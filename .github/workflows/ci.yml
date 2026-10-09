@@ -1,18 +1,33 @@
 name: ci
 on: [push, pull_request]
 jobs:
+  # bastiolang is private for now, and the workflow token cannot read it.
+  # Until a BASTIOLANG_TOKEN secret (read access to bastiolang) is set, the
+  # test job is skipped, which GitHub shows as skipped, not passed. Once
+  # bastiolang is public, drop this gate and the token line.
+  gate:
+    runs-on: ubuntu-24.04
+    outputs:
+      ok: ${{ steps.check.outputs.ok }}
+    steps:
+      - id: check
+        env:
+          TOKEN: ${{ secrets.BASTIOLANG_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then echo ok=true >> "$GITHUB_OUTPUT"
+          else echo "::warning::BASTIOLANG_TOKEN is not set; skipping the QEMU test"; fi
   test:
+    needs: gate
+    if: needs.gate.outputs.ok == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      # While bastiolang is private, the workflow token cannot read it: set a
-      # BASTIOLANG_TOKEN secret with read access. Once it is public, none is needed.
       - uses: actions/checkout@v4
         with:
           repository: yukikotani231/bastiolang
           ref: main
           path: bastiolang
-          token: ${{ secrets.BASTIOLANG_TOKEN || github.token }}
+          token: ${{ secrets.BASTIOLANG_TOKEN }}
       - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86
       - run: cd bastiolang/stage0 && cargo build --release
       - run: make test BASTIOC=bastiolang/stage0/target/release/bastioc0
