@@ -1,0 +1,14 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: yukikotani231/bastiolang
+          path: bastiolang
+      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86
+      - run: cd bastiolang/stage0 && cargo build --release
+      - run: make test BASTIOC=bastiolang/stage0/target/release/bastioc0
