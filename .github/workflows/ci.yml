@@ -5,9 +5,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      # A plain clone: actions/checkout's default-branch lookup for another
-      # repository returned Not Found with this workflow's token.
-      - run: git clone --depth 1 https://github.com/yukikotani231/bastiolang bastiolang
+      # While bastiolang is private, the workflow token cannot read it: set a
+      # BASTIOLANG_TOKEN secret with read access. Once it is public, none is needed.
+      - uses: actions/checkout@v4
+        with:
+          repository: yukikotani231/bastiolang
+          ref: main
+          path: bastiolang
+          token: ${{ secrets.BASTIOLANG_TOKEN || github.token }}
       - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86
       - run: cd bastiolang/stage0 && cargo build --release
       - run: make test BASTIOC=bastiolang/stage0/target/release/bastioc0
