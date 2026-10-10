@@ -1,0 +1,214 @@
+// A disk made of an in-memory file's pages: what a file system mounted on
+// a loop device (/dev/loopN, src/lxloop.bastio) reads and writes. At mount
+// the file hands its pages over, every hole filled with a zeroed page so
+// that a write never needs the page allocator, and at unmount they go back
+// to the file. Commands finish at once, as on the ATA drive: blk_begin
+// does the copy, and blk_poll reports it.
+
+import "ramfs.bastio";
+import "bio.bastio";
+
+const LOOP_SECTORS_MAX: u64 = 131072;    // FILE_MAX / 512
+
+struct LoopDev {
+  pages: Vec[Slot],     // the file's pages, none a hole
+  sectors: u64,         // the device's size: the file's whole 4 KiB blocks
+  done: u64,            // what loopdev_poll reports next: BIO_IDLE, BIO_OK or BIO_FAILED
+}
+
+spec fn loopdev_ok(l: &LoopDev) -> bool {
+  l.sectors <= LOOP_SECTORS_MAX && l.sectors % 8 == 0 && vlen(l.pages) * 8 >= l.sectors
+  && BIO_OK <= l.done && l.done <= BIO_IDLE
+}
+
+/// A device over `pages`, `size` bytes long (rounded down to whole 4 KiB
+/// blocks). The pages must hold no holes: loopdev_fill makes sure of it.
+fn loopdev_new(pages: Vec[Slot], size: u64) -> LoopDev
+  ensures loopdev_ok(result)
+{
+  let mut s = size / 4096 * 8;
+  if s > LOOP_SECTORS_MAX {
+    s = LOOP_SECTORS_MAX;
+  }
+  if vec_len(pages) * 8 < s {
+    s = vec_len(pages) * 8;
+  }
+  return LoopDev { pages: pages, sectors: s, done: BIO_IDLE };
+}
+
+/// Copies m bytes at byte `from` of page p into buf[at ..]. False if page
+/// p is a hole or past the end; buf is not changed then.
+fn loopdev_get(l: &mut LoopDev, p: u64, from: u64, buf: &mut Bytes, at: u64, m: u64) -> bool
+  requires loopdev_ok(l) && from + m <= 4096 && at + m <= blen(buf)
+  ensures loopdev_ok(l) && l.sectors == old(l.sectors) && blen(buf) == old(blen(buf))
+{
+  if p >= vec_len(l.pages) {
+    return false;
+  }
+  let mut ok = false;
+  match vec_swap(&mut l.pages, p, Slot::Hole) {
+    Slot::Hole => {},
+    Slot::Page(fr) => {
+      frame_to_bytes(&mut buf, at, fr, from, m);
+      ok = true;
+      match vec_swap(&mut l.pages, p, Slot::Page(fr)) {
+        Slot::Hole => {},
+        Slot::Page(_x) => { unreachable; },
+      }
+    },
+  }
+  return ok;
+}
+
+/// Copies buf[at .. at + m] over m bytes at byte `from` of page p. False if
+/// page p is a hole or past the end.
+fn loopdev_put(l: &mut LoopDev, p: u64, from: u64, buf: &Bytes, at: u64, m: u64) -> bool
+  requires loopdev_ok(l) && from + m <= 4096 && at + m <= blen(buf)
+  ensures loopdev_ok(l) && l.sectors == old(l.sectors)
+{
+  if p >= vec_len(l.pages) {
+    return false;
+  }
+  let mut ok = false;
+  match vec_swap(&mut l.pages, p, Slot::Hole) {
+    Slot::Hole => {},
+    Slot::Page(fr) => {
+      let mut f = fr;
+      bytes_to_frame(&mut f, from, buf, at, m);
+      ok = true;
+      match vec_swap(&mut l.pages, p, Slot::Page(f)) {
+        Slot::Hole => {},
+        Slot::Page(_x) => { unreachable; },
+      }
+    },
+  }
+  return ok;
+}
+
+/// Reads sector lba into buf[0..512].
+fn loopdev_read(l: &mut LoopDev, lba: u64, buf: &mut Bytes) -> bool
+  requires loopdev_ok(l) && blen(buf) >= 512
+  ensures loopdev_ok(l) && l.sectors == old(l.sectors) && blen(buf) == old(blen(buf))
+{
+  if lba >= l.sectors {
+    return false;
+  }
+  return loopdev_get(&mut l, lba / 8, lba % 8 * 512, &mut buf, 0, 512);
+}
+
+/// Writes buf[0..512] to sector lba.
+fn loopdev_write(l: &mut LoopDev, lba: u64, buf: &Bytes) -> bool
+  requires loopdev_ok(l) && blen(buf) >= 512
+  ensures loopdev_ok(l) && l.sectors == old(l.sectors)
+{
+  if lba >= l.sectors {
+    return false;
+  }
+  return loopdev_put(&mut l, lba / 8, lba % 8 * 512, buf, 0, 512);
+}
+
+/// Reads the 4 KiB block at sector lba (a multiple of 8) into out[at ..].
+fn loopdev_read_block(l: &mut LoopDev, lba: u64, out: &mut Bytes, at: u64) -> bool
+  requires loopdev_ok(l) && at + 4096 <= blen(out)
+  ensures loopdev_ok(l) && l.sectors == old(l.sectors) && blen(out) == old(blen(out))
+{
+  if lba % 8 != 0 || lba >= l.sectors {
+    return false;
+  }
+  return loopdev_get(&mut l, lba / 8, 0, &mut out, at, 4096);
+}
+
+/// Writes src[at .. at + 4096] to the block at sector lba (a multiple of 8).
+fn loopdev_write_block(l: &mut LoopDev, lba: u64, src: &Bytes, at: u64) -> bool
+  requires loopdev_ok(l) && at + 4096 <= blen(src)
+  ensures loopdev_ok(l) && l.sectors == old(l.sectors)
+{
+  if lba % 8 != 0 || lba >= l.sectors {
+    return false;
+  }
+  return loopdev_put(&mut l, lba / 8, 0, src, at, 4096);
+}
+
+fn loopdev_begin(l: &mut LoopDev, op: u64, lba: u64, buf: &mut Bytes, at: u64) -> bool
+  requires loopdev_ok(l) && op <= BIO_FLUSH && at + 4096 <= blen(buf)
+  ensures loopdev_ok(l) && l.sectors == old(l.sectors) && blen(buf) == old(blen(buf))
+{
+  if l.done != BIO_IDLE {
+    return false;
+  }
+  let mut ok = true;
+  if op == BIO_READ {
+    ok = loopdev_read_block(&mut l, lba, &mut buf, at);
+  } else if op == BIO_WRITE {
+    ok = loopdev_write_block(&mut l, lba, buf, at);
+  }
+  if ok {
+    l.done = BIO_OK;
+  } else {
+    l.done = BIO_FAILED;
+  }
+  return true;
+}
+
+fn loopdev_poll(l: &mut LoopDev) -> u64
+  requires loopdev_ok(l)
+  ensures loopdev_ok(l) && l.sectors == old(l.sectors) && result <= BIO_IDLE && result != BIO_RUNNING
+{
+  let d = l.done;
+  l.done = BIO_IDLE;
+  return d;
+}
+
+/// Fills every hole of the first `np` pages of `pages` with a zeroed page.
+/// False if memory runs out (the pages filled so far stay).
+fn loopdev_fill(pages: &mut Vec[Slot], mem: &mut Mem, np: u64) -> bool
+  requires mem_ok(mem) && vlen(pages) <= FILE_PAGES
+  ensures mem_ok(mem) && vlen(pages) >= old(vlen(pages))
+{
+  while vec_len(pages) < np && vec_len(pages) < FILE_PAGES
+    invariant mem_ok(mem) && vlen(pages) <= FILE_PAGES && vlen(pages) >= old(vlen(pages))
+  {
+    vec_push(&mut pages, Slot::Hole);
+  }
+  let mut p = 0;
+  while p < vec_len(pages) && p < np
+    invariant mem_ok(mem) && vlen(pages) <= FILE_PAGES && vlen(pages) >= old(vlen(pages))
+  {
+    match vec_swap(&mut pages, p, Slot::Hole) {
+      Slot::Page(fr) => {
+        match vec_swap(&mut pages, p, Slot::Page(fr)) {
+          Slot::Hole => {},
+          Slot::Page(_x) => { unreachable; },
+        }
+      },
+      Slot::Hole => {
+        let i = find_free(&mut mem);
+        if i >= NPAGES {
+          return false;
+        }
+        let mut fr = take_page(&mut mem, i);
+        let mut j = 0;
+        while j < 4096
+          invariant j <= 4096
+        {
+          frame_write8(&mut fr, j, 0);
+          j = j + 1;
+        }
+        match vec_swap(&mut pages, p, Slot::Page(fr)) {
+          Slot::Hole => {},
+          Slot::Page(_x) => { unreachable; },
+        }
+      },
+    }
+    p = p + 1;
+  }
+  return true;
+}
+
+/// Gives every page back (when a disk is let go of with a loop mount up).
+fn loopdev_free(l: LoopDev, mem: &mut Mem)
+  requires mem_ok(mem)
+  ensures mem_ok(mem)
+{
+  slots_free(l.pages, &mut mem);
+}

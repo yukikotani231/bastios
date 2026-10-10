@@ -1,16 +1,23 @@
-// mount(2) and umount2(2), for tmpfs only. The in-memory file system is
-// already a tmpfs, so a mount marks an in-memory directory in the file
+// mount(2) and umount2(2), for tmpfs and for BastiOS's own disk format
+// (bstdisk3) on a disk image. The in-memory file system is already a
+// tmpfs, so a tmpfs mount marks an in-memory directory in the file
 // layer's mount table (vfs_mount, src/fs.bastio), and unmounting removes
 // everything under it. MS_RDONLY makes everything under the directory
 // read-only (EROFS for each call that would change it), and MS_REMOUNT
 // switches that.
 //
+// A bstdisk3 mount takes a disk image made by mkfs.bstdisk3 (user/mkfs.c):
+// the source is a loop device bound to an in-memory file, or the file
+// itself. The file layer mounts it as a second disk file system
+// (vfs_lo_mount); one at a time.
+//
 // Different from Linux: the directory must be in memory (not under
 // /disk) and empty, since a mount here does not hide what was there; a
 // mount cannot be renamed or removed while mounted (EBUSY, as Linux says
 // for a mount point that is busy); a file that is open blocks umount2
-// even with MNT_DETACH; hard links across the mount's edge are not
-// refused; and statfs does not report tmpfs.
+// even with MNT_DETACH; and hard links across a tmpfs mount's edge are
+// not refused. A bstdisk3 image's file cannot be written while it is
+// mounted (EBUSY), and reads of it give zeros meanwhile.
 
 import "linux.bastio";
 
@@ -21,18 +28,56 @@ const MS_REMOUNT: u64 = 32;
 const UMOUNT_OK_FLAGS: u64 = 11;      // MNT_FORCE | MNT_DETACH | UMOUNT_NOFOLLOW
 const UMOUNT_NOFOLLOW: u64 = 8;
 
-/// Is the NUL-terminated string at user address va "tmpfs"?
-fn is_tmpfs(k: &mut Kernel, pid: u64, va: u64) -> bool
+const FST_NONE: u64 = 0;
+const FST_TMPFS: u64 = 1;
+const FST_BSTDISK: u64 = 2;
+
+/// Which file system type the NUL-terminated string at user address va
+/// names: "tmpfs", "bstdisk3", or neither.
+fn fs_type(k: &mut Kernel, pid: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if va < USER_BASE || va >= USER_BASE + USER_SIZE - 6 {
-    return false;
+  if va < USER_BASE || va >= USER_BASE + USER_SIZE - 9 {
+    return FST_NONE;
   }
   if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 6) != 6 {
-    return false;
+    return FST_NONE;
   }
-  return xfer_is(k.fs.xfer, 0, 5, "tmpfs") && bget(k.fs.xfer, 5) == 0;
+  if xfer_is(k.fs.xfer, 0, 5, "tmpfs") && bget(k.fs.xfer, 5) == 0 {
+    return FST_TMPFS;
+  }
+  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 9) != 9 {
+    return FST_NONE;
+  }
+  if xfer_is(k.fs.xfer, 0, 8, "bstdisk3") && bget(k.fs.xfer, 8) == 0 {
+    return FST_BSTDISK;
+  }
+  return FST_NONE;
+}
+
+/// The in-memory file holding the disk image that the path at user
+/// address va names (a loop device bound to one, or the file itself),
+/// and that loop device's number (0 for a file): or NFILES with the
+/// -errno in k.perr.
+fn image_file(k: &mut Kernel, pid: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k) && result <= NFILES
+{
+  let n = lx_path_at(&mut k, pid, AT_FDCWD, va);
+  if n == NO_RESULT {
+    return NFILES;
+  }
+  let f = vfs_lookup(&mut k.fs, n);
+  if f == NO_FILE {
+    k.perr = ENOENT;
+    return NFILES;
+  }
+  if f >= NFILES || vfs_is_dir(&mut k.fs, f) {
+    k.perr = ENOTBLK;                       // only an image in memory mounts
+    return NFILES;
+  }
+  return f;
 }
 
 /// The in-memory directory node at the path in the first n bytes of the
@@ -63,13 +108,24 @@ fn mount_dir(k: &mut Kernel, n: u64) -> u64
 
 /// mount(source, target, fstype, flags, data): the source and data are
 /// not used.
-fn lx_mount(k: &mut Kernel, pid: u64, target: u64, fstype: u64, flags: u64) -> u64
+fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
   let remount = flags & MS_REMOUNT != 0;
-  if !remount && !is_tmpfs(&mut k, pid, fstype) {
+  let mut t = FST_TMPFS;
+  if !remount {
+    t = fs_type(&mut k, pid, fstype);
+  }
+  if t == FST_NONE {
     return ENODEV;                          // no other file system type mounts
+  }
+  let mut img = NFILES;
+  if t == FST_BSTDISK {
+    img = image_file(&mut k, pid, source);
+    if img >= NFILES {
+      return k.perr;
+    }
   }
   let n = lx_path_at(&mut k, pid, AT_FDCWD, target);
   if n == NO_RESULT {
@@ -81,14 +137,31 @@ fn lx_mount(k: &mut Kernel, pid: u64, target: u64, fstype: u64, flags: u64) -> u
   }
   let s = vfs_mount_slot(k.fs, i);
   if remount {
+    if i + 1 == k.fs.lo_at {
+      k.fs.lo_ro = flags & MS_RDONLY != 0;
+      return 0;
+    }
     if s >= MNT_N {
       return EINVAL;                        // not a mount
     }
     vfs_set_ro(&mut k.fs, s, flags & MS_RDONLY != 0);
     return 0;
   }
-  if s < MNT_N || vfs_ram_has_children(&mut k.fs, n) {
+  if s < MNT_N || i + 1 == k.fs.lo_at || vfs_ram_has_children(&mut k.fs, n) {
     return EBUSY;
+  }
+  if t == FST_BSTDISK {
+    let r = vfs_lo_mount(&mut k.fs, &mut k.mem, img, i, LO_NODEV, flags & MS_RDONLY != 0);
+    if r == LO_BUSY {
+      return EBUSY;
+    }
+    if r == LO_NOFS {
+      return EINVAL;                        // as Linux says for an unformatted device
+    }
+    if r == LO_NOMEM {
+      return ENOMEM;
+    }
+    return 0;
   }
   if !vfs_mount(&mut k.fs, i, flags & MS_RDONLY != 0) {
     return ENOMEM;                          // MNT_N mounts already
@@ -116,6 +189,12 @@ fn lx_umount2(k: &mut Kernel, pid: u64, target: u64, flags: u64) -> u64
   let i = mount_dir(&mut k, n);
   if i >= NFILES {
     return EINVAL;                          // not a mount
+  }
+  if i + 1 == k.fs.lo_at {
+    if !vfs_lo_umount(&mut k.fs, &mut k.mem) {
+      return EBUSY;                         // a file in it is open
+    }
+    return 0;
   }
   let s = vfs_mount_slot(k.fs, i);
   if s >= MNT_N {
@@ -148,7 +227,7 @@ fn lx_mount_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u6
   ensures kok(k)
 {
   if n == LX_MOUNT {
-    return lx_mount(&mut k, pid, b, c, pget(k.procs, pid, F_REGS + R_R10));
+    return lx_mount(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
   }
   return lx_umount2(&mut k, pid, a, b);
 }
