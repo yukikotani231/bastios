@@ -1,38 +1,26 @@
 # BastiOS
 
-A small x86-64 kernel written in [Bastio](https://github.com/yukikotani231/bastiolang), a language whose memory safety is proved at compile time. It boots under QEMU, or from a GRUB image under BIOS or UEFI, and runs a shell on the serial console and, when the boot loader sets up a framebuffer, on the screen with a PS/2 or USB keyboard.
+A small x86-64 kernel written in [Bastio](https://github.com/yukikotani231/bastiolang), a language whose memory safety is proved at compile time. It runs its own programs and unmodified Linux ones (BusyBox, Lua, sqlite, a C compiler), on several processors, with files on an NVMe, virtio, SATA or ATA disk and a TCP/IP stack on a virtio or e1000 network card. It boots under QEMU, or from a GRUB image on a USB stick under BIOS or UEFI.
 
-```
-BastiOS 0.2: 14016 pages of memory
-
-BastiOS 0.2 -- type `help`
+<!-- guide-test: session -->
+```text
 bastios> hello
 hello from user mode, pid 2
-bastios> spin &
-[2]
-bastios> ps
-  PID  PPID STATE    TICKS NAME
-    1     0 ready       2 sh
-    2     1 ready       2 spin
-bastios> kill 2
-bastios> echo hi there > notes
-bastios> ls
-      66 motd
-     216 about
-   13680 elfdemo
-       9 notes
-bastios> cat notes
-hi there
 bastios> fault
 
-[pid 3 (fault): page fault at rip 0x0000008000000018, address 0x0000000000100000; killed]
-[exit 142]
+[pid 2 (fault): page fault at rip 0x0000008000000018, address 0x0000000000100000; killed]
+[exit 139]
+bastios> ash
+...
+# echo hi there > /disk/notes; cat /disk/notes | wc -c
+9
+# exit
 bastios> halt
 bye
-BastiOS: 14016 pages free at power off
+...
 ```
 
-The kernel (`src/`) runs user programs in ring 3, each in its own address space, and schedules them round robin with timer preemption. The shell is itself a user program (`user/sh.bastio`). Files live in an in-memory file system whose data pages come from the same allocator, or, under `disk/`, on a disk (NVMe, virtio, AHCI or ATA) where they survive power off; user programs open, read, write and remove them through system calls. None of the Bastio code has runtime checks; the compiler proves, before it emits anything:
+The kernel (`src/`) runs each user program in ring 3 in its own address space, preempted by the timer. The shell above is itself a user program in Bastio (`user/sh.bastio`); `fault` reads kernel memory and is killed for it; `ash` is BusyBox's shell, a Linux binary. None of the Bastio code has runtime checks; the compiler proves, before it emits anything:
 - every buffer and string index is in bounds, and no arithmetic overflows or underflows;
 - every physical page is owned by exactly one thing at a time: the allocator, or one slot of one page table. The allocator's bitmap is proved to agree with the pool, so a page is never handed out twice;
 - a page table is empty before it is freed, so tearing down a process returns every page (the test checks that the count at power off equals the count at boot);
@@ -45,7 +33,7 @@ Introduce an off-by-one, drop an ownership check, or free a table that still map
 
 ## Try it
 
-On x86-64 Linux with QEMU (see [Build and run](#build-and-run) for the full list of tools):
+On x86-64 Linux, with Rust, Z3, QEMU and musl-gcc installed ([Getting started](docs/getting-started.md) has the full list):
 
 ```sh
 git clone https://github.com/yukikotani231/bastiolang
@@ -54,71 +42,19 @@ git clone https://github.com/yukikotani231/bastios
 cd bastios && make run
 ```
 
-The first build proves every source file and fetches BusyBox, so it takes a while. `make run` boots the kernel on your terminal with two processors, 256 MiB, a virtio disk (`build/disk.img`, kept across boots) and a virtio network card on QEMU's user network. Some things to type:
+The first build proves every source file and fetches BusyBox, so it takes a while. `make run` boots on your terminal; type `help`, and Ctrl-A X quits. [Getting started](docs/getting-started.md) goes on from there: writing a program in Bastio, running a Linux program, and booting from a USB stick.
 
-| Command | What happens |
-| --- | --- |
-| `help` | the shell's commands |
-| `hello`, `spin &`, `ps`, `kill 2` | user processes, preemption, killing |
-| `echo hi > disk/note`, `cat disk/note` | a file on the disk; still there next boot |
-| `ash` | BusyBox's shell, an unmodified Linux binary: try `ls /bin`, `echo hi \| wc -c`, then `exit` |
-| `ifconfig`, `ping` | the address DHCP gave, and ICMP to the gateway |
-| `tcpecho 7001` | then `nc 127.0.0.1 7001` on the host: what you type comes back |
-| `halt` | power off; the kernel counts its pages back |
+## What it does
 
-Ctrl-A X quits QEMU at any time.
+- **Processors.** Every processor runs the scheduler. The kernel's state is under one lock (`Lock[Sys]`) and the console's devices under another, while user code runs in parallel, including the threads of one process, which share its address space.
+- **Programs.** BastiOS's own programs use its system call ABI (`int 0x80`). Linux x86-64 ELF executables use the Linux ABI (`syscall`): static or dynamic, against musl, or static against glibc. Much of the Linux system call interface is implemented: files, pipes, signals, threads and futexes, `poll` and `epoll`, timers, and sockets; [docs/linux.md](docs/linux.md) lists them. `make compat` runs a compatibility suite (`test/compat`).
+- **Files.** An in-memory file system, and one on the disk under `disk/` that keeps every write whole across a power cut (copy-on-write). The disk is an NVMe drive, a virtio disk, a SATA disk on an AHCI controller or a legacy ATA disk; commands are queued behind a block cache and finish by interrupt (MSI-X or MSI), so a process waiting for the disk sleeps.
+- **Network.** A virtio or Intel e1000 card; DHCP, ARP, IPv4, ICMP, UDP and TCP (retransmission, out-of-order data, zero windows), loopback, and Unix sockets.
+- **Console.** The first serial port, and with GRUB the screen (the framebuffer it sets up) with a PS/2 or USB keyboard.
 
-To boot through a real boot loader, `make iso` builds `build/bastios.iso`. It is GRUB with the same kernel, as a hybrid image that boots from CD or USB under BIOS or UEFI. It needs `grub-mkrescue`, `xorriso` and `mtools`, plus GRUB's BIOS and UEFI files (`sudo apt-get install grub-pc-bin grub-efi-amd64-bin xorriso mtools`; add `ovmf` for UEFI in QEMU). `make run-iso` boots it in QEMU under BIOS and `make run-uefi` under UEFI firmware; both open a QEMU window, where the kernel draws its console on the 1024x768 framebuffer GRUB sets up and reads the PS/2 keyboard, while the serial console stays on your terminal. To write it to a USB stick, use `sudo dd if=build/bastios.iso of=/dev/sdX bs=4M` (check the device name first: dd overwrites it).
+How the pieces fit together, and what is proved where, is in [docs/architecture.md](docs/architecture.md).
 
-On real hardware, mind the limits. It has only been tried in QEMU. The console is on the first serial port (COM1, 115200 baud) and, booted from the image, on the screen, if GRUB can give it a 32-bit linear framebuffer between 2 GiB and the I/O APIC, which is where PC firmware puts it. Keys come from a PS/2 keyboard or a USB keyboard on an xHCI (USB 3) controller's root port. Device registers may sit anywhere below 2^46 (64 TiB), which needs a CPU with 1 GiB pages (every x86-64 CPU of the last decade; QEMU's default model lacks them). USB hubs and controllers that want more than four scratchpad pages are not supported. It needs a virtio or Intel e1000 (82540EM) network card to use the network. The disk can be an NVMe drive (namespace 1, with 512-byte or 4 KiB sectors), a virtio disk, a SATA disk on an AHCI controller (the first port with a disk; 512-byte sectors only) or a legacy ATA disk. Devices are found on any PCI bus the firmware numbered, through the legacy configuration ports (not PCIe's ECAM). It finds the other processors in the ACPI tables, under UEFI through the copy of the RSDP that GRUB passes; tables above 1 GiB leave it on one processor.
-
-## Layout
-
-How the pieces fit together (boot, memory, processes, the scheduler, system calls, the proof boundary) is in [docs/architecture.md](docs/architecture.md).
-
-| Path | What |
-| --- | --- |
-| `src/uart.bastio`, `src/pic.bastio`, `src/pit.bastio` | Device drivers: COM1, the 8259 interrupt controllers, the 100 Hz timer |
-| `src/fb.bastio`, `src/kbd.bastio`, `src/xhci.bastio`, `src/console.bastio` | The console: text on the boot loader's framebuffer (8x16 cells from the public-domain font in `src/font8x8.bin`), the PS/2 keyboard, a USB keyboard on an xHCI controller, and all of them joined with COM1 |
-| `src/nvme.bastio` | Disk driver: an NVMe drive, polled through one I/O queue pair in pages lent to it |
-| `src/ahci.bastio` | Disk driver: a SATA disk on an AHCI controller, polled through command slot 0 |
-| `src/ata.bastio` | Disk driver: the first drive on the legacy ATA controller, in PIO mode |
-| `src/pages.bastio` | Physical page allocator (`Mem`: a bitmap proved to track the pool) |
-| `src/space.bastio` | Building, walking and tearing down user address spaces |
-| `src/elf.bastio` | Loading static Linux x86-64 ELF executables: header checks, segments, the initial stack (argv, envp, auxv) |
-| `src/ramfs.bastio` | The in-memory file system: a flat table of files, each a vector of pages (a page never written is a hole and reads as zeros) |
-| `src/diskfs.bastio` | The file system on the disk (names under `disk/`): 4 KiB blocks, a directory that grows to 1023 entries, two levels of block maps per file, copy-on-write so a power cut never tears a write |
-| `src/fs.bastio` | The layer above both file systems: per-process open-file table, the transfer buffer, and dispatch by name (`disk/...` or memory) |
-| `src/proc.bastio` | Kernel state (`Kernel` struct), console input queue, process table, program images, spawn and exit |
-| `src/usermem.bastio` | Copying between user memory and kernel byte buffers |
-| `src/syscall.bastio` | System calls (BastiOS ABI, `int 0x80`), including the file calls |
-| `src/linux.bastio` | Linux system calls (the `syscall` instruction) |
-| `src/main.bastio` | Boot, the scheduler loop, fault handling, power off |
-| `user/*.bastio` | User programs: `sh`, `hello`, `spin` (never yields; shows preemption), `true` (exits at once), `bench` (times syscalls, spawn and write in timer ticks), `fstest` (exercises the file calls), `crashme` (checks the disk files, then keeps writing; the power-cut test kills it), `diskbench` (times writing and reading a 2 MiB file on the disk; `make diskbench` runs it on every disk driver) |
-| `user/lib/file.bastio` | The file system calls for user programs |
-| `files/` | Files installed in the file system at boot (built into the kernel image) |
-| `user/fault.S` | A user program that reads kernel memory, to test fault isolation |
-| `user/straddle.S` | A user program whose buffers cross page boundaries, to test how the kernel copies user memory |
-| `user/mhello.c` | An ordinary C program built with musl libc (`musl-gcc -static-pie`) |
-| `user/busybox.config` | The BusyBox options for `ash`; the Makefile fetches BusyBox (GPL-2.0, not part of this repository) at a pinned tag and builds it against musl as a static PIE |
-| `user/mtest.c` | A musl program using `malloc` (brk and mmap), a file through stdio, and a line read from the console |
-| `user/fpucheck.c` | Checks that two processes using SSE registers at once do not see each other's |
-| `user/mtcp.c` | A musl program that uses TCP through the Linux system calls: accepts a connection and answers it, then connects out and reads the reply; `mtcp echo PORT` echoes a connection (`make netbench`) |
-| `user/mdir.c` | A musl program that uses `openat`, `fstatat`, `mkdirat` and `unlinkat` relative to a directory descriptor, then `fchdir` and `getcwd`, runs out of descriptors, and talks through a named pipe |
-| `user/mmisc.c` | A musl program that checks the small calls: `uname`, `readv`, `pread`/`pwrite`, limits, `sysinfo`, `statfs`, `getrandom`, priorities, sessions and process groups, `ttyname` and `tcgetpgrp`, and that a pipe holds 64 KiB |
-| `user/mspawn.c` | A musl program that starts BusyBox `ash` with `posix_spawn`, checks its exit status, and checks that spawning a missing program reports `ENOENT` |
-| `user/mdyn.c` | A dynamically linked musl PIE, which the kernel starts through musl's dynamic linker |
-| `user/mtime.c` | A musl program that checks clocks, `nanosleep`, `poll` timing out on a pipe and waking when a child writes to it, `select`/`pselect` on pipes, `alarm`, `setitimer` and `pause`, and `eventfd`, `timerfd` and `epoll` |
-| `user/mudp.c` | A musl program that uses UDP sockets through the Linux system calls: binds a port, waits for a datagram and sends it back |
-| `user/elfcheck.c`, `user/elfstart.S` | A freestanding C program linked as a static Linux ELF executable twice, at a fixed address (`elfexec`) and as a static PIE (`elfpie`); it checks its data, bss and initial stack, and a few Linux system calls. `elfbad` is a truncated copy the loader must refuse |
-
-User programs are linked at `USER_BASE` (0x8000000000) behind a small header (magic, memory size, entry), flattened to raw images, and embedded in the kernel with `include_bytes`.
-
-The kernel also loads Linux x86-64 ELF executables: fixed-address executables whose segments lie in the user window, and PIEs, which it places at `USER_BASE`. A dynamically linked PIE names its interpreter (`PT_INTERP`): the kernel loads that too, high in the window just below where `mmap` starts, and starts it with `AT_BASE` pointing at it; the interpreter then links the program. The interpreter is the file at that path, or, for musl's `/lib/ld-musl-x86_64.so.1` when there is no such file, a copy of musl's `libc.so` built into the kernel image, so programs linked only against musl's libc run as they come (other shared libraries would have to be files). It starts them with the stack the Linux ABI promises (argc, argv, envp and the auxiliary vector). Every header field is untrusted, and the proof shows each read stays inside the file and each copied byte lands in the window below the stack.
-
-Such programs make Linux system calls with the `syscall` instruction (`src/linux.bastio`): `read` (the console, blocking, a file or a pipe), `write` and `writev` (the console, a file or a pipe), `pipe`, `pipe2` (a pipe holds 64 KiB, and a write of up to `PIPE_BUF` bytes goes in whole), `mknod`/`mknodat` for named pipes, as `mkfifo` makes them (a writer's `open` waits for a reader; a FIFO is a file of the file system with the FIFO type bits, so it is listed, renamed and removed like a file and kept on the disk across reboots; up to four can be open at once), `dup`, `dup2`, `dup3`, `fcntl` (duplicating, close-on-exec, and record and open file description locks), `flock` (`src/lxlock.bastio`; a conflicting lock waits, and a record-lock wait that would deadlock fails with `EDEADLK`), `poll` and `ppoll` (waiting until the console has a line, a pipe has data or room, a socket has data, a connection to accept or room to send, or the timeout passes; ppoll waits with its signal mask, as `rt_sigsuspend` does), `select` and `pselect6` (the same readiness over fd_sets; nothing is ever exceptional, the time left is not written back, and pselect6 waits with its signal mask), `eventfd` and `eventfd2` (with `EFD_SEMAPHORE`), `timerfd_create`, `timerfd_settime` and `timerfd_gettime` (realtime, monotonic and boot-time clocks, relative or absolute, once or periodic), `epoll_create`, `epoll_create1`, `epoll_ctl`, `epoll_wait`, `epoll_pwait` and `epoll_pwait2` (`src/lxevent.bastio`; readiness is what `poll` sees, so `EPOLLET` entries are reported level-triggered, `EPOLLONESHOT` holds, files cannot be watched as on Linux, an epoll instance inside another never reports ready, and the signal mask is not applied), `alarm`, `setitimer` and `getitimer` (`ITIMER_REAL` only, checked on each timer tick, so to within 10 ms), `pause`, `nanosleep` and `clock_nanosleep`, `clock_gettime`, `clock_getres`, `gettimeofday` and `time` (off the HPET; with no real-time clock, `CLOCK_REALTIME` counts from the epoch at boot), `open`, `openat` (with `O_EXCL` and `O_DIRECTORY`), `close`, `lseek` (from the start or the current offset), `unlink`, `unlinkat` (with `AT_REMOVEDIR` too), `mkdir`, `mkdirat`, `rmdir`, `rename`, `renameat` and `renameat2` (within one file system; a file or empty directory at the new name is replaced, by removing it first), `chdir`, `fchdir`, `faccessat`, `chmod`/`fchmod`/`fchmodat` and `utime`/`utimes`/`futimesat`/`utimensat` (each file keeps its permission bits and modification time, in memory and on the disk), `brk`, `mmap` (anonymous or a private copy of a file, anywhere or at a `MAP_FIXED` address), `munmap` and `mprotect` (both accepted and ignored: pages stay mapped until exit), `ioctl` (`TCGETS`, `TIOCGWINSZ`, `TIOCGPGRP` and `TIOCGSID` on the console, whose foreground group is always the caller's, as there is no job control; setting the terminal or its group is accepted and ignored), signals (`rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`, `kill`, `tkill`, `tgkill`, `rt_sigpending`, `rt_sigtimedwait`, `rt_sigsuspend`, and `sigaltstack` (accepted, never used); SIGCHLD goes to a Linux parent when its child ends; a handler runs on the user stack in the frame Linux builds, default actions end the process or ignore the signal, Ctrl-C on the console sends SIGINT to the Linux programs on it, and a write to a pipe with no reader sends SIGPIPE; there is no stopping and there are no alternate signal stacks, and a siginfo carries the signal number and the sending process), `getuid` and friends (always 0; the `set` calls succeed and change nothing), `readv` (every buffer, on a file; into the first buffer with room otherwise), `pread64`, `pwrite64`, `ftruncate` and `truncate`, `uname` (Linux 6.1.0-bastios on x86_64), `getrlimit`/`prlimit64` (16 descriptors, the 64 KiB stack, the rest unlimited), `sysinfo`, `statfs`/`fstatfs`, `mount` and `umount2` (tmpfs only, on an empty in-memory directory, read-only with `MS_RDONLY`; `src/lxmount.bastio`), `getrusage`, `getrandom` (the bytes `/dev/urandom` gives, from a seeded generator: not a secure source), `getpriority`/`setpriority`, `umask`, `sched_yield`, `sched_getaffinity`, process groups and sessions (`setpgid`, `getpgid`, `setsid`, `getsid`; `kill` with 0 or a negative pid signals a group, and -1 every other Linux program), and `chmod`, `chown`, `utimensat` and friends (accepted for files that exist; modes, owners and times are not kept), `getcwd`, `stat`/`lstat`/`access`/`newfstatat`/`fstat` (`/`, `/bin` and the file system's directories are directories, `/bin/NAME` a built-in program, anything else a file; an open descriptor reports the console, a pipe, a directory or a file), `link` and `linkat` (hard links within one file system, not to directories; `st_nlink` counts a file's names), `symlink` and `symlinkat` (links in memory and on the disk, followed by every call that takes a path; `lstat`, `readlink`, `unlink`, `rename`, `mkdir` and `rmdir` act on a link itself), `readlink` and `readlinkat` (a link's target, and `/proc/PID/exe` and `/proc/PID/fd/N`; the console is `/dev/tty`, so `ttyname` works), a generated, read-only `/proc` (`mounts`, `meminfo`, `uptime`, `cpuinfo`, `filesystems`, the sysctls `kernel/tainted`, `pid_max` and `printk`, and per process `mounts`, `stat`, `status`, `cmdline` and `exe`, with `/proc/self`; enough for BusyBox's `ps`, `free`, `df` and `uptime`), `getdents64` (listing `/`, `/bin`, `/proc` and any directory of the file system; paths are taken from the working directory, with `.` and `..`, and the `*at` calls start relative paths at their directory descriptor), sockets over the kernel's UDP and TCP (`socket` for `AF_INET` datagrams and streams, `bind`, `listen`, `accept`, `accept4`, `connect`, `sendto`/`send`/`write`, `recvfrom`/`recv`/`read`, blocking or with `SOCK_NONBLOCK`/`MSG_DONTWAIT`, `getsockname`, `getpeername`; `setsockopt` and `shutdown` are accepted and ignored, and closing a stream sends its FIN), `fork`, `vfork` and `clone(SIGCHLD)` (the whole window is copied, and descriptors are shared), `clone(CLONE_VM | CLONE_VFORK)` as `posix_spawn` makes it (the parent lends its address space to the child, and waits, until the child calls `execve` or ends), threads: `clone(CLONE_THREAD)` as `pthread_create` makes it (with `CLONE_SETTLS`, `CLONE_PARENT_SETTID`, `CLONE_CHILD_SETTID` and `CLONE_CHILD_CLEARTID`), `futex` (`WAIT`, `WAKE`, `REQUEUE`, `CMP_REQUEUE` and the bitset forms, with timeouts on the monotonic or, with `FUTEX_CLOCK_REALTIME`, the wall clock; within a process only) and `set_tid_address`, so musl's mutexes, condition variables and joins work (`src/lxthread.bastio`; the threads of a process share its address space, descriptors, working directory and signal actions, and run one at a time, on any processor; `exit` from a thread ends that thread, `exit_group` the process), `execve` (built-in programs at `/bin/NAME`, with `/bin/sh` being BusyBox's `ash` so `system` and `popen` get a POSIX shell, ELF files such as `/elfdemo` from memory or `disk/`, and `/proc/PID/exe`, the program that process runs, which is how ash runs a script with no `#!` line; with argv and the environment), `wait4`, `waitid` (ended children only), `times`, `gettid`, `arch_prctl(ARCH_SET_FS)` (the thread pointer), `set_tid_address`, `exit`, `exit_group`, `getpid` and `getppid`; `set_robust_list`, `rseq` and `clone3` fail with `-ENOSYS` quietly (glibc carries on without them, so static glibc programs such as Z3 run); every other call prints a note on the console and returns `-ENOSYS`. Linux fds 0 to 2 are the console, a terminal in canonical mode: the kernel echoes what is typed, handles Backspace, hands a read the line once Enter (or Ctrl-D) is pressed, and turns LF into CR LF on output. Each process has 16 descriptors (`src/lxfd.bastio`; more give `EMFILE`); each is the console or an open file description shared by `dup` and `fork`: a file in the file system below, one end of a pipe, a directory being listed, or a socket (`src/lxsock.bastio` and `src/lxtcp.bastio`, over the kernel's sockets in `src/net.bastio` and `src/tcp.bastio`). That is enough for C programs built against musl libc as static PIEs (`user/mhello.c`, `user/mtest.c`) to use `printf`, `malloc`, `fopen` and `fgets`, and for BusyBox's `ash`, built unmodified, to run as an interactive shell on the console and start other programs, with pipes and redirection. BusyBox's `ls`, `cat`, `wc`, `head`, `rm`, `cp`, `kill`, `sleep`, `mkdir`, `rmdir`, `pwd`, `mv`, `chmod`, `touch`, `stat`, `ln`, `readlink` and `mkfifo` are built in too, and `/bin/NAME` for each of them starts the BusyBox binary, which picks the applet from `argv[0]`. Each process has its own x87/SSE state, saved in a page of its own whenever it stops running. `int 0x80` keeps the BastiOS ABI, the one in bastiolang's user prelude. Calls 0 to 10 have named builtins there; the file calls (11 to 24, listed in `src/syscall.bastio`) go through its generic `sys_call` / `sys_send` / `sys_recv`, which lend the kernel a byte buffer.
-
-## Build and run
+## Build and test
 
 Requirements:
 
@@ -133,21 +69,21 @@ Requirements:
 | git and network access | | The first build clones BusyBox 1.36.1 from github.com/mirror/busybox into `build/busybox` (set `BUSYBOX_GIT` for another mirror) |
 | GRUB, xorriso, mtools, OVMF | GRUB 2.12, xorriso 1.5.6, OVMF 2024.02 | Only for `make iso` and `test/iso_test.sh` (which skips without them; UEFI is skipped without OVMF) |
 
-Tested on x86-64 Linux (Ubuntu 24.04), which is what CI runs; other platforms are untested. On Ubuntu: `sudo apt-get install z3 build-essential qemu-system-x86 python3 musl-tools`, plus [rustup](https://rustup.rs) for bastiolang.
+Tested on x86-64 Linux (Ubuntu 24.04), which is what CI runs; other platforms are untested.
 
 ```sh
-git clone https://github.com/yukikotani231/bastiolang
-git clone https://github.com/yukikotani231/bastios
-(cd bastiolang/stage0 && cargo build --release)
-cd bastios
-make          # build/bastios.elf
-make run      # boot on this terminal with build/disk.img as the disk; Ctrl-A X quits
-make iso      # build/bastios.iso: GRUB + the kernel, bootable under BIOS or UEFI
-make test     # boot in QEMU, type commands over the serial line, check the replies
-make fuzz     # fuzz the system calls with hostile arguments (SEED, SEEDS, CALLS, SMP, PAR)
+make            # build/bastios.elf
+make run        # boot on this terminal with build/disk.img as the disk; Ctrl-A X quits
+make disk FILES="..."   # put files from this machine on that disk
+make iso        # build/bastios.iso: GRUB + the kernel, bootable under BIOS or UEFI
+make test       # boot in QEMU, type commands over the serial line, check the replies
+make fuzz       # fuzz the system calls with hostile arguments (SEED, SEEDS, CALLS, SMP, PAR)
+make compat     # the Linux compatibility suite; writes build/compat/report.md
 ```
 
-Set `BASTIOC=/path/to/bastioc0` if the compiler lives elsewhere.
+`make test` also checks the sessions in this README and in [Getting started](docs/getting-started.md) (`test/guide_test.py`). Set `BASTIOC=/path/to/bastioc0` if the compiler lives elsewhere.
+
+The kernel is built by bastiolang's bootstrap compiler, `bastioc0`, through C: the compiler proves each file, writes C, and `cc` compiles it. bastiolang's self-hosted compiler also has a native backend that writes x86-64 assembly for the kernel and user targets, which takes the C compiler out of the trusted base for Bastio code; BastiOS built that way passes `make test`. The Makefile switches to it once the self-hosted compiler is the default.
 
 ## What is trusted
 
@@ -170,14 +106,34 @@ The proof covers everything in `src/` and `user/*.bastio`. Everything below it i
 
 ## Status
 
-v0.2: processes, preemptive round-robin scheduling, system calls, fault isolation, and files in memory and on disk. Not there yet:
-- every processor runs the scheduler, but under one lock for the whole kernel state (`Lock[Sys]` in `src/main.bastio`); the kernel runs with interrupts off and handles each interrupt as an event in its scheduler loop;
-- all user pages are mapped writable and executable (the image has no page-aligned sections yet);
+v0.2, pre-release: the system call ABI, the disk format and the build can change. Known limits:
+- one lock for the whole kernel state; system calls from different processors wait for each other;
+- user pages are always executable: `mprotect` sets only whether a page is writable;
 - a user window of 64 MiB per process (pages are mapped as a program asks for them, and `fork` copies every mapped page), at most 31 processes;
-- files are simple: 128 files and directories in memory and 1023 under `disk/`, paths up to 255 bytes, files up to 64 MiB in memory and 1 GiB on disk, 16 open files per process. The disk drivers poll one drive (NVMe, virtio, AHCI, or legacy ATA with 28-bit sector numbers), with no interrupts, one 4 KiB command at a time. File data goes through a 64-block cache, and a process waiting for the disk sleeps while others run. A write call returns only once the disk has it; each write call is copy-on-write and lands whole or not at all across a power cut, but work spread over several calls can be cut between them;
-- running out of memory when starting a program fails the spawn cleanly, but the kernel's own arena (for `Buf`) still halts the machine when it runs out.
+- 128 files and directories in memory and 1023 under `disk/`, paths up to 255 bytes, files up to 64 MiB in memory and 1 GiB on disk, 16 open files per process; one disk, one command at a time; a write call returns once the disk has it, but work spread over several calls can be cut between them by a power cut;
+- running out of memory when starting a program fails the spawn cleanly, but the kernel's own arena (for `Buf`) still halts the machine when it runs out;
+- it has only been run in QEMU; [Getting started](docs/getting-started.md#5-boot-from-a-usb-stick) lists what real hardware it supports.
 
-The direction is in bastiolang's [ROADMAP.md](https://github.com/yukikotani231/bastiolang/blob/main/ROADMAP.md) under "v3: toward a kernel".
+The direction is in bastiolang's [ROADMAP.md](https://github.com/yukikotani231/bastiolang/blob/main/ROADMAP.md).
+
+## Layout
+
+| Path | What |
+| --- | --- |
+| `src/main.bastio`, `proc.bastio`, `syscall.bastio` | Boot, the scheduler loop, faults, power off; processes and program images; BastiOS's system calls |
+| `src/pages.bastio`, `space.bastio`, `usermem.bastio`, `elf.bastio` | The page allocator, address spaces, copying user memory, the ELF loader |
+| `src/linux.bastio`, `src/lx*.bastio` | The Linux system calls ([docs/linux.md](docs/linux.md)) |
+| `src/fs.bastio`, `ramfs.bastio`, `diskfs.bastio`, `diskq.bastio`, `bio.bastio` | Open files, the in-memory and disk file systems, the disk queue and block cache |
+| `src/blk.bastio`, `nvme.bastio`, `virtio_blk.bastio`, `ahci.bastio`, `ata.bastio` | Disk drivers |
+| `src/net.bastio`, `tcp.bastio`, `card.bastio`, `virtio_net.bastio`, `e1000.bastio` | The network stack and card drivers |
+| `src/console.bastio`, `uart.bastio`, `fb.bastio`, `kbd.bastio`, `xhci.bastio` | The console: serial port, screen, PS/2 and USB keyboards |
+| `src/pic.bastio`, `pit.bastio`, `lapic.bastio`, `hpet.bastio`, `rtc.bastio`, `pci.bastio`, `virtq.bastio` | Interrupt controllers, clocks, PCI, virtqueues |
+| `boot/` | The trusted base: boot, trap entry, processor startup (see above) |
+| `user/*.bastio` | BastiOS programs: `sh`, `hello`, `spin`, `bench`, `fstest`, `crashme`, `diskbench` and others |
+| `user/*.c`, `user/*.S` | Test programs in C and assembly: musl programs for the Linux system calls, freestanding ELF and fault tests, the system call fuzzer |
+| `files/` | Files installed in memory at boot (built into the kernel image) |
+| `test/` | `make test` and the benchmarks; `test/compat/` is the Linux compatibility suite |
+| `docs/` | [Getting started](docs/getting-started.md), [architecture](docs/architecture.md), [Linux programs](docs/linux.md), [trusted base](docs/trusted-base.md), [releasing](docs/releasing.md) |
 
 ## Contributing
 

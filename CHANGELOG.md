@@ -14,6 +14,14 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Added
 
+- A getting-started guide (`docs/getting-started.md`): build, boot in
+  QEMU, write a Bastio program, run a Linux program, boot from a USB
+  stick. `make test` checks its programs and terminal sessions, and the
+  README's, against the real system (`test/guide_test.py`).
+- `make disk FILES="..."` puts files from the build machine on the disk
+  that `make run` boots with.
+- The README describes what BastiOS does now; the list of Linux system
+  calls moved to `docs/linux.md`.
 - `mount` and `umount2` for tmpfs (`src/lxmount.bastio`): a tmpfs mounts
   on an empty in-memory directory, `MS_RDONLY` makes it read-only
   (`EROFS`) until an `MS_REMOUNT`, and unmounting removes what is in it.
