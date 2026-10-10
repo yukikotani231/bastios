@@ -1,0 +1,364 @@
+// Linux file locks: fcntl's record locks (F_GETLK, F_SETLK, F_SETLKW),
+// open file description locks (F_OFD_GETLK and friends) and flock.
+//
+// k.locks is a table of LK_N held locks, LK_W words each: the file plus 1
+// (0: a free entry), the owner, the type (F_RDLCK or F_WRLCK), the first
+// byte, the byte after the last (LK_EOF: to the end of the file, however
+// far it grows) and the class (LKC_FCNTL or LKC_FLOCK). The owner of a
+// record lock is the thread group's leader; the owner of an OFD lock or a
+// flock is LK_DESC + the open file description. Record locks and OFD
+// locks see each other; flock locks see only flock locks, as on Linux.
+//
+// A process loses its record locks on a file when it closes any of its
+// descriptors for it (and so when it exits); an OFD lock or a flock goes
+// when the last descriptor for its description closes (lx_fd_close and
+// unref_value in src/lxfd.bastio call lock_drop).
+//
+// Not done: F_SETLKW and a blocking flock wait by running the call again
+// on later ticks, like a full pipe; deadlocks between record locks are not
+// detected (no EDEADLK), and a wait that would never end only ends with a
+// signal. Mandatory locking and leases are not supported.
+
+import "lxfd.bastio";
+
+const F_RDLCK: u64 = 0;
+const F_WRLCK: u64 = 1;
+const FLOCK_SIZE: u64 = 32;               // struct flock
+const ENOLCK: u64 = 18446744073709551579;     // 2^64 - 37
+const LK_SIGN: u64 = 9223372036854775808;     // 2^63: off_t values at or above it are negative
+
+fn lk_get(t: &Buf, i: u64, f: u64) -> u64
+  requires len(t) == LK_LEN && i < LK_N && f < LK_W
+{
+  return get(t, i * LK_W + f);
+}
+
+fn lk_set(t: &mut Buf, i: u64, f: u64, v: u64)
+  requires len(t) == LK_LEN && i < LK_N && f < LK_W
+  ensures len(t) == LK_LEN
+{
+  t = set(t, i * LK_W + f, v);
+}
+
+/// Whether held lock i belongs to the same file and class as a request,
+/// and its bytes overlap [s, e).
+fn lk_touches(t: &Buf, i: u64, file: u64, class: u64, s: u64, e: u64) -> bool
+  requires len(t) == LK_LEN && i < LK_N && file < LK_EOF
+{
+  return lk_get(t, i, 0) == file + 1 && lk_get(t, i, 5) == class
+    && lk_get(t, i, 3) < e && s < lk_get(t, i, 4);
+}
+
+/// The first held lock that keeps owner from taking a lock of type ty on
+/// [s, e) of file, or LK_N if none does.
+fn lk_conflict(t: &Buf, file: u64, class: u64, owner: u64, ty: u64, s: u64, e: u64) -> u64
+  requires len(t) == LK_LEN && file < LK_EOF
+  ensures result <= LK_N
+{
+  let mut i = 0;
+  while i < LK_N
+    invariant i <= LK_N
+  {
+    if lk_touches(t, i, file, class, s, e) && lk_get(t, i, 1) != owner
+      && (ty == F_WRLCK || lk_get(t, i, 2) == F_WRLCK) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return LK_N;
+}
+
+fn lk_free_count(t: &Buf) -> u64
+  requires len(t) == LK_LEN
+  ensures result <= LK_N
+{
+  let mut n = 0;
+  let mut i = 0;
+  while i < LK_N
+    invariant i <= LK_N && n <= i
+  {
+    if lk_get(t, i, 0) == 0 {
+      n = n + 1;
+    }
+    i = i + 1;
+  }
+  return n;
+}
+
+fn lk_free_slot(t: &Buf) -> u64
+  requires len(t) == LK_LEN
+  ensures result <= LK_N
+{
+  let mut i = 0;
+  while i < LK_N
+    invariant i <= LK_N
+  {
+    if lk_get(t, i, 0) == 0 {
+      return i;
+    }
+    i = i + 1;
+  }
+  return LK_N;
+}
+
+fn lk_put(t: &mut Buf, file: u64, class: u64, owner: u64, ty: u64, s: u64, e: u64)
+  requires len(t) == LK_LEN
+  ensures len(t) == LK_LEN
+{
+  let i = lk_free_slot(t);
+  if i < LK_N && file < LK_EOF {
+    lk_set(&mut t, i, 0, file + 1);
+    lk_set(&mut t, i, 1, owner);
+    lk_set(&mut t, i, 2, ty);
+    lk_set(&mut t, i, 3, s);
+    lk_set(&mut t, i, 4, e);
+    lk_set(&mut t, i, 5, class);
+  }
+}
+
+/// Sets owner's lock on [s, e) of file to type ty, or removes it there
+/// (F_UNLCK), splitting and trimming what owner held before. Returns 0,
+/// or -ENOLCK when the table has no room (and then nothing changes).
+/// The caller has checked that nobody else's lock is in the way.
+fn lk_apply(t: &mut Buf, file: u64, class: u64, owner: u64, ty: u64, s: u64, e: u64) -> u64
+  requires len(t) == LK_LEN && file < LK_EOF
+  ensures len(t) == LK_LEN
+{
+  // Room first, so a request either happens whole or not at all: one
+  // entry for the new lock, one more if it splits an old one in two.
+  let mut need = 0;
+  if ty != F_UNLCK {
+    need = 1;
+  }
+  let mut i = 0;
+  while i < LK_N
+    invariant i <= LK_N && len(t) == LK_LEN && need <= 2
+  {
+    if lk_touches(t, i, file, class, s, e) && lk_get(t, i, 1) == owner
+      && lk_get(t, i, 3) < s && e < lk_get(t, i, 4) {
+      need = 2;
+    }
+    i = i + 1;
+  }
+  if need > lk_free_count(t) {
+    return ENOLCK;
+  }
+  i = 0;
+  while i < LK_N
+    invariant i <= LK_N && len(t) == LK_LEN
+  {
+    if lk_touches(t, i, file, class, s, e) && lk_get(t, i, 1) == owner {
+      let os = lk_get(t, i, 3);
+      let oe = lk_get(t, i, 4);
+      if os < s && e < oe {
+        lk_set(&mut t, i, 4, s);
+        lk_put(&mut t, file, class, owner, lk_get(t, i, 2), e, oe);
+      } else if os < s {
+        lk_set(&mut t, i, 4, s);
+      } else if e < oe {
+        lk_set(&mut t, i, 3, e);
+      } else {
+        lk_set(&mut t, i, 0, 0);
+      }
+    }
+    i = i + 1;
+  }
+  if ty != F_UNLCK {
+    lk_put(&mut t, file, class, owner, ty, s, e);
+  }
+  return 0;
+}
+
+/// Drops every lock owner holds: on file (or on any file, if file is
+/// LK_EOF) and in class `class` (or in both, if class is 2).
+fn lock_drop(t: &mut Buf, owner: u64, file: u64, class: u64)
+  requires len(t) == LK_LEN
+  ensures len(t) == LK_LEN
+{
+  let mut i = 0;
+  while i < LK_N
+    invariant i <= LK_N && len(t) == LK_LEN
+  {
+    let f = lk_get(t, i, 0);
+    if f != 0 && lk_get(t, i, 1) == owner && (file == LK_EOF || f - 1 == file)
+      && (class == 2 || lk_get(t, i, 5) == class) {
+      lk_set(&mut t, i, 0, 0);
+    }
+    i = i + 1;
+  }
+}
+
+/// The file a Linux descriptor's native row has open, or LK_EOF.
+fn lk_file(k: &Kernel, row: u64) -> u64
+  requires kok(k) && row < FD_ROWS
+{
+  let f = vfs_row_file(k.fs, row);
+  if f == NO_FILE {
+    return LK_EOF;
+  }
+  return f;
+}
+
+/// fcntl's lock commands on descriptor fd: F_GETLK, F_SETLK, F_SETLKW and
+/// the F_OFD_ ones, with a struct flock at user address arg. Returns 0,
+/// -errno, or LK_WAIT for a F_SETLKW that must wait.
+fn lx_fcntl_lock(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let d = fd_look(k, pid, fd);
+  if d.kind != K_FILE {
+    return EBADF;
+  }
+  let ofd = cmd == F_OFD_GETLK || cmd == F_OFD_SETLK || cmd == F_OFD_SETLKW;
+  let h = fd_ofd(k, pid, fd);
+  if ofd && h >= OFD_N {
+    return EBADF;
+  }
+  if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, FLOCK_SIZE) != FLOCK_SIZE {
+    return EFAULT;
+  }
+  let ty = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1));
+  let whence = cast[u64](bget(k.fs.xfer, 2)) + 256 * cast[u64](bget(k.fs.xfer, 3));
+  let start = get_u64(k.fs.xfer, 8);
+  let n = get_u64(k.fs.xfer, 16);
+  if ty != F_RDLCK && ty != F_WRLCK && ty != F_UNLCK {
+    return EINVAL;
+  }
+  if ofd && (bget(k.fs.xfer, 24) != 0 || bget(k.fs.xfer, 25) != 0 || bget(k.fs.xfer, 26) != 0 || bget(k.fs.xfer, 27) != 0) {
+    return EINVAL;                          // an OFD request must say l_pid 0
+  }
+  let file = lk_file(k, d.x);
+  if file == LK_EOF {
+    return EBADF;
+  }
+  // The range: l_start from SEEK_SET, SEEK_CUR or SEEK_END, then l_len
+  // bytes on (to the end of the file when 0, before l_start when negative).
+  let mut base = 0;
+  if whence == 1 {
+    base = vfs_offset(k.fs, d.x);
+  } else if whence == 2 {
+    base = vfs_size(&mut k.fs, file);
+    if base == NO_FILE {
+      return EBADF;
+    }
+  } else if whence != 0 {
+    return EINVAL;
+  }
+  if base >= LK_SIGN {
+    return EINVAL;
+  }
+  let mut s = 0;
+  if start < LK_SIGN {
+    if start >= LK_SIGN - base {
+      return EINVAL;                        // past the largest off_t
+    }
+    s = base + start;
+  } else {
+    let back = LK_EOF - start + 1;          // -l_start
+    if back > base {
+      return EINVAL;
+    }
+    s = base - back;
+  }
+  let mut e = LK_EOF;
+  if n != 0 && n < LK_SIGN {
+    if n < LK_SIGN - s {
+      e = s + n;
+    }
+  } else if n >= LK_SIGN {
+    let back = LK_EOF - n + 1;              // -l_len
+    if back > s {
+      return EINVAL;
+    }
+    e = s;
+    s = s - back;
+  }
+  let mut owner = tgid(k.procs, pid);
+  if ofd {
+    owner = LK_DESC + h;
+  }
+  if cmd == F_GETLK || cmd == F_OFD_GETLK {
+    if ty == F_UNLCK {
+      return EINVAL;
+    }
+    let i = lk_conflict(k.locks, file, LKC_FCNTL, owner, ty, s, e);
+    if i == LK_N {
+      bset(&mut k.fs.xfer, 0, cast[u8](F_UNLCK));
+      bset(&mut k.fs.xfer, 1, 0);
+    } else {
+      let os = lk_get(k.locks, i, 3);
+      let oe = lk_get(k.locks, i, 4);
+      let who = lk_get(k.locks, i, 1);
+      bset(&mut k.fs.xfer, 0, cast[u8](lk_get(k.locks, i, 2) % 256));
+      bset(&mut k.fs.xfer, 1, 0);
+      bset(&mut k.fs.xfer, 2, 0);           // SEEK_SET
+      bset(&mut k.fs.xfer, 3, 0);
+      xfer_u64(&mut k.fs.xfer, 8, os);
+      if oe == LK_EOF || oe <= os {
+        xfer_u64(&mut k.fs.xfer, 16, 0);
+      } else {
+        xfer_u64(&mut k.fs.xfer, 16, oe - os);
+      }
+      // l_pid: the holder's process, or -1 for a description's lock.
+      let mut p = 0xFFFFFFFF;
+      if who < LK_DESC {
+        p = who;
+      }
+      bset(&mut k.fs.xfer, 24, cast[u8](p % 256));
+      bset(&mut k.fs.xfer, 25, cast[u8](p / 256 % 256));
+      bset(&mut k.fs.xfer, 26, cast[u8](p / 65536 % 256));
+      bset(&mut k.fs.xfer, 27, cast[u8](p / 16777216 % 256));
+    }
+    if copy_to_user(&mut k.spaces, pid, arg, k.fs.xfer, FLOCK_SIZE) != FLOCK_SIZE {
+      return EFAULT;
+    }
+    return 0;
+  }
+  if ty != F_UNLCK && lk_conflict(k.locks, file, LKC_FCNTL, owner, ty, s, e) < LK_N {
+    if cmd == F_SETLKW || cmd == F_OFD_SETLKW {
+      return LK_WAIT;
+    }
+    return EAGAIN;
+  }
+  return lk_apply(&mut k.locks, file, LKC_FCNTL, owner, ty, s, e);
+}
+
+/// flock(fd, op): LOCK_SH, LOCK_EX or LOCK_UN on the whole file, owned
+/// by fd's open file description; LOCK_NB (4) fails with -EWOULDBLOCK
+/// instead of waiting. Returns 0, -errno, or LK_WAIT.
+fn lx_flock(k: &mut Kernel, pid: u64, fd: u64, op: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
+    return EBADF;
+  }
+  let o = op & !4;
+  if o != 1 && o != 2 && o != 8 {
+    return EINVAL;                          // LOCK_SH, LOCK_EX, LOCK_UN
+  }
+  let h = fd_ofd(k, pid, fd);
+  if d.kind != K_FILE || h >= OFD_N {
+    return 0;                               // nothing to lock against on a pipe or the console
+  }
+  let file = lk_file(k, d.x);
+  if file == LK_EOF {
+    return EBADF;
+  }
+  let owner = LK_DESC + h;
+  let mut ty = F_UNLCK;
+  if o == 1 {
+    ty = F_RDLCK;
+  } else if o == 2 {
+    ty = F_WRLCK;
+  }
+  if ty != F_UNLCK && lk_conflict(k.locks, file, LKC_FLOCK, owner, ty, 0, LK_EOF) < LK_N {
+    if op & 4 != 0 {
+      return EAGAIN;                        // EWOULDBLOCK
+    }
+    return LK_WAIT;
+  }
+  return lk_apply(&mut k.locks, file, LKC_FLOCK, owner, ty, 0, LK_EOF);
+}
