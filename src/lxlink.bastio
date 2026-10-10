@@ -1,0 +1,283 @@
+// Symbolic links for Linux programs: symlink and symlinkat make them,
+// readlink reads them (src/lxprocfs.bastio's lx_readlink calls link_out),
+// and every path read from user memory has them followed (lx_follow, from
+// lx_path_from). A link is a file of the file system whose mode has the
+// link type bits (vfs_symlink, vfs_is_link) and whose contents are the
+// target.
+//
+// Following is done on the already normalized path: each prefix that ends
+// at a component is looked up, and a link found there is replaced by its
+// target (from the top if it starts with "/", otherwise from the link's
+// directory), the rest of the path is put back after it, and the result
+// is normalized again. The last component is followed unless the call
+// acts on a link itself (lx_path_at_nf). At most LINK_HOPS links are
+// followed for one path; more is a loop, and the path does not resolve.
+//
+// One difference from Linux: ".." is taken away before links are
+// followed, so "link/.." is the directory holding the link, not the
+// parent of the link's target.
+
+import "linux.bastio";
+
+const LX_SYMLINK: u64 = 88;
+const LX_SYMLINKAT: u64 = 266;
+const LINK_HOPS: u64 = 8;
+const SPLICE: u64 = 1024;             // 2 * PATH_OUT: a link's directory, its target and the rest
+
+/// Normalizes src[..sl] into dst: empty parts and "." dropped, ".." going
+/// up a level, no leading "/". Returns the length, or NO_RESULT if it is
+/// longer than FNAME_MAX.
+fn lex_norm(src: &Bytes, sl: u64, dst: &mut Bytes) -> u64
+  requires sl <= blen(src) && blen(dst) == PATH_OUT
+  ensures blen(dst) == PATH_OUT
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  let mut o = 0;
+  let mut i = 0;
+  while i < sl
+    invariant i <= sl && sl <= blen(src) && o <= PATH_OUT && blen(dst) == PATH_OUT
+  {
+    if bget(src, i) == 47 {
+      i = i + 1;
+    } else {
+      let mut j = i;
+      while j < sl && bget(src, j) != 47
+        invariant i <= j && j <= sl && sl <= blen(src)
+      {
+        j = j + 1;
+      }
+      let w = j - i;
+      if w == 1 && bget(src, i) == 46 {
+        // "." stays here
+      } else if w == 2 && bget(src, i) == 46 && bget(src, i + 1) == 46 {
+        while o > 0 && bget(dst, o - 1) != 47
+          invariant o <= PATH_OUT && blen(dst) == PATH_OUT
+        {
+          o = o - 1;
+        }
+        if o > 0 {
+          o = o - 1;
+        }
+      } else {
+        if o + 1 + w > PATH_OUT {
+          return NO_RESULT;
+        }
+        if o > 0 {
+          bset(&mut dst, o, 47);
+          o = o + 1;
+        }
+        let mut c = 0;
+        while c < w
+          invariant c <= w && i + w <= sl && sl <= blen(src) && o + w <= PATH_OUT && blen(dst) == PATH_OUT
+        {
+          bset(&mut dst, o + c, bget(src, i + c));
+          c = c + 1;
+        }
+        o = o + w;
+      }
+      i = j;
+    }
+  }
+  if o > FNAME_MAX {
+    return NO_RESULT;
+  }
+  return o;
+}
+
+/// Follows the symbolic links in the normalized path in xfer[..n] (the
+/// last component's too when `last`), leaving the result there. Returns
+/// its length, or NO_RESULT for a loop, a broken link or a result too long.
+fn lx_follow(k: &mut Kernel, n: u64, last: bool) -> u64
+  requires kok(k)
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  if n > FNAME_MAX {
+    return NO_RESULT;
+  }
+  if n == 0 {
+    return 0;
+  }
+  let mut p = balloc(PATH_OUT);
+  let mut q = balloc(SPLICE);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= FNAME_MAX && blen(p) == PATH_OUT && kok(k)
+  {
+    bset(&mut p, i, bget(k.fs.xfer, i));
+    i = i + 1;
+  }
+  let mut pl = n;
+  let mut e = 0;                            // where the component being looked at starts
+  let mut hops = 0;
+  let mut bad = false;
+  while e < pl && !bad
+    invariant e <= pl && pl <= FNAME_MAX && blen(p) == PATH_OUT && blen(q) == SPLICE && kok(k)
+  {
+    let mut c = e;
+    while c < pl && bget(p, c) != 47
+      invariant e <= c && c <= pl && pl <= FNAME_MAX && blen(p) == PATH_OUT
+    {
+      c = c + 1;
+    }
+    let mut f = NO_FILE;
+    if c < pl || last {
+      let mut j = 0;
+      while j < c
+        invariant j <= c && c <= pl && pl <= FNAME_MAX && blen(p) == PATH_OUT && kok(k)
+      {
+        bset(&mut k.fs.xfer, j, bget(p, j));
+        j = j + 1;
+      }
+      f = vfs_lookup(&mut k.fs, c);
+    }
+    if f != NO_FILE && vfs_is_link(&mut k.fs, f) {
+      let t = vfs_read_at(&mut k.fs, f, 0, FNAME_MAX);
+      if hops >= LINK_HOPS || t == NO_FD || t == 0 || t > FNAME_MAX {
+        bad = true;
+      } else {
+        hops = hops + 1;
+        // The link's directory (for a relative target), the target, then
+        // the rest of the path.
+        let mut ql = 0;
+        if bget(k.fs.xfer, 0) != 47 {
+          while ql < e
+            invariant ql <= e && e <= pl && pl <= FNAME_MAX && blen(p) == PATH_OUT && blen(q) == SPLICE
+          {
+            bset(&mut q, ql, bget(p, ql));
+            ql = ql + 1;
+          }
+        }
+        let mut a = 0;
+        while a < t
+          invariant a <= t && t <= FNAME_MAX && ql <= FNAME_MAX && blen(q) == SPLICE && kok(k)
+        {
+          bset(&mut q, ql + a, bget(k.fs.xfer, a));
+          a = a + 1;
+        }
+        ql = ql + t;
+        let mut r = c;
+        while r < pl
+          invariant c <= r && r <= pl && pl <= FNAME_MAX && ql <= 2 * FNAME_MAX && blen(p) == PATH_OUT && blen(q) == SPLICE
+        {
+          bset(&mut q, ql + r - c, bget(p, r));
+          r = r + 1;
+        }
+        ql = ql + (pl - c);
+        let nl = lex_norm(q, ql, &mut p);
+        if nl == NO_RESULT {
+          bad = true;
+        } else {
+          pl = nl;
+          e = 0;                            // look again from the top
+        }
+      }
+    } else if c < pl {
+      e = c + 1;
+    } else {
+      e = pl;
+    }
+  }
+  bfree(q);
+  if bad {
+    bfree(p);
+    return NO_RESULT;
+  }
+  let mut o = 0;
+  while o < pl
+    invariant o <= pl && pl <= FNAME_MAX && blen(p) == PATH_OUT && kok(k)
+  {
+    bset(&mut k.fs.xfer, o, bget(p, o));
+    o = o + 1;
+  }
+  bfree(p);
+  return pl;
+}
+
+/// readlink of the link with handle f: its target into user memory at va,
+/// at most `size` bytes and no NUL. Returns the count or -errno.
+fn link_out(k: &mut Kernel, pid: u64, f: u64, va: u64, size: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if size == 0 || size > 0x7FFFFFFF {
+    return EINVAL;
+  }
+  let t = vfs_read_at(&mut k.fs, f, 0, smaller(size, FNAME_MAX));
+  if t == NO_FD {
+    return ENOENT;
+  }
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, t) != t {
+    return EFAULT;
+  }
+  return t;
+}
+
+/// symlink / symlinkat(target, dirfd, path): a link at path whose target
+/// is the string at user address `tva`, kept as given. Returns 0 or -errno.
+fn lx_symlink(k: &mut Kernel, pid: u64, tva: u64, dirfd: u64, path: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if tva < USER_BASE || tva >= USER_BASE + USER_SIZE {
+    return EFAULT;
+  }
+  let want = smaller(PATH_MAX_LX, USER_SIZE - (tva - USER_BASE));
+  let got = copy_from_user(&mut k.spaces, pid, tva, &mut k.fs.xfer, want);
+  if got == NO_RESULT {
+    return EFAULT;
+  }
+  let mut tl = 0;
+  while tl < got && bget(k.fs.xfer, tl) != 0
+    invariant tl <= got && got <= XFER && kok(k)
+  {
+    tl = tl + 1;
+  }
+  if tl == 0 || tl >= got || tl > FNAME_MAX {
+    return ENOENT;
+  }
+  let mut tb = balloc(FNAME_MAX);
+  let mut i = 0;
+  while i < tl
+    invariant i <= tl && tl <= FNAME_MAX && tl <= XFER && blen(tb) == FNAME_MAX && kok(k)
+  {
+    bset(&mut tb, i, bget(k.fs.xfer, i));
+    i = i + 1;
+  }
+  let n = lx_path_at_nf(&mut k, pid, dirfd, path);
+  if n == NO_RESULT {
+    bfree(tb);
+    return ENOENT;
+  }
+  if n == 0 || vfs_lookup(&mut k.fs, n) != NO_FILE || dir_at(&mut k, n) != NO_FILE {
+    bfree(tb);
+    return EEXIST;
+  }
+  let mut j = 0;
+  while j < tl
+    invariant j <= tl && tl <= FNAME_MAX && n <= FNAME_MAX && blen(tb) == FNAME_MAX && kok(k)
+  {
+    bset(&mut k.fs.xfer, n + j, bget(tb, j));
+    j = j + 1;
+  }
+  bfree(tb);
+  if !vfs_symlink(&mut k.fs, &mut k.mem, n, tl) {
+    return ENOENT;                          // no such directory, or no room
+  }
+  return 0;
+}
+
+fn is_link_call(n: u64) -> bool {
+  return n == LX_SYMLINK || n == LX_SYMLINKAT;
+}
+
+/// symlink and symlinkat.
+fn lx_link_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if n == LX_SYMLINK {
+    return lx_symlink(&mut k, pid, a, AT_FDCWD, b);
+  }
+  return lx_symlink(&mut k, pid, a, b, c);
+}

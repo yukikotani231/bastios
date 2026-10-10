@@ -572,9 +572,13 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let n = lx_path_at(&mut k, pid, dirfd, path);
+  let n = lx_path_at_nf(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return ENOENT;
+  }
+  let lk = vfs_lookup(&mut k.fs, n);
+  if lk != NO_FILE && vfs_is_link(&mut k.fs, lk) {
+    return link_out(&mut k, pid, lk, va, size);   // a symbolic link (src/lxlink.bastio)
   }
   let mut pfd = NO_RESULT;
   if n <= XFER {

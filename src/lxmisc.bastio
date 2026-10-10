@@ -331,7 +331,7 @@ fn path_exists(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  return lx_stat(&mut k, pid, dirfd, va, 0);
+  return lx_stat(&mut k, pid, dirfd, va, 0, true);
 }
 
 /// pread64 / pwrite64 on a file: at offset `off`, leaving the file offset
