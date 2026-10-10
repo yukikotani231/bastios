@@ -464,7 +464,7 @@ fn lx_setpgid(k: &mut Kernel, pid: u64, target: u64, g: u64) -> u64
 }
 
 fn is_misc_call(n: u64) -> bool {
-  return n == LX_TRUNCATE || n == LX_FTRUNCATE || n == LX_PREAD64 || n == LX_PWRITE64 || n == LX_SCHED_YIELD || n == LX_MREMAP || n == LX_MUNMAP || n == LX_MPROTECT
+  return n == LX_TRUNCATE || n == LX_FTRUNCATE || n == LX_PREAD64 || n == LX_PWRITE64 || n == LX_SCHED_YIELD || n == LX_MREMAP || n == LX_MUNMAP || n == LX_MPROTECT || n == LX_MSYNC
     || n == LX_MADVISE || n == LX_FSYNC || n == LX_FDATASYNC || n == LX_CHMOD || n == LX_FCHMOD
     || n == LX_CHOWN || n == LX_FCHOWN || n == LX_LCHOWN || n == LX_UMASK || n == LX_GETRLIMIT
     || n == LX_GETRUSAGE || n == LX_SYSINFO || n == LX_SETUID || n == LX_SETGID || n == LX_SETPGID
@@ -510,6 +510,8 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_munmap(&mut k, pid, a, b);
   } else if n == LX_MPROTECT {
     r = lx_mprotect(&mut k, pid, a, b, c);
+  } else if n == LX_MSYNC {
+    r = lx_msync(&mut k, pid, a, b);
   } else if n == LX_FSYNC || n == LX_FDATASYNC || n == LX_FCHOWN {
     let d = fd_look(k, pid, a);
     if d.kind == K_BAD {

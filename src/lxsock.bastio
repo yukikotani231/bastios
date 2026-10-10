@@ -33,6 +33,9 @@ const SOCK_NONBLOCK: u64 = 0x800;
 const SOCK_CLOEXEC: u64 = 0x80000;
 const MSG_DONTWAIT: u64 = 0x40;
 const SIN_LEN: u64 = 16;               // struct sockaddr_in
+const SIN6_LEN: u64 = 28;              // struct sockaddr_in6
+const AF_INET6: u64 = 10;
+const EADDRNOTAVAIL: u64 = 18446744073709551517;   // 2^64 - 99
 
 const ENOTSOCK: u64 = 18446744073709551528;        // 2^64 - 88
 const EDESTADDRREQ: u64 = 18446744073709551527;    // 2^64 - 89
@@ -69,7 +72,10 @@ fn sk_look(k: &Kernel, pid: u64, fd: u64) -> Sk
   return Sk { err: 0, h: h, s: s };
 }
 
-/// Reads the struct sockaddr_in at user address va (alen bytes long).
+/// Reads the struct sockaddr_in at user address va (alen bytes long), or a
+/// struct sockaddr_in6 whose address IPv4 can stand for: :: (any), ::1
+/// (127.0.0.1) or ::ffff:a.b.c.d. Any other IPv6 address is
+/// -EADDRNOTAVAIL: there is no IPv6 on the wire.
 fn sin_in(k: &mut Kernel, pid: u64, va: u64, alen: u64) -> Sin
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -81,19 +87,55 @@ fn sin_in(k: &mut Kernel, pid: u64, va: u64, alen: u64) -> Sin
   if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 8) != 8 {
     return Sin { err: EFAULT, ip: 0, port: 0 };
   }
-  if cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1)) != AF_INET {
-    return Sin { err: EAFNOSUPPORT, ip: 0, port: 0 };
-  }
+  let family = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1));
   // The port and the address are in network byte order.
   let port = 256 * cast[u64](bget(k.fs.xfer, 2)) + cast[u64](bget(k.fs.xfer, 3));
+  if family == AF_INET6 {
+    if alen < SIN6_LEN - 4 {
+      return Sin { err: EINVAL, ip: 0, port: 0 };
+    }
+    if va > 0xFFFFFFFFFFFFFF00 || copy_from_user(&mut k.spaces, pid, va + 8, &mut k.fs.xfer, 16) != 16 {
+      return Sin { err: EFAULT, ip: 0, port: 0 };
+    }
+    let hi = get_u64(k.fs.xfer, 0);         // the first 8 bytes of the address
+    let lo = get_u64(k.fs.xfer, 8);
+    let ip = 0x1000000 * cast[u64](bget(k.fs.xfer, 12)) + 0x10000 * cast[u64](bget(k.fs.xfer, 13)) + 0x100 * cast[u64](bget(k.fs.xfer, 14)) + cast[u64](bget(k.fs.xfer, 15));
+    if hi == 0 && lo == 0 {
+      return Sin { err: 0, ip: 0, port: port };
+    }
+    if hi == 0 && lo % 0x100000000 == 0 && ip == 1 {
+      return Sin { err: 0, ip: 0x7F000001, port: port };   // ::1
+    }
+    if hi == 0 && lo % 0x100000000 == 0xFFFF0000 {
+      return Sin { err: 0, ip: ip, port: port };           // ::ffff:a.b.c.d
+    }
+    return Sin { err: EADDRNOTAVAIL, ip: 0, port: 0 };
+  }
+  if family != AF_INET {
+    return Sin { err: EAFNOSUPPORT, ip: 0, port: 0 };
+  }
   let ip = 0x1000000 * cast[u64](bget(k.fs.xfer, 4)) + 0x10000 * cast[u64](bget(k.fs.xfer, 5)) + 0x100 * cast[u64](bget(k.fs.xfer, 6)) + cast[u64](bget(k.fs.xfer, 7));
   return Sin { err: 0, ip: ip, port: port };
 }
 
+/// Whether open file description h is an AF_INET6 socket.
+fn ofd_v6(k: &Kernel, h: u64) -> bool {
+  return h < OFD_N && (k.inet6 >> h) % 2 == 1;
+}
+
+/// Whether descriptor fd of process pid is an AF_INET6 socket.
+fn fd_v6(k: &Kernel, pid: u64, fd: u64) -> bool
+  requires fds_ok(k) && pid < NPROC
+{
+  return ofd_v6(k, fd_ofd(k, pid, fd));
+}
+
 /// Writes ip:port as a struct sockaddr_in to user address va, where the
 /// u32 at user address lenp says how much room there is, and sets that to
-/// SIN_LEN. Nothing if va is 0. Returns 0 or -EFAULT.
-fn sin_out(k: &mut Kernel, pid: u64, va: u64, lenp: u64, ip: u64, port: u64) -> u64
+/// SIN_LEN. With v6, a struct sockaddr_in6 instead (SIN6_LEN): 0.0.0.0 as
+/// ::, 127.0.0.1 as ::1, and any other address as ::ffff:a.b.c.d. Nothing
+/// if va is 0. Returns 0 or -EFAULT.
+fn sin_out(k: &mut Kernel, pid: u64, va: u64, lenp: u64, ip: u64, port: u64, v6: bool) -> u64
   requires kok(k) && pid < NPROC && ip <= 4294967295 && port <= 65535
   ensures kok(k)
 {
@@ -104,20 +146,36 @@ fn sin_out(k: &mut Kernel, pid: u64, va: u64, lenp: u64, ip: u64, port: u64) -> 
     return EFAULT;
   }
   let room = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1)) + 65536 * cast[u64](bget(k.fs.xfer, 2)) + 16777216 * cast[u64](bget(k.fs.xfer, 3));
-  lx_fill(&mut k, 0, SIN_LEN);
-  bset(&mut k.fs.xfer, 0, cast[u8](AF_INET));
+  let mut len = SIN_LEN;
+  lx_fill(&mut k, 0, SIN6_LEN);
   bset(&mut k.fs.xfer, 2, cast[u8](port / 256));
   bset(&mut k.fs.xfer, 3, cast[u8](port % 256));
-  bset(&mut k.fs.xfer, 4, cast[u8](ip / 0x1000000));
-  bset(&mut k.fs.xfer, 5, cast[u8](ip / 0x10000 % 256));
-  bset(&mut k.fs.xfer, 6, cast[u8](ip / 0x100 % 256));
-  bset(&mut k.fs.xfer, 7, cast[u8](ip % 256));
-  let n = smaller(room, SIN_LEN);
+  if v6 {
+    len = SIN6_LEN;
+    bset(&mut k.fs.xfer, 0, cast[u8](AF_INET6));
+    if ip == 0x7F000001 {
+      bset(&mut k.fs.xfer, 23, 1);          // ::1
+    } else if ip != 0 {
+      bset(&mut k.fs.xfer, 18, 255);        // ::ffff:a.b.c.d
+      bset(&mut k.fs.xfer, 19, 255);
+      bset(&mut k.fs.xfer, 20, cast[u8](ip / 0x1000000));
+      bset(&mut k.fs.xfer, 21, cast[u8](ip / 0x10000 % 256));
+      bset(&mut k.fs.xfer, 22, cast[u8](ip / 0x100 % 256));
+      bset(&mut k.fs.xfer, 23, cast[u8](ip % 256));
+    }
+  } else {
+    bset(&mut k.fs.xfer, 0, cast[u8](AF_INET));
+    bset(&mut k.fs.xfer, 4, cast[u8](ip / 0x1000000));
+    bset(&mut k.fs.xfer, 5, cast[u8](ip / 0x10000 % 256));
+    bset(&mut k.fs.xfer, 6, cast[u8](ip / 0x100 % 256));
+    bset(&mut k.fs.xfer, 7, cast[u8](ip % 256));
+  }
+  let n = smaller(room, len);
   if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {
     return EFAULT;
   }
   lx_fill(&mut k, 0, 4);
-  bset(&mut k.fs.xfer, 0, cast[u8](SIN_LEN));
+  bset(&mut k.fs.xfer, 0, cast[u8](len));
   if copy_to_user(&mut k.spaces, pid, lenp, k.fs.xfer, 4) != 4 {
     return EFAULT;
   }
@@ -132,9 +190,26 @@ fn lx_socket(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64) -> u6
   if domain == 1 {
     return ux_socket(&mut k, pid, kind, proto);   // AF_UNIX: src/lxunix.bastio
   }
-  if domain != AF_INET {
+  // AF_INET6 is AF_INET underneath: its addresses are the IPv6 forms of
+  // IPv4 ones (sin_in), and names come back as struct sockaddr_in6.
+  if domain != AF_INET && domain != AF_INET6 {
     return EAFNOSUPPORT;
   }
+  let fd = lx_inet_socket(&mut k, pid, kind, proto);
+  if domain == AF_INET6 {
+    let h = fd_ofd(k, pid, fd);
+    if h < OFD_N {
+      k.inet6 = k.inet6 | (1 << h);
+    }
+  }
+  return fd;
+}
+
+/// An AF_INET socket of `kind`: UDP or TCP.
+fn lx_inet_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
   if kind % 16 == SOCK_STREAM {
     return lx_tcp_socket(&mut k, pid, kind, proto);   // src/lxtcp.bastio
   }
@@ -291,7 +366,7 @@ fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, 
   }
   let ip = sock_peer_ip(k.nic, sk.s);
   let port = sock_peer_port(k.nic, sk.s);
-  let r = sin_out(&mut k, pid, addr, alenp, ip, port);
+  let r = sin_out(&mut k, pid, addr, alenp, ip, port, ofd_v6(k, sk.h));
   if r != 0 {
     return r;
   }
@@ -315,7 +390,7 @@ fn lx_sockname(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
     return sk.err;
   }
   if !peer {
-    return sin_out(&mut k, pid, addr, lenp, 0, sock_port(k.nic, sk.s));
+    return sin_out(&mut k, pid, addr, lenp, 0, sock_port(k.nic, sk.s), ofd_v6(k, sk.h));
   }
   let p = of_get(k.ofd, sk.h, 3) / 2;
   if p == 0 {
@@ -325,7 +400,7 @@ fn lx_sockname(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
   if ip > 4294967295 {
     return ENOTCONN;
   }
-  return sin_out(&mut k, pid, addr, lenp, ip, p % 65536);
+  return sin_out(&mut k, pid, addr, lenp, ip, p % 65536, ofd_v6(k, sk.h));
 }
 
 /// getsockopt(fd, level, name, val, lenp): SO_TYPE says stream or
