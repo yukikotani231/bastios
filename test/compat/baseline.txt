@@ -322,6 +322,19 @@ t_proc: uname
 t_proc: wait with no children is ECHILD
 t_proc: waitid
 t_proc: waitpid WNOHANG
+t_sig2: 24 processes at once
+t_sig2: SA_ONSTACK runs on the alternate stack
+t_sig2: SA_RESETHAND runs the handler once
+t_sig2: SA_RESTART does not restart epoll_wait
+t_sig2: SA_RESTART does not restart nanosleep
+t_sig2: SA_RESTART does not restart poll
+t_sig2: a PROT_NONE page is EFAULT to a system call
+t_sig2: epoll_pwait blocks its mask while it waits
+t_sig2: mprotect makes a PROT_NONE mapping usable
+t_sig2: read into an untouched stack buffer
+t_sig2: rt_sigprocmask with a wrong sigset size is EINVAL
+t_sig2: sigaltstack smaller than MINSIGSTKSZ is ENOMEM
+t_sig2: the stack grows to 512 KiB
 t_signal: SA_SIGINFO
 t_signal: SIGCHLD on child exit
 t_signal: SIG_IGN
