@@ -135,7 +135,14 @@ fn tick(t: u64) -> u64 {
 fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 {
   puts(con, "\r\nBastiOS 0.2: ");
   put_num(con, pool_size(pool));
-  puts(con, " pages of memory\r\n");
+  puts(con, " pages of memory, ");
+  let cpus = cpu_count(cpu);
+  put_num(con, cpus);
+  if cpus == 1 {
+    puts(con, " processor\r\n");
+  } else {
+    puts(con, " processors\r\n");
+  }
   // The allocator takes the pool for as long as the kernel runs and gives
   // it back at power off.
   let mut m = mem_new(pool);
@@ -156,7 +163,7 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
     vec_push(&mut fpus, Fpu::None);
     q = q + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), ticks: 0, fs: vfs_new() };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), ticks: 0, cpus: cpus, fs: vfs_new() };
   install_files(con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(con, "cannot start the shell\r\n");
