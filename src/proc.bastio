@@ -19,7 +19,7 @@ const F_STATE: u64 = 0;
 const F_WAIT: u64 = 1;               // the child a WAITING process waits for
 const F_CODE: u64 = 2;               // exit code of a ZOMBIE
 const F_PARENT: u64 = 3;
-const F_PROG: u64 = 4;               // index into the program table
+const F_PROG: u64 = 4;               // index into the program table; NPROGS + 1 + a vfs handle for a file
 const F_TICKS: u64 = 5;              // timer ticks spent running
 const F_BRK: u64 = 6;                // Linux: window offset of the program break
 const F_MMAP: u64 = 7;               // Linux: window offset of the lowest mmap page
@@ -328,6 +328,10 @@ const OF_TCP: u64 = 6;                // x: the kernel connection (TCBS: none ye
 const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
 const DIR_VFS: u64 = 2;               // DIR_VFS + a file layer directory handle
+const DIR_PROC: u64 = 0x10000;        // /proc; DIR_PROC + pid: /proc/PID (src/lxprocfs.bastio)
+const PROC_DEV: u64 = 256;            // an OF_DEV device from here up is a /proc file: PROC_DEV + 16 * pid + PF_*
+const PF_EXE: u64 = 7;                // /proc/PID/exe, a link
+const EACCES: u64 = 18446744073709551603;   // 2^64 - 13
 
 const NPIPES: u64 = 8;
 const PIPE_CAP: u64 = 1024;
@@ -714,7 +718,10 @@ fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, pid: u64, sr
     pset(&mut procs, pid, F_REGS + r, 0);
     r = r + 1;
   }
-  pset(&mut procs, pid, F_PROG, NPROGS);       // a file: no name in the table
+  pset(&mut procs, pid, F_PROG, NPROGS);       // a file: NPROGS + 1 + its handle, for /proc/PID/exe
+  if src.file && src.f < NFILES + DSLOTS {
+    pset(&mut procs, pid, F_PROG, NPROGS + 1 + src.f);
+  }
   if !src.file {
     pset(&mut procs, pid, F_PROG, src.prog);
   }

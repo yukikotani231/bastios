@@ -30,6 +30,7 @@ import "lxsig.bastio";
 import "lxtime.bastio";
 import "lxmisc.bastio";
 import "lxdev.bastio";
+import "lxprocfs.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
