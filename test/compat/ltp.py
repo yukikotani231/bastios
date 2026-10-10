@@ -98,6 +98,13 @@ def classify(status, text):
             bad.append(line.strip())     # a kernel note: a fault, a kill
     if status is None:
         return "hang", "; ".join(bad[:2]) or "did not finish"
+    # A test with child processes keeps its counts in a MAP_SHARED page;
+    # where the children's updates do not reach the parent, it exits 0
+    # though a child printed TFAIL. Its own lines count, not just its status.
+    for line in text.split("\n"):
+        m = RESULT.match(line)
+        if m and m.group(1) in ("TFAIL", "TBROK", "TWARN"):
+            status |= {"TFAIL": TFAIL, "TBROK": TBROK, "TWARN": TWARN}[m.group(1)]
     if status == 0:
         return "pass", ""
     if status & TBROK:
