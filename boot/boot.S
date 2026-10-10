@@ -57,6 +57,7 @@ pml4:   .skip 4096
 pdpt:   .skip 4096
 hipdpt: .skip 63 * 4096               /* 512 GiB - 2^46, right after pdpt */
 pd:     .skip 4096
+fwpd:   .skip 4096                    /* 1-2 GiB */
 devpd:  .skip 8192                    /* 2-3 GiB, then 3-4 GiB */
 .align 16
 stack_bottom:
@@ -107,6 +108,26 @@ _start:
         or      $0x83, %eax           /* present | writable | huge */
         mov     %eax, pd(,%ecx,8)
         movl    $0, pd+4(,%ecx,8)
+        inc     %ecx
+        cmp     $512, %ecx
+        jne     1b
+
+        /* The second GiB, identity-mapped (2 MiB pages, kernel-only) for
+         * one reader: boot/smp.c, which finds the ACPI tables there on
+         * machines with 2 GiB or more below 4 GiB (firmware puts them at
+         * the top of that memory). Nothing else uses these addresses: the
+         * page pool stays below 1 GiB, and Bastio's `mmio_claim` starts
+         * at 2 GiB. */
+        mov     $fwpd, %eax
+        or      $3, %eax
+        mov     %eax, pdpt+8
+        xor     %ecx, %ecx
+1:      mov     %ecx, %eax
+        shl     $21, %eax
+        add     $0x40000000, %eax
+        or      $0x83, %eax           /* present | writable | huge */
+        mov     %eax, fwpd(,%ecx,8)
+        movl    $0, fwpd+4(,%ecx,8)
         inc     %ecx
         cmp     $512, %ecx
         jne     1b

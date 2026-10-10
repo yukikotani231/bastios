@@ -1385,6 +1385,79 @@ for machine, name in (("pc,hpet=off", "i440fx, no HPET"), ("q35,hpet=off", "q35,
     print(f"---- {name} transcript ----")
     print(out.decode(errors="replace").replace("\r", "")[-500:])
 
+# The hardware report (boot option diag, src/info.bastio), on a q35 with
+# 2 GiB, whose firmware puts the ACPI tables just below 2 GiB: the kernel
+# must still find them (the processors, power off). Each pause in the report
+# waits for a key, which the serial line gives.
+def report_boot(args, name, keys):
+    global qemu, out, deadline
+    qemu = subprocess.Popen(
+        ["qemu-system-x86_64", "-kernel", kernel, "-display", "none", "-nic", "none",
+         "-serial", "stdio", "-monitor", "none"] + args,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    out = b""
+    deadline = time.time() + timeout
+    for _ in range(keys):
+        mark = len(out)
+        if not read_until(b"(or wait a minute) --", mark):
+            break
+        qemu.stdin.write(b" "); qemu.stdin.flush()
+    ok = read_until(b"bastios> ")
+    mark = len(out)
+    qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
+    read_until(b"pages free at power off", mark)
+    try:
+        code = qemu.wait(timeout=max(1, deadline - time.time()))
+    except subprocess.TimeoutExpired:
+        qemu.kill(); qemu.wait(); code = None
+    print(f"---- {name} transcript ----")
+    print(out.decode(errors="replace").replace("\r", "")[-1500:])
+    return ok, code
+
+ok, code = report_boot(["-machine", "q35", "-m", "2G", "-smp", "2", "-append", "diag"], "hardware report", 3)
+text = out.decode(errors="replace").replace("\r", "")
+for want, what in (
+        ("---- hardware report", "the report starts"),
+        ("processors: the MADT lists 2, 2 running", "the MADT, below 2 GiB, lists both processors"),
+        ("acpi: soft power off, power button", "the FADT below 2 GiB gives power off"),
+        ("acpi: tables FACP@0x7f", "the tables are listed where they are"),
+        ("timer: the local APIC timer, counted against the HPET", "the timer's calibration"),
+        ("MiB usable in a map of", "the memory map"),
+        ("pci 00:1f.2 8086:2922 class 010601 AHCI disk", "the PCI devices, with their drivers"),
+        ("acpi: reset register: port 0xcf9", "the reset register"),
+        ("---- end of the hardware report", "the report ends")):
+    good = ok and want in text
+    print(("ok  " if good else "FAIL"), f"(hardware report) {what}")
+    fails += not good
+booted = re.findall(r"BastiOS 0.2: (\d+) pages of memory", text)
+off = re.search(r"BastiOS: (\d+) pages free at power off", text)
+good = code == 0 and booted and off and booted[-1] == off.group(1)
+print(("ok  " if good else "FAIL"), f"(hardware report) every page back, and S5 (status {code})")
+fails += not good
+ok, code = report_boot(["-machine", "pc", "-m", "64M"], "no report", 0)
+good = ok and b"hardware report" not in out
+print(("ok  " if good else "FAIL"), "(hardware report) only with diag")
+fails += not good
+
+# A disk that is not blank and has no BastiOS file system (an MBR's
+# signature; or only a GPT's backup header at the end) is someone else's:
+# it is not formatted, and not a byte of it changes.
+for name, at, data in (("an MBR", 510, b"\x55\xaa"), ("a backup GPT header", (33 << 20) - 512, b"EFI PART")):
+    other = os.path.join(disk_dir.name, "other.img")
+    with open(other, "wb") as f:
+        f.truncate(33 << 20)
+        f.seek(at)
+        f.write(data)
+    before = open(other, "rb").read()
+    ok, code = report_boot(["-m", "64M", "-drive", f"file={other},format=raw,if=none,id=od",
+                            "-device", "virtio-blk-pci,drive=od"], f"disk with {name}", 0)
+    good = ok and b"disk: it holds a partition table or other data; left alone" in out
+    print(("ok  " if good else "FAIL"), f"(foreign disk) a disk with {name} is left alone")
+    fails += not good
+    good = open(other, "rb").read() == before
+    print(("ok  " if good else "FAIL"), f"(foreign disk) not a byte of the disk with {name} changed")
+    fails += not good
+
 print(f"---- {fails} failed ----")
 sys.exit(1 if fails else 0)
 PY
