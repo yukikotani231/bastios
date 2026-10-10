@@ -1,8 +1,8 @@
 // Linux file descriptors. Each process has LXNFD descriptors; each names
 // the console or an open file description (the `ofd` table), which dup,
 // dup2 and fork share and which counts its references. A description is a
-// file (a native row of the file layer), one end of a pipe, or a
-// directory being listed.
+// file (a native row of the file layer), one end of a pipe, a directory
+// being listed, or a UDP socket (src/lxsock.bastio).
 //
 // k.lxfd, word pid * LXNFD + fd: 0 closed, FD_CONSOLE, or FD_OFD + h for
 // description h; plus FD_CLOEXEC if execve closes it.
@@ -90,6 +90,9 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   if kind == OF_DIR {
     return Fd { kind: K_DIR, x: x };
   }
+  if kind == OF_SOCK {
+    return Fd { kind: K_SOCK, x: x };
+  }
   return Fd { kind: K_BAD, x: 0 };
 }
 
@@ -153,6 +156,8 @@ fn unref_value(k: &mut Kernel, v: u64)
     pi_set(&mut k.pipes, x, 2, 0);
   } else if kind == OF_PIPE_W && x < NPIPES {
     pi_set(&mut k.pipes, x, 3, 0);
+  } else if kind == OF_SOCK {
+    sock_close(&mut k.nic, x);
   }
 }
 

@@ -387,6 +387,8 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
     m = Meta { ok: true, mode: S_IFIFO, size: 0, ino: 4 };
   } else if d.kind == K_DIR {
     m = Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1 };
+  } else if d.kind == K_SOCK {
+    m = Meta { ok: true, mode: S_IFSOCK, size: 0, ino: 5 };
   } else if d.kind == K_FILE {
     m = Meta { ok: true, mode: S_IFREG, size: row_size(&mut k.fs, d.x), ino: 100 };
   }
