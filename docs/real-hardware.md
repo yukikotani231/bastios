@@ -20,17 +20,44 @@ Still, BastiOS is young software with drivers that have only met QEMU's devices.
 - A camera (a phone is fine) for the screen.
 - Optional, and the best record if you have it: a serial port (COM1) and a null-modem or USB-serial cable to another computer. Set it to 115200 baud, 8N1, and capture everything.
 
-## Make the stick
-
-On x86-64 Linux, build BastiOS as in [getting-started.md](getting-started.md), then:
+To capture the serial log on the other computer (`/dev/ttyUSB0` is a USB-serial adapter's usual name on Linux; on macOS it is `/dev/tty.usbserial-...`):
 
 ```text
-make usb
-lsblk                    # find the stick: /dev/sdX
-sudo dd if=build/bastios-usb.img of=/dev/sdX bs=4M conv=fsync
+picocom -b 115200 --logfile bastios.log /dev/ttyUSB0      # Linux; quit with Ctrl-A Ctrl-X
+screen -L -Logfile bastios.log /dev/tty.usbserial-XXXX 115200   # macOS; quit with Ctrl-A K
 ```
 
-`dd` overwrites the whole device it is given, so check the name twice. The image is the ISO followed by a 64 MiB partition where BastiOS keeps its files. A release's ISO (`bastios-vX.Y.Z.iso`) can be written the same way if you would rather not build anything, but it has no partition, so step 7 below cannot work with it.
+On Windows, PuTTY does it: Connection type Serial, speed 115200, and under Session > Logging choose "All session output". Start the capture before powering the PC on. The serial line also takes input, so you can type the commands below there instead of on the PC.
+
+## Make the stick
+
+You need the USB image, `bastios-usb.img`. Either build it (on x86-64 Linux, set up as in [getting-started.md](getting-started.md), then `make usb`; it lands in `build/bastios-usb.img`) or use one the maintainers give you, with its SHA-256 checksum to compare against. The image is the ISO followed by a 64 MiB partition where BastiOS keeps its files. A release's ISO (`bastios-vX.Y.Z.iso`) can be written the same way if you would rather not build anything, but it has no partition, so step 7 below cannot work with it.
+
+Writing the image erases the whole stick. Whatever tool you use, check twice that it is about to write the stick and not another disk.
+
+**Linux**
+
+```text
+sha256sum bastios-usb.img            # compare with the checksum you were given
+lsblk                                # find the stick: /dev/sdX
+sudo dd if=bastios-usb.img of=/dev/sdX bs=4M conv=fsync
+```
+
+**macOS**
+
+```text
+shasum -a 256 bastios-usb.img
+diskutil list                        # find the stick: /dev/diskN (external, physical)
+diskutil unmountDisk /dev/diskN
+sudo dd if=bastios-usb.img of=/dev/rdiskN bs=4m
+diskutil eject /dev/diskN
+```
+
+`rdiskN` (with the `r`) is the same stick, written much faster. If macOS then says the disk is not readable, choose **Ignore**: it cannot read BastiOS's partition, which is expected.
+
+**Windows**
+
+Use [Rufus](https://rufus.ie): pick the stick under Device, choose the image with SELECT (set the file filter to "All files" to see a `.img`), and press START. If Rufus asks how to write it, choose **DD image** mode. [balenaEtcher](https://etcher.balena.io) also works and needs no choices. Check the checksum first with `certutil -hashfile bastios-usb.img SHA256` in a command prompt.
 
 ## Boot it
 
@@ -58,6 +85,16 @@ Note for each step whether it worked. If something goes wrong, note what it did 
 | 11 | Boot again, then press the power button briefly | `power button: powering off`, and the machine switches off |
 
 If the machine stops responding at any point, photograph the screen. Any line that starts with `bastio: kernel fault` matters most: please copy it exactly.
+
+## If it stops early
+
+Each of these is worth a report on its own; try the next step only if you have time.
+
+- **The machine does not offer the stick, or goes straight to its own system.** Check that Secure Boot is off, and that USB boot is allowed in the firmware settings. Under UEFI, also try the stick's entry without "UEFI:" (that boots it through the BIOS compatibility mode, if the machine has one), and the other way round.
+- **GRUB appears, then the screen goes black or freezes.** Photograph the last screen. If the machine has a serial port, the log is there even when the screen shows nothing: capture it at 115200 baud. Then try the first GRUB entry, **BastiOS**, which skips the report.
+- **The boot log stops partway.** Photograph it: the last line says how far the kernel got.
+- **The prompt appears but typing does nothing.** Try another keyboard: the laptop's own (PS/2 inside), a USB keyboard on another port, or one plugged in directly rather than through a hub or dock.
+- **A SATA disk is plugged in, but the log does not say `disk: AHCI`.** Reboot, press `e` on the GRUB entry, add ` ahci_reset` at the end of the line that starts with `multiboot2`, and press F10 or Ctrl-X to boot.
 
 ## What to send back
 
@@ -90,7 +127,7 @@ These are expected on real machines today, so there is no need to report them un
 
 - Network: only the Intel e1000 families (8254x, 82574L, 82576, I350, I210, I211: the I350, I210 and I211 are untested, so a report on one of them is especially welcome) and virtio cards. Most desktop and laptop cards (Intel I219 and I225/I226, Realtek RTL8111/8168, and Wi-Fi) have no driver.
 - USB: only xHCI (USB 3) controllers, with keyboards and BastiOS-partitioned sticks, on a root port or behind up to two USB 2 hubs.
-- Disks: NVMe, AHCI (SATA), legacy ATA and USB sticks. A disk is used only if it is blank or already BastiOS's. If a SATA disk is plugged in but the boot log does not say `disk: AHCI`, try again with the boot option `ahci_reset` (press `e` on the GRUB entry and add it after the kernel's path): it resets every SATA link before looking for the disk.
+- Disks: NVMe, AHCI (SATA), legacy ATA and USB sticks. A disk is used only if it is blank or already BastiOS's. If a SATA disk is plugged in but the boot log does not say `disk: AHCI`, try again with the boot option `ahci_reset` (press `e` on the GRUB entry and add it at the end of the `multiboot2` line): it resets every SATA link before looking for the disk.
 - Screen: a 32-bit framebuffer that GRUB sets up, in the device window below 4 GiB or anywhere above 4 GiB (where many PCs put the graphics memory; this case is untested, because no QEMU display has its framebuffer there). There is no GPU driver.
 - Processors: when the local APICs have to run in x2APIC mode (the report's `local APIC:` line says so: the firmware locked that mode, or a processor has an id of 255 or more), the kernel does without MSI and wake-up interrupts, so disks and the network are polled more.
 - ACPI: only the PM1a registers; PM1b is not used. The only AML read is `\_S5`. A reset register in memory has not been tested, because QEMU has none.
