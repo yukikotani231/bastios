@@ -7,11 +7,12 @@
 // k.lxfd, word pid * LXNFD + fd: 0 closed, FD_CONSOLE, or FD_OFD + h for
 // description h; plus FD_CLOEXEC if execve closes it.
 // k.ofd, words h * OFD_STRIDE: kind, references, row, pipe or directory,
-// and a directory's next entry.
+// and a directory's next entry (for a pipe end: 1 if it is nonblocking).
 // k.pipes, words p * PIPE_STRIDE: head, count, read end open, write end
 // open, then a ring of PIPE_CAP bytes.
 
 import "linux.bastio";
+import "lxdev.bastio";
 
 struct Fd { kind: u64, x: u64 }
 
@@ -93,7 +94,36 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   if kind == OF_SOCK || kind == OF_TCP {
     return Fd { kind: K_SOCK, x: x };
   }
+  if kind == OF_DEV {
+    return Fd { kind: K_DEV, x: x };
+  }
   return Fd { kind: K_BAD, x: 0 };
+}
+
+/// The open file description descriptor `fd` of process `pid` names, or
+/// OFD_N if it names none (closed, or the console).
+fn fd_ofd(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires fds_ok(k) && pid < NPROC
+  ensures result <= OFD_N
+{
+  let v = fd_get(k.lxfd, pid, fd) % FD_CLOEXEC;
+  if v < FD_OFD || v - FD_OFD >= OFD_N {
+    return OFD_N;
+  }
+  return v - FD_OFD;
+}
+
+/// Whether descriptor `fd` of process `pid` is a pipe end with O_NONBLOCK:
+/// a read or write that would wait fails with -EAGAIN instead.
+fn pipe_nonblock(k: &Kernel, pid: u64, fd: u64) -> bool
+  requires fds_ok(k) && pid < NPROC
+{
+  let h = fd_ofd(k, pid, fd);
+  if h >= OFD_N {
+    return false;
+  }
+  let kind = of_get(k.ofd, h, 0);
+  return (kind == OF_PIPE_R || kind == OF_PIPE_W) && of_get(k.ofd, h, 3) == 1;
 }
 
 /// Process `pid`'s descriptors as a new program starts: 0 to 2 on the
@@ -294,6 +324,20 @@ fn fd_install(k: &mut Kernel, pid: u64, h: u64) -> u64
   return fd;
 }
 
+/// A new descriptor on the console (open of /dev/tty). Returns it, or
+/// -EMFILE.
+fn fd_install_console(k: &mut Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let fd = fd_free(k.lxfd, pid, 0);
+  if fd >= LXNFD {
+    return EMFILE;
+  }
+  fd_set(&mut k.lxfd, pid, fd, FD_CONSOLE);
+  return fd;
+}
+
 /// open / openat: the native flags for Linux `flags`, then vfs_open, and
 /// a description for the row.
 fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64) -> u64
@@ -303,6 +347,17 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64) -> u64
   let n = lx_path_at(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return ENOENT;
+  }
+  let dev = dev_at(k.fs.xfer, n);
+  if dev == DEV_TTY {
+    return fd_install_console(&mut k, pid);
+  }
+  if dev != DEV_NONE && dev != DEV_DIR {
+    let hv = ofd_new(&mut k, OF_DEV, dev);
+    if hv >= OFD_N {
+      return ENFILE;
+    }
+    return fd_install(&mut k, pid, hv);
   }
   let dir = dir_at(&mut k, n);
   let excl = flags & LO_CREAT != 0 && flags & LO_EXCL != 0;
@@ -416,11 +471,31 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     fd_set(&mut k.lxfd, pid, fd, v % FD_CLOEXEC + FD_CLOEXEC * (arg % 2));
     return 0;
   }
+  let h = fd_ofd(k, pid, fd);
+  let mut kind = OF_FREE;
+  if h < OFD_N {
+    kind = of_get(k.ofd, h, 0);
+  }
+  let pipe = h < OFD_N && (kind == OF_PIPE_R || kind == OF_PIPE_W);
   if cmd == F_GETFL {
-    return LO_RDWR;
+    if !pipe {
+      return LO_RDWR;
+    }
+    let mut fl = 0;                         // O_RDONLY
+    if kind == OF_PIPE_W {
+      fl = LO_WRONLY;
+    }
+    if of_get(k.ofd, h, 3) == 1 {
+      fl = fl + LO_NONBLOCK;
+    }
+    return fl;
   }
   if cmd == F_SETFL {
-    return 0;                               // no flag (O_NONBLOCK, O_APPEND) can change
+    // O_NONBLOCK on a pipe end can change; no other flag (O_APPEND) can.
+    if pipe {
+      of_set(&mut k.ofd, h, 3, arg / LO_NONBLOCK % 2);
+    }
+    return 0;
   }
   return EINVAL;
 }
@@ -467,6 +542,8 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
   pi_set(&mut k.pipes, p, 1, 0);
   pi_set(&mut k.pipes, p, 2, 1);
   pi_set(&mut k.pipes, p, 3, 1);
+  of_set(&mut k.ofd, hr, 3, flags / LO_NONBLOCK % 2);
+  of_set(&mut k.ofd, hw, 3, flags / LO_NONBLOCK % 2);
   let mut ce = 0;
   if flags / LO_CLOEXEC % 2 == 1 {
     ce = FD_CLOEXEC;

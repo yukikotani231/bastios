@@ -260,6 +260,11 @@ steps = [
     # variables (one timed) and joins, and _exit from a thread ending the
     # whole process (user/mthread.c).
     ("mthread", b"mthread: ok, 8000 increments", b"\n# "),
+    # What Linux programs expect to find: /dev/null swallows, /tmp and
+    # /etc/passwd exist, and every file has its own inode number.
+    ("echo lost > /dev/null; wc -c < /dev/null; test -d /tmp && echo tmp$((2+2))", b"\r\n0\r\ntmp4\r\n", b"\n# "),
+    ("cat /etc/passwd", b"root:x:0:0", b"\n# "),
+    ("echo a > /tmp/i1; echo b > /tmp/i2; set -- $(ls -i /tmp/i1); a=$1; set -- $(ls -i /tmp/i2); [ $a != $1 ] && echo distinct; rm /tmp/i1 /tmp/i2", b"\r\ndistinct\r\n", b"\n# "),
     ("exit 5", b"[exit 5]"),
     ("rm lxout", b""),
     ("sh", b"BastiOS 0.2 -- type"),
