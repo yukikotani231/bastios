@@ -1,0 +1,438 @@
+// A file system on the ATA disk, so files survive power off. The format is
+// deliberately simple: the disk is cut into DSLOTS fixed slots of 1 MiB,
+// one per file, behind a superblock and a directory.
+//
+//   sector 0         superblock: the magic "BSTDISK1"
+//   sectors 1..4     directory: DSLOTS entries of 64 bytes
+//   sector 8 + 2048 i ...  the data of slot i (2048 sectors, 1 MiB)
+//
+// A directory entry is: byte 0 used (0 or 1), byte 1 the name length,
+// bytes 2..30 the name, bytes 32..40 the size (little-endian). A disk
+// without the magic is formatted when it is mounted.
+//
+// The directory is kept in memory and written through: every change writes
+// the sector it lives in. Data moves one sector at a time through a
+// one-sector buffer; a write that covers part of a sector reads it first.
+// Bytes past a file's size are never returned, and a write past the end
+// first fills the gap with zeros, so a file never shows stale disk
+// contents.
+
+import "ata.bastio";
+
+const DSLOTS: u64 = 32;
+const SLOT_SECTORS: u64 = 2048;
+const SLOT_BYTES: u64 = 1048576;      // SLOT_SECTORS * SECTOR
+const DATA0: u64 = 8;                 // the first data sector
+const DIR_BYTES: u64 = 2048;          // DSLOTS * 64
+const DIR_SECTORS: u64 = 4;
+const DENT: u64 = 64;
+const DNAME_MAX: u64 = 28;
+const DISK_MAGIC: u64 = 0x314B534944545342;   // "BSTDISK1", little-endian
+const NO_DISK_FILE: u64 = 18446744073709551615;
+
+struct DiskFs {
+  ata: Ata,
+  dir: Bytes,           // the directory, DIR_BYTES
+  sec: Bytes,           // a sector buffer
+  slots: u64,           // slots that fit on the disk; 0 without a disk
+}
+
+spec fn disk_ok(d: &DiskFs) -> bool {
+  ata_ok(d.ata) && blen(d.dir) == DIR_BYTES && blen(d.sec) == SECTOR && d.slots <= DSLOTS
+}
+
+// ---------------------------------------------------------------- bytes
+
+/// The little-endian u64 at b[at..at + 8].
+fn get_u64(b: &Bytes, at: u64) -> u64
+  requires at + 8 <= blen(b)
+{
+  return bget(b, at) + 0x100 * bget(b, at + 1) + 0x10000 * bget(b, at + 2)
+    + 0x1000000 * bget(b, at + 3) + 0x100000000 * bget(b, at + 4)
+    + 0x10000000000 * bget(b, at + 5) + 0x1000000000000 * bget(b, at + 6)
+    + 0x100000000000000 * bget(b, at + 7);
+}
+
+/// Stores v at b[at..at + 8], little-endian.
+fn put_u64(b: &mut Bytes, at: u64, v: u64)
+  requires at + 8 <= blen(b)
+  ensures blen(b) == old(blen(b))
+{
+  let l = blen(b);
+  let mut x = v;
+  let mut k = 0;
+  while k < 8
+    invariant k <= 8 && blen(b) == l
+  {
+    bset(&mut b, at + k, x % 256);
+    x = x / 256;
+    k = k + 1;
+  }
+}
+
+// ---------------------------------------------------------------- mounting
+
+/// Writes directory sector s (0 to DIR_SECTORS - 1) to the disk.
+fn dir_flush(d: &mut DiskFs, s: u64) -> bool
+  requires disk_ok(d) && s < DIR_SECTORS
+  ensures disk_ok(d)
+{
+  let mut j = 0;
+  while j < SECTOR
+    invariant j <= SECTOR && disk_ok(d)
+  {
+    bset(&mut d.sec, j, bget(d.dir, s * SECTOR + j));
+    j = j + 1;
+  }
+  return ata_write(&mut d.ata, 1 + s, d.sec);
+}
+
+/// Mounts the disk, formatting it if it has no file system yet. Without a
+/// disk (or one too small for a slot) the file system has no slots and
+/// every operation on it fails.
+fn disk_mount(ata: Ata) -> DiskFs
+  requires ata_ok(ata)
+  ensures disk_ok(result)
+{
+  let mut d = DiskFs { ata: ata, dir: balloc(DIR_BYTES), sec: balloc(SECTOR), slots: 0 };
+  if d.ata.sectors < DATA0 + SLOT_SECTORS || !ata_read(&mut d.ata, 0, &mut d.sec) {
+    return d;
+  }
+  let mut n = (d.ata.sectors - DATA0) / SLOT_SECTORS;
+  if n > DSLOTS {
+    n = DSLOTS;
+  }
+  if get_u64(d.sec, 0) == DISK_MAGIC {
+    let mut s = 0;
+    while s < DIR_SECTORS
+      invariant s <= DIR_SECTORS && disk_ok(d)
+    {
+      if !ata_read(&mut d.ata, 1 + s, &mut d.sec) {
+        return d;
+      }
+      let mut j = 0;
+      while j < SECTOR
+        invariant j <= SECTOR && disk_ok(d)
+      {
+        bset(&mut d.dir, s * SECTOR + j, bget(d.sec, j));
+        j = j + 1;
+      }
+      s = s + 1;
+    }
+  } else {
+    // Format: an empty directory (balloc zeroes it), then the superblock.
+    let mut s = 0;
+    while s < DIR_SECTORS
+      invariant s <= DIR_SECTORS && disk_ok(d)
+    {
+      if !dir_flush(&mut d, s) {
+        return d;
+      }
+      s = s + 1;
+    }
+    let mut j = 0;
+    while j < SECTOR
+      invariant j <= SECTOR && disk_ok(d)
+    {
+      bset(&mut d.sec, j, 0);
+      j = j + 1;
+    }
+    put_u64(&mut d.sec, 0, DISK_MAGIC);
+    if !ata_write(&mut d.ata, 0, d.sec) {
+      return d;
+    }
+  }
+  d.slots = n;
+  return d;
+}
+
+/// Unmounts the disk and hands back its driver (at power off). Every
+/// change was already written through.
+fn disk_unmount(d: DiskFs) -> Ata
+  requires disk_ok(d)
+  ensures ata_ok(result)
+{
+  bfree(d.dir);
+  bfree(d.sec);
+  return d.ata;
+}
+
+// ---------------------------------------------------------------- the directory
+
+fn dent_used(d: &DiskFs, i: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+{
+  return bget(d.dir, i * DENT) == 1;
+}
+
+fn disk_size(d: &DiskFs, i: u64) -> u64
+  requires disk_ok(d) && i < DSLOTS
+  ensures result <= SLOT_BYTES || result == NO_DISK_FILE
+{
+  if i >= d.slots || !dent_used(d, i) {
+    return NO_DISK_FILE;
+  }
+  let s = get_u64(d.dir, i * DENT + 32);
+  if s > SLOT_BYTES {
+    return SLOT_BYTES;          // a damaged entry: never read past the slot
+  }
+  return s;
+}
+
+/// Sets entry i's size and writes it through.
+fn set_size(d: &mut DiskFs, i: u64, size: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+  ensures disk_ok(d)
+{
+  put_u64(&mut d.dir, i * DENT + 32, size);
+  return dir_flush(&mut d, i / 8);
+}
+
+/// Does entry i hold the file named by name[from..from + n]?
+fn dent_is(d: &DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS && from + n <= blen(name)
+{
+  if !dent_used(d, i) || bget(d.dir, i * DENT + 1) != n || n > DNAME_MAX {
+    return false;
+  }
+  let mut k = 0;
+  while k < n
+    invariant k <= n
+  {
+    if bget(d.dir, i * DENT + 2 + k) != bget(name, from + k) {
+      return false;
+    }
+    k = k + 1;
+  }
+  return true;
+}
+
+/// The slot holding the file named by name[from..from + n], or DSLOTS.
+fn disk_find(d: &DiskFs, name: &Bytes, from: u64, n: u64) -> u64
+  requires disk_ok(d) && from + n <= blen(name)
+  ensures result <= DSLOTS
+{
+  let mut i = 0;
+  while i < d.slots
+    invariant i <= DSLOTS
+  {
+    if dent_is(d, i, name, from, n) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return DSLOTS;
+}
+
+/// Creates an empty file named by name[from..from + n] (1 to DNAME_MAX
+/// bytes) in a free slot. Returns the slot or DSLOTS.
+fn disk_create(d: &mut DiskFs, name: &Bytes, from: u64, n: u64) -> u64
+  requires disk_ok(d) && from + n <= blen(name)
+  ensures disk_ok(d) && result <= DSLOTS
+{
+  if n == 0 || n > DNAME_MAX {
+    return DSLOTS;
+  }
+  let mut i = 0;
+  while i < d.slots
+    invariant i <= DSLOTS && disk_ok(d)
+  {
+    if !dent_used(d, i) {
+      let mut k = 0;
+      while k < DENT
+        invariant k <= DENT && disk_ok(d)
+      {
+        bset(&mut d.dir, i * DENT + k, 0);
+        k = k + 1;
+      }
+      bset(&mut d.dir, i * DENT, 1);
+      bset(&mut d.dir, i * DENT + 1, n);
+      k = 0;
+      while k < n
+        invariant k <= n && disk_ok(d)
+      {
+        bset(&mut d.dir, i * DENT + 2 + k, bget(name, from + k));
+        k = k + 1;
+      }
+      if !dir_flush(&mut d, i / 8) {
+        return DSLOTS;
+      }
+      return i;
+    }
+    i = i + 1;
+  }
+  return DSLOTS;
+}
+
+/// Removes the file in slot i.
+fn disk_remove(d: &mut DiskFs, i: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+  ensures disk_ok(d)
+{
+  bset(&mut d.dir, i * DENT, 0);
+  return dir_flush(&mut d, i / 8);
+}
+
+/// Copies the name of the file in slot i into buf from `at`. Returns its
+/// length, or NO_DISK_FILE if the slot is free or buf too short.
+fn disk_name(d: &DiskFs, i: u64, buf: &mut Bytes, at: u64) -> u64
+  requires disk_ok(d) && i < DSLOTS
+  ensures blen(buf) == old(blen(buf))
+  ensures result <= DNAME_MAX || result == NO_DISK_FILE
+{
+  if i >= d.slots || !dent_used(d, i) {
+    return NO_DISK_FILE;
+  }
+  let n = bget(d.dir, i * DENT + 1);
+  if n > DNAME_MAX || at > blen(buf) || n > blen(buf) - at {
+    return NO_DISK_FILE;
+  }
+  let l = blen(buf);
+  let mut k = 0;
+  while k < n
+    invariant k <= n && blen(buf) == l
+  {
+    bset(&mut buf, at + k, bget(d.dir, i * DENT + 2 + k));
+    k = k + 1;
+  }
+  return n;
+}
+
+// ---------------------------------------------------------------- data
+
+/// Reads up to n bytes of the file in slot i from offset `off` into the
+/// start of buf. Returns the count, short at the end of the file, or
+/// NO_DISK_FILE if the disk fails.
+fn disk_read(d: &mut DiskFs, i: u64, off: u64, buf: &mut Bytes, n: u64) -> u64
+  requires disk_ok(d) && i < DSLOTS && n <= blen(buf)
+  ensures disk_ok(d) && blen(buf) == old(blen(buf))
+  ensures result <= n || result == NO_DISK_FILE
+{
+  let size = disk_size(d, i);
+  if size == NO_DISK_FILE {
+    return NO_DISK_FILE;
+  }
+  if off >= size {
+    return 0;
+  }
+  let mut want = size - off;
+  if want > n {
+    want = n;
+  }
+  let l = blen(buf);
+  let mut k = 0;
+  while k < want
+    invariant k <= want && want <= n && n <= blen(buf) && blen(buf) == l && disk_ok(d)
+    invariant off + want <= SLOT_BYTES
+  {
+    let a = off + k;
+    let o = a % SECTOR;
+    let mut m = SECTOR - o;
+    if m > want - k {
+      m = want - k;
+    }
+    if !ata_read(&mut d.ata, DATA0 + i * SLOT_SECTORS + a / SECTOR, &mut d.sec) {
+      return NO_DISK_FILE;
+    }
+    let mut j = 0;
+    while j < m
+      invariant j <= m && blen(buf) == l && disk_ok(d)
+    {
+      bset(&mut buf, k + j, bget(d.sec, o + j));
+      j = j + 1;
+    }
+    k = k + m;
+  }
+  return want;
+}
+
+/// Writes m bytes into the sector at file offset a (a % SECTOR + m <=
+/// SECTOR): from buf[at..] if `zeros` is false, zeros otherwise. A partial
+/// sector is read first.
+fn put_sector(d: &mut DiskFs, i: u64, a: u64, buf: &Bytes, at: u64, m: u64, zeros: bool) -> bool
+  requires disk_ok(d) && i < DSLOTS && a < SLOT_BYTES && a % SECTOR + m <= SECTOR && (zeros || at + m <= blen(buf))
+  ensures disk_ok(d)
+{
+  let lba = DATA0 + i * SLOT_SECTORS + a / SECTOR;
+  let o = a % SECTOR;
+  if m < SECTOR && !ata_read(&mut d.ata, lba, &mut d.sec) {
+    return false;
+  }
+  let mut j = 0;
+  while j < m
+    invariant j <= m && disk_ok(d)
+  {
+    if zeros {
+      bset(&mut d.sec, o + j, 0);
+    } else {
+      bset(&mut d.sec, o + j, bget(buf, at + j));
+    }
+    j = j + 1;
+  }
+  return ata_write(&mut d.ata, lba, d.sec);
+}
+
+/// Writes the first n bytes of buf to the file in slot i at `off`, after
+/// zero-filling any gap past the current end. Returns the count, short if
+/// the slot is full or the disk fails, or NO_DISK_FILE if there is no file.
+fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64) -> u64
+  requires disk_ok(d) && i < DSLOTS && n <= blen(buf)
+  ensures disk_ok(d)
+  ensures result <= n || result == NO_DISK_FILE
+{
+  let size = disk_size(d, i);
+  if size == NO_DISK_FILE {
+    return NO_DISK_FILE;
+  }
+  if off >= SLOT_BYTES {
+    return 0;
+  }
+  // The gap from the end to `off` becomes zeros.
+  let mut g = size;
+  while g < off
+    invariant g <= SLOT_BYTES && disk_ok(d)
+  {
+    let mut m = SECTOR - g % SECTOR;
+    if m > off - g {
+      m = off - g;
+    }
+    if !put_sector(&mut d, i, g, buf, 0, m, true) {
+      return 0;
+    }
+    g = g + m;
+  }
+  let mut want = SLOT_BYTES - off;
+  if want > n {
+    want = n;
+  }
+  let mut k = 0;
+  let mut ok = true;
+  while ok && k < want
+    invariant k <= want && want <= n && off + want <= SLOT_BYTES && disk_ok(d)
+  {
+    let a = off + k;
+    let mut m = SECTOR - a % SECTOR;
+    if m > want - k {
+      m = want - k;
+    }
+    if put_sector(&mut d, i, a, buf, k, m, false) {
+      k = k + m;
+    } else {
+      ok = false;
+    }
+  }
+  if off + k > size {
+    if !set_size(&mut d, i, off + k) {
+      return 0;
+    }
+  }
+  return k;
+}
+
+/// Empties the file in slot i.
+fn disk_truncate(d: &mut DiskFs, i: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+  ensures disk_ok(d)
+{
+  return set_size(&mut d, i, 0);
+}

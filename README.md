@@ -31,7 +31,7 @@ bye
 BastiOS: 14016 pages free at power off
 ```
 
-The kernel (`src/`) runs user programs in ring 3, each in its own address space, and schedules them round robin with timer preemption. The shell is itself a user program (`user/sh.bastio`). Files live in an in-memory file system whose data pages come from the same allocator, and user programs open, read, write and remove them through system calls. None of the Bastio code has runtime checks; the compiler proves, before it emits anything:
+The kernel (`src/`) runs user programs in ring 3, each in its own address space, and schedules them round robin with timer preemption. The shell is itself a user program (`user/sh.bastio`). Files live in an in-memory file system whose data pages come from the same allocator, or, under `disk/`, on an ATA disk where they survive power off; user programs open, read, write and remove them through system calls. None of the Bastio code has runtime checks; the compiler proves, before it emits anything:
 - every buffer and string index is in bounds, and no arithmetic overflows or underflows;
 - every physical page is owned by exactly one thing at a time: the allocator, or one slot of one page table. The allocator's bitmap is proved to agree with the pool, so a page is never handed out twice;
 - a page table is empty before it is freed, so tearing down a process returns every page (the test checks that the count at power off equals the count at boot);
@@ -49,11 +49,13 @@ How the pieces fit together (boot, memory, processes, the scheduler, system call
 | Path | What |
 | --- | --- |
 | `src/uart.bastio`, `src/pic.bastio`, `src/pit.bastio` | Device drivers: COM1, the 8259 interrupt controllers, the 100 Hz timer |
+| `src/ata.bastio` | Disk driver: the first drive on the legacy ATA controller, in PIO mode |
 | `src/pages.bastio` | Physical page allocator (`Mem`: a bitmap proved to track the pool) |
 | `src/space.bastio` | Building, walking and tearing down user address spaces |
 | `src/elf.bastio` | Loading static Linux x86-64 ELF executables: header checks, segments, the initial stack (argv, envp, auxv) |
 | `src/ramfs.bastio` | The in-memory file system: a flat table of files, each a vector of pages (a page never written is a hole and reads as zeros) |
-| `src/fs.bastio` | The layer above file systems: per-process open-file table and the transfer buffer; a later file system on a block device slots in here |
+| `src/diskfs.bastio` | The file system on the disk (names under `disk/`): a superblock, a directory of 32 entries, and a 1 MiB slot per file |
+| `src/fs.bastio` | The layer above both file systems: per-process open-file table, the transfer buffer, and dispatch by name (`disk/...` or memory) |
 | `src/proc.bastio` | Kernel state (`Kernel` struct), console input queue, process table, program images, spawn and exit |
 | `src/usermem.bastio` | Copying between user memory and kernel byte buffers |
 | `src/syscall.bastio` | System calls (BastiOS ABI, `int 0x80`), including the file calls |
@@ -98,7 +100,7 @@ git clone https://github.com/yukikotani231/bastios
 (cd bastiolang/stage0 && cargo build --release)
 cd bastios
 make          # build/bastios.elf
-make run      # boot on this terminal; Ctrl-A X quits
+make run      # boot on this terminal with build/disk.img as the disk; Ctrl-A X quits
 make test     # boot in QEMU, type commands over the serial line, check the replies
 ```
 
@@ -124,11 +126,11 @@ Count the lines yourself (`wc -l boot/* user/*.S`). Copied numbers go stale.
 
 ## Status
 
-v0.2: processes, preemptive round-robin scheduling, system calls, fault isolation, and an in-memory file system. Not there yet:
+v0.2: processes, preemptive round-robin scheduling, system calls, fault isolation, and files in memory and on disk. Not there yet:
 - one CPU runs the kernel: the other processors are started at boot (`cpus` in the shell counts them) but park until Bastio has locks and `smp_start` (bastiolang docs/concurrency.md); the kernel runs with interrupts off and handles each interrupt as an event in its main loop;
 - all user pages are mapped writable and executable (the image has no page-aligned sections yet);
 - a user window of 2 MiB per process, at most 15 processes, programs built into the kernel image (the file system cannot hold programs to run yet);
-- the file system lives in memory only: a flat directory of 32 files, names up to 28 bytes, files up to 1 MiB, 8 open files per process, and nothing survives power off (there is no block device driver yet);
+- files are simple: flat directories of 32 files each (in memory, and under `disk/`), names up to 28 bytes, files up to 1 MiB, 8 open files per process. The disk driver polls one legacy ATA drive with 28-bit sector numbers, and writes go straight to the disk with no cache or journal, so a power cut in the middle of a write can leave that file half written;
 - running out of memory when starting a program fails the spawn cleanly, but the kernel's own arena (for `Buf`) still halts the machine when it runs out.
 
 The direction is in bastiolang's [ROADMAP.md](https://github.com/yukikotani231/bastiolang/blob/main/ROADMAP.md) under "v3: toward a kernel".
