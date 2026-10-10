@@ -66,7 +66,8 @@ const READ_MAX: u64 = 262144;          // the most one read of a file returns
 const MAP_SHARED: u64 = 1;
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANONYMOUS: u64 = 0x20;
-const PATH_MAX_LX: u64 = 256;           // the longest path read from user memory
+const PATH_MAX_LX: u64 = 4096;          // the longest path read from user memory (Linux's PATH_MAX)
+const PATH_FIRST: u64 = 256;            // read first; most paths end within it
 const PATH_OUT: u64 = 512;              // room for a name being built
 
 const ARCH_SET_FS: u64 = 0x1002;
@@ -350,7 +351,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_DUP2 || n == LX_DUP3 {
-    if n == LX_DUP3 && a == b {
+    if n == LX_DUP3 && (a == b || c % 0x100000000 & !LO_CLOEXEC != 0) {
       ret(&mut k.procs, pid, EINVAL);
     } else {
       ret(&mut k.procs, pid, lx_dup2(&mut k, pid, a, b, n == LX_DUP3 && c / LO_CLOEXEC % 2 == 1));
@@ -447,7 +448,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     let r10 = pget(k.procs, pid, F_REGS + R_R10);
     if (r10 % 0x100000000) & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH) != 0 {
       ret(&mut k.procs, pid, EINVAL);
-    } else if r10 / AT_EMPTY_PATH % 2 == 1 && lx_path_in(&mut k, pid, b) == 0 {
+    } else if r10 / AT_EMPTY_PATH % 2 == 1 && user_empty(&mut k, pid, b) {
       ret(&mut k.procs, pid, lx_fstat(&mut k, pid, a, c));      // fstat by another name
     } else {
       ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b, c, (r10 & AT_SYMLINK_NOFOLLOW) == 0));
@@ -1437,23 +1438,42 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
     return NO_RESULT;
   }
   let n = smaller(PATH_MAX_LX, USER_SIZE - (va - USER_BASE));
-  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, n);
+  let mut want = smaller(PATH_FIRST, n);
+  let mut got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, want);
   if got == NO_RESULT {
     return NO_RESULT;
   }
-  k.perr = ENAMETOOLONG;
   let mut e = 0;
   while e < got && bget(k.fs.xfer, e) != 0
     invariant e <= got && got <= XFER && kok(k)
   {
     e = e + 1;
   }
+  if e >= got && got == want && want < n {
+    // Longer than the first read: read up to PATH_MAX.
+    want = n;
+    got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, want);
+    if got == NO_RESULT {
+      return NO_RESULT;
+    }
+    e = 0;
+    while e < got && bget(k.fs.xfer, e) != 0
+      invariant e <= got && got <= XFER && kok(k)
+    {
+      e = e + 1;
+    }
+  }
   if e >= got {
-    return NO_RESULT;                       // no NUL in reach
+    if got == want {
+      k.perr = ENAMETOOLONG;                // no NUL within PATH_MAX
+    }
+    return NO_RESULT;                       // or EFAULT: unmapped before the NUL
   }
   if e == 0 {
-    return 0;                               // "": what *at calls with AT_EMPTY_PATH look for
+    k.perr = ENOENT;                        // "" names nothing, as on Linux
+    return NO_RESULT;
   }
+  k.perr = ENAMETOOLONG;
   let trail = bget(k.fs.xfer, e - 1) == 47;  // "link/" names what the link points to, as on Linux
   // Build the name in `out`, starting from the working directory unless
   // the path starts at "/".
@@ -1503,7 +1523,7 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
         if o > 0 {
           o = o - 1;
         }
-      } else if o + 1 + w > PATH_OUT {
+      } else if o + 1 + w > FNAME_MAX {
         ok = false;
       } else {
         if o > 0 {
@@ -1523,8 +1543,22 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
     }
   }
   if !ok || o > FNAME_MAX {
+    // Too long for the file layer. Walk what fits, so a loop of links
+    // (ELOOP) or a missing directory (ENOENT) on the way is still reported
+    // as Linux reports it.
+    let mut c = 0;
+    while c < o && c < FNAME_MAX
+      invariant c <= o && blen(out) == PATH_OUT && kok(k)
+    {
+      bset(&mut k.fs.xfer, c, bget(out, c));
+      c = c + 1;
+    }
     bfree(out);
-    return NO_RESULT;                       // k.perr is ENAMETOOLONG
+    if c > 0 && lx_follow(&mut k, c, true) == NO_RESULT {
+      return NO_RESULT;                     // k.perr says why
+    }
+    k.perr = ENAMETOOLONG;
+    return NO_RESULT;
   }
   let mut c = 0;
   while c < o

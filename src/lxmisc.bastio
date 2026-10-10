@@ -389,8 +389,17 @@ fn lx_pio(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, va: u64
   if d.kind == K_PIPE_R || d.kind == K_PIPE_W || d.kind == K_SOCK || d.kind == K_CONSOLE {
     return ESPIPE;
   }
+  if d.kind == K_DIR && !write {
+    return EISDIR;
+  }
   if d.kind != K_FILE {
     return EBADF;
+  }
+  if off >= 0x8000000000000000 {
+    return EINVAL;                          // a negative offset
+  }
+  if n == 0 {
+    return 0;                               // nothing is read from or written to va
   }
   let was = vfs_offset(k.fs, d.x);
   if !vfs_seek(&mut k.fs, d.x, off) {
@@ -650,6 +659,8 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     let pn = lx_path_at(&mut k, pid, AT_FDCWD, a);
     if pn == NO_RESULT {
       r = k.perr;
+    } else if !path_there(&mut k, pn) {
+      r = ENOENT;
     } else if vfs_in_mount(&mut k.fs, pn, false) {
       r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC);
     } else {

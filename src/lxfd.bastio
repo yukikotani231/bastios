@@ -521,6 +521,17 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, mode: u6
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if flags & LO_NOFOLLOW != 0 && flags & LO_PATH == 0 {
+    // O_NOFOLLOW: a symbolic link at the end is ELOOP, as on Linux.
+    let m = lx_path_at_nf(&mut k, pid, dirfd, path);
+    if m == NO_RESULT {
+      return k.perr;
+    }
+    let f = vfs_lookup(&mut k.fs, m);
+    if f != NO_FILE && vfs_is_link(&mut k.fs, f) {
+      return ELOOP;
+    }
+  }
   let n = lx_path_at(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return k.perr;
@@ -536,6 +547,9 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if flags & LO_TMPFILE != 0 {
     return EOPNOTSUPP;                      // so a program falls back to a named file
   }
+  if (flags % 4 != 0 || flags & LO_CREAT != 0) && flags & LO_PATH == 0 && dir_at(&mut k, n) != NO_FILE {
+    return EISDIR;                          // a directory is not written through open
+  }
   if (flags % 4 != 0 || flags & LO_TRUNC != 0 || flags & LO_CREAT != 0) && vfs_ro(&mut k.fs, n) {
     let exists = vfs_lookup(&mut k.fs, n) != NO_FILE || dir_at(&mut k, n) != NO_FILE;
     if (exists && (flags % 4 != 0 || flags & LO_TRUNC != 0)) || (!exists && flags & LO_CREAT != 0) {
@@ -548,6 +562,12 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   // Permissions (src/lxperm.bastio): on the file, for what the flags
   // ask; on its directory, for a new name.
   let kept = kept_meta(&mut k, n);
+  if kept && flags & LO_NOATIME != 0 {
+    let nm = meta_keep(&mut k, n, n);
+    if nm.ok && !owns(k.procs, pid, nm.own) {
+      return EPERM;                         // O_NOATIME is for the owner and root
+    }
+  }
   if kept && flags & LO_CREAT != 0 && flags & LO_EXCL != 0 {
     // EEXIST, below
   } else if kept && flags & LO_PATH == 0 {
@@ -656,7 +676,7 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if fresh {
     let made = vfs_row_file(k.fs, row);
     if made != NO_FILE {
-      made_by(&mut k, pid, made, own, mode % 512, false);   // 0777 bits, less the umask
+      made_by(&mut k, pid, made, own, mode % 4096, false);  // less the umask
     }
   }
   let h = ofd_new(&mut k, OF_FILE, row);

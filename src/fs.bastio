@@ -1385,6 +1385,20 @@ fn vfs_rename(v: &mut Vfs, n: u64, m: u64) -> bool
 // ---------------------------------------------------------------- metadata
 
 /// The handle of the file open in `row` (as vfs_lookup gives), or NO_FILE.
+/// Whether open file row (a FD_ROWS row) was opened for writing.
+fn vfs_row_writable(v: &Vfs, row: u64) -> bool
+  requires vfs_ok(v)
+{
+  return row < FD_ROWS && fget(v.ftab, row, FD_MODE) / O_WRITE % 2 == 1;
+}
+
+/// Whether open file row was opened for reading.
+fn vfs_row_readable(v: &Vfs, row: u64) -> bool
+  requires vfs_ok(v)
+{
+  return row < FD_ROWS && fget(v.ftab, row, FD_MODE) / O_READ % 2 == 1;
+}
+
 fn vfs_row_file(v: &Vfs, row: u64) -> u64
   requires vfs_ok(v) && row < FD_ROWS
   ensures result < HFILES || result == NO_FILE

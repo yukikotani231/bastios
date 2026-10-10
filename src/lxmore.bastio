@@ -119,11 +119,15 @@ fn lx_copy(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, outp: u64, inp: u6
   ensures kok(k) && con_ok(con)
 {
   let d = fd_look(k, pid, from);
-  if d.kind == K_BAD {
-    return EBADF;
+  let o = fd_look(k, pid, out);
+  if d.kind == K_BAD || o.kind == K_BAD || (o.kind == K_FILE && !vfs_row_writable(k.fs, o.x)) {
+    return EBADF;                           // or the destination is not open for writing
   }
   if d.kind != K_FILE {
     return EINVAL;                          // only files are read from
+  }
+  if !vfs_row_readable(k.fs, d.x) {
+    return EBADF;                           // the source is not open for reading
   }
   let f = vfs_row_file(k.fs, d.x);
   let mut ioff = vfs_offset(k.fs, d.x);
@@ -132,6 +136,9 @@ fn lx_copy(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, outp: u64, inp: u6
       return EFAULT;
     }
     ioff = get_u64(k.fs.xfer, 0);
+    if ioff >= 0x8000000000000000 {
+      return EINVAL;                        // a negative offset
+    }
   }
   let mut ooff = 0xFFFFFFFFFFFFFFFF;
   if outp != 0 {
@@ -199,6 +206,23 @@ fn lx_piov(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, iov: u
   if cnt > 1024 || off >= 0x8000000000000000 {
     return EINVAL;
   }
+  // As on Linux, the whole vector is checked before anything moves: a
+  // length past SSIZE_MAX, alone or in total, is EINVAL.
+  let mut total = 0;
+  let mut v = 0;
+  while v < cnt
+    invariant v <= cnt && cnt <= 1024 && total < 0x8000000000000000 && kok(k)
+  {
+    if iov > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, iov + 16 * v, &mut k.fs.xfer, 16) != 16 {
+      return EFAULT;
+    }
+    let len = get_u64(k.fs.xfer, 8);
+    if len >= 0x8000000000000000 - total {
+      return EINVAL;
+    }
+    total = total + len;
+    v = v + 1;
+  }
   let mut done = 0;
   let mut i = 0;
   while i < cnt
@@ -233,11 +257,19 @@ fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u6
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  let f = flags % 0x100000000;
+  if f & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH | 0x6000) != 0 || f & 0x6000 == 0x6000 {
+    return EINVAL;                          // unknown flags, or both AT_STATX_FORCE_SYNC and DONT_SYNC
+  }
+  let mask = pget(k.procs, pid, F_REGS + R_R10);
+  if mask & 0x80000000 != 0 {
+    return EINVAL;                          // STATX__RESERVED
+  }
   if buf == 0 || buf > 0xFFFFFFFFFFFF0000 {
     return EFAULT;
   }
   let mut r = 0;
-  if flags / AT_EMPTY_PATH % 2 == 1 && lx_path_in(&mut k, pid, path) == 0 {
+  if flags / AT_EMPTY_PATH % 2 == 1 && user_empty(&mut k, pid, path) {
     r = lx_fstat(&mut k, pid, dirfd, buf);
   } else {
     r = lx_stat(&mut k, pid, dirfd, path, buf, (flags & AT_SYMLINK_NOFOLLOW) == 0);
