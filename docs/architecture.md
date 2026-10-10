@@ -92,13 +92,14 @@ Programs are not loaded from disk: `prog_image` returns each program's flat imag
 
 ## The scheduler loop
 
-Every processor runs the same loop, `sched` (`src/main.bastio`), started on all of them at once by `smp_run(sched, ..)`. Each passes its own `Cpu` and `Mmu`; what they share is one `Lock[Sys]` holding the kernel's state (`Kernel`), the console's output ring (`Con`), the interrupt controller and the HPET clock, and a separate `Lock[Term]` for the console's devices (serial port, screen, keyboard). The lock's invariant, `kok(k) && con_ok(con) && pic_ok(pic) && hpet_ok(clock)`, is what a processor may assume when it takes the lock and must restore before it lets go; the prover checks both (bastiolang `docs/language.md`, "Locks and struct invariants"). Kernel code runs with interrupts off, so a processor never takes an interrupt while it holds the lock.
+Every processor runs the same loop, `sched` (`src/main.bastio`), started on all of them at once by `smp_run(sched, ..)`. Each passes its own `Cpu` and `Mmu`; what they share is one `Lock[Sys]` holding the kernel's state (`Kernel`), the console's output ring (`Con`), the interrupt controllers (the 8259 pair and the bootstrap processor's local APIC) and the HPET clock, and a separate `Lock[Term]` for the console's devices (serial port, screen, keyboard). The lock's invariant, `kok(k) && con_ok(con) && pic_ok(pic) && lapic_ok(apic) && hpet_ok(clock)`, is what a processor may assume when it takes the lock and must restore before it lets go; the prover checks both (bastiolang `docs/language.md`, "Locks and struct invariants"). Kernel code runs with interrupts off, so a processor never takes an interrupt while it holds the lock.
 
 1. With the lock (`next_job`): after an interrupt or an idle wait (not after a system call), poll the network card and hand typed input to processes blocked in `READ` (`wake_readers`); then pick the next `READY` process after this processor's last one, round robin (`pick`). If there is none: stop if no process is alive, else wait for an interrupt without the lock (`cpu_idle`). Otherwise take its FPU page out, load its registers and FPU state into this processor's `Cpu`, load its address space into CR3 with a lease (`mmu_enter`), and mark it `RUNNING`, so no other processor picks it. The address space stays in the table: threads of the same process run on other processors at the same time, each with its own lease (see "Threads on several processors" below).
 2. Without the lock: enter user mode until the next trap (`cpu_run`), then switch back to the kernel's map and give the lease back (`mmu_exit`).
 3. With the lock (`finish`): save the FPU state, put the page back, bring the thread group's shared state to this thread (`group_take`), save the registers, error code and fault address into its row, and act on the trap vector:
    - `32` (the PIT, on the bootstrap processor) or `48` (each other processor's local APIC timer): count the tick and move on to the next process. This is the preemption.
    - `0x80` (system call): handle it (`syscall`); it says whether to keep running the same process, switch, or power off.
+   - `0x31` (`V_DISK`, a disk command finished) or `0x32` (`V_WAKE`, another processor woke a process): nothing beyond the device poll of the next step 1. Both are acknowledged at the local APIC here, under the lock (`src/lapic.bastio`).
    - below `32` (an exception): print the fault and kill the process with exit code `128 + vector`. The kernel itself is unaffected.
 
    Step 3 and the next step 1 are one critical section (`turn`), so a system call costs one round trip of the lock.
@@ -144,7 +145,7 @@ One copy on one processor takes about 2 s either way. I found where the time wen
 What is left is mostly emulation:
 - `pause` still costs. As an experiment (not a change, because `pause` is the right instruction on real hardware), removing it from the spin loop cuts getpid on four copies from about 190 ticks to about 85, against about 130 on one processor.
 - QEMU's four processor threads and its I/O thread share the host's four cores.
-- A writer woken when the ring drains waits up to one 10 ms tick for an idle processor to pick it up: BastiOS sends no wake-up interrupts between processors. Measured and rejected (2026-10-10): sending one to each idle processor (claimed as an `Mmio` block of the local APIC) left 4 x `bench` unchanged within noise and made a single `bench`'s spawn+exit half as fast (49 to 94 ticks), because the child of a spawning parent then starts on another processor instead of on the parent's when it blocks in wait4. Waking only for writers, or with affinity, may still pay off; it needs a benchmark that shows it.
+- A writer woken when the ring drains waits up to one 10 ms tick for an idle processor to pick it up: BastiOS sends no wake-up interrupts between processors. Measured and rejected (2026-10-10): sending one to each idle processor (claimed as an `Mmio` block of the local APIC) left 4 x `bench` unchanged within noise and made a single `bench`'s spawn+exit half as fast (49 to 94 ticks), because the child of a spawning parent then starts on another processor instead of on the parent's when it blocks in wait4. Waking only for writers, or with affinity, may still pay off; it needs a benchmark that shows it. The one wake-up BastiOS does send is `V_WAKE`, when a disk completion wakes a process while some processor is idle (see "Waiting for the disk without stopping the machine").
 
 These numbers should be taken again on KVM or real hardware before `Lock[Sys]` is split further.
 
@@ -208,9 +209,11 @@ Writes on the DMA drivers are 3.4 to 3.9 times faster: the host's fsync per flus
 - Reads and writes of file data go through a cache of 64 blocks and a queue of disk commands. The queue runs one command at a time, in order, and a flush in it is a barrier.
 - A read whose blocks are all cached copies them out at once. Otherwise it queues reads of what is missing, plus up to eight blocks after it, and its process sleeps in `DISKWAIT`. Its call restarts once the queue has moved. Nothing changed before it slept, so restarting is harmless.
 - A write first needs the old maps and the data it keeps in the cache, and it sleeps and restarts the same way until they are. Then, without waiting, it puts its new blocks in the cache (readers see them at once) and queues them: data and maps, a flush, its directory block, a flush, the release of the old blocks, and the end of the transaction. Its process sleeps, with its result already in `rax`, until that end is reached.
-- The queue is moved along whenever the kernel polls devices. A processor with nothing to run while a command is in flight looks again after a short spin, instead of halting until the next tick.
+- The queue is moved along whenever the kernel polls devices. Every DMA disk says when a command has finished with a message-signalled interrupt, `V_DISK`, aimed at the bootstrap processor's local APIC: MSI-X on NVMe and virtio, MSI on AHCI. So a processor with nothing to run halts, and the interrupt ends either its wait or the process it was running, which leads to the poll. Only the bootstrap processor gets `V_DISK`, so when the poll makes a process `READY` while another processor is idle, it sends that one `V_WAKE` (to all other processors) rather than leave the process for the idle processor's next tick. The boot log says `disk: completions by message-signalled interrupt` when this is on.
+- A disk without the interrupt (the ATA drive, whose PIO transfer is over before the command is started, or a device whose MSI or MSI-X could not be set up) is polled instead: a processor with nothing to run while one of its commands is in flight looks again after a short spin.
+- The kernel claims the local APIC's page as an `Mmio` block, turns the bootstrap processor's APIC on (keeping the 8259 on LINT0) and acknowledges `V_DISK` and `V_WAKE` itself. That claim is not exclusive: `boot/smp.c` uses the same page, before `main` and for the application processors' timer. Each processor's APIC is only ever touched by that processor, and Bastio touches it only with `Lock[Sys]` held and interrupts off, so the two never meet.
 - Creating, removing, renaming, truncating and changing metadata still do their I/O synchronously. They first wait for the queue to empty, so the order on the disk stays the order of the calls.
-- A command that fails, or runs for ten seconds, kills the disk: queued work is dropped, and every later file call on the disk fails.
+- A command that fails, or runs for ten seconds, kills the disk: queued work is dropped, and every later file call on the disk fails. A write still waiting for its transaction then fails too (`EIO` for Linux programs), although its result had been decided at commit: the queue remembers the last transaction that finished before the disk died (`dq_kill`), and only those count as written.
 
 Measured with `make iobench` (`test/iobench.sh`, `-smp 2`, NVMe, three runs, ticks at 100 Hz) and `make diskbench`, before and after (2026-10-10):
 
@@ -226,6 +229,23 @@ Measured with `make iobench` (`test/iobench.sh`, `-smp 2`, NVMe, three runs, tic
 - A write now costs two flushes instead of one per block written, which is why most drivers write faster. virtio is about the same, because its flushes cost nothing.
 - `make smpbench`, which does no disk I/O, is unchanged within noise (8.7 s and 17.8 s against 8.5 s and 16.9 s).
 - `bench` is still three to four times slower beside a disk writer. Two causes remain: the idle processor polling the disk takes the kernel lock every few microseconds, and copying blocks in and out of the cache happens under that lock. Completion interrupts (MSI-X and MSI) remove the first cause. The second needs the disk state behind its own lock (stages 4 and 5 of the plan).
+
+Completion interrupts came next. Measured the same way, booting `main` before the change and the change itself alternately on the same host (2026-10-10):
+
+| | polled (before) | interrupts (after) |
+|---|---|---|
+| `bench` getpid while `diskbench` runs (`-smp 2`) | 122-191 | 97-137 |
+| `bench` spawn+exit while `diskbench` runs | 36-93 | 100-132 |
+| two `diskbench` at once, write | 178-212 | 226-254 |
+| two `diskbench` at once, read | 94-125 | 97-126 |
+| `diskbench` write: ATA, virtio, NVMe, AHCI, NVMe 4 KiB | 256-285, 133-167, 100-115, 90-115, 103-109 | 287-291, 156-190, 120-132, 110-121, 115-121 |
+| `diskbench` read: same order | 84-109, 44-56, 43-60, 41-82, 44-65 | 98-115, 52-58, 51-68, 42-58, 45-53 |
+| `make smpbench`, 4 copies, `-smp 1` and `-smp 4` (s) | 8.7-9.4, 17.7 | 8.7-9.5, 14.8 |
+
+- What it buys: an idle processor halts instead of taking the kernel lock every few microseconds, so getpid beside a disk writer is faster, and an idle machine with a disk command in flight costs the host nothing.
+- What it costs under TCG: a command's completion is now noticed when an interrupt wakes a halted processor, not by one already spinning, and that is slower in QEMU. A lone `diskbench` writes 10-20% slower and two at once about 20% slower. spawn+exit beside a writer is slower too, also on `-smp 1`: every completion now interrupts whatever is running for a trap and a poll under the lock, where before the disk waited for an idle processor. Neither cause was taken further apart.
+- Tried and dropped: polling for a short while before halting (16 rounds). Two writers went back to 190-212, but getpid beside a writer went back to 170-198, because the polling takes the kernel lock again. Both costs point at the same thing, the disk's state sharing `Lock[Sys]`; that is stage 4. The numbers should be taken again on KVM, where halting and waking cost far less.
+- ATA has no interrupt (its PIO transfer is over when the command starts) and did not change; its spread is noise.
 
 The disk driver (`src/ata.bastio`) talks to the first drive of the legacy ATA controller in PIO mode with 28-bit sector numbers, polling with interrupts off; a 4 KiB block is one READ or WRITE SECTORS command for eight sectors. It owns the controller's ports 0x1F0 to 0x1F7 and 0x3F6 as `PortIo` capabilities claimed in `main`, so the proof checks that it touches no other port and that no other driver touches these. Every wait for the drive is bounded, so a missing or stuck drive makes an operation fail instead of hanging the kernel.
 

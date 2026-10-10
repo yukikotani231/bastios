@@ -11,6 +11,7 @@ import "pci.bastio";
 import "virtio_blk.bastio";
 import "nvme.bastio";
 import "ahci.bastio";
+import "lapic.bastio";
 
 const VIRTIO_PORTS_LO: u64 = 0x1000;  // PCI I/O BARs sit above the legacy ports
 const NVME_AT: u64 = 24;              // the NVMe drive's five pages: 24 .. 28
@@ -55,9 +56,11 @@ fn take_low_page(m: &mut Mem, i: u64) -> Frame
 /// The NVMe controller `dev` on PCI, if its registers lie in the
 /// device window clear of the framebuffer at lo .. hi, five pages from
 /// NVME_AT are free, and namespace 1 has 512-byte blocks; else none (and
-/// everything it claimed or took is back).
-fn nvme_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64) -> Drive
-  requires pci_ok(pci) && mem_ok(m)
+/// everything it claimed or took is back). Unless `msi` is 0, and if the
+/// controller has MSI-X with its table in the claimed registers, its
+/// completions raise V_DISK by a message to address `msi`.
+fn nvme_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, msi: u64) -> Drive
+  requires pci_ok(pci) && mem_ok(m) && msi <= 4294967295
   requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) ==> mmio_free(win, a)
   ensures mem_ok(m) && (result is Drive::Nvme ==> nvme_ok(result.Nvme)) && !(result is Drive::Ahci)
   ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !drive_claims(result, a) ==> mmio_free(win, a)
@@ -82,10 +85,33 @@ fn nvme_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64) 
   let f2 = take_low_page(&mut m, NVME_AT + 2);
   let f3 = take_low_page(&mut m, NVME_AT + 3);
   let f4 = take_low_page(&mut m, NVME_AT + 4);
-  let n = nvme_new(mmio_claim(&mut win, bar, size), f0, f1, f2, f3, f4);
+  let mut cap = 0;
+  let mut table = 0;
+  if msi != 0 {
+    cap = pci_cap(&mut pci, dev, CAP_MSIX);
+  }
+  if cap != 0 && cap < 252 {
+    table = pci_msix_table(&mut pci, dev, cap);
+    if table >= 4294967296 {
+      cap = 0;                        // the table is in another BAR
+    }
+  } else {
+    cap = 0;
+  }
+  // MSI-X goes on before the controller makes its queues: a device may
+  // (QEMU's does) only bind a queue to a message while MSI-X is on. Its
+  // table entries start masked, so nothing is sent until nvme_msix.
+  if cap != 0 {
+    pci_intx_off(&mut pci, dev);
+    pci_msix_on(&mut pci, dev, cap);
+  }
+  let mut n = nvme_new(mmio_claim(&mut win, bar, size), f0, f1, f2, f3, f4, cap != 0);
   if n.sectors == 0 {
     mmio_release(&mut win, nvme_free(n, &mut m));
     return Drive::None;
+  }
+  if cap != 0 {
+    let on = nvme_msix(&mut n, table, msi, V_DISK);
   }
   return Drive::Nvme(n);
 }
@@ -93,9 +119,10 @@ fn nvme_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64) 
 /// The first AHCI controller on PCI, if its registers (BAR 5) lie in
 /// the device window clear of the framebuffer at lo .. hi, two pages from
 /// AHCI_AT are free, and one of its ports has a SATA disk; else none (and
-/// everything it claimed or took is back).
-fn ahci_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64) -> Drive
-  requires pci_ok(pci) && mem_ok(m)
+/// everything it claimed or took is back). Unless `msi` is 0, and if the
+/// controller has MSI, its completions raise V_DISK by a message to `msi`.
+fn ahci_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, msi: u64) -> Drive
+  requires pci_ok(pci) && mem_ok(m) && msi <= 4294967295
   requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) ==> mmio_free(win, a)
   ensures mem_ok(m) && (result is Drive::Ahci ==> ahci_ok(result.Ahci)) && !(result is Drive::Nvme)
   ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !drive_claims(result, a) ==> mmio_free(win, a)
@@ -117,20 +144,65 @@ fn ahci_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64) 
   pci_enable(&mut pci, dev);
   let f0 = take_low_page(&mut m, AHCI_AT);
   let f1 = take_low_page(&mut m, AHCI_AT + 1);
-  let h = ahci_new(mmio_claim(&mut win, bar, size), f0, f1);
+  let mut h = ahci_new(mmio_claim(&mut win, bar, size), f0, f1);
   if h.sectors == 0 {
     mmio_release(&mut win, ahci_free(h, &mut m));
     return Drive::None;
   }
+  let mut cap = 0;
+  if msi != 0 {
+    cap = pci_cap(&mut pci, dev, CAP_MSI);
+  }
+  if cap != 0 && cap < 240 {
+    pci_intx_off(&mut pci, dev);
+    pci_msi_on(&mut pci, dev, cap, msi, V_DISK);
+    ahci_irq_on(&mut h);
+  }
   return Drive::Ahci(h);
+}
+
+/// Turns MSI-X on for virtio device `dev` (enabled) with message 0 going
+/// to `msi` as V_DISK, if `msi` is not 0 and its table is in a memory BAR
+/// in the device window clear of the framebuffer at lo .. hi. The table
+/// entry is claimed only while it is written. True if it is on.
+fn virtio_msix(pci: &mut Pci, win: &mut MmioSpace, dev: u64, lo: u64, hi: u64, msi: u64) -> bool
+  requires pci_ok(pci) && dev < PCI_NONE && msi <= 4294967295
+  requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) ==> mmio_free(win, a)
+  ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) ==> mmio_free(win, a)
+{
+  if msi == 0 {
+    return false;
+  }
+  let cap = pci_cap(&mut pci, dev, CAP_MSIX);
+  if cap == 0 || cap >= 252 {
+    return false;
+  }
+  let t = pci_msix_table(&mut pci, dev, cap);
+  let bir = t / 4294967296;
+  let off = t % 4294967296;
+  if bir > 5 {
+    return false;
+  }
+  let tb = pci_mem_bar_at(&mut pci, dev, PCI_BAR0 + 4 * bir);
+  let e = tb + off;
+  if tb == 0 || e % 16 != 0 || !(e + 16 <= lo || e >= hi)
+    || !((e >= WIN_LO && e + 16 <= WIN_LOW_TOP) || (e >= WIN_HIGH && e + 16 <= WIN_TOP)) {
+    return false;
+  }
+  pci_intx_off(&mut pci, dev);
+  pci_msix_on(&mut pci, dev, cap);
+  let mut r = mmio_claim(&mut win, e, 16);
+  pci_msix_entry(&mut r, msi, V_DISK);
+  mmio_release(&mut win, r);
+  return true;
 }
 
 /// Picks the disk: an NVMe drive (see `nvme_find`), else the first virtio
 /// block device on PCI, given the four lowest pages for its queue and
 /// request and page 31 for block data, else a SATA disk on AHCI (see `ahci_find`), or else the ATA
-/// drive.
-fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64) -> Blk
-  requires pci_ok(pci) && mem_ok(m)
+/// drive. `msi` is where a device's interrupt messages go (0 for none).
+fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, msi: u64) -> Blk
+  requires pci_ok(pci) && mem_ok(m) && msi <= 4294967295
   requires forall k: u64 :: ATA_IO <= k && k < ATA_IO + 8 ==> port_free(ports, k)
   requires port_free(ports, ATA_CTL)
   requires forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 ==> port_free(ports, k)
@@ -139,7 +211,7 @@ fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, l
   ensures forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 && !blk_holds(result, k) ==> port_free(ports, k)
   ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !blk_claims(result, a) ==> mmio_free(win, a)
 {
-  let nv = nvme_find(&mut pci, &mut m, &mut win, lo, hi);
+  let nv = nvme_find(&mut pci, &mut m, &mut win, lo, hi, msi);
   match nv {
     Drive::Nvme(n) => { return Blk::Nvme(n); },
     Drive::Ahci(h) => { unreachable; },
@@ -152,21 +224,33 @@ fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, l
       && get(m.bm, 0) == 1 && get(m.bm, 1) == 1 && get(m.bm, 2) == 1 && get(m.bm, 3) == 1
       && get(m.bm, VIRTIO_DATA_AT) == 1 {
       pci_enable(&mut pci, dev);
+      let msix = virtio_msix(&mut pci, &mut win, dev, lo, hi, msi);
       let f0 = take_low_page(&mut m, 0);
       let f1 = take_low_page(&mut m, 1);
       let f2 = take_low_page(&mut m, 2);
       let f3 = take_low_page(&mut m, 3);
       let f4 = take_low_page(&mut m, VIRTIO_DATA_AT);
-      return Blk::Virtio(virtio_new(&mut ports, base, f0, f1, f2, f3, f4));
+      return Blk::Virtio(virtio_new(&mut ports, base, f0, f1, f2, f3, f4, msix));
     }
   }
-  let sd = ahci_find(&mut pci, &mut m, &mut win, lo, hi);
+  let sd = ahci_find(&mut pci, &mut m, &mut win, lo, hi, msi);
   match sd {
     Drive::Ahci(h) => { return Blk::Ahci(h); },
     Drive::Nvme(n) => { unreachable; },
     Drive::None => {},
   }
   return Blk::Ata(ata_new(&mut ports));
+}
+
+/// Does the disk raise V_DISK when a command started by blk_begin ends?
+/// If not, it has to be polled.
+fn blk_irq(b: &Blk) -> bool {
+  match b {
+    Blk::Nvme(n) => { return n.irq; },
+    Blk::Ahci(h) => { return h.irq; },
+    Blk::Ata(a) => { return false; },
+    Blk::Virtio(v) => { return v.irq; },
+  }
 }
 
 /// Gives the disk's ports or registers back and, for virtio and NVMe,

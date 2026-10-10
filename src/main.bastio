@@ -12,6 +12,7 @@ import "uart.bastio";
 import "pic.bastio";
 import "pit.bastio";
 import "hpet.bastio";
+import "lapic.bastio";
 import "rtc.bastio";
 import "console.bastio";
 import "pages.bastio";
@@ -78,22 +79,52 @@ fn fault_name(con: &mut Con, v: u64)
 // The vector of each processor's local timer (boot/core.h).
 const V_LTIMER: u64 = 48;
 const DISK_POLL_GAP: u64 = 2000;      // idle loops between looks at a running disk command
+const MAX_IDLE: u64 = 1024;           // more than there are processors
 
 // The kernel's state and the devices the scheduler drives, shared by every
 // processor through a lock. The invariant is what each processor may assume
 // when it takes the lock, and must restore before it lets go.
-struct Sys { k: Kernel, con: Con, pic: Pic, clock: Hpet, stop: bool }
-  invariant kok(k) && con_ok(con) && pic_ok(pic) && hpet_ok(clock);
+// `idle` counts the processors that found nothing to run and have not
+// come back for more: those a V_WAKE may be worth sending to.
+struct Sys { k: Kernel, con: Con, pic: Pic, apic: Lapic, clock: Hpet, stop: bool, idle: u64 }
+  invariant kok(k) && con_ok(con) && pic_ok(pic) && lapic_ok(apic) && hpet_ok(clock);
 
 spec fn sys_ok(s: &Sys) -> bool {
-  kok(s.k) && con_ok(s.con) && pic_ok(s.pic) && hpet_ok(s.clock)
+  kok(s.k) && con_ok(s.con) && pic_ok(s.pic) && lapic_ok(s.apic) && hpet_ok(s.clock)
 }
 
 // A process taken out to run: its id, its lease on its address space, and
 // its FPU page.
 struct Task { pid: u64, lease: Lease, fpu: Frame }
 
-enum Job { Stop, Idle, Disk, Run(Task) }   // Disk: idle, but a disk command is running
+enum Job { Stop, Idle, Disk, Run(Task) }   // Disk: idle, but a polled disk command is running
+
+/// Is any process READY (waiting for a processor)?
+fn any_ready(procs: &Buf) -> bool
+  requires len(procs) == PTAB_LEN
+{
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC
+  {
+    if state(procs, p) == READY {
+      return true;
+    }
+    p = p + 1;
+  }
+  return false;
+}
+
+/// Under the lock: this processor has nothing to run.
+fn go_idle(s: &mut Sys) -> Job
+  requires sys_ok(s)
+  ensures sys_ok(s) && result is Job::Idle
+{
+  if s.idle < MAX_IDLE {
+    s.idle = s.idle + 1;
+  }
+  return Job::Idle;
+}
 
 /// Under the lock: what this processor does next. Starting at `from`
 /// (round robin), takes the next READY process out, with its registers and
@@ -108,41 +139,48 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
   if s.stop {
     return Job::Stop;
   }
+  let mut woke = false;
   if poll {
     nic_poll(&mut s.k.nic);
     net_wake(&mut s.k);
     tty_intr(&mut s.con, &mut s.k);
     tty_cook(&mut s.con, &mut s.k);
     wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
-    disk_wake(&mut s.k);
+    woke = disk_wake(&mut s.k);
   }
   let p = lx_pick(&mut s.k, from);
+  // Only the bootstrap processor takes V_DISK. A process the disk woke
+  // that this processor is not about to run would wait for an idle
+  // processor's next tick without a V_WAKE.
+  if woke && s.idle > 0 && any_ready(s.k.procs) {
+    lapic_wake(&mut s.apic);
+  }
   if p == 0 {
     if live_count(s.k.procs) == 0 {
       s.stop = true;
       return Job::Stop;
     }
-    if disk_busy(s.k) {
+    if disk_polled(s.k) {
       return Job::Disk;
     }
-    return Job::Idle;
+    return go_idle(&mut s);
   }
   group_take(&mut s.k, mmu, p);                 // a thread gets its group's space
   if !lx_deliver(&mut s.k, mmu, p) {
-    return Job::Idle;                       // a signal ended it
+    return go_idle(&mut s);                 // a signal ended it
   }
   match take_space(&mut s.k.spaces, p) {
     Space::Empty => {
       // A READY process always has a space; end it rather than spin on it.
       terminate(&mut s.k, mmu, p, 139);
-      return Job::Idle;
+      return go_idle(&mut s);
     },
     Space::Mapped(root) => {
       match take_fpu(&mut s.k.fpus, p) {
         Fpu::None => {
           put_space(&mut s.k.spaces, p, Space::Mapped(root));
           terminate(&mut s.k, mmu, p, 139);
-          return Job::Idle;
+          return go_idle(&mut s);
         },
         Fpu::State(f) => {
           let mut sp = root;
@@ -170,7 +208,7 @@ fn idled(s: &mut Sys, v: u64)
   requires sys_ok(s)
   ensures sys_ok(s)
 {
-  ack(&mut s.pic, v);
+  ack(&mut s.pic, &mut s.apic, v);
   if v == V_TIMER {
     s.k.ticks = tick(s.k.ticks);
     s.k.ns = hpet_ns(&mut s.clock);
@@ -198,7 +236,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     pset(&mut s.k.procs, p, F_REGS + r, cpu_get(cpu, r));
     r = r + 1;
   }
-  ack(&mut s.pic, v);
+  ack(&mut s.pic, &mut s.apic, v);
   if v == V_TIMER {
     s.k.ticks = tick(s.k.ticks);
   }
@@ -230,7 +268,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     if what == POWEROFF {
       s.stop = true;
     }
-    if disk_hold(&mut s.k, p) {
+    if disk_hold(&mut s.k, p, NO_RESULT) {
       return (p + 1) % NPROC;               // a queued write: it waits for the disk
     }
     if what == KEEP {
@@ -242,7 +280,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     s.k.ns = hpet_ns(&mut s.clock);
     s.k.fs.now = s.k.ns / 1000000000;
     let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
-    if disk_hold(&mut s.k, p) || what == SWITCH {
+    if disk_hold(&mut s.k, p, EIO) || what == SWITCH {
       return (p + 1) % NPROC;
     }
     return p;
@@ -299,12 +337,16 @@ fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, p
 }
 
 /// `next_job`, then publishes how much console output waits in `pend`.
-fn next_job_p(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool, pend: &Atomic[u64]) -> Job
+/// `back`: this processor was idle (its last job was Job::Idle).
+fn next_job_p(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool, back: bool, pend: &Atomic[u64]) -> Job
   requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
   ensures sys_ok(s)
   ensures result is Job::Run ==> (1 <= result.Run.pid && result.Run.pid < NPROC)
   ensures !(result is Job::Run) ==> mmu_root(mmu) == KERNEL_ROOT
 {
+  if back && s.idle > 0 {
+    s.idle = s.idle - 1;
+  }
   let j = next_job(&mut s, &mut cpu, &mut mmu, from, poll);
   atomic_store(pend, s.con.n);
   return j;
@@ -416,7 +458,7 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
 {
   let mut cur = 1;
   let mut going = true;
-  let mut j = locked(s, next_job_p, &mut cpu, &mut mmu, cur, true, pend);
+  let mut j = locked(s, next_job_p, &mut cpu, &mut mmu, cur, true, false, pend);
   while going
     invariant cur < NPROC
     invariant !(j is Job::Run) ==> mmu_root(mmu) == KERNEL_ROOT
@@ -440,17 +482,17 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
           locked(s, idled_p, v, pend);
         }
         try_pump(u, s, pumping, pend);
-        j = locked(s, next_job_p, &mut cpu, &mut mmu, cur, true, pend);
+        j = locked(s, next_job_p, &mut cpu, &mut mmu, cur, true, true, pend);
       },
       Job::Disk => {
-        // Nothing to run, but a process waits for a disk command, which
-        // raises no interrupt: look again shortly instead of sleeping
-        // until the next tick.
+        // Nothing to run, but a process waits for a disk command, and the
+        // disk raises no interrupt (blk_irq): look again shortly instead
+        // of sleeping until the next tick.
         let mut w = 0;
         while w < DISK_POLL_GAP && atomic_load(pend) == 0 {
           w = w + 1;
         }
-        j = locked(s, next_job_p, &mut cpu, &mut mmu, cur, true, pend);
+        j = locked(s, next_job_p, &mut cpu, &mut mmu, cur, true, false, pend);
       },
       Job::Run(t) => {
         let v = cpu_run(&mut cpu, mmu);
@@ -480,13 +522,15 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
 }
 
 /// Acknowledges vector `v` at the interrupt controllers if it is a
-/// hardware interrupt.
-fn ack(pic: &mut Pic, v: u64)
-  requires pic_ok(pic)
+/// hardware interrupt (the local timer's is acknowledged by boot/smp.c).
+fn ack(pic: &mut Pic, apic: &mut Lapic, v: u64)
+  requires pic_ok(pic) && lapic_ok(apic)
+  ensures lapic_ok(apic)
 {
   if V_IRQ0 <= v && v < V_IRQ_END {
     pic_eoi(&mut pic, v);
   }
+  lapic_eoi(&mut apic, v);
 }
 
 // The files the file system starts with, built into the kernel image.
@@ -611,6 +655,11 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut rtc = Rtc { io: port_claim(&mut ports, RTC, 2) };
   // Devices with memory-mapped registers claim them from the device window.
   let mut clock = hpet_init(mmio_claim(&mut win, HPET, HPET_LEN));
+  let apic = lapic_new(mmio_claim(&mut win, LAPIC, LAPIC_LEN));
+  let mut msi = 0;
+  if apic.on {
+    msi = lapic_msi_addr(apic);
+  }
   // The wall clock: the RTC's reading, less the HPET time it was read at,
   // so CLOCK_REALTIME = epoch + the HPET clock.
   let wall = rtc_seconds(&mut rtc) * 1000000000;
@@ -656,7 +705,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // The disk: virtio (DMA into pages lent from the allocator) if the machine
   // has one, else ATA. PCI's configuration ports are claimed for it.
   let mut pci = Pci { addr: port_claim(&mut ports, PCI_ADDR, 4), data: port_claim(&mut ports, PCI_DATA, 4) };
-  let dev = blk_new(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi);
+  let dev = blk_new(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi, msi);
   let dev_lo = blk_ports_lo(dev);
   let dev_hi = blk_ports_hi(dev);
   let dk_lo = blk_mmio_lo(dev);
@@ -668,6 +717,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     puts(&mut con, "disk: NVMe\r\n");
   } else if blk_is_ahci(disk.dev) {
     puts(&mut con, "disk: AHCI\r\n");
+  }
+  if blk_irq(disk.dev) {
+    puts(&mut con, "disk: completions by message-signalled interrupt\r\n");
   }
   // A USB keyboard on an xHCI controller, if there is one: eleven pages
   // after the network card's.
@@ -725,7 +777,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // Every processor runs the scheduler until the kernel stops; then they
   // are all back in their park loops and the state is this one's again.
   con_flush(&mut term, &mut con);
-  let sl = lock_new(Sys { k: k, con: con, pic: pic, clock: clock, stop: false });
+  let sl = lock_new(Sys { k: k, con: con, pic: pic, apic: apic, clock: clock, stop: false, idle: 0 });
   let tl = lock_new(term);
   let pumping = atomic_new(false);
   let pend = atomic_new(0);
@@ -791,5 +843,6 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   port_release(&mut ports, pit.io);
   pci_free(&mut ports, pci);
   mmio_release(&mut win, sys.clock.regs);
+  mmio_release(&mut win, sys.apic.regs);
   return 0;
 }

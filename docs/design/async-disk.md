@@ -1,9 +1,12 @@
 # Design: disk I/O that does not stop the machine
 
-Status (2026-10-10): stages 2 and 3 are done, in one PR. They needed each
-other: the cache is what a retried read finds. The queue holds one
-command at a time, and stage 1's cache arrived with them. The rest is
-still planned. Numbers are in docs/architecture.md ("Waiting for the disk
+Status (2026-10-10): stages 1, 2, 3 and 5 are done. Stages 2 and 3 went
+in together (they needed each other: the cache is what a retried read
+finds), with stage 1's cache; the queue holds one command at a time.
+Stage 5 followed, with two changes to the plan below: the end of
+interrupt is written by the kernel, not by `boot/smp.c`, and a `V_WAKE`
+from processor to processor was added. Stage 4 (the lock split) waits on
+its numbers. Numbers are in docs/architecture.md ("Waiting for the disk
 without stopping the machine").
 
 ## Where we are

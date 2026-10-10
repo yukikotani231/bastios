@@ -164,6 +164,15 @@ fn vq_setup(io: &mut PortIo, q: &mut Vq, sel: u64) -> bool
   return true;
 }
 
+/// Asks the device to signal when it hands a chain back (it was told
+/// not to by vq_setup, for drivers that poll).
+fn vq_interrupts(q: &mut Vq)
+  requires vq_ok(q)
+  ensures vq_ok(q)
+{
+  ring_w16(&mut q, q.avail, 0);
+}
+
 /// Descriptor `i`: buffer address, length, flags and the next descriptor
 /// in its chain. The table is in the first page.
 fn vq_desc(q: &mut Vq, i: u64, addr: u64, size: u64, flags: u64, next: u64)

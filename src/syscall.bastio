@@ -294,15 +294,17 @@ const RETRY_BIT: u64 = 0x4000000000000000;   // in F_WAIT: restart once the queu
 /// one whose call restarts (F_WAIT is RETRY_BIT + the queue's `moved` when
 /// it slept) once anything finished, one whose write was queued (F_WAIT is
 /// its transaction) once that transaction has ended. All of them if the
-/// disk died.
-fn disk_wake(k: &mut Kernel)
+/// disk died. True if it woke any.
+fn disk_wake(k: &mut Kernel) -> bool
   requires kok(k)
   ensures kok(k)
 {
+  let mut woke = false;
   disk_pump(&mut k.fs.disk, k.ticks);
   let moved = k.fs.disk.q.moved;
   let done = k.fs.disk.q.done;
   let dead = k.fs.disk.q.dead;
+  let good = k.fs.disk.q.good;
   let mut p = 1;
   while p < NPROC
     invariant 1 <= p && p <= NPROC && kok(k)
@@ -310,18 +312,25 @@ fn disk_wake(k: &mut Kernel)
     if state(k.procs, p) == DISKWAIT {
       let w = pget(k.procs, p, F_WAIT);
       if dead || (w >= RETRY_BIT && w - RETRY_BIT != moved) || (w < RETRY_BIT && done >= w) {
+        if dead && w < RETRY_BIT && w > good {
+          // Its write never reached the disk: it fails after all.
+          pset(&mut k.procs, p, F_REGS + R_RAX, pget(k.procs, p, F_CODE));
+        }
         pset(&mut k.procs, p, F_STATE, READY);
+        woke = true;
       }
     }
     p = p + 1;
   }
+  return woke;
 }
 
-/// Is a disk command queued or running?
-fn disk_busy(k: &Kernel) -> bool
+/// Is a disk command queued or running on a disk that raises no
+/// interrupt when it ends, so that it has to be polled?
+fn disk_polled(k: &Kernel) -> bool
   requires kok(k)
 {
-  return !dq_idle(k.fs.disk.q);
+  return !dq_idle(k.fs.disk.q) && !blk_irq(k.fs.disk.dev);
 }
 
 /// Process pid's system call n needs blocks that are not cached: their
@@ -341,9 +350,10 @@ fn disk_retry(k: &mut Kernel, pid: u64, n: u64) -> u64
 }
 
 /// After process p's system call: if it queued a write, it sleeps until
-/// that transaction ends (its result is already in rax). True if it
-/// sleeps.
-fn disk_hold(k: &mut Kernel, p: u64) -> bool
+/// that transaction ends (its result is already in rax). Should the disk
+/// die first, rax becomes `fail` (kept meanwhile in F_CODE, unused until
+/// the process exits). True if it sleeps.
+fn disk_hold(k: &mut Kernel, p: u64, fail: u64) -> bool
   requires kok(k) && p < NPROC
   ensures kok(k)
 {
@@ -358,6 +368,7 @@ fn disk_hold(k: &mut Kernel, p: u64) -> bool
   }
   pset(&mut k.procs, p, F_STATE, DISKWAIT);
   pset(&mut k.procs, p, F_WAIT, t);
+  pset(&mut k.procs, p, F_CODE, fail);
   disk_wake(&mut k);
   return state(k.procs, p) == DISKWAIT;
 }
