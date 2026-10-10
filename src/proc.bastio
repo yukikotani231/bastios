@@ -82,6 +82,15 @@ const S_ISGID: u64 = 1024;
 const S_ISUID: u64 = 2048;
 const SIG_DEATH: u64 = 256;          // F_CODE of a process a signal ended: 256 + the signal
 
+/// The exit code sys_wait reports for F_CODE `code`: 128 + the signal for
+/// a process a signal ended, as a Linux shell shows it.
+fn shown_code(code: u64) -> u64 {
+  if code >= SIG_DEATH {
+    return 128 + code % 128;
+  }
+  return code;
+}
+
 // Saved register numbers.
 const R_RAX: u64 = 0;
 const R_RDX: u64 = 3;
@@ -564,8 +573,9 @@ struct Kernel {
   pipes: Buf,           // pipe state, PIPE_STRIDE words each
   pipebuf: Bytes,       // pipe rings, PIPE_CAP bytes each
   ticks: u64,           // timer ticks since boot
-  ns: u64,              // the HPET clock at the last system call, in nanoseconds
-  epoch: u64,           // CLOCK_REALTIME minus the HPET clock, in ns (src/rtc.bastio)
+  ns: u64,              // the clock at the last system call, in nanoseconds since boot
+  tsc: Tsc,             // how to read that clock (src/tsc.bastio), also copied into each vDSO
+  epoch: u64,           // CLOCK_REALTIME minus the clock, in ns (src/rtc.bastio)
   rng: u64,             // the state behind /dev/urandom (src/lxdev.bastio)
   cpus: u64,            // processors running, the bootstrap one included
   fs: Vfs,              // files and the open-file table
@@ -826,7 +836,7 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   let mut args = balloc(ARGV0_MAX + 1);
   let alen = name_arg(&mut args, prog_name(prog));
   let src = Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
-  let sp = load_image(&mut k.mem, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, pid, src, args, alen, alen);
+  let sp = load_image(&mut k.mem, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, alen);
   bfree(args);
   let ok = sp is Space::Mapped;
   put_space(&mut k.spaces, pid, sp);
@@ -883,7 +893,7 @@ fn name_arg(args: &mut Bytes, name: Str) -> u64
 /// process `pid` up to start it: program, registers, program break.
 /// Returns `Space::Empty`, changing nothing, if the image is malformed or
 /// memory runs out. The caller installs the space.
-fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, pid: u64, src: Src, args: &Bytes, alen: u64, total: u64) -> Space
+fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, t: Tsc, epoch: u64, pid: u64, src: Src, args: &Bytes, alen: u64, total: u64) -> Space
   requires mem_ok(m) && vfs_ok(v) && len(procs) == PTAB_LEN && pid < NPROC && alen <= total && total <= ARGS_MAX && total <= blen(args)
   ensures mem_ok(m) && vfs_ok(v) && len(procs) == PTAB_LEN
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
@@ -898,7 +908,7 @@ fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, pid: u64, sr
   let mut rsp = USER_BASE + elf_sp(args, alen, total);
   let mut isrc = Src { file: false, prog: NPROGS, f: 0, size: 0 };
   let mut ie = bad_elf();
-  let mut mmap_top = STACK_FIRST * 4096;
+  let mut mmap_top = VDSO_PAGE * 4096;     // the vDSO's page is above it
   if elf {
     if !e.ok {
       return Space::Empty;
@@ -912,10 +922,10 @@ fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, pid: u64, sr
       }
       let probe = elf_parse(&mut v, isrc);
       let low = (e.end + 4095) / 4096 * 4096;
-      if !probe.ok || probe.bias != USER_BASE || probe.ilen != 0 || probe.end > IMAGE_MAX - low {
+      if !probe.ok || probe.bias != USER_BASE || probe.ilen != 0 || low > VDSO_PAGE * 4096 || probe.end > VDSO_PAGE * 4096 - low {
         return Space::Empty;
       }
-      let place = (IMAGE_MAX - probe.end) / 4096 * 4096;
+      let place = (VDSO_PAGE * 4096 - probe.end) / 4096 * 4096;
       ie = elf_parse_at(&mut v, isrc, place);
       if !ie.ok {
         return Space::Empty;
@@ -938,7 +948,7 @@ fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, pid: u64, sr
       return Space::Empty;
     }
   }
-  let sp = build_space(&mut m, &mut v, src, img, elf, e, isrc, ie, size, args, alen, total, seed);
+  let sp = build_space(&mut m, &mut v, src, img, elf, e, isrc, ie, size, args, alen, total, seed, t, epoch);
   if sp is Space::Empty {
     return sp;
   }
@@ -1019,14 +1029,14 @@ fn interp_src(v: &mut Vfs, src: Src, e: Elf) -> Src
 
 /// The address space for a checked image: ELF, or a BastiOS image needing
 /// `size` bytes of memory.
-fn build_space(m: &mut Mem, v: &mut Vfs, src: Src, img: Str, elf: bool, e: Elf, isrc: Src, ie: Elf, size: u64, args: &Bytes, alen: u64, total: u64, seed: u64) -> Space
+fn build_space(m: &mut Mem, v: &mut Vfs, src: Src, img: Str, elf: bool, e: Elf, isrc: Src, ie: Elf, size: u64, args: &Bytes, alen: u64, total: u64, seed: u64, t: Tsc, epoch: u64) -> Space
   requires mem_ok(m) && vfs_ok(v) && (elf ==> (e.ok && elf_fits(src.size, e) && elf_fits(isrc.size, ie))) && (!elf ==> size <= IMAGE_MAX)
   requires alen <= total && total <= ARGS_MAX && total <= blen(args)
   ensures mem_ok(m) && vfs_ok(v)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
   if elf {
-    return elf_space(&mut m, &mut v, src, e, isrc, ie, args, alen, total, seed);
+    return elf_space(&mut m, &mut v, src, e, isrc, ie, args, alen, total, seed, t, epoch);
   }
   return new_space(&mut m, img, size);
 }
@@ -1074,11 +1084,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code: u64)
   if par == 0 || par >= NPROC {
     pset(&mut k.procs, pid, F_STATE, FREE);       // nobody will collect it
   } else if state(k.procs, par) == WAITING && pget(k.procs, par, F_WAIT) == pid {
-    let mut shown = code;
-    if code >= SIG_DEATH {
-      shown = 128 + code % 128;             // as a Linux shell shows it
-    }
-    pset(&mut k.procs, par, F_REGS + R_RAX, shown);
+    pset(&mut k.procs, par, F_REGS + R_RAX, shown_code(code));
     pset(&mut k.procs, par, F_STATE, READY);
     pset(&mut k.procs, pid, F_STATE, FREE);
   } else if state(k.procs, par) == LXWAITING {

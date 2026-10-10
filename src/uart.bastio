@@ -11,16 +11,32 @@ const UART_FCR: u64 = 2;    // FIFO control
 const UART_LCR: u64 = 3;    // line control
 const UART_MCR: u64 = 4;    // modem control
 const UART_LSR: u64 = 5;    // line status
+const UART_SCR: u64 = 7;    // scratch: holds what was written, if there is a UART
 
-struct Uart { io: PortIo }
+// `present`: a UART answered at the ports. Most PCs of the last decade
+// have no COM1, and reading ports nothing answers gives 0xFF, which would
+// say a byte is always waiting: the console would read 0xFF forever and
+// never get to the keyboard.
+struct Uart { io: PortIo, present: bool }
 
 spec fn uart_ok(u: &Uart) -> bool { port_count(u.io) == 8 }
 
-/// 115200 baud, 8N1, FIFOs on, and an interrupt when a byte arrives (the
-/// kernel sees it as vector 36 and drains the UART).
+/// Finds out whether a UART is there (its scratch register keeps two
+/// patterns written to it), and if so sets it up: 115200 baud, 8N1, FIFOs
+/// on, and an interrupt when a byte arrives (the kernel sees it as vector
+/// 36 and drains the UART).
 fn uart_init(u: &mut Uart)
   requires uart_ok(u)
+  ensures uart_ok(u)
 {
+  pio_out8(&mut u.io, UART_SCR, 0x5A);
+  let a = pio_in8(&mut u.io, UART_SCR);
+  pio_out8(&mut u.io, UART_SCR, 0xA5);
+  let b = pio_in8(&mut u.io, UART_SCR);
+  u.present = a == 0x5A && b == 0xA5;
+  if !u.present {
+    return;
+  }
   pio_out8(&mut u.io, UART_IER, 0x00);   // interrupts off while configuring
   pio_out8(&mut u.io, UART_LCR, 0x80);   // DLAB on: the next two are the divisor
   pio_out8(&mut u.io, UART_DATA, 0x01);  // 115200 / 1
@@ -35,6 +51,9 @@ fn uart_init(u: &mut Uart)
 fn uart_write(u: &mut Uart, b: u8)
   requires uart_ok(u)
 {
+  if !u.present {
+    return;
+  }
   // Line status bit 5: the transmit holding register is empty.
   while pio_in8(&mut u.io, UART_LSR) / 32 % 2 == 0 {
   }
@@ -46,6 +65,9 @@ fn uart_poll(u: &mut Uart) -> u64
   requires uart_ok(u)
   ensures result <= 256
 {
+  if !u.present {
+    return 256;
+  }
   // Line status bit 0: a byte is waiting.
   if pio_in8(&mut u.io, UART_LSR) % 2 == 1 {
     return cast[u64](pio_in8(&mut u.io, UART_DATA));

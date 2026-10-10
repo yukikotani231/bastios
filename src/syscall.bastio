@@ -678,13 +678,7 @@ fn do_wait(procs: &mut Buf, pid: u64, c: u64) -> u64
     return KEEP;
   }
   if state(procs, c) == ZOMBIE {
-    // Shown as terminate shows it to a parent already waiting: the child
-    // may end, on another processor, before this call.
-    let mut shown = pget(procs, c, F_CODE);
-    if shown >= SIG_DEATH {
-      shown = 128 + shown % 128;
-    }
-    ret(&mut procs, pid, shown);
+    ret(&mut procs, pid, shown_code(pget(procs, c, F_CODE)));
     pset(&mut procs, c, F_STATE, FREE);
     return KEEP;
   }
