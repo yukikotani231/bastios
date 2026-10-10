@@ -48,9 +48,9 @@ const O_APPEND: u64 = 16;
 const NO_FD: u64 = 18446744073709551615;
 
 // Directory handles besides the nodes (vfs_dir_lookup, vfs_readdir).
-const VDIR_ROOT: u64 = 64;             // NFILES + DSLOTS: the top directory
-const VDIR_DISK: u64 = 65;             // "disk"
-const NAMEBUF: u64 = 64;              // holds any node's name
+const VDIR_ROOT: u64 = 96;             // NFILES + DSLOTS: the top directory
+const VDIR_DISK: u64 = 97;             // "disk"
+const NAMEBUF: u64 = 256;             // holds any in-memory node's name
 
 struct Vfs {
   ram: Vec[Node],       // the in-memory file system
@@ -600,17 +600,8 @@ fn vfs_rmdir(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
 {
   if on_disk(v, n) {
     let d = disk_find(v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX);
-    if d >= DSLOTS || !dent_dir(v.disk, d) {
+    if d >= DSLOTS || !dent_dir(v.disk, d) || disk_has_children(v.disk, d) {
       return false;
-    }
-    let mut j = 0;
-    while j < DSLOTS
-      invariant j <= DSLOTS && vfs_ok(v) && DISK_PREFIX < n && n <= XFER
-    {
-      if disk_under(v.disk, j, v.xfer, DISK_PREFIX, n - DISK_PREFIX) {
-        return false;
-      }
-      j = j + 1;
     }
     return disk_remove(&mut v.disk, d);
   }
@@ -752,24 +743,24 @@ fn vfs_readdir(v: &mut Vfs, d: u64, i: u64) -> u64
     return child_at(&mut v.xfer, n, v.name, l, d == VDIR_ROOT);
   }
   if d == VDIR_DISK || d < NFILES + DSLOTS {
-    let mut l = 0;
+    let mut p = DTOP;
     if d < NFILES + DSLOTS {
       if !dent_dir(v.disk, d - NFILES) {
         return NO_FILE;
       }
-      l = disk_name(v.disk, d - NFILES, &mut v.name, 0);
-      if l > NAMEBUF {
-        return NO_FILE;
-      }
+      p = d - NFILES;
     }
     if i >= DSLOTS {
       return NO_FILE;
     }
-    let n = disk_name(v.disk, i, &mut v.xfer, 0);
-    if n > XFER {
+    if !dent_used(v.disk, i) || dent_parent(v.disk, i) != p {
       return 0;
     }
-    return child_at(&mut v.xfer, n, v.name, l, d == VDIR_DISK);
+    let n = disk_comp(v.disk, i, &mut v.xfer, 0);
+    if n == NO_DISK_FILE {
+      return 0;
+    }
+    return n;
   }
   return NO_FILE;
 }
@@ -777,14 +768,116 @@ fn vfs_readdir(v: &mut Vfs, d: u64, i: u64) -> u64
 /// The handle of entry i of directory d, when vfs_readdir(v, d, i) found
 /// one (returned more than 0).
 fn vfs_child(d: u64, i: u64) -> u64 {
-  if i > NFILES {
-    return NO_FILE;
-  }
   if d == VDIR_ROOT && i == NFILES {
     return VDIR_DISK;
   }
   if d == VDIR_ROOT || d < NFILES {
+    if i >= NFILES {
+      return NO_FILE;
+    }
     return i;
   }
+  if i >= DSLOTS {
+    return NO_FILE;
+  }
   return NFILES + i;
+}
+
+/// Renames the file or directory named by the first n bytes of the
+/// transfer buffer to the next m bytes. Both names must be on the same
+/// file system, the new one free and its directory existing, and a
+/// directory cannot move into itself. Descriptors stay open on the file.
+/// On the disk this is one sector write, so a power cut leaves either
+/// name; in memory a directory's contents are renamed with it.
+fn vfs_rename(v: &mut Vfs, n: u64, m: u64) -> bool
+  requires vfs_ok(v) && n <= XFER && m <= XFER - n
+  ensures vfs_ok(v)
+{
+  if n == 0 || m == 0 || n > FNAME_MAX || m > FNAME_MAX {
+    return false;
+  }
+  let src_disk = on_disk(v, n);
+  let mut node = NO_FILE;
+  if src_disk {
+    let d = disk_find(v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX);
+    if d >= DSLOTS {
+      return false;
+    }
+    node = d;
+  } else {
+    let i = ram_find(&mut v.ram, v.xfer, n);
+    if i >= NFILES {
+      return false;
+    }
+    node = i;
+  }
+  // Keep the old name in v.name and move the new one to the front.
+  let mut k = 0;
+  while k < n
+    invariant k <= n && n <= FNAME_MAX && vfs_ok(v)
+  {
+    bset(&mut v.name, k, bget(v.xfer, k));
+    k = k + 1;
+  }
+  k = 0;
+  while k < m
+    invariant k <= m && vfs_ok(v) && n <= XFER && m <= XFER - n
+  {
+    bset(&mut v.xfer, k, bget(v.xfer, n + k));
+    k = k + 1;
+  }
+  if on_disk(v, m) != src_disk || !path_ok(v, m) || !parent_ok(&mut v, m) {
+    return false;
+  }
+  if vfs_lookup(&mut v, m) != NO_FILE {
+    return false;
+  }
+  // Not into itself: the new name is not the old one and a "/" and more.
+  if m > n && bget(v.xfer, n) == 47 {
+    let mut same = true;
+    let mut j = 0;
+    while j < n
+      invariant j <= n && n < m && m <= XFER && vfs_ok(v)
+    {
+      if bget(v.xfer, j) != bget(v.name, j) {
+        same = false;
+      }
+      j = j + 1;
+    }
+    if same {
+      return false;
+    }
+  }
+  if src_disk {
+    return node < DSLOTS && disk_move(&mut v.disk, node, v.xfer, DISK_PREFIX, m - DISK_PREFIX);
+  }
+  if node >= NFILES {
+    return false;
+  }
+  // In memory: every node inside a directory moves with it. Check that
+  // every new name fits before changing any.
+  if ram_is_dir(&mut v.ram, node) {
+    let mut j = 0;
+    while j < NFILES
+      invariant j <= NFILES && vfs_ok(v) && n <= FNAME_MAX && m <= FNAME_MAX
+    {
+      if ram_under(&mut v.ram, j, v.name, n) {
+        let l = ram_len(&mut v.ram, j);
+        if l == NO_FILE || l < n || l - n > FNAME_MAX - m {
+          return false;
+        }
+      }
+      j = j + 1;
+    }
+    j = 0;
+    while j < NFILES
+      invariant j <= NFILES && vfs_ok(v) && n <= FNAME_MAX && m <= FNAME_MAX
+    {
+      if ram_under(&mut v.ram, j, v.name, n) {
+        ram_reprefix(&mut v.ram, j, n, v.xfer, m);
+      }
+      j = j + 1;
+    }
+  }
+  return ram_reprefix(&mut v.ram, node, n, v.xfer, m);
 }

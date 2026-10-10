@@ -233,6 +233,12 @@ steps = [
     # The *at calls relative to a directory descriptor, fchdir, and mmap
     # of a file (user/mdir.c).
     ("mdir", b"mdir: ok in /dx, mapped", b"\n# "),
+    # Small calls: uname, readv, pread/pwrite, limits, sysinfo, statfs,
+    # getrandom, priorities, sessions (user/mmisc.c).
+    ("mmisc", b"mmisc: ok on Linux x86_64", b"\n# "),
+    # posix_spawn: clone(CLONE_VM | CLONE_VFORK) lends the parent's
+    # address space to the child until it execs or exits (user/mspawn.c).
+    ("mspawn", [b"spawned 5", b"mspawn: ok, kept 1234"], b"\n# "),
     ("exit 5", b"[exit 5]"),
     ("rm lxout", b""),
     ("sh", b"BastiOS 0.2 -- type"),
@@ -273,6 +279,42 @@ steps = [
     ("rmdir docs/sub", b""),
     ("rmdir docs", b""),
     ("cat docs/a", b"no such file: docs/a"),
+    # Renaming: files and directories (with what is in them), never onto
+    # a name that exists, into itself, or between memory and the disk.
+    ("echo one > r1", b""),
+    ("mv r1 r2", b""),
+    ("cat r2", b"one\r\n"),
+    ("cat r1", b"no such file: r1"),
+    ("mkdir rd", b""),
+    ("echo x > rd/f", b""),
+    ("mv rd rd2", b""),
+    ("cat rd2/f", b"x\r\n"),
+    ("mv rd2 rd2/in", b"cannot move rd2"),
+    ("echo y > r3", b""),
+    ("mv r2 r3", b"cannot move r2"),
+    ("mv r2 disk/r2", b"cannot move r2"),
+    ("mv nothere r9", b"cannot move nothere"),
+    ("mv rd2/f r2x", b""),
+    ("cat r2x", b"x\r\n"),
+    ("rm r2", b""),
+    ("rm r3", b""),
+    ("rm r2x", b""),
+    ("rmdir rd2", b""),
+    ("mkdir disk/md", b""),
+    ("echo z > disk/md/f", b""),
+    ("mv disk/md disk/md2", b""),
+    ("cat disk/md2/f", b"z\r\n"),
+    ("mv disk/md2 disk/md2/x", b"cannot move disk/md2"),
+    ("mv disk/md2/f disk/moved", b""),
+    ("cat disk/md2/f", b"no such file: disk/md2/f"),
+    ("rmdir disk/md2", b""),
+    # Paths longer than an old 28-byte name.
+    ("mkdir a_directory_whose_name_is_long", b""),
+    ("echo far > a_directory_whose_name_is_long/and_a_file_with_a_long_name_too", b""),
+    ("cat a_directory_whose_name_is_long/and_a_file_with_a_long_name_too", b"far\r\n"),
+    ("ls a_directory_whose_name_is_long", b"\nand_a_file_with_a_long_name_too\r\n"),
+    ("rm a_directory_whose_name_is_long/and_a_file_with_a_long_name_too", b""),
+    ("rmdir a_directory_whose_name_is_long", b""),
     # Several pages, seeking, appending, holes, descriptor limits, first on
     # the disk and then in memory; it exits with "big" still open, so
     # removing it shows that exit closed it.
@@ -288,6 +330,8 @@ steps = [
     ("mkdir disk/keep", b""),
     ("echo deep > disk/keep/f", b""),
     ("ls disk", [b"\nnote\r\n", b"\nkeep/\r\n"]),
+    ("mkdir disk/long_directory_name_beyond_28_bytes", b""),
+    ("echo far > disk/long_directory_name_beyond_28_bytes/and_a_file_with_a_long_name_too", b""),
     # Every page the files used is back once they are removed.
     ("mem", b"free pages"),
 ]
@@ -755,12 +799,18 @@ qemu = boot(1, with_disk=True)
 session("third", False, [
     ("cat disk/note", b"kept across boots\r\nappended\r\n"),
     ("rm disk/note", b""),
+    ("cat disk/moved", b"z\r\n"),
+    ("rm disk/moved", b""),
     ("ls disk/keep", b"\nf\r\n"),
     ("cat disk/keep/f", b"deep\r\n"),
     ("rmdir disk/keep", b"not an empty directory"),
     ("rm disk/keep/f", b""),
     ("rmdir disk/keep", b""),
     ("ls disk/keep", b"not a directory: disk/keep"),
+    ("cat disk/long_directory_name_beyond_28_bytes/and_a_file_with_a_long_name_too", b"far\r\n"),
+    ("ls", b"       4 disk/long_directory_name_beyond_28_bytes/and_a_file_with_a_long_name_too\r\n"),
+    ("rm disk/long_directory_name_beyond_28_bytes/and_a_file_with_a_long_name_too", b""),
+    ("rmdir disk/long_directory_name_beyond_28_bytes", b""),
     ("cat disk/note", b"no such file: disk/note"),
 ])
 # Power cuts. user/crashme.bastio checks what the last run left on the disk
@@ -793,6 +843,7 @@ session("after the power cuts", False, [
     ("crashme", b"crashme: done"),
     ("rm disk/log", b""),
     ("rm disk/snap", b""),
+    ("rm disk/ow", b""),
     ("ls", b"about"),
 ])
 print(f"---- {fails} failed ----")

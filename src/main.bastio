@@ -27,6 +27,7 @@ import "lxsock.bastio";
 import "lxtcp.bastio";
 import "lxsig.bastio";
 import "lxtime.bastio";
+import "lxmisc.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
