@@ -141,6 +141,7 @@ make          # build/bastios.elf
 make run      # boot on this terminal with build/disk.img as the disk; Ctrl-A X quits
 make iso      # build/bastios.iso: GRUB + the kernel, bootable under BIOS or UEFI
 make test     # boot in QEMU, type commands over the serial line, check the replies
+make fuzz     # fuzz the system calls with hostile arguments (SEED, SEEDS, CALLS, SMP, PAR)
 ```
 
 Set `BASTIOC=/path/to/bastioc0` if the compiler lives elsewhere.

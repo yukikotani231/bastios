@@ -209,11 +209,13 @@ fn disk_open(v: &mut Vfs, row: u64, flags: u64, n: u64) -> u64
 }
 
 /// Closes a row. Returns false if it was not open.
-fn vfs_close(v: &mut Vfs, row: u64) -> bool
-  requires vfs_ok(v) && row < FD_ROWS
-  ensures vfs_ok(v)
+fn vfs_close(v: &mut Vfs, mem: &mut Mem, row: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem) && row < FD_ROWS
+  ensures vfs_ok(v) && mem_ok(mem)
 {
-  if fget(v.ftab, row, FD_FS) == 0 {
+  let fs = fget(v.ftab, row, FD_FS);
+  let node = fget(v.ftab, row, FD_NODE);
+  if fs == 0 {
     return false;
   }
   let mut f = 0;
@@ -223,19 +225,27 @@ fn vfs_close(v: &mut Vfs, row: u64) -> bool
     fset(&mut v.ftab, row, f, 0);
     f = f + 1;
   }
+  // The last close of a file removed while open frees it.
+  if !node_open(v.ftab, fs, node) {
+    if fs == FS_RAM && node < NFILES && ram_len(&mut v.ram, node) == 0 {
+      ram_remove(&mut v.ram, &mut mem, node);
+    } else if fs == FS_DISK && node < DSLOTS && dent_orphan(v.disk, node) {
+      disk_remove(&mut v.disk, node);
+    }
+  }
   return true;
 }
 
 /// Closes every row of process row block `base` (when the process ends).
-fn vfs_close_all(v: &mut Vfs, base: u64)
-  requires vfs_ok(v) && base + NFD <= FD_ROWS
-  ensures vfs_ok(v)
+fn vfs_close_all(v: &mut Vfs, mem: &mut Mem, base: u64)
+  requires vfs_ok(v) && mem_ok(mem) && base + NFD <= FD_ROWS
+  ensures vfs_ok(v) && mem_ok(mem)
 {
   let mut fd = 0;
   while fd < NFD
-    invariant fd <= NFD && vfs_ok(v)
+    invariant fd <= NFD && vfs_ok(v) && mem_ok(mem)
   {
-    vfs_close(&mut v, base + fd);
+    vfs_close(&mut v, &mut mem, base + fd);
     fd = fd + 1;
   }
 }
@@ -343,23 +353,31 @@ fn vfs_seek(v: &mut Vfs, row: u64, off: u64) -> bool
 }
 
 /// Removes the file named by the first n bytes of the transfer buffer.
-/// Returns false if there is none or it is open.
+/// Returns false if there is none (or it is a directory). A file that is
+/// open loses its name now and its data at the last close, as on Linux.
 fn vfs_unlink(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
   requires vfs_ok(v) && mem_ok(mem) && n <= XFER
   ensures vfs_ok(v) && mem_ok(mem)
 {
   if on_disk(v, n) {
     let d = disk_find(v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX);
-    if d >= DSLOTS || node_open(v.ftab, FS_DISK, d) || dent_dir(v.disk, d) {
+    if d >= DSLOTS || dent_dir(v.disk, d) {
       return false;
+    }
+    if node_open(v.ftab, FS_DISK, d) {
+      return disk_orphan(&mut v.disk, d);
     }
     return disk_remove(&mut v.disk, d);
   }
   let i = ram_find(&mut v.ram, v.xfer, n);
-  if i >= NFILES || node_open(v.ftab, FS_RAM, i) || ram_is_dir(&mut v.ram, i) {
+  if i >= NFILES || ram_is_dir(&mut v.ram, i) {
     return false;
   }
-  ram_remove(&mut v.ram, &mut mem, i);
+  if node_open(v.ftab, FS_RAM, i) {
+    ram_orphan(&mut v.ram, i);
+  } else {
+    ram_remove(&mut v.ram, &mut mem, i);
+  }
   return true;
 }
 

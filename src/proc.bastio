@@ -418,7 +418,7 @@ spec fn kok(k: &Kernel) -> bool {
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 23;
+const NPROGS: u64 = 24;
 
 fn prog_name(i: u64) -> Str {
   if i == 0 {
@@ -488,6 +488,9 @@ fn prog_name(i: u64) -> Str {
     return "mspawn";
   }
   if i == 22 {
+    return "sysfuzz";
+  }
+  if i == 23 {
     return "mthread";
   }
   return "(file)";                    // a program loaded from a file
@@ -558,6 +561,9 @@ fn prog_image(i: u64) -> Str {
     return include_bytes("../build/user/mspawn.elf");
   }
   if i == 22 {
+    return include_bytes("../build/user/sysfuzz.elf");
+  }
+  if i == 23 {
     return include_bytes("../build/user/mthread.elf");
   }
   return include_bytes("../build/user/fault.bin");

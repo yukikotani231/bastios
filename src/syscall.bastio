@@ -309,7 +309,7 @@ fn file_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     return do_open(&mut k, pid, a, b, c);
   }
   if n == SYS_CLOSE {
-    if a < NFD && vfs_close(&mut k.fs, pid * NFD + a) {
+    if a < NFD && vfs_close(&mut k.fs, &mut k.mem, pid * NFD + a) {
       return 0;
     }
     return NO_RESULT;
