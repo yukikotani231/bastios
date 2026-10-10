@@ -237,21 +237,12 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_READ || n == LX_READV {
-    let rv = fd_look(k, pid, a);
-    if rv.kind == K_DIR {
-      ret(&mut k.procs, pid, EISDIR);
+    let early = rw_early(&mut k, pid, n, a, b, c);
+    if early != NO_RESULT {
+      ret(&mut k.procs, pid, early);
       return KEEP;
     }
-    if n == LX_READV {
-      let mut bad = iov_check(&mut k, pid, b, c);
-      if bad != 0 || c == 0 {
-        if rv.kind == K_BAD {
-          bad = EBADF;
-        }
-        ret(&mut k.procs, pid, bad);        // nothing to read: 0
-        return KEEP;
-      }
-    }
+    let rv = fd_look(k, pid, a);
     if n == LX_READV && rv.kind == K_FILE {
       let got = file_readv(&mut k, pid, rv.x, b, c);
       if got == DISK_RETRY {
@@ -312,16 +303,10 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_WRITE || n == LX_WRITEV {
-    let wv = fd_look(k, pid, a);
-    if wv.kind != K_BAD && ((n == LX_WRITE && c == 0 && wv.kind == K_FILE) || n == LX_WRITEV) {
-      let mut bad = 0;
-      if n == LX_WRITEV {
-        bad = iov_check(&mut k, pid, b, c);
-      }
-      if bad != 0 || c == 0 {
-        ret(&mut k.procs, pid, bad);        // nothing to write: 0, whatever the buffer
-        return KEEP;
-      }
+    let early = rw_early(&mut k, pid, n, a, b, c);
+    if early != NO_RESULT {
+      ret(&mut k.procs, pid, early);
+      return KEEP;
     }
     let mut w = 0;
     if n == LX_WRITE {
@@ -1160,6 +1145,32 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64
     more = w == piece && w > 0;
   }
   return total;
+}
+
+/// What read, readv, write or writev (n) on fd a returns before it moves
+/// anything, or NO_RESULT to go on: EISDIR for a directory, the iov_check
+/// verdict, and 0 for zero iovecs or a zero-length write to a file.
+fn rw_early(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let d = fd_look(k, pid, a);
+  if d.kind == K_BAD {
+    return NO_RESULT;                       // EBADF, from the call itself
+  }
+  if (n == LX_READ || n == LX_READV) && d.kind == K_DIR {
+    return EISDIR;
+  }
+  if n == LX_READV || n == LX_WRITEV {
+    let bad = iov_check(&mut k, pid, b, c);
+    if bad != 0 || c == 0 {
+      return bad;
+    }
+  }
+  if n == LX_WRITE && c == 0 && d.kind == K_FILE {
+    return 0;                               // nothing to write, whatever the buffer
+  }
+  return NO_RESULT;
 }
 
 /// The checks readv and writev make before they move anything: cnt at most
