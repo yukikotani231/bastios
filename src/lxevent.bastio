@@ -778,8 +778,8 @@ fn fifo_open(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
   ensures kok(k)
 {
   let acc = flags % 4;
-  if acc != 0 && acc != LO_WRONLY {
-    return EINVAL;                          // O_RDWR on a FIFO is not supported
+  if acc == 3 {
+    return EINVAL;
   }
   if fd_free(k.lxfd, pid, 0) >= LXNFD {
     return EMFILE;
@@ -820,6 +820,16 @@ fn fifo_open(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
     }
     let fd = ev_install(&mut k, pid, OF_PIPE_W, q, nb, ce);
     if fd < LXNFD {
+      pi_set(&mut k.pipes, q, 3, smaller(pi_get(k.pipes, q, 3), OFD_N) + 1);
+      pi_set(&mut k.pipes, q, 5, 1);
+    }
+    return fd;
+  }
+  if acc == LO_RDWR {
+    // Both ends in one descriptor; it never waits, as on Linux.
+    let fd = ev_install(&mut k, pid, OF_PIPE_R, q, nb + PIPE_BOTH, ce);
+    if fd < LXNFD {
+      pi_set(&mut k.pipes, q, 2, smaller(pi_get(k.pipes, q, 2), OFD_N) + 1);
       pi_set(&mut k.pipes, q, 3, smaller(pi_get(k.pipes, q, 3), OFD_N) + 1);
       pi_set(&mut k.pipes, q, 5, 1);
     }

@@ -39,6 +39,8 @@ const LX_GETITIMER: u64 = 36;
 const LX_ALARM: u64 = 37;
 const LX_SETITIMER: u64 = 38;
 const ITIMER_REAL: u64 = 0;
+const ITIMER_VIRTUAL: u64 = 1;
+const ITIMER_PROF: u64 = 2;
 const SIGALRM: u64 = 14;
 const LX_RT_SIGTIMEDWAIT: u64 = 128;
 const CLOCK_REALTIME: u64 = 0;
@@ -219,6 +221,9 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
     }
     if pi_get(k.pipes, f.x, 3) == 0 && pi_get(k.pipes, f.x, 5) != 0 {
       b = b | POLLHUP;                      // no writer left: end of file
+    }
+    if pipe_both(k, pid, fd) && pi_get(k.pipes, f.x, 1) <= PIPE_CAP - PIPE_ATOM {
+      b = b | POLLOUT;                      // a FIFO opened O_RDWR writes too
     }
     return b;
   }
@@ -505,12 +510,17 @@ fn alarm_set(k: &mut Kernel, pid: u64, value: u64, interval: u64)
 
 /// Writes process pid's real-time timer to user address va as a struct
 /// itimerval (the interval, then the value, each a timeval).
-fn itimer_out(k: &mut Kernel, pid: u64, va: u64) -> u64
-  requires kok(k) && pid < NPROC
+fn itimer_out(k: &mut Kernel, pid: u64, va: u64, which: u64) -> u64
+  requires kok(k) && pid < NPROC && which <= ITIMER_PROF
   ensures kok(k)
 {
-  let iv = get(k.alarms, 2 * pid + 1);
-  let left = alarm_left(k, pid);
+  let mut iv = get(k.alarms, 2 * pid + 1);
+  let mut left = alarm_left(k, pid);
+  if which != ITIMER_REAL {
+    let w = cpu_timer(which);
+    left = pget(k.procs, pid, w);
+    iv = pget(k.procs, pid, w + 1);
+  }
   xfer_u64(&mut k.fs.xfer, 0, iv / NS_PER_S);
   xfer_u64(&mut k.fs.xfer, 8, iv % NS_PER_S / 1000);
   xfer_u64(&mut k.fs.xfer, 16, left / NS_PER_S);
@@ -521,8 +531,42 @@ fn itimer_out(k: &mut Kernel, pid: u64, va: u64) -> u64
   return 0;
 }
 
-/// alarm, getitimer and setitimer. Only ITIMER_REAL is kept; the CPU-time
-/// timers are refused with -EINVAL.
+/// The row word of CPU-time timer `which` (its interval is the next one).
+fn cpu_timer(which: u64) -> u64
+  ensures result + 1 < STRIDE
+{
+  if which == ITIMER_VIRTUAL {
+    return F_VTIMER;
+  }
+  return F_PTIMER;
+}
+
+/// On a timer tick that found process p running: its CPU-time timers run
+/// down by the tick, and one that runs out sends its signal (SIGVTALRM or
+/// SIGPROF) and starts again from its interval. Time in the kernel counts
+/// as the process's own: ITIMER_VIRTUAL and ITIMER_PROF run alike.
+fn cpu_timers_tick(k: &mut Kernel, p: u64)
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let mut which = ITIMER_VIRTUAL;
+  while which <= ITIMER_PROF
+    invariant ITIMER_VIRTUAL <= which && which <= ITIMER_PROF + 1 && kok(k)
+  {
+    let w = cpu_timer(which);
+    let left = pget(k.procs, p, w);
+    if left > NS_PER_TICK {
+      pset(&mut k.procs, p, w, left - NS_PER_TICK);
+    } else if left != 0 {
+      pset(&mut k.procs, p, w, pget(k.procs, p, w + 1));
+      post_sig(&mut k, p, 25 + which);      // SIGVTALRM (26), SIGPROF (27)
+    }
+    which = which + 1;
+  }
+}
+
+/// alarm, getitimer and setitimer: ITIMER_REAL, and the CPU-time timers
+/// ITIMER_VIRTUAL and ITIMER_PROF (counted in timer ticks).
 fn lx_itimer(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -542,12 +586,12 @@ fn lx_itimer(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     ret(&mut k.procs, pid, secs);
     return KEEP;
   }
-  if a != ITIMER_REAL {
+  if a > ITIMER_PROF {
     ret(&mut k.procs, pid, EINVAL);
     return KEEP;
   }
   if n == LX_GETITIMER {
-    ret(&mut k.procs, pid, itimer_out(&mut k, pid, b));
+    ret(&mut k.procs, pid, itimer_out(&mut k, pid, b, a));
     return KEEP;
   }
   // setitimer(which, new, old): read new before writing old, which may be
@@ -573,11 +617,18 @@ fn lx_itimer(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     interval = ti.ns;
   }
   if c != 0 {
-    let r = itimer_out(&mut k, pid, c);
+    let r = itimer_out(&mut k, pid, c, a);
     if r != 0 {
       ret(&mut k.procs, pid, r);
       return KEEP;
     }
+  }
+  if a != ITIMER_REAL {
+    let w = cpu_timer(a);
+    pset(&mut k.procs, pid, w, value);
+    pset(&mut k.procs, pid, w + 1, interval);
+    ret(&mut k.procs, pid, 0);
+    return KEEP;
   }
   alarm_set(&mut k, pid, value, interval);
   ret(&mut k.procs, pid, 0);

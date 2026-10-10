@@ -61,3 +61,41 @@ $ /disk/sqlite3 -list ca_b.db 'create table t(a, b); with recursive c(x) as (sel
 == ash: a 1200-byte typed line
 $ echo 012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789 | /disk/busybox wc -c
 1201
+
+
+== micropython: classes, generators, exceptions, big integers
+$ printf 'class P:\n    def __init__(s, x): s.x = x\n    def __repr__(s): return "P(" + str(s.x) + ")"\ndef gen(n):\n    for i in range(n): yield i * i\ntry:\n    1 / 0\nexcept ZeroDivisionError as e:\n    print("caught", type(e).__name__)\nprint([P(i) for i in range(3)], sum(gen(10)), 2 ** 100)\n' > ca_m.py && /disk/micropython ca_m.py; rm -f ca_m.py
+caught ZeroDivisionError
+[P(0), P(1), P(2)] 285 1267650600228229401496703205376
+
+== micropython: json, re, files, os
+$ /disk/micropython -c 'import json, re, os; f = open("ca_m.txt", "w"); f.write("hello\n" * 3); f.close(); print(json.dumps({"a": [1, 2.5, None]}), json.loads("[true]"), re.sub(r"(\d+)", r"<\1>", "a12b345"), open("ca_m.txt").read().count("hello"), os.stat("ca_m.txt")[6]); os.remove("ca_m.txt")'
+{"a": [1, 2.5, null]} [True] a<12>b<345> 3 18
+
+
+== micropython: threads and a lock
+$ printf 'import _thread, time\ndef w(k, lock, done):\n    with lock: done.append(k)\nlock = _thread.allocate_lock()\ndone = []\nfor k in range(4): _thread.start_new_thread(w, (k, lock, done))\nt0 = time.time()\nwhile len(done) < 4 and time.time() - t0 < 5: time.sleep_ms(10)\nprint("threads", sorted(done))\n' > ca_t.py && /disk/micropython ca_t.py; rm -f ca_t.py
+threads [0, 1, 2, 3]
+
+== wget: a file from the host
+$ /disk/busybox wget -q -O - HOSTURL/hello.txt
+hello from the host
+
+== wget: 1 MiB from the host
+$ /disk/busybox wget -q -O ca_w.bin HOSTURL/mib.bin && /disk/busybox md5sum ca_w.bin; rm -f ca_w.bin
+85bfb9943e6f0cb09f0f52679e9eac2b  ca_w.bin
+
+== wget: a missing file is an error
+$ /disk/busybox wget -q -O ca_x HOSTURL/nope; echo status $?; rm -f ca_x
+wget: server returned error: HTTP/1.0 404 File not found
+status 1
+
+== httpd: serve a page, fetch it over loopback
+$ mkdir ca_www && echo served by bastios > ca_www/index.html && (/disk/busybox httpd -f -p 18088 -h ca_www & echo $! > ca_pid; sleep 1; /disk/busybox wget -q -O - http://127.0.0.1:18088/ && /disk/busybox wget -q -O - http://127.0.0.1:18088/none; echo status $?; kill $(cat ca_pid)); rm -rf ca_www ca_pid
+served by bastios
+wget: server returned error: HTTP/1.1 404 Not Found
+status 1
+
+== nc: a raw HTTP request to the host
+$ printf 'GET /hello.txt HTTP/1.0\r\n\r\n' | /disk/busybox nc HOSTADDR | /disk/busybox tail -n 1
+hello from the host

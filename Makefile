@@ -323,7 +323,11 @@ QUICKJS_GIT   ?= https://github.com/bellard/quickjs
 QUICKJS_REV   ?= 535a7c250ff4a577ec36c3e103daab6dadeea650
 SQLITE_GIT    ?= https://github.com/sqlite/sqlite
 SQLITE_TAG    ?= version-3.52.0
-COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3
+MPY_GIT       ?= https://github.com/micropython/micropython
+MPY_TAG       ?= v1.24.1
+KILO_GIT      ?= https://github.com/antirez/kilo
+KILO_REV      ?= 323d93b29bd89a2cb446de90c4ed4fea1764176e
+COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo
 APP_CFLAGS    := -static-pie -fPIE -O2 -w -s
 
 build/compat/src:
@@ -349,6 +353,25 @@ build/compat/sqlite3: | build/compat/src
 	cd build/compat/src/sqlite && ./configure --disable-tcl >/dev/null && $(MAKE) -s sqlite3.c shell.c >/dev/null
 	$(MUSLCC) $(APP_CFLAGS) -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION -o $@ \
 	  build/compat/src/sqlite/shell.c build/compat/src/sqlite/sqlite3.c -lm
+
+# MicroPython's unix port, without the modules that need libraries musl
+# does not bring (ffi, btree, ssl).
+build/compat/micropython: | build/compat/src
+	rm -rf build/compat/src/micropython
+	git clone -q --depth 1 --branch $(MPY_TAG) $(MPY_GIT) build/compat/src/micropython
+	git -C build/compat/src/micropython submodule -q update --init --depth 1 lib/micropython-lib
+	$(MAKE) -C build/compat/src/micropython/mpy-cross -s >/dev/null
+	$(MAKE) -C build/compat/src/micropython/ports/unix -s CC=$(MUSLCC) CFLAGS_EXTRA=-fPIE LDFLAGS_EXTRA=-static-pie \
+	  MICROPY_PY_FFI=0 MICROPY_PY_BTREE=0 MICROPY_PY_SSL=0 MICROPY_SSL_AXTLS=0 >/dev/null
+	cp build/compat/src/micropython/ports/unix/build-standard/micropython $@
+
+# kilo, a small editor that puts the terminal in raw mode (test/compat/tty.txt).
+build/compat/kilo: | build/compat/src
+	rm -rf build/compat/src/kilo && mkdir build/compat/src/kilo
+	git -C build/compat/src/kilo init -q
+	git -C build/compat/src/kilo fetch -q --depth 1 $(KILO_GIT) $(KILO_REV)
+	git -C build/compat/src/kilo checkout -q FETCH_HEAD
+	$(MUSLCC) $(APP_CFLAGS) -o $@ build/compat/src/kilo/kilo.c
 
 # Building C on BastiOS: tcc and GNU make on a second disk (test/compat/
 # devdisk.sh) with a small C runtime under /disk/c, which tcc is configured
