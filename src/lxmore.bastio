@@ -51,14 +51,7 @@ fn pipe_put_xfer(k: &mut Kernel, p: u64, n: u64) -> u64
   }
   let put = smaller(n, room);
   let head = pi_get(k.pipes, p, 0) % PIPE_CAP;
-  let ring = p * PIPE_CAP;
-  let mut i = 0;
-  while i < put
-    invariant i <= put && put <= room && put <= XFER && head < PIPE_CAP && ring + PIPE_CAP <= PIPE_BYTES && kok(k)
-  {
-    bset(&mut k.pipebuf, ring + (head + count + i) % PIPE_CAP, bget(k.fs.xfer, i));
-    i = i + 1;
-  }
+  ring_in(&mut k.pipebuf, p * PIPE_CAP, PIPE_CAP, (head + count) % PIPE_CAP, k.fs.xfer, 0, put);
   pi_set(&mut k.pipes, p, 1, count + put);
   return put;
 }

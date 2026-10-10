@@ -607,13 +607,7 @@ fn ux_send(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool) -
     bset(&mut k.uxb, c * UX_CAP + (head + count) % UX_CAP, cast[u8](got % 256));
     bset(&mut k.uxb, c * UX_CAP + (head + count + 1) % UX_CAP, cast[u8](got / 256 % 256));
   }
-  let mut i = 0;
-  while i < got
-    invariant i <= got && got <= UX_CAP - count - lead && head < UX_CAP && c < UX_N && kok(k)
-  {
-    bset(&mut k.uxb, c * UX_CAP + (head + count + lead + i) % UX_CAP, bget(k.fs.xfer, i));
-    i = i + 1;
-  }
+  ring_in(&mut k.uxb, c * UX_CAP, UX_CAP, (head + count + lead) % UX_CAP, k.fs.xfer, 0, got);
   uc_set(&mut k, c, 1, count + lead + got);
   return got;
 }
@@ -658,13 +652,7 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
     return 0;
   }
   let want = smaller(smaller(n, avail), XFER);
-  let mut i = 0;
-  while i < want
-    invariant i <= want && want <= XFER && head < UX_CAP && c < UX_N && kok(k)
-  {
-    bset(&mut k.fs.xfer, i, bget(k.uxb, c * UX_CAP + (head + lead + i) % UX_CAP));
-    i = i + 1;
-  }
+  ring_out(&mut k.fs.xfer, 0, k.uxb, c * UX_CAP, UX_CAP, (head + lead) % UX_CAP, want);
   let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
   if put == NO_RESULT || put != want {
     return EFAULT;
