@@ -107,15 +107,15 @@ fn lx_listen(k: &mut Kernel, pid: u64, fd: u64) -> u64
   if tk.mode == TM_LISTEN {
     return 0;
   }
-  if tk.mode != TM_NEW || tk.port == 0 {
-    return EINVAL;                          // no ephemeral listeners
+  if tk.mode != TM_NEW {
+    return EINVAL;
   }
-  let t = tcp_listen(&mut k.nic, tk.port);
+  let t = tcp_listen(&mut k.nic, tk.port);    // port 0: an ephemeral one
   if t >= TCBS {
     return EADDRINUSE;
   }
   of_set(&mut k.ofd, tk.h, 2, t);
-  of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, tk.port, TM_LISTEN));
+  of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, tcp_local_port(k.nic, t), TM_LISTEN));
   return 0;
 }
 

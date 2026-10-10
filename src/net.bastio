@@ -65,6 +65,9 @@ const SOCKS: u64 = 8;                 // UDP sockets in the table
 const RXQ: u64 = 4;                   // datagrams each socket can queue
 const UDP_MAX: u64 = 1472;            // the largest payload one frame carries
 const NO_SOCK: u64 = 18446744073709551615;
+const LOQ: u64 = 8;                   // frames the loopback queue holds
+const LO_NET: u64 = 127;              // 127.0.0.0/8: this machine
+const LO_IP: u64 = 0x7F000001;        // 127.0.0.1
 const EPH_LO: u64 = 49152;            // ephemeral ports: 49152 .. 65535
 const EPH_N: u64 = 16384;
 // A socket's words in the table.
@@ -117,6 +120,10 @@ struct Net {
   trx: Bytes,         // their receive buffers, TCP_BUF bytes each
   ttx: Bytes,         // their send buffers (unacknowledged, then unsent)
   iss: u64,           // the next initial sequence number
+  lo: Bytes,          // frames sent to ourselves, LOQ slots of RX_BUF bytes,
+  lo_len: Buf,        // their lengths,
+  lo_head: u64,       // the oldest one's slot,
+  lo_n: u64,          // and how many are queued
 }
 
 spec fn net_ok(n: &Net) -> bool {
@@ -126,6 +133,7 @@ spec fn net_ok(n: &Net) -> bool {
   && n.dhcp_xid <= IP_MAX && n.dhcp_offer <= IP_MAX && n.dhcp_server <= IP_MAX
   && len(n.socks) == SOCKS * SOCK_FIELDS && blen(n.dq) == SOCKS * RXQ * UDP_MAX
   && len(n.tcbs) == TCBS * TCB_W && blen(n.trx) == TCBS * TCP_BUF && blen(n.ttx) == TCBS * TCP_BUF
+  && blen(n.lo) == LOQ * RX_BUF && len(n.lo_len) == LOQ && n.lo_head < LOQ && n.lo_n <= LOQ
 }
 
 // ---------------------------------------------------------------- bytes
@@ -319,11 +327,41 @@ fn arp_learn(n: &mut Net, ip: u64, mac: u64)
 
 /// The address a frame for `ip` goes to: ip itself on our subnet, else the
 /// gateway.
+/// Is `ip` this machine: 127.0.0.0/8, or our own address?
+fn is_local(n: &Net, ip: u64) -> bool
+  requires net_ok(n)
+{
+  return ip / 16777216 == LO_NET || (ip == n.ip && n.ip != 0);
+}
+
+/// The source address for a packet to `dst`: a loopback address answers
+/// from itself, everything else comes from our address.
+fn src_ip(n: &Net, dst: u64) -> u64
+  requires net_ok(n)
+  ensures result <= IP_MAX || result == dst
+{
+  if dst / 16777216 == LO_NET {
+    return dst;
+  }
+  return n.ip;
+}
+
+/// Where a packet addressed to `ip` goes: to 0.0.0.0 means this machine,
+/// as on Linux, so it goes to 127.0.0.1.
+fn dst_ip(ip: u64) -> u64
+  ensures (ip <= IP_MAX ==> result <= IP_MAX) && result != 0
+{
+  if ip == 0 {
+    return LO_IP;
+  }
+  return ip;
+}
+
 fn next_hop(n: &Net, ip: u64) -> u64
   requires net_ok(n)
   ensures result <= IP_MAX || result == ip
 {
-  if ip / n.span == n.ip / n.span {
+  if is_local(n, ip) || ip / n.span == n.ip / n.span {
     return ip;
   }
   return n.gw;
@@ -348,13 +386,56 @@ fn arp_send(n: &mut Net, op: u64, eth_dst: u64, tmac: u64, tip: u64) -> bool
   return net_send(&mut n, 42);
 }
 
+/// Queues the outgoing frame for net_poll to take in as if it had arrived.
+/// A full queue drops it, as a busy card would; TCP sends it again.
+fn lo_send(n: &mut Net, flen: u64) -> bool
+  requires net_ok(n) && flen <= FRAME_MAX
+  ensures net_ok(n)
+{
+  if n.lo_n >= LOQ {
+    return false;
+  }
+  let slot = (n.lo_head + n.lo_n) % LOQ;
+  let base = slot * RX_BUF;
+  let mut i = 0;
+  while i < flen
+    invariant i <= flen && net_ok(n) && slot < LOQ
+  {
+    bset(&mut n.lo, base + i, bget(n.out, i));
+    i = i + 1;
+  }
+  n.lo_len = set(n.lo_len, slot, flen);
+  n.lo_n = n.lo_n + 1;
+  if n.tx < 18446744073709551615 {
+    n.tx = n.tx + 1;
+  }
+  return true;
+}
+
+/// Sends an answer straight back to where a frame came from: to the MAC
+/// already in the outgoing frame, or round the loopback queue if it came
+/// from this machine (`ip`: the address it came from).
+fn reply_send(n: &mut Net, ip: u64, flen: u64) -> bool
+  requires net_ok(n) && flen <= FRAME_MAX
+  ensures net_ok(n)
+{
+  if is_local(n, ip) {
+    return lo_send(&mut n, flen);
+  }
+  return net_send(&mut n, flen);
+}
+
 /// Sends the outgoing frame (its first flen bytes, Ethernet header aside)
 /// to `hop`: now if its MAC is cached, else once ARP answers. A frame
-/// already held for an answer is replaced.
+/// already held for an answer is replaced. A frame for this machine goes
+/// round the loopback queue instead.
 fn send_via(n: &mut Net, hop: u64, flen: u64) -> bool
   requires net_ok(n) && hop <= IP_MAX && 14 <= flen && flen <= FRAME_MAX
   ensures net_ok(n)
 {
+  if is_local(n, hop) {
+    return lo_send(&mut n, flen);
+  }
   let mac = arp_find(n, hop);
   if mac != 0 {
     put48(&mut n.out, 0, mac);
@@ -426,7 +507,7 @@ fn ip_header(n: &mut Net, total: u64, proto: u64, dst: u64)
   bset(&mut n.out, 22, 64);           // time to live
   bset(&mut n.out, 23, cast[u8](proto));
   put16(&mut n.out, 24, 0);
-  put32(&mut n.out, 26, n.ip);
+  put32(&mut n.out, 26, src_ip(n, dst));
   put32(&mut n.out, 30, dst);
   put16(&mut n.out, 24, csum(n.out, 14, 20));
 }
@@ -437,7 +518,7 @@ fn udp_seal(n: &mut Net, dst: u64, ulen: u64)
   ensures net_ok(n)
 {
   put16(&mut n.out, 40, 0);
-  let mut c = 65535 - l4_sum(n.out, n.ip, dst, IP_UDP, ulen);
+  let mut c = 65535 - l4_sum(n.out, src_ip(n, dst), dst, IP_UDP, ulen);
   if c == 0 {
     c = 65535;                        // 0 would mean "no checksum"
   }
@@ -457,7 +538,7 @@ fn icmp_echo_reply(n: &mut Net, total: u64)
   bset(&mut n.out, 34, cast[u8](ICMP_ECHO_REPLY));
   put16(&mut n.out, 36, 0);
   put16(&mut n.out, 36, csum(n.out, 34, total - 20));
-  net_send(&mut n, 14 + total);
+  reply_send(&mut n, src, 14 + total);
 }
 
 /// Echoes a UDP datagram (already checked: ulen fits in total) back to
@@ -476,7 +557,7 @@ fn udp_echo(n: &mut Net, ulen: u64)
   put16(&mut n.out, 34, dport);
   put16(&mut n.out, 36, sport);
   udp_seal(&mut n, src, ulen);
-  net_send(&mut n, 34 + ulen);
+  reply_send(&mut n, src, 34 + ulen);
 }
 
 /// A UDP datagram for us (total: the IP length, checked against the
@@ -520,7 +601,7 @@ fn ip_in(n: &mut Net, flen: u64)
   // lease is being sought the address offered.
   let dst = be32(n.pkt, 30);
   let seeking = n.dhcp_state == DHCP_DISCOVER || n.dhcp_state == DHCP_REQUEST;
-  let mine = (dst == n.ip && n.ip != 0) || (seeking && dst == n.dhcp_offer && dst != 0);
+  let mine = is_local(n, dst) || (seeking && dst == n.dhcp_offer && dst != 0);
   if !mine && !(dst == IP_MAX && cast[u64](bget(n.pkt, 23)) == IP_UDP) {
     return;
   }
@@ -931,12 +1012,13 @@ fn udp_bind(n: &mut Net, s: u64, port: u64) -> bool
 /// NO_SOCK if it cannot be sent (bad socket or address, or too big). It
 /// does not wait: if the next hop's MAC is not known yet, the datagram is
 /// held and goes out when ARP answers.
-fn udp_sendto(n: &mut Net, s: u64, ip: u64, port: u64, buf: &Bytes, size: u64) -> u64
+fn udp_sendto(n: &mut Net, s: u64, to: u64, port: u64, buf: &Bytes, size: u64) -> u64
   requires net_ok(n)
   ensures net_ok(n)
 {
+  let ip = dst_ip(to);
   if !udp_is_open(n, s) || ip > IP_MAX || port == 0 || port > 65535
-    || size > UDP_MAX || size > blen(buf) || !card_live(n.dev) || n.ip == 0 {
+    || size > UDP_MAX || size > blen(buf) || (!card_live(n.dev) && !is_local(n, ip)) || (n.ip == 0 && ip / 16777216 != LO_NET) {
     return NO_SOCK;
   }
   if sk_get(n, s, S_PORT) == 0 && udp_bind_any(&mut n, s) == 0 {
@@ -1014,6 +1096,33 @@ fn net_poll(n: &mut Net)
   requires net_ok(n)
   ensures net_ok(n)
 {
+  // Frames we sent ourselves first: those queued now, not the answers
+  // they cause, which wait for the next poll.
+  let mut q = n.lo_n;
+  while q > 0
+    invariant net_ok(n)
+  {
+    let slot = n.lo_head;
+    let flen = get(n.lo_len, slot);
+    n.lo_head = (slot + 1) % LOQ;
+    if n.lo_n > 0 {
+      n.lo_n = n.lo_n - 1;
+    }
+    if flen <= FRAME_MAX {
+      let mut i = 0;
+      while i < flen
+        invariant i <= flen && net_ok(n) && slot < LOQ
+      {
+        bset(&mut n.pkt, i, bget(n.lo, slot * RX_BUF + i));
+        i = i + 1;
+      }
+      if n.rx < 18446744073709551615 {
+        n.rx = n.rx + 1;
+      }
+      ip_in(&mut n, flen);
+    }
+    q = q - 1;
+  }
   let mut k = 0;
   while k < RX_BUFS
     invariant k <= RX_BUFS && net_ok(n)
@@ -1122,7 +1231,8 @@ fn net_up(d: Card) -> Nic
     dhcp_state: DHCP_OFF, dhcp_xid: 0, dhcp_offer: 0, dhcp_server: 0, dhcp_tries: 0, dhcp_until: 0, now: 0,
     ping_state: PING_IDLE, ping_pid: 0, ping_ip: 0, ping_hop: 0, ping_until: 0, seq: 0, rx: 0, tx: 0,
     socks: alloc(SOCKS * SOCK_FIELDS), dq: balloc(SOCKS * RXQ * UDP_MAX), eph: 0,
-    tcbs: alloc(TCBS * TCB_W), trx: balloc(TCBS * TCP_BUF), ttx: balloc(TCBS * TCP_BUF), iss: 0 };
+    tcbs: alloc(TCBS * TCB_W), trx: balloc(TCBS * TCP_BUF), ttx: balloc(TCBS * TCP_BUF), iss: 0,
+    lo: balloc(LOQ * RX_BUF), lo_len: alloc(LOQ), lo_head: 0, lo_n: 0 };
   // The address comes from DHCP, sought from now on.
   if card_live(n.dev) {
     n.dhcp_xid = card_mac(n.dev) % 4294967296;
@@ -1274,6 +1384,8 @@ fn nic_free(ports: &mut Ports, win: &mut MmioSpace, c: Nic, m: &mut Mem)
       free(n.arp);
       free(n.socks);
       bfree(n.dq);
+      bfree(n.lo);
+      free(n.lo_len);
       card_free(&mut ports, &mut win, n.dev, &mut m);
     },
   }

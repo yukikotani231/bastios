@@ -157,11 +157,16 @@ t_misc: sync
 t_misc: tcgetattr
 t_misc: tcsetattr
 t_net: SO_REUSEADDR
+t_net: TCP bind/listen
+t_net: TCP loopback connect/accept
 t_net: TCP socket
 t_net: TCP_NODELAY
 t_net: UDP bind port 0
+t_net: UDP loopback
 t_net: UDP socket
+t_net: getaddrinfo localhost
 t_net: getaddrinfo numeric
+t_net: getsockopt SO_TYPE
 t_net: inet_pton
 t_proc: child's getppid is the parent
 t_proc: environment

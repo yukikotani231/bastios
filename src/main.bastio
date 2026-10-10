@@ -433,8 +433,8 @@ fn ack(pic: &mut Pic, v: u64)
 // The files the file system starts with, built into the kernel image.
 // elfdemo is a Linux program (the elfpie test) that execve runs as a file.
 // /etc/passwd and /etc/group name root, the only user, for Linux programs
-// (whoami, ls -l, getpwuid).
-const NINIT: u64 = 5;
+// (whoami, ls -l, getpwuid). /etc/hosts names localhost (getaddrinfo).
+const NINIT: u64 = 6;
 
 fn init_name(i: u64) -> Str {
   if i == 0 {
@@ -448,6 +448,9 @@ fn init_name(i: u64) -> Str {
   }
   if i == 3 {
     return "etc/group";
+  }
+  if i == 4 {
+    return "etc/hosts";
   }
   return "elfdemo";
 }
@@ -464,6 +467,9 @@ fn init_data(i: u64) -> Str {
   }
   if i == 3 {
     return include_bytes("../files/group");
+  }
+  if i == 4 {
+    return include_bytes("../files/hosts");
   }
   return include_bytes("../build/user/elfpie.elf");
 }
