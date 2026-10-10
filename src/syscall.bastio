@@ -35,6 +35,14 @@ const SYS_SENDTO: u64 = 43;           // (socket + 256 * port + 2^24 * address, 
 const SYS_RECVFROM: u64 = 44;         // (socket, buffer, length) -> length; NO_RESULT if none waits
 const SYS_PEER: u64 = 45;             // (socket) -> 65536 * address + port of the last sender
 const SYS_SCLOSE: u64 = 46;           // (socket) -> 0
+const SYS_TCP_LISTEN: u64 = 48;       // (port) -> a listener
+const SYS_TCP_ACCEPT: u64 = 49;       // (listener) -> a connection; NO_RESULT if none is ready
+const SYS_TCP_CONNECT: u64 = 50;      // (65536 * address + port) -> a connection (poll SYS_TCP_STATUS)
+const SYS_TCP_SEND: u64 = 51;         // (connection, buffer, length) -> bytes taken (0: full, try again)
+const SYS_TCP_RECV: u64 = 52;         // (connection, buffer, length) -> bytes; 0 at the end; TCP_AGAIN if none yet
+const SYS_TCP_CLOSE: u64 = 53;        // (connection or listener) -> 0
+const SYS_TCP_STATUS: u64 = 54;       // (connection) -> 0 connecting, 1 open, 2 closed or reset
+const SYS_TCP_PEER: u64 = 55;         // (connection) -> 65536 * address + port
 const SYS_NETINFO: u64 = 47;          // (what) -> 0 address, 1 gateway, 2 netmask, 3 how (0 not yet, 1 DHCP, 2 static)
 const SYS_STAT: u64 = 18;             // (_, name, name length) -> size
 
@@ -375,6 +383,44 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     }
     return NO_RESULT;
   }
+  if n == SYS_TCP_LISTEN {
+    return tcp_listen(&mut k.nic, a);
+  }
+  if n == SYS_TCP_ACCEPT {
+    return tcp_accept(&mut k.nic, a);
+  }
+  if n == SYS_TCP_CONNECT {
+    return tcp_connect(&mut k.nic, a / 65536, a % 65536);
+  }
+  if n == SYS_TCP_SEND {
+    let got = copy_from_user(&mut k.spaces, pid, b, &mut k.fs.xfer, smaller(c, XFER));
+    if got == NO_RESULT {
+      return NO_RESULT;
+    }
+    return tcp_send(&mut k.nic, a, k.fs.xfer, got);
+  }
+  if n == SYS_TCP_RECV {
+    let got = tcp_recv(&mut k.nic, a, &mut k.fs.xfer, smaller(c, XFER));
+    if got == NO_SOCK || got == TCP_AGAIN {
+      return got;
+    }
+    if copy_to_user(&mut k.spaces, pid, b, k.fs.xfer, got) == NO_RESULT {
+      return NO_RESULT;
+    }
+    return got;
+  }
+  if n == SYS_TCP_CLOSE {
+    if tcp_close(&mut k.nic, a) {
+      return 0;
+    }
+    return NO_RESULT;
+  }
+  if n == SYS_TCP_STATUS {
+    return tcp_status(k.nic, a);
+  }
+  if n == SYS_TCP_PEER {
+    return tcp_peer_ip(k.nic, a) * 65536 + tcp_peer_port(k.nic, a);
+  }
   return NO_RESULT;
 }
 
@@ -523,7 +569,7 @@ fn syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, nic_info(k.nic, a));
     return KEEP;
   }
-  if SYS_SOCKET <= n && n <= SYS_SCLOSE {
+  if (SYS_SOCKET <= n && n <= SYS_SCLOSE) || (SYS_TCP_LISTEN <= n && n <= SYS_TCP_PEER) {
     ret(&mut k.procs, pid, net_call(&mut k, pid, n, a, b, c));
     return KEEP;
   }
