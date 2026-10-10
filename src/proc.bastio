@@ -36,6 +36,10 @@ const F_RESTART: u64 = 31;
 const F_TGID: u64 = 32;
 const F_CTID: u64 = 33;
 const F_FUTEX: u64 = 34;
+// Linux process groups and sessions (src/lxsig.bastio): the group and the
+// session, 0 meaning the process's own pid.
+const F_PGID: u64 = 35;
+const F_SID: u64 = 36;
 const SIG_DEATH: u64 = 256;          // F_CODE of a process a signal ended: 256 + the signal
 
 // Saved register numbers.
@@ -381,6 +385,7 @@ const AT_REMOVEDIR: u64 = 0x200;
 const DENT_BUF: u64 = 2048;           // the most getdents64 fills in one call
 const ENOTDIR: u64 = 18446744073709551596;  // 2^64 - 20
 const EEXIST: u64 = 18446744073709551599;   // 2^64 - 17
+const EPERM: u64 = 18446744073709551615;    // 2^64 - 1
 const LO_EXCL: u64 = 0x80;
 const LO_DIRECTORY: u64 = 0x10000;
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
