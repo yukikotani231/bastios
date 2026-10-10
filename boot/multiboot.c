@@ -58,10 +58,11 @@ uint32_t bst_multiboot_info(uint32_t magic, uint32_t info) {
         for (uint32_t i = 0; i < sizeof mb1; i++) out[i] = (uint8_t)rd8(info + i);
         uint32_t flags = rd32(info);
         if (flags & (1u << 2)) keep_cmdline(rd32(info + 16), IDENT_LIMIT);
+        flags &= (1u << 0) | (1u << 6) | (1u << 12);   /* what the copy keeps valid */
         if (flags & (1u << 6)) {
             uint64_t at = rd32(info + 48), end = at + rd32(info + 44), n = 0;
             if (end > IDENT_LIMIT) end = at;
-            for (uint64_t e = at; e + 24 <= end && n < MAX_REGIONS && rd32(e) >= 20; e += rd32(e) + 4, n++) {
+            for (uint64_t e = at; e + 24 <= end && n < MAX_REGIONS && rd32(e) >= 20; e += (uint64_t)rd32(e) + 4, n++) {
                 uint8_t *m = mmap1 + 24 * n;
                 put32(m, 20);
                 put64(m + 4, rd64(e + 4));
@@ -71,6 +72,7 @@ uint32_t bst_multiboot_info(uint32_t magic, uint32_t info) {
             put32(out + 44, 24 * n);
             put32(out + 48, (uint32_t)(uint64_t)mmap1);
         }
+        put32(out, flags);
         info_mb1 = (uint64_t)mb1;
         return (uint32_t)(uint64_t)mb1;
     }
@@ -145,7 +147,7 @@ uint64_t bst_boot_region(uint64_t n, uint64_t f) {
     if (!mb || !(rd32(mb) & (1u << 6)) || f > 2) return 0;
     uint64_t at = rd32(mb + 48), end = at + rd32(mb + 44);
     if (end > IDENT_LIMIT) return 0;
-    for (uint64_t e = at; e + 24 <= end; e += rd32(e) + 4, n--) {
+    for (uint64_t e = at; e + 24 <= end; e += (uint64_t)rd32(e) + 4, n--) {
         if (rd32(e) < 20) return 0;
         if (n == 0) return f == 0 ? rd64(e + 4) : f == 1 ? rd64(e + 12) : rd32(e + 20);
     }

@@ -675,6 +675,10 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Fixed
 
+- The copy of the Multiboot 1 boot information keeps only the flags whose
+  fields point into the copy (memory size, memory map, framebuffer), and
+  the memory map walks no longer stall on an entry size that wraps 32
+  bits. QEMU's loader triggers neither.
 - `mprotect(PROT_NONE)` and a `PROT_NONE` file or `MAP_SHARED` mapping made
   the pages read-only, not inaccessible: the program and the system calls it
   made could still read them. Such a page is now kept mapped but hidden
