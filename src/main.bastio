@@ -215,7 +215,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     puts(&mut con, "disk: virtio\r\n");
   }
   // The network card, if any: nine pages after the disk's four.
-  let mut nic = nic_new(&mut ports, &mut pci, &mut m, 4, dev_lo, dev_hi);
+  let nic = nic_new(&mut ports, &mut pci, &mut m, 4, dev_lo, dev_hi);
   if nic_live(nic) {
     puts(&mut con, "net: virtio, mac ");
     put_mac(&mut con, nic_mac(nic));
@@ -238,7 +238,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     vec_push(&mut fpus, Fpu::None);
     q = q + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), ticks: 0, ns: 0, cpus: cpus, fs: vfs_new(disk) };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), ticks: 0, ns: 0, cpus: cpus, fs: vfs_new(disk), nic: nic };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
@@ -246,9 +246,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut cur = 1;
   let mut running = true;
   while running
-    invariant kok(k) && mmu_root(mmu) == KERNEL_ROOT && cur < NPROC && nic_ok(nic)
+    invariant kok(k) && mmu_root(mmu) == KERNEL_ROOT && cur < NPROC
   {
-    nic_poll(&mut nic);
+    nic_poll(&mut k.nic);
     drain(&mut con, &mut k.q);
     tty_cook(&mut con, &mut k);
     wake_readers(&mut k.procs, &mut k.q, k.line);
@@ -271,9 +271,6 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
         k.ticks = tick(k.ticks);
         pset(&mut k.procs, p, F_TICKS, tick(pget(k.procs, p, F_TICKS)));
         cur = (p + 1) % NPROC;
-      } else if v == V_SYSCALL && pget(k.procs, p, F_REGS + R_RAX) == SYS_PING {
-        // The network is the kernel loop's, so its call is handled here.
-        ret(&mut k.procs, p, nic_ping(&mut nic, pget(k.procs, p, F_REGS + R_RDI)));
       } else if v == V_SYSCALL {
         k.ns = hpet_ns(&mut clock);
         let r = syscall(&mut con, &mut k, mmu, p);
@@ -323,7 +320,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   vec_free(k.fpus);
   blk_free(&mut ports, vfs_free(k.fs, &mut k.mem), &mut k.mem);
-  nic_free(&mut ports, nic, &mut k.mem);
+  nic_free(&mut ports, k.nic, &mut k.mem);
   puts(&mut con, "BastiOS: ");
   put_num(&mut con, count_free(k.mem.bm));
   puts(&mut con, " pages free at power off\r\n");

@@ -1,7 +1,8 @@
 // A minimal IPv4 stack over the virtio network card: Ethernet, ARP, IPv4
 // without options or fragments, ICMP echo (it answers pings and can send
 // them) and UDP echo on port 7. The address is fixed for QEMU's user-mode
-// network: 10.0.2.15, gateway 10.0.2.2.
+// network: 10.0.2.15, gateway 10.0.2.2. On top sits a small table of UDP
+// sockets, which the native and the Linux system calls share.
 //
 // Every frame is parsed out of a byte buffer, and the proof shows that no
 // read or write leaves the buffer and no length field read off the wire can
@@ -28,6 +29,20 @@ const PING_ID: u64 = 0x4253;          // "BS"
 const PING_DATA: u64 = 32;
 const NET_SPINS: u64 = 2000000;
 
+const SOCKS: u64 = 8;                 // UDP sockets in the table
+const UDP_MAX: u64 = 1472;            // the largest payload one frame carries
+const NO_SOCK: u64 = 18446744073709551615;
+const EPH_LO: u64 = 49152;            // ephemeral ports: 49152 .. 65535
+const EPH_N: u64 = 16384;
+// A socket's words in the table.
+const S_OPEN: u64 = 0;                // 1 while open
+const S_PORT: u64 = 1;                // its local port, 0 until bound
+const S_HAS: u64 = 2;                 // 1 while a datagram is queued
+const S_LEN: u64 = 3;                 // its length
+const S_PEER_IP: u64 = 4;             // who sent the last datagram
+const S_PEER_PORT: u64 = 5;
+const SOCK_FIELDS: u64 = 6;
+
 struct Net {
   dev: VNet,
   pkt: Bytes,         // the frame being handled
@@ -38,11 +53,15 @@ struct Net {
   got: bool,          // its reply has arrived
   rx: u64,            // frames received and sent
   tx: u64,
+  socks: Buf,         // the UDP sockets, SOCK_FIELDS words each
+  dq: Bytes,          // each socket's queued datagram, UDP_MAX bytes each
+  eph: u64,           // where the next ephemeral port search starts
 }
 
 spec fn net_ok(n: &Net) -> bool {
   vnet_ok(n.dev) && blen(n.pkt) == RX_BUF && blen(n.out) == RX_BUF
   && n.arp_mac < MAC_LIMIT && n.seq <= 65535
+  && len(n.socks) == SOCKS * SOCK_FIELDS && blen(n.dq) == SOCKS * UDP_MAX
 }
 
 // ---------------------------------------------------------------- bytes
@@ -202,6 +221,217 @@ fn arp_in(n: &mut Net, flen: u64)
   }
 }
 
+// ---------------------------------------------------------------- UDP sockets
+
+fn sk_get(n: &Net, s: u64, f: u64) -> u64
+  requires net_ok(n) && s < SOCKS && f < SOCK_FIELDS
+  ensures result == get(n.socks, s * SOCK_FIELDS + f)
+{
+  return get(n.socks, s * SOCK_FIELDS + f);
+}
+
+fn sk_set(n: &mut Net, s: u64, f: u64, v: u64)
+  requires net_ok(n) && s < SOCKS && f < SOCK_FIELDS
+  ensures net_ok(n)
+{
+  n.socks = set(n.socks, s * SOCK_FIELDS + f, v);
+}
+
+/// The open socket bound to `port`, or SOCKS if there is none.
+fn sock_find(n: &Net, port: u64) -> u64
+  requires net_ok(n)
+  ensures result <= SOCKS
+{
+  if port == 0 {
+    return SOCKS;
+  }
+  let mut s = 0;
+  while s < SOCKS
+    invariant s <= SOCKS
+  {
+    if sk_get(n, s, S_OPEN) == 1 && sk_get(n, s, S_PORT) == port {
+      return s;
+    }
+    s = s + 1;
+  }
+  return SOCKS;
+}
+
+/// Queues the payload of the UDP datagram in the received frame on socket
+/// s. A socket holds one datagram: another that arrives before it is read
+/// is dropped, which UDP allows.
+fn udp_deliver(n: &mut Net, s: u64, total: u64)
+  requires net_ok(n) && s < SOCKS && 28 <= total && total <= FRAME_MAX - 14
+  ensures net_ok(n)
+{
+  let ulen = be16(n.pkt, 38);
+  if ulen < 8 || ulen > total - 20 || sk_get(n, s, S_HAS) == 1 {
+    return;
+  }
+  let plen = ulen - 8;
+  let at = s * UDP_MAX;
+  let mut i = 0;
+  while i < plen
+    invariant i <= plen && net_ok(n)
+  {
+    bset(&mut n.dq, at + i, bget(n.pkt, 42 + i));
+    i = i + 1;
+  }
+  sk_set(&mut n, s, S_LEN, plen);
+  sk_set(&mut n, s, S_PEER_IP, be32(n.pkt, 26));
+  sk_set(&mut n, s, S_PEER_PORT, be16(n.pkt, 34));
+  sk_set(&mut n, s, S_HAS, 1);
+}
+
+/// Opens a socket: its index, or NO_SOCK if all are taken.
+fn udp_open(n: &mut Net) -> u64
+  requires net_ok(n)
+  ensures net_ok(n) && (result < SOCKS || result == NO_SOCK)
+{
+  let mut s = 0;
+  while s < SOCKS
+    invariant s <= SOCKS && net_ok(n)
+  {
+    if sk_get(n, s, S_OPEN) != 1 {
+      sk_set(&mut n, s, S_OPEN, 1);
+      sk_set(&mut n, s, S_PORT, 0);
+      sk_set(&mut n, s, S_HAS, 0);
+      sk_set(&mut n, s, S_LEN, 0);
+      sk_set(&mut n, s, S_PEER_IP, 0);
+      sk_set(&mut n, s, S_PEER_PORT, 0);
+      return s;
+    }
+    s = s + 1;
+  }
+  return NO_SOCK;
+}
+
+fn udp_is_open(n: &Net, s: u64) -> bool
+  requires net_ok(n)
+  ensures result ==> s < SOCKS
+{
+  return s < SOCKS && sk_get(n, s, S_OPEN) == 1;
+}
+
+/// Binds open, unbound socket s to a free ephemeral port. Returns the
+/// port, or 0 if none was found. There are fewer sockets than tries, so
+/// one of the ports tried is always free.
+fn udp_bind_any(n: &mut Net, s: u64) -> u64
+  requires net_ok(n) && s < SOCKS
+  ensures net_ok(n) && result <= 65535
+{
+  let mut tries = 0;
+  while tries <= SOCKS
+    invariant net_ok(n)
+  {
+    let p = EPH_LO + n.eph % EPH_N;
+    n.eph = (n.eph % EPH_N + 1) % EPH_N;
+    if sock_find(n, p) == SOCKS {
+      sk_set(&mut n, s, S_PORT, p);
+      return p;
+    }
+    tries = tries + 1;
+  }
+  return 0;
+}
+
+/// Binds socket s to `port` (0: any free ephemeral port). False if s is not
+/// open, is already bound, or another socket has the port.
+fn udp_bind(n: &mut Net, s: u64, port: u64) -> bool
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  if !udp_is_open(n, s) || sk_get(n, s, S_PORT) != 0 || port > 65535 {
+    return false;
+  }
+  if port == 0 {
+    return udp_bind_any(&mut n, s) != 0;
+  }
+  if sock_find(n, port) != SOCKS {
+    return false;
+  }
+  sk_set(&mut n, s, S_PORT, port);
+  return true;
+}
+
+/// Sends bytes 0..size of buf as one datagram from socket s to ip:port,
+/// binding s to an ephemeral port first if it has none. Returns size, or
+/// NO_SOCK if it cannot be sent (bad socket or address, too big, or no
+/// ARP answer for the next hop).
+fn udp_sendto(n: &mut Net, s: u64, ip: u64, port: u64, buf: &Bytes, size: u64) -> u64
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  if !udp_is_open(n, s) || ip > 4294967295 || port == 0 || port > 65535
+    || size > UDP_MAX || size > blen(buf) || !n.dev.live {
+    return NO_SOCK;
+  }
+  if sk_get(n, s, S_PORT) == 0 && udp_bind_any(&mut n, s) == 0 {
+    return NO_SOCK;
+  }
+  let sport = sk_get(n, s, S_PORT);
+  if sport > 65535 {
+    return NO_SOCK;
+  }
+  let mac = resolve(&mut n, ip);
+  if mac == 0 {
+    return NO_SOCK;
+  }
+  eth_header(&mut n, mac, ETH_IP);
+  ip_header(&mut n, 28 + size, IP_UDP, ip);
+  put16(&mut n.out, 34, sport);
+  put16(&mut n.out, 36, port);
+  put16(&mut n.out, 38, 8 + size);
+  put16(&mut n.out, 40, 0);           // no checksum (allowed over IPv4)
+  let mut i = 0;
+  while i < size
+    invariant i <= size && net_ok(n)
+  {
+    bset(&mut n.out, 42 + i, bget(buf, i));
+    i = i + 1;
+  }
+  if !net_send(&mut n, 42 + size) {
+    return NO_SOCK;
+  }
+  return size;
+}
+
+/// Takes the datagram queued on socket s, if any: copies up to `max` bytes
+/// of it (and no more than buf holds) to the start of buf and returns that
+/// count, dropping the rest as Linux does. NO_SOCK if nothing is queued;
+/// it never waits.
+fn udp_recvfrom(n: &mut Net, s: u64, buf: &mut Bytes, max: u64) -> u64
+  requires net_ok(n)
+  ensures net_ok(n) && blen(buf) == old(blen(buf))
+  ensures result == NO_SOCK || (result <= blen(buf) && result <= max)
+{
+  net_poll(&mut n);
+  if !udp_is_open(n, s) || sk_get(n, s, S_HAS) != 1 {
+    return NO_SOCK;
+  }
+  let mut l = sk_get(n, s, S_LEN);
+  if l > UDP_MAX {
+    l = UDP_MAX;
+  }
+  if l > max {
+    l = max;
+  }
+  if l > blen(buf) {
+    l = blen(buf);
+  }
+  let at = s * UDP_MAX;
+  let bl = blen(buf);
+  let mut i = 0;
+  while i < l
+    invariant i <= l && net_ok(n) && blen(buf) == bl
+  {
+    bset(&mut buf, i, bget(n.dq, at + i));
+    i = i + 1;
+  }
+  sk_set(&mut n, s, S_HAS, 0);
+  return l;
+}
+
 // ---------------------------------------------------------------- IPv4
 
 /// Fills in an IPv4 header (no options) at 14 and its checksum.
@@ -278,8 +508,16 @@ fn ip_in(n: &mut Net, flen: u64)
     } else if kind == ICMP_ECHO_REPLY && be16(n.pkt, 38) == PING_ID && be16(n.pkt, 40) == n.seq {
       n.got = true;
     }
-  } else if proto == IP_UDP && be16(n.pkt, 36) == UDP_ECHO_PORT {
-    udp_echo(&mut n, total);
+  } else if proto == IP_UDP {
+    // A socket bound to the port gets the datagram; failing that, port 7
+    // echoes it.
+    let dport = be16(n.pkt, 36);
+    let s = sock_find(n, dport);
+    if s < SOCKS {
+      udp_deliver(&mut n, s, total);
+    } else if dport == UDP_ECHO_PORT {
+      udp_echo(&mut n, total);
+    }
   }
 }
 
@@ -439,7 +677,7 @@ fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, at: u64, avoid_lo: u64
   let b1 = take_low_page(&mut m, at + 7);
   let b2 = take_low_page(&mut m, at + 8);
   let v = vnet_new(&mut ports, base, q0, q1, q2, t0, t1, t2, b0, b1, b2);
-  return Nic::Up(Net { dev: v, pkt: balloc(RX_BUF), out: balloc(RX_BUF), arp_ip: 0, arp_mac: 0, seq: 0, got: false, rx: 0, tx: 0 });
+  return Nic::Up(Net { dev: v, pkt: balloc(RX_BUF), out: balloc(RX_BUF), arp_ip: 0, arp_mac: 0, seq: 0, got: false, rx: 0, tx: 0, socks: alloc(SOCKS * SOCK_FIELDS), dq: balloc(SOCKS * UDP_MAX), eph: 0 });
 }
 
 fn nic_poll(c: &mut Nic)
@@ -501,7 +739,167 @@ fn nic_free(ports: &mut Ports, c: Nic, m: &mut Mem)
     Nic::Up(n) => {
       bfree(n.pkt);
       bfree(n.out);
+      free(n.socks);
+      bfree(n.dq);
       vnet_free(&mut ports, n.dev, &mut m);
+    },
+  }
+}
+
+// ---------------------------------------------------------------- sockets, for system calls
+// Each takes the card or none; with none, every call fails.
+
+/// Opens a UDP socket: its number, or NO_SOCK if there is no card or every
+/// socket is taken.
+fn sock_new(c: &mut Nic) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c) && (result < SOCKS || result == NO_SOCK)
+{
+  match c {
+    Nic::None => {
+      c = Nic::None;
+      return NO_SOCK;
+    },
+    Nic::Up(mut n) => {
+      let s = udp_open(&mut n);
+      c = Nic::Up(n);
+      return s;
+    },
+  }
+}
+
+/// Binds socket s to a local port (0: any free ephemeral one).
+fn sock_bind(c: &mut Nic, s: u64, port: u64) -> bool
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => {
+      c = Nic::None;
+      return false;
+    },
+    Nic::Up(mut n) => {
+      let ok = udp_bind(&mut n, s, port);
+      c = Nic::Up(n);
+      return ok;
+    },
+  }
+}
+
+/// Sends bytes 0..size of buf to ip:port. Returns size, or NO_SOCK.
+fn sock_sendto(c: &mut Nic, s: u64, ip: u64, port: u64, buf: &Bytes, size: u64) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => {
+      c = Nic::None;
+      return NO_SOCK;
+    },
+    Nic::Up(mut n) => {
+      let r = udp_sendto(&mut n, s, ip, port, buf, size);
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+/// Takes the datagram queued on s into the start of buf (at most max
+/// bytes). Returns its length, or NO_SOCK if none is queued. Never waits.
+fn sock_recvfrom(c: &mut Nic, s: u64, buf: &mut Bytes, max: u64) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c) && blen(buf) == old(blen(buf))
+  ensures result == NO_SOCK || (result <= blen(buf) && result <= max)
+{
+  match c {
+    Nic::None => {
+      c = Nic::None;
+      return NO_SOCK;
+    },
+    Nic::Up(mut n) => {
+      let r = udp_recvfrom(&mut n, s, &mut buf, max);
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+/// Is a datagram queued on s (so sock_recvfrom would return one)?
+fn sock_ready(c: &Nic, s: u64) -> bool
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return false; },
+    Nic::Up(n) => { return udp_is_open(n, s) && sk_get(n, s, S_HAS) == 1; },
+  }
+}
+
+/// The address and port the last datagram on s came from (0 before any).
+fn sock_peer_ip(c: &Nic, s: u64) -> u64
+  requires nic_ok(c)
+  ensures result <= 4294967295
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if udp_is_open(n, s) && sk_get(n, s, S_PEER_IP) <= 4294967295 {
+        return sk_get(n, s, S_PEER_IP);
+      }
+      return 0;
+    },
+  }
+}
+
+fn sock_peer_port(c: &Nic, s: u64) -> u64
+  requires nic_ok(c)
+  ensures result <= 65535
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if udp_is_open(n, s) && sk_get(n, s, S_PEER_PORT) <= 65535 {
+        return sk_get(n, s, S_PEER_PORT);
+      }
+      return 0;
+    },
+  }
+}
+
+/// The local port s is bound to (0 if none).
+fn sock_port(c: &Nic, s: u64) -> u64
+  requires nic_ok(c)
+  ensures result <= 65535
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if udp_is_open(n, s) && sk_get(n, s, S_PORT) <= 65535 {
+        return sk_get(n, s, S_PORT);
+      }
+      return 0;
+    },
+  }
+}
+
+/// Closes s, dropping any queued datagram. False if it was not open.
+fn sock_close(c: &mut Nic, s: u64) -> bool
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => {
+      c = Nic::None;
+      return false;
+    },
+    Nic::Up(mut n) => {
+      let ok = udp_is_open(n, s);
+      if ok {
+        sk_set(&mut n, s, S_OPEN, 0);
+        sk_set(&mut n, s, S_PORT, 0);
+        sk_set(&mut n, s, S_HAS, 0);
+      }
+      c = Nic::Up(n);
+      return ok;
     },
   }
 }
