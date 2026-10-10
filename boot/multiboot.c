@@ -51,11 +51,36 @@ static void keep_cmdline(uint64_t a, uint64_t limit) {
  * in %eax (magic) and %ebx (info); 0 if it is neither form. */
 uint32_t bst_multiboot_info(uint32_t magic, uint32_t info) {
     if (magic == MB1_MAGIC) {
-        if (info != 0 && info <= IDENT_LIMIT - 52) {
-            info_mb1 = info;
-            if (rd32(info) & (1u << 2)) keep_cmdline(rd32(info + 16), IDENT_LIMIT);
+        /* Copied too, like the Multiboot 2 form. The kernel reads it back
+         * (boot_fb, the memory map) after the page pool is handed out, and
+         * a loader may put it anywhere below 4 GiB, the pool included.
+         * QEMU's -kernel puts it at 0x9500, below the pool; this guards
+         * other loaders, it fixes nothing seen under QEMU. */
+        if (info == 0 || info > IDENT_LIMIT - sizeof mb1) return 0;
+        uint8_t *out = (uint8_t *)mb1;
+        for (uint32_t i = 0; i < sizeof mb1; i++) out[i] = (uint8_t)rd8(info + i);
+        uint32_t flags = rd32(info);
+        if (flags & (1u << 2)) keep_cmdline(rd32(info + 16), IDENT_LIMIT);
+        flags &= (1u << 0) | (1u << 6) | (1u << 12);   /* what the copy keeps valid */
+        if (flags & (1u << 6)) {
+            /* The map, in entries of any size (each says its own, not
+             * counting its size field), into fixed 24-byte ones. */
+            uint64_t e = rd32(info + 48), end = e + rd32(info + 44), n = 0;
+            if (end > IDENT_LIMIT) end = e;                /* out of reach: an empty map */
+            for (; e + 24 <= end && n < MAX_REGIONS; e += (uint64_t)rd32(e) + 4, n++) {
+                if (rd32(e) < 20) break;
+                uint8_t *m = mmap1 + 24 * n;
+                put32(m, 20);
+                put64(m + 4, rd64(e + 4));
+                put64(m + 12, rd64(e + 12));
+                put32(m + 20, rd32(e + 20));
+            }
+            put32(out + 44, 24 * n);
+            put32(out + 48, (uint32_t)(uint64_t)mmap1);
         }
-        return info;
+        put32(out, flags);
+        info_mb1 = (uint64_t)mb1;
+        return (uint32_t)(uint64_t)mb1;
     }
     if (magic != MB2_MAGIC || info == 0 || info % 8 != 0 || info > IDENT_LIMIT - 16) return 0;
     uint64_t total = rd32(info);
@@ -114,7 +139,7 @@ uint64_t bst_boot_region(uint64_t n, uint64_t f) {
     if (!mb || !(rd32(mb) & (1u << 6)) || f > 2) return 0;
     uint64_t at = rd32(mb + 48), end = at + rd32(mb + 44);
     if (end > IDENT_LIMIT) return 0;
-    for (uint64_t e = at; e + 24 <= end; e += rd32(e) + 4, n--) {
+    for (uint64_t e = at; e + 24 <= end; e += (uint64_t)rd32(e) + 4, n--) {
         if (rd32(e) < 20) return 0;
         if (n == 0) return f == 0 ? rd64(e + 4) : f == 1 ? rd64(e + 12) : rd32(e + 20);
     }

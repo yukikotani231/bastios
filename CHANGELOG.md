@@ -395,6 +395,11 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Fixed
 
+- Multiboot 1 boot information is copied into the kernel image, as the
+  Multiboot 2 form already was, so a loader that puts it in what becomes
+  the page pool cannot have it overwritten before the kernel reads the
+  memory map and framebuffer. QEMU puts it at 0x9500, below the pool, so
+  this changes nothing seen there.
 - `mprotect(PROT_NONE)` and a `PROT_NONE` file or `MAP_SHARED` mapping made
   the pages read-only, not inaccessible: the program and the system calls it
   made could still read them. Such a page is now kept mapped but hidden
