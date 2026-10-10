@@ -1,9 +1,11 @@
 /* Time and waiting through the Linux system calls, against musl: the
  * monotonic clock, nanosleep, poll timing out on an empty pipe, poll seeing
- * data and the end of a pipe, and poll waking when a child writes. */
+ * data and the end of a pipe, poll waking when a child writes, and select
+ * and pselect over pipes. */
 #include <errno.h>
 #include <poll.h>
 #include <stdio.h>
+#include <sys/select.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -79,7 +81,42 @@ int main(void)
     long long woke = now_ms() - t0;
     int status;
     waitpid(child, &status, 0);
-    printf("mtime: slept %lld, timed out %lld, woke %s\n", slept / 100 * 100, waited / 100 * 100,
+
+    if (pipe(p) != 0)
+        return fail("pipe");
+    fd_set r, w;
+    FD_ZERO(&r);
+    FD_SET(p[0], &r);
+    struct timeval to = { 0, 100000 };
+    t0 = now_ms();
+    if (select(p[0] + 1, &r, 0, 0, &to) != 0 || FD_ISSET(p[0], &r))
+        return fail("select on an empty pipe");
+    long long sel = now_ms() - t0;
+    if (sel < 100 || sel > 2000)
+        return fail("select timing out after 100 ms");
+    if (write(p[1], "z", 1) != 1)
+        return fail("write");
+    int top = p[0] > p[1] ? p[0] : p[1];
+    FD_ZERO(&r);
+    FD_SET(p[0], &r);
+    FD_ZERO(&w);
+    FD_SET(p[1], &w);
+    if (select(top + 1, &r, &w, 0, 0) != 2 || !FD_ISSET(p[0], &r) || !FD_ISSET(p[1], &w))
+        return fail("select seeing data and room");
+    close(p[1]);
+    FD_ZERO(&w);
+    FD_SET(p[1], &w);
+    struct timeval zero = { 0, 0 };
+    if (select(top + 1, 0, &w, 0, &zero) != -1 || errno != EBADF)
+        return fail("select on a closed descriptor");
+    struct timespec none = { 0, 0 };
+    FD_ZERO(&r);
+    FD_SET(p[0], &r);
+    if (pselect(p[0] + 1, &r, 0, 0, &none, 0) != 1 || !FD_ISSET(p[0], &r))
+        return fail("pselect");
+    close(p[0]);
+
+    printf("mtime: selected, slept %lld, timed out %lld, woke %s\n", slept / 100 * 100, waited / 100 * 100,
            woke >= 100 && woke < 5000 ? "in time" : "late");
     return 0;
 }
