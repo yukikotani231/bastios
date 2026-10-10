@@ -31,6 +31,11 @@ _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 _s.bind(("127.0.0.1", 0))
 udp_port2 = _s.getsockname()[1]
 _s.close()
+# And a TCP port forwarded to guest port 7001, where `tcpecho 7001` listens.
+_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+_s.bind(("127.0.0.1", 0))
+tcp_port = _s.getsockname()[1]
+_s.close()
 
 def boot(cpus, with_disk=False, virtio=False, net=False, subnet=None):
     drive = ["-drive", f"file={disk},format=raw,if=ide,index=0"] if with_disk else []
@@ -40,7 +45,7 @@ def boot(cpus, with_disk=False, virtio=False, net=False, subnet=None):
         drive = ["-drive", f"file={disk},format=raw,if=none,id=vd",
                  "-device", "virtio-blk-pci,drive=vd"]
     # A virtio network card on QEMU's user-mode network (src/net.bastio).
-    nic = ["-netdev", f"user,id=n0,hostfwd=udp:127.0.0.1:{udp_port}-:7,hostfwd=udp:127.0.0.1:{udp_port2}-:7000",
+    nic = ["-netdev", f"user,id=n0,hostfwd=udp:127.0.0.1:{udp_port}-:7,hostfwd=udp:127.0.0.1:{udp_port2}-:7000,hostfwd=tcp:127.0.0.1:{tcp_port}-:7001",
            "-device", "virtio-net-pci,netdev=n0"] if net else []
     if subnet:
         # QEMU's DHCP server on a subnet other than its default: the
@@ -379,6 +384,79 @@ else:
         print("ok   Linux UDP socket: bind, recvfrom, sendto, connect, write")
     else:
         print("FAIL Linux UDP socket:", got, repr(out[mark:])); fails += 1
+    # TCP, accepting: 20000 bytes through a 4 KiB window and back, then the
+    # host closes its side and the guest's echo loop sees the end.
+    mark = len(out)
+    qemu.stdin.write(b"tcpecho 7001\r"); qemu.stdin.flush()
+    sent = bytes((i * 7 + i // 251) % 256 for i in range(20000))
+    back = b""
+    if read_until(b"listening on tcp port 7001", mark):
+        # The echo is read slowly through a small buffer on another thread,
+        # so QEMU acknowledges the guest's data a piece at a time.
+        import threading
+        got_back = []
+        def slow_reader(sock):
+            try:
+                while True:
+                    chunk = sock.recv(700)
+                    if not chunk:
+                        break
+                    got_back.append(chunk)
+                    time.sleep(0.002)
+            except OSError as e:
+                print("     tcp echo read:", e)
+        try:
+            ts = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            ts.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
+            ts.settimeout(20)
+            ts.connect(("127.0.0.1", tcp_port))
+            rd = threading.Thread(target=slow_reader, args=(ts,))
+            rd.start()
+            ts.sendall(sent)
+            ts.shutdown(socket.SHUT_WR)
+            rd.join(30)
+            ts.close()
+            back = b"".join(got_back)
+        except OSError as e:
+            print("     tcp echo:", e)
+    if read_until(b"bastios> ", mark) and back == sent and b"echoed 20000 bytes" in out[mark:]:
+        print("ok   TCP: accept, 20000 bytes echoed in order, close")
+    else:
+        print("FAIL TCP echo:", len(back), back == sent[:len(back)]); fails += 1
+    # TCP, connecting: to a server on this machine (10.0.2.2), which reads
+    # a line, answers and closes.
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    srv.settimeout(10)
+    mark = len(out)
+    qemu.stdin.write(f"tcpget 10.0.2.2 {srv.getsockname()[1]} hello over tcp\r".encode()); qemu.stdin.flush()
+    line = b""
+    try:
+        cs, _ = srv.accept()
+        cs.settimeout(10)
+        while not line.endswith(b"\n"):
+            chunk = cs.recv(100)
+            if not chunk:
+                break
+            line += chunk
+        cs.sendall(b"pong from the host\n")
+        cs.close()
+    except OSError as e:
+        print("     tcp get:", e)
+    srv.close()
+    if (read_until(b"bastios> ", mark) and line == b"hello over tcp\n"
+            and b"pong from the host" in out[mark:] and b"closed" in out[mark:]):
+        print("ok   TCP: connect, send, receive until the peer closes")
+    else:
+        print("FAIL TCP connect:", line); fails += 1
+    # A closed port on the host: QEMU resets the connection.
+    mark = len(out)
+    qemu.stdin.write(f"tcpget 10.0.2.2 {udp_port} x\r".encode()); qemu.stdin.flush()
+    if read_until(b"bastios> ", mark) and b"connection refused" in out[mark:]:
+        print("ok   TCP: a refused connection says so")
+    else:
+        print("FAIL TCP refused"); fails += 1
     mark = len(out)
     qemu.stdin.write(b"udpsend 10.0.2.2 0 x\r"); qemu.stdin.flush()
     if read_until(b"bastios> ", mark) and b"usage: udpsend" in out[mark:]:

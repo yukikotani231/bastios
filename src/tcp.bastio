@@ -1,0 +1,951 @@
+// TCP (RFC 793, 9293), small and polled: a table of connections over the
+// IPv4 stack in src/net.bastio. Each connection has a 4 KiB receive buffer
+// and a 4 KiB send buffer. Segments are taken in order only (one that
+// arrives early is dropped and the peer resends it); lost segments are
+// resent go-back-N on a fixed timeout; there is no congestion control, no
+// window scaling and no selective acknowledgement. A peer that shrinks its
+// window to 0 is probed with one byte on the timeout.
+//
+// As in the rest of the stack, every byte and table index is proved in
+// bounds for any segment that can arrive: lengths and offsets read off the
+// wire, and sequence numbers turned into buffer offsets, are checked or
+// clamped before they are used. Nothing waits: callers poll (tcp_accept,
+// tcp_status, tcp_recv return at once).
+
+import "net.bastio";
+
+// TCBS, TCP_BUF and TCB_W are in net.bastio, which sizes the table.
+
+const TCP_MSS: u64 = 1460;            // the largest segment we send or ask for
+const TCP_RTO: u64 = 100;             // ticks before a resend (1 s)
+const TCP_TRIES: u64 = 8;             // resends before the connection is reset
+const TCP_LINGER: u64 = 200;          // ticks in TIME_WAIT
+const SEQ_MOD: u64 = 4294967296;
+const TCP_AGAIN: u64 = 18446744073709551614;   // nothing yet: try again
+
+// Header flags.
+const TF_FIN: u64 = 1;
+const TF_SYN: u64 = 2;
+const TF_RST: u64 = 4;
+const TF_PSH: u64 = 8;
+const TF_ACK: u64 = 16;
+
+// Connection states.
+const T_CLOSED: u64 = 0;
+const T_LISTEN: u64 = 1;
+const T_SYN_SENT: u64 = 2;
+const T_SYN_RCVD: u64 = 3;
+const T_ESTABLISHED: u64 = 4;
+const T_FIN_WAIT_1: u64 = 5;
+const T_FIN_WAIT_2: u64 = 6;
+const T_CLOSE_WAIT: u64 = 7;
+const T_CLOSING: u64 = 8;
+const T_LAST_ACK: u64 = 9;
+const T_TIME_WAIT: u64 = 10;
+
+// A connection's words in the table. A slot is free when it is CLOSED and
+// no one holds it.
+const W_STATE: u64 = 0;
+const W_LPORT: u64 = 1;               // our port
+const W_RIP: u64 = 2;                 // the peer's address and port
+const W_RPORT: u64 = 3;
+const W_UNA: u64 = 4;                 // the oldest byte not yet acknowledged
+const W_NXT: u64 = 5;                 // the next byte to send
+const W_RCV: u64 = 6;                 // the next byte we expect
+const W_WND: u64 = 7;                 // the peer's window, from W_UNA
+const W_TIMER: u64 = 8;               // the tick to resend (or leave TIME_WAIT) at; 0: off
+const W_TRIES: u64 = 9;
+const W_PARENT: u64 = 10;             // the listener a connection came in on (TCBS: none)
+const W_HELD: u64 = 11;               // 1 while a caller holds it (until tcp_close)
+const W_TXLEN: u64 = 12;              // bytes in the send buffer, from W_UNA on
+const W_RXLEN: u64 = 13;              // bytes in the receive buffer
+const W_FIN: u64 = 14;                // our FIN: 0 none, 1 to send after the data, 2 sent
+const W_PEERFIN: u64 = 15;            // 1 once the peer's FIN arrived
+const W_RESET: u64 = 16;              // 1 if the connection was reset or timed out
+const W_ISS: u64 = 17;                // our initial sequence number
+
+fn tw(n: &Net, t: u64, f: u64) -> u64
+  requires net_ok(n) && t < TCBS && f < TCB_W
+  ensures result == get(n.tcbs, t * TCB_W + f)
+{
+  return get(n.tcbs, t * TCB_W + f);
+}
+
+fn tset(n: &mut Net, t: u64, f: u64, v: u64)
+  requires net_ok(n) && t < TCBS && f < TCB_W
+  ensures net_ok(n)
+{
+  n.tcbs = set(n.tcbs, t * TCB_W + f, v);
+}
+
+/// a + b on sequence numbers (mod 2^32).
+fn seq_add(a: u64, b: u64) -> u64
+  requires a < SEQ_MOD && b < SEQ_MOD
+  ensures result < SEQ_MOD
+{
+  return (a + b) % SEQ_MOD;
+}
+
+/// How far b is ahead of a on sequence numbers (mod 2^32); both are reduced
+/// first, so any words will do.
+fn seq_diff(b: u64, a: u64) -> u64
+  ensures result < SEQ_MOD
+{
+  return (b % SEQ_MOD + SEQ_MOD - a % SEQ_MOD) % SEQ_MOD;
+}
+
+/// A word of the table, made to fit below `lim` (it always does when the
+/// table is as this file leaves it; the check keeps the proof local).
+fn twb(n: &Net, t: u64, f: u64, lim: u64) -> u64
+  requires net_ok(n) && t < TCBS && f < TCB_W && lim >= 1
+  ensures result < lim
+{
+  let v = tw(n, t, f);
+  if v >= lim {
+    return lim - 1;
+  }
+  return v;
+}
+
+fn synced(st: u64) -> bool {
+  return st >= T_ESTABLISHED && st <= T_TIME_WAIT;
+}
+
+// ---------------------------------------------------------------- segments out
+
+/// Sends a segment on connection t: flags, sequence number `seq`, and `dl`
+/// bytes of the send buffer from offset `off` (a SYN carries our MSS
+/// instead).
+fn tcp_emit(n: &mut Net, t: u64, flags: u64, seq: u64, off: u64, dl: u64)
+  requires net_ok(n) && t < TCBS && flags <= 255 && seq < SEQ_MOD
+  requires off + dl <= TCP_BUF && dl <= TCP_MSS
+  ensures net_ok(n)
+{
+  let rip = tw(n, t, W_RIP);
+  let lport = tw(n, t, W_LPORT);
+  let rport = tw(n, t, W_RPORT);
+  if rip > IP_MAX || lport > 65535 || rport > 65535 {
+    return;
+  }
+  let mut hl = 20;
+  if flags % 4 >= TF_SYN {
+    hl = 24;                          // with the MSS option
+  }
+  let tlen = hl + dl;
+  if 20 + tlen > FRAME_MAX - 14 {
+    return;                           // a SYN never carries data
+  }
+  let mut win = TCP_BUF - twb(n, t, W_RXLEN, TCP_BUF + 1);
+  if win > 65535 {
+    win = 65535;
+  }
+  eth_header(&mut n, 0, ETH_IP);
+  ip_header(&mut n, 20 + tlen, IP_TCP, rip);
+  put16(&mut n.out, 34, lport);
+  put16(&mut n.out, 36, rport);
+  put32(&mut n.out, 38, seq);
+  put32(&mut n.out, 42, twb(n, t, W_RCV, SEQ_MOD));
+  bset(&mut n.out, 46, hl / 4 * 16);
+  bset(&mut n.out, 47, flags);
+  put16(&mut n.out, 48, win);
+  put32(&mut n.out, 50, 0);           // checksum and urgent pointer
+  if hl == 24 {
+    bset(&mut n.out, 54, 2);          // MSS
+    bset(&mut n.out, 55, 4);
+    put16(&mut n.out, 56, TCP_MSS);
+  }
+  let at = t * TCP_BUF + off;
+  let mut i = 0;
+  while i < dl
+    invariant i <= dl && net_ok(n)
+  {
+    bset(&mut n.out, 34 + hl + i, bget(n.ttx, at + i));
+    i = i + 1;
+  }
+  put16(&mut n.out, 50, 65535 - l4_sum(n.out, n.ip, rip, IP_TCP, tlen));
+  send_via(&mut n, next_hop(n, rip), 34 + tlen);
+}
+
+/// Arms the resend timer if it is off.
+fn tcp_arm(n: &mut Net, t: u64)
+  requires net_ok(n) && t < TCBS
+  ensures net_ok(n)
+{
+  if tw(n, t, W_TIMER) == 0 && n.now < 18446744073709551615 - TCP_RTO {
+    tset(&mut n, t, W_TIMER, n.now + TCP_RTO);
+  }
+}
+
+/// Sends what connection t may send now: data from the send buffer as far
+/// as the peer's window allows, then our FIN once all data is out, or a
+/// bare ACK if nothing else went and `want_ack` asks for one.
+fn tcp_output(n: &mut Net, t: u64, want_ack: bool)
+  requires net_ok(n) && t < TCBS
+  ensures net_ok(n)
+{
+  let st = tw(n, t, W_STATE);
+  if !synced(st) || st == T_TIME_WAIT {
+    if want_ack && synced(st) {
+      tcp_emit(&mut n, t, TF_ACK, twb(n, t, W_NXT, SEQ_MOD), 0, 0);
+    }
+    return;
+  }
+  let una = twb(n, t, W_UNA, SEQ_MOD);
+  let txlen = twb(n, t, W_TXLEN, TCP_BUF + 1);
+  let wnd = tw(n, t, W_WND);
+  let mut off = seq_diff(tw(n, t, W_NXT), una);
+  if off > txlen {
+    off = txlen;                      // our FIN is out: no more data
+  }
+  let mut sent = false;
+  let mut segs = 0;
+  while off < txlen && off < wnd && segs < 4 && tw(n, t, W_FIN) != 2
+    invariant off <= txlen && txlen <= TCP_BUF && una < SEQ_MOD && net_ok(n)
+  {
+    let mut l = txlen - off;
+    if l > TCP_MSS {
+      l = TCP_MSS;
+    }
+    if l > wnd - off {
+      l = wnd - off;
+    }
+    tcp_emit(&mut n, t, TF_ACK + TF_PSH, seq_add(una, off), off, l);
+    off = off + l;
+    tset(&mut n, t, W_NXT, seq_add(una, off));
+    sent = true;
+    segs = segs + 1;
+  }
+  if tw(n, t, W_FIN) == 1 && off == txlen {
+    tcp_emit(&mut n, t, TF_FIN + TF_ACK, seq_add(una, txlen), 0, 0);
+    tset(&mut n, t, W_NXT, seq_add(seq_add(una, txlen), 1));
+    tset(&mut n, t, W_FIN, 2);
+    if st == T_ESTABLISHED {
+      tset(&mut n, t, W_STATE, T_FIN_WAIT_1);
+    } else if st == T_CLOSE_WAIT {
+      tset(&mut n, t, W_STATE, T_LAST_ACK);
+    }
+    sent = true;
+  }
+  if !sent && want_ack {
+    tcp_emit(&mut n, t, TF_ACK, twb(n, t, W_NXT, SEQ_MOD), 0, 0);
+  }
+  if tw(n, t, W_NXT) != una {
+    tcp_arm(&mut n, t);
+  }
+}
+
+/// Answers a segment no connection wants with a reset, straight back to
+/// the MAC it came from (`dlen`: its data length, `flags`: its flags).
+fn tcp_refuse(n: &mut Net, flags: u64, dlen: u64)
+  requires net_ok(n) && dlen <= FRAME_MAX
+  ensures net_ok(n)
+{
+  if flags % 8 >= TF_RST {
+    return;                           // never answer a reset
+  }
+  let src = be32(n.pkt, 26);
+  let smac = be48(n.pkt, 6);
+  let sport = be16(n.pkt, 34);
+  let dport = be16(n.pkt, 36);
+  let seq = be32(n.pkt, 38);
+  let ackn = be32(n.pkt, 42);
+  let mut used = dlen;
+  if flags % 4 >= TF_SYN {
+    used = used + 1;
+  }
+  if flags % 2 == TF_FIN {
+    used = used + 1;
+  }
+  eth_header(&mut n, smac, ETH_IP);
+  ip_header(&mut n, 40, IP_TCP, src);
+  put16(&mut n.out, 34, dport);
+  put16(&mut n.out, 36, sport);
+  if flags % 32 >= TF_ACK {
+    put32(&mut n.out, 38, ackn);
+    put32(&mut n.out, 42, 0);
+    bset(&mut n.out, 47, TF_RST);
+  } else {
+    put32(&mut n.out, 38, 0);
+    put32(&mut n.out, 42, seq_add(seq, used % SEQ_MOD));
+    bset(&mut n.out, 47, TF_RST + TF_ACK);
+  }
+  bset(&mut n.out, 46, 0x50);
+  put16(&mut n.out, 48, 0);
+  put32(&mut n.out, 50, 0);
+  put16(&mut n.out, 50, 65535 - l4_sum(n.out, n.ip, src, IP_TCP, 20));
+  net_send(&mut n, 54);
+}
+
+// ---------------------------------------------------------------- the table
+
+/// A free slot, or TCBS if the table is full.
+fn tcb_free_slot(n: &Net) -> u64
+  requires net_ok(n)
+  ensures result <= TCBS
+{
+  let mut t = 0;
+  while t < TCBS
+    invariant t <= TCBS
+  {
+    if tw(n, t, W_STATE) == T_CLOSED && tw(n, t, W_HELD) == 0 {
+      return t;
+    }
+    t = t + 1;
+  }
+  return TCBS;
+}
+
+/// Sets every word of slot t for a new connection.
+fn tcb_init(n: &mut Net, t: u64, st: u64, lport: u64, rip: u64, rport: u64, parent: u64, held: u64)
+  requires net_ok(n) && t < TCBS
+  ensures net_ok(n)
+{
+  let mut f = 0;
+  while f < TCB_W
+    invariant f <= TCB_W && net_ok(n)
+  {
+    tset(&mut n, t, f, 0);
+    f = f + 1;
+  }
+  n.iss = (n.iss % SEQ_MOD + 64000 + n.now % 65536) % SEQ_MOD;
+  tset(&mut n, t, W_ISS, n.iss);
+  tset(&mut n, t, W_UNA, n.iss);
+  tset(&mut n, t, W_NXT, n.iss);
+  tset(&mut n, t, W_STATE, st);
+  tset(&mut n, t, W_LPORT, lport);
+  tset(&mut n, t, W_RIP, rip);
+  tset(&mut n, t, W_RPORT, rport);
+  tset(&mut n, t, W_PARENT, parent);
+  tset(&mut n, t, W_HELD, held);
+}
+
+/// The connection a segment from rip:rport to our lport belongs to: an
+/// exact match first, else a listener on lport; TCBS if neither.
+fn tcb_find(n: &Net, lport: u64, rip: u64, rport: u64) -> u64
+  requires net_ok(n)
+  ensures result <= TCBS
+{
+  let mut lis = TCBS;
+  let mut t = 0;
+  while t < TCBS
+    invariant t <= TCBS && lis <= TCBS
+  {
+    let st = tw(n, t, W_STATE);
+    if st != T_CLOSED && tw(n, t, W_LPORT) == lport {
+      if st == T_LISTEN {
+        lis = t;
+      } else if tw(n, t, W_RIP) == rip && tw(n, t, W_RPORT) == rport {
+        return t;
+      }
+    }
+    t = t + 1;
+  }
+  return lis;
+}
+
+/// Is a port in use by any connection or listener?
+fn tcp_port_used(n: &Net, port: u64) -> bool
+  requires net_ok(n)
+{
+  let mut t = 0;
+  while t < TCBS
+    invariant t <= TCBS
+  {
+    if (tw(n, t, W_STATE) != T_CLOSED || tw(n, t, W_HELD) == 1) && tw(n, t, W_LPORT) == port {
+      return true;
+    }
+    t = t + 1;
+  }
+  return false;
+}
+
+/// Ends connection t: CLOSED, and reset if `reset`.
+fn tcb_close(n: &mut Net, t: u64, reset: bool)
+  requires net_ok(n) && t < TCBS
+  ensures net_ok(n)
+{
+  tset(&mut n, t, W_STATE, T_CLOSED);
+  tset(&mut n, t, W_TIMER, 0);
+  if reset {
+    tset(&mut n, t, W_RESET, 1);
+  }
+}
+
+// ---------------------------------------------------------------- segments in
+
+/// Takes the acknowledgement `ackn` on connection t: drops the bytes it
+/// covers from the send buffer and moves the state on if it covers our FIN.
+fn tcp_acked(n: &mut Net, t: u64, ackn: u64)
+  requires net_ok(n) && t < TCBS && ackn < SEQ_MOD
+  ensures net_ok(n)
+{
+  let una = twb(n, t, W_UNA, SEQ_MOD);
+  let k = seq_diff(ackn, una);
+  let flight = seq_diff(tw(n, t, W_NXT), una);
+  if k == 0 || k > flight {
+    return;                           // old, or for bytes not sent
+  }
+  let txlen = twb(n, t, W_TXLEN, TCP_BUF + 1);
+  let mut drop = k;
+  if drop > txlen {
+    drop = txlen;                     // the rest acknowledges our FIN
+  }
+  // Shift the send buffer down past the acknowledged bytes.
+  let base = t * TCP_BUF;
+  let mut i = 0;
+  while i + drop < txlen
+    invariant i + drop <= txlen && net_ok(n)
+  {
+    bset(&mut n.ttx, base + i, bget(n.ttx, base + i + drop));
+    i = i + 1;
+  }
+  tset(&mut n, t, W_TXLEN, txlen - drop);
+  tset(&mut n, t, W_UNA, ackn);
+  tset(&mut n, t, W_TRIES, 0);
+  tset(&mut n, t, W_TIMER, 0);
+  if ackn != tw(n, t, W_NXT) {
+    tcp_arm(&mut n, t);
+  }
+  if k > txlen && tw(n, t, W_FIN) == 2 {
+    // Our FIN is acknowledged.
+    let st = tw(n, t, W_STATE);
+    if st == T_FIN_WAIT_1 {
+      tset(&mut n, t, W_STATE, T_FIN_WAIT_2);
+    } else if st == T_CLOSING {
+      tset(&mut n, t, W_STATE, T_TIME_WAIT);
+      if n.now < 18446744073709551615 - TCP_LINGER {
+        tset(&mut n, t, W_TIMER, n.now + TCP_LINGER);
+      }
+    } else if st == T_LAST_ACK {
+      tcb_close(&mut n, t, false);
+    }
+  }
+}
+
+/// A connection request on listener `lis`: a new connection in SYN_RCVD,
+/// answered with SYN+ACK. Dropped if the table is full.
+fn tcp_accept_syn(n: &mut Net, lis: u64, seq: u64)
+  requires net_ok(n) && lis < TCBS && seq < SEQ_MOD
+  ensures net_ok(n)
+{
+  let t = tcb_free_slot(n);
+  if t >= TCBS {
+    return;
+  }
+  tcb_init(&mut n, t, T_SYN_RCVD, be16(n.pkt, 36), be32(n.pkt, 26), be16(n.pkt, 34), lis, 0);
+  tset(&mut n, t, W_RCV, seq_add(seq, 1));
+  tset(&mut n, t, W_WND, be16(n.pkt, 48));
+  let iss = twb(n, t, W_ISS, SEQ_MOD);
+  tcp_emit(&mut n, t, TF_SYN + TF_ACK, iss, 0, 0);
+  tset(&mut n, t, W_NXT, seq_add(iss, 1));
+  tcp_arm(&mut n, t);
+}
+
+/// A TCP segment for us (total: the IP length, checked against the frame).
+fn tcp_in(n: &mut Net, total: u64)
+  requires net_ok(n) && 28 <= total && total <= FRAME_MAX - 14
+  ensures net_ok(n)
+{
+  if total < 40 {
+    return;
+  }
+  let hl = bget(n.pkt, 46) / 16 * 4;
+  if hl < 20 || 20 + hl > total {
+    return;
+  }
+  let src = be32(n.pkt, 26);
+  if l4_sum(n.pkt, src, be32(n.pkt, 30), IP_TCP, total - 20) != 65535 {
+    return;
+  }
+  let dlen = total - 20 - hl;
+  let doff = 34 + hl;                 // where the data starts in the frame
+  let sport = be16(n.pkt, 34);
+  let dport = be16(n.pkt, 36);
+  let seq = be32(n.pkt, 38);
+  let ackn = be32(n.pkt, 42);
+  let flags = bget(n.pkt, 47);
+  let is_syn = flags % 4 >= TF_SYN;
+  let is_ack = flags % 32 >= TF_ACK;
+  let is_rst = flags % 8 >= TF_RST;
+  let is_fin = flags % 2 == TF_FIN;
+  let t = tcb_find(n, dport, src, sport);
+  if t >= TCBS {
+    tcp_refuse(&mut n, flags, dlen);
+    return;
+  }
+  let st = tw(n, t, W_STATE);
+  if st == T_LISTEN {
+    if is_syn && !is_ack && !is_rst {
+      tcp_accept_syn(&mut n, t, seq);
+    } else {
+      tcp_refuse(&mut n, flags, dlen);
+    }
+    return;
+  }
+  if is_rst {
+    tcb_close(&mut n, t, true);
+    return;
+  }
+  if st == T_SYN_SENT {
+    if is_syn && is_ack && ackn == seq_add(twb(n, t, W_ISS, SEQ_MOD), 1) {
+      tset(&mut n, t, W_RCV, seq_add(seq, 1));
+      tset(&mut n, t, W_UNA, ackn);
+      tset(&mut n, t, W_WND, be16(n.pkt, 48));
+      tset(&mut n, t, W_TIMER, 0);
+      tset(&mut n, t, W_TRIES, 0);
+      tset(&mut n, t, W_STATE, T_ESTABLISHED);
+      tcp_output(&mut n, t, true);
+    }
+    return;
+  }
+  // From here on the connection is synchronized (or SYN_RCVD).
+  if is_syn {
+    tcp_output(&mut n, t, true);      // a repeated SYN: acknowledge again
+    return;
+  }
+  if is_ack {
+    if st == T_SYN_RCVD {
+      if ackn != seq_add(twb(n, t, W_ISS, SEQ_MOD), 1) {
+        return;
+      }
+      tset(&mut n, t, W_UNA, ackn);
+      tset(&mut n, t, W_TIMER, 0);
+      tset(&mut n, t, W_TRIES, 0);
+      tset(&mut n, t, W_STATE, T_ESTABLISHED);
+    } else {
+      tcp_acked(&mut n, t, ackn);
+    }
+    tset(&mut n, t, W_WND, be16(n.pkt, 48));
+  }
+  let st2 = tw(n, t, W_STATE);
+  if st2 == T_CLOSED {
+    return;
+  }
+  // Data and FIN, in order only.
+  let mut need_ack = dlen > 0 || is_fin;
+  let rcv = twb(n, t, W_RCV, SEQ_MOD);
+  if seq == rcv && tw(n, t, W_PEERFIN) == 0
+    && (st2 == T_ESTABLISHED || st2 == T_FIN_WAIT_1 || st2 == T_FIN_WAIT_2) {
+    let rxlen = twb(n, t, W_RXLEN, TCP_BUF + 1);
+    let mut take = dlen;
+    if take > TCP_BUF - rxlen {
+      take = TCP_BUF - rxlen;         // beyond our window: the peer resends
+    }
+    let base = t * TCP_BUF + rxlen;
+    let mut i = 0;
+    while i < take
+      invariant i <= take && net_ok(n)
+    {
+      bset(&mut n.trx, base + i, bget(n.pkt, doff + i));
+      i = i + 1;
+    }
+    tset(&mut n, t, W_RXLEN, rxlen + take);
+    let mut r = seq_add(rcv, take);
+    if is_fin && take == dlen {
+      r = seq_add(r, 1);
+      tset(&mut n, t, W_PEERFIN, 1);
+      if st2 == T_ESTABLISHED {
+        tset(&mut n, t, W_STATE, T_CLOSE_WAIT);
+      } else if st2 == T_FIN_WAIT_1 {
+        tset(&mut n, t, W_STATE, T_CLOSING);
+      } else {
+        tset(&mut n, t, W_STATE, T_TIME_WAIT);
+        tset(&mut n, t, W_TIMER, 0);
+        if n.now < 18446744073709551615 - TCP_LINGER {
+          tset(&mut n, t, W_TIMER, n.now + TCP_LINGER);
+        }
+      }
+    }
+    tset(&mut n, t, W_RCV, r);
+  }
+  tcp_output(&mut n, t, need_ack);
+}
+
+// ---------------------------------------------------------------- timers
+
+/// Resends what is unacknowledged on connections whose timer is up (go
+/// back to the oldest byte), resets those that have tried too often, and
+/// ends TIME_WAIT.
+fn tcp_tick(n: &mut Net, now: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let mut t = 0;
+  while t < TCBS
+    invariant t <= TCBS && net_ok(n)
+  {
+    let due = tw(n, t, W_TIMER);
+    let st = tw(n, t, W_STATE);
+    if due != 0 && now >= due && st != T_CLOSED && st != T_LISTEN {
+      tset(&mut n, t, W_TIMER, 0);
+      if st == T_TIME_WAIT {
+        tcb_close(&mut n, t, false);
+      } else if tw(n, t, W_TRIES) >= TCP_TRIES {
+        tcb_close(&mut n, t, true);
+      } else {
+        tset(&mut n, t, W_TRIES, tw(n, t, W_TRIES) + 1);
+        let iss = twb(n, t, W_ISS, SEQ_MOD);
+        if st == T_SYN_SENT {
+          tcp_emit(&mut n, t, TF_SYN, iss, 0, 0);
+        } else if st == T_SYN_RCVD {
+          tcp_emit(&mut n, t, TF_SYN + TF_ACK, iss, 0, 0);
+        } else {
+          // Go back: resend from the oldest unacknowledged byte. A FIN
+          // that was out goes again after the data.
+          tset(&mut n, t, W_NXT, tw(n, t, W_UNA));
+          if tw(n, t, W_FIN) == 2 {
+            tset(&mut n, t, W_FIN, 1);
+          }
+          if tw(n, t, W_WND) == 0 && tw(n, t, W_TXLEN) > 0 {
+            tset(&mut n, t, W_WND, 1);  // probe a closed window with one byte
+          }
+        }
+        tcp_output(&mut n, t, false);
+        tcp_arm(&mut n, t);
+      }
+    }
+    t = t + 1;
+  }
+}
+
+// ---------------------------------------------------------------- calls
+
+fn tcb_held(n: &Net, t: u64) -> bool
+  requires net_ok(n)
+  ensures result ==> t < TCBS
+{
+  return t < TCBS && tw(n, t, W_HELD) == 1;
+}
+
+/// Listens on `port`: the listener's number, or NO_SOCK.
+fn tcp_listen_on(n: &mut Net, port: u64) -> u64
+  requires net_ok(n)
+  ensures net_ok(n) && (result < TCBS || result == NO_SOCK)
+{
+  if port == 0 || port > 65535 || n.ip == 0 || tcp_port_used(n, port) {
+    return NO_SOCK;
+  }
+  let t = tcb_free_slot(n);
+  if t >= TCBS {
+    return NO_SOCK;
+  }
+  tcb_init(&mut n, t, T_LISTEN, port, 0, 0, TCBS, 1);
+  return t;
+}
+
+/// A connection that came in on listener `lis` and is established, now
+/// held by the caller; NO_SOCK if none is ready yet.
+fn tcp_take(n: &mut Net, lis: u64) -> u64
+  requires net_ok(n)
+  ensures net_ok(n) && (result < TCBS || result == NO_SOCK)
+{
+  if !tcb_held(n, lis) || tw(n, lis, W_STATE) != T_LISTEN {
+    return NO_SOCK;
+  }
+  let mut t = 0;
+  while t < TCBS
+    invariant t <= TCBS && net_ok(n)
+  {
+    if tw(n, t, W_PARENT) == lis && tw(n, t, W_HELD) == 0 && synced(tw(n, t, W_STATE)) {
+      tset(&mut n, t, W_HELD, 1);
+      return t;
+    }
+    t = t + 1;
+  }
+  return NO_SOCK;
+}
+
+/// Opens a connection to ip:port from an ephemeral port: its number (it is
+/// SYN_SENT; poll tcp_status), or NO_SOCK.
+fn tcp_open(n: &mut Net, ip: u64, port: u64) -> u64
+  requires net_ok(n)
+  ensures net_ok(n) && (result < TCBS || result == NO_SOCK)
+{
+  if ip > IP_MAX || ip == 0 || port == 0 || port > 65535 || n.ip == 0 || !n.dev.live {
+    return NO_SOCK;
+  }
+  let t = tcb_free_slot(n);
+  if t >= TCBS {
+    return NO_SOCK;
+  }
+  let mut lport = 0;
+  let mut tries = 0;
+  while tries <= TCBS && lport == 0
+    invariant net_ok(n) && lport <= 65535
+  {
+    let p = EPH_LO + n.eph % EPH_N;
+    n.eph = (n.eph % EPH_N + 1) % EPH_N;
+    if !tcp_port_used(n, p) {
+      lport = p;
+    }
+    tries = tries + 1;
+  }
+  if lport == 0 {
+    return NO_SOCK;
+  }
+  tcb_init(&mut n, t, T_SYN_SENT, lport, ip, port, TCBS, 1);
+  let iss = twb(n, t, W_ISS, SEQ_MOD);
+  tcp_emit(&mut n, t, TF_SYN, iss, 0, 0);
+  tset(&mut n, t, W_NXT, seq_add(iss, 1));
+  tcp_arm(&mut n, t);
+  return t;
+}
+
+/// 0 while connecting, 1 while data can flow (established, or the peer
+/// has closed its side), 2 once it is closed or was reset.
+fn tcp_status_of(n: &Net, t: u64) -> u64
+  requires net_ok(n)
+  ensures result <= 2
+{
+  if !tcb_held(n, t) {
+    return 2;
+  }
+  let st = tw(n, t, W_STATE);
+  if st == T_SYN_SENT || st == T_SYN_RCVD || st == T_LISTEN {
+    return 0;
+  }
+  if synced(st) && tw(n, t, W_RESET) == 0 {
+    return 1;
+  }
+  return 2;
+}
+
+/// Puts up to `size` bytes from buf into connection t's send buffer and
+/// sends what the window allows. Returns how many were taken (0 when the
+/// buffer is full: try again), or NO_SOCK if t cannot send.
+fn tcp_write(n: &mut Net, t: u64, buf: &Bytes, size: u64) -> u64
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  if !tcb_held(n, t) || tw(n, t, W_FIN) != 0 {
+    return NO_SOCK;
+  }
+  let st = tw(n, t, W_STATE);
+  if st != T_ESTABLISHED && st != T_CLOSE_WAIT {
+    return NO_SOCK;
+  }
+  let txlen = twb(n, t, W_TXLEN, TCP_BUF + 1);
+  let mut k = size;
+  if k > TCP_BUF - txlen {
+    k = TCP_BUF - txlen;
+  }
+  if k > blen(buf) {
+    k = blen(buf);
+  }
+  let base = t * TCP_BUF + txlen;
+  let mut i = 0;
+  while i < k
+    invariant i <= k && net_ok(n)
+  {
+    bset(&mut n.ttx, base + i, bget(buf, i));
+    i = i + 1;
+  }
+  tset(&mut n, t, W_TXLEN, txlen + k);
+  tcp_output(&mut n, t, false);
+  return k;
+}
+
+/// Takes up to `max` received bytes (no more than buf holds) from
+/// connection t into the start of buf. Returns the count; 0 at the end
+/// (the peer closed and everything was read); TCP_AGAIN if nothing has
+/// arrived yet; NO_SOCK if t was reset or is not a connection.
+fn tcp_read(n: &mut Net, t: u64, buf: &mut Bytes, max: u64) -> u64
+  requires net_ok(n)
+  ensures net_ok(n) && blen(buf) == old(blen(buf))
+  ensures result == NO_SOCK || result == TCP_AGAIN || (result <= blen(buf) && result <= max)
+{
+  net_poll(&mut n);
+  if !tcb_held(n, t) {
+    return NO_SOCK;
+  }
+  let rxlen = twb(n, t, W_RXLEN, TCP_BUF + 1);
+  if rxlen == 0 {
+    if tw(n, t, W_PEERFIN) == 1 {
+      return 0;
+    }
+    if tw(n, t, W_RESET) == 1 || tw(n, t, W_STATE) == T_CLOSED {
+      return NO_SOCK;
+    }
+    return TCP_AGAIN;
+  }
+  let mut k = rxlen;
+  if k > max {
+    k = max;
+  }
+  if k > blen(buf) {
+    k = blen(buf);
+  }
+  let base = t * TCP_BUF;
+  let bl = blen(buf);
+  let mut i = 0;
+  while i < k
+    invariant i <= k && net_ok(n) && blen(buf) == bl
+  {
+    bset(&mut buf, i, bget(n.trx, base + i));
+    i = i + 1;
+  }
+  // Shift the rest down.
+  let mut j = 0;
+  while j + k < rxlen
+    invariant j + k <= rxlen && net_ok(n) && blen(buf) == bl
+  {
+    bset(&mut n.trx, base + j, bget(n.trx, base + j + k));
+    j = j + 1;
+  }
+  tset(&mut n, t, W_RXLEN, rxlen - k);
+  // If the window had closed below a segment, tell the peer it reopened.
+  if k > 0 && TCP_BUF - rxlen < TCP_MSS {
+    tcp_output(&mut n, t, true);
+  }
+  return k;
+}
+
+/// The caller lets go of t: a listener stops, a connection sends its FIN
+/// after the data still buffered (the slot is freed once the close
+/// completes), and one that never connected is dropped.
+fn tcp_release(n: &mut Net, t: u64) -> bool
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  if !tcb_held(n, t) {
+    return false;
+  }
+  tset(&mut n, t, W_HELD, 0);
+  let st = tw(n, t, W_STATE);
+  if st == T_LISTEN || st == T_SYN_SENT {
+    tcb_close(&mut n, t, false);
+  } else if (st == T_ESTABLISHED || st == T_CLOSE_WAIT || st == T_SYN_RCVD) && tw(n, t, W_FIN) == 0 {
+    tset(&mut n, t, W_FIN, 1);
+    tcp_output(&mut n, t, false);
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------- for system calls
+// Each takes the card or none; with none, every call fails.
+
+fn tcp_listen(c: &mut Nic, port: u64) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; return NO_SOCK; },
+    Nic::Up(mut n) => {
+      let r = tcp_listen_on(&mut n, port);
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+fn tcp_accept(c: &mut Nic, lis: u64) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; return NO_SOCK; },
+    Nic::Up(mut n) => {
+      let r = tcp_take(&mut n, lis);
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+fn tcp_connect(c: &mut Nic, ip: u64, port: u64) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; return NO_SOCK; },
+    Nic::Up(mut n) => {
+      let r = tcp_open(&mut n, ip, port);
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+fn tcp_status(c: &Nic, t: u64) -> u64
+  requires nic_ok(c)
+  ensures result <= 2
+{
+  match c {
+    Nic::None => { return 2; },
+    Nic::Up(n) => { return tcp_status_of(n, t); },
+  }
+}
+
+fn tcp_send(c: &mut Nic, t: u64, buf: &Bytes, size: u64) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; return NO_SOCK; },
+    Nic::Up(mut n) => {
+      let r = tcp_write(&mut n, t, buf, size);
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+fn tcp_recv(c: &mut Nic, t: u64, buf: &mut Bytes, max: u64) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c) && blen(buf) == old(blen(buf))
+  ensures result == NO_SOCK || result == TCP_AGAIN || (result <= blen(buf) && result <= max)
+{
+  match c {
+    Nic::None => { c = Nic::None; return NO_SOCK; },
+    Nic::Up(mut n) => {
+      let r = tcp_read(&mut n, t, &mut buf, max);
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+fn tcp_close(c: &mut Nic, t: u64) -> bool
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; return false; },
+    Nic::Up(mut n) => {
+      let r = tcp_release(&mut n, t);
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+/// The peer's address and port (0 for a listener or a free slot).
+fn tcp_peer_ip(c: &Nic, t: u64) -> u64
+  requires nic_ok(c)
+  ensures result <= IP_MAX
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if tcb_held(n, t) && tw(n, t, W_RIP) <= IP_MAX {
+        return tw(n, t, W_RIP);
+      }
+      return 0;
+    },
+  }
+}
+
+fn tcp_peer_port(c: &Nic, t: u64) -> u64
+  requires nic_ok(c)
+  ensures result <= 65535
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if tcb_held(n, t) && tw(n, t, W_RPORT) <= 65535 {
+        return tw(n, t, W_RPORT);
+      }
+      return 0;
+    },
+  }
+}
