@@ -338,6 +338,7 @@ fn ofd_new(k: &mut Kernel, kind: u64, x: u64) -> u64
   }
   of_set(&mut k.ofd, h, 0, kind);
   of_set(&mut k.ofd, h, 1, 1);
+  k.inet6 = k.inet6 & !(1 << h);            // not AF_INET6 unless lx_socket says so
   of_set(&mut k.ofd, h, 2, x);
   of_set(&mut k.ofd, h, 3, 0);
   return h;

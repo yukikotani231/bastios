@@ -59,6 +59,7 @@ const LO_TRUNC: u64 = 0x200;
 const LO_APPEND: u64 = 0x400;
 const LO_NONBLOCK: u64 = 0x800;
 
+const MAP_SHARED: u64 = 1;
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANONYMOUS: u64 = 0x20;
 const PATH_MAX_LX: u64 = 256;           // the longest path read from user memory
@@ -1255,6 +1256,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64, fd: u64, off
     }
     at = addr - USER_BASE;
     // What was there goes, read-only pages too: the new mapping is writable.
+    map_forget(&mut k, pid, at / 4096, at / 4096 + pages, false);
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
     if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages) {
       return ENOMEM;
@@ -1299,6 +1301,9 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64, fd: u64, off
       return EFAULT;
     }
     done = done + step;
+  }
+  if flags % 4 == MAP_SHARED {
+    map_record(&mut k, pid, fd, at / 4096, pages, off);
   }
   return USER_BASE + at;
 }
