@@ -31,6 +31,10 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 - Renaming files and directories: `vfs_rename`, system call 22, and the
   shell's `mv`. On the disk a rename is one sector write, so a power cut
   leaves the old name or the new one.
+- A generated, read-only `/proc` for Linux programs: `mounts`,
+  `meminfo`, `uptime`, a directory per process with `stat`, `status`,
+  `cmdline` and `exe` (a link `readlink` reads), and `/proc/self`.
+  BusyBox's `ps`, `free`, `df` and `uptime` work on it.
 - Setting an open file's length (`vfs_truncate`, system call 23):
   shrinking frees what lies past the new end, growing reads as zeros.
   On the disk it is copy-on-write like a write, so a power cut leaves the
