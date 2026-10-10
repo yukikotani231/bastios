@@ -34,10 +34,12 @@ fn tsc_scale(d: u64, mult: u64) -> u64
   let ml = mult % TWO32;
   // d * mult / 2^32 = hi*mh*2^32 + hi*ml + lo*mh + lo*ml/2^32. Each
   // product is checked against the bound by division first, as hpet_ns
-  // does.
-  if hi != 0 && mh != 0 {
+  // does. The first term is not rare: with a counter near 1 GHz, mh is 1
+  // and hi is 1 after about 4 seconds.
+  if mh != 0 && hi > (TWO32 - 1) / mh {
     return NS_MAX;
   }
+  let top = hi * mh * TWO32;
   if ml != 0 && hi > NS_MAX / ml {
     return NS_MAX;
   }
@@ -56,7 +58,10 @@ fn tsc_scale(d: u64, mult: u64) -> u64
   if a + b > NS_MAX - c {
     return NS_MAX;
   }
-  return a + b + c;
+  if a + b + c > NS_MAX - top {
+    return NS_MAX;
+  }
+  return top + a + b + c;
 }
 
 /// The time the counter reading `now` stands for, in ns since boot.
@@ -78,7 +83,18 @@ fn tsc_calibrate(cpu: &Cpu, h: &mut Hpet, a: &mut Acpi) -> Tsc
   ensures hpet_ok(h) && acpi_ok(a)
 {
   let none = Tsc { base: 0, mult: 0, at: 0 };
-  let h0 = clock_ns(&mut h, &mut a);
+  // The measurement starts when the clock next moves: under QEMU the
+  // first read of an HPET just switched on comes back about 12 ms behind
+  // the second, which made the rate 100 to 200 times too high.
+  let first = clock_ns(&mut h, &mut a);
+  let mut h0 = first;
+  let mut m = 0;
+  while h0 == first && m < CALIBRATE_SPINS
+    invariant m <= CALIBRATE_SPINS && hpet_ok(h) && acpi_ok(a)
+  {
+    h0 = clock_ns(&mut h, &mut a);
+    m = m + 1;
+  }
   let t0 = cpu_tsc(cpu);
   if h0 >= NS_MAX - NS_CALIBRATE {
     return none;

@@ -404,6 +404,18 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Fixed
 
+- The clock went wrong a few seconds after boot under QEMU, which broke
+  about 30 `make compat` checks (sleeps took 0 ms, poll and socket
+  timeouts fired at once, `date` said 2554). There were two bugs. First,
+  the TSC rate was measured from a stale first HPET read, about 12 ms
+  behind the next one, so the clock ran 50 to 200 times too fast. The
+  measurement now starts when the clock next moves. Second, `tsc_scale`,
+  and its copy in the vDSO, dropped the `hi * mh * 2^32` term and
+  returned the maximum instead. With a rate under 1 GHz, which the bad
+  measurement produced, that happened once the counter had moved 2^32
+  ticks, and the clock stuck at the end of time. Both now compute the
+  term.
+
 - A PC without a serial port (most of those of the last decade) took no
   keyboard input: COM1's ports read as 0xFF there, which said a byte was
   always waiting, so the console read 0xFF forever and never looked at
