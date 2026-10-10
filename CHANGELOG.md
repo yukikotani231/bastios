@@ -197,6 +197,12 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Changed
 
+- Blocks are copied in bulk (bastiolang's `bcopy` and friends) instead of
+  a byte at a time: between user memory, the disk cache, the devices'
+  pages, the network buffers and the pipe and AF_UNIX rings. Under QEMU,
+  `diskbench` reads three to four times faster and writes up to a third
+  faster.
+
 - Removing the name a disk file was made under while a hard link remains
   is committed by one sector write (`disk_take_name`); a rename between
   two names of one file does nothing, as on Linux.

@@ -248,13 +248,7 @@ fn net_copy(n: &mut Net, flen: u64)
   requires net_ok(n) && flen <= RX_BUF
   ensures net_ok(n)
 {
-  let mut i = 0;
-  while i < flen
-    invariant i <= flen && net_ok(n)
-  {
-    bset(&mut n.out, i, bget(n.pkt, i));
-    i = i + 1;
-  }
+  bcopy(&mut n.out, 0, n.pkt, 0, flen);
 }
 
 /// Sends the first `flen` bytes of the outgoing frame, padded to the
@@ -399,13 +393,7 @@ fn lo_send(n: &mut Net, flen: u64) -> bool
   }
   let slot = (n.lo_head + n.lo_n) % LOQ;
   let base = slot * RX_BUF;
-  let mut i = 0;
-  while i < flen
-    invariant i <= flen && net_ok(n) && slot < LOQ
-  {
-    bset(&mut n.lo, base + i, bget(n.out, i));
-    i = i + 1;
-  }
+  bcopy(&mut n.lo, base, n.out, 0, flen);
   n.lo_len = set(n.lo_len, slot, flen);
   n.lo_n = n.lo_n + 1;
   if n.tx < 18446744073709551615 {
@@ -443,13 +431,7 @@ fn send_via(n: &mut Net, hop: u64, flen: u64) -> bool
     put48(&mut n.out, 0, mac);
     return net_send(&mut n, flen);
   }
-  let mut i = 0;
-  while i < flen
-    invariant i <= flen && net_ok(n)
-  {
-    bset(&mut n.held, i, bget(n.out, i));
-    i = i + 1;
-  }
+  bcopy(&mut n.held, 0, n.out, 0, flen);
   n.held_len = flen;
   n.held_hop = hop;
   return arp_send(&mut n, 1, MAC_BCAST, 0, hop);
@@ -479,13 +461,7 @@ fn arp_in(n: &mut Net, flen: u64)
   if n.held_len >= 14 && n.held_hop == sip {
     // The frame waiting for this answer goes out now.
     let l = n.held_len;
-    let mut i = 0;
-    while i < l
-      invariant i <= l && l <= FRAME_MAX && net_ok(n)
-    {
-      bset(&mut n.out, i, bget(n.held, i));
-      i = i + 1;
-    }
+    bcopy(&mut n.out, 0, n.held, 0, l);
     n.held_len = 0;
     put48(&mut n.out, 0, smac);
     net_send(&mut n, l);
@@ -914,13 +890,7 @@ fn udp_deliver(n: &mut Net, s: u64, ulen: u64)
   let slot = (sk_get(n, s, S_HEAD) % RXQ + count) % RXQ;
   let plen = ulen - 8;
   let at = (s * RXQ + slot) * UDP_MAX;
-  let mut i = 0;
-  while i < plen
-    invariant i <= plen && net_ok(n)
-  {
-    bset(&mut n.dq, at + i, bget(n.pkt, 42 + i));
-    i = i + 1;
-  }
+  bcopy(&mut n.dq, at, n.pkt, 42, plen);
   sk_set(&mut n, s, S_SLOTS + slot * SLOT_W, plen);
   sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 1, be32(n.pkt, 26));
   sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 2, be16(n.pkt, 34));
@@ -1036,13 +1006,7 @@ fn udp_sendto(n: &mut Net, s: u64, to: u64, port: u64, buf: &Bytes, size: u64) -
   put16(&mut n.out, 34, sport);
   put16(&mut n.out, 36, port);
   put16(&mut n.out, 38, 8 + size);
-  let mut i = 0;
-  while i < size
-    invariant i <= size && net_ok(n)
-  {
-    bset(&mut n.out, 42 + i, bget(buf, i));
-    i = i + 1;
-  }
+  bcopy(&mut n.out, 42, buf, 0, size);
   udp_seal(&mut n, ip, 8 + size);
   if !send_via(&mut n, hop, 42 + size) {
     return NO_SOCK;
@@ -1077,13 +1041,7 @@ fn udp_recvfrom(n: &mut Net, s: u64, buf: &mut Bytes, max: u64) -> u64
   }
   let at = (s * RXQ + slot) * UDP_MAX;
   let bl = blen(buf);
-  let mut i = 0;
-  while i < l
-    invariant i <= l && net_ok(n) && blen(buf) == bl
-  {
-    bset(&mut buf, i, bget(n.dq, at + i));
-    i = i + 1;
-  }
+  bcopy(&mut buf, 0, n.dq, at, l);
   sk_set(&mut n, s, S_PEER_IP, sk_get(n, s, S_SLOTS + slot * SLOT_W + 1));
   sk_set(&mut n, s, S_PEER_PORT, sk_get(n, s, S_SLOTS + slot * SLOT_W + 2));
   sk_set(&mut n, s, S_HEAD, (slot + 1) % RXQ);
@@ -1111,13 +1069,7 @@ fn net_poll(n: &mut Net)
       n.lo_n = n.lo_n - 1;
     }
     if flen <= FRAME_MAX {
-      let mut i = 0;
-      while i < flen
-        invariant i <= flen && net_ok(n) && slot < LOQ
-      {
-        bset(&mut n.pkt, i, bget(n.lo, slot * RX_BUF + i));
-        i = i + 1;
-      }
+      bcopy(&mut n.pkt, 0, n.lo, slot * RX_BUF, flen);
       if n.rx < 18446744073709551615 {
         n.rx = n.rx + 1;
       }

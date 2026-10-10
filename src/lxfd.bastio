@@ -724,14 +724,7 @@ fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   }
   let want = smaller(smaller(n, count), XFER);
   let head = pi_get(k.pipes, p, 0) % PIPE_CAP;
-  let ring = p * PIPE_CAP;
-  let mut i = 0;
-  while i < want
-    invariant i <= want && want <= XFER && head < PIPE_CAP && ring + PIPE_CAP <= PIPE_BYTES && kok(k)
-  {
-    bset(&mut k.fs.xfer, i, bget(k.pipebuf, ring + (head + i) % PIPE_CAP));
-    i = i + 1;
-  }
+  ring_out(&mut k.fs.xfer, 0, k.pipebuf, p * PIPE_CAP, PIPE_CAP, head, want);
   let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
   if put == NO_RESULT || (put == 0 && want > 0) {
     return EFAULT;
@@ -765,16 +758,31 @@ fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
     return EFAULT;
   }
   let head = pi_get(k.pipes, p, 0) % PIPE_CAP;
-  let ring = p * PIPE_CAP;
-  let mut i = 0;
-  while i < got
-    invariant i <= got && got <= room && got <= XFER && head < PIPE_CAP && ring + PIPE_CAP <= PIPE_BYTES && kok(k)
-  {
-    bset(&mut k.pipebuf, ring + (head + count + i) % PIPE_CAP, bget(k.fs.xfer, i));
-    i = i + 1;
-  }
+  ring_in(&mut k.pipebuf, p * PIPE_CAP, PIPE_CAP, (head + count) % PIPE_CAP, k.fs.xfer, 0, got);
   pi_set(&mut k.pipes, p, 1, count + got);
   return got;
+}
+
+/// Copies n bytes out of the ring buffer src[base .. base + cap], starting
+/// at position `from` and wrapping at the end, into dst from index d.
+fn ring_out(dst: &mut Bytes, d: u64, src: &Bytes, base: u64, cap: u64, from: u64, n: u64)
+  requires from < cap && n <= cap && base + cap <= blen(src) && d + n <= blen(dst)
+  ensures blen(dst) == old(blen(dst))
+{
+  let first = smaller(n, cap - from);
+  bcopy(&mut dst, d, src, base + from, first);
+  bcopy(&mut dst, d + first, src, base, n - first);
+}
+
+/// Copies src[s .. s + n] into the ring buffer dst[base .. base + cap],
+/// from position `at`, wrapping at the end.
+fn ring_in(dst: &mut Bytes, base: u64, cap: u64, at: u64, src: &Bytes, s: u64, n: u64)
+  requires at < cap && n <= cap && base + cap <= blen(dst) && s + n <= blen(src)
+  ensures blen(dst) == old(blen(dst))
+{
+  let first = smaller(n, cap - at);
+  bcopy(&mut dst, base + at, src, s, first);
+  bcopy(&mut dst, base, src, s + first, n - first);
 }
 
 /// Makes process `pid` run system call `n` again later: a wait.

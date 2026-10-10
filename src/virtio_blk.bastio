@@ -149,14 +149,7 @@ fn virtio_read(v: &mut Virtio, lba: u64, buf: &mut Bytes) -> bool
   if !virtio_submit(&mut v, DESC_NEXT + DESC_WRITE, false) {
     return false;
   }
-  let l = blen(buf);
-  let mut i = 0;
-  while i < VIO_SECTOR
-    invariant i <= VIO_SECTOR && virtio_ok(v) && blen(buf) == l && l >= VIO_SECTOR
-  {
-    bset(&mut buf, i, dma_read8(&mut v.req, REQ_DATA + i));
-    i = i + 1;
-  }
+  dma_to_bytes(&mut buf, 0, &mut v.req, REQ_DATA, VIO_SECTOR);
   return true;
 }
 
@@ -168,13 +161,7 @@ fn virtio_write(v: &mut Virtio, lba: u64, buf: &Bytes) -> bool
   if lba >= v.sectors {
     return false;
   }
-  let mut i = 0;
-  while i < VIO_SECTOR
-    invariant i <= VIO_SECTOR && virtio_ok(v)
-  {
-    dma_write8(&mut v.req, REQ_DATA + i, bget(buf, i));
-    i = i + 1;
-  }
+  bytes_to_dma(&mut v.req, REQ_DATA, buf, 0, VIO_SECTOR);
   virtio_header(&mut v, BLK_OUT, lba);
   return virtio_submit(&mut v, DESC_NEXT, false);
 }
@@ -247,14 +234,7 @@ fn virtio_begin(v: &mut Virtio, op: u64, lba: u64, src: &Bytes, at: u64) -> bool
     return false;
   }
   if op == BIO_WRITE {
-    let sz = v.sectors;
-    let mut i = 0;
-    while i < VIO_BLOCK
-      invariant i <= VIO_BLOCK && i % 8 == 0 && virtio_ok(v) && v.sectors == sz
-    {
-      dma_write64(&mut v.data, i, get_u64(src, at + i));
-      i = i + 8;
-    }
+    bytes_to_dma(&mut v.data, 0, src, at, VIO_BLOCK);
     virtio_header(&mut v, BLK_OUT, lba);
     virtio_send(&mut v, DESC_NEXT, true);
   } else {
@@ -294,14 +274,5 @@ fn virtio_fetch(v: &mut Virtio, out: &mut Bytes, at: u64)
   requires virtio_ok(v) && at + VIO_BLOCK <= blen(out)
   ensures virtio_ok(v) && v.sectors == old(v.sectors) && v.busy == old(v.busy) && blen(out) == old(blen(out))
 {
-  let l = blen(out);
-  let sz = v.sectors;
-  let b0 = v.busy;
-  let mut i = 0;
-  while i < VIO_BLOCK
-    invariant i <= VIO_BLOCK && i % 8 == 0 && virtio_ok(v) && v.sectors == sz && v.busy == b0 && blen(out) == l && at + VIO_BLOCK <= l
-  {
-    put_u64(&mut out, at + i, dma_read64(&mut v.data, i));
-    i = i + 8;
-  }
+  dma_to_bytes(&mut out, at, &mut v.data, 0, VIO_BLOCK);
 }

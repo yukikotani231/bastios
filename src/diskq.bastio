@@ -288,13 +288,7 @@ fn dq_put(q: &mut DiskQ, b: u64, src: &Bytes, at: u64, look: bool) -> bool
   if s >= NC {
     return false;
   }
-  let mut j = 0;
-  while j < CBLOCK
-    invariant j <= CBLOCK && j % 8 == 0 && dq_ok(q) && s < NC && q.count < NQ
-  {
-    put_u64(&mut q.cache, s * CBLOCK + j, get_u64(src, at + j));
-    j = j + 8;
-  }
+  bcopy(&mut q.cache, s * CBLOCK, src, at, CBLOCK);
   if look {
     q.tag = set(q.tag, s, b);
   } else {
