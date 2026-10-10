@@ -100,12 +100,12 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64) -> u64
         }
         xfer_u64(&mut out, used, i + 1);              // d_ino
         xfer_u64(&mut out, used + 8, i + 1);          // d_off: the next entry
-        bset(&mut out, used + 16, reclen % 256);      // d_reclen
-        bset(&mut out, used + 17, reclen / 256 % 256);
+        bset(&mut out, used + 16, cast[u8](reclen % 256));      // d_reclen
+        bset(&mut out, used + 17, cast[u8](reclen / 256 % 256));
         if e.dir {
-          bset(&mut out, used + 18, DT_DIR);
+          bset(&mut out, used + 18, cast[u8](DT_DIR));
         } else {
-          bset(&mut out, used + 18, DT_REG);
+          bset(&mut out, used + 18, cast[u8](DT_REG));
         }
         let mut j = 0;
         while j < e.len

@@ -298,9 +298,9 @@ fn lx_wait4(k: &mut Kernel, pid: u64, want: u64, status: u64, options: u64) -> u
           lx_fill(&mut k, 0, 4);
           let code = pget(k.procs, c, F_CODE);
           if code >= SIG_DEATH {
-            bset(&mut k.fs.xfer, 0, code % 128);   // ended by a signal
+            bset(&mut k.fs.xfer, 0, cast[u8](code % 128));   // ended by a signal
           } else {
-            bset(&mut k.fs.xfer, 1, code % 256);
+            bset(&mut k.fs.xfer, 1, cast[u8](code % 256));
           }
           if lx_put_out(&mut k, pid, status, 4) != 0 {
             ret(&mut k.procs, pid, EFAULT);
@@ -514,7 +514,7 @@ fn xfer_u64(x: &mut Bytes, at: u64, v: u64)
   while i < 8
     invariant i <= 8 && at + 8 <= blen(x)
   {
-    bset(&mut x, at + i, r % 256);
+    bset(&mut x, at + i, cast[u8](r % 256));
     r = r / 256;
     i = i + 1;
   }

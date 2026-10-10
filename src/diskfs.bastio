@@ -47,10 +47,10 @@ spec fn disk_ok(d: &DiskFs) -> bool {
 fn get_u64(b: &Bytes, at: u64) -> u64
   requires at + 8 <= blen(b)
 {
-  return bget(b, at) + 0x100 * bget(b, at + 1) + 0x10000 * bget(b, at + 2)
-    + 0x1000000 * bget(b, at + 3) + 0x100000000 * bget(b, at + 4)
-    + 0x10000000000 * bget(b, at + 5) + 0x1000000000000 * bget(b, at + 6)
-    + 0x100000000000000 * bget(b, at + 7);
+  return cast[u64](bget(b, at)) + 0x100 * cast[u64](bget(b, at + 1)) + 0x10000 * cast[u64](bget(b, at + 2))
+    + 0x1000000 * cast[u64](bget(b, at + 3)) + 0x100000000 * cast[u64](bget(b, at + 4))
+    + 0x10000000000 * cast[u64](bget(b, at + 5)) + 0x1000000000000 * cast[u64](bget(b, at + 6))
+    + 0x100000000000000 * cast[u64](bget(b, at + 7));
 }
 
 /// Stores v at b[at..at + 8], little-endian.
@@ -64,7 +64,7 @@ fn put_u64(b: &mut Bytes, at: u64, v: u64)
   while k < 8
     invariant k <= 8 && blen(b) == l
   {
-    bset(&mut b, at + k, x % 256);
+    bset(&mut b, at + k, cast[u8](x % 256));
     x = x / 256;
     k = k + 1;
   }
@@ -193,7 +193,7 @@ fn set_size(d: &mut DiskFs, i: u64, size: u64) -> bool
 fn dent_is(d: &DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
   requires disk_ok(d) && i < DSLOTS && from + n <= blen(name)
 {
-  if !dent_used(d, i) || bget(d.dir, i * DENT + 1) != n || n > DNAME_MAX {
+  if !dent_used(d, i) || cast[u64](bget(d.dir, i * DENT + 1)) != n || n > DNAME_MAX {
     return false;
   }
   let mut k = 0;
@@ -247,7 +247,7 @@ fn disk_create(d: &mut DiskFs, name: &Bytes, from: u64, n: u64) -> u64
         k = k + 1;
       }
       bset(&mut d.dir, i * DENT, 1);
-      bset(&mut d.dir, i * DENT + 1, n);
+      bset(&mut d.dir, i * DENT + 1, cast[u8](n));
       k = 0;
       while k < n
         invariant k <= n && disk_ok(d)
@@ -284,7 +284,7 @@ fn disk_name(d: &DiskFs, i: u64, buf: &mut Bytes, at: u64) -> u64
   if i >= d.slots || !dent_used(d, i) {
     return NO_DISK_FILE;
   }
-  let n = bget(d.dir, i * DENT + 1);
+  let n = cast[u64](bget(d.dir, i * DENT + 1));
   if n > DNAME_MAX || at > blen(buf) || n > blen(buf) - at {
     return NO_DISK_FILE;
   }

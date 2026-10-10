@@ -251,7 +251,7 @@ fn w_byte(l2: &mut PageTable, a: u64) -> u64
   let mut v = 256;
   if pt_has(l1, p % 512) {
     let f = pt_take_frame(&mut l1, p % 512);
-    v = frame_read8(f, a % 4096);
+    v = cast[u64](frame_read8(f, a % 4096));
     pt_put_frame(&mut l1, p % 512, f, true);
   }
   pt_put(&mut l2, t, l1);

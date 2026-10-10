@@ -31,7 +31,7 @@ fn pci_free(ports: &mut Ports, p: Pci)
 fn pci_select(p: &mut Pci, dev: u64, off: u64)
   requires pci_ok(p) && dev < 32 && off < 256 && off % 4 == 0
 {
-  pio_out32(&mut p.addr, 0, PCI_ENABLE + dev * 2048 + off);
+  pio_out32(&mut p.addr, 0, cast[u32](PCI_ENABLE + dev * 2048 + off));
 }
 
 fn pci_read(p: &mut Pci, dev: u64, off: u64) -> u64
@@ -39,14 +39,14 @@ fn pci_read(p: &mut Pci, dev: u64, off: u64) -> u64
   ensures result <= 4294967295
 {
   pci_select(&mut p, dev, off);
-  return pio_in32(&mut p.data, 0);
+  return cast[u64](pio_in32(&mut p.data, 0));
 }
 
 fn pci_write(p: &mut Pci, dev: u64, off: u64, v: u64)
   requires pci_ok(p) && dev < 32 && off < 256 && off % 4 == 0 && v <= 4294967295
 {
   pci_select(&mut p, dev, off);
-  pio_out32(&mut p.data, 0, v);
+  pio_out32(&mut p.data, 0, cast[u32](v));
 }
 
 /// The first device on bus 0 with this vendor and device id, or 32.

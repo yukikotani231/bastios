@@ -49,7 +49,7 @@ fn ata_status(a: &mut Ata) -> u64
   requires ata_ok(a)
   ensures ata_ok(a) && a.sectors == old(a.sectors) && result <= 255
 {
-  return pio_in8(&mut a.ctl, 0);
+  return cast[u64](pio_in8(&mut a.ctl, 0));
 }
 
 /// Waits until the drive is not busy. Returns false on a timeout or an
@@ -105,12 +105,12 @@ fn ata_command(a: &mut Ata, lba: u64, cmd: u64) -> bool
   if !ata_idle(&mut a) {
     return false;
   }
-  pio_out8(&mut a.io, ATA_DRIVE, 0xE0 + lba / 0x1000000);
+  pio_out8(&mut a.io, ATA_DRIVE, cast[u8](0xE0 + lba / 0x1000000));
   pio_out8(&mut a.io, ATA_COUNT, 1);
-  pio_out8(&mut a.io, ATA_LBA0, lba % 256);
-  pio_out8(&mut a.io, ATA_LBA1, lba / 256 % 256);
-  pio_out8(&mut a.io, ATA_LBA2, lba / 65536 % 256);
-  pio_out8(&mut a.io, ATA_CMD, cmd);
+  pio_out8(&mut a.io, ATA_LBA0, cast[u8](lba % 256));
+  pio_out8(&mut a.io, ATA_LBA1, cast[u8](lba / 256 % 256));
+  pio_out8(&mut a.io, ATA_LBA2, cast[u8](lba / 65536 % 256));
+  pio_out8(&mut a.io, ATA_CMD, cast[u8](cmd));
   return ata_ready(&mut a);
 }
 
@@ -132,7 +132,7 @@ fn ata_new(ports: &mut Ports) -> Ata
   pio_out8(&mut a.io, ATA_LBA0, 0);
   pio_out8(&mut a.io, ATA_LBA1, 0);
   pio_out8(&mut a.io, ATA_LBA2, 0);
-  pio_out8(&mut a.io, ATA_CMD, ATA_IDENTIFY);
+  pio_out8(&mut a.io, ATA_CMD, cast[u8](ATA_IDENTIFY));
   if pio_in8(&mut a.io, ATA_CMD) == 0 {
     return a;                                  // no drive
   }
@@ -148,10 +148,10 @@ fn ata_new(ports: &mut Ports) -> Ata
   {
     let v = pio_in16(&mut a.io, ATA_DATA);
     if w == 60 {
-      lo = v;
+      lo = cast[u64](v);
     }
     if w == 61 {
-      hi = v;
+      hi = cast[u64](v);
     }
     w = w + 1;
   }
@@ -186,8 +186,8 @@ fn ata_read(a: &mut Ata, lba: u64, buf: &mut Bytes) -> bool
     invariant w <= 256 && ata_ok(a) && a.sectors == sz && blen(buf) == l && l >= SECTOR
   {
     let v = pio_in16(&mut a.io, ATA_DATA);
-    bset(&mut buf, 2 * w, v % 256);
-    bset(&mut buf, 2 * w + 1, v / 256);
+    bset(&mut buf, 2 * w, cast[u8](v % 256));
+    bset(&mut buf, 2 * w + 1, cast[u8](v / 256));
     w = w + 1;
   }
   return true;
@@ -206,12 +206,12 @@ fn ata_write(a: &mut Ata, lba: u64, buf: &Bytes) -> bool
   while w < 256
     invariant w <= 256 && ata_ok(a) && a.sectors == sz
   {
-    pio_out16(&mut a.io, ATA_DATA, bget(buf, 2 * w) + 256 * bget(buf, 2 * w + 1));
+    pio_out16(&mut a.io, ATA_DATA, cast[u16](bget(buf, 2 * w)) + 256 * cast[u16](bget(buf, 2 * w + 1)));
     w = w + 1;
   }
   if !ata_idle(&mut a) {
     return false;
   }
-  pio_out8(&mut a.io, ATA_CMD, ATA_FLUSH);
+  pio_out8(&mut a.io, ATA_CMD, cast[u8](ATA_FLUSH));
   return ata_idle(&mut a);
 }

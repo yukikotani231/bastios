@@ -311,8 +311,8 @@ fn put_mac(con: &mut Uart, mac: u64)
     let b = (mac / q) % 256;
     let hi = b / 16;
     let lo = b % 16;
-    if hi < 10 { uart_write(&mut con, 48 + hi); } else { uart_write(&mut con, 87 + hi); }
-    if lo < 10 { uart_write(&mut con, 48 + lo); } else { uart_write(&mut con, 87 + lo); }
+    if hi < 10 { uart_write(&mut con, cast[u8](48 + hi)); } else { uart_write(&mut con, cast[u8](87 + hi)); }
+    if lo < 10 { uart_write(&mut con, cast[u8](48 + lo)); } else { uart_write(&mut con, cast[u8](87 + lo)); }
     q = q / 256;
   }
 }

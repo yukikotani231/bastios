@@ -22,8 +22,8 @@ fn pic_init(p: &mut Pic)
 {
   pio_out8(&mut p.master, 0, 0x11);    // ICW1: initialise, ICW4 follows
   pio_out8(&mut p.slave, 0, 0x11);
-  pio_out8(&mut p.master, 1, V_IRQ0);  // ICW2: vector base
-  pio_out8(&mut p.slave, 1, V_IRQ8);
+  pio_out8(&mut p.master, 1, cast[u8](V_IRQ0));  // ICW2: vector base
+  pio_out8(&mut p.slave, 1, cast[u8](V_IRQ8));
   pio_out8(&mut p.master, 1, 4);       // ICW3: the slave is on IRQ 2
   pio_out8(&mut p.slave, 1, 2);        //       and knows it is number 2
   pio_out8(&mut p.master, 1, 1);       // ICW4: 8086 mode
