@@ -270,7 +270,7 @@ steps = [
     ("mkdir pd; chmod 700 pd; stat -c '%a %F' pd", b"\r\n700 directory\r\n", b"\n# "),
     ("rm pm; rmdir pd; echo cleaned$((1+1))", b"\r\ncleaned2\r\n", b"\n# "),
     # The *at calls relative to a directory descriptor, fchdir, and mmap
-    # of a file (user/mdir.c).
+    # of a file, EMFILE, and a named pipe (user/mdir.c).
     ("mdir", b"mdir: ok in /dx, mapped", b"\n# "),
     # Small calls: uname, readv, pread/pwrite, limits, sysinfo, statfs,
     # getrandom, priorities, sessions, process groups, ttyname, pipe capacity (user/mmisc.c).

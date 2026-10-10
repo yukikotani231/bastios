@@ -581,6 +581,10 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
   if pf != 0 {
     return proc_meta(pf);
   }
+  let ff = fifo_find(k, n);
+  if ff < FIFO_N {
+    return Meta { ok: true, mode: S_IFIFO, size: 0, ino: INO_FIFO + ff, mtime: 0 };
+  }
   let dir = dir_at(&mut k, n);
   if dir != NO_FILE {
     if dir >= DIR_PROC {

@@ -20,6 +20,17 @@
 //
 // A read or epoll_wait that has to wait runs again (lx_retry), as a pipe
 // read does.
+//
+// A named pipe (mkfifo, mknod with S_IFIFO) is a name in one of FIFO_N
+// slots in k.evt, at FIFO_AT + f * FIFO_STRIDE: the name's length (0: the
+// slot is free), the pipe its open ends share + 1, then the name, a byte
+// a word, as the path layer spells it (no leading "/"). The pipe is an
+// ordinary one (src/lxfd.bastio) marked as the FIFO's, made when the
+// first end opens and gone when the last one closes. Opening to write
+// waits until there is a reader (-ENXIO with O_NONBLOCK); opening to read
+// does not wait, but reads wait until a writer has come. The name lives
+// beside the file system, not in it: stat, open and unlink know it, a
+// directory listing does not show it, and it does not survive a reboot.
 
 import "linux.bastio";
 
@@ -34,6 +45,12 @@ const LX_TIMERFD_GETTIME: u64 = 287;
 const LX_EVENTFD2: u64 = 290;
 const LX_EPOLL_CREATE1: u64 = 291;
 const LX_EPOLL_PWAIT2: u64 = 441;
+const LX_MKNOD: u64 = 133;
+const LX_MKNODAT: u64 = 259;
+const S_IFMT: u64 = 0xF000;
+const S_IFIFO_TYPE: u64 = 0x1000;
+const ENXIO: u64 = 18446744073709551610;     // 2^64 - 6
+const ENAMETOOLONG: u64 = 18446744073709551580;  // 2^64 - 36
 const EFD_SEMAPHORE: u64 = 1;
 const EV_MAX: u64 = 18446744073709551614;    // 2^64 - 2: the most an eventfd holds
 const TFD_TIMER_ABSTIME: u64 = 1;
@@ -51,7 +68,7 @@ const ENOSPC: u64 = 18446744073709551588;    // 2^64 - 28
 fn is_event_call(n: u64) -> bool {
   return n == LX_EPOLL_CREATE || n == LX_EPOLL_WAIT || n == LX_EPOLL_CTL || n == LX_EPOLL_PWAIT
     || n == LX_TIMERFD_CREATE || n == LX_EVENTFD || n == LX_TIMERFD_SETTIME || n == LX_TIMERFD_GETTIME
-    || n == LX_EVENTFD2 || n == LX_EPOLL_CREATE1 || n == LX_EPOLL_PWAIT2;
+    || n == LX_EVENTFD2 || n == LX_EPOLL_CREATE1 || n == LX_EPOLL_PWAIT2 || n == LX_MKNOD || n == LX_MKNODAT;
 }
 
 /// Gives process pid the lowest closed descriptor for a new description
@@ -539,6 +556,148 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
   return KEEP;
 }
 
+// ---------------------------------------------------------------- FIFOs
+
+/// The named pipe called x[..n] (the transfer buffer), or FIFO_N.
+fn fifo_find(k: &Kernel, n: u64) -> u64
+  requires kok(k)
+  ensures result <= FIFO_N
+{
+  if n == 0 || n > FIFO_NAME {
+    return FIFO_N;
+  }
+  let mut f = 0;
+  while f < FIFO_N
+    invariant f <= FIFO_N && n <= FIFO_NAME && kok(k)
+  {
+    let base = FIFO_AT + f * FIFO_STRIDE;
+    if get(k.evt, base) == n {
+      let mut i = 0;
+      let mut same = true;
+      while i < n && same
+        invariant i <= n && n <= FIFO_NAME && f < FIFO_N && kok(k)
+      {
+        same = get(k.evt, base + 2 + i) == cast[u64](bget(k.fs.xfer, i));
+        i = i + 1;
+      }
+      if same {
+        return f;
+      }
+    }
+    f = f + 1;
+  }
+  return FIFO_N;
+}
+
+/// mknod and mknodat(dirfd, path, mode): only named pipes (S_IFIFO).
+fn lx_mknod(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if mode & S_IFMT != S_IFIFO_TYPE {
+    return EPERM;                           // no device nodes, and files come from open
+  }
+  let n = lx_path_at(&mut k, pid, dirfd, path);
+  if n == NO_RESULT {
+    return ENOENT;
+  }
+  if n == 0 || n > FNAME_MAX {
+    return EEXIST;                          // "/"
+  }
+  if n > FIFO_NAME {
+    return ENAMETOOLONG;
+  }
+  let mut f = 0;
+  while f < FIFO_N && get(k.evt, FIFO_AT + f * FIFO_STRIDE) != 0
+    invariant f <= FIFO_N && kok(k)
+  {
+    f = f + 1;
+  }
+  if f >= FIFO_N {
+    return ENOSPC;
+  }
+  if fifo_find(k, n) < FIFO_N {
+    return EEXIST;
+  }
+  // Keep the name before anything else can touch the transfer buffer.
+  let base = FIFO_AT + f * FIFO_STRIDE;
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= FIFO_NAME && f < FIFO_N && kok(k)
+  {
+    k.evt = set(k.evt, base + 2 + i, cast[u64](bget(k.fs.xfer, i)));
+    i = i + 1;
+  }
+  let there = path_meta(&mut k, n);
+  if there.ok {
+    return EEXIST;
+  }
+  k.evt = set(k.evt, base + 1, 0);
+  k.evt = set(k.evt, base, n);
+  return 0;
+}
+
+/// open of named pipe f with these flags: a descriptor, -errno, or SK_WAIT
+/// for a writer that must wait for a reader.
+fn fifo_open(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC && f < FIFO_N
+  ensures kok(k)
+{
+  let acc = flags % 4;
+  if acc != 0 && acc != LO_WRONLY {
+    return EINVAL;                          // O_RDWR on a FIFO is not supported
+  }
+  if fd_free(k.lxfd, pid, 0) >= LXNFD {
+    return EMFILE;
+  }
+  let base = FIFO_AT + f * FIFO_STRIDE;
+  let w = get(k.evt, base + 1);
+  let mut q = NPIPES;
+  if w >= 1 && w - 1 < NPIPES {
+    let c = w - 1;
+    if pi_get(k.pipes, c, 4) == f + 1 && (pi_get(k.pipes, c, 2) != 0 || pi_get(k.pipes, c, 3) != 0) {
+      q = c;                                // an end is open: join its pipe
+    }
+  }
+  if q >= NPIPES {
+    q = 0;
+    while q < NPIPES && (pi_get(k.pipes, q, 2) != 0 || pi_get(k.pipes, q, 3) != 0)
+      invariant q <= NPIPES && kok(k)
+    {
+      q = q + 1;
+    }
+    if q >= NPIPES {
+      return ENFILE;
+    }
+    pi_set(&mut k.pipes, q, 0, 0);
+    pi_set(&mut k.pipes, q, 1, 0);
+    pi_set(&mut k.pipes, q, 4, f + 1);
+    pi_set(&mut k.pipes, q, 5, 0);
+    k.evt = set(k.evt, base + 1, q + 1);
+  }
+  let nb = flags / LO_NONBLOCK % 2;
+  let ce = flags / LO_CLOEXEC % 2 == 1;
+  if acc == LO_WRONLY {
+    if pi_get(k.pipes, q, 2) == 0 {
+      if nb == 1 {
+        return ENXIO;
+      }
+      return SK_WAIT;
+    }
+    let fd = ev_install(&mut k, pid, OF_PIPE_W, q, nb, ce);
+    if fd < LXNFD {
+      pi_set(&mut k.pipes, q, 3, smaller(pi_get(k.pipes, q, 3), OFD_N) + 1);
+      pi_set(&mut k.pipes, q, 5, 1);
+    }
+    return fd;
+  }
+  let fd = ev_install(&mut k, pid, OF_PIPE_R, q, nb, ce);
+  if fd < LXNFD {
+    pi_set(&mut k.pipes, q, 2, smaller(pi_get(k.pipes, q, 2), OFD_N) + 1);
+  }
+  return fd;
+}
+
 /// The eventfd, timerfd and epoll calls; d is the fourth argument (r10).
 fn lx_event_call(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u64, d: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -586,6 +745,10 @@ fn lx_event_call(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: 
     }
   } else if n == LX_EPOLL_CTL {
     r = lx_epoll_ctl(&mut k, pid, a, b, c, d);
+  } else if n == LX_MKNOD {
+    r = lx_mknod(&mut k, pid, AT_FDCWD, a, b);
+  } else if n == LX_MKNODAT {
+    r = lx_mknod(&mut k, pid, a, b, c);
   }
   ret(&mut k.procs, pid, r);
   return KEEP;

@@ -212,7 +212,7 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
     if pi_get(k.pipes, f.x, 1) > 0 {
       b = POLLIN;
     }
-    if pi_get(k.pipes, f.x, 3) == 0 {
+    if pi_get(k.pipes, f.x, 3) == 0 && pi_get(k.pipes, f.x, 5) != 0 {
       b = b | POLLHUP;                      // no writer left: end of file
     }
     return b;

@@ -106,6 +106,7 @@ const S_IFREG: u64 = 0x81A4;                // a regular file, rw-r--r--
 const S_IFMT_DIR: u64 = 0x4000;             // the type bits of a directory
 const S_IFMT_REG: u64 = 0x8000;             // and of a regular file
 const INO_FILES: u64 = 1000;                // inode numbers of files: this + the handle
+const INO_FIFO: u64 = 900;                 // inode numbers of named pipes: this + the slot
 
 // ---------------------------------------------------------------- user memory
 
@@ -312,12 +313,17 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, lx_fcntl(&mut k, pid, a, b, c));
     return KEEP;
   }
-  if n == LX_OPEN {
-    ret(&mut k.procs, pid, lx_open(&mut k, pid, AT_FDCWD, a, b));
-    return KEEP;
-  }
-  if n == LX_OPENAT {
-    ret(&mut k.procs, pid, lx_open(&mut k, pid, a, b, c));
+  if n == LX_OPEN || n == LX_OPENAT {
+    let mut r = 0;
+    if n == LX_OPEN {
+      r = lx_open(&mut k, pid, AT_FDCWD, a, b);
+    } else {
+      r = lx_open(&mut k, pid, a, b, c);
+    }
+    if r == SK_WAIT {
+      return lx_retry(&mut k, pid, n);      // a FIFO's writer waits for a reader
+    }
+    ret(&mut k.procs, pid, r);
     return KEEP;
   }
   if n == LX_UNLINK || n == LX_UNLINKAT {
