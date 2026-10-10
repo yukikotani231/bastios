@@ -4,8 +4,9 @@
  * running out of descriptors, a named pipe (mkfifo), the errors a path
  * walk gives (ENOTDIR, ELOOP), renameat2 with RENAME_EXCHANGE, mknod of a
  * regular file, one write of more than 4096 bytes, O_TMPFILE refused, a
- * full in-memory table (ENOSPC), a tmpfs mount (read-only too), and
- * cleaning up. */
+ * full in-memory table (ENOSPC), a tmpfs mount (read-only too), a
+ * BastiOS file system made with mkfs.bstdisk3 on a disk image and
+ * mounted (bstdisk3), and cleaning up. */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -15,6 +16,7 @@
 #include <sys/statfs.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <dirent.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -24,6 +26,71 @@ static int fail(const char *what)
 {
     printf("mdir: %s failed (errno %d)\n", what, errno);
     return 1;
+}
+
+/* A disk image: refused until mkfs.bstdisk3 formats it, then mounted,
+ * written, unmounted, and mounted again with everything still there. */
+static int lomount(void)
+{
+    int im = open("img", O_CREAT | O_RDWR, 0644);
+    if (im < 0 || ftruncate(im, 1 << 20) != 0 || close(im) != 0 || mkdir("lm", 0755) != 0)
+        return fail("a disk image");
+    if (mount("img", "lm", "bstdisk3", 0, 0) != -1 || errno != EINVAL)
+        return fail("mount of an unformatted image");
+    int status = -1;
+    pid_t c = fork();
+    if (c == 0) {
+        execl("/bin/mkfs.bstdisk3", "mkfs.bstdisk3", "-F", "img", (char *)0);
+        _exit(127);
+    }
+    if (c < 0 || waitpid(c, &status, 0) != c || status != 0)
+        return fail("mkfs.bstdisk3");
+    if (mount("img", "lm", "bstdisk3", 0, 0) != 0)
+        return fail("mount of a bstdisk3 image");
+    if (mount("img", "lm", "bstdisk3", 0, 0) != -1 || errno != EBUSY)
+        return fail("a second mount on it");
+    char mb[1024] = { 0 };
+    int pm = open("/proc/self/mounts", O_RDONLY);
+    if (pm < 0 || read(pm, mb, sizeof mb - 1) <= 0 || !strstr(mb, " /dx/lm bstdisk3 rw"))
+        return fail("bstdisk3 in /proc/self/mounts");
+    close(pm);
+    int w = open("lm/a", O_CREAT | O_WRONLY, 0644);
+    if (w < 0 || write(w, "hello", 5) != 5 || mkdir("lm/d", 0755) != 0)
+        return fail("writing to the mount");
+    if (umount2("lm", 0) != -1 || errno != EBUSY || rmdir("lm") != -1 || errno != EBUSY)
+        return fail("a busy bstdisk3 mount");
+    close(w);
+    w = open("lm/d/b", O_CREAT | O_WRONLY, 0600);
+    if (w < 0 || write(w, big, sizeof big) != sizeof big || close(w) != 0 || symlink("d/b", "lm/l") != 0)
+        return fail("a file in a directory in the mount");
+    if (rename("lm/a", "moved") != -1 || errno != EXDEV)
+        return fail("a rename out of the mount");
+    int n = 0;
+    DIR *dir = opendir("lm");
+    struct dirent *e;
+    while (dir && (e = readdir(dir)))
+        n += !strcmp(e->d_name, "a") || !strcmp(e->d_name, "d") || !strcmp(e->d_name, "l");
+    if (!dir || n != 3)
+        return fail("listing the mount");
+    closedir(dir);
+    if (umount2("lm", 0) != 0)
+        return fail("umount2 of bstdisk3");
+    struct stat st;
+    if (stat("lm/a", &st) == 0 || mount("img", "lm", "bstdisk3", MS_RDONLY, 0) != 0)
+        return fail("mounting it again");
+    char rb[8] = { 0 };
+    int r = open("lm/a", O_RDONLY);
+    if (r < 0 || read(r, rb, sizeof rb) != 5 || strcmp(rb, "hello") != 0 || close(r) != 0
+        || stat("lm/d/b", &st) != 0 || st.st_size != sizeof big || (st.st_mode & 0777) != 0600
+        || lstat("lm/l", &st) != 0 || !S_ISLNK(st.st_mode))
+        return fail("what the image kept");
+    if (open("lm/new", O_CREAT | O_WRONLY, 0644) != -1 || errno != EROFS || unlink("lm/a") != -1 || errno != EROFS)
+        return fail("a read-only bstdisk3 mount");
+    /* The image's name can go while it is mounted; the file goes at the unmount. */
+    if (unlink("img") != 0 || stat("img", &st) == 0 || stat("lm/a", &st) != 0
+        || umount2("lm", 0) != 0 || rmdir("lm") != 0)
+        return fail("removing the image");
+    return 0;
 }
 
 int main(void)
@@ -181,6 +248,8 @@ int main(void)
     close(mf);
     if (umount2("mt", 0) != 0 || rmdir("mt") != 0)
         return fail("removing the mount");
+    if (lomount() != 0)
+        return 1;
     if (unlinkat(AT_FDCWD, "f", 0) != 0 || chdir("..") != 0 || rmdir("dx") != 0)
         return fail("cleaning up");
     close(d);

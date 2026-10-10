@@ -462,6 +462,9 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
       return EROFS;                         // a read-only mount (src/lxmount.bastio)
     }
   }
+  if flags % 4 != 0 && k.fs.lo_at != 0 && vfs_lookup(&mut k.fs, n) == k.fs.lo_file {
+    return EBUSY;                           // a disk image while it is mounted (vfs_lo_mount)
+  }
   let pf = proc_file(k.procs, k.fs.xfer, n);
   if pf != 0 {
     if flags % 4 != 0 || pf % 16 == PF_EXE {
