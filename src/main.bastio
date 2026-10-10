@@ -38,6 +38,7 @@ import "lxevent.bastio";
 import "lxptimer.bastio";
 import "lxmore.bastio";
 import "lxmsg.bastio";
+import "lxcred.bastio";
 import "lxlock.bastio";
 import "lxprocfs.bastio";
 import "lxlink.bastio";
@@ -121,10 +122,6 @@ fn fast_call(cpu: &mut Cpu, v: u64, pid: u64, tg: u64, others: &Atomic[bool]) ->
     }
     if n == LX_GETPID {
       cpu_set(&mut cpu, R_RAX, tg);
-      return true;
-    }
-    if n == LX_GETUID || n == LX_GETGID || n == LX_GETEUID || n == LX_GETEGID {
-      cpu_set(&mut cpu, R_RAX, 0);
       return true;
     }
     if n == LX_SCHED_YIELD && !atomic_load(others) {
@@ -620,7 +617,8 @@ fn ack(pic: &mut Pic, apic: &mut Lapic, v: u64)
 
 // The files the file system starts with, built into the kernel image.
 // elfdemo is a Linux program (the elfpie test) that execve runs as a file.
-// /etc/passwd and /etc/group name root, the only user, for Linux programs
+// /etc/passwd and /etc/group name root and a few unprivileged users (nobody,
+// bin, daemon) for Linux programs
 // (whoami, ls -l, getpwuid). /etc/hosts names localhost (getaddrinfo).
 const NINIT: u64 = 6;
 

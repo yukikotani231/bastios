@@ -489,9 +489,8 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_sig_call(n) {
     return lx_sig_call(&mut k, pid, n, a, b, c);
   }
-  if n == LX_GETUID || n == LX_GETGID || n == LX_GETEUID || n == LX_GETEGID {
-    ret(&mut k.procs, pid, 0);              // everyone is root
-    return KEEP;
+  if is_cred_call(n) {
+    return lx_cred_call(&mut k, pid, n, a, b, c);
   }
   if n == LX_GETCWD {
     ret(&mut k.procs, pid, lx_getcwd(&mut k, pid, a, b));

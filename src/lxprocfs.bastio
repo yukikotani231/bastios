@@ -339,6 +339,22 @@ fn put_n(o: &mut Bytes, at: u64, v: u64) -> u64
   return a;
 }
 
+/// A status line's four ids (real, effective, saved, file system) from
+/// row words w and s, each after a tab.
+fn put_ids(o: &mut Bytes, at: u64, procs: &Buf, p: u64, w: u64, s: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT && len(procs) == PTAB_LEN && p < NPROC && w < STRIDE && s < STRIDE
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = put_c(&mut o, at, 9);
+  a = put_n(&mut o, a, id_get(procs, p, w, false));
+  a = put_c(&mut o, a, 9);
+  a = put_n(&mut o, a, id_get(procs, p, w, true));
+  a = put_c(&mut o, a, 9);
+  a = put_n(&mut o, a, id_get(procs, p, s, false));
+  a = put_c(&mut o, a, 9);
+  return put_n(&mut o, a, id_get(procs, p, s, true));
+}
+
 /// Appends v as two digits (v below 100).
 fn put_2(o: &mut Bytes, at: u64, v: u64) -> u64
   requires blen(o) == PROC_OUT && at <= PROC_OUT
@@ -544,7 +560,11 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, p);
     a = put_s(&mut o, a, "\nPPid:\t");
     a = put_n(&mut o, a, parent);
-    return put_s(&mut o, a, "\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\nThreads:\t1\n");
+    a = put_s(&mut o, a, "\nUid:");
+    a = put_ids(&mut o, a, k.procs, p, F_UID, F_SUID);
+    a = put_s(&mut o, a, "\nGid:");
+    a = put_ids(&mut o, a, k.procs, p, F_GID, F_SGID);
+    return put_s(&mut o, a, "\nThreads:\t1\n");
   }
   if what == PF_CMDLINE {
     let a = put_prog(&mut k, p, &mut o, 0, true);

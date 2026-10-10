@@ -98,6 +98,13 @@ dev: tcc: a compile error
 dev: tcc: arguments, exit status, an executable file
 dev: tcc: hello
 dev: tcc: the library (malloc, qsort, files, strings)
+t_cred: a child inherits ids; /proc/self/status shows them
+t_cred: an unprivileged process keeps to the ids it holds
+t_cred: getgrnam finds users
+t_cred: getpwnam finds nobody
+t_cred: root starts as uid and gid 0
+t_cred: setreuid and setfsuid follow Linux's rules
+t_cred: the parent is still root
 t_dir: chdir
 t_dir: chdir ..
 t_dir: create file in directory

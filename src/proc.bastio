@@ -11,8 +11,8 @@ import "net.bastio";
 import "tcp.bastio";
 
 const NPROC: u64 = 32;
-const STRIDE: u64 = 48;
-const PTAB_LEN: u64 = 1536;          // NPROC * STRIDE
+const STRIDE: u64 = 56;
+const PTAB_LEN: u64 = 1792;          // NPROC * STRIDE
 
 // Row fields.
 const F_STATE: u64 = 0;
@@ -57,6 +57,13 @@ const F_ALTSIZE: u64 = 41;
 // interval, for ITIMER_VIRTUAL and then ITIMER_PROF; 0 left is off.
 const F_VTIMER: u64 = 42;
 const F_PTIMER: u64 = 44;
+// Credentials (src/lxcred.bastio), two 32-bit ids a word: real and
+// effective user, saved and file-system user, then the same for groups.
+// All 0 (root) at boot; a fork or a thread copies them.
+const F_UID: u64 = 46;
+const F_SUID: u64 = 47;
+const F_GID: u64 = 48;
+const F_SGID: u64 = 49;
 const SIG_DEATH: u64 = 256;          // F_CODE of a process a signal ended: 256 + the signal
 
 // Saved register numbers.
