@@ -25,6 +25,7 @@ const LX_MUNMAP: u64 = 11;
 const LX_BRK: u64 = 12;
 const LX_IOCTL: u64 = 16;
 const LX_WRITEV: u64 = 20;
+const LX_READV: u64 = 19;
 const LX_GETPID: u64 = 39;
 const LX_EXIT: u64 = 60;
 const LX_GETPPID: u64 = 110;
@@ -181,18 +182,31 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     terminate(&mut k, mmu, pid, a % 256);
     return SWITCH;
   }
-  if n == LX_READ {
+  if n == LX_READ || n == LX_READV {
+    // readv reads into the first buffer that has room: a short read, as
+    // Linux allows.
+    let mut va = b;
+    let mut cnt = c;
+    if n == LX_READV {
+      let v = first_iov(&mut k, pid, b, c);
+      if v.err != 0 {
+        ret(&mut k.procs, pid, v.err);
+        return KEEP;
+      }
+      va = v.base;
+      cnt = v.len;
+    }
     let d = fd_look(k, pid, a);
     if d.kind == K_CONSOLE {
-      return console_read(&mut k, pid, b, c);
+      return console_read(&mut k, pid, va, cnt);
     }
     let mut r = EBADF;
     if d.kind == K_FILE {
-      r = lx_file_read(&mut k, pid, d.x, b, c);
+      r = lx_file_read(&mut k, pid, d.x, va, cnt);
     } else if d.kind == K_PIPE_R {
-      r = pipe_read(&mut k, pid, d.x, b, c);
+      r = pipe_read(&mut k, pid, d.x, va, cnt);
     } else if d.kind == K_SOCK {
-      r = lx_recvfrom(&mut k, pid, a, b, c, 0, 0, 0);
+      r = lx_recvfrom(&mut k, pid, a, va, cnt, 0, 0, 0);
       if r == SK_WAIT {
         r = EAGAIN;                         // wait for a datagram, below
       } else if r == EAGAIN {
@@ -245,6 +259,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if is_sock_call(n) {
     return lx_sock_call(&mut k, pid, n, a, b, c);
+  }
+  if is_misc_call(n) {
+    return lx_misc_call(&mut con, &mut k, pid, n, a, b, c);
   }
   if is_time_call(n) {
     return lx_time_call(&mut k, pid, n, was, a, b, c);
@@ -684,6 +701,37 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64
     return EBADF;
   }
   return w;
+}
+
+/// The first iovec with room among the cnt at user address iov (or the
+/// last, if none has): its base and length, or err.
+struct Iov { err: u64, base: u64, len: u64 }
+
+fn first_iov(k: &mut Kernel, pid: u64, iov: u64, cnt: u64) -> Iov
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if cnt == 0 || cnt > IOV_MAX {
+    return Iov { err: EINVAL, base: 0, len: 0 };
+  }
+  if iov > USER_BASE + USER_SIZE {
+    return Iov { err: EFAULT, base: 0, len: 0 };
+  }
+  let mut i = 0;
+  while i < cnt
+    invariant i <= cnt && cnt <= IOV_MAX && iov <= USER_BASE + USER_SIZE && kok(k)
+  {
+    let base = user_u64(&mut k.spaces, pid, iov + 16 * i);
+    let size = user_u64(&mut k.spaces, pid, iov + 16 * i + 8);
+    if !base.ok || !size.ok {
+      return Iov { err: EFAULT, base: 0, len: 0 };
+    }
+    if size.v > 0 || i + 1 == cnt {
+      return Iov { err: 0, base: base.v, len: size.v };
+    }
+    i = i + 1;
+  }
+  return Iov { err: EINVAL, base: 0, len: 0 };
 }
 
 /// writev: the cnt (base, length) pairs at user address iov, each written
