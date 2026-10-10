@@ -53,7 +53,7 @@ Note for each step whether it worked. If something goes wrong, note what it did 
 | 6 | Type `clock`, wait about ten seconds by a watch, type `clock` again | The two numbers differ by about 10,000,000,000 (nanoseconds) |
 | 7 | `echo hello > disk/note`, then `cat disk/note` | `hello`. Then type `reboot`: the machine restarts. Boot BastiOS again and `cat disk/note` still prints `hello` |
 | 8 | `ash`, then `ls /`, then `exit` | BusyBox's shell runs Linux programs |
-| 9 | `ifconfig` | An address, but only with a supported network card (an Intel e1000 82540EM, or virtio): most real cards have no driver yet, and then it has none |
+| 9 | `ifconfig` | An address, but only with a supported network card (an Intel 8254x, 82574L, 82576, I350, I210 or I211, or virtio): most real cards have no driver yet, and then it has none |
 | 10 | `halt` | `bye`, and the machine switches off |
 | 11 | Boot again, then press the power button briefly | `power button: powering off`, and the machine switches off |
 
@@ -87,7 +87,7 @@ The report holds the processor's model, the memory map, the ACPI tables and PCI 
 
 These are expected on real machines today, so there is no need to report them unless something else goes wrong too:
 
-- Network: only Intel e1000 (82540EM) and virtio cards. Most real cards (Intel I219 and I225, Realtek RTL8111/8168, and Wi-Fi) have no driver.
+- Network: only the Intel e1000 families (8254x, 82574L, 82576, I350, I210, I211: the I350, I210 and I211 are untested, so a report on one of them is especially welcome) and virtio cards. Most desktop and laptop cards (Intel I219 and I225/I226, Realtek RTL8111/8168, and Wi-Fi) have no driver.
 - USB: only xHCI (USB 3) controllers, with keyboards and BastiOS-partitioned sticks, on a root port or behind up to two USB 2 hubs.
 - Disks: NVMe, AHCI (SATA), legacy ATA and USB sticks. A disk is used only if it is blank or already BastiOS's.
 - Screen: a 32-bit framebuffer that GRUB sets up below 4 GiB. There is no GPU driver.

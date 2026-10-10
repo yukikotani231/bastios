@@ -9,7 +9,7 @@
 # close its window, by rule or on a seed.
 #
 #   SEED=n     the seed for the random-loss run (default: 1)
-#   NIC=name   the QEMU card (default: virtio-net-pci; e1000 also works)
+#   NIC=name   the QEMU card (default: virtio-net-pci; e1000, e1000e and igb also work)
 set -u
 cd "$(dirname "$0")/.."
 KERNEL=${KERNEL:-build/bastios.elf}

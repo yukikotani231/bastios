@@ -266,6 +266,7 @@ test: build/bastios.elf
 	BASTIOC=$(BASTIOC) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/guide_test.py
 	test/tcp_test.sh
 	NIC=e1000 test/tcp_test.sh
+	NIC=igb test/tcp_test.sh
 	test/iso_test.sh
 	test/nmi_test.sh
 	test/fuzz_test.sh 1 2 2000

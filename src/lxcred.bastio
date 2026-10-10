@@ -1,13 +1,14 @@
 // Linux credentials: the real, effective, saved and file-system user and
-// group ids of each process, and the system calls that read and change
-// them (getuid ... setfsgid), with Linux's rules for who may change what:
+// group ids of each process and its supplementary groups, and the system
+// calls that read and change them (getuid ... setfsgid, getgroups and
+// setgroups), with Linux's rules for who may change what:
 // effective user 0 may set anything, anyone else only moves between the
 // ids it already holds (-EPERM otherwise).
 //
 // Files are checked against the file-system ids, and new files belong to
-// them (src/lxperm.bastio). Not done: setpriority does not compare them,
-// and exec does not honour set-user-ID bits. Supplementary groups are not kept:
-// getgroups names group 0, and setgroups succeeds for root doing nothing.
+// them (src/lxperm.bastio), which also makes exec honour set-user-ID and
+// set-group-ID bits. A process keeps up to NGROUPS_KEPT supplementary
+// groups (EINVAL for more). Not done: setpriority does not compare ids.
 
 import "lxmisc.bastio";
 
@@ -170,6 +171,106 @@ fn get_res_id(k: &mut Kernel, pid: u64, w: u64, s: u64, a: u64, b: u64, c: u64) 
   return r;
 }
 
+/// How many supplementary groups process pid has.
+fn ngroups(procs: &Buf, pid: u64) -> u64
+  requires len(procs) == PTAB_LEN && pid < NPROC
+  ensures result <= NGROUPS_KEPT
+{
+  let n = pget(procs, pid, F_NGROUPS);
+  if n > NGROUPS_KEPT {
+    return NGROUPS_KEPT;
+  }
+  return n;
+}
+
+/// Process pid's supplementary group i.
+fn group_at(procs: &Buf, pid: u64, i: u64) -> u64
+  requires len(procs) == PTAB_LEN && pid < NPROC && i < NGROUPS_KEPT
+  ensures result < ID_SPAN
+{
+  return id_get(procs, pid, F_GROUPS + i / 2, i % 2 == 1);
+}
+
+/// Whether group g is one of process pid's supplementary groups.
+fn in_groups(procs: &Buf, pid: u64, g: u64) -> bool
+  requires len(procs) == PTAB_LEN && pid < NPROC
+{
+  let n = ngroups(procs, pid);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= NGROUPS_KEPT
+  {
+    if group_at(procs, pid, i) == g {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+/// getgroups(size, list): the count with size 0, else the ids (EINVAL if
+/// they do not fit).
+fn lx_getgroups(k: &mut Kernel, pid: u64, size: u64, list: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = ngroups(k.procs, pid);
+  if size % ID_SPAN >= INT_SIGN {
+    return EINVAL;                          // a negative size
+  }
+  if size % ID_SPAN == 0 {
+    return n;
+  }
+  if size % ID_SPAN < n {
+    return EINVAL;
+  }
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= NGROUPS_KEPT && kok(k)
+  {
+    xfer_u64(&mut k.fs.xfer, 4 * i, group_at(k.procs, pid, i));
+    i = i + 1;
+  }
+  let r = lx_put_out(&mut k, pid, list, 4 * n);
+  if r != 0 {
+    return r;
+  }
+  return n;
+}
+
+/// setgroups(size, list), for root: NGROUPS_KEPT at most (EINVAL for
+/// more; Linux takes up to NGROUPS_MAX, 65536).
+fn lx_setgroups(k: &mut Kernel, pid: u64, size: u64, list: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if !cred_root(k.procs, pid) {
+    return EPERM;
+  }
+  let n = size % ID_SPAN;
+  if n > NGROUPS_KEPT {
+    return EINVAL;
+  }
+  if n > 0 && copy_from_user(&mut k.spaces, pid, list, &mut k.fs.xfer, 4 * n) != 4 * n {
+    return EFAULT;
+  }
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= NGROUPS_KEPT && kok(k)
+  {
+    let g = get_u64(k.fs.xfer, 4 * i) % ID_SPAN;
+    let w = F_GROUPS + i / 2;
+    if i % 2 == 0 {
+      id_put(&mut k.procs, pid, w, g, id_get(k.procs, pid, w, true));
+    } else {
+      id_put(&mut k.procs, pid, w, id_get(k.procs, pid, w, false), g);
+    }
+    i = i + 1;
+  }
+  pset(&mut k.procs, pid, F_NGROUPS, n);
+  return 0;
+}
+
 fn is_cred_call(n: u64) -> bool {
   return n == LX_GETUID || n == LX_GETGID || n == LX_GETEUID || n == LX_GETEGID
     || n == LX_SETUID || n == LX_SETGID || n == LX_SETREUID || n == LX_SETREGID
@@ -211,8 +312,8 @@ fn lx_cred_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     r = get_res_id(&mut k, pid, F_UID, F_SUID, a, b, c);
   } else if n == LX_GETRESGID {
     r = get_res_id(&mut k, pid, F_GID, F_SGID, a, b, c);
-  } else if n == LX_SETGROUPS && !cred_root(k.procs, pid) {
-    r = EPERM;
+  } else if n == LX_SETGROUPS {
+    r = lx_setgroups(&mut k, pid, a, b);
   }
   ret(&mut k.procs, pid, r);
   return KEEP;

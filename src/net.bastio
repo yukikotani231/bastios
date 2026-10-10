@@ -1137,7 +1137,7 @@ fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, a
     let b2 = take_low_page(&mut m, at + 8);
     return net_up(Card::Virtio(vnet_new(&mut ports, base, q0, q1, q2, t0, t1, t2, b0, b1, b2, msix)));
   }
-  let e = pci_find(&mut pci, E1K_VENDOR, E1K_DEVICE);
+  let e = e1k_find(&mut pci);
   if e == PCI_NONE {
     return Nic::None;
   }
@@ -1155,7 +1155,8 @@ fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, a
   let b3 = take_low_page(&mut m, at + 4);
   let t = take_low_page(&mut m, at + 5);
   let regs = mmio_claim(&mut win, bar, E1K_LEN);
-  return net_up(Card::E1000(e1k_new(regs, r, b0, b1, b2, b3, t)));
+  let id = pci_read(&mut pci, e, PCI_ID);
+  return net_up(Card::E1000(e1k_new(regs, e1k_model(id % 65536, id / 65536 % 65536), r, b0, b1, b2, b3, t)));
 }
 
 /// The stack on a started card, seeking its address by DHCP (or with the

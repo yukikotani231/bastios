@@ -26,7 +26,7 @@ bastioc1: /disk/sieve.bastio: 15 proof obligation(s) discharged
 
 == bastioc1: a failed proof builds nothing
 $ mkdir /cb_f && cd /cb_f && CC=/disk/tcc BASTIO_SOLVER=/disk/z3 /disk/bastioc1 -o ov /disk/overflow.bastio; echo status $?; ls; cd /; rm -rf /cb_f
-/disk/overflow.bastio:5:12: error[E-VERIFY-OVERFLOW]
+/disk/overflow.bastio:5:12: error[E-VERIFY-OVERFLOW]: could not prove that `a + b` does not overflow u64
   |   return a + b;
   |            ^
   = counterexample: a = 18446744073709551615, b = 1

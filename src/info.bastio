@@ -494,8 +494,12 @@ fn put_driver(con: &mut Con, vendor: u64, device: u64, cls: u64)
     puts(&mut con, " virtio disk");
   } else if vendor == VIRTIO_VENDOR && device == VIRTIO_NET {
     puts(&mut con, " virtio network");
-  } else if vendor == E1K_VENDOR && device == E1K_DEVICE {
+  } else if e1k_model(vendor, device) == E1K_8254X {
     puts(&mut con, " e1000 network");
+  } else if e1k_model(vendor, device) == E1K_82574 {
+    puts(&mut con, " e1000 network (82574)");
+  } else if e1k_model(vendor, device) == E1K_IGB {
+    puts(&mut con, " e1000 network (igb)");
   } else if cls == XHCI_CLASS {
     puts(&mut con, " xHCI USB (keyboard, disk)");
   } else if cls / 65536 == 1 {
