@@ -745,6 +745,9 @@ fn lx_mknod(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64) -> u64
   }
   xfer_load(&mut k, t, 0, n);               // path_meta may have used the transfer buffer
   bfree(t);
+  if vfs_ro(&mut k.fs, n) {
+    return EROFS;
+  }
   let mut kind = 0;
   if fifo {
     kind = T_FIFO;

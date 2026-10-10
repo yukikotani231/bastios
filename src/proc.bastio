@@ -430,6 +430,7 @@ const LO_DIRECTORY: u64 = 0x10000;
 const LO_TMPFILE: u64 = 0x400000;      // with LO_DIRECTORY: an unnamed file, which BastiOS lacks
 const EOPNOTSUPP: u64 = 18446744073709551521; // 2^64 - 95
 const ENOSPC: u64 = 18446744073709551588;    // 2^64 - 28
+const EROFS: u64 = 18446744073709551586;     // 2^64 - 30
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
 const NAPPLETS: u64 = 18;
 const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----
