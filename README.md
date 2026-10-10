@@ -39,14 +39,18 @@ Introduce an off-by-one, drop an ownership check, or free a table that still map
 | --- | --- |
 | `src/pages.bastio` | Physical page allocator (`Mem`: a bitmap proved to track the pool) |
 | `src/space.bastio` | Building, walking and tearing down user address spaces |
+| `src/elf.bastio` | Loading static Linux x86-64 ELF executables: header checks, segments, the initial stack (argv, envp, auxv) |
 | `src/proc.bastio` | Kernel state (`Kernel` struct), console input queue, process table, program images, spawn and exit |
 | `src/syscall.bastio` | System calls |
 | `src/main.bastio` | Boot, the scheduler loop, fault handling, power off |
 | `user/*.bastio` | User programs: `sh`, `hello`, `spin` (never yields; shows preemption), `true` (exits at once), `bench` (times syscalls, spawn and write in timer ticks) |
 | `user/fault.S` | A user program that reads kernel memory, to test fault isolation |
 | `user/straddle.S` | A user program whose buffers cross page boundaries, to test how the kernel copies user memory |
+| `user/elfcheck.c`, `user/elfstart.S` | A freestanding C program linked as a static Linux ELF executable twice, at a fixed address (`elfexec`) and as a static PIE (`elfpie`); it checks its data, bss and initial stack. `elfbad` is a truncated copy the loader must refuse |
 
-User programs are linked at `USER_BASE` (0x8000000000) behind a small header (magic, memory size, entry), flattened to raw images, and embedded in the kernel with `include_bytes`. The system call ABI (`int 0x80`) is the one in bastiolang's user prelude.
+User programs are linked at `USER_BASE` (0x8000000000) behind a small header (magic, memory size, entry), flattened to raw images, and embedded in the kernel with `include_bytes`.
+
+The kernel also loads static Linux x86-64 ELF executables, the first step toward running Linux programs: fixed-address executables whose segments lie in the user window, and static PIEs, which it places at `USER_BASE`. It starts them with the stack the Linux ABI promises (argc, argv, envp and the auxiliary vector). Every header field is untrusted, and the proof shows each read stays inside the file and each copied byte lands in the window below the stack. Dynamically linked executables are refused, and Linux system calls do not exist yet, so for now these programs talk to the kernel through the BastiOS `int 0x80` ABI. The system call ABI (`int 0x80`) is the one in bastiolang's user prelude.
 
 ## Build and run
 

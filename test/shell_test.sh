@@ -62,6 +62,12 @@ steps = [
     # unmapped page (it returns 4, the exit code).
     ("straddle", [b"page-crossing write ok", b"hello from user mode", b"END![exit 4]"]),
     ("bench", b"ticks"),
+    # Static Linux ELF executables: one linked at a fixed address, one a
+    # static PIE. Each checks its .data, .bss and initial stack (argv, envp,
+    # auxv) and says ok. A truncated ELF must be refused, not loaded.
+    ("elfexec", b"elfexec: ok"),
+    ("elfpie", b"elfpie: ok"),
+    ("elfbad", b"unknown command: elfbad"),
     ("sh", b"BastiOS 0.2 -- type"),
     ("exit", b""),
     ("mem", b"free pages"),
