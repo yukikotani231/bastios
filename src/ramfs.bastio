@@ -1,0 +1,432 @@
+// An in-memory file system. Files live in physical pages taken from the
+// page allocator, one page per 4096 bytes, so a file's pages are owned by
+// the file the same way a process's pages are owned by its page tables:
+// the proof shows each page is taken from the allocator once and given back
+// once, when the file is truncated or removed (or at power off).
+//
+// The directory is flat: a fixed table of NFILES nodes, each free or one
+// file. A page a file has never written is a hole and reads as zeros, so a
+// write past the end leaves a gap that costs nothing.
+//
+// Nothing here knows about processes or system calls; `fs.bastio` sits on
+// top and moves bytes between files and user memory through a kernel buffer.
+
+import "pages.bastio";
+
+const NFILES: u64 = 32;
+const FNAME_MAX: u64 = 28;
+const FILE_PAGES: u64 = 256;
+const FILE_MAX: u64 = 1048576;        // FILE_PAGES * 4096
+
+enum Slot { Hole, Page(Frame) }
+
+struct RamFile {
+  name: Bytes,
+  size: u64,
+  pages: Vec[Slot],     // page i holds bytes 4096 * i .. 4096 * (i + 1)
+}
+
+enum Node { Free, File(RamFile) }
+
+spec fn file_ok(f: &RamFile) -> bool {
+  blen(f.name) <= FNAME_MAX && f.size <= FILE_MAX && vlen(f.pages) <= FILE_PAGES
+}
+
+/// The table always has NFILES slots, and every file in it is well formed.
+spec fn nodes_ok(v: &Vec[Node]) -> bool {
+  vlen(v) == NFILES && forall i: u64 :: i < NFILES ==> (vget(v, i) is Node::File ==> file_ok(vget(v, i).File))
+}
+
+fn ram_new() -> Vec[Node]
+  ensures nodes_ok(result)
+{
+  let mut v = vec_new[Node]();
+  let mut i = 0;
+  while i < NFILES
+    invariant i <= NFILES && vlen(v) == i
+    invariant forall j: u64 :: j < i ==> vget(v, j) is Node::Free
+  {
+    vec_push(&mut v, Node::Free);
+    i = i + 1;
+  }
+  return v;
+}
+
+/// Takes node `i` out, leaving its slot free.
+fn take_node(v: &mut Vec[Node], i: u64) -> Node
+  requires nodes_ok(v) && i < NFILES
+  ensures nodes_ok(v) && vget(v, i) is Node::Free
+  ensures result is Node::File ==> file_ok(result.File)
+{
+  return vec_swap(&mut v, i, Node::Free);
+}
+
+/// Puts a node into a free slot.
+fn put_node(v: &mut Vec[Node], i: u64, x: Node)
+  requires nodes_ok(v) && i < NFILES && vget(v, i) is Node::Free
+  requires x is Node::File ==> file_ok(x.File)
+  ensures nodes_ok(v)
+{
+  match vec_swap(&mut v, i, x) {
+    Node::Free => {},
+    Node::File(_f) => { unreachable; },     // the slot was free
+  }
+}
+
+// ---------------------------------------------------------------- one file
+
+/// Do the first n bytes of `name` spell the file's name?
+fn name_is(f: &RamFile, name: &Bytes, n: u64) -> bool
+  requires n <= blen(name)
+{
+  if blen(f.name) != n {
+    return false;
+  }
+  let mut i = 0;
+  while i < n
+    invariant i <= n
+  {
+    if bget(f.name, i) != bget(name, i) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+/// Writes m zeros into buf from `at`.
+fn zero_fill(buf: &mut Bytes, at: u64, m: u64)
+  requires at + m <= blen(buf)
+  ensures blen(buf) == old(blen(buf))
+{
+  let l = blen(buf);
+  let mut j = 0;
+  while j < m
+    invariant j <= m && blen(buf) == l
+  {
+    bset(&mut buf, at + j, 0);
+    j = j + 1;
+  }
+}
+
+/// Copies m bytes of page p of the file, starting at byte `from` of the
+/// page, into buf at `at`. A hole reads as zeros.
+fn read_chunk(f: &mut RamFile, p: u64, from: u64, buf: &mut Bytes, at: u64, m: u64)
+  requires file_ok(f) && from + m <= 4096 && at + m <= blen(buf)
+  ensures file_ok(f) && blen(buf) == old(blen(buf))
+{
+  if p >= vec_len(f.pages) {
+    zero_fill(&mut buf, at, m);
+    return;
+  }
+  match vec_swap(&mut f.pages, p, Slot::Hole) {
+    Slot::Hole => { zero_fill(&mut buf, at, m); },
+    Slot::Page(fr) => {
+      let l = blen(buf);
+      let mut j = 0;
+      while j < m
+        invariant j <= m && blen(buf) == l
+      {
+        bset(&mut buf, at + j, frame_read8(fr, from + j));
+        j = j + 1;
+      }
+      match vec_swap(&mut f.pages, p, Slot::Page(fr)) {
+        Slot::Hole => {},
+        Slot::Page(_x) => { unreachable; },
+      }
+    },
+  }
+}
+
+/// How many of the `left` bytes wanted from offset `a` lie on a's page.
+fn page_chunk(a: u64, left: u64) -> u64
+  ensures result <= left && a % 4096 + result <= 4096
+  ensures left > 0 ==> result > 0
+{
+  let room = 4096 - a % 4096;
+  if room < left {
+    return room;
+  }
+  return left;
+}
+
+/// Reads up to n bytes from offset `off` into the start of buf. Returns the
+/// count, which is short at the end of the file.
+fn file_read(f: &mut RamFile, off: u64, buf: &mut Bytes, n: u64) -> u64
+  requires file_ok(f) && n <= blen(buf)
+  ensures file_ok(f) && blen(buf) == old(blen(buf))
+  ensures result <= n
+{
+  if off >= f.size {
+    return 0;
+  }
+  let mut want = f.size - off;
+  if want > n {
+    want = n;
+  }
+  let l = blen(buf);
+  let mut k = 0;
+  while k < want
+    invariant k <= want && want <= n && n <= blen(buf) && file_ok(f) && blen(buf) == l
+  {
+    let a = off + k;
+    let m = page_chunk(a, want - k);
+    read_chunk(&mut f, a / 4096, a % 4096, &mut buf, k, m);
+    k = k + m;
+  }
+  return want;
+}
+
+/// Copies m bytes of buf from `at` into fr at byte `from`.
+fn frame_fill(fr: &mut Frame, from: u64, buf: &Bytes, at: u64, m: u64)
+  requires from + m <= 4096 && at + m <= blen(buf)
+{
+  let mut j = 0;
+  while j < m
+    invariant j <= m
+  {
+    frame_write8(&mut fr, from + j, bget(buf, at + j));
+    j = j + 1;
+  }
+}
+
+/// Puts a frame back as page p, whose slot is a hole.
+fn put_page(pages: &mut Vec[Slot], p: u64, fr: Frame)
+  requires p < vlen(pages) && vget(pages, p) is Slot::Hole
+  ensures vlen(pages) == old(vlen(pages))
+{
+  match vec_swap(&mut pages, p, Slot::Page(fr)) {
+    Slot::Hole => {},
+    Slot::Page(_x) => { unreachable; },
+  }
+}
+
+/// Copies m bytes of buf from `at` into page p of the file at byte `from`,
+/// giving the page a frame first if it is a hole. Returns false, changing
+/// nothing, when no page is free.
+fn write_chunk(f: &mut RamFile, mem: &mut Mem, p: u64, from: u64, buf: &Bytes, at: u64, m: u64) -> bool
+  requires file_ok(f) && mem_ok(mem) && p < vlen(f.pages) && from + m <= 4096 && at + m <= blen(buf)
+  ensures file_ok(f) && mem_ok(mem) && vlen(f.pages) == old(vlen(f.pages))
+{
+  match vec_swap(&mut f.pages, p, Slot::Hole) {
+    Slot::Hole => {
+      let i = find_free(&mut mem);
+      if i >= NPAGES {
+        return false;
+      }
+      let mut fr = take_page(&mut mem, i);
+      frame_fill(&mut fr, from, buf, at, m);
+      put_page(&mut f.pages, p, fr);
+    },
+    Slot::Page(x) => {
+      let mut fr = x;
+      frame_fill(&mut fr, from, buf, at, m);
+      put_page(&mut f.pages, p, fr);
+    },
+  }
+  return true;
+}
+
+/// Writes the first n bytes of buf at offset `off`, growing the file as
+/// needed. Returns the count, which is short when the file reaches
+/// FILE_MAX or memory runs out.
+fn file_write(f: &mut RamFile, mem: &mut Mem, off: u64, buf: &Bytes, n: u64) -> u64
+  requires file_ok(f) && mem_ok(mem) && n <= blen(buf)
+  ensures file_ok(f) && mem_ok(mem)
+  ensures result <= n
+{
+  if off >= FILE_MAX {
+    return 0;
+  }
+  let mut want = FILE_MAX - off;
+  if want > n {
+    want = n;
+  }
+  let mut k = 0;
+  let mut ok = true;
+  while ok && k < want
+    invariant k <= want && want <= n && off + want <= FILE_MAX && file_ok(f) && mem_ok(mem)
+  {
+    let a = off + k;
+    let p = a / 4096;
+    while vec_len(f.pages) <= p
+      invariant file_ok(f) && p < FILE_PAGES
+    {
+      vec_push(&mut f.pages, Slot::Hole);
+    }
+    let m = page_chunk(a, want - k);
+    if write_chunk(&mut f, &mut mem, p, a % 4096, buf, k, m) {
+      k = k + m;
+      if a + m > f.size {
+        f.size = a + m;
+      }
+    } else {
+      ok = false;
+    }
+  }
+  return k;
+}
+
+/// Gives every page of the file back and makes it empty.
+fn file_truncate(f: &mut RamFile, mem: &mut Mem)
+  requires file_ok(f) && mem_ok(mem)
+  ensures file_ok(f) && mem_ok(mem) && vlen(f.pages) == 0 && f.size == 0
+{
+  while vec_len(f.pages) > 0
+    invariant file_ok(f) && mem_ok(mem)
+  {
+    match vec_pop(&mut f.pages) {
+      Slot::Hole => {},
+      Slot::Page(fr) => { give_page(&mut mem, fr); },
+    }
+  }
+  f.size = 0;
+}
+
+/// Frees a file: its pages go back to the allocator.
+fn file_free(f: RamFile, mem: &mut Mem)
+  requires file_ok(f) && mem_ok(mem)
+  ensures mem_ok(mem)
+{
+  let mut g = f;
+  file_truncate(&mut g, &mut mem);
+  vec_free(g.pages);
+  bfree(g.name);
+}
+
+// ---------------------------------------------------------------- the table
+
+/// The node holding the file named by the first n bytes of `name`, or
+/// NFILES if there is none.
+fn ram_find(v: &mut Vec[Node], name: &Bytes, n: u64) -> u64
+  requires nodes_ok(v) && n <= blen(name)
+  ensures nodes_ok(v) && result <= NFILES
+{
+  let mut i = 0;
+  while i < NFILES
+    invariant i <= NFILES && nodes_ok(v)
+  {
+    let mut hit = false;
+    match take_node(&mut v, i) {
+      Node::Free => {},
+      Node::File(f) => {
+        hit = name_is(f, name, n);
+        put_node(&mut v, i, Node::File(f));
+      },
+    }
+    if hit {
+      return i;
+    }
+    i = i + 1;
+  }
+  return NFILES;
+}
+
+/// Creates an empty file named by the first n bytes of `name` (1 to
+/// FNAME_MAX of them) in a free node. Returns the node, or NFILES if the
+/// name is too long or the table is full.
+fn ram_create(v: &mut Vec[Node], name: &Bytes, n: u64) -> u64
+  requires nodes_ok(v) && n <= blen(name)
+  ensures nodes_ok(v) && result <= NFILES
+{
+  if n == 0 || n > FNAME_MAX {
+    return NFILES;
+  }
+  let mut i = 0;
+  while i < NFILES
+    invariant i <= NFILES && nodes_ok(v)
+  {
+    match take_node(&mut v, i) {
+      Node::Free => {
+        let mut nm = balloc(n);
+        let mut j = 0;
+        while j < n
+          invariant j <= n && blen(nm) == n
+        {
+          bset(&mut nm, j, bget(name, j));
+          j = j + 1;
+        }
+        put_node(&mut v, i, Node::File(RamFile { name: nm, size: 0, pages: vec_new[Slot]() }));
+        return i;
+      },
+      Node::File(f) => { put_node(&mut v, i, Node::File(f)); },
+    }
+    i = i + 1;
+  }
+  return NFILES;
+}
+
+/// The size of the file in node i, or NO_FILE if the node is free.
+const NO_FILE: u64 = 18446744073709551615;
+
+fn ram_size(v: &mut Vec[Node], i: u64) -> u64
+  requires nodes_ok(v) && i < NFILES
+  ensures nodes_ok(v)
+{
+  let mut s = NO_FILE;
+  match take_node(&mut v, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      s = f.size;
+      put_node(&mut v, i, Node::File(f));
+    },
+  }
+  return s;
+}
+
+/// Copies the name of the file in node i into the start of buf. Returns its
+/// length, or NO_FILE if the node is free or buf is too short.
+fn ram_name(v: &mut Vec[Node], i: u64, buf: &mut Bytes) -> u64
+  requires nodes_ok(v) && i < NFILES
+  ensures nodes_ok(v) && blen(buf) == old(blen(buf))
+{
+  let mut r = NO_FILE;
+  match take_node(&mut v, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      let n = blen(f.name);
+      if n <= blen(buf) {
+        let l = blen(buf);
+        let mut j = 0;
+        while j < n
+          invariant j <= n && n <= blen(buf) && blen(buf) == l
+        {
+          bset(&mut buf, j, bget(f.name, j));
+          j = j + 1;
+        }
+        r = n;
+      }
+      put_node(&mut v, i, Node::File(f));
+    },
+  }
+  return r;
+}
+
+/// Removes the file in node i, if there is one.
+fn ram_remove(v: &mut Vec[Node], mem: &mut Mem, i: u64)
+  requires nodes_ok(v) && mem_ok(mem) && i < NFILES
+  ensures nodes_ok(v) && mem_ok(mem)
+{
+  match take_node(&mut v, i) {
+    Node::Free => {},
+    Node::File(f) => { file_free(f, &mut mem); },
+  }
+}
+
+/// Frees the whole table (at power off).
+fn ram_free(v: Vec[Node], mem: &mut Mem)
+  requires nodes_ok(v) && mem_ok(mem)
+  ensures mem_ok(mem)
+{
+  let mut t = v;
+  while vec_len(t) > 0
+    invariant mem_ok(mem)
+    invariant forall j: u64 :: j < vlen(t) ==> (vget(t, j) is Node::File ==> file_ok(vget(t, j).File))
+  {
+    match vec_pop(&mut t) {
+      Node::Free => {},
+      Node::File(f) => { file_free(f, &mut mem); },
+    }
+  }
+  vec_free(t);
+}

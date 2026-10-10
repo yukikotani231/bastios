@@ -15,6 +15,8 @@ How the kernel is put together, and which part of it is proved. Read the [README
   | src/main.bastio     scheduler loop   |<->| boot/boot.S    multiboot, long    |
   | src/syscall.bastio  system calls     |   |                mode, trap stubs, |
   | src/proc.bastio     processes        |   |                bst_cpu_enter     |
+  | src/fs.bastio       open files       |   |                                  |
+  | src/ramfs.bastio    in-memory files  |   |                                  |
   | src/space.bastio    address spaces   |   | boot/platform.c  TSS, IDT, PIC,  |
   | src/pages.bastio    page allocator   |   |                timer             |
   | src/console.bastio  kernel messages  |   | kernel prelude (in bastiolang):  |
@@ -102,8 +104,26 @@ A user program raises `int 0x80` with the call number in `rax` and arguments in 
 | 8 | ps() | Print the process table |
 | 9 | kill(pid) | Terminate a process with code 137 |
 | 10 | poweroff() | Stop the machine |
+| 11 | open(flags, va, n) | Open the file named by the user bytes; flags `O_READ` 1, `O_WRITE` 2, `O_CREATE` 4, `O_TRUNC` 8, `O_APPEND` 16; returns a descriptor (0 to 7) |
+| 12 | close(fd) | Close a descriptor |
+| 13 | fread(fd, va, n) | Read up to n bytes (at most 4096) at the descriptor's offset into user memory; returns the count, 0 at the end |
+| 14 | fwrite(fd, va, n) | Write up to n user bytes (at most 4096); returns the count |
+| 15 | unlink(_, va, n) | Remove a file that no descriptor has open |
+| 16 | dirent(i, va, n) | Copy the name of directory entry i; returns its length, 0 for an unused entry |
+| 17 | seek(fd, off) | Move a descriptor's offset |
+| 18 | stat(_, va, n) | The size of a file |
+
+Calls 0 to 10 have named builtins in bastiolang's user prelude. The file calls (11 to 18) do not: user programs make them with the generic `sys_call(n, a, b)`, `sys_send(n, a, buf, len)` (lends the kernel bytes of a buffer to read) and `sys_recv(n, a, buf)` (lends a buffer to overwrite), wrapped in `user/lib/file.bastio`. A failed call returns `u64::MAX`.
 
 Every argument is an untrusted number. The handlers check ranges at run time (`user_range`, pid bounds, states), and the proof makes sure no check is missing: a handler that indexed the process table with an unchecked pid would not compile.
+
+## Files
+
+The file system is in memory (`src/ramfs.bastio`). Its directory is a flat table of 32 nodes, each free or one file: a name, a size, and a vector of pages, where page i holds bytes 4096 i to 4096 (i + 1). A page the file has never written is a hole and reads as zeros. The pages are `Frame`s taken from the page allocator, so a file owns its pages the way a page table owns the pages it maps: the proof shows that truncating or removing a file gives every page back once, and power off frees every file before counting the free pages.
+
+`src/fs.bastio` sits between the system calls and the file system. It owns the open-file table (8 rows per process; a descriptor is a row number, so a process can only name its own files) and a 4096-byte transfer buffer. Each transfer is two copies: user memory to the buffer and the buffer to the file, or back (`src/usermem.bastio` walks the user window as the console `write` does). The file system below only ever sees the buffer. Each open row records which file system its file is on, so a second one, such as a file system on a block device, becomes another field of `Vfs` and another branch where rows are dispatched; the system calls above do not change.
+
+At boot the kernel installs the files in `files/` (built into the image with `include_bytes`). A process's descriptors are closed when it ends, and a file cannot be removed while a descriptor has it open.
 
 ## User programs
 
@@ -126,5 +146,6 @@ Trusted, and listed in the README's "What is trusted" table: `boot/`, `user/star
 These are current choices, not design limits; the README's "Status" lists them with the plan:
 - one CPU; the kernel runs with interrupts off and polls the UART;
 - a 2 MiB user window per process, at most `NPROC - 1` processes, programs built into the kernel image;
+- files live in memory only (32 files, names up to 28 bytes, files up to 1 MiB, 8 descriptors per process), and programs cannot be run from files yet;
 - user pages are mapped writable and executable;
 - the kernel's arena halts the machine when it runs out (the page pool does not: spawns fail cleanly).
