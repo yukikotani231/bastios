@@ -17,14 +17,14 @@ BastiOS also trusts everything bastiolang trusts: Z3, the Bastio compiler, the C
 
 | File | What it does | Why it is not Bastio |
 | --- | --- | --- |
-| `boot/boot.S` | Multiboot header and entry; identity map of the first 1 GiB and the uncached device window (3-4 GiB); long mode, SSE, `syscall` enabled; the GDT; entering user mode (`bst_cpu_enter`) and idling (`bst_cpu_wait`); the trap stubs, `trap_common` and the `syscall` entry | Mode switches, descriptor tables, `iretq` and saving registers are below any language |
+| `boot/boot.S` | Multiboot header (with its request for a 1024x768x32 framebuffer) and entry; identity map of the first 1 GiB and the uncached device window (2-4 GiB); long mode, SSE, `syscall` enabled; the GDT; entering user mode (`bst_cpu_enter`) and idling (`bst_cpu_wait`); the trap stubs, `trap_common` and the `syscall` entry | Mode switches, descriptor tables, `iretq` and saving registers are below any language |
 | `boot/ap.S` | The real-mode trampoline that takes each application processor to long mode on the kernel's tables | 16- and 32-bit code |
 | `boot/smp.c` | Finding the processors in the ACPI MADT, the local APIC (end of interrupt, timer calibration, startup IPIs), each processor's task state segment and `KERNEL_GS_BASE`, and handing parked processors work for `smp_run` | Firmware tables lie anywhere in the first 1 GiB, outside the device window that `Mmio` covers, and Bastio cannot read memory it was not given as a capability. The local APIC is in the device window, so it could move to `Mmio`; the SMP work plans that |
 | `boot/platform.c` | The interrupt table and the `syscall` MSRs | `lidt` and `wrmsr` have no capability |
 | `boot/core.h` | The per-processor block layout shared by the three files above | |
 | `boot/libc.c` | `memset`, `memcpy`, `memmove` and `memcmp`, which the C compiler may emit calls to | Also linked into each user program |
 | `boot/linker.ld` | Load address, and `_end`, where the page pool starts | |
-| `boot/grub.cfg` | The GRUB menu for the ISO only (`make run` and the tests use QEMU's Multiboot loader) | |
+| `boot/grub.cfg` | The GRUB menu for the ISO only (`make run` and the tests use QEMU's Multiboot loader); it loads the video drivers so GRUB can set the framebuffer the kernel asks for | |
 
 What the kernel trusts these to do, beyond the obvious:
 - **Entering user mode cannot raise privilege.** `bst_cpu_enter` takes only rip, rsp, the FS base, the general registers and the arithmetic flags from the context Bastio code saved. The code and stack segments, IOPL 0 and the interrupt flag are forced, and a rip, rsp or FS base outside the lower half of the address space is replaced by 0. So nothing the kernel stores in a `Cpu` context can give user code I/O ports, kernel segments or interrupts off.
@@ -32,6 +32,7 @@ What the kernel trusts these to do, beyond the obvious:
 - **A trap from user mode always lands on that processor's empty trap stack** (TSS.rsp0), and saves the full context into the processor's block before returning to Bastio.
 - **A fault in kernel mode halts the machine** with a report (`bst_kernel_fault`): it is a bug in the trusted base or the compiler.
 - **The memory map.** Everything the identity map covers is RAM or the kernel image, the page pool starts at `_end`, and the device window holds only devices.
+- **The framebuffer report.** The address, pitch and size GRUB reports for the framebuffer (read by the prelude's `boot_fb`) describe device memory and nothing else; the kernel only checks that the block lies in the device window and claims it there, so a false report would let it draw over another device in the window.
 
 ### Known gap: an NMI during the `syscall` entry
 

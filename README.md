@@ -1,6 +1,6 @@
 # BastiOS
 
-A small x86-64 kernel written in [Bastio](https://github.com/yukikotani231/bastiolang), a language whose memory safety is proved at compile time. It boots under QEMU and runs a shell on the serial console.
+A small x86-64 kernel written in [Bastio](https://github.com/yukikotani231/bastiolang), a language whose memory safety is proved at compile time. It boots under QEMU, or from a GRUB image under BIOS or UEFI, and runs a shell on the serial console and, when the boot loader sets up a framebuffer, on the screen with a PS/2 keyboard.
 
 ```
 BastiOS 0.2: 14016 pages of memory
@@ -68,9 +68,9 @@ The first build proves every source file and fetches BusyBox, so it takes a whil
 
 Ctrl-A X quits QEMU at any time.
 
-To boot through a real boot loader, `make iso` builds `build/bastios.iso`. It is GRUB with the same kernel, as a hybrid image that boots from CD or USB under BIOS or UEFI. It needs `grub-mkrescue`, `xorriso` and `mtools`, plus GRUB's BIOS and UEFI files (`sudo apt-get install grub-pc-bin grub-efi-amd64-bin xorriso mtools`; add `ovmf` for UEFI in QEMU). `make run-iso` boots it in QEMU under BIOS and `make run-uefi` under UEFI firmware. To write it to a USB stick, use `sudo dd if=build/bastios.iso of=/dev/sdX bs=4M` (check the device name first: dd overwrites it).
+To boot through a real boot loader, `make iso` builds `build/bastios.iso`. It is GRUB with the same kernel, as a hybrid image that boots from CD or USB under BIOS or UEFI. It needs `grub-mkrescue`, `xorriso` and `mtools`, plus GRUB's BIOS and UEFI files (`sudo apt-get install grub-pc-bin grub-efi-amd64-bin xorriso mtools`; add `ovmf` for UEFI in QEMU). `make run-iso` boots it in QEMU under BIOS and `make run-uefi` under UEFI firmware; both open a QEMU window, where the kernel draws its console on the 1024x768 framebuffer GRUB sets up and reads the PS/2 keyboard, while the serial console stays on your terminal. To write it to a USB stick, use `sudo dd if=build/bastios.iso of=/dev/sdX bs=4M` (check the device name first: dd overwrites it).
 
-On real hardware, mind the limits. It has only been tried in QEMU. BastiOS talks only on the first serial port (COM1, 115200 baud), so a machine without one shows nothing after GRUB. It needs a virtio or Intel e1000 (82540EM) network card and a virtio or legacy ATA disk to use either. Under UEFI it runs on one processor, because it finds the ACPI tables only where BIOS firmware puts them.
+On real hardware, mind the limits. It has only been tried in QEMU. The console is on the first serial port (COM1, 115200 baud) and, booted from the image, on the screen, if GRUB can give it a 32-bit linear framebuffer between 2 GiB and the I/O APIC, which is where PC firmware puts it. Keys come from a PS/2 keyboard, which many PCs without the port emulate for a USB keyboard; there is no USB driver. It needs a virtio or Intel e1000 (82540EM) network card and a virtio or legacy ATA disk to use either. Under UEFI it runs on one processor, because it finds the ACPI tables only where BIOS firmware puts them.
 
 ## Layout
 
@@ -79,6 +79,7 @@ How the pieces fit together (boot, memory, processes, the scheduler, system call
 | Path | What |
 | --- | --- |
 | `src/uart.bastio`, `src/pic.bastio`, `src/pit.bastio` | Device drivers: COM1, the 8259 interrupt controllers, the 100 Hz timer |
+| `src/fb.bastio`, `src/kbd.bastio`, `src/console.bastio` | The console: text on the boot loader's framebuffer (8x16 cells from the public-domain font in `src/font8x8.bin`), the PS/2 keyboard, and the two joined with COM1 |
 | `src/ata.bastio` | Disk driver: the first drive on the legacy ATA controller, in PIO mode |
 | `src/pages.bastio` | Physical page allocator (`Mem`: a bitmap proved to track the pool) |
 | `src/space.bastio` | Building, walking and tearing down user address spaces |
@@ -147,12 +148,12 @@ The proof covers everything in `src/` and `user/*.bastio`. Everything below it i
 
 | Part | Where | Role |
 | --- | --- | --- |
-| Boot loader | GRUB, configured by `boot/grub.cfg` (only for the ISO) | Loads the kernel as a Multiboot image and passes the memory map; `make run` and the tests use QEMU's own Multiboot loader instead |
-| Boot and trap entry | `boot/boot.S` | Multiboot entry, identity map, long mode; GDT with user segments; the trap stubs and the `syscall` entry; enabling SSE; entering user mode (which also loads the FS base) (`bst_cpu_enter`) and idling (`bst_cpu_wait`) |
+| Boot loader | GRUB, configured by `boot/grub.cfg` (only for the ISO) | Loads the kernel as a Multiboot image and passes the memory map and the framebuffer it set up (address, pitch, size, pixel layout: the screen console trusts these); `make run` and the tests use QEMU's own Multiboot loader instead |
+| Boot and trap entry | `boot/boot.S` | Multiboot entry, identity map (the first 1 GiB, and the 2-4 GiB device window uncached), the Multiboot header's video request, long mode; GDT with user segments; the trap stubs and the `syscall` entry; enabling SSE; entering user mode (which also loads the FS base) (`bst_cpu_enter`) and idling (`bst_cpu_wait`) |
 | Processor startup | `boot/smp.c`, `boot/ap.S` | Finding the processors in the ACPI MADT, mapping the local APIC, INIT and startup IPIs; the real-mode trampoline that takes each application processor to long mode on the kernel's tables, where it checks in and parks until `smp_run` hands it work; each processor's TSS. C because the firmware tables lie outside the device window `Mmio` covers |
 | Platform setup | `boot/platform.c` | Interrupt table, `syscall` MSRs |
 | C helpers | `boot/libc.c` | `memset` / `memcpy` / `memmove` / `memcmp`, which the C compiler may call |
-| Runtime preludes | in bastiolang, `stage0/src/codegen.rs` | one `in` / `out` instruction per port access, COM1 output for the prelude's own panic messages, the arena allocator, page-table entry encoding, CR3 loads, the system call stubs for user programs |
+| Runtime preludes | in bastiolang, `stage0/src/codegen.rs` | one `in` / `out` instruction per port access, COM1 output for the prelude's own panic messages, reading the framebuffer fields out of the Multiboot information (`boot_fb`), the arena allocator, page-table entry encoding, CR3 loads, the system call stubs for user programs |
 | User entry | `user/start.S`, `user/user.ld` | Image header; calls `main` and exits with its result |
 | Toolchain | | Z3, the stage0 compiler, the C compiler, QEMU |
 

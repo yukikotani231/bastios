@@ -1,0 +1,302 @@
+// A text console on the linear framebuffer the boot loader set up (GRUB
+// through VBE under BIOS, or UEFI's GOP), drawn with an 8x8 font doubled
+// vertically into 8x16 cells. The framebuffer is a block of the device
+// window claimed as an `Mmio`, so every pixel write is proved inside it.
+//
+// The text on screen is kept in `text`, and `shown` records what each cell
+// last had drawn, so scrolling redraws only the cells that changed.
+// Escape sequences (ESC [ ... letter) are swallowed, not interpreted.
+//
+// src/font8x8.bin: 128 glyphs of 8 bytes, a byte per row, bit 0 the
+// leftmost pixel. Public domain: font8x8_basic.h from
+// github.com/dhepper/font8x8 (after Marcel Sondaar and IBM's VGA fonts).
+
+const CELL_W: u64 = 8;
+const CELL_H: u64 = 16;
+const FB_MAX_PITCH: u64 = 1048576;
+const FB_MAX_SIDE: u64 = 65535;
+const FG_LEVEL: u64 = 0xC0;           // light grey text on black
+const FB_LO: u64 = 0x80000000;        // where the device window starts
+const FB_TOP: u64 = 0xFEC00000;       // the framebuffer must end below the I/O APIC
+
+struct Fb {
+  regs: Mmio,
+  size: u64,          // bytes in the block: pitch * height
+  pitch: u64,         // bytes per line of pixels
+  cols: u64,
+  rows: u64,
+  cx: u64,            // the cursor
+  cy: u64,
+  fg: u64,            // the text colour, as a pixel
+  esc: u64,           // 0, or inside an escape sequence: 1 after ESC, 2 after ESC [
+  text: Bytes,        // cols * rows characters
+  shown: Bytes,       // what each cell shows now
+}
+
+spec fn fb_ok(f: &Fb) -> bool {
+  mmio_base(f.regs) % 4 == 0 && f.size <= mmio_len(f.regs) && f.pitch <= FB_MAX_PITCH
+  && 1 <= f.cols && f.cols <= FB_MAX_SIDE && 1 <= f.rows && f.rows <= FB_MAX_SIDE
+  && f.cx < f.cols && f.cy < f.rows && f.fg <= 4294967295
+}
+
+fn font() -> Str {
+  return include_bytes("font8x8.bin");
+}
+
+/// Draws cell (col, row) with character c, inverted if `inv` (the cursor).
+fn fb_draw(f: &mut Fb, col: u64, row: u64, c: u64, inv: bool)
+  requires fb_ok(f) && col < f.cols && row < f.rows
+  ensures fb_ok(f)
+{
+  let g = font();
+  let mut ch = c;
+  if ch >= 128 {
+    ch = 32;
+  }
+  let mut r = 0;
+  while r < CELL_H
+    invariant r <= CELL_H && fb_ok(f)
+  {
+    let off = (row * CELL_H + r) * f.pitch + col * CELL_W * 4;
+    if off % 4 == 0 && off + CELL_W * 4 <= f.size && ch * 8 + r / 2 < slen(g) {
+      let mut bits = cast[u64](sget(g, ch * 8 + r / 2));
+      if inv {
+        bits = 255 - bits;
+      }
+      let mut p = 0;
+      while p < CELL_W
+        invariant p <= CELL_W && fb_ok(f) && off % 4 == 0 && off + CELL_W * 4 <= f.size
+      {
+        let mut px = 0;
+        if bits % 2 == 1 {
+          px = f.fg;
+        }
+        mmio_write32(&mut f.regs, off + p * 4, cast[u32](px));
+        bits = bits / 2;
+        p = p + 1;
+      }
+    }
+    r = r + 1;
+  }
+}
+
+/// The character in cell (col, row).
+fn fb_at(f: &Fb, col: u64, row: u64) -> u64
+  requires fb_ok(f) && col < f.cols && row < f.rows
+  ensures result <= 255
+{
+  let i = row * f.cols + col;
+  if i < blen(f.text) {
+    return cast[u64](bget(f.text, i));
+  }
+  return 32;
+}
+
+fn fb_set(f: &mut Fb, col: u64, row: u64, c: u64)
+  requires fb_ok(f) && col < f.cols && row < f.rows && c <= 255
+  ensures fb_ok(f)
+{
+  let i = row * f.cols + col;
+  if i < blen(f.text) {
+    bset(&mut f.text, i, cast[u8](c));
+  }
+}
+
+/// Draws every cell whose character differs from what it shows.
+fn fb_refresh(f: &mut Fb)
+  requires fb_ok(f)
+  ensures fb_ok(f)
+{
+  let mut row = 0;
+  while row < f.rows
+    invariant row <= f.rows && fb_ok(f)
+  {
+    let mut col = 0;
+    while col < f.cols
+      invariant col <= f.cols && row < f.rows && fb_ok(f)
+    {
+      let i = row * f.cols + col;
+      let c = fb_at(f, col, row);
+      if i < blen(f.shown) && cast[u64](bget(f.shown, i)) != c {
+        fb_draw(&mut f, col, row, c, false);
+        bset(&mut f.shown, i, cast[u8](c));
+      }
+      col = col + 1;
+    }
+    row = row + 1;
+  }
+}
+
+/// Moves the cursor down a line, scrolling the text up at the bottom.
+fn fb_newline(f: &mut Fb)
+  requires fb_ok(f)
+  ensures fb_ok(f)
+{
+  if f.cy + 1 < f.rows {
+    f.cy = f.cy + 1;
+    return;
+  }
+  let n = blen(f.text);
+  let mut i = 0;
+  while i + f.cols < n
+    invariant fb_ok(f) && blen(f.text) == n && i <= n
+  {
+    bset(&mut f.text, i, bget(f.text, i + f.cols));
+    i = i + 1;
+  }
+  let mut col = 0;
+  while col < f.cols
+    invariant col <= f.cols && fb_ok(f)
+  {
+    fb_set(&mut f, col, f.rows - 1, 32);
+    col = col + 1;
+  }
+  fb_refresh(&mut f);
+}
+
+/// Writes byte b at the cursor: printable ASCII, CR, LF, backspace (which
+/// only moves back) and tab; escape sequences are skipped.
+fn fb_put(f: &mut Fb, b: u64)
+  requires fb_ok(f)
+  ensures fb_ok(f)
+{
+  if f.esc == 1 {
+    if b == 91 {
+      f.esc = 2;                      // ESC [
+    } else {
+      f.esc = 0;
+    }
+    return;
+  }
+  if f.esc == 2 {
+    if (b >= 65 && b <= 90) || (b >= 97 && b <= 122) {
+      f.esc = 0;                      // the final letter
+    }
+    return;
+  }
+  // Take the cursor off its cell.
+  fb_draw(&mut f, f.cx, f.cy, fb_at(f, f.cx, f.cy), false);
+  if b == 27 {
+    f.esc = 1;
+  } else if b == 13 {
+    f.cx = 0;
+  } else if b == 10 {
+    fb_newline(&mut f);
+  } else if b == 8 {
+    if f.cx > 0 {
+      f.cx = f.cx - 1;
+    }
+  } else if b == 9 {
+    let mut n = 8 - f.cx % 8;
+    if f.cx + n >= f.cols {
+      n = f.cols - 1 - f.cx;
+    }
+    f.cx = f.cx + n;
+  } else if b >= 32 && b < 127 {
+    fb_set(&mut f, f.cx, f.cy, b);
+    let i = f.cy * f.cols + f.cx;
+    fb_draw(&mut f, f.cx, f.cy, b, false);
+    if i < blen(f.shown) {
+      bset(&mut f.shown, i, cast[u8](b));
+    }
+    if f.cx + 1 < f.cols {
+      f.cx = f.cx + 1;
+    } else {
+      f.cx = 0;
+      fb_newline(&mut f);
+    }
+  }
+  fb_draw(&mut f, f.cx, f.cy, fb_at(f, f.cx, f.cy), true);
+}
+
+/// A console on the framebuffer `regs` (size bytes: pitch * height lines of
+/// width pixels), cleared, with the cursor at the top left. `rgb`: the bit
+/// positions of red, green and blue, a byte each.
+fn fb_new(regs: Mmio, size: u64, pitch: u64, width: u64, height: u64, rgb: u64) -> Fb
+  requires mmio_base(regs) % 4 == 0 && size <= mmio_len(regs) && size <= FB_TOP && pitch <= FB_MAX_PITCH
+  requires CELL_W <= width && width <= FB_MAX_SIDE && CELL_H <= height && height <= FB_MAX_SIDE
+  ensures fb_ok(result)
+{
+  let cols = width / CELL_W;
+  let rows = height / CELL_H;
+  let fg = (FG_LEVEL << (rgb % 32)) + (FG_LEVEL << (rgb / 256 % 32)) + (FG_LEVEL << (rgb / 65536 % 32));
+  let mut f = Fb { regs: regs, size: size, pitch: pitch, cols: cols, rows: rows, cx: 0, cy: 0,
+    fg: fg % 4294967296, esc: 0, text: balloc(cols * rows), shown: balloc(cols * rows) };
+  let mut o = 0;
+  while o + 4 <= size
+    invariant o % 4 == 0 && o <= size && fb_ok(f) && f.size == size
+  {
+    mmio_write32(&mut f.regs, o, 0);
+    o = o + 4;
+  }
+  // Both buffers start as spaces: the screen is blank.
+  let mut i = 0;
+  while i < blen(f.text)
+    invariant fb_ok(f)
+  {
+    bset(&mut f.text, i, 32);
+    i = i + 1;
+  }
+  let mut j = 0;
+  while j < blen(f.shown)
+    invariant fb_ok(f)
+  {
+    bset(&mut f.shown, j, 32);
+    j = j + 1;
+  }
+  fb_draw(&mut f, 0, 0, 32, true);
+  return f;
+}
+
+/// Gives the block back (at power off).
+fn fb_free(f: Fb) -> Mmio {
+  bfree(f.text);
+  bfree(f.shown);
+  return f.regs;
+}
+
+enum Screen { None, Fb(Fb) }
+
+/// The screen on the framebuffer at lo .. hi (pitch bytes per line, width
+/// by height pixels), if it is one this console can draw on and lies in
+/// the device window below FB_TOP; else none. Claims the block.
+fn screen_new(win: &mut MmioSpace, lo: u64, hi: u64, pitch: u64, width: u64, height: u64, rgb: u64) -> Screen
+  requires forall a: u64 :: FB_LO <= a && a < FB_TOP ==> mmio_free(win, a)
+  ensures screen_ok(result)
+  ensures forall a: u64 :: FB_LO <= a && a < FB_TOP && !(lo <= a && a < hi) ==> mmio_free(win, a)
+{
+  if lo < FB_LO || hi > FB_TOP || hi <= lo || lo % 4 != 0 || pitch > FB_MAX_PITCH
+    || width < CELL_W || width > FB_MAX_SIDE || height < CELL_H || height > FB_MAX_SIDE || pitch < width * 4 {
+    return Screen::None;
+  }
+  let regs = mmio_claim(&mut win, lo, hi - lo);
+  return Screen::Fb(fb_new(regs, hi - lo, pitch, width, height, rgb));
+}
+
+spec fn screen_ok(s: &Screen) -> bool {
+  s is Screen::Fb ==> fb_ok(s.Fb)
+}
+
+fn screen_put(s: &mut Screen, b: u8)
+  requires screen_ok(s)
+  ensures screen_ok(s)
+{
+  match s {
+    Screen::None => { s = Screen::None; },
+    Screen::Fb(mut f) => {
+      fb_put(&mut f, cast[u64](b));
+      s = Screen::Fb(f);
+    },
+  }
+}
+
+fn screen_on(s: &Screen) -> bool {
+  return s is Screen::Fb;
+}
+
+fn screen_free(win: &mut MmioSpace, s: Screen) {
+  match s {
+    Screen::None => {},
+    Screen::Fb(f) => { mmio_release(&mut win, fb_free(f)); },
+  }
+}

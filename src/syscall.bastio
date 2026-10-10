@@ -59,9 +59,9 @@ const POWEROFF: u64 = 2;
 
 /// Writes the n bytes at user address va to the console. Returns the count
 /// written, which stops short at an unmapped page.
-fn do_write(con: &mut Uart, spaces: &mut Vec[Space], pid: u64, va: u64, n: u64) -> u64
-  requires uart_ok(con) && spaces_ok(spaces) && pid < NPROC
-  ensures spaces_ok(spaces)
+fn do_write(con: &mut Con, spaces: &mut Vec[Space], pid: u64, va: u64, n: u64) -> u64
+  requires con_ok(con) && spaces_ok(spaces) && pid < NPROC
+  ensures spaces_ok(spaces) && con_ok(con)
 {
   if !user_range(va, n) {
     return NO_RESULT;
@@ -79,8 +79,9 @@ fn do_write(con: &mut Uart, spaces: &mut Vec[Space], pid: u64, va: u64, n: u64) 
 
 /// Writes the n bytes at offset off of the user window to the console,
 /// stopping short at an unmapped page. Returns the count written.
-fn write_from(con: &mut Uart, root: &mut PageTable, off: u64, n: u64) -> u64
-  requires uart_ok(con) && pt_level(root) == 4 && off + n <= USER_SIZE
+fn write_from(con: &mut Con, root: &mut PageTable, off: u64, n: u64) -> u64
+  requires con_ok(con) && pt_level(root) == 4 && off + n <= USER_SIZE
+  ensures con_ok(con) && pt_level(root) == 4
 {
   if !pt_has(root, 1) {
     return 0;
@@ -91,13 +92,13 @@ fn write_from(con: &mut Uart, root: &mut PageTable, off: u64, n: u64) -> u64
     let mut l2 = pt_take(&mut l3, 0);
     let mut ok = true;
     while ok && k < n
-      invariant k <= n && pt_level(l2) == 2
+      invariant k <= n && pt_level(l2) == 2 && con_ok(con)
     {
       let ch = w_byte(&mut l2, off + k);
       if ch == 256 {
         ok = false;
       } else {
-        uart_write(&mut con, cast[u8](ch));
+        con_write(&mut con, cast[u8](ch));
         k = k + 1;
       }
     }
@@ -481,9 +482,9 @@ fn do_wait(procs: &mut Buf, pid: u64, c: u64) -> u64
 }
 
 /// Handles the system call process `pid` just made.
-fn syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
-  requires uart_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
-  ensures kok(k)
+fn syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
+  requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k) && con_ok(con)
 {
   let n = pget(k.procs, pid, F_REGS + R_RAX);
   let a = pget(k.procs, pid, F_REGS + R_RDI);

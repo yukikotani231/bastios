@@ -128,16 +128,16 @@ fn is_linux(procs: &Buf, p: u64) -> bool
 /// typed and posts SIGINT to every Linux program (there are no process
 /// groups: they all share the console). Otherwise the byte stays queued
 /// for a BastiOS program.
-fn tty_intr(con: &mut Uart, k: &mut Kernel)
-  requires uart_ok(con) && kok(k)
-  ensures kok(k)
+fn tty_intr(con: &mut Con, k: &mut Kernel)
+  requires con_ok(con) && kok(k)
+  ensures kok(k) && con_ok(con)
 {
   let n = get(k.q, 1);
   let h = get(k.q, 0);
   let mut hit = false;
   let mut i = 0;
   while i < n
-    invariant i <= n && n <= 256 && h < 256 && kok(k)
+    invariant i <= n && n <= 256 && h < 256 && kok(k) && con_ok(con)
   {
     if get(k.q, 2 + (h + i) % 256) == 3 {
       hit = true;
@@ -150,7 +150,7 @@ fn tty_intr(con: &mut Uart, k: &mut Kernel)
   let mut any = false;
   let mut p = 1;
   while p < NPROC
-    invariant 1 <= p && p <= NPROC && kok(k)
+    invariant 1 <= p && p <= NPROC && kok(k) && con_ok(con)
   {
     let st = state(k.procs, p);
     if st != FREE && st != ZOMBIE && is_linux(k.procs, p) {
@@ -167,7 +167,7 @@ fn tty_intr(con: &mut Uart, k: &mut Kernel)
   puts(&mut con, "^C\r\n");
   p = 1;
   while p < NPROC
-    invariant 1 <= p && p <= NPROC && kok(k)
+    invariant 1 <= p && p <= NPROC && kok(k) && con_ok(con)
   {
     if is_linux(k.procs, p) {
       post_sig(&mut k, p, SIGINT);
