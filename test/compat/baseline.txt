@@ -133,6 +133,8 @@ t_dir: unlink file in directory
 t_fdlock: 200 descriptors, dup2 to 200 and F_DUPFD from 100
 t_fdlock: F_GETLK reports the conflicting lock that starts first
 t_fdlock: F_SETLEASE and F_GETLEASE
+t_fdlock: F_SETOWN, F_SETOWN_EX and F_SETSIG set a description's owner
+t_fdlock: O_ASYNC on a pipe signals its owner when input arrives
 t_fdlock: a lock needs the matching access mode; bad requests are EINVAL
 t_file: /dev/null write
 t_file: /dev/urandom read
@@ -357,7 +359,9 @@ t_path: a loop of links through a long path is ELOOP
 t_path: a path in unmapped memory is EFAULT
 t_path: a set-group-ID bit at create is kept only for a member of the group
 t_path: an empty path is ENOENT, except with AT_EMPTY_PATH
+t_path: chroot keeps absolute paths, links and .. inside the new root
 t_path: fstat of a directory gives its mode
+t_path: mknod makes device and socket nodes; a device node opens its device
 t_path: paths are read up to PATH_MAX
 t_path: pread and pwrite take no negative offset
 t_path: sendfile checks its descriptors and offset; statx its flags
