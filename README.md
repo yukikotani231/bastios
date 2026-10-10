@@ -62,13 +62,15 @@ How the pieces fit together (boot, memory, processes, the scheduler, system call
 | `files/` | Files installed in the file system at boot (built into the kernel image) |
 | `user/fault.S` | A user program that reads kernel memory, to test fault isolation |
 | `user/straddle.S` | A user program whose buffers cross page boundaries, to test how the kernel copies user memory |
+| `user/mhello.c` | An ordinary C program built with musl libc (`musl-gcc -static-pie`) |
+| `user/fpucheck.c` | Checks that two processes using SSE registers at once do not see each other's |
 | `user/elfcheck.c`, `user/elfstart.S` | A freestanding C program linked as a static Linux ELF executable twice, at a fixed address (`elfexec`) and as a static PIE (`elfpie`); it checks its data, bss and initial stack, and a few Linux system calls. `elfbad` is a truncated copy the loader must refuse |
 
 User programs are linked at `USER_BASE` (0x8000000000) behind a small header (magic, memory size, entry), flattened to raw images, and embedded in the kernel with `include_bytes`.
 
 The kernel also loads static Linux x86-64 ELF executables, the first step toward running Linux programs: fixed-address executables whose segments lie in the user window, and static PIEs, which it places at `USER_BASE`. It starts them with the stack the Linux ABI promises (argc, argv, envp and the auxiliary vector). Every header field is untrusted, and the proof shows each read stays inside the file and each copied byte lands in the window below the stack. Dynamically linked executables are refused.
 
-Such programs make Linux system calls with the `syscall` instruction (`src/linux.bastio`). So far there are `write` (to stdout and stderr), `exit`, `exit_group`, `getpid` and `getppid`; every other call returns `-ENOSYS`. `int 0x80` keeps the BastiOS ABI, the one in bastiolang's user prelude. Calls 0 to 10 have named builtins there; the file calls (11 to 18, listed in `src/syscall.bastio`) go through its generic `sys_call` / `sys_send` / `sys_recv`, which lend the kernel a byte buffer.
+Such programs make Linux system calls with the `syscall` instruction (`src/linux.bastio`). So far there are `write` and `writev` (to stdout and stderr), `ioctl` (always `-ENOTTY`), `arch_prctl(ARCH_SET_FS)` (the thread pointer), `set_tid_address`, `exit`, `exit_group`, `getpid` and `getppid`; every other call prints a note on the console and returns `-ENOSYS`. That is enough for a C program built against musl libc as a static PIE (`user/mhello.c`) to start, print with `printf` and exit with a status. Each process has its own x87/SSE state, saved in a page of its own whenever it stops running. `int 0x80` keeps the BastiOS ABI, the one in bastiolang's user prelude. Calls 0 to 10 have named builtins there; the file calls (11 to 18, listed in `src/syscall.bastio`) go through its generic `sys_call` / `sys_send` / `sys_recv`, which lend the kernel a byte buffer.
 
 ## Build and run
 
@@ -81,8 +83,9 @@ Requirements:
 | Z3 | 4.8.12, 5.1.0 | Every kernel and user source is proved at build time |
 | QEMU | 8.2 | `qemu-system-x86_64` |
 | Python 3 | 3.12, 3.13 | Only for the test driver |
+| musl-gcc | musl 1.2.4 | Builds the musl test program (`musl-tools` on Ubuntu) |
 
-Tested on x86-64 Linux (Ubuntu 24.04), which is what CI runs; other platforms are untested. On Ubuntu: `sudo apt-get install z3 build-essential qemu-system-x86 python3`, plus [rustup](https://rustup.rs) for bastiolang.
+Tested on x86-64 Linux (Ubuntu 24.04), which is what CI runs; other platforms are untested. On Ubuntu: `sudo apt-get install z3 build-essential qemu-system-x86 python3 musl-tools`, plus [rustup](https://rustup.rs) for bastiolang.
 
 ```sh
 git clone https://github.com/yukikotani231/bastiolang
@@ -102,7 +105,7 @@ The proof covers everything in `src/` and `user/*.bastio`. Everything below it i
 
 | Part | Where | Role |
 | --- | --- | --- |
-| Boot and trap entry | `boot/boot.S` | Multiboot entry, identity map, long mode; GDT with user segments; the trap stubs and the `syscall` entry; entering user mode (`bst_cpu_enter`) and idling (`bst_cpu_wait`) |
+| Boot and trap entry | `boot/boot.S` | Multiboot entry, identity map, long mode; GDT with user segments; the trap stubs and the `syscall` entry; enabling SSE; entering user mode (which also loads the FS base) (`bst_cpu_enter`) and idling (`bst_cpu_wait`) |
 | Platform setup | `boot/platform.c` | TSS, interrupt table, `syscall` MSRs, 8259 PICs, 100 Hz timer |
 | C helpers | `boot/libc.c` | `memset` / `memcpy` / `memmove` / `memcmp`, which the C compiler may call |
 | Runtime preludes | in bastiolang, `stage0/src/codegen.rs` | COM1 port I/O, the arena allocator, page-table entry encoding, CR3 loads, the system call stubs for user programs |

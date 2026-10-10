@@ -34,11 +34,41 @@ fn fault_name(con: &Serial, v: u64) {
 }
 
 /// Runs process `pid` until the next trap and returns its vector (256 if
-/// the process has no address space). Its registers are loaded from and
-/// saved back to its row.
-fn run(mmu: &mut Mmu, cpu: &mut Cpu, spaces: &mut Vec[Space], procs: &mut Buf, pid: u64) -> u64
+/// the process has no address space or FPU state). Its registers are loaded
+/// from and saved back to its row, its x87/SSE registers from and to its
+/// FPU page.
+fn run(mmu: &mut Mmu, cpu: &mut Cpu, spaces: &mut Vec[Space], fpus: &mut Vec[Fpu], procs: &mut Buf, pid: u64) -> u64
+  requires spaces_ok(spaces) && fpus_ok(fpus) && len(procs) == PTAB_LEN && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures spaces_ok(spaces) && fpus_ok(fpus) && len(procs) == PTAB_LEN && mmu_root(mmu) == KERNEL_ROOT
+{
+  let mut v = 256;
+  match take_fpu(&mut fpus, pid) {
+    Fpu::None => { return 256; },
+    Fpu::State(mut f) => {
+      cpu_fpu_load(&mut cpu, f);
+      v = run_space(&mut mmu, &mut cpu, &mut spaces, procs, pid);
+      cpu_fpu_save(&mut cpu, &mut f);
+      put_fpu(&mut fpus, pid, Fpu::State(f));
+    },
+  }
+  if v == 256 {
+    return v;
+  }
+  // Registers, then the error code, fault address and FS base (words 18-20).
+  let mut r = 0;
+  while r < 21
+    invariant r <= 21 && len(procs) == PTAB_LEN
+  {
+    pset(&mut procs, pid, F_REGS + r, cpu_get(cpu, r));
+    r = r + 1;
+  }
+  return v;
+}
+
+/// run, once the FPU state is loaded: the registers and the address space.
+fn run_space(mmu: &mut Mmu, cpu: &mut Cpu, spaces: &mut Vec[Space], procs: &Buf, pid: u64) -> u64
   requires spaces_ok(spaces) && len(procs) == PTAB_LEN && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
-  ensures spaces_ok(spaces) && len(procs) == PTAB_LEN && mmu_root(mmu) == KERNEL_ROOT
+  ensures spaces_ok(spaces) && mmu_root(mmu) == KERNEL_ROOT
 {
   let mut v = 256;
   match take_space(&mut spaces, pid) {
@@ -51,19 +81,12 @@ fn run(mmu: &mut Mmu, cpu: &mut Cpu, spaces: &mut Vec[Space], procs: &mut Buf, p
         cpu_set(&mut cpu, r, pget(procs, pid, F_REGS + r));
         r = r + 1;
       }
+      cpu_set(&mut cpu, R_FSBASE, pget(procs, pid, F_REGS + R_FSBASE));
       mmu_switch(&mut mmu, root);
       v = cpu_run(&mut cpu, mmu);
       mmu_kernel(&mut mmu);
       put_space(&mut spaces, pid, Space::Mapped(root));
     },
-  }
-  // Registers, then the error code and fault address (words 18 and 19).
-  let mut r = 0;
-  while r < 20
-    invariant r <= 20 && len(procs) == PTAB_LEN
-  {
-    pset(&mut procs, pid, F_REGS + r, cpu_get(cpu, r));
-    r = r + 1;
   }
   return v;
 }
@@ -125,7 +148,15 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
     vec_push(&mut spaces, Space::Empty);
     i = i + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), ticks: 0, fs: vfs_new() };
+  let mut fpus = vec_new[Fpu]();
+  let mut q = 0;
+  while q < NPROC
+    invariant q <= NPROC && vlen(fpus) == q
+  {
+    vec_push(&mut fpus, Fpu::None);
+    q = q + 1;
+  }
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), ticks: 0, fs: vfs_new() };
   install_files(con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(con, "cannot start the shell\r\n");
@@ -145,7 +176,7 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
         k.ticks = tick(k.ticks);
       }
     } else {
-      let v = run(&mut mmu, &mut cpu, &mut k.spaces, &mut k.procs, p);
+      let v = run(&mut mmu, &mut cpu, &mut k.spaces, &mut k.fpus, &mut k.procs, p);
       cur = p;
       if v == V_TIMER {
         k.ticks = tick(k.ticks);
@@ -192,6 +223,12 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
     }
   }
   vec_free(k.spaces);
+  while vec_len(k.fpus) > 0
+    invariant mem_ok(k.mem)
+  {
+    drop_fpu(&mut k.mem, vec_pop(&mut k.fpus));
+  }
+  vec_free(k.fpus);
   vfs_free(k.fs, &mut k.mem);
   puts(con, "BastiOS: ");
   put_num(con, count_free(k.mem.bm));

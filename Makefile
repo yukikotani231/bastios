@@ -24,7 +24,7 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf)
 
 build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
@@ -67,6 +67,18 @@ build/user/elfexec.elf: build/user/elfstart.o build/user/elfcheck.o
 
 build/user/elfpie.elf: build/user/elfstart.o build/user/elfcheck.o
 	$(CC) -nostdlib -static-pie -Wl,--build-id=none -o $@ $^
+
+build/user/fpucheck.o: user/fpucheck.c | build/user
+	$(CC) $(filter-out -mgeneral-regs-only,$(ELFCFLAGS)) -c -o $@ $<
+
+build/user/fpucheck.elf: build/user/elfstart.o build/user/fpucheck.o
+	$(CC) -nostdlib -static-pie -Wl,--build-id=none -o $@ $^
+
+# A C program against musl libc, static PIE (the musl-tools package).
+MUSLCC ?= musl-gcc
+
+build/user/mhello.elf: user/mhello.c | build/user
+	$(MUSLCC) -static-pie -O2 -o $@ $<
 
 build/user/elfbad.elf: build/user/elfexec.elf
 	head -c 4200 $< > $@

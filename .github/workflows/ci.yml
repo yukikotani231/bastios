@@ -37,7 +37,7 @@ jobs:
           ref: main
           path: bastiolang
           token: ${{ secrets.BASTIOLANG_TOKEN }}
-      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86
+      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86 musl-tools
       - name: Tool versions
         run: |
           echo "bastiolang $(git -C bastiolang rev-parse HEAD)"
