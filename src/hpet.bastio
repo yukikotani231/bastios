@@ -1,8 +1,9 @@
 // The HPET (high precision event timer), through the 1 KiB block of
 // memory-mapped registers it owns. The kernel uses only its main counter,
-// as a clock: nanoseconds since boot.
+// as a clock: nanoseconds since boot. A machine without one keeps time
+// with the ACPI PM timer instead (clock_ns, src/acpi.bastio).
 
-const HPET: u64 = 0xFED00000;
+const HPET: u64 = 0xFED00000;     // where chipsets put it; the ACPI HPET table says exactly
 const HPET_LEN: u64 = 1024;
 
 // Register offsets.
@@ -18,16 +19,21 @@ const U64_MAX: u64 = 18446744073709551615;
 struct Hpet { regs: Mmio, period: u64 }
 
 spec fn hpet_ok(h: &Hpet) -> bool {
-  mmio_base(h.regs) == HPET && mmio_len(h.regs) == HPET_LEN && h.period <= HPET_MAX_PERIOD
+  HPET <= mmio_base(h.regs) && mmio_base(h.regs) + HPET_LEN <= 0xFEE00000 && mmio_base(h.regs) % 1024 == 0 && mmio_len(h.regs) == HPET_LEN
+    && h.period <= HPET_MAX_PERIOD
 }
 
 /// Starts the counter and records its period; a period of 0 means there is
-/// no usable HPET and the clock reads 0.
-fn hpet_init(regs: Mmio) -> Hpet
-  requires mmio_base(regs) == HPET && mmio_len(regs) == HPET_LEN
+/// no usable HPET (or, `there` false, none at all, and the registers are
+/// not touched) and the clock reads 0.
+fn hpet_init(regs: Mmio, there: bool) -> Hpet
+  requires HPET <= mmio_base(regs) && mmio_base(regs) + HPET_LEN <= 0xFEE00000 && mmio_base(regs) % 1024 == 0 && mmio_len(regs) == HPET_LEN
   ensures hpet_ok(result)
 {
   let mut r = regs;
+  if !there {
+    return Hpet { regs: r, period: 0 };
+  }
   let p = mmio_read64(&mut r, HPET_CAP) / 0x100000000;
   if p == 0 || p > HPET_MAX_PERIOD {
     return Hpet { regs: r, period: 0 };

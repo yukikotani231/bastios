@@ -94,6 +94,7 @@ const LX_EXECVE: u64 = 59;
 const LX_WAIT4: u64 = 61;
 const LX_GETTID: u64 = 186;
 const LX_FUTEX: u64 = 202;
+const LX_REBOOT: u64 = 169;
 
 // What thread_exec says.
 const EXEC_GO: u64 = 0;              // no other thread is left: go on
@@ -216,6 +217,23 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if n == LX_FUTEX {
     return lx_futex(&mut k, pid, was, a, b, c);
+  }
+  if n == LX_REBOOT {
+    // reboot(2), after its two magic numbers: RESTART restarts the
+    // machine, POWER_OFF and HALT power it off (everyone is root).
+    if a != 0xFEE1DEAD || (b != 672274793 && b != 85072278 && b != 369367448 && b != 537993216) {
+      ret(&mut k.procs, pid, EINVAL);
+      return KEEP;
+    }
+    ret(&mut k.procs, pid, 0);
+    if c == 0x01234567 {
+      return REBOOT;
+    }
+    if c == 0x4321FEDC || c == 0xCDEF0123 {
+      return POWEROFF;
+    }
+    ret(&mut k.procs, pid, EINVAL);
+    return KEEP;
   }
   if n == LX_READ || n == LX_READV {
     let rv = fd_look(k, pid, a);

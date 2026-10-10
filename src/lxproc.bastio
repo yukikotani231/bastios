@@ -773,6 +773,12 @@ fn applet_name(j: u64) -> Str {
   if j == 16 {
     return "readlink";
   }
+  if j == 17 {
+    return "reboot";
+  }
+  if j == 18 {
+    return "poweroff";
+  }
   return "mkfifo";
 }
 
