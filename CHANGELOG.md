@@ -685,6 +685,12 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   (bastiolang's `pt_set_access`), so any touch faults, a system call given
   it fails with `EFAULT`, `fork` keeps it hidden, and a hidden `MAP_SHARED`
   page stays shared when `mprotect` uncovers it.
+- A kernel stack that overflowed wrote over its processor's IST1 stack,
+  task state segment and saved user context, with no fault. Each kernel
+  stack now has an unmapped guard page under it: an overflow becomes a
+  double fault that halts the processor (`test/stackguard_test.sh`). The
+  kernel stack grew from 91 to 92 KiB; the trap stack, which holds one
+  trap frame, shrank from 32 to 24 KiB.
 - mmap without an address, shmat without one, and brk could hand out
   pages a mapping made with MAP_FIXED (or shmat at an address, or mremap
   with MREMAP_FIXED) already held, with that mapping's bytes in them, and
