@@ -283,6 +283,7 @@ struct Kernel {
   procs: Buf,           // the process table
   q: Buf,               // console input waiting for a READ
   ticks: u64,           // timer ticks since boot
+  ns: u64,              // the HPET clock at the last system call, in nanoseconds
   cpus: u64,            // processors running, the bootstrap one included
   fs: Vfs,              // files and the open-file table
 }

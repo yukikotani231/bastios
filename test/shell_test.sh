@@ -181,9 +181,23 @@ else:
             return None
         m = re.search(rb"(\d+) ticks, \d+ s", out[mark:])
         return int(m.group(1)) if m else None
-    t0, w0 = uptime(), time.time()
+    # The HPET (src/hpet.bastio, memory-mapped registers claimed through
+    # Mmio) counts nanoseconds: over the same wall-clock interval it must
+    # advance by about as much.
+    def clock():
+        mark = len(out)
+        qemu.stdin.write(b"clock\r"); qemu.stdin.flush()
+        if not read_until(b"bastios> ", mark):
+            return None
+        m = re.search(rb"(\d+) ns since boot", out[mark:])
+        return int(m.group(1)) if m else None
+    t0, c0, w0 = uptime(), clock(), time.time()
     time.sleep(2)
-    t1, w1 = uptime(), time.time()
+    t1, c1, w1 = uptime(), clock(), time.time()
+    if c0 and c1 and 0.6e9 * (w1 - w0) <= c1 - c0 <= 1.5e9 * (w1 - w0):
+        print(f"ok   HPET clock: {(c1 - c0) / 1e9:.2f} s in {w1 - w0:.1f} s")
+    else:
+        print("FAIL HPET clock:", c0, c1); fails += 1
     if t0 is not None and t1 is not None and 60 * (w1 - w0) <= t1 - t0 <= 200 * (w1 - w0):
         print(f"ok   timer: {t1 - t0} ticks in {w1 - w0:.1f} s")
     else:
@@ -198,7 +212,8 @@ else:
     # Several processors at once: processes that never make a system call
     # run on the other processors while the shell stays responsive, and
     # `ps` (which runs with the kernel's lock held) catches at least two of
-    # them on a processor at the same moment. One is left running for
+    # them (on four processors, usually all three) on a processor at the
+    # same moment. One is left running for
     # `halt`, which must wait for its processor to bring it back.
     if smp >= 4:
         pids = []
@@ -209,10 +224,16 @@ else:
             m = re.search(rb"\[(\d+)\]", out[mark:])
             pids.append(m.group(1).decode() if m else "0")
         time.sleep(0.5)
-        mark = len(out)
-        qemu.stdin.write(b"ps\r"); qemu.stdin.flush()
-        read_until(b"bastios> ", mark)
-        running = len(re.findall(rb"running +\d+ spin", out[mark:]))
+        # A process caught between two runs (back under the lock, about to
+        # be picked again) shows as ready, so look a few times.
+        running = 0
+        for _ in range(5):
+            mark = len(out)
+            qemu.stdin.write(b"ps\r"); qemu.stdin.flush()
+            read_until(b"bastios> ", mark)
+            running = max(running, len(re.findall(rb"running +\d+ spin", out[mark:])))
+            if running == 3:
+                break
         if running >= 2:
             print(f"ok   {running} processes running on other processors at once")
         else:
