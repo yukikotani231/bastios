@@ -161,7 +161,10 @@ t_mem: mmap MAP_FIXED
 t_mem: mmap a file MAP_PRIVATE
 t_mem: mmap anonymous
 t_mem: mmap is zeroed
+t_mem: mprotect read-only faults on write
+t_mem: mremap grow
 t_mem: munmap
+t_mem: munmap faults on touch
 t_misc: /etc/passwd
 t_misc: /proc/meminfo
 t_misc: /proc/self/exe
