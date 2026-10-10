@@ -9,6 +9,8 @@
 # BASTIOC points at the Bastio stage0 compiler (github.com/yukikotani231/bastiolang).
 
 BASTIOC ?= ../bastiolang/stage0/target/release/bastioc0
+# Where `import "core/..."` finds the Bastio core library.
+BASTIOLIB ?= ../bastiolang
 CC      ?= cc
 QEMU    ?= qemu-system-x86_64
 
@@ -39,7 +41,7 @@ ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmi
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so
 
 build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
-	$(BASTIOC) --target user -o $@ $<
+	$(BASTIOC) --lib $(BASTIOLIB) --target user -o $@ $<
 
 build/user/%.o: build/user/%.c
 	$(CC) $(UCFLAGS) -c -o $@ $<
@@ -141,7 +143,7 @@ KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
 build/kernel.c: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
-	$(BASTIOC) --target kernel -o $@ src/main.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --target kernel -o $@ src/main.bastio
 
 build/kernel.o: build/kernel.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -232,6 +234,7 @@ run-uefi: build/bastios.iso $(DISK)
 
 test: build/bastios.elf
 	test/trusted_base.sh
+	test/fsck_test.py
 	test/shell_test.sh
 	test/tcp_test.sh
 	NIC=e1000 test/tcp_test.sh
@@ -272,18 +275,124 @@ build/compat/busybox: build/busybox/Makefile test/compat/busybox.config | build/
 	$(MAKE) -C build/compat/bb -s CC=$(MUSLCC) EXTRA_CFLAGS=-fPIE CFLAGS_busybox=-static-pie busybox
 	cp build/compat/bb/busybox $@
 
-build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox test/compat/mkdisk.py
-	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox
+# Real programs, built from their own sources against musl as static PIEs
+# and checked by test/compat/apps.txt: Lua, QuickJS and the sqlite3 shell.
+# sqlite3's sources come from its GitHub mirror, which has no amalgamation:
+# configuring and generating it needs tclsh (the tcl package).
+LUA_GIT       ?= https://github.com/lua/lua
+LUA_TAG       ?= v5.4.7
+QUICKJS_GIT   ?= https://github.com/bellard/quickjs
+QUICKJS_REV   ?= 535a7c250ff4a577ec36c3e103daab6dadeea650
+SQLITE_GIT    ?= https://github.com/sqlite/sqlite
+SQLITE_TAG    ?= version-3.52.0
+COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3
+APP_CFLAGS    := -static-pie -fPIE -O2 -w -s
 
-compat: build/bastios.elf build/compat/disk.img
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --out build/compat $(COMPAT_PROGS)
+build/compat/src:
+	mkdir -p $@
+
+build/compat/lua: | build/compat/src
+	rm -rf build/compat/src/lua
+	git clone -q --depth 1 --branch $(LUA_TAG) $(LUA_GIT) build/compat/src/lua
+	$(MUSLCC) $(APP_CFLAGS) -DLUA_USE_LINUX -DMAKE_LUA -o $@ build/compat/src/lua/onelua.c -lm
+
+build/compat/qjs: | build/compat/src
+	rm -rf build/compat/src/quickjs && mkdir build/compat/src/quickjs
+	git -C build/compat/src/quickjs init -q
+	git -C build/compat/src/quickjs fetch -q --depth 1 $(QUICKJS_GIT) $(QUICKJS_REV)
+	git -C build/compat/src/quickjs checkout -q FETCH_HEAD
+	$(MAKE) -C build/compat/src/quickjs -s CC=$(MUSLCC) HOST_CC=$(CC) CONFIG_LTO= qjs >/dev/null
+	cd build/compat/src/quickjs && $(MUSLCC) -static-pie -s -o ../../qjs .obj/qjs.o .obj/repl.o .obj/quickjs.o \
+	  .obj/dtoa.o .obj/libregexp.o .obj/libunicode.o .obj/cutils.o .obj/quickjs-libc.o -lm
+
+build/compat/sqlite3: | build/compat/src
+	rm -rf build/compat/src/sqlite
+	git clone -q --depth 1 --branch $(SQLITE_TAG) $(SQLITE_GIT) build/compat/src/sqlite
+	cd build/compat/src/sqlite && ./configure --disable-tcl >/dev/null && $(MAKE) -s sqlite3.c shell.c >/dev/null
+	$(MUSLCC) $(APP_CFLAGS) -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION -o $@ \
+	  build/compat/src/sqlite/shell.c build/compat/src/sqlite/sqlite3.c -lm
+
+# Building C on BastiOS: tcc and GNU make on a second disk (test/compat/
+# devdisk.sh) with a small C runtime under /disk/c, which tcc is configured
+# to look in; test/compat/dev.txt compiles and runs programs with them.
+# make's sources come from its GitHub mirror and gnulib's, and bootstrapping
+# them needs autoconf, automake, autopoint and texinfo.
+TCC_GIT       ?= https://github.com/TinyCC/tinycc
+TCC_REV       ?= 43c7708b85681a2fd4451c8a541af4494a8919b2
+GMAKE_GIT     ?= https://github.com/mirror/make
+GMAKE_TAG     ?= 4.4.1
+GNULIB_GIT    ?= https://github.com/coreutils/gnulib
+GNULIB_TAG    ?= stable-202301
+MUSL_INC      ?= /usr/include/x86_64-linux-musl
+MUSL_LIB      ?= /usr/lib/x86_64-linux-musl
+TCC_SRC       := build/compat/src/tcc
+
+build/compat/tcc: test/compat/patches/tcc-auto-type.patch | build/compat/src
+	rm -rf $(TCC_SRC) && mkdir $(TCC_SRC)
+	git -C $(TCC_SRC) init -q
+	git -C $(TCC_SRC) fetch -q --depth 1 $(TCC_GIT) $(TCC_REV)
+	git -C $(TCC_SRC) checkout -q FETCH_HEAD
+	git -C $(TCC_SRC) apply $(CURDIR)/test/compat/patches/tcc-auto-type.patch
+	cd $(TCC_SRC) && ./configure --cc=$(MUSLCC) --config-musl --config-pie --extra-cflags="-O2 -fPIE" \
+	  --extra-ldflags="-static-pie -s" --sysincludepaths=/disk/c/include --libpaths=/disk/c/lib \
+	  --crtprefix=/disk/c/lib --tccdir=/disk/c/lib --elfinterp=/lib/ld-musl-x86_64.so.1 >/dev/null
+	$(MAKE) -C $(TCC_SRC) -s tcc
+	$(MAKE) -C $(TCC_SRC) -s libtcc1.a XFLAGS-unx="-B$(CURDIR)/$(TCC_SRC) -I$(CURDIR)/$(TCC_SRC)/include -I$(MUSL_INC)"
+	cp $(TCC_SRC)/tcc $@
+
+build/compat/make: | build/compat/src
+	rm -rf build/compat/src/make build/compat/src/gnulib
+	git clone -q --depth 1 --branch $(GMAKE_TAG) $(GMAKE_GIT) build/compat/src/make
+	git clone -q --depth 1 --branch $(GNULIB_TAG) $(GNULIB_GIT) build/compat/src/gnulib
+	cd build/compat/src/make && ./bootstrap --no-git --gnulib-srcdir=../gnulib --skip-po >/dev/null && \
+	  CC=$(MUSLCC) CFLAGS="-O2 -fPIE" LDFLAGS="-static-pie -s" ./configure -q --disable-nls --without-guile
+	$(MAKE) -C build/compat/src/make -s >/dev/null
+	cp build/compat/src/make/make $@
+
+build/compat/dev.img: build/compat/tcc build/compat/make test/compat/devdisk.sh test/compat/dev_headers.c test/compat/mkdisk.py
+	test/compat/devdisk.sh $@ build/compat/tcc build/compat/make $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)
+
+# The Bastio compiler on BastiOS: bastioc1 (bastiolang's stage1, as C from
+# bastioc0, built here with musl), Z3 to discharge its proofs, and tcc to
+# build the C it writes, on a third disk (test/compat/bastiodisk.sh) for
+# test/compat/bastio.txt. Z3 is built against glibc, statically: there is
+# no C++ compiler for musl here. Its build takes a while, once.
+BASTIOLANG    ?= $(patsubst %/stage0/target/release/bastioc0,%,$(BASTIOC))
+Z3_GIT        ?= https://github.com/Z3Prover/z3
+Z3_TAG        ?= z3-4.8.12
+Z3_JOBS       ?= 4
+
+build/compat/z3: | build/compat/src
+	rm -rf build/compat/src/z3
+	git clone -q --depth 1 --branch $(Z3_TAG) $(Z3_GIT) build/compat/src/z3
+	cd build/compat/src/z3 && CXX=g++ CC=gcc CXXFLAGS=-fPIE LDFLAGS=-static-pie \
+	  python3 scripts/mk_make.py --single-threaded >/dev/null
+	$(MAKE) -C build/compat/src/z3/build -s -j$(Z3_JOBS) z3 >/dev/null
+	strip -o $@ build/compat/src/z3/build/z3
+
+build/compat/bastioc1.c: $(BASTIOC) $(wildcard $(BASTIOLANG)/stage1/*.bastio) | build/compat
+	$(BASTIOC) --emit-c -o $@ $(BASTIOLANG)/stage1/bastioc1.bastio
+
+build/compat/bastioc1: build/compat/bastioc1.c
+	$(MUSLCC) $(APP_CFLAGS) -o $@ $<
+
+build/compat/bastio.img: build/compat/bastioc1 build/compat/z3 build/compat/tcc test/compat/bastiodisk.sh \
+    $(wildcard test/compat/bastio/*.bastio) test/compat/mkdisk.py
+	test/compat/bastiodisk.sh $@ build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc \
+	  $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB) $(BASTIOLANG)/stage1
+
+build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) test/compat/mkdisk.py
+	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
+
+compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --out build/compat $(COMPAT_PROGS)
 
 # Records which checks pass now, so `make compat` catches regressions.
-compat-baseline: build/bastios.elf build/compat/disk.img
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --out build/compat $(COMPAT_PROGS)
+compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --out build/compat $(COMPAT_PROGS)
 
 # The same checks on this Linux machine: are the expectations right?
-compat-host: $(COMPAT_BINS) build/compat/busybox
+compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
 	test/compat/run.py --host build/compat --out build/compat/host $(COMPAT_PROGS)
 
 # Not part of `make test`: prints timings, checks nothing (see the script).
@@ -301,8 +410,12 @@ diskbench: build/bastios.elf
 iobench: build/bastios.elf
 	test/iobench.sh
 
+# Network timings on virtio-net and e1000.
+netbench: build/bastios.elf
+	test/netbench.sh
+
 clean:
 	rm -rf build
 
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
-.PHONY: all run test fuzz smpbench threadbench diskbench iobench compat compat-baseline compat-host clean
+.PHONY: all run test fuzz smpbench threadbench diskbench iobench netbench compat compat-baseline compat-host clean

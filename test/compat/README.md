@@ -8,8 +8,9 @@ make compat-host       # the same checks on this Linux machine
 make compat-baseline   # record which checks pass now (baseline.txt)
 ```
 
-Needs what `make test` needs plus `musl-gcc` (the musl-tools package) and
-`script` (util-linux, only for `compat-host`).
+Needs what `make test` needs plus `musl-gcc` (the musl-tools package),
+`git` and `tclsh` (the tcl package, to generate sqlite's amalgamation) for
+the real programs, and `script` (util-linux, only for `compat-host`).
 
 ## What runs
 
@@ -19,6 +20,27 @@ Needs what `make test` needs plus `musl-gcc` (the musl-tools package) and
   line per check (`progs/compat.h`).
 - `applets.txt`: one-line shell commands using a BusyBox built with a broad
   set of applets (`busybox.config`), each with its exact expected output.
+- `apps.txt`: real programs, in the same format: Lua 5.4.7, QuickJS and the
+  sqlite3 3.52 shell (files, WAL, an index over 20000 rows). The Makefile
+  clones each at a pinned tag or commit and builds it against musl as a
+  static PIE (`LUA_TAG`, `QUICKJS_REV`, `SQLITE_TAG` pick the versions).
+- `dev.txt`: building C on BastiOS, in the same format. tcc and GNU make
+  run from a second disk (`devdisk.sh`, booted after everything else)
+  with the headers `dev_headers.c` pulls in, the C runtime objects and
+  musl's `libc.so`, on a disk of its own (split out when the disk's
+  directory held only 64 entries; it now holds 1023). tcc (pinned by `TCC_REV`) is configured to find
+  them under `/disk/c` and builds dynamic PIEs, which the kernel runs
+  with its built-in musl dynamic linker. Building make needs autoconf,
+  automake, autopoint and texinfo for its bootstrap.
+- `bastio.txt`: the Bastio compiler on BastiOS, from a third disk
+  (`bastiodisk.sh`): bastiolang's `bastioc1` (C from `bastioc0`, built
+  against musl), Z3 (`Z3_TAG`, a static PIE against glibc, as there is no
+  musl C++ toolchain; its build takes a while, once) and tcc, with the
+  headers the generated C includes, and the programs in `bastio/`.
+  `bastioc1` proves each program with Z3, then builds it with tcc, which
+  needs GNU `__auto_type` (`patches/tcc-auto-type.patch`, applied to
+  `TCC_REV`). The compiler's own sources are on the disk under `/disk/s`,
+  but proving them needs more memory than a process gets.
 
 `mkdisk.py` puts the programs and that BusyBox on a disk image in BastiOS's
 own disk format, so they appear as `/disk/NAME`. `run.py` boots the kernel

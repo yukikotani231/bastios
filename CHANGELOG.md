@@ -14,6 +14,87 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Added
 
+- Fixes from the LTP file-system tests: a path through a file fails with
+  `ENOTDIR`, a loop of symbolic links with `ELOOP`, a too-long name with
+  `ENAMETOOLONG`, and a bad directory descriptor with `EBADF`/`ENOTDIR`
+  (they all said `ENOENT`). `renameat2` takes `RENAME_EXCHANGE`, `mknod`
+  makes regular files, one `write` moves more than 4096 bytes, `"link/"`
+  names what the link points to, `linkat` across file systems says
+  `EXDEV`, `newfstatat` rejects unknown flags, a full in-memory table
+  makes `mkdir` say `ENOSPC`, and `O_TMPFILE` is refused with
+  `EOPNOTSUPP` (it opened the directory).
+- `/proc/cpuinfo`, `/proc/filesystems`, `/proc/PID/mounts` (so
+  `/proc/self/mounts`) and three read-only sysctls:
+  `/proc/sys/kernel/tainted`, `pid_max` and `printk`.
+- The in-memory file system holds 128 files and directories (it held 32).
+- The disk's directory grows: up to 1023 files and directories under
+  `disk/` (it held 64). The format is now `BSTDISK3`, which names the
+  directory's extra blocks in the superblock; a `BSTDISK2` disk is mounted
+  as it is and upgraded in place. The power-cut test now grows the
+  directory while the power is cut, and `test/fsck.py` checks the new
+  blocks.
+- `sendmsg` and `recvmsg`, with `SCM_RIGHTS` passing a descriptor over an
+  `AF_UNIX` socket (one per message, one in flight per direction);
+  `MSG_PEEK` on TCP and unix sockets; `shutdown` on TCP (sends the FIN)
+  and unix sockets; `MSG_NOSIGNAL`; `SO_SNDBUF` and `SO_RCVBUF`;
+  `AF_UNIX` `SOCK_DGRAM` and `SOCK_SEQPACKET` socket pairs, which keep
+  message boundaries; and `rt_sigqueueinfo` (`sigqueue`), whose value
+  reaches the handler's siginfo. A new compat program, `t_sock2`, checks
+  these.
+- `signalfd` and `signalfd4`: read, poll and epoll on the signals in its
+  set. A blocked signal is now kept pending even when its action ignores
+  it, as on Linux, so a blocked `SIGCHLD` reaches a signalfd or `sigwait`.
+- A Linux program blocked on a network socket (`accept`, `read`,
+  `recvfrom`, a full TCP send buffer) sleeps instead of being restarted on
+  every pass of the scheduler, so it no longer keeps a processor busy
+  (`ps` shows it as `socket`). The network card wakes it by interrupt:
+  MSI-X on virtio-net, the PCI interrupt line through the 8259 on the
+  e1000, asked for only while someone sleeps. `make netbench` measures it.
+- File locks are kept (`src/lxlock.bastio`): `fcntl` record locks
+  (`F_GETLK`, `F_SETLK`, `F_SETLKW`), open file description locks
+  (`F_OFD_*`) and `flock`, with Linux's owners and release rules. A
+  conflicting `F_SETLKW` or blocking `flock` waits, and an `F_SETLKW` that
+  would close a cycle of waits fails with `EDEADLK`. Checked by the new
+  compat program `t_lock`.
+- C can be built on BastiOS: tcc and GNU make 4.4.1, built as static PIEs,
+  compile and link programs (dynamic PIEs against musl's `libc.so`) and
+  run makefiles, `-j` included. `make compat` boots a second disk with
+  them and a small C runtime and runs `test/compat/dev.txt`.
+- `ppoll` and `pselect6` wait with the signal mask they are given (GNU
+  make `-j` hung waiting for SIGCHLD).
+- The Bastio compiler runs on BastiOS: bastiolang's self-hosted `bastioc1`
+  (built with musl), Z3 4.8.12 (a static glibc build) and tcc prove a
+  Bastio program, report a failed proof with its counterexample, and build
+  and run the program, all inside BastiOS. tcc gains GNU `__auto_type`
+  (`test/compat/patches/tcc-auto-type.patch`), which the generated C uses.
+  `make compat` boots a third disk with them and runs
+  `test/compat/bastio.txt`. Not yet: `bastioc1` proving itself, which needs
+  about 320 MiB, more than a process's 64 MiB window and the kernel's
+  256 MiB page pool.
+- `FUTEX_CLOCK_REALTIME` deadlines are read on the wall clock.
+- `set_robust_list`, `rseq` and `clone3`, which glibc asks for, fail with
+  `ENOSYS` quietly; glibc carries on without them (static glibc programs
+  run).
+
+### Fixed
+
+- `readv` on a disk file whose blocks were not cached yet returned the
+  kernel's internal retry code to the program instead of waiting for the
+  disk (stdio's `fread` failed on `/disk` files).
+- A `futex` wake missed a waiter with a timeout that was on a processor at
+  that moment (a timed wait is retried each time it is scheduled), so it
+  slept to its deadline: glibc's condition variables waited out their
+  whole timeout, which made each Z3 query take 10 s.
+- Modification times were seconds since boot; they are wall-clock times
+  now, as `stat` reports them.
+- A file created by `open` with `O_CREAT` gets the mode asked for, less a
+  umask of 022 (it was always 0644, so programs tcc linked were not
+  executable by mode).
+- Real programs in `make compat` (`test/compat/apps.txt`): Lua 5.4.7,
+  QuickJS and the sqlite3 3.52 shell, built from source as static PIEs,
+  run their files, pipes, timers, WAL databases and a 20000-row index.
+- The console takes lines of up to 4095 bytes (it cut them at 255, which
+  left a long pasted command hanging in ash).
 - The threads of a Linux process run on several processors at once. They
   used to take turns on one: four threads of pure computation now finish
   about twice as fast on four processors under QEMU.
@@ -24,8 +105,7 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 - `sendfile`, `copy_file_range`, `preadv`, `pwritev`, `statx`,
   `fallocate` (growing), `fadvise64`, `memfd_create`, `getcpu`, and
-  `FIONREAD` on a pipe. `flock` and `fcntl` record locks are accepted but
-  not kept. A new compat program, `t_more`, checks these and other calls
+  `FIONREAD` on a pipe. A new compat program, `t_more`, checks these and other calls
   real programs make.
 - `msync` writes a `MAP_SHARED` file mapping back to the file, and so do
   `munmap`, exit and `execve` (up to four such mappings per process; the
@@ -112,6 +192,13 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Changed
 
+- Removing the name a disk file was made under while a hard link remains
+  is committed by one sector write (`disk_take_name`); a rename between
+  two names of one file does nothing, as on Linux.
+- The power-cut test cuts power fifteen times and also truncates,
+  renames and links; `test/fsck.py` checks the disk image after every
+  cut (`test/fsck_test.py` shows it catches damage). Native call 24
+  (`SYS_LINK`, `f_link`) makes a hard link.
 - Named pipes live in the file system: `mknod`/`mkfifo` make a file with
   the FIFO type bits, so a FIFO is listed (type `p`), renamed, linked and
   removed like any file, and on the disk it survives a reboot. Only four

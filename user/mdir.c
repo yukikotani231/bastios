@@ -1,15 +1,21 @@
 /* Directories through the Linux system calls, against musl: openat,
  * fstatat, mkdirat and unlinkat relative to a directory descriptor,
  * fchdir to it, getcwd, a file mapped with mmap and MAP_FIXED over it,
- * running out of descriptors, a named pipe (mkfifo), and cleaning up. */
+ * running out of descriptors, a named pipe (mkfifo), the errors a path
+ * walk gives (ENOTDIR, ELOOP), renameat2 with RENAME_EXCHANGE, mknod of a
+ * regular file, one write of more than 4096 bytes, O_TMPFILE refused, a
+ * full in-memory table (ENOSPC), and cleaning up. */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+static char big[10000];
 
 static int fail(const char *what)
 {
@@ -84,6 +90,61 @@ int main(void)
     close(r);
     if (unlink("ff") != 0 || stat("ff", &st) == 0)
         return fail("removing a FIFO");
+    /* Renaming one name of a file to another name of it does nothing. */
+    if (link("f", "f2") != 0 || rename("f", "f2") != 0 || stat("f", &st) != 0 || stat("f2", &st) != 0
+        || st.st_nlink != 2 || unlink("f2") != 0)
+        return fail("renaming between two names of one file");
+    /* A file in the middle of a path is not a directory; a loop of links
+     * ends in ELOOP; "link/" names what the link points to. */
+    if (open("f/x", O_RDONLY) != -1 || errno != ENOTDIR)
+        return fail("ENOTDIR for a file in a path");
+    if (symlink("lb", "la") != 0 || symlink("la", "lb") != 0 || open("la", O_RDONLY) != -1 || errno != ELOOP)
+        return fail("ELOOP for a loop of links");
+    if (symlink(".", "ld") != 0 || lstat("ld", &st) != 0 || !S_ISLNK(st.st_mode)
+        || lstat("ld/", &st) != 0 || !S_ISDIR(st.st_mode))
+        return fail("lstat of \"link/\"");
+    if (unlink("la") != 0 || unlink("lb") != 0 || unlink("ld") != 0)
+        return fail("removing the links");
+    /* RENAME_EXCHANGE swaps two names. */
+    int e1 = open("e1", O_CREAT | O_WRONLY, 0644), e2 = open("e2", O_CREAT | O_WRONLY, 0644);
+    if (e1 < 0 || e2 < 0 || write(e1, "1", 1) != 1 || write(e2, "22", 2) != 2)
+        return fail("making two files to swap");
+    close(e1);
+    close(e2);
+    if (syscall(SYS_renameat2, AT_FDCWD, "e1", AT_FDCWD, "e2", 2) != 0 || stat("e1", &st) != 0 || st.st_size != 2
+        || stat("e2", &st) != 0 || st.st_size != 1 || unlink("e1") != 0 || unlink("e2") != 0)
+        return fail("renameat2(RENAME_EXCHANGE)");
+    /* mknod makes a regular file too. */
+    if (mknod("rn", S_IFREG | 0600, 0) != 0 || stat("rn", &st) != 0 || !S_ISREG(st.st_mode)
+        || (st.st_mode & 0777) != 0600 || unlink("rn") != 0)
+        return fail("mknod of a regular file");
+    /* One write call moves all of a buffer bigger than a page. */
+    memset(big, 'b', sizeof big);
+    int bw = open("bw", O_CREAT | O_RDWR, 0644);
+    if (bw < 0 || write(bw, big, sizeof big) != (ssize_t)sizeof big || fstat(bw, &st) != 0
+        || st.st_size != (off_t)sizeof big)
+        return fail("a write of 10000 bytes");
+    close(bw);
+    if (unlink("bw") != 0)
+        return fail("removing bw");
+    if (open(".", O_TMPFILE | O_RDWR, 0600) != -1 || errno != EOPNOTSUPP)
+        return fail("O_TMPFILE refused");
+    /* Making directories until the in-memory table is full ends in ENOSPC. */
+    int made = 0;
+    char nm[16];
+    while (made < 1000) {
+        snprintf(nm, sizeof nm, "n%d", made);
+        if (mkdir(nm, 0755) != 0)
+            break;
+        made++;
+    }
+    if (made == 1000 || errno != ENOSPC)
+        return fail("filling the in-memory table");
+    while (made > 0) {
+        snprintf(nm, sizeof nm, "n%d", --made);
+        if (rmdir(nm) != 0)
+            return fail("emptying the in-memory table");
+    }
     if (unlinkat(AT_FDCWD, "f", 0) != 0 || chdir("..") != 0 || rmdir("dx") != 0)
         return fail("cleaning up");
     close(d);

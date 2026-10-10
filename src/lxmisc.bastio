@@ -226,7 +226,6 @@ fn lx_getrandom(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
 }
 
 /// Whether the path at va (from dirfd) names something.
-const EIO: u64 = 18446744073709551611;       // 2^64 - 5
 const TIMES_UTIMBUF: u64 = 0;          // utime: actime, modtime
 const TIMES_TIMEVAL: u64 = 1;          // utimes, futimesat: two struct timeval
 const TIMES_TIMESPEC: u64 = 2;         // utimensat: two struct timespec
@@ -235,7 +234,8 @@ const UTIME_OMIT: u64 = 1073741822;    // tv_nsec: leave it
 
 /// The file layer handle of the path at va (relative to dirfd), for
 /// changing its mode or times: NO_FILE if it exists but keeps none ("/",
-/// /bin and the built-in programs), NO_RESULT if it does not exist.
+/// /bin and the built-in programs), NO_RESULT (k.perr says why) if it
+/// does not exist.
 fn meta_target(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -256,6 +256,7 @@ fn meta_target(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
   if m.ok {
     return NO_FILE;
   }
+  k.perr = ENOENT;
   return NO_RESULT;
 }
 
@@ -266,7 +267,7 @@ fn set_meta(k: &mut Kernel, f: u64, mode: u64, mtime: u64) -> u64
   ensures kok(k)
 {
   if f == NO_RESULT {
-    return ENOENT;
+    return k.perr;
   }
   if f >= NFILES + DSLOTS {
     return 0;                               // nothing to keep: accepted
@@ -299,7 +300,7 @@ fn set_times(k: &mut Kernel, pid: u64, f: u64, va: u64, kind: u64) -> u64
   ensures kok(k)
 {
   if f == NO_RESULT {
-    return ENOENT;
+    return k.perr;
   }
   let mut t = k.fs.now;
   if va != 0 {
@@ -391,7 +392,7 @@ fn lx_truncate(k: &mut Kernel, pid: u64, path: u64, size: u64) -> u64
   }
   let n = lx_path_in(&mut k, pid, path);
   if n == NO_RESULT {
-    return ENOENT;
+    return k.perr;
   }
   if dir_at(&mut k, n) != NO_FILE {
     return EISDIR;

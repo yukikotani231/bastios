@@ -31,6 +31,9 @@ const LX_EXIT: u64 = 60;
 const LX_GETPPID: u64 = 110;
 const LX_ARCH_PRCTL: u64 = 158;
 const LX_SET_TID_ADDRESS: u64 = 218;
+const LX_SET_ROBUST_LIST: u64 = 273;
+const LX_RSEQ: u64 = 334;
+const LX_CLONE3: u64 = 435;
 const LX_OPENAT: u64 = 257;
 const LX_STAT: u64 = 4;
 const LX_LSTAT: u64 = 6;
@@ -111,7 +114,11 @@ const S_IFREG_X: u64 = 0x81ED;              // a regular file, rwxr-xr-x
 const S_IFREG: u64 = 0x81A4;                // a regular file, rw-r--r--
 const S_IFMT_DIR: u64 = 0x4000;             // the type bits of a directory
 const S_IFMT_REG: u64 = 0x8000;             // and of a regular file
-const INO_FILES: u64 = 1000;                // inode numbers of files: this + the handle
+// Inode numbers: directories 1 + their DIR_* number (at most 1 + DIR_VFS +
+// VDIR_DISK), then the built-in programs, then files (past both), then
+// /proc (INO_PROC, 4096 up).
+const INO_PROGS: u64 = 1536;                // the built-in programs: this + the program
+const INO_FILES: u64 = 2048;                // files: this + the handle
 
 // ---------------------------------------------------------------- user memory
 
@@ -208,7 +215,11 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if n == LX_READ || n == LX_READV {
     let rv = fd_look(k, pid, a);
     if n == LX_READV && rv.kind == K_FILE {
-      ret(&mut k.procs, pid, file_readv(&mut k, pid, rv.x, b, c));
+      let got = file_readv(&mut k, pid, rv.x, b, c);
+      if got == DISK_RETRY {
+        return disk_retry(&mut k, pid, n);   // nothing read yet: wait for the disk
+      }
+      ret(&mut k.procs, pid, got);
       return KEEP;
     }
     // readv on anything but a file reads into the first buffer that has
@@ -235,12 +246,17 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       r = pipe_read(&mut k, pid, d.x, va, cnt);
     } else if d.kind == K_EVENT || d.kind == K_TIMER {
       r = ev_read(&mut k, pid, d.kind, d.x, va, cnt);
+    } else if d.kind == K_SIGFD {
+      r = sfd_read(&mut k, pid, d.x, va, cnt);
     } else if d.kind == K_DEV && d.x >= PROC_DEV {
       r = proc_read(&mut k, pid, a, d.x, va, cnt);
     } else if d.kind == K_DEV {
       r = dev_read(&mut k, pid, d.x, va, cnt);
     } else if d.kind == K_SOCK {
       r = lx_recvfrom(&mut k, pid, a, va, cnt, 0, 0, 0);
+      if r == SK_WAIT && !is_unix(k, pid, a) {
+        return sock_retry(&mut k, pid, n);  // a network socket: sleep until a frame comes in
+      }
       if r == SK_WAIT {
         r = EAGAIN;                         // wait for a datagram, below
       } else if r == EAGAIN {
@@ -267,6 +283,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if w == EAGAIN && pipe_nonblock(k, pid, a) {
       ret(&mut k.procs, pid, EAGAIN);        // a full nonblocking pipe: say so
       return KEEP;
+    }
+    if w == SK_WAIT && is_tcp(k, pid, a) {
+      return sock_retry(&mut k, pid, n);     // a full connection: sleep until an ACK comes in
     }
     if w == EAGAIN || w == SK_WAIT {
       return lx_retry(&mut k, pid, n);       // a full pipe or connection: wait for room
@@ -307,6 +326,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_sock_call(n) {
     return lx_sock_call(&mut k, pid, n, a, b, c);
   }
+  if is_msg_call(n) {
+    return lx_msg_call(&mut k, pid, n, a, b, c);
+  }
   if is_misc_call(n) {
     return lx_misc_call(&mut con, &mut k, pid, n, a, b, c);
   }
@@ -323,15 +345,19 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return lx_event_call(&mut k, pid, n, was, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
   }
   if n == LX_FCNTL {
-    ret(&mut k.procs, pid, lx_fcntl(&mut k, pid, a, b, c));
+    let r = lx_fcntl(&mut k, pid, a, b, c);
+    if r == LK_WAIT {
+      return lx_retry(&mut k, pid, n);     // F_SETLKW: someone else's lock is in the way
+    }
+    ret(&mut k.procs, pid, r);
     return KEEP;
   }
   if n == LX_OPEN || n == LX_OPENAT {
     let mut r = 0;
     if n == LX_OPEN {
-      r = lx_open(&mut k, pid, AT_FDCWD, a, b);
+      r = lx_open(&mut k, pid, AT_FDCWD, a, b, c);
     } else {
-      r = lx_open(&mut k, pid, a, b, c);
+      r = lx_open(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
     }
     if r == SK_WAIT {
       return lx_retry(&mut k, pid, n);      // a FIFO's writer waits for a reader
@@ -385,7 +411,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if n == LX_NEWFSTATAT {
     let r10 = pget(k.procs, pid, F_REGS + R_R10);
-    if r10 / AT_EMPTY_PATH % 2 == 1 && lx_path_in(&mut k, pid, b) == 0 {
+    if (r10 % 0x100000000) & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH) != 0 {
+      ret(&mut k.procs, pid, EINVAL);
+    } else if r10 / AT_EMPTY_PATH % 2 == 1 && lx_path_in(&mut k, pid, b) == 0 {
       ret(&mut k.procs, pid, lx_fstat(&mut k, pid, a, c));      // fstat by another name
     } else {
       ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b, c, (r10 & AT_SYMLINK_NOFOLLOW) == 0));
@@ -500,6 +528,14 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if n == LX_SET_TID_ADDRESS {
     pset(&mut k.procs, pid, F_CTID, a);
     ret(&mut k.procs, pid, pid);
+    return KEEP;
+  }
+  // glibc asks for these and carries on without them: robust futex lists
+  // (no robust mutexes), restartable sequences (sched_getcpu falls back to
+  // the system call), and clone3 (pthread_create falls back to clone, as
+  // on Linux before 5.3). Refused quietly, as known gaps.
+  if n == LX_SET_ROBUST_LIST || n == LX_RSEQ || n == LX_CLONE3 {
+    ret(&mut k.procs, pid, ENOSYS);
     return KEEP;
   }
   puts(&mut con, "[pid ");
@@ -831,14 +867,41 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64
     }
     return fits;
   }
-  let w = vfs_write(&mut k.fs, &mut k.mem, d.x, got);
-  if w == NO_FD {
-    return EBADF;
+  // A file takes the whole count, XFER bytes at a time; each piece is
+  // its own write (on the disk, its own commit). If the disk has not
+  // caught up after the first piece, the count so far is returned.
+  let mut total = 0;
+  let mut piece = got;
+  let mut more = true;
+  while more && total < n
+    invariant total <= n && piece <= XFER && kok(k) && pid < NPROC
+  {
+    if total > 0 {
+      if va > 0xFFFFFFFFFFFFFFFF - total {
+        return total;
+      }
+      piece = copy_from_user(&mut k.spaces, pid, va + total, &mut k.fs.xfer, smaller(n - total, XFER));
+      if piece == NO_RESULT || piece == 0 {
+        return total;
+      }
+    }
+    let w = vfs_write(&mut k.fs, &mut k.mem, d.x, piece);
+    if w == NO_FD {
+      return EBADF;
+    }
+    if w == VFS_MISS {
+      if total == 0 {
+        return DISK_RETRY;                  // sleep until the disk catches up
+      }
+      return total;
+    }
+    if w > n - total {
+      return total;                         // cannot happen: w <= piece <= n - total
+    }
+    total = total + w;
+    more = w == piece && w > 0;
   }
-  if w == VFS_MISS {
-    return DISK_RETRY;                      // sleep until the disk catches up
-  }
-  return w;
+  return total;
 }
 
 /// The first iovec with room among the cnt at user address iov (or the
@@ -981,7 +1044,9 @@ fn lx_fail_or(total: u64, err: u64) -> u64 {
 /// the leading "/", relative paths taken from process pid's working
 /// directory, "." and empty parts dropped and ".." going up a level.
 /// Returns its length (0 for the top directory), or NO_RESULT if it is
-/// unreadable or too long.
+/// unreadable (k.perr = -EFAULT), too long (-ENAMETOOLONG), loops through
+/// links (-ELOOP), goes through a dangling link (-ENOENT) or through
+/// something that is not a directory (-ENOTDIR).
 fn lx_path_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -992,7 +1057,8 @@ fn lx_path_in(k: &mut Kernel, pid: u64, va: u64) -> u64
 
 /// lx_path_in for the *at calls: a relative path starts at directory
 /// descriptor dirfd, or at the working directory for AT_FDCWD. NO_RESULT
-/// for a relative path and a dirfd that is not an open directory.
+/// for a relative path and a dirfd that is not an open directory (k.perr
+/// says which: EBADF or ENOTDIR).
 fn lx_path_at(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -1013,17 +1079,21 @@ fn lx_path_at_nf(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
 }
 
 /// The base a relative path of an *at call starts from: OFD_N for the
-/// working directory, a directory description, or OFD_N + 1 for none.
+/// working directory, a directory description, OFD_N + 1 for a descriptor
+/// that is not open, or OFD_N + 2 for one that is not a directory.
 fn dir_ofd(k: &Kernel, pid: u64, dirfd: u64) -> u64
   requires kok(k) && pid < NPROC
-  ensures result <= OFD_N + 1
+  ensures result <= OFD_N + 2
 {
   if dirfd % 0x100000000 == AT_FDCWD {
     return OFD_N;
   }
+  if fd_get(k.lxfd, pid, dirfd) == 0 {
+    return OFD_N + 1;
+  }
   let v = fd_get(k.lxfd, pid, dirfd) % FD_CLOEXEC;
   if v < FD_OFD || v - FD_OFD >= OFD_N || of_get(k.ofd, v - FD_OFD, 0) != OF_DIR {
-    return OFD_N + 1;
+    return OFD_N + 2;
   }
   return v - FD_OFD;
 }
@@ -1055,6 +1125,7 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
+  k.perr = EFAULT;
   if va < USER_BASE || va >= USER_BASE + USER_SIZE {
     return NO_RESULT;
   }
@@ -1063,6 +1134,7 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
   if got == NO_RESULT {
     return NO_RESULT;
   }
+  k.perr = ENAMETOOLONG;
   let mut e = 0;
   while e < got && bget(k.fs.xfer, e) != 0
     invariant e <= got && got <= XFER && kok(k)
@@ -1075,6 +1147,7 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
   if e == 0 {
     return 0;                               // "": what *at calls with AT_EMPTY_PATH look for
   }
+  let trail = bget(k.fs.xfer, e - 1) == 47;  // "link/" names what the link points to, as on Linux
   // Build the name in `out`, starting from the working directory unless
   // the path starts at "/".
   let mut out = balloc(PATH_OUT);
@@ -1082,6 +1155,10 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
   if bget(k.fs.xfer, 0) != 47 {
     if h > OFD_N {
       bfree(out);
+      k.perr = EBADF;
+      if h > OFD_N + 1 {
+        k.perr = ENOTDIR;
+      }
       return NO_RESULT;                     // relative to no directory
     }
     let cl = base_len(k, pid, h);
@@ -1140,7 +1217,7 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
   }
   if !ok || o > FNAME_MAX {
     bfree(out);
-    return NO_RESULT;
+    return NO_RESULT;                       // k.perr is ENAMETOOLONG
   }
   let mut c = 0;
   while c < o
@@ -1151,7 +1228,7 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
   }
   bfree(out);
   let o2 = proc_self(&mut k.fs.xfer, o, pid);   // "proc/self" is the caller's /proc/PID
-  return lx_follow(&mut k, o2, follow);       // symbolic links (src/lxlink.bastio)
+  return lx_follow(&mut k, o2, follow || trail);  // symbolic links (src/lxlink.bastio)
 }
 
 /// lseek: SEEK_SET (0), SEEK_CUR (1) and SEEK_END (2), with a signed

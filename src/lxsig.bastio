@@ -18,6 +18,7 @@ const LX_RT_SIGRETURN: u64 = 15;
 const LX_KILL: u64 = 62;
 const LX_TKILL: u64 = 200;
 const LX_TGKILL: u64 = 234;
+const LX_RT_SIGQUEUEINFO: u64 = 129;
 const LX_RT_SIGPENDING: u64 = 127;
 const LX_SIGALTSTACK: u64 = 131;
 const SS_DISABLE: u64 = 2;
@@ -112,13 +113,15 @@ fn post_sig(k: &mut Kernel, p: u64, s: u64)
   ensures kok(k)
 {
   let st = state(k.procs, p);
-  if st == FREE || st == ZOMBIE || sig_ignored(k.sigact, p, s) {
+  let blocked = has_sig(pget(k.procs, p, F_SIGMASK), s) && s != SIGKILL;
+  // A blocked signal is kept even if ignored, as on Linux: a signalfd or
+  // sigwait may take it, and delivery drops it if it is still ignored.
+  if st == FREE || st == ZOMBIE || (sig_ignored(k.sigact, p, s) && !blocked) {
     return;
   }
   pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
   k.sigsave = set(k.sigsave, sender_at(p, s), 0);     // the kernel, unless post_from says
-  let blocked = has_sig(pget(k.procs, p, F_SIGMASK), s) && s != SIGKILL;
-  if !blocked && (st == LXREADING || st == LXWAITING || st == FUTEXWAIT) {
+  if !blocked && (st == LXREADING || st == LXWAITING || st == FUTEXWAIT || st == SOCKWAIT) {
     pset(&mut k.procs, p, F_STATE, READY);
   }
 }
@@ -138,6 +141,73 @@ fn post_from(k: &mut Kernel, p: u64, s: u64, from: u64)
 {
   post_sig(&mut k, p, s);
   k.sigsave = set(k.sigsave, sender_at(p, s), from);
+}
+
+/// post_from with a value (sigqueue): the siginfo says SI_QUEUE and
+/// carries the low 32 bits of `value` (sival_int; a sival_ptr loses its
+/// upper half). The sender word holds from + 256 * (1 + 2 * value).
+fn post_queued(k: &mut Kernel, p: u64, s: u64, from: u64, value: u64)
+  requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG && from < NPROC
+  ensures kok(k)
+{
+  post_sig(&mut k, p, s);
+  k.sigsave = set(k.sigsave, sender_at(p, s), from + 256 + 512 * (value % 0x100000000));
+}
+
+/// Writes the parts of a siginfo at `at` in b that come from a sender
+/// word (see post_queued): si_pid, and for a queued signal si_code
+/// SI_QUEUE (-1) and si_value.
+fn info_from(b: &mut Bytes, at: u64, word: u64)
+  requires at + 32 <= blen(b)
+  ensures blen(b) == old(blen(b))
+{
+  bset(&mut b, at + 16, cast[u8](word % 256));          // si_pid
+  if word / 256 % 2 == 1 {
+    let mut i = 0;
+    while i < 4
+      invariant i <= 4 && at + 32 <= blen(b) && blen(b) == old(blen(b))
+    {
+      bset(&mut b, at + 8 + i, cast[u8](255));           // si_code: SI_QUEUE
+      bset(&mut b, at + 24 + i, cast[u8](word / 512 / pow256(i) % 256));
+      i = i + 1;
+    }
+  }
+}
+
+fn pow256(i: u64) -> u64
+  requires i < 4
+  ensures result >= 1 && result <= 16777216
+{
+  if i == 0 {
+    return 1;
+  }
+  if i == 1 {
+    return 256;
+  }
+  if i == 2 {
+    return 65536;
+  }
+  return 16777216;
+}
+
+/// rt_sigqueueinfo(target, s, info): kill with the si_value in info.
+fn lx_sigqueue(k: &mut Kernel, pid: u64, target: u64, s: u64, info: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  if s > NSIG {
+    return EINVAL;
+  }
+  if target >= NPROC || state(k.procs, target) == FREE || state(k.procs, target) == ZOMBIE || target == 0 {
+    return ESRCH;
+  }
+  if info > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, info, &mut k.fs.xfer, 32) != 32 {
+    return EFAULT;
+  }
+  if s != 0 {
+    post_queued(&mut k, target, s, pid, get_u64(k.fs.xfer, 24));
+  }
+  return 0;
 }
 
 /// Process p's child has ended: a Linux parent gets SIGCHLD (thrown away
@@ -204,9 +274,9 @@ fn tty_intr(con: &mut Con, k: &mut Kernel)
   let mut hit = false;
   let mut i = 0;
   while i < n
-    invariant i <= n && n <= 256 && h < 256 && kok(k) && con_ok(con)
+    invariant i <= n && n <= INQ_CAP && h < INQ_CAP && kok(k) && con_ok(con)
   {
-    if get(k.q, 2 + (h + i) % 256) == 3 {
+    if get(k.q, 2 + (h + i) % INQ_CAP) == 3 {
       hit = true;
     }
     i = i + 1;
@@ -465,6 +535,8 @@ fn lx_sig_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     r = lx_kill(&mut k, pid, a, b);
   } else if n == LX_TGKILL {
     r = lx_kill(&mut k, pid, b, c);
+  } else if n == LX_RT_SIGQUEUEINFO {
+    r = lx_sigqueue(&mut k, pid, a, b, c);
   } else if n == LX_RT_SIGRETURN {
     r = lx_sigreturn(&mut k, pid);
   } else if n == LX_RT_SIGPENDING {
@@ -483,7 +555,7 @@ fn lx_sig_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
 
 fn is_sig_call(n: u64) -> bool {
   return n == LX_RT_SIGACTION || n == LX_RT_SIGPROCMASK || n == LX_KILL || n == LX_TKILL
-    || n == LX_TGKILL || n == LX_RT_SIGRETURN || n == LX_RT_SIGPENDING || n == LX_SIGALTSTACK;
+    || n == LX_TGKILL || n == LX_RT_SIGRETURN || n == LX_RT_SIGPENDING || n == LX_SIGALTSTACK || n == LX_RT_SIGQUEUEINFO;
 }
 
 // ---------------------------------------------------------------- delivery
@@ -561,7 +633,10 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   // and here it collects it when it runs again after the handler.
   let call = pget(k.procs, p, F_REGS + R_RAX);
   let waiting = pget(k.procs, p, F_RESTART) != 0;
-  let suspended = waiting && call == LX_RT_SIGSUSPEND;
+  // ppoll and pselect6 with a mask swap it as rt_sigsuspend does, and
+  // never run again after a handler either.
+  let swapped = waiting && (call == LX_PPOLL || call == LX_PSELECT6) && get(k.sigsave, p) & MASK_SWAPPED != 0;
+  let suspended = waiting && call == LX_RT_SIGSUSPEND || swapped;
   let pausing = call == LX_PAUSE || suspended;
   let reaping = (call == LX_WAIT4 || call == LX_WAITID) && s == SIGCHLD;
   if waiting && (flags & SA_RESTART == 0 || pausing) && !reaping {
@@ -590,14 +665,15 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   // The mask to go back to: rt_sigsuspend's caller gets its own back.
   let mut was = pget(k.procs, p, F_SIGMASK);
   if suspended {
-    was = get(k.sigsave, p);
+    was = get(k.sigsave, p) & !MASK_SWAPPED;
+    k.sigsave = set(k.sigsave, p, was);     // the call is over: nothing left to put back
   }
   xfer_u64(&mut fr, UC_AT + UC_REGS + 8 * 21, was);         // oldmask
   xfer_u64(&mut fr, UC_AT + UC_FPPTR, base + FP_AT);
   xfer_u64(&mut fr, UC_AT + UC_MASK, was);
   // The siginfo: signo, errno, code (SI_USER).
   bset(&mut fr, INFO_AT, cast[u8](s));
-  bset(&mut fr, INFO_AT + 16, cast[u8](get(k.sigsave, sender_at(p, s)) % 256));   // si_pid
+  info_from(&mut fr, INFO_AT, get(k.sigsave, sender_at(p, s)));   // si_pid, si_value
   // The FPU state, as fxsave left it.
   match take_fpu(&mut k.fpus, p) {
     Fpu::None => {},

@@ -49,8 +49,8 @@ const NO_FD: u64 = 18446744073709551615;
 const VFS_MISS: u64 = 18446744073709551614;     // the disk has not caught up: sleep, then try again
 
 // Directory handles besides the nodes (vfs_dir_lookup, vfs_readdir).
-const VDIR_ROOT: u64 = 96;             // NFILES + DSLOTS: the top directory
-const VDIR_DISK: u64 = 97;             // "disk"
+const VDIR_ROOT: u64 = NFILES + DSLOTS;  // the top directory
+const VDIR_DISK: u64 = NFILES + DSLOTS + 1;  // "disk"
 const NAMEBUF: u64 = 256;             // holds any in-memory node's name
 
 struct Vfs {
@@ -1109,10 +1109,18 @@ fn vfs_mkfifo(v: &mut Vfs, mem: &mut Mem, n: u64, perm: u64) -> bool
   requires vfs_ok(v) && mem_ok(mem)
   ensures vfs_ok(v) && mem_ok(mem)
 {
-  if n > FNAME_MAX || !path_ok(v, n) || !parent_ok(&mut v, n) || vfs_lookup(&mut v, n) != NO_FILE || vfs_dir_lookup(&mut v, n) != NO_FILE {
+  return vfs_mknode(&mut v, &mut mem, n, T_FIFO + perm % 4096);
+}
+
+/// vfs_mkfifo for any mode: type bits (none for a regular file) and
+/// permission bits.
+fn vfs_mknode(v: &mut Vfs, mem: &mut Mem, n: u64, mode: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem)
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  if mode >= 65536 || n > FNAME_MAX || !path_ok(v, n) || !parent_ok(&mut v, n) || vfs_lookup(&mut v, n) != NO_FILE || vfs_dir_lookup(&mut v, n) != NO_FILE {
     return false;
   }
-  let mode = T_FIFO + perm % 4096;
   if on_disk(v, n) {
     let d = disk_create(&mut v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX, false, v.now);
     if d >= DSLOTS {
@@ -1259,18 +1267,75 @@ fn vfs_link(v: &mut Vfs, n: u64, m: u64) -> u64
 }
 
 /// vfs_unlink of disk file entry d, which hard link l also names: the
-/// link's entry goes, and the file takes its name. Two sector writes; a
-/// power cut between them leaves the file under its old name only.
+/// file takes the link's name and the link goes, committed by one sector
+/// write (disk_take_name).
 fn disk_unlink_named(v: &mut Vfs, d: u64, l: u64) -> bool
   requires vfs_ok(v) && d < DSLOTS && l < DSLOTS
   ensures vfs_ok(v)
 {
-  let k = disk_name(v.disk, l, &mut v.xfer, DISK_PREFIX);
-  if k == NO_DISK_FILE || k > XFER - DISK_PREFIX {
+  return disk_take_name(&mut v.disk, d, l);
+}
+
+// ---------------------------------------------------------------- exchange
+
+const XCHG_TMP: u64 = 16;             // ".rename-exchange", a name at the disk's top
+
+/// Swaps the files named xfer[0..n] and the m bytes after (neither a
+/// directory, both on one file system: the caller checks). Descriptors
+/// stay on their files. In memory the two nodes swap names at once. On
+/// the disk it is three entry writes: the first file moves to a spare
+/// name at the disk's top (".rename-exchange"), the second takes the
+/// first's name, then the first takes the second's; a power cut in between
+/// can leave the first file under the spare name. False, changing nothing,
+/// if the spare name is taken or a name is not there.
+fn vfs_exchange(v: &mut Vfs, n: u64, m: u64) -> bool
+  requires vfs_ok(v) && n <= XFER && m <= XFER - n
+  ensures vfs_ok(v)
+{
+  if n == 0 || m == 0 || n > FNAME_MAX || m > FNAME_MAX {
     return false;
   }
-  if !disk_remove(&mut v.disk, l) {
+  if on_disk(v, n) {
+    let i = disk_find(v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX);
+    if i >= DSLOTS || n + DISK_PREFIX > XFER || m <= DISK_PREFIX {
+      return false;
+    }
+    let j = disk_find(v.disk, v.xfer, n + DISK_PREFIX, m - DISK_PREFIX);
+    if j >= DSLOTS || i == j {
+      return false;
+    }
+    let tmp = bfrom(".rename-exchange");
+    if blen(tmp) != XCHG_TMP || disk_find(v.disk, tmp, 0, XCHG_TMP) < DSLOTS
+      || !disk_move(&mut v.disk, i, tmp, 0, XCHG_TMP) {
+      bfree(tmp);
+      return false;
+    }
+    if !disk_move(&mut v.disk, j, v.xfer, DISK_PREFIX, n - DISK_PREFIX) {
+      disk_move(&mut v.disk, i, v.xfer, DISK_PREFIX, n - DISK_PREFIX);   // back, as it was
+      bfree(tmp);
+      return false;
+    }
+    bfree(tmp);
+    return disk_move(&mut v.disk, i, v.xfer, n + DISK_PREFIX, m - DISK_PREFIX);
+  }
+  let i = ram_find(&mut v.ram, v.xfer, n);
+  if i >= NFILES || n > NAMEBUF {
     return false;
   }
-  return disk_move(&mut v.disk, d, v.xfer, DISK_PREFIX, k);
+  // Keep the first name in v.name, and bring the second to the front.
+  let mut c = 0;
+  while c < n
+    invariant c <= n && n <= FNAME_MAX && vfs_ok(v)
+  {
+    bset(&mut v.name, c, bget(v.xfer, c));
+    c = c + 1;
+  }
+  xfer_shift(&mut v.xfer, n, m);
+  let j = ram_find(&mut v.ram, v.xfer, m);
+  let il = ram_len(&mut v.ram, i);
+  let jl = ram_len(&mut v.ram, j % NFILES);
+  if j >= NFILES || i == j || il == NO_FILE || jl == NO_FILE {
+    return false;
+  }
+  return ram_reprefix(&mut v.ram, i, il, v.xfer, m) && ram_reprefix(&mut v.ram, j, jl, v.name, n);
 }
