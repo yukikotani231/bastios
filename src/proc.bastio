@@ -354,13 +354,13 @@ fn wake_readers(procs: &mut Buf, q: &mut Queue, line: &Buf)
 // Everything the kernel owns, in one place. `mmu` and `cpu` stay with
 // `main`, which lends them where they are needed.
 // Linux file descriptors (src/lxfd.bastio).
-const LXNFD: u64 = 16;
-const LXFD_LEN: u64 = 512;            // NPROC * LXNFD
+const LXNFD: u64 = 256;
+const LXFD_LEN: u64 = 8192;           // NPROC * LXNFD
 const FD_CONSOLE: u64 = 1;
 const FD_OFD: u64 = 2;
 const FD_CLOEXEC: u64 = 1024;
 
-const OFD_N: u64 = 64;
+const OFD_N: u64 = 1024;
 // File locks (src/lxlock.bastio): LK_N entries of LK_W words, then for
 // each process the record lock it waits for in F_SETLKW, LK_WW words.
 const LK_N: u64 = 128;
@@ -375,9 +375,12 @@ const LK_EOF: u64 = 18446744073709551615;   // a range to the end of the file; n
 const LK_DESC: u64 = 4294967296;      // 2^32: lock owners from here are descriptions
 const LKC_FCNTL: u64 = 0;             // record and OFD locks
 const LKC_FLOCK: u64 = 1;
+const LKC_LEASE: u64 = 3;             // a lease: the whole file, owned by a description
+const F_SETLEASE: u64 = 1024;
+const F_GETLEASE: u64 = 1025;
 const LK_WAIT: u64 = 18446744073709551000;   // not an errno: wait and run the call again
 const OFD_STRIDE: u64 = 4;
-const OFD_LEN: u64 = 256;             // OFD_N * OFD_STRIDE
+const OFD_LEN: u64 = 4096;            // OFD_N * OFD_STRIDE
 const OF_FREE: u64 = 0;
 const OF_FILE: u64 = 1;
 const OF_PIPE_R: u64 = 2;
@@ -396,7 +399,7 @@ const DISK_RETRY: u64 = 0x8000000000000002;
 // (without the leading "/", at most FNAME_MAX) and one byte a word after.
 const CWD_STRIDE: u64 = 256;           // FNAME_MAX + 1
 const CWD_LEN: u64 = 8192;            // NPROC * CWD_STRIDE
-const DPATH_LEN: u64 = 16384;         // OFD_N * CWD_STRIDE
+const DPATH_LEN: u64 = 262144;        // OFD_N * CWD_STRIDE
 const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
 
 // Linux signal actions: per process, 64 signals of 4 words each (handler,
@@ -589,7 +592,7 @@ struct Kernel {
   ux: Buf,              // AF_UNIX channels and names (src/lxunix.bastio)
   uxb: Bytes,           // their bytes
   maps: Buf,            // Linux MAP_SHARED file mappings, MAP_N per process (src/lxmem.bastio)
-  inet6: u64,           // bit h: open file description h is an AF_INET6 socket (src/lxsock.bastio)
+  inet6: Buf,           // word h: 1 if open file description h is an AF_INET6 socket (src/lxsock.bastio)
   locks: Buf,           // file locks held (src/lxlock.bastio)
   perr: u64,            // why lx_path_from last gave NO_RESULT: -ENOENT, -ENOTDIR, ... (src/linux.bastio)
   ipc: Buf,             // System V message queues and semaphores (src/lxipc.bastio)
@@ -599,7 +602,7 @@ struct Kernel {
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.locks) == LK_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.locks) == LK_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.inet6) == OFD_N
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
 }
 

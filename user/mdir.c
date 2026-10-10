@@ -130,10 +130,10 @@ int main(void)
     if (mmap(m, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0) != m || m[0] != 0)
         return fail("mmap with MAP_FIXED");
     /* Opening until nothing is left ends in EMFILE, not ENOENT. */
-    int many[32], got = 0;
-    while (got < 32 && (many[got] = open("f", O_RDONLY)) >= 0)
+    int many[300], got = 0;
+    while (got < 300 && (many[got] = open("f", O_RDONLY)) >= 0)
         got++;
-    if (got == 32 || errno != EMFILE)
+    if (got == 300 || errno != EMFILE)
         return fail("running out of descriptors");
     while (got > 0)
         close(many[--got]);

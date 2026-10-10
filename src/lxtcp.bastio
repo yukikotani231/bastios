@@ -146,7 +146,7 @@ fn lx_accept(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, flags: u64
   }
   of_set(&mut k.ofd, h, 3, tm_word(flags / SOCK_NONBLOCK % 2, tk.port, TM_CONN));
   if ofd_v6(k, tk.h) {
-    k.inet6 = k.inet6 | (1 << h);           // an AF_INET6 listener's connections are too
+    k.inet6 = set(k.inet6, h, 1);           // an AF_INET6 listener's connections are too
   }
   let nfd = fd_install(&mut k, pid, h);
   if nfd >= LXNFD {
