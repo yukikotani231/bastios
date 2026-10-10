@@ -291,8 +291,12 @@ compat-host: $(COMPAT_BINS) build/compat/busybox
 smpbench: build/bastios.elf
 	test/smpbench.sh
 
+# Not part of `make test` either: do one process's threads run in parallel?
+threadbench: build/bastios.elf
+	test/threadbench.sh
+
 clean:
 	rm -rf build
 
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
-.PHONY: all run test fuzz smpbench compat compat-baseline compat-host clean
+.PHONY: all run test fuzz smpbench threadbench compat compat-baseline compat-host clean

@@ -59,12 +59,13 @@ const WAITING: u64 = 3;
 const ZOMBIE: u64 = 4;
 const LXREADING: u64 = 5;            // blocked in a Linux read of the console
 const LXWAITING: u64 = 6;            // blocked in a Linux wait4 for any child
-const RUNNING: u64 = 7;              // on a processor: its space and FPU page are out
+const RUNNING: u64 = 7;              // on a processor (with a lease on its space): its FPU page is out
 const KILLED: u64 = 8;               // RUNNING, and killed: ends when it comes back
 const NETWAIT: u64 = 9;              // waiting for the network (a ping's reply)
 const LXVFORK: u64 = 10;             // lent its address space to child F_WAIT (clone with CLONE_VM | CLONE_VFORK)
 const CONWAIT: u64 = 11;             // writing to the console, whose ring is full
 const FUTEXWAIT: u64 = 12;           // in a Linux futex wait with no timeout
+const EXITING: u64 = 13;             // RUNNING, a thread whose leader is in execve: freed when it comes back
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -918,7 +919,7 @@ fn put_state(con: &mut Con, s: u64)
     puts(&mut con, "reading");
   } else if s == WAITING || s == LXWAITING {
     puts(&mut con, "waiting");
-  } else if s == RUNNING || s == KILLED {
+  } else if s == RUNNING || s == KILLED || s == EXITING {
     puts(&mut con, "running");
   } else if s == FUTEXWAIT {
     puts(&mut con, "futex  ");

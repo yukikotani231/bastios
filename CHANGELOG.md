@@ -14,6 +14,10 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Added
 
+- The threads of a Linux process run on several processors at once. They
+  used to take turns on one: four threads of pure computation now finish
+  about twice as fast on four processors under QEMU.
+
 - Files on the disk can grow to 1 GiB (as far as the disk allows) and in
   memory to 64 MiB; they were capped at 1 MiB.
 - Paths can be up to 255 bytes; they were capped at 28.

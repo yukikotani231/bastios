@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -58,10 +59,84 @@ static void *ender(void *arg)
     _exit(7);                         /* exit_group: every thread ends */
 }
 
+/* `mthread par`: four threads of pure computation, timed. How much faster
+ * four processors run them than one (test/threadbench.sh) shows whether
+ * the threads of a process really run at the same time. */
+static void *spin(void *arg)
+{
+    unsigned long x = (unsigned long)arg | 1;
+    /* Memory mapped while the other threads run (malloc asks the kernel
+     * for pages), written and read back. */
+    unsigned long *m = malloc(256 * 1024);
+    if (!m)
+        return 0;
+    for (long i = 0; i < 30000000; i++) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        m[i & 32767] = x;
+    }
+    for (long i = 0; i < 32768; i++)
+        x += m[i];
+    free(m);
+    return (void *)x;
+}
+
+static int par(void)
+{
+    pthread_t t[4];
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    for (int i = 0; i < 4; i++)
+        pthread_create(&t[i], 0, spin, (void *)(long)(i + 1));
+    unsigned long sum = 0;
+    for (int i = 0; i < 4; i++) {
+        void *r;
+        pthread_join(t[i], &r);
+        sum += (unsigned long)r;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    long ms = (b.tv_sec - a.tv_sec) * 1000 + (b.tv_nsec - a.tv_nsec) / 1000000;
+    printf("mthread: par 4 threads %ld ms (%lx)\n", ms, sum & 0xfff);
+    return 0;
+}
+
+/* `mthread exec`: execve while two other threads are running (on other
+ * processors, with SMP): the kernel ends them first. */
+static void *forever(void *arg)
+{
+    volatile unsigned long *n = arg;
+    for (;;)
+        (*n)++;
+    return 0;
+}
+
+static int exec_threads(void)
+{
+    static volatile unsigned long n[2];
+    pthread_t t;
+    for (int i = 0; i < 2; i++)
+        pthread_create(&t, 0, forever, (void *)&n[i]);
+    while (n[0] == 0 || n[1] == 0)
+        ;
+    char *av[] = { "mthread", "done", 0 };
+    execv("/bin/mthread", av);
+    printf("mthread: execv failed\n");
+    return 1;
+}
+
 #define FAIL(...) do { printf("mthread: " __VA_ARGS__); printf("\n"); return 1; } while (0)
 
-int main(void)
+int main(int argc, char **argv)
 {
+    if (argc > 1 && argv[1][0] == 'p')
+        return par();
+    if (argc > 1 && argv[1][0] == 'e')
+        return exec_threads();
+    if (argc > 1 && argv[1][0] == 'd') {
+        printf("mthread: exec ok, threads gone\n");
+        return 0;
+    }
     pthread_t t[4];
     void *r = 0;
 
