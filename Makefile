@@ -53,7 +53,7 @@ build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := src/console.bastio src/pages.bastio src/space.bastio src/proc.bastio src/syscall.bastio src/main.bastio
+KSRCS := src/uart.bastio src/pic.bastio src/pit.bastio src/console.bastio src/pages.bastio src/space.bastio src/proc.bastio src/syscall.bastio src/main.bastio
 
 # src/main.bastio imports the rest.
 build/kernel.c: $(KSRCS) $(UBINS) $(BASTIOC) | build

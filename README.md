@@ -29,6 +29,7 @@ The kernel (`src/`) runs user programs in ring 3, each in its own address space,
 - every physical page is owned by exactly one thing at a time: the allocator, or one slot of one page table. The allocator's bitmap is proved to agree with the pool, so a page is never handed out twice;
 - a page table is empty before it is freed, so tearing down a process returns every page (the test checks that the count at power off equals the count at boot);
 - table levels line up, user mappings never go into the kernel's slot of a top-level table, and the address space in CR3 is never freed;
+- every device is driven through the I/O ports it claimed: the UART, the interrupt controllers and the timer each own their ports (claimed once, in `main`), no two of them can own the same port, and an access outside a driver's ports does not compile;
 - the kernel never reads memory through an address: it reads a user buffer by taking each table out of its parent and the page out of the last table, and putting them back.
 
 Introduce an off-by-one, drop an ownership check, or free a table that still maps a page, and the build fails with a counterexample instead of producing a kernel.
@@ -37,6 +38,7 @@ Introduce an off-by-one, drop an ownership check, or free a table that still map
 
 | Path | What |
 | --- | --- |
+| `src/uart.bastio`, `src/pic.bastio`, `src/pit.bastio` | Device drivers: COM1, the 8259 interrupt controllers, the 100 Hz timer |
 | `src/pages.bastio` | Physical page allocator (`Mem`: a bitmap proved to track the pool) |
 | `src/space.bastio` | Building, walking and tearing down user address spaces |
 | `src/proc.bastio` | Kernel state (`Kernel` struct), console input queue, process table, program images, spawn and exit |
@@ -81,9 +83,9 @@ The proof covers everything in `src/` and `user/*.bastio`. Everything below it i
 | Part | Where | Role |
 | --- | --- | --- |
 | Boot and trap entry | `boot/boot.S` | Multiboot entry, identity map, long mode; GDT with user segments; the trap stubs; entering user mode (`bst_cpu_enter`) and idling (`bst_cpu_wait`) |
-| Platform setup | `boot/platform.c` | TSS, interrupt table, 8259 PICs, 100 Hz timer |
+| Platform setup | `boot/platform.c` | TSS, interrupt table |
 | C helpers | `boot/libc.c` | `memset` / `memcpy` / `memmove` / `memcmp`, which the C compiler may call |
-| Runtime preludes | in bastiolang, `stage0/src/codegen.rs` | COM1 port I/O, the arena allocator, page-table entry encoding, CR3 loads, the system call stubs for user programs |
+| Runtime preludes | in bastiolang, `stage0/src/codegen.rs` | one `in` / `out` instruction per port access, COM1 output for the prelude's own panic messages, the arena allocator, page-table entry encoding, CR3 loads, the system call stubs for user programs |
 | User entry | `user/start.S`, `user/user.ld` | Image header; calls `main` and exits with its result |
 | Toolchain | | Z3, the stage0 compiler, the C compiler, QEMU |
 
@@ -94,7 +96,7 @@ Count the lines yourself (`wc -l boot/* user/*.S`). Copied numbers go stale.
 ## Status
 
 v0.2: processes, preemptive round-robin scheduling, system calls and fault isolation. Not there yet:
-- one CPU only; the kernel runs with interrupts off and polls the UART;
+- one CPU only; the kernel runs with interrupts off and handles each interrupt as an event in its main loop;
 - all user pages are mapped writable and executable (the image has no page-aligned sections yet);
 - a user window of 2 MiB per process, at most 15 processes, programs built into the kernel image (no file system);
 - running out of memory when starting a program fails the spawn cleanly, but the kernel's own arena (for `Buf`) still halts the machine when it runs out.

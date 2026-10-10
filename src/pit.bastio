@@ -1,0 +1,21 @@
+// The 8253/8254 programmable interval timer: channel 0 drives IRQ 0.
+
+const PIT: u64 = 0x40;
+const PIT_HZ: u64 = 1193182;
+
+// Ports: channel 0 data at 0, mode/command at 3.
+struct Pit { io: PortIo }
+
+spec fn pit_ok(t: &Pit) -> bool { port_count(t.io) == 4 }
+
+/// Channel 0 as a rate generator at `hz` interrupts a second. The divisor is
+/// 16 bits, so `hz` must be at least 19.
+fn pit_init(t: &mut Pit, hz: u64)
+  requires pit_ok(t) && 19 <= hz
+  ensures pit_ok(t)
+{
+  let div = PIT_HZ / hz;
+  pio_out8(&mut t.io, 3, 0x36);         // channel 0, low then high byte, mode 3
+  pio_out8(&mut t.io, 0, div % 256);
+  pio_out8(&mut t.io, 0, div / 256);
+}

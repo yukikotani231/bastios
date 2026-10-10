@@ -1,7 +1,7 @@
 /*
  * Platform setup that must happen before the Bastio kernel runs: the task
- * state segment (the stack user-mode traps land on), the interrupt table,
- * the 8259 interrupt controllers and the timer. Part of the trusted base.
+ * state segment (the stack user-mode traps land on) and the interrupt
+ * table. Part of the trusted base.
  */
 #include <stdint.h>
 
@@ -25,8 +25,6 @@ static struct __attribute__((packed)) {
     uint16_t off_mid;
     uint32_t off_hi, zero;
 } idt[256];
-
-static inline void outb(uint16_t port, uint8_t v) { __asm__ volatile ("outb %0, %1" : : "a"(v), "Nd"(port)); }
 
 #define SYSCALL_VECTOR 0x80
 
@@ -55,16 +53,6 @@ void bst_platform_init(void) {
     struct __attribute__((packed)) { uint16_t limit; uint64_t base; } idtr = { sizeof idt - 1, (uint64_t)idt };
     __asm__ volatile ("lidt %0" : : "m"(idtr));
 
-    /* PICs: IRQs 0-15 to vectors 32-47; unmask only the timer (IRQ 0) and COM1 (IRQ 4). */
-    outb(0x20, 0x11); outb(0xA0, 0x11);
-    outb(0x21, 32);   outb(0xA1, 40);
-    outb(0x21, 4);    outb(0xA1, 2);
-    outb(0x21, 1);    outb(0xA1, 1);
-    outb(0x21, 0xEE); outb(0xA1, 0xFF);
-
-    /* PIT channel 0: 100 Hz. */
-    uint16_t div = 1193182 / 100;
-    outb(0x43, 0x36);
-    outb(0x40, div & 0xFF);
-    outb(0x40, div >> 8);
+    /* The interrupt controllers, the timer and the UART are set up by the
+     * kernel itself, in Bastio (src/pic.bastio, src/pit.bastio, src/uart.bastio). */
 }

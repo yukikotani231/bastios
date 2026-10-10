@@ -1,0 +1,46 @@
+// The two 8259 interrupt controllers, through their command and data ports.
+// Interrupts stay off while the kernel runs (they end `cpu_run` and
+// `cpu_idle` as events, docs/concurrency.md "Model A"), so the kernel
+// acknowledges each one in its main loop rather than in a handler.
+
+const PIC1: u64 = 0x20;
+const PIC2: u64 = 0xA0;
+
+// Hardware interrupts 0-15 arrive on these vectors.
+const V_IRQ0: u64 = 32;
+const V_IRQ8: u64 = 40;
+const V_IRQ_END: u64 = 48;
+
+struct Pic { master: PortIo, slave: PortIo }
+
+spec fn pic_ok(p: &Pic) -> bool { port_count(p.master) == 2 && port_count(p.slave) == 2 }
+
+/// Moves IRQs 0-15 to vectors 32-47 and unmasks only the timer (IRQ 0) and
+/// COM1 (IRQ 4).
+fn pic_init(p: &mut Pic)
+  requires pic_ok(p)
+  ensures pic_ok(p)
+{
+  pio_out8(&mut p.master, 0, 0x11);    // ICW1: initialise, ICW4 follows
+  pio_out8(&mut p.slave, 0, 0x11);
+  pio_out8(&mut p.master, 1, V_IRQ0);  // ICW2: vector base
+  pio_out8(&mut p.slave, 1, V_IRQ8);
+  pio_out8(&mut p.master, 1, 4);       // ICW3: the slave is on IRQ 2
+  pio_out8(&mut p.slave, 1, 2);        //       and knows it is number 2
+  pio_out8(&mut p.master, 1, 1);       // ICW4: 8086 mode
+  pio_out8(&mut p.slave, 1, 1);
+  pio_out8(&mut p.master, 1, 0xEE);    // masks: all but IRQ 0 and 4
+  pio_out8(&mut p.slave, 1, 0xFF);
+}
+
+/// Acknowledges hardware interrupt vector `v`, so the controller sends the
+/// next one.
+fn pic_eoi(p: &mut Pic, v: u64)
+  requires pic_ok(p) && V_IRQ0 <= v && v < V_IRQ_END
+  ensures pic_ok(p)
+{
+  if v >= V_IRQ8 {
+    pio_out8(&mut p.slave, 0, 0x20);
+  }
+  pio_out8(&mut p.master, 0, 0x20);
+}

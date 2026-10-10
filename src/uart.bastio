@@ -1,0 +1,56 @@
+// COM1, a 16550 UART, driven through the eight I/O ports it owns. This used
+// to be C in the compiler's kernel prelude; now the only trusted part is the
+// single `in` or `out` instruction behind each port access.
+
+const COM1: u64 = 0x3F8;
+
+// Register offsets.
+const UART_DATA: u64 = 0;   // receive / transmit buffer (divisor low with DLAB)
+const UART_IER: u64 = 1;    // interrupt enable (divisor high with DLAB)
+const UART_FCR: u64 = 2;    // FIFO control
+const UART_LCR: u64 = 3;    // line control
+const UART_MCR: u64 = 4;    // modem control
+const UART_LSR: u64 = 5;    // line status
+
+struct Uart { io: PortIo }
+
+spec fn uart_ok(u: &Uart) -> bool { port_count(u.io) == 8 }
+
+/// 115200 baud, 8N1, FIFOs on, and an interrupt when a byte arrives (the
+/// kernel sees it as vector 36 and drains the UART).
+fn uart_init(u: &mut Uart)
+  requires uart_ok(u)
+  ensures uart_ok(u)
+{
+  pio_out8(&mut u.io, UART_IER, 0x00);   // interrupts off while configuring
+  pio_out8(&mut u.io, UART_LCR, 0x80);   // DLAB on: the next two are the divisor
+  pio_out8(&mut u.io, UART_DATA, 0x01);  // 115200 / 1
+  pio_out8(&mut u.io, UART_IER, 0x00);
+  pio_out8(&mut u.io, UART_LCR, 0x03);   // DLAB off, 8 bits, no parity, 1 stop bit
+  pio_out8(&mut u.io, UART_FCR, 0xC7);   // FIFOs on and cleared
+  pio_out8(&mut u.io, UART_MCR, 0x0B);   // DTR, RTS, OUT2 (routes the IRQ line)
+  pio_out8(&mut u.io, UART_IER, 0x01);   // interrupt on received data
+}
+
+/// Sends byte `b`, waiting until the transmitter has room.
+fn uart_write(u: &mut Uart, b: u64)
+  requires uart_ok(u) && b <= 255
+  ensures uart_ok(u)
+{
+  // Line status bit 5: the transmit holding register is empty.
+  while pio_in8(&mut u.io, UART_LSR) / 32 % 2 == 0 {
+  }
+  pio_out8(&mut u.io, UART_DATA, b);
+}
+
+/// The next received byte, or 256 when none is waiting.
+fn uart_poll(u: &mut Uart) -> u64
+  requires uart_ok(u)
+  ensures uart_ok(u) && result <= 256
+{
+  // Line status bit 0: a byte is waiting.
+  if pio_in8(&mut u.io, UART_LSR) % 2 == 1 {
+    return pio_in8(&mut u.io, UART_DATA);
+  }
+  return 256;
+}
