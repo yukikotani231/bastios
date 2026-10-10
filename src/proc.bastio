@@ -57,6 +57,7 @@ const LXWAITING: u64 = 6;            // blocked in a Linux wait4 for any child
 const RUNNING: u64 = 7;              // on a processor: its space and FPU page are out
 const KILLED: u64 = 8;               // RUNNING, and killed: ends when it comes back
 const NETWAIT: u64 = 9;              // waiting for the network (a ping's reply)
+const LXVFORK: u64 = 10;             // lent its address space to child F_WAIT (clone with CLONE_VM | CLONE_VFORK)
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -412,7 +413,7 @@ spec fn kok(k: &Kernel) -> bool {
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 21;
+const NPROGS: u64 = 22;
 
 fn prog_name(i: u64) -> Str {
   if i == 0 {
@@ -478,6 +479,9 @@ fn prog_name(i: u64) -> Str {
   if i == 20 {
     return "mmisc";
   }
+  if i == 21 {
+    return "mspawn";
+  }
   return "(file)";                    // a program loaded from a file
 }
 
@@ -541,6 +545,9 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 20 {
     return include_bytes("../build/user/mmisc.elf");
+  }
+  if i == 21 {
+    return include_bytes("../build/user/mspawn.elf");
   }
   return include_bytes("../build/user/fault.bin");
 }
@@ -737,6 +744,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
   requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
+  vfork_give_back(&mut k, mmu, pid);         // a borrowed address space goes home
   match take_space(&mut k.spaces, pid) {
     Space::Empty => {},
     Space::Mapped(t) => { free_space(&mut k.mem, mmu, t); },
@@ -791,6 +799,8 @@ fn put_state(con: &mut Con, s: u64)
     puts(&mut con, "running");
   } else if s == NETWAIT {
     puts(&mut con, "netwait");
+  } else if s == LXVFORK {
+    puts(&mut con, "vfork  ");
   } else {
     puts(&mut con, "zombie ");
   }
