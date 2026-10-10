@@ -114,7 +114,7 @@ The proof covers everything in `src/` and `user/*.bastio`. Everything below it i
 | Part | Where | Role |
 | --- | --- | --- |
 | Boot and trap entry | `boot/boot.S` | Multiboot entry, identity map, long mode; GDT with user segments; the trap stubs and the `syscall` entry; enabling SSE; entering user mode (which also loads the FS base) (`bst_cpu_enter`) and idling (`bst_cpu_wait`) |
-| Processor startup | `boot/smp.c`, `boot/ap.S` | Finding the processors in the ACPI MADT, mapping the local APIC, INIT and startup IPIs; the real-mode trampoline that takes each application processor to long mode on the kernel's tables, where it checks in and parks. C until Bastio has an `Mmio` capability |
+| Processor startup | `boot/smp.c`, `boot/ap.S` | Finding the processors in the ACPI MADT, mapping the local APIC, INIT and startup IPIs; the real-mode trampoline that takes each application processor to long mode on the kernel's tables, where it checks in and parks until `smp_run` hands it work. C until Bastio has an `Mmio` capability |
 | Platform setup | `boot/platform.c` | TSS, interrupt table, `syscall` MSRs |
 | C helpers | `boot/libc.c` | `memset` / `memcpy` / `memmove` / `memcmp`, which the C compiler may call |
 | Runtime preludes | in bastiolang, `stage0/src/codegen.rs` | one `in` / `out` instruction per port access, COM1 output for the prelude's own panic messages, the arena allocator, page-table entry encoding, CR3 loads, the system call stubs for user programs |
@@ -128,7 +128,7 @@ Count the lines yourself (`wc -l boot/* user/*.S`). Copied numbers go stale.
 ## Status
 
 v0.2: processes, preemptive round-robin scheduling, system calls, fault isolation, and files in memory and on disk. Not there yet:
-- one CPU runs the kernel: the other processors are started at boot (`cpus` in the shell counts them) but park until Bastio has locks and `smp_start` (bastiolang docs/concurrency.md); the kernel runs with interrupts off and handles each interrupt as an event in its main loop;
+- every processor runs the scheduler, but under one lock for the whole kernel state (`Lock[Sys]` in `src/main.bastio`); the kernel runs with interrupts off and handles each interrupt as an event in its scheduler loop;
 - all user pages are mapped writable and executable (the image has no page-aligned sections yet);
 - a user window of 2 MiB per process, at most 15 processes, programs built into the kernel image (the file system cannot hold programs to run yet);
 - files are simple: flat directories of 32 files each (in memory, and under `disk/`), names up to 28 bytes, files up to 1 MiB, 8 open files per process. The disk driver polls one legacy ATA drive with 28-bit sector numbers, and writes go straight to the disk with no cache or journal, so a power cut in the middle of a write can leave that file half written;

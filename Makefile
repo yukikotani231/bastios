@@ -120,13 +120,13 @@ build/kernel.o: build/kernel.c
 build/libc.o: boot/libc.c | build
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-build/boot.o: boot/boot.S | build
+build/boot.o: boot/boot.S boot/core.h | build
 	$(CC) -c -o $@ $<
 
 build/platform.o: boot/platform.c | build
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-build/smp.o: boot/smp.c | build
+build/smp.o: boot/smp.c boot/core.h | build
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 build/ap.o: boot/ap.S | build

@@ -5,12 +5,12 @@
  * AP_TRAMPOLINE and points each AP at it with a startup IPI. The AP starts
  * in 16-bit real mode at that address, switches to protected mode, turns on
  * long mode with the kernel's own page tables (bst_kernel_pml4), loads the
- * kernel's GDT and IDT, takes the stack the BSP left in bst_ap_stack, checks
- * in by incrementing bst_cpus_online, and parks with interrupts off.
+ * kernel's GDT and IDT, takes the stack the BSP left in bst_ap_stack, and
+ * calls bst_ap_main (smp.c), which checks it in and parks it.
  *
  * APs are started one at a time, so bst_ap_stack is never shared. A parked
- * AP runs no Bastio code and touches no kernel state: it waits for later
- * work (a scheduler loop of its own, see bastiolang docs/concurrency.md).
+ * AP touches no kernel state until the kernel hands it work with `smp_run`
+ * (bst_ap_main in smp.c): the scheduler loop, under the kernel's lock.
  */
 
 .set AP_TRAMPOLINE, 0x8000               /* must match smp.c; page-aligned, below 1 MiB */

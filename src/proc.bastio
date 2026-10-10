@@ -43,6 +43,8 @@ const WAITING: u64 = 3;
 const ZOMBIE: u64 = 4;
 const LXREADING: u64 = 5;            // blocked in a Linux read of the console
 const LXWAITING: u64 = 6;            // blocked in a Linux wait4 for any child
+const RUNNING: u64 = 7;              // on a processor: its space and FPU page are out
+const KILLED: u64 = 8;               // RUNNING, and killed: ends when it comes back
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -129,6 +131,19 @@ fn put_space(s: &mut Vec[Space], pid: u64, x: Space)
   }
 }
 
+/// Puts an address space back into slot `pid`. The slot is empty unless
+/// the scheduler has a bug; whatever was there is freed.
+fn restore_space(m: &mut Mem, s: &mut Vec[Space], mmu: &Mmu, pid: u64, x: Space)
+  requires mem_ok(m) && spaces_ok(s) && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  requires x is Space::Mapped ==> pt_level(x.Mapped) == 4
+  ensures mem_ok(m) && spaces_ok(s)
+{
+  match vec_swap(&mut s, pid, x) {
+    Space::Empty => {},
+    Space::Mapped(t) => { free_space(&mut m, mmu, t); },
+  }
+}
+
 // ---------------------------------------------------------------- FPU state
 
 // A process's x87/SSE registers, saved in a page of their own while it is
@@ -156,6 +171,15 @@ fn put_fpu(s: &mut Vec[Fpu], pid: u64, x: Fpu)
     Fpu::None => {},
     Fpu::State(_f) => { unreachable; },     // the slot was empty
   }
+}
+
+/// Puts FPU state back into slot `pid`. The slot is empty unless the
+/// scheduler has a bug; whatever was there goes back to the allocator.
+fn restore_fpu(m: &mut Mem, s: &mut Vec[Fpu], pid: u64, x: Fpu)
+  requires mem_ok(m) && fpus_ok(s) && pid < NPROC
+  ensures mem_ok(m) && fpus_ok(s)
+{
+  drop_fpu(&mut m, vec_swap(&mut s, pid, x));
 }
 
 /// Gives the page of FPU state `x`, if any, back to the allocator.
@@ -669,6 +693,8 @@ fn put_state(con: &mut Uart, s: u64)
     puts(&mut con, "reading");
   } else if s == WAITING || s == LXWAITING {
     puts(&mut con, "waiting");
+  } else if s == RUNNING || s == KILLED {
+    puts(&mut con, "running");
   } else {
     puts(&mut con, "zombie ");
   }

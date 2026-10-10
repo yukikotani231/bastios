@@ -100,8 +100,8 @@ qemu.kill(); qemu.wait()
 print("---- one-processor transcript ----")
 print(out.decode(errors="replace").replace("\r", ""))
 
-# The rest runs on `smp` processors: the application processors are started
-# at boot and park; the shell and its programs run on the bootstrap one.
+# The rest runs on `smp` processors: every processor runs the scheduler, so
+# the shell and its programs run on whichever one picks them.
 qemu = boot(smp, with_disk=True, net=True)
 out = b""
 
@@ -334,6 +334,41 @@ else:
         print("ok   no pages leaked:", mem[2].decode())
     else:
         print("FAIL page leak:", mem); fails += 1
+    # Several processors at once: processes that never make a system call
+    # run on the other processors while the shell stays responsive, and
+    # `ps` (which runs with the kernel's lock held) catches at least two of
+    # them (on four processors, usually all three) on a processor at the
+    # same moment. One is left running for
+    # `halt`, which must wait for its processor to bring it back.
+    if smp >= 4:
+        pids = []
+        for _ in range(3):
+            mark = len(out)
+            qemu.stdin.write(b"spin &\r"); qemu.stdin.flush()
+            read_until(b"bastios> ", mark)
+            m = re.search(rb"\[(\d+)\]", out[mark:])
+            pids.append(m.group(1).decode() if m else "0")
+        time.sleep(0.5)
+        # A process caught between two runs (back under the lock, about to
+        # be picked again) shows as ready, so look a few times.
+        running = 0
+        for _ in range(5):
+            mark = len(out)
+            qemu.stdin.write(b"ps\r"); qemu.stdin.flush()
+            read_until(b"bastios> ", mark)
+            running = max(running, len(re.findall(rb"running +\d+ spin", out[mark:])))
+            if running == 3:
+                break
+        if running >= 2:
+            print(f"ok   {running} processes running on other processors at once")
+        else:
+            print(f"FAIL parallel: {running} spin processes running"); fails += 1
+        for p in pids[:2]:
+            mark = len(out)
+            qemu.stdin.write(f"kill {p}\r".encode()); qemu.stdin.flush()
+            ok = read_until(b"bastios> ", mark) and b"no such" not in out[mark:]
+            print(("ok  " if ok else "FAIL"), f"kill {p} (running on another processor)")
+            fails += not ok
     qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
     read_until(b"pages free at power off")
 booted = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
