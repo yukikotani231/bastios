@@ -134,6 +134,8 @@ t_ipc: AF_UNIX connect/accept
 t_ipc: EOF once writers close
 t_ipc: O_NONBLOCK read of an empty pipe is EAGAIN
 t_ipc: dup2 onto stdout and back
+t_ipc: epoll
+t_ipc: eventfd
 t_ipc: fcntl F_DUPFD
 t_ipc: fcntl F_GETFD sees FD_CLOEXEC
 t_ipc: fcntl F_GETFL sees O_NONBLOCK
@@ -149,6 +151,7 @@ t_ipc: pselect timeout
 t_ipc: select
 t_ipc: socketpair AF_UNIX
 t_ipc: socketpair both ways, EOF after close
+t_ipc: timerfd
 t_mem: 64 MiB of address space
 t_mem: file for mapping
 t_mem: madvise
