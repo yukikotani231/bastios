@@ -22,7 +22,7 @@ build build/user:
 #    link it at USER_BASE behind its header, and flatten it to a raw image
 #    that the kernel embeds with include_bytes.
 UCFLAGS := $(CFLAGS) -fpie
-UPROGS  := sh hello spin
+UPROGS  := sh hello spin true bench
 UBINS   := $(UPROGS:%=build/user/%.bin) build/user/fault.bin
 
 build/user/%.c: user/%.bastio $(BASTIOC) | build/user

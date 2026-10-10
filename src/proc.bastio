@@ -206,7 +206,7 @@ spec fn kok(k: &Kernel) -> bool {
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 4;
+const NPROGS: u64 = 6;
 
 fn prog_name(i: u64) -> Str {
   if i == 0 {
@@ -217,6 +217,12 @@ fn prog_name(i: u64) -> Str {
   }
   if i == 2 {
     return "spin";
+  }
+  if i == 3 {
+    return "true";
+  }
+  if i == 4 {
+    return "bench";
   }
   return "fault";
 }
@@ -230,6 +236,12 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 2 {
     return include_bytes("../build/user/spin.bin");
+  }
+  if i == 3 {
+    return include_bytes("../build/user/true.bin");
+  }
+  if i == 4 {
+    return include_bytes("../build/user/bench.bin");
   }
   return include_bytes("../build/user/fault.bin");
 }
