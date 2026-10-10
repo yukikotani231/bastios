@@ -261,9 +261,9 @@ enum Screen { None, Fb(Fb) }
 /// by height pixels), if it is one this console can draw on and lies in
 /// the device window below FB_TOP; else none. Claims the block.
 fn screen_new(win: &mut MmioSpace, lo: u64, hi: u64, pitch: u64, width: u64, height: u64, rgb: u64) -> Screen
-  requires forall a: u64 :: FB_LO <= a && a < FB_TOP ==> mmio_free(win, a)
+  requires forall a: u64 :: bar_space(a) ==> mmio_free(win, a)
   ensures screen_ok(result)
-  ensures forall a: u64 :: FB_LO <= a && a < FB_TOP && !(lo <= a && a < hi) ==> mmio_free(win, a)
+  ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) ==> mmio_free(win, a)
 {
   if lo < FB_LO || hi > FB_TOP || hi <= lo || lo % 4 != 0 || pitch > FB_MAX_PITCH
     || width < CELL_W || width > FB_MAX_SIDE || height < CELL_H || height > FB_MAX_SIDE || pitch < width * 4 {
