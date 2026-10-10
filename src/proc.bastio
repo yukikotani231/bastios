@@ -255,11 +255,17 @@ spec fn qok(q: &Buf) -> bool {
 }
 
 // The terminal line for Linux programs: word 0 is how many bytes it holds
-// (at most LINE_MAX), word 1 is 1 once it is finished (Enter or Ctrl-D),
-// and the bytes follow from word 2.
-// Like Linux's 4096-byte canonical line; one read moves it whole (XFER).
+// (at most LINE_MAX), word 1 is 1 once it is finished (Enter or Ctrl-D;
+// in noncanonical mode, as soon as it holds a byte), and the bytes follow
+// from word 2. Like Linux's 4096-byte canonical line; one read moves it
+// whole (XFER). After it, the terminal's settings: word TT_SET is 1 once a
+// program has set them (TCSETS), and the TERMIOS_SIZE bytes of its struct
+// termios follow from word TT0, one to a word (src/linux.bastio's tt_byte).
 const LINE_MAX: u64 = 4095;
-const LINE_LEN: u64 = 4097;
+const TT_SET: u64 = 4097;             // LINE_MAX + 2
+const TT0: u64 = 4098;
+const TERMIOS_SIZE: u64 = 36;         // the kernel's struct termios
+const LINE_LEN: u64 = 4134;           // TT0 + TERMIOS_SIZE
 
 spec fn lineok(l: &Buf) -> bool {
   len(l) == LINE_LEN && get(l, 0) <= LINE_MAX && get(l, 1) <= 1

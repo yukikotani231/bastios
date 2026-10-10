@@ -1,10 +1,15 @@
 # Checks that pass on BastiOS (make compat-baseline rewrites this).
 # make compat fails if one of them stops passing.
 apps: ash: a 1200-byte typed line
+apps: httpd: serve a page, fetch it over loopback
 apps: lua: arithmetic and strings
 apps: lua: coroutines and tables
 apps: lua: files
 apps: lua: popen and os.execute
+apps: micropython: classes, generators, exceptions, big integers
+apps: micropython: json, re, files, os
+apps: micropython: threads and a lock
+apps: nc: a raw HTTP request to the host
 apps: qjs: files and exec
 apps: qjs: language
 apps: qjs: promises and timers
@@ -12,6 +17,9 @@ apps: sqlite3: 20000 rows, an index and a query
 apps: sqlite3: WAL
 apps: sqlite3: a database file
 apps: sqlite3: in memory
+apps: wget: 1 MiB from the host
+apps: wget: a file from the host
+apps: wget: a missing file is an error
 bastio: bastioc1: a failed proof builds nothing
 bastio: bastioc1: a type error
 bastio: bastioc1: prove a program
@@ -415,3 +423,8 @@ t_time: nanosleep 100 ms
 t_time: sleep(1)
 t_time: strftime + localtime
 t_time: time
+tty: kilo: edit and save a file
+tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
+tty: micropython: REPL line editing and history
+tty: stty: the terminal is in canonical mode again after an editor
+tty: vi: edit and save a file
