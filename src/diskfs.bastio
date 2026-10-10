@@ -16,6 +16,21 @@
 // Bytes past a file's size are never returned, and a write past the end
 // first fills the gap with zeros, so a file never shows stale disk
 // contents.
+//
+// Power cuts. Every metadata change is one sector write (a file's whole
+// entry lives in one directory sector), and data goes to the disk before
+// the size that covers it: a write that extends a file writes its sectors
+// first and the new size last, truncation writes only the size, and
+// creating or removing a file writes only its entry. The drivers return
+// only once the drive has the sector (ATA: FLUSH CACHE after each write;
+// virtio: the legacy device is write-through unless the cache feature is
+// negotiated, and it is not). So after a cut anywhere, the file system
+// mounts as it was after some prefix of the sector writes: every file has
+// its old or its new size, never bytes it was not given. What is not
+// atomic: overwriting bytes inside a file's current size (a cut can leave
+// some sectors new and some old), and a format cut short (the next mount
+// formats again). test/shell_test.sh cuts power during user/crashme.bastio
+// six times and checks this; writing the size before the data fails it.
 
 import "blk.bastio";
 

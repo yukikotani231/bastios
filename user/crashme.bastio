@@ -1,0 +1,251 @@
+// A workload for the power-cut test (test/shell_test.sh). It first checks
+// what an earlier run, possibly cut off at any point, left on the disk:
+//
+//   disk/log   records of REC bytes, record i being "r", i in 14 decimal
+//              digits, "\n": the size is a whole number of records and
+//              every record is the right one, in order;
+//   disk/snap  empty, or SNAP bytes all equal to one digit;
+//   disk/t     absent, or empty.
+//
+// It prints "crashme: clean, N records" (or what was wrong, and exits
+// with 1), then appends PER_RUN more records. Every 16 records it rewrites
+// disk/snap (truncate, then SNAP bytes over several sectors) and creates
+// and removes disk/t. It prints "crashme: N" every 64 records and
+// "crashme: done N" at the end.
+
+import "lib/file.bastio";
+
+const REC: u64 = 16;
+const SNAP: u64 = 2000;
+const PER_RUN: u64 = 1024;
+const MAX_RECS: u64 = 65536;           // SLOT_BYTES / REC
+
+fn puts(con: &Serial, s: Str) {
+  let mut i = 0;
+  while i < slen(s)
+    invariant i <= slen(s)
+  {
+    serial_write(con, sget(s, i));
+    i = i + 1;
+  }
+}
+
+fn put_num(con: &Serial, n: u64) {
+  let mut p = 1;
+  while p <= n / 10
+    invariant p >= 1
+  {
+    p = p * 10;
+  }
+  let mut q = p;
+  while q > 0 {
+    serial_write(con, 48 + (n / q) % 10);
+    q = q / 10;
+  }
+}
+
+/// Byte j (0 to REC - 1) of record i.
+fn rec_byte(i: u64, j: u64) -> u64
+  requires j < REC
+  ensures result <= 255
+{
+  if j == 0 {
+    return 114;                         // 'r'
+  }
+  if j == REC - 1 {
+    return 10;
+  }
+  let mut p = 1;
+  let mut k = j;
+  while k < REC - 2
+    invariant k <= REC - 2 && p >= 1 && p <= 10000000000000
+  {
+    if p <= 1000000000000 {
+      p = p * 10;
+    }
+    k = k + 1;
+  }
+  return 48 + i / p % 10;
+}
+
+/// Checks disk/log. Returns its record count, or NOT_OK.
+fn check_log(log: &Bytes, buf: &mut Bytes) -> u64
+  requires blen(log) >= 8 && blen(buf) == 4096
+  ensures blen(buf) == 4096
+{
+  let size = f_stat(log, 7);
+  if size == NOT_OK {
+    return 0;
+  }
+  if size % REC != 0 || size > MAX_RECS * REC {
+    return NOT_OK;
+  }
+  let fd = f_open(log, 7, O_READ);
+  if fd == NOT_OK {
+    return NOT_OK;
+  }
+  let mut at = 0;
+  let mut ok = true;
+  while ok && at < size
+    invariant blen(buf) == 4096 && at <= size && size <= MAX_RECS * REC
+  {
+    let r = f_read(fd, &mut buf);
+    if r == 0 || r > 4096 || r > size - at {
+      ok = false;
+    } else {
+      let mut j = 0;
+      while ok && j < r
+        invariant j <= r && r <= 4096 && blen(buf) == 4096
+      {
+        if bget(buf, j) != rec_byte((at + j) / REC, (at + j) % REC) {
+          ok = false;
+        }
+        j = j + 1;
+      }
+      at = at + r;
+    }
+  }
+  f_close(fd);
+  if !ok {
+    return NOT_OK;
+  }
+  return size / REC;
+}
+
+/// Is disk/snap absent, empty, or SNAP copies of one digit?
+fn check_snap(snap: &Bytes, buf: &mut Bytes) -> bool
+  requires blen(snap) >= 9 && blen(buf) == 4096
+  ensures blen(buf) == 4096
+{
+  let size = f_stat(snap, 9);
+  if size == NOT_OK || size == 0 {
+    return true;
+  }
+  if size != SNAP {
+    return false;
+  }
+  let fd = f_open(snap, 9, O_READ);
+  if fd == NOT_OK {
+    return false;
+  }
+  let r = f_read(fd, &mut buf);
+  f_close(fd);
+  if r != SNAP {
+    return false;
+  }
+  let d = bget(buf, 0);
+  if d < 48 || d > 57 {
+    return false;
+  }
+  let mut j = 0;
+  while j < SNAP
+    invariant j <= SNAP && blen(buf) == 4096
+  {
+    if bget(buf, j) != d {
+      return false;
+    }
+    j = j + 1;
+  }
+  return true;
+}
+
+/// Truncates disk/snap and writes SNAP copies of digit d.
+fn write_snap(snap: &Bytes, buf: &mut Bytes, d: u64) -> bool
+  requires blen(snap) >= 9 && blen(buf) == 4096 && d <= 255
+  ensures blen(buf) == 4096
+{
+  let fd = f_open(snap, 9, O_WRITE + O_CREATE + O_TRUNC);
+  if fd == NOT_OK {
+    return false;
+  }
+  let mut j = 0;
+  while j < SNAP
+    invariant j <= SNAP && blen(buf) == 4096
+  {
+    bset(&mut buf, j, d);
+    j = j + 1;
+  }
+  let w = f_write(fd, buf, SNAP);
+  f_close(fd);
+  return w == SNAP;
+}
+
+fn bad(con: &Serial, what: Str) -> u64 {
+  puts(con, "crashme: bad ");
+  puts(con, what);
+  puts(con, "\r\n");
+  return 1;
+}
+
+fn main(con: &mut Serial) -> u64 {
+  let mut buf = balloc(4096);
+  let mut rec = balloc(REC);
+  let log = bfrom("disk/log");
+  let snap = bfrom("disk/snap");
+  let t = bfrom("disk/t");
+  let mut code = 0;
+  let n = check_log(log, &mut buf);
+  let tsize = f_stat(t, 6);
+  if n == NOT_OK {
+    code = bad(con, "log");
+  } else if !check_snap(snap, &mut buf) {
+    code = bad(con, "snap");
+  } else if tsize != NOT_OK && tsize != 0 {
+    code = bad(con, "t");
+  } else {
+    puts(con, "crashme: clean, ");
+    put_num(con, n);
+    puts(con, " records\r\n");
+  }
+  // A cut-off run may have left disk/t behind.
+  f_unlink(t, 6);
+  let mut base = 0;
+  if n != NOT_OK && n <= MAX_RECS {
+    base = n;
+  }
+  let fd = f_open(log, 7, O_WRITE + O_CREATE + O_APPEND);
+  if code == 0 && fd == NOT_OK {
+    code = bad(con, "open");
+  }
+  let mut k = 0;
+  while code == 0 && k < PER_RUN && base + k < MAX_RECS
+    invariant k <= PER_RUN && blen(buf) == 4096 && blen(rec) == REC && base <= MAX_RECS
+  {
+    let i = base + k;
+    let mut j = 0;
+    while j < REC
+      invariant j <= REC && blen(rec) == REC
+    {
+      bset(&mut rec, j, rec_byte(i, j));
+      j = j + 1;
+    }
+    if f_write(fd, rec, REC) != REC {
+      code = bad(con, "append");
+    } else if i % 16 == 15 {
+      if !write_snap(snap, &mut buf, 48 + i / 16 % 10) {
+        code = bad(con, "snap write");
+      }
+      let tf = f_open(t, 6, O_WRITE + O_CREATE);
+      f_close(tf);
+      f_unlink(t, 6);
+    }
+    if i % 64 == 63 {
+      puts(con, "crashme: ");
+      put_num(con, i + 1);
+      puts(con, "\r\n");
+    }
+    k = k + 1;
+  }
+  f_close(fd);
+  if code == 0 {
+    puts(con, "crashme: done ");
+    put_num(con, base + k);
+    puts(con, "\r\n");
+  }
+  bfree(buf);
+  bfree(rec);
+  bfree(log);
+  bfree(snap);
+  bfree(t);
+  return code;
+}

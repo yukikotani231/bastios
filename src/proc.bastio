@@ -359,7 +359,7 @@ spec fn kok(k: &Kernel) -> bool {
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 15;
+const NPROGS: u64 = 16;
 
 fn prog_name(i: u64) -> Str {
   if i == 0 {
@@ -407,6 +407,9 @@ fn prog_name(i: u64) -> Str {
   if i == 14 {
     return "fault";
   }
+  if i == 15 {
+    return "crashme";
+  }
   return "(file)";                    // a program loaded from a file
 }
 
@@ -452,6 +455,9 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 13 {
     return include_bytes("../build/user/ash.elf");
+  }
+  if i == 15 {
+    return include_bytes("../build/user/crashme.bin");
   }
   return include_bytes("../build/user/fault.bin");
 }
