@@ -19,7 +19,7 @@ const INFO_SMP: u64 = 6;         // 0 processors the MADT lists, 1 x2APIC ones, 
                                  // 3 the local APIC's mode, 4 the mode the firmware left it in (APIC_*)
 const APIC_XAPIC: u64 = 1;       // INFO_SMP 3 and 4: 0 off, 1 xAPIC, 2 x2APIC, 3 x2APIC locked by the firmware
 const APIC_X2APIC: u64 = 2;
-const INFO_TIMER: u64 = 7;       // 0 what the local APIC timer was counted against, 1 its count for 10 ms
+const INFO_TIMER: u64 = 7;       // 0 what the local APIC timer was counted against, 1 its count for 10 ms, 2 it ticks for the PIT
 const INFO_FB: u64 = 9;          // the boot loader's framebuffer, at any address: i as boot_fb's field
 const INFO_ACPI: u64 = 8;        // 0 where the RSDP came from, 1 its revision, 2 + 2k / 3 + 2k table k's signature / address
 const MEM_REGIONS: u64 = 128;    // boot/multiboot.c keeps at most this many
@@ -465,7 +465,13 @@ fn hw_smp(con: &mut Con, cpu: &Cpu, hpet: bool, pm: bool)
   }
   puts(&mut con, ": ");
   put_num(&mut con, boot_info(cpu, INFO_TIMER, 1) % 4294967296);
-  puts(&mut con, " ticks in 10 ms\r\nclock: ");
+  puts(&mut con, " ticks in 10 ms\r\ntick: ");
+  if boot_info(cpu, INFO_TIMER, 2) == 1 {
+    puts(&mut con, "the local APIC timer (the PIT does not count)");
+  } else {
+    puts(&mut con, "the PIT");
+  }
+  puts(&mut con, "\r\nclock: ");
   if hpet {
     puts(&mut con, "the HPET\r\n");
   } else if pm {

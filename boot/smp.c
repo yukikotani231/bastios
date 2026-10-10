@@ -42,6 +42,8 @@ static struct __attribute__((packed)) { uint16_t limit; uint64_t base; } ap_idtr
 static volatile uint32_t *lapic;    /* its registers in xAPIC mode */
 static int x2apic;                  /* every local APIC runs in x2APIC mode: registers are MSRs */
 static uint32_t lapic_ticks_10ms;   /* local APIC timer count for 10 ms, divide by 16 */
+static uint32_t bsp_lapic_tick;     /* no PIT: the BSP's 10 ms tick comes from its local APIC timer */
+#define BSP_TICK_VECTOR 32          /* the vector the kernel takes the PIT's tick on (V_TIMER) */
 static uint32_t timer_from;         /* what it was counted against: 1 HPET, 2 PM timer, 3 PIT, 4 none (a guess) */
 static uint32_t madt_cpus, madt_x2; /* enabled processor entries in the MADT: local APIC, x2APIC */
 static uint32_t madt_high;          /* of those, ones with an id of 255 or more (x2APIC mode only) */
@@ -286,7 +288,7 @@ static int map_lapic(uint64_t base) {
 /* Called from trap_common for every vector: local APIC interrupts must be
  * acknowledged at the local APIC (the 8259's are acknowledged by the kernel). */
 void bst_lapic_ack(uint64_t vector) {
-    if (vector == LAPIC_TIMER_VECTOR && (lapic || x2apic)) lw(0xB0, 0);
+    if ((vector == LAPIC_TIMER_VECTOR || (vector == BSP_TICK_VECTOR && bsp_lapic_tick)) && (lapic || x2apic)) lw(0xB0, 0);
 }
 
 /* Processor i's task state segment: user-mode traps land on the trap stack
@@ -396,6 +398,24 @@ static uint32_t lapic_vs_pmtimer(void) {
     uint32_t n = 0xFFFFFFFF - lr(0x390);
     lw(0x380, 0);
     return d >= 35795 ? n : 0;
+}
+
+/* Does PIT channel 0 count? Its count is read twice, about a millisecond
+ * apart. Missing, it reads 0xFFFF both times; gated, it does not move. The
+ * kernel programs channel 0 itself afterwards. */
+static int pit_counts(void) {
+    outb(0x43, 0x34);                               /* channel 0, low then high byte, mode 2 */
+    outb(0x40, 0xFF);
+    outb(0x40, 0xFF);
+    udelay(10);
+    outb(0x43, 0x00);                               /* latch */
+    uint32_t a = inb(0x40);
+    a |= (uint32_t)inb(0x40) << 8;
+    udelay(1000);
+    outb(0x43, 0x00);
+    uint32_t b = inb(0x40);
+    b |= (uint32_t)inb(0x40) << 8;
+    return a != b;
 }
 
 /* Count the local APIC timer against 10 ms of the HPET, else of the ACPI PM
@@ -508,6 +528,17 @@ void bst_smp_init(void) {
     __asm__ volatile ("sidt %0" : "=m"(ap_idtr));
     for (int m = 0; m < 3; m++) syscall_msrs[m] = rdmsr(0xC0000081 + m + (m == 2));
     calibrate_lapic_timer();
+    /* The kernel ticks on the PIT (IRQ 0, vector 32) on this processor.
+     * Many recent chipsets gate the PIT's clock off by default (Intel's
+     * "8254 clock gating"), and then no tick ever comes and the kernel
+     * stands still. Without a counting PIT the local APIC timer raises
+     * vector 32 every 10 ms instead (acknowledged in bst_lapic_ack). */
+    if (!pit_counts()) {
+        bsp_lapic_tick = 1;
+        lw(0x3E0, 0x3);                                 /* divide by 16 */
+        lw(0x320, 0x20000 | BSP_TICK_VECTOR);           /* periodic */
+        lw(0x380, lapic_ticks_10ms);
+    }
 
     uint32_t self = x2apic ? lr(0x20) : lr(0x20) >> 24;
     uint32_t seen[MAX_CPUS];
@@ -562,7 +593,7 @@ uint64_t bst_platform_info(uint64_t what, uint64_t i) {
         return i == 0 ? madt_cpus : i == 1 ? madt_x2 : i == 2 ? smp_stop
              : i == 3 ? apic_now : i == 4 ? apic_fw : 0;
     case 7:                                                /* the local APIC timer's calibration */
-        return i == 0 ? timer_from : i == 1 ? lapic_ticks_10ms : 0;
+        return i == 0 ? timer_from : i == 1 ? lapic_ticks_10ms : i == 2 ? bsp_lapic_tick : 0;
     case 8: {                                              /* ACPI: where the RSDP came from, its revision, the tables */
         uint64_t rsdp = find_rsdp();
         if (i == 0) return rsdp_from;

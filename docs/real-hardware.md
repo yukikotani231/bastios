@@ -79,7 +79,7 @@ The report holds the processor's model, the memory map, the ACPI tables and PCI 
 | 1 | `processors:` | How many processors the ACPI MADT lists and how many started, and if not all, why (no MADT, a processor that did not answer) |
 | 1 | `local APIC:` | xAPIC or x2APIC mode, and the mode the firmware left it in |
 | 1 | `screen:` | Where the boot loader's framebuffer is, its size, and whether the console draws on it |
-| 1 | `timer:`, `clock:` | What the local APIC timer was calibrated against (HPET, ACPI PM timer, PIT) and what keeps time |
+| 1 | `timer:`, `tick:`, `clock:` | What the local APIC timer was calibrated against (HPET, ACPI PM timer, PIT), what gives the 10 ms tick (the PIT, or the local APIC timer when the PIT does not count) and what keeps time |
 | 2 | `memory:` | The firmware's memory map, region by region |
 | 3 | `acpi:` | Where the ACPI tables were found, each table and its address, the power-management registers, the S5 sleep type (needed for power off) and the reset register |
 | 3 | `pci` | Every PCI device: bus:slot.function, vendor:device, class, and what BastiOS does with it ("no driver" is common and fine) |

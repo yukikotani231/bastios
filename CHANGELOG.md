@@ -41,6 +41,13 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   code, src/lapic.bastio, reaches the registers only as memory). Tested
   with QEMU 9.2 (`QEMU_X2APIC=... make test`; QEMU 8 cannot emulate
   x2APIC without KVM).
+- A PIT that does not count. Many recent chipsets gate the 8254's clock
+  off by default, and the bootstrap processor took its 10 ms tick only from
+  the PIT: no tick ever came, `uptime` stayed at 0 and nothing that waits
+  on time ran. The kernel now checks at boot whether PIT channel 0 counts
+  and, if not, has the local APIC timer raise the same interrupt every
+  10 ms (`boot/smp.c`). The hardware report's `tick:` line says which.
+  Tested with QEMU's `-machine q35,pit=off`.
 
 ### Linux programs
 

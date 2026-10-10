@@ -1452,7 +1452,7 @@ for machine, name in (("pc,hpet=off", "i440fx, no HPET"), ("q35,hpet=off", "q35,
 # 2 GiB, whose firmware puts the ACPI tables just below 2 GiB: the kernel
 # must still find them (the processors, power off). Each pause in the report
 # waits for a key, which the serial line gives.
-def report_boot(args, name, keys, qemu_bin="qemu-system-x86_64"):
+def report_boot(args, name, keys, qemu_bin="qemu-system-x86_64", between=None):
     global qemu, out, deadline
     qemu = subprocess.Popen(
         [qemu_bin, "-kernel", kernel, "-display", "none", "-nic", "none",
@@ -1466,6 +1466,8 @@ def report_boot(args, name, keys, qemu_bin="qemu-system-x86_64"):
             break
         qemu.stdin.write(b" "); qemu.stdin.flush()
     ok = read_until(b"bastios> ")
+    if ok and between:
+        between()
     mark = len(out)
     qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
     read_until(b"pages free at power off", mark)
@@ -1485,6 +1487,7 @@ for want, what in (
         ("acpi: soft power off, power button", "the FADT below 2 GiB gives power off"),
         ("acpi: tables FACP@0x7f", "the tables are listed where they are"),
         ("timer: the local APIC timer, counted against the HPET", "the timer's calibration"),
+        ("tick: the PIT\n", "the PIT ticks"),
         ("MiB usable in a map of", "the memory map"),
         ("pci 00:1f.2 8086:2922 class 010601 AHCI disk", "the PCI devices, with their drivers"),
         ("acpi: reset register: port 0xcf9", "the reset register"),
@@ -1500,6 +1503,24 @@ fails += not good
 ok, code = report_boot(["-machine", "pc", "-m", "64M"], "no report", 0)
 good = ok and b"hardware report" not in out
 print(("ok  " if good else "FAIL"), "(hardware report) only with diag")
+fails += not good
+
+# A PIT whose clock is gated off (many recent chipsets: Intel's "8254
+# clock gating"; QEMU's pit=off has none at all). The bootstrap processor
+# ticks on the local APIC timer instead (boot/smp.c): before, no tick ever
+# came and uptime stayed at 0.
+ok, code = report_boot(["-machine", "q35,pit=off", "-m", "64M", "-append", "diag"], "no PIT", 3,
+                       between=lambda: (uptime(), time.sleep(2), uptime()))
+text = out.decode(errors="replace").replace("\r", "")
+good = ok and "tick: the local APIC timer (the PIT does not count)" in text
+print(("ok  " if good else "FAIL"), "(no PIT) the report says the local APIC timer ticks")
+fails += not good
+ticks = [int(t) for t in re.findall(r"(\d+) ticks, \d+ s", text)]
+good = len(ticks) == 2 and 120 <= ticks[1] - ticks[0] <= 400
+print(("ok  " if good else "FAIL"), f"(no PIT) the timer ticks: {ticks}")
+fails += not good
+good = code == 0
+print(("ok  " if good else "FAIL"), f"(no PIT) halt powers off (status {code})")
 fails += not good
 
 # x2APIC (boot/smp.c). SeaBIOS leaves the local APICs in x2APIC mode when
