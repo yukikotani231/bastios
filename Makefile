@@ -272,6 +272,7 @@ run-uefi: build/bastios.iso $(DISK)
 test: build/bastios.elf
 	test/trusted_base.sh
 	test/fsck_test.py
+	test/crashsim.py --runs 1 --boots 8 --every 8
 	test/shell_test.sh
 	BASTIOC=$(BASTIOC) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/guide_test.py
 	test/tcp_test.sh
@@ -457,6 +458,11 @@ compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img bu
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
 	test/compat/run.py --host build/compat --out build/compat/host $(COMPAT_PROGS)
 
+# Power cuts on a disk with a write cache, at every point of two crashme
+# runs (see test/crashsim.py; `make test` runs a short pass).
+crashsim: build/bastios.elf
+	test/crashsim.py
+
 # Not part of `make test`: prints timings, checks nothing (see the script).
 smpbench: build/bastios.elf
 	test/smpbench.sh
@@ -480,4 +486,4 @@ clean:
 	rm -rf build
 
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
-.PHONY: all run disk usb run-usb test fuzz smpbench threadbench diskbench iobench netbench compat compat-baseline compat-host clean
+.PHONY: all run disk usb run-usb test crashsim fuzz smpbench threadbench diskbench iobench netbench compat compat-baseline compat-host clean
