@@ -112,6 +112,11 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Changed
 
+- Named pipes live in the file system: `mknod`/`mkfifo` make a file with
+  the FIFO type bits, so a FIFO is listed (type `p`), renamed, linked and
+  removed like any file, and on the disk it survives a reboot. Only four
+  can be open at once; any number can exist. BusyBox's `mkfifo` is built
+  in.
 - The disk format is now `BSTDISK2`: 4 KiB blocks, 64 directory entries
   that each hold one path component and point at their parent, two levels
   of block maps per file, and copy-on-write for every write. A disk in the

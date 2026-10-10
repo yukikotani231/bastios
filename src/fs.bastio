@@ -1088,6 +1088,53 @@ fn vfs_set_meta(v: &mut Vfs, f0: u64, mode: u64, mtime: u64) -> bool
 const T_LINK: u64 = 0xA000;           // mode type bits of a symbolic link
 const LINK_MODE: u64 = 0xA1FF;        // a link: rwxrwxrwx, as Linux shows them
 
+const T_FIFO: u64 = 0x1000;           // mode type bits of a named pipe
+
+/// Is handle f a named pipe? The Linux layer opens it as a pipe
+/// (src/lxevent.bastio); its data never lives in the file.
+fn vfs_is_fifo(v: &mut Vfs, f: u64) -> bool
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  let m = vfs_meta(&mut v, f);
+  return m.ok && m.mode % 65536 / 4096 * 4096 == T_FIFO;
+}
+
+/// Creates a named pipe called xfer[0..n] with permission bits `perm`: an
+/// empty file whose mode has the FIFO type bits. False if the name is
+/// taken, its parent does not exist, or there is no room. Two steps on the
+/// disk (the file, then its mode): a power cut between them leaves an empty
+/// file under the name.
+fn vfs_mkfifo(v: &mut Vfs, mem: &mut Mem, n: u64, perm: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem)
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  if n > FNAME_MAX || !path_ok(v, n) || !parent_ok(&mut v, n) || vfs_lookup(&mut v, n) != NO_FILE || vfs_dir_lookup(&mut v, n) != NO_FILE {
+    return false;
+  }
+  let mode = T_FIFO + perm % 4096;
+  if on_disk(v, n) {
+    let d = disk_create(&mut v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX, false, v.now);
+    if d >= DSLOTS {
+      return false;
+    }
+    if !disk_set_meta(&mut v.disk, d, mode, NO_DISK_FILE) {
+      disk_remove(&mut v.disk, d);
+      return false;
+    }
+    return true;
+  }
+  let i = ram_create(&mut v.ram, v.xfer, n, false, v.now);
+  if i >= NFILES {
+    return false;
+  }
+  if !ram_set_meta(&mut v.ram, i, mode, NO_FILE) {
+    ram_remove(&mut v.ram, &mut mem, i);
+    return false;
+  }
+  return true;
+}
+
 /// Is handle f a symbolic link? Its contents are the target.
 fn vfs_is_link(v: &mut Vfs, f: u64) -> bool
   requires vfs_ok(v)

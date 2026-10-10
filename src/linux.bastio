@@ -107,7 +107,6 @@ const S_IFREG: u64 = 0x81A4;                // a regular file, rw-r--r--
 const S_IFMT_DIR: u64 = 0x4000;             // the type bits of a directory
 const S_IFMT_REG: u64 = 0x8000;             // and of a regular file
 const INO_FILES: u64 = 1000;                // inode numbers of files: this + the handle
-const INO_FIFO: u64 = 900;                 // inode numbers of named pipes: this + the slot
 
 // ---------------------------------------------------------------- user memory
 
