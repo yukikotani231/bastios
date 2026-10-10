@@ -1,6 +1,6 @@
 # BastiOS
 
-A small x86-64 kernel written in [Bastio](https://github.com/yukikotani231/bastiolang), a language whose memory safety is proved at compile time. It runs its own programs and unmodified Linux ones (BusyBox, Lua, sqlite, a C compiler), on several processors, with files on an NVMe, virtio, SATA or ATA disk and a TCP/IP stack on a virtio or e1000 network card. It boots under QEMU, or from a GRUB image on a USB stick under BIOS or UEFI.
+A small x86-64 kernel written in [Bastio](https://github.com/yukikotani231/bastiolang), a language whose memory safety is proved at compile time. It runs its own programs and unmodified Linux ones (BusyBox, Lua, sqlite, a C compiler), on several processors, with files on an NVMe, virtio, SATA or ATA disk and a TCP/IP stack on a virtio or e1000 network card. It boots under QEMU, or from a Limine image on a USB stick under BIOS or UEFI.
 
 <!-- guide-test: session -->
 ```text
@@ -50,7 +50,7 @@ The first build proves every source file and fetches BusyBox, so it takes a whil
 - **Programs.** BastiOS's own programs use its system call ABI (`int 0x80`). Linux x86-64 ELF executables use the Linux ABI (`syscall`): static or dynamic, against musl, or static against glibc. Much of the Linux system call interface is implemented: files, pipes, signals, threads and futexes, `poll` and `epoll`, timers, and sockets; [docs/linux.md](docs/linux.md) lists them. `make compat` runs a compatibility suite (`test/compat`).
 - **Files.** An in-memory file system, and one on the disk under `disk/` that keeps every write whole across a power cut (copy-on-write). The disk is an NVMe drive, a virtio disk, a SATA disk on an AHCI controller or a legacy ATA disk; commands are queued behind a block cache and finish by interrupt (MSI-X or MSI), so a process waiting for the disk sleeps.
 - **Network.** A virtio or Intel e1000 card; DHCP, ARP, IPv4, ICMP, UDP and TCP (retransmission, out-of-order data, zero windows), loopback, and Unix sockets.
-- **Console.** The first serial port, and with GRUB the screen (the framebuffer it sets up) with a PS/2 or USB keyboard.
+- **Console.** The first serial port, and with the ISO the screen (the framebuffer it sets up) with a PS/2 or USB keyboard.
 
 How the pieces fit together, and what is proved where, is in [docs/architecture.md](docs/architecture.md).
 
@@ -67,7 +67,7 @@ Requirements:
 | Python 3 | 3.12, 3.13 | Only for the test driver |
 | musl-gcc | musl 1.2.4 | Builds the musl test programs and BusyBox (`musl-tools` on Ubuntu) |
 | git and network access | | The first build clones BusyBox 1.36.1 from github.com/mirror/busybox into `build/busybox` (set `BUSYBOX_GIT` for another mirror) |
-| GRUB, xorriso, mtools, OVMF | GRUB 2.12, xorriso 1.5.6, OVMF 2024.02 | Only for `make iso` and `test/iso_test.sh` (which skips without them; UEFI is skipped without OVMF) |
+| xorriso, OVMF | xorriso 1.5.6, OVMF 2024.02 | Only for `make iso` and `test/iso_test.sh` (which skips without xorriso; UEFI is skipped without OVMF). `make iso` fetches Limine v11.4.1 (`LIMINE_TAG`) |
 
 Tested on x86-64 Linux (Ubuntu 24.04), which is what CI runs; other platforms are untested.
 
@@ -75,7 +75,7 @@ Tested on x86-64 Linux (Ubuntu 24.04), which is what CI runs; other platforms ar
 make            # build/bastios.elf
 make run        # boot on this terminal with build/disk.img as the disk; Ctrl-A X quits
 make disk FILES="..."   # put files from this machine on that disk
-make iso        # build/bastios.iso: GRUB + the kernel, bootable under BIOS or UEFI
+make iso        # build/bastios.iso: Limine + the kernel, bootable under BIOS or UEFI
 make test       # boot in QEMU, type commands over the serial line, check the replies
 make fuzz       # fuzz the system calls with hostile arguments (SEED, SEEDS, CALLS, SMP, PAR)
 make compat     # the Linux compatibility suite; writes build/compat/report.md
@@ -91,7 +91,7 @@ The proof covers everything in `src/` and `user/*.bastio`. Everything below it i
 
 | Part | Where | Role |
 | --- | --- | --- |
-| Boot loader | GRUB, configured by `boot/grub.cfg` (only for the ISO) | Loads the kernel as a Multiboot 2 image and passes the memory map, a copy of the ACPI RSDP and the framebuffer it set up (address, pitch, size, pixel layout: the screen console trusts these); `make run` and the tests use QEMU's own Multiboot loader instead |
+| Boot loader | [Limine](https://github.com/limine-bootloader/limine) (BSD-2-Clause, fetched at a pinned tag), configured by `boot/limine.conf` (only for the ISO) | Loads the kernel as a Multiboot 2 image and passes the memory map, a copy of the ACPI RSDP and the framebuffer it set up (address, pitch, size, pixel layout: the screen console trusts these); `make run` and the tests use QEMU's own Multiboot loader instead |
 | Boot and trap entry | `boot/boot.S` | Multiboot 1 and 2 headers and entry (`boot/multiboot.c` turns Multiboot 2 information into the Multiboot 1 form), identity map (the first 1 GiB, and the device window from 2 GiB to 2^46 uncached, with 1 GiB pages above 4 GiB), the Multiboot header's video request, long mode; GDT with user segments; the trap stubs and the `syscall` entry; enabling SSE; entering user mode (which also loads the FS base) (`bst_cpu_enter`) and idling (`bst_cpu_wait`) |
 | Processor startup | `boot/smp.c`, `boot/ap.S` | Finding the processors in the ACPI MADT, mapping the local APIC, INIT and startup IPIs; the real-mode trampoline that takes each application processor to long mode on the kernel's tables, where it checks in and parks until `smp_run` hands it work; each processor's TSS. C because the firmware tables lie outside the device window `Mmio` covers |
 | Platform setup | `boot/platform.c` | Interrupt table, `syscall` MSRs |

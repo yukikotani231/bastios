@@ -277,6 +277,13 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   4 GiB, where UEFI firmware puts them. Needs bastiolang with the wider
   window. QEMU targets pass `-cpu qemu64,+pdpe1gb`, since QEMU's default
   CPU model has no 1 GiB pages (on such a CPU the window stops at 4 GiB).
+- The ISO boots through Limine (BSD-2-Clause) instead of GRUB
+  (GPL-3.0), so the image ships no GPL-3.0 code. `make iso` fetches
+  Limine's binary release at a pinned tag and needs only `xorriso`. The
+  kernel is now linked at 16 MiB (it was 1 MiB): Limine loads a Multiboot
+  kernel only into RAM the firmware marks free, and under OVMF the range the
+  kernel used to take (1 to 14 MiB) is not all free. The 15 MiB below the
+  kernel go unused.
 
 ### Fixed
 

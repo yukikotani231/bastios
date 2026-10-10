@@ -177,16 +177,31 @@ build/bastios64.elf: $(KOBJS) boot/linker.ld
 build/bastios.elf: build/bastios64.elf
 	objcopy -O elf32-i386 $< $@
 
-# A bootable image: GRUB (BIOS and UEFI, as a hybrid ISO that can also be
-# written to a USB stick) loading the same Multiboot kernel. Needs
-# grub-mkrescue, xorriso, mtools, and GRUB's i386-pc and x86_64-efi files
-# (grub-pc-bin and grub-efi-amd64-bin on Ubuntu).
-build/bastios.iso: build/bastios.elf boot/grub.cfg
+# A bootable image: Limine (BSD-2-Clause; BIOS and UEFI, as a hybrid ISO
+# that can also be written to a USB stick) loading the same Multiboot
+# kernel. Limine is not part of this repository: its binary release is
+# fetched at a pinned tag, and its small installer (limine.c, which writes
+# the BIOS boot code into the image) is built here. Needs xorriso.
+LIMINE_GIT ?= https://github.com/limine-bootloader/limine.git
+LIMINE_TAG ?= v11.4.1-binary
+
+build/limine/limine: | build
+	rm -rf build/limine
+	git -c advice.detachedHead=false clone -q --depth 1 --branch $(LIMINE_TAG) $(LIMINE_GIT) build/limine
+	$(MAKE) -C build/limine -s CC=$(CC)
+
+build/bastios.iso: build/bastios.elf boot/limine.conf build/limine/limine
 	rm -rf build/iso
-	mkdir -p build/iso/boot/grub
+	mkdir -p build/iso/boot/limine build/iso/EFI/BOOT
 	cp build/bastios.elf build/iso/boot/
-	cp boot/grub.cfg build/iso/boot/grub/
-	grub-mkrescue -o $@ build/iso 2>/dev/null
+	cp boot/limine.conf build/limine/limine-bios.sys build/limine/limine-bios-cd.bin \
+	  build/limine/limine-uefi-cd.bin build/limine/LICENSE build/iso/boot/limine/
+	cp build/limine/BOOTX64.EFI build/iso/EFI/BOOT/
+	xorriso -as mkisofs -quiet -R -r -J -b boot/limine/limine-bios-cd.bin \
+	  -no-emul-boot -boot-load-size 4 -boot-info-table -hfsplus -apm-block-size 2048 \
+	  --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image \
+	  --protective-msdos-label build/iso -o $@ 2>/dev/null
+	build/limine/limine bios-install --quiet $@
 
 iso: build/bastios.iso
 
@@ -230,7 +245,7 @@ CLEAN_EXIT := ; s=$$?; [ $$s -eq 0 ] || [ $$s -eq 33 ]
 run: build/bastios.elf $(DISK)
 	$(QEMU) $(QEMU_ARGS) -serial mon:stdio $(CLEAN_EXIT)
 
-# The ISO through GRUB, under BIOS and under UEFI (OVMF firmware).
+# The ISO through Limine, under BIOS and under UEFI (OVMF firmware).
 run-iso: build/bastios.iso $(DISK)
 	$(QEMU) -cdrom build/bastios.iso $(ISO_DISPLAY) $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
 

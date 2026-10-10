@@ -163,16 +163,16 @@ bastios> halt
 
 ## 5. Boot from a USB stick
 
-`make iso` builds `build/bastios.iso`: GRUB with the same kernel, as a hybrid image that boots from CD or USB, under BIOS or UEFI. It needs GRUB's BIOS and UEFI files, `xorriso` and `mtools`:
+`make iso` builds `build/bastios.iso`: the [Limine](https://github.com/limine-bootloader/limine) boot loader with the same kernel, as a hybrid image that boots from CD or USB, under BIOS or UEFI. The first `make iso` fetches Limine's binary release at a pinned tag; it needs `xorriso`:
 
 ```text
-sudo apt-get install grub-pc-bin grub-efi-amd64-bin xorriso mtools ovmf
+sudo apt-get install xorriso ovmf
 make iso
 make run-iso     # in QEMU under BIOS
 make run-uefi    # in QEMU under UEFI (OVMF)
 ```
 
-Both open a QEMU window, where the kernel draws its console on the framebuffer GRUB sets up and reads the keyboard; the serial console stays on your terminal. `make test` boots the image both ways (`test/iso_test.sh`, skipped when the tools are missing).
+Both open a QEMU window, where the kernel draws its console on the framebuffer Limine sets up and reads the keyboard; the serial console stays on your terminal. `make test` boots the image both ways (`test/iso_test.sh`, skipped when the tools are missing).
 
 To write it to a USB stick, find the stick's device name (`lsblk`), then:
 
@@ -183,7 +183,7 @@ sudo dd if=build/bastios.iso of=/dev/sdX bs=4M conv=fsync
 `dd` overwrites the whole device it is given, so check the name twice.
 
 BastiOS has been run only in QEMU so far. On a real PC:
-- **Console.** The first serial port (COM1, 115200 baud), and the screen if GRUB can give it a 32-bit linear framebuffer between 2 GiB and the I/O APIC, which is where PC firmware puts it. Keys come from a PS/2 keyboard, or a USB keyboard on an xHCI (USB 3) controller's root port; USB hubs are not supported.
+- **Console.** The first serial port (COM1, 115200 baud), and the screen if Limine can give it a 32-bit linear framebuffer between 2 GiB and the I/O APIC, which is where PC firmware puts it. Keys come from a PS/2 keyboard, or a USB keyboard on an xHCI (USB 3) controller's root port; USB hubs are not supported.
 - **Processor.** It needs 1 GiB pages, which every x86-64 CPU of the last decade has. Other processors are found in the ACPI tables; tables above 1 GiB leave it on one processor.
 - **Disk.** An NVMe drive (namespace 1, 512-byte or 4 KiB sectors), a virtio disk, a SATA disk on an AHCI controller (the first port with a disk, 512-byte sectors), or a legacy ATA disk. The first boot formats it, so give it a disk you can lose.
 - **Network.** A virtio or Intel e1000 (82540EM) card; other cards are ignored.

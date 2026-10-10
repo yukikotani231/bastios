@@ -3,12 +3,12 @@
 boot/ap.S: 84 lines
 boot/boot.S: 444 lines
 boot/core.h: 26 lines
-boot/grub.cfg: 16 lines
 boot/libc.c: 35 lines
+boot/limine.conf: 10 lines
 boot/linker.ld: 15 lines
 boot/multiboot.c: 76 lines
 boot/platform.c: 47 lines
 boot/smp.c: 257 lines
 user/start.S: 19 lines
 user/user.ld: 15 lines
-total: 1034 lines
+total: 1028 lines

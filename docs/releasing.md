@@ -38,8 +38,9 @@ workflow needs the same `BASTIOLANG_TOKEN` secret as CI.
 
 ## What a release contains
 
-- `bastios-vX.Y.Z.iso`: GRUB and the kernel, a hybrid image that boots from
-  CD or USB under BIOS or UEFI (`make iso`).
+- `bastios-vX.Y.Z.iso`: Limine and the kernel, a hybrid image that boots from
+  CD or USB under BIOS or UEFI (`make iso`). Limine is BSD-2-Clause; its
+  license is copied into the image as `boot/limine/LICENSE`.
 - `bastios-vX.Y.Z.elf`: the kernel alone, a Multiboot image for
   `qemu-system-x86_64 -kernel`.
 - `busybox-1.36.1-source.tar.gz` and `busybox-vX.Y.Z.config`: the kernel

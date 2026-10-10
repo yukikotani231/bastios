@@ -25,7 +25,7 @@ BastiOS also trusts everything bastiolang trusts: Z3, the Bastio compiler, the C
 | `boot/core.h` | The per-processor block layout shared by the three files above | |
 | `boot/libc.c` | `memset`, `memcpy`, `memmove` and `memcmp`, which the C compiler may emit calls to | Also linked into each user program |
 | `boot/linker.ld` | Load address, and `_end`, where the page pool starts | |
-| `boot/grub.cfg` | The GRUB menu for the ISO only, loading the kernel with Multiboot 2 (`make run` and most tests use QEMU's Multiboot 1 loader); it loads the video drivers so GRUB can set the framebuffer the kernel asks for | |
+| `boot/limine.conf` | The Limine menu for the ISO only, loading the kernel with Multiboot 2 (`make run` and most tests use QEMU's Multiboot 1 loader) | |
 
 What the kernel trusts these to do, beyond the obvious:
 - **Entering user mode cannot raise privilege.** `bst_cpu_enter` takes only rip, rsp, the FS base, the general registers and the arithmetic flags from the context Bastio code saved. The code and stack segments, IOPL 0 and the interrupt flag are forced, and a rip, rsp or FS base outside the lower half of the address space is replaced by 0. So nothing the kernel stores in a `Cpu` context can give user code I/O ports, kernel segments or interrupts off.
@@ -33,7 +33,7 @@ What the kernel trusts these to do, beyond the obvious:
 - **A trap from user mode always lands on that processor's empty trap stack** (TSS.rsp0), and saves the full context into the processor's block before returning to Bastio.
 - **A fault in kernel mode halts the machine** with a report (`bst_kernel_fault`): it is a bug in the trusted base or the compiler.
 - **The memory map.** Everything the identity map covers is RAM or the kernel image, the page pool starts at `_end`, and the device window holds only devices. Above 4 GiB the window may also cover RAM the kernel never uses (the pool stays below 1 GiB), mapped uncached. A user address space shares only the first 512 GiB of the kernel's map, and the kernel switches back to its own tables before any Bastio code runs, so a claimed `Mmio` is always mapped; on a CPU without 1 GiB pages nothing above 4 GiB is, and touching it faults.
-- **The framebuffer report.** The address, pitch and size GRUB reports for the framebuffer (read by the prelude's `boot_fb`) describe device memory and nothing else; the kernel only checks that the block lies in the device window and claims it there, so a false report would let it draw over another device in the window.
+- **The framebuffer report.** The address, pitch and size the boot loader reports for the framebuffer (read by the prelude's `boot_fb`) describe device memory and nothing else; the kernel only checks that the block lies in the device window and claims it there, so a false report would let it draw over another device in the window.
 
 ### Closed gap: an NMI during the `syscall` entry
 

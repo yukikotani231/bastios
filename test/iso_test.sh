@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boot build/bastios.iso (make iso) through GRUB under BIOS and under UEFI
+# Boot build/bastios.iso (make iso) through Limine under BIOS and under UEFI
 # (OVMF), with the devices `make run` gives it, and check that the shell
 # comes up, runs a program, uses the disk and the network, and gets every
 # page back at power off. A line typed on the PS/2 keyboard must run and
@@ -10,8 +10,8 @@ set -u
 cd "$(dirname "$0")/.."
 OVMF=${OVMF:-/usr/share/OVMF/OVMF_CODE_4M.fd}
 OVMF_VARS=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
-if ! command -v grub-mkrescue >/dev/null || ! command -v xorriso >/dev/null; then
-  echo "SKIP iso: grub-mkrescue or xorriso missing"
+if ! command -v xorriso >/dev/null; then
+  echo "SKIP iso: xorriso missing"
   exit 0
 fi
 make -s build/bastios.iso || exit 1
@@ -116,7 +116,7 @@ def run(name, firmware, usb=False, nvme=False):
             out += chunk
         return True
     ok = until(b"bastios> ", 0)
-    print(("ok  " if ok else "FAIL"), f"({name}) GRUB boots the kernel to the shell")
+    print(("ok  " if ok else "FAIL"), f"({name}) Limine boots the kernel to the shell")
     fails += not ok
     # Both processors: under UEFI the ACPI tables are found through the
     # Multiboot memory map, not the BIOS areas.
