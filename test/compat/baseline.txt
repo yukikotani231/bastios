@@ -1,0 +1,131 @@
+# Checks that pass on BastiOS (make compat-baseline rewrites this).
+# make compat fails if one of them stops passing.
+busybox: awk
+busybox: base64
+busybox: basename/dirname
+busybox: cat a file
+busybox: cmp
+busybox: cp
+busybox: cut
+busybox: date -d
+busybox: du
+busybox: echo
+busybox: env
+busybox: expr
+busybox: grep
+busybox: gzip round trip
+busybox: head/tail
+busybox: hostname
+busybox: id -u
+busybox: kill -0
+busybox: ls -l
+busybox: md5sum
+busybox: mktemp
+busybox: nproc
+busybox: printenv
+busybox: printf
+busybox: readlink/realpath
+busybox: sed
+busybox: seq
+busybox: sh -c
+busybox: sh pipeline and subshell
+busybox: sha256sum
+busybox: sleep
+busybox: sort -n
+busybox: stat
+busybox: sync
+busybox: tee
+busybox: test
+busybox: time
+busybox: timeout
+busybox: tr
+busybox: true/false
+busybox: uniq -c
+busybox: uptime
+busybox: usleep
+busybox: wc
+busybox: which
+busybox: xargs
+busybox: yes | head
+t_dir: create file in directory
+t_dir: getcwd
+t_dir: opendir/readdir /
+t_dir: stat / is a directory
+t_dir: stat file in directory
+t_dir: unlink file in directory
+t_file: O_RDONLY refuses write
+t_file: access F_OK
+t_file: access missing
+t_file: close
+t_file: close twice is EBADF
+t_file: fstat size
+t_file: lseek SEEK_SET
+t_file: open O_CREAT|O_TRUNC
+t_file: open missing is ENOENT
+t_file: read back
+t_file: stdio fprintf/fscanf
+t_file: tmpfile
+t_file: write
+t_file: writev
+t_ipc: EOF once writers close
+t_ipc: dup2 onto stdout and back
+t_ipc: fcntl F_DUPFD
+t_ipc: fcntl F_GETFD sees FD_CLOEXEC
+t_ipc: fcntl F_SETFL
+t_ipc: pipe
+t_ipc: pipe across fork
+t_ipc: pipe2
+t_ipc: poll a readable pipe
+t_ipc: poll times out
+t_mem: 64 MiB of address space
+t_mem: file for mapping
+t_mem: malloc churn
+t_mem: mmap anonymous
+t_mem: mmap is zeroed
+t_mem: munmap
+t_misc: SSE floating point
+t_misc: TIOCGWINSZ
+t_misc: printf %f
+t_misc: qsort
+t_misc: strtod
+t_misc: sync
+t_misc: tcgetattr
+t_misc: tcsetattr
+t_net: SO_REUSEADDR
+t_net: TCP socket
+t_net: TCP_NODELAY
+t_net: UDP bind port 0
+t_net: UDP socket
+t_net: getaddrinfo numeric
+t_net: inet_pton
+t_proc: child's getppid is the parent
+t_proc: environment
+t_proc: execve
+t_proc: execve missing is ENOENT
+t_proc: fork + exit status
+t_proc: fork copies memory
+t_proc: getpid
+t_proc: getppid
+t_proc: killed child's status
+t_proc: sysconf(_SC_NPROCESSORS_ONLN)
+t_proc: times
+t_proc: uid/gid
+t_proc: wait with no children is ECHILD
+t_proc: waitpid WNOHANG
+t_signal: SIG_IGN
+t_signal: kill missing pid is ESRCH
+t_signal: kill self
+t_signal: raise runs the handler
+t_signal: sigaction
+t_signal: sigprocmask blocks
+t_signal: unblock delivers
+t_time: clock_getres
+t_time: clock_gettime BOOTTIME
+t_time: clock_gettime MONOTONIC
+t_time: clock_gettime PROCESS_CPUTIME
+t_time: clock_nanosleep TIMER_ABSTIME
+t_time: gmtime_r
+t_time: monotonic does not go back
+t_time: nanosleep 100 ms
+t_time: sleep(1)
+t_time: strftime + localtime
