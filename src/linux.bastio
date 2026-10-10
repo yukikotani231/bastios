@@ -82,6 +82,7 @@ const LX_WAIT4: u64 = 61;
 const LX_GETTID: u64 = 186;
 
 const SIGCHLD: u64 = 17;
+const SIGPIPE: u64 = 13;
 const WNOHANG: u64 = 1;
 
 const E2BIG: u64 = 18446744073709551609;    // 2^64 - 7
@@ -129,40 +130,33 @@ fn read_root(root: &mut PageTable, off: u64) -> Word
   let mut l3 = pt_take(&mut root, 1);
   if pt_has(l3, 0) {
     let mut l2 = pt_take(&mut l3, 0);
-    if pt_has(l2, 0) {
-      let mut l1 = pt_take(&mut l2, 0);
-      w = read_l1(&mut l1, off);
-      pt_put(&mut l2, 0, l1);
-    }
+    w = read_l2(&mut l2, off);
     pt_put(&mut l3, 0, l2);
   }
   pt_put(&mut root, 1, l3);
   return w;
 }
 
-/// The 8 bytes at window offset off, most significant first, so that a
-/// word straddling two pages takes each page out once per byte at most.
-fn read_l1(l1: &mut PageTable, off: u64) -> Word
-  requires pt_level(l1) == 1 && off + 8 <= USER_SIZE
-  ensures pt_level(l1) == 1
+/// The 8 bytes at window offset off, most significant first.
+fn read_l2(l2: &mut PageTable, off: u64) -> Word
+  requires pt_level(l2) == 2 && off + 8 <= USER_SIZE
+  ensures pt_level(l2) == 2
 {
   let mut v = 0;
   let mut i = 8;
   while i > 0
-    invariant i <= 8 && pt_level(l1) == 1
+    invariant i <= 8 && pt_level(l2) == 2
     invariant (i == 8 ==> v == 0) && (i == 7 ==> v < 0x100) && (i == 6 ==> v < 0x10000)
     invariant (i == 5 ==> v < 0x1000000) && (i == 4 ==> v < 0x100000000)
     invariant (i == 3 ==> v < 0x10000000000) && (i == 2 ==> v < 0x1000000000000)
     invariant (i == 1 ==> v < 0x100000000000000)
   {
     i = i - 1;
-    let a = off + i;
-    if !pt_has(l1, a / 4096) {
+    let ch = w_byte(&mut l2, off + i);
+    if ch == 256 {
       return Word { ok: false, v: 0 };
     }
-    let f = pt_take_frame(&mut l1, a / 4096);
-    v = v * 256 + cast[u64](frame_read8(f, a % 4096));
-    pt_put_frame(&mut l1, a / 4096, f, true);
+    v = v * 256 + ch;
   }
   return Word { ok: true, v: v };
 }
@@ -173,6 +167,7 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   ensures kok(k)
 {
   let n = pget(k.procs, pid, F_REGS + R_RAX);
+  pset(&mut k.procs, pid, F_RESTART, 0);
   let a = pget(k.procs, pid, F_REGS + R_RDI);
   let b = pget(k.procs, pid, F_REGS + R_RSI);
   let c = pget(k.procs, pid, F_REGS + R_RDX);
@@ -192,6 +187,14 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       r = lx_file_read(&mut k, pid, d.x, b, c);
     } else if d.kind == K_PIPE_R {
       r = pipe_read(&mut k, pid, d.x, b, c);
+    } else if d.kind == K_SOCK {
+      r = lx_recvfrom(&mut k, pid, a, b, c, 0, 0, 0);
+      if r == SK_WAIT {
+        r = EAGAIN;                         // wait for a datagram, below
+      } else if r == EAGAIN {
+        ret(&mut k.procs, pid, r);          // nonblocking: say so
+        return KEEP;
+      }
     }
     if r == EAGAIN {
       return lx_retry(&mut k, pid, n);       // an empty pipe: wait for a writer
@@ -210,6 +213,10 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       return lx_retry(&mut k, pid, n);       // a full pipe: wait for a reader
     }
     ret(&mut k.procs, pid, w);
+    if w == EPIPE {
+      post_sig(&mut k, pid, SIGPIPE);        // no reader left
+      return SWITCH;
+    }
     return KEEP;
   }
   if n == LX_PIPE || n == LX_PIPE2 {
@@ -231,6 +238,9 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       ret(&mut k.procs, pid, lx_dup2(&mut k, pid, a, b, n == LX_DUP3 && c / LO_CLOEXEC % 2 == 1));
     }
     return KEEP;
+  }
+  if is_sock_call(n) {
+    return lx_sock_call(&mut k, pid, n, a, b, c);
   }
   if n == LX_POLL {
     ret(&mut k.procs, pid, lx_poll(&mut k, pid, a, b));
@@ -292,8 +302,21 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_NEWFSTATAT {
-    // Relative paths start at "/", the only working directory there is.
-    ret(&mut k.procs, pid, lx_stat(&mut k, pid, b, c));
+    let r10 = pget(k.procs, pid, F_REGS + R_R10);
+    if r10 / AT_EMPTY_PATH % 2 == 1 && lx_path_in(&mut k, pid, b) == 0 {
+      ret(&mut k.procs, pid, lx_fstat(&mut k, pid, a, c));      // fstat by another name
+    } else {
+      // Relative paths start at "/", the only working directory there is.
+      ret(&mut k.procs, pid, lx_stat(&mut k, pid, b, c));
+    }
+    return KEEP;
+  }
+  if n == LX_FSTAT {
+    ret(&mut k.procs, pid, lx_fstat(&mut k, pid, a, b));
+    return KEEP;
+  }
+  if n == LX_GETDENTS64 {
+    ret(&mut k.procs, pid, lx_getdents(&mut k, pid, a, b, c));
     return KEEP;
   }
   if n == LX_ACCESS {
@@ -315,15 +338,8 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, pid);            // one thread, whose id is the pid
     return KEEP;
   }
-  if n == LX_RT_SIGACTION {
-    // No signals are ever delivered yet: every action reads back as the
-    // default (a zeroed struct sigaction), and setting one is accepted.
-    ret(&mut k.procs, pid, lx_zero_out(&mut k, pid, c, 32));
-    return KEEP;
-  }
-  if n == LX_RT_SIGPROCMASK {
-    ret(&mut k.procs, pid, lx_zero_out(&mut k, pid, c, 8));   // nothing is blocked
-    return KEEP;
+  if is_sig_call(n) {
+    return lx_sig_call(&mut k, pid, n, a, b, c);
   }
   if n == LX_GETUID || n == LX_GETGID || n == LX_GETEUID || n == LX_GETEGID {
     ret(&mut k.procs, pid, 0);              // everyone is root
@@ -558,6 +574,7 @@ fn console_read(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
     pset(&mut k.procs, pid, F_REGS + R_RIP, rip - 2);
     pset(&mut k.procs, pid, F_REGS + R_RAX, LX_READ);
     pset(&mut k.procs, pid, F_STATE, LXREADING);
+    pset(&mut k.procs, pid, F_RESTART, 1);
     return SWITCH;
   }
   // Take only what fits in the window from va, so no byte is lost.
@@ -627,6 +644,9 @@ fn lx_write_fd(con: &mut Uart, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u6
   let d = fd_look(k, pid, fd);
   if d.kind == K_PIPE_W {
     return pipe_write(&mut k, pid, d.x, va, n);
+  }
+  if d.kind == K_SOCK {
+    return lx_sendto(&mut k, pid, fd, va, n, 0, 0);   // to the connected peer
   }
   if d.kind != K_CONSOLE && d.kind != K_FILE {
     return EBADF;
@@ -720,7 +740,8 @@ fn lx_fail_or(total: u64, err: u64) -> u64 {
 /// Copies the NUL-terminated path at user address va into the transfer
 /// buffer, without leading "/" or "./" (the file system is one flat
 /// directory, and the working directory is "/").
-/// Returns its length, or NO_RESULT if it is unreadable, empty or too long.
+/// Returns its length (0 for the root directory), or NO_RESULT if it is
+/// unreadable or too long.
 fn lx_path_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -754,8 +775,11 @@ fn lx_path_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   {
     e = e + 1;
   }
-  if e >= got || e == s || e - s > FNAME_MAX {
-    return NO_RESULT;                       // no NUL in reach, empty, or too long
+  if e >= got || e - s > FNAME_MAX {
+    return NO_RESULT;                       // no NUL in reach, or too long
+  }
+  if e == s || (e - s == 1 && bget(k.fs.xfer, s) == 46) {
+    return 0;                               // "/" or ".": the root directory
   }
   let mut i = 0;
   while i < e - s
@@ -817,10 +841,13 @@ fn lx_map_pages(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, from: u64, to: u
         let mut l3 = pt_take(&mut root, 1);
         if pt_has(l3, 0) {
           let mut l2 = pt_take(&mut l3, 0);
-          if pt_has(l2, 0) {
-            let mut l1 = pt_take(&mut l2, 0);
-            ok = lx_map_l1(&mut m, &mut l1, from, to);
-            pt_put(&mut l2, 0, l1);
+          ok = true;
+          let mut p = from;
+          while ok && p < to
+            invariant mem_ok(m) && pt_level(l2) == 2 && to <= STACK_FIRST
+          {
+            ok = w_map(&mut m, &mut l2, p);
+            p = p + 1;
           }
           pt_put(&mut l3, 0, l2);
         }
@@ -830,26 +857,6 @@ fn lx_map_pages(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, from: u64, to: u
       return ok;
     },
   }
-}
-
-fn lx_map_l1(m: &mut Mem, l1: &mut PageTable, from: u64, to: u64) -> bool
-  requires mem_ok(m) && pt_level(l1) == 1 && to <= STACK_FIRST
-  ensures mem_ok(m) && pt_level(l1) == 1
-{
-  let mut p = from;
-  while p < to
-    invariant mem_ok(m) && pt_level(l1) == 1 && to <= STACK_FIRST
-  {
-    if !pt_has(l1, p) {
-      let a = find_free(&mut m);
-      if a >= NPAGES {
-        return false;
-      }
-      pt_put_frame(&mut l1, p, take_page(&mut m, a), true);
-    }
-    p = p + 1;
-  }
-  return true;
 }
 
 /// brk: grows the heap (page by page) up to `want`; never shrinks it, and

@@ -31,8 +31,13 @@ _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 _s.bind(("127.0.0.1", 0))
 udp_port2 = _s.getsockname()[1]
 _s.close()
+# And a TCP port forwarded to guest port 7001, where `tcpecho 7001` listens.
+_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+_s.bind(("127.0.0.1", 0))
+tcp_port = _s.getsockname()[1]
+_s.close()
 
-def boot(cpus, with_disk=False, virtio=False, net=False):
+def boot(cpus, with_disk=False, virtio=False, net=False, subnet=None):
     drive = ["-drive", f"file={disk},format=raw,if=ide,index=0"] if with_disk else []
     if virtio:
         # The same disk as a virtio block device (src/virtio.bastio): sectors
@@ -40,8 +45,13 @@ def boot(cpus, with_disk=False, virtio=False, net=False):
         drive = ["-drive", f"file={disk},format=raw,if=none,id=vd",
                  "-device", "virtio-blk-pci,drive=vd"]
     # A virtio network card on QEMU's user-mode network (src/net.bastio).
-    nic = ["-netdev", f"user,id=n0,hostfwd=udp:127.0.0.1:{udp_port}-:7,hostfwd=udp:127.0.0.1:{udp_port2}-:7000",
+    nic = ["-netdev", f"user,id=n0,hostfwd=udp:127.0.0.1:{udp_port}-:7,hostfwd=udp:127.0.0.1:{udp_port2}-:7000,hostfwd=tcp:127.0.0.1:{tcp_port}-:7001",
            "-device", "virtio-net-pci,netdev=n0"] if net else []
+    if subnet:
+        # QEMU's DHCP server on a subnet other than its default: the
+        # address the kernel ends up with can only have come from DHCP.
+        nic = ["-netdev", f"user,id=n0,net={subnet}",
+               "-device", "virtio-net-pci,netdev=n0"]
     return subprocess.Popen(
         ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
@@ -112,9 +122,13 @@ steps = [
     ("help", b"commands:"),
     # The network: ICMP echo to QEMU's gateway and to its DNS address, both
     # answered by QEMU itself; a malformed address is refused.
+    ("ifconfig", b"10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2 (DHCP)"),
     ("ping", b"reply from 10.0.2.2"),
     ("ping 10.0.2.3", b"reply from 10.0.2.3"),
     ("ping 10.0.2.300", b"usage: ping"),
+    # Nothing answers ARP for this address: the shell waits off the kernel
+    # lock (its process is in NETWAIT) until the timer ends the ping.
+    ("ping 10.0.2.99", b"no answer to ARP for 10.0.2.99"),
     ("cpus", f"processors running: {smp}\r\n".encode()),
     ("about", b"proved safe"),
     ("echo hello world", b"hello world"),
@@ -153,7 +167,7 @@ steps = [
     ("fpucheck", b"fpucheck: xmm0 kept"),
     # musl malloc (brk, mmap), stdio on a file, and a line read from the
     # console; the third field is what to wait for instead of the prompt.
-    ("mtest", [b"mtest: malloc heap 75", b"mtest: file line 42"], b"type a line"),
+    ("mtest", [b"mtest: malloc heap 75", b"mtest: big memory 4096 1024", b"mtest: file line 42"], b"type a line"),
     ("typed for mtest", b"mtest: got typed for mtest"),
     # BusyBox's shell, unmodified, reading commands from the console. The
     # console is a terminal (ioctl TCGETS works), so ash is interactive and
@@ -185,6 +199,21 @@ steps = [
     # execve of a file: elfdemo is the elfpie program installed at boot.
     ("/elfdemo a b", b"/elfdemo: ok", b"\n# "),
     ("./elfdemo; echo st=$?", [b"./elfdemo: ok", b"st=0"], b"\n# "),
+    # BusyBox applets, run as /bin/NAME: getdents64, fstat, stat.
+    ("ls", [b"elfdemo", b"motd", b"bin"], b"\n# "),
+    ("ls /bin", [b"mhello", b"cat"], b"\n# "),
+    ("cat /motd", b"Welcome to BastiOS", b"\n# "),
+    ("echo one > t; echo two >> t; cat t | wc -l", b"\r\n2\r\n", b"\n# "),
+    ("cp t t2; head -n 1 t2; rm t t2; ls", [b"\r\none\r\n", b"elfdemo"], b"\n# "),
+    # Signals: a trap handler entered and returned from (rt_sigreturn),
+    # a process ending itself with kill, a writer ended by SIGPIPE once
+    # head has gone, and Ctrl-C ending a busy loop (the parent ash's own
+    # handler sees it too and carries on).
+    ("trap 'echo got$((1+1))' USR1; kill -USR1 $$; echo after$((2+2))", [b"\r\ngot2\r\n", b"\r\nafter4\r\n"], b"\n# "),
+    ("ash -c 'kill $$'; echo k=$?", b"k=143", b"\n# "),
+    ("ash -c 'while :; do echo y; done' | head -n 1; echo piped", b"\r\ny\r\npiped", b"\n# "),
+    ("ash -c 'while :; do :; done'", b"^C", b"\n# ", b"\x03"),
+    ("echo st=$?", b"st=130", b"\n# "),
     ("exit 5", b"[exit 5]"),
     ("rm lxout", b""),
     ("sh", b"BastiOS 0.2 -- type"),
@@ -227,6 +256,9 @@ else:
         until = step[2] if len(step) > 2 else b"bastios> "
         mark = len(out)
         qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+        if len(step) > 3:
+            time.sleep(1)                   # then keys typed while it runs
+            qemu.stdin.write(step[3]); qemu.stdin.flush()
         wants = want if isinstance(want, list) else [want]
         ok = read_until(until, mark) and all(w in out[mark:] for w in wants)
         print(("ok  " if ok else "FAIL"), repr(line)); ok or print(repr(out[mark:]))
@@ -321,6 +353,122 @@ else:
         print("ok   UDP socket: sendto from an ephemeral port")
     else:
         print("FAIL UDP sendto:", got); fails += 1
+    # Three datagrams sent while the shell sleeps queue on the socket and
+    # come out in order.
+    mark = len(out)
+    qemu.stdin.write(b"udpecho 7000 3\r"); qemu.stdin.flush()
+    got = []
+    if read_until(b"listening on udp port 7000", mark):
+        us = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        us.settimeout(10)
+        try:
+            for w in (b"one", b"two", b"three"):
+                us.sendto(w, ("127.0.0.1", udp_port2))
+            for _ in range(3):
+                got.append(us.recvfrom(100)[0])
+        except OSError:
+            pass
+        us.close()
+    if (read_until(b"bastios> ", mark) and got == [b"one", b"two", b"three"]
+            and re.search(rb": one\r\n.*: two\r\n.*: three\r\n", out[mark:], re.S)):
+        print("ok   UDP socket: three datagrams queue and come out in order")
+    else:
+        print("FAIL UDP socket queue:", got); fails += 1
+    # The same through Linux system calls: a musl program (user/mudp.c)
+    # binds port 7000, blocks in recvfrom, sends the datagram back with
+    # sendto, then connects and writes "bye".
+    mark = len(out)
+    qemu.stdin.write(b"mudp 7000\r"); qemu.stdin.flush()
+    got = []
+    if read_until(b"listening on udp port 7000", mark):
+        us = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        us.settimeout(10)
+        try:
+            us.sendto(b"hello linux", ("127.0.0.1", udp_port2))
+            got.append(us.recvfrom(100)[0])
+            got.append(us.recvfrom(100)[0])
+        except OSError:
+            pass
+        us.close()
+    if (read_until(b"bastios> ", mark) and got == [b"hello linux", b"bye"]
+            and b"mudp: 11 bytes from 10.0.2.2: hello linux" in out[mark:]
+            and b"mudp: sent it back" in out[mark:]):
+        print("ok   Linux UDP socket: bind, recvfrom, sendto, connect, write")
+    else:
+        print("FAIL Linux UDP socket:", got, repr(out[mark:])); fails += 1
+    # TCP, accepting: 20000 bytes through a 4 KiB window and back, then the
+    # host closes its side and the guest's echo loop sees the end.
+    mark = len(out)
+    qemu.stdin.write(b"tcpecho 7001\r"); qemu.stdin.flush()
+    sent = bytes((i * 7 + i // 251) % 256 for i in range(20000))
+    back = b""
+    if read_until(b"listening on tcp port 7001", mark):
+        # The echo is read slowly through a small buffer on another thread,
+        # so QEMU acknowledges the guest's data a piece at a time.
+        import threading
+        got_back = []
+        def slow_reader(sock):
+            try:
+                while True:
+                    chunk = sock.recv(700)
+                    if not chunk:
+                        break
+                    got_back.append(chunk)
+                    time.sleep(0.002)
+            except OSError as e:
+                print("     tcp echo read:", e)
+        try:
+            ts = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            ts.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
+            ts.settimeout(20)
+            ts.connect(("127.0.0.1", tcp_port))
+            rd = threading.Thread(target=slow_reader, args=(ts,))
+            rd.start()
+            ts.sendall(sent)
+            ts.shutdown(socket.SHUT_WR)
+            rd.join(30)
+            ts.close()
+            back = b"".join(got_back)
+        except OSError as e:
+            print("     tcp echo:", e)
+    if read_until(b"bastios> ", mark) and back == sent and b"echoed 20000 bytes" in out[mark:]:
+        print("ok   TCP: accept, 20000 bytes echoed in order, close")
+    else:
+        print("FAIL TCP echo:", len(back), back == sent[:len(back)]); fails += 1
+    # TCP, connecting: to a server on this machine (10.0.2.2), which reads
+    # a line, answers and closes.
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    srv.settimeout(10)
+    mark = len(out)
+    qemu.stdin.write(f"tcpget 10.0.2.2 {srv.getsockname()[1]} hello over tcp\r".encode()); qemu.stdin.flush()
+    line = b""
+    try:
+        cs, _ = srv.accept()
+        cs.settimeout(10)
+        while not line.endswith(b"\n"):
+            chunk = cs.recv(100)
+            if not chunk:
+                break
+            line += chunk
+        cs.sendall(b"pong from the host\n")
+        cs.close()
+    except OSError as e:
+        print("     tcp get:", e)
+    srv.close()
+    if (read_until(b"bastios> ", mark) and line == b"hello over tcp\n"
+            and b"pong from the host" in out[mark:] and b"closed" in out[mark:]):
+        print("ok   TCP: connect, send, receive until the peer closes")
+    else:
+        print("FAIL TCP connect:", line); fails += 1
+    # A closed port on the host: QEMU resets the connection.
+    mark = len(out)
+    qemu.stdin.write(f"tcpget 10.0.2.2 {udp_port} x\r".encode()); qemu.stdin.flush()
+    if read_until(b"bastios> ", mark) and b"connection refused" in out[mark:]:
+        print("ok   TCP: a refused connection says so")
+    else:
+        print("FAIL TCP refused"); fails += 1
     mark = len(out)
     qemu.stdin.write(b"udpsend 10.0.2.2 0 x\r"); qemu.stdin.flush()
     if read_until(b"bastios> ", mark) and b"usage: udpsend" in out[mark:]:
@@ -421,8 +569,11 @@ def session(name, want_banner, steps, halt=False):
     print(f"---- {name} boot transcript ----")
     print(out.decode(errors="replace").replace("\r", ""))
 
-qemu = boot(1, virtio=True)
+qemu = boot(1, virtio=True, subnet="192.168.76.0/24")
 session("virtio", True, [
+    ("ifconfig", b"192.168.76.15 netmask 255.255.255.0 gateway 192.168.76.2 (DHCP)"),
+    ("ping", b"reply from 192.168.76.2"),
+    ("ping 192.168.76.3", b"reply from 192.168.76.3"),
     ("ls", b"      18 disk/note"),
     ("cat disk/note", b"kept across boots\r\n"),
     ("echo appended >> disk/note", b""),

@@ -1,0 +1,553 @@
+// Linux signals. Each process has a blocked set and a pending set (words
+// F_SIGMASK and F_SIGPEND of its row, bit s - 1 for signal s) and an action
+// per signal in k.sigact. A signal is posted by kill, by Ctrl-C on the
+// console or by a write to a pipe with no reader, and delivered when the
+// process is next picked to run (lx_deliver): the default action ends the
+// process or ignores the signal, and a handler is entered on the user
+// stack with the frame Linux builds (struct rt_sigframe: the return
+// address, a ucontext with the saved registers and mask, a siginfo, and
+// the x87/SSE state), which rt_sigreturn reads back.
+//
+// Nothing in a frame read back from user memory is trusted: the registers
+// it restores are user registers, the flags keep only the arithmetic and
+// direction bits, and the MXCSR keeps only bits fxrstor accepts.
+
+import "linux.bastio";
+
+const LX_RT_SIGRETURN: u64 = 15;
+const LX_KILL: u64 = 62;
+const LX_TKILL: u64 = 200;
+const LX_TGKILL: u64 = 234;
+
+const NSIG: u64 = 64;
+const SIGINT: u64 = 2;
+const SIGKILL: u64 = 9;
+const SIGSEGV: u64 = 11;
+const SIGCONT: u64 = 18;
+const SIGSTOP: u64 = 19;
+const SIGTTOU: u64 = 22;
+const SIGURG: u64 = 23;
+const SIGWINCH: u64 = 28;
+
+const SIG_DFL: u64 = 0;
+const SIG_IGN: u64 = 1;
+const SA_RESTART: u64 = 0x10000000;
+const SA_NODEFER: u64 = 0x40000000;
+const SA_RESETHAND: u64 = 0x80000000;
+
+const SIG_BLOCK: u64 = 0;
+const SIG_UNBLOCK: u64 = 1;
+const SIG_SETMASK: u64 = 2;
+
+const ESRCH: u64 = 18446744073709551613;   // 2^64 - 3
+const EINTR: u64 = 18446744073709551612;   // 2^64 - 4
+
+// The frame, from the address the handler sees in rsp: the return address
+// (8 bytes), the ucontext (UC_SIZE), the siginfo (128), the FPU state (512).
+const UC_AT: u64 = 8;
+const UC_SIZE: u64 = 304;
+const UC_REGS: u64 = 40;              // uc_mcontext: 23 registers, then fpstate
+const UC_FPPTR: u64 = 224;            // UC_REGS + 23 * 8
+const UC_MASK: u64 = 296;             // uc_sigmask
+const INFO_AT: u64 = 312;
+const FP_AT: u64 = 440;               // 16-byte aligned when rsp is 8 past a multiple of 16
+const FRAME_SIZE: u64 = 952;
+const RED_ZONE: u64 = 128;
+const FLAGS_USER: u64 = 0xCD5;        // CF PF AF ZF SF DF OF
+const MXCSR_OK: u64 = 0xFFBF;
+
+/// The bit for signal s (1 to 64) in a signal set.
+fn sbit(s: u64) -> u64
+  requires 1 <= s && s <= NSIG
+{
+  return 1 << (s - 1);
+}
+
+fn has_sig(m: u64, s: u64) -> bool
+  requires 1 <= s && s <= NSIG
+{
+  return m & sbit(s) != 0;
+}
+
+fn sa_get(t: &Buf, pid: u64, s: u64, f: u64) -> u64
+  requires len(t) == SIGACT_LEN && pid < NPROC && 1 <= s && s <= NSIG && f < 4
+{
+  return get(t, pid * 256 + (s - 1) * 4 + f);
+}
+
+fn sa_set(t: &mut Buf, pid: u64, s: u64, f: u64, v: u64)
+  requires len(t) == SIGACT_LEN && pid < NPROC && 1 <= s && s <= NSIG && f < 4
+  ensures len(t) == SIGACT_LEN
+{
+  t = set(t, pid * 256 + (s - 1) * 4 + f, v);
+}
+
+/// Signals whose default action is to do nothing. Stopping is not
+/// supported (there is no job control), so the stop signals are among them.
+fn dfl_ignores(s: u64) -> bool {
+  return s == SIGCHLD || s == SIGURG || s == SIGWINCH || (s >= SIGCONT && s <= SIGTTOU);
+}
+
+/// Would signal s be thrown away, as Linux does when it is generated?
+fn sig_ignored(t: &Buf, pid: u64, s: u64) -> bool
+  requires len(t) == SIGACT_LEN && pid < NPROC && 1 <= s && s <= NSIG
+{
+  if s == SIGKILL {
+    return false;
+  }
+  let h = sa_get(t, pid, s, 0);
+  return h == SIG_IGN || (h == SIG_DFL && dfl_ignores(s));
+}
+
+/// Makes signal s pending for process p, and wakes p from a wait it may be
+/// in (a console read or wait4), so the signal is acted on.
+fn post_sig(k: &mut Kernel, p: u64, s: u64)
+  requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
+  let st = state(k.procs, p);
+  if st == FREE || st == ZOMBIE || sig_ignored(k.sigact, p, s) {
+    return;
+  }
+  pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
+  let blocked = has_sig(pget(k.procs, p, F_SIGMASK), s) && s != SIGKILL;
+  if !blocked && (st == LXREADING || st == LXWAITING) {
+    pset(&mut k.procs, p, F_STATE, READY);
+  }
+}
+
+/// A Linux program: started from an ELF image (src/proc.bastio sets its
+/// mmap floor), as opposed to a BastiOS one.
+fn is_linux(procs: &Buf, p: u64) -> bool
+  requires len(procs) == PTAB_LEN && p < NPROC
+{
+  return pget(procs, p, F_MMAP) != 0;
+}
+
+/// Ctrl-C on the console: with a Linux program on it, throws away what was
+/// typed and posts SIGINT to every Linux program (there are no process
+/// groups: they all share the console). Otherwise the byte stays queued
+/// for a BastiOS program.
+fn tty_intr(con: &mut Uart, k: &mut Kernel)
+  requires uart_ok(con) && kok(k)
+  ensures kok(k)
+{
+  let n = get(k.q, 1);
+  let h = get(k.q, 0);
+  let mut hit = false;
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= 256 && h < 256 && kok(k)
+  {
+    if get(k.q, 2 + (h + i) % 256) == 3 {
+      hit = true;
+    }
+    i = i + 1;
+  }
+  if !hit {
+    return;
+  }
+  let mut any = false;
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && kok(k)
+  {
+    let st = state(k.procs, p);
+    if st != FREE && st != ZOMBIE && is_linux(k.procs, p) {
+      any = true;
+    }
+    p = p + 1;
+  }
+  if !any {
+    return;
+  }
+  k.q = set(k.q, 1, 0);
+  k.line = set(k.line, 0, 0);
+  k.line = set(k.line, 1, 0);
+  puts(&mut con, "^C\r\n");
+  p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && kok(k)
+  {
+    if is_linux(k.procs, p) {
+      post_sig(&mut k, p, SIGINT);
+    }
+    p = p + 1;
+  }
+}
+
+/// fork: the child has the parent's actions. (Its row, copied from the
+/// parent's, has the blocked set; fork_into clears what is pending.)
+fn sig_fork(t: &mut Buf, parent: u64, child: u64)
+  requires len(t) == SIGACT_LEN && parent < NPROC && child < NPROC
+  ensures len(t) == SIGACT_LEN
+{
+  let mut s = 1;
+  while s <= NSIG
+    invariant 1 <= s && s <= NSIG + 1 && len(t) == SIGACT_LEN
+  {
+    let mut f = 0;
+    while f < 4
+      invariant f <= 4 && s <= NSIG && len(t) == SIGACT_LEN
+    {
+      sa_set(&mut t, child, s, f, sa_get(t, parent, s, f));
+      f = f + 1;
+    }
+    s = s + 1;
+  }
+}
+
+/// A new program (spawn, or execve with keep_ign): every handler goes back
+/// to the default; execve keeps the signals that are ignored.
+fn sig_reset(t: &mut Buf, pid: u64, keep_ign: bool)
+  requires len(t) == SIGACT_LEN && pid < NPROC
+  ensures len(t) == SIGACT_LEN
+{
+  let mut s = 1;
+  while s <= NSIG
+    invariant 1 <= s && s <= NSIG + 1 && len(t) == SIGACT_LEN
+  {
+    if !keep_ign || sa_get(t, pid, s, 0) != SIG_IGN {
+      sa_set(&mut t, pid, s, 0, SIG_DFL);
+    }
+    sa_set(&mut t, pid, s, 1, 0);
+    sa_set(&mut t, pid, s, 2, 0);
+    sa_set(&mut t, pid, s, 3, 0);
+    s = s + 1;
+  }
+}
+
+// ---------------------------------------------------------------- system calls
+
+/// rt_sigaction(sig, act, oact): struct sigaction is handler, flags,
+/// restorer and mask, 8 bytes each.
+fn lx_sigaction(k: &mut Kernel, pid: u64, s: u64, act: u64, oact: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if s == 0 || s > NSIG {
+    return EINVAL;
+  }
+  let mut nh = 0;
+  let mut nf = 0;
+  let mut nr = 0;
+  let mut nm = 0;
+  if act != 0 {
+    if s == SIGKILL || s == SIGSTOP {
+      return EINVAL;
+    }
+    if copy_from_user(&mut k.spaces, pid, act, &mut k.fs.xfer, 32) != 32 {
+      return EFAULT;
+    }
+    nh = rd64(k.fs.xfer, 0);
+    nf = rd64(k.fs.xfer, 8);
+    nr = rd64(k.fs.xfer, 16);
+    nm = rd64(k.fs.xfer, 24);
+  }
+  if oact != 0 {
+    xfer_u64(&mut k.fs.xfer, 0, sa_get(k.sigact, pid, s, 0));
+    xfer_u64(&mut k.fs.xfer, 8, sa_get(k.sigact, pid, s, 1));
+    xfer_u64(&mut k.fs.xfer, 16, sa_get(k.sigact, pid, s, 2));
+    xfer_u64(&mut k.fs.xfer, 24, sa_get(k.sigact, pid, s, 3));
+    if lx_put_out(&mut k, pid, oact, 32) != 0 {
+      return EFAULT;
+    }
+  }
+  if act != 0 {
+    sa_set(&mut k.sigact, pid, s, 0, nh);
+    sa_set(&mut k.sigact, pid, s, 1, nf);
+    sa_set(&mut k.sigact, pid, s, 2, nr);
+    sa_set(&mut k.sigact, pid, s, 3, nm);
+    if sig_ignored(k.sigact, pid, s) {
+      pset(&mut k.procs, pid, F_SIGPEND, pget(k.procs, pid, F_SIGPEND) & !sbit(s));
+    }
+  }
+  return 0;
+}
+
+/// The set a process may block: anything but SIGKILL and SIGSTOP.
+fn blockable(m: u64) -> u64 {
+  return m & !(sbit(SIGKILL) | sbit(SIGSTOP));
+}
+
+/// rt_sigprocmask(how, set, oset).
+fn lx_sigprocmask(k: &mut Kernel, pid: u64, how: u64, setp: u64, oset: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let was = pget(k.procs, pid, F_SIGMASK);
+  let mut new = was;
+  if setp != 0 {
+    if copy_from_user(&mut k.spaces, pid, setp, &mut k.fs.xfer, 8) != 8 {
+      return EFAULT;
+    }
+    let v = rd64(k.fs.xfer, 0);
+    if how == SIG_BLOCK {
+      new = was | v;
+    } else if how == SIG_UNBLOCK {
+      new = was & !v;
+    } else if how == SIG_SETMASK {
+      new = v;
+    } else {
+      return EINVAL;
+    }
+  }
+  if oset != 0 {
+    xfer_u64(&mut k.fs.xfer, 0, was);
+    if lx_put_out(&mut k, pid, oset, 8) != 0 {
+      return EFAULT;
+    }
+  }
+  pset(&mut k.procs, pid, F_SIGMASK, blockable(new));
+  return 0;
+}
+
+/// kill(target, s): one process, or with 0 or a negative target every
+/// Linux program (there are no process groups). Signal 0 only checks.
+fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  if s > NSIG {
+    return EINVAL;
+  }
+  if target == 0 || target >= 0x8000000000000000 {
+    let mut p = 1;
+    while p < NPROC
+      invariant 1 <= p && p <= NPROC && kok(k)
+    {
+      if is_linux(k.procs, p) && s != 0 {
+        post_sig(&mut k, p, s);
+      }
+      p = p + 1;
+    }
+    return 0;
+  }
+  if target >= NPROC || state(k.procs, target) == FREE || state(k.procs, target) == ZOMBIE {
+    return ESRCH;
+  }
+  if s != 0 {
+    post_sig(&mut k, target, s);
+  }
+  return 0;
+}
+
+/// The signal system calls. Returns KEEP, or SWITCH when the caller now
+/// has a signal to take, so it is delivered before the caller goes on.
+fn lx_sig_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  let mut r = ENOSYS;
+  if n == LX_RT_SIGACTION {
+    r = lx_sigaction(&mut k, pid, a, b, c);
+  } else if n == LX_RT_SIGPROCMASK {
+    r = lx_sigprocmask(&mut k, pid, a, b, c);
+  } else if n == LX_KILL {
+    r = lx_kill(&mut k, pid, a, b);
+  } else if n == LX_TKILL {
+    r = lx_kill(&mut k, pid, a, b);
+  } else if n == LX_TGKILL {
+    r = lx_kill(&mut k, pid, b, c);
+  } else if n == LX_RT_SIGRETURN {
+    r = lx_sigreturn(&mut k, pid);
+  }
+  ret(&mut k.procs, pid, r);
+  if pget(k.procs, pid, F_SIGPEND) & !pget(k.procs, pid, F_SIGMASK) != 0 {
+    return SWITCH;
+  }
+  return KEEP;
+}
+
+fn is_sig_call(n: u64) -> bool {
+  return n == LX_RT_SIGACTION || n == LX_RT_SIGPROCMASK || n == LX_KILL || n == LX_TKILL
+    || n == LX_TGKILL || n == LX_RT_SIGRETURN;
+}
+
+// ---------------------------------------------------------------- delivery
+
+/// Our register number for entry g of struct sigcontext's general
+/// registers (r8-r15, rdi, rsi, rbp, rbx, rdx, rax, rcx, rsp, rip, eflags).
+fn sc_reg(g: u64) -> u64
+  requires g < 18
+  ensures result < 21
+{
+  if g < 8 {
+    return 7 + g;                           // r8 .. r15
+  }
+  if g == 8 { return R_RDI; }
+  if g == 9 { return R_RSI; }
+  if g == 10 { return 6; }                  // rbp
+  if g == 11 { return 1; }                  // rbx
+  if g == 12 { return R_RDX; }
+  if g == 13 { return R_RAX; }
+  if g == 14 { return 2; }                  // rcx
+  if g == 15 { return R_RSP; }
+  if g == 16 { return R_RIP; }
+  return R_RFLAGS;
+}
+
+/// Before process p runs: acts on its pending, unblocked signals. Returns
+/// false if one ended it.
+fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
+  requires kok(k) && 1 <= p && p < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k)
+{
+  let mut s = 1;
+  while s <= NSIG
+    invariant 1 <= s && s <= NSIG + 1 && kok(k)
+  {
+    let pend = pget(k.procs, p, F_SIGPEND);
+    let take = has_sig(pend, s) && (s == SIGKILL || !has_sig(pget(k.procs, p, F_SIGMASK), s));
+    if take {
+      pset(&mut k.procs, p, F_SIGPEND, pend & !sbit(s));
+      let h = sa_get(k.sigact, p, s, 0);
+      if s == SIGKILL || (h == SIG_DFL && !dfl_ignores(s)) {
+        terminate(&mut k, mmu, p, SIG_DEATH + s);
+        return false;
+      }
+      if h != SIG_DFL && h != SIG_IGN {
+        if !enter_handler(&mut k, p, s) {
+          terminate(&mut k, mmu, p, SIG_DEATH + SIGSEGV);
+          return false;
+        }
+        return true;                        // one handler at a time
+      }
+    }
+    s = s + 1;
+  }
+  return true;
+}
+
+/// Builds the signal frame for signal s on process p's stack and points p
+/// at the handler. False if the stack has no room or the action has no
+/// return address (SA_RESTORER, which every C library sets).
+fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
+  requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
+  let restorer = sa_get(k.sigact, p, s, 2);
+  let flags = sa_get(k.sigact, p, s, 1);
+  let rsp = pget(k.procs, p, F_REGS + R_RSP);
+  if restorer == 0 || rsp < USER_BASE + RED_ZONE + FRAME_SIZE + 16 || rsp > USER_BASE + USER_SIZE {
+    return false;
+  }
+  // A system call that was waiting: without SA_RESTART it fails with
+  // EINTR instead of running again once the handler returns.
+  if pget(k.procs, p, F_RESTART) == 1 && flags & SA_RESTART == 0 {
+    let rip = pget(k.procs, p, F_REGS + R_RIP);
+    if rip <= 0xFFFFFFFFFFFFFFF0 {
+      pset(&mut k.procs, p, F_REGS + R_RIP, rip + 2);
+      pset(&mut k.procs, p, F_REGS + R_RAX, EINTR);
+    }
+  }
+  pset(&mut k.procs, p, F_RESTART, 0);
+  let base = (rsp - RED_ZONE - FRAME_SIZE) / 16 * 16 - 8;   // rsp the handler sees
+  let mut fr = balloc(FRAME_SIZE);
+  xfer_u64(&mut fr, 0, restorer);
+  // The ucontext: no flags, link or alternate stack; the registers; the
+  // mask to go back to.
+  xfer_u64(&mut fr, UC_AT + 16, 0);
+  xfer_u64(&mut fr, UC_AT + 24, 2);                        // ss_flags: SS_DISABLE
+  let mut g = 0;
+  while g < 18
+    invariant g <= 18 && blen(fr) == FRAME_SIZE && kok(k)
+  {
+    xfer_u64(&mut fr, UC_AT + UC_REGS + 8 * g, pget(k.procs, p, F_REGS + sc_reg(g)));
+    g = g + 1;
+  }
+  xfer_u64(&mut fr, UC_AT + UC_REGS + 8 * 18, 0x33);        // cs
+  let was = pget(k.procs, p, F_SIGMASK);
+  xfer_u64(&mut fr, UC_AT + UC_REGS + 8 * 21, was);         // oldmask
+  xfer_u64(&mut fr, UC_AT + UC_FPPTR, base + FP_AT);
+  xfer_u64(&mut fr, UC_AT + UC_MASK, was);
+  // The siginfo: signo, errno, code (SI_USER).
+  bset(&mut fr, INFO_AT, cast[u8](s));
+  // The FPU state, as fxsave left it.
+  match take_fpu(&mut k.fpus, p) {
+    Fpu::None => {},
+    Fpu::State(f) => {
+      let mut w = 0;
+      while w < 64
+        invariant w <= 64 && blen(fr) == FRAME_SIZE
+      {
+        xfer_u64(&mut fr, FP_AT + 8 * w, frame_read(f, w));
+        w = w + 1;
+      }
+      put_fpu(&mut k.fpus, p, Fpu::State(f));
+    },
+  }
+  let put = copy_to_user(&mut k.spaces, p, base, fr, FRAME_SIZE);
+  bfree(fr);
+  if put != FRAME_SIZE {
+    return false;
+  }
+  let mut mask = was;
+  if flags & SA_NODEFER == 0 {
+    mask = mask | sbit(s);
+  }
+  pset(&mut k.procs, p, F_SIGMASK, blockable(mask | sa_get(k.sigact, p, s, 3)));
+  if flags & SA_RESETHAND != 0 {
+    sa_set(&mut k.sigact, p, s, 0, SIG_DFL);
+  }
+  pset(&mut k.procs, p, F_REGS + R_RIP, sa_get(k.sigact, p, s, 0));
+  pset(&mut k.procs, p, F_REGS + R_RSP, base);
+  pset(&mut k.procs, p, F_REGS + R_RDI, s);
+  pset(&mut k.procs, p, F_REGS + R_RSI, base + INFO_AT);
+  pset(&mut k.procs, p, F_REGS + R_RDX, base + UC_AT);
+  pset(&mut k.procs, p, F_REGS + R_RAX, 0);
+  return true;
+}
+
+/// rt_sigreturn: the handler's frame starts 8 bytes below rsp (its return
+/// address was popped). Restores the registers, the mask and the FPU
+/// state, and returns the restored rax, so the interrupted code sees it
+/// unchanged.
+fn lx_sigreturn(k: &mut Kernel, pid: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  let uc = pget(k.procs, pid, F_REGS + R_RSP);
+  let mut fr = balloc(FRAME_SIZE);
+  if uc < 8 || copy_from_user(&mut k.spaces, pid, uc, &mut fr, UC_SIZE) != UC_SIZE {
+    bfree(fr);
+    return EFAULT;
+  }
+  let fp = rd64(fr, UC_FPPTR);
+  if fp != 0 {
+    let mut fx = balloc(512);
+    if copy_from_user(&mut k.spaces, pid, fp, &mut fx, 512) == 512 {
+      match take_fpu(&mut k.fpus, pid) {
+        Fpu::None => {},
+        Fpu::State(mut f) => {
+          let mut w = 0;
+          while w < 64
+            invariant w <= 64 && blen(fx) == 512
+          {
+            let mut v = rd64(fx, 8 * w);
+            if w == 3 {
+              v = v & MXCSR_OK;               // MXCSR: no reserved bits for fxrstor
+            }
+            frame_write(&mut f, w, v);
+            w = w + 1;
+          }
+          put_fpu(&mut k.fpus, pid, Fpu::State(f));
+        },
+      }
+    }
+    bfree(fx);
+  }
+  let mut g = 0;
+  while g < 17
+    invariant g <= 17 && blen(fr) == FRAME_SIZE && kok(k)
+  {
+    pset(&mut k.procs, pid, F_REGS + sc_reg(g), rd64(fr, UC_REGS + 8 * g));
+    g = g + 1;
+  }
+  let fl = rd64(fr, UC_REGS + 8 * 17);
+  pset(&mut k.procs, pid, F_REGS + R_RFLAGS, (fl & FLAGS_USER) | 0x202);
+  pset(&mut k.procs, pid, F_SIGMASK, blockable(rd64(fr, UC_MASK)));
+  let rax = rd64(fr, UC_REGS + 8 * 13);
+  bfree(fr);
+  return rax;
+}

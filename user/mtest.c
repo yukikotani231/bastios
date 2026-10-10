@@ -1,5 +1,6 @@
 /*
- * A musl C program that uses more of Linux: malloc (brk and mmap), a file
+ * A musl C program that uses more of Linux: malloc (brk and mmap), memory
+ * well past 2 MiB (a 16 MiB mmap block and 4 MiB more brk heap), a file
  * written with stdio and read back, and a line read from the console.
  * Prints one "mtest: ..." line per check and exits with the number that
  * failed.
@@ -7,6 +8,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 int main(void) {
     int bad = 0;
@@ -23,6 +26,23 @@ int main(void) {
         printf("mtest: malloc %s %d\n", small, sum);
         free(big);
         free(small);
+    }
+
+    /* More than the old 2 MiB window: every page of a 16 MiB block from
+     * mmap and of 4 MiB of brk heap, each written and read back. */
+    char *huge = malloc(16 << 20);
+    /* musl's sbrk refuses to grow the heap, so call brk itself. */
+    char *heap = (char *)syscall(SYS_brk, 0);
+    char *end = (char *)syscall(SYS_brk, heap + (4 << 20));
+    if (!huge || end != heap + (4 << 20)) { puts("mtest: big memory failed"); bad++; }
+    else {
+        int hs = 0, bs = 0;
+        for (int i = 0; i < (16 << 20); i += 4096) huge[i] = (char)(i >> 12);
+        for (int i = 0; i < (4 << 20); i += 4096) heap[i] = (char)(i >> 12);
+        for (int i = 0; i < (16 << 20); i += 4096) hs += huge[i] == (char)(i >> 12);
+        for (int i = 0; i < (4 << 20); i += 4096) bs += heap[i] == (char)(i >> 12);
+        printf("mtest: big memory %d %d\n", hs, bs);
+        free(huge);
     }
 
     FILE *f = fopen("/mtest.txt", "w");

@@ -1,0 +1,134 @@
+// Listing directories for Linux programs (getdents64). There are two:
+// "/", holding "bin" and the file layer's files (vfs_dirent), and "/bin",
+// holding the built-in programs and BusyBox's applets. A directory
+// description remembers the index of the next entry.
+
+import "linux.bastio";
+
+const DT_DIR: u64 = 4;
+const DT_REG: u64 = 8;
+const DENT_HDR: u64 = 19;             // d_ino, d_off, d_reclen, d_type
+
+// One entry: its name is in the transfer buffer.
+struct Ent { len: u64, dir: bool, end: bool }
+
+/// Entry `i` of directory `dir`, its name copied into the start of the
+/// transfer buffer. len 0 is an unused slot; `end` is past the last.
+fn dir_entry(k: &mut Kernel, dir: u64, i: u64) -> Ent
+  requires kok(k)
+  ensures kok(k) && result.len <= XFER
+{
+  if dir == DIR_ROOT {
+    if i == 0 {
+      return Ent { len: name_out(&mut k.fs.xfer, "bin"), dir: true, end: false };
+    }
+    let n = vfs_dirent(&mut k.fs, i - 1);
+    if n == NO_FILE {
+      return Ent { len: 0, dir: false, end: true };
+    }
+    return Ent { len: n, dir: false, end: false };
+  }
+  if i < NPROGS {
+    return Ent { len: name_out(&mut k.fs.xfer, prog_name(i)), dir: false, end: false };
+  }
+  if i - NPROGS < NAPPLETS {
+    return Ent { len: name_out(&mut k.fs.xfer, applet_name(i - NPROGS)), dir: false, end: false };
+  }
+  return Ent { len: 0, dir: false, end: true };
+}
+
+/// Copies `name` (up to FNAME_MAX bytes) into the start of x.
+fn name_out(x: &mut Bytes, name: Str) -> u64
+  requires blen(x) == XFER
+  ensures blen(x) == XFER && result <= FNAME_MAX
+{
+  let n = smaller(slen(name), FNAME_MAX);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= FNAME_MAX && blen(x) == XFER
+  {
+    bset(&mut x, i, sget(name, i));
+    i = i + 1;
+  }
+  return n;
+}
+
+/// getdents64(fd, buf, count): as many struct linux_dirent64 records as
+/// fit in count bytes (and DENT_BUF), from where the last call stopped.
+/// Returns the bytes filled, 0 at the end, or -errno.
+fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let v = fd_get(k.lxfd, pid, fd) % FD_CLOEXEC;
+  if v < FD_OFD || v - FD_OFD >= OFD_N {
+    if v == FD_CONSOLE {
+      return ENOTDIR;
+    }
+    return EBADF;
+  }
+  let h = v - FD_OFD;
+  if of_get(k.ofd, h, 0) != OF_DIR {
+    return ENOTDIR;
+  }
+  let dir = of_get(k.ofd, h, 2);
+  let cap = smaller(count, DENT_BUF);
+  let mut out = balloc(DENT_BUF);
+  let mut used = 0;
+  let mut i = of_get(k.ofd, h, 3);
+  let mut more = true;
+  while more && i < 0x100000000
+    invariant used <= cap && cap <= DENT_BUF && blen(out) == DENT_BUF && kok(k)
+  {
+    let e = dir_entry(&mut k, dir, i);
+    if e.end {
+      more = false;
+    } else if e.len == 0 {
+      i = i + 1;
+    } else {
+      // The record: header, name, NUL, padded to 8 bytes.
+      let reclen = (DENT_HDR + e.len + 1 + 7) / 8 * 8;
+      if reclen > cap - used {
+        more = false;
+      } else {
+        let mut z = 0;
+        while z < reclen
+          invariant z <= reclen && used + reclen <= cap && cap <= DENT_BUF && blen(out) == DENT_BUF
+        {
+          bset(&mut out, used + z, 0);
+          z = z + 1;
+        }
+        xfer_u64(&mut out, used, i + 1);              // d_ino
+        xfer_u64(&mut out, used + 8, i + 1);          // d_off: the next entry
+        bset(&mut out, used + 16, cast[u8](reclen % 256));      // d_reclen
+        bset(&mut out, used + 17, cast[u8](reclen / 256 % 256));
+        if e.dir {
+          bset(&mut out, used + 18, cast[u8](DT_DIR));
+        } else {
+          bset(&mut out, used + 18, cast[u8](DT_REG));
+        }
+        let mut j = 0;
+        while j < e.len
+          invariant j <= e.len && e.len <= XFER && DENT_HDR + e.len < reclen
+          invariant used + reclen <= cap && cap <= DENT_BUF && blen(out) == DENT_BUF && kok(k)
+        {
+          bset(&mut out, used + DENT_HDR + j, bget(k.fs.xfer, j));
+          j = j + 1;
+        }
+        used = used + reclen;
+        i = i + 1;
+      }
+    }
+  }
+  if used == 0 && more {
+    bfree(out);
+    return EINVAL;                          // not even one entry fits
+  }
+  let put = copy_to_user(&mut k.spaces, pid, va, out, used);
+  bfree(out);
+  if put != used {
+    return EFAULT;
+  }
+  of_set(&mut k.ofd, h, 3, i);
+  return used;
+}

@@ -30,14 +30,14 @@ const SEG_LOAD: u64 = 1;              // a PT_LOAD that fits the window
 const SEG_BAD: u64 = 2;               // malformed, or something we cannot run
 
 // The initial stack lives in the window's top page.
-const STACK_PAGE: u64 = 511;
+const STACK_PAGE: u64 = 16383;       // WPAGES - 1
 const SP_WORD: u64 = 256;             // rsp points at word 256 of that page
 const ARGS_AT: u64 = 2752;            // argument and environment strings, above the vectors
 const ARGS_MAX: u64 = 1280;           // their bytes, NULs included (up to RANDOM_AT)
 const ARGV_MAX: u64 = 32;             // the most arguments
 const ENVC_MAX: u64 = 16;             // the most environment strings
 const RANDOM_AT: u64 = 4032;          // the 16 bytes AT_RANDOM points at
-const ELF_SP: u64 = 0x1FF800;         // window offset of rsp: page 511, word 256
+const ELF_SP: u64 = 0x3FFF800;        // window offset of rsp: page STACK_PAGE, word 256
 
 /// Where an executable's bytes come from: built-in image `prog`, or file
 /// `f` of the file layer; `size` bytes either way.
@@ -253,50 +253,40 @@ fn on_page(a: u64, left: u64) -> u64
 }
 
 /// Copies the `n` bytes at offset `from` of `src` to window offset `off`,
-/// XFER bytes at a time. A page `l1` does not map is skipped (`new_l1`
-/// maps them all). Returns false if the bytes could not all be read.
-fn copy_in(l1: &mut PageTable, v: &mut Vfs, src: Src, from: u64, off: u64, n: u64) -> bool
-  requires pt_level(l1) == 1 && vfs_ok(v) && off + n <= IMAGE_MAX && from + n <= src.size
-  ensures pt_level(l1) == 1 && vfs_ok(v)
+/// XFER bytes at a time. A page the window does not map is skipped
+/// (`new_window` maps them all). Returns false if the bytes could not all
+/// be read.
+fn copy_in(l2: &mut PageTable, v: &mut Vfs, src: Src, from: u64, off: u64, n: u64) -> bool
+  requires pt_level(l2) == 2 && vfs_ok(v) && off + n <= IMAGE_MAX && from + n <= src.size
+  ensures pt_level(l2) == 2 && vfs_ok(v)
 {
   let mut k = 0;
   while k < n
-    invariant k <= n && pt_level(l1) == 1 && vfs_ok(v)
+    invariant k <= n && pt_level(l2) == 2 && vfs_ok(v)
   {
     let c = smaller(n - k, XFER);
     if !src_read(&mut v, src, from + k, c) {
       return false;
     }
-    put_window(&mut l1, v.xfer, off + k, c);
+    put_window(&mut l2, v.xfer, off + k, c);
     k = k + c;
   }
   return true;
 }
 
 /// Copies the first `n` bytes of `x` to window offset `off`, a page at a
-/// time; pages `l1` does not map are skipped.
-fn put_window(l1: &mut PageTable, x: &Bytes, off: u64, n: u64)
-  requires pt_level(l1) == 1 && n <= blen(x) && off + n <= IMAGE_MAX
-  ensures pt_level(l1) == 1
+/// time; pages the window does not map are skipped.
+fn put_window(l2: &mut PageTable, x: &Bytes, off: u64, n: u64)
+  requires pt_level(l2) == 2 && n <= blen(x) && off + n <= IMAGE_MAX
+  ensures pt_level(l2) == 2
 {
   let mut k = 0;
   while k < n
-    invariant k <= n && pt_level(l1) == 1
+    invariant k <= n && pt_level(l2) == 2
   {
     let a = off + k;
     let m = on_page(a, n - k);
-    let p = a / 4096;
-    if pt_has(l1, p) {
-      let mut f = pt_take_frame(&mut l1, p);
-      let mut j = 0;
-      while j < m
-        invariant j <= m
-      {
-        frame_write8(&mut f, a % 4096 + j, bget(x, k + j));
-        j = j + 1;
-      }
-      pt_put_frame(&mut l1, p, f, true);
-    }
+    w_write(&mut l2, a, x, k, m);
     k = k + m;
   }
 }
@@ -382,32 +372,37 @@ fn elf_space(m: &mut Mem, v: &mut Vfs, src: Src, e: Elf, args: &Bytes, alen: u64
   ensures mem_ok(m) && vfs_ok(v)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
-  match new_l1(&mut m, "", (e.end + 4095) / 4096) {
+  match new_window(&mut m, "", (e.end + 4095) / 4096) {
     Space::Empty => { return Space::Empty; },
-    Space::Mapped(mut l1) => {
+    Space::Mapped(mut l2) => {
       let mut i = 0;
       let mut ok = true;
       while ok && i < e.phnum
-        invariant i <= e.phnum && e.phnum <= PH_MAX && pt_level(l1) == 1 && vfs_ok(v)
+        invariant i <= e.phnum && e.phnum <= PH_MAX && pt_level(l2) == 2 && vfs_ok(v)
       {
         let s = seg(&mut v, src, e.phoff, i, e.bias);
         if s.kind == SEG_LOAD {
-          ok = copy_in(&mut l1, &mut v, src, s.from, s.off, s.filesz);
+          ok = copy_in(&mut l2, &mut v, src, s.from, s.off, s.filesz);
         } else if s.kind == SEG_BAD {
           ok = false;                       // the file changed since elf_parse
         }
         i = i + 1;
       }
       if !ok {
-        free_l1(&mut m, l1);
+        free_l2(&mut m, l2);
         return Space::Empty;
       }
-      if pt_has(l1, STACK_PAGE) {
-        let mut f = pt_take_frame(&mut l1, STACK_PAGE);
-        init_stack(&mut f, e, args, alen, total, seed);
-        pt_put_frame(&mut l1, STACK_PAGE, f, true);
+      let t = STACK_PAGE / 512;
+      if pt_has(l2, t) {
+        let mut l1 = pt_take(&mut l2, t);
+        if pt_has(l1, STACK_PAGE % 512) {
+          let mut f = pt_take_frame(&mut l1, STACK_PAGE % 512);
+          init_stack(&mut f, e, args, alen, total, seed);
+          pt_put_frame(&mut l1, STACK_PAGE % 512, f, true);
+        }
+        pt_put(&mut l2, t, l1);
       }
-      return space_from_l1(&mut m, l1);
+      return space_from_l2(&mut m, l2);
     },
   }
 }

@@ -1,0 +1,319 @@
+// Linux UDP sockets, over the kernel's sockets in src/net.bastio. A socket
+// descriptor names an open file description of kind OF_SOCK whose x is
+// the kernel socket. Its word 3 is 2 * peer + nonblocking, where peer is
+// 65536 * address + port as set by connect (0: not connected).
+
+import "linux.bastio";
+
+const LX_SOCKET: u64 = 41;
+const LX_CONNECT: u64 = 42;
+const LX_SENDTO: u64 = 44;
+const LX_RECVFROM: u64 = 45;
+const LX_BIND: u64 = 49;
+const LX_GETSOCKNAME: u64 = 51;
+const LX_GETPEERNAME: u64 = 52;
+const LX_SETSOCKOPT: u64 = 54;
+
+const AF_INET: u64 = 2;
+const SOCK_DGRAM: u64 = 2;
+const IPPROTO_UDP: u64 = 17;
+const SOCK_NONBLOCK: u64 = 0x800;
+const SOCK_CLOEXEC: u64 = 0x80000;
+const MSG_DONTWAIT: u64 = 0x40;
+const SIN_LEN: u64 = 16;               // struct sockaddr_in
+
+const ENOTSOCK: u64 = 18446744073709551528;        // 2^64 - 88
+const EDESTADDRREQ: u64 = 18446744073709551527;    // 2^64 - 89
+const EMSGSIZE: u64 = 18446744073709551526;        // 2^64 - 90
+const EPROTONOSUPPORT: u64 = 18446744073709551523; // 2^64 - 93
+const EAFNOSUPPORT: u64 = 18446744073709551519;    // 2^64 - 97
+const EADDRINUSE: u64 = 18446744073709551518;      // 2^64 - 98
+const ENETUNREACH: u64 = 18446744073709551515;     // 2^64 - 101
+const ENOBUFS: u64 = 18446744073709551511;         // 2^64 - 105
+const ENOTCONN: u64 = 18446744073709551509;        // 2^64 - 107
+
+// A socket descriptor: its description h and kernel socket s, or err.
+struct Sk { err: u64, h: u64, s: u64 }
+
+// An address: ip and port, or err.
+struct Sin { err: u64, ip: u64, port: u64 }
+
+fn sk_look(k: &Kernel, pid: u64, fd: u64) -> Sk
+  requires kok(k) && pid < NPROC
+  ensures result.err == 0 ==> (result.h < OFD_N && result.s < SOCKS)
+{
+  let v = fd_get(k.lxfd, pid, fd) % FD_CLOEXEC;
+  if v == 0 {
+    return Sk { err: EBADF, h: 0, s: 0 };
+  }
+  if v < FD_OFD || v - FD_OFD >= OFD_N {
+    return Sk { err: ENOTSOCK, h: 0, s: 0 };
+  }
+  let h = v - FD_OFD;
+  let s = of_get(k.ofd, h, 2);
+  if of_get(k.ofd, h, 0) != OF_SOCK || s >= SOCKS {
+    return Sk { err: ENOTSOCK, h: 0, s: 0 };
+  }
+  return Sk { err: 0, h: h, s: s };
+}
+
+/// Reads the struct sockaddr_in at user address va (alen bytes long).
+fn sin_in(k: &mut Kernel, pid: u64, va: u64, alen: u64) -> Sin
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result.err == 0 ==> (result.ip <= 4294967295 && result.port <= 65535)
+{
+  if alen < 8 {
+    return Sin { err: EINVAL, ip: 0, port: 0 };
+  }
+  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 8) != 8 {
+    return Sin { err: EFAULT, ip: 0, port: 0 };
+  }
+  if cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1)) != AF_INET {
+    return Sin { err: EAFNOSUPPORT, ip: 0, port: 0 };
+  }
+  // The port and the address are in network byte order.
+  let port = 256 * cast[u64](bget(k.fs.xfer, 2)) + cast[u64](bget(k.fs.xfer, 3));
+  let ip = 0x1000000 * cast[u64](bget(k.fs.xfer, 4)) + 0x10000 * cast[u64](bget(k.fs.xfer, 5)) + 0x100 * cast[u64](bget(k.fs.xfer, 6)) + cast[u64](bget(k.fs.xfer, 7));
+  return Sin { err: 0, ip: ip, port: port };
+}
+
+/// Writes ip:port as a struct sockaddr_in to user address va, where the
+/// u32 at user address lenp says how much room there is, and sets that to
+/// SIN_LEN. Nothing if va is 0. Returns 0 or -EFAULT.
+fn sin_out(k: &mut Kernel, pid: u64, va: u64, lenp: u64, ip: u64, port: u64) -> u64
+  requires kok(k) && pid < NPROC && ip <= 4294967295 && port <= 65535
+  ensures kok(k)
+{
+  if va == 0 {
+    return 0;
+  }
+  if copy_from_user(&mut k.spaces, pid, lenp, &mut k.fs.xfer, 4) != 4 {
+    return EFAULT;
+  }
+  let room = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1)) + 65536 * cast[u64](bget(k.fs.xfer, 2)) + 16777216 * cast[u64](bget(k.fs.xfer, 3));
+  lx_fill(&mut k, 0, SIN_LEN);
+  bset(&mut k.fs.xfer, 0, cast[u8](AF_INET));
+  bset(&mut k.fs.xfer, 2, cast[u8](port / 256));
+  bset(&mut k.fs.xfer, 3, cast[u8](port % 256));
+  bset(&mut k.fs.xfer, 4, cast[u8](ip / 0x1000000));
+  bset(&mut k.fs.xfer, 5, cast[u8](ip / 0x10000 % 256));
+  bset(&mut k.fs.xfer, 6, cast[u8](ip / 0x100 % 256));
+  bset(&mut k.fs.xfer, 7, cast[u8](ip % 256));
+  let n = smaller(room, SIN_LEN);
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {
+    return EFAULT;
+  }
+  lx_fill(&mut k, 0, 4);
+  bset(&mut k.fs.xfer, 0, cast[u8](SIN_LEN));
+  if copy_to_user(&mut k.spaces, pid, lenp, k.fs.xfer, 4) != 4 {
+    return EFAULT;
+  }
+  return 0;
+}
+
+/// socket(domain, type, protocol): only AF_INET datagram (UDP) sockets.
+fn lx_socket(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if domain != AF_INET {
+    return EAFNOSUPPORT;
+  }
+  if kind % 16 != SOCK_DGRAM || (proto != 0 && proto != IPPROTO_UDP) {
+    return EPROTONOSUPPORT;
+  }
+  let s = sock_new(&mut k.nic);
+  if s >= SOCKS {
+    return ENOBUFS;                         // every socket taken, or no network card
+  }
+  let h = ofd_new(&mut k, OF_SOCK, s);
+  if h >= OFD_N {
+    sock_close(&mut k.nic, s);
+    return ENFILE;
+  }
+  of_set(&mut k.ofd, h, 3, kind / SOCK_NONBLOCK % 2);
+  let fd = fd_install(&mut k, pid, h);
+  if fd < LXNFD && kind / SOCK_CLOEXEC % 2 == 1 {
+    fd_set(&mut k.lxfd, pid, fd, FD_OFD + h + FD_CLOEXEC);
+  }
+  return fd;
+}
+
+/// bind(fd, addr, len): the port only; the address is ignored (there is
+/// one).
+fn lx_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let sk = sk_look(k, pid, fd);
+  if sk.err != 0 {
+    return sk.err;
+  }
+  let sin = sin_in(&mut k, pid, addr, alen);
+  if sin.err != 0 {
+    return sin.err;
+  }
+  if sock_port(k.nic, sk.s) != 0 {
+    return EINVAL;                          // already bound
+  }
+  if !sock_bind(&mut k.nic, sk.s, sin.port) {
+    return EADDRINUSE;
+  }
+  return 0;
+}
+
+/// connect(fd, addr, len): sets where send and write go. Datagrams from
+/// elsewhere are still received.
+fn lx_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let sk = sk_look(k, pid, fd);
+  if sk.err != 0 {
+    return sk.err;
+  }
+  let sin = sin_in(&mut k, pid, addr, alen);
+  if sin.err != 0 {
+    return sin.err;
+  }
+  if sin.port == 0 {
+    return EINVAL;
+  }
+  let nb = of_get(k.ofd, sk.h, 3) % 2;
+  of_set(&mut k.ofd, sk.h, 3, 2 * (65536 * sin.ip + sin.port) + nb);
+  return 0;
+}
+
+/// sendto(fd, buf, n, flags, addr, alen); with addr 0, to the connected
+/// peer (send and write). One datagram of at most UDP_MAX bytes.
+fn lx_sendto(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, addr: u64, alen: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let sk = sk_look(k, pid, fd);
+  if sk.err != 0 {
+    return sk.err;
+  }
+  let mut ip = 0;
+  let mut port = 0;
+  if addr == 0 {
+    let peer = of_get(k.ofd, sk.h, 3) / 2;
+    if peer == 0 {
+      return EDESTADDRREQ;
+    }
+    ip = peer / 65536;
+    port = peer % 65536;
+  } else {
+    let sin = sin_in(&mut k, pid, addr, alen);
+    if sin.err != 0 {
+      return sin.err;
+    }
+    ip = sin.ip;
+    port = sin.port;
+  }
+  if n > UDP_MAX {
+    return EMSGSIZE;
+  }
+  if copy_from_user(&mut k.spaces, pid, buf, &mut k.fs.xfer, n) != n {
+    return EFAULT;
+  }
+  let r = sock_sendto(&mut k.nic, sk.s, ip, port, k.fs.xfer, n);
+  if r == NO_SOCK {
+    return ENETUNREACH;                     // no route, no free port, or port 0
+  }
+  return r;
+}
+
+/// recvfrom(fd, buf, n, flags, addr, alenp); recv and read too. Takes one
+/// datagram (the part past n is dropped, as Linux does). Returns its
+/// length, -EAGAIN if none is queued and the caller must not wait, or
+/// SK_WAIT if it must.
+fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: u64, alenp: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let sk = sk_look(k, pid, fd);
+  if sk.err != 0 {
+    return sk.err;
+  }
+  let got = sock_recvfrom(&mut k.nic, sk.s, &mut k.fs.xfer, smaller(n, XFER));
+  if got == NO_SOCK {
+    if flags / MSG_DONTWAIT % 2 == 1 || of_get(k.ofd, sk.h, 3) % 2 == 1 {
+      return EAGAIN;
+    }
+    return SK_WAIT;
+  }
+  if copy_to_user(&mut k.spaces, pid, buf, k.fs.xfer, got) != got {
+    return EFAULT;
+  }
+  let ip = sock_peer_ip(k.nic, sk.s);
+  let port = sock_peer_port(k.nic, sk.s);
+  let r = sin_out(&mut k, pid, addr, alenp, ip, port);
+  if r != 0 {
+    return r;
+  }
+  return got;
+}
+
+/// getsockname (the bound port; the address reads as 0.0.0.0) and
+/// getpeername (the connected peer).
+fn lx_sockname(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let sk = sk_look(k, pid, fd);
+  if sk.err != 0 {
+    return sk.err;
+  }
+  if !peer {
+    return sin_out(&mut k, pid, addr, lenp, 0, sock_port(k.nic, sk.s));
+  }
+  let p = of_get(k.ofd, sk.h, 3) / 2;
+  if p == 0 {
+    return ENOTCONN;
+  }
+  let ip = p / 65536;
+  if ip > 4294967295 {
+    return ENOTCONN;
+  }
+  return sin_out(&mut k, pid, addr, lenp, ip, p % 65536);
+}
+
+/// The socket system calls. Returns KEEP or SWITCH, as linux_syscall does.
+fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  let d = pget(k.procs, pid, F_REGS + R_R10);
+  let e = pget(k.procs, pid, F_REGS + R_R8);
+  let f = pget(k.procs, pid, F_REGS + R_R9);
+  let mut r = ENOSYS;
+  if n == LX_SOCKET {
+    r = lx_socket(&mut k, pid, a, b, c);
+  } else if n == LX_BIND {
+    r = lx_bind(&mut k, pid, a, b, c);
+  } else if n == LX_CONNECT {
+    r = lx_connect(&mut k, pid, a, b, c);
+  } else if n == LX_SENDTO {
+    r = lx_sendto(&mut k, pid, a, b, c, e, f);
+  } else if n == LX_RECVFROM {
+    r = lx_recvfrom(&mut k, pid, a, b, c, d, e, f);
+    if r == SK_WAIT {
+      return lx_retry(&mut k, pid, n);       // nothing queued yet: wait for a datagram
+    }
+  } else if n == LX_GETSOCKNAME || n == LX_GETPEERNAME {
+    r = lx_sockname(&mut k, pid, a, b, c, n == LX_GETPEERNAME);
+  } else if n == LX_SETSOCKOPT {
+    // Accepted and ignored (SO_REUSEADDR and the like), on a socket.
+    let sk = sk_look(k, pid, a);
+    r = sk.err;
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}
+
+fn is_sock_call(n: u64) -> bool {
+  return n == LX_SOCKET || n == LX_BIND || n == LX_CONNECT || n == LX_SENDTO || n == LX_RECVFROM
+    || n == LX_GETSOCKNAME || n == LX_GETPEERNAME || n == LX_SETSOCKOPT;
+}
