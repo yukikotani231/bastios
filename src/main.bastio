@@ -12,6 +12,7 @@ import "uart.bastio";
 import "pic.bastio";
 import "pit.bastio";
 import "hpet.bastio";
+import "tsc.bastio";
 import "lapic.bastio";
 import "rtc.bastio";
 import "console.bastio";
@@ -267,14 +268,14 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
 }
 
 /// Under the lock, after an idle wait ended with vector `v`.
-fn idled(s: &mut Sys, v: u64)
+fn idled(s: &mut Sys, cpu: &Cpu, v: u64)
   requires sys_ok(s)
   ensures sys_ok(s)
 {
   ack(&mut s.pic, &mut s.apic, v);
   if v == V_TIMER {
     s.k.ticks = tick(s.k.ticks);
-    s.k.ns = clock_ns(&mut s.clock, &mut s.acpi);
+    s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
     lx_alarms(&mut s.k);
     power_button(&mut s);
   }
@@ -320,7 +321,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   if v == V_TIMER || v == V_LTIMER {
     pset(&mut s.k.procs, p, F_TICKS, tick(pget(s.k.procs, p, F_TICKS)));
     cpu_timers_tick(&mut s.k, p);
-    s.k.ns = clock_ns(&mut s.clock, &mut s.acpi);
+    s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
     lx_alarms(&mut s.k);
     if v == V_TIMER {
       power_button(&mut s);
@@ -328,7 +329,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     return (p + 1) % NPROC;
   }
   if v == V_SYSCALL {
-    s.k.ns = clock_ns(&mut s.clock, &mut s.acpi);
+    s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
     s.k.fs.now = sat_add(s.k.epoch, s.k.ns) / 1000000000;   // wall-clock seconds, as stat reports them
     let what = syscall(&mut s.con, &mut s.k, mmu, p);
     if what == POWEROFF || what == REBOOT {
@@ -345,7 +346,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     return (p + 1) % NPROC;
   }
   if v == V_LINUX {
-    s.k.ns = clock_ns(&mut s.clock, &mut s.acpi);
+    s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
     s.k.fs.now = sat_add(s.k.epoch, s.k.ns) / 1000000000;   // wall-clock seconds, as stat reports them
     let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
     call_done(&mut s.k, p);
@@ -440,11 +441,11 @@ fn next_job_p(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool, 
 }
 
 /// `idled`, then publishes how much console output waits in `pend`.
-fn idled_p(s: &mut Sys, v: u64, pend: &Atomic[u64])
+fn idled_p(s: &mut Sys, cpu: &Cpu, v: u64, pend: &Atomic[u64])
   requires sys_ok(s)
   ensures sys_ok(s)
 {
-  idled(&mut s, v);
+  idled(&mut s, cpu, v);
   atomic_store(pend, s.con.r.n);
 }
 
@@ -582,7 +583,7 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
         // processor is at it, else sleep until an interrupt.
         if atomic_load(pend) == 0 || atomic_load(pumping) {
           let v = cpu_idle(&mut cpu);
-          locked(s, idled_p, v, pend);
+          locked(s, idled_p, cpu, v, pend);
         }
         try_pump(u, s, pumping, pend);
         j = locked(s, next_job_p, &mut cpu, &mut mmu, cur, true, true, pend, others);
@@ -835,16 +836,17 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     reset_reg = mmio_claim(&mut win, r, 1);
   }
   let mut clock = hpet_init(mmio_claim(&mut win, hpet_at, HPET_LEN), hpet_there);
+  let tsc = tsc_calibrate(cpu, &mut clock, &mut acpi);
   let apic = lapic_new(mmio_claim(&mut win, LAPIC, LAPIC_LEN), boot_info(cpu, INFO_SMP, 3) == APIC_XAPIC);
   let mut msi = 0;
   if apic.on {
     msi = lapic_msi_addr(apic);
   }
-  // The wall clock: the RTC's reading, less the HPET time it was read at,
-  // so CLOCK_REALTIME = epoch + the HPET clock.
+  // The wall clock: the RTC's reading, less the time since boot it was
+  // read at, so CLOCK_REALTIME = epoch + the clock (src/tsc.bastio).
   let wall = rtc_seconds(&mut rtc) * 1000000000;
-  port_release(&mut ports, rtc.io);         // read once; the HPET keeps time from here
-  let at = clock_ns(&mut clock, &mut acpi);
+  port_release(&mut ports, rtc.io);         // read once; the clock keeps time from here
+  let at = tsc_now(tsc, 0, cpu);
   let mut epoch = 0;
   if wall > at {
     epoch = wall - at;
@@ -1016,7 +1018,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     q = q + 1;
   }
   let shm = new_store(&mut m);
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: 0, epoch: epoch, rng: epoch ^ at, cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), inet6: 0, locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, sys: alloc(SYS_LEN) };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: epoch ^ at, cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), inet6: 0, locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, sys: alloc(SYS_LEN) };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");

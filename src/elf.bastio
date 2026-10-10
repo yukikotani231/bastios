@@ -17,6 +17,7 @@ import "pages.bastio";
 import "space.bastio";
 import "fs.bastio";
 import "core/endian.bastio";
+import "tsc.bastio";
 
 const ELF_HDR: u64 = 64;              // size of the ELF64 file header
 const PH_SIZE: u64 = 56;              // size of an ELF64 program header
@@ -44,6 +45,12 @@ const ARGV_MAX: u64 = 32;             // the most arguments
 const ENVC_MAX: u64 = 16;             // the most environment strings
 const RANDOM_AT: u64 = 4032;          // the 16 bytes AT_RANDOM points at
 const ELF_SP: u64 = 0x3FFF800;        // window offset of rsp: page STACK_PAGE, word 256
+// The vDSO (user/vdso.c): one read-only page just below the stack, holding
+// the image and, from byte VDSO_DATA, the clock it reads (src/tsc.bastio).
+const VDSO_PAGE: u64 = 16127;         // STACK_FIRST - 1
+const VDSO_DATA: u64 = 496;           // word of the page: mult, base, at, epoch
+const AT_SYSINFO_EHDR: u64 = 33;
+const AT_IGNORE: u64 = 1;
 
 /// Where an executable's bytes come from: built-in image `prog`, or file
 /// `f` of the file layer; `size` bytes either way.
@@ -328,7 +335,7 @@ fn put_window(l2: &mut PageTable, x: &Bytes, off: u64, n: u64)
 /// arguments past ARGV_MAX and strings past ENVC_MAX are not passed).
 /// `seed` fills the AT_RANDOM bytes; it is not a source of secure
 /// randomness. `base` is where the interpreter was placed, or 0.
-fn init_stack(f: &mut Frame, e: Elf, base: u64, args: &Bytes, alen: u64, total: u64, seed: u64)
+fn init_stack(f: &mut Frame, e: Elf, base: u64, vdso: bool, args: &Bytes, alen: u64, total: u64, seed: u64)
   requires alen <= total && total <= ARGS_MAX && total <= blen(args)
 {
   let top = USER_BASE + STACK_PAGE * 4096;
@@ -383,7 +390,43 @@ fn init_stack(f: &mut Frame, e: Elf, base: u64, args: &Bytes, alen: u64, total: 
   aux(&mut f, v + 22, 17, 100);                    // AT_CLKTCK: the timer runs at 100 Hz
   aux(&mut f, v + 24, 23, 0);                      // AT_SECURE
   aux(&mut f, v + 26, 25, top + RANDOM_AT);        // AT_RANDOM
-  aux(&mut f, v + 28, 0, 0);                       // AT_NULL
+  if vdso {
+    aux(&mut f, v + 28, AT_SYSINFO_EHDR, USER_BASE + VDSO_PAGE * 4096);
+  } else {
+    aux(&mut f, v + 28, AT_IGNORE, 0);
+  }
+  aux(&mut f, v + 30, 0, 0);                       // AT_NULL
+}
+
+/// Fills the vDSO page: the image, then the clock it reads.
+fn vdso_fill(f: &mut Frame, t: Tsc, epoch: u64) {
+  copy_page(&mut f, include_bytes("../build/user/vdso.so"), 0);
+  frame_write(&mut f, VDSO_DATA, t.mult);
+  frame_write(&mut f, VDSO_DATA + 1, t.base);
+  frame_write(&mut f, VDSO_DATA + 2, t.at);
+  frame_write(&mut f, VDSO_DATA + 3, epoch);
+}
+
+/// Maps the vDSO, read-only, at window page VDSO_PAGE (which must not be
+/// mapped yet). False if memory ran out.
+fn vdso_map(m: &mut Mem, l2: &mut PageTable, t: Tsc, epoch: u64) -> bool
+  requires mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0
+  ensures mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0
+{
+  if !w_map(&mut m, &mut l2, VDSO_PAGE, false) {
+    return false;
+  }
+  let i = VDSO_PAGE / 512;
+  if pt_has(l2, i) {
+    let mut l1 = pt_take(&mut l2, i);
+    if pt_has(l1, VDSO_PAGE % 512) && !pt_shared(l1, VDSO_PAGE % 512) {
+      let mut f = pt_take_frame(&mut l1, VDSO_PAGE % 512);
+      vdso_fill(&mut f, t, epoch);
+      pt_put_frame(&mut l1, VDSO_PAGE % 512, f, false);
+    }
+    pt_put(&mut l2, i, l1);
+  }
+  return true;
 }
 
 fn aux(f: &mut Frame, w: u64, key: u64, v: u64)
@@ -398,7 +441,7 @@ fn aux(f: &mut Frame, w: u64, key: u64, v: u64)
 /// `isrc` too when `ie` is ok, and a stack holding argv, envp and the
 /// auxiliary vector. Returns `Space::Empty`, with every page given back,
 /// when memory runs out.
-fn elf_space(m: &mut Mem, v: &mut Vfs, src: Src, e: Elf, isrc: Src, ie: Elf, args: &Bytes, alen: u64, total: u64, seed: u64) -> Space
+fn elf_space(m: &mut Mem, v: &mut Vfs, src: Src, e: Elf, isrc: Src, ie: Elf, args: &Bytes, alen: u64, total: u64, seed: u64, clk: Tsc, epoch: u64) -> Space
   requires mem_ok(m) && vfs_ok(v) && e.ok && elf_fits(src.size, e) && elf_fits(isrc.size, ie)
   requires alen <= total && total <= ARGS_MAX && total <= blen(args)
   ensures mem_ok(m) && vfs_ok(v)
@@ -446,6 +489,12 @@ fn elf_space(m: &mut Mem, v: &mut Vfs, src: Src, e: Elf, isrc: Src, ie: Elf, arg
         }
         j = j + 1;
       }
+      // The vDSO, unless the program's own pages reach that high.
+      let mut vdso = false;
+      if ok && !w_has(&mut l2, VDSO_PAGE) {
+        ok = vdso_map(&mut m, &mut l2, clk, epoch);
+        vdso = true;
+      }
       if !ok {
         free_l2(&mut m, l2);
         return Space::Empty;
@@ -459,7 +508,7 @@ fn elf_space(m: &mut Mem, v: &mut Vfs, src: Src, e: Elf, isrc: Src, ie: Elf, arg
         let mut l1 = pt_take(&mut l2, t);
         if pt_has(l1, STACK_PAGE % 512) && !pt_shared(l1, STACK_PAGE % 512) {
           let mut f = pt_take_frame(&mut l1, STACK_PAGE % 512);
-          init_stack(&mut f, e, base, args, alen, total, seed);
+          init_stack(&mut f, e, base, vdso, args, alen, total, seed);
           pt_put_frame(&mut l1, STACK_PAGE % 512, f, true);
         }
         pt_put(&mut l2, t, l1);

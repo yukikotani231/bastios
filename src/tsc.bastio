@@ -1,0 +1,118 @@
+// The clock: each processor's time-stamp counter, scaled to nanoseconds
+// with a rate measured at boot against the HPET (or, without one, the ACPI
+// PM timer). The kernel reads it under the lock (k.ns), and Linux programs read the same counter with
+// the same arithmetic in user mode, through the vDSO (user/vdso.c), whose
+// page holds a copy of the Tsc below. So a time a program reads there and
+// one the kernel compares with it come from one clock.
+//
+// The proof knows nothing about the counter (cpu_tsc returns any number):
+// that it counts at a steady rate, and that the processors' counters
+// agree, is trusted to the hardware (an invariant TSC; under QEMU's TCG
+// every processor reads the host's). k.ns is kept from going back.
+
+import "hpet.bastio";
+
+const NS_CALIBRATE: u64 = 10000000;    // 10 ms of clock_ns time to measure the rate over
+const CALIBRATE_SPINS: u64 = 100000000; // clock reads before giving up on it
+const MULT_MAX: u64 = 1099511627776;   // 2^40: a counter slower than 4 MHz is not used
+const TWO32: u64 = 4294967296;
+const NS_MAX: u64 = 18446744073709551615;
+
+// ns = at + (counter - base) * mult / 2^32; mult 0 means there is no clock
+// to measure the rate against, and the time stays 0.
+struct Tsc { base: u64, mult: u64, at: u64 }
+
+/// d * mult / 2^32, rounded down, or NS_MAX if that does not fit (after
+/// centuries). Split in 32-bit halves so no step overflows; user/vdso.c
+/// does the same steps.
+fn tsc_scale(d: u64, mult: u64) -> u64
+  requires mult < MULT_MAX
+{
+  let hi = d / TWO32;
+  let lo = d % TWO32;
+  let mh = mult / TWO32;
+  let ml = mult % TWO32;
+  // d * mult / 2^32 = hi*mh*2^32 + hi*ml + lo*mh + lo*ml/2^32. Each
+  // product is checked against the bound by division first, as hpet_ns
+  // does.
+  if hi != 0 && mh != 0 {
+    return NS_MAX;
+  }
+  if ml != 0 && hi > NS_MAX / ml {
+    return NS_MAX;
+  }
+  let a = hi * ml;
+  if mh != 0 && lo > NS_MAX / mh {
+    return NS_MAX;
+  }
+  let b = lo * mh;
+  if ml != 0 && lo > NS_MAX / ml {
+    return NS_MAX;
+  }
+  let c = lo * ml / TWO32;
+  if a > NS_MAX - b {
+    return NS_MAX;
+  }
+  if a + b > NS_MAX - c {
+    return NS_MAX;
+  }
+  return a + b + c;
+}
+
+/// The time the counter reading `now` stands for, in ns since boot.
+fn tsc_ns(t: Tsc, now: u64) -> u64 {
+  if t.mult == 0 || t.mult >= MULT_MAX || now < t.base {
+    return t.at;
+  }
+  let d = tsc_scale(now - t.base, t.mult);
+  if d > NS_MAX - t.at {
+    return NS_MAX;
+  }
+  return t.at + d;
+}
+
+/// Measures the counter's rate over NS_CALIBRATE of clock_ns time (the HPET,
+/// else the ACPI PM timer). With neither, the clock stays at 0.
+fn tsc_calibrate(cpu: &Cpu, h: &mut Hpet, a: &mut Acpi) -> Tsc
+  requires hpet_ok(h) && acpi_ok(a)
+  ensures hpet_ok(h) && acpi_ok(a)
+{
+  let none = Tsc { base: 0, mult: 0, at: 0 };
+  let h0 = clock_ns(&mut h, &mut a);
+  let t0 = cpu_tsc(cpu);
+  if h0 >= NS_MAX - NS_CALIBRATE {
+    return none;
+  }
+  let mut h1 = h0;
+  let mut n = 0;
+  while h1 < h0 + NS_CALIBRATE && n < CALIBRATE_SPINS
+    invariant n <= CALIBRATE_SPINS && hpet_ok(h) && acpi_ok(a)
+  {
+    h1 = clock_ns(&mut h, &mut a);
+    n = n + 1;
+  }
+  let t1 = cpu_tsc(cpu);
+  if h1 < h0 + NS_CALIBRATE || t1 <= t0 {
+    return none;                            // no clock, or a counter that did not move
+  }
+  let dns = h1 - h0;
+  let dt = t1 - t0;
+  if dns >= TWO32 {
+    return none;                            // the clock jumped
+  }
+  let mult = dns * TWO32 / dt;
+  if mult == 0 || mult >= MULT_MAX {
+    return none;
+  }
+  return Tsc { base: t1, mult: mult, at: h1 };
+}
+
+/// The clock now, read on this processor, but never before `was` (the
+/// processors' counters may disagree a little).
+fn tsc_now(t: Tsc, was: u64, cpu: &Cpu) -> u64 {
+  let n = tsc_ns(t, cpu_tsc(cpu));
+  if n < was {
+    return was;
+  }
+  return n;
+}

@@ -1,15 +1,18 @@
-// Time and waiting for Linux programs: clocks off the HPET (k.ns, read as
+// Time and waiting for Linux programs: clocks off the clock of
+// src/tsc.bastio (k.ns, read as
 // each system call comes in), sleeps, and poll over the console, pipes and
 // sockets. A call that has to wait runs again later (the restart in
 // lx_retry); a timed wait keeps its deadline in the restart word, as 2 +
-// the HPET time it ends at, so the later runs wait for the first run's
+// the time it ends at, so the later runs wait for the first run's
 // deadline rather than starting the clock again.
 //
 // alarm and setitimer(ITIMER_REAL) keep a deadline per process in
-// k.alarms, which every timer tick checks (lx_alarms) against the HPET.
+// k.alarms, which every timer tick checks (lx_alarms) against k.ns.
 //
 // CLOCK_REALTIME (and gettimeofday, time) is k.epoch, read from the CMOS
-// clock at boot (src/rtc.bastio), plus the HPET clock.
+// clock at boot (src/rtc.bastio), plus k.ns. Programs linked against musl
+// read the monotonic and real-time clocks through the vDSO (user/vdso.c)
+// instead, from the same counter with the same arithmetic.
 
 import "linux.bastio";
 
@@ -159,7 +162,7 @@ fn lx_sleep(k: &mut Kernel, pid: u64, n: u64, was: u64, clk: u64, flags: u64, re
     ret(&mut k.procs, pid, ts.err);
     return KEEP;
   }
-  // Every clock runs at the HPET's pace (the CPU-time ones too, here).
+  // Every clock runs at the same pace (the CPU-time ones too, here).
   let mut wait = ts.ns;
   if flags & TIMER_ABSTIME != 0 {
     if ts.ns <= now {
@@ -851,7 +854,7 @@ fn lx_time_rest(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
       return KEEP;
     }
     if n == LX_CLOCK_GETRES {
-      ret(&mut k.procs, pid, time_out(&mut k, pid, b, 1, 1));   // the HPET counts in ns
+      ret(&mut k.procs, pid, time_out(&mut k, pid, b, 1, 1));   // the clock is kept in ns
       return KEEP;
     }
     ret(&mut k.procs, pid, time_out(&mut k, pid, b, t, 1));

@@ -16,6 +16,14 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Processors
 
+- A vDSO (`user/vdso.c`): `clock_gettime` for the monotonic and real-time
+  clocks runs in user mode, with no system call and no kernel lock. The
+  kernel now keeps time with the time-stamp counter, its rate measured
+  against the HPET at boot (`src/tsc.bastio`), and copies the clock's
+  parameters into each Linux process's vDSO page, so both read one clock.
+  Four threads reading the clock 20000 times each went from about 2.3 s on
+  one processor and 4.1 s on four to under 30 ms (`MODE=clock
+  test/threadbench.sh`). Needs bastiolang's `cpu_tsc`.
 - The threads of a Linux process run on several processors at once. They
   used to take turns on one: four threads of pure computation now finish
   about twice as fast on four processors under QEMU.
