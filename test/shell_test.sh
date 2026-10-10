@@ -225,6 +225,9 @@ steps = [
     ("cat /motd", b"Welcome to BastiOS", b"\n# "),
     ("echo one > t; echo two >> t; cat t | wc -l", b"\r\n2\r\n", b"\n# "),
     ("cp t t2; head -n 1 t2; rm t t2; ls", [b"\r\none\r\n", b"elfdemo"], b"\n# "),
+    # A line longer than 256 bytes typed (or pasted) at once arrives whole:
+    # the console's input ring and the terminal line hold 4096 bytes.
+    ("echo " + "x" * 1000 + " | wc -c", b"\r\n1001\r\n", b"\n# "),
     # Signals: a trap handler entered and returned from (rt_sigreturn),
     # a process ending itself with kill, a writer ended by SIGPIPE once
     # head has gone, and Ctrl-C ending a busy loop (the parent ash's own

@@ -8,8 +8,9 @@ make compat-host       # the same checks on this Linux machine
 make compat-baseline   # record which checks pass now (baseline.txt)
 ```
 
-Needs what `make test` needs plus `musl-gcc` (the musl-tools package) and
-`script` (util-linux, only for `compat-host`).
+Needs what `make test` needs plus `musl-gcc` (the musl-tools package),
+`git` and `tclsh` (the tcl package, to generate sqlite's amalgamation) for
+the real programs, and `script` (util-linux, only for `compat-host`).
 
 ## What runs
 
@@ -19,6 +20,10 @@ Needs what `make test` needs plus `musl-gcc` (the musl-tools package) and
   line per check (`progs/compat.h`).
 - `applets.txt`: one-line shell commands using a BusyBox built with a broad
   set of applets (`busybox.config`), each with its exact expected output.
+- `apps.txt`: real programs, in the same format: Lua 5.4.7, QuickJS and the
+  sqlite3 3.52 shell (files, WAL, an index over 20000 rows). The Makefile
+  clones each at a pinned tag or commit and builds it against musl as a
+  static PIE (`LUA_TAG`, `QUICKJS_REV`, `SQLITE_TAG` pick the versions).
 
 `mkdisk.py` puts the programs and that BusyBox on a disk image in BastiOS's
 own disk format, so they appear as `/disk/NAME`. `run.py` boots the kernel

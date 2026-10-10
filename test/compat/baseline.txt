@@ -1,5 +1,17 @@
 # Checks that pass on BastiOS (make compat-baseline rewrites this).
 # make compat fails if one of them stops passing.
+apps: ash: a 1200-byte typed line
+apps: lua: arithmetic and strings
+apps: lua: coroutines and tables
+apps: lua: files
+apps: lua: popen and os.execute
+apps: qjs: files and exec
+apps: qjs: language
+apps: qjs: promises and timers
+apps: sqlite3: 20000 rows, an index and a query
+apps: sqlite3: WAL
+apps: sqlite3: a database file
+apps: sqlite3: in memory
 busybox: awk
 busybox: base64
 busybox: basename/dirname
@@ -92,6 +104,7 @@ t_dir: unlink file in directory
 t_file: /dev/null write
 t_file: /dev/urandom read
 t_file: /dev/zero read
+t_file: 12 open descriptors
 t_file: O_APPEND
 t_file: O_EXCL on existing
 t_file: O_RDONLY refuses write
@@ -108,10 +121,10 @@ t_file: fstat size
 t_file: fsync
 t_file: ftruncate grow
 t_file: ftruncate shrink
+t_file: link
 t_file: lseek SEEK_CUR
 t_file: lseek SEEK_END
 t_file: lseek SEEK_SET
-t_file: link
 t_file: lstat sees the link
 t_file: open O_CREAT|O_TRUNC
 t_file: open missing is ENOENT
@@ -146,6 +159,7 @@ t_ipc: fcntl F_GETFD sees FD_CLOEXEC
 t_ipc: fcntl F_GETFL sees O_NONBLOCK
 t_ipc: fcntl F_SETFL
 t_ipc: isatty(0)
+t_ipc: mkfifo
 t_ipc: pipe
 t_ipc: pipe across fork
 t_ipc: pipe holds 64 KiB, then EAGAIN
@@ -157,6 +171,32 @@ t_ipc: select
 t_ipc: socketpair AF_UNIX
 t_ipc: socketpair both ways, EOF after close
 t_ipc: timerfd
+t_ipc: ttyname(0)
+t_lock: F_GETLK names the holder
+t_lock: F_GETLK sees no lock of ours
+t_lock: F_SETLK bad type is EINVAL
+t_lock: F_SETLK write lock
+t_lock: F_SETLKW waits until it is free
+t_lock: F_UNLCK frees the rest
+t_lock: OFD F_GETLK says l_pid -1
+t_lock: OFD and record locks meet
+t_lock: OFD lock
+t_lock: a forked child is kept out too
+t_lock: a lock to the end of the file
+t_lock: another description is kept out
+t_lock: another process is kept out
+t_lock: bytes beside it are free
+t_lock: closing any descriptor drops the locks
+t_lock: closing the description drops it
+t_lock: flock LOCK_EX
+t_lock: flock LOCK_NB is EWOULDBLOCK
+t_lock: flock LOCK_SH is shared
+t_lock: flock LOCK_UN
+t_lock: flock and fcntl locks do not meet
+t_lock: lock file
+t_lock: read locks are shared
+t_lock: the owner relocks freely
+t_lock: unlocking a middle part splits it
 t_mem: 64 MiB of address space
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
@@ -188,6 +228,7 @@ t_misc: statfs
 t_misc: strtod
 t_misc: sync
 t_misc: tcgetattr
+t_misc: tcgetpgrp
 t_misc: tcsetattr
 t_more: FIONREAD on a pipe
 t_more: a full nonblocking pipe is EAGAIN
@@ -275,6 +316,7 @@ t_signal: alarm
 t_signal: getitimer
 t_signal: kill missing pid is ESRCH
 t_signal: kill self
+t_signal: kill(0) to own group
 t_signal: raise runs the handler
 t_signal: setitimer
 t_signal: sigaction

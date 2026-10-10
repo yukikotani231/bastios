@@ -274,9 +274,9 @@ fn tty_intr(con: &mut Con, k: &mut Kernel)
   let mut hit = false;
   let mut i = 0;
   while i < n
-    invariant i <= n && n <= 256 && h < 256 && kok(k) && con_ok(con)
+    invariant i <= n && n <= INQ_CAP && h < INQ_CAP && kok(k) && con_ok(con)
   {
-    if get(k.q, 2 + (h + i) % 256) == 3 {
+    if get(k.q, 2 + (h + i) % INQ_CAP) == 3 {
       hit = true;
     }
     i = i + 1;

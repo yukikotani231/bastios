@@ -25,14 +25,22 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 - `signalfd` and `signalfd4`: read, poll and epoll on the signals in its
   set. A blocked signal is now kept pending even when its action ignores
   it, as on Linux, so a blocked `SIGCHLD` reaches a signalfd or `sigwait`.
+- File locks are kept (`src/lxlock.bastio`): `fcntl` record locks
+  (`F_GETLK`, `F_SETLK`, `F_SETLKW`), open file description locks
+  (`F_OFD_*`) and `flock`, with Linux's owners and release rules. A
+  conflicting `F_SETLKW` or blocking `flock` waits. Deadlocks are not
+  detected. Checked by the new compat program `t_lock`.
+- Real programs in `make compat` (`test/compat/apps.txt`): Lua 5.4.7,
+  QuickJS and the sqlite3 3.52 shell, built from source as static PIEs,
+  run their files, pipes, timers, WAL databases and a 20000-row index.
+- The console takes lines of up to 4095 bytes (it cut them at 255, which
+  left a long pasted command hanging in ash).
 - The threads of a Linux process run on several processors at once. They
   used to take turns on one: four threads of pure computation now finish
   about twice as fast on four processors under QEMU.
-
 - `sendfile`, `copy_file_range`, `preadv`, `pwritev`, `statx`,
   `fallocate` (growing), `fadvise64`, `memfd_create`, `getcpu`, and
-  `FIONREAD` on a pipe. `flock` and `fcntl` record locks are accepted but
-  not kept. A new compat program, `t_more`, checks these and other calls
+  `FIONREAD` on a pipe. A new compat program, `t_more`, checks these and other calls
   real programs make.
 - `msync` writes a `MAP_SHARED` file mapping back to the file, and so do
   `munmap`, exit and `execve` (up to four such mappings per process; the

@@ -237,6 +237,7 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
   let kind = of_get(k.ofd, h, 0);
   let x = of_get(k.ofd, h, 2);
   let w = of_get(k.ofd, h, 3);
+  lock_drop(&mut k.locks, LK_DESC + h, LK_EOF, 2);   // its OFD locks and flocks
   of_set(&mut k.ofd, h, 0, OF_FREE);
   of_set(&mut k.ofd, h, 1, 0);
   if kind == OF_FILE && x < FD_ROWS {
@@ -289,6 +290,15 @@ fn lx_fd_close(k: &mut Kernel, pid: u64, fd: u64) -> bool
   let v = fd_get(k.lxfd, pid, fd);
   if v == 0 || fd >= LXNFD {
     return false;
+  }
+  // A process's record locks on a file go when it closes any descriptor
+  // for that file (src/lxlock.bastio).
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_FILE {
+    let f = lk_file(k, d.x);
+    if f != LK_EOF {
+      lock_drop(&mut k.locks, tgid(k.procs, pid), f, LKC_FCNTL);
+    }
   }
   fd_set(&mut k.lxfd, pid, fd, 0);
   unref_value(&mut k, v);
@@ -607,13 +617,18 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     }
     return 0;
   }
+  let lock = cmd == F_SETLK || cmd == F_SETLKW || cmd == F_OFD_SETLK || cmd == F_OFD_SETLKW;
+  let fk = fd_look(k, pid, fd);
+  if (cmd == F_GETLK || cmd == F_OFD_GETLK || lock) && fk.kind == K_FILE {
+    return lx_fcntl_lock(&mut k, pid, fd, cmd, arg);   // src/lxlock.bastio
+  }
   if cmd == F_GETLK || cmd == F_OFD_GETLK {
-    // Locks are not kept (src/lxmore.bastio): nothing ever stands in the
-    // way, so l_type (a short at the start of struct flock) says F_UNLCK.
+    // Only files keep locks: nothing stands in the way on anything else,
+    // so l_type (a short at the start of struct flock) says F_UNLCK.
     xfer_u64(&mut k.fs.xfer, 0, F_UNLCK);
     return lx_put_out(&mut k, pid, arg, 2);
   }
-  if cmd == F_SETLK || cmd == F_SETLKW || cmd == F_OFD_SETLK || cmd == F_OFD_SETLKW {
+  if lock {
     return 0;                               // accepted, not kept
   }
   return EINVAL;
