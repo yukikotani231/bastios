@@ -28,13 +28,14 @@ const SYS_UNLINK: u64 = 15;           // (_, name, name length) -> 0
 const SYS_DIRENT: u64 = 16;           // (entry, buffer, length) -> name length, 0 if unused
 const SYS_SEEK: u64 = 17;             // (fd, offset) -> 0
 // The network (src/net.bastio). Socket calls return NO_RESULT on failure.
-const SYS_PING: u64 = 40;             // (address) -> 1 reply, 0 none, 2 no ARP answer, 3 no network card, 4 busy
+const SYS_PING: u64 = 40;             // (address, 0: the gateway) -> 1 reply, 0 none, 2 no ARP answer, 3 no network card, 4 busy
 const SYS_SOCKET: u64 = 41;           // () -> a UDP socket
 const SYS_BIND: u64 = 42;             // (socket, port; 0: any) -> 0
 const SYS_SENDTO: u64 = 43;           // (socket + 256 * port + 2^24 * address, buffer, length) -> length
 const SYS_RECVFROM: u64 = 44;         // (socket, buffer, length) -> length; NO_RESULT if none waits
 const SYS_PEER: u64 = 45;             // (socket) -> 65536 * address + port of the last sender
 const SYS_SCLOSE: u64 = 46;           // (socket) -> 0
+const SYS_NETINFO: u64 = 47;          // (what) -> 0 address, 1 gateway, 2 netmask, 3 how (0 not yet, 1 DHCP, 2 static)
 const SYS_STAT: u64 = 18;             // (_, name, name length) -> size
 
 // What the scheduler does after a system call.
@@ -331,12 +332,14 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   return NO_RESULT;
 }
 
-/// Wakes the process whose ping has finished, if one has, with its
-/// result. Called on every scheduler pass, after the card is polled.
+/// Runs the network's timers (DHCP retries) and wakes the process whose
+/// ping has finished, if one has, with its result. Called on every
+/// scheduler pass, after the card is polled.
 fn net_wake(k: &mut Kernel)
   requires kok(k)
   ensures kok(k)
 {
+  nic_tick(&mut k.nic, k.ticks);
   let w = nic_ping_check(&mut k.nic, k.ticks);
   if w == NET_NONE {
     return;
@@ -469,6 +472,10 @@ fn syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     }
     pset(&mut k.procs, pid, F_STATE, NETWAIT);
     return SWITCH;
+  }
+  if n == SYS_NETINFO {
+    ret(&mut k.procs, pid, nic_info(k.nic, a));
+    return KEEP;
   }
   if SYS_SOCKET <= n && n <= SYS_SCLOSE {
     ret(&mut k.procs, pid, net_call(&mut k, pid, n, a, b, c));
