@@ -32,6 +32,7 @@ bst_kernel_pml4:
 pml4:   .skip 4096
 pdpt:   .skip 4096
 pd:     .skip 4096
+devpd:  .skip 4096
 .align 16
 stack_bottom:
         .skip 65536
@@ -88,6 +89,24 @@ _start:
         or      $0x83, %eax           /* present | writable | huge */
         mov     %eax, pd(,%ecx,8)
         movl    $0, pd+4(,%ecx,8)
+        inc     %ecx
+        cmp     $512, %ecx
+        jne     1b
+
+        /* The device window: 3-4 GiB, where the local APIC, I/O APIC and HPET
+         * live, identity-mapped uncached (PWT | PCD) with 2 MiB pages,
+         * kernel-only. Bastio code reaches it only through claimed `Mmio`
+         * blocks; nothing else in the kernel uses these addresses. */
+        mov     $devpd, %eax
+        or      $3, %eax
+        mov     %eax, pdpt+24
+        xor     %ecx, %ecx
+1:      mov     %ecx, %eax
+        shl     $21, %eax
+        add     $0xC0000000, %eax
+        or      $0x9B, %eax           /* present | writable | PWT | PCD | huge */
+        mov     %eax, devpd(,%ecx,8)
+        movl    $0, devpd+4(,%ecx,8)
         inc     %ecx
         cmp     $512, %ecx
         jne     1b

@@ -408,6 +408,8 @@ fn syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       ret(&mut k.procs, pid, k.ticks);
     } else if a == 2 {
       ret(&mut k.procs, pid, k.cpus);
+    } else if a == 3 {
+      ret(&mut k.procs, pid, k.ns);
     } else {
       ret(&mut k.procs, pid, NO_RESULT);
     }
