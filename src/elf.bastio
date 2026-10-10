@@ -413,13 +413,13 @@ fn vdso_map(m: &mut Mem, l2: &mut PageTable, t: Tsc, epoch: u64) -> bool
   requires mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0
   ensures mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0
 {
-  if !w_map(&mut m, &mut l2, VDSO_PAGE) {
+  if !w_map(&mut m, &mut l2, VDSO_PAGE, false) {
     return false;
   }
   let i = VDSO_PAGE / 512;
   if pt_has(l2, i) {
     let mut l1 = pt_take(&mut l2, i);
-    if pt_has(l1, VDSO_PAGE % 512) {
+    if pt_has(l1, VDSO_PAGE % 512) && !pt_shared(l1, VDSO_PAGE % 512) {
       let mut f = pt_take_frame(&mut l1, VDSO_PAGE % 512);
       vdso_fill(&mut f, t, epoch);
       pt_put_frame(&mut l1, VDSO_PAGE % 512, f, false);
