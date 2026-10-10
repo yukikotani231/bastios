@@ -14,7 +14,15 @@ import "syscall.bastio";
 
 const V_LINUX: u64 = 0x81;
 
+const LX_READ: u64 = 0;
 const LX_WRITE: u64 = 1;
+const LX_OPEN: u64 = 2;
+const LX_CLOSE: u64 = 3;
+const LX_LSEEK: u64 = 8;
+const LX_MMAP: u64 = 9;
+const LX_MPROTECT: u64 = 10;
+const LX_MUNMAP: u64 = 11;
+const LX_BRK: u64 = 12;
 const LX_IOCTL: u64 = 16;
 const LX_WRITEV: u64 = 20;
 const LX_GETPID: u64 = 39;
@@ -22,9 +30,28 @@ const LX_EXIT: u64 = 60;
 const LX_GETPPID: u64 = 110;
 const LX_ARCH_PRCTL: u64 = 158;
 const LX_SET_TID_ADDRESS: u64 = 218;
+const LX_OPENAT: u64 = 257;
+const LX_UNLINK: u64 = 87;
+const LX_UNLINKAT: u64 = 263;
+
+// Linux fds 0-2 are the console; fd k >= 3 is the process's native fd k - 3.
+const LX_FD0: u64 = 3;
+
+// open flags
+const LO_ACCMODE: u64 = 3;
+const LO_WRONLY: u64 = 1;
+const LO_RDWR: u64 = 2;
+const LO_CREAT: u64 = 0x40;
+const LO_TRUNC: u64 = 0x200;
+const LO_APPEND: u64 = 0x400;
+
+const MAP_FIXED: u64 = 0x10;
+const MAP_ANONYMOUS: u64 = 0x20;
+const PATH_MAX_LX: u64 = 256;           // the longest path read from user memory
 
 const ARCH_SET_FS: u64 = 0x1002;
 const IOV_MAX: u64 = 1024;
+const TOTAL_MAX: u64 = 0x100000000000;      // more than writev can move in the window
 const LX_EXIT_GROUP: u64 = 231;
 
 // -errno as u64.
@@ -33,6 +60,8 @@ const EFAULT: u64 = 18446744073709551602;   // 2^64 - 14
 const EBADF: u64 = 18446744073709551607;    // 2^64 - 9
 const EINVAL: u64 = 18446744073709551594;   // 2^64 - 22
 const ENOTTY: u64 = 18446744073709551591;   // 2^64 - 25
+const ENOENT: u64 = 18446744073709551614;   // 2^64 - 2
+const ENOMEM: u64 = 18446744073709551604;   // 2^64 - 12
 
 // ---------------------------------------------------------------- user memory
 
@@ -122,17 +151,68 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     terminate(&mut k, mmu, pid, a % 256);
     return SWITCH;
   }
+  if n == LX_READ {
+    if a == 0 {
+      return console_read(&mut k, pid, b, c);
+    }
+    ret(&mut k.procs, pid, lx_file_read(&mut k, pid, a, b, c));
+    return KEEP;
+  }
   if n == LX_WRITE {
-    if a != 1 && a != 2 {
-      ret(&mut k.procs, pid, EBADF);
-      return KEEP;
+    ret(&mut k.procs, pid, lx_write_fd(&mut con, &mut k, pid, a, b, c));
+    return KEEP;
+  }
+  if n == LX_WRITEV {
+    ret(&mut k.procs, pid, do_writev(&mut con, &mut k, pid, a, b, c));
+    return KEEP;
+  }
+  if n == LX_OPEN {
+    ret(&mut k.procs, pid, lx_open(&mut k, pid, a, b));
+    return KEEP;
+  }
+  if n == LX_OPENAT {
+    ret(&mut k.procs, pid, lx_open(&mut k, pid, b, c));   // one flat directory: dirfd is ignored
+    return KEEP;
+  }
+  if n == LX_UNLINK || n == LX_UNLINKAT {
+    let mut path = a;
+    if n == LX_UNLINKAT {
+      path = b;                             // dirfd ignored, as for openat
     }
-    let w = do_write(&mut con, &mut k.spaces, pid, b, c);
-    if w == NO_RESULT || (w == 0 && c > 0) {
-      ret(&mut k.procs, pid, EFAULT);
+    let plen = lx_path_in(&mut k, pid, path);
+    if plen == NO_RESULT || !vfs_unlink(&mut k.fs, &mut k.mem, plen) {
+      ret(&mut k.procs, pid, ENOENT);
     } else {
-      ret(&mut k.procs, pid, w);
+      ret(&mut k.procs, pid, 0);
     }
+    return KEEP;
+  }
+  if n == LX_CLOSE {
+    if a < LX_FD0 {
+      ret(&mut k.procs, pid, 0);
+    } else if a - LX_FD0 < NFD && vfs_close(&mut k.fs, pid * NFD + (a - LX_FD0)) {
+      ret(&mut k.procs, pid, 0);
+    } else {
+      ret(&mut k.procs, pid, EBADF);
+    }
+    return KEEP;
+  }
+  if n == LX_LSEEK {
+    ret(&mut k.procs, pid, lx_lseek(&mut k, pid, a, b, c));
+    return KEEP;
+  }
+  if n == LX_BRK {
+    ret(&mut k.procs, pid, lx_brk(&mut k, pid, a));
+    return KEEP;
+  }
+  if n == LX_MMAP {
+    let flags = pget(k.procs, pid, F_REGS + R_R10);
+    ret(&mut k.procs, pid, lx_mmap(&mut k, pid, a, b, flags));
+    return KEEP;
+  }
+  if n == LX_MUNMAP || n == LX_MPROTECT {
+    // Pages stay mapped (and writable) until the process exits.
+    ret(&mut k.procs, pid, 0);
     return KEEP;
   }
   if n == LX_GETPID {
@@ -141,14 +221,6 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if n == LX_GETPPID {
     ret(&mut k.procs, pid, pget(k.procs, pid, F_PARENT));
-    return KEEP;
-  }
-  if n == LX_WRITEV {
-    if a != 1 && a != 2 {
-      ret(&mut k.procs, pid, EBADF);
-      return KEEP;
-    }
-    ret(&mut k.procs, pid, do_writev(&mut con, &mut k.spaces, pid, b, c));
     return KEEP;
   }
   if n == LX_IOCTL {
@@ -177,12 +249,124 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   return KEEP;
 }
 
-/// writev to the console: the iovcnt (base, length) pairs at user address
-/// iov. Returns the bytes written, or -EFAULT if the vector itself or the
-/// first buffer cannot be read.
-fn do_writev(con: &mut Uart, spaces: &mut Vec[Space], pid: u64, iov: u64, cnt: u64) -> u64
-  requires uart_ok(con) && spaces_ok(spaces) && pid < NPROC
-  ensures spaces_ok(spaces)
+// ---------------------------------------------------------------- reading and writing
+
+/// read(0, buf, n): the bytes typed so far, up to n, with CR turned into
+/// LF as a terminal would. With none, the process blocks and the call is
+/// restarted (rip moved back over the 2-byte `syscall`) once a byte comes.
+fn console_read(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  if n == 0 {
+    ret(&mut k.procs, pid, 0);
+    return KEEP;
+  }
+  if !user_range(va, 1) {
+    ret(&mut k.procs, pid, EFAULT);
+    return KEEP;
+  }
+  if get(k.q, 1) == 0 {
+    let rip = pget(k.procs, pid, F_REGS + R_RIP);
+    if rip < 2 {
+      ret(&mut k.procs, pid, EFAULT);
+      return KEEP;
+    }
+    pset(&mut k.procs, pid, F_REGS + R_RIP, rip - 2);
+    pset(&mut k.procs, pid, F_REGS + R_RAX, LX_READ);
+    pset(&mut k.procs, pid, F_STATE, LXREADING);
+    return SWITCH;
+  }
+  // Take only what fits in the window from va, so no byte is lost.
+  let room = USER_SIZE - (va - USER_BASE);
+  let want = smaller(smaller(n, room), smaller(get(k.q, 1), XFER));
+  let mut i = 0;
+  while i < want
+    invariant i <= want && want <= XFER && kok(k)
+  {
+    let mut ch = q_pop(&mut k.q);
+    if ch == 13 {
+      ch = 10;
+    }
+    if ch > 255 {
+      ch = 0;                               // the queue was empty: cannot happen
+    }
+    bset(&mut k.fs.xfer, i, ch);
+    i = i + 1;
+  }
+  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
+  if put == NO_RESULT || (put == 0 && want > 0) {
+    ret(&mut k.procs, pid, EFAULT);
+  } else {
+    ret(&mut k.procs, pid, put);
+  }
+  return KEEP;
+}
+
+/// The native row of Linux fd `fd`, or FD_ROWS if it is not a file fd.
+fn lx_row(pid: u64, fd: u64) -> u64
+  requires pid < NPROC
+  ensures result <= FD_ROWS
+{
+  if fd < LX_FD0 || fd - LX_FD0 >= NFD {
+    return FD_ROWS;
+  }
+  return pid * NFD + (fd - LX_FD0);
+}
+
+fn lx_file_read(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let row = lx_row(pid, fd);
+  if row >= FD_ROWS {
+    return EBADF;
+  }
+  let got = vfs_read(&mut k.fs, row, smaller(n, XFER));
+  if got == NO_FD {
+    return EBADF;
+  }
+  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, got);
+  if put == NO_RESULT || (put == 0 && got > 0) {
+    return EFAULT;
+  }
+  vfs_advance(&mut k.fs, row, vfs_offset(k.fs, row), put);
+  return put;
+}
+
+/// write(fd, va, n) to the console (fd 1 or 2) or a file. Returns the
+/// count or -errno.
+fn lx_write_fd(con: &mut Uart, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
+  requires uart_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if fd == 1 || fd == 2 {
+    let w = do_write(&mut con, &mut k.spaces, pid, va, n);
+    if w == NO_RESULT || (w == 0 && n > 0) {
+      return EFAULT;
+    }
+    return w;
+  }
+  let row = lx_row(pid, fd);
+  if row >= FD_ROWS {
+    return EBADF;
+  }
+  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, smaller(n, XFER));
+  if got == NO_RESULT || (got == 0 && n > 0) {
+    return EFAULT;
+  }
+  let w = vfs_write(&mut k.fs, &mut k.mem, row, got);
+  if w == NO_FD {
+    return EBADF;
+  }
+  return w;
+}
+
+/// writev: the cnt (base, length) pairs at user address iov, each written
+/// as by write. Returns the bytes written, or -errno if nothing was.
+fn do_writev(con: &mut Uart, k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u64) -> u64
+  requires uart_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k)
 {
   if cnt > IOV_MAX {
     return EINVAL;
@@ -194,28 +378,244 @@ fn do_writev(con: &mut Uart, spaces: &mut Vec[Space], pid: u64, iov: u64, cnt: u
   let mut i = 0;
   while i < cnt
     invariant i <= cnt && cnt <= IOV_MAX && iov <= USER_BASE + USER_SIZE
-    invariant spaces_ok(spaces) && total <= i * USER_SIZE
+    invariant kok(k) && total <= TOTAL_MAX
   {
     let at = iov + 16 * i;
-    let base = user_u64(&mut spaces, pid, at);
-    let size = user_u64(&mut spaces, pid, at + 8);
-    if !base.ok || !size.ok {
-      return EFAULT;
+    let base = user_u64(&mut k.spaces, pid, at);
+    let size = user_u64(&mut k.spaces, pid, at + 8);
+    if !base.ok || !size.ok || base.v > USER_BASE + USER_SIZE {
+      return lx_fail_or(total, EFAULT);
     }
-    if size.v > 0 {
-      let w = do_write(&mut con, &mut spaces, pid, base.v, size.v);
-      if w == NO_RESULT || w > USER_SIZE {
-        if total == 0 {
-          return EFAULT;
-        }
+    // A file write moves at most XFER bytes at once: go round until done.
+    let mut done = 0;
+    while done < size.v
+      invariant done <= size.v && kok(k) && total <= TOTAL_MAX
+      invariant base.v <= USER_BASE + USER_SIZE
+    {
+      let left = size.v - done;
+      if done > USER_SIZE {
+        return lx_fail_or(total, EFAULT);       // past the window: base + done faults
+      }
+      let w = lx_write_fd(&mut con, &mut k, pid, fd, base.v + done, left);
+      if w > left || w > USER_SIZE {
+        return lx_fail_or(total, w);            // an error
+      }
+      if w == 0 || total + w > TOTAL_MAX {
         return total;
       }
       total = total + w;
-      if w < size.v {
-        return total;
-      }
+      done = done + w;
     }
     i = i + 1;
   }
   return total;
+}
+
+/// What a call that moved `total` bytes before failing with `err` returns.
+fn lx_fail_or(total: u64, err: u64) -> u64 {
+  if total > 0 {
+    return total;
+  }
+  return err;
+}
+
+// ---------------------------------------------------------------- files
+
+/// Copies the NUL-terminated path at user address va into the transfer
+/// buffer, without leading slashes (the file system is one flat directory).
+/// Returns its length, or NO_RESULT if it is unreadable, empty or too long.
+fn lx_path_in(k: &mut Kernel, pid: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  if va < USER_BASE || va >= USER_BASE + USER_SIZE {
+    return NO_RESULT;
+  }
+  let n = smaller(PATH_MAX_LX, USER_SIZE - (va - USER_BASE));
+  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, n);
+  if got == NO_RESULT {
+    return NO_RESULT;
+  }
+  let mut s = 0;
+  while s < got && bget(k.fs.xfer, s) == 47
+    invariant s <= got && got <= XFER && kok(k)
+  {
+    s = s + 1;
+  }
+  let mut e = s;
+  while e < got && bget(k.fs.xfer, e) != 0
+    invariant s <= e && e <= got && got <= XFER && kok(k)
+  {
+    e = e + 1;
+  }
+  if e >= got || e == s || e - s > FNAME_MAX {
+    return NO_RESULT;                       // no NUL in reach, empty, or too long
+  }
+  let mut i = 0;
+  while i < e - s
+    invariant i <= e - s && e <= got && got <= XFER && kok(k)
+  {
+    bset(&mut k.fs.xfer, i, bget(k.fs.xfer, s + i));
+    i = i + 1;
+  }
+  return e - s;
+}
+
+/// open / openat: the native flags for Linux `flags`, then vfs_open.
+fn lx_open(k: &mut Kernel, pid: u64, path: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = lx_path_in(&mut k, pid, path);
+  if n == NO_RESULT {
+    return ENOENT;
+  }
+  let acc = flags % 4;
+  let mut f = O_READ;
+  if acc == LO_WRONLY {
+    f = O_WRITE;
+  } else if acc == LO_RDWR {
+    f = O_READ + O_WRITE;
+  }
+  if flags / LO_CREAT % 2 == 1 {
+    f = f + O_CREATE;
+  }
+  if flags / LO_TRUNC % 2 == 1 {
+    f = f + O_TRUNC;
+  }
+  if flags / LO_APPEND % 2 == 1 {
+    f = f + O_APPEND;
+  }
+  let fd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, f, n);
+  if fd == NO_FD || fd >= NFD {
+    return ENOENT;
+  }
+  return fd + LX_FD0;
+}
+
+/// lseek: SEEK_SET (0) and SEEK_CUR (1). SEEK_END needs the file size by
+/// descriptor, which the file layer does not give yet.
+fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let row = lx_row(pid, fd);
+  if row >= FD_ROWS {
+    return EBADF;
+  }
+  let mut to = off;
+  if whence == 1 {
+    let cur = vfs_offset(k.fs, row);
+    if off >= 0x8000000000000000 || cur > 0x7FFFFFFFFFFFFFFF - off {
+      return EINVAL;                        // negative relative offsets are not supported
+    }
+    to = cur + off;
+  } else if whence != 0 {
+    return EINVAL;
+  }
+  if to >= 0x8000000000000000 {
+    return EINVAL;
+  }
+  if !vfs_seek(&mut k.fs, row, to) {
+    return EBADF;
+  }
+  return to;
+}
+
+// ---------------------------------------------------------------- memory
+
+/// Maps fresh zero pages at window pages [from, to) of process pid, where
+/// none is mapped yet. Returns false if memory ran out (the pages mapped so
+/// far stay, and go back when the process exits).
+fn lx_map_pages(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, from: u64, to: u64) -> bool
+  requires mem_ok(m) && spaces_ok(spaces) && pid < NPROC && to <= STACK_FIRST
+  ensures mem_ok(m) && spaces_ok(spaces)
+{
+  match take_space(&mut spaces, pid) {
+    Space::Empty => { return false; },
+    Space::Mapped(mut root) => {
+      let mut ok = false;
+      if pt_has(root, 1) {
+        let mut l3 = pt_take(&mut root, 1);
+        if pt_has(l3, 0) {
+          let mut l2 = pt_take(&mut l3, 0);
+          if pt_has(l2, 0) {
+            let mut l1 = pt_take(&mut l2, 0);
+            ok = lx_map_l1(&mut m, &mut l1, from, to);
+            pt_put(&mut l2, 0, l1);
+          }
+          pt_put(&mut l3, 0, l2);
+        }
+        pt_put(&mut root, 1, l3);
+      }
+      put_space(&mut spaces, pid, Space::Mapped(root));
+      return ok;
+    },
+  }
+}
+
+fn lx_map_l1(m: &mut Mem, l1: &mut PageTable, from: u64, to: u64) -> bool
+  requires mem_ok(m) && pt_level(l1) == 1 && to <= STACK_FIRST
+  ensures mem_ok(m) && pt_level(l1) == 1
+{
+  let mut p = from;
+  while p < to
+    invariant mem_ok(m) && pt_level(l1) == 1 && to <= STACK_FIRST
+  {
+    if !pt_has(l1, p) {
+      let a = find_free(&mut m);
+      if a >= NPAGES {
+        return false;
+      }
+      pt_put_frame(&mut l1, p, take_page(&mut m, a), true);
+    }
+    p = p + 1;
+  }
+  return true;
+}
+
+/// brk: grows the heap (page by page) up to `want`; never shrinks it, and
+/// never into mmap's pages. Returns the break, as Linux does on failure too.
+fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let cur = pget(k.procs, pid, F_BRK);
+  let low = pget(k.procs, pid, F_MMAP);
+  if cur > USER_SIZE || low > STACK_FIRST * 4096 {
+    return USER_BASE;                       // not a Linux process
+  }
+  if want <= USER_BASE + cur || want > USER_BASE + low {
+    return USER_BASE + cur;
+  }
+  let new = want - USER_BASE;
+  if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, (cur + 4095) / 4096, (new + 4095) / 4096) {
+    return USER_BASE + cur;
+  }
+  pset(&mut k.procs, pid, F_BRK, new);
+  return want;
+}
+
+/// mmap: anonymous private memory only, taken downward from the stack.
+/// The address hint is ignored, and MAP_FIXED and file mappings fail.
+fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags / MAP_ANONYMOUS % 2 == 0 || flags / MAP_FIXED % 2 == 1 || n == 0 || n > USER_SIZE {
+    return EINVAL;
+  }
+  let brk = pget(k.procs, pid, F_BRK);
+  let low = pget(k.procs, pid, F_MMAP);
+  let pages = (n + 4095) / 4096;
+  if low > STACK_FIRST * 4096 || brk > low || pages * 4096 > low - brk {
+    return ENOMEM;
+  }
+  let at = (low - pages * 4096) / 4096 * 4096;
+  if at < brk || !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096) {
+    return ENOMEM;
+  }
+  pset(&mut k.procs, pid, F_MMAP, at);
+  return USER_BASE + at;
 }

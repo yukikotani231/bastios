@@ -159,7 +159,14 @@ fn main(ports: &mut Ports, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64
   pit_init(&mut pit, 100);
   puts(&mut con, "\r\nBastiOS 0.2: ");
   put_num(&mut con, pool_size(pool));
-  puts(&mut con, " pages of memory\r\n");
+  puts(&mut con, " pages of memory, ");
+  let cpus = cpu_count(cpu);
+  put_num(&mut con, cpus);
+  if cpus == 1 {
+    puts(&mut con, " processor\r\n");
+  } else {
+    puts(&mut con, " processors\r\n");
+  }
   // The allocator takes the pool for as long as the kernel runs and gives
   // it back at power off.
   let mut m = mem_new(pool);
@@ -180,7 +187,7 @@ fn main(ports: &mut Ports, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64
     vec_push(&mut fpus, Fpu::None);
     q = q + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), ticks: 0, fs: vfs_new() };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), ticks: 0, cpus: cpus, fs: vfs_new() };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");

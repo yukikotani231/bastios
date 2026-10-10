@@ -24,7 +24,7 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad mhello fpucheck
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf)
 
 build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
@@ -77,7 +77,7 @@ build/user/fpucheck.elf: build/user/elfstart.o build/user/fpucheck.o
 # A C program against musl libc, static PIE (the musl-tools package).
 MUSLCC ?= musl-gcc
 
-build/user/mhello.elf: user/mhello.c | build/user
+build/user/mhello.elf build/user/mtest.elf: build/user/%.elf: user/%.c | build/user
 	$(MUSLCC) -static-pie -O2 -o $@ $<
 
 build/user/elfbad.elf: build/user/elfexec.elf
@@ -107,9 +107,15 @@ build/boot.o: boot/boot.S | build
 build/platform.o: boot/platform.c | build
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+build/smp.o: boot/smp.c | build
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+build/ap.o: boot/ap.S | build
+	$(CC) -c -o $@ $<
+
 # 3. Link a 64-bit kernel, then repackage it as ELF32: QEMU's -kernel
 #    Multiboot loader only accepts 32-bit ELF images. The code is unchanged.
-KOBJS := build/boot.o build/platform.o build/kernel.o build/libc.o
+KOBJS := build/boot.o build/ap.o build/platform.o build/smp.o build/kernel.o build/libc.o
 
 build/bastios64.elf: $(KOBJS) boot/linker.ld
 	$(CC) $(LDFLAGS) -o $@ $(KOBJS)

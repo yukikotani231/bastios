@@ -6,18 +6,27 @@ set -u
 cd "$(dirname "$0")/.."
 KERNEL=${KERNEL:-build/bastios.elf}
 TIMEOUT=${TIMEOUT:-60}
+SMP=${SMP:-4}
 
-python3 - "$KERNEL" "$TIMEOUT" <<'PY'
+python3 - "$KERNEL" "$TIMEOUT" "$SMP" <<'PY'
 import re, subprocess, sys, time, select
 
-kernel, timeout = sys.argv[1], float(sys.argv[2])
-qemu = subprocess.Popen(
-    ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-display", "none",
-     "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-     "-serial", "stdio", "-monitor", "none"],
-    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+kernel, timeout, smp = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
+
+def boot(cpus):
+    return subprocess.Popen(
+        ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", str(cpus),
+         "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+         "-serial", "stdio", "-monitor", "none"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
 deadline = time.time() + timeout
 out = b""
+fails = 0
+
+# A single-processor machine first: no application processors to start, and
+# the kernel must say so and still reach the prompt.
+qemu = boot(1)
 
 def read_until(marker, start=0):
     global out
@@ -34,11 +43,25 @@ def read_until(marker, start=0):
         out += chunk
     return True
 
+if read_until(b"bastios> ") and b"pages of memory, 1 processor\r\n" in out:
+    print("ok   boots on one processor")
+else:
+    print("FAIL boot on one processor"); fails += 1
+qemu.kill(); qemu.wait()
+print("---- one-processor transcript ----")
+print(out.decode(errors="replace").replace("\r", ""))
+
+# The rest runs on `smp` processors: the application processors are started
+# at boot and park; the shell and its programs run on the bootstrap one.
+qemu = boot(smp)
+out = b""
+
 # (input line, expected text in the reply). The shell is a user process;
 # the later steps exercise process creation, waiting, preemption, killing
 # and fault isolation.
 steps = [
     ("help", b"commands:"),
+    ("cpus", f"processors running: {smp}\r\n".encode()),
     ("about", b"proved safe"),
     ("echo hello world", b"hello world"),
     ("add 2 40", b"42"),
@@ -74,6 +97,10 @@ steps = [
     # keep its own value (checked again at the end, once both are done).
     ("fpucheck &", b"]"),
     ("fpucheck", b"fpucheck: xmm0 kept"),
+    # musl malloc (brk, mmap), stdio on a file, and a line read from the
+    # console; the third field is what to wait for instead of the prompt.
+    ("mtest", [b"mtest: malloc heap 75", b"mtest: file line 42"], b"type a line"),
+    ("typed for mtest", b"mtest: got typed for mtest"),
     ("sh", b"BastiOS 0.2 -- type"),
     ("exit", b""),
     ("mem", b"free pages"),
@@ -99,16 +126,17 @@ steps = [
     # Every page the files used is back once they are removed.
     ("mem", b"free pages"),
 ]
-fails = 0
 if not read_until(b"bastios> "):
     print("FAIL: no prompt after boot"); fails += 1
 else:
     print("ok   boot banner and prompt")
-    for line, want in steps:
+    for step in steps:
+        line, want = step[0], step[1]
+        until = step[2] if len(step) > 2 else b"bastios> "
         mark = len(out)
         qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
         wants = want if isinstance(want, list) else [want]
-        ok = read_until(b"bastios> ", mark) and all(w in out[mark:] for w in wants)
+        ok = read_until(until, mark) and all(w in out[mark:] for w in wants)
         print(("ok  " if ok else "FAIL"), repr(line))
         fails += not ok
     if out.count(b"fpucheck: xmm0 kept") == 2 and b"xmm0 changed" not in out:

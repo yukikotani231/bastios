@@ -19,6 +19,8 @@ const F_CODE: u64 = 2;               // exit code of a ZOMBIE
 const F_PARENT: u64 = 3;
 const F_PROG: u64 = 4;               // index into the program table
 const F_TICKS: u64 = 5;              // timer ticks spent running
+const F_BRK: u64 = 6;                // Linux: window offset of the program break
+const F_MMAP: u64 = 7;               // Linux: window offset of the lowest mmap page
 const F_REGS: u64 = 8;               // 21 saved words, in `cpu_get` order
 
 // Saved register numbers.
@@ -26,6 +28,7 @@ const R_RAX: u64 = 0;
 const R_RDX: u64 = 3;
 const R_RSI: u64 = 4;
 const R_RDI: u64 = 5;
+const R_R10: u64 = 9;
 const R_RIP: u64 = 15;
 const R_RSP: u64 = 16;
 const R_RFLAGS: u64 = 17;
@@ -37,6 +40,7 @@ const READY: u64 = 1;
 const READING: u64 = 2;
 const WAITING: u64 = 3;
 const ZOMBIE: u64 = 4;
+const LXREADING: u64 = 5;            // blocked in a Linux read of the console
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -236,6 +240,10 @@ fn wake_readers(procs: &mut Buf, q: &mut Buf)
       pset(&mut procs, p, F_REGS + R_RAX, q_pop(&mut q));
       pset(&mut procs, p, F_STATE, READY);
     }
+    // A Linux read restarts its system call, which takes the bytes itself.
+    if state(procs, p) == LXREADING && get(q, 1) > 0 {
+      pset(&mut procs, p, F_STATE, READY);
+    }
     p = p + 1;
   }
 }
@@ -251,6 +259,7 @@ struct Kernel {
   procs: Buf,           // the process table
   q: Buf,               // console input waiting for a READ
   ticks: u64,           // timer ticks since boot
+  cpus: u64,            // processors running, the bootstrap one included
   fs: Vfs,              // files and the open-file table
 }
 
@@ -260,7 +269,7 @@ spec fn kok(k: &Kernel) -> bool {
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 13;
+const NPROGS: u64 = 14;
 
 fn prog_name(i: u64) -> Str {
   if i == 0 {
@@ -298,6 +307,9 @@ fn prog_name(i: u64) -> Str {
   }
   if i == 11 {
     return "fpucheck";
+  }
+  if i == 12 {
+    return "mtest";
   }
   return "fault";
 }
@@ -338,6 +350,9 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 11 {
     return include_bytes("../build/user/fpucheck.elf");
+  }
+  if i == 12 {
+    return include_bytes("../build/user/mtest.elf");
   }
   return include_bytes("../build/user/fault.bin");
 }
@@ -434,6 +449,12 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   pset(&mut k.procs, pid, F_REGS + R_RIP, entry);
   pset(&mut k.procs, pid, F_REGS + R_RSP, rsp);
   pset(&mut k.procs, pid, F_REGS + R_RFLAGS, 0x202);
+  if elf {
+    // The heap starts on the page after the image; mmap takes pages
+    // downward from the stack. Both stay in the window below the stack.
+    pset(&mut k.procs, pid, F_BRK, (e.end + 4095) / 4096 * 4096);
+    pset(&mut k.procs, pid, F_MMAP, STACK_FIRST * 4096);
+  }
   pset(&mut k.procs, pid, F_STATE, READY);
   return pid;
 }
@@ -495,7 +516,7 @@ fn put_state(con: &mut Uart, s: u64)
 {
   if s == READY {
     puts(&mut con, "ready  ");
-  } else if s == READING {
+  } else if s == READING || s == LXREADING {
     puts(&mut con, "reading");
   } else if s == WAITING {
     puts(&mut con, "waiting");
