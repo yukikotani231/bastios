@@ -1,13 +1,14 @@
 /* Directories through the Linux system calls, against musl: openat,
  * fstatat, mkdirat and unlinkat relative to a directory descriptor,
  * fchdir to it, getcwd, a file mapped with mmap and MAP_FIXED over it,
- * and cleaning up. */
+ * running out of descriptors, a named pipe (mkfifo), and cleaning up. */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static int fail(const char *what)
@@ -61,6 +62,28 @@ int main(void)
     while (got > 0)
         close(many[--got]);
     close(f);
+    /* A named pipe: a writer waits for a reader, then they talk. */
+    if (mkfifo("ff", 0644) != 0 || mkfifo("ff", 0644) != -1 || errno != EEXIST)
+        return fail("mkfifo");
+    if (stat("ff", &st) != 0 || !S_ISFIFO(st.st_mode))
+        return fail("stat of a FIFO");
+    if (open("ff", O_WRONLY | O_NONBLOCK) != -1 || errno != ENXIO)
+        return fail("a FIFO writer with no reader");
+    pid_t c = fork();
+    if (c == 0) {
+        int w = open("ff", O_WRONLY);
+        _exit(w >= 0 && write(w, "fifo", 4) == 4 && close(w) == 0 ? 0 : 1);
+    }
+    int r = open("ff", O_RDONLY), status;
+    char fb[8] = { 0 };
+    int fn = 0, k;
+    while (r >= 0 && fn < 7 && (k = read(r, fb + fn, sizeof fb - 1 - fn)) > 0)
+        fn += k;
+    if (c < 0 || r < 0 || strcmp(fb, "fifo") != 0 || waitpid(c, &status, 0) != c || status != 0)
+        return fail("talking through a FIFO");
+    close(r);
+    if (unlink("ff") != 0 || stat("ff", &st) == 0)
+        return fail("removing a FIFO");
     if (unlinkat(AT_FDCWD, "f", 0) != 0 || chdir("..") != 0 || rmdir("dx") != 0)
         return fail("cleaning up");
     close(d);
