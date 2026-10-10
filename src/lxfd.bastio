@@ -144,6 +144,23 @@ fn can_block(kind: u64) -> bool {
   return kind == OF_PIPE_R || kind == OF_PIPE_W || kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL;
 }
 
+/// Whether process pid has a file layer row free: an open file holds
+/// one, and each process has NFD of them.
+fn row_free(k: &Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let mut i = 0;
+  while i < NFD
+    invariant i <= NFD
+  {
+    if fget(k.fs.ftab, pid * NFD + i, FD_FS) == 0 {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
 /// Process `pid`'s descriptors as a new program starts: 0 to 2 on the
 /// console, the rest closed. They must hold no references.
 fn lx_fd_reset(t: &mut Buf, pid: u64)
@@ -430,6 +447,9 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64) -> u64
   }
   if flags / LO_APPEND % 2 == 1 {
     f = f + O_APPEND;
+  }
+  if fd_free(k.lxfd, pid, 0) >= LXNFD || !row_free(k, pid) {
+    return EMFILE;                          // no descriptor, or no file layer row, left
   }
   let nfd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, f, n);
   if nfd == NO_FD || nfd >= NFD {
