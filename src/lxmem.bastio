@@ -33,7 +33,9 @@ fn w_unmap(m: &mut Mem, l2: &mut PageTable, p: u64)
   let t = p / 512;
   if pt_has(l2, t) {
     let mut l1 = pt_take(&mut l2, t);
-    if pt_has(l1, p % 512) {
+    if pt_has(l1, p % 512) && pt_shared(l1, p % 512) {
+      drop_shared(&mut m, pt_take_shared(&mut l1, p % 512));
+    } else if pt_has(l1, p % 512) {
       give_page(&mut m, pt_take_frame(&mut l1, p % 512));
     }
     pt_put(&mut l2, t, l1);
@@ -51,7 +53,11 @@ fn w_protect(l2: &mut PageTable, p: u64, writable: bool) -> bool
   }
   let mut l1 = pt_take(&mut l2, t);
   let mut ok = false;
-  if pt_has(l1, p % 512) {
+  if pt_has(l1, p % 512) && pt_shared(l1, p % 512) {
+    let s = pt_take_shared(&mut l1, p % 512);
+    pt_put_shared(&mut l1, p % 512, s, writable);
+    ok = true;
+  } else if pt_has(l1, p % 512) {
     let f = pt_take_frame(&mut l1, p % 512);
     pt_put_frame(&mut l1, p % 512, f, writable);
     ok = true;
@@ -87,6 +93,18 @@ fn w_move(m: &mut Mem, l2: &mut PageTable, from: u64, to: u64) -> bool
     return true;
   }
   let w = pt_writable(src, from % 512);
+  if pt_shared(src, from % 512) {
+    let s = pt_take_shared(&mut src, from % 512);
+    pt_put(&mut l2, tf, src);
+    let mut dst = pt_take(&mut l2, tt);
+    if pt_has(dst, to % 512) {
+      drop_shared(&mut m, s);                     // cannot happen: `to` was emptied
+    } else {
+      pt_put_shared(&mut dst, to % 512, s, w);
+    }
+    pt_put(&mut l2, tt, dst);
+    return true;
+  }
   let f = pt_take_frame(&mut src, from % 512);
   if tf == tt {
     if pt_has(src, to % 512) {
@@ -254,7 +272,7 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
   let to = r % 4294967296;
   // Only pages mmap handed out can have been left unmapped by PROT_NONE.
   let low = pget(k.procs, pid, F_MMAP) / 4096;
-  if prot != 0 && from >= low && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, from, to) {
+  if prot != 0 && from >= low && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, from, to, false) {
     return ENOMEM;
   }
   if win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, from, to, w) != to - from {
@@ -300,7 +318,7 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
   }
   // Fresh pages for the new tail first, so running out of memory leaves
   // the addr mapping as it was.
-  if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at + have, at + want) {
+  if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at + have, at + want, false) {
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at + have, at + want, 0);
     return ENOMEM;
   }
@@ -315,14 +333,15 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
 // ------------------------------------------------- shared file mappings
 //
 // A MAP_SHARED mapping of a file is still a copy of its bytes (there is no
-// page cache to share), but it is recorded, so msync and munmap write the
+// page cache to share), made of shared pages so that fork's child sees the
+// same bytes (lx_mmap), and it is recorded, so msync and munmap write the
 // pages back, and exit and execve do too. Each process has MAP_N records
 // in k.maps: the first window page + 1 (0: free), the page count, the open
 // file description (which the record holds a reference on, so the file
 // stays open after close), and the file offset of the first page.
 //
-// Not done: a second process (or a write(2) to the file) does not see the
-// bytes until a write-back; a mapping beyond MAP_N stays a private copy;
+// Not done: a process that maps the file on its own (or a write(2) to the
+// file) does not see the bytes until a write-back; a mapping beyond MAP_N stays a private copy;
 // a row opened O_APPEND is not written back; the write-back at exit and
 // execve gives up on blocks the disk has not cached.
 

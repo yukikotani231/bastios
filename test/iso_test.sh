@@ -76,10 +76,13 @@ with open(disk, "wb") as f:
     f.truncate(33 << 20)
 fails = 0
 
-def run(name, firmware, usb=False, nvme=False):
+def run(name, firmware, usb=False, nvme=False, stick=None):
     # usb: a machine without PS/2 (i8042=off) and a USB keyboard on an
     # xHCI controller, typed on through QMP; only the keyboard, the screen
     # and the page count are checked. nvme: the disk is an NVMe drive.
+    # stick: no CD; the machine boots from this USB stick image (make usb)
+    # on the xHCI controller, whose BastiOS partition must then be the
+    # disk, and the virtio disk is left untouched.
     global fails
     qmp_path = os.path.join(tmp.name, "qmp.sock")
     if os.path.exists(qmp_path):
@@ -92,10 +95,17 @@ def run(name, firmware, usb=False, nvme=False):
             "-drive", f"file={disk},format=raw,if=none,id=vd",
             "-device", "nvme,serial=bastios,drive=vd" if nvme else "virtio-blk-pci,drive=vd",
             "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0",
-            "-serial", "stdio", "-monitor", f"unix:{mon_path},server,nowait",
-            "-cdrom", "build/bastios.iso"]
+            "-serial", "stdio", "-monitor", f"unix:{mon_path},server,nowait"]
+    if stick:
+        devs += ["-drive", f"file={stick},format=raw,if=none,id=st",
+                 "-device", "qemu-xhci,id=xh", "-device", "usb-storage,bus=xh.0,drive=st,bootindex=0"]
+        before = open(disk, "rb").read()
+    else:
+        devs += ["-cdrom", "build/bastios.iso"]
     if usb:
-        devs += ["-machine", "pc,i8042=off", "-device", "qemu-xhci", "-device", "usb-kbd",
+        if not stick:
+            devs += ["-device", "qemu-xhci,id=xh"]
+        devs += ["-machine", "pc,i8042=off", "-device", "usb-kbd,bus=xh.0",
                  "-qmp", f"unix:{qmp_path},server,nowait"]
     q = subprocess.Popen(["qemu-system-x86_64"] + firmware + devs,
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -141,7 +151,11 @@ def run(name, firmware, usb=False, nvme=False):
             good = b"disk: NVMe" in out
             print(("ok  " if good else "FAIL"), f"({name}) disk driver: NVMe")
             fails += not good
-        if usb or nvme:
+        if stick:
+            good = b"disk: USB, the BastiOS partition (" in out
+            print(("ok  " if good else "FAIL"), f"({name}) the disk is the stick's BastiOS partition")
+            fails += not good
+        if usb or nvme or stick:
             # Where the firmware put the 64-bit BARs: OVMF puts them far
             # above 4 GiB, so the drivers above ran in the upper device window.
             mon.sendall(b"info pci\n")
@@ -152,7 +166,7 @@ def run(name, firmware, usb=False, nvme=False):
                 if r:
                     info += mon.recv(65536)
             bars = [int(b, 16) for b in re.findall(rb"BAR0: 64 bit memory at 0x([0-9a-f]+)", info)]
-            high = firmware != [] and len(bars) == usb + nvme and all(b >= 1 << 32 for b in bars)
+            high = firmware != [] and len(bars) == (usb or bool(stick)) + nvme and all(b >= 1 << 32 for b in bars)
             print(f"     ({name}) 64-bit BAR0s at {', '.join(hex(b) for b in bars) or 'none'}")
             if firmware != []:
                 print(("ok  " if high else "FAIL"), f"({name}) the 64-bit BARs lie above 4 GiB")
@@ -180,7 +194,7 @@ def run(name, firmware, usb=False, nvme=False):
         # What the first UEFI run wrote through virtio, read through NVMe.
         steps = [("cat disk/iso", b"from the iso")]
     for line, want in steps:
-        if not ok or (usb and not nvme):
+        if not ok or (usb and not nvme and not stick):
             break
         mark = len(out)
         if line == "ifconfig":
@@ -197,11 +211,22 @@ def run(name, firmware, usb=False, nvme=False):
         good = booted and off and booted.group(1) == off.group(1) and int(booted.group(1)) > 10000
         print(("ok  " if good else "FAIL"), f"({name}) {booted.group(1).decode() if booted else '?'} pages, every one back at power off")
         fails += not good
+    if stick:
+        q.kill(); q.wait()
+        good = open(disk, "rb").read() == before
+        print(("ok  " if good else "FAIL"), f"({name}) the virtio disk is untouched")
+        fails += not good
     q.kill(); q.wait()
     print(f"---- {name} transcript ----")
     print(out.decode(errors="replace").replace("\r", "")[-1500:])
 
 run("BIOS", [])
+# The image `make usb` builds: the ISO, then a BastiOS partition. The
+# keyboard is on the same controller, so it is read through the disk.
+subprocess.run(["make", "-s", "build/bastios-usb.img", "USB_MIB=33"], check=True)
+stick = os.path.join(tmp.name, "stick.img")
+shutil.copy("build/bastios-usb.img", stick)
+run("BIOS, from a USB stick, USB keyboard", [], usb=True, stick=stick)
 if os.path.exists(ovmf) and os.path.exists(ovmf_vars):
     vars_copy = os.path.join(tmp.name, "vars.fd")
     shutil.copy(ovmf_vars, vars_copy)
@@ -213,6 +238,9 @@ if os.path.exists(ovmf) and os.path.exists(ovmf_vars):
     shutil.copy(ovmf_vars, vars_copy)
     run("UEFI, USB keyboard, NVMe", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
                                      "-drive", f"if=pflash,format=raw,file={vars_copy}"], usb=True, nvme=True)
+    shutil.copy(ovmf_vars, vars_copy)
+    run("UEFI, from a USB stick", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
+                                   "-drive", f"if=pflash,format=raw,file={vars_copy}"], stick=stick)
 else:
     print(f"SKIP UEFI: no OVMF firmware at {ovmf}")
 print(f"---- {fails} failed ----")

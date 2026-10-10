@@ -983,6 +983,7 @@ fn tcp_release(n: &mut Net, t: u64) -> bool
     return false;
   }
   tset(&mut n, t, W_HELD, 0);
+  tset(&mut n, t, W_PARENT, TCBS);          // accepted once: never handed out again
   let st = tw(n, t, W_STATE);
   if st == T_LISTEN || st == T_SYN_SENT {
     tcb_close(&mut n, t, false);

@@ -483,10 +483,9 @@ fn is_misc_call(n: u64) -> bool {
   return n == LX_TRUNCATE || n == LX_FTRUNCATE || n == LX_PREAD64 || n == LX_PWRITE64 || n == LX_SCHED_YIELD || n == LX_MREMAP || n == LX_MUNMAP || n == LX_MPROTECT || n == LX_MSYNC
     || n == LX_MADVISE || n == LX_FSYNC || n == LX_FDATASYNC || n == LX_CHMOD || n == LX_FCHMOD
     || n == LX_CHOWN || n == LX_FCHOWN || n == LX_LCHOWN || n == LX_UMASK || n == LX_GETRLIMIT
-    || n == LX_GETRUSAGE || n == LX_SYSINFO || n == LX_SETUID || n == LX_SETGID || n == LX_SETPGID
-    || n == LX_GETPGRP || n == LX_SETSID || n == LX_SETREUID || n == LX_SETREGID
-    || n == LX_GETGROUPS || n == LX_SETGROUPS || n == LX_SETRESUID || n == LX_GETRESUID
-    || n == LX_SETRESGID || n == LX_GETRESGID || n == LX_GETPGID || n == LX_GETSID
+    || n == LX_GETRUSAGE || n == LX_SYSINFO || n == LX_SETPGID
+    || n == LX_GETPGRP || n == LX_SETSID
+    || n == LX_GETGROUPS || n == LX_GETPGID || n == LX_GETSID
     || n == LX_UTIME || n == LX_STATFS || n == LX_FSTATFS || n == LX_GETPRIORITY
     || n == LX_SETPRIORITY || n == LX_MLOCK || n == LX_MUNLOCK || n == LX_PRCTL
     || n == LX_SETRLIMIT || n == LX_SYNC || n == LX_SCHED_GETAFFINITY || n == LX_UTIMES
@@ -638,15 +637,6 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     }
   } else if n == LX_GETPRIORITY {
     r = 20;                                 // nice 0, as the system call encodes it
-  } else if n == LX_GETRESUID || n == LX_GETRESGID {
-    xfer_u64(&mut k.fs.xfer, 0, 0);
-    r = lx_put_out(&mut k, pid, a, 4);
-    if r == 0 {
-      r = lx_put_out(&mut k, pid, b, 4);
-    }
-    if r == 0 {
-      r = lx_put_out(&mut k, pid, c, 4);
-    }
   } else if n == LX_PRCTL {
     if a != PR_SET_NAME && a != PR_GET_NAME {
       r = EINVAL;
@@ -667,9 +657,9 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   } else if n == LX_GETRANDOM {
     r = lx_getrandom(&mut k, pid, a, b);
   }
-  // Everything else (setuid and friends, setgroups, setpriority, setrlimit,
-  // madvise, mlock, munlock, mlockall, munlockall, sync) succeeds doing
-  // nothing: every page stays in memory anyway.
+  // Everything else (setpriority, setrlimit, madvise, mlock, munlock,
+  // mlockall, munlockall, sync) succeeds doing nothing: every page stays
+  // in memory anyway.
   if r == DISK_RETRY {
     return disk_retry(&mut k, pid, n);       // pread/pwrite: blocks not cached yet
   }

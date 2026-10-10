@@ -11,8 +11,8 @@ import "net.bastio";
 import "tcp.bastio";
 
 const NPROC: u64 = 32;
-const STRIDE: u64 = 48;
-const PTAB_LEN: u64 = 1536;          // NPROC * STRIDE
+const STRIDE: u64 = 56;
+const PTAB_LEN: u64 = 1792;          // NPROC * STRIDE
 
 // Row fields.
 const F_STATE: u64 = 0;
@@ -53,6 +53,19 @@ const F_PERSONA: u64 = 38;
 // size; size 0 means none (src/lxsig.bastio).
 const F_ALTSP: u64 = 40;
 const F_ALTSIZE: u64 = 41;
+// setitimer's CPU-time timers (src/lxtime.bastio): ns left and the
+// interval, for ITIMER_VIRTUAL and then ITIMER_PROF; 0 left is off.
+const F_VTIMER: u64 = 42;
+const F_PTIMER: u64 = 44;
+// Credentials (src/lxcred.bastio), two 32-bit ids a word: real and
+// effective user, saved and file-system user, then the same for groups.
+// All 0 (root) at boot; a fork or a thread copies them.
+const F_UID: u64 = 46;
+const F_SUID: u64 = 47;
+const F_GID: u64 = 48;
+const F_SGID: u64 = 49;
+// While a semop waits: which semaphore, and for what (src/lxipc.bastio).
+const F_IPCW: u64 = 50;
 const SIG_DEATH: u64 = 256;          // F_CODE of a process a signal ended: 256 + the signal
 
 // Saved register numbers.
@@ -255,11 +268,17 @@ spec fn qok(q: &Buf) -> bool {
 }
 
 // The terminal line for Linux programs: word 0 is how many bytes it holds
-// (at most LINE_MAX), word 1 is 1 once it is finished (Enter or Ctrl-D),
-// and the bytes follow from word 2.
-// Like Linux's 4096-byte canonical line; one read moves it whole (XFER).
+// (at most LINE_MAX), word 1 is 1 once it is finished (Enter or Ctrl-D;
+// in noncanonical mode, as soon as it holds a byte), and the bytes follow
+// from word 2. Like Linux's 4096-byte canonical line; one read moves it
+// whole (XFER). After it, the terminal's settings: word TT_SET is 1 once a
+// program has set them (TCSETS), and the TERMIOS_SIZE bytes of its struct
+// termios follow from word TT0, one to a word (src/linux.bastio's tt_byte).
 const LINE_MAX: u64 = 4095;
-const LINE_LEN: u64 = 4097;
+const TT_SET: u64 = 4097;             // LINE_MAX + 2
+const TT0: u64 = 4098;
+const TERMIOS_SIZE: u64 = 36;         // the kernel's struct termios
+const LINE_LEN: u64 = 4134;           // TT0 + TERMIOS_SIZE
 
 spec fn lineok(l: &Buf) -> bool {
   len(l) == LINE_LEN && get(l, 0) <= LINE_MAX && get(l, 1) <= 1
@@ -333,6 +352,8 @@ const LK_W: u64 = 6;
 const LK_WAITS: u64 = 768;            // LK_N * LK_W
 const LK_WW: u64 = 4;
 const LK_LEN: u64 = 896;              // LK_WAITS + NPROC * LK_WW
+const IPC_LEN: u64 = 4608;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
+const IPCB_LEN: u64 = 278528;         // its message bytes: IPC_SETS * MQ_CAP
 const LK_EOF: u64 = 18446744073709551615;   // a range to the end of the file; no file
 const LK_DESC: u64 = 4294967296;      // 2^32: lock owners from here are descriptions
 const LKC_FCNTL: u64 = 0;             // record and OFD locks
@@ -344,6 +365,7 @@ const OF_FREE: u64 = 0;
 const OF_FILE: u64 = 1;
 const OF_PIPE_R: u64 = 2;
 const OF_PIPE_W: u64 = 3;
+const PIPE_BOTH: u64 = 2;              // OF_PIPE_R word 3: also a writer (a FIFO opened O_RDWR)
 const OF_DIR: u64 = 4;                // x: DIR_ROOT or DIR_BIN; word 3: next entry
 // lx_recvfrom's answer when the caller must wait: no count or errno.
 const SK_WAIT: u64 = 0x8000000000000000;
@@ -442,7 +464,7 @@ const EOPNOTSUPP: u64 = 18446744073709551521; // 2^64 - 95
 const ENOSPC: u64 = 18446744073709551588;    // 2^64 - 28
 const EROFS: u64 = 18446744073709551586;     // 2^64 - 30
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
-const NAPPLETS: u64 = 18;
+const NAPPLETS: u64 = 20;
 const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----
 const S_IFIFO: u64 = 0x1180;           // a FIFO, rw-------
 const S_IFSOCK: u64 = 0xC1B6;          // a socket, rw-rw-rw-
@@ -498,6 +520,14 @@ const K_TIMER: u64 = 9;               // x: the timer
 const K_EPOLL: u64 = 10;              // x: the epoll instance
 const K_SIGFD: u64 = 11;              // x: the description (src/lxevent.bastio)
 
+/// The pages of System V shared memory segments: a level-2 table, never
+/// loaded, whose slot s is segment s's level-1 table (src/lxipc.bastio).
+/// None only if there was no page for it at boot.
+enum Store {
+  None,
+  Table(PageTable),
+}
+
 struct Kernel {
   mem: Mem,             // the page allocator
   spaces: Vec[Space],   // element `pid` is that process's address space
@@ -528,10 +558,14 @@ struct Kernel {
   inet6: u64,           // bit h: open file description h is an AF_INET6 socket (src/lxsock.bastio)
   locks: Buf,           // file locks held (src/lxlock.bastio)
   perr: u64,            // why lx_path_from last gave NO_RESULT: -ENOENT, -ENOTDIR, ... (src/linux.bastio)
+  ipc: Buf,             // System V message queues and semaphores (src/lxipc.bastio)
+  ipcb: Bytes,          // the queues' messages
+  shm: Store,           // System V shared memory pages (src/lxipc.bastio)
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.locks) == LK_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.locks) == LK_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN
+    && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
 }
 
 // ---------------------------------------------------------------- programs
@@ -985,6 +1019,8 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code: u64)
   drop_fpu(&mut k.mem, take_fpu(&mut k.fpus, pid));
   k.alarms = set(k.alarms, 2 * pid, 0);   // its timers stop
   ptimer_clear(&mut k, pid);
+  sem_exit(&mut k, pid);                   // its SEM_UNDO adjustments
+  shm_drop_all(&mut k, pid);               // and its shared memory attachments
   lx_fd_close_all(&mut k, pid, false);
   close_unshared(&mut k, pid);
   pset(&mut k.procs, pid, F_STATE, ZOMBIE);

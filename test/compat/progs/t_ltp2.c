@@ -8,7 +8,42 @@
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/personality.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
+#include <sys/select.h>
+#include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
+#include <setjmp.h>
+
+static volatile int ticks;
+static void vt(int s) { (void)s; ticks++; }
+static sigjmp_buf back;
+static void segv(int s) { (void)s; siglongjmp(back, 1); }
+
+/* Three connections in turn to a server that accepts, greets and closes
+ * each: the closed ones must not be handed out by accept again. */
+static int serve_three(void) {
+    struct sockaddr_in a = {.sin_family = AF_INET}; socklen_t l = sizeof a;
+    int sfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (bind(sfd, (void *)&a, sizeof a) || listen(sfd, 4) || getsockname(sfd, (void *)&a, &l)) return 0;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    pid_t c = fork();
+    if (c == 0) {
+        for (;;) { int u = accept(sfd, 0, 0); if (u < 0) _exit(1); write(u, "hi", 2); char b[4]; read(u, b, 4); close(u); }
+    }
+    close(sfd);
+    int good = 0;
+    for (int i = 0; i < 3; i++) {
+        int s = socket(AF_INET, SOCK_STREAM, 0); char b[2];
+        fd_set r; FD_ZERO(&r); FD_SET(s, &r); struct timeval t = {2, 0};
+        if (connect(s, (void *)&a, sizeof a) == 0 && select(s + 1, &r, 0, 0, &t) == 1 && read(s, b, 2) == 2) good++;
+        close(s);
+    }
+    kill(c, SIGKILL); waitpid(c, 0, 0);
+    return good == 3;
+}
 
 int main(void) {
     setup();
@@ -45,5 +80,24 @@ int main(void) {
     EXPECT("MSG_OOB on UDP is EOPNOTSUPP", ({ int s = socket(AF_INET, SOCK_DGRAM, 0);
            struct sockaddr_in to = {.sin_family = AF_INET, .sin_port = htons(9), .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
            int r = sendto(s, "x", 1, MSG_OOB, (struct sockaddr *)&to, sizeof to); int e = errno; close(s); r == -1 && e == EOPNOTSUPP; }));
+    EXPECT("accept never hands out a closed connection", serve_three());
+    EXPECT("a page fault runs the SIGSEGV handler", ({ signal(SIGSEGV, segv); char *p = mmap(0, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int caught = 0; if (sigsetjmp(back, 1) == 0) p[0] = 1; else caught = 1; signal(SIGSEGV, SIG_DFL); munmap(p, 4096); caught; }));
+    EXPECT("a file reads 8 KiB in one read", ({ int fd = open("cf_ltp2", O_RDWR | O_CREAT | O_TRUNC, 0644); static char b[8192];
+           memset(b, 'x', sizeof b); write(fd, b, sizeof b); lseek(fd, 0, SEEK_SET); int r = read(fd, b, sizeof b); close(fd); unlink("cf_ltp2");
+           r == 8192; }));
+    EXPECT("a FIFO opened O_RDWR reads what it writes", ({ unlink("cf_fifo"); int ok = mkfifo("cf_fifo", 0600) == 0;
+           int fd = open("cf_fifo", O_RDWR | O_NONBLOCK); char b[3] = {0};
+           ok = ok && fd >= 0 && write(fd, "ab", 2) == 2 && read(fd, b, 2) == 2 && b[0] == 'a' && (fcntl(fd, F_GETFL) & O_ACCMODE) == O_RDWR;
+           close(fd); unlink("cf_fifo"); ok; }));
+    EXPECT("ITIMER_VIRTUAL sends SIGVTALRM", ({ signal(SIGVTALRM, vt); struct itimerval t = {{0, 10000}, {0, 10000}}, o;
+           ticks = 0; setitimer(ITIMER_VIRTUAL, &t, 0); while (ticks < 3) ;
+           struct itimerval z = {{0, 0}, {0, 0}}; setitimer(ITIMER_VIRTUAL, &z, &o); signal(SIGVTALRM, SIG_DFL);
+           o.it_interval.tv_usec == 10000; }));
+    EXPECT("SIOCGIFCONF lists lo", ({ int s = socket(AF_INET, SOCK_DGRAM, 0); struct ifreq r[8]; struct ifconf c = {.ifc_len = sizeof r, .ifc_req = r};
+           int ok = ioctl(s, SIOCGIFCONF, &c) == 0 && c.ifc_len >= (int)sizeof r[0];
+           int lo = 0; for (int i = 0; ok && i < c.ifc_len / (int)sizeof r[0]; i++)
+               if (strcmp(r[i].ifr_name, "lo") == 0 && ioctl(s, SIOCGIFFLAGS, &r[i]) == 0 && (r[i].ifr_flags & IFF_LOOPBACK)) lo = 1;
+           close(s); ok && lo; }));
     return done();
 }

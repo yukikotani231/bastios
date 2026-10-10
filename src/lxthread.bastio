@@ -16,8 +16,11 @@
 // shared state is used only under the kernel lock, by whichever member's
 // trap is being handled: `finish` moves it to that member first.
 //
-// What is left out: futexes shared between processes (there is no shared
-// memory), the leader calling exit while other threads run (it ends the
+// Futexes are known by their address within the thread group, or, when
+// the word is on a shared page (MAP_SHARED) and the call is not
+// FUTEX_PRIVATE_FLAG, by the page itself, so processes meet there.
+//
+// What is left out: the leader calling exit while other threads run (it ends the
 // whole group, as exit_group), execve from a thread other than the leader
 // (EINVAL), wait4 for the children of another thread of the group.
 
@@ -29,7 +32,9 @@ const FUTEX_WAIT_BITSET: u64 = 9;
 const FUTEX_WAKE_BITSET: u64 = 10;
 const FUTEX_WOKEN: u64 = 1;         // F_FUTEX of a timed waiter woken on a processor (futex_wake)
 const FUTEX_CLOCK_REALTIME: u64 = 256;
-const FUTEX_CMD: u64 = 127;          // the rest: FUTEX_PRIVATE_FLAG, FUTEX_CLOCK_REALTIME
+const FUTEX_CMD: u64 = 127;
+const FUTEX_PRIVATE: u64 = 128;
+const FUTEX_PHYS: u64 = 0x8000000000000000;   // keys of futexes on shared pages          // the rest: FUTEX_PRIVATE_FLAG, FUTEX_CLOCK_REALTIME
 const ETIMEDOUT: u64 = 18446744073709551506;   // 2^64 - 110
 
 const CLONE_SIGHAND: u64 = 0x800;
@@ -366,6 +371,8 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   pset(&mut k.procs, c, F_TICKS, 0);
   pset(&mut k.procs, c, F_PARENT, 0);       // threads are nobody's children
   pset(&mut k.procs, c, F_ALTSIZE, 0);      // nor have an alternate signal stack
+  pset(&mut k.procs, c, F_VTIMER, 0);       // the CPU-time timers belong to the leader
+  pset(&mut k.procs, c, F_PTIMER, 0);
   pset(&mut k.procs, c, F_QUIET, 0);
   group_fork(&mut k.procs, pid, c);
   pset(&mut k.procs, c, F_REGS + R_RAX, 0);
@@ -471,7 +478,7 @@ fn futex_waiting(procs: &Buf, q: u64, g: u64, addr: u64) -> bool
   requires len(procs) == PTAB_LEN && q < NPROC
 {
   let st = state(procs, q);
-  return (st == FUTEXWAIT || st == READY) && tgid(procs, q) == g && pget(procs, q, F_FUTEX) == addr
+  return (st == FUTEXWAIT || st == READY) && (g == 0 || tgid(procs, q) == g) && pget(procs, q, F_FUTEX) == addr
     && pget(procs, q, F_RESTART) != 0 && pget(procs, q, F_REGS + R_RAX) == LX_FUTEX;
 }
 
@@ -481,16 +488,43 @@ fn futex_waiting(procs: &Buf, q: u64, g: u64, addr: u64) -> bool
 fn futex_polling(procs: &Buf, q: u64, g: u64, addr: u64) -> bool
   requires len(procs) == PTAB_LEN && q < NPROC
 {
-  return state(procs, q) == RUNNING && tgid(procs, q) == g && pget(procs, q, F_FUTEX) == addr
+  return state(procs, q) == RUNNING && (g == 0 || tgid(procs, q) == g) && pget(procs, q, F_FUTEX) == addr
     && pget(procs, q, F_RESTART) >= 2 && pget(procs, q, F_REGS + R_RAX) == LX_FUTEX;
 }
 
-/// Wakes up to n waiters on addr in pid's thread group; returns how many.
+/// The key futex word addr of pid is known by (F_FUTEX of its waiters):
+/// FUTEX_PHYS + its physical place if it is on a shared page and the call
+/// is not private, otherwise addr itself, within pid's thread group.
+fn futex_key(k: &mut Kernel, pid: u64, addr: u64, op: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if op & FUTEX_PRIVATE == 0 && addr < FUTEX_PHYS {
+    let pg = user_shared_page(&mut k.spaces, pid, addr);
+    if pg < NPAGES {
+      return FUTEX_PHYS + pg * 4096 + addr % 4096;
+    }
+  }
+  return addr;
+}
+
+/// The thread group whose waiters a key reaches: any (0) for a shared page.
+fn futex_group(procs: &Buf, pid: u64, key: u64) -> u64
+  requires len(procs) == PTAB_LEN && pid < NPROC
+{
+  if key >= FUTEX_PHYS {
+    return 0;
+  }
+  return tgid(procs, pid);
+}
+
+/// Wakes up to n waiters on key (futex_key) that pid reaches; returns how
+/// many.
 fn futex_wake(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k) && result <= NPROC
 {
-  let g = tgid(k.procs, pid);
+  let g = futex_group(k.procs, pid, addr);
   let mut woken = 0;
   let mut q = 1;
   while q < NPROC && woken < n
@@ -517,12 +551,12 @@ fn futex_wake(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
   return woken;
 }
 
-/// Moves up to n waiters on addr in pid's group to wait on to instead.
+/// Moves up to n waiters on key addr that pid reaches to wait on key to.
 fn futex_requeue(k: &mut Kernel, pid: u64, addr: u64, to: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k) && result <= NPROC
 {
-  let g = tgid(k.procs, pid);
+  let g = futex_group(k.procs, pid, addr);
   let mut moved = 0;
   let mut q = 1;
   while q < NPROC && moved < n
@@ -550,8 +584,9 @@ fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) ->
     ret(&mut k.procs, pid, EINVAL);
     return KEEP;
   }
+  let key = futex_key(&mut k, pid, addr, op);
   if cmd == FUTEX_WAKE || cmd == FUTEX_WAKE_BITSET {
-    ret(&mut k.procs, pid, futex_wake(&mut k, pid, addr, val));
+    ret(&mut k.procs, pid, futex_wake(&mut k, pid, key, val));
     return KEEP;
   }
   if cmd == FUTEX_REQUEUE || cmd == FUTEX_CMP_REQUEUE {
@@ -570,8 +605,9 @@ fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) ->
       ret(&mut k.procs, pid, EINVAL);
       return KEEP;
     }
-    let woken = futex_wake(&mut k, pid, addr, val);
-    let moved = futex_requeue(&mut k, pid, addr, addr2, arg4);
+    let key2 = futex_key(&mut k, pid, addr2, op);
+    let woken = futex_wake(&mut k, pid, key, val);
+    let moved = futex_requeue(&mut k, pid, key, key2, arg4);
     if cmd == FUTEX_CMP_REQUEUE {
       ret(&mut k.procs, pid, woken + moved);
     } else {
@@ -631,12 +667,12 @@ fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) ->
       return KEEP;
     }
     let r = wait_until(&mut k, pid, LX_FUTEX, dl);
-    pset(&mut k.procs, pid, F_FUTEX, addr);
+    pset(&mut k.procs, pid, F_FUTEX, key);
     return r;
   }
   let r = lx_retry(&mut k, pid, LX_FUTEX);
   if r == SWITCH {
-    pset(&mut k.procs, pid, F_FUTEX, addr);
+    pset(&mut k.procs, pid, F_FUTEX, key);
     pset(&mut k.procs, pid, F_STATE, FUTEXWAIT);
   }
   return r;

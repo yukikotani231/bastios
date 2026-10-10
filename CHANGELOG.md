@@ -26,6 +26,19 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Linux programs
 
+- Anonymous `MAP_SHARED` memory is shared with children: `fork` maps the
+  same pages in the child instead of copying them, so a write on one side
+  is seen on the other. The pages are counted references (bastiolang's
+  `Shared`), given back with the last mapping; `munmap`, `mprotect`,
+  `mremap` and exit handle them.
+- A futex in a `MAP_SHARED` page reaches every process that maps the page:
+  a futex without `FUTEX_PRIVATE_FLAG` on such a page is known by the
+  physical page and offset, not by the caller's address. Futexes on private
+  memory stay per process.
+- A `MAP_SHARED` file mapping is shared with `fork`'s child the same way:
+  both see each other's writes at once. It is still written back to the
+  file at `msync`, `munmap` and exit; a process that maps the file on its
+  own still gets a copy (there is no page cache).
 - Dynamically linked programs: the kernel loads a PIE's interpreter, and
   carries musl's `libc.so` for `/lib/ld-musl-x86_64.so.1`. `/bin/sh` is
   BusyBox's `ash`, so `system` and `popen` work; `waitid`, `times`.
@@ -145,9 +158,27 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   `test/compat/bastio.txt`. Not yet: `bastioc1` proving itself, which needs
   about 320 MiB, more than a process's 64 MiB window and the kernel's
   256 MiB page pool.
+- More real programs in `make compat`: MicroPython 1.24 (scripts, threads,
+  its REPL), BusyBox `vi`, the kilo editor, and BusyBox `wget`, `httpd` and
+  `nc` talking HTTP with a web server on the host (`run.py` runs one) and
+  over loopback. A new group, `test/compat/tty.txt`, types keys at
+  full-screen programs on the console and checks what they wrote.
 
 ### Files and disks
 
+- USB sticks and disks as the disk (`src/xhci.bastio`): SCSI over the
+  bulk-only transport, on the same xHCI controller as the USB keyboard.
+  Only a GPT partition of the BastiOS type is used, and it comes before
+  the machine's own disks, which are then left alone. `make usb` builds
+  `build/bastios-usb.img`, the ISO plus that partition, so the stick
+  BastiOS boots from keeps its files (`tools/mkusb.py`); `make run-usb`
+  boots it in QEMU. Checked by `test/shell_test.sh` and, booting from
+  the stick under BIOS and UEFI, `test/iso_test.sh`.
+- USB hubs: the keyboard and the stick are found behind up to two tiers of
+  USB 2 hubs, as on a PC's front panel or a monitor's ports.
+- The USB stick finishes its commands by interrupt (MSI-X on the xHCI
+  event ring) instead of being polled, so a process waiting for it sleeps
+  and an idle processor halts. `DISK=usb make iobench` measures it.
 - An NVMe drive as the disk (`src/nvme.bastio`): polled, one I/O queue,
   namespace 1 with 512-byte or 4 KiB blocks, each write flushed. It is picked
   before virtio and ATA.
@@ -232,6 +263,22 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   reaches the wire.
 
 ### Console and boot
+
+- ACPI (`src/acpi.bastio`): `halt` powers a PC off through S5 instead of
+  only halting it, `reboot` (new, and BusyBox's `reboot -f` and
+  `poweroff -f` through Linux's reboot(2)) restarts it through the FADT's
+  reset register, the keyboard controller or 0xCF9, and the power button
+  powers off. The kernel parses the FADT and the DSDT's `\_S5` itself, in
+  Bastio, through bastiolang's new `boot_acpi`. Checked on QEMU's i440fx
+  and q35 machines without the isa-debug-exit device.
+- The clock is the HPET where the ACPI HPET table puts it, else the ACPI PM
+  timer (`-machine hpet=off` used to leave the clock at 0), and the
+  processors' local APIC timers are calibrated against the same instead of
+  the PIT, which newer PCs may gate off.
+- The console obeys `tcsetattr`: a program can turn off canonical mode
+  and echo and read each key as it is typed, with `VMIN` and `VTIME`, and
+  turn off `ISIG`, `ICRNL` and output processing. Settings used to be
+  accepted and ignored, so editors and REPLs got whole echoed lines.
 
 - A console on the screen and a PS/2 keyboard when booted from the ISO:
   text drawn on the framebuffer GRUB sets up under BIOS or UEFI, keys read

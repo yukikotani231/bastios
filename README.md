@@ -1,6 +1,6 @@
 # BastiOS
 
-A small x86-64 kernel written in [Bastio](https://github.com/yukikotani231/bastiolang), a language whose memory safety is proved at compile time. It runs its own programs and unmodified Linux ones (BusyBox, Lua, sqlite, a C compiler), on several processors, with files on an NVMe, virtio, SATA or ATA disk and a TCP/IP stack on a virtio or e1000 network card. It boots under QEMU, or from a GRUB image on a USB stick under BIOS or UEFI.
+A small x86-64 kernel written in [Bastio](https://github.com/yukikotani231/bastiolang), a language whose memory safety is proved at compile time. It runs its own programs and unmodified Linux ones (BusyBox, Lua, sqlite, a C compiler), on several processors, with files on a USB stick or an NVMe, virtio, SATA or ATA disk and a TCP/IP stack on a virtio or e1000 network card. It boots under QEMU, or from a GRUB image on a USB stick under BIOS or UEFI.
 
 <!-- guide-test: session -->
 ```text
@@ -48,7 +48,7 @@ The first build proves every source file and fetches BusyBox, so it takes a whil
 
 - **Processors.** Every processor runs the scheduler. The kernel's state is under one lock (`Lock[Sys]`) and the console's devices under another, while user code runs in parallel, including the threads of one process, which share its address space.
 - **Programs.** BastiOS's own programs use its system call ABI (`int 0x80`). Linux x86-64 ELF executables use the Linux ABI (`syscall`): static or dynamic, against musl, or static against glibc. Much of the Linux system call interface is implemented: files, pipes, signals, threads and futexes, `poll` and `epoll`, timers, and sockets; [docs/linux.md](docs/linux.md) lists them. `make compat` runs a compatibility suite (`test/compat`).
-- **Files.** An in-memory file system, and one on the disk under `disk/` that keeps every write whole across a power cut (copy-on-write). The disk is an NVMe drive, a virtio disk, a SATA disk on an AHCI controller or a legacy ATA disk; commands are queued behind a block cache and finish by interrupt (MSI-X or MSI), so a process waiting for the disk sleeps.
+- **Files.** An in-memory file system, and one on the disk under `disk/` that keeps every write whole across a power cut (copy-on-write). The disk is a partition on a USB stick (the one it booted from, with `make usb`), an NVMe drive, a virtio disk, a SATA disk on an AHCI controller or a legacy ATA disk; commands are queued behind a block cache and, except on ATA, finish by interrupt (MSI-X or MSI), so a process waiting for the disk sleeps.
 - **Network.** A virtio or Intel e1000 card; DHCP, ARP, IPv4, ICMP, UDP and TCP (retransmission, out-of-order data, zero windows), loopback, and Unix sockets.
 - **Console.** The first serial port, and with GRUB the screen (the framebuffer it sets up) with a PS/2 or USB keyboard.
 
@@ -93,7 +93,7 @@ The proof covers everything in `src/` and `user/*.bastio`. Everything below it i
 | --- | --- | --- |
 | Boot loader | GRUB, configured by `boot/grub.cfg` (only for the ISO) | Loads the kernel as a Multiboot 2 image and passes the memory map, a copy of the ACPI RSDP and the framebuffer it set up (address, pitch, size, pixel layout: the screen console trusts these); `make run` and the tests use QEMU's own Multiboot loader instead |
 | Boot and trap entry | `boot/boot.S` | Multiboot 1 and 2 headers and entry (`boot/multiboot.c` turns Multiboot 2 information into the Multiboot 1 form), identity map (the first 1 GiB, and the device window from 2 GiB to 2^46 uncached, with 1 GiB pages above 4 GiB), the Multiboot header's video request, long mode; GDT with user segments; the trap stubs and the `syscall` entry; enabling SSE; entering user mode (which also loads the FS base) (`bst_cpu_enter`) and idling (`bst_cpu_wait`) |
-| Processor startup | `boot/smp.c`, `boot/ap.S` | Finding the processors in the ACPI MADT, mapping the local APIC, INIT and startup IPIs; the real-mode trampoline that takes each application processor to long mode on the kernel's tables, where it checks in and parks until `smp_run` hands it work; each processor's TSS. C because the firmware tables lie outside the device window `Mmio` covers |
+| Processor startup | `boot/smp.c`, `boot/ap.S` | Finding the ACPI tables (the processors in the MADT; any table, a byte at a time, for the kernel's `boot_acpi`), mapping the local APIC and calibrating its timer, INIT and startup IPIs; the real-mode trampoline that takes each application processor to long mode on the kernel's tables, where it checks in and parks until `smp_run` hands it work; each processor's TSS. C because the firmware tables lie outside the device window `Mmio` covers |
 | Platform setup | `boot/platform.c` | Interrupt table, `syscall` MSRs |
 | C helpers | `boot/libc.c` | `memset` / `memcpy` / `memmove` / `memcmp`, which the C compiler may call |
 | Runtime preludes | in bastiolang, `stage0/src/codegen.rs` | one `in` / `out` instruction per port access, COM1 output for the prelude's own panic messages, reading the framebuffer fields out of the Multiboot information (`boot_fb`), the arena allocator, page-table entry encoding, CR3 loads, the system call stubs for user programs |
@@ -124,10 +124,11 @@ The direction is in bastiolang's [ROADMAP.md](https://github.com/yukikotani231/b
 | `src/pages.bastio`, `space.bastio`, `usermem.bastio`, `elf.bastio` | The page allocator, address spaces, copying user memory, the ELF loader |
 | `src/linux.bastio`, `src/lx*.bastio` | The Linux system calls ([docs/linux.md](docs/linux.md)) |
 | `src/fs.bastio`, `ramfs.bastio`, `diskfs.bastio`, `diskq.bastio`, `bio.bastio` | Open files, the in-memory and disk file systems, the disk queue and block cache |
-| `src/blk.bastio`, `nvme.bastio`, `virtio_blk.bastio`, `ahci.bastio`, `ata.bastio` | Disk drivers |
+| `src/blk.bastio`, `nvme.bastio`, `virtio_blk.bastio`, `ahci.bastio`, `ata.bastio` | Disk drivers (USB sticks: `xhci.bastio`) |
 | `src/net.bastio`, `tcp.bastio`, `card.bastio`, `virtio_net.bastio`, `e1000.bastio` | The network stack and card drivers |
-| `src/console.bastio`, `uart.bastio`, `fb.bastio`, `kbd.bastio`, `xhci.bastio` | The console: serial port, screen, PS/2 and USB keyboards |
+| `src/console.bastio`, `uart.bastio`, `fb.bastio`, `kbd.bastio`, `xhci.bastio` | The console: serial port, screen, PS/2 and USB keyboards; `xhci.bastio` also drives USB sticks |
 | `src/pic.bastio`, `pit.bastio`, `lapic.bastio`, `hpet.bastio`, `rtc.bastio`, `pci.bastio`, `virtq.bastio` | Interrupt controllers, clocks, PCI, virtqueues |
+| `src/acpi.bastio` | ACPI: power off (S5), restart, the power button, the PM timer clock; the FADT and the DSDT's `\_S5` parsed in Bastio |
 | `boot/` | The trusted base: boot, trap entry, processor startup (see above) |
 | `user/*.bastio` | BastiOS programs: `sh`, `hello`, `spin`, `bench`, `fstest`, `crashme`, `diskbench` and others |
 | `user/*.c`, `user/*.S` | Test programs in C and assembly: musl programs for the Linux system calls, freestanding ELF and fault tests, the system call fuzzer |

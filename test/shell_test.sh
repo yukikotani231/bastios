@@ -1007,7 +1007,7 @@ print(out.decode(errors="replace").replace("\r", "")[-400:])
 # A USB keyboard on an xHCI controller (src/xhci.bastio), on a machine with
 # no PS/2 controller at all (i8042=off), so the keys can only come over
 # USB. They are sent through QMP; at power off the controller is reset and
-# its eleven pages are back.
+# its fourteen pages are back.
 import json
 qmp_path = os.path.join(disk_dir.name, "qmp.sock")
 qemu = boot(1, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci", "-device", "usb-kbd",
@@ -1051,6 +1051,107 @@ if ok:
 qemu.kill(); qemu.wait()
 print("---- USB boot transcript ----")
 print(out.decode(errors="replace").replace("\r", "")[-400:])
+
+# A USB stick with a BastiOS partition (tools/mkusb.py --blank: a GPT and
+# the partition, no boot image) on the same xHCI controller as the USB
+# keyboard: the partition is the disk, ahead of the virtio disk, which must
+# be left untouched, and the keyboard is read through the disk's driver.
+# The controller's event ring raises V_DISK by MSI-X, so a process waiting
+# for the stick sleeps. A second boot finds the file, with the stick and
+# the keyboard behind two tiers of USB hubs (as a stick in a real PC's
+# front panel often is); test/fsck.py then checks the partition.
+stick = os.path.join(disk_dir.name, "stick.img")
+subprocess.run(["tools/mkusb.py", stick, "--blank", "--mib", "33"], check=True, stdout=subprocess.DEVNULL)
+before = open(disk, "rb").read()
+def stick_boot(name, steps, keys=False, image=None, hubs=False):
+    global qemu, out, deadline, fails
+    usb = ["-device", "usb-storage,bus=xh.0,drive=st", "-device", "usb-kbd,bus=xh.0"]
+    if hubs:
+        usb = ["-device", "usb-hub,bus=xh.0,port=1", "-device", "usb-hub,bus=xh.0,port=1.2",
+               "-device", "usb-storage,bus=xh.0,port=1.2.3,drive=st", "-device", "usb-kbd,bus=xh.0,port=1.4"]
+    qemu = boot(1, virtio=True, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci,id=xh",
+                                       "-drive", f"file={image or stick},format=raw,if=none,id=st"] + usb +
+                                      ["-qmp", f"unix:{qmp_path},server,nowait"])
+    out = b""
+    deadline = time.time() + timeout
+    ok = read_until(b"bastios> ")
+    if image:
+        good = ok and b"usb: a USB disk without a BastiOS partition; not used\r\n" in out and b"disk: virtio\r\n" in out
+    else:
+        good = ok and b"disk: USB, the BastiOS partition (67584 sectors)\r\n" in out
+        good = good and b"disk: completions by message-signalled interrupt\r\n" in out
+    print(("ok  " if good else "FAIL"), f"({name} boot) {'the stick is not used' if image else 'the disk is the stick'}")
+    fails += not good
+    if ok and keys:
+        qmp = socket.socket(socket.AF_UNIX)
+        qmp.connect(qmp_path)
+        qf = qmp.makefile("rw")
+        qf.readline()
+        def qmp_cmd(c):
+            qf.write(json.dumps(c) + "\n"); qf.flush()
+            return qf.readline()
+        qmp_cmd({"execute": "qmp_capabilities"})
+        mark = len(out)
+        for k in ["e", "c", "h", "o", "spc", "shift-s", "t", "i", "c", "k", "ret"]:
+            parts = k.split("-")
+            for down in (True, False):
+                for q in (parts if down else parts[::-1]):
+                    qmp_cmd({"execute": "input-send-event", "arguments": {"events": [
+                        {"type": "key", "data": {"down": down, "key": {"type": "qcode", "data": q}}}]}})
+                time.sleep(0.03)
+        good = read_until(b"Stick\r\n", mark) and read_until(b"bastios> ", mark + 1)
+        print(("ok  " if good else "FAIL"), f"({name} boot) a line typed on the USB keyboard runs, read through the disk")
+        fails += not good
+        qmp.close()
+    for line, w in steps:
+        if not ok:
+            break
+        mark = len(out)
+        qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+        good = read_until(b"bastios> ", mark) and w in out[mark:]
+        print(("ok  " if good else "FAIL"), f"({name} boot)", repr(line))
+        fails += not good
+    if ok:
+        qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
+        read_until(b"pages free at power off")
+        booted = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
+        off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+        good = booted and off and booted.group(1) == off.group(1)
+        print(("ok  " if good else "FAIL"), f"({name} boot) every page back at power off")
+        fails += not good
+    qemu.kill(); qemu.wait()
+    if not image:
+        good = open(disk, "rb").read() == before
+        print(("ok  " if good else "FAIL"), f"({name} boot) the virtio disk is untouched")
+        fails += not good
+    print(f"---- {name} boot transcript ----")
+    print(out.decode(errors="replace").replace("\r", "")[-600:])
+stick_boot("USB disk", [
+    ("echo on the stick > disk/s", b""),
+    ("cat disk/s", b"on the stick\r\n"),
+    ("fstest", b"fstest: disk ok"),
+    ("rm disk/big", b""),
+    ("diskbench", b"read 2 MiB: "),
+], keys=True)
+stick_boot("USB disk behind hubs", [("cat disk/s", b"on the stick\r\n"), ("fstest", b"fstest: disk ok")],
+           keys=True, hubs=True)
+f, n = map(int, subprocess.check_output(["tools/mkusb.py", "--find", stick]).split())
+part = os.path.join(disk_dir.name, "part.img")
+with open(stick, "rb") as src, open(part, "wb") as dst:
+    src.seek(f * 512)
+    dst.write(src.read(n * 512))
+r = subprocess.run(["test/fsck.py", part], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+print(("ok  " if r.returncode == 0 else "FAIL"), "(USB disk) fsck of the partition:", r.stdout.decode().strip())
+fails += r.returncode != 0
+# A stick with no BastiOS partition is never written to: the virtio disk
+# is the disk, and the stick stays all zeros.
+bare = os.path.join(disk_dir.name, "bare.img")
+with open(bare, "wb") as fb:
+    fb.truncate(8 << 20)
+stick_boot("bare stick", [], image=bare)
+good = not any(open(bare, "rb").read())
+print(("ok  " if good else "FAIL"), "(bare stick boot) the stick is untouched")
+fails += not good
 
 # And back on ATA: what virtio wrote is on the disk.
 qemu = boot(1, with_disk=True)
@@ -1158,6 +1259,125 @@ with open(disk, "rb") as f:
     ok = f.read(8) == b"BSTDISK3"
 print(("ok  " if ok else "FAIL"), "a BSTDISK2 disk is upgraded to BSTDISK3 at mount")
 fails += not ok
+# ACPI (src/acpi.bastio) on both of QEMU's PCs, the i440fx (pc) and the
+# q35, without the isa-debug-exit device and without -no-reboot, so only
+# the kernel's own ACPI code can end QEMU: `reboot` restarts the machine
+# (a second boot), the power button (QEMU's system_powerdown) powers it off
+# through S5, and QEMU exits by itself with status 0. With the HPET turned
+# off the clock is the PM timer, and BusyBox's `reboot -f` and
+# `poweroff -f` reach the kernel through Linux's reboot(2).
+def acpi_boot(machine, name, steps, end):
+    global qemu, out, deadline, fails
+    mon_path = os.path.join(disk_dir.name, "acpi-mon.sock")
+    if os.path.exists(mon_path):
+        os.unlink(mon_path)
+    qemu = subprocess.Popen(
+        ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", "2", "-display", "none",
+         "-machine", machine, "-nic", "none", "-serial", "stdio", "-monitor", f"unix:{mon_path},server,nowait"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    out = b""
+    deadline = time.time() + timeout
+    ok = read_until(b"bastios> ")
+    for line, want in steps:
+        if not ok:
+            break
+        mark = len(out)
+        if line == "reboot":
+            qemu.stdin.write(b"reboot\r"); qemu.stdin.flush()
+            ok = read_until(b"pages free at restart", mark) and read_until(b"bastios> ", mark)
+            booted = re.findall(rb"BastiOS 0.2: (\d+) pages of memory", out)
+            restart = re.search(rb"BastiOS: (\d+) pages free at restart", out)
+            ok = ok and len(booted) == 2 and restart and booted[0] == restart.group(1)
+            print(("ok  " if ok else "FAIL"), f"({name}) reboot: every page back, then a second boot")
+        else:
+            qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+            ok = read_until(b"# " if line == "ash" else b"bastios> ", mark) and want in out[mark:]
+            print(("ok  " if ok else "FAIL"), f"({name})", repr(line))
+        fails += not ok
+    if ok:
+        mark = len(out)
+        if end == "button":
+            m = socket.socket(socket.AF_UNIX)
+            m.connect(mon_path)
+            m.sendall(b"system_powerdown\n")
+            ok = read_until(b"power button: powering off", mark)
+            m.close()
+            print(("ok  " if ok else "FAIL"), f"({name}) the power button powers off")
+            fails += not ok
+        else:
+            qemu.stdin.write(end.encode() + b"\r"); qemu.stdin.flush()
+        read_until(b"pages free at power off", mark)
+    try:
+        code = qemu.wait(timeout=max(1, deadline - time.time()))
+    except subprocess.TimeoutExpired:
+        qemu.kill(); qemu.wait(); code = None
+    booted = re.findall(rb"BastiOS 0.2: (\d+) pages of memory", out)
+    off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+    good = code == 0 and booted and off and booted[-1] == off.group(1)
+    print(("ok  " if good else "FAIL"), f"({name}) every page back, and QEMU powered off by S5 (status {code})")
+    fails += not good
+    print(f"---- {name} transcript ----")
+    print(out.decode(errors="replace").replace("\r", "")[-500:])
+
+def clock_ns_now():
+    global out
+    mark = len(out)
+    qemu.stdin.write(b"clock\r"); qemu.stdin.flush()
+    read_until(b"bastios> ", mark)
+    m = re.search(rb"(\d+) ns since boot", out[mark:])
+    return int(m.group(1)) if m else None
+
+for machine, name in (("pc", "i440fx"), ("q35", "q35")):
+    acpi_boot(machine, f"{name} ACPI", [
+        ("help", b"  reboot           restart the machine"),
+        ("reboot", b""),
+    ], "button")
+    good = b"acpi: soft power off, power button\r\n" in out
+    print(("ok  " if good else "FAIL"), f"({name} ACPI) the boot log has soft power off and the power button")
+    fails += not good
+
+# The PM timer as the clock: two readings a second apart (by the host's
+# clock; TCG is slow, so the window is wide), on each machine.
+for machine, name in (("pc,hpet=off", "i440fx, no HPET"), ("q35,hpet=off", "q35, no HPET")):
+    qemu = subprocess.Popen(
+        ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", "2", "-display", "none",
+         "-machine", machine, "-nic", "none", "-serial", "stdio", "-monitor", "none"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    out = b""
+    deadline = time.time() + timeout
+    ok = read_until(b"bastios> ") and b"clock: the ACPI PM timer (no HPET)\r\n" in out
+    print(("ok  " if ok else "FAIL"), f"({name}) the clock is the ACPI PM timer")
+    fails += not ok
+    if ok:
+        t0 = clock_ns_now()
+        time.sleep(1)
+        t1 = clock_ns_now()
+        good = t0 is not None and t1 is not None and 500000000 <= t1 - t0 <= 5000000000
+        print(("ok  " if good else "FAIL"), f"({name}) a second passes on it: {t0} then {t1} ns")
+        fails += not good
+        # BusyBox's reboot and poweroff, with -f: reboot(2) straight away.
+        mark = len(out)
+        qemu.stdin.write(b"ash\r"); qemu.stdin.flush()
+        read_until(b"# ", mark)
+        mark = len(out)
+        qemu.stdin.write(b"reboot -f\r"); qemu.stdin.flush()
+        good = read_until(b"pages free at restart", mark) and read_until(b"bastios> ", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) reboot -f in ash restarts the machine")
+        fails += not good
+        mark = len(out)
+        qemu.stdin.write(b"ash\r"); qemu.stdin.flush()
+        read_until(b"# ", mark)
+        qemu.stdin.write(b"poweroff -f\r"); qemu.stdin.flush()
+        read_until(b"pages free at power off", mark)
+    try:
+        code = qemu.wait(timeout=max(1, deadline - time.time()))
+    except subprocess.TimeoutExpired:
+        qemu.kill(); qemu.wait(); code = None
+    print(("ok  " if code == 0 else "FAIL"), f"({name}) poweroff -f powers QEMU off (status {code})")
+    fails += code != 0
+    print(f"---- {name} transcript ----")
+    print(out.decode(errors="replace").replace("\r", "")[-500:])
+
 print(f"---- {fails} failed ----")
 sys.exit(1 if fails else 0)
 PY
