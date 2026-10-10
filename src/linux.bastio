@@ -235,6 +235,8 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       r = pipe_read(&mut k, pid, d.x, va, cnt);
     } else if d.kind == K_EVENT || d.kind == K_TIMER {
       r = ev_read(&mut k, pid, d.kind, d.x, va, cnt);
+    } else if d.kind == K_SIGFD {
+      r = sfd_read(&mut k, pid, d.x, va, cnt);
     } else if d.kind == K_DEV && d.x >= PROC_DEV {
       r = proc_read(&mut k, pid, a, d.x, va, cnt);
     } else if d.kind == K_DEV {
@@ -312,6 +314,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if is_sock_call(n) {
     return lx_sock_call(&mut k, pid, n, a, b, c);
+  }
+  if is_msg_call(n) {
+    return lx_msg_call(&mut k, pid, n, a, b, c);
   }
   if is_misc_call(n) {
     return lx_misc_call(&mut con, &mut k, pid, n, a, b, c);

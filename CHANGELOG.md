@@ -14,6 +14,17 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Added
 
+- `sendmsg` and `recvmsg`, with `SCM_RIGHTS` passing a descriptor over an
+  `AF_UNIX` socket (one per message, one in flight per direction);
+  `MSG_PEEK` on TCP and unix sockets; `shutdown` on TCP (sends the FIN)
+  and unix sockets; `MSG_NOSIGNAL`; `SO_SNDBUF` and `SO_RCVBUF`;
+  `AF_UNIX` `SOCK_DGRAM` and `SOCK_SEQPACKET` socket pairs, which keep
+  message boundaries; and `rt_sigqueueinfo` (`sigqueue`), whose value
+  reaches the handler's siginfo. A new compat program, `t_sock2`, checks
+  these.
+- `signalfd` and `signalfd4`: read, poll and epoll on the signals in its
+  set. A blocked signal is now kept pending even when its action ignores
+  it, as on Linux, so a blocked `SIGCHLD` reaches a signalfd or `sigwait`.
 - A Linux program blocked on a network socket (`accept`, `read`,
   `recvfrom`, a full TCP send buffer) sleeps instead of being restarted on
   every pass of the scheduler, so it no longer keeps a processor busy

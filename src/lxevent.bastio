@@ -18,6 +18,11 @@
 // requires, sees no difference. An epoll instance inside another never
 // reports ready.
 //
+// A signalfd is an open file description of kind OF_SIGFD whose word 2 is
+// the set of signals it takes. A read takes the lowest pending ones in the
+// set from the reading process, as signalfd_siginfo records; the caller
+// keeps them blocked so they are not delivered first.
+//
 // A read or epoll_wait that has to wait runs again (lx_retry), as a pipe
 // read does.
 //
@@ -48,6 +53,9 @@ const LX_TIMERFD_GETTIME: u64 = 287;
 const LX_EVENTFD2: u64 = 290;
 const LX_EPOLL_CREATE1: u64 = 291;
 const LX_EPOLL_PWAIT2: u64 = 441;
+const LX_SIGNALFD: u64 = 282;
+const LX_SIGNALFD4: u64 = 289;
+const SFD_INFO: u64 = 128;                   // struct signalfd_siginfo
 const LX_MKNOD: u64 = 133;
 const LX_MKNODAT: u64 = 259;
 const S_IFMT: u64 = 0xF000;
@@ -71,7 +79,8 @@ const ENOSPC: u64 = 18446744073709551588;    // 2^64 - 28
 fn is_event_call(n: u64) -> bool {
   return n == LX_EPOLL_CREATE || n == LX_EPOLL_WAIT || n == LX_EPOLL_CTL || n == LX_EPOLL_PWAIT
     || n == LX_TIMERFD_CREATE || n == LX_EVENTFD || n == LX_TIMERFD_SETTIME || n == LX_TIMERFD_GETTIME
-    || n == LX_EVENTFD2 || n == LX_EPOLL_CREATE1 || n == LX_EPOLL_PWAIT2 || n == LX_MKNOD || n == LX_MKNODAT;
+    || n == LX_EVENTFD2 || n == LX_EPOLL_CREATE1 || n == LX_EPOLL_PWAIT2 || n == LX_MKNOD || n == LX_MKNODAT
+    || n == LX_SIGNALFD || n == LX_SIGNALFD4;
 }
 
 /// Gives process pid the lowest closed descriptor for a new description
@@ -137,6 +146,112 @@ fn ev_write(k: &mut Kernel, pid: u64, h: u64, va: u64, n: u64) -> u64
   }
   of_set(&mut k.ofd, h, 2, c + v);
   return 8;
+}
+
+// ---------------------------------------------------------------- signalfd
+
+/// signalfd and signalfd4(fd, maskp, size, flags): a new signalfd taking
+/// the signals in the set at maskp (fd -1), or a new set for signalfd fd.
+/// SIGKILL and SIGSTOP are left out, as on Linux.
+fn lx_signalfd(k: &mut Kernel, pid: u64, fd: u64, maskp: u64, size: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if size != 8 || flags & !(LO_NONBLOCK | LO_CLOEXEC) != 0 {
+    return EINVAL;
+  }
+  if maskp > VA_LAST || copy_from_user(&mut k.spaces, pid, maskp, &mut k.fs.xfer, 8) != 8 {
+    return EFAULT;
+  }
+  let mask = get_u64(k.fs.xfer, 0) & !(sbit(SIGKILL) | sbit(SIGSTOP));
+  if fd != 0xFFFFFFFF && fd != 0xFFFFFFFFFFFFFFFF {
+    let h = fd_ofd(k, pid, fd);
+    if h >= OFD_N {
+      return EBADF;
+    }
+    if of_get(k.ofd, h, 0) != OF_SIGFD {
+      return EINVAL;
+    }
+    of_set(&mut k.ofd, h, 2, mask);
+    return fd;
+  }
+  return ev_install(&mut k, pid, OF_SIGFD, mask, flags / LO_NONBLOCK % 2, flags / LO_CLOEXEC % 2 == 1);
+}
+
+/// What poll finds on signalfd description h, for process pid.
+fn sfd_bits(k: &Kernel, pid: u64, h: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  if h < OFD_N && pget(k.procs, pid, F_SIGPEND) & of_get(k.ofd, h, 2) != 0 {
+    return POLLIN;
+  }
+  return 0;
+}
+
+/// Writes the signalfd_siginfo for process pid's pending signal s to va.
+/// False if va cannot take it.
+fn sfd_one(k: &mut Kernel, pid: u64, s: u64, va: u64) -> bool
+  requires kok(k) && pid < NPROC && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
+  lx_fill(&mut k, 0, SFD_INFO);
+  bset(&mut k.fs.xfer, 0, cast[u8](s));                 // ssi_signo
+  let word = get(k.sigsave, sender_at(pid, s));
+  bset(&mut k.fs.xfer, 12, cast[u8](word % 256));       // ssi_pid
+  if word / 256 % 2 == 1 {
+    let v = word / 512;
+    let mut i = 0;
+    while i < 4
+      invariant i <= 4 && kok(k)
+    {
+      bset(&mut k.fs.xfer, 8 + i, cast[u8](255));        // ssi_code: SI_QUEUE
+      bset(&mut k.fs.xfer, 44 + i, cast[u8](v / pow256(i) % 256));   // ssi_int
+      bset(&mut k.fs.xfer, 48 + i, cast[u8](v / pow256(i) % 256));   // ssi_ptr
+      i = i + 1;
+    }
+  }
+  return va <= VA_LAST && copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, SFD_INFO) == SFD_INFO;
+}
+
+/// read(2) on signalfd description h: takes the pending signals in its set,
+/// lowest first, one signalfd_siginfo each, as many as n has room for.
+/// Returns the bytes written, -EINVAL if n holds none, EAGAIN if none is
+/// pending.
+fn sfd_read(k: &mut Kernel, pid: u64, h: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if h >= OFD_N {
+    return EBADF;
+  }
+  if n < SFD_INFO {
+    return EINVAL;
+  }
+  let mask = of_get(k.ofd, h, 2);
+  let mut done = 0;
+  let mut stop = false;
+  let mut s = 1;
+  while s <= NSIG && !stop
+    invariant 1 <= s && s <= NSIG + 1 && done <= SFD_INFO * NSIG && kok(k)
+  {
+    let pend = pget(k.procs, pid, F_SIGPEND);
+    if has_sig(pend & mask, s) && done + SFD_INFO <= SFD_INFO * NSIG && done + SFD_INFO <= n {
+      if !sfd_one(&mut k, pid, s, sat_add(va, done)) {
+        if done == 0 {
+          return EFAULT;
+        }
+        stop = true;
+      } else {
+        pset(&mut k.procs, pid, F_SIGPEND, pend & !sbit(s));
+        done = done + SFD_INFO;
+      }
+    }
+    s = s + 1;
+  }
+  if done == 0 {
+    return EAGAIN;
+  }
+  return done;
 }
 
 // ---------------------------------------------------------------- timerfd
@@ -756,6 +871,10 @@ fn lx_event_call(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: 
     }
   } else if n == LX_EPOLL_CTL {
     r = lx_epoll_ctl(&mut k, pid, a, b, c, d);
+  } else if n == LX_SIGNALFD {
+    r = lx_signalfd(&mut k, pid, a, b, c, 0);
+  } else if n == LX_SIGNALFD4 {
+    r = lx_signalfd(&mut k, pid, a, b, c, d);
   } else if n == LX_MKNOD {
     r = lx_mknod(&mut k, pid, AT_FDCWD, a, b);
   } else if n == LX_MKNODAT {
