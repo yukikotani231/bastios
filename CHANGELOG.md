@@ -40,6 +40,15 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
   from the i8042, alongside the serial console.
 - A USB keyboard on an xHCI controller's root port, for PCs without PS/2
   (no hubs).
+- An NVMe drive as the disk (`src/nvme.bastio`): polled, one I/O queue,
+  namespace 1 with 512-byte blocks, each write flushed. It is picked
+  before virtio and ATA.
+- A SATA disk on an AHCI controller (`src/ahci.bastio`): polled, command
+  slot 0 of the first port with a disk, each write flushed. It is picked
+  after virtio, before legacy ATA.
+- PCI devices are found on every bus and function, not only the
+  function-0 devices of bus 0 (NVMe drives sit behind root ports, and
+  q35's AHCI controller is function 2).
 
 ### Changed
 
@@ -55,6 +64,11 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 - The device window is mapped from 2 GiB (it was 3 GiB), where UEFI
   firmware puts the framebuffer. Needs bastiolang with `boot_fb`.
+- The device window now reaches 2^46: boot.S maps 4 GiB to 2^46 uncached
+  with 1 GiB pages, so the xHCI and NVMe drivers take 64-bit BARs above
+  4 GiB, where UEFI firmware puts them. Needs bastiolang with the wider
+  window. QEMU targets pass `-cpu qemu64,+pdpe1gb`, since QEMU's default
+  CPU model has no 1 GiB pages (on such a CPU the window stops at 4 GiB).
 - `make run-iso` and `make run-uefi` open a QEMU window.
 
 ## [0.2.0] - not yet tagged

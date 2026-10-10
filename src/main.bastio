@@ -591,19 +591,25 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // The disk: virtio (DMA into pages lent from the allocator) if the machine
   // has one, else ATA. PCI's configuration ports are claimed for it.
   let mut pci = Pci { addr: port_claim(&mut ports, PCI_ADDR, 4), data: port_claim(&mut ports, PCI_DATA, 4) };
-  let dev = blk_new(&mut ports, &mut pci, &mut m);
+  let dev = blk_new(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi);
   let dev_lo = blk_ports_lo(dev);
   let dev_hi = blk_ports_hi(dev);
+  let dk_lo = blk_mmio_lo(dev);
+  let dk_hi = blk_mmio_hi(dev);
   let disk = disk_mount(dev);
   if blk_is_virtio(disk.dev) {
     puts(&mut con, "disk: virtio\r\n");
+  } else if blk_is_nvme(disk.dev) {
+    puts(&mut con, "disk: NVMe\r\n");
+  } else if blk_is_ahci(disk.dev) {
+    puts(&mut con, "disk: AHCI\r\n");
   }
   // A USB keyboard on an xHCI controller, if there is one: eleven pages
   // after the network card's.
   let xdev = pci_find_class(&mut pci, XHCI_CLASS);
   let usb_lo = usb_bar(&mut pci, xdev);
   let usb_hi = usb_lo + usb_bar_size(&mut pci, xdev);
-  let usb = usb_new(&mut pci, &mut m, &mut win, 13, fb_lo, fb_hi, xdev, usb_lo, usb_hi - usb_lo);
+  let usb = usb_new(&mut pci, &mut m, &mut win, 13, fb_lo, fb_hi, dk_lo, dk_hi, xdev, usb_lo, usb_hi - usb_lo);
   let usb_on = usb_live(usb);
   match term.usb {
     Usb::None => {},
@@ -612,14 +618,14 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   term.usb = usb;
   if usb_on {
     puts(&mut con, "keyboard: USB (xHCI)\r\n");
-  } else if xdev < 32 && usb_lo == 0 {
-    puts(&mut con, "usb: the xHCI controller's registers are above 4 GiB; not used\r\n");
-  } else if xdev < 32 {
+  } else if xdev < PCI_NONE && usb_lo == 0 {
+    puts(&mut con, "usb: the xHCI controller's registers are outside the device window; not used\r\n");
+  } else if xdev < PCI_NONE {
     puts(&mut con, "usb: no keyboard on the xHCI controller's root ports\r\n");
   }
   // The network card, if any: nine pages after the disk's four (an e1000
   // takes six of them).
-  let nic = nic_new(&mut ports, &mut pci, &mut m, &mut win, 4, dev_lo, dev_hi, fb_lo, fb_hi, usb_lo, usb_hi);
+  let nic = nic_new(&mut ports, &mut pci, &mut m, &mut win, 4, dev_lo, dev_hi, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi);
   if nic_live(nic) {
     if nic_e1000(nic) {
       puts(&mut con, "net: e1000, mac ");
@@ -680,7 +686,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     drop_fpu(&mut sys.k.mem, vec_pop(&mut sys.k.fpus));
   }
   vec_free(sys.k.fpus);
-  blk_free(&mut ports, vfs_free(sys.k.fs, &mut sys.k.mem), &mut sys.k.mem);
+  blk_free(&mut ports, &mut win, vfs_free(sys.k.fs, &mut sys.k.mem), &mut sys.k.mem);
   nic_free(&mut ports, &mut win, sys.k.nic, &mut sys.k.mem);
   usb_off(&mut devices.usb, &mut win, &mut sys.k.mem);
   puts(&mut sys.con, "BastiOS: ");

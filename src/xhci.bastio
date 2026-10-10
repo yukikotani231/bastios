@@ -33,7 +33,6 @@ import "pages.bastio";
 const XHCI_CLASS: u64 = 0x0C0330;      // serial bus controller, USB, xHCI
 const XHCI_PAGES: u64 = 11;
 const XHCI_MAX_LEN: u64 = 0x100000;    // registers claimed: the BAR, up to 1 MiB
-const XHCI_TOP: u64 = 0xFEC00000;      // below the I/O APIC
 const XHCI_SPINS: u64 = 20000000;
 const XHCI_SP_MAX: u64 = 4;
 const RING_N: u64 = 64;
@@ -789,19 +788,21 @@ fn usb_poll(u: &mut Usb) -> u64
   }
 }
 
-/// The xHCI controller `dev` on PCI bus 0, whose registers are bar ..
+/// The xHCI controller `dev` on PCI, whose registers are bar ..
 /// bar + size, started with pages at .. at+10, if the registers lie in the
-/// device window below the I/O APIC and clear of the framebuffer at
-/// lo .. hi; else none. A controller with no keyboard is stopped and given
-/// back at once.
-fn usb_new(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, lo: u64, hi: u64, dev: u64, bar: u64, size: u64) -> Usb
-  requires pci_ok(pci) && mem_ok(m) && at + XHCI_PAGES <= NPAGES && bar <= 4294967295 && size <= XHCI_MAX_LEN
-  requires forall a: u64 :: 0x80000000 <= a && a < XHCI_TOP && !(lo <= a && a < hi) ==> mmio_free(win, a)
+/// device window (`bar_space`) clear of the framebuffer at lo .. hi and
+/// the disk's registers at lo2 .. hi2; else none. A controller with no
+/// keyboard is stopped and given back at once.
+fn usb_new(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, lo: u64, hi: u64, lo2: u64, hi2: u64,
+  dev: u64, bar: u64, size: u64) -> Usb
+  requires pci_ok(pci) && mem_ok(m) && at + XHCI_PAGES <= NPAGES && bar < WIN_TOP && size <= XHCI_MAX_LEN
+  requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) ==> mmio_free(win, a)
   ensures usb_ok(result) && mem_ok(m)
-  ensures forall a: u64 :: 0x80000000 <= a && a < XHCI_TOP && !(lo <= a && a < hi) && !(bar <= a && a < bar + size) ==> mmio_free(win, a)
+  ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) && !(bar <= a && a < bar + size) ==> mmio_free(win, a)
 {
-  if dev >= 32 || bar < 0x80000000 || size < 0x2000 || bar + size > XHCI_TOP || bar % 4096 != 0
-    || !(bar + size <= lo || bar >= hi) || !pages_free(m, at, XHCI_PAGES) {
+  if dev >= PCI_NONE || size < 0x2000 || bar % 4096 != 0
+    || !((bar >= WIN_LO && bar + size <= WIN_LOW_TOP) || (bar >= WIN_HIGH && bar + size <= WIN_TOP))
+    || !(bar + size <= lo || bar >= hi) || !(bar + size <= lo2 || bar >= hi2) || !pages_free(m, at, XHCI_PAGES) {
     return Usb::None;
   }
   pci_enable(&mut pci, dev);
@@ -829,19 +830,19 @@ fn usb_new(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, lo: u64, hi
 /// (both 0 if it has no usable memory BAR).
 fn usb_bar(pci: &mut Pci, dev: u64) -> u64
   requires pci_ok(pci)
-  ensures result <= 4294967295
+  ensures result < WIN_TOP
 {
-  if dev >= 32 {
+  if dev >= PCI_NONE {
     return 0;
   }
-  return pci_mem_bar(&mut pci, dev);
+  return pci_mem_bar64(&mut pci, dev);
 }
 
 fn usb_bar_size(pci: &mut Pci, dev: u64) -> u64
   requires pci_ok(pci)
   ensures result <= XHCI_MAX_LEN
 {
-  if dev >= 32 {
+  if dev >= PCI_NONE {
     return 0;
   }
   let n = pci_bar_size(&mut pci, dev);
