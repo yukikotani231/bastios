@@ -262,16 +262,16 @@ fn q_pop(q: &mut Buf) -> u64
 }
 
 /// Moves every byte the UART has received into the queue.
-fn drain(con: &mut Uart, q: &mut Buf)
-  requires uart_ok(con) && qok(q)
-  ensures qok(q)
+fn drain(con: &mut Con, q: &mut Buf)
+  requires con_ok(con) && qok(q)
+  ensures qok(q) && con_ok(con)
 {
-  let mut c = uart_poll(&mut con);
+  let mut c = con_poll(&mut con);
   while c < 256
-    invariant qok(q)
+    invariant qok(q) && con_ok(con)
   {
     q_push(&mut q, c);
-    c = uart_poll(&mut con);
+    c = con_poll(&mut con);
   }
 }
 
@@ -318,6 +318,11 @@ const OF_PIPE_W: u64 = 3;
 const OF_DIR: u64 = 4;                // x: DIR_ROOT or DIR_BIN; word 3: next entry
 // lx_recvfrom's answer when the caller must wait: no count or errno.
 const SK_WAIT: u64 = 0x8000000000000000;
+// Linux working directories: per process, word 0 the length of the path
+// (without the leading "/", at most FNAME_MAX) and one byte a word after.
+const CWD_STRIDE: u64 = 32;
+const CWD_LEN: u64 = 512;             // NPROC * CWD_STRIDE
+
 // Linux signal actions: per process, 64 signals of 4 words each (handler,
 // flags, restorer, mask).
 const SIGACT_LEN: u64 = 4096;
@@ -335,10 +340,11 @@ const LX_PIPE: u64 = 22;
 const LX_FSTAT: u64 = 5;
 const LX_GETDENTS64: u64 = 217;
 const AT_EMPTY_PATH: u64 = 0x1000;
+const AT_REMOVEDIR: u64 = 0x200;
 const DENT_BUF: u64 = 2048;           // the most getdents64 fills in one call
 const ENOTDIR: u64 = 18446744073709551596;  // 2^64 - 20
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
-const NAPPLETS: u64 = 8;
+const NAPPLETS: u64 = 11;
 const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----
 const S_IFIFO: u64 = 0x1180;           // a FIFO, rw-------
 const S_IFSOCK: u64 = 0xC1B6;          // a socket, rw-rw-rw-
@@ -394,10 +400,11 @@ struct Kernel {
   fs: Vfs,              // files and the open-file table
   nic: Nic,             // the network card and its UDP sockets, if any
   sigact: Buf,          // Linux signal actions (src/lxsig.bastio)
+  cwd: Buf,             // Linux working directories (src/lxdir.bastio)
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN
 }
 
 // ---------------------------------------------------------------- programs
@@ -573,6 +580,7 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   }
   lx_fd_reset(&mut k.lxfd, pid);
   sig_reset(&mut k.sigact, pid, false);
+  k.cwd = set(k.cwd, pid * CWD_STRIDE, 0);   // starts at "/"
   let mut args = balloc(ARGV0_MAX + 1);
   let alen = name_arg(&mut args, prog_name(prog));
   let src = Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
@@ -754,8 +762,9 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
   }
 }
 
-fn put_state(con: &mut Uart, s: u64)
-  requires uart_ok(con)
+fn put_state(con: &mut Con, s: u64)
+  requires con_ok(con)
+  ensures con_ok(con)
 {
   if s == READY {
     puts(&mut con, "ready  ");
@@ -772,13 +781,14 @@ fn put_state(con: &mut Uart, s: u64)
   }
 }
 
-fn print_ps(con: &mut Uart, procs: &Buf)
-  requires uart_ok(con) && len(procs) == PTAB_LEN
+fn print_ps(con: &mut Con, procs: &Buf)
+  requires con_ok(con) && len(procs) == PTAB_LEN
+  ensures con_ok(con)
 {
   puts(&mut con, "  PID  PPID STATE    TICKS NAME\r\n");
   let mut p = 1;
   while p < NPROC
-    invariant 1 <= p && p <= NPROC
+    invariant 1 <= p && p <= NPROC && con_ok(con)
   {
     if state(procs, p) != FREE {
       put_num_pad(&mut con, p, 5);

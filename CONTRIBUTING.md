@@ -9,8 +9,9 @@ Thanks for your interest. BastiOS is pre-release and moves together with [bastio
    make test
    ```
    CI runs the same thing.
-2. Kernel logic goes in Bastio (`src/`, `user/*.bastio`), where it is proved. Assembly and C (`boot/`, `user/*.S`) are the trusted base: add to them only what Bastio cannot express yet, and say why in the commit.
+2. Kernel logic goes in Bastio (`src/`, `user/*.bastio`), where it is proved. Assembly and C (`boot/`, `user/start.S`) are the trusted base ([docs/trusted-base.md](docs/trusted-base.md)): add to them only what Bastio cannot express yet, say why in the commit, and update `test/trusted_base.txt` with `test/trusted_base.sh --update`.
 3. Every new shell command or kernel feature gets a case in `test/shell_test.sh`.
+4. A change a user would notice gets a line under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md).
 
 Don't copy counts (lines, pages, tests) into prose; they go stale. Give the command that counts them instead.
 

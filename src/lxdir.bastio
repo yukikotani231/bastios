@@ -1,10 +1,22 @@
-// Listing directories for Linux programs (getdents64). There are two:
-// "/", holding "bin" and the file layer's files (vfs_dirent), and "/bin",
-// holding the built-in programs and BusyBox's applets. A directory
-// description remembers the index of the next entry.
+// Directories for Linux programs: listing them (getdents64), the working
+// directory (chdir, getcwd), mkdir, rmdir and unlink. "/" holds "bin" and
+// the file layer's top directory; "/bin" holds the built-in programs and
+// BusyBox's applets; every other directory is the file layer's
+// (vfs_dir_lookup, vfs_readdir). A directory description's x is DIR_ROOT,
+// DIR_BIN or DIR_VFS + the file layer's handle, and word 3 the index of
+// the next entry.
 
 import "linux.bastio";
 
+const DIR_VFS: u64 = 2;
+const LX_CHDIR: u64 = 80;
+const LX_MKDIR: u64 = 83;
+const LX_RMDIR: u64 = 84;
+const LX_MKDIRAT: u64 = 258;
+const EEXIST: u64 = 18446744073709551599;     // 2^64 - 17
+const EISDIR: u64 = 18446744073709551595;     // 2^64 - 21
+const ENOTEMPTY: u64 = 18446744073709551577;  // 2^64 - 39
+const EBUSY: u64 = 18446744073709551600;      // 2^64 - 16
 const DT_DIR: u64 = 4;
 const DT_REG: u64 = 8;
 const DENT_HDR: u64 = 19;             // d_ino, d_off, d_reclen, d_type
@@ -22,11 +34,10 @@ fn dir_entry(k: &mut Kernel, dir: u64, i: u64) -> Ent
     if i == 0 {
       return Ent { len: name_out(&mut k.fs.xfer, "bin"), dir: true, end: false };
     }
-    let n = vfs_dirent(&mut k.fs, i - 1);
-    if n == NO_FILE {
-      return Ent { len: 0, dir: false, end: true };
-    }
-    return Ent { len: n, dir: false, end: false };
+    return vfs_entry(&mut k, VDIR_ROOT, i - 1);
+  }
+  if dir >= DIR_VFS {
+    return vfs_entry(&mut k, dir - DIR_VFS, i);
   }
   if i < NPROGS {
     return Ent { len: name_out(&mut k.fs.xfer, prog_name(i)), dir: false, end: false };
@@ -35,6 +46,21 @@ fn dir_entry(k: &mut Kernel, dir: u64, i: u64) -> Ent
     return Ent { len: name_out(&mut k.fs.xfer, applet_name(i - NPROGS)), dir: false, end: false };
   }
   return Ent { len: 0, dir: false, end: true };
+}
+
+/// Entry i of the file layer's directory d.
+fn vfs_entry(k: &mut Kernel, d: u64, i: u64) -> Ent
+  requires kok(k)
+  ensures kok(k) && result.len <= XFER
+{
+  let n = vfs_readdir(&mut k.fs, d, i);
+  if n == NO_FILE {
+    return Ent { len: 0, dir: false, end: true };
+  }
+  if n == 0 {
+    return Ent { len: 0, dir: false, end: false };
+  }
+  return Ent { len: n, dir: vfs_is_dir(&mut k.fs, vfs_child(d, i)), end: false };
 }
 
 /// Copies `name` (up to FNAME_MAX bytes) into the start of x.
@@ -131,4 +157,174 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64) -> u64
   }
   of_set(&mut k.ofd, h, 3, i);
   return used;
+}
+
+// ---------------------------------------------------------------- paths
+
+/// The directory description x for the name in the first n bytes of the
+/// transfer buffer, or NO_FILE if it is not a directory.
+fn dir_at(k: &mut Kernel, n: u64) -> u64
+  requires kok(k) && n <= FNAME_MAX
+  ensures kok(k)
+{
+  if n == 0 {
+    return DIR_ROOT;
+  }
+  if is_bin(k.fs.xfer, n) {
+    return DIR_BIN;
+  }
+  let d = vfs_dir_lookup(&mut k.fs, n);
+  if d == NO_FILE {
+    return NO_FILE;
+  }
+  return DIR_VFS + d;
+}
+
+/// A child process starts in its parent's working directory.
+fn cwd_fork(t: &mut Buf, parent: u64, child: u64)
+  requires len(t) == CWD_LEN && parent < NPROC && child < NPROC
+  ensures len(t) == CWD_LEN
+{
+  let mut i = 0;
+  while i < CWD_STRIDE
+    invariant i <= CWD_STRIDE && len(t) == CWD_LEN
+  {
+    t = set(t, child * CWD_STRIDE + i, get(t, parent * CWD_STRIDE + i));
+    i = i + 1;
+  }
+}
+
+/// chdir(path): the directory becomes process pid's working directory.
+fn lx_chdir(k: &mut Kernel, pid: u64, path: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = lx_path_in(&mut k, pid, path);
+  if n == NO_RESULT {
+    return ENOENT;
+  }
+  if dir_at(&mut k, n) == NO_FILE {
+    if vfs_lookup(&mut k.fs, n) != NO_FILE {
+      return ENOTDIR;
+    }
+    return ENOENT;
+  }
+  // dir_at leaves the name in the transfer buffer.
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= FNAME_MAX && kok(k) && pid < NPROC
+  {
+    k.cwd = set(k.cwd, pid * CWD_STRIDE + 1 + i, cast[u64](bget(k.fs.xfer, i)));
+    i = i + 1;
+  }
+  k.cwd = set(k.cwd, pid * CWD_STRIDE, n);
+  return 0;
+}
+
+/// getcwd(buf, size): "/" and the working directory, NUL-terminated.
+/// Returns the bytes written, NUL included.
+fn lx_getcwd(k: &mut Kernel, pid: u64, va: u64, size: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = smaller(get(k.cwd, pid * CWD_STRIDE), FNAME_MAX);
+  if size < n + 2 {
+    return ERANGE;
+  }
+  bset(&mut k.fs.xfer, 0, 47);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= FNAME_MAX && kok(k) && pid < NPROC
+  {
+    bset(&mut k.fs.xfer, 1 + i, cast[u8](get(k.cwd, pid * CWD_STRIDE + 1 + i) % 256));
+    i = i + 1;
+  }
+  bset(&mut k.fs.xfer, n + 1, 0);
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n + 2) != n + 2 {
+    return EFAULT;
+  }
+  return n + 2;
+}
+
+/// mkdir(path, mode); the mode is not kept.
+fn lx_mkdir(k: &mut Kernel, pid: u64, path: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = lx_path_in(&mut k, pid, path);
+  if n == NO_RESULT {
+    return ENOENT;
+  }
+  if n == 0 || is_bin(k.fs.xfer, n) || vfs_lookup(&mut k.fs, n) != NO_FILE || vfs_dir_lookup(&mut k.fs, n) != NO_FILE {
+    return EEXIST;
+  }
+  if !vfs_mkdir(&mut k.fs, n) {
+    return ENOENT;                          // no parent, or no room
+  }
+  return 0;
+}
+
+/// rmdir(path): only an empty directory goes.
+fn lx_rmdir(k: &mut Kernel, pid: u64, path: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = lx_path_in(&mut k, pid, path);
+  if n == NO_RESULT {
+    return ENOENT;
+  }
+  let d = dir_at(&mut k, n);
+  if d == NO_FILE {
+    if vfs_lookup(&mut k.fs, n) != NO_FILE {
+      return ENOTDIR;
+    }
+    return ENOENT;
+  }
+  if d < DIR_VFS || d - DIR_VFS == VDIR_ROOT || d - DIR_VFS == VDIR_DISK {
+    return EBUSY;                           // "/", "/bin" and "/disk" stay
+  }
+  if !vfs_rmdir(&mut k.fs, &mut k.mem, n) {
+    return ENOTEMPTY;
+  }
+  return 0;
+}
+
+/// unlink(path): files only.
+fn lx_unlink(k: &mut Kernel, pid: u64, path: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = lx_path_in(&mut k, pid, path);
+  if n == NO_RESULT {
+    return ENOENT;
+  }
+  if dir_at(&mut k, n) != NO_FILE {
+    return EISDIR;
+  }
+  if !vfs_unlink(&mut k.fs, &mut k.mem, n) {
+    return ENOENT;
+  }
+  return 0;
+}
+
+fn is_dir_call(n: u64) -> bool {
+  return n == LX_CHDIR || n == LX_MKDIR || n == LX_RMDIR || n == LX_MKDIRAT;
+}
+
+/// chdir, mkdir, mkdirat and rmdir. The *at calls take paths from the
+/// working directory whatever their dirfd.
+fn lx_dir_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if n == LX_CHDIR {
+    return lx_chdir(&mut k, pid, a);
+  }
+  if n == LX_MKDIR {
+    return lx_mkdir(&mut k, pid, a);
+  }
+  if n == LX_MKDIRAT {
+    return lx_mkdir(&mut k, pid, b);
+  }
+  return lx_rmdir(&mut k, pid, a);
 }

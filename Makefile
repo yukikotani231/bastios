@@ -11,8 +11,16 @@ BASTIOC ?= ../bastiolang/stage0/target/release/bastioc0
 CC      ?= cc
 QEMU    ?= qemu-system-x86_64
 
-CFLAGS  := -std=c11 -O2 -ffreestanding -fno-builtin -fno-stack-protector \
-           -fno-pic -fno-pie -mno-red-zone -mgeneral-regs-only -nostdlib -w
+BASE_CFLAGS := -std=c11 -O2 -ffreestanding -fno-builtin -fno-stack-protector \
+               -fno-pic -fno-pie -mno-red-zone -mgeneral-regs-only -nostdlib
+# Generated C (proved Bastio) is compiled without warnings: it declares
+# temporaries it may not use. The hand-written C in boot/ is the trusted
+# base, so every warning there is an error. GCC takes reads of the BIOS data
+# area near address 0 for null dereferences unless told pages may be that
+# small; Clang has no such parameter and no such warning.
+CFLAGS  := $(BASE_CFLAGS) -w
+TCFLAGS := $(BASE_CFLAGS) -Wall -Wextra -Werror \
+           $(shell $(CC) --param=min-pagesize=0 -Werror -E -x c /dev/null >/dev/null 2>&1 && echo --param=min-pagesize=0)
 LDFLAGS := -nostdlib -static -no-pie -z max-page-size=0x1000 -T boot/linker.ld -Wl,--build-id=none -Wl,--no-warn-rwx-segments
 
 all: build/bastios.elf
@@ -42,7 +50,7 @@ $(UASM:%=build/user/%.o): build/user/%.o: user/%.S | build/user
 	$(CC) -c -o $@ $<
 
 build/user/libc.o: boot/libc.c | build/user
-	$(CC) $(UCFLAGS) -c -o $@ $<
+	$(CC) $(TCFLAGS) -fpie -c -o $@ $<
 
 ULDFLAGS := -nostdlib -static -no-pie -z max-page-size=0x1000 -T user/user.ld -Wl,--build-id=none -Wl,--no-warn-rwx-segments
 
@@ -108,7 +116,7 @@ build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := src/uart.bastio src/pic.bastio src/pit.bastio src/hpet.bastio src/console.bastio src/pages.bastio src/space.bastio src/elf.bastio src/ramfs.bastio src/ata.bastio src/pci.bastio src/virtq.bastio src/virtio_blk.bastio src/virtio_net.bastio src/net.bastio src/tcp.bastio src/blk.bastio src/diskfs.bastio src/fs.bastio \
+KSRCS := src/uart.bastio src/fb.bastio src/kbd.bastio src/font8x8.bin src/card.bastio src/e1000.bastio src/pic.bastio src/pit.bastio src/hpet.bastio src/console.bastio src/pages.bastio src/space.bastio src/elf.bastio src/ramfs.bastio src/ata.bastio src/pci.bastio src/virtq.bastio src/virtio_blk.bastio src/virtio_net.bastio src/net.bastio src/tcp.bastio src/blk.bastio src/diskfs.bastio src/fs.bastio \
          src/proc.bastio src/usermem.bastio src/syscall.bastio src/linux.bastio src/lxproc.bastio src/lxfd.bastio src/lxdir.bastio src/lxsock.bastio src/lxtcp.bastio src/lxsig.bastio src/lxtime.bastio src/main.bastio
 KFILES := $(wildcard files/*)
 
@@ -120,16 +128,16 @@ build/kernel.o: build/kernel.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 build/libc.o: boot/libc.c | build
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(TCFLAGS) -c -o $@ $<
 
 build/boot.o: boot/boot.S boot/core.h | build
 	$(CC) -c -o $@ $<
 
 build/platform.o: boot/platform.c | build
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(TCFLAGS) -c -o $@ $<
 
 build/smp.o: boot/smp.c boot/core.h | build
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(TCFLAGS) -c -o $@ $<
 
 build/ap.o: boot/ap.S | build
 	$(CC) -c -o $@ $<
@@ -167,11 +175,14 @@ OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
 # A virtio disk and network card (QEMU's user network: DHCP, and the host
 # reachable at 10.0.2.2; TCP port 7001 on this machine reaches the guest's
 # port 7001, for `tcpecho 7001`).
-QEMU_DEVS := -m 256M -smp $(SMP) -display none -no-reboot \
+QEMU_DEVS := -m 256M -smp $(SMP) -no-reboot \
              -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
              -drive file=$(DISK),format=raw,if=none,id=vd -device virtio-blk-pci,drive=vd \
              -netdev user,id=n0,hostfwd=tcp:127.0.0.1:7001-:7001 -device virtio-net-pci,netdev=n0
-QEMU_ARGS := -kernel build/bastios.elf $(QEMU_DEVS)
+QEMU_ARGS := -kernel build/bastios.elf -display none $(QEMU_DEVS)
+# The ISO targets open QEMU's window, for the screen and keyboard
+# (ISO_DISPLAY="-display none" for serial only).
+ISO_DISPLAY ?=
 
 $(DISK): | build
 	truncate -s 33M $@
@@ -186,15 +197,16 @@ run: build/bastios.elf $(DISK)
 
 # The ISO through GRUB, under BIOS and under UEFI (OVMF firmware).
 run-iso: build/bastios.iso $(DISK)
-	$(QEMU) -cdrom build/bastios.iso $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
+	$(QEMU) -cdrom build/bastios.iso $(ISO_DISPLAY) $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
 
 run-uefi: build/bastios.iso $(DISK)
 	cp $(OVMF_VARS) build/ovmf_vars.fd
 	$(QEMU) -drive if=pflash,format=raw,readonly=on,file=$(OVMF) \
 	  -drive if=pflash,format=raw,file=build/ovmf_vars.fd \
-	  -cdrom build/bastios.iso $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
+	  -cdrom build/bastios.iso $(ISO_DISPLAY) $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
 
 test: build/bastios.elf
+	test/trusted_base.sh
 	test/shell_test.sh
 	test/tcp_test.sh
 	NIC=e1000 test/tcp_test.sh

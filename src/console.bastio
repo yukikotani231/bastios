@@ -1,59 +1,97 @@
-// Console output helpers for the kernel's own messages.
+// The console: the serial port, and the screen and keyboard when the
+// machine has them. Output goes to both; input comes from either. Below,
+// output helpers for the kernel's own messages.
 
-fn puts(con: &mut Uart, s: Str)
-  requires uart_ok(con)
+import "uart.bastio";
+import "fb.bastio";
+import "kbd.bastio";
+
+struct Con { uart: Uart, screen: Screen, kbd: Kbd }
+
+spec fn con_ok(c: &Con) -> bool {
+  uart_ok(c.uart) && screen_ok(c.screen) && kbd_ok(c.kbd)
+}
+
+fn con_write(c: &mut Con, b: u8)
+  requires con_ok(c)
+  ensures con_ok(c)
+{
+  uart_write(&mut c.uart, b);
+  screen_put(&mut c.screen, b);
+}
+
+/// The next byte typed on the serial line or the keyboard, or 256.
+fn con_poll(c: &mut Con) -> u64
+  requires con_ok(c)
+  ensures con_ok(c) && result <= 256
+{
+  let b = uart_poll(&mut c.uart);
+  if b < 256 {
+    return b;
+  }
+  return kbd_poll(&mut c.kbd);
+}
+
+fn puts(con: &mut Con, s: Str)
+  requires con_ok(con)
+  ensures con_ok(con)
 {
   let mut i = 0;
   while i < slen(s)
-    invariant i <= slen(s)
+    invariant i <= slen(s) && con_ok(con)
   {
-    uart_write(&mut con, sget(s, i));
+    con_write(&mut con, sget(s, i));
     i = i + 1;
   }
 }
 
-fn put_num(con: &mut Uart, n: u64)
-  requires uart_ok(con)
+fn put_num(con: &mut Con, n: u64)
+  requires con_ok(con)
+  ensures con_ok(con)
 {
   let mut p = 1;
   while p <= n / 10
-    invariant p >= 1
+    invariant p >= 1 && con_ok(con)
   {
     p = p * 10;
   }
   let mut q = p;
   while q > 0
+    invariant con_ok(con)
   {
-    uart_write(&mut con, cast[u8](48 + (n / q) % 10));
+    con_write(&mut con, cast[u8](48 + (n / q) % 10));
     q = q / 10;
   }
 }
 
-fn put_hex(con: &mut Uart, n: u64)
-  requires uart_ok(con)
+fn put_hex(con: &mut Con, n: u64)
+  requires con_ok(con)
+  ensures con_ok(con)
 {
   puts(&mut con, "0x");
   let mut q = 0x1000000000000000;
   while q > 0
+    invariant con_ok(con)
   {
     let d = (n / q) % 16;
     if d < 10 {
-      uart_write(&mut con, cast[u8](48 + d));
+      con_write(&mut con, cast[u8](48 + d));
     } else {
-      uart_write(&mut con, cast[u8](87 + d));
+      con_write(&mut con, cast[u8](87 + d));
     }
     q = q / 16;
   }
 }
 
 // `n` right-aligned in a field of `w` characters.
-fn put_num_pad(con: &mut Uart, n: u64, w: u64)
-  requires uart_ok(con)
+fn put_num_pad(con: &mut Con, n: u64, w: u64)
+  requires con_ok(con)
+  ensures con_ok(con)
 {
   let mut digits = 1;
   let mut q = n;
   while q >= 10
-    invariant digits <= 20
+    invariant digits <= 20 && con_ok(con)
   {
     q = q / 10;
     if digits < 20 {
@@ -62,8 +100,9 @@ fn put_num_pad(con: &mut Uart, n: u64, w: u64)
   }
   let mut k = digits;
   while k < w
+    invariant con_ok(con)
   {
-    uart_write(&mut con, 32);
+    con_write(&mut con, 32);
     k = k + 1;
   }
   put_num(&mut con, n);

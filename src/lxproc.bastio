@@ -73,6 +73,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   pset(&mut k.procs, c, F_REGS + R_RAX, 0);
   lx_fd_fork(&mut k, pid, c);
   sig_fork(&mut k.sigact, pid, c);
+  cwd_fork(&mut k.cwd, pid, c);
   pset(&mut k.procs, c, F_SIGPEND, 0);
   pset(&mut k.procs, c, F_RESTART, 0);
   pset(&mut k.procs, c, F_STATE, READY);
@@ -339,8 +340,8 @@ fn lx_wait4(k: &mut Kernel, pid: u64, want: u64, status: u64, options: u64) -> u
 /// What stat says about a path or descriptor.
 struct Meta { ok: bool, mode: u64, size: u64, ino: u64 }
 
-/// stat(path, buf): "/" and "/bin" are directories, /bin/NAME a built-in
-/// program, /NAME a file. Owner root, one link, no times. Returns 0 or
+/// stat(path, buf): "/", "/bin" and the file layer's directories are
+/// directories, /bin/NAME a built-in program, anything else a file. Owner root, one link, no times. Returns 0 or
 /// -errno; with `buf` 0 it only checks that the path exists (access).
 fn lx_stat(k: &mut Kernel, pid: u64, path: u64, buf: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -366,8 +367,9 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
   ensures kok(k)
 {
   let none = Meta { ok: false, mode: 0, size: 0, ino: 0 };
-  if n == 0 || is_bin(k.fs.xfer, n) {
-    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1 + n };
+  let dir = dir_at(&mut k, n);
+  if dir != NO_FILE {
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1 + dir };
   }
   if n > 4 && xfer_bin(k.fs.xfer) {
     let prog = bin_prog(k.fs.xfer, n);
@@ -504,7 +506,16 @@ fn applet_name(j: u64) -> Str {
   if j == 6 {
     return "kill";
   }
-  return "sleep";
+  if j == 7 {
+    return "sleep";
+  }
+  if j == 8 {
+    return "mkdir";
+  }
+  if j == 9 {
+    return "rmdir";
+  }
+  return "pwd";
 }
 
 /// Stores v little-endian in bytes at..at+8 of x.

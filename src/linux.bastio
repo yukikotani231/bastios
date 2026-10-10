@@ -58,6 +58,7 @@ const LO_APPEND: u64 = 0x400;
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANONYMOUS: u64 = 0x20;
 const PATH_MAX_LX: u64 = 256;           // the longest path read from user memory
+const PATH_OUT: u64 = 64;               // room for a name being built
 
 const ARCH_SET_FS: u64 = 0x1002;
 const IOV_MAX: u64 = 1024;
@@ -162,9 +163,9 @@ fn read_l2(l2: &mut PageTable, off: u64) -> Word
 }
 
 /// Handles the Linux system call process `pid` just made.
-fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
-  requires uart_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
-  ensures kok(k)
+fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
+  requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k) && con_ok(con)
 {
   let n = pget(k.procs, pid, F_REGS + R_RAX);
   let was = pget(k.procs, pid, F_RESTART);  // a timed wait keeps its deadline here
@@ -263,12 +264,11 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if n == LX_UNLINKAT {
       path = b;                             // dirfd ignored, as for openat
     }
-    let plen = lx_path_in(&mut k, pid, path);
-    if plen == NO_RESULT || !vfs_unlink(&mut k.fs, &mut k.mem, plen) {
-      ret(&mut k.procs, pid, ENOENT);
-    } else {
-      ret(&mut k.procs, pid, 0);
+    if n == LX_UNLINKAT && c & AT_REMOVEDIR != 0 {
+      ret(&mut k.procs, pid, lx_rmdir(&mut k, pid, path));
+      return KEEP;
     }
+    ret(&mut k.procs, pid, lx_unlink(&mut k, pid, path));
     return KEEP;
   }
   if n == LX_CLOSE {
@@ -346,18 +346,11 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_GETCWD {
-    // One flat directory: the working directory is always "/".
-    if b < 2 {
-      ret(&mut k.procs, pid, ERANGE);
-    } else {
-      bset(&mut k.fs.xfer, 0, 47);
-      bset(&mut k.fs.xfer, 1, 0);
-      if copy_to_user(&mut k.spaces, pid, a, k.fs.xfer, 2) == 2 {
-        ret(&mut k.procs, pid, 2);
-      } else {
-        ret(&mut k.procs, pid, EFAULT);
-      }
-    }
+    ret(&mut k.procs, pid, lx_getcwd(&mut k, pid, a, b));
+    return KEEP;
+  }
+  if is_dir_call(n) {
+    ret(&mut k.procs, pid, lx_dir_call(&mut k, pid, n, a, b, c));
     return KEEP;
   }
   if n == LX_GETPID {
@@ -489,15 +482,15 @@ fn lx_zero_out(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
 /// are echoed and gathered into k.line, Backspace erases, and Enter or
 /// Ctrl-D finishes the line, which wakes the reader. Bytes typed while no
 /// Linux program reads stay queued for the native shell.
-fn tty_cook(con: &mut Uart, k: &mut Kernel)
-  requires uart_ok(con) && kok(k)
-  ensures kok(k)
+fn tty_cook(con: &mut Con, k: &mut Kernel)
+  requires con_ok(con) && kok(k)
+  ensures kok(k) && con_ok(con)
 {
   if !lx_reading(k.procs) {
     return;
   }
   while get(k.line, 1) == 0 && get(k.q, 1) > 0
-    invariant kok(k)
+    invariant kok(k) && con_ok(con)
   {
     tty_key(&mut con, &mut k.line, q_pop(&mut k.q));
   }
@@ -526,9 +519,9 @@ fn lx_reading(procs: &Buf) -> bool
 }
 
 /// One typed byte c, added to the unfinished line l.
-fn tty_key(con: &mut Uart, l: &mut Buf, c: u64)
-  requires uart_ok(con) && lineok(l) && get(l, 1) == 0
-  ensures lineok(l)
+fn tty_key(con: &mut Con, l: &mut Buf, c: u64)
+  requires con_ok(con) && lineok(l) && get(l, 1) == 0
+  ensures lineok(l) && con_ok(con)
 {
   let n = get(l, 0);
   if c == 13 || c == 10 {
@@ -545,14 +538,14 @@ fn tty_key(con: &mut Uart, l: &mut Buf, c: u64)
   } else if c == 127 || c == 8 {
     if n > 0 {
       l = set(l, 0, n - 1);
-      uart_write(&mut con, 8);
-      uart_write(&mut con, 32);
-      uart_write(&mut con, 8);
+      con_write(&mut con, 8);
+      con_write(&mut con, 32);
+      con_write(&mut con, 8);
     }
   } else if c >= 32 && c <= 255 && n + 1 < LINE_MAX {
     l = set(l, 2 + n, c);
     l = set(l, 0, n + 1);
-    uart_write(&mut con, cast[u8](c));
+    con_write(&mut con, cast[u8](c));
   }
 }
 
@@ -643,9 +636,9 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
 
 /// write(fd, va, n) to the console, a file or a pipe. Returns the count,
 /// -errno, or EAGAIN when a pipe is full.
-fn lx_write_fd(con: &mut Uart, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
-  requires uart_ok(con) && kok(k) && pid < NPROC
-  ensures kok(k)
+fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
 {
   let d = fd_look(k, pid, fd);
   if d.kind == K_PIPE_W {
@@ -666,13 +659,13 @@ fn lx_write_fd(con: &mut Uart, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u6
     // out as CR LF.
     let mut i = 0;
     while i < got
-      invariant i <= got && got <= XFER && kok(k)
+      invariant i <= got && got <= XFER && kok(k) && con_ok(con)
     {
       let ch = bget(k.fs.xfer, i);
       if ch == 10 {
-        uart_write(&mut con, 13);
+        con_write(&mut con, 13);
       }
-      uart_write(&mut con, ch);
+      con_write(&mut con, ch);
       i = i + 1;
     }
     return got;
@@ -686,9 +679,9 @@ fn lx_write_fd(con: &mut Uart, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u6
 
 /// writev: the cnt (base, length) pairs at user address iov, each written
 /// as by write. Returns the bytes written, or -errno if nothing was.
-fn do_writev(con: &mut Uart, k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u64) -> u64
-  requires uart_ok(con) && kok(k) && pid < NPROC
-  ensures kok(k)
+fn do_writev(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
 {
   if cnt > IOV_MAX {
     return EINVAL;
@@ -699,7 +692,7 @@ fn do_writev(con: &mut Uart, k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u
   let mut total = 0;
   let mut i = 0;
   while i < cnt
-    invariant i <= cnt && cnt <= IOV_MAX && iov <= USER_BASE + USER_SIZE
+    invariant i <= cnt && cnt <= IOV_MAX && iov <= USER_BASE + USER_SIZE && con_ok(con)
     invariant kok(k) && total <= TOTAL_MAX
   {
     let at = iov + 16 * i;
@@ -711,7 +704,7 @@ fn do_writev(con: &mut Uart, k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u
     // A file write moves at most XFER bytes at once: go round until done.
     let mut done = 0;
     while done < size.v
-      invariant done <= size.v && kok(k) && total <= TOTAL_MAX
+      invariant done <= size.v && kok(k) && total <= TOTAL_MAX && con_ok(con)
       invariant base.v <= USER_BASE + USER_SIZE
     {
       let left = size.v - done;
@@ -744,9 +737,10 @@ fn lx_fail_or(total: u64, err: u64) -> u64 {
 // ---------------------------------------------------------------- files
 
 /// Copies the NUL-terminated path at user address va into the transfer
-/// buffer, without leading "/" or "./" (the file system is one flat
-/// directory, and the working directory is "/").
-/// Returns its length (0 for the root directory), or NO_RESULT if it is
+/// buffer as a name for the file layer: from the top directory, without
+/// the leading "/", relative paths taken from process pid's working
+/// directory, "." and empty parts dropped and ".." going up a level.
+/// Returns its length (0 for the top directory), or NO_RESULT if it is
 /// unreadable or too long.
 fn lx_path_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -761,40 +755,90 @@ fn lx_path_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   if got == NO_RESULT {
     return NO_RESULT;
   }
-  // Leading "/" and "./" both name the one directory there is.
-  let mut s = 0;
-  let mut more = true;
-  while more && s < got
-    invariant s <= got && got <= XFER && kok(k)
-  {
-    if bget(k.fs.xfer, s) == 47 {
-      s = s + 1;
-    } else if s + 1 < got && bget(k.fs.xfer, s) == 46 && bget(k.fs.xfer, s + 1) == 47 {
-      s = s + 2;
-    } else {
-      more = false;
-    }
-  }
-  let mut e = s;
+  let mut e = 0;
   while e < got && bget(k.fs.xfer, e) != 0
-    invariant s <= e && e <= got && got <= XFER && kok(k)
+    invariant e <= got && got <= XFER && kok(k)
   {
     e = e + 1;
   }
-  if e >= got || e - s > FNAME_MAX {
-    return NO_RESULT;                       // no NUL in reach, or too long
+  if e >= got {
+    return NO_RESULT;                       // no NUL in reach
   }
-  if e == s || (e - s == 1 && bget(k.fs.xfer, s) == 46) {
-    return 0;                               // "/" or ".": the root directory
+  if e == 0 {
+    return 0;                               // "": what *at calls with AT_EMPTY_PATH look for
+  }
+  // Build the name in `out`, starting from the working directory unless
+  // the path starts at "/".
+  let mut out = balloc(PATH_OUT);
+  let mut o = 0;
+  if bget(k.fs.xfer, 0) != 47 {
+    let cl = smaller(get(k.cwd, pid * CWD_STRIDE), FNAME_MAX);
+    while o < cl
+      invariant o <= cl && cl <= FNAME_MAX && blen(out) == PATH_OUT && kok(k) && pid < NPROC
+    {
+      bset(&mut out, o, cast[u8](get(k.cwd, pid * CWD_STRIDE + 1 + o) % 256));
+      o = o + 1;
+    }
   }
   let mut i = 0;
-  while i < e - s
-    invariant i <= e - s && e <= got && got <= XFER && kok(k)
+  let mut ok = true;
+  while ok && i < e
+    invariant i <= e && e < got && got <= XFER && o <= PATH_OUT && blen(out) == PATH_OUT && kok(k)
   {
-    bset(&mut k.fs.xfer, i, bget(k.fs.xfer, s + i));
-    i = i + 1;
+    if bget(k.fs.xfer, i) == 47 {
+      i = i + 1;
+    } else {
+      let mut j = i;
+      while j < e && bget(k.fs.xfer, j) != 47
+        invariant i <= j && j <= e && e < got && got <= XFER && kok(k)
+      {
+        j = j + 1;
+      }
+      let w = j - i;
+      if w == 1 && bget(k.fs.xfer, i) == 46 {
+        // "." stays here
+      } else if w == 2 && bget(k.fs.xfer, i) == 46 && bget(k.fs.xfer, i + 1) == 46 {
+        // "..": drop the last part (the top's parent is the top)
+        while o > 0 && bget(out, o - 1) != 47
+          invariant o <= PATH_OUT && blen(out) == PATH_OUT
+        {
+          o = o - 1;
+        }
+        if o > 0 {
+          o = o - 1;
+        }
+      } else if o + 1 + w > PATH_OUT {
+        ok = false;
+      } else {
+        if o > 0 {
+          bset(&mut out, o, 47);
+          o = o + 1;
+        }
+        let mut c = 0;
+        while c < w
+          invariant c <= w && i + w <= e && e < got && got <= XFER && o + w <= PATH_OUT && blen(out) == PATH_OUT && kok(k)
+        {
+          bset(&mut out, o + c, bget(k.fs.xfer, i + c));
+          c = c + 1;
+        }
+        o = o + w;
+      }
+      i = j;
+    }
   }
-  return e - s;
+  if !ok || o > FNAME_MAX {
+    bfree(out);
+    return NO_RESULT;
+  }
+  let mut c = 0;
+  while c < o
+    invariant c <= o && o <= FNAME_MAX && blen(out) == PATH_OUT && kok(k)
+  {
+    bset(&mut k.fs.xfer, c, bget(out, c));
+    c = c + 1;
+  }
+  bfree(out);
+  return o;
 }
 
 /// lseek: SEEK_SET (0) and SEEK_CUR (1). SEEK_END needs the file size by

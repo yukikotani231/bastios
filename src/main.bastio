@@ -31,8 +31,9 @@ import "lxtime.bastio";
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
 
-fn fault_name(con: &mut Uart, v: u64)
-  requires uart_ok(con)
+fn fault_name(con: &mut Con, v: u64)
+  requires con_ok(con)
+  ensures con_ok(con)
 {
   if v == 0 {
     puts(&mut con, "divide error");
@@ -62,11 +63,11 @@ const V_LTIMER: u64 = 48;
 // The kernel's state and the devices the scheduler drives, shared by every
 // processor through a lock. The invariant is what each processor may assume
 // when it takes the lock, and must restore before it lets go.
-struct Sys { k: Kernel, con: Uart, pic: Pic, clock: Hpet, stop: bool }
-  invariant kok(k) && uart_ok(con) && pic_ok(pic) && hpet_ok(clock);
+struct Sys { k: Kernel, con: Con, pic: Pic, clock: Hpet, stop: bool }
+  invariant kok(k) && con_ok(con) && pic_ok(pic) && hpet_ok(clock);
 
 spec fn sys_ok(s: &Sys) -> bool {
-  kok(s.k) && uart_ok(s.con) && pic_ok(s.pic) && hpet_ok(s.clock)
+  kok(s.k) && con_ok(s.con) && pic_ok(s.pic) && hpet_ok(s.clock)
 }
 
 // A process taken out to run: its id, address space and FPU page.
@@ -281,13 +282,13 @@ fn init_data(i: u64) -> Str {
   return include_bytes("../build/user/elfpie.elf");
 }
 
-fn install_files(con: &mut Uart, k: &mut Kernel)
-  requires uart_ok(con) && kok(k)
-  ensures kok(k)
+fn install_files(con: &mut Con, k: &mut Kernel)
+  requires con_ok(con) && kok(k)
+  ensures kok(k) && con_ok(con)
 {
   let mut i = 0;
   while i < NINIT
-    invariant i <= NINIT && kok(k)
+    invariant i <= NINIT && kok(k) && con_ok(con)
   {
     if !vfs_install(&mut k.fs, &mut k.mem, init_name(i), init_data(i)) {
       puts(&mut con, "cannot install file ");
@@ -299,22 +300,24 @@ fn install_files(con: &mut Uart, k: &mut Kernel)
 }
 
 /// A MAC address as six hex bytes, colon-separated.
-fn put_mac(con: &mut Uart, mac: u64)
-  requires uart_ok(con)
+fn put_mac(con: &mut Con, mac: u64)
+  requires con_ok(con)
+  ensures con_ok(con)
 {
   let mut q = 0x10000000000;
   let mut first = true;
   while q > 0
+    invariant con_ok(con)
   {
     if !first {
-      uart_write(&mut con, 58);
+      con_write(&mut con, 58);
     }
     first = false;
     let b = (mac / q) % 256;
     let hi = b / 16;
     let lo = b % 16;
-    if hi < 10 { uart_write(&mut con, cast[u8](48 + hi)); } else { uart_write(&mut con, cast[u8](87 + hi)); }
-    if lo < 10 { uart_write(&mut con, cast[u8](48 + lo)); } else { uart_write(&mut con, cast[u8](87 + lo)); }
+    if hi < 10 { con_write(&mut con, cast[u8](48 + hi)); } else { con_write(&mut con, cast[u8](87 + hi)); }
+    if lo < 10 { con_write(&mut con, cast[u8](48 + lo)); } else { con_write(&mut con, cast[u8](87 + lo)); }
     q = q / 256;
   }
 }
@@ -330,12 +333,23 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // Every device the kernel drives, with the I/O ports it owns. The ports
   // are claimed here, once: no two drivers can own the same port, and no
   // code can touch a port that was not claimed.
-  let mut con = Uart { io: port_claim(&mut ports, COM1, 8) };
+  let mut uart = Uart { io: port_claim(&mut ports, COM1, 8) };
+  let mut kbd = Kbd { data: port_claim(&mut ports, KBD_DATA, 1), status: port_claim(&mut ports, KBD_STATUS, 1),
+    shift: false, ctrl: false, ext: false };
   let mut pic = Pic { master: port_claim(&mut ports, PIC1, 2), slave: port_claim(&mut ports, PIC2, 2) };
   let mut pit = Pit { io: port_claim(&mut ports, PIT, 4) };
   // Devices with memory-mapped registers claim them from the device window.
   let mut clock = hpet_init(mmio_claim(&mut win, HPET, HPET_LEN));
-  uart_init(&mut con);
+  uart_init(&mut uart);
+  kbd_init(&mut kbd);
+  // The screen: the framebuffer the boot loader set up, if there is one
+  // and it lies in the device window below the I/O APIC.
+  let fb_lo = boot_fb(cpu, 0);
+  let fb_pitch = boot_fb(cpu, 1);
+  let fb_h = boot_fb(cpu, 3);
+  let fb_hi = fb_lo + fb_pitch * fb_h;
+  let screen = screen_new(&mut win, fb_lo, fb_hi, fb_pitch, boot_fb(cpu, 2), fb_h, boot_fb(cpu, 4));
+  let mut con = Con { uart: uart, screen: screen, kbd: kbd };
   pic_init(&mut pic);
   pit_init(&mut pit, 100);
   puts(&mut con, "\r\nBastiOS 0.2: ");
@@ -350,6 +364,13 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   // The allocator takes the pool for as long as the kernel runs and gives
   // it back at power off.
+  if screen_on(con.screen) {
+    puts(&mut con, "screen: ");
+    put_num(&mut con, boot_fb(cpu, 2));
+    puts(&mut con, "x");
+    put_num(&mut con, fb_h);
+    puts(&mut con, " framebuffer, keyboard on PS/2\r\n");
+  }
   let mut m = mem_new(pool);
   // The disk: virtio (DMA into pages lent from the allocator) if the machine
   // has one, else ATA. PCI's configuration ports are claimed for it.
@@ -363,7 +384,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   // The network card, if any: nine pages after the disk's four (an e1000
   // takes six of them).
-  let nic = nic_new(&mut ports, &mut pci, &mut m, &mut win, 4, dev_lo, dev_hi);
+  let nic = nic_new(&mut ports, &mut pci, &mut m, &mut win, 4, dev_lo, dev_hi, fb_lo, fb_hi);
   if nic_live(nic) {
     if nic_e1000(nic) {
       puts(&mut con, "net: e1000, mac ");
@@ -390,7 +411,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     vec_push(&mut fpus, Fpu::None);
     q = q + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), ticks: 0, ns: 0, cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN) };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), ticks: 0, ns: 0, cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN) };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
@@ -430,8 +451,12 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.ofd);
   free(sys.k.pipes);
   free(sys.k.sigact);
+  free(sys.k.cwd);
   pool = sys.k.mem.pool;
-  port_release(&mut ports, sys.con.io);
+  port_release(&mut ports, sys.con.uart.io);
+  port_release(&mut ports, sys.con.kbd.data);
+  port_release(&mut ports, sys.con.kbd.status);
+  screen_free(&mut win, sys.con.screen);
   port_release(&mut ports, sys.pic.master);
   port_release(&mut ports, sys.pic.slave);
   port_release(&mut ports, pit.io);
