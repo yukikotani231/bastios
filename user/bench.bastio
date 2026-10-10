@@ -1,0 +1,87 @@
+// Times the kernel's hot paths in timer ticks (100 Hz): creating and
+// tearing down address spaces, and copying bytes out of user memory for
+// `write`. The numbers are only comparable between runs on the same host.
+
+fn puts(con: &Serial, s: Str) {
+  let mut i = 0;
+  while i < slen(s)
+    invariant i <= slen(s)
+  {
+    serial_write(con, sget(s, i));
+    i = i + 1;
+  }
+}
+
+fn put_num(con: &Serial, n: u64) {
+  let mut p = 1;
+  while p <= n / 10
+    invariant p >= 1
+  {
+    p = p * 10;
+  }
+  let mut q = p;
+  while q > 0 {
+    serial_write(con, 48 + (n / q) % 10);
+    q = q / 10;
+  }
+}
+
+fn since(t0: u64) -> u64 {
+  let t1 = sys_info(1);
+  if t1 < t0 {
+    return 0;
+  }
+  return t1 - t0;
+}
+
+const SYSCALLS: u64 = 20000;
+const SPAWNS: u64 = 2000;
+const WRITE_BYTES: u64 = 1048576;
+
+fn main(con: &mut Serial) -> u64 {
+  let mut name = alloc(4);
+  name = set(name, 0, 116);   // "true"
+  name = set(name, 1, 114);
+  name = set(name, 2, 117);
+  name = set(name, 3, 101);
+  let ts = sys_info(1);
+  let mut i = 0;
+  while i < SYSCALLS {
+    sys_getpid();
+    i = i + 1;
+  }
+  let syscall_ticks = since(ts);
+  let t0 = sys_info(1);
+  i = 0;
+  while i < SPAWNS {
+    let pid = sys_spawn(name, 0, 4);
+    if pid != 0 {
+      sys_wait(pid);
+    }
+    i = i + 1;
+  }
+  let spawn_ticks = since(t0);
+  free(name);
+  // Carriage returns: they reach the console, but print nothing visible.
+  let t1 = sys_info(1);
+  i = 0;
+  while i < WRITE_BYTES {
+    serial_write(con, 13);
+    i = i + 1;
+  }
+  let write_ticks = since(t1);
+  puts(con, "getpid x");
+  put_num(con, SYSCALLS);
+  puts(con, ": ");
+  put_num(con, syscall_ticks);
+  puts(con, " ticks\r\nspawn+exit x");
+  put_num(con, SPAWNS);
+  puts(con, ": ");
+  put_num(con, spawn_ticks);
+  puts(con, " ticks\r\nwrite ");
+  put_num(con, WRITE_BYTES / 1024);
+  puts(con, " KiB: ");
+  put_num(con, write_ticks);
+  puts(con, " ticks\r\n");
+  return 0;
+}

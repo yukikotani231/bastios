@@ -115,7 +115,7 @@ fn new_space(m: &mut Mem, img: Str, size: u64) -> Space
   ensures mem_ok(m)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
-  let a = find_free(m.bm);
+  let a = find_free(&mut m);
   if a >= NPAGES {
     return Space::Empty;
   }
@@ -128,7 +128,7 @@ fn new_space(m: &mut Mem, img: Str, size: u64) -> Space
     invariant forall j: u64 :: p <= j && j < 512 ==> !pt_used(l1, j)
   {
     if p < npages || p >= STACK_FIRST {
-      let b = find_free(m.bm);
+      let b = find_free(&mut m);
       if b >= NPAGES {
         ok = false;
       } else {
@@ -147,21 +147,21 @@ fn new_space(m: &mut Mem, img: Str, size: u64) -> Space
     free_l1(&mut m, l1);
     return Space::Empty;
   }
-  let c = find_free(m.bm);
+  let c = find_free(&mut m);
   if c >= NPAGES {
     free_l1(&mut m, l1);
     return Space::Empty;
   }
   let mut l2 = pt_new(take_page(&mut m, c), 2);
   pt_put(&mut l2, 0, l1);
-  let d = find_free(m.bm);
+  let d = find_free(&mut m);
   if d >= NPAGES {
     free_l2(&mut m, l2);
     return Space::Empty;
   }
   let mut l3 = pt_new(take_page(&mut m, d), 3);
   pt_put(&mut l3, 0, l2);
-  let e = find_free(m.bm);
+  let e = find_free(&mut m);
   if e >= NPAGES {
     free_l3(&mut m, l3);
     return Space::Empty;
@@ -169,35 +169,4 @@ fn new_space(m: &mut Mem, img: Str, size: u64) -> Space
   let mut root = pt_new(take_page(&mut m, e), 4);
   pt_put(&mut root, 1, l3);
   return Space::Mapped(root);
-}
-
-/// The byte at offset `off` of the user window, or 256 if no page is
-/// mapped there. Walks the tables by taking each one out of its parent and
-/// putting it back, so the kernel never reads memory through an address.
-fn user_byte(root: &mut PageTable, off: u64) -> u64
-  requires pt_level(root) == 4 && off < USER_SIZE
-  ensures pt_level(root) == 4
-  ensures result <= 256
-{
-  if !pt_has(root, 1) {
-    return 256;
-  }
-  let mut r = 256;
-  let mut l3 = pt_take(&mut root, 1);
-  if pt_has(l3, 0) {
-    let mut l2 = pt_take(&mut l3, 0);
-    if pt_has(l2, 0) {
-      let mut l1 = pt_take(&mut l2, 0);
-      let p = off / 4096;
-      if pt_has(l1, p) {
-        let f = pt_take_frame(&mut l1, p);
-        r = frame_read8(f, off % 4096);
-        pt_put_frame(&mut l1, p, f, true);
-      }
-      pt_put(&mut l2, 0, l1);
-    }
-    pt_put(&mut l3, 0, l2);
-  }
-  pt_put(&mut root, 1, l3);
-  return r;
 }

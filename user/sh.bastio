@@ -195,7 +195,7 @@ fn cmd_help(con: &Serial) {
   puts(con, "  NAME [&]         run a program and wait for it (`&`: don't wait)\r\n");
   puts(con, "  about            what this is\r\n");
   puts(con, "  halt             power off\r\n");
-  puts(con, "programs: hello, spin, fault, sh\r\n");
+  puts(con, "programs: hello, spin, fault, straddle, true, bench, sh\r\n");
 }
 
 fn cmd_about(con: &Serial) {

@@ -58,6 +58,10 @@ steps = [
     ("kill 2", b"no such process"),
     ("fault", b"page fault at rip"),
     ("echo survived", b"survived"),
+    # User buffers that cross a page boundary, and a write cut short by an
+    # unmapped page (it returns 4, the exit code).
+    ("straddle", [b"page-crossing write ok", b"hello from user mode", b"END![exit 4]"]),
+    ("bench", b"ticks"),
     ("sh", b"BastiOS 0.2 -- type"),
     ("exit", b""),
     ("mem", b"free pages"),
@@ -70,7 +74,8 @@ else:
     for line, want in steps:
         mark = len(out)
         qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
-        ok = read_until(b"bastios> ", mark) and want in out[mark:]
+        wants = want if isinstance(want, list) else [want]
+        ok = read_until(b"bastios> ", mark) and all(w in out[mark:] for w in wants)
         print(("ok  " if ok else "FAIL"), repr(line))
         fails += not ok
     # Every page the finished processes used must be back in the pool.

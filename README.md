@@ -42,8 +42,9 @@ Introduce an off-by-one, drop an ownership check, or free a table that still map
 | `src/proc.bastio` | Kernel state (`Kernel` struct), console input queue, process table, program images, spawn and exit |
 | `src/syscall.bastio` | System calls |
 | `src/main.bastio` | Boot, the scheduler loop, fault handling, power off |
-| `user/*.bastio` | User programs: `sh`, `hello`, `spin` (never yields; shows preemption) |
+| `user/*.bastio` | User programs: `sh`, `hello`, `spin` (never yields; shows preemption), `true` (exits at once), `bench` (times syscalls, spawn and write in timer ticks) |
 | `user/fault.S` | A user program that reads kernel memory, to test fault isolation |
+| `user/straddle.S` | A user program whose buffers cross page boundaries, to test how the kernel copies user memory |
 
 User programs are linked at `USER_BASE` (0x8000000000) behind a small header (magic, memory size, entry), flattened to raw images, and embedded in the kernel with `include_bytes`. The system call ABI (`int 0x80`) is the one in bastiolang's user prelude.
 

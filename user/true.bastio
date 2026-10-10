@@ -1,0 +1,6 @@
+// Does nothing and exits 0. The cheapest program there is, so `bench` uses
+// it to time process creation and teardown on their own.
+
+fn main(con: &mut Serial) -> u64 {
+  return 0;
+}
