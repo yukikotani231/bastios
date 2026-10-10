@@ -37,7 +37,7 @@ ap32:
         mov     %ax, %es
         mov     %ax, %ss
         mov     %cr4, %eax
-        or      $0x20, %eax              /* PAE */
+        or      $0x620, %eax             /* PAE | OSFXSR | OSXMMEXCPT, as on the BSP */
         mov     %eax, %cr4
         mov     $bst_kernel_pml4, %eax
         mov     %eax, %cr3
@@ -46,7 +46,8 @@ ap32:
         or      $0x101, %eax
         wrmsr
         mov     %cr0, %eax
-        or      $0x80010001, %eax        /* PG | WP | PE */
+        and     $0xFFFFFFFB, %eax        /* clear EM */
+        or      $0x80010003, %eax        /* PG | WP | MP | PE */
         mov     %eax, %cr0
         ljmp    $0x18, $T(ap64)
 

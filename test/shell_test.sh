@@ -91,6 +91,12 @@ steps = [
     ("elfexec", b"elfexec: ok"),
     ("elfpie", b"elfpie: ok"),
     ("elfbad", b"unknown command: elfbad"),
+    # A C program against musl libc: TLS, printf, exit status.
+    ("mhello", [b"hello from musl: mhello, argc 1, 6", b"[exit 3]"]),
+    # Two processes using xmm0 at once, preempting each other: each must
+    # keep its own value (checked again at the end, once both are done).
+    ("fpucheck &", b"]"),
+    ("fpucheck", b"fpucheck: xmm0 kept"),
     ("sh", b"BastiOS 0.2 -- type"),
     ("exit", b""),
     ("mem", b"free pages"),
@@ -127,6 +133,10 @@ else:
         ok = read_until(b"bastios> ", mark) and all(w in out[mark:] for w in wants)
         print(("ok  " if ok else "FAIL"), repr(line))
         fails += not ok
+    if out.count(b"fpucheck: xmm0 kept") == 2 and b"xmm0 changed" not in out:
+        print("ok   both fpucheck processes kept xmm0")
+    else:
+        print("FAIL fpucheck: SSE state leaked between processes"); fails += 1
     # Every page the finished processes and removed files used must be
     # back in the pool.
     mem = [l.strip() for l in out.split(b"\n") if l.strip().endswith(b"free pages")]

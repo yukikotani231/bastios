@@ -34,7 +34,7 @@ static volatile uint32_t *lapic;
 
 /* The saved user context of the processor running the caller. One for now:
  * only the bootstrap processor runs Bastio code. */
-extern uint64_t bst_cpu_ctx[20];
+extern uint64_t bst_cpu_ctx[21];
 uint64_t *bst_platform_ctx(void) { return bst_cpu_ctx; }
 
 uint64_t bst_platform_cpus(void) { return __atomic_load_n(&cpus_online, __ATOMIC_SEQ_CST); }

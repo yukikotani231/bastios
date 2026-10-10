@@ -48,7 +48,7 @@ user_rsp:       .skip 8
 .global bst_idle_vector
 bst_idle_vector: .skip 8
 .global bst_cpu_ctx
-bst_cpu_ctx:    .skip 20 * 8
+bst_cpu_ctx:    .skip 21 * 8
 
 .section .data
 .align 16
@@ -95,14 +95,15 @@ _start:
         mov     $pml4, %eax
         mov     %eax, %cr3
         mov     %cr4, %eax
-        or      $0x20, %eax           /* PAE */
+        or      $0x620, %eax          /* PAE | OSFXSR | OSXMMEXCPT: SSE for user code */
         mov     %eax, %cr4
         mov     $0xC0000080, %ecx     /* EFER */
         rdmsr
         or      $0x101, %eax          /* LME | SCE (the `syscall` instruction) */
         wrmsr
         mov     %cr0, %eax
-        or      $0x80010001, %eax     /* PG | WP | PE: the kernel cannot write read-only pages either */
+        and     $0xFFFFFFFB, %eax     /* clear EM: x87/SSE run natively */
+        or      $0x80010003, %eax     /* PG | WP | MP | PE: the kernel cannot write read-only pages either */
         mov     %eax, %cr0
 
         lgdt    bst_gdt_ptr
@@ -168,6 +169,16 @@ bst_cpu_enter:
         jbe     2f
         xor     %eax, %eax
 2:      push    %rax
+
+        /* FS base (word 20), for the user's thread pointer. */
+        mov     20*8(%rsi), %rax
+        cmp     %rcx, %rax
+        jbe     3f
+        xor     %eax, %eax
+3:      mov     %rax, %rdx
+        shr     $32, %rdx
+        mov     $0xC0000100, %ecx       /* FS_BASE */
+        wrmsr
 
         mov     $UDATA, %ax
         mov     %ax, %ds
@@ -312,6 +323,10 @@ trap_common:
         mov     152(%rsp), %rax; mov %rax, 17*8(%rdi)
         mov     128(%rsp), %rax; mov %rax, 18*8(%rdi)
         mov     %cr2, %rax;      mov %rax, 19*8(%rdi)
+        mov     $0xC0000100, %ecx       /* FS_BASE */
+        rdmsr
+        shl     $32, %rdx
+        or      %rdx, %rax;      mov %rax, 20*8(%rdi)
         mov     120(%rsp), %rax
         mov     kernel_rsp, %rsp
         pop     %r15
