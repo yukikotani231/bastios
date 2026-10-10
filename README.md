@@ -35,6 +35,8 @@ Introduce an off-by-one, drop an ownership check, or free a table that still map
 
 ## Layout
 
+How the pieces fit together (boot, memory, processes, the scheduler, system calls, the proof boundary) is in [docs/architecture.md](docs/architecture.md).
+
 | Path | What |
 | --- | --- |
 | `src/pages.bastio` | Physical page allocator (`Mem`: a bitmap proved to track the pool) |
