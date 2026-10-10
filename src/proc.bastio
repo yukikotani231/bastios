@@ -1,7 +1,6 @@
 // Processes. The table is one buffer with a row of STRIDE words per
 // process; the process id is the row number (1 to NPROC - 1). A process's
-// address space lives in slot `pid` of the directory, a level-5 table that
-// is never loaded into CR3 and only serves to own the level-4 roots.
+// address space is element `pid` of a vector of spaces.
 
 const NPROC: u64 = 16;
 const STRIDE: u64 = 32;
@@ -89,6 +88,34 @@ fn pick(procs: &Buf, from: u64) -> u64
   return 0;
 }
 
+// ---------------------------------------------------------------- address spaces
+
+/// One slot per process id; every address space is a level-4 table.
+spec fn spaces_ok(s: &Vec[Space]) -> bool {
+  vlen(s) == NPROC && forall i: u64 :: i < NPROC ==> (vget(s, i) is Space::Mapped ==> pt_level(vget(s, i).Mapped) == 4)
+}
+
+/// Takes process `pid`'s address space out, leaving its slot empty.
+fn take_space(s: &mut Vec[Space], pid: u64) -> Space
+  requires spaces_ok(s) && pid < NPROC
+  ensures spaces_ok(s) && vget(s, pid) is Space::Empty
+  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
+{
+  return vec_swap(&mut s, pid, Space::Empty);
+}
+
+/// Puts an address space into an empty slot.
+fn put_space(s: &mut Vec[Space], pid: u64, x: Space)
+  requires spaces_ok(s) && pid < NPROC && vget(s, pid) is Space::Empty
+  requires x is Space::Mapped ==> pt_level(x.Mapped) == 4
+  ensures spaces_ok(s)
+{
+  match vec_swap(&mut s, pid, x) {
+    Space::Empty => {},
+    Space::Mapped(_t) => { unreachable; },     // the slot was empty
+  }
+}
+
 // ---------------------------------------------------------------- input queue
 
 // Bytes typed on the console, waiting for a READ: word 0 is the head,
@@ -163,14 +190,14 @@ fn wake_readers(procs: &mut Buf, q: &mut Buf)
 // `main`, which lends them where they are needed.
 struct Kernel {
   mem: Mem,             // the page allocator
-  dir: PageTable,       // level 5: slot `pid` holds that process's address space
+  spaces: Vec[Space],   // element `pid` is that process's address space
   procs: Buf,           // the process table
   q: Buf,               // console input waiting for a READ
   ticks: u64,           // timer ticks since boot
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && pt_level(k.dir) == 5 && len(k.procs) == PTAB_LEN && qok(k.q)
+  mem_ok(k.mem) && spaces_ok(k.spaces) && len(k.procs) == PTAB_LEN && qok(k.q)
 }
 
 // ---------------------------------------------------------------- programs
@@ -238,7 +265,7 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
     return 0;
   }
   let mut pid = 1;
-  while pid < NPROC && (state(k.procs, pid) != FREE || pt_has(k.dir, pid))
+  while pid < NPROC && state(k.procs, pid) != FREE
     invariant 1 <= pid && pid <= NPROC
   {
     pid = pid + 1;
@@ -246,7 +273,18 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   if pid >= NPROC {
     return 0;
   }
-  if !new_space(&mut k.mem, &mut k.dir, pid, img, size) {
+  // A FREE process has no address space; check it rather than assume it.
+  match take_space(&mut k.spaces, pid) {
+    Space::Empty => {},
+    Space::Mapped(t) => {
+      put_space(&mut k.spaces, pid, Space::Mapped(t));
+      return 0;
+    },
+  }
+  let sp = new_space(&mut k.mem, img, size);
+  let ok = sp is Space::Mapped;
+  put_space(&mut k.spaces, pid, sp);
+  if !ok {
     return 0;
   }
   let mut f = 0;
@@ -271,8 +309,9 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
   requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
-  if pt_has(k.dir, pid) {
-    free_space(&mut k.mem, mmu, pt_take(&mut k.dir, pid));
+  match take_space(&mut k.spaces, pid) {
+    Space::Empty => {},
+    Space::Mapped(t) => { free_space(&mut k.mem, mmu, t); },
   }
   pset(&mut k.procs, pid, F_STATE, ZOMBIE);
   pset(&mut k.procs, pid, F_CODE, code);

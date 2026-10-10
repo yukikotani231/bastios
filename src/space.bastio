@@ -16,6 +16,9 @@ const STACK_FIRST: u64 = 496;         // 512 - STACK_PAGES
 const IMAGE_MAX: u64 = 0x1F0000;      // STACK_FIRST * 4096
 const KERNEL_ROOT: u64 = 0x10000;     // mmu_root while CR3 holds the kernel's own map
 
+// A process's address space (its level-4 table), if it has one.
+enum Space { Empty, Mapped(PageTable) }
+
 fn free_l1(m: &mut Mem, t: PageTable)
   requires mem_ok(m) && pt_level(t) == 1
   ensures mem_ok(m)
@@ -103,16 +106,16 @@ fn copy_page(f: &mut Frame, img: Str, from: u64)
 }
 
 /// Builds an address space holding `img` (with `size` bytes of memory in
-/// all, the rest zero) and a stack, and puts it in slot `pid` of `dir`.
-/// Returns false, with every page given back, when memory runs out.
-fn new_space(m: &mut Mem, dir: &mut PageTable, pid: u64, img: Str, size: u64) -> bool
-  requires mem_ok(m) && pt_level(dir) == 5 && pid < 512 && !pt_used(dir, pid)
-  requires size <= IMAGE_MAX
-  ensures mem_ok(m) && pt_level(dir) == 5
+/// all, the rest zero) and a stack. Returns `Space::Empty`, with every page
+/// given back, when memory runs out.
+fn new_space(m: &mut Mem, img: Str, size: u64) -> Space
+  requires mem_ok(m) && size <= IMAGE_MAX
+  ensures mem_ok(m)
+  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
   let a = find_free(m.bm);
   if a >= NPAGES {
-    return false;
+    return Space::Empty;
   }
   let mut l1 = pt_new(take_page(&mut m, a), 1);
   let npages = (size + 4095) / 4096;
@@ -140,31 +143,30 @@ fn new_space(m: &mut Mem, dir: &mut PageTable, pid: u64, img: Str, size: u64) ->
   }
   if !ok {
     free_l1(&mut m, l1);
-    return false;
+    return Space::Empty;
   }
   let c = find_free(m.bm);
   if c >= NPAGES {
     free_l1(&mut m, l1);
-    return false;
+    return Space::Empty;
   }
   let mut l2 = pt_new(take_page(&mut m, c), 2);
   pt_put(&mut l2, 0, l1);
   let d = find_free(m.bm);
   if d >= NPAGES {
     free_l2(&mut m, l2);
-    return false;
+    return Space::Empty;
   }
   let mut l3 = pt_new(take_page(&mut m, d), 3);
   pt_put(&mut l3, 0, l2);
   let e = find_free(m.bm);
   if e >= NPAGES {
     free_l3(&mut m, l3);
-    return false;
+    return Space::Empty;
   }
   let mut root = pt_new(take_page(&mut m, e), 4);
   pt_put(&mut root, 1, l3);
-  pt_put(&mut dir, pid, root);
-  return true;
+  return Space::Mapped(root);
 }
 
 /// The byte at offset `off` of the user window, or 256 if no page is

@@ -28,27 +28,29 @@ fn fault_name(con: &Serial, v: u64) {
 /// Runs process `pid` until the next trap and returns its vector (256 if
 /// the process has no address space). Its registers are loaded from and
 /// saved back to its row.
-fn run(mmu: &mut Mmu, cpu: &mut Cpu, dir: &mut PageTable, procs: &mut Buf, pid: u64) -> u64
-  requires pt_level(dir) == 5 && len(procs) == PTAB_LEN && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
-  ensures pt_level(dir) == 5 && len(procs) == PTAB_LEN && mmu_root(mmu) == KERNEL_ROOT
+fn run(mmu: &mut Mmu, cpu: &mut Cpu, spaces: &mut Vec[Space], procs: &mut Buf, pid: u64) -> u64
+  requires spaces_ok(spaces) && len(procs) == PTAB_LEN && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures spaces_ok(spaces) && len(procs) == PTAB_LEN && mmu_root(mmu) == KERNEL_ROOT
 {
-  if !pt_has(dir, pid) {
-    return 256;
+  let mut v = 256;
+  match take_space(&mut spaces, pid) {
+    Space::Empty => { return 256; },
+    Space::Mapped(root) => {
+      let mut r = 0;
+      while r < 18
+        invariant r <= 18
+      {
+        cpu_set(&mut cpu, r, pget(procs, pid, F_REGS + r));
+        r = r + 1;
+      }
+      mmu_switch(&mut mmu, root);
+      v = cpu_run(&mut cpu, mmu);
+      mmu_kernel(&mut mmu);
+      put_space(&mut spaces, pid, Space::Mapped(root));
+    },
   }
-  let mut r = 0;
-  while r < 18
-    invariant r <= 18
-  {
-    cpu_set(&mut cpu, r, pget(procs, pid, F_REGS + r));
-    r = r + 1;
-  }
-  let root = pt_take(&mut dir, pid);
-  mmu_switch(&mut mmu, root);
-  let v = cpu_run(&mut cpu, mmu);
-  mmu_kernel(&mut mmu);
-  pt_put(&mut dir, pid, root);
   // Registers, then the error code and fault address (words 18 and 19).
-  r = 0;
+  let mut r = 0;
   while r < 20
     invariant r <= 20 && len(procs) == PTAB_LEN
   {
@@ -72,15 +74,16 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
   // The allocator takes the pool for as long as the kernel runs and gives
   // it back at power off.
   let mut m = mem_new(pool);
-  let a = find_free(m.bm);
-  if a >= NPAGES {
-    puts(con, "no memory\r\n");
-    free(m.bm);
-    pool = m.pool;
-    return 1;
+  let mut spaces = vec_new[Space]();
+  let mut i = 0;
+  while i < NPROC
+    invariant i <= NPROC && vlen(spaces) == i
+    invariant forall j: u64 :: j < i ==> vget(spaces, j) is Space::Empty
+  {
+    vec_push(&mut spaces, Space::Empty);
+    i = i + 1;
   }
-  let dir = pt_new(take_page(&mut m, a), 5);
-  let mut k = Kernel { mem: m, dir: dir, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), ticks: 0 };
+  let mut k = Kernel { mem: m, spaces: spaces, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), ticks: 0 };
   if spawn(&mut k, 0, 0) == 0 {
     puts(con, "cannot start the shell\r\n");
   }
@@ -99,7 +102,7 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
         k.ticks = tick(k.ticks);
       }
     } else {
-      let v = run(&mut mmu, &mut cpu, &mut k.dir, &mut k.procs, p);
+      let v = run(&mut mmu, &mut cpu, &mut k.spaces, &mut k.procs, p);
       cur = p;
       if v == V_TIMER {
         k.ticks = tick(k.ticks);
@@ -132,17 +135,16 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
     }
   }
   // Power off: tear down whatever is left, so every page goes back.
-  let mut i = 0;
-  while i < 512
-    invariant i <= 512 && mem_ok(k.mem) && pt_level(k.dir) == 5 && mmu_root(mmu) == KERNEL_ROOT
-    invariant forall j: u64 :: j < i ==> !pt_used(k.dir, j)
+  while vec_len(k.spaces) > 0
+    invariant mem_ok(k.mem) && mmu_root(mmu) == KERNEL_ROOT
+    invariant forall j: u64 :: j < vlen(k.spaces) ==> (vget(k.spaces, j) is Space::Mapped ==> pt_level(vget(k.spaces, j).Mapped) == 4)
   {
-    if pt_has(k.dir, i) {
-      free_space(&mut k.mem, mmu, pt_take(&mut k.dir, i));
+    match vec_pop(&mut k.spaces) {
+      Space::Empty => {},
+      Space::Mapped(t) => { free_space(&mut k.mem, mmu, t); },
     }
-    i = i + 1;
   }
-  give_page(&mut k.mem, pt_free(k.dir));
+  vec_free(k.spaces);
   puts(con, "BastiOS: ");
   put_num(con, count_free(k.mem.bm));
   puts(con, " pages free at power off\r\n");
