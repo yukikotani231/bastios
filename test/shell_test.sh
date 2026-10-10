@@ -37,13 +37,25 @@ _s.bind(("127.0.0.1", 0))
 tcp_port = _s.getsockname()[1]
 _s.close()
 
-def boot(cpus, with_disk=False, virtio=False, net=False, subnet=None, card="virtio-net-pci", monitor=None, extra=()):
+def boot(cpus, with_disk=False, virtio=False, nvme=False, ahci=False, net=False, subnet=None, card="virtio-net-pci", monitor=None, extra=()):
     drive = ["-drive", f"file={disk},format=raw,if=ide,index=0"] if with_disk else []
     if virtio:
         # The same disk as a virtio block device (src/virtio.bastio): sectors
         # move by DMA through pages the kernel lends it.
         drive = ["-drive", f"file={disk},format=raw,if=none,id=vd",
                  "-device", "virtio-blk-pci,drive=vd"]
+    if nvme:
+        # The same disk as an NVMe drive (src/nvme.bastio): queues and data
+        # in pages lent to the controller, registers in the device window.
+        # On a q35 machine it sits behind a PCIe root port, on bus 1, as on
+        # a real PC.
+        drive = ["-machine", "q35", "-device", "pcie-root-port,id=rp1,chassis=1",
+                 "-drive", f"file={disk},format=raw,if=none,id=nv",
+                 "-device", "nvme,serial=bastios,drive=nv,bus=rp1"]
+    if ahci:
+        # The same disk on the q35 machine's own AHCI controller
+        # (src/ahci.bastio), which is function 2 of device 31.
+        drive = ["-machine", "q35", "-drive", f"file={disk},format=raw,if=ide"]
     # A virtio network card on QEMU's user-mode network (src/net.bastio).
     nic = ["-netdev", f"user,id=n0,hostfwd=udp:127.0.0.1:{udp_port}-:7,hostfwd=udp:127.0.0.1:{udp_port2}-:7000,hostfwd=tcp:127.0.0.1:{tcp_port}-:7001",
            "-device", f"{card},netdev=n0"] if net else ["-nic", "none"]
@@ -765,6 +777,36 @@ session("virtio", True, [
     ("rm disk/big", b""),
 ], halt=True)
 
+# The same disk as an NVMe drive: what virtio wrote is there, and what is
+# written here must be on the medium for the ATA boot below.
+qemu = boot(1, nvme=True)
+def nvme_found():
+    global fails
+    ok = b"disk: NVMe\r\n" in out
+    print(("ok  " if ok else "FAIL"), "(NVMe boot) disk driver: NVMe")
+    fails += not ok
+session("NVMe", None, [
+    ("cat disk/note", b"kept across boots\r\nappended\r\n"),
+    ("echo written by nvme > disk/nv", b""),
+    ("cat disk/nv", b"written by nvme\r\n"),
+    ("fstest", b"fstest: disk ok"),
+    ("rm disk/big", b""),
+], halt=True, ready=nvme_found)
+
+# And as a SATA disk on AHCI: what NVMe wrote is there.
+qemu = boot(1, ahci=True)
+def ahci_found():
+    global fails
+    ok = b"disk: AHCI\r\n" in out
+    print(("ok  " if ok else "FAIL"), "(AHCI boot) disk driver: AHCI")
+    fails += not ok
+session("AHCI", None, [
+    ("cat disk/nv", b"written by nvme\r\n"),
+    ("echo and ahci >> disk/nv", b""),
+    ("fstest", b"fstest: disk ok"),
+    ("rm disk/big", b""),
+], halt=True, ready=ahci_found)
+
 # An e1000 card instead of virtio (src/e1000.bastio), on QEMU's network.
 # Its link takes a moment to come up, so DHCP may need a retry: ask until
 # the lease is there. test/tcp_test.sh runs its TCP cases on it too.
@@ -883,6 +925,8 @@ qemu = boot(1, with_disk=True)
 session("third", False, [
     ("cat disk/note", b"kept across boots\r\nappended\r\n"),
     ("rm disk/note", b""),
+    ("cat disk/nv", b"written by nvme\r\nand ahci\r\n"),
+    ("rm disk/nv", b""),
     ("cat disk/moved", b"z\r\n"),
     ("rm disk/pm", b""),
     ("rm disk/moved", b""),
@@ -901,14 +945,14 @@ session("third", False, [
 # Power cuts. user/crashme.bastio checks what the last run left on the disk
 # (disk/log a whole number of correct records, disk/snap empty or whole,
 # disk/t absent or empty), then keeps appending, rewriting and creating.
-# QEMU is killed part-way through each run, on ATA and on virtio in turn;
-# every boot after a cut must find the file system consistent. Killing
+# QEMU is killed part-way through each run, on ATA, virtio, NVMe and AHCI
+# in turn; every boot after a cut must find the file system consistent. Killing
 # QEMU keeps every sector write that completed (it is in the host's page
 # cache), so this cuts power between two sector writes; it cannot tear a
 # sector in half.
-cuts = [0.05, 0.4, 0.15, 0.9, 0.6, 1.2]
+cuts = [0.05, 0.4, 0.15, 0.9, 0.6, 1.2, 0.3, 0.75]
 for n, delay in enumerate(cuts):
-    qemu = boot(1, with_disk=n % 2 == 0, virtio=n % 2 == 1)
+    qemu = boot(1, with_disk=n % 4 == 0, virtio=n % 4 == 1, nvme=n % 4 == 2, ahci=n % 4 == 3)
     out = b""
     deadline = time.time() + timeout
     mark = 0

@@ -76,10 +76,10 @@ with open(disk, "wb") as f:
     f.truncate(33 << 20)
 fails = 0
 
-def run(name, firmware, usb=False):
+def run(name, firmware, usb=False, nvme=False):
     # usb: a machine without PS/2 (i8042=off) and a USB keyboard on an
     # xHCI controller, typed on through QMP; only the keyboard, the screen
-    # and the page count are checked.
+    # and the page count are checked. nvme: the disk is an NVMe drive.
     global fails
     qmp_path = os.path.join(tmp.name, "qmp.sock")
     if os.path.exists(qmp_path):
@@ -87,9 +87,10 @@ def run(name, firmware, usb=False):
     mon_path = os.path.join(tmp.name, "mon.sock")
     if os.path.exists(mon_path):
         os.remove(mon_path)
-    devs = ["-m", "256M", "-smp", "2", "-display", "none", "-no-reboot",
+    devs = ["-cpu", "qemu64,+pdpe1gb", "-m", "256M", "-smp", "2", "-display", "none", "-no-reboot",
             "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-            "-drive", f"file={disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd",
+            "-drive", f"file={disk},format=raw,if=none,id=vd",
+            "-device", "nvme,serial=bastios,drive=vd" if nvme else "virtio-blk-pci,drive=vd",
             "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0",
             "-serial", "stdio", "-monitor", f"unix:{mon_path},server,nowait",
             "-cdrom", "build/bastios.iso"]
@@ -136,6 +137,26 @@ def run(name, firmware, usb=False):
             good = good and b"keyboard: USB (xHCI)" in out
         print(("ok  " if good else "FAIL"), f"({name}) a line typed on the {'USB' if usb else 'PS/2'} keyboard runs")
         fails += not good
+        if nvme:
+            good = b"disk: NVMe" in out
+            print(("ok  " if good else "FAIL"), f"({name}) disk driver: NVMe")
+            fails += not good
+        if usb or nvme:
+            # Where the firmware put the 64-bit BARs: OVMF puts them far
+            # above 4 GiB, so the drivers above ran in the upper device window.
+            mon.sendall(b"info pci\n")
+            info = b""
+            t0 = time.time()
+            while time.time() - t0 < 3:
+                r, _, _ = select.select([mon], [], [], 0.2)
+                if r:
+                    info += mon.recv(65536)
+            bars = [int(b, 16) for b in re.findall(rb"BAR0: 64 bit memory at 0x([0-9a-f]+)", info)]
+            high = firmware != [] and len(bars) == usb + nvme and all(b >= 1 << 32 for b in bars)
+            print(f"     ({name}) 64-bit BAR0s at {', '.join(hex(b) for b in bars) or 'none'}")
+            if firmware != []:
+                print(("ok  " if high else "FAIL"), f"({name}) the 64-bit BARs lie above 4 GiB")
+                fails += not high
         dump = os.path.join(tmp.name, "screen.ppm")
         mon.sendall(f"screendump {dump}\n".encode())
         text = []
@@ -155,8 +176,11 @@ def run(name, firmware, usb=False):
              ("echo from the iso > disk/iso", b""),
              ("cat disk/iso", b"from the iso"),
              ("ifconfig", b"(DHCP)")]
+    if nvme:
+        # What the first UEFI run wrote through virtio, read through NVMe.
+        steps = [("cat disk/iso", b"from the iso")]
     for line, want in steps:
-        if not ok or usb:
+        if not ok or (usb and not nvme):
             break
         mark = len(out)
         if line == "ifconfig":
@@ -184,12 +208,11 @@ if os.path.exists(ovmf) and os.path.exists(ovmf_vars):
     run("UEFI", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
                  "-drive", f"if=pflash,format=raw,file={vars_copy}"])
     # The firmware drives the xHCI controller itself until it hands over.
+    # OVMF puts both controllers' 64-bit BARs far above 4 GiB, in the upper
+    # part of the device window.
     shutil.copy(ovmf_vars, vars_copy)
-    # OVMF puts 64-bit BARs above 4 GiB, out of the kernel's device window,
-    # unless told to keep them low.
-    run("UEFI, USB keyboard", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
-                               "-drive", f"if=pflash,format=raw,file={vars_copy}",
-                               "-fw_cfg", "name=opt/ovmf/X-PciMmio64Mb,string=0"], usb=True)
+    run("UEFI, USB keyboard, NVMe", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
+                                     "-drive", f"if=pflash,format=raw,file={vars_copy}"], usb=True, nvme=True)
 else:
     print(f"SKIP UEFI: no OVMF firmware at {ovmf}")
 print(f"---- {fails} failed ----")

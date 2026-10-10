@@ -55,6 +55,7 @@ mb2_end:
 bst_kernel_pml4:
 pml4:   .skip 4096
 pdpt:   .skip 4096
+hipdpt: .skip 63 * 4096               /* 512 GiB - 2^46, right after pdpt */
 pd:     .skip 4096
 devpd:  .skip 8192                    /* 2-3 GiB, then 3-4 GiB */
 .align 16
@@ -132,6 +133,45 @@ _start:
         cmp     $1024, %ecx
         jne     1b
 
+        /* The rest of the device window, 4 GiB up to 2^46, where firmware
+         * puts 64-bit PCI BARs (UEFI's often sit at 768 GiB): identity-mapped
+         * uncached with 1 GiB pages, kernel-only. Entry n of the run that
+         * starts at pdpt maps GiB n, so pdpt holds GiBs 4-511 and hipdpt the
+         * 63 tables after it, which pml4 entries 1-63 point at. A user
+         * address space shares only pml4 entry 0 (its own window is at
+         * 512 GiB), and the kernel switches back to its own tables before
+         * running Bastio code, so a claimed Mmio up here is always mapped.
+         * A processor without 1 GiB pages gets none of this: an access
+         * above 4 GiB faults instead. */
+        mov     $0x80000000, %eax
+        cpuid
+        cmp     $0x80000001, %eax
+        jb      3f
+        mov     $0x80000001, %eax
+        cpuid
+        bt      $26, %edx             /* Page1GB */
+        jnc     3f
+        mov     $hipdpt, %eax
+        or      $3, %eax
+        mov     $1, %ecx
+1:      mov     %eax, pml4(,%ecx,8)
+        movl    $0, pml4+4(,%ecx,8)
+        add     $4096, %eax
+        inc     %ecx
+        cmp     $64, %ecx
+        jne     1b
+        mov     $4, %ecx
+2:      mov     %ecx, %eax
+        shl     $30, %eax
+        or      $0x9B, %eax           /* present | writable | PWT | PCD | huge */
+        mov     %eax, pdpt(,%ecx,8)
+        mov     %ecx, %eax
+        shr     $2, %eax
+        mov     %eax, pdpt+4(,%ecx,8)
+        inc     %ecx
+        cmp     $32768, %ecx
+        jne     2b
+3:
         mov     $pml4, %eax
         mov     %eax, %cr3
         mov     %cr4, %eax
