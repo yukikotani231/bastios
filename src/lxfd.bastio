@@ -90,7 +90,7 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   if kind == OF_DIR {
     return Fd { kind: K_DIR, x: x };
   }
-  if kind == OF_SOCK {
+  if kind == OF_SOCK || kind == OF_TCP {
     return Fd { kind: K_SOCK, x: x };
   }
   return Fd { kind: K_BAD, x: 0 };
@@ -158,6 +158,8 @@ fn unref_value(k: &mut Kernel, v: u64)
     pi_set(&mut k.pipes, x, 3, 0);
   } else if kind == OF_SOCK {
     sock_close(&mut k.nic, x);
+  } else if kind == OF_TCP && x < TCBS {
+    tcp_close(&mut k.nic, x);               // sends the FIN after what is buffered
   }
 }
 
