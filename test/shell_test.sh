@@ -144,6 +144,9 @@ steps = [
     ("echo env $GREETING", b"env hey", b"\n# "),
     ("exit", b"", b"\n# "),
     ("elfpie a b", b"elfpie: ok", b"\n# "),
+    # execve of a file: elfdemo is the elfpie program installed at boot.
+    ("/elfdemo a b", b"/elfdemo: ok", b"\n# "),
+    ("./elfdemo; echo st=$?", [b"./elfdemo: ok", b"st=0"], b"\n# "),
     ("exit 5", b"[exit 5]"),
     ("rm lxout", b""),
     ("sh", b"BastiOS 0.2 -- type"),

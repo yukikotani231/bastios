@@ -718,7 +718,8 @@ fn lx_fail_or(total: u64, err: u64) -> u64 {
 // ---------------------------------------------------------------- files
 
 /// Copies the NUL-terminated path at user address va into the transfer
-/// buffer, without leading slashes (the file system is one flat directory).
+/// buffer, without leading "/" or "./" (the file system is one flat
+/// directory, and the working directory is "/").
 /// Returns its length, or NO_RESULT if it is unreadable, empty or too long.
 fn lx_path_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -733,11 +734,19 @@ fn lx_path_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   if got == NO_RESULT {
     return NO_RESULT;
   }
+  // Leading "/" and "./" both name the one directory there is.
   let mut s = 0;
-  while s < got && bget(k.fs.xfer, s) == 47
+  let mut more = true;
+  while more && s < got
     invariant s <= got && got <= XFER && kok(k)
   {
-    s = s + 1;
+    if bget(k.fs.xfer, s) == 47 {
+      s = s + 1;
+    } else if s + 1 < got && bget(k.fs.xfer, s) == 46 && bget(k.fs.xfer, s + 1) == 47 {
+      s = s + 2;
+    } else {
+      more = false;
+    }
   }
   let mut e = s;
   while e < got && bget(k.fs.xfer, e) != 0

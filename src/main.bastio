@@ -110,20 +110,27 @@ fn ack(pic: &mut Pic, v: u64)
 }
 
 // The files the file system starts with, built into the kernel image.
-const NINIT: u64 = 2;
+// elfdemo is a Linux program (the elfpie test) that execve runs as a file.
+const NINIT: u64 = 3;
 
 fn init_name(i: u64) -> Str {
   if i == 0 {
     return "motd";
   }
-  return "about";
+  if i == 1 {
+    return "about";
+  }
+  return "elfdemo";
 }
 
 fn init_data(i: u64) -> Str {
   if i == 0 {
     return include_bytes("../files/motd");
   }
-  return include_bytes("../files/about");
+  if i == 1 {
+    return include_bytes("../files/about");
+  }
+  return include_bytes("../build/user/elfpie.elf");
 }
 
 fn install_files(con: &mut Uart, k: &mut Kernel)
