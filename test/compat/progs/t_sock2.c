@@ -8,6 +8,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/un.h>
@@ -75,6 +76,18 @@ int main(void) {
         EXPECT("a read without SA_RESTART is EINTR", ({ int p[2]; pipe(p); sigaction(SIGRTMIN, &sa, 0); pid_t k = fork();
                k == 0 ? (usleep(100000), kill(getppid(), SIGRTMIN), _exit(0), 0) : 0;
                char x; int n = read(p[0], &x, 1); int e = errno; int st; waitpid(k, &st, 0); n == -1 && e == EINTR; }));
+    }
+    {
+        sigset_t m; sigemptyset(&m); sigaddset(&m, SIGCHLD); sigaddset(&m, SIGUSR1);
+        sigprocmask(SIG_BLOCK, &m, 0);
+        int f = signalfd(-1, &m, SFD_CLOEXEC);
+        struct signalfd_siginfo i;
+        EXPECT("signalfd sees a blocked SIGCHLD", f >= 0 && ({ pid_t k = fork(); k == 0 ? (_exit(3), 0) : 0;
+               struct pollfd p = {f, POLLIN, 0}; int st; poll(&p, 1, 2000) == 1 && read(f, &i, sizeof i) == sizeof i &&
+               i.ssi_signo == SIGCHLD && (pid_t)i.ssi_pid == k && waitpid(k, &st, 0) == k; }));
+        EXPECT("signalfd carries a sigqueue value", sigqueue(getpid(), SIGUSR1, (union sigval){.sival_int = 7}) == 0 &&
+               read(f, &i, sizeof i) == sizeof i && i.ssi_signo == SIGUSR1 && i.ssi_code == SI_QUEUE && i.ssi_int == 7);
+        close(f);
     }
     return done();
 }

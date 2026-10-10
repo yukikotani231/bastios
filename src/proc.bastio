@@ -363,6 +363,7 @@ const FIFO_STRIDE: u64 = 2;           // the FIFO's file handle + 1 (0: free), i
 const FIFO_AT: u64 = 552;             // EP_AT + EP_N * EP_STRIDE
 const EVT_LEN: u64 = 560;             // FIFO_AT + FIFO_N * FIFO_STRIDE
 const OF_UNIX: u64 = 11;              // an AF_UNIX socket: see src/lxunix.bastio
+const OF_SIGFD: u64 = 12;             // a signalfd: word 2 the signals it takes; word 3: nonblocking (src/lxevent.bastio)
 const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
 const DIR_VFS: u64 = 2;               // DIR_VFS + a file layer directory handle
@@ -453,6 +454,7 @@ const K_DEV: u64 = 7;                 // x: the device (src/lxdev.bastio)
 const K_EVENT: u64 = 8;               // x: the description (src/lxevent.bastio)
 const K_TIMER: u64 = 9;               // x: the timer
 const K_EPOLL: u64 = 10;              // x: the epoll instance
+const K_SIGFD: u64 = 11;              // x: the description (src/lxevent.bastio)
 
 struct Kernel {
   mem: Mem,             // the page allocator

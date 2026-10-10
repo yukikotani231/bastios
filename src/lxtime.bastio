@@ -201,6 +201,9 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   if f.kind == K_EVENT || f.kind == K_TIMER || f.kind == K_EPOLL {
     return ev_bits(k, f.kind, f.x);
   }
+  if f.kind == K_SIGFD {
+    return sfd_bits(k, pid, f.x);
+  }
   if f.kind == K_CONSOLE {
     if get(k.line, 1) != 0 {
       return POLLIN | POLLOUT;              // a line is waiting

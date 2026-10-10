@@ -108,6 +108,9 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   if kind == OF_TIMER && x < TFD_N {
     return Fd { kind: K_TIMER, x: x };
   }
+  if kind == OF_SIGFD {
+    return Fd { kind: K_SIGFD, x: h };      // the mask lives in the description
+  }
   if kind == OF_EPOLL && x < EP_N {
     return Fd { kind: K_EPOLL, x: x };
   }
@@ -143,7 +146,7 @@ fn pipe_nonblock(k: &Kernel, pid: u64, fd: u64) -> bool
 /// Whether descriptions of this kind keep O_NONBLOCK in the low bit of
 /// word 3.
 fn can_block(kind: u64) -> bool {
-  return kind == OF_PIPE_R || kind == OF_PIPE_W || kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL;
+  return kind == OF_PIPE_R || kind == OF_PIPE_W || kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD;
 }
 
 /// Whether process pid has a file layer row free: an open file holds
@@ -588,7 +591,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     if kind == OF_PIPE_W {
       fl = LO_WRONLY;
     }
-    if kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL {
+    if kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD {
       fl = LO_RDWR;
     }
     if of_get(k.ofd, h, 3) % 2 == 1 {

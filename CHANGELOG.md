@@ -22,6 +22,9 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
   message boundaries; and `rt_sigqueueinfo` (`sigqueue`), whose value
   reaches the handler's siginfo. A new compat program, `t_sock2`, checks
   these.
+- `signalfd` and `signalfd4`: read, poll and epoll on the signals in its
+  set. A blocked signal is now kept pending even when its action ignores
+  it, as on Linux, so a blocked `SIGCHLD` reaches a signalfd or `sigwait`.
 - `sendfile`, `copy_file_range`, `preadv`, `pwritev`, `statx`,
   `fallocate` (growing), `fadvise64`, `memfd_create`, `getcpu`, and
   `FIONREAD` on a pipe. `flock` and `fcntl` record locks are accepted but

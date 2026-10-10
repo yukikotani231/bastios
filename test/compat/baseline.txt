@@ -219,6 +219,7 @@ t_more: source file
 t_more: statx
 t_more: utimensat
 t_more: vfork + _exit
+t_more: signalfd
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
@@ -304,6 +305,8 @@ t_sock2: sendmsg/recvmsg with two iovecs
 t_sock2: shutdown SHUT_WR gives the peer EOF
 t_sock2: sigqueue carries a value
 t_sock2: write after SHUT_WR is EPIPE
+t_sock2: signalfd sees a blocked SIGCHLD
+t_sock2: signalfd carries a sigqueue value
 t_thread: 4 threads, mutex
 t_thread: condition variable
 t_thread: gettid differs in a thread
