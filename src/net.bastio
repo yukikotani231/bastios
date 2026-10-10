@@ -71,7 +71,7 @@ fn be16(b: &Bytes, o: u64) -> u64
   requires o + 2 <= blen(b)
   ensures result <= 65535
 {
-  return bget(b, o) * 256 + bget(b, o + 1);
+  return cast[u64](bget(b, o)) * 256 + cast[u64](bget(b, o + 1));
 }
 
 fn be32(b: &Bytes, o: u64) -> u64
@@ -92,8 +92,8 @@ fn put16(b: &mut Bytes, o: u64, v: u64)
   requires o + 2 <= blen(b) && v <= 65535
   ensures blen(b) == old(blen(b))
 {
-  bset(&mut b, o, v / 256);
-  bset(&mut b, o + 1, v % 256);
+  bset(&mut b, o, cast[u8](v / 256));
+  bset(&mut b, o + 1, cast[u8](v % 256));
 }
 
 fn put32(b: &mut Bytes, o: u64, v: u64)
@@ -131,7 +131,7 @@ fn csum(b: &Bytes, off: u64, n: u64) -> u64
     i = i + 2;
   }
   if i < n {
-    s = s + bget(b, off + i) * 256;
+    s = s + cast[u64](bget(b, off + i)) * 256;
     if s > 65535 {
       s = s - 65535;
     }
@@ -444,7 +444,7 @@ fn ip_header(n: &mut Net, total: u64, proto: u64, dst: u64)
   put16(&mut n.out, 16, total);
   put32(&mut n.out, 18, 0);           // id, no fragments
   bset(&mut n.out, 22, 64);           // time to live
-  bset(&mut n.out, 23, proto);
+  bset(&mut n.out, 23, cast[u8](proto));
   put16(&mut n.out, 24, 0);
   put32(&mut n.out, 26, MY_IP);
   put32(&mut n.out, 30, dst);
@@ -461,7 +461,7 @@ fn icmp_echo_reply(n: &mut Net, total: u64)
   net_copy(&mut n, 14 + total);
   eth_header(&mut n, smac, ETH_IP);
   ip_header(&mut n, total, IP_ICMP, src);
-  bset(&mut n.out, 34, ICMP_ECHO_REPLY);
+  bset(&mut n.out, 34, cast[u8](ICMP_ECHO_REPLY));
   put16(&mut n.out, 36, 0);
   put16(&mut n.out, 36, csum(n.out, 34, total - 20));
   net_send(&mut n, 14 + total);
@@ -500,9 +500,9 @@ fn ip_in(n: &mut Net, flen: u64)
   if total < 28 || 14 + total > flen || 14 + total > FRAME_MAX {
     return;
   }
-  let proto = bget(n.pkt, 23);
+  let proto = cast[u64](bget(n.pkt, 23));
   if proto == IP_ICMP {
-    let kind = bget(n.pkt, 34);
+    let kind = cast[u64](bget(n.pkt, 34));
     if kind == ICMP_ECHO && csum(n.pkt, 34, total - 20) == 0 {
       icmp_echo_reply(&mut n, total);
     } else if kind == ICMP_ECHO_REPLY && be16(n.pkt, 38) == PING_ID && be16(n.pkt, 40) == n.seq {
@@ -595,7 +595,7 @@ fn net_ping(n: &mut Net, ip: u64) -> u64
   let total = 20 + 8 + PING_DATA;
   eth_header(&mut n, mac, ETH_IP);
   ip_header(&mut n, total, IP_ICMP, ip);
-  bset(&mut n.out, 34, ICMP_ECHO);
+  bset(&mut n.out, 34, cast[u8](ICMP_ECHO));
   bset(&mut n.out, 35, 0);
   put16(&mut n.out, 36, 0);
   put16(&mut n.out, 38, PING_ID);
@@ -604,7 +604,7 @@ fn net_ping(n: &mut Net, ip: u64) -> u64
   while i < PING_DATA
     invariant i <= PING_DATA && net_ok(n)
   {
-    bset(&mut n.out, 42 + i, 0x61 + i % 26);   // "abcd..."
+    bset(&mut n.out, 42 + i, cast[u8](0x61 + i % 26));   // "abcd..."
     i = i + 1;
   }
   put16(&mut n.out, 36, csum(n.out, 34, total - 20));

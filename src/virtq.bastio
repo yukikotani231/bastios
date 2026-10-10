@@ -80,11 +80,11 @@ fn ring_w16(q: &mut Vq, off: u64, x: u64)
   requires off + 2 <= RING_BYTES && off % 2 == 0 && x <= 65535
 {
   if off < 4096 {
-    dma_write16(&mut q.r0, off, x);
+    dma_write16(&mut q.r0, off, cast[u16](x));
   } else if off < 8192 {
-    dma_write16(&mut q.r1, off - 4096, x);
+    dma_write16(&mut q.r1, off - 4096, cast[u16](x));
   } else {
-    dma_write16(&mut q.r2, off - 8192, x);
+    dma_write16(&mut q.r2, off - 8192, cast[u16](x));
   }
 }
 
@@ -93,11 +93,11 @@ fn ring_r16(q: &mut Vq, off: u64) -> u64
   ensures result <= 65535
 {
   if off < 4096 {
-    return dma_read16(&mut q.r0, off);
+    return cast[u64](dma_read16(&mut q.r0, off));
   } else if off < 8192 {
-    return dma_read16(&mut q.r1, off - 4096);
+    return cast[u64](dma_read16(&mut q.r1, off - 4096));
   }
-  return dma_read16(&mut q.r2, off - 8192);
+  return cast[u64](dma_read16(&mut q.r2, off - 8192));
 }
 
 fn ring_r32(q: &mut Vq, off: u64) -> u64
@@ -105,11 +105,11 @@ fn ring_r32(q: &mut Vq, off: u64) -> u64
   ensures result <= 4294967295
 {
   if off < 4096 {
-    return dma_read32(&mut q.r0, off);
+    return cast[u64](dma_read32(&mut q.r0, off));
   } else if off < 8192 {
-    return dma_read32(&mut q.r1, off - 4096);
+    return cast[u64](dma_read32(&mut q.r1, off - 4096));
   }
-  return dma_read32(&mut q.r2, off - 8192);
+  return cast[u64](dma_read32(&mut q.r2, off - 8192));
 }
 
 /// Starts the handshake: reset, then "I see you" and "I can drive you".
@@ -119,9 +119,9 @@ fn virtio_start(io: &mut PortIo, want: u64) -> bool
   requires port_count(io) == VIO_PORTS && want <= 2147483648
 {
   pio_out8(&mut io, VIO_STATUS, 0);
-  pio_out8(&mut io, VIO_STATUS, VIO_ACK);
-  pio_out8(&mut io, VIO_STATUS, VIO_ACK + VIO_DRIVER);
-  let offered = pio_in32(&mut io, VIO_HOST_FEATURES);
+  pio_out8(&mut io, VIO_STATUS, cast[u8](VIO_ACK));
+  pio_out8(&mut io, VIO_STATUS, cast[u8](VIO_ACK + VIO_DRIVER));
+  let offered = cast[u64](pio_in32(&mut io, VIO_HOST_FEATURES));
   if offered == 0xFFFFFFFF {
     return false;
   }
@@ -129,7 +129,7 @@ fn virtio_start(io: &mut PortIo, want: u64) -> bool
   if want > 0 && offered / want % 2 == 1 {
     acc = want;
   }
-  pio_out32(&mut io, VIO_GUEST_FEATURES, acc);
+  pio_out32(&mut io, VIO_GUEST_FEATURES, cast[u32](acc));
   return true;
 }
 
@@ -140,8 +140,8 @@ fn vq_setup(io: &mut PortIo, q: &mut Vq, sel: u64) -> bool
   requires port_count(io) == VIO_PORTS && vq_ok(q) && sel <= 65535
   ensures vq_ok(q)
 {
-  pio_out16(&mut io, VIO_QUEUE_SEL, sel);
-  let n = pio_in16(&mut io, VIO_QUEUE_SIZE);
+  pio_out16(&mut io, VIO_QUEUE_SEL, cast[u16](sel));
+  let n = cast[u64](pio_in16(&mut io, VIO_QUEUE_SIZE));
   let a = dma_addr(q.r0);
   if n < 3 || n > 256 || a % 4096 != 0 || a > ADDR_LIMIT - RING_BYTES
     || dma_addr(q.r1) != a + 4096 || dma_addr(q.r2) != a + 8192 {
@@ -153,7 +153,7 @@ fn vq_setup(io: &mut PortIo, q: &mut Vq, sel: u64) -> bool
   q.idx = 0;
   q.seen = 0;
   ring_w16(&mut q, q.avail, AVAIL_NO_INTERRUPT);
-  pio_out32(&mut io, VIO_QUEUE_PFN, a / 4096);
+  pio_out32(&mut io, VIO_QUEUE_PFN, cast[u32](a / 4096));
   return true;
 }
 
@@ -163,9 +163,9 @@ fn vq_desc(q: &mut Vq, i: u64, addr: u64, size: u64, flags: u64, next: u64)
   requires vq_ok(q) && i < q.n && size <= 4294967295 && flags <= 65535 && next <= 65535
 {
   dma_write64(&mut q.r0, i * 16, addr);
-  dma_write32(&mut q.r0, i * 16 + 8, size);
-  dma_write16(&mut q.r0, i * 16 + 12, flags);
-  dma_write16(&mut q.r0, i * 16 + 14, next);
+  dma_write32(&mut q.r0, i * 16 + 8, cast[u32](size));
+  dma_write16(&mut q.r0, i * 16 + 12, cast[u16](flags));
+  dma_write16(&mut q.r0, i * 16 + 14, cast[u16](next));
 }
 
 /// Offers the chain starting at descriptor `head` to the device. The

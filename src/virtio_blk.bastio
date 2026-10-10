@@ -49,9 +49,9 @@ fn virtio_new(ports: &mut Ports, base: u64, f0: Frame, f1: Frame, f2: Frame, f3:
   vq_desc(&mut v.q, 0, r, 16, DESC_NEXT, 1);
   vq_desc(&mut v.q, 1, r + REQ_DATA, VIO_SECTOR, DESC_NEXT, 2);
   vq_desc(&mut v.q, 2, r + REQ_STATUS, 1, DESC_WRITE, 0);
-  pio_out8(&mut v.io, VIO_STATUS, VIO_ACK + VIO_DRIVER + VIO_DRIVER_OK);
-  let lo = pio_in32(&mut v.io, VIO_CAPACITY);
-  let hi = pio_in32(&mut v.io, VIO_CAPACITY + 4);
+  pio_out8(&mut v.io, VIO_STATUS, cast[u8](VIO_ACK + VIO_DRIVER + VIO_DRIVER_OK));
+  let lo = cast[u64](pio_in32(&mut v.io, VIO_CAPACITY));
+  let hi = cast[u64](pio_in32(&mut v.io, VIO_CAPACITY + 4));
   v.sectors = lo + hi * 4294967296;
   return v;
 }
@@ -76,7 +76,7 @@ fn virtio_submit(v: &mut Virtio, data_flags: u64) -> bool
   ensures virtio_ok(v) && v.sectors == old(v.sectors)
 {
   dma_write8(&mut v.req, REQ_STATUS, 255);
-  dma_write16(&mut v.q.r0, 16 + 12, data_flags);          // descriptor 1's flags
+  dma_write16(&mut v.q.r0, 16 + 12, cast[u16](data_flags));          // descriptor 1's flags
   vq_push(&mut v.q, 0);                                    // the chain starts at 0
   pio_out16(&mut v.io, VIO_QUEUE_NOTIFY, 0);
   return vq_wait(&mut v.q) && dma_read8(&mut v.req, REQ_STATUS) == 0;
@@ -86,7 +86,7 @@ fn virtio_submit(v: &mut Virtio, data_flags: u64) -> bool
 fn virtio_header(v: &mut Virtio, kind: u64, lba: u64)
   requires kind <= 1
 {
-  dma_write32(&mut v.req, 0, kind);
+  dma_write32(&mut v.req, 0, cast[u32](kind));
   dma_write32(&mut v.req, 4, 0);
   dma_write64(&mut v.req, 8, lba);
 }

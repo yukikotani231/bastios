@@ -416,8 +416,8 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
     return EMFILE;
   }
   lx_fill(&mut k, 0, 8);
-  bset(&mut k.fs.xfer, 0, r);
-  bset(&mut k.fs.xfer, 4, w);
+  bset(&mut k.fs.xfer, 0, cast[u8](r));
+  bset(&mut k.fs.xfer, 4, cast[u8](w));
   if lx_put_out(&mut k, pid, fds, 8) != 0 {
     return EFAULT;
   }
@@ -465,7 +465,7 @@ fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   while i < want
     invariant i <= want && want <= PIPE_CAP && head < PIPE_CAP && kok(k)
   {
-    bset(&mut k.fs.xfer, i, pi_get(k.pipes, p, 4 + (head + i) % PIPE_CAP) % 256);
+    bset(&mut k.fs.xfer, i, cast[u8](pi_get(k.pipes, p, 4 + (head + i) % PIPE_CAP) % 256));
     i = i + 1;
   }
   let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
@@ -502,7 +502,7 @@ fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   while i < got
     invariant i <= got && got <= PIPE_CAP - count && head < PIPE_CAP && kok(k)
   {
-    pi_set(&mut k.pipes, p, 4 + (head + count + i) % PIPE_CAP, bget(k.fs.xfer, i));
+    pi_set(&mut k.pipes, p, 4 + (head + count + i) % PIPE_CAP, cast[u64](bget(k.fs.xfer, i)));
     i = i + 1;
   }
   pi_set(&mut k.pipes, p, 1, count + got);
@@ -551,7 +551,7 @@ fn lx_poll(k: &mut Kernel, pid: u64, fds: u64, nfds: u64) -> u64
     if ev / 4 % 2 == 1 {
       rv = rv + 4;                          // POLLOUT
     }
-    bset(&mut k.fs.xfer, 8 * i + 6, rv);
+    bset(&mut k.fs.xfer, 8 * i + 6, cast[u8](rv));
     bset(&mut k.fs.xfer, 8 * i + 7, 0);
     i = i + 1;
   }

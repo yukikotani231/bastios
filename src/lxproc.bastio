@@ -301,7 +301,7 @@ fn lx_wait4(k: &mut Kernel, pid: u64, want: u64, status: u64, options: u64) -> u
       if state(k.procs, c) == ZOMBIE {
         if status != 0 {
           lx_fill(&mut k, 0, 4);
-          bset(&mut k.fs.xfer, 1, pget(k.procs, c, F_CODE) % 256);
+          bset(&mut k.fs.xfer, 1, cast[u8](pget(k.procs, c, F_CODE) % 256));
           if lx_put_out(&mut k, pid, status, 4) != 0 {
             ret(&mut k.procs, pid, EFAULT);
             return KEEP;
@@ -402,7 +402,7 @@ fn xfer_u64(x: &mut Bytes, at: u64, v: u64)
   while i < 8
     invariant i <= 8 && at + 8 <= blen(x)
   {
-    bset(&mut x, at + i, r % 256);
+    bset(&mut x, at + i, cast[u8](r % 256));
     r = r / 256;
     i = i + 1;
   }
