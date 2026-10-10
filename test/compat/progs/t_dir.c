@@ -41,6 +41,8 @@ int main(void) {
     EXPECT("chdir ..", chdir("..") == 0);
     EXPECT("fchdir", (fd = open("cd_x", O_RDONLY | O_DIRECTORY)) >= 0 && fchdir(fd) == 0 &&
            close(fd) == 0 && chdir("..") == 0);
+    EXPECT("read of a directory is EISDIR", ({ char c1; (fd = open("cd_x", O_RDONLY | O_DIRECTORY)) >= 0 &&
+           read(fd, &c1, 1) == -1 && errno == EISDIR && close(fd) == 0; }));
     {
         int g = -1;
         EXPECT("openat relative to a directory fd", (fd = open("cd_x", O_RDONLY | O_DIRECTORY)) >= 0 &&

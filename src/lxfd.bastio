@@ -829,7 +829,7 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
 
 /// Reads up to n bytes from pipe p to user address va. Returns the count,
 /// 0 at end of file (no writer left), or EAGAIN if the caller must wait.
-fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
+fn pipe_read1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && p < NPIPES
   ensures kok(k)
 {
@@ -859,7 +859,7 @@ fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
 /// count, -EPIPE with no reader left, or EAGAIN if the pipe is full. A
 /// write of PIPE_ATOM bytes or fewer goes in whole or not at all, so
 /// writers sharing a pipe never interleave inside one (POSIX PIPE_BUF).
-fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
+fn pipe_write1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && p < NPIPES
   ensures kok(k)
 {
@@ -882,6 +882,51 @@ fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   ring_in(&mut k.pipebuf, p * PIPE_CAP, PIPE_CAP, (head + count) % PIPE_CAP, k.fs.xfer, 0, got);
   pi_set(&mut k.pipes, p, 1, count + got);
   return got;
+}
+
+/// pipe_read1 in XFER pieces, until n bytes or the pipe is empty.
+fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && p < NPIPES
+  ensures kok(k)
+{
+  let first = pipe_read1(&mut k, pid, p, va, n);
+  if first == 0 || first > n || first < XFER || va >= 0x8000000000000000 {
+    return first;                           // EOF, an error, EAGAIN, or all there was
+  }
+  let mut done = first;
+  while done < n && done < 0x8000000000000000
+    invariant kok(k) && done <= n
+  {
+    let more = pipe_read1(&mut k, pid, p, va + done, n - done);
+    if more == 0 || more > n - done {
+      return done;                          // empty now: what we have is the answer
+    }
+    done = done + more;
+  }
+  return done;
+}
+
+/// pipe_write1 in XFER pieces, until n bytes or the pipe is full, as one
+/// write on Linux puts in all that fits.
+fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && p < NPIPES
+  ensures kok(k)
+{
+  let first = pipe_write1(&mut k, pid, p, va, n);
+  if first == 0 || first > n || first < XFER || va >= 0x8000000000000000 {
+    return first;
+  }
+  let mut done = first;
+  while done < n && done < 0x8000000000000000
+    invariant kok(k) && done <= n
+  {
+    let more = pipe_write1(&mut k, pid, p, va + done, n - done);
+    if more == 0 || more > n - done {
+      return done;                          // full now, or the rest faulted
+    }
+    done = done + more;
+  }
+  return done;
 }
 
 /// Copies n bytes out of the ring buffer src[base .. base + cap], starting

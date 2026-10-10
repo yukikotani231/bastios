@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/timerfd.h>
+#include <sys/uio.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 
@@ -35,6 +36,11 @@ int main(void) {
         fcntl(s[1], F_SETPIPE_SZ, 5000) == 8192 && fcntl(s[0], F_GETPIPE_SZ) == 8192; char z[8192] = {0};
         ok = ok && write(s[1], z, sizeof z) == 8192 && write(s[1], z, 1) == -1 && errno == EAGAIN &&
             fcntl(s[1], F_SETPIPE_SZ, 4096) == -1 && errno == EBUSY;
+        close(s[0]); close(s[1]); ok; }));
+    EXPECT("readv/writev check every iovec; 0 vectors is 0", ({ int s[2], ok = pipe(s) == 0; char z[4];
+        struct iovec v[2] = {{z, 4}, {z, (size_t)-1}};
+        ok = ok && writev(s[1], v, 2) == -1 && errno == EINVAL && writev(s[1], v, 0) == 0 && readv(s[0], v, 0) == 0 &&
+            write(s[1], "abcd", 4) == 4 && readv(s[0], v, 2) == -1 && errno == EINVAL;
         close(s[0]); close(s[1]); ok; }));
     if (begin("pipe holds 64 KiB, then EAGAIN")) {
         int big = 0, n;

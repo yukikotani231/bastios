@@ -14,7 +14,6 @@ const LX_FCHDIR: u64 = 81;
 const LX_MKDIR: u64 = 83;
 const LX_RMDIR: u64 = 84;
 const LX_MKDIRAT: u64 = 258;
-const EISDIR: u64 = 18446744073709551595;     // 2^64 - 21
 const ENOTEMPTY: u64 = 18446744073709551577;  // 2^64 - 39
 const EXDEV: u64 = 18446744073709551598;      // 2^64 - 18
 const LX_RENAME: u64 = 82;

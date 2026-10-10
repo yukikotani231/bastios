@@ -117,6 +117,7 @@ t_dir: mkdir existing is EEXIST
 t_dir: mkdir nested missing parent is ENOENT
 t_dir: openat relative to a directory fd
 t_dir: opendir/readdir /
+t_dir: read of a directory is EISDIR
 t_dir: readdir subdirectory
 t_dir: relative open after chdir
 t_dir: rmdir
@@ -178,6 +179,7 @@ t_ipc: AF_UNIX bind/listen
 t_ipc: AF_UNIX connect to no listener fails
 t_ipc: AF_UNIX connect/accept
 t_ipc: EOF once writers close
+t_ipc: F_SETPIPE_SZ limits a pipe
 t_ipc: O_NONBLOCK read of an empty pipe is EAGAIN
 t_ipc: dup2 onto stdout and back
 t_ipc: epoll
@@ -195,6 +197,7 @@ t_ipc: pipe2
 t_ipc: poll a readable pipe
 t_ipc: poll times out
 t_ipc: pselect timeout
+t_ipc: readv/writev check every iovec; 0 vectors is 0
 t_ipc: select
 t_ipc: socketpair AF_UNIX
 t_ipc: socketpair both ways, EOF after close
@@ -247,12 +250,11 @@ t_ltp2: send on an unconnected TCP socket is EPIPE
 t_ltp2: sendto with a huge address length is EINVAL
 t_mem: 64 MiB of address space
 t_mem: MAP_SHARED anonymous across fork
-t_mem: MAP_SHARED file mapping across fork
 t_mem: MAP_SHARED file mapped by two processes
-t_mem: read(2) sees a store into a MAP_SHARED mapping
-t_mem: a MAP_SHARED mapping sees write(2)
+t_mem: MAP_SHARED file mapping across fork
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
+t_mem: a MAP_SHARED mapping sees write(2)
 t_mem: file for mapping
 t_mem: futex across fork on a MAP_SHARED page
 t_mem: madvise
@@ -267,6 +269,7 @@ t_mem: mprotect read-only faults on write
 t_mem: mremap grow
 t_mem: munmap
 t_mem: munmap faults on touch
+t_mem: read(2) sees a store into a MAP_SHARED mapping
 t_misc: /etc/passwd
 t_misc: /proc/meminfo
 t_misc: /proc/self/exe
