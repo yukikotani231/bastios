@@ -34,6 +34,8 @@ const LX_OPENAT: u64 = 257;
 const LX_STAT: u64 = 4;
 const LX_LSTAT: u64 = 6;
 const LX_ACCESS: u64 = 21;
+const LX_FACCESSAT: u64 = 269;
+const LX_FACCESSAT2: u64 = 439;
 const LX_NEWFSTATAT: u64 = 262;
 const LX_RT_SIGACTION: u64 = 13;
 const LX_RT_SIGPROCMASK: u64 = 14;
@@ -255,23 +257,25 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_OPEN {
-    ret(&mut k.procs, pid, lx_open(&mut k, pid, a, b));
+    ret(&mut k.procs, pid, lx_open(&mut k, pid, AT_FDCWD, a, b));
     return KEEP;
   }
   if n == LX_OPENAT {
-    ret(&mut k.procs, pid, lx_open(&mut k, pid, b, c));   // one flat directory: dirfd is ignored
+    ret(&mut k.procs, pid, lx_open(&mut k, pid, a, b, c));
     return KEEP;
   }
   if n == LX_UNLINK || n == LX_UNLINKAT {
     let mut path = a;
+    let mut dirfd = AT_FDCWD;
     if n == LX_UNLINKAT {
-      path = b;                             // dirfd ignored, as for openat
+      path = b;
+      dirfd = a;
     }
     if n == LX_UNLINKAT && c & AT_REMOVEDIR != 0 {
-      ret(&mut k.procs, pid, lx_rmdir(&mut k, pid, path));
+      ret(&mut k.procs, pid, lx_rmdir(&mut k, pid, dirfd, path));
       return KEEP;
     }
-    ret(&mut k.procs, pid, lx_unlink(&mut k, pid, path));
+    ret(&mut k.procs, pid, lx_unlink(&mut k, pid, dirfd, path));
     return KEEP;
   }
   if n == LX_CLOSE {
@@ -292,7 +296,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if n == LX_MMAP {
     let flags = pget(k.procs, pid, F_REGS + R_R10);
-    ret(&mut k.procs, pid, lx_mmap(&mut k, pid, a, b, flags));
+    let fd = pget(k.procs, pid, F_REGS + R_R8);
+    let off = pget(k.procs, pid, F_REGS + R_R9);
+    ret(&mut k.procs, pid, lx_mmap(&mut k, pid, a, b, flags, fd, off));
     return KEEP;
   }
   if n == LX_MUNMAP || n == LX_MPROTECT {
@@ -301,7 +307,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_STAT || n == LX_LSTAT {
-    ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b));
+    ret(&mut k.procs, pid, lx_stat(&mut k, pid, AT_FDCWD, a, b));
     return KEEP;
   }
   if n == LX_NEWFSTATAT {
@@ -309,8 +315,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if r10 / AT_EMPTY_PATH % 2 == 1 && lx_path_in(&mut k, pid, b) == 0 {
       ret(&mut k.procs, pid, lx_fstat(&mut k, pid, a, c));      // fstat by another name
     } else {
-      // Relative paths start at "/", the only working directory there is.
-      ret(&mut k.procs, pid, lx_stat(&mut k, pid, b, c));
+      ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b, c));
     }
     return KEEP;
   }
@@ -322,8 +327,12 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, lx_getdents(&mut k, pid, a, b, c));
     return KEEP;
   }
+  if n == LX_FACCESSAT || n == LX_FACCESSAT2 {
+    ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b, 0));
+    return KEEP;
+  }
   if n == LX_ACCESS {
-    ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, 0));   // everyone may do anything
+    ret(&mut k.procs, pid, lx_stat(&mut k, pid, AT_FDCWD, a, 0));   // everyone may do anything
     return KEEP;
   }
   if n == LX_FORK || n == LX_VFORK || (n == LX_CLONE && a == SIGCHLD && b == 0) {
@@ -756,6 +765,62 @@ fn lx_path_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
+  return lx_path_from(&mut k, pid, va, OFD_N);
+}
+
+/// lx_path_in for the *at calls: a relative path starts at directory
+/// descriptor dirfd, or at the working directory for AT_FDCWD. NO_RESULT
+/// for a relative path and a dirfd that is not an open directory.
+fn lx_path_at(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  return lx_path_from(&mut k, pid, va, dir_ofd(k, pid, dirfd));
+}
+
+/// The base a relative path of an *at call starts from: OFD_N for the
+/// working directory, a directory description, or OFD_N + 1 for none.
+fn dir_ofd(k: &Kernel, pid: u64, dirfd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= OFD_N + 1
+{
+  if dirfd % 0x100000000 == AT_FDCWD {
+    return OFD_N;
+  }
+  let v = fd_get(k.lxfd, pid, dirfd) % FD_CLOEXEC;
+  if v < FD_OFD || v - FD_OFD >= OFD_N || of_get(k.ofd, v - FD_OFD, 0) != OF_DIR {
+    return OFD_N + 1;
+  }
+  return v - FD_OFD;
+}
+
+/// The length of the base path h names (see dir_ofd), and its bytes.
+fn base_len(k: &Kernel, pid: u64, h: u64) -> u64
+  requires kok(k) && pid < NPROC && h <= OFD_N
+  ensures result <= FNAME_MAX
+{
+  if h == OFD_N {
+    return smaller(get(k.cwd, pid * CWD_STRIDE), FNAME_MAX);
+  }
+  return smaller(get(k.dpath, h * CWD_STRIDE), FNAME_MAX);
+}
+
+fn base_byte(k: &Kernel, pid: u64, h: u64, i: u64) -> u8
+  requires kok(k) && pid < NPROC && h <= OFD_N && i < FNAME_MAX
+{
+  if h == OFD_N {
+    return cast[u8](get(k.cwd, pid * CWD_STRIDE + 1 + i) % 256);
+  }
+  return cast[u8](get(k.dpath, h * CWD_STRIDE + 1 + i) % 256);
+}
+
+/// lx_path_in from base h (see dir_ofd).
+fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
   if va < USER_BASE || va >= USER_BASE + USER_SIZE {
     return NO_RESULT;
   }
@@ -781,11 +846,15 @@ fn lx_path_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   let mut out = balloc(PATH_OUT);
   let mut o = 0;
   if bget(k.fs.xfer, 0) != 47 {
-    let cl = smaller(get(k.cwd, pid * CWD_STRIDE), FNAME_MAX);
+    if h > OFD_N {
+      bfree(out);
+      return NO_RESULT;                     // relative to no directory
+    }
+    let cl = base_len(k, pid, h);
     while o < cl
-      invariant o <= cl && cl <= FNAME_MAX && blen(out) == PATH_OUT && kok(k) && pid < NPROC
+      invariant o <= cl && cl <= FNAME_MAX && blen(out) == PATH_OUT && kok(k) && pid < NPROC && h <= OFD_N
     {
-      bset(&mut out, o, cast[u8](get(k.cwd, pid * CWD_STRIDE + 1 + o) % 256));
+      bset(&mut out, o, base_byte(k, pid, h, o));
       o = o + 1;
     }
   }
@@ -940,25 +1009,96 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
   return want;
 }
 
-/// mmap: anonymous private memory only, taken downward from the stack.
-/// The address hint is ignored, and MAP_FIXED and file mappings fail.
-fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64) -> u64
+/// mmap: private memory, taken downward from the stack, or at addr with
+/// MAP_FIXED. A file mapping is a copy of the file's bytes from `off` (the
+/// rest of the last page zero), so writes to it never reach the file, even
+/// with MAP_SHARED. The address hint without MAP_FIXED is ignored.
+fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64, fd: u64, off: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if flags / MAP_ANONYMOUS % 2 == 0 || flags / MAP_FIXED % 2 == 1 || n == 0 || n > USER_SIZE {
+  if n == 0 || n > USER_SIZE || off % 4096 != 0 {
     return EINVAL;
   }
-  let brk = pget(k.procs, pid, F_BRK);
-  let low = pget(k.procs, pid, F_MMAP);
+  let anon = flags / MAP_ANONYMOUS % 2 == 1;
+  let mut f = NO_FILE;
+  if !anon {
+    let d = fd_look(k, pid, fd);
+    if d.kind != K_FILE {
+      return EBADF;
+    }
+    f = row_file(k.fs, d.x);
+    if f == NO_FILE {
+      return EBADF;
+    }
+  }
   let pages = (n + 4095) / 4096;
-  if low > STACK_FIRST * 4096 || brk > low || pages * 4096 > low - brk {
-    return ENOMEM;
+  let mut at = 0;
+  if flags / MAP_FIXED % 2 == 1 {
+    if addr % 4096 != 0 || addr < USER_BASE || addr - USER_BASE > STACK_FIRST * 4096 || pages > STACK_FIRST - (addr - USER_BASE) / 4096 {
+      return EINVAL;
+    }
+    at = addr - USER_BASE;
+    if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages) {
+      return ENOMEM;
+    }
+  } else {
+    let brk = pget(k.procs, pid, F_BRK);
+    let low = pget(k.procs, pid, F_MMAP);
+    if low > STACK_FIRST * 4096 || brk > low || pages * 4096 > low - brk {
+      return ENOMEM;
+    }
+    at = (low - pages * 4096) / 4096 * 4096;
+    if at < brk || !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096) {
+      return ENOMEM;
+    }
+    pset(&mut k.procs, pid, F_MMAP, at);
   }
-  let at = (low - pages * 4096) / 4096 * 4096;
-  if at < brk || !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096) {
-    return ENOMEM;
+  // Fresh pages are zero, but MAP_FIXED may land on pages in use: fill the
+  // whole range, from the file where it has bytes, zero after.
+  if anon && flags / MAP_FIXED % 2 == 0 {
+    return USER_BASE + at;
   }
-  pset(&mut k.procs, pid, F_MMAP, at);
+  let total = pages * 4096;
+  let mut done = 0;
+  while done < total
+    invariant done <= total && kok(k) && pid < NPROC
+  {
+    let step = smaller(XFER, total - done);
+    let mut got = 0;
+    if f != NO_FILE && off <= 0xFFFFFFFFFFFFFFFF - done {
+      got = vfs_read_at(&mut k.fs, f, off + done, step);
+      if got == NO_FD {
+        got = 0;
+      }
+    }
+    let mut z = got;
+    while z < step
+      invariant got <= z && z <= step && step <= XFER && kok(k)
+    {
+      bset(&mut k.fs.xfer, z, 0);
+      z = z + 1;
+    }
+    if copy_to_user(&mut k.spaces, pid, USER_BASE + at + done, k.fs.xfer, step) != step {
+      return EFAULT;
+    }
+    done = done + step;
+  }
   return USER_BASE + at;
+}
+
+/// The file layer's handle for the file open on native row `row`, or
+/// NO_FILE.
+fn row_file(v: &Vfs, row: u64) -> u64
+  requires vfs_ok(v) && row < FD_ROWS
+{
+  let fs = fget(v.ftab, row, FD_FS);
+  let node = fget(v.ftab, row, FD_NODE);
+  if fs == FS_RAM && node < NFILES {
+    return node;
+  }
+  if fs == FS_DISK && node < DSLOTS {
+    return NFILES + node;
+  }
+  return NO_FILE;
 }

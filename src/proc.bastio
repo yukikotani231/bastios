@@ -312,6 +312,8 @@ const CON_FULL: u64 = 0x8000000000000001;
 // (without the leading "/", at most FNAME_MAX) and one byte a word after.
 const CWD_STRIDE: u64 = 32;
 const CWD_LEN: u64 = 512;             // NPROC * CWD_STRIDE
+const DPATH_LEN: u64 = 2048;          // OFD_N * CWD_STRIDE
+const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
 
 // Linux signal actions: per process, 64 signals of 4 words each (handler,
 // flags, restorer, mask).
@@ -391,15 +393,16 @@ struct Kernel {
   nic: Nic,             // the network card and its UDP sockets, if any
   sigact: Buf,          // Linux signal actions (src/lxsig.bastio)
   cwd: Buf,             // Linux working directories (src/lxdir.bastio)
+  dpath: Buf,           // the path of each open directory description, laid out like cwd
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN
 }
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 19;
+const NPROGS: u64 = 20;
 
 fn prog_name(i: u64) -> Str {
   if i == 0 {
@@ -459,6 +462,9 @@ fn prog_name(i: u64) -> Str {
   if i == 18 {
     return "crashme";
   }
+  if i == 19 {
+    return "mdir";
+  }
   return "(file)";                    // a program loaded from a file
 }
 
@@ -516,6 +522,9 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 18 {
     return include_bytes("../build/user/crashme.bin");
+  }
+  if i == 19 {
+    return include_bytes("../build/user/mdir.elf");
   }
   return include_bytes("../build/user/fault.bin");
 }

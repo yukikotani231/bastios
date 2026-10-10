@@ -1,7 +1,7 @@
 /*
  * BastiOS boot and trap entry.
  *
- * Multiboot 1 entry in 32-bit protected mode, switch to 64-bit long mode,
+ * Multiboot 1 or 2 entry in 32-bit protected mode, switch to 64-bit long mode,
  * set up the descriptor tables (platform.c), call the Bastio kernel
  * (`bst_kmain`), then power off. Also the only code that crosses between
  * user mode and the kernel: `bst_cpu_enter`, the trap stubs, `bst_cpu_wait`.
@@ -30,6 +30,25 @@
 .long 0                               /* a linear framebuffer, preferably */
 .long 1024, 768, 32                   /* 1024x768, 32 bits per pixel */
 
+/* The Multiboot 2 header, which GRUB uses (boot/grub.cfg): it passes the
+ * ACPI RSDP as well, and boot/multiboot.c turns its information into the
+ * Multiboot 1 form above. */
+.set MB2_MAGIC,   0xE85250D6
+.align 8
+mb2_header:
+.long MB2_MAGIC
+.long 0                               /* i386 (32-bit protected mode) */
+.long mb2_end - mb2_header
+.long -(MB2_MAGIC + (mb2_end - mb2_header))
+.align 8
+.word 5, 1                            /* framebuffer, optional: */
+.long 20
+.long 1024, 768, 32                   /* 1024x768, 32 bits per pixel */
+.align 8
+.word 0, 0                            /* end */
+.long 8
+mb2_end:
+
 .section .bss
 .align 4096
 .global bst_kernel_pml4
@@ -46,6 +65,7 @@ stack_top:
  * its own block of bst_cores (core.h). */
 .align 8
 mb_info:        .skip 8
+mb_magic:       .skip 8
 
 .section .data
 .align 16
@@ -71,6 +91,7 @@ _start:
         cli
         mov     $stack_top, %esp
         mov     %ebx, mb_info
+        mov     %eax, mb_magic        /* which Multiboot */
 
         /* Identity-map the first 1 GiB with 2 MiB pages, kernel-only (no U bit). */
         mov     $pdpt, %eax
@@ -139,6 +160,10 @@ long_mode:
         mov     %ax, %gs
         mov     $(bst_cores + CORE_KSTACK), %rsp
 
+        mov     mb_magic, %edi        /* Multiboot 2 information to the form */
+        mov     mb_info, %esi         /* the prelude reads (boot/multiboot.c) */
+        call    bst_multiboot_info
+        mov     %eax, mb_info
         call    bst_platform_init
         call    bst_smp_init
         mov     mb_info, %edi

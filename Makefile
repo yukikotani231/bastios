@@ -34,7 +34,7 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest crashme
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime ash
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir ash
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf)
 
 build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
@@ -87,7 +87,7 @@ build/user/fpucheck.elf: build/user/elfstart.o build/user/fpucheck.o
 # A C program against musl libc, static PIE (the musl-tools package).
 MUSLCC ?= musl-gcc
 
-build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf: build/user/%.elf: user/%.c | build/user
+build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf: build/user/%.elf: user/%.c | build/user
 	$(MUSLCC) -static-pie -O2 -o $@ $<
 
 # BusyBox (GPL-2.0-only, not part of this repository): fetched at a pinned
@@ -139,12 +139,15 @@ build/platform.o: boot/platform.c | build
 build/smp.o: boot/smp.c boot/core.h | build
 	$(CC) $(TCFLAGS) -c -o $@ $<
 
+build/multiboot.o: boot/multiboot.c | build
+	$(CC) $(TCFLAGS) -c -o $@ $<
+
 build/ap.o: boot/ap.S | build
 	$(CC) -c -o $@ $<
 
 # 3. Link a 64-bit kernel, then repackage it as ELF32: QEMU's -kernel
 #    Multiboot loader only accepts 32-bit ELF images. The code is unchanged.
-KOBJS := build/boot.o build/ap.o build/platform.o build/smp.o build/kernel.o build/libc.o
+KOBJS := build/boot.o build/ap.o build/platform.o build/smp.o build/multiboot.o build/kernel.o build/libc.o
 
 build/bastios64.elf: $(KOBJS) boot/linker.ld
 	$(CC) $(LDFLAGS) -o $@ $(KOBJS)

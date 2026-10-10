@@ -10,6 +10,7 @@ import "linux.bastio";
 
 const DIR_VFS: u64 = 2;
 const LX_CHDIR: u64 = 80;
+const LX_FCHDIR: u64 = 81;
 const LX_MKDIR: u64 = 83;
 const LX_RMDIR: u64 = 84;
 const LX_MKDIRAT: u64 = 258;
@@ -210,14 +211,44 @@ fn lx_chdir(k: &mut Kernel, pid: u64, path: u64) -> u64
     return ENOENT;
   }
   // dir_at leaves the name in the transfer buffer.
+  name_keep(&mut k.cwd, CWD_LEN, pid, k.fs.xfer, n);
+  return 0;
+}
+
+/// Keeps x[0..n] as row `row` of a path table (cwd or dpath).
+fn name_keep(t: &mut Buf, tlen: u64, row: u64, x: &Bytes, n: u64)
+  requires len(t) == tlen && (row + 1) * CWD_STRIDE <= tlen && n <= FNAME_MAX && n <= blen(x)
+  ensures len(t) == tlen
+{
   let mut i = 0;
   while i < n
-    invariant i <= n && n <= FNAME_MAX && kok(k) && pid < NPROC
+    invariant i <= n && n <= FNAME_MAX && n <= blen(x) && len(t) == tlen && (row + 1) * CWD_STRIDE <= tlen
   {
-    k.cwd = set(k.cwd, pid * CWD_STRIDE + 1 + i, cast[u64](bget(k.fs.xfer, i)));
+    t = set(t, row * CWD_STRIDE + 1 + i, cast[u64](bget(x, i)));
     i = i + 1;
   }
-  k.cwd = set(k.cwd, pid * CWD_STRIDE, n);
+  t = set(t, row * CWD_STRIDE, n);
+}
+
+/// fchdir(fd): the open directory becomes the working directory.
+fn lx_fchdir(k: &mut Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let h = dir_ofd(k, pid, fd);
+  if h >= OFD_N {
+    if fd_get(k.lxfd, pid, fd) == 0 {
+      return EBADF;
+    }
+    return ENOTDIR;
+  }
+  let mut i = 0;
+  while i < CWD_STRIDE
+    invariant i <= CWD_STRIDE && kok(k) && pid < NPROC && h < OFD_N
+  {
+    k.cwd = set(k.cwd, pid * CWD_STRIDE + i, get(k.dpath, h * CWD_STRIDE + i));
+    i = i + 1;
+  }
   return 0;
 }
 
@@ -247,11 +278,11 @@ fn lx_getcwd(k: &mut Kernel, pid: u64, va: u64, size: u64) -> u64
 }
 
 /// mkdir(path, mode); the mode is not kept.
-fn lx_mkdir(k: &mut Kernel, pid: u64, path: u64) -> u64
+fn lx_mkdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let n = lx_path_in(&mut k, pid, path);
+  let n = lx_path_at(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return ENOENT;
   }
@@ -265,11 +296,11 @@ fn lx_mkdir(k: &mut Kernel, pid: u64, path: u64) -> u64
 }
 
 /// rmdir(path): only an empty directory goes.
-fn lx_rmdir(k: &mut Kernel, pid: u64, path: u64) -> u64
+fn lx_rmdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let n = lx_path_in(&mut k, pid, path);
+  let n = lx_path_at(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return ENOENT;
   }
@@ -290,11 +321,11 @@ fn lx_rmdir(k: &mut Kernel, pid: u64, path: u64) -> u64
 }
 
 /// unlink(path): files only.
-fn lx_unlink(k: &mut Kernel, pid: u64, path: u64) -> u64
+fn lx_unlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let n = lx_path_in(&mut k, pid, path);
+  let n = lx_path_at(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return ENOENT;
   }
@@ -308,11 +339,10 @@ fn lx_unlink(k: &mut Kernel, pid: u64, path: u64) -> u64
 }
 
 fn is_dir_call(n: u64) -> bool {
-  return n == LX_CHDIR || n == LX_MKDIR || n == LX_RMDIR || n == LX_MKDIRAT;
+  return n == LX_CHDIR || n == LX_FCHDIR || n == LX_MKDIR || n == LX_RMDIR || n == LX_MKDIRAT;
 }
 
-/// chdir, mkdir, mkdirat and rmdir. The *at calls take paths from the
-/// working directory whatever their dirfd.
+/// chdir, fchdir, mkdir, mkdirat and rmdir.
 fn lx_dir_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -320,11 +350,14 @@ fn lx_dir_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   if n == LX_CHDIR {
     return lx_chdir(&mut k, pid, a);
   }
+  if n == LX_FCHDIR {
+    return lx_fchdir(&mut k, pid, a);
+  }
   if n == LX_MKDIR {
-    return lx_mkdir(&mut k, pid, a);
+    return lx_mkdir(&mut k, pid, AT_FDCWD, a);
   }
   if n == LX_MKDIRAT {
-    return lx_mkdir(&mut k, pid, b);
+    return lx_mkdir(&mut k, pid, a, b);
   }
-  return lx_rmdir(&mut k, pid, a);
+  return lx_rmdir(&mut k, pid, AT_FDCWD, a);
 }

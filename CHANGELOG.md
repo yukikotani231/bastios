@@ -20,6 +20,10 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Changed
 
+- The ISO's GRUB loads the kernel with Multiboot 2 (QEMU's `-kernel` keeps
+  Multiboot 1), so under UEFI the kernel gets the ACPI RSDP and starts
+  every processor; it ran on one before.
+
 - The device window is mapped from 2 GiB (it was 3 GiB), where UEFI
   firmware puts the framebuffer. Needs bastiolang with `boot_fb`.
 - `make run-iso` and `make run-uefi` open a QEMU window.

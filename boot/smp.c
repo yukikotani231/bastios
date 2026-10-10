@@ -77,17 +77,31 @@ static int sig_is(uint64_t a, const char *sig, uint64_t n) {
     return 1;
 }
 
-/* The RSDP lies on a 16-byte boundary in the first KiB of the EBDA or in
- * 0xE0000-0xFFFFF (ACPI 6.5, 5.2.5.1). */
-static uint64_t find_rsdp(void) {
-    uint64_t ebda = (uint64_t)rd16(0x40E) << 4;
-    uint64_t from[2] = { ebda, 0xE0000 }, to[2] = { ebda + 1024, 0x100000 };
-    for (int r = 0; r < 2; r++) {
-        if (from[r] < 0x80000 || to[r] > 0x100000) continue;
-        for (uint64_t a = from[r]; a + 20 <= to[r]; a += 16)
-            if (sig_is(a, "RSD PTR ", 8) && sum_ok(a, 20)) return a;
-    }
+/* A valid RSDP on a 16-byte boundary in [from, to), or 0. */
+static uint64_t scan_rsdp(uint64_t from, uint64_t to) {
+    for (uint64_t a = (from + 15) & ~15ull; a + 20 <= to; a += 16)
+        if (sig_is(a, "RSD PTR ", 8) && sum_ok(a, 20)) return a;
     return 0;
+}
+
+extern uint8_t bst_boot_rsdp[36];   /* multiboot.c: the copy Multiboot 2 passed */
+extern uint32_t bst_boot_rsdp_len;
+
+/* The RSDP: the copy a Multiboot 2 loader passed (GRUB, from the ISO; under
+ * UEFI the only way to it), else where BIOS firmware puts it, on a 16-byte
+ * boundary in the first KiB of the EBDA or in 0xE0000-0xFFFFF (ACPI 6.5,
+ * 5.2.5.1). */
+static uint64_t find_rsdp(void) {
+    if (bst_boot_rsdp_len >= 20 && sig_is((uint64_t)bst_boot_rsdp, "RSD PTR ", 8) && sum_ok((uint64_t)bst_boot_rsdp, 20)) {
+        /* A revision 2 RSDP is only usable whole: find_madt reads the XSDT
+         * address from its last 16 bytes. */
+        if (rd8((uint64_t)bst_boot_rsdp + 15) < 2 || bst_boot_rsdp_len >= 36) return (uint64_t)bst_boot_rsdp;
+    }
+    uint64_t ebda = (uint64_t)rd16(0x40E) << 4;
+    uint64_t a = 0;
+    if (ebda >= 0x80000 && ebda + 1024 <= 0x100000) a = scan_rsdp(ebda, ebda + 1024);
+    if (!a) a = scan_rsdp(0xE0000, 0x100000);
+    return a;
 }
 
 /* A system description table at `a` with a valid header and checksum, or 0. */
