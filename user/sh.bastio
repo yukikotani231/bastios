@@ -409,6 +409,8 @@ fn cmd_help(con: &Serial) {
   puts(con, "  clock            nanoseconds since boot (HPET)\r\n");
   puts(con, "  kill PID         stop a process\r\n");
   puts(con, "  ping [A.B.C.D]   ICMP echo (default: the gateway, 10.0.2.2)\r\n");
+  puts(con, "  udpecho PORT     wait for a UDP datagram and send it back\r\n");
+  puts(con, "  udpsend A.B.C.D PORT TEXT  send TEXT as a UDP datagram\r\n");
   puts(con, "  NAME [&]         run a program and wait for it (`&`: don't wait)\r\n");
   puts(con, "  about            what this is\r\n");
   puts(con, "  halt             power off\r\n");
@@ -477,49 +479,82 @@ fn cmd_kill(con: &Serial, line: &Buf, n: u64)
 
 // `ping [A.B.C.D]`: one ICMP echo through the kernel's network stack (the
 // gateway, 10.0.2.2, if no address is given).
+const NOT_IP: u64 = 18446744073709551615;
+const IP_END: u64 = 4294967296;
+const SYS_PING: u64 = 40;
+const SYS_SOCKET: u64 = 41;
+const SYS_BIND: u64 = 42;
+const SYS_SENDTO: u64 = 43;
+const SYS_RECVFROM: u64 = 44;
+const SYS_PEER: u64 = 45;
+const SYS_SCLOSE: u64 = 46;
+const UDP_WAIT: u64 = 1500;          // udpecho gives up after 15 s of ticks
+
+// Parses an address A.B.C.D starting at line[i]. Returns the address plus
+// IP_END times the index just past it, or NOT_IP if there is none there.
+fn parse_ip(line: &Buf, n: u64, start: u64) -> u64
+  requires n < len(line) && start <= n + 1
+  ensures result == NOT_IP || (result % IP_END <= 4294967295 && result / IP_END <= n + 1)
+{
+  let mut i = start;
+  let mut ip = 0;
+  let mut part = 0;
+  while part < 4
+    invariant part <= 4 && i <= n + 1 && ip <= 4294967295
+    invariant part < 4 ==> ip <= 16777215
+    invariant part < 3 ==> ip <= 65535
+    invariant part < 2 ==> ip <= 255
+    invariant part == 0 ==> ip == 0
+  {
+    let e = digits_end(line, n, i);
+    if e == i || e > i + 3 {
+      return NOT_IP;
+    }
+    let v = parse_num(line, i, e);
+    if v > 255 {
+      return NOT_IP;
+    }
+    ip = ip * 256 + v;
+    part = part + 1;
+    i = e;
+    if part < 4 {
+      if i > n || get(line, i) != 46 {
+        return NOT_IP;
+      }
+      i = i + 1;
+    }
+  }
+  if i >= 65536 {
+    return NOT_IP;                    // longer than any line
+  }
+  return i * IP_END + ip;
+}
+
+fn put_ip(con: &Serial, ip: u64) {
+  put_num(con, ip / 16777216 % 256);
+  puts(con, ".");
+  put_num(con, ip / 65536 % 256);
+  puts(con, ".");
+  put_num(con, ip / 256 % 256);
+  puts(con, ".");
+  put_num(con, ip % 256);
+}
+
 fn cmd_ping(con: &Serial, line: &Buf, n: u64)
   requires n < len(line)
   requires n >= 4
 {
   let mut ip = 0x0A000202;
-  let mut i = skip_spaces(line, n, 5);
+  let i = skip_spaces(line, n, 5);
   if i <= n {
-    ip = 0;
-    let mut part = 0;
-    while part < 4
-      invariant part <= 4 && i <= n + 1 && ip <= 4294967295
-      invariant part < 4 ==> ip <= 16777215
-      invariant part < 3 ==> ip <= 65535
-      invariant part < 2 ==> ip <= 255
-      invariant part == 0 ==> ip == 0
-    {
-      let e = digits_end(line, n, i);
-      if e == i || e > i + 3 {
-        puts(con, "usage: ping [A.B.C.D]\r\n");
-        return;
-      }
-      let v = parse_num(line, i, e);
-      if v > 255 {
-        puts(con, "usage: ping [A.B.C.D]\r\n");
-        return;
-      }
-      ip = ip * 256 + v;
-      part = part + 1;
-      i = e;
-      if part < 4 {
-        if i > n || get(line, i) != 46 {
-          puts(con, "usage: ping [A.B.C.D]\r\n");
-          return;
-        }
-        i = i + 1;
-      }
-    }
-    if i != n + 1 {
+    let r = parse_ip(line, n, i);
+    if r == NOT_IP || r / IP_END != n + 1 {
       puts(con, "usage: ping [A.B.C.D]\r\n");
       return;
     }
+    ip = r % IP_END;
   }
-  let r = sys_call(40, ip, 0);
+  let r = sys_call(SYS_PING, ip, 0);
   if r == 1 {
     puts(con, "reply from ");
   } else if r == 2 {
@@ -530,14 +565,133 @@ fn cmd_ping(con: &Serial, line: &Buf, n: u64)
   } else {
     puts(con, "no reply from ");
   }
-  put_num(con, ip / 16777216);
-  puts(con, ".");
-  put_num(con, ip / 65536 % 256);
-  puts(con, ".");
-  put_num(con, ip / 256 % 256);
-  puts(con, ".");
-  put_num(con, ip % 256);
+  put_ip(con, ip);
   puts(con, "\r\n");
+}
+
+// The first n bytes of b, with anything unprintable shown as a dot.
+fn put_text(con: &Serial, b: &Bytes, n: u64)
+  requires n <= blen(b)
+{
+  let mut i = 0;
+  while i < n
+    invariant i <= n
+  {
+    let c = bget(b, i);
+    if c < 32 || c > 126 {
+      serial_write(con, 46);
+    } else {
+      serial_write(con, c);
+    }
+    i = i + 1;
+  }
+}
+
+// udpecho PORT: waits for one datagram on a UDP port, prints it and sends
+// it back to its sender.
+fn cmd_udpecho(con: &Serial, line: &Buf, n: u64)
+  requires n < len(line) && n >= 7
+{
+  let i = skip_spaces(line, n, 8);
+  let e = digits_end(line, n, i);
+  let port = parse_num(line, i, e);
+  if e == i || e != n + 1 || port == 0 || port > 65535 {
+    puts(con, "usage: udpecho PORT\r\n");
+    return;
+  }
+  let s = sys_call(SYS_SOCKET, 0, 0);
+  if s == NOT_OK {
+    puts(con, "no network\r\n");
+    return;
+  }
+  if sys_call(SYS_BIND, s, port) != 0 {
+    puts(con, "port in use\r\n");
+    sys_call(SYS_SCLOSE, s, 0);
+    return;
+  }
+  puts(con, "listening on udp port ");
+  put_num(con, port);
+  puts(con, "\r\n");
+  let mut buf = balloc(1472);
+  let t0 = sys_info(1);
+  let mut got = NOT_OK;
+  let mut waiting = true;
+  while waiting {
+    got = sys_recv(SYS_RECVFROM, s, &mut buf);
+    if got != NOT_OK {
+      waiting = false;
+    } else {
+      let now = sys_info(1);
+      if now >= t0 && now - t0 > UDP_WAIT {
+        waiting = false;
+      }
+      sys_yield();
+    }
+  }
+  if got == NOT_OK || got > blen(buf) {
+    puts(con, "nothing arrived\r\n");
+  } else {
+    let peer = sys_call(SYS_PEER, s, 0);
+    puts(con, "from ");
+    put_ip(con, peer / 65536);
+    puts(con, ":");
+    put_num(con, peer % 65536);
+    puts(con, ": ");
+    put_text(con, buf, got);
+    puts(con, "\r\n");
+    // Back to the sender, from the bound port.
+    if peer / 65536 <= 4294967295 && s < 256 {
+      let to = s + 256 * (peer % 65536) + 16777216 * (peer / 65536);
+      if sys_send(SYS_SENDTO, to, buf, got) == got {
+        puts(con, "sent it back\r\n");
+      }
+    }
+  }
+  bfree(buf);
+  sys_call(SYS_SCLOSE, s, 0);
+}
+
+// udpsend A.B.C.D PORT TEXT: sends TEXT as one datagram, from an
+// ephemeral port.
+fn cmd_udpsend(con: &Serial, line: &Buf, n: u64)
+  requires n < len(line) && n >= 7
+  requires forall j: u64 :: 1 <= j && j < len(line) ==> get(line, j) <= 255
+{
+  let i = skip_spaces(line, n, 8);
+  let r = parse_ip(line, n, i);
+  if r == NOT_IP || r / IP_END > n {
+    puts(con, "usage: udpsend A.B.C.D PORT TEXT\r\n");
+    return;
+  }
+  let ip = r % IP_END;
+  let a = skip_spaces(line, n, r / IP_END);
+  let e = digits_end(line, n, a);
+  let port = parse_num(line, a, e);
+  let t = skip_spaces(line, n, e);
+  if a == r / IP_END || e == a || port == 0 || port > 65535 || t > n || t == e {
+    puts(con, "usage: udpsend A.B.C.D PORT TEXT\r\n");
+    return;
+  }
+  let s = sys_call(SYS_SOCKET, 0, 0);
+  if s == NOT_OK || s >= 256 {
+    puts(con, "no network\r\n");
+    return;
+  }
+  let text = line_bytes(line, t, n + 1);
+  let sent = sys_send(SYS_SENDTO, s + 256 * port + 16777216 * ip, text, blen(text));
+  if sent == blen(text) {
+    puts(con, "sent ");
+    put_num(con, sent);
+    puts(con, " bytes to ");
+    put_ip(con, ip);
+    puts(con, ":");
+    put_num(con, port);
+    puts(con, "\r\n");
+  } else {
+    puts(con, "could not send\r\n");
+  }
+  bfree(text);
+  sys_call(SYS_SCLOSE, s, 0);
 }
 
 // Runs the program named by the line, or reports that there is none.
@@ -638,6 +792,10 @@ fn main(con: &mut Serial) -> u64 {
       cmd_kill(con, line, n);
     } else if is_cmd(line, n, "ping") {
       cmd_ping(con, line, n);
+    } else if is_cmd(line, n, "udpecho") {
+      cmd_udpecho(con, line, n);
+    } else if is_cmd(line, n, "udpsend") {
+      cmd_udpsend(con, line, n);
     } else if is_cmd(line, n, "exit") {
       running = false;
     } else if is_cmd(line, n, "halt") {

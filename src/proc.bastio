@@ -7,6 +7,7 @@ import "pages.bastio";
 import "space.bastio";
 import "elf.bastio";
 import "fs.bastio";
+import "net.bastio";
 
 const NPROC: u64 = 16;
 const STRIDE: u64 = 32;
@@ -364,10 +365,11 @@ struct Kernel {
   ns: u64,              // the HPET clock at the last system call, in nanoseconds
   cpus: u64,            // processors running, the bootstrap one included
   fs: Vfs,              // files and the open-file table
+  nic: Nic,             // the network card and its UDP sockets, if any
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs)
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs) && nic_ok(k.nic)
 }
 
 // ---------------------------------------------------------------- programs
