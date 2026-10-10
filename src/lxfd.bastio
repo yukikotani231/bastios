@@ -486,7 +486,7 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   }
   let pf = proc_file(k.procs, k.fs.xfer, n);
   if pf != 0 {
-    if flags % 4 != 0 || pf % 16 == PF_EXE {
+    if flags % 4 != 0 || is_exe_file(pf) {
       return EACCES;                        // /proc is read-only; exe is only a link
     }
     let hp = ofd_new(&mut k, OF_DEV, pf);

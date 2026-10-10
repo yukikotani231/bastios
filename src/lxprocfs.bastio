@@ -10,6 +10,8 @@
 //   /proc/sys/kernel/tainted, pid_max, printk, and the System V IPC
 //   limits shmmax, shmall, shmmni, msgmax, msgmnb, msgmni, sem
 //                           read-only sysctls with their fixed values
+//   /proc/sys/kernel/hostname, domainname, ostype, osrelease
+//                           what uname says (src/lxsys.bastio)
 //   /proc/sysvipc/msg, sem, shm
 //                           the System V IPC objects (src/lxipc.bastio)
 //   /proc/PID/              one directory per process (zombies included)
@@ -54,6 +56,8 @@ const SY_PID_MAX: u64 = 2;
 const SY_PRINTK: u64 = 3;
 const SY_IPC: u64 = 4;                // 4 .. 13: ipc_proc_text (src/lxipc.bastio)
 const SY_IPC_END: u64 = 14;
+const SY_UTS: u64 = 14;                // 14 .. 17: uts_proc_text (src/lxsys.bastio)
+const SY_UTS_END: u64 = 19;
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
 const S_IFREG_RO: u64 = 0x8124;       // a regular file, r--r--r--
@@ -205,6 +209,15 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
     }
     i = i + 1;
   }
+  let mut j = 0;
+  while j < SY_UTS_END - SY_UTS
+    invariant j <= SY_UTS_END - SY_UTS
+  {
+    if xfer_is(x, 5, n, uts_proc_name(j)) {
+      return PROC_DEV + PSYS + SY_UTS + j;
+    }
+    j = j + 1;
+  }
   let p = proc_pid(procs, x, 5, e);
   if p >= NPROC {
     return 0;
@@ -230,7 +243,7 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
 
 /// What stat says about /proc file f (a proc_file device).
 fn proc_meta(f: u64) -> Meta {
-  if f % 16 == PF_EXE {
+  if is_exe_file(f) {
     return Meta { ok: true, mode: S_IFLNK, size: 0, ino: INO_PROC + f % 4096, mtime: 0 };
   }
   return Meta { ok: true, mode: S_IFREG_RO, size: 0, ino: INO_PROC + f % 4096, mtime: 0 };
@@ -447,9 +460,9 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
   if f < PROC_DEV {
     return 0;
   }
-  let what = f % 16;
-  let p = (f - PROC_DEV) / 16;
-  if p == NPROC {
+  if f >= PROC_DEV + PSYS {
+    // A /proc/sys file, numbered from 0 (src/lxprocfs.bastio's SY_*).
+    let what = f - PROC_DEV - PSYS;
     if what == SY_TAINTED {
       return put_s(&mut o, 0, "0\n");
     }
@@ -463,11 +476,13 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     if what >= SY_IPC && what < SY_IPC_END {
       return ipc_proc_text(&mut k, what - SY_IPC, &mut o);
     }
+    if what >= SY_UTS && what < SY_UTS_END {
+      return uts_proc_text(k, what - SY_UTS, &mut o);
+    }
     return 0;
   }
-  if p > NPROC {
-    return 0;
-  }
+  let what = f % 16;
+  let p = (f - PROC_DEV) / 16;
   if what == PF_MOUNTS {
     let mut a = put_s(&mut o, 0, "rootfs / ramfs rw 0 0\nproc /proc proc rw 0 0\n");
     if k.fs.disk.slots > 0 {
@@ -628,7 +643,7 @@ fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
   ensures kok(k)
 {
   let h = fd_ofd(k, pid, fd);
-  if h >= OFD_N || f % 16 == PF_EXE {
+  if h >= OFD_N || is_exe_file(f) {
     return EBADF;
   }
   let off = of_get(k.ofd, h, 3);
@@ -774,7 +789,7 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
     return m;
   }
   let f = proc_file(k.procs, k.fs.xfer, n);
-  if f == 0 || f % 16 != PF_EXE {
+  if f == 0 || !is_exe_file(f) {
     let m = path_meta(&mut k, n);
     if m.ok {
       return EINVAL;

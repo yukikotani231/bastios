@@ -27,8 +27,9 @@
 // data), at 32 its mode, at 40 its modification time; bytes 56..256 its
 // name: one path component of up to DNAME_MAX bytes. So a path is a walk
 // from the top, component by component, and full paths can be longer than
-// any entry. A disk without either magic (blank, or in a still older
-// format) is formatted when it is mounted.
+// any entry. A blank disk is formatted when it is mounted; a disk with
+// neither magic that is not blank (a partition table, another system's
+// data, a still older format) is left alone, and there is no file system.
 //
 // A file's data is found through two levels of maps. The root map is one
 // block of PTRS block numbers, each naming a first-level map, a block of
@@ -119,6 +120,7 @@ struct DiskFs {
   blocks: u64,          // blocks on the disk, at most MAX_BLOCKS
   slots: u64,           // the entries the directory's blocks hold now (DPB * blocks); 0 without a disk
   hint: u64,            // where the next allocation starts looking
+  foreign: bool,        // the disk holds something else, and is left alone
 }
 
 spec fn disk_ok(d: &DiskFs) -> bool {
@@ -414,8 +416,42 @@ fn ent_flush(d: &mut DiskFs, i: u64) -> bool
   return dir_flush(&mut d, i / 2);
 }
 
-/// Mounts the disk, formatting it if it has no file system yet, and works
-/// out which blocks are in use. Without a disk (or one too small) the file
+const BLANK_SECTORS: u64 = 34;      // a protective MBR, then GPT's header and its 32 sectors of entries
+
+/// Are the first and the last BLANK_SECTORS of the disk's `n` sectors all
+/// zeros (or unreadable: then the disk is not used either)?
+fn disk_blank(dev: &mut Blk, sec: &mut Bytes, n: u64) -> bool
+  requires blk_ok(dev) && blen(sec) == SECTOR
+  ensures blk_ok(dev) && blen(sec) == SECTOR
+{
+  let mut i = 0;
+  while i < 2 * BLANK_SECTORS
+    invariant blk_ok(dev) && blen(sec) == SECTOR
+  {
+    let mut lba = i;
+    if i >= BLANK_SECTORS && n >= 2 * BLANK_SECTORS {
+      lba = n - 2 * BLANK_SECTORS + i;
+    }
+    if !blk_read(&mut dev, lba, &mut sec) {
+      return false;
+    }
+    let mut k = 0;
+    while k < SECTOR
+      invariant k <= SECTOR && blen(sec) == SECTOR && blk_ok(dev)
+    {
+      if bget(sec, k) != 0 {
+        return false;
+      }
+      k = k + 1;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+/// Mounts the disk, formatting it if it has no file system yet and is
+/// blank (else it is left alone: `foreign`), and works out which blocks
+/// are in use. Without a disk (or one too small) the file
 /// system has no entries and every operation on it fails.
 fn disk_mount(dev: Blk) -> DiskFs
   requires blk_ok(dev)
@@ -423,7 +459,7 @@ fn disk_mount(dev: Blk) -> DiskFs
 {
   let mut d = DiskFs { dev: dev, dir: balloc(DIR_BYTES), sb: balloc(SECTOR), sec: balloc(SECTOR), root: balloc(BLOCK),
     la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(), txn: 0,
-    used: balloc(MAX_BLOCKS), blocks: 0, slots: 0, hint: DATA_B0 };
+    used: balloc(MAX_BLOCKS), blocks: 0, slots: 0, hint: DATA_B0, foreign: false };
   let mut n = blk_sectors(d.dev) / BSECT;
   if n > MAX_BLOCKS {
     n = MAX_BLOCKS;
@@ -476,6 +512,17 @@ fn disk_mount(dev: Blk) -> DiskFs
       zero(&mut d.sb, 8 * db, SECTOR);      // forget any blocks named past a gap
     }
   } else {
+    // Format, but only a blank disk. Anything in its first or last
+    // BLANK_SECTORS sectors (an MBR or GPT partition table, GPT's backup
+    // copy at the end, a boot sector, another file system's superblock)
+    // means the disk is someone else's: on a real machine, the one with
+    // its owner's operating system on it. It is not touched.
+    let all = blk_sectors(d.dev);
+    if !disk_blank(&mut d.dev, &mut d.sec, all) {
+      d.blocks = 0;
+      d.foreign = true;
+      return d;
+    }
     // Format: an empty directory (balloc zeroes it), then the superblock.
     d.slots = DIR_FIXED * DPB;
     let mut s = 0;

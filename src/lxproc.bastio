@@ -269,7 +269,7 @@ fn lx_src_at(k: &mut Kernel, pid: u64, va: u64) -> Src
   if n <= XFER {
     pf = proc_file(k.procs, k.fs.xfer, n);
   }
-  if pf >= PROC_DEV && pf % 16 == PF_EXE {
+  if is_exe_file(pf) {
     return exe_src(&mut k, (pf - PROC_DEV) / 16);
   }
   if n > 4 && xfer_bin(k.fs.xfer) {
