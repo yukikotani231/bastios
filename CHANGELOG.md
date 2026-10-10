@@ -14,6 +14,11 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Added
 
+- Anonymous `MAP_SHARED` memory is shared with children: `fork` maps the
+  same pages in the child instead of copying them, so a write on one side
+  is seen on the other. The pages are counted references (bastiolang's
+  `Shared`), given back with the last mapping; `munmap`, `mprotect`,
+  `mremap` and exit handle them. Needs the bastiolang with `Shared`.
 - `sendmsg` and `recvmsg`, with `SCM_RIGHTS` passing a descriptor over an
   `AF_UNIX` socket (one per message, one in flight per direction);
   `MSG_PEEK` on TCP and unix sockets; `shutdown` on TCP (sends the FIN)

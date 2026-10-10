@@ -198,6 +198,7 @@ t_lock: read locks are shared
 t_lock: the owner relocks freely
 t_lock: unlocking a middle part splits it
 t_mem: 64 MiB of address space
+t_mem: MAP_SHARED anonymous across fork
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
 t_mem: file for mapping
