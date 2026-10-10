@@ -48,9 +48,9 @@ const O_APPEND: u64 = 16;
 const NO_FD: u64 = 18446744073709551615;
 
 // Directory handles besides the nodes (vfs_dir_lookup, vfs_readdir).
-const VDIR_ROOT: u64 = 64;             // NFILES + DSLOTS: the top directory
-const VDIR_DISK: u64 = 65;             // "disk"
-const NAMEBUF: u64 = 64;              // holds any node's name
+const VDIR_ROOT: u64 = 96;             // NFILES + DSLOTS: the top directory
+const VDIR_DISK: u64 = 97;             // "disk"
+const NAMEBUF: u64 = 256;             // holds any in-memory node's name
 
 struct Vfs {
   ram: Vec[Node],       // the in-memory file system
@@ -600,17 +600,8 @@ fn vfs_rmdir(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
 {
   if on_disk(v, n) {
     let d = disk_find(v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX);
-    if d >= DSLOTS || !dent_dir(v.disk, d) {
+    if d >= DSLOTS || !dent_dir(v.disk, d) || disk_has_children(v.disk, d) {
       return false;
-    }
-    let mut j = 0;
-    while j < DSLOTS
-      invariant j <= DSLOTS && vfs_ok(v) && DISK_PREFIX < n && n <= XFER
-    {
-      if disk_under(v.disk, j, v.xfer, DISK_PREFIX, n - DISK_PREFIX) {
-        return false;
-      }
-      j = j + 1;
     }
     return disk_remove(&mut v.disk, d);
   }
@@ -752,24 +743,24 @@ fn vfs_readdir(v: &mut Vfs, d: u64, i: u64) -> u64
     return child_at(&mut v.xfer, n, v.name, l, d == VDIR_ROOT);
   }
   if d == VDIR_DISK || d < NFILES + DSLOTS {
-    let mut l = 0;
+    let mut p = DTOP;
     if d < NFILES + DSLOTS {
       if !dent_dir(v.disk, d - NFILES) {
         return NO_FILE;
       }
-      l = disk_name(v.disk, d - NFILES, &mut v.name, 0);
-      if l > NAMEBUF {
-        return NO_FILE;
-      }
+      p = d - NFILES;
     }
     if i >= DSLOTS {
       return NO_FILE;
     }
-    let n = disk_name(v.disk, i, &mut v.xfer, 0);
-    if n > XFER {
+    if !dent_used(v.disk, i) || dent_parent(v.disk, i) != p {
       return 0;
     }
-    return child_at(&mut v.xfer, n, v.name, l, d == VDIR_DISK);
+    let n = disk_comp(v.disk, i, &mut v.xfer, 0);
+    if n == NO_DISK_FILE {
+      return 0;
+    }
+    return n;
   }
   return NO_FILE;
 }
@@ -777,14 +768,17 @@ fn vfs_readdir(v: &mut Vfs, d: u64, i: u64) -> u64
 /// The handle of entry i of directory d, when vfs_readdir(v, d, i) found
 /// one (returned more than 0).
 fn vfs_child(d: u64, i: u64) -> u64 {
-  if i > NFILES {
-    return NO_FILE;
-  }
   if d == VDIR_ROOT && i == NFILES {
     return VDIR_DISK;
   }
   if d == VDIR_ROOT || d < NFILES {
+    if i >= NFILES {
+      return NO_FILE;
+    }
     return i;
+  }
+  if i >= DSLOTS {
+    return NO_FILE;
   }
   return NFILES + i;
 }

@@ -320,8 +320,8 @@ const OF_DIR: u64 = 4;                // x: DIR_ROOT or DIR_BIN; word 3: next en
 const SK_WAIT: u64 = 0x8000000000000000;
 // Linux working directories: per process, word 0 the length of the path
 // (without the leading "/", at most FNAME_MAX) and one byte a word after.
-const CWD_STRIDE: u64 = 32;
-const CWD_LEN: u64 = 512;             // NPROC * CWD_STRIDE
+const CWD_STRIDE: u64 = 256;           // FNAME_MAX + 1
+const CWD_LEN: u64 = 4096;            // NPROC * CWD_STRIDE
 
 // Linux signal actions: per process, 64 signals of 4 words each (handler,
 // flags, restorer, mask).
