@@ -15,7 +15,10 @@
 const INFO_CMDLINE: u64 = 0;     // byte i of the boot command line, 256 past its end
 const INFO_MEM: u64 = 1;         // the memory map: i = 3 * region + 0 base, 1 length, 2 type (0 past the end)
 const INFO_CPUID: u64 = 2;       // 2-5: CPUID eax, ebx, ecx, edx for leaf i / 2^32, subleaf i % 2^32
-const INFO_SMP: u64 = 6;         // 0 processors the MADT lists, 1 x2APIC ones, 2 why not all run (SMP_*)
+const INFO_SMP: u64 = 6;         // 0 processors the MADT lists, 1 x2APIC ones, 2 why not all run (SMP_*),
+                                 // 3 the local APIC's mode, 4 the mode the firmware left it in (APIC_*)
+const APIC_XAPIC: u64 = 1;       // INFO_SMP 3 and 4: 0 off, 1 xAPIC, 2 x2APIC, 3 x2APIC locked by the firmware
+const APIC_X2APIC: u64 = 2;
 const INFO_TIMER: u64 = 7;       // 0 what the local APIC timer was counted against, 1 its count for 10 ms
 const INFO_ACPI: u64 = 8;        // 0 where the RSDP came from, 1 its revision, 2 + 2k / 3 + 2k table k's signature / address
 const MEM_REGIONS: u64 = 128;    // boot/multiboot.c keeps at most this many
@@ -392,7 +395,28 @@ fn hw_smp(con: &mut Con, cpu: &Cpu, hpet: bool, pm: bool)
   } else if why == 5 {
     puts(&mut con, "; more than the kernel's limit");
   } else if why == 6 {
-    puts(&mut con, "; x2APIC entries are not started yet");
+    puts(&mut con, "; ids of 255 and up need x2APIC, which this processor lacks");
+  }
+  puts(&mut con, "\r\nlocal APIC: ");
+  let mode = boot_info(cpu, INFO_SMP, 3);
+  let fw = boot_info(cpu, INFO_SMP, 4);
+  if mode == APIC_XAPIC {
+    puts(&mut con, "xAPIC");
+  } else if mode == APIC_X2APIC {
+    puts(&mut con, "x2APIC");
+    if fw > APIC_X2APIC {
+      puts(&mut con, ", locked by the firmware");
+    } else {
+      puts(&mut con, ", for ids of 255 and up");
+    }
+  } else {
+    puts(&mut con, "off");
+  }
+  if fw == APIC_X2APIC {
+    puts(&mut con, "; the firmware left it in x2APIC mode");
+  }
+  if mode == APIC_X2APIC {
+    puts(&mut con, " (so no MSI, no wake-up interrupts)");
   }
   puts(&mut con, "\r\ntimer: the local APIC timer, counted against ");
   let src = boot_info(cpu, INFO_TIMER, 0);

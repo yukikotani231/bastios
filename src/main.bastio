@@ -47,6 +47,7 @@ import "lxlock.bastio";
 import "lxprocfs.bastio";
 import "lxlink.bastio";
 import "lxmount.bastio";
+import "lxperm.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
@@ -688,6 +689,27 @@ fn init_data(i: u64) -> Str {
   return include_bytes("../build/user/elfpie.elf");
 }
 
+/// Gives the file or directory at path `name` permission bits `mode`.
+fn set_mode(v: &mut Vfs, name: Str, mode: u64)
+  requires vfs_ok(v) && slen(name) <= FNAME_MAX
+  ensures vfs_ok(v)
+{
+  let mut i = 0;
+  while i < slen(name)
+    invariant i <= slen(name) && slen(name) <= FNAME_MAX && vfs_ok(v)
+  {
+    bset(&mut v.xfer, i, sget(name, i));
+    i = i + 1;
+  }
+  let mut f = vfs_lookup(&mut v, slen(name));
+  if f == NO_FILE {
+    f = vfs_dir_lookup(&mut v, slen(name));
+  }
+  if f != NO_FILE {
+    vfs_set_meta(&mut v, f, mode, NO_FILE);
+  }
+}
+
 /// Makes directory `name` (a top-level name) in the RAM file system.
 fn make_dir(v: &mut Vfs, name: Str) -> bool
   requires vfs_ok(v) && slen(name) <= FNAME_MAX
@@ -722,6 +744,8 @@ fn install_files(con: &mut Con, k: &mut Kernel)
     }
     i = i + 1;
   }
+  set_mode(&mut k.fs, "tmp", 1023);         // 01777: anyone may make names, only owners remove them
+  set_mode(&mut k.fs, "elfdemo", 493);      // 0755: a program
 }
 
 /// A MAC address as six hex bytes, colon-separated.
@@ -811,7 +835,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     reset_reg = mmio_claim(&mut win, r, 1);
   }
   let mut clock = hpet_init(mmio_claim(&mut win, hpet_at, HPET_LEN), hpet_there);
-  let apic = lapic_new(mmio_claim(&mut win, LAPIC, LAPIC_LEN));
+  let apic = lapic_new(mmio_claim(&mut win, LAPIC, LAPIC_LEN), boot_info(cpu, INFO_SMP, 3) == APIC_XAPIC);
   let mut msi = 0;
   if apic.on {
     msi = lapic_msi_addr(apic);

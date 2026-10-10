@@ -23,9 +23,29 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   with nothing else waiting are answered without the kernel lock: 4 copies
   of `bench` at once on 4 processors make 20000 `getpid` calls in about
   25 ticks instead of about 250.
+- x2APIC. A firmware that leaves the local APICs in x2APIC mode (SeaBIOS
+  and OVMF do when a machine may have APIC ids of 255 and up; many real
+  PCs do with VT-d on) used to hang the kernel at boot. It now takes them
+  back to xAPIC, unless the firmware locked x2APIC mode or a processor has
+  an id of 255 or more: then it runs them in x2APIC mode, and processors
+  the MADT lists only as x2APIC entries are started too. In x2APIC mode
+  the kernel does without MSI and wake-up interrupts for now (its own APIC
+  code, src/lapic.bastio, reaches the registers only as memory). Tested
+  with QEMU 9.2 (`QEMU_X2APIC=... make test`; QEMU 8 cannot emulate
+  x2APIC without KVM).
 
 ### Linux programs
 
+- Files have owners and permissions (`src/lxperm.bastio`). Each file keeps
+  its owner's user and group ids, in memory and on the disk; `chown`,
+  `fchown`, `lchown` and `fchownat` change them, and `stat` reports them.
+  `open`, `execve`, `truncate` and `access` check the mode bits against
+  the caller's ids. A path needs search permission on its directories, and
+  making or removing a name needs write permission on its directory. A
+  sticky directory keeps others' names. `chmod` and `utime` are for the
+  owner. A new file belongs to its maker and takes the process's `umask`,
+  which is kept per process now (it was always 022). `/tmp` is 01777, and
+  BusyBox's `chown` is built in.
 - Anonymous `MAP_SHARED` memory is shared with children: `fork` maps the
   same pages in the child instead of copying them, so a write on one side
   is seen on the other. The pages are counted references (bastiolang's

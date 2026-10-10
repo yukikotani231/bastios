@@ -24,7 +24,8 @@
 // was open, nameless until its last close), byte 1 its name length, then as
 // little-endian u64s: at 8 its parent (another entry, or DTOP for the top
 // directory, "disk"), at 16 its size, at 24 its root map block (0 for no
-// data), at 32 its mode, at 40 its modification time; bytes 56..256 its
+// data), at 32 its mode (the low 16 bits; then its owner's user and group
+// ids, 24 bits each, 0 for root), at 40 its modification time; bytes 56..256 its
 // name: one path component of up to DNAME_MAX bytes. So a path is a walk
 // from the top, component by component, and full paths can be longer than
 // any entry. A blank disk is formatted when it is mounted; a disk with
@@ -96,11 +97,12 @@ const E_NLEN: u64 = 1;
 const E_PARENT: u64 = 8;
 const E_SIZE: u64 = 16;
 const E_ROOT: u64 = 24;
-const E_MODE: u64 = 32;
+const E_MODE: u64 = 32;                // the mode (16 bits), user id (24) and group id (24)
 const E_MTIME: u64 = 40;
 const E_LINK: u64 = 48;
 const E_NAME: u64 = 56;
 
+const OWN_ID_MAX: u64 = 0x1000000;     // ids a disk entry can keep: 24 bits each
 const MODE_FILE: u64 = 420;           // 0644
 const MODE_DIR: u64 = 493;            // 0755
 
@@ -1699,6 +1701,28 @@ fn disk_mode(d: &DiskFs, i: u64) -> u64
   return dent_get(d, i, E_MODE) % 65536;
 }
 
+/// Entry i's owner: user id + group id * 2^32 (each below OWN_ID_MAX).
+fn disk_owner(d: &DiskFs, i: u64) -> u64
+  requires disk_ok(d) && i < DSLOTS
+{
+  let w = dent_get(d, i, E_MODE) / 65536;
+  return w % OWN_ID_MAX + w / OWN_ID_MAX % OWN_ID_MAX * 0x100000000;
+}
+
+/// Sets entry i's owner to user id uid and group id gid. False if the
+/// entry is unused or the disk fails.
+fn disk_set_owner(d: &mut DiskFs, i: u64, uid: u64, gid: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS && uid < OWN_ID_MAX && gid < OWN_ID_MAX
+  ensures disk_ok(d)
+{
+  disk_drain(&mut d);                 // queued writes reach the disk first
+  if !dent_used(d, i) {
+    return false;
+  }
+  dent_set(&mut d, i, E_MODE, dent_get(d, i, E_MODE) % 65536 + (uid + gid * OWN_ID_MAX) * 65536);
+  return ent_flush(&mut d, i);
+}
+
 /// Entry i's modification time, in seconds.
 fn disk_mtime(d: &DiskFs, i: u64) -> u64
   requires disk_ok(d) && i < DSLOTS
@@ -1717,7 +1741,7 @@ fn disk_set_meta(d: &mut DiskFs, i: u64, mode: u64, mtime: u64) -> bool
     return false;
   }
   if mode < 65536 {
-    dent_set(&mut d, i, E_MODE, mode);
+    dent_set(&mut d, i, E_MODE, dent_get(d, i, E_MODE) / 65536 * 65536 + mode);
   }
   if mtime != NO_DISK_FILE {
     dent_set(&mut d, i, E_MTIME, mtime);

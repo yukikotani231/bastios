@@ -4,10 +4,9 @@
 // effective user 0 may set anything, anyone else only moves between the
 // ids it already holds (-EPERM otherwise).
 //
-// Not done: nothing else looks at these ids yet. Files are not checked
-// against them (every open, chmod or unlink works as for root), new files
-// belong to root, kill and setpriority do not compare them, and exec does
-// not honour set-user-ID bits. Supplementary groups are not kept:
+// Files are checked against the file-system ids, and new files belong to
+// them (src/lxperm.bastio). Not done: setpriority does not compare them,
+// and exec does not honour set-user-ID bits. Supplementary groups are not kept:
 // getgroups names group 0, and setgroups succeeds for root doing nothing.
 
 import "lxmisc.bastio";
