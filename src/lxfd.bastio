@@ -399,6 +399,14 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64) -> u64
   if n == NO_RESULT {
     return ENOENT;
   }
+  return lx_open_n(&mut k, pid, n, flags);
+}
+
+/// open of the path in the first n bytes of the transfer buffer.
+fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+  ensures kok(k)
+{
   let pf = proc_file(k.procs, k.fs.xfer, n);
   if pf != 0 {
     if flags % 4 != 0 || pf % 16 == PF_EXE {
@@ -572,6 +580,15 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
       of_set(&mut k.ofd, h, 3, of_get(k.ofd, h, 3) / 2 * 2 + arg / LO_NONBLOCK % 2);
     }
     return 0;
+  }
+  if cmd == F_GETLK || cmd == F_OFD_GETLK {
+    // Locks are not kept (src/lxmore.bastio): nothing ever stands in the
+    // way, so l_type (a short at the start of struct flock) says F_UNLCK.
+    xfer_u64(&mut k.fs.xfer, 0, F_UNLCK);
+    return lx_put_out(&mut k, pid, arg, 2);
+  }
+  if cmd == F_SETLK || cmd == F_SETLKW || cmd == F_OFD_SETLK || cmd == F_OFD_SETLKW {
+    return 0;                               // accepted, not kept
   }
   return EINVAL;
 }
