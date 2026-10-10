@@ -162,6 +162,8 @@ Calls 0 to 10 have named builtins in bastiolang's user prelude. The file calls (
 
 Every argument is an untrusted number. The handlers check ranges at run time (`user_range`, pid bounds, states), and the proof makes sure no check is missing: a handler that indexed the process table with an unchecked pid would not compile.
 
+`test/fuzz_test.sh` (`make fuzz`, and a short run in `make test`) checks this from the outside. `user/sysfuzz.c`, a freestanding program, makes random calls through both entry points (`syscall` with Linux numbers and `int 0x80` with native ones) with hostile arguments: kernel, device and non-canonical addresses, pointers at the edges of the user window and running off mapped pages, huge and negative lengths, bad descriptors. Several run at once on several processors. The kernel must not fault or stop answering, and every page must be back at power off. Calls that would only end or stall the fuzzer itself (exit, execve, signals to other processes, a read with nothing to read) are left out or tamed, and a seed replays the same calls.
+
 ## Files
 
 The file system is in memory (`src/ramfs.bastio`). Its directory is a flat table of 32 nodes, each free or one file: a name, a size, and a vector of pages, where page i holds bytes 4096 i to 4096 (i + 1). A page the file has never written is a hole and reads as zeros. The pages are `Frame`s taken from the page allocator, so a file owns its pages the way a page table owns the pages it maps: the proof shows that truncating or removing a file gives every page back once, and power off frees every file before counting the free pages.
