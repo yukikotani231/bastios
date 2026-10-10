@@ -67,6 +67,14 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   for disks that are still not found. Tested with that option in QEMU (a CD
   on port 0, the disk on port 3); staggered spin-up itself is untested, as
   QEMU's AHCI does not have it.
+- PCs with no PS/2 controller at all. Its ports read 0xFF, which the
+  keyboard driver took for a mouse byte always waiting and polled for on
+  every turn of the console. The driver now notices at boot and leaves
+  the ports alone; the hardware report says `keyboard: none found` when
+  there is no USB keyboard either. Tested with `-machine pc,i8042=off`.
+- NVMe drives whose namespace 1 is not active. The driver used namespace 1
+  unconditionally; it now asks for the active namespace list and takes the
+  first one. Tested with a QEMU NVMe controller whose only namespace is 2.
 
 ### Linux programs
 

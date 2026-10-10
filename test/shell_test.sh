@@ -929,6 +929,19 @@ session("AHCI after COMRESET", None, [
     ("cat disk/nv", b"written by nvme\r\nand ahci\r\n"),
 ], halt=True, ready=ahci_reset_found)
 
+# An NVMe drive whose only namespace is 2 (src/nvme.bastio takes the first
+# active one; it used to ask for namespace 1 and find no disk).
+qemu = boot(1, extra=["-machine", "q35", "-drive", f"file={disk},format=raw,if=none,id=nv2",
+                      "-device", "nvme,serial=bastios,id=nvc", "-device", "nvme-ns,drive=nv2,bus=nvc,nsid=2"])
+def nvme_ns2_found():
+    global fails
+    ok = b"disk: NVMe\r\n" in out
+    print(("ok  " if ok else "FAIL"), "(NVMe namespace 2) disk driver: NVMe")
+    fails += not ok
+session("NVMe namespace 2", None, [
+    ("cat disk/nv", b"written by nvme\r\nand ahci\r\n"),
+], halt=True, ready=nvme_ns2_found)
+
 # And on an NVMe drive with 4 KiB sectors: what AHCI wrote is there, and
 # what is written here is where the ATA boot below looks for it.
 qemu = boot(1, nvme4k=True)
@@ -1507,6 +1520,7 @@ for want, what in (
         ("acpi: tables FACP@0x7f", "the tables are listed where they are"),
         ("timer: the local APIC timer, counted against the HPET", "the timer's calibration"),
         ("tick: the PIT\n", "the PIT ticks"),
+        ("keyboard: PS/2 (no USB keyboard)", "the PS/2 keyboard"),
         ("MiB usable in a map of", "the memory map"),
         ("pci 00:1f.2 8086:2922 class 010601 AHCI disk", "the PCI devices, with their drivers"),
         ("acpi: reset register: port 0xcf9", "the reset register"),
@@ -1522,6 +1536,15 @@ fails += not good
 ok, code = report_boot(["-machine", "pc", "-m", "64M"], "no report", 0)
 good = ok and b"hardware report" not in out
 print(("ok  " if good else "FAIL"), "(hardware report) only with diag")
+fails += not good
+
+# No i8042 at all (many recent PCs, with only USB keyboards): its ports
+# read 0xFF, which src/kbd.bastio took as a mouse byte always waiting, and
+# polled for on every turn. Now the keyboard is left alone, and the report
+# says so; the serial line still works.
+ok, code = report_boot(["-machine", "pc,i8042=off", "-m", "64M", "-append", "diag"], "no i8042", 3)
+good = ok and b"keyboard: none found (no USB keyboard, no PS/2 controller)" in out and code == 0
+print(("ok  " if good else "FAIL"), f"(no i8042) no keyboard found, the shell works, S5 (status {code})")
 fails += not good
 
 # Time without the usual timers. A PIT whose clock is gated off (many
