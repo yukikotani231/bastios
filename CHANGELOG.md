@@ -31,14 +31,52 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   with nothing else waiting are answered without the kernel lock: 4 copies
   of `bench` at once on 4 processors make 20000 `getpid` calls in about
   25 ticks instead of about 250.
+- x2APIC. A firmware that leaves the local APICs in x2APIC mode (SeaBIOS
+  and OVMF do when a machine may have APIC ids of 255 and up; many real
+  PCs do with VT-d on) used to hang the kernel at boot. It now takes them
+  back to xAPIC, unless the firmware locked x2APIC mode or a processor has
+  an id of 255 or more: then it runs them in x2APIC mode, and processors
+  the MADT lists only as x2APIC entries are started too. In x2APIC mode
+  the kernel does without MSI and wake-up interrupts for now (its own APIC
+  code, src/lapic.bastio, reaches the registers only as memory). Tested
+  with QEMU 9.2 (`QEMU_X2APIC=... make test`; QEMU 8 cannot emulate
+  x2APIC without KVM).
 
 ### Linux programs
 
+- Files have owners and permissions (`src/lxperm.bastio`). Each file keeps
+  its owner's user and group ids, in memory and on the disk; `chown`,
+  `fchown`, `lchown` and `fchownat` change them, and `stat` reports them.
+  `open`, `execve`, `truncate` and `access` check the mode bits against
+  the caller's ids. A path needs search permission on its directories, and
+  making or removing a name needs write permission on its directory. A
+  sticky directory keeps others' names. `chmod` and `utime` are for the
+  owner. A new file belongs to its maker and takes the process's `umask`,
+  which is kept per process now (it was always 022). `/tmp` is 01777, and
+  BusyBox's `chown` is built in.
 - Anonymous `MAP_SHARED` memory is shared with children: `fork` maps the
   same pages in the child instead of copying them, so a write on one side
   is seen on the other. The pages are counted references (bastiolang's
   `Shared`), given back with the last mapping; `munmap`, `mprotect`,
   `mremap` and exit handle them.
+- A futex in a `MAP_SHARED` page reaches every process that maps the page:
+  a futex without `FUTEX_PRIVATE_FLAG` on such a page is known by the
+  physical page and offset, not by the caller's address. Futexes on private
+  memory stay per process.
+- A `MAP_SHARED` file mapping is shared with `fork`'s child the same way:
+  both see each other's writes at once. It is still written back to the
+  file at `msync`, `munmap` and exit.
+- A page cache (`src/pcache.bastio`): a `MAP_SHARED` file mapping maps one
+  shared page per page of the file, so separate processes that map the same
+  file share it, and `read` and `write` agree with the mapping before it is
+  written back. See [docs/design/page-cache.md](docs/design/page-cache.md).
+- `FUTEX_REQUEUE` and `FUTEX_CMP_REQUEUE` move waiters with a timeout too:
+  they used to go back to the old word on their next check of the clock.
+  Negative counts give `EINVAL`, and a futex that is not private on an
+  unmapped word gives `EFAULT`, as on Linux.
+- `mmap` of a file gives `EACCES` when the descriptor was not opened for
+  reading, or for a writable `MAP_SHARED` mapping when it was not opened
+  for writing (or was opened `O_APPEND`).
 - Dynamically linked programs: the kernel loads a PIE's interpreter, and
   carries musl's `libc.so` for `/lib/ld-musl-x86_64.so.1`. `/bin/sh` is
   BusyBox's `ash`, so `system` and `popen` work; `waitid`, `times`.
@@ -166,6 +204,10 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Files and disks
 
+- A disk that is not blank and has no BastiOS file system (a partition
+  table, another system's data) is left alone. It used to be formatted on
+  the first boot, which on a real machine would have destroyed the disk
+  with its owner's system on it.
 - USB sticks and disks as the disk (`src/xhci.bastio`): SCSI over the
   bulk-only transport, on the same xHCI controller as the USB keyboard.
   Only a GPT partition of the BastiOS type is used, and it comes before
@@ -250,6 +292,13 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   (`SYS_LINK`, `f_link`) makes a hard link.
 - The ATA driver waits longer for the drive (a cache flush waits on the
   host's fsync).
+- A BastiOS file system on a disk image: `mkfs.bstdisk3 IMAGE` formats an
+  in-memory file, and `mount -t bstdisk3 IMAGE DIR` mounts it on an empty
+  in-memory directory as a second disk file system (`vfs_lo_mount`). It
+  is the same code and format as `disk/`, over a driver that reads and
+  writes the image's pages (`src/loopblk.bastio`). One image at a time;
+  it can hold more files than the in-memory file system. BusyBox's
+  `mount`, `umount` and `truncate` are built in.
 
 ### Network
 
@@ -263,6 +312,28 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   reaches the wire.
 
 ### Console and boot
+
+- ACPI (`src/acpi.bastio`): `halt` powers a PC off through S5 instead of
+  only halting it, `reboot` (new, and BusyBox's `reboot -f` and
+  `poweroff -f` through Linux's reboot(2)) restarts it through the FADT's
+  reset register, the keyboard controller or 0xCF9, and the power button
+  powers off. The kernel parses the FADT and the DSDT's `\_S5` itself, in
+  Bastio, through bastiolang's new `boot_acpi`. Checked on QEMU's i440fx
+  and q35 machines without the isa-debug-exit device.
+- The clock is the HPET where the ACPI HPET table puts it, else the ACPI PM
+  timer (`-machine hpet=off` used to leave the clock at 0), and the
+  processors' local APIC timers are calibrated against the same instead of
+  the PIT, which newer PCs may gate off.
+- A hardware report for trying BastiOS on a real machine: the ISO's GRUB
+  menu has a second entry, "BastiOS, with a hardware report" (boot option
+  `diag`), which prints the processor, the memory map, the ACPI tables and
+  registers and every PCI device with its driver, a screenful at a time.
+  [docs/real-hardware.md](docs/real-hardware.md) says what to check and
+  what to send back. Uses bastiolang's new `boot_info`.
+- The ACPI tables are found wherever the firmware put them: between 1 and
+  2 GiB (where they are on a machine with 2 GiB or more below 4 GiB, which
+  used to leave it on one processor and without power off) and above
+  4 GiB. A reset register in memory is used too.
 
 - The console obeys `tcsetattr`: a program can turn off canonical mode
   and echo and read each key as it is typed, with `VMIN` and `VTIME`, and

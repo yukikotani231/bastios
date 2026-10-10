@@ -10,8 +10,9 @@
 // and a directory's next entry (for a pipe end: 1 if it is nonblocking).
 // k.pipes, words p * PIPE_STRIDE: head, count, the descriptions of its
 // read end and of its write end, the FIFO it belongs to + 1 (0 for an
-// anonymous pipe; src/lxevent.bastio), and 1 once a writer has opened it;
-// the ring itself is PIPE_CAP bytes of k.pipebuf at p * PIPE_CAP.
+// anonymous pipe; src/lxevent.bastio), 1 once a writer has opened it, and
+// the size F_SETPIPE_SZ gave it (0: PIPE_CAP); the ring itself is
+// PIPE_CAP bytes of k.pipebuf at p * PIPE_CAP.
 
 import "linux.bastio";
 import "lxdev.bastio";
@@ -63,6 +64,85 @@ fn pi_set(t: &mut Buf, p: u64, f: u64, v: u64)
   ensures len(t) == PIPES_LEN
 {
   t = set(t, p * PIPE_STRIDE + f, v);
+}
+
+/// Pipe p's head and count as a core Ring over its PIPE_CAP bytes of
+/// k.pipebuf. The stored words are clamped, so the ring is well formed
+/// whatever they hold.
+fn pipe_ring(t: &Buf, p: u64) -> Ring
+  requires len(t) == PIPES_LEN && p < NPIPES
+  ensures ring_ok(result) && result.cap == PIPE_CAP
+{
+  return Ring { h: pi_get(t, p, 0) % PIPE_CAP, n: smaller(pi_get(t, p, 1), PIPE_CAP), cap: PIPE_CAP };
+}
+
+/// Stores ring r back as pipe p's head and count.
+fn pipe_keep(t: &mut Buf, p: u64, r: &Ring)
+  requires len(t) == PIPES_LEN && p < NPIPES
+  ensures len(t) == PIPES_LEN
+{
+  pi_set(&mut t, p, 0, r.h);
+  pi_set(&mut t, p, 1, r.n);
+}
+
+/// How many bytes pipe p may hold: PIPE_CAP unless F_SETPIPE_SZ made it
+/// smaller (word 6; 0 means PIPE_CAP). Its ring is PIPE_CAP bytes still.
+fn pipe_cap(t: &Buf, p: u64) -> u64
+  requires len(t) == PIPES_LEN && p < NPIPES
+  ensures PIPE_PAGE <= result && result <= PIPE_CAP
+{
+  let c = pi_get(t, p, 6);
+  if c >= PIPE_PAGE && c <= PIPE_CAP {
+    return c;
+  }
+  return PIPE_CAP;
+}
+
+/// Room for more bytes in pipe p, which holds `count`.
+fn pipe_room(t: &Buf, p: u64, count: u64) -> u64
+  requires len(t) == PIPES_LEN && p < NPIPES && count <= PIPE_CAP
+  ensures result <= PIPE_CAP - count
+{
+  let c = pipe_cap(t, p);
+  if count >= c {
+    return 0;
+  }
+  return c - count;
+}
+
+/// F_GETPIPE_SZ and F_SETPIPE_SZ on pipe p. A new size is rounded up to
+/// a power of two pages; it may not drop below what the pipe holds
+/// (EBUSY) or rise past PIPE_CAP, /proc/sys/fs/pipe-max-size (EPERM, or
+/// ENOMEM for root, whom Linux would let go further).
+fn pipe_size(k: &mut Kernel, pid: u64, p: u64, set: bool, arg: u64) -> u64
+  requires kok(k) && pid < NPROC && p < NPIPES
+  ensures kok(k)
+{
+  if !set {
+    return pipe_cap(k.pipes, p);
+  }
+  let want = arg % 0x100000000;
+  if want > PIPE_CAP {
+    if cred_root(k.procs, pid) {
+      return ENOMEM;
+    }
+    return EPERM;
+  }
+  let mut size = PIPE_PAGE;
+  while size < want && size < PIPE_CAP
+    invariant PIPE_PAGE <= size && size <= PIPE_CAP
+  {
+    if size >= PIPE_CAP / 2 {
+      size = PIPE_CAP;
+    } else {
+      size = size * 2;
+    }
+  }
+  if pi_get(k.pipes, p, 1) > size {
+    return EBUSY;
+  }
+  pi_set(&mut k.pipes, p, 6, size);
+  return size;
 }
 
 /// What Linux descriptor `fd` of process `pid` refers to.
@@ -436,7 +516,7 @@ fn fd_install_console(k: &mut Kernel, pid: u64) -> u64
 
 /// open / openat: the native flags for Linux `flags`, then vfs_open, and
 /// a description for the row. A file it creates gets `mode` less the
-/// umask (always 022).
+/// process's umask, and its owner (src/lxperm.bastio).
 fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, mode: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -462,9 +542,35 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
       return EROFS;                         // a read-only mount (src/lxmount.bastio)
     }
   }
+  if flags % 4 != 0 && k.fs.lo_at != 0 && vfs_lookup(&mut k.fs, n) == k.fs.lo_file {
+    return EBUSY;                           // a disk image while it is mounted (vfs_lo_mount)
+  }
+  // Permissions (src/lxperm.bastio): on the file, for what the flags
+  // ask; on its directory, for a new name.
+  let kept = kept_meta(&mut k, n);
+  if kept && flags & LO_CREAT != 0 && flags & LO_EXCL != 0 {
+    // EEXIST, below
+  } else if kept && flags & LO_PATH == 0 {
+    let mut want = 0;
+    if flags % 4 != LO_WRONLY {
+      want = MAY_R;
+    }
+    if flags % 4 != 0 || flags & LO_TRUNC != 0 {
+      want = want + MAY_W;
+    }
+    let e = may_path(&mut k, pid, n, want);
+    if e != 0 {
+      return e;
+    }
+  } else if flags & LO_CREAT != 0 && dir_at(&mut k, n) == NO_FILE && dev_at(k.fs.xfer, n) == DEV_NONE {
+    let e = may_dir(&mut k, pid, n);
+    if e != 0 {
+      return e;
+    }
+  }
   let pf = proc_file(k.procs, k.fs.xfer, n);
   if pf != 0 {
-    if flags % 4 != 0 || pf % 16 == PF_EXE {
+    if flags % 4 != 0 || is_exe_file(pf) {
       return EACCES;                        // /proc is read-only; exe is only a link
     }
     let hp = ofd_new(&mut k, OF_DEV, pf);
@@ -538,6 +644,10 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     return EMFILE;                          // no descriptor, or no file layer row, left
   }
   let fresh = f / O_CREATE % 2 == 1 && vfs_lookup(&mut k.fs, n) == NO_FILE;
+  let mut own = 0;
+  if fresh {
+    own = new_owner(&mut k, pid, n);
+  }
   let nfd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, f, n);
   if nfd == NO_FD || nfd >= NFD {
     return ENOENT;
@@ -546,7 +656,7 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if fresh {
     let made = vfs_row_file(k.fs, row);
     if made != NO_FILE {
-      vfs_set_meta(&mut k.fs, made, mode % 512 & !18, NO_FILE);   // 0777 bits, less umask 022
+      made_by(&mut k, pid, made, own, mode % 512, false);   // 0777 bits, less the umask
     }
   }
   let h = ofd_new(&mut k, OF_FILE, row);
@@ -683,6 +793,13 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     }
     return 0;
   }
+  if cmd == F_GETPIPE_SZ || cmd == F_SETPIPE_SZ {
+    let pd = fd_look(k, pid, fd);
+    if pd.kind != K_PIPE_R && pd.kind != K_PIPE_W {
+      return EBADF;
+    }
+    return pipe_size(&mut k, pid, pd.x, cmd == F_SETPIPE_SZ, arg);
+  }
   let lock = cmd == F_SETLK || cmd == F_SETLKW || cmd == F_OFD_SETLK || cmd == F_OFD_SETLKW;
   let fk = fd_look(k, pid, fd);
   if (cmd == F_GETLK || cmd == F_OFD_GETLK || lock) && fk.kind == K_FILE {
@@ -744,6 +861,7 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
   pi_set(&mut k.pipes, p, 3, 1);
   pi_set(&mut k.pipes, p, 4, 0);
   pi_set(&mut k.pipes, p, 5, 1);
+  pi_set(&mut k.pipes, p, 6, 0);
   of_set(&mut k.ofd, hr, 3, flags / LO_NONBLOCK % 2);
   of_set(&mut k.ofd, hw, 3, flags / LO_NONBLOCK % 2);
   let mut ce = 0;
@@ -757,11 +875,12 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
 
 /// Reads up to n bytes from pipe p to user address va. Returns the count,
 /// 0 at end of file (no writer left), or EAGAIN if the caller must wait.
-fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
+fn pipe_read1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && p < NPIPES
   ensures kok(k)
 {
-  let count = smaller(pi_get(k.pipes, p, 1), PIPE_CAP);
+  let mut r = pipe_ring(k.pipes, p);
+  let count = r.n;
   if count == 0 {
     if pi_get(k.pipes, p, 3) == 0 && pi_get(k.pipes, p, 5) != 0 {
       return 0;                             // every writer has gone
@@ -772,14 +891,13 @@ fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
     return 0;
   }
   let want = smaller(smaller(n, count), XFER);
-  let head = pi_get(k.pipes, p, 0) % PIPE_CAP;
-  ring_out(&mut k.fs.xfer, 0, k.pipebuf, p * PIPE_CAP, PIPE_CAP, head, want);
+  ring_out(&mut k.fs.xfer, 0, k.pipebuf, p * PIPE_CAP, PIPE_CAP, r.h, want);
   let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
   if put == NO_RESULT || (put == 0 && want > 0) {
     return EFAULT;
   }
-  pi_set(&mut k.pipes, p, 0, (head + put) % PIPE_CAP);
-  pi_set(&mut k.pipes, p, 1, count - put);
+  ring_pop_n(&mut r, put);
+  pipe_keep(&mut k.pipes, p, r);
   return put;
 }
 
@@ -787,7 +905,7 @@ fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
 /// count, -EPIPE with no reader left, or EAGAIN if the pipe is full. A
 /// write of PIPE_ATOM bytes or fewer goes in whole or not at all, so
 /// writers sharing a pipe never interleave inside one (POSIX PIPE_BUF).
-fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
+fn pipe_write1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && p < NPIPES
   ensures kok(k)
 {
@@ -797,8 +915,8 @@ fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   if n == 0 {
     return 0;
   }
-  let count = smaller(pi_get(k.pipes, p, 1), PIPE_CAP);
-  let room = PIPE_CAP - count;
+  let mut r = pipe_ring(k.pipes, p);
+  let room = pipe_room(k.pipes, p, r.n);
   if room == 0 || (n <= PIPE_ATOM && room < n) {
     return EAGAIN;
   }
@@ -806,10 +924,55 @@ fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   if got == NO_RESULT || (got == 0 && n > 0) {
     return EFAULT;
   }
-  let head = pi_get(k.pipes, p, 0) % PIPE_CAP;
-  ring_in(&mut k.pipebuf, p * PIPE_CAP, PIPE_CAP, (head + count) % PIPE_CAP, k.fs.xfer, 0, got);
-  pi_set(&mut k.pipes, p, 1, count + got);
+  ring_in(&mut k.pipebuf, p * PIPE_CAP, PIPE_CAP, ring_slot(r, r.n), k.fs.xfer, 0, got);
+  ring_push_n(&mut r, got);
+  pipe_keep(&mut k.pipes, p, r);
   return got;
+}
+
+/// pipe_read1 in XFER pieces, until n bytes or the pipe is empty.
+fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && p < NPIPES
+  ensures kok(k)
+{
+  let first = pipe_read1(&mut k, pid, p, va, n);
+  if first == 0 || first > n || first < XFER || va >= 0x8000000000000000 {
+    return first;                           // EOF, an error, EAGAIN, or all there was
+  }
+  let mut done = first;
+  while done < n && done < 0x8000000000000000
+    invariant kok(k) && done <= n
+  {
+    let more = pipe_read1(&mut k, pid, p, va + done, n - done);
+    if more == 0 || more > n - done {
+      return done;                          // empty now: what we have is the answer
+    }
+    done = done + more;
+  }
+  return done;
+}
+
+/// pipe_write1 in XFER pieces, until n bytes or the pipe is full, as one
+/// write on Linux puts in all that fits.
+fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && p < NPIPES
+  ensures kok(k)
+{
+  let first = pipe_write1(&mut k, pid, p, va, n);
+  if first == 0 || first > n || first < XFER || va >= 0x8000000000000000 {
+    return first;
+  }
+  let mut done = first;
+  while done < n && done < 0x8000000000000000
+    invariant kok(k) && done <= n
+  {
+    let more = pipe_write1(&mut k, pid, p, va + done, n - done);
+    if more == 0 || more > n - done {
+      return done;                          // full now, or the rest faulted
+    }
+    done = done + more;
+  }
+  return done;
 }
 
 /// Copies n bytes out of the ring buffer src[base .. base + cap], starting

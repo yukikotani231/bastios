@@ -275,6 +275,14 @@ steps = [
     # The *at calls relative to a directory descriptor, fchdir, and mmap
     # of a file, EMFILE, and a named pipe (user/mdir.c).
     ("mdir", b"mdir: ok in /dx, mapped", b"\n# "),
+    # A BastiOS file system on a disk image: mkfs.bstdisk3, mount -t bstdisk3,
+    # and the file still there after an unmount and a second mount.
+    ("truncate -s 1M im; mkfs.bstdisk3 im && mkdir mm && mount -t bstdisk3 im mm && echo kept > mm/f && umount mm && mount -t bstdisk3 im mm && cat mm/f; cat /proc/mounts; umount mm; rm im; rmdir mm; echo lo$((1+1))",
+     [b"\r\nkept\r\n", b"bstdisk3 /mm bstdisk3 rw", b"\r\nlo2\r\n"], b"\n# "),
+    # Owners and the umask (src/lxperm.bastio): a new file takes the umask,
+    # chown keeps its owner, on the disk too.
+    ("umask 077; echo x > po; chown 65534:100 po; stat -c 'p%a %u %g' po; rm po; umask 022; echo y > /disk/po; chown 7:8 /disk/po; stat -c 'd%a %u %g' /disk/po; rm /disk/po",
+     [b"p600 65534 100", b"d644 7 8"], b"\n# "),
     # Small calls: uname, readv, pread/pwrite, limits, sysinfo, statfs,
     # getrandom, priorities, sessions, process groups, ttyname, pipe capacity (user/mmisc.c).
     ("mmisc", b"mmisc: ok on Linux x86_64, signals, pipe 65536", b"\n# "),
@@ -1266,6 +1274,237 @@ with open(disk, "rb") as f:
     ok = f.read(8) == b"BSTDISK3"
 print(("ok  " if ok else "FAIL"), "a BSTDISK2 disk is upgraded to BSTDISK3 at mount")
 fails += not ok
+# ACPI (src/acpi.bastio) on both of QEMU's PCs, the i440fx (pc) and the
+# q35, without the isa-debug-exit device and without -no-reboot, so only
+# the kernel's own ACPI code can end QEMU: `reboot` restarts the machine
+# (a second boot), the power button (QEMU's system_powerdown) powers it off
+# through S5, and QEMU exits by itself with status 0. With the HPET turned
+# off the clock is the PM timer, and BusyBox's `reboot -f` and
+# `poweroff -f` reach the kernel through Linux's reboot(2).
+def acpi_boot(machine, name, steps, end):
+    global qemu, out, deadline, fails
+    mon_path = os.path.join(disk_dir.name, "acpi-mon.sock")
+    if os.path.exists(mon_path):
+        os.unlink(mon_path)
+    qemu = subprocess.Popen(
+        ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", "2", "-display", "none",
+         "-machine", machine, "-nic", "none", "-serial", "stdio", "-monitor", f"unix:{mon_path},server,nowait"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    out = b""
+    deadline = time.time() + timeout
+    ok = read_until(b"bastios> ")
+    for line, want in steps:
+        if not ok:
+            break
+        mark = len(out)
+        if line == "reboot":
+            qemu.stdin.write(b"reboot\r"); qemu.stdin.flush()
+            ok = read_until(b"pages free at restart", mark) and read_until(b"bastios> ", mark)
+            booted = re.findall(rb"BastiOS 0.2: (\d+) pages of memory", out)
+            restart = re.search(rb"BastiOS: (\d+) pages free at restart", out)
+            ok = ok and len(booted) == 2 and restart and booted[0] == restart.group(1)
+            print(("ok  " if ok else "FAIL"), f"({name}) reboot: every page back, then a second boot")
+        else:
+            qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+            ok = read_until(b"# " if line == "ash" else b"bastios> ", mark) and want in out[mark:]
+            print(("ok  " if ok else "FAIL"), f"({name})", repr(line))
+        fails += not ok
+    if ok:
+        mark = len(out)
+        if end == "button":
+            m = socket.socket(socket.AF_UNIX)
+            m.connect(mon_path)
+            m.sendall(b"system_powerdown\n")
+            ok = read_until(b"power button: powering off", mark)
+            m.close()
+            print(("ok  " if ok else "FAIL"), f"({name}) the power button powers off")
+            fails += not ok
+        else:
+            qemu.stdin.write(end.encode() + b"\r"); qemu.stdin.flush()
+        read_until(b"pages free at power off", mark)
+    try:
+        code = qemu.wait(timeout=max(1, deadline - time.time()))
+    except subprocess.TimeoutExpired:
+        qemu.kill(); qemu.wait(); code = None
+    booted = re.findall(rb"BastiOS 0.2: (\d+) pages of memory", out)
+    off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+    good = code == 0 and booted and off and booted[-1] == off.group(1)
+    print(("ok  " if good else "FAIL"), f"({name}) every page back, and QEMU powered off by S5 (status {code})")
+    fails += not good
+    print(f"---- {name} transcript ----")
+    print(out.decode(errors="replace").replace("\r", "")[-500:])
+
+def clock_ns_now():
+    global out
+    mark = len(out)
+    qemu.stdin.write(b"clock\r"); qemu.stdin.flush()
+    read_until(b"bastios> ", mark)
+    m = re.search(rb"(\d+) ns since boot", out[mark:])
+    return int(m.group(1)) if m else None
+
+for machine, name in (("pc", "i440fx"), ("q35", "q35")):
+    acpi_boot(machine, f"{name} ACPI", [
+        ("help", b"  reboot           restart the machine"),
+        ("reboot", b""),
+    ], "button")
+    good = b"acpi: soft power off, power button\r\n" in out
+    print(("ok  " if good else "FAIL"), f"({name} ACPI) the boot log has soft power off and the power button")
+    fails += not good
+
+# The PM timer as the clock: two readings a second apart (by the host's
+# clock; TCG is slow, so the window is wide), on each machine.
+for machine, name in (("pc,hpet=off", "i440fx, no HPET"), ("q35,hpet=off", "q35, no HPET")):
+    qemu = subprocess.Popen(
+        ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", "2", "-display", "none",
+         "-machine", machine, "-nic", "none", "-serial", "stdio", "-monitor", "none"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    out = b""
+    deadline = time.time() + timeout
+    ok = read_until(b"bastios> ") and b"clock: the ACPI PM timer (no HPET)\r\n" in out
+    print(("ok  " if ok else "FAIL"), f"({name}) the clock is the ACPI PM timer")
+    fails += not ok
+    if ok:
+        t0 = clock_ns_now()
+        time.sleep(1)
+        t1 = clock_ns_now()
+        good = t0 is not None and t1 is not None and 500000000 <= t1 - t0 <= 5000000000
+        print(("ok  " if good else "FAIL"), f"({name}) a second passes on it: {t0} then {t1} ns")
+        fails += not good
+        # BusyBox's reboot and poweroff, with -f: reboot(2) straight away.
+        mark = len(out)
+        qemu.stdin.write(b"ash\r"); qemu.stdin.flush()
+        read_until(b"# ", mark)
+        mark = len(out)
+        qemu.stdin.write(b"reboot -f\r"); qemu.stdin.flush()
+        good = read_until(b"pages free at restart", mark) and read_until(b"bastios> ", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) reboot -f in ash restarts the machine")
+        fails += not good
+        mark = len(out)
+        qemu.stdin.write(b"ash\r"); qemu.stdin.flush()
+        read_until(b"# ", mark)
+        qemu.stdin.write(b"poweroff -f\r"); qemu.stdin.flush()
+        read_until(b"pages free at power off", mark)
+    try:
+        code = qemu.wait(timeout=max(1, deadline - time.time()))
+    except subprocess.TimeoutExpired:
+        qemu.kill(); qemu.wait(); code = None
+    print(("ok  " if code == 0 else "FAIL"), f"({name}) poweroff -f powers QEMU off (status {code})")
+    fails += code != 0
+    print(f"---- {name} transcript ----")
+    print(out.decode(errors="replace").replace("\r", "")[-500:])
+
+# The hardware report (boot option diag, src/info.bastio), on a q35 with
+# 2 GiB, whose firmware puts the ACPI tables just below 2 GiB: the kernel
+# must still find them (the processors, power off). Each pause in the report
+# waits for a key, which the serial line gives.
+def report_boot(args, name, keys, qemu_bin="qemu-system-x86_64"):
+    global qemu, out, deadline
+    qemu = subprocess.Popen(
+        [qemu_bin, "-kernel", kernel, "-display", "none", "-nic", "none",
+         "-serial", "stdio", "-monitor", "none"] + args,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    out = b""
+    deadline = time.time() + timeout
+    for _ in range(keys):
+        mark = len(out)
+        if not read_until(b"(or wait a minute) --", mark):
+            break
+        qemu.stdin.write(b" "); qemu.stdin.flush()
+    ok = read_until(b"bastios> ")
+    mark = len(out)
+    qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
+    read_until(b"pages free at power off", mark)
+    try:
+        code = qemu.wait(timeout=max(1, deadline - time.time()))
+    except subprocess.TimeoutExpired:
+        qemu.kill(); qemu.wait(); code = None
+    print(f"---- {name} transcript ----")
+    print(out.decode(errors="replace").replace("\r", "")[-1500:])
+    return ok, code
+
+ok, code = report_boot(["-machine", "q35", "-m", "2G", "-smp", "2", "-append", "diag"], "hardware report", 3)
+text = out.decode(errors="replace").replace("\r", "")
+for want, what in (
+        ("---- hardware report", "the report starts"),
+        ("processors: the MADT lists 2, 2 running", "the MADT, below 2 GiB, lists both processors"),
+        ("acpi: soft power off, power button", "the FADT below 2 GiB gives power off"),
+        ("acpi: tables FACP@0x7f", "the tables are listed where they are"),
+        ("timer: the local APIC timer, counted against the HPET", "the timer's calibration"),
+        ("MiB usable in a map of", "the memory map"),
+        ("pci 00:1f.2 8086:2922 class 010601 AHCI disk", "the PCI devices, with their drivers"),
+        ("acpi: reset register: port 0xcf9", "the reset register"),
+        ("---- end of the hardware report", "the report ends")):
+    good = ok and want in text
+    print(("ok  " if good else "FAIL"), f"(hardware report) {what}")
+    fails += not good
+booted = re.findall(r"BastiOS 0.2: (\d+) pages of memory", text)
+off = re.search(r"BastiOS: (\d+) pages free at power off", text)
+good = code == 0 and booted and off and booted[-1] == off.group(1)
+print(("ok  " if good else "FAIL"), f"(hardware report) every page back, and S5 (status {code})")
+fails += not good
+ok, code = report_boot(["-machine", "pc", "-m", "64M"], "no report", 0)
+good = ok and b"hardware report" not in out
+print(("ok  " if good else "FAIL"), "(hardware report) only with diag")
+fails += not good
+
+# x2APIC (boot/smp.c). SeaBIOS leaves the local APICs in x2APIC mode when
+# the machine may have APIC ids of 255 and up (sockets of 256 cores): with
+# only low ids present the kernel goes back to xAPIC, which its own APIC
+# code drives; with a processor of id 256 (socket 1) it stays in x2APIC
+# mode and starts that one too. Before, the kernel hung at boot in both.
+# QEMU emulates x2APIC without KVM only from 9.0: QEMU_X2APIC names such a
+# qemu-system-x86_64, else the one on the path is used if it is new enough.
+def qemu_major(q):
+    try:
+        v = subprocess.run([q, "--version"], capture_output=True, text=True).stdout
+    except OSError:
+        return 0
+    m = re.search(r"version (\d+)\.", v)
+    return int(m.group(1)) if m else 0
+qemu9 = os.environ.get("QEMU_X2APIC") or "qemu-system-x86_64"
+if qemu_major(qemu9) < 9:
+    print("skip (x2APIC) needs QEMU 9.0 or later: set QEMU_X2APIC")
+else:
+    many = ["-machine", "q35", "-m", "64M", "-cpu", "qemu64,+x2apic", "-smp", "2,sockets=2,cores=256,maxcpus=512", "-append", "diag"]
+    for extra, name, checks in (
+            ([], "x2APIC firmware", (
+                ("pages of memory, 2 processors", "both processors start"),
+                ("local APIC: xAPIC; the firmware left it in x2APIC mode", "the kernel takes the local APIC back to xAPIC"))),
+            (["-device", "qemu64-x86_64-cpu,socket-id=1,core-id=0,thread-id=0"], "x2APIC id 256", (
+                ("pages of memory, 3 processors", "the processor with APIC id 256 starts too"),
+                ("the MADT lists 2 (and 1 x2APIC entries), 3 running", "the MADT's x2APIC entry is counted"),
+                ("local APIC: x2APIC, for ids of 255 and up", "the local APICs stay in x2APIC mode")))):
+        ok, code = report_boot(many + extra, name, 3, qemu9)
+        text = out.decode(errors="replace").replace("\r", "")
+        for want, what in checks:
+            good = ok and want in text
+            print(("ok  " if good else "FAIL"), f"({name}) {what}")
+            fails += not good
+        booted = re.findall(r"BastiOS 0.2: (\d+) pages of memory", text)
+        off = re.search(r"BastiOS: (\d+) pages free at power off", text)
+        good = code == 0 and booted and off and booted[-1] == off.group(1)
+        print(("ok  " if good else "FAIL"), f"({name}) every page back, and S5 (status {code})")
+        fails += not good
+
+# A disk that is not blank and has no BastiOS file system (an MBR's
+# signature; or only a GPT's backup header at the end) is someone else's:
+# it is not formatted, and not a byte of it changes.
+for name, at, data in (("an MBR", 510, b"\x55\xaa"), ("a backup GPT header", (33 << 20) - 512, b"EFI PART")):
+    other = os.path.join(disk_dir.name, "other.img")
+    with open(other, "wb") as f:
+        f.truncate(33 << 20)
+        f.seek(at)
+        f.write(data)
+    before = open(other, "rb").read()
+    ok, code = report_boot(["-m", "64M", "-drive", f"file={other},format=raw,if=none,id=od",
+                            "-device", "virtio-blk-pci,drive=od"], f"disk with {name}", 0)
+    good = ok and b"disk: it holds a partition table or other data; left alone" in out
+    print(("ok  " if good else "FAIL"), f"(foreign disk) a disk with {name} is left alone")
+    fails += not good
+    good = open(other, "rb").read() == before
+    print(("ok  " if good else "FAIL"), f"(foreign disk) not a byte of the disk with {name} changed")
+    fails += not good
+
 print(f"---- {fails} failed ----")
 sys.exit(1 if fails else 0)
 PY

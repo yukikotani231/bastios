@@ -1,6 +1,6 @@
 // The clock: each processor's time-stamp counter, scaled to nanoseconds
-// with a rate measured against the HPET at boot. The kernel reads it
-// under the lock (k.ns), and Linux programs read the same counter with
+// with a rate measured at boot against the HPET (or, without one, the ACPI
+// PM timer). The kernel reads it under the lock (k.ns), and Linux programs read the same counter with
 // the same arithmetic in user mode, through the vDSO (user/vdso.c), whose
 // page holds a copy of the Tsc below. So a time a program reads there and
 // one the kernel compares with it come from one clock.
@@ -11,15 +11,16 @@
 // every processor reads the host's). k.ns is kept from going back.
 
 import "hpet.bastio";
+import "acpi.bastio";
 
-const NS_CALIBRATE: u64 = 10000000;    // 10 ms of HPET time to measure the rate over
-const CALIBRATE_SPINS: u64 = 100000000; // reads of the HPET before giving up on it
+const NS_CALIBRATE: u64 = 10000000;    // 10 ms of clock_ns time to measure the rate over
+const CALIBRATE_SPINS: u64 = 100000000; // clock reads before giving up on it
 const MULT_MAX: u64 = 1099511627776;   // 2^40: a counter slower than 4 MHz is not used
 const TWO32: u64 = 4294967296;
 const NS_MAX: u64 = 18446744073709551615;
 
 // ns = at + (counter - base) * mult / 2^32; mult 0 means there is no clock
-// and the time stays 0, as it did without an HPET.
+// to measure the rate against, and the time stays 0.
 struct Tsc { base: u64, mult: u64, at: u64 }
 
 /// d * mult / 2^32, rounded down, or NS_MAX if that does not fit (after
@@ -71,14 +72,14 @@ fn tsc_ns(t: Tsc, now: u64) -> u64 {
   return t.at + d;
 }
 
-/// Measures the counter's rate over NS_CALIBRATE of HPET time. Without a
-/// working HPET there is no rate to measure, and the clock stays at 0.
-fn tsc_calibrate(cpu: &Cpu, h: &mut Hpet) -> Tsc
-  requires hpet_ok(h)
-  ensures hpet_ok(h)
+/// Measures the counter's rate over NS_CALIBRATE of clock_ns time (the HPET,
+/// else the ACPI PM timer). With neither, the clock stays at 0.
+fn tsc_calibrate(cpu: &Cpu, h: &mut Hpet, a: &mut Acpi) -> Tsc
+  requires hpet_ok(h) && acpi_ok(a)
+  ensures hpet_ok(h) && acpi_ok(a)
 {
   let none = Tsc { base: 0, mult: 0, at: 0 };
-  let h0 = hpet_ns(&mut h);
+  let h0 = clock_ns(&mut h, &mut a);
   let t0 = cpu_tsc(cpu);
   if h0 >= NS_MAX - NS_CALIBRATE {
     return none;
@@ -88,17 +89,17 @@ fn tsc_calibrate(cpu: &Cpu, h: &mut Hpet) -> Tsc
   while h1 < h0 + NS_CALIBRATE && n < CALIBRATE_SPINS
     invariant n <= CALIBRATE_SPINS
   {
-    h1 = hpet_ns(&mut h);
+    h1 = clock_ns(&mut h, &mut a);
     n = n + 1;
   }
   let t1 = cpu_tsc(cpu);
   if h1 < h0 + NS_CALIBRATE || t1 <= t0 {
-    return none;                            // no HPET, or a counter that did not move
+    return none;                            // no clock, or a counter that did not move
   }
   let dns = h1 - h0;
   let dt = t1 - t0;
   if dns >= TWO32 {
-    return none;                            // the HPET jumped
+    return none;                            // the clock jumped
   }
   let mult = dns * TWO32 / dt;
   if mult == 0 || mult >= MULT_MAX {

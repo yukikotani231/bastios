@@ -332,16 +332,18 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
 
 // ------------------------------------------------- shared file mappings
 //
-// A MAP_SHARED mapping of a file is still a copy of its bytes (there is no
-// page cache to share), but it is recorded, so msync and munmap write the
-// pages back, and exit and execve do too. Each process has MAP_N records
-// in k.maps: the first window page + 1 (0: free), the page count, the open
-// file description (which the record holds a reference on, so the file
-// stays open after close), and the file offset of the first page.
+// A MAP_SHARED mapping of a file maps the page cache's pages
+// (src/pcache.bastio, lx_map_file_shared below), so every process that
+// maps the file shares them, and it is recorded, so msync and munmap write
+// the pages back, and exit and execve do too. Each process has MAP_N
+// records in k.maps: the first window page + 1 (0: free), the page count,
+// the open file description (which the record holds a reference on, so the
+// file stays open after close, and so its cached pages stay), and the file
+// offset of the first page.
 //
-// Not done: a second process (or a write(2) to the file) does not see the
-// bytes until a write-back; a mapping beyond MAP_N stays a private copy;
-// a row opened O_APPEND is not written back; the write-back at exit and
+// Not done: a mapping beyond MAP_N is never written back, and its file can
+// be closed under it (it keeps its pages, but they leave the cache); a row
+// opened O_APPEND is not written back; the write-back at exit and
 // execve gives up on blocks the disk has not cached.
 
 const LX_MSYNC: u64 = 26;
@@ -356,7 +358,8 @@ fn mp_at(p: u64, i: u64, f: u64) -> u64
 
 /// Records window pages first .. first + pages of process pid as a shared
 /// mapping of the file open as fd, from offset off. Nothing if fd names
-/// no file or every record is in use (the mapping stays a private copy).
+/// no file or every record is in use (the mapping is then never written
+/// back).
 fn map_record(k: &mut Kernel, pid: u64, fd: u64, first: u64, pages: u64, off: u64)
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -588,6 +591,84 @@ fn lx_mincore(k: &mut Kernel, pid: u64, addr: u64, n: u64, vec: u64) -> u64
       return EFAULT;
     }
     done = done + m;
+  }
+  return 0;
+}
+
+// ------------------------------------------------ cached file pages
+
+/// Maps the page cache's slot `slot` (src/pcache.bastio) at window page p
+/// of process pid, making the level-1 table if need be. False if the
+/// process has no window, memory ran out, or p is in use.
+fn lx_map_cached(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, p: u64, c: &mut PCache, slot: u64) -> bool
+  requires mem_ok(m) && spaces_ok(spaces) && pid < NPROC && p < WPAGES && pc_ok(c) && slot < PC_N
+  ensures mem_ok(m) && spaces_ok(spaces) && pc_ok(c)
+{
+  match take_space(&mut spaces, pid) {
+    Space::Empty => { return false; },
+    Space::Mapped(mut root) => {
+      let mut ok = false;
+      if pt_has(root, 1) {
+        ok = pt_borrow(&mut root, 1, cached_l3, &mut m, p, &mut c, slot);
+      }
+      put_space(&mut spaces, pid, Space::Mapped(root));
+      return ok;
+    },
+  }
+}
+
+fn cached_l3(l3: &mut PageTable, m: &mut Mem, p: u64, c: &mut PCache, slot: u64) -> bool
+  requires pt_level(l3) == 3 && mem_ok(m) && p < WPAGES && pc_ok(c) && slot < PC_N
+  ensures mem_ok(m) && pc_ok(c)
+{
+  if !pt_has(l3, 0) {
+    return false;
+  }
+  return pt_borrow(&mut l3, 0, cached_l2, &mut m, p, &mut c, slot);
+}
+
+fn cached_l2(l2: &mut PageTable, m: &mut Mem, p: u64, c: &mut PCache, slot: u64) -> bool
+  requires pt_level(l2) == 2 && mem_ok(m) && p < WPAGES && pc_ok(c) && slot < PC_N
+  ensures mem_ok(m) && pc_ok(c) && pt_level(l2) == 2
+{
+  let t = p / 512;
+  if !pt_has(l2, t) {
+    let a = find_free(&mut m);
+    if a >= NPAGES {
+      return false;
+    }
+    pt_put(&mut l2, t, pt_new(take_page(&mut m, a), 1));
+  }
+  return pt_borrow(&mut l2, t, pc_map_slot, &mut c, slot, p % 512);
+}
+
+/// mmap MAP_SHARED of file f from offset off at window pages first ..
+/// first + pages: each page is the page cache's page for that part of the
+/// file, read in now if no process has it yet. 0, or ENOMEM.
+fn lx_map_file_shared(k: &mut Kernel, pid: u64, first: u64, pages: u64, f: u64, off: u64) -> u64
+  requires kok(k) && pid < NPROC && first <= WPAGES && pages <= WPAGES - first && off % 4096 == 0
+  ensures kok(k)
+{
+  let mut j = 0;
+  while j < pages
+    invariant j <= pages && kok(k) && pid < NPROC && first + pages <= WPAGES
+  {
+    let fpg = off / 4096 + j;
+    let mut slot = pc_find(k.fs.pc, f, fpg);
+    if slot >= PC_N {
+      let mut got = 0;
+      if fpg <= 0xFFFFFFFFFFFFF {
+        got = vfs_read_at(&mut k.fs, f, fpg * 4096, XFER);
+        if got == NO_FD {
+          got = 0;
+        }
+      }
+      slot = pc_add(&mut k.fs.pc, &mut k.mem, f, fpg, k.fs.xfer, got);
+    }
+    if slot >= PC_N || !lx_map_cached(&mut k.mem, &mut k.spaces, pid, first + j, &mut k.fs.pc, slot) {
+      return ENOMEM;
+    }
+    j = j + 1;
   }
   return 0;
 }

@@ -17,6 +17,7 @@
 
 import "card.bastio";
 import "core/endian.bastio";
+import "core/csum.bastio";
 
 const ETH_ARP: u64 = 0x0806;
 const ETH_IP: u64 = 0x0800;
@@ -186,45 +187,13 @@ fn put48(b: &mut Bytes, o: u64, v: u64)
   put32(&mut b, o + 2, v % 4294967296);
 }
 
-/// Adds the 16-bit word v to a ones'-complement sum.
-fn cadd(s: u64, v: u64) -> u64
-  requires s <= 65535 && v <= 65535
-  ensures result <= 65535
-{
-  let t = s + v;
-  if t > 65535 {
-    return t - 65535;                 // end-around carry
-  }
-  return t;
-}
-
-/// The ones'-complement sum (RFC 1071) of bytes off..off+n as 16-bit words,
-/// added to s0 (an odd last byte is padded with a zero).
-fn sum16(b: &Bytes, off: u64, n: u64, s0: u64) -> u64
-  requires off + n <= blen(b) && s0 <= 65535
-  ensures result <= 65535
-{
-  let mut s = s0;
-  let mut i = 0;
-  while i + 1 < n
-    invariant i <= n && s <= 65535
-  {
-    s = cadd(s, be16(b, off + i));
-    i = i + 2;
-  }
-  if i < n {
-    s = cadd(s, cast[u64](bget(b, off + i)) * 256);
-  }
-  return s;
-}
-
 /// The Internet checksum of bytes off..off+n. Over a header that already
 /// holds its checksum, it is 0.
 fn csum(b: &Bytes, off: u64, n: u64) -> u64
   requires off + n <= blen(b)
   ensures result <= 65535
 {
-  return 65535 - sum16(b, off, n, 0);
+  return csum_inet(b, off, n);
 }
 
 /// The sum over a UDP datagram or TCP segment at 34..34+size of b and its
@@ -234,13 +203,7 @@ fn l4_sum(b: &Bytes, src: u64, dst: u64, proto: u64, size: u64) -> u64
   requires 34 + size <= blen(b) && src <= IP_MAX && dst <= IP_MAX && proto <= 255 && size <= 65535
   ensures result <= 65535
 {
-  let mut s = cadd(0, src / 65536);
-  s = cadd(s, src % 65536);
-  s = cadd(s, dst / 65536);
-  s = cadd(s, dst % 65536);
-  s = cadd(s, proto);
-  s = cadd(s, size);
-  return sum16(b, 34, size, s);
+  return csum_sum16(b, 34, size, csum_pseudo4(src, dst, proto, size));
 }
 
 /// Copies the first n bytes of the received frame to the outgoing one.
@@ -1126,13 +1089,14 @@ fn pages_free(m: &Mem, lo: u64, k: u64) -> bool
 }
 
 /// Starts the network card: the first virtio card on PCI if its
-/// ports do not overlap avoid_lo .. avoid_hi (another driver's), else the
+/// ports do not overlap avoid_lo .. avoid_hi or plo .. phi (another
+/// driver's, and the ACPI registers), else the
 /// first e1000 whose registers lie in the part of the device window below
 /// E1K_TOP, with pages from page `at` on.
-fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, avoid_lo: u64, avoid_hi: u64, fb_lo: u64, fb_hi: u64,
-  usb_lo: u64, usb_hi: u64, dk_lo: u64, dk_hi: u64, msi: u64) -> Nic
+fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, avoid_lo: u64, avoid_hi: u64,
+  plo: u64, phi: u64, fb_lo: u64, fb_hi: u64, usb_lo: u64, usb_hi: u64, dk_lo: u64, dk_hi: u64, msi: u64) -> Nic
   requires pci_ok(pci) && mem_ok(m) && at + NET_PAGES <= NPAGES && E1K_PAGES <= NET_PAGES && msi <= 4294967295
-  requires forall k: u64 :: 0x1000 <= k && k < 65536 && !(avoid_lo <= k && k < avoid_hi) ==> port_free(ports, k)
+  requires forall k: u64 :: 0x1000 <= k && k < 65536 && !(avoid_lo <= k && k < avoid_hi) && !(plo <= k && k < phi) ==> port_free(ports, k)
   requires forall a: u64 :: 0xC0000000 <= a && a < E1K_TOP && !(fb_lo <= a && a < fb_hi) && !(usb_lo <= a && a < usb_hi)
     && !(dk_lo <= a && a < dk_hi) ==> mmio_free(win, a)
   ensures nic_ok(result) && mem_ok(m)
@@ -1141,7 +1105,7 @@ fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, a
   if dev < PCI_NONE {
     let base = pci_io_bar(&mut pci, dev);
     if base < 0x1000 || base + VIO_PORTS > 65536 || !(base + VIO_PORTS <= avoid_lo || base >= avoid_hi)
-      || !pages_free(m, at, NET_PAGES) {
+      || !(base + VIO_PORTS <= plo || base >= phi) || !pages_free(m, at, NET_PAGES) {
       return Nic::None;
     }
     pci_enable(&mut pci, dev);

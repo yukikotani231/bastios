@@ -1,0 +1,219 @@
+// Linux credentials: the real, effective, saved and file-system user and
+// group ids of each process, and the system calls that read and change
+// them (getuid ... setfsgid), with Linux's rules for who may change what:
+// effective user 0 may set anything, anyone else only moves between the
+// ids it already holds (-EPERM otherwise).
+//
+// Files are checked against the file-system ids, and new files belong to
+// them (src/lxperm.bastio). Not done: setpriority does not compare them,
+// and exec does not honour set-user-ID bits. Supplementary groups are not kept:
+// getgroups names group 0, and setgroups succeeds for root doing nothing.
+
+import "lxmisc.bastio";
+
+const LX_SETFSUID: u64 = 122;
+const LX_SETFSGID: u64 = 123;
+const ID_SPAN: u64 = 0x100000000;          // ids are 32 bits, two to a row word
+const NO_ID: u64 = 0xFFFFFFFF;             // (uid_t) -1: "leave this one as it is"
+
+/// The low (hi false) or high id kept in word f of pid's row.
+fn id_get(procs: &Buf, pid: u64, f: u64, hi: bool) -> u64
+  requires len(procs) == PTAB_LEN && pid < NPROC && f < STRIDE
+  ensures result < ID_SPAN
+{
+  let w = pget(procs, pid, f);
+  if hi {
+    return w / ID_SPAN;
+  }
+  return w % ID_SPAN;
+}
+
+fn id_put(procs: &mut Buf, pid: u64, f: u64, lo: u64, hi: u64)
+  requires len(procs) == PTAB_LEN && pid < NPROC && f < STRIDE && lo < ID_SPAN && hi < ID_SPAN
+  ensures len(procs) == PTAB_LEN
+{
+  pset(&mut procs, pid, f, hi * ID_SPAN + lo);
+}
+
+/// Root, as far as changing ids goes: effective user 0.
+fn cred_root(procs: &Buf, pid: u64) -> bool
+  requires len(procs) == PTAB_LEN && pid < NPROC
+{
+  return id_get(procs, pid, F_UID, true) == 0;
+}
+
+/// setuid (w F_UID, s F_SUID) or setgid (F_GID, F_SGID) to id a.
+fn set_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64) -> u64
+  requires len(procs) == PTAB_LEN && pid < NPROC && w < STRIDE && s < STRIDE
+  ensures len(procs) == PTAB_LEN
+{
+  let u = a % ID_SPAN;
+  if u == NO_ID {
+    return EINVAL;
+  }
+  let r0 = id_get(procs, pid, w, false);
+  let s0 = id_get(procs, pid, s, false);
+  if cred_root(procs, pid) {
+    id_put(&mut procs, pid, w, u, u);
+    id_put(&mut procs, pid, s, u, u);
+    return 0;
+  }
+  if u != r0 && u != s0 {
+    return EPERM;
+  }
+  id_put(&mut procs, pid, w, r0, u);
+  id_put(&mut procs, pid, s, s0, u);
+  return 0;
+}
+
+/// setreuid or setregid: real a and effective b, NO_ID leaving one alone.
+fn set_re_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64, b: u64) -> u64
+  requires len(procs) == PTAB_LEN && pid < NPROC && w < STRIDE && s < STRIDE
+  ensures len(procs) == PTAB_LEN
+{
+  let r = a % ID_SPAN;
+  let e = b % ID_SPAN;
+  let r0 = id_get(procs, pid, w, false);
+  let e0 = id_get(procs, pid, w, true);
+  let s0 = id_get(procs, pid, s, false);
+  let root = cred_root(procs, pid);
+  let mut nr = r0;
+  let mut ne = e0;
+  let mut ns = s0;
+  if r != NO_ID {
+    if !root && r != r0 && r != e0 {
+      return EPERM;
+    }
+    nr = r;
+  }
+  if e != NO_ID {
+    if !root && e != r0 && e != e0 && e != s0 {
+      return EPERM;
+    }
+    ne = e;
+  }
+  if r != NO_ID || (e != NO_ID && e != r0) {
+    ns = ne;
+  }
+  id_put(&mut procs, pid, w, nr, ne);
+  id_put(&mut procs, pid, s, ns, ne);
+  return 0;
+}
+
+/// Whether an unprivileged process may take id x: it holds it already.
+fn holds(x: u64, r0: u64, e0: u64, s0: u64) -> bool {
+  return x == NO_ID || x == r0 || x == e0 || x == s0;
+}
+
+/// setresuid or setresgid.
+fn set_res_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64, b: u64, c: u64) -> u64
+  requires len(procs) == PTAB_LEN && pid < NPROC && w < STRIDE && s < STRIDE
+  ensures len(procs) == PTAB_LEN
+{
+  let r = a % ID_SPAN;
+  let e = b % ID_SPAN;
+  let sv = c % ID_SPAN;
+  let r0 = id_get(procs, pid, w, false);
+  let e0 = id_get(procs, pid, w, true);
+  let s0 = id_get(procs, pid, s, false);
+  if !cred_root(procs, pid) && !(holds(r, r0, e0, s0) && holds(e, r0, e0, s0) && holds(sv, r0, e0, s0)) {
+    return EPERM;
+  }
+  let mut nr = r0;
+  let mut ne = e0;
+  let mut ns = s0;
+  if r != NO_ID {
+    nr = r;
+  }
+  if e != NO_ID {
+    ne = e;
+  }
+  if sv != NO_ID {
+    ns = sv;
+  }
+  id_put(&mut procs, pid, w, nr, ne);
+  id_put(&mut procs, pid, s, ns, ne);
+  return 0;
+}
+
+/// setfsuid or setfsgid: always the old file-system id back.
+fn set_fs_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64) -> u64
+  requires len(procs) == PTAB_LEN && pid < NPROC && w < STRIDE && s < STRIDE
+  ensures len(procs) == PTAB_LEN
+{
+  let f = a % ID_SPAN;
+  let r0 = id_get(procs, pid, w, false);
+  let e0 = id_get(procs, pid, w, true);
+  let s0 = id_get(procs, pid, s, false);
+  let f0 = id_get(procs, pid, s, true);
+  if f != NO_ID && (cred_root(procs, pid) || holds(f, r0, e0, s0) || f == f0) {
+    id_put(&mut procs, pid, s, s0, f);
+  }
+  return f0;
+}
+
+/// getresuid or getresgid: real, effective and saved to a, b and c.
+fn get_res_id(k: &mut Kernel, pid: u64, w: u64, s: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && pid < NPROC && w < STRIDE && s < STRIDE
+  ensures kok(k)
+{
+  xfer_u64(&mut k.fs.xfer, 0, id_get(k.procs, pid, w, false));
+  let mut r = lx_put_out(&mut k, pid, a, 4);
+  if r == 0 {
+    xfer_u64(&mut k.fs.xfer, 0, id_get(k.procs, pid, w, true));
+    r = lx_put_out(&mut k, pid, b, 4);
+  }
+  if r == 0 {
+    xfer_u64(&mut k.fs.xfer, 0, id_get(k.procs, pid, s, false));
+    r = lx_put_out(&mut k, pid, c, 4);
+  }
+  return r;
+}
+
+fn is_cred_call(n: u64) -> bool {
+  return n == LX_GETUID || n == LX_GETGID || n == LX_GETEUID || n == LX_GETEGID
+    || n == LX_SETUID || n == LX_SETGID || n == LX_SETREUID || n == LX_SETREGID
+    || n == LX_SETRESUID || n == LX_SETRESGID || n == LX_GETRESUID || n == LX_GETRESGID
+    || n == LX_SETFSUID || n == LX_SETFSGID || n == LX_SETGROUPS;
+}
+
+/// System call n of process pid, with its first three arguments.
+fn lx_cred_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut r = 0;
+  if n == LX_GETUID {
+    r = id_get(k.procs, pid, F_UID, false);
+  } else if n == LX_GETEUID {
+    r = id_get(k.procs, pid, F_UID, true);
+  } else if n == LX_GETGID {
+    r = id_get(k.procs, pid, F_GID, false);
+  } else if n == LX_GETEGID {
+    r = id_get(k.procs, pid, F_GID, true);
+  } else if n == LX_SETUID {
+    r = set_id(&mut k.procs, pid, F_UID, F_SUID, a);
+  } else if n == LX_SETGID {
+    r = set_id(&mut k.procs, pid, F_GID, F_SGID, a);
+  } else if n == LX_SETREUID {
+    r = set_re_id(&mut k.procs, pid, F_UID, F_SUID, a, b);
+  } else if n == LX_SETREGID {
+    r = set_re_id(&mut k.procs, pid, F_GID, F_SGID, a, b);
+  } else if n == LX_SETRESUID {
+    r = set_res_id(&mut k.procs, pid, F_UID, F_SUID, a, b, c);
+  } else if n == LX_SETRESGID {
+    r = set_res_id(&mut k.procs, pid, F_GID, F_SGID, a, b, c);
+  } else if n == LX_SETFSUID {
+    r = set_fs_id(&mut k.procs, pid, F_UID, F_SUID, a);
+  } else if n == LX_SETFSGID {
+    r = set_fs_id(&mut k.procs, pid, F_GID, F_SGID, a);
+  } else if n == LX_GETRESUID {
+    r = get_res_id(&mut k, pid, F_UID, F_SUID, a, b, c);
+  } else if n == LX_GETRESGID {
+    r = get_res_id(&mut k, pid, F_GID, F_SGID, a, b, c);
+  } else if n == LX_SETGROUPS && !cred_root(k.procs, pid) {
+    r = EPERM;
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}

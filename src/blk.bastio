@@ -15,13 +15,14 @@ import "nvme.bastio";
 import "ahci.bastio";
 import "lapic.bastio";
 import "xhci.bastio";
+import "loopblk.bastio";
 
 const VIRTIO_PORTS_LO: u64 = 0x1000;  // PCI I/O BARs sit above the legacy ports
 const NVME_AT: u64 = 24;              // the NVMe drive's five pages: 24 .. 28
 const AHCI_AT: u64 = 29;              // the AHCI controller's two pages: 29, 30
 const VIRTIO_DATA_AT: u64 = 31;       // virtio's block data page (its others are 0 .. 3)
 
-enum Blk { Ata(Ata), Virtio(Virtio), Nvme(Nvme), Ahci(Ahci), Usb(Xhci) }
+enum Blk { Ata(Ata), Virtio(Virtio), Nvme(Nvme), Ahci(Ahci), Usb(Xhci), Loop(LoopDev) }
 enum Drive { None, Nvme(Nvme), Ahci(Ahci) }
 
 /// Does the disk driver hold I/O port k in the PCI range?
@@ -33,6 +34,7 @@ spec fn blk_ok(b: &Blk) -> bool {
   (b is Blk::Ata ==> ata_ok(b.Ata)) && (b is Blk::Virtio ==> virtio_ok(b.Virtio))
   && (b is Blk::Nvme ==> nvme_ok(b.Nvme)) && (b is Blk::Ahci ==> ahci_ok(b.Ahci))
   && (b is Blk::Usb ==> xhci_ok(b.Usb))
+  && (b is Blk::Loop ==> loopdev_ok(b.Loop))
 }
 
 /// Does the disk driver hold device-window address a?
@@ -199,14 +201,15 @@ fn virtio_msix(pci: &mut Pci, win: &mut MmioSpace, dev: u64, lo: u64, hi: u64, l
 /// block device on PCI, given the four lowest pages for its queue and
 /// request and page 31 for block data, else a SATA disk on AHCI (see `ahci_find`), or else the ATA
 /// drive. `msi` is where a device's interrupt messages go (0 for none).
-fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64) -> Blk
+fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64,
+  plo: u64, phi: u64) -> Blk
   requires pci_ok(pci) && mem_ok(m) && msi <= 4294967295
   requires forall k: u64 :: ATA_IO <= k && k < ATA_IO + 8 ==> port_free(ports, k)
   requires port_free(ports, ATA_CTL)
-  requires forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 ==> port_free(ports, k)
+  requires forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 && !(plo <= k && k < phi) ==> port_free(ports, k)
   requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) ==> mmio_free(win, a)
   ensures blk_ok(result) && mem_ok(m)
-  ensures forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 && !blk_holds(result, k) ==> port_free(ports, k)
+  ensures forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 && !(plo <= k && k < phi) && !blk_holds(result, k) ==> port_free(ports, k)
   ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) && !blk_claims(result, a) ==> mmio_free(win, a)
 {
   let nv = nvme_find(&mut pci, &mut m, &mut win, lo, hi, lo2, hi2, msi);
@@ -218,7 +221,7 @@ fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, l
   let dev = pci_find(&mut pci, VIRTIO_VENDOR, VIRTIO_BLK);
   if dev < PCI_NONE {
     let base = pci_io_bar(&mut pci, dev);
-    if base >= VIRTIO_PORTS_LO && base + VIO_PORTS <= 65536
+    if base >= VIRTIO_PORTS_LO && base + VIO_PORTS <= 65536 && (base + VIO_PORTS <= plo || base >= phi)
       && get(m.bm, 0) == 1 && get(m.bm, 1) == 1 && get(m.bm, 2) == 1 && get(m.bm, 3) == 1
       && get(m.bm, VIRTIO_DATA_AT) == 1 {
       pci_enable(&mut pci, dev);
@@ -245,14 +248,15 @@ fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, l
 /// its keyboard if it has one, and `u` is left empty), else as blk_new.
 /// A stick booted from is the one the user chose, so it goes before the
 /// machine's own disks, which are then left untouched.
-fn blk_find(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64, u: &mut Usb) -> Blk
+fn blk_find(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64, u: &mut Usb,
+  plo: u64, phi: u64) -> Blk
   requires pci_ok(pci) && mem_ok(m) && msi <= 4294967295 && usb_ok(u)
   requires forall k: u64 :: ATA_IO <= k && k < ATA_IO + 8 ==> port_free(ports, k)
   requires port_free(ports, ATA_CTL)
-  requires forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 ==> port_free(ports, k)
+  requires forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 && !(plo <= k && k < phi) ==> port_free(ports, k)
   requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) ==> mmio_free(win, a)
   ensures blk_ok(result) && mem_ok(m) && usb_ok(u)
-  ensures forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 && !blk_holds(result, k) ==> port_free(ports, k)
+  ensures forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 && !(plo <= k && k < phi) && !blk_holds(result, k) ==> port_free(ports, k)
   ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) && !blk_claims(result, a) ==> mmio_free(win, a)
 {
   match u {
@@ -265,7 +269,7 @@ fn blk_find(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, 
     },
     Usb::None => { u = Usb::None; },
   }
-  return blk_new(&mut ports, &mut pci, &mut m, &mut win, lo, hi, lo2, hi2, msi);
+  return blk_new(&mut ports, &mut pci, &mut m, &mut win, lo, hi, lo2, hi2, msi, plo, phi);
 }
 
 /// Does the disk raise V_DISK when a command started by blk_begin ends?
@@ -277,6 +281,7 @@ fn blk_irq(b: &Blk) -> bool {
     Blk::Ata(a) => { return false; },
     Blk::Virtio(v) => { return v.irq; },
     Blk::Usb(x) => { return x.irq; },
+    Blk::Loop(l) => { return false; },
   }
 }
 
@@ -292,6 +297,7 @@ fn blk_free(ports: &mut Ports, win: &mut MmioSpace, b: Blk, m: &mut Mem)
     Blk::Nvme(n) => { mmio_release(&mut win, nvme_free(n, &mut m)); },
     Blk::Ahci(h) => { mmio_release(&mut win, ahci_free(h, &mut m)); },
     Blk::Usb(x) => { mmio_release(&mut win, xhci_free(x, &mut m)); },
+    Blk::Loop(l) => { loopdev_free(l, &mut m); },
   }
 }
 
@@ -307,6 +313,7 @@ fn blk_mmio_lo(b: &Blk) -> u64
     Blk::Ata(a) => { return 0; },
     Blk::Virtio(v) => { return 0; },
     Blk::Usb(x) => { return 0; },
+    Blk::Loop(l) => { return 0; },
   }
 }
 
@@ -321,6 +328,7 @@ fn blk_mmio_hi(b: &Blk) -> u64
     Blk::Ata(a) => { return 0; },
     Blk::Virtio(v) => { return 0; },
     Blk::Usb(x) => { return 0; },
+    Blk::Loop(l) => { return 0; },
   }
 }
 
@@ -335,6 +343,7 @@ fn blk_ports_lo(b: &Blk) -> u64
     Blk::Nvme(n) => { return 0; },
     Blk::Ahci(h) => { return 0; },
     Blk::Usb(x) => { return 0; },
+    Blk::Loop(l) => { return 0; },
   }
 }
 
@@ -348,6 +357,7 @@ fn blk_ports_hi(b: &Blk) -> u64
     Blk::Nvme(n) => { return 0; },
     Blk::Ahci(h) => { return 0; },
     Blk::Usb(x) => { return 0; },
+    Blk::Loop(l) => { return 0; },
   }
 }
 
@@ -383,6 +393,7 @@ fn blk_kbd_poll(b: &mut Blk) -> u64
     Blk::Virtio(v) => { b = Blk::Virtio(v); return 256; },
     Blk::Nvme(n) => { b = Blk::Nvme(n); return 256; },
     Blk::Ahci(h) => { b = Blk::Ahci(h); return 256; },
+    Blk::Loop(l) => { b = Blk::Loop(l); return 256; },
   }
 }
 
@@ -394,6 +405,7 @@ fn blk_kbd(b: &Blk) -> bool {
     Blk::Virtio(v) => { return false; },
     Blk::Nvme(n) => { return false; },
     Blk::Ahci(h) => { return false; },
+    Blk::Loop(l) => { return false; },
   }
 }
 
@@ -405,6 +417,7 @@ fn blk_sectors(b: &Blk) -> u64 {
     Blk::Nvme(n) => { return n.sectors; },
     Blk::Ahci(h) => { return h.sectors; },
     Blk::Usb(x) => { return x.sectors; },
+    Blk::Loop(l) => { return l.sectors; },
   }
 }
 
@@ -440,6 +453,11 @@ fn blk_read(b: &mut Blk, lba: u64, buf: &mut Bytes) -> bool
       b = Blk::Usb(x);
       return ok;
     },
+    Blk::Loop(mut l) => {
+      let ok = loopdev_read(&mut l, lba, &mut buf);
+      b = Blk::Loop(l);
+      return ok;
+    },
   }
 }
 
@@ -473,6 +491,11 @@ fn blk_write(b: &mut Blk, lba: u64, buf: &Bytes) -> bool
     Blk::Usb(mut x) => {
       let ok = usbd_write(&mut x, lba, buf);
       b = Blk::Usb(x);
+      return ok;
+    },
+    Blk::Loop(mut l) => {
+      let ok = loopdev_write(&mut l, lba, buf);
+      b = Blk::Loop(l);
       return ok;
     },
   }
@@ -511,6 +534,11 @@ fn blk_read_block(b: &mut Blk, lba: u64, out: &mut Bytes, at: u64) -> bool
       b = Blk::Usb(x);
       return ok;
     },
+    Blk::Loop(mut l) => {
+      let ok = loopdev_read_block(&mut l, lba, &mut out, at);
+      b = Blk::Loop(l);
+      return ok;
+    },
   }
 }
 
@@ -545,6 +573,11 @@ fn blk_write_block(b: &mut Blk, lba: u64, src: &Bytes, at: u64) -> bool
     Blk::Usb(mut x) => {
       let ok = usbd_write_block(&mut x, lba, src, at);
       b = Blk::Usb(x);
+      return ok;
+    },
+    Blk::Loop(mut l) => {
+      let ok = loopdev_write_block(&mut l, lba, src, at);
+      b = Blk::Loop(l);
       return ok;
     },
   }
@@ -589,6 +622,11 @@ fn blk_begin(b: &mut Blk, op: u64, lba: u64, buf: &mut Bytes, at: u64) -> bool
       b = Blk::Usb(x);
       return ok;
     },
+    Blk::Loop(mut l) => {
+      let ok = loopdev_begin(&mut l, op, lba, &mut buf, at);
+      b = Blk::Loop(l);
+      return ok;
+    },
   }
 }
 
@@ -624,6 +662,11 @@ fn blk_poll(b: &mut Blk) -> u64
       b = Blk::Usb(x);
       return r;
     },
+    Blk::Loop(mut l) => {
+      let r = loopdev_poll(&mut l);
+      b = Blk::Loop(l);
+      return r;
+    },
   }
 }
 
@@ -651,5 +694,6 @@ fn blk_fetch(b: &mut Blk, buf: &mut Bytes, at: u64)
       usbd_fetch(&mut x, &mut buf, at);
       b = Blk::Usb(x);
     },
+    Blk::Loop(l) => { b = Blk::Loop(l); },   // loopdev_begin read it already
   }
 }

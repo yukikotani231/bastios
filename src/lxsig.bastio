@@ -284,14 +284,13 @@ fn tty_intr(con: &mut Con, k: &mut Kernel)
   if tt_flags(k.line, 12) & ISIG == 0 {
     return;                                 // Ctrl-C is a byte like any other (ISIG off)
   }
-  let n = get(k.q, 1);
-  let h = get(k.q, 0);
+  let n = k.q.r.n;
   let mut hit = false;
   let mut i = 0;
   while i < n
-    invariant i <= n && n <= INQ_CAP && h < INQ_CAP && kok(k) && con_ok(con)
+    invariant i <= n && n == k.q.r.n && kok(k) && con_ok(con)
   {
-    if get(k.q, 2 + (h + i) % INQ_CAP) == 3 {
+    if get(k.q.q, ring_slot(k.q.r, i)) == 3 {
       hit = true;
     }
     i = i + 1;
@@ -313,7 +312,7 @@ fn tty_intr(con: &mut Con, k: &mut Kernel)
   if !any {
     return;
   }
-  k.q = set(k.q, 1, 0);
+  ring_clear(&mut k.q.r);
   k.line = set(k.line, 0, 0);
   k.line = set(k.line, 1, 0);
   puts(&mut con, "^C\r\n");
@@ -454,6 +453,22 @@ fn lx_sigprocmask(k: &mut Kernel, pid: u64, how: u64, setp: u64, oset: u64) -> u
   return 0;
 }
 
+/// Whether pid may send a signal to p (Linux's kill_ok_by_cred): root may,
+/// and so may a sender whose real or effective uid is p's real or saved
+/// uid; SIGCONT also reaches the sender's own session.
+fn may_signal(k: &Kernel, pid: u64, p: u64, s: u64) -> bool
+  requires kok(k) && pid < NPROC && p < NPROC
+{
+  let ruid = id_get(k.procs, pid, F_UID, false);
+  let euid = id_get(k.procs, pid, F_UID, true);
+  if euid == 0 || (s == 18 && sid_of(k.procs, pid) == sid_of(k.procs, p)) {
+    return true;
+  }
+  let tr = id_get(k.procs, p, F_UID, false);
+  let ts = id_get(k.procs, p, F_SUID, false);
+  return euid == tr || euid == ts || ruid == tr || ruid == ts;
+}
+
 /// kill(target, s): one process; with 0 the caller's process group, with
 /// -g group g, with -1 every other Linux program. Signal 0 only checks.
 fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
@@ -470,6 +485,7 @@ fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
       g = 0xFFFFFFFFFFFFFFFF - target + 1;   // -target
     }
     let mut hit = false;
+    let mut sent = false;
     let mut p = 1;
     while p < NPROC
       invariant 1 <= p && p <= NPROC && kok(k)
@@ -477,8 +493,11 @@ fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
       let live = state(k.procs, p) != FREE && state(k.procs, p) != ZOMBIE && is_linux(k.procs, p);
       if live && ((all && p != pid) || (!all && pgid_of(k.procs, p) == g)) {
         hit = true;
-        if s != 0 {
-          post_from(&mut k, p, s, pid);
+        if may_signal(k, pid, p, s) {
+          sent = true;
+          if s != 0 {
+            post_from(&mut k, p, s, pid);
+          }
         }
       }
       p = p + 1;
@@ -486,10 +505,16 @@ fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
     if !hit {
       return ESRCH;
     }
+    if !sent {
+      return EPERM;
+    }
     return 0;
   }
   if target >= NPROC || state(k.procs, target) == FREE || state(k.procs, target) == ZOMBIE {
     return ESRCH;
+  }
+  if !may_signal(k, pid, target, s) {
+    return EPERM;
   }
   if s != 0 {
     post_from(&mut k, target, s, pid);
@@ -721,6 +746,10 @@ fn never_restarts(call: u64) -> bool {
   }
   // select, pselect6, epoll_wait, epoll_pwait, epoll_pwait2
   if call == 23 || call == 270 || call == 232 || call == 281 || call == 441 {
+    return true;
+  }
+  // semop, semtimedop, msgsnd, msgrcv (src/lxipc.bastio comes later)
+  if call == 65 || call == 220 || call == 69 || call == 70 {
     return true;
   }
   return call == LX_POLL || call == LX_PPOLL;

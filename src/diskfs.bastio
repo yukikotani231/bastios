@@ -24,11 +24,13 @@
 // was open, nameless until its last close), byte 1 its name length, then as
 // little-endian u64s: at 8 its parent (another entry, or DTOP for the top
 // directory, "disk"), at 16 its size, at 24 its root map block (0 for no
-// data), at 32 its mode, at 40 its modification time; bytes 56..256 its
+// data), at 32 its mode (the low 16 bits; then its owner's user and group
+// ids, 24 bits each, 0 for root), at 40 its modification time; bytes 56..256 its
 // name: one path component of up to DNAME_MAX bytes. So a path is a walk
 // from the top, component by component, and full paths can be longer than
-// any entry. A disk without either magic (blank, or in a still older
-// format) is formatted when it is mounted.
+// any entry. A blank disk is formatted when it is mounted; a disk with
+// neither magic that is not blank (a partition table, another system's
+// data, a still older format) is left alone, and there is no file system.
 //
 // A file's data is found through two levels of maps. The root map is one
 // block of PTRS block numbers, each naming a first-level map, a block of
@@ -64,6 +66,7 @@
 import "blk.bastio";
 import "diskq.bastio";
 import "core/endian.bastio";
+import "core/bitmap.bastio";
 
 const DSLOTS: u64 = 1024;             // directory entries, at most
 const DENT: u64 = 256;
@@ -94,11 +97,12 @@ const E_NLEN: u64 = 1;
 const E_PARENT: u64 = 8;
 const E_SIZE: u64 = 16;
 const E_ROOT: u64 = 24;
-const E_MODE: u64 = 32;
+const E_MODE: u64 = 32;                // the mode (16 bits), user id (24) and group id (24)
 const E_MTIME: u64 = 40;
 const E_LINK: u64 = 48;
 const E_NAME: u64 = 56;
 
+const OWN_ID_MAX: u64 = 0x1000000;     // ids a disk entry can keep: 24 bits each
 const MODE_FILE: u64 = 420;           // 0644
 const MODE_DIR: u64 = 493;            // 0755
 
@@ -118,6 +122,7 @@ struct DiskFs {
   blocks: u64,          // blocks on the disk, at most MAX_BLOCKS
   slots: u64,           // the entries the directory's blocks hold now (DPB * blocks); 0 without a disk
   hint: u64,            // where the next allocation starts looking
+  foreign: bool,        // the disk holds something else, and is left alone
 }
 
 spec fn disk_ok(d: &DiskFs) -> bool {
@@ -232,35 +237,15 @@ fn alloc_block(d: &mut DiskFs) -> u64
   if n <= DATA_B0 {
     return 0;
   }
-  let mut start = d.hint;
-  if start < DATA_B0 || start >= n {
-    start = DATA_B0;
+  // From the hint up to n, then from DATA_B0 (core/bitmap: a block it
+  // returns was free, and n means every block is in use).
+  let b = map_take(&mut d.used, DATA_B0, n, d.hint);
+  if b == n {
+    return 0;
   }
-  let mut b = start;
-  while b < n
-    invariant b >= DATA_B0 && b <= n && n <= MAX_BLOCKS && disk_ok(d)
-  {
-    if bget(d.used, b) == 0 {
-      bset(&mut d.used, b, 1);
-      d.hint = b + 1;
-      dq_forget(&mut d.q, b);
-      return b;
-    }
-    b = b + 1;
-  }
-  b = DATA_B0;
-  while b < start && b < n
-    invariant b >= DATA_B0 && n <= MAX_BLOCKS && disk_ok(d)
-  {
-    if bget(d.used, b) == 0 {
-      bset(&mut d.used, b, 1);
-      d.hint = b + 1;
-      dq_forget(&mut d.q, b);
-      return b;
-    }
-    b = b + 1;
-  }
-  return 0;
+  d.hint = b + 1;
+  dq_forget(&mut d.q, b);
+  return b;
 }
 
 // ---------------------------------------------------------------- the queue
@@ -433,8 +418,42 @@ fn ent_flush(d: &mut DiskFs, i: u64) -> bool
   return dir_flush(&mut d, i / 2);
 }
 
-/// Mounts the disk, formatting it if it has no file system yet, and works
-/// out which blocks are in use. Without a disk (or one too small) the file
+const BLANK_SECTORS: u64 = 34;      // a protective MBR, then GPT's header and its 32 sectors of entries
+
+/// Are the first and the last BLANK_SECTORS of the disk's `n` sectors all
+/// zeros (or unreadable: then the disk is not used either)?
+fn disk_blank(dev: &mut Blk, sec: &mut Bytes, n: u64) -> bool
+  requires blk_ok(dev) && blen(sec) == SECTOR
+  ensures blk_ok(dev) && blen(sec) == SECTOR
+{
+  let mut i = 0;
+  while i < 2 * BLANK_SECTORS
+    invariant blk_ok(dev) && blen(sec) == SECTOR
+  {
+    let mut lba = i;
+    if i >= BLANK_SECTORS && n >= 2 * BLANK_SECTORS {
+      lba = n - 2 * BLANK_SECTORS + i;
+    }
+    if !blk_read(&mut dev, lba, &mut sec) {
+      return false;
+    }
+    let mut k = 0;
+    while k < SECTOR
+      invariant k <= SECTOR && blen(sec) == SECTOR && blk_ok(dev)
+    {
+      if bget(sec, k) != 0 {
+        return false;
+      }
+      k = k + 1;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+/// Mounts the disk, formatting it if it has no file system yet and is
+/// blank (else it is left alone: `foreign`), and works out which blocks
+/// are in use. Without a disk (or one too small) the file
 /// system has no entries and every operation on it fails.
 fn disk_mount(dev: Blk) -> DiskFs
   requires blk_ok(dev)
@@ -442,7 +461,7 @@ fn disk_mount(dev: Blk) -> DiskFs
 {
   let mut d = DiskFs { dev: dev, dir: balloc(DIR_BYTES), sb: balloc(SECTOR), sec: balloc(SECTOR), root: balloc(BLOCK),
     la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(), txn: 0,
-    used: balloc(MAX_BLOCKS), blocks: 0, slots: 0, hint: DATA_B0 };
+    used: balloc(MAX_BLOCKS), blocks: 0, slots: 0, hint: DATA_B0, foreign: false };
   let mut n = blk_sectors(d.dev) / BSECT;
   if n > MAX_BLOCKS {
     n = MAX_BLOCKS;
@@ -495,6 +514,17 @@ fn disk_mount(dev: Blk) -> DiskFs
       zero(&mut d.sb, 8 * db, SECTOR);      // forget any blocks named past a gap
     }
   } else {
+    // Format, but only a blank disk. Anything in its first or last
+    // BLANK_SECTORS sectors (an MBR or GPT partition table, GPT's backup
+    // copy at the end, a boot sector, another file system's superblock)
+    // means the disk is someone else's: on a real machine, the one with
+    // its owner's operating system on it. It is not touched.
+    let all = blk_sectors(d.dev);
+    if !disk_blank(&mut d.dev, &mut d.sec, all) {
+      d.blocks = 0;
+      d.foreign = true;
+      return d;
+    }
     // Format: an empty directory (balloc zeroes it), then the superblock.
     d.slots = DIR_FIXED * DPB;
     let mut s = 0;
@@ -1246,7 +1276,7 @@ fn read_ahead(d: &mut DiskFs, root: u64, b: u64, size: u64)
   ensures disk_ok(d)
 {
   let mut c = 0;
-  while c < READ_AHEAD && b + c < PTRS * PTRS && (b + c) * BLOCK < size && d.q.count + 8 < NQ
+  while c < READ_AHEAD && b + c < PTRS * PTRS && (b + c) * BLOCK < size && d.q.r.n + 8 < NQ
     invariant disk_ok(d)
   {
     let p = data_ptr(&mut d, root, b + c);
@@ -1496,11 +1526,20 @@ fn disk_write_wait(d: &mut DiskFs, i: u64, buf: &Bytes, n: u64, now: u64) -> u64
   ensures disk_ok(d)
   ensures result <= n || result == NO_DISK_FILE
 {
+  return disk_write_at_wait(&mut d, i, 0, buf, n, now);
+}
+
+/// disk_write_wait at offset off.
+fn disk_write_at_wait(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -> u64
+  requires disk_ok(d) && i < DSLOTS && n <= blen(buf) && n <= BLOCK
+  ensures disk_ok(d)
+  ensures result <= n || result == NO_DISK_FILE
+{
   let mut tries = 0;
   while tries < 8
     invariant disk_ok(d)
   {
-    let r = disk_write(&mut d, i, 0, buf, n, now);
+    let r = disk_write(&mut d, i, off, buf, n, now);
     if r != DISK_MISS {
       disk_drain(&mut d);
       d.txn = 0;
@@ -1662,6 +1701,28 @@ fn disk_mode(d: &DiskFs, i: u64) -> u64
   return dent_get(d, i, E_MODE) % 65536;
 }
 
+/// Entry i's owner: user id + group id * 2^32 (each below OWN_ID_MAX).
+fn disk_owner(d: &DiskFs, i: u64) -> u64
+  requires disk_ok(d) && i < DSLOTS
+{
+  let w = dent_get(d, i, E_MODE) / 65536;
+  return w % OWN_ID_MAX + w / OWN_ID_MAX % OWN_ID_MAX * 0x100000000;
+}
+
+/// Sets entry i's owner to user id uid and group id gid. False if the
+/// entry is unused or the disk fails.
+fn disk_set_owner(d: &mut DiskFs, i: u64, uid: u64, gid: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS && uid < OWN_ID_MAX && gid < OWN_ID_MAX
+  ensures disk_ok(d)
+{
+  disk_drain(&mut d);                 // queued writes reach the disk first
+  if !dent_used(d, i) {
+    return false;
+  }
+  dent_set(&mut d, i, E_MODE, dent_get(d, i, E_MODE) % 65536 + (uid + gid * OWN_ID_MAX) * 65536);
+  return ent_flush(&mut d, i);
+}
+
 /// Entry i's modification time, in seconds.
 fn disk_mtime(d: &DiskFs, i: u64) -> u64
   requires disk_ok(d) && i < DSLOTS
@@ -1680,7 +1741,7 @@ fn disk_set_meta(d: &mut DiskFs, i: u64, mode: u64, mtime: u64) -> bool
     return false;
   }
   if mode < 65536 {
-    dent_set(&mut d, i, E_MODE, mode);
+    dent_set(&mut d, i, E_MODE, dent_get(d, i, E_MODE) / 65536 * 65536 + mode);
   }
   if mtime != NO_DISK_FILE {
     dent_set(&mut d, i, E_MTIME, mtime);
