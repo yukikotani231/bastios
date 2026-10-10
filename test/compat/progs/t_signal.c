@@ -1,6 +1,8 @@
 /* Signals: handlers, masks, raise and kill, alarms and timers, waiting. */
 #include "compat.h"
+#include <poll.h>
 #include <signal.h>
+#include <sys/select.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -29,6 +31,23 @@ int main(void) {
         EXPECT("sigpending", sigpending(&pend) == 0 && sigismember(&pend, SIGUSR1));
     }
     EXPECT("unblock delivers", sigprocmask(SIG_SETMASK, &old, 0) == 0 && got == SIGUSR1);
+    /* ppoll and pselect wait with their own mask, as GNU make -j relies on:
+     * a signal blocked outside the call wakes it with EINTR, and the mask
+     * outside is the same afterwards. */
+    EXPECT("ppoll applies its signal mask", ({ sigset_t b, e, now; struct timespec t = {2, 0};
+           sigemptyset(&b); sigaddset(&b, SIGUSR1); sigemptyset(&e);
+           got = 0; sigprocmask(SIG_BLOCK, &b, &old);
+           int r = raise(SIGUSR1) == 0 && got == 0 && ppoll(0, 0, &t, &e) == -1 && errno == EINTR && got == SIGUSR1;
+           sigprocmask(SIG_SETMASK, &old, &now);
+           r && sigismember(&now, SIGUSR1); }));
+    EXPECT("pselect applies its signal mask", ({ sigset_t b, e, now; struct timespec t = {2, 0};
+           sigemptyset(&b); sigaddset(&b, SIGUSR1); sigemptyset(&e);
+           got = 0; sigprocmask(SIG_BLOCK, &b, &old);
+           int r = raise(SIGUSR1) == 0 && got == 0 && pselect(0, 0, 0, 0, &t, &e) == -1 && errno == EINTR && got == SIGUSR1;
+           sigprocmask(SIG_SETMASK, &old, &now);
+           r && sigismember(&now, SIGUSR1); }));
+    EXPECT("ppoll without a signal times out", ({ sigset_t e; struct timespec t = {0, 10000000}; sigemptyset(&e);
+           ppoll(0, 0, &t, &e) == 0; }));
     EXPECT("SIG_IGN", signal(SIGUSR1, SIG_IGN) != SIG_ERR && raise(SIGUSR1) == 0);
     signal(SIGUSR1, h);
     EXPECT("signal to a child", (p = fork()) >= 0 && (p == 0 ? (pause(), _exit(0), 0) :

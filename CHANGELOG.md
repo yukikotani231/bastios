@@ -34,8 +34,23 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 - File locks are kept (`src/lxlock.bastio`): `fcntl` record locks
   (`F_GETLK`, `F_SETLK`, `F_SETLKW`), open file description locks
   (`F_OFD_*`) and `flock`, with Linux's owners and release rules. A
-  conflicting `F_SETLKW` or blocking `flock` waits. Deadlocks are not
-  detected. Checked by the new compat program `t_lock`.
+  conflicting `F_SETLKW` or blocking `flock` waits, and an `F_SETLKW` that
+  would close a cycle of waits fails with `EDEADLK`. Checked by the new
+  compat program `t_lock`.
+- C can be built on BastiOS: tcc and GNU make 4.4.1, built as static PIEs,
+  compile and link programs (dynamic PIEs against musl's `libc.so`) and
+  run makefiles, `-j` included. `make compat` boots a second disk with
+  them and a small C runtime and runs `test/compat/dev.txt`.
+- `ppoll` and `pselect6` wait with the signal mask they are given (GNU
+  make `-j` hung waiting for SIGCHLD).
+
+### Fixed
+
+- Modification times were seconds since boot; they are wall-clock times
+  now, as `stat` reports them.
+- A file created by `open` with `O_CREAT` gets the mode asked for, less a
+  umask of 022 (it was always 0644, so programs tcc linked were not
+  executable by mode).
 - Real programs in `make compat` (`test/compat/apps.txt`): Lua 5.4.7,
   QuickJS and the sqlite3 3.52 shell, built from source as static PIEs,
   run their files, pipes, timers, WAL databases and a 20000-row index.
