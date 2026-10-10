@@ -1,0 +1,3 @@
+BastiOS keeps files in physical pages owned by the file system. The proof
+shows that every page a file takes from the allocator goes back exactly
+once: when the file is truncated, removed, or the machine powers off.

@@ -6,6 +6,7 @@ import "console.bastio";
 import "pages.bastio";
 import "space.bastio";
 import "elf.bastio";
+import "fs.bastio";
 
 const NPROC: u64 = 16;
 const STRIDE: u64 = 32;
@@ -200,15 +201,16 @@ struct Kernel {
   q: Buf,               // console input waiting for a READ
   ticks: u64,           // timer ticks since boot
   cpus: u64,            // processors running, the bootstrap one included
+  fs: Vfs,              // files and the open-file table
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && len(k.procs) == PTAB_LEN && qok(k.q)
+  mem_ok(k.mem) && spaces_ok(k.spaces) && len(k.procs) == PTAB_LEN && qok(k.q) && vfs_ok(k.fs)
 }
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 10;
+const NPROGS: u64 = 11;
 
 fn prog_name(i: u64) -> Str {
   if i == 0 {
@@ -237,6 +239,9 @@ fn prog_name(i: u64) -> Str {
   }
   if i == 8 {
     return "elfbad";
+  }
+  if i == 9 {
+    return "fstest";
   }
   return "fault";
 }
@@ -268,6 +273,9 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 8 {
     return include_bytes("../build/user/elfbad.elf");
+  }
+  if i == 9 {
+    return include_bytes("../build/user/fstest.bin");
   }
   return include_bytes("../build/user/fault.bin");
 }
@@ -372,8 +380,9 @@ fn build_space(m: &mut Mem, img: Str, elf: bool, e: Elf, size: u64, name: Str, s
   return new_space(&mut m, img, size);
 }
 
-/// Ends process `pid` with exit `code`: frees its address space, hands the
-/// code to a parent waiting for it, and orphans its children.
+/// Ends process `pid` with exit `code`: frees its address space, closes its
+/// files, hands the code to a parent waiting for it, and orphans its
+/// children.
 fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
   requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
@@ -382,6 +391,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
     Space::Empty => {},
     Space::Mapped(t) => { free_space(&mut k.mem, mmu, t); },
   }
+  vfs_close_all(&mut k.fs, pid * NFD);
   pset(&mut k.procs, pid, F_STATE, ZOMBIE);
   pset(&mut k.procs, pid, F_CODE, code);
   let mut c = 1;
