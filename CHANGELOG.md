@@ -31,6 +31,10 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 - Renaming files and directories: `vfs_rename`, system call 22, and the
   shell's `mv`. On the disk a rename is one sector write, so a power cut
   leaves the old name or the new one.
+- Setting an open file's length (`vfs_truncate`, system call 23):
+  shrinking frees what lies past the new end, growing reads as zeros.
+  On the disk it is copy-on-write like a write, so a power cut leaves the
+  old length or the new one.
 - A console on the screen and a PS/2 keyboard when booted from the ISO:
   text drawn on the framebuffer GRUB sets up under BIOS or UEFI, keys read
   from the i8042, alongside the serial console.

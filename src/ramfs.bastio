@@ -288,6 +288,47 @@ fn file_truncate(f: &mut RamFile, mem: &mut Mem)
   f.size = 0;
 }
 
+/// Sets the file's size to size_to bytes: growing reads as zeros, shrinking
+/// gives back the pages past the end and zeroes the tail of the last one
+/// kept (bytes past the end are always zeros, which growing relies on).
+/// False, changing nothing, for a directory or past FILE_MAX.
+fn file_resize(f: &mut RamFile, mem: &mut Mem, size_to: u64) -> bool
+  requires file_ok(f) && mem_ok(mem)
+  ensures file_ok(f) && mem_ok(mem)
+{
+  if f.dir || size_to > FILE_MAX {
+    return false;
+  }
+  if size_to < f.size {
+    let keep = (size_to + 4095) / 4096;
+    while vec_len(f.pages) > keep
+      invariant file_ok(f) && mem_ok(mem)
+    {
+      match vec_pop(&mut f.pages) {
+        Slot::Hole => {},
+        Slot::Page(fr) => { give_page(&mut mem, fr); },
+      }
+    }
+    let p = size_to / 4096;
+    if size_to % 4096 != 0 && p < vec_len(f.pages) {
+      match vec_swap(&mut f.pages, p, Slot::Hole) {
+        Slot::Hole => {},
+        Slot::Page(x) => {
+          let mut fr = x;
+          let mut j = size_to % 4096;
+          while j < 4096 {
+            frame_write8(&mut fr, j, 0);
+            j = j + 1;
+          }
+          put_page(&mut f.pages, p, fr);
+        },
+      }
+    }
+  }
+  f.size = size_to;
+  return true;
+}
+
 /// Frees a file: its pages go back to the allocator.
 fn file_free(f: RamFile, mem: &mut Mem)
   requires file_ok(f) && mem_ok(mem)

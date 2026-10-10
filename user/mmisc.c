@@ -134,7 +134,14 @@ int main(void)
         return fail("readv");
     if (fsync(fd) != 0)
         return fail("fsync");
+    struct stat fs;
+    if (ftruncate(fd, 4) != 0 || fstat(fd, &fs) != 0 || fs.st_size != 4)
+        return fail("ftruncate shrinking");
+    if (ftruncate(fd, 100) != 0 || fstat(fd, &fs) != 0 || fs.st_size != 100 || pread(fd, z, 2, 50) != 2 || z[0] || z[1])
+        return fail("ftruncate growing");
     close(fd);
+    if (truncate("mm", 3) != 0 || stat("mm", &fs) != 0 || fs.st_size != 3)
+        return fail("truncate");
     if (chmod("mm", 0600) != 0 || unlink("mm") != 0)
         return fail("chmod");
 
