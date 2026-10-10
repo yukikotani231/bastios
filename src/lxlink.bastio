@@ -271,6 +271,10 @@ fn lx_symlink(k: &mut Kernel, pid: u64, tva: u64, dirfd: u64, path: u64) -> u64
     bfree(tb);
     return EEXIST;
   }
+  if vfs_ro(&mut k.fs, n) {
+    bfree(tb);
+    return EROFS;
+  }
   let mut j = 0;
   while j < tl
     invariant j <= tl && tl <= FNAME_MAX && n <= FNAME_MAX && blen(tb) == FNAME_MAX && kok(k)
@@ -324,6 +328,10 @@ fn lx_hardlink(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
   if dir_at(&mut k, m) != NO_FILE {
     bfree(t);
     return EEXIST;
+  }
+  if vfs_ro(&mut k.fs, m) && vfs_lookup(&mut k.fs, m) == NO_FILE {
+    bfree(t);
+    return EROFS;
   }
   xfer_save(k, &mut t, n, m);
   xfer_load(&mut k, t, 0, n + m);
