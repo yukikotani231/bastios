@@ -16,6 +16,11 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Processors
 
+- Four shells running BusyBox pipelines from the disk at once went from
+  17.0 s on four processors (15.4 s on one) to 6.4 s (8.6 s). The block
+  cache, at 256 KiB, was smaller than BusyBox, so every exec read the whole
+  program from the disk again, a block at a time, under the kernel lock.
+  It is now 1 MiB.
 - The read-only pages of the built-in programs (code and constants) are
   made once and shared, read-only, by every process running the program
   (`src/text.bastio`, bastiolang's `Shared`), so `execve` maps them instead
