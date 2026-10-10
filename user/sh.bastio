@@ -409,7 +409,7 @@ fn cmd_help(con: &Serial) {
   puts(con, "  clock            nanoseconds since boot (HPET)\r\n");
   puts(con, "  kill PID         stop a process\r\n");
   puts(con, "  ping [A.B.C.D]   ICMP echo (default: the gateway, 10.0.2.2)\r\n");
-  puts(con, "  udpecho PORT     wait for a UDP datagram and send it back\r\n");
+  puts(con, "  udpecho PORT [N] wait for N UDP datagrams, send each back\r\n");
   puts(con, "  udpsend A.B.C.D PORT TEXT  send TEXT as a UDP datagram\r\n");
   puts(con, "  NAME [&]         run a program and wait for it (`&`: don't wait)\r\n");
   puts(con, "  about            what this is\r\n");
@@ -562,6 +562,9 @@ fn cmd_ping(con: &Serial, line: &Buf, n: u64)
   } else if r == 3 {
     puts(con, "no network\r\n");
     return;
+  } else if r == 4 {
+    puts(con, "another ping is in flight\r\n");
+    return;
   } else {
     puts(con, "no reply from ");
   }
@@ -587,16 +590,81 @@ fn put_text(con: &Serial, b: &Bytes, n: u64)
   }
 }
 
-// udpecho PORT: waits for one datagram on a UDP port, prints it and sends
-// it back to its sender.
+// Waits (yielding) for ticks timer ticks.
+fn sleep_ticks(ticks: u64) {
+  let t0 = sys_info(1);
+  let mut waiting = true;
+  while waiting {
+    let now = sys_info(1);
+    if now < t0 || now - t0 >= ticks {
+      waiting = false;
+    } else {
+      sys_yield();
+    }
+  }
+}
+
+// Waits up to UDP_WAIT ticks for a datagram on socket s, prints it and
+// sends it back to its sender. False if none came.
+fn echo_one(con: &Serial, s: u64, buf: &mut Bytes) -> bool
+  ensures blen(buf) == old(blen(buf))
+{
+  let t0 = sys_info(1);
+  let bl = blen(buf);
+  let mut got = NOT_OK;
+  let mut waiting = true;
+  while waiting
+    invariant blen(buf) == bl
+  {
+    got = sys_recv(SYS_RECVFROM, s, &mut buf);
+    if got != NOT_OK {
+      waiting = false;
+    } else {
+      let now = sys_info(1);
+      if now >= t0 && now - t0 > UDP_WAIT {
+        waiting = false;
+      }
+      sys_yield();
+    }
+  }
+  if got == NOT_OK || got > blen(buf) {
+    return false;
+  }
+  let peer = sys_call(SYS_PEER, s, 0);
+  puts(con, "from ");
+  put_ip(con, peer / 65536);
+  puts(con, ":");
+  put_num(con, peer % 65536);
+  puts(con, ": ");
+  put_text(con, buf, got);
+  puts(con, "\r\n");
+  // Back to the sender, from the bound port.
+  if peer / 65536 <= 4294967295 && s < 256 {
+    let to = s + 256 * (peer % 65536) + 16777216 * (peer / 65536);
+    if sys_send(SYS_SENDTO, to, buf, got) == got {
+      puts(con, "sent it back\r\n");
+    }
+  }
+  return true;
+}
+
+// udpecho PORT [N]: waits for N datagrams (default 1) on a UDP port,
+// printing each and sending it back. With N > 1 it first sleeps a second,
+// so that datagrams sent meanwhile queue up on the socket.
 fn cmd_udpecho(con: &Serial, line: &Buf, n: u64)
   requires n < len(line) && n >= 7
 {
   let i = skip_spaces(line, n, 8);
   let e = digits_end(line, n, i);
   let port = parse_num(line, i, e);
-  if e == i || e != n + 1 || port == 0 || port > 65535 {
-    puts(con, "usage: udpecho PORT\r\n");
+  let j = skip_spaces(line, n, e);
+  let f = digits_end(line, n, j);
+  let mut count = 1;
+  if f > j {
+    count = parse_num(line, j, f);
+  }
+  if e == i || f != n + 1 || (f == j && j != e) || port == 0 || port > 65535 || count == 0 || count > 9 {
+    puts(con, "usage: udpecho PORT [N]\r\n");
     return;
   }
   let s = sys_call(SYS_SOCKET, 0, 0);
@@ -612,39 +680,17 @@ fn cmd_udpecho(con: &Serial, line: &Buf, n: u64)
   puts(con, "listening on udp port ");
   put_num(con, port);
   puts(con, "\r\n");
-  let mut buf = balloc(1472);
-  let t0 = sys_info(1);
-  let mut got = NOT_OK;
-  let mut waiting = true;
-  while waiting {
-    got = sys_recv(SYS_RECVFROM, s, &mut buf);
-    if got != NOT_OK {
-      waiting = false;
-    } else {
-      let now = sys_info(1);
-      if now >= t0 && now - t0 > UDP_WAIT {
-        waiting = false;
-      }
-      sys_yield();
-    }
+  if count > 1 {
+    sleep_ticks(100);
   }
-  if got == NOT_OK || got > blen(buf) {
-    puts(con, "nothing arrived\r\n");
-  } else {
-    let peer = sys_call(SYS_PEER, s, 0);
-    puts(con, "from ");
-    put_ip(con, peer / 65536);
-    puts(con, ":");
-    put_num(con, peer % 65536);
-    puts(con, ": ");
-    put_text(con, buf, got);
-    puts(con, "\r\n");
-    // Back to the sender, from the bound port.
-    if peer / 65536 <= 4294967295 && s < 256 {
-      let to = s + 256 * (peer % 65536) + 16777216 * (peer / 65536);
-      if sys_send(SYS_SENDTO, to, buf, got) == got {
-        puts(con, "sent it back\r\n");
-      }
+  let mut buf = balloc(1472);
+  let mut k = 0;
+  while k < count {
+    if echo_one(con, s, &mut buf) {
+      k = k + 1;
+    } else {
+      puts(con, "nothing arrived\r\n");
+      k = count;
     }
   }
   bfree(buf);

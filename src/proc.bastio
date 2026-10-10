@@ -45,6 +45,7 @@ const LXREADING: u64 = 5;            // blocked in a Linux read of the console
 const LXWAITING: u64 = 6;            // blocked in a Linux wait4 for any child
 const RUNNING: u64 = 7;              // on a processor: its space and FPU page are out
 const KILLED: u64 = 8;               // RUNNING, and killed: ends when it comes back
+const NETWAIT: u64 = 9;              // waiting for the network (a ping's reply)
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -695,6 +696,8 @@ fn put_state(con: &mut Uart, s: u64)
     puts(&mut con, "waiting");
   } else if s == RUNNING || s == KILLED {
     puts(&mut con, "running");
+  } else if s == NETWAIT {
+    puts(&mut con, "netwait");
   } else {
     puts(&mut con, "zombie ");
   }

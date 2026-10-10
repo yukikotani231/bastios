@@ -81,6 +81,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, from: u64) -> Job
     return Job::Stop;
   }
   nic_poll(&mut s.k.nic);
+  net_wake(&mut s.k);
   drain(&mut s.con, &mut s.k.q);
   tty_cook(&mut s.con, &mut s.k);
   wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);

@@ -28,7 +28,7 @@ const SYS_UNLINK: u64 = 15;           // (_, name, name length) -> 0
 const SYS_DIRENT: u64 = 16;           // (entry, buffer, length) -> name length, 0 if unused
 const SYS_SEEK: u64 = 17;             // (fd, offset) -> 0
 // The network (src/net.bastio). Socket calls return NO_RESULT on failure.
-const SYS_PING: u64 = 40;             // (address) -> 1 reply, 0 none, 2 no ARP answer, 3 no network card
+const SYS_PING: u64 = 40;             // (address) -> 1 reply, 0 none, 2 no ARP answer, 3 no network card, 4 busy
 const SYS_SOCKET: u64 = 41;           // () -> a UDP socket
 const SYS_BIND: u64 = 42;             // (socket, port; 0: any) -> 0
 const SYS_SENDTO: u64 = 43;           // (socket + 256 * port + 2^24 * address, buffer, length) -> length
@@ -342,9 +342,6 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if n == SYS_PING {
-    return nic_ping(&mut k.nic, a);
-  }
   if n == SYS_SOCKET {
     return sock_new(&mut k.nic);
   }
@@ -378,6 +375,24 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     return NO_RESULT;
   }
   return NO_RESULT;
+}
+
+/// Wakes the process whose ping has finished, if one has, with its
+/// result. Called on every scheduler pass, after the card is polled.
+fn net_wake(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  let w = nic_ping_check(&mut k.nic, k.ticks);
+  if w == NET_NONE {
+    return;
+  }
+  let p = w / 8;
+  // A process killed while it waited is gone; its slot may hold another.
+  if 1 <= p && p < NPROC && state(k.procs, p) == NETWAIT {
+    ret(&mut k.procs, p, w % 8);
+    pset(&mut k.procs, p, F_STATE, READY);
+  }
 }
 
 // ---------------------------------------------------------------- dispatch
@@ -491,7 +506,17 @@ fn syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if n == SYS_POWEROFF {
     return POWEROFF;
   }
-  if SYS_PING <= n && n <= SYS_SCLOSE {
+  if n == SYS_PING {
+    // The reply is collected by net_wake; the process waits off the lock.
+    let r = nic_ping_start(&mut k.nic, a, pid, k.ticks);
+    if r != NET_PENDING {
+      ret(&mut k.procs, pid, r);
+      return KEEP;
+    }
+    pset(&mut k.procs, pid, F_STATE, NETWAIT);
+    return SWITCH;
+  }
+  if SYS_SOCKET <= n && n <= SYS_SCLOSE {
     ret(&mut k.procs, pid, net_call(&mut k, pid, n, a, b, c));
     return KEEP;
   }
