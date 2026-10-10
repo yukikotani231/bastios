@@ -1,0 +1,88 @@
+// The CMOS real-time clock (the MC146818 behind ports 0x70 and 0x71), read
+// once at boot to give CLOCK_REALTIME its starting point. After that the
+// HPET keeps time; the RTC is not read again, and it is never written.
+
+const RTC: u64 = 0x70;
+
+// Ports: register select at 0, data at 1.
+struct Rtc { io: PortIo }
+
+spec fn rtc_ok(r: &Rtc) -> bool { port_count(r.io) == 2 }
+
+/// RTC register `reg`. Setting bit 7 of the select port would mask the NMI;
+/// it stays clear.
+fn rtc_reg(r: &mut Rtc, reg: u64) -> u64
+  requires rtc_ok(r) && reg < 0x80
+  ensures rtc_ok(r) && result < 256
+{
+  pio_out8(&mut r.io, 0, cast[u8](reg));
+  return cast[u64](pio_in8(&mut r.io, 1));
+}
+
+/// A register value in the clock's format (BCD unless status B bit 2 says
+/// binary) as a number.
+fn rtc_num(v: u64, bcd: bool) -> u64
+  requires v < 256
+  ensures result < 256
+{
+  if bcd {
+    return v / 16 * 10 + v % 16;
+  }
+  return v;
+}
+
+/// Days from 1970-01-01 to year-month-day (the proleptic Gregorian
+/// calendar; years 2000 to 2099, what the clock can hold).
+fn days_from_civil(year: u64, month: u64, day: u64) -> u64
+  requires 2000 <= year && year <= 2099 && 1 <= month && month <= 12 && 1 <= day && day <= 31
+  ensures result <= 47500
+{
+  let mut y = year;
+  let mut mp = month + 9;              // March is month 0 of the year
+  if month > 2 {
+    mp = month - 3;
+  } else {
+    y = year - 1;
+  }
+  let era = y / 400;
+  let yoe = y - era * 400;
+  let doy = (153 * mp + 2) / 5 + day - 1;
+  let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + doe - 719468;
+}
+
+/// The time now, in seconds since 1970-01-01 00:00 UTC, as the clock says
+/// (QEMU's clock runs in UTC). 0 if what it says makes no sense.
+fn rtc_seconds(r: &mut Rtc) -> u64
+  requires rtc_ok(r)
+  ensures rtc_ok(r) && result < 5000000000
+{
+  // Wait out an update in progress (status A bit 7), so the fields below
+  // belong to the same second. It lasts under 2 ms; give up after a while.
+  let mut spins = 0;
+  while spins < 100000 && rtc_reg(&mut r, 0x0A) / 128 % 2 == 1
+    invariant rtc_ok(r)
+  {
+    spins = spins + 1;
+  }
+  let b = rtc_reg(&mut r, 0x0B);
+  let bcd = b / 4 % 2 == 0;
+  let sec = rtc_num(rtc_reg(&mut r, 0x00), bcd);
+  let min = rtc_num(rtc_reg(&mut r, 0x02), bcd);
+  let hraw = rtc_reg(&mut r, 0x04);
+  let mut hour = rtc_num(hraw % 128, bcd);
+  if b / 2 % 2 == 0 {
+    // 12-hour mode: bit 7 of the hour is PM, and 12 means 0.
+    hour = hour % 12;
+    if hraw / 128 == 1 {
+      hour = hour + 12;
+    }
+  }
+  let day = rtc_num(rtc_reg(&mut r, 0x07), bcd);
+  let month = rtc_num(rtc_reg(&mut r, 0x08), bcd);
+  let year = 2000 + rtc_num(rtc_reg(&mut r, 0x09), bcd);   // the 21st century
+  if sec > 59 || min > 59 || hour > 23 || day < 1 || day > 31 || month < 1 || month > 12 || year > 2099 {
+    return 0;
+  }
+  return days_from_civil(year, month, day) * 86400 + hour * 3600 + min * 60 + sec;
+}

@@ -330,6 +330,7 @@ const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
 // flags, restorer, mask).
 const SIGACT_LEN: u64 = 4096;
 const OF_SOCK: u64 = 5;               // x: the kernel socket; word 3: 2 * peer + nonblocking
+const OF_DEV: u64 = 7;                // x: the device (src/lxdev.bastio)
 const OF_TCP: u64 = 6;                // x: the kernel connection (TCBS: none yet); word 3: see src/lxtcp.bastio
 const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
@@ -386,6 +387,7 @@ const K_PIPE_R: u64 = 3;              // x: the pipe
 const K_PIPE_W: u64 = 4;
 const K_DIR: u64 = 5;                 // x: DIR_ROOT or DIR_BIN
 const K_SOCK: u64 = 6;                // x: the kernel socket
+const K_DEV: u64 = 7;                 // x: the device (src/lxdev.bastio)
 
 struct Kernel {
   mem: Mem,             // the page allocator
@@ -399,6 +401,8 @@ struct Kernel {
   pipes: Buf,           // pipe buffers
   ticks: u64,           // timer ticks since boot
   ns: u64,              // the HPET clock at the last system call, in nanoseconds
+  epoch: u64,           // CLOCK_REALTIME minus the HPET clock, in ns (src/rtc.bastio)
+  rng: u64,             // the state behind /dev/urandom (src/lxdev.bastio)
   cpus: u64,            // processors running, the bootstrap one included
   fs: Vfs,              // files and the open-file table
   nic: Nic,             // the network card and its UDP sockets, if any

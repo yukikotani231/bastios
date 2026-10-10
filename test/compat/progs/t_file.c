@@ -68,6 +68,10 @@ int main(void) {
     EXPECT("access missing", access("cf_none", F_OK) == -1 && errno == ENOENT);
     EXPECT("faccessat", faccessat(AT_FDCWD, "cf_c", R_OK, 0) == 0);
     EXPECT("unlink", unlink("cf_c") == 0 && stat("cf_c", &st) == -1 && errno == ENOENT);
+    EXPECT("unlink an open file, then read it", (fd = open("cf_o", O_RDWR | O_CREAT, 0644)) >= 0 && write(fd, "kept", 4) == 4 &&
+           unlink("cf_o") == 0 && lseek(fd, 0, SEEK_SET) == 0 && read(fd, buf, 4) == 4 && memcmp(buf, "kept", 4) == 0);
+    if (fd >= 0) close(fd);
+    unlink("cf_o");
     unlink("cf_d");
     unlink("cf_e");
     {

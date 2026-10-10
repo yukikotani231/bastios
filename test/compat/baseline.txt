@@ -7,14 +7,19 @@ busybox: cat a file
 busybox: cmp
 busybox: cp
 busybox: cut
+busybox: date
 busybox: date -d
+busybox: dd
+busybox: diff
 busybox: du
 busybox: echo
 busybox: env
 busybox: expr
+busybox: find
 busybox: grep
 busybox: gzip round trip
 busybox: head/tail
+busybox: hexdump
 busybox: hostname
 busybox: id -u
 busybox: kill -0
@@ -22,7 +27,10 @@ busybox: ls -l
 busybox: md5sum
 busybox: mkdir -p
 busybox: mkdir/rmdir
+busybox: mktemp
+busybox: nice
 busybox: nproc
+busybox: od
 busybox: printenv
 busybox: printf
 busybox: readlink/realpath
@@ -35,54 +43,81 @@ busybox: sleep
 busybox: sort -n
 busybox: stat
 busybox: sync
+busybox: tar round trip
 busybox: tee
 busybox: test
 busybox: time
 busybox: timeout
+busybox: touch/ls
 busybox: tr
 busybox: true/false
+busybox: uname
 busybox: uniq -c
 busybox: uptime
 busybox: usleep
 busybox: wc
 busybox: which
+busybox: whoami
 busybox: xargs
 busybox: yes | head
 t_dir: chdir
 t_dir: chdir ..
 t_dir: create file in directory
+t_dir: fchdir
 t_dir: getcwd
 t_dir: getcwd after chdir
 t_dir: mkdir
 t_dir: mkdir existing is EEXIST
 t_dir: mkdir nested missing parent is ENOENT
+t_dir: openat relative to a directory fd
 t_dir: opendir/readdir /
 t_dir: readdir subdirectory
 t_dir: relative open after chdir
 t_dir: rmdir
 t_dir: rmdir non-empty is ENOTEMPTY
 t_dir: stat / is a directory
+t_dir: stat /dev
+t_dir: stat /tmp
 t_dir: stat file in directory
 t_dir: stat new directory
+t_dir: statvfs
 t_dir: unlink file in directory
+t_file: /dev/null write
+t_file: /dev/urandom read
+t_file: /dev/zero read
 t_file: O_RDONLY refuses write
 t_file: access F_OK
 t_file: access missing
+t_file: chown to self
 t_file: close
 t_file: close twice is EBADF
+t_file: faccessat
+t_file: fchmod
+t_file: fdatasync
 t_file: fstat size
+t_file: fsync
+t_file: lseek SEEK_CUR
+t_file: lseek SEEK_END
 t_file: lseek SEEK_SET
 t_file: open O_CREAT|O_TRUNC
 t_file: open missing is ENOENT
+t_file: pread
+t_file: pread keeps offset
+t_file: pwrite
 t_file: read back
 t_file: stdio fprintf/fscanf
+t_file: tmpfile
+t_file: unlink
 t_file: write
 t_file: writev
 t_ipc: EOF once writers close
+t_ipc: O_NONBLOCK read of an empty pipe is EAGAIN
 t_ipc: dup2 onto stdout and back
 t_ipc: fcntl F_DUPFD
 t_ipc: fcntl F_GETFD sees FD_CLOEXEC
+t_ipc: fcntl F_GETFL sees O_NONBLOCK
 t_ipc: fcntl F_SETFL
+t_ipc: isatty(0)
 t_ipc: pipe
 t_ipc: pipe across fork
 t_ipc: pipe2
@@ -90,14 +125,24 @@ t_ipc: poll a readable pipe
 t_ipc: poll times out
 t_mem: 64 MiB of address space
 t_mem: file for mapping
+t_mem: madvise
 t_mem: malloc churn
+t_mem: mlock
+t_mem: mmap MAP_FIXED
+t_mem: mmap a file MAP_PRIVATE
 t_mem: mmap anonymous
 t_mem: mmap is zeroed
 t_mem: munmap
+t_misc: /etc/passwd
 t_misc: SSE floating point
 t_misc: TIOCGWINSZ
+t_misc: getlogin or getpwuid
+t_misc: getrandom
+t_misc: prctl PR_SET_NAME
 t_misc: printf %f
 t_misc: qsort
+t_misc: sched_getaffinity
+t_misc: statfs
 t_misc: strtod
 t_misc: sync
 t_misc: tcgetattr
@@ -115,12 +160,28 @@ t_proc: execve
 t_proc: execve missing is ENOENT
 t_proc: fork + exit status
 t_proc: fork copies memory
+t_proc: getgroups
+t_proc: gethostname
+t_proc: getpgrp
 t_proc: getpid
 t_proc: getppid
+t_proc: getpriority
+t_proc: getrlimit
+t_proc: getrusage
+t_proc: getsid
 t_proc: killed child's status
+t_proc: nice
+t_proc: sched_yield
+t_proc: setpgid
+t_proc: setrlimit
+t_proc: setsid in a child
+t_proc: setuid to self
 t_proc: sysconf(_SC_NPROCESSORS_ONLN)
+t_proc: sysinfo
 t_proc: times
 t_proc: uid/gid
+t_proc: umask
+t_proc: uname
 t_proc: wait with no children is ECHILD
 t_proc: waitpid WNOHANG
 t_signal: SIG_IGN
@@ -134,9 +195,12 @@ t_time: clock_getres
 t_time: clock_gettime BOOTTIME
 t_time: clock_gettime MONOTONIC
 t_time: clock_gettime PROCESS_CPUTIME
+t_time: clock_gettime REALTIME after 2020
 t_time: clock_nanosleep TIMER_ABSTIME
+t_time: gettimeofday
 t_time: gmtime_r
 t_time: monotonic does not go back
 t_time: nanosleep 100 ms
 t_time: sleep(1)
 t_time: strftime + localtime
+t_time: time
