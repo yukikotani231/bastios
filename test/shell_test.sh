@@ -25,6 +25,12 @@ _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 _s.bind(("127.0.0.1", 0))
 udp_port = _s.getsockname()[1]
 _s.close()
+# Another, forwarded to guest port 7000, where `udpecho 7000` listens on a
+# socket; and a port on this machine for `udpsend` to send to.
+_s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+_s.bind(("127.0.0.1", 0))
+udp_port2 = _s.getsockname()[1]
+_s.close()
 
 def boot(cpus, with_disk=False, virtio=False, net=False):
     drive = ["-drive", f"file={disk},format=raw,if=ide,index=0"] if with_disk else []
@@ -34,7 +40,7 @@ def boot(cpus, with_disk=False, virtio=False, net=False):
         drive = ["-drive", f"file={disk},format=raw,if=none,id=vd",
                  "-device", "virtio-blk-pci,drive=vd"]
     # A virtio network card on QEMU's user-mode network (src/net.bastio).
-    nic = ["-netdev", f"user,id=n0,hostfwd=udp:127.0.0.1:{udp_port}-:7",
+    nic = ["-netdev", f"user,id=n0,hostfwd=udp:127.0.0.1:{udp_port}-:7,hostfwd=udp:127.0.0.1:{udp_port2}-:7000",
            "-device", "virtio-net-pci,netdev=n0"] if net else []
     return subprocess.Popen(
         ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", str(cpus),
@@ -84,6 +90,12 @@ if read_until(b"bastios> ", mark) and b"no network" in out[mark:]:
     print("ok   no network card: ping says so")
 else:
     print("FAIL no network card: ping"); fails += 1
+mark = len(out)
+qemu.stdin.write(b"udpsend 10.0.2.2 9 x\r"); qemu.stdin.flush()
+if read_until(b"bastios> ", mark) and b"no network" in out[mark:]:
+    print("ok   no network card: no sockets either")
+else:
+    print("FAIL no network card: udpsend"); fails += 1
 qemu.kill(); qemu.wait()
 print("---- one-processor transcript ----")
 print(out.decode(errors="replace").replace("\r", ""))
@@ -273,6 +285,48 @@ else:
         print("ok   UDP echo on port 7")
     else:
         print("FAIL UDP echo:", got); fails += 1
+    # UDP sockets (the system calls in src/syscall.bastio): the shell binds
+    # port 7000, gets a datagram from this machine and sends it back.
+    mark = len(out)
+    qemu.stdin.write(b"udpecho 7000\r"); qemu.stdin.flush()
+    got = None
+    if read_until(b"listening on udp port 7000", mark):
+        us = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        us.settimeout(10)
+        try:
+            us.sendto(b"hello socket", ("127.0.0.1", udp_port2))
+            got, _ = us.recvfrom(100)
+        except OSError:
+            pass
+        us.close()
+    if (read_until(b"bastios> ", mark) and got == b"hello socket"
+            and re.search(rb"from 10\.0\.2\.2:\d+: hello socket", out[mark:])
+            and b"sent it back" in out[mark:]):
+        print("ok   UDP socket: bind, recvfrom, sendto back")
+    else:
+        print("FAIL UDP socket echo:", got); fails += 1
+    # And one sent from an ephemeral port to this machine (QEMU's 10.0.2.2
+    # is the host's loopback), after ARP for the gateway.
+    us = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    us.bind(("127.0.0.1", 0))
+    us.settimeout(10)
+    mark = len(out)
+    qemu.stdin.write(f"udpsend 10.0.2.2 {us.getsockname()[1]} sent by sendto\r".encode()); qemu.stdin.flush()
+    try:
+        got, _ = us.recvfrom(100)
+    except OSError:
+        got = None
+    us.close()
+    if read_until(b"bastios> ", mark) and got == b"sent by sendto" and b"sent 14 bytes" in out[mark:]:
+        print("ok   UDP socket: sendto from an ephemeral port")
+    else:
+        print("FAIL UDP sendto:", got); fails += 1
+    mark = len(out)
+    qemu.stdin.write(b"udpsend 10.0.2.2 0 x\r"); qemu.stdin.flush()
+    if read_until(b"bastios> ", mark) and b"usage: udpsend" in out[mark:]:
+        print("ok   udpsend refuses port 0")
+    else:
+        print("FAIL udpsend port 0"); fails += 1
     # Every page the finished processes and removed files used must be
     # back in the pool.
     mem = [l.strip() for l in out.split(b"\n") if l.strip().endswith(b"free pages")]

@@ -57,11 +57,11 @@ const V_LTIMER: u64 = 48;
 // The kernel's state and the devices the scheduler drives, shared by every
 // processor through a lock. The invariant is what each processor may assume
 // when it takes the lock, and must restore before it lets go.
-struct Sys { k: Kernel, con: Uart, pic: Pic, clock: Hpet, nic: Nic, stop: bool }
-  invariant kok(k) && uart_ok(con) && pic_ok(pic) && hpet_ok(clock) && nic_ok(nic);
+struct Sys { k: Kernel, con: Uart, pic: Pic, clock: Hpet, stop: bool }
+  invariant kok(k) && uart_ok(con) && pic_ok(pic) && hpet_ok(clock);
 
 spec fn sys_ok(s: &Sys) -> bool {
-  kok(s.k) && uart_ok(s.con) && pic_ok(s.pic) && hpet_ok(s.clock) && nic_ok(s.nic)
+  kok(s.k) && uart_ok(s.con) && pic_ok(s.pic) && hpet_ok(s.clock)
 }
 
 // A process taken out to run: its id, address space and FPU page.
@@ -80,7 +80,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, from: u64) -> Job
   if s.stop {
     return Job::Stop;
   }
-  nic_poll(&mut s.nic);
+  nic_poll(&mut s.k.nic);
   drain(&mut s.con, &mut s.k.q);
   tty_cook(&mut s.con, &mut s.k);
   wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
@@ -170,11 +170,6 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, t: Task, v: u64) -> u64
   if v == V_TIMER || v == V_LTIMER {
     pset(&mut s.k.procs, p, F_TICKS, tick(pget(s.k.procs, p, F_TICKS)));
     return (p + 1) % NPROC;
-  }
-  if v == V_SYSCALL && pget(s.k.procs, p, F_REGS + R_RAX) == SYS_PING {
-    // The network card is shared state too, so its call is handled here.
-    ret(&mut s.k.procs, p, nic_ping(&mut s.nic, pget(s.k.procs, p, F_REGS + R_RDI)));
-    return p;
   }
   if v == V_SYSCALL {
     s.k.ns = hpet_ns(&mut s.clock);
@@ -356,7 +351,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     puts(&mut con, "disk: virtio\r\n");
   }
   // The network card, if any: nine pages after the disk's four.
-  let mut nic = nic_new(&mut ports, &mut pci, &mut m, 4, dev_lo, dev_hi);
+  let nic = nic_new(&mut ports, &mut pci, &mut m, 4, dev_lo, dev_hi);
   if nic_live(nic) {
     puts(&mut con, "net: virtio, mac ");
     put_mac(&mut con, nic_mac(nic));
@@ -379,14 +374,14 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     vec_push(&mut fpus, Fpu::None);
     q = q + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), ticks: 0, ns: 0, cpus: cpus, fs: vfs_new(disk) };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), ticks: 0, ns: 0, cpus: cpus, fs: vfs_new(disk), nic: nic };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
   }
   // Every processor runs the scheduler until the kernel stops; then they
   // are all back in their park loops and the state is this one's again.
-  let sl = lock_new(Sys { k: k, con: con, pic: pic, clock: clock, nic: nic, stop: false });
+  let sl = lock_new(Sys { k: k, con: con, pic: pic, clock: clock, stop: false });
   smp_run(sched, &mut cpu, &mut mmu, sl);
   let mut sys = lock_end(sl);
   // Power off: tear down whatever is left, so every page goes back.
@@ -407,7 +402,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   vec_free(sys.k.fpus);
   blk_free(&mut ports, vfs_free(sys.k.fs, &mut sys.k.mem), &mut sys.k.mem);
-  nic_free(&mut ports, sys.nic, &mut sys.k.mem);
+  nic_free(&mut ports, sys.k.nic, &mut sys.k.mem);
   puts(&mut sys.con, "BastiOS: ");
   put_num(&mut sys.con, count_free(sys.k.mem.bm));
   puts(&mut sys.con, " pages free at power off\r\n");
