@@ -24,6 +24,7 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench
 UASM    := fault straddle
+ELFPROGS := elfexec elfpie elfbad
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf)
 
 build/user/%.c: user/%.bastio $(BASTIOC) | build/user
@@ -53,7 +54,6 @@ $(UASM:%=build/user/%.elf): build/user/%.elf: build/user/%.o user/user.ld
 # kernel's ELF loader maps their segments. elfexec is linked at USER_BASE
 # (ET_EXEC), elfpie as a static PIE (ET_DYN), and elfbad is elfexec cut
 # short, so its segments run past the end of the file and it must be refused.
-ELFPROGS := elfexec elfpie elfbad
 ELFCFLAGS := $(UCFLAGS) -fno-asynchronous-unwind-tables
 
 build/user/elfcheck.o: user/elfcheck.c | build/user
@@ -75,7 +75,7 @@ build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := src/console.bastio src/pages.bastio src/space.bastio src/elf.bastio src/proc.bastio src/syscall.bastio src/main.bastio
+KSRCS := src/console.bastio src/pages.bastio src/space.bastio src/elf.bastio src/proc.bastio src/syscall.bastio src/linux.bastio src/main.bastio
 
 # src/main.bastio imports the rest.
 build/kernel.c: $(KSRCS) $(UBINS) $(BASTIOC) | build
