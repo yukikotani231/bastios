@@ -191,6 +191,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, t: Task, v: u64) -> u64
   }
   if v == V_SYSCALL {
     s.k.ns = hpet_ns(&mut s.clock);
+    s.k.fs.now = s.k.ns / 1000000000;
     let what = syscall(&mut s.con, &mut s.k, mmu, p);
     if what == POWEROFF {
       s.stop = true;
@@ -202,6 +203,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, t: Task, v: u64) -> u64
   }
   if v == V_LINUX {
     s.k.ns = hpet_ns(&mut s.clock);
+    s.k.fs.now = s.k.ns / 1000000000;
     if linux_syscall(&mut s.con, &mut s.k, mmu, p) == SWITCH {
       return (p + 1) % NPROC;
     }
