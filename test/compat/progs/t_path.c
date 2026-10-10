@@ -1,13 +1,15 @@
 /* Paths and the errors Linux gives for them: unreadable and empty paths,
  * paths up to PATH_MAX, loops of links through a long path, and the
  * smaller rules LTP checks around them (negative offsets, directories
- * opened for writing, O_NOFOLLOW, rmdir("."), set-group-ID at create). */
+ * opened for writing, O_NOFOLLOW, rmdir("."), set-group-ID at create),
+ * chroot, and device nodes. */
 #include "compat.h"
 #include <fcntl.h>
 #include <limits.h>
 #include <sys/mman.h>
 #include <sys/sendfile.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
@@ -148,6 +150,60 @@ static int sendfile_statx(void) {
     return ok;
 }
 
+static int in_jail(void) {
+    struct stat st;
+    char here[64];
+    if (chroot("pt_jail") != 0) return 0;
+    return stat("/f", &st) == 0 && stat("/abs", &st) == 0 && stat("/../../f", &st) == 0
+        && fails(stat("/pt_jail", &st), ENOENT)
+        && chdir("/sub") == 0 && getcwd(here, sizeof here) && strcmp(here, "/sub") == 0
+        && stat("../f", &st) == 0 && stat("../../../f", &st) == 0 && stat("up", &st) == 0
+        && chdir("/") == 0 && getcwd(here, sizeof here) && strcmp(here, "/") == 0;
+}
+
+static int nobody_chroot(void) {
+    if (setgid(USERS) != 0 || setuid(NOBODY) != 0) return 0;
+    return fails(chroot("pt_jail"), EPERM);
+}
+
+static int chroot_jail(void) {
+    mkdir("pt_jail", 0755); mkdir("pt_jail/sub", 0755);
+    int ok = make("pt_jail/f") && symlink("/f", "pt_jail/abs") == 0 && symlink("../../../f", "pt_jail/sub/up") == 0
+        && fails(chroot("pt_jail/f"), ENOTDIR) && fails(chroot("pt_none"), ENOENT)
+        && in_child(nobody_chroot) && in_child(in_jail);
+    unlink("pt_jail/sub/up"); unlink("pt_jail/abs"); unlink("pt_jail/f"); rmdir("pt_jail/sub"); rmdir("pt_jail");
+    return ok;
+}
+
+static int nobody_mknod(void) {
+    if (setgid(USERS) != 0 || setuid(NOBODY) != 0) return 0;
+    return fails(mknod("pt_nd/x", S_IFCHR | 0666, makedev(1, 3)), EPERM);   /* the directory allows it */
+}
+
+static int device_nodes(void) {
+    struct stat st;
+    unsigned int sx[64];                         /* struct statx: mode at 28, rdev at 128 */
+    char b[4] = "xxx";
+    int ok = mknod("pt_null", S_IFCHR | 0666, makedev(1, 3)) == 0 && stat("pt_null", &st) == 0
+        && S_ISCHR(st.st_mode) && st.st_rdev == makedev(1, 3) && st.st_size == 0;
+    int fd = open("pt_null", O_RDWR | O_TRUNC);
+    ok = ok && fd >= 0 && write(fd, "data", 4) == 4 && read(fd, b, 4) == 0;
+    close(fd);
+    ok = ok && mknod("pt_zero", S_IFCHR | 0444, makedev(1, 5)) == 0;
+    fd = open("pt_zero", O_RDONLY);
+    ok = ok && fd >= 0 && read(fd, b, 4) == 4 && b[0] == 0 && b[3] == 0;
+    close(fd);
+    ok = ok && mknod("pt_blk", S_IFBLK | 0600, makedev(8, 1)) == 0
+        && syscall(SYS_statx, AT_FDCWD, "pt_blk", 0, 0x7ff, sx) == 0 && S_ISBLK(sx[7] & 0xffff)
+        && sx[32] == 8 && sx[33] == 1
+        && mknod("pt_sock", S_IFSOCK | 0600, 0) == 0 && stat("pt_sock", &st) == 0 && S_ISSOCK(st.st_mode)
+        && fails(open("pt_sock", O_RDONLY), ENXIO)
+        && fails(mknod("pt_bad", S_IFMT | 0600, 0), EINVAL) && fails(mknod("pt_null", S_IFCHR, 0), EEXIST)
+        && mkdir("pt_nd", 0777) == 0 && chmod("pt_nd", 0777) == 0 && in_child(nobody_mknod);
+    rmdir("pt_nd"); unlink("pt_null"); unlink("pt_zero"); unlink("pt_blk"); unlink("pt_sock");
+    return ok;
+}
+
 int main(void) {
     setup();
     EXPECT("a path in unmapped memory is EFAULT", unreadable_is_efault());
@@ -159,5 +215,7 @@ int main(void) {
     EXPECT("O_NOFOLLOW, O_NOATIME, EISDIR, rmdir of . and mkdir over a name", open_rules());
     EXPECT("a set-group-ID bit at create is kept only for a member of the group", setgid_create());
     EXPECT("sendfile checks its descriptors and offset; statx its flags", sendfile_statx());
+    EXPECT("chroot keeps absolute paths, links and .. inside the new root", chroot_jail());
+    EXPECT("mknod makes device and socket nodes; a device node opens its device", device_nodes());
     return done();
 }

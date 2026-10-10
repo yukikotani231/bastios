@@ -40,7 +40,42 @@ fn dev_at(x: &Bytes, n: u64) -> u64
   return DEV_NONE;
 }
 
-/// What stat says about device d.
+/// Device d's number, as Linux numbers it (major * 256 + minor).
+fn dev_rdev(d: u64) -> u64 {
+  if d == DEV_NULL {
+    return 0x103;
+  }
+  if d == DEV_ZERO {
+    return 0x105;
+  }
+  if d == DEV_RANDOM {
+    return 0x109;                           // /dev/urandom's
+  }
+  if d == DEV_TTY {
+    return 0x500;
+  }
+  return 0;
+}
+
+/// The device a device node numbered rdev opens, or DEV_NONE.
+fn rdev_dev(rdev: u64) -> u64 {
+  if rdev == 0x103 {
+    return DEV_NULL;
+  }
+  if rdev == 0x105 {
+    return DEV_ZERO;
+  }
+  if rdev == 0x108 || rdev == 0x109 {
+    return DEV_RANDOM;
+  }
+  if rdev == 0x500 || rdev == 0x501 {
+    return DEV_TTY;
+  }
+  return DEV_NONE;
+}
+
+/// What stat says about device d (for a device, size is the device
+/// number: see put_stat).
 fn dev_meta(d: u64) -> Meta {
   if d >= PROC_DEV {
     return proc_meta(d);                    // a /proc file (src/lxprocfs.bastio)
@@ -48,7 +83,7 @@ fn dev_meta(d: u64) -> Meta {
   if d == DEV_DIR {
     return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 3, mtime: 0, own: 0 };
   }
-  return Meta { ok: true, mode: S_IFCHR, size: 0, ino: 30 + d % 16, mtime: 0, own: 0 };
+  return Meta { ok: true, mode: S_IFCHR, size: dev_rdev(d), ino: 30 + d % 16, mtime: 0, own: 0 };
 }
 
 /// The next 64 random bits (splitmix64).

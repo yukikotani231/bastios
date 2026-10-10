@@ -60,7 +60,6 @@ const LX_MKNOD: u64 = 133;
 const LX_MKNODAT: u64 = 259;
 const S_IFMT: u64 = 0xF000;
 const S_IFIFO_TYPE: u64 = 0x1000;
-const ENXIO: u64 = 18446744073709551610;     // 2^64 - 6
 const EFD_SEMAPHORE: u64 = 1;
 const EV_MAX: u64 = 18446744073709551614;    // 2^64 - 2: the most an eventfd holds
 const TFD_TIMER_ABSTIME: u64 = 1;
@@ -722,13 +721,18 @@ fn fifo_slot(k: &mut Kernel, h: u64) -> u64
 
 /// mknod and mknodat(dirfd, path, mode): named pipes (S_IFIFO) and empty
 /// regular files (S_IFREG, or no type); no device nodes.
-fn lx_mknod(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64) -> u64
+fn lx_mknod(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64, dev: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let fifo = mode & S_IFMT == S_IFIFO_TYPE;
-  if !fifo && mode & S_IFMT != S_IFMT_REG && mode & S_IFMT != 0 {
-    return EPERM;                           // no device nodes
+  let ty = mode & S_IFMT;
+  let fifo = ty == S_IFIFO_TYPE;
+  let device = ty == T_CHR || ty == T_BLK;
+  if ty == S_IFMT_DIR {
+    return EPERM;                           // mkdir makes directories
+  }
+  if !fifo && !device && ty != T_SOCK && ty != S_IFMT_REG && ty != 0 {
+    return EINVAL;
   }
   let n = lx_path_at_nf(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
@@ -753,12 +757,23 @@ fn lx_mknod(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64) -> u64
   if e != 0 {
     return e;
   }
-  let own = new_owner(&mut k, pid, n);
-  let mut kind = 0;
-  if fifo {
-    kind = T_FIFO;
+  if device && id_get(k.procs, pid, F_UID, true) != 0 {
+    return EPERM;                           // CAP_MKNOD
   }
-  if !vfs_mknode(&mut k.fs, &mut k.mem, n, kind + mode % 512) {
+  let own = new_owner(&mut k, pid, n);
+  let mut made = false;
+  if device {
+    // The node keeps its device number (Linux's 32-bit encoding) as its contents.
+    store_le32(&mut k.fs.xfer, n, cast[u32](dev % 0x100000000));
+    made = vfs_mkdata(&mut k.fs, &mut k.mem, n, 4, ty + mode % 512);
+  } else {
+    let mut kind = 0;
+    if fifo || ty == T_SOCK {
+      kind = ty;
+    }
+    made = vfs_mknode(&mut k.fs, &mut k.mem, n, kind + mode % 512);
+  }
+  if !made {
     return ENOENT;                          // no such directory, or no room
   }
   // A slot left from a removed FIFO whose handle this one now has is not
@@ -816,6 +831,7 @@ fn fifo_open(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
     pi_set(&mut k.pipes, q, 4, f + 1);
     pi_set(&mut k.pipes, q, 5, 0);
     pi_set(&mut k.pipes, q, 6, 0);
+    pi_set(&mut k.pipes, q, 7, 0);
     k.evt = set(k.evt, base + 1, q + 1);
   }
   let nb = flags / LO_NONBLOCK % 2;
@@ -913,9 +929,9 @@ fn lx_event_call(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: 
   } else if n == LX_SIGNALFD4 {
     r = lx_signalfd(&mut k, pid, a, b, c, d);
   } else if n == LX_MKNOD {
-    r = lx_mknod(&mut k, pid, AT_FDCWD, a, b);
+    r = lx_mknod(&mut k, pid, AT_FDCWD, a, b, c);
   } else if n == LX_MKNODAT {
-    r = lx_mknod(&mut k, pid, a, b, c);
+    r = lx_mknod(&mut k, pid, a, b, c, d);
   }
   ret(&mut k.procs, pid, r);
   return KEEP;

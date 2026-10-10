@@ -171,6 +171,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   shm_fork(&mut k, pid, c);
   sig_fork(&mut k.sigact, pid, c);
   cwd_fork(&mut k.cwd, pid, c);
+  cwd_fork(&mut k.croot, pid, c);
   pset(&mut k.procs, c, F_SIGPEND, 0);
   pset(&mut k.procs, c, F_RESTART, 0);
   pset(&mut k.procs, c, F_STATE, READY);
@@ -711,6 +712,12 @@ fn file_meta(v: &mut Vfs, f: u64) -> Meta
     kind = T_LINK;                          // a symbolic link: only lstat gets this far
   } else if fm.mode % 65536 / 4096 * 4096 == T_FIFO {
     kind = T_FIFO;                          // a named pipe
+  } else if fm.mode % 65536 / 4096 * 4096 == T_SOCK {
+    return Meta { ok: true, mode: T_SOCK + fm.mode % 4096, size: 0, ino: INO_FILES + f, mtime: fm.mtime, own: fm.own };
+  } else if fm.mode % 65536 / 4096 * 4096 == T_CHR || fm.mode % 65536 / 4096 * 4096 == T_BLK {
+    // A device node: size carries its number (see put_stat).
+    let t = fm.mode % 65536 / 4096 * 4096;
+    return Meta { ok: true, mode: t + fm.mode % 4096, size: vfs_node_dev(&mut v, f), ino: INO_FILES + f, mtime: fm.mtime, own: fm.own };
   }
   return Meta { ok: true, mode: kind + fm.mode % 4096, size: size, ino: INO_FILES + f, mtime: fm.mtime, own: fm.own };
 }
@@ -743,10 +750,18 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
 }
 
 /// Writes a struct stat for m to user address buf. Returns 0 or -EFAULT.
-fn put_stat(k: &mut Kernel, pid: u64, buf: u64, m: Meta) -> u64
+/// For a character or block device, m.size is the device number (st_rdev)
+/// and the size is 0.
+fn put_stat(k: &mut Kernel, pid: u64, buf: u64, mo: Meta) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  let mut m = mo;
+  let mut rdev = 0;
+  if m.mode % 65536 / 4096 * 4096 == T_CHR || m.mode % 65536 / 4096 * 4096 == T_BLK {
+    rdev = m.size;
+    m.size = 0;
+  }
   let mut nlink = 1;
   if m.ino >= INO_FILES && m.ino < INO_FILES + HFILES {
     nlink = vfs_nlink(&mut k.fs, m.ino - INO_FILES);   // a file and its hard links
@@ -756,6 +771,7 @@ fn put_stat(k: &mut Kernel, pid: u64, buf: u64, m: Meta) -> u64
   xfer_u64(&mut k.fs.xfer, 16, nlink);        // st_nlink
   xfer_u64(&mut k.fs.xfer, 24, m.mode % 0x100000000 + m.own % 0x100000000 * 0x100000000);   // st_mode, st_uid
   xfer_u64(&mut k.fs.xfer, 32, m.own / 0x100000000);                 // st_gid
+  xfer_u64(&mut k.fs.xfer, 40, rdev);         // st_rdev
   xfer_u64(&mut k.fs.xfer, 48, m.size);       // st_size
   xfer_u64(&mut k.fs.xfer, 56, 4096);         // st_blksize
   let mut blocks = m.size / 512;

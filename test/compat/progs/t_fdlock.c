@@ -1,9 +1,13 @@
 /* Descriptors past the first few dozen, and the record-lock and lease
  * rules LTP checks: F_GETLK reports the conflicting lock that starts
  * first, a lock needs the matching access mode, malformed requests on a
- * pipe are EINVAL, and leases need a file nobody writes. */
+ * pipe are EINVAL, and leases need a file nobody writes. Also the owner
+ * of a description (F_SETOWN, F_SETOWN_EX, F_SETSIG) and the signal it
+ * gets when input arrives with O_ASYNC. */
 #include "compat.h"
 #include <fcntl.h>
+#include <limits.h>
+#include <signal.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 
@@ -72,11 +76,56 @@ static int leases(void) {
     return ok;
 }
 
+static int owners(void) {
+    int p[2];
+    struct f_owner_ex ex = { 0 }, bad = { 3, 0 }, none = { F_OWNER_PID, 0 };
+    pid_t me = getpid(), g = getpgrp();
+    int ok = pipe(p) == 0 && fcntl(p[0], F_GETOWN) == 0
+        && fcntl(p[0], F_GETOWN_EX, &ex) == 0 && ex.pid == 0
+        && fcntl(p[0], F_SETOWN, me) == 0 && fcntl(p[0], F_GETOWN) == me
+        && fcntl(p[0], F_SETOWN, -g) == 0 && fcntl(p[0], F_GETOWN) == -g
+        && fcntl(p[0], F_GETOWN_EX, &ex) == 0 && ex.type == F_OWNER_PGRP && ex.pid == g;
+    ex.type = F_OWNER_TID; ex.pid = me;
+    ok = ok && fcntl(p[0], F_SETOWN_EX, &ex) == 0 && fcntl(p[0], F_GETOWN_EX, &ex) == 0
+        && ex.type == F_OWNER_TID && ex.pid == me
+        && fcntl(p[0], F_SETOWN_EX, &bad) == -1 && errno == EINVAL
+        && fcntl(p[0], F_SETOWN, INT_MAX) == -1 && errno == ESRCH
+        && fcntl(p[0], F_SETOWN_EX, &none) == 0 && fcntl(p[0], F_GETOWN) == 0
+        && fcntl(p[0], F_GETOWN_EX, &ex) == 0 && ex.type == F_OWNER_PID && ex.pid == 0
+        && fcntl(p[0], F_GETSIG) == 0 && fcntl(p[0], F_SETSIG, 65) == -1 && errno == EINVAL
+        && fcntl(p[0], F_SETSIG, SIGUSR1) == 0 && fcntl(p[0], F_GETSIG) == SIGUSR1;
+    close(p[0]); close(p[1]);
+    return ok;
+}
+
+static int io_signal(void) {
+    int p[2];
+    char c;
+    sigset_t set, old;
+    struct timespec t = { 2, 0 };
+    sigemptyset(&set); sigaddset(&set, SIGIO); sigaddset(&set, SIGUSR1);
+    int ok = pipe(p) == 0 && sigprocmask(SIG_BLOCK, &set, &old) == 0
+        && fcntl(p[0], F_SETFL, O_ASYNC) == 0 && (fcntl(p[0], F_GETFL) & O_ASYNC)
+        && fcntl(p[0], F_SETOWN, getpid()) == 0
+        && write(p[1], "x", 1) == 1 && sigtimedwait(&set, NULL, &t) == SIGIO
+        && read(p[0], &c, 1) == 1
+        && fcntl(p[0], F_SETSIG, SIGUSR1) == 0
+        && write(p[1], "y", 1) == 1 && sigtimedwait(&set, NULL, &t) == SIGUSR1
+        && read(p[0], &c, 1) == 1
+        && fcntl(p[0], F_SETFL, 0) == 0 && write(p[1], "z", 1) == 1
+        && sigtimedwait(&set, NULL, &(struct timespec){ 0, 100000000 }) == -1 && errno == EAGAIN;
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    close(p[0]); close(p[1]);
+    return ok;
+}
+
 int main(void) {
     setup();
     EXPECT("200 descriptors, dup2 to 200 and F_DUPFD from 100", many_descriptors());
     EXPECT("F_GETLK reports the conflicting lock that starts first", getlk_first());
     EXPECT("a lock needs the matching access mode; bad requests are EINVAL", lock_modes());
     EXPECT("F_SETLEASE and F_GETLEASE", leases());
+    EXPECT("F_SETOWN, F_SETOWN_EX and F_SETSIG set a description's owner", owners());
+    EXPECT("O_ASYNC on a pipe signals its owner when input arrives", io_signal());
     return done();
 }
