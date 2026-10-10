@@ -20,7 +20,8 @@ busybox: id -u
 busybox: kill -0
 busybox: ls -l
 busybox: md5sum
-busybox: mktemp
+busybox: mkdir -p
+busybox: mkdir/rmdir
 busybox: nproc
 busybox: printenv
 busybox: printf
@@ -47,11 +48,22 @@ busybox: wc
 busybox: which
 busybox: xargs
 busybox: yes | head
+t_dir: chdir
+t_dir: chdir ..
 t_dir: create file in directory
 t_dir: getcwd
+t_dir: getcwd after chdir
+t_dir: mkdir
+t_dir: mkdir existing is EEXIST
+t_dir: mkdir nested missing parent is ENOENT
 t_dir: opendir/readdir /
+t_dir: readdir subdirectory
+t_dir: relative open after chdir
+t_dir: rmdir
+t_dir: rmdir non-empty is ENOTEMPTY
 t_dir: stat / is a directory
 t_dir: stat file in directory
+t_dir: stat new directory
 t_dir: unlink file in directory
 t_file: O_RDONLY refuses write
 t_file: access F_OK
@@ -64,7 +76,6 @@ t_file: open O_CREAT|O_TRUNC
 t_file: open missing is ENOENT
 t_file: read back
 t_file: stdio fprintf/fscanf
-t_file: tmpfile
 t_file: write
 t_file: writev
 t_ipc: EOF once writers close

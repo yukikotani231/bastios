@@ -6,6 +6,8 @@
 #
 # Commands run in /, which is BastiOS's RAM file system. Keep files they
 # make under names starting with "ca_" and remove them in the same command.
+# Do not use /dev/null or /tmp here: whether those exist is measured by the
+# C programs, and a case should measure its applet.
 
 == echo
 $ bb echo hello world
@@ -108,7 +110,7 @@ x
 x
 
 == tee
-$ echo tee | bb tee ca_t >/dev/null; bb cat ca_t; bb rm ca_t
+$ echo tee | bb tee ca_t > ca_u; bb cat ca_t; bb rm ca_t ca_u
 tee
 
 == xargs
@@ -136,12 +138,12 @@ $ bb whoami
 root
 
 == hostname
-$ bb hostname >/dev/null && echo ok
-ok
+$ bb hostname | bb grep -c .
+1
 
 == nproc
-$ bb nproc >/dev/null && echo ok
-ok
+$ bb nproc | bb grep -c '^[0-9]'
+1
 
 == date
 $ bb date +%Y | bb grep -c '^20'
@@ -172,7 +174,7 @@ $ echo cp > ca_a; bb cp ca_a ca_b; bb cat ca_b; bb rm ca_a ca_b
 cp
 
 == mv
-$ echo mv > ca_a; bb mv ca_a ca_b; bb cat ca_b; bb ls ca_a 2>/dev/null; bb rm ca_b
+$ echo mv > ca_a; bb mv ca_a ca_b; bb cat ca_b; bb test -e ca_a && echo left; bb rm ca_b
 mv
 
 == ln -s
@@ -204,15 +206,15 @@ $ bb mkdir ca_d; bb touch ca_d/x; bb find ca_d -name x; bb rm -r ca_d
 ca_d/x
 
 == du
-$ bb du /disk/busybox >/dev/null && echo ok
-ok
+$ bb du /disk/busybox | bb grep -c busybox
+1
 
 == df
-$ bb df / >/dev/null && echo ok
-ok
+$ bb df / | bb grep -c /
+1
 
 == dd
-$ bb dd if=/dev/zero bs=512 count=2 2>/dev/null | bb wc -c
+$ bb dd if=/dev/zero bs=512 count=2 2>ca_e | bb wc -c; bb rm ca_e
 1024
 
 == cmp
@@ -241,7 +243,7 @@ $ PATH=/bin bb which ls
 /bin/ls
 
 == timeout
-$ bb sh -c 'bb timeout 1 bb sleep 5; echo $?' 2>/dev/null
+$ bb sh -c 'bb timeout 1 bb sleep 5; echo $?' 2>ca_e; bb rm ca_e
 143
 
 == nice
