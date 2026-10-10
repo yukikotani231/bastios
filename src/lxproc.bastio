@@ -40,6 +40,86 @@ fn lx_fork(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
 }
 
+/// clone(CLONE_VM | CLONE_VFORK, stack), as posix_spawn makes it: the
+/// child runs in the parent's own address space, on `stack`, while the
+/// parent waits (LXVFORK). The space is not shared: it moves to the child
+/// and moves back when the child calls execve or ends (vfork_give_back).
+fn lx_vfork_vm(k: &mut Kernel, mmu: &Mmu, pid: u64, stack: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k)
+{
+  let c = free_pid(k.procs);
+  if c == 0 {
+    return EAGAIN;
+  }
+  // fork_into frees the space it is given if c turns out to have one:
+  // that must never be the parent's.
+  match take_space(&mut k.spaces, c) {
+    Space::Empty => {},
+    Space::Mapped(u) => {
+      put_space(&mut k.spaces, c, Space::Mapped(u));
+      return EAGAIN;
+    },
+  }
+  let fp = find_free(&mut k.mem);
+  if fp >= NPAGES {
+    return ENOMEM;
+  }
+  let mut fpu = take_page(&mut k.mem, fp);
+  match take_fpu(&mut k.fpus, pid) {
+    Fpu::None => {},
+    Fpu::State(g) => {
+      copy_frame(&mut fpu, g);
+      put_fpu(&mut k.fpus, pid, Fpu::State(g));
+    },
+  }
+  match take_space(&mut k.spaces, pid) {
+    Space::Empty => {
+      give_page(&mut k.mem, fpu);
+      return ENOMEM;
+    },
+    Space::Mapped(t) => {
+      if fork_into(&mut k, mmu, pid, c, t, fpu) != c {
+        return EAGAIN;
+      }
+    },
+  }
+  if stack != 0 {
+    pset(&mut k.procs, c, F_REGS + R_RSP, stack);
+  }
+  ret(&mut k.procs, pid, c);
+  pset(&mut k.procs, pid, F_WAIT, c);
+  pset(&mut k.procs, pid, F_STATE, LXVFORK);
+  return c;
+}
+
+/// If process `c` runs in an address space its parent lent it (see
+/// lx_vfork_vm), gives the space back and wakes the parent. Afterwards c
+/// has no address space.
+fn vfork_give_back(k: &mut Kernel, mmu: &Mmu, c: u64)
+  requires kok(k) && 1 <= c && c < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k)
+{
+  let par = pget(k.procs, c, F_PARENT);
+  if par == 0 || par >= NPROC || state(k.procs, par) != LXVFORK || pget(k.procs, par, F_WAIT) != c {
+    return;
+  }
+  match take_space(&mut k.spaces, c) {
+    Space::Empty => {},
+    Space::Mapped(t) => {
+      match take_space(&mut k.spaces, par) {
+        Space::Empty => { put_space(&mut k.spaces, par, Space::Mapped(t)); },
+        Space::Mapped(u) => {
+          put_space(&mut k.spaces, par, Space::Mapped(u));
+          free_space(&mut k.mem, mmu, t);
+        },
+      }
+    },
+  }
+  pset(&mut k.procs, par, F_WAIT, 0);
+  pset(&mut k.procs, par, F_STATE, READY);
+}
+
 /// lx_fork, once the child's address space `t` and FPU page are made:
 /// installs them as process `c`, a copy of `pid`.
 fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Frame) -> u64
@@ -126,6 +206,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
   match sp {
     Space::Empty => { return ENOEXEC; },
     Space::Mapped(new) => {
+      vfork_give_back(&mut k, mmu, pid);
       match take_space(&mut k.spaces, pid) {
         Space::Empty => {},
         Space::Mapped(t) => { free_space(&mut k.mem, mmu, t); },

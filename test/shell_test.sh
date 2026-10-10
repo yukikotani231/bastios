@@ -233,6 +233,12 @@ steps = [
     # The *at calls relative to a directory descriptor, fchdir, and mmap
     # of a file (user/mdir.c).
     ("mdir", b"mdir: ok in /dx, mapped", b"\n# "),
+    # Small calls: uname, readv, pread/pwrite, limits, sysinfo, statfs,
+    # getrandom, priorities, sessions (user/mmisc.c).
+    ("mmisc", b"mmisc: ok on Linux x86_64", b"\n# "),
+    # posix_spawn: clone(CLONE_VM | CLONE_VFORK) lends the parent's
+    # address space to the child until it execs or exits (user/mspawn.c).
+    ("mspawn", [b"spawned 5", b"mspawn: ok, kept 1234"], b"\n# "),
     ("exit 5", b"[exit 5]"),
     ("rm lxout", b""),
     ("sh", b"BastiOS 0.2 -- type"),

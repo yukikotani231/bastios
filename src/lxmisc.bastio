@@ -1,0 +1,374 @@
+// Small Linux system calls that programs and libc ask about but that have
+// little to do here: the system's name, limits, scheduling, ids, process
+// groups, permissions and times on files, file system statistics, random
+// bytes. Most report a fixed, honest answer (one user, root; one process
+// group per process; nothing to sync) and keep no new state.
+
+import "linux.bastio";
+
+const LX_PREAD64: u64 = 17;
+const LX_PWRITE64: u64 = 18;
+const LX_SCHED_YIELD: u64 = 24;
+const LX_MREMAP: u64 = 25;
+const LX_MADVISE: u64 = 28;
+const LX_FSYNC: u64 = 74;
+const LX_FDATASYNC: u64 = 75;
+const LX_CHMOD: u64 = 90;
+const LX_FCHMOD: u64 = 91;
+const LX_CHOWN: u64 = 92;
+const LX_FCHOWN: u64 = 93;
+const LX_LCHOWN: u64 = 94;
+const LX_UMASK: u64 = 95;
+const LX_GETRLIMIT: u64 = 97;
+const LX_GETRUSAGE: u64 = 98;
+const LX_SYSINFO: u64 = 99;
+const LX_SETUID: u64 = 105;
+const LX_SETGID: u64 = 106;
+const LX_SETPGID: u64 = 109;
+const LX_GETPGRP: u64 = 111;
+const LX_SETSID: u64 = 112;
+const LX_SETREUID: u64 = 113;
+const LX_SETREGID: u64 = 114;
+const LX_GETGROUPS: u64 = 115;
+const LX_SETGROUPS: u64 = 116;
+const LX_SETRESUID: u64 = 117;
+const LX_GETRESUID: u64 = 118;
+const LX_SETRESGID: u64 = 119;
+const LX_GETRESGID: u64 = 120;
+const LX_GETPGID: u64 = 121;
+const LX_GETSID: u64 = 124;
+const LX_UTIME: u64 = 132;
+const LX_STATFS: u64 = 137;
+const LX_FSTATFS: u64 = 138;
+const LX_GETPRIORITY: u64 = 140;
+const LX_SETPRIORITY: u64 = 141;
+const LX_MLOCK: u64 = 149;
+const LX_MUNLOCK: u64 = 150;
+const LX_PRCTL: u64 = 157;
+const LX_SETRLIMIT: u64 = 160;
+const LX_SYNC: u64 = 162;
+const LX_SCHED_GETAFFINITY: u64 = 204;
+const LX_UTIMES: u64 = 235;
+const LX_FUTIMESAT: u64 = 261;
+const LX_FCHOWNAT: u64 = 260;
+const LX_FCHMODAT: u64 = 268;
+const LX_UTIMENSAT: u64 = 280;
+const LX_PRLIMIT64: u64 = 302;
+const LX_GETRANDOM: u64 = 318;
+const LX_UNAME: u64 = 63;
+
+const UTS_FIELD: u64 = 65;            // each struct utsname string
+const UTS_SIZE: u64 = 390;
+const RLIM_INFINITY: u64 = 18446744073709551615;
+const RLIMIT_STACK: u64 = 3;
+const RLIMIT_NOFILE: u64 = 7;
+const STACK_BYTES: u64 = 65536;       // STACK_PAGES pages
+const PR_SET_NAME: u64 = 15;
+const PR_GET_NAME: u64 = 16;
+const RAMFS_MAGIC: u64 = 0x858458F6;
+const STATFS_SIZE: u64 = 120;
+const SYSINFO_SIZE: u64 = 112;
+const RUSAGE_SIZE: u64 = 144;
+
+/// Zeroes the first n bytes of the transfer buffer.
+fn xfer_zero(k: &mut Kernel, n: u64)
+  requires kok(k) && n <= XFER
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= XFER && kok(k)
+  {
+    bset(&mut k.fs.xfer, i, 0);
+    i = i + 1;
+  }
+}
+
+/// Copies `s` (shorter than UTS_FIELD) into field f of a struct utsname
+/// in the transfer buffer, which is zero.
+fn uts_put(k: &mut Kernel, f: u64, s: Str)
+  requires kok(k) && f < 6
+  ensures kok(k)
+{
+  let n = smaller(slen(s), UTS_FIELD - 1);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n < UTS_FIELD && f < 6 && kok(k)
+  {
+    bset(&mut k.fs.xfer, f * UTS_FIELD + i, sget(s, i));
+    i = i + 1;
+  }
+}
+
+/// uname(buf): Linux on x86_64, so libc and programs that look take the
+/// Linux paths; the version names BastiOS.
+fn lx_uname(k: &mut Kernel, pid: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  xfer_zero(&mut k, UTS_SIZE);
+  uts_put(&mut k, 0, "Linux");
+  uts_put(&mut k, 1, "bastios");
+  uts_put(&mut k, 2, "6.1.0-bastios");
+  uts_put(&mut k, 3, "BastiOS 0.2");
+  uts_put(&mut k, 4, "x86_64");
+  uts_put(&mut k, 5, "(none)");
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, UTS_SIZE) != UTS_SIZE {
+    return EFAULT;
+  }
+  return 0;
+}
+
+/// The limit on resource r: descriptors and stack are what the kernel
+/// gives; everything else is unlimited.
+fn rlimit_of(r: u64) -> u64 {
+  if r == RLIMIT_NOFILE {
+    return LXNFD;
+  }
+  if r == RLIMIT_STACK {
+    return STACK_BYTES;
+  }
+  return RLIM_INFINITY;
+}
+
+/// Writes struct rlimit {cur, max} for resource r to va (if not 0).
+fn rlimit_out(k: &mut Kernel, pid: u64, r: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if va == 0 {
+    return 0;
+  }
+  xfer_u64(&mut k.fs.xfer, 0, rlimit_of(r));
+  xfer_u64(&mut k.fs.xfer, 8, rlimit_of(r));
+  return lx_put_out(&mut k, pid, va, 16);
+}
+
+/// sysinfo(info): uptime, memory in bytes (mem_unit 1) and the number of
+/// processes; no load averages or swap.
+fn lx_sysinfo(k: &mut Kernel, pid: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut procs = 0;
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && procs < p && kok(k) && pid < NPROC
+  {
+    if state(k.procs, p) != FREE {
+      procs = procs + 1;
+    }
+    p = p + 1;
+  }
+  let nfree = smaller(count_free(k.mem.bm), NPAGES);
+  xfer_zero(&mut k, SYSINFO_SIZE);
+  xfer_u64(&mut k.fs.xfer, 0, k.ns / NS_PER_S);   // uptime
+  xfer_u64(&mut k.fs.xfer, 32, NPAGES * 4096);    // totalram
+  xfer_u64(&mut k.fs.xfer, 40, nfree * 4096);     // freeram
+  bset(&mut k.fs.xfer, 80, cast[u8](procs));      // procs (u16)
+  bset(&mut k.fs.xfer, 104, 1);                   // mem_unit
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, SYSINFO_SIZE) != SYSINFO_SIZE {
+    return EFAULT;
+  }
+  return 0;
+}
+
+/// getrusage(who, usage): user time is the ticks spent running; the rest
+/// is zero.
+fn lx_getrusage(k: &mut Kernel, pid: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let t = smaller(pget(k.procs, pid, F_TICKS), 0xFFFFFFFFFFFF);
+  xfer_zero(&mut k, RUSAGE_SIZE);
+  xfer_u64(&mut k.fs.xfer, 0, t / 100);              // ru_utime.tv_sec
+  xfer_u64(&mut k.fs.xfer, 8, t % 100 * 10000);      // ru_utime.tv_usec
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, RUSAGE_SIZE) != RUSAGE_SIZE {
+    return EFAULT;
+  }
+  return 0;
+}
+
+/// statfs / fstatfs: one file system of 4 KiB blocks, sized by the free
+/// memory (files live in memory), with names up to FNAME_MAX bytes.
+fn lx_statfs(k: &mut Kernel, pid: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let nfree = smaller(count_free(k.mem.bm), NPAGES);
+  xfer_zero(&mut k, STATFS_SIZE);
+  xfer_u64(&mut k.fs.xfer, 0, RAMFS_MAGIC);       // f_type
+  xfer_u64(&mut k.fs.xfer, 8, 4096);              // f_bsize
+  xfer_u64(&mut k.fs.xfer, 16, NPAGES);           // f_blocks
+  xfer_u64(&mut k.fs.xfer, 24, nfree);            // f_bfree
+  xfer_u64(&mut k.fs.xfer, 32, nfree);            // f_bavail
+  xfer_u64(&mut k.fs.xfer, 40, NFILES + DSLOTS);  // f_files
+  xfer_u64(&mut k.fs.xfer, 48, NFILES);           // f_ffree (a guess: the table is not counted)
+  xfer_u64(&mut k.fs.xfer, 64, FNAME_MAX);        // f_namelen
+  xfer_u64(&mut k.fs.xfer, 72, 4096);             // f_frsize
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, STATFS_SIZE) != STATFS_SIZE {
+    return EFAULT;
+  }
+  return 0;
+}
+
+/// getrandom(buf, n, flags): bytes from a linear congruential generator seeded by the
+/// HPET clock. Not a secure source; there is no entropy pool yet.
+fn lx_getrandom(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let want = smaller(n, XFER);
+  let mut x = k.ns % 2147483648;
+  let mut i = 0;
+  while i < want
+    invariant i <= want && want <= XFER && kok(k) && x < 2147483648
+  {
+    x = (x * 1103515245 + 12345) % 2147483648;
+    bset(&mut k.fs.xfer, i, cast[u8](x / 65536 % 256));
+    i = i + 1;
+  }
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want) != want {
+    return EFAULT;
+  }
+  return want;
+}
+
+/// Whether the path at va (from dirfd) names something.
+fn path_exists(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  return lx_stat(&mut k, pid, dirfd, va, 0);
+}
+
+/// pread64 / pwrite64 on a file: at offset `off`, leaving the file offset
+/// where it was.
+fn lx_pio(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, va: u64, n: u64, off: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_PIPE_R || d.kind == K_PIPE_W || d.kind == K_SOCK || d.kind == K_CONSOLE {
+    return ESPIPE;
+  }
+  if d.kind != K_FILE {
+    return EBADF;
+  }
+  let was = vfs_offset(k.fs, d.x);
+  if !vfs_seek(&mut k.fs, d.x, off) {
+    return EBADF;
+  }
+  let mut r = 0;
+  if write {
+    r = lx_write_fd(&mut con, &mut k, pid, fd, va, n);
+  } else {
+    r = lx_file_read(&mut k, pid, d.x, va, n);
+  }
+  vfs_seek(&mut k.fs, d.x, was);
+  return r;
+}
+
+fn is_misc_call(n: u64) -> bool {
+  return n == LX_PREAD64 || n == LX_PWRITE64 || n == LX_SCHED_YIELD || n == LX_MREMAP
+    || n == LX_MADVISE || n == LX_FSYNC || n == LX_FDATASYNC || n == LX_CHMOD || n == LX_FCHMOD
+    || n == LX_CHOWN || n == LX_FCHOWN || n == LX_LCHOWN || n == LX_UMASK || n == LX_GETRLIMIT
+    || n == LX_GETRUSAGE || n == LX_SYSINFO || n == LX_SETUID || n == LX_SETGID || n == LX_SETPGID
+    || n == LX_GETPGRP || n == LX_SETSID || n == LX_SETREUID || n == LX_SETREGID
+    || n == LX_GETGROUPS || n == LX_SETGROUPS || n == LX_SETRESUID || n == LX_GETRESUID
+    || n == LX_SETRESGID || n == LX_GETRESGID || n == LX_GETPGID || n == LX_GETSID
+    || n == LX_UTIME || n == LX_STATFS || n == LX_FSTATFS || n == LX_GETPRIORITY
+    || n == LX_SETPRIORITY || n == LX_MLOCK || n == LX_MUNLOCK || n == LX_PRCTL
+    || n == LX_SETRLIMIT || n == LX_SYNC || n == LX_SCHED_GETAFFINITY || n == LX_UTIMES
+    || n == LX_FUTIMESAT || n == LX_FCHOWNAT || n == LX_FCHMODAT || n == LX_UTIMENSAT
+    || n == LX_PRLIMIT64 || n == LX_GETRANDOM || n == LX_UNAME;
+}
+
+/// System call n of process pid, with its first three arguments.
+fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  let r10 = pget(k.procs, pid, F_REGS + R_R10);
+  if n == LX_SCHED_YIELD {
+    ret(&mut k.procs, pid, 0);
+    return SWITCH;
+  }
+  let mut r = 0;
+  if n == LX_PREAD64 || n == LX_PWRITE64 {
+    r = lx_pio(&mut con, &mut k, pid, n == LX_PWRITE64, a, b, c, r10);
+  } else if n == LX_UNAME {
+    r = lx_uname(&mut k, pid, a);
+  } else if n == LX_MREMAP {
+    r = ENOMEM;                             // callers (musl's realloc) fall back to a copy
+  } else if n == LX_FSYNC || n == LX_FDATASYNC || n == LX_FCHMOD || n == LX_FCHOWN {
+    let d = fd_look(k, pid, a);
+    if d.kind == K_BAD {
+      r = EBADF;                            // writes go straight through; owners and modes are not kept
+    }
+  } else if n == LX_CHMOD || n == LX_CHOWN || n == LX_LCHOWN || n == LX_UTIME || n == LX_UTIMES {
+    r = path_exists(&mut k, pid, AT_FDCWD, a);
+  } else if n == LX_FCHMODAT || n == LX_FCHOWNAT || n == LX_FUTIMESAT || n == LX_UTIMENSAT {
+    if b == 0 && n == LX_UTIMENSAT {
+      let d = fd_look(k, pid, a);
+      if d.kind == K_BAD {
+        r = EBADF;                          // futimens(fd)
+      }
+    } else {
+      r = path_exists(&mut k, pid, a, b);
+    }
+  } else if n == LX_UMASK {
+    r = 18;                                 // 022: not kept, and the mode is not either
+  } else if n == LX_GETRLIMIT {
+    r = rlimit_out(&mut k, pid, a, b);
+  } else if n == LX_PRLIMIT64 {
+    r = rlimit_out(&mut k, pid, b, r10);    // a new limit is accepted and not applied
+  } else if n == LX_GETRUSAGE {
+    r = lx_getrusage(&mut k, pid, b);
+  } else if n == LX_SYSINFO {
+    r = lx_sysinfo(&mut k, pid, a);
+  } else if n == LX_STATFS || n == LX_FSTATFS {
+    r = lx_statfs(&mut k, pid, b);
+  } else if n == LX_GETPGRP || n == LX_SETSID {
+    r = pid;                                // each process leads its own group and session
+  } else if n == LX_GETPGID || n == LX_GETSID {
+    r = pid;
+    if a != 0 {
+      r = a;
+    }
+  } else if n == LX_GETPRIORITY {
+    r = 20;                                 // nice 0, as the system call encodes it
+  } else if n == LX_GETRESUID || n == LX_GETRESGID {
+    xfer_u64(&mut k.fs.xfer, 0, 0);
+    r = lx_put_out(&mut k, pid, a, 4);
+    if r == 0 {
+      r = lx_put_out(&mut k, pid, b, 4);
+    }
+    if r == 0 {
+      r = lx_put_out(&mut k, pid, c, 4);
+    }
+  } else if n == LX_PRCTL {
+    if a != PR_SET_NAME && a != PR_GET_NAME {
+      r = EINVAL;
+    } else if a == PR_GET_NAME {
+      xfer_zero(&mut k, 16);
+      r = lx_put_out(&mut k, pid, b, 16);
+    }
+  } else if n == LX_SCHED_GETAFFINITY {
+    if b < 8 {
+      r = EINVAL;
+    } else {
+      xfer_u64(&mut k.fs.xfer, 0, 1);       // the process runs on any processor; say one
+      r = lx_put_out(&mut k, pid, c, 8);
+      if r == 0 {
+        r = 8;
+      }
+    }
+  } else if n == LX_GETRANDOM {
+    r = lx_getrandom(&mut k, pid, a, b);
+  }
+  // Everything else (setuid and friends, getgroups, setpgid, setpriority,
+  // setrlimit, madvise, mlock, munlock, sync) succeeds doing nothing.
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}
