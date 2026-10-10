@@ -1,0 +1,36 @@
+// Built on BastiOS by bastioc1 (test/compat/bastio.txt): counts the primes
+// below 1000 with a sieve and prints the count. Every index is proved in
+// bounds before the program is compiled.
+
+fn put_num(con: &Serial, x: u64) {
+  if x >= 10 {
+    put_num(con, x / 10);
+  }
+  serial_write(con, cast[u8](48 + x % 10));
+}
+
+fn main(con: Serial) -> Serial {
+  let n = 1000;
+  let mut composite = balloc(n);
+  let mut count = 0;
+  let mut i = 2;
+  while i < n
+    invariant i >= 2 && i <= n && blen(composite) == n && count < i
+  {
+    if bget(composite, i) == 0 {
+      count = count + 1;
+      let mut j = i * i;
+      while j < n
+        invariant blen(composite) == n
+      {
+        bset(&mut composite, j, 1);
+        j = j + i;
+      }
+    }
+    i = i + 1;
+  }
+  bfree(composite);
+  put_num(con, count);
+  serial_write(con, 10);
+  return con;
+}

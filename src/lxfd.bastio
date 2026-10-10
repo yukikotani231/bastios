@@ -430,7 +430,7 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, mode: u6
 {
   let n = lx_path_at(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
-    return ENOENT;
+    return k.perr;
   }
   return lx_open_n(&mut k, pid, n, flags, mode);
 }
@@ -440,6 +440,15 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   requires kok(k) && pid < NPROC && n <= FNAME_MAX
   ensures kok(k)
 {
+  if flags & LO_TMPFILE != 0 {
+    return EOPNOTSUPP;                      // so a program falls back to a named file
+  }
+  if (flags % 4 != 0 || flags & LO_TRUNC != 0 || flags & LO_CREAT != 0) && vfs_ro(&mut k.fs, n) {
+    let exists = vfs_lookup(&mut k.fs, n) != NO_FILE || dir_at(&mut k, n) != NO_FILE;
+    if (exists && (flags % 4 != 0 || flags & LO_TRUNC != 0)) || (!exists && flags & LO_CREAT != 0) {
+      return EROFS;                         // a read-only mount (src/lxmount.bastio)
+    }
+  }
   let pf = proc_file(k.procs, k.fs.xfer, n);
   if pf != 0 {
     if flags % 4 != 0 || pf % 16 == PF_EXE {
@@ -529,6 +538,7 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     vfs_close(&mut k.fs, &mut k.mem, row);
     return ENFILE;
   }
+  of_set(&mut k.ofd, h, 3, flags / LO_NONBLOCK % 2);   // kept for F_GETFL only
   let fd = fd_install(&mut k, pid, h);
   if fd < LXNFD && flags / LO_CLOEXEC % 2 == 1 {
     fd_set(&mut k.lxfd, pid, fd, FD_OFD + h + FD_CLOEXEC);
@@ -601,6 +611,35 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     kind = of_get(k.ofd, h, 0);
   }
   let pipe = h < OFD_N && can_block(kind);
+  let mut row = FD_ROWS;
+  if h < OFD_N && kind == OF_FILE {
+    row = of_get(k.ofd, h, 2);
+  }
+  if cmd == F_GETFL && row < FD_ROWS {
+    let m = fget(k.fs.ftab, row, FD_MODE);
+    let mut fl = 0;                         // O_RDONLY
+    if m / O_WRITE % 2 == 1 {
+      fl = LO_WRONLY;
+      if m / O_READ % 2 == 1 {
+        fl = LO_RDWR;
+      }
+    }
+    if m / O_APPEND % 2 == 1 {
+      fl = fl + LO_APPEND;
+    }
+    return fl + of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK;
+  }
+  if cmd == F_SETFL && row < FD_ROWS {
+    // O_APPEND takes effect; O_NONBLOCK is only reported back (a file never blocks).
+    let m = fget(k.fs.ftab, row, FD_MODE);
+    let mut nm = m % O_APPEND;              // O_TRUNC and O_CREATE only matter at open
+    if arg / LO_APPEND % 2 == 1 {
+      nm = nm + O_APPEND;
+    }
+    fset(&mut k.fs.ftab, row, FD_MODE, nm);
+    of_set(&mut k.ofd, h, 3, arg / LO_NONBLOCK % 2);
+    return 0;
+  }
   if cmd == F_GETFL {
     if !pipe {
       return LO_RDWR;
@@ -715,14 +754,7 @@ fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   }
   let want = smaller(smaller(n, count), XFER);
   let head = pi_get(k.pipes, p, 0) % PIPE_CAP;
-  let ring = p * PIPE_CAP;
-  let mut i = 0;
-  while i < want
-    invariant i <= want && want <= XFER && head < PIPE_CAP && ring + PIPE_CAP <= PIPE_BYTES && kok(k)
-  {
-    bset(&mut k.fs.xfer, i, bget(k.pipebuf, ring + (head + i) % PIPE_CAP));
-    i = i + 1;
-  }
+  ring_out(&mut k.fs.xfer, 0, k.pipebuf, p * PIPE_CAP, PIPE_CAP, head, want);
   let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
   if put == NO_RESULT || (put == 0 && want > 0) {
     return EFAULT;
@@ -756,16 +788,31 @@ fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
     return EFAULT;
   }
   let head = pi_get(k.pipes, p, 0) % PIPE_CAP;
-  let ring = p * PIPE_CAP;
-  let mut i = 0;
-  while i < got
-    invariant i <= got && got <= room && got <= XFER && head < PIPE_CAP && ring + PIPE_CAP <= PIPE_BYTES && kok(k)
-  {
-    bset(&mut k.pipebuf, ring + (head + count + i) % PIPE_CAP, bget(k.fs.xfer, i));
-    i = i + 1;
-  }
+  ring_in(&mut k.pipebuf, p * PIPE_CAP, PIPE_CAP, (head + count) % PIPE_CAP, k.fs.xfer, 0, got);
   pi_set(&mut k.pipes, p, 1, count + got);
   return got;
+}
+
+/// Copies n bytes out of the ring buffer src[base .. base + cap], starting
+/// at position `from` and wrapping at the end, into dst from index d.
+fn ring_out(dst: &mut Bytes, d: u64, src: &Bytes, base: u64, cap: u64, from: u64, n: u64)
+  requires from < cap && n <= cap && base + cap <= blen(src) && d + n <= blen(dst)
+  ensures blen(dst) == old(blen(dst))
+{
+  let first = smaller(n, cap - from);
+  bcopy(&mut dst, d, src, base + from, first);
+  bcopy(&mut dst, d + first, src, base, n - first);
+}
+
+/// Copies src[s .. s + n] into the ring buffer dst[base .. base + cap],
+/// from position `at`, wrapping at the end.
+fn ring_in(dst: &mut Bytes, base: u64, cap: u64, at: u64, src: &Bytes, s: u64, n: u64)
+  requires at < cap && n <= cap && base + cap <= blen(dst) && s + n <= blen(src)
+  ensures blen(dst) == old(blen(dst))
+{
+  let first = smaller(n, cap - at);
+  bcopy(&mut dst, base + at, src, s, first);
+  bcopy(&mut dst, base, src, s + first, n - first);
 }
 
 /// Makes process `pid` run system call `n` again later: a wait.

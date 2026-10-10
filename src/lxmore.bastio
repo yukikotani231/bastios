@@ -27,7 +27,6 @@ const MFD_CLOEXEC: u64 = 1;
 const COPY_MAX: u64 = 0x7FFFF000;         // the most one sendfile moves, as on Linux
 const EFBIG: u64 = 18446744073709551589;      // 2^64 - 27
 const ENODEV: u64 = 18446744073709551597;     // 2^64 - 19
-const EOPNOTSUPP: u64 = 18446744073709551521; // 2^64 - 95
 
 fn is_more_call(n: u64) -> bool {
   return n == LX_SENDFILE || n == LX_FLOCK || n == LX_FADVISE64 || n == LX_FALLOCATE || n == LX_PREADV
@@ -52,14 +51,7 @@ fn pipe_put_xfer(k: &mut Kernel, p: u64, n: u64) -> u64
   }
   let put = smaller(n, room);
   let head = pi_get(k.pipes, p, 0) % PIPE_CAP;
-  let ring = p * PIPE_CAP;
-  let mut i = 0;
-  while i < put
-    invariant i <= put && put <= room && put <= XFER && head < PIPE_CAP && ring + PIPE_CAP <= PIPE_BYTES && kok(k)
-  {
-    bset(&mut k.pipebuf, ring + (head + count + i) % PIPE_CAP, bget(k.fs.xfer, i));
-    i = i + 1;
-  }
+  ring_in(&mut k.pipebuf, p * PIPE_CAP, PIPE_CAP, (head + count) % PIPE_CAP, k.fs.xfer, 0, put);
   pi_set(&mut k.pipes, p, 1, count + put);
   return put;
 }

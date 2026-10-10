@@ -1,10 +1,15 @@
 # Checks that pass on BastiOS (make compat-baseline rewrites this).
 # make compat fails if one of them stops passing.
 apps: ash: a 1200-byte typed line
+apps: httpd: serve a page, fetch it over loopback
 apps: lua: arithmetic and strings
 apps: lua: coroutines and tables
 apps: lua: files
 apps: lua: popen and os.execute
+apps: micropython: classes, generators, exceptions, big integers
+apps: micropython: json, re, files, os
+apps: micropython: threads and a lock
+apps: nc: a raw HTTP request to the host
 apps: qjs: files and exec
 apps: qjs: language
 apps: qjs: promises and timers
@@ -12,6 +17,14 @@ apps: sqlite3: 20000 rows, an index and a query
 apps: sqlite3: WAL
 apps: sqlite3: a database file
 apps: sqlite3: in memory
+apps: wget: 1 MiB from the host
+apps: wget: a file from the host
+apps: wget: a missing file is an error
+bastio: bastioc1: a failed proof builds nothing
+bastio: bastioc1: a type error
+bastio: bastioc1: prove a program
+bastio: bastioc1: prove, build with tcc, run
+bastio: z3: a query
 busybox: awk
 busybox: base64
 busybox: basename/dirname
@@ -205,6 +218,22 @@ t_lock: lock file
 t_lock: read locks are shared
 t_lock: the owner relocks freely
 t_lock: unlocking a middle part splits it
+t_ltp2: F_GETFL reports the access mode of a file
+t_ltp2: F_SETFL O_APPEND appends to a file
+t_ltp2: MSG_OOB on UDP is EOPNOTSUPP
+t_ltp2: a file reads 8 KiB in one read
+t_ltp2: a page fault runs the SIGSEGV handler
+t_ltp2: accept never hands out a closed connection
+t_ltp2: fsync of a pipe is EINVAL
+t_ltp2: getgroups counts and lists the groups
+t_ltp2: getgroups with a negative size is EINVAL
+t_ltp2: listen on a UDP socket is EOPNOTSUPP
+t_ltp2: mincore errors
+t_ltp2: mincore marks mapped pages
+t_ltp2: mlockall and munlockall succeed
+t_ltp2: personality is kept
+t_ltp2: send on an unconnected TCP socket is EPIPE
+t_ltp2: sendto with a huge address length is EINVAL
 t_mem: 64 MiB of address space
 t_mem: MAP_SHARED anonymous across fork
 t_mem: MAP_SHARED write-back at exit, after close
@@ -318,6 +347,19 @@ t_proc: uname
 t_proc: wait with no children is ECHILD
 t_proc: waitid
 t_proc: waitpid WNOHANG
+t_sig2: 24 processes at once
+t_sig2: SA_ONSTACK runs on the alternate stack
+t_sig2: SA_RESETHAND runs the handler once
+t_sig2: SA_RESTART does not restart epoll_wait
+t_sig2: SA_RESTART does not restart nanosleep
+t_sig2: SA_RESTART does not restart poll
+t_sig2: a PROT_NONE page is EFAULT to a system call
+t_sig2: epoll_pwait blocks its mask while it waits
+t_sig2: mprotect makes a PROT_NONE mapping usable
+t_sig2: read into an untouched stack buffer
+t_sig2: rt_sigprocmask with a wrong sigset size is EINVAL
+t_sig2: sigaltstack smaller than MINSIGSTKSZ is ENOMEM
+t_sig2: the stack grows to 512 KiB
 t_signal: SA_SIGINFO
 t_signal: SIGCHLD on child exit
 t_signal: SIG_IGN
@@ -367,6 +409,8 @@ t_thread: gettid differs in a thread
 t_thread: pthread_create + join
 t_thread: pthread_detach
 t_thread: thread-local storage
+t_thread: timed condition wait, signalled early (monotonic)
+t_thread: timed condition wait, signalled early (realtime)
 t_time: clock_getres
 t_time: clock_gettime BOOTTIME
 t_time: clock_gettime MONOTONIC
@@ -380,3 +424,8 @@ t_time: nanosleep 100 ms
 t_time: sleep(1)
 t_time: strftime + localtime
 t_time: time
+tty: kilo: edit and save a file
+tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
+tty: micropython: REPL line editing and history
+tty: stty: the terminal is in canonical mode again after an editor
+tty: vi: edit and save a file

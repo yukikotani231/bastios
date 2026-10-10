@@ -22,6 +22,7 @@ const LX_RENAME: u64 = 82;
 const LX_RENAMEAT: u64 = 264;
 const LX_RENAMEAT2: u64 = 316;
 const RENAME_NOREPLACE: u64 = 1;
+const RENAME_EXCHANGE: u64 = 2;
 const DT_DIR: u64 = 4;
 const DT_REG: u64 = 8;
 const DENT_HDR: u64 = 19;             // d_ino, d_off, d_reclen, d_type
@@ -216,7 +217,7 @@ fn lx_chdir(k: &mut Kernel, pid: u64, path: u64) -> u64
 {
   let n = lx_path_in(&mut k, pid, path);
   if n == NO_RESULT {
-    return ENOENT;
+    return k.perr;
   }
   if dir_at(&mut k, n) == NO_FILE {
     if vfs_lookup(&mut k.fs, n) != NO_FILE {
@@ -298,13 +299,19 @@ fn lx_mkdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
 {
   let n = lx_path_at_nf(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
-    return ENOENT;
+    return k.perr;
   }
   if n == 0 || is_bin(k.fs.xfer, n) || vfs_lookup(&mut k.fs, n) != NO_FILE || vfs_dir_lookup(&mut k.fs, n) != NO_FILE {
     return EEXIST;
   }
+  if vfs_ro(&mut k.fs, n) {
+    return EROFS;
+  }
   if !vfs_mkdir(&mut k.fs, n) {
-    return ENOENT;                          // no parent, or no room
+    if parent_ok(&mut k.fs, n) {
+      return ENOSPC;                        // no room
+    }
+    return ENOENT;
   }
   return 0;
 }
@@ -316,7 +323,7 @@ fn lx_rmdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
 {
   let n = lx_path_at_nf(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
-    return ENOENT;
+    return k.perr;
   }
   let d = dir_at(&mut k, n);
   if d == NO_FILE {
@@ -327,6 +334,12 @@ fn lx_rmdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
   }
   if d < DIR_VFS || d >= DIR_PROC || d - DIR_VFS == VDIR_ROOT || d - DIR_VFS == VDIR_DISK {
     return EBUSY;                           // "/", "/bin" and "/disk" stay
+  }
+  if vfs_is_mount(&mut k.fs, n) {
+    return EBUSY;                           // a tmpfs mount's directory (src/lxmount.bastio)
+  }
+  if vfs_ro(&mut k.fs, n) {
+    return EROFS;
   }
   if !vfs_rmdir(&mut k.fs, &mut k.mem, n) {
     return ENOTEMPTY;
@@ -341,10 +354,13 @@ fn lx_unlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
 {
   let n = lx_path_at_nf(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
-    return ENOENT;
+    return k.perr;
   }
   if dir_at(&mut k, n) != NO_FILE {
     return EISDIR;
+  }
+  if vfs_ro(&mut k.fs, n) && vfs_lookup(&mut k.fs, n) != NO_FILE {
+    return EROFS;
   }
   if !vfs_unlink(&mut k.fs, &mut k.mem, n) {
     return ENOENT;
@@ -416,19 +432,23 @@ fn rename_clear(k: &mut Kernel, m: u64, src_dir: bool, noreplace: bool) -> u64
   return 0;
 }
 
-/// rename, renameat and renameat2 (RENAME_NOREPLACE; other flags are
-/// refused). A file or empty directory at the new name is replaced, by
-/// removing it first: not atomically, as Linux does it.
+/// rename, renameat and renameat2 (RENAME_NOREPLACE, or RENAME_EXCHANGE
+/// for two names that are not directories; other flags are refused). A
+/// file or empty directory at the new name is replaced, by removing it
+/// first: not atomically, as Linux does it.
 fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if flags == RENAME_EXCHANGE {
+    return lx_exchange(&mut k, pid, odir, opath, ndir, npath);
+  }
   if flags & !RENAME_NOREPLACE != 0 {
-    return EINVAL;
+    return EINVAL;                          // RENAME_WHITEOUT, or EXCHANGE with another flag
   }
   let n = lx_path_at_nf(&mut k, pid, odir, opath);
   if n == NO_RESULT {
-    return ENOENT;
+    return k.perr;
   }
   let d = dir_at(&mut k, n);
   let src_f = vfs_lookup(&mut k.fs, n);
@@ -438,13 +458,23 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
   if d != NO_FILE && (d < DIR_VFS || d >= DIR_PROC || d - DIR_VFS == VDIR_ROOT || d - DIR_VFS == VDIR_DISK) {
     return EBUSY;
   }
+  if vfs_is_mount(&mut k.fs, n) {
+    return EBUSY;
+  }
+  if vfs_ro(&mut k.fs, n) {
+    return EROFS;
+  }
   let src_disk = on_disk(k.fs, n);
   let mut t = balloc(2 * FNAME_MAX);
   xfer_save(k, &mut t, 0, n);
   let m = lx_path_at_nf(&mut k, pid, ndir, npath);
   if m == NO_RESULT {
     bfree(t);
-    return ENOENT;
+    return k.perr;
+  }
+  if vfs_ro(&mut k.fs, m) {
+    bfree(t);
+    return EROFS;
   }
   xfer_save(k, &mut t, n, m);
   let mut same = n == m;
@@ -472,6 +502,61 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
   bfree(t);
   if !vfs_rename(&mut k.fs, n, m) {
     return ENOENT;                          // no such directory, or a directory into itself
+  }
+  return 0;
+}
+
+/// renameat2 with RENAME_EXCHANGE: the two names swap files (vfs_exchange).
+/// Both must exist, on one file system; directories are not offered
+/// (EINVAL).
+fn lx_exchange(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = lx_path_at_nf(&mut k, pid, odir, opath);
+  if n == NO_RESULT {
+    return k.perr;
+  }
+  let a = vfs_lookup(&mut k.fs, n);
+  let ad = dir_at(&mut k, n);
+  let a_disk = on_disk(k.fs, n);
+  if (a != NO_FILE || ad != NO_FILE) && vfs_ro(&mut k.fs, n) {
+    return EROFS;
+  }
+  let mut t = balloc(2 * FNAME_MAX);
+  xfer_save(k, &mut t, 0, n);
+  let m = lx_path_at_nf(&mut k, pid, ndir, npath);
+  if m == NO_RESULT {
+    bfree(t);
+    return k.perr;
+  }
+  let b = vfs_lookup(&mut k.fs, m);
+  let bd = dir_at(&mut k, m);
+  if (a == NO_FILE && ad == NO_FILE) || (b == NO_FILE && bd == NO_FILE) {
+    bfree(t);
+    return ENOENT;
+  }
+  if ad != NO_FILE || bd != NO_FILE {
+    bfree(t);
+    return EINVAL;
+  }
+  if on_disk(k.fs, m) != a_disk {
+    bfree(t);
+    return EXDEV;
+  }
+  if a == b {
+    bfree(t);
+    return 0;                               // two names of one file
+  }
+  if vfs_ro(&mut k.fs, m) {
+    bfree(t);
+    return EROFS;
+  }
+  xfer_save(k, &mut t, n, m);
+  xfer_load(&mut k, t, 0, n + m);
+  bfree(t);
+  if !vfs_exchange(&mut k.fs, n, m) {
+    return EIO;
   }
   return 0;
 }

@@ -107,19 +107,22 @@ fn e1k_rxbuf_addr(e: &E1k, b: u64) -> u64
   return a + b % 2 * RX_BUF;
 }
 
-/// Byte `off` of receive buffer b.
-fn e1k_rxbuf_read8(e: &mut E1k, b: u64, off: u64) -> u8
-  requires b < E1K_DESCS && off < RX_BUF
+/// Copies the first n bytes of receive buffer `b` into pkt.
+fn e1k_rxbuf_copy(e: &mut E1k, b: u64, pkt: &mut Bytes, n: u64)
+  requires e1k_ok(e) && b < E1K_DESCS && n <= RX_BUF && n <= blen(pkt)
+  ensures e1k_ok(e) && blen(pkt) == old(blen(pkt)) && e.live == old(e.live) && e.irq == old(e.irq)
+  ensures e.rx_next == old(e.rx_next) && e.tx_next == old(e.tx_next)
 {
-  let at = b % 2 * RX_BUF + off;
+  let at = b % 2 * RX_BUF;
   if b < 2 {
-    return dma_read8(&mut e.rb0, at);
+    dma_to_bytes(&mut pkt, 0, &mut e.rb0, at, n);
   } else if b < 4 {
-    return dma_read8(&mut e.rb1, at);
+    dma_to_bytes(&mut pkt, 0, &mut e.rb1, at, n);
   } else if b < 6 {
-    return dma_read8(&mut e.rb2, at);
+    dma_to_bytes(&mut pkt, 0, &mut e.rb2, at, n);
+  } else {
+    dma_to_bytes(&mut pkt, 0, &mut e.rb3, at, n);
   }
-  return dma_read8(&mut e.rb3, at);
 }
 
 /// Word w of the EEPROM, or 65536 if the card never answered.
@@ -321,14 +324,7 @@ fn e1k_recv(e: &mut E1k, pkt: &mut Bytes) -> u64
   if st / DESC_EOP % 2 == 1 && got <= RX_BUF - NET_HDR {
     n = got;                          // else a frame over several buffers: dropped
   }
-  let l = blen(pkt);
-  let mut i = 0;
-  while i < n
-    invariant i <= n && n <= RX_BUF - NET_HDR && e1k_ok(e) && blen(pkt) == l && l >= RX_BUF && b < E1K_DESCS
-  {
-    bset(&mut pkt, i, e1k_rxbuf_read8(&mut e, b, i));
-    i = i + 1;
-  }
+  e1k_rxbuf_copy(&mut e, b, &mut pkt, n);
   // Back to the card: clear its status, then move the tail onto it.
   dma_write64(&mut e.ring, b * 16 + 8, 0);
   e1k_write(&mut e, E1K_RDT, b);
@@ -345,13 +341,7 @@ fn e1k_send(e: &mut E1k, pkt: &Bytes, n: u64) -> bool
   if !e.live {
     return false;
   }
-  let mut j = 0;
-  while j < n
-    invariant j <= n && n <= FRAME_MAX && n <= blen(pkt) && e1k_ok(e)
-  {
-    dma_write8(&mut e.tb, j, bget(pkt, j));
-    j = j + 1;
-  }
+  bytes_to_dma(&mut e.tb, 0, pkt, 0, n);
   let d = E1K_TXR + e.tx_next * 16;
   dma_write64(&mut e.ring, d, dma_addr(e.tb));
   dma_write64(&mut e.ring, d + 8, n + TX_CMD * 16777216);

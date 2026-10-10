@@ -392,27 +392,14 @@ fn nvme_out(d: &mut Dma, from: u64, cnt: u64, out: &mut Bytes, at: u64)
   requires from + cnt <= 4096 && from % 8 == 0 && cnt % 8 == 0 && at + cnt <= blen(out)
   ensures blen(out) == old(blen(out))
 {
-  let l = blen(out);
-  let mut i = 0;
-  while i < cnt
-    invariant i <= cnt && i % 8 == 0 && blen(out) == l
-  {
-    put_u64(&mut out, at + i, dma_read64(&mut d, from + i));
-    i = i + 8;
-  }
+  dma_to_bytes(&mut out, at, &mut d, from, cnt);
 }
 
 /// Copies src[at..at + cnt] into the data page from `to`.
 fn nvme_in(d: &mut Dma, to: u64, cnt: u64, src: &Bytes, at: u64)
   requires to + cnt <= 4096 && to % 8 == 0 && cnt % 8 == 0 && at + cnt <= blen(src)
 {
-  let mut i = 0;
-  while i < cnt
-    invariant i <= cnt && i % 8 == 0
-  {
-    dma_write64(&mut d, to + i, get_u64(src, at + i));
-    i = i + 8;
-  }
+  bytes_to_dma(&mut d, to, src, at, cnt);
 }
 
 /// Reads sector `lba` into buf[0..512]. Returns false if the drive fails

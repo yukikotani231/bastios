@@ -27,6 +27,8 @@ const FUTEX_REQUEUE: u64 = 3;
 const FUTEX_CMP_REQUEUE: u64 = 4;
 const FUTEX_WAIT_BITSET: u64 = 9;
 const FUTEX_WAKE_BITSET: u64 = 10;
+const FUTEX_WOKEN: u64 = 1;         // F_FUTEX of a timed waiter woken on a processor (futex_wake)
+const FUTEX_CLOCK_REALTIME: u64 = 256;
 const FUTEX_CMD: u64 = 127;          // the rest: FUTEX_PRIVATE_FLAG, FUTEX_CLOCK_REALTIME
 const ETIMEDOUT: u64 = 18446744073709551506;   // 2^64 - 110
 
@@ -363,6 +365,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   pset(&mut k.procs, c, F_CODE, 0);
   pset(&mut k.procs, c, F_TICKS, 0);
   pset(&mut k.procs, c, F_PARENT, 0);       // threads are nobody's children
+  pset(&mut k.procs, c, F_ALTSIZE, 0);      // nor have an alternate signal stack
   pset(&mut k.procs, c, F_QUIET, 0);
   group_fork(&mut k.procs, pid, c);
   pset(&mut k.procs, c, F_REGS + R_RAX, 0);
@@ -472,6 +475,16 @@ fn futex_waiting(procs: &Buf, q: u64, g: u64, addr: u64) -> bool
     && pget(procs, q, F_RESTART) != 0 && pget(procs, q, F_REGS + R_RAX) == LX_FUTEX;
 }
 
+/// Whether q is in a timed wait on addr in group g but on a processor right
+/// now, between two tries of the call (a timed wait tries again each time
+/// it is scheduled, src/lxtime.bastio's wait_until).
+fn futex_polling(procs: &Buf, q: u64, g: u64, addr: u64) -> bool
+  requires len(procs) == PTAB_LEN && q < NPROC
+{
+  return state(procs, q) == RUNNING && tgid(procs, q) == g && pget(procs, q, F_FUTEX) == addr
+    && pget(procs, q, F_RESTART) >= 2 && pget(procs, q, F_REGS + R_RAX) == LX_FUTEX;
+}
+
 /// Wakes up to n waiters on addr in pid's thread group; returns how many.
 fn futex_wake(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -483,7 +496,12 @@ fn futex_wake(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
   while q < NPROC && woken < n
     invariant 1 <= q && q <= NPROC && woken <= n && woken < q && kok(k)
   {
-    if q != pid && futex_waiting(k.procs, q, g, addr) {
+    if q != pid && futex_polling(k.procs, q, g, addr) {
+      // Its registers are live on another processor: leave it a note,
+      // which its next try finds (lx_futex).
+      pset(&mut k.procs, q, F_FUTEX, FUTEX_WOKEN);
+      woken = woken + 1;
+    } else if q != pid && futex_waiting(k.procs, q, g, addr) {
       let rip = pget(k.procs, q, F_REGS + R_RIP);
       if rip <= 0xFFFFFFFFFFFFFFF0 {
         pset(&mut k.procs, q, F_REGS + R_RIP, rip + 2);
@@ -584,15 +602,27 @@ fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) ->
         ret(&mut k.procs, pid, ts.err);
         return KEEP;
       }
-      // FUTEX_WAIT's timeout is relative, FUTEX_WAIT_BITSET's absolute;
-      // every clock here counts from boot.
+      // FUTEX_WAIT's timeout is relative, FUTEX_WAIT_BITSET's absolute:
+      // on CLOCK_MONOTONIC, which counts from boot, or with
+      // FUTEX_CLOCK_REALTIME on the wall clock, which starts at k.epoch.
       if cmd == FUTEX_WAIT {
         dl = sat_add(k.ns, ts.ns);
+      } else if op & FUTEX_CLOCK_REALTIME != 0 {
+        if ts.ns > k.epoch {
+          dl = ts.ns - k.epoch;
+        } else {
+          dl = 0;
+        }
       } else {
         dl = ts.ns;
       }
     }
   } else if was >= 2 {
+    if pget(k.procs, pid, F_FUTEX) == FUTEX_WOKEN {
+      pset(&mut k.procs, pid, F_FUTEX, 0);  // woken while on a processor (futex_wake)
+      ret(&mut k.procs, pid, 0);
+      return KEEP;
+    }
     dl = was - 2;
   }
   if dl < FOREVER {

@@ -7,7 +7,9 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sched.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -169,6 +171,35 @@ static int unmap_threads(void)
     return 0;
 }
 
+/* `mthread ids`: getpid, gettid, getuid and sched_yield, which a
+ * processor answers without the kernel lock, from a thread and from the
+ * process's first thread at once. */
+static volatile int ids_bad;
+
+static void *ids_thread(void *arg)
+{
+    pid_t pid = *(pid_t *)arg;
+    for (int i = 0; i < 20000; i++) {
+        if (getpid() != pid || syscall(SYS_gettid) == pid || getuid() != 0 || sched_yield() != 0)
+            ids_bad = 1;
+    }
+    return 0;
+}
+
+static int ids_main(void)
+{
+    pid_t pid = getpid();
+    pthread_t t;
+    pthread_create(&t, 0, ids_thread, &pid);
+    for (int i = 0; i < 20000; i++) {
+        if (getpid() != pid || syscall(SYS_gettid) != pid || sched_yield() != 0)
+            ids_bad = 1;
+    }
+    pthread_join(t, 0);
+    printf("mthread: ids %s\n", ids_bad ? "WRONG" : "ok");
+    return ids_bad;
+}
+
 #define FAIL(...) do { printf("mthread: " __VA_ARGS__); printf("\n"); return 1; } while (0)
 
 int main(int argc, char **argv)
@@ -177,6 +208,8 @@ int main(int argc, char **argv)
         return par();
     if (argc > 1 && argv[1][0] == 'e')
         return exec_threads();
+    if (argc > 1 && argv[1][0] == 'i')
+        return ids_main();
     if (argc > 1 && argv[1][0] == 'u')
         return unmap_threads();
     if (argc > 1 && argv[1][0] == 'd') {

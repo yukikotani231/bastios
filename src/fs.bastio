@@ -23,9 +23,9 @@ import "ramfs.bastio";
 import "diskfs.bastio";
 
 const NFD: u64 = 16;                  // open files per process
-const FD_ROWS: u64 = 256;             // NPROC * NFD
+const FD_ROWS: u64 = 512;             // NPROC * NFD
 const FD_STRIDE: u64 = 4;
-const FTAB_LEN: u64 = 1024;           // FD_ROWS * FD_STRIDE
+const FTAB_LEN: u64 = 2048;           // FD_ROWS * FD_STRIDE
 const XFER: u64 = 4096;               // the most bytes one call moves
 
 // Row fields.
@@ -49,9 +49,11 @@ const NO_FD: u64 = 18446744073709551615;
 const VFS_MISS: u64 = 18446744073709551614;     // the disk has not caught up: sleep, then try again
 
 // Directory handles besides the nodes (vfs_dir_lookup, vfs_readdir).
-const VDIR_ROOT: u64 = 96;             // NFILES + DSLOTS: the top directory
-const VDIR_DISK: u64 = 97;             // "disk"
+const VDIR_ROOT: u64 = NFILES + DSLOTS;  // the top directory
+const VDIR_DISK: u64 = NFILES + DSLOTS + 1;  // "disk"
 const NAMEBUF: u64 = 256;             // holds any in-memory node's name
+const MNT_N: u64 = 8;                 // tmpfs mounts at once
+const MNT_LEN: u64 = 16;              // MNT_N * 2: per mount, its directory node + 1 (0: free) and 1 if read-only
 
 struct Vfs {
   ram: Vec[Node],       // the in-memory file system
@@ -59,18 +61,28 @@ struct Vfs {
   xfer: Bytes,          // the transfer buffer
   disk: DiskFs,         // the file system on the disk
   name: Bytes,          // a directory's name, while vfs_readdir lists it
+  mnt: Buf,             // tmpfs mounts on in-memory directories (src/lxmount.bastio)
   now: u64,             // the time, in seconds, for modification times
 }
 
 spec fn vfs_ok(v: &Vfs) -> bool {
-  nodes_ok(v.ram) && len(v.ftab) == FTAB_LEN && blen(v.xfer) == XFER && disk_ok(v.disk) && blen(v.name) == NAMEBUF
+  nodes_ok(v.ram) && len(v.ftab) == FTAB_LEN && blen(v.xfer) == XFER && disk_ok(v.disk) && blen(v.name) == NAMEBUF && len(v.mnt) == MNT_LEN
 }
 
 fn vfs_new(disk: DiskFs) -> Vfs
   requires disk_ok(disk)
   ensures vfs_ok(result)
 {
-  return Vfs { ram: ram_new(), ftab: alloc(FTAB_LEN), xfer: balloc(XFER), disk: disk, name: balloc(NAMEBUF), now: 0 };
+  return Vfs { ram: ram_new(), ftab: alloc(FTAB_LEN), xfer: balloc(XFER), disk: disk, name: balloc(NAMEBUF), mnt: alloc(MNT_LEN), now: 0 };
+}
+
+/// The next byte typed on a USB keyboard that sits on the disk's xHCI
+/// controller (see blk_find), or 256.
+fn vfs_kbd_poll(v: &mut Vfs) -> u64
+  requires vfs_ok(v)
+  ensures vfs_ok(v) && result <= 256
+{
+  return blk_kbd_poll(&mut v.disk.dev);
 }
 
 /// Frees everything (at power off): every in-memory file's pages go back,
@@ -83,6 +95,7 @@ fn vfs_free(v: Vfs, mem: &mut Mem) -> Blk
   free(v.ftab);
   bfree(v.xfer);
   bfree(v.name);
+  free(v.mnt);
   return disk_unmount(v.disk);
 }
 
@@ -1109,10 +1122,18 @@ fn vfs_mkfifo(v: &mut Vfs, mem: &mut Mem, n: u64, perm: u64) -> bool
   requires vfs_ok(v) && mem_ok(mem)
   ensures vfs_ok(v) && mem_ok(mem)
 {
-  if n > FNAME_MAX || !path_ok(v, n) || !parent_ok(&mut v, n) || vfs_lookup(&mut v, n) != NO_FILE || vfs_dir_lookup(&mut v, n) != NO_FILE {
+  return vfs_mknode(&mut v, &mut mem, n, T_FIFO + perm % 4096);
+}
+
+/// vfs_mkfifo for any mode: type bits (none for a regular file) and
+/// permission bits.
+fn vfs_mknode(v: &mut Vfs, mem: &mut Mem, n: u64, mode: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem)
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  if mode >= 65536 || n > FNAME_MAX || !path_ok(v, n) || !parent_ok(&mut v, n) || vfs_lookup(&mut v, n) != NO_FILE || vfs_dir_lookup(&mut v, n) != NO_FILE {
     return false;
   }
-  let mode = T_FIFO + perm % 4096;
   if on_disk(v, n) {
     let d = disk_create(&mut v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX, false, v.now);
     if d >= DSLOTS {
@@ -1266,4 +1287,274 @@ fn disk_unlink_named(v: &mut Vfs, d: u64, l: u64) -> bool
   ensures vfs_ok(v)
 {
   return disk_take_name(&mut v.disk, d, l);
+}
+
+// ---------------------------------------------------------------- exchange
+
+const XCHG_TMP: u64 = 16;             // ".rename-exchange", a name at the disk's top
+
+/// Swaps the files named xfer[0..n] and the m bytes after (neither a
+/// directory, both on one file system: the caller checks). Descriptors
+/// stay on their files. In memory the two nodes swap names at once. On
+/// the disk it is three entry writes: the first file moves to a spare
+/// name at the disk's top (".rename-exchange"), the second takes the
+/// first's name, then the first takes the second's; a power cut in between
+/// can leave the first file under the spare name. False, changing nothing,
+/// if the spare name is taken or a name is not there.
+fn vfs_exchange(v: &mut Vfs, n: u64, m: u64) -> bool
+  requires vfs_ok(v) && n <= XFER && m <= XFER - n
+  ensures vfs_ok(v)
+{
+  if n == 0 || m == 0 || n > FNAME_MAX || m > FNAME_MAX {
+    return false;
+  }
+  if on_disk(v, n) {
+    let i = disk_find(v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX);
+    if i >= DSLOTS || n + DISK_PREFIX > XFER || m <= DISK_PREFIX {
+      return false;
+    }
+    let j = disk_find(v.disk, v.xfer, n + DISK_PREFIX, m - DISK_PREFIX);
+    if j >= DSLOTS || i == j {
+      return false;
+    }
+    let tmp = bfrom(".rename-exchange");
+    if blen(tmp) != XCHG_TMP || disk_find(v.disk, tmp, 0, XCHG_TMP) < DSLOTS
+      || !disk_move(&mut v.disk, i, tmp, 0, XCHG_TMP) {
+      bfree(tmp);
+      return false;
+    }
+    if !disk_move(&mut v.disk, j, v.xfer, DISK_PREFIX, n - DISK_PREFIX) {
+      disk_move(&mut v.disk, i, v.xfer, DISK_PREFIX, n - DISK_PREFIX);   // back, as it was
+      bfree(tmp);
+      return false;
+    }
+    bfree(tmp);
+    return disk_move(&mut v.disk, i, v.xfer, n + DISK_PREFIX, m - DISK_PREFIX);
+  }
+  let i = ram_find(&mut v.ram, v.xfer, n);
+  if i >= NFILES || n > NAMEBUF {
+    return false;
+  }
+  // Keep the first name in v.name, and bring the second to the front.
+  let mut c = 0;
+  while c < n
+    invariant c <= n && n <= FNAME_MAX && vfs_ok(v)
+  {
+    bset(&mut v.name, c, bget(v.xfer, c));
+    c = c + 1;
+  }
+  xfer_shift(&mut v.xfer, n, m);
+  let j = ram_find(&mut v.ram, v.xfer, m);
+  let il = ram_len(&mut v.ram, i);
+  let jl = ram_len(&mut v.ram, j % NFILES);
+  if j >= NFILES || i == j || il == NO_FILE || jl == NO_FILE {
+    return false;
+  }
+  return ram_reprefix(&mut v.ram, i, il, v.xfer, m) && ram_reprefix(&mut v.ram, j, jl, v.name, n);
+}
+
+// ---------------------------------------------------------------- mounts
+
+// A tmpfs mount is an in-memory directory marked in v.mnt: the files in
+// it are ordinary in-memory nodes (the in-memory file system already is
+// a tmpfs), so mounting only marks the directory, and unmounting removes
+// everything under it. src/lxmount.bastio has the system calls.
+
+/// The mount slot on in-memory node i, or MNT_N if none.
+fn vfs_mount_slot(v: &Vfs, i: u64) -> u64
+  requires vfs_ok(v) && i < NFILES
+  ensures result <= MNT_N
+{
+  let mut s = 0;
+  while s < MNT_N
+    invariant s <= MNT_N
+  {
+    if get(v.mnt, 2 * s) == i + 1 {
+      return s;
+    }
+    s = s + 1;
+  }
+  return MNT_N;
+}
+
+/// The in-memory node mount slot s is on, or NFILES if s is free.
+fn vfs_mount_node(v: &Vfs, s: u64) -> u64
+  requires vfs_ok(v) && s < MNT_N
+  ensures result <= NFILES
+{
+  let i1 = get(v.mnt, 2 * s);
+  if i1 == 0 || i1 > NFILES {
+    return NFILES;
+  }
+  return i1 - 1;
+}
+
+/// Is mount slot s read-only?
+fn vfs_mount_ro(v: &Vfs, s: u64) -> bool
+  requires vfs_ok(v) && s < MNT_N
+{
+  return get(v.mnt, 2 * s + 1) == 1;
+}
+
+/// Mounts on in-memory directory node i. False if every slot is taken.
+fn vfs_mount(v: &mut Vfs, i: u64, ro: bool) -> bool
+  requires vfs_ok(v) && i < NFILES
+  ensures vfs_ok(v)
+{
+  let mut s = 0;
+  while s < MNT_N && get(v.mnt, 2 * s) != 0
+    invariant s <= MNT_N && vfs_ok(v)
+  {
+    s = s + 1;
+  }
+  if s >= MNT_N {
+    return false;
+  }
+  v.mnt = set(v.mnt, 2 * s, i + 1);
+  vfs_set_ro(&mut v, s, ro);
+  return true;
+}
+
+/// Makes mount slot s read-only or writable.
+fn vfs_set_ro(v: &mut Vfs, s: u64, ro: bool)
+  requires vfs_ok(v) && s < MNT_N
+  ensures vfs_ok(v)
+{
+  let mut r = 0;
+  if ro {
+    r = 1;
+  }
+  v.mnt = set(v.mnt, 2 * s + 1, r);
+}
+
+/// Is a[..l] the same as b[..l]?
+fn same_start(a: &Bytes, b: &Bytes, l: u64) -> bool
+  requires l <= blen(a) && l <= blen(b)
+{
+  let mut j = 0;
+  while j < l
+    invariant j <= l
+  {
+    if bget(a, j) != bget(b, j) {
+      return false;
+    }
+    j = j + 1;
+  }
+  return true;
+}
+
+/// Does the path in the first n bytes of the transfer buffer lie in a
+/// read-only mount (or name its directory)?
+fn vfs_ro(v: &mut Vfs, n: u64) -> bool
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+{
+  return vfs_in_mount(&mut v, n, true);
+}
+
+/// Does the path in the first n bytes of the transfer buffer lie in a
+/// mount (a read-only one, if ro_only), or name its directory?
+fn vfs_in_mount(v: &mut Vfs, n: u64, ro_only: bool) -> bool
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+{
+  if on_disk(v, n) {
+    return false;
+  }
+  let mut s = 0;
+  while s < MNT_N
+    invariant s <= MNT_N && vfs_ok(v) && n <= XFER
+  {
+    let i = vfs_mount_node(v, s);
+    if i < NFILES && (vfs_mount_ro(v, s) || !ro_only) {
+      let l = ram_name(&mut v.ram, i, &mut v.name);
+      if l != NO_FILE && l <= n && (l == n || bget(v.xfer, l) == 47) && same_start(v.xfer, v.name, l) {
+        return true;
+      }
+    }
+    s = s + 1;
+  }
+  return false;
+}
+
+/// Does file f (a vfs_lookup handle) lie in a mount? Uses the transfer
+/// buffer.
+fn vfs_file_in_mount(v: &mut Vfs, f: u64) -> bool
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  if f >= NFILES {
+    return false;                           // on the disk
+  }
+  let l = ram_name(&mut v.ram, f, &mut v.xfer);
+  if l == NO_FILE {
+    return false;
+  }
+  return vfs_in_mount(&mut v, l, false);
+}
+
+/// Is anything under the in-memory directory named by the first n bytes
+/// of the transfer buffer?
+fn vfs_ram_has_children(v: &mut Vfs, n: u64) -> bool
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+{
+  let mut j = 0;
+  while j < NFILES
+    invariant j <= NFILES && vfs_ok(v) && n <= XFER
+  {
+    if ram_under(&mut v.ram, j, v.xfer, n) {
+      return true;
+    }
+    j = j + 1;
+  }
+  return false;
+}
+
+/// Does the first n bytes of the transfer buffer name a mount's directory?
+fn vfs_is_mount(v: &mut Vfs, n: u64) -> bool
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+{
+  if on_disk(v, n) {
+    return false;
+  }
+  let i = ram_find(&mut v.ram, v.xfer, n);
+  return i < NFILES && vfs_mount_slot(v, i) < MNT_N;
+}
+
+/// Unmounts slot s: removes every node under its directory (which stays,
+/// as on Linux, where it shows again once uncovered). False, changing
+/// nothing, if a file under it is open.
+fn vfs_umount(v: &mut Vfs, mem: &mut Mem, s: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem) && s < MNT_N
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  let i = vfs_mount_node(v, s);
+  if i < NFILES {
+    let l = ram_name(&mut v.ram, i, &mut v.name);
+    if l != NO_FILE {
+      let mut j = 0;
+      while j < NFILES
+        invariant j <= NFILES && vfs_ok(v) && mem_ok(mem) && l <= NAMEBUF
+      {
+        if ram_under(&mut v.ram, j, v.name, l) && node_open(v.ftab, FS_RAM, j) {
+          return false;
+        }
+        j = j + 1;
+      }
+      j = 0;
+      while j < NFILES
+        invariant j <= NFILES && vfs_ok(v) && mem_ok(mem) && l <= NAMEBUF
+      {
+        if ram_under(&mut v.ram, j, v.name, l) {
+          ram_remove(&mut v.ram, &mut mem, j);
+        }
+        j = j + 1;
+      }
+    }
+  }
+  v.mnt = set(v.mnt, 2 * s, 0);
+  v.mnt = set(v.mnt, 2 * s + 1, 0);
+  return true;
 }
