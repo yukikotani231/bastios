@@ -450,6 +450,64 @@ fn ram_name(v: &mut Vec[Node], i: u64, buf: &mut Bytes) -> u64
   return r;
 }
 
+/// The length of node i's name, or NO_FILE if the node is free.
+fn ram_len(v: &mut Vec[Node], i: u64) -> u64
+  requires nodes_ok(v) && i < NFILES
+  ensures nodes_ok(v)
+{
+  let mut r = NO_FILE;
+  match take_node(&mut v, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      r = blen(f.name);
+      put_node(&mut v, i, Node::File(f));
+    },
+  }
+  return r;
+}
+
+/// Renames node i: its name becomes the first nl bytes of `new` followed
+/// by what came after the first `cut` bytes of its old name. Returns false,
+/// changing nothing, if the node is free, its name is shorter than `cut`,
+/// or the new name would be empty or longer than FNAME_MAX.
+fn ram_reprefix(v: &mut Vec[Node], i: u64, cut: u64, new: &Bytes, nl: u64) -> bool
+  requires nodes_ok(v) && i < NFILES && nl <= blen(new)
+  ensures nodes_ok(v)
+{
+  let mut ok = false;
+  match take_node(&mut v, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      let mut g = f;
+      let ol = blen(g.name);
+      if cut <= ol && nl <= FNAME_MAX && ol - cut <= FNAME_MAX - nl && nl + (ol - cut) > 0 {
+        let total = nl + (ol - cut);
+        let mut nm = balloc(total);
+        let mut j = 0;
+        while j < nl
+          invariant j <= nl && blen(nm) == total
+        {
+          bset(&mut nm, j, bget(new, j));
+          j = j + 1;
+        }
+        let mut k = 0;
+        while k < ol - cut
+          invariant k <= ol - cut && blen(nm) == total && cut <= ol && ol == blen(g.name)
+        {
+          bset(&mut nm, nl + k, bget(g.name, cut + k));
+          k = k + 1;
+        }
+        let old_name = g.name;
+        g.name = nm;
+        bfree(old_name);
+        ok = true;
+      }
+      put_node(&mut v, i, Node::File(g));
+    },
+  }
+  return ok;
+}
+
 /// Removes the file in node i, if there is one.
 fn ram_remove(v: &mut Vec[Node], mem: &mut Mem, i: u64)
   requires nodes_ok(v) && mem_ok(mem) && i < NFILES

@@ -48,6 +48,7 @@ const SYS_STAT: u64 = 18;             // (_, name, name length) -> size; DIR_BIT
 const SYS_MKDIR: u64 = 19;            // (_, name, name length) -> 0
 const SYS_RMDIR: u64 = 20;            // (_, name, name length) -> 0
 const SYS_READDIR: u64 = 21;          // (256 * entry + name length, buffer, length) -> length (+ DIR_BIT)
+const SYS_RENAME: u64 = 22;           // (old name length, buffer, length) -> 0: the buffer holds both names
 const DIR_BIT: u64 = 4294967296;      // marks a directory in SYS_STAT and SYS_READDIR
 
 // What the scheduler does after a system call.
@@ -352,6 +353,13 @@ fn file_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   }
   if n == SYS_READDIR {
     return do_readdir(&mut k, pid, a / 256, a % 256, b, c);
+  }
+  if n == SYS_RENAME {
+    if a <= c && c <= XFER && copy_from_user(&mut k.spaces, pid, b, &mut k.fs.xfer, c) == c
+      && vfs_rename(&mut k.fs, a, c - a) {
+      return 0;
+    }
+    return NO_RESULT;
   }
   return NO_RESULT;
 }
