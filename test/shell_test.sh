@@ -214,6 +214,13 @@ steps = [
     ("ash -c 'while :; do echo y; done' | head -n 1; echo piped", b"\r\ny\r\npiped", b"\n# "),
     ("ash -c 'while :; do :; done'", b"^C", b"\n# ", b"\x03"),
     ("echo st=$?", b"st=130", b"\n# "),
+    # Time: clocks, nanosleep, and poll that waits (user/mtime.c); the
+    # sleep applet; ash's read -t, a poll on the console that times out, then
+    # one that wakes when a line is typed.
+    ("mtime", [b"mtime: slept ", b"woke in time"], b"\n# "),
+    ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
+    ("read -t 1 x; echo rt=$?", b"rt=1", b"\n# "),
+    ("read -t 9 x; echo rt=$? x=$x", b"rt=0 x=late", b"\n# ", b"late\r"),
     ("exit 5", b"[exit 5]"),
     ("rm lxout", b""),
     ("sh", b"BastiOS 0.2 -- type"),

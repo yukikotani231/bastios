@@ -26,6 +26,7 @@ import "lxdir.bastio";
 import "lxsock.bastio";
 import "lxtcp.bastio";
 import "lxsig.bastio";
+import "lxtime.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
@@ -192,6 +193,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, t: Task, v: u64) -> u64
     return (p + 1) % NPROC;
   }
   if v == V_LINUX {
+    s.k.ns = hpet_ns(&mut s.clock);
     if linux_syscall(&mut s.con, &mut s.k, mmu, p) == SWITCH {
       return (p + 1) % NPROC;
     }

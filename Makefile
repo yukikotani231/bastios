@@ -24,7 +24,7 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp ash
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime ash
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf)
 
 build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
@@ -77,7 +77,7 @@ build/user/fpucheck.elf: build/user/elfstart.o build/user/fpucheck.o
 # A C program against musl libc, static PIE (the musl-tools package).
 MUSLCC ?= musl-gcc
 
-build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf: build/user/%.elf: user/%.c | build/user
+build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf: build/user/%.elf: user/%.c | build/user
 	$(MUSLCC) -static-pie -O2 -o $@ $<
 
 # BusyBox (GPL-2.0-only, not part of this repository): fetched at a pinned
@@ -107,7 +107,7 @@ build/user/%.bin: build/user/%.elf
 
 # 2. Prove the kernel and translate it to freestanding C.
 KSRCS := src/uart.bastio src/pic.bastio src/pit.bastio src/hpet.bastio src/console.bastio src/pages.bastio src/space.bastio src/elf.bastio src/ramfs.bastio src/ata.bastio src/pci.bastio src/virtq.bastio src/virtio_blk.bastio src/virtio_net.bastio src/net.bastio src/tcp.bastio src/blk.bastio src/diskfs.bastio src/fs.bastio \
-         src/proc.bastio src/usermem.bastio src/syscall.bastio src/linux.bastio src/lxproc.bastio src/lxfd.bastio src/lxdir.bastio src/lxsock.bastio src/lxtcp.bastio src/lxsig.bastio src/main.bastio
+         src/proc.bastio src/usermem.bastio src/syscall.bastio src/linux.bastio src/lxproc.bastio src/lxfd.bastio src/lxdir.bastio src/lxsock.bastio src/lxtcp.bastio src/lxsig.bastio src/lxtime.bastio src/main.bastio
 KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.

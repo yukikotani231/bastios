@@ -501,7 +501,10 @@ fn applet_name(j: u64) -> Str {
   if j == 5 {
     return "cp";
   }
-  return "kill";
+  if j == 6 {
+    return "kill";
+  }
+  return "sleep";
 }
 
 /// Stores v little-endian in bytes at..at+8 of x.
