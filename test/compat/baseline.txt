@@ -12,6 +12,11 @@ apps: sqlite3: 20000 rows, an index and a query
 apps: sqlite3: WAL
 apps: sqlite3: a database file
 apps: sqlite3: in memory
+bastio: bastioc1: a failed proof builds nothing
+bastio: bastioc1: a type error
+bastio: bastioc1: prove a program
+bastio: bastioc1: prove, build with tcc, run
+bastio: z3: a query
 busybox: awk
 busybox: base64
 busybox: basename/dirname
@@ -366,6 +371,8 @@ t_thread: gettid differs in a thread
 t_thread: pthread_create + join
 t_thread: pthread_detach
 t_thread: thread-local storage
+t_thread: timed condition wait, signalled early (monotonic)
+t_thread: timed condition wait, signalled early (realtime)
 t_time: clock_getres
 t_time: clock_gettime BOOTTIME
 t_time: clock_gettime MONOTONIC

@@ -31,6 +31,9 @@ const LX_EXIT: u64 = 60;
 const LX_GETPPID: u64 = 110;
 const LX_ARCH_PRCTL: u64 = 158;
 const LX_SET_TID_ADDRESS: u64 = 218;
+const LX_SET_ROBUST_LIST: u64 = 273;
+const LX_RSEQ: u64 = 334;
+const LX_CLONE3: u64 = 435;
 const LX_OPENAT: u64 = 257;
 const LX_STAT: u64 = 4;
 const LX_LSTAT: u64 = 6;
@@ -208,7 +211,11 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if n == LX_READ || n == LX_READV {
     let rv = fd_look(k, pid, a);
     if n == LX_READV && rv.kind == K_FILE {
-      ret(&mut k.procs, pid, file_readv(&mut k, pid, rv.x, b, c));
+      let got = file_readv(&mut k, pid, rv.x, b, c);
+      if got == DISK_RETRY {
+        return disk_retry(&mut k, pid, n);   // nothing read yet: wait for the disk
+      }
+      ret(&mut k.procs, pid, got);
       return KEEP;
     }
     // readv on anything but a file reads into the first buffer that has
@@ -517,6 +524,14 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if n == LX_SET_TID_ADDRESS {
     pset(&mut k.procs, pid, F_CTID, a);
     ret(&mut k.procs, pid, pid);
+    return KEEP;
+  }
+  // glibc asks for these and carries on without them: robust futex lists
+  // (no robust mutexes), restartable sequences (sched_getcpu falls back to
+  // the system call), and clone3 (pthread_create falls back to clone, as
+  // on Linux before 5.3). Refused quietly, as known gaps.
+  if n == LX_SET_ROBUST_LIST || n == LX_RSEQ || n == LX_CLONE3 {
+    ret(&mut k.procs, pid, ENOSYS);
     return KEEP;
   }
   puts(&mut con, "[pid ");

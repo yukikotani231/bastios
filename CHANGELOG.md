@@ -56,9 +56,29 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
   them and a small C runtime and runs `test/compat/dev.txt`.
 - `ppoll` and `pselect6` wait with the signal mask they are given (GNU
   make `-j` hung waiting for SIGCHLD).
+- The Bastio compiler runs on BastiOS: bastiolang's self-hosted `bastioc1`
+  (built with musl), Z3 4.8.12 (a static glibc build) and tcc prove a
+  Bastio program, report a failed proof with its counterexample, and build
+  and run the program, all inside BastiOS. tcc gains GNU `__auto_type`
+  (`test/compat/patches/tcc-auto-type.patch`), which the generated C uses.
+  `make compat` boots a third disk with them and runs
+  `test/compat/bastio.txt`. Not yet: `bastioc1` proving itself, which needs
+  about 320 MiB, more than a process's 64 MiB window and the kernel's
+  256 MiB page pool.
+- `FUTEX_CLOCK_REALTIME` deadlines are read on the wall clock.
+- `set_robust_list`, `rseq` and `clone3`, which glibc asks for, fail with
+  `ENOSYS` quietly; glibc carries on without them (static glibc programs
+  run).
 
 ### Fixed
 
+- `readv` on a disk file whose blocks were not cached yet returned the
+  kernel's internal retry code to the program instead of waiting for the
+  disk (stdio's `fread` failed on `/disk` files).
+- A `futex` wake missed a waiter with a timeout that was on a processor at
+  that moment (a timed wait is retried each time it is scheduled), so it
+  slept to its deadline: glibc's condition variables waited out their
+  whole timeout, which made each Z3 query take 10 s.
 - Modification times were seconds since boot; they are wall-clock times
   now, as `stat` reports them.
 - A file created by `open` with `O_CREAT` gets the mode asked for, less a

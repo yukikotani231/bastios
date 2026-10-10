@@ -24,11 +24,15 @@ PTRS = 512
 DTOP = 64
 DNAME_MAX = 200
 MODE = 0o755
-DISK_BYTES = 33 << 20
+DISK_BYTES = 33 << 20             # at least; more when the files need it
+FREE_BYTES = 16 << 20             # room left for the guest to write
+MAX_DISK = 65536 * BLOCK          # src/diskfs.bastio's MAX_BLOCKS
 
 def main():
     out, args = sys.argv[1], sys.argv[2:]
-    img = bytearray(DISK_BYTES)
+    need = sum(os.path.getsize(a.split("=", 1)[-1]) for a in args)
+    size = max(DISK_BYTES, min(MAX_DISK, (need * 101 // 100 + FREE_BYTES) // BLOCK * BLOCK))
+    img = bytearray(size)
     img[0:8] = b"BSTDISK2"
     nxt = DATA_B0
     slots = 0
