@@ -35,6 +35,14 @@ const SYS_SENDTO: u64 = 43;           // (socket + 256 * port + 2^24 * address, 
 const SYS_RECVFROM: u64 = 44;         // (socket, buffer, length) -> length; NO_RESULT if none waits
 const SYS_PEER: u64 = 45;             // (socket) -> 65536 * address + port of the last sender
 const SYS_SCLOSE: u64 = 46;           // (socket) -> 0
+const SYS_TCP_LISTEN: u64 = 48;       // (port) -> a listener
+const SYS_TCP_ACCEPT: u64 = 49;       // (listener) -> a connection; NO_RESULT if none is ready
+const SYS_TCP_CONNECT: u64 = 50;      // (65536 * address + port) -> a connection (poll SYS_TCP_STATUS)
+const SYS_TCP_SEND: u64 = 51;         // (connection, buffer, length) -> bytes taken (0: full, try again)
+const SYS_TCP_RECV: u64 = 52;         // (connection, buffer, length) -> bytes; 0 at the end; TCP_AGAIN if none yet
+const SYS_TCP_CLOSE: u64 = 53;        // (connection or listener) -> 0
+const SYS_TCP_STATUS: u64 = 54;       // (connection) -> 0 connecting, 1 open, 2 closed or reset
+const SYS_TCP_PEER: u64 = 55;         // (connection) -> 65536 * address + port
 const SYS_NETINFO: u64 = 47;          // (what) -> 0 address, 1 gateway, 2 netmask, 3 how (0 not yet, 1 DHCP, 2 static)
 const SYS_STAT: u64 = 18;             // (_, name, name length) -> size
 
@@ -70,7 +78,6 @@ fn do_write(con: &mut Uart, spaces: &mut Vec[Space], pid: u64, va: u64, n: u64) 
 fn write_from(con: &mut Uart, root: &mut PageTable, off: u64, n: u64) -> u64
   requires uart_ok(con) && pt_level(root) == 4 && off + n <= USER_SIZE
 {
-  // The window is one level-1 table: walk down to it once, not per byte.
   if !pt_has(root, 1) {
     return 0;
   }
@@ -78,45 +85,21 @@ fn write_from(con: &mut Uart, root: &mut PageTable, off: u64, n: u64) -> u64
   let mut l3 = pt_take(&mut root, 1);
   if pt_has(l3, 0) {
     let mut l2 = pt_take(&mut l3, 0);
-    if pt_has(l2, 0) {
-      let mut l1 = pt_take(&mut l2, 0);
-      k = write_l1(&mut con, &mut l1, off, n);
-      pt_put(&mut l2, 0, l1);
+    let mut ok = true;
+    while ok && k < n
+      invariant k <= n && pt_level(l2) == 2
+    {
+      let ch = w_byte(&mut l2, off + k);
+      if ch == 256 {
+        ok = false;
+      } else {
+        uart_write(&mut con, ch);
+        k = k + 1;
+      }
     }
     pt_put(&mut l3, 0, l2);
   }
   pt_put(&mut root, 1, l3);
-  return k;
-}
-
-/// write_from below the level-1 table: takes each page out once and
-/// writes every wanted byte on it.
-fn write_l1(con: &mut Uart, l1: &mut PageTable, off: u64, n: u64) -> u64
-  requires uart_ok(con) && pt_level(l1) == 1 && off + n <= USER_SIZE
-{
-  let mut k = 0;
-  let mut ok = true;
-  while ok && k < n
-    invariant k <= n && pt_level(l1) == 1
-  {
-    let a = off + k;
-    let p = a / 4096;
-    if pt_has(l1, p) {
-      let m = chunk(a, n - k);
-      let f = pt_take_frame(&mut l1, p);
-      let mut j = 0;
-      while j < m
-        invariant j <= m
-      {
-        uart_write(&mut con, frame_read8(f, a % 4096 + j));
-        j = j + 1;
-      }
-      pt_put_frame(&mut l1, p, f, true);
-      k = k + m;
-    } else {
-      ok = false;
-    }
-  }
   return k;
 }
 
@@ -154,18 +137,14 @@ fn find_prog(root: &mut PageTable, off: u64, n: u64) -> u64
   let mut l3 = pt_take(&mut root, 1);
   if pt_has(l3, 0) {
     let mut l2 = pt_take(&mut l3, 0);
-    if pt_has(l2, 0) {
-      let mut l1 = pt_take(&mut l2, 0);
-      let mut i = 0;
-      while i < NPROGS
-        invariant i <= NPROGS && found <= NPROGS && pt_level(l1) == 1
-      {
-        if found == NPROGS && l1_matches(&mut l1, off, n, prog_name(i)) {
-          found = i;
-        }
-        i = i + 1;
+    let mut i = 0;
+    while i < NPROGS
+      invariant i <= NPROGS && found <= NPROGS && pt_level(l2) == 2
+    {
+      if found == NPROGS && w_matches(&mut l2, off, n, prog_name(i)) {
+        found = i;
       }
-      pt_put(&mut l2, 0, l1);
+      i = i + 1;
     }
     pt_put(&mut l3, 0, l2);
   }
@@ -173,41 +152,24 @@ fn find_prog(root: &mut PageTable, off: u64, n: u64) -> u64
   return found;
 }
 
-/// Do the n bytes at offset off of the window `l1` maps spell `name`?
-fn l1_matches(l1: &mut PageTable, off: u64, n: u64, name: Str) -> bool
-  requires pt_level(l1) == 1 && off + n <= USER_SIZE
-  ensures pt_level(l1) == 1
+/// Do the n bytes at offset off of the window `l2` maps spell `name`?
+fn w_matches(l2: &mut PageTable, off: u64, n: u64, name: Str) -> bool
+  requires pt_level(l2) == 2 && off + n <= USER_SIZE
+  ensures pt_level(l2) == 2
 {
   if n != slen(name) {
     return false;
   }
   let mut k = 0;
-  let mut same = true;
-  while same && k < n
-    invariant k <= n && pt_level(l1) == 1
+  while k < n
+    invariant k <= n && pt_level(l2) == 2
   {
-    let a = off + k;
-    let p = a / 4096;
-    if pt_has(l1, p) {
-      let m = chunk(a, n - k);
-      let f = pt_take_frame(&mut l1, p);
-      let mut j = 0;
-      while same && j < m
-        invariant j <= m
-      {
-        if frame_read8(f, a % 4096 + j) != sget(name, k + j) {
-          same = false;
-        } else {
-          j = j + 1;
-        }
-      }
-      pt_put_frame(&mut l1, p, f, true);
-      k = k + m;
-    } else {
-      same = false;
+    if w_byte(&mut l2, off + k) != sget(name, k) {
+      return false;
     }
+    k = k + 1;
   }
-  return same;
+  return true;
 }
 
 // ---------------------------------------------------------------- files
@@ -375,6 +337,44 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     }
     return NO_RESULT;
   }
+  if n == SYS_TCP_LISTEN {
+    return tcp_listen(&mut k.nic, a);
+  }
+  if n == SYS_TCP_ACCEPT {
+    return tcp_accept(&mut k.nic, a);
+  }
+  if n == SYS_TCP_CONNECT {
+    return tcp_connect(&mut k.nic, a / 65536, a % 65536);
+  }
+  if n == SYS_TCP_SEND {
+    let got = copy_from_user(&mut k.spaces, pid, b, &mut k.fs.xfer, smaller(c, XFER));
+    if got == NO_RESULT {
+      return NO_RESULT;
+    }
+    return tcp_send(&mut k.nic, a, k.fs.xfer, got);
+  }
+  if n == SYS_TCP_RECV {
+    let got = tcp_recv(&mut k.nic, a, &mut k.fs.xfer, smaller(c, XFER));
+    if got == NO_SOCK || got == TCP_AGAIN {
+      return got;
+    }
+    if copy_to_user(&mut k.spaces, pid, b, k.fs.xfer, got) == NO_RESULT {
+      return NO_RESULT;
+    }
+    return got;
+  }
+  if n == SYS_TCP_CLOSE {
+    if tcp_close(&mut k.nic, a) {
+      return 0;
+    }
+    return NO_RESULT;
+  }
+  if n == SYS_TCP_STATUS {
+    return tcp_status(k.nic, a);
+  }
+  if n == SYS_TCP_PEER {
+    return tcp_peer_ip(k.nic, a) * 65536 + tcp_peer_port(k.nic, a);
+  }
   return NO_RESULT;
 }
 
@@ -523,7 +523,7 @@ fn syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, nic_info(k.nic, a));
     return KEEP;
   }
-  if SYS_SOCKET <= n && n <= SYS_SCLOSE {
+  if (SYS_SOCKET <= n && n <= SYS_SCLOSE) || (SYS_TCP_LISTEN <= n && n <= SYS_TCP_PEER) {
     ret(&mut k.procs, pid, net_call(&mut k, pid, n, a, b, c));
     return KEEP;
   }

@@ -8,6 +8,7 @@ import "space.bastio";
 import "elf.bastio";
 import "fs.bastio";
 import "net.bastio";
+import "tcp.bastio";
 
 const NPROC: u64 = 16;
 const STRIDE: u64 = 32;

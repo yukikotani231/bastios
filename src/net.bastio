@@ -30,6 +30,7 @@ const NETMASK: u64 = 0xFFFFFF00;      // /24
 
 const IP_ICMP: u64 = 1;
 const IP_UDP: u64 = 17;
+const IP_TCP: u64 = 6;
 const ICMP_ECHO_REPLY: u64 = 0;
 const ICMP_ECHO: u64 = 8;
 const UDP_ECHO_PORT: u64 = 7;
@@ -77,6 +78,11 @@ const S_SLOTS: u64 = 6;               // then per slot: length, address, port
 const SLOT_W: u64 = 3;
 const SOCK_FIELDS: u64 = 18;          // S_SLOTS + RXQ * SLOT_W
 
+// The TCP table's size (src/tcp.bastio has the rest).
+const TCBS: u64 = 8;                  // connections
+const TCP_BUF: u64 = 4096;            // bytes in each receive and send buffer
+const TCB_W: u64 = 18;                // words per connection
+
 struct Net {
   dev: VNet,
   pkt: Bytes,         // the frame being handled
@@ -107,6 +113,10 @@ struct Net {
   socks: Buf,         // the UDP sockets, SOCK_FIELDS words each
   dq: Bytes,          // their queued datagrams, RXQ slots of UDP_MAX bytes each
   eph: u64,           // where the next ephemeral port search starts
+  tcbs: Buf,          // TCP connections (src/tcp.bastio), TCB_W words each
+  trx: Bytes,         // their receive buffers, TCP_BUF bytes each
+  ttx: Bytes,         // their send buffers (unacknowledged, then unsent)
+  iss: u64,           // the next initial sequence number
 }
 
 spec fn net_ok(n: &Net) -> bool {
@@ -115,6 +125,7 @@ spec fn net_ok(n: &Net) -> bool {
   && len(n.arp) == ARP_N * 2 && n.held_len <= FRAME_MAX && n.seq <= 65535 && n.ping_pid < PID_LIMIT && n.ping_ip <= IP_MAX
   && n.dhcp_xid <= IP_MAX && n.dhcp_offer <= IP_MAX && n.dhcp_server <= IP_MAX
   && len(n.socks) == SOCKS * SOCK_FIELDS && blen(n.dq) == SOCKS * RXQ * UDP_MAX
+  && len(n.tcbs) == TCBS * TCB_W && blen(n.trx) == TCBS * TCP_BUF && blen(n.ttx) == TCBS * TCP_BUF
 }
 
 // ---------------------------------------------------------------- bytes
@@ -206,19 +217,20 @@ fn csum(b: &Bytes, off: u64, n: u64) -> u64
   return 65535 - sum16(b, off, n, 0);
 }
 
-/// The sum over a UDP datagram at 34..34+ulen of b and its pseudo-header
-/// (addresses, protocol, length). 65535 when its checksum is right.
-fn udp_sum(b: &Bytes, src: u64, dst: u64, ulen: u64) -> u64
-  requires 34 + ulen <= blen(b) && src <= IP_MAX && dst <= IP_MAX && ulen <= 65535
+/// The sum over a UDP datagram or TCP segment at 34..34+size of b and its
+/// pseudo-header (addresses, protocol, length). 65535 when its checksum is
+/// right.
+fn l4_sum(b: &Bytes, src: u64, dst: u64, proto: u64, size: u64) -> u64
+  requires 34 + size <= blen(b) && src <= IP_MAX && dst <= IP_MAX && proto <= 255 && size <= 65535
   ensures result <= 65535
 {
   let mut s = cadd(0, src / 65536);
   s = cadd(s, src % 65536);
   s = cadd(s, dst / 65536);
   s = cadd(s, dst % 65536);
-  s = cadd(s, IP_UDP);
-  s = cadd(s, ulen);
-  return sum16(b, 34, ulen, s);
+  s = cadd(s, proto);
+  s = cadd(s, size);
+  return sum16(b, 34, size, s);
 }
 
 /// Copies the first n bytes of the received frame to the outgoing one.
@@ -425,7 +437,7 @@ fn udp_seal(n: &mut Net, dst: u64, ulen: u64)
   ensures net_ok(n)
 {
   put16(&mut n.out, 40, 0);
-  let mut c = 65535 - udp_sum(n.out, n.ip, dst, ulen);
+  let mut c = 65535 - l4_sum(n.out, n.ip, dst, IP_UDP, ulen);
   if c == 0 {
     c = 65535;                        // 0 would mean "no checksum"
   }
@@ -478,7 +490,7 @@ fn udp_in(n: &mut Net, total: u64)
   if ulen < 8 || ulen > total - 20 {
     return;
   }
-  if be16(n.pkt, 40) != 0 && udp_sum(n.pkt, be32(n.pkt, 26), be32(n.pkt, 30), ulen) != 65535 {
+  if be16(n.pkt, 40) != 0 && l4_sum(n.pkt, be32(n.pkt, 26), be32(n.pkt, 30), IP_UDP, ulen) != 65535 {
     return;
   }
   let dport = be16(n.pkt, 36);
@@ -528,6 +540,8 @@ fn ip_in(n: &mut Net, flen: u64)
     }
   } else if proto == IP_UDP {
     udp_in(&mut n, total);
+  } else if proto == IP_TCP && mine {
+    tcp_in(&mut n, total);
   }
 }
 
@@ -1080,7 +1094,8 @@ fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, at: u64, avoid_lo: u64
     arp: alloc(ARP_N * 2), arp_next: 0, held: balloc(RX_BUF), held_len: 0, held_hop: 0,
     dhcp_state: DHCP_OFF, dhcp_xid: 0, dhcp_offer: 0, dhcp_server: 0, dhcp_tries: 0, dhcp_until: 0, now: 0,
     ping_state: PING_IDLE, ping_pid: 0, ping_ip: 0, ping_hop: 0, ping_until: 0, seq: 0, rx: 0, tx: 0,
-    socks: alloc(SOCKS * SOCK_FIELDS), dq: balloc(SOCKS * RXQ * UDP_MAX), eph: 0 };
+    socks: alloc(SOCKS * SOCK_FIELDS), dq: balloc(SOCKS * RXQ * UDP_MAX), eph: 0,
+    tcbs: alloc(TCBS * TCB_W), trx: balloc(TCBS * TCP_BUF), ttx: balloc(TCBS * TCP_BUF), iss: 0 };
   // The address comes from DHCP, sought from now on.
   if n.dev.live {
     n.dhcp_xid = n.dev.mac % 4294967296;
@@ -1162,6 +1177,7 @@ fn nic_tick(c: &mut Nic, now: u64)
     Nic::None => { c = Nic::None; },
     Nic::Up(mut n) => {
       dhcp_tick(&mut n, now);
+      tcp_tick(&mut n, now);
       c = Nic::Up(n);
     },
   }
@@ -1218,6 +1234,9 @@ fn nic_free(ports: &mut Ports, c: Nic, m: &mut Mem)
       bfree(n.pkt);
       bfree(n.out);
       bfree(n.held);
+      free(n.tcbs);
+      bfree(n.trx);
+      bfree(n.ttx);
       free(n.arp);
       free(n.socks);
       bfree(n.dq);
