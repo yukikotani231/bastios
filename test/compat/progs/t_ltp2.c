@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/socket.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <setjmp.h>
 
@@ -99,5 +100,18 @@ int main(void) {
            int lo = 0; for (int i = 0; ok && i < c.ifc_len / (int)sizeof r[0]; i++)
                if (strcmp(r[i].ifr_name, "lo") == 0 && ioctl(s, SIOCGIFFLAGS, &r[i]) == 0 && (r[i].ifr_flags & IFF_LOOPBACK)) lo = 1;
            close(s); ok && lo; }));
+    EXPECT("pread/pwrite: negative offset EINVAL, a directory EISDIR, 0 bytes 0", ({ int fd = open("cf_pio", O_RDWR | O_CREAT | O_TRUNC, 0644);
+           char b[4]; int d = open(".", O_RDONLY | O_DIRECTORY);
+           int ok = pread(fd, b, 4, -1) == -1 && errno == EINVAL && pwrite(fd, NULL, 0, 0) == 0 &&
+               pread(d, b, 4, 0) == -1 && errno == EISDIR;
+           close(d); close(fd); unlink("cf_pio"); ok; }));
+    EXPECT("waitpid(0) waits only for the caller's group", ({ int ok = 1; pid_t c = fork();
+           if (c == 0) { pid_t a = fork(); if (a == 0) _exit(1); setpgid(0, 0); pid_t b = fork(); if (b == 0) _exit(2);
+               int st; pid_t g = waitpid(0, &st, 0); pid_t h = waitpid(0, &st, WNOHANG);
+               pid_t r = waitpid(a, &st, 0); _exit(g == b && h == -1 && errno == ECHILD && r == a ? 0 : 3); }
+           int st = 0; waitpid(c, &st, 0); ok && WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("waitpid with bad options is EINVAL", waitpid(-1, NULL, 0x7fff) == -1 && errno == EINVAL);
+    EXPECT("rlimits: bad resource EINVAL; soft over hard EINVAL", ({ struct rlimit r, w = { 2, 1 };
+           getrlimit(99, &r) == -1 && errno == EINVAL && setrlimit(RLIMIT_CORE, &w) == -1 && errno == EINVAL; }));
     return done();
 }

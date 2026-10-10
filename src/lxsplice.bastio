@@ -1,0 +1,390 @@
+// splice, tee and vmsplice: moving bytes in and out of pipes without a
+// user buffer in between (here, through the transfer buffer).
+//
+// splice moves from a pipe to a pipe, a file, the console or /dev/null,
+// or from a file to a pipe. tee copies from one pipe to another, leaving
+// the bytes in the first. vmsplice is writev into a pipe's write end, or
+// readv out of its read end.
+//
+// Not done: splice to or from a socket (EINVAL). The bytes are copied,
+// never moved page by page, so SPLICE_F_MOVE and SPLICE_F_GIFT change
+// nothing.
+
+import "lxmore.bastio";
+
+const LX_SPLICE: u64 = 275;
+const LX_TEE: u64 = 276;
+const LX_VMSPLICE: u64 = 278;
+const SPLICE_F_NONBLOCK: u64 = 2;
+const SP_WAIT: u64 = 18446744073709551000;   // nothing moved, and the caller may wait
+
+fn is_splice_call(n: u64) -> bool {
+  return n == LX_SPLICE || n == LX_TEE || n == LX_VMSPLICE;
+}
+
+/// Whether descriptor fd of pid is a pipe end that can be written.
+fn pipe_out(k: &Kernel, pid: u64, fd: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let d = fd_look(k, pid, fd);
+  return d.kind == K_PIPE_W || (d.kind == K_PIPE_R && pipe_both(k, pid, fd));
+}
+
+/// Copies up to n bytes from `skip` bytes into pipe p into the transfer
+/// buffer, leaving them in the pipe. The count.
+fn pipe_peek_xfer(k: &mut Kernel, p: u64, skip: u64, n: u64) -> u64
+  requires kok(k) && p < NPIPES && n <= XFER
+  ensures kok(k) && result <= n
+{
+  let r = pipe_ring(k.pipes, p);
+  if skip >= r.n {
+    return 0;
+  }
+  let got = smaller(n, r.n - skip);
+  ring_out(&mut k.fs.xfer, 0, k.pipebuf, p * PIPE_CAP, PIPE_CAP, (r.h + skip) % PIPE_CAP, got);
+  return got;
+}
+
+/// Drops the first n bytes of pipe p (n at most what it holds).
+fn pipe_drop(k: &mut Kernel, p: u64, n: u64)
+  requires kok(k) && p < NPIPES
+  ensures kok(k)
+{
+  let mut r = pipe_ring(k.pipes, p);
+  ring_pop_n(&mut r, smaller(n, r.n));
+  pipe_keep(&mut k.pipes, p, r);
+}
+
+/// What an empty source pipe p means for a call that moved nothing: 0 at
+/// the end (no writer left), else wait (SP_WAIT) or, nonblocking, EAGAIN.
+fn empty_pipe(k: &Kernel, p: u64, nb: bool) -> u64
+  requires kok(k) && p < NPIPES
+{
+  if pi_get(k.pipes, p, 3) == 0 && pi_get(k.pipes, p, 5) != 0 {
+    return 0;
+  }
+  if nb {
+    return EAGAIN;
+  }
+  return SP_WAIT;
+}
+
+/// Reads a loff_t at user address va: the offset, or NO_RESULT for a bad
+/// pointer and NO_FD for a negative one.
+fn off_in(k: &mut Kernel, pid: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 8) != 8 {
+    return NO_RESULT;
+  }
+  let o = get_u64(k.fs.xfer, 0);
+  if o >= 0x8000000000000000 {
+    return NO_FD;
+  }
+  return o;
+}
+
+/// splice from pipe p to descriptor `out` (at *outp when outp is not 0):
+/// up to len bytes.
+fn splice_from_pipe(con: &mut Con, k: &mut Kernel, pid: u64, p: u64, out: u64, outp: u64, len: u64, nb: bool) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC && p < NPIPES
+  ensures kok(k) && con_ok(con)
+{
+  let mut ooff = 0xFFFFFFFFFFFFFFFF;
+  if outp != 0 {
+    ooff = off_in(&mut k, pid, outp);
+    if ooff == NO_RESULT {
+      return EFAULT;
+    }
+    if ooff == NO_FD {
+      return EINVAL;
+    }
+  }
+  let od = fd_look(k, pid, out);
+  let to_pipe = pipe_out(k, pid, out);
+  if to_pipe && od.x == p {
+    return EINVAL;                          // a pipe into itself
+  }
+  let mut done = 0;
+  let mut stop = false;
+  while done < len && !stop
+    invariant done <= len && kok(k) && con_ok(con)
+  {
+    let got = pipe_peek_xfer(&mut k, p, 0, smaller(XFER, len - done));
+    if got == 0 {
+      if done == 0 {
+        return empty_pipe(k, p, nb);
+      }
+      stop = true;
+    } else {
+      let mut at = ooff;
+      if ooff != 0xFFFFFFFFFFFFFFFF {
+        at = sat_add(ooff, done);
+      }
+      let w = put_xfer(&mut con, &mut k, pid, out, got, at);
+      if w > XFER {
+        if done > 0 {
+          stop = true;
+        } else if w == EAGAIN && !nb && !pipe_nonblock(k, pid, out) {
+          return SP_WAIT;                   // a full pipe: wait for room
+        } else {
+          return w;
+        }
+      } else {
+        pipe_drop(&mut k, p, w);
+        done = done + w;
+        if w < got {
+          stop = true;
+        }
+      }
+    }
+  }
+  if outp != 0 && !to_pipe {
+    xfer_u64(&mut k.fs.xfer, 0, sat_add(ooff, done));
+    if copy_to_user(&mut k.spaces, pid, outp, k.fs.xfer, 8) != 8 {
+      return EFAULT;
+    }
+  }
+  return done;
+}
+
+/// splice from file row `row` (at *inp when inp is not 0, else at its own
+/// offset, which moves on) into pipe p: up to len bytes.
+fn splice_to_pipe(k: &mut Kernel, pid: u64, row: u64, inp: u64, p: u64, len: u64, nb: bool) -> u64
+  requires kok(k) && pid < NPROC && row < FD_ROWS && p < NPIPES
+  ensures kok(k)
+{
+  if fget(k.fs.ftab, row, FD_MODE) / O_READ % 2 == 0 {
+    return EBADF;                           // not open for reading
+  }
+  let f = vfs_row_file(k.fs, row);
+  let mut ioff = vfs_offset(k.fs, row);
+  if inp != 0 {
+    ioff = off_in(&mut k, pid, inp);
+    if ioff == NO_RESULT {
+      return EFAULT;
+    }
+    if ioff == NO_FD {
+      return EINVAL;
+    }
+  }
+  let mut done = 0;
+  let mut stop = false;
+  while done < len && !stop
+    invariant done <= len && kok(k)
+  {
+    let step = smaller(XFER, len - done);
+    let pr = pipe_ring(k.pipes, p);
+    let room = pipe_room(k.pipes, p, pr.n);
+    if room == 0 {
+      if done == 0 {
+        if pi_get(k.pipes, p, 2) == 0 {
+          return EPIPE;
+        }
+        if nb {
+          return EAGAIN;
+        }
+        return SP_WAIT;
+      }
+      stop = true;
+    } else {
+      let got = vfs_read_at(&mut k.fs, f, sat_add(ioff, done), smaller(step, room));
+      if got == NO_FD || got == 0 {
+        stop = true;                        // the end of the file
+      } else {
+        let w = pipe_put_xfer(&mut k, p, got);
+        if w > XFER {
+          if done == 0 {
+            return w;
+          }
+          stop = true;
+        } else {
+          done = done + w;
+          if w < got {
+            stop = true;
+          }
+        }
+      }
+    }
+  }
+  if inp != 0 {
+    xfer_u64(&mut k.fs.xfer, 0, sat_add(ioff, done));
+    if copy_to_user(&mut k.spaces, pid, inp, k.fs.xfer, 8) != 8 {
+      return EFAULT;
+    }
+  } else {
+    vfs_seek(&mut k.fs, row, sat_add(ioff, done));
+  }
+  return done;
+}
+
+/// splice(in, inp, out, outp, len, flags).
+fn lx_splice(con: &mut Con, k: &mut Kernel, pid: u64, fin: u64, inp: u64, out: u64, outp: u64, len: u64, flags: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  let di = fd_look(k, pid, fin);
+  let dout = fd_look(k, pid, out);
+  if di.kind == K_BAD || dout.kind == K_BAD {
+    return EBADF;
+  }
+  let from_pipe = di.kind == K_PIPE_R;
+  let to_pipe = dout.kind == K_PIPE_W || (dout.kind == K_PIPE_R && pipe_both(k, pid, out));
+  if di.kind == K_PIPE_W || (dout.kind == K_PIPE_R && !to_pipe) {
+    return EBADF;                           // the wrong end of a pipe
+  }
+  if !from_pipe && !to_pipe {
+    return EINVAL;                          // one side must be a pipe
+  }
+  if (from_pipe && inp != 0) || (to_pipe && outp != 0) {
+    return ESPIPE;                          // a pipe has no offset
+  }
+  if len == 0 {
+    return 0;
+  }
+  let nb = flags / SPLICE_F_NONBLOCK % 2 == 1;
+  if from_pipe {
+    if dout.kind == K_SOCK {
+      return EINVAL;                        // not done
+    }
+    if dout.kind == K_FILE && fget(k.fs.ftab, dout.x, FD_MODE) / O_APPEND % 2 == 1 {
+      return EINVAL;                        // as Linux: no splice onto an O_APPEND file
+    }
+    return splice_from_pipe(&mut con, &mut k, pid, di.x, out, outp, len, nb);
+  }
+  if di.kind != K_FILE {
+    return EINVAL;                          // only a file feeds a pipe here
+  }
+  return splice_to_pipe(&mut k, pid, di.x, inp, dout.x, len, nb || pipe_nonblock(k, pid, out));
+}
+
+/// tee(in, out, len, flags): copies up to len bytes from pipe `in` to pipe
+/// `out`, leaving them in `in`.
+fn lx_tee(k: &mut Kernel, pid: u64, fin: u64, out: u64, len: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let di = fd_look(k, pid, fin);
+  let dout = fd_look(k, pid, out);
+  if di.kind == K_BAD || dout.kind == K_BAD {
+    return EBADF;
+  }
+  let to_pipe = dout.kind == K_PIPE_W || (dout.kind == K_PIPE_R && pipe_both(k, pid, out));
+  if di.kind != K_PIPE_R || !to_pipe || di.x == dout.x {
+    return EINVAL;
+  }
+  let nb = flags / SPLICE_F_NONBLOCK % 2 == 1;
+  let mut done = 0;
+  let mut stop = false;
+  while done < len && !stop
+    invariant done <= len && kok(k)
+  {
+    let got = pipe_peek_xfer(&mut k, di.x, done, smaller(XFER, len - done));
+    if got == 0 {
+      if done == 0 {
+        return empty_pipe(k, di.x, nb);
+      }
+      stop = true;
+    } else {
+      let w = pipe_put_xfer(&mut k, dout.x, got);
+      if w > XFER {
+        if done > 0 {
+          stop = true;
+        } else if w == EAGAIN && !nb {
+          return SP_WAIT;
+        } else {
+          return w;
+        }
+      } else {
+        done = done + w;
+        if w < got {
+          stop = true;
+        }
+      }
+    }
+  }
+  return done;
+}
+
+/// vmsplice(fd, iov, nr, flags): writev into a pipe's write end, or readv
+/// out of its read end.
+fn lx_vmsplice(k: &mut Kernel, pid: u64, fd: u64, iov: u64, nr: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let d = fd_look(k, pid, fd);
+  let w = d.kind == K_PIPE_W || (d.kind == K_PIPE_R && pipe_both(k, pid, fd));
+  if d.kind != K_PIPE_W && d.kind != K_PIPE_R {
+    return EBADF;
+  }
+  let bad = iov_check(&mut k, pid, iov, nr);
+  if bad != 0 {
+    return bad;
+  }
+  let nb = flags / SPLICE_F_NONBLOCK % 2 == 1;
+  let mut done = 0;
+  let mut i = 0;
+  while i < nr && i < IOV_MAX && iov < USER_BASE + USER_SIZE
+    invariant i <= nr && kok(k) && done < 0x8000000000000000
+  {
+    let base = user_u64(&mut k.spaces, pid, iov + 16 * i);
+    let size = user_u64(&mut k.spaces, pid, iov + 16 * i + 8);
+    if !base.ok || !size.ok {
+      return lx_fail_or(done, EFAULT);
+    }
+    let mut r = 0;
+    if size.v > 0 {
+      if w {
+        r = pipe_write(&mut k, pid, d.x, base.v, size.v);
+      } else {
+        r = pipe_read(&mut k, pid, d.x, base.v, size.v);
+      }
+    }
+    if r > size.v {
+      if done > 0 {
+        return done;
+      }
+      if r == EAGAIN && !nb && !pipe_nonblock(k, pid, fd) {
+        return SP_WAIT;
+      }
+      return r;
+    }
+    if r >= 0x8000000000000000 - done {
+      return done;
+    }
+    done = done + r;
+    if r < size.v {
+      return done;
+    }
+    i = i + 1;
+  }
+  return done;
+}
+
+fn lx_splice_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  let r10 = pget(k.procs, pid, F_REGS + R_R10);
+  let r8 = pget(k.procs, pid, F_REGS + R_R8);
+  let r9 = pget(k.procs, pid, F_REGS + R_R9);
+  let mut r = 0;
+  if n == LX_SPLICE {
+    r = lx_splice(&mut con, &mut k, pid, a, b, c, r10, r8, r9);
+  } else if n == LX_TEE {
+    r = lx_tee(&mut k, pid, a, b, c, r10);
+  } else {
+    r = lx_vmsplice(&mut k, pid, a, b, c, r10);
+  }
+  if r == SP_WAIT {
+    return lx_retry(&mut k, pid, n);        // an empty source or a full pipe: wait
+  }
+  if r == EPIPE {
+    ret(&mut k.procs, pid, r);
+    post_sig(&mut k, pid, SIGPIPE);
+    return SWITCH;
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}

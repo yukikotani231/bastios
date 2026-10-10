@@ -7,11 +7,13 @@ set -u
 cd "$(dirname "$0")/.."
 KERNEL=${KERNEL:-build/bastios.elf}
 SMP=${SMP:-4}
+# MODE=clock times `mthread clock` (four threads reading the clock) instead.
+MODE=${MODE:-par}
 
-python3 - "$KERNEL" "$SMP" <<'PY'
+python3 - "$KERNEL" "$SMP" "$MODE" <<'PY'
 import re, subprocess, sys, time, select
 
-kernel, smp = sys.argv[1], int(sys.argv[2])
+kernel, smp, mode = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 
 def run(cpus):
     q = subprocess.Popen(
@@ -41,13 +43,13 @@ def run(cpus):
         q.stdin.write(b"ash\r"); q.stdin.flush()
         if not until(rb"\n# ", 60):
             return None
-        q.stdin.write(b"mthread par\r"); q.stdin.flush()
-        m = until(rb"par 4 threads (\d+) ms", 600)
+        q.stdin.write(b"mthread " + mode.encode() + b"\r"); q.stdin.flush()
+        m = until(rb"4 threads (\d+) ms", 600)
         return int(m.group(1)) if m else None
     finally:
         q.kill(); q.wait()
 
 for cpus in sorted({1, smp}):
     ms = run(cpus)
-    print(f"-smp {cpus}: mthread par: " + (f"{ms} ms" if ms is not None else "did not finish"))
+    print(f"-smp {cpus}: mthread {mode}: " + (f"{ms} ms" if ms is not None else "did not finish"))
 PY

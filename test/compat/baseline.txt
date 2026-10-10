@@ -246,8 +246,12 @@ t_ltp2: mincore errors
 t_ltp2: mincore marks mapped pages
 t_ltp2: mlockall and munlockall succeed
 t_ltp2: personality is kept
+t_ltp2: pread/pwrite: negative offset EINVAL, a directory EISDIR, 0 bytes 0
+t_ltp2: rlimits: bad resource EINVAL; soft over hard EINVAL
 t_ltp2: send on an unconnected TCP socket is EPIPE
 t_ltp2: sendto with a huge address length is EINVAL
+t_ltp2: waitpid with bad options is EINVAL
+t_ltp2: waitpid(0) waits only for the caller's group
 t_mem: 64 MiB of address space
 t_mem: FUTEX_CMP_REQUEUE moves timed waiters across processes
 t_mem: FUTEX_CMP_REQUEUE with a negative count is EINVAL
@@ -318,12 +322,17 @@ t_more: readdir counts the files
 t_more: renameat2 RENAME_NOREPLACE
 t_more: sched_getcpu
 t_more: sendfile file to file
+t_more: sendfile needs a readable source
 t_more: sendfile to a pipe
 t_more: signalfd
 t_more: source file
+t_more: splice a file into a pipe
+t_more: splice a pipe into a file
+t_more: splice rejects two files and a pipe offset
 t_more: statx
 t_more: utimensat
 t_more: vfork + _exit
+t_more: vmsplice into a pipe, EAGAIN on an empty tee
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket

@@ -69,6 +69,9 @@ const UTS_SIZE: u64 = 390;
 const RLIM_INFINITY: u64 = 18446744073709551615;
 const RLIMIT_STACK: u64 = 3;
 const RLIMIT_NOFILE: u64 = 7;
+const RLIMIT_CORE: u64 = 4;
+const RLIM_NLIMITS: u64 = 16;
+const NR_OPEN: u64 = 1048576;          // Linux's default /proc/sys/fs/nr_open
 const STACK_BYTES: u64 = 1048576;     // STACK_PAGES pages
 const PR_SET_NAME: u64 = 15;
 const PR_GET_NAME: u64 = 16;
@@ -129,8 +132,11 @@ fn lx_uname(k: &mut Kernel, pid: u64, va: u64) -> u64
 }
 
 /// The limit on resource r: descriptors and stack are what the kernel
-/// gives; everything else is unlimited.
+/// gives, core files none; everything else is unlimited.
 fn rlimit_of(r: u64) -> u64 {
+  if r == RLIMIT_CORE {
+    return 0;                               // no core files are written
+  }
   if r == RLIMIT_NOFILE {
     return LXNFD;
   }
@@ -140,11 +146,44 @@ fn rlimit_of(r: u64) -> u64 {
   return RLIM_INFINITY;
 }
 
+/// The checks setrlimit and prlimit make of a new limit for resource r at
+/// va (if not 0): a resource there is, soft at most hard, and only root
+/// raising a hard limit. The limits stay as they are.
+fn rlimit_check(k: &mut Kernel, pid: u64, r: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if r >= RLIM_NLIMITS {
+    return EINVAL;
+  }
+  if va == 0 {
+    return 0;
+  }
+  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 16) != 16 {
+    return EFAULT;
+  }
+  let cur = get_u64(k.fs.xfer, 0);
+  let max = get_u64(k.fs.xfer, 8);
+  if cur > max {
+    return EINVAL;
+  }
+  if max > rlimit_of(r) && !cred_root(k.procs, pid) {
+    return EPERM;
+  }
+  if r == RLIMIT_NOFILE && max > NR_OPEN {
+    return EPERM;                           // past /proc/sys/fs/nr_open, even for root
+  }
+  return 0;
+}
+
 /// Writes struct rlimit {cur, max} for resource r to va (if not 0).
 fn rlimit_out(k: &mut Kernel, pid: u64, r: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if r >= RLIM_NLIMITS {
+    return EINVAL;
+  }
   if va == 0 {
     return 0;
   }
@@ -380,11 +419,15 @@ fn path_exists(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
 }
 
 /// pread64 / pwrite64 on a file: at offset `off`, leaving the file offset
-/// where it was.
+/// where it was. Linux's order of errors: a negative offset, a bad
+/// descriptor, one that cannot seek, a directory.
 fn lx_pio(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, va: u64, n: u64, off: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
   ensures kok(k) && con_ok(con)
 {
+  if off >= 0x8000000000000000 {
+    return EINVAL;
+  }
   let d = fd_look(k, pid, fd);
   if d.kind == K_PIPE_R || d.kind == K_PIPE_W || d.kind == K_SOCK || d.kind == K_CONSOLE {
     return ESPIPE;
@@ -395,11 +438,8 @@ fn lx_pio(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, va: u64
   if d.kind != K_FILE {
     return EBADF;
   }
-  if off >= 0x8000000000000000 {
-    return EINVAL;                          // a negative offset
-  }
   if n == 0 {
-    return 0;                               // nothing is read from or written to va
+    return 0;                               // nothing to move, whatever the buffer
   }
   let was = vfs_offset(k.fs, d.x);
   if !vfs_seek(&mut k.fs, d.x, off) {
@@ -649,8 +689,13 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_umask(&mut k, pid, a);
   } else if n == LX_GETRLIMIT {
     r = rlimit_out(&mut k, pid, a, b);
+  } else if n == LX_SETRLIMIT {
+    r = rlimit_check(&mut k, pid, a, b);    // a new limit is checked and not applied
   } else if n == LX_PRLIMIT64 {
-    r = rlimit_out(&mut k, pid, b, r10);    // a new limit is accepted and not applied
+    r = rlimit_check(&mut k, pid, b, c);
+    if r == 0 {
+      r = rlimit_out(&mut k, pid, b, r10);
+    }
   } else if n == LX_GETRUSAGE {
     r = lx_getrusage(&mut k, pid, b);
   } else if n == LX_SYSINFO {
