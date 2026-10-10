@@ -443,6 +443,12 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if flags & LO_TMPFILE != 0 {
     return EOPNOTSUPP;                      // so a program falls back to a named file
   }
+  if (flags % 4 != 0 || flags & LO_TRUNC != 0 || flags & LO_CREAT != 0) && vfs_ro(&mut k.fs, n) {
+    let exists = vfs_lookup(&mut k.fs, n) != NO_FILE || dir_at(&mut k, n) != NO_FILE;
+    if (exists && (flags % 4 != 0 || flags & LO_TRUNC != 0)) || (!exists && flags & LO_CREAT != 0) {
+      return EROFS;                         // a read-only mount (src/lxmount.bastio)
+    }
+  }
   let pf = proc_file(k.procs, k.fs.xfer, n);
   if pf != 0 {
     if flags % 4 != 0 || pf % 16 == PF_EXE {

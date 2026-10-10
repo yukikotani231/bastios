@@ -438,7 +438,33 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
   if what == PF_MOUNTS {
     let mut a = put_s(&mut o, 0, "rootfs / ramfs rw 0 0\nproc /proc proc rw 0 0\n");
     if k.fs.disk.slots > 0 {
-      a = put_s(&mut o, a, "disk /disk bstdisk2 rw 0 0\n");
+      a = put_s(&mut o, a, "disk /disk bstdisk3 rw 0 0\n");
+    }
+    // tmpfs mounts (src/lxmount.bastio): "tmpfs /NAME tmpfs rw 0 0".
+    let mut s = 0;
+    while s < MNT_N
+      invariant s <= MNT_N && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+    {
+      let i = vfs_mount_node(k.fs, s);
+      if i < NFILES {
+        let l = ram_name(&mut k.fs.ram, i, &mut k.fs.name);
+        if l != NO_FILE {
+          a = put_s(&mut o, a, "tmpfs /");
+          let mut j = 0;
+          while j < l
+            invariant j <= l && l <= NAMEBUF && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+          {
+            a = put_c(&mut o, a, bget(k.fs.name, j));
+            j = j + 1;
+          }
+          if vfs_mount_ro(k.fs, s) {
+            a = put_s(&mut o, a, " tmpfs ro 0 0\n");
+          } else {
+            a = put_s(&mut o, a, " tmpfs rw 0 0\n");
+          }
+        }
+      }
+      s = s + 1;
     }
     return a;
   }
@@ -467,7 +493,7 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     return a;
   }
   if what == PF_FILESYSTEMS && p == 0 {
-    return put_s(&mut o, 0, "nodev\tramfs\nnodev\tproc\n\tbstdisk2\n");
+    return put_s(&mut o, 0, "nodev\tramfs\nnodev\tproc\nnodev\ttmpfs\n\tbstdisk3\n");
   }
   if what == PF_UPTIME {
     let mut a = put_n(&mut o, 0, k.ns / NS_PER_S);
