@@ -1,6 +1,19 @@
-// An Intel 8254x (e1000) network card, the one most PCs and hypervisors of
-// its era offer: 82540EM, PCI id 8086:100E, as QEMU's `-device e1000`
-// emulates it. Polled like the virtio card: its registers are a 128 KiB
+// An Intel gigabit network card of the e1000 families, which share a
+// register layout and the legacy descriptors this driver uses:
+//   E1K_8254X  the 8254x most PCs and hypervisors of their era offer
+//              (82540EM 8086:100E, as QEMU's `-device e1000`; 82544GC and
+//              82545EM, its `e1000-82544gc` and `e1000-82545em`);
+//   E1K_82574  the 82574L (8086:10D3, QEMU's `e1000e`), which needs one
+//              erratum bit set;
+//   E1K_IGB    the 82576 (8086:10C9, QEMU's `igb`) and its successors
+//              I350, I210 and I211 (untested: QEMU has none), whose queue 0
+//              lives at 0xC000 / 0xE000 and must be enabled on its own, and
+//              which take the advanced descriptors (QEMU's igb knows no
+//              others). An advanced receive descriptor is written back with
+//              the status at byte 8 and the length at byte 12, over the
+//              buffer's address, which is therefore written again each time.
+// The I217-I219 (on the PCH) and I225/I226 are other designs, not driven.
+// Polled like the virtio card: its registers are a 128 KiB
 // block of the device window, claimed as an `Mmio`, and every page it can
 // touch is a `Dma` lent at start and taken back after a reset at power off.
 //
@@ -11,7 +24,10 @@
 import "virtio_net.bastio";
 
 const E1K_VENDOR: u64 = 0x8086;
-const E1K_DEVICE: u64 = 0x100E;       // 82540EM
+const E1K_NONE: u64 = 0;              // e1k_model: not one of these
+const E1K_8254X: u64 = 1;
+const E1K_82574: u64 = 2;
+const E1K_IGB: u64 = 3;
 const E1K_LEN: u64 = 0x20000;         // the register block
 const E1K_TOP: u64 = 0xFEC00000;      // its BAR must lie below the I/O APIC, HPET and local APIC
 const E1K_PAGES: u64 = 6;
@@ -27,16 +43,19 @@ const E1K_IMC: u64 = 0x00D8;          // interrupt mask clear
 const E1K_RCTL: u64 = 0x0100;
 const E1K_TCTL: u64 = 0x0400;
 const E1K_TIPG: u64 = 0x0410;
-const E1K_RDBAL: u64 = 0x2800;
-const E1K_RDBAH: u64 = 0x2804;
-const E1K_RDLEN: u64 = 0x2808;
-const E1K_RDH: u64 = 0x2810;
-const E1K_RDT: u64 = 0x2818;
-const E1K_TDBAL: u64 = 0x3800;
-const E1K_TDBAH: u64 = 0x3804;
-const E1K_TDLEN: u64 = 0x3808;
-const E1K_TDH: u64 = 0x3810;
-const E1K_TDT: u64 = 0x3818;
+const E1K_RQ: u64 = 0x2800;           // receive queue 0's registers, from:
+const IGB_RQ: u64 = 0xC000;           //   (on igb)
+const E1K_TQ: u64 = 0x3800;           // transmit queue 0's
+const IGB_TQ: u64 = 0xE000;
+const Q_BAL: u64 = 0x00;              // offsets in a queue's registers
+const Q_BAH: u64 = 0x04;
+const Q_LEN: u64 = 0x08;
+const Q_SRRCTL: u64 = 0x0C;           // igb receive: buffer size and descriptor type
+const Q_H: u64 = 0x10;
+const Q_T: u64 = 0x18;
+const Q_DCTL: u64 = 0x28;             // igb: bit 25 enables the queue
+const E1K_MDIC: u64 = 0x0020;         // PHY register access
+const E1K_GCR: u64 = 0x5B00;          // 82574: bit 22 must be set (erratum)
 const E1K_MTA: u64 = 0x5200;          // 128 words of multicast filter
 const E1K_RAL: u64 = 0x5400;          // our MAC address, low 32 bits
 const E1K_RAH: u64 = 0x5404;          // high 16 bits, and bit 31: valid
@@ -49,7 +68,15 @@ const RCTL_ON: u64 = 0x4008002;       // enable, accept broadcast, strip the CRC
 const TCTL_ON: u64 = 0x4010A;         // enable, pad short frames, collision threshold and distance
 const TIPG_STD: u64 = 0x0060200A;
 const RAH_AV: u64 = 0x80000000;
-const EERD_DONE: u64 = 16;
+const EERD_DONE: u64 = 16;            // 8254x: bit 4; the others: bit 1, address from bit 2
+const QD_ENABLE: u64 = 0x2000000;
+const SRRCTL_ADV: u64 = 0x2000002;    // 2 KiB buffers, advanced one-buffer descriptors
+const ADV_TX: u64 = 0x2B300000;       // advanced data descriptor: DEXT, RS, IFCS, EOP; type 3
+const GCR_ERRATUM: u64 = 0x400000;
+// MDIC: write PHY 1's control register (0) with autonegotiation on and
+// restarted (and power-down off), then bit 28 says it is done.
+const MDIC_AUTONEG: u64 = 0x04201200;
+const MDIC_READY: u64 = 0x10000000;
 const TX_CMD: u64 = 0x0B;             // end of packet, insert the CRC, report status
 const DESC_DD: u64 = 1;               // descriptor done
 const DESC_EOP: u64 = 2;              // the whole frame is in this buffer
@@ -65,6 +92,9 @@ struct E1k {
   tb: Dma,            // the frame being sent
   rx_next: u64,       // the next receive descriptor the card fills
   tx_next: u64,       // the next transmit descriptor
+  model: u64,         // E1K_8254X, E1K_82574 or E1K_IGB
+  rq: u64,            // where queue 0's registers are
+  tq: u64,
   mac: u64,
   live: bool,
   irq: bool,          // received frames can raise its PCI interrupt line (see e1k_irq)
@@ -73,6 +103,44 @@ struct E1k {
 spec fn e1k_ok(e: &E1k) -> bool {
   mmio_len(e.regs) == E1K_LEN && mmio_base(e.regs) % 4096 == 0
   && e.rx_next < E1K_DESCS && e.tx_next < E1K_DESCS && e.mac < 281474976710656
+  && (e.rq == E1K_RQ || e.rq == IGB_RQ) && (e.tq == E1K_TQ || e.tq == IGB_TQ)
+}
+
+/// Which family PCI id `vendor:device` is, or E1K_NONE.
+fn e1k_model(vendor: u64, device: u64) -> u64
+  ensures result <= E1K_IGB
+{
+  if vendor != E1K_VENDOR {
+    return E1K_NONE;
+  }
+  if device == 0x100E || device == 0x100C || device == 0x100F {
+    return E1K_8254X;                 // 82540EM, 82544GC, 82545EM
+  }
+  if device == 0x10D3 {
+    return E1K_82574;
+  }
+  if device == 0x10C9 || device == 0x1521 || device == 0x1533 || device == 0x157B || device == 0x1539 {
+    return E1K_IGB;                   // 82576, I350, I210 (and without flash), I211
+  }
+  return E1K_NONE;
+}
+
+/// The first card of these families on the PCI bus, or PCI_NONE.
+fn e1k_find(p: &mut Pci) -> u64
+  requires pci_ok(p)
+  ensures pci_ok(p) && result <= PCI_NONE
+{
+  let mut d = 0;
+  while d < PCI_NONE
+    invariant d <= PCI_NONE && pci_ok(p)
+  {
+    let id = pci_read(&mut p, d, PCI_ID);
+    if e1k_model(id % 65536, id / 65536 % 65536) != E1K_NONE {
+      return d;
+    }
+    d = pci_next(&mut p, d);
+  }
+  return PCI_NONE;
 }
 
 fn e1k_read(e: &mut E1k, r: u64) -> u64
@@ -130,13 +198,19 @@ fn e1k_eeprom(e: &mut E1k, w: u64) -> u64
   requires e1k_ok(e) && w < 64
   ensures e1k_ok(e)
 {
-  e1k_write(&mut e, E1K_EERD, 1 + w * 256);
+  let mut done = EERD_DONE;
+  if e.model == E1K_8254X {
+    e1k_write(&mut e, E1K_EERD, 1 + w * 256);
+  } else {
+    e1k_write(&mut e, E1K_EERD, 1 + w * 4);
+    done = 2;
+  }
   let mut spins = 0;
   while spins < VIO_SPINS
-    invariant e1k_ok(e)
+    invariant e1k_ok(e) && (done == 2 || done == EERD_DONE)
   {
     let v = e1k_read(&mut e, E1K_EERD);
-    if v / EERD_DONE % 2 == 1 {
+    if v / done % 2 == 1 {
       return v / 65536;
     }
     spins = spins + 1;
@@ -170,12 +244,18 @@ fn e1k_reset(e: &mut E1k) -> bool
 /// Takes the card's registers and six pages, resets it, sets up both rings
 /// and reads its MAC address. A card that cannot be started is left with
 /// `live` false: it sends nothing and receives nothing.
-fn e1k_new(regs: Mmio, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3: Frame, t: Frame) -> E1k
+fn e1k_new(regs: Mmio, model: u64, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3: Frame, t: Frame) -> E1k
   requires mmio_len(regs) == E1K_LEN && mmio_base(regs) % 4096 == 0
   ensures e1k_ok(result)
 {
+  let mut rq = E1K_RQ;
+  let mut tq = E1K_TQ;
+  if model == E1K_IGB {
+    rq = IGB_RQ;
+    tq = IGB_TQ;
+  }
   let mut e = E1k { regs: regs, ring: dma_lend(r), rb0: dma_lend(b0), rb1: dma_lend(b1), rb2: dma_lend(b2),
-    rb3: dma_lend(b3), tb: dma_lend(t), rx_next: 0, tx_next: 0, mac: 0, live: false, irq: false };
+    rb3: dma_lend(b3), tb: dma_lend(t), rx_next: 0, tx_next: 0, model: model, rq: rq, tq: tq, mac: 0, live: false, irq: false };
   let ra = dma_addr(e.ring);
   if ra > ADDR_LIMIT - 4096 || !e1k_reset(&mut e) {
     return e;
@@ -190,6 +270,23 @@ fn e1k_new(regs: Mmio, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3: Frame, t: 
     up = up + CTRL_ASDE;
   }
   e1k_write(&mut e, E1K_CTRL, up);
+  // igb: the PHY negotiates the link only when told to (QEMU's waits
+  // for it; a real one may be powered down), as Linux's igb does.
+  if model == E1K_IGB {
+    e1k_write(&mut e, E1K_MDIC, MDIC_AUTONEG);
+    let mut spins = 0;
+    while spins < VIO_SPINS && e1k_read(&mut e, E1K_MDIC) / MDIC_READY % 2 == 0
+      invariant e1k_ok(e) && e.rq == rq && e.tq == tq && !e.live
+    {
+      spins = spins + 1;
+    }
+  }
+  if model == E1K_82574 {
+    let g = e1k_read(&mut e, E1K_GCR);
+    if g / GCR_ERRATUM % 2 == 0 {
+      e1k_write(&mut e, E1K_GCR, g + GCR_ERRATUM);
+    }
+  }
   let mut i = 0;
   while i < 128
     invariant i <= 128 && e1k_ok(e)
@@ -235,22 +332,56 @@ fn e1k_new(regs: Mmio, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3: Frame, t: 
     dma_write64(&mut e.ring, E1K_TXR + d * 16 + 8, 0);
     d = d + 1;
   }
-  e1k_write(&mut e, E1K_RDBAL, ra);
-  e1k_write(&mut e, E1K_RDBAH, 0);
-  e1k_write(&mut e, E1K_RDLEN, E1K_DESCS * 16);
-  e1k_write(&mut e, E1K_RDH, 0);
-  e1k_write(&mut e, E1K_RDT, E1K_DESCS - 1);
+  let rq0 = e.rq;
+  let tq0 = e.tq;
+  e1k_write(&mut e, rq0 + Q_BAL, ra);
+  e1k_write(&mut e, rq0 + Q_BAH, 0);
+  e1k_write(&mut e, rq0 + Q_LEN, E1K_DESCS * 16);
+  e1k_write(&mut e, rq0 + Q_H, 0);
+  // igb: advanced descriptors, and the queue is enabled on its own,
+  // before its tail is written.
+  if model == E1K_IGB {
+    e1k_write(&mut e, rq0 + Q_SRRCTL, SRRCTL_ADV);
+  }
+  if model == E1K_IGB && (!e1k_queue_on(&mut e, rq0) || !e1k_queue_on(&mut e, tq0)) {
+    return e;
+  }
+  e1k_write(&mut e, rq0 + Q_T, E1K_DESCS - 1);
   e1k_write(&mut e, E1K_RCTL, RCTL_ON);
   // Transmit.
-  e1k_write(&mut e, E1K_TDBAL, ra + E1K_TXR);
-  e1k_write(&mut e, E1K_TDBAH, 0);
-  e1k_write(&mut e, E1K_TDLEN, E1K_DESCS * 16);
-  e1k_write(&mut e, E1K_TDH, 0);
-  e1k_write(&mut e, E1K_TDT, 0);
+  e1k_write(&mut e, tq0 + Q_BAL, ra + E1K_TXR);
+  e1k_write(&mut e, tq0 + Q_BAH, 0);
+  e1k_write(&mut e, tq0 + Q_LEN, E1K_DESCS * 16);
+  e1k_write(&mut e, tq0 + Q_H, 0);
+  e1k_write(&mut e, tq0 + Q_T, 0);
   e1k_write(&mut e, E1K_TIPG, TIPG_STD);
   e1k_write(&mut e, E1K_TCTL, TCTL_ON);
   e.live = true;
   return e;
+}
+
+/// igb: sets the enable bit of the queue whose registers start at `q` and
+/// waits until the card says it is on.
+fn e1k_queue_on(e: &mut E1k, q: u64) -> bool
+  requires e1k_ok(e) && (q == IGB_RQ || q == IGB_TQ)
+  ensures e1k_ok(e) && e.live == old(e.live) && e.rq == old(e.rq) && e.tq == old(e.tq)
+  ensures e.rx_next == old(e.rx_next) && e.tx_next == old(e.tx_next) && e.model == old(e.model)
+{
+  let c = e1k_read(&mut e, q + Q_DCTL);
+  if c / QD_ENABLE % 2 == 0 {
+    e1k_write(&mut e, q + Q_DCTL, c + QD_ENABLE);
+  }
+  let mut spins = 0;
+  while spins < VIO_SPINS
+    invariant e1k_ok(e) && e.live == old(e.live) && e.rq == old(e.rq) && e.tq == old(e.tq)
+      && e.rx_next == old(e.rx_next) && e.tx_next == old(e.tx_next) && e.model == old(e.model)
+  {
+    if e1k_read(&mut e, q + Q_DCTL) / QD_ENABLE % 2 == 1 {
+      return true;
+    }
+    spins = spins + 1;
+  }
+  return false;
 }
 
 /// Resets the card, so it stops using the pages, and takes them back (at
@@ -315,19 +446,30 @@ fn e1k_recv(e: &mut E1k, pkt: &mut Bytes) -> u64
     return 0;
   }
   let b = e.rx_next;
-  let st = cast[u64](dma_read8(&mut e.ring, b * 16 + 12));
+  let mut st_at = 12;
+  let mut len_at = 8;
+  if e.model == E1K_IGB {
+    st_at = 8;
+    len_at = 12;
+  }
+  let st = cast[u64](dma_read8(&mut e.ring, b * 16 + st_at));
   if st % 2 != DESC_DD {
     return 0;
   }
-  let got = cast[u64](dma_read16(&mut e.ring, b * 16 + 8));
+  let got = cast[u64](dma_read16(&mut e.ring, b * 16 + len_at));
   let mut n = 0;
   if st / DESC_EOP % 2 == 1 && got <= RX_BUF - NET_HDR {
     n = got;                          // else a frame over several buffers: dropped
   }
   e1k_rxbuf_copy(&mut e, b, &mut pkt, n);
-  // Back to the card: clear its status, then move the tail onto it.
+  // Back to the card: clear its status (and give the address again),
+  // then move the tail onto it.
+  if e.model == E1K_IGB {
+    dma_write64(&mut e.ring, b * 16, e1k_rxbuf_addr(e, b));
+  }
   dma_write64(&mut e.ring, b * 16 + 8, 0);
-  e1k_write(&mut e, E1K_RDT, b);
+  let rq = e.rq;
+  e1k_write(&mut e, rq + Q_T, b);
   e.rx_next = (b + 1) % E1K_DESCS;
   return n;
 }
@@ -344,9 +486,14 @@ fn e1k_send(e: &mut E1k, pkt: &Bytes, n: u64) -> bool
   bytes_to_dma(&mut e.tb, 0, pkt, 0, n);
   let d = E1K_TXR + e.tx_next * 16;
   dma_write64(&mut e.ring, d, dma_addr(e.tb));
-  dma_write64(&mut e.ring, d + 8, n + TX_CMD * 16777216);
+  if e.model == E1K_IGB {
+    dma_write64(&mut e.ring, d + 8, n + ADV_TX + n * 70368744177664);   // the payload length at bit 46
+  } else {
+    dma_write64(&mut e.ring, d + 8, n + TX_CMD * 16777216);
+  }
   e.tx_next = (e.tx_next + 1) % E1K_DESCS;
-  e1k_write(&mut e, E1K_TDT, e.tx_next);
+  let tq = e.tq;
+  e1k_write(&mut e, tq + Q_T, e.tx_next);
   let mut spins = 0;
   while spins < VIO_SPINS
     invariant e1k_ok(e) && d + 16 <= 4096 && d % 16 == 0
