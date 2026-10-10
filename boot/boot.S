@@ -44,6 +44,7 @@ bst_trap_stack_top:
 .align 8
 mb_info:        .skip 8
 kernel_rsp:     .skip 8
+user_rsp:       .skip 8
 .global bst_idle_vector
 bst_idle_vector: .skip 8
 .global bst_cpu_ctx
@@ -96,7 +97,7 @@ _start:
         mov     %eax, %cr4
         mov     $0xC0000080, %ecx     /* EFER */
         rdmsr
-        or      $0x100, %eax          /* LME */
+        or      $0x101, %eax          /* LME | SCE (the `syscall` instruction) */
         wrmsr
         mov     %cr0, %eax
         or      $0x80010001, %eax     /* PG | WP | PE: the kernel cannot write read-only pages either */
@@ -194,6 +195,30 @@ bst_cpu_wait:
         cli
         mov     bst_idle_vector, %rax
         ret
+
+/*
+ * Entry for the `syscall` instruction (Linux system calls). The CPU leaves
+ * the user rip in rcx and rflags in r11, masks IF, DF, TF and AC (see
+ * bst_platform_init) and does not switch stacks, so this moves to the trap
+ * stack (empty while user code runs), builds the frame an interrupt from
+ * ring 3 would have pushed, and joins trap_common as vector 0x81. No `int`
+ * can raise 0x81 from ring 3 (its gate has DPL 0), so the vector means
+ * `syscall`. With interrupts masked and one CPU, user_rsp cannot be
+ * overwritten before it is pushed. The return to user mode is the usual
+ * iretq in bst_cpu_enter, which sanitizes everything it restores.
+ */
+.global bst_syscall_entry
+bst_syscall_entry:
+        mov     %rsp, user_rsp
+        mov     $bst_trap_stack_top, %rsp
+        push    $UDATA                  /* ss */
+        push    user_rsp                /* rsp */
+        push    %r11                    /* rflags */
+        push    $UCODE                  /* cs */
+        push    %rcx                    /* rip */
+        push    $0                      /* error code */
+        push    $0x81                   /* vector */
+        jmp     trap_common
 
 /*
  * Trap stubs. Each pushes a dummy error code where the CPU pushes none, then

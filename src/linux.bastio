@@ -1,0 +1,64 @@
+// Linux system calls: what a program gets when it runs the `syscall`
+// instruction (vector 0x81 from the trap entry). The number is in rax and
+// the arguments in rdi, rsi, rdx, r10, r8, r9; the result goes back in rax,
+// a negative errno as two's complement. `int 0x80` keeps the BastiOS ABI.
+//
+// Only a few calls exist so far; every other number returns -ENOSYS, which
+// a Linux program can handle, rather than killing it.
+
+import "pages.bastio";
+import "proc.bastio";
+import "syscall.bastio";
+
+const V_LINUX: u64 = 0x81;
+
+const LX_WRITE: u64 = 1;
+const LX_GETPID: u64 = 39;
+const LX_EXIT: u64 = 60;
+const LX_GETPPID: u64 = 110;
+const LX_EXIT_GROUP: u64 = 231;
+
+// -errno as u64.
+const ENOSYS: u64 = 18446744073709551578;   // 2^64 - 38
+const EFAULT: u64 = 18446744073709551602;   // 2^64 - 14
+const EBADF: u64 = 18446744073709551607;    // 2^64 - 9
+
+/// Handles the Linux system call process `pid` just made.
+fn linux_syscall(con: &Serial, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k)
+{
+  let n = pget(k.procs, pid, F_REGS + R_RAX);
+  let a = pget(k.procs, pid, F_REGS + R_RDI);
+  let b = pget(k.procs, pid, F_REGS + R_RSI);
+  let c = pget(k.procs, pid, F_REGS + R_RDX);
+  if n == LX_EXIT || n == LX_EXIT_GROUP {
+    // One thread per process, so both end the process. Linux keeps the
+    // low 8 bits of the status.
+    terminate(&mut k, mmu, pid, a % 256);
+    return SWITCH;
+  }
+  if n == LX_WRITE {
+    if a != 1 && a != 2 {
+      ret(&mut k.procs, pid, EBADF);
+      return KEEP;
+    }
+    let w = do_write(con, &mut k.spaces, pid, b, c);
+    if w == NO_RESULT || (w == 0 && c > 0) {
+      ret(&mut k.procs, pid, EFAULT);
+    } else {
+      ret(&mut k.procs, pid, w);
+    }
+    return KEEP;
+  }
+  if n == LX_GETPID {
+    ret(&mut k.procs, pid, pid);
+    return KEEP;
+  }
+  if n == LX_GETPPID {
+    ret(&mut k.procs, pid, pget(k.procs, pid, F_PARENT));
+    return KEEP;
+  }
+  ret(&mut k.procs, pid, ENOSYS);
+  return KEEP;
+}

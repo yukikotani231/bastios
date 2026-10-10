@@ -4,24 +4,24 @@
  * ET_DYN). It checks what the ELF loader promises: initialized data and a
  * zeroed .bss, and the initial stack of the Linux ABI (argc, argv, envp and
  * the auxiliary vector). It prints "<name>: ok" and exits 0, or exits with
- * a bit set for each check that failed. Output goes through the BastiOS
- * system call ABI, as the kernel has no Linux system calls yet.
+ * a bit set for each check that failed. It talks to the kernel only with
+ * Linux system calls (the `syscall` instruction).
  */
 typedef unsigned long u64;
 
 static volatile u64 data_word = 0x1122334455667788;  /* .data */
 static volatile char bss[8192];                      /* .bss, spans pages */
 
-static u64 sys(u64 n, u64 a, u64 b) {
+static u64 sys(u64 n, u64 a, u64 b, u64 c) {
     u64 r;
-    __asm__ volatile("int $0x80" : "=a"(r) : "a"(n), "D"(a), "S"(b) : "memory");
+    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c) : "rcx", "r11", "memory");
     return r;
 }
 
 static void say(const char *s) {
     u64 n = 0;
     while (s[n]) n++;
-    sys(1, (u64)s, n);
+    sys(1, 1, (u64)s, n);                    /* write(1, s, n) */
 }
 
 extern char _start[];
@@ -65,6 +65,12 @@ u64 elf_main(u64 *sp) {
             if (ph[i].p_type == 1 && (ph[i].p_flags & 1)) found = 1;
     }
     if (!found) bad |= 64;
+    /* Linux system calls: an unknown one fails with -ENOSYS, a bad fd with
+       -EBADF, getpid is positive, and a write reports its count. */
+    if (sys(9999, 0, 0, 0) != (u64)-38) bad |= 128;
+    if (sys(1, 7, (u64)"x", 1) != (u64)-9) bad |= 128;
+    if ((long)sys(39, 0, 0, 0) <= 0) bad |= 128;
+    if (sys(1, 1, (u64)"", 0) != 0) bad |= 128;
     if (bad) return bad;
     say(argv[0]);
     say(": ok\r\n");
