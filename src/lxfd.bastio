@@ -429,10 +429,14 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64) -> u64
     }
     return fd_install(&mut k, pid, hv);
   }
-  let ff = fifo_find(k, n);
-  if ff < FIFO_N {
+  let fh = vfs_lookup(&mut k.fs, n);
+  if fh != NO_FILE && vfs_is_fifo(&mut k.fs, fh) {
     if flags & LO_CREAT != 0 && flags & LO_EXCL != 0 {
       return EEXIST;
+    }
+    let ff = fifo_slot(&mut k, fh);
+    if ff >= FIFO_N {
+      return ENFILE;                        // FIFO_N named pipes are open already
     }
     return fifo_open(&mut k, pid, ff, flags);
   }

@@ -343,11 +343,6 @@ fn lx_unlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
   if n == NO_RESULT {
     return ENOENT;
   }
-  let ff = fifo_find(k, n);
-  if ff < FIFO_N {
-    k.evt = set(k.evt, FIFO_AT + ff * FIFO_STRIDE, 0);   // open ends keep their pipe
-    return 0;
-  }
   if dir_at(&mut k, n) != NO_FILE {
     return EISDIR;
   }
