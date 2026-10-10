@@ -38,7 +38,7 @@ UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest crashme diskbench
 UASM    := fault straddle
 ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash
-UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so
+UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so build/user/vdso.so
 
 build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
 	$(BASTIOC) --lib $(BASTIOLIB) --target user -o $@ $<
@@ -95,6 +95,16 @@ build/user/sysfuzz.o: user/sysfuzz.c | build/user
 # Linked at USER_BASE: its tables of pointers need no relocation.
 build/user/sysfuzz.elf: build/user/elfstart.o build/user/sysfuzz.o
 	$(CC) -nostdlib -static -no-pie -Wl,-Ttext-segment=0x8000000000 -Wl,--build-id=none -o $@ $^
+
+# The vDSO (user/vdso.c): a tiny shared object the kernel copies onto one
+# page of every Linux process, with the clock from byte 0xF80 of it. The
+# whole file must fit below that (user/vdso.ld fails the link otherwise,
+# and the size check catches the section headers at its end).
+build/user/vdso.so: user/vdso.c user/vdso.ld user/vdso.map | build/user
+	$(CC) -O2 -fPIC -ffreestanding -fno-stack-protector -fno-asynchronous-unwind-tables -mgeneral-regs-only \
+	  -Wall -Wextra -Werror -nostdlib -shared -Wl,-T,user/vdso.ld -Wl,--version-script=user/vdso.map \
+	  -Wl,--hash-style=both -Wl,-soname=linux-vdso.so.1 -Wl,--build-id=none -o $@ user/vdso.c
+	@test $$(stat -c %s $@) -le 3968 || { echo "$@ does not fit below the vDSO's clock"; rm -f $@; exit 1; }
 
 # A C program against musl libc, static PIE (the musl-tools package).
 MUSLCC ?= musl-gcc

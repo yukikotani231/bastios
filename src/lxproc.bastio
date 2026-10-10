@@ -210,7 +210,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
     bfree(args);
     return E2BIG;
   }
-  let sp = load_image(&mut k.mem, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, pid, src, args, alen, total);
+  let sp = load_image(&mut k.mem, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, total);
   bfree(args);
   match sp {
     Space::Empty => { return ENOEXEC; },

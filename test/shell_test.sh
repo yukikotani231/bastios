@@ -295,6 +295,9 @@ steps = [
     ("mthread exec", b"mthread: exec ok, threads gone", b"\n# "),
     ("mthread unmap", b"mthread: unmap ok, threads still running", b"\n# "),
     ("mthread ids", b"mthread: ids ok", b"\n# "),
+    # clock_gettime through the vDSO (user/vdso.c): it agrees with the
+    # system call, and four threads read it 20000 times each.
+    ("mthread clock", b"mthread: clock ok (vdso)", b"\n# "),
     # What Linux programs expect to find: /dev/null swallows, /tmp and
     # /etc/passwd exist, and every file has its own inode number.
     ("echo lost > /dev/null; wc -c < /dev/null; test -d /tmp && echo tmp$((2+2))", b"\r\n0\r\ntmp4\r\n", b"\n# "),
@@ -460,9 +463,10 @@ else:
             return None
         m = re.search(rb"(\d+) ticks, \d+ s", out[mark:])
         return int(m.group(1)) if m else None
-    # The HPET (src/hpet.bastio, memory-mapped registers claimed through
-    # Mmio) counts nanoseconds: over the same wall-clock interval it must
-    # advance by about as much.
+    # The clock (src/tsc.bastio: the time-stamp counter, its rate measured
+    # at boot against the HPET, whose registers are claimed through Mmio)
+    # counts nanoseconds: over the same wall-clock interval it must advance
+    # by about as much.
     def clock():
         mark = len(out)
         qemu.stdin.write(b"clock\r"); qemu.stdin.flush()
@@ -474,9 +478,9 @@ else:
     time.sleep(2)
     t1, c1, w1 = uptime(), clock(), time.time()
     if c0 and c1 and 0.6e9 * (w1 - w0) <= c1 - c0 <= 1.5e9 * (w1 - w0):
-        print(f"ok   HPET clock: {(c1 - c0) / 1e9:.2f} s in {w1 - w0:.1f} s")
+        print(f"ok   clock: {(c1 - c0) / 1e9:.2f} s in {w1 - w0:.1f} s")
     else:
-        print("FAIL HPET clock:", c0, c1); fails += 1
+        print("FAIL clock:", c0, c1); fails += 1
     if t0 is not None and t1 is not None and 60 * (w1 - w0) <= t1 - t0 <= 200 * (w1 - w0):
         print(f"ok   timer: {t1 - t0} ticks in {w1 - w0:.1f} s")
     else:

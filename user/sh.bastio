@@ -556,7 +556,7 @@ fn cmd_help(con: &Serial) {
   puts(con, "  mem              free physical pages\r\n");
   puts(con, "  uptime           timer ticks since boot (100 a second)\r\n");
   puts(con, "  cpus             processors running\r\n");
-  puts(con, "  clock            nanoseconds since boot (HPET)\r\n");
+  puts(con, "  clock            nanoseconds since boot\r\n");
   puts(con, "  kill PID         stop a process\r\n");
   puts(con, "  ping [A.B.C.D]   ICMP echo (default: the gateway)\r\n");
   puts(con, "  ifconfig         the network address (from DHCP)\r\n");

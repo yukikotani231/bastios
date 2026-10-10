@@ -14,6 +14,15 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Added
 
+- A vDSO (`user/vdso.c`): `clock_gettime` for the monotonic and real-time
+  clocks runs in user mode, with no system call and no kernel lock. The
+  kernel now keeps time with the time-stamp counter, its rate measured
+  against the HPET at boot (`src/tsc.bastio`), and copies the clock's
+  parameters into each Linux process's vDSO page, so both read one clock.
+  Four threads reading the clock 20000 times each went from about 2.3 s on
+  one processor and 4.1 s on four to under 30 ms (`MODE=clock
+  test/threadbench.sh`).
+
 - `mount` and `umount2` for tmpfs (`src/lxmount.bastio`): a tmpfs mounts
   on an empty in-memory directory, `MS_RDONLY` makes it read-only
   (`EROFS`) until an `MS_REMOUNT`, and unmounting removes what is in it.
