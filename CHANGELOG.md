@@ -23,6 +23,16 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   with nothing else waiting are answered without the kernel lock: 4 copies
   of `bench` at once on 4 processors make 20000 `getpid` calls in about
   25 ticks instead of about 250.
+- x2APIC. A firmware that leaves the local APICs in x2APIC mode (SeaBIOS
+  and OVMF do when a machine may have APIC ids of 255 and up; many real
+  PCs do with VT-d on) used to hang the kernel at boot. It now takes them
+  back to xAPIC, unless the firmware locked x2APIC mode or a processor has
+  an id of 255 or more: then it runs them in x2APIC mode, and processors
+  the MADT lists only as x2APIC entries are started too. In x2APIC mode
+  the kernel does without MSI and wake-up interrupts for now (its own APIC
+  code, src/lapic.bastio, reaches the registers only as memory). Tested
+  with QEMU 9.2 (`QEMU_X2APIC=... make test`; QEMU 8 cannot emulate
+  x2APIC without KVM).
 
 ### Linux programs
 
