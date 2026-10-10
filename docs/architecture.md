@@ -128,7 +128,7 @@ One copy on one processor takes about 2 s either way. I found where the time wen
 What is left is mostly emulation:
 - `pause` still costs. As an experiment (not a change, because `pause` is the right instruction on real hardware), removing it from the spin loop cuts getpid on four copies from about 190 ticks to about 85, against about 130 on one processor.
 - QEMU's four processor threads and its I/O thread share the host's four cores.
-- A writer woken when the ring drains waits up to one 10 ms tick for an idle processor to pick it up, because BastiOS does not yet send wake-up interrupts between processors.
+- A writer woken when the ring drains waits up to one 10 ms tick for an idle processor to pick it up: BastiOS sends no wake-up interrupts between processors. Measured and rejected (2026-10-10): sending one to each idle processor (claimed as an `Mmio` block of the local APIC) left 4 x `bench` unchanged within noise and made a single `bench`'s spawn+exit half as fast (49 to 94 ticks), because the child of a spawning parent then starts on another processor instead of on the parent's when it blocks in wait4. Waking only for writers, or with affinity, may still pay off; it needs a benchmark that shows it.
 
 These numbers should be taken again on KVM or real hardware before `Lock[Sys]` is split further.
 
