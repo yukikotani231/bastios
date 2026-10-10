@@ -36,6 +36,7 @@ const MSG_DONTWAIT: u64 = 0x40;
 const MSG_PEEK: u64 = 2;
 const MSG_NOSIGNAL: u64 = 0x4000;
 const MSG_OOB: u64 = 1;
+const MSG_ERRQUEUE: u64 = 0x2000;
 const SOCKADDR_MAX: u64 = 128;         // sizeof(struct sockaddr_storage)
 const SO_SNDBUF: u64 = 7;
 const SO_RCVBUF: u64 = 8;
@@ -352,6 +353,22 @@ fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, 
   ensures kok(k)
 {
   if is_tcp(k, pid, fd) {
+    if flags % 2 == MSG_OOB {
+      return EINVAL;                        // no urgent data is ever kept
+    }
+    if flags / MSG_ERRQUEUE % 2 == 1 {
+      return EAGAIN;                        // the error queue is always empty
+    }
+    if addr != 0 && alenp != 0 {
+      // A stream socket fills in no address, but a negative length is
+      // still EINVAL, as on Linux.
+      if copy_from_user(&mut k.spaces, pid, alenp, &mut k.fs.xfer, 4) != 4 {
+        return EFAULT;
+      }
+      if bget(k.fs.xfer, 3) >= 128 {
+        return EINVAL;
+      }
+    }
     return lx_tcp_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1);
   }
   if is_unix(k, pid, fd) {
