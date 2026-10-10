@@ -32,6 +32,11 @@ static uint8_t ap_stacks[MAX_CPUS - 1][AP_STACK] __attribute__((aligned(16)));
 static uint64_t lapic_pd[512] __attribute__((aligned(4096)));
 static volatile uint32_t *lapic;
 
+/* The saved user context of the processor running the caller. One for now:
+ * only the bootstrap processor runs Bastio code. */
+extern uint64_t bst_cpu_ctx[20];
+uint64_t *bst_platform_ctx(void) { return bst_cpu_ctx; }
+
 uint64_t bst_platform_cpus(void) { return __atomic_load_n(&cpus_online, __ATOMIC_SEQ_CST); }
 
 /* Called by ap.S on each AP, on its own stack, with interrupts off. */
