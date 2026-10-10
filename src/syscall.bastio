@@ -27,7 +27,14 @@ const SYS_FWRITE: u64 = 14;           // (fd, buffer, length) -> bytes written
 const SYS_UNLINK: u64 = 15;           // (_, name, name length) -> 0
 const SYS_DIRENT: u64 = 16;           // (entry, buffer, length) -> name length, 0 if unused
 const SYS_SEEK: u64 = 17;             // (fd, offset) -> 0
+// The network (src/net.bastio). Socket calls return NO_RESULT on failure.
 const SYS_PING: u64 = 40;             // (address) -> 1 reply, 0 none, 2 no ARP answer, 3 no network card
+const SYS_SOCKET: u64 = 41;           // () -> a UDP socket
+const SYS_BIND: u64 = 42;             // (socket, port; 0: any) -> 0
+const SYS_SENDTO: u64 = 43;           // (socket + 256 * port + 2^24 * address, buffer, length) -> length
+const SYS_RECVFROM: u64 = 44;         // (socket, buffer, length) -> length; NO_RESULT if none waits
+const SYS_PEER: u64 = 45;             // (socket) -> 65536 * address + port of the last sender
+const SYS_SCLOSE: u64 = 46;           // (socket) -> 0
 const SYS_STAT: u64 = 18;             // (_, name, name length) -> size
 
 // What the scheduler does after a system call.
@@ -330,6 +337,49 @@ fn file_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   return NO_RESULT;
 }
 
+/// The network calls; NO_RESULT for a number that is not one.
+fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if n == SYS_PING {
+    return nic_ping(&mut k.nic, a);
+  }
+  if n == SYS_SOCKET {
+    return sock_new(&mut k.nic);
+  }
+  if n == SYS_BIND {
+    if sock_bind(&mut k.nic, a, b) {
+      return 0;
+    }
+    return NO_RESULT;
+  }
+  if n == SYS_SENDTO {
+    let got = copy_from_user(&mut k.spaces, pid, b, &mut k.fs.xfer, smaller(c, XFER));
+    if got == NO_RESULT {
+      return NO_RESULT;
+    }
+    return sock_sendto(&mut k.nic, a % 256, a / 16777216, a / 256 % 65536, k.fs.xfer, got);
+  }
+  if n == SYS_RECVFROM {
+    let got = sock_recvfrom(&mut k.nic, a, &mut k.fs.xfer, smaller(c, XFER));
+    if got == NO_SOCK || copy_to_user(&mut k.spaces, pid, b, k.fs.xfer, got) == NO_RESULT {
+      return NO_RESULT;
+    }
+    return got;
+  }
+  if n == SYS_PEER {
+    return sock_peer_ip(k.nic, a) * 65536 + sock_peer_port(k.nic, a);
+  }
+  if n == SYS_SCLOSE {
+    if sock_close(&mut k.nic, a) {
+      return 0;
+    }
+    return NO_RESULT;
+  }
+  return NO_RESULT;
+}
+
 // ---------------------------------------------------------------- dispatch
 
 fn ret(procs: &mut Buf, pid: u64, v: u64)
@@ -440,6 +490,10 @@ fn syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if n == SYS_POWEROFF {
     return POWEROFF;
+  }
+  if SYS_PING <= n && n <= SYS_SCLOSE {
+    ret(&mut k.procs, pid, net_call(&mut k, pid, n, a, b, c));
+    return KEEP;
   }
   ret(&mut k.procs, pid, file_call(&mut k, pid, n, a, b, c));
   return KEEP;
