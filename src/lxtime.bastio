@@ -206,8 +206,8 @@ fn poll_bits(k: &Kernel, pid: u64, fd: u64) -> u64
     if pi_get(k.pipes, f.x, 2) == 0 {
       return POLLERR;                       // no reader left
     }
-    if pi_get(k.pipes, f.x, 1) < PIPE_CAP {
-      return POLLOUT;
+    if pi_get(k.pipes, f.x, 1) <= PIPE_CAP - PIPE_ATOM {
+      return POLLOUT;                       // room for a whole PIPE_BUF write
     }
     return 0;
   }

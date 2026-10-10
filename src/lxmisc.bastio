@@ -214,26 +214,15 @@ fn lx_statfs(k: &mut Kernel, pid: u64, va: u64) -> u64
   return 0;
 }
 
-/// getrandom(buf, n, flags): bytes from a linear congruential generator seeded by the
-/// HPET clock. Not a secure source; there is no entropy pool yet.
+/// getrandom(buf, n, flags): the bytes /dev/urandom gives, from the kernel's
+/// generator (rng_next), seeded at boot from the clocks. Not a secure
+/// source; there is no entropy pool yet. Two calls in one tick no longer
+/// return the same bytes, as they did when each call reseeded from the HPET.
 fn lx_getrandom(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let want = smaller(n, XFER);
-  let mut x = k.ns % 2147483648;
-  let mut i = 0;
-  while i < want
-    invariant i <= want && want <= XFER && kok(k) && x < 2147483648
-  {
-    x = (x * 1103515245 + 12345) % 2147483648;
-    bset(&mut k.fs.xfer, i, cast[u8](x / 65536 % 256));
-    i = i + 1;
-  }
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want) != want {
-    return EFAULT;
-  }
-  return want;
+  return dev_read(&mut k, pid, DEV_RANDOM, va, n);   // what /dev/urandom gives
 }
 
 /// Whether the path at va (from dirfd) names something.
