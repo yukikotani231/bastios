@@ -6,11 +6,16 @@
 import "pages.bastio";
 import "ata.bastio";
 import "pci.bastio";
-import "virtio.bastio";
+import "virtio_blk.bastio";
 
 const VIRTIO_PORTS_LO: u64 = 0x1000;  // PCI I/O BARs sit above the legacy ports
 
 enum Blk { Ata(Ata), Virtio(Virtio) }
+
+/// Does the disk driver hold I/O port k in the PCI range?
+spec fn blk_holds(b: &Blk, k: u64) -> bool {
+  b is Blk::Virtio && port_base(b.Virtio.io) <= k && k < port_base(b.Virtio.io) + VIO_PORTS
+}
 
 spec fn blk_ok(b: &Blk) -> bool {
   (b is Blk::Ata ==> ata_ok(b.Ata)) && (b is Blk::Virtio ==> virtio_ok(b.Virtio))
@@ -35,6 +40,7 @@ fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem) -> Blk
   requires port_free(ports, ATA_CTL)
   requires forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 ==> port_free(ports, k)
   ensures blk_ok(result) && mem_ok(m)
+  ensures forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 && !blk_holds(result, k) ==> port_free(ports, k)
 {
   let dev = pci_find(&mut pci, VIRTIO_VENDOR, VIRTIO_BLK);
   if dev < 32 {
@@ -61,6 +67,27 @@ fn blk_free(ports: &mut Ports, b: Blk, m: &mut Mem)
   match b {
     Blk::Ata(a) => { ata_free(&mut ports, a); },
     Blk::Virtio(v) => { virtio_free(&mut ports, v, &mut m); },
+  }
+}
+
+/// The PCI-range ports the disk driver holds, as lo .. hi (empty for ATA).
+fn blk_ports_lo(b: &Blk) -> u64
+  ensures b is Blk::Virtio ==> result == port_base(b.Virtio.io)
+  ensures b is Blk::Ata ==> result == 0
+{
+  match b {
+    Blk::Ata(a) => { return 0; },
+    Blk::Virtio(v) => { return port_base(v.io); },
+  }
+}
+
+fn blk_ports_hi(b: &Blk) -> u64
+  ensures b is Blk::Virtio ==> result == port_base(b.Virtio.io) + VIO_PORTS
+  ensures b is Blk::Ata ==> result == 0
+{
+  match b {
+    Blk::Ata(a) => { return 0; },
+    Blk::Virtio(v) => { return port_base(v.io) + VIO_PORTS; },
   }
 }
 

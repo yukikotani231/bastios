@@ -17,6 +17,7 @@ import "pages.bastio";
 import "space.bastio";
 import "proc.bastio";
 import "fs.bastio";
+import "net.bastio";
 import "syscall.bastio";
 import "linux.bastio";
 import "lxproc.bastio";
@@ -56,11 +57,11 @@ const V_LTIMER: u64 = 48;
 // The kernel's state and the devices the scheduler drives, shared by every
 // processor through a lock. The invariant is what each processor may assume
 // when it takes the lock, and must restore before it lets go.
-struct Sys { k: Kernel, con: Uart, pic: Pic, clock: Hpet, stop: bool }
-  invariant kok(k) && uart_ok(con) && pic_ok(pic) && hpet_ok(clock);
+struct Sys { k: Kernel, con: Uart, pic: Pic, clock: Hpet, nic: Nic, stop: bool }
+  invariant kok(k) && uart_ok(con) && pic_ok(pic) && hpet_ok(clock) && nic_ok(nic);
 
 spec fn sys_ok(s: &Sys) -> bool {
-  kok(s.k) && uart_ok(s.con) && pic_ok(s.pic) && hpet_ok(s.clock)
+  kok(s.k) && uart_ok(s.con) && pic_ok(s.pic) && hpet_ok(s.clock) && nic_ok(s.nic)
 }
 
 // A process taken out to run: its id, address space and FPU page.
@@ -79,6 +80,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, from: u64) -> Job
   if s.stop {
     return Job::Stop;
   }
+  nic_poll(&mut s.nic);
   drain(&mut s.con, &mut s.k.q);
   tty_cook(&mut s.con, &mut s.k);
   wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
@@ -168,6 +170,11 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, t: Task, v: u64) -> u64
   if v == V_TIMER || v == V_LTIMER {
     pset(&mut s.k.procs, p, F_TICKS, tick(pget(s.k.procs, p, F_TICKS)));
     return (p + 1) % NPROC;
+  }
+  if v == V_SYSCALL && pget(s.k.procs, p, F_REGS + R_RAX) == SYS_PING {
+    // The network card is shared state too, so its call is handled here.
+    ret(&mut s.k.procs, p, nic_ping(&mut s.nic, pget(s.k.procs, p, F_REGS + R_RDI)));
+    return p;
   }
   if v == V_SYSCALL {
     s.k.ns = hpet_ns(&mut s.clock);
@@ -285,6 +292,27 @@ fn install_files(con: &mut Uart, k: &mut Kernel)
   }
 }
 
+/// A MAC address as six hex bytes, colon-separated.
+fn put_mac(con: &mut Uart, mac: u64)
+  requires uart_ok(con)
+{
+  let mut q = 0x10000000000;
+  let mut first = true;
+  while q > 0
+  {
+    if !first {
+      uart_write(&mut con, 58);
+    }
+    first = false;
+    let b = (mac / q) % 256;
+    let hi = b / 16;
+    let lo = b % 16;
+    if hi < 10 { uart_write(&mut con, 48 + hi); } else { uart_write(&mut con, 87 + hi); }
+    if lo < 10 { uart_write(&mut con, 48 + lo); } else { uart_write(&mut con, 87 + lo); }
+    q = q / 256;
+  }
+}
+
 fn tick(t: u64) -> u64 {
   if t < 18446744073709551615 {
     return t + 1;
@@ -320,9 +348,19 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // The disk: virtio (DMA into pages lent from the allocator) if the machine
   // has one, else ATA. PCI's configuration ports are claimed for it.
   let mut pci = Pci { addr: port_claim(&mut ports, PCI_ADDR, 4), data: port_claim(&mut ports, PCI_DATA, 4) };
-  let disk = disk_mount(blk_new(&mut ports, &mut pci, &mut m));
+  let dev = blk_new(&mut ports, &mut pci, &mut m);
+  let dev_lo = blk_ports_lo(dev);
+  let dev_hi = blk_ports_hi(dev);
+  let disk = disk_mount(dev);
   if blk_is_virtio(disk.dev) {
     puts(&mut con, "disk: virtio\r\n");
+  }
+  // The network card, if any: nine pages after the disk's four.
+  let mut nic = nic_new(&mut ports, &mut pci, &mut m, 4, dev_lo, dev_hi);
+  if nic_live(nic) {
+    puts(&mut con, "net: virtio, mac ");
+    put_mac(&mut con, nic_mac(nic));
+    puts(&mut con, ", ip 10.0.2.15\r\n");
   }
   let mut spaces = vec_new[Space]();
   let mut i = 0;
@@ -348,7 +386,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   // Every processor runs the scheduler until the kernel stops; then they
   // are all back in their park loops and the state is this one's again.
-  let sl = lock_new(Sys { k: k, con: con, pic: pic, clock: clock, stop: false });
+  let sl = lock_new(Sys { k: k, con: con, pic: pic, clock: clock, nic: nic, stop: false });
   smp_run(sched, &mut cpu, &mut mmu, sl);
   let mut sys = lock_end(sl);
   // Power off: tear down whatever is left, so every page goes back.
@@ -369,6 +407,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   vec_free(sys.k.fpus);
   blk_free(&mut ports, vfs_free(sys.k.fs, &mut sys.k.mem), &mut sys.k.mem);
+  nic_free(&mut ports, sys.nic, &mut sys.k.mem);
   puts(&mut sys.con, "BastiOS: ");
   put_num(&mut sys.con, count_free(sys.k.mem.bm));
   puts(&mut sys.con, " pages free at power off\r\n");

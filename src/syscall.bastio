@@ -27,6 +27,7 @@ const SYS_FWRITE: u64 = 14;           // (fd, buffer, length) -> bytes written
 const SYS_UNLINK: u64 = 15;           // (_, name, name length) -> 0
 const SYS_DIRENT: u64 = 16;           // (entry, buffer, length) -> name length, 0 if unused
 const SYS_SEEK: u64 = 17;             // (fd, offset) -> 0
+const SYS_PING: u64 = 40;             // (address) -> 1 reply, 0 none, 2 no ARP answer, 3 no network card
 const SYS_STAT: u64 = 18;             // (_, name, name length) -> size
 
 // What the scheduler does after a system call.
