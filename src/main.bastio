@@ -837,7 +837,13 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     reset_reg = mmio_claim(&mut win, r, 1);
   }
   let mut clock = hpet_init(mmio_claim(&mut win, hpet_at, HPET_LEN), hpet_there);
-  let tsc = tsc_calibrate(cpu, &mut clock, &mut acpi);
+  // No HPET and no PM timer (many recent PCs turn both off): the counter's
+  // rate boot/smp.c measured against the PIT or the RTC.
+  let mut tsc_hz = 0;
+  if clock.period == 0 && acpi.tmr == ACPI_NONE {
+    tsc_hz = boot_info(cpu, INFO_TIMER, 3);
+  }
+  let tsc = tsc_calibrate(cpu, &mut clock, &mut acpi, tsc_hz);
   let apic = lapic_new(mmio_claim(&mut win, LAPIC, LAPIC_LEN), boot_info(cpu, INFO_SMP, 3) == APIC_XAPIC);
   let mut msi = 0;
   if apic.on {

@@ -48,6 +48,15 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   and, if not, has the local APIC timer raise the same interrupt every
   10 ms (`boot/smp.c`). The hardware report's `tick:` line says which.
   Tested with QEMU's `-machine q35,pit=off`.
+- A clock without the HPET or the ACPI PM timer. Many recent PCs turn both
+  off, and the clock then stood still at 0 ns. `boot/smp.c` now measures
+  the time-stamp counter's rate against PIT channel 2, or, when that is
+  gated too, against one second of the RTC (between two of its updates),
+  and the clock runs on that; the local APIC timer is counted against the
+  same. Where neither the PIT nor the RTC answers, the PIT channel 2 wait
+  is bounded by the time-stamp counter (it used to poll up to 10^8 port
+  reads). The PIT-less tick works without a MADT too. Tested with QEMU's
+  `-machine pc,acpi=off,hpet=off` and `...,pit=off`.
 
 ### Linux programs
 

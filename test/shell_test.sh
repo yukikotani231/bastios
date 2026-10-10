@@ -1505,23 +1505,50 @@ good = ok and b"hardware report" not in out
 print(("ok  " if good else "FAIL"), "(hardware report) only with diag")
 fails += not good
 
-# A PIT whose clock is gated off (many recent chipsets: Intel's "8254
-# clock gating"; QEMU's pit=off has none at all). The bootstrap processor
-# ticks on the local APIC timer instead (boot/smp.c): before, no tick ever
-# came and uptime stayed at 0.
-ok, code = report_boot(["-machine", "q35,pit=off", "-m", "64M", "-append", "diag"], "no PIT", 3,
-                       between=lambda: (uptime(), time.sleep(2), uptime()))
-text = out.decode(errors="replace").replace("\r", "")
-good = ok and "tick: the local APIC timer (the PIT does not count)" in text
-print(("ok  " if good else "FAIL"), "(no PIT) the report says the local APIC timer ticks")
-fails += not good
-ticks = [int(t) for t in re.findall(r"(\d+) ticks, \d+ s", text)]
-good = len(ticks) == 2 and 120 <= ticks[1] - ticks[0] <= 400
-print(("ok  " if good else "FAIL"), f"(no PIT) the timer ticks: {ticks}")
-fails += not good
-good = code == 0
-print(("ok  " if good else "FAIL"), f"(no PIT) halt powers off (status {code})")
-fails += not good
+# Time without the usual timers. A PIT whose clock is gated off (many
+# recent chipsets: Intel's "8254 clock gating"; QEMU's pit=off has none at
+# all): the bootstrap processor ticks on the local APIC timer instead
+# (boot/smp.c); before, no tick ever came and uptime stayed at 0. No HPET
+# and no ACPI PM timer (many recent PCs turn both off; here acpi=off, which
+# also takes the MADT, and with it the other processor, and S5 away, so the
+# kernel ends through isa-debug-exit, status 33): boot/smp.c measures the
+# time-stamp counter against PIT channel 2, else against a second of the
+# RTC, and the clock runs on that; before, it stayed at 0 ns.
+exit_dev = ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
+for machine, name, extra, status, wants in (
+        ("q35,pit=off", "no PIT", [], 0, (
+            ("timer: the local APIC timer, counted against the HPET", "the timer is counted against the HPET"),
+            ("tick: the local APIC timer (the PIT does not count)", "the report says the local APIC timer ticks"))),
+        ("pc,acpi=off,hpet=off", "no HPET or PM timer", exit_dev, 33, (
+            ("timer: the local APIC timer, counted against the PIT", "the timer is counted against the PIT"),
+            ("tick: the PIT\n", "the PIT ticks"),
+            ("clock: the time-stamp counter at", "the clock is the TSC"),
+            ("kHz, as measured against the PIT", "its rate measured against the PIT"))),
+        ("pc,acpi=off,hpet=off,pit=off", "no HPET, PM timer or PIT", exit_dev, 33, (
+            ("timer: the local APIC timer, counted against the RTC", "the timer is counted against the RTC"),
+            ("tick: the local APIC timer (the PIT does not count)", "the local APIC timer ticks"),
+            ("kHz, as measured against the RTC", "the TSC's rate measured against the RTC")))):
+    marks = []
+    def measure():
+        t0, c0, w0 = uptime(), clock(), time.time()
+        time.sleep(2)
+        t1, c1, w1 = uptime(), clock(), time.time()
+        marks.extend([t0, t1, c0, c1, w1 - w0])
+    ok, code = report_boot(["-machine", machine, "-m", "64M", "-append", "diag"] + extra, name, 3, between=measure)
+    text = out.decode(errors="replace").replace("\r", "")
+    for want, what in wants:
+        good = ok and want in text
+        print(("ok  " if good else "FAIL"), f"({name}) {what}")
+        fails += not good
+    good = len(marks) == 5 and None not in marks and 60 * marks[4] <= marks[1] - marks[0] <= 200 * marks[4]
+    print(("ok  " if good else "FAIL"), f"({name}) the timer ticks: {marks[:2]}")
+    fails += not good
+    good = len(marks) == 5 and None not in marks and 0.6e9 * marks[4] <= marks[3] - marks[2] <= 1.5e9 * marks[4]
+    print(("ok  " if good else "FAIL"), f"({name}) the clock runs: {marks[2:4]}")
+    fails += not good
+    good = code == status
+    print(("ok  " if good else "FAIL"), f"({name}) halt ends QEMU (status {code})")
+    fails += not good
 
 # x2APIC (boot/smp.c). SeaBIOS leaves the local APICs in x2APIC mode when
 # the machine may have APIC ids of 255 and up (sockets of 256 cores): with

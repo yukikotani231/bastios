@@ -19,7 +19,8 @@ const INFO_SMP: u64 = 6;         // 0 processors the MADT lists, 1 x2APIC ones, 
                                  // 3 the local APIC's mode, 4 the mode the firmware left it in (APIC_*)
 const APIC_XAPIC: u64 = 1;       // INFO_SMP 3 and 4: 0 off, 1 xAPIC, 2 x2APIC, 3 x2APIC locked by the firmware
 const APIC_X2APIC: u64 = 2;
-const INFO_TIMER: u64 = 7;       // 0 what the local APIC timer was counted against, 1 its count for 10 ms, 2 it ticks for the PIT
+const INFO_TIMER: u64 = 7;       // 0 what the local APIC timer was counted against, 1 its count for 10 ms, 2 it ticks for the PIT,
+                                 // 3 the time-stamp counter's rate when measured against the PIT or RTC
 const INFO_FB: u64 = 9;          // the boot loader's framebuffer, at any address: i as boot_fb's field
 const INFO_ACPI: u64 = 8;        // 0 where the RSDP came from, 1 its revision, 2 + 2k / 3 + 2k table k's signature / address
 const MEM_REGIONS: u64 = 128;    // boot/multiboot.c keeps at most this many
@@ -454,12 +455,15 @@ fn hw_smp(con: &mut Con, cpu: &Cpu, hpet: bool, pm: bool)
   }
   puts(&mut con, "\r\ntimer: the local APIC timer, counted against ");
   let src = boot_info(cpu, INFO_TIMER, 0);
+  let hz = boot_info(cpu, INFO_TIMER, 3);
   if src == 1 {
     puts(&mut con, "the HPET");
   } else if src == 2 {
     puts(&mut con, "the ACPI PM timer");
   } else if src == 3 {
     puts(&mut con, "the PIT");
+  } else if src == 5 {
+    puts(&mut con, "the RTC");
   } else {
     puts(&mut con, "nothing (a guess)");
   }
@@ -476,6 +480,15 @@ fn hw_smp(con: &mut Con, cpu: &Cpu, hpet: bool, pm: bool)
     puts(&mut con, "the HPET\r\n");
   } else if pm {
     puts(&mut con, "the ACPI PM timer\r\n");
+  } else if hz >= 4000000 && hz <= 100000000000 {
+    puts(&mut con, "the time-stamp counter at ");
+    put_num(&mut con, hz / 1000);
+    puts(&mut con, " kHz, as measured against the ");
+    if src == 5 {
+      puts(&mut con, "RTC\r\n");
+    } else {
+      puts(&mut con, "PIT\r\n");
+    }
   } else {
     puts(&mut con, "none (time stands still)\r\n");
   }
