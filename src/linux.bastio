@@ -225,6 +225,8 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       r = lx_file_read(&mut k, pid, d.x, va, cnt);
     } else if d.kind == K_PIPE_R {
       r = pipe_read(&mut k, pid, d.x, va, cnt);
+    } else if d.kind == K_EVENT || d.kind == K_TIMER {
+      r = ev_read(&mut k, pid, d.kind, d.x, va, cnt);
     } else if d.kind == K_DEV && d.x >= PROC_DEV {
       r = proc_read(&mut k, pid, a, d.x, va, cnt);
     } else if d.kind == K_DEV {
@@ -296,6 +298,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if is_time_call(n) {
     return lx_time_call(&mut k, pid, n, was, a, b, c);
+  }
+  if is_event_call(n) {
+    return lx_event_call(&mut k, pid, n, was, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
   }
   if n == LX_FCNTL {
     ret(&mut k.procs, pid, lx_fcntl(&mut k, pid, a, b, c));
@@ -731,6 +736,9 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64
   let d = fd_look(k, pid, fd);
   if d.kind == K_PIPE_W {
     return pipe_write(&mut k, pid, d.x, va, n);
+  }
+  if d.kind == K_EVENT {
+    return ev_write(&mut k, pid, d.x, va, n);
   }
   if d.kind == K_SOCK {
     return lx_sendto(&mut k, pid, fd, va, n, 0, 0);   // to the connected peer

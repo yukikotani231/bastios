@@ -183,8 +183,23 @@ fn poll_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   requires kok(k) && pid < NPROC
 {
   let f = fd_look(k, pid, fd);
+  if f.kind == K_EPOLL {
+    return ep_poll_bits(k, pid, f.x);       // POLLIN if something it watches is ready
+  }
+  return leaf_bits(k, pid, fd);
+}
+
+/// poll_bits for anything but an epoll instance, which finds 0 here: an
+/// epoll instance inside another one never reports ready.
+fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  let f = fd_look(k, pid, fd);
   if f.kind == K_BAD {
     return POLLNVAL;
+  }
+  if f.kind == K_EVENT || f.kind == K_TIMER || f.kind == K_EPOLL {
+    return ev_bits(k, f.kind, f.x);
   }
   if f.kind == K_CONSOLE {
     if get(k.line, 1) != 0 {
