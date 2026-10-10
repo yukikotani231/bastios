@@ -235,6 +235,10 @@ steps = [
     ("echo one > m1; echo two > m2; mv m1 m2; cat m2; test -e m1 || echo moved$((1+1))", b"\r\none\r\nmoved2\r\n", b"\n# "),
     ("mkdir md; mv m2 md; mv md mdd; cat mdd/m2; ls md; echo l=$?", [b"\r\none\r\n", b"l=1"], b"\n# "),
     ("rm mdd/m2; rmdir mdd; echo clean$((1+1))", b"\r\nclean2\r\n", b"\n# "),
+    # Removing a file that is open: the name goes, the open descriptor
+    # still reads it until it is closed (in memory and on the disk).
+    ("echo kept > uo; exec 3< uo; rm uo; test -e uo || cat <&3; exec 3<&-", b"\r\nkept\r\n", b"\n# "),
+    ("echo dk > disk/uo; exec 4< disk/uo; rm disk/uo; ls disk/uo; cat <&4; exec 4<&-", [b"No such file", b"\r\ndk\r\n"], b"\n# "),
     # Modes and times: chmod, touch -t (utimensat), stat and ls -l, in
     # memory and on the disk.
     ("echo x > pm; chmod 750 pm; stat -c '%a %s %F' pm", b"\r\n750 2 regular file\r\n", b"\n# "),
