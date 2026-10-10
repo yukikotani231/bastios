@@ -70,6 +70,37 @@ def off_disk(img):
     put(img, get(img, get(img, entry(img, 0) + 24) * BLOCK) * BLOCK, 1 << 40)
 
 
+def dir_block(img, db):
+    return get(img, 8 * db)
+
+
+def gap(img):
+    put(img, 8 * 6, dir_block(img, 4))      # block 6 named, block 4 not
+    put(img, 8 * 4, 0)
+
+
+def shared_dir_block(img):
+    # A file's data block is also directory block 4.
+    put(img, get(img, get(img, entry(img, 0) + 24) * BLOCK) * BLOCK, dir_block(img, 4))
+
+
+def dtop_used(img):
+    e = dir_block(img, 4) * BLOCK           # entry 64: the first of directory block 4
+    img[e] = 1
+    img[e + 1] = 1
+    put(img, e + 8, DTOP)
+    img[e + 56] = ord("q")
+
+
+# On an image with 100 more files, so the directory has grown past its
+# fixed blocks.
+GROWN = [
+    ("a grown directory", None, "clean"),
+    ("a gap in the directory's blocks", gap, "error"),
+    ("a directory block a file also uses", shared_dir_block, "error"),
+    ("entry 64 in use", dtop_used, "error"),
+]
+
 CASES = [
     ("untouched", None, "clean"),
     ("a hard link", lambda img: add_link(img, 5, b"other", 0), "clean"),
@@ -96,8 +127,16 @@ def main():
         base = os.path.join(t, "base.img")
         subprocess.run([sys.executable, os.path.join(here, "compat", "mkdisk.py"), base, big, small], check=True)
         pristine = open(base, "rb").read()
-        for name, damage, want in CASES:
-            img = bytearray(pristine)
+        many = []
+        for k in range(100):
+            many.append(os.path.join(t, f"m{k}"))
+            open(many[-1], "wb").write(b"m" * (k + 1))
+        grown = os.path.join(t, "grown.img")
+        subprocess.run([sys.executable, os.path.join(here, "compat", "mkdisk.py"), grown, big] + many, check=True)
+        grown_img = open(grown, "rb").read()
+        runs = [(n, d, w, pristine) for n, d, w in CASES] + [(n, d, w, grown_img) for n, d, w in GROWN]
+        for name, damage, want, start in runs:
+            img = bytearray(start)
             if damage:
                 damage(img)
             path = os.path.join(t, "case.img")

@@ -606,7 +606,7 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
     if prog >= NPROGS {
       return none;
     }
-    return Meta { ok: true, mode: S_IFREG_X, size: slen(prog_image(prog)), ino: 10 + prog, mtime: 0 };
+    return Meta { ok: true, mode: S_IFREG_X, size: slen(prog_image(prog)), ino: INO_PROGS + prog, mtime: 0 };
   }
   return file_meta(&mut k.fs, vfs_lookup(&mut k.fs, n));
 }

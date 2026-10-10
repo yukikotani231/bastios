@@ -5,9 +5,11 @@
 
 Each FILE is stored under its base name, so a program shows up in the guest
 as /disk/NAME. DEST=FILE stores FILE as /disk/DEST, where DEST may name
-directories (a/b/c.h), which are made as needed. The format ("BSTDISK2"), in 4096-byte blocks: block 0 the
-superblock, its first 8 bytes the magic; blocks 1..4 a directory of 64
-entries of 256 bytes (byte 0 the kind, 1 a file; byte 1 the name length;
+directories (a/b/c.h), which are made as needed. The format ("BSTDISK3"),
+in 4096-byte blocks: block 0 the superblock, its first 8 bytes the magic,
+then at byte 8 * db the block holding directory block db for db = 4..63;
+blocks 1..4 directory blocks 0..3. The directory holds up to 1024 entries
+of 256 bytes, 16 to a block, entry 64 unused (byte 0 the kind, 1 a file; byte 1 the name length;
 then little-endian u64s: at 8 the parent, 64 for the top directory, at 16
 the size, at 24 the root map block, at 32 the mode, at 40 the modification
 time; the name from byte 56); from block 5, data and maps. A root map is a
@@ -17,8 +19,10 @@ numbers of data blocks; 0 is a hole.
 import os, struct, sys
 
 BLOCK = 4096
-DSLOTS = 64
+DSLOTS = 1024
 DENT = 256
+DPB = BLOCK // DENT
+DIR_FIXED = 4
 DATA_B0 = 5
 PTRS = 512
 DTOP = 64
@@ -29,7 +33,7 @@ DISK_BYTES = 33 << 20
 def main():
     out, args = sys.argv[1], sys.argv[2:]
     img = bytearray(DISK_BYTES)
-    img[0:8] = b"BSTDISK2"
+    img[0:8] = b"BSTDISK3"
     nxt = DATA_B0
     slots = 0
     dirs = {}                      # path of a directory -> its entry
@@ -52,9 +56,19 @@ def main():
             sys.exit(f"mkdisk: more than {DSLOTS} files and directories, the disk holds {DSLOTS}")
         if not name or len(name) > DNAME_MAX:
             sys.exit(f"mkdisk: bad name: {name!r}")
+        if slots == DTOP:
+            slots += 1                 # its number means the top directory
         i = slots
         slots += 1
-        e = BLOCK + i * DENT
+        db = i // DPB
+        if db < DIR_FIXED:
+            dblock = 1 + db
+        else:
+            dblock = struct.unpack_from("<Q", img, 8 * db)[0]
+            if dblock == 0:
+                dblock = alloc()
+                img[8 * db:8 * db + 8] = struct.pack("<Q", dblock)
+        e = dblock * BLOCK + (i % DPB) * DENT
         img[e] = kind
         img[e + 1] = len(name)
         img[e + 8:e + 48] = struct.pack("<QQQQQ", parent, size, root, MODE, 0)

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Checks a BastiOS disk image (src/diskfs.bastio's BSTDISK2 format).
+"""Checks a BastiOS disk image (src/diskfs.bastio's BSTDISK3 format, or
+the older BSTDISK2, which is the same with only the fixed directory blocks).
 
     fsck.py DISK.img
 
@@ -8,6 +9,9 @@ keeps, without changing anything:
 
   - the magic, and every entry's kind (0 free, 1 file, 2 directory,
     3 orphan, 4 hard link);
+  - the directory's blocks past the fixed four: named in the superblock
+    in order with no gap, each a block of the disk used by nothing else,
+    and entry 64 (DTOP) never used;
   - names: 1 to 200 bytes, no "/" or NUL, nothing after the name, and no
     two names alike in one directory;
   - parents: the top (64) or a directory, reached without a cycle;
@@ -28,8 +32,11 @@ import struct, sys
 
 BLOCK = 4096
 DIR_AT = BLOCK
-DSLOTS = 64
+DSLOTS = 1024
 DENT = 256
+DPB = BLOCK // DENT
+DIR_FIXED = 4
+DIR_BLOCKS = DSLOTS // DPB
 DATA_B0 = 5
 PTRS = 512
 MAX_BLOCKS = 65536
@@ -46,12 +53,32 @@ def u64(b, at):
 
 def check(img):
     errors, notes = [], []
-    if img[0:8] != b"BSTDISK2":
-        return ["no BSTDISK2 magic (a blank disk is formatted at mount)"], notes, {}
+    if img[0:8] not in (b"BSTDISK2", b"BSTDISK3"):
+        return ["no BSTDISK3 or BSTDISK2 magic (a blank disk is formatted at mount)"], notes, {}
     blocks = min(len(img) // BLOCK, MAX_BLOCKS)
+    # Where each directory block is: the fixed ones, then the superblock's.
+    dblocks = [1 + db for db in range(DIR_FIXED)]
+    if img[0:8] == b"BSTDISK3":
+        ended = False
+        for db in range(DIR_FIXED, DIR_BLOCKS):
+            b = u64(img, 8 * db)
+            if b == 0:
+                ended = True
+            elif ended:
+                errors.append(f"superblock: directory block {db} ({b}) is named past a gap")
+            elif not DATA_B0 <= b < blocks:
+                errors.append(f"superblock: directory block {db} ({b}) is off the disk")
+                ended = True
+            else:
+                dblocks.append(b)
+    slots = DPB * len(dblocks)
     ents = []
     for i in range(DSLOTS):
-        e = img[DIR_AT + i * DENT:DIR_AT + (i + 1) * DENT]
+        if i < slots:
+            at = dblocks[i // DPB] * BLOCK + (i % DPB) * DENT
+            e = img[at:at + DENT]
+        else:
+            e = bytes(DENT)
         ents.append({
             "kind": e[0], "nlen": e[1], "parent": u64(e, 8), "size": u64(e, 16),
             "root": u64(e, 24), "mode": u64(e, 32), "link": u64(e, 48),
@@ -62,6 +89,9 @@ def check(img):
         return f"entry {i} ({ents[i]['name'].decode(errors='replace')!r})"
 
     named = (FILE, DIR, LINK)
+    if ents[DTOP]["kind"]:
+        errors.append(f"entry {DTOP}: in use, but its number means the top directory")
+        ents[DTOP]["kind"] = 0
     for i, e in enumerate(ents):
         if e["kind"] > LINK:
             errors.append(f"entry {i}: unknown kind {e['kind']}")
@@ -114,8 +144,11 @@ def check(img):
                 notes.append(f"{where(i)}: a hard link to no file (the mount drops it)")
             elif (ents[t]["parent"], ents[t]["name"]) == (e["parent"], e["name"]):
                 notes.append(f"{where(i)}: a hard link its file took the name of (the mount drops it)")
-    # Files: maps and blocks.
+    # Files: maps and blocks; the directory's own blocks first.
     owner = {}
+    for db, b in enumerate(dblocks[DIR_FIXED:], DIR_FIXED):
+        owner[b] = f"directory block {db}"
+        stats["blocks"] += 1
 
     def claim(b, i, what):
         if b in owner:

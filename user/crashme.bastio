@@ -22,6 +22,11 @@
 //              nothing, cut while made). Removing the name a file was made
 //              under while the other remains is the case diskfs commits
 //              with one sector write (disk_take_name).
+//   disk/g/    files 000, 001, ... up to some count and none past it, each
+//              holding its own three digits (the last may be empty, cut
+//              while made). Three more each 16 records, up to GMAX, so
+//              runs keep growing the directory past its first 64 entries
+//              (dir_grow) while the power is cut.
 //
 // It prints "crashme: clean, N records" (or what was wrong, and exits
 // with 1), then appends PER_RUN more records. Every 16 records it rewrites
@@ -45,6 +50,7 @@ const OW_N: u64 = 4000;
 const TR_SMALL: u64 = 3000;
 const TR_BIG: u64 = 9000;              // three blocks: the shrink drops two and zeroes a tail
 const PAY: u64 = 100;
+const GMAX: u64 = 600;                 // the most files in disk/g
 
 fn puts(con: &Serial, s: Str) {
   let mut i = 0;
@@ -537,6 +543,71 @@ fn step_links(ln: &mut Bytes, buf: &mut Bytes, first: bool) -> bool
   return ok;
 }
 
+/// Sets nm, "disk/g/NNN", to name file k of disk/g.
+fn g_name(nm: &mut Bytes, k: u64)
+  requires blen(nm) == 10 && k < 1000
+  ensures blen(nm) == 10
+{
+  bset(&mut nm, 7, cast[u8](48 + k / 100));
+  bset(&mut nm, 8, cast[u8](48 + k / 10 % 10));
+  bset(&mut nm, 9, cast[u8](48 + k % 10));
+}
+
+/// Checks disk/g as the header says. Returns 2 * the count of files, plus
+/// 1 if the last is empty, or NOT_OK.
+fn check_g(nm: &mut Bytes, buf: &mut Bytes) -> u64
+  requires blen(nm) == 10 && blen(buf) == 4096
+  ensures blen(nm) == 10 && blen(buf) == 4096
+  ensures result == NOT_OK || result <= 2 * GMAX + 1
+{
+  let mut m = 0;
+  let mut gap = false;
+  let mut empty = false;
+  let mut k = 0;
+  while k < GMAX
+    invariant k <= GMAX && m <= k && blen(nm) == 10 && blen(buf) == 4096
+  {
+    g_name(&mut nm, k);
+    let s = f_stat(nm, 10);
+    if s == NOT_OK {
+      gap = true;
+    } else if gap || empty {
+      return NOT_OK;                    // a file past a missing or an empty one
+    } else if s == 0 {
+      empty = true;
+      m = k + 1;
+    } else {
+      let fd = f_open(nm, 10, O_READ);
+      let got = f_read(fd, &mut buf);
+      f_close(fd);
+      if s != 3 || got != 3 || bget(buf, 0) != bget(nm, 7) || bget(buf, 1) != bget(nm, 8) || bget(buf, 2) != bget(nm, 9) {
+        return NOT_OK;
+      }
+      m = k + 1;
+    }
+    k = k + 1;
+  }
+  if empty {
+    return 2 * m + 1;
+  }
+  return 2 * m;
+}
+
+/// Writes file k of disk/g: its three digits.
+fn put_g(nm: &mut Bytes, buf: &mut Bytes, k: u64) -> bool
+  requires blen(nm) == 10 && blen(buf) == 4096 && k < 1000
+  ensures blen(nm) == 10 && blen(buf) == 4096
+{
+  g_name(&mut nm, k);
+  bset(&mut buf, 0, bget(nm, 7));
+  bset(&mut buf, 1, bget(nm, 8));
+  bset(&mut buf, 2, bget(nm, 9));
+  let fd = f_open(nm, 10, O_WRITE + O_CREATE + O_TRUNC);
+  let ok = fd != NOT_OK && f_write(fd, buf, 3) == 3;
+  f_close(fd);
+  return ok;
+}
+
 fn bad(con: &Serial, what: Str) -> u64 {
   puts(con, "crashme: bad ");
   puts(con, what);
@@ -554,8 +625,11 @@ fn main(con: &mut Serial) -> u64 {
   let tr = bfrom("disk/tr");
   let mut rn = bfrom("disk/radisk/rb");
   let mut ln = bfrom("disk/ladisk/lb");
+  let gd = bfrom("disk/g");
+  let mut gn = bfrom("disk/g/000");
   let mut code = 0;
   let n = check_log(log, &mut buf);
+  let gs = check_g(&mut gn, &mut buf);
   let tsize = f_stat(t, 6);
   if n == NOT_OK {
     code = bad(con, "log");
@@ -571,6 +645,8 @@ fn main(con: &mut Serial) -> u64 {
     code = bad(con, "ra/rb");
   } else if blen(ln) != 14 || !check_links(ln, &mut buf, n != NOT_OK && n > 12) {
     code = bad(con, "la/lb");
+  } else if gs == NOT_OK {
+    code = bad(con, "g");
   } else {
     puts(con, "crashme: clean, ");
     put_num(con, n);
@@ -578,6 +654,13 @@ fn main(con: &mut Serial) -> u64 {
   }
   // A cut-off run may have left disk/t behind.
   f_unlink(t, 6);
+  f_mkdir(gd, 6);
+  let mut g = 0;
+  let mut gempty = false;
+  if gs != NOT_OK {
+    g = gs / 2;
+    gempty = gs % 2 == 1;
+  }
   let mut base = 0;
   if n != NOT_OK && n <= MAX_RECS {
     base = n;
@@ -590,8 +673,8 @@ fn main(con: &mut Serial) -> u64 {
     code = bad(con, "open");
   }
   let mut k = 0;
-  while code == 0 && k < PER_RUN && base + k < MAX_RECS && blen(rn) == 14 && blen(ln) == 14
-    invariant k <= PER_RUN && blen(buf) == 4096 && blen(rec) == REC && base <= MAX_RECS
+  while code == 0 && k < PER_RUN && base + k < MAX_RECS && blen(rn) == 14 && blen(ln) == 14 && blen(gn) == 10
+    invariant k <= PER_RUN && blen(buf) == 4096 && blen(rec) == REC && base <= MAX_RECS && g <= GMAX
   {
     let i = base + k;
     let mut j = 0;
@@ -627,6 +710,18 @@ fn main(con: &mut Serial) -> u64 {
         code = bad(con, "link");
       }
     }
+    if code == 0 && (i % 16 == 1 || i % 16 == 9 || i % 16 == 13) && g < GMAX {
+      let mut gk = g;
+      if gempty && g > 0 {
+        gk = g - 1;                     // a cut left the last one empty
+      } else {
+        g = g + 1;
+      }
+      gempty = false;
+      if !put_g(&mut gn, &mut buf, gk) {
+        code = bad(con, "g write");
+      }
+    }
     if i % 64 == 63 {
       puts(con, "crashme: ");
       put_num(con, i + 1);
@@ -649,5 +744,7 @@ fn main(con: &mut Serial) -> u64 {
   bfree(tr);
   bfree(rn);
   bfree(ln);
+  bfree(gd);
+  bfree(gn);
   return code;
 }

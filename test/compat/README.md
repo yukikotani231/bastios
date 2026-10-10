@@ -27,8 +27,8 @@ the real programs, and `script` (util-linux, only for `compat-host`).
 - `dev.txt`: building C on BastiOS, in the same format. tcc and GNU make
   run from a second disk (`devdisk.sh`, booted after everything else)
   with the headers `dev_headers.c` pulls in, the C runtime objects and
-  musl's `libc.so`; the disk's directory has 64 entries, which is why it
-  is a disk of its own. tcc (pinned by `TCC_REV`) is configured to find
+  musl's `libc.so`, on a disk of its own (split out when the disk's
+  directory held only 64 entries; it now holds 1023). tcc (pinned by `TCC_REV`) is configured to find
   them under `/disk/c` and builds dynamic PIEs, which the kernel runs
   with its built-in musl dynamic linker. Building make needs autoconf,
   automake, autopoint and texinfo for its bootstrap.
