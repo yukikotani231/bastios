@@ -30,6 +30,8 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 - A console on the screen and a PS/2 keyboard when booted from the ISO:
   text drawn on the framebuffer GRUB sets up under BIOS or UEFI, keys read
   from the i8042, alongside the serial console.
+- A USB keyboard on an xHCI controller's root port, for PCs without PS/2
+  (no hubs).
 
 ### Changed
 

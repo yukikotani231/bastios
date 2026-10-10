@@ -9,6 +9,7 @@ const PCI_ENABLE: u64 = 0x80000000;   // bit 31 of the address: a config cycle
 // Register offsets in a device's configuration header.
 const PCI_ID: u64 = 0x00;             // vendor (low 16 bits), device (high)
 const PCI_COMMAND: u64 = 0x04;        // command (low 16), status (high)
+const PCI_CLASS: u64 = 0x08;        // revision (low 8 bits), class code (high 24)
 const PCI_BAR0: u64 = 0x10;
 
 const PCI_CMD_IO: u64 = 1;            // respond to its I/O ports
@@ -113,4 +114,40 @@ fn pci_enable(p: &mut Pci, dev: u64)
     n = n + PCI_CMD_MASTER;
   }
   pci_write(&mut p, dev, PCI_COMMAND, n);
+}
+
+/// The first device on bus 0 whose class, subclass and programming
+/// interface (the top 24 bits of register 8) are `cls`, or 32.
+fn pci_find_class(p: &mut Pci, cls: u64) -> u64
+  requires pci_ok(p)
+  ensures result <= 32
+{
+  let mut d = 0;
+  while d < 32
+    invariant d <= 32
+  {
+    if pci_read(&mut p, d, PCI_ID) != 0xFFFFFFFF && pci_read(&mut p, d, PCI_CLASS) >> 8 == cls {
+      return d;
+    }
+    d = d + 1;
+  }
+  return 32;
+}
+
+/// The size of the device's first BAR, a memory BAR, found the usual way:
+/// write all ones, read back which address bits stick, restore it. The
+/// device must not be decoding it meanwhile (it is not enabled yet).
+fn pci_bar_size(p: &mut Pci, dev: u64) -> u64
+  requires pci_ok(p) && dev < 32
+  ensures result <= 4294967296
+{
+  let b = pci_read(&mut p, dev, PCI_BAR0);
+  pci_write(&mut p, dev, PCI_BAR0, 0xFFFFFFFF);
+  let s = pci_read(&mut p, dev, PCI_BAR0);
+  pci_write(&mut p, dev, PCI_BAR0, b);
+  let mask = s & 0xFFFFFFF0;
+  if b % 2 == 1 || mask == 0 {
+    return 0;
+  }
+  return 4294967296 - mask;
 }

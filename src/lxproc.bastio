@@ -597,9 +597,12 @@ fn applet_name(j: u64) -> Str {
     return "pwd";
   }
   if j == 11 {
-    return "chmod";
+    return "mv";
   }
   if j == 12 {
+    return "chmod";
+  }
+  if j == 13 {
     return "touch";
   }
   return "stat";
