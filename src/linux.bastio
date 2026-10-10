@@ -329,7 +329,11 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return lx_event_call(&mut k, pid, n, was, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
   }
   if n == LX_FCNTL {
-    ret(&mut k.procs, pid, lx_fcntl(&mut k, pid, a, b, c));
+    let r = lx_fcntl(&mut k, pid, a, b, c);
+    if r == LK_WAIT {
+      return lx_retry(&mut k, pid, n);     // F_SETLKW: someone else's lock is in the way
+    }
+    ret(&mut k.procs, pid, r);
     return KEEP;
   }
   if n == LX_OPEN || n == LX_OPENAT {

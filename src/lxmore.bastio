@@ -2,9 +2,8 @@
 // pwritev, statx, fallocate and fadvise64, flock, memfd_create and getcpu.
 //
 // Not done: sendfile and copy_file_range read only from files, and write
-// only to files, pipes and the console. Locks (flock, and fcntl's F_SETLK
-// family in src/lxfd.bastio) are accepted and not kept: one process is
-// never kept out by another's lock. fallocate only grows a file (mode 0).
+// only to files, pipes and the console. flock is src/lxlock.bastio's.
+// fallocate only grows a file (mode 0).
 // getcpu says processor 0, node 0, wherever the caller runs.
 
 import "lxmisc.bastio";
@@ -414,16 +413,19 @@ fn lx_more_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_statx(&mut k, pid, a, b, c, r8);
   } else if n == LX_FALLOCATE {
     r = lx_fallocate(&mut k, pid, a, b, c, r10);
-  } else if n == LX_FADVISE64 || n == LX_FLOCK {
+  } else if n == LX_FLOCK {
+    r = lx_flock(&mut k, pid, a, b);        // src/lxlock.bastio
+    if r == LK_WAIT {
+      return lx_retry(&mut k, pid, n);      // someone else's flock is in the way
+    }
+  } else if n == LX_FADVISE64 {
     let d = fd_look(k, pid, a);
     if d.kind == K_BAD {
       r = EBADF;
-    } else if n == LX_FLOCK && b & !4 != LOCK_SH && b & !4 != LOCK_EX && b & !4 != LOCK_UN {
-      r = EINVAL;                           // LOCK_NB (4) may come with any of them
-    } else if n == LX_FADVISE64 && d.kind != K_FILE {
+    } else if d.kind != K_FILE {
       r = ESPIPE;
     }
-    // Otherwise accepted: advice is not taken and locks are not kept.
+    // Otherwise accepted: advice is not taken.
   } else if n == LX_GETCPU {
     lx_fill(&mut k, 0, 4);
     if a != 0 {
