@@ -1,6 +1,7 @@
 # BastiOS build.
 #   make            build build/bastios.elf
 #   make run        boot it in QEMU on this terminal (Ctrl-A X to quit)
+#   make disk       put files from this machine on the disk (FILES="...")
 #   make iso        build/bastios.iso: bootable from CD or USB, BIOS or UEFI
 #   make run-iso    boot the ISO in QEMU (run-uefi: under UEFI firmware)
 #   make test       boot it in QEMU and drive the shell over the serial line
@@ -214,6 +215,13 @@ ISO_DISPLAY ?=
 $(DISK): | build
 	truncate -s 33M $@
 
+# A disk holding files from this machine, which then show up under disk/
+# (in ash: /disk/NAME). FILES lists them: PATH stores PATH under its base
+# name, NAME=PATH under NAME. This replaces $(DISK) and what was on it.
+#   make disk FILES="hi greet=build/user/greet.elf"
+disk: | build
+	test/compat/mkdisk.py $(DISK) $(FILES)
+
 # QEMU exits with 33 when the kernel powers off through isa-debug-exit
 # (`halt`), which is a clean stop, not a failure.
 CLEAN_EXIT := ; s=$$?; [ $$s -eq 0 ] || [ $$s -eq 33 ]
@@ -236,6 +244,7 @@ test: build/bastios.elf
 	test/trusted_base.sh
 	test/fsck_test.py
 	test/shell_test.sh
+	BASTIOC=$(BASTIOC) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/guide_test.py
 	test/tcp_test.sh
 	NIC=e1000 test/tcp_test.sh
 	test/iso_test.sh
@@ -418,4 +427,4 @@ clean:
 	rm -rf build
 
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
-.PHONY: all run test fuzz smpbench threadbench diskbench iobench netbench compat compat-baseline compat-host clean
+.PHONY: all run disk test fuzz smpbench threadbench diskbench iobench netbench compat compat-baseline compat-host clean

@@ -247,6 +247,25 @@ Completion interrupts came next. Measured the same way, booting `main` before th
 - Tried and dropped: polling for a short while before halting (16 rounds). Two writers went back to 190-212, but getpid beside a writer went back to 170-198, because the polling takes the kernel lock again. Both costs point at the same thing, the disk's state sharing `Lock[Sys]`; that is stage 4. The numbers should be taken again on KVM, where halting and waking cost far less.
 - ATA has no interrupt (its PIO transfer is over when the command starts) and did not change; its spread is noise.
 
+#### Where the lock time went: byte-at-a-time copies
+
+Before splitting the disk off `Lock[Sys]` (stage 4 of the plan), the time each system call holds the lock was measured: HPET readings around `finish` in `turn`, per call number, during one `diskbench` on NVMe (a temporary build, not kept). A file read held the lock for 840 µs per call and a 4 KiB write for 495 µs, against 8 µs for getpid. Almost all of it was copying. Every 4 KiB block was moved a byte (or a `get_u64`/`put_u64` of eight bytes) at a time: user memory to the transfer buffer, to the cache, to the device's page, and back. The kernel is compiled with `-mgeneral-regs-only`, so none of these loops is vectorised, and under TCG each iteration costs tens of host instructions.
+
+Bastio now has bulk copies (`bcopy`, `bmove`, `frame_to_bytes`, `bytes_to_frame`, `dma_to_bytes`, `bytes_to_dma`; bastiolang `docs/language.md`), proved in bounds like `bget`/`bset` and compiled to `rep movsq`. The block paths use them: user memory (`src/space.bastio`), the cache (`src/diskq.bastio`, `src/diskfs.bastio`, whose `zero` now doubles a run of zeros with `bmove`), every DMA disk's data page, both network cards' buffers and the TCP and UDP queues, and the pipe and AF_UNIX rings. After that the lock is held for about 150 µs per file read and 170 µs per write.
+
+Measured as above (2026-10-10), before and after:
+
+| | byte copies | bulk copies |
+| --- | --- | --- |
+| `diskbench` write: ATA, virtio, NVMe, AHCI, NVMe 4 KiB | 286-314, 174-343, 143-234, 113-135, 131-136 | 289-298, 132-159, 99-113, 87-104, 90-98 |
+| `diskbench` read: same order | 92-113, 52-56, 56-76, 56-65, 56-66 | 59-61, 19-20, 19-22, 15-17, 14-16 |
+| `bench` getpid alone / while `diskbench` runs (`make iobench`) | 45-60 / 110-128 | 48-54 / 120-131 |
+| spawn+exit while `diskbench` runs | 108-135 | 65-72 |
+| two `diskbench` at once, write / read | 234-249 / 108-135 | 192-208 / 35-41 |
+
+- Reads are three to four times faster on every DMA disk, and two readers at once three times faster.
+- getpid beside a disk writer did not move, although the writer now holds the lock a third as long. Two copies of `bench` side by side slow each other's getpid just as much (105 ticks each, against 50 alone), so this is `Lock[Sys]` shared by every call, not the disk. Splitting the disk's state off (stage 4) would not change it, and stage 4 is not done. What would is calls that do not hold the one lock at all; see "How it scales".
+
 The disk driver (`src/ata.bastio`) talks to the first drive of the legacy ATA controller in PIO mode with 28-bit sector numbers, polling with interrupts off; a 4 KiB block is one READ or WRITE SECTORS command for eight sectors. It owns the controller's ports 0x1F0 to 0x1F7 and 0x3F6 as `PortIo` capabilities claimed in `main`, so the proof checks that it touches no other port and that no other driver touches these. Every wait for the drive is bounded, so a missing or stuck drive makes an operation fail instead of hanging the kernel.
 
 At boot the kernel installs the files in `files/` (built into the image with `include_bytes`). A process's descriptors are closed when it ends, and a file cannot be removed while a descriptor has it open.

@@ -14,6 +14,14 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Added
 
+- A getting-started guide (`docs/getting-started.md`): build, boot in
+  QEMU, write a Bastio program, run a Linux program, boot from a USB
+  stick. `make test` checks its programs and terminal sessions, and the
+  README's, against the real system (`test/guide_test.py`).
+- `make disk FILES="..."` puts files from the build machine on the disk
+  that `make run` boots with.
+- The README describes what BastiOS does now; the list of Linux system
+  calls moved to `docs/linux.md`.
 - `mount` and `umount2` for tmpfs (`src/lxmount.bastio`): a tmpfs mounts
   on an empty in-memory directory, `MS_RDONLY` makes it read-only
   (`EROFS`) until an `MS_REMOUNT`, and unmounting removes what is in it.
@@ -196,6 +204,12 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
   left alone instead of being misdriven.
 
 ### Changed
+
+- Blocks are copied in bulk (bastiolang's `bcopy` and friends) instead of
+  a byte at a time: between user memory, the disk cache, the devices'
+  pages, the network buffers and the pipe and AF_UNIX rings. Under QEMU,
+  `diskbench` reads three to four times faster and writes up to a third
+  faster.
 
 - Removing the name a disk file was made under while a hard link remains
   is committed by one sector write (`disk_take_name`); a rename between

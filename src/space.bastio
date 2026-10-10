@@ -215,14 +215,7 @@ fn frame_to_buf(f: &mut Frame, o: u64, buf: &mut Bytes, k: u64, m: u64)
   requires o + m <= 4096 && k + m <= blen(buf)
   ensures blen(buf) == old(blen(buf))
 {
-  let l = blen(buf);
-  let mut j = 0;
-  while j < m
-    invariant j <= m && blen(buf) == l
-  {
-    bset(&mut buf, k + j, frame_read8(f, o + j));
-    j = j + 1;
-  }
+  frame_to_bytes(&mut buf, k, f, o, m);
 }
 
 fn l1_read(l1: &mut PageTable, i: u64, o: u64, buf: &mut Bytes, k: u64, m: u64) -> bool
@@ -254,13 +247,7 @@ fn w_read(l2: &mut PageTable, a: u64, buf: &mut Bytes, k: u64, m: u64) -> bool
 fn buf_to_frame(f: &mut Frame, o: u64, buf: &Bytes, k: u64, m: u64)
   requires o + m <= 4096 && k + m <= blen(buf)
 {
-  let mut j = 0;
-  while j < m
-    invariant j <= m
-  {
-    frame_write8(&mut f, o + j, bget(buf, k + j));
-    j = j + 1;
-  }
+  bytes_to_frame(&mut f, o, buf, k, m);
 }
 
 fn l1_write(l1: &mut PageTable, i: u64, o: u64, buf: &Bytes, k: u64, m: u64) -> bool
