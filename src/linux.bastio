@@ -314,6 +314,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_time_call(n) {
     return lx_time_call(&mut k, pid, n, was, a, b, c);
   }
+  if is_more_call(n) {
+    return lx_more_call(&mut con, &mut k, pid, n, a, b, c);
+  }
   if is_ptimer_call(n) {
     return lx_ptimer_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
   }
@@ -513,6 +516,7 @@ const TCGETS: u64 = 0x5401;
 const TCSETS: u64 = 0x5402;
 const TCSETSF: u64 = 0x5404;              // TCSETSW (0x5403) lies between
 const TIOCGWINSZ: u64 = 0x5413;
+const FIONREAD: u64 = 0x541B;
 const TIOCGPGRP: u64 = 0x540F;
 const TIOCSPGRP: u64 = 0x5410;
 const TIOCGSID: u64 = 0x5429;
@@ -530,6 +534,11 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   let d = fd_look(k, pid, fd);
   if d.kind == K_BAD {
     return EBADF;
+  }
+  if req == FIONREAD && d.kind == K_PIPE_R {
+    // The bytes waiting in the pipe, as an int.
+    xfer_u64(&mut k.fs.xfer, 0, smaller(pi_get(k.pipes, d.x, 1), PIPE_CAP));
+    return lx_put_out(&mut k, pid, arg, 4);
   }
   if d.kind != K_CONSOLE {
     return ENOTTY;

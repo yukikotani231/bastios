@@ -18,6 +18,11 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
   used to take turns on one: four threads of pure computation now finish
   about twice as fast on four processors under QEMU.
 
+- `sendfile`, `copy_file_range`, `preadv`, `pwritev`, `statx`,
+  `fallocate` (growing), `fadvise64`, `memfd_create`, `getcpu`, and
+  `FIONREAD` on a pipe. `flock` and `fcntl` record locks are accepted but
+  not kept. A new compat program, `t_more`, checks these and other calls
+  real programs make.
 - `msync` writes a `MAP_SHARED` file mapping back to the file, and so do
   `munmap`, exit and `execve` (up to four such mappings per process; the
   mapping is still a copy, so others see the bytes only after a

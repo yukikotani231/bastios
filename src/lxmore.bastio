@@ -1,0 +1,453 @@
+// More Linux file calls: sendfile and copy_file_range, preadv and
+// pwritev, statx, fallocate and fadvise64, flock, memfd_create and getcpu.
+//
+// Not done: sendfile and copy_file_range read only from files, and write
+// only to files, pipes and the console. Locks (flock, and fcntl's F_SETLK
+// family in src/lxfd.bastio) are accepted and not kept: one process is
+// never kept out by another's lock. fallocate only grows a file (mode 0).
+// getcpu says processor 0, node 0, wherever the caller runs.
+
+import "lxmisc.bastio";
+
+const LX_SENDFILE: u64 = 40;
+const LX_FLOCK: u64 = 73;
+const LX_FADVISE64: u64 = 221;
+const LX_FALLOCATE: u64 = 285;
+const LX_PREADV: u64 = 295;
+const LX_PWRITEV: u64 = 296;
+const LX_GETCPU: u64 = 309;
+const LX_MEMFD_CREATE: u64 = 319;
+const LX_COPY_FILE_RANGE: u64 = 326;
+const LX_STATX: u64 = 332;
+const STATX_SIZE: u64 = 256;              // struct statx
+const STATX_BASIC: u64 = 0x7FF;           // STATX_BASIC_STATS: what statx fills in
+const LOCK_SH: u64 = 1;
+const LOCK_EX: u64 = 2;
+const LOCK_UN: u64 = 8;
+const MFD_CLOEXEC: u64 = 1;
+const COPY_MAX: u64 = 0x7FFFF000;         // the most one sendfile moves, as on Linux
+const EFBIG: u64 = 18446744073709551589;      // 2^64 - 27
+const ENODEV: u64 = 18446744073709551597;     // 2^64 - 19
+const EOPNOTSUPP: u64 = 18446744073709551521; // 2^64 - 95
+
+fn is_more_call(n: u64) -> bool {
+  return n == LX_SENDFILE || n == LX_FLOCK || n == LX_FADVISE64 || n == LX_FALLOCATE || n == LX_PREADV
+    || n == LX_PWRITEV || n == LX_GETCPU || n == LX_MEMFD_CREATE || n == LX_COPY_FILE_RANGE || n == LX_STATX;
+}
+
+/// Puts the first n transfer bytes into pipe p from the kernel side (no
+/// user buffer): a short count when it is nearly full, -EAGAIN when it is
+/// full, -EPIPE with no reader.
+fn pipe_put_xfer(k: &mut Kernel, p: u64, n: u64) -> u64
+  requires kok(k) && p < NPIPES && n <= XFER
+  ensures kok(k)
+  ensures result <= n || result > XFER
+{
+  if pi_get(k.pipes, p, 2) == 0 {
+    return EPIPE;
+  }
+  let count = smaller(pi_get(k.pipes, p, 1), PIPE_CAP);
+  let room = PIPE_CAP - count;
+  if room == 0 {
+    return EAGAIN;
+  }
+  let put = smaller(n, room);
+  let head = pi_get(k.pipes, p, 0) % PIPE_CAP;
+  let ring = p * PIPE_CAP;
+  let mut i = 0;
+  while i < put
+    invariant i <= put && put <= room && put <= XFER && head < PIPE_CAP && ring + PIPE_CAP <= PIPE_BYTES && kok(k)
+  {
+    bset(&mut k.pipebuf, ring + (head + count + i) % PIPE_CAP, bget(k.fs.xfer, i));
+    i = i + 1;
+  }
+  pi_set(&mut k.pipes, p, 1, count + put);
+  return put;
+}
+
+/// Writes the first n transfer bytes to descriptor `out` of process pid,
+/// at `off` (a file's own offset when off is u64::MAX). The count written,
+/// or -errno, EAGAIN for a full pipe, CON_FULL or DISK_RETRY.
+fn put_xfer(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, n: u64, off: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC && n <= XFER
+  ensures kok(k) && con_ok(con)
+  ensures result <= n || result > XFER
+{
+  let d = fd_look(k, pid, out);
+  if d.kind == K_PIPE_W {
+    return pipe_put_xfer(&mut k, d.x, n);
+  }
+  if d.kind == K_CONSOLE {
+    if 2 * n > con_room(con) && con_room(con) < OUTCAP {
+      return CON_FULL;
+    }
+    let fits = smaller(n, con_room(con) / 2);
+    let mut i = 0;
+    while i < fits
+      invariant i <= fits && fits <= n && n <= XFER && kok(k) && con_ok(con)
+    {
+      let ch = bget(k.fs.xfer, i);
+      if ch == 10 {
+        con_write(&mut con, 13);
+      }
+      con_write(&mut con, ch);
+      i = i + 1;
+    }
+    return fits;
+  }
+  if d.kind == K_DEV {
+    return n;
+  }
+  if d.kind != K_FILE {
+    return EINVAL;                          // sockets and the rest: not done
+  }
+  let was = vfs_offset(k.fs, d.x);
+  if off != 0xFFFFFFFFFFFFFFFF {
+    vfs_seek(&mut k.fs, d.x, off);
+  }
+  let w = vfs_write(&mut k.fs, &mut k.mem, d.x, n);
+  if off != 0xFFFFFFFFFFFFFFFF {
+    vfs_seek(&mut k.fs, d.x, was);
+  }
+  if w == NO_FD {
+    return EBADF;
+  }
+  if w == VFS_MISS {
+    return DISK_RETRY;
+  }
+  return w;
+}
+
+/// sendfile(out, in, offp, count) and copy_file_range(in, inoffp, out,
+/// outoffp, count, flags): copies from file `in` (at *inp, or its own
+/// offset when inp is 0) to `out` (at *outp, or its own offset). Stops
+/// short when the destination fills; the count, or -errno (EAGAIN,
+/// CON_FULL or DISK_RETRY when nothing was copied yet).
+fn lx_copy(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, outp: u64, inp: u64, from: u64, count: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  let d = fd_look(k, pid, from);
+  if d.kind == K_BAD {
+    return EBADF;
+  }
+  if d.kind != K_FILE {
+    return EINVAL;                          // only files are read from
+  }
+  let f = vfs_row_file(k.fs, d.x);
+  let mut ioff = vfs_offset(k.fs, d.x);
+  if inp != 0 {
+    if copy_from_user(&mut k.spaces, pid, inp, &mut k.fs.xfer, 8) != 8 {
+      return EFAULT;
+    }
+    ioff = get_u64(k.fs.xfer, 0);
+  }
+  let mut ooff = 0xFFFFFFFFFFFFFFFF;
+  if outp != 0 {
+    if copy_from_user(&mut k.spaces, pid, outp, &mut k.fs.xfer, 8) != 8 {
+      return EFAULT;
+    }
+    ooff = get_u64(k.fs.xfer, 0);
+    if ooff >= 0x8000000000000000 {
+      return EINVAL;
+    }
+  }
+  let total = smaller(count, COPY_MAX);
+  let mut done = 0;
+  let mut err = 0;
+  while done < total && err == 0
+    invariant done <= total && kok(k) && con_ok(con)
+  {
+    let step = smaller(XFER, total - done);
+    let got = vfs_read_at(&mut k.fs, f, sat_add(ioff, done), step);
+    if got == NO_FD || got == 0 {
+      err = 1;                              // the end of the file (or no file)
+    } else {
+      let mut at = ooff;
+      if ooff != 0xFFFFFFFFFFFFFFFF {
+        at = sat_add(ooff, done);
+      }
+      let w = put_xfer(&mut con, &mut k, pid, out, got, at);
+      if w > XFER {
+        if done == 0 {
+          return w;                         // -errno, or wait
+        }
+        err = 1;
+      } else {
+        done = done + w;
+        if w < got {
+          err = 1;                          // the destination filled up
+        }
+      }
+    }
+  }
+  // Where the copy ended: through the pointers given, or the descriptors'
+  // own offsets.
+  if inp != 0 {
+    xfer_u64(&mut k.fs.xfer, 0, sat_add(ioff, done));
+    if copy_to_user(&mut k.spaces, pid, inp, k.fs.xfer, 8) != 8 {
+      return EFAULT;
+    }
+  } else {
+    vfs_seek(&mut k.fs, d.x, sat_add(ioff, done));
+  }
+  if outp != 0 {
+    xfer_u64(&mut k.fs.xfer, 0, sat_add(ooff, done));
+    if copy_to_user(&mut k.spaces, pid, outp, k.fs.xfer, 8) != 8 {
+      return EFAULT;
+    }
+  }
+  return done;
+}
+
+/// preadv and pwritev: each iovec at off and on, until one comes up short.
+fn lx_piov(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, iov: u64, cnt: u64, off: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  if cnt > 1024 || off >= 0x8000000000000000 {
+    return EINVAL;
+  }
+  let mut done = 0;
+  let mut i = 0;
+  while i < cnt
+    invariant i <= cnt && cnt <= 1024 && kok(k) && con_ok(con)
+  {
+    if iov > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, iov + 16 * i, &mut k.fs.xfer, 16) != 16 {
+      return EFAULT;
+    }
+    let base = get_u64(k.fs.xfer, 0);
+    let len = get_u64(k.fs.xfer, 8);
+    if len > 0 {
+      let r = lx_pio(&mut con, &mut k, pid, write, fd, base, len, sat_add(off, done));
+      if r > 0x7FFFFFFFFFFFFFFF {
+        if done == 0 {
+          return r;                         // -errno, or DISK_RETRY
+        }
+        return done;
+      }
+      done = sat_add(done, r);
+      if r < len {
+        return done;
+      }
+    }
+    i = i + 1;
+  }
+  return done;
+}
+
+/// statx(dirfd, path, flags, mask, buf): stat's answer, written into buf
+/// first as a struct stat and then rewritten in place as a struct statx.
+fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if buf == 0 || buf > 0xFFFFFFFFFFFF0000 {
+    return EFAULT;
+  }
+  let mut r = 0;
+  if flags / AT_EMPTY_PATH % 2 == 1 && lx_path_in(&mut k, pid, path) == 0 {
+    r = lx_fstat(&mut k, pid, dirfd, buf);
+  } else {
+    r = lx_stat(&mut k, pid, dirfd, path, buf, (flags & AT_SYMLINK_NOFOLLOW) == 0);
+  }
+  if r != 0 {
+    return r;
+  }
+  if copy_from_user(&mut k.spaces, pid, buf, &mut k.fs.xfer, STAT_SIZE) != STAT_SIZE {
+    return EFAULT;
+  }
+  let ino = get_u64(k.fs.xfer, 8);
+  let nlink = get_u64(k.fs.xfer, 16);
+  let mode = get_u64(k.fs.xfer, 24) % 0x100000000;
+  let size = get_u64(k.fs.xfer, 48);
+  let blocks = get_u64(k.fs.xfer, 64);
+  let atime = get_u64(k.fs.xfer, 72);
+  let mtime = get_u64(k.fs.xfer, 88);
+  let ctime = get_u64(k.fs.xfer, 104);
+  let mut z = 0;
+  while z < STATX_SIZE
+    invariant z <= STATX_SIZE && kok(k)
+  {
+    bset(&mut k.fs.xfer, z, 0);
+    z = z + 1;
+  }
+  xfer_u64(&mut k.fs.xfer, 0, STATX_BASIC + 4096 * 0x100000000);   // stx_mask, stx_blksize
+  xfer_u64(&mut k.fs.xfer, 16, nlink % 0x100000000);                // stx_nlink (uid 0)
+  xfer_u64(&mut k.fs.xfer, 24, mode % 65536 * 0x100000000);         // stx_gid 0, stx_mode
+  xfer_u64(&mut k.fs.xfer, 32, ino);
+  xfer_u64(&mut k.fs.xfer, 40, size);
+  xfer_u64(&mut k.fs.xfer, 48, blocks);
+  xfer_u64(&mut k.fs.xfer, 64, atime);                              // stx_atime.tv_sec
+  xfer_u64(&mut k.fs.xfer, 96, ctime);                              // stx_ctime.tv_sec
+  xfer_u64(&mut k.fs.xfer, 112, mtime);                             // stx_mtime.tv_sec
+  if copy_to_user(&mut k.spaces, pid, buf, k.fs.xfer, STATX_SIZE) != STATX_SIZE {
+    return EFAULT;
+  }
+  return 0;
+}
+
+/// fallocate(fd, mode, off, len): mode 0 only, which grows the file to
+/// off + len if it is shorter.
+fn lx_fallocate(k: &mut Kernel, pid: u64, fd: u64, mode: u64, off: u64, len: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
+    return EBADF;
+  }
+  if d.kind != K_FILE {
+    return ENODEV;
+  }
+  if mode != 0 {
+    return EOPNOTSUPP;
+  }
+  if len == 0 || off >= 0x8000000000000000 || len >= 0x8000000000000000 {
+    return EINVAL;
+  }
+  let size = vfs_size(&mut k.fs, vfs_row_file(k.fs, d.x));
+  if size == NO_FILE {
+    return EBADF;
+  }
+  if off + len <= size {
+    return 0;
+  }
+  if !vfs_truncate(&mut k.fs, &mut k.mem, d.x, off + len) {
+    return EFBIG;                           // read-only, or the file or disk is full
+  }
+  return 0;
+}
+
+/// memfd_create(name, flags): a file in /tmp that is unlinked at once, so
+/// it lives as long as a descriptor or mapping holds it.
+fn lx_memfd(k: &mut Kernel, pid: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags / 2 != 0 && flags != MFD_CLOEXEC + 2 {
+    return EINVAL;                          // MFD_ALLOW_SEALING (2) is accepted; nothing else
+  }
+  let mut oflags = LO_RDWR + LO_CREAT + LO_EXCL;
+  if flags % 2 == MFD_CLOEXEC {
+    oflags = oflags + LO_CLOEXEC;
+  }
+  let mut tries = 0;
+  while tries < 16
+    invariant tries <= 16 && kok(k)
+  {
+    let n = memfd_name(&mut k, pid, sat_add(k.ns, tries));
+    let fd = lx_open_n(&mut k, pid, n, oflags);
+    if fd < LXNFD {
+      let n2 = memfd_name(&mut k, pid, sat_add(k.ns, tries));
+      vfs_unlink(&mut k.fs, &mut k.mem, n2);
+      return fd;
+    }
+    if fd != EEXIST {
+      return fd;
+    }
+    tries = tries + 1;
+  }
+  return EEXIST;
+}
+
+/// Writes "tmp/.memfd-P-T" (P the pid, T a stamp in hex) to the transfer
+/// buffer; its length.
+fn memfd_name(k: &mut Kernel, pid: u64, t: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k) && result <= 40
+{
+  let mut i = 0;
+  let pre = "tmp/.memfd-";
+  while i < slen(pre) && i < 11
+    invariant i <= 11 && kok(k)
+  {
+    bset(&mut k.fs.xfer, i, sget(pre, i));
+    i = i + 1;
+  }
+  bset(&mut k.fs.xfer, 11, cast[u8](48 + pid % 10));
+  bset(&mut k.fs.xfer, 12, cast[u8](48 + pid / 10 % 10));
+  bset(&mut k.fs.xfer, 13, 45);             // '-'
+  let mut j = 0;
+  while j < 16
+    invariant j <= 16 && kok(k)
+  {
+    let digit = t / (1 << (4 * j)) % 16;
+    let mut ch = 48 + digit;
+    if digit >= 10 {
+      ch = 87 + digit;                      // 'a' ..
+    }
+    bset(&mut k.fs.xfer, 14 + j, cast[u8](ch));
+    j = j + 1;
+  }
+  return 30;
+}
+
+fn out_is_file(k: &Kernel, pid: u64, fd: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let d = fd_look(k, pid, fd);
+  return d.kind == K_FILE;
+}
+
+/// System call n of the ones is_more_call names.
+fn lx_more_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  let r10 = pget(k.procs, pid, F_REGS + R_R10);
+  let r8 = pget(k.procs, pid, F_REGS + R_R8);
+  let mut r = 0;
+  if n == LX_SENDFILE {
+    r = lx_copy(&mut con, &mut k, pid, a, 0, c, b, r10);
+  } else if n == LX_COPY_FILE_RANGE {
+    if pget(k.procs, pid, F_REGS + R_R9) != 0 {
+      r = EINVAL;                           // no flags are defined
+    } else if !out_is_file(k, pid, c) {
+      r = EBADF;
+    } else {
+      r = lx_copy(&mut con, &mut k, pid, c, r10, b, a, r8);
+    }
+  } else if n == LX_PREADV || n == LX_PWRITEV {
+    r = lx_piov(&mut con, &mut k, pid, n == LX_PWRITEV, a, b, c, r10);
+  } else if n == LX_STATX {
+    r = lx_statx(&mut k, pid, a, b, c, r8);
+  } else if n == LX_FALLOCATE {
+    r = lx_fallocate(&mut k, pid, a, b, c, r10);
+  } else if n == LX_FADVISE64 || n == LX_FLOCK {
+    let d = fd_look(k, pid, a);
+    if d.kind == K_BAD {
+      r = EBADF;
+    } else if n == LX_FLOCK && b & !4 != LOCK_SH && b & !4 != LOCK_EX && b & !4 != LOCK_UN {
+      r = EINVAL;                           // LOCK_NB (4) may come with any of them
+    } else if n == LX_FADVISE64 && d.kind != K_FILE {
+      r = ESPIPE;
+    }
+    // Otherwise accepted: advice is not taken and locks are not kept.
+  } else if n == LX_GETCPU {
+    lx_fill(&mut k, 0, 4);
+    if a != 0 {
+      r = lx_put_out(&mut k, pid, a, 4);
+    }
+    if r == 0 && b != 0 {
+      r = lx_put_out(&mut k, pid, b, 4);
+    }
+  } else if n == LX_MEMFD_CREATE {
+    r = lx_memfd(&mut k, pid, b);
+  }
+  if r == EAGAIN && n != LX_FLOCK {
+    if n == LX_SENDFILE && pipe_nonblock(k, pid, a) {
+      ret(&mut k.procs, pid, EAGAIN);
+      return KEEP;
+    }
+    return lx_retry(&mut k, pid, n);         // a full pipe: wait for room
+  }
+  if r == CON_FULL {
+    return con_block(&mut k, pid, n);
+  }
+  if r == DISK_RETRY {
+    return disk_retry(&mut k, pid, n);
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}

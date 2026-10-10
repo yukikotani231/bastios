@@ -432,6 +432,13 @@ const F_SETFD: u64 = 2;
 const F_GETFL: u64 = 3;
 const F_SETFL: u64 = 4;
 const F_DUPFD_CLOEXEC: u64 = 1030;
+const F_GETLK: u64 = 5;
+const F_SETLK: u64 = 6;
+const F_SETLKW: u64 = 7;
+const F_OFD_GETLK: u64 = 36;
+const F_OFD_SETLK: u64 = 37;
+const F_OFD_SETLKW: u64 = 38;
+const F_UNLCK: u64 = 2;
 const LO_CLOEXEC: u64 = 0x80000;
 
 const EMFILE: u64 = 18446744073709551592;   // 2^64 - 24
