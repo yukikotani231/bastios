@@ -14,7 +14,6 @@ const LX_FCHDIR: u64 = 81;
 const LX_MKDIR: u64 = 83;
 const LX_RMDIR: u64 = 84;
 const LX_MKDIRAT: u64 = 258;
-const EISDIR: u64 = 18446744073709551595;     // 2^64 - 21
 const ENOTEMPTY: u64 = 18446744073709551577;  // 2^64 - 39
 const EXDEV: u64 = 18446744073709551598;      // 2^64 - 18
 const LX_RENAME: u64 = 82;
@@ -224,7 +223,11 @@ fn lx_chdir(k: &mut Kernel, pid: u64, path: u64) -> u64
     }
     return ENOENT;
   }
-  // dir_at leaves the name in the transfer buffer.
+  let e = may_path(&mut k, pid, n, MAY_X);   // search permission (src/lxperm.bastio)
+  if e != 0 {
+    return e;
+  }
+  // dir_at and may_path leave the name in the transfer buffer.
   name_keep(&mut k.cwd, CWD_LEN, pid, k.fs.xfer, n);
   return 0;
 }
@@ -291,8 +294,9 @@ fn lx_getcwd(k: &mut Kernel, pid: u64, va: u64, size: u64) -> u64
   return n + 2;
 }
 
-/// mkdir(path, mode); the mode is not kept.
-fn lx_mkdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
+/// mkdir(path, mode): the mode less the umask, and the owner, as for a
+/// new file (src/lxperm.bastio).
+fn lx_mkdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
@@ -306,11 +310,21 @@ fn lx_mkdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
   if vfs_ro(&mut k.fs, n) {
     return EROFS;
   }
+  let e = may_dir(&mut k, pid, n);
+  if e != 0 {
+    return e;
+  }
+  let own = new_owner(&mut k, pid, n);
+  let sgid = dir_sgid(&mut k, n);
   if !vfs_mkdir(&mut k.fs, n) {
     if parent_ok(&mut k.fs, n) {
       return ENOSPC;                        // no room
     }
     return ENOENT;
+  }
+  let d = vfs_dir_lookup(&mut k.fs, n);
+  if d != NO_FILE {
+    made_by(&mut k, pid, d, own, mode % 4096, sgid);
   }
   return 0;
 }
@@ -340,6 +354,10 @@ fn lx_rmdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
   if vfs_ro(&mut k.fs, n) {
     return EROFS;
   }
+  let e = may_remove(&mut k, pid, n);
+  if e != 0 {
+    return e;
+  }
   if !vfs_rmdir(&mut k.fs, &mut k.mem, n) {
     return ENOTEMPTY;
   }
@@ -360,6 +378,12 @@ fn lx_unlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
   }
   if vfs_ro(&mut k.fs, n) && vfs_lookup(&mut k.fs, n) != NO_FILE {
     return EROFS;
+  }
+  if vfs_lookup(&mut k.fs, n) != NO_FILE {
+    let e = may_remove(&mut k, pid, n);
+    if e != 0 {
+      return e;
+    }
   }
   if !vfs_unlink(&mut k.fs, &mut k.mem, n) {
     return ENOENT;
@@ -463,6 +487,10 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
   if vfs_ro(&mut k.fs, n) {
     return EROFS;
   }
+  let e = may_remove(&mut k, pid, n);
+  if e != 0 {
+    return e;
+  }
   let src_disk = vfs_fs_of(&mut k.fs, n);
   let mut t = balloc(2 * FNAME_MAX);
   xfer_save(k, &mut t, 0, n);
@@ -474,6 +502,14 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
   if vfs_ro(&mut k.fs, m) {
     bfree(t);
     return EROFS;
+  }
+  let mut e2 = may_dir(&mut k, pid, m);
+  if e2 == 0 && (dir_at(&mut k, m) != NO_FILE || vfs_lookup(&mut k.fs, m) != NO_FILE) {
+    e2 = may_remove(&mut k, pid, m);        // what it replaces goes away
+  }
+  if e2 != 0 {
+    bfree(t);
+    return e2;
   }
   xfer_save(k, &mut t, n, m);
   let mut same = n == m;
@@ -522,6 +558,10 @@ fn lx_exchange(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
   if (a != NO_FILE || ad != NO_FILE) && vfs_ro(&mut k.fs, n) {
     return EROFS;
   }
+  let e = may_remove(&mut k, pid, n);
+  if e != 0 {
+    return e;
+  }
   let mut t = balloc(2 * FNAME_MAX);
   xfer_save(k, &mut t, 0, n);
   let m = lx_path_at_nf(&mut k, pid, ndir, npath);
@@ -551,6 +591,11 @@ fn lx_exchange(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
     bfree(t);
     return EROFS;
   }
+  let e2 = may_remove(&mut k, pid, m);
+  if e2 != 0 {
+    bfree(t);
+    return e2;
+  }
   xfer_save(k, &mut t, n, m);
   xfer_load(&mut k, t, 0, n + m);
   bfree(t);
@@ -577,10 +622,10 @@ fn lx_dir_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     return lx_fchdir(&mut k, pid, a);
   }
   if n == LX_MKDIR {
-    return lx_mkdir(&mut k, pid, AT_FDCWD, a);
+    return lx_mkdir(&mut k, pid, AT_FDCWD, a, b);
   }
   if n == LX_MKDIRAT {
-    return lx_mkdir(&mut k, pid, a, b);
+    return lx_mkdir(&mut k, pid, a, b, c);
   }
   if n == LX_RENAME {
     return lx_rename(&mut k, pid, AT_FDCWD, a, AT_FDCWD, b, 0);

@@ -249,7 +249,20 @@ fn meta_target(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let n = lx_path_at(&mut k, pid, dirfd, va);
+  return meta_target_at(&mut k, pid, dirfd, va, true);
+}
+
+/// meta_target, for a symbolic link itself unless `follow`.
+fn meta_target_at(k: &mut Kernel, pid: u64, dirfd: u64, va: u64, follow: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut n = NO_RESULT;
+  if follow {
+    n = lx_path_at(&mut k, pid, dirfd, va);
+  } else {
+    n = lx_path_at_nf(&mut k, pid, dirfd, va);
+  }
   if n == NO_RESULT {
     return NO_RESULT;
   }
@@ -274,36 +287,52 @@ fn meta_target(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
 }
 
 /// Sets the mode (below 4096; 65536 leaves it) and modification time
-/// (NO_FILE leaves it) of handle f from meta_target. Returns 0 or -errno.
-fn set_meta(k: &mut Kernel, f: u64, mode: u64, mtime: u64) -> u64
-  requires kok(k)
+/// (NO_FILE leaves it) of handle f from meta_target, for process pid: its
+/// owner, or root, or (setting the time to now, `now`) anyone who may
+/// write it (src/lxperm.bastio). Returns 0 or -errno.
+fn set_meta(k: &mut Kernel, pid: u64, f: u64, mode: u64, mtime: u64, now: bool) -> u64
+  requires kok(k) && pid < NPROC
   ensures kok(k)
 {
   if f == NO_RESULT {
     return k.perr;
   }
+  let uid = fs_id(k.procs, pid, false);
   if f >= HFILES {
+    if uid != 0 && !now {
+      return EPERM;                         // root's
+    }
     return 0;                               // nothing to keep: accepted
   }
-  if !vfs_set_meta(&mut k.fs, f, mode, mtime) {
+  let m = vfs_meta(&mut k.fs, f);
+  if !owns(k.procs, pid, m.own) {
+    if !now {
+      return EPERM;
+    }
+    if !mode_allows(m.mode, m.own, uid, fs_id(k.procs, pid, true), MAY_W) {
+      return EACCES;
+    }
+  }
+  let mut md = mode;
+  if mode < 4096 {
+    md = chmod_bits(k.procs, pid, m.mode, m.own, mode);
+  }
+  if !vfs_set_meta(&mut k.fs, f, md, mtime) {
     return EIO;
   }
   return 0;
 }
 
-/// fchmod: set_meta on the file open as Linux fd `fd`.
+/// fchmod: set_meta on the file or directory open as Linux fd `fd`.
 fn fd_set_meta(k: &mut Kernel, pid: u64, fd: u64, mode: u64, mtime: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let d = fd_look(k, pid, fd);
-  if d.kind == K_BAD {
-    return EBADF;
+  let f = fd_handle(&mut k, pid, fd);
+  if f == NO_FILE {
+    return 0;                               // a pipe, socket or device: nothing kept
   }
-  if d.kind != K_FILE {
-    return 0;
-  }
-  return set_meta(&mut k, vfs_row_file(k.fs, d.x), mode, mtime);
+  return set_meta(&mut k, pid, f, mode, mtime, false);
 }
 
 /// Sets f's modification time from the times at user address va (0:
@@ -316,6 +345,7 @@ fn set_times(k: &mut Kernel, pid: u64, f: u64, va: u64, kind: u64) -> u64
     return k.perr;
   }
   let mut t = k.fs.now;
+  let mut now = va == 0;
   if va != 0 {
     if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 32) != 32 {
       return EFAULT;
@@ -331,6 +361,7 @@ fn set_times(k: &mut Kernel, pid: u64, f: u64, va: u64, kind: u64) -> u64
         }
         if ns == UTIME_NOW {
           t = k.fs.now;
+          now = true;
         }
       }
     }
@@ -338,7 +369,7 @@ fn set_times(k: &mut Kernel, pid: u64, f: u64, va: u64, kind: u64) -> u64
   if t == NO_FILE {
     t = NO_FILE - 1;                        // NO_FILE would mean "leave it"
   }
-  return set_meta(&mut k, f, 65536, t);
+  return set_meta(&mut k, pid, f, 65536, t, now);
 }
 
 fn path_exists(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
@@ -412,6 +443,10 @@ fn lx_truncate(k: &mut Kernel, pid: u64, path: u64, size: u64) -> u64
   }
   if vfs_ro(&mut k.fs, n) && vfs_lookup(&mut k.fs, n) != NO_FILE {
     return EROFS;
+  }
+  let e = may_path(&mut k, pid, n, MAY_W);
+  if e != 0 {
+    return e;                               // src/lxperm.bastio
   }
   let nfd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, O_WRITE, n);
   if nfd == NO_FD || nfd >= NFD {
@@ -495,6 +530,58 @@ fn is_misc_call(n: u64) -> bool {
     || n == LX_PERSONALITY || n == LX_MLOCKALL || n == LX_MUNLOCKALL;
 }
 
+fn is_meta_call(n: u64) -> bool {
+  return n == LX_FCHMOD || n == LX_CHOWN || n == LX_LCHOWN || n == LX_FCHOWNAT || n == LX_CHMOD || n == LX_FCHMODAT
+    || n == LX_UTIME || n == LX_UTIMES || n == LX_FUTIMESAT || n == LX_UTIMENSAT;
+}
+
+/// The calls that change a file's mode, owner or times.
+fn lx_meta_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, r10: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut r = 0;
+  if n == LX_FCHMOD {
+    r = fd_set_meta(&mut k, pid, a, b % 4096, NO_FILE);
+  } else if n == LX_CHOWN {
+    r = lx_chown(&mut k, pid, AT_FDCWD, a, b, c, 0);
+  } else if n == LX_LCHOWN {
+    r = lx_chown(&mut k, pid, AT_FDCWD, a, b, c, AT_SYMLINK_NOFOLLOW);
+  } else if n == LX_FCHOWNAT {
+    r = lx_chown(&mut k, pid, a, b, c, r10, pget(k.procs, pid, F_REGS + R_R8));
+  } else if n == LX_CHMOD {
+    let f = meta_target(&mut k, pid, AT_FDCWD, a);
+    r = set_meta(&mut k, pid, f, b % 4096, NO_FILE, false);
+  } else if n == LX_FCHMODAT {
+    let f = meta_target(&mut k, pid, a, b);
+    r = set_meta(&mut k, pid, f, c % 4096, NO_FILE, false);
+  } else if n == LX_UTIME || n == LX_UTIMES {
+    let f = meta_target(&mut k, pid, AT_FDCWD, a);
+    let mut kind = TIMES_TIMEVAL;
+    if n == LX_UTIME {
+      kind = TIMES_UTIMBUF;
+    }
+    r = set_times(&mut k, pid, f, b, kind);
+  } else if n == LX_FUTIMESAT {
+    let f = meta_target(&mut k, pid, a, b);
+    r = set_times(&mut k, pid, f, c, TIMES_TIMEVAL);
+  } else if n == LX_UTIMENSAT {
+    if b == 0 {
+      // futimens(fd, times)
+      let d = fd_look(k, pid, a);
+      if d.kind == K_BAD {
+        r = EBADF;
+      } else if d.kind == K_FILE {
+        r = set_times(&mut k, pid, vfs_row_file(k.fs, d.x), c, TIMES_TIMESPEC);
+      }
+    } else {
+      let f = meta_target(&mut k, pid, a, b);
+      r = set_times(&mut k, pid, f, c, TIMES_TIMESPEC);
+    }
+  }
+  return r;
+}
+
 /// System call n of process pid, with its first three arguments.
 fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
@@ -529,11 +616,13 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_mprotect(&mut k, pid, a, b, c);
   } else if n == LX_MSYNC {
     r = lx_msync(&mut k, pid, a, b);
-  } else if n == LX_FSYNC || n == LX_FDATASYNC || n == LX_FCHOWN {
+  } else if n == LX_FCHOWN {
+    r = chown_handle(&mut k, pid, fd_handle(&mut k, pid, a), b, c);
+  } else if n == LX_FSYNC || n == LX_FDATASYNC {
     let d = fd_look(k, pid, a);
     if d.kind == K_BAD {
-      r = EBADF;                            // writes go straight through; owners are not kept
-    } else if n != LX_FCHOWN && d.kind != K_FILE && d.kind != K_DIR {
+      r = EBADF;                            // writes go straight through
+    } else if d.kind != K_FILE && d.kind != K_DIR {
       r = EINVAL;                           // a pipe, socket or device has nothing to sync
     }
   } else if n == LX_MINCORE {
@@ -554,43 +643,10 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     if r == 0 {
       r = 1;
     }
-  } else if n == LX_FCHMOD {
-    r = fd_set_meta(&mut k, pid, a, b % 4096, NO_FILE);
-  } else if n == LX_CHOWN || n == LX_LCHOWN {
-    r = path_exists(&mut k, pid, AT_FDCWD, a);
-  } else if n == LX_FCHOWNAT {
-    r = path_exists(&mut k, pid, a, b);
-  } else if n == LX_CHMOD {
-    let f = meta_target(&mut k, pid, AT_FDCWD, a);
-    r = set_meta(&mut k, f, b % 4096, NO_FILE);
-  } else if n == LX_FCHMODAT {
-    let f = meta_target(&mut k, pid, a, b);
-    r = set_meta(&mut k, f, c % 4096, NO_FILE);
-  } else if n == LX_UTIME || n == LX_UTIMES {
-    let f = meta_target(&mut k, pid, AT_FDCWD, a);
-    let mut kind = TIMES_TIMEVAL;
-    if n == LX_UTIME {
-      kind = TIMES_UTIMBUF;
-    }
-    r = set_times(&mut k, pid, f, b, kind);
-  } else if n == LX_FUTIMESAT {
-    let f = meta_target(&mut k, pid, a, b);
-    r = set_times(&mut k, pid, f, c, TIMES_TIMEVAL);
-  } else if n == LX_UTIMENSAT {
-    if b == 0 {
-      // futimens(fd, times)
-      let d = fd_look(k, pid, a);
-      if d.kind == K_BAD {
-        r = EBADF;
-      } else if d.kind == K_FILE {
-        r = set_times(&mut k, pid, vfs_row_file(k.fs, d.x), c, TIMES_TIMESPEC);
-      }
-    } else {
-      let f = meta_target(&mut k, pid, a, b);
-      r = set_times(&mut k, pid, f, c, TIMES_TIMESPEC);
-    }
+  } else if is_meta_call(n) {
+    r = lx_meta_call(&mut k, pid, n, a, b, c, r10);
   } else if n == LX_UMASK {
-    r = 18;                                 // 022: not kept, and the mode is not either
+    r = lx_umask(&mut k, pid, a);
   } else if n == LX_GETRLIMIT {
     r = rlimit_out(&mut k, pid, a, b);
   } else if n == LX_PRLIMIT64 {

@@ -749,6 +749,11 @@ fn lx_mknod(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64) -> u64
   if vfs_ro(&mut k.fs, n) {
     return EROFS;
   }
+  let e = may_dir(&mut k, pid, n);
+  if e != 0 {
+    return e;
+  }
+  let own = new_owner(&mut k, pid, n);
   let mut kind = 0;
   if fifo {
     kind = T_FIFO;
@@ -759,6 +764,9 @@ fn lx_mknod(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64) -> u64
   // A slot left from a removed FIFO whose handle this one now has is not
   // this FIFO's: open ends keep their pipe, new opens get a new one.
   let h = vfs_lookup(&mut k.fs, n);
+  if h != NO_FILE {
+    made_by(&mut k, pid, h, own, mode % 4096, false);   // the umask and owner (src/lxperm.bastio)
+  }
   let mut f = 0;
   while f < FIFO_N
     invariant f <= FIFO_N && kok(k)
@@ -807,6 +815,7 @@ fn fifo_open(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
     pi_set(&mut k.pipes, q, 1, 0);
     pi_set(&mut k.pipes, q, 4, f + 1);
     pi_set(&mut k.pipes, q, 5, 0);
+    pi_set(&mut k.pipes, q, 6, 0);
     k.evt = set(k.evt, base + 1, q + 1);
   }
   let nb = flags / LO_NONBLOCK % 2;

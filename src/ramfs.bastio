@@ -30,6 +30,7 @@ struct RamFile {
   mode: u64,            // permission bits, such as 0644
   mtime: u64,           // last change, in seconds
   link: u64,            // a hard link: the node it names (and nothing else here is used); NFILES if not
+  own: u64,             // the owner: user id + group id * 2^32
 }
 
 enum Node { Free, File(RamFile) }
@@ -462,7 +463,7 @@ fn ram_create(v: &mut Vec[Node], name: &Bytes, n: u64, dir: bool, now: u64) -> u
           bset(&mut nm, j, bget(name, j));
           j = j + 1;
         }
-        put_node(&mut v, i, Node::File(RamFile { name: nm, dir: dir, size: 0, pages: vec_new[Slot](), mode: mode, mtime: now, link: NFILES }));
+        put_node(&mut v, i, Node::File(RamFile { name: nm, dir: dir, size: 0, pages: vec_new[Slot](), mode: mode, mtime: now, link: NFILES, own: 0 }));
         return i;
       },
       Node::File(f) => { put_node(&mut v, i, Node::File(f)); },
@@ -621,19 +622,20 @@ fn ram_reprefix(v: &mut Vec[Node], i: u64, cut: u64, new: &Bytes, nl: u64) -> bo
   return ok;
 }
 
-/// A node's permission bits and modification time (seconds).
-struct FMeta { ok: bool, mode: u64, mtime: u64 }
+/// A node's permission bits, modification time (seconds) and owner (user
+/// id + group id * 2^32).
+struct FMeta { ok: bool, mode: u64, mtime: u64, own: u64 }
 
 /// Node i's mode and modification time; ok is false if the node is free.
 fn ram_meta(v: &mut Vec[Node], i: u64) -> FMeta
   requires nodes_ok(v) && i < NFILES
   ensures nodes_ok(v)
 {
-  let mut r = FMeta { ok: false, mode: 0, mtime: 0 };
+  let mut r = FMeta { ok: false, mode: 0, mtime: 0, own: 0 };
   match take_node(&mut v, i) {
     Node::Free => {},
     Node::File(f) => {
-      r = FMeta { ok: true, mode: f.mode, mtime: f.mtime };
+      r = FMeta { ok: true, mode: f.mode, mtime: f.mtime, own: f.own };
       put_node(&mut v, i, Node::File(f));
     },
   }
@@ -657,6 +659,25 @@ fn ram_set_meta(v: &mut Vec[Node], i: u64, mode: u64, mtime: u64) -> bool
       if mtime != NO_FILE {
         g.mtime = mtime;
       }
+      put_node(&mut v, i, Node::File(g));
+      ok = true;
+    },
+  }
+  return ok;
+}
+
+/// Sets node i's owner (user id + group id * 2^32). False if the node is
+/// free.
+fn ram_set_owner(v: &mut Vec[Node], i: u64, own: u64) -> bool
+  requires nodes_ok(v) && i < NFILES
+  ensures nodes_ok(v)
+{
+  let mut ok = false;
+  match take_node(&mut v, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      let mut g = f;
+      g.own = own;
       put_node(&mut v, i, Node::File(g));
       ok = true;
     },
