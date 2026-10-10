@@ -52,7 +52,6 @@ const SIG_BLOCK: u64 = 0;
 const SIG_UNBLOCK: u64 = 1;
 const SIG_SETMASK: u64 = 2;
 
-const ESRCH: u64 = 18446744073709551613;   // 2^64 - 3
 const EINTR: u64 = 18446744073709551612;   // 2^64 - 4
 
 // The frame, from the address the handler sees in rsp: the return address
