@@ -45,7 +45,7 @@ fn pipe_put_xfer(k: &mut Kernel, p: u64, n: u64) -> u64
     return EPIPE;
   }
   let count = smaller(pi_get(k.pipes, p, 1), PIPE_CAP);
-  let room = PIPE_CAP - count;
+  let room = pipe_room(k.pipes, p, count);
   if room == 0 {
     return EAGAIN;
   }
