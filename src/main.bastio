@@ -45,6 +45,7 @@ import "info.bastio";
 import "lxcred.bastio";
 import "lxprio.bastio";
 import "lxipc.bastio";
+import "lxmq.bastio";
 import "lxsys.bastio";
 import "lxlock.bastio";
 import "lxprocfs.bastio";

@@ -545,6 +545,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_sig_call(n) {
     return lx_sig_call(&mut k, pid, n, a, b, c);
   }
+  if is_pq_call(n) {
+    return lx_pq_call(&mut k, pid, n, was, a, b, c);
+  }
   if is_ipc_call(n) {
     return lx_ipc_call(&mut k, pid, n, was, a, b, c);
   }

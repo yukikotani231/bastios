@@ -4,6 +4,7 @@
  * length, MSG_OOB on UDP), clone with a stack, unshare, sched_getattr,
  * a socket's O_NONBLOCK, and errno corners of dup3, getrusage, getrandom,
  * timer_settime, the socket calls, mremap and munlock, and nested epoll. */
+#include <mqueue.h>
 #include "compat.h"
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -181,5 +182,16 @@ int main(void) {
            write(p[1], "x", 1); ok = ok && epoll_wait(b, &out, 1, 0) == 1 && out.data.fd == a && (out.events & EPOLLIN);
            ev.data.fd = b; ok = ok && epoll_ctl(a, EPOLL_CTL_ADD, b, &ev) == -1 && errno == ELOOP;
            close(a); close(b); close(p[0]); close(p[1]); ok; }));
+    EXPECT("mqueue: priorities order messages, getattr counts, unlink, bad sigevent EINVAL", ({
+           struct mq_attr at = {.mq_maxmsg = 4, .mq_msgsize = 16}, g; char b[16]; unsigned pr = 0;
+           mq_unlink("/ltp2q"); mqd_t q = mq_open("/ltp2q", O_RDWR | O_CREAT | O_EXCL, 0600, &at);
+           struct sigevent se = {.sigev_notify = 77};
+           int ok = q != (mqd_t)-1 && mq_send(q, "lo", 2, 1) == 0 && mq_send(q, "hi", 2, 9) == 0 &&
+               mq_getattr(q, &g) == 0 && g.mq_curmsgs == 2 && g.mq_maxmsg == 4 &&
+               mq_receive(q, b, 16, &pr) == 2 && pr == 9 && !memcmp(b, "hi", 2) &&
+               mq_receive(q, b, 8, &pr) == -1 && errno == EMSGSIZE &&
+               syscall(SYS_mq_notify, q, &se) == -1 && errno == EINVAL &&
+               mq_open("/ltp2q", O_RDWR | O_CREAT | O_EXCL, 0600, &at) == (mqd_t)-1 && errno == EEXIST;
+           mq_close(q); ok && mq_unlink("/ltp2q") == 0 && mq_unlink("/ltp2q") == -1 && errno == ENOENT; }));
     return done();
 }
