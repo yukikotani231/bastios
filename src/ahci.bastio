@@ -34,6 +34,9 @@ const PCI_BAR5: u64 = 0x24;
 
 // Generic host control.
 const HBA_GHC: u64 = 0x04;
+const HBA_IS: u64 = 0x08;              // which ports have an interrupt pending
+const GHC_IE: u64 = 2;                 // interrupts on
+const IE_DONE: u64 = 0x40000003;       // a D2H register or PIO setup FIS, or an error
 const HBA_PI: u64 = 0x0C;
 const HBA_CAP2: u64 = 0x24;
 const HBA_BOHC: u64 = 0x28;
@@ -71,6 +74,7 @@ struct Ahci {
   px: u64,            // where the port's registers start
   sectors: u64,       // 0 when no disk could be started
   busy: bool,         // a command started by ahci_begin has not been polled to its end
+  irq: bool,          // the port's completions raise an interrupt (ahci_irq_on)
 }
 
 spec fn ahci_ok(h: &Ahci) -> bool {
@@ -298,7 +302,7 @@ fn ahci_new(regs: Mmio, f0: Frame, f1: Frame) -> Ahci
   requires mmio_base(regs) % 1024 == 0 && mmio_len(regs) <= AHCI_MAX_LEN && mmio_len(regs) >= 0x180
   ensures ahci_ok(result) && mmio_base(result.regs) == mmio_base(regs) && mmio_len(result.regs) == mmio_len(regs)
 {
-  let mut h = Ahci { regs: regs, cmd: dma_lend(f0), buf: dma_lend(f1), px: 0x100, sectors: 0, busy: false };
+  let mut h = Ahci { regs: regs, cmd: dma_lend(f0), buf: dma_lend(f1), px: 0x100, sectors: 0, busy: false, irq: false };
   // Take the controller from the firmware if it supports the handoff,
   // then switch it to AHCI mode.
   if ar(&mut h, HBA_CAP2) % 2 == 1 {
@@ -519,8 +523,41 @@ fn ahci_poll(h: &mut Ahci) -> u64
   let st = ahci_check(&mut h);
   if st != BIO_RUNNING {
     h.busy = false;
+    if h.irq {
+      // Acknowledge it: the port's status, then the controller's.
+      pw(&mut h, PX_IS, 4294967295);
+      aw(&mut h, HBA_IS, ahci_port_bit(h.px));
+    }
   }
   return st;
+}
+
+/// The bit of port register block `px` in HBA_IS and PI.
+fn ahci_port_bit(px: u64) -> u64
+  ensures 1 <= result && result <= 2147483648
+{
+  let mut b = 1;
+  let mut i = 0;
+  while i < 31 && 0x100 + i * 128 < px && b <= 1073741824
+    invariant 1 <= b && b <= 2147483648 && i <= 31
+  {
+    b = b * 2;
+    i = i + 1;
+  }
+  return b;
+}
+
+/// Lets the port's completions and errors raise the controller's
+/// interrupt, which the caller has pointed somewhere (MSI).
+fn ahci_irq_on(h: &mut Ahci)
+  requires ahci_ok(h)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy)
+{
+  pw(&mut h, PX_IS, 4294967295);
+  pw(&mut h, PX_IE, IE_DONE);
+  let ghc = ar(&mut h, HBA_GHC);
+  aw(&mut h, HBA_GHC, bit_set(ghc, GHC_IE));
+  h.irq = true;
 }
 
 /// Copies the data page (a finished read's block) to out[at..at + 4096].

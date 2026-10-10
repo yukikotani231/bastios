@@ -1,0 +1,96 @@
+// The bootstrap processor's local APIC, through its 4 KiB page of
+// registers. Every processor sees its own local APIC at this address, and
+// the kernel only touches it under the kernel lock, so each access goes to
+// the APIC of the processor making it.
+//
+// The kernel uses it for two vectors (boot/smp.c drives the timer):
+//   V_DISK  a disk command finished: the disk raises it by MSI or MSI-X,
+//           aimed at the bootstrap processor;
+//   V_WAKE  sent from one processor to the others, so the ones halted in
+//           cpu_idle look for work (a process the disk just woke).
+// Both are acknowledged in `lapic_eoi`, under the lock, on the processor
+// that took them, as the 8259's interrupts are.
+
+const LAPIC: u64 = 0xFEE00000;
+const LAPIC_LEN: u64 = 4096;
+const V_DISK: u64 = 0x31;
+const V_WAKE: u64 = 0x32;
+
+// Register offsets.
+const LA_ID: u64 = 0x20;
+const LA_VERSION: u64 = 0x30;
+const LA_EOI: u64 = 0xB0;
+const LA_SVR: u64 = 0xF0;        // spurious vector; bit 8 enables the APIC
+const LA_ICR_LO: u64 = 0x300;    // interrupt command: writing it sends
+const LA_ICR_HI: u64 = 0x310;
+const LA_LINT0: u64 = 0x350;
+const LA_LINT1: u64 = 0x360;
+
+const ICR_PENDING: u64 = 0x1000;           // bit 12: the last one is not sent yet
+const ICR_OTHERS: u64 = 0xC4000;           // to all but this processor, asserted, fixed
+const LA_SPINS: u64 = 100000;
+
+struct Lapic { regs: Mmio, on: bool, id: u64 }
+
+spec fn lapic_ok(a: &Lapic) -> bool {
+  mmio_base(a.regs) == LAPIC && mmio_len(a.regs) == LAPIC_LEN && a.id < 256
+}
+
+/// Takes the bootstrap processor's local APIC and turns it on, if it
+/// answers at LAPIC like an xAPIC (version 0x10-0x15); otherwise `on` is
+/// false and nothing is written. The 8259 stays the timer's and the
+/// keyboard's: LINT0 passes its interrupts through (ExtINT), as the
+/// firmware left it, and LINT1 is NMI.
+fn lapic_new(regs: Mmio) -> Lapic
+  requires mmio_base(regs) == LAPIC && mmio_len(regs) == LAPIC_LEN
+  ensures lapic_ok(result)
+{
+  let mut r = regs;
+  let ver = cast[u64](mmio_read32(&mut r, LA_VERSION)) % 256;
+  if ver < 0x10 || ver > 0x15 {
+    return Lapic { regs: r, on: false, id: 0 };
+  }
+  let id = cast[u64](mmio_read32(&mut r, LA_ID)) >> 24;
+  mmio_write32(&mut r, LA_LINT0, 0x700);
+  mmio_write32(&mut r, LA_LINT1, 0x400);
+  mmio_write32(&mut r, LA_SVR, 0x1FF);       // enabled, spurious vector 0xFF
+  return Lapic { regs: r, on: true, id: id % 256 };
+}
+
+/// Where a device's message must go to raise a vector on the bootstrap
+/// processor (physical destination, its APIC id).
+fn lapic_msi_addr(a: &Lapic) -> u64
+  requires lapic_ok(a)
+  ensures result <= 4294967295
+{
+  return LAPIC + a.id * 4096;
+}
+
+/// End of interrupt for V_DISK and V_WAKE, on this processor's APIC.
+fn lapic_eoi(a: &mut Lapic, v: u64)
+  requires lapic_ok(a)
+  ensures lapic_ok(a) && a.on == old(a.on) && a.id == old(a.id)
+{
+  if a.on && (v == V_DISK || v == V_WAKE) {
+    mmio_write32(&mut a.regs, LA_EOI, 0);
+  }
+}
+
+/// Sends V_WAKE to every other processor.
+fn lapic_wake(a: &mut Lapic)
+  requires lapic_ok(a)
+  ensures lapic_ok(a) && a.on == old(a.on) && a.id == old(a.id)
+{
+  if !a.on {
+    return;
+  }
+  let id0 = a.id;
+  let mut n = 0;
+  while n < LA_SPINS && cast[u64](mmio_read32(&mut a.regs, LA_ICR_LO)) / ICR_PENDING % 2 == 1
+    invariant lapic_ok(a) && a.on && a.id == id0
+  {
+    n = n + 1;
+  }
+  mmio_write32(&mut a.regs, LA_ICR_HI, 0);
+  mmio_write32(&mut a.regs, LA_ICR_LO, cast[u32](ICR_OTHERS + V_WAKE));
+}

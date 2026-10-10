@@ -71,6 +71,7 @@ struct Nvme {
   sectors: u64,       // 512-byte sectors; 0 when the drive could not be started
   shift: u64,         // log2 of the drive's block size, minus 9: 0 or 3
   busy: bool,         // a command started by nvme_begin has not been reaped
+  irq: bool,          // I/O completions raise MSI-X message 0 (nvme_msix)
 }
 
 spec fn nvme_ok(n: &Nvme) -> bool {
@@ -251,12 +252,12 @@ fn nvme_disable(n: &mut Nvme) -> bool
 
 /// Starts the controller whose registers are `regs`, lending it five
 /// pages. A drive that cannot be started is left with `sectors` 0.
-fn nvme_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame) -> Nvme
+fn nvme_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, irq: bool) -> Nvme
   requires mmio_base(regs) % 4096 == 0 && mmio_len(regs) <= NVME_MAX_LEN && mmio_len(regs) >= 0x2000
   ensures nvme_ok(result) && mmio_base(result.regs) == mmio_base(regs) && mmio_len(result.regs) == mmio_len(regs)
 {
   let mut n = Nvme { regs: regs, asq: dma_lend(f0), acq: dma_lend(f1), sq: dma_lend(f2), cq: dma_lend(f3),
-    buf: dma_lend(f4), stride: 4, asq_at: 0, sq_at: 0, acq_at: 1, cq_at: 1, sectors: 0, shift: 0, busy: false };
+    buf: dma_lend(f4), stride: 4, asq_at: 0, sq_at: 0, acq_at: 1, cq_at: 1, sectors: 0, shift: 0, busy: false, irq: false };
   let cap_lo = nr32(&mut n, NV_CAP);
   let cap_hi = nr32(&mut n, NV_CAP + 4);
   let mut stride = 4;
@@ -307,8 +308,14 @@ fn nvme_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame) -
     return n;                         // 512-byte and 4 KiB blocks only
   }
   // The I/O queues: completion queue 1, then submission queue 1 feeding it
-  // (physically contiguous, no interrupts).
-  if !nvme_cmd(&mut n, false, OP_CREATE_CQ, 0, dma_phys(n.cq), (Q_N - 1) * 65536 + 1, 1, 0)
+  // (physically contiguous). With `irq`, the completion queue raises
+  // interrupt vector 0 (CDW11 bit 1, vector in bits 16-31); its message
+  // goes nowhere until nvme_msix says where.
+  let mut ien = 1;
+  if irq {
+    ien = 3;
+  }
+  if !nvme_cmd(&mut n, false, OP_CREATE_CQ, 0, dma_phys(n.cq), (Q_N - 1) * 65536 + 1, ien, 0)
     || !nvme_cmd(&mut n, false, OP_CREATE_SQ, 0, dma_phys(n.sq), (Q_N - 1) * 65536 + 1, 65536 + 1, 0) {
     return n;
   }
@@ -319,6 +326,25 @@ fn nvme_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame) -
     n.sectors = size;
   }
   return n;
+}
+
+/// Points MSI-X message 0 at `addr` with `data` (the vector), in the table
+/// at offset `table` of the registers, and unmasks it. False, and nothing
+/// written, if the entry is not inside the claimed registers. The caller
+/// then turns MSI-X on in configuration space.
+fn nvme_msix(n: &mut Nvme, table: u64, addr: u64, data: u64) -> bool
+  requires nvme_ok(n) && addr <= 4294967295 && data <= 4294967295
+  ensures nvme_ok(n) && n.sectors == old(n.sectors) && n.busy == old(n.busy)
+{
+  if table % 16 != 0 || table < NV_DB + 4 * n.stride || table >= mmio_len(n.regs) || mmio_len(n.regs) - table < 16 {
+    return false;
+  }
+  nw32(&mut n, table, addr);
+  nw32(&mut n, table + 4, 0);
+  nw32(&mut n, table + 8, data);
+  nw32(&mut n, table + 12, 0);
+  n.irq = true;
+  return true;
 }
 
 /// Shuts the controller down (so it writes back its cache), disables it,

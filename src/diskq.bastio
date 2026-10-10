@@ -61,6 +61,7 @@ struct DiskQ {
   done: u64,            // the last transaction finished
   moved: u64,           // counts operations finished, so sleepers know to look again
   dead: bool,           // a command failed or never finished: the disk is not used again
+  good: u64,            // once dead: the last transaction that finished before it died
 }
 
 spec fn dq_ok(q: &DiskQ) -> bool {
@@ -72,7 +73,7 @@ fn dq_new() -> DiskQ
   ensures dq_ok(result)
 {
   let mut q = DiskQ { cache: balloc(NC * CBLOCK), tag: alloc(NC), st: alloc(NC), q: alloc(NQ * QW),
-    head: 0, count: 0, running: false, since: 0, hand: 0, next: 1, done: 0, moved: 0, dead: false };
+    head: 0, count: 0, running: false, since: 0, hand: 0, next: 1, done: 0, moved: 0, dead: false, good: 0 };
   let mut i = 0;
   while i < NC
     invariant i <= NC && dq_ok(q)
@@ -95,6 +96,21 @@ fn dq_free(q: DiskQ)
 /// Has every queued operation finished?
 fn dq_idle(q: &DiskQ) -> bool {
   return q.count == 0;
+}
+
+/// The disk failed: nothing more is sent to it. Transactions up to
+/// `good` reached it whole; any later one did not, even once its end is
+/// passed in the queue.
+fn dq_kill(q: &mut DiskQ)
+  requires dq_ok(q)
+  ensures dq_ok(q) && q.dead
+  ensures q.head == old(q.head) && q.count == old(q.count) && q.running == old(q.running)
+  ensures q.next == old(q.next) && q.done == old(q.done) && q.moved == old(q.moved)
+{
+  if !q.dead {
+    q.good = q.done;
+    q.dead = true;
+  }
 }
 
 /// The slot holding block b's data (valid or dirty), or NC.
@@ -374,7 +390,7 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
       // running, so the device is given no more commands.
     }
     if r != BIO_OK {
-      q.dead = true;
+      dq_kill(&mut q);
     }
     if s < NC {
       if kind == Q_READ && r == BIO_OK {
@@ -410,7 +426,7 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
     } else if s < NC && kind == Q_WRITE {
       dq_settle(&mut q, s);
     }
-    q.dead = true;
+    dq_kill(&mut q);
     dq_pop(&mut q);
     return DQ_MOVED;
   }
@@ -421,7 +437,7 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
     op = BIO_WRITE;
   }
   if !blk_begin(&mut dev, op, b * 8, &mut q.cache, s * CBLOCK) {
-    q.dead = true;
+    dq_kill(&mut q);
     return DQ_MOVED;                  // dropped on the next call
   }
   q.running = true;

@@ -223,3 +223,98 @@ fn pci_bar_size_at(p: &mut Pci, dev: u64, reg: u64) -> u64
   }
   return 4294967296 - mask;
 }
+
+// Message-signalled interrupts. A device with a capability list (status
+// bit 4) chains its capabilities from register 0x34; each starts with its
+// id (byte 0) and the offset of the next one (byte 1).
+const PCI_CAPS: u64 = 0x34;
+const CAP_MSI: u64 = 0x05;
+const CAP_MSIX: u64 = 0x11;
+const PCI_CMD_NOINTX: u64 = 0x400;    // command bit 10: do not assert the INTx pin
+
+/// The offset of the device's capability with id `id`, or 0 if it has
+/// none. Follows at most 48 links, so a looping list ends.
+fn pci_cap(p: &mut Pci, dev: u64, id: u64) -> u64
+  requires pci_ok(p) && dev < PCI_NONE
+  ensures result == 0 || (64 <= result && result < 256 && result % 4 == 0)
+{
+  if (pci_read(&mut p, dev, PCI_COMMAND) >> 20) % 2 == 0 {
+    return 0;
+  }
+  let mut at = pci_read(&mut p, dev, PCI_CAPS) % 256;
+  let mut n = 0;
+  while n < 48 && at >= 64 && at % 4 == 0
+    invariant at < 256
+  {
+    let w = pci_read(&mut p, dev, at);
+    if w % 256 == id {
+      return at;
+    }
+    at = (w >> 8) % 256;
+    n = n + 1;
+  }
+  return 0;
+}
+
+/// Stops the device from asserting its INTx pin (it signals by message
+/// instead). The status half is written as zeros, which changes nothing.
+fn pci_intx_off(p: &mut Pci, dev: u64)
+  requires pci_ok(p) && dev < PCI_NONE
+{
+  let c = pci_read(&mut p, dev, PCI_COMMAND) % 65536;
+  if c / PCI_CMD_NOINTX % 2 == 0 {
+    pci_write(&mut p, dev, PCI_COMMAND, c + PCI_CMD_NOINTX);
+  }
+}
+
+/// Where the device's MSI-X table is: the offset into its BAR (low 3 bits
+/// clear), plus the BAR's number (0-5) times 2^32. `cap` is its MSI-X
+/// capability.
+fn pci_msix_table(p: &mut Pci, dev: u64, cap: u64) -> u64
+  requires pci_ok(p) && dev < PCI_NONE && 64 <= cap && cap < 252 && cap % 4 == 0
+{
+  let t = pci_read(&mut p, dev, cap + 4);
+  return t % 8 * 4294967296 + (t - t % 8);
+}
+
+/// Turns MSI-X on (message control bit 15) with no function-wide mask
+/// (bit 14). Its table must already say where each message goes.
+fn pci_msix_on(p: &mut Pci, dev: u64, cap: u64)
+  requires pci_ok(p) && dev < PCI_NONE && 64 <= cap && cap < 256 && cap % 4 == 0
+{
+  let w = pci_read(&mut p, dev, cap);
+  let ctl = (w >> 16) % 16384 + 32768;
+  pci_write(&mut p, dev, cap, ctl * 65536 + w % 65536);
+}
+
+/// Turns MSI on, one message, to `addr` (a local APIC's) with `data` (the
+/// vector). `cap` is the MSI capability; message control bit 7 says
+/// whether the address has a high half (and so where the data sits).
+fn pci_msi_on(p: &mut Pci, dev: u64, cap: u64, addr: u64, data: u64)
+  requires pci_ok(p) && dev < PCI_NONE && 64 <= cap && cap < 240 && cap % 4 == 0
+  requires addr <= 4294967295 && data <= 65535
+{
+  let w = pci_read(&mut p, dev, cap);
+  let ctl = (w >> 16) % 65536;
+  pci_write(&mut p, dev, cap + 4, addr);
+  if ctl / 128 % 2 == 1 {
+    pci_write(&mut p, dev, cap + 8, 0);
+    pci_write(&mut p, dev, cap + 12, data);
+  } else {
+    pci_write(&mut p, dev, cap + 8, data);
+  }
+  // Enable (bit 0), one message (bits 4-6 zero).
+  pci_write(&mut p, dev, cap, (ctl - (ctl / 16 % 8) * 16 - ctl % 2 + 1) * 65536 + w % 65536);
+}
+
+/// Writes one MSI-X table entry, `e` (claimed for the purpose): messages go
+/// to `addr` with `data`, and the entry is unmasked.
+fn pci_msix_entry(e: &mut Mmio, addr: u64, data: u64)
+  requires mmio_len(e) == 16 && mmio_base(e) % 16 == 0 && addr <= 4294967295 && data <= 4294967295
+  ensures mmio_len(e) == old(mmio_len(e)) && mmio_base(e) == old(mmio_base(e))
+{
+  mmio_write32(&mut e, 0, cast[u32](addr));
+  mmio_write32(&mut e, 4, 0);
+  mmio_write32(&mut e, 8, cast[u32](data));
+  mmio_write32(&mut e, 12, 0);
+}

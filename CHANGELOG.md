@@ -64,6 +64,12 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
   directory block and a flush, and returns once they are done. While a
   disk writer runs, `bench`'s getpid takes 120-183 ticks instead of
   240-260 (`make iobench`).
+- Disk completions arrive by interrupt: MSI-X on NVMe and virtio, MSI on
+  AHCI, to the bootstrap processor's local APIC, which the kernel now
+  turns on. A processor with nothing to run halts instead of polling the
+  disk, so `bench`'s getpid beside a disk writer takes 97-137 ticks
+  instead of 122-191. Under QEMU's TCG, disk throughput drops 10-20%
+  (numbers in docs/architecture.md).
 - NVMe namespaces with 4 KiB logical blocks are used; they were skipped.
   AHCI disks with sectors longer than 512 bytes are now recognized and
   left alone instead of being misdriven.
