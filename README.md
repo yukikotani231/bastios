@@ -37,10 +37,10 @@ Introduce an off-by-one, drop an ownership check, or free a table that still map
 
 | Path | What |
 | --- | --- |
-| `src/pages.bastio` | Physical page allocator (bitmap proved to track the pool) |
+| `src/pages.bastio` | Physical page allocator (`Mem`: a bitmap proved to track the pool) |
 | `src/space.bastio` | Building, walking and tearing down user address spaces |
-| `src/proc.bastio` | Process table, program images, spawn and exit |
-| `src/syscall.bastio` | System calls and the console input queue |
+| `src/proc.bastio` | Kernel state (`Kernel` struct), console input queue, process table, program images, spawn and exit |
+| `src/syscall.bastio` | System calls |
 | `src/main.bastio` | Boot, the scheduler loop, fault handling, power off |
 | `user/*.bastio` | User programs: `sh`, `hello`, `spin` (never yields; shows preemption) |
 | `user/fault.S` | A user program that reads kernel memory, to test fault isolation |

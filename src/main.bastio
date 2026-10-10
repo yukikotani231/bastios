@@ -69,44 +69,44 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
   puts(con, "\r\nBastiOS 0.2: ");
   put_num(con, pool_size(pool));
   puts(con, " pages of memory\r\n");
-  let mut bm = bm_new(pool);
-  let a = find_free(bm);
+  // The allocator takes the pool for as long as the kernel runs and gives
+  // it back at power off.
+  let mut m = mem_new(pool);
+  let a = find_free(m.bm);
   if a >= NPAGES {
     puts(con, "no memory\r\n");
-    free(bm);
+    free(m.bm);
+    pool = m.pool;
     return 1;
   }
-  let mut dir = pt_new(take_page(&mut bm, &mut pool, a), 5);
-  let mut procs = alloc(PTAB_LEN);
-  let mut q = alloc(INQ_LEN);
-  if spawn(&mut bm, &mut pool, &mut dir, &mut procs, 0, 0) == 0 {
+  let dir = pt_new(take_page(&mut m, a), 5);
+  let mut k = Kernel { mem: m, dir: dir, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), ticks: 0 };
+  if spawn(&mut k, 0, 0) == 0 {
     puts(con, "cannot start the shell\r\n");
   }
   let mut cur = 1;
-  let mut ticks = 0;
   let mut running = true;
   while running
-    invariant tracks(bm, pool) && pt_level(dir) == 5 && len(procs) == PTAB_LEN && qok(q)
-    invariant mmu_root(mmu) == KERNEL_ROOT && cur < NPROC
+    invariant kok(k) && mmu_root(mmu) == KERNEL_ROOT && cur < NPROC
   {
-    drain(con, &mut q);
-    wake_readers(&mut procs, &mut q);
-    let p = pick(procs, cur);
+    drain(con, &mut k.q);
+    wake_readers(&mut k.procs, &mut k.q);
+    let p = pick(k.procs, cur);
     if p == 0 {
-      if live_count(procs) == 0 {
+      if live_count(k.procs) == 0 {
         running = false;
       } else if cpu_idle(&mut cpu) == V_TIMER {
-        ticks = tick(ticks);
+        k.ticks = tick(k.ticks);
       }
     } else {
-      let v = run(&mut mmu, &mut cpu, &mut dir, &mut procs, p);
+      let v = run(&mut mmu, &mut cpu, &mut k.dir, &mut k.procs, p);
       cur = p;
       if v == V_TIMER {
-        ticks = tick(ticks);
-        pset(&mut procs, p, F_TICKS, tick(pget(procs, p, F_TICKS)));
+        k.ticks = tick(k.ticks);
+        pset(&mut k.procs, p, F_TICKS, tick(pget(k.procs, p, F_TICKS)));
         cur = (p + 1) % NPROC;
       } else if v == V_SYSCALL {
-        let r = syscall(con, &mut bm, &mut pool, mmu, &mut dir, &mut procs, &mut q, p, ticks);
+        let r = syscall(con, &mut k, mmu, p);
         if r == SWITCH {
           cur = (p + 1) % NPROC;
         } else if r == POWEROFF {
@@ -116,17 +116,17 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
         puts(con, "\r\n[pid ");
         put_num(con, p);
         puts(con, " (");
-        puts(con, prog_name(pget(procs, p, F_PROG)));
+        puts(con, prog_name(pget(k.procs, p, F_PROG)));
         puts(con, "): ");
         fault_name(con, v);
         puts(con, " at rip ");
-        put_hex(con, pget(procs, p, F_REGS + R_RIP));
+        put_hex(con, pget(k.procs, p, F_REGS + R_RIP));
         if v == 14 {
           puts(con, ", address ");
-          put_hex(con, pget(procs, p, F_REGS + 19));
+          put_hex(con, pget(k.procs, p, F_REGS + 19));
         }
         puts(con, "; killed]\r\n");
-        terminate(&mut bm, &mut pool, mmu, &mut dir, &mut procs, p, 128 + v);
+        terminate(&mut k, mmu, p, 128 + v);
         cur = (p + 1) % NPROC;
       }
     }
@@ -134,20 +134,21 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
   // Power off: tear down whatever is left, so every page goes back.
   let mut i = 0;
   while i < 512
-    invariant i <= 512 && tracks(bm, pool) && pt_level(dir) == 5 && mmu_root(mmu) == KERNEL_ROOT
-    invariant forall j: u64 :: j < i ==> !pt_used(dir, j)
+    invariant i <= 512 && mem_ok(k.mem) && pt_level(k.dir) == 5 && mmu_root(mmu) == KERNEL_ROOT
+    invariant forall j: u64 :: j < i ==> !pt_used(k.dir, j)
   {
-    if pt_has(dir, i) {
-      free_space(&mut bm, &mut pool, mmu, pt_take(&mut dir, i));
+    if pt_has(k.dir, i) {
+      free_space(&mut k.mem, mmu, pt_take(&mut k.dir, i));
     }
     i = i + 1;
   }
-  give_page(&mut bm, &mut pool, pt_free(dir));
+  give_page(&mut k.mem, pt_free(k.dir));
   puts(con, "BastiOS: ");
-  put_num(con, count_free(bm));
+  put_num(con, count_free(k.mem.bm));
   puts(con, " pages free at power off\r\n");
-  free(bm);
-  free(procs);
-  free(q);
+  free(k.mem.bm);
+  free(k.procs);
+  free(k.q);
+  pool = k.mem.pool;
   return 0;
 }

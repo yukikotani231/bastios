@@ -19,74 +19,6 @@ const KEEP: u64 = 0;
 const SWITCH: u64 = 1;
 const POWEROFF: u64 = 2;
 
-// ---------------------------------------------------------------- input queue
-
-// Bytes typed on the console, waiting for a READ: word 0 is the head,
-// word 1 the count, words 2..258 a ring of 256 bytes.
-const INQ_LEN: u64 = 258;
-
-spec fn qok(q: &Buf) -> bool {
-  len(q) == INQ_LEN && get(q, 0) < 256 && get(q, 1) <= 256
-}
-
-fn q_push(q: &mut Buf, b: u64)
-  requires qok(q)
-  ensures qok(q)
-{
-  let n = get(q, 1);
-  if n < 256 {
-    q = set(q, 2 + (get(q, 0) + n) % 256, b);
-    q = set(q, 1, n + 1);
-  }
-}
-
-/// The oldest byte, or 256 if there is none.
-fn q_pop(q: &mut Buf) -> u64
-  requires qok(q)
-  ensures qok(q)
-{
-  let n = get(q, 1);
-  if n == 0 {
-    return 256;
-  }
-  let h = get(q, 0);
-  let b = get(q, 2 + h);
-  q = set(q, 0, (h + 1) % 256);
-  q = set(q, 1, n - 1);
-  return b;
-}
-
-/// Moves every byte the UART has received into the queue.
-fn drain(con: &Serial, q: &mut Buf)
-  requires qok(q)
-  ensures qok(q)
-{
-  let mut c = serial_poll(con);
-  while c < 256
-    invariant qok(q)
-  {
-    q_push(&mut q, c);
-    c = serial_poll(con);
-  }
-}
-
-/// Hands queued bytes to processes blocked in READ.
-fn wake_readers(procs: &mut Buf, q: &mut Buf)
-  requires len(procs) == PTAB_LEN && qok(q)
-  ensures len(procs) == PTAB_LEN && qok(q)
-{
-  let mut p = 1;
-  while p < NPROC
-    invariant 1 <= p && p <= NPROC && len(procs) == PTAB_LEN && qok(q)
-  {
-    if state(procs, p) == READING && get(q, 1) > 0 {
-      pset(&mut procs, p, F_REGS + R_RAX, q_pop(&mut q));
-      pset(&mut procs, p, F_STATE, READY);
-    }
-    p = p + 1;
-  }
-}
-
 // ---------------------------------------------------------------- user memory
 
 /// Is [va, va + n) inside the user window?
@@ -200,71 +132,70 @@ fn do_wait(procs: &mut Buf, pid: u64, c: u64) -> u64
 }
 
 /// Handles the system call process `pid` just made.
-fn syscall(con: &Serial, bm: &mut Buf, pool: &mut Pool, mmu: &Mmu, dir: &mut PageTable, procs: &mut Buf, q: &mut Buf, pid: u64, ticks: u64) -> u64
-  requires tracks(bm, pool) && pt_level(dir) == 5 && len(procs) == PTAB_LEN && qok(q)
-  requires 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
-  ensures tracks(bm, pool) && pt_level(dir) == 5 && len(procs) == PTAB_LEN && qok(q)
+fn syscall(con: &Serial, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k)
 {
-  let n = pget(procs, pid, F_REGS + R_RAX);
-  let a = pget(procs, pid, F_REGS + R_RDI);
-  let b = pget(procs, pid, F_REGS + R_RSI);
+  let n = pget(k.procs, pid, F_REGS + R_RAX);
+  let a = pget(k.procs, pid, F_REGS + R_RDI);
+  let b = pget(k.procs, pid, F_REGS + R_RSI);
   if n == SYS_EXIT {
-    terminate(&mut bm, &mut pool, mmu, &mut dir, &mut procs, pid, a);
+    terminate(&mut k, mmu, pid, a);
     return SWITCH;
   }
   if n == SYS_WRITE {
-    ret(&mut procs, pid, do_write(con, &mut dir, pid, a, b));
+    ret(&mut k.procs, pid, do_write(con, &mut k.dir, pid, a, b));
     return KEEP;
   }
   if n == SYS_READ {
-    let c = q_pop(&mut q);
+    let c = q_pop(&mut k.q);
     if c < 256 {
-      ret(&mut procs, pid, c);
+      ret(&mut k.procs, pid, c);
       return KEEP;
     }
-    pset(&mut procs, pid, F_STATE, READING);
+    pset(&mut k.procs, pid, F_STATE, READING);
     return SWITCH;
   }
   if n == SYS_SPAWN {
-    let prog = lookup(&mut dir, pid, a, b);
+    let prog = lookup(&mut k.dir, pid, a, b);
     let mut child = 0;
     if prog < NPROGS {
-      child = spawn(&mut bm, &mut pool, &mut dir, &mut procs, prog, pid);
+      child = spawn(&mut k, prog, pid);
     }
-    ret(&mut procs, pid, child);
+    ret(&mut k.procs, pid, child);
     return KEEP;
   }
   if n == SYS_WAIT {
-    return do_wait(&mut procs, pid, a);
+    return do_wait(&mut k.procs, pid, a);
   }
   if n == SYS_YIELD {
     return SWITCH;
   }
   if n == SYS_GETPID {
-    ret(&mut procs, pid, pid);
+    ret(&mut k.procs, pid, pid);
     return KEEP;
   }
   if n == SYS_INFO {
     if a == 0 {
-      ret(&mut procs, pid, count_free(bm));
+      ret(&mut k.procs, pid, count_free(k.mem.bm));
     } else if a == 1 {
-      ret(&mut procs, pid, ticks);
+      ret(&mut k.procs, pid, k.ticks);
     } else {
-      ret(&mut procs, pid, NO_RESULT);
+      ret(&mut k.procs, pid, NO_RESULT);
     }
     return KEEP;
   }
   if n == SYS_PS {
-    print_ps(con, procs);
+    print_ps(con, k.procs);
     return KEEP;
   }
   if n == SYS_KILL {
-    if a == 0 || a >= NPROC || state(procs, a) == FREE || state(procs, a) == ZOMBIE {
-      ret(&mut procs, pid, 1);
+    if a == 0 || a >= NPROC || state(k.procs, a) == FREE || state(k.procs, a) == ZOMBIE {
+      ret(&mut k.procs, pid, 1);
       return KEEP;
     }
-    ret(&mut procs, pid, 0);
-    terminate(&mut bm, &mut pool, mmu, &mut dir, &mut procs, a, 137);
+    ret(&mut k.procs, pid, 0);
+    terminate(&mut k, mmu, a, 137);
     if a == pid {
       return SWITCH;
     }
@@ -273,6 +204,6 @@ fn syscall(con: &Serial, bm: &mut Buf, pool: &mut Pool, mmu: &Mmu, dir: &mut Pag
   if n == SYS_POWEROFF {
     return POWEROFF;
   }
-  ret(&mut procs, pid, NO_RESULT);
+  ret(&mut k.procs, pid, NO_RESULT);
   return KEEP;
 }
