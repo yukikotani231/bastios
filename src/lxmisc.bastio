@@ -176,16 +176,24 @@ fn lx_sysinfo(k: &mut Kernel, pid: u64, va: u64) -> u64
   return 0;
 }
 
-/// getrusage(who, usage): user time is the ticks spent running; the rest
+/// getrusage(who, usage): the user and system times (see tm_ticks) of the
+/// caller, or with RUSAGE_CHILDREN of its waited-for children; the rest
 /// is zero.
-fn lx_getrusage(k: &mut Kernel, pid: u64, va: u64) -> u64
+fn lx_getrusage(k: &mut Kernel, pid: u64, children: bool, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let t = smaller(pget(k.procs, pid, F_TICKS), 0xFFFFFFFFFFFF);
+  let mut t = smaller(pget(k.procs, pid, F_TICKS), 0xFFFFFFFFFFFF);
+  let mut st = smaller(tm_ticks(k, pid, 0), 0xFFFFFFFFFFFF);
+  if children {
+    t = smaller(tm_ticks(k, pid, 1), 0xFFFFFFFFFFFF);
+    st = smaller(tm_ticks(k, pid, 2), 0xFFFFFFFFFFFF);
+  }
   xfer_zero(&mut k, RUSAGE_SIZE);
   xfer_u64(&mut k.fs.xfer, 0, t / 100);              // ru_utime.tv_sec
   xfer_u64(&mut k.fs.xfer, 8, t % 100 * 10000);      // ru_utime.tv_usec
+  xfer_u64(&mut k.fs.xfer, 16, st / 100);            // ru_stime
+  xfer_u64(&mut k.fs.xfer, 24, st % 100 * 10000);
   if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, RUSAGE_SIZE) != RUSAGE_SIZE {
     return EFAULT;
   }
@@ -495,6 +503,12 @@ fn lx_setpgid(k: &mut Kernel, pid: u64, target: u64, g: u64) -> u64
   if g % 0x100000000 >= 0x80000000 {
     return EINVAL;                          // a negative group
   }
+  if t != pid && sid_of(k.procs, t) != sid_of(k.procs, pid) {
+    return EPERM;                           // a child in another session
+  }
+  if t != pid && jc_execed(k, t) {
+    return EACCES;                          // a child that has called execve
+  }
   let mut want = t;
   if g != 0 {
     want = g;
@@ -658,7 +672,7 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     if who != 0 && who != 1 && who != 0xFFFFFFFF {
       r = EINVAL;                           // RUSAGE_SELF, RUSAGE_THREAD, RUSAGE_CHILDREN
     } else {
-      r = lx_getrusage(&mut k, pid, b);
+      r = lx_getrusage(&mut k, pid, who == 0xFFFFFFFF, b);
     }
   } else if n == LX_SYSINFO {
     r = lx_sysinfo(&mut k, pid, a);

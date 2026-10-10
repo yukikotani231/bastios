@@ -500,6 +500,7 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
             return KEEP;
           }
         }
+        tm_reap(&mut k, pid, c);
         pset(&mut k.procs, c, F_STATE, FREE);
         ret(&mut k.procs, pid, c);
         return KEEP;
@@ -593,6 +594,7 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
           }
         }
         if options & 0x1000000 == 0 {
+          tm_reap(&mut k, pid, c);
           pset(&mut k.procs, c, F_STATE, FREE);
         }
         ret(&mut k.procs, pid, 0);
@@ -623,8 +625,8 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
   return r;
 }
 
-/// times(buf): the caller's run time in clock ticks as user time (system
-/// time, and the children's, are 0); returns the ticks since boot.
+/// times(buf): the caller's user and system time, and its waited-for
+/// children's, in clock ticks; returns the ticks since boot.
 fn lx_times(k: &mut Kernel, pid: u64, buf: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -632,6 +634,9 @@ fn lx_times(k: &mut Kernel, pid: u64, buf: u64) -> u64
   if buf != 0 {
     lx_fill(&mut k, 0, 32);
     xfer_u64(&mut k.fs.xfer, 0, pget(k.procs, pid, F_TICKS));
+    xfer_u64(&mut k.fs.xfer, 8, tm_ticks(k, pid, 0));
+    xfer_u64(&mut k.fs.xfer, 16, tm_ticks(k, pid, 1));
+    xfer_u64(&mut k.fs.xfer, 24, tm_ticks(k, pid, 2));
     if lx_put_out(&mut k, pid, buf, 32) != 0 {
       return EFAULT;
     }

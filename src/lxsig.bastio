@@ -113,12 +113,14 @@ fn dfl_stops(s: u64) -> bool {
 // SIGCONT (or SIGKILL) makes it READY again. Its word in k.sys from SYS_JC
 // is the signal that stopped it, plus JC_STOP until wait reports the stop
 // (WUNTRACED, WSTOPPED), plus JC_CONT until wait reports that it
-// continued (WCONTINUED). Each change sends the parent SIGCHLD unless its
+// continued (WCONTINUED), plus JC_EXECED once it called execve (setpgid
+// then refuses to move it). Each change sends the parent SIGCHLD unless its
 // SIGCHLD action has SA_NOCLDSTOP, and wakes it from wait4 or waitid.
 // Only the thread that takes the signal stops, not its whole group.
 
 const JC_STOP: u64 = 256;
 const JC_CONT: u64 = 512;
+const JC_EXECED: u64 = 1024;
 const SA_NOCLDSTOP: u64 = 1;
 
 fn jc_get(k: &Kernel, p: u64) -> u64
@@ -176,13 +178,31 @@ fn jc_report(k: &mut Kernel, c: u64, stops: bool, conts: bool, keep: bool) -> u6
   return 0;
 }
 
+/// execve in process p.
+fn jc_exec(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let w = jc_get(k, p);
+  if w / JC_EXECED % 2 == 0 && w < 0xFFFFFFFF {
+    jc_set(&mut k, p, w + JC_EXECED);
+  }
+}
+
+/// Has process p called execve?
+fn jc_execed(k: &Kernel, p: u64) -> bool
+  requires kok(k) && p < NPROC
+{
+  return jc_get(k, p) / JC_EXECED % 2 == 1;
+}
+
 /// Process p takes stop signal s.
 fn jc_stop(k: &mut Kernel, p: u64, s: u64)
   requires kok(k) && 1 <= p && p < NPROC && s < 256
   ensures kok(k)
 {
   pset(&mut k.procs, p, F_STATE, STOPPED);
-  jc_set(&mut k, p, s + JC_STOP);
+  jc_set(&mut k, p, s + JC_STOP + jc_get(k, p) / JC_EXECED % 2 * JC_EXECED);
   jc_tell(&mut k, p);
 }
 
@@ -214,7 +234,7 @@ fn post_sig(k: &mut Kernel, p: u64, s: u64)
     pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) & !(sbit(SIGSTOP) | sbit(SIGTSTP) | sbit(SIGTTIN) | sbit(SIGTTOU)));
     if st == STOPPED {
       pset(&mut k.procs, p, F_STATE, READY);
-      jc_set(&mut k, p, JC_CONT);
+      jc_set(&mut k, p, JC_CONT + jc_get(k, p) / JC_EXECED % 2 * JC_EXECED);
       jc_tell(&mut k, p);
     }
   } else if dfl_stops(s) {

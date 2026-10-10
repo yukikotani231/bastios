@@ -353,7 +353,12 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   if v == V_LINUX {
     s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
     s.k.fs.now = sat_add(s.k.epoch, s.k.ns) / 1000000000;   // wall-clock seconds, as stat reports them
+    let began = s.k.ns;
     let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
+    let ended = tsc_now(s.k.tsc, s.k.ns, cpu);
+    if ended > began {
+      tm_sys_add(&mut s.k, p, ended - began);   // system time (src/lxrlimit.bastio)
+    }
     call_done(&mut s.k, p);
     if what == POWEROFF || what == REBOOT {
       s.stop = true;

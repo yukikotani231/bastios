@@ -19,6 +19,7 @@
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/times.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <setjmp.h>
@@ -335,5 +336,15 @@ int main(void) {
            int cont = w2 == 0 && si.si_pid == c && si.si_code == CLD_CONTINUED && w3 == c && WIFCONTINUED(st);
            kill(c, SIGKILL); waitpid(c, &st, 0);
            stopped && tee && cont && WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL; }));
+    EXPECT("times: system calls count as system time; a waited-for child's times reach tms_cutime/cstime", ({
+           struct tms a, b; times(&a); time_t t0 = time(0); while (time(0) - t0 < 2) getppid();
+           pid_t c = fork(); if (c == 0) { time_t t1 = time(0); while (time(0) - t1 < 2) getppid(); volatile long x = 0; for (long i = 0; i < 100000000; i++) x += i; _exit(0); }
+           waitpid(c, 0, 0); times(&b);
+           b.tms_stime > a.tms_stime && b.tms_cutime > 0 && b.tms_cstime > 0; }));
+    EXPECT("setpgid on a child after its execve is EACCES", ({
+           int go[2]; pipe(go); pid_t c = fork();
+           if (c == 0) { close(go[0]); fcntl(go[1], F_SETFD, FD_CLOEXEC); execl("/disk/busybox", "sleep", "1", (char *)0); execl("/bin/sleep", "sleep", "1", (char *)0); _exit(1); }
+           close(go[1]); char x; read(go[0], &x, 1); close(go[0]);   /* EOF once the child execs */
+           int r = setpgid(c, c); int e = errno; int st; waitpid(c, &st, 0); r == -1 && e == EACCES; }));
     return done();
 }

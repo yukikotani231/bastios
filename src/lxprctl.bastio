@@ -95,6 +95,7 @@ fn pr_exec(k: &mut Kernel, p: u64)
   pr_set(&mut k, p, PRW_NAME, 0);
   pr_set(&mut k, p, PRW_NAME + 1, 0);
   rl_exec(&mut k, p);                     // and nothing stays locked
+  jc_exec(&mut k, p);                     // and setpgid may no longer move it
 }
 
 /// Process p is ending: each child that asked for a parent-death signal

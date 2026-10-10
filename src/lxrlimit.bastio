@@ -93,6 +93,7 @@ fn rl_fork(k: &mut Kernel, p: u64, c: u64)
   }
   rl_put(&mut k, c, RLW_LOCKED, 0);
   rl_put(&mut k, c, RLW_MCL, 0);
+  tm_clear(&mut k, c);
 }
 
 /// execve: a new address space, so nothing is locked.
@@ -319,6 +320,69 @@ fn lx_munlockall(k: &mut Kernel, pid: u64) -> u64
   rl_put(&mut k, pid, RLW_LOCKED, 0);
   rl_put(&mut k, pid, RLW_MCL, 0);
   return 0;
+}
+
+// ---------------------------------------------------------------- CPU times
+// Timer ticks that find a process running count as its user time
+// (F_TICKS). Its system calls run in the kernel, where no tick lands, so
+// their time is measured with the TSC instead: three words per process in
+// k.sys from SYS_TM, the ns spent in system calls, then the user ticks and
+// the system ns of the children it has waited for (and theirs).
+
+fn tm_get(k: &Kernel, p: u64, i: u64) -> u64
+  requires kok(k) && p < NPROC && i < 3
+{
+  return get(k.sys, SYS_TM + 3 * p + i);
+}
+
+fn tm_set(k: &mut Kernel, p: u64, i: u64, v: u64)
+  requires kok(k) && p < NPROC && i < 3
+  ensures kok(k)
+{
+  k.sys = set(k.sys, SYS_TM + 3 * p + i, v);
+}
+
+/// Process p spent ns in a system call.
+fn tm_sys_add(k: &mut Kernel, p: u64, ns: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  if state(k.procs, p) != FREE {
+    tm_set(&mut k, p, 0, sat_add(tm_get(k, p, 0), ns));
+  }
+}
+
+/// The parent waited for child c: c's times, and its children's, become
+/// the parent's children's times.
+fn tm_reap(k: &mut Kernel, parent: u64, c: u64)
+  requires kok(k) && parent < NPROC && c < NPROC
+  ensures kok(k)
+{
+  let u = sat_add(pget(k.procs, c, F_TICKS), tm_get(k, c, 1));
+  let s = sat_add(tm_get(k, c, 0), tm_get(k, c, 2));
+  tm_set(&mut k, parent, 1, sat_add(tm_get(k, parent, 1), u));
+  tm_set(&mut k, parent, 2, sat_add(tm_get(k, parent, 2), s));
+}
+
+/// A new process or thread c starts with no times.
+fn tm_clear(k: &mut Kernel, c: u64)
+  requires kok(k) && c < NPROC
+  ensures kok(k)
+{
+  tm_set(&mut k, c, 0, 0);
+  tm_set(&mut k, c, 1, 0);
+  tm_set(&mut k, c, 2, 0);
+}
+
+/// Process p's system time in timer ticks, its children's user time in
+/// ticks (i 1), or their system time in ticks (i 2).
+fn tm_ticks(k: &Kernel, p: u64, i: u64) -> u64
+  requires kok(k) && p < NPROC && i < 3
+{
+  if i == 1 {
+    return tm_get(k, p, 1);
+  }
+  return tm_get(k, p, i) / NS_PER_TICK;
 }
 
 /// The bytes process p has locked, for /proc/<pid>/status.
