@@ -3,7 +3,7 @@
  * and socket errors (listen on UDP, send before connect, a bad address
  * length, MSG_OOB on UDP), clone with a stack, unshare, sched_getattr,
  * a socket's O_NONBLOCK, and errno corners of dup3, getrusage, getrandom,
- * timer_settime, the socket calls, mremap and munlock. */
+ * timer_settime, the socket calls, mremap and munlock, and nested epoll. */
 #include "compat.h"
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -22,6 +22,7 @@
 #include <sched.h>
 #include <sys/syscall.h>
 #include <sys/random.h>
+#include <sys/epoll.h>
 #include <time.h>
 
 static volatile int ticks;
@@ -174,5 +175,11 @@ int main(void) {
     EXPECT("errors: mremap MREMAP_FIXED alone, munlock of unmapped pages", ({ char *p = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
            int ok = mremap(p, 4096, 4096, MREMAP_FIXED, p + 4096) == MAP_FAILED && errno == EINVAL;
            munmap(p, 8192); ok && munlock(p, 4096) == -1 && errno == ENOMEM; }));
+    EXPECT("nested epoll: readiness passes up, a loop is ELOOP", ({ int p[2]; pipe(p); int a = epoll_create1(0), b = epoll_create1(0);
+           struct epoll_event ev = {.events = EPOLLIN}, out; ev.data.fd = p[0]; epoll_ctl(a, EPOLL_CTL_ADD, p[0], &ev);
+           ev.data.fd = a; int ok = epoll_ctl(b, EPOLL_CTL_ADD, a, &ev) == 0 && epoll_wait(b, &out, 1, 0) == 0;
+           write(p[1], "x", 1); ok = ok && epoll_wait(b, &out, 1, 0) == 1 && out.data.fd == a && (out.events & EPOLLIN);
+           ev.data.fd = b; ok = ok && epoll_ctl(a, EPOLL_CTL_ADD, b, &ev) == -1 && errno == ELOOP;
+           close(a); close(b); close(p[0]); close(p[1]); ok; }));
     return done();
 }

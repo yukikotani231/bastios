@@ -252,6 +252,7 @@ t_ltp2: listen on a UDP socket is EOPNOTSUPP
 t_ltp2: mincore errors
 t_ltp2: mincore marks mapped pages
 t_ltp2: mlockall and munlockall succeed
+t_ltp2: nested epoll: readiness passes up, a loop is ELOOP
 t_ltp2: nice: root lowers and raises it, a child inherits it, nobody may not lower it
 t_ltp2: personality is kept
 t_ltp2: pread/pwrite: negative offset EINVAL, a directory EISDIR, 0 bytes 0
