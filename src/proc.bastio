@@ -333,6 +333,7 @@ const OF_SOCK: u64 = 5;               // x: the kernel socket; word 3: 2 * peer 
 const OF_TCP: u64 = 6;                // x: the kernel connection (TCBS: none yet); word 3: see src/lxtcp.bastio
 const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
+const DIR_VFS: u64 = 2;               // DIR_VFS + a file layer directory handle
 
 const NPIPES: u64 = 8;
 const PIPE_CAP: u64 = 1024;
@@ -347,7 +348,7 @@ const AT_REMOVEDIR: u64 = 0x200;
 const DENT_BUF: u64 = 2048;           // the most getdents64 fills in one call
 const ENOTDIR: u64 = 18446744073709551596;  // 2^64 - 20
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
-const NAPPLETS: u64 = 11;
+const NAPPLETS: u64 = 14;
 const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----
 const S_IFIFO: u64 = 0x1180;           // a FIFO, rw-------
 const S_IFSOCK: u64 = 0xC1B6;          // a socket, rw-rw-rw-

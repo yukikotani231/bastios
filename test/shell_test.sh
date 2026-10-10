@@ -230,6 +230,14 @@ steps = [
     ("mkdir sub; cd sub && /bin/pwd && cd ../.. && /bin/pwd; ls dd", [b"\r\n/dd/sub\r\n/\r\n", b"sub"], b"\n# "),
     ("rmdir dd; echo r=$?", [b"not empty", b"r=1"], b"\n# "),
     ("rm dd/f; rmdir dd/sub dd; test -d dd || echo gone$((1+1))", b"\r\ngone2\r\n", b"\n# "),
+    # Modes and times: chmod, touch -t (utimensat), stat and ls -l, in
+    # memory and on the disk.
+    ("echo x > pm; chmod 750 pm; stat -c '%a %s %F' pm", b"\r\n750 2 regular file\r\n", b"\n# "),
+    ("ls -l pm", b"-rwxr-x---", b"\n# "),
+    ("touch -t 200001020304 pm; stat -c %Y pm", b"\r\n946782240\r\n", b"\n# "),
+    ("echo y > disk/pm; chmod 600 disk/pm; touch -t 199912312359 disk/pm; stat -c '%a %Y' disk/pm", b"\r\n600 946684740\r\n", b"\n# "),
+    ("mkdir pd; chmod 700 pd; stat -c '%a %F' pd", b"\r\n700 directory\r\n", b"\n# "),
+    ("rm pm; rmdir pd; echo cleaned$((1+1))", b"\r\ncleaned2\r\n", b"\n# "),
     # The *at calls relative to a directory descriptor, fchdir, and mmap
     # of a file (user/mdir.c).
     ("mdir", b"mdir: ok in /dx, mapped", b"\n# "),
@@ -787,6 +795,7 @@ session("third", False, [
     ("cat disk/note", b"kept across boots\r\nappended\r\n"),
     ("rm disk/note", b""),
     ("cat disk/moved", b"z\r\n"),
+    ("rm disk/pm", b""),
     ("rm disk/moved", b""),
     ("ls disk/keep", b"\nf\r\n"),
     ("cat disk/keep/f", b"deep\r\n"),
