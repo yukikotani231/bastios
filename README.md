@@ -90,6 +90,7 @@ The proof covers everything in `src/` and `user/*.bastio`. Everything below it i
 | Part | Where | Role |
 | --- | --- | --- |
 | Boot and trap entry | `boot/boot.S` | Multiboot entry, identity map, long mode; GDT with user segments; the trap stubs and the `syscall` entry; entering user mode (`bst_cpu_enter`) and idling (`bst_cpu_wait`) |
+| Processor startup | `boot/smp.c`, `boot/ap.S` | Finding the processors in the ACPI MADT, mapping the local APIC, INIT and startup IPIs; the real-mode trampoline that takes each application processor to long mode on the kernel's tables, where it checks in and parks. C until Bastio has an `Mmio` capability |
 | Platform setup | `boot/platform.c` | TSS, interrupt table, `syscall` MSRs, 8259 PICs, 100 Hz timer |
 | C helpers | `boot/libc.c` | `memset` / `memcpy` / `memmove` / `memcmp`, which the C compiler may call |
 | Runtime preludes | in bastiolang, `stage0/src/codegen.rs` | COM1 port I/O, the arena allocator, page-table entry encoding, CR3 loads, the system call stubs for user programs |
@@ -103,7 +104,7 @@ Count the lines yourself (`wc -l boot/* user/*.S`). Copied numbers go stale.
 ## Status
 
 v0.2: processes, preemptive round-robin scheduling, system calls and fault isolation. Not there yet:
-- one CPU only; the kernel runs with interrupts off and polls the UART;
+- one CPU runs the kernel: the other processors are started at boot (`cpus` in the shell counts them) but park until Bastio has locks and `smp_start` (bastiolang docs/concurrency.md); the kernel runs with interrupts off and polls the UART;
 - all user pages are mapped writable and executable (the image has no page-aligned sections yet);
 - a user window of 2 MiB per process, at most 15 processes, programs built into the kernel image (no file system);
 - running out of memory when starting a program fails the spawn cleanly, but the kernel's own arena (for `Buf`) still halts the machine when it runs out.

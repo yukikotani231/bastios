@@ -61,7 +61,9 @@ bst_gdt:
         .quad 0x00AFFA000000FFFF      /* 0x20: 64-bit code, ring 3 */
         .quad 0, 0                    /* 0x28: TSS (filled by platform.c) */
 bst_gdt_end:
-gdt_ptr:
+
+.global bst_gdt_ptr
+bst_gdt_ptr:
         .word bst_gdt_end - bst_gdt - 1
         .quad bst_gdt
 
@@ -103,7 +105,7 @@ _start:
         or      $0x80010001, %eax     /* PG | WP | PE: the kernel cannot write read-only pages either */
         mov     %eax, %cr0
 
-        lgdt    gdt_ptr
+        lgdt    bst_gdt_ptr
         ljmp    $KCODE, $long_mode
 
 .code64
@@ -118,6 +120,7 @@ long_mode:
         mov     $stack_top, %rsp
 
         call    bst_platform_init
+        call    bst_smp_init
         mov     mb_info, %edi
         call    bst_kmain
 

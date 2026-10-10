@@ -291,6 +291,8 @@ fn syscall(con: &Serial, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       ret(&mut k.procs, pid, count_free(k.mem.bm));
     } else if a == 1 {
       ret(&mut k.procs, pid, k.ticks);
+    } else if a == 2 {
+      ret(&mut k.procs, pid, k.cpus);
     } else {
       ret(&mut k.procs, pid, NO_RESULT);
     }

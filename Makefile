@@ -93,9 +93,15 @@ build/boot.o: boot/boot.S | build
 build/platform.o: boot/platform.c | build
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+build/smp.o: boot/smp.c | build
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+build/ap.o: boot/ap.S | build
+	$(CC) -c -o $@ $<
+
 # 3. Link a 64-bit kernel, then repackage it as ELF32: QEMU's -kernel
 #    Multiboot loader only accepts 32-bit ELF images. The code is unchanged.
-KOBJS := build/boot.o build/platform.o build/kernel.o build/libc.o
+KOBJS := build/boot.o build/ap.o build/platform.o build/smp.o build/kernel.o build/libc.o
 
 build/bastios64.elf: $(KOBJS) boot/linker.ld
 	$(CC) $(LDFLAGS) -o $@ $(KOBJS)
