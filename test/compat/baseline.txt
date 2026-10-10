@@ -246,8 +246,12 @@ t_ltp2: mincore errors
 t_ltp2: mincore marks mapped pages
 t_ltp2: mlockall and munlockall succeed
 t_ltp2: personality is kept
+t_ltp2: pread/pwrite: negative offset EINVAL, a directory EISDIR, 0 bytes 0
+t_ltp2: rlimits: bad resource EINVAL; soft over hard EINVAL
 t_ltp2: send on an unconnected TCP socket is EPIPE
 t_ltp2: sendto with a huge address length is EINVAL
+t_ltp2: waitpid with bad options is EINVAL
+t_ltp2: waitpid(0) waits only for the caller's group
 t_mem: 64 MiB of address space
 t_mem: FUTEX_CMP_REQUEUE moves timed waiters across processes
 t_mem: FUTEX_CMP_REQUEUE with a negative count is EINVAL
