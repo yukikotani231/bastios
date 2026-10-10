@@ -33,15 +33,30 @@ fn user_range(va: u64, n: u64) -> bool
 
 /// Writes the n bytes at user address va to the console. Returns the count
 /// written, which stops short at an unmapped page.
-fn do_write(con: &Serial, dir: &mut PageTable, pid: u64, va: u64, n: u64) -> u64
-  requires pt_level(dir) == 5 && pid < NPROC
-  ensures pt_level(dir) == 5
+fn do_write(con: &Serial, spaces: &mut Vec[Space], pid: u64, va: u64, n: u64) -> u64
+  requires spaces_ok(spaces) && pid < NPROC
+  ensures spaces_ok(spaces)
 {
-  if !user_range(va, n) || !pt_has(dir, pid) {
+  if !user_range(va, n) {
     return NO_RESULT;
   }
   let off = va - USER_BASE;
-  let mut root = pt_take(&mut dir, pid);
+  match take_space(&mut spaces, pid) {
+    Space::Empty => { return NO_RESULT; },
+    Space::Mapped(mut root) => {
+      let k = write_from(con, &mut root, off, n);
+      put_space(&mut spaces, pid, Space::Mapped(root));
+      return k;
+    },
+  }
+}
+
+/// Writes the n bytes at offset off of the user window to the console,
+/// stopping short at an unmapped page. Returns the count written.
+fn write_from(con: &Serial, root: &mut PageTable, off: u64, n: u64) -> u64
+  requires pt_level(root) == 4 && off + n <= USER_SIZE
+  ensures pt_level(root) == 4
+{
   let mut k = 0;
   let mut ok = true;
   while ok && k < n
@@ -55,7 +70,6 @@ fn do_write(con: &Serial, dir: &mut PageTable, pid: u64, va: u64, n: u64) -> u64
       k = k + 1;
     }
   }
-  pt_put(&mut dir, pid, root);
   return k;
 }
 
@@ -80,16 +94,32 @@ fn user_matches(root: &mut PageTable, off: u64, n: u64, name: Str) -> bool
 }
 
 /// The program whose name is the n bytes at user address va, or NPROGS.
-fn lookup(dir: &mut PageTable, pid: u64, va: u64, n: u64) -> u64
-  requires pt_level(dir) == 5 && pid < NPROC
-  ensures pt_level(dir) == 5
+fn lookup(spaces: &mut Vec[Space], pid: u64, va: u64, n: u64) -> u64
+  requires spaces_ok(spaces) && pid < NPROC
+  ensures spaces_ok(spaces)
   ensures result <= NPROGS
 {
-  if !user_range(va, n) || !pt_has(dir, pid) {
+  if !user_range(va, n) {
     return NPROGS;
   }
   let off = va - USER_BASE;
-  let mut root = pt_take(&mut dir, pid);
+  match take_space(&mut spaces, pid) {
+    Space::Empty => { return NPROGS; },
+    Space::Mapped(mut root) => {
+      let found = find_prog(&mut root, off, n);
+      put_space(&mut spaces, pid, Space::Mapped(root));
+      return found;
+    },
+  }
+}
+
+/// The program whose name is the n bytes at offset off of the user
+/// window, or NPROGS.
+fn find_prog(root: &mut PageTable, off: u64, n: u64) -> u64
+  requires pt_level(root) == 4 && off + n <= USER_SIZE
+  ensures pt_level(root) == 4
+  ensures result <= NPROGS
+{
   let mut found = NPROGS;
   let mut i = 0;
   while i < NPROGS
@@ -100,7 +130,6 @@ fn lookup(dir: &mut PageTable, pid: u64, va: u64, n: u64) -> u64
     }
     i = i + 1;
   }
-  pt_put(&mut dir, pid, root);
   return found;
 }
 
@@ -144,7 +173,7 @@ fn syscall(con: &Serial, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return SWITCH;
   }
   if n == SYS_WRITE {
-    ret(&mut k.procs, pid, do_write(con, &mut k.dir, pid, a, b));
+    ret(&mut k.procs, pid, do_write(con, &mut k.spaces, pid, a, b));
     return KEEP;
   }
   if n == SYS_READ {
@@ -157,7 +186,7 @@ fn syscall(con: &Serial, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return SWITCH;
   }
   if n == SYS_SPAWN {
-    let prog = lookup(&mut k.dir, pid, a, b);
+    let prog = lookup(&mut k.spaces, pid, a, b);
     let mut child = 0;
     if prog < NPROGS {
       child = spawn(&mut k, prog, pid);
