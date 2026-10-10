@@ -19,6 +19,8 @@ import "proc.bastio";
 import "fs.bastio";
 import "syscall.bastio";
 import "linux.bastio";
+import "lxproc.bastio";
+import "lxfd.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
@@ -78,7 +80,8 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, from: u64) -> Job
     return Job::Stop;
   }
   drain(&mut s.con, &mut s.k.q);
-  wake_readers(&mut s.k.procs, &mut s.k.q);
+  tty_cook(&mut s.con, &mut s.k);
+  wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
   let p = pick(s.k.procs, from);
   if p == 0 {
     if live_count(s.k.procs) == 0 {
@@ -242,20 +245,27 @@ fn ack(pic: &mut Pic, v: u64)
 }
 
 // The files the file system starts with, built into the kernel image.
-const NINIT: u64 = 2;
+// elfdemo is a Linux program (the elfpie test) that execve runs as a file.
+const NINIT: u64 = 3;
 
 fn init_name(i: u64) -> Str {
   if i == 0 {
     return "motd";
   }
-  return "about";
+  if i == 1 {
+    return "about";
+  }
+  return "elfdemo";
 }
 
 fn init_data(i: u64) -> Str {
   if i == 0 {
     return include_bytes("../files/motd");
   }
-  return include_bytes("../files/about");
+  if i == 1 {
+    return include_bytes("../files/about");
+  }
+  return include_bytes("../build/user/elfpie.elf");
 }
 
 fn install_files(con: &mut Uart, k: &mut Kernel)
@@ -289,7 +299,6 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut con = Uart { io: port_claim(&mut ports, COM1, 8) };
   let mut pic = Pic { master: port_claim(&mut ports, PIC1, 2), slave: port_claim(&mut ports, PIC2, 2) };
   let mut pit = Pit { io: port_claim(&mut ports, PIT, 4) };
-  let disk = disk_mount(ata_new(&mut ports));
   // Devices with memory-mapped registers claim them from the device window.
   let mut clock = hpet_init(mmio_claim(&mut win, HPET, HPET_LEN));
   uart_init(&mut con);
@@ -308,6 +317,13 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // The allocator takes the pool for as long as the kernel runs and gives
   // it back at power off.
   let mut m = mem_new(pool);
+  // The disk: virtio (DMA into pages lent from the allocator) if the machine
+  // has one, else ATA. PCI's configuration ports are claimed for it.
+  let mut pci = Pci { addr: port_claim(&mut ports, PCI_ADDR, 4), data: port_claim(&mut ports, PCI_DATA, 4) };
+  let disk = disk_mount(blk_new(&mut ports, &mut pci, &mut m));
+  if blk_is_virtio(disk.dev) {
+    puts(&mut con, "disk: virtio\r\n");
+  }
   let mut spaces = vec_new[Space]();
   let mut i = 0;
   while i < NPROC
@@ -325,7 +341,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     vec_push(&mut fpus, Fpu::None);
     q = q + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), ticks: 0, ns: 0, cpus: cpus, fs: vfs_new(disk) };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), ticks: 0, ns: 0, cpus: cpus, fs: vfs_new(disk) };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
@@ -352,19 +368,23 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     drop_fpu(&mut sys.k.mem, vec_pop(&mut sys.k.fpus));
   }
   vec_free(sys.k.fpus);
-  let ata = vfs_free(sys.k.fs, &mut sys.k.mem);
+  blk_free(&mut ports, vfs_free(sys.k.fs, &mut sys.k.mem), &mut sys.k.mem);
   puts(&mut sys.con, "BastiOS: ");
   put_num(&mut sys.con, count_free(sys.k.mem.bm));
   puts(&mut sys.con, " pages free at power off\r\n");
   free(sys.k.mem.bm);
   free(sys.k.procs);
   free(sys.k.q);
+  free(sys.k.line);
+  free(sys.k.lxfd);
+  free(sys.k.ofd);
+  free(sys.k.pipes);
   pool = sys.k.mem.pool;
   port_release(&mut ports, sys.con.io);
   port_release(&mut ports, sys.pic.master);
   port_release(&mut ports, sys.pic.slave);
   port_release(&mut ports, pit.io);
-  ata_free(&mut ports, ata);
+  pci_free(&mut ports, pci);
   mmio_release(&mut win, sys.clock.regs);
   return 0;
 }

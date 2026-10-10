@@ -61,9 +61,9 @@ fn vfs_new(disk: DiskFs) -> Vfs
 
 /// Frees everything (at power off): every in-memory file's pages go back,
 /// and the disk driver is handed back so its ports can be released.
-fn vfs_free(v: Vfs, mem: &mut Mem) -> Ata
+fn vfs_free(v: Vfs, mem: &mut Mem) -> Blk
   requires vfs_ok(v) && mem_ok(mem)
-  ensures mem_ok(mem) && ata_ok(result)
+  ensures mem_ok(mem) && blk_ok(result)
 {
   ram_free(v.ram, &mut mem);
   free(v.ftab);
@@ -234,26 +234,14 @@ fn vfs_read(v: &mut Vfs, row: u64, n: u64) -> u64
     return NO_FD;
   }
   let i = fget(v.ftab, row, FD_NODE);
-  if fget(v.ftab, row, FD_FS) == FS_DISK && i < DSLOTS {
-    let r = disk_read(&mut v.disk, i, fget(v.ftab, row, FD_OFF), &mut v.xfer, n);
-    if r == NO_DISK_FILE {
-      return NO_FD;
-    }
-    return r;
+  let fs = fget(v.ftab, row, FD_FS);
+  if fs == FS_DISK && i < DSLOTS {
+    return vfs_read_at(&mut v, NFILES + i, fget(v.ftab, row, FD_OFF), n);
   }
-  if fget(v.ftab, row, FD_FS) != FS_RAM || i >= NFILES {
+  if fs != FS_RAM || i >= NFILES {
     return NO_FD;
   }
-  let mut got = NO_FD;
-  match take_node(&mut v.ram, i) {
-    Node::Free => {},
-    Node::File(f) => {
-      let mut g = f;
-      got = file_read(&mut g, fget(v.ftab, row, FD_OFF), &mut v.xfer, n);
-      put_node(&mut v.ram, i, Node::File(g));
-    },
-  }
-  return got;
+  return vfs_read_at(&mut v, i, fget(v.ftab, row, FD_OFF), n);
 }
 
 /// Writes the first n bytes of the transfer buffer to the file open in
@@ -353,24 +341,85 @@ fn vfs_unlink(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
   return true;
 }
 
-/// The size of the file named by the first n bytes of the transfer
-/// buffer, or NO_FILE.
-fn vfs_stat(v: &mut Vfs, n: u64) -> u64
+/// The file named by the first n bytes of the transfer buffer, as a
+/// handle for vfs_read_at and vfs_size, or NO_FILE. Handles number files
+/// like vfs_dirent: 0 to NFILES - 1 in memory, then DSLOTS on the disk. A
+/// handle names the same file until that file is removed.
+fn vfs_lookup(v: &mut Vfs, n: u64) -> u64
   requires vfs_ok(v) && n <= XFER
   ensures vfs_ok(v)
+  ensures result < NFILES + DSLOTS || result == NO_FILE
 {
   if on_disk(v, n) {
     let d = disk_find(v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX);
     if d >= DSLOTS {
       return NO_FILE;
     }
-    return disk_size(v.disk, d);
+    return NFILES + d;
   }
   let i = ram_find(&mut v.ram, v.xfer, n);
   if i >= NFILES {
     return NO_FILE;
   }
-  return ram_size(&mut v.ram, i);
+  return i;
+}
+
+/// The size of file f (a vfs_lookup handle), or NO_FILE.
+fn vfs_size(v: &mut Vfs, f: u64) -> u64
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  if f < NFILES {
+    return ram_size(&mut v.ram, f);
+  }
+  if f < NFILES + DSLOTS {
+    let s = disk_size(v.disk, f - NFILES);
+    if s == NO_DISK_FILE {
+      return NO_FILE;
+    }
+    return s;
+  }
+  return NO_FILE;
+}
+
+/// Copies up to n bytes of file f (a vfs_lookup handle) from offset off
+/// into the start of the transfer buffer, without a descriptor. Returns
+/// the count, short at the end of the file, or NO_FD if f names no file.
+fn vfs_read_at(v: &mut Vfs, f: u64, off: u64, n: u64) -> u64
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+  ensures result <= n || result == NO_FD
+{
+  if f >= NFILES + DSLOTS {
+    return NO_FD;
+  }
+  if f >= NFILES {
+    let r = disk_read(&mut v.disk, f - NFILES, off, &mut v.xfer, n);
+    if r == NO_DISK_FILE {
+      return NO_FD;
+    }
+    return r;
+  }
+  let mut got = NO_FD;
+  match take_node(&mut v.ram, f) {
+    Node::Free => {},
+    Node::File(g0) => {
+      let mut g = g0;
+      got = file_read(&mut g, off, &mut v.xfer, n);
+      put_node(&mut v.ram, f, Node::File(g));
+    },
+  }
+  return got;
+}
+
+/// The size of the file named by the first n bytes of the transfer
+/// buffer, or NO_FILE.
+fn vfs_stat(v: &mut Vfs, n: u64) -> u64
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+{
+  let f = vfs_lookup(&mut v, n);
+  return vfs_size(&mut v, f);
 }
 
 /// Copies the name of directory entry i into the start of the transfer

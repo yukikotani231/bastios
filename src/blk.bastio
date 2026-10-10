@@ -1,0 +1,117 @@
+// The disk under the file system: a virtio block device when the machine
+// has one (it moves sectors by DMA), otherwise the ATA drive on the legacy
+// IDE ports (programmed I/O). Both read and write one 512-byte sector at a
+// time into a byte buffer.
+
+import "pages.bastio";
+import "ata.bastio";
+import "pci.bastio";
+import "virtio.bastio";
+
+const VIRTIO_PORTS_LO: u64 = 0x1000;  // PCI I/O BARs sit above the legacy ports
+
+enum Blk { Ata(Ata), Virtio(Virtio) }
+
+spec fn blk_ok(b: &Blk) -> bool {
+  (b is Blk::Ata ==> ata_ok(b.Ata)) && (b is Blk::Virtio ==> virtio_ok(b.Virtio))
+}
+
+/// `take_page`, also saying that every other page's entry is unchanged, so
+/// several pages can be taken in a row.
+fn take_low_page(m: &mut Mem, i: u64) -> Frame
+  requires mem_ok(m) && i < NPAGES && get(m.bm, i) == 1
+  ensures mem_ok(m) && frame_id(result) == i
+  ensures forall j: u64 :: j != i ==> get(m.bm, j) == old(get(m.bm, j))
+{
+  m.bm = set(m.bm, i, 0);
+  return pool_take(&mut m.pool, i);
+}
+
+/// Picks the disk: the first virtio block device on PCI bus 0, given the
+/// four lowest pages for its queue and request, or else the ATA drive.
+fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem) -> Blk
+  requires pci_ok(pci) && mem_ok(m)
+  requires forall k: u64 :: ATA_IO <= k && k < ATA_IO + 8 ==> port_free(ports, k)
+  requires port_free(ports, ATA_CTL)
+  requires forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 ==> port_free(ports, k)
+  ensures blk_ok(result) && mem_ok(m)
+{
+  let dev = pci_find(&mut pci, VIRTIO_VENDOR, VIRTIO_BLK);
+  if dev < 32 {
+    let base = pci_io_bar(&mut pci, dev);
+    if base >= VIRTIO_PORTS_LO && base + VIO_PORTS <= 65536
+      && get(m.bm, 0) == 1 && get(m.bm, 1) == 1 && get(m.bm, 2) == 1 && get(m.bm, 3) == 1 {
+      pci_enable(&mut pci, dev);
+      let f0 = take_low_page(&mut m, 0);
+      let f1 = take_low_page(&mut m, 1);
+      let f2 = take_low_page(&mut m, 2);
+      let f3 = take_low_page(&mut m, 3);
+      return Blk::Virtio(virtio_new(&mut ports, base, f0, f1, f2, f3));
+    }
+  }
+  return Blk::Ata(ata_new(&mut ports));
+}
+
+/// Gives the disk's ports back and, for virtio, resets the device and
+/// takes its pages back (at power off).
+fn blk_free(ports: &mut Ports, b: Blk, m: &mut Mem)
+  requires blk_ok(b) && mem_ok(m)
+  ensures mem_ok(m)
+{
+  match b {
+    Blk::Ata(a) => { ata_free(&mut ports, a); },
+    Blk::Virtio(v) => { virtio_free(&mut ports, v, &mut m); },
+  }
+}
+
+fn blk_is_virtio(b: &Blk) -> bool {
+  return b is Blk::Virtio;
+}
+
+/// The disk's size in sectors (0 if there is none).
+fn blk_sectors(b: &Blk) -> u64 {
+  match b {
+    Blk::Ata(a) => { return a.sectors; },
+    Blk::Virtio(v) => { return v.sectors; },
+  }
+}
+
+/// Reads sector `lba` into buf[0..512]; false if the disk fails or the
+/// sector is past its end.
+fn blk_read(b: &mut Blk, lba: u64, buf: &mut Bytes) -> bool
+  requires blk_ok(b) && blen(buf) >= SECTOR
+  ensures blk_ok(b) && blen(buf) == old(blen(buf))
+{
+  match b {
+    Blk::Ata(mut a) => {
+      let ok = ata_read(&mut a, lba, &mut buf);
+      b = Blk::Ata(a);
+      return ok;
+    },
+    Blk::Virtio(mut v) => {
+      let ok = virtio_read(&mut v, lba, &mut buf);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+  }
+}
+
+/// Writes buf[0..512] to sector `lba`; false if the disk fails or the
+/// sector is past its end.
+fn blk_write(b: &mut Blk, lba: u64, buf: &Bytes) -> bool
+  requires blk_ok(b) && blen(buf) >= SECTOR
+  ensures blk_ok(b)
+{
+  match b {
+    Blk::Ata(mut a) => {
+      let ok = ata_write(&mut a, lba, buf);
+      b = Blk::Ata(a);
+      return ok;
+    },
+    Blk::Virtio(mut v) => {
+      let ok = virtio_write(&mut v, lba, buf);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+  }
+}

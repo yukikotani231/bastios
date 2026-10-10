@@ -20,8 +20,13 @@ disk = os.path.join(disk_dir.name, "disk.img")
 with open(disk, "wb") as f:
     f.truncate(33 << 20)
 
-def boot(cpus, with_disk=False):
+def boot(cpus, with_disk=False, virtio=False):
     drive = ["-drive", f"file={disk},format=raw,if=ide,index=0"] if with_disk else []
+    if virtio:
+        # The same disk as a virtio block device (src/virtio.bastio): sectors
+        # move by DMA through pages the kernel lends it.
+        drive = ["-drive", f"file={disk},format=raw,if=none,id=vd",
+                 "-device", "virtio-blk-pci,drive=vd"]
     return subprocess.Popen(
         ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
@@ -117,11 +122,38 @@ steps = [
     # console; the third field is what to wait for instead of the prompt.
     ("mtest", [b"mtest: malloc heap 75", b"mtest: file line 42"], b"type a line"),
     ("typed for mtest", b"mtest: got typed for mtest"),
-    # BusyBox's shell, unmodified, reading commands from the console.
-    ("ash", b"", b""),
-    ("echo $((6 * 7)) from ash", b"42 from ash", b"42 from ash"),
-    ("for i in 1 2 3; do echo n$i; done; test -z \"\" && echo empty", [b"n1", b"n3", b"empty"], b"empty"),
+    # BusyBox's shell, unmodified, reading commands from the console. The
+    # console is a terminal (ioctl TCGETS works), so ash is interactive and
+    # prompts with "# "; the kernel echoes what is typed and handles
+    # Backspace (DEL) itself, as a Linux tty in canonical mode does.
+    ("ash", b"built-in shell (ash)", b"\n# "),
+    ("echo $((6 * 7)) from ash", b"42 from ash", b"\n# "),
+    ("for i in 1 2 3; do echo n$i; done; test -z \"\" && echo empty", [b"n1\r\nn2\r\nn3\r\nempty"], b"\n# "),
+    ("echo abX\x7fc", [b"echo abX\x08 \x08c", b"\nabc\r\n"], b"\n# "),
+    # fork, execve and wait4: a subshell, programs found on PATH as
+    # /bin/NAME (stat), with their arguments and exit status, and a
+    # nested ash whose exit status the outer one sees.
+    ("(echo in subshell; exit 4); echo sub=$?", [b"in subshell", b"sub=4"], b"\n# "),
+    ("mhello a b; echo st=$?", [b"hello from musl: mhello, argc 3, 6", b"st=3"], b"\n# "),
+    ("hello", b"hello from user mode, pid ", b"\n# "),
+    ("nothere", b"nothere: not found", b"\n# "),
+    ("ash", b"built-in shell (ash)", b"\n# "),
+    ("exit 7", b"", b"\n# "),
+    ("echo outer got $?", b"outer got 7", b"\n# "),
+    # Pipes, redirection and dup2 (built-ins and programs on both sides),
+    # the environment passed by execve, and argv/envp checked by elfpie.
+    ("echo piped | (read x; echo got=$x)", b"got=piped", b"\n# "),
+    ("mhello p | (read l; echo [$l])", b"[hello from musl: mhello, argc 2, 6]", b"\n# "),
+    ("mhello > lxout; read y < lxout; echo y=$y", b"y=hello from musl: mhello, argc 1, 6", b"\n# "),
+    ("export GREETING=hey; ash", b"built-in shell (ash)", b"\n# "),
+    ("echo env $GREETING", b"env hey", b"\n# "),
+    ("exit", b"", b"\n# "),
+    ("elfpie a b", b"elfpie: ok", b"\n# "),
+    # execve of a file: elfdemo is the elfpie program installed at boot.
+    ("/elfdemo a b", b"/elfdemo: ok", b"\n# "),
+    ("./elfdemo; echo st=$?", [b"./elfdemo: ok", b"st=0"], b"\n# "),
     ("exit 5", b"[exit 5]"),
+    ("rm lxout", b""),
     ("sh", b"BastiOS 0.2 -- type"),
     ("exit", b""),
     ("mem", b"free pages"),
@@ -164,7 +196,7 @@ else:
         qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
         wants = want if isinstance(want, list) else [want]
         ok = read_until(until, mark) and all(w in out[mark:] for w in wants)
-        print(("ok  " if ok else "FAIL"), repr(line))
+        print(("ok  " if ok else "FAIL"), repr(line)); ok or print(repr(out[mark:]))
         fails += not ok
     if out.count(b"fpucheck: xmm0 kept") == 2 and b"xmm0 changed" not in out:
         print("ok   both fpucheck processes kept xmm0")
@@ -264,30 +296,55 @@ else:
 print("---- serial transcript ----")
 print(out.decode(errors="replace").replace("\r", ""))
 
-# Boot again on the same disk: the file written above is still there.
-qemu = boot(1, with_disk=True)
-out = b""
-deadline = time.time() + timeout
-again = [
+# Boot again on the same disk, now as a virtio device: the file written
+# through ATA is still there, and virtio can read, extend and keep it. At
+# power off the four pages the device was lent are back in the pool.
+def session(name, want_banner, steps, halt=False):
+    global qemu, out, deadline, fails
+    out = b""
+    deadline = time.time() + timeout
+    if not read_until(b"bastios> "):
+        print(f"FAIL: no prompt after the {name} boot"); fails += 1
+    else:
+        if want_banner is not None:
+            ok = (b"disk: virtio" in out) == want_banner
+            print(("ok  " if ok else "FAIL"), f"({name} boot) disk driver: {'virtio' if want_banner else 'ATA'}")
+            fails += not ok
+        for line, want in steps:
+            mark = len(out)
+            qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+            ok = read_until(b"bastios> ", mark) and want in out[mark:]
+            print(("ok  " if ok else "FAIL"), f"({name} boot)", repr(line))
+            fails += not ok
+        if halt:
+            qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
+            read_until(b"pages free at power off")
+            booted = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
+            off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+            ok = booted and off and booted.group(1) == off.group(1)
+            print(("ok  " if ok else "FAIL"), f"({name} boot) every page back at power off")
+            fails += not ok
+    qemu.kill(); qemu.wait()
+    print(f"---- {name} boot transcript ----")
+    print(out.decode(errors="replace").replace("\r", ""))
+
+qemu = boot(1, virtio=True)
+session("virtio", True, [
     ("ls", b"      18 disk/note"),
     ("cat disk/note", b"kept across boots\r\n"),
     ("echo appended >> disk/note", b""),
     ("cat disk/note", b"kept across boots\r\nappended\r\n"),
+    ("fstest", b"fstest: disk ok"),
+    ("rm disk/big", b""),
+], halt=True)
+
+# And back on ATA: what virtio wrote is on the disk.
+qemu = boot(1, with_disk=True)
+session("third", False, [
+    ("cat disk/note", b"kept across boots\r\nappended\r\n"),
     ("rm disk/note", b""),
     ("cat disk/note", b"no such file: disk/note"),
-]
-if not read_until(b"bastios> "):
-    print("FAIL: no prompt after the second boot"); fails += 1
-else:
-    for line, want in again:
-        mark = len(out)
-        qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
-        ok = read_until(b"bastios> ", mark) and want in out[mark:]
-        print(("ok  " if ok else "FAIL"), "(second boot)", repr(line))
-        fails += not ok
-qemu.kill(); qemu.wait()
-print("---- second boot transcript ----")
-print(out.decode(errors="replace").replace("\r", ""))
+])
 print(f"---- {fails} failed ----")
 sys.exit(1 if fails else 0)
 PY

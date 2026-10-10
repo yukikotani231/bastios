@@ -17,7 +17,7 @@
 // first fills the gap with zeros, so a file never shows stale disk
 // contents.
 
-import "ata.bastio";
+import "blk.bastio";
 
 const DSLOTS: u64 = 32;
 const SLOT_SECTORS: u64 = 2048;
@@ -31,14 +31,14 @@ const DISK_MAGIC: u64 = 0x314B534944545342;   // "BSTDISK1", little-endian
 const NO_DISK_FILE: u64 = 18446744073709551615;
 
 struct DiskFs {
-  ata: Ata,
+  dev: Blk,
   dir: Bytes,           // the directory, DIR_BYTES
   sec: Bytes,           // a sector buffer
   slots: u64,           // slots that fit on the disk; 0 without a disk
 }
 
 spec fn disk_ok(d: &DiskFs) -> bool {
-  ata_ok(d.ata) && blen(d.dir) == DIR_BYTES && blen(d.sec) == SECTOR && d.slots <= DSLOTS
+  blk_ok(d.dev) && blen(d.dir) == DIR_BYTES && blen(d.sec) == SECTOR && d.slots <= DSLOTS
 }
 
 // ---------------------------------------------------------------- bytes
@@ -84,21 +84,22 @@ fn dir_flush(d: &mut DiskFs, s: u64) -> bool
     bset(&mut d.sec, j, bget(d.dir, s * SECTOR + j));
     j = j + 1;
   }
-  return ata_write(&mut d.ata, 1 + s, d.sec);
+  return blk_write(&mut d.dev, 1 + s, d.sec);
 }
 
 /// Mounts the disk, formatting it if it has no file system yet. Without a
 /// disk (or one too small for a slot) the file system has no slots and
 /// every operation on it fails.
-fn disk_mount(ata: Ata) -> DiskFs
-  requires ata_ok(ata)
+fn disk_mount(dev: Blk) -> DiskFs
+  requires blk_ok(dev)
   ensures disk_ok(result)
 {
-  let mut d = DiskFs { ata: ata, dir: balloc(DIR_BYTES), sec: balloc(SECTOR), slots: 0 };
-  if d.ata.sectors < DATA0 + SLOT_SECTORS || !ata_read(&mut d.ata, 0, &mut d.sec) {
+  let mut d = DiskFs { dev: dev, dir: balloc(DIR_BYTES), sec: balloc(SECTOR), slots: 0 };
+  let size = blk_sectors(d.dev);
+  if size < DATA0 + SLOT_SECTORS || !blk_read(&mut d.dev, 0, &mut d.sec) {
     return d;
   }
-  let mut n = (d.ata.sectors - DATA0) / SLOT_SECTORS;
+  let mut n = (size - DATA0) / SLOT_SECTORS;
   if n > DSLOTS {
     n = DSLOTS;
   }
@@ -107,7 +108,7 @@ fn disk_mount(ata: Ata) -> DiskFs
     while s < DIR_SECTORS
       invariant s <= DIR_SECTORS && disk_ok(d)
     {
-      if !ata_read(&mut d.ata, 1 + s, &mut d.sec) {
+      if !blk_read(&mut d.dev, 1 + s, &mut d.sec) {
         return d;
       }
       let mut j = 0;
@@ -138,7 +139,7 @@ fn disk_mount(ata: Ata) -> DiskFs
       j = j + 1;
     }
     put_u64(&mut d.sec, 0, DISK_MAGIC);
-    if !ata_write(&mut d.ata, 0, d.sec) {
+    if !blk_write(&mut d.dev, 0, d.sec) {
       return d;
     }
   }
@@ -148,13 +149,13 @@ fn disk_mount(ata: Ata) -> DiskFs
 
 /// Unmounts the disk and hands back its driver (at power off). Every
 /// change was already written through.
-fn disk_unmount(d: DiskFs) -> Ata
+fn disk_unmount(d: DiskFs) -> Blk
   requires disk_ok(d)
-  ensures ata_ok(result)
+  ensures blk_ok(result)
 {
   bfree(d.dir);
   bfree(d.sec);
-  return d.ata;
+  return d.dev;
 }
 
 // ---------------------------------------------------------------- the directory
@@ -331,7 +332,7 @@ fn disk_read(d: &mut DiskFs, i: u64, off: u64, buf: &mut Bytes, n: u64) -> u64
     if m > want - k {
       m = want - k;
     }
-    if !ata_read(&mut d.ata, DATA0 + i * SLOT_SECTORS + a / SECTOR, &mut d.sec) {
+    if !blk_read(&mut d.dev, DATA0 + i * SLOT_SECTORS + a / SECTOR, &mut d.sec) {
       return NO_DISK_FILE;
     }
     let mut j = 0;
@@ -355,7 +356,7 @@ fn put_sector(d: &mut DiskFs, i: u64, a: u64, buf: &Bytes, at: u64, m: u64, zero
 {
   let lba = DATA0 + i * SLOT_SECTORS + a / SECTOR;
   let o = a % SECTOR;
-  if m < SECTOR && !ata_read(&mut d.ata, lba, &mut d.sec) {
+  if m < SECTOR && !blk_read(&mut d.dev, lba, &mut d.sec) {
     return false;
   }
   let mut j = 0;
@@ -369,7 +370,7 @@ fn put_sector(d: &mut DiskFs, i: u64, a: u64, buf: &Bytes, at: u64, m: u64, zero
     }
     j = j + 1;
   }
-  return ata_write(&mut d.ata, lba, d.sec);
+  return blk_write(&mut d.dev, lba, d.sec);
 }
 
 /// Writes the first n bytes of buf to the file in slot i at `off`, after

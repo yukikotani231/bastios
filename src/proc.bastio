@@ -41,8 +41,9 @@ const READING: u64 = 2;
 const WAITING: u64 = 3;
 const ZOMBIE: u64 = 4;
 const LXREADING: u64 = 5;            // blocked in a Linux read of the console
-const RUNNING: u64 = 6;              // on a processor: its space and FPU page are out
-const KILLED: u64 = 7;               // RUNNING, and killed: ends when it comes back
+const LXWAITING: u64 = 6;            // blocked in a Linux wait4 for any child
+const RUNNING: u64 = 7;              // on a processor: its space and FPU page are out
+const KILLED: u64 = 8;               // RUNNING, and killed: ends when it comes back
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -210,6 +211,16 @@ spec fn qok(q: &Buf) -> bool {
   len(q) == INQ_LEN && get(q, 0) < 256 && get(q, 1) <= 256
 }
 
+// The terminal line for Linux programs: word 0 is how many bytes it holds
+// (at most LINE_MAX), word 1 is 1 once it is finished (Enter or Ctrl-D),
+// and the bytes follow from word 2.
+const LINE_MAX: u64 = 255;
+const LINE_LEN: u64 = 257;
+
+spec fn lineok(l: &Buf) -> bool {
+  len(l) == LINE_LEN && get(l, 0) <= LINE_MAX && get(l, 1) <= 1
+}
+
 fn q_push(q: &mut Buf, b: u64)
   requires qok(q)
   ensures qok(q)
@@ -251,9 +262,10 @@ fn drain(con: &mut Uart, q: &mut Buf)
   }
 }
 
-/// Hands queued bytes to processes blocked in READ.
-fn wake_readers(procs: &mut Buf, q: &mut Buf)
-  requires len(procs) == PTAB_LEN && qok(q)
+/// Hands queued bytes to processes blocked in READ, and wakes processes
+/// blocked in a Linux read once a whole line is typed.
+fn wake_readers(procs: &mut Buf, q: &mut Buf, line: &Buf)
+  requires len(procs) == PTAB_LEN && qok(q) && lineok(line)
   ensures len(procs) == PTAB_LEN && qok(q)
 {
   let mut p = 1;
@@ -264,8 +276,8 @@ fn wake_readers(procs: &mut Buf, q: &mut Buf)
       pset(&mut procs, p, F_REGS + R_RAX, q_pop(&mut q));
       pset(&mut procs, p, F_STATE, READY);
     }
-    // A Linux read restarts its system call, which takes the bytes itself.
-    if state(procs, p) == LXREADING && get(q, 1) > 0 {
+    // A Linux read restarts its system call, which takes the line itself.
+    if state(procs, p) == LXREADING && get(line, 1) == 1 {
       pset(&mut procs, p, F_STATE, READY);
     }
     p = p + 1;
@@ -276,12 +288,65 @@ fn wake_readers(procs: &mut Buf, q: &mut Buf)
 
 // Everything the kernel owns, in one place. `mmu` and `cpu` stay with
 // `main`, which lends them where they are needed.
+// Linux file descriptors (src/lxfd.bastio).
+const LXNFD: u64 = 16;
+const LXFD_LEN: u64 = 256;            // NPROC * LXNFD
+const FD_CONSOLE: u64 = 1;
+const FD_OFD: u64 = 2;
+const FD_CLOEXEC: u64 = 1024;
+
+const OFD_N: u64 = 64;
+const OFD_STRIDE: u64 = 4;
+const OFD_LEN: u64 = 256;             // OFD_N * OFD_STRIDE
+const OF_FREE: u64 = 0;
+const OF_FILE: u64 = 1;
+const OF_PIPE_R: u64 = 2;
+const OF_PIPE_W: u64 = 3;
+
+const NPIPES: u64 = 8;
+const PIPE_CAP: u64 = 1024;
+const PIPE_STRIDE: u64 = 1028;        // 4 + PIPE_CAP
+const PIPES_LEN: u64 = 8224;          // NPIPES * PIPE_STRIDE
+
+const LX_PIPE: u64 = 22;
+const LX_POLL: u64 = 7;
+const POLL_MAX: u64 = 64;
+const LX_DUP: u64 = 32;
+const LX_DUP2: u64 = 33;
+const LX_FCNTL: u64 = 72;
+const LX_PIPE2: u64 = 293;
+const LX_DUP3: u64 = 292;
+
+const F_DUPFD: u64 = 0;
+const F_GETFD: u64 = 1;
+const F_SETFD: u64 = 2;
+const F_GETFL: u64 = 3;
+const F_SETFL: u64 = 4;
+const F_DUPFD_CLOEXEC: u64 = 1030;
+const LO_CLOEXEC: u64 = 0x80000;
+
+const EMFILE: u64 = 18446744073709551592;   // 2^64 - 24
+const ENFILE: u64 = 18446744073709551593;   // 2^64 - 23
+const ESPIPE: u64 = 18446744073709551587;   // 2^64 - 29
+const EPIPE: u64 = 18446744073709551584;    // 2^64 - 32
+
+// What a descriptor refers to, once looked up.
+const K_BAD: u64 = 0;
+const K_CONSOLE: u64 = 1;
+const K_FILE: u64 = 2;                // x: the native row
+const K_PIPE_R: u64 = 3;              // x: the pipe
+const K_PIPE_W: u64 = 4;
+
 struct Kernel {
   mem: Mem,             // the page allocator
   spaces: Vec[Space],   // element `pid` is that process's address space
   fpus: Vec[Fpu],       // element `pid` is that process's FPU state
   procs: Buf,           // the process table
   q: Buf,               // console input waiting for a READ
+  line: Buf,            // the line a Linux program is typing (see tty_cook)
+  lxfd: Buf,            // Linux descriptors (src/lxfd.bastio)
+  ofd: Buf,             // open file descriptions they share
+  pipes: Buf,           // pipe buffers
   ticks: u64,           // timer ticks since boot
   ns: u64,              // the HPET clock at the last system call, in nanoseconds
   cpus: u64,            // processors running, the bootstrap one included
@@ -289,7 +354,7 @@ struct Kernel {
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && vfs_ok(k.fs)
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs)
 }
 
 // ---------------------------------------------------------------- programs
@@ -339,7 +404,10 @@ fn prog_name(i: u64) -> Str {
   if i == 13 {
     return "ash";
   }
-  return "fault";
+  if i == 14 {
+    return "fault";
+  }
+  return "(file)";                    // a program loaded from a file
 }
 
 fn prog_image(i: u64) -> Str {
@@ -401,48 +469,18 @@ fn read_u64(s: Str, at: u64) -> u64
 // ---------------------------------------------------------------- life cycle
 
 const MAGIC: u64 = 0x0A52455355545342;   // "BSTUSER\n"
+const ARGV0_MAX: u64 = 63;              // the most bytes of a program name in argv
 
-/// Starts program `prog` as a child of `parent` (0 for none). Returns the
-/// new process id, or 0 if the image is malformed or there is no room.
+/// Starts program `prog` as a child of `parent` (0 for none), with just
+/// its name as argv. Returns the new process id, or 0 if the image is
+/// malformed or there is no room.
 fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   requires kok(k)
   ensures kok(k)
   ensures result < NPROC
 {
-  // An image is a Linux ELF executable or a BastiOS image; check its
-  // headers before taking anything.
-  let img = prog_image(prog);
-  let elf = is_elf(img);
-  let e = elf_parse(img);
-  let mut size = 0;
-  let mut entry = e.entry;
-  let mut rsp = USER_BASE + ELF_SP;
-  if elf {
-    if !e.ok {
-      return 0;
-    }
-  } else {
-    // The BastiOS header: magic, bytes of memory the image needs, entry point.
-    if slen(img) < 24 || slen(img) > IMAGE_MAX {
-      return 0;
-    }
-    size = read_u64(img, 8);
-    entry = read_u64(img, 16);
-    rsp = USER_BASE + USER_SIZE;
-    if read_u64(img, 0) != MAGIC || size < slen(img) || size > IMAGE_MAX {
-      return 0;
-    }
-    if entry < USER_BASE + 24 || entry >= USER_BASE + slen(img) {
-      return 0;
-    }
-  }
-  let mut pid = 1;
-  while pid < NPROC && state(k.procs, pid) != FREE
-    invariant 1 <= pid && pid <= NPROC
-  {
-    pid = pid + 1;
-  }
-  if pid >= NPROC {
+  let pid = free_pid(k.procs);
+  if pid == 0 {
     return 0;
   }
   // A FREE process has no address space; check it rather than assume it.
@@ -459,7 +497,19 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   }
   let mut fpu = take_page(&mut k.mem, fp);
   fpu_init(&mut fpu);
-  let sp = build_space(&mut k.mem, img, elf, e, size, prog_name(prog), k.ticks % 0x100000000 * NPROC + pid);
+  let mut f = 0;
+  while f < STRIDE
+    invariant f <= STRIDE && len(k.procs) == PTAB_LEN
+  {
+    pset(&mut k.procs, pid, f, 0);
+    f = f + 1;
+  }
+  lx_fd_reset(&mut k.lxfd, pid);
+  let mut args = balloc(ARGV0_MAX + 1);
+  let alen = name_arg(&mut args, prog_name(prog));
+  let src = Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
+  let sp = load_image(&mut k.mem, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, pid, src, args, alen, alen);
+  bfree(args);
   let ok = sp is Space::Mapped;
   put_space(&mut k.spaces, pid, sp);
   if !ok {
@@ -468,37 +518,123 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   }
   drop_fpu(&mut k.mem, take_fpu(&mut k.fpus, pid));
   put_fpu(&mut k.fpus, pid, Fpu::State(fpu));
-  let mut f = 0;
-  while f < STRIDE
-    invariant f <= STRIDE && len(k.procs) == PTAB_LEN
-  {
-    pset(&mut k.procs, pid, f, 0);
-    f = f + 1;
-  }
   pset(&mut k.procs, pid, F_PARENT, parent);
-  pset(&mut k.procs, pid, F_PROG, prog);
-  pset(&mut k.procs, pid, F_REGS + R_RIP, entry);
-  pset(&mut k.procs, pid, F_REGS + R_RSP, rsp);
-  pset(&mut k.procs, pid, F_REGS + R_RFLAGS, 0x202);
-  if elf {
-    // The heap starts on the page after the image; mmap takes pages
-    // downward from the stack. Both stay in the window below the stack.
-    pset(&mut k.procs, pid, F_BRK, (e.end + 4095) / 4096 * 4096);
-    pset(&mut k.procs, pid, F_MMAP, STACK_FIRST * 4096);
-  }
   pset(&mut k.procs, pid, F_STATE, READY);
   return pid;
 }
 
+/// A FREE process id, or 0 if there is none.
+fn free_pid(procs: &Buf) -> u64
+  requires len(procs) == PTAB_LEN
+  ensures result < NPROC
+{
+  let mut pid = 1;
+  while pid < NPROC && state(procs, pid) != FREE
+    invariant 1 <= pid && pid <= NPROC
+  {
+    pid = pid + 1;
+  }
+  if pid >= NPROC {
+    return 0;
+  }
+  return pid;
+}
+
+/// Writes `name` (at most ARGV0_MAX bytes of it) and a NUL into `args`:
+/// an argv of one. Returns the bytes written.
+fn name_arg(args: &mut Bytes, name: Str) -> u64
+  requires blen(args) == ARGV0_MAX + 1
+  ensures blen(args) == ARGV0_MAX + 1 && result <= ARGV0_MAX + 1
+{
+  let n = smaller(slen(name), ARGV0_MAX);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= ARGV0_MAX && blen(args) == ARGV0_MAX + 1
+  {
+    bset(&mut args, i, sget(name, i));
+    i = i + 1;
+  }
+  bset(&mut args, n, 0);
+  return n + 1;
+}
+
+/// Builds the address space for program `prog`, with the argument strings
+/// in the first `alen` bytes of `args` and the environment strings from
+/// there to `total` (each ending in a NUL), and sets
+/// process `pid` up to start it: program, registers, program break.
+/// Returns `Space::Empty`, changing nothing, if the image is malformed or
+/// memory runs out. The caller installs the space.
+fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, pid: u64, src: Src, args: &Bytes, alen: u64, total: u64) -> Space
+  requires mem_ok(m) && vfs_ok(v) && len(procs) == PTAB_LEN && pid < NPROC && alen <= total && total <= ARGS_MAX && total <= blen(args)
+  ensures mem_ok(m) && vfs_ok(v) && len(procs) == PTAB_LEN
+  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
+{
+  // A built-in image is a Linux ELF executable or a BastiOS image; a file
+  // must be ELF. Check the headers before taking anything.
+  let img = prog_image(src.prog);
+  let elf = src.file || is_elf(img);
+  let e = elf_parse(&mut v, src);
+  let mut size = 0;
+  let mut entry = e.entry;
+  let mut rsp = USER_BASE + ELF_SP;
+  if elf {
+    if !e.ok {
+      return Space::Empty;
+    }
+  } else {
+    // The BastiOS header: magic, bytes of memory the image needs, entry point.
+    if slen(img) < 24 || slen(img) > IMAGE_MAX {
+      return Space::Empty;
+    }
+    size = read_u64(img, 8);
+    entry = read_u64(img, 16);
+    rsp = USER_BASE + USER_SIZE;
+    if read_u64(img, 0) != MAGIC || size < slen(img) || size > IMAGE_MAX {
+      return Space::Empty;
+    }
+    if entry < USER_BASE + 24 || entry >= USER_BASE + slen(img) {
+      return Space::Empty;
+    }
+  }
+  let sp = build_space(&mut m, &mut v, src, img, elf, e, size, args, alen, total, seed);
+  if sp is Space::Empty {
+    return sp;
+  }
+  let mut r = 0;
+  while r < 21
+    invariant r <= 21 && len(procs) == PTAB_LEN
+  {
+    pset(&mut procs, pid, F_REGS + r, 0);
+    r = r + 1;
+  }
+  pset(&mut procs, pid, F_PROG, NPROGS);       // a file: no name in the table
+  if !src.file {
+    pset(&mut procs, pid, F_PROG, src.prog);
+  }
+  pset(&mut procs, pid, F_REGS + R_RIP, entry);
+  pset(&mut procs, pid, F_REGS + R_RSP, rsp);
+  pset(&mut procs, pid, F_REGS + R_RFLAGS, 0x202);
+  pset(&mut procs, pid, F_BRK, 0);
+  pset(&mut procs, pid, F_MMAP, 0);
+  if elf {
+    // The heap starts on the page after the image; mmap takes pages
+    // downward from the stack. Both stay in the window below the stack.
+    pset(&mut procs, pid, F_BRK, (e.end + 4095) / 4096 * 4096);
+    pset(&mut procs, pid, F_MMAP, STACK_FIRST * 4096);
+  }
+  return sp;
+}
+
 /// The address space for a checked image: ELF, or a BastiOS image needing
 /// `size` bytes of memory.
-fn build_space(m: &mut Mem, img: Str, elf: bool, e: Elf, size: u64, name: Str, seed: u64) -> Space
-  requires mem_ok(m) && (elf ==> (e.ok && elf_fits(img, e))) && (!elf ==> size <= IMAGE_MAX)
-  ensures mem_ok(m)
+fn build_space(m: &mut Mem, v: &mut Vfs, src: Src, img: Str, elf: bool, e: Elf, size: u64, args: &Bytes, alen: u64, total: u64, seed: u64) -> Space
+  requires mem_ok(m) && vfs_ok(v) && (elf ==> (e.ok && elf_fits(src.size, e))) && (!elf ==> size <= IMAGE_MAX)
+  requires alen <= total && total <= ARGS_MAX && total <= blen(args)
+  ensures mem_ok(m) && vfs_ok(v)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
   if elf {
-    return elf_space(&mut m, img, e, name, seed);
+    return elf_space(&mut m, &mut v, src, e, args, alen, total, seed);
   }
   return new_space(&mut m, img, size);
 }
@@ -515,7 +651,8 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
     Space::Mapped(t) => { free_space(&mut k.mem, mmu, t); },
   }
   drop_fpu(&mut k.mem, take_fpu(&mut k.fpus, pid));
-  vfs_close_all(&mut k.fs, pid * NFD);
+  lx_fd_close_all(&mut k, pid, false);
+  close_unshared(&mut k, pid);
   pset(&mut k.procs, pid, F_STATE, ZOMBIE);
   pset(&mut k.procs, pid, F_CODE, code);
   let mut c = 1;
@@ -537,6 +674,9 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
     pset(&mut k.procs, par, F_REGS + R_RAX, code);
     pset(&mut k.procs, par, F_STATE, READY);
     pset(&mut k.procs, pid, F_STATE, FREE);
+  } else if state(k.procs, par) == LXWAITING {
+    // wait4 restarts its system call, which collects the zombie itself.
+    pset(&mut k.procs, par, F_STATE, READY);
   } else if state(k.procs, par) == FREE || state(k.procs, par) == ZOMBIE {
     pset(&mut k.procs, pid, F_STATE, FREE);
   }
@@ -549,7 +689,7 @@ fn put_state(con: &mut Uart, s: u64)
     puts(&mut con, "ready  ");
   } else if s == READING || s == LXREADING {
     puts(&mut con, "reading");
-  } else if s == WAITING {
+  } else if s == WAITING || s == LXWAITING {
     puts(&mut con, "waiting");
   } else if s == RUNNING || s == KILLED {
     puts(&mut con, "running");

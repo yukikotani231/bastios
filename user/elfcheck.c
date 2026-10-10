@@ -37,10 +37,19 @@ u64 elf_main(u64 *sp) {
     bss[sizeof bss - 1] = 1;                 /* .bss is writable */
     u64 argc = sp[0];
     char **argv = (char **)(sp + 1);
-    if (argc != 1 || !argv[0] || argv[1]) bad |= 8;
+    if (argc < 1 || argc > 32 || argv[argc]) bad |= 8;
+    for (u64 i = 0; i < argc && i < 32; i++)
+        if (!argv[i]) bad |= 8;
+    /* The environment: empty when started from the BastiOS shell, NAME=VALUE
+       strings when started by execve. */
     char **envp = argv + argc + 1;
-    if (envp[0]) bad |= 16;
-    u64 *aux = (u64 *)(envp + 1);
+    u64 envc = 0;
+    for (; envp[envc]; envc++) {
+        const char *e = envp[envc];
+        while (*e && *e != '=') e++;
+        if (*e != '=' || envc >= 16) { bad |= 16; break; }
+    }
+    u64 *aux = (u64 *)(envp + envc + 1);
     u64 seen = 0, phdr = 0, phnum = 0, phent = 0;
     for (; aux[0]; aux += 2) {
         u64 k = aux[0], v = aux[1];
