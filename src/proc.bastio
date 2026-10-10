@@ -429,7 +429,7 @@ spec fn kok(k: &Kernel) -> bool {
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 26;
+const NPROGS: u64 = 27;
 const LDSO_PROG: u64 = 25;            // musl's dynamic linker, the interpreter of musl programs
 
 fn prog_name(i: u64) -> Str {
@@ -511,6 +511,9 @@ fn prog_name(i: u64) -> Str {
   if i == 25 {
     return "ld-musl-x86_64.so.1";
   }
+  if i == 26 {
+    return "diskbench";
+  }
   return "(file)";                    // a program loaded from a file
 }
 
@@ -589,6 +592,9 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 25 {
     return include_bytes("../build/user/ld-musl.so");
+  }
+  if i == 26 {
+    return include_bytes("../build/user/diskbench.bin");
   }
   return include_bytes("../build/user/fault.bin");
 }

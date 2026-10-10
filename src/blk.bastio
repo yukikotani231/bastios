@@ -1,8 +1,9 @@
 // The disk under the file system: an NVMe drive when the machine has one,
 // else a virtio block device, else a SATA disk on an AHCI controller (all
 // three move sectors by DMA), otherwise the ATA drive on the legacy IDE
-// ports (programmed I/O). All of them read and write one 512-byte sector
-// at a time into a byte buffer.
+// ports (programmed I/O). All of them read and write one 512-byte sector,
+// or one 4 KiB block of eight sectors with a single command, into a byte
+// buffer.
 
 import "pages.bastio";
 import "ata.bastio";
@@ -14,6 +15,7 @@ import "ahci.bastio";
 const VIRTIO_PORTS_LO: u64 = 0x1000;  // PCI I/O BARs sit above the legacy ports
 const NVME_AT: u64 = 24;              // the NVMe drive's five pages: 24 .. 28
 const AHCI_AT: u64 = 29;              // the AHCI controller's two pages: 29, 30
+const VIRTIO_DATA_AT: u64 = 31;       // virtio's block data page (its others are 0 .. 3)
 
 enum Blk { Ata(Ata), Virtio(Virtio), Nvme(Nvme), Ahci(Ahci) }
 enum Drive { None, Nvme(Nvme), Ahci(Ahci) }
@@ -125,7 +127,7 @@ fn ahci_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64) 
 
 /// Picks the disk: an NVMe drive (see `nvme_find`), else the first virtio
 /// block device on PCI, given the four lowest pages for its queue and
-/// request, else a SATA disk on AHCI (see `ahci_find`), or else the ATA
+/// request and page 31 for block data, else a SATA disk on AHCI (see `ahci_find`), or else the ATA
 /// drive.
 fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64) -> Blk
   requires pci_ok(pci) && mem_ok(m)
@@ -147,13 +149,15 @@ fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, l
   if dev < PCI_NONE {
     let base = pci_io_bar(&mut pci, dev);
     if base >= VIRTIO_PORTS_LO && base + VIO_PORTS <= 65536
-      && get(m.bm, 0) == 1 && get(m.bm, 1) == 1 && get(m.bm, 2) == 1 && get(m.bm, 3) == 1 {
+      && get(m.bm, 0) == 1 && get(m.bm, 1) == 1 && get(m.bm, 2) == 1 && get(m.bm, 3) == 1
+      && get(m.bm, VIRTIO_DATA_AT) == 1 {
       pci_enable(&mut pci, dev);
       let f0 = take_low_page(&mut m, 0);
       let f1 = take_low_page(&mut m, 1);
       let f2 = take_low_page(&mut m, 2);
       let f3 = take_low_page(&mut m, 3);
-      return Blk::Virtio(virtio_new(&mut ports, base, f0, f1, f2, f3));
+      let f4 = take_low_page(&mut m, VIRTIO_DATA_AT);
+      return Blk::Virtio(virtio_new(&mut ports, base, f0, f1, f2, f3, f4));
     }
   }
   let sd = ahci_find(&mut pci, &mut m, &mut win, lo, hi);
@@ -307,6 +311,68 @@ fn blk_write(b: &mut Blk, lba: u64, buf: &Bytes) -> bool
     },
     Blk::Ahci(mut h) => {
       let ok = ahci_write(&mut h, lba, buf);
+      b = Blk::Ahci(h);
+      return ok;
+    },
+  }
+}
+
+/// Reads the 4 KiB block of eight sectors from `lba` (a multiple of 8) into
+/// out[at .. at + 4096] with one command; false if the disk fails or the
+/// block is not whole on the disk.
+fn blk_read_block(b: &mut Blk, lba: u64, out: &mut Bytes, at: u64) -> bool
+  requires blk_ok(b) && at + 4096 <= blen(out)
+  ensures blk_ok(b) && blen(out) == old(blen(out))
+{
+  match b {
+    Blk::Ata(mut a) => {
+      let ok = ata_read_block(&mut a, lba, &mut out, at);
+      b = Blk::Ata(a);
+      return ok;
+    },
+    Blk::Virtio(mut v) => {
+      let ok = virtio_read_block(&mut v, lba, &mut out, at);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+    Blk::Nvme(mut n) => {
+      let ok = nvme_read_block(&mut n, lba, &mut out, at);
+      b = Blk::Nvme(n);
+      return ok;
+    },
+    Blk::Ahci(mut h) => {
+      let ok = ahci_read_block(&mut h, lba, &mut out, at);
+      b = Blk::Ahci(h);
+      return ok;
+    },
+  }
+}
+
+/// Writes src[at .. at + 4096] to the eight sectors from `lba` (a multiple
+/// of 8) with one command, and flushes the drive's cache once; false if the
+/// disk fails or the block is not whole on the disk.
+fn blk_write_block(b: &mut Blk, lba: u64, src: &Bytes, at: u64) -> bool
+  requires blk_ok(b) && at + 4096 <= blen(src)
+  ensures blk_ok(b)
+{
+  match b {
+    Blk::Ata(mut a) => {
+      let ok = ata_write_block(&mut a, lba, src, at);
+      b = Blk::Ata(a);
+      return ok;
+    },
+    Blk::Virtio(mut v) => {
+      let ok = virtio_write_block(&mut v, lba, src, at);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+    Blk::Nvme(mut n) => {
+      let ok = nvme_write_block(&mut n, lba, src, at);
+      b = Blk::Nvme(n);
+      return ok;
+    },
+    Blk::Ahci(mut h) => {
+      let ok = ahci_write_block(&mut h, lba, src, at);
       b = Blk::Ahci(h);
       return ok;
     },

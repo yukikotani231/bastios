@@ -176,7 +176,8 @@ fn sec_out(dev: &mut Blk, sec: &mut Bytes, lba: u64, src: &Bytes, at: u64) -> bo
   return blk_write(&mut dev, lba, sec);
 }
 
-/// Reads block b into out, or zeros for b == 0 (a hole).
+/// Reads block b into out, or zeros for b == 0 (a hole), with one disk
+/// command.
 fn block_in(dev: &mut Blk, sec: &mut Bytes, b: u64, out: &mut Bytes) -> bool
   requires blk_ok(dev) && blen(sec) == SECTOR && blen(out) == BLOCK && b < MAX_BLOCKS
   ensures blk_ok(dev) && blen(sec) == SECTOR && blen(out) == BLOCK
@@ -185,33 +186,16 @@ fn block_in(dev: &mut Blk, sec: &mut Bytes, b: u64, out: &mut Bytes) -> bool
     zero(&mut out, 0, BLOCK);
     return true;
   }
-  let mut s = 0;
-  while s < BSECT
-    invariant s <= BSECT && blk_ok(dev) && blen(sec) == SECTOR && blen(out) == BLOCK
-  {
-    if !sec_in(&mut dev, &mut sec, b * BSECT + s, &mut out, s * SECTOR) {
-      return false;
-    }
-    s = s + 1;
-  }
-  return true;
+  return blk_read_block(&mut dev, b * BSECT, &mut out, 0);
 }
 
-/// Writes src (BLOCK bytes) to block b.
+/// Writes src (BLOCK bytes) to block b with one disk command, and flushes
+/// the drive's cache, so it is on the disk before any later write.
 fn block_out(dev: &mut Blk, sec: &mut Bytes, b: u64, src: &Bytes) -> bool
   requires blk_ok(dev) && blen(sec) == SECTOR && blen(src) == BLOCK && b < MAX_BLOCKS
   ensures blk_ok(dev) && blen(sec) == SECTOR
 {
-  let mut s = 0;
-  while s < BSECT
-    invariant s <= BSECT && blk_ok(dev) && blen(sec) == SECTOR
-  {
-    if !sec_out(&mut dev, &mut sec, b * BSECT + s, src, s * SECTOR) {
-      return false;
-    }
-    s = s + 1;
-  }
-  return true;
+  return blk_write_block(&mut dev, b * BSECT, src, 0);
 }
 
 /// The block number at m[at..at + 8], or 0 for a hole or a number that is
@@ -894,28 +878,22 @@ fn disk_read(d: &mut DiskFs, i: u64, off: u64, buf: &mut Bytes, n: u64) -> u64
     }
     if p == 0 {
       zero(&mut buf, k, k + m);
+    } else if m == BLOCK {
+      // A whole block goes straight into buf.
+      if !blk_read_block(&mut d.dev, p * BSECT, &mut buf, k) {
+        return NO_DISK_FILE;
+      }
     } else {
-      let mut j = 0;
-      while j < m
-        invariant j <= m && blen(buf) == l && disk_ok(d)
+      // Part of one: the whole block into d.data, then the part wanted.
+      if !block_in(&mut d.dev, &mut d.sec, p, &mut d.data) {
+        return NO_DISK_FILE;
+      }
+      let mut t = 0;
+      while t < m
+        invariant t <= m && blen(buf) == l && disk_ok(d)
       {
-        let q = o + j;
-        let so = q % SECTOR;
-        let mut c = SECTOR - so;
-        if c > m - j {
-          c = m - j;
-        }
-        if !blk_read(&mut d.dev, p * BSECT + q / SECTOR, &mut d.sec) {
-          return NO_DISK_FILE;
-        }
-        let mut t = 0;
-        while t < c
-          invariant t <= c && blen(buf) == l && disk_ok(d)
-        {
-          bset(&mut buf, k + j + t, bget(d.sec, so + t));
-          t = t + 1;
-        }
-        j = j + c;
+        bset(&mut buf, k + t, bget(d.data, o + t));
+        t = t + 1;
       }
     }
     k = k + m;
@@ -934,18 +912,12 @@ fn cow_data(d: &mut DiskFs, prev: u64, valid: u64, buf: &Bytes, at: u64, wo: u64
   let mut keep = 0;
   if prev != 0 {
     keep = valid;
-    let mut s = 0;
-    while s < BSECT
-      invariant s <= BSECT && disk_ok(d)
-    {
-      let lo = s * SECTOR;
-      // Sectors the write covers entirely need not be read.
-      if lo < valid && !(lo >= wo && lo + SECTOR <= wo + wm) {
-        if !sec_in(&mut d.dev, &mut d.sec, prev * BSECT + s, &mut d.data, lo) {
-          return 0;
-        }
+    // Unless the write covers every byte worth keeping, read the old block
+    // (one command for the whole block).
+    if !(wo == 0 && wm >= valid) {
+      if !block_in(&mut d.dev, &mut d.sec, prev, &mut d.data) {
+        return 0;
       }
-      s = s + 1;
     }
   }
   zero(&mut d.data, keep, BLOCK);
