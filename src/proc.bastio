@@ -411,13 +411,20 @@ const LX_PIPE: u64 = 22;
 const LX_FSTAT: u64 = 5;
 const LX_GETDENTS64: u64 = 217;
 const AT_EMPTY_PATH: u64 = 0x1000;
+const AT_NO_AUTOMOUNT: u64 = 0x800;
 const AT_REMOVEDIR: u64 = 0x200;
 const DENT_BUF: u64 = 2048;           // the most getdents64 fills in one call
 const ENOTDIR: u64 = 18446744073709551596;  // 2^64 - 20
+const ENAMETOOLONG: u64 = 18446744073709551580;  // 2^64 - 36
+const EIO: u64 = 18446744073709551611;       // 2^64 - 5
+const ELOOP: u64 = 18446744073709551576;    // 2^64 - 40
 const EEXIST: u64 = 18446744073709551599;   // 2^64 - 17
 const EPERM: u64 = 18446744073709551615;    // 2^64 - 1
 const LO_EXCL: u64 = 0x80;
 const LO_DIRECTORY: u64 = 0x10000;
+const LO_TMPFILE: u64 = 0x400000;      // with LO_DIRECTORY: an unnamed file, which BastiOS lacks
+const EOPNOTSUPP: u64 = 18446744073709551521; // 2^64 - 95
+const ENOSPC: u64 = 18446744073709551588;    // 2^64 - 28
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
 const NAPPLETS: u64 = 18;
 const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----
@@ -499,6 +506,7 @@ struct Kernel {
   maps: Buf,            // Linux MAP_SHARED file mappings, MAP_N per process (src/lxmem.bastio)
   inet6: u64,           // bit h: open file description h is an AF_INET6 socket (src/lxsock.bastio)
   locks: Buf,           // file locks held (src/lxlock.bastio)
+  perr: u64,            // why lx_path_from last gave NO_RESULT: -ENOENT, -ENOTDIR, ... (src/linux.bastio)
 }
 
 spec fn kok(k: &Kernel) -> bool {

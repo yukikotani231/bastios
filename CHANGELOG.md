@@ -14,6 +14,20 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Added
 
+- Fixes from the LTP file-system tests: a path through a file fails with
+  `ENOTDIR`, a loop of symbolic links with `ELOOP`, a too-long name with
+  `ENAMETOOLONG`, and a bad directory descriptor with `EBADF`/`ENOTDIR`
+  (they all said `ENOENT`). `renameat2` takes `RENAME_EXCHANGE`, `mknod`
+  makes regular files, one `write` moves more than 4096 bytes, `"link/"`
+  names what the link points to, `linkat` across file systems says
+  `EXDEV`, `newfstatat` rejects unknown flags, a full in-memory table
+  makes `mkdir` say `ENOSPC`, and `O_TMPFILE` is refused with
+  `EOPNOTSUPP` (it opened the directory).
+- `/proc/cpuinfo`, `/proc/filesystems`, `/proc/PID/mounts` (so
+  `/proc/self/mounts`) and three read-only sysctls:
+  `/proc/sys/kernel/tainted`, `pid_max` and `printk`.
+- The in-memory file system holds 128 files and directories (it held 32).
+
 - File locks are kept (`src/lxlock.bastio`): `fcntl` record locks
   (`F_GETLK`, `F_SETLK`, `F_SETLKW`), open file description locks
   (`F_OFD_*`) and `flock`, with Linux's owners and release rules. A

@@ -407,7 +407,7 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64) -> u64
 {
   let n = lx_path_at(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
-    return ENOENT;
+    return k.perr;
   }
   return lx_open_n(&mut k, pid, n, flags);
 }
@@ -417,6 +417,9 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC && n <= FNAME_MAX
   ensures kok(k)
 {
+  if flags & LO_TMPFILE != 0 {
+    return EOPNOTSUPP;                      // so a program falls back to a named file
+  }
   let pf = proc_file(k.procs, k.fs.xfer, n);
   if pf != 0 {
     if flags % 4 != 0 || pf % 16 == PF_EXE {

@@ -53,7 +53,6 @@ const LX_MKNODAT: u64 = 259;
 const S_IFMT: u64 = 0xF000;
 const S_IFIFO_TYPE: u64 = 0x1000;
 const ENXIO: u64 = 18446744073709551610;     // 2^64 - 6
-const ENAMETOOLONG: u64 = 18446744073709551580;  // 2^64 - 36
 const EFD_SEMAPHORE: u64 = 1;
 const EV_MAX: u64 = 18446744073709551614;    // 2^64 - 2: the most an eventfd holds
 const TFD_TIMER_ABSTIME: u64 = 1;
@@ -66,7 +65,6 @@ const EP_OFF: u64 = 0x4000000000000000;      // a one-shot entry that has fired
 const EPOLL_EVENT: u64 = 12;                 // struct epoll_event, packed: u32 events, u64 data
 const INT_NEG: u64 = 0x80000000;             // an int argument this large is negative
 const VA_LAST: u64 = 0xFFFFFFFFFFFF0000;     // an address past this cannot hold two timespecs
-const ENOSPC: u64 = 18446744073709551588;    // 2^64 - 28
 
 fn is_event_call(n: u64) -> bool {
   return n == LX_EPOLL_CREATE || n == LX_EPOLL_WAIT || n == LX_EPOLL_CTL || n == LX_EPOLL_PWAIT
@@ -606,17 +604,19 @@ fn fifo_slot(k: &mut Kernel, h: u64) -> u64
   return FIFO_N;
 }
 
-/// mknod and mknodat(dirfd, path, mode): only named pipes (S_IFIFO).
+/// mknod and mknodat(dirfd, path, mode): named pipes (S_IFIFO) and empty
+/// regular files (S_IFREG, or no type); no device nodes.
 fn lx_mknod(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if mode & S_IFMT != S_IFIFO_TYPE {
-    return EPERM;                           // no device nodes, and files come from open
+  let fifo = mode & S_IFMT == S_IFIFO_TYPE;
+  if !fifo && mode & S_IFMT != S_IFMT_REG && mode & S_IFMT != 0 {
+    return EPERM;                           // no device nodes
   }
   let n = lx_path_at_nf(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
-    return ENOENT;
+    return k.perr;
   }
   if n == 0 || n > FNAME_MAX {
     return EEXIST;                          // "/"
@@ -630,7 +630,11 @@ fn lx_mknod(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64) -> u64
   }
   xfer_load(&mut k, t, 0, n);               // path_meta may have used the transfer buffer
   bfree(t);
-  if !vfs_mkfifo(&mut k.fs, &mut k.mem, n, mode % 512) {
+  let mut kind = 0;
+  if fifo {
+    kind = T_FIFO;
+  }
+  if !vfs_mknode(&mut k.fs, &mut k.mem, n, kind + mode % 512) {
     return ENOENT;                          // no such directory, or no room
   }
   // A slot left from a removed FIFO whose handle this one now has is not
