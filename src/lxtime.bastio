@@ -215,6 +215,9 @@ fn poll_bits(k: &Kernel, pid: u64, fd: u64) -> u64
     if is_tcp(k, pid, fd) {
       return tcp_poll_bits(k, pid, fd);
     }
+    if is_unix(k, pid, fd) {
+      return ux_poll_bits(k, pid, fd);
+    }
     if sock_ready(k.nic, f.x) {
       return POLLIN | POLLOUT;
     }

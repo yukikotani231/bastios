@@ -91,7 +91,7 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   if kind == OF_DIR {
     return Fd { kind: K_DIR, x: x };
   }
-  if kind == OF_SOCK || kind == OF_TCP {
+  if kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX {
     return Fd { kind: K_SOCK, x: x };
   }
   if kind == OF_DEV {
@@ -178,6 +178,7 @@ fn unref_value(k: &mut Kernel, v: u64)
   }
   let kind = of_get(k.ofd, h, 0);
   let x = of_get(k.ofd, h, 2);
+  let w = of_get(k.ofd, h, 3);
   of_set(&mut k.ofd, h, 0, OF_FREE);
   of_set(&mut k.ofd, h, 1, 0);
   if kind == OF_FILE && x < FD_ROWS {
@@ -190,6 +191,8 @@ fn unref_value(k: &mut Kernel, v: u64)
     sock_close(&mut k.nic, x);
   } else if kind == OF_TCP && x < TCBS {
     tcp_close(&mut k.nic, x);               // sends the FIN after what is buffered
+  } else if kind == OF_UNIX {
+    ux_close(&mut k, x, w);                 // src/lxunix.bastio
   }
 }
 

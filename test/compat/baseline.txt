@@ -91,6 +91,7 @@ t_dir: unlink file in directory
 t_file: /dev/null write
 t_file: /dev/urandom read
 t_file: /dev/zero read
+t_file: O_APPEND
 t_file: O_EXCL on existing
 t_file: O_RDONLY refuses write
 t_file: access F_OK
@@ -104,6 +105,8 @@ t_file: fchmod
 t_file: fdatasync
 t_file: fstat size
 t_file: fsync
+t_file: ftruncate grow
+t_file: ftruncate shrink
 t_file: lseek SEEK_CUR
 t_file: lseek SEEK_END
 t_file: lseek SEEK_SET
@@ -113,14 +116,21 @@ t_file: pread
 t_file: pread keeps offset
 t_file: pwrite
 t_file: read back
+t_file: readv
 t_file: rename
+t_file: rename over existing
+t_file: stat
 t_file: stdio fprintf/fscanf
 t_file: tmpfile
+t_file: truncate
 t_file: unlink
 t_file: unlink an open file, then read it
 t_file: utime
 t_file: write
 t_file: writev
+t_ipc: AF_UNIX bind/listen
+t_ipc: AF_UNIX connect to no listener fails
+t_ipc: AF_UNIX connect/accept
 t_ipc: EOF once writers close
 t_ipc: O_NONBLOCK read of an empty pipe is EAGAIN
 t_ipc: dup2 onto stdout and back
@@ -131,11 +141,14 @@ t_ipc: fcntl F_SETFL
 t_ipc: isatty(0)
 t_ipc: pipe
 t_ipc: pipe across fork
+t_ipc: pipe holds 64 KiB, then EAGAIN
 t_ipc: pipe2
 t_ipc: poll a readable pipe
 t_ipc: poll times out
 t_ipc: pselect timeout
 t_ipc: select
+t_ipc: socketpair AF_UNIX
+t_ipc: socketpair both ways, EOF after close
 t_mem: 64 MiB of address space
 t_mem: file for mapping
 t_mem: madvise
@@ -191,6 +204,7 @@ t_proc: getrusage
 t_proc: getsid
 t_proc: killed child's status
 t_proc: nice
+t_proc: popen
 t_proc: sched_yield
 t_proc: setpgid
 t_proc: setrlimit
@@ -198,12 +212,15 @@ t_proc: setsid in a child
 t_proc: setuid to self
 t_proc: sysconf(_SC_NPROCESSORS_ONLN)
 t_proc: sysinfo
+t_proc: system()
 t_proc: times
 t_proc: uid/gid
 t_proc: umask
 t_proc: uname
 t_proc: wait with no children is ECHILD
+t_proc: waitid
 t_proc: waitpid WNOHANG
+t_signal: SA_SIGINFO
 t_signal: SIGCHLD on child exit
 t_signal: SIG_IGN
 t_signal: alarm
