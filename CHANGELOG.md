@@ -14,12 +14,26 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Added
 
+- Files on the disk can grow to 1 GiB (as far as the disk allows) and in
+  memory to 64 MiB; they were capped at 1 MiB.
+- Paths can be up to 255 bytes; they were capped at 28.
+- A write to a file on the disk lands whole or not at all across a power
+  cut, even one that overwrites the middle of a file across two blocks.
+- Renaming files and directories: `vfs_rename`, system call 22, and the
+  shell's `mv`. On the disk a rename is one sector write, so a power cut
+  leaves the old name or the new one.
 - A console on the screen and a PS/2 keyboard when booted from the ISO:
   text drawn on the framebuffer GRUB sets up under BIOS or UEFI, keys read
   from the i8042, alongside the serial console.
 
 ### Changed
 
+- The disk format is now `BSTDISK2`: 4 KiB blocks, 64 directory entries
+  that each hold one path component and point at their parent, two levels
+  of block maps per file, and copy-on-write for every write. A disk in the
+  old `BSTDISK1` format is formatted afresh at boot (its files are lost).
+- The ATA driver waits longer for the drive (a cache flush waits on the
+  host's fsync).
 - The ISO's GRUB loads the kernel with Multiboot 2 (QEMU's `-kernel` keeps
   Multiboot 1), so under UEFI the kernel gets the ACPI RSDP and starts
   every processor; it ran on one before.

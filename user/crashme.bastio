@@ -5,12 +5,18 @@
 //              digits, "\n": the size is a whole number of records and
 //              every record is the right one, in order;
 //   disk/snap  empty, or SNAP bytes all equal to one digit;
-//   disk/t     absent, or empty.
+//   disk/t     absent, or empty;
+//   disk/ow    absent, empty, OW_A bytes "x" (cut while it was made), or
+//              OW bytes: "x" except bytes OW_AT..OW_AT + OW_N, which are
+//              all "x" or all one digit. Those are rewritten in place by
+//              single write calls that cross a block boundary, so a mix
+//              of two digits would be a torn write.
 //
 // It prints "crashme: clean, N records" (or what was wrong, and exits
 // with 1), then appends PER_RUN more records. Every 16 records it rewrites
 // disk/snap (truncate, then SNAP bytes over several sectors) and creates
-// and removes disk/t. It prints "crashme: N" every 64 records and
+// and removes disk/t; between, it overwrites the middle of disk/ow. It
+// prints "crashme: N" every 64 records and
 // "crashme: done N" at the end.
 
 import "lib/file.bastio";
@@ -18,7 +24,11 @@ import "lib/file.bastio";
 const REC: u64 = 16;
 const SNAP: u64 = 2000;
 const PER_RUN: u64 = 1024;
-const MAX_RECS: u64 = 65536;           // SLOT_BYTES / REC
+const MAX_RECS: u64 = 65536;           // 1 MiB of records
+const OW: u64 = 6000;
+const OW_A: u64 = 4096;                 // the first of the two writes making it
+const OW_AT: u64 = 1000;
+const OW_N: u64 = 4000;
 
 fn puts(con: &Serial, s: Str) {
   let mut i = 0;
@@ -169,6 +179,100 @@ fn write_snap(snap: &Bytes, buf: &mut Bytes, d: u8) -> bool
   return w == SNAP;
 }
 
+/// Is disk/ow in one of the states the header lists?
+fn check_ow(ow: &Bytes, buf: &mut Bytes) -> bool
+  requires blen(ow) >= 7 && blen(buf) == 4096
+  ensures blen(buf) == 4096
+{
+  let size = f_stat(ow, 7);
+  if size == NOT_OK || size == 0 {
+    return true;
+  }
+  if size != OW && size != OW_A {
+    return false;
+  }
+  let fd = f_open(ow, 7, O_READ);
+  if fd == NOT_OK {
+    return false;
+  }
+  let mut at = 0;
+  let mut mid = 0;
+  let mut ok = true;
+  while ok && at < size
+    invariant blen(buf) == 4096 && at <= size && size <= OW
+  {
+    let r = f_read(fd, &mut buf);
+    if r == 0 || r > 4096 || r > size - at {
+      ok = false;
+    } else {
+      let mut j = 0;
+      while ok && j < r
+        invariant j <= r && r <= 4096 && blen(buf) == 4096
+      {
+        let p = at + j;
+        let c = cast[u64](bget(buf, j));
+        if size == OW && p >= OW_AT && p < OW_AT + OW_N {
+          if p == OW_AT {
+            mid = c;
+          }
+          if c != mid || (c != 120 && (c < 48 || c > 57)) {
+            ok = false;
+          }
+        } else if c != 120 {
+          ok = false;
+        }
+        j = j + 1;
+      }
+      at = at + r;
+    }
+  }
+  f_close(fd);
+  return ok;
+}
+
+/// Makes disk/ow afresh: OW bytes "x", in two writes.
+fn make_ow(ow: &Bytes, buf: &mut Bytes) -> bool
+  requires blen(ow) >= 7 && blen(buf) == 4096
+  ensures blen(buf) == 4096
+{
+  let fd = f_open(ow, 7, O_WRITE + O_CREATE + O_TRUNC);
+  if fd == NOT_OK {
+    return false;
+  }
+  let mut j = 0;
+  while j < 4096
+    invariant j <= 4096 && blen(buf) == 4096
+  {
+    bset(&mut buf, j, 120);
+    j = j + 1;
+  }
+  let ok = f_write(fd, buf, OW_A) == OW_A && f_write(fd, buf, OW - OW_A) == OW - OW_A;
+  f_close(fd);
+  return ok;
+}
+
+/// Overwrites bytes OW_AT..OW_AT + OW_N of disk/ow with digit d, in one
+/// write call.
+fn rewrite_ow(ow: &Bytes, buf: &mut Bytes, d: u8) -> bool
+  requires blen(ow) >= 7 && blen(buf) == 4096
+  ensures blen(buf) == 4096
+{
+  let fd = f_open(ow, 7, O_WRITE);
+  if fd == NOT_OK {
+    return false;
+  }
+  let mut j = 0;
+  while j < OW_N
+    invariant j <= OW_N && blen(buf) == 4096
+  {
+    bset(&mut buf, j, d);
+    j = j + 1;
+  }
+  let ok = f_seek(fd, OW_AT) == 0 && f_write(fd, buf, OW_N) == OW_N;
+  f_close(fd);
+  return ok;
+}
+
 fn bad(con: &Serial, what: Str) -> u64 {
   puts(con, "crashme: bad ");
   puts(con, what);
@@ -182,6 +286,7 @@ fn main(con: &mut Serial) -> u64 {
   let log = bfrom("disk/log");
   let snap = bfrom("disk/snap");
   let t = bfrom("disk/t");
+  let ow = bfrom("disk/ow");
   let mut code = 0;
   let n = check_log(log, &mut buf);
   let tsize = f_stat(t, 6);
@@ -191,6 +296,8 @@ fn main(con: &mut Serial) -> u64 {
     code = bad(con, "snap");
   } else if tsize != NOT_OK && tsize != 0 {
     code = bad(con, "t");
+  } else if !check_ow(ow, &mut buf) {
+    code = bad(con, "ow");
   } else {
     puts(con, "crashme: clean, ");
     put_num(con, n);
@@ -201,6 +308,9 @@ fn main(con: &mut Serial) -> u64 {
   let mut base = 0;
   if n != NOT_OK && n <= MAX_RECS {
     base = n;
+  }
+  if code == 0 && f_stat(ow, 7) != OW && !make_ow(ow, &mut buf) {
+    code = bad(con, "ow make");
   }
   let fd = f_open(log, 7, O_WRITE + O_CREATE + O_APPEND);
   if code == 0 && fd == NOT_OK {
@@ -227,6 +337,10 @@ fn main(con: &mut Serial) -> u64 {
       let tf = f_open(t, 6, O_WRITE + O_CREATE);
       f_close(tf);
       f_unlink(t, 6);
+    } else if i % 16 == 7 {
+      if !rewrite_ow(ow, &mut buf, cast[u8](48 + i / 16 % 10)) {
+        code = bad(con, "ow write");
+      }
     }
     if i % 64 == 63 {
       puts(con, "crashme: ");
@@ -246,5 +360,6 @@ fn main(con: &mut Serial) -> u64 {
   bfree(log);
   bfree(snap);
   bfree(t);
+  bfree(ow);
   return code;
 }

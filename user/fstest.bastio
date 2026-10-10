@@ -1,6 +1,7 @@
 // Exercises the file system calls: writing and reading back a file that
 // spans several pages, seeking, appending, a hole that reads as zeros,
-// removing, running out of descriptors, and descriptors that are not open.
+// removing, running out of descriptors, descriptors that are not open, and
+// offsets past 3 MiB.
 // It runs once on the disk ("disk/big", if there is a disk) and once in
 // memory ("big"), and ends by leaving "big" open, to show that exiting
 // closes it. Prints "fstest: ok", or the step that failed (also the exit
@@ -114,11 +115,74 @@ fn read_check(fd: u64, buf: &mut Bytes, from: u64) -> u64
   return total;
 }
 
+const AT1: u64 = 2097052;              // 2 MiB - 100
+const AT2: u64 = 3149728;              // 3 MiB + 4000
+
+/// Writes m bytes of the pattern at `at` through fd.
+fn write_at(fd: u64, buf: &mut Bytes, at: u64, m: u64) -> bool
+  requires blen(buf) == 4096 && m <= 4096 && at <= 1073741824
+  ensures blen(buf) == 4096
+{
+  let mut j = 0;
+  while j < m
+    invariant j <= m && blen(buf) == 4096
+  {
+    bset(&mut buf, j, cast[u8](pat(at + j)));
+    j = j + 1;
+  }
+  return f_seek(fd, at) == 0 && f_write(fd, buf, m) == m;
+}
+
+/// Reads m bytes at `at` through fd: the pattern, or zeros if `hole`.
+fn check_at(fd: u64, buf: &mut Bytes, at: u64, m: u64, hole: bool) -> bool
+  requires blen(buf) == 4096 && m <= 4096 && at <= 1073741824
+  ensures blen(buf) == 4096
+{
+  if f_seek(fd, at) != 0 || f_read(fd, &mut buf) < m {
+    return false;
+  }
+  let mut j = 0;
+  while j < m
+    invariant j <= m && blen(buf) == 4096
+  {
+    let mut want = 0;
+    if !hole {
+      want = pat(at + j);
+    }
+    if cast[u64](bget(buf, j)) != want {
+      return false;
+    }
+    j = j + 1;
+  }
+  return true;
+}
+
+/// Steps 15 and 16. Returns 0 or the step that failed.
+fn large(big: &Bytes, nl: u64, buf: &mut Bytes) -> u64
+  requires nl <= blen(big) && blen(buf) == 4096
+  ensures blen(buf) == 4096 && result <= 16
+{
+  let fd = f_open(big, nl, O_WRITE + O_CREATE + O_TRUNC);
+  let ok = fd != NOT_OK && write_at(fd, &mut buf, AT1, 200) && write_at(fd, &mut buf, AT2, 4096);
+  f_close(fd);
+  if !ok || f_stat(big, nl) != AT2 + 4096 {
+    return 15;
+  }
+  let rd = f_open(big, nl, O_READ);
+  let good = rd != NOT_OK && check_at(rd, &mut buf, AT1, 200, false) && check_at(rd, &mut buf, AT2, 4096, false)
+    && check_at(rd, &mut buf, 1048576, 4096, true) && check_at(rd, &mut buf, AT1 - 4096, 4096, true);
+  f_close(rd);
+  if !good {
+    return 16;
+  }
+  return 0;
+}
+
 /// Runs every step on the file named by the first nl bytes of `big`.
 /// Returns 0, or the step that failed.
 fn run(big: &Bytes, nl: u64, buf: &mut Bytes, keep_open: bool) -> u64
   requires nl <= blen(big) && blen(buf) == 4096
-  ensures blen(buf) == 4096 && result <= 14
+  ensures blen(buf) == 4096 && result <= 16
 {
   let mut step = 0;
 
@@ -199,6 +263,12 @@ fn run(big: &Bytes, nl: u64, buf: &mut Bytes, keep_open: bool) -> u64
   // 13. Descriptors that are not open.
   if step == 0 && (f_close(3) != NOT_OK || f_read(3, &mut buf) != NOT_OK || f_close(99) != NOT_OK) {
     step = 13;
+  }
+  f_unlink(big, nl);
+  // 15-16. Large offsets: across the 2 MiB mark (a second map block on the
+  // disk) and past 3 MiB, with a hole in between that reads as zeros.
+  if step == 0 {
+    step = large(big, nl, &mut buf);
   }
   f_unlink(big, nl);
   // 14. Leave the file open for writing: exiting must close it, so the

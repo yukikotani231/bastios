@@ -31,7 +31,8 @@ const ATA_IDENTIFY: u64 = 0xEC;
 
 const SECTOR: u64 = 512;
 const LBA28_MAX: u64 = 0x10000000;
-const ATA_SPINS: u64 = 1000000;       // polls before giving up
+const ATA_SPINS: u64 = 500000000;     // polls before giving up (a FLUSH CACHE waits
+                                      // on the host's fsync, which can take a while)
 
 struct Ata {
   io: PortIo,           // ports 0x1F0..0x1F7

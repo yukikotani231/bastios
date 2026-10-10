@@ -14,6 +14,7 @@ const SYS_STAT: u64 = 18;
 const SYS_MKDIR: u64 = 19;
 const SYS_RMDIR: u64 = 20;
 const SYS_READDIR: u64 = 21;
+const SYS_RENAME: u64 = 22;
 const DIR_BIT: u64 = 4294967296;      // f_stat and f_readdir: a directory
 
 const O_READ: u64 = 1;
@@ -103,4 +104,12 @@ fn f_readdir(i: u64, n: u64, buf: &mut Bytes) -> u64
   ensures blen(buf) == old(blen(buf))
 {
   return sys_recv(SYS_READDIR, 256 * i + n, &mut buf);
+}
+
+/// Renames the file or directory named by the first n bytes of `names`
+/// to the m bytes after them.
+fn f_rename(names: &Bytes, n: u64, m: u64) -> u64
+  requires n <= blen(names) && m <= blen(names) - n
+{
+  return sys_send(SYS_RENAME, n, names, n + m);
 }

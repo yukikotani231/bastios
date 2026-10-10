@@ -61,7 +61,7 @@ const LO_APPEND: u64 = 0x400;
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANONYMOUS: u64 = 0x20;
 const PATH_MAX_LX: u64 = 256;           // the longest path read from user memory
-const PATH_OUT: u64 = 64;               // room for a name being built
+const PATH_OUT: u64 = 512;              // room for a name being built
 
 const ARCH_SET_FS: u64 = 0x1002;
 const IOV_MAX: u64 = 1024;
@@ -232,6 +232,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     }
     if w == EAGAIN || w == SK_WAIT {
       return lx_retry(&mut k, pid, n);       // a full pipe or connection: wait for room
+    }
+    if w == CON_FULL {
+      return con_block(&mut k, pid, n);      // a full console: wait for the pump
     }
     ret(&mut k.procs, pid, w);
     if w == EPIPE {
@@ -687,16 +690,22 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64
   if d.kind != K_CONSOLE && d.kind != K_FILE {
     return EBADF;
   }
+  let room = con_room(con);
+  if d.kind == K_CONSOLE && 2 * smaller(n, XFER) > room && room < OUTCAP {
+    return CON_FULL;                        // the console's ring is too full: wait
+  }
   let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, smaller(n, XFER));
   if got == NO_RESULT || (got == 0 && n > 0) {
     return EFAULT;
   }
   if d.kind == K_CONSOLE {
     // The console, with ONLCR as the termios from TCGETS says: LF goes
-    // out as CR LF.
+    // out as CR LF. At most two bytes each, so a full ring makes the write
+    // short (only a write longer than the whole ring gets that far).
+    let fits = smaller(got, con_room(con) / 2);
     let mut i = 0;
-    while i < got
-      invariant i <= got && got <= XFER && kok(k) && con_ok(con)
+    while i < fits
+      invariant i <= fits && fits <= got && got <= XFER && kok(k) && con_ok(con)
     {
       let ch = bget(k.fs.xfer, i);
       if ch == 10 {
@@ -705,7 +714,7 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64
       con_write(&mut con, ch);
       i = i + 1;
     }
-    return got;
+    return fits;
   }
   let w = vfs_write(&mut k.fs, &mut k.mem, d.x, got);
   if w == NO_FD {
