@@ -348,6 +348,15 @@ t_net: getaddrinfo localhost
 t_net: getaddrinfo numeric
 t_net: getsockopt SO_TYPE
 t_net: inet_pton
+t_path: O_NOFOLLOW, O_NOATIME, EISDIR, rmdir of . and mkdir over a name
+t_path: a loop of links through a long path is ELOOP
+t_path: a path in unmapped memory is EFAULT
+t_path: a set-group-ID bit at create is kept only for a member of the group
+t_path: an empty path is ENOENT, except with AT_EMPTY_PATH
+t_path: fstat of a directory gives its mode
+t_path: paths are read up to PATH_MAX
+t_path: pread and pwrite take no negative offset
+t_path: sendfile checks its descriptors and offset; statx its flags
 t_perm: a new file belongs to its maker
 t_perm: a path needs search permission on its directories
 t_perm: a set-group-ID directory passes on its group
