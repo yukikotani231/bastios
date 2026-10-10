@@ -814,7 +814,7 @@ fn tcp_open(n: &mut Net, ip: u64, port: u64) -> u64
   requires net_ok(n)
   ensures net_ok(n) && (result < TCBS || result == NO_SOCK)
 {
-  if ip > IP_MAX || ip == 0 || port == 0 || port > 65535 || n.ip == 0 || !n.dev.live {
+  if ip > IP_MAX || ip == 0 || port == 0 || port > 65535 || n.ip == 0 || !card_live(n.dev) {
     return NO_SOCK;
   }
   let t = tcb_free_slot(n);

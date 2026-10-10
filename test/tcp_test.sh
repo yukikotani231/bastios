@@ -9,15 +9,17 @@
 # close its window, by rule or on a seed.
 #
 #   SEED=n     the seed for the random-loss run (default: 1)
+#   NIC=name   the QEMU card (default: virtio-net-pci; e1000 also works)
 set -u
 cd "$(dirname "$0")/.."
 KERNEL=${KERNEL:-build/bastios.elf}
 SEED=${SEED:-1}
+NIC=${NIC:-virtio-net-pci}
 
-python3 - "$KERNEL" "$SEED" <<'PY'
+python3 - "$KERNEL" "$SEED" "$NIC" <<'PY'
 import random, select, socket, struct, subprocess, sys, time
 
-kernel, seed = sys.argv[1], int(sys.argv[2])
+kernel, seed, card = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 
 GUEST_IP = (10 << 24) | (0 << 16) | (2 << 8) | 15
 HOST_IP = (10 << 24) | (0 << 16) | (2 << 8) | 2
@@ -349,7 +351,7 @@ qemu = subprocess.Popen(
      "-serial", "stdio", "-monitor", "none",
      "-netdev", f"dgram,id=n0,local.type=inet,local.host=127.0.0.1,local.port={link.guest_port},"
                 f"remote.type=inet,remote.host=127.0.0.1,remote.port={link.port}",
-     "-device", "virtio-net-pci,netdev=n0"],
+     "-device", f"{card},netdev=n0"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 out = b""
 fails = 0
@@ -421,12 +423,19 @@ def guest_data(p):
     return [s for _, s in p.log if s["data"]]
 
 ok = until(lambda: b"bastios> " in out, 60)
-check(ok, "boots with its card on this script's wire")
-mark = len(out)
-type_line("ifconfig")
-check(until(lambda: b"bastios> " in out[mark:], 10)
-      and b"10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2 (DHCP)" in out[mark:],
-      "takes its address from this script's DHCP server")
+check(ok, f"boots with its card ({card}) on this script's wire")
+# A card's link can take a moment to come up (an e1000's does), so DHCP
+# may need a retry or two: ask until the lease is there.
+leased = False
+t_boot = time.time()
+while not leased and time.time() - t_boot < 10:
+    mark = len(out)
+    type_line("ifconfig")
+    until(lambda: b"bastios> " in out[mark:], 10)
+    leased = b"10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2 (DHCP)" in out[mark:]
+    if not leased:
+        until(lambda: False, 0.5)
+check(leased and net.dhcp_done, f"takes its address from this script's DHCP server ({time.time() - t_boot:.1f}s)")
 
 # 1. Lost segments from the guest: its SYN+ACK once and its first data
 #    segment twice. It must send each again when its timer runs out.

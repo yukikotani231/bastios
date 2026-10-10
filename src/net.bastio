@@ -15,7 +15,7 @@
 // answer arrives, and a ping is a request whose result the caller collects
 // later (see nic_ping_start / nic_ping_check).
 
-import "virtio_net.bastio";
+import "card.bastio";
 
 const ETH_ARP: u64 = 0x0806;
 const ETH_IP: u64 = 0x0800;
@@ -84,7 +84,7 @@ const TCP_BUF: u64 = 4096;            // bytes in each receive and send buffer
 const TCB_W: u64 = 22;                // words per connection
 
 struct Net {
-  dev: VNet,
+  dev: Card,
   pkt: Bytes,         // the frame being handled
   out: Bytes,         // the frame being built
   ip: u64,            // our address, the gateway, and the subnet's size
@@ -120,7 +120,7 @@ struct Net {
 }
 
 spec fn net_ok(n: &Net) -> bool {
-  vnet_ok(n.dev) && blen(n.pkt) == RX_BUF && blen(n.out) == RX_BUF && blen(n.held) == RX_BUF
+  card_ok(n.dev) && blen(n.pkt) == RX_BUF && blen(n.out) == RX_BUF && blen(n.held) == RX_BUF
   && n.ip <= IP_MAX && n.gw <= IP_MAX && 1 <= n.span && n.span <= 4294967296
   && len(n.arp) == ARP_N * 2 && n.held_len <= FRAME_MAX && n.seq <= 65535 && n.ping_pid < PID_LIMIT && n.ping_ip <= IP_MAX
   && n.dhcp_xid <= IP_MAX && n.dhcp_offer <= IP_MAX && n.dhcp_server <= IP_MAX
@@ -263,7 +263,7 @@ fn net_send(n: &mut Net, flen: u64) -> bool
   if n.tx < 18446744073709551615 {
     n.tx = n.tx + 1;
   }
-  return vnet_send(&mut n.dev, n.out, l);
+  return card_send(&mut n.dev, n.out, l);
 }
 
 fn eth_header(n: &mut Net, dst: u64, kind: u64)
@@ -271,7 +271,7 @@ fn eth_header(n: &mut Net, dst: u64, kind: u64)
   ensures net_ok(n)
 {
   put48(&mut n.out, 0, dst);
-  put48(&mut n.out, 6, n.dev.mac);
+  put48(&mut n.out, 6, card_mac(n.dev));
   put16(&mut n.out, 12, kind);
 }
 
@@ -341,7 +341,7 @@ fn arp_send(n: &mut Net, op: u64, eth_dst: u64, tmac: u64, tip: u64) -> bool
   bset(&mut n.out, 18, 6);
   bset(&mut n.out, 19, 4);
   put16(&mut n.out, 20, op);
-  put48(&mut n.out, 22, n.dev.mac);
+  put48(&mut n.out, 22, card_mac(n.dev));
   put32(&mut n.out, 28, n.ip);
   put48(&mut n.out, 32, tmac);
   put32(&mut n.out, 38, tip);
@@ -571,7 +571,7 @@ fn dhcp_send(n: &mut Net, kind: u64)
   bset(&mut n.out, 44, 6);            // ... six bytes long
   put32(&mut n.out, 46, n.dhcp_xid);
   put16(&mut n.out, 52, 0x8000);      // answer by broadcast: we have no address
-  put48(&mut n.out, 70, n.dev.mac);   // chaddr
+  put48(&mut n.out, 70, card_mac(n.dev));   // chaddr
   put32(&mut n.out, 278, DHCP_MAGIC);
   bset(&mut n.out, 282, 53);          // option: message type
   bset(&mut n.out, 283, 1);
@@ -936,7 +936,7 @@ fn udp_sendto(n: &mut Net, s: u64, ip: u64, port: u64, buf: &Bytes, size: u64) -
   ensures net_ok(n)
 {
   if !udp_is_open(n, s) || ip > IP_MAX || port == 0 || port > 65535
-    || size > UDP_MAX || size > blen(buf) || !n.dev.live || n.ip == 0 {
+    || size > UDP_MAX || size > blen(buf) || !card_live(n.dev) || n.ip == 0 {
     return NO_SOCK;
   }
   if sk_get(n, s, S_PORT) == 0 && udp_bind_any(&mut n, s) == 0 {
@@ -1018,7 +1018,7 @@ fn net_poll(n: &mut Net)
   while k < RX_BUFS
     invariant k <= RX_BUFS && net_ok(n)
   {
-    let flen = vnet_recv(&mut n.dev, &mut n.pkt);
+    let flen = card_recv(&mut n.dev, &mut n.pkt);
     if flen == 0 {
       return;
     }
@@ -1062,43 +1062,69 @@ fn pages_free(m: &Mem, lo: u64, k: u64) -> bool
   return true;
 }
 
-/// Starts the first virtio network card on PCI bus 0, if there is one and
-/// its ports do not overlap avoid_lo .. avoid_hi (another driver's), with
-/// nine pages from page `at` on.
-fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, at: u64, avoid_lo: u64, avoid_hi: u64) -> Nic
-  requires pci_ok(pci) && mem_ok(m) && at + NET_PAGES <= NPAGES
+/// Starts the network card: the first virtio card on PCI bus 0 if its
+/// ports do not overlap avoid_lo .. avoid_hi (another driver's), else the
+/// first e1000 whose registers lie in the part of the device window below
+/// E1K_TOP, with pages from page `at` on.
+fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, avoid_lo: u64, avoid_hi: u64) -> Nic
+  requires pci_ok(pci) && mem_ok(m) && at + NET_PAGES <= NPAGES && E1K_PAGES <= NET_PAGES
   requires forall k: u64 :: 0x1000 <= k && k < 65536 && !(avoid_lo <= k && k < avoid_hi) ==> port_free(ports, k)
+  requires forall a: u64 :: 0xC0000000 <= a && a < E1K_TOP ==> mmio_free(win, a)
   ensures nic_ok(result) && mem_ok(m)
 {
   let dev = pci_find(&mut pci, VIRTIO_VENDOR, VIRTIO_NET);
-  if dev == 32 {
+  if dev < 32 {
+    let base = pci_io_bar(&mut pci, dev);
+    if base < 0x1000 || base + VIO_PORTS > 65536 || !(base + VIO_PORTS <= avoid_lo || base >= avoid_hi)
+      || !pages_free(m, at, NET_PAGES) {
+      return Nic::None;
+    }
+    pci_enable(&mut pci, dev);
+    let q0 = take_low_page(&mut m, at);
+    let q1 = take_low_page(&mut m, at + 1);
+    let q2 = take_low_page(&mut m, at + 2);
+    let t0 = take_low_page(&mut m, at + 3);
+    let t1 = take_low_page(&mut m, at + 4);
+    let t2 = take_low_page(&mut m, at + 5);
+    let b0 = take_low_page(&mut m, at + 6);
+    let b1 = take_low_page(&mut m, at + 7);
+    let b2 = take_low_page(&mut m, at + 8);
+    return net_up(Card::Virtio(vnet_new(&mut ports, base, q0, q1, q2, t0, t1, t2, b0, b1, b2)));
+  }
+  let e = pci_find(&mut pci, E1K_VENDOR, E1K_DEVICE);
+  if e == 32 {
     return Nic::None;
   }
-  let base = pci_io_bar(&mut pci, dev);
-  if base < 0x1000 || base + VIO_PORTS > 65536 || !(base + VIO_PORTS <= avoid_lo || base >= avoid_hi)
-    || !pages_free(m, at, NET_PAGES) {
+  let bar = pci_mem_bar(&mut pci, e);
+  if bar < 0xC0000000 || bar + E1K_LEN > E1K_TOP || bar % 4096 != 0 || !pages_free(m, at, E1K_PAGES) {
     return Nic::None;
   }
-  pci_enable(&mut pci, dev);
-  let q0 = take_low_page(&mut m, at);
-  let q1 = take_low_page(&mut m, at + 1);
-  let q2 = take_low_page(&mut m, at + 2);
-  let t0 = take_low_page(&mut m, at + 3);
-  let t1 = take_low_page(&mut m, at + 4);
-  let t2 = take_low_page(&mut m, at + 5);
-  let b0 = take_low_page(&mut m, at + 6);
-  let b1 = take_low_page(&mut m, at + 7);
-  let b2 = take_low_page(&mut m, at + 8);
-  let v = vnet_new(&mut ports, base, q0, q1, q2, t0, t1, t2, b0, b1, b2);
-  let mut n = Net { dev: v, pkt: balloc(RX_BUF), out: balloc(RX_BUF), ip: 0, gw: 0, span: 1,
+  pci_enable(&mut pci, e);
+  let r = take_low_page(&mut m, at);
+  let b0 = take_low_page(&mut m, at + 1);
+  let b1 = take_low_page(&mut m, at + 2);
+  let b2 = take_low_page(&mut m, at + 3);
+  let b3 = take_low_page(&mut m, at + 4);
+  let t = take_low_page(&mut m, at + 5);
+  let regs = mmio_claim(&mut win, bar, E1K_LEN);
+  return net_up(Card::E1000(e1k_new(regs, r, b0, b1, b2, b3, t)));
+}
+
+/// The stack on a started card, seeking its address by DHCP (or with the
+/// static one if the card is dead).
+fn net_up(d: Card) -> Nic
+  requires card_ok(d)
+  ensures nic_ok(result)
+{
+  let mut n = Net { dev: d, pkt: balloc(RX_BUF), out: balloc(RX_BUF), ip: 0, gw: 0, span: 1,
     arp: alloc(ARP_N * 2), arp_next: 0, held: balloc(RX_BUF), held_len: 0, held_hop: 0,
     dhcp_state: DHCP_OFF, dhcp_xid: 0, dhcp_offer: 0, dhcp_server: 0, dhcp_tries: 0, dhcp_until: 0, now: 0,
     ping_state: PING_IDLE, ping_pid: 0, ping_ip: 0, ping_hop: 0, ping_until: 0, seq: 0, rx: 0, tx: 0,
     socks: alloc(SOCKS * SOCK_FIELDS), dq: balloc(SOCKS * RXQ * UDP_MAX), eph: 0,
     tcbs: alloc(TCBS * TCB_W), trx: balloc(TCBS * TCP_BUF), ttx: balloc(TCBS * TCP_BUF), iss: 0 };
   // The address comes from DHCP, sought from now on.
-  if n.dev.live {
-    n.dhcp_xid = n.dev.mac % 4294967296;
+  if card_live(n.dev) {
+    n.dhcp_xid = card_mac(n.dev) % 4294967296;
     dhcp_start(&mut n);
   } else {
     dhcp_static(&mut n);
@@ -1139,7 +1165,7 @@ fn nic_ping_start(c: &mut Nic, ip: u64, pid: u64, now: u64) -> u64
       }
       if to > IP_MAX || pid >= PID_LIMIT {
         r = 4;
-      } else if n.dev.live {
+      } else if card_live(n.dev) {
         r = ping_start(&mut n, to, pid, now);
       }
       c = Nic::Up(n);
@@ -1212,19 +1238,26 @@ fn nic_info(c: &Nic, what: u64) -> u64
 fn nic_mac(c: &Nic) -> u64 {
   match c {
     Nic::None => { return 0; },
-    Nic::Up(n) => { return n.dev.mac; },
+    Nic::Up(n) => { return card_mac(n.dev); },
+  }
+}
+
+fn nic_e1000(c: &Nic) -> bool {
+  match c {
+    Nic::None => { return false; },
+    Nic::Up(n) => { return card_is_e1000(n.dev); },
   }
 }
 
 fn nic_live(c: &Nic) -> bool {
   match c {
     Nic::None => { return false; },
-    Nic::Up(n) => { return n.dev.live; },
+    Nic::Up(n) => { return card_live(n.dev); },
   }
 }
 
 /// Resets the card and takes its pages back (at power off).
-fn nic_free(ports: &mut Ports, c: Nic, m: &mut Mem)
+fn nic_free(ports: &mut Ports, win: &mut MmioSpace, c: Nic, m: &mut Mem)
   requires nic_ok(c) && mem_ok(m)
   ensures mem_ok(m)
 {
@@ -1240,7 +1273,7 @@ fn nic_free(ports: &mut Ports, c: Nic, m: &mut Mem)
       free(n.arp);
       free(n.socks);
       bfree(n.dq);
-      vnet_free(&mut ports, n.dev, &mut m);
+      card_free(&mut ports, &mut win, n.dev, &mut m);
     },
   }
 }
