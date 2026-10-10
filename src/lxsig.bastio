@@ -18,6 +18,9 @@ const LX_RT_SIGRETURN: u64 = 15;
 const LX_KILL: u64 = 62;
 const LX_TKILL: u64 = 200;
 const LX_TGKILL: u64 = 234;
+const LX_RT_SIGPENDING: u64 = 127;
+const LX_SIGALTSTACK: u64 = 131;
+const SS_DISABLE: u64 = 2;
 
 const NSIG: u64 = 64;
 const SIGINT: u64 = 2;
@@ -113,6 +116,17 @@ fn post_sig(k: &mut Kernel, p: u64, s: u64)
   let blocked = has_sig(pget(k.procs, p, F_SIGMASK), s) && s != SIGKILL;
   if !blocked && (st == LXREADING || st == LXWAITING || st == FUTEXWAIT) {
     pset(&mut k.procs, p, F_STATE, READY);
+  }
+}
+
+/// Process p's child has ended: a Linux parent gets SIGCHLD (thrown away
+/// unless it has a handler, as the default action ignores it).
+fn child_ended(k: &mut Kernel, p: u64)
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  if is_linux(k.procs, p) {
+    post_sig(&mut k, p, SIGCHLD);
   }
 }
 
@@ -332,6 +346,42 @@ fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
   return 0;
 }
 
+/// rt_sigsuspend(mask): waits, with mask as the blocked set, until a
+/// handler runs; the handler's return puts the old mask back (see
+/// enter_handler), and the call ends with -EINTR. `was` is the restart
+/// word: only the first run swaps the mask.
+fn lx_sigsuspend(k: &mut Kernel, pid: u64, was: u64, setp: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  if was == 0 {
+    if copy_from_user(&mut k.spaces, pid, setp, &mut k.fs.xfer, 8) != 8 {
+      ret(&mut k.procs, pid, EFAULT);
+      return KEEP;
+    }
+    k.sigsave = set(k.sigsave, pid, pget(k.procs, pid, F_SIGMASK));
+    pset(&mut k.procs, pid, F_SIGMASK, blockable(rd64(k.fs.xfer, 0)));
+  }
+  return lx_retry(&mut k, pid, LX_RT_SIGSUSPEND);
+}
+
+/// sigaltstack(ss, old): there are no alternate stacks. A new one is
+/// accepted and not used; the old one always reads as disabled.
+fn lx_sigaltstack(k: &mut Kernel, pid: u64, oss: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if oss != 0 {
+    xfer_u64(&mut k.fs.xfer, 0, 0);
+    xfer_u64(&mut k.fs.xfer, 8, SS_DISABLE);
+    xfer_u64(&mut k.fs.xfer, 16, 0);
+    if lx_put_out(&mut k, pid, oss, 24) != 0 {
+      return EFAULT;
+    }
+  }
+  return 0;
+}
+
 /// The signal system calls. Returns KEEP, or SWITCH when the caller now
 /// has a signal to take, so it is delivered before the caller goes on.
 fn lx_sig_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
@@ -351,6 +401,12 @@ fn lx_sig_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     r = lx_kill(&mut k, pid, b, c);
   } else if n == LX_RT_SIGRETURN {
     r = lx_sigreturn(&mut k, pid);
+  } else if n == LX_RT_SIGPENDING {
+    // Pending signals that are blocked: the others are about to be taken.
+    xfer_u64(&mut k.fs.xfer, 0, pget(k.procs, pid, F_SIGPEND) & pget(k.procs, pid, F_SIGMASK));
+    r = lx_put_out(&mut k, pid, a, smaller(b, 8));
+  } else if n == LX_SIGALTSTACK {
+    r = lx_sigaltstack(&mut k, pid, b);
   }
   ret(&mut k.procs, pid, r);
   if pget(k.procs, pid, F_SIGPEND) & !pget(k.procs, pid, F_SIGMASK) != 0 {
@@ -361,7 +417,7 @@ fn lx_sig_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
 
 fn is_sig_call(n: u64) -> bool {
   return n == LX_RT_SIGACTION || n == LX_RT_SIGPROCMASK || n == LX_KILL || n == LX_TKILL
-    || n == LX_TGKILL || n == LX_RT_SIGRETURN;
+    || n == LX_TGKILL || n == LX_RT_SIGRETURN || n == LX_RT_SIGPENDING || n == LX_SIGALTSTACK;
 }
 
 // ---------------------------------------------------------------- delivery
@@ -434,9 +490,15 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   }
   // A system call that was waiting: without SA_RESTART it fails with
   // EINTR instead of running again once the handler returns.
-  // pause never runs again.
-  let pausing = pget(k.procs, p, F_REGS + R_RAX) == LX_PAUSE;
-  if pget(k.procs, p, F_RESTART) != 0 && (flags & SA_RESTART == 0 || pausing) {
+  // pause and rt_sigsuspend never run again. A wait4 that SIGCHLD
+  // interrupts always does: on Linux it would already have its child,
+  // and here it collects it when it runs again after the handler.
+  let call = pget(k.procs, p, F_REGS + R_RAX);
+  let waiting = pget(k.procs, p, F_RESTART) != 0;
+  let suspended = waiting && call == LX_RT_SIGSUSPEND;
+  let pausing = call == LX_PAUSE || suspended;
+  let reaping = call == LX_WAIT4 && s == SIGCHLD;
+  if waiting && (flags & SA_RESTART == 0 || pausing) && !reaping {
     let rip = pget(k.procs, p, F_REGS + R_RIP);
     if rip <= 0xFFFFFFFFFFFFFFF0 {
       pset(&mut k.procs, p, F_REGS + R_RIP, rip + 2);
@@ -459,7 +521,11 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
     g = g + 1;
   }
   xfer_u64(&mut fr, UC_AT + UC_REGS + 8 * 18, 0x33);        // cs
-  let was = pget(k.procs, p, F_SIGMASK);
+  // The mask to go back to: rt_sigsuspend's caller gets its own back.
+  let mut was = pget(k.procs, p, F_SIGMASK);
+  if suspended {
+    was = get(k.sigsave, p);
+  }
   xfer_u64(&mut fr, UC_AT + UC_REGS + 8 * 21, was);         // oldmask
   xfer_u64(&mut fr, UC_AT + UC_FPPTR, base + FP_AT);
   xfer_u64(&mut fr, UC_AT + UC_MASK, was);
@@ -484,7 +550,7 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   if put != FRAME_SIZE {
     return false;
   }
-  let mut mask = was;
+  let mut mask = pget(k.procs, p, F_SIGMASK);
   if flags & SA_NODEFER == 0 {
     mask = mask | sbit(s);
   }

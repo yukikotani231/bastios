@@ -102,6 +102,9 @@ const STAT_SIZE: u64 = 144;                 // struct stat on x86-64
 const S_IFDIR: u64 = 0x41ED;                // a directory, rwxr-xr-x
 const S_IFREG_X: u64 = 0x81ED;              // a regular file, rwxr-xr-x
 const S_IFREG: u64 = 0x81A4;                // a regular file, rw-r--r--
+const S_IFMT_DIR: u64 = 0x4000;             // the type bits of a directory
+const S_IFMT_REG: u64 = 0x8000;             // and of a regular file
+const INO_FILES: u64 = 1000;                // inode numbers of files: this + the handle
 
 // ---------------------------------------------------------------- user memory
 
@@ -393,6 +396,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if n == LX_GETTID {
     ret(&mut k.procs, pid, pid);            // a thread's id is its row
     return KEEP;
+  }
+  if n == LX_RT_SIGSUSPEND {
+    return lx_sigsuspend(&mut k, pid, was, a);
   }
   if is_sig_call(n) {
     return lx_sig_call(&mut k, pid, n, a, b, c);

@@ -235,12 +235,20 @@ steps = [
     ("echo one > m1; echo two > m2; mv m1 m2; cat m2; test -e m1 || echo moved$((1+1))", b"\r\none\r\nmoved2\r\n", b"\n# "),
     ("mkdir md; mv m2 md; mv md mdd; cat mdd/m2; ls md; echo l=$?", [b"\r\none\r\n", b"l=1"], b"\n# "),
     ("rm mdd/m2; rmdir mdd; echo clean$((1+1))", b"\r\nclean2\r\n", b"\n# "),
+    # Modes and times: chmod, touch -t (utimensat), stat and ls -l, in
+    # memory and on the disk.
+    ("echo x > pm; chmod 750 pm; stat -c '%a %s %F' pm", b"\r\n750 2 regular file\r\n", b"\n# "),
+    ("ls -l pm", b"-rwxr-x---", b"\n# "),
+    ("touch -t 200001020304 pm; stat -c %Y pm", b"\r\n946782240\r\n", b"\n# "),
+    ("echo y > disk/pm; chmod 600 disk/pm; touch -t 199912312359 disk/pm; stat -c '%a %Y' disk/pm", b"\r\n600 946684740\r\n", b"\n# "),
+    ("mkdir pd; chmod 700 pd; stat -c '%a %F' pd", b"\r\n700 directory\r\n", b"\n# "),
+    ("rm pm; rmdir pd; echo cleaned$((1+1))", b"\r\ncleaned2\r\n", b"\n# "),
     # The *at calls relative to a directory descriptor, fchdir, and mmap
     # of a file (user/mdir.c).
     ("mdir", b"mdir: ok in /dx, mapped", b"\n# "),
     # Small calls: uname, readv, pread/pwrite, limits, sysinfo, statfs,
     # getrandom, priorities, sessions (user/mmisc.c).
-    ("mmisc", b"mmisc: ok on Linux x86_64", b"\n# "),
+    ("mmisc", b"mmisc: ok on Linux x86_64, signals", b"\n# "),
     # posix_spawn: clone(CLONE_VM | CLONE_VFORK) lends the parent's
     # address space to the child until it execs or exits (user/mspawn.c).
     ("mspawn", [b"spawned 5", b"mspawn: ok, kept 1234"], b"\n# "),
@@ -857,6 +865,7 @@ session("third", False, [
     ("cat disk/note", b"kept across boots\r\nappended\r\n"),
     ("rm disk/note", b""),
     ("cat disk/moved", b"z\r\n"),
+    ("rm disk/pm", b""),
     ("rm disk/moved", b""),
     ("ls disk/keep", b"\nf\r\n"),
     ("cat disk/keep/f", b"deep\r\n"),

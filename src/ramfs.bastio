@@ -27,6 +27,8 @@ struct RamFile {
   dir: bool,            // a directory: size 0 and no pages, always
   size: u64,
   pages: Vec[Slot],     // page i holds bytes 4096 * i .. 4096 * (i + 1)
+  mode: u64,            // permission bits, such as 0644
+  mtime: u64,           // last change, in seconds
 }
 
 enum Node { Free, File(RamFile) }
@@ -328,12 +330,16 @@ fn ram_find(v: &mut Vec[Node], name: &Bytes, n: u64) -> u64
 /// Creates an empty file (or directory) named by the first n bytes of
 /// `name` (1 to FNAME_MAX of them) in a free node. Returns the node, or
 /// NFILES if the name is too long or the table is full.
-fn ram_create(v: &mut Vec[Node], name: &Bytes, n: u64, dir: bool) -> u64
+fn ram_create(v: &mut Vec[Node], name: &Bytes, n: u64, dir: bool, now: u64) -> u64
   requires nodes_ok(v) && n <= blen(name)
   ensures nodes_ok(v) && result <= NFILES
 {
   if n == 0 || n > FNAME_MAX {
     return NFILES;
+  }
+  let mut mode = 420;                   // 0644
+  if dir {
+    mode = 493;                         // 0755
   }
   let mut i = 0;
   while i < NFILES
@@ -349,7 +355,7 @@ fn ram_create(v: &mut Vec[Node], name: &Bytes, n: u64, dir: bool) -> u64
           bset(&mut nm, j, bget(name, j));
           j = j + 1;
         }
-        put_node(&mut v, i, Node::File(RamFile { name: nm, dir: dir, size: 0, pages: vec_new[Slot]() }));
+        put_node(&mut v, i, Node::File(RamFile { name: nm, dir: dir, size: 0, pages: vec_new[Slot](), mode: mode, mtime: now }));
         return i;
       },
       Node::File(f) => { put_node(&mut v, i, Node::File(f)); },
@@ -503,6 +509,49 @@ fn ram_reprefix(v: &mut Vec[Node], i: u64, cut: u64, new: &Bytes, nl: u64) -> bo
         ok = true;
       }
       put_node(&mut v, i, Node::File(g));
+    },
+  }
+  return ok;
+}
+
+/// A node's permission bits and modification time (seconds).
+struct FMeta { ok: bool, mode: u64, mtime: u64 }
+
+/// Node i's mode and modification time; ok is false if the node is free.
+fn ram_meta(v: &mut Vec[Node], i: u64) -> FMeta
+  requires nodes_ok(v) && i < NFILES
+  ensures nodes_ok(v)
+{
+  let mut r = FMeta { ok: false, mode: 0, mtime: 0 };
+  match take_node(&mut v, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      r = FMeta { ok: true, mode: f.mode, mtime: f.mtime };
+      put_node(&mut v, i, Node::File(f));
+    },
+  }
+  return r;
+}
+
+/// Sets node i's mode (when `mode` is below 65536) and its modification
+/// time (when `mtime` is not NO_FILE). False if the node is free.
+fn ram_set_meta(v: &mut Vec[Node], i: u64, mode: u64, mtime: u64) -> bool
+  requires nodes_ok(v) && i < NFILES
+  ensures nodes_ok(v)
+{
+  let mut ok = false;
+  match take_node(&mut v, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      let mut g = f;
+      if mode < 65536 {
+        g.mode = mode;
+      }
+      if mtime != NO_FILE {
+        g.mtime = mtime;
+      }
+      put_node(&mut v, i, Node::File(g));
+      ok = true;
     },
   }
   return ok;

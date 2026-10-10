@@ -38,6 +38,7 @@ const LX_ALARM: u64 = 37;
 const LX_SETITIMER: u64 = 38;
 const ITIMER_REAL: u64 = 0;
 const SIGALRM: u64 = 14;
+const LX_RT_SIGTIMEDWAIT: u64 = 128;
 
 
 /// a + b, or FOREVER if that is as far or further.
@@ -547,13 +548,68 @@ fn lx_itimer(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   return KEEP;
 }
 
+/// rt_sigtimedwait(set, info, timeout): takes the lowest pending signal in
+/// set and returns it, filling in the siginfo's number; waits (a run
+/// again) until one is pending or the timeout passes (-EAGAIN).
+fn lx_sigtimedwait(k: &mut Kernel, pid: u64, n: u64, was: u64, setp: u64, info: u64, tsp: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if copy_from_user(&mut k.spaces, pid, setp, &mut k.fs.xfer, 8) != 8 {
+    ret(&mut k.procs, pid, EFAULT);
+    return KEEP;
+  }
+  let want = rd64(k.fs.xfer, 0);
+  let mut wait = FOREVER;
+  if tsp != 0 {
+    let ts = ts_in(&mut k, pid, tsp);
+    if ts.err != 0 {
+      ret(&mut k.procs, pid, ts.err);
+      return KEEP;
+    }
+    wait = ts.ns;
+  }
+  let pend = pget(k.procs, pid, F_SIGPEND);
+  let mut s = 1;
+  while s <= NSIG
+    invariant 1 <= s && s <= NSIG + 1 && kok(k)
+  {
+    if has_sig(pend & want, s) {
+      pset(&mut k.procs, pid, F_SIGPEND, pend & !sbit(s));
+      if info != 0 {
+        let mut i = 0;
+        while i < 128
+          invariant i <= 128 && kok(k)
+        {
+          bset(&mut k.fs.xfer, i, 0);
+          i = i + 1;
+        }
+        bset(&mut k.fs.xfer, 0, cast[u8](s));
+        if lx_put_out(&mut k, pid, info, 128) != 0 {
+          ret(&mut k.procs, pid, EFAULT);
+          return KEEP;
+        }
+      }
+      ret(&mut k.procs, pid, s);
+      return KEEP;
+    }
+    s = s + 1;
+  }
+  let dl = deadline(k, was, wait);
+  if k.ns < dl {
+    return wait_until(&mut k, pid, n, dl);
+  }
+  ret(&mut k.procs, pid, EAGAIN);
+  return KEEP;
+}
+
 // ---------------------------------------------------------------- calls
 
 fn is_time_call(n: u64) -> bool {
   return n == LX_POLL || n == LX_PPOLL || n == LX_NANOSLEEP || n == LX_CLOCK_NANOSLEEP
     || n == LX_CLOCK_GETTIME || n == LX_CLOCK_GETRES || n == LX_GETTIMEOFDAY || n == LX_TIME
     || n == LX_SELECT || n == LX_PSELECT6 || n == LX_PAUSE || n == LX_ALARM || n == LX_GETITIMER
-    || n == LX_SETITIMER;
+    || n == LX_SETITIMER || n == LX_RT_SIGTIMEDWAIT;
 }
 
 /// System call n of process pid with arguments a, b, c, and `was`, the
@@ -582,6 +638,9 @@ fn lx_time_call(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
       wait = ts.ns;
     }
     return lx_poll(&mut k, pid, n, was, a, b, wait);
+  }
+  if n == LX_RT_SIGTIMEDWAIT {
+    return lx_sigtimedwait(&mut k, pid, n, was, a, b, c);
   }
   if n == LX_PAUSE {
     return wait_until(&mut k, pid, n, FOREVER);   // until a signal handler runs

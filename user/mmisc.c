@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/random.h>
@@ -13,12 +14,88 @@
 #include <sys/sysinfo.h>
 #include <sys/uio.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static int fail(const char *what)
 {
     printf("mmisc: %s failed (errno %d)\n", what, errno);
     return 1;
+}
+
+static volatile int got_usr, got_chld;
+
+static void on_usr(int s)
+{
+    (void)s;
+    got_usr++;
+}
+
+static void on_chld(int s)
+{
+    (void)s;
+    got_chld++;
+}
+
+/* Waiting for signals: sigpending, sigwaitinfo, sigtimedwait, sigsuspend,
+ * SIGCHLD from a child that ends, and sigaltstack. */
+static int signals(void)
+{
+    sigset_t usr1, cur;
+    sigemptyset(&usr1);
+    sigaddset(&usr1, SIGUSR1);
+    if (sigprocmask(SIG_BLOCK, &usr1, 0) != 0)
+        return fail("sigprocmask");
+    kill(getpid(), SIGUSR1);
+    if (sigpending(&cur) != 0 || !sigismember(&cur, SIGUSR1))
+        return fail("sigpending");
+    siginfo_t si;
+    if (sigwaitinfo(&usr1, &si) != SIGUSR1 || si.si_signo != SIGUSR1)
+        return fail("sigwaitinfo");
+    struct timespec brief = { 0, 50000000 };
+    if (sigtimedwait(&usr1, &si, &brief) != -1 || errno != EAGAIN)
+        return fail("sigtimedwait timing out");
+
+    struct sigaction sa = { 0 };
+    sa.sa_handler = on_usr;
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGUSR1, &sa, 0);
+    pid_t c = fork();
+    if (c < 0)
+        return fail("fork");
+    if (c == 0) {
+        kill(getppid(), SIGUSR1);
+        _exit(0);
+    }
+    sigset_t none;
+    sigemptyset(&none);
+    while (!got_usr)
+        if (sigsuspend(&none) != -1 || errno != EINTR)
+            return fail("sigsuspend");
+    if (sigprocmask(SIG_BLOCK, 0, &cur) != 0 || !sigismember(&cur, SIGUSR1))
+        return fail("sigsuspend giving the mask back");
+    int st;
+    waitpid(c, &st, 0);
+
+    sa.sa_handler = on_chld;
+    sa.sa_flags = 0;
+    got_chld = 0;
+    sigaction(SIGCHLD, &sa, 0);
+    c = fork();
+    if (c < 0)
+        return fail("fork");
+    if (c == 0)
+        _exit(3);
+    if (waitpid(c, &st, 0) != c || !WIFEXITED(st) || WEXITSTATUS(st) != 3)
+        return fail("waitpid with a SIGCHLD handler");
+    if (got_chld != 1)
+        return fail("SIGCHLD");
+    signal(SIGCHLD, SIG_DFL);
+
+    stack_t old;
+    if (sigaltstack(0, &old) != 0 || !(old.ss_flags & SS_DISABLE))
+        return fail("sigaltstack");
+    return 0;
 }
 
 int main(void)
@@ -68,6 +145,8 @@ int main(void)
         return fail("sched_yield");
     if (setsid() != getpid() || getsid(0) != getpid() || getpgrp() != getpid())
         return fail("sessions");
-    printf("mmisc: ok on %s %s\n", u.sysname, u.machine);
+    if (signals() != 0)
+        return 1;
+    printf("mmisc: ok on %s %s, signals\n", u.sysname, u.machine);
     return 0;
 }
