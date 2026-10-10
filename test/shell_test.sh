@@ -228,6 +228,9 @@ steps = [
     ("ash -c 'while :; do echo y; done' | head -n 1; echo piped", b"\r\ny\r\npiped", b"\n# "),
     ("ash -c 'while :; do :; done'", b"^C", b"\n# ", b"\x03"),
     ("echo st=$?", b"st=130", b"\n# "),
+    # A script with no #! line: execve says ENOEXEC, so ash runs it itself,
+    # through an execve of /proc/self/exe.
+    ("echo 'echo script $1' > /sc; chmod +x /sc; /sc ran; rm /sc", b"script ran", b"\n# "),
     # Time: clocks, nanosleep, poll that waits, select, alarms and pause, and
     # eventfd, timerfd and epoll (user/mtime.c); the sleep applet; ash's
     # read -t, a poll on the console that times out, then one that wakes
