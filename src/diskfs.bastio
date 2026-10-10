@@ -6,7 +6,8 @@
 //   blocks 5..       file data and the maps that find it
 //
 // A directory entry is: byte 0 its kind (0 unused, 1 a file, 2 a
-// directory, which holds no data), byte 1 its name length, then as
+// directory, which holds no data, 3 an orphan: a file removed while it
+// was open, nameless until its last close), byte 1 its name length, then as
 // little-endian u64s: at 8 its parent (another entry, or DTOP for the top
 // directory, "disk"), at 16 its size, at 24 its root map block (0 for no
 // data), at 32 its mode, at 40 its modification time; bytes 56..256 its
@@ -63,6 +64,7 @@ const NO_DISK_FILE: u64 = 18446744073709551615;
 
 // Directory entry fields.
 const E_KIND: u64 = 0;
+const K_ORPHAN: u64 = 3;               // kind: a file removed while open
 const E_NLEN: u64 = 1;
 const E_PARENT: u64 = 8;
 const E_SIZE: u64 = 16;
@@ -380,6 +382,11 @@ fn disk_mount(dev: Blk) -> DiskFs
       if r != 0 {
         walk(&mut d, r, 1);
       }
+    } else if cast[u64](bget(d.dir, i * DENT + E_KIND)) == K_ORPHAN {
+      // Removed while open, then the power went: nothing has it open now.
+      // Its blocks stay unmarked, so they are free.
+      bset(&mut d.dir, i * DENT + E_KIND, 0);
+      dir_flush(&mut d, i / 2);
     }
     i = i + 1;
   }
@@ -405,11 +412,45 @@ fn disk_unmount(d: DiskFs) -> Blk
 
 // ---------------------------------------------------------------- the directory
 
-/// Is entry i in use?
+/// Is entry i in use: a file, a directory, or an orphan (a file removed
+/// while still open, which keeps its data until the last close)?
 fn dent_used(d: &DiskFs, i: u64) -> bool
   requires disk_ok(d) && i < DSLOTS
 {
+  let k = cast[u64](bget(d.dir, i * DENT));
+  return i < d.slots && (k == 1 || k == 2 || k == K_ORPHAN);
+}
+
+/// Does entry i have a name (a file or a directory, not an orphan)?
+fn dent_live(d: &DiskFs, i: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+{
   return i < d.slots && (bget(d.dir, i * DENT) == 1 || bget(d.dir, i * DENT) == 2);
+}
+
+/// Is entry i an orphan?
+fn dent_orphan(d: &DiskFs, i: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+{
+  return i < d.slots && cast[u64](bget(d.dir, i * DENT)) == K_ORPHAN;
+}
+
+/// Takes entry i's name away but keeps its data, while it is open: one
+/// sector write. disk_remove frees it at the last close, and a mount
+/// frees any a power cut left behind.
+fn disk_orphan(d: &mut DiskFs, i: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+  ensures disk_ok(d)
+{
+  if bget(d.dir, i * DENT) != 1 {
+    return false;
+  }
+  bset(&mut d.dir, i * DENT + E_KIND, cast[u8](K_ORPHAN));
+  if !ent_flush(&mut d, i) {
+    bset(&mut d.dir, i * DENT + E_KIND, 1);
+    return false;
+  }
+  return true;
 }
 
 /// Is entry i a directory?
@@ -467,7 +508,7 @@ fn disk_size(d: &DiskFs, i: u64) -> u64
 fn dent_named(d: &DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
   requires disk_ok(d) && i < DSLOTS && from + n <= blen(name)
 {
-  if !dent_used(d, i) || cast[u64](bget(d.dir, i * DENT + E_NLEN)) != n || n > DNAME_MAX {
+  if !dent_live(d, i) || cast[u64](bget(d.dir, i * DENT + E_NLEN)) != n || n > DNAME_MAX {
     return false;
   }
   let mut k = 0;
@@ -507,7 +548,7 @@ fn disk_has_children(d: &DiskFs, p: u64) -> bool
   while i < DSLOTS
     invariant i <= DSLOTS
   {
-    if dent_used(d, i) && dent_parent(d, i) == p {
+    if dent_live(d, i) && dent_parent(d, i) == p {
       return true;
     }
     i = i + 1;
@@ -616,7 +657,7 @@ fn disk_move(d: &mut DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
   requires disk_ok(d) && i < DSLOTS && from + n <= blen(name)
   ensures disk_ok(d)
 {
-  if !dent_used(d, i) {
+  if !dent_live(d, i) {
     return false;
   }
   let end = from + n;
@@ -688,7 +729,7 @@ fn disk_remove(d: &mut DiskFs, i: u64) -> bool
   ensures disk_ok(d)
 {
   let r = dent_root(d, i);
-  let file = bget(d.dir, i * DENT + E_KIND) == 1;
+  let file = bget(d.dir, i * DENT + E_KIND) == 1 || cast[u64](bget(d.dir, i * DENT + E_KIND)) == K_ORPHAN;
   bset(&mut d.dir, i * DENT + E_KIND, 0);
   if !ent_flush(&mut d, i) {
     return false;
@@ -707,7 +748,7 @@ fn disk_comp(d: &DiskFs, i: u64, buf: &mut Bytes, at: u64) -> u64
   ensures blen(buf) == old(blen(buf))
   ensures result == NO_DISK_FILE || (at <= blen(buf) && result <= blen(buf) - at && result <= DNAME_MAX)
 {
-  if !dent_used(d, i) {
+  if !dent_live(d, i) {
     return NO_DISK_FILE;
   }
   let n = cast[u64](bget(d.dir, i * DENT + E_NLEN));
@@ -741,7 +782,7 @@ fn disk_name(d: &DiskFs, i: u64, buf: &mut Bytes, at: u64) -> u64
     invariant steps <= DSLOTS && total <= steps * (DNAME_MAX + 1)
   {
     let l = cast[u64](bget(d.dir, c * DENT + E_NLEN));
-    if !dent_used(d, c) || l == 0 || l > DNAME_MAX || steps == DSLOTS {
+    if !dent_live(d, c) || l == 0 || l > DNAME_MAX || steps == DSLOTS {
       return NO_DISK_FILE;      // free, damaged, or a cycle
     }
     total = total + l + 1;
