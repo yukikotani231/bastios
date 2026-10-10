@@ -68,6 +68,7 @@ const STACK_BYTES: u64 = 1048576;     // STACK_PAGES pages
 const PR_SET_NAME: u64 = 15;
 const PR_GET_NAME: u64 = 16;
 const RAMFS_MAGIC: u64 = 0x858458F6;
+const TMPFS_MAGIC: u64 = 0x01021994;
 const STATFS_SIZE: u64 = 120;
 const SYSINFO_SIZE: u64 = 112;
 const RUSAGE_SIZE: u64 = 144;
@@ -192,14 +193,16 @@ fn lx_getrusage(k: &mut Kernel, pid: u64, va: u64) -> u64
 }
 
 /// statfs / fstatfs: one file system of 4 KiB blocks, sized by the free
-/// memory (files live in memory), with names up to FNAME_MAX bytes.
-fn lx_statfs(k: &mut Kernel, pid: u64, va: u64) -> u64
+/// memory (files live in memory), with names up to FNAME_MAX bytes. Its
+/// type is tmpfs for a path in a tmpfs mount (src/lxmount.bastio), ramfs
+/// otherwise (`magic`).
+fn lx_statfs(k: &mut Kernel, pid: u64, va: u64, magic: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
   let nfree = smaller(count_free(k.mem.bm), NPAGES);
   xfer_zero(&mut k, STATFS_SIZE);
-  xfer_u64(&mut k.fs.xfer, 0, RAMFS_MAGIC);       // f_type
+  xfer_u64(&mut k.fs.xfer, 0, magic);             // f_type
   xfer_u64(&mut k.fs.xfer, 8, 4096);              // f_bsize
   xfer_u64(&mut k.fs.xfer, 16, NPAGES);           // f_blocks
   xfer_u64(&mut k.fs.xfer, 24, nfree);            // f_bfree
@@ -570,8 +573,17 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_getrusage(&mut k, pid, b);
   } else if n == LX_SYSINFO {
     r = lx_sysinfo(&mut k, pid, a);
-  } else if n == LX_STATFS || n == LX_FSTATFS {
-    r = lx_statfs(&mut k, pid, b);
+  } else if n == LX_STATFS {
+    let pn = lx_path_at(&mut k, pid, AT_FDCWD, a);
+    if pn == NO_RESULT {
+      r = k.perr;
+    } else if vfs_in_mount(&mut k.fs, pn, false) {
+      r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC);
+    } else {
+      r = lx_statfs(&mut k, pid, b, RAMFS_MAGIC);
+    }
+  } else if n == LX_FSTATFS {
+    r = lx_statfs(&mut k, pid, b, RAMFS_MAGIC);
   } else if n == LX_GETPGRP {
     r = pgid_of(k.procs, pid);
   } else if n == LX_SETSID {
