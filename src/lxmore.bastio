@@ -27,7 +27,6 @@ const MFD_CLOEXEC: u64 = 1;
 const COPY_MAX: u64 = 0x7FFFF000;         // the most one sendfile moves, as on Linux
 const EFBIG: u64 = 18446744073709551589;      // 2^64 - 27
 const ENODEV: u64 = 18446744073709551597;     // 2^64 - 19
-const EOPNOTSUPP: u64 = 18446744073709551521; // 2^64 - 95
 
 fn is_more_call(n: u64) -> bool {
   return n == LX_SENDFILE || n == LX_FLOCK || n == LX_FADVISE64 || n == LX_FALLOCATE || n == LX_PREADV
