@@ -43,6 +43,35 @@ The kernel (`src/`) runs user programs in ring 3, each in its own address space,
 
 Introduce an off-by-one, drop an ownership check, or free a table that still maps a page, and the build fails with a counterexample instead of producing a kernel.
 
+## Try it
+
+On x86-64 Linux with QEMU (see [Build and run](#build-and-run) for the full list of tools):
+
+```sh
+git clone https://github.com/yukikotani231/bastiolang
+git clone https://github.com/yukikotani231/bastios
+(cd bastiolang/stage0 && cargo build --release)
+cd bastios && make run
+```
+
+The first build proves every source file and fetches BusyBox, so it takes a while. `make run` boots the kernel on your terminal with two processors, 256 MiB, a virtio disk (`build/disk.img`, kept across boots) and a virtio network card on QEMU's user network. Some things to type:
+
+| Command | What happens |
+| --- | --- |
+| `help` | the shell's commands |
+| `hello`, `spin &`, `ps`, `kill 2` | user processes, preemption, killing |
+| `echo hi > disk/note`, `cat disk/note` | a file on the disk; still there next boot |
+| `ash` | BusyBox's shell, an unmodified Linux binary: try `ls /bin`, `echo hi \| wc -c`, then `exit` |
+| `ifconfig`, `ping` | the address DHCP gave, and ICMP to the gateway |
+| `tcpecho 7001` | then `nc 127.0.0.1 7001` on the host: what you type comes back |
+| `halt` | power off; the kernel counts its pages back |
+
+Ctrl-A X quits QEMU at any time.
+
+To boot through a real boot loader, `make iso` builds `build/bastios.iso`. It is GRUB with the same kernel, as a hybrid image that boots from CD or USB under BIOS or UEFI. It needs `grub-mkrescue`, `xorriso` and `mtools`, plus GRUB's BIOS and UEFI files (`sudo apt-get install grub-pc-bin grub-efi-amd64-bin xorriso mtools`; add `ovmf` for UEFI in QEMU). `make run-iso` boots it in QEMU under BIOS and `make run-uefi` under UEFI firmware. To write it to a USB stick, use `sudo dd if=build/bastios.iso of=/dev/sdX bs=4M` (check the device name first: dd overwrites it).
+
+On real hardware, mind the limits. It has only been tried in QEMU. BastiOS talks only on the first serial port (COM1, 115200 baud), so a machine without one shows nothing after GRUB. It needs a virtio or Intel e1000 (82540EM) network card and a virtio or legacy ATA disk to use either. Under UEFI it runs on one processor, because it finds the ACPI tables only where BIOS firmware puts them.
+
 ## Layout
 
 How the pieces fit together (boot, memory, processes, the scheduler, system calls, the proof boundary) is in [docs/architecture.md](docs/architecture.md).
@@ -94,6 +123,7 @@ Requirements:
 | Python 3 | 3.12, 3.13 | Only for the test driver |
 | musl-gcc | musl 1.2.4 | Builds the musl test programs and BusyBox (`musl-tools` on Ubuntu) |
 | git and network access | | The first build clones BusyBox 1.36.1 from github.com/mirror/busybox into `build/busybox` (set `BUSYBOX_GIT` for another mirror) |
+| GRUB, xorriso, mtools, OVMF | GRUB 2.12, xorriso 1.5.6, OVMF 2024.02 | Only for `make iso` and `test/iso_test.sh` (which skips without them; UEFI is skipped without OVMF) |
 
 Tested on x86-64 Linux (Ubuntu 24.04), which is what CI runs; other platforms are untested. On Ubuntu: `sudo apt-get install z3 build-essential qemu-system-x86 python3 musl-tools`, plus [rustup](https://rustup.rs) for bastiolang.
 
@@ -104,6 +134,7 @@ git clone https://github.com/yukikotani231/bastios
 cd bastios
 make          # build/bastios.elf
 make run      # boot on this terminal with build/disk.img as the disk; Ctrl-A X quits
+make iso      # build/bastios.iso: GRUB + the kernel, bootable under BIOS or UEFI
 make test     # boot in QEMU, type commands over the serial line, check the replies
 ```
 
@@ -115,6 +146,7 @@ The proof covers everything in `src/` and `user/*.bastio`. Everything below it i
 
 | Part | Where | Role |
 | --- | --- | --- |
+| Boot loader | GRUB, configured by `boot/grub.cfg` (only for the ISO) | Loads the kernel as a Multiboot image and passes the memory map; `make run` and the tests use QEMU's own Multiboot loader instead |
 | Boot and trap entry | `boot/boot.S` | Multiboot entry, identity map, long mode; GDT with user segments; the trap stubs and the `syscall` entry; enabling SSE; entering user mode (which also loads the FS base) (`bst_cpu_enter`) and idling (`bst_cpu_wait`) |
 | Processor startup | `boot/smp.c`, `boot/ap.S` | Finding the processors in the ACPI MADT, mapping the local APIC, INIT and startup IPIs; the real-mode trampoline that takes each application processor to long mode on the kernel's tables, where it checks in and parks until `smp_run` hands it work. C until Bastio has an `Mmio` capability |
 | Platform setup | `boot/platform.c` | TSS, interrupt table, `syscall` MSRs |
