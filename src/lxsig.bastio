@@ -723,6 +723,10 @@ fn never_restarts(call: u64) -> bool {
   if call == 23 || call == 270 || call == 232 || call == 281 || call == 441 {
     return true;
   }
+  // semop, semtimedop, msgsnd, msgrcv (src/lxipc.bastio comes later)
+  if call == 65 || call == 220 || call == 69 || call == 70 {
+    return true;
+  }
   return call == LX_POLL || call == LX_PPOLL;
 }
 
