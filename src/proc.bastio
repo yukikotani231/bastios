@@ -11,8 +11,8 @@ import "net.bastio";
 import "tcp.bastio";
 
 const NPROC: u64 = 16;
-const STRIDE: u64 = 32;
-const PTAB_LEN: u64 = 512;           // NPROC * STRIDE
+const STRIDE: u64 = 40;
+const PTAB_LEN: u64 = 640;           // NPROC * STRIDE
 
 // Row fields.
 const F_STATE: u64 = 0;
@@ -31,6 +31,11 @@ const F_REGS: u64 = 8;               // 21 saved words, in `cpu_get` order
 const F_SIGMASK: u64 = 29;
 const F_SIGPEND: u64 = 30;
 const F_RESTART: u64 = 31;
+// Linux threads (src/lxthread.bastio): the group's leader (0: no threads),
+// the clear_child_tid address, and the address a futex wait waits on.
+const F_TGID: u64 = 32;
+const F_CTID: u64 = 33;
+const F_FUTEX: u64 = 34;
 const SIG_DEATH: u64 = 256;          // F_CODE of a process a signal ended: 256 + the signal
 
 // Saved register numbers.
@@ -59,6 +64,7 @@ const KILLED: u64 = 8;               // RUNNING, and killed: ends when it comes 
 const NETWAIT: u64 = 9;              // waiting for the network (a ping's reply)
 const LXVFORK: u64 = 10;             // lent its address space to child F_WAIT (clone with CLONE_VM | CLONE_VFORK)
 const CONWAIT: u64 = 11;             // writing to the console, whose ring is full
+const FUTEXWAIT: u64 = 12;           // in a Linux futex wait with no timeout
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -321,10 +327,13 @@ const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
 const SIGACT_LEN: u64 = 4096;
 const ALARMS_LEN: u64 = 32;          // NPROC * 2
 const LX_PAUSE: u64 = 34;
+const LX_RT_SIGSUSPEND: u64 = 130;
 const OF_SOCK: u64 = 5;               // x: the kernel socket; word 3: 2 * peer + nonblocking
+const OF_DEV: u64 = 7;                // x: the device (src/lxdev.bastio)
 const OF_TCP: u64 = 6;                // x: the kernel connection (TCBS: none yet); word 3: see src/lxtcp.bastio
 const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
+const DIR_VFS: u64 = 2;               // DIR_VFS + a file layer directory handle
 
 const NPIPES: u64 = 8;
 const PIPE_CAP: u64 = 1024;
@@ -338,8 +347,11 @@ const AT_EMPTY_PATH: u64 = 0x1000;
 const AT_REMOVEDIR: u64 = 0x200;
 const DENT_BUF: u64 = 2048;           // the most getdents64 fills in one call
 const ENOTDIR: u64 = 18446744073709551596;  // 2^64 - 20
+const EEXIST: u64 = 18446744073709551599;   // 2^64 - 17
+const LO_EXCL: u64 = 0x80;
+const LO_DIRECTORY: u64 = 0x10000;
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
-const NAPPLETS: u64 = 12;
+const NAPPLETS: u64 = 15;
 const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----
 const S_IFIFO: u64 = 0x1180;           // a FIFO, rw-------
 const S_IFSOCK: u64 = 0xC1B6;          // a socket, rw-rw-rw-
@@ -378,6 +390,7 @@ const K_PIPE_R: u64 = 3;              // x: the pipe
 const K_PIPE_W: u64 = 4;
 const K_DIR: u64 = 5;                 // x: DIR_ROOT or DIR_BIN
 const K_SOCK: u64 = 6;                // x: the kernel socket
+const K_DEV: u64 = 7;                 // x: the device (src/lxdev.bastio)
 
 struct Kernel {
   mem: Mem,             // the page allocator
@@ -391,22 +404,25 @@ struct Kernel {
   pipes: Buf,           // pipe buffers
   ticks: u64,           // timer ticks since boot
   ns: u64,              // the HPET clock at the last system call, in nanoseconds
+  epoch: u64,           // CLOCK_REALTIME minus the HPET clock, in ns (src/rtc.bastio)
+  rng: u64,             // the state behind /dev/urandom (src/lxdev.bastio)
   cpus: u64,            // processors running, the bootstrap one included
   fs: Vfs,              // files and the open-file table
   nic: Nic,             // the network card and its UDP sockets, if any
   sigact: Buf,          // Linux signal actions (src/lxsig.bastio)
   cwd: Buf,             // Linux working directories (src/lxdir.bastio)
   dpath: Buf,           // the path of each open directory description, laid out like cwd
+  sigsave: Buf,         // the mask rt_sigsuspend replaced, per process (src/lxsig.bastio)
   alarms: Buf,          // Linux ITIMER_REAL per process: deadline (0: off) and interval (src/lxtime.bastio)
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == NPROC
 }
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 22;
+const NPROGS: u64 = 24;
 
 fn prog_name(i: u64) -> Str {
   if i == 0 {
@@ -475,6 +491,12 @@ fn prog_name(i: u64) -> Str {
   if i == 21 {
     return "mspawn";
   }
+  if i == 22 {
+    return "sysfuzz";
+  }
+  if i == 23 {
+    return "mthread";
+  }
   return "(file)";                    // a program loaded from a file
 }
 
@@ -541,6 +563,12 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 21 {
     return include_bytes("../build/user/mspawn.elf");
+  }
+  if i == 22 {
+    return include_bytes("../build/user/sysfuzz.elf");
+  }
+  if i == 23 {
+    return include_bytes("../build/user/mthread.elf");
   }
   return include_bytes("../build/user/fault.bin");
 }
@@ -733,10 +761,15 @@ fn build_space(m: &mut Mem, v: &mut Vfs, src: Src, img: Str, elf: bool, e: Elf, 
 /// Ends process `pid` with exit `code`: frees its address space, closes its
 /// files, hands the code to a parent waiting for it, and orphans its
 /// children.
-fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
-  requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code: u64)
+  requires kok(k) && 1 <= who && who < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
+  // A thread ends its whole group, which ends as its leader.
+  let pid = group_end(&mut k, mmu, who);
+  if pid == 0 {
+    return;
+  }
   vfork_give_back(&mut k, mmu, pid);         // a borrowed address space goes home
   match take_space(&mut k.spaces, pid) {
     Space::Empty => {},
@@ -777,6 +810,9 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
   } else if state(k.procs, par) == FREE || state(k.procs, par) == ZOMBIE {
     pset(&mut k.procs, pid, F_STATE, FREE);
   }
+  if 1 <= par && par < NPROC {
+    child_ended(&mut k, par);
+  }
 }
 
 fn put_state(con: &mut Con, s: u64)
@@ -791,6 +827,8 @@ fn put_state(con: &mut Con, s: u64)
     puts(&mut con, "waiting");
   } else if s == RUNNING || s == KILLED {
     puts(&mut con, "running");
+  } else if s == FUTEXWAIT {
+    puts(&mut con, "futex  ");
   } else if s == CONWAIT {
     puts(&mut con, "writing");
   } else if s == NETWAIT {

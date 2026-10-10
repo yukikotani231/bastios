@@ -12,6 +12,7 @@ import "uart.bastio";
 import "pic.bastio";
 import "pit.bastio";
 import "hpet.bastio";
+import "rtc.bastio";
 import "console.bastio";
 import "pages.bastio";
 import "space.bastio";
@@ -28,6 +29,8 @@ import "lxtcp.bastio";
 import "lxsig.bastio";
 import "lxtime.bastio";
 import "lxmisc.bastio";
+import "lxthread.bastio";
+import "lxdev.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
@@ -95,7 +98,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, from: u64, poll: bool) -> Job
     tty_cook(&mut s.con, &mut s.k);
     wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
   }
-  let p = pick(s.k.procs, from);
+  let p = lx_pick(&mut s.k, from);
   if p == 0 {
     if live_count(s.k.procs) == 0 {
       s.stop = true;
@@ -103,6 +106,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, from: u64, poll: bool) -> Job
     }
     return Job::Idle;
   }
+  group_take(&mut s.k, mmu, p);                 // a thread gets its group's space
   if !lx_deliver(&mut s.k, mmu, p) {
     return Job::Idle;                       // a signal ended it
   }
@@ -191,6 +195,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, t: Task, v: u64) -> u64
   }
   if v == V_SYSCALL {
     s.k.ns = hpet_ns(&mut s.clock);
+    s.k.fs.now = s.k.ns / 1000000000;
     let what = syscall(&mut s.con, &mut s.k, mmu, p);
     if what == POWEROFF {
       s.stop = true;
@@ -202,6 +207,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, t: Task, v: u64) -> u64
   }
   if v == V_LINUX {
     s.k.ns = hpet_ns(&mut s.clock);
+    s.k.fs.now = s.k.ns / 1000000000;
     if linux_syscall(&mut s.con, &mut s.k, mmu, p) == SWITCH {
       return (p + 1) % NPROC;
     }
@@ -426,7 +432,9 @@ fn ack(pic: &mut Pic, v: u64)
 
 // The files the file system starts with, built into the kernel image.
 // elfdemo is a Linux program (the elfpie test) that execve runs as a file.
-const NINIT: u64 = 3;
+// /etc/passwd and /etc/group name root, the only user, for Linux programs
+// (whoami, ls -l, getpwuid).
+const NINIT: u64 = 5;
 
 fn init_name(i: u64) -> Str {
   if i == 0 {
@@ -434,6 +442,12 @@ fn init_name(i: u64) -> Str {
   }
   if i == 1 {
     return "about";
+  }
+  if i == 2 {
+    return "etc/passwd";
+  }
+  if i == 3 {
+    return "etc/group";
   }
   return "elfdemo";
 }
@@ -445,13 +459,38 @@ fn init_data(i: u64) -> Str {
   if i == 1 {
     return include_bytes("../files/about");
   }
+  if i == 2 {
+    return include_bytes("../files/passwd");
+  }
+  if i == 3 {
+    return include_bytes("../files/group");
+  }
   return include_bytes("../build/user/elfpie.elf");
+}
+
+/// Makes directory `name` (a top-level name) in the RAM file system.
+fn make_dir(v: &mut Vfs, name: Str) -> bool
+  requires vfs_ok(v) && slen(name) <= FNAME_MAX
+  ensures vfs_ok(v)
+{
+  let mut i = 0;
+  while i < slen(name)
+    invariant i <= slen(name) && slen(name) <= FNAME_MAX && vfs_ok(v)
+  {
+    bset(&mut v.xfer, i, sget(name, i));
+    i = i + 1;
+  }
+  return vfs_mkdir(&mut v, slen(name));
 }
 
 fn install_files(con: &mut Con, k: &mut Kernel)
   requires con_ok(con) && kok(k)
   ensures kok(k) && con_ok(con)
 {
+  // /tmp and /etc, which Linux programs expect: RAM directories.
+  if !make_dir(&mut k.fs, "tmp") || !make_dir(&mut k.fs, "etc") {
+    puts(&mut con, "cannot make /tmp or /etc\r\n");
+  }
   let mut i = 0;
   while i < NINIT
     invariant i <= NINIT && kok(k) && con_ok(con)
@@ -504,8 +543,18 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     shift: false, ctrl: false, ext: false };
   let mut pic = Pic { master: port_claim(&mut ports, PIC1, 2), slave: port_claim(&mut ports, PIC2, 2) };
   let mut pit = Pit { io: port_claim(&mut ports, PIT, 4) };
+  let mut rtc = Rtc { io: port_claim(&mut ports, RTC, 2) };
   // Devices with memory-mapped registers claim them from the device window.
   let mut clock = hpet_init(mmio_claim(&mut win, HPET, HPET_LEN));
+  // The wall clock: the RTC's reading, less the HPET time it was read at,
+  // so CLOCK_REALTIME = epoch + the HPET clock.
+  let wall = rtc_seconds(&mut rtc) * 1000000000;
+  port_release(&mut ports, rtc.io);         // read once; the HPET keeps time from here
+  let at = hpet_ns(&mut clock);
+  let mut epoch = 0;
+  if wall > at {
+    epoch = wall - at;
+  }
   uart_init(&mut uart);
   kbd_init(&mut kbd);
   // The screen: the framebuffer the boot loader set up, if there is one
@@ -603,7 +652,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     vec_push(&mut fpus, Fpu::None);
     q = q + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), ticks: 0, ns: 0, cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), alarms: alloc(ALARMS_LEN) };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), ticks: 0, ns: 0, epoch: epoch, rng: epoch ^ at, cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(NPROC), alarms: alloc(ALARMS_LEN) };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
@@ -661,6 +710,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.cwd);
   free(sys.k.dpath);
   free(sys.k.alarms);
+  free(sys.k.sigsave);
   pool = sys.k.mem.pool;
   port_release(&mut ports, devices.uart.io);
   port_release(&mut ports, devices.kbd.data);

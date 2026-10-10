@@ -4,6 +4,7 @@
 #   make iso        build/bastios.iso: bootable from CD or USB, BIOS or UEFI
 #   make run-iso    boot the ISO in QEMU (run-uefi: under UEFI firmware)
 #   make test       boot it in QEMU and drive the shell over the serial line
+#   make fuzz       fuzz the system calls (SEED, SEEDS, CALLS, SMP)
 #
 # BASTIOC points at the Bastio stage0 compiler (github.com/yukikotani231/bastiolang).
 
@@ -34,7 +35,7 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest crashme
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn ash
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread ash
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf)
 
 build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
@@ -84,10 +85,19 @@ build/user/fpucheck.o: user/fpucheck.c | build/user
 build/user/fpucheck.elf: build/user/elfstart.o build/user/fpucheck.o
 	$(CC) -nostdlib -static-pie -Wl,--build-id=none -o $@ $^
 
+# The system call fuzzer (user/sysfuzz.c, test/fuzz_test.sh): freestanding,
+# so nothing between it and the kernel tidies its arguments.
+build/user/sysfuzz.o: user/sysfuzz.c | build/user
+	$(CC) $(ELFCFLAGS) -c -o $@ $<
+
+# Linked at USER_BASE: its tables of pointers need no relocation.
+build/user/sysfuzz.elf: build/user/elfstart.o build/user/sysfuzz.o
+	$(CC) -nostdlib -static -no-pie -Wl,-Ttext-segment=0x8000000000 -Wl,--build-id=none -o $@ $^
+
 # A C program against musl libc, static PIE (the musl-tools package).
 MUSLCC ?= musl-gcc
 
-build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf: build/user/%.elf: user/%.c | build/user
+build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf: build/user/%.elf: user/%.c | build/user
 	$(MUSLCC) -static-pie -O2 -o $@ $<
 
 # BusyBox (GPL-2.0-only, not part of this repository): fetched at a pinned
@@ -116,8 +126,8 @@ build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := src/uart.bastio src/fb.bastio src/kbd.bastio src/font8x8.bin src/card.bastio src/e1000.bastio src/pic.bastio src/pit.bastio src/hpet.bastio src/console.bastio src/pages.bastio src/space.bastio src/elf.bastio src/ramfs.bastio src/ata.bastio src/pci.bastio src/virtq.bastio src/virtio_blk.bastio src/virtio_net.bastio src/net.bastio src/tcp.bastio src/blk.bastio src/diskfs.bastio src/fs.bastio \
-         src/proc.bastio src/usermem.bastio src/syscall.bastio src/linux.bastio src/lxproc.bastio src/lxfd.bastio src/lxdir.bastio src/lxsock.bastio src/lxtcp.bastio src/lxsig.bastio src/lxtime.bastio src/lxmisc.bastio src/main.bastio
+KSRCS := src/uart.bastio src/fb.bastio src/kbd.bastio src/font8x8.bin src/card.bastio src/e1000.bastio src/pic.bastio src/pit.bastio src/hpet.bastio src/rtc.bastio src/console.bastio src/pages.bastio src/space.bastio src/elf.bastio src/ramfs.bastio src/ata.bastio src/pci.bastio src/virtq.bastio src/virtio_blk.bastio src/virtio_net.bastio src/net.bastio src/tcp.bastio src/blk.bastio src/diskfs.bastio src/fs.bastio \
+         src/proc.bastio src/usermem.bastio src/syscall.bastio src/linux.bastio src/lxproc.bastio src/lxfd.bastio src/lxdir.bastio src/lxsock.bastio src/lxtcp.bastio src/lxsig.bastio src/lxtime.bastio src/lxmisc.bastio src/lxdev.bastio src/main.bastio
 KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
@@ -218,6 +228,15 @@ test: build/bastios.elf
 	NIC=e1000 test/tcp_test.sh
 	test/iso_test.sh
 	test/nmi_test.sh
+	test/fuzz_test.sh 1 2 2000
+
+# The system call fuzzer at length: SEEDS runs of CALLS calls from seed
+# SEED (see test/fuzz_test.sh; `make test` runs a short one).
+SEED  ?= 1
+SEEDS ?= 16
+CALLS ?= 5000
+fuzz: build/bastios.elf
+	SMP=$(SMP) test/fuzz_test.sh $(SEED) $(SEEDS) $(CALLS)
 
 # The Linux compatibility suite (test/compat): static musl programs that
 # exercise the system call surface, and a BusyBox with a broad set of
@@ -266,4 +285,4 @@ clean:
 	rm -rf build
 
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
-.PHONY: all run test smpbench compat compat-baseline compat-host clean
+.PHONY: all run test fuzz smpbench compat compat-baseline compat-host clean

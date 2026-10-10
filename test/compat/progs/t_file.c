@@ -41,7 +41,13 @@ int main(void) {
     EXPECT("close twice is EBADF", close(fd) == -1 && errno == EBADF);
     EXPECT("stat", stat("cf_a", &st) == 0 && st.st_size == 100);
     EXPECT("truncate", truncate("cf_a", 3) == 0 && stat("cf_a", &st) == 0 && st.st_size == 3);
-    EXPECT("O_EXCL on existing", open("cf_a", O_RDWR | O_CREAT | O_EXCL, 0644) == -1 && errno == EEXIST);
+    {
+        /* Close what a wrong success opened, so later checks do not see an
+         * open cf_a (BastiOS refuses to unlink open files). */
+        int x = -1;
+        EXPECT("O_EXCL on existing", (x = open("cf_a", O_RDWR | O_CREAT | O_EXCL, 0644)) == -1 && errno == EEXIST);
+        if (x >= 0) close(x);
+    }
     EXPECT("open missing is ENOENT", open("cf_none", O_RDONLY) == -1 && errno == ENOENT);
     EXPECT("O_APPEND", (fd = open("cf_a", O_WRONLY | O_APPEND)) >= 0 && write(fd, "XY", 2) == 2 &&
            close(fd) == 0 && stat("cf_a", &st) == 0 && st.st_size == 5);
@@ -68,6 +74,10 @@ int main(void) {
     EXPECT("access missing", access("cf_none", F_OK) == -1 && errno == ENOENT);
     EXPECT("faccessat", faccessat(AT_FDCWD, "cf_c", R_OK, 0) == 0);
     EXPECT("unlink", unlink("cf_c") == 0 && stat("cf_c", &st) == -1 && errno == ENOENT);
+    EXPECT("unlink an open file, then read it", (fd = open("cf_o", O_RDWR | O_CREAT, 0644)) >= 0 && write(fd, "kept", 4) == 4 &&
+           unlink("cf_o") == 0 && lseek(fd, 0, SEEK_SET) == 0 && read(fd, buf, 4) == 4 && memcmp(buf, "kept", 4) == 0);
+    if (fd >= 0) close(fd);
+    unlink("cf_o");
     unlink("cf_d");
     unlink("cf_e");
     {

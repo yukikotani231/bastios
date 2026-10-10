@@ -235,6 +235,107 @@ fn lx_getrandom(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
 }
 
 /// Whether the path at va (from dirfd) names something.
+const EIO: u64 = 18446744073709551611;       // 2^64 - 5
+const TIMES_UTIMBUF: u64 = 0;          // utime: actime, modtime
+const TIMES_TIMEVAL: u64 = 1;          // utimes, futimesat: two struct timeval
+const TIMES_TIMESPEC: u64 = 2;         // utimensat: two struct timespec
+const UTIME_NOW: u64 = 1073741823;     // tv_nsec: now
+const UTIME_OMIT: u64 = 1073741822;    // tv_nsec: leave it
+
+/// The file layer handle of the path at va (relative to dirfd), for
+/// changing its mode or times: NO_FILE if it exists but keeps none ("/",
+/// /bin and the built-in programs), NO_RESULT if it does not exist.
+fn meta_target(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = lx_path_at(&mut k, pid, dirfd, va);
+  if n == NO_RESULT {
+    return NO_RESULT;
+  }
+  let f = vfs_lookup(&mut k.fs, n);
+  if f != NO_FILE {
+    return f;
+  }
+  let d = vfs_dir_lookup(&mut k.fs, n);
+  if d != NO_FILE {
+    return d;
+  }
+  let m = path_meta(&mut k, n);
+  if m.ok {
+    return NO_FILE;
+  }
+  return NO_RESULT;
+}
+
+/// Sets the mode (below 4096; 65536 leaves it) and modification time
+/// (NO_FILE leaves it) of handle f from meta_target. Returns 0 or -errno.
+fn set_meta(k: &mut Kernel, f: u64, mode: u64, mtime: u64) -> u64
+  requires kok(k)
+  ensures kok(k)
+{
+  if f == NO_RESULT {
+    return ENOENT;
+  }
+  if f >= NFILES + DSLOTS {
+    return 0;                               // nothing to keep: accepted
+  }
+  if !vfs_set_meta(&mut k.fs, f, mode, mtime) {
+    return EIO;
+  }
+  return 0;
+}
+
+/// fchmod: set_meta on the file open as Linux fd `fd`.
+fn fd_set_meta(k: &mut Kernel, pid: u64, fd: u64, mode: u64, mtime: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
+    return EBADF;
+  }
+  if d.kind != K_FILE {
+    return 0;
+  }
+  return set_meta(&mut k, vfs_row_file(k.fs, d.x), mode, mtime);
+}
+
+/// Sets f's modification time from the times at user address va (0:
+/// now), laid out as `kind` says. Returns 0 or -errno.
+fn set_times(k: &mut Kernel, pid: u64, f: u64, va: u64, kind: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if f == NO_RESULT {
+    return ENOENT;
+  }
+  let mut t = k.fs.now;
+  if va != 0 {
+    if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 32) != 32 {
+      return EFAULT;
+    }
+    if kind == TIMES_UTIMBUF {
+      t = get_u64(k.fs.xfer, 8);
+    } else {
+      t = get_u64(k.fs.xfer, 16);
+      if kind == TIMES_TIMESPEC {
+        let ns = get_u64(k.fs.xfer, 24);
+        if ns == UTIME_OMIT {
+          return 0;
+        }
+        if ns == UTIME_NOW {
+          t = k.fs.now;
+        }
+      }
+    }
+  }
+  if t == NO_FILE {
+    t = NO_FILE - 1;                        // NO_FILE would mean "leave it"
+  }
+  return set_meta(&mut k, f, 65536, t);
+}
+
 fn path_exists(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -301,21 +402,45 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_uname(&mut k, pid, a);
   } else if n == LX_MREMAP {
     r = ENOMEM;                             // callers (musl's realloc) fall back to a copy
-  } else if n == LX_FSYNC || n == LX_FDATASYNC || n == LX_FCHMOD || n == LX_FCHOWN {
+  } else if n == LX_FSYNC || n == LX_FDATASYNC || n == LX_FCHOWN {
     let d = fd_look(k, pid, a);
     if d.kind == K_BAD {
-      r = EBADF;                            // writes go straight through; owners and modes are not kept
+      r = EBADF;                            // writes go straight through; owners are not kept
     }
-  } else if n == LX_CHMOD || n == LX_CHOWN || n == LX_LCHOWN || n == LX_UTIME || n == LX_UTIMES {
+  } else if n == LX_FCHMOD {
+    r = fd_set_meta(&mut k, pid, a, b % 4096, NO_FILE);
+  } else if n == LX_CHOWN || n == LX_LCHOWN {
     r = path_exists(&mut k, pid, AT_FDCWD, a);
-  } else if n == LX_FCHMODAT || n == LX_FCHOWNAT || n == LX_FUTIMESAT || n == LX_UTIMENSAT {
-    if b == 0 && n == LX_UTIMENSAT {
+  } else if n == LX_FCHOWNAT {
+    r = path_exists(&mut k, pid, a, b);
+  } else if n == LX_CHMOD {
+    let f = meta_target(&mut k, pid, AT_FDCWD, a);
+    r = set_meta(&mut k, f, b % 4096, NO_FILE);
+  } else if n == LX_FCHMODAT {
+    let f = meta_target(&mut k, pid, a, b);
+    r = set_meta(&mut k, f, c % 4096, NO_FILE);
+  } else if n == LX_UTIME || n == LX_UTIMES {
+    let f = meta_target(&mut k, pid, AT_FDCWD, a);
+    let mut kind = TIMES_TIMEVAL;
+    if n == LX_UTIME {
+      kind = TIMES_UTIMBUF;
+    }
+    r = set_times(&mut k, pid, f, b, kind);
+  } else if n == LX_FUTIMESAT {
+    let f = meta_target(&mut k, pid, a, b);
+    r = set_times(&mut k, pid, f, c, TIMES_TIMEVAL);
+  } else if n == LX_UTIMENSAT {
+    if b == 0 {
+      // futimens(fd, times)
       let d = fd_look(k, pid, a);
       if d.kind == K_BAD {
-        r = EBADF;                          // futimens(fd)
+        r = EBADF;
+      } else if d.kind == K_FILE {
+        r = set_times(&mut k, pid, vfs_row_file(k.fs, d.x), c, TIMES_TIMESPEC);
       }
     } else {
-      r = path_exists(&mut k, pid, a, b);
+      let f = meta_target(&mut k, pid, a, b);
+      r = set_times(&mut k, pid, f, c, TIMES_TIMESPEC);
     }
   } else if n == LX_UMASK {
     r = 18;                                 // 022: not kept, and the mode is not either

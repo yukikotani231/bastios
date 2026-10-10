@@ -6,7 +6,8 @@
 //   blocks 5..       file data and the maps that find it
 //
 // A directory entry is: byte 0 its kind (0 unused, 1 a file, 2 a
-// directory, which holds no data), byte 1 its name length, then as
+// directory, which holds no data, 3 an orphan: a file removed while it
+// was open, nameless until its last close), byte 1 its name length, then as
 // little-endian u64s: at 8 its parent (another entry, or DTOP for the top
 // directory, "disk"), at 16 its size, at 24 its root map block (0 for no
 // data), at 32 its mode, at 40 its modification time; bytes 56..256 its
@@ -63,6 +64,7 @@ const NO_DISK_FILE: u64 = 18446744073709551615;
 
 // Directory entry fields.
 const E_KIND: u64 = 0;
+const K_ORPHAN: u64 = 3;               // kind: a file removed while open
 const E_NLEN: u64 = 1;
 const E_PARENT: u64 = 8;
 const E_SIZE: u64 = 16;
@@ -281,10 +283,18 @@ fn walk(d: &mut DiskFs, r: u64, u: u8)
   ensures disk_ok(d)
 {
   bset(&mut d.used, r, u);
-  if !block_in(&mut d.dev, &mut d.sec, r, &mut d.root) {
+  walk_from(&mut d, r, 0, u);
+}
+
+/// Marks the blocks under entries `from`.. of root map r (not r itself).
+fn walk_from(d: &mut DiskFs, r: u64, from: u64, u: u8)
+  requires disk_ok(d) && r >= DATA_B0 && r < MAX_BLOCKS
+  ensures disk_ok(d)
+{
+  if from >= PTRS || !block_in(&mut d.dev, &mut d.sec, r, &mut d.root) {
     return;
   }
-  let mut j = 0;
+  let mut j = from;
   while j < PTRS
     invariant j <= PTRS && disk_ok(d)
   {
@@ -380,6 +390,11 @@ fn disk_mount(dev: Blk) -> DiskFs
       if r != 0 {
         walk(&mut d, r, 1);
       }
+    } else if cast[u64](bget(d.dir, i * DENT + E_KIND)) == K_ORPHAN {
+      // Removed while open, then the power went: nothing has it open now.
+      // Its blocks stay unmarked, so they are free.
+      bset(&mut d.dir, i * DENT + E_KIND, 0);
+      dir_flush(&mut d, i / 2);
     }
     i = i + 1;
   }
@@ -405,11 +420,45 @@ fn disk_unmount(d: DiskFs) -> Blk
 
 // ---------------------------------------------------------------- the directory
 
-/// Is entry i in use?
+/// Is entry i in use: a file, a directory, or an orphan (a file removed
+/// while still open, which keeps its data until the last close)?
 fn dent_used(d: &DiskFs, i: u64) -> bool
   requires disk_ok(d) && i < DSLOTS
 {
+  let k = cast[u64](bget(d.dir, i * DENT));
+  return i < d.slots && (k == 1 || k == 2 || k == K_ORPHAN);
+}
+
+/// Does entry i have a name (a file or a directory, not an orphan)?
+fn dent_live(d: &DiskFs, i: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+{
   return i < d.slots && (bget(d.dir, i * DENT) == 1 || bget(d.dir, i * DENT) == 2);
+}
+
+/// Is entry i an orphan?
+fn dent_orphan(d: &DiskFs, i: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+{
+  return i < d.slots && cast[u64](bget(d.dir, i * DENT)) == K_ORPHAN;
+}
+
+/// Takes entry i's name away but keeps its data, while it is open: one
+/// sector write. disk_remove frees it at the last close, and a mount
+/// frees any a power cut left behind.
+fn disk_orphan(d: &mut DiskFs, i: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+  ensures disk_ok(d)
+{
+  if bget(d.dir, i * DENT) != 1 {
+    return false;
+  }
+  bset(&mut d.dir, i * DENT + E_KIND, cast[u8](K_ORPHAN));
+  if !ent_flush(&mut d, i) {
+    bset(&mut d.dir, i * DENT + E_KIND, 1);
+    return false;
+  }
+  return true;
 }
 
 /// Is entry i a directory?
@@ -467,7 +516,7 @@ fn disk_size(d: &DiskFs, i: u64) -> u64
 fn dent_named(d: &DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
   requires disk_ok(d) && i < DSLOTS && from + n <= blen(name)
 {
-  if !dent_used(d, i) || cast[u64](bget(d.dir, i * DENT + E_NLEN)) != n || n > DNAME_MAX {
+  if !dent_live(d, i) || cast[u64](bget(d.dir, i * DENT + E_NLEN)) != n || n > DNAME_MAX {
     return false;
   }
   let mut k = 0;
@@ -507,7 +556,7 @@ fn disk_has_children(d: &DiskFs, p: u64) -> bool
   while i < DSLOTS
     invariant i <= DSLOTS
   {
-    if dent_used(d, i) && dent_parent(d, i) == p {
+    if dent_live(d, i) && dent_parent(d, i) == p {
       return true;
     }
     i = i + 1;
@@ -552,7 +601,7 @@ fn disk_find(d: &DiskFs, name: &Bytes, from: u64, n: u64) -> u64
 /// Creates an empty file (or directory) at the path name[from..from + n].
 /// Its directory must exist, its last component be 1 to DNAME_MAX bytes,
 /// and the name be free. Returns the entry or DSLOTS.
-fn disk_create(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool) -> u64
+fn disk_create(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, now: u64) -> u64
   requires disk_ok(d) && from + n <= blen(name)
   ensures disk_ok(d) && result <= DSLOTS
 {
@@ -589,6 +638,7 @@ fn disk_create(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool) -> u6
       }
       bset(&mut d.dir, i * DENT + E_NLEN, cast[u8](l));
       dent_set(&mut d, i, E_PARENT, p);
+      dent_set(&mut d, i, E_MTIME, now);
       let mut j = 0;
       while j < l
         invariant j <= l && disk_ok(d)
@@ -615,7 +665,7 @@ fn disk_move(d: &mut DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
   requires disk_ok(d) && i < DSLOTS && from + n <= blen(name)
   ensures disk_ok(d)
 {
-  if !dent_used(d, i) {
+  if !dent_live(d, i) {
     return false;
   }
   let end = from + n;
@@ -687,7 +737,7 @@ fn disk_remove(d: &mut DiskFs, i: u64) -> bool
   ensures disk_ok(d)
 {
   let r = dent_root(d, i);
-  let file = bget(d.dir, i * DENT + E_KIND) == 1;
+  let file = bget(d.dir, i * DENT + E_KIND) == 1 || cast[u64](bget(d.dir, i * DENT + E_KIND)) == K_ORPHAN;
   bset(&mut d.dir, i * DENT + E_KIND, 0);
   if !ent_flush(&mut d, i) {
     return false;
@@ -706,7 +756,7 @@ fn disk_comp(d: &DiskFs, i: u64, buf: &mut Bytes, at: u64) -> u64
   ensures blen(buf) == old(blen(buf))
   ensures result == NO_DISK_FILE || (at <= blen(buf) && result <= blen(buf) - at && result <= DNAME_MAX)
 {
-  if !dent_used(d, i) {
+  if !dent_live(d, i) {
     return NO_DISK_FILE;
   }
   let n = cast[u64](bget(d.dir, i * DENT + E_NLEN));
@@ -740,7 +790,7 @@ fn disk_name(d: &DiskFs, i: u64, buf: &mut Bytes, at: u64) -> u64
     invariant steps <= DSLOTS && total <= steps * (DNAME_MAX + 1)
   {
     let l = cast[u64](bget(d.dir, c * DENT + E_NLEN));
-    if !dent_used(d, c) || l == 0 || l > DNAME_MAX || steps == DSLOTS {
+    if !dent_live(d, c) || l == 0 || l > DNAME_MAX || steps == DSLOTS {
       return NO_DISK_FILE;      // free, damaged, or a cycle
     }
     total = total + l + 1;
@@ -936,7 +986,7 @@ fn valid_in(size: u64, b: u64) -> u64
 /// entirely or not at all, even across a power cut (see the top of this
 /// file). Returns the count (short only at the 1 GiB limit), 0 if the disk
 /// is full or fails, or NO_DISK_FILE if there is no file.
-fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64) -> u64
+fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -> u64
   requires disk_ok(d) && i < DSLOTS && n <= blen(buf) && n <= BLOCK
   ensures disk_ok(d)
   ensures result <= n || result == NO_DISK_FILE
@@ -1035,13 +1085,16 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64) -> u64
   // The switch: one sector.
   let size_raw = dent_get(d, i, E_SIZE);
   let root_raw = dent_get(d, i, E_ROOT);
+  let mtime_raw = dent_get(d, i, E_MTIME);
   dent_set(&mut d, i, E_SIZE, newsize);
   dent_set(&mut d, i, E_ROOT, nr);
+  dent_set(&mut d, i, E_MTIME, now);
   if !ent_flush(&mut d, i) {
     // The sector may or may not be on the disk: keep both trees (the
     // next mount frees the one that lost) and the old one in memory.
     dent_set(&mut d, i, E_SIZE, size_raw);
     dent_set(&mut d, i, E_ROOT, root_raw);
+    dent_set(&mut d, i, E_MTIME, mtime_raw);
     return 0;
   }
   free_block(&mut d, old0);
@@ -1053,7 +1106,7 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64) -> u64
 }
 
 /// Empties the file in entry i.
-fn disk_truncate(d: &mut DiskFs, i: u64) -> bool
+fn disk_truncate(d: &mut DiskFs, i: u64, now: u64) -> bool
   requires disk_ok(d) && i < DSLOTS
   ensures disk_ok(d)
 {
@@ -1063,6 +1116,7 @@ fn disk_truncate(d: &mut DiskFs, i: u64) -> bool
   }
   dent_set(&mut d, i, E_SIZE, 0);
   dent_set(&mut d, i, E_ROOT, 0);
+  dent_set(&mut d, i, E_MTIME, now);
   if !ent_flush(&mut d, i) {
     return false;
   }
@@ -1070,4 +1124,153 @@ fn disk_truncate(d: &mut DiskFs, i: u64) -> bool
     walk(&mut d, r, 0);
   }
   return true;
+}
+
+/// Sets the size of the file in entry i to len bytes: growing reads as
+/// zeros, shrinking drops the blocks past the end. Like a write, it happens
+/// entirely or not at all (one entry-sector switch). It keeps the rule that
+/// the bytes past a file's end are zeros and the blocks wholly past it are
+/// holes, which is what lets growing only move the end.
+fn disk_resize(d: &mut DiskFs, i: u64, size_to: u64, now: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+  ensures disk_ok(d)
+{
+  let size = disk_size(d, i);
+  if size == NO_DISK_FILE || dent_dir(d, i) || size_to > DFILE_MAX {
+    return false;
+  }
+  if size_to == 0 {
+    return disk_truncate(&mut d, i, now);
+  }
+  let root0 = dent_root(d, i);
+  let size_raw = dent_get(d, i, E_SIZE);
+  let root_raw = dent_get(d, i, E_ROOT);
+  let mtime_raw = dent_get(d, i, E_MTIME);
+  if size_to >= size || root0 == 0 {
+    dent_set(&mut d, i, E_SIZE, size_to);
+    dent_set(&mut d, i, E_MTIME, now);
+    if !ent_flush(&mut d, i) {
+      dent_set(&mut d, i, E_SIZE, size_raw);
+      dent_set(&mut d, i, E_MTIME, mtime_raw);
+      return false;
+    }
+    return true;
+  }
+  // Shrinking: copy the last block kept (its tail zeroed), its map, and
+  // the root, each cut off after the new end.
+  let bl = (size_to - 1) / BLOCK;
+  let il = bl / PTRS;
+  let kl = bl % PTRS;
+  if !block_in(&mut d.dev, &mut d.sec, root0, &mut d.root) {
+    return false;
+  }
+  let la0 = ptr_in(d, d.root, 8 * il);
+  if !block_in(&mut d.dev, &mut d.sec, la0, &mut d.la) {
+    return false;
+  }
+  // The old map, to free its tail once the switch is done.
+  let mut c = 0;
+  while c < BLOCK
+    invariant c <= BLOCK && disk_ok(d)
+  {
+    bset(&mut d.lb, c, bget(d.la, c));
+    c = c + 1;
+  }
+  let prev = ptr_in(d, d.la, 8 * kl);
+  let mut nd = prev;
+  if prev != 0 && size_to % BLOCK != 0 {
+    if !block_in(&mut d.dev, &mut d.sec, prev, &mut d.data) {
+      return false;
+    }
+    zero(&mut d.data, size_to % BLOCK, BLOCK);
+    nd = alloc_block(&mut d);
+    if nd == 0 {
+      return false;
+    }
+    if !block_out(&mut d.dev, &mut d.sec, nd, d.data) {
+      free_block(&mut d, nd);
+      return false;
+    }
+  }
+  put_u64(&mut d.la, 8 * kl, nd);
+  zero(&mut d.la, 8 * kl + 8, BLOCK);
+  let mut na = 0;
+  let mut ok = true;
+  if la0 != 0 {
+    na = alloc_block(&mut d);
+    ok = na != 0 && block_out(&mut d.dev, &mut d.sec, na, d.la);
+  }
+  put_u64(&mut d.root, 8 * il, na);
+  zero(&mut d.root, 8 * il + 8, BLOCK);
+  let mut nr = 0;
+  if ok {
+    nr = alloc_block(&mut d);
+    ok = nr != 0 && block_out(&mut d.dev, &mut d.sec, nr, d.root);
+  }
+  if !ok {
+    if nd != prev {
+      free_block(&mut d, nd);
+    }
+    free_block(&mut d, na);
+    free_block(&mut d, nr);
+    return false;
+  }
+  // The switch: one sector.
+  dent_set(&mut d, i, E_SIZE, size_to);
+  dent_set(&mut d, i, E_ROOT, nr);
+  dent_set(&mut d, i, E_MTIME, now);
+  if !ent_flush(&mut d, i) {
+    // As in disk_write: keep both trees; the next mount frees the loser.
+    dent_set(&mut d, i, E_SIZE, size_raw);
+    dent_set(&mut d, i, E_ROOT, root_raw);
+    dent_set(&mut d, i, E_MTIME, mtime_raw);
+    return false;
+  }
+  // Free what only the old tree held.
+  if nd != prev {
+    free_block(&mut d, prev);
+  }
+  let mut k = kl + 1;
+  while k < PTRS
+    invariant k <= PTRS + 1 && disk_ok(d)
+  {
+    free_block(&mut d, ptr_in(d, d.lb, 8 * k));
+    k = k + 1;
+  }
+  free_block(&mut d, la0);
+  walk_from(&mut d, root0, il + 1, 0);
+  free_block(&mut d, root0);
+  return true;
+}
+
+/// Entry i's mode (permission bits).
+fn disk_mode(d: &DiskFs, i: u64) -> u64
+  requires disk_ok(d) && i < DSLOTS
+{
+  return dent_get(d, i, E_MODE) % 65536;
+}
+
+/// Entry i's modification time, in seconds.
+fn disk_mtime(d: &DiskFs, i: u64) -> u64
+  requires disk_ok(d) && i < DSLOTS
+{
+  return dent_get(d, i, E_MTIME);
+}
+
+/// Sets entry i's mode (when `mode` is below 65536) and modification time
+/// (when `mtime` is not NO_DISK_FILE): one sector write.
+fn disk_set_meta(d: &mut DiskFs, i: u64, mode: u64, mtime: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+  ensures disk_ok(d)
+{
+  if !dent_used(d, i) {
+    return false;
+  }
+  if mode < 65536 {
+    dent_set(&mut d, i, E_MODE, mode);
+  }
+  if mtime != NO_DISK_FILE {
+    dent_set(&mut d, i, E_MTIME, mtime);
+  }
+  return ent_flush(&mut d, i);
 }

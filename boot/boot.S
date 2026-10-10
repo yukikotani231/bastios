@@ -439,6 +439,11 @@ from_kernel:
         mov     %rsp, %rax
         and     $-CORE_BLOCK, %rax
         mov     %rdi, CORE_IDLE(%rax)
+        /* Return with interrupts off. bst_cpu_wait reports one vector; a
+         * second interrupt taken between its `hlt` and `cli` would overwrite
+         * it, and an 8259 interrupt lost that way is never acknowledged,
+         * which blocks its line and every lower-priority one for good. */
+        andq    $~0x200, 152(%rsp)      /* IF in the saved rflags */
         pop     %r15
         pop     %r14
         pop     %r13

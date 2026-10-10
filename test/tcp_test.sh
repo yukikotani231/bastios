@@ -524,7 +524,11 @@ def zero_window_scenario():
     alive = q.state == "ESTABLISHED"
     q.rwin = 8192
     q.ack_now()                         # the window reopens
+    # We dropped the probe byte (no room), so the guest must go back to it
+    # at once, not leave a hole for its backed-off resend timer to fill.
+    prompt = until(lambda: len(q.got) > 0, 2)
     finished = until(lambda: q.done() and b"bastios> " in out[mark:], 60)
+    check(prompt, "zero window: the guest resends the dropped probe byte as soon as the window reopens")
     check(alive, "zero window: the guest keeps the connection while we answer its probes")
     check(len(probes) >= 3, f"zero window: the guest probed our closed window ({len(probes)} probes)")
     check(guest_shut, "zero window: the guest closed its own window when its buffers filled")

@@ -58,6 +58,7 @@ struct Vfs {
   xfer: Bytes,          // the transfer buffer
   disk: DiskFs,         // the file system on the disk
   name: Bytes,          // a directory's name, while vfs_readdir lists it
+  now: u64,             // the time, in seconds, for modification times
 }
 
 spec fn vfs_ok(v: &Vfs) -> bool {
@@ -68,7 +69,7 @@ fn vfs_new(disk: DiskFs) -> Vfs
   requires disk_ok(disk)
   ensures vfs_ok(result)
 {
-  return Vfs { ram: ram_new(), ftab: alloc(FTAB_LEN), xfer: balloc(XFER), disk: disk, name: balloc(NAMEBUF) };
+  return Vfs { ram: ram_new(), ftab: alloc(FTAB_LEN), xfer: balloc(XFER), disk: disk, name: balloc(NAMEBUF), now: 0 };
 }
 
 /// Frees everything (at power off): every in-memory file's pages go back,
@@ -152,7 +153,7 @@ fn vfs_open(v: &mut Vfs, mem: &mut Mem, base: u64, flags: u64, n: u64) -> u64
     if flags / O_CREATE % 2 == 0 || !path_ok(v, n) || !parent_ok(&mut v, n) {
       return NO_FD;
     }
-    i = ram_create(&mut v.ram, v.xfer, n, false);
+    i = ram_create(&mut v.ram, v.xfer, n, false, v.now);
     if i >= NFILES {
       return NO_FD;
     }
@@ -165,6 +166,7 @@ fn vfs_open(v: &mut Vfs, mem: &mut Mem, base: u64, flags: u64, n: u64) -> u64
       Node::File(f) => {
         let mut g = f;
         file_truncate(&mut g, &mut mem);
+        g.mtime = v.now;
         put_node(&mut v.ram, i, Node::File(g));
       },
     }
@@ -187,7 +189,7 @@ fn disk_open(v: &mut Vfs, row: u64, flags: u64, n: u64) -> u64
     if flags / O_CREATE % 2 == 0 || !path_ok(v, n) || !parent_ok(&mut v, n) {
       return NO_FD;
     }
-    i = disk_create(&mut v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX, false);
+    i = disk_create(&mut v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX, false, v.now);
     if i >= DSLOTS {
       return NO_FD;
     }
@@ -195,7 +197,7 @@ fn disk_open(v: &mut Vfs, row: u64, flags: u64, n: u64) -> u64
     return NO_FD;
   }
   if flags / O_TRUNC % 2 == 1 && flags / O_WRITE % 2 == 1 {
-    if !disk_truncate(&mut v.disk, i) {
+    if !disk_truncate(&mut v.disk, i, v.now) {
       return NO_FD;
     }
   }
@@ -207,11 +209,13 @@ fn disk_open(v: &mut Vfs, row: u64, flags: u64, n: u64) -> u64
 }
 
 /// Closes a row. Returns false if it was not open.
-fn vfs_close(v: &mut Vfs, row: u64) -> bool
-  requires vfs_ok(v) && row < FD_ROWS
-  ensures vfs_ok(v)
+fn vfs_close(v: &mut Vfs, mem: &mut Mem, row: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem) && row < FD_ROWS
+  ensures vfs_ok(v) && mem_ok(mem)
 {
-  if fget(v.ftab, row, FD_FS) == 0 {
+  let fs = fget(v.ftab, row, FD_FS);
+  let node = fget(v.ftab, row, FD_NODE);
+  if fs == 0 {
     return false;
   }
   let mut f = 0;
@@ -221,19 +225,27 @@ fn vfs_close(v: &mut Vfs, row: u64) -> bool
     fset(&mut v.ftab, row, f, 0);
     f = f + 1;
   }
+  // The last close of a file removed while open frees it.
+  if !node_open(v.ftab, fs, node) {
+    if fs == FS_RAM && node < NFILES && ram_len(&mut v.ram, node) == 0 {
+      ram_remove(&mut v.ram, &mut mem, node);
+    } else if fs == FS_DISK && node < DSLOTS && dent_orphan(v.disk, node) {
+      disk_remove(&mut v.disk, node);
+    }
+  }
   return true;
 }
 
 /// Closes every row of process row block `base` (when the process ends).
-fn vfs_close_all(v: &mut Vfs, base: u64)
-  requires vfs_ok(v) && base + NFD <= FD_ROWS
-  ensures vfs_ok(v)
+fn vfs_close_all(v: &mut Vfs, mem: &mut Mem, base: u64)
+  requires vfs_ok(v) && mem_ok(mem) && base + NFD <= FD_ROWS
+  ensures vfs_ok(v) && mem_ok(mem)
 {
   let mut fd = 0;
   while fd < NFD
-    invariant fd <= NFD && vfs_ok(v)
+    invariant fd <= NFD && vfs_ok(v) && mem_ok(mem)
   {
-    vfs_close(&mut v, base + fd);
+    vfs_close(&mut v, &mut mem, base + fd);
     fd = fd + 1;
   }
 }
@@ -279,7 +291,7 @@ fn vfs_write(v: &mut Vfs, mem: &mut Mem, row: u64, n: u64) -> u64
     if fget(v.ftab, row, FD_MODE) / O_APPEND % 2 == 1 {
       off = disk_size(v.disk, i);
     }
-    let w = disk_write(&mut v.disk, i, off, v.xfer, n);
+    let w = disk_write(&mut v.disk, i, off, v.xfer, n, v.now);
     if w == NO_DISK_FILE {
       return NO_FD;
     }
@@ -299,11 +311,46 @@ fn vfs_write(v: &mut Vfs, mem: &mut Mem, row: u64, n: u64) -> u64
         off = g.size;
       }
       put = file_write(&mut g, &mut mem, off, v.xfer, n);
+      if put > 0 {
+        g.mtime = v.now;
+      }
       put_node(&mut v.ram, i, Node::File(g));
       vfs_advance(&mut v, row, off, put);
     },
   }
   return put;
+}
+
+/// Sets the size of the file open in `row` to size_to bytes (ftruncate):
+/// growing reads as zeros. The row must be open for writing; its offset
+/// stays where it is. False otherwise, or if the disk fails or is full.
+fn vfs_truncate(v: &mut Vfs, mem: &mut Mem, row: u64, size_to: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem) && row < FD_ROWS
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  if fget(v.ftab, row, FD_MODE) / O_WRITE % 2 == 0 {
+    return false;
+  }
+  let i = fget(v.ftab, row, FD_NODE);
+  if fget(v.ftab, row, FD_FS) == FS_DISK && i < DSLOTS {
+    return disk_resize(&mut v.disk, i, size_to, v.now);
+  }
+  if fget(v.ftab, row, FD_FS) != FS_RAM || i >= NFILES {
+    return false;
+  }
+  let mut ok = false;
+  match take_node(&mut v.ram, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      let mut g = f;
+      ok = file_resize(&mut g, &mut mem, size_to);
+      if ok {
+        g.mtime = v.now;
+      }
+      put_node(&mut v.ram, i, Node::File(g));
+    },
+  }
+  return ok;
 }
 
 /// Sets a row's offset to off + k, saturating.
@@ -338,23 +385,31 @@ fn vfs_seek(v: &mut Vfs, row: u64, off: u64) -> bool
 }
 
 /// Removes the file named by the first n bytes of the transfer buffer.
-/// Returns false if there is none or it is open.
+/// Returns false if there is none (or it is a directory). A file that is
+/// open loses its name now and its data at the last close, as on Linux.
 fn vfs_unlink(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
   requires vfs_ok(v) && mem_ok(mem) && n <= XFER
   ensures vfs_ok(v) && mem_ok(mem)
 {
   if on_disk(v, n) {
     let d = disk_find(v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX);
-    if d >= DSLOTS || node_open(v.ftab, FS_DISK, d) || dent_dir(v.disk, d) {
+    if d >= DSLOTS || dent_dir(v.disk, d) {
       return false;
+    }
+    if node_open(v.ftab, FS_DISK, d) {
+      return disk_orphan(&mut v.disk, d);
     }
     return disk_remove(&mut v.disk, d);
   }
   let i = ram_find(&mut v.ram, v.xfer, n);
-  if i >= NFILES || node_open(v.ftab, FS_RAM, i) || ram_is_dir(&mut v.ram, i) {
+  if i >= NFILES || ram_is_dir(&mut v.ram, i) {
     return false;
   }
-  ram_remove(&mut v.ram, &mut mem, i);
+  if node_open(v.ftab, FS_RAM, i) {
+    ram_orphan(&mut v.ram, i);
+  } else {
+    ram_remove(&mut v.ram, &mut mem, i);
+  }
   return true;
 }
 
@@ -483,7 +538,7 @@ fn vfs_install(v: &mut Vfs, mem: &mut Mem, name: Str, data: Str) -> bool
   let n = blen(nm);
   let mut i = ram_find(&mut v.ram, nm, n);
   if i >= NFILES {
-    i = ram_create(&mut v.ram, nm, n, false);
+    i = ram_create(&mut v.ram, nm, n, false, v.now);
   }
   bfree(nm);
   if i >= NFILES {
@@ -584,12 +639,12 @@ fn vfs_mkdir(v: &mut Vfs, n: u64) -> bool
     if disk_find(v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX) < DSLOTS {
       return false;
     }
-    return disk_create(&mut v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX, true) < DSLOTS;
+    return disk_create(&mut v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX, true, v.now) < DSLOTS;
   }
   if ram_find(&mut v.ram, v.xfer, n) < NFILES {
     return false;
   }
-  return ram_create(&mut v.ram, v.xfer, n, true) < NFILES;
+  return ram_create(&mut v.ram, v.xfer, n, true, v.now) < NFILES;
 }
 
 /// Removes the directory named by the first n bytes of the transfer buffer
@@ -880,4 +935,68 @@ fn vfs_rename(v: &mut Vfs, n: u64, m: u64) -> bool
     }
   }
   return ram_reprefix(&mut v.ram, node, n, v.xfer, m);
+}
+
+// ---------------------------------------------------------------- metadata
+
+/// The handle of the file open in `row` (as vfs_lookup gives), or NO_FILE.
+fn vfs_row_file(v: &Vfs, row: u64) -> u64
+  requires vfs_ok(v) && row < FD_ROWS
+  ensures result < NFILES + DSLOTS || result == NO_FILE
+{
+  let fs = fget(v.ftab, row, FD_FS);
+  let node = fget(v.ftab, row, FD_NODE);
+  if fs == FS_RAM && node < NFILES {
+    return node;
+  }
+  if fs == FS_DISK && node < DSLOTS {
+    return NFILES + node;
+  }
+  return NO_FILE;
+}
+
+/// The permission bits (such as 0644) and modification time (seconds) of
+/// handle f, from vfs_lookup or vfs_dir_lookup. ok is false if it names
+/// nothing. The top directory and "disk" are 0755 from time 0.
+fn vfs_meta(v: &mut Vfs, f: u64) -> FMeta
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  if f < NFILES {
+    return ram_meta(&mut v.ram, f);
+  }
+  if f < NFILES + DSLOTS {
+    if !dent_used(v.disk, f - NFILES) {
+      return FMeta { ok: false, mode: 0, mtime: 0 };
+    }
+    return FMeta { ok: true, mode: disk_mode(v.disk, f - NFILES), mtime: disk_mtime(v.disk, f - NFILES) };
+  }
+  if f == VDIR_ROOT || f == VDIR_DISK {
+    return FMeta { ok: true, mode: 493, mtime: 0 };
+  }
+  return FMeta { ok: false, mode: 0, mtime: 0 };
+}
+
+/// Sets handle f's permission bits (when `mode` is below 4096) and its
+/// modification time (when `mtime` is not NO_FILE). False if f names
+/// nothing that keeps them, or the disk fails.
+fn vfs_set_meta(v: &mut Vfs, f: u64, mode: u64, mtime: u64) -> bool
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  let mut m = 65536;
+  if mode < 4096 {
+    m = mode;
+  }
+  if f < NFILES {
+    return ram_set_meta(&mut v.ram, f, m, mtime);
+  }
+  if f < NFILES + DSLOTS {
+    let mut t = NO_DISK_FILE;
+    if mtime != NO_FILE {
+      t = mtime;
+    }
+    return disk_set_meta(&mut v.disk, f - NFILES, m, t);
+  }
+  return false;
 }

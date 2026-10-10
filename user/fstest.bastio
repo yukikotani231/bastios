@@ -1,7 +1,7 @@
 // Exercises the file system calls: writing and reading back a file that
 // spans several pages, seeking, appending, a hole that reads as zeros,
 // removing, running out of descriptors, descriptors that are not open, and
-// offsets past 3 MiB.
+// offsets past 3 MiB, and truncating to a length.
 // It runs once on the disk ("disk/big", if there is a disk) and once in
 // memory ("big"), and ends by leaving "big" open, to show that exiting
 // closes it. Prints "fstest: ok", or the step that failed (also the exit
@@ -178,11 +178,30 @@ fn large(big: &Bytes, nl: u64, buf: &mut Bytes) -> u64
   return 0;
 }
 
+/// Step 17: truncating the file from step 15 (AT2 + 4096 bytes) to just
+/// past AT1 and growing it back: the cut bytes and blocks read as zeros.
+fn resize(big: &Bytes, nl: u64, buf: &mut Bytes) -> bool
+  requires nl <= blen(big) && blen(buf) == 4096
+  ensures blen(buf) == 4096
+{
+  let rd = f_open(big, nl, O_READ);
+  let refused = f_truncate(rd, 0) == NOT_OK;
+  f_close(rd);
+  let fd = f_open(big, nl, O_READ + O_WRITE);
+  let ok = refused && fd != NOT_OK && f_truncate(fd, AT1 + 50) == 0 && f_stat(big, nl) == AT1 + 50
+    && check_at(fd, &mut buf, AT1, 50, false) && f_read(fd, &mut buf) == 0
+    && f_truncate(fd, AT2 + 4096) == 0 && f_stat(big, nl) == AT2 + 4096
+    && check_at(fd, &mut buf, AT1 + 50, 150, true) && check_at(fd, &mut buf, AT2, 4096, true)
+    && check_at(fd, &mut buf, AT1, 50, false);
+  f_close(fd);
+  return ok;
+}
+
 /// Runs every step on the file named by the first nl bytes of `big`.
 /// Returns 0, or the step that failed.
 fn run(big: &Bytes, nl: u64, buf: &mut Bytes, keep_open: bool) -> u64
   requires nl <= blen(big) && blen(buf) == 4096
-  ensures blen(buf) == 4096 && result <= 16
+  ensures blen(buf) == 4096 && result <= 17
 {
   let mut step = 0;
 
@@ -211,10 +230,13 @@ fn run(big: &Bytes, nl: u64, buf: &mut Bytes, keep_open: bool) -> u64
   if step == 0 && f_write(rd, buf, 1) != NOT_OK {
     step = 6;
   }
-  // 7. A file that is open cannot be removed.
-  if step == 0 && f_unlink(big, nl) != NOT_OK {
+  // 7. A second descriptor reads the same bytes (step 11 removes the
+  // file while one is open).
+  let rd2 = f_open(big, nl, O_READ);
+  if step == 0 && read_check(rd2, &mut buf, 0) != BIG {
     step = 7;
   }
+  f_close(rd2);
   f_close(rd);
   // 8. Appending lands at the end, wherever the offset is.
   let ap = f_open(big, nl, O_WRITE + O_APPEND);
@@ -237,10 +259,16 @@ fn run(big: &Bytes, nl: u64, buf: &mut Bytes, keep_open: bool) -> u64
     step = 10;
   }
   f_close(ho);
-  // 11. Removing it; then it is gone.
+  // 11. Removing it while it is open: the name is gone at once, and the
+  // open descriptor still reads the data until it is closed (as on Linux).
+  let op = f_open(big, nl, O_READ);
   if step == 0 && (f_unlink(big, nl) != 0 || f_stat(big, nl) != NOT_OK || f_open(big, nl, O_READ) != NOT_OK) {
     step = 11;
   }
+  if step == 0 && (f_read(op, &mut buf) != 4096 || cast[u64](bget(buf, 0)) != pat(0)) {
+    step = 11;
+  }
+  f_close(op);
   // 12. Eight descriptors per process, then no more.
   let mut i = 0;
   let mut opened = 0;
@@ -269,6 +297,9 @@ fn run(big: &Bytes, nl: u64, buf: &mut Bytes, keep_open: bool) -> u64
   // disk) and past 3 MiB, with a hole in between that reads as zeros.
   if step == 0 {
     step = large(big, nl, &mut buf);
+  }
+  if step == 0 && !resize(big, nl, &mut buf) {
+    step = 17;
   }
   f_unlink(big, nl);
   // 14. Leave the file open for writing: exiting must close it, so the
