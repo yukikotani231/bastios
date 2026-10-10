@@ -91,6 +91,11 @@ const LX_WAIT4: u64 = 61;
 const LX_GETTID: u64 = 186;
 const LX_FUTEX: u64 = 202;
 
+// What thread_exec says.
+const EXEC_GO: u64 = 0;              // no other thread is left: go on
+const EXEC_NO: u64 = 1;              // pid is a thread but not the leader
+const EXEC_WAIT: u64 = 2;            // others are still on processors
+
 const SIGCHLD: u64 = 17;
 const SIGPIPE: u64 = 13;
 const WNOHANG: u64 = 1;
@@ -107,7 +112,6 @@ const S_IFREG: u64 = 0x81A4;                // a regular file, rw-r--r--
 const S_IFMT_DIR: u64 = 0x4000;             // the type bits of a directory
 const S_IFMT_REG: u64 = 0x8000;             // and of a regular file
 const INO_FILES: u64 = 1000;                // inode numbers of files: this + the handle
-const INO_FIFO: u64 = 900;                 // inode numbers of named pipes: this + the slot
 
 // ---------------------------------------------------------------- user memory
 
@@ -137,18 +141,20 @@ fn read_root(root: &mut PageTable, off: u64) -> Word
   requires pt_level(root) == 4 && off + 8 <= USER_SIZE
   ensures pt_level(root) == 4
 {
-  let mut w = Word { ok: false, v: 0 };
   if !pt_has(root, 1) {
-    return w;
+    return Word { ok: false, v: 0 };
   }
-  let mut l3 = pt_take(&mut root, 1);
-  if pt_has(l3, 0) {
-    let mut l2 = pt_take(&mut l3, 0);
-    w = read_l2(&mut l2, off);
-    pt_put(&mut l3, 0, l2);
+  return pt_borrow(&mut root, 1, read_l3, off);
+}
+
+/// read_root below the top-level table, in place.
+fn read_l3(l3: &mut PageTable, off: u64) -> Word
+  requires pt_level(l3) == 3 && off + 8 <= USER_SIZE
+{
+  if !pt_has(l3, 0) {
+    return Word { ok: false, v: 0 };
   }
-  pt_put(&mut root, 1, l3);
-  return w;
+  return pt_borrow(&mut l3, 0, read_l2, off);
 }
 
 /// The 8 bytes at window offset off, most significant first.
@@ -373,6 +379,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     let flags = pget(k.procs, pid, F_REGS + R_R10);
     let fd = pget(k.procs, pid, F_REGS + R_R8);
     let off = pget(k.procs, pid, F_REGS + R_R9);
+    if flags / MAP_FIXED % 2 == 1 && !win_quiet(&mut k, pid) {
+      return lx_retry(&mut k, pid, n);      // MAP_FIXED unmaps: another thread of pid runs on a processor
+    }
     ret(&mut k.procs, pid, lx_mmap(&mut k, pid, a, b, flags, fd, off));
     return KEEP;
   }
@@ -422,9 +431,13 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_EXECVE {
-    if !thread_exec(&mut k, mmu, pid) {
+    let te = thread_exec(&mut k, mmu, pid);
+    if te == EXEC_NO {
       ret(&mut k.procs, pid, EINVAL);       // from a thread other than the leader
       return KEEP;
+    }
+    if te == EXEC_WAIT {
+      return lx_retry(&mut k, pid, LX_EXECVE);   // its other threads are still ending
     }
     ret(&mut k.procs, pid, lx_execve(&mut k, mmu, pid, a, b, c));
     return KEEP;
@@ -1214,25 +1227,40 @@ fn lx_map_pages(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, from: u64, to: u
     Space::Mapped(mut root) => {
       let mut ok = false;
       if pt_has(root, 1) {
-        let mut l3 = pt_take(&mut root, 1);
-        if pt_has(l3, 0) {
-          let mut l2 = pt_take(&mut l3, 0);
-          ok = true;
-          let mut p = from;
-          while ok && p < to
-            invariant mem_ok(m) && pt_level(l2) == 2 && to <= STACK_FIRST
-          {
-            ok = w_map(&mut m, &mut l2, p);
-            p = p + 1;
-          }
-          pt_put(&mut l3, 0, l2);
-        }
-        pt_put(&mut root, 1, l3);
+        ok = pt_borrow(&mut root, 1, map_l3, &mut m, from, to);
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return ok;
     },
   }
+}
+
+/// lx_map_pages below the top-level table, in place: other threads may be
+/// running on the space, and the new pages appear to them as they are
+/// mapped.
+fn map_l3(l3: &mut PageTable, m: &mut Mem, from: u64, to: u64) -> bool
+  requires pt_level(l3) == 3 && mem_ok(m) && to <= STACK_FIRST
+  ensures mem_ok(m)
+{
+  if !pt_has(l3, 0) {
+    return false;
+  }
+  return pt_borrow(&mut l3, 0, map_l2, &mut m, from, to);
+}
+
+fn map_l2(l2: &mut PageTable, m: &mut Mem, from: u64, to: u64) -> bool
+  requires pt_level(l2) == 2 && mem_ok(m) && to <= STACK_FIRST
+  ensures mem_ok(m)
+{
+  let mut ok = true;
+  let mut p = from;
+  while ok && p < to
+    invariant mem_ok(m) && pt_level(l2) == 2 && to <= STACK_FIRST
+  {
+    ok = w_map(&mut m, &mut l2, p);
+    p = p + 1;
+  }
+  return ok;
 }
 
 /// brk: grows the heap (page by page) up to `want`; never shrinks it, and

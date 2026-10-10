@@ -20,6 +20,9 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
   (`ps` shows it as `socket`). The network card wakes it by interrupt:
   MSI-X on virtio-net, the PCI interrupt line through the 8259 on the
   e1000, asked for only while someone sleeps. `make netbench` measures it.
+- The threads of a Linux process run on several processors at once. They
+  used to take turns on one: four threads of pure computation now finish
+  about twice as fast on four processors under QEMU.
 - `sendfile`, `copy_file_range`, `preadv`, `pwritev`, `statx`,
   `fallocate` (growing), `fadvise64`, `memfd_create`, `getcpu`, and
   `FIONREAD` on a pipe. `flock` and `fcntl` record locks are accepted but
@@ -110,6 +113,11 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Changed
 
+- Named pipes live in the file system: `mknod`/`mkfifo` make a file with
+  the FIFO type bits, so a FIFO is listed (type `p`), renamed, linked and
+  removed like any file, and on the disk it survives a reboot. Only four
+  can be open at once; any number can exist. BusyBox's `mkfifo` is built
+  in.
 - The disk format is now `BSTDISK2`: 4 KiB blocks, 64 directory entries
   that each hold one path component and point at their parent, two levels
   of block maps per file, and copy-on-write for every write. A disk in the

@@ -40,6 +40,9 @@ const F_FUTEX: u64 = 34;
 // session, 0 meaning the process's own pid.
 const F_PGID: u64 = 35;
 const F_SID: u64 = 36;
+// Nonzero while a Linux thread waits for the other threads of its group to
+// leave the processors, to change their shared page tables (src/lxmem.bastio).
+const F_QUIET: u64 = 37;
 const SIG_DEATH: u64 = 256;          // F_CODE of a process a signal ended: 256 + the signal
 
 // Saved register numbers.
@@ -63,13 +66,14 @@ const WAITING: u64 = 3;
 const ZOMBIE: u64 = 4;
 const LXREADING: u64 = 5;            // blocked in a Linux read of the console
 const LXWAITING: u64 = 6;            // blocked in a Linux wait4 for any child
-const RUNNING: u64 = 7;              // on a processor: its space and FPU page are out
+const RUNNING: u64 = 7;              // on a processor (with a lease on its space): its FPU page is out
 const KILLED: u64 = 8;               // RUNNING, and killed: ends when it comes back
 const NETWAIT: u64 = 9;              // waiting for the network (a ping's reply)
 const LXVFORK: u64 = 10;             // lent its address space to child F_WAIT (clone with CLONE_VM | CLONE_VFORK)
 const CONWAIT: u64 = 11;             // writing to the console, whose ring is full
 const FUTEXWAIT: u64 = 12;           // in a Linux futex wait with no timeout
 const DISKWAIT: u64 = 13;            // waiting for the disk: F_WAIT says for what (disk_wake)
+const EXITING: u64 = 14;             // RUNNING, a thread whose leader is in execve: freed when it comes back
 const SOCKWAIT: u64 = 15;            // a Linux call on a network socket that has to wait (sock_wake)
 
 const NO_RESULT: u64 = 18446744073709551615;
@@ -359,11 +363,10 @@ const EP_FDS: u64 = 16;               // descriptors one epoll instance watches
 const EP_ENTRY: u64 = 4;              // fd + 1 (0: empty), its description, events, data
 const EP_STRIDE: u64 = 65;            // 1 + EP_FDS * EP_ENTRY
 const EP_AT: u64 = 32;                // TFD_N * TFD_STRIDE
-const FIFO_N: u64 = 4;                // named pipes, in k.evt from FIFO_AT: FIFO_STRIDE words each
-const FIFO_NAME: u64 = 128;           // the longest name one can have
-const FIFO_STRIDE: u64 = 130;         // name length (0: free), pipe + 1, then the name, a byte a word
+const FIFO_N: u64 = 4;                // open named pipes, in k.evt from FIFO_AT: FIFO_STRIDE words each
+const FIFO_STRIDE: u64 = 2;           // the FIFO's file handle + 1 (0: free), its pipe + 1
 const FIFO_AT: u64 = 552;             // EP_AT + EP_N * EP_STRIDE
-const EVT_LEN: u64 = 1072;            // FIFO_AT + FIFO_N * FIFO_STRIDE
+const EVT_LEN: u64 = 560;             // FIFO_AT + FIFO_N * FIFO_STRIDE
 const OF_UNIX: u64 = 11;              // an AF_UNIX socket: see src/lxunix.bastio
 const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
@@ -405,7 +408,7 @@ const EPERM: u64 = 18446744073709551615;    // 2^64 - 1
 const LO_EXCL: u64 = 0x80;
 const LO_DIRECTORY: u64 = 0x10000;
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
-const NAPPLETS: u64 = 17;
+const NAPPLETS: u64 = 18;
 const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----
 const S_IFIFO: u64 = 0x1180;           // a FIFO, rw-------
 const S_IFSOCK: u64 = 0xC1B6;          // a socket, rw-rw-rw-
@@ -989,7 +992,7 @@ fn put_state(con: &mut Con, s: u64)
     puts(&mut con, "reading");
   } else if s == WAITING || s == LXWAITING {
     puts(&mut con, "waiting");
-  } else if s == RUNNING || s == KILLED {
+  } else if s == RUNNING || s == KILLED || s == EXITING {
     puts(&mut con, "running");
   } else if s == FUTEXWAIT {
     puts(&mut con, "futex  ");

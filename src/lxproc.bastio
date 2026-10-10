@@ -156,6 +156,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   group_fork(&mut k.procs, pid, c);
   pset(&mut k.procs, c, F_CTID, 0);
   pset(&mut k.procs, c, F_FUTEX, 0);
+  pset(&mut k.procs, c, F_QUIET, 0);
   lx_fd_fork(&mut k, pid, c);
   map_fork(&mut k, pid, c);
   sig_fork(&mut k.sigact, pid, c);
@@ -589,10 +590,6 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
   if pf != 0 {
     return proc_meta(pf);
   }
-  let ff = fifo_find(k, n);
-  if ff < FIFO_N {
-    return Meta { ok: true, mode: S_IFIFO, size: 0, ino: INO_FIFO + ff, mtime: 0 };
-  }
   let dir = dir_at(&mut k, n);
   if dir != NO_FILE {
     if dir >= DIR_PROC {
@@ -628,6 +625,8 @@ fn file_meta(v: &mut Vfs, f: u64) -> Meta
   let mut kind = S_IFMT_REG;
   if fm.mode % 65536 / 4096 * 4096 == T_LINK {
     kind = T_LINK;                          // a symbolic link: only lstat gets this far
+  } else if fm.mode % 65536 / 4096 * 4096 == T_FIFO {
+    kind = T_FIFO;                          // a named pipe
   }
   return Meta { ok: true, mode: kind + fm.mode % 4096, size: size, ino: INO_FILES + f, mtime: fm.mtime };
 }
@@ -773,7 +772,10 @@ fn applet_name(j: u64) -> Str {
   if j == 15 {
     return "ln";
   }
-  return "readlink";
+  if j == 16 {
+    return "readlink";
+  }
+  return "mkfifo";
 }
 
 /// Stores v little-endian in bytes at..at+8 of x.

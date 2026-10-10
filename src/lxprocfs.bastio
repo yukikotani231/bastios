@@ -353,7 +353,7 @@ fn put_prog(k: &mut Kernel, p: u64, o: &mut Bytes, at: u64, base: bool) -> u64
 
 /// The one-letter state of process p, as ps shows it.
 fn state_letter(s: u64) -> u8 {
-  if s == READY || s == RUNNING || s == KILLED {
+  if s == READY || s == RUNNING || s == KILLED || s == EXITING {
     return 82;                              // R
   }
   if s == ZOMBIE {

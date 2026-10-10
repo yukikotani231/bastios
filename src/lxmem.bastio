@@ -5,8 +5,9 @@
 // (clone_l1) and the kernel will not write a read-only page for the
 // program (w_write). mremap moves pages without copying them: each one
 // leaves its old slot and goes to the new one. A stale TLB entry cannot
-// outlive any of this, since every entry to user mode reloads CR3, and a
-// process (with all its threads) runs on one processor at a time.
+// outlive any of this: the threads of a process may run on several
+// processors at once, so these calls first wait until none of them holds a
+// lease on the space (win_quiet), and every entry to user mode reloads CR3.
 //
 // Not done: PROT_NONE maps the pages read-only, not inaccessible (a page
 // is either mapped, and readable, or gone); PROT_EXEC is not enforced;
@@ -20,8 +21,8 @@ const MREMAP_MAYMOVE: u64 = 1;
 /// Window page p out of l2: its frame goes back to m. Nothing if p is not
 /// mapped.
 fn w_unmap(m: &mut Mem, l2: &mut PageTable, p: u64)
-  requires mem_ok(m) && pt_level(l2) == 2 && p < WPAGES
-  ensures mem_ok(m) && pt_level(l2) == 2
+  requires mem_ok(m) && pt_level(l2) == 2 && p < WPAGES && pt_leases(l2) == 0
+  ensures mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0
 {
   let t = p / 512;
   if pt_has(l2, t) {
@@ -35,8 +36,8 @@ fn w_unmap(m: &mut Mem, l2: &mut PageTable, p: u64)
 
 /// Maps window page p writable or not, if it is mapped. False if not.
 fn w_protect(l2: &mut PageTable, p: u64, writable: bool) -> bool
-  requires pt_level(l2) == 2 && p < WPAGES
-  ensures pt_level(l2) == 2
+  requires pt_level(l2) == 2 && p < WPAGES && pt_leases(l2) == 0
+  ensures pt_level(l2) == 2 && pt_leases(l2) == 0
 {
   let t = p / 512;
   if !pt_has(l2, t) {
@@ -58,8 +59,8 @@ fn w_protect(l2: &mut PageTable, p: u64, writable: bool) -> bool
 /// page leaves `to` empty. False if a level-1 table for `to` could not be
 /// made.
 fn w_move(m: &mut Mem, l2: &mut PageTable, from: u64, to: u64) -> bool
-  requires mem_ok(m) && pt_level(l2) == 2 && from < WPAGES && to < WPAGES
-  ensures mem_ok(m) && pt_level(l2) == 2
+  requires mem_ok(m) && pt_level(l2) == 2 && from < WPAGES && to < WPAGES && pt_leases(l2) == 0
+  ensures mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0
 {
   w_unmap(&mut m, &mut l2, to);
   let tf = from / 512;
@@ -101,10 +102,34 @@ fn w_move(m: &mut Mem, l2: &mut PageTable, from: u64, to: u64) -> bool
   return true;
 }
 
+/// Whether no processor runs process pid's space now, so its mappings may
+/// shrink or lose permissions (win_op). If one does, pid is marked F_QUIET:
+/// the other threads of its group are not picked again (group_free) until
+/// pid's retried call finds the space free and clears the mark.
+fn win_quiet(k: &mut Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut free = true;
+  match take_space(&mut k.spaces, pid) {
+    Space::Empty => {},
+    Space::Mapped(mut root) => {
+      free = pt_lease_count(&mut root) == 0;
+      put_space(&mut k.spaces, pid, Space::Mapped(root));
+    },
+  }
+  if free {
+    pset(&mut k.procs, pid, F_QUIET, 0);
+  } else {
+    pset(&mut k.procs, pid, F_QUIET, 1);
+  }
+  return free;
+}
+
 /// Does `op` to window pages from .. to of process pid: unmap them,
 /// protect them (arg: 1 writable), or move them to arg ... Returns how many
-/// of them were mapped, or WPAGES + 1 if the process has no window or a
-/// move ran out of memory.
+/// of them were mapped, or WPAGES + 1 if the process has no window, a move
+/// ran out of memory, or a processor runs the space (win_quiet says first).
 fn win_op(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, op: u64, from: u64, to: u64, arg: u64) -> u64
   requires mem_ok(m) && spaces_ok(spaces) && pid < NPROC && from <= to && to <= WPAGES
   requires op == WOP_MOVE ==> arg + (to - from) <= WPAGES
@@ -114,7 +139,7 @@ fn win_op(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, op: u64, from: u64, to
     Space::Empty => { return WPAGES + 1; },
     Space::Mapped(mut root) => {
       let mut r = WPAGES + 1;
-      if pt_has(root, 1) {
+      if pt_lease_count(&mut root) == 0 && pt_has(root, 1) {
         let mut l3 = pt_take(&mut root, 1);
         if pt_has(l3, 0) {
           let mut l2 = pt_take(&mut l3, 0);
@@ -125,7 +150,7 @@ fn win_op(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, op: u64, from: u64, to
           // moved onto one not moved yet.
           let up = op == WOP_MOVE && arg > from;
           while i < n
-            invariant i <= n && n == to - from && from <= to && to <= WPAGES && mem_ok(m) && pt_level(l2) == 2
+            invariant i <= n && n == to - from && from <= to && to <= WPAGES && mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0
             invariant op == WOP_MOVE ==> arg + n <= WPAGES
             invariant r <= WPAGES + 1
           {
