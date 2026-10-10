@@ -289,11 +289,15 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     s.k.ns = hpet_ns(&mut s.clock);
     s.k.fs.now = sat_add(s.k.epoch, s.k.ns) / 1000000000;   // wall-clock seconds, as stat reports them
     let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
+    call_done(&mut s.k, p);
     sock_wake(&mut s.k);
     if disk_hold(&mut s.k, p, EIO) || what == SWITCH {
       return (p + 1) % NPROC;
     }
     return p;
+  }
+  if v == 14 && stack_fault(&mut s.k, p) {
+    return p;                               // the stack grew: run the instruction again
   }
   if v < 32 {
     puts(&mut s.con, "\r\n[pid ");

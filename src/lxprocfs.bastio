@@ -392,8 +392,14 @@ fn put_prog(k: &mut Kernel, p: u64, o: &mut Bytes, at: u64, base: bool) -> u64
   return a;
 }
 
-/// The one-letter state of process p, as ps shows it.
-fn state_letter(s: u64) -> u8 {
+/// The one-letter state of a process in state s, as ps shows it. A
+/// process that runs its system call again until what it waits for comes
+/// (`waiting`, F_ASLEEP) is waiting, though it is READY or RUNNING: Linux
+/// would have it asleep.
+fn state_letter(s: u64, waiting: bool) -> u8 {
+  if (s == READY || s == RUNNING) && waiting {
+    return 83;                              // S
+  }
   if s == READY || s == RUNNING || s == KILLED || s == EXITING {
     return 82;                              // R
   }
@@ -508,7 +514,7 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     a = put_s(&mut o, a, " (");
     a = put_prog(&mut k, p, &mut o, a, true);
     a = put_s(&mut o, a, ") ");
-    a = put_c(&mut o, a, state_letter(s));
+    a = put_c(&mut o, a, state_letter(s, pget(k.procs, p, F_ASLEEP) != 0));
     a = put_c(&mut o, a, 32);
     a = put_n(&mut o, a, parent);
     a = put_c(&mut o, a, 32);
@@ -531,7 +537,7 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     let mut a = put_s(&mut o, 0, "Name:\t");
     a = put_prog(&mut k, p, &mut o, a, true);
     a = put_s(&mut o, a, "\nState:\t");
-    a = put_c(&mut o, a, state_letter(s));
+    a = put_c(&mut o, a, state_letter(s, pget(k.procs, p, F_ASLEEP) != 0));
     a = put_s(&mut o, a, "\nTgid:\t");
     a = put_n(&mut o, a, p);
     a = put_s(&mut o, a, "\nPid:\t");

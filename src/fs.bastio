@@ -23,9 +23,9 @@ import "ramfs.bastio";
 import "diskfs.bastio";
 
 const NFD: u64 = 16;                  // open files per process
-const FD_ROWS: u64 = 256;             // NPROC * NFD
+const FD_ROWS: u64 = 512;             // NPROC * NFD
 const FD_STRIDE: u64 = 4;
-const FTAB_LEN: u64 = 1024;           // FD_ROWS * FD_STRIDE
+const FTAB_LEN: u64 = 2048;           // FD_ROWS * FD_STRIDE
 const XFER: u64 = 4096;               // the most bytes one call moves
 
 // Row fields.

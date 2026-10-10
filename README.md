@@ -173,7 +173,7 @@ The proof covers everything in `src/` and `user/*.bastio`. Everything below it i
 v0.2: processes, preemptive round-robin scheduling, system calls, fault isolation, and files in memory and on disk. Not there yet:
 - every processor runs the scheduler, but under one lock for the whole kernel state (`Lock[Sys]` in `src/main.bastio`); the kernel runs with interrupts off and handles each interrupt as an event in its scheduler loop;
 - all user pages are mapped writable and executable (the image has no page-aligned sections yet);
-- a user window of 64 MiB per process (pages are mapped as a program asks for them, and `fork` copies every mapped page), at most 15 processes;
+- a user window of 64 MiB per process (pages are mapped as a program asks for them, and `fork` copies every mapped page), at most 31 processes;
 - files are simple: 128 files and directories in memory and 1023 under `disk/`, paths up to 255 bytes, files up to 64 MiB in memory and 1 GiB on disk, 16 open files per process. The disk drivers poll one drive (NVMe, virtio, AHCI, or legacy ATA with 28-bit sector numbers), with no interrupts, one 4 KiB command at a time. File data goes through a 64-block cache, and a process waiting for the disk sleeps while others run. A write call returns only once the disk has it; each write call is copy-on-write and lands whole or not at all across a power cut, but work spread over several calls can be cut between them;
 - running out of memory when starting a program fails the spawn cleanly, but the kernel's own arena (for `Buf`) still halts the machine when it runs out.
 

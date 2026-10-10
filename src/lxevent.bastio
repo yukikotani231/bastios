@@ -616,7 +616,8 @@ fn ev_bits(k: &Kernel, kind: u64, x: u64) -> u64
 
 /// epoll_wait, epoll_pwait and epoll_pwait2: up to maxevents ready entries
 /// to va, waiting (a run again) until there is one or `wait` ns have
-/// passed. epoll_pwait's signal mask is not applied.
+/// passed. epoll_pwait's signal mask is applied by lx_event_call
+/// (mask_swap).
 fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64, maxevents: u64, wait: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -850,7 +851,17 @@ fn lx_event_call(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: 
     } else if d < INT_NEG {
       wait = d * 1000000;                   // ms; a negative timeout waits forever
     }
-    return lx_epoll_wait(&mut k, pid, n, was, a, b, c, wait);
+    // epoll_pwait and epoll_pwait2 wait with the mask at r8 blocked.
+    let r8 = pget(k.procs, pid, F_REGS + R_R8);
+    if n != LX_EPOLL_WAIT && was == 0 && r8 != 0 && !mask_swap(&mut k, pid, r8) {
+      ret(&mut k.procs, pid, EFAULT);
+      return KEEP;
+    }
+    let er = lx_epoll_wait(&mut k, pid, n, was, a, b, c, wait);
+    if er == KEEP {
+      mask_back(&mut k, pid);
+    }
+    return er;
   }
   let mut r = ENOSYS;
   if n == LX_EVENTFD {

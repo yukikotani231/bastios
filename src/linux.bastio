@@ -194,6 +194,10 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   ensures kok(k) && con_ok(con)
 {
   let n = pget(k.procs, pid, F_REGS + R_RAX);
+  let sp = pget(k.procs, pid, F_REGS + R_RSP);
+  if sp >= USER_BASE + 128 {
+    stack_reach(&mut k.mem, &mut k.spaces, pid, sp - 128);   // the red zone too
+  }
   let was = pget(k.procs, pid, F_RESTART);  // a timed wait keeps its deadline here
   pset(&mut k.procs, pid, F_RESTART, 0);
   let a = pget(k.procs, pid, F_REGS + R_RDI);
@@ -402,7 +406,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if flags / MAP_FIXED % 2 == 1 && !win_quiet(&mut k, pid) {
       return lx_retry(&mut k, pid, n);      // MAP_FIXED unmaps: another thread of pid runs on a processor
     }
-    ret(&mut k.procs, pid, lx_mmap(&mut k, pid, a, b, flags, fd, off));
+    ret(&mut k.procs, pid, lx_mmap(&mut k, pid, a, b, c, flags, fd, off));
     return KEEP;
   }
   if n == LX_STAT || n == LX_LSTAT {
@@ -1294,7 +1298,7 @@ fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
 /// none is mapped yet. Returns false if memory ran out (the pages mapped so
 /// far stay, and go back when the process exits).
 fn lx_map_pages(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, from: u64, to: u64) -> bool
-  requires mem_ok(m) && spaces_ok(spaces) && pid < NPROC && to <= STACK_FIRST
+  requires mem_ok(m) && spaces_ok(spaces) && pid < NPROC && to <= WPAGES
   ensures mem_ok(m) && spaces_ok(spaces)
 {
   match take_space(&mut spaces, pid) {
@@ -1314,7 +1318,7 @@ fn lx_map_pages(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, from: u64, to: u
 /// running on the space, and the new pages appear to them as they are
 /// mapped.
 fn map_l3(l3: &mut PageTable, m: &mut Mem, from: u64, to: u64) -> bool
-  requires pt_level(l3) == 3 && mem_ok(m) && to <= STACK_FIRST
+  requires pt_level(l3) == 3 && mem_ok(m) && to <= WPAGES
   ensures mem_ok(m)
 {
   if !pt_has(l3, 0) {
@@ -1324,18 +1328,49 @@ fn map_l3(l3: &mut PageTable, m: &mut Mem, from: u64, to: u64) -> bool
 }
 
 fn map_l2(l2: &mut PageTable, m: &mut Mem, from: u64, to: u64) -> bool
-  requires pt_level(l2) == 2 && mem_ok(m) && to <= STACK_FIRST
+  requires pt_level(l2) == 2 && mem_ok(m) && to <= WPAGES
   ensures mem_ok(m)
 {
   let mut ok = true;
   let mut p = from;
   while ok && p < to
-    invariant mem_ok(m) && pt_level(l2) == 2 && to <= STACK_FIRST
+    invariant mem_ok(m) && pt_level(l2) == 2 && to <= WPAGES
   {
     ok = w_map(&mut m, &mut l2, p);
     p = p + 1;
   }
   return ok;
+}
+
+/// The stack grows down as on Linux: its region is the top STACK_PAGES
+/// pages of the window, and a new window maps only the top STACK_MAPPED.
+/// Maps fresh zero pages from the one holding va up to the top, where none
+/// is mapped yet. False if va is not in the part of the region a new window
+/// leaves out, or memory ran out. Called with the stack pointer (less the
+/// red zone) on each system call, so the kernel can reach a buffer the
+/// program put on its stack without touching it, before a signal frame is
+/// written, and on a page fault.
+fn stack_reach(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, va: u64) -> bool
+  requires mem_ok(m) && spaces_ok(spaces) && pid < NPROC
+  ensures mem_ok(m) && spaces_ok(spaces)
+{
+  if va < USER_BASE + STACK_FIRST * 4096 || va >= USER_BASE + STACK_LOW * 4096 {
+    return false;
+  }
+  return lx_map_pages(&mut m, &mut spaces, pid, (va - USER_BASE) / 4096, WPAGES);
+}
+
+/// A page fault of process p: if it touched a stack page not mapped yet,
+/// the stack grows to it (stack_reach) and true says to run p again.
+fn stack_fault(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let va = pget(k.procs, p, F_REGS + 19);   // CR2
+  if va < USER_BASE || copy_from_user(&mut k.spaces, p, va, &mut k.fs.xfer, 1) == 1 {
+    return false;                           // mapped: not a stack to grow
+  }
+  return stack_reach(&mut k.mem, &mut k.spaces, p, va);
 }
 
 /// brk: grows the heap (page by page) up to `want`; never shrinks it, and
@@ -1364,7 +1399,7 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
 /// MAP_FIXED. A file mapping is a copy of the file's bytes from `off` (the
 /// rest of the last page zero), so writes to it never reach the file, even
 /// with MAP_SHARED. The address hint without MAP_FIXED is ignored.
-fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64, fd: u64, off: u64) -> u64
+fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
@@ -1403,7 +1438,14 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64, fd: u64, off
       return ENOMEM;
     }
     at = (low - pages * 4096) / 4096 * 4096;
-    if at < brk || !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096) {
+    if at < brk {
+      return ENOMEM;
+    }
+    // Fresh PROT_NONE memory is only address space: its pages are mapped
+    // when an mprotect makes them usable (lx_mprotect), and touching it
+    // before that faults, as on Linux.
+    let reserve = anon && prot == 0;
+    if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096) {
       return ENOMEM;
     }
     pset(&mut k.procs, pid, F_MMAP, at);
