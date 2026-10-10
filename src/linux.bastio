@@ -452,11 +452,15 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_FACCESSAT || n == LX_FACCESSAT2 {
-    ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b, 0, true));
+    let mut fl = 0;
+    if n == LX_FACCESSAT2 {
+      fl = pget(k.procs, pid, F_REGS + R_R10);
+    }
+    ret(&mut k.procs, pid, lx_access(&mut k, pid, a, b, c, fl));
     return KEEP;
   }
   if n == LX_ACCESS {
-    ret(&mut k.procs, pid, lx_stat(&mut k, pid, AT_FDCWD, a, 0, true));   // everyone may do anything
+    ret(&mut k.procs, pid, lx_access(&mut k, pid, AT_FDCWD, a, b, 0));
     return KEEP;
   }
   if n == LX_CLONE && a & CLONE_VM != 0 && a & CLONE_VFORK != 0 && a & CLONE_THREAD == 0 {
@@ -1281,7 +1285,8 @@ fn lx_path_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
-  return lx_path_from(&mut k, pid, va, OFD_N, true);
+  let n = lx_path_from(&mut k, pid, va, OFD_N, true);
+  return perm_walk(&mut k, pid, n);
 }
 
 /// lx_path_in for the *at calls: a relative path starts at directory
@@ -1293,7 +1298,8 @@ fn lx_path_at(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
-  return lx_path_from(&mut k, pid, va, dir_ofd(k, pid, dirfd), true);
+  let n = lx_path_from(&mut k, pid, va, dir_ofd(k, pid, dirfd), true);
+  return perm_walk(&mut k, pid, n);
 }
 
 /// lx_path_at for the calls that act on a symbolic link itself (lstat,
@@ -1304,7 +1310,8 @@ fn lx_path_at_nf(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
-  return lx_path_from(&mut k, pid, va, dir_ofd(k, pid, dirfd), false);
+  let n = lx_path_from(&mut k, pid, va, dir_ofd(k, pid, dirfd), false);
+  return perm_walk(&mut k, pid, n);
 }
 
 /// The base a relative path of an *at call starts from: OFD_N for the

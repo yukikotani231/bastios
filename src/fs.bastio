@@ -1343,20 +1343,45 @@ fn vfs_meta(v: &mut Vfs, f0: u64) -> FMeta
   }
   if f < NFILES + DSLOTS {
     if !dent_used(v.disk, f - NFILES) {
-      return FMeta { ok: false, mode: 0, mtime: 0 };
+      return FMeta { ok: false, mode: 0, mtime: 0, own: 0 };
     }
-    return FMeta { ok: true, mode: disk_mode(v.disk, f - NFILES), mtime: disk_mtime(v.disk, f - NFILES) };
+    return FMeta { ok: true, mode: disk_mode(v.disk, f - NFILES), mtime: disk_mtime(v.disk, f - NFILES), own: disk_owner(v.disk, f - NFILES) };
   }
   if f < HFILES {
     if !dent_used(v.lo, f - LO0) {
-      return FMeta { ok: false, mode: 0, mtime: 0 };
+      return FMeta { ok: false, mode: 0, mtime: 0, own: 0 };
     }
-    return FMeta { ok: true, mode: disk_mode(v.lo, f - LO0), mtime: disk_mtime(v.lo, f - LO0) };
+    return FMeta { ok: true, mode: disk_mode(v.lo, f - LO0), mtime: disk_mtime(v.lo, f - LO0), own: disk_owner(v.lo, f - LO0) };
   }
   if f == VDIR_ROOT || f == VDIR_DISK || f == VDIR_LO {
-    return FMeta { ok: true, mode: 493, mtime: 0 };
+    return FMeta { ok: true, mode: 493, mtime: 0, own: 0 };
   }
-  return FMeta { ok: false, mode: 0, mtime: 0 };
+  return FMeta { ok: false, mode: 0, mtime: 0, own: 0 };
+}
+
+/// Sets handle f's owner to user id uid and group id gid. False if f
+/// names nothing that keeps one, the disk cannot keep ids that large, or
+/// the disk fails.
+fn vfs_set_owner(v: &mut Vfs, f0: u64, uid: u64, gid: u64) -> bool
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  let f = vfs_target(&mut v, f0);
+  if f < NFILES {
+    return uid < 0x100000000 && gid < 0x100000000 && ram_set_owner(&mut v.ram, f, uid + gid * 0x100000000);
+  }
+  if uid >= OWN_ID_MAX || gid >= OWN_ID_MAX {
+    return false;
+  }
+  if f < NFILES + DSLOTS {
+    return disk_set_owner(&mut v.disk, f - NFILES, uid, gid);
+  }
+  if f < HFILES && !v.lo_ro {
+    let ok = disk_set_owner(&mut v.lo, f - LO0, uid, gid);
+    lo_settle(&mut v);
+    return ok;
+  }
+  return false;
 }
 
 /// Sets handle f's permission bits (when `mode` is below 4096) and its

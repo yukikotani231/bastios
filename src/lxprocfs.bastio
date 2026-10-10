@@ -231,14 +231,14 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
 /// What stat says about /proc file f (a proc_file device).
 fn proc_meta(f: u64) -> Meta {
   if f % 16 == PF_EXE {
-    return Meta { ok: true, mode: S_IFLNK, size: 0, ino: INO_PROC + f % 4096, mtime: 0 };
+    return Meta { ok: true, mode: S_IFLNK, size: 0, ino: INO_PROC + f % 4096, mtime: 0, own: 0 };
   }
-  return Meta { ok: true, mode: S_IFREG_RO, size: 0, ino: INO_PROC + f % 4096, mtime: 0 };
+  return Meta { ok: true, mode: S_IFREG_RO, size: 0, ino: INO_PROC + f % 4096, mtime: 0, own: 0 };
 }
 
 /// What stat says about /proc directory d (a proc_dir description).
 fn proc_dir_meta(d: u64) -> Meta {
-  return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + d % 256, mtime: 0 };
+  return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + d % 256, mtime: 0, own: 0 };
 }
 
 /// Entry i of /proc directory `dir` (getdents64), its name in the

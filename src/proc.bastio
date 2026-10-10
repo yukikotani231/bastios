@@ -66,6 +66,15 @@ const F_GID: u64 = 48;
 const F_SGID: u64 = 49;
 // While a semop waits: which semaphore, and for what (src/lxipc.bastio).
 const F_IPCW: u64 = 50;
+// A Linux process's umask plus 1; 0 means 0022 (src/lxperm.bastio).
+const F_UMASK: u64 = 51;
+// File permission bits (src/lxperm.bastio).
+const MAY_X: u64 = 1;
+const MAY_W: u64 = 2;
+const MAY_R: u64 = 4;
+const S_ISVTX: u64 = 512;            // sticky: only a name's owner may remove it
+const S_ISGID: u64 = 1024;
+const S_ISUID: u64 = 2048;
 const SIG_DEATH: u64 = 256;          // F_CODE of a process a signal ended: 256 + the signal
 
 // Saved register numbers.
@@ -466,7 +475,7 @@ const EROFS: u64 = 18446744073709551586;     // 2^64 - 30
 const ENOTBLK: u64 = 18446744073709551601;   // 2^64 - 15
 const EBUSY: u64 = 18446744073709551600;     // 2^64 - 16
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
-const NAPPLETS: u64 = 23;
+const NAPPLETS: u64 = 24;
 const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----
 const S_IFIFO: u64 = 0x1180;           // a FIFO, rw-------
 const S_IFSOCK: u64 = 0xC1B6;          // a socket, rw-rw-rw-
@@ -502,6 +511,7 @@ const F_OFD_SETLK: u64 = 37;
 const F_OFD_SETLKW: u64 = 38;
 const F_UNLCK: u64 = 2;
 const LO_CLOEXEC: u64 = 0x80000;
+const LO_PATH: u64 = 0x200000;         // a handle for the name only: no permission needed
 
 const EMFILE: u64 = 18446744073709551592;   // 2^64 - 24
 const ENFILE: u64 = 18446744073709551593;   // 2^64 - 23

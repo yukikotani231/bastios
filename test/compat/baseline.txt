@@ -327,6 +327,18 @@ t_net: getaddrinfo localhost
 t_net: getaddrinfo numeric
 t_net: getsockopt SO_TYPE
 t_net: inet_pton
+t_perm: a new file belongs to its maker
+t_perm: a path needs search permission on its directories
+t_perm: a set-group-ID directory passes on its group
+t_perm: a sticky directory keeps others' names
+t_perm: access checks the real ids
+t_perm: chmod, chown and utime are for the owner
+t_perm: chown, fchown, lchown and fchownat keep the owner
+t_perm: exec needs an execute bit
+t_perm: names in a directory need write permission on it
+t_perm: open checks the mode bits
+t_perm: the disk keeps owners
+t_perm: umask applies to new files and directories
 t_proc: child's getppid is the parent
 t_proc: environment
 t_proc: execve
