@@ -81,7 +81,7 @@ const SOCK_FIELDS: u64 = 18;          // S_SLOTS + RXQ * SLOT_W
 // The TCP table's size (src/tcp.bastio has the rest).
 const TCBS: u64 = 8;                  // connections
 const TCP_BUF: u64 = 4096;            // bytes in each receive and send buffer
-const TCB_W: u64 = 18;                // words per connection
+const TCB_W: u64 = 22;                // words per connection
 
 struct Net {
   dev: VNet,
