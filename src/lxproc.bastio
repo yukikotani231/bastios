@@ -95,15 +95,15 @@ fn fork_space(m: &mut Mem, spaces: &mut Vec[Space], pid: u64) -> Space
 // ---------------------------------------------------------------- execve
 
 /// execve(path, argv, envp): replaces process `pid`'s program with the one
-/// at `path` (/bin/NAME), passing argv and envp.
+/// at `path` (/bin/NAME, or an ELF file /NAME), passing argv and envp.
 /// Descriptors stay open unless marked close-on-exec. Returns 0 (the new program's rax) or -errno, in
 /// which case the old program carries on.
 fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
-  let prog = lx_prog_at(&mut k, pid, path);
-  if prog >= NPROGS {
+  let src = lx_src_at(&mut k, pid, path);
+  if !src.file && src.prog >= NPROGS {
     return ENOENT;
   }
   let mut args = balloc(ARGS_MAX);
@@ -117,7 +117,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
     bfree(args);
     return E2BIG;
   }
-  let sp = load_image(&mut k.mem, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, pid, prog, args, alen, total);
+  let sp = load_image(&mut k.mem, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, pid, src, args, alen, total);
   bfree(args);
   match sp {
     Space::Empty => { return ENOEXEC; },
@@ -145,6 +145,32 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
     },
   }
   return 0;
+}
+
+/// The executable at user path `va`: built-in image NAME for /bin/NAME,
+/// otherwise the file. Not found: a built-in Src with prog NPROGS.
+fn lx_src_at(k: &mut Kernel, pid: u64, va: u64) -> Src
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let none = Src { file: false, prog: NPROGS, f: 0, size: 0 };
+  let n = lx_path_in(&mut k, pid, va);
+  if n == NO_RESULT {
+    return none;
+  }
+  if n > 4 && xfer_bin(k.fs.xfer) {
+    let prog = lx_prog_at(&mut k, pid, va);
+    return Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
+  }
+  let f = vfs_lookup(&mut k.fs, n);
+  if f == NO_FILE {
+    return none;
+  }
+  let size = vfs_size(&mut k.fs, f);
+  if size == NO_FILE {
+    return none;
+  }
+  return Src { file: true, prog: NPROGS, f: f, size: size };
 }
 
 /// The program at user path `va`: /bin/NAME for a built-in image NAME.
