@@ -107,7 +107,7 @@ fn iov_at(k: &mut Kernel, pid: u64, iov: u64, i: u64) -> bool
 
 /// sendmsg on a UDP socket: the cnt buffers of the list at iov, joined
 /// into one datagram. Returns its length, or -errno.
-fn udp_gather(k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u64, name: u64, nlen: u64) -> u64
+fn udp_gather(k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u64, name: u64, nlen: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC && cnt <= 1024
   ensures kok(k)
 {
@@ -115,11 +115,12 @@ fn udp_gather(k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u64, name: u64, 
   if d.err != 0 {
     return d.err;
   }
+  let room = UDP_MAX - sock_corked(k.nic, d.s);
   let mut g = balloc(UDP_MAX);
   let mut total = 0;
   let mut i = 0;
   while i < cnt
-    invariant i <= cnt && cnt <= 1024 && total <= UDP_MAX && blen(g) == UDP_MAX && kok(k)
+    invariant i <= cnt && cnt <= 1024 && total <= room && room <= UDP_MAX && blen(g) == UDP_MAX && kok(k)
   {
     if !iov_at(&mut k, pid, iov, i) {
       bfree(g);
@@ -127,7 +128,7 @@ fn udp_gather(k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u64, name: u64, 
     }
     let base = get_u64(k.fs.xfer, 0);
     let len = get_u64(k.fs.xfer, 8);
-    if len > UDP_MAX - total {
+    if len > room - total {
       bfree(g);
       return EMSGSIZE;
     }
@@ -147,7 +148,7 @@ fn udp_gather(k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u64, name: u64, 
     }
     i = i + 1;
   }
-  let r = sock_sendto(&mut k.nic, d.s, d.ip, d.port, g, total);
+  let r = sock_send_more(&mut k.nic, d.s, d.ip, d.port, g, total, flags / MSG_MORE % 2 == 1);
   bfree(g);
   if r == NO_SOCK {
     return ENETUNREACH;
@@ -235,7 +236,7 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   }
   let dgram = !is_tcp(k, pid, fd) && (!unix || ux_dgram(k, pid, fd));
   if dgram && !unix {
-    return udp_gather(&mut k, pid, fd, iov, cnt, name, nlen);
+    return udp_gather(&mut k, pid, fd, iov, cnt, name, nlen, flags);
   }
   let mut done = 0;
   let mut sent = false;
@@ -257,7 +258,7 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
       if unix {
         r = ux_send(&mut k, pid, fd, base, len, sent || flags / MSG_DONTWAIT % 2 == 1);
       } else {
-        r = lx_sendto(&mut k, pid, fd, base, len, name, nlen);
+        r = lx_sendto(&mut k, pid, fd, base, len, name, nlen, flags);
       }
       if r > 0x7FFFFFFFFFFFFFFF {
         if !sent {

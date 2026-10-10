@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <setjmp.h>
@@ -259,5 +260,30 @@ int main(void) {
                int g = socket(AF_INET, SOCK_STREAM, 0); _exit(bind(g, (struct sockaddr *)&lo, sizeof lo) == -1 && errno == EACCES ? 0 : 1); }
            int st = 0; waitpid(c, &st, 0); close(r); close(w); close(f);
            n == 6 && got == 6 && !strcmp(b, "onetwo") && nb && WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("SO_PEERCRED: the connecting child on the accepted socket, ourselves on a socketpair", ({
+           struct sockaddr_un a = {.sun_family = AF_UNIX, .sun_path = "\0ltp2-peercred"};
+           int s = socket(AF_UNIX, SOCK_STREAM, 0); bind(s, (struct sockaddr *)&a, sizeof a); listen(s, 4);
+           int go[2]; pipe(go);
+           pid_t c = fork(); if (c == 0) { int t = socket(AF_UNIX, SOCK_STREAM, 0); connect(t, (struct sockaddr *)&a, sizeof a);
+               char x; read(go[0], &x, 1); _exit(0); }
+           int d = accept(s, 0, 0); struct ucred u = {0}; socklen_t ul = sizeof u;
+           int r = getsockopt(d, SOL_SOCKET, SO_PEERCRED, &u, &ul); write(go[1], "x", 1);
+           int st; waitpid(c, &st, 0); int sv[2]; socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+           struct ucred v = {0}; socklen_t vl = sizeof v; int r2 = getsockopt(sv[0], SOL_SOCKET, SO_PEERCRED, &v, &vl);
+           close(d); close(s); close(sv[0]); close(sv[1]); close(go[0]); close(go[1]);
+           r == 0 && ul == sizeof u && u.pid == c && u.uid == geteuid() && r2 == 0 && v.pid == getpid(); }));
+    EXPECT("MSG_MORE holds a UDP datagram and a short TCP segment back until the next send", ({
+           int r = socket(AF_INET, SOCK_DGRAM, 0), w = socket(AF_INET, SOCK_DGRAM, 0);
+           struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)}; socklen_t l = sizeof a;
+           bind(r, (struct sockaddr *)&a, sizeof a); getsockname(r, (struct sockaddr *)&a, &l); connect(w, (struct sockaddr *)&a, sizeof a);
+           char b[32] = {0}; send(w, "ab", 2, MSG_MORE); usleep(20000); int u1 = recv(r, b, sizeof b, MSG_DONTWAIT);
+           send(w, "cd", 2, 0); usleep(20000); int u2 = recv(r, b, sizeof b, MSG_DONTWAIT);
+           int ok = u1 == -1 && u2 == 4 && !memcmp(b, "abcd", 4); close(r); close(w);
+           struct sockaddr_in t = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)}; l = sizeof t;
+           int s = socket(AF_INET, SOCK_STREAM, 0); bind(s, (struct sockaddr *)&t, sizeof t); getsockname(s, (struct sockaddr *)&t, &l); listen(s, 1);
+           int c = socket(AF_INET, SOCK_STREAM, 0); connect(c, (struct sockaddr *)&t, sizeof t); int d = accept(s, 0, 0);
+           send(c, "ef", 2, MSG_MORE); usleep(20000); int t1 = recv(d, b, sizeof b, MSG_DONTWAIT);
+           send(c, "g", 1, 0); usleep(20000); int t2 = recv(d, b, sizeof b, MSG_DONTWAIT);
+           close(c); close(d); close(s); ok && t1 == -1 && t2 == 3 && !memcmp(b, "efg", 3); }));
     return done();
 }

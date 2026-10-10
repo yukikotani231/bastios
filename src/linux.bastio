@@ -1107,7 +1107,7 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64
     return ev_write(&mut k, pid, d.x, va, n);
   }
   if d.kind == K_SOCK {
-    return lx_sendto(&mut k, pid, fd, va, n, 0, 0);   // to the connected peer
+    return lx_sendto(&mut k, pid, fd, va, n, 0, 0, 0);   // to the connected peer
   }
   if d.kind == K_DEV {
     return n;                               // a device swallows what it is given

@@ -254,7 +254,7 @@ fn lx_tcp_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u6
 
 /// write / send on a connection: what the send buffer takes; SK_WAIT
 /// while it is full; -EPIPE once the connection cannot send.
-fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64) -> u64
+fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, more: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
@@ -272,6 +272,7 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64) -> u64
   if got == NO_RESULT || got == 0 {
     return EFAULT;
   }
+  tcp_cork(&mut k.nic, tk.t, more);
   let w = tcp_send(&mut k.nic, tk.t, k.fs.xfer, got);
   if w == NO_SOCK {
     return EPIPE;

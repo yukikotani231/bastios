@@ -33,6 +33,7 @@ const IPPROTO_UDP: u64 = 17;
 const SOCK_NONBLOCK: u64 = 0x800;
 const SOCK_CLOEXEC: u64 = 0x80000;
 const MSG_DONTWAIT: u64 = 0x40;
+const MSG_MORE: u64 = 0x8000;
 const MSG_PEEK: u64 = 2;
 const MSG_NOSIGNAL: u64 = 0x4000;
 const MSG_OOB: u64 = 1;
@@ -368,12 +369,13 @@ fn to_local(ip: u64) -> u64
 
 /// sendto(fd, buf, n, flags, addr, alen); with addr 0, to the connected
 /// peer (send and write). One datagram of at most UDP_MAX bytes.
-fn lx_sendto(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, addr: u64, alen: u64) -> u64
+fn lx_sendto(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, addr: u64, alen: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  let more = flags / MSG_MORE % 2 == 1;
   if is_tcp(k, pid, fd) {
-    return lx_tcp_send(&mut k, pid, fd, buf, n);
+    return lx_tcp_send(&mut k, pid, fd, buf, n, more);
   }
   if is_unix(k, pid, fd) {
     return ux_send(&mut k, pid, fd, buf, n, false);
@@ -382,13 +384,13 @@ fn lx_sendto(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, addr: u64, ale
   if d.err != 0 {
     return d.err;
   }
-  if n > UDP_MAX {
+  if n > UDP_MAX - sock_corked(k.nic, d.s) {
     return EMSGSIZE;
   }
   if copy_from_user(&mut k.spaces, pid, buf, &mut k.fs.xfer, n) != n {
     return EFAULT;
   }
-  let r = sock_sendto(&mut k.nic, d.s, d.ip, d.port, k.fs.xfer, n);
+  let r = sock_send_more(&mut k.nic, d.s, d.ip, d.port, k.fs.xfer, n, more);
   if r == NO_SOCK {
     return ENETUNREACH;                     // no route, no free port, or port 0
   }
@@ -605,6 +607,25 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
   if level == SOL_TCP && name % 0x100000000 >= 0x80000000 {
     return ENOPROTOOPT;
   }
+  if level == SOL_SOCKET && name == 17 {     // SO_PEERCRED: struct ucred
+    if copy_from_user(&mut k.spaces, pid, lenp, &mut k.fs.xfer, 4) != 4 {
+      return EFAULT;
+    }
+    let room = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1)) + 65536 * cast[u64](bget(k.fs.xfer, 2)) + 16777216 * cast[u64](bget(k.fs.xfer, 3));
+    if room >= 0x80000000 {
+      return EINVAL;
+    }
+    ux_peercred(&mut k, pid, fd);
+    let n = smaller(room, 12);
+    if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {
+      return EFAULT;
+    }
+    xput(&mut k, 0, n, 4);
+    if copy_to_user(&mut k.spaces, pid, lenp, k.fs.xfer, 4) != 4 {
+      return EFAULT;
+    }
+    return 0;
+  }
   let mut v = 0;
   if level == SOL_SOCKET && name == SO_TYPE {
     v = 2;                                  // SOCK_DGRAM
@@ -655,7 +676,7 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   } else if n == LX_SENDTO && d % 2 == MSG_OOB && dgram.err == 0 {
     r = EOPNOTSUPP;                         // a datagram has no out-of-band data
   } else if n == LX_SENDTO {
-    r = lx_sendto(&mut k, pid, a, b, c, e, f);
+    r = lx_sendto(&mut k, pid, a, b, c, e, f, d);
   } else if n == LX_RECVFROM {
     r = lx_recvfrom(&mut k, pid, a, b, c, d, e, f);
   } else if n == LX_GETSOCKNAME || n == LX_GETPEERNAME {

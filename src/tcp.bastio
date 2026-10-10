@@ -70,6 +70,8 @@ const W_MAX: u64 = 18;                // the furthest W_NXT has been (it goes ba
 const W_HLO: u64 = 19;                // data that came early, held in the receive buffer
 const W_HHI: u64 = 20;                // at [W_HLO, W_HHI); W_HHI == 0: none
 const W_MSS: u64 = 21;                // the largest segment the peer takes
+const W_CORK: u64 = 22;               // MSG_MORE: the tick a short segment goes anyway; 0: none held
+const TCP_CORK_TICKS: u64 = 20;       // 200 ms, as Linux
 
 fn tw(n: &Net, t: u64, f: u64) -> u64
   requires net_ok(n) && t < TCBS && f < TCB_W
@@ -232,7 +234,10 @@ fn tcp_output(n: &mut Net, t: u64, want_ack: bool)
   }
   let mut sent = false;
   let mut segs = 0;
-  while off < txlen && off < wnd && segs < 4 && tw(n, t, W_FIN) != 2
+  // MSG_MORE holds back a segment shorter than mss until the next send
+  // without it, the FIN, or the cork tick.
+  let hold = tw(n, t, W_CORK) != 0 && tw(n, t, W_FIN) == 0;
+  while off < txlen && off < wnd && segs < 4 && tw(n, t, W_FIN) != 2 && !(hold && txlen - off < mss)
     invariant off <= txlen && txlen <= TCP_BUF && una < SEQ_MOD && net_ok(n)
   {
     let mut l = txlen - off;
@@ -729,6 +734,11 @@ fn tcp_tick(n: &mut Net, now: u64)
   while t < TCBS
     invariant t <= TCBS && net_ok(n)
   {
+    let cork = tw(n, t, W_CORK);
+    if cork != 0 && now >= cork {
+      tset(&mut n, t, W_CORK, 0);
+      tcp_output(&mut n, t, false);
+    }
     let due = tw(n, t, W_TIMER);
     let st = tw(n, t, W_STATE);
     if due != 0 && now >= due && st != T_CLOSED && st != T_LISTEN {
@@ -1089,6 +1099,28 @@ fn tcp_send(c: &mut Nic, t: u64, buf: &Bytes, size: u64) -> u64
       let r = tcp_write(&mut n, t, buf, size);
       c = Nic::Up(n);
       return r;
+    },
+  }
+}
+
+/// MSG_MORE (more) or not on the next send on connection t: with it, a
+/// short segment waits for more data (up to TCP_CORK_TICKS); without, what
+/// waited goes with that send.
+fn tcp_cork(c: &mut Nic, t: u64, more: bool)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if tcb_held(n, t) {
+        if !more {
+          tset(&mut n, t, W_CORK, 0);
+        } else if tw(n, t, W_CORK) == 0 && n.now < 0xFFFFFFFFFFFF0000 {
+          tset(&mut n, t, W_CORK, n.now + TCP_CORK_TICKS);
+        }
+      }
+      c = Nic::Up(n);
     },
   }
 }
