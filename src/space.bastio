@@ -3,8 +3,10 @@
 // up to WIN_L1S level-1 tables under the level-2 one, so the window is the
 // WPAGES pages (64 MiB) from USER_BASE. A level-1 table exists only once a
 // page under it is mapped. The program image starts at page 0 and the
-// stack takes the top STACK_PAGES pages; Linux programs map their heap and
-// mmap pages in between as they ask for them. Slot 0 of
+// stack takes the top STACK_PAGES pages, of which the top STACK_MAPPED are
+// mapped at first; a Linux program's stack grows down into the rest as it
+// is used (stack_reach, src/linux.bastio). Linux programs map their heap
+// and mmap pages in between as they ask for them. Slot 0 of
 // every top-level table maps the kernel without the user bit (set up by the
 // prelude), so user code cannot touch kernel memory.
 //
@@ -22,9 +24,11 @@ const WOP_MOVE: u64 = 2;                // arg: where the first page goes
 const WIN_L1S: u64 = 32;              // level-1 tables the window may hold
 const WPAGES: u64 = 16384;            // WIN_L1S * 512
 const USER_SIZE: u64 = 0x4000000;     // WPAGES * 4096
-const STACK_PAGES: u64 = 16;
-const STACK_FIRST: u64 = 16368;       // WPAGES - STACK_PAGES
-const IMAGE_MAX: u64 = 0x3FF0000;     // STACK_FIRST * 4096
+const STACK_PAGES: u64 = 256;         // 1 MiB
+const STACK_FIRST: u64 = 16128;       // WPAGES - STACK_PAGES
+const STACK_MAPPED: u64 = 16;         // stack pages a new window maps
+const STACK_LOW: u64 = 16368;         // WPAGES - STACK_MAPPED
+const IMAGE_MAX: u64 = 0x3F00000;     // STACK_FIRST * 4096
 const KERNEL_ROOT: u64 = 0x10000;     // mmu_root while CR3 holds the kernel's own map
 
 // A process's address space (its level-4 table), if it has one.
@@ -331,7 +335,8 @@ fn new_space(m: &mut Mem, img: Str, size: u64) -> Space
 }
 
 /// A level-2 window table mapping the first `npages` pages of the window,
-/// holding `img`, and the stack pages; every other page is zero. Returns
+/// holding `img`, and the top STACK_MAPPED stack pages; every other page
+/// is zero. Returns
 /// `Space::Empty`, with every page given back, when memory runs out.
 fn new_window(m: &mut Mem, img: Str, npages: u64) -> Space
   requires mem_ok(m) && npages <= STACK_FIRST
@@ -354,9 +359,9 @@ fn new_window(m: &mut Mem, img: Str, npages: u64) -> Space
       p = p + 1;
     }
   }
-  p = STACK_FIRST;
+  p = STACK_LOW;
   while ok && p < WPAGES
-    invariant STACK_FIRST <= p && p <= WPAGES && mem_ok(m) && pt_level(l2) == 2
+    invariant STACK_LOW <= p && p <= WPAGES && mem_ok(m) && pt_level(l2) == 2
   {
     ok = w_map(&mut m, &mut l2, p);
     if ok {

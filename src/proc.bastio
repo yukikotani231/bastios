@@ -10,9 +10,9 @@ import "fs.bastio";
 import "net.bastio";
 import "tcp.bastio";
 
-const NPROC: u64 = 16;
-const STRIDE: u64 = 40;
-const PTAB_LEN: u64 = 640;           // NPROC * STRIDE
+const NPROC: u64 = 32;
+const STRIDE: u64 = 48;
+const PTAB_LEN: u64 = 1536;          // NPROC * STRIDE
 
 // Row fields.
 const F_STATE: u64 = 0;
@@ -43,6 +43,14 @@ const F_SID: u64 = 36;
 // Nonzero while a Linux thread waits for the other threads of its group to
 // leave the processors, to change their shared page tables (src/lxmem.bastio).
 const F_QUIET: u64 = 37;
+// Nonzero while a Linux process runs a system call again and again until
+// what it waits for comes (lx_retry): /proc shows it asleep, as Linux would
+// have it, though it is READY or RUNNING (src/lxprocfs.bastio).
+const F_ASLEEP: u64 = 39;
+// A Linux thread's alternate signal stack (sigaltstack): its address and
+// size; size 0 means none (src/lxsig.bastio).
+const F_ALTSP: u64 = 40;
+const F_ALTSIZE: u64 = 41;
 const SIG_DEATH: u64 = 256;          // F_CODE of a process a signal ended: 256 + the signal
 
 // Saved register numbers.
@@ -310,7 +318,7 @@ fn wake_readers(procs: &mut Buf, q: &mut Buf, line: &Buf)
 // `main`, which lends them where they are needed.
 // Linux file descriptors (src/lxfd.bastio).
 const LXNFD: u64 = 16;
-const LXFD_LEN: u64 = 256;            // NPROC * LXNFD
+const LXFD_LEN: u64 = 512;            // NPROC * LXNFD
 const FD_CONSOLE: u64 = 1;
 const FD_OFD: u64 = 2;
 const FD_CLOEXEC: u64 = 1024;
@@ -322,7 +330,7 @@ const LK_N: u64 = 128;
 const LK_W: u64 = 6;
 const LK_WAITS: u64 = 768;            // LK_N * LK_W
 const LK_WW: u64 = 4;
-const LK_LEN: u64 = 832;              // LK_WAITS + NPROC * LK_WW
+const LK_LEN: u64 = 896;              // LK_WAITS + NPROC * LK_WW
 const LK_EOF: u64 = 18446744073709551615;   // a range to the end of the file; no file
 const LK_DESC: u64 = 4294967296;      // 2^32: lock owners from here are descriptions
 const LKC_FCNTL: u64 = 0;             // record and OFD locks
@@ -346,21 +354,21 @@ const DISK_RETRY: u64 = 0x8000000000000002;
 // Linux working directories: per process, word 0 the length of the path
 // (without the leading "/", at most FNAME_MAX) and one byte a word after.
 const CWD_STRIDE: u64 = 256;           // FNAME_MAX + 1
-const CWD_LEN: u64 = 4096;            // NPROC * CWD_STRIDE
+const CWD_LEN: u64 = 8192;            // NPROC * CWD_STRIDE
 const DPATH_LEN: u64 = 16384;         // OFD_N * CWD_STRIDE
 const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
 
 // Linux signal actions: per process, 64 signals of 4 words each (handler,
 // flags, restorer, mask).
-const SIGACT_LEN: u64 = 4096;
-const SIGSAVE_LEN: u64 = 1040;        // NPROC + NPROC * 64
-const ALARMS_LEN: u64 = 224;         // NPROC * 2, then PT_N POSIX timers of PT_W words per process
-const PT_BASE: u64 = 32;             // where the POSIX timers start in k.alarms (src/lxptimer.bastio)
+const SIGACT_LEN: u64 = 8192;           // NPROC * SIGACT_ROW
+const SIGSAVE_LEN: u64 = 2080;        // NPROC + NPROC * 64
+const ALARMS_LEN: u64 = 448;         // NPROC * 2, then PT_N POSIX timers of PT_W words per process
+const PT_BASE: u64 = 64;             // where the POSIX timers start in k.alarms (src/lxptimer.bastio)
 const PT_N: u64 = 4;                 // POSIX timers per process
 const PT_W: u64 = 3;                 // words per timer: deadline, interval, state
 const MAP_N: u64 = 4;                // MAP_SHARED file mappings per process
 const MAP_W: u64 = 4;                // words per mapping: first page + 1, pages, description, offset
-const MAPS_LEN: u64 = 256;           // NPROC * MAP_N * MAP_W
+const MAPS_LEN: u64 = 512;           // NPROC * MAP_N * MAP_W
 const LX_PAUSE: u64 = 34;
 const LX_RT_SIGSUSPEND: u64 = 130;
 const LX_WAITID: u64 = 247;
@@ -430,6 +438,7 @@ const LO_DIRECTORY: u64 = 0x10000;
 const LO_TMPFILE: u64 = 0x400000;      // with LO_DIRECTORY: an unnamed file, which BastiOS lacks
 const EOPNOTSUPP: u64 = 18446744073709551521; // 2^64 - 95
 const ENOSPC: u64 = 18446744073709551588;    // 2^64 - 28
+const EROFS: u64 = 18446744073709551586;     // 2^64 - 30
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
 const NAPPLETS: u64 = 18;
 const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----

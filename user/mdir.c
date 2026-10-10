@@ -4,12 +4,14 @@
  * running out of descriptors, a named pipe (mkfifo), the errors a path
  * walk gives (ENOTDIR, ELOOP), renameat2 with RENAME_EXCHANGE, mknod of a
  * regular file, one write of more than 4096 bytes, O_TMPFILE refused, a
- * full in-memory table (ENOSPC), and cleaning up. */
+ * full in-memory table (ENOSPC), a tmpfs mount (read-only too), and
+ * cleaning up. */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -145,6 +147,34 @@ int main(void)
         if (rmdir(nm) != 0)
             return fail("emptying the in-memory table");
     }
+    /* tmpfs: mounted on an empty directory, listed in /proc/self/mounts,
+     * busy while a file in it is open, emptied by umount2; read-only
+     * with MS_RDONLY until a remount. */
+    if (mkdir("mt", 0755) != 0 || mount("none", "mt", "ext2", 0, 0) != -1 || errno != ENODEV)
+        return fail("mount of a type BastiOS lacks");
+    if (mount("none", "mt", "tmpfs", 0, 0) != 0 || mount("none", "mt", "tmpfs", 0, 0) != -1 || errno != EBUSY)
+        return fail("mount of tmpfs");
+    char mb[512] = { 0 };
+    int pm = open("/proc/self/mounts", O_RDONLY);
+    if (pm < 0 || read(pm, mb, sizeof mb - 1) <= 0 || !strstr(mb, "tmpfs /dx/mt tmpfs rw"))
+        return fail("tmpfs in /proc/self/mounts");
+    close(pm);
+    int mf = open("mt/in", O_CREAT | O_WRONLY, 0644);
+    if (mf < 0 || write(mf, "x", 1) != 1)
+        return fail("a file in tmpfs");
+    if (rmdir("mt") != -1 || errno != EBUSY || umount2("mt", 0) != -1 || errno != EBUSY)
+        return fail("a busy mount");
+    close(mf);
+    if (umount2("mt", 0) != 0 || stat("mt/in", &st) == 0 || umount2("mt", 0) != -1 || errno != EINVAL)
+        return fail("umount2");
+    if (mount("none", "mt", "tmpfs", MS_RDONLY, 0) != 0 || open("mt/ro", O_CREAT | O_WRONLY, 0644) != -1
+        || errno != EROFS || mkdir("mt/d", 0755) != -1 || errno != EROFS)
+        return fail("a read-only mount");
+    if (mount(0, "mt", 0, MS_REMOUNT, 0) != 0 || (mf = open("mt/rw", O_CREAT | O_WRONLY, 0644)) < 0)
+        return fail("a remount read-write");
+    close(mf);
+    if (umount2("mt", 0) != 0 || rmdir("mt") != 0)
+        return fail("removing the mount");
     if (unlinkat(AT_FDCWD, "f", 0) != 0 || chdir("..") != 0 || rmdir("dx") != 0)
         return fail("cleaning up");
     close(d);

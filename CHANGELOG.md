@@ -14,6 +14,11 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Added
 
+- `mount` and `umount2` for tmpfs (`src/lxmount.bastio`): a tmpfs mounts
+  on an empty in-memory directory, `MS_RDONLY` makes it read-only
+  (`EROFS`) until an `MS_REMOUNT`, and unmounting removes what is in it.
+  Mounts are listed in `/proc/mounts` and `tmpfs` in
+  `/proc/filesystems`. Other file system types say `ENODEV`.
 - Fixes from the LTP file-system tests: a path through a file fails with
   `ENOTDIR`, a loop of symbolic links with `ELOOP`, a too-long name with
   `ENAMETOOLONG`, and a bad directory descriptor with `EBADF`/`ENOTDIR`

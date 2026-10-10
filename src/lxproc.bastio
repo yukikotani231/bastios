@@ -226,6 +226,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
   }
   lx_fd_close_all(&mut k, pid, true);
   sig_reset(&mut k.sigact, pid, true);
+  pset(&mut k.procs, pid, F_ALTSIZE, 0);  // and the alternate signal stack
   ptimer_clear(&mut k, pid);              // execve deletes POSIX timers
   match take_fpu(&mut k.fpus, pid) {
     Fpu::None => {},
