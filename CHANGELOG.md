@@ -25,6 +25,12 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 - `signalfd` and `signalfd4`: read, poll and epoll on the signals in its
   set. A blocked signal is now kept pending even when its action ignores
   it, as on Linux, so a blocked `SIGCHLD` reaches a signalfd or `sigwait`.
+- A Linux program blocked on a network socket (`accept`, `read`,
+  `recvfrom`, a full TCP send buffer) sleeps instead of being restarted on
+  every pass of the scheduler, so it no longer keeps a processor busy
+  (`ps` shows it as `socket`). The network card wakes it by interrupt:
+  MSI-X on virtio-net, the PCI interrupt line through the 8259 on the
+  e1000, asked for only while someone sleeps. `make netbench` measures it.
 - File locks are kept (`src/lxlock.bastio`): `fcntl` record locks
   (`F_GETLK`, `F_SETLK`, `F_SETLKW`), open file description locks
   (`F_OFD_*`) and `flock`, with Linux's owners and release rules. A
@@ -127,6 +133,13 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Changed
 
+- Removing the name a disk file was made under while a hard link remains
+  is committed by one sector write (`disk_take_name`); a rename between
+  two names of one file does nothing, as on Linux.
+- The power-cut test cuts power fifteen times and also truncates,
+  renames and links; `test/fsck.py` checks the disk image after every
+  cut (`test/fsck_test.py` shows it catches damage). Native call 24
+  (`SYS_LINK`, `f_link`) makes a hard link.
 - Named pipes live in the file system: `mknod`/`mkfifo` make a file with
   the FIFO type bits, so a FIFO is listed (type `p`), renamed, linked and
   removed like any file, and on the disk it survives a reboot. Only four

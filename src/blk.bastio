@@ -177,15 +177,8 @@ fn virtio_msix(pci: &mut Pci, win: &mut MmioSpace, dev: u64, lo: u64, hi: u64, m
   if cap == 0 || cap >= 252 {
     return false;
   }
-  let t = pci_msix_table(&mut pci, dev, cap);
-  let bir = t / 4294967296;
-  let off = t % 4294967296;
-  if bir > 5 {
-    return false;
-  }
-  let tb = pci_mem_bar_at(&mut pci, dev, PCI_BAR0 + 4 * bir);
-  let e = tb + off;
-  if tb == 0 || e % 16 != 0 || !(e + 16 <= lo || e >= hi)
+  let e = pci_msix_at(&mut pci, dev, cap);
+  if e == 0 || !(e + 16 <= lo || e >= hi)
     || !((e >= WIN_LO && e + 16 <= WIN_LOW_TOP) || (e >= WIN_HIGH && e + 16 <= WIN_TOP)) {
     return false;
   }

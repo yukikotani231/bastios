@@ -84,6 +84,10 @@ int main(void)
     close(r);
     if (unlink("ff") != 0 || stat("ff", &st) == 0)
         return fail("removing a FIFO");
+    /* Renaming one name of a file to another name of it does nothing. */
+    if (link("f", "f2") != 0 || rename("f", "f2") != 0 || stat("f", &st) != 0 || stat("f2", &st) != 0
+        || st.st_nlink != 2 || unlink("f2") != 0)
+        return fail("renaming between two names of one file");
     if (unlinkat(AT_FDCWD, "f", 0) != 0 || chdir("..") != 0 || rmdir("dx") != 0)
         return fail("cleaning up");
     close(d);

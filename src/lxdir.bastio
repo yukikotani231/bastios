@@ -431,7 +431,8 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
     return ENOENT;
   }
   let d = dir_at(&mut k, n);
-  if d == NO_FILE && vfs_lookup(&mut k.fs, n) == NO_FILE {
+  let src_f = vfs_lookup(&mut k.fs, n);
+  if d == NO_FILE && src_f == NO_FILE {
     return ENOENT;
   }
   if d != NO_FILE && (d < DIR_VFS || d >= DIR_PROC || d - DIR_VFS == VDIR_ROOT || d - DIR_VFS == VDIR_DISK) {
@@ -454,9 +455,9 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
     same = bget(t, i) == bget(t, n + i);
     i = i + 1;
   }
-  if same {
+  if same || (d == NO_FILE && vfs_lookup(&mut k.fs, m) == src_f) {
     bfree(t);
-    return 0;                               // a name renamed to itself
+    return 0;                               // a name renamed to itself, or to another name of its file
   }
   if on_disk(k.fs, m) != src_disk {
     bfree(t);

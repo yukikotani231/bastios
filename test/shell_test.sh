@@ -478,6 +478,12 @@ else:
         print("ok   network card found at boot")
     else:
         print("FAIL network card at boot"); fails += 1
+    # Its receive queue raises an MSI-X message (src/virtio_net.bastio),
+    # for processes that sleep until a frame comes in.
+    if b"net: frames received by interrupt\r\n" in out:
+        print("ok   network card interrupts")
+    else:
+        print("FAIL network card interrupts"); fails += 1
     us = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     us.settimeout(10)
     try:
@@ -653,17 +659,26 @@ else:
     # TCP through Linux system calls (user/mtcp.c, musl): it listens,
     # accepts, reads a line naming a port on this machine and answers it;
     # then it connects to that port, writes, and reads the reply until the
-    # host closes.
+    # host closes. It runs in the background so that ps can show it
+    # blocked in accept: asleep (SOCKWAIT, "socket") rather than restarted
+    # on every pass of the scheduler, until the frames that come in wake it.
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.bind(("127.0.0.1", 0))
     srv.listen(1)
     srv.settimeout(10)
     ask = f"{srv.getsockname()[1]}\n".encode()
     mark = len(out)
-    qemu.stdin.write(b"mtcp\r"); qemu.stdin.flush()
+    qemu.stdin.write(b"mtcp &\r"); qemu.stdin.flush()
     reply = b""
     line = b""
     if read_until(b"listening on tcp port 7001", mark):
+        time.sleep(0.5)
+        m2 = len(out)
+        qemu.stdin.write(b"ps\r"); qemu.stdin.flush()
+        if read_until(b"bastios> ", m2) and re.search(rb"socket\s+\d+\s+mtcp", out[m2:]):
+            print("ok   Linux TCP: a process blocked in accept sleeps")
+        else:
+            print("FAIL Linux TCP accept sleep:", repr(out[m2:])); fails += 1
         try:
             ts = socket.create_connection(("127.0.0.1", tcp_port), timeout=10)
             ts.sendall(ask)
@@ -685,12 +700,12 @@ else:
         except OSError as e:
             print("     mtcp:", e)
     srv.close()
-    if (read_until(b"bastios> ", mark) and reply == b"echo: " + ask
+    if (read_until(b"mtcp: got", mark) and reply == b"echo: " + ask
             and b"mtcp: connection from 10.0.2.2" in out[mark:]):
         print("ok   Linux TCP: listen, accept, read, write, close")
     else:
         print("FAIL Linux TCP serve:", reply, repr(out[mark:])); fails += 1
-    if line == b"linux says hi\n" and b"mtcp: got back at you" in out[mark:]:
+    if line == b"linux says hi\n" and read_until(b"mtcp: got back at you", mark):
         print("ok   Linux TCP: connect, write, read until the peer closes")
     else:
         print("FAIL Linux TCP get:", line); fails += 1
@@ -920,6 +935,9 @@ def e1000_ready():
     ok = b"net: e1000, mac 52:54:00:12:34:56" in out
     print(("ok  " if ok else "FAIL"), "(e1000 boot) card found")
     fails += not ok
+    ok = b"net: frames received by interrupt\r\n" in out
+    print(("ok  " if ok else "FAIL"), "(e1000 boot) card interrupts, through the 8259")
+    fails += not ok
     t0 = time.time()
     leased = False
     while not leased and time.time() - t0 < 10:
@@ -1049,13 +1067,26 @@ session("third", False, [
 ])
 # Power cuts. user/crashme.bastio checks what the last run left on the disk
 # (disk/log a whole number of correct records, disk/snap empty or whole,
-# disk/t absent or empty), then keeps appending, rewriting and creating.
+# disk/t absent or empty, disk/ow not torn, disk/tr zeros past its cut,
+# one of disk/ra and disk/rb, disk/la and disk/lb whole), then keeps
+# appending, rewriting, creating, truncating, renaming and linking.
+# After each cut, before the next boot mounts it, test/fsck.py checks the
+# image itself: every entry, name, parent and block map.
 # QEMU is killed part-way through each run, on ATA, virtio, NVMe, AHCI and
 # NVMe with 4 KiB sectors in turn; every boot after a cut must find the file system consistent. Killing
 # QEMU keeps every sector write that completed (it is in the host's page
 # cache), so this cuts power between two sector writes; it cannot tear a
 # sector in half.
-cuts = [0.05, 0.4, 0.15, 0.9, 0.6, 1.2, 0.3, 0.75, 0.5, 1.0]
+cuts = [0.05, 0.4, 0.15, 0.9, 0.6, 1.2, 0.3, 0.75, 0.5, 1.0, 0.2, 0.45, 0.7, 0.95, 1.1]
+def fsck(when, clean=False):
+    global fails
+    r = subprocess.run([sys.executable, "test/fsck.py", disk], capture_output=True, text=True)
+    last = (r.stdout.strip().splitlines() or ["(no output)"])[-1]
+    ok = r.returncode == 0 and (not clean or "fsck: note" not in r.stdout)
+    print(("ok  " if ok else "FAIL"), f"fsck {when}:", last)
+    if not ok:
+        print(r.stdout + r.stderr)
+    fails += not ok
 for n, delay in enumerate(cuts):
     qemu = boot(1, with_disk=n % 5 == 0, virtio=n % 5 == 1, nvme=n % 5 == 2, ahci=n % 5 == 3, nvme4k=n % 5 == 4)
     out = b""
@@ -1071,6 +1102,7 @@ for n, delay in enumerate(cuts):
     line = next((l for l in out[mark:].split(b"\n") if b"crashme:" in l), b"(nothing)")
     print(("ok  " if ok else "FAIL"), f"power cut {n + 1} after {delay} s:", line.strip().decode(errors="replace"))
     fails += not ok
+    fsck(f"after power cut {n + 1}")
 # A last run that is left to finish, then the files are removed.
 qemu = boot(1, with_disk=True)
 session("after the power cuts", False, [
@@ -1078,8 +1110,38 @@ session("after the power cuts", False, [
     ("rm disk/log", b""),
     ("rm disk/snap", b""),
     ("rm disk/ow", b""),
+    ("rm disk/tr", b""),
+    ("rm disk/ra", b""),
+    ("rm disk/rb", b""),
+    ("rm disk/la", b""),
+    ("rm disk/lb", b""),
     ("ls", b"about"),
-])
+], halt=True)
+fsck("at the end", clean=True)
+# What a power cut inside disk_take_name leaves: a file under the name its
+# hard link still has (disk/b), and a link naming a free entry (disk/c).
+# The mount drops both links; the file stays, and the image is clean.
+src = os.path.join(disk_dir.name, "b")
+with open(src, "wb") as f:
+    f.write(b"kept\n")
+subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, src], check=True)
+with open(disk, "r+b") as f:
+    for slot, name, target in ((1, b"b", 0), (2, b"c", 9)):
+        e = bytearray(256)
+        e[0], e[1] = 4, len(name)
+        e[8:16] = (64).to_bytes(8, "little")
+        e[48:56] = target.to_bytes(8, "little")
+        e[56:56 + len(name)] = name
+        f.seek(4096 + slot * 256)
+        f.write(e)
+fsck("of the cut-off link image")
+qemu = boot(1, with_disk=True)
+session("cut-off link", False, [
+    ("cat disk/b", b"kept\r\n"),
+    ("ls disk", b"\nb\r\n"),
+    ("cat disk/c", b"no such file"),
+], halt=True)
+fsck("after mounting it", clean=True)
 print(f"---- {fails} failed ----")
 sys.exit(1 if fails else 0)
 PY

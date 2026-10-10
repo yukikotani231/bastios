@@ -121,7 +121,7 @@ fn post_sig(k: &mut Kernel, p: u64, s: u64)
   }
   pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
   k.sigsave = set(k.sigsave, sender_at(p, s), 0);     // the kernel, unless post_from says
-  if !blocked && (st == LXREADING || st == LXWAITING || st == FUTEXWAIT) {
+  if !blocked && (st == LXREADING || st == LXWAITING || st == FUTEXWAIT || st == SOCKWAIT) {
     pset(&mut k.procs, p, F_STATE, READY);
   }
 }

@@ -1259,18 +1259,11 @@ fn vfs_link(v: &mut Vfs, n: u64, m: u64) -> u64
 }
 
 /// vfs_unlink of disk file entry d, which hard link l also names: the
-/// link's entry goes, and the file takes its name. Two sector writes; a
-/// power cut between them leaves the file under its old name only.
+/// file takes the link's name and the link goes, committed by one sector
+/// write (disk_take_name).
 fn disk_unlink_named(v: &mut Vfs, d: u64, l: u64) -> bool
   requires vfs_ok(v) && d < DSLOTS && l < DSLOTS
   ensures vfs_ok(v)
 {
-  let k = disk_name(v.disk, l, &mut v.xfer, DISK_PREFIX);
-  if k == NO_DISK_FILE || k > XFER - DISK_PREFIX {
-    return false;
-  }
-  if !disk_remove(&mut v.disk, l) {
-    return false;
-  }
-  return disk_move(&mut v.disk, d, v.xfer, DISK_PREFIX, k);
+  return disk_take_name(&mut v.disk, d, l);
 }

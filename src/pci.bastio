@@ -256,6 +256,15 @@ fn pci_cap(p: &mut Pci, dev: u64, id: u64) -> u64
   return 0;
 }
 
+/// The interrupt line the firmware routed the device's INTx to (config
+/// 0x3C), or 255 if none.
+fn pci_irq_line(p: &mut Pci, dev: u64) -> u64
+  requires pci_ok(p) && dev < PCI_NONE
+  ensures result < 256
+{
+  return pci_read(&mut p, dev, 0x3C) % 256;
+}
+
 /// Stops the device from asserting its INTx pin (it signals by message
 /// instead). The status half is written as zeros, which changes nothing.
 fn pci_intx_off(p: &mut Pci, dev: u64)
@@ -317,4 +326,25 @@ fn pci_msix_entry(e: &mut Mmio, addr: u64, data: u64)
   mmio_write32(&mut e, 4, 0);
   mmio_write32(&mut e, 8, cast[u32](data));
   mmio_write32(&mut e, 12, 0);
+}
+
+/// The address of entry 0 of the MSI-X table of device `dev` (enabled),
+/// whose MSI-X capability is `cap`: in the memory BAR the table names,
+/// 16-byte aligned. 0 if it is not in a memory BAR.
+fn pci_msix_at(p: &mut Pci, dev: u64, cap: u64) -> u64
+  requires pci_ok(p) && dev < PCI_NONE && 64 <= cap && cap < 252 && cap % 4 == 0
+  ensures result == 0 || (result % 16 == 0 && result >= WIN_LO && result < WIN_TOP + 4294967296)
+{
+  let t = pci_msix_table(&mut p, dev, cap);
+  let bir = t / 4294967296;
+  let off = t % 4294967296;
+  if bir > 5 {
+    return 0;
+  }
+  let tb = pci_mem_bar_at(&mut p, dev, PCI_BAR0 + 4 * bir);
+  let e = tb + off;
+  if tb == 0 || e % 16 != 0 || e < WIN_LO {
+    return 0;
+  }
+  return e;
 }

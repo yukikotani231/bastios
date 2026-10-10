@@ -74,6 +74,7 @@ const CONWAIT: u64 = 11;             // writing to the console, whose ring is fu
 const FUTEXWAIT: u64 = 12;           // in a Linux futex wait with no timeout
 const DISKWAIT: u64 = 13;            // waiting for the disk: F_WAIT says for what (disk_wake)
 const EXITING: u64 = 14;             // RUNNING, a thread whose leader is in execve: freed when it comes back
+const SOCKWAIT: u64 = 15;            // a Linux call on a network socket that has to wait (sock_wake)
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -1016,6 +1017,8 @@ fn put_state(con: &mut Con, s: u64)
     puts(&mut con, "netwait");
   } else if s == DISKWAIT {
     puts(&mut con, "disk   ");
+  } else if s == SOCKWAIT {
+    puts(&mut con, "socket ");
   } else if s == LXVFORK {
     puts(&mut con, "vfork  ");
   } else {
