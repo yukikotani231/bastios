@@ -11,8 +11,8 @@ import "net.bastio";
 import "tcp.bastio";
 
 const NPROC: u64 = 16;
-const STRIDE: u64 = 32;
-const PTAB_LEN: u64 = 512;           // NPROC * STRIDE
+const STRIDE: u64 = 40;
+const PTAB_LEN: u64 = 640;           // NPROC * STRIDE
 
 // Row fields.
 const F_STATE: u64 = 0;
@@ -31,6 +31,11 @@ const F_REGS: u64 = 8;               // 21 saved words, in `cpu_get` order
 const F_SIGMASK: u64 = 29;
 const F_SIGPEND: u64 = 30;
 const F_RESTART: u64 = 31;
+// Linux threads (src/lxthread.bastio): the group's leader (0: no threads),
+// the clear_child_tid address, and the address a futex wait waits on.
+const F_TGID: u64 = 32;
+const F_CTID: u64 = 33;
+const F_FUTEX: u64 = 34;
 const SIG_DEATH: u64 = 256;          // F_CODE of a process a signal ended: 256 + the signal
 
 // Saved register numbers.
@@ -59,6 +64,7 @@ const KILLED: u64 = 8;               // RUNNING, and killed: ends when it comes 
 const NETWAIT: u64 = 9;              // waiting for the network (a ping's reply)
 const LXVFORK: u64 = 10;             // lent its address space to child F_WAIT (clone with CLONE_VM | CLONE_VFORK)
 const CONWAIT: u64 = 11;             // writing to the console, whose ring is full
+const FUTEXWAIT: u64 = 12;           // in a Linux futex wait with no timeout
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -319,9 +325,12 @@ const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
 // Linux signal actions: per process, 64 signals of 4 words each (handler,
 // flags, restorer, mask).
 const SIGACT_LEN: u64 = 4096;
+const SIGSAVE_LEN: u64 = 1040;        // NPROC + NPROC * 64
 const ALARMS_LEN: u64 = 32;          // NPROC * 2
 const LX_PAUSE: u64 = 34;
 const LX_RT_SIGSUSPEND: u64 = 130;
+const LX_WAITID: u64 = 247;
+const LX_TIMES: u64 = 100;
 const OF_SOCK: u64 = 5;               // x: the kernel socket; word 3: 2 * peer + nonblocking
 const OF_DEV: u64 = 7;                // x: the device (src/lxdev.bastio)
 const OF_TCP: u64 = 6;                // x: the kernel connection (TCBS: none yet); word 3: see src/lxtcp.bastio
@@ -410,17 +419,18 @@ struct Kernel {
   sigact: Buf,          // Linux signal actions (src/lxsig.bastio)
   cwd: Buf,             // Linux working directories (src/lxdir.bastio)
   dpath: Buf,           // the path of each open directory description, laid out like cwd
-  sigsave: Buf,         // the mask rt_sigsuspend replaced, per process (src/lxsig.bastio)
+  sigsave: Buf,         // per process, the mask rt_sigsuspend replaced; then each pending signal's sender (src/lxsig.bastio)
   alarms: Buf,          // Linux ITIMER_REAL per process: deadline (0: off) and interval (src/lxtime.bastio)
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == NPROC
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN
 }
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 23;
+const NPROGS: u64 = 26;
+const LDSO_PROG: u64 = 25;            // musl's dynamic linker, the interpreter of musl programs
 
 fn prog_name(i: u64) -> Str {
   if i == 0 {
@@ -492,6 +502,15 @@ fn prog_name(i: u64) -> Str {
   if i == 22 {
     return "sysfuzz";
   }
+  if i == 23 {
+    return "mthread";
+  }
+  if i == 24 {
+    return "mdyn";
+  }
+  if i == 25 {
+    return "ld-musl-x86_64.so.1";
+  }
   return "(file)";                    // a program loaded from a file
 }
 
@@ -561,6 +580,15 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 22 {
     return include_bytes("../build/user/sysfuzz.elf");
+  }
+  if i == 23 {
+    return include_bytes("../build/user/mthread.elf");
+  }
+  if i == 24 {
+    return include_bytes("../build/user/mdyn.elf");
+  }
+  if i == 25 {
+    return include_bytes("../build/user/ld-musl.so");
   }
   return include_bytes("../build/user/fault.bin");
 }
@@ -688,9 +716,32 @@ fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, pid: u64, sr
   let mut size = 0;
   let mut entry = e.entry;
   let mut rsp = USER_BASE + ELF_SP;
+  let mut isrc = Src { file: false, prog: NPROGS, f: 0, size: 0 };
+  let mut ie = bad_elf();
+  let mut mmap_top = STACK_FIRST * 4096;
   if elf {
     if !e.ok {
       return Space::Empty;
+    }
+    if e.ilen != 0 {
+      // A dynamically linked program: its interpreter goes just below
+      // where mmap starts, and runs first.
+      isrc = interp_src(&mut v, src, e);
+      if !isrc.file && isrc.prog >= NPROGS {
+        return Space::Empty;
+      }
+      let probe = elf_parse(&mut v, isrc);
+      let low = (e.end + 4095) / 4096 * 4096;
+      if !probe.ok || probe.bias != USER_BASE || probe.ilen != 0 || probe.end > IMAGE_MAX - low {
+        return Space::Empty;
+      }
+      let place = (IMAGE_MAX - probe.end) / 4096 * 4096;
+      ie = elf_parse_at(&mut v, isrc, place);
+      if !ie.ok {
+        return Space::Empty;
+      }
+      entry = ie.entry;
+      mmap_top = place;
     }
   } else {
     // The BastiOS header: magic, bytes of memory the image needs, entry point.
@@ -707,7 +758,7 @@ fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, pid: u64, sr
       return Space::Empty;
     }
   }
-  let sp = build_space(&mut m, &mut v, src, img, elf, e, size, args, alen, total, seed);
+  let sp = build_space(&mut m, &mut v, src, img, elf, e, isrc, ie, size, args, alen, total, seed);
   if sp is Space::Empty {
     return sp;
   }
@@ -734,21 +785,68 @@ fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, pid: u64, sr
     // The heap starts on the page after the image; mmap takes pages
     // downward from the stack. Both stay in the window below the stack.
     pset(&mut procs, pid, F_BRK, (e.end + 4095) / 4096 * 4096);
-    pset(&mut procs, pid, F_MMAP, STACK_FIRST * 4096);
+    pset(&mut procs, pid, F_MMAP, mmap_top);
   }
   return sp;
 }
 
+/// The interpreter program `e` (from `src`) names: the file at that path,
+/// or, for musl's /lib/ld-musl-x86_64.so.1 when no such file exists, the
+/// built-in copy. Not found: a built-in Src with prog NPROGS.
+fn interp_src(v: &mut Vfs, src: Src, e: Elf) -> Src
+  requires vfs_ok(v) && e.ok && elf_fits(src.size, e)
+  ensures vfs_ok(v)
+{
+  let none = Src { file: false, prog: NPROGS, f: 0, size: 0 };
+  let ilen = e.ilen;
+  if ilen < 2 || !src_read(&mut v, src, e.interp, ilen) {
+    return none;
+  }
+  // The path ends in a NUL; a leading '/' is dropped, as the file layer
+  // names files from the root.
+  let mut n = ilen - 1;
+  if cast[u64](bget(v.xfer, n)) != 0 {
+    return none;
+  }
+  let mut skip = 0;
+  if cast[u64](bget(v.xfer, 0)) == 47 {
+    skip = 1;
+  }
+  let mut i = 0;
+  while i + skip < n
+    invariant i <= n && n < INTERP_MAX && skip <= 1 && vfs_ok(v)
+  {
+    bset(&mut v.xfer, i, bget(v.xfer, i + skip));
+    i = i + 1;
+  }
+  n = n - skip;
+  if n == 0 || n > FNAME_MAX {
+    return none;
+  }
+  let musl = xfer_is(v.xfer, 0, n, "lib/ld-musl-x86_64.so.1");
+  let f = vfs_lookup(&mut v, n);
+  if f != NO_FILE {
+    let size = vfs_size(&mut v, f);
+    if size != NO_FILE {
+      return Src { file: true, prog: NPROGS, f: f, size: size };
+    }
+  }
+  if musl {
+    return Src { file: false, prog: LDSO_PROG, f: 0, size: slen(prog_image(LDSO_PROG)) };
+  }
+  return none;
+}
+
 /// The address space for a checked image: ELF, or a BastiOS image needing
 /// `size` bytes of memory.
-fn build_space(m: &mut Mem, v: &mut Vfs, src: Src, img: Str, elf: bool, e: Elf, size: u64, args: &Bytes, alen: u64, total: u64, seed: u64) -> Space
-  requires mem_ok(m) && vfs_ok(v) && (elf ==> (e.ok && elf_fits(src.size, e))) && (!elf ==> size <= IMAGE_MAX)
+fn build_space(m: &mut Mem, v: &mut Vfs, src: Src, img: Str, elf: bool, e: Elf, isrc: Src, ie: Elf, size: u64, args: &Bytes, alen: u64, total: u64, seed: u64) -> Space
+  requires mem_ok(m) && vfs_ok(v) && (elf ==> (e.ok && elf_fits(src.size, e) && elf_fits(isrc.size, ie))) && (!elf ==> size <= IMAGE_MAX)
   requires alen <= total && total <= ARGS_MAX && total <= blen(args)
   ensures mem_ok(m) && vfs_ok(v)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
   if elf {
-    return elf_space(&mut m, &mut v, src, e, args, alen, total, seed);
+    return elf_space(&mut m, &mut v, src, e, isrc, ie, args, alen, total, seed);
   }
   return new_space(&mut m, img, size);
 }
@@ -756,10 +854,15 @@ fn build_space(m: &mut Mem, v: &mut Vfs, src: Src, img: Str, elf: bool, e: Elf, 
 /// Ends process `pid` with exit `code`: frees its address space, closes its
 /// files, hands the code to a parent waiting for it, and orphans its
 /// children.
-fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
-  requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code: u64)
+  requires kok(k) && 1 <= who && who < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
+  // A thread ends its whole group, which ends as its leader.
+  let pid = group_end(&mut k, mmu, who);
+  if pid == 0 {
+    return;
+  }
   vfork_give_back(&mut k, mmu, pid);         // a borrowed address space goes home
   match take_space(&mut k.spaces, pid) {
     Space::Empty => {},
@@ -801,7 +904,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
     pset(&mut k.procs, pid, F_STATE, FREE);
   }
   if 1 <= par && par < NPROC {
-    child_ended(&mut k, par);
+    child_ended(&mut k, par, pid);
   }
 }
 
@@ -817,6 +920,8 @@ fn put_state(con: &mut Con, s: u64)
     puts(&mut con, "waiting");
   } else if s == RUNNING || s == KILLED {
     puts(&mut con, "running");
+  } else if s == FUTEXWAIT {
+    puts(&mut con, "futex  ");
   } else if s == CONWAIT {
     puts(&mut con, "writing");
   } else if s == NETWAIT {

@@ -8,6 +8,8 @@ import "linux.bastio";
 
 const LX_PREAD64: u64 = 17;
 const LX_PWRITE64: u64 = 18;
+const LX_TRUNCATE: u64 = 76;
+const LX_FTRUNCATE: u64 = 77;
 const LX_SCHED_YIELD: u64 = 24;
 const LX_MREMAP: u64 = 25;
 const LX_MADVISE: u64 = 28;
@@ -370,8 +372,56 @@ fn lx_pio(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, va: u64
   return r;
 }
 
+/// ftruncate(fd, size): sets the length of a file open for writing,
+/// cutting it or adding zeros; its offset stays.
+fn lx_ftruncate(k: &mut Kernel, pid: u64, fd: u64, size: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
+    return EBADF;
+  }
+  if d.kind != K_FILE || size >= 0x8000000000000000 {
+    return EINVAL;
+  }
+  if !vfs_truncate(&mut k.fs, &mut k.mem, d.x, size) {
+    return EINVAL;                          // not open for writing, too long, or the disk failed
+  }
+  return 0;
+}
+
+/// truncate(path, size): ftruncate on the file at path, opened for writing
+/// just for this.
+fn lx_truncate(k: &mut Kernel, pid: u64, path: u64, size: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if size >= 0x8000000000000000 {
+    return EINVAL;
+  }
+  let n = lx_path_in(&mut k, pid, path);
+  if n == NO_RESULT {
+    return ENOENT;
+  }
+  if dir_at(&mut k, n) != NO_FILE {
+    return EISDIR;
+  }
+  let nfd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, O_WRITE, n);
+  if nfd == NO_FD || nfd >= NFD {
+    return ENOENT;
+  }
+  let row = pid * NFD + nfd;
+  let ok = vfs_truncate(&mut k.fs, &mut k.mem, row, size);
+  vfs_close(&mut k.fs, &mut k.mem, row);
+  if !ok {
+    return EINVAL;
+  }
+  return 0;
+}
+
 fn is_misc_call(n: u64) -> bool {
-  return n == LX_PREAD64 || n == LX_PWRITE64 || n == LX_SCHED_YIELD || n == LX_MREMAP
+  return n == LX_TRUNCATE || n == LX_FTRUNCATE || n == LX_PREAD64 || n == LX_PWRITE64 || n == LX_SCHED_YIELD || n == LX_MREMAP
     || n == LX_MADVISE || n == LX_FSYNC || n == LX_FDATASYNC || n == LX_CHMOD || n == LX_FCHMOD
     || n == LX_CHOWN || n == LX_FCHOWN || n == LX_LCHOWN || n == LX_UMASK || n == LX_GETRLIMIT
     || n == LX_GETRUSAGE || n == LX_SYSINFO || n == LX_SETUID || n == LX_SETGID || n == LX_SETPGID
@@ -391,6 +441,14 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   ensures kok(k) && con_ok(con)
 {
   let r10 = pget(k.procs, pid, F_REGS + R_R10);
+  if n == LX_FTRUNCATE {
+    ret(&mut k.procs, pid, lx_ftruncate(&mut k, pid, a, b));
+    return KEEP;
+  }
+  if n == LX_TRUNCATE {
+    ret(&mut k.procs, pid, lx_truncate(&mut k, pid, a, b));
+    return KEEP;
+  }
   if n == LX_SCHED_YIELD {
     ret(&mut k.procs, pid, 0);
     return SWITCH;
