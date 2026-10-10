@@ -359,10 +359,15 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   if blk_is_virtio(disk.dev) {
     puts(&mut con, "disk: virtio\r\n");
   }
-  // The network card, if any: nine pages after the disk's four.
-  let nic = nic_new(&mut ports, &mut pci, &mut m, 4, dev_lo, dev_hi);
+  // The network card, if any: nine pages after the disk's four (an e1000
+  // takes six of them).
+  let nic = nic_new(&mut ports, &mut pci, &mut m, &mut win, 4, dev_lo, dev_hi);
   if nic_live(nic) {
-    puts(&mut con, "net: virtio, mac ");
+    if nic_e1000(nic) {
+      puts(&mut con, "net: e1000, mac ");
+    } else {
+      puts(&mut con, "net: virtio, mac ");
+    }
     put_mac(&mut con, nic_mac(nic));
     puts(&mut con, ", address by DHCP\r\n");
   }
@@ -411,7 +416,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   vec_free(sys.k.fpus);
   blk_free(&mut ports, vfs_free(sys.k.fs, &mut sys.k.mem), &mut sys.k.mem);
-  nic_free(&mut ports, sys.k.nic, &mut sys.k.mem);
+  nic_free(&mut ports, &mut win, sys.k.nic, &mut sys.k.mem);
   puts(&mut sys.con, "BastiOS: ");
   put_num(&mut sys.con, count_free(sys.k.mem.bm));
   puts(&mut sys.con, " pages free at power off\r\n");

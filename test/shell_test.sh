@@ -37,7 +37,7 @@ _s.bind(("127.0.0.1", 0))
 tcp_port = _s.getsockname()[1]
 _s.close()
 
-def boot(cpus, with_disk=False, virtio=False, net=False, subnet=None):
+def boot(cpus, with_disk=False, virtio=False, net=False, subnet=None, card="virtio-net-pci"):
     drive = ["-drive", f"file={disk},format=raw,if=ide,index=0"] if with_disk else []
     if virtio:
         # The same disk as a virtio block device (src/virtio.bastio): sectors
@@ -46,7 +46,9 @@ def boot(cpus, with_disk=False, virtio=False, net=False, subnet=None):
                  "-device", "virtio-blk-pci,drive=vd"]
     # A virtio network card on QEMU's user-mode network (src/net.bastio).
     nic = ["-netdev", f"user,id=n0,hostfwd=udp:127.0.0.1:{udp_port}-:7,hostfwd=udp:127.0.0.1:{udp_port2}-:7000,hostfwd=tcp:127.0.0.1:{tcp_port}-:7001",
-           "-device", "virtio-net-pci,netdev=n0"] if net else []
+           "-device", f"{card},netdev=n0"] if net else ["-nic", "none"]
+    # (Without -nic none QEMU adds an e1000 of its own, which the kernel
+    # would now drive.)
     if subnet:
         # QEMU's DHCP server on a subnet other than its default: the
         # address the kernel ends up with can only have come from DHCP.
@@ -584,13 +586,15 @@ print(out.decode(errors="replace").replace("\r", ""))
 # Boot again on the same disk, now as a virtio device: the file written
 # through ATA is still there, and virtio can read, extend and keep it. At
 # power off the four pages the device was lent are back in the pool.
-def session(name, want_banner, steps, halt=False):
+def session(name, want_banner, steps, halt=False, ready=None):
     global qemu, out, deadline, fails
     out = b""
     deadline = time.time() + timeout
     if not read_until(b"bastios> "):
         print(f"FAIL: no prompt after the {name} boot"); fails += 1
     else:
+        if ready is not None:
+            ready()
         if want_banner is not None:
             ok = (b"disk: virtio" in out) == want_banner
             print(("ok  " if ok else "FAIL"), f"({name} boot) disk driver: {'virtio' if want_banner else 'ATA'}")
@@ -625,6 +629,40 @@ session("virtio", True, [
     ("fstest", b"fstest: disk ok"),
     ("rm disk/big", b""),
 ], halt=True)
+
+# An e1000 card instead of virtio (src/e1000.bastio), on QEMU's network.
+# Its link takes a moment to come up, so DHCP may need a retry: ask until
+# the lease is there. test/tcp_test.sh runs its TCP cases on it too.
+def e1000_ready():
+    global fails
+    ok = b"net: e1000, mac 52:54:00:12:34:56" in out
+    print(("ok  " if ok else "FAIL"), "(e1000 boot) card found")
+    fails += not ok
+    t0 = time.time()
+    leased = False
+    while not leased and time.time() - t0 < 10:
+        mark = len(out)
+        qemu.stdin.write(b"ifconfig\r"); qemu.stdin.flush()
+        leased = read_until(b"bastios> ", mark) and b"10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2 (DHCP)" in out[mark:]
+        if not leased:
+            time.sleep(0.5)
+    print(("ok  " if leased else "FAIL"), f"(e1000 boot) address by DHCP ({time.time() - t0:.1f}s)")
+    fails += not leased
+    us = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    us.settimeout(10)
+    try:
+        us.sendto(b"through the e1000", ("127.0.0.1", udp_port))
+        got, _ = us.recvfrom(100)
+    except OSError:
+        got = None
+    us.close()
+    print(("ok  " if got == b"through the e1000" else "FAIL"), "(e1000 boot) UDP echo on port 7")
+    fails += got != b"through the e1000"
+qemu = boot(1, net=True, card="e1000")
+session("e1000", None, [
+    ("ping", b"reply from 10.0.2.2"),
+    ("ping 10.0.2.3", b"reply from 10.0.2.3"),
+], halt=True, ready=e1000_ready)
 
 # And back on ATA: what virtio wrote is on the disk.
 qemu = boot(1, with_disk=True)
