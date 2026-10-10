@@ -446,15 +446,16 @@ fn disk_mount(dev: Blk) -> DiskFs
     }
     i = i + 1;
   }
-  // A hard link must name a file; a power cut while the file was being
-  // removed can leave one naming a free entry, and it goes too.
+  // A hard link must name a file under another name. A power cut can
+  // leave one naming a free entry (while the file was removed), or one
+  // whose file has already taken its name (disk_take_name): it goes.
   i = 0;
   while i < DSLOTS
     invariant i <= DSLOTS && disk_ok(d)
   {
     if cast[u64](bget(d.dir, i * DENT + E_KIND)) == K_LINK {
       let t = get_u64(d.dir, i * DENT + E_LINK);
-      if t >= DSLOTS || bget(d.dir, t * DENT + E_KIND) != 1 {
+      if t >= DSLOTS || bget(d.dir, t * DENT + E_KIND) != 1 || same_name(d, i, t) {
         bset(&mut d.dir, i * DENT + E_KIND, 0);
         dir_flush(&mut d, i / 2);
       }
@@ -744,6 +745,82 @@ fn disk_links(d: &DiskFs, t: u64) -> u64
     i = i + 1;
   }
   return c;
+}
+
+/// Do entries i and t have the same parent and last component?
+fn same_name(d: &DiskFs, i: u64, t: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS && t < DSLOTS
+{
+  if dent_get(d, i, E_PARENT) != dent_get(d, t, E_PARENT) || bget(d.dir, i * DENT + E_NLEN) != bget(d.dir, t * DENT + E_NLEN) {
+    return false;
+  }
+  let mut j = 0;
+  while j < DENT - E_NAME
+    invariant j <= DENT - E_NAME
+  {
+    if bget(d.dir, i * DENT + E_NAME + j) != bget(d.dir, t * DENT + E_NAME + j) {
+      return false;
+    }
+    j = j + 1;
+  }
+  return true;
+}
+
+/// File entry i takes the name (parent and last component) of hard link l,
+/// which names it, and l goes: how a file that has links loses its own
+/// name. The commit is the one sector write of i's entry; l's removal is a
+/// second write unless both share a sector. A power cut between them
+/// leaves l naming i under i's new name, which the next mount drops, so
+/// either the old state or the new one survives.
+fn disk_take_name(d: &mut DiskFs, i: u64, l: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS && l < DSLOTS
+  ensures disk_ok(d)
+{
+  disk_drain(&mut d);                 // queued writes reach the disk first
+  if i == l || i >= d.slots || bget(d.dir, i * DENT) != 1 || disk_link_of(d, l) != i {
+    return false;
+  }
+  let mut save = balloc(DENT);
+  let mut j = 0;
+  while j < DENT
+    invariant j <= DENT && blen(save) == DENT && disk_ok(d)
+  {
+    bset(&mut save, j, bget(d.dir, i * DENT + j));
+    j = j + 1;
+  }
+  dent_set(&mut d, i, E_PARENT, dent_get(d, l, E_PARENT));
+  bset(&mut d.dir, i * DENT + E_NLEN, bget(d.dir, l * DENT + E_NLEN));
+  j = E_NAME;
+  while j < DENT
+    invariant j <= DENT && disk_ok(d)
+  {
+    bset(&mut d.dir, i * DENT + j, bget(d.dir, l * DENT + j));
+    j = j + 1;
+  }
+  let shared = i / 2 == l / 2;       // two entries to a sector
+  if shared {
+    bset(&mut d.dir, l * DENT + E_KIND, 0);
+  }
+  if !ent_flush(&mut d, i) {
+    j = 0;
+    while j < DENT
+      invariant j <= DENT && blen(save) == DENT && disk_ok(d)
+    {
+      bset(&mut d.dir, i * DENT + j, bget(save, j));
+      j = j + 1;
+    }
+    if shared {
+      bset(&mut d.dir, l * DENT + E_KIND, cast[u8](K_LINK));
+    }
+    bfree(save);
+    return false;
+  }
+  bfree(save);
+  if !shared {
+    bset(&mut d.dir, l * DENT + E_KIND, 0);
+    ent_flush(&mut d, l);               // if this fails, the next mount drops l
+  }
+  return true;
 }
 
 /// disk_create, or a hard link to entry `link` when it is below DSLOTS.

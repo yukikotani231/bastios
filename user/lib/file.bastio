@@ -16,6 +16,7 @@ const SYS_RMDIR: u64 = 20;
 const SYS_READDIR: u64 = 21;
 const SYS_RENAME: u64 = 22;
 const SYS_FTRUNCATE: u64 = 23;
+const SYS_LINK: u64 = 24;
 const DIR_BIT: u64 = 4294967296;      // f_stat and f_readdir: a directory
 
 const O_READ: u64 = 1;
@@ -114,6 +115,14 @@ fn f_rename(names: &Bytes, n: u64, m: u64) -> u64
   requires n <= blen(names) && m <= blen(names) - n
 {
   return sys_send(SYS_RENAME, n, names, n + m);
+}
+
+/// Gives the file named by the first n bytes of `names` another name, the
+/// m bytes after them (a hard link).
+fn f_link(names: &Bytes, n: u64, m: u64) -> u64
+  requires n <= blen(names) && m <= blen(names) - n
+{
+  return sys_send(SYS_LINK, n, names, n + m);
 }
 
 /// Sets the size of the file open (for writing) in fd to n bytes; past the

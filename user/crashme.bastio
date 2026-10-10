@@ -10,12 +10,25 @@
 //              OW bytes: "x" except bytes OW_AT..OW_AT + OW_N, which are
 //              all "x" or all one digit. Those are rewritten in place by
 //              single write calls that cross a block boundary, so a mix
-//              of two digits would be a torn write.
+//              of two digits would be a torn write;
+//   disk/tr    absent, empty, or TR_SMALL bytes "a" possibly followed by
+//              zeros up to TR_BIG: it is cut to TR_SMALL and grown back to
+//              TR_BIG by ftruncate, so the bytes past TR_SMALL must read
+//              as zeros every time;
+//   disk/ra,rb one of them, never both (once made): renamed back and
+//              forth, holding PAY bytes "R" (or nothing, cut while made);
+//   disk/la,lb one or both, never neither (once made): linked and
+//              unlinked in turn, each name holding PAY bytes "L" (or
+//              nothing, cut while made). Removing the name a file was made
+//              under while the other remains is the case diskfs commits
+//              with one sector write (disk_take_name).
 //
 // It prints "crashme: clean, N records" (or what was wrong, and exits
 // with 1), then appends PER_RUN more records. Every 16 records it rewrites
 // disk/snap (truncate, then SNAP bytes over several sectors) and creates
-// and removes disk/t; between, it overwrites the middle of disk/ow. It
+// and removes disk/t; between, it overwrites the middle of disk/ow,
+// truncates disk/tr, renames disk/ra or disk/rb and links or unlinks
+// disk/la or disk/lb. It
 // prints "crashme: N" every 64 records and
 // "crashme: done N" at the end.
 
@@ -29,6 +42,9 @@ const OW: u64 = 6000;
 const OW_A: u64 = 4096;                 // the first of the two writes making it
 const OW_AT: u64 = 1000;
 const OW_N: u64 = 4000;
+const TR_SMALL: u64 = 3000;
+const TR_BIG: u64 = 9000;              // three blocks: the shrink drops two and zeroes a tail
+const PAY: u64 = 100;
 
 fn puts(con: &Serial, s: Str) {
   let mut i = 0;
@@ -273,6 +289,254 @@ fn rewrite_ow(ow: &Bytes, buf: &mut Bytes, d: u8) -> bool
   return ok;
 }
 
+/// Is disk/tr in one of the states the header lists?
+fn check_tr(tr: &Bytes, buf: &mut Bytes) -> bool
+  requires blen(tr) >= 7 && blen(buf) == 4096
+  ensures blen(buf) == 4096
+{
+  let size = f_stat(tr, 7);
+  if size == NOT_OK || size == 0 {
+    return true;
+  }
+  if size != TR_SMALL && size != TR_BIG {
+    return false;
+  }
+  let fd = f_open(tr, 7, O_READ);
+  if fd == NOT_OK {
+    return false;
+  }
+  let mut at = 0;
+  let mut ok = true;
+  while ok && at < size
+    invariant blen(buf) == 4096 && at <= size && size <= TR_BIG
+  {
+    let r = f_read(fd, &mut buf);
+    if r == 0 || r > 4096 || r > size - at {
+      ok = false;
+    } else {
+      let mut j = 0;
+      while ok && j < r
+        invariant j <= r && r <= 4096 && blen(buf) == 4096
+      {
+        let c = bget(buf, j);
+        if (at + j < TR_SMALL && c != 97) || (at + j >= TR_SMALL && c != 0) {
+          ok = false;
+        }
+        j = j + 1;
+      }
+      at = at + r;
+    }
+  }
+  f_close(fd);
+  return ok;
+}
+
+/// Makes disk/tr if it is absent or empty, otherwise cuts it to TR_SMALL
+/// or grows it to TR_BIG (when `grow`).
+fn step_tr(tr: &Bytes, buf: &mut Bytes, grow: bool) -> bool
+  requires blen(tr) >= 7 && blen(buf) == 4096
+  ensures blen(buf) == 4096
+{
+  let size = f_stat(tr, 7);
+  if size == NOT_OK || size == 0 {
+    let fd = f_open(tr, 7, O_WRITE + O_CREATE + O_TRUNC);
+    if fd == NOT_OK {
+      return false;
+    }
+    let mut j = 0;
+    while j < TR_SMALL
+      invariant j <= TR_SMALL && blen(buf) == 4096
+    {
+      bset(&mut buf, j, 97);
+      j = j + 1;
+    }
+    let ok = f_write(fd, buf, TR_SMALL) == TR_SMALL;
+    f_close(fd);
+    return ok;
+  }
+  let fd = f_open(tr, 7, O_WRITE);
+  if fd == NOT_OK {
+    return false;
+  }
+  let mut to = TR_SMALL;
+  if grow {
+    to = TR_BIG;
+  }
+  let ok = f_truncate(fd, to) == 0;
+  f_close(fd);
+  return ok;
+}
+
+/// The size of names[at..at + 7], checked to be 0 or PAY bytes of c:
+/// NOT_OK if absent, NOT_OK - 1 if wrong.
+fn pay_size(names: &Bytes, at: u64, buf: &mut Bytes, c: u8) -> u64
+  requires blen(names) == 14 && at <= 7 && blen(buf) == 4096
+  ensures blen(buf) == 4096
+{
+  let mut nm = balloc(7);
+  let mut j = 0;
+  while j < 7
+    invariant j <= 7 && blen(nm) == 7 && blen(names) == 14 && at <= 7
+  {
+    bset(&mut nm, j, bget(names, at + j));
+    j = j + 1;
+  }
+  let size = f_stat(nm, 7);
+  let mut r = size;
+  if size != NOT_OK && size != 0 {
+    r = NOT_OK - 1;
+    if size == PAY {
+      let fd = f_open(nm, 7, O_READ);
+      if fd != NOT_OK {
+        if f_read(fd, &mut buf) == PAY {
+          r = PAY;
+          let mut k = 0;
+          while k < PAY
+            invariant k <= PAY && blen(buf) == 4096
+          {
+            if bget(buf, k) != c {
+              r = NOT_OK - 1;
+            }
+            k = k + 1;
+          }
+        }
+        f_close(fd);
+      }
+    }
+  }
+  bfree(nm);
+  return r;
+}
+
+/// Writes PAY bytes of c to names[at..at + 7], making it if needed.
+fn put_pay(names: &Bytes, at: u64, buf: &mut Bytes, c: u8) -> bool
+  requires blen(names) == 14 && at <= 7 && blen(buf) == 4096
+  ensures blen(buf) == 4096
+{
+  let mut nm = balloc(7);
+  let mut j = 0;
+  while j < 7
+    invariant j <= 7 && blen(nm) == 7 && blen(names) == 14 && at <= 7
+  {
+    bset(&mut nm, j, bget(names, at + j));
+    j = j + 1;
+  }
+  let mut k = 0;
+  while k < PAY
+    invariant k <= PAY && blen(buf) == 4096
+  {
+    bset(&mut buf, k, c);
+    k = k + 1;
+  }
+  let fd = f_open(nm, 7, O_WRITE + O_CREATE + O_TRUNC);
+  let ok = fd != NOT_OK && f_write(fd, buf, PAY) == PAY;
+  f_close(fd);
+  bfree(nm);
+  return ok;
+}
+
+/// Are disk/ra and disk/rb (in `rn`) as the header says? `made` once
+/// the first step has finished.
+fn check_ren(rn: &Bytes, buf: &mut Bytes, made: bool) -> bool
+  requires blen(rn) == 14 && blen(buf) == 4096
+  ensures blen(buf) == 4096
+{
+  let a = pay_size(rn, 0, &mut buf, 82);
+  let b = pay_size(rn, 7, &mut buf, 82);
+  return a != NOT_OK - 1 && b != NOT_OK - 1 && (a == NOT_OK || b == NOT_OK) && (!made || a != NOT_OK || b != NOT_OK);
+}
+
+/// Renames whichever of disk/ra and disk/rb exists to the other, making
+/// disk/ra if neither does (or rewriting an empty one).
+fn step_ren(rn: &mut Bytes, buf: &mut Bytes) -> bool
+  requires blen(rn) == 14 && blen(buf) == 4096
+  ensures blen(rn) == 14 && blen(buf) == 4096
+{
+  let a = pay_size(rn, 0, &mut buf, 82);
+  let b = pay_size(rn, 7, &mut buf, 82);
+  if a == 0 || (a == NOT_OK && b == NOT_OK) {
+    return put_pay(rn, 0, &mut buf, 82);
+  }
+  if b == 0 {
+    return put_pay(rn, 7, &mut buf, 82);
+  }
+  if a == PAY {
+    return f_rename(rn, 7, 7) == 0;
+  }
+  // rb to ra: swap the halves, rename, swap back.
+  swap7(&mut rn);
+  let ok = f_rename(rn, 7, 7) == 0;
+  swap7(&mut rn);
+  return ok;
+}
+
+fn swap7(x: &mut Bytes)
+  requires blen(x) == 14
+  ensures blen(x) == 14
+{
+  let mut j = 0;
+  while j < 7
+    invariant j <= 7 && blen(x) == 14
+  {
+    let c = bget(x, j);
+    bset(&mut x, j, bget(x, j + 7));
+    bset(&mut x, j + 7, c);
+    j = j + 1;
+  }
+}
+
+/// Are disk/la and disk/lb (in `ln`) as the header says? `made` once
+/// the first step has finished.
+fn check_links(ln: &Bytes, buf: &mut Bytes, made: bool) -> bool
+  requires blen(ln) == 14 && blen(buf) == 4096
+  ensures blen(buf) == 4096
+{
+  let a = pay_size(ln, 0, &mut buf, 76);
+  let b = pay_size(ln, 7, &mut buf, 76);
+  return a != NOT_OK - 1 && b != NOT_OK - 1 && (!made || a != NOT_OK || b != NOT_OK);
+}
+
+/// One step of la -> la+lb -> lb -> lb+la -> la: links the one name to
+/// the other, or removes one of two (the first when `first`). Makes
+/// disk/la if neither exists, and rewrites an empty one.
+fn step_links(ln: &mut Bytes, buf: &mut Bytes, first: bool) -> bool
+  requires blen(ln) == 14 && blen(buf) == 4096
+  ensures blen(ln) == 14 && blen(buf) == 4096
+{
+  let a = pay_size(ln, 0, &mut buf, 76);
+  let b = pay_size(ln, 7, &mut buf, 76);
+  if a == 0 || (a == NOT_OK && b == NOT_OK) {
+    return put_pay(ln, 0, &mut buf, 76);
+  }
+  if b == 0 {
+    return put_pay(ln, 7, &mut buf, 76);
+  }
+  if a == PAY && b == PAY {
+    let mut nm = balloc(7);
+    let mut at = 7;
+    if first {
+      at = 0;
+    }
+    let mut j = 0;
+    while j < 7
+      invariant j <= 7 && blen(nm) == 7 && blen(ln) == 14 && at <= 7
+    {
+      bset(&mut nm, j, bget(ln, at + j));
+      j = j + 1;
+    }
+    let ok = f_unlink(nm, 7) == 0;
+    bfree(nm);
+    return ok;
+  }
+  if a == PAY {
+    return f_link(ln, 7, 7) == 0;
+  }
+  swap7(&mut ln);
+  let ok = f_link(ln, 7, 7) == 0;
+  swap7(&mut ln);
+  return ok;
+}
+
 fn bad(con: &Serial, what: Str) -> u64 {
   puts(con, "crashme: bad ");
   puts(con, what);
@@ -287,6 +551,9 @@ fn main(con: &mut Serial) -> u64 {
   let snap = bfrom("disk/snap");
   let t = bfrom("disk/t");
   let ow = bfrom("disk/ow");
+  let tr = bfrom("disk/tr");
+  let mut rn = bfrom("disk/radisk/rb");
+  let mut ln = bfrom("disk/ladisk/lb");
   let mut code = 0;
   let n = check_log(log, &mut buf);
   let tsize = f_stat(t, 6);
@@ -298,6 +565,12 @@ fn main(con: &mut Serial) -> u64 {
     code = bad(con, "t");
   } else if !check_ow(ow, &mut buf) {
     code = bad(con, "ow");
+  } else if !check_tr(tr, &mut buf) {
+    code = bad(con, "tr");
+  } else if blen(rn) != 14 || !check_ren(rn, &mut buf, n != NOT_OK && n > 6) {
+    code = bad(con, "ra/rb");
+  } else if blen(ln) != 14 || !check_links(ln, &mut buf, n != NOT_OK && n > 12) {
+    code = bad(con, "la/lb");
   } else {
     puts(con, "crashme: clean, ");
     put_num(con, n);
@@ -317,7 +590,7 @@ fn main(con: &mut Serial) -> u64 {
     code = bad(con, "open");
   }
   let mut k = 0;
-  while code == 0 && k < PER_RUN && base + k < MAX_RECS
+  while code == 0 && k < PER_RUN && base + k < MAX_RECS && blen(rn) == 14 && blen(ln) == 14
     invariant k <= PER_RUN && blen(buf) == 4096 && blen(rec) == REC && base <= MAX_RECS
   {
     let i = base + k;
@@ -341,6 +614,18 @@ fn main(con: &mut Serial) -> u64 {
       if !rewrite_ow(ow, &mut buf, cast[u8](48 + i / 16 % 10)) {
         code = bad(con, "ow write");
       }
+    } else if i % 16 == 3 {
+      if !step_tr(tr, &mut buf, i / 16 % 2 == 0) {
+        code = bad(con, "tr step");
+      }
+    } else if i % 16 == 5 {
+      if !step_ren(&mut rn, &mut buf) {
+        code = bad(con, "rename");
+      }
+    } else if i % 16 == 11 {
+      if !step_links(&mut ln, &mut buf, i / 32 % 2 == 0) {
+        code = bad(con, "link");
+      }
     }
     if i % 64 == 63 {
       puts(con, "crashme: ");
@@ -361,5 +646,8 @@ fn main(con: &mut Serial) -> u64 {
   bfree(snap);
   bfree(t);
   bfree(ow);
+  bfree(tr);
+  bfree(rn);
+  bfree(ln);
   return code;
 }
