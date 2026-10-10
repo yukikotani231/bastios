@@ -18,7 +18,7 @@ const F_CODE: u64 = 2;               // exit code of a ZOMBIE
 const F_PARENT: u64 = 3;
 const F_PROG: u64 = 4;               // index into the program table
 const F_TICKS: u64 = 5;              // timer ticks spent running
-const F_REGS: u64 = 8;               // 18 saved registers, in `cpu_get` order
+const F_REGS: u64 = 8;               // 21 saved words, in `cpu_get` order
 
 // Saved register numbers.
 const R_RAX: u64 = 0;
@@ -28,6 +28,7 @@ const R_RDI: u64 = 5;
 const R_RIP: u64 = 15;
 const R_RSP: u64 = 16;
 const R_RFLAGS: u64 = 17;
+const R_FSBASE: u64 = 20;
 
 // States.
 const FREE: u64 = 0;
@@ -121,6 +122,55 @@ fn put_space(s: &mut Vec[Space], pid: u64, x: Space)
   }
 }
 
+// ---------------------------------------------------------------- FPU state
+
+// A process's x87/SSE registers, saved in a page of their own while it is
+// not running. Element `pid` of a vector, like the address spaces.
+enum Fpu { None, State(Frame) }
+
+spec fn fpus_ok(s: &Vec[Fpu]) -> bool {
+  vlen(s) == NPROC
+}
+
+/// Takes process `pid`'s FPU state out, leaving its slot empty.
+fn take_fpu(s: &mut Vec[Fpu], pid: u64) -> Fpu
+  requires fpus_ok(s) && pid < NPROC
+  ensures fpus_ok(s) && vget(s, pid) is Fpu::None
+{
+  return vec_swap(&mut s, pid, Fpu::None);
+}
+
+/// Puts FPU state into an empty slot.
+fn put_fpu(s: &mut Vec[Fpu], pid: u64, x: Fpu)
+  requires fpus_ok(s) && pid < NPROC && vget(s, pid) is Fpu::None
+  ensures fpus_ok(s)
+{
+  match vec_swap(&mut s, pid, x) {
+    Fpu::None => {},
+    Fpu::State(_f) => { unreachable; },     // the slot was empty
+  }
+}
+
+/// Gives the page of FPU state `x`, if any, back to the allocator.
+fn drop_fpu(m: &mut Mem, x: Fpu)
+  requires mem_ok(m)
+  ensures mem_ok(m)
+{
+  match x {
+    Fpu::None => {},
+    Fpu::State(f) => { give_page(&mut m, f); },
+  }
+}
+
+/// The x87/SSE state a Linux process starts with: control word 0x37F and
+/// MXCSR 0x1F80 (every exception masked, round to nearest).
+fn fpu_init(f: &mut Frame) {
+  frame_write8(&mut f, 0, 0x7F);
+  frame_write8(&mut f, 1, 0x03);
+  frame_write8(&mut f, 24, 0x80);
+  frame_write8(&mut f, 25, 0x1F);
+}
+
 // ---------------------------------------------------------------- input queue
 
 // Bytes typed on the console, waiting for a READ: word 0 is the head,
@@ -196,18 +246,19 @@ fn wake_readers(procs: &mut Buf, q: &mut Buf)
 struct Kernel {
   mem: Mem,             // the page allocator
   spaces: Vec[Space],   // element `pid` is that process's address space
+  fpus: Vec[Fpu],       // element `pid` is that process's FPU state
   procs: Buf,           // the process table
   q: Buf,               // console input waiting for a READ
   ticks: u64,           // timer ticks since boot
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && len(k.procs) == PTAB_LEN && qok(k.q)
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q)
 }
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 10;
+const NPROGS: u64 = 12;
 
 fn prog_name(i: u64) -> Str {
   if i == 0 {
@@ -236,6 +287,12 @@ fn prog_name(i: u64) -> Str {
   }
   if i == 8 {
     return "elfbad";
+  }
+  if i == 9 {
+    return "mhello";
+  }
+  if i == 10 {
+    return "fpucheck";
   }
   return "fault";
 }
@@ -267,6 +324,12 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 8 {
     return include_bytes("../build/user/elfbad.elf");
+  }
+  if i == 9 {
+    return include_bytes("../build/user/mhello.elf");
+  }
+  if i == 10 {
+    return include_bytes("../build/user/fpucheck.elf");
   }
   return include_bytes("../build/user/fault.bin");
 }
@@ -336,12 +399,21 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
       return 0;
     },
   }
+  let fp = find_free(&mut k.mem);
+  if fp >= NPAGES {
+    return 0;
+  }
+  let mut fpu = take_page(&mut k.mem, fp);
+  fpu_init(&mut fpu);
   let sp = build_space(&mut k.mem, img, elf, e, size, prog_name(prog), k.ticks % 0x100000000 * NPROC + pid);
   let ok = sp is Space::Mapped;
   put_space(&mut k.spaces, pid, sp);
   if !ok {
+    give_page(&mut k.mem, fpu);
     return 0;
   }
+  drop_fpu(&mut k.mem, take_fpu(&mut k.fpus, pid));
+  put_fpu(&mut k.fpus, pid, Fpu::State(fpu));
   let mut f = 0;
   while f < STRIDE
     invariant f <= STRIDE && len(k.procs) == PTAB_LEN
@@ -381,6 +453,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
     Space::Empty => {},
     Space::Mapped(t) => { free_space(&mut k.mem, mmu, t); },
   }
+  drop_fpu(&mut k.mem, take_fpu(&mut k.fpus, pid));
   pset(&mut k.procs, pid, F_STATE, ZOMBIE);
   pset(&mut k.procs, pid, F_CODE, code);
   let mut c = 1;
