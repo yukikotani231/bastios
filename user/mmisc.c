@@ -1,6 +1,6 @@
 /* Small Linux system calls, against musl: uname and gethostname, readv,
  * pread and pwrite, limits, sysinfo, statfs, getrandom, priorities, umask,
- * sessions and sched_yield. */
+ * sessions, sched_yield, and how much a pipe holds. */
 #include <errno.h>
 #include <fcntl.h>
 #include <sched.h>
@@ -110,6 +110,30 @@ static int signals(void)
     return 0;
 }
 
+/* A pipe holds 64 KiB, as on Linux. Once nearly full, a write of PIPE_BUF
+ * bytes or fewer goes in whole or not at all; a bigger one goes in part. */
+static int pipes(void)
+{
+    static char blk[4096];
+    int q[2];
+    if (pipe2(q, O_NONBLOCK) != 0)
+        return -1;
+    int held = 0, n;
+    while (held < (1 << 20) && (n = write(q[1], blk, sizeof blk)) > 0)
+        held += n;
+    if (n != -1 || errno != EAGAIN)
+        return -1;
+    if (read(q[0], blk, 100) != 100)
+        return -1;
+    if (write(q[1], blk, 200) != -1 || errno != EAGAIN)
+        return -1;                          /* atomic: no room for all 200 */
+    if (write(q[1], blk, 50) != 50 || write(q[1], blk, 8192) != 50)
+        return -1;                          /* not atomic: what fits goes in */
+    close(q[0]);
+    close(q[1]);
+    return held;
+}
+
 int main(void)
 {
     struct utsname u;
@@ -154,9 +178,10 @@ int main(void)
     struct statfs sf;
     if (statfs("/", &sf) != 0 || sf.f_bsize != 4096)
         return fail("statfs");
-    unsigned char r[16];
-    if (getrandom(r, sizeof r, 0) != sizeof r)
-        return fail("getrandom");
+    unsigned char r[16], r2[16];
+    if (getrandom(r, sizeof r, 0) != sizeof r || getrandom(r2, sizeof r2, 0) != sizeof r2
+        || memcmp(r, r2, sizeof r) == 0)
+        return fail("getrandom");                   /* back to back, still different */
     errno = 0;
     if (getpriority(PRIO_PROCESS, 0) != 0 || errno != 0 || setpriority(PRIO_PROCESS, 0, 5) != 0)
         return fail("priorities");
@@ -167,6 +192,9 @@ int main(void)
         return fail("sessions");
     if (signals() != 0)
         return 1;
-    printf("mmisc: ok on %s %s, signals\n", u.sysname, u.machine);
+    int held = pipes();
+    if (held < 0)
+        return fail("pipe capacity");
+    printf("mmisc: ok on %s %s, signals, pipe %d\n", u.sysname, u.machine, held);
     return 0;
 }
