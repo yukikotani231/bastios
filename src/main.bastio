@@ -39,8 +39,10 @@ import "lxptimer.bastio";
 import "lxmore.bastio";
 import "lxmsg.bastio";
 import "acpi.bastio";
+import "info.bastio";
 import "lxcred.bastio";
 import "lxipc.bastio";
+import "lxsys.bastio";
 import "lxlock.bastio";
 import "lxprocfs.bastio";
 import "lxlink.bastio";
@@ -415,7 +417,7 @@ fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, p
 {
   let c = finish(&mut s, &mut cpu, mmu, p, fpu, v);
   let j = next_job(&mut s, &mut cpu, &mut mmu, c, poll);
-  atomic_store(pend, s.con.n);
+  atomic_store(pend, s.con.r.n);
   atomic_store(others, any_ready(s.k.procs));
   return Next { job: j, from: c };
 }
@@ -432,7 +434,7 @@ fn next_job_p(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool, 
     s.idle = s.idle - 1;
   }
   let j = next_job(&mut s, &mut cpu, &mut mmu, from, poll);
-  atomic_store(pend, s.con.n);
+  atomic_store(pend, s.con.r.n);
   atomic_store(others, any_ready(s.k.procs));
   return j;
 }
@@ -443,7 +445,7 @@ fn idled_p(s: &mut Sys, v: u64, pend: &Atomic[u64])
   ensures sys_ok(s)
 {
   idled(&mut s, v);
-  atomic_store(pend, s.con.n);
+  atomic_store(pend, s.con.r.n);
 }
 
 /// `finish`, then publishes how much console output waits in `pend`.
@@ -453,7 +455,7 @@ fn finish_p(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64, p
   ensures sys_ok(s) && result < NPROC
 {
   let c = finish(&mut s, &mut cpu, mmu, p, fpu, v);
-  atomic_store(pend, s.con.n);
+  atomic_store(pend, s.con.r.n);
   return c;
 }
 
@@ -499,7 +501,7 @@ fn exchange(s: &mut Sys, tx: &mut Bytes, rx: &Bytes, rn: u64, pend: &Atomic[u64]
   if con_room(s.con) >= OUTCAP / 2 {
     wake_writers(&mut s.k.procs);
   }
-  atomic_store(pend, s.con.n);
+  atomic_store(pend, s.con.r.n);
   return n;
 }
 
@@ -769,6 +771,31 @@ fn put_mac(con: &mut Con, mac: u64)
   }
 }
 
+/// Between the parts of the hardware report, so each can be read (or
+/// photographed): waits for a key, or a minute, or, without a clock,
+/// about as many polls.
+fn diag_pause(t: &mut Term, con: &mut Con, clock: &mut Hpet, acpi: &mut Acpi)
+  requires term_ok(t) && con_ok(con) && hpet_ok(clock) && acpi_ok(acpi)
+  ensures term_ok(t) && con_ok(con) && hpet_ok(clock) && acpi_ok(acpi)
+{
+  puts(&mut con, "-- press a key to go on (or wait a minute) --");
+  con_flush(&mut t, &mut con);
+  let start = clock_ns(&mut clock, &mut acpi);
+  let mut polls = 0;
+  let mut go = false;
+  while !go && polls < 100000000
+    invariant term_ok(t) && hpet_ok(clock) && acpi_ok(acpi)
+  {
+    let now = clock_ns(&mut clock, &mut acpi);
+    if term_poll(&mut t) < 256 || now < start || now - start >= 60000000000 {
+      go = true;
+    }
+    polls = polls + 1;
+  }
+  puts(&mut con, "\r\n");
+  con_flush(&mut t, &mut con);
+}
+
 fn tick(t: u64) -> u64 {
   if t < 18446744073709551615 {
     return t + 1;
@@ -798,6 +825,15 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   if !hpet_there {
     hpet_at = HPET;
   }
+  // A reset register in memory (src/acpi.bastio), if it is in the chipset
+  // part of the window, where no PCI BAR goes, and clear of the HPET and
+  // the local APIC; else an empty claim.
+  let r = acpi.mreset;
+  let mut reset_reg = mmio_claim(&mut win, WIN_LOW_TOP, 0);
+  if WIN_LOW_TOP <= r && r < WIN_HIGH && !(hpet_at <= r && r < hpet_at + HPET_LEN) && !(LAPIC <= r && r < LAPIC + LAPIC_LEN) {
+    mmio_release(&mut win, reset_reg);
+    reset_reg = mmio_claim(&mut win, r, 1);
+  }
   let mut clock = hpet_init(mmio_claim(&mut win, hpet_at, HPET_LEN), hpet_there);
   let apic = lapic_new(mmio_claim(&mut win, LAPIC, LAPIC_LEN));
   let mut msi = 0;
@@ -826,8 +862,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut con = con_new();
   pic_init(&mut pic);
   pit_init(&mut pit, 100);
+  let pool_pages = pool_size(pool);
   puts(&mut con, "\r\nBastiOS 0.2: ");
-  put_num(&mut con, pool_size(pool));
+  put_num(&mut con, pool_pages);
   puts(&mut con, " pages of memory, ");
   let cpus = cpu_count(cpu);
   put_num(&mut con, cpus);
@@ -879,6 +916,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   if usb_disk == MSD_UNUSED {
     puts(&mut con, "usb: a USB disk without a BastiOS partition; not used\r\n");
   }
+  if disk.foreign {
+    puts(&mut con, "disk: it holds a partition table or other data; left alone\r\n");
+  }
   if blk_irq(disk.dev) {
     puts(&mut con, "disk: completions by message-signalled interrupt\r\n");
   }
@@ -923,6 +963,41 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
       puts(&mut con, "net: frames received by interrupt\r\n");
     }
   }
+  // The hardware report, with the boot option `diag` (src/info.bastio),
+  // after a line for each thing the boot log above says nothing about.
+  if boot_word(cpu, "diag") {
+    if !screen_on(term.screen) {
+      puts(&mut con, "screen: none (the serial line only)\r\n");
+    }
+    if !usb_on {
+      puts(&mut con, "keyboard: PS/2 (no USB keyboard)\r\n");
+    }
+    if blk_sectors(disk.dev) == 0 {
+      puts(&mut con, "disk: none found\r\n");
+    } else if !blk_is_virtio(disk.dev) && !blk_is_nvme(disk.dev) && !blk_is_ahci(disk.dev) && !blk_is_usb(disk.dev) {
+      puts(&mut con, "disk: ATA (");
+      put_num(&mut con, blk_sectors(disk.dev));
+      puts(&mut con, " sectors)\r\n");
+    }
+    if disk.blocks > 0 {
+      puts(&mut con, "disk: the BastiOS file system, ");
+      put_num(&mut con, disk.blocks);
+      puts(&mut con, " blocks of 4 KiB\r\n");
+    }
+    if !nic_live(nic) {
+      puts(&mut con, "net: none (drivers: virtio and e1000 only)\r\n");
+    }
+    puts(&mut con, "---- hardware report (boot option diag; see docs/real-hardware.md) ----\r\n");
+    hw_cpu(&mut con, cpu);
+    hw_smp(&mut con, cpu, clock.period > 0, acpi.tmr != ACPI_NONE);
+    diag_pause(&mut term, &mut con, &mut clock, &mut acpi);
+    hw_mem(&mut con, cpu, pool_pages);
+    diag_pause(&mut term, &mut con, &mut clock, &mut acpi);
+    hw_acpi(&mut con, cpu, acpi);
+    hw_pci(&mut con, &mut pci);
+    puts(&mut con, "---- end of the hardware report ----\r\n");
+    diag_pause(&mut term, &mut con, &mut clock, &mut acpi);
+  }
   let mut spaces = vec_new[Space]();
   let mut i = 0;
   while i < NPROC
@@ -941,7 +1016,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     q = q + 1;
   }
   let shm = new_store(&mut m);
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: 0, epoch: epoch, rng: epoch ^ at, cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), inet6: 0, locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: 0, epoch: epoch, rng: epoch ^ at, cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), inet6: 0, locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, sys: alloc(SYS_LEN) };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
@@ -1015,6 +1090,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.locks);
   free(sys.k.ipc);
   bfree(sys.k.ipcb);
+  free(sys.k.sys);
   free(sys.k.evt);
   free(sys.k.sigsave);
   free(sys.k.ux);
@@ -1023,7 +1099,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // Off, or a restart. QEMU's isa-debug-exit device (tests) exits at once,
   // with status 33; elsewhere the port is unused.
   if sys.reboot {
-    acpi_reset(&mut sys.acpi, &mut pci, &mut devices.kbd.status);
+    acpi_reset(&mut sys.acpi, &mut pci, &mut devices.kbd.status, &mut reset_reg);
   } else {
     pio_out8(&mut debug_exit, 0, 0x10);
     acpi_off(&mut sys.acpi);
@@ -1033,12 +1109,13 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   port_release(&mut ports, devices.uart.io);
   port_release(&mut ports, devices.kbd.data);
   port_release(&mut ports, devices.kbd.status);
-  screen_free(&mut win, devices.screen);
   port_release(&mut ports, sys.pic.master);
   port_release(&mut ports, sys.pic.slave);
   port_release(&mut ports, pit.io);
   pci_free(&mut ports, pci);
+  screen_free(&mut win, devices.screen);
   mmio_release(&mut win, sys.clock.regs);
   mmio_release(&mut win, sys.apic.regs);
+  mmio_release(&mut win, reset_reg);
   return 0;
 }

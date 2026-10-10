@@ -23,6 +23,7 @@
 import "pages.bastio";
 import "ramfs.bastio";
 import "diskfs.bastio";
+import "pcache.bastio";
 
 const NFD: u64 = 16;                  // open files per process
 const FD_ROWS: u64 = 512;             // NPROC * NFD
@@ -78,11 +79,12 @@ struct Vfs {
   lo_size: u64,         // that file's size at the mount
   lo_dev: u64,          // the loop device's number
   lo_ro: bool,          // mounted read-only
+  pc: PCache,           // file pages that MAP_SHARED mappings share (src/pcache.bastio)
 }
 
 spec fn vfs_ok(v: &Vfs) -> bool {
   nodes_ok(v.ram) && len(v.ftab) == FTAB_LEN && blen(v.xfer) == XFER && disk_ok(v.disk) && blen(v.name) == NAMEBUF && len(v.mnt) == MNT_LEN
-    && disk_ok(v.lo) && blen(v.lname) == NAMEBUF
+    && disk_ok(v.lo) && blen(v.lname) == NAMEBUF && pc_ok(v.pc)
 }
 
 fn vfs_new(disk: DiskFs) -> Vfs
@@ -90,7 +92,7 @@ fn vfs_new(disk: DiskFs) -> Vfs
   ensures vfs_ok(result)
 {
   return Vfs { ram: ram_new(), ftab: alloc(FTAB_LEN), xfer: balloc(XFER), disk: disk, name: balloc(NAMEBUF), mnt: alloc(MNT_LEN), now: 0,
-    lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0))), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false };
+    lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0))), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, pc: pc_new() };
 }
 
 /// The next byte typed on a USB keyboard that sits on the disk's xHCI
@@ -116,6 +118,7 @@ fn vfs_free(v: Vfs, mem: &mut Mem, ports: &mut Ports, win: &mut MmioSpace) -> Bl
   bfree(v.lname);
   free(v.mnt);
   blk_free(&mut ports, &mut win, disk_unmount(v.lo), &mut mem);
+  pc_free(v.pc, &mut mem);
   return disk_unmount(v.disk);
 }
 
@@ -233,6 +236,19 @@ fn vfs_open(v: &mut Vfs, mem: &mut Mem, base: u64, flags: u64, n: u64) -> u64
   ensures vfs_ok(v) && mem_ok(mem)
   ensures result < NFD || result == NO_FD
 {
+  let fd = open_row(&mut v, &mut mem, base, flags, n);
+  if fd < NFD && flags / O_TRUNC % 2 == 1 && flags / O_WRITE % 2 == 1 {
+    pc_resize(&mut v.pc, &mut mem, vfs_row_file(v, base + fd), 0);
+  }
+  return fd;
+}
+
+/// vfs_open without the page cache's upkeep.
+fn open_row(v: &mut Vfs, mem: &mut Mem, base: u64, flags: u64, n: u64) -> u64
+  requires vfs_ok(v) && mem_ok(mem) && base + NFD <= FD_ROWS && n <= XFER
+  ensures vfs_ok(v) && mem_ok(mem)
+  ensures result < NFD || result == NO_FD
+{
   let mut fd = 0;
   while fd < NFD && fget(v.ftab, base + fd, FD_FS) != 0
     invariant fd <= NFD
@@ -334,6 +350,7 @@ fn vfs_close(v: &mut Vfs, mem: &mut Mem, row: u64) -> bool
   if fs == 0 {
     return false;
   }
+  let h = vfs_row_file(v, row);
   let mut f = 0;
   while f < FD_STRIDE
     invariant f <= FD_STRIDE && len(v.ftab) == FTAB_LEN
@@ -341,8 +358,11 @@ fn vfs_close(v: &mut Vfs, mem: &mut Mem, row: u64) -> bool
     fset(&mut v.ftab, row, f, 0);
     f = f + 1;
   }
-  // The last close of a file removed while open frees it.
+  // The last close of a file removed while open frees it. The page cache
+  // keeps only open files' pages (a mapping holds its file open), so a
+  // handle is never freed, and named again, with pages still cached.
   if !node_open(v.ftab, fs, node) {
+    pc_forget(&mut v.pc, &mut mem, h);
     if fs == FS_RAM && node < NFILES && ram_len(&mut v.ram, node) == 0 && node != v.lo_file {
       ram_remove(&mut v.ram, &mut mem, node);
     } else if fs == FS_DISK && node < DSLOTS && dent_orphan(v.disk, node) {
@@ -380,6 +400,19 @@ fn vfs_read(v: &mut Vfs, row: u64, n: u64) -> u64
   ensures vfs_ok(v)
   ensures result <= n || result == NO_FD || result == VFS_MISS
 {
+  let r = read_row(&mut v, row, n);
+  if r <= n {
+    pc_overlay(&mut v.pc, vfs_row_file(v, row), fget(v.ftab, row, FD_OFF), &mut v.xfer, r);
+  }
+  return r;
+}
+
+/// vfs_read without the page cache's bytes over the file's.
+fn read_row(v: &mut Vfs, row: u64, n: u64) -> u64
+  requires vfs_ok(v) && row < FD_ROWS && n <= XFER
+  ensures vfs_ok(v)
+  ensures result <= n || result == NO_FD || result == VFS_MISS
+{
   if fget(v.ftab, row, FD_MODE) / O_READ % 2 == 0 {
     return NO_FD;
   }
@@ -405,7 +438,7 @@ fn vfs_read(v: &mut Vfs, row: u64, n: u64) -> u64
   if fs != FS_RAM || i >= NFILES {
     return NO_FD;
   }
-  return vfs_read_at(&mut v, i, fget(v.ftab, row, FD_OFF), n);
+  return read_at(&mut v, i, fget(v.ftab, row, FD_OFF), n);
 }
 
 /// Writes the first n bytes of the transfer buffer to the file open in
@@ -416,6 +449,20 @@ fn vfs_read(v: &mut Vfs, row: u64, n: u64) -> u64
 /// the user), or VFS_MISS if old blocks it needs are not cached yet: the
 /// caller sleeps and tries again (disk_write).
 fn vfs_write(v: &mut Vfs, mem: &mut Mem, row: u64, n: u64) -> u64
+  requires vfs_ok(v) && mem_ok(mem) && row < FD_ROWS && n <= XFER
+  ensures vfs_ok(v) && mem_ok(mem)
+  ensures result <= n || result == NO_FD || result == VFS_MISS
+{
+  let w = write_row(&mut v, &mut mem, row, n);
+  let end = fget(v.ftab, row, FD_OFF);
+  if w <= n && w <= end {
+    pc_wrote(&mut v.pc, vfs_row_file(v, row), end - w, v.xfer, w);
+  }
+  return w;
+}
+
+/// vfs_write without copying the bytes into the page cache.
+fn write_row(v: &mut Vfs, mem: &mut Mem, row: u64, n: u64) -> u64
   requires vfs_ok(v) && mem_ok(mem) && row < FD_ROWS && n <= XFER
   ensures vfs_ok(v) && mem_ok(mem)
   ensures result <= n || result == NO_FD || result == VFS_MISS
@@ -479,6 +526,18 @@ fn vfs_write(v: &mut Vfs, mem: &mut Mem, row: u64, n: u64) -> u64
 /// growing reads as zeros. The row must be open for writing; its offset
 /// stays where it is. False otherwise, or if the disk fails or is full.
 fn vfs_truncate(v: &mut Vfs, mem: &mut Mem, row: u64, size_to: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem) && row < FD_ROWS
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  let ok = truncate_row(&mut v, &mut mem, row, size_to);
+  if ok {
+    pc_resize(&mut v.pc, &mut mem, vfs_row_file(v, row), size_to);
+  }
+  return ok;
+}
+
+/// vfs_truncate without the page cache's upkeep.
+fn truncate_row(v: &mut Vfs, mem: &mut Mem, row: u64, size_to: u64) -> bool
   requires vfs_ok(v) && mem_ok(mem) && row < FD_ROWS
   ensures vfs_ok(v) && mem_ok(mem)
 {
@@ -711,6 +770,20 @@ fn vfs_size(v: &mut Vfs, f0: u64) -> u64
 /// into the start of the transfer buffer, without a descriptor. Returns
 /// the count, short at the end of the file, or NO_FD if f names no file.
 fn vfs_read_at(v: &mut Vfs, f0: u64, off: u64, n: u64) -> u64
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+  ensures result <= n || result == NO_FD
+{
+  let r = read_at(&mut v, f0, off, n);
+  if r <= n && pc_on(v.pc) {
+    let f = vfs_target(&mut v, f0);
+    pc_overlay(&mut v.pc, f, off, &mut v.xfer, r);
+  }
+  return r;
+}
+
+/// vfs_read_at without the page cache's bytes over the file's.
+fn read_at(v: &mut Vfs, f0: u64, off: u64, n: u64) -> u64
   requires vfs_ok(v) && n <= XFER
   ensures vfs_ok(v)
   ensures result <= n || result == NO_FD
@@ -1974,6 +2047,7 @@ fn vfs_lo_mount(v: &mut Vfs, mem: &mut Mem, f: u64, at: u64, dev: u64, ro: bool)
   if magic != DISK_MAGIC && magic != DISK_MAGIC2 {
     return LO_NOFS;
   }
+  pc_forget(&mut v.pc, &mut mem, f);                 // the loop driver owns its pages now
   let mut pages = ram_take_pages(&mut v.ram, f);
   let ok = loopdev_fill(&mut pages, &mut mem, (size + 4095) / 4096);
   v.lo_size = 0;

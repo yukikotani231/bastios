@@ -10,8 +10,9 @@
  * (bst_platform_smp_start / bst_platform_smp_join below).
  *
  * Firmware tables are untrusted input: every read is checked against the
- * table's length and against what boot.S maps (the identity-mapped first
- * 1 GiB, and the device window at 2-4 GiB, where firmware often puts them).
+ * table's length and against what the kernel's page tables map (boot.S:
+ * the first 2 GiB, the device window at 2-4 GiB, and above 4 GiB on a
+ * processor with 1 GiB pages), wherever the firmware put them.
  *
  * It also finds the ACPI tables for the Bastio kernel, which reads them a
  * byte at a time through the `boot_acpi` builtin (bst_platform_acpi) and
@@ -40,6 +41,10 @@ static uint64_t cpus_online = 1;    /* the BSP; updated atomically */
 static struct __attribute__((packed)) { uint16_t limit; uint64_t base; } ap_idtr;
 static volatile uint32_t *lapic;
 static uint32_t lapic_ticks_10ms;   /* local APIC timer count for 10 ms, divide by 16 */
+static uint32_t timer_from;         /* what it was counted against: 1 HPET, 2 PM timer, 3 PIT, 4 none (a guess) */
+static uint32_t madt_cpus, madt_x2; /* enabled processor entries in the MADT: local APIC, x2APIC */
+static uint32_t smp_stop;           /* why not every listed processor runs: SMP_* */
+enum { SMP_ALL, SMP_NO_APIC, SMP_NO_MADT, SMP_LAPIC_AWAY, SMP_AP_LATE, SMP_TOO_MANY, SMP_X2APIC };
 static uint64_t syscall_msrs[3];    /* STAR, LSTAR, FMASK as bst_platform_init set them */
 
 static inline uint8_t *this_core(void) {
@@ -98,24 +103,50 @@ extern uint32_t bst_boot_rsdp_len;
  * UEFI the only way to it), else where BIOS firmware puts it, on a 16-byte
  * boundary in the first KiB of the EBDA or in 0xE0000-0xFFFFF (ACPI 6.5,
  * 5.2.5.1). */
+static uint64_t rsdp_from;          /* 1: the Multiboot 2 copy, 2: found in the BIOS areas */
+
 static uint64_t find_rsdp(void) {
     if (bst_boot_rsdp_len >= 20 && sig_is((uint64_t)bst_boot_rsdp, "RSD PTR ", 8) && sum_ok((uint64_t)bst_boot_rsdp, 20)) {
         /* A revision 2 RSDP is only usable whole: find_madt reads the XSDT
          * address from its last 16 bytes. */
-        if (rd8((uint64_t)bst_boot_rsdp + 15) < 2 || bst_boot_rsdp_len >= 36) return (uint64_t)bst_boot_rsdp;
+        if (rd8((uint64_t)bst_boot_rsdp + 15) < 2 || bst_boot_rsdp_len >= 36) {
+            rsdp_from = 1;
+            return (uint64_t)bst_boot_rsdp;
+        }
     }
     uint64_t ebda = (uint64_t)rd16(0x40E) << 4;
     uint64_t a = 0;
     if (ebda >= 0x80000 && ebda + 1024 <= 0x100000) a = scan_rsdp(ebda, ebda + 1024);
     if (!a) a = scan_rsdp(0xE0000, 0x100000);
+    rsdp_from = a ? 2 : 0;
     return a;
 }
 
-/* Is [a, a + n) mapped by boot.S: the first 1 GiB, or the device window
- * from 2 to 4 GiB (uncached, which only makes the reads slower)? */
+extern uint64_t bst_kernel_pml4[512];
+
+/* Is the page holding `a` present in the kernel's tables (boot.S: the
+ * first 2 GiB, the device window from 2 to 4 GiB, and, on a processor with
+ * 1 GiB pages, everything up to 2^46, uncached, which only makes the
+ * reads slower)? The tables are identity-mapped. */
+static int page_ok(uint64_t a) {
+    const uint64_t frame = 0x000FFFFFFFFFF000ull;
+    uint64_t e = bst_kernel_pml4[(a >> 39) & 511];
+    if (!(e & 1)) return 0;
+    e = ((uint64_t *)(e & frame))[(a >> 30) & 511];
+    if (!(e & 1)) return 0;
+    if (e & 0x80) return 1;
+    e = ((uint64_t *)(e & frame))[(a >> 21) & 511];
+    if (!(e & 1)) return 0;
+    if (e & 0x80) return 1;
+    return ((uint64_t *)(e & frame))[(a >> 12) & 511] & 1;
+}
+
+/* Is all of [a, a + n) mapped? */
 static int mapped(uint64_t a, uint64_t n) {
-    if (a < IDENT_LIMIT) return n <= IDENT_LIMIT - a;
-    return a >= 2 * IDENT_LIMIT && a < 4 * IDENT_LIMIT && n <= 4 * IDENT_LIMIT - a;
+    if (a >= (1ull << 46) || n > (1ull << 46) - a) return 0;
+    for (uint64_t p = a & ~0xFFFull; p < a + n; p += 4096)
+        if (!page_ok(p)) return 0;
+    return 1;
 }
 
 /* A system description table at `a` with a valid header and checksum, or 0. */
@@ -126,9 +157,8 @@ static uint64_t sdt_len(uint64_t a) {
     return n;
 }
 
-/* The table with signature `sig` (its four letters, little-endian) listed
- * in the XSDT or RSDT, or 0; its length in *len. */
-static uint64_t find_table(uint32_t sig, uint64_t *len) {
+/* Entry k of the XSDT (or the RSDT): a table's address, or 0 past the end. */
+static uint64_t root_entry(uint64_t k) {
     uint64_t rsdp = find_rsdp();
     if (!rsdp) return 0;
     uint64_t root = rd32(rsdp + 16), entry = 4;
@@ -137,8 +167,16 @@ static uint64_t find_table(uint32_t sig, uint64_t *len) {
         entry = 8;
     }
     uint64_t n = sdt_len(root);
-    for (uint64_t i = 36; n && i + entry <= n; i += entry) {
-        uint64_t t = entry == 8 ? rd64(root + i) : rd32(root + i);
+    if (k >= n / entry) return 0;
+    uint64_t i = 36 + k * entry;
+    if (i + entry > n) return 0;
+    return entry == 8 ? rd64(root + i) : rd32(root + i);
+}
+
+/* The table with signature `sig` (its four letters, little-endian) listed
+ * in the XSDT or RSDT, or 0; its length in *len. */
+static uint64_t find_table(uint32_t sig, uint64_t *len) {
+    for (uint64_t k = 0, t; (t = root_entry(k)) != 0; k++) {
         uint64_t tn = sdt_len(t);
         if (tn && rd32(t) == sig) {
             *len = tn;
@@ -323,11 +361,16 @@ static void calibrate_lapic_timer(void) {
     lapic[0x3E0 / 4] = 0x3;
     lapic[0x320 / 4] = 0x10000;                     /* masked, one-shot */
     uint32_t n = lapic_vs_hpet();
-    if (!n) n = lapic_vs_pmtimer();
+    timer_from = 1;
+    if (!n) {
+        n = lapic_vs_pmtimer();
+        timer_from = 2;
+    }
     if (n) {
         lapic_ticks_10ms = n;
         return;
     }
+    timer_from = 3;
     outb(0x61, (inb(0x61) & ~0x02) & ~0x01);        /* speaker off, gate low */
     outb(0x43, 0xB0);                               /* channel 2, lo/hi, mode 0 */
     outb(0x42, 11932 & 0xFF);                       /* 1193182 Hz / 100 */
@@ -338,6 +381,7 @@ static void calibrate_lapic_timer(void) {
     n = 0xFFFFFFFF - lapic[0x390 / 4];
     outb(0x61, inb(0x61) & ~0x01);
     lapic[0x380 / 4] = 0;
+    if (!n) timer_from = 4;
     lapic_ticks_10ms = n ? n : 100000;
 }
 
@@ -365,9 +409,20 @@ static int start_ap(uint32_t apic_id, uint64_t n) {
 
 void bst_smp_init(void) {
     core_init(0);
-    uint64_t apic_msr = rdmsr(0x1B);
-    if (!(apic_msr & (1u << 11))) return;               /* APIC globally disabled */
     uint64_t len = 0, madt = find_madt(&len);
+    /* Count the processors the MADT lists: local APIC entries (type 0,
+     * length 8) and x2APIC ones (type 9, length 16), flags bit 0 enabled. */
+    for (uint64_t i = 44; madt && i + 2 <= len; ) {
+        uint64_t type = rd8(madt + i), elen = rd8(madt + i + 1);
+        if (elen < 2 || i + elen > len) break;
+        if (type == 0 && elen >= 8 && (rd32(madt + i + 4) & 1)) madt_cpus++;
+        if (type == 9 && elen >= 16 && (rd32(madt + i + 8) & 1)) madt_x2++;
+        i += elen;
+    }
+    uint64_t apic_msr = rdmsr(0x1B);
+    smp_stop = SMP_NO_APIC;
+    if (!(apic_msr & (1u << 11))) return;               /* APIC globally disabled */
+    smp_stop = madt ? SMP_LAPIC_AWAY : SMP_NO_MADT;
     if (!madt || !map_lapic(apic_msr & 0xFFFFF000ull)) return;
     uint64_t size = (uint64_t)(bst_ap_trampoline_end - bst_ap_trampoline);
     if (size > 4096) return;
@@ -378,16 +433,56 @@ void bst_smp_init(void) {
 
     uint32_t self = lapic[0x20 / 4] >> 24;
     uint64_t started = 0;
+    smp_stop = madt_x2 ? SMP_X2APIC : SMP_ALL;          /* x2APIC entries are not started */
     /* Processor-local APIC entries: type 0, length 8, flags bit 0 = enabled. */
-    for (uint64_t i = 44; i + 2 <= len && started + 1 < MAX_CPUS; ) {
+    for (uint64_t i = 44; i + 2 <= len; ) {
         uint64_t type = rd8(madt + i), elen = rd8(madt + i + 1);
         if (elen < 2 || i + elen > len) break;
         if (type == 0 && elen >= 8 && (rd32(madt + i + 4) & 1)) {
             uint32_t id = rd8(madt + i + 3);
+            if (id != self && started + 1 >= MAX_CPUS) {
+                smp_stop = SMP_TOO_MANY;
+                return;
+            }
             /* An AP that misses its deadline may still wake up later on
              * bst_ap_stack, so start no other AP after it. */
-            if (id != self && !start_ap(id, ++started)) return;
+            if (id != self && !start_ap(id, ++started)) {
+                smp_stop = SMP_AP_LATE;
+                return;
+            }
         }
         i += elen;
     }
+}
+
+/* The boot_info builtin: answer `i` to query `what` (INFO_* in
+ * src/info.bastio, which must match), or 0. Read-only: the kernel checks
+ * every answer it relies on. */
+extern uint64_t bst_boot_cmdline(uint64_t i);              /* multiboot.c */
+extern uint64_t bst_boot_region(uint64_t n, uint64_t f);
+uint64_t bst_platform_info(uint64_t what, uint64_t i) {
+    switch (what) {
+    case 0: return bst_boot_cmdline(i);                    /* a byte, or 256 */
+    case 1: return bst_boot_region(i / 3, i % 3);          /* base, length, type */
+    case 2: case 3: case 4: case 5: {                      /* CPUID leaf i >> 32, subleaf i: eax, ebx, ecx, edx */
+        uint32_t r[4], leaf = (uint32_t)(i >> 32), max;
+        __asm__ volatile ("cpuid" : "=a"(max), "=b"(r[1]), "=c"(r[2]), "=d"(r[3]) : "a"(leaf & 0x80000000u), "c"(0));
+        if (leaf > max) return 0;                          /* past the highest leaf of its range */
+        __asm__ volatile ("cpuid" : "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3]) : "a"(leaf), "c"((uint32_t)i));
+        return r[what - 2];
+    }
+    case 6:                                                /* processor startup */
+        return i == 0 ? madt_cpus : i == 1 ? madt_x2 : i == 2 ? smp_stop : 0;
+    case 7:                                                /* the local APIC timer's calibration */
+        return i == 0 ? timer_from : i == 1 ? lapic_ticks_10ms : 0;
+    case 8: {                                              /* ACPI: where the RSDP came from, its revision, the tables */
+        uint64_t rsdp = find_rsdp();
+        if (i == 0) return rsdp_from;
+        if (i == 1) return rsdp ? rd8(rsdp + 15) : 0;
+        uint64_t t = root_entry((i - 2) / 2);
+        if (i % 2 == 1) return t;                          /* its address (0: past the end) */
+        return t && mapped(t, 36) ? rd32(t) : 0;           /* its signature, 0 if out of reach */
+    }
+    }
+    return 0;
 }

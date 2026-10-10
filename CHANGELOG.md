@@ -47,8 +47,18 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   memory stay per process.
 - A `MAP_SHARED` file mapping is shared with `fork`'s child the same way:
   both see each other's writes at once. It is still written back to the
-  file at `msync`, `munmap` and exit; a process that maps the file on its
-  own still gets a copy (there is no page cache).
+  file at `msync`, `munmap` and exit.
+- A page cache (`src/pcache.bastio`): a `MAP_SHARED` file mapping maps one
+  shared page per page of the file, so separate processes that map the same
+  file share it, and `read` and `write` agree with the mapping before it is
+  written back. See [docs/design/page-cache.md](docs/design/page-cache.md).
+- `FUTEX_REQUEUE` and `FUTEX_CMP_REQUEUE` move waiters with a timeout too:
+  they used to go back to the old word on their next check of the clock.
+  Negative counts give `EINVAL`, and a futex that is not private on an
+  unmapped word gives `EFAULT`, as on Linux.
+- `mmap` of a file gives `EACCES` when the descriptor was not opened for
+  reading, or for a writable `MAP_SHARED` mapping when it was not opened
+  for writing (or was opened `O_APPEND`).
 - Dynamically linked programs: the kernel loads a PIE's interpreter, and
   carries musl's `libc.so` for `/lib/ld-musl-x86_64.so.1`. `/bin/sh` is
   BusyBox's `ash`, so `system` and `popen` work; `waitid`, `times`.
@@ -176,6 +186,10 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Files and disks
 
+- A disk that is not blank and has no BastiOS file system (a partition
+  table, another system's data) is left alone. It used to be formatted on
+  the first boot, which on a real machine would have destroyed the disk
+  with its owner's system on it.
 - USB sticks and disks as the disk (`src/xhci.bastio`): SCSI over the
   bulk-only transport, on the same xHCI controller as the USB keyboard.
   Only a GPT partition of the BastiOS type is used, and it comes before
@@ -292,6 +306,17 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   timer (`-machine hpet=off` used to leave the clock at 0), and the
   processors' local APIC timers are calibrated against the same instead of
   the PIT, which newer PCs may gate off.
+- A hardware report for trying BastiOS on a real machine: the ISO's GRUB
+  menu has a second entry, "BastiOS, with a hardware report" (boot option
+  `diag`), which prints the processor, the memory map, the ACPI tables and
+  registers and every PCI device with its driver, a screenful at a time.
+  [docs/real-hardware.md](docs/real-hardware.md) says what to check and
+  what to send back. Uses bastiolang's new `boot_info`.
+- The ACPI tables are found wherever the firmware put them: between 1 and
+  2 GiB (where they are on a machine with 2 GiB or more below 4 GiB, which
+  used to leave it on one processor and without power off) and above
+  4 GiB. A reset register in memory is used too.
+
 - The console obeys `tcsetattr`: a program can turn off canonical mode
   and echo and read each key as it is typed, with `VMIN` and `VTIME`, and
   turn off `ISIG`, `ICRNL` and output processing. Settings used to be

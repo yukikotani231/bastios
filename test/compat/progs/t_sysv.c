@@ -194,6 +194,7 @@ static int slurp(const char *path, char *buf, int n) {
 static int proc_files(void) {
     char buf[2048];
     int ok = slurp("/proc/sys/kernel/shmmax", buf, sizeof buf) && strtoul(buf, 0, 10) >= 4096;
+    ok = ok && slurp("/proc/sys/kernel/msgmax", buf, sizeof buf) && strtoul(buf, 0, 10) >= 8192;
     ok = ok && slurp("/proc/sys/kernel/sem", buf, sizeof buf);
     int id = shmget(0x515a, 4096, IPC_CREAT | 0600);
     char want[32];

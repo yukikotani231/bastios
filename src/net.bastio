@@ -17,6 +17,7 @@
 
 import "card.bastio";
 import "core/endian.bastio";
+import "core/csum.bastio";
 
 const ETH_ARP: u64 = 0x0806;
 const ETH_IP: u64 = 0x0800;
@@ -186,45 +187,13 @@ fn put48(b: &mut Bytes, o: u64, v: u64)
   put32(&mut b, o + 2, v % 4294967296);
 }
 
-/// Adds the 16-bit word v to a ones'-complement sum.
-fn cadd(s: u64, v: u64) -> u64
-  requires s <= 65535 && v <= 65535
-  ensures result <= 65535
-{
-  let t = s + v;
-  if t > 65535 {
-    return t - 65535;                 // end-around carry
-  }
-  return t;
-}
-
-/// The ones'-complement sum (RFC 1071) of bytes off..off+n as 16-bit words,
-/// added to s0 (an odd last byte is padded with a zero).
-fn sum16(b: &Bytes, off: u64, n: u64, s0: u64) -> u64
-  requires off + n <= blen(b) && s0 <= 65535
-  ensures result <= 65535
-{
-  let mut s = s0;
-  let mut i = 0;
-  while i + 1 < n
-    invariant i <= n && s <= 65535
-  {
-    s = cadd(s, be16(b, off + i));
-    i = i + 2;
-  }
-  if i < n {
-    s = cadd(s, cast[u64](bget(b, off + i)) * 256);
-  }
-  return s;
-}
-
 /// The Internet checksum of bytes off..off+n. Over a header that already
 /// holds its checksum, it is 0.
 fn csum(b: &Bytes, off: u64, n: u64) -> u64
   requires off + n <= blen(b)
   ensures result <= 65535
 {
-  return 65535 - sum16(b, off, n, 0);
+  return csum_inet(b, off, n);
 }
 
 /// The sum over a UDP datagram or TCP segment at 34..34+size of b and its
@@ -234,13 +203,7 @@ fn l4_sum(b: &Bytes, src: u64, dst: u64, proto: u64, size: u64) -> u64
   requires 34 + size <= blen(b) && src <= IP_MAX && dst <= IP_MAX && proto <= 255 && size <= 65535
   ensures result <= 65535
 {
-  let mut s = cadd(0, src / 65536);
-  s = cadd(s, src % 65536);
-  s = cadd(s, dst / 65536);
-  s = cadd(s, dst % 65536);
-  s = cadd(s, proto);
-  s = cadd(s, size);
-  return sum16(b, 34, size, s);
+  return csum_sum16(b, 34, size, csum_pseudo4(src, dst, proto, size));
 }
 
 /// Copies the first n bytes of the received frame to the outgoing one.

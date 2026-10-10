@@ -7,6 +7,7 @@
 #include <sys/syscall.h>
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
+#define FUTEX_CMP_REQUEUE 4
 #include <sched.h>
 #include <time.h>
 #include <sys/wait.h>
@@ -32,6 +33,22 @@ int main(void) {
     EXPECT("munmap faults on touch", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&
            munmap(q, 4096) == 0 && ({ pid_t c = fork(); c == 0 ? (q[0] = 1, _exit(0), 0) :
            c > 0 && waitpid(c, &st, 0) == c && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV; }));
+    {
+        int ro = open("cm_ro", O_RDWR | O_CREAT | O_TRUNC, 0644), wo = -1, bad;
+        if (ro >= 0) { write(ro, "x", 1); close(ro); }
+        ro = open("cm_ro", O_RDONLY);
+        wo = open("cm_ro", O_WRONLY);
+        EXPECT("mmap of a file opened write-only is EACCES", wo >= 0 &&
+               mmap(0, 4096, PROT_READ, MAP_PRIVATE, wo, 0) == MAP_FAILED && errno == EACCES);
+        EXPECT("writable MAP_SHARED of a read-only file is EACCES", ro >= 0 &&
+               mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, ro, 0) == MAP_FAILED && errno == EACCES);
+        bad = dup(ro);
+        close(bad);
+        EXPECT("mmap of a closed descriptor is EBADF", bad >= 0 &&
+               mmap(0, 4096, PROT_WRITE, MAP_SHARED, bad, 0) == MAP_FAILED && errno == EBADF);
+        close(ro); close(wo);
+        unlink("cm_ro");
+    }
     EXPECT("file for mapping", (fd = open("cm_f", O_RDWR | O_CREAT | O_TRUNC, 0644)) >= 0 && write(fd, "mapped!", 7) == 7);
     EXPECT("mmap a file MAP_PRIVATE", (q = mmap(0, 4096, PROT_READ, MAP_PRIVATE, fd, 0)) != MAP_FAILED && memcmp(q, "mapped!", 7) == 0);
     EXPECT("mmap a file MAP_SHARED writes back", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) != MAP_FAILED &&
@@ -43,6 +60,29 @@ int main(void) {
            c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0; }) && ({ char c = 0; pread(fd, &c, 1, 2) == 1 && c == 'X'; }));
     EXPECT("MAP_SHARED file mapping across fork", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) != MAP_FAILED &&
            ({ pid_t c = fork(); c == 0 ? (q[3] = 'F', _exit(0), 0) : c > 0 && waitpid(c, &st, 0) == c && q[3] == 'F'; }));
+    {
+        /* Two processes that map the file on their own share its pages,
+           and read(2) and write(2) agree with the mapping. */
+        pid_t c = fork();
+        if (c == 0) {
+            int g = open("cm_f", O_RDWR);
+            char *m = g >= 0 ? mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, g, 0) : MAP_FAILED;
+            if (m == MAP_FAILED) _exit(1);
+            m[4] = 'C';
+            for (int i = 0; i < 3000000 && m[5] != 'P'; i++) sched_yield();
+            _exit(0);
+        }
+        char *m = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        int ok = c > 0 && m != MAP_FAILED;
+        for (int i = 0; ok && i < 3000000 && m[4] != 'C'; i++) sched_yield();
+        EXPECT("MAP_SHARED file mapped by two processes", ok && m[4] == 'C');
+        if (ok) m[5] = 'P';
+        ok = ok && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+        char b = 0;
+        EXPECT("read(2) sees a store into a MAP_SHARED mapping", ok && (m[6] = 'R', pread(fd, &b, 1, 6) == 1) && b == 'R');
+        EXPECT("a MAP_SHARED mapping sees write(2)", ok && pwrite(fd, "W", 1, 7) == 1 && m[7] == 'W');
+        if (m != MAP_FAILED) munmap(m, 4096);
+    }
     close(fd);
     unlink("cm_f");
     EXPECT("MAP_SHARED anonymous across fork", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&
@@ -69,6 +109,42 @@ int main(void) {
             ok = c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
         }
         EXPECT("futex across fork on a MAP_SHARED page", ok);
+    }
+    {
+        /* Timed waiters in four processes: one woken, three requeued to
+           another word, and those three found there after they have each
+           polled their timeout again. */
+        volatile int *w = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        int ok = w != MAP_FAILED, kids = 0;
+        pid_t c[4];
+        if (ok) {
+            w[0] = 0; w[1] = 0; w[2] = 0;
+            for (int i = 0; i < 4; i++) {
+                c[i] = fork();
+                if (c[i] == 0) {
+                    struct timespec ts = {5, 0};
+                    __sync_fetch_and_add(&w[2], 1);
+                    long r = syscall(SYS_futex, (int *)w, FUTEX_WAIT, 0, &ts, 0, 0);
+                    _exit(r == 0 ? 0 : 1);
+                }
+                kids += c[i] > 0;
+            }
+            for (int i = 0; i < 3000000 && w[2] < kids; i++) sched_yield();
+            struct timespec d = {0, 200000000};
+            nanosleep(&d, 0);
+            long a = syscall(SYS_futex, (int *)w, FUTEX_CMP_REQUEUE, 1, 10, (int *)w + 1, 0);
+            nanosleep(&d, 0);
+            long b = syscall(SYS_futex, (int *)w + 1, FUTEX_WAKE, 10, 0, 0, 0);
+            ok = kids == 4 && a == 4 && b == 3;
+            for (int i = 0; i < 4; i++)
+                ok &= c[i] > 0 && waitpid(c[i], &st, 0) == c[i] && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+        }
+        EXPECT("FUTEX_CMP_REQUEUE moves timed waiters across processes", ok);
+        EXPECT("FUTEX_CMP_REQUEUE with a negative count is EINVAL", ok &&
+               syscall(SYS_futex, (int *)w, FUTEX_CMP_REQUEUE, 1, -1, (int *)w + 1, 0) == -1 && errno == EINVAL);
+        int *gone = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        EXPECT("FUTEX_WAKE on an unmapped word is EFAULT", gone != MAP_FAILED && munmap(gone, 4096) == 0 &&
+               syscall(SYS_futex, gone, FUTEX_WAKE, 1, 0, 0, 0) == -1 && errno == EFAULT);
     }
     EXPECT("mlock", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED && mlock(q, 4096) == 0);
     {
