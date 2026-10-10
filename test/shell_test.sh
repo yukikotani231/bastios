@@ -357,6 +357,28 @@ else:
         print("ok   UDP socket: three datagrams queue and come out in order")
     else:
         print("FAIL UDP socket queue:", got); fails += 1
+    # The same through Linux system calls: a musl program (user/mudp.c)
+    # binds port 7000, blocks in recvfrom, sends the datagram back with
+    # sendto, then connects and writes "bye".
+    mark = len(out)
+    qemu.stdin.write(b"mudp 7000\r"); qemu.stdin.flush()
+    got = []
+    if read_until(b"listening on udp port 7000", mark):
+        us = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        us.settimeout(10)
+        try:
+            us.sendto(b"hello linux", ("127.0.0.1", udp_port2))
+            got.append(us.recvfrom(100)[0])
+            got.append(us.recvfrom(100)[0])
+        except OSError:
+            pass
+        us.close()
+    if (read_until(b"bastios> ", mark) and got == [b"hello linux", b"bye"]
+            and b"mudp: 11 bytes from 10.0.2.2: hello linux" in out[mark:]
+            and b"mudp: sent it back" in out[mark:]):
+        print("ok   Linux UDP socket: bind, recvfrom, sendto, connect, write")
+    else:
+        print("FAIL Linux UDP socket:", got, repr(out[mark:])); fails += 1
     mark = len(out)
     qemu.stdin.write(b"udpsend 10.0.2.2 0 x\r"); qemu.stdin.flush()
     if read_until(b"bastios> ", mark) and b"usage: udpsend" in out[mark:]:
