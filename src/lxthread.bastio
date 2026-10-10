@@ -88,9 +88,20 @@ fn holder(k: &mut Kernel, g: u64) -> u64
   return 0;
 }
 
+/// Whether q waits for the rest of its group to leave the processors
+/// (F_QUIET), and is still retrying the call that needs it. A mark left
+/// behind by a thread that has since blocked or died stops nobody.
+fn quieting(procs: &Buf, q: u64) -> bool
+  requires len(procs) == PTAB_LEN && q < NPROC
+{
+  let st = state(procs, q);
+  return pget(procs, q, F_QUIET) != 0 && pget(procs, q, F_RESTART) != 0 && (st == READY || st == RUNNING);
+}
+
 /// Whether thread p can run now: it is not in a group, or its group is
 /// not ending (no member is KILLED) and one of them holds the address
-/// space (none does while the group has lent it to a vfork child).
+/// space (none does while the group has lent it to a vfork child), and no other
+/// member waits for the group to leave the processors (quieting).
 fn group_free(k: &mut Kernel, p: u64) -> bool
   requires kok(k) && p < NPROC
   ensures kok(k)
@@ -104,6 +115,9 @@ fn group_free(k: &mut Kernel, p: u64) -> bool
     invariant 1 <= q && q <= NPROC && kok(k)
   {
     if in_group(k.procs, q, g) && state(k.procs, q) == KILLED {
+      return false;
+    }
+    if q != p && in_group(k.procs, q, g) && quieting(k.procs, q) {
       return false;
     }
     q = q + 1;
@@ -343,6 +357,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   pset(&mut k.procs, c, F_CODE, 0);
   pset(&mut k.procs, c, F_TICKS, 0);
   pset(&mut k.procs, c, F_PARENT, 0);       // threads are nobody's children
+  pset(&mut k.procs, c, F_QUIET, 0);
   group_fork(&mut k.procs, pid, c);
   pset(&mut k.procs, c, F_REGS + R_RAX, 0);
   if stack != 0 {
