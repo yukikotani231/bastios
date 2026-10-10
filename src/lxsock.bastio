@@ -74,12 +74,12 @@ fn sin_in(k: &mut Kernel, pid: u64, va: u64, alen: u64) -> Sin
   if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 8) != 8 {
     return Sin { err: EFAULT, ip: 0, port: 0 };
   }
-  if bget(k.fs.xfer, 0) + 256 * bget(k.fs.xfer, 1) != AF_INET {
+  if cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1)) != AF_INET {
     return Sin { err: EAFNOSUPPORT, ip: 0, port: 0 };
   }
   // The port and the address are in network byte order.
-  let port = 256 * bget(k.fs.xfer, 2) + bget(k.fs.xfer, 3);
-  let ip = 0x1000000 * bget(k.fs.xfer, 4) + 0x10000 * bget(k.fs.xfer, 5) + 0x100 * bget(k.fs.xfer, 6) + bget(k.fs.xfer, 7);
+  let port = 256 * cast[u64](bget(k.fs.xfer, 2)) + cast[u64](bget(k.fs.xfer, 3));
+  let ip = 0x1000000 * cast[u64](bget(k.fs.xfer, 4)) + 0x10000 * cast[u64](bget(k.fs.xfer, 5)) + 0x100 * cast[u64](bget(k.fs.xfer, 6)) + cast[u64](bget(k.fs.xfer, 7));
   return Sin { err: 0, ip: ip, port: port };
 }
 
@@ -96,21 +96,21 @@ fn sin_out(k: &mut Kernel, pid: u64, va: u64, lenp: u64, ip: u64, port: u64) -> 
   if copy_from_user(&mut k.spaces, pid, lenp, &mut k.fs.xfer, 4) != 4 {
     return EFAULT;
   }
-  let room = bget(k.fs.xfer, 0) + 256 * bget(k.fs.xfer, 1) + 65536 * bget(k.fs.xfer, 2) + 16777216 * bget(k.fs.xfer, 3);
+  let room = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1)) + 65536 * cast[u64](bget(k.fs.xfer, 2)) + 16777216 * cast[u64](bget(k.fs.xfer, 3));
   lx_fill(&mut k, 0, SIN_LEN);
-  bset(&mut k.fs.xfer, 0, AF_INET);
-  bset(&mut k.fs.xfer, 2, port / 256);
-  bset(&mut k.fs.xfer, 3, port % 256);
-  bset(&mut k.fs.xfer, 4, ip / 0x1000000);
-  bset(&mut k.fs.xfer, 5, ip / 0x10000 % 256);
-  bset(&mut k.fs.xfer, 6, ip / 0x100 % 256);
-  bset(&mut k.fs.xfer, 7, ip % 256);
+  bset(&mut k.fs.xfer, 0, cast[u8](AF_INET));
+  bset(&mut k.fs.xfer, 2, cast[u8](port / 256));
+  bset(&mut k.fs.xfer, 3, cast[u8](port % 256));
+  bset(&mut k.fs.xfer, 4, cast[u8](ip / 0x1000000));
+  bset(&mut k.fs.xfer, 5, cast[u8](ip / 0x10000 % 256));
+  bset(&mut k.fs.xfer, 6, cast[u8](ip / 0x100 % 256));
+  bset(&mut k.fs.xfer, 7, cast[u8](ip % 256));
   let n = smaller(room, SIN_LEN);
   if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {
     return EFAULT;
   }
   lx_fill(&mut k, 0, 4);
-  bset(&mut k.fs.xfer, 0, SIN_LEN);
+  bset(&mut k.fs.xfer, 0, cast[u8](SIN_LEN));
   if copy_to_user(&mut k.spaces, pid, lenp, k.fs.xfer, 4) != 4 {
     return EFAULT;
   }

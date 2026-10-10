@@ -32,7 +32,7 @@ fn put_num(con: &Serial, n: u64) {
   let mut q = p;
   while q > 0 {
     let d = (n / q) % 10;
-    serial_write(con, 48 + d);
+    serial_write(con, cast[u8](48 + d));
     q = q / 10;
   }
 }
@@ -49,7 +49,7 @@ fn put_range(con: &Serial, line: &Buf, from: u64, to: u64)
   while i <= to
     invariant from <= i
   {
-    serial_write(con, get(line, i));
+    serial_write(con, cast[u8](get(line, i)));
     i = i + 1;
   }
 }
@@ -120,7 +120,7 @@ fn is_cmd(line: &Buf, n: u64, w: Str) -> bool
   while k < slen(w)
     invariant k <= slen(w)
   {
-    if get(line, k + 1) != sget(w, k) {
+    if get(line, k + 1) != cast[u64](sget(w, k)) {
       return false;
     }
     k = k + 1;
@@ -233,7 +233,7 @@ fn line_bytes(line: &Buf, from: u64, to: u64) -> Bytes
   while i < to - from
     invariant i <= to - from && blen(b) == to - from
   {
-    bset(&mut b, i, get(line, from + i));
+    bset(&mut b, i, cast[u8](get(line, from + i)));
     i = i + 1;
   }
   return b;
@@ -362,7 +362,7 @@ fn echo_to(con: &Serial, line: &Buf, n: u64, g: u64)
   while i < e - 6
     invariant i <= e - 6 && blen(text) == e - 6 + 1
   {
-    bset(&mut text, i, get(line, 6 + i));
+    bset(&mut text, i, cast[u8](get(line, 6 + i)));
     i = i + 1;
   }
   bset(&mut text, e - 6, 10);
@@ -895,7 +895,7 @@ fn cmd_tcpget(con: &Serial, line: &Buf, n: u64)
   while j < n + 1 - x
     invariant j <= n + 1 - x && blen(text) == n + 2 - x
   {
-    bset(&mut text, j, get(line, x + j));
+    bset(&mut text, j, cast[u8](get(line, x + j)));
     j = j + 1;
   }
   bset(&mut text, n + 1 - x, 10);

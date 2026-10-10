@@ -222,13 +222,13 @@ fn lx_poll(k: &mut Kernel, pid: u64, n: u64, was: u64, fds: u64, nfds: u64, wait
     // struct pollfd: int fd, short events, short revents. A negative fd
     // is skipped.
     let at = 8 * i;
-    let fd = bget(k.fs.xfer, at) | bget(k.fs.xfer, at + 1) << 8 | bget(k.fs.xfer, at + 2) << 16 | bget(k.fs.xfer, at + 3) << 24;
-    let ev = bget(k.fs.xfer, at + 4) | bget(k.fs.xfer, at + 5) << 8;
+    let fd = cast[u64](bget(k.fs.xfer, at)) | cast[u64](bget(k.fs.xfer, at + 1)) << 8 | cast[u64](bget(k.fs.xfer, at + 2)) << 16 | cast[u64](bget(k.fs.xfer, at + 3)) << 24;
+    let ev = cast[u64](bget(k.fs.xfer, at + 4)) | cast[u64](bget(k.fs.xfer, at + 5)) << 8;
     let mut rv = 0;
     if fd < 0x80000000 {
       rv = poll_bits(k, pid, fd) & (ev | POLLERR | POLLHUP | POLLNVAL);
     }
-    bset(&mut k.fs.xfer, at + 6, rv % 256);
+    bset(&mut k.fs.xfer, at + 6, cast[u8](rv % 256));
     bset(&mut k.fs.xfer, at + 7, 0);
     if rv != 0 {
       ready = ready + 1;

@@ -12,6 +12,7 @@ const PCI_COMMAND: u64 = 0x04;        // command (low 16), status (high)
 const PCI_BAR0: u64 = 0x10;
 
 const PCI_CMD_IO: u64 = 1;            // respond to its I/O ports
+const PCI_CMD_MEM: u64 = 2;           // respond to its memory-mapped registers
 const PCI_CMD_MASTER: u64 = 4;        // may start DMA
 
 struct Pci { addr: PortIo, data: PortIo }
@@ -31,7 +32,7 @@ fn pci_free(ports: &mut Ports, p: Pci)
 fn pci_select(p: &mut Pci, dev: u64, off: u64)
   requires pci_ok(p) && dev < 32 && off < 256 && off % 4 == 0
 {
-  pio_out32(&mut p.addr, 0, PCI_ENABLE + dev * 2048 + off);
+  pio_out32(&mut p.addr, 0, cast[u32](PCI_ENABLE + dev * 2048 + off));
 }
 
 fn pci_read(p: &mut Pci, dev: u64, off: u64) -> u64
@@ -39,14 +40,14 @@ fn pci_read(p: &mut Pci, dev: u64, off: u64) -> u64
   ensures result <= 4294967295
 {
   pci_select(&mut p, dev, off);
-  return pio_in32(&mut p.data, 0);
+  return cast[u64](pio_in32(&mut p.data, 0));
 }
 
 fn pci_write(p: &mut Pci, dev: u64, off: u64, v: u64)
   requires pci_ok(p) && dev < 32 && off < 256 && off % 4 == 0 && v <= 4294967295
 {
   pci_select(&mut p, dev, off);
-  pio_out32(&mut p.data, 0, v);
+  pio_out32(&mut p.data, 0, cast[u32](v));
 }
 
 /// The first device on bus 0 with this vendor and device id, or 32.
@@ -79,7 +80,23 @@ fn pci_io_bar(p: &mut Pci, dev: u64) -> u64
   return b % 65536 - b % 4;
 }
 
-/// Lets the device answer on its I/O ports and do DMA. The status half of
+/// The base of the device's first BAR if it is a memory BAR below 4 GiB,
+/// else 0.
+fn pci_mem_bar(p: &mut Pci, dev: u64) -> u64
+  requires pci_ok(p) && dev < 32
+  ensures result <= 4294967295
+{
+  let b = pci_read(&mut p, dev, PCI_BAR0);
+  if b % 2 == 1 {
+    return 0;                         // an I/O-port BAR
+  }
+  if b / 2 % 4 == 2 && pci_read(&mut p, dev, PCI_BAR0 + 4) != 0 {
+    return 0;                         // 64 bits, above 4 GiB
+  }
+  return b - b % 16;
+}
+
+/// Lets the device answer on its I/O ports and registers and do DMA. The status half of
 /// the register is written as zeros, which changes nothing in it.
 fn pci_enable(p: &mut Pci, dev: u64)
   requires pci_ok(p) && dev < 32
@@ -88,6 +105,9 @@ fn pci_enable(p: &mut Pci, dev: u64)
   let mut n = c;
   if c % 2 == 0 {
     n = n + PCI_CMD_IO;
+  }
+  if c / PCI_CMD_MEM % 2 == 0 {
+    n = n + PCI_CMD_MEM;
   }
   if c / PCI_CMD_MASTER % 2 == 0 {
     n = n + PCI_CMD_MASTER;

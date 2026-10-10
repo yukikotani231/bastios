@@ -157,9 +157,15 @@ run: build/bastios.elf $(DISK)
 
 test: build/bastios.elf
 	test/shell_test.sh
+	test/tcp_test.sh
+	NIC=e1000 test/tcp_test.sh
+
+# Not part of `make test`: prints timings, checks nothing (see the script).
+smpbench: build/bastios.elf
+	test/smpbench.sh
 
 clean:
 	rm -rf build
 
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
-.PHONY: all run test clean
+.PHONY: all run test smpbench clean
