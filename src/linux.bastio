@@ -1622,9 +1622,9 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
 /// with MAP_SHARED (they are written back at msync, munmap and exit). A
 /// MAP_SHARED mapping, of a file or anonymous, is made of shared pages,
 /// which fork maps in the child too instead of copying: parent and child
-/// see each other's writes. Two separate mmaps of one file do not share
-/// pages (there is no page cache). The address hint without MAP_FIXED is
-/// ignored.
+/// see each other's writes. A MAP_SHARED file mapping maps the page
+/// cache's pages, so every process that maps the same part of the file
+/// shares them too. The address hint without MAP_FIXED is ignored.
 fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -1650,6 +1650,9 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   }
   let pages = (n + 4095) / 4096;
   let sh = flags % 4 == MAP_SHARED;
+  // A shared file mapping maps the page cache's pages (src/pcache.bastio)
+  // instead of fresh ones.
+  let cached = sh && !anon && f != NO_FILE;
   let mut at = 0;
   if flags / MAP_FIXED % 2 == 1 {
     if addr % 4096 != 0 || addr < USER_BASE || addr - USER_BASE > STACK_FIRST * 4096 || pages > STACK_FIRST - (addr - USER_BASE) / 4096 {
@@ -1660,11 +1663,11 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     map_forget(&mut k, pid, at / 4096, at / 4096 + pages, false);
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
     hole_cut(&mut k, pid, at / 4096, at / 4096 + pages);
-    if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
+    if !cached && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
       return ENOMEM;
     }
   } else {
-    let reserve = anon && prot == 0;
+    let reserve = (anon && prot == 0) || cached;
     // A hole munmap left first (src/lxmem.bastio): its pages are unmapped.
     let h = hole_take(&mut k, pid, pages);
     if h < STACK_FIRST {
@@ -1672,7 +1675,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
         hole_add(&mut k, pid, h, h + pages);
         return ENOMEM;
       }
-      return lx_mmap_fill(&mut k, pid, h * 4096, pages, prot, flags, fd, off, anon, f);
+      return lx_mmap_fill(&mut k, pid, h * 4096, pages, prot, flags, fd, off, anon, cached, f);
     }
     let brk = pget(k.procs, pid, F_BRK);
     let low = pget(k.procs, pid, F_MMAP);
@@ -1691,14 +1694,15 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     }
     pset(&mut k.procs, pid, F_MMAP, at);
   }
-  return lx_mmap_fill(&mut k, pid, at, pages, prot, flags, fd, off, anon, f);
+  return lx_mmap_fill(&mut k, pid, at, pages, prot, flags, fd, off, anon, cached, f);
 }
 
-/// The rest of mmap once window offset `at` has its pages: a file's bytes
-/// copied in, the mapping recorded if shared, and write access taken away
-/// without PROT_WRITE.
-fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags: u64, fd: u64, off: u64, anon: bool, f: u64) -> u64
-  requires kok(k) && pid < NPROC && at <= USER_SIZE && pages <= WPAGES
+/// The rest of mmap once window offset `at` has its pages (a `cached`
+/// mapping gets the page cache's instead): a file's bytes copied in, the
+/// mapping recorded if shared, and write access taken away without
+/// PROT_WRITE.
+fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags: u64, fd: u64, off: u64, anon: bool, cached: bool, f: u64) -> u64
+  requires kok(k) && pid < NPROC && at <= USER_SIZE && pages <= WPAGES && off % 4096 == 0
   ensures kok(k)
 {
   // Fresh pages are zero: only a file's bytes need copying in.
@@ -1706,6 +1710,18 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
     if prot != 0 {
       read_only(&mut k, pid, at / 4096, pages, prot);
     }
+    return USER_BASE + at;
+  }
+  if cached {
+    if at / 4096 > WPAGES || pages > WPAGES - at / 4096 {
+      return ENOMEM;
+    }
+    let r = lx_map_file_shared(&mut k, pid, at / 4096, pages, f, off);
+    if r != 0 {
+      return r;
+    }
+    map_record(&mut k, pid, fd, at / 4096, pages, off);
+    read_only(&mut k, pid, at / 4096, pages, prot);
     return USER_BASE + at;
   }
   let total = pages * 4096;
