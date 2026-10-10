@@ -335,8 +335,10 @@ GIT_GIT       ?= https://github.com/git/git
 GIT_TAG       ?= v2.47.0
 PERL_GIT      ?= https://github.com/Perl/perl5
 PERL_TAG      ?= v5.40.0
+CPYTHON_GIT   ?= https://github.com/python/cpython
+CPYTHON_TAG   ?= v3.12.7
 COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo \
-                 build/compat/git build/compat/perl
+                 build/compat/git build/compat/perl build/compat/python
 APP_CFLAGS    := -static-pie -fPIE -O2 -w -s
 
 build/compat/src:
@@ -415,6 +417,32 @@ build/compat/perl: | build/compat/src
 	  mkdir -p $(CURDIR)/build/compat/perllib/$$(dirname $$f) && cp lib/$$f $(CURDIR)/build/compat/perllib/$$f; done
 	cp build/compat/src/perl5/perl $@
 
+# CPython, statically linked with its C modules (zlib from source; no
+# ctypes, sqlite3, readline, lzma, bz2, ssl: their libraries are not built
+# for musl here), and its standard library in one zip, which goes on the
+# disk as /disk/py/lib/python312.zip: run it with PYTHONHOME=/disk/py.
+# configure compares the compiler's multiarch with its triplet, which
+# musl-gcc on a glibc host gets wrong, hence the wrapper.
+build/compat/python: test/compat/pyzip.py | build/compat/src
+	rm -rf build/compat/src/pyzlib build/compat/src/pyzlib-out build/compat/src/cpython build/compat/py
+	git clone -q --depth 1 --branch $(ZLIB_TAG) $(ZLIB_GIT) build/compat/src/pyzlib
+	cd build/compat/src/pyzlib && CC=$(MUSLCC) CFLAGS="-O2 -fPIE" ./configure --static --prefix=$(CURDIR)/build/compat/src/pyzlib-out >/dev/null
+	$(MAKE) -C build/compat/src/pyzlib -s install >/dev/null
+	git clone -q --depth 1 --branch $(CPYTHON_TAG) $(CPYTHON_GIT) build/compat/src/cpython
+	printf '#!/bin/sh\nfor a; do [ "$$a" = --print-multiarch ] && { echo x86_64-linux-musl; exit 0; }; done\nexec $(MUSLCC) "$$@"\n' \
+	  > build/compat/src/cpython/musl-cc && chmod +x build/compat/src/cpython/musl-cc
+	cd build/compat/src/cpython && ZLIB_CFLAGS=-I$(CURDIR)/build/compat/src/pyzlib-out/include \
+	  ZLIB_LIBS="-L$(CURDIR)/build/compat/src/pyzlib-out/lib -lz" PKG_CONFIG_LIBDIR=/nonexistent MODULE_BUILDTYPE=static \
+	  py_cv_module__ctypes=n/a py_cv_module__ctypes_test=n/a py_cv_module_readline=n/a py_cv_module__uuid=n/a \
+	  py_cv_module__lzma=n/a py_cv_module__bz2=n/a py_cv_module__sqlite3=n/a py_cv_module_xxlimited=n/a \
+	  py_cv_module_xxlimited_35=n/a CC=$(CURDIR)/build/compat/src/cpython/musl-cc CFLAGS=-fPIE LDFLAGS=-static-pie \
+	  ./configure --disable-shared --disable-test-modules --without-ensurepip --prefix=/disk/py >/dev/null
+	$(MAKE) -C build/compat/src/cpython -s >/dev/null
+	mkdir -p build/compat/py/lib
+	cp build/compat/src/cpython/build/lib.*/_sysconfigdata_*.py build/compat/src/cpython/Lib/
+	build/compat/src/cpython/python test/compat/pyzip.py build/compat/src/cpython/Lib build/compat/py/lib/python312.zip
+	strip -o $@ build/compat/src/cpython/python
+
 # Building C on BastiOS: tcc and GNU make on a second disk (test/compat/
 # devdisk.sh) with a small C runtime under /disk/c, which tcc is configured
 # to look in; test/compat/dev.txt compiles and runs programs with them.
@@ -485,7 +513,7 @@ build/compat/bastio.img: build/compat/bastioc1 build/compat/z3 build/compat/tcc 
 	  $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB) $(BASTIOLANG)/stage1
 
 build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) test/compat/mkdisk.py
-	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) perllib=build/compat/perllib
+	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) perllib=build/compat/perllib py=build/compat/py
 
 compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img
 	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --out build/compat $(COMPAT_PROGS)
