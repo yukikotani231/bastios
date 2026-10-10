@@ -10,8 +10,9 @@
 // and a directory's next entry (for a pipe end: 1 if it is nonblocking).
 // k.pipes, words p * PIPE_STRIDE: head, count, the descriptions of its
 // read end and of its write end, the FIFO it belongs to + 1 (0 for an
-// anonymous pipe; src/lxevent.bastio), and 1 once a writer has opened it;
-// the ring itself is PIPE_CAP bytes of k.pipebuf at p * PIPE_CAP.
+// anonymous pipe; src/lxevent.bastio), 1 once a writer has opened it, and
+// the size F_SETPIPE_SZ gave it (0: PIPE_CAP); the ring itself is
+// PIPE_CAP bytes of k.pipebuf at p * PIPE_CAP.
 
 import "linux.bastio";
 import "lxdev.bastio";
@@ -63,6 +64,66 @@ fn pi_set(t: &mut Buf, p: u64, f: u64, v: u64)
   ensures len(t) == PIPES_LEN
 {
   t = set(t, p * PIPE_STRIDE + f, v);
+}
+
+/// How many bytes pipe p may hold: PIPE_CAP unless F_SETPIPE_SZ made it
+/// smaller (word 6; 0 means PIPE_CAP). Its ring is PIPE_CAP bytes still.
+fn pipe_cap(t: &Buf, p: u64) -> u64
+  requires len(t) == PIPES_LEN && p < NPIPES
+  ensures PIPE_PAGE <= result && result <= PIPE_CAP
+{
+  let c = pi_get(t, p, 6);
+  if c >= PIPE_PAGE && c <= PIPE_CAP {
+    return c;
+  }
+  return PIPE_CAP;
+}
+
+/// Room for more bytes in pipe p, which holds `count`.
+fn pipe_room(t: &Buf, p: u64, count: u64) -> u64
+  requires len(t) == PIPES_LEN && p < NPIPES && count <= PIPE_CAP
+  ensures result <= PIPE_CAP - count
+{
+  let c = pipe_cap(t, p);
+  if count >= c {
+    return 0;
+  }
+  return c - count;
+}
+
+/// F_GETPIPE_SZ and F_SETPIPE_SZ on pipe p. A new size is rounded up to
+/// a power of two pages; it may not drop below what the pipe holds
+/// (EBUSY) or rise past PIPE_CAP, /proc/sys/fs/pipe-max-size (EPERM, or
+/// ENOMEM for root, whom Linux would let go further).
+fn pipe_size(k: &mut Kernel, pid: u64, p: u64, set: bool, arg: u64) -> u64
+  requires kok(k) && pid < NPROC && p < NPIPES
+  ensures kok(k)
+{
+  if !set {
+    return pipe_cap(k.pipes, p);
+  }
+  let want = arg % 0x100000000;
+  if want > PIPE_CAP {
+    if cred_root(k.procs, pid) {
+      return ENOMEM;
+    }
+    return EPERM;
+  }
+  let mut size = PIPE_PAGE;
+  while size < want && size < PIPE_CAP
+    invariant PIPE_PAGE <= size && size <= PIPE_CAP
+  {
+    if size >= PIPE_CAP / 2 {
+      size = PIPE_CAP;
+    } else {
+      size = size * 2;
+    }
+  }
+  if pi_get(k.pipes, p, 1) > size {
+    return EBUSY;
+  }
+  pi_set(&mut k.pipes, p, 6, size);
+  return size;
 }
 
 /// What Linux descriptor `fd` of process `pid` refers to.
@@ -686,6 +747,13 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     }
     return 0;
   }
+  if cmd == F_GETPIPE_SZ || cmd == F_SETPIPE_SZ {
+    let pd = fd_look(k, pid, fd);
+    if pd.kind != K_PIPE_R && pd.kind != K_PIPE_W {
+      return EBADF;
+    }
+    return pipe_size(&mut k, pid, pd.x, cmd == F_SETPIPE_SZ, arg);
+  }
   let lock = cmd == F_SETLK || cmd == F_SETLKW || cmd == F_OFD_SETLK || cmd == F_OFD_SETLKW;
   let fk = fd_look(k, pid, fd);
   if (cmd == F_GETLK || cmd == F_OFD_GETLK || lock) && fk.kind == K_FILE {
@@ -747,6 +815,7 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
   pi_set(&mut k.pipes, p, 3, 1);
   pi_set(&mut k.pipes, p, 4, 0);
   pi_set(&mut k.pipes, p, 5, 1);
+  pi_set(&mut k.pipes, p, 6, 0);
   of_set(&mut k.ofd, hr, 3, flags / LO_NONBLOCK % 2);
   of_set(&mut k.ofd, hw, 3, flags / LO_NONBLOCK % 2);
   let mut ce = 0;
@@ -801,7 +870,7 @@ fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
     return 0;
   }
   let count = smaller(pi_get(k.pipes, p, 1), PIPE_CAP);
-  let room = PIPE_CAP - count;
+  let room = pipe_room(k.pipes, p, count);
   if room == 0 || (n <= PIPE_ATOM && room < n) {
     return EAGAIN;
   }

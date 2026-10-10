@@ -31,6 +31,11 @@ int main(void) {
     EXPECT("fcntl F_GETFL sees O_NONBLOCK", (fcntl(q[0], F_GETFL) & O_NONBLOCK) != 0);
     EXPECT("fcntl F_DUPFD", (fd = fcntl(q[0], F_DUPFD, 10)) >= 10 && close(fd) == 0);
     EXPECT("fcntl F_SETFL", fcntl(q[0], F_SETFL, 0) == 0 && (fcntl(q[0], F_GETFL) & O_NONBLOCK) == 0);
+    EXPECT("F_SETPIPE_SZ limits a pipe", ({ int s[2], ok = pipe2(s, O_NONBLOCK) == 0 && fcntl(s[1], F_GETPIPE_SZ) == 65536 &&
+        fcntl(s[1], F_SETPIPE_SZ, 5000) == 8192 && fcntl(s[0], F_GETPIPE_SZ) == 8192; char z[8192] = {0};
+        ok = ok && write(s[1], z, sizeof z) == 8192 && write(s[1], z, 1) == -1 && errno == EAGAIN &&
+            fcntl(s[1], F_SETPIPE_SZ, 4096) == -1 && errno == EBUSY;
+        close(s[0]); close(s[1]); ok; }));
     if (begin("pipe holds 64 KiB, then EAGAIN")) {
         int big = 0, n;
         char blk[4096] = {0};

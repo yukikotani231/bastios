@@ -219,7 +219,7 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
     if pi_get(k.pipes, f.x, 3) == 0 && pi_get(k.pipes, f.x, 5) != 0 {
       b = b | POLLHUP;                      // no writer left: end of file
     }
-    if pipe_both(k, pid, fd) && pi_get(k.pipes, f.x, 1) <= PIPE_CAP - PIPE_ATOM {
+    if pipe_both(k, pid, fd) && pipe_room(k.pipes, f.x, smaller(pi_get(k.pipes, f.x, 1), PIPE_CAP)) >= PIPE_ATOM {
       b = b | POLLOUT;                      // a FIFO opened O_RDWR writes too
     }
     return b;
@@ -228,7 +228,7 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
     if pi_get(k.pipes, f.x, 2) == 0 {
       return POLLERR;                       // no reader left
     }
-    if pi_get(k.pipes, f.x, 1) <= PIPE_CAP - PIPE_ATOM {
+    if pipe_room(k.pipes, f.x, smaller(pi_get(k.pipes, f.x, 1), PIPE_CAP)) >= PIPE_ATOM {
       return POLLOUT;                       // room for a whole PIPE_BUF write
     }
     return 0;
