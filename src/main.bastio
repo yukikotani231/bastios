@@ -438,7 +438,7 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
         while w < DISK_POLL_GAP && atomic_load(pend) == 0 {
           w = w + 1;
         }
-        j = locked(s, next_job_p, &mut cpu, mmu, cur, true, pend);
+        j = locked(s, next_job_p, &mut cpu, &mut mmu, cur, true, pend);
       },
       Job::Run(t) => {
         let v = cpu_run(&mut cpu, mmu);
