@@ -368,7 +368,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_STAT || n == LX_LSTAT {
-    ret(&mut k.procs, pid, lx_stat(&mut k, pid, AT_FDCWD, a, b));
+    ret(&mut k.procs, pid, lx_stat(&mut k, pid, AT_FDCWD, a, b, n == LX_STAT));
     return KEEP;
   }
   if n == LX_NEWFSTATAT {
@@ -376,7 +376,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if r10 / AT_EMPTY_PATH % 2 == 1 && lx_path_in(&mut k, pid, b) == 0 {
       ret(&mut k.procs, pid, lx_fstat(&mut k, pid, a, c));      // fstat by another name
     } else {
-      ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b, c));
+      ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b, c, (r10 & AT_SYMLINK_NOFOLLOW) == 0));
     }
     return KEEP;
   }
@@ -389,11 +389,11 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_FACCESSAT || n == LX_FACCESSAT2 {
-    ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b, 0));
+    ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b, 0, true));
     return KEEP;
   }
   if n == LX_ACCESS {
-    ret(&mut k.procs, pid, lx_stat(&mut k, pid, AT_FDCWD, a, 0));   // everyone may do anything
+    ret(&mut k.procs, pid, lx_stat(&mut k, pid, AT_FDCWD, a, 0, true));   // everyone may do anything
     return KEEP;
   }
   if n == LX_CLONE && a & CLONE_VM != 0 && a & CLONE_VFORK != 0 && a & CLONE_THREAD == 0 {
@@ -446,6 +446,10 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if n == LX_GETCWD {
     ret(&mut k.procs, pid, lx_getcwd(&mut k, pid, a, b));
+    return KEEP;
+  }
+  if is_link_call(n) {
+    ret(&mut k.procs, pid, lx_link_call(&mut k, pid, n, a, b, c));
     return KEEP;
   }
   if is_procfs_call(n) {
@@ -961,7 +965,7 @@ fn lx_path_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
-  return lx_path_from(&mut k, pid, va, OFD_N);
+  return lx_path_from(&mut k, pid, va, OFD_N, true);
 }
 
 /// lx_path_in for the *at calls: a relative path starts at directory
@@ -972,7 +976,18 @@ fn lx_path_at(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
-  return lx_path_from(&mut k, pid, va, dir_ofd(k, pid, dirfd));
+  return lx_path_from(&mut k, pid, va, dir_ofd(k, pid, dirfd), true);
+}
+
+/// lx_path_at for the calls that act on a symbolic link itself (lstat,
+/// readlink, unlink, rename, mkdir, rmdir, mknod): links on the way are
+/// followed, a link at the end is not.
+fn lx_path_at_nf(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  return lx_path_from(&mut k, pid, va, dir_ofd(k, pid, dirfd), false);
 }
 
 /// The base a relative path of an *at call starts from: OFD_N for the
@@ -1011,8 +1026,9 @@ fn base_byte(k: &Kernel, pid: u64, h: u64, i: u64) -> u8
   return cast[u8](get(k.dpath, h * CWD_STRIDE + 1 + i) % 256);
 }
 
-/// lx_path_in from base h (see dir_ofd).
-fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64) -> u64
+/// lx_path_in from base h (see dir_ofd), following symbolic links (the
+/// last one too when `follow`).
+fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
@@ -1112,7 +1128,8 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64) -> u64
     c = c + 1;
   }
   bfree(out);
-  return proc_self(&mut k.fs.xfer, o, pid);   // "proc/self" is the caller's /proc/PID
+  let o2 = proc_self(&mut k.fs.xfer, o, pid);   // "proc/self" is the caller's /proc/PID
+  return lx_follow(&mut k, o2, follow);       // symbolic links (src/lxlink.bastio)
 }
 
 /// lseek: SEEK_SET (0), SEEK_CUR (1) and SEEK_END (2), with a signed

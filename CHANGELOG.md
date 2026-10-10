@@ -46,6 +46,10 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 - Renaming files and directories: `vfs_rename`, system call 22, and the
   shell's `mv`. On the disk a rename is one sector write, so a power cut
   leaves the old name or the new one.
+- Symbolic links: `symlink`/`symlinkat` make them in memory or on the
+  disk, every path a Linux program passes is followed through them (at
+  most 8 links), and `lstat`, `readlink`, `unlink` and `rename` act on
+  the link itself. BusyBox's `ln` and `readlink` are built in.
 - A generated, read-only `/proc` for Linux programs: `mounts`,
   `meminfo`, `uptime`, a directory per process with `stat`, `status`,
   `cmdline` and `exe` (a link `readlink` reads), and `/proc/self`.

@@ -597,7 +597,7 @@ fn lx_mknod(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64) -> u64
   if mode & S_IFMT != S_IFIFO_TYPE {
     return EPERM;                           // no device nodes, and files come from open
   }
-  let n = lx_path_at(&mut k, pid, dirfd, path);
+  let n = lx_path_at_nf(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return ENOENT;
   }

@@ -371,6 +371,7 @@ const DIR_PROC: u64 = 0x10000;        // /proc; DIR_PROC + pid: /proc/PID (src/l
 const PROC_DEV: u64 = 256;            // an OF_DEV device from here up is a /proc file: PROC_DEV + 16 * pid + PF_*
 const PF_EXE: u64 = 7;                // /proc/PID/exe, a link
 const EACCES: u64 = 18446744073709551603;   // 2^64 - 13
+const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 
 // AF_UNIX sockets (src/lxunix.bastio): UX_N one-way channels and UX_LIS
 // names to connect to.
@@ -403,7 +404,7 @@ const EPERM: u64 = 18446744073709551615;    // 2^64 - 1
 const LO_EXCL: u64 = 0x80;
 const LO_DIRECTORY: u64 = 0x10000;
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
-const NAPPLETS: u64 = 15;
+const NAPPLETS: u64 = 17;
 const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----
 const S_IFIFO: u64 = 0x1180;           // a FIFO, rw-------
 const S_IFSOCK: u64 = 0xC1B6;          // a socket, rw-rw-rw-

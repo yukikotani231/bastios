@@ -37,6 +37,7 @@ import "lxdev.bastio";
 import "lxevent.bastio";
 import "lxptimer.bastio";
 import "lxprocfs.bastio";
+import "lxlink.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;

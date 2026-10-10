@@ -1002,7 +1002,8 @@ fn vfs_set_meta(v: &mut Vfs, f: u64, mode: u64, mtime: u64) -> bool
 {
   let mut m = 65536;
   if mode < 4096 {
-    m = mode;
+    let cur = vfs_meta(&mut v, f);
+    m = cur.mode % 65536 / 4096 * 4096 + mode;   // the type bits stay (a link stays a link)
   }
   if f < NFILES {
     return ram_set_meta(&mut v.ram, f, m, mtime);
@@ -1015,4 +1016,81 @@ fn vfs_set_meta(v: &mut Vfs, f: u64, mode: u64, mtime: u64) -> bool
     return disk_set_meta(&mut v.disk, f - NFILES, m, t);
   }
   return false;
+}
+
+// ---------------------------------------------------------------- symbolic links
+
+const T_LINK: u64 = 0xA000;           // mode type bits of a symbolic link
+const LINK_MODE: u64 = 0xA1FF;        // a link: rwxrwxrwx, as Linux shows them
+
+/// Is handle f a symbolic link? Its contents are the target.
+fn vfs_is_link(v: &mut Vfs, f: u64) -> bool
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  let m = vfs_meta(&mut v, f);
+  return m.ok && m.mode % 65536 / 4096 * 4096 == T_LINK;
+}
+
+/// Creates a symbolic link: its name is xfer[0..n], its target the m bytes
+/// after. False if the name is taken, its parent does not exist, the
+/// target is empty or too long, or there is no room. The link is made in
+/// steps (an empty node, then its type, then the target); a power cut in
+/// between can leave an empty file or an empty link under the name.
+fn vfs_symlink(v: &mut Vfs, mem: &mut Mem, n: u64, m: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem)
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  if n > FNAME_MAX || m == 0 || m > FNAME_MAX || !path_ok(v, n) || !parent_ok(&mut v, n) || vfs_lookup(&mut v, n) != NO_FILE {
+    return false;
+  }
+  if on_disk(v, n) {
+    let d = disk_create(&mut v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX, false, v.now);
+    if d >= DSLOTS {
+      return false;
+    }
+    xfer_shift(&mut v.xfer, n, m);
+    if !disk_set_meta(&mut v.disk, d, LINK_MODE, NO_DISK_FILE) || disk_write_wait(&mut v.disk, d, v.xfer, m, v.now) != m {
+      disk_remove(&mut v.disk, d);
+      return false;
+    }
+    return true;
+  }
+  let i = ram_create(&mut v.ram, v.xfer, n, false, v.now);
+  if i >= NFILES {
+    return false;
+  }
+  xfer_shift(&mut v.xfer, n, m);
+  let mut w = 0;
+  match take_node(&mut v.ram, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      let mut g = f;
+      g.mode = LINK_MODE;
+      w = file_write(&mut g, &mut mem, 0, v.xfer, m);
+      put_node(&mut v.ram, i, Node::File(g));
+    },
+  }
+  if w != m {
+    ram_remove(&mut v.ram, &mut mem, i);
+    return false;
+  }
+  return true;
+}
+
+/// Moves x[from .. from + m] to the front of x.
+fn xfer_shift(x: &mut Bytes, from: u64, m: u64)
+  requires blen(x) == XFER
+  ensures blen(x) == XFER
+{
+  if from > XFER || m > XFER - from {
+    return;
+  }
+  let mut i = 0;
+  while i < m
+    invariant i <= m && from + m <= XFER && blen(x) == XFER
+  {
+    bset(&mut x, i, bget(x, from + i));
+    i = i + 1;
+  }
 }
