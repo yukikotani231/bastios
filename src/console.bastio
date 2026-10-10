@@ -10,6 +10,7 @@
 import "uart.bastio";
 import "fb.bastio";
 import "kbd.bastio";
+import "core/ring.bastio";
 import "xhci.bastio";
 
 struct Term { uart: Uart, screen: Screen, kbd: Kbd, usb: Usb }
@@ -45,16 +46,17 @@ fn term_poll(t: &mut Term) -> u64
 
 const OUTCAP: u64 = 65536;
 
-struct Con { out: Bytes, h: u64, n: u64 }
+/// The console's output ring: OUTCAP bytes, indexed by a core Ring.
+struct Con { out: Bytes, r: Ring }
 
 spec fn con_ok(c: &Con) -> bool {
-  blen(c.out) == OUTCAP && c.h < OUTCAP && c.n <= OUTCAP
+  blen(c.out) == OUTCAP && ring_ok(c.r) && c.r.cap == OUTCAP
 }
 
 fn con_new() -> Con
   ensures con_ok(result)
 {
-  return Con { out: balloc(OUTCAP), h: 0, n: 0 };
+  return Con { out: balloc(OUTCAP), r: ring_new(OUTCAP) };
 }
 
 fn con_free(c: Con) {
@@ -65,7 +67,7 @@ fn con_free(c: Con) {
 fn con_room(c: &Con) -> u64
   requires con_ok(c)
 {
-  return OUTCAP - c.n;
+  return ring_room(c.r);
 }
 
 /// Appends b to the output ring, or drops it if the ring is full (system
@@ -74,9 +76,8 @@ fn con_write(c: &mut Con, b: u8)
   requires con_ok(c)
   ensures con_ok(c)
 {
-  if c.n < OUTCAP {
-    bset(&mut c.out, (c.h + c.n) % OUTCAP, b);
-    c.n = c.n + 1;
+  if !ring_full(c.r) {
+    bset(&mut c.out, ring_push(&mut c.r), b);
   }
 }
 
@@ -87,12 +88,10 @@ fn con_take(c: &mut Con, buf: &mut Bytes) -> u64
   ensures con_ok(c)
 {
   let mut k = 0;
-  while k < blen(buf) && c.n > 0
+  while k < blen(buf) && !ring_empty(c.r)
     invariant con_ok(c)
   {
-    bset(&mut buf, k, bget(c.out, c.h));
-    c.h = (c.h + 1) % OUTCAP;
-    c.n = c.n - 1;
+    bset(&mut buf, k, bget(c.out, ring_pop(&mut c.r)));
     k = k + 1;
   }
   return k;
@@ -104,12 +103,10 @@ fn con_flush(t: &mut Term, c: &mut Con)
   requires term_ok(t) && con_ok(c)
   ensures term_ok(t) && con_ok(c)
 {
-  while c.n > 0
+  while !ring_empty(c.r)
     invariant term_ok(t) && con_ok(c)
   {
-    term_write(&mut t, bget(c.out, c.h));
-    c.h = (c.h + 1) % OUTCAP;
-    c.n = c.n - 1;
+    term_write(&mut t, bget(c.out, ring_pop(&mut c.r)));
   }
 }
 

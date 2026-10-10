@@ -382,7 +382,7 @@ fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, p
 {
   let c = finish(&mut s, &mut cpu, mmu, p, fpu, v);
   let j = next_job(&mut s, &mut cpu, &mut mmu, c, poll);
-  atomic_store(pend, s.con.n);
+  atomic_store(pend, s.con.r.n);
   atomic_store(others, any_ready(s.k.procs));
   return Next { job: j, from: c };
 }
@@ -399,7 +399,7 @@ fn next_job_p(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool, 
     s.idle = s.idle - 1;
   }
   let j = next_job(&mut s, &mut cpu, &mut mmu, from, poll);
-  atomic_store(pend, s.con.n);
+  atomic_store(pend, s.con.r.n);
   atomic_store(others, any_ready(s.k.procs));
   return j;
 }
@@ -410,7 +410,7 @@ fn idled_p(s: &mut Sys, v: u64, pend: &Atomic[u64])
   ensures sys_ok(s)
 {
   idled(&mut s, v);
-  atomic_store(pend, s.con.n);
+  atomic_store(pend, s.con.r.n);
 }
 
 /// `finish`, then publishes how much console output waits in `pend`.
@@ -420,7 +420,7 @@ fn finish_p(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64, p
   ensures sys_ok(s) && result < NPROC
 {
   let c = finish(&mut s, &mut cpu, mmu, p, fpu, v);
-  atomic_store(pend, s.con.n);
+  atomic_store(pend, s.con.r.n);
   return c;
 }
 
@@ -450,7 +450,7 @@ fn exchange(s: &mut Sys, tx: &mut Bytes, rx: &Bytes, rn: u64, pend: &Atomic[u64]
   if con_room(s.con) >= OUTCAP / 2 {
     wake_writers(&mut s.k.procs);
   }
-  atomic_store(pend, s.con.n);
+  atomic_store(pend, s.con.r.n);
   return n;
 }
 
