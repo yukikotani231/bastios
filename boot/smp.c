@@ -6,7 +6,8 @@
  * application processor (AP) with INIT and two startup IPIs (Intel SDM
  * vol. 3, 8.4.4). Each AP runs boot/ap.S, checks in through bst_ap_main and
  * parks with interrupts off. The Bastio kernel sees the result through the
- * `cpu_count` builtin.
+ * `cpu_count` builtin, and hands the parked APs work with `smp_run`
+ * (bst_platform_smp_start / bst_platform_smp_join below).
  *
  * Firmware tables are untrusted input: every read is checked against the
  * table's length and against the identity-mapped first 1 GiB.
@@ -163,6 +164,27 @@ static void core_init(uint64_t i) {
  * interrupts off. Sets the processor up like the bootstrap one, starts its
  * local APIC timer (preemption once it runs processes), checks in, and
  * parks: it sleeps between timer interrupts and runs nothing. */
+/* Work for the APs (bst_platform_smp_start): the function, its argument,
+ * and a generation number each AP compares with the last one it ran. */
+static void (*volatile work_fn)(void *);
+static void *volatile work_arg;
+static uint64_t work_gen, work_done;
+
+/* Runs fn(arg) on every AP. The caller runs it on this processor itself,
+ * then waits in bst_platform_smp_join. One piece of work at a time. */
+void bst_platform_smp_start(void (*fn)(void *), void *arg) {
+    work_fn = fn;
+    work_arg = arg;
+    __atomic_store_n(&work_done, 0, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&work_gen, 1, __ATOMIC_RELEASE);
+}
+
+/* Waits until every AP has returned from the current work. */
+void bst_platform_smp_join(void) {
+    while (__atomic_load_n(&work_done, __ATOMIC_ACQUIRE) + 1 < cpus_online)
+        __asm__ volatile ("pause");
+}
+
 void bst_ap_main(void) {
     __asm__ volatile ("lidt %0" : : "m"(ap_idtr));
     for (int m = 0; m < 3; m++) wrmsr(0xC0000081 + m + (m == 2), syscall_msrs[m]);
@@ -172,7 +194,19 @@ void bst_ap_main(void) {
     lapic[0x320 / 4] = 0x20000 | LAPIC_TIMER_VECTOR; /* periodic */
     lapic[0x380 / 4] = lapic_ticks_10ms;
     __atomic_fetch_add(&cpus_online, 1, __ATOMIC_SEQ_CST);
-    for (;;) __asm__ volatile ("sti; hlt; cli");
+    /* Park: wait for work, waking on the local timer to look. Interrupts
+     * are on only inside hlt, as in cpu_idle. */
+    uint64_t seen = 0;
+    for (;;) {
+        uint64_t g = __atomic_load_n(&work_gen, __ATOMIC_ACQUIRE);
+        if (g != seen) {
+            seen = g;
+            work_fn(work_arg);
+            __atomic_fetch_add(&work_done, 1, __ATOMIC_RELEASE);
+            continue;
+        }
+        __asm__ volatile ("sti; hlt; cli");
+    }
 }
 
 /* Count the local APIC timer against 10 ms of PIT channel 2 (the speaker
