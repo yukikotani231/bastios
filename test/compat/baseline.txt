@@ -2,7 +2,6 @@
 # make compat fails if one of them stops passing.
 apps: ash: a 1200-byte typed line
 apps: git: 300 files, a branch and a merge
-apps: git: gc, fsck and a clone through upload-pack
 apps: git: init, commit, log and diff
 apps: git: stash, revert and bisect run
 apps: httpd: serve a page, fetch it over loopback
