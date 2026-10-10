@@ -507,9 +507,11 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_sig_call(n) {
     return lx_sig_call(&mut k, pid, n, a, b, c);
   }
-  if n == LX_GETUID || n == LX_GETGID || n == LX_GETEUID || n == LX_GETEGID {
-    ret(&mut k.procs, pid, 0);              // everyone is root
-    return KEEP;
+  if is_ipc_call(n) {
+    return lx_ipc_call(&mut k, pid, n, was, a, b, c);
+  }
+  if is_cred_call(n) {
+    return lx_cred_call(&mut k, pid, n, a, b, c);
   }
   if n == LX_GETCWD {
     ret(&mut k.procs, pid, lx_getcwd(&mut k, pid, a, b));
@@ -1617,10 +1619,12 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
 /// mmap: private memory, taken downward from the stack, or at addr with
 /// MAP_FIXED. A file mapping is a copy of the file's bytes from `off` (the
 /// rest of the last page zero), so writes to it never reach the file, even
-/// with MAP_SHARED (they are written back at msync, munmap and exit). An
-/// anonymous MAP_SHARED mapping is made of shared pages, which fork maps
-/// in the child too instead of copying. The address hint without MAP_FIXED
-/// is ignored.
+/// with MAP_SHARED (they are written back at msync, munmap and exit). A
+/// MAP_SHARED mapping, of a file or anonymous, is made of shared pages,
+/// which fork maps in the child too instead of copying: parent and child
+/// see each other's writes. Two separate mmaps of one file do not share
+/// pages (there is no page cache). The address hint without MAP_FIXED is
+/// ignored.
 fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -1645,7 +1649,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     }
   }
   let pages = (n + 4095) / 4096;
-  let sh = anon && flags % 4 == MAP_SHARED;
+  let sh = flags % 4 == MAP_SHARED;
   let mut at = 0;
   if flags / MAP_FIXED % 2 == 1 {
     if addr % 4096 != 0 || addr < USER_BASE || addr - USER_BASE > STACK_FIRST * 4096 || pages > STACK_FIRST - (addr - USER_BASE) / 4096 {
