@@ -41,6 +41,7 @@ import "lxlock.bastio";
 import "lxprocfs.bastio";
 import "lxlink.bastio";
 import "lxloop.bastio";
+import "lxxattr.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;

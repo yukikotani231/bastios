@@ -138,11 +138,13 @@ t_file: close twice is EBADF
 t_file: faccessat
 t_file: fchmod
 t_file: fdatasync
+t_file: fgetxattr unsupported
 t_file: fstat size
 t_file: fsync
 t_file: ftruncate grow
 t_file: ftruncate shrink
 t_file: link
+t_file: listxattr empty
 t_file: lseek SEEK_CUR
 t_file: lseek SEEK_END
 t_file: lseek SEEK_SET
@@ -155,8 +157,10 @@ t_file: pwrite
 t_file: read back
 t_file: readlink
 t_file: readv
+t_file: removexattr of a missing file
 t_file: rename
 t_file: rename over existing
+t_file: setxattr unsupported
 t_file: stat
 t_file: stdio fprintf/fscanf
 t_file: symlink
