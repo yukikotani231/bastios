@@ -272,6 +272,9 @@ fn tty_intr(con: &mut Con, k: &mut Kernel)
   requires con_ok(con) && kok(k)
   ensures kok(k) && con_ok(con)
 {
+  if tt_flags(k.line, 12) & ISIG == 0 {
+    return;                                 // Ctrl-C is a byte like any other (ISIG off)
+  }
   let n = get(k.q, 1);
   let h = get(k.q, 0);
   let mut hit = false;
