@@ -233,6 +233,9 @@ fn do_fread(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
   if got == NO_FD {
     return NO_RESULT;
   }
+  if got == VFS_MISS {
+    return DISK_RETRY;
+  }
   let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, got);
   if put == NO_RESULT {
     return NO_RESULT;
@@ -252,7 +255,87 @@ fn do_fwrite(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
   if got == NO_RESULT {
     return NO_RESULT;
   }
-  return vfs_write(&mut k.fs, &mut k.mem, pid * NFD + fd, got);
+  let w = vfs_write(&mut k.fs, &mut k.mem, pid * NFD + fd, got);
+  if w == VFS_MISS {
+    return DISK_RETRY;
+  }
+  return w;
+}
+
+// ---------------------------------------------------------------- waiting for the disk
+
+const RETRY_BIT: u64 = 0x4000000000000000;   // in F_WAIT: restart once the queue has moved
+
+/// Moves the disk's queue along and wakes the processes waiting for it:
+/// one whose call restarts (F_WAIT is RETRY_BIT + the queue's `moved` when
+/// it slept) once anything finished, one whose write was queued (F_WAIT is
+/// its transaction) once that transaction has ended. All of them if the
+/// disk died.
+fn disk_wake(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  disk_pump(&mut k.fs.disk, k.ticks);
+  let moved = k.fs.disk.q.moved;
+  let done = k.fs.disk.q.done;
+  let dead = k.fs.disk.q.dead;
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && kok(k)
+  {
+    if state(k.procs, p) == DISKWAIT {
+      let w = pget(k.procs, p, F_WAIT);
+      if dead || (w >= RETRY_BIT && w - RETRY_BIT != moved) || (w < RETRY_BIT && done >= w) {
+        pset(&mut k.procs, p, F_STATE, READY);
+      }
+    }
+    p = p + 1;
+  }
+}
+
+/// Is a disk command queued or running?
+fn disk_busy(k: &Kernel) -> bool
+  requires kok(k)
+{
+  return !dq_idle(k.fs.disk.q);
+}
+
+/// Process pid's system call n needs blocks that are not cached: their
+/// reads are queued. It sleeps until the queue has moved, then its call
+/// restarts (as lx_retry does).
+fn disk_retry(k: &mut Kernel, pid: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let r = lx_retry(&mut k, pid, n);
+  if r == SWITCH {
+    pset(&mut k.procs, pid, F_STATE, DISKWAIT);
+    pset(&mut k.procs, pid, F_WAIT, RETRY_BIT + k.fs.disk.q.moved % RETRY_BIT);
+    disk_wake(&mut k);
+  }
+  return r;
+}
+
+/// After process p's system call: if it queued a write, it sleeps until
+/// that transaction ends (its result is already in rax). True if it
+/// sleeps.
+fn disk_hold(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let t = k.fs.disk.txn;
+  if t == 0 {
+    return false;
+  }
+  k.fs.disk.txn = 0;
+  if state(k.procs, p) != READY || t >= RETRY_BIT {
+    disk_wake(&mut k);
+    return false;
+  }
+  pset(&mut k.procs, p, F_STATE, DISKWAIT);
+  pset(&mut k.procs, p, F_WAIT, t);
+  disk_wake(&mut k);
+  return state(k.procs, p) == DISKWAIT;
 }
 
 fn do_dirent(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
@@ -613,6 +696,10 @@ fn syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, net_call(&mut k, pid, n, a, b, c));
     return KEEP;
   }
-  ret(&mut k.procs, pid, file_call(&mut k, pid, n, a, b, c));
+  let r = file_call(&mut k, pid, n, a, b, c);
+  if r == DISK_RETRY {
+    return disk_retry(&mut k, pid, n);
+  }
+  ret(&mut k.procs, pid, r);
   return KEEP;
 }
