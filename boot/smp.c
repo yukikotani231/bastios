@@ -84,32 +84,23 @@ static uint64_t scan_rsdp(uint64_t from, uint64_t to) {
     return 0;
 }
 
-/* BIOS firmware puts the RSDP on a 16-byte boundary in the first KiB of
- * the EBDA or in 0xE0000-0xFFFFF (ACPI 6.5, 5.2.5.1). UEFI firmware hands
- * it over only through the EFI system table, which a Multiboot 1 loader
- * does not pass on. OVMF, like much UEFI firmware, puts it among the ACPI
- * tables, so look in the ACPI (3) and ACPI NVS (4) ranges of the
- * Multiboot memory map: the first MiB of each that lies in the identity
- * map. Firmware that keeps it elsewhere, or tables above 1 GiB, leave the
- * machine on one processor. */
-static uint64_t find_rsdp(uint32_t mbi) {
+extern uint8_t bst_boot_rsdp[36];   /* multiboot.c: the copy Multiboot 2 passed */
+extern uint32_t bst_boot_rsdp_len;
+
+/* The RSDP: the copy a Multiboot 2 loader passed (GRUB, from the ISO; under
+ * UEFI the only way to it), else where BIOS firmware puts it, on a 16-byte
+ * boundary in the first KiB of the EBDA or in 0xE0000-0xFFFFF (ACPI 6.5,
+ * 5.2.5.1). */
+static uint64_t find_rsdp(void) {
+    if (bst_boot_rsdp_len >= 20 && sig_is((uint64_t)bst_boot_rsdp, "RSD PTR ", 8) && sum_ok((uint64_t)bst_boot_rsdp, 20)) {
+        /* A revision 2 RSDP is only usable whole: find_madt reads the XSDT
+         * address from its last 16 bytes. */
+        if (rd8((uint64_t)bst_boot_rsdp + 15) < 2 || bst_boot_rsdp_len >= 36) return (uint64_t)bst_boot_rsdp;
+    }
     uint64_t ebda = (uint64_t)rd16(0x40E) << 4;
     uint64_t a = 0;
     if (ebda >= 0x80000 && ebda + 1024 <= 0x100000) a = scan_rsdp(ebda, ebda + 1024);
     if (!a) a = scan_rsdp(0xE0000, 0x100000);
-    if (a || mbi == 0 || mbi > IDENT_LIMIT - 52 || !(rd32(mbi) & (1u << 6))) return a;
-    uint64_t at = rd32(mbi + 48), end = at + rd32(mbi + 44);
-    if (end > IDENT_LIMIT) return 0;
-    while (!a && at + 24 <= end) {
-        uint64_t size = rd32(at), base = rd64(at + 4), len = rd64(at + 12);
-        uint32_t type = rd32(at + 20);
-        if ((type == 3 || type == 4) && base >= 0x100000 && base < IDENT_LIMIT) {
-            if (len > (1ull << 20)) len = 1ull << 20;
-            if (len > IDENT_LIMIT - base) len = IDENT_LIMIT - base;
-            a = scan_rsdp(base, base + len);
-        }
-        at += size + 4;
-    }
     return a;
 }
 
@@ -121,8 +112,8 @@ static uint64_t sdt_len(uint64_t a) {
     return n;
 }
 
-static uint64_t find_madt(uint32_t mbi, uint64_t *len) {
-    uint64_t rsdp = find_rsdp(mbi);
+static uint64_t find_madt(uint64_t *len) {
+    uint64_t rsdp = find_rsdp();
     if (!rsdp) return 0;
     uint64_t root = rd32(rsdp + 16), entry = 4;
     if (rd8(rsdp + 15) >= 2 && sum_ok(rsdp, 36) && rd64(rsdp + 24) != 0) {
@@ -264,11 +255,11 @@ static int start_ap(uint32_t apic_id, uint64_t n) {
     return bst_platform_cpus() != before;
 }
 
-void bst_smp_init(uint32_t mbi) {
+void bst_smp_init(void) {
     core_init(0);
     uint64_t apic_msr = rdmsr(0x1B);
     if (!(apic_msr & (1u << 11))) return;               /* APIC globally disabled */
-    uint64_t len = 0, madt = find_madt(mbi, &len);
+    uint64_t len = 0, madt = find_madt(&len);
     if (!madt || !map_lapic(apic_msr & 0xFFFFF000ull)) return;
     uint64_t size = (uint64_t)(bst_ap_trampoline_end - bst_ap_trampoline);
     if (size > 4096) return;
