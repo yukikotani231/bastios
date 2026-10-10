@@ -16,9 +16,9 @@
 import "pages.bastio";
 
 const NFILES: u64 = 32;
-const FNAME_MAX: u64 = 28;
-const FILE_PAGES: u64 = 256;
-const FILE_MAX: u64 = 1048576;        // FILE_PAGES * 4096
+const FNAME_MAX: u64 = 255;
+const FILE_PAGES: u64 = 16384;
+const FILE_MAX: u64 = 67108864;       // FILE_PAGES * 4096 (64 MiB)
 
 enum Slot { Hole, Page(Frame) }
 

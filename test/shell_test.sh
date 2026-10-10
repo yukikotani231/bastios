@@ -279,6 +279,13 @@ steps = [
     ("rmdir docs/sub", b""),
     ("rmdir docs", b""),
     ("cat docs/a", b"no such file: docs/a"),
+    # Paths longer than an old 28-byte name.
+    ("mkdir a_directory_whose_name_is_long", b""),
+    ("echo far > a_directory_whose_name_is_long/and_a_file_with_a_long_name_too", b""),
+    ("cat a_directory_whose_name_is_long/and_a_file_with_a_long_name_too", b"far\r\n"),
+    ("ls a_directory_whose_name_is_long", b"\nand_a_file_with_a_long_name_too\r\n"),
+    ("rm a_directory_whose_name_is_long/and_a_file_with_a_long_name_too", b""),
+    ("rmdir a_directory_whose_name_is_long", b""),
     # Several pages, seeking, appending, holes, descriptor limits, first on
     # the disk and then in memory; it exits with "big" still open, so
     # removing it shows that exit closed it.
@@ -294,6 +301,8 @@ steps = [
     ("mkdir disk/keep", b""),
     ("echo deep > disk/keep/f", b""),
     ("ls disk", [b"\nnote\r\n", b"\nkeep/\r\n"]),
+    ("mkdir disk/long_directory_name_beyond_28_bytes", b""),
+    ("echo far > disk/long_directory_name_beyond_28_bytes/and_a_file_with_a_long_name_too", b""),
     # Every page the files used is back once they are removed.
     ("mem", b"free pages"),
 ]
@@ -754,6 +763,10 @@ session("third", False, [
     ("rm disk/keep/f", b""),
     ("rmdir disk/keep", b""),
     ("ls disk/keep", b"not a directory: disk/keep"),
+    ("cat disk/long_directory_name_beyond_28_bytes/and_a_file_with_a_long_name_too", b"far\r\n"),
+    ("ls", b"       4 disk/long_directory_name_beyond_28_bytes/and_a_file_with_a_long_name_too\r\n"),
+    ("rm disk/long_directory_name_beyond_28_bytes/and_a_file_with_a_long_name_too", b""),
+    ("rmdir disk/long_directory_name_beyond_28_bytes", b""),
     ("cat disk/note", b"no such file: disk/note"),
 ])
 # Power cuts. user/crashme.bastio checks what the last run left on the disk
@@ -786,6 +799,7 @@ session("after the power cuts", False, [
     ("crashme", b"crashme: done"),
     ("rm disk/log", b""),
     ("rm disk/snap", b""),
+    ("rm disk/ow", b""),
     ("ls", b"about"),
 ])
 print(f"---- {fails} failed ----")
