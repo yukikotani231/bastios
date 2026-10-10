@@ -46,7 +46,11 @@ fn free_l1(m: &mut Mem, t: PageTable)
     invariant forall j: u64 :: j < i ==> !pt_used(t1, j)
   {
     if pt_has(t1, i) {
-      give_page(&mut m, pt_take_frame(&mut t1, i));
+      if pt_shared(t1, i) {
+        drop_shared(&mut m, pt_take_shared(&mut t1, i));
+      } else {
+        give_page(&mut m, pt_take_frame(&mut t1, i));
+      }
     }
     i = i + 1;
   }
@@ -158,8 +162,8 @@ fn w_has(l2: &mut PageTable, p: u64) -> bool
 }
 
 /// w_map in the level-1 table: a fresh zero page in slot i unless one is
-/// there. False if memory ran out.
-fn l1_map(l1: &mut PageTable, m: &mut Mem, i: u64) -> bool
+/// there, shared (MAP_SHARED) if sh. False if memory ran out.
+fn l1_map(l1: &mut PageTable, m: &mut Mem, i: u64, sh: bool) -> bool
   requires pt_level(l1) == 1 && mem_ok(m) && i < 512
   ensures mem_ok(m)
 {
@@ -170,13 +174,18 @@ fn l1_map(l1: &mut PageTable, m: &mut Mem, i: u64) -> bool
   if b >= NPAGES {
     return false;
   }
-  pt_put_frame(&mut l1, i, take_page(&mut m, b), true);
+  if sh {
+    pt_put_shared(&mut l1, i, shared_new(take_page(&mut m, b)), true);
+  } else {
+    pt_put_frame(&mut l1, i, take_page(&mut m, b), true);
+  }
   return true;
 }
 
 /// Maps a fresh zero page at window page p unless one is there, making its
-/// level-1 table if need be. False if memory ran out.
-fn w_map(m: &mut Mem, l2: &mut PageTable, p: u64) -> bool
+/// level-1 table if need be; a shared page (MAP_SHARED) if sh. False if
+/// memory ran out.
+fn w_map(m: &mut Mem, l2: &mut PageTable, p: u64, sh: bool) -> bool
   requires mem_ok(m) && pt_level(l2) == 2 && p < WPAGES
   ensures mem_ok(m) && pt_level(l2) == 2
 {
@@ -188,7 +197,7 @@ fn w_map(m: &mut Mem, l2: &mut PageTable, p: u64) -> bool
     }
     pt_put(&mut l2, t, pt_new(take_page(&mut m, a), 1));
   }
-  return pt_borrow(&mut l2, t, l1_map, &mut m, p % 512);
+  return pt_borrow(&mut l2, t, l1_map, &mut m, p % 512, sh);
 }
 
 fn l1_fill(l1: &mut PageTable, i: u64, img: Str, from: u64)
@@ -341,7 +350,7 @@ fn new_window(m: &mut Mem, img: Str, npages: u64) -> Space
   while ok && p < npages
     invariant p <= npages && npages <= STACK_FIRST && mem_ok(m) && pt_level(l2) == 2
   {
-    ok = w_map(&mut m, &mut l2, p);
+    ok = w_map(&mut m, &mut l2, p, false);
     if ok {
       w_fill(&mut l2, p, img, p * 4096);
       p = p + 1;
@@ -351,7 +360,7 @@ fn new_window(m: &mut Mem, img: Str, npages: u64) -> Space
   while ok && p < WPAGES
     invariant STACK_LOW <= p && p <= WPAGES && mem_ok(m) && pt_level(l2) == 2
   {
-    ok = w_map(&mut m, &mut l2, p);
+    ok = w_map(&mut m, &mut l2, p, false);
     if ok {
       p = p + 1;
     }
@@ -495,7 +504,11 @@ fn clone_l1(src: &mut PageTable, m: &mut Mem) -> Space
     invariant p <= 512 && mem_ok(m) && pt_level(l1) == 1 && pt_level(src) == 1
     invariant forall j: u64 :: p <= j && j < 512 ==> !pt_used(l1, j)
   {
-    if pt_has(src, p) {
+    if pt_has(src, p) && pt_shared(src, p) {
+      // A MAP_SHARED page stays one page: the child maps it too.
+      let w = pt_writable(src, p);
+      pt_put_shared(&mut l1, p, pt_dup_shared(src, p), w);
+    } else if pt_has(src, p) {
       let b = find_free(&mut m);
       if b >= NPAGES {
         ok = false;
