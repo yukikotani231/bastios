@@ -216,10 +216,10 @@ steps = [
     ("ash -c 'while :; do echo y; done' | head -n 1; echo piped", b"\r\ny\r\npiped", b"\n# "),
     ("ash -c 'while :; do :; done'", b"^C", b"\n# ", b"\x03"),
     ("echo st=$?", b"st=130", b"\n# "),
-    # Time: clocks, nanosleep, and poll that waits (user/mtime.c); the
-    # sleep applet; ash's read -t, a poll on the console that times out, then
-    # one that wakes when a line is typed.
-    ("mtime", [b"mtime: slept ", b"woke in time"], b"\n# "),
+    # Time: clocks, nanosleep, poll that waits, select, and alarms and pause
+    # (user/mtime.c); the sleep applet; ash's read -t, a poll on the console
+    # that times out, then one that wakes when a line is typed.
+    ("mtime", [b"mtime: rang 3, selected, slept ", b"woke in time"], b"\n# "),
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
     ("read -t 1 x; echo rt=$?", b"rt=1", b"\n# "),
     ("read -t 9 x; echo rt=$? x=$x", b"rt=0 x=late", b"\n# ", b"late\r"),
@@ -230,6 +230,11 @@ steps = [
     ("mkdir sub; cd sub && /bin/pwd && cd ../.. && /bin/pwd; ls dd", [b"\r\n/dd/sub\r\n/\r\n", b"sub"], b"\n# "),
     ("rmdir dd; echo r=$?", [b"not empty", b"r=1"], b"\n# "),
     ("rm dd/f; rmdir dd/sub dd; test -d dd || echo gone$((1+1))", b"\r\ngone2\r\n", b"\n# "),
+    # rename through BusyBox's mv: over a file, into a directory, and a
+    # directory with its contents.
+    ("echo one > m1; echo two > m2; mv m1 m2; cat m2; test -e m1 || echo moved$((1+1))", b"\r\none\r\nmoved2\r\n", b"\n# "),
+    ("mkdir md; mv m2 md; mv md mdd; cat mdd/m2; ls md; echo l=$?", [b"\r\none\r\n", b"l=1"], b"\n# "),
+    ("rm mdd/m2; rmdir mdd; echo clean$((1+1))", b"\r\nclean2\r\n", b"\n# "),
     # The *at calls relative to a directory descriptor, fchdir, and mmap
     # of a file (user/mdir.c).
     ("mdir", b"mdir: ok in /dx, mapped", b"\n# "),

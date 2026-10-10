@@ -434,7 +434,9 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   }
   // A system call that was waiting: without SA_RESTART it fails with
   // EINTR instead of running again once the handler returns.
-  if pget(k.procs, p, F_RESTART) != 0 && flags & SA_RESTART == 0 {
+  // pause never runs again.
+  let pausing = pget(k.procs, p, F_REGS + R_RAX) == LX_PAUSE;
+  if pget(k.procs, p, F_RESTART) != 0 && (flags & SA_RESTART == 0 || pausing) {
     let rip = pget(k.procs, p, F_REGS + R_RIP);
     if rip <= 0xFFFFFFFFFFFFFFF0 {
       pset(&mut k.procs, p, F_REGS + R_RIP, rip + 2);

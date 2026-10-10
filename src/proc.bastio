@@ -319,6 +319,8 @@ const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
 // Linux signal actions: per process, 64 signals of 4 words each (handler,
 // flags, restorer, mask).
 const SIGACT_LEN: u64 = 4096;
+const ALARMS_LEN: u64 = 32;          // NPROC * 2
+const LX_PAUSE: u64 = 34;
 const OF_SOCK: u64 = 5;               // x: the kernel socket; word 3: 2 * peer + nonblocking
 const OF_TCP: u64 = 6;                // x: the kernel connection (TCBS: none yet); word 3: see src/lxtcp.bastio
 const DIR_ROOT: u64 = 0;
@@ -337,7 +339,7 @@ const AT_REMOVEDIR: u64 = 0x200;
 const DENT_BUF: u64 = 2048;           // the most getdents64 fills in one call
 const ENOTDIR: u64 = 18446744073709551596;  // 2^64 - 20
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
-const NAPPLETS: u64 = 11;
+const NAPPLETS: u64 = 12;
 const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----
 const S_IFIFO: u64 = 0x1180;           // a FIFO, rw-------
 const S_IFSOCK: u64 = 0xC1B6;          // a socket, rw-rw-rw-
@@ -395,10 +397,11 @@ struct Kernel {
   sigact: Buf,          // Linux signal actions (src/lxsig.bastio)
   cwd: Buf,             // Linux working directories (src/lxdir.bastio)
   dpath: Buf,           // the path of each open directory description, laid out like cwd
+  alarms: Buf,          // Linux ITIMER_REAL per process: deadline (0: off) and interval (src/lxtime.bastio)
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN
 }
 
 // ---------------------------------------------------------------- programs
@@ -740,6 +743,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
     Space::Mapped(t) => { free_space(&mut k.mem, mmu, t); },
   }
   drop_fpu(&mut k.mem, take_fpu(&mut k.fpus, pid));
+  k.alarms = set(k.alarms, 2 * pid, 0);   // its timer stops
   lx_fd_close_all(&mut k, pid, false);
   close_unshared(&mut k, pid);
   pset(&mut k.procs, pid, F_STATE, ZOMBIE);
