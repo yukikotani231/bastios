@@ -37,7 +37,7 @@ _s.bind(("127.0.0.1", 0))
 tcp_port = _s.getsockname()[1]
 _s.close()
 
-def boot(cpus, with_disk=False, virtio=False, net=False, subnet=None, card="virtio-net-pci", monitor=None):
+def boot(cpus, with_disk=False, virtio=False, net=False, subnet=None, card="virtio-net-pci", monitor=None, extra=()):
     drive = ["-drive", f"file={disk},format=raw,if=ide,index=0"] if with_disk else []
     if virtio:
         # The same disk as a virtio block device (src/virtio.bastio): sectors
@@ -57,7 +57,7 @@ def boot(cpus, with_disk=False, virtio=False, net=False, subnet=None, card="virt
     return subprocess.Popen(
         ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-         "-serial", "stdio", "-monitor", f"unix:{monitor},server,nowait" if monitor else "none"] + drive + nic,
+         "-serial", "stdio", "-monitor", f"unix:{monitor},server,nowait" if monitor else "none"] + drive + nic + list(extra),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 deadline = time.time() + timeout
@@ -797,6 +797,54 @@ if ok:
     mon.close()
 qemu.kill(); qemu.wait()
 print("---- keyboard boot transcript ----")
+print(out.decode(errors="replace").replace("\r", "")[-400:])
+
+# A USB keyboard on an xHCI controller (src/xhci.bastio), on a machine with
+# no PS/2 controller at all (i8042=off), so the keys can only come over
+# USB. They are sent through QMP; at power off the controller is reset and
+# its eleven pages are back.
+import json
+qmp_path = os.path.join(disk_dir.name, "qmp.sock")
+qemu = boot(1, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci", "-device", "usb-kbd",
+                      "-qmp", f"unix:{qmp_path},server,nowait"])
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+good = ok and b"keyboard: USB (xHCI)\r\n" in out
+print(("ok  " if good else "FAIL"), "(USB boot) keyboard found on the xHCI controller")
+fails += not good
+if ok:
+    qmp = socket.socket(socket.AF_UNIX)
+    qmp.connect(qmp_path)
+    qf = qmp.makefile("rw")
+    qf.readline()
+    def qmp_cmd(c):
+        qf.write(json.dumps(c) + "\n"); qf.flush()
+        return qf.readline()
+    qmp_cmd({"execute": "qmp_capabilities"})
+    def usbkeys(keys):
+        for k in keys:
+            parts = k.split("-")
+            for down in (True, False):
+                for q in (parts if down else parts[::-1]):
+                    qmp_cmd({"execute": "input-send-event", "arguments": {"events": [
+                        {"type": "key", "data": {"down": down, "key": {"type": "qcode", "data": q}}}]}})
+                time.sleep(0.03)
+    mark = len(out)
+    usbkeys(["e", "c", "h", "o", "spc", "shift-u", "s", "b", "shift-minus", "o", "k", "x", "backspace", "ret"])
+    good = read_until(b"Usb_ok\r\n", mark) and read_until(b"bastios> ", mark + 1)
+    print(("ok  " if good else "FAIL"), "(USB boot) a line typed on the USB keyboard runs")
+    fails += not good
+    qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
+    read_until(b"pages free at power off")
+    booted = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
+    off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+    good = booted and off and booted.group(1) == off.group(1)
+    print(("ok  " if good else "FAIL"), "(USB boot) every page back at power off")
+    fails += not good
+    qmp.close()
+qemu.kill(); qemu.wait()
+print("---- USB boot transcript ----")
 print(out.decode(errors="replace").replace("\r", "")[-400:])
 
 # And back on ATA: what virtio wrote is on the disk.
