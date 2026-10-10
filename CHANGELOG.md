@@ -16,6 +16,15 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Processors
 
+- The read-only pages of the built-in programs (code and constants) are
+  made once and shared, read-only, by every process running the program
+  (`src/text.bastio`, bastiolang's `Shared`), so `execve` maps them instead
+  of copying them out of the image and `fork` maps them again instead of
+  copying them. `fork` copies the rest into pages it does not zero first
+  (bastiolang's `Dirty`). A process that makes such a page writable with
+  `mprotect` gets its own copy. `make forkbench` (4 shells starting a
+  program 100 times each): 3.8 s → 0.6 s on one processor, 5.4 s → 0.7 s
+  on four. `mem` counts the cached pages as free.
 - A vDSO (`user/vdso.c`): `clock_gettime` for the monotonic and real-time
   clocks runs in user mode, with no system call and no kernel lock. The
   kernel now keeps time with the time-stamp counter, its rate measured

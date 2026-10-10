@@ -18,6 +18,7 @@ import "space.bastio";
 import "fs.bastio";
 import "core/endian.bastio";
 import "tsc.bastio";
+import "text.bastio";
 
 const ELF_HDR: u64 = 64;              // size of the ELF64 file header
 const PH_SIZE: u64 = 56;              // size of an ELF64 program header
@@ -102,6 +103,7 @@ struct Seg {
   filesz: u64,    // bytes to copy; the rest of the segment is zero
   off: u64,       // window offset of the segment
   memsz: u64,
+  w: bool,        // writable (PF_W)
 }
 
 spec fn seg_fits(size: u64, s: Seg) -> bool {
@@ -146,7 +148,7 @@ fn is_elf(img: Str) -> bool {
 fn bad_seg() -> Seg
   ensures result.kind == SEG_BAD
 {
-  return Seg { kind: SEG_BAD, from: 0, filesz: 0, off: 0, memsz: 0 };
+  return Seg { kind: SEG_BAD, from: 0, filesz: 0, off: 0, memsz: 0, w: true };
 }
 
 /// Program header `i` of `src` (headers at `phoff`), placed with `bias`.
@@ -160,16 +162,17 @@ fn seg(v: &mut Vfs, src: Src, phoff: u64, i: u64, bias: u64) -> Seg
   let h = 0;
   let n = src.size;
   let t = rd32(v.xfer, h);
+  let flags = rd32(v.xfer, h + 4);
   let from = rd64(v.xfer, h + 8);
   if t == PT_INTERP {
     let plen = rd64(v.xfer, h + 32);
     if plen < 2 || plen > INTERP_MAX || from > n || plen > n - from {
       return bad_seg();
     }
-    return Seg { kind: SEG_INTERP, from: from, filesz: plen, off: 0, memsz: 0 };
+    return Seg { kind: SEG_INTERP, from: from, filesz: plen, off: 0, memsz: 0, w: true };
   }
   if t != PT_LOAD {
-    return Seg { kind: SEG_SKIP, from: 0, filesz: 0, off: 0, memsz: 0 };
+    return Seg { kind: SEG_SKIP, from: 0, filesz: 0, off: 0, memsz: 0, w: true };
   }
   let vaddr = rd64(v.xfer, h + 16);
   let filesz = rd64(v.xfer, h + 32);
@@ -185,7 +188,7 @@ fn seg(v: &mut Vfs, src: Src, phoff: u64, i: u64, bias: u64) -> Seg
   if off > IMAGE_MAX || memsz > IMAGE_MAX - off {
     return bad_seg();
   }
-  return Seg { kind: SEG_LOAD, from: from, filesz: filesz, off: off, memsz: memsz };
+  return Seg { kind: SEG_LOAD, from: from, filesz: filesz, off: off, memsz: memsz, w: flags % 4 >= 2 };
 }
 
 fn bad_elf() -> Elf
@@ -291,8 +294,9 @@ fn on_page(a: u64, left: u64) -> u64
 
 /// Copies the `n` bytes at offset `from` of `src` to window offset `off`,
 /// XFER bytes at a time. A page the window does not map is skipped
-/// (`new_window` maps them all). Returns false if the bytes could not all
-/// be read.
+/// (`new_window` maps them all), and so is a whole page mapped read-only
+/// (a shared page of program text, share_text: it holds these bytes
+/// already). Returns false if the bytes could not all be read.
 fn copy_in(l2: &mut PageTable, v: &mut Vfs, src: Src, from: u64, off: u64, n: u64) -> bool
   requires pt_level(l2) == 2 && vfs_ok(v) && off + n <= IMAGE_MAX && from + n <= src.size
   ensures pt_level(l2) == 2 && vfs_ok(v)
@@ -302,11 +306,15 @@ fn copy_in(l2: &mut PageTable, v: &mut Vfs, src: Src, from: u64, off: u64, n: u6
     invariant k <= n && pt_level(l2) == 2 && vfs_ok(v)
   {
     let c = smaller(n - k, XFER);
-    if !src_read(&mut v, src, from + k, c) {
-      return false;
+    if c == 4096 && (off + k) % 4096 == 0 && w_readonly(&mut l2, (off + k) / 4096) {
+      k = k + c;
+    } else {
+      if !src_read(&mut v, src, from + k, c) {
+        return false;
+      }
+      put_window(&mut l2, v.xfer, off + k, c);
+      k = k + c;
     }
-    put_window(&mut l2, v.xfer, off + k, c);
-    k = k + c;
   }
   return true;
 }
@@ -436,22 +444,119 @@ fn aux(f: &mut Frame, w: u64, key: u64, v: u64)
   frame_write(&mut f, w + 1, v);
 }
 
+/// Maps the pages of built-in program `src` (checked headers `e`) that
+/// only its read-only segments cover from the cache k.txt (`st`,
+/// src/text.bastio), read-only, into window `l2`. A page a writable
+/// segment touches, one past the segment's file bytes, or one whose file
+/// offset is not page-aligned is left to be copied. False if memory ran
+/// out.
+fn share_text(m: &mut Mem, st: &mut PageTable, l2: &mut PageTable, v: &mut Vfs, src: Src, e: Elf) -> bool
+  requires mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l2) == 2 && vfs_ok(v)
+  requires e.ok && elf_fits(src.size, e)
+  ensures mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l2) == 2 && vfs_ok(v)
+{
+  if src.file || src.prog >= 512 {
+    return true;
+  }
+  let img = prog_image(src.prog);
+  // The window pages the writable segments touch, lo .. hi.
+  let mut lo = WPAGES;
+  let mut hi = 0;
+  let mut i = 0;
+  while i < e.phnum
+    invariant i <= e.phnum && e.phnum <= PH_MAX && vfs_ok(v)
+  {
+    let s = seg(&mut v, src, e.phoff, i, e.bias);
+    if s.kind == SEG_LOAD && s.w {
+      if s.off / 4096 < lo {
+        lo = s.off / 4096;
+      }
+      if (s.off + s.memsz + 4095) / 4096 > hi {
+        hi = (s.off + s.memsz + 4095) / 4096;
+      }
+    } else if s.kind == SEG_BAD {
+      return true;                          // elf_space finds it and gives up
+    }
+    i = i + 1;
+  }
+  let mut ok = true;
+  i = 0;
+  while ok && i < e.phnum
+    invariant i <= e.phnum && e.phnum <= PH_MAX && vfs_ok(v) && mem_ok(m)
+    invariant pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l2) == 2
+  {
+    let s = seg(&mut v, src, e.phoff, i, e.bias);
+    if s.kind == SEG_LOAD && !s.w {
+      // Each whole page of the segment's file bytes.
+      let mut a = s.off - s.off % 4096;
+      if a < s.off {
+        a = a + 4096;
+      }
+      while ok && a + 4096 <= s.off + s.filesz
+        invariant s.off <= a && a <= IMAGE_MAX + 4096 && s.off + s.filesz <= IMAGE_MAX && s.from + s.filesz <= src.size
+        invariant mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l2) == 2
+      {
+        let fo = s.from + (a - s.off);
+        let p = a / 4096;
+        if (p < lo || p >= hi) && fo % 4096 == 0 && fo / 4096 < 512 {
+          ok = share_page(&mut m, &mut st, src.prog, img, fo / 4096, &mut l2, p);
+        }
+        a = a + 4096;
+      }
+    }
+    i = i + 1;
+  }
+  return ok;
+}
+
+/// share_text with the cache, if there is one.
+fn share_text_in(m: &mut Mem, txt: &mut Store, l2: &mut PageTable, v: &mut Vfs, src: Src, e: Elf) -> bool
+  requires mem_ok(m) && store_ok(txt) && pt_level(l2) == 2 && vfs_ok(v)
+  requires e.ok && elf_fits(src.size, e)
+  ensures mem_ok(m) && store_ok(txt) && pt_level(l2) == 2 && vfs_ok(v)
+{
+  match txt {
+    Store::None => {
+      txt = Store::None;
+      return true;
+    },
+    Store::Table(t) => {
+      let mut st = t;
+      let ok = share_text(&mut m, &mut st, &mut l2, &mut v, src, e);
+      txt = Store::Table(st);
+      return ok;
+    },
+  }
+}
+
 /// Builds an address space for the checked ELF image `src`: its loadable
 /// segments, zero-filled to their memory size, those of the interpreter
 /// `isrc` too when `ie` is ok, and a stack holding argv, envp and the
 /// auxiliary vector. Returns `Space::Empty`, with every page given back,
 /// when memory runs out.
-fn elf_space(m: &mut Mem, v: &mut Vfs, src: Src, e: Elf, isrc: Src, ie: Elf, args: &Bytes, alen: u64, total: u64, seed: u64, clk: Tsc, epoch: u64) -> Space
-  requires mem_ok(m) && vfs_ok(v) && e.ok && elf_fits(src.size, e) && elf_fits(isrc.size, ie)
+fn elf_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, e: Elf, isrc: Src, ie: Elf, args: &Bytes, alen: u64, total: u64, seed: u64, clk: Tsc, epoch: u64) -> Space
+  requires mem_ok(m) && store_ok(txt) && vfs_ok(v) && e.ok && elf_fits(src.size, e) && elf_fits(isrc.size, ie)
   requires alen <= total && total <= ARGS_MAX && total <= blen(args)
-  ensures mem_ok(m) && vfs_ok(v)
+  ensures mem_ok(m) && store_ok(txt) && vfs_ok(v)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
-  match new_window(&mut m, "", (e.end + 4095) / 4096) {
+  match new_window(&mut m, "", 0) {
     Space::Empty => { return Space::Empty; },
     Space::Mapped(mut l2) => {
+      // Shared read-only pages first; the rest of the image gets fresh
+      // pages, and the copy below skips the read-only ones.
+      let mut ok = share_text_in(&mut m, &mut txt, &mut l2, &mut v, src, e);
+      if ok && ie.ok {
+        ok = share_text_in(&mut m, &mut txt, &mut l2, &mut v, isrc, ie);
+      }
+      let mut q = 0;
+      while ok && q < (e.end + 4095) / 4096
+        invariant pt_level(l2) == 2 && mem_ok(m) && e.end <= IMAGE_MAX
+      {
+        ok = w_map(&mut m, &mut l2, q, false);
+        q = q + 1;
+      }
       let mut i = 0;
-      let mut ok = true;
       while ok && i < e.phnum
         invariant i <= e.phnum && e.phnum <= PH_MAX && pt_level(l2) == 2 && vfs_ok(v)
       {

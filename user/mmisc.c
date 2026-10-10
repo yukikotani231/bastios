@@ -1,7 +1,9 @@
 /* Small Linux system calls, against musl: uname and gethostname, readv,
  * pread and pwrite, limits, sysinfo, statfs, getrandom, priorities, umask,
  * sessions and process groups, the terminal's name and group, sched_yield,
- * and how much a pipe holds. */
+ * how much a pipe holds, and a private copy of a read-only page that
+ * mprotect makes writable (the kernel shares those pages between the
+ * processes running a built-in program). */
 #include <errno.h>
 #include <fcntl.h>
 #include <sched.h>
@@ -10,6 +12,7 @@
 #include <string.h>
 #include <sys/random.h>
 #include <sys/resource.h>
+#include <sys/mman.h>
 #include <sys/statfs.h>
 #include <sys/stat.h>
 #include <sys/sysinfo.h>
@@ -175,6 +178,31 @@ static int pipes(void)
     return held;
 }
 
+/* Big enough to hold a whole page of constants, which the kernel maps
+ * from one shared copy in every process running this program. */
+static const char motto[8192] = "read-only, and shared";
+
+/* A child that makes a page of constants writable and writes it gets its
+ * own copy: the parent, which runs on the same shared page, still reads
+ * what the program says. */
+static int private_copy(void)
+{
+    volatile char *p = (volatile char *)(((unsigned long)motto + 4095) & ~4095UL);
+    pid_t c = fork();
+    if (c == 0) {
+        if (mprotect((void *)p, 4096, PROT_READ | PROT_WRITE) != 0)
+            _exit(2);
+        p[0] = 'R';
+        _exit(p[0] == 'R' ? 0 : 3);
+    }
+    int st;
+    if (c < 0 || waitpid(c, &st, 0) != c || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        return fail("mprotect a page of constants");
+    if (p[0] != 0 || motto[0] != 'r')
+        return fail("a written page of constants stays private");
+    return 0;
+}
+
 int main(void)
 {
     struct utsname u;
@@ -243,6 +271,8 @@ int main(void)
     int held = pipes();
     if (held < 0)
         return fail("pipe capacity");
+    if (private_copy() != 0)
+        return 1;
     printf("mmisc: ok on %s %s, signals, pipe %d\n", u.sysname, u.machine, held);
     return 0;
 }

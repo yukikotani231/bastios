@@ -465,6 +465,10 @@ smpbench: build/bastios.elf
 threadbench: build/bastios.elf
 	test/threadbench.sh
 
+# Not part of `make test` either: how fast ash forks and execs, 4 at a time.
+forkbench: build/bastios.elf
+	test/forkbench.sh
+
 # Not part of `make test` either: disk timings for each driver.
 diskbench: build/bastios.elf
 	test/diskbench.sh
@@ -480,4 +484,4 @@ clean:
 	rm -rf build
 
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
-.PHONY: all run disk usb run-usb test fuzz smpbench threadbench diskbench iobench netbench compat compat-baseline compat-host clean
+.PHONY: all run disk usb run-usb test fuzz smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host clean

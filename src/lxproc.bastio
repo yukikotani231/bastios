@@ -221,7 +221,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
   }
   let from_file = src.file;
   let image = src.f;
-  let sp = load_image(&mut k.mem, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, total);
+  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, total);
   bfree(args);
   match sp {
     Space::Empty => { return ENOEXEC; },
