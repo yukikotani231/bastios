@@ -321,6 +321,38 @@ fn vfs_write(v: &mut Vfs, mem: &mut Mem, row: u64, n: u64) -> u64
   return put;
 }
 
+/// Sets the size of the file open in `row` to size_to bytes (ftruncate):
+/// growing reads as zeros. The row must be open for writing; its offset
+/// stays where it is. False otherwise, or if the disk fails or is full.
+fn vfs_truncate(v: &mut Vfs, mem: &mut Mem, row: u64, size_to: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem) && row < FD_ROWS
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  if fget(v.ftab, row, FD_MODE) / O_WRITE % 2 == 0 {
+    return false;
+  }
+  let i = fget(v.ftab, row, FD_NODE);
+  if fget(v.ftab, row, FD_FS) == FS_DISK && i < DSLOTS {
+    return disk_resize(&mut v.disk, i, size_to, v.now);
+  }
+  if fget(v.ftab, row, FD_FS) != FS_RAM || i >= NFILES {
+    return false;
+  }
+  let mut ok = false;
+  match take_node(&mut v.ram, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      let mut g = f;
+      ok = file_resize(&mut g, &mut mem, size_to);
+      if ok {
+        g.mtime = v.now;
+      }
+      put_node(&mut v.ram, i, Node::File(g));
+    },
+  }
+  return ok;
+}
+
 /// Sets a row's offset to off + k, saturating.
 fn vfs_advance(v: &mut Vfs, row: u64, off: u64, k: u64)
   requires vfs_ok(v) && row < FD_ROWS
