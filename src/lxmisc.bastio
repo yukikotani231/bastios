@@ -607,6 +607,9 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   }
   // Everything else (setuid and friends, getgroups, setpriority,
   // setrlimit, madvise, mlock, munlock, sync) succeeds doing nothing.
+  if r == DISK_RETRY {
+    return disk_retry(&mut k, pid, n);       // pread/pwrite: blocks not cached yet
+  }
   ret(&mut k.procs, pid, r);
   return KEEP;
 }

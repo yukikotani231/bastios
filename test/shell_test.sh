@@ -836,6 +836,36 @@ session("NVMe 4K", None, [
     ("rm disk/big", b""),
 ], halt=True, ready=nvme_found)
 
+# Several processes on the disk at once, on two processors: two
+# diskbench (each writes, reads back and checks its own 2 MiB file) and
+# fstest. Each sleeps while the disk works for another (src/diskq.bastio);
+# all must finish with their data intact, and every page come back.
+qemu = boot(2, nvme=True)
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+if ok:
+    for cmd in (b"diskbench &", b"diskbench &", b"fstest"):
+        mark = len(out)
+        qemu.stdin.write(cmd + b"\r"); qemu.stdin.flush()
+        ok = ok and read_until(b"bastios> ", mark)
+    ok = ok and read_until(b"fstest: ok")
+    ok = ok and read_until(b"read 2 MiB")
+    ok = ok and read_until(b"read 2 MiB", out.find(b"read 2 MiB") + 1)
+    ok = ok and b"failed" not in out and b"fstest: disk ok" in out
+print(("ok  " if ok else "FAIL"), "(disk at once) two diskbench and fstest together")
+fails += not ok
+qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
+read_until(b"pages free at power off")
+booted = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
+off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+good = booted and off and booted.group(1) == off.group(1)
+print(("ok  " if good else "FAIL"), "(disk at once) every page back at power off")
+fails += not good
+qemu.kill(); qemu.wait()
+print("---- disk at once transcript ----")
+print(out.decode(errors="replace").replace("\r", "")[-1500:])
+
 # An e1000 card instead of virtio (src/e1000.bastio), on QEMU's network.
 # Its link takes a moment to come up, so DHCP may need a retry: ask until
 # the lease is there. test/tcp_test.sh runs its TCP cases on it too.

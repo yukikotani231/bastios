@@ -69,6 +69,7 @@ const NETWAIT: u64 = 9;              // waiting for the network (a ping's reply)
 const LXVFORK: u64 = 10;             // lent its address space to child F_WAIT (clone with CLONE_VM | CLONE_VFORK)
 const CONWAIT: u64 = 11;             // writing to the console, whose ring is full
 const FUTEXWAIT: u64 = 12;           // in a Linux futex wait with no timeout
+const DISKWAIT: u64 = 13;            // waiting for the disk: F_WAIT says for what (disk_wake)
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -319,6 +320,9 @@ const SK_WAIT: u64 = 0x8000000000000000;
 // What lx_write_fd returns when the console's ring has no room for the
 // write: not an errno, and never returned to the process.
 const CON_FULL: u64 = 0x8000000000000001;
+// What a file read or write returns when the disk has not caught up
+// (VFS_MISS): the caller sleeps in DISKWAIT and its call restarts.
+const DISK_RETRY: u64 = 0x8000000000000002;
 // Linux working directories: per process, word 0 the length of the path
 // (without the leading "/", at most FNAME_MAX) and one byte a word after.
 const CWD_STRIDE: u64 = 256;           // FNAME_MAX + 1
@@ -974,6 +978,8 @@ fn put_state(con: &mut Con, s: u64)
     puts(&mut con, "writing");
   } else if s == NETWAIT {
     puts(&mut con, "netwait");
+  } else if s == DISKWAIT {
+    puts(&mut con, "disk   ");
   } else if s == LXVFORK {
     puts(&mut con, "vfork  ");
   } else {
