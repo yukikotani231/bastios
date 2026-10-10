@@ -603,6 +603,9 @@ const TCSETS: u64 = 0x5402;
 const TCSETSF: u64 = 0x5404;              // TCSETSW (0x5403) lies between
 const TIOCGWINSZ: u64 = 0x5413;
 const FIONREAD: u64 = 0x541B;
+const FIONBIO: u64 = 0x5421;
+const FIONCLEX: u64 = 0x5450;
+const FIOCLEX: u64 = 0x5451;
 const SIOCATMARK: u64 = 0x8905;
 const SIOCGIFCONF: u64 = 0x8912;
 const SIOCGIFFLAGS: u64 = 0x8913;
@@ -684,6 +687,31 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     // The bytes waiting in the pipe, as an int.
     xfer_u64(&mut k.fs.xfer, 0, smaller(pi_get(k.pipes, d.x, 1), PIPE_CAP));
     return lx_put_out(&mut k, pid, arg, 4);
+  }
+  // On any descriptor: FIONBIO is fcntl's O_NONBLOCK (from the int at
+  // arg), FIOCLEX and FIONCLEX its FD_CLOEXEC, as CPython's setblocking and
+  // set_inheritable use them.
+  if req == FIONBIO {
+    if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, 4) != 4 {
+      return EFAULT;
+    }
+    let on = bget(k.fs.xfer, 0) != 0 || bget(k.fs.xfer, 1) != 0 || bget(k.fs.xfer, 2) != 0 || bget(k.fs.xfer, 3) != 0;
+    let fl = lx_fcntl(&mut k, pid, fd, F_GETFL, 0);
+    if fl > 0xFFFFFFFF {
+      return fl;
+    }
+    let mut nf = fl / (LO_NONBLOCK * 2) * (LO_NONBLOCK * 2) + fl % LO_NONBLOCK;
+    if on {
+      nf = nf + LO_NONBLOCK;
+    }
+    return lx_fcntl(&mut k, pid, fd, F_SETFL, nf);
+  }
+  if req == FIOCLEX || req == FIONCLEX {
+    let mut c = 0;
+    if req == FIOCLEX {
+      c = 1;
+    }
+    return lx_fcntl(&mut k, pid, fd, F_SETFD, c);
   }
   if d.kind == K_SOCK && (req == SIOCATMARK || (req >= SIOCGIFCONF && req <= SIOCSIFFLAGS)) {
     return sock_ioctl(&mut k, pid, fd, req, arg);

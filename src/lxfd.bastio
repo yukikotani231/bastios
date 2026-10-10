@@ -740,6 +740,9 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     kind = of_get(k.ofd, h, 0);
   }
   let pipe = h < OFD_N && can_block(kind);
+  // Sockets keep O_NONBLOCK in the low bit of word 3 too (src/lxsock.bastio,
+  // src/lxtcp.bastio, src/lxunix.bastio), above their other state.
+  let sock = h < OFD_N && (kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX);
   let mut row = FD_ROWS;
   if h < OFD_N && kind == OF_FILE {
     row = of_get(k.ofd, h, 2);
@@ -770,6 +773,9 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     return 0;
   }
   if cmd == F_GETFL {
+    if sock {
+      return LO_RDWR + of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK;
+    }
     if !pipe {
       return LO_RDWR;
     }
@@ -789,9 +795,9 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     return fl;
   }
   if cmd == F_SETFL {
-    // O_NONBLOCK on a pipe end (or eventfd, timerfd, epoll) can change; no
-    // other flag (O_APPEND) can.
-    if pipe {
+    // O_NONBLOCK on a pipe end (or eventfd, timerfd, epoll, socket) can
+    // change; no other flag (O_APPEND) can.
+    if pipe || sock {
       of_set(&mut k.ofd, h, 3, of_get(k.ofd, h, 3) / 2 * 2 + arg / LO_NONBLOCK % 2);
     }
     return 0;

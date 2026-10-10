@@ -735,6 +735,12 @@ fn install_files(con: &mut Con, k: &mut Kernel)
   if !make_dir(&mut k.fs, "tmp") || !make_dir(&mut k.fs, "etc") {
     puts(&mut con, "cannot make /tmp or /etc\r\n");
   }
+  // /dev/shm, where musl's sem_open and shm_open make their files (for
+  // Python's multiprocessing). The devices themselves are not files
+  // (src/lxdev.bastio): their paths are matched before the file system.
+  if !make_dir(&mut k.fs, "dev") || !make_dir(&mut k.fs, "dev/shm") {
+    puts(&mut con, "cannot make /dev/shm\r\n");
+  }
   let mut i = 0;
   while i < NINIT
     invariant i <= NINIT && kok(k) && con_ok(con)
@@ -747,6 +753,7 @@ fn install_files(con: &mut Con, k: &mut Kernel)
     i = i + 1;
   }
   set_mode(&mut k.fs, "tmp", 1023);         // 01777: anyone may make names, only owners remove them
+  set_mode(&mut k.fs, "dev/shm", 1023);
   set_mode(&mut k.fs, "elfdemo", 493);      // 0755: a program
 }
 

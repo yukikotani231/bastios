@@ -1029,6 +1029,22 @@ fn tcp_listen(c: &mut Nic, port: u64) -> u64
   }
 }
 
+/// An ephemeral port for bind(port 0), which Linux picks at bind so that
+/// getsockname names it before listen; 0 if there is none (or no network).
+fn tcp_bind_port(c: &mut Nic) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c) && result <= 65535
+{
+  match c {
+    Nic::None => { c = Nic::None; return 0; },
+    Nic::Up(mut n) => {
+      let p = tcp_eph_port(&mut n);
+      c = Nic::Up(n);
+      return p;
+    },
+  }
+}
+
 fn tcp_accept(c: &mut Nic, lis: u64) -> u64
   requires nic_ok(c)
   ensures nic_ok(c)

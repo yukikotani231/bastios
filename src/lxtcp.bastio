@@ -91,7 +91,13 @@ fn lx_tcp_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if sin.err != 0 {
     return sin.err;
   }
-  of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, sin.port, TM_NEW));
+  // Port 0 takes an ephemeral port now, as on Linux, so getsockname names
+  // it before listen (Python's HTTPServer reads its port then).
+  let mut port = sin.port;
+  if port == 0 {
+    port = tcp_bind_port(&mut k.nic);
+  }
+  of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, port, TM_NEW));
   return 0;
 }
 
@@ -294,7 +300,11 @@ fn lx_tcp_name(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
     return tk.err;
   }
   if !peer {
-    return sin_out(&mut k, pid, addr, lenp, 0, tk.port, ofd_v6(k, tk.h));
+    let mut port = tk.port;
+    if tk.mode == TM_CONN && tk.t < TCBS {
+      port = tcp_local_port(k.nic, tk.t);   // the ephemeral port connect took
+    }
+    return sin_out(&mut k, pid, addr, lenp, 0, port, ofd_v6(k, tk.h));
   }
   if tk.mode != TM_CONN || tk.t >= TCBS {
     return ENOTCONN;

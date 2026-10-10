@@ -657,14 +657,7 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
   }
   let dir = dir_at(&mut k, n);
   if dir != NO_FILE {
-    if dir >= DIR_PROC {
-      return proc_dir_meta(dir);
-    }
-    if dir >= DIR_VFS {
-      let dm = vfs_meta(&mut k.fs, dir - DIR_VFS);
-      return Meta { ok: true, mode: S_IFMT_DIR + dm.mode % 4096, size: 0, ino: 1 + dir, mtime: dm.mtime, own: dm.own };
-    }
-    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1 + dir, mtime: 0, own: 0 };
+    return dir_meta(&mut k, dir);
   }
   if n > 4 && xfer_bin(k.fs.xfer) {
     let prog = bin_prog(k.fs.xfer, n);
@@ -674,6 +667,22 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
     return Meta { ok: true, mode: S_IFREG_X, size: slen(prog_image(prog)), ino: INO_PROGS + prog, mtime: 0, own: 0 };
   }
   return file_meta(&mut k.fs, vfs_lookup(&mut k.fs, n));
+}
+
+/// The metadata of directory dir (as dir_at gives it), the same whether
+/// it is reached by path or by an open descriptor.
+fn dir_meta(k: &mut Kernel, dir: u64) -> Meta
+  requires kok(k)
+  ensures kok(k)
+{
+  if dir >= DIR_PROC {
+    return proc_dir_meta(dir);
+  }
+  if dir >= DIR_VFS {
+    let dm = vfs_meta(&mut k.fs, dir - DIR_VFS);
+    return Meta { ok: true, mode: S_IFMT_DIR + dm.mode % 4096, size: 0, ino: 1 + dir, mtime: dm.mtime, own: dm.own };
+  }
+  return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1 + dir, mtime: 0, own: 0 };
 }
 
 /// The metadata of file f (a vfs_lookup handle). Its inode number is the
@@ -709,7 +718,7 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
   } else if d.kind == K_PIPE_R || d.kind == K_PIPE_W {
     m = Meta { ok: true, mode: S_IFIFO, size: 0, ino: 4, mtime: 0, own: 0 };
   } else if d.kind == K_DIR {
-    m = Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1, mtime: 0, own: 0 };
+    m = dir_meta(&mut k, d.x);              // as stat on its path says, so shutil.rmtree trusts it
   } else if d.kind == K_SOCK {
     m = Meta { ok: true, mode: S_IFSOCK, size: 0, ino: 5, mtime: 0, own: 0 };
   } else if d.kind == K_DEV {
