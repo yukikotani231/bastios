@@ -675,6 +675,12 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Fixed
 
+- `mprotect(PROT_NONE)` and a `PROT_NONE` file or `MAP_SHARED` mapping made
+  the pages read-only, not inaccessible: the program and the system calls it
+  made could still read them. Such a page is now kept mapped but hidden
+  (bastiolang's `pt_set_access`), so any touch faults, a system call given
+  it fails with `EFAULT`, `fork` keeps it hidden, and a hidden `MAP_SHARED`
+  page stays shared when `mprotect` uncovers it.
 - mmap without an address, shmat without one, and brk could hand out
   pages a mapping made with MAP_FIXED (or shmat at an address, or mremap
   with MREMAP_FIXED) already held, with that mapping's bytes in them, and
