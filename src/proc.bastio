@@ -53,6 +53,10 @@ const F_PERSONA: u64 = 38;
 // size; size 0 means none (src/lxsig.bastio).
 const F_ALTSP: u64 = 40;
 const F_ALTSIZE: u64 = 41;
+// setitimer's CPU-time timers (src/lxtime.bastio): ns left and the
+// interval, for ITIMER_VIRTUAL and then ITIMER_PROF; 0 left is off.
+const F_VTIMER: u64 = 42;
+const F_PTIMER: u64 = 44;
 const SIG_DEATH: u64 = 256;          // F_CODE of a process a signal ended: 256 + the signal
 
 // Saved register numbers.
@@ -350,6 +354,7 @@ const OF_FREE: u64 = 0;
 const OF_FILE: u64 = 1;
 const OF_PIPE_R: u64 = 2;
 const OF_PIPE_W: u64 = 3;
+const PIPE_BOTH: u64 = 2;              // OF_PIPE_R word 3: also a writer (a FIFO opened O_RDWR)
 const OF_DIR: u64 = 4;                // x: DIR_ROOT or DIR_BIN; word 3: next entry
 // lx_recvfrom's answer when the caller must wait: no count or errno.
 const SK_WAIT: u64 = 0x8000000000000000;
