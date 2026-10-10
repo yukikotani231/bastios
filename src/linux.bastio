@@ -451,7 +451,11 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if flags / MAP_FIXED % 2 == 1 && !win_quiet(&mut k, pid) {
       return lx_retry(&mut k, pid, n);      // MAP_FIXED unmaps: another thread of pid runs on a processor
     }
-    ret(&mut k.procs, pid, lx_mmap(&mut k, pid, a, b, c, flags, fd, off));
+    let r = lx_mmap(&mut k, pid, a, b, c, flags, fd, off);
+    if flags & 0x2000 != 0 && r < 0x8000000000000000 {
+      lock_mapped(&mut k, pid, b);          // MAP_LOCKED
+    }
+    ret(&mut k.procs, pid, r);
     return KEEP;
   }
   if n == LX_STAT || n == LX_LSTAT {
@@ -1095,10 +1099,11 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
 
 /// write(fd, va, n) to the console, a file or a pipe. Returns the count,
 /// -errno, or EAGAIN when a pipe is full.
-fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
+fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
   ensures kok(k) && con_ok(con)
 {
+  let mut n = n0;
   let d = fd_look(k, pid, fd);
   if d.kind == K_PIPE_W || (d.kind == K_PIPE_R && pipe_both(k, pid, fd)) {
     return pipe_write(&mut k, pid, d.x, va, n);
@@ -1114,6 +1119,13 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64
   }
   if d.kind != K_CONSOLE && d.kind != K_FILE {
     return EBADF;
+  }
+  if d.kind == K_FILE {
+    let lim = fsize_room(&mut k, pid, d.x, n);
+    if lim > n {
+      return lim;                           // -EFBIG: RLIMIT_FSIZE
+    }
+    n = lim;
   }
   let room = con_room(con);
   if d.kind == K_CONSOLE && 2 * smaller(n, XFER) > room && room < OUTCAP {

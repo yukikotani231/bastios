@@ -594,6 +594,7 @@ fn cpu_timers_tick(k: &mut Kernel, p: u64)
     }
     which = which + 1;
   }
+  rl_cpu_tick(&mut k, p);                 // RLIMIT_CPU
 }
 
 /// alarm, getitimer and setitimer: ITIMER_REAL, and the CPU-time timers

@@ -285,5 +285,27 @@ int main(void) {
            send(c, "ef", 2, MSG_MORE); usleep(20000); int t1 = recv(d, b, sizeof b, MSG_DONTWAIT);
            send(c, "g", 1, 0); usleep(20000); int t2 = recv(d, b, sizeof b, MSG_DONTWAIT);
            close(c); close(d); close(s); ok && t1 == -1 && t2 == 3 && !memcmp(b, "efg", 3); }));
+    EXPECT("resource limits: NOFILE caps descriptors, FSIZE cuts writes, prlimit reports the old limit", ({
+           pid_t c = fork(); if (c == 0) {
+               struct rlimit n = {8, 8}; if (setrlimit(RLIMIT_NOFILE, &n)) _exit(1);
+               if (getdtablesize() != 8 || dup2(0, 9) != -1 || errno != EBADF) _exit(2);
+               int fds = 0; while (dup(0) >= 0) fds++; if (errno != EMFILE) _exit(3);
+               signal(SIGXFSZ, SIG_IGN); struct rlimit f = {10, 10}; struct rlimit was;
+               if (prlimit(0, RLIMIT_FSIZE, &f, &was) || was.rlim_cur != RLIM_INFINITY) _exit(4);
+               for (int i = 3; i < 8; i++) close(i);
+               int fd = open("/tmp/ltp2-fsize", O_CREAT | O_TRUNC | O_WRONLY, 0644);
+               int w1 = write(fd, "abcdefghijklmnop", 16); int w2 = write(fd, "x", 1); int e2 = errno;
+               close(fd); unlink("/tmp/ltp2-fsize");
+               _exit(w1 == 10 && w2 == -1 && e2 == EFBIG ? 0 : 5); }
+           int st = 0; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("mlock counts locked memory in VmLck; non-root over RLIMIT_MEMLOCK is ENOMEM", ({
+           pid_t c = fork(); if (c == 0) {
+               char *m = mmap(0, 65536, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+               if (mlock(m, 65536)) _exit(1);
+               char b[2048] = {0}; int fd = open("/proc/self/status", O_RDONLY); read(fd, b, sizeof b - 1); close(fd);
+               char *l = strstr(b, "VmLck:"); if (!l || atol(l + 6) != 64) _exit(2);
+               munlockall(); struct rlimit r = {4096, 4096}; setrlimit(RLIMIT_MEMLOCK, &r); setuid(65534);
+               _exit(mlock(m, 8192) == -1 && errno == ENOMEM && mlock(m, 4096) == 0 ? 0 : 3); }
+           int st = 0; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
     return done();
 }

@@ -88,7 +88,7 @@ fn ev_install(k: &mut Kernel, pid: u64, kind: u64, x: u64, w3: u64, cloexec: boo
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let fd = fd_free(k.lxfd, pid, 0);
+  let fd = fd_free(k, pid, 0);
   if fd >= LXNFD {
     return EMFILE;
   }
@@ -974,7 +974,7 @@ fn fifo_open(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
   if acc == 3 {
     return EINVAL;
   }
-  if fd_free(k.lxfd, pid, 0) >= LXNFD {
+  if fd_free(k, pid, 0) >= LXNFD {
     return EMFILE;
   }
   let base = FIFO_AT + f * FIFO_STRIDE;

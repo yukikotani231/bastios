@@ -18,6 +18,10 @@ fn lx_fork(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
+  let lim = nproc_check(k, pid);
+  if lim != 0 {
+    return lim;                             // -EAGAIN: RLIMIT_NPROC
+  }
   let c = free_pid(k.procs);
   if c == 0 {
     return EAGAIN;

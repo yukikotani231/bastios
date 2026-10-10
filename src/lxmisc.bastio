@@ -128,8 +128,9 @@ fn lx_uname(k: &mut Kernel, pid: u64, va: u64) -> u64
   return 0;
 }
 
-/// The limit on resource r: descriptors and stack are what the kernel
-/// gives, core files none; everything else is unlimited.
+/// The default limit on resource r (src/lxrlimit.bastio keeps the ones
+/// set): descriptors and stack are what the kernel gives, core files none,
+/// locked memory 8 MiB; everything else is unlimited.
 fn rlimit_of(r: u64) -> u64 {
   if r == RLIMIT_CORE {
     return 0;                               // no core files are written
@@ -140,53 +141,10 @@ fn rlimit_of(r: u64) -> u64 {
   if r == RLIMIT_STACK {
     return STACK_BYTES;
   }
+  if r == 8 {
+    return 8388608;                         // RLIMIT_MEMLOCK: 8 MiB, as Linux
+  }
   return RLIM_INFINITY;
-}
-
-/// The checks setrlimit and prlimit make of a new limit for resource r at
-/// va (if not 0): a resource there is, soft at most hard, and only root
-/// raising a hard limit. The limits stay as they are.
-fn rlimit_check(k: &mut Kernel, pid: u64, r: u64, va: u64) -> u64
-  requires kok(k) && pid < NPROC
-  ensures kok(k)
-{
-  if r >= RLIM_NLIMITS {
-    return EINVAL;
-  }
-  if va == 0 {
-    return 0;
-  }
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 16) != 16 {
-    return EFAULT;
-  }
-  let cur = get_u64(k.fs.xfer, 0);
-  let max = get_u64(k.fs.xfer, 8);
-  if cur > max {
-    return EINVAL;
-  }
-  if max > rlimit_of(r) && !cred_root(k.procs, pid) {
-    return EPERM;
-  }
-  if r == RLIMIT_NOFILE && max > NR_OPEN {
-    return EPERM;                           // past /proc/sys/fs/nr_open, even for root
-  }
-  return 0;
-}
-
-/// Writes struct rlimit {cur, max} for resource r to va (if not 0).
-fn rlimit_out(k: &mut Kernel, pid: u64, r: u64, va: u64) -> u64
-  requires kok(k) && pid < NPROC
-  ensures kok(k)
-{
-  if r >= RLIM_NLIMITS {
-    return EINVAL;
-  }
-  if va == 0 {
-    return 0;
-  }
-  xfer_u64(&mut k.fs.xfer, 0, rlimit_of(r));
-  xfer_u64(&mut k.fs.xfer, 8, rlimit_of(r));
-  return lx_put_out(&mut k, pid, va, 16);
 }
 
 /// sysinfo(info): uptime, memory in bytes (mem_unit 1) and the number of
@@ -687,15 +645,14 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_meta_call(&mut k, pid, n, a, b, c, r10);
   } else if n == LX_UMASK {
     r = lx_umask(&mut k, pid, a);
+  } else if (n == LX_GETRLIMIT || n == LX_SETRLIMIT) && b == 0 {
+    r = EFAULT;
   } else if n == LX_GETRLIMIT {
-    r = rlimit_out(&mut k, pid, a, b);
+    r = lx_prlimit(&mut k, pid, 0, a, 0, b);
   } else if n == LX_SETRLIMIT {
-    r = rlimit_check(&mut k, pid, a, b);    // a new limit is checked and not applied
+    r = lx_prlimit(&mut k, pid, 0, a, b, 0);
   } else if n == LX_PRLIMIT64 {
-    r = rlimit_check(&mut k, pid, b, c);
-    if r == 0 {
-      r = rlimit_out(&mut k, pid, b, r10);
-    }
+    r = lx_prlimit(&mut k, pid, a % 0x100000000, b, c, r10);
   } else if n == LX_GETRUSAGE {
     let who = a % 0x100000000;
     if who != 0 && who != 1 && who != 0xFFFFFFFF {
@@ -746,6 +703,15 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_prctl(&mut k, pid, a, b);
   } else if n == LX_MLOCK || n == LX_MUNLOCK {
     r = lock_range(&mut k, pid, a, b);
+    if r == 0 {
+      // The pages the range covers.
+      let bytes = (a % 4096 + smaller(b, USER_SIZE) + 4095) / 4096 * 4096;
+      r = lock_count(&mut k, pid, bytes, n == LX_MLOCK);
+    }
+  } else if n == LX_MLOCKALL {
+    r = lx_mlockall(&mut k, pid, a);
+  } else if n == LX_MUNLOCKALL {
+    r = lx_munlockall(&mut k, pid);
   } else if n == LX_GETRANDOM {
     // GRND_NONBLOCK, GRND_RANDOM and GRND_INSECURE; the last two not together.
     if c % 0x100000000 > 7 || c % 8 == 6 {
@@ -754,9 +720,7 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
       r = lx_getrandom(&mut k, pid, a, b);
     }
   }
-  // Everything else (setpriority, setrlimit, madvise, mlock, munlock,
-  // mlockall, munlockall, sync) succeeds doing nothing: every page stays
-  // in memory anyway.
+  // Everything else (madvise, sync) succeeds doing nothing.
   if r == DISK_RETRY {
     return disk_retry(&mut k, pid, n);       // pread/pwrite: blocks not cached yet
   }

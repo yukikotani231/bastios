@@ -753,8 +753,9 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
       a = put_c(&mut o, a, 32);
       i = i + 1;
     }
-    // Memory is never paged out, so mlock locks nothing it counts.
-    return put_s(&mut o, a, "\nVmLck:\t       0 kB\nThreads:\t1\n");
+    a = put_s(&mut o, a, "\nVmLck:\t");
+    a = put_n(&mut o, a, rl_locked(k, p) / 1024);
+    return put_s(&mut o, a, " kB\nThreads:\t1\n");
   }
   if what == PF_COMM {
     let a = put_comm(&mut k, p, &mut o, 0);

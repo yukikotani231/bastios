@@ -363,11 +363,11 @@ fn ux_socketpair(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64, s
   if ty != SOCK_STREAM {
     dg = UX_DG;
   }
-  let a = fd_free(k.lxfd, pid, 0);
+  let a = fd_free(k, pid, 0);
   if a >= LXNFD {
     return EMFILE;
   }
-  let b = fd_free(k.lxfd, pid, a + 1);
+  let b = fd_free(k, pid, a + 1);
   if b >= LXNFD {
     return EMFILE;
   }

@@ -82,6 +82,7 @@ fn pr_fork(k: &mut Kernel, p: u64, c: u64)
   pr_set(&mut k, c, PRW_DEATH, 0);
   pr_set(&mut k, c, PRW_SLACK, pr_get(k, p, PRW_SLACK));
   pr_set(&mut k, c, PRW_SLACK0, pr_get(k, p, PRW_SLACK));
+  rl_fork(&mut k, p, c);                  // and the resource limits
 }
 
 /// execve: the name goes back to the program's.
@@ -91,6 +92,7 @@ fn pr_exec(k: &mut Kernel, p: u64)
 {
   pr_set(&mut k, p, PRW_NAME, 0);
   pr_set(&mut k, p, PRW_NAME + 1, 0);
+  rl_exec(&mut k, p);                     // and nothing stays locked
 }
 
 /// Process p is ending: each child that asked for a parent-death signal
@@ -125,6 +127,7 @@ fn pr_clear(k: &mut Kernel, p: u64)
     pr_set(&mut k, p, w, 0);
     w = w + 1;
   }
+  rl_clear(&mut k, p);
 }
 
 /// prctl(op, a, ...) for process pid: the result, or -EINVAL for an

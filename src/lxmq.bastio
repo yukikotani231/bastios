@@ -259,7 +259,7 @@ fn lx_mq_open(k: &mut Kernel, pid: u64, va: u64, oflag: u64, mode: u64, attr: u6
     if oflag & LO_CREAT == 0 {
       return ENOENT;
     }
-    if fd_free(k.lxfd, pid, 0) >= LXNFD {
+    if fd_free(k, pid, 0) >= LXNFD {
       return EMFILE;
     }
     q = pq_create(&mut k, pid, n, mode, attr);

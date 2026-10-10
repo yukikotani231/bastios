@@ -472,7 +472,7 @@ fn ofd_new(k: &mut Kernel, kind: u64, x: u64) -> u64
 }
 
 /// The lowest closed descriptor of process pid at or above `from`, or LXNFD.
-fn fd_free(t: &Buf, pid: u64, from: u64) -> u64
+fn fd_free_in(t: &Buf, pid: u64, from: u64) -> u64
   requires len(t) == LXFD_LEN && pid < NPROC
   ensures result <= LXNFD
 {
@@ -493,7 +493,7 @@ fn fd_install(k: &mut Kernel, pid: u64, h: u64) -> u64
   requires kok(k) && pid < NPROC && h < OFD_N
   ensures kok(k)
 {
-  let fd = fd_free(k.lxfd, pid, 0);
+  let fd = fd_free(k, pid, 0);
   if fd >= LXNFD {
     unref_value(&mut k, FD_OFD + h);
     return EMFILE;
@@ -508,7 +508,7 @@ fn fd_install_console(k: &mut Kernel, pid: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let fd = fd_free(k.lxfd, pid, 0);
+  let fd = fd_free(k, pid, 0);
   if fd >= LXNFD {
     return EMFILE;
   }
@@ -642,7 +642,7 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if flags / LO_APPEND % 2 == 1 {
     f = f + O_APPEND;
   }
-  if fd_free(k.lxfd, pid, 0) >= LXNFD || !row_free(k, pid) {
+  if fd_free(k, pid, 0) >= LXNFD || !row_free(k, pid) {
     return EMFILE;                          // no descriptor, or no file layer row, left
   }
   let fresh = f / O_CREATE % 2 == 1 && vfs_lookup(&mut k.fs, n) == NO_FILE;
@@ -680,7 +680,7 @@ fn lx_dup2(k: &mut Kernel, pid: u64, src: u64, new: u64, cloexec: bool) -> u64
   ensures kok(k)
 {
   let v = fd_get(k.lxfd, pid, src) % FD_CLOEXEC;
-  if v == 0 || new >= LXNFD {
+  if v == 0 || new >= fd_limit(k, pid) {
     return EBADF;
   }
   if src == new {
@@ -705,10 +705,10 @@ fn lx_dup(k: &mut Kernel, pid: u64, src: u64, from: u64, cloexec: bool) -> u64
   if v == 0 {
     return EBADF;
   }
-  if from >= LXNFD {
+  if from >= fd_limit(k, pid) {
     return EINVAL;
   }
-  let fd = fd_free(k.lxfd, pid, from);
+  let fd = fd_free(k, pid, from);
   if fd >= LXNFD {
     return EMFILE;
   }
@@ -839,11 +839,11 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
   if p >= NPIPES {
     return ENFILE;
   }
-  let r = fd_free(k.lxfd, pid, 0);
+  let r = fd_free(k, pid, 0);
   if r >= LXNFD {
     return EMFILE;
   }
-  let w = fd_free(k.lxfd, pid, r + 1);
+  let w = fd_free(k, pid, r + 1);
   if w >= LXNFD {
     return EMFILE;
   }
