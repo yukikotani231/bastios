@@ -357,7 +357,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   if nic_live(nic) {
     puts(&mut con, "net: virtio, mac ");
     put_mac(&mut con, nic_mac(nic));
-    puts(&mut con, ", ip 10.0.2.15\r\n");
+    puts(&mut con, ", address by DHCP\r\n");
   }
   let mut spaces = vec_new[Space]();
   let mut i = 0;

@@ -32,7 +32,7 @@ _s.bind(("127.0.0.1", 0))
 udp_port2 = _s.getsockname()[1]
 _s.close()
 
-def boot(cpus, with_disk=False, virtio=False, net=False):
+def boot(cpus, with_disk=False, virtio=False, net=False, subnet=None):
     drive = ["-drive", f"file={disk},format=raw,if=ide,index=0"] if with_disk else []
     if virtio:
         # The same disk as a virtio block device (src/virtio.bastio): sectors
@@ -42,6 +42,11 @@ def boot(cpus, with_disk=False, virtio=False, net=False):
     # A virtio network card on QEMU's user-mode network (src/net.bastio).
     nic = ["-netdev", f"user,id=n0,hostfwd=udp:127.0.0.1:{udp_port}-:7,hostfwd=udp:127.0.0.1:{udp_port2}-:7000",
            "-device", "virtio-net-pci,netdev=n0"] if net else []
+    if subnet:
+        # QEMU's DHCP server on a subnet other than its default: the
+        # address the kernel ends up with can only have come from DHCP.
+        nic = ["-netdev", f"user,id=n0,net={subnet}",
+               "-device", "virtio-net-pci,netdev=n0"]
     return subprocess.Popen(
         ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
@@ -112,6 +117,7 @@ steps = [
     ("help", b"commands:"),
     # The network: ICMP echo to QEMU's gateway and to its DNS address, both
     # answered by QEMU itself; a malformed address is refused.
+    ("ifconfig", b"10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2 (DHCP)"),
     ("ping", b"reply from 10.0.2.2"),
     ("ping 10.0.2.3", b"reply from 10.0.2.3"),
     ("ping 10.0.2.300", b"usage: ping"),
@@ -451,8 +457,11 @@ def session(name, want_banner, steps, halt=False):
     print(f"---- {name} boot transcript ----")
     print(out.decode(errors="replace").replace("\r", ""))
 
-qemu = boot(1, virtio=True)
+qemu = boot(1, virtio=True, subnet="192.168.76.0/24")
 session("virtio", True, [
+    ("ifconfig", b"192.168.76.15 netmask 255.255.255.0 gateway 192.168.76.2 (DHCP)"),
+    ("ping", b"reply from 192.168.76.2"),
+    ("ping 192.168.76.3", b"reply from 192.168.76.3"),
     ("ls", b"      18 disk/note"),
     ("cat disk/note", b"kept across boots\r\n"),
     ("echo appended >> disk/note", b""),
