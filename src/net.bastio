@@ -1,13 +1,19 @@
-// A minimal IPv4 stack over the virtio network card: Ethernet, ARP, IPv4
-// without options or fragments, ICMP echo (it answers pings and can send
-// them) and UDP echo on port 7. The address is fixed for QEMU's user-mode
-// network: 10.0.2.15, gateway 10.0.2.2. On top sits a small table of UDP
-// sockets, which the native and the Linux system calls share.
+// A minimal IPv4 stack over the virtio network card: Ethernet, ARP (a
+// small cache), IPv4 without options or fragments, ICMP echo (it answers
+// pings and sends them) and UDP, with a table of sockets that the native
+// and the Linux system calls share, and an echo service on port 7 for any
+// port no socket has. The address starts as QEMU's user-mode default
+// (10.0.2.15/24, gateway 10.0.2.2).
 //
 // Every frame is parsed out of a byte buffer, and the proof shows that no
 // read or write leaves the buffer and no length field read off the wire can
 // make it do so: a header claiming more bytes than arrived is dropped, not
-// trusted. Polled from the kernel loop and while a ping waits.
+// trusted.
+//
+// Nothing here waits. The stack is polled (from the scheduler, under its
+// lock); a frame that needs an ARP answer first is held and sent when the
+// answer arrives, and a ping is a request whose result the caller collects
+// later (see nic_ping_start / nic_ping_check).
 
 import "virtio_net.bastio";
 
@@ -16,9 +22,11 @@ const ETH_IP: u64 = 0x0800;
 const ETH_MIN: u64 = 60;              // shorter frames are padded
 const MAC_BCAST: u64 = 0xFFFFFFFFFFFF;
 const MAC_LIMIT: u64 = 0x1000000000000;
+const IP_MAX: u64 = 4294967295;
 
-const MY_IP: u64 = 0x0A00020F;        // 10.0.2.15
+const MY_IP: u64 = 0x0A00020F;        // 10.0.2.15, until DHCP says otherwise
 const GATEWAY: u64 = 0x0A000202;      // 10.0.2.2
+const NETMASK: u64 = 0xFFFFFF00;      // /24
 
 const IP_ICMP: u64 = 1;
 const IP_UDP: u64 = 17;
@@ -27,9 +35,21 @@ const ICMP_ECHO: u64 = 8;
 const UDP_ECHO_PORT: u64 = 7;
 const PING_ID: u64 = 0x4253;          // "BS"
 const PING_DATA: u64 = 32;
-const NET_SPINS: u64 = 2000000;
+
+const ARP_N: u64 = 4;                 // ARP cache entries: (address, MAC)
+
+// A ping in flight.
+const PING_IDLE: u64 = 0;
+const PING_ARP: u64 = 1;              // waiting for the next hop's MAC
+const PING_ECHO: u64 = 2;             // request sent, waiting for the reply
+const PING_DONE: u64 = 3;             // the reply came
+const PING_TICKS: u64 = 200;          // give up after 2 s
+const NET_PENDING: u64 = 1000;        // nic_ping_start: started, check later
+const NET_NONE: u64 = 18446744073709551615;
+const PID_LIMIT: u64 = 65536;
 
 const SOCKS: u64 = 8;                 // UDP sockets in the table
+const RXQ: u64 = 4;                   // datagrams each socket can queue
 const UDP_MAX: u64 = 1472;            // the largest payload one frame carries
 const NO_SOCK: u64 = 18446744073709551615;
 const EPH_LO: u64 = 49152;            // ephemeral ports: 49152 .. 65535
@@ -37,31 +57,44 @@ const EPH_N: u64 = 16384;
 // A socket's words in the table.
 const S_OPEN: u64 = 0;                // 1 while open
 const S_PORT: u64 = 1;                // its local port, 0 until bound
-const S_HAS: u64 = 2;                 // 1 while a datagram is queued
-const S_LEN: u64 = 3;                 // its length
-const S_PEER_IP: u64 = 4;             // who sent the last datagram
+const S_HEAD: u64 = 2;                // the oldest queued datagram's slot
+const S_COUNT: u64 = 3;               // how many are queued
+const S_PEER_IP: u64 = 4;             // who sent the last datagram taken
 const S_PEER_PORT: u64 = 5;
-const SOCK_FIELDS: u64 = 6;
+const S_SLOTS: u64 = 6;               // then per slot: length, address, port
+const SLOT_W: u64 = 3;
+const SOCK_FIELDS: u64 = 18;          // S_SLOTS + RXQ * SLOT_W
 
 struct Net {
   dev: VNet,
   pkt: Bytes,         // the frame being handled
   out: Bytes,         // the frame being built
-  arp_ip: u64,        // a one-entry ARP cache: this address ...
-  arp_mac: u64,       // ... is at this MAC (0 while unknown)
+  ip: u64,            // our address, the gateway, and the subnet's size
+  gw: u64,            // (2^32 - netmask: addresses a and b share the
+  span: u64,          // subnet when a / span == b / span)
+  arp: Buf,           // ARP_N entries of (address, MAC); MAC 0: empty
+  arp_next: u64,      // the entry the next new address replaces
+  held: Bytes,        // a frame waiting for its next hop's MAC ...
+  held_len: u64,      // ... this long (0: none) ...
+  held_hop: u64,      // ... to this address
+  ping_state: u64,
+  ping_pid: u64,      // who asked
+  ping_ip: u64,       // the address pinged, through ...
+  ping_hop: u64,      // ... this next hop
+  ping_until: u64,    // the tick it gives up at
   seq: u64,           // the last ping's sequence number
-  got: bool,          // its reply has arrived
   rx: u64,            // frames received and sent
   tx: u64,
   socks: Buf,         // the UDP sockets, SOCK_FIELDS words each
-  dq: Bytes,          // each socket's queued datagram, UDP_MAX bytes each
+  dq: Bytes,          // their queued datagrams, RXQ slots of UDP_MAX bytes each
   eph: u64,           // where the next ephemeral port search starts
 }
 
 spec fn net_ok(n: &Net) -> bool {
-  vnet_ok(n.dev) && blen(n.pkt) == RX_BUF && blen(n.out) == RX_BUF
-  && n.arp_mac < MAC_LIMIT && n.seq <= 65535
-  && len(n.socks) == SOCKS * SOCK_FIELDS && blen(n.dq) == SOCKS * UDP_MAX
+  vnet_ok(n.dev) && blen(n.pkt) == RX_BUF && blen(n.out) == RX_BUF && blen(n.held) == RX_BUF
+  && n.ip <= IP_MAX && n.gw <= IP_MAX && 1 <= n.span && n.span <= 4294967296
+  && len(n.arp) == ARP_N * 2 && n.held_len <= FRAME_MAX && n.seq <= 65535 && n.ping_pid < PID_LIMIT && n.ping_ip <= IP_MAX
+  && len(n.socks) == SOCKS * SOCK_FIELDS && blen(n.dq) == SOCKS * RXQ * UDP_MAX
 }
 
 // ---------------------------------------------------------------- bytes
@@ -112,31 +145,60 @@ fn put48(b: &mut Bytes, o: u64, v: u64)
   put32(&mut b, o + 2, v % 4294967296);
 }
 
-/// The Internet checksum (RFC 1071) of bytes off..off+n: the ones'
-/// complement of their ones'-complement sum as 16-bit words. Over a header
-/// that already holds its checksum, it is 0.
-fn csum(b: &Bytes, off: u64, n: u64) -> u64
-  requires off + n <= blen(b)
+/// Adds the 16-bit word v to a ones'-complement sum.
+fn cadd(s: u64, v: u64) -> u64
+  requires s <= 65535 && v <= 65535
   ensures result <= 65535
 {
-  let mut s = 0;
+  let t = s + v;
+  if t > 65535 {
+    return t - 65535;                 // end-around carry
+  }
+  return t;
+}
+
+/// The ones'-complement sum (RFC 1071) of bytes off..off+n as 16-bit words,
+/// added to s0 (an odd last byte is padded with a zero).
+fn sum16(b: &Bytes, off: u64, n: u64, s0: u64) -> u64
+  requires off + n <= blen(b) && s0 <= 65535
+  ensures result <= 65535
+{
+  let mut s = s0;
   let mut i = 0;
   while i + 1 < n
     invariant i <= n && s <= 65535
   {
-    s = s + be16(b, off + i);
-    if s > 65535 {
-      s = s - 65535;                  // end-around carry
-    }
+    s = cadd(s, be16(b, off + i));
     i = i + 2;
   }
   if i < n {
-    s = s + bget(b, off + i) * 256;
-    if s > 65535 {
-      s = s - 65535;
-    }
+    s = cadd(s, bget(b, off + i) * 256);
   }
-  return 65535 - s;
+  return s;
+}
+
+/// The Internet checksum of bytes off..off+n. Over a header that already
+/// holds its checksum, it is 0.
+fn csum(b: &Bytes, off: u64, n: u64) -> u64
+  requires off + n <= blen(b)
+  ensures result <= 65535
+{
+  return 65535 - sum16(b, off, n, 0);
+}
+
+/// The sum over a UDP datagram at 34..34+ulen of b and its pseudo-header
+/// (addresses, protocol, length). 65535 when its checksum is right.
+fn udp_sum(b: &Bytes, src: u64, dst: u64, ulen: u64) -> u64
+  requires 34 + ulen <= blen(b) && src <= IP_MAX && dst <= IP_MAX && ulen <= 65535
+  ensures result <= 65535
+{
+  let mut s = cadd(0, src / 65536);
+  s = cadd(s, src % 65536);
+  s = cadd(s, dst / 65536);
+  s = cadd(s, dst % 65536);
+  s = cadd(s, IP_UDP);
+  s = cadd(s, ulen);
+  return sum16(b, 34, ulen, s);
 }
 
 /// Copies the first n bytes of the received frame to the outgoing one.
@@ -183,10 +245,62 @@ fn eth_header(n: &mut Net, dst: u64, kind: u64)
 
 // ---------------------------------------------------------------- ARP
 
+/// The MAC address cached for `ip`, or 0.
+fn arp_find(n: &Net, ip: u64) -> u64
+  requires net_ok(n)
+  ensures result < MAC_LIMIT
+{
+  let mut i = 0;
+  while i < ARP_N
+    invariant i <= ARP_N
+  {
+    let mac = get(n.arp, 2 * i + 1);
+    if get(n.arp, 2 * i) == ip && mac < MAC_LIMIT {
+      return mac;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+/// Caches ip -> mac, over the old entry for ip if there is one, else over
+/// the oldest.
+fn arp_learn(n: &mut Net, ip: u64, mac: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let mut i = 0;
+  while i < ARP_N
+    invariant i <= ARP_N && net_ok(n)
+  {
+    if get(n.arp, 2 * i) == ip {
+      n.arp = set(n.arp, 2 * i + 1, mac);
+      return;
+    }
+    i = i + 1;
+  }
+  let e = n.arp_next % ARP_N;
+  n.arp = set(n.arp, 2 * e, ip);
+  n.arp = set(n.arp, 2 * e + 1, mac);
+  n.arp_next = (e + 1) % ARP_N;
+}
+
+/// The address a frame for `ip` goes to: ip itself on our subnet, else the
+/// gateway.
+fn next_hop(n: &Net, ip: u64) -> u64
+  requires net_ok(n)
+  ensures result <= IP_MAX || result == ip
+{
+  if ip / n.span == n.ip / n.span {
+    return ip;
+  }
+  return n.gw;
+}
+
 /// An ARP packet: operation, and the target's MAC and address. We are
 /// always the sender.
 fn arp_send(n: &mut Net, op: u64, eth_dst: u64, tmac: u64, tip: u64) -> bool
-  requires net_ok(n) && op <= 2 && eth_dst < MAC_LIMIT && tmac < MAC_LIMIT && tip <= 4294967295
+  requires net_ok(n) && op <= 2 && eth_dst < MAC_LIMIT && tmac < MAC_LIMIT && tip <= IP_MAX
   ensures net_ok(n)
 {
   eth_header(&mut n, eth_dst, ETH_ARP);
@@ -196,10 +310,34 @@ fn arp_send(n: &mut Net, op: u64, eth_dst: u64, tmac: u64, tip: u64) -> bool
   bset(&mut n.out, 19, 4);
   put16(&mut n.out, 20, op);
   put48(&mut n.out, 22, n.dev.mac);
-  put32(&mut n.out, 28, MY_IP);
+  put32(&mut n.out, 28, n.ip);
   put48(&mut n.out, 32, tmac);
   put32(&mut n.out, 38, tip);
   return net_send(&mut n, 42);
+}
+
+/// Sends the outgoing frame (its first flen bytes, Ethernet header aside)
+/// to `hop`: now if its MAC is cached, else once ARP answers. A frame
+/// already held for an answer is replaced.
+fn send_via(n: &mut Net, hop: u64, flen: u64) -> bool
+  requires net_ok(n) && hop <= IP_MAX && 14 <= flen && flen <= FRAME_MAX
+  ensures net_ok(n)
+{
+  let mac = arp_find(n, hop);
+  if mac != 0 {
+    put48(&mut n.out, 0, mac);
+    return net_send(&mut n, flen);
+  }
+  let mut i = 0;
+  while i < flen
+    invariant i <= flen && net_ok(n)
+  {
+    bset(&mut n.held, i, bget(n.out, i));
+    i = i + 1;
+  }
+  n.held_len = flen;
+  n.held_hop = hop;
+  return arp_send(&mut n, 1, MAC_BCAST, 0, hop);
 }
 
 fn arp_in(n: &mut Net, flen: u64)
@@ -213,12 +351,228 @@ fn arp_in(n: &mut Net, flen: u64)
   let smac = be48(n.pkt, 22);
   let sip = be32(n.pkt, 28);
   let tip = be32(n.pkt, 38);
-  if sip == n.arp_ip {
-    n.arp_mac = smac;                 // the address we asked about (or a change)
+  if smac == 0 || smac == MAC_BCAST {
+    return;
   }
-  if op == 1 && tip == MY_IP {
+  // Learn who asked us, or answered: an entry already cached is refreshed.
+  if tip == n.ip || arp_find(n, sip) != 0 {
+    arp_learn(&mut n, sip, smac);
+  }
+  if op == 1 && tip == n.ip {
     arp_send(&mut n, 2, smac, smac, sip);
   }
+  if n.held_len >= 14 && n.held_hop == sip {
+    // The frame waiting for this answer goes out now.
+    let l = n.held_len;
+    let mut i = 0;
+    while i < l
+      invariant i <= l && l <= FRAME_MAX && net_ok(n)
+    {
+      bset(&mut n.out, i, bget(n.held, i));
+      i = i + 1;
+    }
+    n.held_len = 0;
+    put48(&mut n.out, 0, smac);
+    net_send(&mut n, l);
+  }
+  if n.ping_state == PING_ARP && n.ping_hop == sip {
+    ping_send(&mut n, smac);
+  }
+}
+
+// ---------------------------------------------------------------- IPv4
+
+/// Fills in an IPv4 header (no options) at 14 and its checksum.
+fn ip_header(n: &mut Net, total: u64, proto: u64, dst: u64)
+  requires net_ok(n) && 20 <= total && total <= FRAME_MAX - 14 && proto <= 255 && dst <= IP_MAX
+  ensures net_ok(n)
+{
+  bset(&mut n.out, 14, 0x45);         // version 4, 5 words of header
+  bset(&mut n.out, 15, 0);
+  put16(&mut n.out, 16, total);
+  put32(&mut n.out, 18, 0);           // id, no fragments
+  bset(&mut n.out, 22, 64);           // time to live
+  bset(&mut n.out, 23, proto);
+  put16(&mut n.out, 24, 0);
+  put32(&mut n.out, 26, n.ip);
+  put32(&mut n.out, 30, dst);
+  put16(&mut n.out, 24, csum(n.out, 14, 20));
+}
+
+/// Fills in the UDP checksum of the datagram being built (ulen bytes at 34).
+fn udp_seal(n: &mut Net, dst: u64, ulen: u64)
+  requires net_ok(n) && dst <= IP_MAX && 8 <= ulen && ulen <= FRAME_MAX - 34
+  ensures net_ok(n)
+{
+  put16(&mut n.out, 40, 0);
+  let mut c = 65535 - udp_sum(n.out, n.ip, dst, ulen);
+  if c == 0 {
+    c = 65535;                        // 0 would mean "no checksum"
+  }
+  put16(&mut n.out, 40, c);
+}
+
+/// Answers an echo request: the same frame back, addresses swapped.
+fn icmp_echo_reply(n: &mut Net, total: u64)
+  requires net_ok(n) && 28 <= total && total <= FRAME_MAX - 14
+  ensures net_ok(n)
+{
+  let src = be32(n.pkt, 26);
+  let smac = be48(n.pkt, 6);
+  net_copy(&mut n, 14 + total);
+  eth_header(&mut n, smac, ETH_IP);
+  ip_header(&mut n, total, IP_ICMP, src);
+  bset(&mut n.out, 34, ICMP_ECHO_REPLY);
+  put16(&mut n.out, 36, 0);
+  put16(&mut n.out, 36, csum(n.out, 34, total - 20));
+  net_send(&mut n, 14 + total);
+}
+
+/// Echoes a UDP datagram (already checked: ulen fits in total) back to
+/// where it came from.
+fn udp_echo(n: &mut Net, ulen: u64)
+  requires net_ok(n) && 8 <= ulen && ulen <= FRAME_MAX - 34
+  ensures net_ok(n)
+{
+  let src = be32(n.pkt, 26);
+  let smac = be48(n.pkt, 6);
+  let sport = be16(n.pkt, 34);
+  let dport = be16(n.pkt, 36);
+  net_copy(&mut n, 34 + ulen);
+  eth_header(&mut n, smac, ETH_IP);
+  ip_header(&mut n, 20 + ulen, IP_UDP, src);
+  put16(&mut n.out, 34, dport);
+  put16(&mut n.out, 36, sport);
+  udp_seal(&mut n, src, ulen);
+  net_send(&mut n, 34 + ulen);
+}
+
+/// A UDP datagram for us (total: the IP length, checked against the
+/// frame): its checksum is checked when it has one, then it goes to the
+/// socket bound to its port, or to the echo on port 7.
+fn udp_in(n: &mut Net, total: u64)
+  requires net_ok(n) && 28 <= total && total <= FRAME_MAX - 14
+  ensures net_ok(n)
+{
+  let ulen = be16(n.pkt, 38);
+  if ulen < 8 || ulen > total - 20 {
+    return;
+  }
+  if be16(n.pkt, 40) != 0 && udp_sum(n.pkt, be32(n.pkt, 26), be32(n.pkt, 30), ulen) != 65535 {
+    return;
+  }
+  let dport = be16(n.pkt, 36);
+  let s = sock_find(n, dport);
+  if s < SOCKS {
+    udp_deliver(&mut n, s, ulen);
+  } else if dport == UDP_ECHO_PORT {
+    udp_echo(&mut n, ulen);
+  }
+}
+
+fn ip_in(n: &mut Net, flen: u64)
+  requires net_ok(n) && flen <= RX_BUF
+  ensures net_ok(n)
+{
+  if flen < 34 || bget(n.pkt, 14) != 0x45 || csum(n.pkt, 14, 20) != 0 || be32(n.pkt, 30) != n.ip {
+    return;
+  }
+  let total = be16(n.pkt, 16);
+  // The header's length must fit in what arrived, and in what we can send.
+  if total < 28 || 14 + total > flen || 14 + total > FRAME_MAX {
+    return;
+  }
+  let proto = bget(n.pkt, 23);
+  if proto == IP_ICMP {
+    let kind = bget(n.pkt, 34);
+    if kind == ICMP_ECHO && csum(n.pkt, 34, total - 20) == 0 {
+      icmp_echo_reply(&mut n, total);
+    } else if kind == ICMP_ECHO_REPLY && n.ping_state == PING_ECHO
+      && be16(n.pkt, 38) == PING_ID && be16(n.pkt, 40) == n.seq {
+      n.ping_state = PING_DONE;
+    }
+  } else if proto == IP_UDP {
+    udp_in(&mut n, total);
+  }
+}
+
+// ---------------------------------------------------------------- ping
+
+/// Sends the echo request of the ping in flight to MAC `mac`.
+fn ping_send(n: &mut Net, mac: u64)
+  requires net_ok(n) && mac < MAC_LIMIT
+  ensures net_ok(n)
+{
+  let total = 20 + 8 + PING_DATA;
+  eth_header(&mut n, mac, ETH_IP);
+  ip_header(&mut n, total, IP_ICMP, n.ping_ip);
+  bset(&mut n.out, 34, ICMP_ECHO);
+  bset(&mut n.out, 35, 0);
+  put16(&mut n.out, 36, 0);
+  put16(&mut n.out, 38, PING_ID);
+  put16(&mut n.out, 40, n.seq);
+  let mut i = 0;
+  while i < PING_DATA
+    invariant i <= PING_DATA && net_ok(n)
+  {
+    bset(&mut n.out, 42 + i, 0x61 + i % 26);   // "abcd..."
+    i = i + 1;
+  }
+  put16(&mut n.out, 36, csum(n.out, 34, total - 20));
+  net_send(&mut n, 14 + total);
+  n.ping_state = PING_ECHO;
+}
+
+/// Starts a ping of `ip` for process `pid`; the result is collected with
+/// ping_check. NET_PENDING if started, 4 if another ping is in flight.
+fn ping_start(n: &mut Net, ip: u64, pid: u64, now: u64) -> u64
+  requires net_ok(n) && ip <= IP_MAX && pid < PID_LIMIT
+  ensures net_ok(n)
+{
+  if n.ping_state != PING_IDLE || now > 18446744073709551615 - PING_TICKS {
+    return 4;
+  }
+  let hop = next_hop(n, ip);
+  if hop > IP_MAX {
+    return 4;
+  }
+  n.seq = (n.seq + 1) % 65536;
+  n.ping_ip = ip;
+  n.ping_hop = hop;
+  n.ping_pid = pid;
+  n.ping_until = now + PING_TICKS;
+  let mac = arp_find(n, hop);
+  if mac != 0 {
+    ping_send(&mut n, mac);
+  } else {
+    n.ping_state = PING_ARP;
+    arp_send(&mut n, 1, MAC_BCAST, 0, hop);
+  }
+  return NET_PENDING;
+}
+
+/// The ping's outcome once it has one: 8 * pid + result, where result is
+/// 1 for a reply, 0 for none in time, 2 if ARP got no answer. NET_NONE
+/// while it is still waiting, or if there is none.
+fn ping_check(n: &mut Net, now: u64) -> u64
+  requires net_ok(n)
+  ensures net_ok(n)
+  ensures result == NET_NONE || (result / 8 < PID_LIMIT && result % 8 <= 2)
+{
+  let mut r = NET_NONE;
+  if n.ping_state == PING_DONE {
+    r = 1;
+  } else if n.ping_state != PING_IDLE && now >= n.ping_until {
+    r = 0;
+    if n.ping_state == PING_ARP {
+      r = 2;
+    }
+  }
+  if r == NET_NONE {
+    return NET_NONE;
+  }
+  n.ping_state = PING_IDLE;
+  return n.ping_pid * 8 + r;
 }
 
 // ---------------------------------------------------------------- UDP sockets
@@ -257,19 +611,20 @@ fn sock_find(n: &Net, port: u64) -> u64
   return SOCKS;
 }
 
-/// Queues the payload of the UDP datagram in the received frame on socket
-/// s. A socket holds one datagram: another that arrives before it is read
-/// is dropped, which UDP allows.
-fn udp_deliver(n: &mut Net, s: u64, total: u64)
-  requires net_ok(n) && s < SOCKS && 28 <= total && total <= FRAME_MAX - 14
+/// Queues the payload of the received UDP datagram (ulen bytes with its
+/// header, at 34) on socket s. A datagram arriving at a full queue is
+/// dropped, which UDP allows.
+fn udp_deliver(n: &mut Net, s: u64, ulen: u64)
+  requires net_ok(n) && s < SOCKS && 8 <= ulen && ulen <= FRAME_MAX - 34
   ensures net_ok(n)
 {
-  let ulen = be16(n.pkt, 38);
-  if ulen < 8 || ulen > total - 20 || sk_get(n, s, S_HAS) == 1 {
+  let count = sk_get(n, s, S_COUNT);
+  if count >= RXQ {
     return;
   }
+  let slot = (sk_get(n, s, S_HEAD) % RXQ + count) % RXQ;
   let plen = ulen - 8;
-  let at = s * UDP_MAX;
+  let at = (s * RXQ + slot) * UDP_MAX;
   let mut i = 0;
   while i < plen
     invariant i <= plen && net_ok(n)
@@ -277,10 +632,10 @@ fn udp_deliver(n: &mut Net, s: u64, total: u64)
     bset(&mut n.dq, at + i, bget(n.pkt, 42 + i));
     i = i + 1;
   }
-  sk_set(&mut n, s, S_LEN, plen);
-  sk_set(&mut n, s, S_PEER_IP, be32(n.pkt, 26));
-  sk_set(&mut n, s, S_PEER_PORT, be16(n.pkt, 34));
-  sk_set(&mut n, s, S_HAS, 1);
+  sk_set(&mut n, s, S_SLOTS + slot * SLOT_W, plen);
+  sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 1, be32(n.pkt, 26));
+  sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 2, be16(n.pkt, 34));
+  sk_set(&mut n, s, S_COUNT, count + 1);
 }
 
 /// Opens a socket: its index, or NO_SOCK if all are taken.
@@ -295,8 +650,8 @@ fn udp_open(n: &mut Net) -> u64
     if sk_get(n, s, S_OPEN) != 1 {
       sk_set(&mut n, s, S_OPEN, 1);
       sk_set(&mut n, s, S_PORT, 0);
-      sk_set(&mut n, s, S_HAS, 0);
-      sk_set(&mut n, s, S_LEN, 0);
+      sk_set(&mut n, s, S_HEAD, 0);
+      sk_set(&mut n, s, S_COUNT, 0);
       sk_set(&mut n, s, S_PEER_IP, 0);
       sk_set(&mut n, s, S_PEER_PORT, 0);
       return s;
@@ -311,6 +666,17 @@ fn udp_is_open(n: &Net, s: u64) -> bool
   ensures result ==> s < SOCKS
 {
   return s < SOCKS && sk_get(n, s, S_OPEN) == 1;
+}
+
+/// How many datagrams are queued on s (0 if it is not open).
+fn udp_queued(n: &Net, s: u64) -> u64
+  requires net_ok(n)
+  ensures result <= RXQ && (result > 0 ==> s < SOCKS)
+{
+  if !udp_is_open(n, s) || sk_get(n, s, S_COUNT) > RXQ {
+    return 0;
+  }
+  return sk_get(n, s, S_COUNT);
 }
 
 /// Binds open, unbound socket s to a free ephemeral port. Returns the
@@ -356,13 +722,14 @@ fn udp_bind(n: &mut Net, s: u64, port: u64) -> bool
 
 /// Sends bytes 0..size of buf as one datagram from socket s to ip:port,
 /// binding s to an ephemeral port first if it has none. Returns size, or
-/// NO_SOCK if it cannot be sent (bad socket or address, too big, or no
-/// ARP answer for the next hop).
+/// NO_SOCK if it cannot be sent (bad socket or address, or too big). It
+/// does not wait: if the next hop's MAC is not known yet, the datagram is
+/// held and goes out when ARP answers.
 fn udp_sendto(n: &mut Net, s: u64, ip: u64, port: u64, buf: &Bytes, size: u64) -> u64
   requires net_ok(n)
   ensures net_ok(n)
 {
-  if !udp_is_open(n, s) || ip > 4294967295 || port == 0 || port > 65535
+  if !udp_is_open(n, s) || ip > IP_MAX || port == 0 || port > 65535
     || size > UDP_MAX || size > blen(buf) || !n.dev.live {
     return NO_SOCK;
   }
@@ -370,19 +737,15 @@ fn udp_sendto(n: &mut Net, s: u64, ip: u64, port: u64, buf: &Bytes, size: u64) -
     return NO_SOCK;
   }
   let sport = sk_get(n, s, S_PORT);
-  if sport > 65535 {
+  let hop = next_hop(n, ip);
+  if sport > 65535 || hop > IP_MAX {
     return NO_SOCK;
   }
-  let mac = resolve(&mut n, ip);
-  if mac == 0 {
-    return NO_SOCK;
-  }
-  eth_header(&mut n, mac, ETH_IP);
+  eth_header(&mut n, 0, ETH_IP);
   ip_header(&mut n, 28 + size, IP_UDP, ip);
   put16(&mut n.out, 34, sport);
   put16(&mut n.out, 36, port);
   put16(&mut n.out, 38, 8 + size);
-  put16(&mut n.out, 40, 0);           // no checksum (allowed over IPv4)
   let mut i = 0;
   while i < size
     invariant i <= size && net_ok(n)
@@ -390,26 +753,29 @@ fn udp_sendto(n: &mut Net, s: u64, ip: u64, port: u64, buf: &Bytes, size: u64) -
     bset(&mut n.out, 42 + i, bget(buf, i));
     i = i + 1;
   }
-  if !net_send(&mut n, 42 + size) {
+  udp_seal(&mut n, ip, 8 + size);
+  if !send_via(&mut n, hop, 42 + size) {
     return NO_SOCK;
   }
   return size;
 }
 
-/// Takes the datagram queued on socket s, if any: copies up to `max` bytes
-/// of it (and no more than buf holds) to the start of buf and returns that
-/// count, dropping the rest as Linux does. NO_SOCK if nothing is queued;
-/// it never waits.
+/// Takes the oldest datagram queued on socket s, if any: copies up to
+/// `max` bytes of it (and no more than buf holds) to the start of buf and
+/// returns that count, dropping the rest as Linux does; its sender becomes
+/// the socket's peer. NO_SOCK if nothing is queued; it never waits.
 fn udp_recvfrom(n: &mut Net, s: u64, buf: &mut Bytes, max: u64) -> u64
   requires net_ok(n)
   ensures net_ok(n) && blen(buf) == old(blen(buf))
   ensures result == NO_SOCK || (result <= blen(buf) && result <= max)
 {
   net_poll(&mut n);
-  if !udp_is_open(n, s) || sk_get(n, s, S_HAS) != 1 {
+  let count = udp_queued(n, s);
+  if count == 0 {
     return NO_SOCK;
   }
-  let mut l = sk_get(n, s, S_LEN);
+  let slot = sk_get(n, s, S_HEAD) % RXQ;
+  let mut l = sk_get(n, s, S_SLOTS + slot * SLOT_W);
   if l > UDP_MAX {
     l = UDP_MAX;
   }
@@ -419,7 +785,7 @@ fn udp_recvfrom(n: &mut Net, s: u64, buf: &mut Bytes, max: u64) -> u64
   if l > blen(buf) {
     l = blen(buf);
   }
-  let at = s * UDP_MAX;
+  let at = (s * RXQ + slot) * UDP_MAX;
   let bl = blen(buf);
   let mut i = 0;
   while i < l
@@ -428,97 +794,11 @@ fn udp_recvfrom(n: &mut Net, s: u64, buf: &mut Bytes, max: u64) -> u64
     bset(&mut buf, i, bget(n.dq, at + i));
     i = i + 1;
   }
-  sk_set(&mut n, s, S_HAS, 0);
+  sk_set(&mut n, s, S_PEER_IP, sk_get(n, s, S_SLOTS + slot * SLOT_W + 1));
+  sk_set(&mut n, s, S_PEER_PORT, sk_get(n, s, S_SLOTS + slot * SLOT_W + 2));
+  sk_set(&mut n, s, S_HEAD, (slot + 1) % RXQ);
+  sk_set(&mut n, s, S_COUNT, count - 1);
   return l;
-}
-
-// ---------------------------------------------------------------- IPv4
-
-/// Fills in an IPv4 header (no options) at 14 and its checksum.
-fn ip_header(n: &mut Net, total: u64, proto: u64, dst: u64)
-  requires net_ok(n) && 20 <= total && total <= FRAME_MAX - 14 && proto <= 255 && dst <= 4294967295
-  ensures net_ok(n)
-{
-  bset(&mut n.out, 14, 0x45);         // version 4, 5 words of header
-  bset(&mut n.out, 15, 0);
-  put16(&mut n.out, 16, total);
-  put32(&mut n.out, 18, 0);           // id, no fragments
-  bset(&mut n.out, 22, 64);           // time to live
-  bset(&mut n.out, 23, proto);
-  put16(&mut n.out, 24, 0);
-  put32(&mut n.out, 26, MY_IP);
-  put32(&mut n.out, 30, dst);
-  put16(&mut n.out, 24, csum(n.out, 14, 20));
-}
-
-/// Answers an echo request: the same frame back, addresses swapped.
-fn icmp_echo_reply(n: &mut Net, total: u64)
-  requires net_ok(n) && 28 <= total && total <= FRAME_MAX - 14
-  ensures net_ok(n)
-{
-  let src = be32(n.pkt, 26);
-  let smac = be48(n.pkt, 6);
-  net_copy(&mut n, 14 + total);
-  eth_header(&mut n, smac, ETH_IP);
-  ip_header(&mut n, total, IP_ICMP, src);
-  bset(&mut n.out, 34, ICMP_ECHO_REPLY);
-  put16(&mut n.out, 36, 0);
-  put16(&mut n.out, 36, csum(n.out, 34, total - 20));
-  net_send(&mut n, 14 + total);
-}
-
-/// Echoes a UDP datagram to port 7 back to where it came from.
-fn udp_echo(n: &mut Net, total: u64)
-  requires net_ok(n) && 28 <= total && total <= FRAME_MAX - 14
-  ensures net_ok(n)
-{
-  let src = be32(n.pkt, 26);
-  let smac = be48(n.pkt, 6);
-  let sport = be16(n.pkt, 34);
-  let ulen = be16(n.pkt, 38);
-  if ulen < 8 || ulen > total - 20 {
-    return;
-  }
-  net_copy(&mut n, 14 + 20 + ulen);
-  eth_header(&mut n, smac, ETH_IP);
-  ip_header(&mut n, 20 + ulen, IP_UDP, src);
-  put16(&mut n.out, 34, UDP_ECHO_PORT);
-  put16(&mut n.out, 36, sport);
-  put16(&mut n.out, 40, 0);           // no checksum (allowed over IPv4)
-  net_send(&mut n, 14 + 20 + ulen);
-}
-
-fn ip_in(n: &mut Net, flen: u64)
-  requires net_ok(n) && flen <= RX_BUF
-  ensures net_ok(n)
-{
-  if flen < 34 || bget(n.pkt, 14) != 0x45 || csum(n.pkt, 14, 20) != 0 || be32(n.pkt, 30) != MY_IP {
-    return;
-  }
-  let total = be16(n.pkt, 16);
-  // The header's length must fit in what arrived, and in what we can send.
-  if total < 28 || 14 + total > flen || 14 + total > FRAME_MAX {
-    return;
-  }
-  let proto = bget(n.pkt, 23);
-  if proto == IP_ICMP {
-    let kind = bget(n.pkt, 34);
-    if kind == ICMP_ECHO && csum(n.pkt, 34, total - 20) == 0 {
-      icmp_echo_reply(&mut n, total);
-    } else if kind == ICMP_ECHO_REPLY && be16(n.pkt, 38) == PING_ID && be16(n.pkt, 40) == n.seq {
-      n.got = true;
-    }
-  } else if proto == IP_UDP {
-    // A socket bound to the port gets the datagram; failing that, port 7
-    // echoes it.
-    let dport = be16(n.pkt, 36);
-    let s = sock_find(n, dport);
-    if s < SOCKS {
-      udp_deliver(&mut n, s, total);
-    } else if dport == UDP_ECHO_PORT {
-      udp_echo(&mut n, total);
-    }
-  }
 }
 
 // ---------------------------------------------------------------- the stack
@@ -549,79 +829,6 @@ fn net_poll(n: &mut Net)
     }
     k = k + 1;
   }
-}
-
-/// The MAC address to send to for `ip`: itself on our /24, else the
-/// gateway. Asks with ARP and waits for the answer; 0 if none comes.
-fn resolve(n: &mut Net, ip: u64) -> u64
-  requires net_ok(n) && ip <= 4294967295
-  ensures net_ok(n) && result < MAC_LIMIT
-{
-  let mut hop = GATEWAY;
-  if ip / 256 == MY_IP / 256 {
-    hop = ip;
-  }
-  if n.arp_ip == hop && n.arp_mac != 0 {
-    return n.arp_mac;
-  }
-  n.arp_ip = hop;
-  n.arp_mac = 0;
-  arp_send(&mut n, 1, MAC_BCAST, 0, hop);
-  let mut spins = 0;
-  while spins < NET_SPINS && n.arp_mac == 0
-    invariant net_ok(n)
-  {
-    net_poll(&mut n);
-    spins = spins + 1;
-  }
-  if n.arp_ip != hop {
-    return 0;
-  }
-  return n.arp_mac;
-}
-
-/// Sends one echo request to `ip` and waits for the reply. 1 if it came,
-/// 0 if it did not, 2 if nothing answered for the MAC address.
-fn net_ping(n: &mut Net, ip: u64) -> u64
-  requires net_ok(n) && ip <= 4294967295
-  ensures net_ok(n)
-{
-  let mac = resolve(&mut n, ip);
-  if mac == 0 {
-    return 2;
-  }
-  n.seq = (n.seq + 1) % 65536;
-  n.got = false;
-  let total = 20 + 8 + PING_DATA;
-  eth_header(&mut n, mac, ETH_IP);
-  ip_header(&mut n, total, IP_ICMP, ip);
-  bset(&mut n.out, 34, ICMP_ECHO);
-  bset(&mut n.out, 35, 0);
-  put16(&mut n.out, 36, 0);
-  put16(&mut n.out, 38, PING_ID);
-  put16(&mut n.out, 40, n.seq);
-  let mut i = 0;
-  while i < PING_DATA
-    invariant i <= PING_DATA && net_ok(n)
-  {
-    bset(&mut n.out, 42 + i, 0x61 + i % 26);   // "abcd..."
-    i = i + 1;
-  }
-  put16(&mut n.out, 36, csum(n.out, 34, total - 20));
-  if !net_send(&mut n, 14 + total) {
-    return 0;
-  }
-  let mut spins = 0;
-  while spins < NET_SPINS && !n.got
-    invariant net_ok(n)
-  {
-    net_poll(&mut n);
-    spins = spins + 1;
-  }
-  if n.got {
-    return 1;
-  }
-  return 0;
 }
 
 // ---------------------------------------------------------------- the card, or none
@@ -677,7 +884,10 @@ fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, at: u64, avoid_lo: u64
   let b1 = take_low_page(&mut m, at + 7);
   let b2 = take_low_page(&mut m, at + 8);
   let v = vnet_new(&mut ports, base, q0, q1, q2, t0, t1, t2, b0, b1, b2);
-  return Nic::Up(Net { dev: v, pkt: balloc(RX_BUF), out: balloc(RX_BUF), arp_ip: 0, arp_mac: 0, seq: 0, got: false, rx: 0, tx: 0, socks: alloc(SOCKS * SOCK_FIELDS), dq: balloc(SOCKS * UDP_MAX), eph: 0 });
+  return Nic::Up(Net { dev: v, pkt: balloc(RX_BUF), out: balloc(RX_BUF), ip: MY_IP, gw: GATEWAY, span: 4294967296 - NETMASK,
+    arp: alloc(ARP_N * 2), arp_next: 0, held: balloc(RX_BUF), held_len: 0, held_hop: 0,
+    ping_state: PING_IDLE, ping_pid: 0, ping_ip: 0, ping_hop: 0, ping_until: 0, seq: 0, rx: 0, tx: 0,
+    socks: alloc(SOCKS * SOCK_FIELDS), dq: balloc(SOCKS * RXQ * UDP_MAX), eph: 0 });
 }
 
 fn nic_poll(c: &mut Nic)
@@ -693,9 +903,10 @@ fn nic_poll(c: &mut Nic)
   }
 }
 
-/// Pings `ip`: 1 for a reply, 0 for none, 2 if nothing answered ARP, 3 if
-/// there is no network card.
-fn nic_ping(c: &mut Nic, ip: u64) -> u64
+/// Starts a ping of `ip` for process `pid`: NET_PENDING if it is on its
+/// way (collect the result with nic_ping_check), 3 if there is no network
+/// card, 4 if another ping is in flight or the address is not one.
+fn nic_ping_start(c: &mut Nic, ip: u64, pid: u64, now: u64) -> u64
   requires nic_ok(c)
   ensures nic_ok(c)
 {
@@ -706,9 +917,31 @@ fn nic_ping(c: &mut Nic, ip: u64) -> u64
     },
     Nic::Up(mut n) => {
       let mut r = 3;
-      if ip <= 4294967295 && n.dev.live {
-        r = net_ping(&mut n, ip);
+      if ip > IP_MAX || pid >= PID_LIMIT {
+        r = 4;
+      } else if n.dev.live {
+        r = ping_start(&mut n, ip, pid, now);
       }
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+/// The finished ping, if any, as 8 * pid + result (see ping_check);
+/// NET_NONE if none has finished. `now` is the tick count.
+fn nic_ping_check(c: &mut Nic, now: u64) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c)
+  ensures result == NET_NONE || (result / 8 < PID_LIMIT && result % 8 <= 2)
+{
+  match c {
+    Nic::None => {
+      c = Nic::None;
+      return NET_NONE;
+    },
+    Nic::Up(mut n) => {
+      let r = ping_check(&mut n, now);
       c = Nic::Up(n);
       return r;
     },
@@ -739,6 +972,8 @@ fn nic_free(ports: &mut Ports, c: Nic, m: &mut Mem)
     Nic::Up(n) => {
       bfree(n.pkt);
       bfree(n.out);
+      bfree(n.held);
+      free(n.arp);
       free(n.socks);
       bfree(n.dq);
       vnet_free(&mut ports, n.dev, &mut m);
@@ -804,7 +1039,7 @@ fn sock_sendto(c: &mut Nic, s: u64, ip: u64, port: u64, buf: &Bytes, size: u64) 
   }
 }
 
-/// Takes the datagram queued on s into the start of buf (at most max
+/// Takes the oldest datagram queued on s into the start of buf (at most max
 /// bytes). Returns its length, or NO_SOCK if none is queued. Never waits.
 fn sock_recvfrom(c: &mut Nic, s: u64, buf: &mut Bytes, max: u64) -> u64
   requires nic_ok(c)
@@ -824,17 +1059,19 @@ fn sock_recvfrom(c: &mut Nic, s: u64, buf: &mut Bytes, max: u64) -> u64
   }
 }
 
-/// Is a datagram queued on s (so sock_recvfrom would return one)?
+/// Is a datagram queued on s (so sock_recvfrom would return one)? It does
+/// not poll the card: the scheduler does that on every pass.
 fn sock_ready(c: &Nic, s: u64) -> bool
   requires nic_ok(c)
 {
   match c {
     Nic::None => { return false; },
-    Nic::Up(n) => { return udp_is_open(n, s) && sk_get(n, s, S_HAS) == 1; },
+    Nic::Up(n) => { return udp_queued(n, s) > 0; },
   }
 }
 
-/// The address and port the last datagram on s came from (0 before any).
+/// The address and port the last datagram taken from s came from (0
+/// before any).
 fn sock_peer_ip(c: &Nic, s: u64) -> u64
   requires nic_ok(c)
   ensures result <= 4294967295
@@ -896,7 +1133,7 @@ fn sock_close(c: &mut Nic, s: u64) -> bool
       if ok {
         sk_set(&mut n, s, S_OPEN, 0);
         sk_set(&mut n, s, S_PORT, 0);
-        sk_set(&mut n, s, S_HAS, 0);
+        sk_set(&mut n, s, S_COUNT, 0);
       }
       c = Nic::Up(n);
       return ok;

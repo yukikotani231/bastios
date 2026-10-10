@@ -115,6 +115,9 @@ steps = [
     ("ping", b"reply from 10.0.2.2"),
     ("ping 10.0.2.3", b"reply from 10.0.2.3"),
     ("ping 10.0.2.300", b"usage: ping"),
+    # Nothing answers ARP for this address: the shell waits off the kernel
+    # lock (its process is in NETWAIT) until the timer ends the ping.
+    ("ping 10.0.2.99", b"no answer to ARP for 10.0.2.99"),
     ("cpus", f"processors running: {smp}\r\n".encode()),
     ("about", b"proved safe"),
     ("echo hello world", b"hello world"),
@@ -327,6 +330,27 @@ else:
         print("ok   UDP socket: sendto from an ephemeral port")
     else:
         print("FAIL UDP sendto:", got); fails += 1
+    # Three datagrams sent while the shell sleeps queue on the socket and
+    # come out in order.
+    mark = len(out)
+    qemu.stdin.write(b"udpecho 7000 3\r"); qemu.stdin.flush()
+    got = []
+    if read_until(b"listening on udp port 7000", mark):
+        us = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        us.settimeout(10)
+        try:
+            for w in (b"one", b"two", b"three"):
+                us.sendto(w, ("127.0.0.1", udp_port2))
+            for _ in range(3):
+                got.append(us.recvfrom(100)[0])
+        except OSError:
+            pass
+        us.close()
+    if (read_until(b"bastios> ", mark) and got == [b"one", b"two", b"three"]
+            and re.search(rb": one\r\n.*: two\r\n.*: three\r\n", out[mark:], re.S)):
+        print("ok   UDP socket: three datagrams queue and come out in order")
+    else:
+        print("FAIL UDP socket queue:", got); fails += 1
     mark = len(out)
     qemu.stdin.write(b"udpsend 10.0.2.2 0 x\r"); qemu.stdin.flush()
     if read_until(b"bastios> ", mark) and b"usage: udpsend" in out[mark:]:
