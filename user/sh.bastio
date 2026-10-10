@@ -404,6 +404,7 @@ fn cmd_help(con: &Serial) {
   puts(con, "  mul A B          multiply two numbers (overflow is checked)\r\n");
   puts(con, "  ps               list processes\r\n");
   puts(con, "  mem              free physical pages\r\n");
+  puts(con, "  uptime           timer ticks since boot (100 a second)\r\n");
   puts(con, "  cpus             processors running\r\n");
   puts(con, "  kill PID         stop a process\r\n");
   puts(con, "  NAME [&]         run a program and wait for it (`&`: don't wait)\r\n");
@@ -553,6 +554,12 @@ fn main(con: &mut Serial) -> u64 {
     } else if is_cmd(line, n, "mem") {
       put_num(con, sys_info(0));
       puts(con, " free pages\r\n");
+    } else if is_cmd(line, n, "uptime") {
+      let t = sys_info(1);
+      put_num(con, t);
+      puts(con, " ticks, ");
+      put_num(con, t / 100);
+      puts(con, " s\r\n");
     } else if is_cmd(line, n, "cpus") {
       puts(con, "processors running: ");
       put_num(con, sys_info(2));

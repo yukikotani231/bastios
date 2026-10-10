@@ -214,16 +214,16 @@ fn q_pop(q: &mut Buf) -> u64
 }
 
 /// Moves every byte the UART has received into the queue.
-fn drain(con: &Serial, q: &mut Buf)
-  requires qok(q)
+fn drain(con: &mut Uart, q: &mut Buf)
+  requires uart_ok(con) && qok(q)
   ensures qok(q)
 {
-  let mut c = serial_poll(con);
+  let mut c = uart_poll(&mut con);
   while c < 256
     invariant qok(q)
   {
     q_push(&mut q, c);
-    c = serial_poll(con);
+    c = uart_poll(&mut con);
   }
 }
 
@@ -517,35 +517,37 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
   }
 }
 
-fn put_state(con: &Serial, s: u64) {
+fn put_state(con: &mut Uart, s: u64)
+  requires uart_ok(con)
+{
   if s == READY {
-    puts(con, "ready  ");
+    puts(&mut con, "ready  ");
   } else if s == READING || s == LXREADING {
-    puts(con, "reading");
+    puts(&mut con, "reading");
   } else if s == WAITING {
-    puts(con, "waiting");
+    puts(&mut con, "waiting");
   } else {
-    puts(con, "zombie ");
+    puts(&mut con, "zombie ");
   }
 }
 
-fn print_ps(con: &Serial, procs: &Buf)
-  requires len(procs) == PTAB_LEN
+fn print_ps(con: &mut Uart, procs: &Buf)
+  requires uart_ok(con) && len(procs) == PTAB_LEN
 {
-  puts(con, "  PID  PPID STATE    TICKS NAME\r\n");
+  puts(&mut con, "  PID  PPID STATE    TICKS NAME\r\n");
   let mut p = 1;
   while p < NPROC
     invariant 1 <= p && p <= NPROC
   {
     if state(procs, p) != FREE {
-      put_num_pad(con, p, 5);
-      put_num_pad(con, pget(procs, p, F_PARENT), 6);
-      puts(con, " ");
-      put_state(con, state(procs, p));
-      put_num_pad(con, pget(procs, p, F_TICKS), 6);
-      puts(con, " ");
-      puts(con, prog_name(pget(procs, p, F_PROG)));
-      puts(con, "\r\n");
+      put_num_pad(&mut con, p, 5);
+      put_num_pad(&mut con, pget(procs, p, F_PARENT), 6);
+      puts(&mut con, " ");
+      put_state(&mut con, state(procs, p));
+      put_num_pad(&mut con, pget(procs, p, F_TICKS), 6);
+      puts(&mut con, " ");
+      puts(&mut con, prog_name(pget(procs, p, F_PROG)));
+      puts(&mut con, "\r\n");
     }
     p = p + 1;
   }

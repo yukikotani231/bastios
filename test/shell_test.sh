@@ -9,7 +9,7 @@ TIMEOUT=${TIMEOUT:-60}
 SMP=${SMP:-4}
 
 python3 - "$KERNEL" "$TIMEOUT" "$SMP" <<'PY'
-import subprocess, sys, time, select
+import re, subprocess, sys, time, select
 
 kernel, timeout, smp = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
 
@@ -148,6 +148,24 @@ else:
         print("ok   both fpucheck processes kept xmm0")
     else:
         print("FAIL fpucheck: SSE state leaked between processes"); fails += 1
+    # The timer (src/pit.bastio) runs at 100 Hz and every tick is
+    # acknowledged at the interrupt controller (src/pic.bastio): ticks keep
+    # coming, about 100 a second. The window is wide because QEMU's clock
+    # under load is not exact.
+    def uptime():
+        mark = len(out)
+        qemu.stdin.write(b"uptime\r"); qemu.stdin.flush()
+        if not read_until(b"bastios> ", mark):
+            return None
+        m = re.search(rb"(\d+) ticks, \d+ s", out[mark:])
+        return int(m.group(1)) if m else None
+    t0, w0 = uptime(), time.time()
+    time.sleep(2)
+    t1, w1 = uptime(), time.time()
+    if t0 is not None and t1 is not None and 60 * (w1 - w0) <= t1 - t0 <= 200 * (w1 - w0):
+        print(f"ok   timer: {t1 - t0} ticks in {w1 - w0:.1f} s")
+    else:
+        print("FAIL timer ticks:", t0, t1); fails += 1
     # Every page the finished processes and removed files used must be
     # back in the pool.
     mem = [l.strip() for l in out.split(b"\n") if l.strip().endswith(b"free pages")]
@@ -157,7 +175,6 @@ else:
         print("FAIL page leak:", mem); fails += 1
     qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
     read_until(b"pages free at power off")
-import re
 boot = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
 off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
 if boot and off and boot.group(1) == off.group(1):

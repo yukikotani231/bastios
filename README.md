@@ -36,6 +36,7 @@ The kernel (`src/`) runs user programs in ring 3, each in its own address space,
 - every physical page is owned by exactly one thing at a time: the allocator, or one slot of one page table. The allocator's bitmap is proved to agree with the pool, so a page is never handed out twice;
 - a page table is empty before it is freed, so tearing down a process returns every page (the test checks that the count at power off equals the count at boot);
 - table levels line up, user mappings never go into the kernel's slot of a top-level table, and the address space in CR3 is never freed;
+- every device is driven through the I/O ports it claimed: the UART, the interrupt controllers and the timer each own their ports (claimed once, in `main`), no two of them can own the same port, and an access outside a driver's ports does not compile;
 - the kernel never reads memory through an address: it reads a user buffer by taking each table out of its parent and the page out of the last table, and putting them back;
 - a file's data pages are owned by the file, so removing a file (or powering off) gives each of them back exactly once, and a system call copies only bytes inside the user range it was given and inside the kernel's transfer buffer.
 
@@ -47,6 +48,7 @@ How the pieces fit together (boot, memory, processes, the scheduler, system call
 
 | Path | What |
 | --- | --- |
+| `src/uart.bastio`, `src/pic.bastio`, `src/pit.bastio` | Device drivers: COM1, the 8259 interrupt controllers, the 100 Hz timer |
 | `src/pages.bastio` | Physical page allocator (`Mem`: a bitmap proved to track the pool) |
 | `src/space.bastio` | Building, walking and tearing down user address spaces |
 | `src/elf.bastio` | Loading static Linux x86-64 ELF executables: header checks, segments, the initial stack (argv, envp, auxv) |
@@ -110,9 +112,9 @@ The proof covers everything in `src/` and `user/*.bastio`. Everything below it i
 | --- | --- | --- |
 | Boot and trap entry | `boot/boot.S` | Multiboot entry, identity map, long mode; GDT with user segments; the trap stubs and the `syscall` entry; enabling SSE; entering user mode (which also loads the FS base) (`bst_cpu_enter`) and idling (`bst_cpu_wait`) |
 | Processor startup | `boot/smp.c`, `boot/ap.S` | Finding the processors in the ACPI MADT, mapping the local APIC, INIT and startup IPIs; the real-mode trampoline that takes each application processor to long mode on the kernel's tables, where it checks in and parks. C until Bastio has an `Mmio` capability |
-| Platform setup | `boot/platform.c` | TSS, interrupt table, `syscall` MSRs, 8259 PICs, 100 Hz timer |
+| Platform setup | `boot/platform.c` | TSS, interrupt table, `syscall` MSRs |
 | C helpers | `boot/libc.c` | `memset` / `memcpy` / `memmove` / `memcmp`, which the C compiler may call |
-| Runtime preludes | in bastiolang, `stage0/src/codegen.rs` | COM1 port I/O, the arena allocator, page-table entry encoding, CR3 loads, the system call stubs for user programs |
+| Runtime preludes | in bastiolang, `stage0/src/codegen.rs` | one `in` / `out` instruction per port access, COM1 output for the prelude's own panic messages, the arena allocator, page-table entry encoding, CR3 loads, the system call stubs for user programs |
 | User entry | `user/start.S`, `user/user.ld` | Image header; calls `main` and exits with its result |
 | Toolchain | | Z3, the stage0 compiler, the C compiler, QEMU |
 
@@ -123,7 +125,7 @@ Count the lines yourself (`wc -l boot/* user/*.S`). Copied numbers go stale.
 ## Status
 
 v0.2: processes, preemptive round-robin scheduling, system calls, fault isolation, and an in-memory file system. Not there yet:
-- one CPU runs the kernel: the other processors are started at boot (`cpus` in the shell counts them) but park until Bastio has locks and `smp_start` (bastiolang docs/concurrency.md); the kernel runs with interrupts off and polls the UART;
+- one CPU runs the kernel: the other processors are started at boot (`cpus` in the shell counts them) but park until Bastio has locks and `smp_start` (bastiolang docs/concurrency.md); the kernel runs with interrupts off and handles each interrupt as an event in its main loop;
 - all user pages are mapped writable and executable (the image has no page-aligned sections yet);
 - a user window of 2 MiB per process, at most 15 processes, programs built into the kernel image (the file system cannot hold programs to run yet);
 - the file system lives in memory only: a flat directory of 32 files, names up to 28 bytes, files up to 1 MiB, 8 open files per process, and nothing survives power off (there is no block device driver yet);
