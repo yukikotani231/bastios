@@ -153,12 +153,15 @@ t_ipc: socketpair AF_UNIX
 t_ipc: socketpair both ways, EOF after close
 t_ipc: timerfd
 t_mem: 64 MiB of address space
+t_mem: MAP_SHARED write-back at exit, after close
+t_mem: MAP_SHARED write-back at munmap
 t_mem: file for mapping
 t_mem: madvise
 t_mem: malloc churn
 t_mem: mlock
 t_mem: mmap MAP_FIXED
 t_mem: mmap a file MAP_PRIVATE
+t_mem: mmap a file MAP_SHARED writes back
 t_mem: mmap anonymous
 t_mem: mmap is zeroed
 t_mem: mprotect read-only faults on write
@@ -181,6 +184,9 @@ t_misc: strtod
 t_misc: sync
 t_misc: tcgetattr
 t_misc: tcsetattr
+t_net: AF_INET6 TCP over ::1
+t_net: AF_INET6 UDP over ::1
+t_net: AF_INET6 socket
 t_net: SO_REUSEADDR
 t_net: TCP bind/listen
 t_net: TCP loopback connect/accept

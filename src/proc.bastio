@@ -338,6 +338,9 @@ const ALARMS_LEN: u64 = 224;         // NPROC * 2, then PT_N POSIX timers of PT_
 const PT_BASE: u64 = 32;             // where the POSIX timers start in k.alarms (src/lxptimer.bastio)
 const PT_N: u64 = 4;                 // POSIX timers per process
 const PT_W: u64 = 3;                 // words per timer: deadline, interval, state
+const MAP_N: u64 = 4;                // MAP_SHARED file mappings per process
+const MAP_W: u64 = 4;                // words per mapping: first page + 1, pages, description, offset
+const MAPS_LEN: u64 = 256;           // NPROC * MAP_N * MAP_W
 const LX_PAUSE: u64 = 34;
 const LX_RT_SIGSUSPEND: u64 = 130;
 const LX_WAITID: u64 = 247;
@@ -470,10 +473,12 @@ struct Kernel {
   evt: Buf,             // timerfds and epoll instances (src/lxevent.bastio)
   ux: Buf,              // AF_UNIX channels and names (src/lxunix.bastio)
   uxb: Bytes,           // their bytes
+  maps: Buf,            // Linux MAP_SHARED file mappings, MAP_N per process (src/lxmem.bastio)
+  inet6: u64,           // bit h: open file description h is an AF_INET6 socket (src/lxsock.bastio)
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN
 }
 
 // ---------------------------------------------------------------- programs
@@ -918,6 +923,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code: u64)
   if pid == 0 {
     return;
   }
+  map_drop_all(&mut k, pid);                 // shared file pages go back first
   vfork_give_back(&mut k, mmu, pid);         // a borrowed address space goes home
   match take_space(&mut k.spaces, pid) {
     Space::Empty => {},

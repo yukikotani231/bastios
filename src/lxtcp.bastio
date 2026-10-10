@@ -145,6 +145,9 @@ fn lx_accept(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, flags: u64
     return ENFILE;
   }
   of_set(&mut k.ofd, h, 3, tm_word(flags / SOCK_NONBLOCK % 2, tk.port, TM_CONN));
+  if ofd_v6(k, tk.h) {
+    k.inet6 = k.inet6 | (1 << h);           // an AF_INET6 listener's connections are too
+  }
   let nfd = fd_install(&mut k, pid, h);
   if nfd >= LXNFD {
     return nfd;                             // -EMFILE; the description is gone
@@ -152,7 +155,7 @@ fn lx_accept(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, flags: u64
   if flags / SOCK_CLOEXEC % 2 == 1 {
     fd_set(&mut k.lxfd, pid, nfd, FD_OFD + h + FD_CLOEXEC);
   }
-  let r = sin_out(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, c), tcp_peer_port(k.nic, c));
+  let r = sin_out(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, c), tcp_peer_port(k.nic, c), ofd_v6(k, h));
   if r != 0 {
     return r;
   }
@@ -267,12 +270,12 @@ fn lx_tcp_name(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
     return tk.err;
   }
   if !peer {
-    return sin_out(&mut k, pid, addr, lenp, 0, tk.port);
+    return sin_out(&mut k, pid, addr, lenp, 0, tk.port, ofd_v6(k, tk.h));
   }
   if tk.mode != TM_CONN || tk.t >= TCBS {
     return ENOTCONN;
   }
-  return sin_out(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, tk.t), tcp_peer_port(k.nic, tk.t));
+  return sin_out(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, tk.t), tcp_peer_port(k.nic, tk.t), ofd_v6(k, tk.h));
 }
 
 /// What a poll on a stream socket finds now: a listener is readable when a

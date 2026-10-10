@@ -14,6 +14,13 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Added
 
+- `msync` writes a `MAP_SHARED` file mapping back to the file, and so do
+  `munmap`, exit and `execve` (up to four such mappings per process; the
+  mapping is still a copy, so others see the bytes only after a
+  write-back).
+- `AF_INET6` sockets, TCP and UDP, over the IPv4 stack: `::`, `::1` and
+  `::ffff:a.b.c.d` work, and names come back as `sockaddr_in6`. There is
+  no IPv6 on the wire.
 - `munmap`, `mprotect` and `mremap` work: unmapped pages fault, read-only
   pages fault on a write (and stay read-only across `fork`), and `mremap`
   grows a mapping by moving its pages. A user fault now kills the process
