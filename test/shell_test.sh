@@ -244,6 +244,10 @@ steps = [
     # posix_spawn: clone(CLONE_VM | CLONE_VFORK) lends the parent's
     # address space to the child until it execs or exits (user/mspawn.c).
     ("mspawn", [b"spawned 5", b"mspawn: ok, kept 1234"], b"\n# "),
+    # pthreads: clone(CLONE_THREAD), futex behind mutexes, condition
+    # variables (one timed) and joins, and _exit from a thread ending the
+    # whole process (user/mthread.c).
+    ("mthread", b"mthread: ok, 8000 increments", b"\n# "),
     ("exit 5", b"[exit 5]"),
     ("rm lxout", b""),
     ("sh", b"BastiOS 0.2 -- type"),

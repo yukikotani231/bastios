@@ -111,7 +111,7 @@ fn post_sig(k: &mut Kernel, p: u64, s: u64)
   }
   pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
   let blocked = has_sig(pget(k.procs, p, F_SIGMASK), s) && s != SIGKILL;
-  if !blocked && (st == LXREADING || st == LXWAITING) {
+  if !blocked && (st == LXREADING || st == LXWAITING || st == FUTEXWAIT) {
     pset(&mut k.procs, p, F_STATE, READY);
   }
 }
