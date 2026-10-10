@@ -482,13 +482,13 @@ fn tcp_mss_opt(n: &Net, hl: u64) -> u64
   while o < end
     invariant 54 <= o && 64 <= mss && mss <= TCP_MSS
   {
-    let kind = bget(n.pkt, o);
+    let kind = cast[u64](bget(n.pkt, o));
     if kind == 0 || o + 1 >= end {
       o = end;                        // the end of the options
     } else if kind == 1 {
       o = o + 1;                      // padding
     } else {
-      let l = bget(n.pkt, o + 1);
+      let l = cast[u64](bget(n.pkt, o + 1));
       if l < 2 || o + l > end {
         o = end;                      // malformed: ignore the rest
       } else {
