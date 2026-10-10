@@ -252,7 +252,7 @@ steps = [
     ("mdir", b"mdir: ok in /dx, mapped", b"\n# "),
     # Small calls: uname, readv, pread/pwrite, limits, sysinfo, statfs,
     # getrandom, priorities, sessions (user/mmisc.c).
-    ("mmisc", b"mmisc: ok on Linux x86_64", b"\n# "),
+    ("mmisc", b"mmisc: ok on Linux x86_64, signals", b"\n# "),
     # posix_spawn: clone(CLONE_VM | CLONE_VFORK) lends the parent's
     # address space to the child until it execs or exits (user/mspawn.c).
     ("mspawn", [b"spawned 5", b"mspawn: ok, kept 1234"], b"\n# "),
