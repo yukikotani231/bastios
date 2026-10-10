@@ -524,6 +524,9 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   let fresh = f / O_CREATE % 2 == 1 && vfs_lookup(&mut k.fs, n) == NO_FILE;
   let nfd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, f, n);
   if nfd == NO_FD || nfd >= NFD {
+    if fresh && path_ok(k.fs, n) && parent_ok(&mut k.fs, n) {
+      return ENOSPC;                        // no free node for it
+    }
     return ENOENT;
   }
   let row = pid * NFD + nfd;

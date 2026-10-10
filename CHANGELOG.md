@@ -150,6 +150,17 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   `nc` talking HTTP with a web server on the host (`run.py` runs one) and
   over loopback. A new group, `test/compat/tty.txt`, types keys at
   full-screen programs on the console and checks what they wrote.
+- git 2.47 and Perl 5.40 in `make compat`: git commits, branches, merges
+  300 files, packs with `gc`, clones through `upload-pack` and runs
+  `bisect run`; Perl runs its core modules, fork, signals, sockets and
+  HTTP::Tiny from the host. They found three gaps, fixed here: `execve`
+  passed at most 32 arguments, 16 environment strings and 1280 bytes of
+  them, now 8192 arguments, 1024 environment strings and 128 KiB, as on
+  Linux (`sed -i ... f*` over 300 files failed); `munmap` never gave the
+  address space back, so a program that maps and unmaps as it runs, as
+  musl's `malloc` does for every large block, used up its window (`git
+  add` of 300 files ran out); and the in-memory file system held 128
+  files, and a create past that failed with `ENOENT` instead of `ENOSPC`.
 
 ### Files and disks
 
@@ -198,7 +209,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - Files on the disk can grow to 1 GiB (as far as the disk allows) and in
   memory to 64 MiB; they were capped at 1 MiB.
 - Paths can be up to 255 bytes; they were capped at 28.
-- The in-memory file system holds 128 files and directories (it held 32).
+- The in-memory file system holds 1024 files and directories (it held 32).
 - The disk's directory grows: up to 1023 files and directories under
   `disk/` (it held 64). The format is now `BSTDISK3`, which names the
   directory's extra blocks in the superblock; a `BSTDISK2` disk is mounted

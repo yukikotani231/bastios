@@ -1,6 +1,10 @@
 # Checks that pass on BastiOS (make compat-baseline rewrites this).
 # make compat fails if one of them stops passing.
 apps: ash: a 1200-byte typed line
+apps: git: 300 files, a branch and a merge
+apps: git: gc, fsck and a clone through upload-pack
+apps: git: init, commit, log and diff
+apps: git: stash, revert and bisect run
 apps: httpd: serve a page, fetch it over loopback
 apps: lua: arithmetic and strings
 apps: lua: coroutines and tables
@@ -10,6 +14,12 @@ apps: micropython: classes, generators, exceptions, big integers
 apps: micropython: json, re, files, os
 apps: micropython: threads and a lock
 apps: nc: a raw HTTP request to the host
+apps: perl: HTTP::Tiny from the host
+apps: perl: files, directories and in-place editing
+apps: perl: fork, pipes, signals and alarm
+apps: perl: modules
+apps: perl: sockets over loopback
+apps: perl: the language
 apps: qjs: files and exec
 apps: qjs: language
 apps: qjs: promises and timers
@@ -238,6 +248,7 @@ t_mem: 64 MiB of address space
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
 t_mem: file for mapping
+t_mem: large malloc and free, many times
 t_mem: madvise
 t_mem: malloc churn
 t_mem: mlock
@@ -250,6 +261,7 @@ t_mem: mprotect read-only faults on write
 t_mem: mremap grow
 t_mem: munmap
 t_mem: munmap faults on touch
+t_mem: munmap gives address space back
 t_misc: /etc/passwd
 t_misc: /proc/meminfo
 t_misc: /proc/self/exe

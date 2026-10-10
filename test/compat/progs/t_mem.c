@@ -42,6 +42,21 @@ int main(void) {
            ({ pid_t c = fork(); c == 0 ? (q[0] = 9, _exit(0), 0) : c > 0 && waitpid(c, &st, 0) == c && q[0] == 9; }));
     EXPECT("mlock", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED && mlock(q, 4096) == 0);
     {
+        int ok = 1;
+        for (int i = 0; i < 200 && ok; i++) {
+            char *m = mmap(0, 1 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            ok = m != MAP_FAILED && m[0] == 0 && m[(1 << 20) - 1] == 0;
+            if (ok) { memset(m, 0xAA, 1 << 20); ok = munmap(m, 1 << 20) == 0; }
+        }
+        EXPECT("munmap gives address space back", ok);
+        for (int i = 0; i < 200 && ok; i++) {
+            char *m = malloc(600000);
+            ok = m != NULL;
+            if (ok) { m[0] = m[599999] = 1; free(m); }
+        }
+        EXPECT("large malloc and free, many times", ok);
+    }
+    {
         void *a[64]; int ok = 1;
         for (int i = 0; i < 64; i++) { a[i] = malloc(1000 + i * 3000); ok &= a[i] != NULL; if (a[i]) memset(a[i], i, 1000 + i * 3000); }
         for (int i = 0; i < 64; i += 2) free(a[i]);

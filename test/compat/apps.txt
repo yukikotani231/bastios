@@ -1,5 +1,6 @@
 # Real programs for the compatibility suite (test/compat), built by the
-# Makefile from their own sources: Lua, QuickJS and the sqlite3 shell.
+# Makefile from their own sources: Lua, QuickJS, the sqlite3 shell, MicroPython,
+# git and Perl (kilo is driven from tty.txt).
 # The format is applets.txt's:
 #
 #   == NAME
@@ -99,3 +100,69 @@ status 1
 == nc: a raw HTTP request to the host
 $ printf 'GET /hello.txt HTTP/1.0\r\n\r\n' | /disk/busybox nc HOSTADDR | /disk/busybox tail -n 1
 hello from the host
+
+== git: init, commit, log and diff
+$ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_EXEC_PATH=/disk; G="/disk/git --no-pager -c user.name=T -c user.email=t@x -c init.defaultBranch=main -c maintenance.auto=false -c color.ui=false"; mkdir ca_g && (cd ca_g && $G init -q --template= && echo one > a && $G add a && $G commit -qm first && echo two >> a && $G commit -qam second && $G log --format=%s && $G diff --stat HEAD~1 && $G show HEAD~1:a); rm -rf ca_g
+second
+first
+ a | 1 +
+ 1 file changed, 1 insertion(+)
+one
+
+== git: 300 files, a branch and a merge
+$ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_EXEC_PATH=/disk; G="/disk/git --no-pager -c user.name=T -c user.email=t@x -c init.defaultBranch=main -c maintenance.auto=false -c color.ui=false"; mkdir ca_g && (cd ca_g && $G init -q --template= && i=0 && while [ $i -lt 300 ]; do /disk/busybox seq $i $((i + 50)) > f$i; i=$((i + 1)); done && $G add . && $G commit -qm many && $G checkout -qb side && /disk/busybox sed -i 's/^7$/seven/' f* && $G commit -qam side && $G checkout -q main && echo x > new && $G add new && $G commit -qm new && $G merge -q --no-edit side && $G rev-list --count HEAD && $G grep -l seven | /disk/busybox wc -l && $G ls-files | /disk/busybox wc -l); rm -rf ca_g
+4
+8
+301
+
+== git: gc, fsck and a clone through upload-pack
+$ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_EXEC_PATH=/disk; G="/disk/git --no-pager -c user.name=T -c user.email=t@x -c init.defaultBranch=main -c maintenance.auto=false -c color.ui=false"; mkdir ca_g && (cd ca_g && $G init -q --template= && for i in 1 2 3 4 5 6; do /disk/busybox seq 1 $((i * 500)) > f && $G add f && $G commit -qm c$i; done && $G gc -q && $G fsck --no-progress && $G count-objects -v | /disk/busybox grep -e '^count' -e '^packs') && $G clone -q --template= --no-local -u '/disk/git upload-pack' ca_g ca_g2 && $G -C ca_g2 log --format=%s | /disk/busybox head -n 2 && /disk/busybox cmp ca_g/f ca_g2/f && echo same; rm -rf ca_g ca_g2
+count: 0
+packs: 1
+c6
+c5
+same
+
+== git: stash, revert and bisect run
+$ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_EXEC_PATH=/disk; G="/disk/git --no-pager -c user.name=T -c user.email=t@x -c init.defaultBranch=main -c maintenance.auto=false -c color.ui=false"; mkdir ca_g && (cd ca_g && $G init -q --template= && for i in 1 2 3 4 5 6 7 8; do echo $i >> f && $G add f && $G commit -qm c$i; done && echo wip >> f && $G stash -q && $G stash list | /disk/busybox wc -l && $G stash pop -q && $G checkout -q f && $G revert --no-edit HEAD >/dev/null && /disk/busybox tail -n 1 f && $G bisect start HEAD HEAD~8 >/dev/null && $G bisect run /disk/busybox sh -c '! /disk/busybox grep -qx 5 f' >/dev/null && $G log -1 --format=%s refs/bisect/bad && $G bisect reset >/dev/null 2>&1); rm -rf ca_g
+1
+7
+c5
+
+== perl: the language
+$ /disk/perl -I/disk/perllib -e 'use strict; use warnings; my %h; $h{$_}++ for split //, "mississippi"; print join(" ", map {"$_=$h{$_}"} sort keys %h), "\n"; (my $t = "the quick brown fox") =~ s/(\w+)/\u$1/g; print "$t\n"; printf "%.3f %s %s\n", 3.14159, join(",", sort { $a <=> $b } 10, 9, 100, 1), scalar reverse "olleh"'
+i=4 m=1 p=2 s=4
+The Quick Brown Fox
+3.142 1,9,10,100 hello
+
+== perl: modules
+$ /disk/perl -I/disk/perllib -MData::Dumper -MJSON::PP -MDigest::MD5=md5_hex -MDigest::SHA=sha256_hex -MPOSIX=floor,strftime -MList::Util=sum,reduce -e '$Data::Dumper::Indent = 0; $Data::Dumper::Sortkeys = 1; print Dumper({a => [1, 2], b => "x"}), "\n"; print JSON::PP->new->canonical->encode(JSON::PP->new->decode(q({"b":[1,{"c":null}],"a":2}))), "\n"; print md5_hex("abc"), " ", substr(sha256_hex("abc"), 0, 16), "\n"; print floor(-2.5), " ", strftime("%Y-%m-%d", gmtime(86400 * 365)), " ", sum(1 .. 100), " ", (reduce { $a * $b } 1 .. 20), "\n"'
+$VAR1 = {'a' => [1,2],'b' => 'x'};
+{"a":2,"b":[1,{"c":null}]}
+900150983cd24fb0d6963f7d28e17f72 ba7816bf8f01cfea
+-3 1971-01-01 5050 2432902008176640000
+
+== perl: fork, pipes, signals and alarm
+$ /disk/perl -e 'pipe(my $r, my $w); my $p = fork; if (!$p) { close $r; print $w "child\n"; exit 7 } close $w; my $l = <$r>; waitpid($p, 0); print "got $l", "status ", $? >> 8, "\n"; print `/disk/busybox echo backtick`; system("/bin/sh", "-c", "exit 3"); print "system ", $? >> 8, "\n"; $SIG{USR1} = sub { print "usr1\n" }; kill USR1 => $$; $SIG{ALRM} = sub { die "alarm\n" }; eval { alarm 1; sleep 5 }; print "eval $@"'
+got child
+status 7
+backtick
+system 3
+usr1
+eval alarm
+
+== perl: files, directories and in-place editing
+$ /disk/perl -I/disk/perllib -MFcntl=:flock -e 'mkdir "ca_pd" or die; open(my $f, ">", "ca_pd/x") or die; flock($f, LOCK_EX) or die; print $f "hello\n"; close $f; system("/disk/perl", "-pi", "-e", "s/hello/HELLO/", "ca_pd/x"); open($f, "<", "ca_pd/x") or die; print <$f>; opendir(my $d, "ca_pd") or die; print join(",", grep !/^\./, readdir $d), " ", (stat "ca_pd/x")[7], "\n"; rename "ca_pd/x", "ca_pd/y" or die; unlink "ca_pd/y"; rmdir "ca_pd" or die; print "clean\n"'
+HELLO
+x 6
+clean
+
+== perl: sockets over loopback
+$ /disk/perl -I/disk/perllib -MIO::Socket::INET -e 'my $s = IO::Socket::INET->new(Listen => 5, LocalAddr => "127.0.0.1", LocalPort => 18099, ReuseAddr => 1) or die "listen: $!"; my $p = fork; if (!$p) { my $c = IO::Socket::INET->new(PeerAddr => "127.0.0.1:18099") or die "connect: $!"; print $c "ping\n"; my $a = <$c>; print "child got $a"; exit 0 } my $c = $s->accept; my $l = <$c>; print $c "pong\n"; close $c; waitpid($p, 0); print "server got $l"'
+child got pong
+server got ping
+
+== perl: HTTP::Tiny from the host
+$ /disk/perl -I/disk/perllib -MHTTP::Tiny -MDigest::MD5=md5_hex -e 'my $h = HTTP::Tiny->new; my $r = $h->get("HOSTURL/hello.txt"); print "$r->{status} $r->{content}"; $r = $h->get("HOSTURL/mib.bin"); print "$r->{status} ", length($r->{content}), " ", md5_hex($r->{content}), "\n"'
+200 hello from the host
+200 1048576 85bfb9943e6f0cb09f0f52679e9eac2b

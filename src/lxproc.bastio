@@ -161,6 +161,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   pset(&mut k.procs, c, F_QUIET, 0);
   lx_fd_fork(&mut k, pid, c);
   map_fork(&mut k, pid, c);
+  hole_fork(&mut k, pid, c);
   sig_fork(&mut k.sigact, pid, c);
   cwd_fork(&mut k.cwd, pid, c);
   pset(&mut k.procs, c, F_SIGPEND, 0);
@@ -224,6 +225,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
       put_space(&mut k.spaces, pid, Space::Mapped(new));
     },
   }
+  hole_clear(&mut k, pid);                // a new window has no holes
   lx_fd_close_all(&mut k, pid, true);
   sig_reset(&mut k.sigact, pid, true);
   pset(&mut k.procs, pid, F_ALTSIZE, 0);  // and the alternate signal stack
@@ -362,28 +364,39 @@ fn lx_args(k: &mut Kernel, pid: u64, argv: u64, args: &mut Bytes, from: u64, mos
     if w.v < USER_BASE || w.v >= USER_BASE + USER_SIZE {
       return EFAULT;
     }
-    let want = smaller(ARGS_MAX - alen, USER_SIZE - (w.v - USER_BASE));
-    let got = copy_from_user(&mut k.spaces, pid, w.v, &mut k.fs.xfer, want);
-    if got == NO_RESULT {
-      return EFAULT;
-    }
-    let mut e = 0;
-    while e < got && bget(k.fs.xfer, e) != 0
-      invariant e <= got && got <= want && kok(k)
+    // A string is copied a transfer buffer at a time, up to its NUL.
+    let mut at = w.v;
+    let mut done = false;
+    while !done
+      invariant from <= alen && alen <= ARGS_MAX && kok(k) && blen(args) == ARGS_MAX
+      invariant USER_BASE <= at && j < most && most <= ARGV_MAX && argv < USER_BASE + USER_SIZE
     {
-      e = e + 1;
+      if alen >= ARGS_MAX {
+        return E2BIG;                         // no NUL in what fits
+      }
+      if at >= USER_BASE + USER_SIZE {
+        return EFAULT;
+      }
+      let want = smaller(smaller(ARGS_MAX - alen, XFER), USER_SIZE - (at - USER_BASE));
+      let got = copy_from_user(&mut k.spaces, pid, at, &mut k.fs.xfer, want);
+      if got == NO_RESULT || got == 0 {
+        return EFAULT;
+      }
+      let mut i = 0;
+      while i < got && !done
+        invariant i <= got && got <= want && want <= ARGS_MAX - alen && want <= XFER && kok(k) && blen(args) == ARGS_MAX
+        invariant from <= alen && alen < ARGS_MAX && USER_BASE <= at && j < most && most <= ARGV_MAX && argv < USER_BASE + USER_SIZE
+      {
+        let c = bget(k.fs.xfer, i);
+        bset(&mut args, alen + i, c);
+        if c == 0 {
+          done = true;
+        }
+        i = i + 1;
+      }
+      alen = alen + i;
+      at = at + i;
     }
-    if e >= got {
-      return E2BIG;                           // no NUL in what fits
-    }
-    let mut i = 0;
-    while i <= e
-      invariant i <= e + 1 && e < got && got <= ARGS_MAX - alen && kok(k) && blen(args) == ARGS_MAX
-    {
-      bset(&mut args, alen + i, bget(k.fs.xfer, i));
-      i = i + 1;
-    }
-    alen = alen + e + 1;
     j = j + 1;
   }
   return E2BIG;

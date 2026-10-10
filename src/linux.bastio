@@ -1568,10 +1568,21 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // What was there goes, read-only pages too: the new mapping is writable.
     map_forget(&mut k, pid, at / 4096, at / 4096 + pages, false);
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
+    hole_cut(&mut k, pid, at / 4096, at / 4096 + pages);
     if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages) {
       return ENOMEM;
     }
   } else {
+    let reserve = anon && prot == 0;
+    // A hole munmap left first (src/lxmem.bastio): its pages are unmapped.
+    let h = hole_take(&mut k, pid, pages);
+    if h < STACK_FIRST {
+      if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, h, h + pages) {
+        hole_add(&mut k, pid, h, h + pages);
+        return ENOMEM;
+      }
+      return lx_mmap_fill(&mut k, pid, h * 4096, pages, prot, flags, fd, off, anon, f);
+    }
     let brk = pget(k.procs, pid, F_BRK);
     let low = pget(k.procs, pid, F_MMAP);
     if low > STACK_FIRST * 4096 || brk > low || pages * 4096 > low - brk {
@@ -1584,12 +1595,21 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // Fresh PROT_NONE memory is only address space: its pages are mapped
     // when an mprotect makes them usable (lx_mprotect), and touching it
     // before that faults, as on Linux.
-    let reserve = anon && prot == 0;
     if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096) {
       return ENOMEM;
     }
     pset(&mut k.procs, pid, F_MMAP, at);
   }
+  return lx_mmap_fill(&mut k, pid, at, pages, prot, flags, fd, off, anon, f);
+}
+
+/// The rest of mmap once window offset `at` has its pages: a file's bytes
+/// copied in, the mapping recorded if shared, and write access taken away
+/// without PROT_WRITE.
+fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags: u64, fd: u64, off: u64, anon: bool, f: u64) -> u64
+  requires kok(k) && pid < NPROC && at <= USER_SIZE && pages <= WPAGES
+  ensures kok(k)
+{
   // Fresh pages are zero: only a file's bytes need copying in.
   if anon {
     if prot != 0 {

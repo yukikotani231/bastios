@@ -304,7 +304,8 @@ build/compat/busybox: build/busybox/Makefile test/compat/busybox.config | build/
 	cp build/compat/bb/busybox $@
 
 # Real programs, built from their own sources against musl as static PIEs
-# and checked by test/compat/apps.txt: Lua, QuickJS and the sqlite3 shell.
+# and checked by test/compat/apps.txt: Lua, QuickJS, the sqlite3 shell, MicroPython,
+# kilo, git and Perl.
 # sqlite3's sources come from its GitHub mirror, which has no amalgamation:
 # configuring and generating it needs tclsh (the tcl package).
 LUA_GIT       ?= https://github.com/lua/lua
@@ -317,7 +318,14 @@ MPY_GIT       ?= https://github.com/micropython/micropython
 MPY_TAG       ?= v1.24.1
 KILO_GIT      ?= https://github.com/antirez/kilo
 KILO_REV      ?= 323d93b29bd89a2cb446de90c4ed4fea1764176e
-COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo
+ZLIB_GIT      ?= https://github.com/madler/zlib
+ZLIB_TAG      ?= v1.3.1
+GIT_GIT       ?= https://github.com/git/git
+GIT_TAG       ?= v2.47.0
+PERL_GIT      ?= https://github.com/Perl/perl5
+PERL_TAG      ?= v5.40.0
+COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo \
+                 build/compat/git build/compat/perl
 APP_CFLAGS    := -static-pie -fPIE -O2 -w -s
 
 build/compat/src:
@@ -362,6 +370,39 @@ build/compat/kilo: | build/compat/src
 	git -C build/compat/src/kilo fetch -q --depth 1 $(KILO_GIT) $(KILO_REV)
 	git -C build/compat/src/kilo checkout -q FETCH_HEAD
 	$(MUSLCC) $(APP_CFLAGS) -o $@ build/compat/src/kilo/kilo.c
+
+# git, with zlib and nothing else (no curl, OpenSSL, expat, gettext or
+# iconv). It looks for its own subcommands in /disk, where it is.
+build/compat/git: | build/compat/src
+	rm -rf build/compat/src/zlib build/compat/src/zlib-out build/compat/src/git
+	git clone -q --depth 1 --branch $(ZLIB_TAG) $(ZLIB_GIT) build/compat/src/zlib
+	cd build/compat/src/zlib && CC=$(MUSLCC) CFLAGS="-O2 -fPIE" ./configure --static --prefix=$(CURDIR)/build/compat/src/zlib-out >/dev/null
+	$(MAKE) -C build/compat/src/zlib -s install >/dev/null
+	git clone -q --depth 1 --branch $(GIT_TAG) $(GIT_GIT) build/compat/src/git
+	$(MAKE) -C build/compat/src/git -s CC=$(MUSLCC) CFLAGS="-O2 -fPIE -I$(CURDIR)/build/compat/src/zlib-out/include" \
+	  LDFLAGS="-static-pie -s -L$(CURDIR)/build/compat/src/zlib-out/lib" NO_OPENSSL=1 NO_CURL=1 NO_EXPAT=1 \
+	  NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 NO_ICONV=1 NO_REGEX=NeedsStartEnd \
+	  prefix=/disk gitexecdir=/disk template_dir=/disk/git-templates git >/dev/null
+	cp build/compat/src/git/git $@
+
+# perl, statically linked with its XS modules, and the pure-Perl modules
+# test/compat/apps.txt uses (with what they load) in build/compat/perllib,
+# which goes on the disk as /disk/perllib.
+PERL_MODULES  := strict warnings Carp Exporter Data::Dumper JSON::PP Digest::MD5 Digest::SHA POSIX List::Util \
+                 Scalar::Util Fcntl Socket IO::Handle IO::Socket::INET HTTP::Tiny Time::HiRes File::Spec \
+                 File::Temp File::Path File::Basename Cwd Getopt::Long Storable Encode
+build/compat/perl: | build/compat/src
+	rm -rf build/compat/src/perl5 build/compat/perllib
+	git clone -q --depth 1 --branch $(PERL_TAG) $(PERL_GIT) build/compat/src/perl5
+	cd build/compat/src/perl5 && sh Configure -des -Dcc=$(MUSLCC) -Doptimize=-O2 -Dccflags=-fPIE -Dldflags="-static-pie -s" \
+	  -Dlibs=-lm -Dlibc=$(MUSL_LIB)/libc.a -Dlibpth=$(MUSL_LIB) -Dlocincpth= -Dloclibpth= -Uusedl -Uusethreads \
+	  -Dprefix=/disk -Dprivlib=/disk/perllib -Darchlib=/disk/perllib -Dsitelib=/disk/perllib -Dsitearch=/disk/perllib \
+	  -Dman1dir=none -Dman3dir=none -Dnoextensions="DB_File GDBM_File NDBM_File ODBM_File" >/dev/null
+	$(MAKE) -C build/compat/src/perl5 -s perl >/dev/null
+	cd build/compat/src/perl5 && ./perl -Ilib -e 'for (@ARGV) { eval "require $$_; 1" or die $$@ } print "$$_\n" for values %INC' \
+	  $(PERL_MODULES) | sed -n 's|^lib/||p' | while read f; do \
+	  mkdir -p $(CURDIR)/build/compat/perllib/$$(dirname $$f) && cp lib/$$f $(CURDIR)/build/compat/perllib/$$f; done
+	cp build/compat/src/perl5/perl $@
 
 # Building C on BastiOS: tcc and GNU make on a second disk (test/compat/
 # devdisk.sh) with a small C runtime under /disk/c, which tcc is configured
@@ -433,7 +474,7 @@ build/compat/bastio.img: build/compat/bastioc1 build/compat/z3 build/compat/tcc 
 	  $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB) $(BASTIOLANG)/stage1
 
 build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) test/compat/mkdisk.py
-	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
+	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) perllib=build/compat/perllib
 
 compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img
 	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --out build/compat $(COMPAT_PROGS)
