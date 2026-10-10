@@ -24,7 +24,7 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest ash
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf)
 
 build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
@@ -79,6 +79,25 @@ MUSLCC ?= musl-gcc
 
 build/user/mhello.elf build/user/mtest.elf: build/user/%.elf: user/%.c | build/user
 	$(MUSLCC) -static-pie -O2 -o $@ $<
+
+# BusyBox (GPL-2.0-only, not part of this repository): fetched at a pinned
+# tag, configured from allnoconfig plus the options in user/busybox.config,
+# and built against musl as a static PIE. `ash` is its shell (BusyBox picks
+# the applet from argv[0], which the kernel sets to the program name).
+BUSYBOX_GIT ?= https://github.com/mirror/busybox
+BUSYBOX_TAG ?= 1_36_1
+
+build/busybox/Makefile: | build
+	rm -rf build/busybox
+	git clone -q --depth 1 --branch $(BUSYBOX_TAG) $(BUSYBOX_GIT) build/busybox
+
+build/user/ash.elf: build/busybox/Makefile user/busybox.config | build/user
+	$(MAKE) -C build/busybox -s allnoconfig >/dev/null
+	for o in $$(grep -v '^#' user/busybox.config); do \
+	  sed -i "s/^# $$o is not set/$$o=y/" build/busybox/.config; done
+	yes "" | $(MAKE) -C build/busybox -s oldconfig >/dev/null
+	$(MAKE) -C build/busybox -s CC=$(MUSLCC) EXTRA_CFLAGS=-fPIE CFLAGS_busybox=-static-pie busybox
+	cp build/busybox/busybox $@
 
 build/user/elfbad.elf: build/user/elfexec.elf
 	head -c 4200 $< > $@

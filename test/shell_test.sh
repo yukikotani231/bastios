@@ -101,6 +101,11 @@ steps = [
     # console; the third field is what to wait for instead of the prompt.
     ("mtest", [b"mtest: malloc heap 75", b"mtest: file line 42"], b"type a line"),
     ("typed for mtest", b"mtest: got typed for mtest"),
+    # BusyBox's shell, unmodified, reading commands from the console.
+    ("ash", b"", b""),
+    ("echo $((6 * 7)) from ash", b"42 from ash", b"42 from ash"),
+    ("for i in 1 2 3; do echo n$i; done; test -z \"\" && echo empty", [b"n1", b"n3", b"empty"], b"empty"),
+    ("exit 5", b"[exit 5]"),
     ("sh", b"BastiOS 0.2 -- type"),
     ("exit", b""),
     ("mem", b"free pages"),

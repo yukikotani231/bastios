@@ -63,6 +63,7 @@ How the pieces fit together (boot, memory, processes, the scheduler, system call
 | `user/fault.S` | A user program that reads kernel memory, to test fault isolation |
 | `user/straddle.S` | A user program whose buffers cross page boundaries, to test how the kernel copies user memory |
 | `user/mhello.c` | An ordinary C program built with musl libc (`musl-gcc -static-pie`) |
+| `user/busybox.config` | The BusyBox options for `ash`; the Makefile fetches BusyBox (GPL-2.0, not part of this repository) at a pinned tag and builds it against musl as a static PIE |
 | `user/mtest.c` | A musl program using `malloc` (brk and mmap), a file through stdio, and a line read from the console |
 | `user/fpucheck.c` | Checks that two processes using SSE registers at once do not see each other's |
 | `user/elfcheck.c`, `user/elfstart.S` | A freestanding C program linked as a static Linux ELF executable twice, at a fixed address (`elfexec`) and as a static PIE (`elfpie`); it checks its data, bss and initial stack, and a few Linux system calls. `elfbad` is a truncated copy the loader must refuse |
@@ -71,7 +72,7 @@ User programs are linked at `USER_BASE` (0x8000000000) behind a small header (ma
 
 The kernel also loads static Linux x86-64 ELF executables, the first step toward running Linux programs: fixed-address executables whose segments lie in the user window, and static PIEs, which it places at `USER_BASE`. It starts them with the stack the Linux ABI promises (argc, argv, envp and the auxiliary vector). Every header field is untrusted, and the proof shows each read stays inside the file and each copied byte lands in the window below the stack. Dynamically linked executables are refused.
 
-Such programs make Linux system calls with the `syscall` instruction (`src/linux.bastio`): `read` (the console, blocking, or a file), `write` and `writev` (the console or a file), `open`, `openat`, `close`, `lseek` (from the start or the current offset), `unlink`, `unlinkat`, `brk`, anonymous `mmap`, `munmap` and `mprotect` (both accepted and ignored: pages stay mapped until exit), `ioctl` (always `-ENOTTY`), `arch_prctl(ARCH_SET_FS)` (the thread pointer), `set_tid_address`, `exit`, `exit_group`, `getpid` and `getppid`; every other call prints a note on the console and returns `-ENOSYS`. Linux fds 0 to 2 are the console and fd 3 and up are the process's open files in the file system below. That is enough for C programs built against musl libc as static PIEs (`user/mhello.c`, `user/mtest.c`) to use `printf`, `malloc`, `fopen` and `fgets`. Each process has its own x87/SSE state, saved in a page of its own whenever it stops running. `int 0x80` keeps the BastiOS ABI, the one in bastiolang's user prelude. Calls 0 to 10 have named builtins there; the file calls (11 to 18, listed in `src/syscall.bastio`) go through its generic `sys_call` / `sys_send` / `sys_recv`, which lend the kernel a byte buffer.
+Such programs make Linux system calls with the `syscall` instruction (`src/linux.bastio`): `read` (the console, blocking, or a file), `write` and `writev` (the console or a file), `open`, `openat`, `close`, `lseek` (from the start or the current offset), `unlink`, `unlinkat`, `brk`, anonymous `mmap`, `munmap` and `mprotect` (both accepted and ignored: pages stay mapped until exit), `ioctl` (always `-ENOTTY`), `rt_sigaction` and `rt_sigprocmask` (accepted; no signal is ever delivered), `getuid` and friends (always 0), `getcwd` (always `/`), `stat`/`lstat`/`access`/`newfstatat` (always `-ENOENT` for now), `arch_prctl(ARCH_SET_FS)` (the thread pointer), `set_tid_address`, `exit`, `exit_group`, `getpid` and `getppid`; every other call prints a note on the console and returns `-ENOSYS`. Linux fds 0 to 2 are the console and fd 3 and up are the process's open files in the file system below. That is enough for C programs built against musl libc as static PIEs (`user/mhello.c`, `user/mtest.c`) to use `printf`, `malloc`, `fopen` and `fgets`, and for BusyBox's `ash`, built unmodified, to run scripts typed on the console (built-in commands only, as there is no `fork`/`execve` yet). Each process has its own x87/SSE state, saved in a page of its own whenever it stops running. `int 0x80` keeps the BastiOS ABI, the one in bastiolang's user prelude. Calls 0 to 10 have named builtins there; the file calls (11 to 18, listed in `src/syscall.bastio`) go through its generic `sys_call` / `sys_send` / `sys_recv`, which lend the kernel a byte buffer.
 
 ## Build and run
 
@@ -84,7 +85,8 @@ Requirements:
 | Z3 | 4.8.12, 5.1.0 | Every kernel and user source is proved at build time |
 | QEMU | 8.2 | `qemu-system-x86_64` |
 | Python 3 | 3.12, 3.13 | Only for the test driver |
-| musl-gcc | musl 1.2.4 | Builds the musl test program (`musl-tools` on Ubuntu) |
+| musl-gcc | musl 1.2.4 | Builds the musl test programs and BusyBox (`musl-tools` on Ubuntu) |
+| git and network access | | The first build clones BusyBox 1.36.1 from github.com/mirror/busybox into `build/busybox` (set `BUSYBOX_GIT` for another mirror) |
 
 Tested on x86-64 Linux (Ubuntu 24.04), which is what CI runs; other platforms are untested. On Ubuntu: `sudo apt-get install z3 build-essential qemu-system-x86 python3 musl-tools`, plus [rustup](https://rustup.rs) for bastiolang.
 

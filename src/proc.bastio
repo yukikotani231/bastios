@@ -269,7 +269,7 @@ spec fn kok(k: &Kernel) -> bool {
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 14;
+const NPROGS: u64 = 15;
 
 fn prog_name(i: u64) -> Str {
   if i == 0 {
@@ -310,6 +310,9 @@ fn prog_name(i: u64) -> Str {
   }
   if i == 12 {
     return "mtest";
+  }
+  if i == 13 {
+    return "ash";
   }
   return "fault";
 }
@@ -353,6 +356,9 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 12 {
     return include_bytes("../build/user/mtest.elf");
+  }
+  if i == 13 {
+    return include_bytes("../build/user/ash.elf");
   }
   return include_bytes("../build/user/fault.bin");
 }

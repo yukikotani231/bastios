@@ -31,6 +31,18 @@ const LX_GETPPID: u64 = 110;
 const LX_ARCH_PRCTL: u64 = 158;
 const LX_SET_TID_ADDRESS: u64 = 218;
 const LX_OPENAT: u64 = 257;
+const LX_STAT: u64 = 4;
+const LX_LSTAT: u64 = 6;
+const LX_ACCESS: u64 = 21;
+const LX_NEWFSTATAT: u64 = 262;
+const LX_RT_SIGACTION: u64 = 13;
+const LX_RT_SIGPROCMASK: u64 = 14;
+const LX_GETCWD: u64 = 79;
+const LX_GETUID: u64 = 102;
+const LX_GETGID: u64 = 104;
+const LX_GETEUID: u64 = 107;
+const LX_GETEGID: u64 = 108;
+const ERANGE: u64 = 18446744073709551582;   // 2^64 - 34
 const LX_UNLINK: u64 = 87;
 const LX_UNLINKAT: u64 = 263;
 
@@ -215,6 +227,40 @@ fn linux_syscall(con: &Serial, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, 0);
     return KEEP;
   }
+  if n == LX_STAT || n == LX_LSTAT || n == LX_ACCESS || n == LX_NEWFSTATAT {
+    // No file metadata yet: say no such file, as for a missing one.
+    ret(&mut k.procs, pid, ENOENT);
+    return KEEP;
+  }
+  if n == LX_RT_SIGACTION {
+    // No signals are ever delivered yet: every action reads back as the
+    // default (a zeroed struct sigaction), and setting one is accepted.
+    ret(&mut k.procs, pid, lx_zero_out(&mut k, pid, c, 32));
+    return KEEP;
+  }
+  if n == LX_RT_SIGPROCMASK {
+    ret(&mut k.procs, pid, lx_zero_out(&mut k, pid, c, 8));   // nothing is blocked
+    return KEEP;
+  }
+  if n == LX_GETUID || n == LX_GETGID || n == LX_GETEUID || n == LX_GETEGID {
+    ret(&mut k.procs, pid, 0);              // everyone is root
+    return KEEP;
+  }
+  if n == LX_GETCWD {
+    // One flat directory: the working directory is always "/".
+    if b < 2 {
+      ret(&mut k.procs, pid, ERANGE);
+    } else {
+      bset(&mut k.fs.xfer, 0, 47);
+      bset(&mut k.fs.xfer, 1, 0);
+      if copy_to_user(&mut k.spaces, pid, a, k.fs.xfer, 2) == 2 {
+        ret(&mut k.procs, pid, 2);
+      } else {
+        ret(&mut k.procs, pid, EFAULT);
+      }
+    }
+    return KEEP;
+  }
   if n == LX_GETPID {
     ret(&mut k.procs, pid, pid);
     return KEEP;
@@ -247,6 +293,28 @@ fn linux_syscall(con: &Serial, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   puts(con, " not implemented]\r\n");
   ret(&mut k.procs, pid, ENOSYS);
   return KEEP;
+}
+
+/// Fills the n bytes at user address va with zeros, if va is not 0 (NULL).
+/// Returns 0, or -EFAULT.
+fn lx_zero_out(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= 64
+  ensures kok(k)
+{
+  if va == 0 {
+    return 0;
+  }
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= 64 && kok(k)
+  {
+    bset(&mut k.fs.xfer, i, 0);
+    i = i + 1;
+  }
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {
+    return EFAULT;
+  }
+  return 0;
 }
 
 // ---------------------------------------------------------------- reading and writing
