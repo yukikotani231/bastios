@@ -198,20 +198,38 @@ fn ref_value(k: &mut Kernel, v: u64)
 }
 
 /// Drops the reference descriptor value v holds; the last one closes the
-/// file or the pipe end.
+/// file or the pipe end. Closing a unix socket can drop a description in
+/// flight to it in turn, and that one another: at most OFD_N in all, as
+/// each drop frees a description.
 fn unref_value(k: &mut Kernel, v: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut next = v;
+  let mut i = 0;
+  while next != 0 && i < OFD_N
+    invariant i <= OFD_N && kok(k)
+  {
+    next = unref_one(&mut k, next);
+    i = i + 1;
+  }
+}
+
+/// unref_value for one description; returns the descriptor value of a
+/// description its closing let go of (see ux_close), or 0.
+fn unref_one(k: &mut Kernel, v: u64) -> u64
   requires kok(k)
   ensures kok(k)
 {
   let t = v % FD_CLOEXEC;
   if t < FD_OFD || t - FD_OFD >= OFD_N {
-    return;
+    return 0;
   }
   let h = t - FD_OFD;
   let refs = of_get(k.ofd, h, 1);
   if refs > 1 {
     of_set(&mut k.ofd, h, 1, refs - 1);
-    return;
+    return 0;
   }
   let kind = of_get(k.ofd, h, 0);
   let x = of_get(k.ofd, h, 2);
@@ -239,8 +257,9 @@ fn unref_value(k: &mut Kernel, v: u64)
   } else if kind == OF_EPOLL && x < EP_N {
     k.evt = set(k.evt, EP_AT + x * EP_STRIDE, 0);
   } else if kind == OF_UNIX {
-    ux_close(&mut k, x, w);                 // src/lxunix.bastio
+    return ux_close(&mut k, x, w);          // src/lxunix.bastio
   }
+  return 0;
 }
 
 /// fork: the child's descriptors are the parent's, sharing descriptions.

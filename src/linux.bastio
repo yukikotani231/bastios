@@ -301,6 +301,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_sock_call(n) {
     return lx_sock_call(&mut k, pid, n, a, b, c);
   }
+  if is_msg_call(n) {
+    return lx_msg_call(&mut k, pid, n, a, b, c);
+  }
   if is_misc_call(n) {
     return lx_misc_call(&mut con, &mut k, pid, n, a, b, c);
   }

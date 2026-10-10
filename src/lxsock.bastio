@@ -28,10 +28,15 @@ const LX_ACCEPT4: u64 = 288;
 const AF_INET: u64 = 2;
 const SOCK_STREAM: u64 = 1;
 const SOCK_DGRAM: u64 = 2;
+const SOCK_SEQPACKET: u64 = 5;
 const IPPROTO_UDP: u64 = 17;
 const SOCK_NONBLOCK: u64 = 0x800;
 const SOCK_CLOEXEC: u64 = 0x80000;
 const MSG_DONTWAIT: u64 = 0x40;
+const MSG_PEEK: u64 = 2;
+const MSG_NOSIGNAL: u64 = 0x4000;
+const SO_SNDBUF: u64 = 7;
+const SO_RCVBUF: u64 = 8;
 const SIN_LEN: u64 = 16;               // struct sockaddr_in
 const SIN6_LEN: u64 = 28;              // struct sockaddr_in6
 const AF_INET6: u64 = 10;
@@ -345,10 +350,10 @@ fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, 
   ensures kok(k)
 {
   if is_tcp(k, pid, fd) {
-    return lx_tcp_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1);
+    return lx_tcp_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1);
   }
   if is_unix(k, pid, fd) {
-    return ux_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1);
+    return ux_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1);
   }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
@@ -404,7 +409,8 @@ fn lx_sockname(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
 }
 
 /// getsockopt(fd, level, name, val, lenp): SO_TYPE says stream or
-/// datagram; SO_ERROR and every other option the kernel accepts and
+/// datagram; SO_SNDBUF and SO_RCVBUF the buffer sizes; SO_ERROR and every
+/// other option the kernel accepts and
 /// ignores (setsockopt) read as 0. Options at other levels than
 /// SOL_SOCKET and (on TCP) SOL_TCP are -ENOPROTOOPT.
 fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u64, lenp: u64) -> u64
@@ -424,16 +430,20 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
   let mut v = 0;
   if level == SOL_SOCKET && name == SO_TYPE {
     v = 2;                                  // SOCK_DGRAM
-    if tcp {
+    if tcp && !ux_dgram(k, pid, fd) {
       v = 1;                                // SOCK_STREAM
     }
+  }
+  if level == SOL_SOCKET && (name == SO_SNDBUF || name == SO_RCVBUF) {
+    v = 4096;                               // a unix channel; a TCP buffer is as big
   }
   if copy_from_user(&mut k.spaces, pid, lenp, &mut k.fs.xfer, 4) != 4 {
     return EFAULT;
   }
   let room = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1)) + 65536 * cast[u64](bget(k.fs.xfer, 2)) + 16777216 * cast[u64](bget(k.fs.xfer, 3));
   lx_fill(&mut k, 0, 4);
-  bset(&mut k.fs.xfer, 0, cast[u8](v));
+  bset(&mut k.fs.xfer, 0, cast[u8](v % 256));
+  bset(&mut k.fs.xfer, 1, cast[u8](v / 256 % 256));
   let n = smaller(room, 4);
   if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {
     return EFAULT;
@@ -484,9 +494,13 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     } else {
       r = lx_accept(&mut k, pid, a, b, c, fl);
     }
+  } else if n == LX_SHUTDOWN && is_tcp(k, pid, a) {
+    r = lx_tcp_shutdown(&mut k, pid, a, b);
+  } else if n == LX_SHUTDOWN && is_unix(k, pid, a) {
+    r = ux_shutdown(&mut k, pid, a, b);
   } else if n == LX_SHUTDOWN || n == LX_SETSOCKOPT {
     // Accepted and ignored on a socket: options (SO_REUSEADDR and the
-    // like), and shutdown (close sends the FIN).
+    // like), and shutdown of a datagram socket.
     let sk = sk_look(k, pid, a);
     r = sk.err;
     if is_tcp(k, pid, a) || is_unix(k, pid, a) {
@@ -497,7 +511,7 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     return lx_retry(&mut k, pid, n);         // nothing yet: a datagram, a connection, room
   }
   ret(&mut k.procs, pid, r);
-  if r == EPIPE {
+  if r == EPIPE && !(n == LX_SENDTO && d / MSG_NOSIGNAL % 2 == 1) {
     post_sig(&mut k, pid, SIGPIPE);          // the connection cannot send any more
     return SWITCH;
   }

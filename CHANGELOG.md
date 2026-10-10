@@ -14,6 +14,14 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Added
 
+- `sendmsg` and `recvmsg`, with `SCM_RIGHTS` passing a descriptor over an
+  `AF_UNIX` socket (one per message, one in flight per direction);
+  `MSG_PEEK` on TCP and unix sockets; `shutdown` on TCP (sends the FIN)
+  and unix sockets; `MSG_NOSIGNAL`; `SO_SNDBUF` and `SO_RCVBUF`;
+  `AF_UNIX` `SOCK_DGRAM` and `SOCK_SEQPACKET` socket pairs, which keep
+  message boundaries; and `rt_sigqueueinfo` (`sigqueue`), whose value
+  reaches the handler's siginfo. A new compat program, `t_sock2`, checks
+  these.
 - `sendfile`, `copy_file_range`, `preadv`, `pwritev`, `statx`,
   `fallocate` (growing), `fadvise64`, `memfd_create`, `getcpu`, and
   `FIONREAD` on a pipe. `flock` and `fcntl` record locks are accepted but

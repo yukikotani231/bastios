@@ -285,6 +285,25 @@ t_signal: sigsuspend
 t_signal: sigwait
 t_signal: timer_create
 t_signal: unblock delivers
+t_sock2: AF_UNIX SOCK_DGRAM socketpair
+t_sock2: MSG_DONTWAIT on an empty socket is EAGAIN
+t_sock2: MSG_PEEK leaves the bytes
+t_sock2: SA_RESTART restarts a read
+t_sock2: SCM_RIGHTS passes a descriptor
+t_sock2: SO_ERROR is 0
+t_sock2: SO_KEEPALIVE
+t_sock2: SO_RCVBUF and SO_SNDBUF
+t_sock2: a read without SA_RESTART is EINTR
+t_sock2: connect to a closed port is ECONNREFUSED
+t_sock2: getpeername
+t_sock2: listener
+t_sock2: nonblocking connect
+t_sock2: poll a listener for a connection
+t_sock2: poll sees a peer close
+t_sock2: sendmsg/recvmsg with two iovecs
+t_sock2: shutdown SHUT_WR gives the peer EOF
+t_sock2: sigqueue carries a value
+t_sock2: write after SHUT_WR is EPIPE
 t_thread: 4 threads, mutex
 t_thread: condition variable
 t_thread: gettid differs in a thread

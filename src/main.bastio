@@ -37,6 +37,7 @@ import "lxdev.bastio";
 import "lxevent.bastio";
 import "lxptimer.bastio";
 import "lxmore.bastio";
+import "lxmsg.bastio";
 import "lxprocfs.bastio";
 import "lxlink.bastio";
 

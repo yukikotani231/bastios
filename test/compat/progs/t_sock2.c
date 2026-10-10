@@ -1,0 +1,80 @@
+/* What servers and network tools do with sockets beyond connect and
+ * accept: shutdown, MSG_PEEK and MSG_DONTWAIT, socket options, polling
+ * sockets, nonblocking connect, sendmsg/recvmsg, passing descriptors over
+ * AF_UNIX, and the signals they lean on. */
+#include "compat.h"
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
+#include <sys/un.h>
+#include <sys/wait.h>
+
+static volatile int got, val;
+static void h(int s, siginfo_t *i, void *c) { (void)c; got = s; val = i->si_value.sival_int; }
+
+int main(void) {
+    setup();
+    struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t al = sizeof a;
+    char b[64];
+    int l = -1, c = -1, s = -1, sv[2], one = 1;
+
+    EXPECT("listener", (l = socket(AF_INET, SOCK_STREAM, 0)) >= 0 && setsockopt(l, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) == 0 &&
+           bind(l, (void *)&a, sizeof a) == 0 && listen(l, 4) == 0 && getsockname(l, (void *)&a, &al) == 0);
+    EXPECT("poll a listener for a connection", (c = socket(AF_INET, SOCK_STREAM, 0)) >= 0 && connect(c, (void *)&a, sizeof a) == 0 &&
+           ({ struct pollfd p = {l, POLLIN, 0}; poll(&p, 1, 1000) == 1 && (p.revents & POLLIN); }) && (s = accept(l, 0, 0)) >= 0);
+    EXPECT("MSG_PEEK leaves the bytes", send(c, "peek", 4, 0) == 4 && recv(s, b, 4, MSG_PEEK) == 4 && recv(s, b, 4, 0) == 4 &&
+           memcmp(b, "peek", 4) == 0);
+    EXPECT("MSG_DONTWAIT on an empty socket is EAGAIN", recv(s, b, 4, MSG_DONTWAIT) == -1 && errno == EAGAIN);
+    EXPECT("sendmsg/recvmsg with two iovecs", ({ struct iovec v[2] = {{"ab", 2}, {"cd", 2}}; struct msghdr m = {.msg_iov = v, .msg_iovlen = 2};
+           sendmsg(c, &m, 0) == 4; }) && ({ char x[2], y[2]; struct iovec v[2] = {{x, 2}, {y, 2}}; struct msghdr m = {.msg_iov = v, .msg_iovlen = 2};
+           recvmsg(s, &m, 0) == 4 && memcmp(x, "ab", 2) == 0 && memcmp(y, "cd", 2) == 0; }));
+    EXPECT("SO_RCVBUF and SO_SNDBUF", ({ int v = 0; socklen_t vl = sizeof v; getsockopt(s, SOL_SOCKET, SO_RCVBUF, &v, &vl) == 0 && v > 0 &&
+           (vl = sizeof v, getsockopt(s, SOL_SOCKET, SO_SNDBUF, &v, &vl)) == 0 && v > 0; }));
+    EXPECT("SO_KEEPALIVE", setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one) == 0);
+    EXPECT("SO_ERROR is 0", ({ int v = -1; socklen_t vl = sizeof v; getsockopt(c, SOL_SOCKET, SO_ERROR, &v, &vl) == 0 && v == 0; }));
+    EXPECT("getpeername", ({ struct sockaddr_in p; socklen_t pl = sizeof p; getpeername(c, (void *)&p, &pl) == 0 && p.sin_port == a.sin_port; }));
+    EXPECT("shutdown SHUT_WR gives the peer EOF", shutdown(c, SHUT_WR) == 0 && recv(s, b, sizeof b, 0) == 0);
+    EXPECT("write after SHUT_WR is EPIPE", ({ signal(SIGPIPE, SIG_IGN); send(c, "x", 1, 0) == -1 && errno == EPIPE; }));
+    close(c); close(s);
+    EXPECT("nonblocking connect", (c = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0)) >= 0 &&
+           (connect(c, (void *)&a, sizeof a) == 0 || errno == EINPROGRESS) &&
+           ({ struct pollfd p = {c, POLLOUT, 0}; poll(&p, 1, 1000) == 1 && (p.revents & POLLOUT); }) && (s = accept(l, 0, 0)) >= 0);
+    EXPECT("poll sees a peer close", close(s) == 0 && ({ struct pollfd p = {c, POLLIN, 0}; poll(&p, 1, 1000) == 1; }) && read(c, b, 1) == 0);
+    close(c); close(l);
+    EXPECT("connect to a closed port is ECONNREFUSED", (c = socket(AF_INET, SOCK_STREAM, 0)) >= 0 &&
+           connect(c, (void *)&a, sizeof a) == -1 && errno == ECONNREFUSED);
+    close(c);
+    EXPECT("SCM_RIGHTS passes a descriptor", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 && ({
+           int p[2]; pipe(p); char cb[CMSG_SPACE(sizeof(int))] = {0}; struct iovec v = {"f", 1};
+           struct msghdr m = {.msg_iov = &v, .msg_iovlen = 1, .msg_control = cb, .msg_controllen = sizeof cb};
+           struct cmsghdr *h = CMSG_FIRSTHDR(&m); h->cmsg_level = SOL_SOCKET; h->cmsg_type = SCM_RIGHTS; h->cmsg_len = CMSG_LEN(sizeof(int));
+           memcpy(CMSG_DATA(h), &p[1], sizeof(int));
+           int ok = sendmsg(sv[0], &m, 0) == 1;
+           char rb[CMSG_SPACE(sizeof(int))]; char x; struct iovec rv = {&x, 1};
+           struct msghdr r = {.msg_iov = &rv, .msg_iovlen = 1, .msg_control = rb, .msg_controllen = sizeof rb};
+           int fd = -1;
+           ok = ok && recvmsg(sv[1], &r, 0) == 1 && (h = CMSG_FIRSTHDR(&r)) && h->cmsg_type == SCM_RIGHTS && (memcpy(&fd, CMSG_DATA(h), sizeof fd), fd >= 0) &&
+                write(fd, "z", 1) == 1 && read(p[0], &x, 1) == 1 && x == 'z';
+           ok; }));
+    EXPECT("AF_UNIX SOCK_DGRAM socketpair", socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) == 0 && send(sv[0], "dg", 2, 0) == 2 &&
+           recv(sv[1], b, sizeof b, 0) == 2);
+    {
+        struct sigaction sa = {.sa_sigaction = h, .sa_flags = SA_SIGINFO};
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGRTMIN, &sa, 0);
+        EXPECT("sigqueue carries a value", (got = 0, sigqueue(getpid(), SIGRTMIN, (union sigval){.sival_int = 42}) == 0) && got == SIGRTMIN && val == 42);
+        EXPECT("SA_RESTART restarts a read", ({ int p[2]; pipe(p); pid_t k = fork();
+               k == 0 ? (usleep(100000), kill(getppid(), SIGRTMIN), usleep(100000), write(p[1], "r", 1), _exit(0), 0) : 0;
+               struct sigaction r = {.sa_sigaction = h, .sa_flags = SA_SIGINFO | SA_RESTART}; sigemptyset(&r.sa_mask); sigaction(SIGRTMIN, &r, 0);
+               char x = 0; int n = read(p[0], &x, 1); int st; waitpid(k, &st, 0); n == 1 && x == 'r'; }));
+        EXPECT("a read without SA_RESTART is EINTR", ({ int p[2]; pipe(p); sigaction(SIGRTMIN, &sa, 0); pid_t k = fork();
+               k == 0 ? (usleep(100000), kill(getppid(), SIGRTMIN), _exit(0), 0) : 0;
+               char x; int n = read(p[0], &x, 1); int e = errno; int st; waitpid(k, &st, 0); n == -1 && e == EINTR; }));
+    }
+    return done();
+}

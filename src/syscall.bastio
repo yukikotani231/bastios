@@ -528,7 +528,7 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     return tcp_send(&mut k.nic, a, k.fs.xfer, got);
   }
   if n == SYS_TCP_RECV {
-    let got = tcp_recv(&mut k.nic, a, &mut k.fs.xfer, smaller(c, XFER));
+    let got = tcp_recv(&mut k.nic, a, &mut k.fs.xfer, smaller(c, XFER), false);
     if got == NO_SOCK || got == TCP_AGAIN {
       return got;
     }
