@@ -253,16 +253,16 @@ fn arg_start(line: &Buf, n: u64, w: u64) -> u64
 }
 
 fn cmd_ls(con: &Serial) {
-  let mut name = balloc(32);
+  let mut name = balloc(40);
   let mut i = 0;
   let mut more = true;
   while more && i < 1000
-    invariant blen(name) == 32
+    invariant blen(name) == 40
   {
     let r = f_dirent(i, &mut name);
     if r == NOT_OK {
       more = false;
-    } else if r > 0 && r <= 32 {
+    } else if r > 0 && r <= 40 {
       put_num_pad(con, f_stat(name, r), 8);
       puts(con, " ");
       put_bytes(con, name, r);

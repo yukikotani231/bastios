@@ -1,8 +1,10 @@
 // Exercises the file system calls: writing and reading back a file that
 // spans several pages, seeking, appending, a hole that reads as zeros,
 // removing, running out of descriptors, and descriptors that are not open.
-// It ends by leaving a file open, to show that exiting closes it. Prints
-// "fstest: ok", or the step that failed (also the exit code).
+// It runs once on the disk ("disk/big", if there is a disk) and once in
+// memory ("big"), and ends by leaving "big" open, to show that exiting
+// closes it. Prints "fstest: ok", or the step that failed (also the exit
+// code; 20 is added for the disk run).
 
 import "lib/file.bastio";
 
@@ -112,13 +114,16 @@ fn read_check(fd: u64, buf: &mut Bytes, from: u64) -> u64
   return total;
 }
 
-fn main(con: &mut Serial) -> u64 {
-  let big = bfrom("big");
-  let mut buf = balloc(4096);
+/// Runs every step on the file named by the first nl bytes of `big`.
+/// Returns 0, or the step that failed.
+fn run(big: &Bytes, nl: u64, buf: &mut Bytes, keep_open: bool) -> u64
+  requires nl <= blen(big) && blen(buf) == 4096
+  ensures blen(buf) == 4096 && result <= 14
+{
   let mut step = 0;
 
   // 1-2. Create the file and write BIG bytes, more than two pages.
-  let fd = f_open(big, 3, O_WRITE + O_CREATE + O_TRUNC);
+  let fd = f_open(big, nl, O_WRITE + O_CREATE + O_TRUNC);
   if fd == NOT_OK {
     step = 1;
   } else if !write_big(fd, &mut buf) {
@@ -126,11 +131,11 @@ fn main(con: &mut Serial) -> u64 {
   }
   f_close(fd);
   // 3. Its size.
-  if step == 0 && f_stat(big, 3) != BIG {
+  if step == 0 && f_stat(big, nl) != BIG {
     step = 3;
   }
   // 4. Read it all back.
-  let rd = f_open(big, 3, O_READ);
+  let rd = f_open(big, nl, O_READ);
   if step == 0 && read_check(rd, &mut buf, 0) != BIG {
     step = 4;
   }
@@ -143,25 +148,25 @@ fn main(con: &mut Serial) -> u64 {
     step = 6;
   }
   // 7. A file that is open cannot be removed.
-  if step == 0 && f_unlink(big, 3) != NOT_OK {
+  if step == 0 && f_unlink(big, nl) != NOT_OK {
     step = 7;
   }
   f_close(rd);
   // 8. Appending lands at the end, wherever the offset is.
-  let ap = f_open(big, 3, O_WRITE + O_APPEND);
+  let ap = f_open(big, nl, O_WRITE + O_APPEND);
   bset(&mut buf, 0, 33);
-  if step == 0 && (f_write(ap, buf, 1) != 1 || f_stat(big, 3) != BIG + 1) {
+  if step == 0 && (f_write(ap, buf, 1) != 1 || f_stat(big, nl) != BIG + 1) {
     step = 8;
   }
   f_close(ap);
   // 9. Writing past the end leaves a hole that reads as zeros.
-  let wr = f_open(big, 3, O_WRITE);
+  let wr = f_open(big, nl, O_WRITE);
   f_seek(wr, 20000);
-  if step == 0 && (f_write(wr, buf, 1) != 1 || f_stat(big, 3) != 20001) {
+  if step == 0 && (f_write(wr, buf, 1) != 1 || f_stat(big, nl) != 20001) {
     step = 9;
   }
   f_close(wr);
-  let ho = f_open(big, 3, O_READ);
+  let ho = f_open(big, nl, O_READ);
   f_seek(ho, 15000);
   let r = f_read(ho, &mut buf);
   if step == 0 && (r != 4096 || bget(buf, 0) != 0 || bget(buf, 4095) != 0) {
@@ -169,7 +174,7 @@ fn main(con: &mut Serial) -> u64 {
   }
   f_close(ho);
   // 11. Removing it; then it is gone.
-  if step == 0 && (f_unlink(big, 3) != 0 || f_stat(big, 3) != NOT_OK || f_open(big, 3, O_READ) != NOT_OK) {
+  if step == 0 && (f_unlink(big, nl) != 0 || f_stat(big, nl) != NOT_OK || f_open(big, nl, O_READ) != NOT_OK) {
     step = 11;
   }
   // 12. Eight descriptors per process, then no more.
@@ -178,7 +183,7 @@ fn main(con: &mut Serial) -> u64 {
   while i < 9
     invariant i <= 9 && opened <= i
   {
-    if f_open(big, 3, O_WRITE + O_CREATE) != NOT_OK {
+    if f_open(big, nl, O_WRITE + O_CREATE) != NOT_OK {
       opened = opened + 1;
     }
     i = i + 1;
@@ -195,14 +200,37 @@ fn main(con: &mut Serial) -> u64 {
   if step == 0 && (f_close(3) != NOT_OK || f_read(3, &mut buf) != NOT_OK || f_close(99) != NOT_OK) {
     step = 13;
   }
-  f_unlink(big, 3);
-  // 14. Leave "big" open for writing: exiting must close it, so the shell
-  // can remove it afterwards.
-  if step == 0 && f_open(big, 3, O_WRITE + O_CREATE) == NOT_OK {
+  f_unlink(big, nl);
+  // 14. Leave the file open for writing: exiting must close it, so the
+  // shell can remove it afterwards.
+  if step == 0 && keep_open && f_open(big, nl, O_WRITE + O_CREATE) == NOT_OK {
     step = 14;
   }
-  bfree(buf);
+  return step;
+}
+
+fn main(con: &mut Serial) -> u64 {
+  let mut buf = balloc(4096);
+  // On the disk first (when there is one), then in memory.
+  let disk = bfrom("disk/big");
+  let mut step = 0;
+  let probe = f_open(disk, 8, O_WRITE + O_CREATE);
+  if probe != NOT_OK {
+    f_close(probe);
+    step = run(disk, 8, &mut buf, false);
+    if step != 0 {
+      step = step + 20;
+    } else {
+      puts(con, "fstest: disk ok\r\n");
+    }
+  }
+  bfree(disk);
+  let big = bfrom("big");
+  if step == 0 {
+    step = run(big, 3, &mut buf, true);
+  }
   bfree(big);
+  bfree(buf);
   if step != 0 {
     return fail(con, step);
   }

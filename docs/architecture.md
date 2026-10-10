@@ -17,6 +17,8 @@ How the kernel is put together, and which part of it is proved. Read the [README
   | src/proc.bastio     processes        |   |                bst_cpu_enter     |
   | src/fs.bastio       open files       |   |                                  |
   | src/ramfs.bastio    in-memory files  |   |                                  |
+  | src/diskfs.bastio   files on disk    |   |                                  |
+  | src/ata.bastio      disk driver      |   |                                  |
   | src/space.bastio    address spaces   |   | boot/platform.c  TSS, IDT, PIC,  |
   | src/pages.bastio    page allocator   |   |                timer             |
   | src/console.bastio  kernel messages  |   | boot/smp.c, ap.S  start the other|
@@ -124,7 +126,11 @@ Every argument is an untrusted number. The handlers check ranges at run time (`u
 
 The file system is in memory (`src/ramfs.bastio`). Its directory is a flat table of 32 nodes, each free or one file: a name, a size, and a vector of pages, where page i holds bytes 4096 i to 4096 (i + 1). A page the file has never written is a hole and reads as zeros. The pages are `Frame`s taken from the page allocator, so a file owns its pages the way a page table owns the pages it maps: the proof shows that truncating or removing a file gives every page back once, and power off frees every file before counting the free pages.
 
-`src/fs.bastio` sits between the system calls and the file system. It owns the open-file table (8 rows per process; a descriptor is a row number, so a process can only name its own files) and a 4096-byte transfer buffer. Each transfer is two copies: user memory to the buffer and the buffer to the file, or back (`src/usermem.bastio` walks the user window as the console `write` does). The file system below only ever sees the buffer. Each open row records which file system its file is on, so a second one, such as a file system on a block device, becomes another field of `Vfs` and another branch where rows are dispatched; the system calls above do not change.
+`src/fs.bastio` sits between the system calls and the file system. It owns the open-file table (8 rows per process; a descriptor is a row number, so a process can only name its own files) and a 4096-byte transfer buffer. Each transfer is two copies: user memory to the buffer and the buffer to the file, or back (`src/usermem.bastio` walks the user window as the console `write` does). The file system below only ever sees the buffer. Each open row records which file system its file is on, and the few functions that touch a file dispatch on it; the system calls above do not know there are two.
+
+Names that start with `disk/` are on the disk (`src/diskfs.bastio`), which keeps files across power off. The format is deliberately simple: sector 0 holds the magic `BSTDISK1`, sectors 1 to 4 a directory of 32 entries of 64 bytes (used flag, name, size), and from sector 8 each file has a fixed slot of 1 MiB. A disk without the magic is formatted when it is mounted at boot. The directory is kept in memory and written through: every change writes the sector it lives in. Data goes one sector at a time through a one-sector buffer, and a write that covers part of a sector reads it first. A read never returns bytes past a file's size, and a write past the end first fills the gap with zeros, so a file never shows what an earlier file left on the disk. Without a disk, names under `disk/` cannot be opened and everything else works.
+
+The disk driver (`src/ata.bastio`) talks to the first drive of the legacy ATA controller in PIO mode with 28-bit sector numbers, polling with interrupts off. It owns the controller's ports 0x1F0 to 0x1F7 and 0x3F6 as `PortIo` capabilities claimed in `main`, so the proof checks that it touches no other port and that no other driver touches these. Every wait for the drive is bounded, so a missing or stuck drive makes an operation fail instead of hanging the kernel.
 
 At boot the kernel installs the files in `files/` (built into the image with `include_bytes`). A process's descriptors are closed when it ends, and a file cannot be removed while a descriptor has it open.
 
@@ -149,6 +155,6 @@ Trusted, and listed in the README's "What is trusted" table: `boot/`, `user/star
 These are current choices, not design limits; the README's "Status" lists them with the plan:
 - one CPU runs the kernel (the others park, see "Booting"); the kernel runs with interrupts off and polls the UART;
 - a 2 MiB user window per process, at most `NPROC - 1` processes, programs built into the kernel image;
-- files live in memory only (32 files, names up to 28 bytes, files up to 1 MiB, 8 descriptors per process), and programs cannot be run from files yet;
+- files are simple (32 in memory and 32 on disk, names up to 28 bytes, files up to 1 MiB, 8 descriptors per process, no journal), and programs cannot be run from files yet;
 - user pages are mapped writable and executable;
 - the kernel's arena halts the machine when it runs out (the page pool does not: spawns fail cleanly).

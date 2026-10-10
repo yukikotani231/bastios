@@ -154,6 +154,7 @@ fn main(ports: &mut Ports, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64
   let mut con = Uart { io: port_claim(&mut ports, COM1, 8) };
   let mut pic = Pic { master: port_claim(&mut ports, PIC1, 2), slave: port_claim(&mut ports, PIC2, 2) };
   let mut pit = Pit { io: port_claim(&mut ports, PIT, 4) };
+  let disk = disk_mount(ata_new(&mut ports));
   uart_init(&mut con);
   pic_init(&mut pic);
   pit_init(&mut pit, 100);
@@ -187,7 +188,7 @@ fn main(ports: &mut Ports, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64
     vec_push(&mut fpus, Fpu::None);
     q = q + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), ticks: 0, cpus: cpus, fs: vfs_new() };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), ticks: 0, cpus: cpus, fs: vfs_new(disk) };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
@@ -265,7 +266,7 @@ fn main(ports: &mut Ports, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64
     drop_fpu(&mut k.mem, vec_pop(&mut k.fpus));
   }
   vec_free(k.fpus);
-  vfs_free(k.fs, &mut k.mem);
+  let ata = vfs_free(k.fs, &mut k.mem);
   puts(&mut con, "BastiOS: ");
   put_num(&mut con, count_free(k.mem.bm));
   puts(&mut con, " pages free at power off\r\n");
@@ -277,5 +278,6 @@ fn main(ports: &mut Ports, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64
   port_release(&mut ports, pic.master);
   port_release(&mut ports, pic.slave);
   port_release(&mut ports, pit.io);
+  ata_free(&mut ports, ata);
   return 0;
 }

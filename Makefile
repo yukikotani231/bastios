@@ -106,7 +106,7 @@ build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := src/uart.bastio src/pic.bastio src/pit.bastio src/console.bastio src/pages.bastio src/space.bastio src/elf.bastio src/ramfs.bastio src/fs.bastio \
+KSRCS := src/uart.bastio src/pic.bastio src/pit.bastio src/console.bastio src/pages.bastio src/space.bastio src/elf.bastio src/ramfs.bastio src/ata.bastio src/diskfs.bastio src/fs.bastio \
          src/proc.bastio src/usermem.bastio src/syscall.bastio src/linux.bastio src/main.bastio
 KFILES := $(wildcard files/*)
 
@@ -142,10 +142,17 @@ build/bastios64.elf: $(KOBJS) boot/linker.ld
 build/bastios.elf: build/bastios64.elf
 	objcopy -O elf32-i386 $< $@
 
+# The disk: a raw image on the first ATA drive. BastiOS formats it the first
+# time it boots, and the files under disk/ live there across boots.
+DISK    ?= build/disk.img
 QEMU_ARGS := -kernel build/bastios.elf -m 64M -display none -no-reboot \
-             -device isa-debug-exit,iobase=0xf4,iosize=0x04
+             -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+             -drive file=$(DISK),format=raw,if=ide,index=0
 
-run: build/bastios.elf
+$(DISK): | build
+	truncate -s 33M $@
+
+run: build/bastios.elf $(DISK)
 	$(QEMU) $(QEMU_ARGS) -serial mon:stdio
 
 test: build/bastios.elf
