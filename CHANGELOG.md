@@ -395,6 +395,12 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Fixed
 
+- A PC without a serial port (most of those of the last decade) took no
+  keyboard input: COM1's ports read as 0xFF there, which said a byte was
+  always waiting, so the console read 0xFF forever and never looked at
+  the keyboard. The UART is now detected (its scratch register must keep
+  what is written to it) and left alone when it is missing.
+
 - `readv` on a disk file whose blocks were not cached yet returned the
   kernel's internal retry code to the program instead of waiting for the
   disk (stdio's `fread` failed on `/disk` files).
