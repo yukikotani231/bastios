@@ -29,6 +29,7 @@ import "lxtcp.bastio";
 import "lxsig.bastio";
 import "lxtime.bastio";
 import "lxmisc.bastio";
+import "lxthread.bastio";
 import "lxdev.bastio";
 
 const V_TIMER: u64 = 32;
@@ -97,7 +98,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, from: u64, poll: bool) -> Job
     tty_cook(&mut s.con, &mut s.k);
     wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
   }
-  let p = pick(s.k.procs, from);
+  let p = lx_pick(&mut s.k, from);
   if p == 0 {
     if live_count(s.k.procs) == 0 {
       s.stop = true;
@@ -105,6 +106,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, from: u64, poll: bool) -> Job
     }
     return Job::Idle;
   }
+  group_take(&mut s.k, mmu, p);                 // a thread gets its group's space
   if !lx_deliver(&mut s.k, mmu, p) {
     return Job::Idle;                       // a signal ended it
   }

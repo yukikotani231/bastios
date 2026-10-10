@@ -1,0 +1,571 @@
+// Linux threads: clone with CLONE_THREAD, futex, set_tid_address, and the
+// way exit and exit_group end them.
+//
+// A thread is a process row of its own (its id is the thread id) whose
+// F_TGID names the group's leader; the leader's F_TGID names itself. The
+// threads of a group share one address space, one descriptor table, one
+// working directory, one set of signal actions and one alarm. These are
+// linear, so they cannot be in two rows at once: they live in the row of
+// the group's *holder*, and move to a thread before it runs (group_take),
+// the way vfork moves a parent's space to its child. The other rows of
+// the group keep theirs empty.
+//
+// So a group runs on one processor at a time: a READY thread whose group
+// has a member on a processor waits (lx_pick). Threads interleave as on a
+// single processor, which is correct for every program but not parallel.
+// Running a group on several processors at once needs a page table shared
+// between processors, which the language cannot express yet.
+//
+// What is left out: futexes shared between processes (there is no shared
+// memory), the leader calling exit while other threads run (it ends the
+// whole group, as exit_group), execve from a thread other than the leader
+// (EINVAL), wait4 for the children of another thread of the group.
+
+const FUTEX_WAIT: u64 = 0;
+const FUTEX_WAKE: u64 = 1;
+const FUTEX_REQUEUE: u64 = 3;
+const FUTEX_CMP_REQUEUE: u64 = 4;
+const FUTEX_WAIT_BITSET: u64 = 9;
+const FUTEX_WAKE_BITSET: u64 = 10;
+const FUTEX_CMD: u64 = 127;          // the rest: FUTEX_PRIVATE_FLAG, FUTEX_CLOCK_REALTIME
+const ETIMEDOUT: u64 = 18446744073709551506;   // 2^64 - 110
+
+const CLONE_SIGHAND: u64 = 0x800;
+const CLONE_SETTLS: u64 = 0x80000;
+const CLONE_PARENT_SETTID: u64 = 0x100000;
+const CLONE_CHILD_CLEARTID: u64 = 0x200000;
+const CLONE_CHILD_SETTID: u64 = 0x1000000;
+
+const SIGACT_ROW: u64 = 256;         // SIGACT_LEN / NPROC
+
+/// The leader of p's thread group: p itself for a process without threads.
+fn tgid(procs: &Buf, p: u64) -> u64
+  requires len(procs) == PTAB_LEN && p < NPROC
+  ensures result < NPROC
+{
+  let g = pget(procs, p, F_TGID);
+  if g == 0 || g >= NPROC {
+    return p;
+  }
+  return g;
+}
+
+/// q is a live member of the thread group led by g (g itself included).
+fn in_group(procs: &Buf, q: u64, g: u64) -> bool
+  requires len(procs) == PTAB_LEN && q < NPROC
+{
+  return q != 0 && state(procs, q) != FREE && pget(procs, q, F_TGID) != 0 && pget(procs, q, F_TGID) == g;
+}
+
+fn has_space(spaces: &mut Vec[Space], p: u64) -> bool
+  requires spaces_ok(spaces) && p < NPROC
+  ensures spaces_ok(spaces)
+{
+  match take_space(&mut spaces, p) {
+    Space::Empty => { return false; },
+    Space::Mapped(t) => {
+      put_space(&mut spaces, p, Space::Mapped(t));
+      return true;
+    },
+  }
+}
+
+/// The member of group g that holds the group's address space, or 0 if
+/// none does now (one is on a processor, or lent it to a vfork child).
+fn holder(k: &mut Kernel, g: u64) -> u64
+  requires kok(k)
+  ensures kok(k) && result < NPROC
+{
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && kok(k)
+  {
+    if in_group(k.procs, q, g) && has_space(&mut k.spaces, q) {
+      return q;
+    }
+    q = q + 1;
+  }
+  return 0;
+}
+
+/// Whether thread p can run now: it is not in a group, or no member of
+/// its group is on a processor and one of them holds the address space.
+fn group_free(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  if pget(k.procs, p, F_TGID) == 0 {
+    return true;
+  }
+  let g = tgid(k.procs, p);
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && kok(k)
+  {
+    if in_group(k.procs, q, g) && (state(k.procs, q) == RUNNING || state(k.procs, q) == KILLED) {
+      return false;
+    }
+    q = q + 1;
+  }
+  return holder(&mut k, g) != 0;
+}
+
+/// pick (src/proc.bastio), skipping threads whose group cannot run now.
+fn lx_pick(k: &mut Kernel, from: u64) -> u64
+  requires kok(k)
+  ensures kok(k) && result < NPROC
+{
+  let mut i = 0;
+  while i < NPROC
+    invariant i <= NPROC && kok(k)
+  {
+    let p = (from % NPROC + i) % NPROC;
+    if p != 0 && state(k.procs, p) == READY && group_free(&mut k, p) {
+      return p;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+/// Swaps n words at a and b of buffer t.
+fn swap_words(t: &mut Buf, a: u64, b: u64, n: u64)
+  requires a + n <= len(t) && b + n <= len(t)
+  ensures len(t) == old(len(t))
+{
+  let mut i = 0;
+  while i < n
+    invariant i <= n && a + n <= len(t) && b + n <= len(t)
+  {
+    let x = get(t, a + i);
+    t = set(t, a + i, get(t, b + i));
+    t = set(t, b + i, x);
+    i = i + 1;
+  }
+}
+
+/// Moves what the threads of a group share from member h to member p:
+/// the address space, descriptors, working directory, signal actions,
+/// alarm, and the break and mmap floor. False, with nothing moved, if h
+/// has no space or p already has one.
+fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
+  requires kok(k) && h < NPROC && p < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k)
+{
+  if h == p {
+    return true;
+  }
+  if has_space(&mut k.spaces, p) {
+    return false;
+  }
+  match take_space(&mut k.spaces, h) {
+    Space::Empty => { return false; },
+    Space::Mapped(t) => { restore_space(&mut k.mem, &mut k.spaces, mmu, p, Space::Mapped(t)); },
+  }
+  pset(&mut k.procs, p, F_BRK, pget(k.procs, h, F_BRK));
+  pset(&mut k.procs, p, F_MMAP, pget(k.procs, h, F_MMAP));
+  pset(&mut k.procs, p, F_PROG, pget(k.procs, h, F_PROG));
+  swap_words(&mut k.lxfd, h * LXNFD, p * LXNFD, LXNFD);
+  swap_words(&mut k.cwd, h * CWD_STRIDE, p * CWD_STRIDE, CWD_STRIDE);
+  swap_words(&mut k.sigact, h * SIGACT_ROW, p * SIGACT_ROW, SIGACT_ROW);
+  swap_words(&mut k.alarms, h * 2, p * 2, 2);
+  return true;
+}
+
+/// Before thread p runs: brings the group's shared state to it.
+fn group_take(k: &mut Kernel, mmu: &Mmu, p: u64)
+  requires kok(k) && p < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k)
+{
+  if pget(k.procs, p, F_TGID) == 0 || has_space(&mut k.spaces, p) {
+    return;
+  }
+  let h = holder(&mut k, tgid(k.procs, p));
+  if h != 0 {
+    let moved = group_move(&mut k, mmu, h, p);
+  }
+}
+
+/// Frees the row of thread q, which holds none of the group's shared
+/// state. Its children become the leader g's.
+fn thread_free(k: &mut Kernel, mmu: &Mmu, q: u64, g: u64)
+  requires kok(k) && 1 <= q && q < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k)
+{
+  match take_space(&mut k.spaces, q) {
+    Space::Empty => {},
+    Space::Mapped(t) => { free_space(&mut k.mem, mmu, t); },
+  }
+  drop_fpu(&mut k.mem, take_fpu(&mut k.fpus, q));
+  lx_fd_close_all(&mut k, q, false);
+  let mut c = 1;
+  while c < NPROC
+    invariant 1 <= c && c <= NPROC && kok(k)
+  {
+    if pget(k.procs, c, F_PARENT) == q && state(k.procs, c) != FREE {
+      pset(&mut k.procs, c, F_PARENT, g);
+    }
+    c = c + 1;
+  }
+  pset(&mut k.procs, q, F_TGID, 0);
+  pset(&mut k.procs, q, F_CTID, 0);
+  pset(&mut k.procs, q, F_FUTEX, 0);
+  pset(&mut k.procs, q, F_SIGPEND, 0);
+  pset(&mut k.procs, q, F_RESTART, 0);
+  pset(&mut k.procs, q, F_STATE, FREE);
+}
+
+/// For terminate (src/proc.bastio): process `p` ends. If it is one thread
+/// of a group, the whole group ends: the shared state goes to the leader,
+/// every other thread is freed, and the leader is returned to be ended as
+/// a process. Returns p for a process without threads, and 0 if a member
+/// is on another processor: it is marked KILLED, and its group ends when
+/// it comes back.
+fn group_end(k: &mut Kernel, mmu: &Mmu, p: u64) -> u64
+  requires kok(k) && 1 <= p && p < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k) && result < NPROC
+{
+  if pget(k.procs, p, F_TGID) == 0 {
+    return p;
+  }
+  let g = tgid(k.procs, p);
+  if g == 0 {
+    pset(&mut k.procs, p, F_TGID, 0);
+    return p;
+  }
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && kok(k)
+  {
+    if q != p && in_group(k.procs, q, g) {
+      if state(k.procs, q) == RUNNING {
+        pset(&mut k.procs, q, F_STATE, KILLED);
+        return 0;
+      }
+      if state(k.procs, q) == KILLED {
+        return 0;
+      }
+    }
+    q = q + 1;
+  }
+  let h = holder(&mut k, g);
+  if h != 0 {
+    let moved = group_move(&mut k, mmu, h, g);
+  }
+  let mut r = 1;
+  while r < NPROC
+    invariant 1 <= r && r <= NPROC && kok(k)
+  {
+    if r != g && in_group(k.procs, r, g) {
+      thread_free(&mut k, mmu, r, g);
+    }
+    r = r + 1;
+  }
+  pset(&mut k.procs, g, F_TGID, 0);
+  pset(&mut k.procs, g, F_CTID, 0);
+  if state(k.procs, g) == FREE || state(k.procs, g) == ZOMBIE {
+    return 0;
+  }
+  return g;
+}
+
+// ---------------------------------------------------------------- user words
+
+/// The 32-bit word at user address va of process pid; ok false if it is
+/// not mapped.
+fn user_u32(k: &mut Kernel, pid: u64, va: u64) -> Word
+  requires kok(k) && pid < NPROC
+  ensures kok(k) && result.v < 0x100000000
+{
+  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 4) != 4 {
+    return Word { ok: false, v: 0 };
+  }
+  return Word { ok: true, v: rd32(k.fs.xfer, 0) };
+}
+
+fn put_user_u32(k: &mut Kernel, pid: u64, va: u64, v: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  xfer_u64(&mut k.fs.xfer, 0, v % 0x100000000);
+  return copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, 4) == 4;
+}
+
+// ---------------------------------------------------------------- clone
+
+/// clone(flags, stack, ptid, ctid, tls) with CLONE_THREAD: a new thread
+/// of pid's group, running pid's code on `stack`. Returns its id, or
+/// -errno.
+fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  if flags & CLONE_VM == 0 || flags & CLONE_SIGHAND == 0 || flags & CLONE_VFORK != 0 {
+    return EINVAL;
+  }
+  let c = free_pid(k.procs);
+  if c == 0 {
+    return EAGAIN;
+  }
+  if has_space(&mut k.spaces, c) {
+    return EAGAIN;                          // a FREE row has no space; check it
+  }
+  let fp = find_free(&mut k.mem);
+  if fp >= NPAGES {
+    return ENOMEM;
+  }
+  let mut fpu = take_page(&mut k.mem, fp);
+  match take_fpu(&mut k.fpus, pid) {
+    Fpu::None => {},
+    Fpu::State(f) => {
+      copy_frame(&mut fpu, f);
+      put_fpu(&mut k.fpus, pid, Fpu::State(f));
+    },
+  }
+  drop_fpu(&mut k.mem, take_fpu(&mut k.fpus, c));
+  put_fpu(&mut k.fpus, c, Fpu::State(fpu));
+  let g = tgid(k.procs, pid);
+  pset(&mut k.procs, g, F_TGID, g);
+  let mut f = 0;
+  while f < STRIDE
+    invariant f <= STRIDE && kok(k)
+  {
+    pset(&mut k.procs, c, f, pget(k.procs, pid, f));
+    f = f + 1;
+  }
+  pset(&mut k.procs, c, F_WAIT, 0);
+  pset(&mut k.procs, c, F_CODE, 0);
+  pset(&mut k.procs, c, F_TICKS, 0);
+  pset(&mut k.procs, c, F_PARENT, 0);       // threads are nobody's children
+  pset(&mut k.procs, c, F_REGS + R_RAX, 0);
+  if stack != 0 {
+    pset(&mut k.procs, c, F_REGS + R_RSP, stack);
+  }
+  if flags & CLONE_SETTLS != 0 {
+    pset(&mut k.procs, c, F_REGS + R_FSBASE, tls);
+  }
+  pset(&mut k.procs, c, F_SIGPEND, 0);
+  pset(&mut k.procs, c, F_RESTART, 0);
+  pset(&mut k.procs, c, F_TGID, g);
+  pset(&mut k.procs, c, F_FUTEX, 0);
+  pset(&mut k.procs, c, F_CTID, 0);
+  if flags & CLONE_CHILD_CLEARTID != 0 {
+    pset(&mut k.procs, c, F_CTID, ctid);
+  }
+  // The caller holds the shared space now: the ids go in through it.
+  if flags & CLONE_PARENT_SETTID != 0 && !put_user_u32(&mut k, pid, ptid, c) {
+    pset(&mut k.procs, c, F_STATE, READY);
+    return c;
+  }
+  if flags & CLONE_CHILD_SETTID != 0 {
+    let ok = put_user_u32(&mut k, pid, ctid, c);
+  }
+  pset(&mut k.procs, c, F_STATE, READY);
+  return c;
+}
+
+/// exit(code) from thread pid of a group, not its leader: clears and
+/// wakes its clear_child_tid word (how pthread_join learns of it), hands
+/// the shared state back to the leader and frees the row.
+fn lx_thread_exit(k: &mut Kernel, mmu: &Mmu, pid: u64)
+  requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k)
+{
+  let g = tgid(k.procs, pid);
+  let ct = pget(k.procs, pid, F_CTID);
+  if ct != 0 && put_user_u32(&mut k, pid, ct, 0) {
+    let n = futex_wake(&mut k, pid, ct, 1);
+  }
+  if g == 0 || g == pid || !group_move(&mut k, mmu, pid, g) {
+    terminate(&mut k, mmu, pid, 0);
+    return;
+  }
+  thread_free(&mut k, mmu, pid, g);
+}
+
+/// Whether thread pid's exit ends only that thread.
+fn thread_only(procs: &Buf, pid: u64) -> bool
+  requires len(procs) == PTAB_LEN && pid < NPROC
+{
+  return pget(procs, pid, F_TGID) != 0 && tgid(procs, pid) != pid;
+}
+
+/// Before execve in process pid: its other threads end. False if pid is
+/// a thread other than its group's leader (not supported).
+fn thread_exec(k: &mut Kernel, mmu: &Mmu, pid: u64) -> bool
+  requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k)
+{
+  if pget(k.procs, pid, F_TGID) == 0 {
+    return true;
+  }
+  if tgid(k.procs, pid) != pid {
+    return false;
+  }
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && kok(k)
+  {
+    if q != pid && in_group(k.procs, q, pid) {
+      thread_free(&mut k, mmu, q, pid);
+    }
+    q = q + 1;
+  }
+  pset(&mut k.procs, pid, F_TGID, 0);
+  return true;
+}
+
+// ---------------------------------------------------------------- futex
+
+// A waiter is a thread whose futex call runs again later (lx_retry): its
+// F_FUTEX is the address, and it is either FUTEXWAIT (no timeout) or
+// READY polling its deadline (a timeout, src/lxtime.bastio). A wake ends
+// its call with 0 instead, as if it had returned.
+
+fn futex_waiting(procs: &Buf, q: u64, g: u64, addr: u64) -> bool
+  requires len(procs) == PTAB_LEN && q < NPROC
+{
+  let st = state(procs, q);
+  return (st == FUTEXWAIT || st == READY) && tgid(procs, q) == g && pget(procs, q, F_FUTEX) == addr
+    && pget(procs, q, F_RESTART) != 0 && pget(procs, q, F_REGS + R_RAX) == LX_FUTEX;
+}
+
+/// Wakes up to n waiters on addr in pid's thread group; returns how many.
+fn futex_wake(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k) && result <= NPROC
+{
+  let g = tgid(k.procs, pid);
+  let mut woken = 0;
+  let mut q = 1;
+  while q < NPROC && woken < n
+    invariant 1 <= q && q <= NPROC && woken <= n && woken < q && kok(k)
+  {
+    if q != pid && futex_waiting(k.procs, q, g, addr) {
+      let rip = pget(k.procs, q, F_REGS + R_RIP);
+      if rip <= 0xFFFFFFFFFFFFFFF0 {
+        pset(&mut k.procs, q, F_REGS + R_RIP, rip + 2);
+      }
+      pset(&mut k.procs, q, F_REGS + R_RAX, 0);
+      pset(&mut k.procs, q, F_RESTART, 0);
+      pset(&mut k.procs, q, F_FUTEX, 0);
+      pset(&mut k.procs, q, F_STATE, READY);
+      woken = woken + 1;
+    }
+    q = q + 1;
+  }
+  return woken;
+}
+
+/// Moves up to n waiters on addr in pid's group to wait on to instead.
+fn futex_requeue(k: &mut Kernel, pid: u64, addr: u64, to: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k) && result <= NPROC
+{
+  let g = tgid(k.procs, pid);
+  let mut moved = 0;
+  let mut q = 1;
+  while q < NPROC && moved < n
+    invariant 1 <= q && q <= NPROC && moved <= n && moved < q && kok(k)
+  {
+    if q != pid && futex_waiting(k.procs, q, g, addr) {
+      pset(&mut k.procs, q, F_FUTEX, to);
+      moved = moved + 1;
+    }
+    q = q + 1;
+  }
+  return moved;
+}
+
+/// futex(addr, op, val, timeout or val2, addr2, val3).
+fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  let cmd = op & FUTEX_CMD;
+  let arg4 = pget(k.procs, pid, F_REGS + R_R10);
+  let addr2 = pget(k.procs, pid, F_REGS + R_R8);
+  let val3 = pget(k.procs, pid, F_REGS + R_R9);
+  if addr % 4 != 0 {
+    ret(&mut k.procs, pid, EINVAL);
+    return KEEP;
+  }
+  if cmd == FUTEX_WAKE || cmd == FUTEX_WAKE_BITSET {
+    ret(&mut k.procs, pid, futex_wake(&mut k, pid, addr, val));
+    return KEEP;
+  }
+  if cmd == FUTEX_REQUEUE || cmd == FUTEX_CMP_REQUEUE {
+    if cmd == FUTEX_CMP_REQUEUE {
+      let w = user_u32(&mut k, pid, addr);
+      if !w.ok {
+        ret(&mut k.procs, pid, EFAULT);
+        return KEEP;
+      }
+      if w.v != val3 % 0x100000000 {
+        ret(&mut k.procs, pid, EAGAIN);
+        return KEEP;
+      }
+    }
+    if addr2 % 4 != 0 {
+      ret(&mut k.procs, pid, EINVAL);
+      return KEEP;
+    }
+    let woken = futex_wake(&mut k, pid, addr, val);
+    let moved = futex_requeue(&mut k, pid, addr, addr2, arg4);
+    if cmd == FUTEX_CMP_REQUEUE {
+      ret(&mut k.procs, pid, woken + moved);
+    } else {
+      ret(&mut k.procs, pid, woken);
+    }
+    return KEEP;
+  }
+  if cmd != FUTEX_WAIT && cmd != FUTEX_WAIT_BITSET {
+    ret(&mut k.procs, pid, ENOSYS);
+    return KEEP;
+  }
+  // A wait. Run again (was != 0), it is still waiting: no wake came, or
+  // the wake would have ended the call. Only its deadline is checked.
+  let mut dl = FOREVER;
+  if was == 0 {
+    let w = user_u32(&mut k, pid, addr);
+    if !w.ok {
+      ret(&mut k.procs, pid, EFAULT);
+      return KEEP;
+    }
+    if w.v != val % 0x100000000 {
+      ret(&mut k.procs, pid, EAGAIN);
+      return KEEP;
+    }
+    if arg4 != 0 {
+      let ts = ts_in(&mut k, pid, arg4);
+      if ts.err != 0 {
+        ret(&mut k.procs, pid, ts.err);
+        return KEEP;
+      }
+      // FUTEX_WAIT's timeout is relative, FUTEX_WAIT_BITSET's absolute;
+      // every clock here counts from boot.
+      if cmd == FUTEX_WAIT {
+        dl = sat_add(k.ns, ts.ns);
+      } else {
+        dl = ts.ns;
+      }
+    }
+  } else if was >= 2 {
+    dl = was - 2;
+  }
+  if dl < FOREVER {
+    if k.ns >= dl {
+      ret(&mut k.procs, pid, ETIMEDOUT);
+      return KEEP;
+    }
+    let r = wait_until(&mut k, pid, LX_FUTEX, dl);
+    pset(&mut k.procs, pid, F_FUTEX, addr);
+    return r;
+  }
+  let r = lx_retry(&mut k, pid, LX_FUTEX);
+  if r == SWITCH {
+    pset(&mut k.procs, pid, F_FUTEX, addr);
+    pset(&mut k.procs, pid, F_STATE, FUTEXWAIT);
+  }
+  return r;
+}

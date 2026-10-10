@@ -259,6 +259,10 @@ steps = [
     # A dynamically linked program: the kernel loads musl's dynamic linker,
     # its PT_INTERP, which links libc into it (user/mdyn.c).
     ("mdyn", b"mdyn: linked dynamically, mdyn, sum 5050, argc 1, libc apart", b"\n# "),
+    # pthreads: clone(CLONE_THREAD), futex behind mutexes, condition
+    # variables (one timed) and joins, and _exit from a thread ending the
+    # whole process (user/mthread.c).
+    ("mthread", b"mthread: ok, 8000 increments", b"\n# "),
     # What Linux programs expect to find: /dev/null swallows, /tmp and
     # /etc/passwd exist, and every file has its own inode number.
     ("echo lost > /dev/null; wc -c < /dev/null; test -d /tmp && echo tmp$((2+2))", b"\r\n0\r\ntmp4\r\n", b"\n# "),
