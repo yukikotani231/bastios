@@ -601,6 +601,19 @@ fn tcp_in(n: &mut Net, total: u64)
       tset(&mut n, t, W_TRIES, 0);
       tset(&mut n, t, W_STATE, T_ESTABLISHED);
     } else {
+      // A shut window that reopens without taking our probe: the peer
+      // had no room for the probe byte and dropped it. Go back to it, or
+      // the data sent after it sits in the peer behind a hole until the
+      // resend timer, which by then has backed off for seconds.
+      let wnd = be16(n.pkt, 48);
+      if tw(n, t, W_WND) <= 1 && wnd > 1 && ackn == tw(n, t, W_UNA) && tw(n, t, W_NXT) != ackn {
+        tset(&mut n, t, W_NXT, ackn);
+        if tw(n, t, W_FIN) == 2 {
+          tset(&mut n, t, W_FIN, 1);
+        }
+        tset(&mut n, t, W_TRIES, 0);  // the peer answered: it is alive
+        tset(&mut n, t, W_TIMER, 0);
+      }
       tcp_acked(&mut n, t, ackn);
     }
     tset(&mut n, t, W_WND, be16(n.pkt, 48));
