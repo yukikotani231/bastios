@@ -2,9 +2,12 @@
  * | CLONE_SETTLS | CLONE_CHILD_CLEARTID ...), futex waits and wakes behind
  * mutexes, condition variables and joins, set_tid_address, and exit_group
  * from a thread while others still wait. */
+#define _GNU_SOURCE
 #include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -58,10 +61,128 @@ static void *ender(void *arg)
     _exit(7);                         /* exit_group: every thread ends */
 }
 
+/* `mthread par`: four threads of pure computation, timed. How much faster
+ * four processors run them than one (test/threadbench.sh) shows whether
+ * the threads of a process really run at the same time. */
+static void *spin(void *arg)
+{
+    unsigned long x = (unsigned long)arg | 1;
+    /* Memory mapped while the other threads run (malloc asks the kernel
+     * for pages), written and read back. */
+    unsigned long *m = malloc(256 * 1024);
+    if (!m)
+        return 0;
+    for (long i = 0; i < 30000000; i++) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        m[i & 32767] = x;
+    }
+    for (long i = 0; i < 32768; i++)
+        x += m[i];
+    free(m);
+    return (void *)x;
+}
+
+static int par(void)
+{
+    pthread_t t[4];
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    for (int i = 0; i < 4; i++)
+        pthread_create(&t[i], 0, spin, (void *)(long)(i + 1));
+    unsigned long sum = 0;
+    for (int i = 0; i < 4; i++) {
+        void *r;
+        pthread_join(t[i], &r);
+        sum += (unsigned long)r;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    long ms = (b.tv_sec - a.tv_sec) * 1000 + (b.tv_nsec - a.tv_nsec) / 1000000;
+    printf("mthread: par 4 threads %ld ms (%lx)\n", ms, sum & 0xfff);
+    return 0;
+}
+
+/* `mthread exec`: execve while two other threads are running (on other
+ * processors, with SMP): the kernel ends them first. */
+static void *forever(void *arg)
+{
+    volatile unsigned long *n = arg;
+    for (;;)
+        (*n)++;
+    return 0;
+}
+
+static int exec_threads(void)
+{
+    static volatile unsigned long n[2];
+    pthread_t t;
+    for (int i = 0; i < 2; i++)
+        pthread_create(&t, 0, forever, (void *)&n[i]);
+    while (n[0] == 0 || n[1] == 0)
+        ;
+    char *av[] = { "mthread", "done", 0 };
+    execv("/bin/mthread", av);
+    printf("mthread: execv failed\n");
+    return 1;
+}
+
+/* `mthread unmap`: munmap, mprotect and mremap while two other threads
+ * run (on other processors, with SMP): the kernel waits for them to leave
+ * the processors before it changes the shared page tables, and they run
+ * on afterwards. */
+static int unmap_threads(void)
+{
+    static volatile unsigned long n[2];
+    pthread_t t;
+    for (int i = 0; i < 2; i++)
+        pthread_create(&t, 0, forever, (void *)&n[i]);
+    while (n[0] == 0 || n[1] == 0)
+        ;
+    for (int i = 0; i < 20; i++) {
+        char *p = mmap(0, 4 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) {
+            printf("mthread: mmap failed\n");
+            return 1;
+        }
+        p[0] = 1;
+        p[3 * 4096] = 2;
+        if (mprotect(p, 4 * 4096, PROT_READ) || p[0] != 1 || mprotect(p, 4 * 4096, PROT_READ | PROT_WRITE)) {
+            printf("mthread: mprotect failed\n");
+            return 1;
+        }
+        p[4096] = 3;
+        char *q = mremap(p, 4 * 4096, 8 * 4096, MREMAP_MAYMOVE);
+        if (q == MAP_FAILED || q[0] != 1 || q[4096] != 3 || q[3 * 4096] != 2) {
+            printf("mthread: mremap failed\n");
+            return 1;
+        }
+        if (munmap(q, 8 * 4096)) {
+            printf("mthread: munmap failed\n");
+            return 1;
+        }
+    }
+    unsigned long a = n[0], b = n[1];
+    while (n[0] == a || n[1] == b)
+        ;
+    printf("mthread: unmap ok, threads still running\n");
+    return 0;
+}
+
 #define FAIL(...) do { printf("mthread: " __VA_ARGS__); printf("\n"); return 1; } while (0)
 
-int main(void)
+int main(int argc, char **argv)
 {
+    if (argc > 1 && argv[1][0] == 'p')
+        return par();
+    if (argc > 1 && argv[1][0] == 'e')
+        return exec_threads();
+    if (argc > 1 && argv[1][0] == 'u')
+        return unmap_threads();
+    if (argc > 1 && argv[1][0] == 'd') {
+        printf("mthread: exec ok, threads gone\n");
+        return 0;
+    }
     pthread_t t[4];
     void *r = 0;
 

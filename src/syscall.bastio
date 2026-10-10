@@ -94,25 +94,37 @@ fn write_from(con: &mut Con, root: &mut PageTable, off: u64, n0: u64) -> u64
   if !pt_has(root, 1) {
     return 0;
   }
-  let mut k = 0;
-  let mut l3 = pt_take(&mut root, 1);
-  if pt_has(l3, 0) {
-    let mut l2 = pt_take(&mut l3, 0);
-    let mut ok = true;
-    while ok && k < n
-      invariant k <= n && n <= n0 && pt_level(l2) == 2 && con_ok(con)
-    {
-      let ch = w_byte(&mut l2, off + k);
-      if ch == 256 {
-        ok = false;
-      } else {
-        con_write(&mut con, cast[u8](ch));
-        k = k + 1;
-      }
-    }
-    pt_put(&mut l3, 0, l2);
+  return pt_borrow(&mut root, 1, write_l3, &mut con, off, n);
+}
+
+/// write_from below the top-level table, in place.
+fn write_l3(l3: &mut PageTable, con: &mut Con, off: u64, n: u64) -> u64
+  requires con_ok(con) && pt_level(l3) == 3 && off + n <= USER_SIZE
+  ensures con_ok(con)
+{
+  if !pt_has(l3, 0) {
+    return 0;
   }
-  pt_put(&mut root, 1, l3);
+  return pt_borrow(&mut l3, 0, write_l2, &mut con, off, n);
+}
+
+fn write_l2(l2: &mut PageTable, con: &mut Con, off: u64, n: u64) -> u64
+  requires con_ok(con) && pt_level(l2) == 2 && off + n <= USER_SIZE
+  ensures con_ok(con)
+{
+  let mut k = 0;
+  let mut ok = true;
+  while ok && k < n
+    invariant k <= n && pt_level(l2) == 2 && con_ok(con)
+  {
+    let ch = w_byte(&mut l2, off + k);
+    if ch == 256 {
+      ok = false;
+    } else {
+      con_write(&mut con, cast[u8](ch));
+      k = k + 1;
+    }
+  }
   return k;
 }
 
@@ -146,22 +158,34 @@ fn find_prog(root: &mut PageTable, off: u64, n: u64) -> u64
   if !pt_has(root, 1) {
     return NPROGS;
   }
-  let mut found = NPROGS;
-  let mut l3 = pt_take(&mut root, 1);
-  if pt_has(l3, 0) {
-    let mut l2 = pt_take(&mut l3, 0);
-    let mut i = 0;
-    while i < NPROGS
-      invariant i <= NPROGS && found <= NPROGS && pt_level(l2) == 2
-    {
-      if found == NPROGS && w_matches(&mut l2, off, n, prog_name(i)) {
-        found = i;
-      }
-      i = i + 1;
-    }
-    pt_put(&mut l3, 0, l2);
+  return pt_borrow(&mut root, 1, find_l3, off, n);
+}
+
+/// find_prog below the top-level table, in place.
+fn find_l3(l3: &mut PageTable, off: u64, n: u64) -> u64
+  requires pt_level(l3) == 3 && off + n <= USER_SIZE
+  ensures result <= NPROGS
+{
+  if !pt_has(l3, 0) {
+    return NPROGS;
   }
-  pt_put(&mut root, 1, l3);
+  return pt_borrow(&mut l3, 0, find_l2, off, n);
+}
+
+fn find_l2(l2: &mut PageTable, off: u64, n: u64) -> u64
+  requires pt_level(l2) == 2 && off + n <= USER_SIZE
+  ensures result <= NPROGS
+{
+  let mut found = NPROGS;
+  let mut i = 0;
+  while i < NPROGS
+    invariant i <= NPROGS && found <= NPROGS && pt_level(l2) == 2
+  {
+    if found == NPROGS && w_matches(&mut l2, off, n, prog_name(i)) {
+      found = i;
+    }
+    i = i + 1;
+  }
   return found;
 }
 
@@ -674,7 +698,7 @@ fn syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       return KEEP;
     }
     ret(&mut k.procs, pid, 0);
-    if state(k.procs, a) == RUNNING {
+    if state(k.procs, a) == RUNNING || state(k.procs, a) == EXITING {
       // Running on another processor, which holds its address space: it
       // ends when it comes back (see `finish` in main.bastio).
       pset(&mut k.procs, a, F_STATE, KILLED);

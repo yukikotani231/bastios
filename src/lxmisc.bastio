@@ -496,6 +496,9 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     ret(&mut k.procs, pid, 0);
     return SWITCH;
   }
+  if (n == LX_MREMAP || n == LX_MUNMAP || n == LX_MPROTECT) && !win_quiet(&mut k, pid) {
+    return lx_retry(&mut k, pid, n);      // another thread of pid runs on a processor
+  }
   let mut r = 0;
   if n == LX_PREAD64 || n == LX_PWRITE64 {
     r = lx_pio(&mut con, &mut k, pid, n == LX_PWRITE64, a, b, c, r10);
