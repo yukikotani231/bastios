@@ -336,6 +336,24 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     return p;                               // the stack grew: run the instruction again
   }
   if v < 32 {
+    // Dies of the signal Linux would send: a parent's wait4 sees a
+    // SIGSEGV (or SIGFPE, SIGILL, SIGTRAP), and a shell prints 128 + it.
+    // A handler for it runs instead, if the process has one.
+    let mut sig = SIGSEGV;
+    if v == 0 {
+      sig = SIGFPE;
+    } else if v == 6 {
+      sig = SIGILL;
+    } else if v == 3 {
+      sig = SIGTRAP;
+    }
+    let mut addr = pget(s.k.procs, p, F_REGS + R_RIP);
+    if v == 14 {
+      addr = pget(s.k.procs, p, F_REGS + 19);   // CR2
+    }
+    if fault_caught(&mut s.k, p, sig, addr) {
+      return (p + 1) % NPROC;
+    }
     puts(&mut s.con, "\r\n[pid ");
     put_num(&mut s.con, p);
     puts(&mut s.con, " (");
@@ -349,16 +367,6 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       put_hex(&mut s.con, pget(s.k.procs, p, F_REGS + 19));
     }
     puts(&mut s.con, "; killed]\r\n");
-    // Dies of the signal Linux would send: a parent's wait4 sees a
-    // SIGSEGV (or SIGFPE, SIGILL, SIGTRAP), and a shell prints 128 + it.
-    let mut sig = SIGSEGV;
-    if v == 0 {
-      sig = SIGFPE;
-    } else if v == 6 {
-      sig = SIGILL;
-    } else if v == 3 {
-      sig = SIGTRAP;
-    }
     terminate(&mut s.k, mmu, p, SIG_DEATH + sig);
     return (p + 1) % NPROC;
   }
