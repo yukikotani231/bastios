@@ -69,6 +69,7 @@ const NETWAIT: u64 = 9;              // waiting for the network (a ping's reply)
 const LXVFORK: u64 = 10;             // lent its address space to child F_WAIT (clone with CLONE_VM | CLONE_VFORK)
 const CONWAIT: u64 = 11;             // writing to the console, whose ring is full
 const FUTEXWAIT: u64 = 12;           // in a Linux futex wait with no timeout
+const DISKWAIT: u64 = 13;            // waiting for the disk: F_WAIT says for what (disk_wake)
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -319,6 +320,9 @@ const SK_WAIT: u64 = 0x8000000000000000;
 // What lx_write_fd returns when the console's ring has no room for the
 // write: not an errno, and never returned to the process.
 const CON_FULL: u64 = 0x8000000000000001;
+// What a file read or write returns when the disk has not caught up
+// (VFS_MISS): the caller sleeps in DISKWAIT and its call restarts.
+const DISK_RETRY: u64 = 0x8000000000000002;
 // Linux working directories: per process, word 0 the length of the path
 // (without the leading "/", at most FNAME_MAX) and one byte a word after.
 const CWD_STRIDE: u64 = 256;           // FNAME_MAX + 1
@@ -351,7 +355,11 @@ const EP_FDS: u64 = 16;               // descriptors one epoll instance watches
 const EP_ENTRY: u64 = 4;              // fd + 1 (0: empty), its description, events, data
 const EP_STRIDE: u64 = 65;            // 1 + EP_FDS * EP_ENTRY
 const EP_AT: u64 = 32;                // TFD_N * TFD_STRIDE
-const EVT_LEN: u64 = 552;             // EP_AT + EP_N * EP_STRIDE
+const FIFO_N: u64 = 4;                // named pipes, in k.evt from FIFO_AT: FIFO_STRIDE words each
+const FIFO_NAME: u64 = 128;           // the longest name one can have
+const FIFO_STRIDE: u64 = 130;         // name length (0: free), pipe + 1, then the name, a byte a word
+const FIFO_AT: u64 = 552;             // EP_AT + EP_N * EP_STRIDE
+const EVT_LEN: u64 = 1072;            // FIFO_AT + FIFO_N * FIFO_STRIDE
 const OF_UNIX: u64 = 11;              // an AF_UNIX socket: see src/lxunix.bastio
 const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
@@ -376,8 +384,8 @@ const UXB_LEN: u64 = 65968;           // UX_N * UX_CAP + UX_LIS * UX_PATH
 const NPIPES: u64 = 8;
 const PIPE_CAP: u64 = 65536;          // bytes a pipe holds, as on Linux
 const PIPE_ATOM: u64 = 4096;          // PIPE_BUF: writes this small go in whole
-const PIPE_STRIDE: u64 = 4;           // head, count, read end open, write end open
-const PIPES_LEN: u64 = 32;            // NPIPES * PIPE_STRIDE
+const PIPE_STRIDE: u64 = 6;           // head, count, readers, writers, FIFO + 1 (0: none), a writer came
+const PIPES_LEN: u64 = 48;            // NPIPES * PIPE_STRIDE
 const PIPE_BYTES: u64 = 524288;       // NPIPES * PIPE_CAP
 
 const LX_PIPE: u64 = 22;
@@ -974,6 +982,8 @@ fn put_state(con: &mut Con, s: u64)
     puts(&mut con, "writing");
   } else if s == NETWAIT {
     puts(&mut con, "netwait");
+  } else if s == DISKWAIT {
+    puts(&mut con, "disk   ");
   } else if s == LXVFORK {
     puts(&mut con, "vfork  ");
   } else {

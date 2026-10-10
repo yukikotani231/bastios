@@ -270,7 +270,7 @@ steps = [
     ("mkdir pd; chmod 700 pd; stat -c '%a %F' pd", b"\r\n700 directory\r\n", b"\n# "),
     ("rm pm; rmdir pd; echo cleaned$((1+1))", b"\r\ncleaned2\r\n", b"\n# "),
     # The *at calls relative to a directory descriptor, fchdir, and mmap
-    # of a file (user/mdir.c).
+    # of a file, EMFILE, and a named pipe (user/mdir.c).
     ("mdir", b"mdir: ok in /dx, mapped", b"\n# "),
     # Small calls: uname, readv, pread/pwrite, limits, sysinfo, statfs,
     # getrandom, priorities, sessions, process groups, ttyname, pipe capacity (user/mmisc.c).
@@ -835,6 +835,36 @@ session("NVMe 4K", None, [
     ("diskbench", b"read 2 MiB: "),
     ("rm disk/big", b""),
 ], halt=True, ready=nvme_found)
+
+# Several processes on the disk at once, on two processors: two
+# diskbench (each writes, reads back and checks its own 2 MiB file) and
+# fstest. Each sleeps while the disk works for another (src/diskq.bastio);
+# all must finish with their data intact, and every page come back.
+qemu = boot(2, nvme=True)
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+if ok:
+    for cmd in (b"diskbench &", b"diskbench &", b"fstest"):
+        mark = len(out)
+        qemu.stdin.write(cmd + b"\r"); qemu.stdin.flush()
+        ok = ok and read_until(b"bastios> ", mark)
+    ok = ok and read_until(b"fstest: ok")
+    ok = ok and read_until(b"read 2 MiB")
+    ok = ok and read_until(b"read 2 MiB", out.find(b"read 2 MiB") + 1)
+    ok = ok and b"failed" not in out and b"fstest: disk ok" in out
+print(("ok  " if ok else "FAIL"), "(disk at once) two diskbench and fstest together")
+fails += not ok
+qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
+read_until(b"pages free at power off")
+booted = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
+off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+good = booted and off and booted.group(1) == off.group(1)
+print(("ok  " if good else "FAIL"), "(disk at once) every page back at power off")
+fails += not good
+qemu.kill(); qemu.wait()
+print("---- disk at once transcript ----")
+print(out.decode(errors="replace").replace("\r", "")[-1500:])
 
 # An e1000 card instead of virtio (src/e1000.bastio), on QEMU's network.
 # Its link takes a moment to come up, so DHCP may need a retry: ask until

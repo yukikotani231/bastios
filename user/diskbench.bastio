@@ -1,7 +1,8 @@
 // Times the disk: writes a 2 MiB file on it in 4 KiB calls, reads it back
 // the same way, then removes it. Prints the time for each in timer ticks
 // (100 Hz) and in KiB/s. The numbers are only comparable between runs on
-// the same host and the same disk driver.
+// the same host and the same disk driver. The file is disk/benchN, N the
+// last digit of the pid, so two copies can run at once.
 
 import "lib/file.bastio";
 
@@ -64,8 +65,9 @@ fn main(con: &mut Serial) -> u64 {
     bset(&mut buf, i, cast[u8](i % 251));
     i = i + 1;
   }
-  let name = bfrom("disk/bench");
-  let fd = f_open(name, 10, O_WRITE + O_CREATE + O_TRUNC);
+  let mut name = bfrom("disk/bench0");
+  bset(&mut name, 10, cast[u8](48 + sys_getpid() % 10));
+  let fd = f_open(name, 11, O_WRITE + O_CREATE + O_TRUNC);
   if fd == NOT_OK {
     puts(con, "diskbench: no disk\r\n");
     bfree(name);
@@ -83,7 +85,7 @@ fn main(con: &mut Serial) -> u64 {
   }
   f_close(fd);
   let wt = since(t0);
-  let rd = f_open(name, 10, O_READ);
+  let rd = f_open(name, 11, O_READ);
   let t1 = sys_info(1);
   n = 0;
   while n < CHUNKS && ok
@@ -94,7 +96,7 @@ fn main(con: &mut Serial) -> u64 {
   }
   f_close(rd);
   let rt = since(t1);
-  f_unlink(name, 10);
+  f_unlink(name, 11);
   bfree(name);
   bfree(buf);
   if !ok {

@@ -378,3 +378,93 @@ fn blk_write_block(b: &mut Blk, lba: u64, src: &Bytes, at: u64) -> bool
     },
   }
 }
+
+// Commands that run while the kernel does something else (see
+// src/bio.bastio): blk_begin starts one, blk_poll says when it is done,
+// and blk_fetch copies a finished read into the buffer it was started
+// with. One at a time. While one runs, the waiting calls above fail.
+
+/// Starts BIO_READ into buf[at .. at + 4096] or BIO_WRITE from it, of the
+/// 4 KiB block at sector `lba` (a multiple of 8), or BIO_FLUSH. A read's
+/// data is in buf only after blk_fetch(b, buf, at) (ATA has it at once).
+/// False if a command is running or the block is not whole on the disk.
+fn blk_begin(b: &mut Blk, op: u64, lba: u64, buf: &mut Bytes, at: u64) -> bool
+  requires blk_ok(b) && op <= BIO_FLUSH && at + 4096 <= blen(buf)
+  ensures blk_ok(b) && blen(buf) == old(blen(buf))
+{
+  match b {
+    Blk::Ata(mut a) => {
+      let ok = ata_begin(&mut a, op, lba, &mut buf, at);
+      b = Blk::Ata(a);
+      return ok;
+    },
+    Blk::Virtio(mut v) => {
+      let ok = virtio_begin(&mut v, op, lba, buf, at);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+    Blk::Nvme(mut n) => {
+      let ok = nvme_begin(&mut n, op, lba, buf, at);
+      b = Blk::Nvme(n);
+      return ok;
+    },
+    Blk::Ahci(mut h) => {
+      let ok = ahci_begin(&mut h, op, lba, buf, at);
+      b = Blk::Ahci(h);
+      return ok;
+    },
+  }
+}
+
+/// BIO_RUNNING while the started command runs, then once BIO_OK or
+/// BIO_FAILED; BIO_IDLE if none was started.
+fn blk_poll(b: &mut Blk) -> u64
+  requires blk_ok(b)
+  ensures blk_ok(b) && result <= BIO_IDLE
+{
+  match b {
+    Blk::Ata(mut a) => {
+      let r = ata_poll(&mut a);
+      b = Blk::Ata(a);
+      return r;
+    },
+    Blk::Virtio(mut v) => {
+      let r = virtio_poll(&mut v);
+      b = Blk::Virtio(v);
+      return r;
+    },
+    Blk::Nvme(mut n) => {
+      let r = nvme_poll(&mut n);
+      b = Blk::Nvme(n);
+      return r;
+    },
+    Blk::Ahci(mut h) => {
+      let r = ahci_poll(&mut h);
+      b = Blk::Ahci(h);
+      return r;
+    },
+  }
+}
+
+/// After blk_poll said BIO_OK for a BIO_READ started with (buf, at):
+/// puts the block in buf[at .. at + 4096].
+fn blk_fetch(b: &mut Blk, buf: &mut Bytes, at: u64)
+  requires blk_ok(b) && at + 4096 <= blen(buf)
+  ensures blk_ok(b) && blen(buf) == old(blen(buf))
+{
+  match b {
+    Blk::Ata(a) => { b = Blk::Ata(a); },     // ata_begin read it already
+    Blk::Virtio(mut v) => {
+      virtio_fetch(&mut v, &mut buf, at);
+      b = Blk::Virtio(v);
+    },
+    Blk::Nvme(mut n) => {
+      nvme_fetch(&mut n, &mut buf, at);
+      b = Blk::Nvme(n);
+    },
+    Blk::Ahci(mut h) => {
+      ahci_fetch(&mut h, &mut buf, at);
+      b = Blk::Ahci(h);
+    },
+  }
+}

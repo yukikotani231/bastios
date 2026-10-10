@@ -65,6 +65,13 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
   one cache flush instead of eight: writing a 2 MiB file is 3.4 to 3.9
   times faster on NVMe, virtio and AHCI, 1.5 times on ATA (numbers in
   docs/architecture.md; `make diskbench` measures them).
+- A process waiting for the disk sleeps, and the others run. File data
+  goes through a 64-block cache and an ordered queue of disk commands
+  (`src/diskq.bastio`). A read that misses queues its blocks and read-ahead
+  and restarts when they arrive. A write queues its blocks, a flush, its
+  directory block and a flush, and returns once they are done. While a
+  disk writer runs, `bench`'s getpid takes 120-183 ticks instead of
+  240-260 (`make iobench`).
 - NVMe namespaces with 4 KiB logical blocks are used; they were skipped.
   AHCI disks with sectors longer than 512 bytes are now recognized and
   left alone instead of being misdriven.

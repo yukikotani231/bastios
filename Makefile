@@ -294,8 +294,11 @@ smpbench: build/bastios.elf
 diskbench: build/bastios.elf
 	test/diskbench.sh
 
+iobench: build/bastios.elf
+	test/iobench.sh
+
 clean:
 	rm -rf build
 
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
-.PHONY: all run test fuzz smpbench diskbench compat compat-baseline compat-host clean
+.PHONY: all run test fuzz smpbench diskbench iobench compat compat-baseline compat-host clean
