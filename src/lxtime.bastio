@@ -750,6 +750,10 @@ fn lx_time_rest(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
   ensures kok(k)
 {
   if n == LX_RT_SIGTIMEDWAIT {
+    if pget(k.procs, pid, F_REGS + R_R10) != 8 {
+      ret(&mut k.procs, pid, EINVAL);       // the sigset size
+      return KEEP;
+    }
     return lx_sigtimedwait(&mut k, pid, n, was, a, b, c);
   }
   if n == LX_PAUSE {
