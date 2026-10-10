@@ -94,6 +94,7 @@ const LX_EXECVE: u64 = 59;
 const LX_WAIT4: u64 = 61;
 const LX_GETTID: u64 = 186;
 const LX_FUTEX: u64 = 202;
+const LX_REBOOT: u64 = 169;
 
 // What thread_exec says.
 const EXEC_GO: u64 = 0;              // no other thread is left: go on
@@ -216,6 +217,23 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if n == LX_FUTEX {
     return lx_futex(&mut k, pid, was, a, b, c);
+  }
+  if n == LX_REBOOT {
+    // reboot(2), after its two magic numbers: RESTART restarts the
+    // machine, POWER_OFF and HALT power it off (everyone is root).
+    if a != 0xFEE1DEAD || (b != 672274793 && b != 85072278 && b != 369367448 && b != 537993216) {
+      ret(&mut k.procs, pid, EINVAL);
+      return KEEP;
+    }
+    ret(&mut k.procs, pid, 0);
+    if c == 0x01234567 {
+      return REBOOT;
+    }
+    if c == 0x4321FEDC || c == 0xCDEF0123 {
+      return POWEROFF;
+    }
+    ret(&mut k.procs, pid, EINVAL);
+    return KEEP;
   }
   if n == LX_READ || n == LX_READV {
     let rv = fd_look(k, pid, a);
@@ -489,9 +507,11 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_sig_call(n) {
     return lx_sig_call(&mut k, pid, n, a, b, c);
   }
-  if n == LX_GETUID || n == LX_GETGID || n == LX_GETEUID || n == LX_GETEGID {
-    ret(&mut k.procs, pid, 0);              // everyone is root
-    return KEEP;
+  if is_ipc_call(n) {
+    return lx_ipc_call(&mut k, pid, n, was, a, b, c);
+  }
+  if is_cred_call(n) {
+    return lx_cred_call(&mut k, pid, n, a, b, c);
   }
   if n == LX_GETCWD {
     ret(&mut k.procs, pid, lx_getcwd(&mut k, pid, a, b));
@@ -1498,7 +1518,7 @@ fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
 /// Maps fresh zero pages at window pages [from, to) of process pid, where
 /// none is mapped yet. Returns false if memory ran out (the pages mapped so
 /// far stay, and go back when the process exits).
-fn lx_map_pages(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, from: u64, to: u64) -> bool
+fn lx_map_pages(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, from: u64, to: u64, sh: bool) -> bool
   requires mem_ok(m) && spaces_ok(spaces) && pid < NPROC && to <= WPAGES
   ensures mem_ok(m) && spaces_ok(spaces)
 {
@@ -1507,7 +1527,7 @@ fn lx_map_pages(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, from: u64, to: u
     Space::Mapped(mut root) => {
       let mut ok = false;
       if pt_has(root, 1) {
-        ok = pt_borrow(&mut root, 1, map_l3, &mut m, from, to);
+        ok = pt_borrow(&mut root, 1, map_l3, &mut m, from, to, sh);
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return ok;
@@ -1518,17 +1538,17 @@ fn lx_map_pages(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, from: u64, to: u
 /// lx_map_pages below the top-level table, in place: other threads may be
 /// running on the space, and the new pages appear to them as they are
 /// mapped.
-fn map_l3(l3: &mut PageTable, m: &mut Mem, from: u64, to: u64) -> bool
+fn map_l3(l3: &mut PageTable, m: &mut Mem, from: u64, to: u64, sh: bool) -> bool
   requires pt_level(l3) == 3 && mem_ok(m) && to <= WPAGES
   ensures mem_ok(m)
 {
   if !pt_has(l3, 0) {
     return false;
   }
-  return pt_borrow(&mut l3, 0, map_l2, &mut m, from, to);
+  return pt_borrow(&mut l3, 0, map_l2, &mut m, from, to, sh);
 }
 
-fn map_l2(l2: &mut PageTable, m: &mut Mem, from: u64, to: u64) -> bool
+fn map_l2(l2: &mut PageTable, m: &mut Mem, from: u64, to: u64, sh: bool) -> bool
   requires pt_level(l2) == 2 && mem_ok(m) && to <= WPAGES
   ensures mem_ok(m)
 {
@@ -1537,7 +1557,7 @@ fn map_l2(l2: &mut PageTable, m: &mut Mem, from: u64, to: u64) -> bool
   while ok && p < to
     invariant mem_ok(m) && pt_level(l2) == 2 && to <= WPAGES
   {
-    ok = w_map(&mut m, &mut l2, p);
+    ok = w_map(&mut m, &mut l2, p, sh);
     p = p + 1;
   }
   return ok;
@@ -1558,7 +1578,7 @@ fn stack_reach(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, va: u64) -> bool
   if va < USER_BASE + STACK_FIRST * 4096 || va >= USER_BASE + STACK_LOW * 4096 {
     return false;
   }
-  return lx_map_pages(&mut m, &mut spaces, pid, (va - USER_BASE) / 4096, WPAGES);
+  return lx_map_pages(&mut m, &mut spaces, pid, (va - USER_BASE) / 4096, WPAGES, false);
 }
 
 /// A page fault of process p: if it touched a stack page not mapped yet,
@@ -1589,7 +1609,7 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
     return USER_BASE + cur;
   }
   let new = want - USER_BASE;
-  if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, (cur + 4095) / 4096, (new + 4095) / 4096) {
+  if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, (cur + 4095) / 4096, (new + 4095) / 4096, false) {
     return USER_BASE + cur;
   }
   pset(&mut k.procs, pid, F_BRK, new);
@@ -1599,7 +1619,12 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
 /// mmap: private memory, taken downward from the stack, or at addr with
 /// MAP_FIXED. A file mapping is a copy of the file's bytes from `off` (the
 /// rest of the last page zero), so writes to it never reach the file, even
-/// with MAP_SHARED. The address hint without MAP_FIXED is ignored.
+/// with MAP_SHARED (they are written back at msync, munmap and exit). A
+/// MAP_SHARED mapping, of a file or anonymous, is made of shared pages,
+/// which fork maps in the child too instead of copying: parent and child
+/// see each other's writes. Two separate mmaps of one file do not share
+/// pages (there is no page cache). The address hint without MAP_FIXED is
+/// ignored.
 fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -1624,6 +1649,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     }
   }
   let pages = (n + 4095) / 4096;
+  let sh = flags % 4 == MAP_SHARED;
   let mut at = 0;
   if flags / MAP_FIXED % 2 == 1 {
     if addr % 4096 != 0 || addr < USER_BASE || addr - USER_BASE > STACK_FIRST * 4096 || pages > STACK_FIRST - (addr - USER_BASE) / 4096 {
@@ -1633,7 +1659,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // What was there goes, read-only pages too: the new mapping is writable.
     map_forget(&mut k, pid, at / 4096, at / 4096 + pages, false);
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
-    if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages) {
+    if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
       return ENOMEM;
     }
   } else {
@@ -1650,7 +1676,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // when an mprotect makes them usable (lx_mprotect), and touching it
     // before that faults, as on Linux.
     let reserve = anon && prot == 0;
-    if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096) {
+    if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096, sh) {
       return ENOMEM;
     }
     pset(&mut k.procs, pid, F_MMAP, at);

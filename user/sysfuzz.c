@@ -257,7 +257,7 @@ static int tame(u64 n, u64 *a) {
  * child), SYS_POWEROFF and SYS_KILL of another process are left out. */
 static int tame_native(u64 n, u64 *a) {
     switch (n) {
-    case 0: case 2: case 10: return 0;
+    case 0: case 2: case 10: case 25: return 0;     /* exit, read, power off, reboot */
     case 4: a[0] = 1000 + pick(1000); return 1;       /* wait: no such child */
     case 9: a[0] = pick(2) ? 0 : 1000 + pick(1000); return 1;
     case 3:                                           /* spawn: only "true" or "hello" */

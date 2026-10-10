@@ -168,6 +168,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   }
   lx_fd_fork(&mut k, pid, c);
   map_fork(&mut k, pid, c);
+  shm_fork(&mut k, pid, c);
   sig_fork(&mut k.sigact, pid, c);
   cwd_fork(&mut k.cwd, pid, c);
   pset(&mut k.procs, c, F_SIGPEND, 0);
@@ -231,6 +232,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
       put_space(&mut k.spaces, pid, Space::Mapped(new));
     },
   }
+  shm_drop_all(&mut k, pid);
   lx_fd_close_all(&mut k, pid, true);
   sig_reset(&mut k.sigact, pid, true);
   pset(&mut k.procs, pid, F_ALTSIZE, 0);  // and the alternate signal stack
@@ -774,12 +776,18 @@ fn applet_name(j: u64) -> Str {
     return "readlink";
   }
   if j == 17 {
-    return "mkfifo";
+    return "reboot";
   }
   if j == 18 {
-    return "mount";
+    return "poweroff";
   }
   if j == 19 {
+    return "mkfifo";
+  }
+  if j == 20 {
+    return "mount";
+  }
+  if j == 21 {
     return "umount";
   }
   return "truncate";
