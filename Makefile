@@ -214,6 +214,7 @@ test: build/bastios.elf
 	test/tcp_test.sh
 	NIC=e1000 test/tcp_test.sh
 	test/iso_test.sh
+	test/nmi_test.sh
 
 # The Linux compatibility suite (test/compat): static musl programs that
 # exercise the system call surface, and a BusyBox with a broad set of

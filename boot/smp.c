@@ -155,6 +155,7 @@ static void core_init(uint64_t i) {
     uint8_t *tss = core + CORE_TSS;
     for (int b = 0; b < 104; b++) tss[b] = 0;
     *(uint64_t *)(tss + 4) = top;                   /* rsp0 */
+    *(uint64_t *)(tss + 36) = (uint64_t)(core + CORE_IST_TOP);   /* ist1 */
     *(uint16_t *)(tss + 102) = 104;                 /* iomap_base: none */
     uint64_t base = (uint64_t)tss, limit = 103;
     bst_gdt[5 + 2 * i] = (limit & 0xFFFF) | ((base & 0xFFFFFF) << 16) | (0x89ull << 40)
