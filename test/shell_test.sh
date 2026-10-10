@@ -469,6 +469,50 @@ else:
         print("ok   TCP: a refused connection says so")
     else:
         print("FAIL TCP refused"); fails += 1
+    # TCP through Linux system calls (user/mtcp.c, musl): it listens,
+    # accepts, reads a line naming a port on this machine and answers it;
+    # then it connects to that port, writes, and reads the reply until the
+    # host closes.
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    srv.settimeout(10)
+    ask = f"{srv.getsockname()[1]}\n".encode()
+    mark = len(out)
+    qemu.stdin.write(b"mtcp\r"); qemu.stdin.flush()
+    reply = b""
+    line = b""
+    if read_until(b"listening on tcp port 7001", mark):
+        try:
+            ts = socket.create_connection(("127.0.0.1", tcp_port), timeout=10)
+            ts.sendall(ask)
+            while True:
+                chunk = ts.recv(100)
+                if not chunk:
+                    break
+                reply += chunk
+            ts.close()
+            cs, _ = srv.accept()
+            cs.settimeout(10)
+            while not line.endswith(b"\n"):
+                chunk = cs.recv(100)
+                if not chunk:
+                    break
+                line += chunk
+            cs.sendall(b"back at you\n")
+            cs.close()
+        except OSError as e:
+            print("     mtcp:", e)
+    srv.close()
+    if (read_until(b"bastios> ", mark) and reply == b"echo: " + ask
+            and b"mtcp: connection from 10.0.2.2" in out[mark:]):
+        print("ok   Linux TCP: listen, accept, read, write, close")
+    else:
+        print("FAIL Linux TCP serve:", reply, repr(out[mark:])); fails += 1
+    if line == b"linux says hi\n" and b"mtcp: got back at you" in out[mark:]:
+        print("ok   Linux TCP: connect, write, read until the peer closes")
+    else:
+        print("FAIL Linux TCP get:", line); fails += 1
     mark = len(out)
     qemu.stdin.write(b"udpsend 10.0.2.2 0 x\r"); qemu.stdin.flush()
     if read_until(b"bastios> ", mark) and b"usage: udpsend" in out[mark:]:

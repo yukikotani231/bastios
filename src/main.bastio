@@ -24,6 +24,7 @@ import "lxproc.bastio";
 import "lxfd.bastio";
 import "lxdir.bastio";
 import "lxsock.bastio";
+import "lxtcp.bastio";
 import "lxsig.bastio";
 
 const V_TIMER: u64 = 32;
