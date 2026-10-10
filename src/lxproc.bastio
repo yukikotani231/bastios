@@ -221,6 +221,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
   }
   lx_fd_close_all(&mut k, pid, true);
   sig_reset(&mut k.sigact, pid, true);
+  ptimer_clear(&mut k, pid);              // execve deletes POSIX timers
   match take_fpu(&mut k.fpus, pid) {
     Fpu::None => {},
     Fpu::State(mut f) => {
@@ -580,6 +581,10 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
   let pf = proc_file(k.procs, k.fs.xfer, n);
   if pf != 0 {
     return proc_meta(pf);
+  }
+  let ff = fifo_find(k, n);
+  if ff < FIFO_N {
+    return Meta { ok: true, mode: S_IFIFO, size: 0, ino: INO_FIFO + ff, mtime: 0 };
   }
   let dir = dir_at(&mut k, n);
   if dir != NO_FILE {

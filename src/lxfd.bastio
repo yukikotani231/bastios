@@ -8,8 +8,10 @@
 // description h; plus FD_CLOEXEC if execve closes it.
 // k.ofd, words h * OFD_STRIDE: kind, references, row, pipe or directory,
 // and a directory's next entry (for a pipe end: 1 if it is nonblocking).
-// k.pipes, words p * PIPE_STRIDE: head, count, read end open, write end
-// open; the ring itself is PIPE_CAP bytes of k.pipebuf at p * PIPE_CAP.
+// k.pipes, words p * PIPE_STRIDE: head, count, the descriptions of its
+// read end and of its write end, the FIFO it belongs to + 1 (0 for an
+// anonymous pipe; src/lxevent.bastio), and 1 once a writer has opened it;
+// the ring itself is PIPE_CAP bytes of k.pipebuf at p * PIPE_CAP.
 
 import "linux.bastio";
 import "lxdev.bastio";
@@ -219,9 +221,15 @@ fn unref_value(k: &mut Kernel, v: u64)
   if kind == OF_FILE && x < FD_ROWS {
     vfs_close(&mut k.fs, &mut k.mem, x);
   } else if kind == OF_PIPE_R && x < NPIPES {
-    pi_set(&mut k.pipes, x, 2, 0);
+    let left = pi_get(k.pipes, x, 2);
+    if left > 0 {
+      pi_set(&mut k.pipes, x, 2, left - 1);   // one description fewer on this end
+    }
   } else if kind == OF_PIPE_W && x < NPIPES {
-    pi_set(&mut k.pipes, x, 3, 0);
+    let left = pi_get(k.pipes, x, 3);
+    if left > 0 {
+      pi_set(&mut k.pipes, x, 3, left - 1);   // one description fewer on this end
+    }
   } else if kind == OF_SOCK {
     sock_close(&mut k.nic, x);
   } else if kind == OF_TCP && x < TCBS {
@@ -411,6 +419,13 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64) -> u64
       return ENFILE;
     }
     return fd_install(&mut k, pid, hv);
+  }
+  let ff = fifo_find(k, n);
+  if ff < FIFO_N {
+    if flags & LO_CREAT != 0 && flags & LO_EXCL != 0 {
+      return EEXIST;
+    }
+    return fifo_open(&mut k, pid, ff, flags);
   }
   let dir = dir_at(&mut k, n);
   let excl = flags & LO_CREAT != 0 && flags & LO_EXCL != 0;
@@ -602,6 +617,8 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
   pi_set(&mut k.pipes, p, 1, 0);
   pi_set(&mut k.pipes, p, 2, 1);
   pi_set(&mut k.pipes, p, 3, 1);
+  pi_set(&mut k.pipes, p, 4, 0);
+  pi_set(&mut k.pipes, p, 5, 1);
   of_set(&mut k.ofd, hr, 3, flags / LO_NONBLOCK % 2);
   of_set(&mut k.ofd, hw, 3, flags / LO_NONBLOCK % 2);
   let mut ce = 0;
@@ -621,10 +638,10 @@ fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
 {
   let count = smaller(pi_get(k.pipes, p, 1), PIPE_CAP);
   if count == 0 {
-    if pi_get(k.pipes, p, 3) == 0 {
-      return 0;
+    if pi_get(k.pipes, p, 3) == 0 && pi_get(k.pipes, p, 5) != 0 {
+      return 0;                             // every writer has gone
     }
-    return EAGAIN;
+    return EAGAIN;                          // (a FIFO no writer has opened yet waits for one)
   }
   if n == 0 {
     return 0;

@@ -106,6 +106,7 @@ const S_IFREG: u64 = 0x81A4;                // a regular file, rw-r--r--
 const S_IFMT_DIR: u64 = 0x4000;             // the type bits of a directory
 const S_IFMT_REG: u64 = 0x8000;             // and of a regular file
 const INO_FILES: u64 = 1000;                // inode numbers of files: this + the handle
+const INO_FIFO: u64 = 900;                 // inode numbers of named pipes: this + the slot
 
 // ---------------------------------------------------------------- user memory
 
@@ -305,6 +306,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_time_call(n) {
     return lx_time_call(&mut k, pid, n, was, a, b, c);
   }
+  if is_ptimer_call(n) {
+    return lx_ptimer_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
+  }
   if is_event_call(n) {
     return lx_event_call(&mut k, pid, n, was, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
   }
@@ -312,12 +316,17 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, lx_fcntl(&mut k, pid, a, b, c));
     return KEEP;
   }
-  if n == LX_OPEN {
-    ret(&mut k.procs, pid, lx_open(&mut k, pid, AT_FDCWD, a, b));
-    return KEEP;
-  }
-  if n == LX_OPENAT {
-    ret(&mut k.procs, pid, lx_open(&mut k, pid, a, b, c));
+  if n == LX_OPEN || n == LX_OPENAT {
+    let mut r = 0;
+    if n == LX_OPEN {
+      r = lx_open(&mut k, pid, AT_FDCWD, a, b);
+    } else {
+      r = lx_open(&mut k, pid, a, b, c);
+    }
+    if r == SK_WAIT {
+      return lx_retry(&mut k, pid, n);      // a FIFO's writer waits for a reader
+    }
+    ret(&mut k.procs, pid, r);
     return KEEP;
   }
   if n == LX_UNLINK || n == LX_UNLINKAT {
@@ -355,11 +364,6 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     let fd = pget(k.procs, pid, F_REGS + R_R8);
     let off = pget(k.procs, pid, F_REGS + R_R9);
     ret(&mut k.procs, pid, lx_mmap(&mut k, pid, a, b, flags, fd, off));
-    return KEEP;
-  }
-  if n == LX_MUNMAP || n == LX_MPROTECT {
-    // Pages stay mapped (and writable) until the process exits.
-    ret(&mut k.procs, pid, 0);
     return KEEP;
   }
   if n == LX_STAT || n == LX_LSTAT {
@@ -1250,6 +1254,8 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64, fd: u64, off
       return EINVAL;
     }
     at = addr - USER_BASE;
+    // What was there goes, read-only pages too: the new mapping is writable.
+    win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
     if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages) {
       return ENOMEM;
     }
@@ -1265,9 +1271,8 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64, fd: u64, off
     }
     pset(&mut k.procs, pid, F_MMAP, at);
   }
-  // Fresh pages are zero, but MAP_FIXED may land on pages in use: fill the
-  // whole range, from the file where it has bytes, zero after.
-  if anon && flags / MAP_FIXED % 2 == 0 {
+  // Fresh pages are zero: only a file's bytes need copying in.
+  if anon {
     return USER_BASE + at;
   }
   let total = pages * 4096;
