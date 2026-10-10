@@ -436,7 +436,7 @@ fn fd_install_console(k: &mut Kernel, pid: u64) -> u64
 
 /// open / openat: the native flags for Linux `flags`, then vfs_open, and
 /// a description for the row. A file it creates gets `mode` less the
-/// umask (always 022).
+/// process's umask, and its owner (src/lxperm.bastio).
 fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, mode: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -464,6 +464,29 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   }
   if flags % 4 != 0 && k.fs.lo_at != 0 && vfs_lookup(&mut k.fs, n) == k.fs.lo_file {
     return EBUSY;                           // a disk image while it is mounted (vfs_lo_mount)
+  }
+  // Permissions (src/lxperm.bastio): on the file, for what the flags
+  // ask; on its directory, for a new name.
+  let kept = kept_meta(&mut k, n);
+  if kept && flags & LO_CREAT != 0 && flags & LO_EXCL != 0 {
+    // EEXIST, below
+  } else if kept && flags & LO_PATH == 0 {
+    let mut want = 0;
+    if flags % 4 != LO_WRONLY {
+      want = MAY_R;
+    }
+    if flags % 4 != 0 || flags & LO_TRUNC != 0 {
+      want = want + MAY_W;
+    }
+    let e = may_path(&mut k, pid, n, want);
+    if e != 0 {
+      return e;
+    }
+  } else if flags & LO_CREAT != 0 && dir_at(&mut k, n) == NO_FILE && dev_at(k.fs.xfer, n) == DEV_NONE {
+    let e = may_dir(&mut k, pid, n);
+    if e != 0 {
+      return e;
+    }
   }
   let pf = proc_file(k.procs, k.fs.xfer, n);
   if pf != 0 {
@@ -541,6 +564,10 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     return EMFILE;                          // no descriptor, or no file layer row, left
   }
   let fresh = f / O_CREATE % 2 == 1 && vfs_lookup(&mut k.fs, n) == NO_FILE;
+  let mut own = 0;
+  if fresh {
+    own = new_owner(&mut k, pid, n);
+  }
   let nfd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, f, n);
   if nfd == NO_FD || nfd >= NFD {
     return ENOENT;
@@ -549,7 +576,7 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if fresh {
     let made = vfs_row_file(k.fs, row);
     if made != NO_FILE {
-      vfs_set_meta(&mut k.fs, made, mode % 512 & !18, NO_FILE);   // 0777 bits, less umask 022
+      made_by(&mut k, pid, made, own, mode % 512, false);   // 0777 bits, less the umask
     }
   }
   let h = ofd_new(&mut k, OF_FILE, row);

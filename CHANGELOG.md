@@ -26,6 +26,16 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Linux programs
 
+- Files have owners and permissions (`src/lxperm.bastio`). Each file keeps
+  its owner's user and group ids, in memory and on the disk; `chown`,
+  `fchown`, `lchown` and `fchownat` change them, and `stat` reports them.
+  `open`, `execve`, `truncate` and `access` check the mode bits against
+  the caller's ids. A path needs search permission on its directories, and
+  making or removing a name needs write permission on its directory. A
+  sticky directory keeps others' names. `chmod` and `utime` are for the
+  owner. A new file belongs to its maker and takes the process's `umask`,
+  which is kept per process now (it was always 022). `/tmp` is 01777, and
+  BusyBox's `chown` is built in.
 - Anonymous `MAP_SHARED` memory is shared with children: `fork` maps the
   same pages in the child instead of copying them, so a write on one side
   is seen on the other. The pages are counted references (bastiolang's

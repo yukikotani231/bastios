@@ -275,6 +275,12 @@ fn lx_symlink(k: &mut Kernel, pid: u64, tva: u64, dirfd: u64, path: u64) -> u64
     bfree(tb);
     return EROFS;
   }
+  let e = may_dir(&mut k, pid, n);
+  if e != 0 {
+    bfree(tb);
+    return e;
+  }
+  let own = new_owner(&mut k, pid, n);
   let mut j = 0;
   while j < tl
     invariant j <= tl && tl <= FNAME_MAX && n <= FNAME_MAX && blen(tb) == FNAME_MAX && kok(k)
@@ -285,6 +291,10 @@ fn lx_symlink(k: &mut Kernel, pid: u64, tva: u64, dirfd: u64, path: u64) -> u64
   bfree(tb);
   if !vfs_symlink(&mut k.fs, &mut k.mem, n, tl) {
     return ENOENT;                          // no such directory, or no room
+  }
+  let f = vfs_lookup(&mut k.fs, n);
+  if own != 0 && f < HFILES {
+    vfs_set_owner(&mut k.fs, f, own % 0x100000000, own / 0x100000000 % 0x100000000);
   }
   return 0;
 }
@@ -332,6 +342,11 @@ fn lx_hardlink(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
   if vfs_ro(&mut k.fs, m) && vfs_lookup(&mut k.fs, m) == NO_FILE {
     bfree(t);
     return EROFS;
+  }
+  let e = may_dir(&mut k, pid, m);
+  if e != 0 && vfs_lookup(&mut k.fs, m) == NO_FILE {
+    bfree(t);
+    return e;
   }
   xfer_save(k, &mut t, n, m);
   xfer_load(&mut k, t, 0, n + m);

@@ -279,6 +279,10 @@ steps = [
     # and the file still there after an unmount and a second mount.
     ("truncate -s 1M im; mkfs.bstdisk3 im && mkdir mm && mount -t bstdisk3 im mm && echo kept > mm/f && umount mm && mount -t bstdisk3 im mm && cat mm/f; cat /proc/mounts; umount mm; rm im; rmdir mm; echo lo$((1+1))",
      [b"\r\nkept\r\n", b"bstdisk3 /mm bstdisk3 rw", b"\r\nlo2\r\n"], b"\n# "),
+    # Owners and the umask (src/lxperm.bastio): a new file takes the umask,
+    # chown keeps its owner, on the disk too.
+    ("umask 077; echo x > po; chown 65534:100 po; stat -c 'p%a %u %g' po; rm po; umask 022; echo y > /disk/po; chown 7:8 /disk/po; stat -c 'd%a %u %g' /disk/po; rm /disk/po",
+     [b"p600 65534 100", b"d644 7 8"], b"\n# "),
     # Small calls: uname, readv, pread/pwrite, limits, sysinfo, statfs,
     # getrandom, priorities, sessions, process groups, ttyname, pipe capacity (user/mmisc.c).
     ("mmisc", b"mmisc: ok on Linux x86_64, signals, pipe 65536", b"\n# "),
