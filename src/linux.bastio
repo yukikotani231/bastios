@@ -373,6 +373,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_more_call(n) {
     return lx_more_call(&mut con, &mut k, pid, n, a, b, c);
   }
+  if is_splice_call(n) {
+    return lx_splice_call(&mut con, &mut k, pid, n, a, b, c);
+  }
   if is_ptimer_call(n) {
     return lx_ptimer_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
   }

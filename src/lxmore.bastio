@@ -109,6 +109,21 @@ fn put_xfer(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, n: u64, off: u64)
   return w;
 }
 
+/// Whether descriptor fd of pid may be written: not a bad one, not a
+/// pipe's read end, not a file opened only for reading.
+fn out_writable(k: &Kernel, pid: u64, fd: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD || (d.kind == K_PIPE_R && !pipe_both(k, pid, fd)) {
+    return false;
+  }
+  if d.kind == K_FILE {
+    return fget(k.fs.ftab, d.x, FD_MODE) / O_WRITE % 2 == 1;
+  }
+  return true;
+}
+
 /// sendfile(out, in, offp, count) and copy_file_range(in, inoffp, out,
 /// outoffp, count, flags): copies from file `in` (at *inp, or its own
 /// offset when inp is 0) to `out` (at *outp, or its own offset). Stops
@@ -125,6 +140,12 @@ fn lx_copy(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, outp: u64, inp: u6
   if d.kind != K_FILE {
     return EINVAL;                          // only files are read from
   }
+  if fget(k.fs.ftab, d.x, FD_MODE) / O_READ % 2 != 1 {
+    return EBADF;                           // `in` was not opened for reading
+  }
+  if !out_writable(k, pid, out) {
+    return EBADF;
+  }
   let f = vfs_row_file(k.fs, d.x);
   let mut ioff = vfs_offset(k.fs, d.x);
   if inp != 0 {
@@ -132,6 +153,9 @@ fn lx_copy(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, outp: u64, inp: u6
       return EFAULT;
     }
     ioff = get_u64(k.fs.xfer, 0);
+    if ioff >= 0x8000000000000000 {
+      return EINVAL;                        // a negative offset
+    }
   }
   let mut ooff = 0xFFFFFFFFFFFFFFFF;
   if outp != 0 {
