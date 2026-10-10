@@ -31,6 +31,10 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   is seen on the other. The pages are counted references (bastiolang's
   `Shared`), given back with the last mapping; `munmap`, `mprotect`,
   `mremap` and exit handle them.
+- A futex in a `MAP_SHARED` page reaches every process that maps the page:
+  a futex without `FUTEX_PRIVATE_FLAG` on such a page is known by the
+  physical page and offset, not by the caller's address. Futexes on private
+  memory stay per process.
 - Dynamically linked programs: the kernel loads a PIE's interpreter, and
   carries musl's `libc.so` for `/lib/ld-musl-x86_64.so.1`. `/bin/sh` is
   BusyBox's `ash`, so `system` and `popen` work; `waitid`, `times`.
