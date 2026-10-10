@@ -88,6 +88,11 @@ def run(name, firmware):
     ok = until(b"bastios> ", 0)
     print(("ok  " if ok else "FAIL"), f"({name}) GRUB boots the kernel to the shell")
     fails += not ok
+    # Both processors: under UEFI the ACPI tables are found through the
+    # Multiboot memory map, not the BIOS areas.
+    good = ok and b"pages of memory, 2 processors" in out
+    print(("ok  " if good else "FAIL"), f"({name}) both processors started")
+    fails += not good
     if ok:
         mon = socket.socket(socket.AF_UNIX)
         mon.connect(mon_path)

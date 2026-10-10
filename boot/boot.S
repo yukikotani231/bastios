@@ -140,6 +140,7 @@ long_mode:
         mov     $(bst_cores + CORE_KSTACK), %rsp
 
         call    bst_platform_init
+        mov     mb_info, %edi         /* the memory map, to find the ACPI tables */
         call    bst_smp_init
         mov     mb_info, %edi
         call    bst_kmain
