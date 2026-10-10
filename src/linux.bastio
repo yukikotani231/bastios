@@ -292,8 +292,21 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_NEWFSTATAT {
-    // Relative paths start at "/", the only working directory there is.
-    ret(&mut k.procs, pid, lx_stat(&mut k, pid, b, c));
+    let r10 = pget(k.procs, pid, F_REGS + R_R10);
+    if r10 / AT_EMPTY_PATH % 2 == 1 && lx_path_in(&mut k, pid, b) == 0 {
+      ret(&mut k.procs, pid, lx_fstat(&mut k, pid, a, c));      // fstat by another name
+    } else {
+      // Relative paths start at "/", the only working directory there is.
+      ret(&mut k.procs, pid, lx_stat(&mut k, pid, b, c));
+    }
+    return KEEP;
+  }
+  if n == LX_FSTAT {
+    ret(&mut k.procs, pid, lx_fstat(&mut k, pid, a, b));
+    return KEEP;
+  }
+  if n == LX_GETDENTS64 {
+    ret(&mut k.procs, pid, lx_getdents(&mut k, pid, a, b, c));
     return KEEP;
   }
   if n == LX_ACCESS {
@@ -720,7 +733,8 @@ fn lx_fail_or(total: u64, err: u64) -> u64 {
 /// Copies the NUL-terminated path at user address va into the transfer
 /// buffer, without leading "/" or "./" (the file system is one flat
 /// directory, and the working directory is "/").
-/// Returns its length, or NO_RESULT if it is unreadable, empty or too long.
+/// Returns its length (0 for the root directory), or NO_RESULT if it is
+/// unreadable or too long.
 fn lx_path_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -754,8 +768,11 @@ fn lx_path_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   {
     e = e + 1;
   }
-  if e >= got || e == s || e - s > FNAME_MAX {
-    return NO_RESULT;                       // no NUL in reach, empty, or too long
+  if e >= got || e - s > FNAME_MAX {
+    return NO_RESULT;                       // no NUL in reach, or too long
+  }
+  if e == s || (e - s == 1 && bget(k.fs.xfer, s) == 46) {
+    return 0;                               // "/" or ".": the root directory
   }
   let mut i = 0;
   while i < e - s
