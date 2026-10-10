@@ -1,0 +1,343 @@
+// The file layer between system calls and file systems. It owns the table
+// of open files and a kernel buffer that every transfer goes through:
+// system calls copy user memory into the buffer or out of it
+// (`usermem.bastio`), and the file systems below only ever see the buffer.
+//
+// There is one file system today, the in-memory one (`ramfs.bastio`). Each
+// open file records which file system it is on (FS_RAM), so a second one,
+// such as a file system on a block device, slots in as another field of
+// `Vfs` and another branch in the few functions below that dispatch on
+// FD_FS. Nothing above this file changes.
+//
+// The table has NFD rows per process; a process names its files by row
+// number (its file descriptor), so one process can never reach another's.
+
+import "pages.bastio";
+import "ramfs.bastio";
+
+const NFD: u64 = 8;                   // open files per process
+const FD_ROWS: u64 = 128;             // NPROC * NFD
+const FD_STRIDE: u64 = 4;
+const FTAB_LEN: u64 = 512;            // FD_ROWS * FD_STRIDE
+const XFER: u64 = 4096;               // the most bytes one call moves
+
+// Row fields.
+const FD_FS: u64 = 0;                 // 0: row unused; otherwise the file system
+const FD_NODE: u64 = 1;               // the file within its file system
+const FD_OFF: u64 = 2;                // the offset the next read or write uses
+const FD_MODE: u64 = 3;               // O_READ | O_WRITE | O_APPEND
+
+const FS_RAM: u64 = 1;
+
+// Open flags (the system call ABI).
+const O_READ: u64 = 1;
+const O_WRITE: u64 = 2;
+const O_CREATE: u64 = 4;
+const O_TRUNC: u64 = 8;
+const O_APPEND: u64 = 16;
+
+const NO_FD: u64 = 18446744073709551615;
+
+struct Vfs {
+  ram: Vec[Node],       // the in-memory file system
+  ftab: Buf,            // open files: FD_ROWS rows of FD_STRIDE words
+  xfer: Bytes,          // the transfer buffer
+}
+
+spec fn vfs_ok(v: &Vfs) -> bool {
+  nodes_ok(v.ram) && len(v.ftab) == FTAB_LEN && blen(v.xfer) == XFER
+}
+
+fn vfs_new() -> Vfs
+  ensures vfs_ok(result)
+{
+  return Vfs { ram: ram_new(), ftab: alloc(FTAB_LEN), xfer: balloc(XFER) };
+}
+
+/// Frees everything (at power off); every file's pages go back.
+fn vfs_free(v: Vfs, mem: &mut Mem)
+  requires vfs_ok(v) && mem_ok(mem)
+  ensures mem_ok(mem)
+{
+  ram_free(v.ram, &mut mem);
+  free(v.ftab);
+  bfree(v.xfer);
+}
+
+fn fget(t: &Buf, row: u64, f: u64) -> u64
+  requires len(t) == FTAB_LEN && row < FD_ROWS && f < FD_STRIDE
+{
+  return get(t, row * FD_STRIDE + f);
+}
+
+fn fset(t: &mut Buf, row: u64, f: u64, x: u64)
+  requires len(t) == FTAB_LEN && row < FD_ROWS && f < FD_STRIDE
+  ensures len(t) == FTAB_LEN
+{
+  t = set(t, row * FD_STRIDE + f, x);
+}
+
+/// Is any row open on ramfs node i?
+fn node_open(t: &Buf, i: u64) -> bool
+  requires len(t) == FTAB_LEN
+{
+  let mut r = 0;
+  while r < FD_ROWS
+    invariant r <= FD_ROWS
+  {
+    if fget(t, r, FD_FS) == FS_RAM && fget(t, r, FD_NODE) == i {
+      return true;
+    }
+    r = r + 1;
+  }
+  return false;
+}
+
+/// Opens the file named by the first n bytes of the transfer buffer for
+/// process row block `base` (pid * NFD). Returns the descriptor (0 to
+/// NFD - 1) or NO_FD: no such file without O_CREATE, no room, or a name
+/// that is empty or too long.
+fn vfs_open(v: &mut Vfs, mem: &mut Mem, base: u64, flags: u64, n: u64) -> u64
+  requires vfs_ok(v) && mem_ok(mem) && base + NFD <= FD_ROWS && n <= XFER
+  ensures vfs_ok(v) && mem_ok(mem)
+  ensures result < NFD || result == NO_FD
+{
+  let mut fd = 0;
+  while fd < NFD && fget(v.ftab, base + fd, FD_FS) != 0
+    invariant fd <= NFD
+  {
+    fd = fd + 1;
+  }
+  if fd >= NFD {
+    return NO_FD;
+  }
+  let mut i = ram_find(&mut v.ram, v.xfer, n);
+  if i >= NFILES {
+    if flags / O_CREATE % 2 == 0 {
+      return NO_FD;
+    }
+    i = ram_create(&mut v.ram, v.xfer, n);
+    if i >= NFILES {
+      return NO_FD;
+    }
+  }
+  if flags / O_TRUNC % 2 == 1 && flags / O_WRITE % 2 == 1 {
+    match take_node(&mut v.ram, i) {
+      Node::Free => {},
+      Node::File(f) => {
+        let mut g = f;
+        file_truncate(&mut g, &mut mem);
+        put_node(&mut v.ram, i, Node::File(g));
+      },
+    }
+  }
+  fset(&mut v.ftab, base + fd, FD_FS, FS_RAM);
+  fset(&mut v.ftab, base + fd, FD_NODE, i);
+  fset(&mut v.ftab, base + fd, FD_OFF, 0);
+  fset(&mut v.ftab, base + fd, FD_MODE, flags % (2 * O_APPEND));
+  return fd;
+}
+
+/// Closes a row. Returns false if it was not open.
+fn vfs_close(v: &mut Vfs, row: u64) -> bool
+  requires vfs_ok(v) && row < FD_ROWS
+  ensures vfs_ok(v)
+{
+  if fget(v.ftab, row, FD_FS) == 0 {
+    return false;
+  }
+  let mut f = 0;
+  while f < FD_STRIDE
+    invariant f <= FD_STRIDE && len(v.ftab) == FTAB_LEN
+  {
+    fset(&mut v.ftab, row, f, 0);
+    f = f + 1;
+  }
+  return true;
+}
+
+/// Closes every row of process row block `base` (when the process ends).
+fn vfs_close_all(v: &mut Vfs, base: u64)
+  requires vfs_ok(v) && base + NFD <= FD_ROWS
+  ensures vfs_ok(v)
+{
+  let mut fd = 0;
+  while fd < NFD
+    invariant fd <= NFD && vfs_ok(v)
+  {
+    vfs_close(&mut v, base + fd);
+    fd = fd + 1;
+  }
+}
+
+/// Reads up to n bytes from the file open in `row`, at its offset, into the
+/// start of the transfer buffer. Returns the count (0 at the end of the
+/// file) or NO_FD if the row is not open for reading. The offset does not
+/// move: the caller advances it by what reached the user (vfs_advance).
+fn vfs_read(v: &mut Vfs, row: u64, n: u64) -> u64
+  requires vfs_ok(v) && row < FD_ROWS && n <= XFER
+  ensures vfs_ok(v)
+  ensures result <= n || result == NO_FD
+{
+  if fget(v.ftab, row, FD_FS) != FS_RAM || fget(v.ftab, row, FD_MODE) / O_READ % 2 == 0 {
+    return NO_FD;
+  }
+  let i = fget(v.ftab, row, FD_NODE);
+  if i >= NFILES {
+    return NO_FD;
+  }
+  let mut got = NO_FD;
+  match take_node(&mut v.ram, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      let mut g = f;
+      got = file_read(&mut g, fget(v.ftab, row, FD_OFF), &mut v.xfer, n);
+      put_node(&mut v.ram, i, Node::File(g));
+    },
+  }
+  return got;
+}
+
+/// Writes the first n bytes of the transfer buffer to the file open in
+/// `row`, at its offset (at the end with O_APPEND), and moves the offset
+/// past them. Returns the count, short if memory or the file size limit
+/// runs out, or NO_FD if the row is not open for writing.
+fn vfs_write(v: &mut Vfs, mem: &mut Mem, row: u64, n: u64) -> u64
+  requires vfs_ok(v) && mem_ok(mem) && row < FD_ROWS && n <= XFER
+  ensures vfs_ok(v) && mem_ok(mem)
+  ensures result <= n || result == NO_FD
+{
+  if fget(v.ftab, row, FD_FS) != FS_RAM || fget(v.ftab, row, FD_MODE) / O_WRITE % 2 == 0 {
+    return NO_FD;
+  }
+  let i = fget(v.ftab, row, FD_NODE);
+  if i >= NFILES {
+    return NO_FD;
+  }
+  let mut put = NO_FD;
+  match take_node(&mut v.ram, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      let mut g = f;
+      let mut off = fget(v.ftab, row, FD_OFF);
+      if fget(v.ftab, row, FD_MODE) / O_APPEND % 2 == 1 {
+        off = g.size;
+      }
+      put = file_write(&mut g, &mut mem, off, v.xfer, n);
+      put_node(&mut v.ram, i, Node::File(g));
+      vfs_advance(&mut v, row, off, put);
+    },
+  }
+  return put;
+}
+
+/// Sets a row's offset to off + k, saturating.
+fn vfs_advance(v: &mut Vfs, row: u64, off: u64, k: u64)
+  requires vfs_ok(v) && row < FD_ROWS
+  ensures vfs_ok(v)
+{
+  let mut o = 18446744073709551615;
+  if k <= o - off {
+    o = off + k;
+  }
+  fset(&mut v.ftab, row, FD_OFF, o);
+}
+
+/// The offset of an open row.
+fn vfs_offset(v: &Vfs, row: u64) -> u64
+  requires vfs_ok(v) && row < FD_ROWS
+{
+  return fget(v.ftab, row, FD_OFF);
+}
+
+/// Moves an open row's offset to `off`. Returns false if it is not open.
+fn vfs_seek(v: &mut Vfs, row: u64, off: u64) -> bool
+  requires vfs_ok(v) && row < FD_ROWS
+  ensures vfs_ok(v)
+{
+  if fget(v.ftab, row, FD_FS) == 0 {
+    return false;
+  }
+  fset(&mut v.ftab, row, FD_OFF, off);
+  return true;
+}
+
+/// Removes the file named by the first n bytes of the transfer buffer.
+/// Returns false if there is none or it is open.
+fn vfs_unlink(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem) && n <= XFER
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  let i = ram_find(&mut v.ram, v.xfer, n);
+  if i >= NFILES || node_open(v.ftab, i) {
+    return false;
+  }
+  ram_remove(&mut v.ram, &mut mem, i);
+  return true;
+}
+
+/// The size of the file named by the first n bytes of the transfer
+/// buffer, or NO_FILE.
+fn vfs_stat(v: &mut Vfs, n: u64) -> u64
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+{
+  let i = ram_find(&mut v.ram, v.xfer, n);
+  if i >= NFILES {
+    return NO_FILE;
+  }
+  return ram_size(&mut v.ram, i);
+}
+
+/// Copies the name of directory entry i into the start of the transfer
+/// buffer. Returns its length, 0 for an unused entry, or NO_FILE past the
+/// last entry.
+fn vfs_dirent(v: &mut Vfs, i: u64) -> u64
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+  ensures result <= XFER || result == NO_FILE
+{
+  if i >= NFILES {
+    return NO_FILE;
+  }
+  let n = ram_name(&mut v.ram, i, &mut v.xfer);
+  if n == NO_FILE {
+    return 0;
+  }
+  if n > XFER {
+    return 0;     // cannot happen: names are at most FNAME_MAX bytes
+  }
+  return n;
+}
+
+/// Creates (or replaces) the file `name` holding the bytes of `data`. Used
+/// at boot to fill the file system from images built into the kernel.
+fn vfs_install(v: &mut Vfs, mem: &mut Mem, name: Str, data: Str) -> bool
+  requires vfs_ok(v) && mem_ok(mem)
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  let nm = bfrom(name);
+  let n = blen(nm);
+  let mut i = ram_find(&mut v.ram, nm, n);
+  if i >= NFILES {
+    i = ram_create(&mut v.ram, nm, n);
+  }
+  bfree(nm);
+  if i >= NFILES {
+    return false;
+  }
+  let mut ok = false;
+  match take_node(&mut v.ram, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      let mut g = f;
+      file_truncate(&mut g, &mut mem);
+      let d = bfrom(data);
+      let m = blen(d);
+      ok = file_write(&mut g, &mut mem, 0, d, m) == m;
+      bfree(d);
+      put_node(&mut v.ram, i, Node::File(g));
+    },
+  }
+  return ok;
+}

@@ -22,12 +22,12 @@ build build/user:
 #    link it at USER_BASE behind its header, and flatten it to a raw image
 #    that the kernel embeds with include_bytes.
 UCFLAGS := $(CFLAGS) -fpie
-UPROGS  := sh hello spin true bench
+UPROGS  := sh hello spin true bench fstest
 UASM    := fault straddle
 ELFPROGS := elfexec elfpie elfbad
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf)
 
-build/user/%.c: user/%.bastio $(BASTIOC) | build/user
+build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
 	$(BASTIOC) --target user -o $@ $<
 
 build/user/%.o: build/user/%.c
@@ -75,10 +75,12 @@ build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := src/console.bastio src/pages.bastio src/space.bastio src/elf.bastio src/proc.bastio src/syscall.bastio src/linux.bastio src/main.bastio
+KSRCS := src/console.bastio src/pages.bastio src/space.bastio src/elf.bastio src/ramfs.bastio src/fs.bastio \
+         src/proc.bastio src/usermem.bastio src/syscall.bastio src/linux.bastio src/main.bastio
+KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
-build/kernel.c: $(KSRCS) $(UBINS) $(BASTIOC) | build
+build/kernel.c: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
 	$(BASTIOC) --target kernel -o $@ src/main.bastio
 
 build/kernel.o: build/kernel.c

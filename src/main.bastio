@@ -12,6 +12,7 @@ import "console.bastio";
 import "pages.bastio";
 import "space.bastio";
 import "proc.bastio";
+import "fs.bastio";
 import "syscall.bastio";
 import "linux.bastio";
 
@@ -67,6 +68,40 @@ fn run(mmu: &mut Mmu, cpu: &mut Cpu, spaces: &mut Vec[Space], procs: &mut Buf, p
   return v;
 }
 
+// The files the file system starts with, built into the kernel image.
+const NINIT: u64 = 2;
+
+fn init_name(i: u64) -> Str {
+  if i == 0 {
+    return "motd";
+  }
+  return "about";
+}
+
+fn init_data(i: u64) -> Str {
+  if i == 0 {
+    return include_bytes("../files/motd");
+  }
+  return include_bytes("../files/about");
+}
+
+fn install_files(con: &Serial, k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < NINIT
+    invariant i <= NINIT && kok(k)
+  {
+    if !vfs_install(&mut k.fs, &mut k.mem, init_name(i), init_data(i)) {
+      puts(con, "cannot install file ");
+      puts(con, init_name(i));
+      puts(con, "\r\n");
+    }
+    i = i + 1;
+  }
+}
+
 fn tick(t: u64) -> u64 {
   if t < 18446744073709551615 {
     return t + 1;
@@ -90,7 +125,8 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
     vec_push(&mut spaces, Space::Empty);
     i = i + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), ticks: 0 };
+  let mut k = Kernel { mem: m, spaces: spaces, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), ticks: 0, fs: vfs_new() };
+  install_files(con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(con, "cannot start the shell\r\n");
   }
@@ -156,6 +192,7 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
     }
   }
   vec_free(k.spaces);
+  vfs_free(k.fs, &mut k.mem);
   puts(con, "BastiOS: ");
   put_num(con, count_free(k.mem.bm));
   puts(con, " pages free at power off\r\n");
