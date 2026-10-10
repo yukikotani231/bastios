@@ -269,22 +269,22 @@ fn run(big: &Bytes, nl: u64, buf: &mut Bytes, keep_open: bool) -> u64
     step = 11;
   }
   f_close(op);
-  // 12. Eight descriptors per process, then no more.
+  // 12. Sixteen descriptors per process, then no more.
   let mut i = 0;
   let mut opened = 0;
-  while i < 9
-    invariant i <= 9 && opened <= i
+  while i < 17
+    invariant i <= 17 && opened <= i
   {
     if f_open(big, nl, O_WRITE + O_CREATE) != NOT_OK {
       opened = opened + 1;
     }
     i = i + 1;
   }
-  if step == 0 && opened != 8 {
+  if step == 0 && opened != 16 {
     step = 12;
   }
   i = 0;
-  while i < 8 {
+  while i < 16 {
     f_close(i);
     i = i + 1;
   }
