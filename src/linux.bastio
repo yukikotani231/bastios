@@ -371,6 +371,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     let flags = pget(k.procs, pid, F_REGS + R_R10);
     let fd = pget(k.procs, pid, F_REGS + R_R8);
     let off = pget(k.procs, pid, F_REGS + R_R9);
+    if flags / MAP_FIXED % 2 == 1 && !win_quiet(&mut k, pid) {
+      return lx_retry(&mut k, pid, n);      // MAP_FIXED unmaps: another thread of pid runs on a processor
+    }
     ret(&mut k.procs, pid, lx_mmap(&mut k, pid, a, b, flags, fd, off));
     return KEEP;
   }
