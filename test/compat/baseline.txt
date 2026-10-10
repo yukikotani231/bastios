@@ -237,6 +237,8 @@ t_ltp2: F_SETFL O_APPEND appends to a file
 t_ltp2: ITIMER_VIRTUAL sends SIGVTALRM
 t_ltp2: MSG_OOB on UDP is EOPNOTSUPP
 t_ltp2: SIOCGIFCONF lists lo
+t_ltp2: TCP: bind to port 0 picks one, a second connect is EISCONN, AF_UNSPEC disconnects
+t_ltp2: UDP sendmsg joins its buffers into one datagram; bind errors
 t_ltp2: a CPU-time POSIX timer, and overruns of a timer set in the past
 t_ltp2: a FIFO opened O_RDWR reads what it writes
 t_ltp2: a file reads 8 KiB in one read

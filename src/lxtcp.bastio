@@ -15,6 +15,7 @@ const ECONNRESET: u64 = 18446744073709551512;      // 2^64 - 104
 const EISCONN: u64 = 18446744073709551510;         // 2^64 - 106
 const ECONNREFUSED: u64 = 18446744073709551505;    // 2^64 - 111
 const EINPROGRESS: u64 = 18446744073709551501;     // 2^64 - 115
+const EALREADY: u64 = 18446744073709551502;        // 2^64 - 114
 
 // A stream socket descriptor: description h, connection t (TCBS: none
 // yet), and the fields of word 3; or err.
@@ -75,7 +76,8 @@ fn lx_tcp_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   return fd;
 }
 
-/// bind on a stream socket: remembers the port for listen.
+/// bind on a stream socket: remembers the port for listen; port 0 picks
+/// an ephemeral one now, so getsockname can report it before listen.
 fn lx_tcp_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -91,8 +93,34 @@ fn lx_tcp_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if sin.err != 0 {
     return sin.err;
   }
-  of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, sin.port, TM_NEW));
+  let why = bind_check(k, pid, sin.ip, sin.port);
+  if why != 0 {
+    return why;
+  }
+  let mut port = sin.port;
+  if port == 0 {
+    port = tcp_pick_port(&mut k.nic);
+    if port == 0 {
+      return EADDRINUSE;
+    }
+  }
+  of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, port, TM_NEW));
   return 0;
+}
+
+/// An ephemeral TCP port no connection or listener uses, or 0.
+fn tcp_pick_port(c: &mut Nic) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c) && result <= 65535
+{
+  match c {
+    Nic::None => { c = Nic::None; return 0; },
+    Nic::Up(mut n) => {
+      let p = tcp_eph_port(&mut n);
+      c = Nic::Up(n);
+      return p;
+    },
+  }
 }
 
 /// listen(fd, backlog): the kernel listener on the bound port.
@@ -163,7 +191,10 @@ fn lx_accept(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, flags: u64
 }
 
 /// connect on a stream socket: opens the connection, then waits (SK_WAIT,
-/// the call runs again) until it is established or refused.
+/// the call runs again) until it is established or refused. The port
+/// field of a connection's word 3 is 1 once a connect has reported it
+/// established: a later connect is EISCONN. A refused attempt leaves the
+/// socket unconnected, as on Linux, so it can try again.
 fn lx_tcp_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -172,10 +203,23 @@ fn lx_tcp_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u6
   if tk.err != 0 {
     return tk.err;
   }
+  if is_unspec(&mut k, pid, addr, alen) {
+    // AF_UNSPEC: dissolve the connection; the socket can bind again.
+    if tk.mode == TM_CONN {
+      tcp_close(&mut k.nic, tk.t);
+      of_set(&mut k.ofd, tk.h, 2, TCBS);
+      of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, 0, TM_NEW));
+    }
+    return 0;
+  }
   if tk.mode == TM_LISTEN {
     return EISCONN;
   }
+  if tk.mode == TM_CONN && tk.port != 0 {
+    return EISCONN;
+  }
   let mut t = tk.t;
+  let fresh = tk.mode == TM_NEW;
   if tk.mode == TM_NEW {
     let sin = sin_in(&mut k, pid, addr, alen);
     if sin.err != 0 {
@@ -190,12 +234,19 @@ fn lx_tcp_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u6
   }
   let st = tcp_status(k.nic, t);
   if st == 1 {
+    of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, 1, TM_CONN));
     return 0;
   }
   if st == 2 {
+    tcp_close(&mut k.nic, t);
+    of_set(&mut k.ofd, tk.h, 2, TCBS);
+    of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, 0, TM_NEW));
     return ECONNREFUSED;
   }
   if tk.nb == 1 {
+    if !fresh {
+      return EALREADY;
+    }
     return EINPROGRESS;
   }
   return SK_WAIT;
@@ -294,7 +345,11 @@ fn lx_tcp_name(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
     return tk.err;
   }
   if !peer {
-    return sin_out(&mut k, pid, addr, lenp, 0, tk.port, ofd_v6(k, tk.h));
+    let mut port = tk.port;
+    if tk.mode == TM_CONN {
+      port = tcp_local_port(k.nic, tk.t);   // word 3 only says whether connect reported it
+    }
+    return sin_out(&mut k, pid, addr, lenp, 0, port, ofd_v6(k, tk.h));
   }
   if tk.mode != TM_CONN || tk.t >= TCBS {
     return ENOTCONN;

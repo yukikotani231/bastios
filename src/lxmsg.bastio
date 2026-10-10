@@ -2,10 +2,10 @@
 // iovec), with a destination or source address, and SCM_RIGHTS control
 // messages that pass a descriptor over an AF_UNIX socket.
 //
-// Not done: a datagram goes out from the first non-empty buffer alone
-// (sendmsg on a datagram socket with more than one is -EINVAL, not a
-// gather), and one comes in to the first buffer (the rest of the list
-// stays empty). SCM_RIGHTS passes one descriptor per message, at most
+// Not done: on an AF_UNIX datagram socket a message goes out from the
+// first non-empty buffer alone (more than one is -EINVAL, not a gather;
+// UDP gathers them), and a datagram comes in to the first buffer (the
+// rest of the list stays empty). SCM_RIGHTS passes one descriptor per message, at most
 // one in flight per direction (a second waits until the first is
 // received), and it goes with the next bytes read rather than with the
 // bytes it was sent beside. A socket sent over itself and then closed
@@ -105,6 +105,56 @@ fn iov_at(k: &mut Kernel, pid: u64, iov: u64, i: u64) -> bool
   return iov <= 0xFFFFFFFFFFFF0000 && copy_from_user(&mut k.spaces, pid, iov + 16 * i, &mut k.fs.xfer, 16) == 16;
 }
 
+/// sendmsg on a UDP socket: the cnt buffers of the list at iov, joined
+/// into one datagram. Returns its length, or -errno.
+fn udp_gather(k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u64, name: u64, nlen: u64) -> u64
+  requires kok(k) && pid < NPROC && cnt <= 1024
+  ensures kok(k)
+{
+  let d = udp_dest(&mut k, pid, fd, name, nlen);
+  if d.err != 0 {
+    return d.err;
+  }
+  let mut g = balloc(UDP_MAX);
+  let mut total = 0;
+  let mut i = 0;
+  while i < cnt
+    invariant i <= cnt && cnt <= 1024 && total <= UDP_MAX && blen(g) == UDP_MAX && kok(k)
+  {
+    if !iov_at(&mut k, pid, iov, i) {
+      bfree(g);
+      return EFAULT;
+    }
+    let base = get_u64(k.fs.xfer, 0);
+    let len = get_u64(k.fs.xfer, 8);
+    if len > UDP_MAX - total {
+      bfree(g);
+      return EMSGSIZE;
+    }
+    if len > 0 {
+      if copy_from_user(&mut k.spaces, pid, base, &mut k.fs.xfer, len) != len {
+        bfree(g);
+        return EFAULT;
+      }
+      let mut j = 0;
+      while j < len
+        invariant j <= len && total + len <= UDP_MAX && blen(g) == UDP_MAX && kok(k)
+      {
+        bset(&mut g, total + j, bget(k.fs.xfer, j));
+        j = j + 1;
+      }
+      total = total + len;
+    }
+    i = i + 1;
+  }
+  let r = sock_sendto(&mut k.nic, d.s, d.ip, d.port, g, total);
+  bfree(g);
+  if r == NO_SOCK {
+    return ENETUNREACH;
+  }
+  return r;
+}
+
 /// The description an SCM_RIGHTS message at user address ctl (clen bytes
 /// of control data) passes: its number, OFD_N if there is no such
 /// message, or an error.
@@ -184,6 +234,9 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
     }
   }
   let dgram = !is_tcp(k, pid, fd) && (!unix || ux_dgram(k, pid, fd));
+  if dgram && !unix {
+    return udp_gather(&mut k, pid, fd, iov, cnt, name, nlen);
+  }
   let mut done = 0;
   let mut sent = false;
   let mut stop = false;

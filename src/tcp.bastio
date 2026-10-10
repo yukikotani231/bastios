@@ -311,7 +311,10 @@ fn tcp_refuse(n: &mut Net, flags: u64, dlen: u64)
 
 // ---------------------------------------------------------------- the table
 
-/// A free slot, or TCBS if the table is full.
+/// A free slot, or TCBS if the table is full. When none is closed, a
+/// connection waiting out TIME_WAIT that nobody holds is taken instead,
+/// as Linux reuses them under pressure: a program that opens and closes
+/// many connections in a row would otherwise run out of slots.
 fn tcb_free_slot(n: &Net) -> u64
   requires net_ok(n)
   ensures result <= TCBS
@@ -324,6 +327,15 @@ fn tcb_free_slot(n: &Net) -> u64
       return t;
     }
     t = t + 1;
+  }
+  let mut w = 0;
+  while w < TCBS
+    invariant w <= TCBS
+  {
+    if tw(n, w, W_STATE) == T_TIME_WAIT && tw(n, w, W_HELD) == 0 {
+      return w;
+    }
+    w = w + 1;
   }
   return TCBS;
 }

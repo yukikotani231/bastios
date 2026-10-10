@@ -275,6 +275,10 @@ fn lx_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if sock_port(k.nic, sk.s) != 0 {
     return EINVAL;                          // already bound
   }
+  let why = bind_check(k, pid, sin.ip, sin.port);
+  if why != 0 {
+    return why;
+  }
   if !sock_bind(&mut k.nic, sk.s, sin.port) {
     return EADDRINUSE;
   }
@@ -297,6 +301,11 @@ fn lx_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if sk.err != 0 {
     return sk.err;
   }
+  if is_unspec(&mut k, pid, addr, alen) {
+    let nb0 = of_get(k.ofd, sk.h, 3) % 2;
+    of_set(&mut k.ofd, sk.h, 3, nb0);       // AF_UNSPEC: no peer any more
+    return 0;
+  }
   let sin = sin_in(&mut k, pid, addr, alen);
   if sin.err != 0 {
     return sin.err;
@@ -305,8 +314,56 @@ fn lx_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
     return EINVAL;
   }
   let nb = of_get(k.ofd, sk.h, 3) % 2;
-  of_set(&mut k.ofd, sk.h, 3, 2 * (65536 * sin.ip + sin.port) + nb);
+  of_set(&mut k.ofd, sk.h, 3, 2 * (65536 * to_local(sin.ip) + sin.port) + nb);
   return 0;
+}
+
+/// Whether process pid may bind ip:port: 0, -EADDRNOTAVAIL for an
+/// address that is not this machine's, or -EACCES for a port below 1024
+/// without root.
+fn bind_check(k: &Kernel, pid: u64, ip: u64, port: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  if ip != 0 && !addr_local(k.nic, ip) {
+    return EADDRNOTAVAIL;
+  }
+  if port != 0 && port < 1024 && !cred_root(k.procs, pid) {
+    return EACCES;
+  }
+  return 0;
+}
+
+/// Is ip one of this machine's addresses (loopback, or the card's)?
+fn addr_local(c: &Nic, ip: u64) -> bool
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return ip / 16777216 == LO_NET; },
+    Nic::Up(n) => { return is_local(n, ip); },
+  }
+}
+
+/// Is the address at va (alen bytes) of family AF_UNSPEC? connect with
+/// one undoes a connection.
+fn is_unspec(k: &mut Kernel, pid: u64, va: u64, alen: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if alen < 2 || copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 2) != 2 {
+    return false;
+  }
+  return bget(k.fs.xfer, 0) == 0 && bget(k.fs.xfer, 1) == 0;
+}
+
+/// A destination of 0.0.0.0 means this host, as on Linux.
+fn to_local(ip: u64) -> u64
+  requires ip <= 4294967295
+  ensures result <= 4294967295
+{
+  if ip == 0 {
+    return 0x7F000001;
+  }
+  return ip;
 }
 
 /// sendto(fd, buf, n, flags, addr, alen); with addr 0, to the connected
@@ -321,26 +378,9 @@ fn lx_sendto(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, addr: u64, ale
   if is_unix(k, pid, fd) {
     return ux_send(&mut k, pid, fd, buf, n, false);
   }
-  let sk = sk_look(k, pid, fd);
-  if sk.err != 0 {
-    return sk.err;
-  }
-  let mut ip = 0;
-  let mut port = 0;
-  if addr == 0 {
-    let peer = of_get(k.ofd, sk.h, 3) / 2;
-    if peer == 0 {
-      return EDESTADDRREQ;
-    }
-    ip = peer / 65536;
-    port = peer % 65536;
-  } else {
-    let sin = sin_in(&mut k, pid, addr, alen);
-    if sin.err != 0 {
-      return sin.err;
-    }
-    ip = sin.ip;
-    port = sin.port;
+  let d = udp_dest(&mut k, pid, fd, addr, alen);
+  if d.err != 0 {
+    return d.err;
   }
   if n > UDP_MAX {
     return EMSGSIZE;
@@ -348,11 +388,38 @@ fn lx_sendto(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, addr: u64, ale
   if copy_from_user(&mut k.spaces, pid, buf, &mut k.fs.xfer, n) != n {
     return EFAULT;
   }
-  let r = sock_sendto(&mut k.nic, sk.s, ip, port, k.fs.xfer, n);
+  let r = sock_sendto(&mut k.nic, d.s, d.ip, d.port, k.fs.xfer, n);
   if r == NO_SOCK {
     return ENETUNREACH;                     // no route, no free port, or port 0
   }
   return r;
+}
+
+// Where a UDP datagram goes: the socket, and ip:port; or err.
+struct Dest { err: u64, s: u64, ip: u64, port: u64 }
+
+/// The destination of a datagram sent on UDP socket fd: the address at
+/// addr (alen bytes), or the connected peer when addr is 0.
+fn udp_dest(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> Dest
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let sk = sk_look(k, pid, fd);
+  if sk.err != 0 {
+    return Dest { err: sk.err, s: 0, ip: 0, port: 0 };
+  }
+  if addr == 0 {
+    let peer = of_get(k.ofd, sk.h, 3) / 2;
+    if peer == 0 {
+      return Dest { err: EDESTADDRREQ, s: 0, ip: 0, port: 0 };
+    }
+    return Dest { err: 0, s: sk.s, ip: peer / 65536, port: peer % 65536 };
+  }
+  let sin = sin_in(&mut k, pid, addr, alen);
+  if sin.err != 0 {
+    return Dest { err: sin.err, s: 0, ip: 0, port: 0 };
+  }
+  return Dest { err: 0, s: sk.s, ip: to_local(sin.ip), port: sin.port };
 }
 
 /// recvfrom(fd, buf, n, flags, addr, alenp); recv and read too. Takes one

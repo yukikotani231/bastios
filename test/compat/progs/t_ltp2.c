@@ -237,5 +237,27 @@ int main(void) {
     EXPECT("/proc/loadavg reads as five fields", ({ char b[128] = {0}; int fd = open("/proc/loadavg", O_RDONLY);
            int n = fd >= 0 ? read(fd, b, sizeof b - 1) : -1; if (fd >= 0) close(fd);
            float x, y, z; int run, all, last; n > 0 && sscanf(b, "%f %f %f %d/%d %d", &x, &y, &z, &run, &all, &last) == 6 && all >= 1; }));
+    EXPECT("TCP: bind to port 0 picks one, a second connect is EISCONN, AF_UNSPEC disconnects", ({
+           struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)}; socklen_t l = sizeof a;
+           int s = socket(AF_INET, SOCK_STREAM, 0); bind(s, (struct sockaddr *)&a, sizeof a); getsockname(s, (struct sockaddr *)&a, &l);
+           int port = ntohs(a.sin_port); listen(s, 4);
+           int c = socket(AF_INET, SOCK_STREAM, 0); int r1 = connect(c, (struct sockaddr *)&a, sizeof a);
+           int r2 = connect(c, (struct sockaddr *)&a, sizeof a); int e2 = errno;
+           int d = accept(s, 0, 0); struct sockaddr u = {.sa_family = AF_UNSPEC};
+           int r3 = connect(d, &u, sizeof u); struct sockaddr_in b = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+           int r4 = bind(d, (struct sockaddr *)&b, sizeof b); close(d); close(c); close(s);
+           port != 0 && r1 == 0 && r2 == -1 && e2 == EISCONN && r3 == 0 && r4 == 0; }));
+    EXPECT("UDP sendmsg joins its buffers into one datagram; bind errors", ({
+           int r = socket(AF_INET, SOCK_DGRAM, 0), w = socket(AF_INET, SOCK_DGRAM, 0);
+           struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)}; socklen_t l = sizeof a;
+           bind(r, (struct sockaddr *)&a, sizeof a); getsockname(r, (struct sockaddr *)&a, &l);
+           struct iovec v[2] = {{"one", 3}, {"two", 3}}; struct msghdr m = {.msg_name = &a, .msg_namelen = sizeof a, .msg_iov = v, .msg_iovlen = 2};
+           int n = sendmsg(w, &m, 0); char b[16] = {0}; usleep(20000); int got = recv(r, b, sizeof b, MSG_DONTWAIT);
+           struct sockaddr_in far = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(0x0AFFFEFD)};
+           int f = socket(AF_INET, SOCK_DGRAM, 0); int nb = bind(f, (struct sockaddr *)&far, sizeof far) == -1 && errno == EADDRNOTAVAIL;
+           pid_t c = fork(); if (c == 0) { setuid(65534); struct sockaddr_in lo = {.sin_family = AF_INET, .sin_port = htons(80)};
+               int g = socket(AF_INET, SOCK_STREAM, 0); _exit(bind(g, (struct sockaddr *)&lo, sizeof lo) == -1 && errno == EACCES ? 0 : 1); }
+           int st = 0; waitpid(c, &st, 0); close(r); close(w); close(f);
+           n == 6 && got == 6 && !strcmp(b, "onetwo") && nb && WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
     return done();
 }
