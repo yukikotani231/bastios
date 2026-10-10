@@ -278,6 +278,10 @@ steps = [
     # The *at calls relative to a directory descriptor, fchdir, and mmap
     # of a file, EMFILE, and a named pipe (user/mdir.c).
     ("mdir", b"mdir: ok in /dx, mapped", b"\n# "),
+    # A BastiOS file system on a disk image: mkfs.bstdisk3, mount -t bstdisk3,
+    # and the file still there after an unmount and a second mount.
+    ("truncate -s 1M im; mkfs.bstdisk3 im && mkdir mm && mount -t bstdisk3 im mm && echo kept > mm/f && umount mm && mount -t bstdisk3 im mm && cat mm/f; cat /proc/mounts; umount mm; rm im; rmdir mm; echo lo$((1+1))",
+     [b"\r\nkept\r\n", b"bstdisk3 /mm bstdisk3 rw", b"\r\nlo2\r\n"], b"\n# "),
     # Small calls: uname, readv, pread/pwrite, limits, sysinfo, statfs,
     # getrandom, priorities, sessions, process groups, ttyname, pipe capacity (user/mmisc.c).
     ("mmisc", b"mmisc: ok on Linux x86_64, signals, pipe 65536", b"\n# "),
