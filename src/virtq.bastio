@@ -1,0 +1,228 @@
+// What every legacy virtio PCI device shares (virtio 0.9.5 / the "legacy"
+// sections of virtio 1.x): the register block in BAR 0, the status
+// handshake, and the virtqueue, through which the driver hands the device
+// buffers and the device hands them back. Drivers poll; no interrupts.
+//
+// A virtqueue lives in three physically contiguous pages, all lent to the
+// device as `Dma`: the descriptor table at 0, the available ring (driver to
+// device) at `avail`, and the used ring (device to driver) at `used`, on
+// the next page boundary. The proof keeps every ring access inside those
+// pages for any queue size up to 256; that the device reads and writes only
+// the rings and the buffers it is given is trusted.
+
+import "pages.bastio";
+
+const VIRTIO_VENDOR: u64 = 0x1AF4;
+
+// Legacy registers, as offsets from BAR 0 (no MSI-X, so a device's own
+// configuration starts at 0x14).
+const VIO_HOST_FEATURES: u64 = 0x00;
+const VIO_GUEST_FEATURES: u64 = 0x04;
+const VIO_QUEUE_PFN: u64 = 0x08;      // physical page number of the queue
+const VIO_QUEUE_SIZE: u64 = 0x0C;
+const VIO_QUEUE_SEL: u64 = 0x0E;
+const VIO_QUEUE_NOTIFY: u64 = 0x10;
+const VIO_STATUS: u64 = 0x12;
+const VIO_CONFIG: u64 = 0x14;
+const VIO_PORTS: u64 = 32;
+
+const VIO_ACK: u64 = 1;
+const VIO_DRIVER: u64 = 2;
+const VIO_DRIVER_OK: u64 = 4;
+
+const DESC_NEXT: u64 = 1;
+const DESC_WRITE: u64 = 2;            // the device writes this buffer
+const AVAIL_NO_INTERRUPT: u64 = 1;    // we poll
+
+const RING_BYTES: u64 = 12288;        // r0, r1, r2
+const VIO_SPINS: u64 = 1000000;
+const ADDR_LIMIT: u64 = 0x100000000;  // legacy queues take a 32-bit page number
+
+struct Vq {
+  r0: Dma,
+  r1: Dma,
+  r2: Dma,
+  n: u64,             // queue size
+  avail: u64,         // offsets into the queue
+  used: u64,
+  idx: u64,           // our next available-ring index (mod 2^16)
+  seen: u64,          // the used-ring index we have consumed up to
+}
+
+spec fn vq_ok(q: &Vq) -> bool {
+  q.n >= 3 && q.n <= 256
+  && q.avail % 2 == 0 && q.avail + 6 + 2 * q.n <= q.used
+  && q.used % 4 == 0 && q.used + 6 + 8 * q.n <= RING_BYTES
+  && q.idx <= 65535 && q.seen <= 65535
+}
+
+/// A queue over three pages, not yet given to a device.
+fn vq_new(f0: Frame, f1: Frame, f2: Frame) -> Vq
+  ensures vq_ok(result)
+{
+  return Vq { r0: dma_lend(f0), r1: dma_lend(f1), r2: dma_lend(f2), n: 3, avail: 48, used: 4096, idx: 0, seen: 0 };
+}
+
+/// Takes the queue's pages back. The device must have been reset first.
+fn vq_free(q: Vq, m: &mut Mem)
+  requires mem_ok(m)
+  ensures mem_ok(m)
+{
+  let mut d = q;
+  give_page(&mut m, dma_take(d.r0));
+  give_page(&mut m, dma_take(d.r1));
+  give_page(&mut m, dma_take(d.r2));
+}
+
+// The queue spans three pages; these pick the page an offset falls in.
+
+fn ring_w16(q: &mut Vq, off: u64, x: u64)
+  requires off + 2 <= RING_BYTES && off % 2 == 0 && x <= 65535
+{
+  if off < 4096 {
+    dma_write16(&mut q.r0, off, x);
+  } else if off < 8192 {
+    dma_write16(&mut q.r1, off - 4096, x);
+  } else {
+    dma_write16(&mut q.r2, off - 8192, x);
+  }
+}
+
+fn ring_r16(q: &mut Vq, off: u64) -> u64
+  requires off + 2 <= RING_BYTES && off % 2 == 0
+  ensures result <= 65535
+{
+  if off < 4096 {
+    return dma_read16(&mut q.r0, off);
+  } else if off < 8192 {
+    return dma_read16(&mut q.r1, off - 4096);
+  }
+  return dma_read16(&mut q.r2, off - 8192);
+}
+
+fn ring_r32(q: &mut Vq, off: u64) -> u64
+  requires off + 4 <= RING_BYTES && off % 4 == 0
+  ensures result <= 4294967295
+{
+  if off < 4096 {
+    return dma_read32(&mut q.r0, off);
+  } else if off < 8192 {
+    return dma_read32(&mut q.r1, off - 4096);
+  }
+  return dma_read32(&mut q.r2, off - 8192);
+}
+
+/// Starts the handshake: reset, then "I see you" and "I can drive you".
+/// Accepts feature bit `want` (a power of two, or 0 for none) if the device
+/// offers it, and returns false if nothing answers.
+fn virtio_start(io: &mut PortIo, want: u64) -> bool
+  requires port_count(io) == VIO_PORTS && want <= 2147483648
+{
+  pio_out8(&mut io, VIO_STATUS, 0);
+  pio_out8(&mut io, VIO_STATUS, VIO_ACK);
+  pio_out8(&mut io, VIO_STATUS, VIO_ACK + VIO_DRIVER);
+  let offered = pio_in32(&mut io, VIO_HOST_FEATURES);
+  if offered == 0xFFFFFFFF {
+    return false;
+  }
+  let mut acc = 0;
+  if want > 0 && offered / want % 2 == 1 {
+    acc = want;
+  }
+  pio_out32(&mut io, VIO_GUEST_FEATURES, acc);
+  return true;
+}
+
+/// Gives queue `sel` its pages and lays it out for the device's queue size.
+/// False (and the queue unchanged) if the size is unusable or the pages are
+/// not contiguous below 4 GiB.
+fn vq_setup(io: &mut PortIo, q: &mut Vq, sel: u64) -> bool
+  requires port_count(io) == VIO_PORTS && vq_ok(q) && sel <= 65535
+  ensures vq_ok(q)
+{
+  pio_out16(&mut io, VIO_QUEUE_SEL, sel);
+  let n = pio_in16(&mut io, VIO_QUEUE_SIZE);
+  let a = dma_addr(q.r0);
+  if n < 3 || n > 256 || a % 4096 != 0 || a > ADDR_LIMIT - RING_BYTES
+    || dma_addr(q.r1) != a + 4096 || dma_addr(q.r2) != a + 8192 {
+    return false;
+  }
+  q.n = n;
+  q.avail = 16 * n;
+  q.used = (18 * n + 6 + 4095) / 4096 * 4096;
+  q.idx = 0;
+  q.seen = 0;
+  ring_w16(&mut q, q.avail, AVAIL_NO_INTERRUPT);
+  pio_out32(&mut io, VIO_QUEUE_PFN, a / 4096);
+  return true;
+}
+
+/// Descriptor `i`: buffer address, length, flags and the next descriptor
+/// in its chain. The table is in the first page.
+fn vq_desc(q: &mut Vq, i: u64, addr: u64, size: u64, flags: u64, next: u64)
+  requires vq_ok(q) && i < q.n && size <= 4294967295 && flags <= 65535 && next <= 65535
+{
+  dma_write64(&mut q.r0, i * 16, addr);
+  dma_write32(&mut q.r0, i * 16 + 8, size);
+  dma_write16(&mut q.r0, i * 16 + 12, flags);
+  dma_write16(&mut q.r0, i * 16 + 14, next);
+}
+
+/// Offers the chain starting at descriptor `head` to the device. The
+/// driver then notifies the device (`VIO_QUEUE_NOTIFY`).
+fn vq_push(q: &mut Vq, head: u64)
+  requires vq_ok(q) && head <= 65535
+  ensures vq_ok(q)
+{
+  ring_w16(&mut q, q.avail + 4 + 2 * (q.idx % q.n), head);
+  q.idx = (q.idx + 1) % 65536;
+  ring_w16(&mut q, q.avail + 2, q.idx);
+}
+
+/// Has the device handed back a chain we have not consumed yet?
+fn vq_has_used(q: &mut Vq) -> bool
+  requires vq_ok(q)
+{
+  return ring_r16(&mut q, q.used + 2) != q.seen;
+}
+
+/// The head descriptor of the next used chain, and how many bytes the
+/// device wrote into it.
+fn vq_used_id(q: &mut Vq) -> u64
+  requires vq_ok(q)
+  ensures result <= 4294967295
+{
+  return ring_r32(&mut q, q.used + 4 + 8 * (q.seen % q.n));
+}
+
+fn vq_used_len(q: &mut Vq) -> u64
+  requires vq_ok(q)
+  ensures result <= 4294967295
+{
+  return ring_r32(&mut q, q.used + 8 + 8 * (q.seen % q.n));
+}
+
+fn vq_next(q: &mut Vq)
+  requires vq_ok(q)
+  ensures vq_ok(q)
+{
+  q.seen = (q.seen + 1) % 65536;
+}
+
+/// Waits until the device hands a chain back; false if it never does.
+fn vq_wait(q: &mut Vq) -> bool
+  requires vq_ok(q)
+  ensures vq_ok(q)
+{
+  let mut spins = 0;
+  while spins < VIO_SPINS && !vq_has_used(&mut q)
+    invariant vq_ok(q)
+  {
+    spins = spins + 1;
+  }
+  if spins == VIO_SPINS {
+    return false;
+  }
+  vq_next(&mut q);
+  return true;
+}

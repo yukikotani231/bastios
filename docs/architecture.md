@@ -19,8 +19,11 @@ How the kernel is put together, and which part of it is proved. Read the [README
   | src/ramfs.bastio    in-memory files  |   |                                  |
   | src/diskfs.bastio   files on disk    |   |                                  |
   | src/blk.bastio      disk: virtio or  |   |                                  |
-  |   ATA (virtio.bastio, ata.bastio,    |   |                                  |
-  |   pci.bastio)                        |   |                                  |
+  |   ATA (virtio_blk.bastio, ata.bastio)|   |                                  |
+  | src/net.bastio      IPv4 stack over  |   |                                  |
+  |   virtio_net.bastio                  |   |                                  |
+  | src/virtq.bastio    virtqueues, and  |   |                                  |
+  |   pci.bastio                         |   |                                  |
   | src/space.bastio    address spaces   |   | boot/platform.c  TSS, IDT, PIC,  |
   | src/pages.bastio    page allocator   |   |                timer             |
   | src/console.bastio  kernel messages  |   | boot/smp.c, ap.S  start the other|
@@ -30,7 +33,9 @@ How the kernel is put together, and which part of it is proved. Read the [README
   +--------------------------------------+   +----------------------------------+
 ```
 
-**Devices.** Drivers are Bastio and reach hardware only through capabilities claimed once in `main`: I/O ports (`PortIo`: serial, PIC, PIT, PCI configuration, ATA, virtio), memory-mapped registers (`Mmio`: the HPET, in the 3-4 GiB device window `boot.S` maps uncached) and pages lent to devices for DMA (`Dma`). The disk is a virtio block device when the machine has one: `src/virtio.bastio` lends it four pages (the virtqueue and one request) at boot, programs their physical addresses into the device, and takes them back only after resetting it at power off. While they are lent the prover rejects any attempt to free, map or reuse them, and every access to them is volatile and inside the page. That the device writes only those pages, and stops when reset, is trusted. Without virtio the disk is the ATA drive, driven by programmed I/O.
+**Devices.** Drivers are Bastio and reach hardware only through capabilities claimed once in `main`: I/O ports (`PortIo`: serial, PIC, PIT, PCI configuration, ATA, virtio), memory-mapped registers (`Mmio`: the HPET, in the 3-4 GiB device window `boot.S` maps uncached) and pages lent to devices for DMA (`Dma`). Both virtio drivers share `src/virtq.bastio` (the legacy register block and the virtqueue). The disk is a virtio block device when the machine has one: `src/virtio_blk.bastio` lends it four pages (the virtqueue and one request) at boot, programs their physical addresses into the device, and takes them back only after resetting it at power off. While they are lent the prover rejects any attempt to free, map or reuse them, and every access to them is volatile and inside the page. That the device writes only those pages, and stops when reset, is trusted. Without virtio the disk is the ATA drive, driven by programmed I/O.
+
+**Network.** A virtio network card, when present, gets nine pages the same way (two virtqueues, four 2 KiB receive buffers, one transmit page). `src/net.bastio` is a minimal IPv4 stack on it with a fixed address for QEMU's user-mode network (10.0.2.15, gateway 10.0.2.2): Ethernet, ARP (it answers requests for its address and keeps a one-entry cache), IPv4 without options or fragments (header checksum checked on the way in), ICMP echo both ways and UDP echo on port 7. Every field is read out of a byte buffer, and the proof shows no length read off the wire can take a read or write outside it: a header claiming more bytes than arrived is dropped. The kernel loop polls the card on every pass; the shell's `ping` is system call 40, which the loop handles itself because it owns the card. There are no sockets yet.
 
 The Bastio compiler turns each Bastio file into freestanding C, after proving it. The C is compiled and linked with the trusted parts into one kernel image, and each user program into a flat image that the kernel embeds. The boundary between the two columns is the set of capability builtins: Bastio code never sees an address it could dereference, only linear values (`Frame`, `PageTable`, ...) that the builtins turn into memory accesses.
 
