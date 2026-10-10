@@ -9,7 +9,7 @@
 // k.ofd, words h * OFD_STRIDE: kind, references, row, pipe or directory,
 // and a directory's next entry (for a pipe end: 1 if it is nonblocking).
 // k.pipes, words p * PIPE_STRIDE: head, count, read end open, write end
-// open, then a ring of PIPE_CAP bytes.
+// open; the ring itself is PIPE_CAP bytes of k.pipebuf at p * PIPE_CAP.
 
 import "linux.bastio";
 import "lxdev.bastio";
@@ -559,7 +559,7 @@ fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && p < NPIPES
   ensures kok(k)
 {
-  let count = pi_get(k.pipes, p, 1);
+  let count = smaller(pi_get(k.pipes, p, 1), PIPE_CAP);
   if count == 0 {
     if pi_get(k.pipes, p, 3) == 0 {
       return 0;
@@ -569,13 +569,14 @@ fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   if n == 0 {
     return 0;
   }
-  let want = smaller(smaller(n, count), PIPE_CAP);
+  let want = smaller(smaller(n, count), XFER);
   let head = pi_get(k.pipes, p, 0) % PIPE_CAP;
+  let ring = p * PIPE_CAP;
   let mut i = 0;
   while i < want
-    invariant i <= want && want <= PIPE_CAP && head < PIPE_CAP && kok(k)
+    invariant i <= want && want <= XFER && head < PIPE_CAP && ring + PIPE_CAP <= PIPE_BYTES && kok(k)
   {
-    bset(&mut k.fs.xfer, i, cast[u8](pi_get(k.pipes, p, 4 + (head + i) % PIPE_CAP) % 256));
+    bset(&mut k.fs.xfer, i, bget(k.pipebuf, ring + (head + i) % PIPE_CAP));
     i = i + 1;
   }
   let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
@@ -588,7 +589,9 @@ fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
 }
 
 /// Writes up to n bytes from user address va into pipe p. Returns the
-/// count, -EPIPE with no reader left, or EAGAIN if the pipe is full.
+/// count, -EPIPE with no reader left, or EAGAIN if the pipe is full. A
+/// write of PIPE_ATOM bytes or fewer goes in whole or not at all, so
+/// writers sharing a pipe never interleave inside one (POSIX PIPE_BUF).
 fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && p < NPIPES
   ensures kok(k)
@@ -600,19 +603,21 @@ fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
     return 0;
   }
   let count = smaller(pi_get(k.pipes, p, 1), PIPE_CAP);
-  if count == PIPE_CAP {
+  let room = PIPE_CAP - count;
+  if room == 0 || (n <= PIPE_ATOM && room < n) {
     return EAGAIN;
   }
-  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, smaller(n, PIPE_CAP - count));
+  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, smaller(smaller(n, room), XFER));
   if got == NO_RESULT || (got == 0 && n > 0) {
     return EFAULT;
   }
   let head = pi_get(k.pipes, p, 0) % PIPE_CAP;
+  let ring = p * PIPE_CAP;
   let mut i = 0;
   while i < got
-    invariant i <= got && got <= PIPE_CAP - count && head < PIPE_CAP && kok(k)
+    invariant i <= got && got <= room && got <= XFER && head < PIPE_CAP && ring + PIPE_CAP <= PIPE_BYTES && kok(k)
   {
-    pi_set(&mut k.pipes, p, 4 + (head + count + i) % PIPE_CAP, cast[u64](bget(k.fs.xfer, i)));
+    bset(&mut k.pipebuf, ring + (head + count + i) % PIPE_CAP, bget(k.fs.xfer, i));
     i = i + 1;
   }
   pi_set(&mut k.pipes, p, 1, count + got);

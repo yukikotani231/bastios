@@ -339,9 +339,11 @@ const DIR_BIN: u64 = 1;
 const DIR_VFS: u64 = 2;               // DIR_VFS + a file layer directory handle
 
 const NPIPES: u64 = 8;
-const PIPE_CAP: u64 = 1024;
-const PIPE_STRIDE: u64 = 1028;        // 4 + PIPE_CAP
-const PIPES_LEN: u64 = 8224;          // NPIPES * PIPE_STRIDE
+const PIPE_CAP: u64 = 65536;          // bytes a pipe holds, as on Linux
+const PIPE_ATOM: u64 = 4096;          // PIPE_BUF: writes this small go in whole
+const PIPE_STRIDE: u64 = 4;           // head, count, read end open, write end open
+const PIPES_LEN: u64 = 32;            // NPIPES * PIPE_STRIDE
+const PIPE_BYTES: u64 = 524288;       // NPIPES * PIPE_CAP
 
 const LX_PIPE: u64 = 22;
 const LX_FSTAT: u64 = 5;
@@ -404,7 +406,8 @@ struct Kernel {
   line: Buf,            // the line a Linux program is typing (see tty_cook)
   lxfd: Buf,            // Linux descriptors (src/lxfd.bastio)
   ofd: Buf,             // open file descriptions they share
-  pipes: Buf,           // pipe buffers
+  pipes: Buf,           // pipe state, PIPE_STRIDE words each
+  pipebuf: Bytes,       // pipe rings, PIPE_CAP bytes each
   ticks: u64,           // timer ticks since boot
   ns: u64,              // the HPET clock at the last system call, in nanoseconds
   epoch: u64,           // CLOCK_REALTIME minus the HPET clock, in ns (src/rtc.bastio)
@@ -420,7 +423,7 @@ struct Kernel {
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN
 }
 
 // ---------------------------------------------------------------- programs
