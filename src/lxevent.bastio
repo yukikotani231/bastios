@@ -21,16 +21,19 @@
 // A read or epoll_wait that has to wait runs again (lx_retry), as a pipe
 // read does.
 //
-// A named pipe (mkfifo, mknod with S_IFIFO) is a name in one of FIFO_N
-// slots in k.evt, at FIFO_AT + f * FIFO_STRIDE: the name's length (0: the
-// slot is free), the pipe its open ends share + 1, then the name, a byte
-// a word, as the path layer spells it (no leading "/"). The pipe is an
-// ordinary one (src/lxfd.bastio) marked as the FIFO's, made when the
-// first end opens and gone when the last one closes. Opening to write
-// waits until there is a reader (-ENXIO with O_NONBLOCK); opening to read
-// does not wait, but reads wait until a writer has come. The name lives
-// beside the file system, not in it: stat, open and unlink know it, a
-// directory listing does not show it, and it does not survive a reboot.
+// A named pipe (mkfifo, mknod with S_IFIFO) is a file of the file system
+// whose mode has the FIFO type bits (vfs_mkfifo, vfs_is_fifo), so it is
+// listed, renamed, linked and removed like any file, and on the disk it
+// survives a reboot. Its data never goes in the file: opening it gives an
+// ordinary pipe (src/lxfd.bastio) marked as the FIFO's, made when the
+// first end opens and gone when the last one closes. Which pipe belongs
+// to which FIFO is kept in one of FIFO_N slots in k.evt, at FIFO_AT +
+// f * FIFO_STRIDE: the FIFO's file handle + 1 (0: the slot is free) and
+// its pipe + 1. A slot whose pipe has no open end can be taken by another
+// FIFO, so FIFO_N limits the FIFOs open at once, not how many exist.
+// Opening to write waits until there is a reader (-ENXIO with
+// O_NONBLOCK); opening to read does not wait, but reads wait until a
+// writer has come.
 
 import "linux.bastio";
 
@@ -558,31 +561,45 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
 
 // ---------------------------------------------------------------- FIFOs
 
-/// The named pipe called x[..n] (the transfer buffer), or FIFO_N.
-fn fifo_find(k: &Kernel, n: u64) -> u64
+/// Is FIFO slot f's pipe open at either end?
+fn fifo_busy(k: &Kernel, f: u64) -> bool
+  requires kok(k) && f < FIFO_N
+{
+  let w = get(k.evt, FIFO_AT + f * FIFO_STRIDE + 1);
+  if w == 0 || w - 1 >= NPIPES {
+    return false;
+  }
+  let c = w - 1;
+  return pi_get(k.pipes, c, 4) == f + 1 && (pi_get(k.pipes, c, 2) != 0 || pi_get(k.pipes, c, 3) != 0);
+}
+
+/// The slot of the named pipe with file handle h: the one it has, or a
+/// free one (or one whose pipe is closed) given to it. FIFO_N if none.
+fn fifo_slot(k: &mut Kernel, h: u64) -> u64
   requires kok(k)
+  ensures kok(k)
   ensures result <= FIFO_N
 {
-  if n == 0 || n > FIFO_NAME {
+  if h >= NFILES + DSLOTS {
     return FIFO_N;
   }
   let mut f = 0;
   while f < FIFO_N
-    invariant f <= FIFO_N && n <= FIFO_NAME && kok(k)
+    invariant f <= FIFO_N && kok(k)
   {
-    let base = FIFO_AT + f * FIFO_STRIDE;
-    if get(k.evt, base) == n {
-      let mut i = 0;
-      let mut same = true;
-      while i < n && same
-        invariant i <= n && n <= FIFO_NAME && f < FIFO_N && kok(k)
-      {
-        same = get(k.evt, base + 2 + i) == cast[u64](bget(k.fs.xfer, i));
-        i = i + 1;
-      }
-      if same {
-        return f;
-      }
+    if get(k.evt, FIFO_AT + f * FIFO_STRIDE) == h + 1 {
+      return f;
+    }
+    f = f + 1;
+  }
+  f = 0;
+  while f < FIFO_N
+    invariant f <= FIFO_N && kok(k)
+  {
+    if get(k.evt, FIFO_AT + f * FIFO_STRIDE) == 0 || !fifo_busy(k, f) {
+      k.evt = set(k.evt, FIFO_AT + f * FIFO_STRIDE, h + 1);
+      k.evt = set(k.evt, FIFO_AT + f * FIFO_STRIDE + 1, 0);
+      return f;
     }
     f = f + 1;
   }
@@ -604,36 +621,30 @@ fn lx_mknod(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64) -> u64
   if n == 0 || n > FNAME_MAX {
     return EEXIST;                          // "/"
   }
-  if n > FIFO_NAME {
-    return ENAMETOOLONG;
-  }
-  let mut f = 0;
-  while f < FIFO_N && get(k.evt, FIFO_AT + f * FIFO_STRIDE) != 0
-    invariant f <= FIFO_N && kok(k)
-  {
-    f = f + 1;
-  }
-  if f >= FIFO_N {
-    return ENOSPC;
-  }
-  if fifo_find(k, n) < FIFO_N {
-    return EEXIST;
-  }
-  // Keep the name before anything else can touch the transfer buffer.
-  let base = FIFO_AT + f * FIFO_STRIDE;
-  let mut i = 0;
-  while i < n
-    invariant i <= n && n <= FIFO_NAME && f < FIFO_N && kok(k)
-  {
-    k.evt = set(k.evt, base + 2 + i, cast[u64](bget(k.fs.xfer, i)));
-    i = i + 1;
-  }
+  let mut t = balloc(2 * FNAME_MAX);
+  xfer_save(k, &mut t, 0, n);
   let there = path_meta(&mut k, n);
   if there.ok {
+    bfree(t);
     return EEXIST;
   }
-  k.evt = set(k.evt, base + 1, 0);
-  k.evt = set(k.evt, base, n);
+  xfer_load(&mut k, t, 0, n);               // path_meta may have used the transfer buffer
+  bfree(t);
+  if !vfs_mkfifo(&mut k.fs, &mut k.mem, n, mode % 512) {
+    return ENOENT;                          // no such directory, or no room
+  }
+  // A slot left from a removed FIFO whose handle this one now has is not
+  // this FIFO's: open ends keep their pipe, new opens get a new one.
+  let h = vfs_lookup(&mut k.fs, n);
+  let mut f = 0;
+  while f < FIFO_N
+    invariant f <= FIFO_N && kok(k)
+  {
+    if h != NO_FILE && get(k.evt, FIFO_AT + f * FIFO_STRIDE) == h + 1 {
+      k.evt = set(k.evt, FIFO_AT + f * FIFO_STRIDE, 0);
+    }
+    f = f + 1;
+  }
   return 0;
 }
 
