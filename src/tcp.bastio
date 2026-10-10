@@ -174,13 +174,7 @@ fn tcp_emit(n: &mut Net, t: u64, flags: u64, seq: u64, off: u64, dl: u64)
     put16(&mut n.out, 56, TCP_MSS);
   }
   let at = t * TCP_BUF + off;
-  let mut i = 0;
-  while i < dl
-    invariant i <= dl && net_ok(n)
-  {
-    bset(&mut n.out, 34 + hl + i, bget(n.ttx, at + i));
-    i = i + 1;
-  }
+  bcopy(&mut n.out, 34 + hl, n.ttx, at, dl);
   put16(&mut n.out, 50, 65535 - l4_sum(n.out, src_ip(n, rip), rip, IP_TCP, tlen));
   send_via(&mut n, next_hop(n, rip), 34 + tlen);
 }
@@ -639,13 +633,7 @@ fn tcp_in(n: &mut Net, total: u64)
       take = TCP_BUF - rxlen;         // beyond our window: the peer resends
     }
     let base = t * TCP_BUF + rxlen;
-    let mut i = 0;
-    while i < take
-      invariant i <= take && net_ok(n)
-    {
-      bset(&mut n.trx, base + i, bget(n.pkt, doff + i));
-      i = i + 1;
-    }
+    bcopy(&mut n.trx, base, n.pkt, doff, take);
     let mut got = rxlen + take;
     let hlo = twb(n, t, W_HLO, TCP_BUF + 1);
     let hhi = twb(n, t, W_HHI, TCP_BUF + 1);
@@ -711,13 +699,7 @@ fn tcp_hold(n: &mut Net, t: u64, ahead: u64, doff: u64, dl: u64)
     }
   }
   let base = t * TCP_BUF + lo;
-  let mut i = 0;
-  while i < hi - lo
-    invariant i <= hi - lo && net_ok(n)
-  {
-    bset(&mut n.trx, base + i, bget(n.pkt, doff + i));
-    i = i + 1;
-  }
+  bcopy(&mut n.trx, base, n.pkt, doff, hi - lo);
   tset(&mut n, t, W_HLO, nlo);
   tset(&mut n, t, W_HHI, nhi);
 }
@@ -916,13 +898,7 @@ fn tcp_write(n: &mut Net, t: u64, buf: &Bytes, size: u64) -> u64
     k = blen(buf);
   }
   let base = t * TCP_BUF + txlen;
-  let mut i = 0;
-  while i < k
-    invariant i <= k && net_ok(n)
-  {
-    bset(&mut n.ttx, base + i, bget(buf, i));
-    i = i + 1;
-  }
+  bcopy(&mut n.ttx, base, buf, 0, k);
   tset(&mut n, t, W_TXLEN, txlen + k);
   tcp_output(&mut n, t, false);
   return k;
@@ -961,13 +937,7 @@ fn tcp_read(n: &mut Net, t: u64, buf: &mut Bytes, max: u64, peek: bool) -> u64
   }
   let base = t * TCP_BUF;
   let bl = blen(buf);
-  let mut i = 0;
-  while i < k
-    invariant i <= k && net_ok(n) && blen(buf) == bl
-  {
-    bset(&mut buf, i, bget(n.trx, base + i));
-    i = i + 1;
-  }
+  bcopy(&mut buf, 0, n.trx, base, k);
   if peek {
     return k;
   }
@@ -1013,6 +983,7 @@ fn tcp_release(n: &mut Net, t: u64) -> bool
     return false;
   }
   tset(&mut n, t, W_HELD, 0);
+  tset(&mut n, t, W_PARENT, TCBS);          // accepted once: never handed out again
   let st = tw(n, t, W_STATE);
   if st == T_LISTEN || st == T_SYN_SENT {
     tcb_close(&mut n, t, false);

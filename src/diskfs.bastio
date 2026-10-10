@@ -148,13 +148,20 @@ fn zero(b: &mut Bytes, from: u64, to: u64)
   requires to <= blen(b)
   ensures blen(b) == old(blen(b))
 {
+  if from >= to {
+    return;
+  }
+  // One zero byte, then the zeros so far copied after themselves: the run
+  // doubles with each copy.
+  bset(&mut b, from, 0);
   let l = blen(b);
-  let mut j = from;
-  while j < to
-    invariant blen(b) == l
+  let mut len = 1;
+  while len < to - from
+    invariant 1 <= len && from + len <= to && to <= l && blen(b) == l
   {
-    bset(&mut b, j, 0);
-    j = j + 1;
+    let c = smaller(len, to - from - len);
+    bmove(&mut b, from + len, from, c);
+    len = len + c;
   }
 }
 
@@ -168,14 +175,7 @@ fn sec_in(dev: &mut Blk, sec: &mut Bytes, lba: u64, out: &mut Bytes, at: u64) ->
   if !blk_read(&mut dev, lba, &mut sec) {
     return false;
   }
-  let l = blen(out);
-  let mut j = 0;
-  while j < SECTOR
-    invariant j <= SECTOR && blen(out) == l && blen(sec) == SECTOR
-  {
-    bset(&mut out, at + j, bget(sec, j));
-    j = j + 1;
-  }
+  bcopy(&mut out, at, sec, 0, SECTOR);
   return true;
 }
 
@@ -184,13 +184,7 @@ fn sec_out(dev: &mut Blk, sec: &mut Bytes, lba: u64, src: &Bytes, at: u64) -> bo
   requires blk_ok(dev) && blen(sec) == SECTOR && at + SECTOR <= blen(src)
   ensures blk_ok(dev) && blen(sec) == SECTOR
 {
-  let mut j = 0;
-  while j < SECTOR
-    invariant j <= SECTOR && blen(sec) == SECTOR
-  {
-    bset(&mut sec, j, bget(src, at + j));
-    j = j + 1;
-  }
+  bcopy(&mut sec, 0, src, at, SECTOR);
   return blk_write(&mut dev, lba, sec);
 }
 
@@ -1232,13 +1226,7 @@ fn disk_read(d: &mut DiskFs, i: u64, off: u64, buf: &mut Bytes, n: u64) -> u64
         missing = true;
         read_ahead(&mut d, root, a / BLOCK + 1, size);
       } else {
-        let mut t = 0;
-        while t < m
-          invariant t <= m && blen(buf) == l && disk_ok(d) && s < NC
-        {
-          bset(&mut buf, k + t, bget(d.q.cache, s * BLOCK + o + t));
-          t = t + 1;
-        }
+        bcopy(&mut buf, k, d.q.cache, s * BLOCK + o, m);
       }
     }
     k = k + m;
@@ -1319,13 +1307,7 @@ fn gather(q: &mut DiskQ, b: u64, out: &mut Bytes) -> bool
   if s >= NC {
     return false;
   }
-  let mut j = 0;
-  while j < BLOCK
-    invariant j <= BLOCK && j % 8 == 0 && dq_ok(q) && blen(out) == BLOCK && s < NC
-  {
-    put_u64(&mut out, j, get_u64(q.cache, s * BLOCK + j));
-    j = j + 8;
-  }
+  bcopy(&mut out, 0, q.cache, s * BLOCK, BLOCK);
   return true;
 }
 
@@ -1336,13 +1318,7 @@ fn patch(blk: &mut Bytes, valid: u64, buf: &Bytes, at: u64, wo: u64, wm: u64)
   ensures blen(blk) == BLOCK
 {
   zero(&mut blk, valid, BLOCK);
-  let mut t = 0;
-  while t < wm
-    invariant t <= wm && blen(blk) == BLOCK
-  {
-    bset(&mut blk, wo + t, bget(buf, at + t));
-    t = t + 1;
-  }
+  bcopy(&mut blk, wo, buf, at, wm);
 }
 
 /// Queues the release of block b once the transaction ends (nothing for 0).

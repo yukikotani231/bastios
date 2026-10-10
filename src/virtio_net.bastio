@@ -34,14 +34,16 @@ spec fn vnet_ok(v: &VNet) -> bool {
   port_count(v.io) == VIO_PORTS && vq_ok(v.rx) && vq_ok(v.tx) && v.mac < 281474976710656
 }
 
-/// Byte `off` of receive buffer `b`.
-fn rxbuf_read8(v: &mut VNet, b: u64, off: u64) -> u8
-  requires b < RX_BUFS && off < RX_BUF
+/// Copies n bytes of receive buffer `b`, from offset `off`, into pkt.
+fn rxbuf_copy(v: &mut VNet, b: u64, off: u64, pkt: &mut Bytes, n: u64)
+  requires vnet_ok(v) && b < RX_BUFS && off + n <= RX_BUF && n <= blen(pkt)
+  ensures vnet_ok(v) && blen(pkt) == old(blen(pkt)) && v.live == old(v.live)
 {
   if b < 2 {
-    return dma_read8(&mut v.rb0, b * RX_BUF + off);
+    dma_to_bytes(&mut pkt, 0, &mut v.rb0, b * RX_BUF + off, n);
+  } else {
+    dma_to_bytes(&mut pkt, 0, &mut v.rb1, (b - 2) * RX_BUF + off, n);
   }
-  return dma_read8(&mut v.rb1, (b - 2) * RX_BUF + off);
 }
 
 /// Offers receive buffer `b` (descriptor `b`) to the card again.
@@ -165,14 +167,7 @@ fn vnet_recv(v: &mut VNet, pkt: &mut Bytes) -> u64
   if got > NET_HDR && got <= RX_BUF {
     n = got - NET_HDR;
   }
-  let l = blen(pkt);
-  let mut i = 0;
-  while i < n
-    invariant i <= n && n <= RX_BUF - NET_HDR && vnet_ok(v) && blen(pkt) == l && l >= RX_BUF && b < RX_BUFS
-  {
-    bset(&mut pkt, i, rxbuf_read8(&mut v, b, NET_HDR + i));
-    i = i + 1;
-  }
+  rxbuf_copy(&mut v, b, NET_HDR, &mut pkt, n);
   rx_give(&mut v, b);
   return n;
 }
@@ -193,13 +188,7 @@ fn vnet_send(v: &mut VNet, pkt: &Bytes, n: u64) -> bool
     dma_write8(&mut v.tb, i, 0);      // no checksum offload, no segmentation
     i = i + 1;
   }
-  let mut j = 0;
-  while j < n
-    invariant j <= n && n <= FRAME_MAX && n <= blen(pkt)
-  {
-    dma_write8(&mut v.tb, NET_HDR + j, bget(pkt, j));
-    j = j + 1;
-  }
+  bytes_to_dma(&mut v.tb, NET_HDR, pkt, 0, n);
   let a = dma_addr(v.tb);
   vq_desc(&mut v.tx, 0, a, NET_HDR + n, 0, 0);
   vq_push(&mut v.tx, 0);

@@ -35,6 +35,9 @@ const SOCK_CLOEXEC: u64 = 0x80000;
 const MSG_DONTWAIT: u64 = 0x40;
 const MSG_PEEK: u64 = 2;
 const MSG_NOSIGNAL: u64 = 0x4000;
+const MSG_OOB: u64 = 1;
+const MSG_ERRQUEUE: u64 = 0x2000;
+const SOCKADDR_MAX: u64 = 128;         // sizeof(struct sockaddr_storage)
 const SO_SNDBUF: u64 = 7;
 const SO_RCVBUF: u64 = 8;
 const SIN_LEN: u64 = 16;               // struct sockaddr_in
@@ -86,8 +89,8 @@ fn sin_in(k: &mut Kernel, pid: u64, va: u64, alen: u64) -> Sin
   ensures kok(k)
   ensures result.err == 0 ==> (result.ip <= 4294967295 && result.port <= 65535)
 {
-  if alen < 8 {
-    return Sin { err: EINVAL, ip: 0, port: 0 };
+  if alen < 8 || alen % 4294967296 > SOCKADDR_MAX {
+    return Sin { err: EINVAL, ip: 0, port: 0 };   // a socklen_t past sockaddr_storage too
   }
   if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 8) != 8 {
     return Sin { err: EFAULT, ip: 0, port: 0 };
@@ -350,6 +353,22 @@ fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, 
   ensures kok(k)
 {
   if is_tcp(k, pid, fd) {
+    if flags % 2 == MSG_OOB {
+      return EINVAL;                        // no urgent data is ever kept
+    }
+    if flags / MSG_ERRQUEUE % 2 == 1 {
+      return EAGAIN;                        // the error queue is always empty
+    }
+    if addr != 0 && alenp != 0 {
+      // A stream socket fills in no address, but a negative length is
+      // still EINVAL, as on Linux.
+      if copy_from_user(&mut k.spaces, pid, alenp, &mut k.fs.xfer, 4) != 4 {
+        return EFAULT;
+      }
+      if bget(k.fs.xfer, 3) >= 128 {
+        return EINVAL;
+      }
+    }
     return lx_tcp_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1);
   }
   if is_unix(k, pid, fd) {
@@ -464,12 +483,15 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   let e = pget(k.procs, pid, F_REGS + R_R8);
   let f = pget(k.procs, pid, F_REGS + R_R9);
   let mut r = ENOSYS;
+  let dgram = sk_look(k, pid, a);
   if n == LX_SOCKET {
     r = lx_socket(&mut k, pid, a, b, c);
   } else if n == LX_BIND {
     r = lx_bind(&mut k, pid, a, b, c);
   } else if n == LX_CONNECT {
     r = lx_connect(&mut k, pid, a, b, c);
+  } else if n == LX_SENDTO && d % 2 == MSG_OOB && dgram.err == 0 {
+    r = EOPNOTSUPP;                         // a datagram has no out-of-band data
   } else if n == LX_SENDTO {
     r = lx_sendto(&mut k, pid, a, b, c, e, f);
   } else if n == LX_RECVFROM {
@@ -478,6 +500,8 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     r = lx_sockname(&mut k, pid, a, b, c, n == LX_GETPEERNAME);
   } else if n == LX_LISTEN && is_unix(k, pid, a) {
     r = ux_listen(&mut k, pid, a);
+  } else if n == LX_LISTEN && dgram.err == 0 {
+    r = EOPNOTSUPP;                         // a datagram socket cannot listen
   } else if n == LX_LISTEN {
     r = lx_listen(&mut k, pid, a);
   } else if n == LX_SOCKETPAIR {
