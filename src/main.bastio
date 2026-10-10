@@ -49,6 +49,7 @@ import "lxmq.bastio";
 import "lxsys.bastio";
 import "lxlock.bastio";
 import "lxprocfs.bastio";
+import "lxprctl.bastio";
 import "lxlink.bastio";
 import "lxmount.bastio";
 import "lxperm.bastio";

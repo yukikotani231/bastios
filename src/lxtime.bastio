@@ -146,8 +146,8 @@ fn clock_now(k: &Kernel, pid: u64, clk: u64) -> u64
 }
 
 /// nanosleep and clock_nanosleep: waits until the time asked for has
-/// passed. A signal handler ends the sleep early with -EINTR (the time
-/// left is not written back).
+/// passed. A signal handler ends the sleep early with -EINTR, and the
+/// time left goes back through rem (sleep_left).
 fn lx_sleep(k: &mut Kernel, pid: u64, n: u64, was: u64, clk: u64, flags: u64, req: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -155,6 +155,10 @@ fn lx_sleep(k: &mut Kernel, pid: u64, n: u64, was: u64, clk: u64, flags: u64, re
   let now = clock_now(k, pid, clk);
   if now == FOREVER {
     ret(&mut k.procs, pid, EINVAL);
+    return KEEP;
+  }
+  if clk == 3 {
+    ret(&mut k.procs, pid, EOPNOTSUPP);     // CLOCK_THREAD_CPUTIME_ID: Linux cannot sleep on it either
     return KEEP;
   }
   let ts = ts_in(&mut k, pid, req);
@@ -177,6 +181,32 @@ fn lx_sleep(k: &mut Kernel, pid: u64, n: u64, was: u64, clk: u64, flags: u64, re
     return KEEP;
   }
   return wait_until(&mut k, pid, n, dl);
+}
+
+/// A nanosleep or relative clock_nanosleep of process p that a signal
+/// handler interrupts: the time it had left goes to its rem argument (if
+/// not NULL). False if rem cannot be written: the call then fails with
+/// EFAULT instead of EINTR, as on Linux.
+fn sleep_left(k: &mut Kernel, p: u64, call: u64) -> bool
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let was = pget(k.procs, p, F_RESTART);
+  let mut rem = 0;
+  if call == LX_NANOSLEEP {
+    rem = pget(k.procs, p, F_REGS + R_RSI);
+  } else if call == LX_CLOCK_NANOSLEEP && pget(k.procs, p, F_REGS + R_RSI) & TIMER_ABSTIME == 0 {
+    rem = pget(k.procs, p, F_REGS + R_R10);
+  }
+  if rem == 0 || was < 2 {
+    return true;
+  }
+  let dl = was - 2;
+  let mut left = 0;
+  if dl > k.ns {
+    left = dl - k.ns;
+  }
+  return time_out(&mut k, p, rem, left, 1) == 0;
 }
 
 // ---------------------------------------------------------------- poll

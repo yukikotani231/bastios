@@ -240,6 +240,7 @@ fn thread_free(k: &mut Kernel, mmu: &Mmu, q: u64, g: u64)
     }
     c = c + 1;
   }
+  pr_clear(&mut k, q);
   pset(&mut k.procs, q, F_TGID, 0);
   pset(&mut k.procs, q, F_CTID, 0);
   pset(&mut k.procs, q, F_FUTEX, 0);
@@ -374,6 +375,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   pset(&mut k.procs, c, F_CODE, 0);
   pset(&mut k.procs, c, F_TICKS, 0);
   pset(&mut k.procs, c, F_PARENT, 0);       // threads are nobody's children
+  pr_fork(&mut k, pid, c);
   pset(&mut k.procs, c, F_ALTSIZE, 0);      // nor have an alternate signal stack
   pset(&mut k.procs, c, F_VTIMER, 0);       // the CPU-time timers belong to the leader
   pset(&mut k.procs, c, F_PTIMER, 0);

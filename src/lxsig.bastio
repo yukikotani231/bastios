@@ -223,13 +223,13 @@ fn lx_sigqueue(k: &mut Kernel, pid: u64, target: u64, s: u64, info: u64) -> u64
   if s > NSIG {
     return EINVAL;
   }
-  if target >= NPROC || state(k.procs, target) == FREE || state(k.procs, target) == ZOMBIE || target == 0 {
+  if target >= NPROC || state(k.procs, target) == FREE || target == 0 {
     return ESRCH;
   }
   if info > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, info, &mut k.fs.xfer, 32) != 32 {
     return EFAULT;
   }
-  if s != 0 {
+  if s != 0 && state(k.procs, target) != ZOMBIE {
     post_queued(&mut k, target, s, pid, get_u64(k.fs.xfer, 24));
   }
   return 0;
@@ -552,13 +552,13 @@ fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
     }
     return 0;
   }
-  if target >= NPROC || state(k.procs, target) == FREE || state(k.procs, target) == ZOMBIE {
+  if target >= NPROC || state(k.procs, target) == FREE {
     return ESRCH;
   }
   if !may_signal(k, pid, target, s) {
     return EPERM;
   }
-  if s != 0 {
+  if s != 0 && state(k.procs, target) != ZOMBIE {   // a zombie takes it and drops it, as on Linux
     post_from(&mut k, target, s, pid);
   }
   return 0;
@@ -851,7 +851,11 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
     let rip = pget(k.procs, p, F_REGS + R_RIP);
     if rip <= 0xFFFFFFFFFFFFFFF0 {
       pset(&mut k.procs, p, F_REGS + R_RIP, rip + 2);
-      pset(&mut k.procs, p, F_REGS + R_RAX, EINTR);
+      if sleep_left(&mut k, p, call) {
+        pset(&mut k.procs, p, F_REGS + R_RAX, EINTR);
+      } else {
+        pset(&mut k.procs, p, F_REGS + R_RAX, EFAULT);
+      }
     }
   }
   pset(&mut k.procs, p, F_RESTART, 0);

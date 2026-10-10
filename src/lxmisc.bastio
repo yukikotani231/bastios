@@ -743,12 +743,7 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
       }
     }
   } else if n == LX_PRCTL {
-    if a != PR_SET_NAME && a != PR_GET_NAME {
-      r = EINVAL;
-    } else if a == PR_GET_NAME {
-      xfer_zero(&mut k, 16);
-      r = lx_put_out(&mut k, pid, b, 16);
-    }
+    r = lx_prctl(&mut k, pid, a, b);
   } else if n == LX_MLOCK || n == LX_MUNLOCK {
     r = lock_range(&mut k, pid, a, b);
   } else if n == LX_GETRANDOM {

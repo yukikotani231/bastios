@@ -5,6 +5,7 @@
  * a socket's O_NONBLOCK, and errno corners of dup3, getrusage, getrandom,
  * timer_settime, the socket calls, mremap and munlock, and nested epoll. */
 #include <mqueue.h>
+#include <sys/prctl.h>
 #include "compat.h"
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -33,6 +34,8 @@ static void segv(int s) { (void)s; siglongjmp(back, 1); }
 
 /* Three connections in turn to a server that accepts, greets and closes
  * each: the closed ones must not be handed out by accept again. */
+static void nop(int s) { (void)s; }
+
 static int seven(void *a) { (void)a; return 7; }
 static char kid_stack[16384] __attribute__((aligned(16)));
 
@@ -193,5 +196,27 @@ int main(void) {
                syscall(SYS_mq_notify, q, &se) == -1 && errno == EINVAL &&
                mq_open("/ltp2q", O_RDWR | O_CREAT | O_EXCL, 0600, &at) == (mqd_t)-1 && errno == EEXIST;
            mq_close(q); ok && mq_unlink("/ltp2q") == 0 && mq_unlink("/ltp2q") == -1 && errno == ENOENT; }));
+    EXPECT("prctl: a name shows in /proc/self/comm; death signal and timer slack read back", ({ char b[16] = {0}, c[32] = {0}; int d = 0;
+           prctl(PR_SET_NAME, "abcdefghijklmnopq"); prctl(PR_GET_NAME, b);
+           int fd = open("/proc/self/comm", O_RDONLY); int n = fd >= 0 ? read(fd, c, sizeof c) : -1; if (fd >= 0) close(fd);
+           int ok = !strcmp(b, "abcdefghijklmno") && n == 16 && !memcmp(c, "abcdefghijklmno\n", 16) &&
+               prctl(PR_SET_PDEATHSIG, SIGUSR2) == 0 && prctl(PR_GET_PDEATHSIG, &d) == 0 && d == SIGUSR2 &&
+               prctl(PR_SET_PDEATHSIG, 0) == 0 && prctl(PR_SET_TIMERSLACK, 70000) == 0 && prctl(PR_GET_TIMERSLACK) == 70000;
+           prctl(PR_SET_TIMERSLACK, 0); prctl(PR_SET_NAME, "t_ltp2"); ok; }));
+    EXPECT("an interrupted nanosleep writes the time left; kill of a zombie succeeds", ({ signal(SIGALRM, nop);
+           struct timespec rq = {5, 0}, rm = {0, 0}; alarm(1); int r = nanosleep(&rq, &rm); int e = errno; signal(SIGALRM, SIG_DFL);
+           pid_t c = fork(); if (c == 0) _exit(0); usleep(200000);
+           int k = kill(c, SIGTERM); int st; waitpid(c, &st, 0);
+           r == -1 && e == EINTR && rm.tv_sec >= 2 && rm.tv_sec <= 4 && k == 0; }));
+    EXPECT("a CPU-time POSIX timer, and overruns of a timer set in the past", ({ timer_t t, u; struct sigevent se = {.sigev_notify = SIGEV_NONE};
+           struct itimerspec v = {{0, 0}, {0, 500000000}}, g; struct timespec now;
+           int ok = timer_create(CLOCK_PROCESS_CPUTIME_ID, &se, &t) == 0 && timer_settime(t, 0, &v, 0) == 0 &&
+               timer_gettime(t, &g) == 0 && g.it_value.tv_sec == 0 && g.it_value.tv_nsec > 0; timer_delete(t);
+           sigset_t m; sigemptyset(&m); sigaddset(&m, SIGUSR1); sigprocmask(SIG_BLOCK, &m, 0);
+           struct sigevent su = {.sigev_notify = SIGEV_SIGNAL, .sigev_signo = SIGUSR1}; timer_create(CLOCK_MONOTONIC, &su, &u);
+           clock_gettime(CLOCK_MONOTONIC, &now); struct itimerspec w = {{0, 1000000}, {now.tv_sec - 1, now.tv_nsec}};
+           timer_settime(u, TIMER_ABSTIME, &w, 0); usleep(50000); int sig = 0; sigwait(&m, &sig);
+           int o = timer_getoverrun(u); timer_delete(u); sigprocmask(SIG_UNBLOCK, &m, 0);
+           ok && sig == SIGUSR1 && o >= 1000; }));
     return done();
 }

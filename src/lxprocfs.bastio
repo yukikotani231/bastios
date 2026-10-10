@@ -52,6 +52,8 @@ const PF_STATUS: u64 = 6;
 const PF_CPUINFO: u64 = 8;            // these two with pid 0; 7 is PF_EXE
 const PF_FILESYSTEMS: u64 = 9;
 const PF_MAPS: u64 = 10;
+const PF_COMM: u64 = 11;
+const PF_SLACK: u64 = 12;
 const PSYS: u64 = 16 * NPROC;         // PROC_DEV + PSYS + SY_*: a /proc/sys file
 const SY_TAINTED: u64 = 1;
 const SY_PID_MAX: u64 = 2;
@@ -250,6 +252,20 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   if xfer_is(x, e + 1, n, "maps") {
     return base + PF_MAPS;
   }
+  if xfer_is(x, e + 1, n, "comm") {
+    return base + PF_COMM;
+  }
+  if xfer_is(x, e + 1, n, "timerslack_ns") {
+    return base + PF_SLACK;
+  }
+  // task/TID/comm, for a thread of the group (or the group itself).
+  if e + 6 < n && xfer_is(x, e + 1, e + 6, "task/") {
+    let te = comp_end(x, e + 6, n);
+    let t = proc_pid(procs, x, e + 6, te);
+    if t < NPROC && (t == p || tgid(procs, t) == p) && te < n && xfer_is(x, te + 1, n, "comm") {
+      return PROC_DEV + 16 * t + PF_COMM;
+    }
+  }
   return 0;
 }
 
@@ -428,6 +444,23 @@ fn put_2(o: &mut Bytes, at: u64, v: u64) -> u64
 {
   let a = put_c(&mut o, at, cast[u8](48 + v / 10 % 10));
   return put_c(&mut o, a, cast[u8](48 + v % 10));
+}
+
+/// Appends process p's name (see pr_comm).
+fn put_comm(k: &mut Kernel, p: u64, o: &mut Bytes, at: u64) -> u64
+  requires kok(k) && p < NPROC && blen(o) == PROC_OUT && at <= PROC_OUT
+  ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let n = pr_comm(&mut k, p);
+  let mut a = at;
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= 15 && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+  {
+    a = put_c(&mut o, a, bget(k.fs.xfer, i));
+    i = i + 1;
+  }
+  return a;
 }
 
 /// Appends the path of process p's program ("/bin/NAME", or the file it
@@ -632,7 +665,7 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     // itrealvalue starttime, then 30 more fields of zeros.
     let mut a = put_n(&mut o, 0, p);
     a = put_s(&mut o, a, " (");
-    a = put_prog(&mut k, p, &mut o, a, true);
+    a = put_comm(&mut k, p, &mut o, a);
     a = put_s(&mut o, a, ") ");
     a = put_c(&mut o, a, state_letter(s, pget(k.procs, p, F_ASLEEP) != 0));
     a = put_c(&mut o, a, 32);
@@ -665,7 +698,7 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
   }
   if what == PF_STATUS {
     let mut a = put_s(&mut o, 0, "Name:\t");
-    a = put_prog(&mut k, p, &mut o, a, true);
+    a = put_comm(&mut k, p, &mut o, a);
     a = put_s(&mut o, a, "\nState:\t");
     a = put_c(&mut o, a, state_letter(s, pget(k.procs, p, F_ASLEEP) != 0));
     a = put_s(&mut o, a, "\nTgid:\t");
@@ -690,6 +723,14 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     }
     // Memory is never paged out, so mlock locks nothing it counts.
     return put_s(&mut o, a, "\nVmLck:\t       0 kB\nThreads:\t1\n");
+  }
+  if what == PF_COMM {
+    let a = put_comm(&mut k, p, &mut o, 0);
+    return put_c(&mut o, a, 10);
+  }
+  if what == PF_SLACK {
+    let a = put_n(&mut o, 0, pr_slack(k, p));
+    return put_c(&mut o, a, 10);
   }
   if what == PF_MAPS {
     // Only the regions whose place is fixed: the stack (mapped on demand

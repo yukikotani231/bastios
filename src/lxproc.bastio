@@ -155,6 +155,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   pset(&mut k.procs, c, F_PARENT, pid);
   pset(&mut k.procs, c, F_REGS + R_RAX, 0);
   pset(&mut k.procs, c, F_TGID, 0);         // a fork of a thread is a new process
+  pr_fork(&mut k, pid, c);
   group_fork(&mut k.procs, pid, c);
   pset(&mut k.procs, c, F_CTID, 0);
   pset(&mut k.procs, c, F_FUTEX, 0);
@@ -239,6 +240,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
   lx_fd_close_all(&mut k, pid, true);
   sig_reset(&mut k.sigact, pid, true);
   pset(&mut k.procs, pid, F_ALTSIZE, 0);  // and the alternate signal stack
+  pr_exec(&mut k, pid);                   // the name becomes the program's
   ptimer_clear(&mut k, pid);              // execve deletes POSIX timers
   exec_ids(&mut k, pid, from_file, image); // set-user-ID and set-group-ID files
   match take_fpu(&mut k.fpus, pid) {

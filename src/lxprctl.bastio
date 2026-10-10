@@ -1,0 +1,240 @@
+// prctl: a thread's name, its parent-death signal and its timer slack.
+//
+// Each process row has PR_W words in k.sys from SYS_PR: the name (up to
+// 15 bytes, 8 to a word, 0 when it was never set: /proc then shows the
+// program's file name), the signal sent when its parent ends (0: none),
+// and the timer slack in ns with the slack PR_SET_TIMERSLACK 0 goes back
+// to (both 0 until set: 50 us). The slack is only reported: every sleep
+// here wakes on the next timer tick anyway.
+//
+// Not here: PR_SET_TSC (making rdtsc fault needs CR4.TSD switched per
+// process), dumpable, no_new_privs, seccomp, capabilities.
+
+import "linux.bastio";
+
+const PR_W: u64 = 5;
+const PRW_NAME: u64 = 0;              // two words
+const PRW_DEATH: u64 = 2;
+const PRW_SLACK: u64 = 3;
+const PRW_SLACK0: u64 = 4;
+const SLACK_NS: u64 = 50000;
+const PR_SET_PDEATHSIG: u64 = 1;
+const PR_GET_PDEATHSIG: u64 = 2;
+const PR_SET_TIMERSLACK: u64 = 29;
+const PR_GET_TIMERSLACK: u64 = 30;
+
+fn pr_get(k: &Kernel, p: u64, w: u64) -> u64
+  requires kok(k) && p < NPROC && w < PR_W
+{
+  return get(k.sys, SYS_PR + PR_W * p + w);
+}
+
+fn pr_set(k: &mut Kernel, p: u64, w: u64, v: u64)
+  requires kok(k) && p < NPROC && w < PR_W
+  ensures kok(k)
+{
+  k.sys = set(k.sys, SYS_PR + PR_W * p + w, v);
+}
+
+/// Process p's timer slack in ns.
+fn pr_slack(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+{
+  let s = pr_get(k, p, PRW_SLACK);
+  if s == 0 {
+    return SLACK_NS;
+  }
+  return s;
+}
+
+/// Byte i (below 16) of process p's name; 0 past its end.
+fn pr_name_byte(k: &Kernel, p: u64, i: u64) -> u64
+  requires kok(k) && p < NPROC && i < 16
+  ensures result < 256
+{
+  let mut w = pr_get(k, p, PRW_NAME + i / 8);
+  let mut s = 0;
+  while s < i % 8
+    invariant s <= i % 8
+  {
+    w = w / 256;
+    s = s + 1;
+  }
+  return w % 256;
+}
+
+/// Has process p been given a name?
+fn pr_named(k: &Kernel, p: u64) -> bool
+  requires kok(k) && p < NPROC
+{
+  return pr_get(k, p, PRW_NAME) != 0;
+}
+
+/// A new process or thread c of p: the name and the slack carry over, the
+/// slack it goes back to becomes the one it starts with, and the
+/// parent-death signal does not.
+fn pr_fork(k: &mut Kernel, p: u64, c: u64)
+  requires kok(k) && p < NPROC && c < NPROC
+  ensures kok(k)
+{
+  pr_set(&mut k, c, PRW_NAME, pr_get(k, p, PRW_NAME));
+  pr_set(&mut k, c, PRW_NAME + 1, pr_get(k, p, PRW_NAME + 1));
+  pr_set(&mut k, c, PRW_DEATH, 0);
+  pr_set(&mut k, c, PRW_SLACK, pr_get(k, p, PRW_SLACK));
+  pr_set(&mut k, c, PRW_SLACK0, pr_get(k, p, PRW_SLACK));
+}
+
+/// execve: the name goes back to the program's.
+fn pr_exec(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  pr_set(&mut k, p, PRW_NAME, 0);
+  pr_set(&mut k, p, PRW_NAME + 1, 0);
+}
+
+/// Process p is ending: each child that asked for a parent-death signal
+/// gets it, and p's row is cleared for the next process in its slot.
+fn pr_exit(k: &mut Kernel, p: u64)
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let mut c = 1;
+  while c < NPROC
+    invariant 1 <= c && c <= NPROC && kok(k)
+  {
+    let s = pr_get(k, c, PRW_DEATH);
+    let st = state(k.procs, c);
+    if c != p && s != 0 && s <= NSIG && pget(k.procs, c, F_PARENT) == p && st != FREE && st != ZOMBIE {
+      post_from(&mut k, c, s, p);
+    }
+    c = c + 1;
+  }
+  pr_clear(&mut k, p);
+}
+
+/// Clears process p's row for the next process in its slot.
+fn pr_clear(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let mut w = 0;
+  while w < PR_W
+    invariant w <= PR_W && kok(k)
+  {
+    pr_set(&mut k, p, w, 0);
+    w = w + 1;
+  }
+}
+
+/// prctl(op, a, ...) for process pid: the result, or -EINVAL for an
+/// operation not handled here.
+fn lx_prctl(k: &mut Kernel, pid: u64, op: u64, a: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if op == PR_SET_NAME {
+    // Up to 15 bytes of the string at a, read a byte at a time so that a
+    // short name at the end of a page is fine.
+    let mut nb = balloc(16);
+    let mut i = 0;
+    let mut more = true;
+    while i < 15 && more
+      invariant i <= 15 && blen(nb) == 16 && kok(k)
+    {
+      if a > 0xFFFFFFFFFFFFFF00 || copy_from_user(&mut k.spaces, pid, a + i, &mut k.fs.xfer, 1) != 1 {
+        bfree(nb);
+        return EFAULT;
+      }
+      let b = bget(k.fs.xfer, 0);
+      if b == 0 {
+        more = false;
+      } else {
+        bset(&mut nb, i, b);
+        i = i + 1;
+      }
+    }
+    pr_set(&mut k, pid, PRW_NAME, pack8(nb, 0));
+    pr_set(&mut k, pid, PRW_NAME + 1, pack8(nb, 8));
+    bfree(nb);
+    return 0;
+  }
+  if op == PR_GET_NAME {
+    pr_comm(&mut k, pid);
+    return lx_put_out(&mut k, pid, a, 16);
+  }
+  if op == PR_SET_PDEATHSIG {
+    if a > NSIG {
+      return EINVAL;
+    }
+    pr_set(&mut k, pid, PRW_DEATH, a);
+    return 0;
+  }
+  if op == PR_GET_PDEATHSIG {
+    if !put_user_u32(&mut k, pid, a, pr_get(k, pid, PRW_DEATH)) {
+      return EFAULT;
+    }
+    return 0;
+  }
+  if op == PR_SET_TIMERSLACK {
+    if a == 0 {
+      pr_set(&mut k, pid, PRW_SLACK, pr_get(k, pid, PRW_SLACK0));
+    } else {
+      pr_set(&mut k, pid, PRW_SLACK, a);
+    }
+    return 0;
+  }
+  if op == PR_GET_TIMERSLACK {
+    return pr_slack(k, pid);
+  }
+  return EINVAL;
+}
+
+/// Bytes at..at+8 of b as a little-endian word.
+fn pack8(b: &Bytes, at: u64) -> u64
+  requires at + 8 <= blen(b)
+{
+  let mut w = 0;
+  let mut i = 8;
+  while i > 0
+    invariant i <= 8
+  {
+    i = i - 1;
+    w = smaller(w, 0xFFFFFFFFFFFFFF) * 256 + cast[u64](bget(b, at + i));
+  }
+  return w;
+}
+
+/// Process p's name into the first 16 transfer bytes, NUL-padded: the one
+/// PR_SET_NAME gave, or the first 15 bytes of its program's file name.
+/// Returns its length.
+fn pr_comm(k: &mut Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures kok(k) && result <= 15
+{
+  let mut o = balloc(PROC_OUT);
+  let mut n = 0;
+  if pr_named(k, p) {
+    while n < 15 && pr_name_byte(k, p, n) != 0
+      invariant n <= 15 && blen(o) == PROC_OUT
+    {
+      bset(&mut o, n, cast[u8](pr_name_byte(k, p, n)));
+      n = n + 1;
+    }
+  } else {
+    n = smaller(put_prog(&mut k, p, &mut o, 0, true), 15);
+  }
+  let mut i = 0;
+  while i < 16
+    invariant i <= 16 && n <= 15 && blen(o) == PROC_OUT && kok(k)
+  {
+    if i < n {
+      bset(&mut k.fs.xfer, i, bget(o, i));
+    } else {
+      bset(&mut k.fs.xfer, i, 0);
+    }
+    i = i + 1;
+  }
+  bfree(o);
+  return n;
+}
