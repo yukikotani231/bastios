@@ -61,40 +61,68 @@ fn write_from(con: &Serial, root: &mut PageTable, off: u64, n: u64) -> u64
   requires pt_level(root) == 4 && off + n <= USER_SIZE
   ensures pt_level(root) == 4
 {
-  let mut k = 0;
-  let mut ok = true;
-  while ok && k < n
-    invariant k <= n && pt_level(root) == 4
-  {
-    let c = user_byte(&mut root, off + k);
-    if c > 255 {
-      ok = false;
-    } else {
-      serial_write(con, c);
-      k = k + 1;
-    }
+  // The window is one level-1 table: walk down to it once, not per byte.
+  if !pt_has(root, 1) {
+    return 0;
   }
+  let mut k = 0;
+  let mut l3 = pt_take(&mut root, 1);
+  if pt_has(l3, 0) {
+    let mut l2 = pt_take(&mut l3, 0);
+    if pt_has(l2, 0) {
+      let mut l1 = pt_take(&mut l2, 0);
+      k = write_l1(con, &mut l1, off, n);
+      pt_put(&mut l2, 0, l1);
+    }
+    pt_put(&mut l3, 0, l2);
+  }
+  pt_put(&mut root, 1, l3);
   return k;
 }
 
-/// Do the n bytes at offset off of the user window spell `name`?
-fn user_matches(root: &mut PageTable, off: u64, n: u64, name: Str) -> bool
-  requires pt_level(root) == 4 && off + n <= USER_SIZE
-  ensures pt_level(root) == 4
+/// How many of the `left` bytes wanted from window offset `a` lie on a's
+/// page.
+fn chunk(a: u64, left: u64) -> u64
+  ensures result <= left && a % 4096 + result <= 4096
+  ensures left > 0 ==> result > 0
 {
-  if n != slen(name) {
-    return false;
+  let room = 4096 - a % 4096;
+  if room < left {
+    return room;
   }
+  return left;
+}
+
+/// write_from below the level-1 table: takes each page out once and
+/// writes every wanted byte on it.
+fn write_l1(con: &Serial, l1: &mut PageTable, off: u64, n: u64) -> u64
+  requires pt_level(l1) == 1 && off + n <= USER_SIZE
+  ensures pt_level(l1) == 1
+{
   let mut k = 0;
-  while k < n
-    invariant k <= n && pt_level(root) == 4
+  let mut ok = true;
+  while ok && k < n
+    invariant k <= n && pt_level(l1) == 1
   {
-    if user_byte(&mut root, off + k) != sget(name, k) {
-      return false;
+    let a = off + k;
+    let p = a / 4096;
+    if pt_has(l1, p) {
+      let m = chunk(a, n - k);
+      let f = pt_take_frame(&mut l1, p);
+      let mut j = 0;
+      while j < m
+        invariant j <= m
+      {
+        serial_write(con, frame_read8(f, a % 4096 + j));
+        j = j + 1;
+      }
+      pt_put_frame(&mut l1, p, f, true);
+      k = k + m;
+    } else {
+      ok = false;
     }
-    k = k + 1;
   }
-  return true;
+  return k;
 }
 
 /// The program whose name is the n bytes at user address va, or NPROGS.
@@ -124,17 +152,67 @@ fn find_prog(root: &mut PageTable, off: u64, n: u64) -> u64
   ensures pt_level(root) == 4
   ensures result <= NPROGS
 {
-  let mut found = NPROGS;
-  let mut i = 0;
-  while i < NPROGS
-    invariant i <= NPROGS && found <= NPROGS && pt_level(root) == 4
-  {
-    if found == NPROGS && user_matches(&mut root, off, n, prog_name(i)) {
-      found = i;
-    }
-    i = i + 1;
+  if !pt_has(root, 1) {
+    return NPROGS;
   }
+  let mut found = NPROGS;
+  let mut l3 = pt_take(&mut root, 1);
+  if pt_has(l3, 0) {
+    let mut l2 = pt_take(&mut l3, 0);
+    if pt_has(l2, 0) {
+      let mut l1 = pt_take(&mut l2, 0);
+      let mut i = 0;
+      while i < NPROGS
+        invariant i <= NPROGS && found <= NPROGS && pt_level(l1) == 1
+      {
+        if found == NPROGS && l1_matches(&mut l1, off, n, prog_name(i)) {
+          found = i;
+        }
+        i = i + 1;
+      }
+      pt_put(&mut l2, 0, l1);
+    }
+    pt_put(&mut l3, 0, l2);
+  }
+  pt_put(&mut root, 1, l3);
   return found;
+}
+
+/// Do the n bytes at offset off of the window `l1` maps spell `name`?
+fn l1_matches(l1: &mut PageTable, off: u64, n: u64, name: Str) -> bool
+  requires pt_level(l1) == 1 && off + n <= USER_SIZE
+  ensures pt_level(l1) == 1
+{
+  if n != slen(name) {
+    return false;
+  }
+  let mut k = 0;
+  let mut same = true;
+  while same && k < n
+    invariant k <= n && pt_level(l1) == 1
+  {
+    let a = off + k;
+    let p = a / 4096;
+    if pt_has(l1, p) {
+      let m = chunk(a, n - k);
+      let f = pt_take_frame(&mut l1, p);
+      let mut j = 0;
+      while same && j < m
+        invariant j <= m
+      {
+        if frame_read8(f, a % 4096 + j) != sget(name, k + j) {
+          same = false;
+        } else {
+          j = j + 1;
+        }
+      }
+      pt_put_frame(&mut l1, p, f, true);
+      k = k + m;
+    } else {
+      same = false;
+    }
+  }
+  return same;
 }
 
 // ---------------------------------------------------------------- dispatch

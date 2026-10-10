@@ -23,7 +23,8 @@ build build/user:
 #    that the kernel embeds with include_bytes.
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench
-UBINS   := $(UPROGS:%=build/user/%.bin) build/user/fault.bin
+UASM    := fault straddle
+UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin)
 
 build/user/%.c: user/%.bastio $(BASTIOC) | build/user
 	$(BASTIOC) --target user -o $@ $<
@@ -34,7 +35,7 @@ build/user/%.o: build/user/%.c
 build/user/start.o: user/start.S | build/user
 	$(CC) -c -o $@ $<
 
-build/user/fault.o: user/fault.S | build/user
+$(UASM:%=build/user/%.o): build/user/%.o: user/%.S | build/user
 	$(CC) -c -o $@ $<
 
 build/user/libc.o: boot/libc.c | build/user
@@ -45,8 +46,8 @@ ULDFLAGS := -nostdlib -static -no-pie -z max-page-size=0x1000 -T user/user.ld -W
 build/user/%.elf: build/user/start.o build/user/%.o build/user/libc.o user/user.ld
 	$(CC) $(ULDFLAGS) -o $@ build/user/start.o build/user/$*.o build/user/libc.o
 
-build/user/fault.elf: build/user/fault.o user/user.ld
-	$(CC) $(ULDFLAGS) -o $@ build/user/fault.o
+$(UASM:%=build/user/%.elf): build/user/%.elf: build/user/%.o user/user.ld
+	$(CC) $(ULDFLAGS) -o $@ $<
 
 build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
