@@ -368,6 +368,59 @@ fn cmd_dir(con: &Serial, line: &Buf, n: u64, make: bool)
   bfree(name);
 }
 
+/// `mv OLD NEW`: rename a file or directory.
+fn cmd_mv(con: &Serial, line: &Buf, n: u64)
+  requires n < len(line) && n >= 2
+  requires forall j: u64 :: 1 <= j && j < len(line) ==> get(line, j) <= 255
+{
+  let a = arg_start(line, n, 2);
+  if a == 0 {
+    puts(con, "usage: mv OLD NEW\r\n");
+    return;
+  }
+  let args = line_bytes(line, a, n + 1);
+  let l = blen(args);
+  let mut sp = 0;
+  while sp < l && bget(args, sp) != 32
+    invariant sp <= l
+  {
+    sp = sp + 1;
+  }
+  let mut t = sp;
+  while t < l && bget(args, t) == 32
+    invariant sp <= t && t <= l
+  {
+    t = t + 1;
+  }
+  if sp == 0 || t >= l {
+    puts(con, "usage: mv OLD NEW\r\n");
+    bfree(args);
+    return;
+  }
+  let mut names = balloc(sp + (l - t));
+  let mut j = 0;
+  while j < sp
+    invariant j <= sp && sp <= l && blen(names) == sp + (l - t)
+  {
+    bset(&mut names, j, bget(args, j));
+    j = j + 1;
+  }
+  j = 0;
+  while j < l - t
+    invariant j <= l - t && t <= l && blen(names) == sp + (l - t)
+  {
+    bset(&mut names, sp + j, bget(args, t + j));
+    j = j + 1;
+  }
+  if f_rename(names, sp, l - t) == NOT_OK {
+    puts(con, "cannot move ");
+    put_bytes(con, names, sp);
+    puts(con, "\r\n");
+  }
+  bfree(names);
+  bfree(args);
+}
+
 fn cmd_cat(con: &Serial, line: &Buf, n: u64)
   requires n < len(line) && n >= 3
   requires forall j: u64 :: 1 <= j && j < len(line) ==> get(line, j) <= 255
@@ -496,6 +549,7 @@ fn cmd_help(con: &Serial) {
   puts(con, "  mkdir DIR        make a directory (rmdir: remove an empty one)\r\n");
   puts(con, "  cat FILE         print FILE\r\n");
   puts(con, "  rm FILE          remove FILE\r\n");
+  puts(con, "  mv OLD NEW       rename a file or directory\r\n");
   puts(con, "  add A B          add two numbers (overflow is checked)\r\n");
   puts(con, "  mul A B          multiply two numbers (overflow is checked)\r\n");
   puts(con, "  ps               list processes\r\n");
@@ -1143,6 +1197,8 @@ fn main(con: &mut Serial) -> u64 {
       cmd_dir(con, line, n, true);
     } else if is_cmd(line, n, "rmdir") {
       cmd_dir(con, line, n, false);
+    } else if is_cmd(line, n, "mv") {
+      cmd_mv(con, line, n);
     } else if is_cmd(line, n, "cat") {
       cmd_cat(con, line, n);
     } else if is_cmd(line, n, "rm") {

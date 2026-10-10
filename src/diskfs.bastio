@@ -607,6 +607,80 @@ fn disk_create(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool) -> u6
   return DSLOTS;
 }
 
+/// Moves entry i to the path name[from..from + n]: its directory must
+/// exist and not be i or inside i, its last component be 1 to DNAME_MAX
+/// bytes, and the name be free. One sector write, so a power cut leaves
+/// the old name or the new one.
+fn disk_move(d: &mut DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS && from + n <= blen(name)
+  ensures disk_ok(d)
+{
+  if !dent_used(d, i) {
+    return false;
+  }
+  let end = from + n;
+  let mut k = end;
+  while k > from && bget(name, k - 1) != 47
+    invariant from <= k && k <= end
+  {
+    k = k - 1;
+  }
+  let mut p = DTOP;
+  if k > from {
+    p = disk_find(d, name, from, k - 1 - from);
+    if p >= DSLOTS || !dent_dir(d, p) {
+      return false;
+    }
+  }
+  let l = end - k;
+  if l == 0 || l > DNAME_MAX || disk_child(d, p, name, k, l) < DSLOTS {
+    return false;
+  }
+  // The new directory, and each one above it, must not be i.
+  let mut c = p;
+  let mut steps = 0;
+  while c < DSLOTS && steps <= DSLOTS
+    invariant steps <= DSLOTS + 1
+  {
+    if c == i {
+      return false;
+    }
+    c = dent_parent(d, c);
+    steps = steps + 1;
+  }
+  let mut save = balloc(DENT);
+  let mut j = 0;
+  while j < DENT
+    invariant j <= DENT && blen(save) == DENT && disk_ok(d)
+  {
+    bset(&mut save, j, bget(d.dir, i * DENT + j));
+    j = j + 1;
+  }
+  dent_set(&mut d, i, E_PARENT, p);
+  bset(&mut d.dir, i * DENT + E_NLEN, cast[u8](l));
+  zero(&mut d.dir, i * DENT + E_NAME, i * DENT + DENT);
+  j = 0;
+  while j < l
+    invariant j <= l && disk_ok(d)
+  {
+    bset(&mut d.dir, i * DENT + E_NAME + j, bget(name, k + j));
+    j = j + 1;
+  }
+  let ok = ent_flush(&mut d, i);
+  if !ok {
+    // As after a failed write: memory keeps the old name.
+    j = 0;
+    while j < DENT
+      invariant j <= DENT && blen(save) == DENT && disk_ok(d)
+    {
+      bset(&mut d.dir, i * DENT + j, bget(save, j));
+      j = j + 1;
+    }
+  }
+  bfree(save);
+  return ok;
+}
+
 /// Removes entry i (a file, or an empty directory: the caller checks).
 fn disk_remove(d: &mut DiskFs, i: u64) -> bool
   requires disk_ok(d) && i < DSLOTS

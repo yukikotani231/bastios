@@ -19,6 +19,9 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 - Paths can be up to 255 bytes; they were capped at 28.
 - A write to a file on the disk lands whole or not at all across a power
   cut, even one that overwrites the middle of a file across two blocks.
+- Renaming files and directories: `vfs_rename`, system call 22, and the
+  shell's `mv`. On the disk a rename is one sector write, so a power cut
+  leaves the old name or the new one.
 - A console on the screen and a PS/2 keyboard when booted from the ISO:
   text drawn on the framebuffer GRUB sets up under BIOS or UEFI, keys read
   from the i8042, alongside the serial console.
