@@ -18,6 +18,11 @@ const EEXIST: u64 = 18446744073709551599;     // 2^64 - 17
 const EISDIR: u64 = 18446744073709551595;     // 2^64 - 21
 const ENOTEMPTY: u64 = 18446744073709551577;  // 2^64 - 39
 const EBUSY: u64 = 18446744073709551600;      // 2^64 - 16
+const EXDEV: u64 = 18446744073709551598;      // 2^64 - 18
+const LX_RENAME: u64 = 82;
+const LX_RENAMEAT: u64 = 264;
+const LX_RENAMEAT2: u64 = 316;
+const RENAME_NOREPLACE: u64 = 1;
 const DT_DIR: u64 = 4;
 const DT_REG: u64 = 8;
 const DENT_HDR: u64 = 19;             // d_ino, d_off, d_reclen, d_type
@@ -338,11 +343,135 @@ fn lx_unlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
   return 0;
 }
 
-fn is_dir_call(n: u64) -> bool {
-  return n == LX_CHDIR || n == LX_FCHDIR || n == LX_MKDIR || n == LX_RMDIR || n == LX_MKDIRAT;
+/// Copies the first n bytes of the transfer buffer to t at `at`.
+fn xfer_save(k: &Kernel, t: &mut Bytes, at: u64, n: u64)
+  requires kok(k) && n <= FNAME_MAX && blen(t) == 2 * FNAME_MAX && at <= FNAME_MAX
+  ensures blen(t) == 2 * FNAME_MAX
+{
+  let mut i = 0;
+  while i < n
+    invariant i <= n && blen(t) == 2 * FNAME_MAX
+  {
+    bset(&mut t, at + i, bget(k.fs.xfer, i));
+    i = i + 1;
+  }
 }
 
-/// chdir, fchdir, mkdir, mkdirat and rmdir.
+/// Copies n bytes of t from `at` to the start of the transfer buffer.
+fn xfer_load(k: &mut Kernel, t: &Bytes, at: u64, n: u64)
+  requires kok(k) && n <= 2 * FNAME_MAX && blen(t) == 2 * FNAME_MAX && at + n <= 2 * FNAME_MAX
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < n
+    invariant i <= n && kok(k)
+  {
+    bset(&mut k.fs.xfer, i, bget(t, at + i));
+    i = i + 1;
+  }
+}
+
+/// Makes room for a rename to the name in the first m bytes of the
+/// transfer buffer: removes a file there, or an empty directory when a
+/// directory is moving (src_dir). 0, or the error.
+fn rename_clear(k: &mut Kernel, m: u64, src_dir: bool, noreplace: bool) -> u64
+  requires kok(k) && m <= FNAME_MAX
+  ensures kok(k)
+{
+  let d = dir_at(&mut k, m);
+  let is_file = d == NO_FILE && vfs_lookup(&mut k.fs, m) != NO_FILE;
+  if d == NO_FILE && !is_file {
+    return 0;                               // nothing there
+  }
+  if noreplace {
+    return EEXIST;
+  }
+  if is_file {
+    if src_dir {
+      return ENOTDIR;
+    }
+    if !vfs_unlink(&mut k.fs, &mut k.mem, m) {
+      return ENOENT;
+    }
+    return 0;
+  }
+  if !src_dir {
+    return EISDIR;
+  }
+  if d < DIR_VFS || d - DIR_VFS == VDIR_ROOT || d - DIR_VFS == VDIR_DISK {
+    return EBUSY;
+  }
+  if !vfs_rmdir(&mut k.fs, &mut k.mem, m) {
+    return ENOTEMPTY;
+  }
+  return 0;
+}
+
+/// rename, renameat and renameat2 (RENAME_NOREPLACE; other flags are
+/// refused). A file or empty directory at the new name is replaced, by
+/// removing it first: not atomically, as Linux does it.
+fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags & !RENAME_NOREPLACE != 0 {
+    return EINVAL;
+  }
+  let n = lx_path_at(&mut k, pid, odir, opath);
+  if n == NO_RESULT {
+    return ENOENT;
+  }
+  let d = dir_at(&mut k, n);
+  if d == NO_FILE && vfs_lookup(&mut k.fs, n) == NO_FILE {
+    return ENOENT;
+  }
+  if d != NO_FILE && (d < DIR_VFS || d - DIR_VFS == VDIR_ROOT || d - DIR_VFS == VDIR_DISK) {
+    return EBUSY;
+  }
+  let src_disk = on_disk(k.fs, n);
+  let mut t = balloc(2 * FNAME_MAX);
+  xfer_save(k, &mut t, 0, n);
+  let m = lx_path_at(&mut k, pid, ndir, npath);
+  if m == NO_RESULT {
+    bfree(t);
+    return ENOENT;
+  }
+  xfer_save(k, &mut t, n, m);
+  let mut same = n == m;
+  let mut i = 0;
+  while i < m && same
+    invariant i <= m && m <= FNAME_MAX && n <= FNAME_MAX && blen(t) == 2 * FNAME_MAX
+  {
+    same = bget(t, i) == bget(t, n + i);
+    i = i + 1;
+  }
+  if same {
+    bfree(t);
+    return 0;                               // a name renamed to itself
+  }
+  if on_disk(k.fs, m) != src_disk {
+    bfree(t);
+    return EXDEV;
+  }
+  let r = rename_clear(&mut k, m, d != NO_FILE, flags & RENAME_NOREPLACE != 0);
+  if r != 0 {
+    bfree(t);
+    return r;
+  }
+  xfer_load(&mut k, t, 0, n + m);
+  bfree(t);
+  if !vfs_rename(&mut k.fs, n, m) {
+    return ENOENT;                          // no such directory, or a directory into itself
+  }
+  return 0;
+}
+
+fn is_dir_call(n: u64) -> bool {
+  return n == LX_CHDIR || n == LX_FCHDIR || n == LX_MKDIR || n == LX_RMDIR || n == LX_MKDIRAT
+    || n == LX_RENAME || n == LX_RENAMEAT || n == LX_RENAMEAT2;
+}
+
+/// chdir, fchdir, mkdir, mkdirat, rmdir and the renames.
 fn lx_dir_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -358,6 +487,16 @@ fn lx_dir_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   }
   if n == LX_MKDIRAT {
     return lx_mkdir(&mut k, pid, a, b);
+  }
+  if n == LX_RENAME {
+    return lx_rename(&mut k, pid, AT_FDCWD, a, AT_FDCWD, b, 0);
+  }
+  if n == LX_RENAMEAT || n == LX_RENAMEAT2 {
+    let mut flags = 0;
+    if n == LX_RENAMEAT2 {
+      flags = pget(k.procs, pid, F_REGS + R_R8);
+    }
+    return lx_rename(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), flags);
   }
   return lx_rmdir(&mut k, pid, AT_FDCWD, a);
 }
