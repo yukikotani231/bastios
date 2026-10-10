@@ -14,6 +14,10 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Added
 
+- The threads of a Linux process run on several processors at once. They
+  used to take turns on one: four threads of pure computation now finish
+  about twice as fast on four processors under QEMU.
+
 - `sendfile`, `copy_file_range`, `preadv`, `pwritev`, `statx`,
   `fallocate` (growing), `fadvise64`, `memfd_create`, `getcpu`, and
   `FIONREAD` on a pipe. `flock` and `fcntl` record locks are accepted but

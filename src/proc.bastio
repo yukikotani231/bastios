@@ -40,6 +40,9 @@ const F_FUTEX: u64 = 34;
 // session, 0 meaning the process's own pid.
 const F_PGID: u64 = 35;
 const F_SID: u64 = 36;
+// Nonzero while a Linux thread waits for the other threads of its group to
+// leave the processors, to change their shared page tables (src/lxmem.bastio).
+const F_QUIET: u64 = 37;
 const SIG_DEATH: u64 = 256;          // F_CODE of a process a signal ended: 256 + the signal
 
 // Saved register numbers.
@@ -63,13 +66,14 @@ const WAITING: u64 = 3;
 const ZOMBIE: u64 = 4;
 const LXREADING: u64 = 5;            // blocked in a Linux read of the console
 const LXWAITING: u64 = 6;            // blocked in a Linux wait4 for any child
-const RUNNING: u64 = 7;              // on a processor: its space and FPU page are out
+const RUNNING: u64 = 7;              // on a processor (with a lease on its space): its FPU page is out
 const KILLED: u64 = 8;               // RUNNING, and killed: ends when it comes back
 const NETWAIT: u64 = 9;              // waiting for the network (a ping's reply)
 const LXVFORK: u64 = 10;             // lent its address space to child F_WAIT (clone with CLONE_VM | CLONE_VFORK)
 const CONWAIT: u64 = 11;             // writing to the console, whose ring is full
 const FUTEXWAIT: u64 = 12;           // in a Linux futex wait with no timeout
 const DISKWAIT: u64 = 13;            // waiting for the disk: F_WAIT says for what (disk_wake)
+const EXITING: u64 = 14;             // RUNNING, a thread whose leader is in execve: freed when it comes back
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -987,7 +991,7 @@ fn put_state(con: &mut Con, s: u64)
     puts(&mut con, "reading");
   } else if s == WAITING || s == LXWAITING {
     puts(&mut con, "waiting");
-  } else if s == RUNNING || s == KILLED {
+  } else if s == RUNNING || s == KILLED || s == EXITING {
     puts(&mut con, "running");
   } else if s == FUTEXWAIT {
     puts(&mut con, "futex  ");
