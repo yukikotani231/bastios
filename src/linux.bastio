@@ -1706,8 +1706,10 @@ fn stack_fault(k: &mut Kernel, p: u64) -> bool
   return stack_reach(&mut k.mem, &mut k.spaces, p, va);
 }
 
-/// brk: grows the heap (page by page) up to `want`; never shrinks it, and
-/// never into mmap's pages. Returns the break, as Linux does on failure too.
+/// brk: moves the heap's end to `want`, mapping the pages it grows into
+/// and unmapping the pages it gives back; never below where it started,
+/// and never into mmap's pages. Returns the break, as Linux does on
+/// failure too.
 fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -1717,10 +1719,21 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
   if cur > USER_SIZE || low > STACK_FIRST * 4096 {
     return USER_BASE;                       // not a Linux process
   }
-  if want <= USER_BASE + cur || want > USER_BASE + low {
+  let start = smaller(pget(k.procs, pid, F_BRK0), cur);
+  if want < USER_BASE + start || want > USER_BASE + low || want == USER_BASE + cur {
     return USER_BASE + cur;
   }
   let new = want - USER_BASE;
+  if new < cur {
+    // Shrinking: the pages wholly above the new break go.
+    let from = (new + 4095) / 4096;
+    let to = (cur + 4095) / 4096;
+    if to <= WPAGES {
+      win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, from, to, 0);
+    }
+    pset(&mut k.procs, pid, F_BRK, new);
+    return want;
+  }
   if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, (cur + 4095) / 4096, (new + 4095) / 4096, false) {
     return USER_BASE + cur;
   }

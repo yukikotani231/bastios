@@ -54,6 +54,7 @@ const PF_FILESYSTEMS: u64 = 9;
 const PF_MAPS: u64 = 10;
 const PF_COMM: u64 = 11;
 const PF_SLACK: u64 = 12;
+const PF_LOADAVG: u64 = 13;           // with pid 0
 const PSYS: u64 = 16 * NPROC;         // PROC_DEV + PSYS + SY_*: a /proc/sys file
 const SY_TAINTED: u64 = 1;
 const SY_PID_MAX: u64 = 2;
@@ -187,6 +188,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
     }
     if xfer_is(x, 5, n, "uptime") {
       return PROC_DEV + PF_UPTIME;
+    }
+    if xfer_is(x, 5, n, "loadavg") {
+      return PROC_DEV + PF_LOADAVG;
     }
     if xfer_is(x, 5, n, "cpuinfo") {
       return PROC_DEV + PF_CPUINFO;
@@ -647,6 +651,34 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
   }
   if what == PF_CMDLINE && p == 0 {
     return put_s(&mut o, 0, "BOOT_IMAGE=/boot/bastios.elf\n");
+  }
+  if what == PF_LOADAVG && p == 0 {
+    // No load average is kept (sysinfo's loads are 0 too): then the
+    // runnable and existing processes, and the newest process id.
+    let mut live = 0;
+    let mut run = 0;
+    let mut last = 0;
+    let mut q = 1;
+    while q < NPROC
+      invariant 1 <= q && q <= NPROC && live < q && run <= live && last < q && kok(k)
+    {
+      let st = state(k.procs, q);
+      if st != FREE && st != ZOMBIE {
+        live = live + 1;
+        last = q;
+        if st == READY || st == RUNNING {
+          run = run + 1;
+        }
+      }
+      q = q + 1;
+    }
+    let mut a = put_s(&mut o, 0, "0.00 0.00 0.00 ");
+    a = put_n(&mut o, a, run);
+    a = put_c(&mut o, a, 47);
+    a = put_n(&mut o, a, live);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, last);
+    return put_c(&mut o, a, 10);
   }
   if what == PF_UPTIME {
     let mut a = put_n(&mut o, 0, k.ns / NS_PER_S);

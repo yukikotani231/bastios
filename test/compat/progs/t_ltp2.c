@@ -218,5 +218,24 @@ int main(void) {
            timer_settime(u, TIMER_ABSTIME, &w, 0); usleep(50000); int sig = 0; sigwait(&m, &sig);
            int o = timer_getoverrun(u); timer_delete(u); sigprocmask(SIG_UNBLOCK, &m, 0);
            ok && sig == SIGUSR1 && o >= 1000; }));
+    EXPECT("brk shrinks and grows back, never below its start", ({ char *b0 = (char *)syscall(SYS_brk, 0);
+           char *up = (char *)syscall(SYS_brk, b0 + 8191); b0[8000] = 1;
+           char *down = (char *)syscall(SYS_brk, b0 + 10); char *low = (char *)syscall(SYS_brk, 4096);
+           char *back = (char *)syscall(SYS_brk, b0 + 8191); int z = b0[8000];
+           syscall(SYS_brk, b0); up == b0 + 8191 && down == b0 + 10 && low == b0 + 10 && back == b0 + 8191 && z == 0; }));
+    EXPECT("sendmmsg and recvmmsg over UDP loopback; accept on UDP is EOPNOTSUPP", ({
+           int r = socket(AF_INET, SOCK_DGRAM, 0), w = socket(AF_INET, SOCK_DGRAM, 0);
+           struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)}; socklen_t l = sizeof a;
+           bind(r, (struct sockaddr *)&a, sizeof a); getsockname(r, (struct sockaddr *)&a, &l); connect(w, (struct sockaddr *)&a, sizeof a);
+           char m1[] = "one", m2[] = "three", b1[8] = {0}, b2[8] = {0};
+           struct iovec s1 = {m1, 3}, s2 = {m2, 5}, d1 = {b1, 8}, d2 = {b2, 8};
+           struct mmsghdr sm[2] = {{.msg_hdr = {.msg_iov = &s1, .msg_iovlen = 1}}, {.msg_hdr = {.msg_iov = &s2, .msg_iovlen = 1}}};
+           struct mmsghdr rm[2] = {{.msg_hdr = {.msg_iov = &d1, .msg_iovlen = 1}}, {.msg_hdr = {.msg_iov = &d2, .msg_iovlen = 1}}};
+           int ns = sendmmsg(w, sm, 2, 0); usleep(20000); int nr = recvmmsg(r, rm, 2, MSG_DONTWAIT, 0);
+           int e = accept(r, 0, 0) == -1 && errno == EOPNOTSUPP; close(r); close(w);
+           ns == 2 && sm[1].msg_len == 5 && nr == 2 && rm[0].msg_len == 3 && !strcmp(b1, "one") && !strcmp(b2, "three") && e; }));
+    EXPECT("/proc/loadavg reads as five fields", ({ char b[128] = {0}; int fd = open("/proc/loadavg", O_RDONLY);
+           int n = fd >= 0 ? read(fd, b, sizeof b - 1) : -1; if (fd >= 0) close(fd);
+           float x, y, z; int run, all, last; n > 0 && sscanf(b, "%f %f %f %d/%d %d", &x, &y, &z, &run, &all, &last) == 6 && all >= 1; }));
     return done();
 }

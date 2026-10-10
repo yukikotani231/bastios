@@ -230,6 +230,7 @@ t_lock: read locks are shared
 t_lock: the owner relocks freely
 t_lock: unlocking a middle part splits it
 t_ltp2: /proc/cmdline
+t_ltp2: /proc/loadavg reads as five fields
 t_ltp2: F_GETFL and F_SETFL see a socket's O_NONBLOCK
 t_ltp2: F_GETFL reports the access mode of a file
 t_ltp2: F_SETFL O_APPEND appends to a file
@@ -243,6 +244,7 @@ t_ltp2: a page fault runs the SIGSEGV handler
 t_ltp2: accept never hands out a closed connection
 t_ltp2: an empty path is ENOENT, an unmapped one EFAULT
 t_ltp2: an interrupted nanosleep writes the time left; kill of a zombie succeeds
+t_ltp2: brk shrinks and grows back, never below its start
 t_ltp2: clone with a child stack makes a process
 t_ltp2: errors: dup3 flags, getrusage who, getrandom flags, a null timer setting
 t_ltp2: errors: mremap MREMAP_FIXED alone, munlock of unmapped pages
@@ -265,6 +267,7 @@ t_ltp2: sched_getattr reads the policy; a short size is EINVAL
 t_ltp2: sched_setaffinity to processor 0
 t_ltp2: sched_setscheduler: SCHED_FIFO 10, read back, bad priority EINVAL
 t_ltp2: send on an unconnected TCP socket is EPIPE
+t_ltp2: sendmmsg and recvmmsg over UDP loopback; accept on UDP is EOPNOTSUPP
 t_ltp2: sendto with a huge address length is EINVAL
 t_ltp2: tkill and tgkill reject a zero or negative id
 t_ltp2: unshare: files and cwd succeed, bad flags EINVAL

@@ -194,6 +194,7 @@ fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
     Space::Mapped(t) => { restore_space(&mut k.mem, &mut k.spaces, mmu, p, Space::Mapped(t)); },
   }
   pset(&mut k.procs, p, F_BRK, pget(k.procs, h, F_BRK));
+  pset(&mut k.procs, p, F_BRK0, pget(k.procs, h, F_BRK0));
   pset(&mut k.procs, p, F_MMAP, pget(k.procs, h, F_MMAP));
   pset(&mut k.procs, p, F_PROG, pget(k.procs, h, F_PROG));
   swap_words(&mut k.lxfd, h * LXNFD, p * LXNFD, LXNFD);

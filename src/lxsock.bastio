@@ -618,8 +618,11 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     if n == LX_ACCEPT4 {
       fl = d;
     }
+    let sk = sk_look(k, pid, a);
     if is_unix(k, pid, a) {
       r = ux_accept(&mut k, pid, a, b, c, fl);
+    } else if sk.err == 0 {
+      r = EOPNOTSUPP;                       // a UDP socket takes no connections
     } else {
       r = lx_accept(&mut k, pid, a, b, c, fl);
     }

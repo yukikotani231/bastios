@@ -78,6 +78,7 @@ const NGROUPS_KEPT: u64 = 16;
 // handed back: the scheduler treats every process alike.
 const F_NICE: u64 = 61;
 const F_SCHED: u64 = 62;
+const F_BRK0: u64 = 63;              // Linux: where the program break started (brk goes no lower)
 // File permission bits (src/lxperm.bastio).
 const MAY_X: u64 = 1;
 const MAY_W: u64 = 2;
@@ -975,11 +976,13 @@ fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, t: Tsc, epoc
   pset(&mut procs, pid, F_REGS + R_RSP, rsp);
   pset(&mut procs, pid, F_REGS + R_RFLAGS, 0x202);
   pset(&mut procs, pid, F_BRK, 0);
+  pset(&mut procs, pid, F_BRK0, 0);
   pset(&mut procs, pid, F_MMAP, 0);
   if elf {
     // The heap starts on the page after the image; mmap takes pages
     // downward from the stack. Both stay in the window below the stack.
     pset(&mut procs, pid, F_BRK, (e.end + 4095) / 4096 * 4096);
+    pset(&mut procs, pid, F_BRK0, (e.end + 4095) / 4096 * 4096);
     pset(&mut procs, pid, F_MMAP, mmap_top);
   }
   return sp;
