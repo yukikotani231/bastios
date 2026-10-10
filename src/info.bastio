@@ -20,6 +20,7 @@ const INFO_SMP: u64 = 6;         // 0 processors the MADT lists, 1 x2APIC ones, 
 const APIC_XAPIC: u64 = 1;       // INFO_SMP 3 and 4: 0 off, 1 xAPIC, 2 x2APIC, 3 x2APIC locked by the firmware
 const APIC_X2APIC: u64 = 2;
 const INFO_TIMER: u64 = 7;       // 0 what the local APIC timer was counted against, 1 its count for 10 ms
+const INFO_FB: u64 = 9;          // the boot loader's framebuffer, at any address: i as boot_fb's field
 const INFO_ACPI: u64 = 8;        // 0 where the RSDP came from, 1 its revision, 2 + 2k / 3 + 2k table k's signature / address
 const MEM_REGIONS: u64 = 128;    // boot/multiboot.c keeps at most this many
 const ACPI_TABLES: u64 = 64;     // the most tables listed
@@ -65,6 +66,12 @@ fn cpuid(cpu: &Cpu, leaf: u64, sub: u64, r: u64) -> u64
   requires leaf <= 4294967295 && sub <= 4294967295 && r < 4
 {
   return boot_info(cpu, INFO_CPUID + r, leaf * 4294967296 + sub);
+}
+
+/// Does boot.S map the device window above 4 GiB? Only on a processor
+/// with 1 GiB pages (CPUID 0x80000001, EDX bit 26).
+fn high_window(cpu: &Cpu) -> bool {
+  return (cpuid(cpu, 0x80000001, 0, 3) >> 26) % 2 == 1;
 }
 
 /// Bit `b` of `x`.
@@ -364,6 +371,33 @@ fn put_offset(con: &mut Con, base: u64, off: u64)
   } else {
     puts(&mut con, " ");
     put_hexn(&mut con, base + off);
+  }
+}
+
+/// The framebuffer the boot loader set up, wherever it is, and whether the
+/// console draws on it.
+fn hw_screen(con: &mut Con, cpu: &Cpu, used: bool)
+  requires con_ok(con)
+  ensures con_ok(con)
+{
+  let at = boot_info(cpu, INFO_FB, 0);
+  if at == 0 {
+    puts(&mut con, "screen: no 32-bit RGB framebuffer from the boot loader\r\n");
+    return;
+  }
+  puts(&mut con, "screen: framebuffer at ");
+  put_hexn(&mut con, at);
+  puts(&mut con, ", ");
+  put_num(&mut con, boot_info(cpu, INFO_FB, 2) % 65536);
+  puts(&mut con, "x");
+  put_num(&mut con, boot_info(cpu, INFO_FB, 3) % 65536);
+  puts(&mut con, ", ");
+  put_num(&mut con, boot_info(cpu, INFO_FB, 1) % 4294967296);
+  puts(&mut con, " bytes a line");
+  if used {
+    puts(&mut con, "; in use\r\n");
+  } else {
+    puts(&mut con, "; not used (outside the device window, or above 4 GiB without 1 GiB pages)\r\n");
   }
 }
 

@@ -321,6 +321,13 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Console and boot
 
+- A framebuffer above 4 GiB is used. Many PCs put the graphics memory
+  there (recent Intel graphics at 0x4000000000), and the console then had
+  no screen at all. It needs 1 GiB pages, as the rest of the device window
+  above 4 GiB does. Untested: no QEMU display puts its framebuffer there.
+  The hardware report gains a `screen:` line with the framebuffer's
+  address, size and whether it is in use.
+
 - ACPI (`src/acpi.bastio`): `halt` powers a PC off through S5 instead of
   only halting it, `reboot` (new, and BusyBox's `reboot -f` and
   `poweroff -f` through Linux's reboot(2)) restarts it through the FADT's

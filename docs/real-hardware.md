@@ -78,6 +78,7 @@ The report holds the processor's model, the memory map, the ACPI tables and PCI 
 | 1 | `cpu:` | Who made the processor, its name, family and model, and whether it has the features the kernel needs (`1gb-pages`: without it, devices above 4 GiB are out of reach) |
 | 1 | `processors:` | How many processors the ACPI MADT lists and how many started, and if not all, why (no MADT, a processor that did not answer) |
 | 1 | `local APIC:` | xAPIC or x2APIC mode, and the mode the firmware left it in |
+| 1 | `screen:` | Where the boot loader's framebuffer is, its size, and whether the console draws on it |
 | 1 | `timer:`, `clock:` | What the local APIC timer was calibrated against (HPET, ACPI PM timer, PIT) and what keeps time |
 | 2 | `memory:` | The firmware's memory map, region by region |
 | 3 | `acpi:` | Where the ACPI tables were found, each table and its address, the power-management registers, the S5 sleep type (needed for power off) and the reset register |
@@ -90,7 +91,7 @@ These are expected on real machines today, so there is no need to report them un
 - Network: only the Intel e1000 families (8254x, 82574L, 82576, I350, I210, I211: the I350, I210 and I211 are untested, so a report on one of them is especially welcome) and virtio cards. Most desktop and laptop cards (Intel I219 and I225/I226, Realtek RTL8111/8168, and Wi-Fi) have no driver.
 - USB: only xHCI (USB 3) controllers, with keyboards and BastiOS-partitioned sticks, on a root port or behind up to two USB 2 hubs.
 - Disks: NVMe, AHCI (SATA), legacy ATA and USB sticks. A disk is used only if it is blank or already BastiOS's.
-- Screen: a 32-bit framebuffer that GRUB sets up below 4 GiB. There is no GPU driver.
+- Screen: a 32-bit framebuffer that GRUB sets up, in the device window below 4 GiB or anywhere above 4 GiB (where many PCs put the graphics memory; this case is untested, because no QEMU display has its framebuffer there). There is no GPU driver.
 - Processors: when the local APICs have to run in x2APIC mode (the report's `local APIC:` line says so: the firmware locked that mode, or a processor has an id of 255 or more), the kernel does without MSI and wake-up interrupts, so disks and the network are polled more.
 - ACPI: only the PM1a registers; PM1b is not used. The only AML read is `\_S5`. A reset register in memory has not been tested, because QEMU has none.
 - Memory: the kernel uses at most 256 MiB, below 1 GiB, whatever the machine has.

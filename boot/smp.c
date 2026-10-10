@@ -546,6 +546,7 @@ void bst_smp_init(void) {
  * every answer it relies on. */
 extern uint64_t bst_boot_cmdline(uint64_t i);              /* multiboot.c */
 extern uint64_t bst_boot_region(uint64_t n, uint64_t f);
+extern uint64_t bst_boot_framebuffer(uint64_t f);
 uint64_t bst_platform_info(uint64_t what, uint64_t i) {
     switch (what) {
     case 0: return bst_boot_cmdline(i);                    /* a byte, or 256 */
@@ -570,6 +571,7 @@ uint64_t bst_platform_info(uint64_t what, uint64_t i) {
         if (i % 2 == 1) return t;                          /* its address (0: past the end) */
         return t && mapped(t, 36) ? rd32(t) : 0;           /* its signature, 0 if out of reach */
     }
+    case 9: return bst_boot_framebuffer(i);                /* the framebuffer, anywhere: as boot_fb */
     }
     return 0;
 }
