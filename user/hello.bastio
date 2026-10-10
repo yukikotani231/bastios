@@ -21,7 +21,7 @@ fn put_num(con: &Serial, n: u64) {
   }
   let mut q = p;
   while q > 0 {
-    serial_write(con, 48 + (n / q) % 10);
+    serial_write(con, cast[u8](48 + (n / q) % 10));
     q = q / 10;
   }
 }

@@ -164,8 +164,8 @@ fn tcp_emit(n: &mut Net, t: u64, flags: u64, seq: u64, off: u64, dl: u64)
   put16(&mut n.out, 36, rport);
   put32(&mut n.out, 38, seq);
   put32(&mut n.out, 42, twb(n, t, W_RCV, SEQ_MOD));
-  bset(&mut n.out, 46, hl / 4 * 16);
-  bset(&mut n.out, 47, flags);
+  bset(&mut n.out, 46, cast[u8](hl / 4 * 16));
+  bset(&mut n.out, 47, cast[u8](flags));
   put16(&mut n.out, 48, win);
   put32(&mut n.out, 50, 0);           // checksum and urgent pointer
   if hl == 24 {
@@ -302,11 +302,11 @@ fn tcp_refuse(n: &mut Net, flags: u64, dlen: u64)
   if flags % 32 >= TF_ACK {
     put32(&mut n.out, 38, ackn);
     put32(&mut n.out, 42, 0);
-    bset(&mut n.out, 47, TF_RST);
+    bset(&mut n.out, 47, cast[u8](TF_RST));
   } else {
     put32(&mut n.out, 38, 0);
     put32(&mut n.out, 42, seq_add(seq, used % SEQ_MOD));
-    bset(&mut n.out, 47, TF_RST + TF_ACK);
+    bset(&mut n.out, 47, cast[u8](TF_RST + TF_ACK));
   }
   bset(&mut n.out, 46, 0x50);
   put16(&mut n.out, 48, 0);
@@ -536,7 +536,7 @@ fn tcp_in(n: &mut Net, total: u64)
   if total < 40 {
     return;
   }
-  let hl = bget(n.pkt, 46) / 16 * 4;
+  let hl = cast[u64](bget(n.pkt, 46)) / 16 * 4;
   if hl < 20 || 20 + hl > total {
     return;
   }
@@ -550,7 +550,7 @@ fn tcp_in(n: &mut Net, total: u64)
   let dport = be16(n.pkt, 36);
   let seq = be32(n.pkt, 38);
   let ackn = be32(n.pkt, 42);
-  let flags = bget(n.pkt, 47);
+  let flags = cast[u64](bget(n.pkt, 47));
   let is_syn = flags % 4 >= TF_SYN;
   let is_ack = flags % 32 >= TF_ACK;
   let is_rst = flags % 8 >= TF_RST;

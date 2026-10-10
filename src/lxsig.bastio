@@ -462,7 +462,7 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   xfer_u64(&mut fr, UC_AT + UC_FPPTR, base + FP_AT);
   xfer_u64(&mut fr, UC_AT + UC_MASK, was);
   // The siginfo: signo, errno, code (SI_USER).
-  bset(&mut fr, INFO_AT, s);
+  bset(&mut fr, INFO_AT, cast[u8](s));
   // The FPU state, as fxsave left it.
   match take_fpu(&mut k.fpus, p) {
     Fpu::None => {},

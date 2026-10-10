@@ -93,7 +93,7 @@ fn write_from(con: &mut Uart, root: &mut PageTable, off: u64, n: u64) -> u64
       if ch == 256 {
         ok = false;
       } else {
-        uart_write(&mut con, ch);
+        uart_write(&mut con, cast[u8](ch));
         k = k + 1;
       }
     }
@@ -164,7 +164,7 @@ fn w_matches(l2: &mut PageTable, off: u64, n: u64, name: Str) -> bool
   while k < n
     invariant k <= n && pt_level(l2) == 2
   {
-    if w_byte(&mut l2, off + k) != sget(name, k) {
+    if w_byte(&mut l2, off + k) != cast[u64](sget(name, k)) {
       return false;
     }
     k = k + 1;

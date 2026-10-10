@@ -32,8 +32,8 @@ fn uart_init(u: &mut Uart)
 }
 
 /// Sends byte `b`, waiting until the transmitter has room.
-fn uart_write(u: &mut Uart, b: u64)
-  requires uart_ok(u) && b <= 255
+fn uart_write(u: &mut Uart, b: u8)
+  requires uart_ok(u)
 {
   // Line status bit 5: the transmit holding register is empty.
   while pio_in8(&mut u.io, UART_LSR) / 32 % 2 == 0 {
@@ -48,7 +48,7 @@ fn uart_poll(u: &mut Uart) -> u64
 {
   // Line status bit 0: a byte is waiting.
   if pio_in8(&mut u.io, UART_LSR) % 2 == 1 {
-    return pio_in8(&mut u.io, UART_DATA);
+    return cast[u64](pio_in8(&mut u.io, UART_DATA));
   }
   return 256;
 }

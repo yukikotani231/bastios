@@ -13,8 +13,13 @@ const LX_BIND: u64 = 49;
 const LX_GETSOCKNAME: u64 = 51;
 const LX_GETPEERNAME: u64 = 52;
 const LX_SETSOCKOPT: u64 = 54;
+const LX_ACCEPT: u64 = 43;
+const LX_SHUTDOWN: u64 = 48;
+const LX_LISTEN: u64 = 50;
+const LX_ACCEPT4: u64 = 288;
 
 const AF_INET: u64 = 2;
+const SOCK_STREAM: u64 = 1;
 const SOCK_DGRAM: u64 = 2;
 const IPPROTO_UDP: u64 = 17;
 const SOCK_NONBLOCK: u64 = 0x800;
@@ -69,12 +74,12 @@ fn sin_in(k: &mut Kernel, pid: u64, va: u64, alen: u64) -> Sin
   if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 8) != 8 {
     return Sin { err: EFAULT, ip: 0, port: 0 };
   }
-  if bget(k.fs.xfer, 0) + 256 * bget(k.fs.xfer, 1) != AF_INET {
+  if cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1)) != AF_INET {
     return Sin { err: EAFNOSUPPORT, ip: 0, port: 0 };
   }
   // The port and the address are in network byte order.
-  let port = 256 * bget(k.fs.xfer, 2) + bget(k.fs.xfer, 3);
-  let ip = 0x1000000 * bget(k.fs.xfer, 4) + 0x10000 * bget(k.fs.xfer, 5) + 0x100 * bget(k.fs.xfer, 6) + bget(k.fs.xfer, 7);
+  let port = 256 * cast[u64](bget(k.fs.xfer, 2)) + cast[u64](bget(k.fs.xfer, 3));
+  let ip = 0x1000000 * cast[u64](bget(k.fs.xfer, 4)) + 0x10000 * cast[u64](bget(k.fs.xfer, 5)) + 0x100 * cast[u64](bget(k.fs.xfer, 6)) + cast[u64](bget(k.fs.xfer, 7));
   return Sin { err: 0, ip: ip, port: port };
 }
 
@@ -91,21 +96,21 @@ fn sin_out(k: &mut Kernel, pid: u64, va: u64, lenp: u64, ip: u64, port: u64) -> 
   if copy_from_user(&mut k.spaces, pid, lenp, &mut k.fs.xfer, 4) != 4 {
     return EFAULT;
   }
-  let room = bget(k.fs.xfer, 0) + 256 * bget(k.fs.xfer, 1) + 65536 * bget(k.fs.xfer, 2) + 16777216 * bget(k.fs.xfer, 3);
+  let room = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1)) + 65536 * cast[u64](bget(k.fs.xfer, 2)) + 16777216 * cast[u64](bget(k.fs.xfer, 3));
   lx_fill(&mut k, 0, SIN_LEN);
-  bset(&mut k.fs.xfer, 0, AF_INET);
-  bset(&mut k.fs.xfer, 2, port / 256);
-  bset(&mut k.fs.xfer, 3, port % 256);
-  bset(&mut k.fs.xfer, 4, ip / 0x1000000);
-  bset(&mut k.fs.xfer, 5, ip / 0x10000 % 256);
-  bset(&mut k.fs.xfer, 6, ip / 0x100 % 256);
-  bset(&mut k.fs.xfer, 7, ip % 256);
+  bset(&mut k.fs.xfer, 0, cast[u8](AF_INET));
+  bset(&mut k.fs.xfer, 2, cast[u8](port / 256));
+  bset(&mut k.fs.xfer, 3, cast[u8](port % 256));
+  bset(&mut k.fs.xfer, 4, cast[u8](ip / 0x1000000));
+  bset(&mut k.fs.xfer, 5, cast[u8](ip / 0x10000 % 256));
+  bset(&mut k.fs.xfer, 6, cast[u8](ip / 0x100 % 256));
+  bset(&mut k.fs.xfer, 7, cast[u8](ip % 256));
   let n = smaller(room, SIN_LEN);
   if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {
     return EFAULT;
   }
   lx_fill(&mut k, 0, 4);
-  bset(&mut k.fs.xfer, 0, SIN_LEN);
+  bset(&mut k.fs.xfer, 0, cast[u8](SIN_LEN));
   if copy_to_user(&mut k.spaces, pid, lenp, k.fs.xfer, 4) != 4 {
     return EFAULT;
   }
@@ -119,6 +124,9 @@ fn lx_socket(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64) -> u6
 {
   if domain != AF_INET {
     return EAFNOSUPPORT;
+  }
+  if kind % 16 == SOCK_STREAM {
+    return lx_tcp_socket(&mut k, pid, kind, proto);   // src/lxtcp.bastio
   }
   if kind % 16 != SOCK_DGRAM || (proto != 0 && proto != IPPROTO_UDP) {
     return EPROTONOSUPPORT;
@@ -146,6 +154,9 @@ fn lx_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if is_tcp(k, pid, fd) {
+    return lx_tcp_bind(&mut k, pid, fd, addr, alen);
+  }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
     return sk.err;
@@ -169,6 +180,9 @@ fn lx_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if is_tcp(k, pid, fd) {
+    return lx_tcp_connect(&mut k, pid, fd, addr, alen);
+  }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
     return sk.err;
@@ -191,6 +205,9 @@ fn lx_sendto(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, addr: u64, ale
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if is_tcp(k, pid, fd) {
+    return lx_tcp_send(&mut k, pid, fd, buf, n);
+  }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
     return sk.err;
@@ -233,6 +250,9 @@ fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, 
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if is_tcp(k, pid, fd) {
+    return lx_tcp_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1);
+  }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
     return sk.err;
@@ -262,6 +282,9 @@ fn lx_sockname(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if is_tcp(k, pid, fd) {
+    return lx_tcp_name(&mut k, pid, fd, addr, lenp, peer);
+  }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
     return sk.err;
@@ -299,21 +322,38 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     r = lx_sendto(&mut k, pid, a, b, c, e, f);
   } else if n == LX_RECVFROM {
     r = lx_recvfrom(&mut k, pid, a, b, c, d, e, f);
-    if r == SK_WAIT {
-      return lx_retry(&mut k, pid, n);       // nothing queued yet: wait for a datagram
-    }
   } else if n == LX_GETSOCKNAME || n == LX_GETPEERNAME {
     r = lx_sockname(&mut k, pid, a, b, c, n == LX_GETPEERNAME);
-  } else if n == LX_SETSOCKOPT {
-    // Accepted and ignored (SO_REUSEADDR and the like), on a socket.
+  } else if n == LX_LISTEN {
+    r = lx_listen(&mut k, pid, a);
+  } else if n == LX_ACCEPT || n == LX_ACCEPT4 {
+    let mut fl = 0;
+    if n == LX_ACCEPT4 {
+      fl = d;
+    }
+    r = lx_accept(&mut k, pid, a, b, c, fl);
+  } else if n == LX_SHUTDOWN || n == LX_SETSOCKOPT {
+    // Accepted and ignored on a socket: options (SO_REUSEADDR and the
+    // like), and shutdown (close sends the FIN).
     let sk = sk_look(k, pid, a);
     r = sk.err;
+    if is_tcp(k, pid, a) {
+      r = 0;
+    }
+  }
+  if r == SK_WAIT {
+    return lx_retry(&mut k, pid, n);         // nothing yet: a datagram, a connection, room
   }
   ret(&mut k.procs, pid, r);
+  if r == EPIPE {
+    post_sig(&mut k, pid, SIGPIPE);          // the connection cannot send any more
+    return SWITCH;
+  }
   return KEEP;
 }
 
 fn is_sock_call(n: u64) -> bool {
   return n == LX_SOCKET || n == LX_BIND || n == LX_CONNECT || n == LX_SENDTO || n == LX_RECVFROM
-    || n == LX_GETSOCKNAME || n == LX_GETPEERNAME || n == LX_SETSOCKOPT;
+    || n == LX_GETSOCKNAME || n == LX_GETPEERNAME || n == LX_SETSOCKOPT || n == LX_LISTEN
+    || n == LX_ACCEPT || n == LX_ACCEPT4 || n == LX_SHUTDOWN;
 }

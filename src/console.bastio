@@ -24,7 +24,7 @@ fn put_num(con: &mut Uart, n: u64)
   let mut q = p;
   while q > 0
   {
-    uart_write(&mut con, 48 + (n / q) % 10);
+    uart_write(&mut con, cast[u8](48 + (n / q) % 10));
     q = q / 10;
   }
 }
@@ -38,9 +38,9 @@ fn put_hex(con: &mut Uart, n: u64)
   {
     let d = (n / q) % 16;
     if d < 10 {
-      uart_write(&mut con, 48 + d);
+      uart_write(&mut con, cast[u8](48 + d));
     } else {
-      uart_write(&mut con, 87 + d);
+      uart_write(&mut con, cast[u8](87 + d));
     }
     q = q / 16;
   }

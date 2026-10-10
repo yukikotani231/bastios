@@ -34,9 +34,8 @@ spec fn vnet_ok(v: &VNet) -> bool {
 }
 
 /// Byte `off` of receive buffer `b`.
-fn rxbuf_read8(v: &mut VNet, b: u64, off: u64) -> u64
+fn rxbuf_read8(v: &mut VNet, b: u64, off: u64) -> u8
   requires b < RX_BUFS && off < RX_BUF
-  ensures result <= 255
 {
   if b < 2 {
     return dma_read8(&mut v.rb0, b * RX_BUF + off);
@@ -81,14 +80,14 @@ fn vnet_new(ports: &mut Ports, base: u64, q0: Frame, q1: Frame, q2: Frame, t0: F
   vq_desc(&mut v.rx, 1, a0 + RX_BUF, RX_BUF, DESC_WRITE, 0);
   vq_desc(&mut v.rx, 2, a1, RX_BUF, DESC_WRITE, 0);
   vq_desc(&mut v.rx, 3, a1 + RX_BUF, RX_BUF, DESC_WRITE, 0);
-  let m0 = pio_in8(&mut v.io, VIO_CONFIG);
-  let m1 = pio_in8(&mut v.io, VIO_CONFIG + 1);
-  let m2 = pio_in8(&mut v.io, VIO_CONFIG + 2);
-  let m3 = pio_in8(&mut v.io, VIO_CONFIG + 3);
-  let m4 = pio_in8(&mut v.io, VIO_CONFIG + 4);
-  let m5 = pio_in8(&mut v.io, VIO_CONFIG + 5);
+  let m0 = cast[u64](pio_in8(&mut v.io, VIO_CONFIG));
+  let m1 = cast[u64](pio_in8(&mut v.io, VIO_CONFIG + 1));
+  let m2 = cast[u64](pio_in8(&mut v.io, VIO_CONFIG + 2));
+  let m3 = cast[u64](pio_in8(&mut v.io, VIO_CONFIG + 3));
+  let m4 = cast[u64](pio_in8(&mut v.io, VIO_CONFIG + 4));
+  let m5 = cast[u64](pio_in8(&mut v.io, VIO_CONFIG + 5));
   v.mac = ((((m0 * 256 + m1) * 256 + m2) * 256 + m3) * 256 + m4) * 256 + m5;
-  pio_out8(&mut v.io, VIO_STATUS, VIO_ACK + VIO_DRIVER + VIO_DRIVER_OK);
+  pio_out8(&mut v.io, VIO_STATUS, cast[u8](VIO_ACK + VIO_DRIVER + VIO_DRIVER_OK));
   v.live = true;
   let mut b = 0;
   while b < RX_BUFS
