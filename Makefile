@@ -54,8 +54,9 @@ build/user/%.bin: build/user/%.elf
 # 2. Prove the kernel and translate it to freestanding C.
 KSRCS := src/console.bastio src/pages.bastio src/space.bastio src/proc.bastio src/syscall.bastio src/main.bastio
 
+# src/main.bastio imports the rest.
 build/kernel.c: $(KSRCS) $(UBINS) $(BASTIOC) | build
-	$(BASTIOC) --target kernel -o $@ $(KSRCS)
+	$(BASTIOC) --target kernel -o $@ src/main.bastio
 
 build/kernel.o: build/kernel.c
 	$(CC) $(CFLAGS) -c -o $@ $<

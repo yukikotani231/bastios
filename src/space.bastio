@@ -9,6 +9,8 @@
 // building a space takes each page from the pool once, that tearing it down
 // returns every page, and that a table is empty before it is freed.
 
+import "pages.bastio";
+
 const USER_BASE: u64 = 0x8000000000;
 const USER_SIZE: u64 = 0x200000;
 const STACK_PAGES: u64 = 16;
