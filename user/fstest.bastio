@@ -27,7 +27,7 @@ fn put_num(con: &Serial, n: u64) {
   }
   let mut q = p;
   while q > 0 {
-    serial_write(con, 48 + (n / q) % 10);
+    serial_write(con, cast[u8](48 + (n / q) % 10));
     q = q / 10;
   }
 }
@@ -71,7 +71,7 @@ fn write_big(fd: u64, buf: &mut Bytes) -> bool
     while j < m
       invariant j <= m && blen(buf) == 4096
     {
-      bset(&mut buf, j, pat(done + j));
+      bset(&mut buf, j, cast[u8](pat(done + j)));
       j = j + 1;
     }
     if f_write(fd, buf, m) != m {
@@ -103,7 +103,7 @@ fn read_check(fd: u64, buf: &mut Bytes, from: u64) -> u64
       while j < r
         invariant j <= r && r <= 4096 && blen(buf) == 4096
       {
-        if bget(buf, j) != pat(from + total + j) {
+        if cast[u64](bget(buf, j)) != pat(from + total + j) {
           return NOT_OK;
         }
         j = j + 1;

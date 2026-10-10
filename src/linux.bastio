@@ -209,8 +209,8 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     } else {
       w = do_writev(&mut con, &mut k, pid, a, b, c);
     }
-    if w == EAGAIN {
-      return lx_retry(&mut k, pid, n);       // a full pipe: wait for a reader
+    if w == EAGAIN || w == SK_WAIT {
+      return lx_retry(&mut k, pid, n);       // a full pipe or connection: wait for room
     }
     ret(&mut k.procs, pid, w);
     if w == EPIPE {
@@ -452,7 +452,7 @@ fn lx_fill(k: &mut Kernel, v: u64, n: u64)
   while i < n
     invariant i <= n && n <= 160 && kok(k)
   {
-    bset(&mut k.fs.xfer, i, v);
+    bset(&mut k.fs.xfer, i, cast[u8](v));
     i = i + 1;
   }
 }
@@ -546,7 +546,7 @@ fn tty_key(con: &mut Uart, l: &mut Buf, c: u64)
   } else if c >= 32 && c <= 255 && n + 1 < LINE_MAX {
     l = set(l, 2 + n, c);
     l = set(l, 0, n + 1);
-    uart_write(&mut con, c);
+    uart_write(&mut con, cast[u8](c));
   }
 }
 
@@ -585,7 +585,7 @@ fn console_read(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
   while i < want
     invariant i <= want && want <= have && have <= LINE_MAX && kok(k)
   {
-    bset(&mut k.fs.xfer, i, get(k.line, 2 + i) % 256);
+    bset(&mut k.fs.xfer, i, cast[u8](get(k.line, 2 + i) % 256));
     i = i + 1;
   }
   let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);

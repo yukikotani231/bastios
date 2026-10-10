@@ -321,6 +321,7 @@ const SK_WAIT: u64 = 0x8000000000000000;
 // flags, restorer, mask).
 const SIGACT_LEN: u64 = 4096;
 const OF_SOCK: u64 = 5;               // x: the kernel socket; word 3: 2 * peer + nonblocking
+const OF_TCP: u64 = 6;                // x: the kernel connection (TCBS: none yet); word 3: see src/lxtcp.bastio
 const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
 
@@ -394,7 +395,7 @@ spec fn kok(k: &Kernel) -> bool {
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 17;
+const NPROGS: u64 = 18;
 
 fn prog_name(i: u64) -> Str {
   if i == 0 {
@@ -446,6 +447,9 @@ fn prog_name(i: u64) -> Str {
     return "mudp";
   }
   if i == 16 {
+    return "mtcp";
+  }
+  if i == 17 {
     return "crashme";
   }
   return "(file)";                    // a program loaded from a file
@@ -498,6 +502,9 @@ fn prog_image(i: u64) -> Str {
     return include_bytes("../build/user/mudp.elf");
   }
   if i == 16 {
+    return include_bytes("../build/user/mtcp.elf");
+  }
+  if i == 17 {
     return include_bytes("../build/user/crashme.bin");
   }
   return include_bytes("../build/user/fault.bin");
@@ -507,10 +514,10 @@ fn prog_image(i: u64) -> Str {
 fn read_u64(s: Str, at: u64) -> u64
   requires at <= 64 && at + 8 <= slen(s)
 {
-  return sget(s, at) + 0x100 * sget(s, at + 1) + 0x10000 * sget(s, at + 2)
-    + 0x1000000 * sget(s, at + 3) + 0x100000000 * sget(s, at + 4)
-    + 0x10000000000 * sget(s, at + 5) + 0x1000000000000 * sget(s, at + 6)
-    + 0x100000000000000 * sget(s, at + 7);
+  return cast[u64](sget(s, at)) + 0x100 * cast[u64](sget(s, at + 1)) + 0x10000 * cast[u64](sget(s, at + 2))
+    + 0x1000000 * cast[u64](sget(s, at + 3)) + 0x100000000 * cast[u64](sget(s, at + 4))
+    + 0x10000000000 * cast[u64](sget(s, at + 5)) + 0x1000000000000 * cast[u64](sget(s, at + 6))
+    + 0x100000000000000 * cast[u64](sget(s, at + 7));
 }
 
 // ---------------------------------------------------------------- life cycle

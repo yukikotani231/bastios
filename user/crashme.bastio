@@ -39,15 +39,14 @@ fn put_num(con: &Serial, n: u64) {
   }
   let mut q = p;
   while q > 0 {
-    serial_write(con, 48 + (n / q) % 10);
+    serial_write(con, cast[u8](48 + (n / q) % 10));
     q = q / 10;
   }
 }
 
 /// Byte j (0 to REC - 1) of record i.
-fn rec_byte(i: u64, j: u64) -> u64
+fn rec_byte(i: u64, j: u64) -> u8
   requires j < REC
-  ensures result <= 255
 {
   if j == 0 {
     return 114;                         // 'r'
@@ -65,7 +64,7 @@ fn rec_byte(i: u64, j: u64) -> u64
     }
     k = k + 1;
   }
-  return 48 + i / p % 10;
+  return cast[u8](48 + i / p % 10);
 }
 
 /// Checks disk/log. Returns its record count, or NOT_OK.
@@ -150,8 +149,8 @@ fn check_snap(snap: &Bytes, buf: &mut Bytes) -> bool
 }
 
 /// Truncates disk/snap and writes SNAP copies of digit d.
-fn write_snap(snap: &Bytes, buf: &mut Bytes, d: u64) -> bool
-  requires blen(snap) >= 9 && blen(buf) == 4096 && d <= 255
+fn write_snap(snap: &Bytes, buf: &mut Bytes, d: u8) -> bool
+  requires blen(snap) >= 9 && blen(buf) == 4096
   ensures blen(buf) == 4096
 {
   let fd = f_open(snap, 9, O_WRITE + O_CREATE + O_TRUNC);
@@ -222,7 +221,7 @@ fn main(con: &mut Serial) -> u64 {
     if f_write(fd, rec, REC) != REC {
       code = bad(con, "append");
     } else if i % 16 == 15 {
-      if !write_snap(snap, &mut buf, 48 + i / 16 % 10) {
+      if !write_snap(snap, &mut buf, cast[u8](48 + i / 16 % 10)) {
         code = bad(con, "snap write");
       }
       let tf = f_open(t, 6, O_WRITE + O_CREATE);
