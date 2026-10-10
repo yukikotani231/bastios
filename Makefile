@@ -1,6 +1,8 @@
 # BastiOS build.
 #   make            build build/bastios.elf
 #   make run        boot it in QEMU on this terminal (Ctrl-A X to quit)
+#   make iso        build/bastios.iso: bootable from CD or USB, BIOS or UEFI
+#   make run-iso    boot the ISO in QEMU (run-uefi: under UEFI firmware)
 #   make test       boot it in QEMU and drive the shell over the serial line
 #
 # BASTIOC points at the Bastio stage0 compiler (github.com/yukikotani231/bastiolang).
@@ -24,7 +26,7 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest crashme
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp ash
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime ash
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf)
 
 build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
@@ -77,7 +79,7 @@ build/user/fpucheck.elf: build/user/elfstart.o build/user/fpucheck.o
 # A C program against musl libc, static PIE (the musl-tools package).
 MUSLCC ?= musl-gcc
 
-build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf: build/user/%.elf: user/%.c | build/user
+build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf: build/user/%.elf: user/%.c | build/user
 	$(MUSLCC) -static-pie -O2 -o $@ $<
 
 # BusyBox (GPL-2.0-only, not part of this repository): fetched at a pinned
@@ -107,7 +109,7 @@ build/user/%.bin: build/user/%.elf
 
 # 2. Prove the kernel and translate it to freestanding C.
 KSRCS := src/uart.bastio src/pic.bastio src/pit.bastio src/hpet.bastio src/console.bastio src/pages.bastio src/space.bastio src/elf.bastio src/ramfs.bastio src/ata.bastio src/pci.bastio src/virtq.bastio src/virtio_blk.bastio src/virtio_net.bastio src/net.bastio src/tcp.bastio src/blk.bastio src/diskfs.bastio src/fs.bastio \
-         src/proc.bastio src/usermem.bastio src/syscall.bastio src/linux.bastio src/lxproc.bastio src/lxfd.bastio src/lxdir.bastio src/lxsock.bastio src/lxtcp.bastio src/lxsig.bastio src/main.bastio
+         src/proc.bastio src/usermem.bastio src/syscall.bastio src/linux.bastio src/lxproc.bastio src/lxfd.bastio src/lxdir.bastio src/lxsock.bastio src/lxtcp.bastio src/lxsig.bastio src/lxtime.bastio src/main.bastio
 KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
@@ -142,23 +144,61 @@ build/bastios64.elf: $(KOBJS) boot/linker.ld
 build/bastios.elf: build/bastios64.elf
 	objcopy -O elf32-i386 $< $@
 
-# The disk: a raw image on the first ATA drive. BastiOS formats it the first
-# time it boots, and the files under disk/ live there across boots.
+# A bootable image: GRUB (BIOS and UEFI, as a hybrid ISO that can also be
+# written to a USB stick) loading the same Multiboot kernel. Needs
+# grub-mkrescue, xorriso, mtools, and GRUB's i386-pc and x86_64-efi files
+# (grub-pc-bin and grub-efi-amd64-bin on Ubuntu).
+build/bastios.iso: build/bastios.elf boot/grub.cfg
+	rm -rf build/iso
+	mkdir -p build/iso/boot/grub
+	cp build/bastios.elf build/iso/boot/
+	cp boot/grub.cfg build/iso/boot/grub/
+	grub-mkrescue -o $@ build/iso 2>/dev/null
+
+iso: build/bastios.iso
+
+# The disk: a raw image, here as a virtio block device. BastiOS formats it
+# the first time it boots, and the files under disk/ live there across
+# boots.
 DISK    ?= build/disk.img
-QEMU_ARGS := -kernel build/bastios.elf -m 64M -display none -no-reboot \
+SMP     ?= 2
+OVMF    ?= /usr/share/OVMF/OVMF_CODE_4M.fd
+OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
+# A virtio disk and network card (QEMU's user network: DHCP, and the host
+# reachable at 10.0.2.2; TCP port 7001 on this machine reaches the guest's
+# port 7001, for `tcpecho 7001`).
+QEMU_DEVS := -m 256M -smp $(SMP) -display none -no-reboot \
              -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-             -drive file=$(DISK),format=raw,if=ide,index=0
+             -drive file=$(DISK),format=raw,if=none,id=vd -device virtio-blk-pci,drive=vd \
+             -netdev user,id=n0,hostfwd=tcp:127.0.0.1:7001-:7001 -device virtio-net-pci,netdev=n0
+QEMU_ARGS := -kernel build/bastios.elf $(QEMU_DEVS)
 
 $(DISK): | build
 	truncate -s 33M $@
 
+# QEMU exits with 33 when the kernel powers off through isa-debug-exit
+# (`halt`), which is a clean stop, not a failure.
+CLEAN_EXIT := ; s=$$?; [ $$s -eq 0 ] || [ $$s -eq 33 ]
+
+# On this terminal; Ctrl-A X quits.
 run: build/bastios.elf $(DISK)
-	$(QEMU) $(QEMU_ARGS) -serial mon:stdio
+	$(QEMU) $(QEMU_ARGS) -serial mon:stdio $(CLEAN_EXIT)
+
+# The ISO through GRUB, under BIOS and under UEFI (OVMF firmware).
+run-iso: build/bastios.iso $(DISK)
+	$(QEMU) -cdrom build/bastios.iso $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
+
+run-uefi: build/bastios.iso $(DISK)
+	cp $(OVMF_VARS) build/ovmf_vars.fd
+	$(QEMU) -drive if=pflash,format=raw,readonly=on,file=$(OVMF) \
+	  -drive if=pflash,format=raw,file=build/ovmf_vars.fd \
+	  -cdrom build/bastios.iso $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
 
 test: build/bastios.elf
 	test/shell_test.sh
 	test/tcp_test.sh
 	NIC=e1000 test/tcp_test.sh
+	test/iso_test.sh
 
 # Not part of `make test`: prints timings, checks nothing (see the script).
 smpbench: build/bastios.elf
