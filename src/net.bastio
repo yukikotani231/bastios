@@ -124,6 +124,9 @@ struct Net {
   lo_len: Buf,        // their lengths,
   lo_head: u64,       // the oldest one's slot,
   lo_n: u64,          // and how many are queued
+  seen_rx: u64,       // rx and the tick count when sock_wake last looked
+  seen_tick: u64,
+  irq_on: bool,       // received frames raise the card's interrupt (nic_listen)
 }
 
 spec fn net_ok(n: &Net) -> bool {
@@ -1176,8 +1179,8 @@ fn pages_free(m: &Mem, lo: u64, k: u64) -> bool
 /// first e1000 whose registers lie in the part of the device window below
 /// E1K_TOP, with pages from page `at` on.
 fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, avoid_lo: u64, avoid_hi: u64, fb_lo: u64, fb_hi: u64,
-  usb_lo: u64, usb_hi: u64, dk_lo: u64, dk_hi: u64) -> Nic
-  requires pci_ok(pci) && mem_ok(m) && at + NET_PAGES <= NPAGES && E1K_PAGES <= NET_PAGES
+  usb_lo: u64, usb_hi: u64, dk_lo: u64, dk_hi: u64, msi: u64) -> Nic
+  requires pci_ok(pci) && mem_ok(m) && at + NET_PAGES <= NPAGES && E1K_PAGES <= NET_PAGES && msi <= 4294967295
   requires forall k: u64 :: 0x1000 <= k && k < 65536 && !(avoid_lo <= k && k < avoid_hi) ==> port_free(ports, k)
   requires forall a: u64 :: 0xC0000000 <= a && a < E1K_TOP && !(fb_lo <= a && a < fb_hi) && !(usb_lo <= a && a < usb_hi)
     && !(dk_lo <= a && a < dk_hi) ==> mmio_free(win, a)
@@ -1191,6 +1194,23 @@ fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, a
       return Nic::None;
     }
     pci_enable(&mut pci, dev);
+    // MSI-X goes on before the card is started: the card takes a queue's
+    // vector only while it is on. The table entry is claimed only while
+    // it is written.
+    let mut msix = false;
+    let cap = pci_cap(&mut pci, dev, CAP_MSIX);
+    if msi > 0 && cap > 0 && cap < 252 {
+      let e = pci_msix_at(&mut pci, dev, cap);
+      if e >= 0xC0000000 && e + 16 <= E1K_TOP && (e + 16 <= fb_lo || e >= fb_hi)
+        && (e + 16 <= usb_lo || e >= usb_hi) && (e + 16 <= dk_lo || e >= dk_hi) {
+        pci_intx_off(&mut pci, dev);
+        pci_msix_on(&mut pci, dev, cap);
+        let mut r = mmio_claim(&mut win, e, 16);
+        pci_msix_entry(&mut r, msi, V_NET);
+        mmio_release(&mut win, r);
+        msix = true;
+      }
+    }
     let q0 = take_low_page(&mut m, at);
     let q1 = take_low_page(&mut m, at + 1);
     let q2 = take_low_page(&mut m, at + 2);
@@ -1200,7 +1220,7 @@ fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, a
     let b0 = take_low_page(&mut m, at + 6);
     let b1 = take_low_page(&mut m, at + 7);
     let b2 = take_low_page(&mut m, at + 8);
-    return net_up(Card::Virtio(vnet_new(&mut ports, base, q0, q1, q2, t0, t1, t2, b0, b1, b2)));
+    return net_up(Card::Virtio(vnet_new(&mut ports, base, q0, q1, q2, t0, t1, t2, b0, b1, b2, msix)));
   }
   let e = pci_find(&mut pci, E1K_VENDOR, E1K_DEVICE);
   if e == PCI_NONE {
@@ -1235,7 +1255,7 @@ fn net_up(d: Card) -> Nic
     ping_state: PING_IDLE, ping_pid: 0, ping_ip: 0, ping_hop: 0, ping_until: 0, seq: 0, rx: 0, tx: 0,
     socks: alloc(SOCKS * SOCK_FIELDS), dq: balloc(SOCKS * RXQ * UDP_MAX), eph: 0,
     tcbs: alloc(TCBS * TCB_W), trx: balloc(TCBS * TCP_BUF), ttx: balloc(TCBS * TCP_BUF), iss: 0,
-    lo: balloc(LOQ * RX_BUF), lo_len: alloc(LOQ), lo_head: 0, lo_n: 0 };
+    lo: balloc(LOQ * RX_BUF), lo_len: alloc(LOQ), lo_head: 0, lo_n: 0, seen_rx: 0, seen_tick: 0, irq_on: false };
   // The address comes from DHCP, sought from now on.
   if card_live(n.dev) {
     n.dhcp_xid = card_mac(n.dev) % 4294967296;
@@ -1246,6 +1266,8 @@ fn net_up(d: Card) -> Nic
   return Nic::Up(n);
 }
 
+/// After an interrupt or an idle wait: lets an e1000 lower its interrupt
+/// line, then polls the card.
 fn nic_poll(c: &mut Nic)
   requires nic_ok(c)
   ensures nic_ok(c)
@@ -1253,6 +1275,9 @@ fn nic_poll(c: &mut Nic)
   match c {
     Nic::None => { c = Nic::None; },
     Nic::Up(mut n) => {
+      if n.irq_on {
+        card_ack(&mut n.dev);
+      }
       net_poll(&mut n);
       c = Nic::Up(n);
     },
@@ -1308,6 +1333,73 @@ fn nic_ping_check(c: &mut Nic, now: u64) -> u64
   }
 }
 
+/// Has a frame come in, or the clock ticked, since the last call? Each
+/// can change what a socket call waiting in SOCKWAIT would find. Then
+/// also returns, in `rx`, the frame count, for the waiters to compare.
+fn nic_moved(c: &mut Nic, now: u64) -> bool
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; return false; },
+    Nic::Up(mut n) => {
+      let moved = n.rx != n.seen_rx || now != n.seen_tick;
+      n.seen_rx = n.rx;
+      n.seen_tick = now;
+      c = Nic::Up(n);
+      return moved;
+    },
+  }
+}
+
+/// A process is about to sleep until a frame comes in: received frames
+/// raise the card's interrupt from now on (if it has one), and the card is
+/// polled once more, for a frame that came in before (a virtio card does
+/// not signal those). Frames waited for this way cost an interrupt each,
+/// so they are only asked for while someone sleeps on them (nic_quiet):
+/// a process that keeps calling polls the card itself.
+fn nic_listen(c: &mut Nic)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if !n.irq_on {
+        card_irq_set(&mut n.dev, true);
+        n.irq_on = true;
+      }
+      net_poll(&mut n);
+      c = Nic::Up(n);
+    },
+  }
+}
+
+/// No one sleeps on a frame any more: received frames raise nothing.
+fn nic_quiet(c: &mut Nic)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if n.irq_on {
+        card_irq_set(&mut n.dev, false);
+        n.irq_on = false;
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
+/// Frames received and sent so far (0 without a card).
+fn nic_rx(c: &Nic) -> u64 {
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => { return n.rx; },
+  }
+}
+
 /// The timer side of the stack (DHCP retries); `now` is the tick count.
 fn nic_tick(c: &mut Nic, now: u64)
   requires nic_ok(c)
@@ -1360,6 +1452,26 @@ fn nic_e1000(c: &Nic) -> bool {
   match c {
     Nic::None => { return false; },
     Nic::Up(n) => { return card_is_e1000(n.dev); },
+  }
+}
+
+fn nic_irq(c: &Nic) -> bool {
+  match c {
+    Nic::None => { return false; },
+    Nic::Up(n) => { return card_irq(n.dev); },
+  }
+}
+
+fn nic_irq_on(c: &mut Nic)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      card_irq_on(&mut n.dev);
+      c = Nic::Up(n);
+    },
   }
 }
 

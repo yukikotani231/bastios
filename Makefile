@@ -339,8 +339,12 @@ diskbench: build/bastios.elf
 iobench: build/bastios.elf
 	test/iobench.sh
 
+# Network timings on virtio-net and e1000.
+netbench: build/bastios.elf
+	test/netbench.sh
+
 clean:
 	rm -rf build
 
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
-.PHONY: all run test fuzz smpbench threadbench diskbench iobench compat compat-baseline compat-host clean
+.PHONY: all run test fuzz smpbench threadbench diskbench iobench netbench compat compat-baseline compat-host clean

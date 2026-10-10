@@ -42,3 +42,27 @@ fn pic_eoi(p: &mut Pic, v: u64)
   }
   pio_out8(&mut p.master, 0, 0x20);
 }
+
+/// Unmasks hardware interrupt `irq` (3-15; through IRQ 2, the slave, for
+/// 8-15).
+fn pic_unmask(p: &mut Pic, irq: u64)
+  requires pic_ok(p) && 3 <= irq && irq < 16
+{
+  if irq < 8 {
+    let m = cast[u64](pio_in8(&mut p.master, 1));
+    let bit = 1 << irq;
+    if m / bit % 2 == 1 {
+      pio_out8(&mut p.master, 1, cast[u8](m - bit));
+    }
+    return;
+  }
+  let s = cast[u64](pio_in8(&mut p.slave, 1));
+  let bit = 1 << (irq - 8);
+  if s / bit % 2 == 1 {
+    pio_out8(&mut p.slave, 1, cast[u8](s - bit));
+  }
+  let m = cast[u64](pio_in8(&mut p.master, 1));
+  if m / 4 % 2 == 1 {
+    pio_out8(&mut p.master, 1, cast[u8](m - 4));
+  }
+}

@@ -14,6 +14,12 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Added
 
+- A Linux program blocked on a network socket (`accept`, `read`,
+  `recvfrom`, a full TCP send buffer) sleeps instead of being restarted on
+  every pass of the scheduler, so it no longer keeps a processor busy
+  (`ps` shows it as `socket`). The network card wakes it by interrupt:
+  MSI-X on virtio-net, the PCI interrupt line through the 8259 on the
+  e1000, asked for only while someone sleeps. `make netbench` measures it.
 - File locks are kept (`src/lxlock.bastio`): `fcntl` record locks
   (`F_GETLK`, `F_SETLK`, `F_SETLKW`), open file description locks
   (`F_OFD_*`) and `flock`, with Linux's owners and release rules. A

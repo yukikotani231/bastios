@@ -241,6 +241,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       r = dev_read(&mut k, pid, d.x, va, cnt);
     } else if d.kind == K_SOCK {
       r = lx_recvfrom(&mut k, pid, a, va, cnt, 0, 0, 0);
+      if r == SK_WAIT && !is_unix(k, pid, a) {
+        return sock_retry(&mut k, pid, n);  // a network socket: sleep until a frame comes in
+      }
       if r == SK_WAIT {
         r = EAGAIN;                         // wait for a datagram, below
       } else if r == EAGAIN {
@@ -267,6 +270,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if w == EAGAIN && pipe_nonblock(k, pid, a) {
       ret(&mut k.procs, pid, EAGAIN);        // a full nonblocking pipe: say so
       return KEEP;
+    }
+    if w == SK_WAIT && is_tcp(k, pid, a) {
+      return sock_retry(&mut k, pid, n);     // a full connection: sleep until an ACK comes in
     }
     if w == EAGAIN || w == SK_WAIT {
       return lx_retry(&mut k, pid, n);       // a full pipe or connection: wait for room

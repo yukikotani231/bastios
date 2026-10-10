@@ -103,7 +103,7 @@ How the pieces fit together (boot, memory, processes, the scheduler, system call
 | `user/busybox.config` | The BusyBox options for `ash`; the Makefile fetches BusyBox (GPL-2.0, not part of this repository) at a pinned tag and builds it against musl as a static PIE |
 | `user/mtest.c` | A musl program using `malloc` (brk and mmap), a file through stdio, and a line read from the console |
 | `user/fpucheck.c` | Checks that two processes using SSE registers at once do not see each other's |
-| `user/mtcp.c` | A musl program that uses TCP through the Linux system calls: accepts a connection and answers it, then connects out and reads the reply |
+| `user/mtcp.c` | A musl program that uses TCP through the Linux system calls: accepts a connection and answers it, then connects out and reads the reply; `mtcp echo PORT` echoes a connection (`make netbench`) |
 | `user/mdir.c` | A musl program that uses `openat`, `fstatat`, `mkdirat` and `unlinkat` relative to a directory descriptor, then `fchdir` and `getcwd`, runs out of descriptors, and talks through a named pipe |
 | `user/mmisc.c` | A musl program that checks the small calls: `uname`, `readv`, `pread`/`pwrite`, limits, `sysinfo`, `statfs`, `getrandom`, priorities, sessions and process groups, `ttyname` and `tcgetpgrp`, and that a pipe holds 64 KiB |
 | `user/mspawn.c` | A musl program that starts BusyBox `ash` with `posix_spawn`, checks its exit status, and checks that spawning a missing program reports `ENOENT` |
