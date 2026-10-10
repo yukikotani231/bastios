@@ -255,13 +255,15 @@ t_ltp2: personality is kept
 t_ltp2: send on an unconnected TCP socket is EPIPE
 t_ltp2: sendto with a huge address length is EINVAL
 t_mem: 64 MiB of address space
+t_mem: FUTEX_CMP_REQUEUE moves timed waiters across processes
+t_mem: FUTEX_CMP_REQUEUE with a negative count is EINVAL
+t_mem: FUTEX_WAKE on an unmapped word is EFAULT
 t_mem: MAP_SHARED anonymous across fork
-t_mem: MAP_SHARED file mapping across fork
 t_mem: MAP_SHARED file mapped by two processes
-t_mem: read(2) sees a store into a MAP_SHARED mapping
-t_mem: a MAP_SHARED mapping sees write(2)
+t_mem: MAP_SHARED file mapping across fork
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
+t_mem: a MAP_SHARED mapping sees write(2)
 t_mem: file for mapping
 t_mem: futex across fork on a MAP_SHARED page
 t_mem: large malloc and free, many times
@@ -273,11 +275,15 @@ t_mem: mmap a file MAP_PRIVATE
 t_mem: mmap a file MAP_SHARED writes back
 t_mem: mmap anonymous
 t_mem: mmap is zeroed
+t_mem: mmap of a closed descriptor is EBADF
+t_mem: mmap of a file opened write-only is EACCES
 t_mem: mprotect read-only faults on write
 t_mem: mremap grow
 t_mem: munmap
 t_mem: munmap faults on touch
 t_mem: munmap gives address space back
+t_mem: read(2) sees a store into a MAP_SHARED mapping
+t_mem: writable MAP_SHARED of a read-only file is EACCES
 t_misc: /etc/passwd
 t_misc: /proc/meminfo
 t_misc: /proc/self/exe

@@ -42,6 +42,13 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   shared page per page of the file, so separate processes that map the same
   file share it, and `read` and `write` agree with the mapping before it is
   written back. See [docs/design/page-cache.md](docs/design/page-cache.md).
+- `FUTEX_REQUEUE` and `FUTEX_CMP_REQUEUE` move waiters with a timeout too:
+  they used to go back to the old word on their next check of the clock.
+  Negative counts give `EINVAL`, and a futex that is not private on an
+  unmapped word gives `EFAULT`, as on Linux.
+- `mmap` of a file gives `EACCES` when the descriptor was not opened for
+  reading, or for a writable `MAP_SHARED` mapping when it was not opened
+  for writing (or was opened `O_APPEND`).
 - Dynamically linked programs: the kernel loads a PIE's interpreter, and
   carries musl's `libc.so` for `/lib/ld-musl-x86_64.so.1`. `/bin/sh` is
   BusyBox's `ash`, so `system` and `popen` work; `waitid`, `times`.
