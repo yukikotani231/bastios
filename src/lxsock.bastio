@@ -13,6 +13,12 @@ const LX_BIND: u64 = 49;
 const LX_GETSOCKNAME: u64 = 51;
 const LX_GETPEERNAME: u64 = 52;
 const LX_SETSOCKOPT: u64 = 54;
+const LX_GETSOCKOPT: u64 = 55;
+const SOL_SOCKET: u64 = 1;
+const SOL_TCP: u64 = 6;                 // IPPROTO_TCP, as a level
+const SO_TYPE: u64 = 3;
+const SO_ERROR: u64 = 4;
+const ENOPROTOOPT: u64 = 18446744073709551524;      // 2^64 - 92
 const LX_ACCEPT: u64 = 43;
 const LX_SHUTDOWN: u64 = 48;
 const LX_LISTEN: u64 = 50;
@@ -303,6 +309,48 @@ fn lx_sockname(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
   return sin_out(&mut k, pid, addr, lenp, ip, p % 65536);
 }
 
+/// getsockopt(fd, level, name, val, lenp): SO_TYPE says stream or
+/// datagram; SO_ERROR and every other option the kernel accepts and
+/// ignores (setsockopt) read as 0. Options at other levels than
+/// SOL_SOCKET and (on TCP) SOL_TCP are -ENOPROTOOPT.
+fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u64, lenp: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let tcp = is_tcp(k, pid, fd);
+  if !tcp {
+    let sk = sk_look(k, pid, fd);
+    if sk.err != 0 {
+      return sk.err;
+    }
+  }
+  if level != SOL_SOCKET && !(tcp && level == SOL_TCP) {
+    return ENOPROTOOPT;
+  }
+  let mut v = 0;
+  if level == SOL_SOCKET && name == SO_TYPE {
+    v = 2;                                  // SOCK_DGRAM
+    if tcp {
+      v = 1;                                // SOCK_STREAM
+    }
+  }
+  if copy_from_user(&mut k.spaces, pid, lenp, &mut k.fs.xfer, 4) != 4 {
+    return EFAULT;
+  }
+  let room = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1)) + 65536 * cast[u64](bget(k.fs.xfer, 2)) + 16777216 * cast[u64](bget(k.fs.xfer, 3));
+  lx_fill(&mut k, 0, 4);
+  bset(&mut k.fs.xfer, 0, cast[u8](v));
+  let n = smaller(room, 4);
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {
+    return EFAULT;
+  }
+  bset(&mut k.fs.xfer, 0, cast[u8](n));
+  if copy_to_user(&mut k.spaces, pid, lenp, k.fs.xfer, 4) != 4 {
+    return EFAULT;
+  }
+  return 0;
+}
+
 /// The socket system calls. Returns KEEP or SWITCH, as linux_syscall does.
 fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC
@@ -326,6 +374,8 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     r = lx_sockname(&mut k, pid, a, b, c, n == LX_GETPEERNAME);
   } else if n == LX_LISTEN {
     r = lx_listen(&mut k, pid, a);
+  } else if n == LX_GETSOCKOPT {
+    r = lx_getsockopt(&mut k, pid, a, b, c, d, e);
   } else if n == LX_ACCEPT || n == LX_ACCEPT4 {
     let mut fl = 0;
     if n == LX_ACCEPT4 {
@@ -354,6 +404,6 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
 
 fn is_sock_call(n: u64) -> bool {
   return n == LX_SOCKET || n == LX_BIND || n == LX_CONNECT || n == LX_SENDTO || n == LX_RECVFROM
-    || n == LX_GETSOCKNAME || n == LX_GETPEERNAME || n == LX_SETSOCKOPT || n == LX_LISTEN
+    || n == LX_GETSOCKNAME || n == LX_GETPEERNAME || n == LX_SETSOCKOPT || n == LX_GETSOCKOPT || n == LX_LISTEN
     || n == LX_ACCEPT || n == LX_ACCEPT4 || n == LX_SHUTDOWN;
 }

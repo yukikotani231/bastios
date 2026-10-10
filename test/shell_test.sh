@@ -606,6 +606,14 @@ else:
         print("ok   TCP: a refused connection says so")
     else:
         print("FAIL TCP refused"); fails += 1
+    # The same to this machine: the SYN and the reset both go round the
+    # loopback queue, never onto the wire.
+    mark = len(out)
+    qemu.stdin.write(b"tcpget 127.0.0.1 9 x\r"); qemu.stdin.flush()
+    if read_until(b"bastios> ", mark) and b"connection refused" in out[mark:]:
+        print("ok   TCP: loopback to a closed port is refused")
+    else:
+        print("FAIL TCP loopback refused"); fails += 1
     # TCP through Linux system calls (user/mtcp.c, musl): it listens,
     # accepts, reads a line naming a port on this machine and answers it;
     # then it connects to that port, writes, and reads the reply until the
