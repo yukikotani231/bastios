@@ -272,8 +272,45 @@ build/compat/busybox: build/busybox/Makefile test/compat/busybox.config | build/
 	$(MAKE) -C build/compat/bb -s CC=$(MUSLCC) EXTRA_CFLAGS=-fPIE CFLAGS_busybox=-static-pie busybox
 	cp build/compat/bb/busybox $@
 
-build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox test/compat/mkdisk.py
-	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox
+# Real programs, built from their own sources against musl as static PIEs
+# and checked by test/compat/apps.txt: Lua, QuickJS and the sqlite3 shell.
+# sqlite3's sources come from its GitHub mirror, which has no amalgamation:
+# configuring and generating it needs tclsh (the tcl package).
+LUA_GIT       ?= https://github.com/lua/lua
+LUA_TAG       ?= v5.4.7
+QUICKJS_GIT   ?= https://github.com/bellard/quickjs
+QUICKJS_REV   ?= 535a7c250ff4a577ec36c3e103daab6dadeea650
+SQLITE_GIT    ?= https://github.com/sqlite/sqlite
+SQLITE_TAG    ?= version-3.52.0
+COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3
+APP_CFLAGS    := -static-pie -fPIE -O2 -w -s
+
+build/compat/src:
+	mkdir -p $@
+
+build/compat/lua: | build/compat/src
+	rm -rf build/compat/src/lua
+	git clone -q --depth 1 --branch $(LUA_TAG) $(LUA_GIT) build/compat/src/lua
+	$(MUSLCC) $(APP_CFLAGS) -DLUA_USE_LINUX -DMAKE_LUA -o $@ build/compat/src/lua/onelua.c -lm
+
+build/compat/qjs: | build/compat/src
+	rm -rf build/compat/src/quickjs && mkdir build/compat/src/quickjs
+	git -C build/compat/src/quickjs init -q
+	git -C build/compat/src/quickjs fetch -q --depth 1 $(QUICKJS_GIT) $(QUICKJS_REV)
+	git -C build/compat/src/quickjs checkout -q FETCH_HEAD
+	$(MAKE) -C build/compat/src/quickjs -s CC=$(MUSLCC) HOST_CC=$(CC) CONFIG_LTO= qjs >/dev/null
+	cd build/compat/src/quickjs && $(MUSLCC) -static-pie -s -o ../../qjs .obj/qjs.o .obj/repl.o .obj/quickjs.o \
+	  .obj/dtoa.o .obj/libregexp.o .obj/libunicode.o .obj/cutils.o .obj/quickjs-libc.o -lm
+
+build/compat/sqlite3: | build/compat/src
+	rm -rf build/compat/src/sqlite
+	git clone -q --depth 1 --branch $(SQLITE_TAG) $(SQLITE_GIT) build/compat/src/sqlite
+	cd build/compat/src/sqlite && ./configure --disable-tcl >/dev/null && $(MAKE) -s sqlite3.c shell.c >/dev/null
+	$(MUSLCC) $(APP_CFLAGS) -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION -o $@ \
+	  build/compat/src/sqlite/shell.c build/compat/src/sqlite/sqlite3.c -lm
+
+build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) test/compat/mkdisk.py
+	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
 
 compat: build/bastios.elf build/compat/disk.img
 	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --out build/compat $(COMPAT_PROGS)
@@ -283,7 +320,7 @@ compat-baseline: build/bastios.elf build/compat/disk.img
 	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --out build/compat $(COMPAT_PROGS)
 
 # The same checks on this Linux machine: are the expectations right?
-compat-host: $(COMPAT_BINS) build/compat/busybox
+compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
 	test/compat/run.py --host build/compat --out build/compat/host $(COMPAT_PROGS)
 
 # Not part of `make test`: prints timings, checks nothing (see the script).
