@@ -163,7 +163,7 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
     vec_push(&mut fpus, Fpu::None);
     q = q + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), ticks: 0, cpus: cpus, fs: vfs_new() };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), ticks: 0, cpus: cpus, fs: vfs_new() };
   install_files(con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(con, "cannot start the shell\r\n");
@@ -174,7 +174,8 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
     invariant kok(k) && mmu_root(mmu) == KERNEL_ROOT && cur < NPROC
   {
     drain(con, &mut k.q);
-    wake_readers(&mut k.procs, &mut k.q);
+    tty_cook(con, &mut k);
+    wake_readers(&mut k.procs, &mut k.q, k.line);
     let p = pick(k.procs, cur);
     if p == 0 {
       if live_count(k.procs) == 0 {
@@ -243,6 +244,7 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
   free(k.mem.bm);
   free(k.procs);
   free(k.q);
+  free(k.line);
   pool = k.mem.pool;
   return 0;
 }

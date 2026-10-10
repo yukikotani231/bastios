@@ -186,6 +186,16 @@ spec fn qok(q: &Buf) -> bool {
   len(q) == INQ_LEN && get(q, 0) < 256 && get(q, 1) <= 256
 }
 
+// The terminal line for Linux programs: word 0 is how many bytes it holds
+// (at most LINE_MAX), word 1 is 1 once it is finished (Enter or Ctrl-D),
+// and the bytes follow from word 2.
+const LINE_MAX: u64 = 255;
+const LINE_LEN: u64 = 257;
+
+spec fn lineok(l: &Buf) -> bool {
+  len(l) == LINE_LEN && get(l, 0) <= LINE_MAX && get(l, 1) <= 1
+}
+
 fn q_push(q: &mut Buf, b: u64)
   requires qok(q)
   ensures qok(q)
@@ -227,9 +237,10 @@ fn drain(con: &Serial, q: &mut Buf)
   }
 }
 
-/// Hands queued bytes to processes blocked in READ.
-fn wake_readers(procs: &mut Buf, q: &mut Buf)
-  requires len(procs) == PTAB_LEN && qok(q)
+/// Hands queued bytes to processes blocked in READ, and wakes processes
+/// blocked in a Linux read once a whole line is typed.
+fn wake_readers(procs: &mut Buf, q: &mut Buf, line: &Buf)
+  requires len(procs) == PTAB_LEN && qok(q) && lineok(line)
   ensures len(procs) == PTAB_LEN && qok(q)
 {
   let mut p = 1;
@@ -240,8 +251,8 @@ fn wake_readers(procs: &mut Buf, q: &mut Buf)
       pset(&mut procs, p, F_REGS + R_RAX, q_pop(&mut q));
       pset(&mut procs, p, F_STATE, READY);
     }
-    // A Linux read restarts its system call, which takes the bytes itself.
-    if state(procs, p) == LXREADING && get(q, 1) > 0 {
+    // A Linux read restarts its system call, which takes the line itself.
+    if state(procs, p) == LXREADING && get(line, 1) == 1 {
       pset(&mut procs, p, F_STATE, READY);
     }
     p = p + 1;
@@ -258,13 +269,14 @@ struct Kernel {
   fpus: Vec[Fpu],       // element `pid` is that process's FPU state
   procs: Buf,           // the process table
   q: Buf,               // console input waiting for a READ
+  line: Buf,            // the line a Linux program is typing (see tty_cook)
   ticks: u64,           // timer ticks since boot
   cpus: u64,            // processors running, the bootstrap one included
   fs: Vfs,              // files and the open-file table
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && vfs_ok(k.fs)
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && vfs_ok(k.fs)
 }
 
 // ---------------------------------------------------------------- programs
