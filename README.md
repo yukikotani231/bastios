@@ -49,10 +49,23 @@ User programs are linked at `USER_BASE` (0x8000000000) behind a small header (ma
 
 ## Build and run
 
-Requirements: a C compiler and binutils for x86-64, `z3`, `qemu-system-x86_64`, Python 3 (for the test driver), and a built [bastiolang](https://github.com/yukikotani231/bastiolang) checkout next to this one.
+Requirements:
+
+| Tool | Tested with | Notes |
+| --- | --- | --- |
+| [bastiolang](https://github.com/yukikotani231/bastiolang) | `main` | Checked out next to this repository and built; it needs Rust and Z3 (see its README) |
+| C compiler and binutils for x86-64 | GCC 13, binutils 2.42 | Called as `cc` |
+| Z3 | 4.8.12, 5.1.0 | Every kernel and user source is proved at build time |
+| QEMU | 8.2 | `qemu-system-x86_64` |
+| Python 3 | 3.12, 3.13 | Only for the test driver |
+
+Tested on x86-64 Linux (Ubuntu 24.04), which is what CI runs; other platforms are untested. On Ubuntu: `sudo apt-get install z3 build-essential qemu-system-x86 python3`, plus [rustup](https://rustup.rs) for bastiolang.
 
 ```sh
-(cd ../bastiolang/stage0 && cargo build --release)
+git clone https://github.com/yukikotani231/bastiolang
+git clone https://github.com/yukikotani231/bastios
+(cd bastiolang/stage0 && cargo build --release)
+cd bastios
 make          # build/bastios.elf
 make run      # boot on this terminal; Ctrl-A X quits
 make test     # boot in QEMU, type commands over the serial line, check the replies
@@ -86,3 +99,7 @@ v0.2: processes, preemptive round-robin scheduling, system calls and fault isola
 - running out of memory when starting a program fails the spawn cleanly, but the kernel's own arena (for `Buf`) still halts the machine when it runs out.
 
 The direction is in bastiolang's [ROADMAP.md](https://github.com/yukikotani231/bastiolang/blob/main/ROADMAP.md) under "v3: toward a kernel".
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
