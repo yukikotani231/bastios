@@ -307,6 +307,9 @@ fn ram_find(v: &mut Vec[Node], name: &Bytes, n: u64) -> u64
   requires nodes_ok(v) && n <= blen(name)
   ensures nodes_ok(v) && result <= NFILES
 {
+  if n == 0 {
+    return NFILES;              // no file is named "" (orphans are, see ram_orphan)
+  }
   let mut i = 0;
   while i < NFILES
     invariant i <= NFILES && nodes_ok(v)
@@ -555,6 +558,25 @@ fn ram_set_meta(v: &mut Vec[Node], i: u64, mode: u64, mtime: u64) -> bool
     },
   }
   return ok;
+}
+
+/// Takes node i's name away but keeps its data: a file removed while it
+/// is open, which fs.bastio frees at the last close. No name matches it,
+/// lists show it as unused, and no directory holds it.
+fn ram_orphan(v: &mut Vec[Node], i: u64)
+  requires nodes_ok(v) && i < NFILES
+  ensures nodes_ok(v)
+{
+  match take_node(&mut v, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      let mut g = f;
+      let old_name = g.name;
+      g.name = balloc(0);
+      bfree(old_name);
+      put_node(&mut v, i, Node::File(g));
+    },
+  }
 }
 
 /// Removes the file in node i, if there is one.

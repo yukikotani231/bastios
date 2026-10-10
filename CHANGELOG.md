@@ -24,6 +24,10 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
   `utime`, `utimes`, `futimesat` and `utimensat` change them, and `stat`
   reports them with an inode number per file. BusyBox's `chmod`, `touch`
   and `stat` applets are built in.
+- Removing a file that is open works as on Linux: the name goes at once
+  and the data stays readable through the open descriptors until the
+  last one is closed. On the disk such a file is an orphan entry, and a
+  mount frees any a power cut left behind.
 - Renaming files and directories: `vfs_rename`, system call 22, and the
   shell's `mv`. On the disk a rename is one sector write, so a power cut
   leaves the old name or the new one.

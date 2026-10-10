@@ -211,10 +211,13 @@ fn run(big: &Bytes, nl: u64, buf: &mut Bytes, keep_open: bool) -> u64
   if step == 0 && f_write(rd, buf, 1) != NOT_OK {
     step = 6;
   }
-  // 7. A file that is open cannot be removed.
-  if step == 0 && f_unlink(big, nl) != NOT_OK {
+  // 7. A second descriptor reads the same bytes (step 11 removes the
+  // file while one is open).
+  let rd2 = f_open(big, nl, O_READ);
+  if step == 0 && read_check(rd2, &mut buf, 0) != BIG {
     step = 7;
   }
+  f_close(rd2);
   f_close(rd);
   // 8. Appending lands at the end, wherever the offset is.
   let ap = f_open(big, nl, O_WRITE + O_APPEND);
@@ -237,10 +240,16 @@ fn run(big: &Bytes, nl: u64, buf: &mut Bytes, keep_open: bool) -> u64
     step = 10;
   }
   f_close(ho);
-  // 11. Removing it; then it is gone.
+  // 11. Removing it while it is open: the name is gone at once, and the
+  // open descriptor still reads the data until it is closed (as on Linux).
+  let op = f_open(big, nl, O_READ);
   if step == 0 && (f_unlink(big, nl) != 0 || f_stat(big, nl) != NOT_OK || f_open(big, nl, O_READ) != NOT_OK) {
     step = 11;
   }
+  if step == 0 && (f_read(op, &mut buf) != 4096 || cast[u64](bget(buf, 0)) != pat(0)) {
+    step = 11;
+  }
+  f_close(op);
   // 12. Eight descriptors per process, then no more.
   let mut i = 0;
   let mut opened = 0;
