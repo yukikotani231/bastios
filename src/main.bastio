@@ -78,8 +78,9 @@ enum Job { Stop, Idle, Run(Task) }
 
 /// Under the lock: what this processor does next. Starting at `from`
 /// (round robin), takes the next READY process out, with its registers and
-/// FPU state loaded into `cpu`, and marks it RUNNING.
-fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, from: u64) -> Job
+/// FPU state loaded into `cpu`, and marks it RUNNING. With `poll`, first
+/// polls the network card and hands typed input to waiting readers.
+fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, from: u64, poll: bool) -> Job
   requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
   ensures sys_ok(s)
   ensures result is Job::Run ==> (pt_level(result.Run.root) == 4 && 1 <= result.Run.pid && result.Run.pid < NPROC)
@@ -87,12 +88,13 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, from: u64) -> Job
   if s.stop {
     return Job::Stop;
   }
-  nic_poll(&mut s.k.nic);
-  net_wake(&mut s.k);
-  drain(&mut s.con, &mut s.k.q);
-  tty_intr(&mut s.con, &mut s.k);
-  tty_cook(&mut s.con, &mut s.k);
-  wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
+  if poll {
+    nic_poll(&mut s.k.nic);
+    net_wake(&mut s.k);
+    tty_intr(&mut s.con, &mut s.k);
+    tty_cook(&mut s.con, &mut s.k);
+    wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
+  }
   let p = pick(s.k.procs, from);
   if p == 0 {
     if live_count(s.k.procs) == 0 {
@@ -225,29 +227,188 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, t: Task, v: u64) -> u64
 
 /// The scheduler loop each processor runs, with its own `cpu` and `mmu`,
 /// until the kernel stops (no process left, or a power off).
-fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys])
+// What `turn` hands back: the next job, and where the round robin goes on.
+struct Next { job: Job, from: u64 }
+
+/// `finish` for task `t`, then `next_job` from where it leaves the round
+/// robin, in one critical section, so a system call costs one round trip
+/// of the lock. Publishes how much console output waits in `pend`.
+fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, t: Task, v: u64, poll: bool, pend: &Atomic[u64]) -> Next
+  requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
+  requires pt_level(t.root) == 4 && 1 <= t.pid && t.pid < NPROC
+  ensures sys_ok(s) && result.from < NPROC
+  ensures result.job is Job::Run ==> (pt_level(result.job.Run.root) == 4 && 1 <= result.job.Run.pid && result.job.Run.pid < NPROC)
+{
+  let c = finish(&mut s, &mut cpu, mmu, t, v);
+  let j = next_job(&mut s, &mut cpu, mmu, c, poll);
+  atomic_store(pend, s.con.n);
+  return Next { job: j, from: c };
+}
+
+/// `next_job`, then publishes how much console output waits in `pend`.
+fn next_job_p(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, from: u64, poll: bool, pend: &Atomic[u64]) -> Job
+  requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
+  ensures sys_ok(s)
+  ensures result is Job::Run ==> (pt_level(result.Run.root) == 4 && 1 <= result.Run.pid && result.Run.pid < NPROC)
+{
+  let j = next_job(&mut s, &mut cpu, mmu, from, poll);
+  atomic_store(pend, s.con.n);
+  return j;
+}
+
+/// `idled`, then publishes how much console output waits in `pend`.
+fn idled_p(s: &mut Sys, v: u64, pend: &Atomic[u64])
+  requires sys_ok(s)
+  ensures sys_ok(s)
+{
+  idled(&mut s, v);
+  atomic_store(pend, s.con.n);
+}
+
+/// `finish`, then publishes how much console output waits in `pend`.
+fn finish_p(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, t: Task, v: u64, pend: &Atomic[u64]) -> u64
+  requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
+  requires pt_level(t.root) == 4 && 1 <= t.pid && t.pid < NPROC
+  ensures sys_ok(s) && result < NPROC
+{
+  let c = finish(&mut s, &mut cpu, mmu, t, v);
+  atomic_store(pend, s.con.n);
+  return c;
+}
+
+// The most bytes `pump` moves per round, each way.
+const CHUNK: u64 = 256;
+
+/// Under the kernel lock, for `pump`: queues the rn bytes received in rx as
+/// typed input, and moves the next chunk of output into tx. Returns how
+/// many bytes of tx to send.
+fn exchange(s: &mut Sys, tx: &mut Bytes, rx: &Bytes, rn: u64, pend: &Atomic[u64]) -> u64
+  requires sys_ok(s)
+  ensures sys_ok(s)
+{
+  if rn > 0 {
+    let mut i = 0;
+    while i < rn && i < blen(rx)
+      invariant sys_ok(s)
+    {
+      q_push(&mut s.k.q, cast[u64](bget(rx, i)));
+      i = i + 1;
+    }
+    tty_intr(&mut s.con, &mut s.k);
+    tty_cook(&mut s.con, &mut s.k);
+    wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
+  }
+  let n = con_take(&mut s.con, &mut tx);
+  if con_room(s.con) >= OUTCAP / 2 {
+    wake_writers(&mut s.k.procs);
+  }
+  atomic_store(pend, s.con.n);
+  return n;
+}
+
+/// Under the console devices' lock: moves output from the kernel's ring to
+/// the devices, and typed bytes into the kernel, a chunk at a time. The
+/// kernel lock is taken only to move the bytes (`exchange`); the device
+/// I/O, two port accesses per byte on the serial line and slow on a real
+/// one, happens with it free, so the other processors go on. Stops after a
+/// bounded number of chunks so a busy writer cannot keep this processor
+/// here.
+fn pump(t: &mut Term, s: &Lock[Sys], pend: &Atomic[u64])
+  requires term_ok(t)
+  ensures term_ok(t)
+{
+  let mut tx = balloc(CHUNK);
+  let mut rx = balloc(CHUNK);
+  let mut rounds = 0;
+  let mut more = true;
+  while more && rounds < 16
+    invariant term_ok(t) && blen(rx) == CHUNK
+  {
+    let mut rn = 0;
+    let mut c = 0;
+    while c < 256 && rn < CHUNK
+      invariant term_ok(t) && rn <= CHUNK && blen(rx) == CHUNK
+    {
+      c = term_poll(&mut t);
+      if c < 256 {
+        bset(&mut rx, rn, cast[u8](c));
+        rn = rn + 1;
+      }
+    }
+    let tn = locked(s, exchange, &mut tx, rx, rn, pend);
+    term_send(&mut t, tx, tn);
+    more = tn == CHUNK || rn == CHUNK;
+    rounds = rounds + 1;
+  }
+  bfree(tx);
+  bfree(rx);
+}
+
+/// Pumps the console if no other processor is already doing it. One that
+/// is will see any output queued meanwhile on its next round, or the next
+/// processor to finish a turn will.
+fn try_pump(u: &Lock[Term], s: &Lock[Sys], pumping: &Atomic[bool], pend: &Atomic[u64]) {
+  if atomic_cas(pumping, false, true) {
+    locked(u, pump, s, pend);
+    atomic_store(pumping, false);
+  }
+}
+
+/// The scheduler loop each processor runs, with its own `cpu` and `mmu`,
+/// until the kernel stops (no process left, or a power off).
+fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &Atomic[bool], pend: &Atomic[u64])
   requires mmu_root(mmu) == KERNEL_ROOT
   ensures mmu_root(mmu) == KERNEL_ROOT
 {
   let mut cur = 1;
   let mut going = true;
+  let mut j = locked(s, next_job_p, &mut cpu, mmu, cur, true, pend);
   while going
     invariant mmu_root(mmu) == KERNEL_ROOT && cur < NPROC
+    invariant j is Job::Run ==> (pt_level(j.Run.root) == 4 && 1 <= j.Run.pid && j.Run.pid < NPROC)
   {
-    let j = locked(s, next_job, &mut cpu, mmu, cur);
+    // Devices are polled after an interrupt or idle wait, not after a
+    // system call: every processor's timer interrupts often enough, and
+    // polling on every call would put port I/O in the hottest critical
+    // section.
+    let mut poll = true;
     match j {
-      Job::Stop => { going = false; },
+      Job::Stop => {
+        going = false;
+        j = Job::Stop;
+      },
       Job::Idle => {
-        let v = cpu_idle(&mut cpu);
-        locked(s, idled, v);
+        // Nothing to run: pump the console if it has output and no other
+        // processor is at it, else sleep until an interrupt.
+        if atomic_load(pend) == 0 || atomic_load(pumping) {
+          let v = cpu_idle(&mut cpu);
+          locked(s, idled_p, v, pend);
+        }
+        j = locked(s, next_job_p, &mut cpu, mmu, cur, true, pend);
       },
       Job::Run(t) => {
         mmu_switch(&mut mmu, t.root);
         let v = cpu_run(&mut cpu, mmu);
         mmu_kernel(&mut mmu);
-        cur = locked(s, finish, &mut cpu, mmu, t, v);
+        poll = v != V_SYSCALL && v != V_LINUX;
+        let next = locked(s, turn, &mut cpu, mmu, t, v, poll, pend);
+        cur = next.from;
+        j = next.job;
       },
     }
+    // After an interrupt the devices may have input; after any turn there
+    // may be output.
+    if poll || atomic_load(pend) > 0 {
+      try_pump(u, s, pumping, pend);
+    }
+  }
+  // Only Stop ends the loop; a task here would be put back as after a tick.
+  match j {
+    Job::Run(t) => {
+      let c = locked(s, finish_p, &mut cpu, mmu, t, V_TIMER, pend);
+    },
+    Job::Idle => {},
+    Job::Stop => {},
   }
 }
 
@@ -352,7 +513,8 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let fb_h = boot_fb(cpu, 3);
   let fb_hi = fb_lo + fb_pitch * fb_h;
   let screen = screen_new(&mut win, fb_lo, fb_hi, fb_pitch, boot_fb(cpu, 2), fb_h, boot_fb(cpu, 4));
-  let mut con = Con { uart: uart, screen: screen, kbd: kbd };
+  let mut term = Term { uart: uart, screen: screen, kbd: kbd };
+  let mut con = con_new();
   pic_init(&mut pic);
   pit_init(&mut pit, 100);
   puts(&mut con, "\r\nBastiOS 0.2: ");
@@ -367,7 +529,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   // The allocator takes the pool for as long as the kernel runs and gives
   // it back at power off.
-  if screen_on(con.screen) {
+  if screen_on(term.screen) {
     puts(&mut con, "screen: ");
     put_num(&mut con, boot_fb(cpu, 2));
     puts(&mut con, "x");
@@ -421,9 +583,16 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   // Every processor runs the scheduler until the kernel stops; then they
   // are all back in their park loops and the state is this one's again.
+  con_flush(&mut term, &mut con);
   let sl = lock_new(Sys { k: k, con: con, pic: pic, clock: clock, stop: false });
-  smp_run(sched, &mut cpu, &mut mmu, sl);
+  let tl = lock_new(term);
+  let pumping = atomic_new(false);
+  let pend = atomic_new(0);
+  smp_run(sched, &mut cpu, &mut mmu, sl, tl, pumping, pend);
   let mut sys = lock_end(sl);
+  let mut devices = lock_end(tl);
+  atomic_end(pumping);
+  atomic_end(pend);
   // Power off: tear down whatever is left, so every page goes back.
   while vec_len(sys.k.spaces) > 0
     invariant mem_ok(sys.k.mem) && mmu_root(mmu) == KERNEL_ROOT
@@ -446,6 +615,8 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   puts(&mut sys.con, "BastiOS: ");
   put_num(&mut sys.con, count_free(sys.k.mem.bm));
   puts(&mut sys.con, " pages free at power off\r\n");
+  con_flush(&mut devices, &mut sys.con);
+  con_free(sys.con);
   free(sys.k.mem.bm);
   free(sys.k.procs);
   free(sys.k.q);
@@ -457,10 +628,10 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.cwd);
   free(sys.k.dpath);
   pool = sys.k.mem.pool;
-  port_release(&mut ports, sys.con.uart.io);
-  port_release(&mut ports, sys.con.kbd.data);
-  port_release(&mut ports, sys.con.kbd.status);
-  screen_free(&mut win, sys.con.screen);
+  port_release(&mut ports, devices.uart.io);
+  port_release(&mut ports, devices.kbd.data);
+  port_release(&mut ports, devices.kbd.status);
+  screen_free(&mut win, devices.screen);
   port_release(&mut ports, sys.pic.master);
   port_release(&mut ports, sys.pic.slave);
   port_release(&mut ports, pit.io);
