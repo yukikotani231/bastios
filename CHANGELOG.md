@@ -37,8 +37,11 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   memory stay per process.
 - A `MAP_SHARED` file mapping is shared with `fork`'s child the same way:
   both see each other's writes at once. It is still written back to the
-  file at `msync`, `munmap` and exit; a process that maps the file on its
-  own still gets a copy (there is no page cache).
+  file at `msync`, `munmap` and exit.
+- A page cache (`src/pcache.bastio`): a `MAP_SHARED` file mapping maps one
+  shared page per page of the file, so separate processes that map the same
+  file share it, and `read` and `write` agree with the mapping before it is
+  written back. See [docs/design/page-cache.md](docs/design/page-cache.md).
 - Dynamically linked programs: the kernel loads a PIE's interpreter, and
   carries musl's `libc.so` for `/lib/ld-musl-x86_64.so.1`. `/bin/sh` is
   BusyBox's `ash`, so `system` and `popen` work; `waitid`, `times`.
