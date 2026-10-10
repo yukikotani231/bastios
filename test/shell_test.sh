@@ -230,6 +230,9 @@ steps = [
     ("mkdir sub; cd sub && /bin/pwd && cd ../.. && /bin/pwd; ls dd", [b"\r\n/dd/sub\r\n/\r\n", b"sub"], b"\n# "),
     ("rmdir dd; echo r=$?", [b"not empty", b"r=1"], b"\n# "),
     ("rm dd/f; rmdir dd/sub dd; test -d dd || echo gone$((1+1))", b"\r\ngone2\r\n", b"\n# "),
+    # The *at calls relative to a directory descriptor, and fchdir
+    # (user/mdir.c).
+    ("mdir", b"mdir: ok in /dx", b"\n# "),
     ("exit 5", b"[exit 5]"),
     ("rm lxout", b""),
     ("sh", b"BastiOS 0.2 -- type"),

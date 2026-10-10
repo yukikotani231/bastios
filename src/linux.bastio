@@ -34,6 +34,8 @@ const LX_OPENAT: u64 = 257;
 const LX_STAT: u64 = 4;
 const LX_LSTAT: u64 = 6;
 const LX_ACCESS: u64 = 21;
+const LX_FACCESSAT: u64 = 269;
+const LX_FACCESSAT2: u64 = 439;
 const LX_NEWFSTATAT: u64 = 262;
 const LX_RT_SIGACTION: u64 = 13;
 const LX_RT_SIGPROCMASK: u64 = 14;
@@ -252,23 +254,25 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_OPEN {
-    ret(&mut k.procs, pid, lx_open(&mut k, pid, a, b));
+    ret(&mut k.procs, pid, lx_open(&mut k, pid, AT_FDCWD, a, b));
     return KEEP;
   }
   if n == LX_OPENAT {
-    ret(&mut k.procs, pid, lx_open(&mut k, pid, b, c));   // one flat directory: dirfd is ignored
+    ret(&mut k.procs, pid, lx_open(&mut k, pid, a, b, c));
     return KEEP;
   }
   if n == LX_UNLINK || n == LX_UNLINKAT {
     let mut path = a;
+    let mut dirfd = AT_FDCWD;
     if n == LX_UNLINKAT {
-      path = b;                             // dirfd ignored, as for openat
+      path = b;
+      dirfd = a;
     }
     if n == LX_UNLINKAT && c & AT_REMOVEDIR != 0 {
-      ret(&mut k.procs, pid, lx_rmdir(&mut k, pid, path));
+      ret(&mut k.procs, pid, lx_rmdir(&mut k, pid, dirfd, path));
       return KEEP;
     }
-    ret(&mut k.procs, pid, lx_unlink(&mut k, pid, path));
+    ret(&mut k.procs, pid, lx_unlink(&mut k, pid, dirfd, path));
     return KEEP;
   }
   if n == LX_CLOSE {
@@ -298,7 +302,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_STAT || n == LX_LSTAT {
-    ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b));
+    ret(&mut k.procs, pid, lx_stat(&mut k, pid, AT_FDCWD, a, b));
     return KEEP;
   }
   if n == LX_NEWFSTATAT {
@@ -306,8 +310,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if r10 / AT_EMPTY_PATH % 2 == 1 && lx_path_in(&mut k, pid, b) == 0 {
       ret(&mut k.procs, pid, lx_fstat(&mut k, pid, a, c));      // fstat by another name
     } else {
-      // Relative paths start at "/", the only working directory there is.
-      ret(&mut k.procs, pid, lx_stat(&mut k, pid, b, c));
+      ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b, c));
     }
     return KEEP;
   }
@@ -319,8 +322,12 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, lx_getdents(&mut k, pid, a, b, c));
     return KEEP;
   }
+  if n == LX_FACCESSAT || n == LX_FACCESSAT2 {
+    ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b, 0));
+    return KEEP;
+  }
   if n == LX_ACCESS {
-    ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, 0));   // everyone may do anything
+    ret(&mut k.procs, pid, lx_stat(&mut k, pid, AT_FDCWD, a, 0));   // everyone may do anything
     return KEEP;
   }
   if n == LX_FORK || n == LX_VFORK || (n == LX_CLONE && a == SIGCHLD && b == 0) {
@@ -747,6 +754,62 @@ fn lx_path_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
+  return lx_path_from(&mut k, pid, va, OFD_N);
+}
+
+/// lx_path_in for the *at calls: a relative path starts at directory
+/// descriptor dirfd, or at the working directory for AT_FDCWD. NO_RESULT
+/// for a relative path and a dirfd that is not an open directory.
+fn lx_path_at(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  return lx_path_from(&mut k, pid, va, dir_ofd(k, pid, dirfd));
+}
+
+/// The base a relative path of an *at call starts from: OFD_N for the
+/// working directory, a directory description, or OFD_N + 1 for none.
+fn dir_ofd(k: &Kernel, pid: u64, dirfd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= OFD_N + 1
+{
+  if dirfd % 0x100000000 == AT_FDCWD {
+    return OFD_N;
+  }
+  let v = fd_get(k.lxfd, pid, dirfd) % FD_CLOEXEC;
+  if v < FD_OFD || v - FD_OFD >= OFD_N || of_get(k.ofd, v - FD_OFD, 0) != OF_DIR {
+    return OFD_N + 1;
+  }
+  return v - FD_OFD;
+}
+
+/// The length of the base path h names (see dir_ofd), and its bytes.
+fn base_len(k: &Kernel, pid: u64, h: u64) -> u64
+  requires kok(k) && pid < NPROC && h <= OFD_N
+  ensures result <= FNAME_MAX
+{
+  if h == OFD_N {
+    return smaller(get(k.cwd, pid * CWD_STRIDE), FNAME_MAX);
+  }
+  return smaller(get(k.dpath, h * CWD_STRIDE), FNAME_MAX);
+}
+
+fn base_byte(k: &Kernel, pid: u64, h: u64, i: u64) -> u8
+  requires kok(k) && pid < NPROC && h <= OFD_N && i < FNAME_MAX
+{
+  if h == OFD_N {
+    return cast[u8](get(k.cwd, pid * CWD_STRIDE + 1 + i) % 256);
+  }
+  return cast[u8](get(k.dpath, h * CWD_STRIDE + 1 + i) % 256);
+}
+
+/// lx_path_in from base h (see dir_ofd).
+fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
   if va < USER_BASE || va >= USER_BASE + USER_SIZE {
     return NO_RESULT;
   }
@@ -772,11 +835,15 @@ fn lx_path_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   let mut out = balloc(PATH_OUT);
   let mut o = 0;
   if bget(k.fs.xfer, 0) != 47 {
-    let cl = smaller(get(k.cwd, pid * CWD_STRIDE), FNAME_MAX);
+    if h > OFD_N {
+      bfree(out);
+      return NO_RESULT;                     // relative to no directory
+    }
+    let cl = base_len(k, pid, h);
     while o < cl
-      invariant o <= cl && cl <= FNAME_MAX && blen(out) == PATH_OUT && kok(k) && pid < NPROC
+      invariant o <= cl && cl <= FNAME_MAX && blen(out) == PATH_OUT && kok(k) && pid < NPROC && h <= OFD_N
     {
-      bset(&mut out, o, cast[u8](get(k.cwd, pid * CWD_STRIDE + 1 + o) % 256));
+      bset(&mut out, o, base_byte(k, pid, h, o));
       o = o + 1;
     }
   }

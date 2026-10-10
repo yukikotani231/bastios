@@ -296,11 +296,11 @@ fn fd_install(k: &mut Kernel, pid: u64, h: u64) -> u64
 
 /// open / openat: the native flags for Linux `flags`, then vfs_open, and
 /// a description for the row.
-fn lx_open(k: &mut Kernel, pid: u64, path: u64, flags: u64) -> u64
+fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let n = lx_path_in(&mut k, pid, path);
+  let n = lx_path_at(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return ENOENT;
   }
@@ -311,6 +311,7 @@ fn lx_open(k: &mut Kernel, pid: u64, path: u64, flags: u64) -> u64
     if hd >= OFD_N {
       return ENFILE;
     }
+    name_keep(&mut k.dpath, DPATH_LEN, hd, k.fs.xfer, n);   // for *at calls and fchdir
     return fd_install(&mut k, pid, hd);
   }
   let acc = flags % 4;
