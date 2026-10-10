@@ -8,6 +8,9 @@
 #include <sys/sem.h>
 #include <sys/shm.h>
 #include <sys/wait.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 struct m { long type; char text[64]; };
@@ -179,6 +182,30 @@ static int shm_errors(void) {
     return ok;
 }
 
+static int slurp(const char *path, char *buf, int n) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    int got = (int)fread(buf, 1, n - 1, f);
+    fclose(f);
+    buf[got < 0 ? 0 : got] = 0;
+    return got > 0;
+}
+
+static int proc_files(void) {
+    char buf[2048];
+    int ok = slurp("/proc/sys/kernel/shmmax", buf, sizeof buf) && strtoul(buf, 0, 10) >= 4096;
+    ok = ok && slurp("/proc/sys/kernel/sem", buf, sizeof buf);
+    int id = shmget(0x515a, 4096, IPC_CREAT | 0600);
+    char want[32];
+    snprintf(want, sizeof want, " %d ", id);
+    ok = ok && id >= 0 && slurp("/proc/sysvipc/shm", buf, sizeof buf)
+        && strncmp(buf, "       key      shmid", 20) == 0
+        && strstr(buf, "     20826 ") != 0 && strstr(buf, want) != 0;            /* 0x515a = 20826 */
+    shmctl(id, IPC_RMID, 0);
+    ok = ok && slurp("/proc/sysvipc/msg", buf, sizeof buf) && slurp("/proc/sysvipc/sem", buf, sizeof buf);
+    return ok;
+}
+
 int main(void) {
     setup();
     EXPECT("msgsnd, msgrcv and IPC_STAT", queue_basics());
@@ -193,5 +220,6 @@ int main(void) {
     EXPECT("SEM_UNDO is undone at exit", sem_undo());
     EXPECT("shmat, a second view, fork, IPC_RMID", shm_basics());
     EXPECT("shmget and shmat errors", shm_errors());
+    EXPECT("/proc/sysvipc and /proc/sys/kernel limits", proc_files());
     return done();
 }

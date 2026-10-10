@@ -463,8 +463,10 @@ const LO_TMPFILE: u64 = 0x400000;      // with LO_DIRECTORY: an unnamed file, wh
 const EOPNOTSUPP: u64 = 18446744073709551521; // 2^64 - 95
 const ENOSPC: u64 = 18446744073709551588;    // 2^64 - 28
 const EROFS: u64 = 18446744073709551586;     // 2^64 - 30
+const ENOTBLK: u64 = 18446744073709551601;   // 2^64 - 15
+const EBUSY: u64 = 18446744073709551600;     // 2^64 - 16
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
-const NAPPLETS: u64 = 20;
+const NAPPLETS: u64 = 23;
 const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----
 const S_IFIFO: u64 = 0x1180;           // a FIFO, rw-------
 const S_IFSOCK: u64 = 0xC1B6;          // a socket, rw-rw-rw-
@@ -570,7 +572,7 @@ spec fn kok(k: &Kernel) -> bool {
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 27;
+const NPROGS: u64 = 28;
 const LDSO_PROG: u64 = 25;            // musl's dynamic linker, the interpreter of musl programs
 
 fn prog_name(i: u64) -> Str {
@@ -655,6 +657,9 @@ fn prog_name(i: u64) -> Str {
   if i == 26 {
     return "diskbench";
   }
+  if i == 27 {
+    return "mkfs.bstdisk3";
+  }
   return "(file)";                    // a program loaded from a file
 }
 
@@ -736,6 +741,9 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 26 {
     return include_bytes("../build/user/diskbench.bin");
+  }
+  if i == 27 {
+    return include_bytes("../build/user/mkfs.elf");
   }
   return include_bytes("../build/user/fault.bin");
 }
@@ -917,7 +925,7 @@ fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, pid: u64, sr
     r = r + 1;
   }
   pset(&mut procs, pid, F_PROG, NPROGS);       // a file: NPROGS + 1 + its handle, for /proc/PID/exe
-  if src.file && src.f < NFILES + DSLOTS {
+  if src.file && src.f < HFILES {
     pset(&mut procs, pid, F_PROG, NPROGS + 1 + src.f);
   }
   if !src.file {

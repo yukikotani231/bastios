@@ -1031,7 +1031,8 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     drop_fpu(&mut sys.k.mem, vec_pop(&mut sys.k.fpus));
   }
   vec_free(sys.k.fpus);
-  blk_free(&mut ports, &mut win, vfs_free(sys.k.fs, &mut sys.k.mem), &mut sys.k.mem);
+  let dk = vfs_free(sys.k.fs, &mut sys.k.mem, &mut ports, &mut win);
+  blk_free(&mut ports, &mut win, dk, &mut sys.k.mem);
   nic_free(&mut ports, &mut win, sys.k.nic, &mut sys.k.mem);
   usb_off(&mut devices.usb, &mut win, &mut sys.k.mem);
   puts(&mut sys.con, "BastiOS: ");

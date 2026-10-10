@@ -117,10 +117,10 @@ const S_IFREG: u64 = 0x81A4;                // a regular file, rw-r--r--
 const S_IFMT_DIR: u64 = 0x4000;             // the type bits of a directory
 const S_IFMT_REG: u64 = 0x8000;             // and of a regular file
 // Inode numbers: directories 1 + their DIR_* number (at most 1 + DIR_VFS +
-// VDIR_DISK), then the built-in programs, then files (past both), then
-// /proc (INO_PROC, 4096 up).
-const INO_PROGS: u64 = 1536;                // the built-in programs: this + the program
-const INO_FILES: u64 = 2048;                // files: this + the handle
+// VDIR_LO), then the built-in programs, then files (past both), then
+// /proc (INO_PROC, 8192 up).
+const INO_PROGS: u64 = 2304;                // the built-in programs: this + the program
+const INO_FILES: u64 = 2560;                // files: this + the handle (below INO_PROC)
 
 // ---------------------------------------------------------------- user memory
 
@@ -1622,9 +1622,9 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
 /// with MAP_SHARED (they are written back at msync, munmap and exit). A
 /// MAP_SHARED mapping, of a file or anonymous, is made of shared pages,
 /// which fork maps in the child too instead of copying: parent and child
-/// see each other's writes. Two separate mmaps of one file do not share
-/// pages (there is no page cache). The address hint without MAP_FIXED is
-/// ignored.
+/// see each other's writes. A MAP_SHARED file mapping maps the page
+/// cache's pages, so every process that maps the same part of the file
+/// shares them too. The address hint without MAP_FIXED is ignored.
 fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -1650,6 +1650,9 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   }
   let pages = (n + 4095) / 4096;
   let sh = flags % 4 == MAP_SHARED;
+  // A shared file mapping maps the page cache's pages (src/pcache.bastio)
+  // instead of fresh ones.
+  let cached = sh && !anon && f != NO_FILE;
   let mut at = 0;
   if flags / MAP_FIXED % 2 == 1 {
     if addr % 4096 != 0 || addr < USER_BASE || addr - USER_BASE > STACK_FIRST * 4096 || pages > STACK_FIRST - (addr - USER_BASE) / 4096 {
@@ -1659,7 +1662,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // What was there goes, read-only pages too: the new mapping is writable.
     map_forget(&mut k, pid, at / 4096, at / 4096 + pages, false);
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
-    if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
+    if !cached && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
       return ENOMEM;
     }
   } else {
@@ -1675,7 +1678,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // Fresh PROT_NONE memory is only address space: its pages are mapped
     // when an mprotect makes them usable (lx_mprotect), and touching it
     // before that faults, as on Linux.
-    let reserve = anon && prot == 0;
+    let reserve = (anon && prot == 0) || cached;
     if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096, sh) {
       return ENOMEM;
     }
@@ -1686,6 +1689,18 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     if prot != 0 {
       read_only(&mut k, pid, at / 4096, pages, prot);
     }
+    return USER_BASE + at;
+  }
+  if cached {
+    if at / 4096 > WPAGES || pages > WPAGES - at / 4096 {
+      return ENOMEM;
+    }
+    let r = lx_map_file_shared(&mut k, pid, at / 4096, pages, f, off);
+    if r != 0 {
+      return r;
+    }
+    map_record(&mut k, pid, fd, at / 4096, pages, off);
+    read_only(&mut k, pid, at / 4096, pages, prot);
     return USER_BASE + at;
   }
   let total = pages * 4096;
@@ -1743,6 +1758,9 @@ fn row_file(v: &Vfs, row: u64) -> u64
   }
   if fs == FS_DISK && node < DSLOTS {
     return NFILES + node;
+  }
+  if fs == FS_LO && node < DSLOTS {
+    return LO0 + node;
   }
   return NO_FILE;
 }
