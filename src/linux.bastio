@@ -225,6 +225,8 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       r = lx_file_read(&mut k, pid, d.x, va, cnt);
     } else if d.kind == K_PIPE_R {
       r = pipe_read(&mut k, pid, d.x, va, cnt);
+    } else if d.kind == K_DEV && d.x >= PROC_DEV {
+      r = proc_read(&mut k, pid, a, d.x, va, cnt);
     } else if d.kind == K_DEV {
       r = dev_read(&mut k, pid, d.x, va, cnt);
     } else if d.kind == K_SOCK {
@@ -428,6 +430,10 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if n == LX_GETCWD {
     ret(&mut k.procs, pid, lx_getcwd(&mut k, pid, a, b));
+    return KEEP;
+  }
+  if is_procfs_call(n) {
+    ret(&mut k.procs, pid, lx_procfs_call(&mut k, pid, n, a, b, c));
     return KEEP;
   }
   if is_dir_call(n) {
@@ -1065,7 +1071,7 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64) -> u64
     c = c + 1;
   }
   bfree(out);
-  return o;
+  return proc_self(&mut k.fs.xfer, o, pid);   // "proc/self" is the caller's /proc/PID
 }
 
 /// lseek: SEEK_SET (0), SEEK_CUR (1) and SEEK_END (2), with a signed

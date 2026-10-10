@@ -543,8 +543,15 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
   if dev != DEV_NONE {
     return dev_meta(dev);
   }
+  let pf = proc_file(k.procs, k.fs.xfer, n);
+  if pf != 0 {
+    return proc_meta(pf);
+  }
   let dir = dir_at(&mut k, n);
   if dir != NO_FILE {
+    if dir >= DIR_PROC {
+      return proc_dir_meta(dir);
+    }
     if dir >= DIR_VFS {
       let dm = vfs_meta(&mut k.fs, dir - DIR_VFS);
       return Meta { ok: true, mode: S_IFMT_DIR + dm.mode % 4096, size: 0, ino: 1 + dir, mtime: dm.mtime };
