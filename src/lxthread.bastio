@@ -562,13 +562,24 @@ fn futex_requeue(k: &mut Kernel, pid: u64, addr: u64, to: u64, n: u64) -> u64
   while q < NPROC && moved < n
     invariant 1 <= q && q <= NPROC && moved <= n && moved < q && kok(k)
   {
-    if q != pid && futex_waiting(k.procs, q, g, addr) {
+    // A timed waiter between two tries (futex_polling) keeps the key it
+    // finds in F_FUTEX on its next try (lx_futex), so it moves too.
+    if q != pid && (futex_waiting(k.procs, q, g, addr) || futex_polling(k.procs, q, g, addr)) {
       pset(&mut k.procs, q, F_FUTEX, to);
       moved = moved + 1;
     }
     q = q + 1;
   }
   return moved;
+}
+
+/// Whether the 4 bytes at addr of pid can be read.
+fn user_mapped(k: &mut Kernel, pid: u64, addr: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let w = user_u32(&mut k, pid, addr);
+  return w.ok;
 }
 
 /// futex(addr, op, val, timeout or val2, addr2, val3).
@@ -584,12 +595,28 @@ fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) ->
     ret(&mut k.procs, pid, EINVAL);
     return KEEP;
   }
+  // A futex that is not private is known by its page, so as on Linux a
+  // word that is not mapped (or PROT_NONE, which maps nothing) fails.
+  if op & FUTEX_PRIVATE == 0 && (cmd == FUTEX_WAKE || cmd == FUTEX_WAKE_BITSET || cmd == FUTEX_REQUEUE || cmd == FUTEX_CMP_REQUEUE)
+    && !user_mapped(&mut k, pid, addr) {
+    ret(&mut k.procs, pid, EFAULT);
+    return KEEP;
+  }
   let key = futex_key(&mut k, pid, addr, op);
   if cmd == FUTEX_WAKE || cmd == FUTEX_WAKE_BITSET {
     ret(&mut k.procs, pid, futex_wake(&mut k, pid, key, val));
     return KEEP;
   }
   if cmd == FUTEX_REQUEUE || cmd == FUTEX_CMP_REQUEUE {
+    // The counts are ints: a negative one is refused.
+    if val % 0x100000000 >= 0x80000000 || arg4 % 0x100000000 >= 0x80000000 {
+      ret(&mut k.procs, pid, EINVAL);
+      return KEEP;
+    }
+    if op & FUTEX_PRIVATE == 0 && !user_mapped(&mut k, pid, addr2) {
+      ret(&mut k.procs, pid, EFAULT);
+      return KEEP;
+    }
     if cmd == FUTEX_CMP_REQUEUE {
       let w = user_u32(&mut k, pid, addr);
       if !w.ok {
@@ -607,7 +634,7 @@ fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) ->
     }
     let key2 = futex_key(&mut k, pid, addr2, op);
     let woken = futex_wake(&mut k, pid, key, val);
-    let moved = futex_requeue(&mut k, pid, key, key2, arg4);
+    let moved = futex_requeue(&mut k, pid, key, key2, arg4 % 0x100000000);
     if cmd == FUTEX_CMP_REQUEUE {
       ret(&mut k.procs, pid, woken + moved);
     } else {
@@ -667,12 +694,17 @@ fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) ->
       return KEEP;
     }
     let r = wait_until(&mut k, pid, LX_FUTEX, dl);
-    pset(&mut k.procs, pid, F_FUTEX, key);
+    // On a later try F_FUTEX may name another word: a requeue moved it.
+    if was == 0 {
+      pset(&mut k.procs, pid, F_FUTEX, key);
+    }
     return r;
   }
   let r = lx_retry(&mut k, pid, LX_FUTEX);
   if r == SWITCH {
-    pset(&mut k.procs, pid, F_FUTEX, key);
+    if was == 0 {
+      pset(&mut k.procs, pid, F_FUTEX, key);
+    }
     pset(&mut k.procs, pid, F_STATE, FUTEXWAIT);
   }
   return r;
