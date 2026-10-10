@@ -18,7 +18,7 @@ python3 - "$KERNEL" "$TIMEOUT" <<'PY'
 import os, re, select, socket, subprocess, sys, tempfile, time
 
 kernel, timeout = sys.argv[1], float(sys.argv[2])
-CORE_BLOCK, CORE_IST_TOP, IST_SIZE = 0x20000, 0x1400, 0x1000
+CORE_BLOCK, CORE_IST_TOP, IST_SIZE = 0x20000, 0x2000, 0x1000
 
 tmp = tempfile.TemporaryDirectory()
 mon_path = os.path.join(tmp.name, "mon")

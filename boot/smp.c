@@ -466,7 +466,37 @@ static int64_t madt_cpu(uint64_t e) {
     return -1;
 }
 
+/* The guard page under each kernel stack (core.h). boot.S maps the first
+ * GiB with 2 MiB pages; the blocks span at most two of them (2 MiB in all,
+ * 128 KiB aligned), which this splits into 4 KiB pages with the same
+ * rights before taking the guards out. Runs on the bootstrap processor
+ * before any AP starts, so only its own TLB holds the old entries. User
+ * address spaces share these tables through pml4 entry 0. */
+static uint64_t guard_pt[2][512] __attribute__((aligned(4096)));
+
+static void guard_stacks(void) {
+    const uint64_t frame = 0x000FFFFFFFFFF000ull, huge = 1ull << 21;
+    uint64_t lo = (uint64_t)bst_cores[0], hi = lo + sizeof bst_cores;
+    if (hi > IDENT_LIMIT) return;                    /* the kernel image is in the first GiB */
+    uint64_t *pdpt = (uint64_t *)(bst_kernel_pml4[0] & frame);
+    uint64_t *pd = (uint64_t *)(pdpt[0] & frame);
+    for (uint64_t r = lo & ~(huge - 1); r < hi; r += huge) {
+        uint64_t *pde = &pd[r / huge];
+        uint64_t *pt = guard_pt[r / huge - lo / huge];
+        for (uint64_t i = 0; i < 512; i++)
+            pt[i] = (r + 4096 * i) | (*pde & 0x1F);  /* present, writable, PWT, PCD as before */
+        *pde = (uint64_t)pt | (*pde & 0x1F);
+    }
+    for (uint64_t i = 0; i < MAX_CPUS; i++) {
+        uint64_t g = (uint64_t)(bst_cores[i] + CORE_GUARD);
+        guard_pt[(g / huge) - (lo / huge)][(g / 4096) % 512] = 0;
+    }
+    uint64_t cr3;
+    __asm__ volatile ("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) : : "memory");
+}
+
 void bst_smp_init(void) {
+    guard_stacks();
     core_init(0);
     uint64_t len = 0, madt = find_madt(&len);
     for (uint64_t i = 44; madt && i + 2 <= len; ) {

@@ -408,6 +408,12 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   page stays shared when `mprotect` uncovers it.
 - `mmap` of a file with a bad descriptor and a length of 0 failed with
   `EINVAL`; as on Linux, the descriptor is checked first (`EBADF`).
+- A kernel stack that overflowed wrote over its processor's IST1 stack,
+  task state segment and saved user context, with no fault. Each kernel
+  stack now has an unmapped guard page under it: an overflow becomes a
+  double fault that halts the processor (`test/stackguard_test.sh`). The
+  kernel stack grew from 91 to 92 KiB; the trap stack, which holds one
+  trap frame, shrank from 32 to 24 KiB.
 - A PC without a serial port (most of those of the last decade) took no
   keyboard input: COM1's ports read as 0xFF there, which said a byte was
   always waiting, so the console read 0xFF forever and never looked at

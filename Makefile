@@ -279,6 +279,7 @@ test: build/bastios.elf
 	NIC=igb test/tcp_test.sh
 	test/iso_test.sh
 	test/nmi_test.sh
+	test/stackguard_test.sh
 	test/fuzz_test.sh 1 2 2000
 
 # The system call fuzzer at length: SEEDS runs of CALLS calls from seed
