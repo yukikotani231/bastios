@@ -29,6 +29,8 @@ const R_RAX: u64 = 0;
 const R_RDX: u64 = 3;
 const R_RSI: u64 = 4;
 const R_RDI: u64 = 5;
+const R_R8: u64 = 7;
+const R_R9: u64 = 8;
 const R_R10: u64 = 9;
 const R_RIP: u64 = 15;
 const R_RSP: u64 = 16;
@@ -45,6 +47,7 @@ const LXREADING: u64 = 5;            // blocked in a Linux read of the console
 const LXWAITING: u64 = 6;            // blocked in a Linux wait4 for any child
 const RUNNING: u64 = 7;              // on a processor: its space and FPU page are out
 const KILLED: u64 = 8;               // RUNNING, and killed: ends when it comes back
+const NETWAIT: u64 = 9;              // waiting for the network (a ping's reply)
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -303,6 +306,12 @@ const OF_FREE: u64 = 0;
 const OF_FILE: u64 = 1;
 const OF_PIPE_R: u64 = 2;
 const OF_PIPE_W: u64 = 3;
+const OF_DIR: u64 = 4;                // x: DIR_ROOT or DIR_BIN; word 3: next entry
+// lx_recvfrom's answer when the caller must wait: no count or errno.
+const SK_WAIT: u64 = 0x8000000000000000;
+const OF_SOCK: u64 = 5;               // x: the kernel socket; word 3: 2 * peer + nonblocking
+const DIR_ROOT: u64 = 0;
+const DIR_BIN: u64 = 1;
 
 const NPIPES: u64 = 8;
 const PIPE_CAP: u64 = 1024;
@@ -310,6 +319,16 @@ const PIPE_STRIDE: u64 = 1028;        // 4 + PIPE_CAP
 const PIPES_LEN: u64 = 8224;          // NPIPES * PIPE_STRIDE
 
 const LX_PIPE: u64 = 22;
+const LX_FSTAT: u64 = 5;
+const LX_GETDENTS64: u64 = 217;
+const AT_EMPTY_PATH: u64 = 0x1000;
+const DENT_BUF: u64 = 2048;           // the most getdents64 fills in one call
+const ENOTDIR: u64 = 18446744073709551596;  // 2^64 - 20
+const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
+const NAPPLETS: u64 = 6;
+const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----
+const S_IFIFO: u64 = 0x1180;           // a FIFO, rw-------
+const S_IFSOCK: u64 = 0xC1B6;          // a socket, rw-rw-rw-
 const LX_POLL: u64 = 7;
 const POLL_MAX: u64 = 64;
 const LX_DUP: u64 = 32;
@@ -337,6 +356,8 @@ const K_CONSOLE: u64 = 1;
 const K_FILE: u64 = 2;                // x: the native row
 const K_PIPE_R: u64 = 3;              // x: the pipe
 const K_PIPE_W: u64 = 4;
+const K_DIR: u64 = 5;                 // x: DIR_ROOT or DIR_BIN
+const K_SOCK: u64 = 6;                // x: the kernel socket
 
 struct Kernel {
   mem: Mem,             // the page allocator
@@ -361,7 +382,7 @@ spec fn kok(k: &Kernel) -> bool {
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 16;
+const NPROGS: u64 = 17;
 
 fn prog_name(i: u64) -> Str {
   if i == 0 {
@@ -410,6 +431,9 @@ fn prog_name(i: u64) -> Str {
     return "fault";
   }
   if i == 15 {
+    return "mudp";
+  }
+  if i == 16 {
     return "crashme";
   }
   return "(file)";                    // a program loaded from a file
@@ -459,6 +483,9 @@ fn prog_image(i: u64) -> Str {
     return include_bytes("../build/user/ash.elf");
   }
   if i == 15 {
+    return include_bytes("../build/user/mudp.elf");
+  }
+  if i == 16 {
     return include_bytes("../build/user/crashme.bin");
   }
   return include_bytes("../build/user/fault.bin");
@@ -701,6 +728,8 @@ fn put_state(con: &mut Uart, s: u64)
     puts(&mut con, "waiting");
   } else if s == RUNNING || s == KILLED {
     puts(&mut con, "running");
+  } else if s == NETWAIT {
+    puts(&mut con, "netwait");
   } else {
     puts(&mut con, "zombie ");
   }

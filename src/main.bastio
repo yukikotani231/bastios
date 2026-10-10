@@ -22,6 +22,8 @@ import "syscall.bastio";
 import "linux.bastio";
 import "lxproc.bastio";
 import "lxfd.bastio";
+import "lxdir.bastio";
+import "lxsock.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
@@ -81,6 +83,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, from: u64) -> Job
     return Job::Stop;
   }
   nic_poll(&mut s.k.nic);
+  net_wake(&mut s.k);
   drain(&mut s.con, &mut s.k.q);
   tty_cook(&mut s.con, &mut s.k);
   wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
@@ -355,7 +358,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   if nic_live(nic) {
     puts(&mut con, "net: virtio, mac ");
     put_mac(&mut con, nic_mac(nic));
-    puts(&mut con, ", ip 10.0.2.15\r\n");
+    puts(&mut con, ", address by DHCP\r\n");
   }
   let mut spaces = vec_new[Space]();
   let mut i = 0;

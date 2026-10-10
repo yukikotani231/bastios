@@ -32,7 +32,7 @@ _s.bind(("127.0.0.1", 0))
 udp_port2 = _s.getsockname()[1]
 _s.close()
 
-def boot(cpus, with_disk=False, virtio=False, net=False):
+def boot(cpus, with_disk=False, virtio=False, net=False, subnet=None):
     drive = ["-drive", f"file={disk},format=raw,if=ide,index=0"] if with_disk else []
     if virtio:
         # The same disk as a virtio block device (src/virtio.bastio): sectors
@@ -42,6 +42,11 @@ def boot(cpus, with_disk=False, virtio=False, net=False):
     # A virtio network card on QEMU's user-mode network (src/net.bastio).
     nic = ["-netdev", f"user,id=n0,hostfwd=udp:127.0.0.1:{udp_port}-:7,hostfwd=udp:127.0.0.1:{udp_port2}-:7000",
            "-device", "virtio-net-pci,netdev=n0"] if net else []
+    if subnet:
+        # QEMU's DHCP server on a subnet other than its default: the
+        # address the kernel ends up with can only have come from DHCP.
+        nic = ["-netdev", f"user,id=n0,net={subnet}",
+               "-device", "virtio-net-pci,netdev=n0"]
     return subprocess.Popen(
         ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
@@ -112,9 +117,13 @@ steps = [
     ("help", b"commands:"),
     # The network: ICMP echo to QEMU's gateway and to its DNS address, both
     # answered by QEMU itself; a malformed address is refused.
+    ("ifconfig", b"10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2 (DHCP)"),
     ("ping", b"reply from 10.0.2.2"),
     ("ping 10.0.2.3", b"reply from 10.0.2.3"),
     ("ping 10.0.2.300", b"usage: ping"),
+    # Nothing answers ARP for this address: the shell waits off the kernel
+    # lock (its process is in NETWAIT) until the timer ends the ping.
+    ("ping 10.0.2.99", b"no answer to ARP for 10.0.2.99"),
     ("cpus", f"processors running: {smp}\r\n".encode()),
     ("about", b"proved safe"),
     ("echo hello world", b"hello world"),
@@ -185,6 +194,12 @@ steps = [
     # execve of a file: elfdemo is the elfpie program installed at boot.
     ("/elfdemo a b", b"/elfdemo: ok", b"\n# "),
     ("./elfdemo; echo st=$?", [b"./elfdemo: ok", b"st=0"], b"\n# "),
+    # BusyBox applets, run as /bin/NAME: getdents64, fstat, stat.
+    ("ls", [b"elfdemo", b"motd", b"bin"], b"\n# "),
+    ("ls /bin", [b"mhello", b"cat"], b"\n# "),
+    ("cat /motd", b"Welcome to BastiOS", b"\n# "),
+    ("echo one > t; echo two >> t; cat t | wc -l", b"\r\n2\r\n", b"\n# "),
+    ("cp t t2; head -n 1 t2; rm t t2; ls", [b"\r\none\r\n", b"elfdemo"], b"\n# "),
     ("exit 5", b"[exit 5]"),
     ("rm lxout", b""),
     ("sh", b"BastiOS 0.2 -- type"),
@@ -321,6 +336,49 @@ else:
         print("ok   UDP socket: sendto from an ephemeral port")
     else:
         print("FAIL UDP sendto:", got); fails += 1
+    # Three datagrams sent while the shell sleeps queue on the socket and
+    # come out in order.
+    mark = len(out)
+    qemu.stdin.write(b"udpecho 7000 3\r"); qemu.stdin.flush()
+    got = []
+    if read_until(b"listening on udp port 7000", mark):
+        us = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        us.settimeout(10)
+        try:
+            for w in (b"one", b"two", b"three"):
+                us.sendto(w, ("127.0.0.1", udp_port2))
+            for _ in range(3):
+                got.append(us.recvfrom(100)[0])
+        except OSError:
+            pass
+        us.close()
+    if (read_until(b"bastios> ", mark) and got == [b"one", b"two", b"three"]
+            and re.search(rb": one\r\n.*: two\r\n.*: three\r\n", out[mark:], re.S)):
+        print("ok   UDP socket: three datagrams queue and come out in order")
+    else:
+        print("FAIL UDP socket queue:", got); fails += 1
+    # The same through Linux system calls: a musl program (user/mudp.c)
+    # binds port 7000, blocks in recvfrom, sends the datagram back with
+    # sendto, then connects and writes "bye".
+    mark = len(out)
+    qemu.stdin.write(b"mudp 7000\r"); qemu.stdin.flush()
+    got = []
+    if read_until(b"listening on udp port 7000", mark):
+        us = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        us.settimeout(10)
+        try:
+            us.sendto(b"hello linux", ("127.0.0.1", udp_port2))
+            got.append(us.recvfrom(100)[0])
+            got.append(us.recvfrom(100)[0])
+        except OSError:
+            pass
+        us.close()
+    if (read_until(b"bastios> ", mark) and got == [b"hello linux", b"bye"]
+            and b"mudp: 11 bytes from 10.0.2.2: hello linux" in out[mark:]
+            and b"mudp: sent it back" in out[mark:]):
+        print("ok   Linux UDP socket: bind, recvfrom, sendto, connect, write")
+    else:
+        print("FAIL Linux UDP socket:", got, repr(out[mark:])); fails += 1
     mark = len(out)
     qemu.stdin.write(b"udpsend 10.0.2.2 0 x\r"); qemu.stdin.flush()
     if read_until(b"bastios> ", mark) and b"usage: udpsend" in out[mark:]:
@@ -421,8 +479,11 @@ def session(name, want_banner, steps, halt=False):
     print(f"---- {name} boot transcript ----")
     print(out.decode(errors="replace").replace("\r", ""))
 
-qemu = boot(1, virtio=True)
+qemu = boot(1, virtio=True, subnet="192.168.76.0/24")
 session("virtio", True, [
+    ("ifconfig", b"192.168.76.15 netmask 255.255.255.0 gateway 192.168.76.2 (DHCP)"),
+    ("ping", b"reply from 192.168.76.2"),
+    ("ping 192.168.76.3", b"reply from 192.168.76.3"),
     ("ls", b"      18 disk/note"),
     ("cat disk/note", b"kept across boots\r\n"),
     ("echo appended >> disk/note", b""),

@@ -1,11 +1,13 @@
 // Linux file descriptors. Each process has LXNFD descriptors; each names
 // the console or an open file description (the `ofd` table), which dup,
 // dup2 and fork share and which counts its references. A description is a
-// file (a native row of the file layer) or one end of a pipe.
+// file (a native row of the file layer), one end of a pipe, a directory
+// being listed, or a UDP socket (src/lxsock.bastio).
 //
 // k.lxfd, word pid * LXNFD + fd: 0 closed, FD_CONSOLE, or FD_OFD + h for
 // description h; plus FD_CLOEXEC if execve closes it.
-// k.ofd, words h * OFD_STRIDE: kind, references, row or pipe.
+// k.ofd, words h * OFD_STRIDE: kind, references, row, pipe or directory,
+// and a directory's next entry.
 // k.pipes, words p * PIPE_STRIDE: head, count, read end open, write end
 // open, then a ring of PIPE_CAP bytes.
 
@@ -85,6 +87,12 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   if kind == OF_PIPE_W && x < NPIPES {
     return Fd { kind: K_PIPE_W, x: x };
   }
+  if kind == OF_DIR {
+    return Fd { kind: K_DIR, x: x };
+  }
+  if kind == OF_SOCK {
+    return Fd { kind: K_SOCK, x: x };
+  }
   return Fd { kind: K_BAD, x: 0 };
 }
 
@@ -148,6 +156,8 @@ fn unref_value(k: &mut Kernel, v: u64)
     pi_set(&mut k.pipes, x, 2, 0);
   } else if kind == OF_PIPE_W && x < NPIPES {
     pi_set(&mut k.pipes, x, 3, 0);
+  } else if kind == OF_SOCK {
+    sock_close(&mut k.nic, x);
   }
 }
 
@@ -247,6 +257,7 @@ fn ofd_new(k: &mut Kernel, kind: u64, x: u64) -> u64
   of_set(&mut k.ofd, h, 0, kind);
   of_set(&mut k.ofd, h, 1, 1);
   of_set(&mut k.ofd, h, 2, x);
+  of_set(&mut k.ofd, h, 3, 0);
   return h;
 }
 
@@ -290,6 +301,18 @@ fn lx_open(k: &mut Kernel, pid: u64, path: u64, flags: u64) -> u64
   let n = lx_path_in(&mut k, pid, path);
   if n == NO_RESULT {
     return ENOENT;
+  }
+  if n == 0 || is_bin(k.fs.xfer, n) {
+    // A directory, for getdents64: "/" or "/bin".
+    let mut dir = DIR_ROOT;
+    if n > 0 {
+      dir = DIR_BIN;
+    }
+    let hd = ofd_new(&mut k, OF_DIR, dir);
+    if hd >= OFD_N {
+      return ENFILE;
+    }
+    return fd_install(&mut k, pid, hd);
   }
   let acc = flags % 4;
   let mut f = O_READ;
