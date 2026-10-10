@@ -27,6 +27,10 @@ int main(void)
     if (f < 0 || write(f, "at", 2) != 2)
         return fail("openat");
     close(f);
+    if (openat(d, "f", O_CREAT | O_EXCL | O_WRONLY, 0644) != -1 || errno != EEXIST)
+        return fail("O_EXCL on a file that exists");
+    if (openat(d, "f", O_RDONLY | O_DIRECTORY) != -1 || errno != ENOTDIR)
+        return fail("O_DIRECTORY on a file");
     struct stat st;
     if (fstatat(d, "f", &st, 0) != 0 || st.st_size != 2 || !S_ISREG(st.st_mode))
         return fail("fstatat");
