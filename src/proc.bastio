@@ -55,6 +55,15 @@ const F_ALTSP: u64 = 40;
 const F_ALTSIZE: u64 = 41;
 const SIG_DEATH: u64 = 256;          // F_CODE of a process a signal ended: 256 + the signal
 
+/// The exit code sys_wait reports for F_CODE `code`: 128 + the signal for
+/// a process a signal ended, as a Linux shell shows it.
+fn shown_code(code: u64) -> u64 {
+  if code >= SIG_DEATH {
+    return 128 + code % 128;
+  }
+  return code;
+}
+
 // Saved register numbers.
 const R_RAX: u64 = 0;
 const R_RDX: u64 = 3;
@@ -1006,11 +1015,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code: u64)
   if par == 0 || par >= NPROC {
     pset(&mut k.procs, pid, F_STATE, FREE);       // nobody will collect it
   } else if state(k.procs, par) == WAITING && pget(k.procs, par, F_WAIT) == pid {
-    let mut shown = code;
-    if code >= SIG_DEATH {
-      shown = 128 + code % 128;             // as a Linux shell shows it
-    }
-    pset(&mut k.procs, par, F_REGS + R_RAX, shown);
+    pset(&mut k.procs, par, F_REGS + R_RAX, shown_code(code));
     pset(&mut k.procs, par, F_STATE, READY);
     pset(&mut k.procs, pid, F_STATE, FREE);
   } else if state(k.procs, par) == LXWAITING {

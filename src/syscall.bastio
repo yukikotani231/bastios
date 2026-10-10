@@ -676,7 +676,7 @@ fn do_wait(procs: &mut Buf, pid: u64, c: u64) -> u64
     return KEEP;
   }
   if state(procs, c) == ZOMBIE {
-    ret(&mut procs, pid, pget(procs, c, F_CODE));
+    ret(&mut procs, pid, shown_code(pget(procs, c, F_CODE)));
     pset(&mut procs, c, F_STATE, FREE);
     return KEEP;
   }
