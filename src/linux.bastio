@@ -1493,7 +1493,7 @@ fn stack_reach(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, va: u64) -> bool
   if va < USER_BASE + STACK_FIRST * 4096 || va >= USER_BASE + STACK_LOW * 4096 {
     return false;
   }
-  return lx_map_pages(&mut m, &mut spaces, pid, (va - USER_BASE) / 4096, WPAGES);
+  return lx_map_pages(&mut m, &mut spaces, pid, (va - USER_BASE) / 4096, WPAGES, false);
 }
 
 /// A page fault of process p: if it touched a stack page not mapped yet,

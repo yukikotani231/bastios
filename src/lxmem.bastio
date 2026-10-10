@@ -272,7 +272,7 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
   let to = r % 4294967296;
   // Only pages mmap handed out can have been left unmapped by PROT_NONE.
   let low = pget(k.procs, pid, F_MMAP) / 4096;
-  if prot != 0 && from >= low && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, from, to) {
+  if prot != 0 && from >= low && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, from, to, false) {
     return ENOMEM;
   }
   if win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, from, to, w) != to - from {
