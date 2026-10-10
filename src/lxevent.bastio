@@ -694,7 +694,7 @@ fn fifo_slot(k: &mut Kernel, h: u64) -> u64
   ensures kok(k)
   ensures result <= FIFO_N
 {
-  if h >= NFILES + DSLOTS {
+  if h >= HFILES {
     return FIFO_N;
   }
   let mut f = 0;

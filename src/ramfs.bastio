@@ -341,6 +341,68 @@ fn file_free(f: RamFile, mem: &mut Mem)
   bfree(g.name);
 }
 
+/// Gives every page in `pages` back.
+fn slots_free(pages: Vec[Slot], mem: &mut Mem)
+  requires mem_ok(mem)
+  ensures mem_ok(mem)
+{
+  let mut g = pages;
+  while vec_len(g) > 0
+    invariant mem_ok(mem)
+  {
+    match vec_pop(&mut g) {
+      Slot::Hole => {},
+      Slot::Page(fr) => { give_page(&mut mem, fr); },
+    }
+  }
+  vec_free(g);
+}
+
+/// Takes node i's pages out (for a loop mount, src/fs.bastio), leaving it
+/// none: nothing for a free node or a directory.
+fn ram_take_pages(v: &mut Vec[Node], i: u64) -> Vec[Slot]
+  requires nodes_ok(v) && i < NFILES
+  ensures nodes_ok(v) && vlen(result) <= FILE_PAGES
+{
+  let mut pages = vec_new[Slot]();
+  match take_node(&mut v, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      let mut g = f;
+      let p = g.pages;
+      g.pages = pages;
+      pages = p;
+      put_node(&mut v, i, Node::File(g));
+    },
+  }
+  return pages;
+}
+
+/// Puts `pages` back as node i's (any it has now go back to the
+/// allocator); they go to the allocator instead if node i is free, a
+/// directory, or the pages are too many for a file.
+fn ram_put_pages(v: &mut Vec[Node], mem: &mut Mem, i: u64, pages: Vec[Slot])
+  requires nodes_ok(v) && mem_ok(mem) && i < NFILES
+  ensures nodes_ok(v) && mem_ok(mem)
+{
+  match take_node(&mut v, i) {
+    Node::Free => {
+      slots_free(pages, &mut mem);
+    },
+    Node::File(f) => {
+      let mut g = f;
+      if g.dir || vec_len(pages) > FILE_PAGES {
+        slots_free(pages, &mut mem);
+      } else {
+        let p = g.pages;
+        g.pages = pages;
+        slots_free(p, &mut mem);
+      }
+      put_node(&mut v, i, Node::File(g));
+    },
+  }
+}
+
 // ---------------------------------------------------------------- the table
 
 /// The node holding the file named by the first n bytes of `name`, or
