@@ -42,6 +42,9 @@ fn dev_at(x: &Bytes, n: u64) -> u64
 
 /// What stat says about device d.
 fn dev_meta(d: u64) -> Meta {
+  if d >= PROC_DEV {
+    return proc_meta(d);                    // a /proc file (src/lxprocfs.bastio)
+  }
   if d == DEV_DIR {
     return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 3, mtime: 0 };
   }

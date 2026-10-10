@@ -35,8 +35,8 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest crashme
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread ash
-UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf)
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash
+UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so
 
 build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
 	$(BASTIOC) --target user -o $@ $<
@@ -100,6 +100,16 @@ MUSLCC ?= musl-gcc
 build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf: build/user/%.elf: user/%.c | build/user
 	$(MUSLCC) -static-pie -O2 -o $@ $<
 
+# A dynamically linked PIE, and musl's dynamic linker (libc.so, which is
+# also /lib/ld-musl-x86_64.so.1) that the kernel loads as its interpreter.
+build/user/mdyn.elf: user/mdyn.c | build/user
+	$(MUSLCC) -fPIE -pie -O2 -o $@ $<
+
+MUSL_LDSO ?= /lib/ld-musl-x86_64.so.1
+
+build/user/ld-musl.so: | build/user
+	cp -L $(MUSL_LDSO) $@
+
 # BusyBox (GPL-2.0-only, not part of this repository): fetched at a pinned
 # tag, configured from allnoconfig plus the options in user/busybox.config,
 # and built against musl as a static PIE. `ash` is its shell (BusyBox picks
@@ -127,7 +137,7 @@ build/user/%.bin: build/user/%.elf
 
 # 2. Prove the kernel and translate it to freestanding C.
 KSRCS := src/uart.bastio src/fb.bastio src/kbd.bastio src/font8x8.bin src/card.bastio src/e1000.bastio src/pic.bastio src/pit.bastio src/hpet.bastio src/rtc.bastio src/console.bastio src/pages.bastio src/space.bastio src/elf.bastio src/ramfs.bastio src/ata.bastio src/pci.bastio src/virtq.bastio src/virtio_blk.bastio src/virtio_net.bastio src/net.bastio src/tcp.bastio src/blk.bastio src/diskfs.bastio src/fs.bastio \
-         src/proc.bastio src/usermem.bastio src/syscall.bastio src/linux.bastio src/lxproc.bastio src/lxfd.bastio src/lxdir.bastio src/lxsock.bastio src/lxtcp.bastio src/lxsig.bastio src/lxtime.bastio src/lxmisc.bastio src/lxdev.bastio src/main.bastio
+         src/proc.bastio src/usermem.bastio src/syscall.bastio src/linux.bastio src/lxproc.bastio src/lxfd.bastio src/lxdir.bastio src/lxsock.bastio src/lxtcp.bastio src/lxsig.bastio src/lxtime.bastio src/lxmisc.bastio src/lxdev.bastio src/lxprocfs.bastio src/main.bastio
 KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
@@ -187,8 +197,11 @@ OVMF    ?= /usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
 # A virtio disk and network card (QEMU's user network: DHCP, and the host
 # reachable at 10.0.2.2; TCP port 7001 on this machine reaches the guest's
-# port 7001, for `tcpecho 7001`).
-QEMU_DEVS := -m 256M -smp $(SMP) -no-reboot \
+# port 7001, for `tcpecho 7001`). QEMU's default CPU model lacks 1 GiB
+# pages, which boot.S needs to map the device window above 4 GiB (where
+# UEFI firmware puts 64-bit PCI BARs); every real x86-64 CPU of the last
+# decade has them.
+QEMU_DEVS := -cpu qemu64,+pdpe1gb -m 256M -smp $(SMP) -no-reboot \
              -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
              -drive file=$(DISK),format=raw,if=none,id=vd -device virtio-blk-pci,drive=vd \
              -netdev user,id=n0,hostfwd=tcp:127.0.0.1:7001-:7001 -device virtio-net-pci,netdev=n0

@@ -2,9 +2,10 @@
 // directory (chdir, getcwd), mkdir, rmdir and unlink. "/" holds "bin" and
 // the file layer's top directory; "/bin" holds the built-in programs and
 // BusyBox's applets; every other directory is the file layer's
-// (vfs_dir_lookup, vfs_readdir). A directory description's x is DIR_ROOT,
-// DIR_BIN or DIR_VFS + the file layer's handle, and word 3 the index of
-// the next entry.
+// (vfs_dir_lookup, vfs_readdir) but "/proc" (src/lxprocfs.bastio). A
+// directory description's x is DIR_ROOT, DIR_BIN, DIR_VFS + the file
+// layer's handle or DIR_PROC (+ a pid), and word 3 the index of the next
+// entry.
 
 import "linux.bastio";
 
@@ -38,7 +39,13 @@ fn dir_entry(k: &mut Kernel, dir: u64, i: u64) -> Ent
     if i == 0 {
       return Ent { len: name_out(&mut k.fs.xfer, "bin"), dir: true, end: false };
     }
-    return vfs_entry(&mut k, VDIR_ROOT, i - 1);
+    if i == 1 {
+      return Ent { len: name_out(&mut k.fs.xfer, "proc"), dir: true, end: false };
+    }
+    return vfs_entry(&mut k, VDIR_ROOT, i - 2);
+  }
+  if dir >= DIR_PROC {
+    return proc_entry(&mut k, dir, i);
   }
   if dir >= DIR_VFS {
     return vfs_entry(&mut k, dir - DIR_VFS, i);
@@ -177,6 +184,10 @@ fn dir_at(k: &mut Kernel, n: u64) -> u64
   if is_bin(k.fs.xfer, n) {
     return DIR_BIN;
   }
+  let pd = proc_dir(k.procs, k.fs.xfer, n);
+  if pd != NO_FILE {
+    return pd;
+  }
   let d = vfs_dir_lookup(&mut k.fs, n);
   if d == NO_FILE {
     return NO_FILE;
@@ -314,7 +325,7 @@ fn lx_rmdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
     }
     return ENOENT;
   }
-  if d < DIR_VFS || d - DIR_VFS == VDIR_ROOT || d - DIR_VFS == VDIR_DISK {
+  if d < DIR_VFS || d >= DIR_PROC || d - DIR_VFS == VDIR_ROOT || d - DIR_VFS == VDIR_DISK {
     return EBUSY;                           // "/", "/bin" and "/disk" stay
   }
   if !vfs_rmdir(&mut k.fs, &mut k.mem, n) {
@@ -396,7 +407,7 @@ fn rename_clear(k: &mut Kernel, m: u64, src_dir: bool, noreplace: bool) -> u64
   if !src_dir {
     return EISDIR;
   }
-  if d < DIR_VFS || d - DIR_VFS == VDIR_ROOT || d - DIR_VFS == VDIR_DISK {
+  if d < DIR_VFS || d >= DIR_PROC || d - DIR_VFS == VDIR_ROOT || d - DIR_VFS == VDIR_DISK {
     return EBUSY;
   }
   if !vfs_rmdir(&mut k.fs, &mut k.mem, m) {
@@ -423,7 +434,7 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
   if d == NO_FILE && vfs_lookup(&mut k.fs, n) == NO_FILE {
     return ENOENT;
   }
-  if d != NO_FILE && (d < DIR_VFS || d - DIR_VFS == VDIR_ROOT || d - DIR_VFS == VDIR_DISK) {
+  if d != NO_FILE && (d < DIR_VFS || d >= DIR_PROC || d - DIR_VFS == VDIR_ROOT || d - DIR_VFS == VDIR_DISK) {
     return EBUSY;
   }
   let src_disk = on_disk(k.fs, n);

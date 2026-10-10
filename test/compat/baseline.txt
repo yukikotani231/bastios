@@ -11,12 +11,14 @@ busybox: cut
 busybox: date
 busybox: date -d
 busybox: dd
+busybox: df
 busybox: diff
 busybox: du
 busybox: echo
 busybox: env
 busybox: expr
 busybox: find
+busybox: free
 busybox: grep
 busybox: gzip round trip
 busybox: head/tail
@@ -35,6 +37,7 @@ busybox: nproc
 busybox: od
 busybox: printenv
 busybox: printf
+busybox: ps
 busybox: readlink/realpath
 busybox: sed
 busybox: seq
@@ -79,6 +82,7 @@ t_dir: rmdir
 t_dir: rmdir non-empty is ENOTEMPTY
 t_dir: stat / is a directory
 t_dir: stat /dev
+t_dir: stat /proc/self
 t_dir: stat /tmp
 t_dir: stat file in directory
 t_dir: stat new directory
@@ -143,6 +147,8 @@ t_mem: mmap anonymous
 t_mem: mmap is zeroed
 t_mem: munmap
 t_misc: /etc/passwd
+t_misc: /proc/meminfo
+t_misc: /proc/self/exe
 t_misc: SSE floating point
 t_misc: TIOCGWINSZ
 t_misc: getlogin or getpwuid
