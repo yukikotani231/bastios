@@ -288,7 +288,8 @@ steps = [
     # What Linux programs expect to find: /dev/null swallows, /tmp and
     # /etc/passwd exist, and every file has its own inode number.
     ("echo lost > /dev/null; wc -c < /dev/null; test -d /tmp && echo tmp$((2+2))", b"\r\n0\r\ntmp4\r\n", b"\n# "),
-    ("cat /etc/passwd", b"root:x:0:0", b"\n# "),
+    ("cat /etc/passwd", b"nobody:x:65534:65534:", b"\n# "),
+    ("cat /etc/group", b"nogroup:x:65534:", b"\n# "),
     ("echo a > /tmp/i1; echo b > /tmp/i2; set -- $(ls -i /tmp/i1); a=$1; set -- $(ls -i /tmp/i2); [ $a != $1 ] && echo distinct; rm /tmp/i1 /tmp/i2", b"\r\ndistinct\r\n", b"\n# "),
     # Symbolic links: made by ln -s, read by readlink, followed by
     # everything else (relative and absolute targets, a link to a
