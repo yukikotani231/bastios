@@ -5,11 +5,16 @@
 //   /proc/mounts            the mount table ("/", "/proc", and "/disk" with a disk)
 //   /proc/meminfo           total and free memory, as sysinfo counts them
 //   /proc/uptime            seconds since boot
+//   /proc/cpuinfo           one block per running processor
+//   /proc/filesystems       the file system types mount names
+//   /proc/sys/kernel/tainted, pid_max, printk
+//                           read-only sysctls with their fixed values
 //   /proc/PID/              one directory per process (zombies included)
 //   /proc/PID/stat          the one-line status ps reads (52 fields)
 //   /proc/PID/status        the same as "Name:\t..." lines
 //   /proc/PID/cmdline       the program's name: argv is not kept
 //   /proc/PID/exe           a symbolic link to the program (readlink)
+//   /proc/PID/mounts        the same as /proc/mounts
 //   /proc/self              the caller's own directory
 //
 // "self" is rewritten to the caller's pid when a path is read from user
@@ -22,7 +27,10 @@
 // can on Linux too.
 //
 // Not here: argv in cmdline, readlink of /proc/self itself (it reads as
-// the directory), /proc/PID/fd, maps and environ, and /proc/cpuinfo.
+// the directory), /proc/PID/fd, maps and environ, writable sysctls, and
+// /proc/sys as a directory (its files open and stat, but are not listed).
+// A sysctl for a feature BastiOS lacks (SysV IPC, core dumps, splice) is
+// left out, so a program that checks for it finds the feature missing.
 
 import "linux.bastio";
 
@@ -35,6 +43,12 @@ const PF_UPTIME: u64 = 3;
 const PF_STAT: u64 = 4;
 const PF_CMDLINE: u64 = 5;
 const PF_STATUS: u64 = 6;
+const PF_CPUINFO: u64 = 8;            // these two with pid 0; 7 is PF_EXE
+const PF_FILESYSTEMS: u64 = 9;
+const PSYS: u64 = 16 * NPROC;         // PROC_DEV + PSYS + SY_*: a /proc/sys file
+const SY_TAINTED: u64 = 1;
+const SY_PID_MAX: u64 = 2;
+const SY_PRINTK: u64 = 3;
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
 const S_IFREG_RO: u64 = 0x8124;       // a regular file, r--r--r--
@@ -160,7 +174,22 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
     if xfer_is(x, 5, n, "uptime") {
       return PROC_DEV + PF_UPTIME;
     }
+    if xfer_is(x, 5, n, "cpuinfo") {
+      return PROC_DEV + PF_CPUINFO;
+    }
+    if xfer_is(x, 5, n, "filesystems") {
+      return PROC_DEV + PF_FILESYSTEMS;
+    }
     return 0;
+  }
+  if xfer_is(x, 5, n, "sys/kernel/tainted") {
+    return PROC_DEV + PSYS + SY_TAINTED;
+  }
+  if xfer_is(x, 5, n, "sys/kernel/pid_max") {
+    return PROC_DEV + PSYS + SY_PID_MAX;
+  }
+  if xfer_is(x, 5, n, "sys/kernel/printk") {
+    return PROC_DEV + PSYS + SY_PRINTK;
   }
   let p = proc_pid(procs, x, 5, e);
   if p >= NPROC {
@@ -178,6 +207,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   }
   if xfer_is(x, e + 1, n, "exe") {
     return base + PF_EXE;
+  }
+  if xfer_is(x, e + 1, n, "mounts") {
+    return base + PF_MOUNTS;
   }
   return 0;
 }
@@ -215,6 +247,9 @@ fn proc_entry(k: &mut Kernel, dir: u64, i: u64) -> Ent
     if i == 3 {
       return Ent { len: name_out(&mut k.fs.xfer, "exe"), dir: false, end: false };
     }
+    if i == 4 {
+      return Ent { len: name_out(&mut k.fs.xfer, "mounts"), dir: false, end: false };
+    }
     return end;
   }
   if i == 0 {
@@ -229,7 +264,13 @@ fn proc_entry(k: &mut Kernel, dir: u64, i: u64) -> Ent
   if i == 3 {
     return Ent { len: name_out(&mut k.fs.xfer, "uptime"), dir: false, end: false };
   }
-  let p = i - 3;
+  if i == 4 {
+    return Ent { len: name_out(&mut k.fs.xfer, "cpuinfo"), dir: false, end: false };
+  }
+  if i == 5 {
+    return Ent { len: name_out(&mut k.fs.xfer, "filesystems"), dir: false, end: false };
+  }
+  let p = i - 5;
   if p >= NPROC {
     return end;
   }
@@ -372,7 +413,20 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
   }
   let what = f % 16;
   let p = (f - PROC_DEV) / 16;
-  if p >= NPROC {
+  if p == NPROC {
+    if what == SY_TAINTED {
+      return put_s(&mut o, 0, "0\n");
+    }
+    if what == SY_PID_MAX {
+      let a = put_n(&mut o, 0, NPROC);    // every pid is below it
+      return put_c(&mut o, a, 10);
+    }
+    if what == SY_PRINTK {
+      return put_s(&mut o, 0, "7\t4\t1\t7\n");
+    }
+    return 0;
+  }
+  if p > NPROC {
     return 0;
   }
   if what == PF_MOUNTS {
@@ -392,6 +446,22 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     a = put_s(&mut o, a, " kB\nMemAvailable: ");
     a = put_n(&mut o, a, avail);
     return put_s(&mut o, a, " kB\nBuffers: 0 kB\nCached: 0 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n");
+  }
+  if what == PF_CPUINFO && p == 0 {
+    let mut a = 0;
+    let mut c = 0;
+    while c < k.cpus
+      invariant a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+    {
+      a = put_s(&mut o, a, "processor\t: ");
+      a = put_n(&mut o, a, c);
+      a = put_s(&mut o, a, "\nmodel name\t: x86-64\nflags\t\t: fpu tsc msr pae apic sse sse2 syscall lm\n\n");
+      c = c + 1;
+    }
+    return a;
+  }
+  if what == PF_FILESYSTEMS && p == 0 {
+    return put_s(&mut o, 0, "nodev\tramfs\nnodev\tproc\n\tbstdisk2\n");
   }
   if what == PF_UPTIME {
     let mut a = put_n(&mut o, 0, k.ns / NS_PER_S);
@@ -574,7 +644,7 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
 {
   let n = lx_path_at_nf(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
-    return ENOENT;
+    return k.perr;
   }
   let lk = vfs_lookup(&mut k.fs, n);
   if lk != NO_FILE && vfs_is_link(&mut k.fs, lk) {

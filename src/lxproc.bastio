@@ -554,7 +554,7 @@ fn lx_stat(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, buf: u64, follow: bo
     n = lx_path_at_nf(&mut k, pid, dirfd, path);   // lstat: a link itself
   }
   if n == NO_RESULT {
-    return ENOENT;
+    return k.perr;
   }
   let m = path_meta(&mut k, n);
   if !m.ok {
