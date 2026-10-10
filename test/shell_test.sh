@@ -109,6 +109,16 @@ steps = [
     ("echo $((6 * 7)) from ash", b"42 from ash", b"\n# "),
     ("for i in 1 2 3; do echo n$i; done; test -z \"\" && echo empty", [b"n1\r\nn2\r\nn3\r\nempty"], b"\n# "),
     ("echo abX\x7fc", [b"echo abX\x08 \x08c", b"\nabc\r\n"], b"\n# "),
+    # fork, execve and wait4: a subshell, programs found on PATH as
+    # /bin/NAME (stat), with their arguments and exit status, and a
+    # nested ash whose exit status the outer one sees.
+    ("(echo in subshell; exit 4); echo sub=$?", [b"in subshell", b"sub=4"], b"\n# "),
+    ("mhello a b; echo st=$?", [b"hello from musl: mhello, argc 3, 6", b"st=3"], b"\n# "),
+    ("hello", b"hello from user mode, pid ", b"\n# "),
+    ("nothere", b"nothere: not found", b"\n# "),
+    ("ash", b"built-in shell (ash)", b"\n# "),
+    ("exit 7", b"", b"\n# "),
+    ("echo outer got $?", b"outer got 7", b"\n# "),
     ("exit 5", b"[exit 5]"),
     ("sh", b"BastiOS 0.2 -- type"),
     ("exit", b""),

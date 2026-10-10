@@ -29,8 +29,9 @@ const SEG_BAD: u64 = 2;               // malformed, or something we cannot run
 // The initial stack lives in the window's top page.
 const STACK_PAGE: u64 = 511;
 const SP_WORD: u64 = 256;             // rsp points at word 256 of that page
-const NAME_AT: u64 = 3968;            // argv[0], at most NAME_MAX bytes and a NUL
-const NAME_MAX: u64 = 63;
+const ARGS_AT: u64 = 2688;            // the argument strings, above the vectors
+const ARGS_MAX: u64 = 1344;           // their bytes, NULs included (up to RANDOM_AT)
+const ARGV_MAX: u64 = 32;             // the most arguments
 const RANDOM_AT: u64 = 4032;          // the 16 bytes AT_RANDOM points at
 const ELF_SP: u64 = 0x1FF800;         // window offset of rsp: page 511, word 256
 
@@ -238,23 +239,33 @@ fn copy_in(l1: &mut PageTable, img: Str, from: u64, off: u64, n: u64)
 }
 
 /// Writes the initial stack the Linux ABI promises at the entry point:
-/// argc, argv (just the program name), an empty environment and the
-/// auxiliary vector. `seed` fills the AT_RANDOM bytes; it is not a source
-/// of secure randomness.
-fn init_stack(f: &mut Frame, e: Elf, name: Str, seed: u64) {
+/// argc, argv, an empty environment and the auxiliary vector. The first
+/// `alen` bytes of `args` are the argument strings, each ending in a NUL
+/// (bytes after the last NUL, and arguments past ARGV_MAX, are not passed).
+/// `seed` fills the AT_RANDOM bytes; it is not a source of secure
+/// randomness.
+fn init_stack(f: &mut Frame, e: Elf, args: &Bytes, alen: u64, seed: u64)
+  requires alen <= ARGS_MAX && alen <= blen(args)
+{
   let top = USER_BASE + STACK_PAGE * 4096;
-  let mut n = slen(name);
-  if n > NAME_MAX {
-    n = NAME_MAX;
-  }
+  let w = SP_WORD;
+  let mut argc = 0;
+  let mut start = 0;
   let mut i = 0;
-  while i < n
-    invariant i <= n && n <= NAME_MAX
+  while i < alen
+    invariant i <= alen && alen <= ARGS_MAX && alen <= blen(args) && argc <= ARGV_MAX && start <= i
   {
-    frame_write8(&mut f, NAME_AT + i, sget(name, i));
+    let ch = bget(args, i);
+    frame_write8(&mut f, ARGS_AT + i, ch);
+    if ch == 0 {
+      if argc < ARGV_MAX {
+        frame_write(&mut f, w + 1 + argc, top + ARGS_AT + start);
+        argc = argc + 1;
+      }
+      start = i + 1;
+    }
     i = i + 1;
   }
-  frame_write8(&mut f, NAME_AT + n, 0);
   let mut x = seed % 0x80000000;
   let mut r = 0;
   while r < 16
@@ -264,26 +275,25 @@ fn init_stack(f: &mut Frame, e: Elf, name: Str, seed: u64) {
     frame_write8(&mut f, RANDOM_AT + r, x / 0x800000);
     r = r + 1;
   }
-  let w = SP_WORD;
-  frame_write(&mut f, w, 1);                       // argc
-  frame_write(&mut f, w + 1, top + NAME_AT);       // argv[0]
-  frame_write(&mut f, w + 2, 0);                   // end of argv
-  frame_write(&mut f, w + 3, 0);                   // end of envp
-  aux(&mut f, w + 4, 3, e.phdr);                   // AT_PHDR
-  aux(&mut f, w + 6, 4, PH_SIZE);                  // AT_PHENT
-  aux(&mut f, w + 8, 5, e.phnum);                  // AT_PHNUM
-  aux(&mut f, w + 10, 6, 4096);                    // AT_PAGESZ
-  aux(&mut f, w + 12, 7, 0);                       // AT_BASE: no interpreter
-  aux(&mut f, w + 14, 8, 0);                       // AT_FLAGS
-  aux(&mut f, w + 16, 9, e.entry);                 // AT_ENTRY
-  aux(&mut f, w + 18, 11, 0);                      // AT_UID
-  aux(&mut f, w + 20, 12, 0);                      // AT_EUID
-  aux(&mut f, w + 22, 13, 0);                      // AT_GID
-  aux(&mut f, w + 24, 14, 0);                      // AT_EGID
-  aux(&mut f, w + 26, 17, 100);                    // AT_CLKTCK: the timer runs at 100 Hz
-  aux(&mut f, w + 28, 23, 0);                      // AT_SECURE
-  aux(&mut f, w + 30, 25, top + RANDOM_AT);        // AT_RANDOM
-  aux(&mut f, w + 32, 0, 0);                       // AT_NULL
+  frame_write(&mut f, w, argc);
+  frame_write(&mut f, w + 1 + argc, 0);            // end of argv
+  frame_write(&mut f, w + 2 + argc, 0);            // end of envp
+  let v = w + 3 + argc;
+  aux(&mut f, v, 3, e.phdr);                       // AT_PHDR
+  aux(&mut f, v + 2, 4, PH_SIZE);                  // AT_PHENT
+  aux(&mut f, v + 4, 5, e.phnum);                  // AT_PHNUM
+  aux(&mut f, v + 6, 6, 4096);                     // AT_PAGESZ
+  aux(&mut f, v + 8, 7, 0);                        // AT_BASE: no interpreter
+  aux(&mut f, v + 10, 8, 0);                       // AT_FLAGS
+  aux(&mut f, v + 12, 9, e.entry);                 // AT_ENTRY
+  aux(&mut f, v + 14, 11, 0);                      // AT_UID
+  aux(&mut f, v + 16, 12, 0);                      // AT_EUID
+  aux(&mut f, v + 18, 13, 0);                      // AT_GID
+  aux(&mut f, v + 20, 14, 0);                      // AT_EGID
+  aux(&mut f, v + 22, 17, 100);                    // AT_CLKTCK: the timer runs at 100 Hz
+  aux(&mut f, v + 24, 23, 0);                      // AT_SECURE
+  aux(&mut f, v + 26, 25, top + RANDOM_AT);        // AT_RANDOM
+  aux(&mut f, v + 28, 0, 0);                       // AT_NULL
 }
 
 fn aux(f: &mut Frame, w: u64, key: u64, v: u64)
@@ -297,8 +307,8 @@ fn aux(f: &mut Frame, w: u64, key: u64, v: u64)
 /// segments, zero-filled to their memory size, and a stack holding argv,
 /// envp and the auxiliary vector. Returns `Space::Empty`, with every page
 /// given back, when memory runs out.
-fn elf_space(m: &mut Mem, img: Str, e: Elf, name: Str, seed: u64) -> Space
-  requires mem_ok(m) && e.ok && elf_fits(img, e)
+fn elf_space(m: &mut Mem, img: Str, e: Elf, args: &Bytes, alen: u64, seed: u64) -> Space
+  requires mem_ok(m) && e.ok && elf_fits(img, e) && alen <= ARGS_MAX && alen <= blen(args)
   ensures mem_ok(m)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
@@ -317,7 +327,7 @@ fn elf_space(m: &mut Mem, img: Str, e: Elf, name: Str, seed: u64) -> Space
       }
       if pt_has(l1, STACK_PAGE) {
         let mut f = pt_take_frame(&mut l1, STACK_PAGE);
-        init_stack(&mut f, e, name, seed);
+        init_stack(&mut f, e, args, alen, seed);
         pt_put_frame(&mut l1, STACK_PAGE, f, true);
       }
       return space_from_l1(&mut m, l1);

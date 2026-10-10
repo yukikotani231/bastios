@@ -75,6 +75,27 @@ const ENOTTY: u64 = 18446744073709551591;   // 2^64 - 25
 const ENOENT: u64 = 18446744073709551614;   // 2^64 - 2
 const ENOMEM: u64 = 18446744073709551604;   // 2^64 - 12
 
+// Process calls and file metadata (src/lxproc.bastio).
+const LX_CLONE: u64 = 56;
+const LX_FORK: u64 = 57;
+const LX_VFORK: u64 = 58;
+const LX_EXECVE: u64 = 59;
+const LX_WAIT4: u64 = 61;
+const LX_GETTID: u64 = 186;
+
+const SIGCHLD: u64 = 17;
+const WNOHANG: u64 = 1;
+
+const E2BIG: u64 = 18446744073709551609;    // 2^64 - 7
+const ENOEXEC: u64 = 18446744073709551608;  // 2^64 - 8
+const ECHILD: u64 = 18446744073709551606;   // 2^64 - 10
+const EAGAIN: u64 = 18446744073709551605;   // 2^64 - 11
+
+const STAT_SIZE: u64 = 144;                 // struct stat on x86-64
+const S_IFDIR: u64 = 0x41ED;                // a directory, rwxr-xr-x
+const S_IFREG_X: u64 = 0x81ED;              // a regular file, rwxr-xr-x
+const S_IFREG: u64 = 0x81A4;                // a regular file, rw-r--r--
+
 // ---------------------------------------------------------------- user memory
 
 /// A word read from user memory, if it was there.
@@ -227,9 +248,32 @@ fn linux_syscall(con: &Serial, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, 0);
     return KEEP;
   }
-  if n == LX_STAT || n == LX_LSTAT || n == LX_ACCESS || n == LX_NEWFSTATAT {
-    // No file metadata yet: say no such file, as for a missing one.
-    ret(&mut k.procs, pid, ENOENT);
+  if n == LX_STAT || n == LX_LSTAT {
+    ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b));
+    return KEEP;
+  }
+  if n == LX_NEWFSTATAT {
+    // Relative paths start at "/", the only working directory there is.
+    ret(&mut k.procs, pid, lx_stat(&mut k, pid, b, c));
+    return KEEP;
+  }
+  if n == LX_ACCESS {
+    ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, 0));   // everyone may do anything
+    return KEEP;
+  }
+  if n == LX_FORK || n == LX_VFORK || (n == LX_CLONE && a == SIGCHLD && b == 0) {
+    ret(&mut k.procs, pid, lx_fork(&mut k, mmu, pid));
+    return KEEP;
+  }
+  if n == LX_EXECVE {
+    ret(&mut k.procs, pid, lx_execve(&mut k, mmu, pid, a, b));
+    return KEEP;
+  }
+  if n == LX_WAIT4 {
+    return lx_wait4(&mut k, pid, a, b, c);
+  }
+  if n == LX_GETTID {
+    ret(&mut k.procs, pid, pid);            // one thread, whose id is the pid
     return KEEP;
   }
   if n == LX_RT_SIGACTION {
@@ -345,12 +389,12 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
 
 /// Sets the first n transfer bytes to v.
 fn lx_fill(k: &mut Kernel, v: u64, n: u64)
-  requires kok(k) && v <= 255 && n <= 64
+  requires kok(k) && v <= 255 && n <= 160
   ensures kok(k)
 {
   let mut i = 0;
   while i < n
-    invariant i <= n && n <= 64 && kok(k)
+    invariant i <= n && n <= 160 && kok(k)
   {
     bset(&mut k.fs.xfer, i, v);
     i = i + 1;
@@ -360,7 +404,7 @@ fn lx_fill(k: &mut Kernel, v: u64, n: u64)
 /// Copies the first n transfer bytes to user address va. Returns 0, or
 /// -EFAULT.
 fn lx_put_out(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
-  requires kok(k) && pid < NPROC && n <= 64
+  requires kok(k) && pid < NPROC && n <= 160
   ensures kok(k)
 {
   if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {

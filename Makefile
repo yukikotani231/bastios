@@ -107,7 +107,7 @@ build/user/%.bin: build/user/%.elf
 
 # 2. Prove the kernel and translate it to freestanding C.
 KSRCS := src/console.bastio src/pages.bastio src/space.bastio src/elf.bastio src/ramfs.bastio src/fs.bastio \
-         src/proc.bastio src/usermem.bastio src/syscall.bastio src/linux.bastio src/main.bastio
+         src/proc.bastio src/usermem.bastio src/syscall.bastio src/linux.bastio src/lxproc.bastio src/main.bastio
 KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.

@@ -15,6 +15,7 @@ import "proc.bastio";
 import "fs.bastio";
 import "syscall.bastio";
 import "linux.bastio";
+import "lxproc.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
