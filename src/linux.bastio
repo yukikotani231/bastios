@@ -243,6 +243,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if r == EAGAIN && !pipe_nonblock(k, pid, a) {
       return lx_retry(&mut k, pid, n);       // an empty pipe: wait for a writer
     }
+    if r == DISK_RETRY {
+      return disk_retry(&mut k, pid, n);     // blocks not cached yet: wait for the disk
+    }
     ret(&mut k.procs, pid, r);
     return KEEP;
   }
@@ -262,6 +265,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     }
     if w == CON_FULL {
       return con_block(&mut k, pid, n);      // a full console: wait for the pump
+    }
+    if w == DISK_RETRY {
+      return disk_retry(&mut k, pid, n);     // blocks not cached yet: wait for the disk
     }
     ret(&mut k.procs, pid, w);
     if w == EPIPE {
@@ -719,6 +725,9 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
   if got == NO_FD {
     return EBADF;
   }
+  if got == VFS_MISS {
+    return DISK_RETRY;                      // sleep until the disk catches up
+  }
   let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, got);
   if put == NO_RESULT || (put == 0 && got > 0) {
     return EFAULT;
@@ -778,6 +787,9 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64
   let w = vfs_write(&mut k.fs, &mut k.mem, d.x, got);
   if w == NO_FD {
     return EBADF;
+  }
+  if w == VFS_MISS {
+    return DISK_RETRY;                      // sleep until the disk catches up
   }
   return w;
 }

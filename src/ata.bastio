@@ -8,6 +8,8 @@
 // kernel. Every wait is bounded, so a missing or wedged drive makes an
 // operation fail instead of hanging the kernel.
 
+import "bio.bastio";
+
 const ATA_IO: u64 = 0x1F0;
 const ATA_CTL: u64 = 0x3F6;
 
@@ -39,10 +41,11 @@ struct Ata {
   io: PortIo,           // ports 0x1F0..0x1F7
   ctl: PortIo,          // port 0x3F6
   sectors: u64,         // the drive's size, 0 if there is no drive
+  done: u64,            // what ata_poll reports next: BIO_IDLE, BIO_OK or BIO_FAILED
 }
 
 spec fn ata_ok(a: &Ata) -> bool {
-  port_count(a.io) == 8 && port_count(a.ctl) == 1 && a.sectors <= LBA28_MAX
+  port_count(a.io) == 8 && port_count(a.ctl) == 1 && a.sectors <= LBA28_MAX && BIO_OK <= a.done && a.done <= BIO_IDLE
 }
 
 /// The status register, read through the control port so it does not
@@ -132,7 +135,7 @@ fn ata_new(ports: &mut Ports) -> Ata
   ensures ata_ok(result)
   ensures forall k: u64 :: (k < ATA_IO || ATA_IO + 8 <= k) && k != ATA_CTL ==> port_free(ports, k) == old(port_free(ports, k))
 {
-  let mut a = Ata { io: port_claim(&mut ports, ATA_IO, 8), ctl: port_claim(&mut ports, ATA_CTL, 1), sectors: 0 };
+  let mut a = Ata { io: port_claim(&mut ports, ATA_IO, 8), ctl: port_claim(&mut ports, ATA_CTL, 1), sectors: 0, done: BIO_IDLE };
   pio_out8(&mut a.ctl, 0, 2);                  // nIEN: no interrupts, we poll
   pio_out8(&mut a.io, ATA_DRIVE, 0xA0);
   if pio_in8(&mut a.io, ATA_CMD) == 0xFF {
@@ -265,6 +268,27 @@ fn ata_write_block(a: &mut Ata, lba: u64, src: &Bytes, at: u64) -> bool
   requires ata_ok(a) && at + 8 * SECTOR <= blen(src)
   ensures ata_ok(a) && a.sectors == old(a.sectors)
 {
+  return ata_put_block(&mut a, lba, src, at) && ata_flush(&mut a);
+}
+
+/// Flushes the drive's cache.
+fn ata_flush(a: &mut Ata) -> bool
+  requires ata_ok(a)
+  ensures ata_ok(a) && a.sectors == old(a.sectors)
+{
+  if !ata_idle(&mut a) {
+    return false;
+  }
+  pio_out8(&mut a.io, ATA_CMD, cast[u8](ATA_FLUSH));
+  return ata_idle(&mut a);
+}
+
+/// Writes src[at..at + 4096] to the eight sectors from `lba` with one
+/// command, without flushing.
+fn ata_put_block(a: &mut Ata, lba: u64, src: &Bytes, at: u64) -> bool
+  requires ata_ok(a) && at + 8 * SECTOR <= blen(src)
+  ensures ata_ok(a) && a.sectors == old(a.sectors)
+{
   if lba >= a.sectors || a.sectors - lba < 8 || !ata_command_n(&mut a, lba, ATA_WRITE, 8) {
     return false;
   }
@@ -286,9 +310,45 @@ fn ata_write_block(a: &mut Ata, lba: u64, src: &Bytes, at: u64) -> bool
     }
     s = s + 1;
   }
-  if !ata_idle(&mut a) {
+  return ata_idle(&mut a);
+}
+
+// The background interface the DMA drivers have (see src/bio.bastio).
+// Programmed I/O needs the processor for the whole transfer, so here
+// ata_begin does the work at once and ata_poll reports how it went.
+
+/// Reads (into buf[at..at + 4096], now) or writes (from it) the block at
+/// sector `lba`, or flushes the drive's cache. False if the last result
+/// has not been polled yet, or the block is not on the drive.
+fn ata_begin(a: &mut Ata, op: u64, lba: u64, buf: &mut Bytes, at: u64) -> bool
+  requires ata_ok(a) && op <= BIO_FLUSH && at + 4096 <= blen(buf)
+  ensures ata_ok(a) && a.sectors == old(a.sectors) && blen(buf) == old(blen(buf))
+  ensures result ==> a.done != BIO_IDLE
+{
+  if a.done != BIO_IDLE {
     return false;
   }
-  pio_out8(&mut a.io, ATA_CMD, cast[u8](ATA_FLUSH));
-  return ata_idle(&mut a);
+  let mut ok = true;
+  if op == BIO_READ {
+    ok = ata_read_block(&mut a, lba, &mut buf, at);
+  } else if op == BIO_WRITE {
+    ok = ata_put_block(&mut a, lba, buf, at);
+  } else {
+    ok = ata_flush(&mut a);
+  }
+  if ok {
+    a.done = BIO_OK;
+  } else {
+    a.done = BIO_FAILED;
+  }
+  return true;
+}
+
+fn ata_poll(a: &mut Ata) -> u64
+  requires ata_ok(a)
+  ensures ata_ok(a) && a.sectors == old(a.sectors) && result <= BIO_IDLE && result != BIO_RUNNING
+{
+  let d = a.done;
+  a.done = BIO_IDLE;
+  return d;
 }
