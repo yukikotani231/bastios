@@ -1,0 +1,76 @@
+// File system calls for user programs. The kernel defines the numbers
+// (src/syscall.bastio); the language reaches them through its generic
+// sys_call / sys_send / sys_recv, which lend the kernel a byte buffer. Every
+// call returns NOT_OK on failure.
+
+const SYS_OPEN: u64 = 11;
+const SYS_CLOSE: u64 = 12;
+const SYS_FREAD: u64 = 13;
+const SYS_FWRITE: u64 = 14;
+const SYS_UNLINK: u64 = 15;
+const SYS_DIRENT: u64 = 16;
+const SYS_SEEK: u64 = 17;
+const SYS_STAT: u64 = 18;
+
+const O_READ: u64 = 1;
+const O_WRITE: u64 = 2;
+const O_CREATE: u64 = 4;
+const O_TRUNC: u64 = 8;
+const O_APPEND: u64 = 16;
+
+const NOT_OK: u64 = 18446744073709551615;
+
+/// Opens the file named by the first n bytes of `name`. Returns a file
+/// descriptor.
+fn f_open(name: &Bytes, n: u64, flags: u64) -> u64
+  requires n <= blen(name)
+{
+  return sys_send(SYS_OPEN, flags, name, n);
+}
+
+fn f_close(fd: u64) -> u64 {
+  return sys_call(SYS_CLOSE, fd, 0);
+}
+
+/// Reads up to blen(buf) bytes (at most 4096 per call) into buf. Returns
+/// the count, 0 at the end of the file.
+fn f_read(fd: u64, buf: &mut Bytes) -> u64
+  ensures blen(buf) == old(blen(buf))
+{
+  return sys_recv(SYS_FREAD, fd, &mut buf);
+}
+
+/// Writes the first n bytes of buf (at most 4096 per call). Returns the
+/// count written.
+fn f_write(fd: u64, buf: &Bytes, n: u64) -> u64
+  requires n <= blen(buf)
+{
+  return sys_send(SYS_FWRITE, fd, buf, n);
+}
+
+fn f_seek(fd: u64, off: u64) -> u64 {
+  return sys_call(SYS_SEEK, fd, off);
+}
+
+/// Removes a file. Fails if it is open.
+fn f_unlink(name: &Bytes, n: u64) -> u64
+  requires n <= blen(name)
+{
+  return sys_send(SYS_UNLINK, 0, name, n);
+}
+
+/// The size of a file.
+fn f_stat(name: &Bytes, n: u64) -> u64
+  requires n <= blen(name)
+{
+  return sys_send(SYS_STAT, 0, name, n);
+}
+
+/// Copies the name of directory entry i into buf. Returns its length (which
+/// may exceed blen(buf): then only the start was copied), 0 for an unused
+/// entry, or NOT_OK past the last entry.
+fn f_dirent(i: u64, buf: &mut Bytes) -> u64
+  ensures blen(buf) == old(blen(buf))
+{
+  return sys_recv(SYS_DIRENT, i, &mut buf);
+}
