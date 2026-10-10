@@ -15,6 +15,10 @@
 import "pages.bastio";
 
 const USER_BASE: u64 = 0x8000000000;
+// What win_op (src/lxmem.bastio) does to a range of window pages.
+const WOP_UNMAP: u64 = 0;
+const WOP_PROTECT: u64 = 1;             // arg: 1 writable, 0 read-only
+const WOP_MOVE: u64 = 2;                // arg: where the first page goes
 const WIN_L1S: u64 = 32;              // level-1 tables the window may hold
 const WPAGES: u64 = 16384;            // WIN_L1S * 512
 const USER_SIZE: u64 = 0x4000000;     // WPAGES * 4096
@@ -258,7 +262,7 @@ fn buf_to_frame(f: &mut Frame, o: u64, buf: &Bytes, k: u64, m: u64)
 fn l1_write(l1: &mut PageTable, i: u64, o: u64, buf: &Bytes, k: u64, m: u64) -> bool
   requires pt_level(l1) == 1 && i < 512 && o + m <= 4096 && k + m <= blen(buf)
 {
-  if !pt_has(l1, i) {
+  if !pt_has(l1, i) || !pt_writable(l1, i) {
     return false;
   }
   pt_borrow_frame(&mut l1, i, buf_to_frame, o, buf, k, m);
@@ -266,7 +270,8 @@ fn l1_write(l1: &mut PageTable, i: u64, o: u64, buf: &Bytes, k: u64, m: u64) -> 
 }
 
 /// Copies buf[k .. k + m] to window offset a (all on one page). False if
-/// the page is not mapped.
+/// the page is not mapped, or mapped read-only (mprotect): the kernel
+/// writes nothing the program itself could not.
 fn w_write(l2: &mut PageTable, a: u64, buf: &Bytes, k: u64, m: u64) -> bool
   requires pt_level(l2) == 2 && a < USER_SIZE && a % 4096 + m <= 4096 && k + m <= blen(buf)
   ensures pt_level(l2) == 2
@@ -503,8 +508,9 @@ fn clone_l1(src: &mut PageTable, m: &mut Mem) -> Space
         ok = false;
       } else {
         let mut f = take_page(&mut m, b);
+        let w = pt_writable(src, p);      // a read-only page stays read-only in both
         pt_borrow_frame(&mut src, p, copy_from, &mut f);
-        pt_put_frame(&mut l1, p, f, true);
+        pt_put_frame(&mut l1, p, f, w);
       }
     }
     if ok {

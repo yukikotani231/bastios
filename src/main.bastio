@@ -29,10 +29,12 @@ import "lxtcp.bastio";
 import "lxsig.bastio";
 import "lxtime.bastio";
 import "lxunix.bastio";
+import "lxmem.bastio";
 import "lxmisc.bastio";
 import "lxthread.bastio";
 import "lxdev.bastio";
 import "lxevent.bastio";
+import "lxptimer.bastio";
 import "lxprocfs.bastio";
 
 const V_TIMER: u64 = 32;
@@ -259,7 +261,17 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       put_hex(&mut s.con, pget(s.k.procs, p, F_REGS + 19));
     }
     puts(&mut s.con, "; killed]\r\n");
-    terminate(&mut s.k, mmu, p, 128 + v);
+    // Dies of the signal Linux would send: a parent's wait4 sees a
+    // SIGSEGV (or SIGFPE, SIGILL, SIGTRAP), and a shell prints 128 + it.
+    let mut sig = SIGSEGV;
+    if v == 0 {
+      sig = SIGFPE;
+    } else if v == 6 {
+      sig = SIGILL;
+    } else if v == 3 {
+      sig = SIGTRAP;
+    }
+    terminate(&mut s.k, mmu, p, SIG_DEATH + sig);
     return (p + 1) % NPROC;
   }
   return p;
