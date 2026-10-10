@@ -1,10 +1,12 @@
 /* Directories through the Linux system calls, against musl: openat,
  * fstatat, mkdirat and unlinkat relative to a directory descriptor,
- * fchdir to it, getcwd, and cleaning up. */
+ * fchdir to it, getcwd, a file mapped with mmap and MAP_FIXED over it,
+ * and cleaning up. */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -41,10 +43,15 @@ int main(void)
     f = open("f", O_RDONLY);
     if (f < 0 || read(f, buf, sizeof buf) != 2 || strcmp(buf, "at") != 0)
         return fail("reading back");
+    char *m = mmap(0, 4096, PROT_READ, MAP_PRIVATE, f, 0);
+    if (m == MAP_FAILED || m[0] != 'a' || m[1] != 't' || m[2] != 0)
+        return fail("mmap of a file");
+    if (mmap(m, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0) != m || m[0] != 0)
+        return fail("mmap with MAP_FIXED");
     close(f);
     if (unlinkat(AT_FDCWD, "f", 0) != 0 || chdir("..") != 0 || rmdir("dx") != 0)
         return fail("cleaning up");
     close(d);
-    printf("mdir: ok in %s\n", cwd);
+    printf("mdir: ok in %s, %s\n", cwd, "mapped");
     return 0;
 }
