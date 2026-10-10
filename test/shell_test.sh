@@ -688,7 +688,10 @@ else:
         time.sleep(0.5)
         m2 = len(out)
         qemu.stdin.write(b"ps\r"); qemu.stdin.flush()
-        if read_until(b"bastios> ", m2) and re.search(rb"socket\s+\d+\s+mtcp", out[m2:]):
+        # ps's own line names mtcp; wait for the prompt after it (the one
+        # `mtcp &` printed can arrive after m2, under SMP).
+        if (read_until(b" mtcp", m2) and read_until(b"bastios> ", out.index(b" mtcp", m2))
+                and re.search(rb"socket\s+\d+\s+mtcp", out[m2:])):
             print("ok   Linux TCP: a process blocked in accept sleeps")
         else:
             print("FAIL Linux TCP accept sleep:", repr(out[m2:])); fails += 1
