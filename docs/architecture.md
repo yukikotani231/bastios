@@ -57,13 +57,13 @@ The Bastio compiler turns each Bastio file into freestanding C, after proving it
 | Slot | Maps | Owner |
 | --- | --- | --- |
 | 0 | The kernel: the boot identity map of the first 1 GiB, without the user bit | Not owned; `pt_new` points it at the kernel's own map in every new level-4 table, and the prover rejects any `pt_put` or `pt_take` on slot 0 |
-| 1 | The process's user window: 512 pages (2 MiB) from `USER_BASE` = `0x8000000000` | The process, through one table at each of levels 3, 2 and 1 |
+| 1 | The process's user window: `WPAGES` = 16384 pages (64 MiB) from `USER_BASE` = `0x8000000000` | The process, through one table at each of levels 3 and 2 and up to `WIN_L1S` = 32 level-1 tables, each made when a page under it is first mapped |
 
-The program image starts at page 0 of the window and the stack takes the top `STACK_PAGES` pages. `new_space` (`src/space.bastio`) builds this from the bottom up, taking every page from `Mem`; if memory runs out half way, it frees what it built and returns `Space::Empty`, so a failed spawn leaks nothing. `free_space` tears it down level by level; `pt_free` and `pt_free_root` require an empty table, so the proof shows every page is returned, and `pt_free_root` also requires that the table is not the one in CR3.
+The program image starts at page 0 of the window and the stack takes the top `STACK_PAGES` pages. Nothing else is mapped at the start: a Linux program's heap (`brk`) grows up from the image and its `mmap` pages come down from the stack, each page mapped when asked for. `new_space` (`src/space.bastio`) builds this from the bottom up, taking every page from `Mem`; if memory runs out half way, it frees what it built and returns `Space::Empty`, so a failed spawn leaks nothing. `free_space` tears it down level by level; `pt_free` and `pt_free_root` require an empty table, so the proof shows every page is returned, and `pt_free_root` also requires that the table is not the one in CR3.
 
 **Kernel heap.** `Buf`, `Vec` and `Box` values in the kernel come from the prelude's fixed 8 MiB arena, not from the page pool. Running out of it halts the machine (see "Limits").
 
-**Reading user memory.** The kernel cannot dereference a user pointer. To copy a user buffer (`write`, `spawn`'s program name), it takes the level-3, level-2 and level-1 tables out of their parents, then takes each page out of the level-1 table, reads the bytes it needs with `frame_read8`, and puts everything back. Ownership is moved, never aliased, so the proof covers these copies too. `user_range` checks first that the buffer lies inside the window; a page that is not mapped ends the copy early.
+**Reading user memory.** The kernel cannot dereference a user pointer. To copy a user buffer (`write`, `spawn`'s program name), it takes the level-3 and level-2 tables out of their parents, then for each page takes its level-1 table out of the level-2 one and the page out of that (`w_read`, `w_write` and `w_byte` in `src/space.bastio`), reads or writes the bytes it needs on that page, and puts everything back. Ownership is moved, never aliased, so the proof covers these copies too. `user_range` checks first that the buffer lies inside the window; a page that is not mapped ends the copy early.
 
 ## Processes
 
@@ -162,7 +162,7 @@ Trusted, and listed in the README's "What is trusted" table: `boot/`, `user/star
 
 These are current choices, not design limits; the README's "Status" lists them with the plan:
 - one lock for the whole kernel state; the kernel runs with interrupts off and polls the UART, and console and PIT interrupts reach only the bootstrap processor;
-- a 2 MiB user window per process, at most `NPROC - 1` processes, programs built into the kernel image;
+- a 64 MiB user window per process, at most `NPROC - 1` processes;
 - files are simple (32 in memory and 32 on disk, names up to 28 bytes, files up to 1 MiB, 8 descriptors per process, no journal), and programs cannot be run from files yet;
 - user pages are mapped writable and executable;
 - the kernel's arena halts the machine when it runs out (the page pool does not: spawns fail cleanly).
