@@ -1,8 +1,11 @@
 // Loading static Linux x86-64 ELF executables (the first step toward
 // running Linux programs). An image is either a fixed-address executable
-// (ET_EXEC) whose segments lie in the user window, or a static PIE (ET_DYN)
-// with no interpreter, which is placed at USER_BASE; a static PIE relocates
-// itself, so the kernel applies no relocations.
+// (ET_EXEC) whose segments lie in the user window, or a PIE (ET_DYN), which
+// is placed at USER_BASE. A static PIE relocates itself. A dynamically
+// linked one names an interpreter (PT_INTERP), the dynamic linker, which
+// the kernel loads too, high in the window just below where mmap starts,
+// and starts instead of the program; the linker relocates both. The kernel
+// applies no relocations either way.
 //
 // The bytes come from a built-in image or a file (Src), read a piece at a
 // time into the file layer's transfer buffer. Every field read from them
@@ -28,6 +31,8 @@ const PT_INTERP: u64 = 3;
 const SEG_SKIP: u64 = 0;              // not loaded (PT_NOTE, PT_GNU_STACK, ...)
 const SEG_LOAD: u64 = 1;              // a PT_LOAD that fits the window
 const SEG_BAD: u64 = 2;               // malformed, or something we cannot run
+const SEG_INTERP: u64 = 3;            // PT_INTERP: from and filesz locate the interpreter's path
+const INTERP_MAX: u64 = 256;          // the longest interpreter path, NUL included
 
 // The initial stack lives in the window's top page.
 const STACK_PAGE: u64 = 16383;       // WPAGES - 1
@@ -78,6 +83,8 @@ struct Elf {
   phoff: u64,     // file offset of the program headers
   phnum: u64,
   phdr: u64,      // user address of the program headers once loaded, or 0
+  interp: u64,    // file offset of the interpreter's path
+  ilen: u64,      // and its length, NUL included; 0 when there is none
 }
 
 /// A program header, once checked.
@@ -90,12 +97,14 @@ struct Seg {
 }
 
 spec fn seg_fits(size: u64, s: Seg) -> bool {
-  s.kind == SEG_LOAD ==> (s.filesz <= s.memsz && s.from + s.filesz <= size && s.off + s.memsz <= IMAGE_MAX)
+  (s.kind == SEG_LOAD ==> (s.filesz <= s.memsz && s.from + s.filesz <= size && s.off + s.memsz <= IMAGE_MAX))
+  && (s.kind == SEG_INTERP ==> (s.filesz <= INTERP_MAX && s.from + s.filesz <= size))
 }
 
 spec fn elf_fits(size: u64, e: Elf) -> bool {
   e.ok ==> (e.phnum <= PH_MAX && e.phoff + e.phnum * PH_SIZE <= size
-    && e.end <= IMAGE_MAX && e.bias <= USER_BASE
+    && e.end <= IMAGE_MAX && e.bias <= USER_BASE + IMAGE_MAX
+    && e.ilen <= INTERP_MAX && e.interp + e.ilen <= size
     && USER_BASE <= e.entry && e.entry < USER_BASE + e.end)
 }
 
@@ -134,7 +143,7 @@ fn bad_seg() -> Seg
 
 /// Program header `i` of `src` (headers at `phoff`), placed with `bias`.
 fn seg(v: &mut Vfs, src: Src, phoff: u64, i: u64, bias: u64) -> Seg
-  requires vfs_ok(v) && i < PH_MAX && bias <= USER_BASE
+  requires vfs_ok(v) && i < PH_MAX && bias <= USER_BASE + IMAGE_MAX
   ensures vfs_ok(v) && seg_fits(src.size, result)
 {
   if phoff > src.size || i * PH_SIZE > src.size - phoff || !src_read(&mut v, src, phoff + i * PH_SIZE, PH_SIZE) {
@@ -143,13 +152,17 @@ fn seg(v: &mut Vfs, src: Src, phoff: u64, i: u64, bias: u64) -> Seg
   let h = 0;
   let n = src.size;
   let t = rd32(v.xfer, h);
+  let from = rd64(v.xfer, h + 8);
   if t == PT_INTERP {
-    return bad_seg();                 // needs a dynamic linker
+    let plen = rd64(v.xfer, h + 32);
+    if plen < 2 || plen > INTERP_MAX || from > n || plen > n - from {
+      return bad_seg();
+    }
+    return Seg { kind: SEG_INTERP, from: from, filesz: plen, off: 0, memsz: 0 };
   }
   if t != PT_LOAD {
     return Seg { kind: SEG_SKIP, from: 0, filesz: 0, off: 0, memsz: 0 };
   }
-  let from = rd64(v.xfer, h + 8);
   let vaddr = rd64(v.xfer, h + 16);
   let filesz = rd64(v.xfer, h + 32);
   let memsz = rd64(v.xfer, h + 40);
@@ -170,12 +183,21 @@ fn seg(v: &mut Vfs, src: Src, phoff: u64, i: u64, bias: u64) -> Seg
 fn bad_elf() -> Elf
   ensures !result.ok
 {
-  return Elf { ok: false, bias: 0, entry: 0, end: 0, phoff: 0, phnum: 0, phdr: 0 };
+  return Elf { ok: false, bias: 0, entry: 0, end: 0, phoff: 0, phnum: 0, phdr: 0, interp: 0, ilen: 0 };
 }
 
-/// Checks the file header and every program header of `src`.
+/// Checks the file header and every program header of `src`, placing a
+/// PIE at USER_BASE.
 fn elf_parse(v: &mut Vfs, src: Src) -> Elf
   requires vfs_ok(v)
+  ensures vfs_ok(v) && elf_fits(src.size, result)
+{
+  return elf_parse_at(&mut v, src, 0);
+}
+
+/// elf_parse, placing a PIE at window offset `place` instead.
+fn elf_parse_at(v: &mut Vfs, src: Src, place: u64) -> Elf
+  requires vfs_ok(v) && place <= IMAGE_MAX
   ensures vfs_ok(v) && elf_fits(src.size, result)
 {
   let n = src.size;
@@ -195,7 +217,7 @@ fn elf_parse(v: &mut Vfs, src: Src) -> Elf
   }
   let mut bias = 0;
   if ty == ET_DYN {
-    bias = USER_BASE;
+    bias = USER_BASE + place;
   } else if ty != ET_EXEC {
     return bad_elf();
   }
@@ -211,13 +233,20 @@ fn elf_parse(v: &mut Vfs, src: Src) -> Elf
   let mut end = 0;
   let mut phdr = 0;
   let mut loads = 0;
+  let mut interp = 0;
+  let mut ilen = 0;
   let mut i = 0;
   while i < phnum
     invariant i <= phnum && phnum <= PH_MAX && end <= IMAGE_MAX && loads <= i && vfs_ok(v)
+    invariant ilen <= INTERP_MAX && interp + ilen <= n
   {
     let s = seg(&mut v, src, phoff, i, bias);
     if s.kind == SEG_BAD {
       return bad_elf();
+    }
+    if s.kind == SEG_INTERP {
+      interp = s.from;
+      ilen = s.filesz;
     }
     if s.kind == SEG_LOAD {
       loads = loads + 1;
@@ -237,7 +266,7 @@ fn elf_parse(v: &mut Vfs, src: Src) -> Elf
   if entry > USER_BASE + IMAGE_MAX || entry + bias < USER_BASE || entry + bias >= USER_BASE + end {
     return bad_elf();
   }
-  return Elf { ok: true, bias: bias, entry: entry + bias, end: end, phoff: phoff, phnum: phnum, phdr: phdr };
+  return Elf { ok: true, bias: bias, entry: entry + bias, end: end, phoff: phoff, phnum: phnum, phdr: phdr, interp: interp, ilen: ilen };
 }
 
 /// How many of the `left` bytes wanted from window offset `a` lie on a's page.
@@ -297,8 +326,8 @@ fn put_window(l2: &mut PageTable, x: &Bytes, off: u64, n: u64)
 /// environment strings, each ending in a NUL (bytes after the last NUL,
 /// arguments past ARGV_MAX and strings past ENVC_MAX are not passed).
 /// `seed` fills the AT_RANDOM bytes; it is not a source of secure
-/// randomness.
-fn init_stack(f: &mut Frame, e: Elf, args: &Bytes, alen: u64, total: u64, seed: u64)
+/// randomness. `base` is where the interpreter was placed, or 0.
+fn init_stack(f: &mut Frame, e: Elf, base: u64, args: &Bytes, alen: u64, total: u64, seed: u64)
   requires alen <= total && total <= ARGS_MAX && total <= blen(args)
 {
   let top = USER_BASE + STACK_PAGE * 4096;
@@ -343,7 +372,7 @@ fn init_stack(f: &mut Frame, e: Elf, args: &Bytes, alen: u64, total: u64, seed: 
   aux(&mut f, v + 2, 4, PH_SIZE);                  // AT_PHENT
   aux(&mut f, v + 4, 5, e.phnum);                  // AT_PHNUM
   aux(&mut f, v + 6, 6, 4096);                     // AT_PAGESZ
-  aux(&mut f, v + 8, 7, 0);                        // AT_BASE: no interpreter
+  aux(&mut f, v + 8, 7, base);                     // AT_BASE: the interpreter, if any
   aux(&mut f, v + 10, 8, 0);                       // AT_FLAGS
   aux(&mut f, v + 12, 9, e.entry);                 // AT_ENTRY
   aux(&mut f, v + 14, 11, 0);                      // AT_UID
@@ -363,12 +392,14 @@ fn aux(f: &mut Frame, w: u64, key: u64, v: u64)
   frame_write(&mut f, w + 1, v);
 }
 
-/// Builds an address space for the checked ELF image `img`: its loadable
-/// segments, zero-filled to their memory size, and a stack holding argv,
-/// envp and the auxiliary vector. Returns `Space::Empty`, with every page
-/// given back, when memory runs out.
-fn elf_space(m: &mut Mem, v: &mut Vfs, src: Src, e: Elf, args: &Bytes, alen: u64, total: u64, seed: u64) -> Space
-  requires mem_ok(m) && vfs_ok(v) && e.ok && elf_fits(src.size, e) && alen <= total && total <= ARGS_MAX && total <= blen(args)
+/// Builds an address space for the checked ELF image `src`: its loadable
+/// segments, zero-filled to their memory size, those of the interpreter
+/// `isrc` too when `ie` is ok, and a stack holding argv, envp and the
+/// auxiliary vector. Returns `Space::Empty`, with every page given back,
+/// when memory runs out.
+fn elf_space(m: &mut Mem, v: &mut Vfs, src: Src, e: Elf, isrc: Src, ie: Elf, args: &Bytes, alen: u64, total: u64, seed: u64) -> Space
+  requires mem_ok(m) && vfs_ok(v) && e.ok && elf_fits(src.size, e) && elf_fits(isrc.size, ie)
+  requires alen <= total && total <= ARGS_MAX && total <= blen(args)
   ensures mem_ok(m) && vfs_ok(v)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
@@ -388,16 +419,46 @@ fn elf_space(m: &mut Mem, v: &mut Vfs, src: Src, e: Elf, args: &Bytes, alen: u64
         }
         i = i + 1;
       }
+      // The interpreter's segments, on pages of their own.
+      let mut iph = 0;
+      if ie.ok {
+        iph = ie.phnum;
+      }
+      let mut j = 0;
+      while ok && j < iph
+        invariant j <= iph && iph <= PH_MAX && pt_level(l2) == 2 && vfs_ok(v) && mem_ok(m)
+      {
+        let s = seg(&mut v, isrc, ie.phoff, j, ie.bias);
+        if s.kind == SEG_LOAD {
+          let mut p = s.off / 4096;
+          while ok && p < (s.off + s.memsz + 4095) / 4096
+            invariant pt_level(l2) == 2 && mem_ok(m) && s.off + s.memsz <= IMAGE_MAX
+          {
+            ok = w_map(&mut m, &mut l2, p);
+            p = p + 1;
+          }
+          if ok {
+            ok = copy_in(&mut l2, &mut v, isrc, s.from, s.off, s.filesz);
+          }
+        } else if s.kind == SEG_BAD {
+          ok = false;
+        }
+        j = j + 1;
+      }
       if !ok {
         free_l2(&mut m, l2);
         return Space::Empty;
+      }
+      let mut base = 0;
+      if ie.ok {
+        base = ie.bias;
       }
       let t = STACK_PAGE / 512;
       if pt_has(l2, t) {
         let mut l1 = pt_take(&mut l2, t);
         if pt_has(l1, STACK_PAGE % 512) {
           let mut f = pt_take_frame(&mut l1, STACK_PAGE % 512);
-          init_stack(&mut f, e, args, alen, total, seed);
+          init_stack(&mut f, e, base, args, alen, total, seed);
           pt_put_frame(&mut l1, STACK_PAGE % 512, f, true);
         }
         pt_put(&mut l2, t, l1);

@@ -252,6 +252,9 @@ steps = [
     # posix_spawn: clone(CLONE_VM | CLONE_VFORK) lends the parent's
     # address space to the child until it execs or exits (user/mspawn.c).
     ("mspawn", [b"spawned 5", b"mspawn: ok, kept 1234"], b"\n# "),
+    # A dynamically linked program: the kernel loads musl's dynamic linker,
+    # its PT_INTERP, which links libc into it (user/mdyn.c).
+    ("mdyn", b"mdyn: linked dynamically, mdyn, sum 5050, argc 1, libc apart", b"\n# "),
     ("exit 5", b"[exit 5]"),
     ("rm lxout", b""),
     ("sh", b"BastiOS 0.2 -- type"),
