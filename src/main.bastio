@@ -552,6 +552,8 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     puts(&mut con, "disk: virtio\r\n");
   } else if blk_is_nvme(disk.dev) {
     puts(&mut con, "disk: NVMe\r\n");
+  } else if blk_is_ahci(disk.dev) {
+    puts(&mut con, "disk: AHCI\r\n");
   }
   // A USB keyboard on an xHCI controller, if there is one: eleven pages
   // after the network card's.
@@ -567,9 +569,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   term.usb = usb;
   if usb_on {
     puts(&mut con, "keyboard: USB (xHCI)\r\n");
-  } else if xdev < 32 && usb_lo == 0 {
+  } else if xdev < PCI_NONE && usb_lo == 0 {
     puts(&mut con, "usb: the xHCI controller's registers are outside the device window; not used\r\n");
-  } else if xdev < 32 {
+  } else if xdev < PCI_NONE {
     puts(&mut con, "usb: no keyboard on the xHCI controller's root ports\r\n");
   }
   // The network card, if any: nine pages after the disk's four (an e1000

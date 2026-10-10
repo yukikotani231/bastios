@@ -788,7 +788,7 @@ fn usb_poll(u: &mut Usb) -> u64
   }
 }
 
-/// The xHCI controller `dev` on PCI bus 0, whose registers are bar ..
+/// The xHCI controller `dev` on PCI, whose registers are bar ..
 /// bar + size, started with pages at .. at+10, if the registers lie in the
 /// device window (`bar_space`) clear of the framebuffer at lo .. hi and
 /// the disk's registers at lo2 .. hi2; else none. A controller with no
@@ -800,7 +800,7 @@ fn usb_new(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, lo: u64, hi
   ensures usb_ok(result) && mem_ok(m)
   ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) && !(bar <= a && a < bar + size) ==> mmio_free(win, a)
 {
-  if dev >= 32 || size < 0x2000 || bar % 4096 != 0
+  if dev >= PCI_NONE || size < 0x2000 || bar % 4096 != 0
     || !((bar >= WIN_LO && bar + size <= WIN_LOW_TOP) || (bar >= WIN_HIGH && bar + size <= WIN_TOP))
     || !(bar + size <= lo || bar >= hi) || !(bar + size <= lo2 || bar >= hi2) || !pages_free(m, at, XHCI_PAGES) {
     return Usb::None;
@@ -832,7 +832,7 @@ fn usb_bar(pci: &mut Pci, dev: u64) -> u64
   requires pci_ok(pci)
   ensures result < WIN_TOP
 {
-  if dev >= 32 {
+  if dev >= PCI_NONE {
     return 0;
   }
   return pci_mem_bar64(&mut pci, dev);
@@ -842,7 +842,7 @@ fn usb_bar_size(pci: &mut Pci, dev: u64) -> u64
   requires pci_ok(pci)
   ensures result <= XHCI_MAX_LEN
 {
-  if dev >= 32 {
+  if dev >= PCI_NONE {
     return 0;
   }
   let n = pci_bar_size(&mut pci, dev);

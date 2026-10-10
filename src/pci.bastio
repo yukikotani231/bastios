@@ -1,15 +1,23 @@
 // PCI configuration space, through the two legacy I/O ports: write an
 // address to 0xCF8, then read or write the 32-bit register at 0xCFC. The
-// kernel uses it only to find devices on bus 0 and to let them do DMA.
+// kernel uses it only to find devices and to let them do DMA.
+//
+// A device (strictly, a function of one) is named by its index bus * 256 +
+// device * 8 + function, below PCI_NONE, which stands for "none". The
+// search walks every bus the firmware numbered (an NVMe drive on a real
+// PC sits behind a PCIe root port, on bus 1 or later), skipping empty
+// slots and the other functions of single-function devices.
 
 const PCI_ADDR: u64 = 0xCF8;
 const PCI_DATA: u64 = 0xCFC;
 const PCI_ENABLE: u64 = 0x80000000;   // bit 31 of the address: a config cycle
+const PCI_NONE: u64 = 65536;
 
 // Register offsets in a device's configuration header.
 const PCI_ID: u64 = 0x00;             // vendor (low 16 bits), device (high)
 const PCI_COMMAND: u64 = 0x04;        // command (low 16), status (high)
 const PCI_CLASS: u64 = 0x08;        // revision (low 8 bits), class code (high 24)
+const PCI_HEADER: u64 = 0x0C;         // bit 23: a multi-function device
 const PCI_BAR0: u64 = 0x10;
 
 const PCI_CMD_IO: u64 = 1;            // respond to its I/O ports
@@ -41,15 +49,15 @@ fn pci_free(ports: &mut Ports, p: Pci)
   port_release(&mut ports, p.data);
 }
 
-/// Selects register `off` (a multiple of 4) of device `dev` on bus 0.
+/// Selects register `off` (a multiple of 4) of device `dev`.
 fn pci_select(p: &mut Pci, dev: u64, off: u64)
-  requires pci_ok(p) && dev < 32 && off < 256 && off % 4 == 0
+  requires pci_ok(p) && dev < PCI_NONE && off < 256 && off % 4 == 0
 {
-  pio_out32(&mut p.addr, 0, cast[u32](PCI_ENABLE + dev * 2048 + off));
+  pio_out32(&mut p.addr, 0, cast[u32](PCI_ENABLE + dev * 256 + off));
 }
 
 fn pci_read(p: &mut Pci, dev: u64, off: u64) -> u64
-  requires pci_ok(p) && dev < 32 && off < 256 && off % 4 == 0
+  requires pci_ok(p) && dev < PCI_NONE && off < 256 && off % 4 == 0
   ensures result <= 4294967295
 {
   pci_select(&mut p, dev, off);
@@ -57,33 +65,47 @@ fn pci_read(p: &mut Pci, dev: u64, off: u64) -> u64
 }
 
 fn pci_write(p: &mut Pci, dev: u64, off: u64, v: u64)
-  requires pci_ok(p) && dev < 32 && off < 256 && off % 4 == 0 && v <= 4294967295
+  requires pci_ok(p) && dev < PCI_NONE && off < 256 && off % 4 == 0 && v <= 4294967295
 {
   pci_select(&mut p, dev, off);
   pio_out32(&mut p.data, 0, cast[u32](v));
 }
 
-/// The first device on bus 0 with this vendor and device id, or 32.
+/// The device to look at after `dev`: the next function, or the next
+/// slot if `dev` is function 0 of an empty slot or of a single-function
+/// device.
+fn pci_next(p: &mut Pci, dev: u64) -> u64
+  requires pci_ok(p) && dev < PCI_NONE
+  ensures dev < result && result <= PCI_NONE
+{
+  if dev % 8 == 0 && dev + 8 <= PCI_NONE
+    && (pci_read(&mut p, dev, PCI_ID) == 0xFFFFFFFF || (pci_read(&mut p, dev, PCI_HEADER) >> 23) % 2 == 0) {
+    return dev + 8;
+  }
+  return dev + 1;
+}
+
+/// The first device with this vendor and device id, or PCI_NONE.
 fn pci_find(p: &mut Pci, vendor: u64, device: u64) -> u64
   requires pci_ok(p) && vendor <= 65535 && device <= 65535
-  ensures result <= 32
+  ensures result <= PCI_NONE
 {
   let want = vendor + device * 65536;
   let mut d = 0;
-  while d < 32
-    invariant d <= 32
+  while d < PCI_NONE
+    invariant d <= PCI_NONE
   {
     if pci_read(&mut p, d, PCI_ID) == want {
       return d;
     }
-    d = d + 1;
+    d = pci_next(&mut p, d);
   }
-  return 32;
+  return PCI_NONE;
 }
 
 /// The base of the device's first BAR if it is an I/O-port BAR, else 0.
 fn pci_io_bar(p: &mut Pci, dev: u64) -> u64
-  requires pci_ok(p) && dev < 32
+  requires pci_ok(p) && dev < PCI_NONE
   ensures result < 65536
 {
   let b = pci_read(&mut p, dev, PCI_BAR0);
@@ -96,7 +118,7 @@ fn pci_io_bar(p: &mut Pci, dev: u64) -> u64
 /// The base of the device's first BAR if it is a memory BAR below 4 GiB,
 /// else 0.
 fn pci_mem_bar(p: &mut Pci, dev: u64) -> u64
-  requires pci_ok(p) && dev < 32
+  requires pci_ok(p) && dev < PCI_NONE
   ensures result <= 4294967295
 {
   let b = pci_read(&mut p, dev, PCI_BAR0);
@@ -112,15 +134,26 @@ fn pci_mem_bar(p: &mut Pci, dev: u64) -> u64
 /// The address of the device's first BAR, a 32- or 64-bit memory BAR (0
 /// for an I/O-port BAR, or one at or above 2^46, beyond the device window).
 fn pci_mem_bar64(p: &mut Pci, dev: u64) -> u64
-  requires pci_ok(p) && dev < 32
+  requires pci_ok(p) && dev < PCI_NONE
   ensures result < WIN_TOP
 {
-  let b = pci_read(&mut p, dev, PCI_BAR0);
+  return pci_mem_bar_at(&mut p, dev, PCI_BAR0);
+}
+
+/// The same for the BAR at configuration offset `reg` (0x10 .. 0x24).
+fn pci_mem_bar_at(p: &mut Pci, dev: u64, reg: u64) -> u64
+  requires pci_ok(p) && dev < PCI_NONE && PCI_BAR0 <= reg && reg <= 0x24 && reg % 4 == 0
+  ensures result < WIN_TOP
+{
+  let b = pci_read(&mut p, dev, reg);
   if b % 2 == 1 {
     return 0;
   }
   if b / 2 % 4 == 2 {
-    let hi = pci_read(&mut p, dev, PCI_BAR0 + 4);
+    if reg == 0x24 {
+      return 0;                       // a 64-bit BAR cannot start in the last slot
+    }
+    let hi = pci_read(&mut p, dev, reg + 4);
     if hi >= WIN_TOP / 4294967296 {
       return 0;
     }
@@ -132,7 +165,7 @@ fn pci_mem_bar64(p: &mut Pci, dev: u64) -> u64
 /// Lets the device answer on its I/O ports and registers and do DMA. The status half of
 /// the register is written as zeros, which changes nothing in it.
 fn pci_enable(p: &mut Pci, dev: u64)
-  requires pci_ok(p) && dev < 32
+  requires pci_ok(p) && dev < PCI_NONE
 {
   let c = pci_read(&mut p, dev, PCI_COMMAND) % 65536;
   let mut n = c;
@@ -148,35 +181,42 @@ fn pci_enable(p: &mut Pci, dev: u64)
   pci_write(&mut p, dev, PCI_COMMAND, n);
 }
 
-/// The first device on bus 0 whose class, subclass and programming
-/// interface (the top 24 bits of register 8) are `cls`, or 32.
+/// The first device whose class, subclass and programming interface (the
+/// top 24 bits of register 8) are `cls`, or PCI_NONE.
 fn pci_find_class(p: &mut Pci, cls: u64) -> u64
   requires pci_ok(p)
-  ensures result <= 32
+  ensures result <= PCI_NONE
 {
   let mut d = 0;
-  while d < 32
-    invariant d <= 32
+  while d < PCI_NONE
+    invariant d <= PCI_NONE
   {
     if pci_read(&mut p, d, PCI_ID) != 0xFFFFFFFF && pci_read(&mut p, d, PCI_CLASS) >> 8 == cls {
       return d;
     }
-    d = d + 1;
+    d = pci_next(&mut p, d);
   }
-  return 32;
+  return PCI_NONE;
 }
 
 /// The size of the device's first BAR, a memory BAR, found the usual way:
 /// write all ones, read back which address bits stick, restore it. The
 /// device must not be decoding it meanwhile (it is not enabled yet).
 fn pci_bar_size(p: &mut Pci, dev: u64) -> u64
-  requires pci_ok(p) && dev < 32
+  requires pci_ok(p) && dev < PCI_NONE
   ensures result <= 4294967296
 {
-  let b = pci_read(&mut p, dev, PCI_BAR0);
-  pci_write(&mut p, dev, PCI_BAR0, 0xFFFFFFFF);
-  let s = pci_read(&mut p, dev, PCI_BAR0);
-  pci_write(&mut p, dev, PCI_BAR0, b);
+  return pci_bar_size_at(&mut p, dev, PCI_BAR0);
+}
+
+fn pci_bar_size_at(p: &mut Pci, dev: u64, reg: u64) -> u64
+  requires pci_ok(p) && dev < PCI_NONE && PCI_BAR0 <= reg && reg <= 0x24 && reg % 4 == 0
+  ensures result <= 4294967296
+{
+  let b = pci_read(&mut p, dev, reg);
+  pci_write(&mut p, dev, reg, 0xFFFFFFFF);
+  let s = pci_read(&mut p, dev, reg);
+  pci_write(&mut p, dev, reg, b);
   let mask = s & 0xFFFFFFF0;
   if b % 2 == 1 || mask == 0 {
     return 0;

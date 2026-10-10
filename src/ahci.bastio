@@ -1,0 +1,366 @@
+// A SATA disk on an AHCI controller (the SATA controllers of PCs from the
+// last fifteen years; QEMU's -device ahci, and the q35 machine's own),
+// driven by polling: the controller runs, but never interrupts.
+//
+// The driver takes the controller from the firmware, switches it to AHCI
+// mode, and uses the first port with a SATA disk on it. Each read or
+// write is one command for one 512-byte sector in command slot 0, whose
+// data goes through a page lent to the controller; the driver waits for
+// it to finish before doing anything else. A write is followed by a cache
+// flush, so the sector is on the medium when the write returns.
+//
+// The registers (BAR 5) are a block of the device window claimed as an
+// `Mmio`. The controller reads and writes only the two pages lent to it at
+// start (`Dma`), which come back after the port is stopped at power off:
+//
+//   cmd   0: the command list (32 headers; only slot 0 is used);
+//         1024: the received-FIS area; 2048: slot 0's command table
+//         (the command FIS, then one PRD entry at 2048 + 128)
+//   buf   identify data, then each sector's data
+
+import "pci.bastio";
+import "pages.bastio";
+
+const AHCI_CLASS: u64 = 0x010601;      // mass storage, SATA, AHCI 1.0
+const AHCI_PAGES: u64 = 2;
+const AHCI_MAX_LEN: u64 = 0x1100;      // the generic registers and 32 ports
+const AHCI_SPINS: u64 = 20000000;
+const AHCI_SECTOR: u64 = 512;
+const PCI_BAR5: u64 = 0x24;
+
+// Generic host control.
+const HBA_GHC: u64 = 0x04;
+const HBA_PI: u64 = 0x0C;
+const HBA_CAP2: u64 = 0x24;
+const HBA_BOHC: u64 = 0x28;
+const GHC_AE: u64 = 0x80000000;        // AHCI enable
+// A port's registers, from 0x100 + 0x80 * port.
+const PX_CLB: u64 = 0x00;
+const PX_FB: u64 = 0x08;
+const PX_IS: u64 = 0x10;
+const PX_IE: u64 = 0x14;
+const PX_CMD: u64 = 0x18;
+const PX_TFD: u64 = 0x20;
+const PX_SIG: u64 = 0x24;
+const PX_SSTS: u64 = 0x28;
+const PX_SERR: u64 = 0x30;
+const PX_CI: u64 = 0x38;
+const CMD_ST: u64 = 1;
+const CMD_FRE: u64 = 0x10;
+const CMD_FR: u64 = 0x4000;
+const CMD_CR: u64 = 0x8000;
+const TFD_BUSY: u64 = 0x88;            // BSY | DRQ
+const TFD_ERR: u64 = 1;
+const IS_TFE: u64 = 0x40000000;        // task file error
+const SIG_SATA: u64 = 0x101;
+// ATA commands (and ATA_IDENTIFY, from ata.bastio).
+const ATA_READ_EXT: u64 = 0x25;
+const ATA_WRITE_EXT: u64 = 0x35;
+const ATA_FLUSH_EXT: u64 = 0xEA;
+
+const FIS_AT: u64 = 1024;
+const TBL_AT: u64 = 2048;
+
+struct Ahci {
+  regs: Mmio,
+  cmd: Dma, buf: Dma,
+  px: u64,            // where the port's registers start
+  sectors: u64,       // 0 when no disk could be started
+}
+
+spec fn ahci_ok(h: &Ahci) -> bool {
+  mmio_base(h.regs) % 1024 == 0 && mmio_len(h.regs) <= AHCI_MAX_LEN
+  && h.px % 128 == 0 && h.px + 128 <= mmio_len(h.regs)
+}
+
+/// v with bit b (a power of two below 2^32) set, or cleared.
+fn bit_set(v: u64, b: u64) -> u64
+  requires v <= 4294967295 && 1 <= b && b <= 0x80000000
+  ensures result <= 4294967295
+{
+  if v / b % 2 == 1 || v + b > 4294967295 {
+    return v;
+  }
+  return v + b;
+}
+
+fn bit_clear(v: u64, b: u64) -> u64
+  requires v <= 4294967295 && 1 <= b && b <= 0x80000000
+  ensures result <= 4294967295
+{
+  if v / b % 2 == 1 && v >= b {
+    return v - b;
+  }
+  return v;
+}
+
+fn ar(h: &mut Ahci, off: u64) -> u64
+  requires mmio_base(h.regs) % 1024 == 0 && off % 4 == 0 && off + 4 <= mmio_len(h.regs)
+  ensures result <= 4294967295
+{
+  return cast[u64](mmio_read32(&mut h.regs, off));
+}
+
+fn aw(h: &mut Ahci, off: u64, v: u64)
+  requires mmio_base(h.regs) % 1024 == 0 && off % 4 == 0 && off + 4 <= mmio_len(h.regs) && v <= 4294967295
+{
+  mmio_write32(&mut h.regs, off, cast[u32](v));
+}
+
+/// Port register r.
+fn pr(h: &mut Ahci, r: u64) -> u64
+  requires ahci_ok(h) && r % 4 == 0 && r < 128
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && result <= 4294967295
+{
+  return ar(&mut h, h.px + r);
+}
+
+fn pw(h: &mut Ahci, r: u64, v: u64)
+  requires ahci_ok(h) && r % 4 == 0 && r < 128 && v <= 4294967295
+  ensures ahci_ok(h) && h.sectors == old(h.sectors)
+{
+  aw(&mut h, h.px + r, v);
+}
+
+/// Waits until port register r has none of the bits in `mask` set.
+fn port_clear(h: &mut Ahci, r: u64, mask: u64) -> bool
+  requires ahci_ok(h) && r % 4 == 0 && r < 128
+  ensures ahci_ok(h) && h.sectors == old(h.sectors)
+{
+  let sec0 = h.sectors;
+  let mut i = 0;
+  while i < AHCI_SPINS
+    invariant ahci_ok(h) && h.sectors == sec0
+  {
+    if pr(&mut h, r) & mask == 0 {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+/// Stops the port's command engine and its FIS receiving: afterwards the
+/// controller does not touch the command list or the FIS area.
+fn port_stop(h: &mut Ahci) -> bool
+  requires ahci_ok(h)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors)
+{
+  let c = pr(&mut h, PX_CMD);
+  pw(&mut h, PX_CMD, bit_clear(c, CMD_ST));
+  if !port_clear(&mut h, PX_CMD, CMD_CR) {
+    return false;
+  }
+  let c2 = pr(&mut h, PX_CMD);
+  pw(&mut h, PX_CMD, bit_clear(c2, CMD_FRE));
+  return port_clear(&mut h, PX_CMD, CMD_FR);
+}
+
+/// Issues the command set up in slot 0 and waits for it; true if the disk
+/// reported no error.
+fn ahci_issue(h: &mut Ahci) -> bool
+  requires ahci_ok(h)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors)
+{
+  pw(&mut h, PX_IS, 4294967295);
+  pw(&mut h, PX_CI, 1);
+  let sec0 = h.sectors;
+  let mut i = 0;
+  while i < AHCI_SPINS
+    invariant ahci_ok(h) && h.sectors == sec0
+  {
+    if pr(&mut h, PX_IS) & IS_TFE != 0 {
+      return false;
+    }
+    if pr(&mut h, PX_CI) % 2 == 0 {
+      return pr(&mut h, PX_TFD) & TFD_ERR == 0;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+/// Sets up slot 0 for ATA command `op` on sector `lba` (count 1 unless
+/// identify), moving 512 bytes through `buf` (to the disk if `write`).
+fn ahci_cmd(h: &mut Ahci, op: u64, lba: u64, write: bool, data: bool) -> bool
+  requires ahci_ok(h) && op < 256 && lba < 0x1000000000000
+  ensures ahci_ok(h) && h.sectors == old(h.sectors)
+{
+  let t = dma_phys(h.cmd) + TBL_AT;
+  let mut flags = 5;                  // the command FIS is 5 dwords
+  if write {
+    flags = flags + 64;
+  }
+  if data {
+    flags = flags + 65536;            // one PRD entry
+  }
+  dma_write32(&mut h.cmd, 0, cast[u32](flags));
+  dma_write32(&mut h.cmd, 4, 0);
+  dma_write64(&mut h.cmd, 8, t);
+  dma_write64(&mut h.cmd, 16, 0);
+  dma_write64(&mut h.cmd, 24, 0);
+  // The command FIS: register, host to device.
+  let mut i = 0;
+  while i < 128
+    invariant i <= 128 && i % 8 == 0 && ahci_ok(h) && h.sectors == old(h.sectors)
+  {
+    dma_write64(&mut h.cmd, TBL_AT + i, 0);
+    i = i + 8;
+  }
+  dma_write8(&mut h.cmd, TBL_AT, 0x27);
+  dma_write8(&mut h.cmd, TBL_AT + 1, 0x80);
+  dma_write8(&mut h.cmd, TBL_AT + 2, cast[u8](op));
+  dma_write8(&mut h.cmd, TBL_AT + 4, cast[u8](lba % 256));
+  dma_write8(&mut h.cmd, TBL_AT + 5, cast[u8](lba / 256 % 256));
+  dma_write8(&mut h.cmd, TBL_AT + 6, cast[u8](lba / 65536 % 256));
+  dma_write8(&mut h.cmd, TBL_AT + 7, 0x40);              // LBA mode
+  dma_write8(&mut h.cmd, TBL_AT + 8, cast[u8](lba / 16777216 % 256));
+  dma_write8(&mut h.cmd, TBL_AT + 9, cast[u8](lba / 4294967296 % 256));
+  dma_write8(&mut h.cmd, TBL_AT + 10, cast[u8](lba / 1099511627776 % 256));
+  if data && op != ATA_IDENTIFY {
+    dma_write8(&mut h.cmd, TBL_AT + 12, 1);              // one sector
+  }
+  // The PRD entry: the data page, 512 bytes.
+  dma_write64(&mut h.cmd, TBL_AT + 128, dma_phys(h.buf));
+  dma_write32(&mut h.cmd, TBL_AT + 136, 0);
+  dma_write32(&mut h.cmd, TBL_AT + 140, cast[u32](AHCI_SECTOR - 1));
+  return ahci_issue(&mut h);
+}
+
+/// Starts the first SATA disk on the controller whose registers are
+/// `regs`, lending it two pages. Without one, `sectors` stays 0.
+fn ahci_new(regs: Mmio, f0: Frame, f1: Frame) -> Ahci
+  requires mmio_base(regs) % 1024 == 0 && mmio_len(regs) <= AHCI_MAX_LEN && mmio_len(regs) >= 0x180
+  ensures ahci_ok(result) && mmio_base(result.regs) == mmio_base(regs) && mmio_len(result.regs) == mmio_len(regs)
+{
+  let mut h = Ahci { regs: regs, cmd: dma_lend(f0), buf: dma_lend(f1), px: 0x100, sectors: 0 };
+  // Take the controller from the firmware if it supports the handoff,
+  // then switch it to AHCI mode.
+  if ar(&mut h, HBA_CAP2) % 2 == 1 {
+    let bohc = ar(&mut h, HBA_BOHC);
+    aw(&mut h, HBA_BOHC, bit_set(bohc, 2));
+    let mut i = 0;
+    while i < AHCI_SPINS
+      invariant ahci_ok(h)
+    {
+      if ar(&mut h, HBA_BOHC) % 2 == 0 {
+        i = AHCI_SPINS;
+      } else {
+        i = i + 1;
+      }
+    }
+  }
+  let ghc = ar(&mut h, HBA_GHC);
+  aw(&mut h, HBA_GHC, bit_set(ghc, GHC_AE));
+  // The first implemented port with a device present and a SATA disk's
+  // signature (an ATAPI drive, such as a CD, has another).
+  let mut pi = ar(&mut h, HBA_PI);
+  let n = mmio_len(h.regs);
+  let mut p = 0;
+  let mut found = false;
+  while p < 32 && !found
+    invariant p <= 32 && ahci_ok(h) && mmio_len(h.regs) == n
+  {
+    let px = 0x100 + p * 128;
+    if pi % 2 == 1 && px + 128 <= n {
+      h.px = px;
+      if pr(&mut h, PX_SSTS) % 16 == 3 && pr(&mut h, PX_SIG) == SIG_SATA {
+        found = true;
+      }
+    }
+    if !found {
+      p = p + 1;
+      pi = pi / 2;
+    }
+  }
+  if !found || !port_stop(&mut h) {
+    return h;
+  }
+  let mut i = 0;
+  while i < 4096
+    invariant i <= 4096 && i % 8 == 0 && ahci_ok(h)
+  {
+    dma_write64(&mut h.cmd, i, 0);
+    i = i + 8;
+  }
+  let c = dma_phys(h.cmd);
+  pw(&mut h, PX_CLB, c % 4294967296);
+  pw(&mut h, PX_CLB + 4, c / 4294967296 % 4294967296);
+  pw(&mut h, PX_FB, (c + FIS_AT) % 4294967296);
+  pw(&mut h, PX_FB + 4, (c + FIS_AT) / 4294967296 % 4294967296);
+  pw(&mut h, PX_SERR, 4294967295);
+  pw(&mut h, PX_IS, 4294967295);
+  pw(&mut h, PX_IE, 0);
+  let c1 = pr(&mut h, PX_CMD);
+  pw(&mut h, PX_CMD, bit_set(c1, CMD_FRE));
+  if !port_clear(&mut h, PX_TFD, TFD_BUSY) {
+    return h;
+  }
+  let c2 = pr(&mut h, PX_CMD);
+  pw(&mut h, PX_CMD, bit_set(c2, CMD_ST));
+  // IDENTIFY DEVICE: words 100-103 are the LBA48 sector count.
+  if !ahci_cmd(&mut h, ATA_IDENTIFY, 0, false, true) {
+    return h;
+  }
+  let size = dma_read64(&mut h.buf, 200);
+  if size < 0x1000000000000 {
+    h.sectors = size;
+  }
+  return h;
+}
+
+/// Stops the port (so the controller lets go of the pages) and takes the
+/// pages back (at power off). Returns the registers.
+fn ahci_free(h: Ahci, m: &mut Mem) -> Mmio
+  requires ahci_ok(h) && mem_ok(m)
+  ensures mem_ok(m) && mmio_base(result) == mmio_base(h.regs) && mmio_len(result) == mmio_len(h.regs)
+{
+  let mut d = h;
+  port_stop(&mut d);
+  give_page(&mut m, dma_take(d.cmd));
+  give_page(&mut m, dma_take(d.buf));
+  return d.regs;
+}
+
+/// Reads sector `lba` into buf[0..512]. Returns false if the disk fails or
+/// the sector is past its end.
+fn ahci_read(h: &mut Ahci, lba: u64, buf: &mut Bytes) -> bool
+  requires ahci_ok(h) && blen(buf) >= AHCI_SECTOR
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && blen(buf) == old(blen(buf))
+{
+  if lba >= h.sectors || lba >= 0x1000000000000 {
+    return false;
+  }
+  if !ahci_cmd(&mut h, ATA_READ_EXT, lba, false, true) {
+    return false;
+  }
+  let l = blen(buf);
+  let sec0 = h.sectors;
+  let mut i = 0;
+  while i < AHCI_SECTOR
+    invariant i <= AHCI_SECTOR && ahci_ok(h) && h.sectors == sec0 && blen(buf) == l && l >= AHCI_SECTOR
+  {
+    bset(&mut buf, i, dma_read8(&mut h.buf, i));
+    i = i + 1;
+  }
+  return true;
+}
+
+/// Writes buf[0..512] to sector `lba`, then flushes the disk's cache.
+fn ahci_write(h: &mut Ahci, lba: u64, buf: &Bytes) -> bool
+  requires ahci_ok(h) && blen(buf) >= AHCI_SECTOR
+  ensures ahci_ok(h) && h.sectors == old(h.sectors)
+{
+  if lba >= h.sectors || lba >= 0x1000000000000 {
+    return false;
+  }
+  let sec0 = h.sectors;
+  let mut i = 0;
+  while i < AHCI_SECTOR
+    invariant i <= AHCI_SECTOR && ahci_ok(h) && h.sectors == sec0
+  {
+    dma_write8(&mut h.buf, i, bget(buf, i));
+    i = i + 1;
+  }
+  return ahci_cmd(&mut h, ATA_WRITE_EXT, lba, true, true) && ahci_cmd(&mut h, ATA_FLUSH_EXT, 0, false, false);
+}

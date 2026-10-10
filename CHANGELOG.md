@@ -30,6 +30,12 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 - An NVMe drive as the disk (`src/nvme.bastio`): polled, one I/O queue,
   namespace 1 with 512-byte blocks, each write flushed. It is picked
   before virtio and ATA.
+- A SATA disk on an AHCI controller (`src/ahci.bastio`): polled, command
+  slot 0 of the first port with a disk, each write flushed. It is picked
+  after virtio, before legacy ATA.
+- PCI devices are found on every bus and function, not only the
+  function-0 devices of bus 0 (NVMe drives sit behind root ports, and
+  q35's AHCI controller is function 2).
 
 ### Changed
 
