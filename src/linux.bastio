@@ -79,6 +79,9 @@ const ENOMEM: u64 = 18446744073709551604;   // 2^64 - 12
 
 // Process calls and file metadata (src/lxproc.bastio).
 const LX_CLONE: u64 = 56;
+const CLONE_VM: u64 = 0x100;
+const CLONE_VFORK: u64 = 0x4000;
+const CLONE_THREAD: u64 = 0x10000;
 const LX_FORK: u64 = 57;
 const LX_VFORK: u64 = 58;
 const LX_EXECVE: u64 = 59;
@@ -348,6 +351,14 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if n == LX_ACCESS {
     ret(&mut k.procs, pid, lx_stat(&mut k, pid, AT_FDCWD, a, 0));   // everyone may do anything
     return KEEP;
+  }
+  if n == LX_CLONE && a & CLONE_VM != 0 && a & CLONE_VFORK != 0 && a & CLONE_THREAD == 0 {
+    let r = lx_vfork_vm(&mut k, mmu, pid, b);
+    if r >= NPROC {
+      ret(&mut k.procs, pid, r);            // -errno: no child
+      return KEEP;
+    }
+    return SWITCH;                          // the parent waits until the child lets go
   }
   if n == LX_FORK || n == LX_VFORK || (n == LX_CLONE && a == SIGCHLD && b == 0) {
     ret(&mut k.procs, pid, lx_fork(&mut k, mmu, pid));
