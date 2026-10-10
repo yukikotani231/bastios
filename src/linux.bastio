@@ -374,6 +374,13 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, lx_execve(&mut k, mmu, pid, a, b, c));
     return KEEP;
   }
+  if n == LX_WAITID {
+    return lx_waitid(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
+  }
+  if n == LX_TIMES {
+    ret(&mut k.procs, pid, lx_times(&mut k, pid, a));
+    return KEEP;
+  }
   if n == LX_WAIT4 {
     return lx_wait4(&mut k, pid, a, b, c);
   }

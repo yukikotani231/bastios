@@ -497,7 +497,7 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   let waiting = pget(k.procs, p, F_RESTART) != 0;
   let suspended = waiting && call == LX_RT_SIGSUSPEND;
   let pausing = call == LX_PAUSE || suspended;
-  let reaping = call == LX_WAIT4 && s == SIGCHLD;
+  let reaping = (call == LX_WAIT4 || call == LX_WAITID) && s == SIGCHLD;
   if waiting && (flags & SA_RESTART == 0 || pausing) && !reaping {
     let rip = pget(k.procs, p, F_REGS + R_RIP);
     if rip <= 0xFFFFFFFFFFFFFFF0 {
