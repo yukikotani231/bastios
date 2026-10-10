@@ -61,9 +61,9 @@ fn vfs_new(disk: DiskFs) -> Vfs
 
 /// Frees everything (at power off): every in-memory file's pages go back,
 /// and the disk driver is handed back so its ports can be released.
-fn vfs_free(v: Vfs, mem: &mut Mem) -> Ata
+fn vfs_free(v: Vfs, mem: &mut Mem) -> Blk
   requires vfs_ok(v) && mem_ok(mem)
-  ensures mem_ok(mem) && ata_ok(result)
+  ensures mem_ok(mem) && blk_ok(result)
 {
   ram_free(v.ram, &mut mem);
   free(v.ftab);
