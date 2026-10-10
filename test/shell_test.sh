@@ -74,6 +74,10 @@ steps = [
     # keep its own value (checked again at the end, once both are done).
     ("fpucheck &", b"]"),
     ("fpucheck", b"fpucheck: xmm0 kept"),
+    # musl malloc (brk, mmap), stdio on a file, and a line read from the
+    # console; the third field is what to wait for instead of the prompt.
+    ("mtest", [b"mtest: malloc heap 75", b"mtest: file line 42"], b"type a line"),
+    ("typed for mtest", b"mtest: got typed for mtest"),
     ("sh", b"BastiOS 0.2 -- type"),
     ("exit", b""),
     ("mem", b"free pages"),
@@ -104,11 +108,13 @@ if not read_until(b"bastios> "):
     print("FAIL: no prompt after boot"); fails += 1
 else:
     print("ok   boot banner and prompt")
-    for line, want in steps:
+    for step in steps:
+        line, want = step[0], step[1]
+        until = step[2] if len(step) > 2 else b"bastios> "
         mark = len(out)
         qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
         wants = want if isinstance(want, list) else [want]
-        ok = read_until(b"bastios> ", mark) and all(w in out[mark:] for w in wants)
+        ok = read_until(until, mark) and all(w in out[mark:] for w in wants)
         print(("ok  " if ok else "FAIL"), repr(line))
         fails += not ok
     if out.count(b"fpucheck: xmm0 kept") == 2 and b"xmm0 changed" not in out:
