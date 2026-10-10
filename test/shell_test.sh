@@ -782,6 +782,14 @@ def session(name, want_banner, steps, halt=False, ready=None):
     print(f"---- {name} boot transcript ----")
     print(out.decode(errors="replace").replace("\r", ""))
 
+# Every DMA disk signals completions by MSI or MSI-X (src/lapic.bastio),
+# so a processor waiting for one halts instead of polling.
+def irq_found(name):
+    global fails
+    ok = b"disk: completions by message-signalled interrupt\r\n" in out
+    print(("ok  " if ok else "FAIL"), f"({name} boot) disk completions by interrupt")
+    fails += not ok
+
 qemu = boot(1, virtio=True, subnet="192.168.76.0/24")
 session("virtio", True, [
     ("ifconfig", b"192.168.76.15 netmask 255.255.255.0 gateway 192.168.76.2 (DHCP)"),
@@ -793,7 +801,7 @@ session("virtio", True, [
     ("cat disk/note", b"kept across boots\r\nappended\r\n"),
     ("fstest", b"fstest: disk ok"),
     ("rm disk/big", b""),
-], halt=True)
+], halt=True, ready=lambda: irq_found("virtio"))
 
 # The same disk as an NVMe drive: what virtio wrote is there, and what is
 # written here must be on the medium for the ATA boot below.
@@ -803,6 +811,7 @@ def nvme_found():
     ok = b"disk: NVMe\r\n" in out
     print(("ok  " if ok else "FAIL"), "(NVMe boot) disk driver: NVMe")
     fails += not ok
+    irq_found("NVMe")
 session("NVMe", None, [
     ("cat disk/note", b"kept across boots\r\nappended\r\n"),
     ("echo written by nvme > disk/nv", b""),
@@ -818,6 +827,7 @@ def ahci_found():
     ok = b"disk: AHCI\r\n" in out
     print(("ok  " if ok else "FAIL"), "(AHCI boot) disk driver: AHCI")
     fails += not ok
+    irq_found("AHCI")
 session("AHCI", None, [
     ("cat disk/nv", b"written by nvme\r\n"),
     ("echo and ahci >> disk/nv", b""),

@@ -1238,7 +1238,7 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
   release(&mut d.q, root0);
   let t = dq_end(&mut d.q);
   if !ok || t == 0 {
-    d.q.dead = true;                  // dq_fits said there was room: not reached
+    dq_kill(&mut d.q);                // dq_fits said there was room: not reached
     return 0;
   }
   d.txn = t;

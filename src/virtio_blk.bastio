@@ -14,6 +14,12 @@ import "bio.bastio";
 
 const VIRTIO_BLK: u64 = 0x1001;       // legacy (transitional) block device id
 const VIO_CAPACITY: u64 = 0x14;       // 64 bits: the size in 512-byte sectors
+// With MSI-X on, two registers come first and the configuration (the
+// capacity) moves on by 4 bytes.
+const VIO_MSIX_CONFIG: u64 = 0x14;    // the message for configuration changes
+const VIO_MSIX_QUEUE: u64 = 0x16;     // the selected queue's message
+const VIO_CAPACITY_MSIX: u64 = 0x18;
+const VIO_NO_VECTOR: u64 = 0xFFFF;
 
 const BLK_IN: u64 = 0;                // read
 const BLK_OUT: u64 = 1;               // write
@@ -31,6 +37,7 @@ struct Virtio {
   sectors: u64,       // 0 when the device could not be started
   busy: bool,         // a request started by virtio_begin has not been polled to its end
   flushing: bool,     // and it is a flush, which the device does not need
+  irq: bool,          // the queue's completions raise MSI-X message 0
 }
 
 spec fn virtio_ok(v: &Virtio) -> bool {
@@ -39,15 +46,16 @@ spec fn virtio_ok(v: &Virtio) -> bool {
 
 /// Claims the device's ports, lends it five pages and starts it. A device
 /// that cannot be started (bad queue size, pages out of its reach) is left
-/// with `sectors` 0, and every later operation on it fails.
-fn virtio_new(ports: &mut Ports, base: u64, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame) -> Virtio
+/// with `sectors` 0, and every later operation on it fails. `msix`: MSI-X
+/// is on (with message 0 set up), so the queue is bound to message 0.
+fn virtio_new(ports: &mut Ports, base: u64, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, msix: bool) -> Virtio
   requires base + VIO_PORTS <= 65536
   requires forall k: u64 :: base <= k && k < base + VIO_PORTS ==> port_free(ports, k)
   ensures virtio_ok(result) && port_base(result.io) == base
   ensures forall k: u64 :: (k < base || base + VIO_PORTS <= k) ==> port_free(ports, k) == old(port_free(ports, k))
 {
   let mut v = Virtio { io: port_claim(&mut ports, base, VIO_PORTS), q: vq_new(f0, f1, f2), req: dma_lend(f3),
-    data: dma_lend(f4), sectors: 0, busy: false, flushing: false };
+    data: dma_lend(f4), sectors: 0, busy: false, flushing: false, irq: false };
   let r = dma_addr(v.req);
   if !virtio_start(&mut v.io, 0) || r > ADDR_LIMIT - 4096 || dma_addr(v.data) > ADDR_LIMIT - 4096
     || !vq_setup(&mut v.io, &mut v.q, 0) {
@@ -58,9 +66,21 @@ fn virtio_new(ports: &mut Ports, base: u64, f0: Frame, f1: Frame, f2: Frame, f3:
   vq_desc(&mut v.q, 0, r, 16, DESC_NEXT, 1);
   vq_desc(&mut v.q, 1, r + REQ_DATA, VIO_SECTOR, DESC_NEXT, 2);
   vq_desc(&mut v.q, 2, r + REQ_STATUS, 1, DESC_WRITE, 0);
+  let mut cap = VIO_CAPACITY;
+  if msix {
+    // Queue 0 is still selected (vq_setup). The device answers
+    // VIO_NO_VECTOR if it cannot take the message.
+    cap = VIO_CAPACITY_MSIX;
+    pio_out16(&mut v.io, VIO_MSIX_CONFIG, cast[u16](VIO_NO_VECTOR));
+    pio_out16(&mut v.io, VIO_MSIX_QUEUE, 0);
+    if cast[u64](pio_in16(&mut v.io, VIO_MSIX_QUEUE)) == 0 {
+      vq_interrupts(&mut v.q);
+      v.irq = true;
+    }
+  }
   pio_out8(&mut v.io, VIO_STATUS, cast[u8](VIO_ACK + VIO_DRIVER + VIO_DRIVER_OK));
-  let lo = cast[u64](pio_in32(&mut v.io, VIO_CAPACITY));
-  let hi = cast[u64](pio_in32(&mut v.io, VIO_CAPACITY + 4));
+  let lo = cast[u64](pio_in32(&mut v.io, cap));
+  let hi = cast[u64](pio_in32(&mut v.io, cap + 4));
   v.sectors = lo + hi * 4294967296;
   return v;
 }
