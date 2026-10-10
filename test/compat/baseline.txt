@@ -113,6 +113,7 @@ t_file: rename
 t_file: stdio fprintf/fscanf
 t_file: tmpfile
 t_file: unlink
+t_file: unlink an open file, then read it
 t_file: utime
 t_file: write
 t_file: writev
