@@ -20,8 +20,13 @@ disk = os.path.join(disk_dir.name, "disk.img")
 with open(disk, "wb") as f:
     f.truncate(33 << 20)
 
-def boot(cpus, with_disk=False):
+def boot(cpus, with_disk=False, virtio=False):
     drive = ["-drive", f"file={disk},format=raw,if=ide,index=0"] if with_disk else []
+    if virtio:
+        # The same disk as a virtio block device (src/virtio.bastio): sectors
+        # move by DMA through pages the kernel lends it.
+        drive = ["-drive", f"file={disk},format=raw,if=none,id=vd",
+                 "-device", "virtio-blk-pci,drive=vd"]
     return subprocess.Popen(
         ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
@@ -253,30 +258,55 @@ else:
 print("---- serial transcript ----")
 print(out.decode(errors="replace").replace("\r", ""))
 
-# Boot again on the same disk: the file written above is still there.
-qemu = boot(1, with_disk=True)
-out = b""
-deadline = time.time() + timeout
-again = [
+# Boot again on the same disk, now as a virtio device: the file written
+# through ATA is still there, and virtio can read, extend and keep it. At
+# power off the four pages the device was lent are back in the pool.
+def session(name, want_banner, steps, halt=False):
+    global qemu, out, deadline, fails
+    out = b""
+    deadline = time.time() + timeout
+    if not read_until(b"bastios> "):
+        print(f"FAIL: no prompt after the {name} boot"); fails += 1
+    else:
+        if want_banner is not None:
+            ok = (b"disk: virtio" in out) == want_banner
+            print(("ok  " if ok else "FAIL"), f"({name} boot) disk driver: {'virtio' if want_banner else 'ATA'}")
+            fails += not ok
+        for line, want in steps:
+            mark = len(out)
+            qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+            ok = read_until(b"bastios> ", mark) and want in out[mark:]
+            print(("ok  " if ok else "FAIL"), f"({name} boot)", repr(line))
+            fails += not ok
+        if halt:
+            qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
+            read_until(b"pages free at power off")
+            booted = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
+            off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+            ok = booted and off and booted.group(1) == off.group(1)
+            print(("ok  " if ok else "FAIL"), f"({name} boot) every page back at power off")
+            fails += not ok
+    qemu.kill(); qemu.wait()
+    print(f"---- {name} boot transcript ----")
+    print(out.decode(errors="replace").replace("\r", ""))
+
+qemu = boot(1, virtio=True)
+session("virtio", True, [
     ("ls", b"      18 disk/note"),
     ("cat disk/note", b"kept across boots\r\n"),
     ("echo appended >> disk/note", b""),
     ("cat disk/note", b"kept across boots\r\nappended\r\n"),
+    ("fstest", b"fstest: disk ok"),
+    ("rm disk/big", b""),
+], halt=True)
+
+# And back on ATA: what virtio wrote is on the disk.
+qemu = boot(1, with_disk=True)
+session("third", False, [
+    ("cat disk/note", b"kept across boots\r\nappended\r\n"),
     ("rm disk/note", b""),
     ("cat disk/note", b"no such file: disk/note"),
-]
-if not read_until(b"bastios> "):
-    print("FAIL: no prompt after the second boot"); fails += 1
-else:
-    for line, want in again:
-        mark = len(out)
-        qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
-        ok = read_until(b"bastios> ", mark) and want in out[mark:]
-        print(("ok  " if ok else "FAIL"), "(second boot)", repr(line))
-        fails += not ok
-qemu.kill(); qemu.wait()
-print("---- second boot transcript ----")
-print(out.decode(errors="replace").replace("\r", ""))
+])
 print(f"---- {fails} failed ----")
 sys.exit(1 if fails else 0)
 PY

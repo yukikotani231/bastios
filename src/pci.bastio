@@ -1,0 +1,96 @@
+// PCI configuration space, through the two legacy I/O ports: write an
+// address to 0xCF8, then read or write the 32-bit register at 0xCFC. The
+// kernel uses it only to find devices on bus 0 and to let them do DMA.
+
+const PCI_ADDR: u64 = 0xCF8;
+const PCI_DATA: u64 = 0xCFC;
+const PCI_ENABLE: u64 = 0x80000000;   // bit 31 of the address: a config cycle
+
+// Register offsets in a device's configuration header.
+const PCI_ID: u64 = 0x00;             // vendor (low 16 bits), device (high)
+const PCI_COMMAND: u64 = 0x04;        // command (low 16), status (high)
+const PCI_BAR0: u64 = 0x10;
+
+const PCI_CMD_IO: u64 = 1;            // respond to its I/O ports
+const PCI_CMD_MASTER: u64 = 4;        // may start DMA
+
+struct Pci { addr: PortIo, data: PortIo }
+
+spec fn pci_ok(p: &Pci) -> bool {
+  port_count(p.addr) == 4 && port_count(p.data) == 4
+}
+
+fn pci_free(ports: &mut Ports, p: Pci)
+  requires pci_ok(p)
+{
+  port_release(&mut ports, p.addr);
+  port_release(&mut ports, p.data);
+}
+
+/// Selects register `off` (a multiple of 4) of device `dev` on bus 0.
+fn pci_select(p: &mut Pci, dev: u64, off: u64)
+  requires pci_ok(p) && dev < 32 && off < 256 && off % 4 == 0
+{
+  pio_out32(&mut p.addr, 0, PCI_ENABLE + dev * 2048 + off);
+}
+
+fn pci_read(p: &mut Pci, dev: u64, off: u64) -> u64
+  requires pci_ok(p) && dev < 32 && off < 256 && off % 4 == 0
+  ensures result <= 4294967295
+{
+  pci_select(&mut p, dev, off);
+  return pio_in32(&mut p.data, 0);
+}
+
+fn pci_write(p: &mut Pci, dev: u64, off: u64, v: u64)
+  requires pci_ok(p) && dev < 32 && off < 256 && off % 4 == 0 && v <= 4294967295
+{
+  pci_select(&mut p, dev, off);
+  pio_out32(&mut p.data, 0, v);
+}
+
+/// The first device on bus 0 with this vendor and device id, or 32.
+fn pci_find(p: &mut Pci, vendor: u64, device: u64) -> u64
+  requires pci_ok(p) && vendor <= 65535 && device <= 65535
+  ensures result <= 32
+{
+  let want = vendor + device * 65536;
+  let mut d = 0;
+  while d < 32
+    invariant d <= 32
+  {
+    if pci_read(&mut p, d, PCI_ID) == want {
+      return d;
+    }
+    d = d + 1;
+  }
+  return 32;
+}
+
+/// The base of the device's first BAR if it is an I/O-port BAR, else 0.
+fn pci_io_bar(p: &mut Pci, dev: u64) -> u64
+  requires pci_ok(p) && dev < 32
+  ensures result < 65536
+{
+  let b = pci_read(&mut p, dev, PCI_BAR0);
+  if b % 2 == 0 {
+    return 0;                         // a memory BAR
+  }
+  return b % 65536 - b % 4;
+}
+
+/// Lets the device answer on its I/O ports and do DMA. The status half of
+/// the register is written as zeros, which changes nothing in it.
+fn pci_enable(p: &mut Pci, dev: u64)
+  requires pci_ok(p) && dev < 32
+{
+  let c = pci_read(&mut p, dev, PCI_COMMAND) % 65536;
+  let mut n = c;
+  if c % 2 == 0 {
+    n = n + PCI_CMD_IO;
+  }
+  if c / PCI_CMD_MASTER % 2 == 0 {
+    n = n + PCI_CMD_MASTER;
+  }
+  pci_write(&mut p, dev, PCI_COMMAND, n);
+}
