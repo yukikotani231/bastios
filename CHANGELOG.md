@@ -57,6 +57,16 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   is bounded by the time-stamp counter (it used to poll up to 10^8 port
   reads). The PIT-less tick works without a MADT too. Tested with QEMU's
   `-machine pc,acpi=off,hpet=off` and `...,pit=off`.
+- SATA ports the firmware did not bring up. A controller with staggered
+  spin-up keeps each disk off until its port's SUD bit is set, and firmware
+  that boots fast from another disk may leave a link down. The AHCI driver
+  now sets SUD (and POD) on every port, gives a port whose link is still
+  down a COMRESET, and tries a port whose device has not yet sent its
+  signature once FIS receiving is on, letting it go again if it is not a
+  SATA disk. The boot option `ahci_reset` resets every port with a device,
+  for disks that are still not found. Tested with that option in QEMU (a CD
+  on port 0, the disk on port 3); staggered spin-up itself is untested, as
+  QEMU's AHCI does not have it.
 
 ### Linux programs
 

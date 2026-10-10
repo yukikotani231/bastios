@@ -910,6 +910,25 @@ session("AHCI", None, [
     ("rm disk/big", b""),
 ], halt=True, ready=ahci_found)
 
+# Ports the firmware did not bring up (src/ahci.bastio, port_wake): with
+# the boot option ahci_reset every port with a device gets a COMRESET, after
+# which a device sends its signature only once FIS receiving is on. A CD
+# on port 0 is tried first and let go (an ATAPI signature); the disk on
+# port 3 is found and holds what was written above.
+cd_img = os.path.join(disk_dir.name, "cd.iso")
+with open(cd_img, "wb") as f:
+    f.truncate(1 << 20)
+qemu = boot(1, extra=["-machine", "q35", "-drive", f"file={disk},format=raw,if=ide,index=3",
+                      "-drive", f"file={cd_img},format=raw,media=cdrom,if=ide,index=0", "-append", "ahci_reset"])
+def ahci_reset_found():
+    global fails
+    ok = b"disk: AHCI\r\n" in out
+    print(("ok  " if ok else "FAIL"), "(AHCI after COMRESET) disk driver: AHCI, past a CD")
+    fails += not ok
+session("AHCI after COMRESET", None, [
+    ("cat disk/nv", b"written by nvme\r\nand ahci\r\n"),
+], halt=True, ready=ahci_reset_found)
+
 # And on an NVMe drive with 4 KiB sectors: what AHCI wrote is there, and
 # what is written here is where the ATA boot below looks for it.
 qemu = boot(1, nvme4k=True)
