@@ -161,6 +161,11 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   BastiOS boots from keeps its files (`tools/mkusb.py`); `make run-usb`
   boots it in QEMU. Checked by `test/shell_test.sh` and, booting from
   the stick under BIOS and UEFI, `test/iso_test.sh`.
+- USB hubs: the keyboard and the stick are found behind up to two tiers of
+  USB 2 hubs, as on a PC's front panel or a monitor's ports.
+- The USB stick finishes its commands by interrupt (MSI-X on the xHCI
+  event ring) instead of being polled, so a process waiting for it sleeps
+  and an idle processor halts. `DISK=usb make iobench` measures it.
 - An NVMe drive as the disk (`src/nvme.bastio`): polled, one I/O queue,
   namespace 1 with 512-byte or 4 KiB blocks, each write flushed. It is picked
   before virtio and ATA.
