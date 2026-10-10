@@ -1,0 +1,77 @@
+// The physical page allocator. A bitmap with one entry per page says which
+// pages are free, and the proof keeps it in step with the Pool capability:
+// an entry is 1 exactly when the pool still has that page. `pool_take`
+// demands that the pool has the page, so no page is ever handed out twice.
+
+const NPAGES: u64 = 0x10000;   // the most pages a pool can have
+
+spec fn tracks(bm: &Buf, pool: &Pool) -> bool {
+  len(bm) == NPAGES
+  && (forall i: u64 :: i < NPAGES ==> ((get(bm, i) == 1) == pool_has(pool, i)))
+  && (forall i: u64 :: pool_has(pool, i) ==> i < pool_size(pool))
+}
+
+fn bm_new(pool: &Pool) -> Buf
+  requires forall i: u64 :: pool_has(pool, i) == (i < pool_size(pool))
+  ensures tracks(result, pool)
+{
+  let mut bm = alloc(NPAGES);
+  let n = pool_size(pool);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= NPAGES
+    invariant forall j: u64 :: j < NPAGES ==> ((get(bm, j) == 1) == (j < i))
+  {
+    bm = set(bm, i, 1);
+    i = i + 1;
+  }
+  return bm;
+}
+
+/// The first free page, or NPAGES when there is none.
+fn find_free(bm: &Buf) -> u64
+  requires len(bm) == NPAGES
+  ensures result <= NPAGES
+  ensures result < NPAGES ==> get(bm, result) == 1
+{
+  let mut i = 0;
+  while i < NPAGES && get(bm, i) != 1
+    invariant i <= NPAGES
+  {
+    i = i + 1;
+  }
+  return i;
+}
+
+fn count_free(bm: &Buf) -> u64
+  requires len(bm) == NPAGES
+{
+  let mut n = 0;
+  let mut i = 0;
+  while i < NPAGES
+    invariant i <= NPAGES && n <= i
+  {
+    if get(bm, i) == 1 {
+      n = n + 1;
+    }
+    i = i + 1;
+  }
+  return n;
+}
+
+fn take_page(bm: &mut Buf, pool: &mut Pool, i: u64) -> Frame
+  requires tracks(bm, pool) && i < NPAGES && get(bm, i) == 1
+  ensures tracks(bm, pool)
+  ensures frame_id(result) == i
+{
+  bm = set(bm, i, 0);
+  return pool_take(&mut pool, i);
+}
+
+fn give_page(bm: &mut Buf, pool: &mut Pool, f: Frame)
+  requires tracks(bm, pool)
+  ensures tracks(bm, pool)
+{
+  bm = set(bm, frame_id(f), 1);
+  pool_give(&mut pool, f);
+}

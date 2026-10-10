@@ -9,5 +9,7 @@ SECTIONS
     .rodata : { *(.rodata .rodata.*) }
     .data   : { *(.data .data.*) }
     .bss    : { *(COMMON) *(.bss .bss.*) }
+    . = ALIGN(4096);
+    _end = .;              /* physical pages after this belong to the page pool */
     /DISCARD/ : { *(.note.*) *(.comment) *(.eh_frame*) }
 }

@@ -1,0 +1,15 @@
+// Runs forever without making a system call. Only the timer interrupt takes
+// the CPU back from it, so the shell staying responsive shows preemption
+// working. Stop it with `kill`.
+
+fn main(con: &mut Serial) -> u64 {
+  let mut x = 0;
+  while true {
+    if x < 1000000 {
+      x = x + 1;
+    } else {
+      x = 0;
+    }
+  }
+  return x;
+}

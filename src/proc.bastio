@@ -1,0 +1,252 @@
+// Processes. The table is one buffer with a row of STRIDE words per
+// process; the process id is the row number (1 to NPROC - 1). A process's
+// address space lives in slot `pid` of the directory, a level-5 table that
+// is never loaded into CR3 and only serves to own the level-4 roots.
+
+const NPROC: u64 = 16;
+const STRIDE: u64 = 32;
+const PTAB_LEN: u64 = 512;           // NPROC * STRIDE
+
+// Row fields.
+const F_STATE: u64 = 0;
+const F_WAIT: u64 = 1;               // the child a WAITING process waits for
+const F_CODE: u64 = 2;               // exit code of a ZOMBIE
+const F_PARENT: u64 = 3;
+const F_PROG: u64 = 4;               // index into the program table
+const F_TICKS: u64 = 5;              // timer ticks spent running
+const F_REGS: u64 = 8;               // 18 saved registers, in `cpu_get` order
+
+// Saved register numbers.
+const R_RAX: u64 = 0;
+const R_RDX: u64 = 3;
+const R_RSI: u64 = 4;
+const R_RDI: u64 = 5;
+const R_RIP: u64 = 15;
+const R_RSP: u64 = 16;
+const R_RFLAGS: u64 = 17;
+
+// States.
+const FREE: u64 = 0;
+const READY: u64 = 1;
+const READING: u64 = 2;
+const WAITING: u64 = 3;
+const ZOMBIE: u64 = 4;
+
+const NO_RESULT: u64 = 18446744073709551615;
+
+fn pget(procs: &Buf, pid: u64, f: u64) -> u64
+  requires len(procs) == PTAB_LEN && pid < NPROC && f < STRIDE
+{
+  return get(procs, pid * STRIDE + f);
+}
+
+fn pset(procs: &mut Buf, pid: u64, f: u64, v: u64)
+  requires len(procs) == PTAB_LEN && pid < NPROC && f < STRIDE
+  ensures len(procs) == PTAB_LEN
+{
+  procs = set(procs, pid * STRIDE + f, v);
+}
+
+fn state(procs: &Buf, pid: u64) -> u64
+  requires len(procs) == PTAB_LEN && pid < NPROC
+{
+  return pget(procs, pid, F_STATE);
+}
+
+/// Processes that are not FREE or ZOMBIE.
+fn live_count(procs: &Buf) -> u64
+  requires len(procs) == PTAB_LEN
+{
+  let mut n = 0;
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && n <= p
+  {
+    let s = state(procs, p);
+    if s != FREE && s != ZOMBIE {
+      n = n + 1;
+    }
+    p = p + 1;
+  }
+  return n;
+}
+
+/// The next READY process at or after `from` (round robin), or 0 if none.
+fn pick(procs: &Buf, from: u64) -> u64
+  requires len(procs) == PTAB_LEN
+  ensures result < NPROC
+{
+  let mut k = 0;
+  while k < NPROC
+    invariant k <= NPROC
+  {
+    let p = (from % NPROC + k) % NPROC;
+    if p != 0 && state(procs, p) == READY {
+      return p;
+    }
+    k = k + 1;
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------- programs
+
+const NPROGS: u64 = 4;
+
+fn prog_name(i: u64) -> Str {
+  if i == 0 {
+    return "sh";
+  }
+  if i == 1 {
+    return "hello";
+  }
+  if i == 2 {
+    return "spin";
+  }
+  return "fault";
+}
+
+fn prog_image(i: u64) -> Str {
+  if i == 0 {
+    return include_bytes("../build/user/sh.bin");
+  }
+  if i == 1 {
+    return include_bytes("../build/user/hello.bin");
+  }
+  if i == 2 {
+    return include_bytes("../build/user/spin.bin");
+  }
+  return include_bytes("../build/user/fault.bin");
+}
+
+/// The little-endian u64 at `at` in `s`.
+fn read_u64(s: Str, at: u64) -> u64
+  requires at <= 64 && at + 8 <= slen(s)
+{
+  return sget(s, at) + 0x100 * sget(s, at + 1) + 0x10000 * sget(s, at + 2)
+    + 0x1000000 * sget(s, at + 3) + 0x100000000 * sget(s, at + 4)
+    + 0x10000000000 * sget(s, at + 5) + 0x1000000000000 * sget(s, at + 6)
+    + 0x100000000000000 * sget(s, at + 7);
+}
+
+// ---------------------------------------------------------------- life cycle
+
+const MAGIC: u64 = 0x0A52455355545342;   // "BSTUSER\n"
+
+/// Starts program `prog` as a child of `parent` (0 for none). Returns the
+/// new process id, or 0 if the image is malformed or there is no room.
+fn spawn(bm: &mut Buf, pool: &mut Pool, dir: &mut PageTable, procs: &mut Buf, prog: u64, parent: u64) -> u64
+  requires tracks(bm, pool) && pt_level(dir) == 5 && len(procs) == PTAB_LEN
+  ensures tracks(bm, pool) && pt_level(dir) == 5 && len(procs) == PTAB_LEN
+  ensures result < NPROC
+{
+  // The image header: magic, bytes of memory the image needs, entry point.
+  let img = prog_image(prog);
+  if slen(img) < 24 || slen(img) > IMAGE_MAX {
+    return 0;
+  }
+  let size = read_u64(img, 8);
+  let entry = read_u64(img, 16);
+  if read_u64(img, 0) != MAGIC || size < slen(img) || size > IMAGE_MAX {
+    return 0;
+  }
+  if entry < USER_BASE + 24 || entry >= USER_BASE + slen(img) {
+    return 0;
+  }
+  let mut pid = 1;
+  while pid < NPROC && (state(procs, pid) != FREE || pt_has(dir, pid))
+    invariant 1 <= pid && pid <= NPROC
+  {
+    pid = pid + 1;
+  }
+  if pid >= NPROC {
+    return 0;
+  }
+  if !new_space(&mut bm, &mut pool, &mut dir, pid, img, size) {
+    return 0;
+  }
+  let mut f = 0;
+  while f < STRIDE
+    invariant f <= STRIDE && len(procs) == PTAB_LEN
+  {
+    pset(&mut procs, pid, f, 0);
+    f = f + 1;
+  }
+  pset(&mut procs, pid, F_PARENT, parent);
+  pset(&mut procs, pid, F_PROG, prog);
+  pset(&mut procs, pid, F_REGS + R_RIP, entry);
+  pset(&mut procs, pid, F_REGS + R_RSP, USER_BASE + USER_SIZE);
+  pset(&mut procs, pid, F_REGS + R_RFLAGS, 0x202);
+  pset(&mut procs, pid, F_STATE, READY);
+  return pid;
+}
+
+/// Ends process `pid` with exit `code`: frees its address space, hands the
+/// code to a parent waiting for it, and orphans its children.
+fn terminate(bm: &mut Buf, pool: &mut Pool, mmu: &Mmu, dir: &mut PageTable, procs: &mut Buf, pid: u64, code: u64)
+  requires tracks(bm, pool) && pt_level(dir) == 5 && len(procs) == PTAB_LEN
+  requires 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures tracks(bm, pool) && pt_level(dir) == 5 && len(procs) == PTAB_LEN
+{
+  if pt_has(dir, pid) {
+    free_space(&mut bm, &mut pool, mmu, pt_take(&mut dir, pid));
+  }
+  pset(&mut procs, pid, F_STATE, ZOMBIE);
+  pset(&mut procs, pid, F_CODE, code);
+  let mut c = 1;
+  while c < NPROC
+    invariant 1 <= c && c <= NPROC && len(procs) == PTAB_LEN
+  {
+    if pget(procs, c, F_PARENT) == pid && state(procs, c) != FREE {
+      pset(&mut procs, c, F_PARENT, 0);
+      if state(procs, c) == ZOMBIE {
+        pset(&mut procs, c, F_STATE, FREE);
+      }
+    }
+    c = c + 1;
+  }
+  let par = pget(procs, pid, F_PARENT);
+  if par == 0 || par >= NPROC {
+    pset(&mut procs, pid, F_STATE, FREE);       // nobody will collect it
+  } else if state(procs, par) == WAITING && pget(procs, par, F_WAIT) == pid {
+    pset(&mut procs, par, F_REGS + R_RAX, code);
+    pset(&mut procs, par, F_STATE, READY);
+    pset(&mut procs, pid, F_STATE, FREE);
+  } else if state(procs, par) == FREE || state(procs, par) == ZOMBIE {
+    pset(&mut procs, pid, F_STATE, FREE);
+  }
+}
+
+fn put_state(con: &Serial, s: u64) {
+  if s == READY {
+    puts(con, "ready  ");
+  } else if s == READING {
+    puts(con, "reading");
+  } else if s == WAITING {
+    puts(con, "waiting");
+  } else {
+    puts(con, "zombie ");
+  }
+}
+
+fn print_ps(con: &Serial, procs: &Buf)
+  requires len(procs) == PTAB_LEN
+{
+  puts(con, "  PID  PPID STATE    TICKS NAME\r\n");
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC
+  {
+    if state(procs, p) != FREE {
+      put_num_pad(con, p, 5);
+      put_num_pad(con, pget(procs, p, F_PARENT), 6);
+      puts(con, " ");
+      put_state(con, state(procs, p));
+      put_num_pad(con, pget(procs, p, F_TICKS), 6);
+      puts(con, " ");
+      puts(con, prog_name(pget(procs, p, F_PROG)));
+      puts(con, "\r\n");
+    }
+    p = p + 1;
+  }
+}

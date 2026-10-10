@@ -34,16 +34,33 @@ def read_until(marker, start=0):
         out += chunk
     return True
 
-# (input line, expected text in the reply)
+# (input line, expected text in the reply). The shell is a user process;
+# the later steps exercise process creation, waiting, preemption, killing
+# and fault isolation.
 steps = [
     ("help", b"commands:"),
-    ("about", b"proved safe at compile time"),
+    ("about", b"proved safe"),
     ("echo hello world", b"hello world"),
     ("add 2 40", b"42"),
     ("mul 3 7", b"21"),
     ("mul 4294967296 4294967296", b"overflow"),
     ("add 99999999999999999999 1", b"too large"),
     ("frobnicate", b"unknown command: frobnicate"),
+    ("mem", b"free pages"),
+    ("hello", b"hello from user mode, pid 2"),
+    ("ps", b"    1     0 ready"),
+    ("spin &", b"[2]"),
+    # spin never makes a system call: only the timer can give the shell
+    # the CPU back, so getting a prompt at all shows preemption.
+    ("echo still here", b"still here"),
+    ("ps", b"spin"),
+    ("kill 2", b""),
+    ("kill 2", b"no such process"),
+    ("fault", b"page fault at rip"),
+    ("echo survived", b"survived"),
+    ("sh", b"BastiOS 0.2 -- type"),
+    ("exit", b""),
+    ("mem", b"free pages"),
 ]
 fails = 0
 if not read_until(b"bastios> "):
@@ -56,8 +73,21 @@ else:
         ok = read_until(b"bastios> ", mark) and want in out[mark:]
         print(("ok  " if ok else "FAIL"), repr(line))
         fails += not ok
+    # Every page the finished processes used must be back in the pool.
+    mem = [l.strip() for l in out.split(b"\n") if l.strip().endswith(b"free pages")]
+    if len(mem) == 2 and mem[0] == mem[1]:
+        print("ok   no pages leaked:", mem[1].decode())
+    else:
+        print("FAIL page leak:", mem); fails += 1
     qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
-    read_until(b"bye")
+    read_until(b"pages free at power off")
+import re
+boot = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
+off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+if boot and off and boot.group(1) == off.group(1):
+    print(f"ok   all {off.group(1).decode()} pages back in the pool at power off")
+else:
+    print("FAIL pages at power off:", boot and boot.group(1), off and off.group(1)); fails += 1
 try:
     code = qemu.wait(timeout=max(1, deadline - time.time()))
 except subprocess.TimeoutExpired:

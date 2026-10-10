@@ -11,16 +11,51 @@ QEMU    ?= qemu-system-x86_64
 
 CFLAGS  := -std=c11 -O2 -ffreestanding -fno-builtin -fno-stack-protector \
            -fno-pic -fno-pie -mno-red-zone -mgeneral-regs-only -nostdlib -w
-LDFLAGS := -nostdlib -static -no-pie -z max-page-size=0x1000 -T boot/linker.ld -Wl,--build-id=none
+LDFLAGS := -nostdlib -static -no-pie -z max-page-size=0x1000 -T boot/linker.ld -Wl,--build-id=none -Wl,--no-warn-rwx-segments
 
 all: build/bastios.elf
 
-build:
-	mkdir -p build
+build build/user:
+	mkdir -p $@
 
-# 1. Prove the kernel and translate it to freestanding C.
-build/kernel.c: src/main.bastio $(BASTIOC) | build
-	$(BASTIOC) --target kernel -o $@ $<
+# 1. User programs: prove each one, compile it as position-independent code,
+#    link it at USER_BASE behind its header, and flatten it to a raw image
+#    that the kernel embeds with include_bytes.
+UCFLAGS := $(CFLAGS) -fpie
+UPROGS  := sh hello spin
+UBINS   := $(UPROGS:%=build/user/%.bin) build/user/fault.bin
+
+build/user/%.c: user/%.bastio $(BASTIOC) | build/user
+	$(BASTIOC) --target user -o $@ $<
+
+build/user/%.o: build/user/%.c
+	$(CC) $(UCFLAGS) -c -o $@ $<
+
+build/user/start.o: user/start.S | build/user
+	$(CC) -c -o $@ $<
+
+build/user/fault.o: user/fault.S | build/user
+	$(CC) -c -o $@ $<
+
+build/user/libc.o: boot/libc.c | build/user
+	$(CC) $(UCFLAGS) -c -o $@ $<
+
+ULDFLAGS := -nostdlib -static -no-pie -z max-page-size=0x1000 -T user/user.ld -Wl,--build-id=none -Wl,--no-warn-rwx-segments
+
+build/user/%.elf: build/user/start.o build/user/%.o build/user/libc.o user/user.ld
+	$(CC) $(ULDFLAGS) -o $@ build/user/start.o build/user/$*.o build/user/libc.o
+
+build/user/fault.elf: build/user/fault.o user/user.ld
+	$(CC) $(ULDFLAGS) -o $@ build/user/fault.o
+
+build/user/%.bin: build/user/%.elf
+	objcopy -O binary $< $@
+
+# 2. Prove the kernel and translate it to freestanding C.
+KSRCS := src/console.bastio src/pages.bastio src/space.bastio src/proc.bastio src/syscall.bastio src/main.bastio
+
+build/kernel.c: $(KSRCS) $(UBINS) $(BASTIOC) | build
+	$(BASTIOC) --target kernel -o $@ $(KSRCS)
 
 build/kernel.o: build/kernel.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -31,10 +66,15 @@ build/libc.o: boot/libc.c | build
 build/boot.o: boot/boot.S | build
 	$(CC) -c -o $@ $<
 
-# 2. Link a 64-bit kernel, then repackage it as ELF32: QEMU's -kernel
+build/platform.o: boot/platform.c | build
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# 3. Link a 64-bit kernel, then repackage it as ELF32: QEMU's -kernel
 #    Multiboot loader only accepts 32-bit ELF images. The code is unchanged.
-build/bastios64.elf: build/boot.o build/kernel.o build/libc.o boot/linker.ld
-	$(CC) $(LDFLAGS) -o $@ build/boot.o build/kernel.o build/libc.o
+KOBJS := build/boot.o build/platform.o build/kernel.o build/libc.o
+
+build/bastios64.elf: $(KOBJS) boot/linker.ld
+	$(CC) $(LDFLAGS) -o $@ $(KOBJS)
 
 build/bastios.elf: build/bastios64.elf
 	objcopy -O elf32-i386 $< $@
@@ -51,4 +91,5 @@ test: build/bastios.elf
 clean:
 	rm -rf build
 
+.PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
 .PHONY: all run test clean
