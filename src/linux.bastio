@@ -209,8 +209,8 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     } else {
       w = do_writev(&mut con, &mut k, pid, a, b, c);
     }
-    if w == EAGAIN {
-      return lx_retry(&mut k, pid, n);       // a full pipe: wait for a reader
+    if w == EAGAIN || w == SK_WAIT {
+      return lx_retry(&mut k, pid, n);       // a full pipe or connection: wait for room
     }
     ret(&mut k.procs, pid, w);
     if w == EPIPE {

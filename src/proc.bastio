@@ -321,6 +321,7 @@ const SK_WAIT: u64 = 0x8000000000000000;
 // flags, restorer, mask).
 const SIGACT_LEN: u64 = 4096;
 const OF_SOCK: u64 = 5;               // x: the kernel socket; word 3: 2 * peer + nonblocking
+const OF_TCP: u64 = 6;                // x: the kernel connection (TCBS: none yet); word 3: see src/lxtcp.bastio
 const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
 
@@ -394,7 +395,7 @@ spec fn kok(k: &Kernel) -> bool {
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 16;
+const NPROGS: u64 = 17;
 
 fn prog_name(i: u64) -> Str {
   if i == 0 {
@@ -445,6 +446,9 @@ fn prog_name(i: u64) -> Str {
   if i == 15 {
     return "mudp";
   }
+  if i == 16 {
+    return "mtcp";
+  }
   return "(file)";                    // a program loaded from a file
 }
 
@@ -493,6 +497,9 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 15 {
     return include_bytes("../build/user/mudp.elf");
+  }
+  if i == 16 {
+    return include_bytes("../build/user/mtcp.elf");
   }
   return include_bytes("../build/user/fault.bin");
 }

@@ -1,0 +1,276 @@
+// Linux TCP sockets, over the kernel's connections in src/tcp.bastio. A
+// stream socket names an open file description of kind OF_TCP whose x is
+// the kernel connection or listener (TCBS before listen or connect), and
+// whose word 3 packs nonblocking (bit 0), the bound port and the mode
+// (TM_NEW, TM_LISTEN, TM_CONN): see tm_word.
+
+import "linux.bastio";
+
+const IPPROTO_TCP: u64 = 6;
+const TM_NEW: u64 = 0;
+const TM_LISTEN: u64 = 1;
+const TM_CONN: u64 = 2;
+
+const ECONNRESET: u64 = 18446744073709551512;      // 2^64 - 104
+const EISCONN: u64 = 18446744073709551510;         // 2^64 - 106
+const ECONNREFUSED: u64 = 18446744073709551505;    // 2^64 - 111
+const EINPROGRESS: u64 = 18446744073709551501;     // 2^64 - 115
+
+// A stream socket descriptor: description h, connection t (TCBS: none
+// yet), and the fields of word 3; or err.
+struct Tk { err: u64, h: u64, t: u64, nb: u64, port: u64, mode: u64 }
+
+fn tm_word(nb: u64, port: u64, mode: u64) -> u64
+  requires nb <= 1 && port <= 65535 && mode <= TM_CONN
+{
+  return nb + 2 * port + 131072 * mode;
+}
+
+fn tk_look(k: &Kernel, pid: u64, fd: u64) -> Tk
+  requires kok(k) && pid < NPROC
+  ensures result.err == 0 ==> (result.h < OFD_N && result.t <= TCBS && result.nb <= 1 && result.port <= 65535 && result.mode <= TM_CONN)
+{
+  let none = Tk { err: ENOTSOCK, h: 0, t: 0, nb: 0, port: 0, mode: 0 };
+  let v = fd_get(k.lxfd, pid, fd) % FD_CLOEXEC;
+  if v == 0 {
+    return Tk { err: EBADF, h: 0, t: 0, nb: 0, port: 0, mode: 0 };
+  }
+  if v < FD_OFD || v - FD_OFD >= OFD_N {
+    return none;
+  }
+  let h = v - FD_OFD;
+  let t = of_get(k.ofd, h, 2);
+  let w = of_get(k.ofd, h, 3);
+  if of_get(k.ofd, h, 0) != OF_TCP || t > TCBS || w / 131072 > TM_CONN {
+    return none;
+  }
+  return Tk { err: 0, h: h, t: t, nb: w % 2, port: w / 2 % 65536, mode: w / 131072 };
+}
+
+fn is_tcp(k: &Kernel, pid: u64, fd: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let v = fd_get(k.lxfd, pid, fd) % FD_CLOEXEC;
+  return v >= FD_OFD && v - FD_OFD < OFD_N && of_get(k.ofd, v - FD_OFD, 0) == OF_TCP;
+}
+
+/// socket(AF_INET, SOCK_STREAM, 0 or IPPROTO_TCP): a description with no
+/// connection yet.
+fn lx_tcp_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if proto != 0 && proto != IPPROTO_TCP {
+    return EPROTONOSUPPORT;
+  }
+  let h = ofd_new(&mut k, OF_TCP, TCBS);
+  if h >= OFD_N {
+    return ENFILE;
+  }
+  of_set(&mut k.ofd, h, 3, tm_word(kind / SOCK_NONBLOCK % 2, 0, TM_NEW));
+  let fd = fd_install(&mut k, pid, h);
+  if fd < LXNFD && kind / SOCK_CLOEXEC % 2 == 1 {
+    fd_set(&mut k.lxfd, pid, fd, FD_OFD + h + FD_CLOEXEC);
+  }
+  return fd;
+}
+
+/// bind on a stream socket: remembers the port for listen.
+fn lx_tcp_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let tk = tk_look(k, pid, fd);
+  if tk.err != 0 {
+    return tk.err;
+  }
+  if tk.mode != TM_NEW || tk.port != 0 {
+    return EINVAL;
+  }
+  let sin = sin_in(&mut k, pid, addr, alen);
+  if sin.err != 0 {
+    return sin.err;
+  }
+  of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, sin.port, TM_NEW));
+  return 0;
+}
+
+/// listen(fd, backlog): the kernel listener on the bound port.
+fn lx_listen(k: &mut Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let tk = tk_look(k, pid, fd);
+  if tk.err != 0 {
+    return tk.err;
+  }
+  if tk.mode == TM_LISTEN {
+    return 0;
+  }
+  if tk.mode != TM_NEW || tk.port == 0 {
+    return EINVAL;                          // no ephemeral listeners
+  }
+  let t = tcp_listen(&mut k.nic, tk.port);
+  if t >= TCBS {
+    return EADDRINUSE;
+  }
+  of_set(&mut k.ofd, tk.h, 2, t);
+  of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, tk.port, TM_LISTEN));
+  return 0;
+}
+
+/// accept4(fd, addr, lenp, flags): an established connection from the
+/// listener, in a new descriptor; SK_WAIT if none has come in yet.
+fn lx_accept(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let tk = tk_look(k, pid, fd);
+  if tk.err != 0 {
+    return tk.err;
+  }
+  if tk.mode != TM_LISTEN {
+    return EINVAL;
+  }
+  let c = tcp_accept(&mut k.nic, tk.t);
+  if c >= TCBS {
+    if tk.nb == 1 {
+      return EAGAIN;
+    }
+    return SK_WAIT;
+  }
+  let h = ofd_new(&mut k, OF_TCP, c);
+  if h >= OFD_N {
+    tcp_close(&mut k.nic, c);
+    return ENFILE;
+  }
+  of_set(&mut k.ofd, h, 3, tm_word(flags / SOCK_NONBLOCK % 2, tk.port, TM_CONN));
+  let nfd = fd_install(&mut k, pid, h);
+  if nfd >= LXNFD {
+    return nfd;                             // -EMFILE; the description is gone
+  }
+  if flags / SOCK_CLOEXEC % 2 == 1 {
+    fd_set(&mut k.lxfd, pid, nfd, FD_OFD + h + FD_CLOEXEC);
+  }
+  let r = sin_out(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, c), tcp_peer_port(k.nic, c));
+  if r != 0 {
+    return r;
+  }
+  return nfd;
+}
+
+/// connect on a stream socket: opens the connection, then waits (SK_WAIT,
+/// the call runs again) until it is established or refused.
+fn lx_tcp_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let tk = tk_look(k, pid, fd);
+  if tk.err != 0 {
+    return tk.err;
+  }
+  if tk.mode == TM_LISTEN {
+    return EISCONN;
+  }
+  let mut t = tk.t;
+  if tk.mode == TM_NEW {
+    let sin = sin_in(&mut k, pid, addr, alen);
+    if sin.err != 0 {
+      return sin.err;
+    }
+    t = tcp_connect(&mut k.nic, sin.ip, sin.port);
+    if t >= TCBS {
+      return ENETUNREACH;
+    }
+    of_set(&mut k.ofd, tk.h, 2, t);
+    of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, 0, TM_CONN));
+  }
+  let st = tcp_status(k.nic, t);
+  if st == 1 {
+    return 0;
+  }
+  if st == 2 {
+    return ECONNREFUSED;
+  }
+  if tk.nb == 1 {
+    return EINPROGRESS;
+  }
+  return SK_WAIT;
+}
+
+/// write / send on a connection: what the send buffer takes; SK_WAIT
+/// while it is full; -EPIPE once the connection cannot send.
+fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let tk = tk_look(k, pid, fd);
+  if tk.err != 0 {
+    return tk.err;
+  }
+  if tk.mode != TM_CONN {
+    return ENOTCONN;
+  }
+  if n == 0 {
+    return 0;
+  }
+  let got = copy_from_user(&mut k.spaces, pid, buf, &mut k.fs.xfer, smaller(n, XFER));
+  if got == NO_RESULT || got == 0 {
+    return EFAULT;
+  }
+  let w = tcp_send(&mut k.nic, tk.t, k.fs.xfer, got);
+  if w == NO_SOCK {
+    return EPIPE;
+  }
+  if w == 0 {
+    return SK_WAIT;
+  }
+  return w;
+}
+
+/// read / recv on a connection: the bytes that arrived, 0 at the end,
+/// SK_WAIT (or -EAGAIN when nonblocking) while none have.
+fn lx_tcp_recv(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, dontwait: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let tk = tk_look(k, pid, fd);
+  if tk.err != 0 {
+    return tk.err;
+  }
+  if tk.mode != TM_CONN {
+    return ENOTCONN;
+  }
+  let got = tcp_recv(&mut k.nic, tk.t, &mut k.fs.xfer, smaller(n, XFER));
+  if got == NO_SOCK {
+    return ECONNRESET;
+  }
+  if got == TCP_AGAIN {
+    if dontwait || tk.nb == 1 {
+      return EAGAIN;
+    }
+    return SK_WAIT;
+  }
+  if copy_to_user(&mut k.spaces, pid, buf, k.fs.xfer, got) != got {
+    return EFAULT;
+  }
+  return got;
+}
+
+/// getsockname / getpeername on a stream socket.
+fn lx_tcp_name(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let tk = tk_look(k, pid, fd);
+  if tk.err != 0 {
+    return tk.err;
+  }
+  if !peer {
+    return sin_out(&mut k, pid, addr, lenp, 0, tk.port);
+  }
+  if tk.mode != TM_CONN || tk.t >= TCBS {
+    return ENOTCONN;
+  }
+  return sin_out(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, tk.t), tcp_peer_port(k.nic, tk.t));
+}

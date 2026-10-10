@@ -1,5 +1,5 @@
 /* UDP sockets through the Linux system calls, against musl: a
- * nonblocking recv with nothing queued, then bind, getsockname, a
+ * nonblocking recv with nothing queued, a raw socket refused, then bind, getsockname, a
  * blocking recvfrom, sendto back to the sender, and connect + write. */
 #include <arpa/inet.h>
 #include <errno.h>
@@ -26,8 +26,8 @@ int main(int argc, char **argv)
     if (recv(nb, buf, sizeof buf, 0) != -1 || errno != EAGAIN)
         return fail("nonblocking recv");
     close(nb);
-    if (socket(AF_INET, SOCK_STREAM, 0) != -1)
-        return fail("refusing TCP");
+    if (socket(AF_INET, SOCK_RAW, 1) != -1)
+        return fail("refusing a raw socket");
 
     int s = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in me = { .sin_family = AF_INET, .sin_port = htons(port) };
