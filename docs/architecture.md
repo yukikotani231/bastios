@@ -100,6 +100,22 @@ Every processor runs the same loop, `sched` (`src/main.bastio`), started on all 
 
 `kill` of a process that is `RUNNING` on another processor only marks it `KILLED`; that processor ends it in step 3. Power off sets a flag that every processor sees the next time it takes the lock, and `smp_run` returns once all of them have left the loop, so every space is back in the table. Then `main` takes the state out of the lock (`lock_end`), pops every remaining space and frees it, and prints the free page count, which `test/shell_test.sh` compares with the count at boot.
 
+### How it scales
+
+`make smpbench` (`test/smpbench.sh`) runs four copies of `bench` at once, on one processor and on four. Measured 2026-10-10 under QEMU 8.2 TCG (no KVM) on a 4-core host:
+
+| | wall | getpid x20000 | spawn+exit x2000 | write 1 MiB |
+| --- | --- | --- | --- | --- |
+| `-smp 1` | 5.5 s | ~120 ticks each | ~125 | ~285 |
+| `-smp 4` | 31.5 s | ~200 | 160-800 | ~2100 |
+
+Four processors are five times slower than one on this workload. Two things combine:
+
+- **The workload is almost all kernel time, under the lock.** Every system call takes `Lock[Sys]` twice, once in `finish` and once in `next_job`. `next_job` also polls the network card and the UART each time. Four processes making system calls back to back therefore run one at a time at best.
+- **Spinning is very expensive under TCG.** Removing the `pause` from the lock's spin loop (`bst_lock_acquire` in the bastiolang prelude) brings the `-smp 4` run down to 12 s, with getpid about 100 ticks each. That is faster than `-smp 1`. On real hardware `pause` is the right instruction, so it stays; it just makes TCG numbers pessimistic.
+
+Splitting `Lock[Sys]` per subsystem (memory, files, network) would not remove the two lock round trips per system call, because both go through the process table. What would remove them is a processor owning the row of the process it runs, the way it already owns its address space and FPU page. Then system calls that touch only the caller's own state would not take the lock. These numbers should be taken again on KVM or real hardware before choosing.
+
 ## System calls
 
 A user program raises `int 0x80` with the call number in `rax` and arguments in `rdi`, `rsi`, `rdx`; the result comes back in `rax`. The numbers are the ones in bastiolang's user prelude, which provides the `sys_*` builtins:
