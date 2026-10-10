@@ -8,6 +8,12 @@
 // before it is freed, the address space in CR3 is never freed, and every
 // buffer index and arithmetic step is in range.
 
+import "console.bastio";
+import "pages.bastio";
+import "space.bastio";
+import "proc.bastio";
+import "syscall.bastio";
+
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
 

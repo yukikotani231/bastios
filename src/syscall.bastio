@@ -2,6 +2,10 @@
 // rax and arguments in rdi, rsi, rdx; the result goes back in rax. The
 // numbers are the ones in bastiolang's user prelude.
 
+import "pages.bastio";
+import "space.bastio";
+import "proc.bastio";
+
 const SYS_EXIT: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_READ: u64 = 2;

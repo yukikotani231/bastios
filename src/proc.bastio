@@ -2,6 +2,10 @@
 // process; the process id is the row number (1 to NPROC - 1). A process's
 // address space is element `pid` of a vector of spaces.
 
+import "console.bastio";
+import "pages.bastio";
+import "space.bastio";
+
 const NPROC: u64 = 16;
 const STRIDE: u64 = 32;
 const PTAB_LEN: u64 = 512;           // NPROC * STRIDE
