@@ -286,15 +286,14 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
 /// mremap(addr, oldn, newn, flags): shrinking unmaps the tail; growing
 /// moves the pages (with MREMAP_MAYMOVE) to a new place below the lowest
 /// mmap, where the rest are fresh zero pages. Growing in place is not
-/// tried: without MREMAP_MAYMOVE it is -ENOMEM. Moving to an address
-/// the caller chooses (MREMAP_FIXED) is not supported: with good
-/// arguments it is -ENOMEM, as when no room is found.
+/// tried: without MREMAP_MAYMOVE it is -ENOMEM. MREMAP_FIXED moves the
+/// pages to the address the caller chooses (remap_fixed).
 fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u64, to_addr: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
   let r = win_range(addr, oldn);
-  if r == 18446744073709551615 || newn == 0 || newn > USER_SIZE {
+  if addr % 4096 != 0 || oldn > USER_SIZE || newn == 0 || newn > USER_SIZE {
     return EINVAL;
   }
   let fl = flags % 0x100000000;
@@ -302,6 +301,15 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
   // with the first.
   if fl > 7 || (fl > 1 && fl % 2 == 0) {
     return EINVAL;
+  }
+  if r == 18446744073709551615 {
+    return EFAULT;                          // not all in the mappable part of the window
+  }
+  // No mapping at addr (Linux finds no VMA there): EFAULT.
+  let f0 = r / 4294967296;
+  let e0 = r % 4294967296;
+  if win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, f0, e0, 0) != e0 - f0 {
+    return EFAULT;
   }
   if fl / MREMAP_FIXED % 2 == 1 {
     if to_addr % 4096 != 0 || to_addr < USER_BASE || to_addr - USER_BASE > USER_SIZE - newn
@@ -311,7 +319,7 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
     if to_addr < addr + oldn && addr < to_addr + newn {
       return EINVAL;                        // over the old pages
     }
-    return ENOMEM;
+    return remap_fixed(&mut k, pid, r, newn, to_addr);
   }
   if fl / MREMAP_DONTUNMAP % 2 == 1 {
     return EINVAL;                          // not supported
@@ -351,6 +359,45 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
   }
   pset(&mut k.procs, pid, F_MMAP, at * 4096);
   return USER_BASE + at * 4096;
+}
+
+/// mremap with MREMAP_FIXED: the pages of window range r (as win_range
+/// gives it) move to to_addr, unmapping what was there; past the old
+/// size, the rest are fresh zero pages. to_addr .. to_addr + newn is in
+/// the user space and does not overlap the old range.
+fn remap_fixed(k: &mut Kernel, pid: u64, r: u64, newn: u64, to_addr: u64) -> u64
+  requires kok(k) && pid < NPROC && to_addr >= USER_BASE && newn <= USER_SIZE && to_addr - USER_BASE <= USER_SIZE - newn
+  ensures kok(k)
+{
+  let from = r / 4294967296;
+  let oend = r % 4294967296;
+  if oend < from || oend > WPAGES {
+    return EINVAL;
+  }
+  let have = oend - from;
+  let want = (newn + 4095) / 4096;
+  let at = (to_addr - USER_BASE) / 4096;
+  if at + want > WPAGES {
+    return ENOMEM;
+  }
+  map_forget(&mut k, pid, at, at + want, false);
+  win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at, at + want, 0);
+  let mut keep = have;
+  if want < have {
+    keep = want;
+    map_forget(&mut k, pid, from + want, oend, false);
+    win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, from + want, oend, 0);
+  } else if want > have {
+    if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at + have, at + want, false) {
+      win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at + have, at + want, 0);
+      return ENOMEM;
+    }
+  }
+  map_forget(&mut k, pid, from, from + keep, false);
+  if win_op(&mut k.mem, &mut k.spaces, pid, WOP_MOVE, from, from + keep, at) > WPAGES {
+    return ENOMEM;
+  }
+  return to_addr;
 }
 
 // ------------------------------------------------- shared file mappings

@@ -307,5 +307,21 @@ int main(void) {
                munlockall(); struct rlimit r = {4096, 4096}; setrlimit(RLIMIT_MEMLOCK, &r); setuid(65534);
                _exit(mlock(m, 8192) == -1 && errno == ENOMEM && mlock(m, 4096) == 0 ? 0 : 3); }
            int st = 0; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("mremap MREMAP_FIXED moves pages to the address asked for; an unmapped address is EFAULT", ({
+           char *a = mmap(0, 3 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           char *t = mmap(0, 2 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           a[0] = 'x'; a[4096] = 'y'; t[0] = 'z';
+           char *m = mremap(a, 2 * 4096, 2 * 4096, MREMAP_MAYMOVE | MREMAP_FIXED, t);
+           int ok = m == t && t[0] == 'x' && t[4096] == 'y';
+           munmap(t, 2 * 4096); munmap(a + 2 * 4096, 4096);
+           void *e = mremap(a, 4096, 8192, MREMAP_MAYMOVE); ok && e == MAP_FAILED && errno == EFAULT; }));
+    EXPECT("sched_setattr keeps SCHED_DEADLINE runtime, deadline and period", ({
+           struct { unsigned size, policy; unsigned long long flags; int nice; unsigned prio; unsigned long long run, dl, per; }
+               at = {48, 6, 0, 0, 0, 10000000, 30000000, 40000000}, g = {0};
+           pid_t c = fork(); if (c == 0) { cpu_set_t all; memset(&all, 0xff, sizeof all); sched_setaffinity(0, sizeof all, &all);
+               if (syscall(SYS_sched_setattr, 0, &at, 0)) _exit(1);
+               if (syscall(SYS_sched_getattr, 0, &g, 48, 0)) _exit(2);
+               _exit(g.policy == 6 && g.run == 10000000 && g.dl == 30000000 && g.per == 40000000 ? 0 : 3); }
+           int st = 0; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
     return done();
 }
