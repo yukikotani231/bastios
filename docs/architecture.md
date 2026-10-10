@@ -16,6 +16,7 @@ How the kernel is put together, and which part of it is proved. Read the [README
   | src/syscall.bastio  system calls     |   |                mode, trap stubs, |
   | src/proc.bastio     processes        |   |                bst_cpu_enter     |
   | src/fs.bastio       open files       |   |                                  |
+  | src/pcache.bastio   shared file pages|   |                                  |
   | src/ramfs.bastio    in-memory files  |   |                                  |
   | src/diskfs.bastio   files on disk    |   |                                  |
   | src/blk.bastio      disk: USB stick, |   |                                  |
