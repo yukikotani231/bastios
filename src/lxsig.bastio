@@ -633,7 +633,10 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   // and here it collects it when it runs again after the handler.
   let call = pget(k.procs, p, F_REGS + R_RAX);
   let waiting = pget(k.procs, p, F_RESTART) != 0;
-  let suspended = waiting && call == LX_RT_SIGSUSPEND;
+  // ppoll and pselect6 with a mask swap it as rt_sigsuspend does, and
+  // never run again after a handler either.
+  let swapped = waiting && (call == LX_PPOLL || call == LX_PSELECT6) && get(k.sigsave, p) & MASK_SWAPPED != 0;
+  let suspended = waiting && call == LX_RT_SIGSUSPEND || swapped;
   let pausing = call == LX_PAUSE || suspended;
   let reaping = (call == LX_WAIT4 || call == LX_WAITID) && s == SIGCHLD;
   if waiting && (flags & SA_RESTART == 0 || pausing) && !reaping {
@@ -662,7 +665,8 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   // The mask to go back to: rt_sigsuspend's caller gets its own back.
   let mut was = pget(k.procs, p, F_SIGMASK);
   if suspended {
-    was = get(k.sigsave, p);
+    was = get(k.sigsave, p) & !MASK_SWAPPED;
+    k.sigsave = set(k.sigsave, p, was);     // the call is over: nothing left to put back
   }
   xfer_u64(&mut fr, UC_AT + UC_REGS + 8 * 21, was);         // oldmask
   xfer_u64(&mut fr, UC_AT + UC_FPPTR, base + FP_AT);

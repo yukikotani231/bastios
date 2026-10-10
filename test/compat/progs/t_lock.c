@@ -84,6 +84,26 @@ int main(void) {
            waitpid(c, &st, 0);
            ok; }));
 
+    /* Two processes each waiting for the other's lock: the second to wait
+     * gets EDEADLK instead of waiting forever. */
+    EXPECT("F_SETLKW deadlock is EDEADLK", ({ int ok = 0, p[2]; char b;
+           if (lk(fd, F_SETLK, F_WRLCK, 0, 1) == 0 && pipe(p) == 0 && (c = fork()) == 0) {
+               close(p[0]);
+               lk(fd, F_SETLK, F_WRLCK, 1, 1);
+               write(p[1], "x", 1);
+               _exit(lk(fd, F_SETLKW, F_WRLCK, 0, 1) == 0 ? 0 : 1);   /* waits for the parent */
+           }
+           close(p[1]);
+           if (c > 0 && read(p[0], &b, 1) == 1) {
+               struct timespec t = {0, 300000000};
+               nanosleep(&t, 0);                            /* let the child start waiting */
+               ok = lk(fd, F_SETLKW, F_WRLCK, 1, 1) == -1 && errno == EDEADLK;
+               lk(fd, F_SETLK, F_UNLCK, 0, 0);              /* the child gets its lock */
+               ok = waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0 && ok;
+           }
+           close(p[0]);
+           ok; }));
+
     /* OFD locks belong to the open file description. */
     EXPECT("OFD lock", (g = open("lk_a", O_RDWR)) >= 0 && lk(fd, F_OFD_SETLK, F_WRLCK, 0, 1) == 0);
     EXPECT("another description is kept out", lk(g, F_OFD_SETLK, F_WRLCK, 0, 1) == -1 && errno == EAGAIN);

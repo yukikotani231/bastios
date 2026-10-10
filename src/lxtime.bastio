@@ -28,7 +28,6 @@ const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
 const CLOCK_THREAD_CPUTIME_ID: u64 = 3;
 const CLOCK_BOOTTIME: u64 = 7;
 const LX_SELECT: u64 = 23;
-const LX_PSELECT6: u64 = 270;
 const FD_SETSIZE: u64 = 1024;
 const SET_BYTES: u64 = 128;             // FD_SETSIZE / 8
 const SEL_IN: u64 = 1024;              // where in xfer select keeps the three sets it was given
@@ -247,7 +246,7 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
 /// poll and ppoll: fills in revents for each of the nfds struct pollfd at
 /// fds and returns how many have something, waiting (a run again) until
 /// one does or `wait` ns have passed (FOREVER: no timeout). ppoll's signal
-/// mask is not applied.
+/// mask is applied by lx_time_call (mask_swap).
 fn lx_poll(k: &mut Kernel, pid: u64, n: u64, was: u64, fds: u64, nfds: u64, wait: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -257,7 +256,8 @@ fn lx_poll(k: &mut Kernel, pid: u64, n: u64, was: u64, fds: u64, nfds: u64, wait
     return KEEP;
   }
   let size = 8 * nfds;
-  if copy_from_user(&mut k.spaces, pid, fds, &mut k.fs.xfer, size) != size {
+  // No descriptors (a plain wait, often with fds NULL): nothing to copy.
+  if size > 0 && copy_from_user(&mut k.spaces, pid, fds, &mut k.fs.xfer, size) != size {
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
   }
@@ -288,7 +288,7 @@ fn lx_poll(k: &mut Kernel, pid: u64, n: u64, was: u64, fds: u64, nfds: u64, wait
       return wait_until(&mut k, pid, n, dl);
     }
   }
-  if copy_to_user(&mut k.spaces, pid, fds, k.fs.xfer, size) != size {
+  if size > 0 && copy_to_user(&mut k.spaces, pid, fds, k.fs.xfer, size) != size {
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
   }
@@ -365,7 +365,7 @@ fn set_store(k: &mut Kernel, pid: u64, va: u64, slot: u64, nb: u64) -> bool
 /// select and pselect6 over the first nfds descriptors: rd, wr and ex are
 /// the user's fd_sets (0 for none). Waits like poll. Nothing is ever
 /// exceptional, the time left is not written back to select's timeout,
-/// and pselect6's signal mask is not applied.
+/// and pselect6's signal mask is applied by lx_time_call (mask_swap).
 fn lx_select(k: &mut Kernel, pid: u64, n: u64, was: u64, nfds: u64, rd: u64, wr: u64, ex: u64, wait: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -663,17 +663,92 @@ fn lx_time_call(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
     return lx_poll(&mut k, pid, n, was, a, b, wait);
   }
   if n == LX_PPOLL {
-    let mut wait = FOREVER;
-    if c != 0 {
-      let ts = ts_in(&mut k, pid, c);
-      if ts.err != 0 {
-        ret(&mut k.procs, pid, ts.err);
+    // ppoll(fds, nfds, tsp, sigmask, size): waits with sigmask blocked.
+    let r10 = pget(k.procs, pid, F_REGS + R_R10);
+    if was == 0 && r10 != 0 && !mask_swap(&mut k, pid, r10) {
+      ret(&mut k.procs, pid, EFAULT);
+      return KEEP;
+    }
+    let pr = lx_ppoll(&mut k, pid, n, was, a, b, c);
+    if pr == KEEP {
+      mask_back(&mut k, pid);
+    }
+    return pr;
+  }
+  if n == LX_PSELECT6 {
+    // The sixth argument points at { const sigset_t *ss; size_t len }.
+    let r9 = pget(k.procs, pid, F_REGS + R_R9);
+    if was == 0 && r9 != 0 {
+      if copy_from_user(&mut k.spaces, pid, r9, &mut k.fs.xfer, 8) != 8 {
+        ret(&mut k.procs, pid, EFAULT);
         return KEEP;
       }
-      wait = ts.ns;
+      let ss = get_u64(k.fs.xfer, 0);
+      if ss != 0 && !mask_swap(&mut k, pid, ss) {
+        ret(&mut k.procs, pid, EFAULT);
+        return KEEP;
+      }
     }
-    return lx_poll(&mut k, pid, n, was, a, b, wait);
+    let sr = lx_time_rest(&mut k, pid, n, was, a, b, c);
+    if sr == KEEP {
+      mask_back(&mut k, pid);
+    }
+    return sr;
   }
+  return lx_time_rest(&mut k, pid, n, was, a, b, c);
+}
+
+/// ppoll and pselect6 with a signal mask: like rt_sigsuspend, the call
+/// waits with the mask at user address va blocked. The old one is kept in
+/// k.sigsave, flagged MASK_SWAPPED, until the call returns (mask_back) or
+/// a handler interrupts it (enter_handler puts it in the frame). False if
+/// va cannot be read.
+fn mask_swap(k: &mut Kernel, pid: u64, va: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 8) != 8 {
+    return false;
+  }
+  k.sigsave = set(k.sigsave, pid, pget(k.procs, pid, F_SIGMASK) | MASK_SWAPPED);
+  pset(&mut k.procs, pid, F_SIGMASK, blockable(get_u64(k.fs.xfer, 0)));
+  return true;
+}
+
+/// Puts back the mask mask_swap replaced, if it did.
+fn mask_back(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let w = get(k.sigsave, pid);
+  if w & MASK_SWAPPED != 0 {
+    pset(&mut k.procs, pid, F_SIGMASK, w & !MASK_SWAPPED);
+    k.sigsave = set(k.sigsave, pid, w & !MASK_SWAPPED);
+  }
+}
+
+/// ppoll's timeout, then lx_poll.
+fn lx_ppoll(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut wait = FOREVER;
+  if c != 0 {
+    let ts = ts_in(&mut k, pid, c);
+    if ts.err != 0 {
+      ret(&mut k.procs, pid, ts.err);
+      return KEEP;
+    }
+    wait = ts.ns;
+  }
+  return lx_poll(&mut k, pid, n, was, a, b, wait);
+}
+
+/// The rest of lx_time_call.
+fn lx_time_rest(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
   if n == LX_RT_SIGTIMEDWAIT {
     return lx_sigtimedwait(&mut k, pid, n, was, a, b, c);
   }

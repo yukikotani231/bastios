@@ -316,10 +316,13 @@ const FD_OFD: u64 = 2;
 const FD_CLOEXEC: u64 = 1024;
 
 const OFD_N: u64 = 64;
-// File locks (src/lxlock.bastio): LK_N entries of LK_W words.
+// File locks (src/lxlock.bastio): LK_N entries of LK_W words, then for
+// each process the record lock it waits for in F_SETLKW, LK_WW words.
 const LK_N: u64 = 128;
 const LK_W: u64 = 6;
-const LK_LEN: u64 = 768;              // LK_N * LK_W
+const LK_WAITS: u64 = 768;            // LK_N * LK_W
+const LK_WW: u64 = 4;
+const LK_LEN: u64 = 832;              // LK_WAITS + NPROC * LK_WW
 const LK_EOF: u64 = 18446744073709551615;   // a range to the end of the file; no file
 const LK_DESC: u64 = 4294967296;      // 2^32: lock owners from here are descriptions
 const LKC_FCNTL: u64 = 0;             // record and OFD locks
@@ -427,6 +430,10 @@ const S_IFIFO: u64 = 0x1180;           // a FIFO, rw-------
 const S_IFSOCK: u64 = 0xC1B6;          // a socket, rw-rw-rw-
 const LX_POLL: u64 = 7;
 const LX_PPOLL: u64 = 271;
+const LX_PSELECT6: u64 = 270;
+// In k.sigsave's word for a process: its mask was swapped by ppoll or
+// pselect6 (bit 8 is SIGKILL's, which no saved mask holds).
+const MASK_SWAPPED: u64 = 256;
 const POLL_MAX: u64 = 64;
 const POLLIN: u64 = 1;
 const POLLOUT: u64 = 4;

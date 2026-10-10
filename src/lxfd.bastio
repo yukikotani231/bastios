@@ -422,8 +422,9 @@ fn fd_install_console(k: &mut Kernel, pid: u64) -> u64
 }
 
 /// open / openat: the native flags for Linux `flags`, then vfs_open, and
-/// a description for the row.
-fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64) -> u64
+/// a description for the row. A file it creates gets `mode` less the
+/// umask (always 022).
+fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, mode: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
@@ -431,11 +432,11 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64) -> u64
   if n == NO_RESULT {
     return ENOENT;
   }
-  return lx_open_n(&mut k, pid, n, flags);
+  return lx_open_n(&mut k, pid, n, flags, mode);
 }
 
 /// open of the path in the first n bytes of the transfer buffer.
-fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64) -> u64
+fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   requires kok(k) && pid < NPROC && n <= FNAME_MAX
   ensures kok(k)
 {
@@ -511,11 +512,18 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64) -> u64
   if fd_free(k.lxfd, pid, 0) >= LXNFD || !row_free(k, pid) {
     return EMFILE;                          // no descriptor, or no file layer row, left
   }
+  let fresh = f / O_CREATE % 2 == 1 && vfs_lookup(&mut k.fs, n) == NO_FILE;
   let nfd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, f, n);
   if nfd == NO_FD || nfd >= NFD {
     return ENOENT;
   }
   let row = pid * NFD + nfd;
+  if fresh {
+    let made = vfs_row_file(k.fs, row);
+    if made != NO_FILE {
+      vfs_set_meta(&mut k.fs, made, mode % 512 & !18, NO_FILE);   // 0777 bits, less umask 022
+    }
+  }
   let h = ofd_new(&mut k, OF_FILE, row);
   if h >= OFD_N {
     vfs_close(&mut k.fs, &mut k.mem, row);

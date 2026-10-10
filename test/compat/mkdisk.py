@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Writes a BastiOS disk image (src/diskfs.bastio's format) holding files.
 
-    mkdisk.py OUT.img FILE...
+    mkdisk.py OUT.img FILE... [DEST=FILE]...
 
 Each FILE is stored under its base name, so a program shows up in the guest
-as /disk/NAME. The format ("BSTDISK2"), in 4096-byte blocks: block 0 the
+as /disk/NAME. DEST=FILE stores FILE as /disk/DEST, where DEST may name
+directories (a/b/c.h), which are made as needed. The format ("BSTDISK2"), in 4096-byte blocks: block 0 the
 superblock, its first 8 bytes the magic; blocks 1..4 a directory of 64
 entries of 256 bytes (byte 0 the kind, 1 a file; byte 1 the name length;
 then little-endian u64s: at 8 the parent, 64 for the top directory, at 16
@@ -26,12 +27,12 @@ MODE = 0o755
 DISK_BYTES = 33 << 20
 
 def main():
-    out, files = sys.argv[1], sys.argv[2:]
-    if len(files) > DSLOTS:
-        sys.exit(f"mkdisk: {len(files)} files, the disk holds {DSLOTS}")
+    out, args = sys.argv[1], sys.argv[2:]
     img = bytearray(DISK_BYTES)
     img[0:8] = b"BSTDISK2"
     nxt = DATA_B0
+    slots = 0
+    dirs = {}                      # path of a directory -> its entry
 
     def alloc():
         nonlocal nxt
@@ -45,13 +46,36 @@ def main():
         at = block * BLOCK + 8 * j
         img[at:at + 8] = struct.pack("<Q", p)
 
-    for i, path in enumerate(files):
-        name = os.path.basename(path).encode()
-        data = open(path, "rb").read()
+    def entry(kind, name, parent, size, root):
+        nonlocal slots
+        if slots >= DSLOTS:
+            sys.exit(f"mkdisk: more than {DSLOTS} files and directories, the disk holds {DSLOTS}")
         if not name or len(name) > DNAME_MAX:
-            sys.exit(f"mkdisk: bad name: {path}")
+            sys.exit(f"mkdisk: bad name: {name!r}")
+        i = slots
+        slots += 1
+        e = BLOCK + i * DENT
+        img[e] = kind
+        img[e + 1] = len(name)
+        img[e + 8:e + 48] = struct.pack("<QQQQQ", parent, size, root, MODE, 0)
+        img[e + 56:e + 56 + len(name)] = name
+        return i
+
+    def parent_of(dest):
+        parent, path = DTOP, ""
+        for part in dest.split("/")[:-1]:
+            path = path + "/" + part
+            if path not in dirs:
+                dirs[path] = entry(2, part.encode(), parent, 0, 0)
+            parent = dirs[path]
+        return parent
+
+    for arg in args:
+        dest, src = arg.split("=", 1) if "=" in arg else (os.path.basename(arg), arg)
+        data = open(src, "rb").read()
         if len(data) > PTRS * PTRS * BLOCK:
-            sys.exit(f"mkdisk: {path} is too large")
+            sys.exit(f"mkdisk: {src} is too large")
+        parent = parent_of(dest)
         root = 0
         if data:
             root = alloc()
@@ -65,11 +89,7 @@ def main():
                 put_ptr(maps[b // PTRS], b % PTRS, d)
                 chunk = data[k:k + BLOCK]
                 img[d * BLOCK:d * BLOCK + len(chunk)] = chunk
-        e = BLOCK + i * DENT
-        img[e] = 1
-        img[e + 1] = len(name)
-        img[e + 8:e + 48] = struct.pack("<QQQQQ", DTOP, len(data), root, MODE, 0)
-        img[e + 56:e + 56 + len(name)] = name
+        entry(1, dest.split("/")[-1].encode(), parent, len(data), root)
     with open(out, "wb") as f:
         f.write(img)
 
