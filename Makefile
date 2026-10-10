@@ -338,6 +338,9 @@ build/ltp/configure: | build
 	rm -f build/ltp/testcases/kernel/syscalls/fmtmsg/fmtmsg01.c \
 	  build/ltp/testcases/kernel/syscalls/timer_create/timer_create01.c \
 	  build/ltp/testcases/kernel/syscalls/timer_create/timer_create03.c
+	# LTP images a 300 MB file for a test's block device; a RAM file holds
+	# 64 MiB here (FILE_MAX, src/ramfs.bastio), so ask for 32 MB.
+	sed -i 's/^#define DEV_SIZE_MB 300u$$/#define DEV_SIZE_MB 32u/' build/ltp/lib/tst_device.c
 	$(MAKE) -C build/ltp -s autotools >/dev/null
 
 build/ltp/.built: build/ltp/configure
