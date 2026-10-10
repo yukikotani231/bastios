@@ -3,6 +3,8 @@
 #   make run        boot it in QEMU on this terminal (Ctrl-A X to quit)
 #   make disk       put files from this machine on the disk (FILES="...")
 #   make iso        build/bastios.iso: bootable from CD or USB, BIOS or UEFI
+#   make usb        build/bastios-usb.img: the ISO plus a partition for the files
+#   make run-usb    boot that image from a USB stick in QEMU
 #   make run-iso    boot the ISO in QEMU (run-uefi: under UEFI firmware)
 #   make test       boot it in QEMU and drive the shell over the serial line
 #   make fuzz       fuzz the system calls (SEED, SEEDS, CALLS, SMP)
@@ -190,6 +192,15 @@ build/bastios.iso: build/bastios.elf boot/grub.cfg
 
 iso: build/bastios.iso
 
+# A USB stick image: the ISO, then a GPT partition of USB_MIB MiB for the
+# file system (tools/mkusb.py). Booted from, the stick is also the disk,
+# and the machine's own disks are left alone.
+USB_MIB ?= 64
+build/bastios-usb.img: build/bastios.iso tools/mkusb.py
+	tools/mkusb.py $@ --iso build/bastios.iso --mib $(USB_MIB)
+
+usb: build/bastios-usb.img
+
 # The disk: a raw image, here as a virtio block device. BastiOS formats it
 # the first time it boots, and the files under disk/ live there across
 # boots.
@@ -233,6 +244,14 @@ run: build/bastios.elf $(DISK)
 # The ISO through GRUB, under BIOS and under UEFI (OVMF firmware).
 run-iso: build/bastios.iso $(DISK)
 	$(QEMU) -cdrom build/bastios.iso $(ISO_DISPLAY) $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
+
+# From the USB stick image, on an xHCI controller, with a USB keyboard.
+run-usb: build/bastios-usb.img
+	$(QEMU) -drive file=build/bastios-usb.img,format=raw,if=none,id=st -device qemu-xhci,id=xh \
+	  -device usb-storage,bus=xh.0,drive=st,bootindex=0 -device usb-kbd,bus=xh.0 \
+	  $(ISO_DISPLAY) -cpu qemu64,+pdpe1gb -m 256M -smp $(SMP) -no-reboot \
+	  -device isa-debug-exit,iobase=0xf4,iosize=0x04 -nic user,model=virtio-net-pci \
+	  -serial mon:stdio $(CLEAN_EXIT)
 
 run-uefi: build/bastios.iso $(DISK)
 	cp $(OVMF_VARS) build/ovmf_vars.fd
@@ -450,4 +469,4 @@ clean:
 	rm -rf build
 
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
-.PHONY: all run disk test fuzz smpbench threadbench diskbench iobench netbench compat compat-baseline compat-host clean
+.PHONY: all run disk usb run-usb test fuzz smpbench threadbench diskbench iobench netbench compat compat-baseline compat-host clean

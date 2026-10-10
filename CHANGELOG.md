@@ -153,6 +153,14 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Files and disks
 
+- USB sticks and disks as the disk (`src/xhci.bastio`): SCSI over the
+  bulk-only transport, on the same xHCI controller as the USB keyboard.
+  Only a GPT partition of the BastiOS type is used, and it comes before
+  the machine's own disks, which are then left alone. `make usb` builds
+  `build/bastios-usb.img`, the ISO plus that partition, so the stick
+  BastiOS boots from keeps its files (`tools/mkusb.py`); `make run-usb`
+  boots it in QEMU. Checked by `test/shell_test.sh` and, booting from
+  the stick under BIOS and UEFI, `test/iso_test.sh`.
 - An NVMe drive as the disk (`src/nvme.bastio`): polled, one I/O queue,
   namespace 1 with 512-byte or 4 KiB blocks, each write flushed. It is picked
   before virtio and ATA.
