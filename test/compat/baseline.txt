@@ -415,6 +415,16 @@ t_sock2: signalfd carries a sigqueue value
 t_sock2: signalfd sees a blocked SIGCHLD
 t_sock2: sigqueue carries a value
 t_sock2: write after SHUT_WR is EPIPE
+t_sysv: GETNCNT counts a waiting process
+t_sysv: IPC_RMID ends a wait with EIDRM
+t_sysv: SEM_UNDO is undone at exit
+t_sysv: a signal ends semop; semtimedop times out
+t_sysv: msgget keys: IPC_EXCL, ENOENT
+t_sysv: msgrcv picks by type
+t_sysv: msgrcv waits for a message
+t_sysv: msgsnd, msgrcv and IPC_STAT
+t_sysv: queue permissions follow the ids
+t_sysv: semop, SETALL, GETALL, GETPID, errors
 t_thread: 4 threads, mutex
 t_thread: condition variable
 t_thread: gettid differs in a thread
