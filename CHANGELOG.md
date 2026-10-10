@@ -26,6 +26,11 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Linux programs
 
+- Anonymous `MAP_SHARED` memory is shared with children: `fork` maps the
+  same pages in the child instead of copying them, so a write on one side
+  is seen on the other. The pages are counted references (bastiolang's
+  `Shared`), given back with the last mapping; `munmap`, `mprotect`,
+  `mremap` and exit handle them.
 - Dynamically linked programs: the kernel loads a PIE's interpreter, and
   carries musl's `libc.so` for `/lib/ld-musl-x86_64.so.1`. `/bin/sh` is
   BusyBox's `ash`, so `system` and `popen` work; `waitid`, `times`.
