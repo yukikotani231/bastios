@@ -57,6 +57,7 @@ const LO_RDWR: u64 = 2;
 const LO_CREAT: u64 = 0x40;
 const LO_TRUNC: u64 = 0x200;
 const LO_APPEND: u64 = 0x400;
+const LO_NONBLOCK: u64 = 0x800;
 
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANONYMOUS: u64 = 0x20;
@@ -216,6 +217,8 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       r = lx_file_read(&mut k, pid, d.x, va, cnt);
     } else if d.kind == K_PIPE_R {
       r = pipe_read(&mut k, pid, d.x, va, cnt);
+    } else if d.kind == K_DEV {
+      r = dev_read(&mut k, pid, d.x, va, cnt);
     } else if d.kind == K_SOCK {
       r = lx_recvfrom(&mut k, pid, a, va, cnt, 0, 0, 0);
       if r == SK_WAIT {
@@ -225,7 +228,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
         return KEEP;
       }
     }
-    if r == EAGAIN {
+    if r == EAGAIN && !pipe_nonblock(k, pid, a) {
       return lx_retry(&mut k, pid, n);       // an empty pipe: wait for a writer
     }
     ret(&mut k.procs, pid, r);
@@ -237,6 +240,10 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       w = lx_write_fd(&mut con, &mut k, pid, a, b, c);
     } else {
       w = do_writev(&mut con, &mut k, pid, a, b, c);
+    }
+    if w == EAGAIN && pipe_nonblock(k, pid, a) {
+      ret(&mut k.procs, pid, EAGAIN);        // a full nonblocking pipe: say so
+      return KEEP;
     }
     if w == EAGAIN || w == SK_WAIT {
       return lx_retry(&mut k, pid, n);       // a full pipe or connection: wait for room
@@ -705,6 +712,9 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64
   if d.kind == K_SOCK {
     return lx_sendto(&mut k, pid, fd, va, n, 0, 0);   // to the connected peer
   }
+  if d.kind == K_DEV {
+    return n;                               // a device swallows what it is given
+  }
   if d.kind != K_CONSOLE && d.kind != K_FILE {
     return EBADF;
   }
@@ -1041,8 +1051,8 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64) -> u64
   return o;
 }
 
-/// lseek: SEEK_SET (0) and SEEK_CUR (1). SEEK_END needs the file size by
-/// descriptor, which the file layer does not give yet.
+/// lseek: SEEK_SET (0), SEEK_CUR (1) and SEEK_END (2), with a signed
+/// offset. Returns the new offset or -errno.
 fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -1051,19 +1061,39 @@ fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
   if d.kind == K_BAD {
     return EBADF;
   }
+  if d.kind == K_DEV {
+    return 0;                               // devices have no position
+  }
   if d.kind != K_FILE {
     return ESPIPE;
   }
   let row = d.x;
-  let mut to = off;
+  // SEEK_SET from 0, SEEK_CUR from the offset, SEEK_END from the size; off
+  // is signed (two's complement).
+  let mut base = 0;
   if whence == 1 {
-    let cur = vfs_offset(k.fs, row);
-    if off >= 0x8000000000000000 || cur > 0x7FFFFFFFFFFFFFFF - off {
-      return EINVAL;                        // negative relative offsets are not supported
+    base = vfs_offset(k.fs, row);
+  } else if whence == 2 {
+    let size = vfs_size(&mut k.fs, vfs_row_file(k.fs, row));
+    if size == NO_FILE {
+      return EBADF;
     }
-    to = cur + off;
+    base = size;
   } else if whence != 0 {
     return EINVAL;
+  }
+  let mut to = 0;
+  if off < 0x8000000000000000 {
+    if base > 0x7FFFFFFFFFFFFFFF - off {
+      return EINVAL;
+    }
+    to = base + off;
+  } else {
+    let back = 0xFFFFFFFFFFFFFFFF - off + 1;
+    if whence == 0 || back > base {
+      return EINVAL;                        // before the start of the file
+    }
+    to = base - back;
   }
   if to >= 0x8000000000000000 {
     return EINVAL;
