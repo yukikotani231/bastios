@@ -500,6 +500,10 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, lx_link_call(&mut k, pid, n, a, b, c));
     return KEEP;
   }
+  if is_mount_call(n) {
+    ret(&mut k.procs, pid, lx_mount_call(&mut k, pid, n, a, b, c));
+    return KEEP;
+  }
   if is_procfs_call(n) {
     ret(&mut k.procs, pid, lx_procfs_call(&mut k, pid, n, a, b, c));
     return KEEP;

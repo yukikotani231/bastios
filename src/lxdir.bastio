@@ -304,6 +304,9 @@ fn lx_mkdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
   if n == 0 || is_bin(k.fs.xfer, n) || vfs_lookup(&mut k.fs, n) != NO_FILE || vfs_dir_lookup(&mut k.fs, n) != NO_FILE {
     return EEXIST;
   }
+  if vfs_ro(&mut k.fs, n) {
+    return EROFS;
+  }
   if !vfs_mkdir(&mut k.fs, n) {
     if parent_ok(&mut k.fs, n) {
       return ENOSPC;                        // no room
@@ -332,6 +335,12 @@ fn lx_rmdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
   if d < DIR_VFS || d >= DIR_PROC || d - DIR_VFS == VDIR_ROOT || d - DIR_VFS == VDIR_DISK {
     return EBUSY;                           // "/", "/bin" and "/disk" stay
   }
+  if vfs_is_mount(&mut k.fs, n) {
+    return EBUSY;                           // a tmpfs mount's directory (src/lxmount.bastio)
+  }
+  if vfs_ro(&mut k.fs, n) {
+    return EROFS;
+  }
   if !vfs_rmdir(&mut k.fs, &mut k.mem, n) {
     return ENOTEMPTY;
   }
@@ -349,6 +358,9 @@ fn lx_unlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
   }
   if dir_at(&mut k, n) != NO_FILE {
     return EISDIR;
+  }
+  if vfs_ro(&mut k.fs, n) && vfs_lookup(&mut k.fs, n) != NO_FILE {
+    return EROFS;
   }
   if !vfs_unlink(&mut k.fs, &mut k.mem, n) {
     return ENOENT;
@@ -446,6 +458,12 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
   if d != NO_FILE && (d < DIR_VFS || d >= DIR_PROC || d - DIR_VFS == VDIR_ROOT || d - DIR_VFS == VDIR_DISK) {
     return EBUSY;
   }
+  if vfs_is_mount(&mut k.fs, n) {
+    return EBUSY;
+  }
+  if vfs_ro(&mut k.fs, n) {
+    return EROFS;
+  }
   let src_disk = on_disk(k.fs, n);
   let mut t = balloc(2 * FNAME_MAX);
   xfer_save(k, &mut t, 0, n);
@@ -453,6 +471,10 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
   if m == NO_RESULT {
     bfree(t);
     return k.perr;
+  }
+  if vfs_ro(&mut k.fs, m) {
+    bfree(t);
+    return EROFS;
   }
   xfer_save(k, &mut t, n, m);
   let mut same = n == m;
@@ -498,6 +520,9 @@ fn lx_exchange(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
   let a = vfs_lookup(&mut k.fs, n);
   let ad = dir_at(&mut k, n);
   let a_disk = on_disk(k.fs, n);
+  if (a != NO_FILE || ad != NO_FILE) && vfs_ro(&mut k.fs, n) {
+    return EROFS;
+  }
   let mut t = balloc(2 * FNAME_MAX);
   xfer_save(k, &mut t, 0, n);
   let m = lx_path_at_nf(&mut k, pid, ndir, npath);
@@ -522,6 +547,10 @@ fn lx_exchange(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
   if a == b {
     bfree(t);
     return 0;                               // two names of one file
+  }
+  if vfs_ro(&mut k.fs, m) {
+    bfree(t);
+    return EROFS;
   }
   xfer_save(k, &mut t, n, m);
   xfer_load(&mut k, t, 0, n + m);
