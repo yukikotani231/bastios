@@ -1,0 +1,562 @@
+// Linux file descriptors. Each process has LXNFD descriptors; each names
+// the console or an open file description (the `ofd` table), which dup,
+// dup2 and fork share and which counts its references. A description is a
+// file (a native row of the file layer) or one end of a pipe.
+//
+// k.lxfd, word pid * LXNFD + fd: 0 closed, FD_CONSOLE, or FD_OFD + h for
+// description h; plus FD_CLOEXEC if execve closes it.
+// k.ofd, words h * OFD_STRIDE: kind, references, row or pipe.
+// k.pipes, words p * PIPE_STRIDE: head, count, read end open, write end
+// open, then a ring of PIPE_CAP bytes.
+
+import "linux.bastio";
+
+struct Fd { kind: u64, x: u64 }
+
+spec fn fds_ok(k: &Kernel) -> bool {
+  len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN
+}
+
+fn fd_get(t: &Buf, pid: u64, fd: u64) -> u64
+  requires len(t) == LXFD_LEN && pid < NPROC
+  ensures fd >= LXNFD ==> result == 0
+{
+  if fd >= LXNFD {
+    return 0;
+  }
+  return get(t, pid * LXNFD + fd);
+}
+
+fn fd_set(t: &mut Buf, pid: u64, fd: u64, v: u64)
+  requires len(t) == LXFD_LEN && pid < NPROC && fd < LXNFD
+  ensures len(t) == LXFD_LEN
+{
+  t = set(t, pid * LXNFD + fd, v);
+}
+
+fn of_get(t: &Buf, h: u64, f: u64) -> u64
+  requires len(t) == OFD_LEN && h < OFD_N && f < OFD_STRIDE
+{
+  return get(t, h * OFD_STRIDE + f);
+}
+
+fn of_set(t: &mut Buf, h: u64, f: u64, v: u64)
+  requires len(t) == OFD_LEN && h < OFD_N && f < OFD_STRIDE
+  ensures len(t) == OFD_LEN
+{
+  t = set(t, h * OFD_STRIDE + f, v);
+}
+
+fn pi_get(t: &Buf, p: u64, f: u64) -> u64
+  requires len(t) == PIPES_LEN && p < NPIPES && f < PIPE_STRIDE
+{
+  return get(t, p * PIPE_STRIDE + f);
+}
+
+fn pi_set(t: &mut Buf, p: u64, f: u64, v: u64)
+  requires len(t) == PIPES_LEN && p < NPIPES && f < PIPE_STRIDE
+  ensures len(t) == PIPES_LEN
+{
+  t = set(t, p * PIPE_STRIDE + f, v);
+}
+
+/// What Linux descriptor `fd` of process `pid` refers to.
+fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
+  requires fds_ok(k) && pid < NPROC
+  ensures result.kind == K_FILE ==> result.x < FD_ROWS
+  ensures (result.kind == K_PIPE_R || result.kind == K_PIPE_W) ==> result.x < NPIPES
+{
+  let v = fd_get(k.lxfd, pid, fd) % FD_CLOEXEC;
+  if v == FD_CONSOLE {
+    return Fd { kind: K_CONSOLE, x: 0 };
+  }
+  if v < FD_OFD || v - FD_OFD >= OFD_N {
+    return Fd { kind: K_BAD, x: 0 };
+  }
+  let h = v - FD_OFD;
+  let kind = of_get(k.ofd, h, 0);
+  let x = of_get(k.ofd, h, 2);
+  if kind == OF_FILE && x < FD_ROWS {
+    return Fd { kind: K_FILE, x: x };
+  }
+  if kind == OF_PIPE_R && x < NPIPES {
+    return Fd { kind: K_PIPE_R, x: x };
+  }
+  if kind == OF_PIPE_W && x < NPIPES {
+    return Fd { kind: K_PIPE_W, x: x };
+  }
+  return Fd { kind: K_BAD, x: 0 };
+}
+
+/// Process `pid`'s descriptors as a new program starts: 0 to 2 on the
+/// console, the rest closed. They must hold no references.
+fn lx_fd_reset(t: &mut Buf, pid: u64)
+  requires len(t) == LXFD_LEN && pid < NPROC
+  ensures len(t) == LXFD_LEN
+{
+  let mut fd = 0;
+  while fd < LXNFD
+    invariant fd <= LXNFD && len(t) == LXFD_LEN
+  {
+    if fd < 3 {
+      fd_set(&mut t, pid, fd, FD_CONSOLE);
+    } else {
+      fd_set(&mut t, pid, fd, 0);
+    }
+    fd = fd + 1;
+  }
+}
+
+/// Adds a reference to whatever descriptor value v names.
+fn ref_value(k: &mut Kernel, v: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  let t = v % FD_CLOEXEC;
+  // There are only LXFD_LEN descriptors to hold references.
+  if t >= FD_OFD && t - FD_OFD < OFD_N {
+    let r = of_get(k.ofd, t - FD_OFD, 1);
+    if r < LXFD_LEN {
+      of_set(&mut k.ofd, t - FD_OFD, 1, r + 1);
+    }
+  }
+}
+
+/// Drops the reference descriptor value v holds; the last one closes the
+/// file or the pipe end.
+fn unref_value(k: &mut Kernel, v: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  let t = v % FD_CLOEXEC;
+  if t < FD_OFD || t - FD_OFD >= OFD_N {
+    return;
+  }
+  let h = t - FD_OFD;
+  let refs = of_get(k.ofd, h, 1);
+  if refs > 1 {
+    of_set(&mut k.ofd, h, 1, refs - 1);
+    return;
+  }
+  let kind = of_get(k.ofd, h, 0);
+  let x = of_get(k.ofd, h, 2);
+  of_set(&mut k.ofd, h, 0, OF_FREE);
+  of_set(&mut k.ofd, h, 1, 0);
+  if kind == OF_FILE && x < FD_ROWS {
+    vfs_close(&mut k.fs, x);
+  } else if kind == OF_PIPE_R && x < NPIPES {
+    pi_set(&mut k.pipes, x, 2, 0);
+  } else if kind == OF_PIPE_W && x < NPIPES {
+    pi_set(&mut k.pipes, x, 3, 0);
+  }
+}
+
+/// fork: the child's descriptors are the parent's, sharing descriptions.
+fn lx_fd_fork(k: &mut Kernel, parent: u64, child: u64)
+  requires kok(k) && parent < NPROC && child < NPROC
+  ensures kok(k)
+{
+  let mut fd = 0;
+  while fd < LXNFD
+    invariant fd <= LXNFD && kok(k)
+  {
+    let v = fd_get(k.lxfd, parent, fd);
+    fd_set(&mut k.lxfd, child, fd, v);
+    ref_value(&mut k, v);
+    fd = fd + 1;
+  }
+}
+
+/// Closes Linux descriptor fd. Returns false if it was not open.
+fn lx_fd_close(k: &mut Kernel, pid: u64, fd: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let v = fd_get(k.lxfd, pid, fd);
+  if v == 0 || fd >= LXNFD {
+    return false;
+  }
+  fd_set(&mut k.lxfd, pid, fd, 0);
+  unref_value(&mut k, v);
+  return true;
+}
+
+/// Closes every descriptor (exit), or every close-on-exec one (execve).
+fn lx_fd_close_all(k: &mut Kernel, pid: u64, only_cloexec: bool)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut fd = 0;
+  while fd < LXNFD
+    invariant fd <= LXNFD && kok(k)
+  {
+    if !only_cloexec || fd_get(k.lxfd, pid, fd) >= FD_CLOEXEC {
+      lx_fd_close(&mut k, pid, fd);
+    }
+    fd = fd + 1;
+  }
+}
+
+/// Closes the native rows of process `pid` that no description still
+/// uses (a forked child may share one after its opener exits).
+fn close_unshared(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut f = 0;
+  while f < NFD
+    invariant f <= NFD && kok(k)
+  {
+    let row = pid * NFD + f;
+    if !row_shared(k.ofd, row) {
+      vfs_close(&mut k.fs, row);
+    }
+    f = f + 1;
+  }
+}
+
+fn row_shared(t: &Buf, row: u64) -> bool
+  requires len(t) == OFD_LEN
+{
+  let mut h = 0;
+  while h < OFD_N
+    invariant h <= OFD_N
+  {
+    if of_get(t, h, 0) == OF_FILE && of_get(t, h, 2) == row {
+      return true;
+    }
+    h = h + 1;
+  }
+  return false;
+}
+
+/// A free description set to (kind, x) with one reference, or OFD_N.
+fn ofd_new(k: &mut Kernel, kind: u64, x: u64) -> u64
+  requires kok(k)
+  ensures kok(k) && result <= OFD_N
+{
+  let mut h = 0;
+  while h < OFD_N && of_get(k.ofd, h, 0) != OF_FREE
+    invariant h <= OFD_N
+  {
+    h = h + 1;
+  }
+  if h >= OFD_N {
+    return OFD_N;
+  }
+  of_set(&mut k.ofd, h, 0, kind);
+  of_set(&mut k.ofd, h, 1, 1);
+  of_set(&mut k.ofd, h, 2, x);
+  return h;
+}
+
+/// The lowest closed descriptor of process pid at or above `from`, or LXNFD.
+fn fd_free(t: &Buf, pid: u64, from: u64) -> u64
+  requires len(t) == LXFD_LEN && pid < NPROC
+  ensures result <= LXNFD
+{
+  let mut fd = from;
+  while fd < LXNFD && fd_get(t, pid, fd) != 0
+  {
+    fd = fd + 1;
+  }
+  if fd >= LXNFD {
+    return LXNFD;
+  }
+  return fd;
+}
+
+/// Puts description h (whose reference the caller hands over) in the
+/// lowest closed descriptor. Returns it, or -EMFILE after dropping h.
+fn fd_install(k: &mut Kernel, pid: u64, h: u64) -> u64
+  requires kok(k) && pid < NPROC && h < OFD_N
+  ensures kok(k)
+{
+  let fd = fd_free(k.lxfd, pid, 0);
+  if fd >= LXNFD {
+    unref_value(&mut k, FD_OFD + h);
+    return EMFILE;
+  }
+  fd_set(&mut k.lxfd, pid, fd, FD_OFD + h);
+  return fd;
+}
+
+/// open / openat: the native flags for Linux `flags`, then vfs_open, and
+/// a description for the row.
+fn lx_open(k: &mut Kernel, pid: u64, path: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = lx_path_in(&mut k, pid, path);
+  if n == NO_RESULT {
+    return ENOENT;
+  }
+  let acc = flags % 4;
+  let mut f = O_READ;
+  if acc == LO_WRONLY {
+    f = O_WRITE;
+  } else if acc == LO_RDWR {
+    f = O_READ + O_WRITE;
+  }
+  if flags / LO_CREAT % 2 == 1 {
+    f = f + O_CREATE;
+  }
+  if flags / LO_TRUNC % 2 == 1 {
+    f = f + O_TRUNC;
+  }
+  if flags / LO_APPEND % 2 == 1 {
+    f = f + O_APPEND;
+  }
+  let nfd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, f, n);
+  if nfd == NO_FD || nfd >= NFD {
+    return ENOENT;
+  }
+  let row = pid * NFD + nfd;
+  let h = ofd_new(&mut k, OF_FILE, row);
+  if h >= OFD_N {
+    vfs_close(&mut k.fs, row);
+    return ENFILE;
+  }
+  let fd = fd_install(&mut k, pid, h);
+  if fd < LXNFD && flags / LO_CLOEXEC % 2 == 1 {
+    fd_set(&mut k.lxfd, pid, fd, FD_OFD + h + FD_CLOEXEC);
+  }
+  return fd;
+}
+
+/// dup2(src, new) (dup3 with `cloexec`). Returns new, or -EBADF.
+fn lx_dup2(k: &mut Kernel, pid: u64, src: u64, new: u64, cloexec: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let v = fd_get(k.lxfd, pid, src) % FD_CLOEXEC;
+  if v == 0 || new >= LXNFD {
+    return EBADF;
+  }
+  if src == new {
+    return new;
+  }
+  lx_fd_close(&mut k, pid, new);
+  ref_value(&mut k, v);
+  if cloexec {
+    fd_set(&mut k.lxfd, pid, new, v + FD_CLOEXEC);
+  } else {
+    fd_set(&mut k.lxfd, pid, new, v);
+  }
+  return new;
+}
+
+/// dup(src) and fcntl F_DUPFD: the lowest closed descriptor >= from.
+fn lx_dup(k: &mut Kernel, pid: u64, src: u64, from: u64, cloexec: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let v = fd_get(k.lxfd, pid, src) % FD_CLOEXEC;
+  if v == 0 {
+    return EBADF;
+  }
+  if from >= LXNFD {
+    return EINVAL;
+  }
+  let fd = fd_free(k.lxfd, pid, from);
+  if fd >= LXNFD {
+    return EMFILE;
+  }
+  return lx_dup2(&mut k, pid, src, fd, cloexec);
+}
+
+fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let v = fd_get(k.lxfd, pid, fd);
+  if v == 0 {
+    return EBADF;
+  }
+  if cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC {
+    return lx_dup(&mut k, pid, fd, arg, cmd == F_DUPFD_CLOEXEC);
+  }
+  if cmd == F_GETFD {
+    return v / FD_CLOEXEC;
+  }
+  if cmd == F_SETFD {
+    fd_set(&mut k.lxfd, pid, fd, v % FD_CLOEXEC + FD_CLOEXEC * (arg % 2));
+    return 0;
+  }
+  if cmd == F_GETFL {
+    return LO_RDWR;
+  }
+  if cmd == F_SETFL {
+    return 0;                               // no flag (O_NONBLOCK, O_APPEND) can change
+  }
+  return EINVAL;
+}
+
+/// pipe2(fds, flags): a new pipe, its read end in fds[0] and write end in
+/// fds[1] (two 32-bit ints). Returns 0 or -errno.
+fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut p = 0;
+  while p < NPIPES && (pi_get(k.pipes, p, 2) != 0 || pi_get(k.pipes, p, 3) != 0)
+    invariant p <= NPIPES
+  {
+    p = p + 1;
+  }
+  if p >= NPIPES {
+    return ENFILE;
+  }
+  let r = fd_free(k.lxfd, pid, 0);
+  if r >= LXNFD {
+    return EMFILE;
+  }
+  let w = fd_free(k.lxfd, pid, r + 1);
+  if w >= LXNFD {
+    return EMFILE;
+  }
+  lx_fill(&mut k, 0, 8);
+  bset(&mut k.fs.xfer, 0, r);
+  bset(&mut k.fs.xfer, 4, w);
+  if lx_put_out(&mut k, pid, fds, 8) != 0 {
+    return EFAULT;
+  }
+  let hr = ofd_new(&mut k, OF_PIPE_R, p);
+  if hr >= OFD_N {
+    return ENFILE;
+  }
+  let hw = ofd_new(&mut k, OF_PIPE_W, p);
+  if hw >= OFD_N {
+    unref_value(&mut k, FD_OFD + hr);
+    return ENFILE;
+  }
+  pi_set(&mut k.pipes, p, 0, 0);
+  pi_set(&mut k.pipes, p, 1, 0);
+  pi_set(&mut k.pipes, p, 2, 1);
+  pi_set(&mut k.pipes, p, 3, 1);
+  let mut ce = 0;
+  if flags / LO_CLOEXEC % 2 == 1 {
+    ce = FD_CLOEXEC;
+  }
+  fd_set(&mut k.lxfd, pid, r, FD_OFD + hr + ce);
+  fd_set(&mut k.lxfd, pid, w, FD_OFD + hw + ce);
+  return 0;
+}
+
+/// Reads up to n bytes from pipe p to user address va. Returns the count,
+/// 0 at end of file (no writer left), or EAGAIN if the caller must wait.
+fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && p < NPIPES
+  ensures kok(k)
+{
+  let count = pi_get(k.pipes, p, 1);
+  if count == 0 {
+    if pi_get(k.pipes, p, 3) == 0 {
+      return 0;
+    }
+    return EAGAIN;
+  }
+  if n == 0 {
+    return 0;
+  }
+  let want = smaller(smaller(n, count), PIPE_CAP);
+  let head = pi_get(k.pipes, p, 0) % PIPE_CAP;
+  let mut i = 0;
+  while i < want
+    invariant i <= want && want <= PIPE_CAP && head < PIPE_CAP && kok(k)
+  {
+    bset(&mut k.fs.xfer, i, pi_get(k.pipes, p, 4 + (head + i) % PIPE_CAP) % 256);
+    i = i + 1;
+  }
+  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
+  if put == NO_RESULT || (put == 0 && want > 0) {
+    return EFAULT;
+  }
+  pi_set(&mut k.pipes, p, 0, (head + put) % PIPE_CAP);
+  pi_set(&mut k.pipes, p, 1, count - put);
+  return put;
+}
+
+/// Writes up to n bytes from user address va into pipe p. Returns the
+/// count, -EPIPE with no reader left, or EAGAIN if the pipe is full.
+fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && p < NPIPES
+  ensures kok(k)
+{
+  if pi_get(k.pipes, p, 2) == 0 {
+    return EPIPE;
+  }
+  if n == 0 {
+    return 0;
+  }
+  let count = smaller(pi_get(k.pipes, p, 1), PIPE_CAP);
+  if count == PIPE_CAP {
+    return EAGAIN;
+  }
+  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, smaller(n, PIPE_CAP - count));
+  if got == NO_RESULT || (got == 0 && n > 0) {
+    return EFAULT;
+  }
+  let head = pi_get(k.pipes, p, 0) % PIPE_CAP;
+  let mut i = 0;
+  while i < got
+    invariant i <= got && got <= PIPE_CAP - count && head < PIPE_CAP && kok(k)
+  {
+    pi_set(&mut k.pipes, p, 4 + (head + count + i) % PIPE_CAP, bget(k.fs.xfer, i));
+    i = i + 1;
+  }
+  pi_set(&mut k.pipes, p, 1, count + got);
+  return got;
+}
+
+/// Makes process `pid` run system call `n` again later: a wait.
+fn lx_retry(k: &mut Kernel, pid: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let rip = pget(k.procs, pid, F_REGS + R_RIP);
+  if rip < 2 {
+    ret(&mut k.procs, pid, EFAULT);
+    return KEEP;
+  }
+  pset(&mut k.procs, pid, F_REGS + R_RIP, rip - 2);
+  pset(&mut k.procs, pid, F_REGS + R_RAX, n);
+  return SWITCH;
+}
+
+/// poll(fds, nfds, timeout): every descriptor is reported ready for what
+/// it asks (POLLIN, POLLOUT), so a caller goes on to read or write and
+/// waits there. Timeouts are not kept. Returns nfds or -errno.
+fn lx_poll(k: &mut Kernel, pid: u64, fds: u64, nfds: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if nfds > POLL_MAX {
+    return EINVAL;
+  }
+  let n = 8 * nfds;
+  if copy_from_user(&mut k.spaces, pid, fds, &mut k.fs.xfer, n) != n {
+    return EFAULT;
+  }
+  let mut i = 0;
+  while i < nfds
+    invariant i <= nfds && nfds <= POLL_MAX && kok(k)
+  {
+    // struct pollfd: int fd, short events, short revents.
+    let ev = bget(k.fs.xfer, 8 * i + 4);
+    let mut rv = 0;
+    if ev % 2 == 1 {
+      rv = rv + 1;                          // POLLIN
+    }
+    if ev / 4 % 2 == 1 {
+      rv = rv + 4;                          // POLLOUT
+    }
+    bset(&mut k.fs.xfer, 8 * i + 6, rv);
+    bset(&mut k.fs.xfer, 8 * i + 7, 0);
+    i = i + 1;
+  }
+  if copy_to_user(&mut k.spaces, pid, fds, k.fs.xfer, n) != n {
+    return EFAULT;
+  }
+  return nfds;
+}

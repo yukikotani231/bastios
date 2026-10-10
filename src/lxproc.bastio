@@ -9,8 +9,8 @@ import "linux.bastio";
 
 /// fork (and vfork, which may share memory but need not): a copy of
 /// process `pid` (its window, registers, FPU state, program break) that
-/// returns 0 where the parent gets the child's id. The child starts with
-/// no open files besides the console. Returns the child's id or -errno.
+/// returns 0 where the parent gets the child's id. The child shares the
+/// parent's open descriptors. Returns the child's id or -errno.
 fn lx_fork(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
@@ -71,6 +71,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   pset(&mut k.procs, c, F_TICKS, 0);
   pset(&mut k.procs, c, F_PARENT, pid);
   pset(&mut k.procs, c, F_REGS + R_RAX, 0);
+  lx_fd_fork(&mut k, pid, c);
   pset(&mut k.procs, c, F_STATE, READY);
   return c;
 }
@@ -94,10 +95,10 @@ fn fork_space(m: &mut Mem, spaces: &mut Vec[Space], pid: u64) -> Space
 // ---------------------------------------------------------------- execve
 
 /// execve(path, argv, envp): replaces process `pid`'s program with the one
-/// at `path` (/bin/NAME), passing argv; the environment is not passed yet.
-/// Open files stay open. Returns 0 (the new program's rax) or -errno, in
+/// at `path` (/bin/NAME), passing argv and envp.
+/// Descriptors stay open unless marked close-on-exec. Returns 0 (the new program's rax) or -errno, in
 /// which case the old program carries on.
-fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64) -> u64
+fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
@@ -106,12 +107,17 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64) -> u64
     return ENOENT;
   }
   let mut args = balloc(ARGS_MAX);
-  let alen = lx_args(&mut k, pid, argv, &mut args);
+  let alen = lx_args(&mut k, pid, argv, &mut args, 0, ARGV_MAX);
   if alen > ARGS_MAX {
     bfree(args);
     return alen;                              // -errno
   }
-  let sp = load_image(&mut k.mem, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, pid, prog, args, alen);
+  let total = lx_args(&mut k, pid, envp, &mut args, alen, ENVC_MAX);
+  if total > ARGS_MAX || total < alen {
+    bfree(args);
+    return E2BIG;
+  }
+  let sp = load_image(&mut k.mem, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, pid, prog, args, alen, total);
   bfree(args);
   match sp {
     Space::Empty => { return ENOEXEC; },
@@ -123,6 +129,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64) -> u64
       put_space(&mut k.spaces, pid, Space::Mapped(new));
     },
   }
+  lx_fd_close_all(&mut k, pid, true);
   match take_fpu(&mut k.fpus, pid) {
     Fpu::None => {},
     Fpu::State(mut f) => {
@@ -188,23 +195,25 @@ fn xfer_is(x: &Bytes, from: u64, to: u64, name: Str) -> bool
   return true;
 }
 
-/// Copies the strings of the NULL-ended array of string pointers at user
-/// address `argv` into `args`, each with its NUL. Returns the bytes used,
-/// or -errno (more than ARGS_MAX) if a pointer is bad or they do not fit.
-fn lx_args(k: &mut Kernel, pid: u64, argv: u64, args: &mut Bytes) -> u64
-  requires kok(k) && pid < NPROC && blen(args) == ARGS_MAX
+/// Copies the strings of the NULL-ended array of at most `most` string
+/// pointers at user address `argv` into `args` from byte `from`, each with
+/// its NUL. Returns where they end, or -errno (more than ARGS_MAX) if a
+/// pointer is bad or they do not fit.
+fn lx_args(k: &mut Kernel, pid: u64, argv: u64, args: &mut Bytes, from: u64, most: u64) -> u64
+  requires kok(k) && pid < NPROC && blen(args) == ARGS_MAX && from <= ARGS_MAX
   ensures kok(k) && blen(args) == ARGS_MAX
+  ensures result <= ARGS_MAX ==> from <= result
 {
   if argv == 0 {
-    return 0;
+    return from;
   }
-  if argv < USER_BASE || argv >= USER_BASE + USER_SIZE {
+  if argv < USER_BASE || argv >= USER_BASE + USER_SIZE || most > ARGV_MAX {
     return EFAULT;
   }
-  let mut alen = 0;
+  let mut alen = from;
   let mut j = 0;
-  while j < ARGV_MAX
-    invariant j <= ARGV_MAX && alen <= ARGS_MAX && kok(k) && blen(args) == ARGS_MAX
+  while j < most
+    invariant j <= most && most <= ARGV_MAX && from <= alen && alen <= ARGS_MAX && kok(k) && blen(args) == ARGS_MAX
     invariant argv < USER_BASE + USER_SIZE
   {
     let w = user_u64(&mut k.spaces, pid, argv + 8 * j);
