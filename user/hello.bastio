@@ -1,0 +1,34 @@
+// A first user program: prints a greeting with its process id and exits.
+// Like every user program, it runs in ring 3 in its own address space and
+// reaches the console only through system calls.
+
+fn puts(con: &Serial, s: Str) {
+  let mut i = 0;
+  while i < slen(s)
+    invariant i <= slen(s)
+  {
+    serial_write(con, sget(s, i));
+    i = i + 1;
+  }
+}
+
+fn put_num(con: &Serial, n: u64) {
+  let mut p = 1;
+  while p <= n / 10
+    invariant p >= 1
+  {
+    p = p * 10;
+  }
+  let mut q = p;
+  while q > 0 {
+    serial_write(con, 48 + (n / q) % 10);
+    q = q / 10;
+  }
+}
+
+fn main(con: &mut Serial) -> u64 {
+  puts(con, "hello from user mode, pid ");
+  put_num(con, sys_getpid());
+  puts(con, "\r\n");
+  return 0;
+}

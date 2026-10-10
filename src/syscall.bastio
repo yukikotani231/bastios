@@ -1,0 +1,278 @@
+// System calls. A user program raises `int 0x80` with the call number in
+// rax and arguments in rdi, rsi, rdx; the result goes back in rax. The
+// numbers are the ones in bastiolang's user prelude.
+
+const SYS_EXIT: u64 = 0;
+const SYS_WRITE: u64 = 1;
+const SYS_READ: u64 = 2;
+const SYS_SPAWN: u64 = 3;
+const SYS_WAIT: u64 = 4;
+const SYS_YIELD: u64 = 5;
+const SYS_GETPID: u64 = 6;
+const SYS_INFO: u64 = 7;
+const SYS_PS: u64 = 8;
+const SYS_KILL: u64 = 9;
+const SYS_POWEROFF: u64 = 10;
+
+// What the scheduler does after a system call.
+const KEEP: u64 = 0;
+const SWITCH: u64 = 1;
+const POWEROFF: u64 = 2;
+
+// ---------------------------------------------------------------- input queue
+
+// Bytes typed on the console, waiting for a READ: word 0 is the head,
+// word 1 the count, words 2..258 a ring of 256 bytes.
+const INQ_LEN: u64 = 258;
+
+spec fn qok(q: &Buf) -> bool {
+  len(q) == INQ_LEN && get(q, 0) < 256 && get(q, 1) <= 256
+}
+
+fn q_push(q: &mut Buf, b: u64)
+  requires qok(q)
+  ensures qok(q)
+{
+  let n = get(q, 1);
+  if n < 256 {
+    q = set(q, 2 + (get(q, 0) + n) % 256, b);
+    q = set(q, 1, n + 1);
+  }
+}
+
+/// The oldest byte, or 256 if there is none.
+fn q_pop(q: &mut Buf) -> u64
+  requires qok(q)
+  ensures qok(q)
+{
+  let n = get(q, 1);
+  if n == 0 {
+    return 256;
+  }
+  let h = get(q, 0);
+  let b = get(q, 2 + h);
+  q = set(q, 0, (h + 1) % 256);
+  q = set(q, 1, n - 1);
+  return b;
+}
+
+/// Moves every byte the UART has received into the queue.
+fn drain(con: &Serial, q: &mut Buf)
+  requires qok(q)
+  ensures qok(q)
+{
+  let mut c = serial_poll(con);
+  while c < 256
+    invariant qok(q)
+  {
+    q_push(&mut q, c);
+    c = serial_poll(con);
+  }
+}
+
+/// Hands queued bytes to processes blocked in READ.
+fn wake_readers(procs: &mut Buf, q: &mut Buf)
+  requires len(procs) == PTAB_LEN && qok(q)
+  ensures len(procs) == PTAB_LEN && qok(q)
+{
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && len(procs) == PTAB_LEN && qok(q)
+  {
+    if state(procs, p) == READING && get(q, 1) > 0 {
+      pset(&mut procs, p, F_REGS + R_RAX, q_pop(&mut q));
+      pset(&mut procs, p, F_STATE, READY);
+    }
+    p = p + 1;
+  }
+}
+
+// ---------------------------------------------------------------- user memory
+
+/// Is [va, va + n) inside the user window?
+fn user_range(va: u64, n: u64) -> bool
+  ensures result ==> va >= USER_BASE && va - USER_BASE + n <= USER_SIZE
+{
+  if va < USER_BASE || va - USER_BASE > USER_SIZE {
+    return false;
+  }
+  return n <= USER_SIZE - (va - USER_BASE);
+}
+
+/// Writes the n bytes at user address va to the console. Returns the count
+/// written, which stops short at an unmapped page.
+fn do_write(con: &Serial, dir: &mut PageTable, pid: u64, va: u64, n: u64) -> u64
+  requires pt_level(dir) == 5 && pid < NPROC
+  ensures pt_level(dir) == 5
+{
+  if !user_range(va, n) || !pt_has(dir, pid) {
+    return NO_RESULT;
+  }
+  let off = va - USER_BASE;
+  let mut root = pt_take(&mut dir, pid);
+  let mut k = 0;
+  let mut ok = true;
+  while ok && k < n
+    invariant k <= n && pt_level(root) == 4
+  {
+    let c = user_byte(&mut root, off + k);
+    if c > 255 {
+      ok = false;
+    } else {
+      serial_write(con, c);
+      k = k + 1;
+    }
+  }
+  pt_put(&mut dir, pid, root);
+  return k;
+}
+
+/// Do the n bytes at offset off of the user window spell `name`?
+fn user_matches(root: &mut PageTable, off: u64, n: u64, name: Str) -> bool
+  requires pt_level(root) == 4 && off + n <= USER_SIZE
+  ensures pt_level(root) == 4
+{
+  if n != slen(name) {
+    return false;
+  }
+  let mut k = 0;
+  while k < n
+    invariant k <= n && pt_level(root) == 4
+  {
+    if user_byte(&mut root, off + k) != sget(name, k) {
+      return false;
+    }
+    k = k + 1;
+  }
+  return true;
+}
+
+/// The program whose name is the n bytes at user address va, or NPROGS.
+fn lookup(dir: &mut PageTable, pid: u64, va: u64, n: u64) -> u64
+  requires pt_level(dir) == 5 && pid < NPROC
+  ensures pt_level(dir) == 5
+  ensures result <= NPROGS
+{
+  if !user_range(va, n) || !pt_has(dir, pid) {
+    return NPROGS;
+  }
+  let off = va - USER_BASE;
+  let mut root = pt_take(&mut dir, pid);
+  let mut found = NPROGS;
+  let mut i = 0;
+  while i < NPROGS
+    invariant i <= NPROGS && found <= NPROGS && pt_level(root) == 4
+  {
+    if found == NPROGS && user_matches(&mut root, off, n, prog_name(i)) {
+      found = i;
+    }
+    i = i + 1;
+  }
+  pt_put(&mut dir, pid, root);
+  return found;
+}
+
+// ---------------------------------------------------------------- dispatch
+
+fn ret(procs: &mut Buf, pid: u64, v: u64)
+  requires len(procs) == PTAB_LEN && pid < NPROC
+  ensures len(procs) == PTAB_LEN
+{
+  pset(&mut procs, pid, F_REGS + R_RAX, v);
+}
+
+fn do_wait(procs: &mut Buf, pid: u64, c: u64) -> u64
+  requires len(procs) == PTAB_LEN && 1 <= pid && pid < NPROC
+  ensures len(procs) == PTAB_LEN
+{
+  if c == 0 || c >= NPROC || state(procs, c) == FREE || pget(procs, c, F_PARENT) != pid {
+    ret(&mut procs, pid, NO_RESULT);
+    return KEEP;
+  }
+  if state(procs, c) == ZOMBIE {
+    ret(&mut procs, pid, pget(procs, c, F_CODE));
+    pset(&mut procs, c, F_STATE, FREE);
+    return KEEP;
+  }
+  pset(&mut procs, pid, F_WAIT, c);
+  pset(&mut procs, pid, F_STATE, WAITING);
+  return SWITCH;
+}
+
+/// Handles the system call process `pid` just made.
+fn syscall(con: &Serial, bm: &mut Buf, pool: &mut Pool, mmu: &Mmu, dir: &mut PageTable, procs: &mut Buf, q: &mut Buf, pid: u64, ticks: u64) -> u64
+  requires tracks(bm, pool) && pt_level(dir) == 5 && len(procs) == PTAB_LEN && qok(q)
+  requires 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures tracks(bm, pool) && pt_level(dir) == 5 && len(procs) == PTAB_LEN && qok(q)
+{
+  let n = pget(procs, pid, F_REGS + R_RAX);
+  let a = pget(procs, pid, F_REGS + R_RDI);
+  let b = pget(procs, pid, F_REGS + R_RSI);
+  if n == SYS_EXIT {
+    terminate(&mut bm, &mut pool, mmu, &mut dir, &mut procs, pid, a);
+    return SWITCH;
+  }
+  if n == SYS_WRITE {
+    ret(&mut procs, pid, do_write(con, &mut dir, pid, a, b));
+    return KEEP;
+  }
+  if n == SYS_READ {
+    let c = q_pop(&mut q);
+    if c < 256 {
+      ret(&mut procs, pid, c);
+      return KEEP;
+    }
+    pset(&mut procs, pid, F_STATE, READING);
+    return SWITCH;
+  }
+  if n == SYS_SPAWN {
+    let prog = lookup(&mut dir, pid, a, b);
+    let mut child = 0;
+    if prog < NPROGS {
+      child = spawn(&mut bm, &mut pool, &mut dir, &mut procs, prog, pid);
+    }
+    ret(&mut procs, pid, child);
+    return KEEP;
+  }
+  if n == SYS_WAIT {
+    return do_wait(&mut procs, pid, a);
+  }
+  if n == SYS_YIELD {
+    return SWITCH;
+  }
+  if n == SYS_GETPID {
+    ret(&mut procs, pid, pid);
+    return KEEP;
+  }
+  if n == SYS_INFO {
+    if a == 0 {
+      ret(&mut procs, pid, count_free(bm));
+    } else if a == 1 {
+      ret(&mut procs, pid, ticks);
+    } else {
+      ret(&mut procs, pid, NO_RESULT);
+    }
+    return KEEP;
+  }
+  if n == SYS_PS {
+    print_ps(con, procs);
+    return KEEP;
+  }
+  if n == SYS_KILL {
+    if a == 0 || a >= NPROC || state(procs, a) == FREE || state(procs, a) == ZOMBIE {
+      ret(&mut procs, pid, 1);
+      return KEEP;
+    }
+    ret(&mut procs, pid, 0);
+    terminate(&mut bm, &mut pool, mmu, &mut dir, &mut procs, a, 137);
+    if a == pid {
+      return SWITCH;
+    }
+    return KEEP;
+  }
+  if n == SYS_POWEROFF {
+    return POWEROFF;
+  }
+  ret(&mut procs, pid, NO_RESULT);
+  return KEEP;
+}

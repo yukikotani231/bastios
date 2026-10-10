@@ -1,0 +1,199 @@
+// User address spaces. Each process has a four-level page table whose slot
+// 1 holds its whole user window: one table at each of levels 3, 2 and 1,
+// so the window is the 512 pages (2 MiB) from USER_BASE. The program image
+// starts at page 0 and the stack takes the top STACK_PAGES pages. Slot 0 of
+// every top-level table maps the kernel without the user bit (set up by the
+// prelude), so user code cannot touch kernel memory.
+//
+// Every table and page here is a linear capability. The proof shows that
+// building a space takes each page from the pool once, that tearing it down
+// returns every page, and that a table is empty before it is freed.
+
+const USER_BASE: u64 = 0x8000000000;
+const USER_SIZE: u64 = 0x200000;
+const STACK_PAGES: u64 = 16;
+const STACK_FIRST: u64 = 496;         // 512 - STACK_PAGES
+const IMAGE_MAX: u64 = 0x1F0000;      // STACK_FIRST * 4096
+const KERNEL_ROOT: u64 = 0x10000;     // mmu_root while CR3 holds the kernel's own map
+
+fn free_l1(bm: &mut Buf, pool: &mut Pool, t: PageTable)
+  requires tracks(bm, pool) && pt_level(t) == 1
+  ensures tracks(bm, pool)
+{
+  let mut t1 = t;
+  let mut i = 0;
+  while i < 512
+    invariant i <= 512 && tracks(bm, pool) && pt_level(t1) == 1
+    invariant forall j: u64 :: j < i ==> !pt_used(t1, j)
+  {
+    if pt_has(t1, i) {
+      give_page(&mut bm, &mut pool, pt_take_frame(&mut t1, i));
+    }
+    i = i + 1;
+  }
+  give_page(&mut bm, &mut pool, pt_free(t1));
+}
+
+fn free_l2(bm: &mut Buf, pool: &mut Pool, t: PageTable)
+  requires tracks(bm, pool) && pt_level(t) == 2
+  ensures tracks(bm, pool)
+{
+  let mut t2 = t;
+  let mut i = 0;
+  while i < 512
+    invariant i <= 512 && tracks(bm, pool) && pt_level(t2) == 2
+    invariant forall j: u64 :: j < i ==> !pt_used(t2, j)
+  {
+    if pt_has(t2, i) {
+      free_l1(&mut bm, &mut pool, pt_take(&mut t2, i));
+    }
+    i = i + 1;
+  }
+  give_page(&mut bm, &mut pool, pt_free(t2));
+}
+
+fn free_l3(bm: &mut Buf, pool: &mut Pool, t: PageTable)
+  requires tracks(bm, pool) && pt_level(t) == 3
+  ensures tracks(bm, pool)
+{
+  let mut t3 = t;
+  let mut i = 0;
+  while i < 512
+    invariant i <= 512 && tracks(bm, pool) && pt_level(t3) == 3
+    invariant forall j: u64 :: j < i ==> !pt_used(t3, j)
+  {
+    if pt_has(t3, i) {
+      free_l2(&mut bm, &mut pool, pt_take(&mut t3, i));
+    }
+    i = i + 1;
+  }
+  give_page(&mut bm, &mut pool, pt_free(t3));
+}
+
+/// Tears down a whole address space. It must not be the one in CR3.
+fn free_space(bm: &mut Buf, pool: &mut Pool, mmu: &Mmu, t: PageTable)
+  requires tracks(bm, pool) && pt_level(t) == 4 && mmu_root(mmu) == KERNEL_ROOT
+  ensures tracks(bm, pool)
+{
+  let mut t4 = t;
+  let mut i = 1;
+  while i < 256
+    invariant 1 <= i && i <= 256 && tracks(bm, pool) && pt_level(t4) == 4
+    invariant forall j: u64 :: 1 <= j && j < i ==> !pt_used(t4, j)
+  {
+    if pt_has(t4, i) {
+      free_l3(&mut bm, &mut pool, pt_take(&mut t4, i));
+    }
+    i = i + 1;
+  }
+  give_page(&mut bm, &mut pool, pt_free_root(mmu, t4));
+}
+
+/// Copies the bytes of `img` from `from` (up to a page of them) into `f`.
+fn copy_page(f: &mut Frame, img: Str, from: u64)
+  requires from <= IMAGE_MAX
+{
+  let mut k = 0;
+  while k < 4096 && from + k < slen(img)
+    invariant k <= 4096
+  {
+    frame_write8(&mut f, k, sget(img, from + k));
+    k = k + 1;
+  }
+}
+
+/// Builds an address space holding `img` (with `size` bytes of memory in
+/// all, the rest zero) and a stack, and puts it in slot `pid` of `dir`.
+/// Returns false, with every page given back, when memory runs out.
+fn new_space(bm: &mut Buf, pool: &mut Pool, dir: &mut PageTable, pid: u64, img: Str, size: u64) -> bool
+  requires tracks(bm, pool) && pt_level(dir) == 5 && pid < 512 && !pt_used(dir, pid)
+  requires size <= IMAGE_MAX
+  ensures tracks(bm, pool) && pt_level(dir) == 5
+{
+  let a = find_free(bm);
+  if a >= NPAGES {
+    return false;
+  }
+  let mut l1 = pt_new(take_page(&mut bm, &mut pool, a), 1);
+  let npages = (size + 4095) / 4096;
+  let mut p = 0;
+  let mut ok = true;
+  while ok && p < 512
+    invariant p <= 512 && tracks(bm, pool) && pt_level(l1) == 1
+    invariant forall j: u64 :: p <= j && j < 512 ==> !pt_used(l1, j)
+  {
+    if p < npages || p >= STACK_FIRST {
+      let b = find_free(bm);
+      if b >= NPAGES {
+        ok = false;
+      } else {
+        let mut f = take_page(&mut bm, &mut pool, b);
+        if p < npages {
+          copy_page(&mut f, img, p * 4096);
+        }
+        pt_put_frame(&mut l1, p, f, true);
+      }
+    }
+    if ok {
+      p = p + 1;
+    }
+  }
+  if !ok {
+    free_l1(&mut bm, &mut pool, l1);
+    return false;
+  }
+  let c = find_free(bm);
+  if c >= NPAGES {
+    free_l1(&mut bm, &mut pool, l1);
+    return false;
+  }
+  let mut l2 = pt_new(take_page(&mut bm, &mut pool, c), 2);
+  pt_put(&mut l2, 0, l1);
+  let d = find_free(bm);
+  if d >= NPAGES {
+    free_l2(&mut bm, &mut pool, l2);
+    return false;
+  }
+  let mut l3 = pt_new(take_page(&mut bm, &mut pool, d), 3);
+  pt_put(&mut l3, 0, l2);
+  let e = find_free(bm);
+  if e >= NPAGES {
+    free_l3(&mut bm, &mut pool, l3);
+    return false;
+  }
+  let mut root = pt_new(take_page(&mut bm, &mut pool, e), 4);
+  pt_put(&mut root, 1, l3);
+  pt_put(&mut dir, pid, root);
+  return true;
+}
+
+/// The byte at offset `off` of the user window, or 256 if no page is
+/// mapped there. Walks the tables by taking each one out of its parent and
+/// putting it back, so the kernel never reads memory through an address.
+fn user_byte(root: &mut PageTable, off: u64) -> u64
+  requires pt_level(root) == 4 && off < USER_SIZE
+  ensures pt_level(root) == 4
+  ensures result <= 256
+{
+  if !pt_has(root, 1) {
+    return 256;
+  }
+  let mut r = 256;
+  let mut l3 = pt_take(&mut root, 1);
+  if pt_has(l3, 0) {
+    let mut l2 = pt_take(&mut l3, 0);
+    if pt_has(l2, 0) {
+      let mut l1 = pt_take(&mut l2, 0);
+      let p = off / 4096;
+      if pt_has(l1, p) {
+        let f = pt_take_frame(&mut l1, p);
+        r = frame_read8(f, off % 4096);
+        pt_put_frame(&mut l1, p, f, true);
+      }
+      pt_put(&mut l2, 0, l1);
+    }
+    pt_put(&mut l3, 0, l2);
+  }
+  pt_put(&mut root, 1, l3);
+  return r;
+}

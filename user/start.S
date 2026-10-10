@@ -6,7 +6,7 @@
  */
 .section .header, "a"
         .quad 0x0A52455355545342      /* "BSTUSER\n" */
-        .quad __image_end - __image_start
+        .quad __image_size
         .quad _start
 
 .section .text

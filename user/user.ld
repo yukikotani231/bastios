@@ -10,5 +10,6 @@ SECTIONS
     .data   : { *(.data .data.*) }
     .bss    : { *(COMMON) *(.bss .bss.*) }
     __image_end = .;
+    __image_size = __image_end - __image_start;
     /DISCARD/ : { *(.note.*) *(.comment) *(.eh_frame*) }
 }

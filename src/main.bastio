@@ -1,276 +1,153 @@
-// BastiOS kernel: an interactive shell on the serial console.
+// BastiOS kernel: boots, starts the shell as the first user process, and
+// schedules processes round robin, preempting them on the timer.
 //
-// Everything here is checked by the Bastio prover before it is compiled:
-// every buffer index is in bounds, every byte sent to the UART fits in a
-// byte, every number parsed from user input is checked for overflow, and
-// the line buffer is freed exactly once. The only code that touches
-// hardware is the compiler's freestanding runtime, reached through the
-// `Serial` capability that boot hands to `main`.
+// The kernel never touches memory through an address. Physical pages, page
+// tables, CR3 and the CPU's user context are linear capabilities, and the
+// Bastio prover checks every use of them before this file is compiled: a
+// page is owned by exactly one table or by the allocator, a table is empty
+// before it is freed, the address space in CR3 is never freed, and every
+// buffer index and arithmetic step is in range.
 
-// ---------------------------------------------------------------- output
+const V_TIMER: u64 = 32;
+const V_SYSCALL: u64 = 128;
 
-fn puts(con: &Serial, s: Str) {
-  let mut i = 0;
-  while i < slen(s)
-    invariant i <= slen(s)
-  {
-    serial_write(con, sget(s, i));
-    i = i + 1;
-  }
-}
-
-fn put_num(con: &Serial, n: u64) {
-  let mut p = 1;
-  while p <= n / 10
-    invariant p >= 1
-  {
-    p = p * 10;
-  }
-  let mut q = p;
-  while q > 0 {
-    let d = (n / q) % 10;
-    serial_write(con, 48 + d);
-    q = q / 10;
-  }
-}
-
-// Line buffers hold the line length in slot 0 and the bytes in 1..=length.
-// Every slot from 1 up holds a byte; the prover carries that fact around.
-
-fn put_range(con: &Serial, line: &Buf, from: u64, to: u64)
-  requires from >= 1
-  requires to < len(line)
-  requires forall j: u64 :: 1 <= j && j < len(line) ==> get(line, j) <= 255
-{
-  let mut i = from;
-  while i <= to
-    invariant from <= i
-  {
-    serial_write(con, get(line, i));
-    i = i + 1;
-  }
-}
-
-// ---------------------------------------------------------------- input
-
-fn read_line(con: &Serial, mut line: Buf) -> Buf
-  requires len(line) >= 2
-  requires forall j: u64 :: 1 <= j && j < len(line) ==> get(line, j) <= 255
-  ensures len(result) == len(line)
-  ensures get(result, 0) <= len(result)
-  ensures forall j: u64 :: 1 <= j && j < len(result) ==> get(result, j) <= 255
-{
-  let mut n = 0;
-  let mut done = false;
-  let mut eof = false;
-  while !done
-    invariant n + 1 <= len(line)
-    invariant forall j: u64 :: 1 <= j && j < len(line) ==> get(line, j) <= 255
-  {
-    let c = serial_read(con);
-    if c == 13 || c == 10 {
-      puts(con, "\r\n");
-      done = true;
-    } else if c == 4 {
-      // Ctrl-D on an empty line ends the session.
-      if n == 0 {
-        eof = true;
-        done = true;
-      }
-    } else if c == 127 || c == 8 {
-      if n > 0 {
-        n = n - 1;
-        serial_write(con, 8);
-        serial_write(con, 32);
-        serial_write(con, 8);
-      }
-    } else if c >= 32 && n + 2 <= len(line) {
-      line = set(line, n + 1, c);
-      n = n + 1;
-      serial_write(con, c);
-    }
-  }
-  if eof {
-    line = set(line, 0, len(line));
+fn fault_name(con: &Serial, v: u64) {
+  if v == 0 {
+    puts(con, "divide error");
+  } else if v == 6 {
+    puts(con, "invalid opcode");
+  } else if v == 13 {
+    puts(con, "general protection fault");
+  } else if v == 14 {
+    puts(con, "page fault");
   } else {
-    line = set(line, 0, n);
+    puts(con, "exception");
   }
-  return line;
 }
 
-// ---------------------------------------------------------------- parsing
-
-// Is the line `w`, or `w` followed by a space?
-fn is_cmd(line: &Buf, n: u64, w: Str) -> bool
-  requires n < len(line)
-  ensures result ==> slen(w) <= n
+/// Runs process `pid` until the next trap and returns its vector (256 if
+/// the process has no address space). Its registers are loaded from and
+/// saved back to its row.
+fn run(mmu: &mut Mmu, cpu: &mut Cpu, dir: &mut PageTable, procs: &mut Buf, pid: u64) -> u64
+  requires pt_level(dir) == 5 && len(procs) == PTAB_LEN && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures pt_level(dir) == 5 && len(procs) == PTAB_LEN && mmu_root(mmu) == KERNEL_ROOT
 {
-  if slen(w) > n {
-    return false;
+  if !pt_has(dir, pid) {
+    return 256;
   }
-  if slen(w) < n {
-    if get(line, slen(w) + 1) != 32 {
-      return false;
-    }
-  }
-  let mut k = 0;
-  while k < slen(w)
-    invariant k <= slen(w)
+  let mut r = 0;
+  while r < 18
+    invariant r <= 18
   {
-    if get(line, k + 1) != sget(w, k) {
-      return false;
-    }
-    k = k + 1;
+    cpu_set(&mut cpu, r, pget(procs, pid, F_REGS + r));
+    r = r + 1;
   }
-  return true;
-}
-
-fn skip_spaces(line: &Buf, n: u64, i: u64) -> u64
-  requires n < len(line)
-  requires i <= n + 1
-  ensures i <= result && result <= n + 1
-{
-  let mut j = i;
-  while j <= n && get(line, j) == 32
-    invariant i <= j && j <= n + 1
+  let root = pt_take(&mut dir, pid);
+  mmu_switch(&mut mmu, root);
+  let v = cpu_run(&mut cpu, mmu);
+  mmu_kernel(&mut mmu);
+  pt_put(&mut dir, pid, root);
+  // Registers, then the error code and fault address (words 18 and 19).
+  r = 0;
+  while r < 20
+    invariant r <= 20 && len(procs) == PTAB_LEN
   {
-    j = j + 1;
-  }
-  return j;
-}
-
-fn digits_end(line: &Buf, n: u64, i: u64) -> u64
-  requires n < len(line)
-  requires i <= n + 1
-  ensures i <= result && result <= n + 1
-{
-  let mut j = i;
-  while j <= n && get(line, j) >= 48 && get(line, j) <= 57
-    invariant i <= j && j <= n + 1
-  {
-    j = j + 1;
-  }
-  return j;
-}
-
-// Parses the decimal digits in [from, to). Numbers above 10^18 are refused
-// (the result is then u64::MAX) instead of silently wrapping: the prover
-// rejects `v * 10 + d` until the size check below is in place.
-fn parse_num(line: &Buf, from: u64, to: u64) -> u64
-  requires from <= to
-  requires to <= len(line)
-  ensures result <= 1000000000000000000 || result == 18446744073709551615
-{
-  let mut v = 0;
-  let mut i = from;
-  while i < to
-    invariant from <= i && i <= to
-    invariant v <= 1000000000000000000
-  {
-    let c = get(line, i);
-    if c < 48 || c > 57 {
-      return 18446744073709551615;
-    }
-    if v > 99999999999999999 {
-      return 18446744073709551615;
-    }
-    v = v * 10 + (c - 48);
-    i = i + 1;
+    pset(&mut procs, pid, F_REGS + r, cpu_get(cpu, r));
+    r = r + 1;
   }
   return v;
 }
 
-// ---------------------------------------------------------------- commands
-
-fn cmd_help(con: &Serial) {
-  puts(con, "commands:\r\n");
-  puts(con, "  help             this list\r\n");
-  puts(con, "  echo TEXT        print TEXT\r\n");
-  puts(con, "  add A B          add two numbers (overflow is checked)\r\n");
-  puts(con, "  mul A B          multiply two numbers (overflow is checked)\r\n");
-  puts(con, "  about            what this is\r\n");
-  puts(con, "  halt             power off\r\n");
+fn tick(t: u64) -> u64 {
+  if t < 18446744073709551615 {
+    return t + 1;
+  }
+  return t;
 }
 
-fn cmd_about(con: &Serial) {
-  puts(con, "BastiOS 0.1: a kernel written in Bastio.\r\n");
-  puts(con, "Every memory access, byte write and arithmetic step in this\r\n");
-  puts(con, "shell was proved safe at compile time; the binary has no\r\n");
-  puts(con, "runtime checks.\r\n");
-}
-
-// `add A B` / `mul A B`. `op` is 0 for add, 1 for mul.
-fn cmd_arith(con: &Serial, line: &Buf, n: u64, op: u64)
-  requires n < len(line)
-  requires n >= 3
-  requires forall j: u64 :: 1 <= j && j < len(line) ==> get(line, j) <= 255
-{
-  let a0 = skip_spaces(line, n, 4);
-  let a1 = digits_end(line, n, a0);
-  let b0 = skip_spaces(line, n, a1);
-  let b1 = digits_end(line, n, b0);
-  if a0 == a1 || b0 == b1 || b1 != n + 1 || a1 == b0 {
-    puts(con, "usage: add A B / mul A B\r\n");
-    return;
+fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 {
+  puts(con, "\r\nBastiOS 0.2: ");
+  put_num(con, pool_size(pool));
+  puts(con, " pages of memory\r\n");
+  let mut bm = bm_new(pool);
+  let a = find_free(bm);
+  if a >= NPAGES {
+    puts(con, "no memory\r\n");
+    free(bm);
+    return 1;
   }
-  let a = parse_num(line, a0, a1);
-  let b = parse_num(line, b0, b1);
-  if a == 18446744073709551615 || b == 18446744073709551615 {
-    puts(con, "number too large (limit 10^18)\r\n");
-    return;
+  let mut dir = pt_new(take_page(&mut bm, &mut pool, a), 5);
+  let mut procs = alloc(PTAB_LEN);
+  let mut q = alloc(INQ_LEN);
+  if spawn(&mut bm, &mut pool, &mut dir, &mut procs, 0, 0) == 0 {
+    puts(con, "cannot start the shell\r\n");
   }
-  if op == 0 {
-    put_num(con, a + b);
-    puts(con, "\r\n");
-    return;
-  }
-  // a * b can overflow; the prover insists on this check.
-  if b != 0 && a > 18446744073709551615 / b {
-    puts(con, "overflow: the product does not fit in 64 bits\r\n");
-    return;
-  }
-  put_num(con, a * b);
-  puts(con, "\r\n");
-}
-
-// ---------------------------------------------------------------- main
-
-fn main(con: Serial) -> Serial {
-  puts(con, "\r\nBastiOS 0.1 -- type `help`\r\n");
-  let mut line = alloc(128);
+  let mut cur = 1;
+  let mut ticks = 0;
   let mut running = true;
   while running
-    invariant len(line) == 128
-    invariant forall j: u64 :: 1 <= j && j < len(line) ==> get(line, j) <= 255
+    invariant tracks(bm, pool) && pt_level(dir) == 5 && len(procs) == PTAB_LEN && qok(q)
+    invariant mmu_root(mmu) == KERNEL_ROOT && cur < NPROC
   {
-    puts(con, "bastios> ");
-    line = read_line(con, line);
-    let n = get(line, 0);
-    if n == len(line) {
-      puts(con, "\r\nbye\r\n");
-      running = false;
-    } else if is_cmd(line, n, "help") {
-      cmd_help(con);
-    } else if is_cmd(line, n, "about") {
-      cmd_about(con);
-    } else if is_cmd(line, n, "echo") {
-      if n >= 6 {
-        put_range(con, line, 6, n);
+    drain(con, &mut q);
+    wake_readers(&mut procs, &mut q);
+    let p = pick(procs, cur);
+    if p == 0 {
+      if live_count(procs) == 0 {
+        running = false;
+      } else if cpu_idle(&mut cpu) == V_TIMER {
+        ticks = tick(ticks);
       }
-      puts(con, "\r\n");
-    } else if is_cmd(line, n, "add") {
-      cmd_arith(con, line, n, 0);
-    } else if is_cmd(line, n, "mul") {
-      cmd_arith(con, line, n, 1);
-    } else if is_cmd(line, n, "halt") {
-      puts(con, "bye\r\n");
-      running = false;
-    } else if n > 0 {
-      puts(con, "unknown command: ");
-      put_range(con, line, 1, n);
-      puts(con, "\r\n");
+    } else {
+      let v = run(&mut mmu, &mut cpu, &mut dir, &mut procs, p);
+      cur = p;
+      if v == V_TIMER {
+        ticks = tick(ticks);
+        pset(&mut procs, p, F_TICKS, tick(pget(procs, p, F_TICKS)));
+        cur = (p + 1) % NPROC;
+      } else if v == V_SYSCALL {
+        let r = syscall(con, &mut bm, &mut pool, mmu, &mut dir, &mut procs, &mut q, p, ticks);
+        if r == SWITCH {
+          cur = (p + 1) % NPROC;
+        } else if r == POWEROFF {
+          running = false;
+        }
+      } else if v < 32 {
+        puts(con, "\r\n[pid ");
+        put_num(con, p);
+        puts(con, " (");
+        puts(con, prog_name(pget(procs, p, F_PROG)));
+        puts(con, "): ");
+        fault_name(con, v);
+        puts(con, " at rip ");
+        put_hex(con, pget(procs, p, F_REGS + R_RIP));
+        if v == 14 {
+          puts(con, ", address ");
+          put_hex(con, pget(procs, p, F_REGS + 19));
+        }
+        puts(con, "; killed]\r\n");
+        terminate(&mut bm, &mut pool, mmu, &mut dir, &mut procs, p, 128 + v);
+        cur = (p + 1) % NPROC;
+      }
     }
   }
-  free(line);
-  return con;
+  // Power off: tear down whatever is left, so every page goes back.
+  let mut i = 0;
+  while i < 512
+    invariant i <= 512 && tracks(bm, pool) && pt_level(dir) == 5 && mmu_root(mmu) == KERNEL_ROOT
+    invariant forall j: u64 :: j < i ==> !pt_used(dir, j)
+  {
+    if pt_has(dir, i) {
+      free_space(&mut bm, &mut pool, mmu, pt_take(&mut dir, i));
+    }
+    i = i + 1;
+  }
+  give_page(&mut bm, &mut pool, pt_free(dir));
+  puts(con, "BastiOS: ");
+  put_num(con, count_free(bm));
+  puts(con, " pages free at power off\r\n");
+  free(bm);
+  free(procs);
+  free(q);
+  return 0;
 }
