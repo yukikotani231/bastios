@@ -35,6 +35,8 @@ const SIGKILL: u64 = 9;
 const SIGSEGV: u64 = 11;
 const SIGCONT: u64 = 18;
 const SIGSTOP: u64 = 19;
+const SIGTSTP: u64 = 20;
+const SIGTTIN: u64 = 21;
 const SIGTTOU: u64 = 22;
 const SIGURG: u64 = 23;
 const SIGWINCH: u64 = 28;
@@ -95,10 +97,93 @@ fn sa_set(t: &mut Buf, pid: u64, s: u64, f: u64, v: u64)
   t = set(t, pid * 256 + (s - 1) * 4 + f, v);
 }
 
-/// Signals whose default action is to do nothing. Stopping is not
-/// supported (there is no job control), so the stop signals are among them.
+/// Signals whose default action is to do nothing (SIGCONT's is to
+/// continue a stopped process, which post_sig does when it is sent).
 fn dfl_ignores(s: u64) -> bool {
-  return s == SIGCHLD || s == SIGURG || s == SIGWINCH || (s >= SIGCONT && s <= SIGTTOU);
+  return s == SIGCHLD || s == SIGURG || s == SIGWINCH || s == SIGCONT;
+}
+
+/// Signals whose default action is to stop the process.
+fn dfl_stops(s: u64) -> bool {
+  return s >= SIGSTOP && s <= SIGTTOU;
+}
+
+// ---------------------------------------------------------------- job control
+// A process stopped by a signal is STOPPED: never picked to run, until
+// SIGCONT (or SIGKILL) makes it READY again. Its word in k.sys from SYS_JC
+// is the signal that stopped it, plus JC_STOP until wait reports the stop
+// (WUNTRACED, WSTOPPED), plus JC_CONT until wait reports that it
+// continued (WCONTINUED). Each change sends the parent SIGCHLD unless its
+// SIGCHLD action has SA_NOCLDSTOP, and wakes it from wait4 or waitid.
+// Only the thread that takes the signal stops, not its whole group.
+
+const JC_STOP: u64 = 256;
+const JC_CONT: u64 = 512;
+const SA_NOCLDSTOP: u64 = 1;
+
+fn jc_get(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+{
+  return get(k.sys, SYS_JC + p);
+}
+
+fn jc_set(k: &mut Kernel, p: u64, v: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  k.sys = set(k.sys, SYS_JC + p, v);
+}
+
+/// Process p stopped or continued: its parent hears of it.
+fn jc_tell(k: &mut Kernel, p: u64)
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let par = pget(k.procs, p, F_PARENT);
+  if par == 0 || par >= NPROC || state(k.procs, par) == FREE || state(k.procs, par) == ZOMBIE {
+    return;
+  }
+  if state(k.procs, par) == LXWAITING {
+    pset(&mut k.procs, par, F_STATE, READY);  // its wait4 or waitid looks again
+  }
+  if sa_get(k.sigact, par, SIGCHLD, 1) & SA_NOCLDSTOP == 0 && is_linux(k.procs, par) {
+    post_from(&mut k, par, SIGCHLD, p);
+  }
+}
+
+/// What wait may report about child c besides its end: 256 + the signal
+/// that stopped it (with `stops`), or 512 + SIGCONT once it continued
+/// (with `conts`); 0 if neither. Unless `keep` (WNOWAIT), the report is
+/// taken.
+fn jc_report(k: &mut Kernel, c: u64, stops: bool, conts: bool, keep: bool) -> u64
+  requires kok(k) && c < NPROC
+  ensures kok(k) && (result == 0 || (result >= 256 && result < 768))
+{
+  let w = jc_get(k, c);
+  let sig = w % 256;
+  if stops && w / JC_STOP % 2 == 1 && state(k.procs, c) == STOPPED {
+    if !keep {
+      jc_set(&mut k, c, w - JC_STOP);
+    }
+    return 256 + sig;
+  }
+  if conts && w / JC_CONT % 2 == 1 {
+    if !keep {
+      jc_set(&mut k, c, w - JC_CONT);
+    }
+    return 512 + SIGCONT;
+  }
+  return 0;
+}
+
+/// Process p takes stop signal s.
+fn jc_stop(k: &mut Kernel, p: u64, s: u64)
+  requires kok(k) && 1 <= p && p < NPROC && s < 256
+  ensures kok(k)
+{
+  pset(&mut k.procs, p, F_STATE, STOPPED);
+  jc_set(&mut k, p, s + JC_STOP);
+  jc_tell(&mut k, p);
 }
 
 /// Would signal s be thrown away, as Linux does when it is generated?
@@ -120,9 +205,27 @@ fn post_sig(k: &mut Kernel, p: u64, s: u64)
 {
   let st = state(k.procs, p);
   let blocked = has_sig(pget(k.procs, p, F_SIGMASK), s) && s != SIGKILL;
+  if st == FREE || st == ZOMBIE {
+    return;
+  }
+  // SIGCONT continues a stopped process whatever its action, and drops
+  // pending stops; a stop signal drops a pending SIGCONT.
+  if s == SIGCONT {
+    pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) & !(sbit(SIGSTOP) | sbit(SIGTSTP) | sbit(SIGTTIN) | sbit(SIGTTOU)));
+    if st == STOPPED {
+      pset(&mut k.procs, p, F_STATE, READY);
+      jc_set(&mut k, p, JC_CONT);
+      jc_tell(&mut k, p);
+    }
+  } else if dfl_stops(s) {
+    pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) & !sbit(SIGCONT));
+  }
+  if s == SIGKILL && st == STOPPED {
+    pset(&mut k.procs, p, F_STATE, READY);  // to die
+  }
   // A blocked signal is kept even if ignored, as on Linux: a signalfd or
   // sigwait may take it, and delivery drops it if it is still ignored.
-  if st == FREE || st == ZOMBIE || (sig_ignored(k.sigact, p, s) && !blocked) {
+  if sig_ignored(k.sigact, p, s) && !blocked {
     return;
   }
   pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
@@ -735,6 +838,10 @@ fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
     if take {
       pset(&mut k.procs, p, F_SIGPEND, pend & !sbit(s));
       let h = sa_get(k.sigact, p, s, 0);
+      if s != SIGKILL && h == SIG_DFL && dfl_stops(s) {
+        jc_stop(&mut k, p, s);
+        return false;                       // not run until SIGCONT
+      }
       if s == SIGKILL || (h == SIG_DFL && !dfl_ignores(s)) {
         terminate(&mut k, mmu, p, SIG_DEATH + s);
         return false;

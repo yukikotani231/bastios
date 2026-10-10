@@ -84,6 +84,7 @@ fn pr_fork(k: &mut Kernel, p: u64, c: u64)
   pr_set(&mut k, c, PRW_SLACK0, pr_get(k, p, PRW_SLACK));
   rl_fork(&mut k, p, c);                  // and the resource limits
   dl_fork(&mut k, p, c);                  // and the deadline parameters
+  jc_set(&mut k, c, 0);                   // nothing to report about the child yet
 }
 
 /// execve: the name goes back to the program's.

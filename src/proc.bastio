@@ -127,6 +127,7 @@ const FUTEXWAIT: u64 = 12;           // in a Linux futex wait with no timeout
 const DISKWAIT: u64 = 13;            // waiting for the disk: F_WAIT says for what (disk_wake)
 const EXITING: u64 = 14;             // RUNNING, a thread whose leader is in execve: freed when it comes back
 const SOCKWAIT: u64 = 15;            // a Linux call on a network socket that has to wait (sock_wake)
+const STOPPED: u64 = 16;             // stopped by SIGSTOP, SIGTSTP, SIGTTIN or SIGTTOU until SIGCONT
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -375,11 +376,12 @@ const LK_WAITS: u64 = 768;            // LK_N * LK_W
 const LK_WW: u64 = 4;
 const LK_LEN: u64 = 896;              // LK_WAITS + NPROC * LK_WW
 const IPC_LEN: u64 = 4608;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
-const SYS_LEN: u64 = 1600;             // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio)
+const SYS_LEN: u64 = 1632;             // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports
 const SYS_PQ: u64 = 160;
 const SYS_PR: u64 = 256;               // SYS_PQ + PQ_N * 12; NPROC * PR_W words
 const SYS_RL: u64 = 416;               // SYS_PR + NPROC * PR_W; NPROC * RL_W words (src/lxrlimit.bastio)
 const SYS_DL: u64 = 1504;              // SYS_RL + NPROC * RL_W; NPROC * 3 words
+const SYS_JC: u64 = 1600;              // SYS_DL + NPROC * 3; a word per process (job control, src/lxsig.bastio)
 const PQ_N: u64 = 8;                   // POSIX message queues (SYS_PQ + PQ_N * 12 words = SYS_LEN)
 const IPCB_LEN: u64 = 411648;         // its message bytes, IPC_SETS * MQ_CAP; then the POSIX queues' names and messages, PQ_N * (256 + 16384)
 const LK_EOF: u64 = 18446744073709551615;   // a range to the end of the file; no file

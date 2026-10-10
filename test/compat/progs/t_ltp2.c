@@ -323,5 +323,17 @@ int main(void) {
                if (syscall(SYS_sched_getattr, 0, &g, 48, 0)) _exit(2);
                _exit(g.policy == 6 && g.run == 10000000 && g.dl == 30000000 && g.per == 40000000 ? 0 : 3); }
            int st = 0; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("SIGSTOP stops a child (wait WUNTRACED, state T), SIGCONT continues it (WCONTINUED, waitid CLD_CONTINUED)", ({
+           pid_t c = fork(); if (c == 0) { for (;;) pause(); }
+           kill(c, SIGSTOP); int st = 0; int w1 = waitpid(c, &st, WUNTRACED);
+           int stopped = w1 == c && WIFSTOPPED(st) && WSTOPSIG(st) == SIGSTOP;
+           char path[32], b[128] = {0}; snprintf(path, sizeof path, "/proc/%d/stat", c);
+           int fd = open(path, O_RDONLY); read(fd, b, sizeof b - 1); close(fd);
+           char *r = strrchr(b, ')'); int tee = r && r[2] == 'T';
+           kill(c, SIGCONT); siginfo_t si = {0}; int w2 = waitid(P_PID, c, &si, WCONTINUED | WNOWAIT);
+           int w3 = waitpid(c, &st, WCONTINUED);
+           int cont = w2 == 0 && si.si_pid == c && si.si_code == CLD_CONTINUED && w3 == c && WIFCONTINUED(st);
+           kill(c, SIGKILL); waitpid(c, &st, 0);
+           stopped && tee && cont && WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL; }));
     return done();
 }

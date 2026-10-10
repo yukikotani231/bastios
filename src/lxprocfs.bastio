@@ -525,6 +525,9 @@ fn state_letter(s: u64, waiting: bool) -> u8 {
   if s == ZOMBIE {
     return 90;                              // Z
   }
+  if s == STOPPED {
+    return 84;                              // T
+  }
   return 83;                                // S: waiting for something
 }
 
