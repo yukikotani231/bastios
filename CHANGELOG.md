@@ -395,6 +395,14 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Fixed
 
+- `mprotect(PROT_NONE)` and a `PROT_NONE` file or `MAP_SHARED` mapping made
+  the pages read-only, not inaccessible: the program and the system calls it
+  made could still read them. Such a page is now kept mapped but hidden
+  (bastiolang's `pt_set_access`), so any touch faults, a system call given
+  it fails with `EFAULT`, `fork` keeps it hidden, and a hidden `MAP_SHARED`
+  page stays shared when `mprotect` uncovers it.
+- `mmap` of a file with a bad descriptor and a length of 0 failed with
+  `EINVAL`; as on Linux, the descriptor is checked first (`EBADF`).
 - A PC without a serial port (most of those of the last decade) took no
   keyboard input: COM1's ports read as 0xFF there, which said a byte was
   always waiting, so the console read 0xFF forever and never looked at

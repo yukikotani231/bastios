@@ -1670,8 +1670,8 @@ fn stack_fault(k: &mut Kernel, p: u64) -> bool
   ensures kok(k)
 {
   let va = pget(k.procs, p, F_REGS + 19);   // CR2
-  if va < USER_BASE || copy_from_user(&mut k.spaces, p, va, &mut k.fs.xfer, 1) == 1 {
-    return false;                           // mapped: not a stack to grow
+  if va < USER_BASE || user_present(&mut k.spaces, p, va) {
+    return false;                           // mapped (if PROT_NONE): not a stack to grow
   }
   return stack_reach(&mut k.mem, &mut k.spaces, p, va);
 }
@@ -1711,7 +1711,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if n == 0 || n > USER_SIZE || off % 4096 != 0 {
+  if off % 4096 != 0 {
     return EINVAL;
   }
   let mut anon = flags / MAP_ANONYMOUS % 2 == 1;
@@ -1735,6 +1735,11 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     if mode / O_READ % 2 == 0 || (flags % 4 == MAP_SHARED && prot / 2 % 2 == 1 && (mode / O_WRITE % 2 == 0 || mode / O_APPEND % 2 == 1)) {
       return EACCES;
     }
+  }
+  // As on Linux, the descriptor is looked at before the length: a bad one
+  // is -EBADF even for a length of 0.
+  if n == 0 || n > USER_SIZE {
+    return EINVAL;
   }
   let pages = (n + 4095) / 4096;
   let sh = flags % 4 == MAP_SHARED;
@@ -1763,10 +1768,11 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     if at < brk {
       return ENOMEM;
     }
-    // Fresh PROT_NONE memory is only address space: its pages are mapped
-    // when an mprotect makes them usable (lx_mprotect), and touching it
-    // before that faults, as on Linux.
-    let reserve = (anon && prot == 0) || cached;
+    // Fresh private PROT_NONE memory is only address space: its pages are
+    // mapped when an mprotect makes them usable (lx_mprotect), and touching
+    // it before that faults, as on Linux. Shared memory is mapped now and
+    // hidden (read_only), so the pages mprotect uncovers are the shared ones.
+    let reserve = (anon && prot == 0 && !sh) || cached;
     if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096, sh) {
       return ENOMEM;
     }
@@ -1774,9 +1780,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   }
   // Fresh pages are zero: only a file's bytes need copying in.
   if anon {
-    if prot != 0 {
-      read_only(&mut k, pid, at / 4096, pages, prot);
-    }
+    read_only(&mut k, pid, at / 4096, pages, prot);
     return USER_BASE + at;
   }
   if cached {
@@ -1823,15 +1827,18 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   return USER_BASE + at;
 }
 
-/// A new mapping without PROT_WRITE (2): its pages, from window page
-/// `first` on, become read-only, so a write faults as on Linux.
+/// A new mapping without PROT_WRITE: its pages, from window page `first`
+/// on, become read-only, or inaccessible without PROT_READ too, so a write
+/// (or any touch) faults as on Linux.
 fn read_only(k: &mut Kernel, pid: u64, first: u64, pages: u64, prot: u64)
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if prot / 2 % 2 == 0 && first <= WPAGES && pages <= WPAGES - first {
-    win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, first, first + pages, 0);
+  let a = prot_access(prot);
+  if a == 2 || first > WPAGES || pages > WPAGES - first {
+    return;
   }
+  win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, first, first + pages, a);
 }
 
 /// The file layer's handle for the file open on native row `row`, or
