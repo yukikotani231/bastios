@@ -200,6 +200,15 @@ steps = [
     ("cat /motd", b"Welcome to BastiOS", b"\n# "),
     ("echo one > t; echo two >> t; cat t | wc -l", b"\r\n2\r\n", b"\n# "),
     ("cp t t2; head -n 1 t2; rm t t2; ls", [b"\r\none\r\n", b"elfdemo"], b"\n# "),
+    # Signals: a trap handler entered and returned from (rt_sigreturn),
+    # a process ending itself with kill, a writer ended by SIGPIPE once
+    # head has gone, and Ctrl-C ending a busy loop (the parent ash's own
+    # handler sees it too and carries on).
+    ("trap 'echo got$((1+1))' USR1; kill -USR1 $$; echo after$((2+2))", [b"\r\ngot2\r\n", b"\r\nafter4\r\n"], b"\n# "),
+    ("ash -c 'kill $$'; echo k=$?", b"k=143", b"\n# "),
+    ("ash -c 'while :; do echo y; done' | head -n 1; echo piped", b"\r\ny\r\npiped", b"\n# "),
+    ("ash -c 'while :; do :; done'", b"^C", b"\n# ", b"\x03"),
+    ("echo st=$?", b"st=130", b"\n# "),
     ("exit 5", b"[exit 5]"),
     ("rm lxout", b""),
     ("sh", b"BastiOS 0.2 -- type"),
@@ -242,6 +251,9 @@ else:
         until = step[2] if len(step) > 2 else b"bastios> "
         mark = len(out)
         qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+        if len(step) > 3:
+            time.sleep(1)                   # then keys typed while it runs
+            qemu.stdin.write(step[3]); qemu.stdin.flush()
         wants = want if isinstance(want, list) else [want]
         ok = read_until(until, mark) and all(w in out[mark:] for w in wants)
         print(("ok  " if ok else "FAIL"), repr(line)); ok or print(repr(out[mark:]))

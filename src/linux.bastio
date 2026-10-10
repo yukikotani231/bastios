@@ -82,6 +82,7 @@ const LX_WAIT4: u64 = 61;
 const LX_GETTID: u64 = 186;
 
 const SIGCHLD: u64 = 17;
+const SIGPIPE: u64 = 13;
 const WNOHANG: u64 = 1;
 
 const E2BIG: u64 = 18446744073709551609;    // 2^64 - 7
@@ -166,6 +167,7 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   ensures kok(k)
 {
   let n = pget(k.procs, pid, F_REGS + R_RAX);
+  pset(&mut k.procs, pid, F_RESTART, 0);
   let a = pget(k.procs, pid, F_REGS + R_RDI);
   let b = pget(k.procs, pid, F_REGS + R_RSI);
   let c = pget(k.procs, pid, F_REGS + R_RDX);
@@ -211,6 +213,10 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       return lx_retry(&mut k, pid, n);       // a full pipe: wait for a reader
     }
     ret(&mut k.procs, pid, w);
+    if w == EPIPE {
+      post_sig(&mut k, pid, SIGPIPE);        // no reader left
+      return SWITCH;
+    }
     return KEEP;
   }
   if n == LX_PIPE || n == LX_PIPE2 {
@@ -332,15 +338,8 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, pid);            // one thread, whose id is the pid
     return KEEP;
   }
-  if n == LX_RT_SIGACTION {
-    // No signals are ever delivered yet: every action reads back as the
-    // default (a zeroed struct sigaction), and setting one is accepted.
-    ret(&mut k.procs, pid, lx_zero_out(&mut k, pid, c, 32));
-    return KEEP;
-  }
-  if n == LX_RT_SIGPROCMASK {
-    ret(&mut k.procs, pid, lx_zero_out(&mut k, pid, c, 8));   // nothing is blocked
-    return KEEP;
+  if is_sig_call(n) {
+    return lx_sig_call(&mut k, pid, n, a, b, c);
   }
   if n == LX_GETUID || n == LX_GETGID || n == LX_GETEUID || n == LX_GETEGID {
     ret(&mut k.procs, pid, 0);              // everyone is root
@@ -575,6 +574,7 @@ fn console_read(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
     pset(&mut k.procs, pid, F_REGS + R_RIP, rip - 2);
     pset(&mut k.procs, pid, F_REGS + R_RAX, LX_READ);
     pset(&mut k.procs, pid, F_STATE, LXREADING);
+    pset(&mut k.procs, pid, F_RESTART, 1);
     return SWITCH;
   }
   // Take only what fits in the window from va, so no byte is lost.

@@ -23,6 +23,13 @@ const F_TICKS: u64 = 5;              // timer ticks spent running
 const F_BRK: u64 = 6;                // Linux: window offset of the program break
 const F_MMAP: u64 = 7;               // Linux: window offset of the lowest mmap page
 const F_REGS: u64 = 8;               // 21 saved words, in `cpu_get` order
+// Linux signals (src/lxsig.bastio): blocked and pending sets (bit s - 1
+// for signal s), and 1 while rip points back at a system call that will
+// run again (a wait), which a signal handler may interrupt instead.
+const F_SIGMASK: u64 = 29;
+const F_SIGPEND: u64 = 30;
+const F_RESTART: u64 = 31;
+const SIG_DEATH: u64 = 256;          // F_CODE of a process a signal ended: 256 + the signal
 
 // Saved register numbers.
 const R_RAX: u64 = 0;
@@ -309,6 +316,9 @@ const OF_PIPE_W: u64 = 3;
 const OF_DIR: u64 = 4;                // x: DIR_ROOT or DIR_BIN; word 3: next entry
 // lx_recvfrom's answer when the caller must wait: no count or errno.
 const SK_WAIT: u64 = 0x8000000000000000;
+// Linux signal actions: per process, 64 signals of 4 words each (handler,
+// flags, restorer, mask).
+const SIGACT_LEN: u64 = 4096;
 const OF_SOCK: u64 = 5;               // x: the kernel socket; word 3: 2 * peer + nonblocking
 const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
@@ -325,7 +335,7 @@ const AT_EMPTY_PATH: u64 = 0x1000;
 const DENT_BUF: u64 = 2048;           // the most getdents64 fills in one call
 const ENOTDIR: u64 = 18446744073709551596;  // 2^64 - 20
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
-const NAPPLETS: u64 = 6;
+const NAPPLETS: u64 = 7;
 const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----
 const S_IFIFO: u64 = 0x1180;           // a FIFO, rw-------
 const S_IFSOCK: u64 = 0xC1B6;          // a socket, rw-rw-rw-
@@ -374,10 +384,11 @@ struct Kernel {
   cpus: u64,            // processors running, the bootstrap one included
   fs: Vfs,              // files and the open-file table
   nic: Nic,             // the network card and its UDP sockets, if any
+  sigact: Buf,          // Linux signal actions (src/lxsig.bastio)
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs) && nic_ok(k.nic)
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN
 }
 
 // ---------------------------------------------------------------- programs
@@ -534,6 +545,7 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
     f = f + 1;
   }
   lx_fd_reset(&mut k.lxfd, pid);
+  sig_reset(&mut k.sigact, pid, false);
   let mut args = balloc(ARGV0_MAX + 1);
   let alen = name_arg(&mut args, prog_name(prog));
   let src = Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
@@ -700,7 +712,11 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
   if par == 0 || par >= NPROC {
     pset(&mut k.procs, pid, F_STATE, FREE);       // nobody will collect it
   } else if state(k.procs, par) == WAITING && pget(k.procs, par, F_WAIT) == pid {
-    pset(&mut k.procs, par, F_REGS + R_RAX, code);
+    let mut shown = code;
+    if code >= SIG_DEATH {
+      shown = 128 + code % 128;             // as a Linux shell shows it
+    }
+    pset(&mut k.procs, par, F_REGS + R_RAX, shown);
     pset(&mut k.procs, par, F_STATE, READY);
     pset(&mut k.procs, pid, F_STATE, FREE);
   } else if state(k.procs, par) == LXWAITING {
