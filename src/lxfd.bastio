@@ -304,12 +304,9 @@ fn lx_open(k: &mut Kernel, pid: u64, path: u64, flags: u64) -> u64
   if n == NO_RESULT {
     return ENOENT;
   }
-  if n == 0 || is_bin(k.fs.xfer, n) {
-    // A directory, for getdents64: "/" or "/bin".
-    let mut dir = DIR_ROOT;
-    if n > 0 {
-      dir = DIR_BIN;
-    }
+  let dir = dir_at(&mut k, n);
+  if dir != NO_FILE {
+    // A directory, for getdents64.
     let hd = ofd_new(&mut k, OF_DIR, dir);
     if hd >= OFD_N {
       return ENFILE;
