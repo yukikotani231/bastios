@@ -223,6 +223,13 @@ steps = [
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
     ("read -t 1 x; echo rt=$?", b"rt=1", b"\n# "),
     ("read -t 9 x; echo rt=$? x=$x", b"rt=0 x=late", b"\n# ", b"late\r"),
+    # Directories: mkdir, a working directory (chdir, getcwd through
+    # /bin/pwd), relative paths with "..", listing a subdirectory, and
+    # rmdir refusing a directory that is not empty.
+    ("mkdir dd; cd dd; /bin/pwd; echo deep > f; cat ../dd/f", b"\r\n/dd\r\ndeep\r\n", b"\n# "),
+    ("mkdir sub; cd sub && /bin/pwd && cd ../.. && /bin/pwd; ls dd", [b"\r\n/dd/sub\r\n/\r\n", b"sub"], b"\n# "),
+    ("rmdir dd; echo r=$?", [b"not empty", b"r=1"], b"\n# "),
+    ("rm dd/f; rmdir dd/sub dd; test -d dd || echo gone$((1+1))", b"\r\ngone2\r\n", b"\n# "),
     ("exit 5", b"[exit 5]"),
     ("rm lxout", b""),
     ("sh", b"BastiOS 0.2 -- type"),
@@ -242,6 +249,27 @@ steps = [
     ("rm notes", b""),
     ("cat notes", b"no such file: notes"),
     ("rm notes", b"cannot remove notes"),
+    # Directories: a file can only go in a directory that exists, and only
+    # an empty directory can be removed.
+    ("mkdir docs", b""),
+    ("mkdir docs", b"cannot make docs"),
+    ("echo inside > docs/a", b""),
+    ("echo x > nodir/a", b"cannot open the file"),
+    ("mkdir nodir/sub", b"cannot make nodir/sub"),
+    ("mkdir docs/sub", b""),
+    ("ls docs", [b"\na\r\n", b"\nsub/\r\n"]),
+    ("ls /", [b"\ndocs/\r\n", b"\ndisk/\r\n", b"\nmotd\r\n"]),
+    ("ls", [b"         docs/\r\n", b"       7 docs/a\r\n"]),
+    ("cat docs/a", b"inside\r\n"),
+    ("cat docs", b"no such file: docs"),
+    ("rm docs", b"cannot remove docs"),
+    ("rmdir docs", b"cannot remove docs: not an empty directory"),
+    ("ls nothere", b"not a directory: nothere"),
+    ("ls docs/a", b"not a directory: docs/a"),
+    ("rm docs/a", b""),
+    ("rmdir docs/sub", b""),
+    ("rmdir docs", b""),
+    ("cat docs/a", b"no such file: docs/a"),
     # Several pages, seeking, appending, holes, descriptor limits, first on
     # the disk and then in memory; it exits with "big" still open, so
     # removing it shows that exit closed it.
@@ -253,6 +281,10 @@ steps = [
     ("echo kept across boots > disk/note", b""),
     ("ls", b"      18 disk/note"),
     ("cat disk/note", b"kept across boots\r\n"),
+    # A directory on the disk, also for the later boots.
+    ("mkdir disk/keep", b""),
+    ("echo deep > disk/keep/f", b""),
+    ("ls disk", [b"\nnote\r\n", b"\nkeep/\r\n"]),
     # Every page the files used is back once they are removed.
     ("mem", b"free pages"),
 ]
@@ -676,6 +708,12 @@ qemu = boot(1, with_disk=True)
 session("third", False, [
     ("cat disk/note", b"kept across boots\r\nappended\r\n"),
     ("rm disk/note", b""),
+    ("ls disk/keep", b"\nf\r\n"),
+    ("cat disk/keep/f", b"deep\r\n"),
+    ("rmdir disk/keep", b"not an empty directory"),
+    ("rm disk/keep/f", b""),
+    ("rmdir disk/keep", b""),
+    ("ls disk/keep", b"not a directory: disk/keep"),
     ("cat disk/note", b"no such file: disk/note"),
 ])
 # Power cuts. user/crashme.bastio checks what the last run left on the disk

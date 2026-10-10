@@ -6,7 +6,8 @@
 //   sectors 1..4     directory: DSLOTS entries of 64 bytes
 //   sector 8 + 2048 i ...  the data of slot i (2048 sectors, 1 MiB)
 //
-// A directory entry is: byte 0 used (0 or 1), byte 1 the name length,
+// A directory entry is: byte 0 its kind (0 unused, 1 a file, 2 a
+// directory, which holds no data), byte 1 the name length,
 // bytes 2..30 the name, bytes 32..40 the size (little-endian). A disk
 // without the magic is formatted when it is mounted.
 //
@@ -178,7 +179,38 @@ fn disk_unmount(d: DiskFs) -> Blk
 fn dent_used(d: &DiskFs, i: u64) -> bool
   requires disk_ok(d) && i < DSLOTS
 {
-  return bget(d.dir, i * DENT) == 1;
+  return bget(d.dir, i * DENT) == 1 || bget(d.dir, i * DENT) == 2;
+}
+
+/// Is slot i a directory?
+fn dent_dir(d: &DiskFs, i: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+{
+  return i < d.slots && bget(d.dir, i * DENT) == 2;
+}
+
+/// Is slot i inside the directory named by name[from..from + n] (its name
+/// is that, a "/", and at least one more byte)?
+fn disk_under(d: &DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS && from + n <= blen(name)
+{
+  let l = cast[u64](bget(d.dir, i * DENT + 1));
+  if i >= d.slots || !dent_used(d, i) || l > DNAME_MAX || l <= n + 1 {
+    return false;
+  }
+  if bget(d.dir, i * DENT + 2 + n) != 47 {
+    return false;
+  }
+  let mut k = 0;
+  while k < n
+    invariant k <= n && n < DNAME_MAX
+  {
+    if bget(d.dir, i * DENT + 2 + k) != bget(name, from + k) {
+      return false;
+    }
+    k = k + 1;
+  }
+  return true;
 }
 
 fn disk_size(d: &DiskFs, i: u64) -> u64
@@ -242,7 +274,7 @@ fn disk_find(d: &DiskFs, name: &Bytes, from: u64, n: u64) -> u64
 
 /// Creates an empty file named by name[from..from + n] (1 to DNAME_MAX
 /// bytes) in a free slot. Returns the slot or DSLOTS.
-fn disk_create(d: &mut DiskFs, name: &Bytes, from: u64, n: u64) -> u64
+fn disk_create(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool) -> u64
   requires disk_ok(d) && from + n <= blen(name)
   ensures disk_ok(d) && result <= DSLOTS
 {
@@ -261,7 +293,11 @@ fn disk_create(d: &mut DiskFs, name: &Bytes, from: u64, n: u64) -> u64
         bset(&mut d.dir, i * DENT + k, 0);
         k = k + 1;
       }
-      bset(&mut d.dir, i * DENT, 1);
+      if dir {
+        bset(&mut d.dir, i * DENT, 2);
+      } else {
+        bset(&mut d.dir, i * DENT, 1);
+      }
       bset(&mut d.dir, i * DENT + 1, cast[u8](n));
       k = 0;
       while k < n
