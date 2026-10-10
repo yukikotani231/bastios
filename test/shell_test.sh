@@ -1049,6 +1049,33 @@ qemu.kill(); qemu.wait()
 print("---- keyboard boot transcript ----")
 print(out.decode(errors="replace").replace("\r", "")[-400:])
 
+# No COM1, as on most PCs of the last decade (src/uart.bastio): its ports
+# read as 0xFF, which used to look like a byte always waiting, so the
+# console read 0xFF forever and the keyboard was never looked at. Now the
+# UART is found missing and `halt` typed on the keyboard powers off (S5,
+# without isa-debug-exit: QEMU exits 0).
+mon_path = os.path.join(disk_dir.name, "mon3.sock")
+q = subprocess.Popen(["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-display", "none", "-nic", "none",
+                      "-serial", "none", "-monitor", f"unix:{mon_path},server,nowait"],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+code = None
+for _ in range(100):
+    if os.path.exists(mon_path):
+        break
+    time.sleep(0.1)
+try:
+    mon = socket.socket(socket.AF_UNIX)
+    mon.connect(mon_path)
+    time.sleep(8)                     # the boot, which nothing shows
+    sendkeys(mon, ["h", "a", "l", "t", "ret"])
+    code = q.wait(timeout=30)
+    mon.close()
+except (OSError, subprocess.TimeoutExpired):
+    q.kill(); q.wait()
+good = code == 0
+print(("ok  " if good else "FAIL"), f"(no COM1) `halt` typed on the keyboard powers off (status {code})")
+fails += not good
+
 # A USB keyboard on an xHCI controller (src/xhci.bastio), on a machine with
 # no PS/2 controller at all (i8042=off), so the keys can only come over
 # USB. They are sent through QMP; at power off the controller is reset and
