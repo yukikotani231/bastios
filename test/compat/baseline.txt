@@ -283,6 +283,7 @@ t_mem: mmap of a closed descriptor is EBADF
 t_mem: mmap of a file opened write-only is EACCES
 t_mem: mprotect read-only faults on write
 t_mem: mremap grow
+t_mem: mremap growth reuses address space
 t_mem: munmap
 t_mem: munmap faults on touch
 t_mem: munmap gives address space back
