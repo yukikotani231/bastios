@@ -5,6 +5,8 @@
 
 import "linux.bastio";
 import "lxdev.bastio";
+import "core/endian.bastio";
+import "core/bytes.bastio";
 
 // ---------------------------------------------------------------- fork
 
@@ -325,19 +327,7 @@ fn xfer_bin(x: &Bytes) -> bool
 fn xfer_is(x: &Bytes, from: u64, to: u64, name: Str) -> bool
   requires from <= to && to <= blen(x)
 {
-  if to - from != slen(name) {
-    return false;
-  }
-  let mut i = 0;
-  while i < slen(name)
-    invariant i <= slen(name) && from + slen(name) == to
-  {
-    if bget(x, from + i) != sget(name, i) {
-      return false;
-    }
-    i = i + 1;
-  }
-  return true;
+  return bytes_span_eq_str(x, from, to, name);
 }
 
 /// Copies the strings of the NULL-ended array of at most `most` string
@@ -783,13 +773,5 @@ fn xfer_u64(x: &mut Bytes, at: u64, v: u64)
   requires at + 8 <= blen(x)
   ensures blen(x) == old(blen(x))
 {
-  let mut r = v;
-  let mut i = 0;
-  while i < 8
-    invariant i <= 8 && at + 8 <= blen(x)
-  {
-    bset(&mut x, at + i, cast[u8](r % 256));
-    r = r / 256;
-    i = i + 1;
-  }
+  store_le64(&mut x, at, v);
 }

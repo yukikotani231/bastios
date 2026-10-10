@@ -9,6 +9,8 @@
 # BASTIOC points at the Bastio stage0 compiler (github.com/yukikotani231/bastiolang).
 
 BASTIOC ?= ../bastiolang/stage0/target/release/bastioc0
+# Where `import "core/..."` finds the Bastio core library.
+BASTIOLIB ?= ../bastiolang
 CC      ?= cc
 QEMU    ?= qemu-system-x86_64
 
@@ -39,7 +41,7 @@ ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmi
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so
 
 build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
-	$(BASTIOC) --target user -o $@ $<
+	$(BASTIOC) --lib $(BASTIOLIB) --target user -o $@ $<
 
 build/user/%.o: build/user/%.c
 	$(CC) $(UCFLAGS) -c -o $@ $<
@@ -141,7 +143,7 @@ KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
 build/kernel.c: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
-	$(BASTIOC) --target kernel -o $@ src/main.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --target kernel -o $@ src/main.bastio
 
 build/kernel.o: build/kernel.c
 	$(CC) $(CFLAGS) -c -o $@ $<
