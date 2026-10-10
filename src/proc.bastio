@@ -11,8 +11,8 @@ import "net.bastio";
 import "tcp.bastio";
 
 const NPROC: u64 = 32;
-const STRIDE: u64 = 56;
-const PTAB_LEN: u64 = 1792;          // NPROC * STRIDE
+const STRIDE: u64 = 64;
+const PTAB_LEN: u64 = 2048;          // NPROC * STRIDE
 
 // Row fields.
 const F_STATE: u64 = 0;
@@ -68,6 +68,11 @@ const F_SGID: u64 = 49;
 const F_IPCW: u64 = 50;
 // A Linux process's umask plus 1; 0 means 0022 (src/lxperm.bastio).
 const F_UMASK: u64 = 51;
+// Supplementary groups (src/lxcred.bastio): how many, then up to
+// NGROUPS_KEPT ids, two 32-bit ids a word.
+const F_NGROUPS: u64 = 52;
+const F_GROUPS: u64 = 53;
+const NGROUPS_KEPT: u64 = 16;
 // File permission bits (src/lxperm.bastio).
 const MAY_X: u64 = 1;
 const MAY_W: u64 = 2;

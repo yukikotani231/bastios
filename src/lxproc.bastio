@@ -219,6 +219,8 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
     bfree(args);
     return E2BIG;
   }
+  let from_file = src.file;
+  let image = src.f;
   let sp = load_image(&mut k.mem, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, total);
   bfree(args);
   match sp {
@@ -238,6 +240,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
   sig_reset(&mut k.sigact, pid, true);
   pset(&mut k.procs, pid, F_ALTSIZE, 0);  // and the alternate signal stack
   ptimer_clear(&mut k, pid);              // execve deletes POSIX timers
+  exec_ids(&mut k, pid, from_file, image); // set-user-ID and set-group-ID files
   match take_fpu(&mut k.fpus, pid) {
     Fpu::None => {},
     Fpu::State(mut f) => {

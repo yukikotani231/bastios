@@ -944,7 +944,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // acknowledged like the timer's), unless it shares the timer's, the
   // keyboard's, the cascade or COM1's.
   if nic_live(nic) && nic_e1000(nic) {
-    let ed = pci_find(&mut pci, E1K_VENDOR, E1K_DEVICE);
+    let ed = e1k_find(&mut pci);
     if ed < PCI_NONE {
       let line = pci_irq_line(&mut pci, ed);
       if line >= 3 && line < 16 && line != 4 {

@@ -7,14 +7,17 @@
 // directory, and a sticky directory (S_ISVTX) lets only the owner of a
 // name, or of the directory, take it away. chmod and utime with times
 // are for the owner; chown is for root, or the owner moving a file to
-// its own group. Effective user 0 passes every check, except that it may
-// run only a file with some execute bit set.
+// one of its groups. A process is in a file's group through its group id
+// or a supplementary group. Effective user 0 passes every check, except
+// that it may run only a file with some execute bit set. A file with the
+// set-user-ID (or set-group-ID) bit runs with its owner's user (or group)
+// id (exec_ids).
 //
-// Different from Linux: there are no supplementary groups (only the
-// file-system group id counts), no capabilities beyond user 0, and the
-// search check of access(2) uses the file-system ids, as every other
-// path walk does (the final check uses the real ids, as Linux does). A
-// file on a disk keeps ids below 2^24 (EINVAL for larger ones).
+// Different from Linux: no capabilities beyond user 0, at most
+// NGROUPS_KEPT supplementary groups, and the search check of access(2)
+// uses the file-system ids, as every other path walk does (the final
+// check uses the real ids, as Linux does). A file on a disk keeps ids
+// below 2^24 (EINVAL for larger ones).
 
 import "linux.bastio";
 
@@ -38,6 +41,12 @@ fn fs_id(procs: &Buf, pid: u64, group: bool) -> u64
 /// (MAY_R, MAY_W and MAY_X added up) to a file of mode `mode` (with its
 /// type bits) owned by `own` (user id + group id * 2^32).
 fn mode_allows(mode: u64, own: u64, uid: u64, gid: u64, want: u64) -> bool {
+  return mode_allows_g(mode, own, uid, gid == own / 0x100000000 % 0x100000000, want);
+}
+
+/// mode_allows, with `ingroup` saying whether the process is in the
+/// file's group (its group id or a supplementary group).
+fn mode_allows_g(mode: u64, own: u64, uid: u64, ingroup: bool, want: u64) -> bool {
   if uid == 0 {
     // Root reads and writes anything; it runs only what someone may run,
     // and searches any directory.
@@ -46,10 +55,24 @@ fn mode_allows(mode: u64, own: u64, uid: u64, gid: u64, want: u64) -> bool {
   let mut bits = mode % 8;
   if uid == own % 0x100000000 {
     bits = mode / 64 % 8;
-  } else if gid == own / 0x100000000 % 0x100000000 {
+  } else if ingroup {
     bits = mode / 8 % 8;
   }
   return bits & want == want;
+}
+
+/// Whether process pid is in group g: its file-system group id (or its
+/// real one, unless `fs`), or one of its supplementary groups.
+fn has_group(procs: &Buf, pid: u64, g: u64, fs: bool) -> bool
+  requires len(procs) == PTAB_LEN && pid < NPROC
+{
+  if fs && fs_id(procs, pid, true) == g {
+    return true;
+  }
+  if !fs && pget(procs, pid, F_GID) % 0x100000000 == g {
+    return true;
+  }
+  return in_groups(procs, pid, g);
 }
 
 /// Whether process pid may do `want` to a file of mode `mode` owned by
@@ -57,7 +80,7 @@ fn mode_allows(mode: u64, own: u64, uid: u64, gid: u64, want: u64) -> bool {
 fn may_meta(procs: &Buf, pid: u64, mode: u64, own: u64, want: u64) -> bool
   requires len(procs) == PTAB_LEN && pid < NPROC
 {
-  return mode_allows(mode, own, fs_id(procs, pid, false), fs_id(procs, pid, true), want);
+  return mode_allows_g(mode, own, fs_id(procs, pid, false), has_group(procs, pid, own / 0x100000000 % 0x100000000, true), want);
 }
 
 /// Whether the path in the first n bytes of the transfer buffer names a
@@ -296,12 +319,12 @@ fn lx_access(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64, flags: 
     return EROFS;
   }
   let mut uid = pget(k.procs, pid, F_UID) % 0x100000000;
-  let mut gid = pget(k.procs, pid, F_GID) % 0x100000000;
+  let mut ingroup = has_group(k.procs, pid, m.own / 0x100000000 % 0x100000000, false);
   if flags & AT_EACCESS != 0 {
     uid = fs_id(k.procs, pid, false);
-    gid = fs_id(k.procs, pid, true);
+    ingroup = has_group(k.procs, pid, m.own / 0x100000000 % 0x100000000, true);
   }
-  if mode != 0 && !mode_allows(m.mode, m.own, uid, gid, mode) {
+  if mode != 0 && !mode_allows_g(m.mode, m.own, uid, ingroup, mode) {
     return EACCES;
   }
   return 0;
@@ -337,7 +360,7 @@ fn set_owner(k: &mut Kernel, pid: u64, f: u64, mode: u64, own: u64, u: u64, g: u
   if g % 0x100000000 != NO_ID {
     ng = g % 0x100000000;
   }
-  if uid != 0 && (uid != own % 0x100000000 || nu != own % 0x100000000 || (ng != own / 0x100000000 % 0x100000000 && ng != fs_id(k.procs, pid, true))) {
+  if uid != 0 && (uid != own % 0x100000000 || nu != own % 0x100000000 || (ng != own / 0x100000000 % 0x100000000 && !has_group(k.procs, pid, ng, true))) {
     return EPERM;
   }
   if f >= HFILES {
@@ -360,14 +383,14 @@ fn set_owner(k: &mut Kernel, pid: u64, f: u64, mode: u64, own: u64, u: u64, g: u
 }
 
 /// The mode chmod by process pid gives a file of mode `cur` owned by
-/// `own`: `mode`, without the set-group-ID bit on a file whose group is
-/// not the process's (unless it is root).
+/// `own`: `mode`, without the set-group-ID bit when the file's group is
+/// not one of the process's (unless it is root), directories included.
 fn chmod_bits(procs: &Buf, pid: u64, cur: u64, own: u64, mode: u64) -> u64
   requires len(procs) == PTAB_LEN && pid < NPROC
   ensures result < 4096
 {
   let mut r = mode % 4096;
-  if fs_id(procs, pid, false) != 0 && cur / 4096 % 16 != 4 && own / 0x100000000 % 0x100000000 != fs_id(procs, pid, true) {
+  if fs_id(procs, pid, false) != 0 && !has_group(procs, pid, own / 0x100000000 % 0x100000000, true) {
     r = r & !S_ISGID;
   }
   return r;
@@ -443,4 +466,30 @@ fn user_empty(k: &mut Kernel, pid: u64, va: u64) -> bool
   ensures kok(k)
 {
   return copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 1) == 1 && bget(k.fs.xfer, 0) == 0;
+}
+
+/// The ids of process pid after it execs a program: from a file with the
+/// set-user-ID bit (f, a file handle, when `file`), the effective user id
+/// becomes the file's owner; with the set-group-ID bit and group execute,
+/// the effective group id its group. As on Linux, the saved ids then
+/// follow the effective ones, and so do the file-system ids.
+fn exec_ids(k: &mut Kernel, pid: u64, file: bool, f: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut euid = id_get(k.procs, pid, F_UID, true);
+  let mut egid = id_get(k.procs, pid, F_GID, true);
+  if file && f < HFILES {
+    let m = vfs_meta(&mut k.fs, f);
+    if m.ok && m.mode & S_ISUID != 0 {
+      euid = m.own % ID_SPAN;
+    }
+    if m.ok && m.mode & S_ISGID != 0 && m.mode & 8 != 0 {
+      egid = m.own / ID_SPAN % ID_SPAN;
+    }
+  }
+  id_put(&mut k.procs, pid, F_UID, id_get(k.procs, pid, F_UID, false), euid);
+  id_put(&mut k.procs, pid, F_SUID, euid, euid);
+  id_put(&mut k.procs, pid, F_GID, id_get(k.procs, pid, F_GID, false), egid);
+  id_put(&mut k.procs, pid, F_SGID, egid, egid);
 }
