@@ -159,6 +159,13 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   pset(&mut k.procs, c, F_CTID, 0);
   pset(&mut k.procs, c, F_FUTEX, 0);
   pset(&mut k.procs, c, F_QUIET, 0);
+  let mut w = F_VTIMER;
+  while w < F_PTIMER + 2
+    invariant F_VTIMER <= w && w <= F_PTIMER + 2 && len(k.procs) == PTAB_LEN && kok(k)
+  {
+    pset(&mut k.procs, c, w, 0);            // a child does not inherit interval timers
+    w = w + 1;
+  }
   lx_fd_fork(&mut k, pid, c);
   map_fork(&mut k, pid, c);
   sig_fork(&mut k.sigact, pid, c);
