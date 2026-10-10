@@ -11,6 +11,10 @@ const SYS_UNLINK: u64 = 15;
 const SYS_DIRENT: u64 = 16;
 const SYS_SEEK: u64 = 17;
 const SYS_STAT: u64 = 18;
+const SYS_MKDIR: u64 = 19;
+const SYS_RMDIR: u64 = 20;
+const SYS_READDIR: u64 = 21;
+const DIR_BIT: u64 = 4294967296;      // f_stat and f_readdir: a directory
 
 const O_READ: u64 = 1;
 const O_WRITE: u64 = 2;
@@ -73,4 +77,30 @@ fn f_dirent(i: u64, buf: &mut Bytes) -> u64
   ensures blen(buf) == old(blen(buf))
 {
   return sys_recv(SYS_DIRENT, i, &mut buf);
+}
+
+/// Makes a directory. Its parent must exist.
+fn f_mkdir(name: &Bytes, n: u64) -> u64
+  requires n <= blen(name)
+{
+  return sys_send(SYS_MKDIR, 0, name, n);
+}
+
+/// Removes a directory. It must be empty.
+fn f_rmdir(name: &Bytes, n: u64) -> u64
+  requires n <= blen(name)
+{
+  return sys_send(SYS_RMDIR, 0, name, n);
+}
+
+/// Entry i of the directory named by the first n bytes of buf (0 bytes:
+/// the top; "disk": the disk). The entry's name replaces the start of buf.
+/// Returns its length, plus DIR_BIT for a directory; 0 for an entry that
+/// is not in this directory; NOT_OK past the last entry, or if the name is
+/// not a directory.
+fn f_readdir(i: u64, n: u64, buf: &mut Bytes) -> u64
+  requires n <= 255 && i < 65536
+  ensures blen(buf) == old(blen(buf))
+{
+  return sys_recv(SYS_READDIR, 256 * i + n, &mut buf);
 }

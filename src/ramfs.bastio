@@ -4,9 +4,11 @@
 // the proof shows each page is taken from the allocator once and given back
 // once, when the file is truncated or removed (or at power off).
 //
-// The directory is flat: a fixed table of NFILES nodes, each free or one
-// file. A page a file has never written is a hole and reads as zeros, so a
-// write past the end leaves a gap that costs nothing.
+// The table is a fixed set of NFILES nodes, each free or one file. A node
+// can also be a directory: it holds no data, and the files in it are the
+// nodes whose names start with its name and a "/" (`fs.bastio` keeps the
+// tree well formed). A page a file has never written is a hole and reads
+// as zeros, so a write past the end leaves a gap that costs nothing.
 //
 // Nothing here knows about processes or system calls; `fs.bastio` sits on
 // top and moves bytes between files and user memory through a kernel buffer.
@@ -21,7 +23,8 @@ const FILE_MAX: u64 = 1048576;        // FILE_PAGES * 4096
 enum Slot { Hole, Page(Frame) }
 
 struct RamFile {
-  name: Bytes,
+  name: Bytes,          // the whole path, such as "notes" or "src/main"
+  dir: bool,            // a directory: size 0 and no pages, always
   size: u64,
   pages: Vec[Slot],     // page i holds bytes 4096 * i .. 4096 * (i + 1)
 }
@@ -322,10 +325,10 @@ fn ram_find(v: &mut Vec[Node], name: &Bytes, n: u64) -> u64
   return NFILES;
 }
 
-/// Creates an empty file named by the first n bytes of `name` (1 to
-/// FNAME_MAX of them) in a free node. Returns the node, or NFILES if the
-/// name is too long or the table is full.
-fn ram_create(v: &mut Vec[Node], name: &Bytes, n: u64) -> u64
+/// Creates an empty file (or directory) named by the first n bytes of
+/// `name` (1 to FNAME_MAX of them) in a free node. Returns the node, or
+/// NFILES if the name is too long or the table is full.
+fn ram_create(v: &mut Vec[Node], name: &Bytes, n: u64, dir: bool) -> u64
   requires nodes_ok(v) && n <= blen(name)
   ensures nodes_ok(v) && result <= NFILES
 {
@@ -346,7 +349,7 @@ fn ram_create(v: &mut Vec[Node], name: &Bytes, n: u64) -> u64
           bset(&mut nm, j, bget(name, j));
           j = j + 1;
         }
-        put_node(&mut v, i, Node::File(RamFile { name: nm, size: 0, pages: vec_new[Slot]() }));
+        put_node(&mut v, i, Node::File(RamFile { name: nm, dir: dir, size: 0, pages: vec_new[Slot]() }));
         return i;
       },
       Node::File(f) => { put_node(&mut v, i, Node::File(f)); },
@@ -374,11 +377,56 @@ fn ram_size(v: &mut Vec[Node], i: u64) -> u64
   return s;
 }
 
+/// Is node i a directory?
+fn ram_is_dir(v: &mut Vec[Node], i: u64) -> bool
+  requires nodes_ok(v) && i < NFILES
+  ensures nodes_ok(v)
+{
+  let mut d = false;
+  match take_node(&mut v, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      d = f.dir;
+      put_node(&mut v, i, Node::File(f));
+    },
+  }
+  return d;
+}
+
+/// Is node i inside the directory named by the first n bytes of `name`
+/// (its name is that, a "/", and at least one more byte)?
+fn ram_under(v: &mut Vec[Node], i: u64, name: &Bytes, n: u64) -> bool
+  requires nodes_ok(v) && i < NFILES && n <= blen(name)
+  ensures nodes_ok(v)
+{
+  let mut hit = false;
+  match take_node(&mut v, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      if blen(f.name) > n + 1 && bget(f.name, n) == 47 {
+        hit = true;
+        let mut j = 0;
+        while j < n
+          invariant j <= n && n < blen(f.name)
+        {
+          if bget(f.name, j) != bget(name, j) {
+            hit = false;
+          }
+          j = j + 1;
+        }
+      }
+      put_node(&mut v, i, Node::File(f));
+    },
+  }
+  return hit;
+}
+
 /// Copies the name of the file in node i into the start of buf. Returns its
 /// length, or NO_FILE if the node is free or buf is too short.
 fn ram_name(v: &mut Vec[Node], i: u64, buf: &mut Bytes) -> u64
   requires nodes_ok(v) && i < NFILES
   ensures nodes_ok(v) && blen(buf) == old(blen(buf))
+  ensures result <= blen(buf) || result == NO_FILE
 {
   let mut r = NO_FILE;
   match take_node(&mut v, i) {

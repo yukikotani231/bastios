@@ -252,7 +252,18 @@ fn arg_start(line: &Buf, n: u64, w: u64) -> u64
   return a;
 }
 
-fn cmd_ls(con: &Serial) {
+/// `ls`: every file and directory, with its size and whole name
+/// (directories end in "/"). `ls DIR`: just what is in DIR ("/" is the
+/// top), by last name.
+fn cmd_ls(con: &Serial, line: &Buf, n: u64)
+  requires n < len(line) && n >= 2
+  requires forall j: u64 :: 1 <= j && j < len(line) ==> get(line, j) <= 255
+{
+  let a = arg_start(line, n, 2);
+  if a != 0 {
+    ls_dir(con, line, a, n);
+    return;
+  }
   let mut name = balloc(40);
   let mut i = 0;
   let mut more = true;
@@ -263,12 +274,96 @@ fn cmd_ls(con: &Serial) {
     if r == NOT_OK {
       more = false;
     } else if r > 0 && r <= 40 {
-      put_num_pad(con, f_stat(name, r), 8);
-      puts(con, " ");
-      put_bytes(con, name, r);
-      puts(con, "\r\n");
+      let size = f_stat(name, r);
+      if size == DIR_BIT {
+        puts(con, "         ");
+        put_bytes(con, name, r);
+        puts(con, "/\r\n");
+      } else {
+        put_num_pad(con, size, 8);
+        puts(con, " ");
+        put_bytes(con, name, r);
+        puts(con, "\r\n");
+      }
     }
     i = i + 1;
+  }
+  bfree(name);
+}
+
+/// `ls DIR`: the directory named by line[a..n + 1].
+fn ls_dir(con: &Serial, line: &Buf, a: u64, n: u64)
+  requires n < len(line) && 1 <= a && a <= n
+  requires forall j: u64 :: 1 <= j && j < len(line) ==> get(line, j) <= 255
+{
+  let dir = line_bytes(line, a, n + 1);
+  let mut dl = blen(dir);
+  if dl == 1 && bget(dir, 0) == 47 {
+    dl = 0;                             // "/": the top
+  }
+  if dl > 40 {
+    puts(con, "not a directory\r\n");
+    bfree(dir);
+    return;
+  }
+  let mut buf = balloc(40);
+  let mut i = 0;
+  let mut more = true;
+  while more && i < 1000
+    invariant blen(buf) == 40 && dl <= 40 && dl <= blen(dir)
+  {
+    let mut j = 0;
+    while j < dl
+      invariant j <= dl && blen(buf) == 40 && dl <= 40 && dl <= blen(dir)
+    {
+      bset(&mut buf, j, bget(dir, j));
+      j = j + 1;
+    }
+    let r = f_readdir(i, dl, &mut buf);
+    if r == NOT_OK {
+      if i == 0 {
+        puts(con, "not a directory: ");
+        put_bytes(con, dir, blen(dir));
+        puts(con, "\r\n");
+      }
+      more = false;
+    } else if r > 0 {
+      let m = r % DIR_BIT;
+      if m <= 40 {
+        put_bytes(con, buf, m);
+        if r >= DIR_BIT {
+          puts(con, "/");
+        }
+        puts(con, "\r\n");
+      }
+    }
+    i = i + 1;
+  }
+  bfree(buf);
+  bfree(dir);
+}
+
+/// `mkdir DIR` (make = true) or `rmdir DIR`.
+fn cmd_dir(con: &Serial, line: &Buf, n: u64, make: bool)
+  requires n < len(line) && n >= 5
+  requires forall j: u64 :: 1 <= j && j < len(line) ==> get(line, j) <= 255
+{
+  let a = arg_start(line, n, 5);
+  if a == 0 {
+    puts(con, "usage: mkdir DIR, rmdir DIR\r\n");
+    return;
+  }
+  let name = line_bytes(line, a, n + 1);
+  if make {
+    if f_mkdir(name, blen(name)) == NOT_OK {
+      puts(con, "cannot make ");
+      put_bytes(con, name, blen(name));
+      puts(con, ": it exists, or its parent does not\r\n");
+    }
+  } else if f_rmdir(name, blen(name)) == NOT_OK {
+    puts(con, "cannot remove ");
+    put_bytes(con, name, blen(name));
+    puts(con, ": not an empty directory\r\n");
   }
   bfree(name);
 }
@@ -397,7 +492,8 @@ fn cmd_help(con: &Serial) {
   puts(con, "  help             this list\r\n");
   puts(con, "  echo TEXT        print TEXT\r\n");
   puts(con, "  echo TEXT > FILE write TEXT to FILE (`>>`: append)\r\n");
-  puts(con, "  ls               list files with their sizes\r\n");
+  puts(con, "  ls [DIR]         list files with their sizes (or what is in DIR)\r\n");
+  puts(con, "  mkdir DIR        make a directory (rmdir: remove an empty one)\r\n");
   puts(con, "  cat FILE         print FILE\r\n");
   puts(con, "  rm FILE          remove FILE\r\n");
   puts(con, "  add A B          add two numbers (overflow is checked)\r\n");
@@ -1042,7 +1138,11 @@ fn main(con: &mut Serial) -> u64 {
         puts(con, "\r\n");
       }
     } else if is_cmd(line, n, "ls") {
-      cmd_ls(con);
+      cmd_ls(con, line, n);
+    } else if is_cmd(line, n, "mkdir") {
+      cmd_dir(con, line, n, true);
+    } else if is_cmd(line, n, "rmdir") {
+      cmd_dir(con, line, n, false);
     } else if is_cmd(line, n, "cat") {
       cmd_cat(con, line, n);
     } else if is_cmd(line, n, "rm") {
