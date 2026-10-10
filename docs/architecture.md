@@ -176,7 +176,7 @@ Proved, for every input, by the Bastio compiler before any C is emitted:
 - table levels line up, frames go only into level-1 tables, slot 0 of a top-level table (the kernel's map) is never touched, and the table in CR3 is never freed;
 - every buffer, string and vector index is in bounds, no arithmetic overflows, and the kernel's own `Buf`s, `Vec`s and tables are never leaked or used after being freed.
 
-Trusted, and listed in the README's "What is trusted" table: `boot/`, `user/start.S` and the linker scripts, the bastiolang preludes, the compilers and Z3, and QEMU. What the proof does not cover: page contents (the kernel copies bytes, but the proof does not know what they mean), the hardware's behaviour, and termination (a kernel loop that never ends is not detected).
+Trusted, and listed in the README's "What is trusted" table and in [trusted-base.md](trusted-base.md): `boot/`, `user/start.S` and the linker scripts, the bastiolang preludes, the compilers and Z3, and QEMU. What the proof does not cover: page contents (the kernel copies bytes, but the proof does not know what they mean), the hardware's behaviour, and termination (a kernel loop that never ends is not detected).
 
 ## Limits
 
