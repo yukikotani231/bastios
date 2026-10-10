@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
+#include <sys/statfs.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -159,6 +160,9 @@ int main(void)
     if (pm < 0 || read(pm, mb, sizeof mb - 1) <= 0 || !strstr(mb, "tmpfs /dx/mt tmpfs rw"))
         return fail("tmpfs in /proc/self/mounts");
     close(pm);
+    struct statfs sf;
+    if (statfs("mt", &sf) != 0 || sf.f_type != 0x01021994 || statfs(".", &sf) != 0 || sf.f_type == 0x01021994)
+        return fail("statfs of a tmpfs");
     int mf = open("mt/in", O_CREAT | O_WRONLY, 0644);
     if (mf < 0 || write(mf, "x", 1) != 1)
         return fail("a file in tmpfs");

@@ -1440,6 +1440,15 @@ fn vfs_ro(v: &mut Vfs, n: u64) -> bool
   requires vfs_ok(v) && n <= XFER
   ensures vfs_ok(v)
 {
+  return vfs_in_mount(&mut v, n, true);
+}
+
+/// Does the path in the first n bytes of the transfer buffer lie in a
+/// mount (a read-only one, if ro_only), or name its directory?
+fn vfs_in_mount(v: &mut Vfs, n: u64, ro_only: bool) -> bool
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+{
   if on_disk(v, n) {
     return false;
   }
@@ -1448,7 +1457,7 @@ fn vfs_ro(v: &mut Vfs, n: u64) -> bool
     invariant s <= MNT_N && vfs_ok(v) && n <= XFER
   {
     let i = vfs_mount_node(v, s);
-    if i < NFILES && vfs_mount_ro(v, s) {
+    if i < NFILES && (vfs_mount_ro(v, s) || !ro_only) {
       let l = ram_name(&mut v.ram, i, &mut v.name);
       if l != NO_FILE && l <= n && (l == n || bget(v.xfer, l) == 47) && same_start(v.xfer, v.name, l) {
         return true;
