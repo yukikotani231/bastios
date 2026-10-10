@@ -188,6 +188,36 @@ t_misc: strtod
 t_misc: sync
 t_misc: tcgetattr
 t_misc: tcsetattr
+t_more: FIONREAD on a pipe
+t_more: a full nonblocking pipe is EAGAIN
+t_more: copy_file_range
+t_more: dup3 O_CLOEXEC
+t_more: fallocate grows a file
+t_more: fchmodat
+t_more: fcntl F_SETLK and F_GETLK
+t_more: flock exclusive
+t_more: fstatat AT_EMPTY_PATH
+t_more: fstatat with AT_SYMLINK_NOFOLLOW
+t_more: fstatfs
+t_more: futimens
+t_more: getrusage children
+t_more: memfd_create
+t_more: mkdirat and unlinkat AT_REMOVEDIR
+t_more: open O_CLOEXEC
+t_more: posix_fadvise
+t_more: posix_spawn
+t_more: preadv
+t_more: prlimit
+t_more: pwritev
+t_more: readdir counts the files
+t_more: renameat2 RENAME_NOREPLACE
+t_more: sched_getcpu
+t_more: sendfile file to file
+t_more: sendfile to a pipe
+t_more: source file
+t_more: statx
+t_more: utimensat
+t_more: vfork + _exit
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
