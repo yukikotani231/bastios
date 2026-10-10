@@ -76,6 +76,15 @@ fn vfs_new(disk: DiskFs) -> Vfs
   return Vfs { ram: ram_new(), ftab: alloc(FTAB_LEN), xfer: balloc(XFER), disk: disk, name: balloc(NAMEBUF), mnt: alloc(MNT_LEN), now: 0 };
 }
 
+/// The next byte typed on a USB keyboard that sits on the disk's xHCI
+/// controller (see blk_find), or 256.
+fn vfs_kbd_poll(v: &mut Vfs) -> u64
+  requires vfs_ok(v)
+  ensures vfs_ok(v) && result <= 256
+{
+  return blk_kbd_poll(&mut v.disk.dev);
+}
+
 /// Frees everything (at power off): every in-memory file's pages go back,
 /// and the disk driver is handed back so its ports can be released.
 fn vfs_free(v: Vfs, mem: &mut Mem) -> Blk

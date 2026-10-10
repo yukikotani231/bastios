@@ -1,37 +1,54 @@
-// A USB keyboard on an xHCI (USB 3) host controller, for PCs without a
-// PS/2 port. Polled: the controller runs, but never interrupts.
+// USB on an xHCI (USB 3) host controller: a keyboard, for PCs without a
+// PS/2 port, and a USB stick or disk to keep the file system on. Polled:
+// the controller runs, but never interrupts.
 //
-// The driver brings up the controller, finds the first root-hub port with
-// a keyboard that speaks the HID boot protocol (every USB keyboard does,
-// for firmware setup screens), gives it a device slot and configures its
-// interrupt IN endpoint. From then on, one 8-byte transfer is kept queued
-// on that endpoint; each completed one is a boot report (modifier bits,
-// then up to six keys held down), and keys that were not down in the last
-// report become the bytes a serial terminal would send, as for PS/2.
-// There is no hub support: the keyboard must be on a root port.
+// The driver brings up the controller and looks at the devices on its
+// root ports. The first that offers a HID boot keyboard interface (every
+// USB keyboard does, for firmware setup screens) becomes the keyboard: it
+// gets a device slot, and its interrupt IN endpoint is configured. From
+// then on, one 8-byte transfer is kept queued on that endpoint; each
+// completed one is a boot report (modifier bits, then up to six keys held
+// down), and keys that were not down in the last report become the bytes a
+// serial terminal would send, as for PS/2.
+//
+// The first that offers a mass-storage interface (SCSI commands over the
+// bulk-only transport, as every USB stick does) gets the other slot and
+// its two bulk endpoints. Each SCSI command is three transfers: a 31-byte
+// command block wrapper out, the data, and a 13-byte status wrapper in.
+// The driver uses the disk only if its GPT has a partition of the BastiOS
+// type (BASTIOS_PART), and then only that partition: a stick holding the
+// boot image (`make usb`) keeps GRUB and the kernel in the partitions
+// before it. A stick without one is left alone.
+// There is no hub support: devices must be on a root port.
 //
 // The registers are a block of the device window claimed as an `Mmio`.
-// The controller reads and writes only the eleven pages lent to it at
+// The controller reads and writes only the thirteen pages lent to it at
 // start (`Dma`), which come back after a controller reset at power off:
 //
 //   dcbaa   0: the device context base address array; 2048: the scratchpad array
 //   cmd     the command ring
 //   evt     0: the event ring segment table (one segment); 64: the event ring
-//   ctx     the keyboard's device context (written by the controller)
+//   ctx     0: slot 1's device context; 2048: slot 2's (written by the controller)
 //   inp     0: the input context (up to 33 contexts of 64 bytes);
 //           3072: data of control transfers
-//   ep0     the default control endpoint's transfer ring
+//   ep0     0: slot 1's default control endpoint ring; 2048: slot 2's
 //   intr    0: the keyboard's interrupt transfer ring; 2048: the report
 //   sp0-3   scratchpad pages: some controllers ask for them (at most 4 here)
+//   bulk    0: the disk's bulk OUT ring; 1024: the command block wrapper;
+//           2048: its bulk IN ring; 3072: the status wrapper
+//   data    the data of the disk's commands: up to a 4 KiB block
 //
 // Rings are RING_N TRBs of 16 bytes, the last a link back to the start.
 // Producer and consumer positions are kept as index * 2 + cycle bit.
 
 import "pci.bastio";
 import "pages.bastio";
+import "bio.bastio";
 
 const XHCI_CLASS: u64 = 0x0C0330;      // serial bus controller, USB, xHCI
-const XHCI_PAGES: u64 = 11;
+const XHCI_PAGES: u64 = 13;
+const USB_AT: u64 = 32;                // the controller's pages: 32 .. 44
+const XHCI_SLOTS: u64 = 2;             // the keyboard's and the disk's
 const XHCI_MAX_LEN: u64 = 0x100000;    // registers claimed: the BAR, up to 1 MiB
 const XHCI_SPINS: u64 = 20000000;
 const XHCI_SP_MAX: u64 = 4;
@@ -39,6 +56,20 @@ const RING_N: u64 = 64;
 const EVT_N: u64 = 252;                // event ring TRBs: offsets 64 .. 4096
 const RAW_AT: u64 = 3072;              // the control-transfer data area
 const RAW_LEN: u64 = 1024;
+const CBW_AT: u64 = 1024;              // in the bulk page
+const IN_RING: u64 = 2048;
+const CSW_AT: u64 = 3072;
+const CBW_SIG: u64 = 0x43425355;       // "USBC"
+const CSW_SIG: u64 = 0x53425355;       // "USBS"
+const GPT_SIG: u64 = 0x5452415020494645;   // "EFI PART"
+// The BastiOS partition type, e0c9ea2a-d5f1-45b3-a799-0a7bec83d701, as
+// the two little-endian words a GPT entry stores it in.
+const BASTIOS_PART_LO: u64 = 0x45b3d5f1e0c9ea2a;
+const BASTIOS_PART_HI: u64 = 0x01d783ec7b0a99a7;
+const MSD_NONE: u64 = 0;               // no mass-storage device
+const MSD_UNUSED: u64 = 1;             // one, but no BastiOS partition on it
+const MSD_ON: u64 = 2;                 // one, and its partition is the disk
+const USB_SECTOR: u64 = 512;
 
 // Operational registers (from the end of the capability registers).
 const USBCMD: u64 = 0x00;
@@ -76,15 +107,28 @@ const TRB_DISABLE_SLOT: u64 = 10;
 const TRB_ADDRESS: u64 = 11;
 const TRB_CONFIGURE: u64 = 12;
 const TRB_EVALUATE: u64 = 13;
+const TRB_RESET_EP: u64 = 14;
+const TRB_STOP_EP: u64 = 15;
+const TRB_SET_DEQ: u64 = 16;
 const TRB_TRANSFER_EV: u64 = 32;
 const TRB_COMMAND_EV: u64 = 33;
 const CC_SUCCESS: u64 = 1;
 const CC_SHORT: u64 = 13;
+const EV_TAKEN: u64 = 64;              // evt_step: an event the driver took itself
+
+// SCSI commands.
+const SCSI_TEST_READY: u64 = 0x00;
+const SCSI_SENSE: u64 = 0x03;
+const SCSI_INQUIRY: u64 = 0x12;
+const SCSI_CAPACITY: u64 = 0x25;
+const SCSI_READ: u64 = 0x28;
+const SCSI_WRITE: u64 = 0x2A;
+const SCSI_SYNC: u64 = 0x35;
 
 struct Xhci {
   regs: Mmio,
   dcbaa: Dma, cmd: Dma, evt: Dma, ctx: Dma, inp: Dma, ep0: Dma, intr: Dma,
-  sp0: Dma, sp1: Dma, sp2: Dma, sp3: Dma,
+  sp0: Dma, sp1: Dma, sp2: Dma, sp3: Dma, bulk: Dma, data: Dma,
   op: u64,            // where the operational registers start
   rt: u64,            // the runtime registers
   db: u64,            // the doorbells
@@ -92,20 +136,38 @@ struct Xhci {
   ports: u64,
   cmd_at: u64,        // ring positions: index * 2 + cycle
   evt_at: u64,
-  ep0_at: u64,
+  e0a: u64,           // slot 1's control ring
+  e0b: u64,           // slot 2's
   int_at: u64,
   ev_p: u64,          // the last event taken: parameter, status, control
   ev_s: u64,
   ev_c: u64,
+  // The keyboard.
   slot: u64,
-  dci: u64,           // the keyboard endpoint's context index
+  dci: u64,           // its endpoint's context index
   port: u64,
   keys: Bytes,        // keys down in the last report
   q: Bytes,           // bytes typed, not yet taken
   qn: u64,
   shift: bool,
   ctrl: bool,
-  live: bool,
+  live: bool,         // is there a keyboard?
+  // The disk.
+  msd: u64,           // MSD_NONE, MSD_UNUSED or MSD_ON
+  ds: u64,            // its slot
+  dout: u64,          // its bulk endpoints' context indexes
+  din: u64,
+  iface: u64,         // its interface, for a reset
+  out_at: u64,
+  in_at: u64,
+  tag: u64,           // the last command's tag
+  plo: u64,           // the partition: its first sector, and its size
+  sectors: u64,
+  busy: bool,         // a command is running
+  stage: u64,         // 1 while its data comes in, before the status wrapper is asked for
+  done: bool,         // and the controller has said it ended
+  dcc: u64,           // how: the completion code
+  bop: u64,           // what it is: BIO_READ, BIO_WRITE or BIO_FLUSH
 }
 
 spec fn xhci_ok(x: &Xhci) -> bool {
@@ -114,8 +176,11 @@ spec fn xhci_ok(x: &Xhci) -> bool {
   && x.rt % 32 == 0 && x.rt + 64 <= mmio_len(x.regs)
   && x.db % 4 == 0 && x.db + 1024 <= mmio_len(x.regs)
   && (x.csz == 32 || x.csz == 64)
-  && x.cmd_at < RING_N * 2 && x.ep0_at < RING_N * 2 && x.int_at < RING_N * 2 && x.evt_at < EVT_N * 2
+  && x.cmd_at < RING_N * 2 && x.e0a < RING_N * 2 && x.e0b < RING_N * 2 && x.int_at < RING_N * 2
+  && x.evt_at < EVT_N * 2 && x.out_at < RING_N * 2 && x.in_at < RING_N * 2
   && x.slot < 256 && x.dci < 32 && x.port < 256
+  && x.ds < 256 && x.dout < 32 && x.din < 32 && x.iface < 256 && x.tag < 4294967296
+  && x.plo <= 4294967296 && x.sectors <= 4294967296
   && blen(x.keys) == 6 && blen(x.q) == 16 && x.qn <= 16
 }
 
@@ -154,25 +219,25 @@ fn xw64(x: &mut Xhci, off: u64, v: u64)
 }
 
 /// Writes a TRB at ring position `at` (index * 2 + cycle) of the ring at
-/// the start of page `d`, and returns the next position, through the link
-/// TRB at the end when it gets there. The control word, with the cycle bit
-/// that hands the TRB to the controller, is written last.
-fn trb_put(d: &mut Dma, at: u64, p: u64, s: u64, c: u64) -> u64
-  requires at < RING_N * 2
+/// byte `base` of page `d`, and returns the next position, through the
+/// link TRB at the end when it gets there. The control word, with the
+/// cycle bit that hands the TRB to the controller, is written last.
+fn trb_put(d: &mut Dma, base: u64, at: u64, p: u64, s: u64, c: u64) -> u64
+  requires at < RING_N * 2 && base % 16 == 0 && base + RING_N * 16 <= 4096
   ensures result < RING_N * 2
 {
   let i = at / 2;
   let cyc = at % 2;
-  dma_write64(&mut d, i * 16, p);
-  dma_write32(&mut d, i * 16 + 8, cast[u32](s & 0xFFFFFFFF));
-  dma_write32(&mut d, i * 16 + 12, cast[u32]((c & 0xFFFFFFFE) | cyc));
+  dma_write64(&mut d, base + i * 16, p);
+  dma_write32(&mut d, base + i * 16 + 8, cast[u32](s & 0xFFFFFFFF));
+  dma_write32(&mut d, base + i * 16 + 12, cast[u32]((c & 0xFFFFFFFE) | cyc));
   if i + 2 < RING_N {
     return at + 2;
   }
   // The link: back to the start, toggling the cycle bit.
-  let l = (RING_N - 1) * 16;
-  let a = dma_addr(d);
-  dma_write64(&mut d, l, a);
+  let l = base + (RING_N - 1) * 16;
+  let a = dma_phys(d);
+  dma_write64(&mut d, l, a + base);
   dma_write32(&mut d, l + 8, 0);
   dma_write32(&mut d, l + 12, cast[u32](TRB_LINK * 1024 + 2 + cyc));
   return 1 - cyc;
@@ -216,9 +281,52 @@ fn evt_next(x: &mut Xhci) -> bool
   return true;
 }
 
-/// Waits for the next event of type `t` (other events are dropped) and
-/// returns its completion code, or 0 if none came.
-fn evt_wait(x: &mut Xhci, t: u64) -> u64
+/// Takes the next event, if there is one, and returns its type (0: none).
+/// The keyboard's reports and the end of a disk command are dealt with
+/// here, whoever is waiting, and come back as EV_TAKEN: one event ring
+/// serves every device.
+fn evt_step(x: &mut Xhci) -> u64
+  requires xhci_ok(x)
+  ensures xhci_ok(x) && result <= EV_TAKEN
+{
+  if !evt_next(&mut x) {
+    return 0;
+  }
+  let t = (x.ev_c >> 10) & 63;
+  if t == TRB_TRANSFER_EV {
+    let s = x.ev_c >> 24;
+    let e = (x.ev_c >> 16) & 31;
+    let cc = x.ev_s >> 24;
+    if x.live && s == x.slot && e == x.dci {
+      if cc == CC_SUCCESS || cc == CC_SHORT {
+        kbd_report(&mut x);
+      }
+      kbd_queue(&mut x);
+      return EV_TAKEN;
+    }
+    // Only data coming in and the status wrapper ask for an event; any
+    // other comes from an error, which ends the command too.
+    if x.busy && s == x.ds && (e == x.din || e == x.dout) {
+      if cc != CC_SUCCESS && cc != CC_SHORT {
+        x.done = true;
+        x.dcc = cc;
+      } else if e == x.din && x.stage == 1 {
+        x.stage = 0;
+        csw_queue(&mut x);
+      } else if e == x.din {
+        x.done = true;
+        x.dcc = cc;
+      }
+      return EV_TAKEN;
+    }
+  }
+  return t;
+}
+
+/// Waits for the next event of type `t` (for a transfer, on slot `slot`)
+/// that evt_step does not take, dropping others, and returns its
+/// completion code, or 0 if none came.
+fn evt_wait(x: &mut Xhci, t: u64, slot: u64) -> u64
   requires xhci_ok(x)
   ensures xhci_ok(x)
 {
@@ -226,7 +334,8 @@ fn evt_wait(x: &mut Xhci, t: u64) -> u64
   while n < XHCI_SPINS
     invariant xhci_ok(x)
   {
-    if evt_next(&mut x) && (x.ev_c >> 10) & 63 == t {
+    let k = evt_step(&mut x);
+    if k == t && (t != TRB_TRANSFER_EV || x.ev_c >> 24 == slot) {
       return x.ev_s >> 24;
     }
     n = n + 1;
@@ -239,32 +348,44 @@ fn xhci_command(x: &mut Xhci, p: u64, c: u64) -> bool
   requires xhci_ok(x)
   ensures xhci_ok(x)
 {
-  x.cmd_at = trb_put(&mut x.cmd, x.cmd_at, p, 0, c);
+  x.cmd_at = trb_put(&mut x.cmd, 0, x.cmd_at, p, 0, c);
   xw(&mut x, x.db, 0);
-  return evt_wait(&mut x, TRB_COMMAND_EV) == CC_SUCCESS;
+  return evt_wait(&mut x, TRB_COMMAND_EV, 0) == CC_SUCCESS;
 }
 
-/// A control transfer on the keyboard's default endpoint: the 8-byte setup
-/// packet, then `n` bytes in (`dir_in`) or none, into the data area of
-/// the input-context page.
-fn xhci_control(x: &mut Xhci, setup: u64, n: u64, dir_in: bool) -> bool
-  requires xhci_ok(x) && n <= RAW_LEN
+/// Puts a TRB on the control ring of slot `slot` (1 or 2).
+fn ep0_put(x: &mut Xhci, slot: u64, p: u64, s: u64, c: u64)
+  requires xhci_ok(x)
+  ensures xhci_ok(x)
+{
+  if slot == 2 {
+    x.e0b = trb_put(&mut x.ep0, 2048, x.e0b, p, s, c);
+  } else {
+    x.e0a = trb_put(&mut x.ep0, 0, x.e0a, p, s, c);
+  }
+}
+
+/// A control transfer on the default endpoint of slot `slot`: the 8-byte
+/// setup packet, then `n` bytes in (`dir_in`) or none, into the data area
+/// of the input-context page.
+fn xhci_control(x: &mut Xhci, slot: u64, setup: u64, n: u64, dir_in: bool) -> bool
+  requires xhci_ok(x) && 1 <= slot && slot <= XHCI_SLOTS && n <= RAW_LEN
   ensures xhci_ok(x)
 {
   let mut trt = 0;                    // no data stage
   if n > 0 && dir_in {
     trt = 3;
   }
-  x.ep0_at = trb_put(&mut x.ep0, x.ep0_at, setup, 8, TRB_SETUP * 1024 + 64 + trt * 65536);
+  ep0_put(&mut x, slot, setup, 8, TRB_SETUP * 1024 + 64 + trt * 65536);
   let mut status_dir = 65536;         // the status stage goes the other way
   if n > 0 && dir_in {
     let a = dma_phys(x.inp);
-    x.ep0_at = trb_put(&mut x.ep0, x.ep0_at, a + RAW_AT, n, TRB_DATA * 1024 + 65536);
+    ep0_put(&mut x, slot, a + RAW_AT, n, TRB_DATA * 1024 + 65536);
     status_dir = 0;
   }
-  x.ep0_at = trb_put(&mut x.ep0, x.ep0_at, 0, 0, TRB_STATUS * 1024 + 32 + status_dir);
-  xw(&mut x, x.db + x.slot * 4, 1);
-  let cc = evt_wait(&mut x, TRB_TRANSFER_EV);
+  ep0_put(&mut x, slot, 0, 0, TRB_STATUS * 1024 + 32 + status_dir);
+  xw(&mut x, x.db + slot * 4, 1);
+  let cc = evt_wait(&mut x, TRB_TRANSFER_EV, slot);
   return cc == CC_SUCCESS || cc == CC_SHORT;
 }
 
@@ -318,28 +439,32 @@ fn port_up(x: &mut Xhci, p: u64) -> u64
   return (now >> 10) & 15;
 }
 
-/// Sets up the device on port p (speed `speed`) as the keyboard: a slot,
-/// an address, the boot protocol and its interrupt endpoint. On failure
-/// the slot, if any, is given back.
-fn kbd_attach(x: &mut Xhci, p: u64, speed: u64) -> bool
+/// Sets up the device on port p (speed `speed`): a slot and an address,
+/// then, from its configuration, the keyboard if it is one and there is
+/// none yet, else the disk if it is a mass-storage device and there is
+/// none yet. Otherwise the slot is given back. True if it was taken.
+fn dev_attach(x: &mut Xhci, p: u64, speed: u64) -> bool
   requires xhci_ok(x) && 1 <= p && p < 256 && speed < 16
   ensures xhci_ok(x)
 {
   if !xhci_command(&mut x, 0, TRB_ENABLE_SLOT * 1024) {
     return false;
   }
-  let slot = x.ev_c >> 24;
-  if slot != 1 {
-    return false;                     // only slot 1 is enabled
+  let s = x.ev_c >> 24;
+  if s < 1 || s > XHCI_SLOTS {
+    return false;
   }
-  x.slot = slot;
-  x.port = p;
-  zero_page(&mut x.ctx, 0, 4096);
+  let half = (s - 1) * 2048;
+  zero_page(&mut x.ctx, half, half + 2048);
   zero_page(&mut x.inp, 0, 4096);
-  zero_page(&mut x.ep0, 0, 4096);
-  x.ep0_at = 1;
+  zero_page(&mut x.ep0, half, half + 2048);
+  if s == 1 {
+    x.e0a = 1;
+  } else {
+    x.e0b = 1;
+  }
   let ca = dma_phys(x.ctx);
-  dma_write64(&mut x.dcbaa, 8, ca);
+  dma_write64(&mut x.dcbaa, s * 8, ca + half);
   // Address the device: the slot and its default control endpoint.
   let mut mps = 8;
   if speed == 3 {
@@ -347,7 +472,7 @@ fn kbd_attach(x: &mut Xhci, p: u64, speed: u64) -> bool
   } else if speed >= 4 {
     mps = 512;                        // SuperSpeed
   }
-  let ea = dma_phys(x.ep0);
+  let ea = dma_phys(x.ep0) + half;
   ictx(&mut x, 0, 1, 3);              // add the slot and endpoint 0
   ictx(&mut x, 1, 0, (speed << 20) | (1 << 27));
   ictx(&mut x, 1, 1, p << 16);
@@ -356,25 +481,26 @@ fn kbd_attach(x: &mut Xhci, p: u64, speed: u64) -> bool
   ictx(&mut x, 2, 3, ea >> 32);
   ictx(&mut x, 2, 4, 8);
   let ia = dma_phys(x.inp);
-  if !xhci_command(&mut x, ia, TRB_ADDRESS * 1024 + slot * 16777216) {
-    return kbd_detach(&mut x);
+  if !xhci_command(&mut x, ia, TRB_ADDRESS * 1024 + s * 16777216) {
+    return dev_detach(&mut x, s);
   }
   // A full-speed device says its endpoint 0 packet size in its descriptor.
-  if !xhci_control(&mut x, 0x0008000001000680, 8, true) {
-    return kbd_detach(&mut x);
+  if !xhci_control(&mut x, s, 0x0008000001000680, 8, true) {
+    return dev_detach(&mut x, s);
   }
   let mps0 = raw(&mut x, 7);
   if speed == 1 && mps0 != 8 && (mps0 == 16 || mps0 == 32 || mps0 == 64) {
     ictx(&mut x, 0, 1, 2);
     ictx(&mut x, 2, 1, 6 + 4 * 8 + (mps0 << 16));
-    if !xhci_command(&mut x, ia, TRB_EVALUATE * 1024 + slot * 16777216) {
-      return kbd_detach(&mut x);
+    if !xhci_command(&mut x, ia, TRB_EVALUATE * 1024 + s * 16777216) {
+      return dev_detach(&mut x, s);
     }
   }
-  // The configuration: find a boot keyboard interface and its interrupt
-  // IN endpoint.
-  if !xhci_control(&mut x, 0x0200000002000680, 512, true) {
-    return kbd_detach(&mut x);
+  // The configuration: a boot keyboard interface and its interrupt IN
+  // endpoint, or a SCSI bulk-only mass-storage interface and its two bulk
+  // endpoints.
+  if !xhci_control(&mut x, s, 0x0200000002000680, 512, true) {
+    return dev_detach(&mut x, s);
   }
   let total = raw(&mut x, 2) + raw(&mut x, 3) * 256;
   let config = raw(&mut x, 5);
@@ -382,10 +508,17 @@ fn kbd_attach(x: &mut Xhci, p: u64, speed: u64) -> bool
   let mut ep = 0;
   let mut emps = 0;
   let mut ival = 0;
+  let mut miface = 256;
+  let mut ein = 0;
+  let mut eout = 0;
+  let mut mpin = 0;
+  let mut mpout = 0;
   let mut i = 0;
   let mut in_kbd = false;
+  let mut in_msd = false;
   while i < total && i < 512
     invariant xhci_ok(x) && iface <= 256 && ep < 16 && emps < 2048 && ival <= 255
+    invariant miface <= 256 && ein < 16 && eout < 16 && mpin < 2048 && mpout < 2048
   {
     let dl = raw(&mut x, i);
     let ty = raw(&mut x, i + 1);
@@ -393,31 +526,73 @@ fn kbd_attach(x: &mut Xhci, p: u64, speed: u64) -> bool
       i = 512;
     } else {
       if ty == 4 {
-        in_kbd = raw(&mut x, i + 5) == 3 && raw(&mut x, i + 6) == 1 && raw(&mut x, i + 7) == 1;
+        let class = raw(&mut x, i + 5);
+        let sub = raw(&mut x, i + 6);
+        let proto = raw(&mut x, i + 7);
+        in_kbd = class == 3 && sub == 1 && proto == 1 && !x.live;
+        in_msd = class == 8 && sub == 6 && proto == 0x50 && x.msd == MSD_NONE && miface == 256;
         if in_kbd && iface == 256 {
           iface = raw(&mut x, i + 2);
         }
-      } else if ty == 5 && in_kbd && ep == 0 {
+        if in_msd {
+          miface = raw(&mut x, i + 2);
+        }
+      } else if ty == 5 {
         let addr = raw(&mut x, i + 2);
-        if addr >= 128 && raw(&mut x, i + 3) & 3 == 3 {
+        let attr = raw(&mut x, i + 3) & 3;
+        let size = (raw(&mut x, i + 4) + raw(&mut x, i + 5) * 256) & 0x7FF;
+        if in_kbd && ep == 0 && addr >= 128 && attr == 3 {
           ep = addr & 15;
-          emps = (raw(&mut x, i + 4) + raw(&mut x, i + 5) * 256) & 0x7FF;
+          emps = size;
           ival = raw(&mut x, i + 6);
+        }
+        if in_msd && attr == 2 {
+          if addr >= 128 && ein == 0 {
+            ein = addr & 15;
+            mpin = size;
+          } else if addr < 128 && eout == 0 {
+            eout = addr & 15;
+            mpout = size;
+          }
         }
       }
       i = i + dl;
     }
   }
-  if iface == 256 || ep == 0 || emps == 0 {
-    return kbd_detach(&mut x);
+  if iface < 256 && ep != 0 && emps != 0 {
+    return kbd_setup(&mut x, s, p, speed, config, iface, ep, emps, ival);
   }
+  if miface < 256 && ein != 0 && eout != 0 && mpin != 0 && mpout != 0 {
+    return msd_setup(&mut x, s, p, speed, config, miface, ein, eout, mpin, mpout);
+  }
+  return dev_detach(&mut x, s);
+}
+
+/// Gives slot s back after a failed attach; returns false.
+fn dev_detach(x: &mut Xhci, s: u64) -> bool
+  requires xhci_ok(x)
+  ensures xhci_ok(x) && !result
+{
+  if s >= 1 && s <= XHCI_SLOTS {
+    xhci_command(&mut x, 0, TRB_DISABLE_SLOT * 1024 + s * 16777216);
+    dma_write64(&mut x.dcbaa, s * 8, 0);
+  }
+  return false;
+}
+
+/// The keyboard on slot s: the boot protocol and its interrupt endpoint.
+fn kbd_setup(x: &mut Xhci, s: u64, p: u64, speed: u64, config: u64, iface: u64, ep: u64, emps: u64, ival: u64) -> bool
+  requires xhci_ok(x) && 1 <= s && s <= XHCI_SLOTS && p < 256 && speed < 16
+  requires config <= 255 && iface < 256 && 1 <= ep && ep < 16 && emps < 2048 && ival <= 255
+  ensures xhci_ok(x)
+{
   // SET_CONFIGURATION, SET_PROTOCOL (boot), SET_IDLE (report only changes;
   // a keyboard may refuse it).
-  if !xhci_control(&mut x, (config << 16) | 0x0900, 0, false)
-    || !xhci_control(&mut x, (iface << 32) | 0x0B21, 0, false) {
-    return kbd_detach(&mut x);
+  if !xhci_control(&mut x, s, (config << 16) | 0x0900, 0, false)
+    || !xhci_control(&mut x, s, (iface << 32) | 0x0B21, 0, false) {
+    return dev_detach(&mut x, s);
   }
-  xhci_control(&mut x, (iface << 32) | 0x0A21, 0, false);
+  xhci_control(&mut x, s, (iface << 32) | 0x0A21, 0, false);
   // The interrupt endpoint: context index 2 * number + 1 (IN).
   let dci = ep * 2 + 1;
   let mut interval = 3;               // in 2^n x 125 us
@@ -444,23 +619,16 @@ fn kbd_attach(x: &mut Xhci, p: u64, speed: u64) -> bool
   ictx(&mut x, dci + 1, 2, (ra & 0xFFFFFFFF) | 1);
   ictx(&mut x, dci + 1, 3, ra >> 32);
   ictx(&mut x, dci + 1, 4, 8 + (emps << 16));
-  if !xhci_command(&mut x, ia, TRB_CONFIGURE * 1024 + slot * 16777216) {
-    return kbd_detach(&mut x);
+  let ia = dma_phys(x.inp);
+  if !xhci_command(&mut x, ia, TRB_CONFIGURE * 1024 + s * 16777216) {
+    return dev_detach(&mut x, s);
   }
+  x.slot = s;
   x.dci = dci;
+  x.port = p;
+  x.live = true;
   kbd_queue(&mut x);
   return true;
-}
-
-/// Gives the slot back after a failed attach; returns false.
-fn kbd_detach(x: &mut Xhci) -> bool
-  requires xhci_ok(x)
-  ensures xhci_ok(x) && !result
-{
-  xhci_command(&mut x, 0, TRB_DISABLE_SLOT * 1024 + x.slot * 16777216);
-  dma_write64(&mut x.dcbaa, 8, 0);
-  x.slot = 0;
-  return false;
 }
 
 /// Queues a transfer for the next report.
@@ -469,8 +637,469 @@ fn kbd_queue(x: &mut Xhci)
   ensures xhci_ok(x)
 {
   let a = dma_phys(x.intr);
-  x.int_at = trb_put(&mut x.intr, x.int_at, a + 2048, 8, TRB_NORMAL * 1024 + 32 + 4);  // IOC, ISP
+  x.int_at = trb_put(&mut x.intr, 0, x.int_at, a + 2048, 8, TRB_NORMAL * 1024 + 32 + 4);  // IOC, ISP
   xw(&mut x, x.db + x.slot * 4, x.dci);
+}
+
+/// The mass-storage device on slot s: its bulk endpoints, then the SCSI
+/// device behind them (msd_start). The slot is kept even if no BastiOS
+/// partition turns up, so another one is not looked for.
+fn msd_setup(x: &mut Xhci, s: u64, p: u64, speed: u64, config: u64, iface: u64, ein: u64, eout: u64,
+  mpin: u64, mpout: u64) -> bool
+  requires xhci_ok(x) && 1 <= s && s <= XHCI_SLOTS && p < 256 && speed < 16
+  requires config <= 255 && iface < 256 && 1 <= ein && ein < 16 && 1 <= eout && eout < 16
+  requires mpin < 2048 && mpout < 2048
+  ensures xhci_ok(x)
+{
+  if !xhci_control(&mut x, s, (config << 16) | 0x0900, 0, false) {
+    return dev_detach(&mut x, s);
+  }
+  let dout = eout * 2;
+  let din = ein * 2 + 1;
+  let mut top = dout;
+  if din > top {
+    top = din;
+  }
+  zero_page(&mut x.inp, 0, RAW_AT);
+  zero_page(&mut x.bulk, 0, 4096);
+  x.out_at = 1;
+  x.in_at = 1;
+  let ba = dma_phys(x.bulk);
+  let ia = ba + IN_RING;
+  ictx(&mut x, 0, 1, 1 | (1 << dout) | (1 << din));
+  ictx(&mut x, 1, 0, (speed << 20) | (top << 27));
+  ictx(&mut x, 1, 1, p << 16);
+  ictx(&mut x, dout + 1, 1, 6 + 2 * 8 + (mpout << 16));   // 3 retries, bulk OUT
+  ictx(&mut x, dout + 1, 2, (ba & 0xFFFFFFFF) | 1);
+  ictx(&mut x, dout + 1, 3, ba >> 32);
+  ictx(&mut x, dout + 1, 4, 3072);
+  ictx(&mut x, din + 1, 1, 6 + 6 * 8 + (mpin << 16));     // 3 retries, bulk IN
+  ictx(&mut x, din + 1, 2, (ia & 0xFFFFFFFF) | 1);
+  ictx(&mut x, din + 1, 3, ia >> 32);
+  ictx(&mut x, din + 1, 4, 3072);
+  let pa = dma_phys(x.inp);
+  if !xhci_command(&mut x, pa, TRB_CONFIGURE * 1024 + s * 16777216) {
+    return dev_detach(&mut x, s);
+  }
+  x.ds = s;
+  x.dout = dout;
+  x.din = din;
+  x.iface = iface;
+  x.msd = MSD_UNUSED;
+  if msd_start(&mut x) {
+    x.msd = MSD_ON;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------- bulk-only transport
+
+/// Byte i of the command block.
+fn cb(x: &mut Xhci, i: u64, v: u64)
+  requires xhci_ok(x) && i < 16
+  ensures xhci_ok(x)
+{
+  dma_write8(&mut x.bulk, CBW_AT + 15 + i, cast[u8](v & 255));
+}
+
+/// Writes SCSI command `op` into the command block: the six-byte form for
+/// the three commands that have only that (with `n` as the allocation
+/// length), else the ten-byte form with sector `lba` and `count` sectors.
+/// Returns the block's length.
+fn cdb(x: &mut Xhci, op: u64, lba: u64, count: u64, n: u64) -> u64
+  requires xhci_ok(x)
+  ensures xhci_ok(x) && result <= 16
+{
+  let mut i = 0;
+  while i < 16
+    invariant xhci_ok(x)
+  {
+    cb(&mut x, i, 0);
+    i = i + 1;
+  }
+  cb(&mut x, 0, op);
+  if op == SCSI_TEST_READY || op == SCSI_SENSE || op == SCSI_INQUIRY {
+    cb(&mut x, 4, n);
+    return 6;
+  }
+  cb(&mut x, 2, lba >> 24);
+  cb(&mut x, 3, lba >> 16);
+  cb(&mut x, 4, lba >> 8);
+  cb(&mut x, 5, lba);
+  cb(&mut x, 7, count >> 8);
+  cb(&mut x, 8, count);
+  return 10;
+}
+
+/// Starts the command in the command block (`len` bytes): the wrapper on
+/// the OUT ring, `n` bytes of the data page in (`dir_in`) or out, and the
+/// status wrapper on the IN ring, which alone raises an event.
+fn bot_go(x: &mut Xhci, len: u64, n: u64, dir_in: bool)
+  requires xhci_ok(x) && len <= 16 && n <= 4096
+  ensures xhci_ok(x) && x.busy
+{
+  x.tag = (x.tag + 1) % 4294967296;
+  dma_write32(&mut x.bulk, CBW_AT, cast[u32](CBW_SIG));
+  dma_write32(&mut x.bulk, CBW_AT + 4, cast[u32](x.tag));
+  dma_write32(&mut x.bulk, CBW_AT + 8, cast[u32](n));
+  if dir_in {
+    dma_write8(&mut x.bulk, CBW_AT + 12, 0x80);
+  } else {
+    dma_write8(&mut x.bulk, CBW_AT + 12, 0);
+  }
+  dma_write8(&mut x.bulk, CBW_AT + 13, 0);             // LUN 0
+  dma_write8(&mut x.bulk, CBW_AT + 14, cast[u8](len));
+  dma_write32(&mut x.bulk, CSW_AT, 0);
+  let b = dma_phys(x.bulk);
+  let d = dma_phys(x.data);
+  x.out_at = trb_put(&mut x.bulk, 0, x.out_at, b + CBW_AT, 31, TRB_NORMAL * 1024);
+  if n > 0 && !dir_in {
+    x.out_at = trb_put(&mut x.bulk, 0, x.out_at, d, n, TRB_NORMAL * 1024);
+  }
+  // Data coming in raises an event (IOC, and ISP for a short one), and
+  // only then is the status wrapper asked for: a device may not take the
+  // request for it while it is still sending the data (QEMU's does not).
+  x.stage = 0;
+  if n > 0 && dir_in {
+    x.in_at = trb_put(&mut x.bulk, IN_RING, x.in_at, d, n, TRB_NORMAL * 1024 + 32 + 4);
+    x.stage = 1;
+  } else {
+    x.in_at = trb_put(&mut x.bulk, IN_RING, x.in_at, b + CSW_AT, 13, TRB_NORMAL * 1024 + 32);   // IOC
+  }
+  x.busy = true;
+  x.done = false;
+  x.dcc = 0;
+  xw(&mut x, x.db + x.ds * 4, x.dout);
+  xw(&mut x, x.db + x.ds * 4, x.din);
+}
+
+/// Asks for the status wrapper, once the data has come in.
+fn csw_queue(x: &mut Xhci)
+  requires xhci_ok(x)
+  ensures xhci_ok(x)
+{
+  let b = dma_phys(x.bulk);
+  x.in_at = trb_put(&mut x.bulk, IN_RING, x.in_at, b + CSW_AT, 13, TRB_NORMAL * 1024 + 32);   // IOC
+  xw(&mut x, x.db + x.ds * 4, x.din);
+}
+
+/// After the controller said the command ended: its SCSI status (0 good,
+/// 1 check condition), or 2 if the transfer failed or the status wrapper
+/// is not this command's, in which case the device is reset.
+fn bot_end(x: &mut Xhci) -> u64
+  requires xhci_ok(x)
+  ensures xhci_ok(x) && !x.busy && result <= 2
+{
+  x.busy = false;
+  if x.dcc != CC_SUCCESS && x.dcc != CC_SHORT {
+    bot_recover(&mut x);
+    return 2;
+  }
+  let sig = cast[u64](dma_read32(&mut x.bulk, CSW_AT));
+  let tag = cast[u64](dma_read32(&mut x.bulk, CSW_AT + 4));
+  let st = cast[u64](dma_read8(&mut x.bulk, CSW_AT + 12));
+  if sig != CSW_SIG || tag != x.tag {
+    bot_recover(&mut x);
+    return 2;
+  }
+  if st <= 1 {
+    return st;
+  }
+  bot_recover(&mut x);                // a phase error
+  return 2;
+}
+
+/// Waits for the started command to end; as bot_end.
+fn bot_wait(x: &mut Xhci) -> u64
+  requires xhci_ok(x)
+  ensures xhci_ok(x) && !x.busy && result <= 2
+{
+  let mut n = 0;
+  while n < XHCI_SPINS && !x.done
+    invariant xhci_ok(x)
+  {
+    evt_step(&mut x);
+    n = n + 1;
+  }
+  if !x.done {
+    x.busy = false;
+    bot_recover(&mut x);
+    return 2;
+  }
+  return bot_end(&mut x);
+}
+
+/// Puts the disk's endpoint `e` (ring at `base`, enqueue position `at`)
+/// back in order after an error: reset if it halted, stopped if it runs,
+/// and its dequeue pointer moved past whatever was still queued.
+fn ep_recover(x: &mut Xhci, e: u64, base: u64, at: u64)
+  requires xhci_ok(x) && e < 32 && base + RING_N * 16 <= 4096 && at < RING_N * 2
+  ensures xhci_ok(x)
+{
+  let c = x.ds * 16777216 + e * 65536;
+  xhci_command(&mut x, 0, TRB_RESET_EP * 1024 + c);
+  xhci_command(&mut x, 0, TRB_STOP_EP * 1024 + c);
+  let b = dma_phys(x.bulk);
+  xhci_command(&mut x, b + base + at / 2 * 16 + at % 2, TRB_SET_DEQ * 1024 + c);
+}
+
+/// Reset recovery, as the bulk-only transport specifies it: both
+/// endpoints put back in order, a mass-storage reset, and both endpoints'
+/// halts cleared.
+fn bot_recover(x: &mut Xhci)
+  requires xhci_ok(x)
+  ensures xhci_ok(x) && !x.busy
+{
+  x.busy = false;
+  x.done = false;
+  if x.ds < 1 || x.ds > XHCI_SLOTS {
+    return;
+  }
+  let s = x.ds;
+  ep_recover(&mut x, x.dout, 0, x.out_at);
+  ep_recover(&mut x, x.din, IN_RING, x.in_at);
+  xhci_control(&mut x, s, (x.iface << 32) | 0xFF21, 0, false);
+  xhci_control(&mut x, s, ((x.dout / 2) << 32) | 0x0102, 0, false);
+  xhci_control(&mut x, s, ((x.din / 2 + 128) << 32) | 0x0102, 0, false);
+}
+
+/// Runs SCSI command `op` (see cdb) with `n` bytes of the data page in or
+/// out, and returns its status as bot_end.
+fn scsi(x: &mut Xhci, op: u64, lba: u64, count: u64, n: u64, dir_in: bool) -> u64
+  requires xhci_ok(x) && n <= 4096
+  ensures xhci_ok(x) && !x.busy && result <= 2
+{
+  let len = cdb(&mut x, op, lba, count, n);
+  bot_go(&mut x, len, n, dir_in);
+  return bot_wait(&mut x);
+}
+
+/// The big-endian u32 at byte o of the data page.
+fn data_be32(x: &mut Xhci, o: u64) -> u64
+  requires xhci_ok(x) && o + 4 <= 4096
+  ensures xhci_ok(x) && result <= 4294967295
+{
+  let a = cast[u64](dma_read8(&mut x.data, o));
+  let b = cast[u64](dma_read8(&mut x.data, o + 1));
+  let c = cast[u64](dma_read8(&mut x.data, o + 2));
+  let d = cast[u64](dma_read8(&mut x.data, o + 3));
+  return a * 16777216 + b * 65536 + c * 256 + d;
+}
+
+/// Brings up the SCSI disk behind the bulk endpoints and finds its BastiOS
+/// partition; true if there is one (plo and sectors say where).
+fn msd_start(x: &mut Xhci) -> bool
+  requires xhci_ok(x)
+  ensures xhci_ok(x)
+{
+  if scsi(&mut x, SCSI_INQUIRY, 0, 0, 36, true) == 2 {
+    return false;
+  }
+  if cast[u64](dma_read8(&mut x.data, 0)) & 31 != 0 {
+    return false;                     // not a direct-access block device
+  }
+  // A device may say it is not ready (a medium change, say) a few times
+  // first; the sense data it then has must be fetched.
+  let mut ready = false;
+  let mut k = 0;
+  while k < 20 && !ready
+    invariant xhci_ok(x)
+  {
+    let st = scsi(&mut x, SCSI_TEST_READY, 0, 0, 0, false);
+    if st == 0 {
+      ready = true;
+    } else {
+      scsi(&mut x, SCSI_SENSE, 0, 0, 18, true);
+      let mut w = 0;
+      while w < 1000000 {
+        w = w + 1;
+      }
+    }
+    k = k + 1;
+  }
+  if !ready || scsi(&mut x, SCSI_CAPACITY, 0, 0, 8, true) != 0 {
+    return false;
+  }
+  let last = data_be32(&mut x, 0);
+  if data_be32(&mut x, 4) != USB_SECTOR || last < 34 {
+    return false;
+  }
+  // The GPT: its header in sector 1, then its entries, 128 bytes each,
+  // read 32 at a time.
+  if scsi(&mut x, SCSI_READ, 1, 1, USB_SECTOR, true) != 0 || dma_read64(&mut x.data, 0) != GPT_SIG {
+    return false;
+  }
+  let elba = dma_read64(&mut x.data, 72);
+  let count = cast[u64](dma_read32(&mut x.data, 80));
+  let esz = cast[u64](dma_read32(&mut x.data, 84));
+  if esz != 128 || elba < 2 || elba > last {
+    return false;
+  }
+  let mut i = 0;
+  while i < count && i < 1024
+    invariant xhci_ok(x) && last <= 4294967295 && elba <= last
+  {
+    let sec = elba + i / 4;
+    if sec + 8 > last + 1 || scsi(&mut x, SCSI_READ, sec, 8, 4096, true) != 0 {
+      return false;
+    }
+    let mut j = 0;
+    while j < 32
+      invariant xhci_ok(x) && last <= 4294967295
+    {
+      let o = j * 128;
+      if i + j < count && dma_read64(&mut x.data, o) == BASTIOS_PART_LO && dma_read64(&mut x.data, o + 8) == BASTIOS_PART_HI {
+        let first = dma_read64(&mut x.data, o + 32);
+        let end = dma_read64(&mut x.data, o + 40);
+        if first < 1 || first > end || end > last {
+          return false;
+        }
+        x.plo = first;
+        x.sectors = end - first + 1;
+        return true;
+      }
+      j = j + 1;
+    }
+    i = i + 32;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------- the disk, for blk.bastio
+
+/// Reads sector `lba` of the partition into buf[0..512]; false if the
+/// disk fails, a command is running, or the sector is past the end.
+fn usbd_read(x: &mut Xhci, lba: u64, buf: &mut Bytes) -> bool
+  requires xhci_ok(x) && blen(buf) >= USB_SECTOR
+  ensures xhci_ok(x) && blen(buf) == old(blen(buf))
+{
+  if x.msd != MSD_ON || x.busy || lba >= x.sectors || x.plo + lba > 4294967295 {
+    return false;
+  }
+  if scsi(&mut x, SCSI_READ, x.plo + lba, 1, USB_SECTOR, true) != 0 {
+    return false;
+  }
+  dma_to_bytes(&mut buf, 0, &mut x.data, 0, USB_SECTOR);
+  return true;
+}
+
+/// Writes buf[0..512] to sector `lba` of the partition.
+fn usbd_write(x: &mut Xhci, lba: u64, buf: &Bytes) -> bool
+  requires xhci_ok(x) && blen(buf) >= USB_SECTOR
+  ensures xhci_ok(x)
+{
+  if x.msd != MSD_ON || x.busy || lba >= x.sectors || x.plo + lba > 4294967295 {
+    return false;
+  }
+  bytes_to_dma(&mut x.data, 0, buf, 0, USB_SECTOR);
+  return scsi(&mut x, SCSI_WRITE, x.plo + lba, 1, USB_SECTOR, false) == 0;
+}
+
+/// Is the 4 KiB block at `lba` (a multiple of 8) whole in the partition?
+fn usbd_fits(x: &Xhci, lba: u64) -> bool
+  requires xhci_ok(x)
+  ensures result ==> lba < x.sectors && x.plo + lba + 8 <= 4294967296
+{
+  return x.msd == MSD_ON && lba % 8 == 0 && lba < x.sectors && x.sectors - lba >= 8 && x.plo + lba + 8 <= 4294967296;
+}
+
+/// SYNCHRONIZE CACHE. Many sticks do not know the command and answer with
+/// a check condition: they are taken to write through.
+fn usbd_sync(x: &mut Xhci) -> bool
+  requires xhci_ok(x)
+  ensures xhci_ok(x)
+{
+  return scsi(&mut x, SCSI_SYNC, 0, 0, 0, false) != 2;
+}
+
+fn usbd_read_block(x: &mut Xhci, lba: u64, out: &mut Bytes, at: u64) -> bool
+  requires xhci_ok(x) && at + 4096 <= blen(out)
+  ensures xhci_ok(x) && blen(out) == old(blen(out))
+{
+  if x.busy || !usbd_fits(x, lba) {
+    return false;
+  }
+  if scsi(&mut x, SCSI_READ, x.plo + lba, 8, 4096, true) != 0 {
+    return false;
+  }
+  dma_to_bytes(&mut out, at, &mut x.data, 0, 4096);
+  return true;
+}
+
+fn usbd_write_block(x: &mut Xhci, lba: u64, src: &Bytes, at: u64) -> bool
+  requires xhci_ok(x) && at + 4096 <= blen(src)
+  ensures xhci_ok(x)
+{
+  if x.busy || !usbd_fits(x, lba) {
+    return false;
+  }
+  bytes_to_dma(&mut x.data, 0, src, at, 4096);
+  return scsi(&mut x, SCSI_WRITE, x.plo + lba, 8, 4096, false) == 0 && usbd_sync(&mut x);
+}
+
+/// Starts BIO_READ, BIO_WRITE (from src[at .. at + 4096]) or BIO_FLUSH, as
+/// blk_begin; it ends in usbd_poll.
+fn usbd_begin(x: &mut Xhci, op: u64, lba: u64, src: &Bytes, at: u64) -> bool
+  requires xhci_ok(x) && op <= BIO_FLUSH && at + 4096 <= blen(src)
+  ensures xhci_ok(x)
+{
+  if x.msd != MSD_ON || x.busy {
+    return false;
+  }
+  x.bop = op;
+  if op == BIO_FLUSH {
+    let len = cdb(&mut x, SCSI_SYNC, 0, 0, 0);
+    bot_go(&mut x, len, 0, false);
+    return true;
+  }
+  if !usbd_fits(x, lba) {
+    return false;
+  }
+  if op == BIO_WRITE {
+    bytes_to_dma(&mut x.data, 0, src, at, 4096);
+    let len = cdb(&mut x, SCSI_WRITE, x.plo + lba, 8, 0);
+    bot_go(&mut x, len, 4096, false);
+  } else {
+    let len = cdb(&mut x, SCSI_READ, x.plo + lba, 8, 0);
+    bot_go(&mut x, len, 4096, true);
+  }
+  return true;
+}
+
+/// BIO_RUNNING while the started command runs, then once BIO_OK or
+/// BIO_FAILED; BIO_IDLE if none was started.
+fn usbd_poll(x: &mut Xhci) -> u64
+  requires xhci_ok(x)
+  ensures xhci_ok(x) && result <= BIO_IDLE
+{
+  if !x.busy {
+    return BIO_IDLE;
+  }
+  let mut n = 0;
+  while n < 16 && !x.done
+    invariant xhci_ok(x)
+  {
+    if evt_step(&mut x) == 0 {
+      n = 16;
+    }
+    n = n + 1;
+  }
+  if !x.done {
+    return BIO_RUNNING;
+  }
+  let st = bot_end(&mut x);
+  if st == 0 || (st == 1 && x.bop == BIO_FLUSH) {
+    return BIO_OK;
+  }
+  return BIO_FAILED;
+}
+
+/// After usbd_poll said BIO_OK for a read: the block, into out[at ..].
+fn usbd_fetch(x: &mut Xhci, out: &mut Bytes, at: u64)
+  requires xhci_ok(x) && at + 4096 <= blen(out)
+  ensures xhci_ok(x) && blen(out) == old(blen(out))
+{
+  dma_to_bytes(&mut out, at, &mut x.data, 0, 4096);
 }
 
 /// Stops the controller and resets it, so it no longer touches the pages.
@@ -533,19 +1162,22 @@ fn xhci_handoff(x: &mut Xhci, xecp: u64)
   }
 }
 
-/// Starts the controller in the registers `regs` with eleven pages, and
-/// attaches the first boot keyboard on a root port. `live` says whether
-/// one was found; if not, the controller is left reset.
+/// Starts the controller in the registers `regs` with thirteen pages, and
+/// attaches the first boot keyboard and the first mass-storage device on
+/// its root ports. `live` says whether there is a keyboard and `msd`
+/// whether there is a disk; with neither, the controller is left reset.
 fn xhci_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, f5: Frame, f6: Frame,
-  f7: Frame, f8: Frame, f9: Frame, f10: Frame) -> Xhci
+  f7: Frame, f8: Frame, f9: Frame, f10: Frame, f11: Frame, f12: Frame) -> Xhci
   requires mmio_base(regs) % 4096 == 0 && mmio_len(regs) <= XHCI_MAX_LEN && mmio_len(regs) >= 0x2000
   ensures xhci_ok(result)
 {
   let mut x = Xhci { regs: regs, dcbaa: dma_lend(f0), cmd: dma_lend(f1), evt: dma_lend(f2), ctx: dma_lend(f3),
     inp: dma_lend(f4), ep0: dma_lend(f5), intr: dma_lend(f6), sp0: dma_lend(f7), sp1: dma_lend(f8),
-    sp2: dma_lend(f9), sp3: dma_lend(f10), op: 0, rt: 0, db: 0, csz: 32, ports: 0, cmd_at: 1, evt_at: 1,
-    ep0_at: 1, int_at: 1, ev_p: 0, ev_s: 0, ev_c: 0, slot: 0, dci: 0, port: 0, keys: balloc(6), q: balloc(16),
-    qn: 0, shift: false, ctrl: false, live: false };
+    sp2: dma_lend(f9), sp3: dma_lend(f10), bulk: dma_lend(f11), data: dma_lend(f12), op: 0, rt: 0, db: 0,
+    csz: 32, ports: 0, cmd_at: 1, evt_at: 1, e0a: 1, e0b: 1, int_at: 1, ev_p: 0, ev_s: 0, ev_c: 0, slot: 0,
+    dci: 0, port: 0, keys: balloc(6), q: balloc(16), qn: 0, shift: false, ctrl: false, live: false,
+    msd: MSD_NONE, ds: 0, dout: 0, din: 0, iface: 0, out_at: 1, in_at: 1, tag: 0, plo: 0, sectors: 0,
+    busy: false, stage: 0, done: false, dcc: 0, bop: 0 };
   let cap = xr(&mut x, 0) & 255;
   let hcs1 = xr(&mut x, 4);
   let hcs2 = xr(&mut x, 8);
@@ -570,7 +1202,7 @@ fn xhci_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, f
   if spads > XHCI_SP_MAX || xr(&mut x, x.op + PAGESIZE) & 1 == 0 || !xhci_halt(&mut x) {
     return x;
   }
-  // The structures the controller reads: one device slot, the scratchpad
+  // The structures the controller reads: two device slots, the scratchpad
   // array, the command ring and the event ring.
   zero_page(&mut x.dcbaa, 0, 4096);
   zero_page(&mut x.cmd, 0, 4096);
@@ -591,7 +1223,7 @@ fn xhci_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, f
   dma_write64(&mut x.evt, 0, ea + 64);
   dma_write32(&mut x.evt, 8, cast[u32](EVT_N));
   let cra = dma_phys(x.cmd);
-  xw(&mut x, x.op + CONFIG, 1);
+  xw(&mut x, x.op + CONFIG, XHCI_SLOTS);
   xw64(&mut x, x.op + DCBAAP, da);
   xw64(&mut x, x.op + CRCR, cra | 1);
   xw(&mut x, x.rt + ERSTSZ, 1);
@@ -605,18 +1237,19 @@ fn xhci_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, f
   {
     n = n + 1;
   }
-  // The first boot keyboard on a root port.
+  // The first boot keyboard and the first mass-storage device on a root
+  // port.
   let mut p = 1;
-  while p <= x.ports && p < 256 && !x.live
+  while p <= x.ports && p < 256 && (!x.live || x.msd == MSD_NONE)
     invariant xhci_ok(x) && p >= 1
   {
     let speed = port_up(&mut x, p);
-    if speed != 0 && kbd_attach(&mut x, p, speed) {
-      x.live = true;
+    if speed != 0 {
+      dev_attach(&mut x, p, speed);
     }
     p = p + 1;
   }
-  if !x.live {
+  if !x.live && x.msd != MSD_ON {
     xhci_halt(&mut x);
   }
   return x;
@@ -641,6 +1274,8 @@ fn xhci_free(x: Xhci, m: &mut Mem) -> Mmio
   give_page(&mut m, dma_take(d.sp1));
   give_page(&mut m, dma_take(d.sp2));
   give_page(&mut m, dma_take(d.sp3));
+  give_page(&mut m, dma_take(d.bulk));
+  give_page(&mut m, dma_take(d.data));
   bfree(d.keys);
   bfree(d.q);
   return d.regs;
@@ -734,16 +1369,9 @@ fn xhci_poll(x: &mut Xhci) -> u64
     return 256;
   }
   let mut n = 0;
-  while x.qn == 0 && n < 8 && evt_next(&mut x)
+  while x.qn == 0 && n < 8 && evt_step(&mut x) != 0
     invariant xhci_ok(x)
   {
-    if (x.ev_c >> 10) & 63 == TRB_TRANSFER_EV && (x.ev_c >> 24) == x.slot && (x.ev_c >> 16) & 31 == x.dci {
-      let cc = x.ev_s >> 24;
-      if cc == CC_SUCCESS || cc == CC_SHORT {
-        kbd_report(&mut x);
-      }
-      kbd_queue(&mut x);
-    }
     n = n + 1;
   }
   if x.qn == 0 {
@@ -774,6 +1402,14 @@ fn usb_live(u: &Usb) -> bool {
   }
 }
 
+/// MSD_NONE, MSD_UNUSED or MSD_ON: is there a USB disk, and is it the disk?
+fn usb_msd(u: &Usb) -> u64 {
+  match u {
+    Usb::None => { return MSD_NONE; },
+    Usb::Xhci(x) => { return x.msd; },
+  }
+}
+
 fn usb_poll(u: &mut Usb) -> u64
   requires usb_ok(u)
   ensures usb_ok(u) && result <= 256
@@ -789,10 +1425,11 @@ fn usb_poll(u: &mut Usb) -> u64
 }
 
 /// The xHCI controller `dev` on PCI, whose registers are bar ..
-/// bar + size, started with pages at .. at+10, if the registers lie in the
+/// bar + size, started with pages at .. at+12, if the registers lie in the
 /// device window (`bar_space`) clear of the framebuffer at lo .. hi and
-/// the disk's registers at lo2 .. hi2; else none. A controller with no
-/// keyboard is stopped and given back at once.
+/// the block at lo2 .. hi2; else none. A controller with neither a
+/// keyboard nor a disk with a BastiOS partition is stopped and given back
+/// at once.
 fn usb_new(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, lo: u64, hi: u64, lo2: u64, hi2: u64,
   dev: u64, bar: u64, size: u64) -> Usb
   requires pci_ok(pci) && mem_ok(m) && at + XHCI_PAGES <= NPAGES && bar < WIN_TOP && size <= XHCI_MAX_LEN
@@ -817,9 +1454,11 @@ fn usb_new(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, lo: u64, hi
   let f8 = take_low_page(&mut m, at + 8);
   let f9 = take_low_page(&mut m, at + 9);
   let f10 = take_low_page(&mut m, at + 10);
+  let f11 = take_low_page(&mut m, at + 11);
+  let f12 = take_low_page(&mut m, at + 12);
   let regs = mmio_claim(&mut win, bar, size);
-  let x = xhci_new(regs, f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10);
-  if !x.live {
+  let x = xhci_new(regs, f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12);
+  if !x.live && x.msd != MSD_ON {
     mmio_release(&mut win, xhci_free(x, &mut m));
     return Usb::None;
   }
