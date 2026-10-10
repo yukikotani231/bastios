@@ -20,4 +20,4 @@ Don't copy counts (lines, pages, tests) into prose; they go stale. Give the comm
 
 ## License
 
-Unless you say otherwise, any contribution you submit for inclusion is licensed as described in [README.md](README.md#license), without any additional terms or conditions.
+Unless you say otherwise, any contribution you submit for inclusion is dual licensed as Apache-2.0 OR MIT, as described in [README.md](README.md#license), without any additional terms or conditions.
