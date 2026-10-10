@@ -178,9 +178,10 @@ int main(void)
     struct statfs sf;
     if (statfs("/", &sf) != 0 || sf.f_bsize != 4096)
         return fail("statfs");
-    unsigned char r[16];
-    if (getrandom(r, sizeof r, 0) != sizeof r)
-        return fail("getrandom");
+    unsigned char r[16], r2[16];
+    if (getrandom(r, sizeof r, 0) != sizeof r || getrandom(r2, sizeof r2, 0) != sizeof r2
+        || memcmp(r, r2, sizeof r) == 0)
+        return fail("getrandom");                   /* back to back, still different */
     errno = 0;
     if (getpriority(PRIO_PROCESS, 0) != 0 || errno != 0 || setpriority(PRIO_PROCESS, 0, 5) != 0)
         return fail("priorities");
