@@ -1066,10 +1066,10 @@ fn pages_free(m: &Mem, lo: u64, k: u64) -> bool
 /// ports do not overlap avoid_lo .. avoid_hi (another driver's), else the
 /// first e1000 whose registers lie in the part of the device window below
 /// E1K_TOP, with pages from page `at` on.
-fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, avoid_lo: u64, avoid_hi: u64, fb_lo: u64, fb_hi: u64) -> Nic
+fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, avoid_lo: u64, avoid_hi: u64, fb_lo: u64, fb_hi: u64, usb_lo: u64, usb_hi: u64) -> Nic
   requires pci_ok(pci) && mem_ok(m) && at + NET_PAGES <= NPAGES && E1K_PAGES <= NET_PAGES
   requires forall k: u64 :: 0x1000 <= k && k < 65536 && !(avoid_lo <= k && k < avoid_hi) ==> port_free(ports, k)
-  requires forall a: u64 :: 0xC0000000 <= a && a < E1K_TOP && !(fb_lo <= a && a < fb_hi) ==> mmio_free(win, a)
+  requires forall a: u64 :: 0xC0000000 <= a && a < E1K_TOP && !(fb_lo <= a && a < fb_hi) && !(usb_lo <= a && a < usb_hi) ==> mmio_free(win, a)
   ensures nic_ok(result) && mem_ok(m)
 {
   let dev = pci_find(&mut pci, VIRTIO_VENDOR, VIRTIO_NET);
@@ -1097,7 +1097,7 @@ fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, a
   }
   let bar = pci_mem_bar(&mut pci, e);
   if bar < 0xC0000000 || bar + E1K_LEN > E1K_TOP || bar % 4096 != 0 || !pages_free(m, at, E1K_PAGES)
-    || !(bar + E1K_LEN <= fb_lo || bar >= fb_hi) {
+    || !(bar + E1K_LEN <= fb_lo || bar >= fb_hi) || !(bar + E1K_LEN <= usb_lo || bar >= usb_hi) {
     return Nic::None;
   }
   pci_enable(&mut pci, e);

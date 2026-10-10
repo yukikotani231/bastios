@@ -350,7 +350,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let fb_h = boot_fb(cpu, 3);
   let fb_hi = fb_lo + fb_pitch * fb_h;
   let screen = screen_new(&mut win, fb_lo, fb_hi, fb_pitch, boot_fb(cpu, 2), fb_h, boot_fb(cpu, 4));
-  let mut con = Con { uart: uart, screen: screen, kbd: kbd };
+  let mut con = Con { uart: uart, screen: screen, kbd: kbd, usb: Usb::None };
   pic_init(&mut pic);
   pit_init(&mut pit, 100);
   puts(&mut con, "\r\nBastiOS 0.2: ");
@@ -370,7 +370,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     put_num(&mut con, boot_fb(cpu, 2));
     puts(&mut con, "x");
     put_num(&mut con, fb_h);
-    puts(&mut con, " framebuffer, keyboard on PS/2\r\n");
+    puts(&mut con, " framebuffer\r\n");
   }
   let mut m = mem_new(pool);
   // The disk: virtio (DMA into pages lent from the allocator) if the machine
@@ -383,9 +383,28 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   if blk_is_virtio(disk.dev) {
     puts(&mut con, "disk: virtio\r\n");
   }
+  // A USB keyboard on an xHCI controller, if there is one: eleven pages
+  // after the network card's.
+  let xdev = pci_find_class(&mut pci, XHCI_CLASS);
+  let usb_lo = usb_bar(&mut pci, xdev);
+  let usb_hi = usb_lo + usb_bar_size(&mut pci, xdev);
+  let usb = usb_new(&mut pci, &mut m, &mut win, 13, fb_lo, fb_hi, xdev, usb_lo, usb_hi - usb_lo);
+  let usb_on = usb_live(usb);
+  match con.usb {
+    Usb::None => {},
+    Usb::Xhci(stale) => { mmio_release(&mut win, xhci_free(stale, &mut m)); },
+  }
+  con.usb = usb;
+  if usb_on {
+    puts(&mut con, "keyboard: USB (xHCI)\r\n");
+  } else if xdev < 32 && usb_lo == 0 {
+    puts(&mut con, "usb: the xHCI controller's registers are above 4 GiB; not used\r\n");
+  } else if xdev < 32 {
+    puts(&mut con, "usb: no keyboard on the xHCI controller's root ports\r\n");
+  }
   // The network card, if any: nine pages after the disk's four (an e1000
   // takes six of them).
-  let nic = nic_new(&mut ports, &mut pci, &mut m, &mut win, 4, dev_lo, dev_hi, fb_lo, fb_hi);
+  let nic = nic_new(&mut ports, &mut pci, &mut m, &mut win, 4, dev_lo, dev_hi, fb_lo, fb_hi, usb_lo, usb_hi);
   if nic_live(nic) {
     if nic_e1000(nic) {
       puts(&mut con, "net: e1000, mac ");
@@ -441,9 +460,15 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   vec_free(sys.k.fpus);
   blk_free(&mut ports, vfs_free(sys.k.fs, &mut sys.k.mem), &mut sys.k.mem);
   nic_free(&mut ports, &mut win, sys.k.nic, &mut sys.k.mem);
+  usb_off(&mut sys.con.usb, &mut win, &mut sys.k.mem);
   puts(&mut sys.con, "BastiOS: ");
   put_num(&mut sys.con, count_free(sys.k.mem.bm));
   puts(&mut sys.con, " pages free at power off\r\n");
+  // (Stopped above, before the count: what is left here is no controller.)
+  match sys.con.usb {
+    Usb::None => {},
+    Usb::Xhci(x) => { mmio_release(&mut win, xhci_free(x, &mut sys.k.mem)); },
+  }
   free(sys.k.mem.bm);
   free(sys.k.procs);
   free(sys.k.q);

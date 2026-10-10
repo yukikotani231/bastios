@@ -1,6 +1,6 @@
 # BastiOS
 
-A small x86-64 kernel written in [Bastio](https://github.com/yukikotani231/bastiolang), a language whose memory safety is proved at compile time. It boots under QEMU, or from a GRUB image under BIOS or UEFI, and runs a shell on the serial console and, when the boot loader sets up a framebuffer, on the screen with a PS/2 keyboard.
+A small x86-64 kernel written in [Bastio](https://github.com/yukikotani231/bastiolang), a language whose memory safety is proved at compile time. It boots under QEMU, or from a GRUB image under BIOS or UEFI, and runs a shell on the serial console and, when the boot loader sets up a framebuffer, on the screen with a PS/2 or USB keyboard.
 
 ```
 BastiOS 0.2: 14016 pages of memory
@@ -70,7 +70,7 @@ Ctrl-A X quits QEMU at any time.
 
 To boot through a real boot loader, `make iso` builds `build/bastios.iso`. It is GRUB with the same kernel, as a hybrid image that boots from CD or USB under BIOS or UEFI. It needs `grub-mkrescue`, `xorriso` and `mtools`, plus GRUB's BIOS and UEFI files (`sudo apt-get install grub-pc-bin grub-efi-amd64-bin xorriso mtools`; add `ovmf` for UEFI in QEMU). `make run-iso` boots it in QEMU under BIOS and `make run-uefi` under UEFI firmware; both open a QEMU window, where the kernel draws its console on the 1024x768 framebuffer GRUB sets up and reads the PS/2 keyboard, while the serial console stays on your terminal. To write it to a USB stick, use `sudo dd if=build/bastios.iso of=/dev/sdX bs=4M` (check the device name first: dd overwrites it).
 
-On real hardware, mind the limits. It has only been tried in QEMU. The console is on the first serial port (COM1, 115200 baud) and, booted from the image, on the screen, if GRUB can give it a 32-bit linear framebuffer between 2 GiB and the I/O APIC, which is where PC firmware puts it. Keys come from a PS/2 keyboard, which many PCs without the port emulate for a USB keyboard; there is no USB driver. It needs a virtio or Intel e1000 (82540EM) network card and a virtio or legacy ATA disk to use either. It finds the other processors in the ACPI tables, under UEFI through the copy of the RSDP that GRUB passes; tables above 1 GiB leave it on one processor.
+On real hardware, mind the limits. It has only been tried in QEMU. The console is on the first serial port (COM1, 115200 baud) and, booted from the image, on the screen, if GRUB can give it a 32-bit linear framebuffer between 2 GiB and the I/O APIC, which is where PC firmware puts it. Keys come from a PS/2 keyboard or a USB keyboard on an xHCI (USB 3) controller's root port. The controller's registers must lie below 4 GiB (firmware with "above 4G decoding" may put them higher; the kernel says so at boot), and USB hubs and controllers that want more than four scratchpad pages are not supported. It needs a virtio or Intel e1000 (82540EM) network card and a virtio or legacy ATA disk to use either. It finds the other processors in the ACPI tables, under UEFI through the copy of the RSDP that GRUB passes; tables above 1 GiB leave it on one processor.
 
 ## Layout
 
@@ -79,7 +79,7 @@ How the pieces fit together (boot, memory, processes, the scheduler, system call
 | Path | What |
 | --- | --- |
 | `src/uart.bastio`, `src/pic.bastio`, `src/pit.bastio` | Device drivers: COM1, the 8259 interrupt controllers, the 100 Hz timer |
-| `src/fb.bastio`, `src/kbd.bastio`, `src/console.bastio` | The console: text on the boot loader's framebuffer (8x16 cells from the public-domain font in `src/font8x8.bin`), the PS/2 keyboard, and the two joined with COM1 |
+| `src/fb.bastio`, `src/kbd.bastio`, `src/xhci.bastio`, `src/console.bastio` | The console: text on the boot loader's framebuffer (8x16 cells from the public-domain font in `src/font8x8.bin`), the PS/2 keyboard, a USB keyboard on an xHCI controller, and all of them joined with COM1 |
 | `src/ata.bastio` | Disk driver: the first drive on the legacy ATA controller, in PIO mode |
 | `src/pages.bastio` | Physical page allocator (`Mem`: a bitmap proved to track the pool) |
 | `src/space.bastio` | Building, walking and tearing down user address spaces |
