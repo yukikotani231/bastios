@@ -1704,8 +1704,14 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
       return EBADF;
     }
     f = row_file(k.fs, d.x);
-    if f == NO_FILE {
+    if f == NO_FILE || d.x >= FD_ROWS {
       return EBADF;
+    }
+    // As on Linux: a file is mapped only if it was opened for reading, and
+    // a writable MAP_SHARED mapping only if for writing (and not O_APPEND).
+    let mode = fget(k.fs.ftab, d.x, FD_MODE);
+    if mode / O_READ % 2 == 0 || (flags % 4 == MAP_SHARED && prot / 2 % 2 == 1 && (mode / O_WRITE % 2 == 0 || mode / O_APPEND % 2 == 1)) {
+      return EACCES;
     }
   }
   let pages = (n + 4095) / 4096;
