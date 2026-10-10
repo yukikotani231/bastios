@@ -297,8 +297,6 @@ trap_common:
         mov     %ax, %ds
         mov     %ax, %es
         mov     120(%rsp), %rdi
-        call    eoi
-        mov     120(%rsp), %rdi
         call    bst_lapic_ack           /* smp.c: end-of-interrupt for local APIC vectors */
         testb   $3, 144(%rsp)
         jz      from_kernel
@@ -376,18 +374,5 @@ kernel_fault:
 3:      cli
         hlt
         jmp     3b
-
-/* Acknowledge a hardware interrupt (vectors 32-47) at the 8259 PICs. */
-eoi:
-        cmp     $32, %rdi
-        jb      1f
-        cmp     $48, %rdi
-        jae     1f
-        mov     $0x20, %al
-        cmp     $40, %rdi
-        jb      2f
-        out     %al, $0xA0
-2:      out     %al, $0x20
-1:      ret
 
         .section .note.GNU-stack,"",@progbits

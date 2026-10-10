@@ -8,6 +8,9 @@
 // before it is freed, the address space in CR3 is never freed, and every
 // buffer index and arithmetic step is in range.
 
+import "uart.bastio";
+import "pic.bastio";
+import "pit.bastio";
 import "console.bastio";
 import "pages.bastio";
 import "space.bastio";
@@ -19,17 +22,19 @@ import "linux.bastio";
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
 
-fn fault_name(con: &Serial, v: u64) {
+fn fault_name(con: &mut Uart, v: u64)
+  requires uart_ok(con)
+{
   if v == 0 {
-    puts(con, "divide error");
+    puts(&mut con, "divide error");
   } else if v == 6 {
-    puts(con, "invalid opcode");
+    puts(&mut con, "invalid opcode");
   } else if v == 13 {
-    puts(con, "general protection fault");
+    puts(&mut con, "general protection fault");
   } else if v == 14 {
-    puts(con, "page fault");
+    puts(&mut con, "page fault");
   } else {
-    puts(con, "exception");
+    puts(&mut con, "exception");
   }
 }
 
@@ -91,6 +96,16 @@ fn run_space(mmu: &mut Mmu, cpu: &mut Cpu, spaces: &mut Vec[Space], procs: &Buf,
   return v;
 }
 
+/// Acknowledges vector `v` at the interrupt controllers if it is a
+/// hardware interrupt.
+fn ack(pic: &mut Pic, v: u64)
+  requires pic_ok(pic)
+{
+  if V_IRQ0 <= v && v < V_IRQ_END {
+    pic_eoi(&mut pic, v);
+  }
+}
+
 // The files the file system starts with, built into the kernel image.
 const NINIT: u64 = 2;
 
@@ -108,8 +123,8 @@ fn init_data(i: u64) -> Str {
   return include_bytes("../files/about");
 }
 
-fn install_files(con: &Serial, k: &mut Kernel)
-  requires kok(k)
+fn install_files(con: &mut Uart, k: &mut Kernel)
+  requires uart_ok(con) && kok(k)
   ensures kok(k)
 {
   let mut i = 0;
@@ -117,9 +132,9 @@ fn install_files(con: &Serial, k: &mut Kernel)
     invariant i <= NINIT && kok(k)
   {
     if !vfs_install(&mut k.fs, &mut k.mem, init_name(i), init_data(i)) {
-      puts(con, "cannot install file ");
-      puts(con, init_name(i));
-      puts(con, "\r\n");
+      puts(&mut con, "cannot install file ");
+      puts(&mut con, init_name(i));
+      puts(&mut con, "\r\n");
     }
     i = i + 1;
   }
@@ -132,16 +147,26 @@ fn tick(t: u64) -> u64 {
   return t;
 }
 
-fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 {
-  puts(con, "\r\nBastiOS 0.2: ");
-  put_num(con, pool_size(pool));
-  puts(con, " pages of memory, ");
+fn main(ports: &mut Ports, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 {
+  // Every device the kernel drives, with the I/O ports it owns. The ports
+  // are claimed here, once: no two drivers can own the same port, and no
+  // code can touch a port that was not claimed.
+  let mut con = Uart { io: port_claim(&mut ports, COM1, 8) };
+  let mut pic = Pic { master: port_claim(&mut ports, PIC1, 2), slave: port_claim(&mut ports, PIC2, 2) };
+  let mut pit = Pit { io: port_claim(&mut ports, PIT, 4) };
+  let disk = disk_mount(ata_new(&mut ports));
+  uart_init(&mut con);
+  pic_init(&mut pic);
+  pit_init(&mut pit, 100);
+  puts(&mut con, "\r\nBastiOS 0.2: ");
+  put_num(&mut con, pool_size(pool));
+  puts(&mut con, " pages of memory, ");
   let cpus = cpu_count(cpu);
-  put_num(con, cpus);
+  put_num(&mut con, cpus);
   if cpus == 1 {
-    puts(con, " processor\r\n");
+    puts(&mut con, " processor\r\n");
   } else {
-    puts(con, " processors\r\n");
+    puts(&mut con, " processors\r\n");
   }
   // The allocator takes the pool for as long as the kernel runs and gives
   // it back at power off.
@@ -163,57 +188,62 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
     vec_push(&mut fpus, Fpu::None);
     q = q + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), ticks: 0, cpus: cpus, fs: vfs_new() };
-  install_files(con, &mut k);
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), ticks: 0, cpus: cpus, fs: vfs_new(disk) };
+  install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
-    puts(con, "cannot start the shell\r\n");
+    puts(&mut con, "cannot start the shell\r\n");
   }
   let mut cur = 1;
   let mut running = true;
   while running
     invariant kok(k) && mmu_root(mmu) == KERNEL_ROOT && cur < NPROC
   {
-    drain(con, &mut k.q);
+    drain(&mut con, &mut k.q);
     wake_readers(&mut k.procs, &mut k.q);
     let p = pick(k.procs, cur);
     if p == 0 {
       if live_count(k.procs) == 0 {
         running = false;
-      } else if cpu_idle(&mut cpu) == V_TIMER {
-        k.ticks = tick(k.ticks);
+      } else {
+        let v = cpu_idle(&mut cpu);
+        ack(&mut pic, v);
+        if v == V_TIMER {
+          k.ticks = tick(k.ticks);
+        }
       }
     } else {
       let v = run(&mut mmu, &mut cpu, &mut k.spaces, &mut k.fpus, &mut k.procs, p);
+      ack(&mut pic, v);
       cur = p;
       if v == V_TIMER {
         k.ticks = tick(k.ticks);
         pset(&mut k.procs, p, F_TICKS, tick(pget(k.procs, p, F_TICKS)));
         cur = (p + 1) % NPROC;
       } else if v == V_SYSCALL {
-        let r = syscall(con, &mut k, mmu, p);
+        let r = syscall(&mut con, &mut k, mmu, p);
         if r == SWITCH {
           cur = (p + 1) % NPROC;
         } else if r == POWEROFF {
           running = false;
         }
       } else if v == V_LINUX {
-        if linux_syscall(con, &mut k, mmu, p) == SWITCH {
+        if linux_syscall(&mut con, &mut k, mmu, p) == SWITCH {
           cur = (p + 1) % NPROC;
         }
       } else if v < 32 {
-        puts(con, "\r\n[pid ");
-        put_num(con, p);
-        puts(con, " (");
-        puts(con, prog_name(pget(k.procs, p, F_PROG)));
-        puts(con, "): ");
-        fault_name(con, v);
-        puts(con, " at rip ");
-        put_hex(con, pget(k.procs, p, F_REGS + R_RIP));
+        puts(&mut con, "\r\n[pid ");
+        put_num(&mut con, p);
+        puts(&mut con, " (");
+        puts(&mut con, prog_name(pget(k.procs, p, F_PROG)));
+        puts(&mut con, "): ");
+        fault_name(&mut con, v);
+        puts(&mut con, " at rip ");
+        put_hex(&mut con, pget(k.procs, p, F_REGS + R_RIP));
         if v == 14 {
-          puts(con, ", address ");
-          put_hex(con, pget(k.procs, p, F_REGS + 19));
+          puts(&mut con, ", address ");
+          put_hex(&mut con, pget(k.procs, p, F_REGS + 19));
         }
-        puts(con, "; killed]\r\n");
+        puts(&mut con, "; killed]\r\n");
         terminate(&mut k, mmu, p, 128 + v);
         cur = (p + 1) % NPROC;
       }
@@ -236,13 +266,18 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
     drop_fpu(&mut k.mem, vec_pop(&mut k.fpus));
   }
   vec_free(k.fpus);
-  vfs_free(k.fs, &mut k.mem);
-  puts(con, "BastiOS: ");
-  put_num(con, count_free(k.mem.bm));
-  puts(con, " pages free at power off\r\n");
+  let ata = vfs_free(k.fs, &mut k.mem);
+  puts(&mut con, "BastiOS: ");
+  put_num(&mut con, count_free(k.mem.bm));
+  puts(&mut con, " pages free at power off\r\n");
   free(k.mem.bm);
   free(k.procs);
   free(k.q);
   pool = k.mem.pool;
+  port_release(&mut ports, con.io);
+  port_release(&mut ports, pic.master);
+  port_release(&mut ports, pic.slave);
+  port_release(&mut ports, pit.io);
+  ata_free(&mut ports, ata);
   return 0;
 }

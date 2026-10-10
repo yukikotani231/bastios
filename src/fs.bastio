@@ -3,17 +3,18 @@
 // system calls copy user memory into the buffer or out of it
 // (`usermem.bastio`), and the file systems below only ever see the buffer.
 //
-// There is one file system today, the in-memory one (`ramfs.bastio`). Each
-// open file records which file system it is on (FS_RAM), so a second one,
-// such as a file system on a block device, slots in as another field of
-// `Vfs` and another branch in the few functions below that dispatch on
-// FD_FS. Nothing above this file changes.
+// There are two file systems: the in-memory one (`ramfs.bastio`) and the
+// one on the ATA disk (`diskfs.bastio`). Names that start with "disk/" are
+// on the disk; every other name is in memory. Each open file records which
+// file system it is on (FD_FS), and the few functions below dispatch on it;
+// nothing above this file knows there are two.
 //
 // The table has NFD rows per process; a process names its files by row
 // number (its file descriptor), so one process can never reach another's.
 
 import "pages.bastio";
 import "ramfs.bastio";
+import "diskfs.bastio";
 
 const NFD: u64 = 8;                   // open files per process
 const FD_ROWS: u64 = 128;             // NPROC * NFD
@@ -28,6 +29,8 @@ const FD_OFF: u64 = 2;                // the offset the next read or write uses
 const FD_MODE: u64 = 3;               // O_READ | O_WRITE | O_APPEND
 
 const FS_RAM: u64 = 1;
+const FS_DISK: u64 = 2;
+const DISK_PREFIX: u64 = 5;           // "disk/"
 
 // Open flags (the system call ABI).
 const O_READ: u64 = 1;
@@ -42,26 +45,43 @@ struct Vfs {
   ram: Vec[Node],       // the in-memory file system
   ftab: Buf,            // open files: FD_ROWS rows of FD_STRIDE words
   xfer: Bytes,          // the transfer buffer
+  disk: DiskFs,         // the file system on the disk
 }
 
 spec fn vfs_ok(v: &Vfs) -> bool {
-  nodes_ok(v.ram) && len(v.ftab) == FTAB_LEN && blen(v.xfer) == XFER
+  nodes_ok(v.ram) && len(v.ftab) == FTAB_LEN && blen(v.xfer) == XFER && disk_ok(v.disk)
 }
 
-fn vfs_new() -> Vfs
+fn vfs_new(disk: DiskFs) -> Vfs
+  requires disk_ok(disk)
   ensures vfs_ok(result)
 {
-  return Vfs { ram: ram_new(), ftab: alloc(FTAB_LEN), xfer: balloc(XFER) };
+  return Vfs { ram: ram_new(), ftab: alloc(FTAB_LEN), xfer: balloc(XFER), disk: disk };
 }
 
-/// Frees everything (at power off); every file's pages go back.
-fn vfs_free(v: Vfs, mem: &mut Mem)
+/// Frees everything (at power off): every in-memory file's pages go back,
+/// and the disk driver is handed back so its ports can be released.
+fn vfs_free(v: Vfs, mem: &mut Mem) -> Ata
   requires vfs_ok(v) && mem_ok(mem)
-  ensures mem_ok(mem)
+  ensures mem_ok(mem) && ata_ok(result)
 {
   ram_free(v.ram, &mut mem);
   free(v.ftab);
   bfree(v.xfer);
+  return disk_unmount(v.disk);
+}
+
+/// Is the name in the first n bytes of the transfer buffer on the disk
+/// ("disk/" and at least one more byte)?
+fn on_disk(v: &Vfs, n: u64) -> bool
+  requires vfs_ok(v) && n <= XFER
+  ensures result ==> DISK_PREFIX < n
+{
+  if n <= DISK_PREFIX {
+    return false;
+  }
+  return bget(v.xfer, 0) == 100 && bget(v.xfer, 1) == 105 && bget(v.xfer, 2) == 115
+    && bget(v.xfer, 3) == 107 && bget(v.xfer, 4) == 47;
 }
 
 fn fget(t: &Buf, row: u64, f: u64) -> u64
@@ -77,15 +97,15 @@ fn fset(t: &mut Buf, row: u64, f: u64, x: u64)
   t = set(t, row * FD_STRIDE + f, x);
 }
 
-/// Is any row open on ramfs node i?
-fn node_open(t: &Buf, i: u64) -> bool
+/// Is any row open on node i of file system fs?
+fn node_open(t: &Buf, fs: u64, i: u64) -> bool
   requires len(t) == FTAB_LEN
 {
   let mut r = 0;
   while r < FD_ROWS
     invariant r <= FD_ROWS
   {
-    if fget(t, r, FD_FS) == FS_RAM && fget(t, r, FD_NODE) == i {
+    if fget(t, r, FD_FS) == fs && fget(t, r, FD_NODE) == i {
       return true;
     }
     r = r + 1;
@@ -110,6 +130,9 @@ fn vfs_open(v: &mut Vfs, mem: &mut Mem, base: u64, flags: u64, n: u64) -> u64
   }
   if fd >= NFD {
     return NO_FD;
+  }
+  if on_disk(v, n) {
+    return disk_open(&mut v, base + fd, flags, n);
   }
   let mut i = ram_find(&mut v.ram, v.xfer, n);
   if i >= NFILES {
@@ -136,6 +159,34 @@ fn vfs_open(v: &mut Vfs, mem: &mut Mem, base: u64, flags: u64, n: u64) -> u64
   fset(&mut v.ftab, base + fd, FD_OFF, 0);
   fset(&mut v.ftab, base + fd, FD_MODE, flags % (2 * O_APPEND));
   return fd;
+}
+
+/// vfs_open for a name on the disk, into the free row `row`.
+fn disk_open(v: &mut Vfs, row: u64, flags: u64, n: u64) -> u64
+  requires vfs_ok(v) && row < FD_ROWS && DISK_PREFIX < n && n <= XFER
+  ensures vfs_ok(v)
+  ensures result < NFD || result == NO_FD
+{
+  let mut i = disk_find(v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX);
+  if i >= DSLOTS {
+    if flags / O_CREATE % 2 == 0 {
+      return NO_FD;
+    }
+    i = disk_create(&mut v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX);
+    if i >= DSLOTS {
+      return NO_FD;
+    }
+  }
+  if flags / O_TRUNC % 2 == 1 && flags / O_WRITE % 2 == 1 {
+    if !disk_truncate(&mut v.disk, i) {
+      return NO_FD;
+    }
+  }
+  fset(&mut v.ftab, row, FD_FS, FS_DISK);
+  fset(&mut v.ftab, row, FD_NODE, i);
+  fset(&mut v.ftab, row, FD_OFF, 0);
+  fset(&mut v.ftab, row, FD_MODE, flags % (2 * O_APPEND));
+  return row % NFD;
 }
 
 /// Closes a row. Returns false if it was not open.
@@ -179,11 +230,18 @@ fn vfs_read(v: &mut Vfs, row: u64, n: u64) -> u64
   ensures vfs_ok(v)
   ensures result <= n || result == NO_FD
 {
-  if fget(v.ftab, row, FD_FS) != FS_RAM || fget(v.ftab, row, FD_MODE) / O_READ % 2 == 0 {
+  if fget(v.ftab, row, FD_MODE) / O_READ % 2 == 0 {
     return NO_FD;
   }
   let i = fget(v.ftab, row, FD_NODE);
-  if i >= NFILES {
+  if fget(v.ftab, row, FD_FS) == FS_DISK && i < DSLOTS {
+    let r = disk_read(&mut v.disk, i, fget(v.ftab, row, FD_OFF), &mut v.xfer, n);
+    if r == NO_DISK_FILE {
+      return NO_FD;
+    }
+    return r;
+  }
+  if fget(v.ftab, row, FD_FS) != FS_RAM || i >= NFILES {
     return NO_FD;
   }
   let mut got = NO_FD;
@@ -207,11 +265,23 @@ fn vfs_write(v: &mut Vfs, mem: &mut Mem, row: u64, n: u64) -> u64
   ensures vfs_ok(v) && mem_ok(mem)
   ensures result <= n || result == NO_FD
 {
-  if fget(v.ftab, row, FD_FS) != FS_RAM || fget(v.ftab, row, FD_MODE) / O_WRITE % 2 == 0 {
+  if fget(v.ftab, row, FD_MODE) / O_WRITE % 2 == 0 {
     return NO_FD;
   }
   let i = fget(v.ftab, row, FD_NODE);
-  if i >= NFILES {
+  if fget(v.ftab, row, FD_FS) == FS_DISK && i < DSLOTS {
+    let mut off = fget(v.ftab, row, FD_OFF);
+    if fget(v.ftab, row, FD_MODE) / O_APPEND % 2 == 1 {
+      off = disk_size(v.disk, i);
+    }
+    let w = disk_write(&mut v.disk, i, off, v.xfer, n);
+    if w == NO_DISK_FILE {
+      return NO_FD;
+    }
+    vfs_advance(&mut v, row, off, w);
+    return w;
+  }
+  if fget(v.ftab, row, FD_FS) != FS_RAM || i >= NFILES {
     return NO_FD;
   }
   let mut put = NO_FD;
@@ -268,8 +338,15 @@ fn vfs_unlink(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
   requires vfs_ok(v) && mem_ok(mem) && n <= XFER
   ensures vfs_ok(v) && mem_ok(mem)
 {
+  if on_disk(v, n) {
+    let d = disk_find(v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX);
+    if d >= DSLOTS || node_open(v.ftab, FS_DISK, d) {
+      return false;
+    }
+    return disk_remove(&mut v.disk, d);
+  }
   let i = ram_find(&mut v.ram, v.xfer, n);
-  if i >= NFILES || node_open(v.ftab, i) {
+  if i >= NFILES || node_open(v.ftab, FS_RAM, i) {
     return false;
   }
   ram_remove(&mut v.ram, &mut mem, i);
@@ -282,6 +359,13 @@ fn vfs_stat(v: &mut Vfs, n: u64) -> u64
   requires vfs_ok(v) && n <= XFER
   ensures vfs_ok(v)
 {
+  if on_disk(v, n) {
+    let d = disk_find(v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX);
+    if d >= DSLOTS {
+      return NO_FILE;
+    }
+    return disk_size(v.disk, d);
+  }
   let i = ram_find(&mut v.ram, v.xfer, n);
   if i >= NFILES {
     return NO_FILE;
@@ -291,14 +375,27 @@ fn vfs_stat(v: &mut Vfs, n: u64) -> u64
 
 /// Copies the name of directory entry i into the start of the transfer
 /// buffer. Returns its length, 0 for an unused entry, or NO_FILE past the
-/// last entry.
+/// last entry. Entries 0 to NFILES - 1 are in memory, the next DSLOTS on
+/// the disk (their names start with "disk/").
 fn vfs_dirent(v: &mut Vfs, i: u64) -> u64
   requires vfs_ok(v)
   ensures vfs_ok(v)
   ensures result <= XFER || result == NO_FILE
 {
-  if i >= NFILES {
+  if i >= NFILES + DSLOTS {
     return NO_FILE;
+  }
+  if i >= NFILES {
+    let d = disk_name(v.disk, i - NFILES, &mut v.xfer, DISK_PREFIX);
+    if d == NO_DISK_FILE {
+      return 0;
+    }
+    bset(&mut v.xfer, 0, 100);
+    bset(&mut v.xfer, 1, 105);
+    bset(&mut v.xfer, 2, 115);
+    bset(&mut v.xfer, 3, 107);
+    bset(&mut v.xfer, 4, 47);
+    return DISK_PREFIX + d;
   }
   let n = ram_name(&mut v.ram, i, &mut v.xfer);
   if n == NO_FILE {

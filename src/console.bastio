@@ -1,16 +1,20 @@
 // Console output helpers for the kernel's own messages.
 
-fn puts(con: &Serial, s: Str) {
+fn puts(con: &mut Uart, s: Str)
+  requires uart_ok(con)
+{
   let mut i = 0;
   while i < slen(s)
     invariant i <= slen(s)
   {
-    serial_write(con, sget(s, i));
+    uart_write(&mut con, sget(s, i));
     i = i + 1;
   }
 }
 
-fn put_num(con: &Serial, n: u64) {
+fn put_num(con: &mut Uart, n: u64)
+  requires uart_ok(con)
+{
   let mut p = 1;
   while p <= n / 10
     invariant p >= 1
@@ -18,28 +22,34 @@ fn put_num(con: &Serial, n: u64) {
     p = p * 10;
   }
   let mut q = p;
-  while q > 0 {
-    serial_write(con, 48 + (n / q) % 10);
+  while q > 0
+  {
+    uart_write(&mut con, 48 + (n / q) % 10);
     q = q / 10;
   }
 }
 
-fn put_hex(con: &Serial, n: u64) {
-  puts(con, "0x");
+fn put_hex(con: &mut Uart, n: u64)
+  requires uart_ok(con)
+{
+  puts(&mut con, "0x");
   let mut q = 0x1000000000000000;
-  while q > 0 {
+  while q > 0
+  {
     let d = (n / q) % 16;
     if d < 10 {
-      serial_write(con, 48 + d);
+      uart_write(&mut con, 48 + d);
     } else {
-      serial_write(con, 87 + d);
+      uart_write(&mut con, 87 + d);
     }
     q = q / 16;
   }
 }
 
 // `n` right-aligned in a field of `w` characters.
-fn put_num_pad(con: &Serial, n: u64, w: u64) {
+fn put_num_pad(con: &mut Uart, n: u64, w: u64)
+  requires uart_ok(con)
+{
   let mut digits = 1;
   let mut q = n;
   while q >= 10
@@ -51,9 +61,10 @@ fn put_num_pad(con: &Serial, n: u64, w: u64) {
     }
   }
   let mut k = digits;
-  while k < w {
-    serial_write(con, 32);
+  while k < w
+  {
+    uart_write(&mut con, 32);
     k = k + 1;
   }
-  put_num(con, n);
+  put_num(&mut con, n);
 }

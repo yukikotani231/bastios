@@ -9,15 +9,23 @@ TIMEOUT=${TIMEOUT:-60}
 SMP=${SMP:-4}
 
 python3 - "$KERNEL" "$TIMEOUT" "$SMP" <<'PY'
-import subprocess, sys, time, select
+import os, re, subprocess, sys, tempfile, time, select
 
 kernel, timeout, smp = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
 
-def boot(cpus):
+# A blank disk for this run (sparse, so it costs nothing): BastiOS formats it
+# on the first boot that sees it, and a later boot must find the files.
+disk_dir = tempfile.TemporaryDirectory()
+disk = os.path.join(disk_dir.name, "disk.img")
+with open(disk, "wb") as f:
+    f.truncate(33 << 20)
+
+def boot(cpus, with_disk=False):
+    drive = ["-drive", f"file={disk},format=raw,if=ide,index=0"] if with_disk else []
     return subprocess.Popen(
         ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-         "-serial", "stdio", "-monitor", "none"],
+         "-serial", "stdio", "-monitor", "none"] + drive,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 deadline = time.time() + timeout
@@ -47,13 +55,21 @@ if read_until(b"bastios> ") and b"pages of memory, 1 processor\r\n" in out:
     print("ok   boots on one processor")
 else:
     print("FAIL boot on one processor"); fails += 1
+# This machine has no disk: names under disk/ cannot be created, and nothing
+# else breaks.
+mark = len(out)
+qemu.stdin.write(b"echo x > disk/a\r"); qemu.stdin.flush()
+if read_until(b"bastios> ", mark) and b"cannot open the file" in out[mark:]:
+    print("ok   no disk: disk/ files are refused")
+else:
+    print("FAIL no disk: disk/a"); fails += 1
 qemu.kill(); qemu.wait()
 print("---- one-processor transcript ----")
 print(out.decode(errors="replace").replace("\r", ""))
 
 # The rest runs on `smp` processors: the application processors are started
 # at boot and park; the shell and its programs run on the bootstrap one.
-qemu = boot(smp)
+qemu = boot(smp, with_disk=True)
 out = b""
 
 # (input line, expected text in the reply). The shell is a user process;
@@ -101,6 +117,11 @@ steps = [
     # console; the third field is what to wait for instead of the prompt.
     ("mtest", [b"mtest: malloc heap 75", b"mtest: file line 42"], b"type a line"),
     ("typed for mtest", b"mtest: got typed for mtest"),
+    # BusyBox's shell, unmodified, reading commands from the console.
+    ("ash", b"", b""),
+    ("echo $((6 * 7)) from ash", b"42 from ash", b"42 from ash"),
+    ("for i in 1 2 3; do echo n$i; done; test -z \"\" && echo empty", [b"n1", b"n3", b"empty"], b"empty"),
+    ("exit 5", b"[exit 5]"),
     ("sh", b"BastiOS 0.2 -- type"),
     ("exit", b""),
     ("mem", b"free pages"),
@@ -118,11 +139,17 @@ steps = [
     ("rm notes", b""),
     ("cat notes", b"no such file: notes"),
     ("rm notes", b"cannot remove notes"),
-    # Several pages, seeking, appending, holes, descriptor limits; it exits
-    # with "big" still open, so removing it shows that exit closed it.
-    ("fstest", b"fstest: ok"),
+    # Several pages, seeking, appending, holes, descriptor limits, first on
+    # the disk and then in memory; it exits with "big" still open, so
+    # removing it shows that exit closed it.
+    ("fstest", [b"fstest: disk ok", b"fstest: ok"]),
     ("rm big", b""),
+    ("rm disk/big", b""),
     ("ls", b"about"),
+    # A file on the disk; the next boot must still have it.
+    ("echo kept across boots > disk/note", b""),
+    ("ls", b"      18 disk/note"),
+    ("cat disk/note", b"kept across boots\r\n"),
     # Every page the files used is back once they are removed.
     ("mem", b"free pages"),
 ]
@@ -143,6 +170,24 @@ else:
         print("ok   both fpucheck processes kept xmm0")
     else:
         print("FAIL fpucheck: SSE state leaked between processes"); fails += 1
+    # The timer (src/pit.bastio) runs at 100 Hz and every tick is
+    # acknowledged at the interrupt controller (src/pic.bastio): ticks keep
+    # coming, about 100 a second. The window is wide because QEMU's clock
+    # under load is not exact.
+    def uptime():
+        mark = len(out)
+        qemu.stdin.write(b"uptime\r"); qemu.stdin.flush()
+        if not read_until(b"bastios> ", mark):
+            return None
+        m = re.search(rb"(\d+) ticks, \d+ s", out[mark:])
+        return int(m.group(1)) if m else None
+    t0, w0 = uptime(), time.time()
+    time.sleep(2)
+    t1, w1 = uptime(), time.time()
+    if t0 is not None and t1 is not None and 60 * (w1 - w0) <= t1 - t0 <= 200 * (w1 - w0):
+        print(f"ok   timer: {t1 - t0} ticks in {w1 - w0:.1f} s")
+    else:
+        print("FAIL timer ticks:", t0, t1); fails += 1
     # Every page the finished processes and removed files used must be
     # back in the pool.
     mem = [l.strip() for l in out.split(b"\n") if l.strip().endswith(b"free pages")]
@@ -152,13 +197,12 @@ else:
         print("FAIL page leak:", mem); fails += 1
     qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
     read_until(b"pages free at power off")
-import re
-boot = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
+booted = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
 off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
-if boot and off and boot.group(1) == off.group(1):
+if booted and off and booted.group(1) == off.group(1):
     print(f"ok   all {off.group(1).decode()} pages back in the pool at power off")
 else:
-    print("FAIL pages at power off:", boot and boot.group(1), off and off.group(1)); fails += 1
+    print("FAIL pages at power off:", booted and booted.group(1), off and off.group(1)); fails += 1
 try:
     code = qemu.wait(timeout=max(1, deadline - time.time()))
 except subprocess.TimeoutExpired:
@@ -169,6 +213,31 @@ if code == 33:
 else:
     print(f"FAIL halt: QEMU exit status {code}"); fails += 1
 print("---- serial transcript ----")
+print(out.decode(errors="replace").replace("\r", ""))
+
+# Boot again on the same disk: the file written above is still there.
+qemu = boot(1, with_disk=True)
+out = b""
+deadline = time.time() + timeout
+again = [
+    ("ls", b"      18 disk/note"),
+    ("cat disk/note", b"kept across boots\r\n"),
+    ("echo appended >> disk/note", b""),
+    ("cat disk/note", b"kept across boots\r\nappended\r\n"),
+    ("rm disk/note", b""),
+    ("cat disk/note", b"no such file: disk/note"),
+]
+if not read_until(b"bastios> "):
+    print("FAIL: no prompt after the second boot"); fails += 1
+else:
+    for line, want in again:
+        mark = len(out)
+        qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+        ok = read_until(b"bastios> ", mark) and want in out[mark:]
+        print(("ok  " if ok else "FAIL"), "(second boot)", repr(line))
+        fails += not ok
+qemu.kill(); qemu.wait()
+print("---- second boot transcript ----")
 print(out.decode(errors="replace").replace("\r", ""))
 print(f"---- {fails} failed ----")
 sys.exit(1 if fails else 0)

@@ -1,0 +1,216 @@
+// A driver for the first disk on the legacy ATA controller (primary bus,
+// master drive), in PIO mode with 28-bit sector numbers. It owns the bus's
+// eight command ports and its control port, and nothing else: the PortIo
+// capabilities say so, and the proof checks every access against them.
+//
+// The drive is polled with interrupts off (nIEN), like the rest of the
+// kernel. Every wait is bounded, so a missing or wedged drive makes an
+// operation fail instead of hanging the kernel.
+
+const ATA_IO: u64 = 0x1F0;
+const ATA_CTL: u64 = 0x3F6;
+
+// Command block registers (offsets from ATA_IO).
+const ATA_DATA: u64 = 0;
+const ATA_COUNT: u64 = 2;
+const ATA_LBA0: u64 = 3;
+const ATA_LBA1: u64 = 4;
+const ATA_LBA2: u64 = 5;
+const ATA_DRIVE: u64 = 6;
+const ATA_CMD: u64 = 7;               // status when read
+
+const ATA_BSY: u64 = 0x80;
+const ATA_DRQ: u64 = 0x08;
+const ATA_ERR: u64 = 0x01;
+const ATA_DF: u64 = 0x20;
+
+const ATA_READ: u64 = 0x20;
+const ATA_WRITE: u64 = 0x30;
+const ATA_FLUSH: u64 = 0xE7;
+const ATA_IDENTIFY: u64 = 0xEC;
+
+const SECTOR: u64 = 512;
+const LBA28_MAX: u64 = 0x10000000;
+const ATA_SPINS: u64 = 1000000;       // polls before giving up
+
+struct Ata {
+  io: PortIo,           // ports 0x1F0..0x1F7
+  ctl: PortIo,          // port 0x3F6
+  sectors: u64,         // the drive's size, 0 if there is no drive
+}
+
+spec fn ata_ok(a: &Ata) -> bool {
+  port_count(a.io) == 8 && port_count(a.ctl) == 1 && a.sectors <= LBA28_MAX
+}
+
+/// The status register, read through the control port so it does not
+/// acknowledge anything.
+fn ata_status(a: &mut Ata) -> u64
+  requires ata_ok(a)
+  ensures ata_ok(a) && a.sectors == old(a.sectors) && result <= 255
+{
+  return pio_in8(&mut a.ctl, 0);
+}
+
+/// Waits until the drive is not busy. Returns false on a timeout or an
+/// error, or if no drive answers (a floating bus reads 0xFF).
+fn ata_idle(a: &mut Ata) -> bool
+  requires ata_ok(a)
+  ensures ata_ok(a) && a.sectors == old(a.sectors)
+{
+  let sz = a.sectors;
+  let mut i = 0;
+  while i < ATA_SPINS
+    invariant ata_ok(a) && a.sectors == sz
+  {
+    let s = ata_status(&mut a);
+    if s == 0xFF {
+      return false;
+    }
+    if s / ATA_BSY % 2 == 0 {
+      return s / ATA_ERR % 2 == 0 && s / ATA_DF % 2 == 0;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+/// Waits until the drive wants data moved (DRQ) after a command.
+fn ata_ready(a: &mut Ata) -> bool
+  requires ata_ok(a)
+  ensures ata_ok(a) && a.sectors == old(a.sectors)
+{
+  let sz = a.sectors;
+  let mut i = 0;
+  while i < ATA_SPINS
+    invariant ata_ok(a) && a.sectors == sz
+  {
+    let s = ata_status(&mut a);
+    if s == 0xFF || s / ATA_ERR % 2 == 1 || s / ATA_DF % 2 == 1 {
+      return false;
+    }
+    if s / ATA_BSY % 2 == 0 && s / ATA_DRQ % 2 == 1 {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+/// Selects the drive and sector `lba` and issues `cmd` for one sector.
+fn ata_command(a: &mut Ata, lba: u64, cmd: u64) -> bool
+  requires ata_ok(a) && lba < LBA28_MAX && cmd <= 255
+  ensures ata_ok(a) && a.sectors == old(a.sectors)
+{
+  if !ata_idle(&mut a) {
+    return false;
+  }
+  pio_out8(&mut a.io, ATA_DRIVE, 0xE0 + lba / 0x1000000);
+  pio_out8(&mut a.io, ATA_COUNT, 1);
+  pio_out8(&mut a.io, ATA_LBA0, lba % 256);
+  pio_out8(&mut a.io, ATA_LBA1, lba / 256 % 256);
+  pio_out8(&mut a.io, ATA_LBA2, lba / 65536 % 256);
+  pio_out8(&mut a.io, ATA_CMD, cmd);
+  return ata_ready(&mut a);
+}
+
+/// Claims the bus and asks the drive its size. A missing drive leaves
+/// `sectors` at 0, and every later operation on it fails.
+fn ata_new(ports: &mut Ports) -> Ata
+  requires forall k: u64 :: ATA_IO <= k && k < ATA_IO + 8 ==> port_free(ports, k)
+  requires port_free(ports, ATA_CTL)
+  ensures ata_ok(result)
+{
+  let mut a = Ata { io: port_claim(&mut ports, ATA_IO, 8), ctl: port_claim(&mut ports, ATA_CTL, 1), sectors: 0 };
+  pio_out8(&mut a.ctl, 0, 2);                  // nIEN: no interrupts, we poll
+  pio_out8(&mut a.io, ATA_DRIVE, 0xA0);
+  if pio_in8(&mut a.io, ATA_CMD) == 0xFF {
+    return a;                                  // nothing on the bus
+  }
+  pio_out8(&mut a.io, ATA_COUNT, 0);
+  pio_out8(&mut a.io, ATA_LBA0, 0);
+  pio_out8(&mut a.io, ATA_LBA1, 0);
+  pio_out8(&mut a.io, ATA_LBA2, 0);
+  pio_out8(&mut a.io, ATA_CMD, ATA_IDENTIFY);
+  if pio_in8(&mut a.io, ATA_CMD) == 0 {
+    return a;                                  // no drive
+  }
+  if !ata_ready(&mut a) {
+    return a;
+  }
+  // 256 words of identity; words 60 and 61 hold the 28-bit sector count.
+  let mut w = 0;
+  let mut lo = 0;
+  let mut hi = 0;
+  while w < 256
+    invariant w <= 256 && ata_ok(a) && lo <= 65535 && hi <= 65535
+  {
+    let v = pio_in16(&mut a.io, ATA_DATA);
+    if w == 60 {
+      lo = v;
+    }
+    if w == 61 {
+      hi = v;
+    }
+    w = w + 1;
+  }
+  let n = lo + hi * 65536;
+  if n <= LBA28_MAX {
+    a.sectors = n;
+  }
+  return a;
+}
+
+/// Gives the bus's ports back (at power off).
+fn ata_free(ports: &mut Ports, a: Ata)
+  requires ata_ok(a)
+{
+  port_release(&mut ports, a.io);
+  port_release(&mut ports, a.ctl);
+}
+
+/// Reads sector `lba` into buf[0..512]. Returns false if the drive fails
+/// or the sector is past its end.
+fn ata_read(a: &mut Ata, lba: u64, buf: &mut Bytes) -> bool
+  requires ata_ok(a) && blen(buf) >= SECTOR
+  ensures ata_ok(a) && a.sectors == old(a.sectors) && blen(buf) == old(blen(buf))
+{
+  if lba >= a.sectors || !ata_command(&mut a, lba, ATA_READ) {
+    return false;
+  }
+  let l = blen(buf);
+  let sz = a.sectors;
+  let mut w = 0;
+  while w < 256
+    invariant w <= 256 && ata_ok(a) && a.sectors == sz && blen(buf) == l && l >= SECTOR
+  {
+    let v = pio_in16(&mut a.io, ATA_DATA);
+    bset(&mut buf, 2 * w, v % 256);
+    bset(&mut buf, 2 * w + 1, v / 256);
+    w = w + 1;
+  }
+  return true;
+}
+
+/// Writes buf[0..512] to sector `lba` and waits until the drive has it.
+fn ata_write(a: &mut Ata, lba: u64, buf: &Bytes) -> bool
+  requires ata_ok(a) && blen(buf) >= SECTOR
+  ensures ata_ok(a) && a.sectors == old(a.sectors)
+{
+  if lba >= a.sectors || !ata_command(&mut a, lba, ATA_WRITE) {
+    return false;
+  }
+  let sz = a.sectors;
+  let mut w = 0;
+  while w < 256
+    invariant w <= 256 && ata_ok(a) && a.sectors == sz
+  {
+    pio_out16(&mut a.io, ATA_DATA, bget(buf, 2 * w) + 256 * bget(buf, 2 * w + 1));
+    w = w + 1;
+  }
+  if !ata_idle(&mut a) {
+    return false;
+  }
+  pio_out8(&mut a.io, ATA_CMD, ATA_FLUSH);
+  return ata_idle(&mut a);
+}
