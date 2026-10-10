@@ -1468,6 +1468,22 @@ fn vfs_in_mount(v: &mut Vfs, n: u64, ro_only: bool) -> bool
   return false;
 }
 
+/// Does file f (a vfs_lookup handle) lie in a mount? Uses the transfer
+/// buffer.
+fn vfs_file_in_mount(v: &mut Vfs, f: u64) -> bool
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  if f >= NFILES {
+    return false;                           // on the disk
+  }
+  let l = ram_name(&mut v.ram, f, &mut v.xfer);
+  if l == NO_FILE {
+    return false;
+  }
+  return vfs_in_mount(&mut v, l, false);
+}
+
 /// Is anything under the in-memory directory named by the first n bytes
 /// of the transfer buffer?
 fn vfs_ram_has_children(v: &mut Vfs, n: u64) -> bool
