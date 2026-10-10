@@ -14,6 +14,19 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Added
 
+- Fixes from the LTP file-system tests: a path through a file fails with
+  `ENOTDIR`, a loop of symbolic links with `ELOOP`, a too-long name with
+  `ENAMETOOLONG`, and a bad directory descriptor with `EBADF`/`ENOTDIR`
+  (they all said `ENOENT`). `renameat2` takes `RENAME_EXCHANGE`, `mknod`
+  makes regular files, one `write` moves more than 4096 bytes, `"link/"`
+  names what the link points to, `linkat` across file systems says
+  `EXDEV`, `newfstatat` rejects unknown flags, a full in-memory table
+  makes `mkdir` say `ENOSPC`, and `O_TMPFILE` is refused with
+  `EOPNOTSUPP` (it opened the directory).
+- `/proc/cpuinfo`, `/proc/filesystems`, `/proc/PID/mounts` (so
+  `/proc/self/mounts`) and three read-only sysctls:
+  `/proc/sys/kernel/tainted`, `pid_max` and `printk`.
+- The in-memory file system holds 128 files and directories (it held 32).
 - `sendmsg` and `recvmsg`, with `SCM_RIGHTS` passing a descriptor over an
   `AF_UNIX` socket (one per message, one in flight per direction);
   `MSG_PEEK` on TCP and unix sockets; `shutdown` on TCP (sends the FIN)
