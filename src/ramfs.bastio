@@ -29,6 +29,7 @@ struct RamFile {
   pages: Vec[Slot],     // page i holds bytes 4096 * i .. 4096 * (i + 1)
   mode: u64,            // permission bits, such as 0644
   mtime: u64,           // last change, in seconds
+  link: u64,            // a hard link: the node it names (and nothing else here is used); NFILES if not
 }
 
 enum Node { Free, File(RamFile) }
@@ -399,7 +400,7 @@ fn ram_create(v: &mut Vec[Node], name: &Bytes, n: u64, dir: bool, now: u64) -> u
           bset(&mut nm, j, bget(name, j));
           j = j + 1;
         }
-        put_node(&mut v, i, Node::File(RamFile { name: nm, dir: dir, size: 0, pages: vec_new[Slot](), mode: mode, mtime: now }));
+        put_node(&mut v, i, Node::File(RamFile { name: nm, dir: dir, size: 0, pages: vec_new[Slot](), mode: mode, mtime: now, link: NFILES }));
         return i;
       },
       Node::File(f) => { put_node(&mut v, i, Node::File(f)); },
@@ -647,4 +648,81 @@ fn ram_free(v: Vec[Node], mem: &mut Mem)
     }
   }
   vec_free(t);
+}
+
+// ---------------------------------------------------------------- hard links
+
+/// The node that node i is a hard link to, or NFILES if it is not one
+/// (or is free).
+fn ram_link_of(v: &mut Vec[Node], i: u64) -> u64
+  requires nodes_ok(v) && i < NFILES
+  ensures nodes_ok(v) && result <= NFILES
+{
+  let mut r = NFILES;
+  match take_node(&mut v, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      if f.link < NFILES {
+        r = f.link;
+      }
+      put_node(&mut v, i, Node::File(f));
+    },
+  }
+  return r;
+}
+
+/// Creates a hard link named by the first n bytes of `name` to node t (a
+/// file, not a link: the caller checks). Returns the new node or NFILES.
+fn ram_link(v: &mut Vec[Node], name: &Bytes, n: u64, t: u64, now: u64) -> u64
+  requires nodes_ok(v) && n <= blen(name) && t < NFILES
+  ensures nodes_ok(v) && result <= NFILES
+{
+  let i = ram_create(&mut v, name, n, false, now);
+  if i >= NFILES {
+    return NFILES;
+  }
+  match take_node(&mut v, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      let mut g = f;
+      g.link = t;
+      put_node(&mut v, i, Node::File(g));
+    },
+  }
+  return i;
+}
+
+/// A node that is a hard link to node t, or NFILES if there is none.
+fn ram_link_to(v: &mut Vec[Node], t: u64) -> u64
+  requires nodes_ok(v)
+  ensures nodes_ok(v) && result <= NFILES
+{
+  let mut i = 0;
+  while i < NFILES
+    invariant i <= NFILES && nodes_ok(v)
+  {
+    if ram_link_of(&mut v, i) == t {
+      return i;
+    }
+    i = i + 1;
+  }
+  return NFILES;
+}
+
+/// How many hard links name node t, besides its own name.
+fn ram_links(v: &mut Vec[Node], t: u64) -> u64
+  requires nodes_ok(v)
+  ensures nodes_ok(v) && result <= NFILES
+{
+  let mut c = 0;
+  let mut i = 0;
+  while i < NFILES
+    invariant i <= NFILES && c <= i && nodes_ok(v)
+  {
+    if ram_link_of(&mut v, i) == t {
+      c = c + 1;
+    }
+    i = i + 1;
+  }
+  return c;
 }
