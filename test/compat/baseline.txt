@@ -230,7 +230,10 @@ t_lock: the owner relocks freely
 t_lock: unlocking a middle part splits it
 t_ltp2: F_GETFL reports the access mode of a file
 t_ltp2: F_SETFL O_APPEND appends to a file
+t_ltp2: ITIMER_VIRTUAL sends SIGVTALRM
 t_ltp2: MSG_OOB on UDP is EOPNOTSUPP
+t_ltp2: SIOCGIFCONF lists lo
+t_ltp2: a FIFO opened O_RDWR reads what it writes
 t_ltp2: a file reads 8 KiB in one read
 t_ltp2: a page fault runs the SIGSEGV handler
 t_ltp2: accept never hands out a closed connection
@@ -245,6 +248,7 @@ t_ltp2: personality is kept
 t_ltp2: send on an unconnected TCP socket is EPIPE
 t_ltp2: sendto with a huge address length is EINVAL
 t_mem: 64 MiB of address space
+t_mem: MAP_SHARED anonymous across fork
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
 t_mem: file for mapping

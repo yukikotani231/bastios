@@ -561,6 +561,12 @@ const TCSETS: u64 = 0x5402;
 const TCSETSF: u64 = 0x5404;              // TCSETSW (0x5403) lies between
 const TIOCGWINSZ: u64 = 0x5413;
 const FIONREAD: u64 = 0x541B;
+const SIOCATMARK: u64 = 0x8905;
+const SIOCGIFCONF: u64 = 0x8912;
+const SIOCGIFFLAGS: u64 = 0x8913;
+const SIOCSIFFLAGS: u64 = 0x8914;
+const IFREQ_SIZE: u64 = 40;
+const IFF_LO: u64 = 0x49;              // IFF_UP | IFF_LOOPBACK | IFF_RUNNING
 const TIOCGPGRP: u64 = 0x540F;
 const TIOCSPGRP: u64 = 0x5410;
 const TIOCGSID: u64 = 0x5429;
@@ -637,6 +643,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     xfer_u64(&mut k.fs.xfer, 0, smaller(pi_get(k.pipes, d.x, 1), PIPE_CAP));
     return lx_put_out(&mut k, pid, arg, 4);
   }
+  if d.kind == K_SOCK && (req == SIOCATMARK || (req >= SIOCGIFCONF && req <= SIOCSIFFLAGS)) {
+    return sock_ioctl(&mut k, pid, fd, req, arg);
+  }
   if d.kind != K_CONSOLE {
     return ENOTTY;
   }
@@ -689,6 +698,62 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     return lx_put_out(&mut k, pid, arg, WINSIZE_SIZE);
   }
   return EINVAL;
+}
+
+/// The socket ioctls: SIOCATMARK on TCP (never at urgent data, which is
+/// never kept), and the interface list, which names only the loopback "lo":
+/// SIOCGIFCONF lists it, SIOCGIFFLAGS reports it up, SIOCSIFFLAGS is
+/// accepted and changes nothing.
+fn sock_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if req == SIOCATMARK {
+    if !is_tcp(k, pid, fd) {
+      return ENOTTY;                        // as Linux: only a stream socket knows the mark
+    }
+    xfer_u64(&mut k.fs.xfer, 0, 0);
+    return lx_put_out(&mut k, pid, arg, 4);
+  }
+  if req == SIOCGIFCONF {
+    // struct ifconf: int ifc_len, then the buffer's address.
+    if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, 16) != 16 {
+      return EFAULT;
+    }
+    let room = get_u64(k.fs.xfer, 0) % 4294967296;
+    let buf = get_u64(k.fs.xfer, 8);
+    let mut n = 0;
+    if buf == 0 || room >= IFREQ_SIZE {
+      n = IFREQ_SIZE;                       // with no buffer, the size needed
+    }
+    if buf != 0 && n > 0 {
+      lx_fill(&mut k, 0, IFREQ_SIZE);
+      bset(&mut k.fs.xfer, 0, 108);         // "lo"
+      bset(&mut k.fs.xfer, 1, 111);
+      bset(&mut k.fs.xfer, 16, 2);          // ifr_addr: AF_INET 127.0.0.1
+      bset(&mut k.fs.xfer, 20, 127);
+      bset(&mut k.fs.xfer, 23, 1);
+      let r = lx_put_out(&mut k, pid, buf, IFREQ_SIZE);
+      if r != 0 {
+        return r;
+      }
+    }
+    xfer_u64(&mut k.fs.xfer, 0, n);
+    return lx_put_out(&mut k, pid, arg, 4);
+  }
+  // SIOCGIFFLAGS, SIOCSIFFLAGS: struct ifreq, the name in its first 16 bytes.
+  if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, IFREQ_SIZE) != IFREQ_SIZE {
+    return EFAULT;
+  }
+  if bget(k.fs.xfer, 0) != 108 || bget(k.fs.xfer, 1) != 111 || bget(k.fs.xfer, 2) != 0 {
+    return 18446744073709551597;            // ENODEV (src/lxmore.bastio comes later)
+  }
+  if req == SIOCSIFFLAGS {
+    return 0;
+  }
+  bset(&mut k.fs.xfer, 16, cast[u8](IFF_LO));
+  bset(&mut k.fs.xfer, 17, 0);
+  return lx_put_out(&mut k, pid, arg, IFREQ_SIZE);
 }
 
 /// Sets the first n transfer bytes to v.
@@ -967,7 +1032,7 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64
   ensures kok(k) && con_ok(con)
 {
   let d = fd_look(k, pid, fd);
-  if d.kind == K_PIPE_W {
+  if d.kind == K_PIPE_W || (d.kind == K_PIPE_R && pipe_both(k, pid, fd)) {
     return pipe_write(&mut k, pid, d.x, va, n);
   }
   if d.kind == K_EVENT {
@@ -1433,7 +1498,7 @@ fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
 /// Maps fresh zero pages at window pages [from, to) of process pid, where
 /// none is mapped yet. Returns false if memory ran out (the pages mapped so
 /// far stay, and go back when the process exits).
-fn lx_map_pages(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, from: u64, to: u64) -> bool
+fn lx_map_pages(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, from: u64, to: u64, sh: bool) -> bool
   requires mem_ok(m) && spaces_ok(spaces) && pid < NPROC && to <= WPAGES
   ensures mem_ok(m) && spaces_ok(spaces)
 {
@@ -1442,7 +1507,7 @@ fn lx_map_pages(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, from: u64, to: u
     Space::Mapped(mut root) => {
       let mut ok = false;
       if pt_has(root, 1) {
-        ok = pt_borrow(&mut root, 1, map_l3, &mut m, from, to);
+        ok = pt_borrow(&mut root, 1, map_l3, &mut m, from, to, sh);
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return ok;
@@ -1453,17 +1518,17 @@ fn lx_map_pages(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, from: u64, to: u
 /// lx_map_pages below the top-level table, in place: other threads may be
 /// running on the space, and the new pages appear to them as they are
 /// mapped.
-fn map_l3(l3: &mut PageTable, m: &mut Mem, from: u64, to: u64) -> bool
+fn map_l3(l3: &mut PageTable, m: &mut Mem, from: u64, to: u64, sh: bool) -> bool
   requires pt_level(l3) == 3 && mem_ok(m) && to <= WPAGES
   ensures mem_ok(m)
 {
   if !pt_has(l3, 0) {
     return false;
   }
-  return pt_borrow(&mut l3, 0, map_l2, &mut m, from, to);
+  return pt_borrow(&mut l3, 0, map_l2, &mut m, from, to, sh);
 }
 
-fn map_l2(l2: &mut PageTable, m: &mut Mem, from: u64, to: u64) -> bool
+fn map_l2(l2: &mut PageTable, m: &mut Mem, from: u64, to: u64, sh: bool) -> bool
   requires pt_level(l2) == 2 && mem_ok(m) && to <= WPAGES
   ensures mem_ok(m)
 {
@@ -1472,7 +1537,7 @@ fn map_l2(l2: &mut PageTable, m: &mut Mem, from: u64, to: u64) -> bool
   while ok && p < to
     invariant mem_ok(m) && pt_level(l2) == 2 && to <= WPAGES
   {
-    ok = w_map(&mut m, &mut l2, p);
+    ok = w_map(&mut m, &mut l2, p, sh);
     p = p + 1;
   }
   return ok;
@@ -1493,7 +1558,7 @@ fn stack_reach(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, va: u64) -> bool
   if va < USER_BASE + STACK_FIRST * 4096 || va >= USER_BASE + STACK_LOW * 4096 {
     return false;
   }
-  return lx_map_pages(&mut m, &mut spaces, pid, (va - USER_BASE) / 4096, WPAGES);
+  return lx_map_pages(&mut m, &mut spaces, pid, (va - USER_BASE) / 4096, WPAGES, false);
 }
 
 /// A page fault of process p: if it touched a stack page not mapped yet,
@@ -1524,7 +1589,7 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
     return USER_BASE + cur;
   }
   let new = want - USER_BASE;
-  if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, (cur + 4095) / 4096, (new + 4095) / 4096) {
+  if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, (cur + 4095) / 4096, (new + 4095) / 4096, false) {
     return USER_BASE + cur;
   }
   pset(&mut k.procs, pid, F_BRK, new);
@@ -1534,7 +1599,10 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
 /// mmap: private memory, taken downward from the stack, or at addr with
 /// MAP_FIXED. A file mapping is a copy of the file's bytes from `off` (the
 /// rest of the last page zero), so writes to it never reach the file, even
-/// with MAP_SHARED. The address hint without MAP_FIXED is ignored.
+/// with MAP_SHARED (they are written back at msync, munmap and exit). An
+/// anonymous MAP_SHARED mapping is made of shared pages, which fork maps
+/// in the child too instead of copying. The address hint without MAP_FIXED
+/// is ignored.
 fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -1559,6 +1627,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     }
   }
   let pages = (n + 4095) / 4096;
+  let sh = anon && flags % 4 == MAP_SHARED;
   let mut at = 0;
   if flags / MAP_FIXED % 2 == 1 {
     if addr % 4096 != 0 || addr < USER_BASE || addr - USER_BASE > STACK_FIRST * 4096 || pages > STACK_FIRST - (addr - USER_BASE) / 4096 {
@@ -1569,7 +1638,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     map_forget(&mut k, pid, at / 4096, at / 4096 + pages, false);
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
     hole_cut(&mut k, pid, at / 4096, at / 4096 + pages);
-    if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages) {
+    if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
       return ENOMEM;
     }
   } else {
@@ -1577,7 +1646,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // A hole munmap left first (src/lxmem.bastio): its pages are unmapped.
     let h = hole_take(&mut k, pid, pages);
     if h < STACK_FIRST {
-      if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, h, h + pages) {
+      if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, h, h + pages, sh) {
         hole_add(&mut k, pid, h, h + pages);
         return ENOMEM;
       }
@@ -1595,7 +1664,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // Fresh PROT_NONE memory is only address space: its pages are mapped
     // when an mprotect makes them usable (lx_mprotect), and touching it
     // before that faults, as on Linux.
-    if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096) {
+    if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096, sh) {
       return ENOMEM;
     }
     pset(&mut k.procs, pid, F_MMAP, at);

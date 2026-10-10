@@ -1010,7 +1010,7 @@ print(out.decode(errors="replace").replace("\r", "")[-400:])
 # A USB keyboard on an xHCI controller (src/xhci.bastio), on a machine with
 # no PS/2 controller at all (i8042=off), so the keys can only come over
 # USB. They are sent through QMP; at power off the controller is reset and
-# its thirteen pages are back.
+# its fourteen pages are back.
 import json
 qmp_path = os.path.join(disk_dir.name, "qmp.sock")
 qemu = boot(1, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci", "-device", "usb-kbd",
@@ -1059,16 +1059,22 @@ print(out.decode(errors="replace").replace("\r", "")[-400:])
 # the partition, no boot image) on the same xHCI controller as the USB
 # keyboard: the partition is the disk, ahead of the virtio disk, which must
 # be left untouched, and the keyboard is read through the disk's driver.
-# A second boot finds the file; test/fsck.py then checks the partition.
+# The controller's event ring raises V_DISK by MSI-X, so a process waiting
+# for the stick sleeps. A second boot finds the file, with the stick and
+# the keyboard behind two tiers of USB hubs (as a stick in a real PC's
+# front panel often is); test/fsck.py then checks the partition.
 stick = os.path.join(disk_dir.name, "stick.img")
 subprocess.run(["tools/mkusb.py", stick, "--blank", "--mib", "33"], check=True, stdout=subprocess.DEVNULL)
 before = open(disk, "rb").read()
-def stick_boot(name, steps, keys=False, image=None):
+def stick_boot(name, steps, keys=False, image=None, hubs=False):
     global qemu, out, deadline, fails
+    usb = ["-device", "usb-storage,bus=xh.0,drive=st", "-device", "usb-kbd,bus=xh.0"]
+    if hubs:
+        usb = ["-device", "usb-hub,bus=xh.0,port=1", "-device", "usb-hub,bus=xh.0,port=1.2",
+               "-device", "usb-storage,bus=xh.0,port=1.2.3,drive=st", "-device", "usb-kbd,bus=xh.0,port=1.4"]
     qemu = boot(1, virtio=True, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci,id=xh",
-                                       "-drive", f"file={image or stick},format=raw,if=none,id=st",
-                                       "-device", "usb-storage,bus=xh.0,drive=st", "-device", "usb-kbd,bus=xh.0",
-                                       "-qmp", f"unix:{qmp_path},server,nowait"])
+                                       "-drive", f"file={image or stick},format=raw,if=none,id=st"] + usb +
+                                      ["-qmp", f"unix:{qmp_path},server,nowait"])
     out = b""
     deadline = time.time() + timeout
     ok = read_until(b"bastios> ")
@@ -1076,6 +1082,7 @@ def stick_boot(name, steps, keys=False, image=None):
         good = ok and b"usb: a USB disk without a BastiOS partition; not used\r\n" in out and b"disk: virtio\r\n" in out
     else:
         good = ok and b"disk: USB, the BastiOS partition (67584 sectors)\r\n" in out
+        good = good and b"disk: completions by message-signalled interrupt\r\n" in out
     print(("ok  " if good else "FAIL"), f"({name} boot) {'the stick is not used' if image else 'the disk is the stick'}")
     fails += not good
     if ok and keys:
@@ -1129,7 +1136,8 @@ stick_boot("USB disk", [
     ("rm disk/big", b""),
     ("diskbench", b"read 2 MiB: "),
 ], keys=True)
-stick_boot("USB disk again", [("cat disk/s", b"on the stick\r\n")])
+stick_boot("USB disk behind hubs", [("cat disk/s", b"on the stick\r\n"), ("fstest", b"fstest: disk ok")],
+           keys=True, hubs=True)
 f, n = map(int, subprocess.check_output(["tools/mkusb.py", "--find", stick]).split())
 part = os.path.join(disk_dir.name, "part.img")
 with open(stick, "rb") as src, open(part, "wb") as dst:

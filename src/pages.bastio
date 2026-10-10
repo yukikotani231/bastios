@@ -103,3 +103,19 @@ fn give_page(m: &mut Mem, f: Frame)
   }
   pool_give(&mut m.pool, f);
 }
+
+/// Gives up one reference to a shared page (a MAP_SHARED page several
+/// address spaces map). The last one gives the page back, which the
+/// bitmap then records as free.
+fn drop_shared(m: &mut Mem, s: Shared)
+  requires mem_ok(m)
+  ensures mem_ok(m)
+{
+  let i = shared_drop(&mut m.pool, s);
+  if i < NPAGES {
+    m.bm = set(m.bm, i, 1);
+    if i < m.low {
+      m.low = i;
+    }
+  }
+}

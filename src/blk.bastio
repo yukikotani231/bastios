@@ -276,7 +276,7 @@ fn blk_irq(b: &Blk) -> bool {
     Blk::Ahci(h) => { return h.irq; },
     Blk::Ata(a) => { return false; },
     Blk::Virtio(v) => { return v.irq; },
-    Blk::Usb(x) => { return false; },
+    Blk::Usb(x) => { return x.irq; },
   }
 }
 

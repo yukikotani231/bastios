@@ -387,7 +387,7 @@ fn init_stack(m: &mut Mem, l2: &mut PageTable, e: Elf, base: u64, args: &Bytes, 
   while p < WPAGES
     invariant pt_level(l2) == 2 && mem_ok(m)
   {
-    if !w_map(&mut m, &mut l2, p) {
+    if !w_map(&mut m, &mut l2, p, false) {
       return false;
     }
     p = p + 1;
@@ -501,7 +501,7 @@ fn elf_space(m: &mut Mem, v: &mut Vfs, src: Src, e: Elf, isrc: Src, ie: Elf, arg
           while ok && p < (s.off + s.memsz + 4095) / 4096
             invariant pt_level(l2) == 2 && mem_ok(m) && s.off + s.memsz <= IMAGE_MAX
           {
-            ok = w_map(&mut m, &mut l2, p);
+            ok = w_map(&mut m, &mut l2, p, false);
             p = p + 1;
           }
           if ok {
