@@ -678,6 +678,38 @@ session("third", False, [
     ("rm disk/note", b""),
     ("cat disk/note", b"no such file: disk/note"),
 ])
+# Power cuts. user/crashme.bastio checks what the last run left on the disk
+# (disk/log a whole number of correct records, disk/snap empty or whole,
+# disk/t absent or empty), then keeps appending, rewriting and creating.
+# QEMU is killed part-way through each run, on ATA and on virtio in turn;
+# every boot after a cut must find the file system consistent. Killing
+# QEMU keeps every sector write that completed (it is in the host's page
+# cache), so this cuts power between two sector writes; it cannot tear a
+# sector in half.
+cuts = [0.05, 0.4, 0.15, 0.9, 0.6, 1.2]
+for n, delay in enumerate(cuts):
+    qemu = boot(1, with_disk=n % 2 == 0, virtio=n % 2 == 1)
+    out = b""
+    deadline = time.time() + timeout
+    mark = 0
+    ok = read_until(b"bastios> ")
+    if ok:
+        mark = len(out)
+        qemu.stdin.write(b"crashme\r"); qemu.stdin.flush()
+        ok = read_until(b" records\r\n", mark) and b"crashme: clean" in out[mark:]
+    time.sleep(delay)
+    qemu.kill(); qemu.wait()
+    line = next((l for l in out[mark:].split(b"\n") if b"crashme:" in l), b"(nothing)")
+    print(("ok  " if ok else "FAIL"), f"power cut {n + 1} after {delay} s:", line.strip().decode(errors="replace"))
+    fails += not ok
+# A last run that is left to finish, then the files are removed.
+qemu = boot(1, with_disk=True)
+session("after the power cuts", False, [
+    ("crashme", b"crashme: done"),
+    ("rm disk/log", b""),
+    ("rm disk/snap", b""),
+    ("ls", b"about"),
+])
 print(f"---- {fails} failed ----")
 sys.exit(1 if fails else 0)
 PY

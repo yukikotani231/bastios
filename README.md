@@ -91,7 +91,7 @@ How the pieces fit together (boot, memory, processes, the scheduler, system call
 | `src/syscall.bastio` | System calls (BastiOS ABI, `int 0x80`), including the file calls |
 | `src/linux.bastio` | Linux system calls (the `syscall` instruction) |
 | `src/main.bastio` | Boot, the scheduler loop, fault handling, power off |
-| `user/*.bastio` | User programs: `sh`, `hello`, `spin` (never yields; shows preemption), `true` (exits at once), `bench` (times syscalls, spawn and write in timer ticks), `fstest` (exercises the file calls) |
+| `user/*.bastio` | User programs: `sh`, `hello`, `spin` (never yields; shows preemption), `true` (exits at once), `bench` (times syscalls, spawn and write in timer ticks), `fstest` (exercises the file calls), `crashme` (checks the disk files, then keeps writing; the power-cut test kills it) |
 | `user/lib/file.bastio` | The file system calls for user programs |
 | `files/` | Files installed in the file system at boot (built into the kernel image) |
 | `user/fault.S` | A user program that reads kernel memory, to test fault isolation |

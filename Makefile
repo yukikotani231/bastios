@@ -24,7 +24,7 @@ build build/user:
 #    link it at USER_BASE behind its header, and flatten it to a raw image
 #    that the kernel embeds with include_bytes.
 UCFLAGS := $(CFLAGS) -fpie
-UPROGS  := sh hello spin true bench fstest
+UPROGS  := sh hello spin true bench fstest crashme
 UASM    := fault straddle
 ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime ash
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf)
