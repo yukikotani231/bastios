@@ -111,6 +111,7 @@ t_file: ftruncate shrink
 t_file: lseek SEEK_CUR
 t_file: lseek SEEK_END
 t_file: lseek SEEK_SET
+t_file: link
 t_file: lstat sees the link
 t_file: open O_CREAT|O_TRUNC
 t_file: open missing is ENOENT

@@ -665,9 +665,13 @@ fn put_stat(k: &mut Kernel, pid: u64, buf: u64, m: Meta) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  let mut nlink = 1;
+  if m.ino >= INO_FILES && m.ino < INO_FILES + NFILES + DSLOTS {
+    nlink = vfs_nlink(&mut k.fs, m.ino - INO_FILES);   // a file and its hard links
+  }
   lx_fill(&mut k, 0, STAT_SIZE);
   xfer_u64(&mut k.fs.xfer, 8, m.ino);         // st_ino
-  xfer_u64(&mut k.fs.xfer, 16, 1);            // st_nlink
+  xfer_u64(&mut k.fs.xfer, 16, nlink);        // st_nlink
   xfer_u64(&mut k.fs.xfer, 24, m.mode);       // st_mode (and st_uid 0)
   xfer_u64(&mut k.fs.xfer, 48, m.size);       // st_size
   xfer_u64(&mut k.fs.xfer, 56, 4096);         // st_blksize
