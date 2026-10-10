@@ -54,6 +54,25 @@ fn uc_set(k: &mut Kernel, c: u64, f: u64, v: u64)
   k.ux = set(k.ux, c * UX_W + f, v);
 }
 
+/// Channel c's head and count as a core Ring over its UX_CAP bytes of
+/// k.uxb. The stored words are clamped, so the ring is well formed
+/// whatever they hold.
+fn uc_ring(k: &Kernel, c: u64) -> Ring
+  requires kok(k) && c < UX_N
+  ensures ring_ok(result) && result.cap == UX_CAP
+{
+  return Ring { h: uc_get(k, c, 0) % UX_CAP, n: smaller(uc_get(k, c, 1), UX_CAP), cap: UX_CAP };
+}
+
+/// Stores ring r back as channel c's head and count.
+fn uc_keep(k: &mut Kernel, c: u64, r: &Ring)
+  requires kok(k) && c < UX_N
+  ensures kok(k)
+{
+  uc_set(&mut k, c, 0, r.h);
+  uc_set(&mut k, c, 1, r.n);
+}
+
 fn ul_get(k: &Kernel, l: u64, f: u64) -> u64
   requires kok(k) && l < UX_LIS && f < UXL_W
 {
@@ -65,6 +84,24 @@ fn ul_set(k: &mut Kernel, l: u64, f: u64, v: u64)
   ensures kok(k)
 {
   k.ux = set(k.ux, UXL0 + l * UXL_W + f, v);
+}
+
+/// Listener l's backlog head and count as a core Ring over its
+/// UX_BACKLOG description words (clamped, so always well formed).
+fn ul_ring(k: &Kernel, l: u64) -> Ring
+  requires kok(k) && l < UX_LIS
+  ensures ring_ok(result) && result.cap == UX_BACKLOG
+{
+  return Ring { h: ul_get(k, l, 2) % UX_BACKLOG, n: smaller(ul_get(k, l, 3), UX_BACKLOG), cap: UX_BACKLOG };
+}
+
+/// Stores ring r back as listener l's backlog head and count.
+fn ul_keep(k: &mut Kernel, l: u64, r: &Ring)
+  requires kok(k) && l < UX_LIS
+  ensures kok(k)
+{
+  ul_set(&mut k, l, 2, r.h);
+  ul_set(&mut k, l, 3, r.n);
 }
 
 /// The description in flight on channel c (SCM_RIGHTS): its number + 1,
@@ -208,13 +245,13 @@ fn ux_close(k: &mut Kernel, x: u64, w: u64) -> u64
     }
     return 0;
   } else if (mode == UM_BOUND || mode == UM_LISTEN) && x < UX_LIS {
-    let head = ul_get(k, x, 2) % UX_BACKLOG;
-    let count = smaller(ul_get(k, x, 3), UX_BACKLOG);
+    let r = ul_ring(k, x);
+    let count = r.n;
     let mut i = 0;
     while i < count
-      invariant i <= count && count <= UX_BACKLOG && head < UX_BACKLOG && kok(k) && x < UX_LIS
+      invariant i <= count && count == r.n && ring_ok(r) && r.cap == UX_BACKLOG && kok(k) && x < UX_LIS
     {
-      let h = ul_get(k, x, 4 + (head + i) % UX_BACKLOG);
+      let h = ul_get(k, x, 4 + ring_slot(r, i));
       // Only the backlog holds a reference to a connection not yet
       // accepted: close it here.
       if h < OFD_N && of_get(k.ofd, h, 0) == OF_UNIX {
@@ -466,8 +503,8 @@ fn ux_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if ul_get(k, l, 0) != UL_LISTEN {
     return ECONNREFUSED;
   }
-  let count = ul_get(k, l, 3);
-  if count >= UX_BACKLOG {
+  let mut r = ul_ring(k, l);
+  if ring_full(r) {
     if u.nb == 1 {
       return EAGAIN;
     }
@@ -485,9 +522,9 @@ fn ux_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   of_set(&mut k.ofd, u.h, 3, u.nb + 2 * UM_CONN);
   of_set(&mut k.ofd, mine, 0, OF_FREE);
   of_set(&mut k.ofd, mine, 1, 0);
-  let head = ul_get(k, l, 2) % UX_BACKLOG;
-  ul_set(&mut k, l, 4 + (head + count) % UX_BACKLOG, theirs);
-  ul_set(&mut k, l, 3, count + 1);
+  let s = ring_push(&mut r);
+  ul_set(&mut k, l, 4 + s, theirs);
+  ul_keep(&mut k, l, r);
   return 0;
 }
 
@@ -504,17 +541,16 @@ fn ux_accept(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, flags: u64
   if u.mode != UM_LISTEN {
     return EINVAL;
   }
-  let count = ul_get(k, u.x, 3);
-  if count == 0 {
+  let mut bl = ul_ring(k, u.x);
+  if ring_empty(bl) {
     if u.nb == 1 {
       return EAGAIN;
     }
     return SK_WAIT;
   }
-  let head = ul_get(k, u.x, 2) % UX_BACKLOG;
-  let h = ul_get(k, u.x, 4 + head);
-  ul_set(&mut k, u.x, 2, (head + 1) % UX_BACKLOG);
-  ul_set(&mut k, u.x, 3, count - 1);
+  let s = ring_pop(&mut bl);
+  let h = ul_get(k, u.x, 4 + s);
+  ul_keep(&mut k, u.x, bl);
   if h >= OFD_N || of_get(k.ofd, h, 0) != OF_UNIX {
     return ECONNABORTED;
   }
@@ -581,7 +617,8 @@ fn ux_send(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool) -
   if n == 0 && !u.dg {
     return 0;
   }
-  let count = smaller(uc_get(k, c, 1), UX_CAP);
+  let mut r = uc_ring(k, c);
+  let count = r.n;
   let mut lead = 0;                         // the length a datagram starts with
   if u.dg {
     if n > XFER || n + 2 > UX_CAP {
@@ -602,13 +639,13 @@ fn ux_send(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool) -
       return EFAULT;
     }
   }
-  let head = uc_get(k, c, 0) % UX_CAP;
   if u.dg {
-    bset(&mut k.uxb, c * UX_CAP + (head + count) % UX_CAP, cast[u8](got % 256));
-    bset(&mut k.uxb, c * UX_CAP + (head + count + 1) % UX_CAP, cast[u8](got / 256 % 256));
+    bset(&mut k.uxb, c * UX_CAP + ring_slot(r, count), cast[u8](got % 256));
+    bset(&mut k.uxb, c * UX_CAP + ring_slot(r, count + 1), cast[u8](got / 256 % 256));
   }
-  ring_in(&mut k.uxb, c * UX_CAP, UX_CAP, (head + count + lead) % UX_CAP, k.fs.xfer, 0, got);
-  uc_set(&mut k, c, 1, count + lead + got);
+  ring_in(&mut k.uxb, c * UX_CAP, UX_CAP, ring_slot(r, count + lead), k.fs.xfer, 0, got);
+  ring_push_n(&mut r, lead + got);
+  uc_keep(&mut k, c, r);
   return got;
 }
 
@@ -628,7 +665,8 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
     return ENOTCONN;
   }
   let c = u.x % UX_N;
-  let count = smaller(uc_get(k, c, 1), UX_CAP);
+  let mut r = uc_ring(k, c);
+  let count = r.n;
   if count == 0 {
     if uc_get(k, c, 3) != 1 {
       return 0;
@@ -638,7 +676,6 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
     }
     return SK_WAIT;
   }
-  let head = uc_get(k, c, 0) % UX_CAP;
   let mut lead = 0;
   let mut avail = count;                    // the bytes this call may take
   if u.dg {
@@ -646,13 +683,13 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
       return EAGAIN;                        // never: datagrams go in whole
     }
     lead = 2;
-    let len = cast[u64](bget(k.uxb, c * UX_CAP + head)) + 256 * cast[u64](bget(k.uxb, c * UX_CAP + (head + 1) % UX_CAP));
+    let len = cast[u64](bget(k.uxb, c * UX_CAP + ring_slot(r, 0))) + 256 * cast[u64](bget(k.uxb, c * UX_CAP + ring_slot(r, 1)));
     avail = smaller(len, count - 2);
   } else if n == 0 {
     return 0;
   }
   let want = smaller(smaller(n, avail), XFER);
-  ring_out(&mut k.fs.xfer, 0, k.uxb, c * UX_CAP, UX_CAP, (head + lead) % UX_CAP, want);
+  ring_out(&mut k.fs.xfer, 0, k.uxb, c * UX_CAP, UX_CAP, ring_slot(r, lead), want);
   let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
   if put == NO_RESULT || put != want {
     return EFAULT;
@@ -671,8 +708,8 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
     if u.dg {
       used = avail;                         // the whole message goes
     }
-    uc_set(&mut k, c, 0, (head + lead + used) % UX_CAP);
-    uc_set(&mut k, c, 1, count - lead - used);
+    ring_pop_n(&mut r, lead + used);
+    uc_keep(&mut k, c, r);
   }
   return put;
 }
