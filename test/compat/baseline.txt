@@ -255,6 +255,12 @@ t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
 t_mem: file for mapping
 t_mem: futex across fork on a MAP_SHARED page
+t_mem: FUTEX_CMP_REQUEUE moves timed waiters across processes
+t_mem: FUTEX_CMP_REQUEUE with a negative count is EINVAL
+t_mem: FUTEX_WAKE on an unmapped word is EFAULT
+t_mem: mmap of a closed descriptor is EBADF
+t_mem: mmap of a file opened write-only is EACCES
+t_mem: writable MAP_SHARED of a read-only file is EACCES
 t_mem: madvise
 t_mem: malloc churn
 t_mem: mlock
@@ -419,6 +425,12 @@ t_sock2: signalfd carries a sigqueue value
 t_sock2: signalfd sees a blocked SIGCHLD
 t_sock2: sigqueue carries a value
 t_sock2: write after SHUT_WR is EPIPE
+t_sys: adjtimex reads and sets
+t_sys: clock_settime moves CLOCK_REALTIME
+t_sys: not root: EPERM
+t_sys: setdomainname
+t_sys: sethostname, uname, /proc/sys/kernel/hostname
+t_sys: settimeofday
 t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: GETNCNT counts a waiting process
 t_sysv: IPC_RMID ends a wait with EIDRM
