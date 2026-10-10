@@ -12,7 +12,17 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- A console on the screen and a PS/2 keyboard when booted from the ISO:
+  text drawn on the framebuffer GRUB sets up under BIOS or UEFI, keys read
+  from the i8042, alongside the serial console.
+
+### Changed
+
+- The device window is mapped from 2 GiB (it was 3 GiB), where UEFI
+  firmware puts the framebuffer. Needs bastiolang with `boot_fb`.
+- `make run-iso` and `make run-uefi` open a QEMU window.
 
 ## [0.2.0] - not yet tagged
 
