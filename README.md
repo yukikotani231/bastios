@@ -108,7 +108,7 @@ The proof covers everything in `src/` and `user/*.bastio`. Everything below it i
 
 v0.2, pre-release: the system call ABI, the disk format and the build can change. Known limits:
 - one lock for the whole kernel state; system calls from different processors wait for each other;
-- all user pages are mapped writable and executable (the image has no page-aligned sections yet), and `munmap` and `mprotect` change nothing;
+- user pages are always executable (`mprotect` sets only whether a page is writable), and `munmap` leaves a page mapped while another thread of the process is running;
 - a user window of 64 MiB per process (pages are mapped as a program asks for them, and `fork` copies every mapped page), at most 31 processes;
 - 128 files and directories in memory and 1023 under `disk/`, paths up to 255 bytes, files up to 64 MiB in memory and 1 GiB on disk, 16 open files per process; one disk, one command at a time; a write call returns once the disk has it, but work spread over several calls can be cut between them by a power cut;
 - running out of memory when starting a program fails the spawn cleanly, but the kernel's own arena (for `Buf`) still halts the machine when it runs out;
