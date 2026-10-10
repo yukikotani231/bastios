@@ -114,7 +114,11 @@ const S_IFREG_X: u64 = 0x81ED;              // a regular file, rwxr-xr-x
 const S_IFREG: u64 = 0x81A4;                // a regular file, rw-r--r--
 const S_IFMT_DIR: u64 = 0x4000;             // the type bits of a directory
 const S_IFMT_REG: u64 = 0x8000;             // and of a regular file
-const INO_FILES: u64 = 1000;                // inode numbers of files: this + the handle
+// Inode numbers: directories 1 + their DIR_* number (at most 1 + DIR_VFS +
+// VDIR_DISK), then the built-in programs, then files (past both), then
+// /proc (INO_PROC, 4096 up).
+const INO_PROGS: u64 = 1536;                // the built-in programs: this + the program
+const INO_FILES: u64 = 2048;                // files: this + the handle
 
 // ---------------------------------------------------------------- user memory
 

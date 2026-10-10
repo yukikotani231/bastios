@@ -87,7 +87,7 @@ How the pieces fit together (boot, memory, processes, the scheduler, system call
 | `src/space.bastio` | Building, walking and tearing down user address spaces |
 | `src/elf.bastio` | Loading static Linux x86-64 ELF executables: header checks, segments, the initial stack (argv, envp, auxv) |
 | `src/ramfs.bastio` | The in-memory file system: a flat table of files, each a vector of pages (a page never written is a hole and reads as zeros) |
-| `src/diskfs.bastio` | The file system on the disk (names under `disk/`): 4 KiB blocks, a directory of 64 entries, two levels of block maps per file, copy-on-write so a power cut never tears a write |
+| `src/diskfs.bastio` | The file system on the disk (names under `disk/`): 4 KiB blocks, a directory that grows to 1023 entries, two levels of block maps per file, copy-on-write so a power cut never tears a write |
 | `src/fs.bastio` | The layer above both file systems: per-process open-file table, the transfer buffer, and dispatch by name (`disk/...` or memory) |
 | `src/proc.bastio` | Kernel state (`Kernel` struct), console input queue, process table, program images, spawn and exit |
 | `src/usermem.bastio` | Copying between user memory and kernel byte buffers |
@@ -174,7 +174,7 @@ v0.2: processes, preemptive round-robin scheduling, system calls, fault isolatio
 - every processor runs the scheduler, but under one lock for the whole kernel state (`Lock[Sys]` in `src/main.bastio`); the kernel runs with interrupts off and handles each interrupt as an event in its scheduler loop;
 - all user pages are mapped writable and executable (the image has no page-aligned sections yet);
 - a user window of 64 MiB per process (pages are mapped as a program asks for them, and `fork` copies every mapped page), at most 15 processes;
-- files are simple: 128 files and directories in memory and 64 under `disk/`, paths up to 255 bytes, files up to 64 MiB in memory and 1 GiB on disk, 16 open files per process. The disk drivers poll one drive (NVMe, virtio, AHCI, or legacy ATA with 28-bit sector numbers), with no interrupts, one 4 KiB command at a time. File data goes through a 64-block cache, and a process waiting for the disk sleeps while others run. A write call returns only once the disk has it; each write call is copy-on-write and lands whole or not at all across a power cut, but work spread over several calls can be cut between them;
+- files are simple: 128 files and directories in memory and 1023 under `disk/`, paths up to 255 bytes, files up to 64 MiB in memory and 1 GiB on disk, 16 open files per process. The disk drivers poll one drive (NVMe, virtio, AHCI, or legacy ATA with 28-bit sector numbers), with no interrupts, one 4 KiB command at a time. File data goes through a 64-block cache, and a process waiting for the disk sleeps while others run. A write call returns only once the disk has it; each write call is copy-on-write and lands whole or not at all across a power cut, but work spread over several calls can be cut between them;
 - running out of memory when starting a program fails the spawn cleanly, but the kernel's own arena (for `Buf`) still halts the machine when it runs out.
 
 The direction is in bastiolang's [ROADMAP.md](https://github.com/yukikotani231/bastiolang/blob/main/ROADMAP.md) under "v3: toward a kernel".

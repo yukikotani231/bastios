@@ -27,6 +27,12 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
   `/proc/self/mounts`) and three read-only sysctls:
   `/proc/sys/kernel/tainted`, `pid_max` and `printk`.
 - The in-memory file system holds 128 files and directories (it held 32).
+- The disk's directory grows: up to 1023 files and directories under
+  `disk/` (it held 64). The format is now `BSTDISK3`, which names the
+  directory's extra blocks in the superblock; a `BSTDISK2` disk is mounted
+  as it is and upgraded in place. The power-cut test now grows the
+  directory while the power is cut, and `test/fsck.py` checks the new
+  blocks.
 - `sendmsg` and `recvmsg`, with `SCM_RIGHTS` passing a descriptor over an
   `AF_UNIX` socket (one per message, one in flight per direction);
   `MSG_PEEK` on TCP and unix sockets; `shutdown` on TCP (sends the FIN)
