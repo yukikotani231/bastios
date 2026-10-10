@@ -111,6 +111,7 @@ const S_IFREG: u64 = 0x81A4;                // a regular file, rw-r--r--
 const S_IFMT_DIR: u64 = 0x4000;             // the type bits of a directory
 const S_IFMT_REG: u64 = 0x8000;             // and of a regular file
 const INO_FILES: u64 = 1000;                // inode numbers of files: this + the handle
+const INO_FIFO: u64 = 900;                 // inode numbers of named pipes: this + the slot
 
 // ---------------------------------------------------------------- user memory
 
@@ -232,6 +233,8 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       r = lx_file_read(&mut k, pid, d.x, va, cnt);
     } else if d.kind == K_PIPE_R {
       r = pipe_read(&mut k, pid, d.x, va, cnt);
+    } else if d.kind == K_EVENT || d.kind == K_TIMER {
+      r = ev_read(&mut k, pid, d.kind, d.x, va, cnt);
     } else if d.kind == K_DEV && d.x >= PROC_DEV {
       r = proc_read(&mut k, pid, a, d.x, va, cnt);
     } else if d.kind == K_DEV {
@@ -247,6 +250,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     }
     if r == EAGAIN && !pipe_nonblock(k, pid, a) {
       return lx_retry(&mut k, pid, n);       // an empty pipe: wait for a writer
+    }
+    if r == DISK_RETRY {
+      return disk_retry(&mut k, pid, n);     // blocks not cached yet: wait for the disk
     }
     ret(&mut k.procs, pid, r);
     return KEEP;
@@ -267,6 +273,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     }
     if w == CON_FULL {
       return con_block(&mut k, pid, n);      // a full console: wait for the pump
+    }
+    if w == DISK_RETRY {
+      return disk_retry(&mut k, pid, n);     // blocks not cached yet: wait for the disk
     }
     ret(&mut k.procs, pid, w);
     if w == EPIPE {
@@ -304,16 +313,24 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_time_call(n) {
     return lx_time_call(&mut k, pid, n, was, a, b, c);
   }
+  if is_event_call(n) {
+    return lx_event_call(&mut k, pid, n, was, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
+  }
   if n == LX_FCNTL {
     ret(&mut k.procs, pid, lx_fcntl(&mut k, pid, a, b, c));
     return KEEP;
   }
-  if n == LX_OPEN {
-    ret(&mut k.procs, pid, lx_open(&mut k, pid, AT_FDCWD, a, b));
-    return KEEP;
-  }
-  if n == LX_OPENAT {
-    ret(&mut k.procs, pid, lx_open(&mut k, pid, a, b, c));
+  if n == LX_OPEN || n == LX_OPENAT {
+    let mut r = 0;
+    if n == LX_OPEN {
+      r = lx_open(&mut k, pid, AT_FDCWD, a, b);
+    } else {
+      r = lx_open(&mut k, pid, a, b, c);
+    }
+    if r == SK_WAIT {
+      return lx_retry(&mut k, pid, n);      // a FIFO's writer waits for a reader
+    }
+    ret(&mut k.procs, pid, r);
     return KEEP;
   }
   if n == LX_UNLINK || n == LX_UNLINKAT {
@@ -490,6 +507,9 @@ const TCGETS: u64 = 0x5401;
 const TCSETS: u64 = 0x5402;
 const TCSETSF: u64 = 0x5404;              // TCSETSW (0x5403) lies between
 const TIOCGWINSZ: u64 = 0x5413;
+const TIOCGPGRP: u64 = 0x540F;
+const TIOCSPGRP: u64 = 0x5410;
+const TIOCGSID: u64 = 0x5429;
 const TERMIOS_SIZE: u64 = 36;             // the kernel's struct termios
 const WINSIZE_SIZE: u64 = 8;
 
@@ -525,6 +545,19 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     bset(&mut k.fs.xfer, 21, 4);            // c_cc[VEOF] = Ctrl-D
     bset(&mut k.fs.xfer, 23, 1);            // c_cc[VMIN] = 1
     return lx_put_out(&mut k, pid, arg, TERMIOS_SIZE);
+  }
+  if req == TIOCGPGRP || req == TIOCGSID {
+    // The console's foreground group is whatever group asks: there is no
+    // job control to put one in the background.
+    let mut g = pgid_of(k.procs, pid);
+    if req == TIOCGSID {
+      g = sid_of(k.procs, pid);
+    }
+    xfer_u64(&mut k.fs.xfer, 0, g);
+    return lx_put_out(&mut k, pid, arg, 4);
+  }
+  if req == TIOCSPGRP {
+    return 0;                               // accepted: see TIOCGPGRP
   }
   if req == TIOCGWINSZ {
     lx_fill(&mut k, 0, WINSIZE_SIZE);
@@ -725,6 +758,9 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
   if got == NO_FD {
     return EBADF;
   }
+  if got == VFS_MISS {
+    return DISK_RETRY;                      // sleep until the disk catches up
+  }
   let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, got);
   if put == NO_RESULT || (put == 0 && got > 0) {
     return EFAULT;
@@ -742,6 +778,9 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64
   let d = fd_look(k, pid, fd);
   if d.kind == K_PIPE_W {
     return pipe_write(&mut k, pid, d.x, va, n);
+  }
+  if d.kind == K_EVENT {
+    return ev_write(&mut k, pid, d.x, va, n);
   }
   if d.kind == K_SOCK {
     return lx_sendto(&mut k, pid, fd, va, n, 0, 0);   // to the connected peer
@@ -781,6 +820,9 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64
   let w = vfs_write(&mut k.fs, &mut k.mem, d.x, got);
   if w == NO_FD {
     return EBADF;
+  }
+  if w == VFS_MISS {
+    return DISK_RETRY;                      // sleep until the disk catches up
   }
   return w;
 }

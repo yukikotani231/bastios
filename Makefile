@@ -33,7 +33,7 @@ build build/user:
 #    link it at USER_BASE behind its header, and flatten it to a raw image
 #    that the kernel embeds with include_bytes.
 UCFLAGS := $(CFLAGS) -fpie
-UPROGS  := sh hello spin true bench fstest crashme
+UPROGS  := sh hello spin true bench fstest crashme diskbench
 UASM    := fault straddle
 ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so
@@ -136,8 +136,7 @@ build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := src/uart.bastio src/fb.bastio src/kbd.bastio src/font8x8.bin src/card.bastio src/e1000.bastio src/pic.bastio src/pit.bastio src/hpet.bastio src/rtc.bastio src/console.bastio src/pages.bastio src/space.bastio src/elf.bastio src/ramfs.bastio src/ata.bastio src/pci.bastio src/virtq.bastio src/virtio_blk.bastio src/virtio_net.bastio src/net.bastio src/tcp.bastio src/blk.bastio src/diskfs.bastio src/fs.bastio \
-         src/proc.bastio src/usermem.bastio src/syscall.bastio src/linux.bastio src/lxproc.bastio src/lxfd.bastio src/lxdir.bastio src/lxsock.bastio src/lxtcp.bastio src/lxsig.bastio src/lxtime.bastio src/lxmisc.bastio src/lxdev.bastio src/lxprocfs.bastio src/main.bastio
+KSRCS := $(wildcard src/*.bastio) src/font8x8.bin
 KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
@@ -295,8 +294,15 @@ smpbench: build/bastios.elf
 threadbench: build/bastios.elf
 	test/threadbench.sh
 
+# Not part of `make test` either: disk timings for each driver.
+diskbench: build/bastios.elf
+	test/diskbench.sh
+
+iobench: build/bastios.elf
+	test/iobench.sh
+
 clean:
 	rm -rf build
 
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
-.PHONY: all run test fuzz smpbench threadbench compat compat-baseline compat-host clean
+.PHONY: all run test fuzz smpbench threadbench diskbench iobench compat compat-baseline compat-host clean

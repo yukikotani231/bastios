@@ -37,7 +37,7 @@ _s.bind(("127.0.0.1", 0))
 tcp_port = _s.getsockname()[1]
 _s.close()
 
-def boot(cpus, with_disk=False, virtio=False, nvme=False, ahci=False, net=False, subnet=None, card="virtio-net-pci", monitor=None, extra=()):
+def boot(cpus, with_disk=False, virtio=False, nvme=False, nvme4k=False, ahci=False, net=False, subnet=None, card="virtio-net-pci", monitor=None, extra=()):
     drive = ["-drive", f"file={disk},format=raw,if=ide,index=0"] if with_disk else []
     if virtio:
         # The same disk as a virtio block device (src/virtio.bastio): sectors
@@ -52,6 +52,12 @@ def boot(cpus, with_disk=False, virtio=False, nvme=False, ahci=False, net=False,
         drive = ["-machine", "q35", "-device", "pcie-root-port,id=rp1,chassis=1",
                  "-drive", f"file={disk},format=raw,if=none,id=nv",
                  "-device", "nvme,serial=bastios,drive=nv,bus=rp1"]
+    if nvme4k:
+        # The same disk as an NVMe drive with 4 KiB logical blocks: the
+        # driver still counts 512-byte sectors, so the bytes land where the
+        # other drivers put them.
+        drive = ["-drive", f"file={disk},format=raw,if=none,id=nv",
+                 "-device", "nvme,serial=bastios,drive=nv,logical_block_size=4096,physical_block_size=4096"]
     if ahci:
         # The same disk on the q35 machine's own AHCI controller
         # (src/ahci.bastio), which is function 2 of device 31.
@@ -228,10 +234,14 @@ steps = [
     ("ash -c 'while :; do echo y; done' | head -n 1; echo piped", b"\r\ny\r\npiped", b"\n# "),
     ("ash -c 'while :; do :; done'", b"^C", b"\n# ", b"\x03"),
     ("echo st=$?", b"st=130", b"\n# "),
-    # Time: clocks, nanosleep, poll that waits, select, and alarms and pause
-    # (user/mtime.c); the sleep applet; ash's read -t, a poll on the console
-    # that times out, then one that wakes when a line is typed.
-    ("mtime", [b"mtime: rang 3, selected, slept ", b"woke in time"], b"\n# "),
+    # A script with no #! line: execve says ENOEXEC, so ash runs it itself,
+    # through an execve of /proc/self/exe.
+    ("echo 'echo script $1' > /sc; chmod +x /sc; /sc ran; rm /sc", b"script ran", b"\n# "),
+    # Time: clocks, nanosleep, poll that waits, select, alarms and pause, and
+    # eventfd, timerfd and epoll (user/mtime.c); the sleep applet; ash's
+    # read -t, a poll on the console that times out, then one that wakes
+    # when a line is typed.
+    ("mtime", [b"mtime: rang 3, selected, slept ", b"woke in time, events ok"], b"\n# "),
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
     ("read -t 1 x; echo rt=$?", b"rt=1", b"\n# "),
     ("read -t 9 x; echo rt=$? x=$x", b"rt=0 x=late", b"\n# ", b"late\r"),
@@ -260,11 +270,11 @@ steps = [
     ("mkdir pd; chmod 700 pd; stat -c '%a %F' pd", b"\r\n700 directory\r\n", b"\n# "),
     ("rm pm; rmdir pd; echo cleaned$((1+1))", b"\r\ncleaned2\r\n", b"\n# "),
     # The *at calls relative to a directory descriptor, fchdir, and mmap
-    # of a file (user/mdir.c).
+    # of a file, EMFILE, and a named pipe (user/mdir.c).
     ("mdir", b"mdir: ok in /dx, mapped", b"\n# "),
     # Small calls: uname, readv, pread/pwrite, limits, sysinfo, statfs,
-    # getrandom, priorities, sessions (user/mmisc.c).
-    ("mmisc", b"mmisc: ok on Linux x86_64, signals", b"\n# "),
+    # getrandom, priorities, sessions, process groups, ttyname, pipe capacity (user/mmisc.c).
+    ("mmisc", b"mmisc: ok on Linux x86_64, signals, pipe 65536", b"\n# "),
     # posix_spawn: clone(CLONE_VM | CLONE_VFORK) lends the parent's
     # address space to the child until it execs or exits (user/mspawn.c).
     ("mspawn", [b"spawned 5", b"mspawn: ok, kept 1234, sh is POSIX"], b"\n# "),
@@ -610,6 +620,14 @@ else:
         print("ok   TCP: a refused connection says so")
     else:
         print("FAIL TCP refused"); fails += 1
+    # The same to this machine: the SYN and the reset both go round the
+    # loopback queue, never onto the wire.
+    mark = len(out)
+    qemu.stdin.write(b"tcpget 127.0.0.1 9 x\r"); qemu.stdin.flush()
+    if read_until(b"bastios> ", mark) and b"connection refused" in out[mark:]:
+        print("ok   TCP: loopback to a closed port is refused")
+    else:
+        print("FAIL TCP loopback refused"); fails += 1
     # TCP through Linux system calls (user/mtcp.c, musl): it listens,
     # accepts, reads a line naming a port on this machine and answers it;
     # then it connects to that port, writes, and reads the reply until the
@@ -812,6 +830,47 @@ session("AHCI", None, [
     ("rm disk/big", b""),
 ], halt=True, ready=ahci_found)
 
+# And on an NVMe drive with 4 KiB sectors: what AHCI wrote is there, and
+# what is written here is where the ATA boot below looks for it.
+qemu = boot(1, nvme4k=True)
+session("NVMe 4K", None, [
+    ("cat disk/nv", b"written by nvme\r\nand ahci\r\n"),
+    ("echo and 4k >> disk/nv", b""),
+    ("fstest", b"fstest: disk ok"),
+    ("diskbench", b"read 2 MiB: "),
+    ("rm disk/big", b""),
+], halt=True, ready=nvme_found)
+
+# Several processes on the disk at once, on two processors: two
+# diskbench (each writes, reads back and checks its own 2 MiB file) and
+# fstest. Each sleeps while the disk works for another (src/diskq.bastio);
+# all must finish with their data intact, and every page come back.
+qemu = boot(2, nvme=True)
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+if ok:
+    for cmd in (b"diskbench &", b"diskbench &", b"fstest"):
+        mark = len(out)
+        qemu.stdin.write(cmd + b"\r"); qemu.stdin.flush()
+        ok = ok and read_until(b"bastios> ", mark)
+    ok = ok and read_until(b"fstest: ok")
+    ok = ok and read_until(b"read 2 MiB")
+    ok = ok and read_until(b"read 2 MiB", out.find(b"read 2 MiB") + 1)
+    ok = ok and b"failed" not in out and b"fstest: disk ok" in out
+print(("ok  " if ok else "FAIL"), "(disk at once) two diskbench and fstest together")
+fails += not ok
+qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
+read_until(b"pages free at power off")
+booted = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
+off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+good = booted and off and booted.group(1) == off.group(1)
+print(("ok  " if good else "FAIL"), "(disk at once) every page back at power off")
+fails += not good
+qemu.kill(); qemu.wait()
+print("---- disk at once transcript ----")
+print(out.decode(errors="replace").replace("\r", "")[-1500:])
+
 # An e1000 card instead of virtio (src/e1000.bastio), on QEMU's network.
 # Its link takes a moment to come up, so DHCP may need a retry: ask until
 # the lease is there. test/tcp_test.sh runs its TCP cases on it too.
@@ -930,7 +989,7 @@ qemu = boot(1, with_disk=True)
 session("third", False, [
     ("cat disk/note", b"kept across boots\r\nappended\r\n"),
     ("rm disk/note", b""),
-    ("cat disk/nv", b"written by nvme\r\nand ahci\r\n"),
+    ("cat disk/nv", b"written by nvme\r\nand ahci\r\nand 4k\r\n"),
     ("rm disk/nv", b""),
     ("cat disk/moved", b"z\r\n"),
     ("rm disk/pm", b""),
@@ -950,14 +1009,14 @@ session("third", False, [
 # Power cuts. user/crashme.bastio checks what the last run left on the disk
 # (disk/log a whole number of correct records, disk/snap empty or whole,
 # disk/t absent or empty), then keeps appending, rewriting and creating.
-# QEMU is killed part-way through each run, on ATA, virtio, NVMe and AHCI
-# in turn; every boot after a cut must find the file system consistent. Killing
+# QEMU is killed part-way through each run, on ATA, virtio, NVMe, AHCI and
+# NVMe with 4 KiB sectors in turn; every boot after a cut must find the file system consistent. Killing
 # QEMU keeps every sector write that completed (it is in the host's page
 # cache), so this cuts power between two sector writes; it cannot tear a
 # sector in half.
-cuts = [0.05, 0.4, 0.15, 0.9, 0.6, 1.2, 0.3, 0.75]
+cuts = [0.05, 0.4, 0.15, 0.9, 0.6, 1.2, 0.3, 0.75, 0.5, 1.0]
 for n, delay in enumerate(cuts):
-    qemu = boot(1, with_disk=n % 4 == 0, virtio=n % 4 == 1, nvme=n % 4 == 2, ahci=n % 4 == 3)
+    qemu = boot(1, with_disk=n % 5 == 0, virtio=n % 5 == 1, nvme=n % 5 == 2, ahci=n % 5 == 3, nvme4k=n % 5 == 4)
     out = b""
     deadline = time.time() + timeout
     mark = 0

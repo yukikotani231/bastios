@@ -490,9 +490,84 @@ fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
   return put;
 }
 
+/// If x[..n] is /proc/PID/fd/N: PID * LXNFD + N, else NO_RESULT. Only
+/// readlink knows these links; they are not listed or stat'ed.
+fn proc_fd(procs: &Buf, x: &Bytes, n: u64) -> u64
+  requires len(procs) == PTAB_LEN && n <= blen(x)
+  ensures result == NO_RESULT || result < NPROC * LXNFD
+{
+  if n < 6 || !xfer_is(x, 0, 5, "proc/") {
+    return NO_RESULT;
+  }
+  let e = comp_end(x, 5, n);
+  let p = proc_pid(procs, x, 5, e);
+  if p >= NPROC || n < e + 5 || n > e + 6 || !xfer_is(x, e, e + 4, "/fd/") {
+    return NO_RESULT;
+  }
+  let mut fd = 0;
+  let mut i = e + 4;
+  while i < n
+    invariant e + 4 <= i && i <= n && n <= e + 6 && fd < 100
+  {
+    let c = cast[u64](bget(x, i));
+    if c < 48 || c > 57 || fd >= 10 {
+      return NO_RESULT;
+    }
+    fd = fd * 10 + (c - 48);
+    i = i + 1;
+  }
+  if fd >= LXNFD {
+    return NO_RESULT;
+  }
+  return p * LXNFD + fd;
+}
+
+/// The target of /proc/P/fd/FD into o: "/dev/tty" for the console, the
+/// path of a file, a "pipe:[N]" or "socket:[N]" or "anon_inode:[...]"
+/// name for the rest. Returns its length, or NO_RESULT if fd is closed.
+fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
+  requires kok(k) && p < NPROC && blen(o) == PROC_OUT
+  ensures kok(k) && blen(o) == PROC_OUT
+  ensures result <= PROC_OUT || result == NO_RESULT
+{
+  let d = fd_look(k, p, fd);
+  if d.kind == K_BAD {
+    return NO_RESULT;
+  }
+  if d.kind == K_CONSOLE {
+    return put_s(&mut o, 0, "/dev/tty");
+  }
+  if d.kind == K_PIPE_R || d.kind == K_PIPE_W {
+    let a = put_s(&mut o, 0, "pipe:[");
+    return put_c(&mut o, put_n(&mut o, a, d.x), 93);
+  }
+  if d.kind == K_SOCK {
+    let a = put_s(&mut o, 0, "socket:[");
+    return put_c(&mut o, put_n(&mut o, a, d.x), 93);
+  }
+  if d.kind == K_FILE {
+    let f = vfs_row_file(k.fs, d.x);
+    if f != NO_FILE {
+      let n = vfs_dirent(&mut k.fs, f);
+      if n != NO_FILE && n <= XFER {
+        let mut a = put_c(&mut o, 0, 47);
+        let mut j = 0;
+        while j < n
+          invariant j <= n && n <= XFER && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+        {
+          a = put_c(&mut o, a, bget(k.fs.xfer, j));
+          j = j + 1;
+        }
+        return a;
+      }
+    }
+  }
+  return put_s(&mut o, 0, "anon_inode:[file]");
+}
+
 /// readlink / readlinkat(dirfd, path, buf, size): the target of
-/// /proc/PID/exe, without a NUL; -EINVAL for anything else that exists,
-/// since nothing else is a symbolic link.
+/// /proc/PID/exe or /proc/PID/fd/N, without a NUL; -EINVAL for anything
+/// else that exists, since nothing else is a symbolic link.
 fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -500,6 +575,34 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
   let n = lx_path_at(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return ENOENT;
+  }
+  let mut pfd = NO_RESULT;
+  if n <= XFER {
+    pfd = proc_fd(k.procs, k.fs.xfer, n);
+  }
+  if pfd != NO_RESULT {
+    if size == 0 || size > 0x7FFFFFFF {
+      return EINVAL;
+    }
+    let mut lo = balloc(PROC_OUT);
+    let ln = fd_link(&mut k, pfd / LXNFD, pfd % LXNFD, &mut lo);
+    if ln == NO_RESULT {
+      bfree(lo);
+      return ENOENT;
+    }
+    let m = smaller(ln, smaller(size, XFER));
+    let mut i = 0;
+    while i < m
+      invariant i <= m && m <= PROC_OUT && m <= XFER && blen(lo) == PROC_OUT && kok(k)
+    {
+      bset(&mut k.fs.xfer, i, bget(lo, i));
+      i = i + 1;
+    }
+    bfree(lo);
+    if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, m) != m {
+      return EFAULT;
+    }
+    return m;
   }
   let f = proc_file(k.procs, k.fs.xfer, n);
   if f == 0 || f % 16 != PF_EXE {

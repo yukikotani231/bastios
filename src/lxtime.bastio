@@ -183,8 +183,23 @@ fn poll_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   requires kok(k) && pid < NPROC
 {
   let f = fd_look(k, pid, fd);
+  if f.kind == K_EPOLL {
+    return ep_poll_bits(k, pid, f.x);       // POLLIN if something it watches is ready
+  }
+  return leaf_bits(k, pid, fd);
+}
+
+/// poll_bits for anything but an epoll instance, which finds 0 here: an
+/// epoll instance inside another one never reports ready.
+fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  let f = fd_look(k, pid, fd);
   if f.kind == K_BAD {
     return POLLNVAL;
+  }
+  if f.kind == K_EVENT || f.kind == K_TIMER || f.kind == K_EPOLL {
+    return ev_bits(k, f.kind, f.x);
   }
   if f.kind == K_CONSOLE {
     if get(k.line, 1) != 0 {
@@ -197,7 +212,7 @@ fn poll_bits(k: &Kernel, pid: u64, fd: u64) -> u64
     if pi_get(k.pipes, f.x, 1) > 0 {
       b = POLLIN;
     }
-    if pi_get(k.pipes, f.x, 3) == 0 {
+    if pi_get(k.pipes, f.x, 3) == 0 && pi_get(k.pipes, f.x, 5) != 0 {
       b = b | POLLHUP;                      // no writer left: end of file
     }
     return b;
@@ -206,14 +221,17 @@ fn poll_bits(k: &Kernel, pid: u64, fd: u64) -> u64
     if pi_get(k.pipes, f.x, 2) == 0 {
       return POLLERR;                       // no reader left
     }
-    if pi_get(k.pipes, f.x, 1) < PIPE_CAP {
-      return POLLOUT;
+    if pi_get(k.pipes, f.x, 1) <= PIPE_CAP - PIPE_ATOM {
+      return POLLOUT;                       // room for a whole PIPE_BUF write
     }
     return 0;
   }
   if f.kind == K_SOCK {
     if is_tcp(k, pid, fd) {
       return tcp_poll_bits(k, pid, fd);
+    }
+    if is_unix(k, pid, fd) {
+      return ux_poll_bits(k, pid, fd);
     }
     if sock_ready(k.nic, f.x) {
       return POLLIN | POLLOUT;

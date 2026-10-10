@@ -1,0 +1,755 @@
+// eventfd, timerfd and epoll, the Linux x86-64 way.
+//
+// An eventfd is an open file description of kind OF_EVENT whose word 2 is
+// the counter (src/lxfd.bastio). A timerfd's description names one of
+// TFD_N timers in k.evt, at t * TFD_STRIDE: in use, the clock it was made
+// for, the deadline on the HPET clock (k.ns; 0: disarmed) and the interval
+// (0: it fires once). Expirations are counted when they are looked at, so
+// no timer tick has to visit them.
+//
+// An epoll instance names one of EP_N sets in k.evt, at EP_AT + e *
+// EP_STRIDE: in use, then EP_FDS entries of EP_ENTRY words: fd + 1 (0:
+// empty), the description that fd named when it was added, the events
+// asked for, and the data handed back. An entry whose fd has since been
+// closed or now names another description is dropped when it is next
+// looked at, as Linux drops it when the description closes. Readiness is
+// what poll finds, so edge-triggered entries (EPOLLET) are reported like
+// level-triggered ones: a program that reads until EAGAIN, as EPOLLET
+// requires, sees no difference. An epoll instance inside another never
+// reports ready.
+//
+// A read or epoll_wait that has to wait runs again (lx_retry), as a pipe
+// read does.
+//
+// A named pipe (mkfifo, mknod with S_IFIFO) is a name in one of FIFO_N
+// slots in k.evt, at FIFO_AT + f * FIFO_STRIDE: the name's length (0: the
+// slot is free), the pipe its open ends share + 1, then the name, a byte
+// a word, as the path layer spells it (no leading "/"). The pipe is an
+// ordinary one (src/lxfd.bastio) marked as the FIFO's, made when the
+// first end opens and gone when the last one closes. Opening to write
+// waits until there is a reader (-ENXIO with O_NONBLOCK); opening to read
+// does not wait, but reads wait until a writer has come. The name lives
+// beside the file system, not in it: stat, open and unlink know it, a
+// directory listing does not show it, and it does not survive a reboot.
+
+import "linux.bastio";
+
+const LX_EPOLL_CREATE: u64 = 213;
+const LX_EPOLL_WAIT: u64 = 232;
+const LX_EPOLL_CTL: u64 = 233;
+const LX_EPOLL_PWAIT: u64 = 281;
+const LX_TIMERFD_CREATE: u64 = 283;
+const LX_EVENTFD: u64 = 284;
+const LX_TIMERFD_SETTIME: u64 = 286;
+const LX_TIMERFD_GETTIME: u64 = 287;
+const LX_EVENTFD2: u64 = 290;
+const LX_EPOLL_CREATE1: u64 = 291;
+const LX_EPOLL_PWAIT2: u64 = 441;
+const LX_MKNOD: u64 = 133;
+const LX_MKNODAT: u64 = 259;
+const S_IFMT: u64 = 0xF000;
+const S_IFIFO_TYPE: u64 = 0x1000;
+const ENXIO: u64 = 18446744073709551610;     // 2^64 - 6
+const ENAMETOOLONG: u64 = 18446744073709551580;  // 2^64 - 36
+const EFD_SEMAPHORE: u64 = 1;
+const EV_MAX: u64 = 18446744073709551614;    // 2^64 - 2: the most an eventfd holds
+const TFD_TIMER_ABSTIME: u64 = 1;
+const CLOCK_MONOTONIC: u64 = 1;
+const EPOLL_CTL_ADD: u64 = 1;
+const EPOLL_CTL_DEL: u64 = 2;
+const EPOLL_CTL_MOD: u64 = 3;
+const EPOLLONESHOT: u64 = 0x40000000;
+const EP_OFF: u64 = 0x4000000000000000;      // a one-shot entry that has fired
+const EPOLL_EVENT: u64 = 12;                 // struct epoll_event, packed: u32 events, u64 data
+const INT_NEG: u64 = 0x80000000;             // an int argument this large is negative
+const VA_LAST: u64 = 0xFFFFFFFFFFFF0000;     // an address past this cannot hold two timespecs
+const ENOSPC: u64 = 18446744073709551588;    // 2^64 - 28
+
+fn is_event_call(n: u64) -> bool {
+  return n == LX_EPOLL_CREATE || n == LX_EPOLL_WAIT || n == LX_EPOLL_CTL || n == LX_EPOLL_PWAIT
+    || n == LX_TIMERFD_CREATE || n == LX_EVENTFD || n == LX_TIMERFD_SETTIME || n == LX_TIMERFD_GETTIME
+    || n == LX_EVENTFD2 || n == LX_EPOLL_CREATE1 || n == LX_EPOLL_PWAIT2 || n == LX_MKNOD || n == LX_MKNODAT;
+}
+
+/// Gives process pid the lowest closed descriptor for a new description
+/// (kind, x, word 3), close-on-exec if `cloexec`. Returns the descriptor,
+/// or -EMFILE / -ENFILE.
+fn ev_install(k: &mut Kernel, pid: u64, kind: u64, x: u64, w3: u64, cloexec: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let fd = fd_free(k.lxfd, pid, 0);
+  if fd >= LXNFD {
+    return EMFILE;
+  }
+  let h = ofd_new(&mut k, kind, x);
+  if h >= OFD_N {
+    return ENFILE;
+  }
+  of_set(&mut k.ofd, h, 3, w3);
+  let mut ce = 0;
+  if cloexec {
+    ce = FD_CLOEXEC;
+  }
+  fd_set(&mut k.lxfd, pid, fd, FD_OFD + h + ce);
+  return fd;
+}
+
+// ---------------------------------------------------------------- eventfd
+
+/// eventfd and eventfd2: a new counter starting at `init`.
+fn lx_eventfd(k: &mut Kernel, pid: u64, init: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags & !(EFD_SEMAPHORE | LO_NONBLOCK | LO_CLOEXEC) != 0 {
+    return EINVAL;
+  }
+  let w3 = flags / LO_NONBLOCK % 2 + 2 * (flags & EFD_SEMAPHORE);
+  return ev_install(&mut k, pid, OF_EVENT, init % 4294967296, w3, flags / LO_CLOEXEC % 2 == 1);
+}
+
+/// write(2) on eventfd description h: adds the u64 at va to the counter.
+/// Returns 8, -EINVAL, -EFAULT, or EAGAIN while it would pass EV_MAX.
+fn ev_write(k: &mut Kernel, pid: u64, h: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if h >= OFD_N {
+    return EBADF;
+  }
+  if n < 8 {
+    return EINVAL;
+  }
+  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 8) != 8 {
+    return EFAULT;
+  }
+  let v = get_u64(k.fs.xfer, 0);
+  if v > EV_MAX {
+    return EINVAL;
+  }
+  let c = smaller(of_get(k.ofd, h, 2), EV_MAX);
+  if v > EV_MAX - c {
+    return EAGAIN;                          // wait for a reader to take some
+  }
+  of_set(&mut k.ofd, h, 2, c + v);
+  return 8;
+}
+
+// ---------------------------------------------------------------- timerfd
+
+/// How many times timer t has fired since it was last read.
+fn tfd_due(k: &Kernel, t: u64) -> u64
+  requires kok(k) && t < TFD_N
+{
+  let dl = get(k.evt, t * TFD_STRIDE + 2);
+  if dl == 0 || k.ns < dl {
+    return 0;
+  }
+  let iv = get(k.evt, t * TFD_STRIDE + 3);
+  if iv == 0 {
+    return 1;
+  }
+  return 1 + (k.ns - dl) / iv;
+}
+
+/// Timer t's next deadline once the expirations so far are taken (0: none).
+fn tfd_next(k: &Kernel, t: u64) -> u64
+  requires kok(k) && t < TFD_N
+  ensures result <= FOREVER || result == get(k.evt, t * TFD_STRIDE + 2)
+{
+  let dl = get(k.evt, t * TFD_STRIDE + 2);
+  if dl == 0 || k.ns < dl {
+    return dl;
+  }
+  let iv = get(k.evt, t * TFD_STRIDE + 3);
+  if iv == 0 {
+    return 0;
+  }
+  return sat_add(k.ns, iv - (k.ns - dl) % iv);
+}
+
+/// read(2) on an eventfd (kind K_EVENT, description x) or a timerfd
+/// (K_TIMER, timer x): the counter, or the expirations, as a u64 at va.
+/// Returns 8, -errno, or EAGAIN while there is nothing yet.
+fn ev_read(k: &mut Kernel, pid: u64, kind: u64, x: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if n < 8 {
+    return EINVAL;
+  }
+  if kind == K_EVENT {
+    if x >= OFD_N {
+      return EBADF;
+    }
+    let c = of_get(k.ofd, x, 2);
+    if c == 0 {
+      return EAGAIN;
+    }
+    let mut v = c;
+    if of_get(k.ofd, x, 3) / 2 % 2 == 1 {
+      v = 1;                                // EFD_SEMAPHORE: one at a time
+    }
+    xfer_u64(&mut k.fs.xfer, 0, v);
+    if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, 8) != 8 {
+      return EFAULT;
+    }
+    of_set(&mut k.ofd, x, 2, c - v);
+    return 8;
+  }
+  if x >= TFD_N {
+    return EBADF;
+  }
+  let due = tfd_due(k, x);
+  if due == 0 {
+    return EAGAIN;
+  }
+  xfer_u64(&mut k.fs.xfer, 0, due);
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, 8) != 8 {
+    return EFAULT;
+  }
+  k.evt = set(k.evt, x * TFD_STRIDE + 2, tfd_next(k, x));
+  return 8;
+}
+
+/// timerfd_create(clock, flags).
+fn lx_timerfd_create(k: &mut Kernel, pid: u64, clk: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if clk != CLOCK_REALTIME && clk != CLOCK_MONOTONIC && clk != CLOCK_BOOTTIME {
+    return EINVAL;
+  }
+  if flags & !(LO_NONBLOCK | LO_CLOEXEC) != 0 {
+    return EINVAL;
+  }
+  let mut t = 0;
+  while t < TFD_N && get(k.evt, t * TFD_STRIDE) != 0
+    invariant t <= TFD_N && kok(k)
+  {
+    t = t + 1;
+  }
+  if t >= TFD_N {
+    return ENFILE;
+  }
+  let fd = ev_install(&mut k, pid, OF_TIMER, t, flags / LO_NONBLOCK % 2, flags / LO_CLOEXEC % 2 == 1);
+  if fd >= LXNFD {
+    return fd;                              // -EMFILE or -ENFILE: the timer stays free
+  }
+  k.evt = set(k.evt, t * TFD_STRIDE, 1);
+  k.evt = set(k.evt, t * TFD_STRIDE + 1, clk);
+  k.evt = set(k.evt, t * TFD_STRIDE + 2, 0);
+  k.evt = set(k.evt, t * TFD_STRIDE + 3, 0);
+  return fd;
+}
+
+/// Writes timer t's struct itimerspec to va: the interval, then the time
+/// left until it next fires (0: disarmed).
+fn tfd_out(k: &mut Kernel, pid: u64, t: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC && t < TFD_N
+  ensures kok(k)
+{
+  if va > VA_LAST {
+    return EFAULT;
+  }
+  let dl = get(k.evt, t * TFD_STRIDE + 2);
+  let iv = get(k.evt, t * TFD_STRIDE + 3);
+  let mut left = 0;
+  if dl != 0 && k.ns < dl {
+    left = dl - k.ns;
+  } else if dl != 0 && iv != 0 {
+    left = iv - (k.ns - dl) % iv;
+  }
+  if time_out(&mut k, pid, va, iv, 1) != 0 {
+    return EFAULT;
+  }
+  return time_out(&mut k, pid, va + 16, left, 1);
+}
+
+/// The timer descriptor fd names: the timer, or -EBADF / -EINVAL.
+fn tfd_of(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result < TFD_N || result == EBADF || result == EINVAL
+{
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
+    return EBADF;
+  }
+  if d.kind != K_TIMER {
+    return EINVAL;
+  }
+  return d.x;
+}
+
+/// timerfd_settime(fd, flags, new, old).
+fn lx_timerfd_settime(k: &mut Kernel, pid: u64, fd: u64, flags: u64, nv: u64, ov: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let t = tfd_of(k, pid, fd);
+  if t >= TFD_N {
+    return t;
+  }
+  if flags & !TFD_TIMER_ABSTIME > 1 {
+    return EINVAL;                          // TFD_TIMER_CANCEL_ON_SET (2) is accepted and ignored
+  }
+  if nv > VA_LAST {
+    return EFAULT;
+  }
+  let iv = ts_in(&mut k, pid, nv);
+  if iv.err != 0 {
+    return iv.err;
+  }
+  let val = ts_in(&mut k, pid, nv + 16);
+  if val.err != 0 {
+    return val.err;
+  }
+  if ov != 0 && tfd_out(&mut k, pid, t, ov) != 0 {
+    return EFAULT;
+  }
+  let mut dl = 0;
+  if val.ns != 0 {
+    let now = clock_now(k, pid, get(k.evt, t * TFD_STRIDE + 1));
+    if flags & TFD_TIMER_ABSTIME == 0 {
+      dl = sat_add(k.ns, val.ns);
+    } else if val.ns <= now || now == FOREVER {
+      dl = k.ns;                            // already past: it fires at once
+    } else {
+      dl = sat_add(k.ns, val.ns - now);
+    }
+    if dl == 0 {
+      dl = 1;                               // 0 means disarmed
+    }
+  }
+  k.evt = set(k.evt, t * TFD_STRIDE + 2, dl);
+  k.evt = set(k.evt, t * TFD_STRIDE + 3, iv.ns);
+  return 0;
+}
+
+// ---------------------------------------------------------------- epoll
+
+/// Where word f of entry j of epoll instance e is in k.evt.
+fn ep_at(e: u64, j: u64, f: u64) -> u64
+  requires e < EP_N && j < EP_FDS && f < EP_ENTRY
+  ensures result < EVT_LEN
+{
+  return EP_AT + e * EP_STRIDE + 1 + j * EP_ENTRY + f;
+}
+
+/// epoll_create(size) and epoll_create1(flags).
+fn lx_epoll_create(k: &mut Kernel, pid: u64, cloexec: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut e = 0;
+  while e < EP_N && get(k.evt, EP_AT + e * EP_STRIDE) != 0
+    invariant e <= EP_N && kok(k)
+  {
+    e = e + 1;
+  }
+  if e >= EP_N {
+    return ENFILE;
+  }
+  let fd = ev_install(&mut k, pid, OF_EPOLL, e, 0, cloexec);
+  if fd >= LXNFD {
+    return fd;
+  }
+  k.evt = set(k.evt, EP_AT + e * EP_STRIDE, 1);
+  let mut j = 0;
+  while j < EP_FDS
+    invariant j <= EP_FDS && e < EP_N && kok(k)
+  {
+    k.evt = set(k.evt, ep_at(e, j, 0), 0);
+    j = j + 1;
+  }
+  return fd;
+}
+
+/// The entry of epoll instance e whose first word is w (fd + 1, or 0 for
+/// an empty one), or EP_FDS.
+fn ep_find(k: &Kernel, e: u64, w: u64) -> u64
+  requires kok(k) && e < EP_N
+  ensures result <= EP_FDS
+{
+  let mut j = 0;
+  while j < EP_FDS
+    invariant j <= EP_FDS && e < EP_N
+  {
+    if get(k.evt, ep_at(e, j, 0)) == w {
+      return j;
+    }
+    j = j + 1;
+  }
+  return EP_FDS;
+}
+
+/// epoll_ctl(epfd, op, fd, event).
+fn lx_epoll_ctl(k: &mut Kernel, pid: u64, epfd: u64, op: u64, fd: u64, ev: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let ep = fd_look(k, pid, epfd);
+  if ep.kind == K_BAD {
+    return EBADF;
+  }
+  if ep.kind != K_EPOLL || fd == epfd {
+    return EINVAL;
+  }
+  let e = ep.x;
+  let target = fd_look(k, pid, fd);
+  if target.kind == K_BAD || fd >= LXNFD {
+    return EBADF;
+  }
+  if target.kind == K_FILE || target.kind == K_DIR {
+    return EPERM;                           // a file is always ready: Linux will not watch one
+  }
+  let h = fd_ofd(k, pid, fd);
+  let mut j = ep_find(k, e, fd + 1);
+  let live = j < EP_FDS && get(k.evt, ep_at(e, j, 1)) == h;
+  if op == EPOLL_CTL_DEL {
+    if !live {
+      return ENOENT;
+    }
+    k.evt = set(k.evt, ep_at(e, j, 0), 0);
+    return 0;
+  }
+  if op != EPOLL_CTL_ADD && op != EPOLL_CTL_MOD {
+    return EINVAL;
+  }
+  if op == EPOLL_CTL_ADD && live {
+    return EEXIST;
+  }
+  if op == EPOLL_CTL_MOD && !live {
+    return ENOENT;
+  }
+  if copy_from_user(&mut k.spaces, pid, ev, &mut k.fs.xfer, EPOLL_EVENT) != EPOLL_EVENT {
+    return EFAULT;
+  }
+  let events = cast[u64](bget(k.fs.xfer, 0)) | cast[u64](bget(k.fs.xfer, 1)) << 8 | cast[u64](bget(k.fs.xfer, 2)) << 16 | cast[u64](bget(k.fs.xfer, 3)) << 24;
+  let data = get_u64(k.fs.xfer, 4);
+  if j >= EP_FDS {
+    j = ep_find(k, e, 0);                   // an empty entry
+    if j >= EP_FDS {
+      return ENOSPC;
+    }
+  }
+  k.evt = set(k.evt, ep_at(e, j, 0), fd + 1);
+  k.evt = set(k.evt, ep_at(e, j, 1), h);
+  k.evt = set(k.evt, ep_at(e, j, 2), events);
+  k.evt = set(k.evt, ep_at(e, j, 3), data);
+  return 0;
+}
+
+/// What entry j of epoll instance e finds ready now, or 0; drops the
+/// entry if its descriptor is gone.
+fn ep_entry_bits(k: &Kernel, pid: u64, e: u64, j: u64) -> u64
+  requires kok(k) && pid < NPROC && e < EP_N && j < EP_FDS
+{
+  let w = get(k.evt, ep_at(e, j, 0));
+  if w == 0 || w > LXNFD {
+    return 0;
+  }
+  let events = get(k.evt, ep_at(e, j, 2));
+  if events & EP_OFF != 0 || fd_ofd(k, pid, w - 1) != get(k.evt, ep_at(e, j, 1)) {
+    return 0;
+  }
+  return leaf_bits(k, pid, w - 1) & (events | POLLERR | POLLHUP) & 0xFFFF;
+}
+
+/// poll on epoll instance e: POLLIN if something it watches is ready.
+fn ep_poll_bits(k: &Kernel, pid: u64, e: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  if e >= EP_N {
+    return POLLNVAL;
+  }
+  let mut j = 0;
+  while j < EP_FDS
+    invariant j <= EP_FDS && e < EP_N
+  {
+    if ep_entry_bits(k, pid, e, j) != 0 {
+      return POLLIN;
+    }
+    j = j + 1;
+  }
+  return 0;
+}
+
+/// What poll finds on an eventfd, timerfd or epoll instance (kind, x as
+/// fd_look gives them), apart from what an epoll instance watches.
+fn ev_bits(k: &Kernel, kind: u64, x: u64) -> u64
+  requires kok(k)
+{
+  if kind == K_EVENT && x < OFD_N {
+    let c = of_get(k.ofd, x, 2);
+    let mut b = 0;
+    if c > 0 {
+      b = POLLIN;
+    }
+    if c < EV_MAX {
+      b = b | POLLOUT;
+    }
+    return b;
+  }
+  if kind == K_TIMER && x < TFD_N && tfd_due(k, x) > 0 {
+    return POLLIN;
+  }
+  return 0;
+}
+
+/// epoll_wait, epoll_pwait and epoll_pwait2: up to maxevents ready entries
+/// to va, waiting (a run again) until there is one or `wait` ns have
+/// passed. epoll_pwait's signal mask is not applied.
+fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64, maxevents: u64, wait: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let ep = fd_look(k, pid, epfd);
+  if ep.kind == K_BAD {
+    ret(&mut k.procs, pid, EBADF);
+    return KEEP;
+  }
+  if ep.kind != K_EPOLL || maxevents == 0 || maxevents >= INT_NEG {
+    ret(&mut k.procs, pid, EINVAL);
+    return KEEP;
+  }
+  let e = ep.x;
+  let most = smaller(maxevents, EP_FDS);
+  let mut got = 0;
+  let mut j = 0;
+  while j < EP_FDS && got < most
+    invariant j <= EP_FDS && got <= j && got <= most && most <= EP_FDS && e < EP_N && kok(k)
+  {
+    let w = get(k.evt, ep_at(e, j, 0));
+    if w != 0 && (w > LXNFD || fd_ofd(k, pid, w - 1) != get(k.evt, ep_at(e, j, 1))) {
+      k.evt = set(k.evt, ep_at(e, j, 0), 0);  // its descriptor was closed
+    }
+    let bits = ep_entry_bits(k, pid, e, j);
+    if bits != 0 {
+      let at = got * EPOLL_EVENT;
+      bset(&mut k.fs.xfer, at, cast[u8](bits % 256));
+      bset(&mut k.fs.xfer, at + 1, cast[u8](bits / 256 % 256));
+      bset(&mut k.fs.xfer, at + 2, 0);
+      bset(&mut k.fs.xfer, at + 3, 0);
+      xfer_u64(&mut k.fs.xfer, at + 4, get(k.evt, ep_at(e, j, 3)));
+      let events = get(k.evt, ep_at(e, j, 2));
+      if events & EPOLLONESHOT != 0 {
+        k.evt = set(k.evt, ep_at(e, j, 2), events | EP_OFF);   // until EPOLL_CTL_MOD
+      }
+      got = got + 1;
+    }
+    j = j + 1;
+  }
+  if got == 0 {
+    let dl = deadline(k, was, wait);
+    if k.ns < dl {
+      return wait_until(&mut k, pid, n, dl);
+    }
+  }
+  let size = got * EPOLL_EVENT;
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, size) != size {
+    ret(&mut k.procs, pid, EFAULT);
+    return KEEP;
+  }
+  ret(&mut k.procs, pid, got);
+  return KEEP;
+}
+
+// ---------------------------------------------------------------- FIFOs
+
+/// The named pipe called x[..n] (the transfer buffer), or FIFO_N.
+fn fifo_find(k: &Kernel, n: u64) -> u64
+  requires kok(k)
+  ensures result <= FIFO_N
+{
+  if n == 0 || n > FIFO_NAME {
+    return FIFO_N;
+  }
+  let mut f = 0;
+  while f < FIFO_N
+    invariant f <= FIFO_N && n <= FIFO_NAME && kok(k)
+  {
+    let base = FIFO_AT + f * FIFO_STRIDE;
+    if get(k.evt, base) == n {
+      let mut i = 0;
+      let mut same = true;
+      while i < n && same
+        invariant i <= n && n <= FIFO_NAME && f < FIFO_N && kok(k)
+      {
+        same = get(k.evt, base + 2 + i) == cast[u64](bget(k.fs.xfer, i));
+        i = i + 1;
+      }
+      if same {
+        return f;
+      }
+    }
+    f = f + 1;
+  }
+  return FIFO_N;
+}
+
+/// mknod and mknodat(dirfd, path, mode): only named pipes (S_IFIFO).
+fn lx_mknod(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if mode & S_IFMT != S_IFIFO_TYPE {
+    return EPERM;                           // no device nodes, and files come from open
+  }
+  let n = lx_path_at(&mut k, pid, dirfd, path);
+  if n == NO_RESULT {
+    return ENOENT;
+  }
+  if n == 0 || n > FNAME_MAX {
+    return EEXIST;                          // "/"
+  }
+  if n > FIFO_NAME {
+    return ENAMETOOLONG;
+  }
+  let mut f = 0;
+  while f < FIFO_N && get(k.evt, FIFO_AT + f * FIFO_STRIDE) != 0
+    invariant f <= FIFO_N && kok(k)
+  {
+    f = f + 1;
+  }
+  if f >= FIFO_N {
+    return ENOSPC;
+  }
+  if fifo_find(k, n) < FIFO_N {
+    return EEXIST;
+  }
+  // Keep the name before anything else can touch the transfer buffer.
+  let base = FIFO_AT + f * FIFO_STRIDE;
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= FIFO_NAME && f < FIFO_N && kok(k)
+  {
+    k.evt = set(k.evt, base + 2 + i, cast[u64](bget(k.fs.xfer, i)));
+    i = i + 1;
+  }
+  let there = path_meta(&mut k, n);
+  if there.ok {
+    return EEXIST;
+  }
+  k.evt = set(k.evt, base + 1, 0);
+  k.evt = set(k.evt, base, n);
+  return 0;
+}
+
+/// open of named pipe f with these flags: a descriptor, -errno, or SK_WAIT
+/// for a writer that must wait for a reader.
+fn fifo_open(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC && f < FIFO_N
+  ensures kok(k)
+{
+  let acc = flags % 4;
+  if acc != 0 && acc != LO_WRONLY {
+    return EINVAL;                          // O_RDWR on a FIFO is not supported
+  }
+  if fd_free(k.lxfd, pid, 0) >= LXNFD {
+    return EMFILE;
+  }
+  let base = FIFO_AT + f * FIFO_STRIDE;
+  let w = get(k.evt, base + 1);
+  let mut q = NPIPES;
+  if w >= 1 && w - 1 < NPIPES {
+    let c = w - 1;
+    if pi_get(k.pipes, c, 4) == f + 1 && (pi_get(k.pipes, c, 2) != 0 || pi_get(k.pipes, c, 3) != 0) {
+      q = c;                                // an end is open: join its pipe
+    }
+  }
+  if q >= NPIPES {
+    q = 0;
+    while q < NPIPES && (pi_get(k.pipes, q, 2) != 0 || pi_get(k.pipes, q, 3) != 0)
+      invariant q <= NPIPES && kok(k)
+    {
+      q = q + 1;
+    }
+    if q >= NPIPES {
+      return ENFILE;
+    }
+    pi_set(&mut k.pipes, q, 0, 0);
+    pi_set(&mut k.pipes, q, 1, 0);
+    pi_set(&mut k.pipes, q, 4, f + 1);
+    pi_set(&mut k.pipes, q, 5, 0);
+    k.evt = set(k.evt, base + 1, q + 1);
+  }
+  let nb = flags / LO_NONBLOCK % 2;
+  let ce = flags / LO_CLOEXEC % 2 == 1;
+  if acc == LO_WRONLY {
+    if pi_get(k.pipes, q, 2) == 0 {
+      if nb == 1 {
+        return ENXIO;
+      }
+      return SK_WAIT;
+    }
+    let fd = ev_install(&mut k, pid, OF_PIPE_W, q, nb, ce);
+    if fd < LXNFD {
+      pi_set(&mut k.pipes, q, 3, smaller(pi_get(k.pipes, q, 3), OFD_N) + 1);
+      pi_set(&mut k.pipes, q, 5, 1);
+    }
+    return fd;
+  }
+  let fd = ev_install(&mut k, pid, OF_PIPE_R, q, nb, ce);
+  if fd < LXNFD {
+    pi_set(&mut k.pipes, q, 2, smaller(pi_get(k.pipes, q, 2), OFD_N) + 1);
+  }
+  return fd;
+}
+
+/// The eventfd, timerfd and epoll calls; d is the fourth argument (r10).
+fn lx_event_call(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u64, d: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if n == LX_EPOLL_WAIT || n == LX_EPOLL_PWAIT || n == LX_EPOLL_PWAIT2 {
+    let mut wait = FOREVER;
+    if n == LX_EPOLL_PWAIT2 {
+      if d != 0 {
+        let ts = ts_in(&mut k, pid, d);
+        if ts.err != 0 {
+          ret(&mut k.procs, pid, ts.err);
+          return KEEP;
+        }
+        wait = ts.ns;
+      }
+    } else if d < INT_NEG {
+      wait = d * 1000000;                   // ms; a negative timeout waits forever
+    }
+    return lx_epoll_wait(&mut k, pid, n, was, a, b, c, wait);
+  }
+  let mut r = ENOSYS;
+  if n == LX_EVENTFD {
+    r = lx_eventfd(&mut k, pid, a, 0);
+  } else if n == LX_EVENTFD2 {
+    r = lx_eventfd(&mut k, pid, a, b);
+  } else if n == LX_TIMERFD_CREATE {
+    r = lx_timerfd_create(&mut k, pid, a, b);
+  } else if n == LX_TIMERFD_SETTIME {
+    r = lx_timerfd_settime(&mut k, pid, a, b, c, d);
+  } else if n == LX_TIMERFD_GETTIME {
+    r = tfd_of(k, pid, a);
+    if r < TFD_N {
+      r = tfd_out(&mut k, pid, r, b);
+    }
+  } else if n == LX_EPOLL_CREATE {
+    r = EINVAL;
+    if a != 0 && a < INT_NEG {
+      r = lx_epoll_create(&mut k, pid, false);
+    }
+  } else if n == LX_EPOLL_CREATE1 {
+    r = EINVAL;
+    if a & !LO_CLOEXEC == 0 {
+      r = lx_epoll_create(&mut k, pid, a != 0);
+    }
+  } else if n == LX_EPOLL_CTL {
+    r = lx_epoll_ctl(&mut k, pid, a, b, c, d);
+  } else if n == LX_MKNOD {
+    r = lx_mknod(&mut k, pid, AT_FDCWD, a, b);
+  } else if n == LX_MKNODAT {
+    r = lx_mknod(&mut k, pid, a, b, c);
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}

@@ -342,6 +342,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   pset(&mut k.procs, c, F_CODE, 0);
   pset(&mut k.procs, c, F_TICKS, 0);
   pset(&mut k.procs, c, F_PARENT, 0);       // threads are nobody's children
+  group_fork(&mut k.procs, pid, c);
   pset(&mut k.procs, c, F_REGS + R_RAX, 0);
   if stack != 0 {
     pset(&mut k.procs, c, F_REGS + R_RSP, stack);

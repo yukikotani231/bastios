@@ -4,10 +4,13 @@
 // has been reset at power off, so the proof shows none of them is freed,
 // mapped into a process or reused while the device may still write it.
 //
-// Memory, four pages: the queue (three pages) and one request page:
-// header at 0 (16 bytes), status byte at 16, the sector's data at 512.
+// Memory, five pages: the queue (three pages), one request page (header
+// at 0, 16 bytes; status byte at 16; a sector's data at 512) and a data
+// page for whole 4 KiB blocks. Descriptor 1, the data, points at one or
+// the other.
 
 import "virtq.bastio";
+import "bio.bastio";
 
 const VIRTIO_BLK: u64 = 0x1001;       // legacy (transitional) block device id
 const VIO_CAPACITY: u64 = 0x14;       // 64 bits: the size in 512-byte sectors
@@ -18,30 +21,36 @@ const BLK_OUT: u64 = 1;               // write
 const REQ_STATUS: u64 = 16;
 const REQ_DATA: u64 = 512;
 const VIO_SECTOR: u64 = 512;
+const VIO_BLOCK: u64 = 4096;
 
 struct Virtio {
   io: PortIo,
   q: Vq,
   req: Dma,
+  data: Dma,
   sectors: u64,       // 0 when the device could not be started
+  busy: bool,         // a request started by virtio_begin has not been polled to its end
+  flushing: bool,     // and it is a flush, which the device does not need
 }
 
 spec fn virtio_ok(v: &Virtio) -> bool {
   port_count(v.io) == VIO_PORTS && vq_ok(v.q)
 }
 
-/// Claims the device's ports, lends it four pages and starts it. A device
+/// Claims the device's ports, lends it five pages and starts it. A device
 /// that cannot be started (bad queue size, pages out of its reach) is left
 /// with `sectors` 0, and every later operation on it fails.
-fn virtio_new(ports: &mut Ports, base: u64, f0: Frame, f1: Frame, f2: Frame, f3: Frame) -> Virtio
+fn virtio_new(ports: &mut Ports, base: u64, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame) -> Virtio
   requires base + VIO_PORTS <= 65536
   requires forall k: u64 :: base <= k && k < base + VIO_PORTS ==> port_free(ports, k)
   ensures virtio_ok(result) && port_base(result.io) == base
   ensures forall k: u64 :: (k < base || base + VIO_PORTS <= k) ==> port_free(ports, k) == old(port_free(ports, k))
 {
-  let mut v = Virtio { io: port_claim(&mut ports, base, VIO_PORTS), q: vq_new(f0, f1, f2), req: dma_lend(f3), sectors: 0 };
+  let mut v = Virtio { io: port_claim(&mut ports, base, VIO_PORTS), q: vq_new(f0, f1, f2), req: dma_lend(f3),
+    data: dma_lend(f4), sectors: 0, busy: false, flushing: false };
   let r = dma_addr(v.req);
-  if !virtio_start(&mut v.io, 0) || r > ADDR_LIMIT - 4096 || !vq_setup(&mut v.io, &mut v.q, 0) {
+  if !virtio_start(&mut v.io, 0) || r > ADDR_LIMIT - 4096 || dma_addr(v.data) > ADDR_LIMIT - 4096
+    || !vq_setup(&mut v.io, &mut v.q, 0) {
     pio_out8(&mut v.io, VIO_STATUS, 0);
     return v;
   }
@@ -67,19 +76,40 @@ fn virtio_free(ports: &mut Ports, v: Virtio, m: &mut Mem)
   pio_out32(&mut d.io, VIO_QUEUE_PFN, 0);
   vq_free(d.q, &mut m);
   give_page(&mut m, dma_take(d.req));
+  give_page(&mut m, dma_take(d.data));
   port_release(&mut ports, d.io);
 }
 
 /// Sends the request set up in `req` and waits for the device to finish it.
-fn virtio_submit(v: &mut Virtio, data_flags: u64) -> bool
+/// The data is a sector in `req`, or a whole block in `data` if `block`.
+/// Fails while a request started by virtio_begin runs.
+fn virtio_submit(v: &mut Virtio, data_flags: u64, block: bool) -> bool
   requires virtio_ok(v) && data_flags <= 65535
-  ensures virtio_ok(v) && v.sectors == old(v.sectors)
+  ensures virtio_ok(v) && v.sectors == old(v.sectors) && v.busy == old(v.busy)
 {
+  if v.busy {
+    return false;
+  }
+  virtio_send(&mut v, data_flags, block);
+  return vq_wait(&mut v.q) && dma_read8(&mut v.req, REQ_STATUS) == 0;
+}
+
+/// Sends the request set up in `req` (see virtio_submit) without waiting.
+fn virtio_send(v: &mut Virtio, data_flags: u64, block: bool)
+  requires virtio_ok(v) && data_flags <= 65535
+  ensures virtio_ok(v) && v.sectors == old(v.sectors) && v.busy == old(v.busy)
+{
+  if block {
+    dma_write64(&mut v.q.r0, 16, dma_phys(v.data));                  // descriptor 1's address
+    dma_write32(&mut v.q.r0, 16 + 8, cast[u32](VIO_BLOCK));          // and length
+  } else {
+    dma_write64(&mut v.q.r0, 16, dma_phys(v.req) + REQ_DATA);
+    dma_write32(&mut v.q.r0, 16 + 8, cast[u32](VIO_SECTOR));
+  }
   dma_write8(&mut v.req, REQ_STATUS, 255);
   dma_write16(&mut v.q.r0, 16 + 12, cast[u16](data_flags));          // descriptor 1's flags
   vq_push(&mut v.q, 0);                                    // the chain starts at 0
   pio_out16(&mut v.io, VIO_QUEUE_NOTIFY, 0);
-  return vq_wait(&mut v.q) && dma_read8(&mut v.req, REQ_STATUS) == 0;
 }
 
 /// Writes the request header for sector `lba`.
@@ -95,13 +125,13 @@ fn virtio_header(v: &mut Virtio, kind: u64, lba: u64)
 /// or the sector is past its end.
 fn virtio_read(v: &mut Virtio, lba: u64, buf: &mut Bytes) -> bool
   requires virtio_ok(v) && blen(buf) >= VIO_SECTOR
-  ensures virtio_ok(v) && v.sectors == old(v.sectors) && blen(buf) == old(blen(buf))
+  ensures virtio_ok(v) && v.sectors == old(v.sectors) && v.busy == old(v.busy) && blen(buf) == old(blen(buf))
 {
   if lba >= v.sectors {
     return false;
   }
   virtio_header(&mut v, BLK_IN, lba);
-  if !virtio_submit(&mut v, DESC_NEXT + DESC_WRITE) {
+  if !virtio_submit(&mut v, DESC_NEXT + DESC_WRITE, false) {
     return false;
   }
   let l = blen(buf);
@@ -118,7 +148,7 @@ fn virtio_read(v: &mut Virtio, lba: u64, buf: &mut Bytes) -> bool
 /// Writes buf[0..512] to sector `lba` and waits until the device has it.
 fn virtio_write(v: &mut Virtio, lba: u64, buf: &Bytes) -> bool
   requires virtio_ok(v) && blen(buf) >= VIO_SECTOR
-  ensures virtio_ok(v) && v.sectors == old(v.sectors)
+  ensures virtio_ok(v) && v.sectors == old(v.sectors) && v.busy == old(v.busy)
 {
   if lba >= v.sectors {
     return false;
@@ -131,5 +161,132 @@ fn virtio_write(v: &mut Virtio, lba: u64, buf: &Bytes) -> bool
     i = i + 1;
   }
   virtio_header(&mut v, BLK_OUT, lba);
-  return virtio_submit(&mut v, DESC_NEXT);
+  return virtio_submit(&mut v, DESC_NEXT, false);
+}
+
+/// Reads the 4 KiB block at sector `lba` (eight sectors) into
+/// out[at..at + 4096] in one request.
+fn virtio_read_block(v: &mut Virtio, lba: u64, out: &mut Bytes, at: u64) -> bool
+  requires virtio_ok(v) && at + VIO_BLOCK <= blen(out)
+  ensures virtio_ok(v) && v.sectors == old(v.sectors) && v.busy == old(v.busy) && blen(out) == old(blen(out))
+{
+  if lba >= v.sectors || v.sectors - lba < VIO_BLOCK / VIO_SECTOR {
+    return false;
+  }
+  virtio_header(&mut v, BLK_IN, lba);
+  if !virtio_submit(&mut v, DESC_NEXT + DESC_WRITE, true) {
+    return false;
+  }
+  let l = blen(out);
+  let sz = v.sectors;
+  let mut i = 0;
+  while i < VIO_BLOCK
+    invariant i <= VIO_BLOCK && i % 8 == 0 && virtio_ok(v) && v.sectors == sz && blen(out) == l && at + VIO_BLOCK <= l
+  {
+    put_u64(&mut out, at + i, dma_read64(&mut v.data, i));
+    i = i + 8;
+  }
+  return true;
+}
+
+/// Writes in[at..at + 4096] to the eight sectors from `lba` in one request.
+fn virtio_write_block(v: &mut Virtio, lba: u64, src: &Bytes, at: u64) -> bool
+  requires virtio_ok(v) && at + VIO_BLOCK <= blen(src)
+  ensures virtio_ok(v) && v.sectors == old(v.sectors) && v.busy == old(v.busy)
+{
+  if lba >= v.sectors || v.sectors - lba < VIO_BLOCK / VIO_SECTOR {
+    return false;
+  }
+  let sz = v.sectors;
+  let mut i = 0;
+  while i < VIO_BLOCK
+    invariant i <= VIO_BLOCK && i % 8 == 0 && virtio_ok(v) && v.sectors == sz
+  {
+    dma_write64(&mut v.data, i, get_u64(src, at + i));
+    i = i + 8;
+  }
+  virtio_header(&mut v, BLK_OUT, lba);
+  return virtio_submit(&mut v, DESC_NEXT, true);
+}
+
+// Requests that run while the kernel does something else (see
+// src/bio.bastio): one at a time. The device is write-through (the cache
+// feature is not accepted), so a flush has nothing to do.
+
+/// Starts reading or writing (from src[at..at + 4096]) the block at
+/// sector `lba`, or a flush. False if a request is already running or the
+/// block is not whole on the disk.
+fn virtio_begin(v: &mut Virtio, op: u64, lba: u64, src: &Bytes, at: u64) -> bool
+  requires virtio_ok(v) && op <= BIO_FLUSH && at + VIO_BLOCK <= blen(src)
+  ensures virtio_ok(v) && v.sectors == old(v.sectors) && (result ==> v.busy)
+{
+  if v.busy {
+    return false;
+  }
+  if op == BIO_FLUSH {
+    v.busy = true;
+    v.flushing = true;
+    return true;
+  }
+  if lba >= v.sectors || v.sectors - lba < VIO_BLOCK / VIO_SECTOR {
+    return false;
+  }
+  if op == BIO_WRITE {
+    let sz = v.sectors;
+    let mut i = 0;
+    while i < VIO_BLOCK
+      invariant i <= VIO_BLOCK && i % 8 == 0 && virtio_ok(v) && v.sectors == sz
+    {
+      dma_write64(&mut v.data, i, get_u64(src, at + i));
+      i = i + 8;
+    }
+    virtio_header(&mut v, BLK_OUT, lba);
+    virtio_send(&mut v, DESC_NEXT, true);
+  } else {
+    virtio_header(&mut v, BLK_IN, lba);
+    virtio_send(&mut v, DESC_NEXT + DESC_WRITE, true);
+  }
+  v.busy = true;
+  v.flushing = false;
+  return true;
+}
+
+fn virtio_poll(v: &mut Virtio) -> u64
+  requires virtio_ok(v)
+  ensures virtio_ok(v) && v.sectors == old(v.sectors) && result <= BIO_IDLE
+  ensures result == BIO_RUNNING ==> v.busy
+{
+  if !v.busy {
+    return BIO_IDLE;
+  }
+  if v.flushing {
+    v.busy = false;
+    return BIO_OK;
+  }
+  if !vq_has_used(&mut v.q) {
+    return BIO_RUNNING;
+  }
+  vq_next(&mut v.q);
+  v.busy = false;
+  if dma_read8(&mut v.req, REQ_STATUS) == 0 {
+    return BIO_OK;
+  }
+  return BIO_FAILED;
+}
+
+/// Copies the data page (a finished read's block) to out[at..at + 4096].
+fn virtio_fetch(v: &mut Virtio, out: &mut Bytes, at: u64)
+  requires virtio_ok(v) && at + VIO_BLOCK <= blen(out)
+  ensures virtio_ok(v) && v.sectors == old(v.sectors) && v.busy == old(v.busy) && blen(out) == old(blen(out))
+{
+  let l = blen(out);
+  let sz = v.sectors;
+  let b0 = v.busy;
+  let mut i = 0;
+  while i < VIO_BLOCK
+    invariant i <= VIO_BLOCK && i % 8 == 0 && virtio_ok(v) && v.sectors == sz && v.busy == b0 && blen(out) == l && at + VIO_BLOCK <= l
+  {
+    put_u64(&mut out, at + i, dma_read64(&mut v.data, i));
+    i = i + 8;
+  }
 }

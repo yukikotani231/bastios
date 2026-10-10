@@ -28,9 +28,11 @@ import "lxsock.bastio";
 import "lxtcp.bastio";
 import "lxsig.bastio";
 import "lxtime.bastio";
+import "lxunix.bastio";
 import "lxmisc.bastio";
 import "lxthread.bastio";
 import "lxdev.bastio";
+import "lxevent.bastio";
 import "lxprocfs.bastio";
 
 const V_TIMER: u64 = 32;
@@ -73,6 +75,7 @@ fn fault_name(con: &mut Con, v: u64)
 
 // The vector of each processor's local timer (boot/core.h).
 const V_LTIMER: u64 = 48;
+const DISK_POLL_GAP: u64 = 2000;      // idle loops between looks at a running disk command
 
 // The kernel's state and the devices the scheduler drives, shared by every
 // processor through a lock. The invariant is what each processor may assume
@@ -88,7 +91,7 @@ spec fn sys_ok(s: &Sys) -> bool {
 // its FPU page.
 struct Task { pid: u64, lease: Lease, fpu: Frame }
 
-enum Job { Stop, Idle, Run(Task) }
+enum Job { Stop, Idle, Disk, Run(Task) }   // Disk: idle, but a disk command is running
 
 /// Under the lock: what this processor does next. Starting at `from`
 /// (round robin), takes the next READY process out, with its registers and
@@ -109,12 +112,16 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
     tty_intr(&mut s.con, &mut s.k);
     tty_cook(&mut s.con, &mut s.k);
     wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
+    disk_wake(&mut s.k);
   }
   let p = lx_pick(&mut s.k, from);
   if p == 0 {
     if live_count(s.k.procs) == 0 {
       s.stop = true;
       return Job::Stop;
+    }
+    if disk_busy(s.k) {
+      return Job::Disk;
     }
     return Job::Idle;
   }
@@ -221,6 +228,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     if what == POWEROFF {
       s.stop = true;
     }
+    if disk_hold(&mut s.k, p) {
+      return (p + 1) % NPROC;               // a queued write: it waits for the disk
+    }
     if what == KEEP {
       return p;
     }
@@ -229,7 +239,8 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   if v == V_LINUX {
     s.k.ns = hpet_ns(&mut s.clock);
     s.k.fs.now = s.k.ns / 1000000000;
-    if linux_syscall(&mut s.con, &mut s.k, mmu, p) == SWITCH {
+    let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
+    if disk_hold(&mut s.k, p) || what == SWITCH {
       return (p + 1) % NPROC;
     }
     return p;
@@ -419,6 +430,16 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
         try_pump(u, s, pumping, pend);
         j = locked(s, next_job_p, &mut cpu, &mut mmu, cur, true, pend);
       },
+      Job::Disk => {
+        // Nothing to run, but a process waits for a disk command, which
+        // raises no interrupt: look again shortly instead of sleeping
+        // until the next tick.
+        let mut w = 0;
+        while w < DISK_POLL_GAP && atomic_load(pend) == 0 {
+          w = w + 1;
+        }
+        j = locked(s, next_job_p, &mut cpu, mmu, cur, true, pend);
+      },
       Job::Run(t) => {
         let v = cpu_run(&mut cpu, mmu);
         mmu_exit(&mut mmu, t.lease);
@@ -441,6 +462,7 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
       let c = locked(s, finish_p, &mut cpu, mmu, t.pid, t.fpu, V_TIMER, pend);
     },
     Job::Idle => {},
+    Job::Disk => {},
     Job::Stop => {},
   }
 }
@@ -458,8 +480,8 @@ fn ack(pic: &mut Pic, v: u64)
 // The files the file system starts with, built into the kernel image.
 // elfdemo is a Linux program (the elfpie test) that execve runs as a file.
 // /etc/passwd and /etc/group name root, the only user, for Linux programs
-// (whoami, ls -l, getpwuid).
-const NINIT: u64 = 5;
+// (whoami, ls -l, getpwuid). /etc/hosts names localhost (getaddrinfo).
+const NINIT: u64 = 6;
 
 fn init_name(i: u64) -> Str {
   if i == 0 {
@@ -473,6 +495,9 @@ fn init_name(i: u64) -> Str {
   }
   if i == 3 {
     return "etc/group";
+  }
+  if i == 4 {
+    return "etc/hosts";
   }
   return "elfdemo";
 }
@@ -489,6 +514,9 @@ fn init_data(i: u64) -> Str {
   }
   if i == 3 {
     return include_bytes("../files/group");
+  }
+  if i == 4 {
+    return include_bytes("../files/hosts");
   }
   return include_bytes("../build/user/elfpie.elf");
 }
@@ -677,7 +705,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     vec_push(&mut fpus, Fpu::None);
     q = q + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), ticks: 0, ns: 0, epoch: epoch, rng: epoch ^ at, cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN) };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: 0, epoch: epoch, rng: epoch ^ at, cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN) };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
@@ -731,11 +759,15 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.lxfd);
   free(sys.k.ofd);
   free(sys.k.pipes);
+  bfree(sys.k.pipebuf);
   free(sys.k.sigact);
   free(sys.k.cwd);
   free(sys.k.dpath);
   free(sys.k.alarms);
+  free(sys.k.evt);
   free(sys.k.sigsave);
+  free(sys.k.ux);
+  bfree(sys.k.uxb);
   pool = sys.k.mem.pool;
   port_release(&mut ports, devices.uart.io);
   port_release(&mut ports, devices.kbd.data);

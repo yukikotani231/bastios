@@ -1,0 +1,645 @@
+// Linux AF_UNIX stream sockets: socketpair, and bind / listen / connect /
+// accept on a name. A socket names an open file description of kind
+// OF_UNIX; its word 3 is nonblocking (bit 0) plus 2 * mode, and its word 2
+// depends on the mode:
+//   UM_NEW     nothing yet
+//   UM_BOUND   bound to a name: the listener slot holding it
+//   UM_LISTEN  listening: the same slot
+//   UM_CONN    connected: rx + UX_N * tx, the channels it reads and writes
+//
+// k.ux holds UX_N channels of UX_W words (head, count, read end open,
+// write end open), then UX_LIS listener slots of UXL_W words (state,
+// name length, backlog head, backlog count, then UX_BACKLOG descriptions
+// waiting to be accepted). k.uxb holds each channel's ring of UX_CAP bytes,
+// then each slot's name.
+//
+// Unlike Linux, bind makes no file: the name lives in the slot until the
+// socket closes, and is matched byte for byte (no path resolution).
+
+import "linux.bastio";
+
+const AF_UNIX: u64 = 1;
+const UM_NEW: u64 = 0;
+const UM_BOUND: u64 = 1;
+const UM_LISTEN: u64 = 2;
+const UM_CONN: u64 = 3;
+const UL_FREE: u64 = 0;
+const UL_BOUND: u64 = 1;
+const UL_LISTEN: u64 = 2;
+const UXL0: u64 = 64;                  // UX_N * UX_W: the first listener word
+const UXP0: u64 = 65536;               // UX_N * UX_CAP: the first name byte
+const SUN_LEN: u64 = 110;              // sizeof(struct sockaddr_un)
+const ECONNABORTED: u64 = 18446744073709551513;    // 2^64 - 103
+
+// A unix socket descriptor: description h, word 2 x, nonblocking, mode;
+// or err.
+struct Ux { err: u64, h: u64, x: u64, nb: u64, mode: u64 }
+
+fn uc_get(k: &Kernel, c: u64, f: u64) -> u64
+  requires kok(k) && c < UX_N && f < UX_W
+{
+  return get(k.ux, c * UX_W + f);
+}
+
+fn uc_set(k: &mut Kernel, c: u64, f: u64, v: u64)
+  requires kok(k) && c < UX_N && f < UX_W
+  ensures kok(k)
+{
+  k.ux = set(k.ux, c * UX_W + f, v);
+}
+
+fn ul_get(k: &Kernel, l: u64, f: u64) -> u64
+  requires kok(k) && l < UX_LIS && f < UXL_W
+{
+  return get(k.ux, UXL0 + l * UXL_W + f);
+}
+
+fn ul_set(k: &mut Kernel, l: u64, f: u64, v: u64)
+  requires kok(k) && l < UX_LIS && f < UXL_W
+  ensures kok(k)
+{
+  k.ux = set(k.ux, UXL0 + l * UXL_W + f, v);
+}
+
+fn ux_look(k: &Kernel, pid: u64, fd: u64) -> Ux
+  requires kok(k) && pid < NPROC
+  ensures result.err == 0 ==> (result.h < OFD_N && result.nb <= 1 && result.mode <= UM_CONN)
+  ensures result.err == 0 && result.mode == UM_CONN ==> result.x < UX_N * UX_N
+  ensures result.err == 0 && (result.mode == UM_BOUND || result.mode == UM_LISTEN) ==> result.x < UX_LIS
+{
+  let v = fd_get(k.lxfd, pid, fd) % FD_CLOEXEC;
+  if v == 0 {
+    return Ux { err: EBADF, h: 0, x: 0, nb: 0, mode: 0 };
+  }
+  let none = Ux { err: ENOTSOCK, h: 0, x: 0, nb: 0, mode: 0 };
+  if v < FD_OFD || v - FD_OFD >= OFD_N {
+    return none;
+  }
+  let h = v - FD_OFD;
+  if of_get(k.ofd, h, 0) != OF_UNIX {
+    return none;
+  }
+  let w = of_get(k.ofd, h, 3);
+  let x = of_get(k.ofd, h, 2);
+  let mode = w / 2;
+  if mode > UM_CONN || (mode == UM_CONN && x >= UX_N * UX_N)
+    || ((mode == UM_BOUND || mode == UM_LISTEN) && x >= UX_LIS) {
+    return none;
+  }
+  return Ux { err: 0, h: h, x: x, nb: w % 2, mode: mode };
+}
+
+fn is_unix(k: &Kernel, pid: u64, fd: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let v = fd_get(k.lxfd, pid, fd) % FD_CLOEXEC;
+  return v >= FD_OFD && v - FD_OFD < OFD_N && of_get(k.ofd, v - FD_OFD, 0) == OF_UNIX;
+}
+
+/// A free channel, open at both ends and empty; UX_N if none is free.
+fn uc_new(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k) && result <= UX_N
+{
+  let mut c = 0;
+  while c < UX_N && (uc_get(k, c, 2) != 0 || uc_get(k, c, 3) != 0)
+    invariant c <= UX_N
+  {
+    c = c + 1;
+  }
+  if c >= UX_N {
+    return UX_N;
+  }
+  uc_set(&mut k, c, 0, 0);
+  uc_set(&mut k, c, 1, 0);
+  uc_set(&mut k, c, 2, 1);
+  uc_set(&mut k, c, 3, 1);
+  return c;
+}
+
+/// Two descriptions joined to each other, each OF_UNIX and connected:
+/// 2^32 * b + a, or OFD_N if channels or descriptions ran out.
+fn ux_pair(k: &mut Kernel, nb: u64) -> u64
+  requires kok(k) && nb <= 1
+  ensures kok(k)
+  ensures result != OFD_N ==> (result % 4294967296 < OFD_N && result / 4294967296 < OFD_N)
+{
+  let c1 = uc_new(&mut k);
+  if c1 >= UX_N {
+    return OFD_N;
+  }
+  let c2 = uc_new(&mut k);
+  if c2 >= UX_N {
+    uc_set(&mut k, c1, 2, 0);
+    uc_set(&mut k, c1, 3, 0);
+    return OFD_N;
+  }
+  let a = ofd_new(&mut k, OF_UNIX, c1 + UX_N * c2);
+  let b = ofd_new(&mut k, OF_UNIX, c2 + UX_N * c1);
+  if a >= OFD_N || b >= OFD_N {
+    if a < OFD_N {
+      of_set(&mut k.ofd, a, 0, OF_FREE);
+      of_set(&mut k.ofd, a, 1, 0);
+    }
+    if b < OFD_N {
+      of_set(&mut k.ofd, b, 0, OF_FREE);
+      of_set(&mut k.ofd, b, 1, 0);
+    }
+    uc_set(&mut k, c1, 2, 0);
+    uc_set(&mut k, c1, 3, 0);
+    uc_set(&mut k, c2, 2, 0);
+    uc_set(&mut k, c2, 3, 0);
+    return OFD_N;
+  }
+  of_set(&mut k.ofd, a, 3, nb + 2 * UM_CONN);
+  of_set(&mut k.ofd, b, 3, nb + 2 * UM_CONN);
+  return a + 4294967296 * b;
+}
+
+/// The last reference to description h (OF_UNIX, word 2 x, word 3 w) is
+/// gone: a connection closes its read end and its write end; a bound or
+/// listening socket frees its name, and closes every connection still
+/// waiting to be accepted.
+fn ux_close(k: &mut Kernel, x: u64, w: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mode = w / 2;
+  if mode == UM_CONN && x < UX_N * UX_N {
+    uc_set(&mut k, x % UX_N, 2, 0);       // nobody reads what comes in
+    uc_set(&mut k, x / UX_N, 3, 0);       // nobody writes what goes out
+  } else if (mode == UM_BOUND || mode == UM_LISTEN) && x < UX_LIS {
+    let head = ul_get(k, x, 2) % UX_BACKLOG;
+    let count = smaller(ul_get(k, x, 3), UX_BACKLOG);
+    let mut i = 0;
+    while i < count
+      invariant i <= count && count <= UX_BACKLOG && head < UX_BACKLOG && kok(k) && x < UX_LIS
+    {
+      let h = ul_get(k, x, 4 + (head + i) % UX_BACKLOG);
+      // Only the backlog holds a reference to a connection not yet
+      // accepted: close it here.
+      if h < OFD_N && of_get(k.ofd, h, 0) == OF_UNIX {
+        let cx = of_get(k.ofd, h, 2);
+        if cx < UX_N * UX_N {
+          uc_set(&mut k, cx % UX_N, 2, 0);
+          uc_set(&mut k, cx / UX_N, 3, 0);
+        }
+        of_set(&mut k.ofd, h, 0, OF_FREE);
+        of_set(&mut k.ofd, h, 1, 0);
+      }
+      i = i + 1;
+    }
+    ul_set(&mut k, x, 0, UL_FREE);
+    ul_set(&mut k, x, 3, 0);
+  }
+}
+
+/// socket(AF_UNIX, SOCK_STREAM, 0).
+fn ux_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if kind % 16 != SOCK_STREAM || proto != 0 {
+    return EPROTONOSUPPORT;
+  }
+  let h = ofd_new(&mut k, OF_UNIX, 0);
+  if h >= OFD_N {
+    return ENFILE;
+  }
+  of_set(&mut k.ofd, h, 3, kind / SOCK_NONBLOCK % 2 + 2 * UM_NEW);
+  let fd = fd_install(&mut k, pid, h);
+  if fd < LXNFD && kind / SOCK_CLOEXEC % 2 == 1 {
+    fd_set(&mut k.lxfd, pid, fd, FD_OFD + h + FD_CLOEXEC);
+  }
+  return fd;
+}
+
+/// socketpair(AF_UNIX, SOCK_STREAM, 0, sv): two connected sockets.
+fn ux_socketpair(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64, sv: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if domain != AF_UNIX {
+    return EAFNOSUPPORT;
+  }
+  if kind % 16 != SOCK_STREAM || proto != 0 {
+    return EPROTONOSUPPORT;
+  }
+  let a = fd_free(k.lxfd, pid, 0);
+  if a >= LXNFD {
+    return EMFILE;
+  }
+  let b = fd_free(k.lxfd, pid, a + 1);
+  if b >= LXNFD {
+    return EMFILE;
+  }
+  lx_fill(&mut k, 0, 8);
+  bset(&mut k.fs.xfer, 0, cast[u8](a));
+  bset(&mut k.fs.xfer, 4, cast[u8](b));
+  if lx_put_out(&mut k, pid, sv, 8) != 0 {
+    return EFAULT;
+  }
+  let p = ux_pair(&mut k, kind / SOCK_NONBLOCK % 2);
+  if p == OFD_N {
+    return ENFILE;
+  }
+  let mut ce = 0;
+  if kind / SOCK_CLOEXEC % 2 == 1 {
+    ce = FD_CLOEXEC;
+  }
+  fd_set(&mut k.lxfd, pid, a, FD_OFD + p % 4294967296 + ce);
+  fd_set(&mut k.lxfd, pid, b, FD_OFD + p / 4294967296 + ce);
+  return 0;
+}
+
+/// Reads the name in the struct sockaddr_un at user address va (alen bytes
+/// long) into the transfer buffer: its length (up to the first NUL, or
+/// all of it for an abstract name, which starts with one), or an error.
+fn sun_in(k: &mut Kernel, pid: u64, va: u64, alen: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result <= UX_PATH || result >= 18446744073709547520   // -4096: an error
+{
+  if alen <= 2 || alen > SUN_LEN {
+    return EINVAL;
+  }
+  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, alen) != alen {
+    return EFAULT;
+  }
+  if cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1)) != AF_UNIX {
+    return EAFNOSUPPORT;
+  }
+  let mut n = alen - 2;
+  if bget(k.fs.xfer, 2) != 0 {
+    let mut i = 0;
+    while i < alen - 2 && bget(k.fs.xfer, 2 + i) != 0
+      invariant i <= alen - 2 && alen <= SUN_LEN && kok(k)
+    {
+      i = i + 1;
+    }
+    n = i;
+  }
+  if n == 0 || n > UX_PATH || n + 2 > alen {
+    return EINVAL;
+  }
+  // Move the name to the front of the transfer buffer.
+  let mut j = 0;
+  while j < n
+    invariant j <= n && n <= UX_PATH && kok(k)
+  {
+    bset(&mut k.fs.xfer, j, bget(k.fs.xfer, j + 2));
+    j = j + 1;
+  }
+  return n;
+}
+
+/// The slot whose name is the first n transfer bytes, or UX_LIS.
+fn ul_find(k: &Kernel, n: u64) -> u64
+  requires kok(k) && n <= UX_PATH
+  ensures result <= UX_LIS
+{
+  let mut l = 0;
+  while l < UX_LIS
+    invariant l <= UX_LIS
+  {
+    if ul_get(k, l, 0) != UL_FREE && ul_get(k, l, 1) == n {
+      let mut i = 0;
+      while i < n && bget(k.uxb, UXP0 + l * UX_PATH + i) == bget(k.fs.xfer, i)
+        invariant i <= n && n <= UX_PATH && l < UX_LIS
+      {
+        i = i + 1;
+      }
+      if i == n {
+        return l;
+      }
+    }
+    l = l + 1;
+  }
+  return UX_LIS;
+}
+
+/// bind on a unix socket: claims the name.
+fn ux_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let u = ux_look(k, pid, fd);
+  if u.err != 0 {
+    return u.err;
+  }
+  if u.mode != UM_NEW {
+    return EINVAL;
+  }
+  let n = sun_in(&mut k, pid, addr, alen);
+  if n > UX_PATH {
+    return n;
+  }
+  if ul_find(k, n) < UX_LIS {
+    return EADDRINUSE;
+  }
+  let mut l = 0;
+  while l < UX_LIS && ul_get(k, l, 0) != UL_FREE
+    invariant l <= UX_LIS
+  {
+    l = l + 1;
+  }
+  if l >= UX_LIS {
+    return ENOBUFS;
+  }
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= UX_PATH && l < UX_LIS && kok(k)
+  {
+    bset(&mut k.uxb, UXP0 + l * UX_PATH + i, bget(k.fs.xfer, i));
+    i = i + 1;
+  }
+  ul_set(&mut k, l, 0, UL_BOUND);
+  ul_set(&mut k, l, 1, n);
+  ul_set(&mut k, l, 2, 0);
+  ul_set(&mut k, l, 3, 0);
+  of_set(&mut k.ofd, u.h, 2, l);
+  of_set(&mut k.ofd, u.h, 3, u.nb + 2 * UM_BOUND);
+  return 0;
+}
+
+/// listen on a bound unix socket.
+fn ux_listen(k: &mut Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let u = ux_look(k, pid, fd);
+  if u.err != 0 {
+    return u.err;
+  }
+  if u.mode == UM_LISTEN {
+    return 0;
+  }
+  if u.mode != UM_BOUND {
+    return EINVAL;                          // no autobind
+  }
+  ul_set(&mut k, u.x, 0, UL_LISTEN);
+  of_set(&mut k.ofd, u.h, 3, u.nb + 2 * UM_LISTEN);
+  return 0;
+}
+
+/// connect on a unix socket: joins it to a new description that waits in
+/// the listener's backlog for accept. Never waits for accept itself.
+fn ux_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let u = ux_look(k, pid, fd);
+  if u.err != 0 {
+    return u.err;
+  }
+  if u.mode == UM_CONN {
+    return EISCONN;
+  }
+  if u.mode != UM_NEW {
+    return EINVAL;
+  }
+  let n = sun_in(&mut k, pid, addr, alen);
+  if n > UX_PATH {
+    return n;
+  }
+  let l = ul_find(k, n);
+  if l >= UX_LIS {
+    return ENOENT;
+  }
+  if ul_get(k, l, 0) != UL_LISTEN {
+    return ECONNREFUSED;
+  }
+  let count = ul_get(k, l, 3);
+  if count >= UX_BACKLOG {
+    if u.nb == 1 {
+      return EAGAIN;
+    }
+    return SK_WAIT;                         // wait for accept to make room
+  }
+  let p = ux_pair(&mut k, 0);
+  if p == OFD_N {
+    return ENFILE;
+  }
+  let mine = p % 4294967296;
+  let theirs = p / 4294967296;
+  // Our description takes over the first end; the one ux_pair made for it
+  // is dropped.
+  of_set(&mut k.ofd, u.h, 2, of_get(k.ofd, mine, 2));
+  of_set(&mut k.ofd, u.h, 3, u.nb + 2 * UM_CONN);
+  of_set(&mut k.ofd, mine, 0, OF_FREE);
+  of_set(&mut k.ofd, mine, 1, 0);
+  let head = ul_get(k, l, 2) % UX_BACKLOG;
+  ul_set(&mut k, l, 4 + (head + count) % UX_BACKLOG, theirs);
+  ul_set(&mut k, l, 3, count + 1);
+  return 0;
+}
+
+/// accept4 on a listening unix socket: the oldest connection waiting, in a
+/// new descriptor; SK_WAIT (or -EAGAIN when nonblocking) if none is.
+fn ux_accept(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let u = ux_look(k, pid, fd);
+  if u.err != 0 {
+    return u.err;
+  }
+  if u.mode != UM_LISTEN {
+    return EINVAL;
+  }
+  let count = ul_get(k, u.x, 3);
+  if count == 0 {
+    if u.nb == 1 {
+      return EAGAIN;
+    }
+    return SK_WAIT;
+  }
+  let head = ul_get(k, u.x, 2) % UX_BACKLOG;
+  let h = ul_get(k, u.x, 4 + head);
+  ul_set(&mut k, u.x, 2, (head + 1) % UX_BACKLOG);
+  ul_set(&mut k, u.x, 3, count - 1);
+  if h >= OFD_N || of_get(k.ofd, h, 0) != OF_UNIX {
+    return ECONNABORTED;
+  }
+  of_set(&mut k.ofd, h, 3, flags / SOCK_NONBLOCK % 2 + 2 * UM_CONN);
+  let nfd = fd_install(&mut k, pid, h);
+  if nfd >= LXNFD {
+    return nfd;                             // -EMFILE; the description is gone
+  }
+  if flags / SOCK_CLOEXEC % 2 == 1 {
+    fd_set(&mut k.lxfd, pid, nfd, FD_OFD + h + FD_CLOEXEC);
+  }
+  let r = sun_out(&mut k, pid, addr, lenp);
+  if r != 0 {
+    return r;
+  }
+  return nfd;
+}
+
+/// Writes an unnamed struct sockaddr_un (the family alone) to user address
+/// va, as for a peer with no name. Nothing if va is 0.
+fn sun_out(k: &mut Kernel, pid: u64, va: u64, lenp: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if va == 0 {
+    return 0;
+  }
+  if copy_from_user(&mut k.spaces, pid, lenp, &mut k.fs.xfer, 4) != 4 {
+    return EFAULT;
+  }
+  let room = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1));
+  lx_fill(&mut k, 0, 4);
+  bset(&mut k.fs.xfer, 0, cast[u8](AF_UNIX));
+  let n = smaller(room, 2);
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {
+    return EFAULT;
+  }
+  bset(&mut k.fs.xfer, 0, 2);
+  if copy_to_user(&mut k.spaces, pid, lenp, k.fs.xfer, 4) != 4 {
+    return EFAULT;
+  }
+  return 0;
+}
+
+/// write / send on a connected unix socket: what fits in its outgoing
+/// channel; SK_WAIT (or -EAGAIN) while that is full; -EPIPE once the other
+/// end is closed.
+fn ux_send(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let u = ux_look(k, pid, fd);
+  if u.err != 0 {
+    return u.err;
+  }
+  if u.mode != UM_CONN {
+    return ENOTCONN;
+  }
+  let c = u.x / UX_N;
+  if uc_get(k, c, 2) == 0 {
+    return EPIPE;
+  }
+  if n == 0 {
+    return 0;
+  }
+  let count = smaller(uc_get(k, c, 1), UX_CAP);
+  if count == UX_CAP {
+    if dontwait || u.nb == 1 {
+      return EAGAIN;
+    }
+    return SK_WAIT;
+  }
+  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, smaller(n, UX_CAP - count));
+  if got == NO_RESULT || got == 0 {
+    return EFAULT;
+  }
+  let head = uc_get(k, c, 0) % UX_CAP;
+  let mut i = 0;
+  while i < got
+    invariant i <= got && got <= UX_CAP - count && head < UX_CAP && c < UX_N && kok(k)
+  {
+    bset(&mut k.uxb, c * UX_CAP + (head + count + i) % UX_CAP, bget(k.fs.xfer, i));
+    i = i + 1;
+  }
+  uc_set(&mut k, c, 1, count + got);
+  return got;
+}
+
+/// read / recv on a connected unix socket: the bytes waiting, 0 once the
+/// other end is closed and they are all read, SK_WAIT (or -EAGAIN) while
+/// none are.
+fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let u = ux_look(k, pid, fd);
+  if u.err != 0 {
+    return u.err;
+  }
+  if u.mode != UM_CONN {
+    return ENOTCONN;
+  }
+  let c = u.x % UX_N;
+  let count = smaller(uc_get(k, c, 1), UX_CAP);
+  if count == 0 {
+    if uc_get(k, c, 3) == 0 {
+      return 0;
+    }
+    if dontwait || u.nb == 1 {
+      return EAGAIN;
+    }
+    return SK_WAIT;
+  }
+  if n == 0 {
+    return 0;
+  }
+  let want = smaller(smaller(n, count), XFER);
+  let head = uc_get(k, c, 0) % UX_CAP;
+  let mut i = 0;
+  while i < want
+    invariant i <= want && want <= XFER && head < UX_CAP && c < UX_N && kok(k)
+  {
+    bset(&mut k.fs.xfer, i, bget(k.uxb, c * UX_CAP + (head + i) % UX_CAP));
+    i = i + 1;
+  }
+  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
+  if put == NO_RESULT || (put == 0 && want > 0) {
+    return EFAULT;
+  }
+  uc_set(&mut k, c, 0, (head + put) % UX_CAP);
+  uc_set(&mut k, c, 1, count - put);
+  return put;
+}
+
+/// getsockname / getpeername on a unix socket: unnamed (the family alone),
+/// or -ENOTCONN for the peer of one not connected.
+fn ux_name(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let u = ux_look(k, pid, fd);
+  if u.err != 0 {
+    return u.err;
+  }
+  if peer && u.mode != UM_CONN {
+    return ENOTCONN;
+  }
+  return sun_out(&mut k, pid, addr, lenp);
+}
+
+/// What a poll on a unix socket finds now: a listener is readable when a
+/// connection waits; a connection when bytes or the end have come, and
+/// writable while its outgoing channel has room.
+fn ux_poll_bits(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  let u = ux_look(k, pid, fd);
+  if u.err != 0 {
+    return POLLERR;
+  }
+  if u.mode == UM_LISTEN {
+    if ul_get(k, u.x, 3) > 0 {
+      return POLLIN;
+    }
+    return 0;
+  }
+  if u.mode != UM_CONN {
+    return POLLOUT;
+  }
+  let mut b = 0;
+  let rx = u.x % UX_N;
+  let tx = u.x / UX_N;
+  if uc_get(k, rx, 1) > 0 {
+    b = POLLIN;
+  }
+  if uc_get(k, rx, 3) == 0 {
+    b = b | POLLIN | POLLHUP;
+  }
+  if uc_get(k, tx, 2) == 0 {
+    b = b | POLLERR;
+  } else if uc_get(k, tx, 1) < UX_CAP {
+    b = b | POLLOUT;
+  }
+  return b;
+}

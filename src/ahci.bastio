@@ -4,10 +4,13 @@
 //
 // The driver takes the controller from the firmware, switches it to AHCI
 // mode, and uses the first port with a SATA disk on it. Each read or
-// write is one command for one 512-byte sector in command slot 0, whose
-// data goes through a page lent to the controller; the driver waits for
-// it to finish before doing anything else. A write is followed by a cache
-// flush, so the sector is on the medium when the write returns.
+// write is one command in slot 0, for one 512-byte sector or one 4 KiB
+// block, whose data goes through a page lent to the controller; the driver
+// waits for it to finish before doing anything else. A write is followed
+// by a cache flush, so the data is on the medium when the write returns.
+//
+// Disks with logical sectors longer than 512 bytes are left alone (QEMU
+// cannot emulate one on AHCI, so a driver for them could not be tested).
 //
 // The registers (BAR 5) are a block of the device window claimed as an
 // `Mmio`. The controller reads and writes only the two pages lent to it at
@@ -20,6 +23,7 @@
 
 import "pci.bastio";
 import "pages.bastio";
+import "bio.bastio";
 
 const AHCI_CLASS: u64 = 0x010601;      // mass storage, SATA, AHCI 1.0
 const AHCI_PAGES: u64 = 2;
@@ -66,6 +70,7 @@ struct Ahci {
   cmd: Dma, buf: Dma,
   px: u64,            // where the port's registers start
   sectors: u64,       // 0 when no disk could be started
+  busy: bool,         // a command started by ahci_begin has not been polled to its end
 }
 
 spec fn ahci_ok(h: &Ahci) -> bool {
@@ -117,7 +122,7 @@ fn pr(h: &mut Ahci, r: u64) -> u64
 
 fn pw(h: &mut Ahci, r: u64, v: u64)
   requires ahci_ok(h) && r % 4 == 0 && r < 128 && v <= 4294967295
-  ensures ahci_ok(h) && h.sectors == old(h.sectors)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy)
 {
   aw(&mut h, h.px + r, v);
 }
@@ -125,7 +130,7 @@ fn pw(h: &mut Ahci, r: u64, v: u64)
 /// Waits until port register r has none of the bits in `mask` set.
 fn port_clear(h: &mut Ahci, r: u64, mask: u64) -> bool
   requires ahci_ok(h) && r % 4 == 0 && r < 128
-  ensures ahci_ok(h) && h.sectors == old(h.sectors)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy)
 {
   let sec0 = h.sectors;
   let mut i = 0;
@@ -144,7 +149,7 @@ fn port_clear(h: &mut Ahci, r: u64, mask: u64) -> bool
 /// controller does not touch the command list or the FIS area.
 fn port_stop(h: &mut Ahci) -> bool
   requires ahci_ok(h)
-  ensures ahci_ok(h) && h.sectors == old(h.sectors)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy)
 {
   let c = pr(&mut h, PX_CMD);
   pw(&mut h, PX_CMD, bit_clear(c, CMD_ST));
@@ -160,38 +165,77 @@ fn port_stop(h: &mut Ahci) -> bool
 /// reported no error.
 fn ahci_issue(h: &mut Ahci) -> bool
   requires ahci_ok(h)
-  ensures ahci_ok(h) && h.sectors == old(h.sectors)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy)
 {
-  pw(&mut h, PX_IS, 4294967295);
-  pw(&mut h, PX_CI, 1);
+  ahci_fire(&mut h);
   let sec0 = h.sectors;
+  let busy0 = h.busy;
   let mut i = 0;
   while i < AHCI_SPINS
-    invariant ahci_ok(h) && h.sectors == sec0
+    invariant ahci_ok(h) && h.sectors == sec0 && h.busy == busy0
   {
-    if pr(&mut h, PX_IS) & IS_TFE != 0 {
-      return false;
-    }
-    if pr(&mut h, PX_CI) % 2 == 0 {
-      return pr(&mut h, PX_TFD) & TFD_ERR == 0;
+    let st = ahci_check(&mut h);
+    if st != BIO_RUNNING {
+      return st == BIO_OK;
     }
     i = i + 1;
   }
   return false;
 }
 
-/// Sets up slot 0 for ATA command `op` on sector `lba` (count 1 unless
-/// identify), moving 512 bytes through `buf` (to the disk if `write`).
-fn ahci_cmd(h: &mut Ahci, op: u64, lba: u64, write: bool, data: bool) -> bool
-  requires ahci_ok(h) && op < 256 && lba < 0x1000000000000
-  ensures ahci_ok(h) && h.sectors == old(h.sectors)
+/// Issues the command set up in slot 0.
+fn ahci_fire(h: &mut Ahci)
+  requires ahci_ok(h)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy)
+{
+  pw(&mut h, PX_IS, 4294967295);
+  pw(&mut h, PX_CI, 1);
+}
+
+/// How the command issued in slot 0 stands: BIO_RUNNING, BIO_OK or
+/// BIO_FAILED.
+fn ahci_check(h: &mut Ahci) -> u64
+  requires ahci_ok(h)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy) && result <= BIO_FAILED
+{
+  if pr(&mut h, PX_IS) & IS_TFE != 0 {
+    return BIO_FAILED;
+  }
+  if pr(&mut h, PX_CI) % 2 == 0 {
+    if pr(&mut h, PX_TFD) & TFD_ERR == 0 {
+      return BIO_OK;
+    }
+    return BIO_FAILED;
+  }
+  return BIO_RUNNING;
+}
+
+/// Sets up slot 0 for ATA command `op` on logical sector `lba`, `count`
+/// of them, moving `bytes` bytes (at most a page; 0 for none) through
+/// `buf` (to the disk if `write`), and runs it. Fails while a command
+/// started by ahci_begin runs.
+fn ahci_cmd(h: &mut Ahci, op: u64, lba: u64, count: u64, bytes: u64, write: bool) -> bool
+  requires ahci_ok(h) && op < 256 && lba < 0x1000000000000 && count < 65536 && bytes <= 4096
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy)
+{
+  if h.busy {
+    return false;
+  }
+  ahci_setup(&mut h, op, lba, count, bytes, write);
+  return ahci_issue(&mut h);
+}
+
+/// Sets up slot 0 for ATA command `op` (see ahci_cmd) without issuing it.
+fn ahci_setup(h: &mut Ahci, op: u64, lba: u64, count: u64, bytes: u64, write: bool)
+  requires ahci_ok(h) && op < 256 && lba < 0x1000000000000 && count < 65536 && bytes <= 4096
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy)
 {
   let t = dma_phys(h.cmd) + TBL_AT;
   let mut flags = 5;                  // the command FIS is 5 dwords
   if write {
     flags = flags + 64;
   }
-  if data {
+  if bytes > 0 {
     flags = flags + 65536;            // one PRD entry
   }
   dma_write32(&mut h.cmd, 0, cast[u32](flags));
@@ -200,9 +244,11 @@ fn ahci_cmd(h: &mut Ahci, op: u64, lba: u64, write: bool, data: bool) -> bool
   dma_write64(&mut h.cmd, 16, 0);
   dma_write64(&mut h.cmd, 24, 0);
   // The command FIS: register, host to device.
+  let sec0 = h.sectors;
+  let busy0 = h.busy;
   let mut i = 0;
   while i < 128
-    invariant i <= 128 && i % 8 == 0 && ahci_ok(h) && h.sectors == old(h.sectors)
+    invariant i <= 128 && i % 8 == 0 && ahci_ok(h) && h.sectors == sec0 && h.busy == busy0
   {
     dma_write64(&mut h.cmd, TBL_AT + i, 0);
     i = i + 8;
@@ -217,14 +263,33 @@ fn ahci_cmd(h: &mut Ahci, op: u64, lba: u64, write: bool, data: bool) -> bool
   dma_write8(&mut h.cmd, TBL_AT + 8, cast[u8](lba / 16777216 % 256));
   dma_write8(&mut h.cmd, TBL_AT + 9, cast[u8](lba / 4294967296 % 256));
   dma_write8(&mut h.cmd, TBL_AT + 10, cast[u8](lba / 1099511627776 % 256));
-  if data && op != ATA_IDENTIFY {
-    dma_write8(&mut h.cmd, TBL_AT + 12, 1);              // one sector
+  dma_write8(&mut h.cmd, TBL_AT + 12, cast[u8](count % 256));
+  dma_write8(&mut h.cmd, TBL_AT + 13, cast[u8](count / 256));
+  // The PRD entry: the data page.
+  if bytes > 0 {
+    dma_write64(&mut h.cmd, TBL_AT + 128, dma_phys(h.buf));
+    dma_write32(&mut h.cmd, TBL_AT + 136, 0);
+    dma_write32(&mut h.cmd, TBL_AT + 140, cast[u32](bytes - 1));
   }
-  // The PRD entry: the data page, 512 bytes.
-  dma_write64(&mut h.cmd, TBL_AT + 128, dma_phys(h.buf));
-  dma_write32(&mut h.cmd, TBL_AT + 136, 0);
-  dma_write32(&mut h.cmd, TBL_AT + 140, cast[u32](AHCI_SECTOR - 1));
-  return ahci_issue(&mut h);
+}
+
+/// Reads or writes `count` sectors from `lba` through the data page.
+fn ahci_io(h: &mut Ahci, write: bool, lba: u64, count: u64) -> bool
+  requires ahci_ok(h) && lba < 0x1000000000000 && 1 <= count && count <= 8
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy)
+{
+  let bytes = count * AHCI_SECTOR;
+  if write {
+    return ahci_cmd(&mut h, ATA_WRITE_EXT, lba, count, bytes, true);
+  }
+  return ahci_cmd(&mut h, ATA_READ_EXT, lba, count, bytes, false);
+}
+
+fn ahci_flush(h: &mut Ahci) -> bool
+  requires ahci_ok(h)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy)
+{
+  return ahci_cmd(&mut h, ATA_FLUSH_EXT, 0, 0, 0, false);
 }
 
 /// Starts the first SATA disk on the controller whose registers are
@@ -233,7 +298,7 @@ fn ahci_new(regs: Mmio, f0: Frame, f1: Frame) -> Ahci
   requires mmio_base(regs) % 1024 == 0 && mmio_len(regs) <= AHCI_MAX_LEN && mmio_len(regs) >= 0x180
   ensures ahci_ok(result) && mmio_base(result.regs) == mmio_base(regs) && mmio_len(result.regs) == mmio_len(regs)
 {
-  let mut h = Ahci { regs: regs, cmd: dma_lend(f0), buf: dma_lend(f1), px: 0x100, sectors: 0 };
+  let mut h = Ahci { regs: regs, cmd: dma_lend(f0), buf: dma_lend(f1), px: 0x100, sectors: 0, busy: false };
   // Take the controller from the firmware if it supports the handoff,
   // then switch it to AHCI mode.
   if ar(&mut h, HBA_CAP2) % 2 == 1 {
@@ -298,12 +363,16 @@ fn ahci_new(regs: Mmio, f0: Frame, f1: Frame) -> Ahci
   }
   let c2 = pr(&mut h, PX_CMD);
   pw(&mut h, PX_CMD, bit_set(c2, CMD_ST));
-  // IDENTIFY DEVICE: words 100-103 are the LBA48 sector count.
-  if !ahci_cmd(&mut h, ATA_IDENTIFY, 0, false, true) {
+  // IDENTIFY DEVICE: words 100-103 are the LBA48 sector count. Word 106
+  // says (bit 12, when bits 15-14 are 01) that sectors are longer than
+  // 512 bytes.
+  if !ahci_cmd(&mut h, ATA_IDENTIFY, 0, 0, 512, false) {
     return h;
   }
   let size = dma_read64(&mut h.buf, 200);
-  if size < 0x1000000000000 {
+  let w106 = cast[u64](dma_read16(&mut h.buf, 212));
+  let long = w106 / 16384 == 1 && w106 / 4096 % 2 == 1;
+  if size < 0x1000000000000 && !long {
     h.sectors = size;
   }
   return h;
@@ -322,45 +391,142 @@ fn ahci_free(h: Ahci, m: &mut Mem) -> Mmio
   return d.regs;
 }
 
+/// Copies the data page's bytes from `from` (cnt bytes, multiples of 8) to
+/// out[at..].
+fn ahci_out(d: &mut Dma, from: u64, cnt: u64, out: &mut Bytes, at: u64)
+  requires from + cnt <= 4096 && from % 8 == 0 && cnt % 8 == 0 && at + cnt <= blen(out)
+  ensures blen(out) == old(blen(out))
+{
+  let l = blen(out);
+  let mut i = 0;
+  while i < cnt
+    invariant i <= cnt && i % 8 == 0 && blen(out) == l
+  {
+    put_u64(&mut out, at + i, dma_read64(&mut d, from + i));
+    i = i + 8;
+  }
+}
+
+/// Copies src[at..at + cnt] into the data page from `to`.
+fn ahci_in(d: &mut Dma, to: u64, cnt: u64, src: &Bytes, at: u64)
+  requires to + cnt <= 4096 && to % 8 == 0 && cnt % 8 == 0 && at + cnt <= blen(src)
+{
+  let mut i = 0;
+  while i < cnt
+    invariant i <= cnt && i % 8 == 0
+  {
+    dma_write64(&mut d, to + i, get_u64(src, at + i));
+    i = i + 8;
+  }
+}
+
 /// Reads sector `lba` into buf[0..512]. Returns false if the disk fails or
 /// the sector is past its end.
 fn ahci_read(h: &mut Ahci, lba: u64, buf: &mut Bytes) -> bool
   requires ahci_ok(h) && blen(buf) >= AHCI_SECTOR
-  ensures ahci_ok(h) && h.sectors == old(h.sectors) && blen(buf) == old(blen(buf))
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy) && blen(buf) == old(blen(buf))
 {
   if lba >= h.sectors || lba >= 0x1000000000000 {
     return false;
   }
-  if !ahci_cmd(&mut h, ATA_READ_EXT, lba, false, true) {
+  if !ahci_io(&mut h, false, lba, 1) {
     return false;
   }
-  let l = blen(buf);
-  let sec0 = h.sectors;
-  let mut i = 0;
-  while i < AHCI_SECTOR
-    invariant i <= AHCI_SECTOR && ahci_ok(h) && h.sectors == sec0 && blen(buf) == l && l >= AHCI_SECTOR
-  {
-    bset(&mut buf, i, dma_read8(&mut h.buf, i));
-    i = i + 1;
-  }
+  ahci_out(&mut h.buf, 0, AHCI_SECTOR, &mut buf, 0);
   return true;
 }
 
 /// Writes buf[0..512] to sector `lba`, then flushes the disk's cache.
 fn ahci_write(h: &mut Ahci, lba: u64, buf: &Bytes) -> bool
   requires ahci_ok(h) && blen(buf) >= AHCI_SECTOR
-  ensures ahci_ok(h) && h.sectors == old(h.sectors)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy)
 {
   if lba >= h.sectors || lba >= 0x1000000000000 {
     return false;
   }
-  let sec0 = h.sectors;
-  let mut i = 0;
-  while i < AHCI_SECTOR
-    invariant i <= AHCI_SECTOR && ahci_ok(h) && h.sectors == sec0
-  {
-    dma_write8(&mut h.buf, i, bget(buf, i));
-    i = i + 1;
+  ahci_in(&mut h.buf, 0, AHCI_SECTOR, buf, 0);
+  return ahci_io(&mut h, true, lba, 1) && ahci_flush(&mut h);
+}
+
+/// Reads the 4 KiB block at sector `lba` (a multiple of 8) into
+/// out[at..at + 4096] with one command.
+fn ahci_read_block(h: &mut Ahci, lba: u64, out: &mut Bytes, at: u64) -> bool
+  requires ahci_ok(h) && at + 4096 <= blen(out)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy) && blen(out) == old(blen(out))
+{
+  if lba % 8 != 0 || lba >= h.sectors || h.sectors - lba < 8 || lba >= 0x1000000000000 {
+    return false;
   }
-  return ahci_cmd(&mut h, ATA_WRITE_EXT, lba, true, true) && ahci_cmd(&mut h, ATA_FLUSH_EXT, 0, false, false);
+  if !ahci_io(&mut h, false, lba, 8) {
+    return false;
+  }
+  ahci_out(&mut h.buf, 0, 4096, &mut out, at);
+  return true;
+}
+
+/// Writes src[at..at + 4096] to the 4 KiB block at sector `lba` (a
+/// multiple of 8) with one command, then flushes the disk's cache.
+fn ahci_write_block(h: &mut Ahci, lba: u64, src: &Bytes, at: u64) -> bool
+  requires ahci_ok(h) && at + 4096 <= blen(src)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy)
+{
+  if lba % 8 != 0 || lba >= h.sectors || h.sectors - lba < 8 || lba >= 0x1000000000000 {
+    return false;
+  }
+  ahci_in(&mut h.buf, 0, 4096, src, at);
+  return ahci_io(&mut h, true, lba, 8) && ahci_flush(&mut h);
+}
+
+// Commands that run while the kernel does something else (see
+// src/bio.bastio): one at a time, in slot 0.
+
+/// Starts reading or writing (from src[at..at + 4096]) the block at
+/// sector `lba` (a multiple of 8), or flushing the disk's cache. False if
+/// a command is already running or the block is not whole on the disk.
+fn ahci_begin(h: &mut Ahci, op: u64, lba: u64, src: &Bytes, at: u64) -> bool
+  requires ahci_ok(h) && op <= BIO_FLUSH && at + 4096 <= blen(src)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && (result ==> h.busy)
+{
+  if h.busy {
+    return false;
+  }
+  if op == BIO_FLUSH {
+    ahci_setup(&mut h, ATA_FLUSH_EXT, 0, 0, 0, false);
+  } else {
+    if lba % 8 != 0 || lba >= h.sectors || h.sectors - lba < 8 || lba >= 0x1000000000000 {
+      return false;
+    }
+    if op == BIO_WRITE {
+      ahci_in(&mut h.buf, 0, 4096, src, at);
+      ahci_setup(&mut h, ATA_WRITE_EXT, lba, 8, 4096, true);
+    } else {
+      ahci_setup(&mut h, ATA_READ_EXT, lba, 8, 4096, false);
+    }
+  }
+  ahci_fire(&mut h);
+  h.busy = true;
+  return true;
+}
+
+fn ahci_poll(h: &mut Ahci) -> u64
+  requires ahci_ok(h)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && result <= BIO_IDLE
+  ensures result == BIO_RUNNING ==> h.busy
+{
+  if !h.busy {
+    return BIO_IDLE;
+  }
+  let st = ahci_check(&mut h);
+  if st != BIO_RUNNING {
+    h.busy = false;
+  }
+  return st;
+}
+
+/// Copies the data page (a finished read's block) to out[at..at + 4096].
+fn ahci_fetch(h: &mut Ahci, out: &mut Bytes, at: u64)
+  requires ahci_ok(h) && at + 4096 <= blen(out)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy) && blen(out) == old(blen(out))
+{
+  ahci_out(&mut h.buf, 0, 4096, &mut out, at);
 }

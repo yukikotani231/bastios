@@ -22,10 +22,10 @@ import "pages.bastio";
 import "ramfs.bastio";
 import "diskfs.bastio";
 
-const NFD: u64 = 8;                   // open files per process
-const FD_ROWS: u64 = 128;             // NPROC * NFD
+const NFD: u64 = 16;                  // open files per process
+const FD_ROWS: u64 = 256;             // NPROC * NFD
 const FD_STRIDE: u64 = 4;
-const FTAB_LEN: u64 = 512;            // FD_ROWS * FD_STRIDE
+const FTAB_LEN: u64 = 1024;           // FD_ROWS * FD_STRIDE
 const XFER: u64 = 4096;               // the most bytes one call moves
 
 // Row fields.
@@ -46,6 +46,7 @@ const O_TRUNC: u64 = 8;
 const O_APPEND: u64 = 16;
 
 const NO_FD: u64 = 18446744073709551615;
+const VFS_MISS: u64 = 18446744073709551614;     // the disk has not caught up: sleep, then try again
 
 // Directory handles besides the nodes (vfs_dir_lookup, vfs_readdir).
 const VDIR_ROOT: u64 = 96;             // NFILES + DSLOTS: the top directory
@@ -254,10 +255,12 @@ fn vfs_close_all(v: &mut Vfs, mem: &mut Mem, base: u64)
 /// start of the transfer buffer. Returns the count (0 at the end of the
 /// file) or NO_FD if the row is not open for reading. The offset does not
 /// move: the caller advances it by what reached the user (vfs_advance).
+/// On the disk, VFS_MISS if what it needs is not in the cache yet: reads
+/// are queued, and the caller sleeps and tries again (disk_read).
 fn vfs_read(v: &mut Vfs, row: u64, n: u64) -> u64
   requires vfs_ok(v) && row < FD_ROWS && n <= XFER
   ensures vfs_ok(v)
-  ensures result <= n || result == NO_FD
+  ensures result <= n || result == NO_FD || result == VFS_MISS
 {
   if fget(v.ftab, row, FD_MODE) / O_READ % 2 == 0 {
     return NO_FD;
@@ -265,7 +268,14 @@ fn vfs_read(v: &mut Vfs, row: u64, n: u64) -> u64
   let i = fget(v.ftab, row, FD_NODE);
   let fs = fget(v.ftab, row, FD_FS);
   if fs == FS_DISK && i < DSLOTS {
-    return vfs_read_at(&mut v, NFILES + i, fget(v.ftab, row, FD_OFF), n);
+    let r = disk_read(&mut v.disk, i, fget(v.ftab, row, FD_OFF), &mut v.xfer, n);
+    if r == NO_DISK_FILE {
+      return NO_FD;
+    }
+    if r == DISK_MISS {
+      return VFS_MISS;
+    }
+    return r;
   }
   if fs != FS_RAM || i >= NFILES {
     return NO_FD;
@@ -276,11 +286,14 @@ fn vfs_read(v: &mut Vfs, row: u64, n: u64) -> u64
 /// Writes the first n bytes of the transfer buffer to the file open in
 /// `row`, at its offset (at the end with O_APPEND), and moves the offset
 /// past them. Returns the count, short if memory or the file size limit
-/// runs out, or NO_FD if the row is not open for writing.
+/// runs out, or NO_FD if the row is not open for writing. On the disk the
+/// write is queued (the caller waits for v.disk.txn before returning to
+/// the user), or VFS_MISS if old blocks it needs are not cached yet: the
+/// caller sleeps and tries again (disk_write).
 fn vfs_write(v: &mut Vfs, mem: &mut Mem, row: u64, n: u64) -> u64
   requires vfs_ok(v) && mem_ok(mem) && row < FD_ROWS && n <= XFER
   ensures vfs_ok(v) && mem_ok(mem)
-  ensures result <= n || result == NO_FD
+  ensures result <= n || result == NO_FD || result == VFS_MISS
 {
   if fget(v.ftab, row, FD_MODE) / O_WRITE % 2 == 0 {
     return NO_FD;
@@ -294,6 +307,9 @@ fn vfs_write(v: &mut Vfs, mem: &mut Mem, row: u64, n: u64) -> u64
     let w = disk_write(&mut v.disk, i, off, v.xfer, n, v.now);
     if w == NO_DISK_FILE {
       return NO_FD;
+    }
+    if w == DISK_MISS {
+      return VFS_MISS;
     }
     vfs_advance(&mut v, row, off, w);
     return w;
@@ -466,7 +482,7 @@ fn vfs_read_at(v: &mut Vfs, f: u64, off: u64, n: u64) -> u64
     return NO_FD;
   }
   if f >= NFILES {
-    let r = disk_read(&mut v.disk, f - NFILES, off, &mut v.xfer, n);
+    let r = disk_read_wait(&mut v.disk, f - NFILES, off, &mut v.xfer, n);
     if r == NO_DISK_FILE {
       return NO_FD;
     }

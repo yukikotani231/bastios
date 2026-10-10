@@ -153,6 +153,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   pset(&mut k.procs, c, F_PARENT, pid);
   pset(&mut k.procs, c, F_REGS + R_RAX, 0);
   pset(&mut k.procs, c, F_TGID, 0);         // a fork of a thread is a new process
+  group_fork(&mut k.procs, pid, c);
   pset(&mut k.procs, c, F_CTID, 0);
   pset(&mut k.procs, c, F_FUTEX, 0);
   lx_fd_fork(&mut k, pid, c);
@@ -248,6 +249,13 @@ fn lx_src_at(k: &mut Kernel, pid: u64, va: u64) -> Src
   if n == NO_RESULT {
     return none;
   }
+  let mut pf = 0;
+  if n <= XFER {
+    pf = proc_file(k.procs, k.fs.xfer, n);
+  }
+  if pf >= PROC_DEV && pf % 16 == PF_EXE {
+    return exe_src(&mut k, (pf - PROC_DEV) / 16);
+  }
   if n > 4 && xfer_bin(k.fs.xfer) {
     let prog = lx_prog_at(&mut k, pid, va);
     return Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
@@ -256,6 +264,32 @@ fn lx_src_at(k: &mut Kernel, pid: u64, va: u64) -> Src
   if f == NO_FILE {
     return none;
   }
+  let size = vfs_size(&mut k.fs, f);
+  if size == NO_FILE {
+    return none;
+  }
+  return Src { file: true, prog: NPROGS, f: f, size: size };
+}
+
+/// The program process p is running, for an exec of /proc/PID/exe (as
+/// BusyBox's ash does to run a script that execve calls ENOEXEC). Not
+/// there: a built-in Src with prog NPROGS.
+fn exe_src(k: &mut Kernel, p: u64) -> Src
+  requires kok(k)
+  ensures kok(k)
+{
+  let none = Src { file: false, prog: NPROGS, f: 0, size: 0 };
+  if p >= NPROC {
+    return none;
+  }
+  let prog = pget(k.procs, p, F_PROG);
+  if prog < NPROGS {
+    return Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
+  }
+  if prog == NPROGS {
+    return none;
+  }
+  let f = prog - NPROGS - 1;
   let size = vfs_size(&mut k.fs, f);
   if size == NO_FILE {
     return none;
@@ -547,6 +581,10 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
   if pf != 0 {
     return proc_meta(pf);
   }
+  let ff = fifo_find(k, n);
+  if ff < FIFO_N {
+    return Meta { ok: true, mode: S_IFIFO, size: 0, ino: INO_FIFO + ff, mtime: 0 };
+  }
   let dir = dir_at(&mut k, n);
   if dir != NO_FILE {
     if dir >= DIR_PROC {
@@ -589,7 +627,7 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
   ensures kok(k)
 {
   let d = fd_look(k, pid, fd);
-  let mut m = Meta { ok: true, mode: S_IFCHR, size: 0, ino: 3, mtime: 0 };
+  let mut m = dev_meta(DEV_TTY);           // the console is /dev/tty
   if d.kind == K_BAD {
     return EBADF;
   } else if d.kind == K_PIPE_R || d.kind == K_PIPE_W {

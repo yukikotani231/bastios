@@ -62,6 +62,16 @@ int main(void) {
            uint64_t n = 0; timerfd_settime(fd, 0, &t, 0) == 0 && read(fd, &n, 8) == 8 && n == 1; }));
     EXPECT("socketpair AF_UNIX", socketpair(AF_UNIX, SOCK_STREAM, 0, p) == 0 && write(p[0], "sp", 2) == 2 &&
            read(p[1], b, 2) == 2 && memcmp(b, "sp", 2) == 0);
+    EXPECT("socketpair both ways, EOF after close", write(p[1], "ba", 2) == 2 && read(p[0], b, 2) == 2 &&
+           memcmp(b, "ba", 2) == 0 && close(p[0]) == 0 && read(p[1], b, 2) == 0);
+    close(p[1]);
+    {
+        struct sockaddr_un a = {.sun_family = AF_UNIX};
+        strcpy(a.sun_path, "/cu_nobody");
+        int s = socket(AF_UNIX, SOCK_STREAM, 0);
+        EXPECT("AF_UNIX connect to no listener fails", s >= 0 && connect(s, (void *)&a, sizeof a) == -1 && errno == ENOENT);
+        close(s);
+    }
     {
         struct sockaddr_un a = {.sun_family = AF_UNIX};
         strcpy(a.sun_path, "/cu_sock");

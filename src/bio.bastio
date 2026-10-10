@@ -1,0 +1,12 @@
+// The disk drivers' commands that run in the background (`*_begin`,
+// `*_poll`, `*_fetch` in each driver, `blk_begin` and friends in
+// src/blk.bastio): what to do, and how a poll answers.
+
+const BIO_READ: u64 = 0;              // read a 4 KiB block
+const BIO_WRITE: u64 = 1;             // write a 4 KiB block
+const BIO_FLUSH: u64 = 2;             // flush the drive's cache
+
+const BIO_RUNNING: u64 = 0;           // still going
+const BIO_OK: u64 = 1;                // finished, and it worked
+const BIO_FAILED: u64 = 2;            // finished, and it did not
+const BIO_IDLE: u64 = 3;              // nothing was started

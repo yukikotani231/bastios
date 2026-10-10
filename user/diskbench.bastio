@@ -1,0 +1,109 @@
+// Times the disk: writes a 2 MiB file on it in 4 KiB calls, reads it back
+// the same way, then removes it. Prints the time for each in timer ticks
+// (100 Hz) and in KiB/s. The numbers are only comparable between runs on
+// the same host and the same disk driver. The file is disk/benchN, N the
+// last digit of the pid, so two copies can run at once.
+
+import "lib/file.bastio";
+
+const CHUNK: u64 = 4096;
+const CHUNKS: u64 = 512;               // 2 MiB
+
+fn puts(con: &Serial, s: Str) {
+  let mut i = 0;
+  while i < slen(s)
+    invariant i <= slen(s)
+  {
+    serial_write(con, sget(s, i));
+    i = i + 1;
+  }
+}
+
+fn put_num(con: &Serial, n: u64) {
+  let mut p = 1;
+  while p <= n / 10
+    invariant p >= 1
+  {
+    p = p * 10;
+  }
+  let mut q = p;
+  while q > 0 {
+    serial_write(con, cast[u8](48 + (n / q) % 10));
+    q = q / 10;
+  }
+}
+
+fn since(t0: u64) -> u64 {
+  let t1 = sys_info(1);
+  if t1 < t0 {
+    return 0;
+  }
+  return t1 - t0;
+}
+
+/// Prints "<what>: <ticks> ticks, <rate> KiB/s".
+fn report(con: &Serial, what: Str, ticks: u64) {
+  puts(con, what);
+  puts(con, ": ");
+  put_num(con, ticks);
+  puts(con, " ticks, ");
+  let t = ticks;
+  if t == 0 {
+    puts(con, "fast");
+  } else {
+    put_num(con, CHUNK * CHUNKS / 1024 * 100 / t);
+  }
+  puts(con, " KiB/s\r\n");
+}
+
+fn main(con: &mut Serial) -> u64 {
+  let mut buf = balloc(CHUNK);
+  let mut i = 0;
+  while i < CHUNK
+    invariant i <= CHUNK && blen(buf) == CHUNK
+  {
+    bset(&mut buf, i, cast[u8](i % 251));
+    i = i + 1;
+  }
+  let mut name = bfrom("disk/bench0");
+  bset(&mut name, 10, cast[u8](48 + sys_getpid() % 10));
+  let fd = f_open(name, 11, O_WRITE + O_CREATE + O_TRUNC);
+  if fd == NOT_OK {
+    puts(con, "diskbench: no disk\r\n");
+    bfree(name);
+    bfree(buf);
+    return 1;
+  }
+  let t0 = sys_info(1);
+  let mut n = 0;
+  let mut ok = true;
+  while n < CHUNKS && ok
+    invariant blen(buf) == CHUNK
+  {
+    ok = f_write(fd, buf, CHUNK) == CHUNK;
+    n = n + 1;
+  }
+  f_close(fd);
+  let wt = since(t0);
+  let rd = f_open(name, 11, O_READ);
+  let t1 = sys_info(1);
+  n = 0;
+  while n < CHUNKS && ok
+    invariant blen(buf) == CHUNK
+  {
+    ok = f_read(rd, &mut buf) == CHUNK && bget(buf, 4095) == cast[u8](4095 % 251);
+    n = n + 1;
+  }
+  f_close(rd);
+  let rt = since(t1);
+  f_unlink(name, 11);
+  bfree(name);
+  bfree(buf);
+  if !ok {
+    puts(con, "diskbench: failed\r\n");
+    return 2;
+  }
+  report(con, "write 2 MiB", wt);
+  report(con, "read 2 MiB", rt);
+  return 0;
+}

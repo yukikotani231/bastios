@@ -36,6 +36,10 @@ const F_RESTART: u64 = 31;
 const F_TGID: u64 = 32;
 const F_CTID: u64 = 33;
 const F_FUTEX: u64 = 34;
+// Linux process groups and sessions (src/lxsig.bastio): the group and the
+// session, 0 meaning the process's own pid.
+const F_PGID: u64 = 35;
+const F_SID: u64 = 36;
 const SIG_DEATH: u64 = 256;          // F_CODE of a process a signal ended: 256 + the signal
 
 // Saved register numbers.
@@ -65,7 +69,8 @@ const NETWAIT: u64 = 9;              // waiting for the network (a ping's reply)
 const LXVFORK: u64 = 10;             // lent its address space to child F_WAIT (clone with CLONE_VM | CLONE_VFORK)
 const CONWAIT: u64 = 11;             // writing to the console, whose ring is full
 const FUTEXWAIT: u64 = 12;           // in a Linux futex wait with no timeout
-const EXITING: u64 = 13;             // RUNNING, a thread whose leader is in execve: freed when it comes back
+const DISKWAIT: u64 = 13;            // waiting for the disk: F_WAIT says for what (disk_wake)
+const EXITING: u64 = 14;             // RUNNING, a thread whose leader is in execve: freed when it comes back
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -316,6 +321,9 @@ const SK_WAIT: u64 = 0x8000000000000000;
 // What lx_write_fd returns when the console's ring has no room for the
 // write: not an errno, and never returned to the process.
 const CON_FULL: u64 = 0x8000000000000001;
+// What a file read or write returns when the disk has not caught up
+// (VFS_MISS): the caller sleeps in DISKWAIT and its call restarts.
+const DISK_RETRY: u64 = 0x8000000000000002;
 // Linux working directories: per process, word 0 the length of the path
 // (without the leading "/", at most FNAME_MAX) and one byte a word after.
 const CWD_STRIDE: u64 = 256;           // FNAME_MAX + 1
@@ -335,6 +343,22 @@ const LX_TIMES: u64 = 100;
 const OF_SOCK: u64 = 5;               // x: the kernel socket; word 3: 2 * peer + nonblocking
 const OF_DEV: u64 = 7;                // x: the device (src/lxdev.bastio)
 const OF_TCP: u64 = 6;                // x: the kernel connection (TCBS: none yet); word 3: see src/lxtcp.bastio
+const OF_EVENT: u64 = 8;              // an eventfd: x the counter; word 3: nonblocking + 2 * semaphore (src/lxevent.bastio)
+const OF_TIMER: u64 = 9;              // a timerfd: x the timer; word 3: nonblocking
+const OF_EPOLL: u64 = 10;             // an epoll instance: x the instance; word 3: nonblocking
+const TFD_N: u64 = 8;                 // timerfds, in k.evt from 0: TFD_STRIDE words each
+const TFD_STRIDE: u64 = 4;
+const EP_N: u64 = 8;                  // epoll instances, in k.evt from EP_AT: EP_STRIDE words each
+const EP_FDS: u64 = 16;               // descriptors one epoll instance watches
+const EP_ENTRY: u64 = 4;              // fd + 1 (0: empty), its description, events, data
+const EP_STRIDE: u64 = 65;            // 1 + EP_FDS * EP_ENTRY
+const EP_AT: u64 = 32;                // TFD_N * TFD_STRIDE
+const FIFO_N: u64 = 4;                // named pipes, in k.evt from FIFO_AT: FIFO_STRIDE words each
+const FIFO_NAME: u64 = 128;           // the longest name one can have
+const FIFO_STRIDE: u64 = 130;         // name length (0: free), pipe + 1, then the name, a byte a word
+const FIFO_AT: u64 = 552;             // EP_AT + EP_N * EP_STRIDE
+const EVT_LEN: u64 = 1072;            // FIFO_AT + FIFO_N * FIFO_STRIDE
+const OF_UNIX: u64 = 11;              // an AF_UNIX socket: see src/lxunix.bastio
 const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
 const DIR_VFS: u64 = 2;               // DIR_VFS + a file layer directory handle
@@ -343,10 +367,24 @@ const PROC_DEV: u64 = 256;            // an OF_DEV device from here up is a /pro
 const PF_EXE: u64 = 7;                // /proc/PID/exe, a link
 const EACCES: u64 = 18446744073709551603;   // 2^64 - 13
 
+// AF_UNIX sockets (src/lxunix.bastio): UX_N one-way channels and UX_LIS
+// names to connect to.
+const UX_N: u64 = 16;
+const UX_W: u64 = 4;                  // head, count, read end open, write end open
+const UX_CAP: u64 = 4096;             // bytes a channel holds
+const UX_LIS: u64 = 4;
+const UX_BACKLOG: u64 = 4;            // connections waiting for accept
+const UXL_W: u64 = 8;                 // 4 + UX_BACKLOG
+const UX_PATH: u64 = 108;             // the longest name
+const UX_LEN: u64 = 96;               // UX_N * UX_W + UX_LIS * UXL_W
+const UXB_LEN: u64 = 65968;           // UX_N * UX_CAP + UX_LIS * UX_PATH
+
 const NPIPES: u64 = 8;
-const PIPE_CAP: u64 = 1024;
-const PIPE_STRIDE: u64 = 1028;        // 4 + PIPE_CAP
-const PIPES_LEN: u64 = 8224;          // NPIPES * PIPE_STRIDE
+const PIPE_CAP: u64 = 65536;          // bytes a pipe holds, as on Linux
+const PIPE_ATOM: u64 = 4096;          // PIPE_BUF: writes this small go in whole
+const PIPE_STRIDE: u64 = 6;           // head, count, readers, writers, FIFO + 1 (0: none), a writer came
+const PIPES_LEN: u64 = 48;            // NPIPES * PIPE_STRIDE
+const PIPE_BYTES: u64 = 524288;       // NPIPES * PIPE_CAP
 
 const LX_PIPE: u64 = 22;
 const LX_FSTAT: u64 = 5;
@@ -356,6 +394,7 @@ const AT_REMOVEDIR: u64 = 0x200;
 const DENT_BUF: u64 = 2048;           // the most getdents64 fills in one call
 const ENOTDIR: u64 = 18446744073709551596;  // 2^64 - 20
 const EEXIST: u64 = 18446744073709551599;   // 2^64 - 17
+const EPERM: u64 = 18446744073709551615;    // 2^64 - 1
 const LO_EXCL: u64 = 0x80;
 const LO_DIRECTORY: u64 = 0x10000;
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
@@ -399,6 +438,9 @@ const K_PIPE_W: u64 = 4;
 const K_DIR: u64 = 5;                 // x: DIR_ROOT or DIR_BIN
 const K_SOCK: u64 = 6;                // x: the kernel socket
 const K_DEV: u64 = 7;                 // x: the device (src/lxdev.bastio)
+const K_EVENT: u64 = 8;               // x: the description (src/lxevent.bastio)
+const K_TIMER: u64 = 9;               // x: the timer
+const K_EPOLL: u64 = 10;              // x: the epoll instance
 
 struct Kernel {
   mem: Mem,             // the page allocator
@@ -409,7 +451,8 @@ struct Kernel {
   line: Buf,            // the line a Linux program is typing (see tty_cook)
   lxfd: Buf,            // Linux descriptors (src/lxfd.bastio)
   ofd: Buf,             // open file descriptions they share
-  pipes: Buf,           // pipe buffers
+  pipes: Buf,           // pipe state, PIPE_STRIDE words each
+  pipebuf: Bytes,       // pipe rings, PIPE_CAP bytes each
   ticks: u64,           // timer ticks since boot
   ns: u64,              // the HPET clock at the last system call, in nanoseconds
   epoch: u64,           // CLOCK_REALTIME minus the HPET clock, in ns (src/rtc.bastio)
@@ -422,15 +465,18 @@ struct Kernel {
   dpath: Buf,           // the path of each open directory description, laid out like cwd
   sigsave: Buf,         // per process, the mask rt_sigsuspend replaced; then each pending signal's sender (src/lxsig.bastio)
   alarms: Buf,          // Linux ITIMER_REAL per process: deadline (0: off) and interval (src/lxtime.bastio)
+  evt: Buf,             // timerfds and epoll instances (src/lxevent.bastio)
+  ux: Buf,              // AF_UNIX channels and names (src/lxunix.bastio)
+  uxb: Bytes,           // their bytes
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN
 }
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 26;
+const NPROGS: u64 = 27;
 const LDSO_PROG: u64 = 25;            // musl's dynamic linker, the interpreter of musl programs
 
 fn prog_name(i: u64) -> Str {
@@ -512,6 +558,9 @@ fn prog_name(i: u64) -> Str {
   if i == 25 {
     return "ld-musl-x86_64.so.1";
   }
+  if i == 26 {
+    return "diskbench";
+  }
   return "(file)";                    // a program loaded from a file
 }
 
@@ -590,6 +639,9 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 25 {
     return include_bytes("../build/user/ld-musl.so");
+  }
+  if i == 26 {
+    return include_bytes("../build/user/diskbench.bin");
   }
   return include_bytes("../build/user/fault.bin");
 }
@@ -927,6 +979,8 @@ fn put_state(con: &mut Con, s: u64)
     puts(&mut con, "writing");
   } else if s == NETWAIT {
     puts(&mut con, "netwait");
+  } else if s == DISKWAIT {
+    puts(&mut con, "disk   ");
   } else if s == LXVFORK {
     puts(&mut con, "vfork  ");
   } else {

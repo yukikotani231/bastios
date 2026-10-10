@@ -181,7 +181,7 @@ fn tcp_emit(n: &mut Net, t: u64, flags: u64, seq: u64, off: u64, dl: u64)
     bset(&mut n.out, 34 + hl + i, bget(n.ttx, at + i));
     i = i + 1;
   }
-  put16(&mut n.out, 50, 65535 - l4_sum(n.out, n.ip, rip, IP_TCP, tlen));
+  put16(&mut n.out, 50, 65535 - l4_sum(n.out, src_ip(n, rip), rip, IP_TCP, tlen));
   send_via(&mut n, next_hop(n, rip), 34 + tlen);
 }
 
@@ -311,8 +311,8 @@ fn tcp_refuse(n: &mut Net, flags: u64, dlen: u64)
   bset(&mut n.out, 46, 0x50);
   put16(&mut n.out, 48, 0);
   put32(&mut n.out, 50, 0);
-  put16(&mut n.out, 50, 65535 - l4_sum(n.out, n.ip, src, IP_TCP, 20));
-  net_send(&mut n, 54);
+  put16(&mut n.out, 50, 65535 - l4_sum(n.out, src_ip(n, src), src, IP_TCP, 20));
+  reply_send(&mut n, src, 54);
 }
 
 // ---------------------------------------------------------------- the table
@@ -783,11 +783,16 @@ fn tcb_held(n: &Net, t: u64) -> bool
   return t < TCBS && tw(n, t, W_HELD) == 1;
 }
 
-/// Listens on `port`: the listener's number, or NO_SOCK.
-fn tcp_listen_on(n: &mut Net, port: u64) -> u64
+/// Listens on `port` (0: an ephemeral one): the listener's number, or
+/// NO_SOCK.
+fn tcp_listen_on(n: &mut Net, want: u64) -> u64
   requires net_ok(n)
   ensures net_ok(n) && (result < TCBS || result == NO_SOCK)
 {
+  let mut port = want;
+  if port == 0 {
+    port = tcp_eph_port(&mut n);
+  }
   if port == 0 || port > 65535 || n.ip == 0 || tcp_port_used(n, port) {
     return NO_SOCK;
   }
@@ -821,19 +826,12 @@ fn tcp_take(n: &mut Net, lis: u64) -> u64
   return NO_SOCK;
 }
 
-/// Opens a connection to ip:port from an ephemeral port: its number (it is
-/// SYN_SENT; poll tcp_status), or NO_SOCK.
-fn tcp_open(n: &mut Net, ip: u64, port: u64) -> u64
+/// An ephemeral port no connection or listener uses, or 0 if none was
+/// found (only TCBS ports can be in use, so TCBS + 1 tries find one).
+fn tcp_eph_port(n: &mut Net) -> u64
   requires net_ok(n)
-  ensures net_ok(n) && (result < TCBS || result == NO_SOCK)
+  ensures net_ok(n) && result <= 65535
 {
-  if ip > IP_MAX || ip == 0 || port == 0 || port > 65535 || n.ip == 0 || !card_live(n.dev) {
-    return NO_SOCK;
-  }
-  let t = tcb_free_slot(n);
-  if t >= TCBS {
-    return NO_SOCK;
-  }
   let mut lport = 0;
   let mut tries = 0;
   while tries <= TCBS && lport == 0
@@ -846,6 +844,25 @@ fn tcp_open(n: &mut Net, ip: u64, port: u64) -> u64
     }
     tries = tries + 1;
   }
+  return lport;
+}
+
+/// Opens a connection to to:port (0.0.0.0: this machine) from an ephemeral port: its number (it is
+/// SYN_SENT; poll tcp_status), or NO_SOCK.
+fn tcp_open(n: &mut Net, to: u64, port: u64) -> u64
+  requires net_ok(n)
+  ensures net_ok(n) && (result < TCBS || result == NO_SOCK)
+{
+  let ip = dst_ip(to);
+  if ip > IP_MAX || port == 0 || port > 65535 || (n.ip == 0 && ip / 16777216 != LO_NET)
+    || (!card_live(n.dev) && !is_local(n, ip)) {
+    return NO_SOCK;
+  }
+  let t = tcb_free_slot(n);
+  if t >= TCBS {
+    return NO_SOCK;
+  }
+  let lport = tcp_eph_port(&mut n);
   if lport == 0 {
     return NO_SOCK;
   }
@@ -1110,6 +1127,21 @@ fn tcp_peer_ip(c: &Nic, t: u64) -> u64
     Nic::Up(n) => {
       if tcb_held(n, t) && tw(n, t, W_RIP) <= IP_MAX {
         return tw(n, t, W_RIP);
+      }
+      return 0;
+    },
+  }
+}
+
+fn tcp_local_port(c: &Nic, t: u64) -> u64
+  requires nic_ok(c)
+  ensures result <= 65535
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if tcb_held(n, t) && tw(n, t, W_LPORT) <= 65535 {
+        return tw(n, t, W_LPORT);
       }
       return 0;
     },

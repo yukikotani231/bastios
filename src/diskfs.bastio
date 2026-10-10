@@ -25,14 +25,17 @@
 // to keep consistent.
 //
 // Power cuts. Data is never written over in place. A write builds the
-// blocks it changes in memory and writes them, and new copies of the maps
-// above them, to free blocks; then it switches the file to the new root
-// and size by writing its directory entry, which is one sector write (an
-// entry never straddles a sector). The old blocks are freed only after
-// that. Removing and truncating write only the entry. The drivers return
-// only once the drive has the sector (ATA: FLUSH CACHE after each write;
-// virtio: the legacy device is write-through unless the cache feature is
-// negotiated, and it is not). So after a cut anywhere, the file system
+// blocks it changes in memory and queues them, and new copies of the maps
+// above them, for free blocks; then a flush; then the directory block
+// holding the file's entry, now with the new root and size (an entry
+// never straddles a sector, so its sector is written whole or not at all,
+// and the block's other sectors are rewritten unchanged); then a flush.
+// The old blocks are freed only after that (src/diskq.bastio runs the
+// queue in order). Removing and truncating write only the entry, after
+// waiting for the queue to empty. A flush means the drive has the data
+// (ATA, AHCI, NVMe: FLUSH CACHE; virtio: the legacy device is
+// write-through unless the cache feature is negotiated, and it is not).
+// So after a cut anywhere, the file system
 // mounts as it was after some prefix of the entry writes: each write call
 // has happened entirely or not at all, even one that overwrites bytes in
 // the middle of a file across two blocks. Not atomic: a format cut short
@@ -45,6 +48,7 @@
 // buffers: every block number and length read from the disk is checked.
 
 import "blk.bastio";
+import "diskq.bastio";
 
 const DSLOTS: u64 = 64;               // directory entries
 const DENT: u64 = 256;
@@ -61,6 +65,7 @@ const DNAME_MAX: u64 = 200;
 const DTOP: u64 = 64;                 // the parent of an entry in "disk"
 const DISK_MAGIC: u64 = 0x324B534944545342;   // "BSTDISK2", little-endian
 const NO_DISK_FILE: u64 = 18446744073709551615;
+const DISK_MISS: u64 = 18446744073709551614;    // not in the cache yet: try again (see disk_read)
 
 // Directory entry fields.
 const E_KIND: u64 = 0;
@@ -84,6 +89,9 @@ struct DiskFs {
   la: Bytes,            // a first-level map, likewise
   lb: Bytes,            // a second one, for a write that crosses two
   data: Bytes,          // a data block being built
+  d2: Bytes,            // a second one, for a write that crosses two
+  q: DiskQ,             // the block cache and the queue of disk commands (src/diskq.bastio)
+  txn: u64,             // the last transaction a write queued, for its caller to wait on
   used: Bytes,          // MAX_BLOCKS: 1 for each block in use
   blocks: u64,          // blocks on the disk, at most MAX_BLOCKS
   slots: u64,           // DSLOTS once mounted; 0 without a disk
@@ -92,7 +100,7 @@ struct DiskFs {
 
 spec fn disk_ok(d: &DiskFs) -> bool {
   blk_ok(d.dev) && blen(d.dir) == DIR_BYTES && blen(d.sec) == SECTOR && blen(d.root) == BLOCK
-    && blen(d.la) == BLOCK && blen(d.lb) == BLOCK && blen(d.data) == BLOCK
+    && blen(d.la) == BLOCK && blen(d.lb) == BLOCK && blen(d.data) == BLOCK && blen(d.d2) == BLOCK && dq_ok(d.q)
     && blen(d.used) == MAX_BLOCKS && d.blocks <= MAX_BLOCKS && d.slots <= DSLOTS
 }
 
@@ -176,7 +184,8 @@ fn sec_out(dev: &mut Blk, sec: &mut Bytes, lba: u64, src: &Bytes, at: u64) -> bo
   return blk_write(&mut dev, lba, sec);
 }
 
-/// Reads block b into out, or zeros for b == 0 (a hole).
+/// Reads block b into out, or zeros for b == 0 (a hole), with one disk
+/// command.
 fn block_in(dev: &mut Blk, sec: &mut Bytes, b: u64, out: &mut Bytes) -> bool
   requires blk_ok(dev) && blen(sec) == SECTOR && blen(out) == BLOCK && b < MAX_BLOCKS
   ensures blk_ok(dev) && blen(sec) == SECTOR && blen(out) == BLOCK
@@ -185,33 +194,16 @@ fn block_in(dev: &mut Blk, sec: &mut Bytes, b: u64, out: &mut Bytes) -> bool
     zero(&mut out, 0, BLOCK);
     return true;
   }
-  let mut s = 0;
-  while s < BSECT
-    invariant s <= BSECT && blk_ok(dev) && blen(sec) == SECTOR && blen(out) == BLOCK
-  {
-    if !sec_in(&mut dev, &mut sec, b * BSECT + s, &mut out, s * SECTOR) {
-      return false;
-    }
-    s = s + 1;
-  }
-  return true;
+  return blk_read_block(&mut dev, b * BSECT, &mut out, 0);
 }
 
-/// Writes src (BLOCK bytes) to block b.
+/// Writes src (BLOCK bytes) to block b with one disk command, and flushes
+/// the drive's cache, so it is on the disk before any later write.
 fn block_out(dev: &mut Blk, sec: &mut Bytes, b: u64, src: &Bytes) -> bool
   requires blk_ok(dev) && blen(sec) == SECTOR && blen(src) == BLOCK && b < MAX_BLOCKS
   ensures blk_ok(dev) && blen(sec) == SECTOR
 {
-  let mut s = 0;
-  while s < BSECT
-    invariant s <= BSECT && blk_ok(dev) && blen(sec) == SECTOR
-  {
-    if !sec_out(&mut dev, &mut sec, b * BSECT + s, src, s * SECTOR) {
-      return false;
-    }
-    s = s + 1;
-  }
-  return true;
+  return blk_write_block(&mut dev, b * BSECT, src, 0);
 }
 
 /// The block number at m[at..at + 8], or 0 for a hole or a number that is
@@ -247,6 +239,7 @@ fn alloc_block(d: &mut DiskFs) -> u64
     if bget(d.used, b) == 0 {
       bset(&mut d.used, b, 1);
       d.hint = b + 1;
+      dq_forget(&mut d.q, b);
       return b;
     }
     b = b + 1;
@@ -258,6 +251,7 @@ fn alloc_block(d: &mut DiskFs) -> u64
     if bget(d.used, b) == 0 {
       bset(&mut d.used, b, 1);
       d.hint = b + 1;
+      dq_forget(&mut d.q, b);
       return b;
     }
     b = b + 1;
@@ -265,10 +259,62 @@ fn alloc_block(d: &mut DiskFs) -> u64
   return 0;
 }
 
+// ---------------------------------------------------------------- the queue
+
+/// Moves the disk's command queue along without waiting (see
+/// src/diskq.bastio), freeing the blocks finished transactions gave up.
+/// True if anything happened.
+fn disk_pump(d: &mut DiskFs, now: u64) -> bool
+  requires disk_ok(d)
+  ensures disk_ok(d)
+{
+  let mut moved = false;
+  let mut n = 0;
+  while n < 2 * NQ + 2
+    invariant disk_ok(d)
+  {
+    let r = dq_pump(&mut d.q, &mut d.dev, now);
+    if r == DQ_IDLE {
+      return moved;
+    }
+    if r >= DQ_FREED {
+      free_block(&mut d, r - DQ_FREED);
+    }
+    moved = true;
+    n = n + 1;
+  }
+  return moved;
+}
+
+/// Waits until every queued command has finished, for the operations
+/// that still do their disk I/O synchronously. A command that never
+/// finishes is given up after DQ_SPINS polls (the disk is then dead).
+fn disk_drain(d: &mut DiskFs)
+  requires disk_ok(d)
+  ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
+{
+  let mut spins = 0;
+  let blocks0 = d.blocks;
+  let slots0 = d.slots;
+  while !dq_idle(d.q) && spins < DQ_SPINS + 2 * NQ + 2
+    invariant disk_ok(d) && d.blocks == blocks0 && d.slots == slots0
+  {
+    let mut now = 0;
+    if spins >= DQ_SPINS && d.q.since < 0x4000000000000000 {
+      now = d.q.since + DQ_TICKS + 1;
+    }
+    let r = dq_pump(&mut d.q, &mut d.dev, now);
+    if r >= DQ_FREED {
+      free_block(&mut d, r - DQ_FREED);
+    }
+    spins = spins + 1;
+  }
+}
+
 /// Gives block b back (nothing for 0).
 fn free_block(d: &mut DiskFs, b: u64)
   requires disk_ok(d)
-  ensures disk_ok(d)
+  ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
 {
   if b >= DATA_B0 && b < MAX_BLOCKS {
     bset(&mut d.used, b, 0);
@@ -344,8 +390,8 @@ fn disk_mount(dev: Blk) -> DiskFs
   ensures disk_ok(result)
 {
   let mut d = DiskFs { dev: dev, dir: balloc(DIR_BYTES), sec: balloc(SECTOR), root: balloc(BLOCK),
-    la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), used: balloc(MAX_BLOCKS),
-    blocks: 0, slots: 0, hint: DATA_B0 };
+    la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(), txn: 0,
+    used: balloc(MAX_BLOCKS), blocks: 0, slots: 0, hint: DATA_B0 };
   let mut n = blk_sectors(d.dev) / BSECT;
   if n > MAX_BLOCKS {
     n = MAX_BLOCKS;
@@ -402,12 +448,23 @@ fn disk_mount(dev: Blk) -> DiskFs
   return d;
 }
 
-/// Unmounts the disk and hands back its driver (at power off). Every
-/// change was already written through.
+/// Unmounts the disk and hands back its driver (at power off), once every
+/// queued command has finished.
 fn disk_unmount(d: DiskFs) -> Blk
   requires disk_ok(d)
   ensures blk_ok(result)
 {
+  let mut e = d;
+  disk_drain(&mut e);
+  return disk_unmount_now(e);
+}
+
+fn disk_unmount_now(d: DiskFs) -> Blk
+  requires disk_ok(d)
+  ensures blk_ok(result)
+{
+  dq_free(d.q);
+  bfree(d.d2);
   bfree(d.dir);
   bfree(d.sec);
   bfree(d.root);
@@ -450,6 +507,7 @@ fn disk_orphan(d: &mut DiskFs, i: u64) -> bool
   requires disk_ok(d) && i < DSLOTS
   ensures disk_ok(d)
 {
+  disk_drain(&mut d);                 // queued writes reach the disk first
   if bget(d.dir, i * DENT) != 1 {
     return false;
   }
@@ -605,6 +663,7 @@ fn disk_create(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, now: 
   requires disk_ok(d) && from + n <= blen(name)
   ensures disk_ok(d) && result <= DSLOTS
 {
+  disk_drain(&mut d);                 // queued writes reach the disk first
   let end = from + n;
   let mut k = end;
   while k > from && bget(name, k - 1) != 47
@@ -665,6 +724,7 @@ fn disk_move(d: &mut DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
   requires disk_ok(d) && i < DSLOTS && from + n <= blen(name)
   ensures disk_ok(d)
 {
+  disk_drain(&mut d);                 // queued writes reach the disk first
   if !dent_live(d, i) {
     return false;
   }
@@ -736,6 +796,7 @@ fn disk_remove(d: &mut DiskFs, i: u64) -> bool
   requires disk_ok(d) && i < DSLOTS
   ensures disk_ok(d)
 {
+  disk_drain(&mut d);                 // queued writes reach the disk first
   let r = dent_root(d, i);
   let file = bget(d.dir, i * DENT + E_KIND) == 1 || cast[u64](bget(d.dir, i * DENT + E_KIND)) == K_ORPHAN;
   bset(&mut d.dir, i * DENT + E_KIND, 0);
@@ -832,40 +893,44 @@ fn disk_name(d: &DiskFs, i: u64, buf: &mut Bytes, at: u64) -> u64
 // ---------------------------------------------------------------- data
 
 /// The block holding block b of the file with root map `root`: 0 for a
-/// hole, NO_DISK_FILE if the disk fails. Reads one sector of each map.
+/// hole, DISK_MISS if a map it needs is not in the cache yet (a read of it
+/// is queued, or will be once the queue has room).
 fn data_ptr(d: &mut DiskFs, root: u64, b: u64) -> u64
   requires disk_ok(d) && b < PTRS * PTRS
   ensures disk_ok(d)
-  ensures result == NO_DISK_FILE || result == 0 || (result >= DATA_B0 && result < MAX_BLOCKS)
+  ensures result == DISK_MISS || result == 0 || (result >= DATA_B0 && result < MAX_BLOCKS)
 {
   if root < DATA_B0 || root >= MAX_BLOCKS {
     return 0;
   }
-  let j = b / PTRS;
-  if !blk_read(&mut d.dev, root * BSECT + j / 64, &mut d.sec) {
-    return NO_DISK_FILE;
+  let s = dq_want(&mut d.q, root);
+  if s >= NC {
+    return DISK_MISS;
   }
-  let l = ptr_in(d, d.sec, 8 * (j % 64));
+  let l = ptr_in(d, d.q.cache, s * BLOCK + 8 * (b / PTRS));
   if l == 0 {
     return 0;
   }
-  let k = b % PTRS;
-  if !blk_read(&mut d.dev, l * BSECT + k / 64, &mut d.sec) {
-    return NO_DISK_FILE;
+  let t = dq_want(&mut d.q, l);
+  if t >= NC {
+    return DISK_MISS;
   }
-  return ptr_in(d, d.sec, 8 * (k % 64));
+  return ptr_in(d, d.q.cache, t * BLOCK + 8 * (b % PTRS));
 }
 
 /// Reads up to n bytes of the file in entry i from offset `off` into the
-/// start of buf. Returns the count, short at the end of the file, or
-/// NO_DISK_FILE if the disk fails.
+/// start of buf, from the block cache. Returns the count, short at the end
+/// of the file; NO_DISK_FILE if there is no such file or the disk is dead;
+/// or DISK_MISS if some of it is not in the cache: reads of what is missing
+/// (and of the next few blocks) are queued, and the caller tries again once
+/// the queue has moved.
 fn disk_read(d: &mut DiskFs, i: u64, off: u64, buf: &mut Bytes, n: u64) -> u64
   requires disk_ok(d) && i < DSLOTS && n <= blen(buf)
   ensures disk_ok(d) && blen(buf) == old(blen(buf))
-  ensures result <= n || result == NO_DISK_FILE
+  ensures result <= n || result == NO_DISK_FILE || result == DISK_MISS
 {
   let size = disk_size(d, i);
-  if size == NO_DISK_FILE {
+  if size == NO_DISK_FILE || d.q.dead {
     return NO_DISK_FILE;
   }
   if off >= size {
@@ -877,10 +942,11 @@ fn disk_read(d: &mut DiskFs, i: u64, off: u64, buf: &mut Bytes, n: u64) -> u64
   }
   let root = dent_root(d, i);
   let l = blen(buf);
+  let mut missing = false;
   let mut k = 0;
   while k < want
     invariant k <= want && want <= n && n <= blen(buf) && blen(buf) == l && disk_ok(d)
-    invariant off + want <= DFILE_MAX
+    invariant off + want <= DFILE_MAX && want <= size
   {
     let a = off + k;
     let o = a % BLOCK;
@@ -889,82 +955,73 @@ fn disk_read(d: &mut DiskFs, i: u64, off: u64, buf: &mut Bytes, n: u64) -> u64
       m = want - k;
     }
     let p = data_ptr(&mut d, root, a / BLOCK);
-    if p == NO_DISK_FILE {
-      return NO_DISK_FILE;
-    }
-    if p == 0 {
+    if p == DISK_MISS {
+      missing = true;
+    } else if p == 0 {
       zero(&mut buf, k, k + m);
     } else {
-      let mut j = 0;
-      while j < m
-        invariant j <= m && blen(buf) == l && disk_ok(d)
-      {
-        let q = o + j;
-        let so = q % SECTOR;
-        let mut c = SECTOR - so;
-        if c > m - j {
-          c = m - j;
-        }
-        if !blk_read(&mut d.dev, p * BSECT + q / SECTOR, &mut d.sec) {
-          return NO_DISK_FILE;
-        }
+      let s = dq_want(&mut d.q, p);
+      if s >= NC {
+        missing = true;
+        read_ahead(&mut d, root, a / BLOCK + 1, size);
+      } else {
         let mut t = 0;
-        while t < c
-          invariant t <= c && blen(buf) == l && disk_ok(d)
+        while t < m
+          invariant t <= m && blen(buf) == l && disk_ok(d) && s < NC
         {
-          bset(&mut buf, k + j + t, bget(d.sec, so + t));
+          bset(&mut buf, k + t, bget(d.q.cache, s * BLOCK + o + t));
           t = t + 1;
         }
-        j = j + c;
       }
     }
     k = k + m;
   }
+  if missing {
+    return DISK_MISS;
+  }
   return want;
 }
 
-/// Builds the new copy of a data block in d.data and writes it to a free
-/// block: the old block's bytes (from `prev`, 0 for a hole) below the old
-/// file size (`valid` bytes of this block), zeros above, and wm bytes of
-/// buf[at..] at offset wo. Returns the new block, or 0.
-fn cow_data(d: &mut DiskFs, prev: u64, valid: u64, buf: &Bytes, at: u64, wo: u64, wm: u64) -> u64
-  requires disk_ok(d) && prev < MAX_BLOCKS && valid <= BLOCK && wo + wm <= BLOCK && at + wm <= blen(buf)
-  ensures disk_ok(d) && (result == 0 || (result >= DATA_B0 && result < MAX_BLOCKS))
+const READ_AHEAD: u64 = 8;            // blocks queued past one a read missed
+
+/// Queues reads of the file's blocks from block b on (up to READ_AHEAD,
+/// within `size` bytes), whose maps are cached already.
+fn read_ahead(d: &mut DiskFs, root: u64, b: u64, size: u64)
+  requires disk_ok(d) && b <= PTRS * PTRS && size <= DFILE_MAX
+  ensures disk_ok(d)
 {
-  let mut keep = 0;
-  if prev != 0 {
-    keep = valid;
-    let mut s = 0;
-    while s < BSECT
-      invariant s <= BSECT && disk_ok(d)
-    {
-      let lo = s * SECTOR;
-      // Sectors the write covers entirely need not be read.
-      if lo < valid && !(lo >= wo && lo + SECTOR <= wo + wm) {
-        if !sec_in(&mut d.dev, &mut d.sec, prev * BSECT + s, &mut d.data, lo) {
-          return 0;
-        }
-      }
-      s = s + 1;
-    }
-  }
-  zero(&mut d.data, keep, BLOCK);
-  let mut t = 0;
-  while t < wm
-    invariant t <= wm && disk_ok(d)
+  let mut c = 0;
+  while c < READ_AHEAD && b + c < PTRS * PTRS && (b + c) * BLOCK < size && d.q.count + 8 < NQ
+    invariant disk_ok(d)
   {
-    bset(&mut d.data, wo + t, bget(buf, at + t));
-    t = t + 1;
+    let p = data_ptr(&mut d, root, b + c);
+    if p != DISK_MISS && p != 0 {
+      dq_want(&mut d.q, p);
+    }
+    c = c + 1;
   }
-  let nb = alloc_block(&mut d);
-  if nb == 0 {
-    return 0;
+}
+
+/// disk_read for callers that cannot sleep (loading a program, mmap):
+/// waits for the queue instead.
+fn disk_read_wait(d: &mut DiskFs, i: u64, off: u64, buf: &mut Bytes, n: u64) -> u64
+  requires disk_ok(d) && i < DSLOTS && n <= blen(buf)
+  ensures disk_ok(d) && blen(buf) == old(blen(buf))
+  ensures result <= n || result == NO_DISK_FILE
+{
+  let mut tries = 0;
+  let l = blen(buf);
+  while tries < 8
+    invariant disk_ok(d) && blen(buf) == l
+  {
+    let r = disk_read(&mut d, i, off, &mut buf, n);
+    if r != DISK_MISS {
+      return r;
+    }
+    disk_drain(&mut d);
+    tries = tries + 1;
   }
-  if !block_out(&mut d.dev, &mut d.sec, nb, d.data) {
-    free_block(&mut d, nb);
-    return 0;
-  }
-  return nb;
+  return NO_DISK_FILE;
 }
 
 /// How many bytes of block b a file of `size` bytes holds.
@@ -981,21 +1038,82 @@ fn valid_in(size: u64, b: u64) -> u64
   return size - b * BLOCK;
 }
 
+/// Copies block b from the cache into `out`, or zeros for b == 0. False
+/// if it is not cached (a read of it is queued, or will be).
+fn gather(q: &mut DiskQ, b: u64, out: &mut Bytes) -> bool
+  requires dq_ok(q) && blen(out) == BLOCK
+  ensures dq_ok(q) && blen(out) == BLOCK
+{
+  if b == 0 {
+    zero(&mut out, 0, BLOCK);
+    return true;
+  }
+  let s = dq_want(&mut q, b);
+  if s >= NC {
+    return false;
+  }
+  let mut j = 0;
+  while j < BLOCK
+    invariant j <= BLOCK && j % 8 == 0 && dq_ok(q) && blen(out) == BLOCK && s < NC
+  {
+    put_u64(&mut out, j, get_u64(q.cache, s * BLOCK + j));
+    j = j + 8;
+  }
+  return true;
+}
+
+/// Turns the old data block in `blk` (valid bytes of it) into the new one:
+/// zeros above `valid`, then wm bytes of buf[at..] at offset wo.
+fn patch(blk: &mut Bytes, valid: u64, buf: &Bytes, at: u64, wo: u64, wm: u64)
+  requires blen(blk) == BLOCK && valid <= BLOCK && wo + wm <= BLOCK && at + wm <= blen(buf)
+  ensures blen(blk) == BLOCK
+{
+  zero(&mut blk, valid, BLOCK);
+  let mut t = 0;
+  while t < wm
+    invariant t <= wm && blen(blk) == BLOCK
+  {
+    bset(&mut blk, wo + t, bget(buf, at + t));
+    t = t + 1;
+  }
+}
+
+/// Queues the release of block b once the transaction ends (nothing for 0).
+fn release(q: &mut DiskQ, b: u64)
+  requires dq_ok(q)
+  ensures dq_ok(q)
+{
+  if b != 0 {
+    dq_release(&mut q, b);
+  }
+}
+
 /// Writes the first n bytes (at most a block) of buf to the file in entry
 /// i at `off`. A gap past the old end reads as zeros. The write happens
 /// entirely or not at all, even across a power cut (see the top of this
-/// file). Returns the count (short only at the 1 GiB limit), 0 if the disk
-/// is full or fails, or NO_DISK_FILE if there is no file.
+/// file).
+///
+/// The disk I/O is queued, not waited for. First every old block the
+/// write needs (the maps on its path, and a data block it changes only in
+/// part) must be in the cache; if one is not, its read is queued and this
+/// returns DISK_MISS, having changed nothing, for the caller to try again
+/// once the queue has moved. Then the new blocks go into the cache and the
+/// queue: data and maps, a flush, the directory block holding the entry,
+/// a flush, the release of the old blocks, and the transaction's end,
+/// whose number is left in d.txn for the caller to wait on. Readers see
+/// the new contents at once. Returns the count (short only at the 1 GiB
+/// limit), 0 if the disk is full or dead, NO_DISK_FILE if there is no
+/// file, or DISK_MISS.
 fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -> u64
   requires disk_ok(d) && i < DSLOTS && n <= blen(buf) && n <= BLOCK
   ensures disk_ok(d)
-  ensures result <= n || result == NO_DISK_FILE
+  ensures result <= n || result == NO_DISK_FILE || result == DISK_MISS
 {
   let size = disk_size(d, i);
   if size == NO_DISK_FILE || dent_dir(d, i) {
     return NO_DISK_FILE;
   }
-  if off >= DFILE_MAX || n == 0 {
+  if off >= DFILE_MAX || n == 0 || d.q.dead {
     return 0;
   }
   let mut want = DFILE_MAX - off;
@@ -1011,21 +1129,24 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
   let b1 = (end - 1) / BLOCK;
   let ia = b0 / PTRS;
   let ib = b1 / PTRS;
-  // The maps as they are.
+  let mut m0 = BLOCK - off % BLOCK;
+  if m0 > want {
+    m0 = want;
+  }
+  // Gather the maps as they are, and the old data the write keeps.
   let root0 = dent_root(d, i);
-  if !block_in(&mut d.dev, &mut d.sec, root0, &mut d.root) {
-    return 0;
+  if !gather(&mut d.q, root0, &mut d.root) {
+    return DISK_MISS;
   }
   let la0 = ptr_in(d, d.root, 8 * ia);
-  if !block_in(&mut d.dev, &mut d.sec, la0, &mut d.la) {
-    return 0;
-  }
   let mut lb0 = 0;
   if ib != ia {
     lb0 = ptr_in(d, d.root, 8 * ib);
-    if !block_in(&mut d.dev, &mut d.sec, lb0, &mut d.lb) {
-      return 0;
-    }
+  }
+  let ga = gather(&mut d.q, la0, &mut d.la);
+  let gb = gather(&mut d.q, lb0, &mut d.lb);
+  if !ga || !gb {
+    return DISK_MISS;
   }
   let old0 = ptr_in(d, d.la, 8 * (b0 % PTRS));
   let mut old1 = 0;
@@ -1036,45 +1157,39 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
       old1 = ptr_in(d, d.lb, 8 * (b1 % PTRS));
     }
   }
-  // New data blocks.
-  let mut m0 = BLOCK - off % BLOCK;
-  if m0 > want {
-    m0 = want;
+  let v0 = valid_in(size, b0);
+  let v1 = valid_in(size, b1);
+  // A block the write covers wherever it holds data needs no reading.
+  let mut keep0 = old0;
+  if off % BLOCK == 0 && m0 >= v0 {
+    keep0 = 0;
   }
-  let n0 = cow_data(&mut d, old0, valid_in(size, b0), buf, 0, off % BLOCK, m0);
-  if n0 == 0 {
-    return 0;
+  let mut keep1 = old1;
+  if b1 == b0 || want - m0 >= v1 {
+    keep1 = 0;
   }
-  put_u64(&mut d.la, 8 * (b0 % PTRS), n0);
+  let g0 = gather(&mut d.q, keep0, &mut d.data);
+  let g1 = gather(&mut d.q, keep1, &mut d.d2);
+  if !g0 || !g1 {
+    return DISK_MISS;
+  }
+  // Room for six blocks (two data, three maps, the directory block) and
+  // fourteen operations, or wait for the queue to move.
+  if !dq_fits(d.q, 6, 14) {
+    return DISK_MISS;
+  }
+  let n0 = alloc_block(&mut d);
   let mut n1 = 0;
   if b1 != b0 {
-    n1 = cow_data(&mut d, old1, valid_in(size, b1), buf, m0, 0, want - m0);
-    if n1 == 0 {
-      free_block(&mut d, n0);
-      return 0;
-    }
-    if ib == ia {
-      put_u64(&mut d.la, 8 * (b1 % PTRS), n1);
-    } else {
-      put_u64(&mut d.lb, 8 * (b1 % PTRS), n1);
-    }
+    n1 = alloc_block(&mut d);
   }
-  // New maps above them.
   let na = alloc_block(&mut d);
-  let mut ok = na != 0 && block_out(&mut d.dev, &mut d.sec, na, d.la);
-  put_u64(&mut d.root, 8 * ia, na);
   let mut nb = 0;
-  if ok && ib != ia {
+  if ib != ia {
     nb = alloc_block(&mut d);
-    ok = nb != 0 && block_out(&mut d.dev, &mut d.sec, nb, d.lb);
-    put_u64(&mut d.root, 8 * ib, nb);
   }
-  let mut nr = 0;
-  if ok {
-    nr = alloc_block(&mut d);
-    ok = nr != 0 && block_out(&mut d.dev, &mut d.sec, nr, d.root);
-  }
-  if !ok {
+  let nr = alloc_block(&mut d);
+  if n0 == 0 || (b1 != b0 && n1 == 0) || na == 0 || (ib != ia && nb == 0) || nr == 0 {
     free_block(&mut d, n0);
     free_block(&mut d, n1);
     free_block(&mut d, na);
@@ -1082,26 +1197,51 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
     free_block(&mut d, nr);
     return 0;
   }
-  // The switch: one sector.
-  let size_raw = dent_get(d, i, E_SIZE);
-  let root_raw = dent_get(d, i, E_ROOT);
-  let mtime_raw = dent_get(d, i, E_MTIME);
+  // The new blocks.
+  let mut k0 = 0;
+  if keep0 != 0 {
+    k0 = v0;
+  }
+  patch(&mut d.data, k0, buf, 0, off % BLOCK, m0);
+  put_u64(&mut d.la, 8 * (b0 % PTRS), n0);
+  let mut ok = dq_put(&mut d.q, n0, d.data, 0, true);
+  if b1 != b0 {
+    let mut k1 = 0;
+    if keep1 != 0 {
+      k1 = v1;
+    }
+    patch(&mut d.d2, k1, buf, m0, 0, want - m0);
+    if ib == ia {
+      put_u64(&mut d.la, 8 * (b1 % PTRS), n1);
+    } else {
+      put_u64(&mut d.lb, 8 * (b1 % PTRS), n1);
+    }
+    ok = ok && dq_put(&mut d.q, n1, d.d2, 0, true);
+  }
+  put_u64(&mut d.root, 8 * ia, na);
+  ok = ok && dq_put(&mut d.q, na, d.la, 0, true);
+  if ib != ia {
+    put_u64(&mut d.root, 8 * ib, nb);
+    ok = ok && dq_put(&mut d.q, nb, d.lb, 0, true);
+  }
+  ok = ok && dq_put(&mut d.q, nr, d.root, 0, true) && dq_flush(&mut d.q);
+  // The switch: the entry, in its directory block, after a flush.
   dent_set(&mut d, i, E_SIZE, newsize);
   dent_set(&mut d, i, E_ROOT, nr);
   dent_set(&mut d, i, E_MTIME, now);
-  if !ent_flush(&mut d, i) {
-    // The sector may or may not be on the disk: keep both trees (the
-    // next mount frees the one that lost) and the old one in memory.
-    dent_set(&mut d, i, E_SIZE, size_raw);
-    dent_set(&mut d, i, E_ROOT, root_raw);
-    dent_set(&mut d, i, E_MTIME, mtime_raw);
+  let db = i * DENT / BLOCK;
+  ok = ok && dq_put(&mut d.q, DIR_LBA / BSECT + db, d.dir, db * BLOCK, false) && dq_flush(&mut d.q);
+  release(&mut d.q, old0);
+  release(&mut d.q, old1);
+  release(&mut d.q, la0);
+  release(&mut d.q, lb0);
+  release(&mut d.q, root0);
+  let t = dq_end(&mut d.q);
+  if !ok || t == 0 {
+    d.q.dead = true;                  // dq_fits said there was room: not reached
     return 0;
   }
-  free_block(&mut d, old0);
-  free_block(&mut d, old1);
-  free_block(&mut d, la0);
-  free_block(&mut d, lb0);
-  free_block(&mut d, root0);
+  d.txn = t;
   return want;
 }
 
@@ -1110,6 +1250,7 @@ fn disk_truncate(d: &mut DiskFs, i: u64, now: u64) -> bool
   requires disk_ok(d) && i < DSLOTS
   ensures disk_ok(d)
 {
+  disk_drain(&mut d);                 // queued writes reach the disk first
   let r = dent_root(d, i);
   if dent_get(d, i, E_SIZE) == 0 && r == 0 {
     return true;
@@ -1135,6 +1276,7 @@ fn disk_resize(d: &mut DiskFs, i: u64, size_to: u64, now: u64) -> bool
   requires disk_ok(d) && i < DSLOTS
   ensures disk_ok(d)
 {
+  disk_drain(&mut d);                 // queued writes reach the disk first
   let size = disk_size(d, i);
   if size == NO_DISK_FILE || dent_dir(d, i) || size_to > DFILE_MAX {
     return false;
@@ -1263,6 +1405,7 @@ fn disk_set_meta(d: &mut DiskFs, i: u64, mode: u64, mtime: u64) -> bool
   requires disk_ok(d) && i < DSLOTS
   ensures disk_ok(d)
 {
+  disk_drain(&mut d);                 // queued writes reach the disk first
   if !dent_used(d, i) {
     return false;
   }

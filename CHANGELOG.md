@@ -49,7 +49,7 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 - A USB keyboard on an xHCI controller's root port, for PCs without PS/2
   (no hubs).
 - An NVMe drive as the disk (`src/nvme.bastio`): polled, one I/O queue,
-  namespace 1 with 512-byte blocks, each write flushed. It is picked
+  namespace 1 with 512-byte or 4 KiB blocks, each write flushed. It is picked
   before virtio and ATA.
 - A SATA disk on an AHCI controller (`src/ahci.bastio`): polled, command
   slot 0 of the first port with a disk, each write flushed. It is picked
@@ -57,6 +57,20 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 - PCI devices are found on every bus and function, not only the
   function-0 devices of bus 0 (NVMe drives sit behind root ports, and
   q35's AHCI controller is function 2).
+- Every disk driver moves a 4 KiB file system block with one command and
+  one cache flush instead of eight: writing a 2 MiB file is 3.4 to 3.9
+  times faster on NVMe, virtio and AHCI, 1.5 times on ATA (numbers in
+  docs/architecture.md; `make diskbench` measures them).
+- A process waiting for the disk sleeps, and the others run. File data
+  goes through a 64-block cache and an ordered queue of disk commands
+  (`src/diskq.bastio`). A read that misses queues its blocks and read-ahead
+  and restarts when they arrive. A write queues its blocks, a flush, its
+  directory block and a flush, and returns once they are done. While a
+  disk writer runs, `bench`'s getpid takes 120-183 ticks instead of
+  240-260 (`make iobench`).
+- NVMe namespaces with 4 KiB logical blocks are used; they were skipped.
+  AHCI disks with sectors longer than 512 bytes are now recognized and
+  left alone instead of being misdriven.
 
 ### Changed
 

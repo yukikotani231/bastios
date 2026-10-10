@@ -1,6 +1,7 @@
 /* Small Linux system calls, against musl: uname and gethostname, readv,
  * pread and pwrite, limits, sysinfo, statfs, getrandom, priorities, umask,
- * sessions and sched_yield. */
+ * sessions and process groups, the terminal's name and group, sched_yield,
+ * and how much a pipe holds. */
 #include <errno.h>
 #include <fcntl.h>
 #include <sched.h>
@@ -110,6 +111,70 @@ static int signals(void)
     return 0;
 }
 
+/* kill(0) reaches the caller's group, and kill(-g) group g, and nobody
+ * else: a child in a group of its own signals itself and its own child. */
+static volatile int usr_seen;
+static void on_usr1(int s)
+{
+    usr_seen |= s == SIGUSR1 ? 1 : 2;   /* signals of one kind do not queue */
+}
+
+static int groups(void)
+{
+    signal(SIGUSR1, on_usr1);
+    signal(SIGUSR2, on_usr1);
+    usr_seen = 0;
+    pid_t c = fork();
+    if (c < 0)
+        return -1;
+    if (c == 0) {
+        if (setpgid(0, 0) != 0 || getpgrp() != getpid())
+            _exit(2);
+        pid_t gc = fork();
+        if (gc == 0) {
+            for (int i = 0; usr_seen != 3 && i < 1000000; i++)
+                sched_yield();
+            _exit(usr_seen == 3 ? 0 : 3);  /* SIGUSR1 from kill(0), SIGUSR2 from kill(-g) */
+        }
+        if (getpgid(gc) != getpid() || kill(0, SIGUSR1) != 0 || kill(-getpid(), SIGUSR2) != 0)
+            _exit(4);
+        int st;
+        if (waitpid(gc, &st, 0) != gc || !WIFEXITED(st) || WEXITSTATUS(st) != 0 || usr_seen != 3)
+            _exit(5);
+        _exit(0);
+    }
+    int st;
+    if (waitpid(c, &st, 0) != c || !WIFEXITED(st) || WEXITSTATUS(st) != 0 || usr_seen != 0)
+        return -1;                      /* the parent, in another group, saw nothing */
+    if (kill(-c, 0) != -1 || errno != ESRCH)
+        return -1;                      /* that group is gone */
+    return 0;
+}
+
+/* A pipe holds 64 KiB, as on Linux. Once nearly full, a write of PIPE_BUF
+ * bytes or fewer goes in whole or not at all; a bigger one goes in part. */
+static int pipes(void)
+{
+    static char blk[4096];
+    int q[2];
+    if (pipe2(q, O_NONBLOCK) != 0)
+        return -1;
+    int held = 0, n;
+    while (held < (1 << 20) && (n = write(q[1], blk, sizeof blk)) > 0)
+        held += n;
+    if (n != -1 || errno != EAGAIN)
+        return -1;
+    if (read(q[0], blk, 100) != 100)
+        return -1;
+    if (write(q[1], blk, 200) != -1 || errno != EAGAIN)
+        return -1;                          /* atomic: no room for all 200 */
+    if (write(q[1], blk, 50) != 50 || write(q[1], blk, 8192) != 50)
+        return -1;                          /* not atomic: what fits goes in */
+    close(q[0]);
+    close(q[1]);
+    return held;
+}
+
 int main(void)
 {
     struct utsname u;
@@ -154,9 +219,10 @@ int main(void)
     struct statfs sf;
     if (statfs("/", &sf) != 0 || sf.f_bsize != 4096)
         return fail("statfs");
-    unsigned char r[16];
-    if (getrandom(r, sizeof r, 0) != sizeof r)
-        return fail("getrandom");
+    unsigned char r[16], r2[16];
+    if (getrandom(r, sizeof r, 0) != sizeof r || getrandom(r2, sizeof r2, 0) != sizeof r2
+        || memcmp(r, r2, sizeof r) == 0)
+        return fail("getrandom");                   /* back to back, still different */
     errno = 0;
     if (getpriority(PRIO_PROCESS, 0) != 0 || errno != 0 || setpriority(PRIO_PROCESS, 0, 5) != 0)
         return fail("priorities");
@@ -165,8 +231,18 @@ int main(void)
         return fail("sched_yield");
     if (setsid() != getpid() || getsid(0) != getpid() || getpgrp() != getpid())
         return fail("sessions");
+    if (setsid() != -1 || errno != EPERM)
+        return fail("setsid of a group leader");
+    const char *tty = ttyname(0);
+    if (!tty || strcmp(tty, "/dev/tty") != 0 || tcgetpgrp(0) != getpgrp())
+        return fail("ttyname and tcgetpgrp");
+    if (groups() != 0)
+        return fail("process groups");
     if (signals() != 0)
         return 1;
-    printf("mmisc: ok on %s %s, signals\n", u.sysname, u.machine);
+    int held = pipes();
+    if (held < 0)
+        return fail("pipe capacity");
+    printf("mmisc: ok on %s %s, signals, pipe %d\n", u.sysname, u.machine, held);
     return 0;
 }
