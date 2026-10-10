@@ -224,13 +224,13 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, t: Task, v: u64) -> u64
 
 /// The scheduler loop each processor runs, with its own `cpu` and `mmu`,
 /// until the kernel stops (no process left, or a power off).
-// What `step` hands back: the next job, and where the round robin goes on.
+// What `turn` hands back: the next job, and where the round robin goes on.
 struct Next { job: Job, from: u64 }
 
 /// `finish` for task `t`, then `next_job` from where it leaves the round
 /// robin, in one critical section, so a system call costs one round trip
 /// of the lock. Publishes how much console output waits in `pend`.
-fn step(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, t: Task, v: u64, poll: bool, pend: &Atomic[u64]) -> Next
+fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, t: Task, v: u64, poll: bool, pend: &Atomic[u64]) -> Next
   requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
   requires pt_level(t.root) == 4 && 1 <= t.pid && t.pid < NPROC
   ensures sys_ok(s) && result.from < NPROC
@@ -388,7 +388,7 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
         let v = cpu_run(&mut cpu, mmu);
         mmu_kernel(&mut mmu);
         poll = v != V_SYSCALL && v != V_LINUX;
-        let next = locked(s, step, &mut cpu, mmu, t, v, poll, pend);
+        let next = locked(s, turn, &mut cpu, mmu, t, v, poll, pend);
         cur = next.from;
         j = next.job;
       },
