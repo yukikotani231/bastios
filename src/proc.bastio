@@ -319,6 +319,7 @@ const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
 // Linux signal actions: per process, 64 signals of 4 words each (handler,
 // flags, restorer, mask).
 const SIGACT_LEN: u64 = 4096;
+const SIGSAVE_LEN: u64 = 1040;        // NPROC + NPROC * 64
 const ALARMS_LEN: u64 = 32;          // NPROC * 2
 const LX_PAUSE: u64 = 34;
 const LX_RT_SIGSUSPEND: u64 = 130;
@@ -404,12 +405,12 @@ struct Kernel {
   sigact: Buf,          // Linux signal actions (src/lxsig.bastio)
   cwd: Buf,             // Linux working directories (src/lxdir.bastio)
   dpath: Buf,           // the path of each open directory description, laid out like cwd
-  sigsave: Buf,         // the mask rt_sigsuspend replaced, per process (src/lxsig.bastio)
+  sigsave: Buf,         // per process, the mask rt_sigsuspend replaced; then each pending signal's sender (src/lxsig.bastio)
   alarms: Buf,          // Linux ITIMER_REAL per process: deadline (0: off) and interval (src/lxtime.bastio)
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == NPROC
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN
 }
 
 // ---------------------------------------------------------------- programs
@@ -869,7 +870,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
     pset(&mut k.procs, pid, F_STATE, FREE);
   }
   if 1 <= par && par < NPROC {
-    child_ended(&mut k, par);
+    child_ended(&mut k, par, pid);
   }
 }
 

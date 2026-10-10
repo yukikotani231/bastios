@@ -189,8 +189,13 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return SWITCH;
   }
   if n == LX_READ || n == LX_READV {
-    // readv reads into the first buffer that has room: a short read, as
-    // Linux allows.
+    let rv = fd_look(k, pid, a);
+    if n == LX_READV && rv.kind == K_FILE {
+      ret(&mut k.procs, pid, file_readv(&mut k, pid, rv.x, b, c));
+      return KEEP;
+    }
+    // readv on anything but a file reads into the first buffer that has
+    // room: a short read, as Linux allows (a later buffer could wait).
     let mut va = b;
     let mut cnt = c;
     if n == LX_READV {
@@ -765,6 +770,51 @@ fn first_iov(k: &mut Kernel, pid: u64, iov: u64, cnt: u64) -> Iov
     i = i + 1;
   }
   return Iov { err: EINVAL, base: 0, len: 0 };
+}
+
+/// readv on file row `row`: fills the cnt (base, length) buffers at user
+/// address iov in turn, stopping at the end of the file. Returns the bytes
+/// read, or -errno if nothing was.
+fn file_readv(k: &mut Kernel, pid: u64, row: u64, iov: u64, cnt: u64) -> u64
+  requires kok(k) && pid < NPROC && row < FD_ROWS
+  ensures kok(k)
+{
+  if cnt == 0 || cnt > IOV_MAX {
+    return EINVAL;
+  }
+  if iov > USER_BASE + USER_SIZE {
+    return EFAULT;
+  }
+  let mut total = 0;
+  let mut i = 0;
+  while i < cnt
+    invariant i <= cnt && cnt <= IOV_MAX && iov <= USER_BASE + USER_SIZE && kok(k) && total <= USER_SIZE
+  {
+    let base = user_u64(&mut k.spaces, pid, iov + 16 * i);
+    let size = user_u64(&mut k.spaces, pid, iov + 16 * i + 8);
+    if !base.ok || !size.ok {
+      if total > 0 {
+        return total;
+      }
+      return EFAULT;
+    }
+    let r = lx_file_read(&mut k, pid, row, base.v, size.v);
+    if r > USER_SIZE {
+      if total > 0 {
+        return total;
+      }
+      return r;                             // -errno
+    }
+    if r > USER_SIZE - total {
+      return total;
+    }
+    total = total + r;
+    if r < size.v {
+      return total;                         // the end of the file
+    }
+    i = i + 1;
+  }
+  return total;
 }
 
 /// writev: the cnt (base, length) pairs at user address iov, each written
