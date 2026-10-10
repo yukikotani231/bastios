@@ -37,7 +37,7 @@ _s.bind(("127.0.0.1", 0))
 tcp_port = _s.getsockname()[1]
 _s.close()
 
-def boot(cpus, with_disk=False, virtio=False, net=False, subnet=None, card="virtio-net-pci", monitor=None):
+def boot(cpus, with_disk=False, virtio=False, net=False, subnet=None, card="virtio-net-pci", monitor=None, extra=()):
     drive = ["-drive", f"file={disk},format=raw,if=ide,index=0"] if with_disk else []
     if virtio:
         # The same disk as a virtio block device (src/virtio.bastio): sectors
@@ -57,7 +57,7 @@ def boot(cpus, with_disk=False, virtio=False, net=False, subnet=None, card="virt
     return subprocess.Popen(
         ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-         "-serial", "stdio", "-monitor", f"unix:{monitor},server,nowait" if monitor else "none"] + drive + nic,
+         "-serial", "stdio", "-monitor", f"unix:{monitor},server,nowait" if monitor else "none"] + drive + nic + list(extra),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 deadline = time.time() + timeout
@@ -216,10 +216,10 @@ steps = [
     ("ash -c 'while :; do echo y; done' | head -n 1; echo piped", b"\r\ny\r\npiped", b"\n# "),
     ("ash -c 'while :; do :; done'", b"^C", b"\n# ", b"\x03"),
     ("echo st=$?", b"st=130", b"\n# "),
-    # Time: clocks, nanosleep, and poll that waits (user/mtime.c); the
-    # sleep applet; ash's read -t, a poll on the console that times out, then
-    # one that wakes when a line is typed.
-    ("mtime", [b"mtime: slept ", b"woke in time"], b"\n# "),
+    # Time: clocks, nanosleep, poll that waits, select, and alarms and pause
+    # (user/mtime.c); the sleep applet; ash's read -t, a poll on the console
+    # that times out, then one that wakes when a line is typed.
+    ("mtime", [b"mtime: rang 3, selected, slept ", b"woke in time"], b"\n# "),
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
     ("read -t 1 x; echo rt=$?", b"rt=1", b"\n# "),
     ("read -t 9 x; echo rt=$? x=$x", b"rt=0 x=late", b"\n# ", b"late\r"),
@@ -230,6 +230,11 @@ steps = [
     ("mkdir sub; cd sub && /bin/pwd && cd ../.. && /bin/pwd; ls dd", [b"\r\n/dd/sub\r\n/\r\n", b"sub"], b"\n# "),
     ("rmdir dd; echo r=$?", [b"not empty", b"r=1"], b"\n# "),
     ("rm dd/f; rmdir dd/sub dd; test -d dd || echo gone$((1+1))", b"\r\ngone2\r\n", b"\n# "),
+    # rename through BusyBox's mv: over a file, into a directory, and a
+    # directory with its contents.
+    ("echo one > m1; echo two > m2; mv m1 m2; cat m2; test -e m1 || echo moved$((1+1))", b"\r\none\r\nmoved2\r\n", b"\n# "),
+    ("mkdir md; mv m2 md; mv md mdd; cat mdd/m2; ls md; echo l=$?", [b"\r\none\r\n", b"l=1"], b"\n# "),
+    ("rm mdd/m2; rmdir mdd; echo clean$((1+1))", b"\r\nclean2\r\n", b"\n# "),
     # The *at calls relative to a directory descriptor, fchdir, and mmap
     # of a file (user/mdir.c).
     ("mdir", b"mdir: ok in /dx, mapped", b"\n# "),
@@ -619,6 +624,19 @@ else:
         print("ok   no pages leaked:", mem[2].decode())
     else:
         print("FAIL page leak:", mem); fails += 1
+    # Console output goes through a 64 KiB ring that the scheduler pumps to
+    # the devices; a writer that finds it full waits (CONWAIT) instead of
+    # losing bytes. bench writes 1 MiB of carriage returns, sixteen times
+    # the ring: every one must arrive.
+    mark = len(out)
+    qemu.stdin.write(b"bench\r"); qemu.stdin.flush()
+    read_until(b"write 1024 KiB", mark)
+    crs = out[mark:].count(b"\r")
+    if crs >= 1048576:
+        print("ok   1 MiB through the console ring, nothing lost")
+    else:
+        print(f"FAIL console ring: {crs} of 1048576 bytes arrived"); fails += 1
+    read_until(b"bastios> ", mark)
     # Several processors at once: processes that never make a system call
     # run on the other processors while the shell stays responsive, and
     # `ps` (which runs with the kernel's lock held) catches at least two of
@@ -784,6 +802,54 @@ if ok:
     mon.close()
 qemu.kill(); qemu.wait()
 print("---- keyboard boot transcript ----")
+print(out.decode(errors="replace").replace("\r", "")[-400:])
+
+# A USB keyboard on an xHCI controller (src/xhci.bastio), on a machine with
+# no PS/2 controller at all (i8042=off), so the keys can only come over
+# USB. They are sent through QMP; at power off the controller is reset and
+# its eleven pages are back.
+import json
+qmp_path = os.path.join(disk_dir.name, "qmp.sock")
+qemu = boot(1, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci", "-device", "usb-kbd",
+                      "-qmp", f"unix:{qmp_path},server,nowait"])
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+good = ok and b"keyboard: USB (xHCI)\r\n" in out
+print(("ok  " if good else "FAIL"), "(USB boot) keyboard found on the xHCI controller")
+fails += not good
+if ok:
+    qmp = socket.socket(socket.AF_UNIX)
+    qmp.connect(qmp_path)
+    qf = qmp.makefile("rw")
+    qf.readline()
+    def qmp_cmd(c):
+        qf.write(json.dumps(c) + "\n"); qf.flush()
+        return qf.readline()
+    qmp_cmd({"execute": "qmp_capabilities"})
+    def usbkeys(keys):
+        for k in keys:
+            parts = k.split("-")
+            for down in (True, False):
+                for q in (parts if down else parts[::-1]):
+                    qmp_cmd({"execute": "input-send-event", "arguments": {"events": [
+                        {"type": "key", "data": {"down": down, "key": {"type": "qcode", "data": q}}}]}})
+                time.sleep(0.03)
+    mark = len(out)
+    usbkeys(["e", "c", "h", "o", "spc", "shift-u", "s", "b", "shift-minus", "o", "k", "x", "backspace", "ret"])
+    good = read_until(b"Usb_ok\r\n", mark) and read_until(b"bastios> ", mark + 1)
+    print(("ok  " if good else "FAIL"), "(USB boot) a line typed on the USB keyboard runs")
+    fails += not good
+    qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
+    read_until(b"pages free at power off")
+    booted = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
+    off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+    good = booted and off and booted.group(1) == off.group(1)
+    print(("ok  " if good else "FAIL"), "(USB boot) every page back at power off")
+    fails += not good
+    qmp.close()
+qemu.kill(); qemu.wait()
+print("---- USB boot transcript ----")
 print(out.decode(errors="replace").replace("\r", "")[-400:])
 
 # And back on ATA: what virtio wrote is on the disk.

@@ -1,0 +1,867 @@
+// A USB keyboard on an xHCI (USB 3) host controller, for PCs without a
+// PS/2 port. Polled: the controller runs, but never interrupts.
+//
+// The driver brings up the controller, finds the first root-hub port with
+// a keyboard that speaks the HID boot protocol (every USB keyboard does,
+// for firmware setup screens), gives it a device slot and configures its
+// interrupt IN endpoint. From then on, one 8-byte transfer is kept queued
+// on that endpoint; each completed one is a boot report (modifier bits,
+// then up to six keys held down), and keys that were not down in the last
+// report become the bytes a serial terminal would send, as for PS/2.
+// There is no hub support: the keyboard must be on a root port.
+//
+// The registers are a block of the device window claimed as an `Mmio`.
+// The controller reads and writes only the eleven pages lent to it at
+// start (`Dma`), which come back after a controller reset at power off:
+//
+//   dcbaa   0: the device context base address array; 2048: the scratchpad array
+//   cmd     the command ring
+//   evt     0: the event ring segment table (one segment); 64: the event ring
+//   ctx     the keyboard's device context (written by the controller)
+//   inp     0: the input context (up to 33 contexts of 64 bytes);
+//           3072: data of control transfers
+//   ep0     the default control endpoint's transfer ring
+//   intr    0: the keyboard's interrupt transfer ring; 2048: the report
+//   sp0-3   scratchpad pages: some controllers ask for them (at most 4 here)
+//
+// Rings are RING_N TRBs of 16 bytes, the last a link back to the start.
+// Producer and consumer positions are kept as index * 2 + cycle bit.
+
+import "pci.bastio";
+import "pages.bastio";
+
+const XHCI_CLASS: u64 = 0x0C0330;      // serial bus controller, USB, xHCI
+const XHCI_PAGES: u64 = 11;
+const XHCI_MAX_LEN: u64 = 0x100000;    // registers claimed: the BAR, up to 1 MiB
+const XHCI_TOP: u64 = 0xFEC00000;      // below the I/O APIC
+const XHCI_SPINS: u64 = 20000000;
+const XHCI_SP_MAX: u64 = 4;
+const RING_N: u64 = 64;
+const EVT_N: u64 = 252;                // event ring TRBs: offsets 64 .. 4096
+const RAW_AT: u64 = 3072;              // the control-transfer data area
+const RAW_LEN: u64 = 1024;
+
+// Operational registers (from the end of the capability registers).
+const USBCMD: u64 = 0x00;
+const USBSTS: u64 = 0x04;
+const PAGESIZE: u64 = 0x08;
+const CRCR: u64 = 0x18;
+const DCBAAP: u64 = 0x30;
+const CONFIG: u64 = 0x38;
+const PORTSC: u64 = 0x400;
+// Interrupter 0 (from the runtime registers).
+const IMAN: u64 = 0x20;
+const ERSTSZ: u64 = 0x28;
+const ERSTBA: u64 = 0x30;
+const ERDP: u64 = 0x38;
+
+const CMD_RUN: u64 = 1;
+const CMD_RESET: u64 = 2;
+const STS_HALTED: u64 = 1;
+const STS_NOT_READY: u64 = 0x800;
+const PORT_CONNECTED: u64 = 1;
+const PORT_ENABLED: u64 = 2;
+const PORT_RESET: u64 = 0x10;
+const PORT_CHANGES: u64 = 0xFE0000;    // write-1-to-clear change bits
+const PORT_RESET_DONE: u64 = 0x200000;
+const PORT_KEEP: u64 = 0xFF01FFFD;     // writing these back changes nothing
+
+// TRB types.
+const TRB_NORMAL: u64 = 1;
+const TRB_SETUP: u64 = 2;
+const TRB_DATA: u64 = 3;
+const TRB_STATUS: u64 = 4;
+const TRB_LINK: u64 = 6;
+const TRB_ENABLE_SLOT: u64 = 9;
+const TRB_DISABLE_SLOT: u64 = 10;
+const TRB_ADDRESS: u64 = 11;
+const TRB_CONFIGURE: u64 = 12;
+const TRB_EVALUATE: u64 = 13;
+const TRB_TRANSFER_EV: u64 = 32;
+const TRB_COMMAND_EV: u64 = 33;
+const CC_SUCCESS: u64 = 1;
+const CC_SHORT: u64 = 13;
+
+struct Xhci {
+  regs: Mmio,
+  dcbaa: Dma, cmd: Dma, evt: Dma, ctx: Dma, inp: Dma, ep0: Dma, intr: Dma,
+  sp0: Dma, sp1: Dma, sp2: Dma, sp3: Dma,
+  op: u64,            // where the operational registers start
+  rt: u64,            // the runtime registers
+  db: u64,            // the doorbells
+  csz: u64,           // bytes per context: 32 or 64
+  ports: u64,
+  cmd_at: u64,        // ring positions: index * 2 + cycle
+  evt_at: u64,
+  ep0_at: u64,
+  int_at: u64,
+  ev_p: u64,          // the last event taken: parameter, status, control
+  ev_s: u64,
+  ev_c: u64,
+  slot: u64,
+  dci: u64,           // the keyboard endpoint's context index
+  port: u64,
+  keys: Bytes,        // keys down in the last report
+  q: Bytes,           // bytes typed, not yet taken
+  qn: u64,
+  shift: bool,
+  ctrl: bool,
+  live: bool,
+}
+
+spec fn xhci_ok(x: &Xhci) -> bool {
+  mmio_base(x.regs) % 4096 == 0 && mmio_len(x.regs) <= XHCI_MAX_LEN
+  && x.op % 8 == 0 && x.op + PORTSC + 4096 <= mmio_len(x.regs)
+  && x.rt % 32 == 0 && x.rt + 64 <= mmio_len(x.regs)
+  && x.db % 4 == 0 && x.db + 1024 <= mmio_len(x.regs)
+  && (x.csz == 32 || x.csz == 64)
+  && x.cmd_at < RING_N * 2 && x.ep0_at < RING_N * 2 && x.int_at < RING_N * 2 && x.evt_at < EVT_N * 2
+  && x.slot < 256 && x.dci < 32 && x.port < 256
+  && blen(x.keys) == 6 && blen(x.q) == 16 && x.qn <= 16
+}
+
+/// A lent page's physical address (always below 2^48: the pool is low).
+fn dma_phys(d: &Dma) -> u64
+  ensures result < 0x1000000000000
+{
+  let a = dma_addr(d);
+  if a >= 0x1000000000000 {
+    return 0;
+  }
+  return a;
+}
+
+fn xr(x: &mut Xhci, off: u64) -> u64
+  requires xhci_ok(x) && off % 4 == 0 && off + 4 <= mmio_len(x.regs)
+  ensures xhci_ok(x) && result <= 4294967295
+{
+  return cast[u64](mmio_read32(&mut x.regs, off));
+}
+
+fn xw(x: &mut Xhci, off: u64, v: u64)
+  requires xhci_ok(x) && off % 4 == 0 && off + 4 <= mmio_len(x.regs)
+  ensures xhci_ok(x)
+{
+  mmio_write32(&mut x.regs, off, cast[u32](v & 0xFFFFFFFF));
+}
+
+/// A 64-bit register as two 32-bit writes, low half first.
+fn xw64(x: &mut Xhci, off: u64, v: u64)
+  requires xhci_ok(x) && off % 8 == 0 && off + 8 <= mmio_len(x.regs)
+  ensures xhci_ok(x)
+{
+  xw(&mut x, off, v & 0xFFFFFFFF);
+  xw(&mut x, off + 4, v >> 32);
+}
+
+/// Writes a TRB at ring position `at` (index * 2 + cycle) of the ring at
+/// the start of page `d`, and returns the next position, through the link
+/// TRB at the end when it gets there. The control word, with the cycle bit
+/// that hands the TRB to the controller, is written last.
+fn trb_put(d: &mut Dma, at: u64, p: u64, s: u64, c: u64) -> u64
+  requires at < RING_N * 2
+  ensures result < RING_N * 2
+{
+  let i = at / 2;
+  let cyc = at % 2;
+  dma_write64(&mut d, i * 16, p);
+  dma_write32(&mut d, i * 16 + 8, cast[u32](s & 0xFFFFFFFF));
+  dma_write32(&mut d, i * 16 + 12, cast[u32]((c & 0xFFFFFFFE) | cyc));
+  if i + 2 < RING_N {
+    return at + 2;
+  }
+  // The link: back to the start, toggling the cycle bit.
+  let l = (RING_N - 1) * 16;
+  let a = dma_addr(d);
+  dma_write64(&mut d, l, a);
+  dma_write32(&mut d, l + 8, 0);
+  dma_write32(&mut d, l + 12, cast[u32](TRB_LINK * 1024 + 2 + cyc));
+  return 1 - cyc;
+}
+
+fn zero_page(d: &mut Dma, from: u64, to: u64)
+  requires from % 8 == 0 && from <= to && to <= 4096
+{
+  let mut o = from;
+  while o + 8 <= to
+    invariant o % 8 == 0 && o <= to && to <= 4096
+  {
+    dma_write64(&mut d, o, 0);
+    o = o + 8;
+  }
+}
+
+/// Takes the next event off the event ring into ev_p, ev_s, ev_c, if the
+/// controller has written one.
+fn evt_next(x: &mut Xhci) -> bool
+  requires xhci_ok(x)
+  ensures xhci_ok(x)
+{
+  let i = x.evt_at / 2;
+  let o = 64 + i * 16;
+  let c = cast[u64](dma_read32(&mut x.evt, o + 12));
+  if c % 2 != x.evt_at % 2 {
+    return false;
+  }
+  x.ev_p = dma_read64(&mut x.evt, o);
+  x.ev_s = cast[u64](dma_read32(&mut x.evt, o + 8));
+  x.ev_c = c;
+  if i + 1 < EVT_N {
+    x.evt_at = x.evt_at + 2;
+  } else {
+    x.evt_at = 1 - x.evt_at % 2;
+  }
+  // Tell the controller how far we have read (and clear its busy bit).
+  let a = dma_phys(x.evt);
+  xw64(&mut x, x.rt + ERDP, (a + 64 + x.evt_at / 2 * 16) | 8);
+  return true;
+}
+
+/// Waits for the next event of type `t` (other events are dropped) and
+/// returns its completion code, or 0 if none came.
+fn evt_wait(x: &mut Xhci, t: u64) -> u64
+  requires xhci_ok(x)
+  ensures xhci_ok(x)
+{
+  let mut n = 0;
+  while n < XHCI_SPINS
+    invariant xhci_ok(x)
+  {
+    if evt_next(&mut x) && (x.ev_c >> 10) & 63 == t {
+      return x.ev_s >> 24;
+    }
+    n = n + 1;
+  }
+  return 0;
+}
+
+/// Runs one command and returns whether it succeeded.
+fn xhci_command(x: &mut Xhci, p: u64, c: u64) -> bool
+  requires xhci_ok(x)
+  ensures xhci_ok(x)
+{
+  x.cmd_at = trb_put(&mut x.cmd, x.cmd_at, p, 0, c);
+  xw(&mut x, x.db, 0);
+  return evt_wait(&mut x, TRB_COMMAND_EV) == CC_SUCCESS;
+}
+
+/// A control transfer on the keyboard's default endpoint: the 8-byte setup
+/// packet, then `n` bytes in (`dir_in`) or none, into the data area of
+/// the input-context page.
+fn xhci_control(x: &mut Xhci, setup: u64, n: u64, dir_in: bool) -> bool
+  requires xhci_ok(x) && n <= RAW_LEN
+  ensures xhci_ok(x)
+{
+  let mut trt = 0;                    // no data stage
+  if n > 0 && dir_in {
+    trt = 3;
+  }
+  x.ep0_at = trb_put(&mut x.ep0, x.ep0_at, setup, 8, TRB_SETUP * 1024 + 64 + trt * 65536);
+  let mut status_dir = 65536;         // the status stage goes the other way
+  if n > 0 && dir_in {
+    let a = dma_phys(x.inp);
+    x.ep0_at = trb_put(&mut x.ep0, x.ep0_at, a + RAW_AT, n, TRB_DATA * 1024 + 65536);
+    status_dir = 0;
+  }
+  x.ep0_at = trb_put(&mut x.ep0, x.ep0_at, 0, 0, TRB_STATUS * 1024 + 32 + status_dir);
+  xw(&mut x, x.db + x.slot * 4, 1);
+  let cc = evt_wait(&mut x, TRB_TRANSFER_EV);
+  return cc == CC_SUCCESS || cc == CC_SHORT;
+}
+
+/// Byte i of the data the last control transfer brought in.
+fn raw(x: &mut Xhci, i: u64) -> u64
+  requires xhci_ok(x)
+  ensures xhci_ok(x) && result <= 255
+{
+  if i < RAW_LEN {
+    return cast[u64](dma_read8(&mut x.inp, RAW_AT + i));
+  }
+  return 0;
+}
+
+/// Writes 32-bit word w of context c (0 the input control context, 1 the
+/// slot, 2 and up the endpoints) of the input context.
+fn ictx(x: &mut Xhci, c: u64, w: u64, v: u64)
+  requires xhci_ok(x) && c <= 32 && w < 8
+  ensures xhci_ok(x)
+{
+  dma_write32(&mut x.inp, c * x.csz + w * 4, cast[u32](v & 0xFFFFFFFF));
+}
+
+/// Resets root port p (from 1) if it needs it, and returns its speed, or 0
+/// if no device is enabled on it.
+fn port_up(x: &mut Xhci, p: u64) -> u64
+  requires xhci_ok(x) && 1 <= p && p <= 256
+  ensures xhci_ok(x) && result < 16
+{
+  let o = x.op + PORTSC + (p - 1) * 16;
+  let sc = xr(&mut x, o);
+  if sc & PORT_CONNECTED == 0 {
+    return 0;
+  }
+  if sc & PORT_ENABLED == 0 {
+    // USB 2 ports need a reset to enable the device; USB 3 ones train
+    // their link on their own.
+    xw(&mut x, o, (sc & PORT_KEEP) | PORT_RESET);
+    let mut n = 0;
+    while n < XHCI_SPINS && xr(&mut x, o) & PORT_RESET_DONE == 0
+      invariant xhci_ok(x) && o % 4 == 0 && o + 4 <= mmio_len(x.regs)
+    {
+      n = n + 1;
+    }
+  }
+  let now = xr(&mut x, o);
+  xw(&mut x, o, (now & PORT_KEEP) | (now & PORT_CHANGES));
+  if now & PORT_ENABLED == 0 {
+    return 0;
+  }
+  return (now >> 10) & 15;
+}
+
+/// Sets up the device on port p (speed `speed`) as the keyboard: a slot,
+/// an address, the boot protocol and its interrupt endpoint. On failure
+/// the slot, if any, is given back.
+fn kbd_attach(x: &mut Xhci, p: u64, speed: u64) -> bool
+  requires xhci_ok(x) && 1 <= p && p < 256 && speed < 16
+  ensures xhci_ok(x)
+{
+  if !xhci_command(&mut x, 0, TRB_ENABLE_SLOT * 1024) {
+    return false;
+  }
+  let slot = x.ev_c >> 24;
+  if slot != 1 {
+    return false;                     // only slot 1 is enabled
+  }
+  x.slot = slot;
+  x.port = p;
+  zero_page(&mut x.ctx, 0, 4096);
+  zero_page(&mut x.inp, 0, 4096);
+  zero_page(&mut x.ep0, 0, 4096);
+  x.ep0_at = 1;
+  let ca = dma_phys(x.ctx);
+  dma_write64(&mut x.dcbaa, 8, ca);
+  // Address the device: the slot and its default control endpoint.
+  let mut mps = 8;
+  if speed == 3 {
+    mps = 64;                         // high speed
+  } else if speed >= 4 {
+    mps = 512;                        // SuperSpeed
+  }
+  let ea = dma_phys(x.ep0);
+  ictx(&mut x, 0, 1, 3);              // add the slot and endpoint 0
+  ictx(&mut x, 1, 0, (speed << 20) | (1 << 27));
+  ictx(&mut x, 1, 1, p << 16);
+  ictx(&mut x, 2, 1, 6 + 4 * 8 + (mps << 16));   // 3 retries, control endpoint
+  ictx(&mut x, 2, 2, (ea & 0xFFFFFFFF) | 1);
+  ictx(&mut x, 2, 3, ea >> 32);
+  ictx(&mut x, 2, 4, 8);
+  let ia = dma_phys(x.inp);
+  if !xhci_command(&mut x, ia, TRB_ADDRESS * 1024 + slot * 16777216) {
+    return kbd_detach(&mut x);
+  }
+  // A full-speed device says its endpoint 0 packet size in its descriptor.
+  if !xhci_control(&mut x, 0x0008000001000680, 8, true) {
+    return kbd_detach(&mut x);
+  }
+  let mps0 = raw(&mut x, 7);
+  if speed == 1 && mps0 != 8 && (mps0 == 16 || mps0 == 32 || mps0 == 64) {
+    ictx(&mut x, 0, 1, 2);
+    ictx(&mut x, 2, 1, 6 + 4 * 8 + (mps0 << 16));
+    if !xhci_command(&mut x, ia, TRB_EVALUATE * 1024 + slot * 16777216) {
+      return kbd_detach(&mut x);
+    }
+  }
+  // The configuration: find a boot keyboard interface and its interrupt
+  // IN endpoint.
+  if !xhci_control(&mut x, 0x0200000002000680, 512, true) {
+    return kbd_detach(&mut x);
+  }
+  let total = raw(&mut x, 2) + raw(&mut x, 3) * 256;
+  let config = raw(&mut x, 5);
+  let mut iface = 256;
+  let mut ep = 0;
+  let mut emps = 0;
+  let mut ival = 0;
+  let mut i = 0;
+  let mut in_kbd = false;
+  while i < total && i < 512
+    invariant xhci_ok(x) && iface <= 256 && ep < 16 && emps < 2048 && ival <= 255
+  {
+    let dl = raw(&mut x, i);
+    let ty = raw(&mut x, i + 1);
+    if dl < 2 {
+      i = 512;
+    } else {
+      if ty == 4 {
+        in_kbd = raw(&mut x, i + 5) == 3 && raw(&mut x, i + 6) == 1 && raw(&mut x, i + 7) == 1;
+        if in_kbd && iface == 256 {
+          iface = raw(&mut x, i + 2);
+        }
+      } else if ty == 5 && in_kbd && ep == 0 {
+        let addr = raw(&mut x, i + 2);
+        if addr >= 128 && raw(&mut x, i + 3) & 3 == 3 {
+          ep = addr & 15;
+          emps = (raw(&mut x, i + 4) + raw(&mut x, i + 5) * 256) & 0x7FF;
+          ival = raw(&mut x, i + 6);
+        }
+      }
+      i = i + dl;
+    }
+  }
+  if iface == 256 || ep == 0 || emps == 0 {
+    return kbd_detach(&mut x);
+  }
+  // SET_CONFIGURATION, SET_PROTOCOL (boot), SET_IDLE (report only changes;
+  // a keyboard may refuse it).
+  if !xhci_control(&mut x, (config << 16) | 0x0900, 0, false)
+    || !xhci_control(&mut x, (iface << 32) | 0x0B21, 0, false) {
+    return kbd_detach(&mut x);
+  }
+  xhci_control(&mut x, (iface << 32) | 0x0A21, 0, false);
+  // The interrupt endpoint: context index 2 * number + 1 (IN).
+  let dci = ep * 2 + 1;
+  let mut interval = 3;               // in 2^n x 125 us
+  if speed <= 2 {
+    let mut ms = 1;
+    while ms * 2 <= ival && interval < 10
+      invariant interval <= 10 && ms <= 1024
+    {
+      ms = ms * 2;
+      interval = interval + 1;
+    }
+  } else if ival >= 1 && ival <= 16 {
+    interval = ival - 1;
+  }
+  zero_page(&mut x.inp, 0, RAW_AT);
+  zero_page(&mut x.intr, 0, 4096);
+  x.int_at = 1;
+  let ra = dma_phys(x.intr);
+  ictx(&mut x, 0, 1, 1 | (1 << dci));
+  ictx(&mut x, 1, 0, (speed << 20) | (dci << 27));
+  ictx(&mut x, 1, 1, p << 16);
+  ictx(&mut x, dci + 1, 0, interval << 16);
+  ictx(&mut x, dci + 1, 1, 6 + 7 * 8 + (emps << 16));  // 3 retries, interrupt IN
+  ictx(&mut x, dci + 1, 2, (ra & 0xFFFFFFFF) | 1);
+  ictx(&mut x, dci + 1, 3, ra >> 32);
+  ictx(&mut x, dci + 1, 4, 8 + (emps << 16));
+  if !xhci_command(&mut x, ia, TRB_CONFIGURE * 1024 + slot * 16777216) {
+    return kbd_detach(&mut x);
+  }
+  x.dci = dci;
+  kbd_queue(&mut x);
+  return true;
+}
+
+/// Gives the slot back after a failed attach; returns false.
+fn kbd_detach(x: &mut Xhci) -> bool
+  requires xhci_ok(x)
+  ensures xhci_ok(x) && !result
+{
+  xhci_command(&mut x, 0, TRB_DISABLE_SLOT * 1024 + x.slot * 16777216);
+  dma_write64(&mut x.dcbaa, 8, 0);
+  x.slot = 0;
+  return false;
+}
+
+/// Queues a transfer for the next report.
+fn kbd_queue(x: &mut Xhci)
+  requires xhci_ok(x)
+  ensures xhci_ok(x)
+{
+  let a = dma_phys(x.intr);
+  x.int_at = trb_put(&mut x.intr, x.int_at, a + 2048, 8, TRB_NORMAL * 1024 + 32 + 4);  // IOC, ISP
+  xw(&mut x, x.db + x.slot * 4, x.dci);
+}
+
+/// Stops the controller and resets it, so it no longer touches the pages.
+fn xhci_halt(x: &mut Xhci) -> bool
+  requires xhci_ok(x)
+  ensures xhci_ok(x)
+{
+  let c = xr(&mut x, x.op + USBCMD);
+  xw(&mut x, x.op + USBCMD, c & 0xFFFFFFFE);
+  let mut n = 0;
+  while n < XHCI_SPINS && xr(&mut x, x.op + USBSTS) & STS_HALTED == 0
+    invariant xhci_ok(x)
+  {
+    n = n + 1;
+  }
+  xw(&mut x, x.op + USBCMD, CMD_RESET);
+  let mut k = 0;
+  while k < XHCI_SPINS
+    invariant xhci_ok(x)
+  {
+    if xr(&mut x, x.op + USBCMD) & CMD_RESET == 0 && xr(&mut x, x.op + USBSTS) & STS_NOT_READY == 0 {
+      return true;
+    }
+    k = k + 1;
+  }
+  return false;
+}
+
+/// Takes the firmware's hold on the controller away (USB legacy support:
+/// the firmware may be emulating a PS/2 keyboard with it).
+fn xhci_handoff(x: &mut Xhci, xecp: u64)
+  requires xhci_ok(x)
+  ensures xhci_ok(x)
+{
+  let mut o = xecp;
+  let mut n = 0;
+  while n < 64 && o >= 0x20 && o <= XHCI_MAX_LEN && o % 4 == 0 && o + 8 <= mmio_len(x.regs)
+    invariant xhci_ok(x)
+  {
+    let v = xr(&mut x, o);
+    if v & 255 == 1 {
+      xw(&mut x, o, v | 0x1000000);  // OS owned
+      let mut k = 0;
+      while k < XHCI_SPINS && xr(&mut x, o) & 0x10000 != 0
+        invariant xhci_ok(x) && o % 4 == 0 && o + 8 <= mmio_len(x.regs)
+      {
+        k = k + 1;
+      }
+      // No more SMIs from it; clear the ones it raised.
+      let ctl = xr(&mut x, o + 4);
+      xw(&mut x, o + 4, (ctl & 0x1FFF1FEE) | 0xE0000000);
+      return;
+    }
+    let next = (v >> 8) & 255;
+    if next == 0 {
+      return;
+    }
+    o = o + next * 4;
+    n = n + 1;
+  }
+}
+
+/// Starts the controller in the registers `regs` with eleven pages, and
+/// attaches the first boot keyboard on a root port. `live` says whether
+/// one was found; if not, the controller is left reset.
+fn xhci_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, f5: Frame, f6: Frame,
+  f7: Frame, f8: Frame, f9: Frame, f10: Frame) -> Xhci
+  requires mmio_base(regs) % 4096 == 0 && mmio_len(regs) <= XHCI_MAX_LEN && mmio_len(regs) >= 0x2000
+  ensures xhci_ok(result)
+{
+  let mut x = Xhci { regs: regs, dcbaa: dma_lend(f0), cmd: dma_lend(f1), evt: dma_lend(f2), ctx: dma_lend(f3),
+    inp: dma_lend(f4), ep0: dma_lend(f5), intr: dma_lend(f6), sp0: dma_lend(f7), sp1: dma_lend(f8),
+    sp2: dma_lend(f9), sp3: dma_lend(f10), op: 0, rt: 0, db: 0, csz: 32, ports: 0, cmd_at: 1, evt_at: 1,
+    ep0_at: 1, int_at: 1, ev_p: 0, ev_s: 0, ev_c: 0, slot: 0, dci: 0, port: 0, keys: balloc(6), q: balloc(16),
+    qn: 0, shift: false, ctrl: false, live: false };
+  let cap = xr(&mut x, 0) & 255;
+  let hcs1 = xr(&mut x, 4);
+  let hcs2 = xr(&mut x, 8);
+  let hcc1 = xr(&mut x, 0x10);
+  let dboff = xr(&mut x, 0x14);
+  let rtoff = xr(&mut x, 0x18);
+  let db = dboff - dboff % 4;
+  let rt = rtoff - rtoff % 32;
+  let size = mmio_len(x.regs);
+  if cap % 8 != 0 || cap + PORTSC + 4096 > size || rt + 64 > size || db + 1024 > size {
+    return x;
+  }
+  x.op = cap;
+  x.rt = rt;
+  x.db = db;
+  if hcc1 & 4 != 0 {
+    x.csz = 64;
+  }
+  x.ports = hcs1 >> 24;
+  let spads = ((hcs2 >> 21) & 31) * 32 + (hcs2 >> 27);
+  xhci_handoff(&mut x, (hcc1 >> 16) * 4);
+  if spads > XHCI_SP_MAX || xr(&mut x, x.op + PAGESIZE) & 1 == 0 || !xhci_halt(&mut x) {
+    return x;
+  }
+  // The structures the controller reads: one device slot, the scratchpad
+  // array, the command ring and the event ring.
+  zero_page(&mut x.dcbaa, 0, 4096);
+  zero_page(&mut x.cmd, 0, 4096);
+  zero_page(&mut x.evt, 0, 4096);
+  let s0 = dma_phys(x.sp0);
+  let s1 = dma_phys(x.sp1);
+  let s2 = dma_phys(x.sp2);
+  let s3 = dma_phys(x.sp3);
+  dma_write64(&mut x.dcbaa, 2048, s0);
+  dma_write64(&mut x.dcbaa, 2056, s1);
+  dma_write64(&mut x.dcbaa, 2064, s2);
+  dma_write64(&mut x.dcbaa, 2072, s3);
+  let da = dma_phys(x.dcbaa);
+  if spads > 0 {
+    dma_write64(&mut x.dcbaa, 0, da + 2048);
+  }
+  let ea = dma_phys(x.evt);
+  dma_write64(&mut x.evt, 0, ea + 64);
+  dma_write32(&mut x.evt, 8, cast[u32](EVT_N));
+  let cra = dma_phys(x.cmd);
+  xw(&mut x, x.op + CONFIG, 1);
+  xw64(&mut x, x.op + DCBAAP, da);
+  xw64(&mut x, x.op + CRCR, cra | 1);
+  xw(&mut x, x.rt + ERSTSZ, 1);
+  xw64(&mut x, x.rt + ERDP, ea + 64);
+  xw64(&mut x, x.rt + ERSTBA, ea);
+  xw(&mut x, x.rt + IMAN, 0);
+  xw(&mut x, x.op + USBCMD, CMD_RUN);
+  let mut n = 0;
+  while n < XHCI_SPINS && xr(&mut x, x.op + USBSTS) & STS_HALTED != 0
+    invariant xhci_ok(x)
+  {
+    n = n + 1;
+  }
+  // The first boot keyboard on a root port.
+  let mut p = 1;
+  while p <= x.ports && p < 256 && !x.live
+    invariant xhci_ok(x) && p >= 1
+  {
+    let speed = port_up(&mut x, p);
+    if speed != 0 && kbd_attach(&mut x, p, speed) {
+      x.live = true;
+    }
+    p = p + 1;
+  }
+  if !x.live {
+    xhci_halt(&mut x);
+  }
+  return x;
+}
+
+/// Stops the controller and takes its pages back (at power off). The
+/// registers go back to the caller.
+fn xhci_free(x: Xhci, m: &mut Mem) -> Mmio
+  requires xhci_ok(x) && mem_ok(m)
+  ensures mem_ok(m)
+{
+  let mut d = x;
+  xhci_halt(&mut d);
+  give_page(&mut m, dma_take(d.dcbaa));
+  give_page(&mut m, dma_take(d.cmd));
+  give_page(&mut m, dma_take(d.evt));
+  give_page(&mut m, dma_take(d.ctx));
+  give_page(&mut m, dma_take(d.inp));
+  give_page(&mut m, dma_take(d.ep0));
+  give_page(&mut m, dma_take(d.intr));
+  give_page(&mut m, dma_take(d.sp0));
+  give_page(&mut m, dma_take(d.sp1));
+  give_page(&mut m, dma_take(d.sp2));
+  give_page(&mut m, dma_take(d.sp3));
+  bfree(d.keys);
+  bfree(d.q);
+  return d.regs;
+}
+
+// HID usages 0x04-0x38 to characters (0: none).
+fn usage_map() -> Str {
+  return "abcdefghijklmnopqrstuvwxyz1234567890\r\0\0\t -=[]\\\0;'`,./";
+}
+
+fn usage_map_shift() -> Str {
+  return "ABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()\r\0\0\t _+{}|\0:\"~<>?";
+}
+
+/// The byte key usage `k` types, with the modifiers held, or 256.
+fn usage_byte(x: &Xhci, k: u64) -> u64
+  ensures result <= 256
+{
+  if k == 0x29 {
+    return 27;                        // Esc
+  }
+  if k == 0x2A {
+    return 127;                       // Backspace, as DEL
+  }
+  if k == 0x58 {
+    return 13;                        // keypad Enter
+  }
+  let m = usage_map();
+  let ms = usage_map_shift();
+  if k < 4 || k - 4 >= slen(m) || k - 4 >= slen(ms) {
+    return 256;
+  }
+  let mut c = cast[u64](sget(m, k - 4));
+  if x.shift {
+    c = cast[u64](sget(ms, k - 4));
+  }
+  if x.ctrl && c >= 97 && c <= 122 {
+    c = c - 96;                       // Ctrl-A is 1
+  }
+  if c == 0 {
+    return 256;
+  }
+  return c;
+}
+
+/// Reads a finished report: keys down now that were not before are typed.
+fn kbd_report(x: &mut Xhci)
+  requires xhci_ok(x)
+  ensures xhci_ok(x)
+{
+  let mods = cast[u64](dma_read8(&mut x.intr, 2048));
+  x.ctrl = mods & 0x11 != 0;
+  x.shift = mods & 0x22 != 0;
+  let mut i = 0;
+  while i < 6
+    invariant i <= 6 && xhci_ok(x)
+  {
+    let k = cast[u64](dma_read8(&mut x.intr, 2050 + i));
+    let mut was = false;
+    let mut j = 0;
+    while j < 6
+      invariant j <= 6 && xhci_ok(x)
+    {
+      if cast[u64](bget(x.keys, j)) == k {
+        was = true;
+      }
+      j = j + 1;
+    }
+    let b = usage_byte(x, k);
+    if k >= 4 && !was && b < 256 && x.qn < 16 {
+      bset(&mut x.q, x.qn, cast[u8](b));
+      x.qn = x.qn + 1;
+    }
+    i = i + 1;
+  }
+  let mut j = 0;
+  while j < 6
+    invariant j <= 6 && xhci_ok(x)
+  {
+    bset(&mut x.keys, j, dma_read8(&mut x.intr, 2050 + j));
+    j = j + 1;
+  }
+}
+
+/// The next byte typed on the keyboard, or 256 if there is none.
+fn xhci_poll(x: &mut Xhci) -> u64
+  requires xhci_ok(x)
+  ensures xhci_ok(x) && result <= 256
+{
+  if !x.live {
+    return 256;
+  }
+  let mut n = 0;
+  while x.qn == 0 && n < 8 && evt_next(&mut x)
+    invariant xhci_ok(x)
+  {
+    if (x.ev_c >> 10) & 63 == TRB_TRANSFER_EV && (x.ev_c >> 24) == x.slot && (x.ev_c >> 16) & 31 == x.dci {
+      let cc = x.ev_s >> 24;
+      if cc == CC_SUCCESS || cc == CC_SHORT {
+        kbd_report(&mut x);
+      }
+      kbd_queue(&mut x);
+    }
+    n = n + 1;
+  }
+  if x.qn == 0 {
+    return 256;
+  }
+  let b = cast[u64](bget(x.q, 0));
+  let mut i = 0;
+  while i + 1 < x.qn
+    invariant xhci_ok(x) && x.qn >= 1 && i < x.qn
+  {
+    bset(&mut x.q, i, bget(x.q, i + 1));
+    i = i + 1;
+  }
+  x.qn = x.qn - 1;
+  return b;
+}
+
+enum Usb { None, Xhci(Xhci) }
+
+spec fn usb_ok(u: &Usb) -> bool {
+  u is Usb::Xhci ==> xhci_ok(u.Xhci)
+}
+
+fn usb_live(u: &Usb) -> bool {
+  match u {
+    Usb::None => { return false; },
+    Usb::Xhci(x) => { return x.live; },
+  }
+}
+
+fn usb_poll(u: &mut Usb) -> u64
+  requires usb_ok(u)
+  ensures usb_ok(u) && result <= 256
+{
+  match u {
+    Usb::None => { u = Usb::None; return 256; },
+    Usb::Xhci(mut x) => {
+      let b = xhci_poll(&mut x);
+      u = Usb::Xhci(x);
+      return b;
+    },
+  }
+}
+
+/// The xHCI controller `dev` on PCI bus 0, whose registers are bar ..
+/// bar + size, started with pages at .. at+10, if the registers lie in the
+/// device window below the I/O APIC and clear of the framebuffer at
+/// lo .. hi; else none. A controller with no keyboard is stopped and given
+/// back at once.
+fn usb_new(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, lo: u64, hi: u64, dev: u64, bar: u64, size: u64) -> Usb
+  requires pci_ok(pci) && mem_ok(m) && at + XHCI_PAGES <= NPAGES && bar <= 4294967295 && size <= XHCI_MAX_LEN
+  requires forall a: u64 :: 0x80000000 <= a && a < XHCI_TOP && !(lo <= a && a < hi) ==> mmio_free(win, a)
+  ensures usb_ok(result) && mem_ok(m)
+  ensures forall a: u64 :: 0x80000000 <= a && a < XHCI_TOP && !(lo <= a && a < hi) && !(bar <= a && a < bar + size) ==> mmio_free(win, a)
+{
+  if dev >= 32 || bar < 0x80000000 || size < 0x2000 || bar + size > XHCI_TOP || bar % 4096 != 0
+    || !(bar + size <= lo || bar >= hi) || !pages_free(m, at, XHCI_PAGES) {
+    return Usb::None;
+  }
+  pci_enable(&mut pci, dev);
+  let f0 = take_low_page(&mut m, at);
+  let f1 = take_low_page(&mut m, at + 1);
+  let f2 = take_low_page(&mut m, at + 2);
+  let f3 = take_low_page(&mut m, at + 3);
+  let f4 = take_low_page(&mut m, at + 4);
+  let f5 = take_low_page(&mut m, at + 5);
+  let f6 = take_low_page(&mut m, at + 6);
+  let f7 = take_low_page(&mut m, at + 7);
+  let f8 = take_low_page(&mut m, at + 8);
+  let f9 = take_low_page(&mut m, at + 9);
+  let f10 = take_low_page(&mut m, at + 10);
+  let regs = mmio_claim(&mut win, bar, size);
+  let x = xhci_new(regs, f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10);
+  if !x.live {
+    mmio_release(&mut win, xhci_free(x, &mut m));
+    return Usb::None;
+  }
+  return Usb::Xhci(x);
+}
+
+/// The registers of xHCI controller `dev` (32: none): base, then size
+/// (both 0 if it has no usable memory BAR).
+fn usb_bar(pci: &mut Pci, dev: u64) -> u64
+  requires pci_ok(pci)
+  ensures result <= 4294967295
+{
+  if dev >= 32 {
+    return 0;
+  }
+  return pci_mem_bar(&mut pci, dev);
+}
+
+fn usb_bar_size(pci: &mut Pci, dev: u64) -> u64
+  requires pci_ok(pci)
+  ensures result <= XHCI_MAX_LEN
+{
+  if dev >= 32 {
+    return 0;
+  }
+  let n = pci_bar_size(&mut pci, dev);
+  if n > XHCI_MAX_LEN {
+    return XHCI_MAX_LEN;
+  }
+  return n;
+}
+
+/// Stops the controller and gives its registers and pages back (at power
+/// off); the keyboard is gone afterwards.
+fn usb_off(u: &mut Usb, win: &mut MmioSpace, m: &mut Mem)
+  requires usb_ok(u) && mem_ok(m)
+  ensures usb_ok(u) && mem_ok(m)
+{
+  match u {
+    Usb::None => { u = Usb::None; },
+    Usb::Xhci(x) => {
+      mmio_release(&mut win, xhci_free(x, &mut m));
+      u = Usb::None;
+    },
+  }
+}

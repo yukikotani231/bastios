@@ -614,7 +614,10 @@ fn applet_name(j: u64) -> Str {
   if j == 9 {
     return "rmdir";
   }
-  return "pwd";
+  if j == 10 {
+    return "pwd";
+  }
+  return "mv";
 }
 
 /// Stores v little-endian in bytes at..at+8 of x.

@@ -28,6 +28,7 @@ busybox: md5sum
 busybox: mkdir -p
 busybox: mkdir/rmdir
 busybox: mktemp
+busybox: mv
 busybox: nice
 busybox: nproc
 busybox: od
@@ -105,6 +106,7 @@ t_file: pread
 t_file: pread keeps offset
 t_file: pwrite
 t_file: read back
+t_file: rename
 t_file: stdio fprintf/fscanf
 t_file: tmpfile
 t_file: unlink
@@ -123,6 +125,8 @@ t_ipc: pipe across fork
 t_ipc: pipe2
 t_ipc: poll a readable pipe
 t_ipc: poll times out
+t_ipc: pselect timeout
+t_ipc: select
 t_mem: 64 MiB of address space
 t_mem: file for mapping
 t_mem: madvise
@@ -185,10 +189,14 @@ t_proc: uname
 t_proc: wait with no children is ECHILD
 t_proc: waitpid WNOHANG
 t_signal: SIG_IGN
+t_signal: alarm
+t_signal: getitimer
 t_signal: kill missing pid is ESRCH
 t_signal: kill self
 t_signal: raise runs the handler
+t_signal: setitimer
 t_signal: sigaction
+t_signal: signal to a child
 t_signal: sigprocmask blocks
 t_signal: unblock delivers
 t_time: clock_getres

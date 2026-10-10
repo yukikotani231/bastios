@@ -5,6 +5,9 @@
 // the HPET time it ends at, so the later runs wait for the first run's
 // deadline rather than starting the clock again.
 //
+// alarm and setitimer(ITIMER_REAL) keep a deadline per process in
+// k.alarms, which every timer tick checks (lx_alarms) against the HPET.
+//
 // CLOCK_REALTIME (and gettimeofday, time) is k.epoch, read from the CMOS
 // clock at boot (src/rtc.bastio), plus the HPET clock.
 
@@ -24,6 +27,17 @@ const TIMER_ABSTIME: u64 = 1;
 const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
 const CLOCK_THREAD_CPUTIME_ID: u64 = 3;
 const CLOCK_BOOTTIME: u64 = 7;
+const LX_SELECT: u64 = 23;
+const LX_PSELECT6: u64 = 270;
+const FD_SETSIZE: u64 = 1024;
+const SET_BYTES: u64 = 128;             // FD_SETSIZE / 8
+const SEL_IN: u64 = 1024;              // where in xfer select keeps the three sets it was given
+const SEL_OUT: u64 = 2048;             // and where it builds the three it gives back
+const LX_GETITIMER: u64 = 36;
+const LX_ALARM: u64 = 37;
+const LX_SETITIMER: u64 = 38;
+const ITIMER_REAL: u64 = 0;
+const SIGALRM: u64 = 14;
 const CLOCK_REALTIME: u64 = 0;
 const CLOCK_REALTIME_COARSE: u64 = 5;
 
@@ -260,11 +274,297 @@ fn lx_poll(k: &mut Kernel, pid: u64, n: u64, was: u64, fds: u64, nfds: u64, wait
   return KEEP;
 }
 
+// ---------------------------------------------------------------- select
+
+/// Whether bit i is set in the fd_set kept in xfer at `at`.
+fn set_has(k: &Kernel, at: u64, i: u64) -> bool
+  requires kok(k) && at <= SEL_OUT + 2 * SET_BYTES && i < FD_SETSIZE
+{
+  let byte = cast[u64](bget(k.fs.xfer, at + i / 8));
+  return (byte >> (i % 8)) % 2 == 1;
+}
+
+/// Sets bit i in the fd_set kept in xfer at `at`.
+fn set_put(k: &mut Kernel, at: u64, i: u64)
+  requires kok(k) && at <= SEL_OUT + 2 * SET_BYTES && i < FD_SETSIZE
+  ensures kok(k)
+{
+  let byte = cast[u64](bget(k.fs.xfer, at + i / 8));
+  bset(&mut k.fs.xfer, at + i / 8, cast[u8]((byte | 1 << (i % 8)) % 256));
+}
+
+/// Copies the first nb bytes of the fd_set at user address va (none when
+/// va is 0) into set `slot` of SEL_IN, and clears set `slot` of SEL_OUT.
+/// False when va cannot be read.
+fn set_load(k: &mut Kernel, pid: u64, va: u64, slot: u64, nb: u64) -> bool
+  requires kok(k) && pid < NPROC && slot < 3 && nb <= SET_BYTES
+  ensures kok(k)
+{
+  if va != 0 {
+    if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, nb) != nb {
+      return false;
+    }
+  }
+  let mut i = 0;
+  while i < SET_BYTES
+    invariant i <= SET_BYTES && kok(k)
+  {
+    let mut v = 0;
+    if va != 0 && i < nb {
+      v = cast[u64](bget(k.fs.xfer, i));
+    }
+    bset(&mut k.fs.xfer, SEL_IN + SET_BYTES * slot + i, cast[u8](v % 256));
+    bset(&mut k.fs.xfer, SEL_OUT + SET_BYTES * slot + i, 0);
+    i = i + 1;
+  }
+  return true;
+}
+
+/// Writes the first nb bytes of set `slot` of SEL_OUT back to user address
+/// va (nothing when va is 0). False when va cannot be written.
+fn set_store(k: &mut Kernel, pid: u64, va: u64, slot: u64, nb: u64) -> bool
+  requires kok(k) && pid < NPROC && slot < 3 && nb <= SET_BYTES
+  ensures kok(k)
+{
+  if va == 0 {
+    return true;
+  }
+  let mut i = 0;
+  while i < nb
+    invariant i <= nb && kok(k)
+  {
+    let v = cast[u64](bget(k.fs.xfer, SEL_OUT + SET_BYTES * slot + i));
+    bset(&mut k.fs.xfer, i, cast[u8](v % 256));
+    i = i + 1;
+  }
+  return copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, nb) == nb;
+}
+
+/// select and pselect6 over the first nfds descriptors: rd, wr and ex are
+/// the user's fd_sets (0 for none). Waits like poll. Nothing is ever
+/// exceptional, the time left is not written back to select's timeout,
+/// and pselect6's signal mask is not applied.
+fn lx_select(k: &mut Kernel, pid: u64, n: u64, was: u64, nfds: u64, rd: u64, wr: u64, ex: u64, wait: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if nfds > FD_SETSIZE {
+    ret(&mut k.procs, pid, EINVAL);
+    return KEEP;
+  }
+  let nb = (nfds + 7) / 8;
+  let ok_r = set_load(&mut k, pid, rd, 0, nb);
+  let ok_w = set_load(&mut k, pid, wr, 1, nb);
+  let ok_e = set_load(&mut k, pid, ex, 2, nb);
+  if !ok_r || !ok_w || !ok_e {
+    ret(&mut k.procs, pid, EFAULT);
+    return KEEP;
+  }
+  let mut ready = 0;
+  let mut i = 0;
+  while i < nfds
+    invariant i <= nfds && nfds <= FD_SETSIZE && ready <= 2 * i && kok(k)
+  {
+    let want_r = set_has(k, SEL_IN, i);
+    let want_w = set_has(k, SEL_IN + SET_BYTES, i);
+    let want_e = set_has(k, SEL_IN + 2 * SET_BYTES, i);
+    if want_r || want_w || want_e {
+      let bits = poll_bits(k, pid, i);
+      if bits & POLLNVAL != 0 {
+        ret(&mut k.procs, pid, EBADF);
+        return KEEP;
+      }
+      if want_r && bits & (POLLIN | POLLHUP | POLLERR) != 0 {
+        set_put(&mut k, SEL_OUT, i);
+        ready = ready + 1;
+      }
+      if want_w && bits & (POLLOUT | POLLERR) != 0 {
+        set_put(&mut k, SEL_OUT + SET_BYTES, i);
+        ready = ready + 1;
+      }
+    }
+    i = i + 1;
+  }
+  if ready == 0 {
+    let dl = deadline(k, was, wait);
+    if k.ns < dl {
+      return wait_until(&mut k, pid, n, dl);
+    }
+  }
+  let st_r = set_store(&mut k, pid, rd, 0, nb);
+  let st_w = set_store(&mut k, pid, wr, 1, nb);
+  let st_e = set_store(&mut k, pid, ex, 2, nb);
+  if !st_r || !st_w || !st_e {
+    ret(&mut k.procs, pid, EFAULT);
+    return KEEP;
+  }
+  ret(&mut k.procs, pid, ready);
+  return KEEP;
+}
+
+/// A struct timeval read from user memory, in ns, as ts_in does a timespec.
+fn tv_in(k: &mut Kernel, pid: u64, va: u64) -> Ts
+  requires kok(k) && pid < NPROC
+  ensures kok(k) && result.ns <= FOREVER
+{
+  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 16) != 16 {
+    return Ts { err: EFAULT, ns: 0 };
+  }
+  let sec = get_u64(k.fs.xfer, 0);
+  let usec = get_u64(k.fs.xfer, 8);
+  if sec >= 0x8000000000000000 || usec >= 1000000 {
+    return Ts { err: EINVAL, ns: 0 };
+  }
+  if sec >= FOREVER / NS_PER_S {
+    return Ts { err: 0, ns: FOREVER };
+  }
+  return Ts { err: 0, ns: sat_add(sec * NS_PER_S, usec * 1000) };
+}
+
+// ---------------------------------------------------------------- alarms
+
+/// On a timer tick, with k.ns just read: sends SIGALRM to each process
+/// whose real-time timer has run out, and sets the timer going again if it
+/// has an interval.
+fn lx_alarms(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && kok(k)
+  {
+    let dl = get(k.alarms, 2 * p);
+    if dl != 0 && k.ns >= dl {
+      post_sig(&mut k, p, SIGALRM);
+      let iv = get(k.alarms, 2 * p + 1);
+      let mut next = 0;
+      if iv != 0 {
+        next = sat_add(dl, iv);
+        if next <= k.ns {
+          next = sat_add(k.ns, iv);         // ticks were missed: skip the lost rounds
+        }
+      }
+      k.alarms = set(k.alarms, 2 * p, next);
+    }
+    p = p + 1;
+  }
+}
+
+/// The time left on process pid's real-time timer, in ns (0 when off).
+fn alarm_left(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  let dl = get(k.alarms, 2 * pid);
+  if dl == 0 || dl <= k.ns {
+    return 0;
+  }
+  return dl - k.ns;
+}
+
+/// Starts process pid's real-time timer: `value` ns from now (0 stops it),
+/// then every `interval` ns.
+fn alarm_set(k: &mut Kernel, pid: u64, value: u64, interval: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if value == 0 {
+    k.alarms = set(k.alarms, 2 * pid, 0);
+    k.alarms = set(k.alarms, 2 * pid + 1, 0);
+    return;
+  }
+  k.alarms = set(k.alarms, 2 * pid, smaller(sat_add(k.ns, value), FOREVER));
+  k.alarms = set(k.alarms, 2 * pid + 1, interval);
+}
+
+/// Writes process pid's real-time timer to user address va as a struct
+/// itimerval (the interval, then the value, each a timeval).
+fn itimer_out(k: &mut Kernel, pid: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let iv = get(k.alarms, 2 * pid + 1);
+  let left = alarm_left(k, pid);
+  xfer_u64(&mut k.fs.xfer, 0, iv / NS_PER_S);
+  xfer_u64(&mut k.fs.xfer, 8, iv % NS_PER_S / 1000);
+  xfer_u64(&mut k.fs.xfer, 16, left / NS_PER_S);
+  xfer_u64(&mut k.fs.xfer, 24, left % NS_PER_S / 1000);
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, 32) != 32 {
+    return EFAULT;
+  }
+  return 0;
+}
+
+/// alarm, getitimer and setitimer. Only ITIMER_REAL is kept; the CPU-time
+/// timers are refused with -EINVAL.
+fn lx_itimer(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if n == LX_ALARM {
+    // The seconds that were left, rounded to the nearest, but at least 1
+    // while the old alarm was still going.
+    let left = alarm_left(k, pid);
+    let mut secs = left / NS_PER_S;
+    if left % NS_PER_S >= NS_PER_S / 2 {
+      secs = secs + 1;
+    }
+    if secs == 0 && left != 0 {
+      secs = 1;
+    }
+    alarm_set(&mut k, pid, (a % 0x100000000) * NS_PER_S, 0);
+    ret(&mut k.procs, pid, secs);
+    return KEEP;
+  }
+  if a != ITIMER_REAL {
+    ret(&mut k.procs, pid, EINVAL);
+    return KEEP;
+  }
+  if n == LX_GETITIMER {
+    ret(&mut k.procs, pid, itimer_out(&mut k, pid, b));
+    return KEEP;
+  }
+  // setitimer(which, new, old): read new before writing old, which may be
+  // the same struct.
+  let mut value = 0;
+  let mut interval = 0;
+  if b != 0 {
+    if b > 0xFFFFFFFFFFFFFF00 {
+      ret(&mut k.procs, pid, EFAULT);
+      return KEEP;
+    }
+    let ti = tv_in(&mut k, pid, b);
+    let tv = tv_in(&mut k, pid, b + 16);
+    if ti.err != 0 {
+      ret(&mut k.procs, pid, ti.err);
+      return KEEP;
+    }
+    if tv.err != 0 {
+      ret(&mut k.procs, pid, tv.err);
+      return KEEP;
+    }
+    value = tv.ns;
+    interval = ti.ns;
+  }
+  if c != 0 {
+    let r = itimer_out(&mut k, pid, c);
+    if r != 0 {
+      ret(&mut k.procs, pid, r);
+      return KEEP;
+    }
+  }
+  alarm_set(&mut k, pid, value, interval);
+  ret(&mut k.procs, pid, 0);
+  return KEEP;
+}
+
 // ---------------------------------------------------------------- calls
 
 fn is_time_call(n: u64) -> bool {
   return n == LX_POLL || n == LX_PPOLL || n == LX_NANOSLEEP || n == LX_CLOCK_NANOSLEEP
-    || n == LX_CLOCK_GETTIME || n == LX_CLOCK_GETRES || n == LX_GETTIMEOFDAY || n == LX_TIME;
+    || n == LX_CLOCK_GETTIME || n == LX_CLOCK_GETRES || n == LX_GETTIMEOFDAY || n == LX_TIME
+    || n == LX_SELECT || n == LX_PSELECT6 || n == LX_PAUSE || n == LX_ALARM || n == LX_GETITIMER
+    || n == LX_SETITIMER;
 }
 
 /// System call n of process pid with arguments a, b, c, and `was`, the
@@ -293,6 +593,33 @@ fn lx_time_call(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
       wait = ts.ns;
     }
     return lx_poll(&mut k, pid, n, was, a, b, wait);
+  }
+  if n == LX_PAUSE {
+    return wait_until(&mut k, pid, n, FOREVER);   // until a signal handler runs
+  }
+  if n == LX_ALARM || n == LX_GETITIMER || n == LX_SETITIMER {
+    return lx_itimer(&mut k, pid, n, a, b, c);
+  }
+  if n == LX_SELECT || n == LX_PSELECT6 {
+    // select(nfds, rd, wr, ex, struct timeval *); pselect6 takes a
+    // struct timespec * there, and a signal mask after it.
+    let ex = pget(k.procs, pid, F_REGS + R_R10);
+    let tva = pget(k.procs, pid, F_REGS + R_R8);
+    let mut wait = FOREVER;
+    if tva != 0 {
+      let mut t = Ts { err: 0, ns: 0 };
+      if n == LX_SELECT {
+        t = tv_in(&mut k, pid, tva);
+      } else {
+        t = ts_in(&mut k, pid, tva);
+      }
+      if t.err != 0 {
+        ret(&mut k.procs, pid, t.err);
+        return KEEP;
+      }
+      wait = t.ns;
+    }
+    return lx_select(&mut k, pid, n, was, a % 0x100000000, b, c, ex, wait);
   }
   if n == LX_NANOSLEEP {
     return lx_sleep(&mut k, pid, n, was, 1, 0, a);
