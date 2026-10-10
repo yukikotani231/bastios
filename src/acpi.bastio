@@ -1,0 +1,420 @@
+// ACPI, for what a PC needs from it besides its processors (boot/smp.c
+// reads the MADT): soft power off (S5), reset, the power button, and the PM
+// timer as the clock on a machine without an HPET.
+//
+// The firmware's tables are read a byte at a time (the boot_acpi builtin)
+// and parsed here, every read checked against the table's end. The only AML
+// this needs is the DSDT's \_S5 package, which says what to write to PM1
+// control for S5; it is found by its name, as every small kernel does, not
+// by interpreting the DSDT.
+//
+// The registers it drives are the PM1a event and control blocks and the PM
+// timer, which firmware puts next to each other in one I/O block (QEMU at
+// 0x600, Intel chipsets usually 0x400 or 0x1800, AMD 0x800). That block is
+// claimed as one `PortIo`, before any other port: the kernel's fixed ports
+// and the PCI configuration ports must lie outside it, and the PCI drivers
+// keep their I/O BARs off it. PM1b blocks (rare, and absent under QEMU) are
+// not driven. Firmware is switched to ACPI mode (SMI_CMD) if it was not, so
+// that the power button reaches the kernel; its status bit is then polled
+// on every timer tick rather than taken as an SCI.
+
+const SIG_FACP: u64 = 0x50434146;      // "FACP": the FADT
+const SIG_DSDT: u64 = 0x54445344;
+const SIG_HPET: u64 = 0x54455048;
+const ACPI_NONE: u64 = 65536;          // a register the machine does not have
+
+const ACPI_LOW: u64 = 0x100;           // the block lies above the legacy ports
+const ACPI_SPAN: u64 = 256;            // and is no longer than this
+const PM1_SCI_EN: u64 = 1;
+const PM1_SLP_EN: u64 = 0x2000;
+const PM1_PWRBTN: u64 = 0x100;         // status and enable bit of the power button
+const PM_HZ: u64 = 3579545;
+const PM_NS: u64 = 1000000000;         // nanoseconds a second
+const ACPI_SPINS: u64 = 1000000;
+
+// Offsets in `io` of the PM1a status register (its enable register is at
+// evt + elen), of PM1a control, and of the PM timer (each ACPI_NONE if
+// absent); the timer's mask (24 or 32 bits); the S5 sleep type (ACPI_NONE
+// if the DSDT has no \_S5); the reset register's I/O port and value
+// (ACPI_NONE if there is none); and the PM timer clock: its last reading
+// and the ticks counted since boot.
+struct Acpi { io: PortIo, evt: u64, elen: u64, cnt: u64, tmr: u64, mask: u64, s5: u64,
+  reset: u64, rval: u64, last: u64, acc: u64 }
+
+spec fn acpi_ok(a: &Acpi) -> bool {
+  (a.evt == ACPI_NONE || (a.elen <= 128 && a.evt + 2 * a.elen <= port_count(a.io) && a.elen >= 2))
+  && (a.cnt == ACPI_NONE || a.cnt + 2 <= port_count(a.io))
+  && (a.tmr == ACPI_NONE || a.tmr + 4 <= port_count(a.io))
+  && (a.mask == 0xFFFFFF || a.mask == 0xFFFFFFFF) && a.last <= a.mask
+  && (a.s5 == ACPI_NONE || a.s5 < 8) && a.rval < 256 && a.reset <= ACPI_NONE
+}
+
+/// The ports the kernel claims by number (src/main.bastio and the ATA
+/// driver), and the PCI configuration ports: the ACPI block keeps off them.
+spec fn kernel_port(k: u64) -> bool {
+  k < ACPI_LOW || (0x1F0 <= k && k < 0x1F8) || k == 0x3F6 || (0x3F8 <= k && k < 0x400)
+    || (0xCF8 <= k && k < 0xD00)
+}
+
+/// Byte `off` of table `sig`, or 256.
+fn acpi_byte(cpu: &Cpu, sig: u64, off: u64) -> u64
+  ensures result <= 256
+{
+  return boot_acpi(cpu, sig, off);
+}
+
+/// The little-endian number in `n` bytes (1, 2 or 4) from `off` of table
+/// `sig`, or 0 if they are not all there.
+fn acpi_num(cpu: &Cpu, sig: u64, off: u64, n: u64) -> u64
+  requires n <= 4 && off <= 4294967296
+  ensures result < 4294967296
+  ensures n <= 2 ==> result < 65536
+  ensures n <= 1 ==> result < 256
+{
+  let mut v = 0;
+  let mut m = 1;
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= 4 && v < m
+    invariant (i == 0 ==> m == 1) && (i == 1 ==> m == 256) && (i == 2 ==> m == 65536)
+    invariant (i == 3 ==> m == 16777216) && (i == 4 ==> m == 4294967296)
+  {
+    let b = acpi_byte(cpu, sig, off + i);
+    if b > 255 {
+      return 0;
+    }
+    v = v + b * m;
+    m = m * 256;
+    i = i + 1;
+  }
+  return v;
+}
+
+/// The 64-bit little-endian number at `off` of table `sig`, or 0.
+fn acpi_u64(cpu: &Cpu, sig: u64, off: u64) -> u64
+  requires off <= 4294967292
+{
+  return acpi_num(cpu, sig, off, 4) + acpi_num(cpu, sig, off + 4, 4) * 4294967296;
+}
+
+/// An I/O port of the FADT: the 32-bit field at `legacy`, else the address
+/// of the generic address structure at `gas` (ACPI 2.0 and later) if it is
+/// in I/O space; ACPI_NONE if neither.
+fn fadt_port(cpu: &Cpu, len: u64, legacy: u64, gas: u64) -> u64
+  requires legacy <= 4096 && gas <= 4096
+  ensures result <= ACPI_NONE
+{
+  let p = acpi_num(cpu, SIG_FACP, legacy, 4);
+  if p > 0 && p < 65536 {
+    return p;
+  }
+  if gas + 12 <= len && acpi_num(cpu, SIG_FACP, gas, 1) == 1 {
+    let x = acpi_u64(cpu, SIG_FACP, gas + 4);
+    if x > 0 && x < 65536 {
+      return x;
+    }
+  }
+  return ACPI_NONE;
+}
+
+/// The S5 sleep type for PM1a control from the DSDT's \_S5 package: the
+/// bytes `_S5_` after a NameOp (0x08, maybe with a root prefix `\`), then a
+/// PackageOp (0x12), its length, its element count, and the first element
+/// (a ByteConst 0x0A n, or Zero or One). ACPI_NONE if it is not there.
+fn acpi_s5(cpu: &Cpu) -> u64
+  ensures result == ACPI_NONE || result < 8
+{
+  let len = acpi_num(cpu, SIG_DSDT, 4, 4);
+  let mut i = 37;
+  while i + 4 < len
+    invariant i >= 37 && i <= 4294967296 && len < 4294967296
+  {
+    if acpi_byte(cpu, SIG_DSDT, i) == 0x5F && acpi_byte(cpu, SIG_DSDT, i + 1) == 0x53
+      && acpi_byte(cpu, SIG_DSDT, i + 2) == 0x35 && acpi_byte(cpu, SIG_DSDT, i + 3) == 0x5F {
+      let before = acpi_byte(cpu, SIG_DSDT, i - 1);
+      let named = before == 0x08 || (before == 0x5C && acpi_byte(cpu, SIG_DSDT, i - 2) == 0x08);
+      if named && acpi_byte(cpu, SIG_DSDT, i + 4) == 0x12 {
+        // PkgLength: its first byte's top two bits say how many follow.
+        let lead = acpi_byte(cpu, SIG_DSDT, i + 5);
+        let at = i + 6 + lead / 64 + 1;           // past the length and the element count
+        let e = acpi_byte(cpu, SIG_DSDT, at);
+        let mut t = ACPI_NONE;
+        if e == 0x0A {
+          t = acpi_byte(cpu, SIG_DSDT, at + 1);
+        } else if e == 0x00 || e == 0x01 {
+          t = e;
+        }
+        if t < 8 {
+          return t;
+        }
+        return ACPI_NONE;
+      }
+    }
+    i = i + 1;
+  }
+  return ACPI_NONE;
+}
+
+/// Where the HPET's registers are, as the ACPI tables say: its base if it
+/// is in memory space at a 1 KiB boundary between 0xFED00000 and the local
+/// APIC (where every chipset puts it); 0 if the tables list no HPET, or
+/// HPET if there are no ACPI tables at all (an old firmware: try the usual
+/// place, which the driver then checks).
+fn acpi_hpet(cpu: &Cpu) -> u64
+  ensures result == 0 || (HPET <= result && result + HPET_LEN <= 0xFEE00000 && result % 1024 == 0)
+{
+  if acpi_byte(cpu, SIG_FACP, 0) > 255 {
+    return HPET;
+  }
+  if acpi_num(cpu, SIG_HPET, 40, 1) != 0 {
+    return 0;
+  }
+  let b = acpi_u64(cpu, SIG_HPET, 44);
+  if b >= HPET && b <= 0xFEE00000 - HPET_LEN && b % 1024 == 0 {
+    return b;
+  }
+  return 0;
+}
+
+/// Reads the FADT and DSDT, claims the block of PM1a event, PM1a control
+/// and PM timer registers if it is sane (and empty ports otherwise), and
+/// switches the firmware to ACPI mode with the power button enabled. Runs
+/// first, while every port is free.
+fn acpi_new(ports: &mut Ports, cpu: &Cpu) -> Acpi
+  requires forall k: u64 :: k < 65536 ==> port_free(ports, k)
+  ensures acpi_ok(result)
+  ensures forall k: u64 :: kernel_port(k) ==> port_free(ports, k)
+  ensures forall k: u64 :: ACPI_LOW <= k && k < 65536 && !(port_base(result.io) <= k && k < port_base(result.io) + port_count(result.io)) ==> port_free(ports, k)
+  ensures port_base(result.io) + port_count(result.io) <= 65536
+{
+  let len = acpi_num(cpu, SIG_FACP, 4, 4);
+  let mut evt = ACPI_NONE;
+  let mut cnt = ACPI_NONE;
+  let mut tmr = ACPI_NONE;
+  let mut elen = 0;
+  let mut mask = 0xFFFFFF;
+  let mut reset = ACPI_NONE;
+  let mut rval = 0;
+  if len >= 116 {
+    evt = fadt_port(cpu, len, 56, 148);
+    cnt = fadt_port(cpu, len, 64, 172);
+    if acpi_num(cpu, SIG_FACP, 91, 1) >= 4 {
+      tmr = fadt_port(cpu, len, 76, 208);
+    }
+    elen = acpi_num(cpu, SIG_FACP, 88, 1) / 2;   // status, then enable
+    let flags = acpi_num(cpu, SIG_FACP, 112, 4);
+    if (flags / 256) % 2 == 1 {
+      mask = 0xFFFFFFFF;
+    }
+    // The reset register (ACPI 2.0, flag RESET_REG_SUP), if it is a port.
+    if len >= 129 && (flags / 1024) % 2 == 1 && acpi_num(cpu, SIG_FACP, 116, 1) == 1 {
+      let r = acpi_u64(cpu, SIG_FACP, 120);
+      if r < 65536 {
+        reset = r;
+        rval = acpi_num(cpu, SIG_FACP, 128, 1);
+      }
+    }
+  }
+  if elen < 2 {
+    evt = ACPI_NONE;
+  }
+  // The block: from the lowest of the three to the end of the highest.
+  let mut lo = 65536;
+  let mut hi = 0;
+  if evt < 65536 { lo = evt; hi = evt + 2 * elen; }
+  if cnt < 65536 {
+    if cnt < lo { lo = cnt; }
+    if cnt + 2 > hi { hi = cnt + 2; }
+  }
+  if tmr < 65536 {
+    if tmr < lo { lo = tmr; }
+    if tmr + 4 > hi { hi = tmr + 4; }
+  }
+  let mut clear = lo >= ACPI_LOW && hi <= 65536 && lo < hi && hi - lo <= ACPI_SPAN;
+  clear = clear && (hi <= 0x1F0 || lo >= 0x1F8) && (hi <= 0x3F6 || lo >= 0x3F7)
+    && (hi <= 0x3F8 || lo >= 0x400) && (hi <= 0xCF8 || lo >= 0xD00);
+  if !clear {
+    let none = port_claim(&mut ports, 0, 0);
+    return Acpi { io: none, evt: ACPI_NONE, elen: 0, cnt: ACPI_NONE, tmr: ACPI_NONE, mask: 0xFFFFFF, s5: ACPI_NONE,
+      reset: reset, rval: rval % 256, last: 0, acc: 0 };
+  }
+  let mut a = Acpi { io: port_claim(&mut ports, lo, hi - lo), evt: ACPI_NONE, elen: elen, cnt: ACPI_NONE, tmr: ACPI_NONE,
+    mask: mask, s5: acpi_s5(cpu), reset: reset, rval: rval % 256, last: 0, acc: 0 };
+  if evt < 65536 { a.evt = evt - lo; }
+  if cnt < 65536 { a.cnt = cnt - lo; }
+  if tmr < 65536 {
+    a.tmr = tmr - lo;
+    a.last = pm_read(&mut a);
+  }
+  // ACPI mode: the SMI command port takes ACPI_ENABLE, and the firmware
+  // sets SCI_EN once it has handed the registers over.
+  if a.cnt != ACPI_NONE && cast[u64](pio_in16(&mut a.io, a.cnt)) % 2 == 0 {
+    let smi = acpi_num(cpu, SIG_FACP, 48, 4);
+    let on = acpi_num(cpu, SIG_FACP, 52, 1);
+    if smi > 0 && smi < 65536 && on > 0 && (smi < lo || smi >= hi) {
+      let mut p = port_claim(&mut ports, smi, 1);
+      pio_out8(&mut p, 0, cast[u8](on));
+      port_release(&mut ports, p);
+      let mut n = 0;
+      while n < ACPI_SPINS && cast[u64](pio_in16(&mut a.io, a.cnt)) % 2 == 0
+        invariant acpi_ok(a)
+      {
+        n = n + 1;
+      }
+    }
+  }
+  if a.evt != ACPI_NONE {
+    pio_out16(&mut a.io, a.evt, cast[u16](PM1_PWRBTN));            // a stale press is forgotten
+    let en = cast[u64](pio_in16(&mut a.io, a.evt + a.elen));
+    pio_out16(&mut a.io, a.evt + a.elen, cast[u16]((en | PM1_PWRBTN) % 65536));
+  }
+  return a;
+}
+
+/// Was the power button pressed since the last look? (The press is then
+/// acknowledged.)
+fn acpi_button(a: &mut Acpi) -> bool
+  requires acpi_ok(a)
+  ensures acpi_ok(a)
+{
+  if a.evt == ACPI_NONE {
+    return false;
+  }
+  if (cast[u64](pio_in16(&mut a.io, a.evt)) / 256) % 2 == 0 {
+    return false;
+  }
+  pio_out16(&mut a.io, a.evt, cast[u16](PM1_PWRBTN));
+  return true;
+}
+
+/// Is there a PM timer to keep time with?
+fn acpi_timer(a: &Acpi) -> bool {
+  return a.tmr != ACPI_NONE;
+}
+
+/// The PM timer's count (it has one).
+fn pm_read(a: &mut Acpi) -> u64
+  requires acpi_ok(a) && a.tmr != ACPI_NONE
+  ensures acpi_ok(a) && result <= a.mask
+{
+  let t = cast[u64](pio_in32(&mut a.io, a.tmr));
+  if a.mask == 0xFFFFFF {
+    return t % 16777216;
+  }
+  return t;
+}
+
+/// Nanoseconds counted by the PM timer since acpi_new (saturating), or 0
+/// without one. It must be read more often than it wraps (every 4.7 s at
+/// 24 bits), which every timer tick does.
+fn acpi_ns(a: &mut Acpi) -> u64
+  requires acpi_ok(a)
+  ensures acpi_ok(a)
+{
+  if a.tmr == ACPI_NONE {
+    return 0;
+  }
+  let now = pm_read(&mut a);
+  let mut d = 0;
+  if now >= a.last {
+    d = now - a.last;
+  } else {
+    d = now + (a.mask - a.last) + 1;
+  }
+  a.last = now;
+  if a.acc > 18446744073709551615 - d {
+    a.acc = 18446744073709551615;
+  } else {
+    a.acc = a.acc + d;
+  }
+  // acc / PM_HZ seconds, split so no step overflows.
+  let s = a.acc / PM_HZ;
+  if s > 18446744073709551615 / PM_NS - 1 {
+    return 18446744073709551615;
+  }
+  return s * PM_NS + (a.acc % PM_HZ) * PM_NS / PM_HZ;
+}
+
+/// Soft power off: the S5 sleep type and SLP_EN into PM1a control. If it
+/// works this does not return.
+fn acpi_off(a: &mut Acpi)
+  requires acpi_ok(a)
+  ensures acpi_ok(a)
+{
+  if a.cnt == ACPI_NONE || a.s5 == ACPI_NONE {
+    return;
+  }
+  let c = cast[u64](pio_in16(&mut a.io, a.cnt));
+  let v = c - ((c / 1024) % 16) * 1024;          // the other bits stay; SLP_TYP and SLP_EN are set
+  pio_out16(&mut a.io, a.cnt, cast[u16](v + a.s5 * 1024 + PM1_SLP_EN));
+}
+
+/// Nanoseconds since boot: the HPET's, else the PM timer's, else 0.
+fn clock_ns(h: &mut Hpet, a: &mut Acpi) -> u64
+  requires hpet_ok(h) && acpi_ok(a)
+  ensures hpet_ok(h) && acpi_ok(a)
+{
+  if h.period > 0 {
+    return hpet_ns(&mut h);
+  }
+  return acpi_ns(&mut a);
+}
+
+/// Restarts the machine: the ACPI reset register if the FADT names one
+/// that is a port the kernel holds (the PCI configuration ports, 0xCF9 on
+/// most chipsets, or the ACPI block), then the keyboard controller's reset
+/// line, then the reset control register at 0xCF9. Returns only if none of
+/// them worked.
+fn acpi_reset(a: &mut Acpi, pci: &mut Pci, kbd_status: &mut PortIo)
+  requires acpi_ok(a) && pci_ok(pci) && port_count(kbd_status) == 1
+  ensures acpi_ok(a)
+{
+  let base = port_base(a.io);
+  if a.reset != ACPI_NONE {
+    if PCI_ADDR <= a.reset && a.reset < PCI_ADDR + 4 {
+      pio_out8(&mut pci.addr, a.reset - PCI_ADDR, cast[u8](a.rval));
+    } else if PCI_DATA <= a.reset && a.reset < PCI_DATA + 4 {
+      pio_out8(&mut pci.data, a.reset - PCI_DATA, cast[u8](a.rval));
+    } else if base <= a.reset && a.reset < base + port_count(a.io) {
+      pio_out8(&mut a.io, a.reset - base, cast[u8](a.rval));
+    }
+    reset_wait(&mut kbd_status);
+  }
+  pio_out8(&mut kbd_status, 0, 0xFE);          // pulse the CPU reset line
+  reset_wait(&mut kbd_status);
+  pio_out8(&mut pci.addr, 1, 0x02);            // 0xCF9: a hard reset
+  pio_out8(&mut pci.addr, 1, 0x06);
+  reset_wait(&mut kbd_status);
+}
+
+/// About 10 ms, in port reads.
+fn reset_wait(p: &mut PortIo)
+  requires port_count(p) == 1
+  ensures port_count(p) == 1
+{
+  let mut i = 0;
+  while i < 10000
+    invariant port_count(p) == 1
+  {
+    pio_in8(&mut p, 0);
+    i = i + 1;
+  }
+}
+
+/// The boot log's lines for what ACPI gave: soft power off, the power
+/// button, and the PM timer as the clock when there is no HPET.
+fn acpi_report(con: &mut Con, a: &Acpi, hpet: bool)
+  requires con_ok(con)
+  ensures con_ok(con)
+{
+  if a.cnt != ACPI_NONE && a.s5 != ACPI_NONE {
+    if a.evt != ACPI_NONE {
+      puts(&mut con, "acpi: soft power off, power button\r\n");
+    } else {
+      puts(&mut con, "acpi: soft power off\r\n");
+    }
+  }
+  if !hpet && a.tmr != ACPI_NONE {
+    puts(&mut con, "clock: the ACPI PM timer (no HPET)\r\n");
+  }
+}

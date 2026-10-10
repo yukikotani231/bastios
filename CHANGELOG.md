@@ -31,6 +31,14 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   is seen on the other. The pages are counted references (bastiolang's
   `Shared`), given back with the last mapping; `munmap`, `mprotect`,
   `mremap` and exit handle them.
+- A futex in a `MAP_SHARED` page reaches every process that maps the page:
+  a futex without `FUTEX_PRIVATE_FLAG` on such a page is known by the
+  physical page and offset, not by the caller's address. Futexes on private
+  memory stay per process.
+- A `MAP_SHARED` file mapping is shared with `fork`'s child the same way:
+  both see each other's writes at once. It is still written back to the
+  file at `msync`, `munmap` and exit; a process that maps the file on its
+  own still gets a copy (there is no page cache).
 - Dynamically linked programs: the kernel loads a PIE's interpreter, and
   carries musl's `libc.so` for `/lib/ld-musl-x86_64.so.1`. `/bin/sh` is
   BusyBox's `ash`, so `system` and `popen` work; `waitid`, `times`.
@@ -267,6 +275,17 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Console and boot
 
+- ACPI (`src/acpi.bastio`): `halt` powers a PC off through S5 instead of
+  only halting it, `reboot` (new, and BusyBox's `reboot -f` and
+  `poweroff -f` through Linux's reboot(2)) restarts it through the FADT's
+  reset register, the keyboard controller or 0xCF9, and the power button
+  powers off. The kernel parses the FADT and the DSDT's `\_S5` itself, in
+  Bastio, through bastiolang's new `boot_acpi`. Checked on QEMU's i440fx
+  and q35 machines without the isa-debug-exit device.
+- The clock is the HPET where the ACPI HPET table puts it, else the ACPI PM
+  timer (`-machine hpet=off` used to leave the clock at 0), and the
+  processors' local APIC timers are calibrated against the same instead of
+  the PIT, which newer PCs may gate off.
 - The console obeys `tcsetattr`: a program can turn off canonical mode
   and echo and read each key as it is typed, with `VMIN` and `VTIME`, and
   turn off `ISIG`, `ICRNL` and output processing. Settings used to be

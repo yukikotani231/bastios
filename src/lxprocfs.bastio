@@ -7,8 +7,11 @@
 //   /proc/uptime            seconds since boot
 //   /proc/cpuinfo           one block per running processor
 //   /proc/filesystems       the file system types mount names
-//   /proc/sys/kernel/tainted, pid_max, printk
+//   /proc/sys/kernel/tainted, pid_max, printk, and the System V IPC
+//   limits shmmax, shmall, shmmni, msgmax, msgmnb, msgmni, sem
 //                           read-only sysctls with their fixed values
+//   /proc/sysvipc/msg, sem, shm
+//                           the System V IPC objects (src/lxipc.bastio)
 //   /proc/PID/              one directory per process (zombies included)
 //   /proc/PID/stat          the one-line status ps reads (52 fields)
 //   /proc/PID/status        the same as "Name:\t..." lines
@@ -29,8 +32,8 @@
 // Not here: argv in cmdline, readlink of /proc/self itself (it reads as
 // the directory), /proc/PID/fd, maps and environ, writable sysctls, and
 // /proc/sys as a directory (its files open and stat, but are not listed).
-// A sysctl for a feature BastiOS lacks (SysV IPC, core dumps, splice) is
-// left out, so a program that checks for it finds the feature missing.
+// A sysctl for a feature BastiOS lacks (core dumps, splice) is left out,
+// so a program that checks for it finds the feature missing.
 
 import "linux.bastio";
 
@@ -49,6 +52,8 @@ const PSYS: u64 = 16 * NPROC;         // PROC_DEV + PSYS + SY_*: a /proc/sys fil
 const SY_TAINTED: u64 = 1;
 const SY_PID_MAX: u64 = 2;
 const SY_PRINTK: u64 = 3;
+const SY_IPC: u64 = 4;                // 4 .. 13: ipc_proc_text (src/lxipc.bastio)
+const SY_IPC_END: u64 = 14;
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
 const S_IFREG_RO: u64 = 0x8124;       // a regular file, r--r--r--
@@ -190,6 +195,15 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   }
   if xfer_is(x, 5, n, "sys/kernel/printk") {
     return PROC_DEV + PSYS + SY_PRINTK;
+  }
+  let mut i = 0;
+  while i < SY_IPC_END - SY_IPC
+    invariant i <= SY_IPC_END - SY_IPC
+  {
+    if xfer_is(x, 5, n, ipc_proc_name(i)) {
+      return PROC_DEV + PSYS + SY_IPC + i;
+    }
+    i = i + 1;
   }
   let p = proc_pid(procs, x, 5, e);
   if p >= NPROC {
@@ -339,6 +353,22 @@ fn put_n(o: &mut Bytes, at: u64, v: u64) -> u64
   return a;
 }
 
+/// A status line's four ids (real, effective, saved, file system) from
+/// row words w and s, each after a tab.
+fn put_ids(o: &mut Bytes, at: u64, procs: &Buf, p: u64, w: u64, s: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT && len(procs) == PTAB_LEN && p < NPROC && w < STRIDE && s < STRIDE
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = put_c(&mut o, at, 9);
+  a = put_n(&mut o, a, id_get(procs, p, w, false));
+  a = put_c(&mut o, a, 9);
+  a = put_n(&mut o, a, id_get(procs, p, w, true));
+  a = put_c(&mut o, a, 9);
+  a = put_n(&mut o, a, id_get(procs, p, s, false));
+  a = put_c(&mut o, a, 9);
+  return put_n(&mut o, a, id_get(procs, p, s, true));
+}
+
 /// Appends v as two digits (v below 100).
 fn put_2(o: &mut Bytes, at: u64, v: u64) -> u64
   requires blen(o) == PROC_OUT && at <= PROC_OUT
@@ -429,6 +459,9 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     }
     if what == SY_PRINTK {
       return put_s(&mut o, 0, "7\t4\t1\t7\n");
+    }
+    if what >= SY_IPC && what < SY_IPC_END {
+      return ipc_proc_text(&mut k, what - SY_IPC, &mut o);
     }
     return 0;
   }
@@ -544,7 +577,11 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, p);
     a = put_s(&mut o, a, "\nPPid:\t");
     a = put_n(&mut o, a, parent);
-    return put_s(&mut o, a, "\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\nThreads:\t1\n");
+    a = put_s(&mut o, a, "\nUid:");
+    a = put_ids(&mut o, a, k.procs, p, F_UID, F_SUID);
+    a = put_s(&mut o, a, "\nGid:");
+    a = put_ids(&mut o, a, k.procs, p, F_GID, F_SGID);
+    return put_s(&mut o, a, "\nThreads:\t1\n");
   }
   if what == PF_CMDLINE {
     let a = put_prog(&mut k, p, &mut o, 0, true);

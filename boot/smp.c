@@ -10,11 +10,18 @@
  * (bst_platform_smp_start / bst_platform_smp_join below).
  *
  * Firmware tables are untrusted input: every read is checked against the
- * table's length and against the identity-mapped first 1 GiB.
+ * table's length and against what boot.S maps (the identity-mapped first
+ * 1 GiB, and the device window at 2-4 GiB, where firmware often puts them).
  *
- * Why this is C and not Bastio yet: reading firmware tables and the local
- * APIC needs memory-mapped access, which Bastio does not have until the
- * `Mmio` capability lands (bastiolang ROADMAP v3).
+ * It also finds the ACPI tables for the Bastio kernel, which reads them a
+ * byte at a time through the `boot_acpi` builtin (bst_platform_acpi) and
+ * parses them itself, and calibrates the local APIC timer the APs use
+ * against the HPET, else the ACPI PM timer, else the PIT.
+ *
+ * Why this is C and not Bastio yet: it runs before the Bastio kernel does,
+ * since each AP programs its timer with the calibrated count as it starts.
+ * The kernel's own use of ACPI (power off, reset, the power button, its
+ * clock) is Bastio: src/acpi.bastio.
  */
 #include <stdint.h>
 #include "core.h"                   /* MAX_CPUS (cpu_count promises at most 4096), the block layout */
@@ -104,15 +111,24 @@ static uint64_t find_rsdp(void) {
     return a;
 }
 
+/* Is [a, a + n) mapped by boot.S: the first 1 GiB, or the device window
+ * from 2 to 4 GiB (uncached, which only makes the reads slower)? */
+static int mapped(uint64_t a, uint64_t n) {
+    if (a < IDENT_LIMIT) return n <= IDENT_LIMIT - a;
+    return a >= 2 * IDENT_LIMIT && a < 4 * IDENT_LIMIT && n <= 4 * IDENT_LIMIT - a;
+}
+
 /* A system description table at `a` with a valid header and checksum, or 0. */
 static uint64_t sdt_len(uint64_t a) {
-    if (a == 0 || a >= IDENT_LIMIT - 36) return 0;
+    if (a == 0 || !mapped(a, 36)) return 0;
     uint64_t n = rd32(a + 4);
-    if (n < 36 || n > IDENT_LIMIT - a || !sum_ok(a, n)) return 0;
+    if (n < 36 || !mapped(a, n) || !sum_ok(a, n)) return 0;
     return n;
 }
 
-static uint64_t find_madt(uint64_t *len) {
+/* The table with signature `sig` (its four letters, little-endian) listed
+ * in the XSDT or RSDT, or 0; its length in *len. */
+static uint64_t find_table(uint32_t sig, uint64_t *len) {
     uint64_t rsdp = find_rsdp();
     if (!rsdp) return 0;
     uint64_t root = rd32(rsdp + 16), entry = 4;
@@ -124,12 +140,58 @@ static uint64_t find_madt(uint64_t *len) {
     for (uint64_t i = 36; n && i + entry <= n; i += entry) {
         uint64_t t = entry == 8 ? rd64(root + i) : rd32(root + i);
         uint64_t tn = sdt_len(t);
-        if (tn >= 44 && sig_is(t, "APIC", 4)) {
+        if (tn && rd32(t) == sig) {
             *len = tn;
             return t;
         }
     }
     return 0;
+}
+
+#define SIG(a, b, c, d) ((uint32_t)(a) | (uint32_t)(b) << 8 | (uint32_t)(c) << 16 | (uint32_t)(d) << 24)
+
+static uint64_t find_madt(uint64_t *len) {
+    uint64_t t = find_table(SIG('A', 'P', 'I', 'C'), len);
+    return *len >= 44 ? t : 0;
+}
+
+/* The DSDT, which the FADT points at (X_DSDT if it has one), or 0. */
+static uint64_t find_dsdt(uint64_t *len) {
+    uint64_t fn = 0, f = find_table(SIG('F', 'A', 'C', 'P'), &fn);
+    if (!f || fn < 44) return 0;
+    uint64_t d = rd32(f + 40);
+    if (fn >= 148 && rd64(f + 140) != 0) d = rd64(f + 140);
+    uint64_t dn = sdt_len(d);
+    if (!dn || rd32(d) != SIG('D', 'S', 'D', 'T')) return 0;
+    *len = dn;
+    return d;
+}
+
+/* The tables the kernel asked for, so a byte costs no search: the kernel
+ * reads its tables only at boot, and only a few of them. */
+static struct { uint32_t sig; uint64_t at, len; } acpi_seen[8];
+static uint64_t acpi_nseen;
+
+/* The boot_acpi builtin: byte `off` of the table with signature `sig`, or
+ * 256 past its end or without one (the promise the prover relies on). */
+uint64_t bst_platform_acpi(uint64_t sig, uint64_t off) {
+    if (sig >> 32) return 256;
+    uint64_t i = 0;
+    while (i < acpi_nseen && acpi_seen[i].sig != sig) i++;
+    if (i == acpi_nseen) {
+        uint64_t len = 0, at;
+        if (sig == SIG('D', 'S', 'D', 'T')) at = find_dsdt(&len);
+        else at = find_table((uint32_t)sig, &len);
+        if (!at) len = 0;
+        if (i == sizeof acpi_seen / sizeof acpi_seen[0]) {
+            return off < len ? rd8(at + off) : 256;    /* not kept */
+        }
+        acpi_seen[i].sig = (uint32_t)sig;
+        acpi_seen[i].at = at;
+        acpi_seen[i].len = len;
+        acpi_nseen++;
+    }
+    return off < acpi_seen[i].len ? rd8(acpi_seen[i].at + off) : 256;
 }
 
 /* The local APIC lies in the device window boot.S maps uncached (2-4 GiB). */
@@ -215,12 +277,57 @@ void bst_ap_main(void) {
     }
 }
 
-/* Count the local APIC timer against 10 ms of PIT channel 2 (the speaker
- * channel, which the kernel never uses), on the bootstrap processor with its
- * timer masked. */
+static inline uint32_t inl(uint16_t port) { uint32_t v; __asm__ volatile ("inl %1, %0" : "=a"(v) : "Nd"(port)); return v; }
+
+/* The local APIC timer's count over 10 ms of the HPET, if the ACPI tables
+ * list one in the device window with a sane period (at most 100 ns a tick,
+ * as the specification requires); 0 otherwise. */
+static uint32_t lapic_vs_hpet(void) {
+    uint64_t len = 0, t = find_table(SIG('H', 'P', 'E', 'T'), &len);
+    if (!t || len < 52 || rd8(t + 40) != 0) return 0;          /* memory space */
+    uint64_t base = rd64(t + 44);
+    if (base % 1024 || base < 3 * IDENT_LIMIT || base > 4 * IDENT_LIMIT - 1024) return 0;
+    volatile uint64_t *h = (volatile uint64_t *)base;
+    uint64_t period = h[0] >> 32;                               /* femtoseconds a tick */
+    if (period == 0 || period > 100000000) return 0;
+    h[0x10 / 8] |= 1;                                           /* the counter runs */
+    uint64_t want = 10000000000000ull / period, c0 = h[0xF0 / 8];
+    lapic[0x380 / 4] = 0xFFFFFFFF;
+    for (uint64_t i = 0; i < 100000000 && h[0xF0 / 8] - c0 < want; i++) {}
+    uint32_t n = 0xFFFFFFFF - lapic[0x390 / 4];
+    lapic[0x380 / 4] = 0;
+    return h[0xF0 / 8] - c0 >= want ? n : 0;
+}
+
+/* The same over 10 ms of the ACPI PM timer (3.579545 MHz, 24 or 32 bits)
+ * the FADT names, if it has one in I/O space; 0 otherwise. */
+static uint32_t lapic_vs_pmtimer(void) {
+    uint64_t len = 0, f = find_table(SIG('F', 'A', 'C', 'P'), &len);
+    if (!f || len < 116) return 0;
+    uint64_t port = rd32(f + 76);
+    if (port == 0 || port > 0xFFFC || rd8(f + 91) < 4) return 0;
+    uint32_t mask = (rd32(f + 112) & (1u << 8)) ? 0xFFFFFFFFu : 0xFFFFFFu;
+    uint32_t t0 = inl((uint16_t)port) & mask, d = 0;
+    lapic[0x380 / 4] = 0xFFFFFFFF;
+    for (uint64_t i = 0; i < 100000000 && d < 35795; i++) d = ((inl((uint16_t)port) & mask) - t0) & mask;
+    uint32_t n = 0xFFFFFFFF - lapic[0x390 / 4];
+    lapic[0x380 / 4] = 0;
+    return d >= 35795 ? n : 0;
+}
+
+/* Count the local APIC timer against 10 ms of the HPET, else of the ACPI PM
+ * timer, else of PIT channel 2 (the speaker channel, which the kernel never
+ * uses; newer PCs may gate it off), on the bootstrap processor with its
+ * timer masked. The kernel picks its clock in the same order. */
 static void calibrate_lapic_timer(void) {
     lapic[0x3E0 / 4] = 0x3;
     lapic[0x320 / 4] = 0x10000;                     /* masked, one-shot */
+    uint32_t n = lapic_vs_hpet();
+    if (!n) n = lapic_vs_pmtimer();
+    if (n) {
+        lapic_ticks_10ms = n;
+        return;
+    }
     outb(0x61, (inb(0x61) & ~0x02) & ~0x01);        /* speaker off, gate low */
     outb(0x43, 0xB0);                               /* channel 2, lo/hi, mode 0 */
     outb(0x42, 11932 & 0xFF);                       /* 1193182 Hz / 100 */
@@ -228,7 +335,7 @@ static void calibrate_lapic_timer(void) {
     lapic[0x380 / 4] = 0xFFFFFFFF;
     outb(0x61, inb(0x61) | 0x01);                   /* gate high: count */
     for (uint64_t i = 0; i < 100000000 && !(inb(0x61) & 0x20); i++) {}
-    uint32_t n = 0xFFFFFFFF - lapic[0x390 / 4];
+    n = 0xFFFFFFFF - lapic[0x390 / 4];
     outb(0x61, inb(0x61) & ~0x01);
     lapic[0x380 / 4] = 0;
     lapic_ticks_10ms = n ? n : 100000;

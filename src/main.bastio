@@ -38,6 +38,9 @@ import "lxevent.bastio";
 import "lxptimer.bastio";
 import "lxmore.bastio";
 import "lxmsg.bastio";
+import "acpi.bastio";
+import "lxcred.bastio";
+import "lxipc.bastio";
 import "lxlock.bastio";
 import "lxprocfs.bastio";
 import "lxlink.bastio";
@@ -83,6 +86,7 @@ fn fault_name(con: &mut Con, v: u64)
 
 // The vector of each processor's local timer (boot/core.h).
 const V_LTIMER: u64 = 48;
+const DEBUG_EXIT: u64 = 0xF4;         // QEMU's isa-debug-exit device, in the tests
 const DISK_POLL_GAP: u64 = 2000;      // idle loops between looks at a running disk command
 const MAX_IDLE: u64 = 1024;           // more than there are processors
 
@@ -91,11 +95,25 @@ const MAX_IDLE: u64 = 1024;           // more than there are processors
 // when it takes the lock, and must restore before it lets go.
 // `idle` counts the processors that found nothing to run and have not
 // come back for more: those a V_WAKE may be worth sending to.
-struct Sys { k: Kernel, con: Con, pic: Pic, apic: Lapic, clock: Hpet, stop: bool, idle: u64 }
-  invariant kok(k) && con_ok(con) && pic_ok(pic) && lapic_ok(apic) && hpet_ok(clock);
+// `acpi` holds the clock's PM timer (without an HPET) and the power
+// button; `reboot` says the stop is a restart.
+struct Sys { k: Kernel, con: Con, pic: Pic, apic: Lapic, clock: Hpet, acpi: Acpi, stop: bool, reboot: bool, idle: u64 }
+  invariant kok(k) && con_ok(con) && pic_ok(pic) && lapic_ok(apic) && hpet_ok(clock) && acpi_ok(acpi);
 
 spec fn sys_ok(s: &Sys) -> bool {
-  kok(s.k) && con_ok(s.con) && pic_ok(s.pic) && lapic_ok(s.apic) && hpet_ok(s.clock)
+  kok(s.k) && con_ok(s.con) && pic_ok(s.pic) && lapic_ok(s.apic) && hpet_ok(s.clock) && acpi_ok(s.acpi)
+}
+
+/// On the bootstrap processor's timer tick: a press of the power button
+/// powers off, as `halt` does.
+fn power_button(s: &mut Sys)
+  requires sys_ok(s)
+  ensures sys_ok(s)
+{
+  if acpi_button(&mut s.acpi) {
+    puts(&mut s.con, "\r\npower button: powering off\r\n");
+    s.stop = true;
+  }
 }
 
 // A process taken out to run: its id, its process id (tgid, for a thread),
@@ -121,10 +139,6 @@ fn fast_call(cpu: &mut Cpu, v: u64, pid: u64, tg: u64, others: &Atomic[bool]) ->
     }
     if n == LX_GETPID {
       cpu_set(&mut cpu, R_RAX, tg);
-      return true;
-    }
-    if n == LX_GETUID || n == LX_GETGID || n == LX_GETEUID || n == LX_GETEGID {
-      cpu_set(&mut cpu, R_RAX, 0);
       return true;
     }
     if n == LX_SCHED_YIELD && !atomic_load(others) {
@@ -257,8 +271,9 @@ fn idled(s: &mut Sys, v: u64)
   ack(&mut s.pic, &mut s.apic, v);
   if v == V_TIMER {
     s.k.ticks = tick(s.k.ticks);
-    s.k.ns = hpet_ns(&mut s.clock);
+    s.k.ns = clock_ns(&mut s.clock, &mut s.acpi);
     lx_alarms(&mut s.k);
+    power_button(&mut s);
   }
 }
 
@@ -302,16 +317,20 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   if v == V_TIMER || v == V_LTIMER {
     pset(&mut s.k.procs, p, F_TICKS, tick(pget(s.k.procs, p, F_TICKS)));
     cpu_timers_tick(&mut s.k, p);
-    s.k.ns = hpet_ns(&mut s.clock);
+    s.k.ns = clock_ns(&mut s.clock, &mut s.acpi);
     lx_alarms(&mut s.k);
+    if v == V_TIMER {
+      power_button(&mut s);
+    }
     return (p + 1) % NPROC;
   }
   if v == V_SYSCALL {
-    s.k.ns = hpet_ns(&mut s.clock);
+    s.k.ns = clock_ns(&mut s.clock, &mut s.acpi);
     s.k.fs.now = sat_add(s.k.epoch, s.k.ns) / 1000000000;   // wall-clock seconds, as stat reports them
     let what = syscall(&mut s.con, &mut s.k, mmu, p);
-    if what == POWEROFF {
+    if what == POWEROFF || what == REBOOT {
       s.stop = true;
+      s.reboot = what == REBOOT;
     }
     sock_wake(&mut s.k);                    // a frame its call took in may wake a socket waiter
     if disk_hold(&mut s.k, p, NO_RESULT) {
@@ -323,10 +342,14 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     return (p + 1) % NPROC;
   }
   if v == V_LINUX {
-    s.k.ns = hpet_ns(&mut s.clock);
+    s.k.ns = clock_ns(&mut s.clock, &mut s.acpi);
     s.k.fs.now = sat_add(s.k.epoch, s.k.ns) / 1000000000;   // wall-clock seconds, as stat reports them
     let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
     call_done(&mut s.k, p);
+    if what == POWEROFF || what == REBOOT {
+      s.stop = true;
+      s.reboot = what == REBOOT;
+    }
     sock_wake(&mut s.k);
     if disk_hold(&mut s.k, p, EIO) || what == SWITCH {
       return (p + 1) % NPROC;
@@ -620,7 +643,8 @@ fn ack(pic: &mut Pic, apic: &mut Lapic, v: u64)
 
 // The files the file system starts with, built into the kernel image.
 // elfdemo is a Linux program (the elfpie test) that execve runs as a file.
-// /etc/passwd and /etc/group name root, the only user, for Linux programs
+// /etc/passwd and /etc/group name root and a few unprivileged users (nobody,
+// bin, daemon) for Linux programs
 // (whoami, ls -l, getpwuid). /etc/hosts names localhost (getaddrinfo).
 const NINIT: u64 = 6;
 
@@ -731,7 +755,12 @@ fn tick(t: u64) -> u64 {
 fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 {
   // Every device the kernel drives, with the I/O ports it owns. The ports
   // are claimed here, once: no two drivers can own the same port, and no
-  // code can touch a port that was not claimed.
+  // code can touch a port that was not claimed. The ACPI registers first,
+  // wherever the firmware put them (src/acpi.bastio), clear of the others.
+  let mut acpi = acpi_new(&mut ports, cpu);
+  let acpi_lo = port_base(acpi.io);
+  let acpi_hi = acpi_lo + port_count(acpi.io);
+  let mut debug_exit = port_claim(&mut ports, DEBUG_EXIT, 1);
   let mut uart = Uart { io: port_claim(&mut ports, COM1, 8) };
   let mut kbd = Kbd { data: port_claim(&mut ports, KBD_DATA, 1), status: port_claim(&mut ports, KBD_STATUS, 1),
     shift: false, ctrl: false, ext: false };
@@ -739,7 +768,13 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut pit = Pit { io: port_claim(&mut ports, PIT, 4) };
   let mut rtc = Rtc { io: port_claim(&mut ports, RTC, 2) };
   // Devices with memory-mapped registers claim them from the device window.
-  let mut clock = hpet_init(mmio_claim(&mut win, HPET, HPET_LEN));
+  // The HPET where the ACPI tables say it is (src/acpi.bastio).
+  let mut hpet_at = acpi_hpet(cpu);
+  let hpet_there = hpet_at != 0;
+  if !hpet_there {
+    hpet_at = HPET;
+  }
+  let mut clock = hpet_init(mmio_claim(&mut win, hpet_at, HPET_LEN), hpet_there);
   let apic = lapic_new(mmio_claim(&mut win, LAPIC, LAPIC_LEN));
   let mut msi = 0;
   if apic.on {
@@ -749,7 +784,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // so CLOCK_REALTIME = epoch + the HPET clock.
   let wall = rtc_seconds(&mut rtc) * 1000000000;
   port_release(&mut ports, rtc.io);         // read once; the HPET keeps time from here
-  let at = hpet_ns(&mut clock);
+  let at = clock_ns(&mut clock, &mut acpi);
   let mut epoch = 0;
   if wall > at {
     epoch = wall - at;
@@ -777,6 +812,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   } else {
     puts(&mut con, " processors\r\n");
   }
+  acpi_report(&mut con, acpi, clock.period > 0);
   // The allocator takes the pool for as long as the kernel runs and gives
   // it back at power off.
   if screen_on(term.screen) {
@@ -799,7 +835,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut usb = usb_new(&mut pci, &mut m, &mut win, USB_AT, fb_lo, fb_hi, 0, 0, xdev, usb_lo, usb_hi - usb_lo, msi, V_DISK);
   let usb_disk = usb_msd(usb);
   // The disk: that stick, else NVMe, virtio, AHCI or ATA (see blk_new).
-  let dev = blk_find(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi, usb_lo, usb_hi, msi, &mut usb);
+  let dev = blk_find(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi, usb_lo, usb_hi, msi, &mut usb, acpi_lo, acpi_hi);
   let dev_lo = blk_ports_lo(dev);
   let dev_hi = blk_ports_hi(dev);
   let dk_lo = blk_mmio_lo(dev);
@@ -837,7 +873,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   // The network card, if any: nine pages after the disk's four (an e1000
   // takes six of them).
-  let mut nic = nic_new(&mut ports, &mut pci, &mut m, &mut win, 4, dev_lo, dev_hi, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi, msi);
+  let mut nic = nic_new(&mut ports, &mut pci, &mut m, &mut win, 4, dev_lo, dev_hi, acpi_lo, acpi_hi, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi, msi);
   // An e1000 has no MSI: its line goes through the 8259 (vectors 32-47,
   // acknowledged like the timer's), unless it shares the timer's, the
   // keyboard's, the cascade or COM1's.
@@ -880,7 +916,8 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     vec_push(&mut fpus, Fpu::None);
     q = q + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: 0, epoch: epoch, rng: epoch ^ at, cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), holes: alloc(HOLES_LEN), inet6: 0, locks: alloc(LK_LEN) , perr: ENOENT };
+  let shm = new_store(&mut m);
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: 0, epoch: epoch, rng: epoch ^ at, cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), holes: alloc(HOLES_LEN), inet6: 0, locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
@@ -888,7 +925,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // Every processor runs the scheduler until the kernel stops; then they
   // are all back in their park loops and the state is this one's again.
   con_flush(&mut term, &mut con);
-  let sl = lock_new(Sys { k: k, con: con, pic: pic, apic: apic, clock: clock, stop: false, idle: 0 });
+  let sl = lock_new(Sys { k: k, con: con, pic: pic, apic: apic, clock: clock, acpi: acpi, stop: false, reboot: false, idle: 0 });
   let tl = lock_new(term);
   let pumping = atomic_new(false);
   let pend = atomic_new(0);
@@ -910,6 +947,10 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     }
   }
   vec_free(sys.k.spaces);
+  match sys.k.shm {
+    Store::None => {},
+    Store::Table(t) => { free_l2(&mut sys.k.mem, t); },
+  }
   while vec_len(sys.k.fpus) > 0
     invariant mem_ok(sys.k.mem)
   {
@@ -921,7 +962,11 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   usb_off(&mut devices.usb, &mut win, &mut sys.k.mem);
   puts(&mut sys.con, "BastiOS: ");
   put_num(&mut sys.con, count_free(sys.k.mem.bm));
-  puts(&mut sys.con, " pages free at power off\r\n");
+  if sys.reboot {
+    puts(&mut sys.con, " pages free at restart\r\n");
+  } else {
+    puts(&mut sys.con, " pages free at power off\r\n");
+  }
   con_flush(&mut devices, &mut sys.con);
   con_free(sys.con);
   // (Stopped above, before the count: what is left here is no controller.)
@@ -944,11 +989,23 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.maps);
   free(sys.k.holes);
   free(sys.k.locks);
+  free(sys.k.ipc);
+  bfree(sys.k.ipcb);
   free(sys.k.evt);
   free(sys.k.sigsave);
   free(sys.k.ux);
   bfree(sys.k.uxb);
   pool = sys.k.mem.pool;
+  // Off, or a restart. QEMU's isa-debug-exit device (tests) exits at once,
+  // with status 33; elsewhere the port is unused.
+  if sys.reboot {
+    acpi_reset(&mut sys.acpi, &mut pci, &mut devices.kbd.status);
+  } else {
+    pio_out8(&mut debug_exit, 0, 0x10);
+    acpi_off(&mut sys.acpi);
+  }
+  port_release(&mut ports, debug_exit);
+  port_release(&mut ports, sys.acpi.io);
   port_release(&mut ports, devices.uart.io);
   port_release(&mut ports, devices.kbd.data);
   port_release(&mut ports, devices.kbd.status);
