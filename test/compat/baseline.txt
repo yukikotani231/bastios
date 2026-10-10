@@ -130,6 +130,10 @@ t_dir: stat file in directory
 t_dir: stat new directory
 t_dir: statvfs
 t_dir: unlink file in directory
+t_fdlock: 200 descriptors, dup2 to 200 and F_DUPFD from 100
+t_fdlock: F_GETLK reports the conflicting lock that starts first
+t_fdlock: F_SETLEASE and F_GETLEASE
+t_fdlock: a lock needs the matching access mode; bad requests are EINVAL
 t_file: /dev/null write
 t_file: /dev/urandom read
 t_file: /dev/zero read
