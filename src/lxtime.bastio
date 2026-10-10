@@ -444,7 +444,7 @@ fn tv_in(k: &mut Kernel, pid: u64, va: u64) -> Ts
 
 /// On a timer tick, with k.ns just read: sends SIGALRM to each process
 /// whose real-time timer has run out, and sets the timer going again if it
-/// has an interval.
+/// has an interval; then the same for the POSIX timers.
 fn lx_alarms(k: &mut Kernel)
   requires kok(k)
   ensures kok(k)
@@ -468,6 +468,7 @@ fn lx_alarms(k: &mut Kernel)
     }
     p = p + 1;
   }
+  ptimer_tick(&mut k);                    // and the POSIX timers (src/lxptimer.bastio)
 }
 
 /// The time left on process pid's real-time timer, in ns (0 when off).

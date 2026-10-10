@@ -242,6 +242,7 @@ t_signal: sigpending
 t_signal: sigprocmask blocks
 t_signal: sigsuspend
 t_signal: sigwait
+t_signal: timer_create
 t_signal: unblock delivers
 t_thread: 4 threads, mutex
 t_thread: condition variable

@@ -299,6 +299,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_time_call(n) {
     return lx_time_call(&mut k, pid, n, was, a, b, c);
   }
+  if is_ptimer_call(n) {
+    return lx_ptimer_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
+  }
   if is_event_call(n) {
     return lx_event_call(&mut k, pid, n, was, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
   }

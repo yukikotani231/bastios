@@ -19,6 +19,9 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
   grows a mapping by moving its pages. A user fault now kills the process
   with `SIGSEGV` (or `SIGFPE`, `SIGILL`, `SIGTRAP`), as Linux does, so
   `wait4` and a shell report the signal.
+- POSIX timers: `timer_create` (SIGEV_SIGNAL and SIGEV_NONE), `timer_settime`
+  (relative or absolute), `timer_gettime`, `timer_getoverrun` and
+  `timer_delete`, four per process.
 - Files on the disk can grow to 1 GiB (as far as the disk allows) and in
   memory to 64 MiB; they were capped at 1 MiB.
 - Paths can be up to 255 bytes; they were capped at 28.
