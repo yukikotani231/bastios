@@ -173,6 +173,12 @@ steps = [
     # execve of a file: elfdemo is the elfpie program installed at boot.
     ("/elfdemo a b", b"/elfdemo: ok", b"\n# "),
     ("./elfdemo; echo st=$?", [b"./elfdemo: ok", b"st=0"], b"\n# "),
+    # BusyBox applets, run as /bin/NAME: getdents64, fstat, stat.
+    ("ls", [b"elfdemo", b"motd", b"bin"], b"\n# "),
+    ("ls /bin", [b"mhello", b"cat"], b"\n# "),
+    ("cat /motd", b"Welcome to BastiOS", b"\n# "),
+    ("echo one > t; echo two >> t; cat t | wc -l", b"\r\n2\r\n", b"\n# "),
+    ("cp t t2; head -n 1 t2; rm t t2; ls", [b"\r\none\r\n", b"elfdemo"], b"\n# "),
     ("exit 5", b"[exit 5]"),
     ("rm lxout", b""),
     ("sh", b"BastiOS 0.2 -- type"),

@@ -183,16 +183,7 @@ fn lx_prog_at(k: &mut Kernel, pid: u64, va: u64) -> u64
   if n == NO_RESULT || n <= 4 || !xfer_bin(k.fs.xfer) {
     return NPROGS;
   }
-  let mut i = 0;
-  while i < NPROGS
-    invariant i <= NPROGS && n <= FNAME_MAX && kok(k)
-  {
-    if xfer_is(k.fs.xfer, 4, n, prog_name(i)) {
-      return i;
-    }
-    i = i + 1;
-  }
-  return NPROGS;
+  return bin_prog(k.fs.xfer, n);
 }
 
 /// Whether the transfer buffer starts with "bin/".
@@ -335,9 +326,12 @@ fn lx_wait4(k: &mut Kernel, pid: u64, want: u64, status: u64, options: u64) -> u
 
 // ---------------------------------------------------------------- stat
 
-/// stat(path, buf): "/bin" is a directory, /bin/NAME a built-in program,
-/// /NAME a file. Owner root, one link, no times. Returns 0 or -errno; with
-/// `buf` 0 it only checks that the path exists (access).
+/// What stat says about a path or descriptor.
+struct Meta { ok: bool, mode: u64, size: u64, ino: u64 }
+
+/// stat(path, buf): "/" and "/bin" are directories, /bin/NAME a built-in
+/// program, /NAME a file. Owner root, one link, no times. Returns 0 or
+/// -errno; with `buf` 0 it only checks that the path exists (access).
 fn lx_stat(k: &mut Kernel, pid: u64, path: u64, buf: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -346,50 +340,153 @@ fn lx_stat(k: &mut Kernel, pid: u64, path: u64, buf: u64) -> u64
   if n == NO_RESULT {
     return ENOENT;
   }
-  let mut mode = S_IFREG;
-  let mut size = 0;
-  let mut ino = 1;
-  if n == 3 && bget(k.fs.xfer, 0) == 98 && bget(k.fs.xfer, 1) == 105 && bget(k.fs.xfer, 2) == 110 {
-    mode = S_IFDIR;
-  } else if n > 4 && xfer_bin(k.fs.xfer) {
-    let mut i = 0;
-    let mut prog = NPROGS;
-    while i < NPROGS
-      invariant i <= NPROGS && n <= FNAME_MAX && kok(k)
-    {
-      if xfer_is(k.fs.xfer, 4, n, prog_name(i)) {
-        prog = i;
-      }
-      i = i + 1;
-    }
-    if prog >= NPROGS {
-      return ENOENT;
-    }
-    mode = S_IFREG_X;
-    size = slen(prog_image(prog));
-    ino = 2 + prog;
-  } else {
-    size = vfs_stat(&mut k.fs, n);
-    if size == NO_FILE {
-      return ENOENT;
-    }
-    ino = 100;
+  let m = path_meta(&mut k, n);
+  if !m.ok {
+    return ENOENT;
   }
   if buf == 0 {
     return 0;
   }
+  return put_stat(&mut k, pid, buf, m);
+}
+
+/// The metadata of the path in the first n bytes of the transfer buffer.
+fn path_meta(k: &mut Kernel, n: u64) -> Meta
+  requires kok(k) && n <= FNAME_MAX
+  ensures kok(k)
+{
+  let none = Meta { ok: false, mode: 0, size: 0, ino: 0 };
+  if n == 0 || is_bin(k.fs.xfer, n) {
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1 + n };
+  }
+  if n > 4 && xfer_bin(k.fs.xfer) {
+    let prog = bin_prog(k.fs.xfer, n);
+    if prog >= NPROGS {
+      return none;
+    }
+    return Meta { ok: true, mode: S_IFREG_X, size: slen(prog_image(prog)), ino: 10 + prog };
+  }
+  let size = vfs_stat(&mut k.fs, n);
+  if size == NO_FILE {
+    return none;
+  }
+  return Meta { ok: true, mode: S_IFREG, size: size, ino: 100 };
+}
+
+/// fstat(fd, buf): the console is a terminal, a pipe a FIFO; a file's size
+/// comes from its row.
+fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let d = fd_look(k, pid, fd);
+  let mut m = Meta { ok: true, mode: S_IFCHR, size: 0, ino: 3 };
+  if d.kind == K_BAD {
+    return EBADF;
+  } else if d.kind == K_PIPE_R || d.kind == K_PIPE_W {
+    m = Meta { ok: true, mode: S_IFIFO, size: 0, ino: 4 };
+  } else if d.kind == K_DIR {
+    m = Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1 };
+  } else if d.kind == K_FILE {
+    m = Meta { ok: true, mode: S_IFREG, size: row_size(&mut k.fs, d.x), ino: 100 };
+  }
+  return put_stat(&mut k, pid, buf, m);
+}
+
+/// The size of the file open on native row `row` (0 if it has none).
+fn row_size(v: &mut Vfs, row: u64) -> u64
+  requires vfs_ok(v) && row < FD_ROWS
+  ensures vfs_ok(v)
+{
+  let fs = fget(v.ftab, row, FD_FS);
+  let node = fget(v.ftab, row, FD_NODE);
+  let mut f = NO_FILE;
+  if fs == FS_RAM && node < NFILES {
+    f = node;
+  } else if fs == FS_DISK && node < DSLOTS {
+    f = NFILES + node;
+  }
+  if f == NO_FILE {
+    return 0;
+  }
+  let size = vfs_size(&mut v, f);
+  if size == NO_FILE {
+    return 0;
+  }
+  return size;
+}
+
+/// Writes a struct stat for m to user address buf. Returns 0 or -EFAULT.
+fn put_stat(k: &mut Kernel, pid: u64, buf: u64, m: Meta) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
   lx_fill(&mut k, 0, STAT_SIZE);
-  xfer_u64(&mut k.fs.xfer, 8, ino);           // st_ino
+  xfer_u64(&mut k.fs.xfer, 8, m.ino);         // st_ino
   xfer_u64(&mut k.fs.xfer, 16, 1);            // st_nlink
-  xfer_u64(&mut k.fs.xfer, 24, mode);         // st_mode (and st_uid 0)
-  xfer_u64(&mut k.fs.xfer, 48, size);         // st_size
+  xfer_u64(&mut k.fs.xfer, 24, m.mode);       // st_mode (and st_uid 0)
+  xfer_u64(&mut k.fs.xfer, 48, m.size);       // st_size
   xfer_u64(&mut k.fs.xfer, 56, 4096);         // st_blksize
-  let mut blocks = size / 512;
-  if size % 512 != 0 {
+  let mut blocks = m.size / 512;
+  if m.size % 512 != 0 {
     blocks = blocks + 1;
   }
   xfer_u64(&mut k.fs.xfer, 64, blocks);       // st_blocks
   return lx_put_out(&mut k, pid, buf, STAT_SIZE);
+}
+
+/// Whether the first n bytes of x are "bin".
+fn is_bin(x: &Bytes, n: u64) -> bool
+  requires blen(x) == XFER
+{
+  return n == 3 && bget(x, 0) == 98 && bget(x, 1) == 105 && bget(x, 2) == 110;
+}
+
+/// The built-in program "bin/NAME" in the first n bytes of x names, or
+/// NPROGS. BusyBox's applet names are BusyBox (it picks the applet from
+/// argv[0]).
+fn bin_prog(x: &Bytes, n: u64) -> u64
+  requires blen(x) == XFER && 4 <= n && n <= FNAME_MAX
+{
+  let mut i = 0;
+  while i < NPROGS
+    invariant i <= NPROGS
+  {
+    if xfer_is(x, 4, n, prog_name(i)) {
+      return i;
+    }
+    i = i + 1;
+  }
+  let mut j = 0;
+  while j < NAPPLETS
+    invariant j <= NAPPLETS
+  {
+    if xfer_is(x, 4, n, applet_name(j)) {
+      return ASH_PROG;
+    }
+    j = j + 1;
+  }
+  return NPROGS;
+}
+
+/// The BusyBox applets built in (user/busybox.config), seen as /bin/NAME.
+fn applet_name(j: u64) -> Str {
+  if j == 0 {
+    return "ls";
+  }
+  if j == 1 {
+    return "cat";
+  }
+  if j == 2 {
+    return "wc";
+  }
+  if j == 3 {
+    return "head";
+  }
+  if j == 4 {
+    return "rm";
+  }
+  return "cp";
 }
 
 /// Stores v little-endian in bytes at..at+8 of x.
