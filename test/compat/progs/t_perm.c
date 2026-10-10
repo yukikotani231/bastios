@@ -2,11 +2,12 @@
  * their maker and take the umask, and an unprivileged process is held to
  * the mode bits: open, creating and removing names, search through
  * directories, sticky directories, chmod and utime for the owner, access,
- * truncate and exec. */
+ * truncate and exec; supplementary groups, and set-user-ID programs. */
 #include "compat.h"
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <grp.h>
 #include <utime.h>
 
 #define NOBODY 65534
@@ -125,6 +126,7 @@ static int owner_only(void) {
     close(fd);
     ok = ok && chmod("pd/m", 0600) == 0 && mode_is("pd/m", 0600);
     ok = ok && chown("pd/m", -1, USERS) == 0 && chown("pd/m", -1, 0) == -1 && errno == EPERM;
+    ok = ok && chmod("p_sgd", 03777) == 0 && mode_is("p_sgd", 01777);    /* not in its group: no S_ISGID */
     unlink("pd/m");
     return ok;
 }
@@ -165,7 +167,83 @@ static int disk_keeps_owners(void) {
     return ok;
 }
 
-int main(void) {
+static int groups_kept(void) {
+    gid_t set[3] = {200, 300, 400}, got[3];
+    if (setgroups(3, set) || getgroups(0, 0) != 3 || getgroups(3, got) != 3) return 0;
+    if (got[0] != 200 || got[1] != 300 || got[2] != 400) return 0;
+    if (getgroups(2, got) != -1 || errno != EINVAL) return 0;
+    char buf[1024];
+    int fd = open("/proc/self/status", O_RDONLY);
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    if (!strstr(buf, "Groups:\t200 300 400")) return 0;
+    if (setuid(NOBODY)) return 0;
+    return setgroups(0, 0) == -1 && errno == EPERM;
+}
+
+static int group_reads(void) {
+    gid_t g = 200;
+    if (setgroups(1, &g) || !become_nobody()) return 0;
+    int fd = open("p_group", O_RDONLY);                              /* 0640, group 200 */
+    close(fd);
+    int ok = fd >= 0 && access("p_group", R_OK) == 0;
+    ok = ok && make("pd/g", 0644) && chown("pd/g", -1, 200) == 0 && owned("pd/g", NOBODY, 200);
+    unlink("pd/g");
+    return ok;
+}
+
+static int no_group(void) {
+    if (setgroups(0, 0) || !become_nobody()) return 0;
+    return open("p_group", O_RDONLY) == -1 && errno == EACCES;
+}
+
+static const char *self;
+
+/* Copies this program to p_suid, owned by 7:300, with `mode`. */
+static int copy_self(int mode) {
+    int in = open(self, O_RDONLY), out = open("p_suid", O_CREAT | O_TRUNC | O_WRONLY, 0755);
+    if (in < 0 || out < 0) return 0;
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(in, buf, sizeof buf)) > 0)
+        if (write(out, buf, n) != n) return 0;
+    close(in); close(out);
+    return chown("p_suid", 7, 300) == 0 && chmod("p_suid", mode) == 0;
+}
+
+/* Runs p_suid as nobody; it checks that it runs with effective user id
+ * euid and effective group id egid. */
+static int run_as_nobody(const char *euid, const char *egid) {
+    pid_t c = fork();
+    if (c == 0) {
+        if (!become_nobody()) _exit(2);
+        execl("p_suid", "p_suid", "ids", euid, egid, (char *)0);
+        _exit(3);
+    }
+    int st; return waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
+static int setuid_exec(void) {
+    int ok = copy_self(04755) && run_as_nobody("7", "100");
+    ok = ok && chmod("p_suid", 02755) == 0 && run_as_nobody("65534", "300");
+    ok = ok && chmod("p_suid", 0755) == 0 && run_as_nobody("65534", "100");
+    unlink("p_suid");
+    return ok;
+}
+
+int main(int argc, char **argv) {
+    self = argv[0];
+    if (argc == 4 && strcmp(argv[1], "ids") == 0) {
+        /* Started by setuid_exec: the real ids stay nobody's, the
+         * effective and saved ones are the file's where its bits say. */
+        uid_t r, e, s;
+        gid_t gr, ge, gs;
+        getresuid(&r, &e, &s);
+        getresgid(&gr, &ge, &gs);
+        return r == NOBODY && e == (uid_t)atoi(argv[2]) && s == e && gr == USERS && ge == (gid_t)atoi(argv[3]) && gs == ge ? 0 : 1;
+    }
     setup();
     umask(022);
     /* The fixtures, made by root: pd (0777) for others to use; p_rootdir
@@ -176,6 +254,8 @@ int main(void) {
     mkdir("p_closed", 0700); make("p_closed/f", 0644);
     mkdir("p_sticky", 0777); chmod("p_sticky", 01777); make("p_sticky/roots", 0666);
     make("p_secret", 0600); make("p_public", 0644); make("p_shared", 0666);
+    make("p_group", 0640); chown("p_group", 0, 200);
+    mkdir("p_sgd", 0755); chown("p_sgd", NOBODY, 0);
 
     EXPECT("umask applies to new files and directories", umask_applies());
     EXPECT("chown, fchown, lchown and fchownat keep the owner", chown_keeps());
@@ -189,10 +269,14 @@ int main(void) {
     EXPECT("exec needs an execute bit", exec_needs_x());
     EXPECT("a set-group-ID directory passes on its group", setgid_dir());
     EXPECT("the disk keeps owners", disk_keeps_owners());
+    EXPECT("setgroups and getgroups keep supplementary groups", in_child(groups_kept));
+    EXPECT("a supplementary group gives the group's bits", in_child(group_reads));
+    EXPECT("without the group, the group's bits do not apply", in_child(no_group));
+    EXPECT("exec honours set-user-ID and set-group-ID bits", setuid_exec());
 
     unlink("p_rootdir/f"); rmdir("p_rootdir");
     unlink("p_closed/f"); rmdir("p_closed");
     unlink("p_sticky/roots"); rmdir("p_sticky");
-    unlink("p_secret"); unlink("p_public"); unlink("p_shared"); rmdir("pd");
+    unlink("p_secret"); unlink("p_public"); unlink("p_shared"); unlink("p_group"); rmdir("p_sgd"); rmdir("pd");
     return done();
 }

@@ -622,6 +622,16 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     a = put_ids(&mut o, a, k.procs, p, F_UID, F_SUID);
     a = put_s(&mut o, a, "\nGid:");
     a = put_ids(&mut o, a, k.procs, p, F_GID, F_SGID);
+    a = put_s(&mut o, a, "\nGroups:\t");
+    let ng = ngroups(k.procs, p);
+    let mut i = 0;
+    while i < ng
+      invariant i <= ng && ng <= NGROUPS_KEPT && blen(o) == PROC_OUT && a <= PROC_OUT && kok(k)
+    {
+      a = put_n(&mut o, a, group_at(k.procs, p, i));
+      a = put_c(&mut o, a, 32);
+      i = i + 1;
+    }
     return put_s(&mut o, a, "\nThreads:\t1\n");
   }
   if what == PF_CMDLINE {

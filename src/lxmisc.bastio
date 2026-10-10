@@ -309,7 +309,7 @@ fn set_meta(k: &mut Kernel, pid: u64, f: u64, mode: u64, mtime: u64, now: bool) 
     if !now {
       return EPERM;
     }
-    if !mode_allows(m.mode, m.own, uid, fs_id(k.procs, pid, true), MAY_W) {
+    if !may_meta(k.procs, pid, m.mode, m.own, MAY_W) {
       return EACCES;
     }
   }
@@ -633,16 +633,7 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
       pset(&mut k.procs, pid, F_PERSONA, a % 4294967296);
     }
   } else if n == LX_GETGROUPS {
-    // One supplementary group: root's, 0.
-    if a >= INT_SIGN && a != 0 {
-      r = EINVAL;
-    } else if a != 0 {
-      xfer_u64(&mut k.fs.xfer, 0, 0);
-      r = lx_put_out(&mut k, pid, b, 4);
-    }
-    if r == 0 {
-      r = 1;
-    }
+    r = lx_getgroups(&mut k, pid, a, b);
   } else if is_meta_call(n) {
     r = lx_meta_call(&mut k, pid, n, a, b, c, r10);
   } else if n == LX_UMASK {
