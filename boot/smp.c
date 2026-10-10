@@ -39,12 +39,16 @@ uint8_t bst_cores[MAX_CPUS][CORE_BLOCK] __attribute__((aligned(CORE_BLOCK)));
 volatile uint64_t bst_ap_stack;     /* read by ap.S; one AP starts at a time */
 static uint64_t cpus_online = 1;    /* the BSP; updated atomically */
 static struct __attribute__((packed)) { uint16_t limit; uint64_t base; } ap_idtr;
-static volatile uint32_t *lapic;
+static volatile uint32_t *lapic;    /* its registers in xAPIC mode */
+static int x2apic;                  /* every local APIC runs in x2APIC mode: registers are MSRs */
 static uint32_t lapic_ticks_10ms;   /* local APIC timer count for 10 ms, divide by 16 */
 static uint32_t timer_from;         /* what it was counted against: 1 HPET, 2 PM timer, 3 PIT, 4 none (a guess) */
 static uint32_t madt_cpus, madt_x2; /* enabled processor entries in the MADT: local APIC, x2APIC */
+static uint32_t madt_high;          /* of those, ones with an id of 255 or more (x2APIC mode only) */
+static uint32_t apic_fw, apic_now;  /* how the firmware left the BSP's APIC, and how it runs: APIC_* */
 static uint32_t smp_stop;           /* why not every listed processor runs: SMP_* */
 enum { SMP_ALL, SMP_NO_APIC, SMP_NO_MADT, SMP_LAPIC_AWAY, SMP_AP_LATE, SMP_TOO_MANY, SMP_X2APIC };
+enum { APIC_OFF, APIC_XAPIC, APIC_X2APIC, APIC_X2APIC_LOCKED };
 static uint64_t syscall_msrs[3];    /* STAR, LSTAR, FMASK as bst_platform_init set them */
 
 static inline uint8_t *this_core(void) {
@@ -67,6 +71,46 @@ static inline uint64_t rdmsr(uint32_t msr) {
     uint32_t lo, hi;
     __asm__ volatile ("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
     return ((uint64_t)hi << 32) | lo;
+}
+
+/* Local APIC registers by their xAPIC offset. In x2APIC mode register
+ * `reg` is MSR 0x800 + reg / 16 (Intel SDM vol. 3, 11.12.1). */
+static uint32_t lr(uint32_t reg) { return x2apic ? (uint32_t)rdmsr(0x800 + reg / 16) : lapic[reg / 4]; }
+static void lw(uint32_t reg, uint32_t v) {
+    if (x2apic) wrmsr(0x800 + reg / 16, v);
+    else lapic[reg / 4] = v;
+}
+
+static void cpuid(uint32_t leaf, uint32_t sub, uint32_t r[4]) {
+    __asm__ volatile ("cpuid" : "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3]) : "a"(leaf), "c"(sub));
+}
+
+/* Has the firmware locked the APIC in x2APIC mode, so that it cannot go
+ * back to xAPIC? (IA32_XAPIC_DISABLE_STATUS, enumerated by
+ * IA32_ARCH_CAPABILITIES bit 21; newer Intel processors.) */
+static int x2apic_locked(void) {
+    uint32_t r[4];
+    cpuid(0, 0, r);
+    if (r[0] < 7) return 0;
+    cpuid(7, 0, r);
+    if (!(r[3] & (1u << 29))) return 0;                 /* no IA32_ARCH_CAPABILITIES */
+    if (!(rdmsr(0x10A) & (1ull << 21))) return 0;
+    return rdmsr(0xBD) & 1;
+}
+
+/* Puts this processor's local APIC in the mode every processor uses
+ * (x2apic). The firmware may have left it in either. x2APIC to xAPIC
+ * only goes through disabled, which resets the APIC (SDM 11.12.5). */
+static void apic_mode(void) {
+    uint64_t m = rdmsr(0x1B);
+    if (x2apic) {
+        if (!(m & (1u << 11))) wrmsr(0x1B, m |= 1u << 11);
+        if (!(m & (1u << 10))) wrmsr(0x1B, m | (1u << 10));
+    } else if (m & (1u << 10)) {
+        m &= ~(uint64_t)(3u << 10);
+        wrmsr(0x1B, m);
+        wrmsr(0x1B, m | (1u << 11));
+    }
 }
 
 /* About a microsecond per iteration: a write to the POST diagnostic port. */
@@ -242,7 +286,7 @@ static int map_lapic(uint64_t base) {
 /* Called from trap_common for every vector: local APIC interrupts must be
  * acknowledged at the local APIC (the 8259's are acknowledged by the kernel). */
 void bst_lapic_ack(uint64_t vector) {
-    if (vector == LAPIC_TIMER_VECTOR && lapic) lapic[0xB0 / 4] = 0;
+    if (vector == LAPIC_TIMER_VECTOR && (lapic || x2apic)) lw(0xB0, 0);
 }
 
 /* Processor i's task state segment: user-mode traps land on the trap stack
@@ -295,10 +339,11 @@ void bst_ap_main(void) {
     __asm__ volatile ("lidt %0" : : "m"(ap_idtr));
     for (int m = 0; m < 3; m++) wrmsr(0xC0000081 + m + (m == 2), syscall_msrs[m]);
     core_init((uint64_t)(this_core() - bst_cores[0]) / CORE_BLOCK);
-    lapic[0xF0 / 4] = 0x1FF;                        /* enable, spurious vector 0xFF */
-    lapic[0x3E0 / 4] = 0x3;                         /* timer: divide by 16 */
-    lapic[0x320 / 4] = 0x20000 | LAPIC_TIMER_VECTOR; /* periodic */
-    lapic[0x380 / 4] = lapic_ticks_10ms;
+    apic_mode();
+    lw(0xF0, 0x1FF);                        /* enable, spurious vector 0xFF */
+    lw(0x3E0, 0x3);                         /* timer: divide by 16 */
+    lw(0x320, 0x20000 | LAPIC_TIMER_VECTOR); /* periodic */
+    lw(0x380, lapic_ticks_10ms);
     __atomic_fetch_add(&cpus_online, 1, __ATOMIC_SEQ_CST);
     /* Park: wait for work, waking on the local timer to look. Interrupts
      * are on only inside hlt, as in cpu_idle. */
@@ -330,10 +375,10 @@ static uint32_t lapic_vs_hpet(void) {
     if (period == 0 || period > 100000000) return 0;
     h[0x10 / 8] |= 1;                                           /* the counter runs */
     uint64_t want = 10000000000000ull / period, c0 = h[0xF0 / 8];
-    lapic[0x380 / 4] = 0xFFFFFFFF;
+    lw(0x380, 0xFFFFFFFF);
     for (uint64_t i = 0; i < 100000000 && h[0xF0 / 8] - c0 < want; i++) {}
-    uint32_t n = 0xFFFFFFFF - lapic[0x390 / 4];
-    lapic[0x380 / 4] = 0;
+    uint32_t n = 0xFFFFFFFF - lr(0x390);
+    lw(0x380, 0);
     return h[0xF0 / 8] - c0 >= want ? n : 0;
 }
 
@@ -346,10 +391,10 @@ static uint32_t lapic_vs_pmtimer(void) {
     if (port == 0 || port > 0xFFFC || rd8(f + 91) < 4) return 0;
     uint32_t mask = (rd32(f + 112) & (1u << 8)) ? 0xFFFFFFFFu : 0xFFFFFFu;
     uint32_t t0 = inl((uint16_t)port) & mask, d = 0;
-    lapic[0x380 / 4] = 0xFFFFFFFF;
+    lw(0x380, 0xFFFFFFFF);
     for (uint64_t i = 0; i < 100000000 && d < 35795; i++) d = ((inl((uint16_t)port) & mask) - t0) & mask;
-    uint32_t n = 0xFFFFFFFF - lapic[0x390 / 4];
-    lapic[0x380 / 4] = 0;
+    uint32_t n = 0xFFFFFFFF - lr(0x390);
+    lw(0x380, 0);
     return d >= 35795 ? n : 0;
 }
 
@@ -358,8 +403,8 @@ static uint32_t lapic_vs_pmtimer(void) {
  * uses; newer PCs may gate it off), on the bootstrap processor with its
  * timer masked. The kernel picks its clock in the same order. */
 static void calibrate_lapic_timer(void) {
-    lapic[0x3E0 / 4] = 0x3;
-    lapic[0x320 / 4] = 0x10000;                     /* masked, one-shot */
+    lw(0x3E0, 0x3);
+    lw(0x320, 0x10000);                     /* masked, one-shot */
     uint32_t n = lapic_vs_hpet();
     timer_from = 1;
     if (!n) {
@@ -375,21 +420,25 @@ static void calibrate_lapic_timer(void) {
     outb(0x43, 0xB0);                               /* channel 2, lo/hi, mode 0 */
     outb(0x42, 11932 & 0xFF);                       /* 1193182 Hz / 100 */
     outb(0x42, 11932 >> 8);
-    lapic[0x380 / 4] = 0xFFFFFFFF;
+    lw(0x380, 0xFFFFFFFF);
     outb(0x61, inb(0x61) | 0x01);                   /* gate high: count */
     for (uint64_t i = 0; i < 100000000 && !(inb(0x61) & 0x20); i++) {}
-    n = 0xFFFFFFFF - lapic[0x390 / 4];
+    n = 0xFFFFFFFF - lr(0x390);
     outb(0x61, inb(0x61) & ~0x01);
-    lapic[0x380 / 4] = 0;
+    lw(0x380, 0);
     if (!n) timer_from = 4;
     lapic_ticks_10ms = n ? n : 100000;
 }
 
 static void send_ipi(uint32_t apic_id, uint32_t low) {
-    while (lapic[0x300 / 4] & (1u << 12)) {}    /* delivery pending */
-    lapic[0x310 / 4] = apic_id << 24;
-    lapic[0x300 / 4] = low;
-    while (lapic[0x300 / 4] & (1u << 12)) {}
+    if (x2apic) {                                   /* one 64-bit register, no pending bit */
+        wrmsr(0x830, (uint64_t)apic_id << 32 | low);
+        return;
+    }
+    while (lr(0x300) & (1u << 12)) {}    /* delivery pending */
+    lw(0x310, apic_id << 24);
+    lw(0x300, low);
+    while (lr(0x300) & (1u << 12)) {}
 }
 
 /* Start one AP and wait up to a second for it to check in. Returns whether
@@ -407,23 +456,52 @@ static int start_ap(uint32_t apic_id, uint64_t n) {
     return bst_platform_cpus() != before;
 }
 
+/* The processor an enabled MADT entry at `e` lists, by APIC id: a local
+ * APIC entry (type 0, length 8) or an x2APIC one (type 9, length 16),
+ * flags bit 0 enabled. -1 for any other entry. */
+static int64_t madt_cpu(uint64_t e) {
+    uint64_t type = rd8(e), elen = rd8(e + 1);
+    if (type == 0 && elen >= 8 && (rd32(e + 4) & 1)) return rd8(e + 3);
+    if (type == 9 && elen >= 16 && (rd32(e + 8) & 1)) return rd32(e + 4);
+    return -1;
+}
+
 void bst_smp_init(void) {
     core_init(0);
     uint64_t len = 0, madt = find_madt(&len);
-    /* Count the processors the MADT lists: local APIC entries (type 0,
-     * length 8) and x2APIC ones (type 9, length 16), flags bit 0 enabled. */
     for (uint64_t i = 44; madt && i + 2 <= len; ) {
-        uint64_t type = rd8(madt + i), elen = rd8(madt + i + 1);
+        uint64_t elen = rd8(madt + i + 1);
         if (elen < 2 || i + elen > len) break;
-        if (type == 0 && elen >= 8 && (rd32(madt + i + 4) & 1)) madt_cpus++;
-        if (type == 9 && elen >= 16 && (rd32(madt + i + 8) & 1)) madt_x2++;
+        int64_t id = madt_cpu(madt + i);
+        if (id >= 0) {
+            if (rd8(madt + i) == 0) madt_cpus++;
+            else madt_x2++;
+            if (id >= 255) madt_high++;
+        }
         i += elen;
     }
     uint64_t apic_msr = rdmsr(0x1B);
     smp_stop = SMP_NO_APIC;
     if (!(apic_msr & (1u << 11))) return;               /* APIC globally disabled */
+    /* xAPIC, the mode the Bastio kernel's own APIC code (src/lapic.bastio)
+     * drives through its page of registers, unless the firmware locked
+     * x2APIC mode or a processor has an id xAPIC cannot address. */
+    uint32_t r[4];
+    cpuid(1, 0, r);
+    int can_x2 = (r[2] >> 21) & 1;
+    apic_fw = !(apic_msr & (1u << 10)) ? APIC_XAPIC : x2apic_locked() ? APIC_X2APIC_LOCKED : APIC_X2APIC;
+    x2apic = apic_fw == APIC_X2APIC_LOCKED || (can_x2 && madt_high);
+    apic_mode();
+    apic_now = x2apic ? APIC_X2APIC : APIC_XAPIC;
+    if (x2apic) {
+        /* What src/lapic.bastio does in xAPIC mode: the 8259 passes
+         * through LINT0 (ExtINT), LINT1 is NMI, the APIC is on. */
+        lw(0x350, 0x700);
+        lw(0x360, 0x400);
+        lw(0xF0, 0x1FF);
+    }
     smp_stop = madt ? SMP_LAPIC_AWAY : SMP_NO_MADT;
-    if (!madt || !map_lapic(apic_msr & 0xFFFFF000ull)) return;
+    if (!madt || (!x2apic && !map_lapic(apic_msr & 0xFFFFF000ull))) return;
     uint64_t size = (uint64_t)(bst_ap_trampoline_end - bst_ap_trampoline);
     if (size > 4096) return;
     for (uint64_t i = 0; i < size; i++) ((volatile char *)AP_TRAMPOLINE)[i] = bst_ap_trampoline[i];
@@ -431,27 +509,35 @@ void bst_smp_init(void) {
     for (int m = 0; m < 3; m++) syscall_msrs[m] = rdmsr(0xC0000081 + m + (m == 2));
     calibrate_lapic_timer();
 
-    uint32_t self = lapic[0x20 / 4] >> 24;
+    uint32_t self = x2apic ? lr(0x20) : lr(0x20) >> 24;
+    uint32_t seen[MAX_CPUS];
     uint64_t started = 0;
-    smp_stop = madt_x2 ? SMP_X2APIC : SMP_ALL;          /* x2APIC entries are not started */
-    /* Processor-local APIC entries: type 0, length 8, flags bit 0 = enabled. */
+    seen[0] = self;
+    smp_stop = SMP_ALL;
     for (uint64_t i = 44; i + 2 <= len; ) {
-        uint64_t type = rd8(madt + i), elen = rd8(madt + i + 1);
+        uint64_t elen = rd8(madt + i + 1);
         if (elen < 2 || i + elen > len) break;
-        if (type == 0 && elen >= 8 && (rd32(madt + i + 4) & 1)) {
-            uint32_t id = rd8(madt + i + 3);
-            if (id != self && started + 1 >= MAX_CPUS) {
-                smp_stop = SMP_TOO_MANY;
-                return;
-            }
-            /* An AP that misses its deadline may still wake up later on
-             * bst_ap_stack, so start no other AP after it. */
-            if (id != self && !start_ap(id, ++started)) {
-                smp_stop = SMP_AP_LATE;
-                return;
-            }
-        }
+        int64_t id = madt_cpu(madt + i);
         i += elen;
+        if (id < 0) continue;
+        if (id >= 255 && !x2apic) {                     /* no x2APIC: out of reach */
+            smp_stop = SMP_X2APIC;
+            continue;
+        }
+        int dup = 0;                                    /* listed twice, or the BSP */
+        for (uint64_t k = 0; k <= started; k++) dup |= seen[k] == (uint32_t)id;
+        if (dup) continue;
+        if (started + 1 >= MAX_CPUS) {
+            smp_stop = SMP_TOO_MANY;
+            return;
+        }
+        /* An AP that misses its deadline may still wake up later on
+         * bst_ap_stack, so start no other AP after it. */
+        seen[started + 1] = (uint32_t)id;
+        if (!start_ap((uint32_t)id, ++started)) {
+            smp_stop = SMP_AP_LATE;
+            return;
+        }
     }
 }
 
@@ -472,7 +558,8 @@ uint64_t bst_platform_info(uint64_t what, uint64_t i) {
         return r[what - 2];
     }
     case 6:                                                /* processor startup */
-        return i == 0 ? madt_cpus : i == 1 ? madt_x2 : i == 2 ? smp_stop : 0;
+        return i == 0 ? madt_cpus : i == 1 ? madt_x2 : i == 2 ? smp_stop
+             : i == 3 ? apic_now : i == 4 ? apic_fw : 0;
     case 7:                                                /* the local APIC timer's calibration */
         return i == 0 ? timer_from : i == 1 ? lapic_ticks_10ms : 0;
     case 8: {                                              /* ACPI: where the RSDP came from, its revision, the tables */

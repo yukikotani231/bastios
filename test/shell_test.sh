@@ -1386,10 +1386,10 @@ for machine, name in (("pc,hpet=off", "i440fx, no HPET"), ("q35,hpet=off", "q35,
 # 2 GiB, whose firmware puts the ACPI tables just below 2 GiB: the kernel
 # must still find them (the processors, power off). Each pause in the report
 # waits for a key, which the serial line gives.
-def report_boot(args, name, keys):
+def report_boot(args, name, keys, qemu_bin="qemu-system-x86_64"):
     global qemu, out, deadline
     qemu = subprocess.Popen(
-        ["qemu-system-x86_64", "-kernel", kernel, "-display", "none", "-nic", "none",
+        [qemu_bin, "-kernel", kernel, "-display", "none", "-nic", "none",
          "-serial", "stdio", "-monitor", "none"] + args,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     out = b""
@@ -1435,6 +1435,45 @@ ok, code = report_boot(["-machine", "pc", "-m", "64M"], "no report", 0)
 good = ok and b"hardware report" not in out
 print(("ok  " if good else "FAIL"), "(hardware report) only with diag")
 fails += not good
+
+# x2APIC (boot/smp.c). SeaBIOS leaves the local APICs in x2APIC mode when
+# the machine may have APIC ids of 255 and up (sockets of 256 cores): with
+# only low ids present the kernel goes back to xAPIC, which its own APIC
+# code drives; with a processor of id 256 (socket 1) it stays in x2APIC
+# mode and starts that one too. Before, the kernel hung at boot in both.
+# QEMU emulates x2APIC without KVM only from 9.0: QEMU_X2APIC names such a
+# qemu-system-x86_64, else the one on the path is used if it is new enough.
+def qemu_major(q):
+    try:
+        v = subprocess.run([q, "--version"], capture_output=True, text=True).stdout
+    except OSError:
+        return 0
+    m = re.search(r"version (\d+)\.", v)
+    return int(m.group(1)) if m else 0
+qemu9 = os.environ.get("QEMU_X2APIC") or "qemu-system-x86_64"
+if qemu_major(qemu9) < 9:
+    print("skip (x2APIC) needs QEMU 9.0 or later: set QEMU_X2APIC")
+else:
+    many = ["-machine", "q35", "-m", "64M", "-cpu", "qemu64,+x2apic", "-smp", "2,sockets=2,cores=256,maxcpus=512", "-append", "diag"]
+    for extra, name, checks in (
+            ([], "x2APIC firmware", (
+                ("pages of memory, 2 processors", "both processors start"),
+                ("local APIC: xAPIC; the firmware left it in x2APIC mode", "the kernel takes the local APIC back to xAPIC"))),
+            (["-device", "qemu64-x86_64-cpu,socket-id=1,core-id=0,thread-id=0"], "x2APIC id 256", (
+                ("pages of memory, 3 processors", "the processor with APIC id 256 starts too"),
+                ("the MADT lists 2 (and 1 x2APIC entries), 3 running", "the MADT's x2APIC entry is counted"),
+                ("local APIC: x2APIC, for ids of 255 and up", "the local APICs stay in x2APIC mode")))):
+        ok, code = report_boot(many + extra, name, 3, qemu9)
+        text = out.decode(errors="replace").replace("\r", "")
+        for want, what in checks:
+            good = ok and want in text
+            print(("ok  " if good else "FAIL"), f"({name}) {what}")
+            fails += not good
+        booted = re.findall(r"BastiOS 0.2: (\d+) pages of memory", text)
+        off = re.search(r"BastiOS: (\d+) pages free at power off", text)
+        good = code == 0 and booted and off and booted[-1] == off.group(1)
+        print(("ok  " if good else "FAIL"), f"({name}) every page back, and S5 (status {code})")
+        fails += not good
 
 # A disk that is not blank and has no BastiOS file system (an MBR's
 # signature; or only a GPT's backup header at the end) is someone else's:
