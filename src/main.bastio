@@ -41,6 +41,7 @@ import "lxmsg.bastio";
 import "lxlock.bastio";
 import "lxprocfs.bastio";
 import "lxlink.bastio";
+import "lxmount.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
@@ -97,11 +98,50 @@ spec fn sys_ok(s: &Sys) -> bool {
   kok(s.k) && con_ok(s.con) && pic_ok(s.pic) && lapic_ok(s.apic) && hpet_ok(s.clock)
 }
 
-// A process taken out to run: its id, its lease on its address space, and
-// its FPU page.
-struct Task { pid: u64, lease: Lease, fpu: Frame }
+// A process taken out to run: its id, its process id (tgid, for a thread),
+// its lease on its address space, and its FPU page.
+struct Task { pid: u64, tgid: u64, lease: Lease, fpu: Frame }
 
 enum Job { Stop, Idle, Disk, Run(Task) }   // Disk: idle, but a polled disk command is running
+
+/// The system calls a processor answers without the lock, from what it
+/// knows of the task it runs: the thread and process ids, the user and
+/// group ids (everyone is root), and a yield while no other process waits
+/// for a processor (`others`, published under the lock by turn and
+/// next_job_p). True if `v` was one of them; the result is in rax and the
+/// task runs on. Anything they skip (a signal, a kill, the tick's
+/// accounting) waits for the task's next trap that is not one of them, at
+/// the latest its timer interrupt.
+fn fast_call(cpu: &mut Cpu, v: u64, pid: u64, tg: u64, others: &Atomic[bool]) -> bool {
+  let n = cpu_get(cpu, R_RAX);
+  if v == V_LINUX {
+    if n == LX_GETTID {
+      cpu_set(&mut cpu, R_RAX, pid);
+      return true;
+    }
+    if n == LX_GETPID {
+      cpu_set(&mut cpu, R_RAX, tg);
+      return true;
+    }
+    if n == LX_GETUID || n == LX_GETGID || n == LX_GETEUID || n == LX_GETEGID {
+      cpu_set(&mut cpu, R_RAX, 0);
+      return true;
+    }
+    if n == LX_SCHED_YIELD && !atomic_load(others) {
+      cpu_set(&mut cpu, R_RAX, 0);
+      return true;
+    }
+  } else if v == V_SYSCALL {
+    if n == SYS_GETPID {
+      cpu_set(&mut cpu, R_RAX, pid);
+      return true;
+    }
+    if n == SYS_YIELD && !atomic_load(others) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /// Is any process READY (waiting for a processor)?
 fn any_ready(procs: &Buf) -> bool
@@ -131,8 +171,8 @@ fn go_idle(s: &mut Sys) -> Job
 }
 
 /// Under the lock: what this processor does next. Starting at `from`
-/// (round robin), takes the next READY process out, with its registers and
-/// FPU state loaded into `cpu`, and marks it RUNNING. With `poll`, first
+/// (round robin), takes the next READY process out, with its registers
+/// loaded into `cpu` (the caller loads its FPU page), and marks it RUNNING. With `poll`, first
 /// polls the network card and hands typed input to waiting readers.
 fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) -> Job
   requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
@@ -193,7 +233,6 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
           let mut sp = root;
           let l = mmu_enter(&mut mmu, &mut sp);
           put_space(&mut s.k.spaces, p, Space::Mapped(sp));
-          cpu_fpu_load(&mut cpu, f);
           let mut r = 0;
           while r < 18
             invariant r <= 18 && len(s.k.procs) == PTAB_LEN
@@ -203,7 +242,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
           }
           cpu_set(&mut cpu, R_FSBASE, pget(s.k.procs, p, F_REGS + R_FSBASE));
           pset(&mut s.k.procs, p, F_STATE, RUNNING);
-          return Job::Run(Task { pid: p, lease: l, fpu: f });
+          return Job::Run(Task { pid: p, tgid: tgid(s.k.procs, p), lease: l, fpu: f });
         },
       }
     },
@@ -225,16 +264,14 @@ fn idled(s: &mut Sys, v: u64)
 
 /// Under the lock, after process `p` ran on this processor until a trap
 /// with vector `v` (and its lease was given back): puts its FPU page `fpu`
-/// back and handles the trap. Returns where this processor's round robin
-/// goes on.
+/// (saved by the caller) back and handles the trap. Returns where this
+/// processor's round robin goes on.
 fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> u64
   requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
   requires 1 <= p && p < NPROC
   ensures sys_ok(s) && result < NPROC
 {
-  let mut f = fpu;
-  cpu_fpu_save(&mut cpu, &mut f);
-  restore_fpu(&mut s.k.mem, &mut s.k.fpus, p, Fpu::State(f));
+  restore_fpu(&mut s.k.mem, &mut s.k.fpus, p, Fpu::State(fpu));
   // Registers, then the error code, fault address and FS base (words 18-20).
   let mut r = 0;
   while r < 21
@@ -288,11 +325,15 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     s.k.ns = hpet_ns(&mut s.clock);
     s.k.fs.now = sat_add(s.k.epoch, s.k.ns) / 1000000000;   // wall-clock seconds, as stat reports them
     let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
+    call_done(&mut s.k, p);
     sock_wake(&mut s.k);
     if disk_hold(&mut s.k, p, EIO) || what == SWITCH {
       return (p + 1) % NPROC;
     }
     return p;
+  }
+  if v == 14 && stack_fault(&mut s.k, p) {
+    return p;                               // the stack grew: run the instruction again
   }
   if v < 32 {
     puts(&mut s.con, "\r\n[pid ");
@@ -332,7 +373,7 @@ struct Next { job: Job, from: u64 }
 /// `finish` for task `t`, then `next_job` from where it leaves the round
 /// robin, in one critical section, so a system call costs one round trip
 /// of the lock. Publishes how much console output waits in `pend`.
-fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, poll: bool, pend: &Atomic[u64]) -> Next
+fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, poll: bool, pend: &Atomic[u64], others: &Atomic[bool]) -> Next
   requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
   requires 1 <= p && p < NPROC
   ensures sys_ok(s) && result.from < NPROC
@@ -342,12 +383,13 @@ fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, p
   let c = finish(&mut s, &mut cpu, mmu, p, fpu, v);
   let j = next_job(&mut s, &mut cpu, &mut mmu, c, poll);
   atomic_store(pend, s.con.n);
+  atomic_store(others, any_ready(s.k.procs));
   return Next { job: j, from: c };
 }
 
 /// `next_job`, then publishes how much console output waits in `pend`.
 /// `back`: this processor was idle (its last job was Job::Idle).
-fn next_job_p(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool, back: bool, pend: &Atomic[u64]) -> Job
+fn next_job_p(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool, back: bool, pend: &Atomic[u64], others: &Atomic[bool]) -> Job
   requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
   ensures sys_ok(s)
   ensures result is Job::Run ==> (1 <= result.Run.pid && result.Run.pid < NPROC)
@@ -358,6 +400,7 @@ fn next_job_p(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool, 
   }
   let j = next_job(&mut s, &mut cpu, &mut mmu, from, poll);
   atomic_store(pend, s.con.n);
+  atomic_store(others, any_ready(s.k.procs));
   return j;
 }
 
@@ -461,13 +504,13 @@ fn try_pump(u: &Lock[Term], s: &Lock[Sys], pumping: &Atomic[bool], pend: &Atomic
 
 /// The scheduler loop each processor runs, with its own `cpu` and `mmu`,
 /// until the kernel stops (no process left, or a power off).
-fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &Atomic[bool], pend: &Atomic[u64])
+fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &Atomic[bool], pend: &Atomic[u64], others: &Atomic[bool])
   requires mmu_root(mmu) == KERNEL_ROOT
   ensures mmu_root(mmu) == KERNEL_ROOT
 {
   let mut cur = 1;
   let mut going = true;
-  let mut j = locked(s, next_job_p, &mut cpu, &mut mmu, cur, true, false, pend);
+  let mut j = locked(s, next_job_p, &mut cpu, &mut mmu, cur, true, false, pend, others);
   while going
     invariant cur < NPROC
     invariant !(j is Job::Run) ==> mmu_root(mmu) == KERNEL_ROOT
@@ -491,7 +534,7 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
           locked(s, idled_p, v, pend);
         }
         try_pump(u, s, pumping, pend);
-        j = locked(s, next_job_p, &mut cpu, &mut mmu, cur, true, true, pend);
+        j = locked(s, next_job_p, &mut cpu, &mut mmu, cur, true, true, pend, others);
       },
       Job::Disk => {
         // Nothing to run, but a process waits for a disk command, and the
@@ -501,18 +544,26 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
         while w < DISK_POLL_GAP && atomic_load(pend) == 0 {
           w = w + 1;
         }
-        j = locked(s, next_job_p, &mut cpu, &mut mmu, cur, true, false, pend);
+        j = locked(s, next_job_p, &mut cpu, &mut mmu, cur, true, false, pend, others);
       },
       Job::Run(t) => {
-        let v = cpu_run(&mut cpu, mmu);
+        // The FPU page is this processor's while the task runs, so it is
+        // loaded and saved outside the lock.
+        cpu_fpu_load(&mut cpu, t.fpu);
+        let mut v = cpu_run(&mut cpu, mmu);
+        while fast_call(&mut cpu, v, t.pid, t.tgid, others) {
+          v = cpu_run(&mut cpu, mmu);         // answered without the lock
+        }
         mmu_exit(&mut mmu, t.lease);
+        let mut f = t.fpu;
+        cpu_fpu_save(&mut cpu, &mut f);
         let poll = v != V_SYSCALL && v != V_LINUX;
         // After an interrupt the devices may have input; after any turn
         // there may be output.
         if poll || atomic_load(pend) > 0 {
           try_pump(u, s, pumping, pend);
         }
-        let next = locked(s, turn, &mut cpu, &mut mmu, t.pid, t.fpu, v, poll, pend);
+        let next = locked(s, turn, &mut cpu, &mut mmu, t.pid, f, v, poll, pend, others);
         cur = next.from;
         j = next.job;
       },
@@ -806,11 +857,13 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let tl = lock_new(term);
   let pumping = atomic_new(false);
   let pend = atomic_new(0);
-  smp_run(sched, &mut cpu, &mut mmu, sl, tl, pumping, pend);
+  let others = atomic_new(false);
+  smp_run(sched, &mut cpu, &mut mmu, sl, tl, pumping, pend, others);
   let mut sys = lock_end(sl);
   let mut devices = lock_end(tl);
   atomic_end(pumping);
   atomic_end(pend);
+  atomic_end(others);
   // Power off: tear down whatever is left, so every page goes back.
   while vec_len(sys.k.spaces) > 0
     invariant mem_ok(sys.k.mem) && mmu_root(mmu) == KERNEL_ROOT

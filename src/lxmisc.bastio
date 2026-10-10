@@ -64,7 +64,7 @@ const UTS_SIZE: u64 = 390;
 const RLIM_INFINITY: u64 = 18446744073709551615;
 const RLIMIT_STACK: u64 = 3;
 const RLIMIT_NOFILE: u64 = 7;
-const STACK_BYTES: u64 = 65536;       // STACK_PAGES pages
+const STACK_BYTES: u64 = 1048576;     // STACK_PAGES pages
 const PR_SET_NAME: u64 = 15;
 const PR_GET_NAME: u64 = 16;
 const RAMFS_MAGIC: u64 = 0x858458F6;
@@ -245,10 +245,14 @@ fn meta_target(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
     return NO_RESULT;
   }
   let f = vfs_lookup(&mut k.fs, n);
+  let d = vfs_dir_lookup(&mut k.fs, n);
+  if (f != NO_FILE || d != NO_FILE) && vfs_ro(&mut k.fs, n) {
+    k.perr = EROFS;                         // in a read-only mount (src/lxmount.bastio)
+    return NO_RESULT;
+  }
   if f != NO_FILE {
     return f;
   }
-  let d = vfs_dir_lookup(&mut k.fs, n);
   if d != NO_FILE {
     return d;
   }
@@ -396,6 +400,9 @@ fn lx_truncate(k: &mut Kernel, pid: u64, path: u64, size: u64) -> u64
   }
   if dir_at(&mut k, n) != NO_FILE {
     return EISDIR;
+  }
+  if vfs_ro(&mut k.fs, n) && vfs_lookup(&mut k.fs, n) != NO_FILE {
+    return EROFS;
   }
   let nfd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, O_WRITE, n);
   if nfd == NO_FD || nfd >= NFD {
