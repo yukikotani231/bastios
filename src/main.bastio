@@ -789,13 +789,13 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // PCI's configuration ports are claimed for the drivers that look for
   // their devices there.
   let mut pci = Pci { addr: port_claim(&mut ports, PCI_ADDR, 4), data: port_claim(&mut ports, PCI_DATA, 4) };
-  // The xHCI controller first, if there is one, with thirteen pages from
+  // The xHCI controller first, if there is one, with fourteen pages from
   // USB_AT: a USB stick with a BastiOS partition on it becomes the disk,
   // and a USB keyboard the keyboard.
   let xdev = pci_find_class(&mut pci, XHCI_CLASS);
   let usb_lo = usb_bar(&mut pci, xdev);
   let usb_hi = usb_lo + usb_bar_size(&mut pci, xdev);
-  let mut usb = usb_new(&mut pci, &mut m, &mut win, USB_AT, fb_lo, fb_hi, 0, 0, xdev, usb_lo, usb_hi - usb_lo);
+  let mut usb = usb_new(&mut pci, &mut m, &mut win, USB_AT, fb_lo, fb_hi, 0, 0, xdev, usb_lo, usb_hi - usb_lo, msi, V_DISK);
   let usb_disk = usb_msd(usb);
   // The disk: that stick, else NVMe, virtio, AHCI or ATA (see blk_new).
   let dev = blk_find(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi, usb_lo, usb_hi, msi, &mut usb);
