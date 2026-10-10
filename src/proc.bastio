@@ -415,8 +415,8 @@ spec fn kok(k: &Kernel) -> bool {
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 24;
-const LDSO_PROG: u64 = 23;            // musl's dynamic linker, the interpreter of musl programs
+const NPROGS: u64 = 25;
+const LDSO_PROG: u64 = 24;            // musl's dynamic linker, the interpreter of musl programs
 
 fn prog_name(i: u64) -> Str {
   if i == 0 {
@@ -486,9 +486,12 @@ fn prog_name(i: u64) -> Str {
     return "mspawn";
   }
   if i == 22 {
-    return "mdyn";
+    return "sysfuzz";
   }
   if i == 23 {
+    return "mdyn";
+  }
+  if i == 24 {
     return "ld-musl-x86_64.so.1";
   }
   return "(file)";                    // a program loaded from a file
@@ -559,9 +562,12 @@ fn prog_image(i: u64) -> Str {
     return include_bytes("../build/user/mspawn.elf");
   }
   if i == 22 {
-    return include_bytes("../build/user/mdyn.elf");
+    return include_bytes("../build/user/sysfuzz.elf");
   }
   if i == 23 {
+    return include_bytes("../build/user/mdyn.elf");
+  }
+  if i == 24 {
     return include_bytes("../build/user/ld-musl.so");
   }
   return include_bytes("../build/user/fault.bin");
