@@ -78,6 +78,27 @@ busybox: which
 busybox: whoami
 busybox: xargs
 busybox: yes | head
+t_dev: /dev/loop-control
+t_dev: BLKGETSIZE64
+t_dev: BLKSSZGET
+t_dev: LOOP_CLR_FD
+t_dev: LOOP_CTL_GET_FREE
+t_dev: LOOP_CTL_GET_FREE skips it
+t_dev: LOOP_GET_STATUS64
+t_dev: LOOP_SET_FD
+t_dev: LOOP_SET_STATUS64
+t_dev: bound twice is EBUSY
+t_dev: cleared twice is ENXIO
+t_dev: file stays bound after close
+t_dev: lands past the offset
+t_dev: loop device is a block device
+t_dev: lseek SEEK_END is the device size
+t_dev: open loop device
+t_dev: read through the device
+t_dev: unbound reads nothing
+t_dev: unbound: LOOP_GET_STATUS64 is ENXIO
+t_dev: write at the end is ENOSPC
+t_dev: write through the device
 t_dir: chdir
 t_dir: chdir ..
 t_dir: create file in directory

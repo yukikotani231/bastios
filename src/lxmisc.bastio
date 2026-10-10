@@ -344,6 +344,20 @@ fn lx_pio(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, va: u64
   if d.kind == K_PIPE_R || d.kind == K_PIPE_W || d.kind == K_SOCK || d.kind == K_CONSOLE {
     return ESPIPE;
   }
+  if d.kind == K_DEV && is_loop(d.x) {
+    // A loop device: at off, leaving the descriptor's position as it was.
+    let h = fd_ofd(k, pid, fd);
+    if h >= OFD_N || off >= 0x8000000000000000 {
+      return EINVAL;
+    }
+    let at = of_get(k.ofd, h, 3);
+    of_set(&mut k.ofd, h, 3, off);
+    let r = loop_io(&mut con, &mut k, pid, fd, d.x, write, va, n);
+    if h < OFD_N {
+      of_set(&mut k.ofd, h, 3, at);
+    }
+    return r;
+  }
   if d.kind != K_FILE {
     return EBADF;
   }
