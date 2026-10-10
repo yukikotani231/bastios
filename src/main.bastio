@@ -23,6 +23,7 @@ import "linux.bastio";
 import "lxproc.bastio";
 import "lxfd.bastio";
 import "lxdir.bastio";
+import "lxsock.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;

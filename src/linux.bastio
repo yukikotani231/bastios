@@ -192,6 +192,14 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       r = lx_file_read(&mut k, pid, d.x, b, c);
     } else if d.kind == K_PIPE_R {
       r = pipe_read(&mut k, pid, d.x, b, c);
+    } else if d.kind == K_SOCK {
+      r = lx_recvfrom(&mut k, pid, a, b, c, 0, 0, 0);
+      if r == SK_WAIT {
+        r = EAGAIN;                         // wait for a datagram, below
+      } else if r == EAGAIN {
+        ret(&mut k.procs, pid, r);          // nonblocking: say so
+        return KEEP;
+      }
     }
     if r == EAGAIN {
       return lx_retry(&mut k, pid, n);       // an empty pipe: wait for a writer
@@ -231,6 +239,9 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       ret(&mut k.procs, pid, lx_dup2(&mut k, pid, a, b, n == LX_DUP3 && c / LO_CLOEXEC % 2 == 1));
     }
     return KEEP;
+  }
+  if is_sock_call(n) {
+    return lx_sock_call(&mut k, pid, n, a, b, c);
   }
   if n == LX_POLL {
     ret(&mut k.procs, pid, lx_poll(&mut k, pid, a, b));
@@ -640,6 +651,9 @@ fn lx_write_fd(con: &mut Uart, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u6
   let d = fd_look(k, pid, fd);
   if d.kind == K_PIPE_W {
     return pipe_write(&mut k, pid, d.x, va, n);
+  }
+  if d.kind == K_SOCK {
+    return lx_sendto(&mut k, pid, fd, va, n, 0, 0);   // to the connected peer
   }
   if d.kind != K_CONSOLE && d.kind != K_FILE {
     return EBADF;
