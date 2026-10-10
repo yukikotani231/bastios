@@ -72,6 +72,7 @@ const PATH_OUT: u64 = 512;              // room for a name being built
 const ARCH_SET_FS: u64 = 0x1002;
 const IOV_MAX: u64 = 1024;
 const EISDIR: u64 = 18446744073709551595;     // 2^64 - 21
+const ESRCH: u64 = 18446744073709551613;      // 2^64 - 3
 const TOTAL_MAX: u64 = 0x100000000000;      // more than writev can move in the window
 const LX_EXIT_GROUP: u64 = 231;
 

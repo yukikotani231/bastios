@@ -191,11 +191,41 @@ fn lx_copy(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, outp: u64, inp: u6
   return done;
 }
 
+/// The errors preadv and pwritev give before they move anything, in
+/// Linux's order, or NO_RESULT to go on.
+fn piov_early(k: &mut Kernel, pid: u64, write: bool, fd: u64, iov: u64, cnt: u64, off: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if off >= 0x8000000000000000 {
+    return EINVAL;
+  }
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
+    return EBADF;
+  }
+  if d.kind == K_PIPE_R || d.kind == K_PIPE_W || d.kind == K_SOCK || d.kind == K_CONSOLE {
+    return ESPIPE;
+  }
+  let bad = iov_check(&mut k, pid, iov, cnt);
+  if bad != 0 {
+    return bad;                             // too many vectors, a negative length, an unreadable array
+  }
+  if d.kind == K_DIR && !write {
+    return EISDIR;
+  }
+  return NO_RESULT;
+}
+
 /// preadv and pwritev: each iovec at off and on, until one comes up short.
 fn lx_piov(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, iov: u64, cnt: u64, off: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
   ensures kok(k) && con_ok(con)
 {
+  let early = piov_early(&mut k, pid, write, fd, iov, cnt, off);
+  if early != NO_RESULT {
+    return early;
+  }
   if cnt > 1024 || off >= 0x8000000000000000 {
     return EINVAL;
   }
