@@ -116,6 +116,13 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Changed
 
+- Removing the name a disk file was made under while a hard link remains
+  is committed by one sector write (`disk_take_name`); a rename between
+  two names of one file does nothing, as on Linux.
+- The power-cut test cuts power fifteen times and also truncates,
+  renames and links; `test/fsck.py` checks the disk image after every
+  cut (`test/fsck_test.py` shows it catches damage). Native call 24
+  (`SYS_LINK`, `f_link`) makes a hard link.
 - Named pipes live in the file system: `mknod`/`mkfifo` make a file with
   the FIFO type bits, so a FIFO is listed (type `p`), renamed, linked and
   removed like any file, and on the disk it survives a reboot. Only four

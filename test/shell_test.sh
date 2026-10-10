@@ -1049,13 +1049,26 @@ session("third", False, [
 ])
 # Power cuts. user/crashme.bastio checks what the last run left on the disk
 # (disk/log a whole number of correct records, disk/snap empty or whole,
-# disk/t absent or empty), then keeps appending, rewriting and creating.
+# disk/t absent or empty, disk/ow not torn, disk/tr zeros past its cut,
+# one of disk/ra and disk/rb, disk/la and disk/lb whole), then keeps
+# appending, rewriting, creating, truncating, renaming and linking.
+# After each cut, before the next boot mounts it, test/fsck.py checks the
+# image itself: every entry, name, parent and block map.
 # QEMU is killed part-way through each run, on ATA, virtio, NVMe, AHCI and
 # NVMe with 4 KiB sectors in turn; every boot after a cut must find the file system consistent. Killing
 # QEMU keeps every sector write that completed (it is in the host's page
 # cache), so this cuts power between two sector writes; it cannot tear a
 # sector in half.
-cuts = [0.05, 0.4, 0.15, 0.9, 0.6, 1.2, 0.3, 0.75, 0.5, 1.0]
+cuts = [0.05, 0.4, 0.15, 0.9, 0.6, 1.2, 0.3, 0.75, 0.5, 1.0, 0.2, 0.45, 0.7, 0.95, 1.1]
+def fsck(when, clean=False):
+    global fails
+    r = subprocess.run([sys.executable, "test/fsck.py", disk], capture_output=True, text=True)
+    last = (r.stdout.strip().splitlines() or ["(no output)"])[-1]
+    ok = r.returncode == 0 and (not clean or "fsck: note" not in r.stdout)
+    print(("ok  " if ok else "FAIL"), f"fsck {when}:", last)
+    if not ok:
+        print(r.stdout + r.stderr)
+    fails += not ok
 for n, delay in enumerate(cuts):
     qemu = boot(1, with_disk=n % 5 == 0, virtio=n % 5 == 1, nvme=n % 5 == 2, ahci=n % 5 == 3, nvme4k=n % 5 == 4)
     out = b""
@@ -1071,6 +1084,7 @@ for n, delay in enumerate(cuts):
     line = next((l for l in out[mark:].split(b"\n") if b"crashme:" in l), b"(nothing)")
     print(("ok  " if ok else "FAIL"), f"power cut {n + 1} after {delay} s:", line.strip().decode(errors="replace"))
     fails += not ok
+    fsck(f"after power cut {n + 1}")
 # A last run that is left to finish, then the files are removed.
 qemu = boot(1, with_disk=True)
 session("after the power cuts", False, [
@@ -1078,8 +1092,38 @@ session("after the power cuts", False, [
     ("rm disk/log", b""),
     ("rm disk/snap", b""),
     ("rm disk/ow", b""),
+    ("rm disk/tr", b""),
+    ("rm disk/ra", b""),
+    ("rm disk/rb", b""),
+    ("rm disk/la", b""),
+    ("rm disk/lb", b""),
     ("ls", b"about"),
-])
+], halt=True)
+fsck("at the end", clean=True)
+# What a power cut inside disk_take_name leaves: a file under the name its
+# hard link still has (disk/b), and a link naming a free entry (disk/c).
+# The mount drops both links; the file stays, and the image is clean.
+src = os.path.join(disk_dir.name, "b")
+with open(src, "wb") as f:
+    f.write(b"kept\n")
+subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, src], check=True)
+with open(disk, "r+b") as f:
+    for slot, name, target in ((1, b"b", 0), (2, b"c", 9)):
+        e = bytearray(256)
+        e[0], e[1] = 4, len(name)
+        e[8:16] = (64).to_bytes(8, "little")
+        e[48:56] = target.to_bytes(8, "little")
+        e[56:56 + len(name)] = name
+        f.seek(4096 + slot * 256)
+        f.write(e)
+fsck("of the cut-off link image")
+qemu = boot(1, with_disk=True)
+session("cut-off link", False, [
+    ("cat disk/b", b"kept\r\n"),
+    ("ls disk", b"\nb\r\n"),
+    ("cat disk/c", b"no such file"),
+], halt=True)
+fsck("after mounting it", clean=True)
 print(f"---- {fails} failed ----")
 sys.exit(1 if fails else 0)
 PY

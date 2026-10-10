@@ -232,6 +232,7 @@ run-uefi: build/bastios.iso $(DISK)
 
 test: build/bastios.elf
 	test/trusted_base.sh
+	test/fsck_test.py
 	test/shell_test.sh
 	test/tcp_test.sh
 	NIC=e1000 test/tcp_test.sh
