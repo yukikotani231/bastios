@@ -210,6 +210,19 @@ t_lock: lock file
 t_lock: read locks are shared
 t_lock: the owner relocks freely
 t_lock: unlocking a middle part splits it
+t_ltp2: F_GETFL reports the access mode of a file
+t_ltp2: F_SETFL O_APPEND appends to a file
+t_ltp2: MSG_OOB on UDP is EOPNOTSUPP
+t_ltp2: fsync of a pipe is EINVAL
+t_ltp2: getgroups counts and lists the groups
+t_ltp2: getgroups with a negative size is EINVAL
+t_ltp2: listen on a UDP socket is EOPNOTSUPP
+t_ltp2: mincore errors
+t_ltp2: mincore marks mapped pages
+t_ltp2: mlockall and munlockall succeed
+t_ltp2: personality is kept
+t_ltp2: send on an unconnected TCP socket is EPIPE
+t_ltp2: sendto with a huge address length is EINVAL
 t_mem: 64 MiB of address space
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap

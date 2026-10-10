@@ -532,6 +532,7 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     vfs_close(&mut k.fs, &mut k.mem, row);
     return ENFILE;
   }
+  of_set(&mut k.ofd, h, 3, flags / LO_NONBLOCK % 2);   // kept for F_GETFL only
   let fd = fd_install(&mut k, pid, h);
   if fd < LXNFD && flags / LO_CLOEXEC % 2 == 1 {
     fd_set(&mut k.lxfd, pid, fd, FD_OFD + h + FD_CLOEXEC);
@@ -604,6 +605,35 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     kind = of_get(k.ofd, h, 0);
   }
   let pipe = h < OFD_N && can_block(kind);
+  let mut row = FD_ROWS;
+  if h < OFD_N && kind == OF_FILE {
+    row = of_get(k.ofd, h, 2);
+  }
+  if cmd == F_GETFL && row < FD_ROWS {
+    let m = fget(k.fs.ftab, row, FD_MODE);
+    let mut fl = 0;                         // O_RDONLY
+    if m / O_WRITE % 2 == 1 {
+      fl = LO_WRONLY;
+      if m / O_READ % 2 == 1 {
+        fl = LO_RDWR;
+      }
+    }
+    if m / O_APPEND % 2 == 1 {
+      fl = fl + LO_APPEND;
+    }
+    return fl + of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK;
+  }
+  if cmd == F_SETFL && row < FD_ROWS {
+    // O_APPEND takes effect; O_NONBLOCK is only reported back (a file never blocks).
+    let m = fget(k.fs.ftab, row, FD_MODE);
+    let mut nm = m % O_APPEND;              // O_TRUNC and O_CREATE only matter at open
+    if arg / LO_APPEND % 2 == 1 {
+      nm = nm + O_APPEND;
+    }
+    fset(&mut k.fs.ftab, row, FD_MODE, nm);
+    of_set(&mut k.ofd, h, 3, arg / LO_NONBLOCK % 2);
+    return 0;
+  }
   if cmd == F_GETFL {
     if !pipe {
       return LO_RDWR;
