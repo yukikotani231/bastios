@@ -15,6 +15,7 @@ const SYS_MKDIR: u64 = 19;
 const SYS_RMDIR: u64 = 20;
 const SYS_READDIR: u64 = 21;
 const SYS_RENAME: u64 = 22;
+const SYS_FTRUNCATE: u64 = 23;
 const DIR_BIT: u64 = 4294967296;      // f_stat and f_readdir: a directory
 
 const O_READ: u64 = 1;
@@ -57,7 +58,8 @@ fn f_seek(fd: u64, off: u64) -> u64 {
   return sys_call(SYS_SEEK, fd, off);
 }
 
-/// Removes a file. Fails if it is open.
+/// Removes a file. A descriptor still open on it keeps reading it until
+/// it is closed.
 fn f_unlink(name: &Bytes, n: u64) -> u64
   requires n <= blen(name)
 {
@@ -112,4 +114,10 @@ fn f_rename(names: &Bytes, n: u64, m: u64) -> u64
   requires n <= blen(names) && m <= blen(names) - n
 {
   return sys_send(SYS_RENAME, n, names, n + m);
+}
+
+/// Sets the size of the file open (for writing) in fd to n bytes; past the
+/// old end it reads as zeros. The offset does not move.
+fn f_truncate(fd: u64, n: u64) -> u64 {
+  return sys_call(SYS_FTRUNCATE, fd, n);
 }
