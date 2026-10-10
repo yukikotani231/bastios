@@ -157,6 +157,7 @@ run: build/bastios.elf $(DISK)
 
 test: build/bastios.elf
 	test/shell_test.sh
+	test/tcp_test.sh
 
 clean:
 	rm -rf build
