@@ -229,6 +229,7 @@ t_lock: lock file
 t_lock: read locks are shared
 t_lock: the owner relocks freely
 t_lock: unlocking a middle part splits it
+t_ltp2: /proc/cmdline
 t_ltp2: F_GETFL reports the access mode of a file
 t_ltp2: F_SETFL O_APPEND appends to a file
 t_ltp2: ITIMER_VIRTUAL sends SIGVTALRM
@@ -238,6 +239,7 @@ t_ltp2: a FIFO opened O_RDWR reads what it writes
 t_ltp2: a file reads 8 KiB in one read
 t_ltp2: a page fault runs the SIGSEGV handler
 t_ltp2: accept never hands out a closed connection
+t_ltp2: an empty path is ENOENT, an unmapped one EFAULT
 t_ltp2: fsync of a pipe is EINVAL
 t_ltp2: getgroups counts and lists the groups
 t_ltp2: getgroups with a negative size is EINVAL
@@ -253,6 +255,7 @@ t_ltp2: sched_setaffinity to processor 0
 t_ltp2: sched_setscheduler: SCHED_FIFO 10, read back, bad priority EINVAL
 t_ltp2: send on an unconnected TCP socket is EPIPE
 t_ltp2: sendto with a huge address length is EINVAL
+t_ltp2: tkill and tgkill reject a zero or negative id
 t_ltp2: waitpid with bad options is EINVAL
 t_ltp2: waitpid(0) waits only for the caller's group
 t_mem: 64 MiB of address space

@@ -451,7 +451,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     let r10 = pget(k.procs, pid, F_REGS + R_R10);
     if (r10 % 0x100000000) & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH) != 0 {
       ret(&mut k.procs, pid, EINVAL);
-    } else if r10 / AT_EMPTY_PATH % 2 == 1 && lx_path_in(&mut k, pid, b) == 0 {
+    } else if r10 / AT_EMPTY_PATH % 2 == 1 && user_empty(&mut k, pid, b) {
       ret(&mut k.procs, pid, lx_fstat(&mut k, pid, a, c));      // fstat by another name
     } else {
       ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b, c, (r10 & AT_SYMLINK_NOFOLLOW) == 0));
@@ -1457,10 +1457,14 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
     e = e + 1;
   }
   if e >= got {
+    if got < n {
+      k.perr = EFAULT;                      // it runs into memory that is not there
+    }
     return NO_RESULT;                       // no NUL in reach
   }
   if e == 0 {
-    return 0;                               // "": what *at calls with AT_EMPTY_PATH look for
+    k.perr = ENOENT;                        // "" names nothing (AT_EMPTY_PATH is the caller's)
+    return NO_RESULT;
   }
   let trail = bget(k.fs.xfer, e - 1) == 47;  // "link/" names what the link points to, as on Linux
   // Build the name in `out`, starting from the working directory unless

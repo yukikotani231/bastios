@@ -133,5 +133,13 @@ int main(void) {
                _exit(ok ? 0 : 1); }
            int st = 0; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
     EXPECT("sched_setaffinity to processor 0", ({ cpu_set_t s; CPU_ZERO(&s); CPU_SET(0, &s); sched_setaffinity(0, sizeof s, &s) == 0; }));
+    EXPECT("an empty path is ENOENT, an unmapped one EFAULT", ({ struct stat st; void *bad = mmap(0, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           stat("", &st) == -1 && errno == ENOENT && unlink("") == -1 && errno == ENOENT &&
+           stat(bad, &st) == -1 && errno == EFAULT &&
+           ({ int d = open(".", O_RDONLY); int r = fstatat(d, "", &st, AT_EMPTY_PATH); close(d); r == 0 && S_ISDIR(st.st_mode); }); }));
+    EXPECT("tkill and tgkill reject a zero or negative id", syscall(SYS_tkill, 0, 0) == -1 && errno == EINVAL &&
+           syscall(SYS_tgkill, -1, getpid(), 0) == -1 && errno == EINVAL && syscall(SYS_tgkill, getpid(), getpid(), 0) == 0);
+    EXPECT("/proc/cmdline", ({ int fd = open("/proc/cmdline", O_RDONLY); char b[1024]; int n = fd >= 0 ? read(fd, b, sizeof b) : -1;
+           if (fd >= 0) close(fd); n > 0 && b[n - 1] == '\n'; }));
     return done();
 }
