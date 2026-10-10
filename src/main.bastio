@@ -138,6 +138,9 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, from: u64, poll: bool) -> Job
     tty_cook(&mut s.con, &mut s.k);
     wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
     woke = disk_wake(&mut s.k);
+    if sock_wake(&mut s.k) {
+      woke = true;
+    }
   }
   let p = lx_pick(&mut s.k, from);
   // Only the bootstrap processor takes V_DISK. A process the disk woke
@@ -250,6 +253,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, t: Task, v: u64) -> u64
     if what == POWEROFF {
       s.stop = true;
     }
+    sock_wake(&mut s.k);                    // a frame its call took in may wake a socket waiter
     if disk_hold(&mut s.k, p, NO_RESULT) {
       return (p + 1) % NPROC;               // a queued write: it waits for the disk
     }
@@ -262,6 +266,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, t: Task, v: u64) -> u64
     s.k.ns = hpet_ns(&mut s.clock);
     s.k.fs.now = s.k.ns / 1000000000;
     let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
+    sock_wake(&mut s.k);
     if disk_hold(&mut s.k, p, EIO) || what == SWITCH {
       return (p + 1) % NPROC;
     }
@@ -720,7 +725,20 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   // The network card, if any: nine pages after the disk's four (an e1000
   // takes six of them).
-  let nic = nic_new(&mut ports, &mut pci, &mut m, &mut win, 4, dev_lo, dev_hi, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi);
+  let mut nic = nic_new(&mut ports, &mut pci, &mut m, &mut win, 4, dev_lo, dev_hi, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi, msi);
+  // An e1000 has no MSI: its line goes through the 8259 (vectors 32-47,
+  // acknowledged like the timer's), unless it shares the timer's, the
+  // keyboard's, the cascade or COM1's.
+  if nic_live(nic) && nic_e1000(nic) {
+    let ed = pci_find(&mut pci, E1K_VENDOR, E1K_DEVICE);
+    if ed < PCI_NONE {
+      let line = pci_irq_line(&mut pci, ed);
+      if line >= 3 && line < 16 && line != 4 {
+        pic_unmask(&mut pic, line);
+        nic_irq_on(&mut nic);
+      }
+    }
+  }
   if nic_live(nic) {
     if nic_e1000(nic) {
       puts(&mut con, "net: e1000, mac ");
@@ -729,6 +747,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     }
     put_mac(&mut con, nic_mac(nic));
     puts(&mut con, ", address by DHCP\r\n");
+    if nic_irq(nic) {
+      puts(&mut con, "net: frames received by interrupt\r\n");
+    }
   }
   let mut spaces = vec_new[Space]();
   let mut i = 0;

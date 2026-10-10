@@ -70,6 +70,7 @@ const LXVFORK: u64 = 10;             // lent its address space to child F_WAIT (
 const CONWAIT: u64 = 11;             // writing to the console, whose ring is full
 const FUTEXWAIT: u64 = 12;           // in a Linux futex wait with no timeout
 const DISKWAIT: u64 = 13;            // waiting for the disk: F_WAIT says for what (disk_wake)
+const SOCKWAIT: u64 = 15;            // a Linux call on a network socket that has to wait (sock_wake)
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -998,6 +999,8 @@ fn put_state(con: &mut Con, s: u64)
     puts(&mut con, "netwait");
   } else if s == DISKWAIT {
     puts(&mut con, "disk   ");
+  } else if s == SOCKWAIT {
+    puts(&mut con, "socket ");
   } else if s == LXVFORK {
     puts(&mut con, "vfork  ");
   } else {

@@ -1,6 +1,8 @@
 /* TCP through the Linux system calls, against musl.
  *   mtcp serve PORT        accept one connection, read a line, send back
  *                          "echo: LINE", close
+ *   mtcp echo PORT         accept one connection and send back everything
+ *                          it reads until the peer closes (test/netbench.sh)
  *   mtcp get A.B.C.D PORT TEXT
  *                          connect, send TEXT and a newline, print what
  *                          comes back until the peer closes
@@ -60,6 +62,38 @@ static int serve(int port)
     return 0;
 }
 
+static int echo(int port)
+{
+    int one = 1;
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in me = { .sin_family = AF_INET, .sin_port = htons(port) };
+    if (s < 0 || setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) != 0)
+        return fail("socket");
+    if (bind(s, (struct sockaddr *)&me, sizeof me) != 0 || listen(s, 1) != 0)
+        return fail("bind and listen");
+    printf("mtcp: listening on tcp port %d\n", port);
+    fflush(stdout);
+    int c = accept(s, 0, 0);
+    if (c < 0)
+        return fail("accept");
+    char buf[2048];
+    long total = 0;
+    ssize_t r;
+    while ((r = read(c, buf, sizeof buf)) > 0) {
+        for (ssize_t off = 0; off < r; ) {
+            ssize_t w = write(c, buf + off, r - off);
+            if (w <= 0)
+                return fail("write");
+            off += w;
+        }
+        total += r;
+    }
+    close(c);
+    close(s);
+    printf("mtcp: echoed %ld bytes\n", total);
+    return 0;
+}
+
 static int get(const char *ip, int port, const char *text)
 {
     int s = socket(AF_INET, SOCK_STREAM, 0);
@@ -85,6 +119,8 @@ static int get(const char *ip, int port, const char *text)
 
 int main(int argc, char **argv)
 {
+    if (argc == 3 && strcmp(argv[1], "echo") == 0)
+        return echo(atoi(argv[2]));
     if (argc == 3 && strcmp(argv[1], "serve") == 0)
         return serve(atoi(argv[2]));
     if (argc == 1) {
@@ -94,6 +130,6 @@ int main(int argc, char **argv)
     }
     if (argc == 5 && strcmp(argv[1], "get") == 0)
         return get(argv[2], atoi(argv[3]), argv[4]);
-    printf("usage: mtcp serve PORT | mtcp get A.B.C.D PORT TEXT\n");
+    printf("usage: mtcp serve PORT | mtcp echo PORT | mtcp get A.B.C.D PORT TEXT\n");
     return 2;
 }
