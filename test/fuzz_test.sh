@@ -14,6 +14,7 @@
 #   FIRST_SEED  default 1          SEEDS  default 8 (seeds FIRST_SEED...)
 #   CALLS       calls per run, default 3000
 #   PAR=n       fuzzers running at once, default 2 (SMP=n: processors, default 2)
+#   ELFRUNS=n   hostile executables to exec afterwards, default 100 (0: none)
 # To replay one run with every call printed: `ash`, then `sysfuzz SEED CALLS v`
 # (`make run`).
 set -u
@@ -21,10 +22,11 @@ cd "$(dirname "$0")/.."
 KERNEL=${KERNEL:-build/bastios.elf}
 SMP=${SMP:-2}
 
-python3 - "$KERNEL" "$SMP" "${1:-1}" "${2:-8}" "${3:-3000}" "${PAR:-2}" <<'PY'
+python3 - "$KERNEL" "$SMP" "${1:-1}" "${2:-8}" "${3:-3000}" "${PAR:-2}" "${ELFRUNS:-100}" <<'PY'
 import os, re, select, subprocess, sys, tempfile, time
 
 kernel, smp, first, seeds, calls, par = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6])
+elfruns = int(sys.argv[7])
 tmp = tempfile.TemporaryDirectory()
 disk = os.path.join(tmp.name, "disk.img")
 with open(disk, "wb") as f:
@@ -111,6 +113,23 @@ for seed in range(first, first + seeds, par):
     how = ", ".join(f"seed {a.decode()} {b.decode()} calls" for a, b in made)
     how += "".join(f"; a fuzzer was killed: {k.decode()}" for k in killed)
     print(f"ok   {how or 'every fuzzer ended early'}")
+
+# Hostile executables (sysfuzz's ELF mode): ELFRUNS damaged images, each
+# exec'd by a child that is killed if it runs on.
+if alive and elfruns:
+    mark = len(out)
+    send(f"sysfuzz e {first} {elfruns}\r".encode())
+    read_until(PROMPT, mark, 30 + elfruns)
+    text = out[mark:]
+    m = re.search(rb"elf seed \d+ ran \d+ images: [^\r\n]*", text)
+    if b"kernel fault" in text or b"bastio: out of memory" in text:
+        fail("hostile executables: the kernel stopped")
+        alive = False
+    elif not m or not read_until(PROMPT, mark, 20):
+        fail("hostile executables: the run did not finish")
+        alive = False
+    else:
+        print(f"ok   {m.group(0).decode()}")
 
 if alive:
     mark = len(out)

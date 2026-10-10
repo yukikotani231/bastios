@@ -92,7 +92,9 @@ build/user/fpucheck.elf: build/user/elfstart.o build/user/fpucheck.o
 
 # The system call fuzzer (user/sysfuzz.c, test/fuzz_test.sh): freestanding,
 # so nothing between it and the kernel tidies its arguments.
-build/user/sysfuzz.o: user/sysfuzz.c | build/user
+# Its ELF mode carries three real programs to damage (.incbin), since /bin's
+# programs cannot be opened as files.
+build/user/sysfuzz.o: user/sysfuzz.c build/user/elfexec.elf build/user/elfpie.elf build/user/mdyn.elf | build/user
 	$(CC) $(ELFCFLAGS) -c -o $@ $<
 
 # Linked at USER_BASE: its tables of pointers need no relocation.

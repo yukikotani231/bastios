@@ -8,6 +8,7 @@
  * test/fuzz_test.sh checks that from the outside.
  *
  * usage: sysfuzz SEED [CALLS] [v]     (v prints every call before making it)
+ *        sysfuzz e SEED [RUNS] [v]    (hostile executables; see elf_fuzz)
  *
  * The same seed makes the same calls, so a failure can be replayed. Calls
  * that would end the run or wait for something that never comes are left
@@ -83,7 +84,7 @@ static u64 next(void) {
     rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
     return rng;
 }
-static u64 pick(u64 n) { return next() % n; }
+static u64 pick(u64 n) { return n ? next() % n : 0; }
 
 
 /* Strings the kernel may take as paths or program names. Some are real
@@ -195,6 +196,12 @@ static const unsigned short linux_calls[] = {
     108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 124, 132, 137, 138,
     140, 141, 149, 150, 157, 158, 160, 162, 186, 201, 204, 217, 218, 228, 229, 230, 235, 257,
     258, 260, 261, 262, 263, 268, 269, 271, 280, 288, 292, 293, 302, 318, 439,
+    /* Added once BastiOS implemented them. */
+    23, 26, 27, 29, 30, 31, 36, 37, 40, 46, 47, 53, 55, 64, 65, 66, 67, 68, 69, 70, 71, 73, 76,
+    77, 82, 86, 88, 89, 100, 122, 123, 127, 129, 131, 133, 135, 151, 152, 159, 164, 165, 166,
+    170, 171, 213, 220, 221, 222, 223, 224, 225, 226, 227, 232, 233, 247, 259, 264, 265, 266,
+    267, 270, 273, 275, 276, 278, 281, 282, 283, 284, 285, 286, 287, 289, 290, 291, 295, 296,
+    305, 309, 316, 319, 326, 332, 334, 441,
 };
 #define NLINUX (sizeof linux_calls / sizeof linux_calls[0])
 
@@ -249,6 +256,44 @@ static int tame(u64 n, u64 *a) {
         return !hits_mine(a[0], a[1]) && !((a[3] & 2) && hits_mine(a[4], a[2]));
     case 158:                                         /* arch_prctl: the fuzzer has no TLS */
         return 1;
+    case 435:                                         /* clone3: a child would go on fuzzing */
+    case 38: case 223:                                /* setitimer, timer_settime: SIGALRM ends us */
+    case 65:                                          /* semop: waits on a semaphore */
+        return 0;
+    case 37:                                          /* alarm: only cancel one */
+        a[0] = 0; return 1;
+    case 129:                                         /* rt_sigqueueinfo: ourselves, signal 0 */
+        a[0] = lx(39, 0, 0, 0, 0, 0, 0); a[1] = 0; return 1;
+    case 23:                                          /* select: zero timeout */
+        a[4] = (u64)buf; return 1;
+    case 270:                                         /* pselect6 */
+        a[4] = (u64)buf; return 1;
+    case 232: case 281:                               /* epoll_wait, epoll_pwait: no waiting */
+        a[3] = 0; return 1;
+    case 441:                                         /* epoll_pwait2 */
+        a[3] = (u64)buf; return 1;
+    case 220:                                         /* semtimedop: zero timeout */
+        a[3] = (u64)buf; return 1;
+    case 69:                                          /* msgsnd: IPC_NOWAIT */
+        a[3] |= 04000; return 1;
+    case 70:                                          /* msgrcv: IPC_NOWAIT */
+        a[4] |= 04000; return 1;
+    case 247:                                         /* waitid: WNOHANG */
+        a[3] |= 1; return 1;
+    case 73:                                          /* flock: LOCK_NB */
+        a[1] |= 4; return 1;
+    case 30:                                          /* shmat: wherever the kernel likes */
+        a[1] = 0; return 1;
+    case 47: case 295:                                /* recvmsg, preadv */
+        return ready(a[0], 1);
+    case 46: case 296: case 278:                      /* sendmsg, pwritev, vmsplice */
+        return ready(a[0], 4);
+    case 40:                                          /* sendfile(out, in) */
+        return ready(a[1], 1) && ready(a[0], 4);
+    case 275: case 326:                               /* splice, copy_file_range */
+        return ready(a[0], 1) && ready(a[2], 4);
+    case 276:                                         /* tee */
+        return ready(a[0], 1) && ready(a[1], 4);
     }
     return 1;
 }
@@ -267,17 +312,171 @@ static int tame_native(u64 n, u64 *a) {
     return 1;
 }
 
+/*
+ * Hostile executables. Each run takes one of three real ELF programs built
+ * into the fuzzer (fixed-address, PIE, and dynamically linked, which names
+ * an interpreter),
+ * damages its headers, writes it to /fzelfSEED and has a child execve it.
+ * The damage aims at what the loader checks: the file header's type, entry,
+ * program header offset, count and size; each program header's type,
+ * offset, address and sizes, with values at the edges of the user window
+ * and of the file, and past 2^63; the interpreter's path (another program,
+ * the file itself, a missing one, an unterminated one); and the file's
+ * length. A child whose image the kernel accepts runs whatever it was
+ * given, so it is killed if it has not ended within about 200 ms. The
+ * kernel must refuse or run each one without faulting or losing a page.
+ */
+#define IMG_MAX (256 * 1024ul)
+static unsigned char bad[IMG_MAX];
+static const char *elf_sources[] = { "elfexec", "elfpie", "mdyn" };
+#define NSOURCES (sizeof elf_sources / sizeof elf_sources[0])
+#define IMAGE(n) __asm__(".section .rodata\n.balign 8\n" #n "_start: .incbin \"build/user/" #n ".elf\"\n" #n "_end:\n.previous")
+IMAGE(elfexec);
+IMAGE(elfpie);
+IMAGE(mdyn);
+extern const unsigned char elfexec_start[], elfexec_end[], elfpie_start[], elfpie_end[], mdyn_start[], mdyn_end[];
+
+static u64 get(const unsigned char *p, int n) { u64 v = 0; for (int i = n - 1; i >= 0; i--) v = v << 8 | p[i]; return v; }
+static void put(unsigned char *p, int n, u64 v) { for (int i = 0; i < n; i++) p[i] = (unsigned char)(v >> (8 * i)); }
+
+/* A value for a field that held `was`, in a file of `size` bytes. */
+static u64 hostile(u64 was, u64 size) {
+    static const u64 v[] = { 0, 1, 0xFFF, 0x1000, 0x1001, 0x400000, USER_BASE - 0x1000, USER_BASE,
+                             USER_BASE + USER_SIZE - 0x1000, USER_BASE + USER_SIZE, USER_SIZE, USER_SIZE + 1,
+                             1ul << 32, 1ul << 63, ~0ul, ~0ul - 0xFFF };
+    switch (pick(6)) {
+    case 0: return v[pick(sizeof v / sizeof v[0])];
+    case 1: return was + pick(64) - 32;
+    case 2: return was ^ (1ul << pick(64));
+    case 3: return size - pick(64);
+    case 4: return was * (2 + pick(4));
+    default: return pick(size + 1);
+    }
+}
+
+static void damage(u64 n, u64 *size, u64 self) {
+    u64 phoff = get(bad + 32, 8), phnum = get(bad + 56, 2);
+    switch (pick(8)) {
+    case 0: {                                          /* a file header field */
+        static const unsigned char at[] = { 16, 24, 32, 54, 56, 4, 5, 18 };
+        static const unsigned char w[] = { 2, 8, 8, 2, 2, 1, 1, 2 };
+        u64 k = pick(sizeof at);
+        put(bad + at[k], w[k], hostile(get(bad + at[k], w[k]), n));
+        break;
+    }
+    case 1: case 2: case 3: case 4: {                 /* a program header field */
+        if (phnum == 0 || phoff >= n) break;
+        u64 h = phoff + 56 * pick(phnum);
+        static const unsigned char at[] = { 0, 8, 16, 32, 40, 4 };
+        static const unsigned char w[] = { 4, 8, 8, 8, 8, 4 };
+        u64 k = pick(sizeof at);
+        if (h + at[k] + w[k] > n) break;
+        u64 val = k == 0 && pick(2) ? (pick(2) ? 1 : 3) : hostile(get(bad + h + at[k], w[k]), n);
+        put(bad + h + at[k], w[k], val);
+        break;
+    }
+    case 5: {                                          /* the interpreter's path */
+        for (u64 i = 0; i < phnum && phoff + 56 * i + 56 <= n; i++) {
+            unsigned char *h = bad + phoff + 56 * i;
+            if (get(h, 4) != 3) continue;
+            u64 at = get(h + 8, 8), len = get(h + 32, 8);
+            if (at >= n || len > n - at || len == 0) break;
+            static const char *to[] = { "/bin/elfpie", "/bin/mdyn", "/bin/elfexec", "/nothere", "", "/bin" };
+            const char *t = pick(4) ? to[pick(sizeof to / sizeof to[0])] : 0;
+            char me[16] = "/fzelf";
+            u64 m = 6;
+            { char d[8]; int k = 0; u64 x = self; do { d[k++] = (char)('0' + x % 10); x /= 10; } while (x); while (k) me[m++] = d[--k]; me[m] = 0; }
+            if (!t) t = me;
+            u64 l = slen(t);
+            if (l + 1 <= len) {
+                for (u64 j = 0; j < len; j++) bad[at + j] = j < l ? (unsigned char)t[j] : 0;
+                if (pick(4) == 0) put(h + 32, 8, l + 1);
+            } else {
+                for (u64 j = 0; j < len; j++) bad[at + j] = 'x';   /* no NUL */
+            }
+            break;
+        }
+        break;
+    }
+    case 6:                                            /* cut the file short */
+        *size = pick(n + 1);
+        break;
+    default:                                           /* some bytes anywhere in the headers */
+        for (u64 k = 1 + pick(8); k; k--) bad[pick(phoff + 56 * phnum < n ? phoff + 56 * phnum : n)] = (unsigned char)next();
+    }
+}
+
+static int elf_fuzz(u64 seed, u64 runs, u64 verbose) {
+    const unsigned char *copy[NSOURCES] = { elfexec_start, elfpie_start, mdyn_start };
+    u64 size[NSOURCES] = { (u64)(elfexec_end - elfexec_start), (u64)(elfpie_end - elfpie_start), (u64)(mdyn_end - mdyn_start) };
+    for (u64 s = 0; s < NSOURCES; s++)
+        if (size[s] < 64 || size[s] > IMG_MAX) { say("sysfuzz: bad built-in image\n"); return 2; }
+    char me[16] = "/fzelf";
+    { u64 m = 6; char d[8]; int k = 0; u64 x = seed; do { d[k++] = (char)('0' + x % 10); x /= 10; } while (x); while (k) me[m++] = d[--k]; me[m] = 0; }
+    u64 refused = 0, ran = 0, killed = 0;
+    say("sysfuzz: elf seed "); say_num(seed); say("\n");
+    for (u64 r = 0; r < runs; r++) {
+        u64 s = pick(NSOURCES), n = size[s], len = n;
+        for (u64 i = 0; i < n; i++) bad[i] = copy[s][i];
+        for (u64 k = 1 + pick(4); k; k--) damage(n, &len, seed);
+        if (verbose) { say("E "); say_num(r); say(" "); say(elf_sources[s]); say("\n"); }
+        i64 f = (i64)lx(2, path(me), 01 | 0100 | 01000, 0755, 0, 0, 0);   /* O_WRONLY|O_CREAT|O_TRUNC */
+        if (f < 0) { say("sysfuzz: cannot write "); say(me); say("\n"); return 2; }
+        for (u64 at = 0; at < len; ) {
+            i64 w = (i64)lx(1, (u64)f, (u64)bad + at, len - at, 0, 0, 0);
+            if (w <= 0) break;
+            at += (u64)w;
+        }
+        lx(3, (u64)f, 0, 0, 0, 0, 0);
+        i64 pid = (i64)lx(57, 0, 0, 0, 0, 0, 0);
+        if (pid == 0) {
+            lx(3, 1, 0, 0, 0, 0, 0);                  /* whatever it prints goes nowhere */
+            lx(3, 2, 0, 0, 0, 0, 0);
+            u64 argv[2] = { path(me), 0 }, envp[1] = { 0 };
+            lx(59, argv[0], (u64)argv, (u64)envp, 0, 0, 0);
+            lx(60, 127, 0, 0, 0, 0, 0);               /* execve refused it */
+        }
+        if (pid < 0) { refused++; continue; }
+        int status = 0;
+        u64 t;
+        for (t = 0; t < 20; t++) {
+            if ((i64)lx(61, (u64)pid, (u64)&status, 1, 0, 0, 0) == pid) break;   /* WNOHANG */
+            struct { u64 s, ns; } ts = { 0, 10000000 };
+            lx(35, (u64)&ts, 0, 0, 0, 0, 0);
+        }
+        if (t == 20) {
+            lx(62, (u64)pid, 9, 0, 0, 0, 0);
+            lx(61, (u64)pid, (u64)&status, 0, 0, 0, 0);
+            killed++;
+        } else if ((status & 0x7F) == 0 && ((status >> 8) & 0xFF) == 127) {
+            refused++;
+        } else {
+            ran++;
+        }
+    }
+    lx(87, path(me), 0, 0, 0, 0, 0);                  /* unlink */
+    say("sysfuzz: elf seed "); say_num(seed); say(" ran "); say_num(runs);
+    say(" images: "); say_num(refused); say(" refused, "); say_num(ran); say(" ended, ");
+    say_num(killed); say(" killed\n");
+    return 0;
+}
+
 u64 elf_main(u64 *sp) {
     if (!sp) return 1;
     u64 argc = sp[0];
     char **argv = (char **)(sp + 1);
-    u64 seed = 0, calls = 2000, verbose = 0;
+    u64 seed = 0, calls = 2000, verbose = 0, elf = 0;
+    if (argc >= 2 && argv[1][0] == 'e') { elf = 1; argv++; argc--; }
     if (argc >= 2) for (char *s = argv[1]; *s >= '0' && *s <= '9'; s++) seed = seed * 10 + (u64)(*s - '0');
     if (argc >= 3) { calls = 0; for (char *s = argv[2]; *s >= '0' && *s <= '9'; s++) calls = calls * 10 + (u64)(*s - '0'); }
     if (argc >= 4 && argv[3][0] == 'v') verbose = 1;
     rng = seed * 0x9E3779B97F4A7C15ul + 1;
     stack_hi = ((u64)sp + 0x10000) & ~0xFFFul;
     stack_lo = ((u64)sp - (1ul << 20)) & ~0xFFFul;
+    if (elf) {
+        if (lx(9, BUF_AT, BUF_SIZE, 3, 0x32, ~0ul, 0) != BUF_AT) return 2;
+        return (u64)elf_fuzz(seed, argc >= 3 ? calls : 50, verbose);
+    }
 
     /* SIGPIPE: ignored, so a write to a pipe nobody reads fails with EPIPE
      * instead of ending the run. */

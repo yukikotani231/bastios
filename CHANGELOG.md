@@ -362,6 +362,13 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Tests and documentation
 
+- The system call fuzzer damages executables too (`sysfuzz e SEED RUNS`,
+  `ELFRUNS=` in `test/fuzz_test.sh`, 100 in `make test`): it breaks the
+  headers of three real programs (fixed-address, PIE, and one with an
+  interpreter), points the interpreter at other programs, itself or
+  nothing, cuts the file short, and has a child exec each one. Its call list
+  gained the 100 Linux calls BastiOS implemented since it was written; the
+  ones that would block or end the run are tamed.
 - A getting-started guide (`docs/getting-started.md`): build, boot in
   QEMU, write a Bastio program, run a Linux program, boot from a USB
   stick. `make test` checks its programs and terminal sessions, and the
