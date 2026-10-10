@@ -35,8 +35,8 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest crashme
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread ash
-UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf)
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash
+UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so
 
 build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
 	$(BASTIOC) --target user -o $@ $<
@@ -99,6 +99,16 @@ MUSLCC ?= musl-gcc
 
 build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf: build/user/%.elf: user/%.c | build/user
 	$(MUSLCC) -static-pie -O2 -o $@ $<
+
+# A dynamically linked PIE, and musl's dynamic linker (libc.so, which is
+# also /lib/ld-musl-x86_64.so.1) that the kernel loads as its interpreter.
+build/user/mdyn.elf: user/mdyn.c | build/user
+	$(MUSLCC) -fPIE -pie -O2 -o $@ $<
+
+MUSL_LDSO ?= /lib/ld-musl-x86_64.so.1
+
+build/user/ld-musl.so: | build/user
+	cp -L $(MUSL_LDSO) $@
 
 # BusyBox (GPL-2.0-only, not part of this repository): fetched at a pinned
 # tag, configured from allnoconfig plus the options in user/busybox.config,

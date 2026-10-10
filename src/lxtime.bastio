@@ -561,7 +561,8 @@ fn lx_itimer(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
 
 /// rt_sigtimedwait(set, info, timeout): takes the lowest pending signal in
 /// set and returns it, filling in the siginfo's number; waits (a run
-/// again) until one is pending or the timeout passes (-EAGAIN).
+/// again) until one is pending or the timeout passes (-EAGAIN). The
+/// siginfo carries the signal's number and sender.
 fn lx_sigtimedwait(k: &mut Kernel, pid: u64, n: u64, was: u64, setp: u64, info: u64, tsp: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -596,6 +597,7 @@ fn lx_sigtimedwait(k: &mut Kernel, pid: u64, n: u64, was: u64, setp: u64, info: 
           i = i + 1;
         }
         bset(&mut k.fs.xfer, 0, cast[u8](s));
+        bset(&mut k.fs.xfer, 16, cast[u8](get(k.sigsave, sender_at(pid, s)) % 256));   // si_pid
         if lx_put_out(&mut k, pid, info, 128) != 0 {
           ret(&mut k.procs, pid, EFAULT);
           return KEEP;
