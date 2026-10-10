@@ -27,12 +27,43 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
   `/proc/self/mounts`) and three read-only sysctls:
   `/proc/sys/kernel/tainted`, `pid_max` and `printk`.
 - The in-memory file system holds 128 files and directories (it held 32).
-
+- `sendmsg` and `recvmsg`, with `SCM_RIGHTS` passing a descriptor over an
+  `AF_UNIX` socket (one per message, one in flight per direction);
+  `MSG_PEEK` on TCP and unix sockets; `shutdown` on TCP (sends the FIN)
+  and unix sockets; `MSG_NOSIGNAL`; `SO_SNDBUF` and `SO_RCVBUF`;
+  `AF_UNIX` `SOCK_DGRAM` and `SOCK_SEQPACKET` socket pairs, which keep
+  message boundaries; and `rt_sigqueueinfo` (`sigqueue`), whose value
+  reaches the handler's siginfo. A new compat program, `t_sock2`, checks
+  these.
+- `signalfd` and `signalfd4`: read, poll and epoll on the signals in its
+  set. A blocked signal is now kept pending even when its action ignores
+  it, as on Linux, so a blocked `SIGCHLD` reaches a signalfd or `sigwait`.
+- A Linux program blocked on a network socket (`accept`, `read`,
+  `recvfrom`, a full TCP send buffer) sleeps instead of being restarted on
+  every pass of the scheduler, so it no longer keeps a processor busy
+  (`ps` shows it as `socket`). The network card wakes it by interrupt:
+  MSI-X on virtio-net, the PCI interrupt line through the 8259 on the
+  e1000, asked for only while someone sleeps. `make netbench` measures it.
 - File locks are kept (`src/lxlock.bastio`): `fcntl` record locks
   (`F_GETLK`, `F_SETLK`, `F_SETLKW`), open file description locks
   (`F_OFD_*`) and `flock`, with Linux's owners and release rules. A
-  conflicting `F_SETLKW` or blocking `flock` waits. Deadlocks are not
-  detected. Checked by the new compat program `t_lock`.
+  conflicting `F_SETLKW` or blocking `flock` waits, and an `F_SETLKW` that
+  would close a cycle of waits fails with `EDEADLK`. Checked by the new
+  compat program `t_lock`.
+- C can be built on BastiOS: tcc and GNU make 4.4.1, built as static PIEs,
+  compile and link programs (dynamic PIEs against musl's `libc.so`) and
+  run makefiles, `-j` included. `make compat` boots a second disk with
+  them and a small C runtime and runs `test/compat/dev.txt`.
+- `ppoll` and `pselect6` wait with the signal mask they are given (GNU
+  make `-j` hung waiting for SIGCHLD).
+
+### Fixed
+
+- Modification times were seconds since boot; they are wall-clock times
+  now, as `stat` reports them.
+- A file created by `open` with `O_CREAT` gets the mode asked for, less a
+  umask of 022 (it was always 0644, so programs tcc linked were not
+  executable by mode).
 - Real programs in `make compat` (`test/compat/apps.txt`): Lua 5.4.7,
   QuickJS and the sqlite3 3.52 shell, built from source as static PIEs,
   run their files, pipes, timers, WAL databases and a 20000-row index.

@@ -1,0 +1,300 @@
+// sendmsg and recvmsg: send and recv over a list of buffers (struct
+// iovec), with a destination or source address, and SCM_RIGHTS control
+// messages that pass a descriptor over an AF_UNIX socket.
+//
+// Not done: a datagram goes out from the first non-empty buffer alone
+// (sendmsg on a datagram socket with more than one is -EINVAL, not a
+// gather), and one comes in to the first buffer (the rest of the list
+// stays empty). SCM_RIGHTS passes one descriptor per message, at most
+// one in flight per direction (a second waits until the first is
+// received), and it goes with the next bytes read rather than with the
+// bytes it was sent beside. A socket sent over itself and then closed
+// is never freed (Linux has a collector for these cycles).
+
+import "lxmore.bastio";
+
+const LX_SENDMSG: u64 = 46;
+const LX_RECVMSG: u64 = 47;
+const MSGHDR: u64 = 56;                   // struct msghdr
+const SCM_RIGHTS: u64 = 1;
+const CMSG_ONE: u64 = 20;                 // CMSG_LEN(sizeof(int))
+const CMSG_ROOM: u64 = 24;                // CMSG_SPACE(sizeof(int))
+const MSG_CTRUNC: u64 = 8;
+const MSG_CMSG_CLOEXEC: u64 = 0x40000000;
+const ETOOMANYREFS: u64 = 18446744073709551507;   // 2^64 - 109
+
+fn is_msg_call(n: u64) -> bool {
+  return n == LX_SENDMSG || n == LX_RECVMSG;
+}
+
+/// The (base, length) of buffer i of the list at iov, in the transfer
+/// buffer's first 16 bytes; false if it cannot be read.
+fn iov_at(k: &mut Kernel, pid: u64, iov: u64, i: u64) -> bool
+  requires kok(k) && pid < NPROC && i < 1024
+  ensures kok(k)
+{
+  return iov <= 0xFFFFFFFFFFFF0000 && copy_from_user(&mut k.spaces, pid, iov + 16 * i, &mut k.fs.xfer, 16) == 16;
+}
+
+/// The description an SCM_RIGHTS message at user address ctl (clen bytes
+/// of control data) passes: its number, OFD_N if there is no such
+/// message, or an error.
+fn rights_in(k: &mut Kernel, pid: u64, ctl: u64, clen: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if ctl == 0 || clen < 16 {
+    return OFD_N;
+  }
+  if ctl > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, ctl, &mut k.fs.xfer, 16) != 16 {
+    return EFAULT;
+  }
+  let len = get_u64(k.fs.xfer, 0);
+  let level = get_u64(k.fs.xfer, 8) % 0x100000000;
+  let kind = get_u64(k.fs.xfer, 8) / 0x100000000;
+  if level != SOL_SOCKET || kind != SCM_RIGHTS {
+    return OFD_N;                           // another control message: ignored
+  }
+  if len < CMSG_ONE || len > clen {
+    return EINVAL;
+  }
+  if len > CMSG_ONE {
+    return ETOOMANYREFS;                    // more than one descriptor
+  }
+  if copy_from_user(&mut k.spaces, pid, ctl + 16, &mut k.fs.xfer, 4) != 4 {
+    return EFAULT;
+  }
+  let fd = get_u64(k.fs.xfer, 0) % 0x100000000;
+  let v = fd_get(k.lxfd, pid, fd) % FD_CLOEXEC;
+  if v < FD_OFD || v - FD_OFD >= OFD_N {
+    return EBADF;                           // also the console: no description
+  }
+  return v - FD_OFD;
+}
+
+/// sendmsg(fd, msg, flags): each buffer in turn, as send would, to
+/// msg_name if it is set; stops at the first one taken short. The first
+/// may wait (SK_WAIT); a later one that would wait ends the call.
+fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if msg > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, msg, &mut k.fs.xfer, MSGHDR) != MSGHDR {
+    return EFAULT;
+  }
+  let name = get_u64(k.fs.xfer, 0);
+  let nlen = get_u64(k.fs.xfer, 8) % 0x100000000;
+  let iov = get_u64(k.fs.xfer, 16);
+  let cnt = get_u64(k.fs.xfer, 24);
+  let ctl = get_u64(k.fs.xfer, 32);
+  let clen = get_u64(k.fs.xfer, 40);
+  if cnt > 1024 {
+    return EMSGSIZE;
+  }
+  let pass = rights_in(&mut k, pid, ctl, clen);
+  if pass > OFD_N {
+    return pass;
+  }
+  let unix = is_unix(k, pid, fd);
+  let mut tx = UX_N;                        // the channel a description goes over
+  if pass < OFD_N {
+    let u = ux_look(k, pid, fd);
+    if !unix || u.err != 0 || u.mode != UM_CONN {
+      return EINVAL;
+    }
+    tx = u.x / UX_N;
+    if uc_fly(k, tx) != 0 {
+      if u.nb == 1 || flags / MSG_DONTWAIT % 2 == 1 {
+        return EAGAIN;
+      }
+      return SK_WAIT;                       // the last one is not received yet
+    }
+  }
+  let dgram = !is_tcp(k, pid, fd) && (!unix || ux_dgram(k, pid, fd));
+  let mut done = 0;
+  let mut sent = false;
+  let mut stop = false;
+  let mut i = 0;
+  while i < cnt && !stop
+    invariant i <= cnt && cnt <= 1024 && kok(k)
+  {
+    if !iov_at(&mut k, pid, iov, i) {
+      return EFAULT;
+    }
+    let base = get_u64(k.fs.xfer, 0);
+    let len = get_u64(k.fs.xfer, 8);
+    if len > 0 || (dgram && i + 1 == cnt && !sent) {
+      if dgram && sent {
+        return EINVAL;                      // a gather: see the top of the file
+      }
+      let mut r = 0;
+      if unix {
+        r = ux_send(&mut k, pid, fd, base, len, sent || flags / MSG_DONTWAIT % 2 == 1);
+      } else {
+        r = lx_sendto(&mut k, pid, fd, base, len, name, nlen);
+      }
+      if r > 0x7FFFFFFFFFFFFFFF {
+        if !sent {
+          return r;                         // -errno, or SK_WAIT
+        }
+        stop = true;
+      } else {
+        sent = true;
+        done = sat_add(done, smaller(r, len));
+        stop = r < len;
+      }
+    }
+    i = i + 1;
+  }
+  let refs = of_get(k.ofd, pass % OFD_N, 1);
+  if pass < OFD_N && tx < UX_N && sent && of_get(k.ofd, pass, 0) != OF_FREE && refs < 0xFFFFFFFF {
+    of_set(&mut k.ofd, pass, 1, refs + 1);  // the message's reference
+    uc_set_fly(&mut k, tx, pass + 1);
+  }
+  return done;
+}
+
+/// recvmsg(fd, msg, flags): fills the buffers in turn, as recv would; the
+/// first may wait, the rest take only what is already there. Writes the
+/// source to msg_name (msg_namelen updated), a description in flight as
+/// an SCM_RIGHTS message to msg_control (msg_controllen updated), and
+/// msg_flags.
+fn lx_recvmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if msg > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, msg, &mut k.fs.xfer, MSGHDR) != MSGHDR {
+    return EFAULT;
+  }
+  let name = get_u64(k.fs.xfer, 0);
+  let iov = get_u64(k.fs.xfer, 16);
+  let cnt = get_u64(k.fs.xfer, 24);
+  let ctl = get_u64(k.fs.xfer, 32);
+  let clen = get_u64(k.fs.xfer, 40);
+  if cnt > 1024 {
+    return EMSGSIZE;
+  }
+  let peek = flags / MSG_PEEK % 2 == 1;
+  let unix = is_unix(k, pid, fd);
+  let dgram = !is_tcp(k, pid, fd) && (!unix || ux_dgram(k, pid, fd));
+  // A description in flight comes out first, so the recv below does not
+  // drop it; it goes back if no bytes come.
+  let mut rx = UX_N;
+  let mut fly = 0;
+  if unix && !peek {
+    let u = ux_look(k, pid, fd);
+    if u.err == 0 && u.mode == UM_CONN {
+      rx = u.x % UX_N;
+      fly = uc_fly(k, rx);
+      uc_set_fly(&mut k, rx, 0);
+    }
+  }
+  let mut namep = 0;
+  if name != 0 {
+    namep = msg + 8;                        // recvfrom's length pointer: msg_namelen
+  }
+  let mut done = 0;
+  let mut got = false;
+  let mut stop = false;
+  let mut i = 0;
+  while i < cnt && !stop
+    invariant i <= cnt && cnt <= 1024 && kok(k)
+  {
+    if !iov_at(&mut k, pid, iov, i) {
+      stop = true;
+      if !got {
+        done = EFAULT;
+      }
+    } else {
+      let base = get_u64(k.fs.xfer, 0);
+      let len = get_u64(k.fs.xfer, 8);
+      if len > 0 || (i + 1 == cnt && !got) {
+        let mut fl = flags;
+        if got {
+          fl = flags | MSG_DONTWAIT;
+        }
+        let r = lx_recvfrom(&mut k, pid, fd, base, len, fl, name, namep);
+        if r > 0x7FFFFFFFFFFFFFFF {
+          if !got {
+            done = r;                       // -errno, or SK_WAIT
+          }
+          stop = true;
+        } else {
+          got = true;
+          done = sat_add(done, smaller(r, len));
+          stop = r < len || dgram || peek || r == 0;
+        }
+      }
+      i = i + 1;
+    }
+  }
+  if !got || done == 0 {
+    if fly != 0 && rx < UX_N {
+      uc_set_fly(&mut k, rx, fly);          // it waits for the bytes after
+    }
+    if !got {
+      return done;
+    }
+    fly = 0;
+  }
+  // The control data: the description, if it fits; else MSG_CTRUNC.
+  let mut cused = 0;
+  let mut mflags = 0;
+  if fly > 0 && fly <= OFD_N {
+    if ctl != 0 && clen >= CMSG_ONE {
+      let nfd = fd_install(&mut k, pid, fly - 1);
+      if nfd < LXNFD {
+        if flags / MSG_CMSG_CLOEXEC % 2 == 1 {
+          fd_set(&mut k.lxfd, pid, nfd, FD_OFD + fly - 1 + FD_CLOEXEC);
+        }
+        lx_fill(&mut k, 0, CMSG_ROOM);
+        xfer_u64(&mut k.fs.xfer, 0, CMSG_ONE);
+        xfer_u64(&mut k.fs.xfer, 8, SOL_SOCKET + 0x100000000 * SCM_RIGHTS);
+        xfer_u64(&mut k.fs.xfer, 16, nfd);
+        if lx_put_out(&mut k, pid, ctl, smaller(clen, CMSG_ROOM)) != 0 {
+          return EFAULT;
+        }
+        cused = smaller(clen, CMSG_ROOM);
+      } else {
+        mflags = MSG_CTRUNC;                // fd_install dropped it
+      }
+    } else {
+      mflags = MSG_CTRUNC;
+      unref_value(&mut k, FD_OFD + fly - 1);
+    }
+  }
+  xfer_u64(&mut k.fs.xfer, 0, cused);
+  if lx_put_out(&mut k, pid, msg + 40, 8) != 0 {
+    return EFAULT;
+  }
+  xfer_u64(&mut k.fs.xfer, 0, mflags);
+  if lx_put_out(&mut k, pid, msg + 48, 4) != 0 {
+    return EFAULT;
+  }
+  return done;
+}
+
+/// The two calls. Returns KEEP or SWITCH, as linux_syscall does.
+fn lx_msg_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  let mut r = 0;
+  if n == LX_SENDMSG {
+    r = lx_sendmsg(&mut k, pid, a, b, c);
+  } else {
+    r = lx_recvmsg(&mut k, pid, a, b, c);
+  }
+  if r == SK_WAIT && !is_unix(k, pid, a) {
+    return sock_retry(&mut k, pid, n);       // sleep until a frame comes in
+  }
+  if r == SK_WAIT {
+    return lx_retry(&mut k, pid, n);
+  }
+  ret(&mut k.procs, pid, r);
+  if r == EPIPE && n == LX_SENDMSG && c / MSG_NOSIGNAL % 2 == 0 {
+    post_sig(&mut k, pid, SIGPIPE);
+    return SWITCH;
+  }
+  return KEEP;
+}

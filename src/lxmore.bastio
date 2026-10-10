@@ -335,7 +335,7 @@ fn lx_memfd(k: &mut Kernel, pid: u64, flags: u64) -> u64
     invariant tries <= 16 && kok(k)
   {
     let n = memfd_name(&mut k, pid, sat_add(k.ns, tries));
-    let fd = lx_open_n(&mut k, pid, n, oflags);
+    let fd = lx_open_n(&mut k, pid, n, oflags, 384);   // 0600
     if fd < LXNFD {
       let n2 = memfd_name(&mut k, pid, sat_add(k.ns, tries));
       vfs_unlink(&mut k.fs, &mut k.mem, n2);

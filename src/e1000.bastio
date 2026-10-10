@@ -22,6 +22,7 @@ const E1K_TXR: u64 = 2048;            // where the transmit ring starts in the r
 const E1K_CTRL: u64 = 0x0000;
 const E1K_EERD: u64 = 0x0014;         // EEPROM read
 const E1K_ICR: u64 = 0x00C0;
+const E1K_IMS: u64 = 0x00D0;          // interrupt mask set
 const E1K_IMC: u64 = 0x00D8;          // interrupt mask clear
 const E1K_RCTL: u64 = 0x0100;
 const E1K_TCTL: u64 = 0x0400;
@@ -52,6 +53,7 @@ const EERD_DONE: u64 = 16;
 const TX_CMD: u64 = 0x0B;             // end of packet, insert the CRC, report status
 const DESC_DD: u64 = 1;               // descriptor done
 const DESC_EOP: u64 = 2;              // the whole frame is in this buffer
+const ICR_RX: u64 = 0x84;             // the interrupts asked for: a frame received (RXT0), link change (LSC)
 
 struct E1k {
   regs: Mmio,
@@ -65,6 +67,7 @@ struct E1k {
   tx_next: u64,       // the next transmit descriptor
   mac: u64,
   live: bool,
+  irq: bool,          // received frames can raise its PCI interrupt line (see e1k_irq)
 }
 
 spec fn e1k_ok(e: &E1k) -> bool {
@@ -169,7 +172,7 @@ fn e1k_new(regs: Mmio, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3: Frame, t: 
   ensures e1k_ok(result)
 {
   let mut e = E1k { regs: regs, ring: dma_lend(r), rb0: dma_lend(b0), rb1: dma_lend(b1), rb2: dma_lend(b2),
-    rb3: dma_lend(b3), tb: dma_lend(t), rx_next: 0, tx_next: 0, mac: 0, live: false };
+    rb3: dma_lend(b3), tb: dma_lend(t), rx_next: 0, tx_next: 0, mac: 0, live: false, irq: false };
   let ra = dma_addr(e.ring);
   if ra > ADDR_LIMIT - 4096 || !e1k_reset(&mut e) {
     return e;
@@ -264,6 +267,39 @@ fn e1k_free(e: E1k, m: &mut Mem) -> Mmio
   give_page(&mut m, dma_take(d.rb3));
   give_page(&mut m, dma_take(d.tb));
   return d.regs;
+}
+
+/// The caller has unmasked the card's interrupt line at the 8259: from now
+/// on `e1k_irq` may let the card raise it.
+fn e1k_irq_on(e: &mut E1k)
+  requires e1k_ok(e)
+  ensures e1k_ok(e) && e.live == old(e.live)
+{
+  e.irq = e.live;
+}
+
+/// Whether a received frame raises the card's interrupt line, if it can.
+/// Unmasking a cause the card already has pending raises it at once.
+fn e1k_irq(e: &mut E1k, on: bool)
+  requires e1k_ok(e)
+  ensures e1k_ok(e) && e.live == old(e.live) && e.irq == old(e.irq)
+{
+  if e.irq && on {
+    e1k_write(&mut e, E1K_IMS, ICR_RX);
+  } else if e.irq {
+    e1k_write(&mut e, E1K_IMC, ICR_RX);
+  }
+}
+
+/// Reading the interrupt cause clears it, so the card lowers its line
+/// (which is level-triggered) before the stack looks for frames.
+fn e1k_ack(e: &mut E1k)
+  requires e1k_ok(e)
+  ensures e1k_ok(e) && e.live == old(e.live) && e.irq == old(e.irq)
+{
+  if e.irq {
+    e1k_read(&mut e, E1K_ICR);
+  }
 }
 
 /// Copies the next received frame into `pkt` and returns its length, or 0

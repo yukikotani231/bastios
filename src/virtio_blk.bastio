@@ -14,12 +14,7 @@ import "bio.bastio";
 
 const VIRTIO_BLK: u64 = 0x1001;       // legacy (transitional) block device id
 const VIO_CAPACITY: u64 = 0x14;       // 64 bits: the size in 512-byte sectors
-// With MSI-X on, two registers come first and the configuration (the
-// capacity) moves on by 4 bytes.
-const VIO_MSIX_CONFIG: u64 = 0x14;    // the message for configuration changes
-const VIO_MSIX_QUEUE: u64 = 0x16;     // the selected queue's message
-const VIO_CAPACITY_MSIX: u64 = 0x18;
-const VIO_NO_VECTOR: u64 = 0xFFFF;
+const VIO_CAPACITY_MSIX: u64 = 0x18;  // with MSI-X on (see VIO_CONFIG_MSIX)
 
 const BLK_IN: u64 = 0;                // read
 const BLK_OUT: u64 = 1;               // write

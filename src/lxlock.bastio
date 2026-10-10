@@ -14,10 +14,17 @@
 // when the last descriptor for its description closes (lx_fd_close and
 // unref_value in src/lxfd.bastio call lock_drop).
 //
-// Not done: F_SETLKW and a blocking flock wait by running the call again
-// on later ticks, like a full pipe; deadlocks between record locks are not
-// detected (no EDEADLK), and a wait that would never end only ends with a
-// signal. Mandatory locking and leases are not supported.
+// F_SETLKW and a blocking flock wait by running the call again on later
+// ticks, like a full pipe. A process about to wait for a record lock notes
+// what it waits for (after the table, LK_WW words per process: file plus
+// 1, type, first byte, byte after the last); if following "the holder of
+// the lock in my way waits for a lock whose holder ..." leads back to the
+// caller, F_SETLKW fails with EDEADLK instead, as on Linux. A note counts
+// only while its process is still in that fcntl call.
+//
+// Not done: waits on OFD locks and flocks are not part of deadlock
+// detection (Linux leaves them out too), and mandatory locking and leases
+// are not supported.
 
 import "lxfd.bastio";
 
@@ -25,6 +32,7 @@ const F_RDLCK: u64 = 0;
 const F_WRLCK: u64 = 1;
 const FLOCK_SIZE: u64 = 32;               // struct flock
 const ENOLCK: u64 = 18446744073709551579;     // 2^64 - 37
+const EDEADLK: u64 = 18446744073709551581;    // 2^64 - 35
 const LK_SIGN: u64 = 9223372036854775808;     // 2^63: off_t values at or above it are negative
 
 fn lk_get(t: &Buf, i: u64, f: u64) -> u64
@@ -38,6 +46,83 @@ fn lk_set(t: &mut Buf, i: u64, f: u64, v: u64)
   ensures len(t) == LK_LEN
 {
   t = set(t, i * LK_W + f, v);
+}
+
+fn lk_wait_get(t: &Buf, p: u64, f: u64) -> u64
+  requires len(t) == LK_LEN && p < NPROC && f < LK_WW
+{
+  return get(t, LK_WAITS + p * LK_WW + f);
+}
+
+fn lk_wait_set(t: &mut Buf, p: u64, f: u64, v: u64)
+  requires len(t) == LK_LEN && p < NPROC && f < LK_WW
+  ensures len(t) == LK_LEN
+{
+  t = set(t, LK_WAITS + p * LK_WW + f, v);
+}
+
+/// A thread of the process led by g that waits in F_SETLKW for a record
+/// lock, or NPROC.
+fn lk_waiter(k: &Kernel, g: u64) -> u64
+  requires kok(k)
+  ensures result <= NPROC
+{
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC
+  {
+    let st = state(k.procs, p);
+    if st != FREE && st != ZOMBIE && tgid(k.procs, p) == g && lk_wait_get(k.locks, p, 0) != 0
+      && pget(k.procs, p, F_RESTART) != 0 && pget(k.procs, p, F_REGS + R_RAX) == LX_FCNTL {
+      return p;
+    }
+    p = p + 1;
+  }
+  return NPROC;
+}
+
+/// Whether owner `me` waiting for a ty lock on [s, e) of file would close
+/// a cycle of waits: the holder in its way waits for a lock held by one
+/// that waits ..., back to me.
+fn lk_deadlock(k: &Kernel, me: u64, file: u64, ty: u64, s: u64, e: u64) -> bool
+  requires kok(k) && file < LK_EOF
+{
+  let mut owner = me;
+  let mut f = file;
+  let mut t = ty;
+  let mut a = s;
+  let mut b = e;
+  let mut step = 0;
+  while step < NPROC
+    invariant step <= NPROC && f < LK_EOF
+  {
+    let i = lk_conflict(k.locks, f, LKC_FCNTL, owner, t, a, b);
+    if i == LK_N {
+      return false;
+    }
+    let holder = lk_get(k.locks, i, 1);
+    if holder == me {
+      return true;
+    }
+    if holder >= NPROC {
+      return false;                         // a description's lock: not followed
+    }
+    let p = lk_waiter(k, holder);
+    if p >= NPROC {
+      return false;                         // the holder is not waiting
+    }
+    let wf = lk_wait_get(k.locks, p, 0);
+    if wf == 0 || wf - 1 >= LK_EOF {
+      return false;
+    }
+    owner = holder;
+    f = wf - 1;
+    t = lk_wait_get(k.locks, p, 1);
+    a = lk_wait_get(k.locks, p, 2);
+    b = lk_wait_get(k.locks, p, 3);
+    step = step + 1;
+  }
+  return false;
 }
 
 /// Whether held lock i belongs to the same file and class as a request,
@@ -316,11 +401,23 @@ fn lx_fcntl_lock(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     return 0;
   }
   if ty != F_UNLCK && lk_conflict(k.locks, file, LKC_FCNTL, owner, ty, s, e) < LK_N {
-    if cmd == F_SETLKW || cmd == F_OFD_SETLKW {
+    if cmd == F_OFD_SETLKW {
+      return LK_WAIT;
+    }
+    if cmd == F_SETLKW {
+      if lk_deadlock(k, owner, file, ty, s, e) {
+        lk_wait_set(&mut k.locks, pid, 0, 0);
+        return EDEADLK;
+      }
+      lk_wait_set(&mut k.locks, pid, 0, file + 1);
+      lk_wait_set(&mut k.locks, pid, 1, ty);
+      lk_wait_set(&mut k.locks, pid, 2, s);
+      lk_wait_set(&mut k.locks, pid, 3, e);
       return LK_WAIT;
     }
     return EAGAIN;
   }
+  lk_wait_set(&mut k.locks, pid, 0, 0);
   return lk_apply(&mut k.locks, file, LKC_FCNTL, owner, ty, s, e);
 }
 
