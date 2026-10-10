@@ -57,6 +57,7 @@ const LXWAITING: u64 = 6;            // blocked in a Linux wait4 for any child
 const RUNNING: u64 = 7;              // on a processor: its space and FPU page are out
 const KILLED: u64 = 8;               // RUNNING, and killed: ends when it comes back
 const NETWAIT: u64 = 9;              // waiting for the network (a ping's reply)
+const CONWAIT: u64 = 10;             // writing to the console, whose ring is full
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -261,20 +262,6 @@ fn q_pop(q: &mut Buf) -> u64
   return b;
 }
 
-/// Moves every byte the UART has received into the queue.
-fn drain(con: &mut Con, q: &mut Buf)
-  requires con_ok(con) && qok(q)
-  ensures qok(q) && con_ok(con)
-{
-  let mut c = con_poll(&mut con);
-  while c < 256
-    invariant qok(q) && con_ok(con)
-  {
-    q_push(&mut q, c);
-    c = con_poll(&mut con);
-  }
-}
-
 /// Hands queued bytes to processes blocked in READ, and wakes processes
 /// blocked in a Linux read once a whole line is typed.
 fn wake_readers(procs: &mut Buf, q: &mut Buf, line: &Buf)
@@ -318,6 +305,9 @@ const OF_PIPE_W: u64 = 3;
 const OF_DIR: u64 = 4;                // x: DIR_ROOT or DIR_BIN; word 3: next entry
 // lx_recvfrom's answer when the caller must wait: no count or errno.
 const SK_WAIT: u64 = 0x8000000000000000;
+// What lx_write_fd returns when the console's ring has no room for the
+// write: not an errno, and never returned to the process.
+const CON_FULL: u64 = 0x8000000000000001;
 // Linux working directories: per process, word 0 the length of the path
 // (without the leading "/", at most FNAME_MAX) and one byte a word after.
 const CWD_STRIDE: u64 = 32;
@@ -774,6 +764,8 @@ fn put_state(con: &mut Con, s: u64)
     puts(&mut con, "waiting");
   } else if s == RUNNING || s == KILLED {
     puts(&mut con, "running");
+  } else if s == CONWAIT {
+    puts(&mut con, "writing");
   } else if s == NETWAIT {
     puts(&mut con, "netwait");
   } else {

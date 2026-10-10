@@ -78,11 +78,17 @@ fn do_write(con: &mut Con, spaces: &mut Vec[Space], pid: u64, va: u64, n: u64) -
 }
 
 /// Writes the n bytes at offset off of the user window to the console,
-/// stopping short at an unmapped page. Returns the count written.
-fn write_from(con: &mut Con, root: &mut PageTable, off: u64, n: u64) -> u64
-  requires con_ok(con) && pt_level(root) == 4 && off + n <= USER_SIZE
+/// stopping short at an unmapped page or when the console's ring is full.
+/// Returns the count written.
+fn write_from(con: &mut Con, root: &mut PageTable, off: u64, n0: u64) -> u64
+  requires con_ok(con) && pt_level(root) == 4 && off + n0 <= USER_SIZE
   ensures con_ok(con) && pt_level(root) == 4
 {
+  let mut n = n0;
+  let room = con_room(con);
+  if room < n {
+    n = room;
+  }
   if !pt_has(root, 1) {
     return 0;
   }
@@ -92,7 +98,7 @@ fn write_from(con: &mut Con, root: &mut PageTable, off: u64, n: u64) -> u64
     let mut l2 = pt_take(&mut l3, 0);
     let mut ok = true;
     while ok && k < n
-      invariant k <= n && pt_level(l2) == 2 && con_ok(con)
+      invariant k <= n && n <= n0 && pt_level(l2) == 2 && con_ok(con)
     {
       let ch = w_byte(&mut l2, off + k);
       if ch == 256 {
@@ -495,6 +501,12 @@ fn syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return SWITCH;
   }
   if n == SYS_WRITE {
+    let room = con_room(con);
+    if b > room && room < OUTCAP {
+      // The console's ring is too full: wait for the scheduler to pump
+      // some of it out, then retry, rather than drop bytes.
+      return con_block(&mut k, pid, SYS_WRITE);
+    }
     ret(&mut k.procs, pid, do_write(&mut con, &mut k.spaces, pid, a, b));
     return KEEP;
   }
