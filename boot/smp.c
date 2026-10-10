@@ -118,7 +118,7 @@ static uint64_t find_madt(uint64_t *len) {
     return 0;
 }
 
-/* The local APIC lies in the device window boot.S maps uncached (3-4 GiB). */
+/* The local APIC lies in the device window boot.S maps uncached (2-4 GiB). */
 static int map_lapic(uint64_t base) {
     if (base < 3 * IDENT_LIMIT || base >= 4 * IDENT_LIMIT) return 0;
     lapic = (volatile uint32_t *)base;

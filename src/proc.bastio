@@ -262,16 +262,16 @@ fn q_pop(q: &mut Buf) -> u64
 }
 
 /// Moves every byte the UART has received into the queue.
-fn drain(con: &mut Uart, q: &mut Buf)
-  requires uart_ok(con) && qok(q)
-  ensures qok(q)
+fn drain(con: &mut Con, q: &mut Buf)
+  requires con_ok(con) && qok(q)
+  ensures qok(q) && con_ok(con)
 {
-  let mut c = uart_poll(&mut con);
+  let mut c = con_poll(&mut con);
   while c < 256
-    invariant qok(q)
+    invariant qok(q) && con_ok(con)
   {
     q_push(&mut q, c);
-    c = uart_poll(&mut con);
+    c = con_poll(&mut con);
   }
 }
 
@@ -762,8 +762,9 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
   }
 }
 
-fn put_state(con: &mut Uart, s: u64)
-  requires uart_ok(con)
+fn put_state(con: &mut Con, s: u64)
+  requires con_ok(con)
+  ensures con_ok(con)
 {
   if s == READY {
     puts(&mut con, "ready  ");
@@ -780,13 +781,14 @@ fn put_state(con: &mut Uart, s: u64)
   }
 }
 
-fn print_ps(con: &mut Uart, procs: &Buf)
-  requires uart_ok(con) && len(procs) == PTAB_LEN
+fn print_ps(con: &mut Con, procs: &Buf)
+  requires con_ok(con) && len(procs) == PTAB_LEN
+  ensures con_ok(con)
 {
   puts(&mut con, "  PID  PPID STATE    TICKS NAME\r\n");
   let mut p = 1;
   while p < NPROC
-    invariant 1 <= p && p <= NPROC
+    invariant 1 <= p && p <= NPROC && con_ok(con)
   {
     if state(procs, p) != FREE {
       put_num_pad(&mut con, p, 5);

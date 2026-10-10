@@ -15,8 +15,8 @@ struct Pic { master: PortIo, slave: PortIo }
 
 spec fn pic_ok(p: &Pic) -> bool { port_count(p.master) == 2 && port_count(p.slave) == 2 }
 
-/// Moves IRQs 0-15 to vectors 32-47 and unmasks only the timer (IRQ 0) and
-/// COM1 (IRQ 4).
+/// Moves IRQs 0-15 to vectors 32-47 and unmasks only the timer (IRQ 0), the
+/// keyboard (IRQ 1) and COM1 (IRQ 4).
 fn pic_init(p: &mut Pic)
   requires pic_ok(p)
 {
@@ -28,7 +28,7 @@ fn pic_init(p: &mut Pic)
   pio_out8(&mut p.slave, 1, 2);        //       and knows it is number 2
   pio_out8(&mut p.master, 1, 1);       // ICW4: 8086 mode
   pio_out8(&mut p.slave, 1, 1);
-  pio_out8(&mut p.master, 1, 0xEE);    // masks: all but IRQ 0 and 4
+  pio_out8(&mut p.master, 1, 0xEC);    // masks: all but IRQ 0, 1 and 4
   pio_out8(&mut p.slave, 1, 0xFF);
 }
 

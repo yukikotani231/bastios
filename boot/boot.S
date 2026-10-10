@@ -13,7 +13,7 @@
 #include "core.h"
 
 .set MB_MAGIC,    0x1BADB002
-.set MB_FLAGS,    0x00000003          /* page-align modules, give memory info */
+.set MB_FLAGS,    0x00000007          /* page-align modules, give memory info, set a video mode */
 .set MB_CHECKSUM, -(MB_MAGIC + MB_FLAGS)
 
 .set KCODE, 0x08
@@ -26,6 +26,9 @@
 .long MB_MAGIC
 .long MB_FLAGS
 .long MB_CHECKSUM
+.long 0, 0, 0, 0, 0                   /* load addresses: unused (flag 16 is off) */
+.long 0                               /* a linear framebuffer, preferably */
+.long 1024, 768, 32                   /* 1024x768, 32 bits per pixel */
 
 .section .bss
 .align 4096
@@ -34,7 +37,7 @@ bst_kernel_pml4:
 pml4:   .skip 4096
 pdpt:   .skip 4096
 pd:     .skip 4096
-devpd:  .skip 4096
+devpd:  .skip 8192                    /* 2-3 GiB, then 3-4 GiB */
 .align 16
 stack_bottom:
         .skip 4096
@@ -86,22 +89,26 @@ _start:
         cmp     $512, %ecx
         jne     1b
 
-        /* The device window: 3-4 GiB, where the local APIC, I/O APIC and HPET
-         * live, identity-mapped uncached (PWT | PCD) with 2 MiB pages,
-         * kernel-only. Bastio code reaches it only through claimed `Mmio`
-         * blocks; nothing else in the kernel uses these addresses. */
+        /* The device window: 2-4 GiB, where the local APIC, I/O APIC, HPET
+         * and PCI devices (a UEFI framebuffer usually sits at 2 GiB) live,
+         * identity-mapped uncached (PWT | PCD) with 2 MiB pages, kernel-only.
+         * Bastio code reaches it only through claimed `Mmio` blocks; nothing
+         * else in the kernel uses these addresses, and the page pool stays
+         * below 1 GiB. */
         mov     $devpd, %eax
         or      $3, %eax
+        mov     %eax, pdpt+16
+        add     $4096, %eax
         mov     %eax, pdpt+24
         xor     %ecx, %ecx
 1:      mov     %ecx, %eax
         shl     $21, %eax
-        add     $0xC0000000, %eax
+        add     $0x80000000, %eax
         or      $0x9B, %eax           /* present | writable | PWT | PCD | huge */
         mov     %eax, devpd(,%ecx,8)
         movl    $0, devpd+4(,%ecx,8)
         inc     %ecx
-        cmp     $512, %ecx
+        cmp     $1024, %ecx
         jne     1b
 
         mov     $pml4, %eax

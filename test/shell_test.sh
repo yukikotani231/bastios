@@ -37,7 +37,7 @@ _s.bind(("127.0.0.1", 0))
 tcp_port = _s.getsockname()[1]
 _s.close()
 
-def boot(cpus, with_disk=False, virtio=False, net=False, subnet=None, card="virtio-net-pci"):
+def boot(cpus, with_disk=False, virtio=False, net=False, subnet=None, card="virtio-net-pci", monitor=None):
     drive = ["-drive", f"file={disk},format=raw,if=ide,index=0"] if with_disk else []
     if virtio:
         # The same disk as a virtio block device (src/virtio.bastio): sectors
@@ -57,7 +57,7 @@ def boot(cpus, with_disk=False, virtio=False, net=False, subnet=None, card="virt
     return subprocess.Popen(
         ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-         "-serial", "stdio", "-monitor", "none"] + drive + nic,
+         "-serial", "stdio", "-monitor", f"unix:{monitor},server,nowait" if monitor else "none"] + drive + nic,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 deadline = time.time() + timeout
@@ -702,6 +702,37 @@ session("e1000", None, [
     ("ping", b"reply from 10.0.2.2"),
     ("ping 10.0.2.3", b"reply from 10.0.2.3"),
 ], halt=True, ready=e1000_ready)
+
+# The PS/2 keyboard (src/kbd.bastio): keys pressed through QEMU's monitor
+# reach the shell as serial input would, Shift and Backspace included.
+# Booted with -kernel there is no framebuffer, so the console stays on the
+# serial port alone; test/iso_test.sh checks the screen.
+def sendkeys(mon, keys):
+    for k in keys:
+        mon.sendall(b"sendkey " + k.encode() + b"\n")
+        time.sleep(0.05)
+mon_path = os.path.join(disk_dir.name, "mon.sock")
+qemu = boot(1, monitor=mon_path)
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+good = ok and b"screen:" not in out
+print(("ok  " if good else "FAIL"), "(keyboard boot) no framebuffer: serial console only")
+fails += not good
+if ok:
+    mon = socket.socket(socket.AF_UNIX)
+    mon.connect(mon_path)
+    mark = len(out)
+    # "echo Typed_abx", Backspace, "c", Enter.
+    sendkeys(mon, ["e", "c", "h", "o", "spc", "shift-t", "y", "p", "e", "d", "shift-minus",
+                   "a", "b", "x", "backspace", "c", "ret"])
+    good = read_until(b"Typed_abc\r\n", mark) and read_until(b"bastios> ", mark + 1)
+    print(("ok  " if good else "FAIL"), "(keyboard boot) a line typed on the keyboard runs")
+    fails += not good
+    mon.close()
+qemu.kill(); qemu.wait()
+print("---- keyboard boot transcript ----")
+print(out.decode(errors="replace").replace("\r", "")[-400:])
 
 # And back on ATA: what virtio wrote is on the disk.
 qemu = boot(1, with_disk=True)

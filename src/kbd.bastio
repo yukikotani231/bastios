@@ -1,0 +1,96 @@
+// A PS/2 keyboard on the i8042 controller (data port 0x60, status port
+// 0x64), polled. The controller hands over scan code set 1 (it translates
+// by default). Keys become the bytes a serial terminal would send: Enter
+// is CR, Backspace is DEL, Ctrl with a letter is that control code (Ctrl-C
+// is 3). On many PCs without a PS/2 port, the firmware emulates one for a
+// USB keyboard.
+
+const KBD_DATA: u64 = 0x60;
+const KBD_STATUS: u64 = 0x64;
+const KST_FULL: u64 = 1;              // a byte is waiting
+const KST_AUX: u64 = 32;              // ... and it is from the mouse
+
+struct Kbd { data: PortIo, status: PortIo, shift: bool, ctrl: bool, ext: bool }
+
+spec fn kbd_ok(k: &Kbd) -> bool {
+  port_count(k.data) == 1 && port_count(k.status) == 1
+}
+
+// Scan codes 0x00-0x39 to characters (0: none or special).
+fn keymap() -> Str {
+  return "\0\01234567890-=\0\tqwertyuiop[]\r\0asdfghjkl;'`\0\\zxcvbnm,./\0*\0 ";
+}
+
+fn keymap_shift() -> Str {
+  return "\0\0!@#$%^&*()_+\0\tQWERTYUIOP{}\r\0ASDFGHJKL:\"~\0|ZXCVBNM<>?\0*\0 ";
+}
+
+/// Empties anything the controller holds from before.
+fn kbd_init(k: &mut Kbd)
+  requires kbd_ok(k)
+{
+  let mut n = 0;
+  while n < 64 && cast[u64](pio_in8(&mut k.status, 0)) % 2 == KST_FULL
+    invariant n <= 64
+  {
+    pio_in8(&mut k.data, 0);
+    n = n + 1;
+  }
+}
+
+/// The next character typed, or 256 if there is none.
+fn kbd_poll(k: &mut Kbd) -> u64
+  requires kbd_ok(k)
+  ensures result <= 256
+{
+  let mut n = 0;
+  while n < 16
+    invariant n <= 16
+  {
+    let st = cast[u64](pio_in8(&mut k.status, 0));
+    if st % 2 != KST_FULL {
+      return 256;
+    }
+    let sc = cast[u64](pio_in8(&mut k.data, 0));
+    n = n + 1;
+    if st / KST_AUX % 2 == 1 {
+      // A mouse byte: not ours.
+    } else if sc == 0xE0 {
+      k.ext = true;                   // the next code is an extended key
+    } else {
+      let ext = k.ext;
+      k.ext = false;
+      let up = sc >= 128;
+      let code = sc % 128;
+      if code == 0x2A || code == 0x36 {
+        k.shift = !up;
+      } else if code == 0x1D {
+        k.ctrl = !up;                 // either Ctrl (the right one is extended)
+      } else if !up && !ext {
+        if code == 0x01 {
+          return 27;                  // Esc
+        }
+        if code == 0x0E {
+          return 127;                 // Backspace, as DEL
+        }
+        let m = keymap();
+        let ms = keymap_shift();
+        if code < slen(m) && code < slen(ms) {
+          let mut c = cast[u64](sget(m, code));
+          if k.shift {
+            c = cast[u64](sget(ms, code));
+          }
+          if k.ctrl && c >= 97 && c <= 122 {
+            c = c - 96;               // Ctrl-A is 1
+          }
+          if c != 0 {
+            return c;
+          }
+        }
+      } else if !up && ext && code == 0x1C {
+        return 13;                    // keypad Enter
+      }
+    }
+  }
+  return 256;
+}
