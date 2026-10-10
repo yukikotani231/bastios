@@ -20,6 +20,7 @@ import "fs.bastio";
 import "syscall.bastio";
 import "linux.bastio";
 import "lxproc.bastio";
+import "lxfd.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
@@ -192,7 +193,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     vec_push(&mut fpus, Fpu::None);
     q = q + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), ticks: 0, ns: 0, cpus: cpus, fs: vfs_new(disk) };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), ticks: 0, ns: 0, cpus: cpus, fs: vfs_new(disk) };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
@@ -280,6 +281,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(k.procs);
   free(k.q);
   free(k.line);
+  free(k.lxfd);
+  free(k.ofd);
+  free(k.pipes);
   pool = k.mem.pool;
   port_release(&mut ports, con.io);
   port_release(&mut ports, pic.master);

@@ -46,8 +46,6 @@ const ERANGE: u64 = 18446744073709551582;   // 2^64 - 34
 const LX_UNLINK: u64 = 87;
 const LX_UNLINKAT: u64 = 263;
 
-// Linux fds 0-2 are the console; fd k >= 3 is the process's native fd k - 3.
-const LX_FD0: u64 = 3;
 
 // open flags
 const LO_ACCMODE: u64 = 3;
@@ -185,18 +183,61 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return SWITCH;
   }
   if n == LX_READ {
-    if a == 0 {
+    let d = fd_look(k, pid, a);
+    if d.kind == K_CONSOLE {
       return console_read(&mut k, pid, b, c);
     }
-    ret(&mut k.procs, pid, lx_file_read(&mut k, pid, a, b, c));
+    let mut r = EBADF;
+    if d.kind == K_FILE {
+      r = lx_file_read(&mut k, pid, d.x, b, c);
+    } else if d.kind == K_PIPE_R {
+      r = pipe_read(&mut k, pid, d.x, b, c);
+    }
+    if r == EAGAIN {
+      return lx_retry(&mut k, pid, n);       // an empty pipe: wait for a writer
+    }
+    ret(&mut k.procs, pid, r);
     return KEEP;
   }
-  if n == LX_WRITE {
-    ret(&mut k.procs, pid, lx_write_fd(&mut con, &mut k, pid, a, b, c));
+  if n == LX_WRITE || n == LX_WRITEV {
+    let mut w = 0;
+    if n == LX_WRITE {
+      w = lx_write_fd(&mut con, &mut k, pid, a, b, c);
+    } else {
+      w = do_writev(&mut con, &mut k, pid, a, b, c);
+    }
+    if w == EAGAIN {
+      return lx_retry(&mut k, pid, n);       // a full pipe: wait for a reader
+    }
+    ret(&mut k.procs, pid, w);
     return KEEP;
   }
-  if n == LX_WRITEV {
-    ret(&mut k.procs, pid, do_writev(&mut con, &mut k, pid, a, b, c));
+  if n == LX_PIPE || n == LX_PIPE2 {
+    let mut flags = 0;
+    if n == LX_PIPE2 {
+      flags = b;
+    }
+    ret(&mut k.procs, pid, lx_pipe(&mut k, pid, a, flags));
+    return KEEP;
+  }
+  if n == LX_DUP {
+    ret(&mut k.procs, pid, lx_dup(&mut k, pid, a, 0, false));
+    return KEEP;
+  }
+  if n == LX_DUP2 || n == LX_DUP3 {
+    if n == LX_DUP3 && a == b {
+      ret(&mut k.procs, pid, EINVAL);
+    } else {
+      ret(&mut k.procs, pid, lx_dup2(&mut k, pid, a, b, n == LX_DUP3 && c / LO_CLOEXEC % 2 == 1));
+    }
+    return KEEP;
+  }
+  if n == LX_POLL {
+    ret(&mut k.procs, pid, lx_poll(&mut k, pid, a, b));
+    return KEEP;
+  }
+  if n == LX_FCNTL {
+    ret(&mut k.procs, pid, lx_fcntl(&mut k, pid, a, b, c));
     return KEEP;
   }
   if n == LX_OPEN {
@@ -221,9 +262,7 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_CLOSE {
-    if a < LX_FD0 {
-      ret(&mut k.procs, pid, 0);
-    } else if a - LX_FD0 < NFD && vfs_close(&mut k.fs, pid * NFD + (a - LX_FD0)) {
+    if lx_fd_close(&mut k, pid, a) {
       ret(&mut k.procs, pid, 0);
     } else {
       ret(&mut k.procs, pid, EBADF);
@@ -266,7 +305,7 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_EXECVE {
-    ret(&mut k.procs, pid, lx_execve(&mut k, mmu, pid, a, b));
+    ret(&mut k.procs, pid, lx_execve(&mut k, mmu, pid, a, b, c));
     return KEEP;
   }
   if n == LX_WAIT4 {
@@ -354,10 +393,11 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if fd >= LX_FD0 {
-    if lx_row(pid, fd) == FD_ROWS {
-      return EBADF;
-    }
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
+    return EBADF;
+  }
+  if d.kind != K_CONSOLE {
     return ENOTTY;
   }
   if req == TCSETS || (req > TCSETS && req <= TCSETSF) {
@@ -561,25 +601,11 @@ fn line_take(l: &mut Buf, t: u64)
   }
 }
 
-/// The native row of Linux fd `fd`, or FD_ROWS if it is not a file fd.
-fn lx_row(pid: u64, fd: u64) -> u64
-  requires pid < NPROC
-  ensures result <= FD_ROWS
-{
-  if fd < LX_FD0 || fd - LX_FD0 >= NFD {
-    return FD_ROWS;
-  }
-  return pid * NFD + (fd - LX_FD0);
-}
-
-fn lx_file_read(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
-  requires kok(k) && pid < NPROC
+/// read from the file open on native row `row`.
+fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && row < FD_ROWS
   ensures kok(k)
 {
-  let row = lx_row(pid, fd);
-  if row >= FD_ROWS {
-    return EBADF;
-  }
   let got = vfs_read(&mut k.fs, row, smaller(n, XFER));
   if got == NO_FD {
     return EBADF;
@@ -592,21 +618,24 @@ fn lx_file_read(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
   return put;
 }
 
-/// write(fd, va, n) to the console (fd 1 or 2) or a file. Returns the
-/// count or -errno.
+/// write(fd, va, n) to the console, a file or a pipe. Returns the count,
+/// -errno, or EAGAIN when a pipe is full.
 fn lx_write_fd(con: &mut Uart, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
   requires uart_ok(con) && kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let row = lx_row(pid, fd);
-  if row >= FD_ROWS && fd > 2 {
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_PIPE_W {
+    return pipe_write(&mut k, pid, d.x, va, n);
+  }
+  if d.kind != K_CONSOLE && d.kind != K_FILE {
     return EBADF;
   }
   let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, smaller(n, XFER));
   if got == NO_RESULT || (got == 0 && n > 0) {
     return EFAULT;
   }
-  if fd <= 2 {
+  if d.kind == K_CONSOLE {
     // The console, with ONLCR as the termios from TCGETS says: LF goes
     // out as CR LF.
     let mut i = 0;
@@ -622,7 +651,7 @@ fn lx_write_fd(con: &mut Uart, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u6
     }
     return got;
   }
-  let w = vfs_write(&mut k.fs, &mut k.mem, row, got);
+  let w = vfs_write(&mut k.fs, &mut k.mem, d.x, got);
   if w == NO_FD {
     return EBADF;
   }
@@ -729,48 +758,20 @@ fn lx_path_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   return e - s;
 }
 
-/// open / openat: the native flags for Linux `flags`, then vfs_open.
-fn lx_open(k: &mut Kernel, pid: u64, path: u64, flags: u64) -> u64
-  requires kok(k) && pid < NPROC
-  ensures kok(k)
-{
-  let n = lx_path_in(&mut k, pid, path);
-  if n == NO_RESULT {
-    return ENOENT;
-  }
-  let acc = flags % 4;
-  let mut f = O_READ;
-  if acc == LO_WRONLY {
-    f = O_WRITE;
-  } else if acc == LO_RDWR {
-    f = O_READ + O_WRITE;
-  }
-  if flags / LO_CREAT % 2 == 1 {
-    f = f + O_CREATE;
-  }
-  if flags / LO_TRUNC % 2 == 1 {
-    f = f + O_TRUNC;
-  }
-  if flags / LO_APPEND % 2 == 1 {
-    f = f + O_APPEND;
-  }
-  let fd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, f, n);
-  if fd == NO_FD || fd >= NFD {
-    return ENOENT;
-  }
-  return fd + LX_FD0;
-}
-
 /// lseek: SEEK_SET (0) and SEEK_CUR (1). SEEK_END needs the file size by
 /// descriptor, which the file layer does not give yet.
 fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let row = lx_row(pid, fd);
-  if row >= FD_ROWS {
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
     return EBADF;
   }
+  if d.kind != K_FILE {
+    return ESPIPE;
+  }
+  let row = d.x;
   let mut to = off;
   if whence == 1 {
     let cur = vfs_offset(k.fs, row);

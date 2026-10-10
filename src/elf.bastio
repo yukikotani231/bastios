@@ -29,9 +29,10 @@ const SEG_BAD: u64 = 2;               // malformed, or something we cannot run
 // The initial stack lives in the window's top page.
 const STACK_PAGE: u64 = 511;
 const SP_WORD: u64 = 256;             // rsp points at word 256 of that page
-const ARGS_AT: u64 = 2688;            // the argument strings, above the vectors
-const ARGS_MAX: u64 = 1344;           // their bytes, NULs included (up to RANDOM_AT)
+const ARGS_AT: u64 = 2752;            // argument and environment strings, above the vectors
+const ARGS_MAX: u64 = 1280;           // their bytes, NULs included (up to RANDOM_AT)
 const ARGV_MAX: u64 = 32;             // the most arguments
+const ENVC_MAX: u64 = 16;             // the most environment strings
 const RANDOM_AT: u64 = 4032;          // the 16 bytes AT_RANDOM points at
 const ELF_SP: u64 = 0x1FF800;         // window offset of rsp: page 511, word 256
 
@@ -239,28 +240,35 @@ fn copy_in(l1: &mut PageTable, img: Str, from: u64, off: u64, n: u64)
 }
 
 /// Writes the initial stack the Linux ABI promises at the entry point:
-/// argc, argv, an empty environment and the auxiliary vector. The first
-/// `alen` bytes of `args` are the argument strings, each ending in a NUL
-/// (bytes after the last NUL, and arguments past ARGV_MAX, are not passed).
+/// argc, argv, envp and the auxiliary vector. The first `alen` bytes of
+/// `args` are the argument strings and the bytes from there to `total` the
+/// environment strings, each ending in a NUL (bytes after the last NUL,
+/// arguments past ARGV_MAX and strings past ENVC_MAX are not passed).
 /// `seed` fills the AT_RANDOM bytes; it is not a source of secure
 /// randomness.
-fn init_stack(f: &mut Frame, e: Elf, args: &Bytes, alen: u64, seed: u64)
-  requires alen <= ARGS_MAX && alen <= blen(args)
+fn init_stack(f: &mut Frame, e: Elf, args: &Bytes, alen: u64, total: u64, seed: u64)
+  requires alen <= total && total <= ARGS_MAX && total <= blen(args)
 {
   let top = USER_BASE + STACK_PAGE * 4096;
   let w = SP_WORD;
   let mut argc = 0;
+  let mut envc = 0;
   let mut start = 0;
   let mut i = 0;
-  while i < alen
-    invariant i <= alen && alen <= ARGS_MAX && alen <= blen(args) && argc <= ARGV_MAX && start <= i
+  while i < total
+    invariant i <= total && total <= ARGS_MAX && total <= blen(args) && start <= i
+    invariant argc <= ARGV_MAX && envc <= ENVC_MAX
   {
     let ch = bget(args, i);
     frame_write8(&mut f, ARGS_AT + i, ch);
     if ch == 0 {
-      if argc < ARGV_MAX {
+      if i < alen && argc < ARGV_MAX {
         frame_write(&mut f, w + 1 + argc, top + ARGS_AT + start);
         argc = argc + 1;
+      } else if i >= alen && envc < ENVC_MAX {
+        // Every argument string comes first, so argc is final here.
+        frame_write(&mut f, w + 2 + argc + envc, top + ARGS_AT + start);
+        envc = envc + 1;
       }
       start = i + 1;
     }
@@ -277,8 +285,8 @@ fn init_stack(f: &mut Frame, e: Elf, args: &Bytes, alen: u64, seed: u64)
   }
   frame_write(&mut f, w, argc);
   frame_write(&mut f, w + 1 + argc, 0);            // end of argv
-  frame_write(&mut f, w + 2 + argc, 0);            // end of envp
-  let v = w + 3 + argc;
+  frame_write(&mut f, w + 2 + argc + envc, 0);     // end of envp
+  let v = w + 3 + argc + envc;
   aux(&mut f, v, 3, e.phdr);                       // AT_PHDR
   aux(&mut f, v + 2, 4, PH_SIZE);                  // AT_PHENT
   aux(&mut f, v + 4, 5, e.phnum);                  // AT_PHNUM
@@ -307,8 +315,8 @@ fn aux(f: &mut Frame, w: u64, key: u64, v: u64)
 /// segments, zero-filled to their memory size, and a stack holding argv,
 /// envp and the auxiliary vector. Returns `Space::Empty`, with every page
 /// given back, when memory runs out.
-fn elf_space(m: &mut Mem, img: Str, e: Elf, args: &Bytes, alen: u64, seed: u64) -> Space
-  requires mem_ok(m) && e.ok && elf_fits(img, e) && alen <= ARGS_MAX && alen <= blen(args)
+fn elf_space(m: &mut Mem, img: Str, e: Elf, args: &Bytes, alen: u64, total: u64, seed: u64) -> Space
+  requires mem_ok(m) && e.ok && elf_fits(img, e) && alen <= total && total <= ARGS_MAX && total <= blen(args)
   ensures mem_ok(m)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
@@ -327,7 +335,7 @@ fn elf_space(m: &mut Mem, img: Str, e: Elf, args: &Bytes, alen: u64, seed: u64) 
       }
       if pt_has(l1, STACK_PAGE) {
         let mut f = pt_take_frame(&mut l1, STACK_PAGE);
-        init_stack(&mut f, e, args, alen, seed);
+        init_stack(&mut f, e, args, alen, total, seed);
         pt_put_frame(&mut l1, STACK_PAGE, f, true);
       }
       return space_from_l1(&mut m, l1);

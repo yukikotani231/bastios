@@ -264,6 +264,55 @@ fn wake_readers(procs: &mut Buf, q: &mut Buf, line: &Buf)
 
 // Everything the kernel owns, in one place. `mmu` and `cpu` stay with
 // `main`, which lends them where they are needed.
+// Linux file descriptors (src/lxfd.bastio).
+const LXNFD: u64 = 16;
+const LXFD_LEN: u64 = 256;            // NPROC * LXNFD
+const FD_CONSOLE: u64 = 1;
+const FD_OFD: u64 = 2;
+const FD_CLOEXEC: u64 = 1024;
+
+const OFD_N: u64 = 64;
+const OFD_STRIDE: u64 = 4;
+const OFD_LEN: u64 = 256;             // OFD_N * OFD_STRIDE
+const OF_FREE: u64 = 0;
+const OF_FILE: u64 = 1;
+const OF_PIPE_R: u64 = 2;
+const OF_PIPE_W: u64 = 3;
+
+const NPIPES: u64 = 8;
+const PIPE_CAP: u64 = 1024;
+const PIPE_STRIDE: u64 = 1028;        // 4 + PIPE_CAP
+const PIPES_LEN: u64 = 8224;          // NPIPES * PIPE_STRIDE
+
+const LX_PIPE: u64 = 22;
+const LX_POLL: u64 = 7;
+const POLL_MAX: u64 = 64;
+const LX_DUP: u64 = 32;
+const LX_DUP2: u64 = 33;
+const LX_FCNTL: u64 = 72;
+const LX_PIPE2: u64 = 293;
+const LX_DUP3: u64 = 292;
+
+const F_DUPFD: u64 = 0;
+const F_GETFD: u64 = 1;
+const F_SETFD: u64 = 2;
+const F_GETFL: u64 = 3;
+const F_SETFL: u64 = 4;
+const F_DUPFD_CLOEXEC: u64 = 1030;
+const LO_CLOEXEC: u64 = 0x80000;
+
+const EMFILE: u64 = 18446744073709551592;   // 2^64 - 24
+const ENFILE: u64 = 18446744073709551593;   // 2^64 - 23
+const ESPIPE: u64 = 18446744073709551587;   // 2^64 - 29
+const EPIPE: u64 = 18446744073709551584;    // 2^64 - 32
+
+// What a descriptor refers to, once looked up.
+const K_BAD: u64 = 0;
+const K_CONSOLE: u64 = 1;
+const K_FILE: u64 = 2;                // x: the native row
+const K_PIPE_R: u64 = 3;              // x: the pipe
+const K_PIPE_W: u64 = 4;
+
 struct Kernel {
   mem: Mem,             // the page allocator
   spaces: Vec[Space],   // element `pid` is that process's address space
@@ -271,6 +320,9 @@ struct Kernel {
   procs: Buf,           // the process table
   q: Buf,               // console input waiting for a READ
   line: Buf,            // the line a Linux program is typing (see tty_cook)
+  lxfd: Buf,            // Linux descriptors (src/lxfd.bastio)
+  ofd: Buf,             // open file descriptions they share
+  pipes: Buf,           // pipe buffers
   ticks: u64,           // timer ticks since boot
   ns: u64,              // the HPET clock at the last system call, in nanoseconds
   cpus: u64,            // processors running, the bootstrap one included
@@ -278,7 +330,7 @@ struct Kernel {
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && vfs_ok(k.fs)
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vfs_ok(k.fs)
 }
 
 // ---------------------------------------------------------------- programs
@@ -425,9 +477,10 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
     pset(&mut k.procs, pid, f, 0);
     f = f + 1;
   }
+  lx_fd_reset(&mut k.lxfd, pid);
   let mut args = balloc(ARGV0_MAX + 1);
   let alen = name_arg(&mut args, prog_name(prog));
-  let sp = load_image(&mut k.mem, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, pid, prog, args, alen);
+  let sp = load_image(&mut k.mem, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, pid, prog, args, alen, alen);
   bfree(args);
   let ok = sp is Space::Mapped;
   put_space(&mut k.spaces, pid, sp);
@@ -478,12 +531,13 @@ fn name_arg(args: &mut Bytes, name: Str) -> u64
 }
 
 /// Builds the address space for program `prog`, with the argument strings
-/// in the first `alen` bytes of `args` (each ending in a NUL), and sets
+/// in the first `alen` bytes of `args` and the environment strings from
+/// there to `total` (each ending in a NUL), and sets
 /// process `pid` up to start it: program, registers, program break.
 /// Returns `Space::Empty`, changing nothing, if the image is malformed or
 /// memory runs out. The caller installs the space.
-fn load_image(m: &mut Mem, procs: &mut Buf, seed: u64, pid: u64, prog: u64, args: &Bytes, alen: u64) -> Space
-  requires mem_ok(m) && len(procs) == PTAB_LEN && pid < NPROC && alen <= ARGS_MAX && alen <= blen(args)
+fn load_image(m: &mut Mem, procs: &mut Buf, seed: u64, pid: u64, prog: u64, args: &Bytes, alen: u64, total: u64) -> Space
+  requires mem_ok(m) && len(procs) == PTAB_LEN && pid < NPROC && alen <= total && total <= ARGS_MAX && total <= blen(args)
   ensures mem_ok(m) && len(procs) == PTAB_LEN
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
@@ -514,7 +568,7 @@ fn load_image(m: &mut Mem, procs: &mut Buf, seed: u64, pid: u64, prog: u64, args
       return Space::Empty;
     }
   }
-  let sp = build_space(&mut m, img, elf, e, size, args, alen, seed);
+  let sp = build_space(&mut m, img, elf, e, size, args, alen, total, seed);
   if sp is Space::Empty {
     return sp;
   }
@@ -542,14 +596,14 @@ fn load_image(m: &mut Mem, procs: &mut Buf, seed: u64, pid: u64, prog: u64, args
 
 /// The address space for a checked image: ELF, or a BastiOS image needing
 /// `size` bytes of memory.
-fn build_space(m: &mut Mem, img: Str, elf: bool, e: Elf, size: u64, args: &Bytes, alen: u64, seed: u64) -> Space
+fn build_space(m: &mut Mem, img: Str, elf: bool, e: Elf, size: u64, args: &Bytes, alen: u64, total: u64, seed: u64) -> Space
   requires mem_ok(m) && (elf ==> (e.ok && elf_fits(img, e))) && (!elf ==> size <= IMAGE_MAX)
-  requires alen <= ARGS_MAX && alen <= blen(args)
+  requires alen <= total && total <= ARGS_MAX && total <= blen(args)
   ensures mem_ok(m)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
   if elf {
-    return elf_space(&mut m, img, e, args, alen, seed);
+    return elf_space(&mut m, img, e, args, alen, total, seed);
   }
   return new_space(&mut m, img, size);
 }
@@ -566,7 +620,8 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
     Space::Mapped(t) => { free_space(&mut k.mem, mmu, t); },
   }
   drop_fpu(&mut k.mem, take_fpu(&mut k.fpus, pid));
-  vfs_close_all(&mut k.fs, pid * NFD);
+  lx_fd_close_all(&mut k, pid, false);
+  close_unshared(&mut k, pid);
   pset(&mut k.procs, pid, F_STATE, ZOMBIE);
   pset(&mut k.procs, pid, F_CODE, code);
   let mut c = 1;
