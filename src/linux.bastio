@@ -75,6 +75,27 @@ const ENOTTY: u64 = 18446744073709551591;   // 2^64 - 25
 const ENOENT: u64 = 18446744073709551614;   // 2^64 - 2
 const ENOMEM: u64 = 18446744073709551604;   // 2^64 - 12
 
+// Process calls and file metadata (src/lxproc.bastio).
+const LX_CLONE: u64 = 56;
+const LX_FORK: u64 = 57;
+const LX_VFORK: u64 = 58;
+const LX_EXECVE: u64 = 59;
+const LX_WAIT4: u64 = 61;
+const LX_GETTID: u64 = 186;
+
+const SIGCHLD: u64 = 17;
+const WNOHANG: u64 = 1;
+
+const E2BIG: u64 = 18446744073709551609;    // 2^64 - 7
+const ENOEXEC: u64 = 18446744073709551608;  // 2^64 - 8
+const ECHILD: u64 = 18446744073709551606;   // 2^64 - 10
+const EAGAIN: u64 = 18446744073709551605;   // 2^64 - 11
+
+const STAT_SIZE: u64 = 144;                 // struct stat on x86-64
+const S_IFDIR: u64 = 0x41ED;                // a directory, rwxr-xr-x
+const S_IFREG_X: u64 = 0x81ED;              // a regular file, rwxr-xr-x
+const S_IFREG: u64 = 0x81A4;                // a regular file, rw-r--r--
+
 // ---------------------------------------------------------------- user memory
 
 /// A word read from user memory, if it was there.
@@ -227,9 +248,32 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, 0);
     return KEEP;
   }
-  if n == LX_STAT || n == LX_LSTAT || n == LX_ACCESS || n == LX_NEWFSTATAT {
-    // No file metadata yet: say no such file, as for a missing one.
-    ret(&mut k.procs, pid, ENOENT);
+  if n == LX_STAT || n == LX_LSTAT {
+    ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b));
+    return KEEP;
+  }
+  if n == LX_NEWFSTATAT {
+    // Relative paths start at "/", the only working directory there is.
+    ret(&mut k.procs, pid, lx_stat(&mut k, pid, b, c));
+    return KEEP;
+  }
+  if n == LX_ACCESS {
+    ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, 0));   // everyone may do anything
+    return KEEP;
+  }
+  if n == LX_FORK || n == LX_VFORK || (n == LX_CLONE && a == SIGCHLD && b == 0) {
+    ret(&mut k.procs, pid, lx_fork(&mut k, mmu, pid));
+    return KEEP;
+  }
+  if n == LX_EXECVE {
+    ret(&mut k.procs, pid, lx_execve(&mut k, mmu, pid, a, b));
+    return KEEP;
+  }
+  if n == LX_WAIT4 {
+    return lx_wait4(&mut k, pid, a, b, c);
+  }
+  if n == LX_GETTID {
+    ret(&mut k.procs, pid, pid);            // one thread, whose id is the pid
     return KEEP;
   }
   if n == LX_RT_SIGACTION {
@@ -270,7 +314,7 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_IOCTL {
-    ret(&mut k.procs, pid, ENOTTY);         // the console has no terminal settings yet
+    ret(&mut k.procs, pid, lx_ioctl(&mut k, pid, a, b, c));
     return KEEP;
   }
   if n == LX_ARCH_PRCTL {
@@ -295,6 +339,80 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   return KEEP;
 }
 
+const TCGETS: u64 = 0x5401;
+const TCSETS: u64 = 0x5402;
+const TCSETSF: u64 = 0x5404;              // TCSETSW (0x5403) lies between
+const TIOCGWINSZ: u64 = 0x5413;
+const TERMIOS_SIZE: u64 = 36;             // the kernel's struct termios
+const WINSIZE_SIZE: u64 = 8;
+
+/// ioctl(fd, req, arg). Descriptors 0-2 are the console, a terminal in
+/// canonical mode with echo (tty_cook) and 24 rows of 80 columns. Its
+/// settings can be read but not changed: setting them succeeds and is
+/// ignored. Files are not terminals.
+fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if fd >= LX_FD0 {
+    if lx_row(pid, fd) == FD_ROWS {
+      return EBADF;
+    }
+    return ENOTTY;
+  }
+  if req == TCSETS || (req > TCSETS && req <= TCSETSF) {
+    return 0;
+  }
+  if req == TCGETS {
+    lx_fill(&mut k, 0, TERMIOS_SIZE);
+    bset(&mut k.fs.xfer, 1, 1);             // c_iflag: ICRNL (0x100)
+    bset(&mut k.fs.xfer, 4, 5);             // c_oflag: OPOST | ONLCR
+    bset(&mut k.fs.xfer, 8, 0xBF);          // c_cflag: B38400 | CS8 | CREAD
+    bset(&mut k.fs.xfer, 12, 0x3B);         // c_lflag: ISIG | ICANON | ECHO | ECHOE | ECHOK
+    bset(&mut k.fs.xfer, 13, 0x8A);         //   | ECHOCTL | ECHOKE | IEXTEN (0x8A3B)
+    bset(&mut k.fs.xfer, 17, 3);            // c_cc[VINTR] = Ctrl-C
+    bset(&mut k.fs.xfer, 18, 0x1C);         // c_cc[VQUIT] = Ctrl-\
+    bset(&mut k.fs.xfer, 19, 0x7F);         // c_cc[VERASE] = DEL
+    bset(&mut k.fs.xfer, 20, 0x15);         // c_cc[VKILL] = Ctrl-U
+    bset(&mut k.fs.xfer, 21, 4);            // c_cc[VEOF] = Ctrl-D
+    bset(&mut k.fs.xfer, 23, 1);            // c_cc[VMIN] = 1
+    return lx_put_out(&mut k, pid, arg, TERMIOS_SIZE);
+  }
+  if req == TIOCGWINSZ {
+    lx_fill(&mut k, 0, WINSIZE_SIZE);
+    bset(&mut k.fs.xfer, 0, 24);            // ws_row
+    bset(&mut k.fs.xfer, 2, 80);            // ws_col
+    return lx_put_out(&mut k, pid, arg, WINSIZE_SIZE);
+  }
+  return EINVAL;
+}
+
+/// Sets the first n transfer bytes to v.
+fn lx_fill(k: &mut Kernel, v: u64, n: u64)
+  requires kok(k) && v <= 255 && n <= 160
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= 160 && kok(k)
+  {
+    bset(&mut k.fs.xfer, i, v);
+    i = i + 1;
+  }
+}
+
+/// Copies the first n transfer bytes to user address va. Returns 0, or
+/// -EFAULT.
+fn lx_put_out(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= 160
+  ensures kok(k)
+{
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {
+    return EFAULT;
+  }
+  return 0;
+}
+
 /// Fills the n bytes at user address va with zeros, if va is not 0 (NULL).
 /// Returns 0, or -EFAULT.
 fn lx_zero_out(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
@@ -304,24 +422,81 @@ fn lx_zero_out(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
   if va == 0 {
     return 0;
   }
-  let mut i = 0;
-  while i < n
-    invariant i <= n && n <= 64 && kok(k)
-  {
-    bset(&mut k.fs.xfer, i, 0);
-    i = i + 1;
-  }
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {
-    return EFAULT;
-  }
-  return 0;
+  lx_fill(&mut k, 0, n);
+  return lx_put_out(&mut k, pid, va, n);
 }
 
 // ---------------------------------------------------------------- reading and writing
 
-/// read(0, buf, n): the bytes typed so far, up to n, with CR turned into
-/// LF as a terminal would. With none, the process blocks and the call is
-/// restarted (rip moved back over the 2-byte `syscall`) once a byte comes.
+/// The terminal's line discipline for Linux programs, like a Linux tty in
+/// canonical mode: while one is blocked reading the console, typed bytes
+/// are echoed and gathered into k.line, Backspace erases, and Enter or
+/// Ctrl-D finishes the line, which wakes the reader. Bytes typed while no
+/// Linux program reads stay queued for the native shell.
+fn tty_cook(con: &mut Uart, k: &mut Kernel)
+  requires uart_ok(con) && kok(k)
+  ensures kok(k)
+{
+  if !lx_reading(k.procs) {
+    return;
+  }
+  while get(k.line, 1) == 0 && get(k.q, 1) > 0
+    invariant kok(k)
+  {
+    tty_key(&mut con, &mut k.line, q_pop(&mut k.q));
+  }
+}
+
+/// Whether some process is blocked in a Linux read of the console.
+fn lx_reading(procs: &Buf) -> bool
+  requires len(procs) == PTAB_LEN
+{
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC
+  {
+    if state(procs, p) == LXREADING {
+      return true;
+    }
+    p = p + 1;
+  }
+  return false;
+}
+
+/// One typed byte c, added to the unfinished line l.
+fn tty_key(con: &mut Uart, l: &mut Buf, c: u64)
+  requires uart_ok(con) && lineok(l) && get(l, 1) == 0
+  ensures lineok(l)
+{
+  let n = get(l, 0);
+  if c == 13 || c == 10 {
+    // Enter: the line ends with LF, so a full line keeps room for it.
+    puts(&mut con, "\r\n");
+    if n < LINE_MAX {
+      l = set(l, 2 + n, 10);
+      l = set(l, 0, n + 1);
+    }
+    l = set(l, 1, 1);
+  } else if c == 4 {
+    // Ctrl-D: the line ends as it is; on an empty line the read returns 0.
+    l = set(l, 1, 1);
+  } else if c == 127 || c == 8 {
+    if n > 0 {
+      l = set(l, 0, n - 1);
+      uart_write(&mut con, 8);
+      uart_write(&mut con, 32);
+      uart_write(&mut con, 8);
+    }
+  } else if c >= 32 && c <= 255 && n + 1 < LINE_MAX {
+    l = set(l, 2 + n, c);
+    l = set(l, 0, n + 1);
+    uart_write(&mut con, c);
+  }
+}
+
+/// read(0, buf, n): up to n bytes of the finished line. With no finished
+/// line the process blocks and the call is restarted (rip moved back over
+/// the 2-byte `syscall`) once there is one, so tty_cook can gather it.
 fn console_read(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC
   ensures kok(k)
@@ -334,7 +509,7 @@ fn console_read(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
   }
-  if get(k.q, 1) == 0 {
+  if get(k.line, 1) == 0 {
     let rip = pget(k.procs, pid, F_REGS + R_RIP);
     if rip < 2 {
       ret(&mut k.procs, pid, EFAULT);
@@ -346,29 +521,44 @@ fn console_read(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
     return SWITCH;
   }
   // Take only what fits in the window from va, so no byte is lost.
+  let have = get(k.line, 0);
   let room = USER_SIZE - (va - USER_BASE);
-  let want = smaller(smaller(n, room), smaller(get(k.q, 1), XFER));
+  let want = smaller(smaller(n, room), have);
   let mut i = 0;
   while i < want
-    invariant i <= want && want <= XFER && kok(k)
+    invariant i <= want && want <= have && have <= LINE_MAX && kok(k)
   {
-    let mut ch = q_pop(&mut k.q);
-    if ch == 13 {
-      ch = 10;
-    }
-    if ch > 255 {
-      ch = 0;                               // the queue was empty: cannot happen
-    }
-    bset(&mut k.fs.xfer, i, ch);
+    bset(&mut k.fs.xfer, i, get(k.line, 2 + i) % 256);
     i = i + 1;
   }
   let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
   if put == NO_RESULT || (put == 0 && want > 0) {
     ret(&mut k.procs, pid, EFAULT);
-  } else {
-    ret(&mut k.procs, pid, put);
+    return KEEP;
   }
+  ret(&mut k.procs, pid, put);
+  line_take(&mut k.line, put);
   return KEEP;
+}
+
+/// Drops the first `t` bytes of the finished line l; once it is empty the
+/// next line can be typed.
+fn line_take(l: &mut Buf, t: u64)
+  requires lineok(l) && t <= get(l, 0)
+  ensures lineok(l)
+{
+  let n = get(l, 0);
+  let mut i = 0;
+  while i + t < n
+    invariant i + t <= n && n <= LINE_MAX && lineok(l)
+  {
+    l = set(l, 2 + i, get(l, 2 + i + t));
+    i = i + 1;
+  }
+  l = set(l, 0, n - t);
+  if n == t {
+    l = set(l, 1, 0);
+  }
 }
 
 /// The native row of Linux fd `fd`, or FD_ROWS if it is not a file fd.
@@ -408,20 +598,29 @@ fn lx_write_fd(con: &mut Uart, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u6
   requires uart_ok(con) && kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if fd == 1 || fd == 2 {
-    let w = do_write(&mut con, &mut k.spaces, pid, va, n);
-    if w == NO_RESULT || (w == 0 && n > 0) {
-      return EFAULT;
-    }
-    return w;
-  }
   let row = lx_row(pid, fd);
-  if row >= FD_ROWS {
+  if row >= FD_ROWS && fd > 2 {
     return EBADF;
   }
   let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, smaller(n, XFER));
   if got == NO_RESULT || (got == 0 && n > 0) {
     return EFAULT;
+  }
+  if fd <= 2 {
+    // The console, with ONLCR as the termios from TCGETS says: LF goes
+    // out as CR LF.
+    let mut i = 0;
+    while i < got
+      invariant i <= got && got <= XFER && kok(k)
+    {
+      let ch = bget(k.fs.xfer, i);
+      if ch == 10 {
+        uart_write(&mut con, 13);
+      }
+      uart_write(&mut con, ch);
+      i = i + 1;
+    }
+    return got;
   }
   let w = vfs_write(&mut k.fs, &mut k.mem, row, got);
   if w == NO_FD {

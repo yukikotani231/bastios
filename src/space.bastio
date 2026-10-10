@@ -194,3 +194,96 @@ fn space_from_l1(m: &mut Mem, l1: PageTable) -> Space
   pt_put(&mut root, 1, l3);
   return Space::Mapped(root);
 }
+
+/// Copies page `src` into page `dst`.
+fn copy_frame(dst: &mut Frame, src: &Frame) {
+  let mut i = 0;
+  while i < 512
+    invariant i <= 512
+  {
+    frame_write(&mut dst, i, frame_read(src, i));
+    i = i + 1;
+  }
+}
+
+/// A copy of address space `root`: new tables and a new copy of every page
+/// its window maps (fork). Returns `Space::Empty`, with every page given
+/// back, when memory runs out.
+fn clone_space(m: &mut Mem, root: &mut PageTable) -> Space
+  requires mem_ok(m) && pt_level(root) == 4
+  ensures mem_ok(m) && pt_level(root) == 4
+  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
+{
+  match clone_window(&mut m, &mut root) {
+    Space::Empty => { return Space::Empty; },
+    Space::Mapped(l1) => { return space_from_l1(&mut m, l1); },
+  }
+}
+
+/// A level-1 table copying the window of address space `root`.
+fn clone_window(m: &mut Mem, root: &mut PageTable) -> Space
+  requires mem_ok(m) && pt_level(root) == 4
+  ensures mem_ok(m) && pt_level(root) == 4
+  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 1
+{
+  if !pt_has(root, 1) {
+    return Space::Empty;
+  }
+  let mut l3 = pt_take(&mut root, 1);
+  if !pt_has(l3, 0) {
+    pt_put(&mut root, 1, l3);
+    return Space::Empty;
+  }
+  let mut l2 = pt_take(&mut l3, 0);
+  if !pt_has(l2, 0) {
+    pt_put(&mut l3, 0, l2);
+    pt_put(&mut root, 1, l3);
+    return Space::Empty;
+  }
+  let mut l1 = pt_take(&mut l2, 0);
+  let c = clone_l1(&mut m, &mut l1);
+  pt_put(&mut l2, 0, l1);
+  pt_put(&mut l3, 0, l2);
+  pt_put(&mut root, 1, l3);
+  return c;
+}
+
+/// clone_space below the level-1 table.
+fn clone_l1(m: &mut Mem, src: &mut PageTable) -> Space
+  requires mem_ok(m) && pt_level(src) == 1
+  ensures mem_ok(m) && pt_level(src) == 1
+  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 1
+{
+  let a = find_free(&mut m);
+  if a >= NPAGES {
+    return Space::Empty;
+  }
+  let mut l1 = pt_new(take_page(&mut m, a), 1);
+  let mut p = 0;
+  let mut ok = true;
+  while ok && p < 512
+    invariant p <= 512 && mem_ok(m) && pt_level(l1) == 1 && pt_level(src) == 1
+    invariant forall j: u64 :: p <= j && j < 512 ==> !pt_used(l1, j)
+  {
+    if pt_has(src, p) {
+      let b = find_free(&mut m);
+      if b >= NPAGES {
+        ok = false;
+      } else {
+        let mut f = take_page(&mut m, b);
+        let g = pt_take_frame(&mut src, p);
+        copy_frame(&mut f, g);
+        pt_put_frame(&mut src, p, g, true);
+        pt_put_frame(&mut l1, p, f, true);
+      }
+    }
+    if ok {
+      p = p + 1;
+    }
+  }
+  if !ok {
+    free_l1(&mut m, l1);
+    return Space::Empty;
+  }
+  return Space::Mapped(l1);
+}

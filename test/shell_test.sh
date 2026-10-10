@@ -117,10 +117,24 @@ steps = [
     # console; the third field is what to wait for instead of the prompt.
     ("mtest", [b"mtest: malloc heap 75", b"mtest: file line 42"], b"type a line"),
     ("typed for mtest", b"mtest: got typed for mtest"),
-    # BusyBox's shell, unmodified, reading commands from the console.
-    ("ash", b"", b""),
-    ("echo $((6 * 7)) from ash", b"42 from ash", b"42 from ash"),
-    ("for i in 1 2 3; do echo n$i; done; test -z \"\" && echo empty", [b"n1", b"n3", b"empty"], b"empty"),
+    # BusyBox's shell, unmodified, reading commands from the console. The
+    # console is a terminal (ioctl TCGETS works), so ash is interactive and
+    # prompts with "# "; the kernel echoes what is typed and handles
+    # Backspace (DEL) itself, as a Linux tty in canonical mode does.
+    ("ash", b"built-in shell (ash)", b"\n# "),
+    ("echo $((6 * 7)) from ash", b"42 from ash", b"\n# "),
+    ("for i in 1 2 3; do echo n$i; done; test -z \"\" && echo empty", [b"n1\r\nn2\r\nn3\r\nempty"], b"\n# "),
+    ("echo abX\x7fc", [b"echo abX\x08 \x08c", b"\nabc\r\n"], b"\n# "),
+    # fork, execve and wait4: a subshell, programs found on PATH as
+    # /bin/NAME (stat), with their arguments and exit status, and a
+    # nested ash whose exit status the outer one sees.
+    ("(echo in subshell; exit 4); echo sub=$?", [b"in subshell", b"sub=4"], b"\n# "),
+    ("mhello a b; echo st=$?", [b"hello from musl: mhello, argc 3, 6", b"st=3"], b"\n# "),
+    ("hello", b"hello from user mode, pid ", b"\n# "),
+    ("nothere", b"nothere: not found", b"\n# "),
+    ("ash", b"built-in shell (ash)", b"\n# "),
+    ("exit 7", b"", b"\n# "),
+    ("echo outer got $?", b"outer got 7", b"\n# "),
     ("exit 5", b"[exit 5]"),
     ("sh", b"BastiOS 0.2 -- type"),
     ("exit", b""),
@@ -164,7 +178,7 @@ else:
         qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
         wants = want if isinstance(want, list) else [want]
         ok = read_until(until, mark) and all(w in out[mark:] for w in wants)
-        print(("ok  " if ok else "FAIL"), repr(line))
+        print(("ok  " if ok else "FAIL"), repr(line)); ok or print(repr(out[mark:]))
         fails += not ok
     if out.count(b"fpucheck: xmm0 kept") == 2 and b"xmm0 changed" not in out:
         print("ok   both fpucheck processes kept xmm0")

@@ -19,6 +19,7 @@ import "proc.bastio";
 import "fs.bastio";
 import "syscall.bastio";
 import "linux.bastio";
+import "lxproc.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
@@ -191,7 +192,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     vec_push(&mut fpus, Fpu::None);
     q = q + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), ticks: 0, ns: 0, cpus: cpus, fs: vfs_new(disk) };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), ticks: 0, ns: 0, cpus: cpus, fs: vfs_new(disk) };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
@@ -202,7 +203,8 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     invariant kok(k) && mmu_root(mmu) == KERNEL_ROOT && cur < NPROC
   {
     drain(&mut con, &mut k.q);
-    wake_readers(&mut k.procs, &mut k.q);
+    tty_cook(&mut con, &mut k);
+    wake_readers(&mut k.procs, &mut k.q, k.line);
     let p = pick(k.procs, cur);
     if p == 0 {
       if live_count(k.procs) == 0 {
@@ -277,6 +279,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(k.mem.bm);
   free(k.procs);
   free(k.q);
+  free(k.line);
   pool = k.mem.pool;
   port_release(&mut ports, con.io);
   port_release(&mut ports, pic.master);
