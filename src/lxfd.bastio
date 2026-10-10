@@ -151,7 +151,7 @@ fn unref_value(k: &mut Kernel, v: u64)
   of_set(&mut k.ofd, h, 0, OF_FREE);
   of_set(&mut k.ofd, h, 1, 0);
   if kind == OF_FILE && x < FD_ROWS {
-    vfs_close(&mut k.fs, x);
+    vfs_close(&mut k.fs, &mut k.mem, x);
   } else if kind == OF_PIPE_R && x < NPIPES {
     pi_set(&mut k.pipes, x, 2, 0);
   } else if kind == OF_PIPE_W && x < NPIPES {
@@ -221,7 +221,7 @@ fn close_unshared(k: &mut Kernel, pid: u64)
   {
     let row = pid * NFD + f;
     if !row_shared(k.ofd, row) {
-      vfs_close(&mut k.fs, row);
+      vfs_close(&mut k.fs, &mut k.mem, row);
     }
     f = f + 1;
   }
@@ -337,7 +337,7 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64) -> u64
   let row = pid * NFD + nfd;
   let h = ofd_new(&mut k, OF_FILE, row);
   if h >= OFD_N {
-    vfs_close(&mut k.fs, row);
+    vfs_close(&mut k.fs, &mut k.mem, row);
     return ENFILE;
   }
   let fd = fd_install(&mut k, pid, h);
