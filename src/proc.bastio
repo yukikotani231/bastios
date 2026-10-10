@@ -113,7 +113,7 @@ const ZOMBIE: u64 = 4;
 const LXREADING: u64 = 5;            // blocked in a Linux read of the console
 const LXWAITING: u64 = 6;            // blocked in a Linux wait4 for any child
 const RUNNING: u64 = 7;              // on a processor (with a lease on its space): its FPU page is out
-const KILLED: u64 = 8;               // RUNNING, and killed: ends when it comes back
+const KILLED: u64 = 8;               // RUNNING, and killed: ends with F_CODE when it comes back
 const NETWAIT: u64 = 9;              // waiting for the network (a ping's reply)
 const LXVFORK: u64 = 10;             // lent its address space to child F_WAIT (clone with CLONE_VM | CLONE_VFORK)
 const CONWAIT: u64 = 11;             // writing to the console, whose ring is full
@@ -1045,7 +1045,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code: u64)
   ensures kok(k)
 {
   // A thread ends its whole group, which ends as its leader.
-  let pid = group_end(&mut k, mmu, who);
+  let pid = group_end(&mut k, mmu, who, code);
   if pid == 0 {
     return;
   }

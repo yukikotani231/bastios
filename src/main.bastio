@@ -316,7 +316,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     pset(&mut s.k.procs, p, F_STATE, READY);
   }
   if killed {
-    terminate(&mut s.k, mmu, p, 137);
+    // With the code it was killed with: 137 from SYS_KILL, or what another
+    // thread of its group passed to exit_group (group_end).
+    terminate(&mut s.k, mmu, p, pget(s.k.procs, p, F_CODE));
     return (p + 1) % NPROC;
   }
   if v == V_TIMER || v == V_LTIMER {

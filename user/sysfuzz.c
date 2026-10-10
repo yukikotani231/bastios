@@ -37,7 +37,10 @@ static u64 lx(u64 n, u64 a, u64 b, u64 c, u64 d, u64 e, u64 f) {
 
 /* fork, vfork and clone: the child must leave at once, without touching the
  * stack it may share with its parent (vfork, CLONE_VM), so it exits inside
- * the asm. */
+ * the asm. With `exit`, not `exit_group`: a child made with CLONE_THREAD
+ * would otherwise end the fuzzer too, part way through a line, and the run
+ * would test nothing more (t_thread in test/compat checks exit_group from
+ * a thread). */
 static u64 lx_fork(u64 n, u64 a, u64 b, u64 c, u64 d, u64 e) {
     register u64 r10 __asm__("r10") = d;
     register u64 r8 __asm__("r8") = e;
@@ -45,7 +48,7 @@ static u64 lx_fork(u64 n, u64 a, u64 b, u64 c, u64 d, u64 e) {
     __asm__ volatile("syscall\n\t"
                      "test %%rax, %%rax\n\t"
                      "jnz 1f\n\t"
-                     "mov $231, %%eax\n\t"
+                     "mov $60, %%eax\n\t"
                      "xor %%edi, %%edi\n\t"
                      "syscall\n\t"
                      "ud2\n"

@@ -248,9 +248,9 @@ fn thread_free(k: &mut Kernel, mmu: &Mmu, q: u64, g: u64)
 /// of a group, the whole group ends: the shared state goes to the leader,
 /// every other thread is freed, and the leader is returned to be ended as
 /// a process. Returns p for a process without threads, and 0 if members
-/// are on other processors: they are marked KILLED, and the group ends when
-/// the last of them comes back.
-fn group_end(k: &mut Kernel, mmu: &Mmu, p: u64) -> u64
+/// are on other processors: they are marked KILLED, with `code` in F_CODE,
+/// and the group ends with that code when the last of them comes back.
+fn group_end(k: &mut Kernel, mmu: &Mmu, p: u64, code: u64) -> u64
   requires kok(k) && 1 <= p && p < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k) && result < NPROC
 {
@@ -271,6 +271,7 @@ fn group_end(k: &mut Kernel, mmu: &Mmu, p: u64) -> u64
       let st = state(k.procs, q);
       if st == RUNNING || st == EXITING {
         pset(&mut k.procs, q, F_STATE, KILLED);
+        pset(&mut k.procs, q, F_CODE, code);
       }
       if st == RUNNING || st == EXITING || st == KILLED {
         busy = true;

@@ -766,6 +766,7 @@ fn syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       // Running on another processor, which holds its address space: it
       // ends when it comes back (see `finish` in main.bastio).
       pset(&mut k.procs, a, F_STATE, KILLED);
+      pset(&mut k.procs, a, F_CODE, 137);
       return KEEP;
     }
     terminate(&mut k, mmu, a, 137);

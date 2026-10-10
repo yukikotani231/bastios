@@ -402,6 +402,10 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Fixed
 
+- `exit_group` from one thread while another thread of the process was
+  running on a different processor ended the process with status 137 (as if
+  killed) instead of the code it was given. The running threads now carry
+  that code until they come back (t_thread in the compatibility suite).
 - Multiboot 1 boot information is copied into the kernel image, as the
   Multiboot 2 form already was, so a loader that puts it in what becomes
   the page pool cannot have it overwritten before the kernel reads the
