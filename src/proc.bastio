@@ -89,6 +89,90 @@ fn pick(procs: &Buf, from: u64) -> u64
   return 0;
 }
 
+// ---------------------------------------------------------------- input queue
+
+// Bytes typed on the console, waiting for a READ: word 0 is the head,
+// word 1 the count, words 2..258 a ring of 256 bytes.
+const INQ_LEN: u64 = 258;
+
+spec fn qok(q: &Buf) -> bool {
+  len(q) == INQ_LEN && get(q, 0) < 256 && get(q, 1) <= 256
+}
+
+fn q_push(q: &mut Buf, b: u64)
+  requires qok(q)
+  ensures qok(q)
+{
+  let n = get(q, 1);
+  if n < 256 {
+    q = set(q, 2 + (get(q, 0) + n) % 256, b);
+    q = set(q, 1, n + 1);
+  }
+}
+
+/// The oldest byte, or 256 if there is none.
+fn q_pop(q: &mut Buf) -> u64
+  requires qok(q)
+  ensures qok(q)
+{
+  let n = get(q, 1);
+  if n == 0 {
+    return 256;
+  }
+  let h = get(q, 0);
+  let b = get(q, 2 + h);
+  q = set(q, 0, (h + 1) % 256);
+  q = set(q, 1, n - 1);
+  return b;
+}
+
+/// Moves every byte the UART has received into the queue.
+fn drain(con: &Serial, q: &mut Buf)
+  requires qok(q)
+  ensures qok(q)
+{
+  let mut c = serial_poll(con);
+  while c < 256
+    invariant qok(q)
+  {
+    q_push(&mut q, c);
+    c = serial_poll(con);
+  }
+}
+
+/// Hands queued bytes to processes blocked in READ.
+fn wake_readers(procs: &mut Buf, q: &mut Buf)
+  requires len(procs) == PTAB_LEN && qok(q)
+  ensures len(procs) == PTAB_LEN && qok(q)
+{
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && len(procs) == PTAB_LEN && qok(q)
+  {
+    if state(procs, p) == READING && get(q, 1) > 0 {
+      pset(&mut procs, p, F_REGS + R_RAX, q_pop(&mut q));
+      pset(&mut procs, p, F_STATE, READY);
+    }
+    p = p + 1;
+  }
+}
+
+// ---------------------------------------------------------------- kernel state
+
+// Everything the kernel owns, in one place. `mmu` and `cpu` stay with
+// `main`, which lends them where they are needed.
+struct Kernel {
+  mem: Mem,             // the page allocator
+  dir: PageTable,       // level 5: slot `pid` holds that process's address space
+  procs: Buf,           // the process table
+  q: Buf,               // console input waiting for a READ
+  ticks: u64,           // timer ticks since boot
+}
+
+spec fn kok(k: &Kernel) -> bool {
+  mem_ok(k.mem) && pt_level(k.dir) == 5 && len(k.procs) == PTAB_LEN && qok(k.q)
+}
+
 // ---------------------------------------------------------------- programs
 
 const NPROGS: u64 = 4;
@@ -135,9 +219,9 @@ const MAGIC: u64 = 0x0A52455355545342;   // "BSTUSER\n"
 
 /// Starts program `prog` as a child of `parent` (0 for none). Returns the
 /// new process id, or 0 if the image is malformed or there is no room.
-fn spawn(bm: &mut Buf, pool: &mut Pool, dir: &mut PageTable, procs: &mut Buf, prog: u64, parent: u64) -> u64
-  requires tracks(bm, pool) && pt_level(dir) == 5 && len(procs) == PTAB_LEN
-  ensures tracks(bm, pool) && pt_level(dir) == 5 && len(procs) == PTAB_LEN
+fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
+  requires kok(k)
+  ensures kok(k)
   ensures result < NPROC
 {
   // The image header: magic, bytes of memory the image needs, entry point.
@@ -154,7 +238,7 @@ fn spawn(bm: &mut Buf, pool: &mut Pool, dir: &mut PageTable, procs: &mut Buf, pr
     return 0;
   }
   let mut pid = 1;
-  while pid < NPROC && (state(procs, pid) != FREE || pt_has(dir, pid))
+  while pid < NPROC && (state(k.procs, pid) != FREE || pt_has(k.dir, pid))
     invariant 1 <= pid && pid <= NPROC
   {
     pid = pid + 1;
@@ -162,58 +246,57 @@ fn spawn(bm: &mut Buf, pool: &mut Pool, dir: &mut PageTable, procs: &mut Buf, pr
   if pid >= NPROC {
     return 0;
   }
-  if !new_space(&mut bm, &mut pool, &mut dir, pid, img, size) {
+  if !new_space(&mut k.mem, &mut k.dir, pid, img, size) {
     return 0;
   }
   let mut f = 0;
   while f < STRIDE
-    invariant f <= STRIDE && len(procs) == PTAB_LEN
+    invariant f <= STRIDE && len(k.procs) == PTAB_LEN
   {
-    pset(&mut procs, pid, f, 0);
+    pset(&mut k.procs, pid, f, 0);
     f = f + 1;
   }
-  pset(&mut procs, pid, F_PARENT, parent);
-  pset(&mut procs, pid, F_PROG, prog);
-  pset(&mut procs, pid, F_REGS + R_RIP, entry);
-  pset(&mut procs, pid, F_REGS + R_RSP, USER_BASE + USER_SIZE);
-  pset(&mut procs, pid, F_REGS + R_RFLAGS, 0x202);
-  pset(&mut procs, pid, F_STATE, READY);
+  pset(&mut k.procs, pid, F_PARENT, parent);
+  pset(&mut k.procs, pid, F_PROG, prog);
+  pset(&mut k.procs, pid, F_REGS + R_RIP, entry);
+  pset(&mut k.procs, pid, F_REGS + R_RSP, USER_BASE + USER_SIZE);
+  pset(&mut k.procs, pid, F_REGS + R_RFLAGS, 0x202);
+  pset(&mut k.procs, pid, F_STATE, READY);
   return pid;
 }
 
 /// Ends process `pid` with exit `code`: frees its address space, hands the
 /// code to a parent waiting for it, and orphans its children.
-fn terminate(bm: &mut Buf, pool: &mut Pool, mmu: &Mmu, dir: &mut PageTable, procs: &mut Buf, pid: u64, code: u64)
-  requires tracks(bm, pool) && pt_level(dir) == 5 && len(procs) == PTAB_LEN
-  requires 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
-  ensures tracks(bm, pool) && pt_level(dir) == 5 && len(procs) == PTAB_LEN
+fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
+  requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k)
 {
-  if pt_has(dir, pid) {
-    free_space(&mut bm, &mut pool, mmu, pt_take(&mut dir, pid));
+  if pt_has(k.dir, pid) {
+    free_space(&mut k.mem, mmu, pt_take(&mut k.dir, pid));
   }
-  pset(&mut procs, pid, F_STATE, ZOMBIE);
-  pset(&mut procs, pid, F_CODE, code);
+  pset(&mut k.procs, pid, F_STATE, ZOMBIE);
+  pset(&mut k.procs, pid, F_CODE, code);
   let mut c = 1;
   while c < NPROC
-    invariant 1 <= c && c <= NPROC && len(procs) == PTAB_LEN
+    invariant 1 <= c && c <= NPROC && len(k.procs) == PTAB_LEN
   {
-    if pget(procs, c, F_PARENT) == pid && state(procs, c) != FREE {
-      pset(&mut procs, c, F_PARENT, 0);
-      if state(procs, c) == ZOMBIE {
-        pset(&mut procs, c, F_STATE, FREE);
+    if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE {
+      pset(&mut k.procs, c, F_PARENT, 0);
+      if state(k.procs, c) == ZOMBIE {
+        pset(&mut k.procs, c, F_STATE, FREE);
       }
     }
     c = c + 1;
   }
-  let par = pget(procs, pid, F_PARENT);
+  let par = pget(k.procs, pid, F_PARENT);
   if par == 0 || par >= NPROC {
-    pset(&mut procs, pid, F_STATE, FREE);       // nobody will collect it
-  } else if state(procs, par) == WAITING && pget(procs, par, F_WAIT) == pid {
-    pset(&mut procs, par, F_REGS + R_RAX, code);
-    pset(&mut procs, par, F_STATE, READY);
-    pset(&mut procs, pid, F_STATE, FREE);
-  } else if state(procs, par) == FREE || state(procs, par) == ZOMBIE {
-    pset(&mut procs, pid, F_STATE, FREE);
+    pset(&mut k.procs, pid, F_STATE, FREE);       // nobody will collect it
+  } else if state(k.procs, par) == WAITING && pget(k.procs, par, F_WAIT) == pid {
+    pset(&mut k.procs, par, F_REGS + R_RAX, code);
+    pset(&mut k.procs, par, F_STATE, READY);
+    pset(&mut k.procs, pid, F_STATE, FREE);
+  } else if state(k.procs, par) == FREE || state(k.procs, par) == ZOMBIE {
+    pset(&mut k.procs, pid, F_STATE, FREE);
   }
 }
 

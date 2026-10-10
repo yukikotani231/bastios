@@ -16,77 +16,77 @@ const STACK_FIRST: u64 = 496;         // 512 - STACK_PAGES
 const IMAGE_MAX: u64 = 0x1F0000;      // STACK_FIRST * 4096
 const KERNEL_ROOT: u64 = 0x10000;     // mmu_root while CR3 holds the kernel's own map
 
-fn free_l1(bm: &mut Buf, pool: &mut Pool, t: PageTable)
-  requires tracks(bm, pool) && pt_level(t) == 1
-  ensures tracks(bm, pool)
+fn free_l1(m: &mut Mem, t: PageTable)
+  requires mem_ok(m) && pt_level(t) == 1
+  ensures mem_ok(m)
 {
   let mut t1 = t;
   let mut i = 0;
   while i < 512
-    invariant i <= 512 && tracks(bm, pool) && pt_level(t1) == 1
+    invariant i <= 512 && mem_ok(m) && pt_level(t1) == 1
     invariant forall j: u64 :: j < i ==> !pt_used(t1, j)
   {
     if pt_has(t1, i) {
-      give_page(&mut bm, &mut pool, pt_take_frame(&mut t1, i));
+      give_page(&mut m, pt_take_frame(&mut t1, i));
     }
     i = i + 1;
   }
-  give_page(&mut bm, &mut pool, pt_free(t1));
+  give_page(&mut m, pt_free(t1));
 }
 
-fn free_l2(bm: &mut Buf, pool: &mut Pool, t: PageTable)
-  requires tracks(bm, pool) && pt_level(t) == 2
-  ensures tracks(bm, pool)
+fn free_l2(m: &mut Mem, t: PageTable)
+  requires mem_ok(m) && pt_level(t) == 2
+  ensures mem_ok(m)
 {
   let mut t2 = t;
   let mut i = 0;
   while i < 512
-    invariant i <= 512 && tracks(bm, pool) && pt_level(t2) == 2
+    invariant i <= 512 && mem_ok(m) && pt_level(t2) == 2
     invariant forall j: u64 :: j < i ==> !pt_used(t2, j)
   {
     if pt_has(t2, i) {
-      free_l1(&mut bm, &mut pool, pt_take(&mut t2, i));
+      free_l1(&mut m, pt_take(&mut t2, i));
     }
     i = i + 1;
   }
-  give_page(&mut bm, &mut pool, pt_free(t2));
+  give_page(&mut m, pt_free(t2));
 }
 
-fn free_l3(bm: &mut Buf, pool: &mut Pool, t: PageTable)
-  requires tracks(bm, pool) && pt_level(t) == 3
-  ensures tracks(bm, pool)
+fn free_l3(m: &mut Mem, t: PageTable)
+  requires mem_ok(m) && pt_level(t) == 3
+  ensures mem_ok(m)
 {
   let mut t3 = t;
   let mut i = 0;
   while i < 512
-    invariant i <= 512 && tracks(bm, pool) && pt_level(t3) == 3
+    invariant i <= 512 && mem_ok(m) && pt_level(t3) == 3
     invariant forall j: u64 :: j < i ==> !pt_used(t3, j)
   {
     if pt_has(t3, i) {
-      free_l2(&mut bm, &mut pool, pt_take(&mut t3, i));
+      free_l2(&mut m, pt_take(&mut t3, i));
     }
     i = i + 1;
   }
-  give_page(&mut bm, &mut pool, pt_free(t3));
+  give_page(&mut m, pt_free(t3));
 }
 
 /// Tears down a whole address space. It must not be the one in CR3.
-fn free_space(bm: &mut Buf, pool: &mut Pool, mmu: &Mmu, t: PageTable)
-  requires tracks(bm, pool) && pt_level(t) == 4 && mmu_root(mmu) == KERNEL_ROOT
-  ensures tracks(bm, pool)
+fn free_space(m: &mut Mem, mmu: &Mmu, t: PageTable)
+  requires mem_ok(m) && pt_level(t) == 4 && mmu_root(mmu) == KERNEL_ROOT
+  ensures mem_ok(m)
 {
   let mut t4 = t;
   let mut i = 1;
   while i < 256
-    invariant 1 <= i && i <= 256 && tracks(bm, pool) && pt_level(t4) == 4
+    invariant 1 <= i && i <= 256 && mem_ok(m) && pt_level(t4) == 4
     invariant forall j: u64 :: 1 <= j && j < i ==> !pt_used(t4, j)
   {
     if pt_has(t4, i) {
-      free_l3(&mut bm, &mut pool, pt_take(&mut t4, i));
+      free_l3(&mut m, pt_take(&mut t4, i));
     }
     i = i + 1;
   }
-  give_page(&mut bm, &mut pool, pt_free_root(mmu, t4));
+  give_page(&mut m, pt_free_root(mmu, t4));
 }
 
 /// Copies the bytes of `img` from `from` (up to a page of them) into `f`.
@@ -105,29 +105,29 @@ fn copy_page(f: &mut Frame, img: Str, from: u64)
 /// Builds an address space holding `img` (with `size` bytes of memory in
 /// all, the rest zero) and a stack, and puts it in slot `pid` of `dir`.
 /// Returns false, with every page given back, when memory runs out.
-fn new_space(bm: &mut Buf, pool: &mut Pool, dir: &mut PageTable, pid: u64, img: Str, size: u64) -> bool
-  requires tracks(bm, pool) && pt_level(dir) == 5 && pid < 512 && !pt_used(dir, pid)
+fn new_space(m: &mut Mem, dir: &mut PageTable, pid: u64, img: Str, size: u64) -> bool
+  requires mem_ok(m) && pt_level(dir) == 5 && pid < 512 && !pt_used(dir, pid)
   requires size <= IMAGE_MAX
-  ensures tracks(bm, pool) && pt_level(dir) == 5
+  ensures mem_ok(m) && pt_level(dir) == 5
 {
-  let a = find_free(bm);
+  let a = find_free(m.bm);
   if a >= NPAGES {
     return false;
   }
-  let mut l1 = pt_new(take_page(&mut bm, &mut pool, a), 1);
+  let mut l1 = pt_new(take_page(&mut m, a), 1);
   let npages = (size + 4095) / 4096;
   let mut p = 0;
   let mut ok = true;
   while ok && p < 512
-    invariant p <= 512 && tracks(bm, pool) && pt_level(l1) == 1
+    invariant p <= 512 && mem_ok(m) && pt_level(l1) == 1
     invariant forall j: u64 :: p <= j && j < 512 ==> !pt_used(l1, j)
   {
     if p < npages || p >= STACK_FIRST {
-      let b = find_free(bm);
+      let b = find_free(m.bm);
       if b >= NPAGES {
         ok = false;
       } else {
-        let mut f = take_page(&mut bm, &mut pool, b);
+        let mut f = take_page(&mut m, b);
         if p < npages {
           copy_page(&mut f, img, p * 4096);
         }
@@ -139,29 +139,29 @@ fn new_space(bm: &mut Buf, pool: &mut Pool, dir: &mut PageTable, pid: u64, img: 
     }
   }
   if !ok {
-    free_l1(&mut bm, &mut pool, l1);
+    free_l1(&mut m, l1);
     return false;
   }
-  let c = find_free(bm);
+  let c = find_free(m.bm);
   if c >= NPAGES {
-    free_l1(&mut bm, &mut pool, l1);
+    free_l1(&mut m, l1);
     return false;
   }
-  let mut l2 = pt_new(take_page(&mut bm, &mut pool, c), 2);
+  let mut l2 = pt_new(take_page(&mut m, c), 2);
   pt_put(&mut l2, 0, l1);
-  let d = find_free(bm);
+  let d = find_free(m.bm);
   if d >= NPAGES {
-    free_l2(&mut bm, &mut pool, l2);
+    free_l2(&mut m, l2);
     return false;
   }
-  let mut l3 = pt_new(take_page(&mut bm, &mut pool, d), 3);
+  let mut l3 = pt_new(take_page(&mut m, d), 3);
   pt_put(&mut l3, 0, l2);
-  let e = find_free(bm);
+  let e = find_free(m.bm);
   if e >= NPAGES {
-    free_l3(&mut bm, &mut pool, l3);
+    free_l3(&mut m, l3);
     return false;
   }
-  let mut root = pt_new(take_page(&mut bm, &mut pool, e), 4);
+  let mut root = pt_new(take_page(&mut m, e), 4);
   pt_put(&mut root, 1, l3);
   pt_put(&mut dir, pid, root);
   return true;

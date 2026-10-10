@@ -11,6 +11,11 @@ spec fn tracks(bm: &Buf, pool: &Pool) -> bool {
   && (forall i: u64 :: pool_has(pool, i) ==> i < pool_size(pool))
 }
 
+// The allocator: the bitmap and the pool it tracks, kept together.
+struct Mem { bm: Buf, pool: Pool }
+
+spec fn mem_ok(m: &Mem) -> bool { tracks(m.bm, m.pool) }
+
 fn bm_new(pool: &Pool) -> Buf
   requires forall i: u64 :: pool_has(pool, i) == (i < pool_size(pool))
   ensures tracks(result, pool)
@@ -59,19 +64,27 @@ fn count_free(bm: &Buf) -> u64
   return n;
 }
 
-fn take_page(bm: &mut Buf, pool: &mut Pool, i: u64) -> Frame
-  requires tracks(bm, pool) && i < NPAGES && get(bm, i) == 1
-  ensures tracks(bm, pool)
-  ensures frame_id(result) == i
+fn mem_new(pool: Pool) -> Mem
+  requires forall i: u64 :: pool_has(pool, i) == (i < pool_size(pool))
+  ensures mem_ok(result)
 {
-  bm = set(bm, i, 0);
-  return pool_take(&mut pool, i);
+  let bm = bm_new(pool);
+  return Mem { bm: bm, pool: pool };
 }
 
-fn give_page(bm: &mut Buf, pool: &mut Pool, f: Frame)
-  requires tracks(bm, pool)
-  ensures tracks(bm, pool)
+fn take_page(m: &mut Mem, i: u64) -> Frame
+  requires mem_ok(m) && i < NPAGES && get(m.bm, i) == 1
+  ensures mem_ok(m)
+  ensures frame_id(result) == i
 {
-  bm = set(bm, frame_id(f), 1);
-  pool_give(&mut pool, f);
+  m.bm = set(m.bm, i, 0);
+  return pool_take(&mut m.pool, i);
+}
+
+fn give_page(m: &mut Mem, f: Frame)
+  requires mem_ok(m)
+  ensures mem_ok(m)
+{
+  m.bm = set(m.bm, frame_id(f), 1);
+  pool_give(&mut m.pool, f);
 }
