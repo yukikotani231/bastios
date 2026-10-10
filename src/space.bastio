@@ -115,7 +115,7 @@ fn new_space(m: &mut Mem, img: Str, size: u64) -> Space
   ensures mem_ok(m)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
-  let a = find_free(m.bm);
+  let a = find_free(&mut m);
   if a >= NPAGES {
     return Space::Empty;
   }
@@ -128,7 +128,7 @@ fn new_space(m: &mut Mem, img: Str, size: u64) -> Space
     invariant forall j: u64 :: p <= j && j < 512 ==> !pt_used(l1, j)
   {
     if p < npages || p >= STACK_FIRST {
-      let b = find_free(m.bm);
+      let b = find_free(&mut m);
       if b >= NPAGES {
         ok = false;
       } else {
@@ -147,21 +147,21 @@ fn new_space(m: &mut Mem, img: Str, size: u64) -> Space
     free_l1(&mut m, l1);
     return Space::Empty;
   }
-  let c = find_free(m.bm);
+  let c = find_free(&mut m);
   if c >= NPAGES {
     free_l1(&mut m, l1);
     return Space::Empty;
   }
   let mut l2 = pt_new(take_page(&mut m, c), 2);
   pt_put(&mut l2, 0, l1);
-  let d = find_free(m.bm);
+  let d = find_free(&mut m);
   if d >= NPAGES {
     free_l2(&mut m, l2);
     return Space::Empty;
   }
   let mut l3 = pt_new(take_page(&mut m, d), 3);
   pt_put(&mut l3, 0, l2);
-  let e = find_free(m.bm);
+  let e = find_free(&mut m);
   if e >= NPAGES {
     free_l3(&mut m, l3);
     return Space::Empty;
