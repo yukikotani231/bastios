@@ -90,18 +90,21 @@ fn holder(k: &mut Kernel, g: u64) -> u64
 
 /// Whether q waits for the rest of its group to leave the processors
 /// (F_QUIET), and is still retrying the call that needs it. A mark left
-/// behind by a thread that has since blocked or died stops nobody.
+/// behind by a thread that has since blocked, died or moved on to another
+/// call stops nobody.
 fn quieting(procs: &Buf, q: u64) -> bool
   requires len(procs) == PTAB_LEN && q < NPROC
 {
   let st = state(procs, q);
-  return pget(procs, q, F_QUIET) != 0 && pget(procs, q, F_RESTART) != 0 && (st == READY || st == RUNNING);
+  let n = pget(procs, q, F_REGS + R_RAX);       // the call it will run again (lx_retry)
+  let remap = n == LX_MUNMAP || n == LX_MPROTECT || n == LX_MREMAP || n == LX_MMAP;
+  return pget(procs, q, F_QUIET) != 0 && pget(procs, q, F_RESTART) != 0 && remap && (st == READY || st == RUNNING);
 }
 
 /// Whether thread p can run now: it is not in a group, or its group is
 /// not ending (no member is KILLED) and one of them holds the address
 /// space (none does while the group has lent it to a vfork child), and no other
-/// member waits for the group to leave the processors (quieting).
+/// member waits for the group to leave the processors (quieting) ahead of p.
 fn group_free(k: &mut Kernel, p: u64) -> bool
   requires kok(k) && p < NPROC
   ensures kok(k)
@@ -117,7 +120,9 @@ fn group_free(k: &mut Kernel, p: u64) -> bool
     if in_group(k.procs, q, g) && state(k.procs, q) == KILLED {
       return false;
     }
-    if q != p && in_group(k.procs, q, g) && quieting(k.procs, q) {
+    // Of two threads waiting at once (two munmaps), the lower one goes
+    // first; the other waits with the rest.
+    if q != p && in_group(k.procs, q, g) && quieting(k.procs, q) && (q < p || !quieting(k.procs, p)) {
       return false;
     }
     q = q + 1;
