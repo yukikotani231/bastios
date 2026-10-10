@@ -1,4 +1,4 @@
-/* System V IPC: message queues and semaphore sets, their keys and
+/* System V IPC: message queues, semaphore sets and shared memory, their keys and
  * permissions, IPC_STAT/IPC_SET/IPC_RMID, blocking waits that a signal or
  * a removal ends, and SEM_UNDO at exit. */
 #include "compat.h"
@@ -6,6 +6,7 @@
 #include <sys/ipc.h>
 #include <sys/msg.h>
 #include <sys/sem.h>
+#include <sys/shm.h>
 #include <sys/wait.h>
 #include <time.h>
 
@@ -147,6 +148,37 @@ static int sem_undo(void) {
     return v == 1 && WIFEXITED(st) && WEXITSTATUS(st) == 0;
 }
 
+static int shm_basics(void) {
+    int id = shmget(IPC_PRIVATE, 10000, IPC_CREAT | 0600);
+    if (id < 0) return 0;
+    char *p = shmat(id, 0, 0);
+    if (p == (void *)-1) return 0;
+    int ok = p[0] == 0 && p[9999] == 0;
+    p[0] = 'a'; p[9000] = 'b';
+    char *q = shmat(id, 0, SHM_RDONLY);                                                  /* a second view */
+    ok = ok && q != (void *)-1 && q != p && q[0] == 'a' && q[9000] == 'b';
+    struct shmid_ds ds;
+    ok = ok && shmctl(id, IPC_STAT, &ds) == 0 && ds.shm_segsz == 10000 && ds.shm_nattch == 2 && ds.shm_cpid == getpid();
+    pid_t c = fork();
+    if (c == 0) { p[1] = 'c'; _exit(shmdt(p) == 0 ? 0 : 1); }                       /* the child shares it */
+    int st; waitpid(c, &st, 0);
+    ok = ok && WIFEXITED(st) && WEXITSTATUS(st) == 0 && q[1] == 'c';
+    ok = ok && shmdt(q) == 0 && shmdt(q) == -1 && errno == EINVAL;
+    ok = ok && shmctl(id, IPC_RMID, 0) == 0 && shmctl(id, IPC_STAT, &ds) == 0 && (ds.shm_perm.mode & SHM_DEST);
+    ok = ok && p[9000] == 'b' && shmdt(p) == 0 && shmctl(id, IPC_STAT, &ds) == -1 && errno == EINVAL;  /* gone with the last detach */
+    return ok;
+}
+
+static int shm_errors(void) {
+    int ok = shmget(IPC_PRIVATE, 0, 0600) == -1 && errno == EINVAL;
+    int id = shmget(0x5159, 4096, IPC_CREAT | 0600);
+    ok = ok && shmget(0x5159, 8192, 0) == -1 && errno == EINVAL;                         /* bigger than it is */
+    ok = ok && shmat(id, (void *)0x1001, 0) == (void *)-1 && errno == EINVAL;
+    ok = ok && shmat(id + 1, 0, 0) == (void *)-1 && errno == EINVAL;
+    shmctl(id, IPC_RMID, 0);
+    return ok;
+}
+
 int main(void) {
     setup();
     EXPECT("msgsnd, msgrcv and IPC_STAT", queue_basics());
@@ -159,5 +191,7 @@ int main(void) {
     EXPECT("GETNCNT counts a waiting process", sem_wait_count());
     EXPECT("a signal ends semop; semtimedop times out", sem_signal());
     EXPECT("SEM_UNDO is undone at exit", sem_undo());
+    EXPECT("shmat, a second view, fork, IPC_RMID", shm_basics());
+    EXPECT("shmget and shmat errors", shm_errors());
     return done();
 }

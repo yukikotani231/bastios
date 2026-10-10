@@ -1,11 +1,13 @@
 /* User and group ids: /etc/passwd names nobody, the set*id calls change
  * the ids and follow Linux's rules once the process is no longer root,
- * a child inherits them, and /proc/self/status shows them. */
+ * a child inherits them, /proc/self/status shows them, and kill checks
+ * them. */
 #include "compat.h"
 #include <fcntl.h>
 #include <grp.h>
 #include <pwd.h>
 #include <sys/fsuid.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -47,6 +49,21 @@ static int inherited(void) {
     return setuid(7) == 0 && in_child(child_sees) && status_shows();
 }
 
+static int kill_rules(void) {
+    pid_t victim = fork();
+    if (victim == 0) { pause(); _exit(0); }                                 /* stays root */
+    pid_t c = fork();
+    if (c == 0) {
+        setuid(65534);
+        int denied = kill(victim, SIGTERM) == -1 && errno == EPERM;
+        int self = kill(getpid(), 0) == 0;
+        _exit(denied && self ? 0 : 1);
+    }
+    int st; waitpid(c, &st, 0);
+    kill(victim, SIGKILL); waitpid(victim, 0, 0);
+    return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
 int main(void) {
     setup();
     EXPECT("getpwnam finds nobody", ({ struct passwd *p = getpwnam("nobody"); p && p->pw_uid == 65534; }));
@@ -55,6 +72,7 @@ int main(void) {
     EXPECT("an unprivileged process keeps to the ids it holds", in_child(drop_to_nobody));
     EXPECT("setreuid and setfsuid follow Linux's rules", in_child(reuid_rules));
     EXPECT("a child inherits ids; /proc/self/status shows them", in_child(inherited));
+    EXPECT("kill needs a matching uid", kill_rules());
     EXPECT("the parent is still root", getuid() == 0 && geteuid() == 0);
     return done();
 }
