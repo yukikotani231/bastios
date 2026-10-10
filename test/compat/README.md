@@ -32,6 +32,15 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   them under `/disk/c` and builds dynamic PIEs, which the kernel runs
   with its built-in musl dynamic linker. Building make needs autoconf,
   automake, autopoint and texinfo for its bootstrap.
+- `bastio.txt`: the Bastio compiler on BastiOS, from a third disk
+  (`bastiodisk.sh`): bastiolang's `bastioc1` (C from `bastioc0`, built
+  against musl), Z3 (`Z3_TAG`, a static PIE against glibc, as there is no
+  musl C++ toolchain; its build takes a while, once) and tcc, with the
+  headers the generated C includes, and the programs in `bastio/`.
+  `bastioc1` proves each program with Z3, then builds it with tcc, which
+  needs GNU `__auto_type` (`patches/tcc-auto-type.patch`, applied to
+  `TCC_REV`). The compiler's own sources are on the disk under `/disk/s`,
+  but proving them needs more memory than a process gets.
 
 `mkdisk.py` puts the programs and that BusyBox on a disk image in BastiOS's
 own disk format, so they appear as `/disk/NAME`. `run.py` boots the kernel

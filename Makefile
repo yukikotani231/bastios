@@ -9,6 +9,8 @@
 # BASTIOC points at the Bastio stage0 compiler (github.com/yukikotani231/bastiolang).
 
 BASTIOC ?= ../bastiolang/stage0/target/release/bastioc0
+# Where `import "core/..."` finds the Bastio core library.
+BASTIOLIB ?= ../bastiolang
 CC      ?= cc
 QEMU    ?= qemu-system-x86_64
 
@@ -39,7 +41,7 @@ ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmi
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so
 
 build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
-	$(BASTIOC) --target user -o $@ $<
+	$(BASTIOC) --lib $(BASTIOLIB) --target user -o $@ $<
 
 build/user/%.o: build/user/%.c
 	$(CC) $(UCFLAGS) -c -o $@ $<
@@ -141,7 +143,7 @@ KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
 build/kernel.c: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
-	$(BASTIOC) --target kernel -o $@ src/main.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --target kernel -o $@ src/main.bastio
 
 build/kernel.o: build/kernel.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -325,11 +327,12 @@ MUSL_INC      ?= /usr/include/x86_64-linux-musl
 MUSL_LIB      ?= /usr/lib/x86_64-linux-musl
 TCC_SRC       := build/compat/src/tcc
 
-build/compat/tcc: | build/compat/src
+build/compat/tcc: test/compat/patches/tcc-auto-type.patch | build/compat/src
 	rm -rf $(TCC_SRC) && mkdir $(TCC_SRC)
 	git -C $(TCC_SRC) init -q
 	git -C $(TCC_SRC) fetch -q --depth 1 $(TCC_GIT) $(TCC_REV)
 	git -C $(TCC_SRC) checkout -q FETCH_HEAD
+	git -C $(TCC_SRC) apply $(CURDIR)/test/compat/patches/tcc-auto-type.patch
 	cd $(TCC_SRC) && ./configure --cc=$(MUSLCC) --config-musl --config-pie --extra-cflags="-O2 -fPIE" \
 	  --extra-ldflags="-static-pie -s" --sysincludepaths=/disk/c/include --libpaths=/disk/c/lib \
 	  --crtprefix=/disk/c/lib --tccdir=/disk/c/lib --elfinterp=/lib/ld-musl-x86_64.so.1 >/dev/null
@@ -349,15 +352,44 @@ build/compat/make: | build/compat/src
 build/compat/dev.img: build/compat/tcc build/compat/make test/compat/devdisk.sh test/compat/dev_headers.c test/compat/mkdisk.py
 	test/compat/devdisk.sh $@ build/compat/tcc build/compat/make $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)
 
+# The Bastio compiler on BastiOS: bastioc1 (bastiolang's stage1, as C from
+# bastioc0, built here with musl), Z3 to discharge its proofs, and tcc to
+# build the C it writes, on a third disk (test/compat/bastiodisk.sh) for
+# test/compat/bastio.txt. Z3 is built against glibc, statically: there is
+# no C++ compiler for musl here. Its build takes a while, once.
+BASTIOLANG    ?= $(patsubst %/stage0/target/release/bastioc0,%,$(BASTIOC))
+Z3_GIT        ?= https://github.com/Z3Prover/z3
+Z3_TAG        ?= z3-4.8.12
+Z3_JOBS       ?= 4
+
+build/compat/z3: | build/compat/src
+	rm -rf build/compat/src/z3
+	git clone -q --depth 1 --branch $(Z3_TAG) $(Z3_GIT) build/compat/src/z3
+	cd build/compat/src/z3 && CXX=g++ CC=gcc CXXFLAGS=-fPIE LDFLAGS=-static-pie \
+	  python3 scripts/mk_make.py --single-threaded >/dev/null
+	$(MAKE) -C build/compat/src/z3/build -s -j$(Z3_JOBS) z3 >/dev/null
+	strip -o $@ build/compat/src/z3/build/z3
+
+build/compat/bastioc1.c: $(BASTIOC) $(wildcard $(BASTIOLANG)/stage1/*.bastio) | build/compat
+	$(BASTIOC) --emit-c -o $@ $(BASTIOLANG)/stage1/bastioc1.bastio
+
+build/compat/bastioc1: build/compat/bastioc1.c
+	$(MUSLCC) $(APP_CFLAGS) -o $@ $<
+
+build/compat/bastio.img: build/compat/bastioc1 build/compat/z3 build/compat/tcc test/compat/bastiodisk.sh \
+    $(wildcard test/compat/bastio/*.bastio) test/compat/mkdisk.py
+	test/compat/bastiodisk.sh $@ build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc \
+	  $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB) $(BASTIOLANG)/stage1
+
 build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) test/compat/mkdisk.py
 	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
 
-compat: build/bastios.elf build/compat/disk.img build/compat/dev.img
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --out build/compat $(COMPAT_PROGS)
+compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --out build/compat $(COMPAT_PROGS)
 
 # Records which checks pass now, so `make compat` catches regressions.
-compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --out build/compat $(COMPAT_PROGS)
+compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --out build/compat $(COMPAT_PROGS)
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)

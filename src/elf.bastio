@@ -16,6 +16,7 @@
 import "pages.bastio";
 import "space.bastio";
 import "fs.bastio";
+import "core/endian.bastio";
 
 const ELF_HDR: u64 = 64;              // size of the ELF64 file header
 const PH_SIZE: u64 = 56;              // size of an ELF64 program header
@@ -112,20 +113,20 @@ fn rd16(x: &Bytes, at: u64) -> u64
   requires at + 2 <= blen(x)
   ensures result < 0x10000
 {
-  return cast[u64](bget(x, at)) + 0x100 * cast[u64](bget(x, at + 1));
+  return cast[u64](load_le16(x, at));
 }
 
 fn rd32(x: &Bytes, at: u64) -> u64
   requires at + 4 <= blen(x)
   ensures result < 0x100000000
 {
-  return rd16(x, at) + 0x10000 * rd16(x, at + 2);
+  return cast[u64](load_le32(x, at));
 }
 
 fn rd64(x: &Bytes, at: u64) -> u64
   requires at + 8 <= blen(x)
 {
-  return rd32(x, at) + 0x100000000 * rd32(x, at + 4);
+  return load_le64(x, at);
 }
 
 /// Does `img` start with the ELF magic? Such an image is loaded as ELF or

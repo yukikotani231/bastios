@@ -63,6 +63,7 @@
 
 import "blk.bastio";
 import "diskq.bastio";
+import "core/endian.bastio";
 
 const DSLOTS: u64 = 1024;             // directory entries, at most
 const DENT: u64 = 256;
@@ -131,10 +132,7 @@ spec fn disk_ok(d: &DiskFs) -> bool {
 fn get_u64(b: &Bytes, at: u64) -> u64
   requires at + 8 <= blen(b)
 {
-  return cast[u64](bget(b, at)) + 0x100 * cast[u64](bget(b, at + 1)) + 0x10000 * cast[u64](bget(b, at + 2))
-    + 0x1000000 * cast[u64](bget(b, at + 3)) + 0x100000000 * cast[u64](bget(b, at + 4))
-    + 0x10000000000 * cast[u64](bget(b, at + 5)) + 0x1000000000000 * cast[u64](bget(b, at + 6))
-    + 0x100000000000000 * cast[u64](bget(b, at + 7));
+  return load_le64(b, at);
 }
 
 /// Stores v at b[at..at + 8], little-endian.
@@ -142,16 +140,7 @@ fn put_u64(b: &mut Bytes, at: u64, v: u64)
   requires at + 8 <= blen(b)
   ensures blen(b) == old(blen(b))
 {
-  let l = blen(b);
-  let mut x = v;
-  let mut k = 0;
-  while k < 8
-    invariant k <= 8 && blen(b) == l
-  {
-    bset(&mut b, at + k, cast[u8](x % 256));
-    x = x / 256;
-    k = k + 1;
-  }
+  store_le64(&mut b, at, v);
 }
 
 /// Sets b[from..to] to zero.
