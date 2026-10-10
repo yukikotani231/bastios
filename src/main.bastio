@@ -390,7 +390,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     vec_push(&mut fpus, Fpu::None);
     q = q + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), ticks: 0, ns: 0, cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN) };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), ticks: 0, ns: 0, cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN) };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
@@ -430,6 +430,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.ofd);
   free(sys.k.pipes);
   free(sys.k.sigact);
+  free(sys.k.cwd);
   pool = sys.k.mem.pool;
   port_release(&mut ports, sys.con.io);
   port_release(&mut ports, sys.pic.master);
