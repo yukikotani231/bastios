@@ -334,7 +334,10 @@ const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
 // flags, restorer, mask).
 const SIGACT_LEN: u64 = 4096;
 const SIGSAVE_LEN: u64 = 1040;        // NPROC + NPROC * 64
-const ALARMS_LEN: u64 = 32;          // NPROC * 2
+const ALARMS_LEN: u64 = 224;         // NPROC * 2, then PT_N POSIX timers of PT_W words per process
+const PT_BASE: u64 = 32;             // where the POSIX timers start in k.alarms (src/lxptimer.bastio)
+const PT_N: u64 = 4;                 // POSIX timers per process
+const PT_W: u64 = 3;                 // words per timer: deadline, interval, state
 const LX_PAUSE: u64 = 34;
 const LX_RT_SIGSUSPEND: u64 = 130;
 const LX_WAITID: u64 = 247;
@@ -921,7 +924,8 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code: u64)
     Space::Mapped(t) => { free_space(&mut k.mem, mmu, t); },
   }
   drop_fpu(&mut k.mem, take_fpu(&mut k.fpus, pid));
-  k.alarms = set(k.alarms, 2 * pid, 0);   // its timer stops
+  k.alarms = set(k.alarms, 2 * pid, 0);   // its timers stop
+  ptimer_clear(&mut k, pid);
   lx_fd_close_all(&mut k, pid, false);
   close_unshared(&mut k, pid);
   pset(&mut k.procs, pid, F_STATE, ZOMBIE);
