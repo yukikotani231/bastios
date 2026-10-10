@@ -44,7 +44,11 @@ const SYS_TCP_CLOSE: u64 = 53;        // (connection or listener) -> 0
 const SYS_TCP_STATUS: u64 = 54;       // (connection) -> 0 connecting, 1 open, 2 closed or reset
 const SYS_TCP_PEER: u64 = 55;         // (connection) -> 65536 * address + port
 const SYS_NETINFO: u64 = 47;          // (what) -> 0 address, 1 gateway, 2 netmask, 3 how (0 not yet, 1 DHCP, 2 static)
-const SYS_STAT: u64 = 18;             // (_, name, name length) -> size
+const SYS_STAT: u64 = 18;             // (_, name, name length) -> size; DIR_BIT for a directory
+const SYS_MKDIR: u64 = 19;            // (_, name, name length) -> 0
+const SYS_RMDIR: u64 = 20;            // (_, name, name length) -> 0
+const SYS_READDIR: u64 = 21;          // (256 * entry + name length, buffer, length) -> length (+ DIR_BIT)
+const DIR_BIT: u64 = 4294967296;      // marks a directory in SYS_STAT and SYS_READDIR
 
 // What the scheduler does after a system call.
 const KEEP: u64 = 0;
@@ -256,6 +260,38 @@ fn do_dirent(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
   return nl;
 }
 
+/// Entry i of the directory whose name (nl bytes) the user buffer at va
+/// starts with: its name replaces the start of the buffer (n bytes long).
+/// Returns the name's length, plus DIR_BIT if it is a directory; 0 for an
+/// entry not in the directory; NO_RESULT past the last entry or for a name
+/// that is not a directory.
+fn do_readdir(k: &mut Kernel, pid: u64, i: u64, nl: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if nl > n || !name_in(&mut k, pid, va, nl) {
+    return NO_RESULT;
+  }
+  let d = vfs_dir_lookup(&mut k.fs, nl);
+  if d == NO_FILE {
+    return NO_RESULT;
+  }
+  let r = vfs_readdir(&mut k.fs, d, i);
+  if r == NO_FILE {
+    return NO_RESULT;
+  }
+  if r == 0 {
+    return 0;
+  }
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, smaller(r, n)) == NO_RESULT {
+    return NO_RESULT;
+  }
+  if vfs_is_dir(&mut k.fs, vfs_child(d, i)) {
+    return r + DIR_BIT;
+  }
+  return r;
+}
+
 /// The file system calls; NO_RESULT for a number that is not one.
 fn file_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -293,9 +329,28 @@ fn file_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   }
   if n == SYS_STAT {
     if name_in(&mut k, pid, b, c) {
-      return vfs_stat(&mut k.fs, c);
+      let f = vfs_lookup(&mut k.fs, c);
+      if f != NO_FILE && vfs_is_dir(&mut k.fs, f) {
+        return DIR_BIT;
+      }
+      return vfs_size(&mut k.fs, f);
     }
     return NO_RESULT;
+  }
+  if n == SYS_MKDIR {
+    if name_in(&mut k, pid, b, c) && vfs_mkdir(&mut k.fs, c) {
+      return 0;
+    }
+    return NO_RESULT;
+  }
+  if n == SYS_RMDIR {
+    if name_in(&mut k, pid, b, c) && vfs_rmdir(&mut k.fs, &mut k.mem, c) {
+      return 0;
+    }
+    return NO_RESULT;
+  }
+  if n == SYS_READDIR {
+    return do_readdir(&mut k, pid, a / 256, a % 256, b, c);
   }
   return NO_RESULT;
 }

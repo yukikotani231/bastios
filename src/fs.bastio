@@ -5,7 +5,13 @@
 //
 // There are two file systems: the in-memory one (`ramfs.bastio`) and the
 // one on the ATA disk (`diskfs.bastio`). Names that start with "disk/" are
-// on the disk; every other name is in memory. Each open file records which
+// on the disk; every other name is in memory.
+//
+// Directories: a name is a path, and both file systems can hold directory
+// nodes. A file "a/b" can only be created while the directory "a" exists,
+// and a directory can only be removed while nothing is in it, so every
+// parent of a file exists. "disk" itself is the disk's top directory; it
+// is not a node, and no file in memory may take its name. Each open file records which
 // file system it is on (FD_FS), and the few functions below dispatch on it;
 // nothing above this file knows there are two.
 //
@@ -41,22 +47,28 @@ const O_APPEND: u64 = 16;
 
 const NO_FD: u64 = 18446744073709551615;
 
+// Directory handles besides the nodes (vfs_dir_lookup, vfs_readdir).
+const VDIR_ROOT: u64 = 64;             // NFILES + DSLOTS: the top directory
+const VDIR_DISK: u64 = 65;             // "disk"
+const NAMEBUF: u64 = 64;              // holds any node's name
+
 struct Vfs {
   ram: Vec[Node],       // the in-memory file system
   ftab: Buf,            // open files: FD_ROWS rows of FD_STRIDE words
   xfer: Bytes,          // the transfer buffer
   disk: DiskFs,         // the file system on the disk
+  name: Bytes,          // a directory's name, while vfs_readdir lists it
 }
 
 spec fn vfs_ok(v: &Vfs) -> bool {
-  nodes_ok(v.ram) && len(v.ftab) == FTAB_LEN && blen(v.xfer) == XFER && disk_ok(v.disk)
+  nodes_ok(v.ram) && len(v.ftab) == FTAB_LEN && blen(v.xfer) == XFER && disk_ok(v.disk) && blen(v.name) == NAMEBUF
 }
 
 fn vfs_new(disk: DiskFs) -> Vfs
   requires disk_ok(disk)
   ensures vfs_ok(result)
 {
-  return Vfs { ram: ram_new(), ftab: alloc(FTAB_LEN), xfer: balloc(XFER), disk: disk };
+  return Vfs { ram: ram_new(), ftab: alloc(FTAB_LEN), xfer: balloc(XFER), disk: disk, name: balloc(NAMEBUF) };
 }
 
 /// Frees everything (at power off): every in-memory file's pages go back,
@@ -68,6 +80,7 @@ fn vfs_free(v: Vfs, mem: &mut Mem) -> Blk
   ram_free(v.ram, &mut mem);
   free(v.ftab);
   bfree(v.xfer);
+  bfree(v.name);
   return disk_unmount(v.disk);
 }
 
@@ -136,13 +149,15 @@ fn vfs_open(v: &mut Vfs, mem: &mut Mem, base: u64, flags: u64, n: u64) -> u64
   }
   let mut i = ram_find(&mut v.ram, v.xfer, n);
   if i >= NFILES {
-    if flags / O_CREATE % 2 == 0 {
+    if flags / O_CREATE % 2 == 0 || !path_ok(v, n) || !parent_ok(&mut v, n) {
       return NO_FD;
     }
-    i = ram_create(&mut v.ram, v.xfer, n);
+    i = ram_create(&mut v.ram, v.xfer, n, false);
     if i >= NFILES {
       return NO_FD;
     }
+  } else if ram_is_dir(&mut v.ram, i) {
+    return NO_FD;
   }
   if flags / O_TRUNC % 2 == 1 && flags / O_WRITE % 2 == 1 {
     match take_node(&mut v.ram, i) {
@@ -169,13 +184,15 @@ fn disk_open(v: &mut Vfs, row: u64, flags: u64, n: u64) -> u64
 {
   let mut i = disk_find(v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX);
   if i >= DSLOTS {
-    if flags / O_CREATE % 2 == 0 {
+    if flags / O_CREATE % 2 == 0 || !path_ok(v, n) || !parent_ok(&mut v, n) {
       return NO_FD;
     }
-    i = disk_create(&mut v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX);
+    i = disk_create(&mut v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX, false);
     if i >= DSLOTS {
       return NO_FD;
     }
+  } else if dent_dir(v.disk, i) {
+    return NO_FD;
   }
   if flags / O_TRUNC % 2 == 1 && flags / O_WRITE % 2 == 1 {
     if !disk_truncate(&mut v.disk, i) {
@@ -328,13 +345,13 @@ fn vfs_unlink(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
 {
   if on_disk(v, n) {
     let d = disk_find(v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX);
-    if d >= DSLOTS || node_open(v.ftab, FS_DISK, d) {
+    if d >= DSLOTS || node_open(v.ftab, FS_DISK, d) || dent_dir(v.disk, d) {
       return false;
     }
     return disk_remove(&mut v.disk, d);
   }
   let i = ram_find(&mut v.ram, v.xfer, n);
-  if i >= NFILES || node_open(v.ftab, FS_RAM, i) {
+  if i >= NFILES || node_open(v.ftab, FS_RAM, i) || ram_is_dir(&mut v.ram, i) {
     return false;
   }
   ram_remove(&mut v.ram, &mut mem, i);
@@ -466,7 +483,7 @@ fn vfs_install(v: &mut Vfs, mem: &mut Mem, name: Str, data: Str) -> bool
   let n = blen(nm);
   let mut i = ram_find(&mut v.ram, nm, n);
   if i >= NFILES {
-    i = ram_create(&mut v.ram, nm, n);
+    i = ram_create(&mut v.ram, nm, n, false);
   }
   bfree(nm);
   if i >= NFILES {
@@ -486,4 +503,288 @@ fn vfs_install(v: &mut Vfs, mem: &mut Mem, name: Str, data: Str) -> bool
     },
   }
   return ok;
+}
+
+// ---------------------------------------------------------------- directories
+
+/// Is the name in the first n bytes of the transfer buffer fit for a new
+/// file or directory: not empty, no "/" at either end or twice in a row,
+/// and not "disk"?
+fn path_ok(v: &Vfs, n: u64) -> bool
+  requires vfs_ok(v) && n <= XFER
+{
+  if n == 0 || bget(v.xfer, 0) == 47 || bget(v.xfer, n - 1) == 47 {
+    return false;
+  }
+  if n == 4 && bget(v.xfer, 0) == 100 && bget(v.xfer, 1) == 105 && bget(v.xfer, 2) == 115
+    && bget(v.xfer, 3) == 107 {
+    return false;
+  }
+  let mut j = 1;
+  while j < n
+    invariant 1 <= j && j <= n
+  {
+    if bget(v.xfer, j) == 47 && bget(v.xfer, j - 1) == 47 {
+      return false;
+    }
+    j = j + 1;
+  }
+  return true;
+}
+
+/// The position of the last "/" in the first n bytes of the transfer
+/// buffer, or n if there is none.
+fn last_slash(v: &Vfs, n: u64) -> u64
+  requires vfs_ok(v) && n <= XFER
+  ensures result <= n
+{
+  let mut k = n;
+  while k > 0
+    invariant k <= n
+  {
+    if bget(v.xfer, k - 1) == 47 {
+      return k - 1;
+    }
+    k = k - 1;
+  }
+  return n;
+}
+
+/// Does the directory that a new file named by the first n bytes of the
+/// transfer buffer would go in exist?
+fn parent_ok(v: &mut Vfs, n: u64) -> bool
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+{
+  let k = last_slash(v, n);
+  if k == n {
+    return true;                        // at the top
+  }
+  if on_disk(v, n) {
+    if k < DISK_PREFIX {
+      return k == DISK_PREFIX - 1;      // directly in "disk"
+    }
+    let d = disk_find(v.disk, v.xfer, DISK_PREFIX, k - DISK_PREFIX);
+    return d < DSLOTS && dent_dir(v.disk, d);
+  }
+  let i = ram_find(&mut v.ram, v.xfer, k);
+  return i < NFILES && ram_is_dir(&mut v.ram, i);
+}
+
+/// Makes the directory named by the first n bytes of the transfer buffer.
+/// Fails if the name is taken, its parent is missing, or there is no room.
+fn vfs_mkdir(v: &mut Vfs, n: u64) -> bool
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+{
+  if !path_ok(v, n) || !parent_ok(&mut v, n) {
+    return false;
+  }
+  if on_disk(v, n) {
+    if disk_find(v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX) < DSLOTS {
+      return false;
+    }
+    return disk_create(&mut v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX, true) < DSLOTS;
+  }
+  if ram_find(&mut v.ram, v.xfer, n) < NFILES {
+    return false;
+  }
+  return ram_create(&mut v.ram, v.xfer, n, true) < NFILES;
+}
+
+/// Removes the directory named by the first n bytes of the transfer buffer
+/// if nothing is in it.
+fn vfs_rmdir(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem) && n <= XFER
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  if on_disk(v, n) {
+    let d = disk_find(v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX);
+    if d >= DSLOTS || !dent_dir(v.disk, d) {
+      return false;
+    }
+    let mut j = 0;
+    while j < DSLOTS
+      invariant j <= DSLOTS && vfs_ok(v) && DISK_PREFIX < n && n <= XFER
+    {
+      if disk_under(v.disk, j, v.xfer, DISK_PREFIX, n - DISK_PREFIX) {
+        return false;
+      }
+      j = j + 1;
+    }
+    return disk_remove(&mut v.disk, d);
+  }
+  let i = ram_find(&mut v.ram, v.xfer, n);
+  if i >= NFILES || !ram_is_dir(&mut v.ram, i) {
+    return false;
+  }
+  let mut j = 0;
+  while j < NFILES
+    invariant j <= NFILES && vfs_ok(v) && n <= XFER
+  {
+    if ram_under(&mut v.ram, j, v.xfer, n) {
+      return false;
+    }
+    j = j + 1;
+  }
+  ram_remove(&mut v.ram, &mut mem, i);
+  return true;
+}
+
+/// Is handle f (from vfs_lookup or vfs_dir_lookup) a directory?
+fn vfs_is_dir(v: &mut Vfs, f: u64) -> bool
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  if f < NFILES {
+    return ram_is_dir(&mut v.ram, f);
+  }
+  if f < NFILES + DSLOTS {
+    return dent_dir(v.disk, f - NFILES);
+  }
+  return f == VDIR_ROOT || f == VDIR_DISK;
+}
+
+/// The directory named by the first n bytes of the transfer buffer, as a
+/// handle for vfs_readdir: VDIR_ROOT for the empty name, VDIR_DISK for
+/// "disk", or a directory node. NO_FILE if there is no such directory.
+fn vfs_dir_lookup(v: &mut Vfs, n: u64) -> u64
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+  ensures result <= VDIR_DISK || result == NO_FILE
+{
+  if n == 0 {
+    return VDIR_ROOT;
+  }
+  if n == 4 && bget(v.xfer, 0) == 100 && bget(v.xfer, 1) == 105 && bget(v.xfer, 2) == 115
+    && bget(v.xfer, 3) == 107 {
+    return VDIR_DISK;
+  }
+  let f = vfs_lookup(&mut v, n);
+  if f != NO_FILE && vfs_is_dir(&mut v, f) {
+    return f;
+  }
+  return NO_FILE;
+}
+
+/// If x[0..n] names something directly in the directory named p[0..l]
+/// (in the top directory when `top`), moves its last part to the start of
+/// x and returns that part's length; otherwise returns 0.
+fn child_at(x: &mut Bytes, n: u64, p: &Bytes, l: u64, top: bool) -> u64
+  requires n <= blen(x) && l <= blen(p)
+  ensures blen(x) == old(blen(x)) && result <= n
+{
+  let mut start = 0;
+  if !top {
+    if n <= l + 1 || bget(x, l) != 47 {
+      return 0;
+    }
+    let mut j = 0;
+    while j < l
+      invariant j <= l && l < n
+    {
+      if bget(x, j) != bget(p, j) {
+        return 0;
+      }
+      j = j + 1;
+    }
+    start = l + 1;
+  }
+  let mut j = start;
+  while j < n
+    invariant start <= j && j <= n
+  {
+    if bget(x, j) == 47 {
+      return 0;
+    }
+    j = j + 1;
+  }
+  let bl = blen(x);
+  let mut k = 0;
+  while k < n - start
+    invariant k <= n - start && start <= n && n <= bl && blen(x) == bl
+  {
+    bset(&mut x, k, bget(x, start + k));
+    k = k + 1;
+  }
+  return n - start;
+}
+
+/// Copies the name (the last part only) of entry i of directory d (a
+/// vfs_dir_lookup handle) into the start of the transfer buffer. Returns
+/// its length, 0 if entry i is not in d, or NO_FILE past the last entry or
+/// if d is not a directory. Entries are numbered like the nodes of d's
+/// file system; the top directory has one more, "disk", when there is a
+/// disk. vfs_child gives the handle of an entry.
+fn vfs_readdir(v: &mut Vfs, d: u64, i: u64) -> u64
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+  ensures result <= XFER || result == NO_FILE
+{
+  if d == VDIR_ROOT || d < NFILES {
+    let mut l = 0;
+    if d < NFILES {
+      if !ram_is_dir(&mut v.ram, d) {
+        return NO_FILE;
+      }
+      l = ram_name(&mut v.ram, d, &mut v.name);
+      if l > NAMEBUF {
+        return NO_FILE;
+      }
+    }
+    if d == VDIR_ROOT && i == NFILES {
+      if v.disk.slots == 0 {
+        return 0;
+      }
+      bset(&mut v.xfer, 0, 100);
+      bset(&mut v.xfer, 1, 105);
+      bset(&mut v.xfer, 2, 115);
+      bset(&mut v.xfer, 3, 107);
+      return 4;
+    }
+    if i >= NFILES {
+      return NO_FILE;
+    }
+    let n = ram_name(&mut v.ram, i, &mut v.xfer);
+    if n > XFER {
+      return 0;
+    }
+    return child_at(&mut v.xfer, n, v.name, l, d == VDIR_ROOT);
+  }
+  if d == VDIR_DISK || d < NFILES + DSLOTS {
+    let mut l = 0;
+    if d < NFILES + DSLOTS {
+      if !dent_dir(v.disk, d - NFILES) {
+        return NO_FILE;
+      }
+      l = disk_name(v.disk, d - NFILES, &mut v.name, 0);
+      if l > NAMEBUF {
+        return NO_FILE;
+      }
+    }
+    if i >= DSLOTS {
+      return NO_FILE;
+    }
+    let n = disk_name(v.disk, i, &mut v.xfer, 0);
+    if n > XFER {
+      return 0;
+    }
+    return child_at(&mut v.xfer, n, v.name, l, d == VDIR_DISK);
+  }
+  return NO_FILE;
+}
+
+/// The handle of entry i of directory d, when vfs_readdir(v, d, i) found
+/// one (returned more than 0).
+fn vfs_child(d: u64, i: u64) -> u64 {
+  if i > NFILES {
+    return NO_FILE;
+  }
+  if d == VDIR_ROOT && i == NFILES {
+    return VDIR_DISK;
+  }
+  if d == VDIR_ROOT || d < NFILES {
+    return i;
+  }
+  return NFILES + i;
 }
