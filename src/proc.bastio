@@ -25,8 +25,9 @@ const F_BRK: u64 = 6;                // Linux: window offset of the program brea
 const F_MMAP: u64 = 7;               // Linux: window offset of the lowest mmap page
 const F_REGS: u64 = 8;               // 21 saved words, in `cpu_get` order
 // Linux signals (src/lxsig.bastio): blocked and pending sets (bit s - 1
-// for signal s), and 1 while rip points back at a system call that will
-// run again (a wait), which a signal handler may interrupt instead.
+// for signal s), and nonzero while rip points back at a system call that
+// will run again (a wait), which a signal handler may interrupt instead:
+// 1, or 2 + the HPET time a timed wait ends at (src/lxtime.bastio).
 const F_SIGMASK: u64 = 29;
 const F_SIGPEND: u64 = 30;
 const F_RESTART: u64 = 31;
@@ -337,12 +338,18 @@ const AT_EMPTY_PATH: u64 = 0x1000;
 const DENT_BUF: u64 = 2048;           // the most getdents64 fills in one call
 const ENOTDIR: u64 = 18446744073709551596;  // 2^64 - 20
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
-const NAPPLETS: u64 = 7;
+const NAPPLETS: u64 = 8;
 const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----
 const S_IFIFO: u64 = 0x1180;           // a FIFO, rw-------
 const S_IFSOCK: u64 = 0xC1B6;          // a socket, rw-rw-rw-
 const LX_POLL: u64 = 7;
+const LX_PPOLL: u64 = 271;
 const POLL_MAX: u64 = 64;
+const POLLIN: u64 = 1;
+const POLLOUT: u64 = 4;
+const POLLERR: u64 = 8;
+const POLLHUP: u64 = 16;
+const POLLNVAL: u64 = 32;
 const LX_DUP: u64 = 32;
 const LX_DUP2: u64 = 33;
 const LX_FCNTL: u64 = 72;
@@ -395,7 +402,7 @@ spec fn kok(k: &Kernel) -> bool {
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 17;
+const NPROGS: u64 = 18;
 
 fn prog_name(i: u64) -> Str {
   if i == 0 {
@@ -449,6 +456,9 @@ fn prog_name(i: u64) -> Str {
   if i == 16 {
     return "mtcp";
   }
+  if i == 17 {
+    return "mtime";
+  }
   return "(file)";                    // a program loaded from a file
 }
 
@@ -500,6 +510,9 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 16 {
     return include_bytes("../build/user/mtcp.elf");
+  }
+  if i == 17 {
+    return include_bytes("../build/user/mtime.elf");
   }
   return include_bytes("../build/user/fault.bin");
 }

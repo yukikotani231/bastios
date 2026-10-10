@@ -274,3 +274,60 @@ fn lx_tcp_name(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
   }
   return sin_out(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, tk.t), tcp_peer_port(k.nic, tk.t));
 }
+
+/// What a poll on a stream socket finds now: a listener is readable when a
+/// connection is waiting to be accepted, a connection when bytes or the
+/// end have arrived, and writable while its send buffer has room.
+fn tcp_poll_bits(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  let tk = tk_look(k, pid, fd);
+  if tk.err != 0 {
+    return POLLNVAL;
+  }
+  if tk.mode == TM_NEW {
+    return POLLOUT | POLLHUP;               // as Linux: not connected
+  }
+  match k.nic {
+    Nic::None => { return POLLERR | POLLHUP; },
+    Nic::Up(n) => { return tcb_poll_bits(n, tk.t, tk.mode == TM_LISTEN); },
+  }
+}
+
+fn tcb_poll_bits(n: &Net, t: u64, listener: bool) -> u64
+  requires net_ok(n)
+{
+  if !tcb_held(n, t) {
+    return POLLERR | POLLHUP;
+  }
+  if listener {
+    let mut c = 0;
+    while c < TCBS
+      invariant c <= TCBS && net_ok(n)
+    {
+      if tw(n, c, W_PARENT) == t && tw(n, c, W_HELD) == 0 && synced(tw(n, c, W_STATE)) {
+        return POLLIN;                      // what tcp_take would hand out
+      }
+      c = c + 1;
+    }
+    return 0;
+  }
+  let st = tw(n, t, W_STATE);
+  if st == T_SYN_SENT || st == T_SYN_RCVD {
+    return 0;
+  }
+  if tw(n, t, W_RESET) == 1 || st == T_CLOSED {
+    return POLLIN | POLLERR | POLLHUP;
+  }
+  let mut b = 0;
+  if tw(n, t, W_RXLEN) > 0 || tw(n, t, W_PEERFIN) == 1 {
+    b = POLLIN;
+  }
+  if tw(n, t, W_PEERFIN) == 1 && tw(n, t, W_FIN) != 0 {
+    b = b | POLLHUP;                        // closed both ways
+  }
+  if tw(n, t, W_FIN) == 0 && (st == T_ESTABLISHED || st == T_CLOSE_WAIT) && tw(n, t, W_TXLEN) < TCP_BUF {
+    b = b | POLLOUT;
+  }
+  return b;
+}

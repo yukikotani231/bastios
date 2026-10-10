@@ -167,6 +167,7 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   ensures kok(k)
 {
   let n = pget(k.procs, pid, F_REGS + R_RAX);
+  let was = pget(k.procs, pid, F_RESTART);  // a timed wait keeps its deadline here
   pset(&mut k.procs, pid, F_RESTART, 0);
   let a = pget(k.procs, pid, F_REGS + R_RDI);
   let b = pget(k.procs, pid, F_REGS + R_RSI);
@@ -242,9 +243,8 @@ fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_sock_call(n) {
     return lx_sock_call(&mut k, pid, n, a, b, c);
   }
-  if n == LX_POLL {
-    ret(&mut k.procs, pid, lx_poll(&mut k, pid, a, b));
-    return KEEP;
+  if is_time_call(n) {
+    return lx_time_call(&mut k, pid, n, was, a, b, c);
   }
   if n == LX_FCNTL {
     ret(&mut k.procs, pid, lx_fcntl(&mut k, pid, a, b, c));
@@ -503,7 +503,9 @@ fn tty_cook(con: &mut Uart, k: &mut Kernel)
   }
 }
 
-/// Whether some process is blocked in a Linux read of the console.
+/// Whether some process is blocked in a Linux read of the console, or
+/// waits in poll (which may be for the console: a poll on pipes or sockets
+/// alone also lets typed bytes go to the Linux line).
 fn lx_reading(procs: &Buf) -> bool
   requires len(procs) == PTAB_LEN
 {
@@ -512,6 +514,10 @@ fn lx_reading(procs: &Buf) -> bool
     invariant 1 <= p && p <= NPROC
   {
     if state(procs, p) == LXREADING {
+      return true;
+    }
+    let n = pget(procs, p, F_REGS + R_RAX);
+    if pget(procs, p, F_RESTART) >= 2 && (n == LX_POLL || n == LX_PPOLL) {
       return true;
     }
     p = p + 1;
