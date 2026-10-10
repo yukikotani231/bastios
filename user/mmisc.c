@@ -23,7 +23,13 @@ static int fail(const char *what)
     return 1;
 }
 
-static volatile int got_usr, got_chld;
+static volatile int got_usr, got_chld, info_pid;
+
+static void on_info(int s, siginfo_t *si, void *uc)
+{
+    (void)uc;
+    info_pid = s == SIGUSR2 && si->si_signo == SIGUSR2 ? si->si_pid : -1;
+}
 
 static void on_usr(int s)
 {
@@ -50,7 +56,7 @@ static int signals(void)
     if (sigpending(&cur) != 0 || !sigismember(&cur, SIGUSR1))
         return fail("sigpending");
     siginfo_t si;
-    if (sigwaitinfo(&usr1, &si) != SIGUSR1 || si.si_signo != SIGUSR1)
+    if (sigwaitinfo(&usr1, &si) != SIGUSR1 || si.si_signo != SIGUSR1 || si.si_pid != getpid())
         return fail("sigwaitinfo");
     struct timespec brief = { 0, 50000000 };
     if (sigtimedwait(&usr1, &si, &brief) != -1 || errno != EAGAIN)
@@ -92,6 +98,12 @@ static int signals(void)
         return fail("SIGCHLD");
     signal(SIGCHLD, SIG_DFL);
 
+    struct sigaction si_sa = { 0 };
+    si_sa.sa_sigaction = on_info;
+    si_sa.sa_flags = SA_SIGINFO;
+    if (sigaction(SIGUSR2, &si_sa, 0) != 0 || kill(getpid(), SIGUSR2) != 0 || info_pid != getpid())
+        return fail("SA_SIGINFO's si_pid");
+
     stack_t old;
     if (sigaltstack(0, &old) != 0 || !(old.ss_flags & SS_DISABLE))
         return fail("sigaltstack");
@@ -116,12 +128,20 @@ int main(void)
     if (pwrite(fd, "XY", 2, 0) != 2 || lseek(fd, 0, SEEK_CUR) != 8)
         return fail("pwrite");
     lseek(fd, 0, SEEK_SET);
-    struct iovec iov[2] = { { x, 0 }, { y, 3 } };
-    if (readv(fd, iov, 2) <= 0 || strncmp(y, "XYc", 3) != 0)
+    char z[4] = { 0 };
+    struct iovec iov[3] = { { x, 0 }, { y, 3 }, { z, 3 } };
+    if (readv(fd, iov, 3) != 6 || strncmp(y, "XYc", 3) != 0 || strncmp(z, "def", 3) != 0)
         return fail("readv");
     if (fsync(fd) != 0)
         return fail("fsync");
+    struct stat fs;
+    if (ftruncate(fd, 4) != 0 || fstat(fd, &fs) != 0 || fs.st_size != 4)
+        return fail("ftruncate shrinking");
+    if (ftruncate(fd, 100) != 0 || fstat(fd, &fs) != 0 || fs.st_size != 100 || pread(fd, z, 2, 50) != 2 || z[0] || z[1])
+        return fail("ftruncate growing");
     close(fd);
+    if (truncate("mm", 3) != 0 || stat("mm", &fs) != 0 || fs.st_size != 3)
+        return fail("truncate");
     if (chmod("mm", 0600) != 0 || unlink("mm") != 0)
         return fail("chmod");
 

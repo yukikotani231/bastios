@@ -113,20 +113,38 @@ fn post_sig(k: &mut Kernel, p: u64, s: u64)
     return;
   }
   pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
+  k.sigsave = set(k.sigsave, sender_at(p, s), 0);     // the kernel, unless post_from says
   let blocked = has_sig(pget(k.procs, p, F_SIGMASK), s) && s != SIGKILL;
   if !blocked && (st == LXREADING || st == LXWAITING || st == FUTEXWAIT) {
     pset(&mut k.procs, p, F_STATE, READY);
   }
 }
 
+/// Where k.sigsave keeps who sent process p's pending signal s.
+fn sender_at(p: u64, s: u64) -> u64
+  requires p < NPROC && 1 <= s && s <= NSIG
+  ensures result < SIGSAVE_LEN
+{
+  return NPROC + p * NSIG + s - 1;
+}
+
+/// post_sig, from process `from` (for the siginfo's si_pid).
+fn post_from(k: &mut Kernel, p: u64, s: u64, from: u64)
+  requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
+  post_sig(&mut k, p, s);
+  k.sigsave = set(k.sigsave, sender_at(p, s), from);
+}
+
 /// Process p's child has ended: a Linux parent gets SIGCHLD (thrown away
 /// unless it has a handler, as the default action ignores it).
-fn child_ended(k: &mut Kernel, p: u64)
+fn child_ended(k: &mut Kernel, p: u64, child: u64)
   requires kok(k) && 1 <= p && p < NPROC
   ensures kok(k)
 {
   if is_linux(k.procs, p) {
-    post_sig(&mut k, p, SIGCHLD);
+    post_from(&mut k, p, SIGCHLD, child);
   }
 }
 
@@ -331,7 +349,7 @@ fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
       invariant 1 <= p && p <= NPROC && kok(k)
     {
       if is_linux(k.procs, p) && s != 0 {
-        post_sig(&mut k, p, s);
+        post_from(&mut k, p, s, pid);
       }
       p = p + 1;
     }
@@ -341,7 +359,7 @@ fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
     return ESRCH;
   }
   if s != 0 {
-    post_sig(&mut k, target, s);
+    post_from(&mut k, target, s, pid);
   }
   return 0;
 }
@@ -497,7 +515,7 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   let waiting = pget(k.procs, p, F_RESTART) != 0;
   let suspended = waiting && call == LX_RT_SIGSUSPEND;
   let pausing = call == LX_PAUSE || suspended;
-  let reaping = call == LX_WAIT4 && s == SIGCHLD;
+  let reaping = (call == LX_WAIT4 || call == LX_WAITID) && s == SIGCHLD;
   if waiting && (flags & SA_RESTART == 0 || pausing) && !reaping {
     let rip = pget(k.procs, p, F_REGS + R_RIP);
     if rip <= 0xFFFFFFFFFFFFFFF0 {
@@ -531,6 +549,7 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   xfer_u64(&mut fr, UC_AT + UC_MASK, was);
   // The siginfo: signo, errno, code (SI_USER).
   bset(&mut fr, INFO_AT, cast[u8](s));
+  bset(&mut fr, INFO_AT + 16, cast[u8](get(k.sigsave, sender_at(p, s)) % 256));   // si_pid
   // The FPU state, as fxsave left it.
   match take_fpu(&mut k.fpus, p) {
     Fpu::None => {},

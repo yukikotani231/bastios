@@ -267,7 +267,10 @@ steps = [
     ("mmisc", b"mmisc: ok on Linux x86_64, signals", b"\n# "),
     # posix_spawn: clone(CLONE_VM | CLONE_VFORK) lends the parent's
     # address space to the child until it execs or exits (user/mspawn.c).
-    ("mspawn", [b"spawned 5", b"mspawn: ok, kept 1234"], b"\n# "),
+    ("mspawn", [b"spawned 5", b"mspawn: ok, kept 1234, sh is POSIX"], b"\n# "),
+    # A dynamically linked program: the kernel loads musl's dynamic linker,
+    # its PT_INTERP, which links libc into it (user/mdyn.c).
+    ("mdyn", b"mdyn: linked dynamically, mdyn, sum 5050, argc 1, libc apart", b"\n# "),
     # pthreads: clone(CLONE_THREAD), futex behind mutexes, condition
     # variables (one timed) and joins, and _exit from a thread ending the
     # whole process (user/mthread.c).
