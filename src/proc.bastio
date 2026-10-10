@@ -47,6 +47,8 @@ const F_QUIET: u64 = 37;
 // what it waits for comes (lx_retry): /proc shows it asleep, as Linux would
 // have it, though it is READY or RUNNING (src/lxprocfs.bastio).
 const F_ASLEEP: u64 = 39;
+// The personality(2) value, kept and handed back; nothing acts on it.
+const F_PERSONA: u64 = 38;
 // A Linux thread's alternate signal stack (sigaltstack): its address and
 // size; size 0 means none (src/lxsig.bastio).
 const F_ALTSP: u64 = 40;

@@ -212,7 +212,7 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64) -> u64
     return tk.err;
   }
   if tk.mode != TM_CONN {
-    return ENOTCONN;
+    return EPIPE;                           // Linux too: never connected is EPIPE on send
   }
   if n == 0 {
     return 0;
