@@ -35,7 +35,14 @@ const DESC_WRITE: u64 = 2;            // the device writes this buffer
 const AVAIL_NO_INTERRUPT: u64 = 1;    // we poll
 
 const RING_BYTES: u64 = 12288;        // r0, r1, r2
-const VIO_SPINS: u64 = 1000000;
+// How many times vq_wait looks at the used ring before it gives up on the
+// device. Each look is one memory read, so a million of them (the old
+// limit) can pass quickly enough that a completion QEMU's I/O thread
+// delivers late on a busy host becomes a disk error. This is 500 times
+// that: a slow device gets far longer to finish, and a dead one still
+// fails instead of hanging the kernel. (A bound in timer ticks would be
+// better, but ticks do not advance while a system call holds the lock.)
+const VIO_SPINS: u64 = 500000000;
 const ADDR_LIMIT: u64 = 0x100000000;  // legacy queues take a 32-bit page number
 
 struct Vq {
