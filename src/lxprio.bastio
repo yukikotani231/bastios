@@ -14,6 +14,10 @@ const LX_SCHED_GET_PRIORITY_MIN: u64 = 147;
 const LX_SCHED_RR_GET_INTERVAL: u64 = 148;
 const LX_SCHED_SETAFFINITY: u64 = 203;
 const LX_SCHED_GETAFFINITY: u64 = 204;
+const LX_SCHED_SETATTR: u64 = 314;
+const LX_SCHED_GETATTR: u64 = 315;
+const ATTR_VER0: u64 = 48;                  // struct sched_attr's first size
+const ATTR_SIZE: u64 = 56;                  // and its size now
 const SCHED_DEADLINE: u64 = 6;
 const PRIO_PROCESS: u64 = 0;
 const PRIO_PGRP: u64 = 1;
@@ -327,15 +331,112 @@ fn get_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u64
   return 8;
 }
 
-fn is_prio_call(n: u64) -> bool {
-  return n == LX_GETPRIORITY || n == LX_SETPRIORITY || (LX_SCHED_SETPARAM <= n && n <= LX_SCHED_RR_GET_INTERVAL)
-    || n == LX_SCHED_SETAFFINITY || n == LX_SCHED_GETAFFINITY;
-}
-
-fn lx_prio_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+/// sched_setattr(who, attr, flags) for the policies sched_setscheduler
+/// knows, with the nice value for the normal ones. SCHED_DEADLINE is not
+/// supported (EINVAL): nothing here could keep its runtime promise.
+fn sched_setattr(k: &mut Kernel, pid: u64, who: u64, attr: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  let t = sched_target(k.procs, pid, who);
+  if t == NPROC || attr == 0 || flags % INT_SPAN != 0 {
+    return EINVAL;
+  }
+  if copy_from_user(&mut k.spaces, pid, attr, &mut k.fs.xfer, 4) != 4 {
+    return EFAULT;
+  }
+  let mut size = get_u64(k.fs.xfer, 0) % INT_SPAN;
+  if size == 0 {
+    size = ATTR_VER0;
+  }
+  if size < ATTR_VER0 {
+    xfer_u64(&mut k.fs.xfer, 0, ATTR_SIZE);
+    let w = lx_put_out(&mut k, pid, attr, 4);  // tells the caller the size known
+    return E2BIG;
+  }
+  if copy_from_user(&mut k.spaces, pid, attr, &mut k.fs.xfer, ATTR_VER0) != ATTR_VER0 {
+    return EFAULT;
+  }
+  if t > NPROC {
+    return ESRCH;
+  }
+  let pol = get_u64(k.fs.xfer, 0) / INT_SPAN;
+  let sflags = get_u64(k.fs.xfer, 8);
+  let nice = nice_arg(get_u64(k.fs.xfer, 16));
+  let prio = get_u64(k.fs.xfer, 20) % INT_SPAN;
+  if !good_policy(pol) || sflags > 1 {
+    return EINVAL;                          // SCHED_FLAG_RESET_ON_FORK only
+  }
+  if !may_sched(k.procs, pid, t) {
+    return EPERM;
+  }
+  if rt_policy(pol) {
+    if prio < 1 || prio > 99 {
+      return EINVAL;
+    }
+    if !cred_root(k.procs, pid) {
+      return EPERM;
+    }
+  } else {
+    if prio != 0 {
+      return EINVAL;
+    }
+    if nice < nice_of(k.procs, t) && !cred_root(k.procs, pid) {
+      return EPERM;
+    }
+    pset(&mut k.procs, t, F_NICE, nice + 1);
+  }
+  pset(&mut k.procs, t, F_SCHED, pol + 256 * prio);
+  return 0;
+}
+
+/// sched_getattr(who, attr, size, flags): the policy, priority and nice
+/// value, in as much of struct sched_attr as size has room for.
+fn sched_getattr(k: &mut Kernel, pid: u64, who: u64, attr: u64, size: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let t = sched_target(k.procs, pid, who);
+  let sz = size % INT_SPAN;
+  if t == NPROC || attr == 0 || flags % INT_SPAN != 0 || sz < ATTR_VER0 || sz > 4096 {
+    return EINVAL;
+  }
+  if t > NPROC {
+    return ESRCH;
+  }
+  let mut n = ATTR_SIZE;
+  if sz < n {
+    n = sz;
+  }
+  let s = pget(k.procs, t, F_SCHED);
+  let v = nice_of(k.procs, t);
+  let mut nice = 0;
+  if v >= 20 {
+    nice = v - 20;
+  } else {
+    nice = INT_SPAN - (20 - v);             // a negative int
+  }
+  xfer_zero(&mut k, ATTR_SIZE);
+  xfer_u64(&mut k.fs.xfer, 0, n + s % 256 * INT_SPAN);
+  xfer_u64(&mut k.fs.xfer, 16, nice + s / 256 % 100 * INT_SPAN);
+  return lx_put_out(&mut k, pid, attr, n);
+}
+
+fn is_prio_call(n: u64) -> bool {
+  return n == LX_GETPRIORITY || n == LX_SETPRIORITY || (LX_SCHED_SETPARAM <= n && n <= LX_SCHED_RR_GET_INTERVAL)
+    || n == LX_SCHED_SETAFFINITY || n == LX_SCHED_GETAFFINITY || n == LX_SCHED_SETATTR || n == LX_SCHED_GETATTR;
+}
+
+fn lx_prio_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, d: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if n == LX_SCHED_SETATTR {
+    return sched_setattr(&mut k, pid, a, b, c);
+  }
+  if n == LX_SCHED_GETATTR {
+    return sched_getattr(&mut k, pid, a, b, c, d);
+  }
   if n == LX_GETPRIORITY {
     return lx_getpriority(k, pid, a, b);
   }

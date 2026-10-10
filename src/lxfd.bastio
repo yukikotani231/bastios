@@ -766,6 +766,11 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     of_set(&mut k.ofd, h, 3, arg / LO_NONBLOCK % 2);
     return 0;
   }
+  // A socket's word 3 has its O_NONBLOCK in bit 0, as a pipe end's does.
+  let sock = kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX;
+  if cmd == F_GETFL && sock {
+    return LO_RDWR + of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK;
+  }
   if cmd == F_GETFL {
     if !pipe {
       return LO_RDWR;
@@ -786,9 +791,9 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     return fl;
   }
   if cmd == F_SETFL {
-    // O_NONBLOCK on a pipe end (or eventfd, timerfd, epoll) can change; no
+    // O_NONBLOCK on a pipe end (or eventfd, timerfd, epoll, socket) can change; no
     // other flag (O_APPEND) can.
-    if pipe {
+    if pipe || sock {
       of_set(&mut k.ofd, h, 3, of_get(k.ofd, h, 3) / 2 * 2 + arg / LO_NONBLOCK % 2);
     }
     return 0;

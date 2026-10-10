@@ -1,7 +1,9 @@
 /* Small system call corners LTP's tests found: file status flags, the
  * supplementary groups, fsync on a pipe, mlockall, personality, mincore,
  * and socket errors (listen on UDP, send before connect, a bad address
- * length, MSG_OOB on UDP). */
+ * length, MSG_OOB on UDP), clone with a stack, unshare, sched_getattr,
+ * a socket's O_NONBLOCK, and errno corners of dup3, getrusage, getrandom,
+ * timer_settime, the socket calls, mremap and munlock. */
 #include "compat.h"
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -19,6 +21,8 @@
 #include <setjmp.h>
 #include <sched.h>
 #include <sys/syscall.h>
+#include <sys/random.h>
+#include <time.h>
 
 static volatile int ticks;
 static void vt(int s) { (void)s; ticks++; }
@@ -27,6 +31,9 @@ static void segv(int s) { (void)s; siglongjmp(back, 1); }
 
 /* Three connections in turn to a server that accepts, greets and closes
  * each: the closed ones must not be handed out by accept again. */
+static int seven(void *a) { (void)a; return 7; }
+static char kid_stack[16384] __attribute__((aligned(16)));
+
 static int serve_three(void) {
     struct sockaddr_in a = {.sin_family = AF_INET}; socklen_t l = sizeof a;
     int sfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -141,5 +148,31 @@ int main(void) {
            syscall(SYS_tgkill, -1, getpid(), 0) == -1 && errno == EINVAL && syscall(SYS_tgkill, getpid(), getpid(), 0) == 0);
     EXPECT("/proc/cmdline", ({ int fd = open("/proc/cmdline", O_RDONLY); char b[1024]; int n = fd >= 0 ? read(fd, b, sizeof b) : -1;
            if (fd >= 0) close(fd); n > 0 && b[n - 1] == '\n'; }));
+    EXPECT("clone with a child stack makes a process", ({ pid_t t = 0;
+           pid_t c = clone(seven, kid_stack + sizeof kid_stack, SIGCHLD | CLONE_PARENT_SETTID, 0, &t);
+           int st = 0; c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 7 && t == c; }));
+    EXPECT("unshare: files and cwd succeed, bad flags EINVAL", unshare(CLONE_FILES | CLONE_FS) == 0 &&
+           unshare(-1) == -1 && errno == EINVAL);
+    EXPECT("sched_getattr reads the policy; a short size is EINVAL", ({ unsigned a[14] = {0};
+           syscall(SYS_sched_getattr, 0, a, 56, 0) == 0 && a[0] == 56 && a[1] == SCHED_OTHER &&
+           syscall(SYS_sched_getattr, 0, a, 47, 0) == -1 && errno == EINVAL; }));
+    EXPECT("F_GETFL and F_SETFL see a socket's O_NONBLOCK", ({ int s = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+           int a = fcntl(s, F_GETFL); fcntl(s, F_SETFL, 0); int b = fcntl(s, F_GETFL); close(s);
+           (a & O_NONBLOCK) && !(b & O_NONBLOCK) && (a & O_ACCMODE) == O_RDWR; }));
+    EXPECT("errors: dup3 flags, getrusage who, getrandom flags, a null timer setting", ({ struct rusage ru; char b[4]; timer_t t;
+           int ok = dup3(0, 9, 1) == -1 && errno == EINVAL && getrusage(-2, &ru) == -1 && errno == EINVAL &&
+               getrandom(b, 4, -1) == -1 && errno == EINVAL && timer_create(CLOCK_MONOTONIC, 0, &t) == 0;
+           ok = ok && syscall(SYS_timer_settime, t, 0, 0, 0) == -1 && errno == EINVAL; timer_delete(t); ok; }));
+    EXPECT("errors: socket types, socketpair of inet, option levels, a negative name length", ({ int s = socket(AF_INET, SOCK_STREAM, 0);
+           int v = 1, sv[2]; socklen_t l = -1; struct sockaddr_in a;
+           int ok = socket(AF_INET, 75, 0) == -1 && errno == EINVAL &&
+               socketpair(AF_INET, SOCK_STREAM, 0, sv) == -1 && errno == EOPNOTSUPP &&
+               setsockopt(s, 500, 1, &v, sizeof v) == -1 && errno == ENOPROTOOPT &&
+               setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &v, 0) == -1 && errno == EINVAL &&
+               getsockopt(s, 500, 1, &v, &(socklen_t){4}) == -1 && errno == EOPNOTSUPP &&
+               getsockname(s, (struct sockaddr *)&a, &l) == -1 && errno == EINVAL; close(s); ok; }));
+    EXPECT("errors: mremap MREMAP_FIXED alone, munlock of unmapped pages", ({ char *p = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int ok = mremap(p, 4096, 4096, MREMAP_FIXED, p + 4096) == MAP_FAILED && errno == EINVAL;
+           munmap(p, 8192); ok && munlock(p, 4096) == -1 && errno == ENOMEM; }));
     return done();
 }

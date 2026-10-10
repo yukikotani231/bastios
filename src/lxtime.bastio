@@ -868,7 +868,14 @@ fn lx_time_rest(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
         return KEEP;
       }
     }
-    ret(&mut k.procs, pid, 0);              // the time zone, if asked for, is left as it is
+    if b != 0 {
+      xfer_u64(&mut k.fs.xfer, 0, 0);       // the time zone: UTC, no daylight saving
+      if copy_to_user(&mut k.spaces, pid, b, k.fs.xfer, 8) != 8 {
+        ret(&mut k.procs, pid, EFAULT);
+        return KEEP;
+      }
+    }
+    ret(&mut k.procs, pid, 0);
     return KEEP;
   }
   // time(tloc)

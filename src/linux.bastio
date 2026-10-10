@@ -34,6 +34,7 @@ const LX_SET_TID_ADDRESS: u64 = 218;
 const LX_SET_ROBUST_LIST: u64 = 273;
 const LX_RSEQ: u64 = 334;
 const LX_CLONE3: u64 = 435;
+const LX_UNSHARE: u64 = 272;
 const LX_OPENAT: u64 = 257;
 const LX_STAT: u64 = 4;
 const LX_LSTAT: u64 = 6;
@@ -221,18 +222,28 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return lx_futex(&mut k, pid, was, a, b, c);
   }
   if n == LX_REBOOT {
-    // reboot(2), after its two magic numbers: RESTART restarts the
-    // machine, POWER_OFF and HALT power it off (everyone is root).
+    // reboot(2), for root, after its two magic numbers: RESTART restarts
+    // the machine, POWER_OFF and HALT power it off. CAD_ON and CAD_OFF
+    // (what Ctrl-Alt-Del does) succeed doing nothing: the console never
+    // reboots on it.
+    if !cred_root(k.procs, pid) {
+      ret(&mut k.procs, pid, EPERM);
+      return KEEP;
+    }
     if a != 0xFEE1DEAD || (b != 672274793 && b != 85072278 && b != 369367448 && b != 537993216) {
       ret(&mut k.procs, pid, EINVAL);
       return KEEP;
     }
     ret(&mut k.procs, pid, 0);
-    if c == 0x01234567 {
+    let cmd = c % 0x100000000;                // an int: HALT, POWER_OFF and CAD_ON are negative
+    if cmd == 0x01234567 {
       return REBOOT;
     }
-    if c == 0x4321FEDC || c == 0xCDEF0123 {
+    if cmd == 0x4321FEDC || cmd == 0xCDEF0123 {
       return POWEROFF;
+    }
+    if cmd == 0x89ABCDEF || cmd == 0 {
+      return KEEP;                          // LINUX_REBOOT_CMD_CAD_ON, CAD_OFF
     }
     ret(&mut k.procs, pid, EINVAL);
     return KEEP;
@@ -351,7 +362,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_DUP2 || n == LX_DUP3 {
-    if n == LX_DUP3 && a == b {
+    if n == LX_DUP3 && (a == b || (c != 0 && c != LO_CLOEXEC)) {
       ret(&mut k.procs, pid, EINVAL);
     } else {
       ret(&mut k.procs, pid, lx_dup2(&mut k, pid, a, b, n == LX_DUP3 && c / LO_CLOEXEC % 2 == 1));
@@ -490,7 +501,15 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, lx_thread_clone(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8)));
     return KEEP;
   }
-  if n == LX_FORK || n == LX_VFORK || (n == LX_CLONE && a == SIGCHLD && b == 0) {
+  if n == LX_UNSHARE {
+    ret(&mut k.procs, pid, lx_unshare(&mut k, pid, a));
+    return KEEP;
+  }
+  if n == LX_CLONE && clone_proc_flags(a) {
+    ret(&mut k.procs, pid, lx_clone_proc(&mut k, mmu, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8)));
+    return KEEP;
+  }
+  if n == LX_FORK || n == LX_VFORK {
     ret(&mut k.procs, pid, lx_fork(&mut k, mmu, pid));
     return KEEP;
   }
@@ -533,7 +552,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return lx_sys_call(&mut k, pid, n, a, b);
   }
   if is_prio_call(n) {
-    ret(&mut k.procs, pid, lx_prio_call(&mut k, pid, n, a, b, c));
+    ret(&mut k.procs, pid, lx_prio_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10)));
     return KEEP;
   }
   if is_cred_call(n) {

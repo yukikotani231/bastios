@@ -23,6 +23,8 @@ import "linux.bastio";
 
 const PROT_WRITE: u64 = 2;
 const MREMAP_MAYMOVE: u64 = 1;
+const MREMAP_FIXED: u64 = 2;
+const MREMAP_DONTUNMAP: u64 = 4;
 
 /// Window page p out of l2: its frame goes back to m. Nothing if p is not
 /// mapped.
@@ -284,14 +286,35 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
 /// mremap(addr, oldn, newn, flags): shrinking unmaps the tail; growing
 /// moves the pages (with MREMAP_MAYMOVE) to a new place below the lowest
 /// mmap, where the rest are fresh zero pages. Growing in place is not
-/// tried: without MREMAP_MAYMOVE it is -ENOMEM.
-fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u64) -> u64
+/// tried: without MREMAP_MAYMOVE it is -ENOMEM. Moving to an address
+/// the caller chooses (MREMAP_FIXED) is not supported: with good
+/// arguments it is -ENOMEM, as when no room is found.
+fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u64, to_addr: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
   let r = win_range(addr, oldn);
   if r == 18446744073709551615 || newn == 0 || newn > USER_SIZE {
     return EINVAL;
+  }
+  let fl = flags % 0x100000000;
+  // MREMAP_MAYMOVE, MREMAP_FIXED and MREMAP_DONTUNMAP; the last two only
+  // with the first.
+  if fl > 7 || (fl > 1 && fl % 2 == 0) {
+    return EINVAL;
+  }
+  if fl / MREMAP_FIXED % 2 == 1 {
+    if to_addr % 4096 != 0 || to_addr < USER_BASE || to_addr - USER_BASE > USER_SIZE - newn
+      || oldn > USER_SIZE || addr < USER_BASE || addr - USER_BASE > USER_SIZE - oldn {
+      return EINVAL;                        // unaligned, or outside the user space
+    }
+    if to_addr < addr + oldn && addr < to_addr + newn {
+      return EINVAL;                        // over the old pages
+    }
+    return ENOMEM;
+  }
+  if fl / MREMAP_DONTUNMAP % 2 == 1 {
+    return EINVAL;                          // not supported
   }
   let from = r / 4294967296;
   let oend = r % 4294967296;
@@ -591,6 +614,24 @@ fn lx_mincore(k: &mut Kernel, pid: u64, addr: u64, n: u64, vec: u64) -> u64
       return EFAULT;
     }
     done = done + m;
+  }
+  return 0;
+}
+
+/// mlock and munlock (which change nothing, as every page stays in
+/// memory): ENOMEM when part of the range, rounded out to pages, is not
+/// mapped.
+fn lock_range(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if addr < USER_BASE || n > USER_SIZE || addr - USER_BASE > USER_SIZE - n {
+    return ENOMEM;
+  }
+  let from = (addr - USER_BASE) / 4096;
+  let to = smaller((addr - USER_BASE + n + 4095) / 4096, WPAGES);
+  if from > to || win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, from, to, 0) != to - from {
+    return ENOMEM;
   }
   return 0;
 }

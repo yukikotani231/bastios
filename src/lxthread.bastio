@@ -42,6 +42,10 @@ const CLONE_SETTLS: u64 = 0x80000;
 const CLONE_PARENT_SETTID: u64 = 0x100000;
 const CLONE_CHILD_CLEARTID: u64 = 0x200000;
 const CLONE_CHILD_SETTID: u64 = 0x1000000;
+const CLONE_PARENT: u64 = 0x8000;
+const CLONE_SYSVSEM: u64 = 0x40000;
+const CLONE_DETACHED: u64 = 0x400000;
+const CLONE_IO: u64 = 0x80000000;
 
 const SIGACT_ROW: u64 = 256;         // SIGACT_LEN / NPROC
 
@@ -400,6 +404,91 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   }
   pset(&mut k.procs, c, F_STATE, READY);
   return c;
+}
+
+/// The clone flags a new process (not a thread, not a vfork) may carry:
+/// the exit signal, CLONE_PARENT, the tid and TLS flags, and the ones
+/// that change nothing here (CLONE_SYSVSEM, CLONE_DETACHED, CLONE_IO).
+/// Sharing files, the cwd, signal handlers or memory with a separate
+/// process, and the namespaces, are not supported.
+fn clone_proc_flags(flags: u64) -> bool {
+  let known = 0xff + CLONE_PARENT + CLONE_SYSVSEM + CLONE_SETTLS + CLONE_PARENT_SETTID
+    + CLONE_CHILD_CLEARTID + CLONE_DETACHED + CLONE_CHILD_SETTID + CLONE_IO;
+  return flags & known == flags;
+}
+
+/// clone(flags, stack, ptid, ctid, tls) that makes a new process: fork,
+/// then the child starts on `stack` (if not 0) with the flags' extras.
+/// With CLONE_PARENT the child is its parent's sibling. Returns the
+/// child's pid, or -errno.
+fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k)
+{
+  let mut par = pid;
+  if flags & CLONE_PARENT != 0 {
+    par = pget(k.procs, tgid(k.procs, pid), F_PARENT);
+    if par == 0 || par >= NPROC {
+      return EINVAL;                        // init has no parent to share
+    }
+  }
+  let c = lx_fork(&mut k, mmu, pid);
+  if c == 0 || c >= NPROC {
+    return c;
+  }
+  pset(&mut k.procs, c, F_PARENT, par);
+  if stack != 0 {
+    pset(&mut k.procs, c, F_REGS + R_RSP, stack);
+  }
+  if flags & CLONE_SETTLS != 0 {
+    pset(&mut k.procs, c, F_REGS + R_FSBASE, tls);
+  }
+  if flags & CLONE_CHILD_CLEARTID != 0 {
+    pset(&mut k.procs, c, F_CTID, ctid);
+  }
+  // The child has its own copy of the space now: CLONE_PARENT_SETTID
+  // writes into both, CLONE_CHILD_SETTID into the child's.
+  if flags & CLONE_PARENT_SETTID != 0 {
+    let a = put_user_u32(&mut k, pid, ptid, c);
+    let b = put_user_u32(&mut k, c, ptid, c);
+  }
+  if flags & CLONE_CHILD_SETTID != 0 {
+    let d = put_user_u32(&mut k, c, ctid, c);
+  }
+  return c;
+}
+
+const CLONE_FS: u64 = 0x200;
+const CLONE_FILES: u64 = 0x400;
+const CLONE_NEWUSER: u64 = 0x10000000;
+// CLONE_NEWNS, NEWCGROUP, NEWUTS, NEWIPC, NEWUSER, NEWPID, NEWNET and
+// NEWTIME: the namespaces.
+const CLONE_NEWALL: u64 = 0x7e020080;
+
+/// unshare(flags). A process (not a thread group) shares nothing with
+/// another one here, so unsharing its files, cwd, memory, signal handlers
+/// or semaphore undo list changes nothing. Namespaces are not supported:
+/// EINVAL, as on a Linux built without them, or EPERM for one that only
+/// root may make.
+fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  let share = CLONE_VM + CLONE_FS + CLONE_FILES + CLONE_SIGHAND + CLONE_THREAD + CLONE_SYSVSEM;
+  if flags & (share + CLONE_NEWALL) != flags {
+    return EINVAL;
+  }
+  let ns = flags & CLONE_NEWALL;
+  if ns != 0 {
+    if ns & CLONE_NEWUSER != ns && !cred_root(k.procs, pid) {
+      return EPERM;
+    }
+    return EINVAL;
+  }
+  if flags != 0 && pget(k.procs, pid, F_TGID) != 0 {
+    return EINVAL;                          // threads that share them: not supported
+  }
+  return 0;
 }
 
 /// exit(code) from thread pid of a group, not its leader: clears and

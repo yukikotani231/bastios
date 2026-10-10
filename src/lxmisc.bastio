@@ -534,6 +534,9 @@ fn lx_setpgid(k: &mut Kernel, pid: u64, target: u64, g: u64) -> u64
   if t >= NPROC || state(k.procs, t) == FREE || (t != pid && pget(k.procs, t, F_PARENT) != pid) {
     return ESRCH;
   }
+  if g % 0x100000000 >= 0x80000000 {
+    return EINVAL;                          // a negative group
+  }
   let mut want = t;
   if g != 0 {
     want = g;
@@ -655,7 +658,7 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   } else if n == LX_UNAME {
     r = lx_uname(&mut k, pid, a);
   } else if n == LX_MREMAP {
-    r = lx_mremap(&mut k, pid, a, b, c, r10);
+    r = lx_mremap(&mut k, pid, a, b, c, r10, pget(k.procs, pid, F_REGS + R_R8));
   } else if n == LX_MUNMAP {
     r = lx_munmap(&mut k, pid, a, b);
   } else if n == LX_MPROTECT {
@@ -694,7 +697,12 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
       r = rlimit_out(&mut k, pid, b, r10);
     }
   } else if n == LX_GETRUSAGE {
-    r = lx_getrusage(&mut k, pid, b);
+    let who = a % 0x100000000;
+    if who != 0 && who != 1 && who != 0xFFFFFFFF {
+      r = EINVAL;                           // RUSAGE_SELF, RUSAGE_THREAD, RUSAGE_CHILDREN
+    } else {
+      r = lx_getrusage(&mut k, pid, b);
+    }
   } else if n == LX_SYSINFO {
     r = lx_sysinfo(&mut k, pid, a);
   } else if n == LX_STATFS {
@@ -741,8 +749,15 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
       xfer_zero(&mut k, 16);
       r = lx_put_out(&mut k, pid, b, 16);
     }
+  } else if n == LX_MLOCK || n == LX_MUNLOCK {
+    r = lock_range(&mut k, pid, a, b);
   } else if n == LX_GETRANDOM {
-    r = lx_getrandom(&mut k, pid, a, b);
+    // GRND_NONBLOCK, GRND_RANDOM and GRND_INSECURE; the last two not together.
+    if c % 0x100000000 > 7 || c % 8 == 6 {
+      r = EINVAL;
+    } else {
+      r = lx_getrandom(&mut k, pid, a, b);
+    }
   }
   // Everything else (setpriority, setrlimit, madvise, mlock, munlock,
   // mlockall, munlockall, sync) succeeds doing nothing: every page stays

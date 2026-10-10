@@ -161,8 +161,8 @@ fn lx_timer_settime(k: &mut Kernel, pid: u64, id: u64, flags: u64, nv: u64, ov: 
   ensures kok(k)
 {
   let t = pt_of(k, pid, id);
-  if t >= PT_N || flags > TIMER_ABSTIME {
-    return EINVAL;
+  if t >= PT_N || flags > TIMER_ABSTIME || nv == 0 {
+    return EINVAL;                          // no such timer, a bad flag, or no new setting
   }
   if nv > VA_LAST {
     return EFAULT;
