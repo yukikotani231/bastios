@@ -78,6 +78,13 @@ busybox: which
 busybox: whoami
 busybox: xargs
 busybox: yes | head
+dev: make: a project of two files
+dev: make: parallel jobs
+dev: make: rebuilds only what changed
+dev: tcc: a compile error
+dev: tcc: arguments, exit status, an executable file
+dev: tcc: hello
+dev: tcc: the library (malloc, qsort, files, strings)
 t_dir: chdir
 t_dir: chdir ..
 t_dir: create file in directory
@@ -176,6 +183,7 @@ t_lock: F_GETLK names the holder
 t_lock: F_GETLK sees no lock of ours
 t_lock: F_SETLK bad type is EINVAL
 t_lock: F_SETLK write lock
+t_lock: F_SETLKW deadlock is EDEADLK
 t_lock: F_SETLKW waits until it is free
 t_lock: F_UNLCK frees the rest
 t_lock: OFD F_GETLK says l_pid -1
@@ -257,11 +265,11 @@ t_more: renameat2 RENAME_NOREPLACE
 t_more: sched_getcpu
 t_more: sendfile file to file
 t_more: sendfile to a pipe
+t_more: signalfd
 t_more: source file
 t_more: statx
 t_more: utimensat
 t_more: vfork + _exit
-t_more: signalfd
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
@@ -318,6 +326,9 @@ t_signal: getitimer
 t_signal: kill missing pid is ESRCH
 t_signal: kill self
 t_signal: kill(0) to own group
+t_signal: ppoll applies its signal mask
+t_signal: ppoll without a signal times out
+t_signal: pselect applies its signal mask
 t_signal: raise runs the handler
 t_signal: setitimer
 t_signal: sigaction
@@ -346,10 +357,10 @@ t_sock2: poll a listener for a connection
 t_sock2: poll sees a peer close
 t_sock2: sendmsg/recvmsg with two iovecs
 t_sock2: shutdown SHUT_WR gives the peer EOF
+t_sock2: signalfd carries a sigqueue value
+t_sock2: signalfd sees a blocked SIGCHLD
 t_sock2: sigqueue carries a value
 t_sock2: write after SHUT_WR is EPIPE
-t_sock2: signalfd sees a blocked SIGCHLD
-t_sock2: signalfd carries a sigqueue value
 t_thread: 4 threads, mutex
 t_thread: condition variable
 t_thread: gettid differs in a thread

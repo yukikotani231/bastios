@@ -24,6 +24,14 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   sqlite3 3.52 shell (files, WAL, an index over 20000 rows). The Makefile
   clones each at a pinned tag or commit and builds it against musl as a
   static PIE (`LUA_TAG`, `QUICKJS_REV`, `SQLITE_TAG` pick the versions).
+- `dev.txt`: building C on BastiOS, in the same format. tcc and GNU make
+  run from a second disk (`devdisk.sh`, booted after everything else)
+  with the headers `dev_headers.c` pulls in, the C runtime objects and
+  musl's `libc.so`; the disk's directory has 64 entries, which is why it
+  is a disk of its own. tcc (pinned by `TCC_REV`) is configured to find
+  them under `/disk/c` and builds dynamic PIEs, which the kernel runs
+  with its built-in musl dynamic linker. Building make needs autoconf,
+  automake, autopoint and texinfo for its bootstrap.
 
 `mkdisk.py` puts the programs and that BusyBox on a disk image in BastiOS's
 own disk format, so they appear as `/disk/NAME`. `run.py` boots the kernel

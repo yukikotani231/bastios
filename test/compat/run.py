@@ -312,6 +312,7 @@ def main():
     ap.add_argument("--kernel", default="build/bastios.elf")
     ap.add_argument("--disk", default="build/compat/disk.img")
     ap.add_argument("--out", default="build/compat")
+    ap.add_argument("--dev-disk", help="the development disk (tcc and make) for dev.txt")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--update-baseline", action="store_true")
@@ -321,6 +322,7 @@ def main():
     names = syscall_names()
     applets = load_applets(os.path.join(HERE, "applets.txt"))
     apps = load_applets(os.path.join(HERE, "apps.txt"))
+    dev = load_applets(os.path.join(HERE, "dev.txt"))
     os.makedirs(args.out, exist_ok=True)
     log = open(os.path.join(args.out, "serial.log"), "wb")
     env = Host(os.path.abspath(args.host)) if args.host else Guest(args.kernel, args.disk, log)
@@ -336,6 +338,14 @@ def main():
         results["busybox"] = [run_applet(env, n, c, e, 30, bb) for n, c, e in applets]
         print("compat: real programs", flush=True)
         results["apps"] = [run_applet(env, n, c, e, 60, bb) for n, c, e in apps]
+        if args.dev_disk and not args.host:
+            # tcc and make are on a disk of their own: the disk's directory
+            # has room for 64 entries, and the C runtime needs most of them.
+            env.stop()
+            env = Guest(args.kernel, args.dev_disk, log)
+            env.boot()
+            print("compat: building C (tcc, make)", flush=True)
+            results["dev"] = [run_applet(env, n, c, e, 60, bb) for n, c, e in dev]
     finally:
         env.stop()
         log.close()
