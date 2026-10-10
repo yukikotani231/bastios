@@ -453,7 +453,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if (r10 % 0x100000000) & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH) != 0 {
       ret(&mut k.procs, pid, EINVAL);
     } else if r10 / AT_EMPTY_PATH % 2 == 1 && user_empty(&mut k, pid, b) {
-      ret(&mut k.procs, pid, lx_fstat(&mut k, pid, a, c));      // fstat by another name
+      ret(&mut k.procs, pid, lx_fstat_at(&mut k, pid, a, c));   // fstat by another name
     } else {
       ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b, c, (r10 & AT_SYMLINK_NOFOLLOW) == 0));
     }

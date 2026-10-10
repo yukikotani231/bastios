@@ -628,6 +628,30 @@ fn lx_stat(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, buf: u64, follow: bo
   return put_stat(&mut k, pid, buf, m);
 }
 
+/// fstat for the *at calls with AT_EMPTY_PATH: dirfd itself, or the
+/// working directory for AT_FDCWD.
+fn lx_fstat_at(k: &mut Kernel, pid: u64, dirfd: u64, buf: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if dirfd % 0x100000000 != AT_FDCWD {
+    return lx_fstat(&mut k, pid, dirfd, buf);
+  }
+  let cl = base_len(k, pid, OFD_N);
+  let mut i = 0;
+  while i < cl
+    invariant i <= cl && cl <= FNAME_MAX && kok(k) && pid < NPROC
+  {
+    bset(&mut k.fs.xfer, i, base_byte(k, pid, OFD_N, i));
+    i = i + 1;
+  }
+  let m = path_meta(&mut k, cl);
+  if !m.ok {
+    return ENOENT;
+  }
+  return put_stat(&mut k, pid, buf, m);
+}
+
 /// The metadata of the path in the first n bytes of the transfer buffer.
 fn path_meta(k: &mut Kernel, n: u64) -> Meta
   requires kok(k) && n <= FNAME_MAX

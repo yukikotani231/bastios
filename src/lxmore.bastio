@@ -317,7 +317,7 @@ fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u6
   }
   let mut r = 0;
   if flags / AT_EMPTY_PATH % 2 == 1 && user_empty(&mut k, pid, path) {
-    r = lx_fstat(&mut k, pid, dirfd, buf);
+    r = lx_fstat_at(&mut k, pid, dirfd, buf);
   } else {
     r = lx_stat(&mut k, pid, dirfd, path, buf, (flags & AT_SYMLINK_NOFOLLOW) == 0);
   }
