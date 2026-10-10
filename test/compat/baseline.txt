@@ -102,10 +102,10 @@ t_cred: a child inherits ids; /proc/self/status shows them
 t_cred: an unprivileged process keeps to the ids it holds
 t_cred: getgrnam finds users
 t_cred: getpwnam finds nobody
+t_cred: kill needs a matching uid
 t_cred: root starts as uid and gid 0
 t_cred: setreuid and setfsuid follow Linux's rules
 t_cred: the parent is still root
-t_cred: kill needs a matching uid
 t_dir: chdir
 t_dir: chdir ..
 t_dir: create file in directory
@@ -247,11 +247,11 @@ t_ltp2: send on an unconnected TCP socket is EPIPE
 t_ltp2: sendto with a huge address length is EINVAL
 t_mem: 64 MiB of address space
 t_mem: MAP_SHARED anonymous across fork
-t_mem: futex across fork on a MAP_SHARED page
 t_mem: MAP_SHARED file mapping across fork
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
 t_mem: file for mapping
+t_mem: futex across fork on a MAP_SHARED page
 t_mem: madvise
 t_mem: malloc churn
 t_mem: mlock
@@ -416,6 +416,7 @@ t_sock2: signalfd carries a sigqueue value
 t_sock2: signalfd sees a blocked SIGCHLD
 t_sock2: sigqueue carries a value
 t_sock2: write after SHUT_WR is EPIPE
+t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: GETNCNT counts a waiting process
 t_sysv: IPC_RMID ends a wait with EIDRM
 t_sysv: SEM_UNDO is undone at exit
