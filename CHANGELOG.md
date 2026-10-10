@@ -103,6 +103,11 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 - The threads of a Linux process run on several processors at once. They
   used to take turns on one: four threads of pure computation now finish
   about twice as fast on four processors under QEMU.
+- `getpid`, `gettid`, `getuid` (and the other id calls) and `sched_yield`
+  with nothing else waiting are answered without the kernel lock: 4 copies
+  of `bench` at once on 4 processors make 20000 `getpid` calls in about
+  25 ticks instead of about 250.
+
 - `sendfile`, `copy_file_range`, `preadv`, `pwritev`, `statx`,
   `fallocate` (growing), `fadvise64`, `memfd_create`, `getcpu`, and
   `FIONREAD` on a pipe. A new compat program, `t_more`, checks these and other calls
