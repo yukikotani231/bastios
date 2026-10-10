@@ -835,7 +835,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     reset_reg = mmio_claim(&mut win, r, 1);
   }
   let mut clock = hpet_init(mmio_claim(&mut win, hpet_at, HPET_LEN), hpet_there);
-  let apic = lapic_new(mmio_claim(&mut win, LAPIC, LAPIC_LEN));
+  let apic = lapic_new(mmio_claim(&mut win, LAPIC, LAPIC_LEN), boot_info(cpu, INFO_SMP, 3) == APIC_XAPIC);
   let mut msi = 0;
   if apic.on {
     msi = lapic_msi_addr(apic);
