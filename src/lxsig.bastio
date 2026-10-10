@@ -284,14 +284,13 @@ fn tty_intr(con: &mut Con, k: &mut Kernel)
   if tt_flags(k.line, 12) & ISIG == 0 {
     return;                                 // Ctrl-C is a byte like any other (ISIG off)
   }
-  let n = get(k.q, 1);
-  let h = get(k.q, 0);
+  let n = k.q.r.n;
   let mut hit = false;
   let mut i = 0;
   while i < n
-    invariant i <= n && n <= INQ_CAP && h < INQ_CAP && kok(k) && con_ok(con)
+    invariant i <= n && n == k.q.r.n && kok(k) && con_ok(con)
   {
-    if get(k.q, 2 + (h + i) % INQ_CAP) == 3 {
+    if get(k.q.q, ring_slot(k.q.r, i)) == 3 {
       hit = true;
     }
     i = i + 1;
@@ -313,7 +312,7 @@ fn tty_intr(con: &mut Con, k: &mut Kernel)
   if !any {
     return;
   }
-  k.q = set(k.q, 1, 0);
+  ring_clear(&mut k.q.r);
   k.line = set(k.line, 0, 0);
   k.line = set(k.line, 1, 0);
   puts(&mut con, "^C\r\n");
