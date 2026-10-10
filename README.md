@@ -131,7 +131,7 @@ Count the lines yourself (`wc -l boot/* user/*.S`). Copied numbers go stale.
 v0.2: processes, preemptive round-robin scheduling, system calls, fault isolation, and files in memory and on disk. Not there yet:
 - every processor runs the scheduler, but under one lock for the whole kernel state (`Lock[Sys]` in `src/main.bastio`); the kernel runs with interrupts off and handles each interrupt as an event in its scheduler loop;
 - all user pages are mapped writable and executable (the image has no page-aligned sections yet);
-- a user window of 2 MiB per process, at most 15 processes, programs built into the kernel image (the file system cannot hold programs to run yet);
+- a user window of 64 MiB per process (pages are mapped as a program asks for them, and `fork` copies every mapped page), at most 15 processes;
 - files are simple: flat directories of 32 files each (in memory, and under `disk/`), names up to 28 bytes, files up to 1 MiB, 8 open files per process. The disk driver polls one legacy ATA drive with 28-bit sector numbers, and writes go straight to the disk with no cache or journal, so a power cut in the middle of a write can leave that file half written;
 - running out of memory when starting a program fails the spawn cleanly, but the kernel's own arena (for `Buf`) still halts the machine when it runs out.
 
