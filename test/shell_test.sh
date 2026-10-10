@@ -9,7 +9,7 @@ TIMEOUT=${TIMEOUT:-60}
 SMP=${SMP:-4}
 
 python3 - "$KERNEL" "$TIMEOUT" "$SMP" <<'PY'
-import os, re, subprocess, sys, tempfile, time, select
+import os, re, socket, subprocess, sys, tempfile, time, select
 
 kernel, timeout, smp = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
 
@@ -20,17 +20,26 @@ disk = os.path.join(disk_dir.name, "disk.img")
 with open(disk, "wb") as f:
     f.truncate(33 << 20)
 
-def boot(cpus, with_disk=False, virtio=False):
+# A free UDP port on this machine, forwarded to the guest's port 7 (UDP echo).
+_s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+_s.bind(("127.0.0.1", 0))
+udp_port = _s.getsockname()[1]
+_s.close()
+
+def boot(cpus, with_disk=False, virtio=False, net=False):
     drive = ["-drive", f"file={disk},format=raw,if=ide,index=0"] if with_disk else []
     if virtio:
         # The same disk as a virtio block device (src/virtio.bastio): sectors
         # move by DMA through pages the kernel lends it.
         drive = ["-drive", f"file={disk},format=raw,if=none,id=vd",
                  "-device", "virtio-blk-pci,drive=vd"]
+    # A virtio network card on QEMU's user-mode network (src/net.bastio).
+    nic = ["-netdev", f"user,id=n0,hostfwd=udp:127.0.0.1:{udp_port}-:7",
+           "-device", "virtio-net-pci,netdev=n0"] if net else []
     return subprocess.Popen(
         ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-         "-serial", "stdio", "-monitor", "none"] + drive,
+         "-serial", "stdio", "-monitor", "none"] + drive + nic,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 deadline = time.time() + timeout
@@ -68,13 +77,20 @@ if read_until(b"bastios> ", mark) and b"cannot open the file" in out[mark:]:
     print("ok   no disk: disk/ files are refused")
 else:
     print("FAIL no disk: disk/a"); fails += 1
+# Nor a network card: ping says so.
+mark = len(out)
+qemu.stdin.write(b"ping\r"); qemu.stdin.flush()
+if read_until(b"bastios> ", mark) and b"no network" in out[mark:]:
+    print("ok   no network card: ping says so")
+else:
+    print("FAIL no network card: ping"); fails += 1
 qemu.kill(); qemu.wait()
 print("---- one-processor transcript ----")
 print(out.decode(errors="replace").replace("\r", ""))
 
 # The rest runs on `smp` processors: the application processors are started
 # at boot and park; the shell and its programs run on the bootstrap one.
-qemu = boot(smp, with_disk=True)
+qemu = boot(smp, with_disk=True, net=True)
 out = b""
 
 # (input line, expected text in the reply). The shell is a user process;
@@ -82,6 +98,11 @@ out = b""
 # and fault isolation.
 steps = [
     ("help", b"commands:"),
+    # The network: ICMP echo to QEMU's gateway and to its DNS address, both
+    # answered by QEMU itself; a malformed address is refused.
+    ("ping", b"reply from 10.0.2.2"),
+    ("ping 10.0.2.3", b"reply from 10.0.2.3"),
+    ("ping 10.0.2.300", b"usage: ping"),
     ("cpus", f"processors running: {smp}\r\n".encode()),
     ("about", b"proved safe"),
     ("echo hello world", b"hello world"),
@@ -234,6 +255,24 @@ else:
         print(f"ok   timer: {t1 - t0} ticks in {w1 - w0:.1f} s")
     else:
         print("FAIL timer ticks:", t0, t1); fails += 1
+    # UDP echo: a datagram from this machine reaches the guest through
+    # QEMU's port forward (ARP, IPv4, UDP on the way in) and comes back.
+    if b"net: virtio, mac 52:54:00:12:34:56" in out:
+        print("ok   network card found at boot")
+    else:
+        print("FAIL network card at boot"); fails += 1
+    us = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    us.settimeout(10)
+    try:
+        us.sendto(b"proved packets", ("127.0.0.1", udp_port))
+        got, _ = us.recvfrom(100)
+    except OSError:
+        got = None
+    us.close()
+    if got == b"proved packets":
+        print("ok   UDP echo on port 7")
+    else:
+        print("FAIL UDP echo:", got); fails += 1
     # Every page the finished processes and removed files used must be
     # back in the pool.
     mem = [l.strip() for l in out.split(b"\n") if l.strip().endswith(b"free pages")]

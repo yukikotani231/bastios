@@ -17,6 +17,7 @@ import "pages.bastio";
 import "space.bastio";
 import "proc.bastio";
 import "fs.bastio";
+import "net.bastio";
 import "syscall.bastio";
 import "linux.bastio";
 import "lxproc.bastio";
@@ -150,6 +151,27 @@ fn install_files(con: &mut Uart, k: &mut Kernel)
   }
 }
 
+/// A MAC address as six hex bytes, colon-separated.
+fn put_mac(con: &mut Uart, mac: u64)
+  requires uart_ok(con)
+{
+  let mut q = 0x10000000000;
+  let mut first = true;
+  while q > 0
+  {
+    if !first {
+      uart_write(&mut con, 58);
+    }
+    first = false;
+    let b = (mac / q) % 256;
+    let hi = b / 16;
+    let lo = b % 16;
+    if hi < 10 { uart_write(&mut con, 48 + hi); } else { uart_write(&mut con, 87 + hi); }
+    if lo < 10 { uart_write(&mut con, 48 + lo); } else { uart_write(&mut con, 87 + lo); }
+    q = q / 256;
+  }
+}
+
 fn tick(t: u64) -> u64 {
   if t < 18446744073709551615 {
     return t + 1;
@@ -185,9 +207,19 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // The disk: virtio (DMA into pages lent from the allocator) if the machine
   // has one, else ATA. PCI's configuration ports are claimed for it.
   let mut pci = Pci { addr: port_claim(&mut ports, PCI_ADDR, 4), data: port_claim(&mut ports, PCI_DATA, 4) };
-  let disk = disk_mount(blk_new(&mut ports, &mut pci, &mut m));
+  let dev = blk_new(&mut ports, &mut pci, &mut m);
+  let dev_lo = blk_ports_lo(dev);
+  let dev_hi = blk_ports_hi(dev);
+  let disk = disk_mount(dev);
   if blk_is_virtio(disk.dev) {
     puts(&mut con, "disk: virtio\r\n");
+  }
+  // The network card, if any: nine pages after the disk's four.
+  let mut nic = nic_new(&mut ports, &mut pci, &mut m, 4, dev_lo, dev_hi);
+  if nic_live(nic) {
+    puts(&mut con, "net: virtio, mac ");
+    put_mac(&mut con, nic_mac(nic));
+    puts(&mut con, ", ip 10.0.2.15\r\n");
   }
   let mut spaces = vec_new[Space]();
   let mut i = 0;
@@ -214,8 +246,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut cur = 1;
   let mut running = true;
   while running
-    invariant kok(k) && mmu_root(mmu) == KERNEL_ROOT && cur < NPROC
+    invariant kok(k) && mmu_root(mmu) == KERNEL_ROOT && cur < NPROC && nic_ok(nic)
   {
+    nic_poll(&mut nic);
     drain(&mut con, &mut k.q);
     tty_cook(&mut con, &mut k);
     wake_readers(&mut k.procs, &mut k.q, k.line);
@@ -238,6 +271,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
         k.ticks = tick(k.ticks);
         pset(&mut k.procs, p, F_TICKS, tick(pget(k.procs, p, F_TICKS)));
         cur = (p + 1) % NPROC;
+      } else if v == V_SYSCALL && pget(k.procs, p, F_REGS + R_RAX) == SYS_PING {
+        // The network is the kernel loop's, so its call is handled here.
+        ret(&mut k.procs, p, nic_ping(&mut nic, pget(k.procs, p, F_REGS + R_RDI)));
       } else if v == V_SYSCALL {
         k.ns = hpet_ns(&mut clock);
         let r = syscall(&mut con, &mut k, mmu, p);
@@ -287,6 +323,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   vec_free(k.fpus);
   blk_free(&mut ports, vfs_free(k.fs, &mut k.mem), &mut k.mem);
+  nic_free(&mut ports, nic, &mut k.mem);
   puts(&mut con, "BastiOS: ");
   put_num(&mut con, count_free(k.mem.bm));
   puts(&mut con, " pages free at power off\r\n");

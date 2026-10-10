@@ -120,6 +120,7 @@ fn ata_new(ports: &mut Ports) -> Ata
   requires forall k: u64 :: ATA_IO <= k && k < ATA_IO + 8 ==> port_free(ports, k)
   requires port_free(ports, ATA_CTL)
   ensures ata_ok(result)
+  ensures forall k: u64 :: (k < ATA_IO || ATA_IO + 8 <= k) && k != ATA_CTL ==> port_free(ports, k) == old(port_free(ports, k))
 {
   let mut a = Ata { io: port_claim(&mut ports, ATA_IO, 8), ctl: port_claim(&mut ports, ATA_CTL, 1), sectors: 0 };
   pio_out8(&mut a.ctl, 0, 2);                  // nIEN: no interrupts, we poll

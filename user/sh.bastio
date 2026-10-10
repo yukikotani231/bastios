@@ -408,6 +408,7 @@ fn cmd_help(con: &Serial) {
   puts(con, "  cpus             processors running\r\n");
   puts(con, "  clock            nanoseconds since boot (HPET)\r\n");
   puts(con, "  kill PID         stop a process\r\n");
+  puts(con, "  ping [A.B.C.D]   ICMP echo (default: the gateway, 10.0.2.2)\r\n");
   puts(con, "  NAME [&]         run a program and wait for it (`&`: don't wait)\r\n");
   puts(con, "  about            what this is\r\n");
   puts(con, "  halt             power off\r\n");
@@ -472,6 +473,71 @@ fn cmd_kill(con: &Serial, line: &Buf, n: u64)
   }
   // Collect it if it was ours, so it does not linger as a zombie.
   sys_wait(pid);
+}
+
+// `ping [A.B.C.D]`: one ICMP echo through the kernel's network stack (the
+// gateway, 10.0.2.2, if no address is given).
+fn cmd_ping(con: &Serial, line: &Buf, n: u64)
+  requires n < len(line)
+  requires n >= 4
+{
+  let mut ip = 0x0A000202;
+  let mut i = skip_spaces(line, n, 5);
+  if i <= n {
+    ip = 0;
+    let mut part = 0;
+    while part < 4
+      invariant part <= 4 && i <= n + 1 && ip <= 4294967295
+      invariant part < 4 ==> ip <= 16777215
+      invariant part < 3 ==> ip <= 65535
+      invariant part < 2 ==> ip <= 255
+      invariant part == 0 ==> ip == 0
+    {
+      let e = digits_end(line, n, i);
+      if e == i || e > i + 3 {
+        puts(con, "usage: ping [A.B.C.D]\r\n");
+        return;
+      }
+      let v = parse_num(line, i, e);
+      if v > 255 {
+        puts(con, "usage: ping [A.B.C.D]\r\n");
+        return;
+      }
+      ip = ip * 256 + v;
+      part = part + 1;
+      i = e;
+      if part < 4 {
+        if i > n || get(line, i) != 46 {
+          puts(con, "usage: ping [A.B.C.D]\r\n");
+          return;
+        }
+        i = i + 1;
+      }
+    }
+    if i != n + 1 {
+      puts(con, "usage: ping [A.B.C.D]\r\n");
+      return;
+    }
+  }
+  let r = sys_call(40, ip, 0);
+  if r == 1 {
+    puts(con, "reply from ");
+  } else if r == 2 {
+    puts(con, "no answer to ARP for ");
+  } else if r == 3 {
+    puts(con, "no network\r\n");
+    return;
+  } else {
+    puts(con, "no reply from ");
+  }
+  put_num(con, ip / 16777216);
+  puts(con, ".");
+  put_num(con, ip / 65536 % 256);
+  puts(con, ".");
+  put_num(con, ip / 256 % 256);
+  puts(con, ".");
+  put_num(con, ip % 256);
+  puts(con, "\r\n");
 }
 
 // Runs the program named by the line, or reports that there is none.
@@ -570,6 +636,8 @@ fn main(con: &mut Serial) -> u64 {
       puts(con, "\r\n");
     } else if is_cmd(line, n, "kill") {
       cmd_kill(con, line, n);
+    } else if is_cmd(line, n, "ping") {
+      cmd_ping(con, line, n);
     } else if is_cmd(line, n, "exit") {
       running = false;
     } else if is_cmd(line, n, "halt") {
