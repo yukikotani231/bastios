@@ -544,6 +544,7 @@ fn lx_retry(k: &mut Kernel, pid: u64, n: u64) -> u64
   }
   pset(&mut k.procs, pid, F_REGS + R_RIP, rip - 2);
   pset(&mut k.procs, pid, F_REGS + R_RAX, n);
+  pset(&mut k.procs, pid, F_RESTART, 1);
   return SWITCH;
 }
 
