@@ -1,0 +1,380 @@
+// Linux scheduling priorities: getpriority/setpriority (and so nice), and
+// the sched_* calls that set a policy or a CPU mask. The values are kept
+// in each process's row (F_NICE, F_SCHED) and handed back, with Linux's
+// checks and errors; the scheduler itself treats every process alike.
+
+const LX_GETPRIORITY: u64 = 140;
+const LX_SETPRIORITY: u64 = 141;
+const LX_SCHED_SETPARAM: u64 = 142;
+const LX_SCHED_GETPARAM: u64 = 143;
+const LX_SCHED_SETSCHEDULER: u64 = 144;
+const LX_SCHED_GETSCHEDULER: u64 = 145;
+const LX_SCHED_GET_PRIORITY_MAX: u64 = 146;
+const LX_SCHED_GET_PRIORITY_MIN: u64 = 147;
+const LX_SCHED_RR_GET_INTERVAL: u64 = 148;
+const LX_SCHED_SETAFFINITY: u64 = 203;
+const LX_SCHED_GETAFFINITY: u64 = 204;
+const SCHED_DEADLINE: u64 = 6;
+const PRIO_PROCESS: u64 = 0;
+const PRIO_PGRP: u64 = 1;
+const PRIO_USER: u64 = 2;
+const SCHED_FIFO: u64 = 1;
+const SCHED_RR: u64 = 2;
+const SCHED_BATCH: u64 = 3;
+const SCHED_IDLE: u64 = 5;
+const SCHED_RESET_ON_FORK: u64 = 0x40000000;
+const INT_SPAN: u64 = 0x100000000;          // an int argument's 32 bits
+
+/// Process p's nice value plus 20: 0 (nice -20) to 39 (nice 19).
+fn nice_of(procs: &Buf, p: u64) -> u64
+  requires len(procs) == PTAB_LEN && p < NPROC
+  ensures result < 40
+{
+  let w = pget(procs, p, F_NICE);
+  if w == 0 || w > 40 {
+    return 20;
+  }
+  return w - 1;
+}
+
+/// The nice value an int argument asks for, plus 20, clamped as Linux
+/// clamps it to -20 .. 19.
+fn nice_arg(a: u64) -> u64
+  ensures result < 40
+{
+  let x = a % INT_SPAN;
+  if x >= 0x80000000 {
+    let m = INT_SPAN - x;                   // a negative value, -m
+    if m >= 20 {
+      return 0;
+    }
+    return 20 - m;
+  }
+  if x > 19 {
+    return 39;
+  }
+  return x + 20;
+}
+
+/// Does process p (alive) match getpriority's (which, who)? who is
+/// already resolved: a pid, a process group or a real user id.
+fn prio_match(procs: &Buf, p: u64, which: u64, who: u64) -> bool
+  requires len(procs) == PTAB_LEN && p < NPROC
+{
+  if state(procs, p) == FREE || state(procs, p) == ZOMBIE {
+    return false;
+  }
+  if which == PRIO_PROCESS {
+    return p == who;
+  }
+  if which == PRIO_PGRP {
+    return pgid_of(procs, p) == who;
+  }
+  return id_get(procs, p, F_UID, false) == who;
+}
+
+/// who 0 resolved to the caller's own pid, group or real user.
+fn prio_who(procs: &Buf, pid: u64, which: u64, who: u64) -> u64
+  requires len(procs) == PTAB_LEN && pid < NPROC
+{
+  let w = who % INT_SPAN;
+  if w != 0 {
+    return w;
+  }
+  if which == PRIO_PROCESS {
+    return pid;
+  }
+  if which == PRIO_PGRP {
+    return pgid_of(procs, pid);
+  }
+  return id_get(procs, pid, F_UID, false);
+}
+
+/// getpriority: 20 - nice of the matching process with the lowest nice,
+/// as the system call encodes it (1 .. 40).
+fn lx_getpriority(k: &Kernel, pid: u64, which: u64, who: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  if which > PRIO_USER {
+    return EINVAL;
+  }
+  let w = prio_who(k.procs, pid, which, who);
+  let mut best = 40;
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && best <= 40
+  {
+    if prio_match(k.procs, p, which, w) {
+      let n = nice_of(k.procs, p);
+      if n < best {
+        best = n;
+      }
+    }
+    p = p + 1;
+  }
+  if best == 40 {
+    return ESRCH;
+  }
+  return 40 - best;
+}
+
+/// setpriority: every matching process gets the nice value; lowering it
+/// takes root (EACCES), and changing another user's process takes root or
+/// a matching user (EPERM).
+fn lx_setpriority(k: &mut Kernel, pid: u64, which: u64, who: u64, prio: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if which > PRIO_USER {
+    return EINVAL;
+  }
+  let w = prio_who(k.procs, pid, which, who);
+  let v = nice_arg(prio);
+  let root = cred_root(k.procs, pid);
+  let euid = id_get(k.procs, pid, F_UID, true);
+  let mut r = ESRCH;
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && kok(k)
+  {
+    if prio_match(k.procs, p, which, w) {
+      if !root && id_get(k.procs, p, F_UID, false) != euid && id_get(k.procs, p, F_UID, true) != euid {
+        r = EPERM;
+      } else if !root && v < nice_of(k.procs, p) {
+        r = EACCES;
+      } else {
+        pset(&mut k.procs, p, F_NICE, v + 1);
+        if r == ESRCH {
+          r = 0;
+        }
+      }
+    }
+    p = p + 1;
+  }
+  return r;
+}
+
+/// The process a sched_* call names: pid, or the caller for 0; NPROC
+/// when the pid is negative (EINVAL) and NPROC + 1 when there is none.
+fn sched_target(procs: &Buf, pid: u64, who: u64) -> u64
+  requires len(procs) == PTAB_LEN && pid < NPROC
+  ensures result <= NPROC + 1
+{
+  let w = who % INT_SPAN;
+  if w >= 0x80000000 {
+    return NPROC;
+  }
+  if w == 0 {
+    return pid;
+  }
+  if w >= NPROC || state(procs, w) == FREE {
+    return NPROC + 1;
+  }
+  return w;
+}
+
+/// May pid change process t's scheduling? Root may; anyone else only
+/// when its effective user is t's real or effective user (else EPERM).
+fn may_sched(procs: &Buf, pid: u64, t: u64) -> bool
+  requires len(procs) == PTAB_LEN && pid < NPROC && t < NPROC
+{
+  if cred_root(procs, pid) {
+    return true;
+  }
+  let euid = id_get(procs, pid, F_UID, true);
+  return id_get(procs, t, F_UID, false) == euid || id_get(procs, t, F_UID, true) == euid;
+}
+
+fn rt_policy(policy: u64) -> bool {
+  return policy == SCHED_FIFO || policy == SCHED_RR;
+}
+
+fn good_policy(policy: u64) -> bool {
+  return policy == 0 || rt_policy(policy) || policy == SCHED_BATCH || policy == SCHED_IDLE;
+}
+
+/// sched_setscheduler (policy) or sched_setparam (keep is true): the
+/// static priority read from param, checked against the policy.
+fn sched_set(k: &mut Kernel, pid: u64, who: u64, policy: u64, param: u64, keep: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let t = sched_target(k.procs, pid, who);
+  let mut pol = policy % INT_SPAN;
+  if !keep {
+    pol = pol & (0xFFFFFFFF - SCHED_RESET_ON_FORK);
+    if !good_policy(pol) {
+      return EINVAL;
+    }
+  }
+  if t == NPROC || param == 0 {
+    return EINVAL;
+  }
+  if copy_from_user(&mut k.spaces, pid, param, &mut k.fs.xfer, 4) != 4 {
+    return EFAULT;
+  }
+  let prio = get_u64(k.fs.xfer, 0) % INT_SPAN;
+  if t > NPROC {
+    return ESRCH;
+  }
+  if !may_sched(k.procs, pid, t) {
+    return EPERM;
+  }
+  if keep {
+    pol = pget(k.procs, t, F_SCHED) % 256;
+  }
+  if rt_policy(pol) {
+    if prio < 1 || prio > 99 {
+      return EINVAL;
+    }
+    if !cred_root(k.procs, pid) {
+      return EPERM;
+    }
+  } else if prio != 0 {
+    return EINVAL;
+  }
+  pset(&mut k.procs, t, F_SCHED, pol + 256 * prio);
+  return 0;
+}
+
+/// sched_getscheduler (param 0) or sched_getparam (into param).
+fn sched_get(k: &mut Kernel, pid: u64, who: u64, param: u64, want_param: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let t = sched_target(k.procs, pid, who);
+  if t == NPROC || (want_param && param == 0) {
+    return EINVAL;
+  }
+  if t > NPROC {
+    return ESRCH;
+  }
+  let s = pget(k.procs, t, F_SCHED);
+  if !want_param {
+    return s % 256;
+  }
+  xfer_u64(&mut k.fs.xfer, 0, s / 256 % 100);
+  return lx_put_out(&mut k, pid, param, 4);
+}
+
+/// sched_rr_get_interval: a 100 ms time slice for SCHED_RR, 0 otherwise.
+fn sched_interval(k: &mut Kernel, pid: u64, who: u64, ts: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let t = sched_target(k.procs, pid, who);
+  if t == NPROC {
+    return EINVAL;
+  }
+  if t > NPROC {
+    return ESRCH;
+  }
+  xfer_u64(&mut k.fs.xfer, 0, 0);
+  let mut ns = 0;
+  if pget(k.procs, t, F_SCHED) % 256 == SCHED_RR {
+    ns = 100000000;
+  }
+  xfer_u64(&mut k.fs.xfer, 8, ns);
+  return lx_put_out(&mut k, pid, ts, 16);
+}
+
+/// sched_setaffinity: any mask that names the one processor Linux
+/// programs are told about (sched_getaffinity) is accepted.
+fn sched_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let t = sched_target(k.procs, pid, who);
+  if t == NPROC {
+    return EINVAL;
+  }
+  if size == 0 {
+    return EINVAL;
+  }
+  if copy_from_user(&mut k.spaces, pid, mask, &mut k.fs.xfer, 1) != 1 {
+    return EFAULT;
+  }
+  if t > NPROC {
+    return ESRCH;
+  }
+  if get_u64(k.fs.xfer, 0) % 2 == 0 {
+    return EINVAL;                          // no processor it may run on
+  }
+  if !may_sched(k.procs, pid, t) {
+    return EPERM;
+  }
+  return 0;
+}
+
+/// sched_getaffinity: the one processor Linux programs are told about;
+/// the size must be a whole number of 8-byte words.
+fn get_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let t = sched_target(k.procs, pid, who);
+  if t == NPROC || size < 8 || size % 8 != 0 {
+    return EINVAL;
+  }
+  if t > NPROC {
+    return ESRCH;
+  }
+  xfer_u64(&mut k.fs.xfer, 0, 1);
+  let r = lx_put_out(&mut k, pid, mask, 8);
+  if r != 0 {
+    return r;
+  }
+  return 8;
+}
+
+fn is_prio_call(n: u64) -> bool {
+  return n == LX_GETPRIORITY || n == LX_SETPRIORITY || (LX_SCHED_SETPARAM <= n && n <= LX_SCHED_RR_GET_INTERVAL)
+    || n == LX_SCHED_SETAFFINITY || n == LX_SCHED_GETAFFINITY;
+}
+
+fn lx_prio_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if n == LX_GETPRIORITY {
+    return lx_getpriority(k, pid, a, b);
+  }
+  if n == LX_SETPRIORITY {
+    return lx_setpriority(&mut k, pid, a, b, c);
+  }
+  if n == LX_SCHED_SETPARAM {
+    return sched_set(&mut k, pid, a, 0, b, true);
+  }
+  if n == LX_SCHED_SETSCHEDULER {
+    return sched_set(&mut k, pid, a, b, c, false);
+  }
+  if n == LX_SCHED_GETPARAM {
+    return sched_get(&mut k, pid, a, b, true);
+  }
+  if n == LX_SCHED_GETSCHEDULER {
+    return sched_get(&mut k, pid, a, 0, false);
+  }
+  if n == LX_SCHED_RR_GET_INTERVAL {
+    return sched_interval(&mut k, pid, a, b);
+  }
+  if n == LX_SCHED_SETAFFINITY {
+    return sched_affinity(&mut k, pid, a, b, c);
+  }
+  if n == LX_SCHED_GETAFFINITY {
+    return get_affinity(&mut k, pid, a, b, c);
+  }
+  let p = a % INT_SPAN;
+  if p == SCHED_DEADLINE {
+    return 0;
+  }
+  if !good_policy(p) {
+    return EINVAL;
+  }
+  if rt_policy(p) {
+    if n == LX_SCHED_GET_PRIORITY_MAX {
+      return 99;
+    }
+    return 1;
+  }
+  return 0;
+}

@@ -43,6 +43,7 @@ import "lxmsg.bastio";
 import "acpi.bastio";
 import "info.bastio";
 import "lxcred.bastio";
+import "lxprio.bastio";
 import "lxipc.bastio";
 import "lxsys.bastio";
 import "lxlock.bastio";

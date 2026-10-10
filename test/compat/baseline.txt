@@ -245,9 +245,12 @@ t_ltp2: listen on a UDP socket is EOPNOTSUPP
 t_ltp2: mincore errors
 t_ltp2: mincore marks mapped pages
 t_ltp2: mlockall and munlockall succeed
+t_ltp2: nice: root lowers and raises it, a child inherits it, nobody may not lower it
 t_ltp2: personality is kept
 t_ltp2: pread/pwrite: negative offset EINVAL, a directory EISDIR, 0 bytes 0
 t_ltp2: rlimits: bad resource EINVAL; soft over hard EINVAL
+t_ltp2: sched_setaffinity to processor 0
+t_ltp2: sched_setscheduler: SCHED_FIFO 10, read back, bad priority EINVAL
 t_ltp2: send on an unconnected TCP socket is EPIPE
 t_ltp2: sendto with a huge address length is EINVAL
 t_ltp2: waitpid with bad options is EINVAL

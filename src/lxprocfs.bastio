@@ -606,7 +606,17 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, p);
     a = put_s(&mut o, a, " 0 -1 0 0 0 0 0 ");
     a = put_n(&mut o, a, pget(k.procs, p, F_TICKS));
-    a = put_s(&mut o, a, " 0 0 0 20 0 1 0 0");
+    let ni = nice_of(k.procs, p);
+    a = put_s(&mut o, a, " 0 0 0 ");
+    a = put_n(&mut o, a, ni);               // the priority: 20 + nice
+    a = put_c(&mut o, a, 32);
+    if ni < 20 {
+      a = put_c(&mut o, a, 45);
+      a = put_n(&mut o, a, 20 - ni);
+    } else {
+      a = put_n(&mut o, a, ni - 20);
+    }
+    a = put_s(&mut o, a, " 1 0 0");
     let mut z = 0;
     while z < 30
       invariant z <= 30 && a <= PROC_OUT && blen(o) == PROC_OUT

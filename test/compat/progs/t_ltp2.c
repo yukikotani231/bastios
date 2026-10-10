@@ -17,6 +17,8 @@
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <setjmp.h>
+#include <sched.h>
+#include <sys/syscall.h>
 
 static volatile int ticks;
 static void vt(int s) { (void)s; ticks++; }
@@ -113,5 +115,23 @@ int main(void) {
     EXPECT("waitpid with bad options is EINVAL", waitpid(-1, NULL, 0x7fff) == -1 && errno == EINVAL);
     EXPECT("rlimits: bad resource EINVAL; soft over hard EINVAL", ({ struct rlimit r, w = { 2, 1 };
            getrlimit(99, &r) == -1 && errno == EINVAL && setrlimit(RLIMIT_CORE, &w) == -1 && errno == EINVAL; }));
+    EXPECT("nice: root lowers and raises it, a child inherits it, nobody may not lower it", ({ pid_t c = fork();
+           if (c == 0) { errno = 0; int a = nice(-5); int g = getpriority(PRIO_PROCESS, 0); int b = nice(10);
+               pid_t d = fork(); if (d == 0) _exit(getpriority(PRIO_PROCESS, 0) == 5 ? 0 : 1);
+               int st; waitpid(d, &st, 0); setuid(65534); int e = nice(-1);
+               _exit(a == -5 && g == -5 && b == 5 && WEXITSTATUS(st) == 0 && e == -1 && errno == EPERM ? 0 : 2); }
+           int st = 0; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0 &&
+           getpriority(PRIO_PROCESS, 0) == 0 && getpriority(9, 0) == -1 && errno == EINVAL &&
+           getpriority(PRIO_PROCESS, 0x7ffffff0) == -1 && errno == ESRCH; }));
+    EXPECT("sched_setscheduler: SCHED_FIFO 10, read back, bad priority EINVAL", ({ pid_t c = fork();
+           if (c == 0) { struct sched_param p = {10}, q = {0}, bad = {100};
+               int ok = sched_get_priority_max(SCHED_FIFO) == 99 && sched_get_priority_min(SCHED_RR) == 1 &&
+                   syscall(SYS_sched_setscheduler, 0, SCHED_FIFO, &p) == 0 && syscall(SYS_sched_getscheduler, 0) == SCHED_FIFO &&
+                   syscall(SYS_sched_getparam, 0, &q) == 0 && q.sched_priority == 10 &&
+                   syscall(SYS_sched_setparam, 0, &bad) == -1 && errno == EINVAL &&
+                   syscall(SYS_sched_setscheduler, 0, 7, &p) == -1 && errno == EINVAL;
+               _exit(ok ? 0 : 1); }
+           int st = 0; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("sched_setaffinity to processor 0", ({ cpu_set_t s; CPU_ZERO(&s); CPU_SET(0, &s); sched_setaffinity(0, sizeof s, &s) == 0; }));
     return done();
 }

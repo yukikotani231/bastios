@@ -73,6 +73,11 @@ const F_UMASK: u64 = 51;
 const F_NGROUPS: u64 = 52;
 const F_GROUPS: u64 = 53;
 const NGROUPS_KEPT: u64 = 16;
+// Scheduling (src/lxprio.bastio): the nice value plus 21, 0 meaning nice
+// 0; and the policy plus 256 times its static priority. Only kept and
+// handed back: the scheduler treats every process alike.
+const F_NICE: u64 = 61;
+const F_SCHED: u64 = 62;
 // File permission bits (src/lxperm.bastio).
 const MAY_X: u64 = 1;
 const MAY_W: u64 = 2;

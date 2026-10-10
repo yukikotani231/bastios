@@ -532,6 +532,10 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_sys_call(n) {
     return lx_sys_call(&mut k, pid, n, a, b);
   }
+  if is_prio_call(n) {
+    ret(&mut k.procs, pid, lx_prio_call(&mut k, pid, n, a, b, c));
+    return KEEP;
+  }
   if is_cred_call(n) {
     return lx_cred_call(&mut k, pid, n, a, b, c);
   }

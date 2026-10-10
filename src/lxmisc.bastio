@@ -42,14 +42,11 @@ const LX_GETSID: u64 = 124;
 const LX_UTIME: u64 = 132;
 const LX_STATFS: u64 = 137;
 const LX_FSTATFS: u64 = 138;
-const LX_GETPRIORITY: u64 = 140;
-const LX_SETPRIORITY: u64 = 141;
 const LX_MLOCK: u64 = 149;
 const LX_MUNLOCK: u64 = 150;
 const LX_PRCTL: u64 = 157;
 const LX_SETRLIMIT: u64 = 160;
 const LX_SYNC: u64 = 162;
-const LX_SCHED_GETAFFINITY: u64 = 204;
 const LX_UTIMES: u64 = 235;
 const LX_FUTIMESAT: u64 = 261;
 const LX_FCHOWNAT: u64 = 260;
@@ -571,9 +568,9 @@ fn is_misc_call(n: u64) -> bool {
     || n == LX_GETRUSAGE || n == LX_SYSINFO || n == LX_SETPGID
     || n == LX_GETPGRP || n == LX_SETSID
     || n == LX_GETGROUPS || n == LX_GETPGID || n == LX_GETSID
-    || n == LX_UTIME || n == LX_STATFS || n == LX_FSTATFS || n == LX_GETPRIORITY
-    || n == LX_SETPRIORITY || n == LX_MLOCK || n == LX_MUNLOCK || n == LX_PRCTL
-    || n == LX_SETRLIMIT || n == LX_SYNC || n == LX_SCHED_GETAFFINITY || n == LX_UTIMES
+    || n == LX_UTIME || n == LX_STATFS || n == LX_FSTATFS
+    || n == LX_MLOCK || n == LX_MUNLOCK || n == LX_PRCTL
+    || n == LX_SETRLIMIT || n == LX_SYNC || n == LX_UTIMES
     || n == LX_FUTIMESAT || n == LX_FCHOWNAT || n == LX_FCHMODAT || n == LX_UTIMENSAT
     || n == LX_PRLIMIT64 || n == LX_GETRANDOM || n == LX_UNAME || n == LX_MINCORE
     || n == LX_PERSONALITY || n == LX_MLOCKALL || n == LX_MUNLOCKALL;
@@ -737,24 +734,12 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
         r = sid_of(k.procs, p);
       }
     }
-  } else if n == LX_GETPRIORITY {
-    r = 20;                                 // nice 0, as the system call encodes it
   } else if n == LX_PRCTL {
     if a != PR_SET_NAME && a != PR_GET_NAME {
       r = EINVAL;
     } else if a == PR_GET_NAME {
       xfer_zero(&mut k, 16);
       r = lx_put_out(&mut k, pid, b, 16);
-    }
-  } else if n == LX_SCHED_GETAFFINITY {
-    if b < 8 {
-      r = EINVAL;
-    } else {
-      xfer_u64(&mut k.fs.xfer, 0, 1);       // the process runs on any processor; say one
-      r = lx_put_out(&mut k, pid, c, 8);
-      if r == 0 {
-        r = 8;
-      }
     }
   } else if n == LX_GETRANDOM {
     r = lx_getrandom(&mut k, pid, a, b);
