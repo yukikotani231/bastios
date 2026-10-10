@@ -293,7 +293,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if n == LX_MMAP {
     let flags = pget(k.procs, pid, F_REGS + R_R10);
-    ret(&mut k.procs, pid, lx_mmap(&mut k, pid, a, b, flags));
+    let fd = pget(k.procs, pid, F_REGS + R_R8);
+    let off = pget(k.procs, pid, F_REGS + R_R9);
+    ret(&mut k.procs, pid, lx_mmap(&mut k, pid, a, b, flags, fd, off));
     return KEEP;
   }
   if n == LX_MUNMAP || n == LX_MPROTECT {
@@ -998,25 +1000,96 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
   return want;
 }
 
-/// mmap: anonymous private memory only, taken downward from the stack.
-/// The address hint is ignored, and MAP_FIXED and file mappings fail.
-fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64) -> u64
+/// mmap: private memory, taken downward from the stack, or at addr with
+/// MAP_FIXED. A file mapping is a copy of the file's bytes from `off` (the
+/// rest of the last page zero), so writes to it never reach the file, even
+/// with MAP_SHARED. The address hint without MAP_FIXED is ignored.
+fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64, fd: u64, off: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if flags / MAP_ANONYMOUS % 2 == 0 || flags / MAP_FIXED % 2 == 1 || n == 0 || n > USER_SIZE {
+  if n == 0 || n > USER_SIZE || off % 4096 != 0 {
     return EINVAL;
   }
-  let brk = pget(k.procs, pid, F_BRK);
-  let low = pget(k.procs, pid, F_MMAP);
+  let anon = flags / MAP_ANONYMOUS % 2 == 1;
+  let mut f = NO_FILE;
+  if !anon {
+    let d = fd_look(k, pid, fd);
+    if d.kind != K_FILE {
+      return EBADF;
+    }
+    f = row_file(k.fs, d.x);
+    if f == NO_FILE {
+      return EBADF;
+    }
+  }
   let pages = (n + 4095) / 4096;
-  if low > STACK_FIRST * 4096 || brk > low || pages * 4096 > low - brk {
-    return ENOMEM;
+  let mut at = 0;
+  if flags / MAP_FIXED % 2 == 1 {
+    if addr % 4096 != 0 || addr < USER_BASE || addr - USER_BASE > STACK_FIRST * 4096 || pages > STACK_FIRST - (addr - USER_BASE) / 4096 {
+      return EINVAL;
+    }
+    at = addr - USER_BASE;
+    if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages) {
+      return ENOMEM;
+    }
+  } else {
+    let brk = pget(k.procs, pid, F_BRK);
+    let low = pget(k.procs, pid, F_MMAP);
+    if low > STACK_FIRST * 4096 || brk > low || pages * 4096 > low - brk {
+      return ENOMEM;
+    }
+    at = (low - pages * 4096) / 4096 * 4096;
+    if at < brk || !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096) {
+      return ENOMEM;
+    }
+    pset(&mut k.procs, pid, F_MMAP, at);
   }
-  let at = (low - pages * 4096) / 4096 * 4096;
-  if at < brk || !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096) {
-    return ENOMEM;
+  // Fresh pages are zero, but MAP_FIXED may land on pages in use: fill the
+  // whole range, from the file where it has bytes, zero after.
+  if anon && flags / MAP_FIXED % 2 == 0 {
+    return USER_BASE + at;
   }
-  pset(&mut k.procs, pid, F_MMAP, at);
+  let total = pages * 4096;
+  let mut done = 0;
+  while done < total
+    invariant done <= total && kok(k) && pid < NPROC
+  {
+    let step = smaller(XFER, total - done);
+    let mut got = 0;
+    if f != NO_FILE && off <= 0xFFFFFFFFFFFFFFFF - done {
+      got = vfs_read_at(&mut k.fs, f, off + done, step);
+      if got == NO_FD {
+        got = 0;
+      }
+    }
+    let mut z = got;
+    while z < step
+      invariant got <= z && z <= step && step <= XFER && kok(k)
+    {
+      bset(&mut k.fs.xfer, z, 0);
+      z = z + 1;
+    }
+    if copy_to_user(&mut k.spaces, pid, USER_BASE + at + done, k.fs.xfer, step) != step {
+      return EFAULT;
+    }
+    done = done + step;
+  }
   return USER_BASE + at;
+}
+
+/// The file layer's handle for the file open on native row `row`, or
+/// NO_FILE.
+fn row_file(v: &Vfs, row: u64) -> u64
+  requires vfs_ok(v) && row < FD_ROWS
+{
+  let fs = fget(v.ftab, row, FD_FS);
+  let node = fget(v.ftab, row, FD_NODE);
+  if fs == FS_RAM && node < NFILES {
+    return node;
+  }
+  if fs == FS_DISK && node < DSLOTS {
+    return NFILES + node;
+  }
+  return NO_FILE;
 }
