@@ -1,6 +1,6 @@
 // The console. The devices behind it, the serial port and the screen and
-// keyboard when the machine has them, are a `Term`: output goes to both,
-// input comes from either. Kernel code never drives a `Term` directly. It
+// keyboards when the machine has them (PS/2, or USB through xHCI), are a
+// `Term`: output goes to both, input comes from any of them. Kernel code never drives a `Term` directly. It
 // writes to a `Con`, an output ring kept with the rest of the kernel state
 // under the kernel lock, and the scheduler moves the bytes to the devices a
 // chunk at a time with that lock free (`pump` in main.bastio), so a slow
@@ -10,12 +10,13 @@
 import "uart.bastio";
 import "fb.bastio";
 import "kbd.bastio";
+import "xhci.bastio";
 
-struct Term { uart: Uart, screen: Screen, kbd: Kbd }
-  invariant uart_ok(uart) && screen_ok(screen) && kbd_ok(kbd);
+struct Term { uart: Uart, screen: Screen, kbd: Kbd, usb: Usb }
+  invariant uart_ok(uart) && screen_ok(screen) && kbd_ok(kbd) && usb_ok(usb);
 
 spec fn term_ok(t: &Term) -> bool {
-  uart_ok(t.uart) && screen_ok(t.screen) && kbd_ok(t.kbd)
+  uart_ok(t.uart) && screen_ok(t.screen) && kbd_ok(t.kbd) && usb_ok(t.usb)
 }
 
 fn term_write(t: &mut Term, b: u8)
@@ -26,7 +27,7 @@ fn term_write(t: &mut Term, b: u8)
   screen_put(&mut t.screen, b);
 }
 
-/// The next byte typed on the serial line or the keyboard, or 256.
+/// The next byte typed on the serial line or a keyboard, or 256.
 fn term_poll(t: &mut Term) -> u64
   requires term_ok(t)
   ensures term_ok(t) && result <= 256
@@ -35,7 +36,11 @@ fn term_poll(t: &mut Term) -> u64
   if b < 256 {
     return b;
   }
-  return kbd_poll(&mut t.kbd);
+  let k = kbd_poll(&mut t.kbd);
+  if k < 256 {
+    return k;
+  }
+  return usb_poll(&mut t.usb);
 }
 
 const OUTCAP: u64 = 65536;
