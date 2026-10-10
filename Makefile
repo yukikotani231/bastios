@@ -11,8 +11,16 @@ BASTIOC ?= ../bastiolang/stage0/target/release/bastioc0
 CC      ?= cc
 QEMU    ?= qemu-system-x86_64
 
-CFLAGS  := -std=c11 -O2 -ffreestanding -fno-builtin -fno-stack-protector \
-           -fno-pic -fno-pie -mno-red-zone -mgeneral-regs-only -nostdlib -w
+BASE_CFLAGS := -std=c11 -O2 -ffreestanding -fno-builtin -fno-stack-protector \
+               -fno-pic -fno-pie -mno-red-zone -mgeneral-regs-only -nostdlib
+# Generated C (proved Bastio) is compiled without warnings: it declares
+# temporaries it may not use. The hand-written C in boot/ is the trusted
+# base, so every warning there is an error. GCC takes reads of the BIOS data
+# area near address 0 for null dereferences unless told pages may be that
+# small; Clang has no such parameter and no such warning.
+CFLAGS  := $(BASE_CFLAGS) -w
+TCFLAGS := $(BASE_CFLAGS) -Wall -Wextra -Werror \
+           $(shell $(CC) --param=min-pagesize=0 -Werror -E -x c /dev/null >/dev/null 2>&1 && echo --param=min-pagesize=0)
 LDFLAGS := -nostdlib -static -no-pie -z max-page-size=0x1000 -T boot/linker.ld -Wl,--build-id=none -Wl,--no-warn-rwx-segments
 
 all: build/bastios.elf
@@ -42,7 +50,7 @@ $(UASM:%=build/user/%.o): build/user/%.o: user/%.S | build/user
 	$(CC) -c -o $@ $<
 
 build/user/libc.o: boot/libc.c | build/user
-	$(CC) $(UCFLAGS) -c -o $@ $<
+	$(CC) $(TCFLAGS) -fpie -c -o $@ $<
 
 ULDFLAGS := -nostdlib -static -no-pie -z max-page-size=0x1000 -T user/user.ld -Wl,--build-id=none -Wl,--no-warn-rwx-segments
 
@@ -120,16 +128,16 @@ build/kernel.o: build/kernel.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 build/libc.o: boot/libc.c | build
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(TCFLAGS) -c -o $@ $<
 
 build/boot.o: boot/boot.S boot/core.h | build
 	$(CC) -c -o $@ $<
 
 build/platform.o: boot/platform.c | build
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(TCFLAGS) -c -o $@ $<
 
 build/smp.o: boot/smp.c boot/core.h | build
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(TCFLAGS) -c -o $@ $<
 
 build/ap.o: boot/ap.S | build
 	$(CC) -c -o $@ $<
@@ -195,6 +203,7 @@ run-uefi: build/bastios.iso $(DISK)
 	  -cdrom build/bastios.iso $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
 
 test: build/bastios.elf
+	test/trusted_base.sh
 	test/shell_test.sh
 	test/tcp_test.sh
 	NIC=e1000 test/tcp_test.sh

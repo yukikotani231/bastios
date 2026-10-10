@@ -149,14 +149,14 @@ The proof covers everything in `src/` and `user/*.bastio`. Everything below it i
 | --- | --- | --- |
 | Boot loader | GRUB, configured by `boot/grub.cfg` (only for the ISO) | Loads the kernel as a Multiboot image and passes the memory map; `make run` and the tests use QEMU's own Multiboot loader instead |
 | Boot and trap entry | `boot/boot.S` | Multiboot entry, identity map, long mode; GDT with user segments; the trap stubs and the `syscall` entry; enabling SSE; entering user mode (which also loads the FS base) (`bst_cpu_enter`) and idling (`bst_cpu_wait`) |
-| Processor startup | `boot/smp.c`, `boot/ap.S` | Finding the processors in the ACPI MADT, mapping the local APIC, INIT and startup IPIs; the real-mode trampoline that takes each application processor to long mode on the kernel's tables, where it checks in and parks until `smp_run` hands it work. C until Bastio has an `Mmio` capability |
-| Platform setup | `boot/platform.c` | TSS, interrupt table, `syscall` MSRs |
+| Processor startup | `boot/smp.c`, `boot/ap.S` | Finding the processors in the ACPI MADT, mapping the local APIC, INIT and startup IPIs; the real-mode trampoline that takes each application processor to long mode on the kernel's tables, where it checks in and parks until `smp_run` hands it work; each processor's TSS. C because the firmware tables lie outside the device window `Mmio` covers |
+| Platform setup | `boot/platform.c` | Interrupt table, `syscall` MSRs |
 | C helpers | `boot/libc.c` | `memset` / `memcpy` / `memmove` / `memcmp`, which the C compiler may call |
 | Runtime preludes | in bastiolang, `stage0/src/codegen.rs` | one `in` / `out` instruction per port access, COM1 output for the prelude's own panic messages, the arena allocator, page-table entry encoding, CR3 loads, the system call stubs for user programs |
 | User entry | `user/start.S`, `user/user.ld` | Image header; calls `main` and exits with its result |
 | Toolchain | | Z3, the stage0 compiler, the C compiler, QEMU |
 
-Count the lines yourself (`wc -l boot/* user/*.S`). Copied numbers go stale.
+`test/trusted_base.sh` counts these files, and `make test` fails when the count differs from `test/trusted_base.txt`, so growth gets reviewed. [docs/trusted-base.md](docs/trusted-base.md) says what each part is trusted to do, and one known gap.
 
 `bst_cpu_enter` takes only rip, rsp, the general registers and the arithmetic flags from the saved context; the code and stack segments, IOPL 0 and the interrupt flag are forced, and non-canonical addresses are replaced, so whatever the kernel stores there, user code cannot gain I/O privilege, disable interrupts or run with kernel segments.
 
