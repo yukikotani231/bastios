@@ -31,15 +31,18 @@ const PM1_PWRBTN: u64 = 0x100;         // status and enable bit of the power but
 const PM_HZ: u64 = 3579545;
 const PM_NS: u64 = 1000000000;         // nanoseconds a second
 const ACPI_SPINS: u64 = 1000000;
+const MMIO_LO: u64 = 0x80000000;       // the device window `mmio_claim` reaches
+const MMIO_HI: u64 = 0x400000000000;   // 2^46
 
 // Offsets in `io` of the PM1a status register (its enable register is at
 // evt + elen), of PM1a control, and of the PM timer (each ACPI_NONE if
 // absent); the timer's mask (24 or 32 bits); the S5 sleep type (ACPI_NONE
-// if the DSDT has no \_S5); the reset register's I/O port and value
-// (ACPI_NONE if there is none); and the PM timer clock: its last reading
-// and the ticks counted since boot.
+// if the DSDT has no \_S5); the reset register's I/O port (ACPI_NONE if
+// it is not a port), its address if it is a memory register in the
+// device window (0 if not; main claims it), and the value to write; and the PM timer clock:
+// its last reading and the ticks counted since boot.
 struct Acpi { io: PortIo, evt: u64, elen: u64, cnt: u64, tmr: u64, mask: u64, s5: u64,
-  reset: u64, rval: u64, last: u64, acc: u64 }
+  reset: u64, mreset: u64, rval: u64, last: u64, acc: u64 }
 
 spec fn acpi_ok(a: &Acpi) -> bool {
   (a.evt == ACPI_NONE || (a.elen <= 128 && a.evt + 2 * a.elen <= port_count(a.io) && a.elen >= 2))
@@ -47,6 +50,7 @@ spec fn acpi_ok(a: &Acpi) -> bool {
   && (a.tmr == ACPI_NONE || a.tmr + 4 <= port_count(a.io))
   && (a.mask == 0xFFFFFF || a.mask == 0xFFFFFFFF) && a.last <= a.mask
   && (a.s5 == ACPI_NONE || a.s5 < 8) && a.rval < 256 && a.reset <= ACPI_NONE
+  && (a.mreset == 0 || (MMIO_LO <= a.mreset && a.mreset < MMIO_HI))
 }
 
 /// The ports the kernel claims by number (src/main.bastio and the ATA
@@ -194,6 +198,7 @@ fn acpi_new(ports: &mut Ports, cpu: &Cpu) -> Acpi
   let mut elen = 0;
   let mut mask = 0xFFFFFF;
   let mut reset = ACPI_NONE;
+  let mut mreset = 0;
   let mut rval = 0;
   if len >= 116 {
     evt = fadt_port(cpu, len, 56, 148);
@@ -206,11 +211,16 @@ fn acpi_new(ports: &mut Ports, cpu: &Cpu) -> Acpi
     if (flags / 256) % 2 == 1 {
       mask = 0xFFFFFFFF;
     }
-    // The reset register (ACPI 2.0, flag RESET_REG_SUP), if it is a port.
-    if len >= 129 && (flags / 1024) % 2 == 1 && acpi_num(cpu, SIG_FACP, 116, 1) == 1 {
+    // The reset register (ACPI 2.0, flag RESET_REG_SUP): a port, or a
+    // memory register in the device window.
+    if len >= 129 && (flags / 1024) % 2 == 1 {
+      let space = acpi_num(cpu, SIG_FACP, 116, 1);
       let r = acpi_u64(cpu, SIG_FACP, 120);
-      if r < 65536 {
+      if space == 1 && r < 65536 {
         reset = r;
+        rval = acpi_num(cpu, SIG_FACP, 128, 1);
+      } else if space == 0 && MMIO_LO <= r && r < MMIO_HI {
+        mreset = r;
         rval = acpi_num(cpu, SIG_FACP, 128, 1);
       }
     }
@@ -236,10 +246,10 @@ fn acpi_new(ports: &mut Ports, cpu: &Cpu) -> Acpi
   if !clear {
     let none = port_claim(&mut ports, 0, 0);
     return Acpi { io: none, evt: ACPI_NONE, elen: 0, cnt: ACPI_NONE, tmr: ACPI_NONE, mask: 0xFFFFFF, s5: ACPI_NONE,
-      reset: reset, rval: rval % 256, last: 0, acc: 0 };
+      reset: reset, mreset: mreset, rval: rval % 256, last: 0, acc: 0 };
   }
   let mut a = Acpi { io: port_claim(&mut ports, lo, hi - lo), evt: ACPI_NONE, elen: elen, cnt: ACPI_NONE, tmr: ACPI_NONE,
-    mask: mask, s5: acpi_s5(cpu), reset: reset, rval: rval % 256, last: 0, acc: 0 };
+    mask: mask, s5: acpi_s5(cpu), reset: reset, mreset: mreset, rval: rval % 256, last: 0, acc: 0 };
   if evt < 65536 { a.evt = evt - lo; }
   if cnt < 65536 { a.cnt = cnt - lo; }
   if tmr < 65536 {
@@ -362,13 +372,18 @@ fn clock_ns(h: &mut Hpet, a: &mut Acpi) -> u64
 
 /// Restarts the machine: the ACPI reset register if the FADT names one
 /// that is a port the kernel holds (the PCI configuration ports, 0xCF9 on
-/// most chipsets, or the ACPI block), then the keyboard controller's reset
-/// line, then the reset control register at 0xCF9. Returns only if none of
-/// them worked.
-fn acpi_reset(a: &mut Acpi, pci: &mut Pci, kbd_status: &mut PortIo)
+/// most chipsets, or the ACPI block) or a memory register main claimed for
+/// it (`rreg`, empty otherwise), then the keyboard controller's reset line,
+/// then the reset control register at 0xCF9. Returns only if none of them
+/// worked.
+fn acpi_reset(a: &mut Acpi, pci: &mut Pci, kbd_status: &mut PortIo, rreg: &mut Mmio)
   requires acpi_ok(a) && pci_ok(pci) && port_count(kbd_status) == 1
   ensures acpi_ok(a)
 {
+  if mmio_len(rreg) == 1 {
+    mmio_write8(&mut rreg, 0, cast[u8](a.rval));
+    reset_wait(&mut kbd_status);
+  }
   let base = port_base(a.io);
   if a.reset != ACPI_NONE {
     if PCI_ADDR <= a.reset && a.reset < PCI_ADDR + 4 {

@@ -76,13 +76,15 @@ with open(disk, "wb") as f:
     f.truncate(33 << 20)
 fails = 0
 
-def run(name, firmware, usb=False, nvme=False, stick=None):
+def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
     # usb: a machine without PS/2 (i8042=off) and a USB keyboard on an
     # xHCI controller, typed on through QMP; only the keyboard, the screen
     # and the page count are checked. nvme: the disk is an NVMe drive.
     # stick: no CD; the machine boots from this USB stick image (make usb)
     # on the xHCI controller, whose BastiOS partition must then be the
-    # disk, and the virtio disk is left untouched.
+    # disk, and the virtio disk is left untouched. diag: GRUB's second entry,
+    # the hardware report (Ctrl-N on the menu, then Enter), paged through on
+    # the serial line; only the report and the page count are checked.
     global fails
     qmp_path = os.path.join(tmp.name, "qmp.sock")
     if os.path.exists(qmp_path):
@@ -125,6 +127,23 @@ def run(name, firmware, usb=False, nvme=False, stick=None):
                 return False
             out += chunk
         return True
+    if diag:
+        ok = until(b"BastiOS, with a hardware report", 0)
+        q.stdin.write(b"\x0e\r"); q.stdin.flush()
+        for _ in range(3):
+            mark = len(out)
+            if not until(b"(or wait a minute) --", mark):
+                break
+            q.stdin.write(b" "); q.stdin.flush()
+        ok = until(b"bastios> ", 0)
+        text = out.decode(errors="replace").replace("\r", "")
+        for want, what in (("---- hardware report", "the menu's second entry gives the report (boot option diag)"),
+                           ("acpi: RSDP from the boot loader (Multiboot 2)", "the RSDP came through Multiboot 2"),
+                           ("pci 00:", "the PCI devices are listed"),
+                           ("---- end of the hardware report", "the report ends")):
+            good = ok and want in text
+            print(("ok  " if good else "FAIL"), f"({name}) {what}")
+            fails += not good
     ok = until(b"bastios> ", 0)
     print(("ok  " if ok else "FAIL"), f"({name}) GRUB boots the kernel to the shell")
     fails += not ok
@@ -133,7 +152,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None):
     good = ok and b"pages of memory, 2 processors" in out
     print(("ok  " if good else "FAIL"), f"({name}) both processors started")
     fails += not good
-    if ok:
+    if ok and not diag:
         mon = socket.socket(socket.AF_UNIX)
         mon.connect(mon_path)
         mark = len(out)
@@ -194,7 +213,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None):
         # What the first UEFI run wrote through virtio, read through NVMe.
         steps = [("cat disk/iso", b"from the iso")]
     for line, want in steps:
-        if not ok or (usb and not nvme and not stick):
+        if not ok or diag or (usb and not nvme and not stick):
             break
         mark = len(out)
         if line == "ifconfig":
@@ -241,6 +260,9 @@ if os.path.exists(ovmf) and os.path.exists(ovmf_vars):
     shutil.copy(ovmf_vars, vars_copy)
     run("UEFI, from a USB stick", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
                                    "-drive", f"if=pflash,format=raw,file={vars_copy}"], stick=stick)
+    shutil.copy(ovmf_vars, vars_copy)
+    run("UEFI, hardware report", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
+                                  "-drive", f"if=pflash,format=raw,file={vars_copy}"], diag=True)
 else:
     print(f"SKIP UEFI: no OVMF firmware at {ovmf}")
 print(f"---- {fails} failed ----")
