@@ -145,9 +145,27 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   `test/compat/bastio.txt`. Not yet: `bastioc1` proving itself, which needs
   about 320 MiB, more than a process's 64 MiB window and the kernel's
   256 MiB page pool.
+- More real programs in `make compat`: MicroPython 1.24 (scripts, threads,
+  its REPL), BusyBox `vi`, the kilo editor, and BusyBox `wget`, `httpd` and
+  `nc` talking HTTP with a web server on the host (`run.py` runs one) and
+  over loopback. A new group, `test/compat/tty.txt`, types keys at
+  full-screen programs on the console and checks what they wrote.
 
 ### Files and disks
 
+- USB sticks and disks as the disk (`src/xhci.bastio`): SCSI over the
+  bulk-only transport, on the same xHCI controller as the USB keyboard.
+  Only a GPT partition of the BastiOS type is used, and it comes before
+  the machine's own disks, which are then left alone. `make usb` builds
+  `build/bastios-usb.img`, the ISO plus that partition, so the stick
+  BastiOS boots from keeps its files (`tools/mkusb.py`); `make run-usb`
+  boots it in QEMU. Checked by `test/shell_test.sh` and, booting from
+  the stick under BIOS and UEFI, `test/iso_test.sh`.
+- USB hubs: the keyboard and the stick are found behind up to two tiers of
+  USB 2 hubs, as on a PC's front panel or a monitor's ports.
+- The USB stick finishes its commands by interrupt (MSI-X on the xHCI
+  event ring) instead of being polled, so a process waiting for it sleeps
+  and an idle processor halts. `DISK=usb make iobench` measures it.
 - An NVMe drive as the disk (`src/nvme.bastio`): polled, one I/O queue,
   namespace 1 with 512-byte or 4 KiB blocks, each write flushed. It is picked
   before virtio and ATA.
@@ -239,6 +257,11 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   reaches the wire.
 
 ### Console and boot
+
+- The console obeys `tcsetattr`: a program can turn off canonical mode
+  and echo and read each key as it is typed, with `VMIN` and `VTIME`, and
+  turn off `ISIG`, `ICRNL` and output processing. Settings used to be
+  accepted and ignored, so editors and REPLs got whole echoed lines.
 
 - A console on the screen and a PS/2 keyboard when booted from the ISO:
   text drawn on the framebuffer GRUB sets up under BIOS or UEFI, keys read

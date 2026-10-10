@@ -130,6 +130,15 @@ fn fd_ofd(k: &Kernel, pid: u64, fd: u64) -> u64
   return v - FD_OFD;
 }
 
+/// Whether descriptor `fd` of process `pid` is a named pipe opened O_RDWR:
+/// a read end (OF_PIPE_R) that also counts as a writer, word 3 bit 1.
+fn pipe_both(k: &Kernel, pid: u64, fd: u64) -> bool
+  requires fds_ok(k) && pid < NPROC
+{
+  let h = fd_ofd(k, pid, fd);
+  return h < OFD_N && of_get(k.ofd, h, 0) == OF_PIPE_R && of_get(k.ofd, h, 3) / PIPE_BOTH % 2 == 1;
+}
+
 /// Whether descriptor `fd` of process `pid` is a pipe end, eventfd, timerfd
 /// or epoll instance with O_NONBLOCK: a read or write that would wait
 /// fails with -EAGAIN instead.
@@ -246,6 +255,10 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
     let left = pi_get(k.pipes, x, 2);
     if left > 0 {
       pi_set(&mut k.pipes, x, 2, left - 1);   // one description fewer on this end
+    }
+    let wl = pi_get(k.pipes, x, 3);
+    if w / PIPE_BOTH % 2 == 1 && wl > 0 {
+      pi_set(&mut k.pipes, x, 3, wl - 1);     // it was a writer too (a FIFO opened O_RDWR)
     }
   } else if kind == OF_PIPE_W && x < NPIPES {
     let left = pi_get(k.pipes, x, 3);
@@ -479,6 +492,9 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     if flags & LO_CREAT != 0 && flags & LO_EXCL != 0 {
       return EEXIST;
     }
+    if flags & LO_DIRECTORY != 0 {
+      return ENOTDIR;                       // and never wait for the other end
+    }
     let ff = fifo_slot(&mut k, fh);
     if ff >= FIFO_N {
       return ENFILE;                        // FIFO_N named pipes are open already
@@ -650,6 +666,9 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     let mut fl = 0;                         // O_RDONLY
     if kind == OF_PIPE_W {
       fl = LO_WRONLY;
+    }
+    if kind == OF_PIPE_R && of_get(k.ofd, h, 3) / PIPE_BOTH % 2 == 1 {
+      fl = LO_RDWR;
     }
     if kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD {
       fl = LO_RDWR;

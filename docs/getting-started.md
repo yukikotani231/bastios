@@ -182,10 +182,17 @@ sudo dd if=build/bastios.iso of=/dev/sdX bs=4M conv=fsync
 
 `dd` overwrites the whole device it is given, so check the name twice.
 
+That stick boots, but the files you write go to the machine's own disk, which the first boot formats. To keep them on the stick instead, and leave the machine's disks alone, write the image `make usb` builds: the same ISO followed by a partition for BastiOS's file system (64 MiB; `make usb USB_MIB=1024` for more). BastiOS uses a USB disk only if it has a partition of that type, and then only that partition. `make run-usb` boots it in QEMU from a USB stick, with a USB keyboard.
+
+```text
+make usb
+sudo dd if=build/bastios-usb.img of=/dev/sdX bs=4M conv=fsync
+```
+
 BastiOS has been run only in QEMU so far. On a real PC:
-- **Console.** The first serial port (COM1, 115200 baud), and the screen if GRUB can give it a 32-bit linear framebuffer between 2 GiB and the I/O APIC, which is where PC firmware puts it. Keys come from a PS/2 keyboard, or a USB keyboard on an xHCI (USB 3) controller's root port; USB hubs are not supported.
+- **Console.** The first serial port (COM1, 115200 baud), and the screen if GRUB can give it a 32-bit linear framebuffer between 2 GiB and the I/O APIC, which is where PC firmware puts it. Keys come from a PS/2 keyboard, or a USB keyboard on an xHCI (USB 3) controller, on a root port or behind up to two USB 2 hubs (a SuperSpeed device behind a USB 3 hub is not found).
 - **Processor.** It needs 1 GiB pages, which every x86-64 CPU of the last decade has. Other processors are found in the ACPI tables; tables above 1 GiB leave it on one processor.
-- **Disk.** An NVMe drive (namespace 1, 512-byte or 4 KiB sectors), a virtio disk, a SATA disk on an AHCI controller (the first port with a disk, 512-byte sectors), or a legacy ATA disk. The first boot formats it, so give it a disk you can lose.
+- **Disk.** The BastiOS partition of a USB stick or disk on an xHCI controller, as for the keyboard (`make usb`; bulk-only transport, 512-byte sectors), else an NVMe drive (namespace 1, 512-byte or 4 KiB sectors), a virtio disk, a SATA disk on an AHCI controller (the first port with a disk, 512-byte sectors), or a legacy ATA disk. The first boot formats it, so give it a disk you can lose, or boot from the `make usb` image.
 - **Network.** A virtio or Intel e1000 (82540EM) card; other cards are ignored.
 - **Devices** are found on any PCI bus the firmware numbered, through the legacy configuration ports, not PCIe's ECAM.
 

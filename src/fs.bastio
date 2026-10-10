@@ -98,6 +98,15 @@ fn vfs_new(disk: DiskFs) -> Vfs
     lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0))), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, grave: vec_new[Blk]() };
 }
 
+/// The next byte typed on a USB keyboard that sits on the disk's xHCI
+/// controller (see blk_find), or 256.
+fn vfs_kbd_poll(v: &mut Vfs) -> u64
+  requires vfs_ok(v)
+  ensures vfs_ok(v) && result <= 256
+{
+  return blk_kbd_poll(&mut v.disk.dev);
+}
+
 /// Frees everything (at power off): every in-memory file's pages go back
 /// (a loop mount's too), and the disk driver is handed back so its ports
 /// can be released.
@@ -135,6 +144,7 @@ fn lo_pages(b: Blk, grave: &mut Vec[Blk]) -> Vec[Slot]
     Blk::Virtio(x) => { vec_push(&mut grave, Blk::Virtio(x)); },
     Blk::Nvme(x) => { vec_push(&mut grave, Blk::Nvme(x)); },
     Blk::Ahci(x) => { vec_push(&mut grave, Blk::Ahci(x)); },
+    Blk::Usb(x) => { vec_push(&mut grave, Blk::Usb(x)); },
   }
   return vec_new[Slot]();
 }

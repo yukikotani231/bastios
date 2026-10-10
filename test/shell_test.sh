@@ -1011,7 +1011,7 @@ print(out.decode(errors="replace").replace("\r", "")[-400:])
 # A USB keyboard on an xHCI controller (src/xhci.bastio), on a machine with
 # no PS/2 controller at all (i8042=off), so the keys can only come over
 # USB. They are sent through QMP; at power off the controller is reset and
-# its eleven pages are back.
+# its fourteen pages are back.
 import json
 qmp_path = os.path.join(disk_dir.name, "qmp.sock")
 qemu = boot(1, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci", "-device", "usb-kbd",
@@ -1055,6 +1055,107 @@ if ok:
 qemu.kill(); qemu.wait()
 print("---- USB boot transcript ----")
 print(out.decode(errors="replace").replace("\r", "")[-400:])
+
+# A USB stick with a BastiOS partition (tools/mkusb.py --blank: a GPT and
+# the partition, no boot image) on the same xHCI controller as the USB
+# keyboard: the partition is the disk, ahead of the virtio disk, which must
+# be left untouched, and the keyboard is read through the disk's driver.
+# The controller's event ring raises V_DISK by MSI-X, so a process waiting
+# for the stick sleeps. A second boot finds the file, with the stick and
+# the keyboard behind two tiers of USB hubs (as a stick in a real PC's
+# front panel often is); test/fsck.py then checks the partition.
+stick = os.path.join(disk_dir.name, "stick.img")
+subprocess.run(["tools/mkusb.py", stick, "--blank", "--mib", "33"], check=True, stdout=subprocess.DEVNULL)
+before = open(disk, "rb").read()
+def stick_boot(name, steps, keys=False, image=None, hubs=False):
+    global qemu, out, deadline, fails
+    usb = ["-device", "usb-storage,bus=xh.0,drive=st", "-device", "usb-kbd,bus=xh.0"]
+    if hubs:
+        usb = ["-device", "usb-hub,bus=xh.0,port=1", "-device", "usb-hub,bus=xh.0,port=1.2",
+               "-device", "usb-storage,bus=xh.0,port=1.2.3,drive=st", "-device", "usb-kbd,bus=xh.0,port=1.4"]
+    qemu = boot(1, virtio=True, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci,id=xh",
+                                       "-drive", f"file={image or stick},format=raw,if=none,id=st"] + usb +
+                                      ["-qmp", f"unix:{qmp_path},server,nowait"])
+    out = b""
+    deadline = time.time() + timeout
+    ok = read_until(b"bastios> ")
+    if image:
+        good = ok and b"usb: a USB disk without a BastiOS partition; not used\r\n" in out and b"disk: virtio\r\n" in out
+    else:
+        good = ok and b"disk: USB, the BastiOS partition (67584 sectors)\r\n" in out
+        good = good and b"disk: completions by message-signalled interrupt\r\n" in out
+    print(("ok  " if good else "FAIL"), f"({name} boot) {'the stick is not used' if image else 'the disk is the stick'}")
+    fails += not good
+    if ok and keys:
+        qmp = socket.socket(socket.AF_UNIX)
+        qmp.connect(qmp_path)
+        qf = qmp.makefile("rw")
+        qf.readline()
+        def qmp_cmd(c):
+            qf.write(json.dumps(c) + "\n"); qf.flush()
+            return qf.readline()
+        qmp_cmd({"execute": "qmp_capabilities"})
+        mark = len(out)
+        for k in ["e", "c", "h", "o", "spc", "shift-s", "t", "i", "c", "k", "ret"]:
+            parts = k.split("-")
+            for down in (True, False):
+                for q in (parts if down else parts[::-1]):
+                    qmp_cmd({"execute": "input-send-event", "arguments": {"events": [
+                        {"type": "key", "data": {"down": down, "key": {"type": "qcode", "data": q}}}]}})
+                time.sleep(0.03)
+        good = read_until(b"Stick\r\n", mark) and read_until(b"bastios> ", mark + 1)
+        print(("ok  " if good else "FAIL"), f"({name} boot) a line typed on the USB keyboard runs, read through the disk")
+        fails += not good
+        qmp.close()
+    for line, w in steps:
+        if not ok:
+            break
+        mark = len(out)
+        qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+        good = read_until(b"bastios> ", mark) and w in out[mark:]
+        print(("ok  " if good else "FAIL"), f"({name} boot)", repr(line))
+        fails += not good
+    if ok:
+        qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
+        read_until(b"pages free at power off")
+        booted = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
+        off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+        good = booted and off and booted.group(1) == off.group(1)
+        print(("ok  " if good else "FAIL"), f"({name} boot) every page back at power off")
+        fails += not good
+    qemu.kill(); qemu.wait()
+    if not image:
+        good = open(disk, "rb").read() == before
+        print(("ok  " if good else "FAIL"), f"({name} boot) the virtio disk is untouched")
+        fails += not good
+    print(f"---- {name} boot transcript ----")
+    print(out.decode(errors="replace").replace("\r", "")[-600:])
+stick_boot("USB disk", [
+    ("echo on the stick > disk/s", b""),
+    ("cat disk/s", b"on the stick\r\n"),
+    ("fstest", b"fstest: disk ok"),
+    ("rm disk/big", b""),
+    ("diskbench", b"read 2 MiB: "),
+], keys=True)
+stick_boot("USB disk behind hubs", [("cat disk/s", b"on the stick\r\n"), ("fstest", b"fstest: disk ok")],
+           keys=True, hubs=True)
+f, n = map(int, subprocess.check_output(["tools/mkusb.py", "--find", stick]).split())
+part = os.path.join(disk_dir.name, "part.img")
+with open(stick, "rb") as src, open(part, "wb") as dst:
+    src.seek(f * 512)
+    dst.write(src.read(n * 512))
+r = subprocess.run(["test/fsck.py", part], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+print(("ok  " if r.returncode == 0 else "FAIL"), "(USB disk) fsck of the partition:", r.stdout.decode().strip())
+fails += r.returncode != 0
+# A stick with no BastiOS partition is never written to: the virtio disk
+# is the disk, and the stick stays all zeros.
+bare = os.path.join(disk_dir.name, "bare.img")
+with open(bare, "wb") as fb:
+    fb.truncate(8 << 20)
+stick_boot("bare stick", [], image=bare)
+good = not any(open(bare, "rb").read())
+print(("ok  " if good else "FAIL"), "(bare stick boot) the stick is untouched")
+fails += not good
 
 # And back on ATA: what virtio wrote is on the disk.
 qemu = boot(1, with_disk=True)

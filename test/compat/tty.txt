@@ -1,0 +1,60 @@
+# Programs driven by keystrokes on the console, for the compatibility suite
+# (test/compat): editors and a REPL that put the terminal in raw mode
+# (termios), read keys one at a time and draw with escape sequences.
+#
+#   == NAME
+#   $ PROGRAM        (one line, run by ash in /, in the foreground)
+#   > KEYS           (typed once the program has drawn something; one line
+#                     each, with Python's escapes: \r, \x1b)
+#   $ CHECK          (one line, run once the program is back at the shell)
+#   expected output of CHECK, line by line
+#
+# run.py waits a moment between key lines, so a program that reads an
+# escape sequence with a timeout (kilo) gets each one whole.
+
+== micropython: REPL line editing and history
+$ cd /tmp && /disk/micropython
+> y = 15\x1b[D\x7f\x1b[C\r
+> z = y * 2\r
+> \x1b[A+1\r
+> f = open('/tmp/ct_mp', 'w'); f.write(str(y) + ' ' + str(z)); f.close()\r
+> \x04
+$ cat /tmp/ct_mp; echo; rm /tmp/ct_mp
+5 11
+
+== micropython: Ctrl-C at the REPL is KeyboardInterrupt
+$ /disk/micropython
+> while True: pass\r
+> \r
+> \x03
+> f = open('/tmp/ct_c', 'w'); f.write('after ' + str(1 + 1)); f.close()\r
+> \x04
+$ cat /tmp/ct_c; echo; rm /tmp/ct_c
+after 2
+
+== vi: edit and save a file
+$ printf 'one\ntwo\nthree\n' > /tmp/ct_vi; bb vi /tmp/ct_vi
+> jdd
+> Gofour\x1b
+> ggIzero \x1b
+> /thr\rx
+> :wq\r
+$ cat /tmp/ct_vi; rm /tmp/ct_vi
+zero one
+hree
+four
+
+== kilo: edit and save a file
+$ echo abc > /tmp/ct_k; /disk/kilo /tmp/ct_k
+> X\x1b[C\x1b[CY\rline2
+> \x13
+> \x11
+$ cat /tmp/ct_k; rm /tmp/ct_k
+XabY
+line2c
+
+== stty: the terminal is in canonical mode again after an editor
+$ /disk/kilo /tmp/ct_s
+> \x11
+$ bb stty -a < /dev/tty 2>/dev/null | bb tr ' ;' '\n\n' | bb grep -x -e icanon -e -icanon -e echo -e -echo | bb tr '\n' ,; echo
+icanon,echo,

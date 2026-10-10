@@ -65,7 +65,7 @@ fn put_xfer(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, n: u64, off: u64)
   ensures result <= n || result > XFER
 {
   let d = fd_look(k, pid, out);
-  if d.kind == K_PIPE_W {
+  if d.kind == K_PIPE_W || (d.kind == K_PIPE_R && pipe_both(k, pid, out)) {
     return pipe_put_xfer(&mut k, d.x, n);
   }
   if d.kind == K_CONSOLE {

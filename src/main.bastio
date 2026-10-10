@@ -301,6 +301,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   }
   if v == V_TIMER || v == V_LTIMER {
     pset(&mut s.k.procs, p, F_TICKS, tick(pget(s.k.procs, p, F_TICKS)));
+    cpu_timers_tick(&mut s.k, p);
     s.k.ns = hpet_ns(&mut s.clock);
     lx_alarms(&mut s.k);
     return (p + 1) % NPROC;
@@ -336,6 +337,24 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     return p;                               // the stack grew: run the instruction again
   }
   if v < 32 {
+    // Dies of the signal Linux would send: a parent's wait4 sees a
+    // SIGSEGV (or SIGFPE, SIGILL, SIGTRAP), and a shell prints 128 + it.
+    // A handler for it runs instead, if the process has one.
+    let mut sig = SIGSEGV;
+    if v == 0 {
+      sig = SIGFPE;
+    } else if v == 6 {
+      sig = SIGILL;
+    } else if v == 3 {
+      sig = SIGTRAP;
+    }
+    let mut addr = pget(s.k.procs, p, F_REGS + R_RIP);
+    if v == 14 {
+      addr = pget(s.k.procs, p, F_REGS + 19);   // CR2
+    }
+    if fault_caught(&mut s.k, p, sig, addr) {
+      return (p + 1) % NPROC;
+    }
     puts(&mut s.con, "\r\n[pid ");
     put_num(&mut s.con, p);
     puts(&mut s.con, " (");
@@ -349,16 +368,6 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       put_hex(&mut s.con, pget(s.k.procs, p, F_REGS + 19));
     }
     puts(&mut s.con, "; killed]\r\n");
-    // Dies of the signal Linux would send: a parent's wait4 sees a
-    // SIGSEGV (or SIGFPE, SIGILL, SIGTRAP), and a shell prints 128 + it.
-    let mut sig = SIGSEGV;
-    if v == 0 {
-      sig = SIGFPE;
-    } else if v == 6 {
-      sig = SIGILL;
-    } else if v == 3 {
-      sig = SIGTRAP;
-    }
     terminate(&mut s.k, mmu, p, SIG_DEATH + sig);
     return (p + 1) % NPROC;
   }
@@ -434,14 +443,30 @@ fn exchange(s: &mut Sys, tx: &mut Bytes, rx: &Bytes, rn: u64, pend: &Atomic[u64]
   requires sys_ok(s)
   ensures sys_ok(s)
 {
-  if rn > 0 {
-    let mut i = 0;
-    while i < rn && i < blen(rx)
-      invariant sys_ok(s)
-    {
-      q_push(&mut s.k.q, cast[u64](bget(rx, i)));
-      i = i + 1;
+  let mut typed = rn > 0;
+  let mut i = 0;
+  while i < rn && i < blen(rx)
+    invariant sys_ok(s)
+  {
+    q_push(&mut s.k.q, cast[u64](bget(rx, i)));
+    i = i + 1;
+  }
+  // A USB keyboard on the disk's controller is polled here, under this
+  // lock, since the controller is part of the disk.
+  let mut k = 0;
+  while k < CHUNK
+    invariant sys_ok(s)
+  {
+    let c = vfs_kbd_poll(&mut s.k.fs);
+    if c < 256 {
+      q_push(&mut s.k.q, c);
+      typed = true;
+      k = k + 1;
+    } else {
+      k = CHUNK;
     }
+  }
+  if typed {
     tty_intr(&mut s.con, &mut s.k);
     tty_cook(&mut s.con, &mut s.k);
     wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
@@ -762,10 +787,19 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     puts(&mut con, " framebuffer\r\n");
   }
   let mut m = mem_new(pool);
-  // The disk: virtio (DMA into pages lent from the allocator) if the machine
-  // has one, else ATA. PCI's configuration ports are claimed for it.
+  // PCI's configuration ports are claimed for the drivers that look for
+  // their devices there.
   let mut pci = Pci { addr: port_claim(&mut ports, PCI_ADDR, 4), data: port_claim(&mut ports, PCI_DATA, 4) };
-  let dev = blk_new(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi, msi);
+  // The xHCI controller first, if there is one, with fourteen pages from
+  // USB_AT: a USB stick with a BastiOS partition on it becomes the disk,
+  // and a USB keyboard the keyboard.
+  let xdev = pci_find_class(&mut pci, XHCI_CLASS);
+  let usb_lo = usb_bar(&mut pci, xdev);
+  let usb_hi = usb_lo + usb_bar_size(&mut pci, xdev);
+  let mut usb = usb_new(&mut pci, &mut m, &mut win, USB_AT, fb_lo, fb_hi, 0, 0, xdev, usb_lo, usb_hi - usb_lo, msi, V_DISK);
+  let usb_disk = usb_msd(usb);
+  // The disk: that stick, else NVMe, virtio, AHCI or ATA (see blk_new).
+  let dev = blk_find(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi, usb_lo, usb_hi, msi, &mut usb);
   let dev_lo = blk_ports_lo(dev);
   let dev_hi = blk_ports_hi(dev);
   let dk_lo = blk_mmio_lo(dev);
@@ -777,17 +811,18 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     puts(&mut con, "disk: NVMe\r\n");
   } else if blk_is_ahci(disk.dev) {
     puts(&mut con, "disk: AHCI\r\n");
+  } else if blk_is_usb(disk.dev) {
+    puts(&mut con, "disk: USB, the BastiOS partition (");
+    put_num(&mut con, blk_sectors(disk.dev));
+    puts(&mut con, " sectors)\r\n");
+  }
+  if usb_disk == MSD_UNUSED {
+    puts(&mut con, "usb: a USB disk without a BastiOS partition; not used\r\n");
   }
   if blk_irq(disk.dev) {
     puts(&mut con, "disk: completions by message-signalled interrupt\r\n");
   }
-  // A USB keyboard on an xHCI controller, if there is one: eleven pages
-  // after the network card's.
-  let xdev = pci_find_class(&mut pci, XHCI_CLASS);
-  let usb_lo = usb_bar(&mut pci, xdev);
-  let usb_hi = usb_lo + usb_bar_size(&mut pci, xdev);
-  let usb = usb_new(&mut pci, &mut m, &mut win, 13, fb_lo, fb_hi, dk_lo, dk_hi, xdev, usb_lo, usb_hi - usb_lo);
-  let usb_on = usb_live(usb);
+  let usb_on = usb_live(usb) || blk_kbd(disk.dev);
   match term.usb {
     Usb::None => {},
     Usb::Xhci(stale) => { mmio_release(&mut win, xhci_free(stale, &mut m)); },

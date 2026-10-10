@@ -39,6 +39,9 @@ const SIGTTOU: u64 = 22;
 const SIGURG: u64 = 23;
 const SIGWINCH: u64 = 28;
 
+// A sender word (k.sigsave) at or above this says the signal came from a
+// processor exception at the address it holds less FAULT_MARK.
+const FAULT_MARK: u64 = 0x8000000000000000;
 const SIG_DFL: u64 = 0;
 const SIG_IGN: u64 = 1;
 const SA_RESTART: u64 = 0x10000000;
@@ -164,6 +167,12 @@ fn info_from(b: &mut Bytes, at: u64, word: u64)
   requires at + 32 <= blen(b)
   ensures blen(b) == old(blen(b))
 {
+  if word >= FAULT_MARK {
+    // A processor exception (fault_caught): si_code SEGV_MAPERR, si_addr.
+    bset(&mut b, at + 8, cast[u8](1));
+    xfer_u64(&mut b, at + 16, word - FAULT_MARK);
+    return;
+  }
   bset(&mut b, at + 16, cast[u8](word % 256));          // si_pid
   if word / 256 % 2 == 1 {
     let mut i = 0;
@@ -272,6 +281,9 @@ fn tty_intr(con: &mut Con, k: &mut Kernel)
   requires con_ok(con) && kok(k)
   ensures kok(k) && con_ok(con)
 {
+  if tt_flags(k.line, 12) & ISIG == 0 {
+    return;                                 // Ctrl-C is a byte like any other (ISIG off)
+  }
   let n = get(k.q, 1);
   let h = get(k.q, 0);
   let mut hit = false;
@@ -679,6 +691,24 @@ fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
     }
     s = s + 1;
   }
+  return true;
+}
+
+/// A processor exception (vector v) in process p, which Linux turns into
+/// signal s: if p has a handler for s and does not block it, makes s
+/// pending, with the faulting address `addr` for its siginfo, and returns
+/// true. Otherwise the exception ends p, as Linux's forced signal would.
+/// Returning from the handler runs the instruction again, as on Linux.
+fn fault_caught(k: &mut Kernel, p: u64, s: u64, addr: u64) -> bool
+  requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
+  let h = sa_get(k.sigact, p, s, 0);
+  if h == SIG_DFL || h == SIG_IGN || has_sig(pget(k.procs, p, F_SIGMASK), s) {
+    return false;
+  }
+  pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
+  k.sigsave = set(k.sigsave, sender_at(p, s), FAULT_MARK + addr % FAULT_MARK);
   return true;
 }
 
