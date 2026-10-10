@@ -16,6 +16,7 @@
 // later (see nic_ping_start / nic_ping_check).
 
 import "card.bastio";
+import "core/endian.bastio";
 
 const ETH_ARP: u64 = 0x0806;
 const ETH_IP: u64 = 0x0800;
@@ -146,14 +147,14 @@ fn be16(b: &Bytes, o: u64) -> u64
   requires o + 2 <= blen(b)
   ensures result <= 65535
 {
-  return cast[u64](bget(b, o)) * 256 + cast[u64](bget(b, o + 1));
+  return cast[u64](load_be16(b, o));
 }
 
 fn be32(b: &Bytes, o: u64) -> u64
   requires o + 4 <= blen(b)
   ensures result <= 4294967295
 {
-  return be16(b, o) * 65536 + be16(b, o + 2);
+  return cast[u64](load_be32(b, o));
 }
 
 fn be48(b: &Bytes, o: u64) -> u64
@@ -167,16 +168,14 @@ fn put16(b: &mut Bytes, o: u64, v: u64)
   requires o + 2 <= blen(b) && v <= 65535
   ensures blen(b) == old(blen(b))
 {
-  bset(&mut b, o, cast[u8](v / 256));
-  bset(&mut b, o + 1, cast[u8](v % 256));
+  store_be16(&mut b, o, cast[u16](v));
 }
 
 fn put32(b: &mut Bytes, o: u64, v: u64)
   requires o + 4 <= blen(b) && v <= 4294967295
   ensures blen(b) == old(blen(b))
 {
-  put16(&mut b, o, v / 65536);
-  put16(&mut b, o + 2, v % 65536);
+  store_be32(&mut b, o, cast[u32](v));
 }
 
 fn put48(b: &mut Bytes, o: u64, v: u64)
