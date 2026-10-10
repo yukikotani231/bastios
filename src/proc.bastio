@@ -462,9 +462,10 @@ const UXB_LEN: u64 = 65968;           // UX_N * UX_CAP + UX_LIS * UX_PATH
 
 const NPIPES: u64 = 8;
 const PIPE_CAP: u64 = 65536;          // bytes a pipe holds, as on Linux
+const PIPE_PAGE: u64 = 4096;          // the least F_SETPIPE_SZ gives a pipe
 const PIPE_ATOM: u64 = 4096;          // PIPE_BUF: writes this small go in whole
-const PIPE_STRIDE: u64 = 6;           // head, count, readers, writers, FIFO + 1 (0: none), a writer came
-const PIPES_LEN: u64 = 48;            // NPIPES * PIPE_STRIDE
+const PIPE_STRIDE: u64 = 7;           // head, count, readers, writers, FIFO + 1 (0: none), a writer came, capacity
+const PIPES_LEN: u64 = 56;            // NPIPES * PIPE_STRIDE
 const PIPE_BYTES: u64 = 524288;       // NPIPES * PIPE_CAP
 
 const LX_PIPE: u64 = 22;
@@ -517,6 +518,8 @@ const F_SETFD: u64 = 2;
 const F_GETFL: u64 = 3;
 const F_SETFL: u64 = 4;
 const F_DUPFD_CLOEXEC: u64 = 1030;
+const F_SETPIPE_SZ: u64 = 1031;
+const F_GETPIPE_SZ: u64 = 1032;
 const F_GETLK: u64 = 5;
 const F_SETLK: u64 = 6;
 const F_SETLKW: u64 = 7;

@@ -38,16 +38,22 @@ spec fn lapic_ok(a: &Lapic) -> bool {
   mmio_base(a.regs) == LAPIC && mmio_len(a.regs) == LAPIC_LEN && a.id < 256
 }
 
-/// Takes the bootstrap processor's local APIC and turns it on, if it
-/// answers at LAPIC like an xAPIC (version 0x10-0x15); otherwise `on` is
-/// false and nothing is written. The 8259 stays the timer's and the
+/// Takes the bootstrap processor's local APIC and turns it on, if it is in
+/// xAPIC mode (`xapic`, from boot/smp.c, which puts it in x2APIC mode only
+/// when it must) and answers at LAPIC like an xAPIC (version 0x10-0x15);
+/// otherwise `on` is false and nothing is written. In x2APIC mode its
+/// registers are MSRs, which Bastio cannot reach yet: the kernel then does
+/// without MSI and wake-up interrupts. The 8259 stays the timer's and the
 /// keyboard's: LINT0 passes its interrupts through (ExtINT), as the
 /// firmware left it, and LINT1 is NMI.
-fn lapic_new(regs: Mmio) -> Lapic
+fn lapic_new(regs: Mmio, xapic: bool) -> Lapic
   requires mmio_base(regs) == LAPIC && mmio_len(regs) == LAPIC_LEN
   ensures lapic_ok(result)
 {
   let mut r = regs;
+  if !xapic {
+    return Lapic { regs: r, on: false, id: 0 };
+  }
   let ver = cast[u64](mmio_read32(&mut r, LA_VERSION)) % 256;
   if ver < 0x10 || ver > 0x15 {
     return Lapic { regs: r, on: false, id: 0 };

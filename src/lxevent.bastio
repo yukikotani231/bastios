@@ -815,6 +815,7 @@ fn fifo_open(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
     pi_set(&mut k.pipes, q, 1, 0);
     pi_set(&mut k.pipes, q, 4, f + 1);
     pi_set(&mut k.pipes, q, 5, 0);
+    pi_set(&mut k.pipes, q, 6, 0);
     k.evt = set(k.evt, base + 1, q + 1);
   }
   let nb = flags / LO_NONBLOCK % 2;

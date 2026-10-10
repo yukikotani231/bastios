@@ -117,6 +117,7 @@ t_dir: mkdir existing is EEXIST
 t_dir: mkdir nested missing parent is ENOENT
 t_dir: openat relative to a directory fd
 t_dir: opendir/readdir /
+t_dir: read of a directory is EISDIR
 t_dir: readdir subdirectory
 t_dir: relative open after chdir
 t_dir: rmdir
@@ -178,6 +179,7 @@ t_ipc: AF_UNIX bind/listen
 t_ipc: AF_UNIX connect to no listener fails
 t_ipc: AF_UNIX connect/accept
 t_ipc: EOF once writers close
+t_ipc: F_SETPIPE_SZ limits a pipe
 t_ipc: O_NONBLOCK read of an empty pipe is EAGAIN
 t_ipc: dup2 onto stdout and back
 t_ipc: epoll
@@ -195,6 +197,7 @@ t_ipc: pipe2
 t_ipc: poll a readable pipe
 t_ipc: poll times out
 t_ipc: pselect timeout
+t_ipc: readv/writev check every iovec; 0 vectors is 0
 t_ipc: select
 t_ipc: socketpair AF_UNIX
 t_ipc: socketpair both ways, EOF after close

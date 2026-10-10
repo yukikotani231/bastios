@@ -10,7 +10,8 @@
 //   /proc/sys/kernel/tainted, pid_max, printk, and the System V IPC
 //   limits shmmax, shmall, shmmni, msgmax, msgmnb, msgmni, sem
 //                           read-only sysctls with their fixed values
-//   /proc/sys/kernel/hostname, domainname, ostype, osrelease
+//   /proc/sys/fs/pipe-max-size  the most F_SETPIPE_SZ gives
+//   /proc/sys/kernel/hostname, domainname, ostype, osrelease, version
 //                           what uname says (src/lxsys.bastio)
 //   /proc/sysvipc/msg, sem, shm
 //                           the System V IPC objects (src/lxipc.bastio)
@@ -58,6 +59,7 @@ const SY_IPC: u64 = 4;                // 4 .. 13: ipc_proc_text (src/lxipc.basti
 const SY_IPC_END: u64 = 14;
 const SY_UTS: u64 = 14;                // 14 .. 17: uts_proc_text (src/lxsys.bastio)
 const SY_UTS_END: u64 = 19;
+const SY_PIPE_MAX: u64 = 19;
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
 const S_IFREG_RO: u64 = 0x8124;       // a regular file, r--r--r--
@@ -199,6 +201,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   }
   if xfer_is(x, 5, n, "sys/kernel/printk") {
     return PROC_DEV + PSYS + SY_PRINTK;
+  }
+  if xfer_is(x, 5, n, "sys/fs/pipe-max-size") {
+    return PROC_DEV + PSYS + SY_PIPE_MAX;
   }
   let mut i = 0;
   while i < SY_IPC_END - SY_IPC
@@ -478,6 +483,10 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     }
     if what >= SY_UTS && what < SY_UTS_END {
       return uts_proc_text(k, what - SY_UTS, &mut o);
+    }
+    if what == SY_PIPE_MAX {
+      let a = put_n(&mut o, 0, PIPE_CAP);   // F_SETPIPE_SZ goes no higher
+      return put_c(&mut o, a, 10);
     }
     return 0;
   }
