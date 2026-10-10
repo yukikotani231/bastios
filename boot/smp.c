@@ -2,7 +2,7 @@
  * Multiprocessor startup. Part of the trusted base.
  *
  * Runs on the bootstrap processor (BSP) before the Bastio kernel: finds the
- * other processors in the ACPI MADT, maps the local APIC, and starts each
+ * other processors in the ACPI MADT and starts each
  * application processor (AP) with INIT and two startup IPIs (Intel SDM
  * vol. 3, 8.4.4). Each AP runs boot/ap.S, checks in through bst_ap_main and
  * parks with interrupts off. The Bastio kernel sees the result through the
@@ -22,14 +22,12 @@
 #define AP_STACK      16384
 #define IDENT_LIMIT   (1ull << 30)  /* boot.S identity-maps the first 1 GiB */
 
-extern uint64_t bst_kernel_pml4[];
 extern const char bst_ap_trampoline[], bst_ap_trampoline_end[];
 
 volatile uint64_t bst_ap_stack;     /* read by ap.S; one AP starts at a time */
 static uint64_t cpus_online = 1;    /* the BSP; updated atomically */
 static struct __attribute__((packed)) { uint16_t limit; uint64_t base; } ap_idtr;
 static uint8_t ap_stacks[MAX_CPUS - 1][AP_STACK] __attribute__((aligned(16)));
-static uint64_t lapic_pd[512] __attribute__((aligned(4096)));
 static volatile uint32_t *lapic;
 
 /* The saved user context of the processor running the caller. One for now:
@@ -113,16 +111,9 @@ static uint64_t find_madt(uint64_t *len) {
     return 0;
 }
 
-/* Map the local APIC's page uncached, kernel-only, through a new page
- * directory for the fourth GiB in the kernel's (shared) level-3 table. */
+/* The local APIC lies in the device window boot.S maps uncached (3-4 GiB). */
 static int map_lapic(uint64_t base) {
     if (base < 3 * IDENT_LIMIT || base >= 4 * IDENT_LIMIT) return 0;
-    uint64_t *pdpt = (uint64_t *)(bst_kernel_pml4[0] & 0x000FFFFFFFFFF000ull);
-    if (pdpt[3] != 0) return 0;
-    lapic_pd[(base >> 21) & 511] = (base & ~0x1FFFFFull) | 0x9B;   /* present, writable, PWT, PCD, 2 MiB */
-    pdpt[3] = (uint64_t)lapic_pd | 3;
-    uint64_t cr3;
-    __asm__ volatile ("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) : : "memory");
     lapic = (volatile uint32_t *)base;
     return 1;
 }

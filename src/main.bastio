@@ -11,6 +11,7 @@
 import "uart.bastio";
 import "pic.bastio";
 import "pit.bastio";
+import "hpet.bastio";
 import "console.bastio";
 import "pages.bastio";
 import "space.bastio";
@@ -148,7 +149,7 @@ fn tick(t: u64) -> u64 {
   return t;
 }
 
-fn main(ports: &mut Ports, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 {
+fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 {
   // Every device the kernel drives, with the I/O ports it owns. The ports
   // are claimed here, once: no two drivers can own the same port, and no
   // code can touch a port that was not claimed.
@@ -156,6 +157,8 @@ fn main(ports: &mut Ports, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64
   let mut pic = Pic { master: port_claim(&mut ports, PIC1, 2), slave: port_claim(&mut ports, PIC2, 2) };
   let mut pit = Pit { io: port_claim(&mut ports, PIT, 4) };
   let disk = disk_mount(ata_new(&mut ports));
+  // Devices with memory-mapped registers claim them from the device window.
+  let mut clock = hpet_init(mmio_claim(&mut win, HPET, HPET_LEN));
   uart_init(&mut con);
   pic_init(&mut pic);
   pit_init(&mut pit, 100);
@@ -189,7 +192,7 @@ fn main(ports: &mut Ports, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64
     vec_push(&mut fpus, Fpu::None);
     q = q + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), ticks: 0, cpus: cpus, fs: vfs_new(disk) };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), ticks: 0, ns: 0, cpus: cpus, fs: vfs_new(disk) };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
@@ -222,6 +225,7 @@ fn main(ports: &mut Ports, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64
         pset(&mut k.procs, p, F_TICKS, tick(pget(k.procs, p, F_TICKS)));
         cur = (p + 1) % NPROC;
       } else if v == V_SYSCALL {
+        k.ns = hpet_ns(&mut clock);
         let r = syscall(&mut con, &mut k, mmu, p);
         if r == SWITCH {
           cur = (p + 1) % NPROC;
@@ -282,5 +286,6 @@ fn main(ports: &mut Ports, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64
   port_release(&mut ports, pic.slave);
   port_release(&mut ports, pit.io);
   ata_free(&mut ports, ata);
+  mmio_release(&mut win, clock.regs);
   return 0;
 }

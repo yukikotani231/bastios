@@ -1,0 +1,59 @@
+// The HPET (high precision event timer), through the 1 KiB block of
+// memory-mapped registers it owns. The kernel uses only its main counter,
+// as a clock: nanoseconds since boot.
+
+const HPET: u64 = 0xFED00000;
+const HPET_LEN: u64 = 1024;
+
+// Register offsets.
+const HPET_CAP: u64 = 0x000;     // capabilities; bits 32-63: tick period in femtoseconds
+const HPET_CONF: u64 = 0x010;    // general configuration; bit 0 starts the counter
+const HPET_COUNT: u64 = 0x0F0;   // main counter
+
+// The specification caps the period at 100 ns.
+const HPET_MAX_PERIOD: u64 = 100000000;
+const FS_PER_NS: u64 = 1000000;
+const U64_MAX: u64 = 18446744073709551615;
+
+struct Hpet { regs: Mmio, period: u64 }
+
+spec fn hpet_ok(h: &Hpet) -> bool {
+  mmio_base(h.regs) == HPET && mmio_len(h.regs) == HPET_LEN && h.period <= HPET_MAX_PERIOD
+}
+
+/// Starts the counter and records its period; a period of 0 means there is
+/// no usable HPET and the clock reads 0.
+fn hpet_init(regs: Mmio) -> Hpet
+  requires mmio_base(regs) == HPET && mmio_len(regs) == HPET_LEN
+  ensures hpet_ok(result)
+{
+  let mut r = regs;
+  let p = mmio_read64(&mut r, HPET_CAP) / 0x100000000;
+  if p == 0 || p > HPET_MAX_PERIOD {
+    return Hpet { regs: r, period: 0 };
+  }
+  mmio_write64(&mut r, HPET_CONF, 1);
+  return Hpet { regs: r, period: p };
+}
+
+/// Nanoseconds since the counter started (saturating; the counter would
+/// need centuries to get there).
+fn hpet_ns(h: &mut Hpet) -> u64
+  requires hpet_ok(h)
+{
+  if h.period == 0 {
+    return 0;
+  }
+  let c = mmio_read64(&mut h.regs, HPET_COUNT);
+  let hi = c / FS_PER_NS;
+  if hi > U64_MAX / h.period {
+    return U64_MAX;
+  }
+  // c * period / 10^6, split so no step overflows.
+  let lo = (c % FS_PER_NS) * h.period / FS_PER_NS;
+  let whole = hi * h.period;
+  if whole > U64_MAX - lo {
+    return U64_MAX;
+  }
+  return whole + lo;
+}
