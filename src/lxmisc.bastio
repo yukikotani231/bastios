@@ -58,6 +58,11 @@ const LX_UTIMENSAT: u64 = 280;
 const LX_PRLIMIT64: u64 = 302;
 const LX_GETRANDOM: u64 = 318;
 const LX_UNAME: u64 = 63;
+const LX_MINCORE: u64 = 27;
+const LX_PERSONALITY: u64 = 135;
+const LX_MLOCKALL: u64 = 151;
+const LX_MUNLOCKALL: u64 = 152;
+const INT_SIGN: u64 = 0x80000000;     // a negative int argument
 
 const UTS_FIELD: u64 = 65;            // each struct utsname string
 const UTS_SIZE: u64 = 390;
@@ -486,7 +491,8 @@ fn is_misc_call(n: u64) -> bool {
     || n == LX_SETPRIORITY || n == LX_MLOCK || n == LX_MUNLOCK || n == LX_PRCTL
     || n == LX_SETRLIMIT || n == LX_SYNC || n == LX_SCHED_GETAFFINITY || n == LX_UTIMES
     || n == LX_FUTIMESAT || n == LX_FCHOWNAT || n == LX_FCHMODAT || n == LX_UTIMENSAT
-    || n == LX_PRLIMIT64 || n == LX_GETRANDOM || n == LX_UNAME;
+    || n == LX_PRLIMIT64 || n == LX_GETRANDOM || n == LX_UNAME || n == LX_MINCORE
+    || n == LX_PERSONALITY || n == LX_MLOCKALL || n == LX_MUNLOCKALL;
 }
 
 /// System call n of process pid, with its first three arguments.
@@ -527,6 +533,26 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     let d = fd_look(k, pid, a);
     if d.kind == K_BAD {
       r = EBADF;                            // writes go straight through; owners are not kept
+    } else if n != LX_FCHOWN && d.kind != K_FILE && d.kind != K_DIR {
+      r = EINVAL;                           // a pipe, socket or device has nothing to sync
+    }
+  } else if n == LX_MINCORE {
+    r = lx_mincore(&mut k, pid, a, b, c);
+  } else if n == LX_PERSONALITY {
+    r = pget(k.procs, pid, F_PERSONA);
+    if a != 0xFFFFFFFF {
+      pset(&mut k.procs, pid, F_PERSONA, a % 4294967296);
+    }
+  } else if n == LX_GETGROUPS {
+    // One supplementary group: root's, 0.
+    if a >= INT_SIGN && a != 0 {
+      r = EINVAL;
+    } else if a != 0 {
+      xfer_u64(&mut k.fs.xfer, 0, 0);
+      r = lx_put_out(&mut k, pid, b, 4);
+    }
+    if r == 0 {
+      r = 1;
     }
   } else if n == LX_FCHMOD {
     r = fd_set_meta(&mut k, pid, a, b % 4096, NO_FILE);
@@ -634,8 +660,9 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   } else if n == LX_GETRANDOM {
     r = lx_getrandom(&mut k, pid, a, b);
   }
-  // Everything else (setuid and friends, getgroups, setpriority,
-  // setrlimit, madvise, mlock, munlock, sync) succeeds doing nothing.
+  // Everything else (setuid and friends, setgroups, setpriority, setrlimit,
+  // madvise, mlock, munlock, mlockall, munlockall, sync) succeeds doing
+  // nothing: every page stays in memory anyway.
   if r == DISK_RETRY {
     return disk_retry(&mut k, pid, n);       // pread/pwrite: blocks not cached yet
   }
