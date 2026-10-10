@@ -1329,6 +1329,30 @@ with open(disk, "rb") as f:
     ok = f.read(8) == b"BSTDISK3"
 print(("ok  " if ok else "FAIL"), "a BSTDISK2 disk is upgraded to BSTDISK3 at mount")
 fails += not ok
+# A program on the disk shares its read-only pages through the page cache
+# (share_text, src/elf.bastio): the second run maps the pages the first
+# read in. mmisc mprotects a page of its constants writable in a child and
+# writes it; that must give the child a copy, so the next run (and the
+# parent) still read the original.
+subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf"], check=True)
+qemu = boot(2, with_disk=True)
+out = b""
+deadline = time.time() + timeout
+for line, want, until in [
+    ("ash", b"built-in shell (ash)", b"\n# "),
+    ("/disk/mx", b"mmisc: ok on Linux", b"\n# "),
+    ("/disk/mx && /disk/mx && echo twice", b"mmisc: ok on Linux x86_64, signals, pipe 65536\r\ntwice", b"\n# "),
+]:
+    mark = len(out)
+    if mark == 0 and not read_until(b"bastios> "):
+        print("FAIL: no prompt after the disk-program boot"); fails += 1
+        break
+    mark = len(out)
+    qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+    ok = read_until(until, mark) and want in out[mark:]
+    print(("ok  " if ok else "FAIL"), "(disk-program boot)", repr(line)); ok or print(repr(out[mark:]))
+    fails += not ok
+qemu.kill(); qemu.wait()
 # ACPI (src/acpi.bastio) on both of QEMU's PCs, the i440fx (pc) and the
 # q35, without the isa-debug-exit device and without -no-reboot, so only
 # the kernel's own ACPI code can end QEMU: `reboot` restarts the machine

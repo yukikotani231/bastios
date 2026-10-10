@@ -1,7 +1,12 @@
 // The page cache: one shared page per (file, page of the file) that a
 // MAP_SHARED mapping has asked for, so every process that maps the same
 // part of a file maps the same page, and read(2) and write(2) see what the
-// mappings hold.
+// mappings hold. exec puts the read-only pages of a program on a file
+// system here too and maps them read-only (share_text, src/elf.bastio), so
+// every process running that program shares its code, as the built-in
+// programs' processes share theirs (src/text.bastio). Those pages are
+// marked TXT_PAGE in the page bitmap: `mem` counts them as available, and
+// mprotect gives a process its own copy before it may write one.
 //
 // The pages are `Shared` references (bastiolang), held in slots of a
 // level-1 page table that no processor ever loads: it is only a place the
@@ -114,9 +119,10 @@ fn fill_frame(f: &mut Frame, src: &Bytes, n: u64)
 }
 
 /// Caches page pg of file h, its first n bytes taken from src (the rest
-/// zero). Returns its slot, or PC_NONE if memory ran out. The caller has
-/// checked pc_find first.
-fn pc_add(c: &mut PCache, m: &mut Mem, h: u64, pg: u64, src: &Bytes, n: u64) -> u64
+/// zero), as a page of program text (TXT_PAGE) if `text`. Returns its
+/// slot, or PC_NONE if memory ran out. The caller has checked pc_find
+/// first.
+fn pc_add(c: &mut PCache, m: &mut Mem, h: u64, pg: u64, src: &Bytes, n: u64, text: bool) -> u64
   requires pc_ok(c) && mem_ok(m) && n <= 4096 && n <= blen(src)
   ensures pc_ok(c) && mem_ok(m)
   ensures result < PC_N || result == PC_NONE
@@ -155,7 +161,11 @@ fn pc_add(c: &mut PCache, m: &mut Mem, h: u64, pg: u64, src: &Bytes, n: u64) -> 
         pc_clear(&mut t, &mut m, i);
       }
       let b = find_free(&mut m);
-      if b < NPAGES && !pt_has(t, i) {
+      if b < NPAGES && !pt_has(t, i) && text {
+        pt_put_shared(&mut t, i, shared_new(take_text_page(&mut m, b)), true);
+        pt_borrow_frame(&mut t, i, fill_frame, src, n);
+        r = i;
+      } else if b < NPAGES && !pt_has(t, i) {
         pt_put_shared(&mut t, i, shared_new(take_page(&mut m, b)), true);
         pt_borrow_frame(&mut t, i, fill_frame, src, n);
         r = i;
@@ -385,6 +395,30 @@ fn pc_map_slot(l1: &mut PageTable, c: &mut PCache, slot: u64, i: u64) -> bool
     PcTab::On(t) => {
       if pt_has(t, slot) && pt_shared(t, slot) {
         pt_put_shared(&mut l1, i, pt_dup_shared(t, slot), true);
+        ok = true;
+      }
+      pc_put(&mut c, PcTab::On(t));
+    },
+  }
+  return ok;
+}
+
+/// Maps the page in slot `slot` read-only at slot i of a process's level-1
+/// table l1, for exec: a page already there is left alone. False only if
+/// the slot holds nothing.
+fn pc_map_text(l1: &mut PageTable, c: &mut PCache, slot: u64, i: u64) -> bool
+  requires pt_level(l1) == 1 && i < 512 && pc_ok(c) && slot < PC_N
+  ensures pc_ok(c)
+{
+  if pt_has(l1, i) {
+    return true;
+  }
+  let mut ok = false;
+  match pc_take(&mut c) {
+    PcTab::Off => {},
+    PcTab::On(t) => {
+      if pt_has(t, slot) && pt_shared(t, slot) {
+        pt_put_shared(&mut l1, i, pt_dup_shared(t, slot), false);
         ok = true;
       }
       pc_put(&mut c, PcTab::On(t));

@@ -16,6 +16,14 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Processors
 
+- Programs on a file system share their code: exec maps each whole page
+  that only read-only segments cover from the page cache, read-only,
+  instead of copying it into a fresh page, as built-in programs already
+  share theirs. Four shells running BusyBox pipelines from the disk at once
+  went from 9.0 s on one processor and 6.6 s on four to 1.3 s on either
+  (QEMU, which also no longer translates BusyBox's code again for every
+  process). A process that mprotects such a page writable gets its own
+  copy first.
 - Four shells running BusyBox pipelines from the disk at once went from
   17.0 s on four processors (15.4 s on one) to 6.4 s (8.6 s). The block
   cache, at 256 KiB, was smaller than BusyBox, so every exec read the whole

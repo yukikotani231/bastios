@@ -677,7 +677,7 @@ fn lx_map_file_shared(k: &mut Kernel, pid: u64, first: u64, pages: u64, f: u64, 
           got = 0;
         }
       }
-      slot = pc_add(&mut k.fs.pc, &mut k.mem, f, fpg, k.fs.xfer, got);
+      slot = pc_add(&mut k.fs.pc, &mut k.mem, f, fpg, k.fs.xfer, got, false);
     }
     if slot >= PC_N || !lx_map_cached(&mut k.mem, &mut k.spaces, pid, first + j, &mut k.fs.pc, slot) {
       return ENOMEM;
