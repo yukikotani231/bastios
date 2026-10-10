@@ -39,6 +39,18 @@ int main(int argc, char **argv) {
     EXPECT("sendfile to a pipe", pipe(p) == 0 && ({ off_t o = 0; sendfile(p[1], fd, &o, 4) == 4; }) &&
            read(p[0], b, 4) == 4 && memcmp(b, "0123", 4) == 0);
     EXPECT("FIONREAD on a pipe", write(p[1], "abc", 3) == 3 && ({ int n = 0; ioctl(p[0], FIONREAD, &n) == 0 && n == 3; }));
+    EXPECT("splice a pipe into a file", ({ loff_t o = 20; splice(p[0], 0, g, &o, 3, 0) == 3 && o == 23; }) &&
+           pread(g, b, 3, 20) == 3 && memcmp(b, "abc", 3) == 0);
+    EXPECT("splice a file into a pipe", ({ loff_t o = 5; splice(fd, &o, p[1], 0, 3, 0) == 3 && o == 8; }) &&
+           ({ int q[2]; pipe(q) == 0 && tee(p[0], q[1], 3, 0) == 3 && read(q[0], b, 3) == 3 && memcmp(b, "567", 3) == 0 &&
+              close(q[0]) == 0 && close(q[1]) == 0; }) && read(p[0], b, 3) == 3 && memcmp(b, "567", 3) == 0);
+    EXPECT("splice rejects two files and a pipe offset", ({ loff_t o = 0; splice(fd, 0, g, 0, 1, 0) == -1 && errno == EINVAL &&
+           splice(p[0], &o, g, 0, 1, 0) == -1 && errno == ESPIPE; }));
+    EXPECT("vmsplice into a pipe, EAGAIN on an empty tee", ({ struct iovec v = {"xy", 2}; int q[2]; pipe(q);
+           int r = vmsplice(p[1], &v, 1, 0) == 2 && read(p[0], b, 2) == 2 && memcmp(b, "xy", 2) == 0 &&
+                   tee(p[0], q[1], 1, SPLICE_F_NONBLOCK) == -1 && errno == EAGAIN; close(q[0]); close(q[1]); r; }));
+    EXPECT("sendfile needs a readable source", ({ int w = open("cx_a", O_WRONLY); off_t o = 0;
+           int r = sendfile(g, w, &o, 1) == -1 && errno == EBADF; close(w); r; }));
     close(p[0]); close(p[1]);
     EXPECT("copy_file_range", ({ off_t i = 0, o = 0; ftruncate(g, 0) == 0 && copy_file_range(fd, &i, g, &o, 10, 0) == 10; }) &&
            pread(g, b, 10, 0) == 10 && memcmp(b, "0123456789", 10) == 0);
