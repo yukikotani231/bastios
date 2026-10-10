@@ -552,11 +552,16 @@ struct Meta { ok: bool, mode: u64, size: u64, ino: u64, mtime: u64 }
 /// stat(path, buf): "/", "/bin" and the file layer's directories are
 /// directories, /bin/NAME a built-in program, anything else a file. Owner root, one link; the mode's permission bits and the times come from the file system. Returns 0 or
 /// -errno; with `buf` 0 it only checks that the path exists (access).
-fn lx_stat(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, buf: u64) -> u64
+fn lx_stat(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, buf: u64, follow: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let n = lx_path_at(&mut k, pid, dirfd, path);
+  let mut n = NO_RESULT;
+  if follow {
+    n = lx_path_at(&mut k, pid, dirfd, path);
+  } else {
+    n = lx_path_at_nf(&mut k, pid, dirfd, path);   // lstat: a link itself
+  }
   if n == NO_RESULT {
     return ENOENT;
   }
@@ -620,7 +625,11 @@ fn file_meta(v: &mut Vfs, f: u64) -> Meta
   if size == NO_FILE || !fm.ok || f >= NFILES + DSLOTS {
     return Meta { ok: false, mode: 0, size: 0, ino: 0, mtime: 0 };
   }
-  return Meta { ok: true, mode: S_IFMT_REG + fm.mode % 4096, size: size, ino: INO_FILES + f, mtime: fm.mtime };
+  let mut kind = S_IFMT_REG;
+  if fm.mode % 65536 / 4096 * 4096 == T_LINK {
+    kind = T_LINK;                          // a symbolic link: only lstat gets this far
+  }
+  return Meta { ok: true, mode: kind + fm.mode % 4096, size: size, ino: INO_FILES + f, mtime: fm.mtime };
 }
 
 /// fstat(fd, buf): the console is a terminal, a pipe a FIFO; a file's size
@@ -754,7 +763,13 @@ fn applet_name(j: u64) -> Str {
   if j == 13 {
     return "touch";
   }
-  return "stat";
+  if j == 14 {
+    return "stat";
+  }
+  if j == 15 {
+    return "ln";
+  }
+  return "readlink";
 }
 
 /// Stores v little-endian in bytes at..at+8 of x.

@@ -26,6 +26,7 @@ busybox: hexdump
 busybox: hostname
 busybox: id -u
 busybox: kill -0
+busybox: ln -s
 busybox: ls -l
 busybox: md5sum
 busybox: mkdir -p
@@ -110,17 +111,20 @@ t_file: ftruncate shrink
 t_file: lseek SEEK_CUR
 t_file: lseek SEEK_END
 t_file: lseek SEEK_SET
+t_file: lstat sees the link
 t_file: open O_CREAT|O_TRUNC
 t_file: open missing is ENOENT
 t_file: pread
 t_file: pread keeps offset
 t_file: pwrite
 t_file: read back
+t_file: readlink
 t_file: readv
 t_file: rename
 t_file: rename over existing
 t_file: stat
 t_file: stdio fprintf/fscanf
+t_file: symlink
 t_file: tmpfile
 t_file: truncate
 t_file: unlink
