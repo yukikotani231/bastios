@@ -10,6 +10,8 @@
  * the `Cpu` capability's builtins.
  */
 
+#include "core.h"
+
 .set MB_MAGIC,    0x1BADB002
 .set MB_FLAGS,    0x00000003          /* page-align modules, give memory info */
 .set MB_CHECKSUM, -(MB_MAGIC + MB_FLAGS)
@@ -35,21 +37,12 @@ pd:     .skip 4096
 devpd:  .skip 4096
 .align 16
 stack_bottom:
-        .skip 65536
+        .skip 4096
 stack_top:
-/* User-mode traps land here (TSS.rsp0); the stub moves to the kernel stack. */
-trap_stack:
-        .skip 16384
-.global bst_trap_stack_top
-bst_trap_stack_top:
+/* The boot stack serves only until long mode: then each processor runs on
+ * its own block of bst_cores (core.h). */
 .align 8
 mb_info:        .skip 8
-kernel_rsp:     .skip 8
-user_rsp:       .skip 8
-.global bst_idle_vector
-bst_idle_vector: .skip 8
-.global bst_cpu_ctx
-bst_cpu_ctx:    .skip 21 * 8
 
 .section .data
 .align 16
@@ -60,7 +53,7 @@ bst_gdt:
         .quad 0x00CF92000000FFFF      /* 0x10: data, ring 0 */
         .quad 0x00CFF2000000FFFF      /* 0x18: data, ring 3 */
         .quad 0x00AFFA000000FFFF      /* 0x20: 64-bit code, ring 3 */
-        .quad 0, 0                    /* 0x28: TSS (filled by platform.c) */
+        .fill 2 * MAX_CPUS, 8, 0      /* 0x28 + 16 i: processor i's TSS (smp.c) */
 bst_gdt_end:
 
 .global bst_gdt_ptr
@@ -137,7 +130,7 @@ long_mode:
         xor     %ax, %ax
         mov     %ax, %fs
         mov     %ax, %gs
-        mov     $stack_top, %rsp
+        mov     $(bst_cores + CORE_KSTACK), %rsp
 
         call    bst_platform_init
         call    bst_smp_init
@@ -153,8 +146,8 @@ long_mode:
         jmp     2b
 
 /*
- * uint64_t bst_cpu_enter(void): run the user context in bst_cpu_ctx until the
- * next trap, then return its vector with the context saved back.
+ * uint64_t bst_cpu_enter(void): run this processor's saved user context until
+ * the next trap, then return its vector with the context saved back.
  * Whatever Bastio put in the context, the CPU enters ring 3 with the user
  * segments, interrupts on and IOPL 0: only rip, rsp, the general registers
  * and the arithmetic flags are taken from it.
@@ -167,9 +160,10 @@ bst_cpu_enter:
         push    %r13
         push    %r14
         push    %r15
-        mov     %rsp, kernel_rsp
-        mov     $bst_trap_stack_top, %rsp
-        mov     $bst_cpu_ctx, %rsi
+        mov     %rsp, %rsi
+        and     $-CORE_BLOCK, %rsi              /* this processor's block */
+        mov     %rsp, CORE_KRSP(%rsi)
+        lea     CORE_BLOCK(%rsi), %rsp          /* its trap stack, empty */
         mov     $0x00007FFFFFFFFFFF, %rcx /* non-canonical addresses would fault in ring 0 */
 
         push    $UDATA                  /* ss */
@@ -222,11 +216,13 @@ bst_cpu_enter:
 /* uint64_t bst_cpu_wait(void): sleep until an interrupt; return its vector. */
 .global bst_cpu_wait
 bst_cpu_wait:
-        movq    $0, bst_idle_vector
+        mov     %rsp, %rdx
+        and     $-CORE_BLOCK, %rdx
+        movq    $0, CORE_IDLE(%rdx)
         sti
         hlt
         cli
-        mov     bst_idle_vector, %rax
+        mov     CORE_IDLE(%rdx), %rax
         ret
 
 /*
@@ -236,16 +232,20 @@ bst_cpu_wait:
  * stack (empty while user code runs), builds the frame an interrupt from
  * ring 3 would have pushed, and joins trap_common as vector 0x81. No `int`
  * can raise 0x81 from ring 3 (its gate has DPL 0), so the vector means
- * `syscall`. With interrupts masked and one CPU, user_rsp cannot be
- * overwritten before it is pushed. The return to user mode is the usual
+ * `syscall`. The stack is this processor's trap stack, found through
+ * KERNEL_GS_BASE: `swapgs` makes %gs point at its block for the few
+ * instructions that need it, and the second `swapgs` gives the user's
+ * %gs base back before anything can trap. The return to user mode is the usual
  * iretq in bst_cpu_enter, which sanitizes everything it restores.
  */
 .global bst_syscall_entry
 bst_syscall_entry:
-        mov     %rsp, user_rsp
-        mov     $bst_trap_stack_top, %rsp
+        swapgs
+        mov     %rsp, %gs:CORE_URSP
+        mov     %gs:CORE_TRAP_TOP, %rsp
         push    $UDATA                  /* ss */
-        push    user_rsp                /* rsp */
+        pushq   %gs:CORE_URSP           /* rsp */
+        swapgs
         push    %r11                    /* rflags */
         push    $UCODE                  /* cs */
         push    %rcx                    /* rip */
@@ -315,11 +315,14 @@ trap_common:
         mov     $KDATA, %ax
         mov     %ax, %ds
         mov     %ax, %es
+        mov     120(%rsp), %rdi
+        call    bst_lapic_ack           /* smp.c: end-of-interrupt for local APIC vectors */
         testb   $3, 144(%rsp)
         jz      from_kernel
 
         /* From user mode: save the context and return from bst_cpu_enter. */
-        mov     $bst_cpu_ctx, %rdi
+        mov     %rsp, %rdi
+        and     $-CORE_BLOCK, %rdi      /* the context is at the bottom of the block */
         mov     112(%rsp), %rax; mov %rax, 0*8(%rdi)
         mov     104(%rsp), %rax; mov %rax, 1*8(%rdi)
         mov     96(%rsp), %rax;  mov %rax, 2*8(%rdi)
@@ -345,7 +348,7 @@ trap_common:
         shl     $32, %rdx
         or      %rdx, %rax;      mov %rax, 20*8(%rdi)
         mov     120(%rsp), %rax
-        mov     kernel_rsp, %rsp
+        mov     CORE_KRSP(%rdi), %rsp
         pop     %r15
         pop     %r14
         pop     %r13
@@ -361,7 +364,9 @@ from_kernel:
         mov     120(%rsp), %rdi
         cmp     $32, %rdi
         jb      kernel_fault
-        mov     %rdi, bst_idle_vector
+        mov     %rsp, %rax
+        and     $-CORE_BLOCK, %rax
+        mov     %rdi, CORE_IDLE(%rax)
         pop     %r15
         pop     %r14
         pop     %r13

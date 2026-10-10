@@ -421,11 +421,17 @@ fn syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == SYS_KILL {
-    if a == 0 || a >= NPROC || state(k.procs, a) == FREE || state(k.procs, a) == ZOMBIE {
+    if a == 0 || a >= NPROC || state(k.procs, a) == FREE || state(k.procs, a) == ZOMBIE || state(k.procs, a) == KILLED {
       ret(&mut k.procs, pid, 1);
       return KEEP;
     }
     ret(&mut k.procs, pid, 0);
+    if state(k.procs, a) == RUNNING {
+      // Running on another processor, which holds its address space: it
+      // ends when it comes back (see `finish` in main.bastio).
+      pset(&mut k.procs, a, F_STATE, KILLED);
+      return KEEP;
+    }
     terminate(&mut k, mmu, a, 137);
     if a == pid {
       return SWITCH;
