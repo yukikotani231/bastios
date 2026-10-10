@@ -1,0 +1,97 @@
+// Device files for Linux programs: /dev/null, /dev/zero, /dev/random,
+// /dev/urandom and /dev/tty, and /dev itself as a directory to stat.
+// Opening one makes an open file description of kind OF_DEV whose x is the
+// device; /dev/tty opens the console itself.
+//
+// /dev/random and /dev/urandom are NOT a cryptographic source: they come
+// from splitmix64 over a seed of the wall clock and the HPET at boot (see
+// k.rng). Enough for programs that want varied bytes (mktemp names, hash
+// seeds), not for keys.
+
+import "linux.bastio";
+
+const DEV_NONE: u64 = 0;
+const DEV_NULL: u64 = 1;
+const DEV_ZERO: u64 = 2;
+const DEV_RANDOM: u64 = 3;          // /dev/random and /dev/urandom
+const DEV_TTY: u64 = 4;
+const DEV_DIR: u64 = 5;             // /dev itself
+
+/// The device the n-byte path in the transfer buffer ("dev/null", from
+/// lx_path_in) names, or DEV_NONE.
+fn dev_at(x: &Bytes, n: u64) -> u64
+  requires blen(x) == XFER && n <= FNAME_MAX
+{
+  if xfer_is(x, 0, n, "dev") {
+    return DEV_DIR;
+  }
+  if xfer_is(x, 0, n, "dev/null") {
+    return DEV_NULL;
+  }
+  if xfer_is(x, 0, n, "dev/zero") {
+    return DEV_ZERO;
+  }
+  if xfer_is(x, 0, n, "dev/random") || xfer_is(x, 0, n, "dev/urandom") {
+    return DEV_RANDOM;
+  }
+  if xfer_is(x, 0, n, "dev/tty") || xfer_is(x, 0, n, "dev/console") {
+    return DEV_TTY;
+  }
+  return DEV_NONE;
+}
+
+/// What stat says about device d.
+fn dev_meta(d: u64) -> Meta {
+  if d == DEV_DIR {
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 3, mtime: 0 };
+  }
+  return Meta { ok: true, mode: S_IFCHR, size: 0, ino: 30 + d % 16, mtime: 0 };
+}
+
+/// The next 64 random bits (splitmix64).
+fn rng_next(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k)
+{
+  k.rng = wrap_add(k.rng, 0x9E3779B97F4A7C15);
+  let mut z = k.rng;
+  z = wrap_mul(z ^ (z >> 30), 0xBF58476D1CE4E5B9);
+  z = wrap_mul(z ^ (z >> 27), 0x94D049BB133111EB);
+  return z ^ (z >> 31);
+}
+
+/// read(2) on device d: nothing from /dev/null, zeros or random bytes from
+/// the others (at most XFER bytes a call). Returns the count or -EFAULT.
+fn dev_read(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if d == DEV_NULL || n == 0 {
+    return 0;
+  }
+  if d != DEV_ZERO && d != DEV_RANDOM {
+    return EBADF;
+  }
+  let want = smaller(n, XFER);
+  let mut i = 0;
+  let mut r = 0;
+  while i < want
+    invariant i <= want && want <= XFER && kok(k)
+  {
+    let mut v: u8 = 0;
+    if d == DEV_RANDOM {
+      if i % 8 == 0 {
+        r = rng_next(&mut k);
+      }
+      v = cast[u8](r % 256);
+      r = r / 256;
+    }
+    bset(&mut k.fs.xfer, i, v);
+    i = i + 1;
+  }
+  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
+  if put == NO_RESULT || (put == 0 && want > 0) {
+    return EFAULT;
+  }
+  return put;
+}

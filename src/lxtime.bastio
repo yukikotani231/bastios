@@ -8,8 +8,8 @@
 // alarm and setitimer(ITIMER_REAL) keep a deadline per process in
 // k.alarms, which every timer tick checks (lx_alarms) against the HPET.
 //
-// There is no real-time clock yet: CLOCK_REALTIME counts from the epoch at
-// boot, like CLOCK_MONOTONIC.
+// CLOCK_REALTIME (and gettimeofday, time) is k.epoch, read from the CMOS
+// clock at boot (src/rtc.bastio), plus the HPET clock.
 
 import "linux.bastio";
 
@@ -39,6 +39,15 @@ const LX_SETITIMER: u64 = 38;
 const ITIMER_REAL: u64 = 0;
 const SIGALRM: u64 = 14;
 const LX_RT_SIGTIMEDWAIT: u64 = 128;
+const CLOCK_REALTIME: u64 = 0;
+const CLOCK_REALTIME_COARSE: u64 = 5;
+
+/// The wall clock, in ns since 1970-01-01 00:00 UTC.
+fn wall_ns(k: &Kernel) -> u64
+  ensures result <= FOREVER
+{
+  return sat_add(k.epoch, k.ns);
+}
 
 
 /// a + b, or FOREVER if that is as far or further.
@@ -122,8 +131,10 @@ fn clock_now(k: &Kernel, pid: u64, clk: u64) -> u64
     }
     return t * NS_PER_TICK;
   }
-  // REALTIME, MONOTONIC, MONOTONIC_RAW, the COARSE ones and BOOTTIME all
-  // count from boot.
+  if clk == CLOCK_REALTIME || clk == CLOCK_REALTIME_COARSE {
+    return smaller(wall_ns(k), FOREVER - 1);
+  }
+  // MONOTONIC, MONOTONIC_RAW, MONOTONIC_COARSE and BOOTTIME count from boot.
   if clk <= CLOCK_BOOTTIME {
     return smaller(k.ns, FOREVER - 1);
   }
@@ -694,7 +705,7 @@ fn lx_time_call(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
   }
   if n == LX_GETTIMEOFDAY {
     if a != 0 {
-      let r = time_out(&mut k, pid, a, k.ns, 1000);
+      let r = time_out(&mut k, pid, a, wall_ns(k), 1000);
       if r != 0 {
         ret(&mut k.procs, pid, r);
         return KEEP;
@@ -704,7 +715,7 @@ fn lx_time_call(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
     return KEEP;
   }
   // time(tloc)
-  let sec = k.ns / NS_PER_S;
+  let sec = wall_ns(k) / NS_PER_S;
   if a != 0 {
     xfer_u64(&mut k.fs.xfer, 0, sec);
     if copy_to_user(&mut k.spaces, pid, a, k.fs.xfer, 8) != 8 {

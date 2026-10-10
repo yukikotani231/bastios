@@ -9,7 +9,7 @@ int main(void) {
     setup();
     char buf[256];
     struct stat st;
-    int fd;
+    int fd = -1;
 
     EXPECT("getcwd", getcwd(buf, sizeof buf) != NULL && buf[0] == '/');
     {
@@ -41,8 +41,13 @@ int main(void) {
     EXPECT("chdir ..", chdir("..") == 0);
     EXPECT("fchdir", (fd = open("cd_x", O_RDONLY | O_DIRECTORY)) >= 0 && fchdir(fd) == 0 &&
            close(fd) == 0 && chdir("..") == 0);
-    EXPECT("openat relative to a directory fd", (fd = open("cd_x", O_RDONLY | O_DIRECTORY)) >= 0 &&
-           openat(fd, "f", O_RDONLY) >= 0);
+    {
+        int g = -1;
+        EXPECT("openat relative to a directory fd", (fd = open("cd_x", O_RDONLY | O_DIRECTORY)) >= 0 &&
+               (g = openat(fd, "f", O_RDONLY)) >= 0);
+        if (g >= 0) close(g);
+        if (fd >= 0) close(fd);
+    }
     EXPECT("rmdir non-empty is ENOTEMPTY", rmdir("cd_x") == -1 && (errno == ENOTEMPTY || errno == EEXIST));
     EXPECT("unlink file in directory", unlink("cd_x/f") == 0);
     EXPECT("rmdir", rmdir("cd_x") == 0 && stat("cd_x", &st) == -1);

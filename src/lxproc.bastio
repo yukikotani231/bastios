@@ -4,6 +4,7 @@
 // /NAME.
 
 import "linux.bastio";
+import "lxdev.bastio";
 
 // ---------------------------------------------------------------- fork
 
@@ -448,6 +449,10 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
   ensures kok(k)
 {
   let none = Meta { ok: false, mode: 0, size: 0, ino: 0, mtime: 0 };
+  let dev = dev_at(k.fs.xfer, n);
+  if dev != DEV_NONE {
+    return dev_meta(dev);
+  }
   let dir = dir_at(&mut k, n);
   if dir != NO_FILE {
     if dir >= DIR_VFS {
@@ -496,6 +501,8 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
     m = Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1, mtime: 0 };
   } else if d.kind == K_SOCK {
     m = Meta { ok: true, mode: S_IFSOCK, size: 0, ino: 5, mtime: 0 };
+  } else if d.kind == K_DEV {
+    m = dev_meta(d.x);
   } else if d.kind == K_FILE {
     m = file_meta(&mut k.fs, vfs_row_file(k.fs, d.x));
     if !m.ok {

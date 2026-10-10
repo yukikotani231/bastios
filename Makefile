@@ -126,8 +126,8 @@ build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := src/uart.bastio src/fb.bastio src/kbd.bastio src/font8x8.bin src/card.bastio src/e1000.bastio src/pic.bastio src/pit.bastio src/hpet.bastio src/console.bastio src/pages.bastio src/space.bastio src/elf.bastio src/ramfs.bastio src/ata.bastio src/pci.bastio src/virtq.bastio src/virtio_blk.bastio src/virtio_net.bastio src/net.bastio src/tcp.bastio src/blk.bastio src/diskfs.bastio src/fs.bastio \
-         src/proc.bastio src/usermem.bastio src/syscall.bastio src/linux.bastio src/lxproc.bastio src/lxfd.bastio src/lxdir.bastio src/lxsock.bastio src/lxtcp.bastio src/lxsig.bastio src/lxtime.bastio src/lxmisc.bastio src/main.bastio
+KSRCS := src/uart.bastio src/fb.bastio src/kbd.bastio src/font8x8.bin src/card.bastio src/e1000.bastio src/pic.bastio src/pit.bastio src/hpet.bastio src/rtc.bastio src/console.bastio src/pages.bastio src/space.bastio src/elf.bastio src/ramfs.bastio src/ata.bastio src/pci.bastio src/virtq.bastio src/virtio_blk.bastio src/virtio_net.bastio src/net.bastio src/tcp.bastio src/blk.bastio src/diskfs.bastio src/fs.bastio \
+         src/proc.bastio src/usermem.bastio src/syscall.bastio src/linux.bastio src/lxproc.bastio src/lxfd.bastio src/lxdir.bastio src/lxsock.bastio src/lxtcp.bastio src/lxsig.bastio src/lxtime.bastio src/lxmisc.bastio src/lxdev.bastio src/main.bastio
 KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
