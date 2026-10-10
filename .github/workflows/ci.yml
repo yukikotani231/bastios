@@ -1,5 +1,13 @@
 name: ci
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   # bastiolang is private for now, and the workflow token cannot read it.
   # Until a BASTIOLANG_TOKEN secret (read access to bastiolang) is set, the
@@ -20,6 +28,7 @@ jobs:
     needs: gate
     if: needs.gate.outputs.ok == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -29,5 +38,13 @@ jobs:
           path: bastiolang
           token: ${{ secrets.BASTIOLANG_TOKEN }}
       - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86
-      - run: cd bastiolang/stage0 && cargo build --release
+      - name: Tool versions
+        run: |
+          echo "bastiolang $(git -C bastiolang rev-parse HEAD)"
+          (cd bastiolang && rustc --version)
+          z3 --version
+          cc --version | head -1
+          qemu-system-x86_64 --version | head -1
+          python3 --version
+      - run: cd bastiolang/stage0 && cargo build --release --locked
       - run: make test BASTIOC=bastiolang/stage0/target/release/bastioc0
