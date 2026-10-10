@@ -170,8 +170,8 @@ fn read_l1(l1: &mut PageTable, off: u64) -> Word
 }
 
 /// Handles the Linux system call process `pid` just made.
-fn linux_syscall(con: &Serial, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
-  requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+fn linux_syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
+  requires uart_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
   let n = pget(k.procs, pid, F_REGS + R_RAX);
@@ -192,11 +192,11 @@ fn linux_syscall(con: &Serial, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_WRITE {
-    ret(&mut k.procs, pid, lx_write_fd(con, &mut k, pid, a, b, c));
+    ret(&mut k.procs, pid, lx_write_fd(&mut con, &mut k, pid, a, b, c));
     return KEEP;
   }
   if n == LX_WRITEV {
-    ret(&mut k.procs, pid, do_writev(con, &mut k, pid, a, b, c));
+    ret(&mut k.procs, pid, do_writev(&mut con, &mut k, pid, a, b, c));
     return KEEP;
   }
   if n == LX_OPEN {
@@ -330,11 +330,11 @@ fn linux_syscall(con: &Serial, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, pid);            // one thread, whose id is the pid
     return KEEP;
   }
-  puts(con, "[pid ");
-  put_num(con, pid);
-  puts(con, ": Linux system call ");
-  put_num(con, n);
-  puts(con, " not implemented]\r\n");
+  puts(&mut con, "[pid ");
+  put_num(&mut con, pid);
+  puts(&mut con, ": Linux system call ");
+  put_num(&mut con, n);
+  puts(&mut con, " not implemented]\r\n");
   ret(&mut k.procs, pid, ENOSYS);
   return KEEP;
 }
@@ -433,8 +433,8 @@ fn lx_zero_out(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
 /// are echoed and gathered into k.line, Backspace erases, and Enter or
 /// Ctrl-D finishes the line, which wakes the reader. Bytes typed while no
 /// Linux program reads stay queued for the native shell.
-fn tty_cook(con: &Serial, k: &mut Kernel)
-  requires kok(k)
+fn tty_cook(con: &mut Uart, k: &mut Kernel)
+  requires uart_ok(con) && kok(k)
   ensures kok(k)
 {
   if !lx_reading(k.procs) {
@@ -443,7 +443,7 @@ fn tty_cook(con: &Serial, k: &mut Kernel)
   while get(k.line, 1) == 0 && get(k.q, 1) > 0
     invariant kok(k)
   {
-    tty_key(con, &mut k.line, q_pop(&mut k.q));
+    tty_key(&mut con, &mut k.line, q_pop(&mut k.q));
   }
 }
 
@@ -464,14 +464,14 @@ fn lx_reading(procs: &Buf) -> bool
 }
 
 /// One typed byte c, added to the unfinished line l.
-fn tty_key(con: &Serial, l: &mut Buf, c: u64)
-  requires lineok(l) && get(l, 1) == 0
+fn tty_key(con: &mut Uart, l: &mut Buf, c: u64)
+  requires uart_ok(con) && lineok(l) && get(l, 1) == 0
   ensures lineok(l)
 {
   let n = get(l, 0);
   if c == 13 || c == 10 {
     // Enter: the line ends with LF, so a full line keeps room for it.
-    puts(con, "\r\n");
+    puts(&mut con, "\r\n");
     if n < LINE_MAX {
       l = set(l, 2 + n, 10);
       l = set(l, 0, n + 1);
@@ -483,14 +483,14 @@ fn tty_key(con: &Serial, l: &mut Buf, c: u64)
   } else if c == 127 || c == 8 {
     if n > 0 {
       l = set(l, 0, n - 1);
-      serial_write(con, 8);
-      serial_write(con, 32);
-      serial_write(con, 8);
+      uart_write(&mut con, 8);
+      uart_write(&mut con, 32);
+      uart_write(&mut con, 8);
     }
   } else if c >= 32 && c <= 255 && n + 1 < LINE_MAX {
     l = set(l, 2 + n, c);
     l = set(l, 0, n + 1);
-    serial_write(con, c);
+    uart_write(&mut con, c);
   }
 }
 
@@ -594,8 +594,8 @@ fn lx_file_read(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
 
 /// write(fd, va, n) to the console (fd 1 or 2) or a file. Returns the
 /// count or -errno.
-fn lx_write_fd(con: &Serial, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
-  requires kok(k) && pid < NPROC
+fn lx_write_fd(con: &mut Uart, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
+  requires uart_ok(con) && kok(k) && pid < NPROC
   ensures kok(k)
 {
   let row = lx_row(pid, fd);
@@ -615,9 +615,9 @@ fn lx_write_fd(con: &Serial, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64)
     {
       let ch = bget(k.fs.xfer, i);
       if ch == 10 {
-        serial_write(con, 13);
+        uart_write(&mut con, 13);
       }
-      serial_write(con, ch);
+      uart_write(&mut con, ch);
       i = i + 1;
     }
     return got;
@@ -631,8 +631,8 @@ fn lx_write_fd(con: &Serial, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64)
 
 /// writev: the cnt (base, length) pairs at user address iov, each written
 /// as by write. Returns the bytes written, or -errno if nothing was.
-fn do_writev(con: &Serial, k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u64) -> u64
-  requires kok(k) && pid < NPROC
+fn do_writev(con: &mut Uart, k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u64) -> u64
+  requires uart_ok(con) && kok(k) && pid < NPROC
   ensures kok(k)
 {
   if cnt > IOV_MAX {
@@ -663,7 +663,7 @@ fn do_writev(con: &Serial, k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u64
       if done > USER_SIZE {
         return lx_fail_or(total, EFAULT);       // past the window: base + done faults
       }
-      let w = lx_write_fd(con, &mut k, pid, fd, base.v + done, left);
+      let w = lx_write_fd(&mut con, &mut k, pid, fd, base.v + done, left);
       if w > left || w > USER_SIZE {
         return lx_fail_or(total, w);            // an error
       }

@@ -1,7 +1,7 @@
 /*
  * Platform setup that must happen before the Bastio kernel runs: the task
- * state segment (the stack user-mode traps land on), the interrupt table,
- * the 8259 interrupt controllers and the timer. Part of the trusted base.
+ * state segment (the stack user-mode traps land on) and the interrupt
+ * table. Part of the trusted base.
  */
 #include <stdint.h>
 
@@ -30,8 +30,6 @@ static struct __attribute__((packed)) {
 static inline void wrmsr(uint32_t msr, uint64_t v) {
     __asm__ volatile ("wrmsr" : : "c"(msr), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
 }
-
-static inline void outb(uint16_t port, uint8_t v) { __asm__ volatile ("outb %0, %1" : : "a"(v), "Nd"(port)); }
 
 #define SYSCALL_VECTOR 0x80
 
@@ -67,16 +65,6 @@ void bst_platform_init(void) {
     wrmsr(0xC0000082, (uint64_t)bst_syscall_entry);         /* LSTAR */
     wrmsr(0xC0000084, 0x40700);                             /* FMASK: AC DF IF TF */
 
-    /* PICs: IRQs 0-15 to vectors 32-47; unmask only the timer (IRQ 0) and COM1 (IRQ 4). */
-    outb(0x20, 0x11); outb(0xA0, 0x11);
-    outb(0x21, 32);   outb(0xA1, 40);
-    outb(0x21, 4);    outb(0xA1, 2);
-    outb(0x21, 1);    outb(0xA1, 1);
-    outb(0x21, 0xEE); outb(0xA1, 0xFF);
-
-    /* PIT channel 0: 100 Hz. */
-    uint16_t div = 1193182 / 100;
-    outb(0x43, 0x36);
-    outb(0x40, div & 0xFF);
-    outb(0x40, div >> 8);
+    /* The interrupt controllers, the timer and the UART are set up by the
+     * kernel itself, in Bastio (src/pic.bastio, src/pit.bastio, src/uart.bastio). */
 }
