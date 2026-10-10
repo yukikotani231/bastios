@@ -1,16 +1,19 @@
-// The disk under the file system: a virtio block device when the machine
-// has one (it moves sectors by DMA), otherwise the ATA drive on the legacy
-// IDE ports (programmed I/O). Both read and write one 512-byte sector at a
-// time into a byte buffer.
+// The disk under the file system: an NVMe drive when the machine has one,
+// else a virtio block device (both move sectors by DMA), otherwise the ATA
+// drive on the legacy IDE ports (programmed I/O). All of them read and
+// write one 512-byte sector at a time into a byte buffer.
 
 import "pages.bastio";
 import "ata.bastio";
 import "pci.bastio";
 import "virtio_blk.bastio";
+import "nvme.bastio";
 
 const VIRTIO_PORTS_LO: u64 = 0x1000;  // PCI I/O BARs sit above the legacy ports
+const NVME_AT: u64 = 24;              // the NVMe drive's five pages: 24 .. 28
 
-enum Blk { Ata(Ata), Virtio(Virtio) }
+enum Blk { Ata(Ata), Virtio(Virtio), Nvme(Nvme) }
+enum Drive { None, Nvme(Nvme) }
 
 /// Does the disk driver hold I/O port k in the PCI range?
 spec fn blk_holds(b: &Blk, k: u64) -> bool {
@@ -19,6 +22,12 @@ spec fn blk_holds(b: &Blk, k: u64) -> bool {
 
 spec fn blk_ok(b: &Blk) -> bool {
   (b is Blk::Ata ==> ata_ok(b.Ata)) && (b is Blk::Virtio ==> virtio_ok(b.Virtio))
+  && (b is Blk::Nvme ==> nvme_ok(b.Nvme))
+}
+
+/// Does the disk driver hold device-window address a?
+spec fn blk_claims(b: &Blk, a: u64) -> bool {
+  b is Blk::Nvme && mmio_base(b.Nvme.regs) <= a && a < mmio_base(b.Nvme.regs) + mmio_len(b.Nvme.regs)
 }
 
 /// `take_page`, also saying that every other page's entry is unchanged, so
@@ -32,16 +41,64 @@ fn take_low_page(m: &mut Mem, i: u64) -> Frame
   return pool_take(&mut m.pool, i);
 }
 
-/// Picks the disk: the first virtio block device on PCI bus 0, given the
-/// four lowest pages for its queue and request, or else the ATA drive.
-fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem) -> Blk
+/// The NVMe controller `dev` on PCI bus 0, if its registers lie in the
+/// device window clear of the framebuffer at lo .. hi, five pages from
+/// NVME_AT are free, and namespace 1 has 512-byte blocks; else none (and
+/// everything it claimed or took is back).
+fn nvme_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64) -> Drive
+  requires pci_ok(pci) && mem_ok(m)
+  requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) ==> mmio_free(win, a)
+  ensures mem_ok(m) && (result is Drive::Nvme ==> nvme_ok(result.Nvme))
+  ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi)
+    && !(result is Drive::Nvme && mmio_base(result.Nvme.regs) <= a && a < mmio_base(result.Nvme.regs) + mmio_len(result.Nvme.regs))
+    ==> mmio_free(win, a)
+{
+  let dev = pci_find_class(&mut pci, NVME_CLASS);
+  if dev >= 32 {
+    return Drive::None;
+  }
+  let bar = pci_mem_bar64(&mut pci, dev);
+  let mut size = pci_bar_size(&mut pci, dev);
+  if size > NVME_MAX_LEN {
+    size = NVME_MAX_LEN;
+  }
+  if bar % 4096 != 0 || size < 0x2000 || !(bar + size <= lo || bar >= hi)
+    || !((bar >= WIN_LO && bar + size <= WIN_LOW_TOP) || (bar >= WIN_HIGH && bar + size <= WIN_TOP))
+    || !pages_free(m, NVME_AT, NVME_PAGES) {
+    return Drive::None;
+  }
+  pci_enable(&mut pci, dev);
+  let f0 = take_low_page(&mut m, NVME_AT);
+  let f1 = take_low_page(&mut m, NVME_AT + 1);
+  let f2 = take_low_page(&mut m, NVME_AT + 2);
+  let f3 = take_low_page(&mut m, NVME_AT + 3);
+  let f4 = take_low_page(&mut m, NVME_AT + 4);
+  let n = nvme_new(mmio_claim(&mut win, bar, size), f0, f1, f2, f3, f4);
+  if n.sectors == 0 {
+    mmio_release(&mut win, nvme_free(n, &mut m));
+    return Drive::None;
+  }
+  return Drive::Nvme(n);
+}
+
+/// Picks the disk: an NVMe drive (see `nvme_find`), else the first virtio
+/// block device on PCI bus 0, given the four lowest pages for its queue and
+/// request, or else the ATA drive.
+fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64) -> Blk
   requires pci_ok(pci) && mem_ok(m)
   requires forall k: u64 :: ATA_IO <= k && k < ATA_IO + 8 ==> port_free(ports, k)
   requires port_free(ports, ATA_CTL)
   requires forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 ==> port_free(ports, k)
+  requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) ==> mmio_free(win, a)
   ensures blk_ok(result) && mem_ok(m)
   ensures forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 && !blk_holds(result, k) ==> port_free(ports, k)
+  ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !blk_claims(result, a) ==> mmio_free(win, a)
 {
+  let nv = nvme_find(&mut pci, &mut m, &mut win, lo, hi);
+  match nv {
+    Drive::Nvme(n) => { return Blk::Nvme(n); },
+    Drive::None => {},
+  }
   let dev = pci_find(&mut pci, VIRTIO_VENDOR, VIRTIO_BLK);
   if dev < 32 {
     let base = pci_io_bar(&mut pci, dev);
@@ -58,36 +115,62 @@ fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem) -> Blk
   return Blk::Ata(ata_new(&mut ports));
 }
 
-/// Gives the disk's ports back and, for virtio, resets the device and
-/// takes its pages back (at power off).
-fn blk_free(ports: &mut Ports, b: Blk, m: &mut Mem)
+/// Gives the disk's ports or registers back and, for virtio and NVMe,
+/// stops the device and takes its pages back (at power off).
+fn blk_free(ports: &mut Ports, win: &mut MmioSpace, b: Blk, m: &mut Mem)
   requires blk_ok(b) && mem_ok(m)
   ensures mem_ok(m)
 {
   match b {
     Blk::Ata(a) => { ata_free(&mut ports, a); },
     Blk::Virtio(v) => { virtio_free(&mut ports, v, &mut m); },
+    Blk::Nvme(n) => { mmio_release(&mut win, nvme_free(n, &mut m)); },
+  }
+}
+
+/// The device-window block the disk driver holds, as lo .. hi (empty
+/// unless it is NVMe).
+fn blk_mmio_lo(b: &Blk) -> u64
+  ensures b is Blk::Nvme ==> result == mmio_base(b.Nvme.regs)
+{
+  match b {
+    Blk::Nvme(n) => { return mmio_base(n.regs); },
+    Blk::Ata(a) => { return 0; },
+    Blk::Virtio(v) => { return 0; },
+  }
+}
+
+fn blk_mmio_hi(b: &Blk) -> u64
+  ensures b is Blk::Nvme ==> result == mmio_base(b.Nvme.regs) + mmio_len(b.Nvme.regs)
+  ensures !(b is Blk::Nvme) ==> result == 0
+{
+  match b {
+    Blk::Nvme(n) => { return mmio_base(n.regs) + mmio_len(n.regs); },
+    Blk::Ata(a) => { return 0; },
+    Blk::Virtio(v) => { return 0; },
   }
 }
 
 /// The PCI-range ports the disk driver holds, as lo .. hi (empty for ATA).
 fn blk_ports_lo(b: &Blk) -> u64
   ensures b is Blk::Virtio ==> result == port_base(b.Virtio.io)
-  ensures b is Blk::Ata ==> result == 0
+  ensures !(b is Blk::Virtio) ==> result == 0
 {
   match b {
     Blk::Ata(a) => { return 0; },
     Blk::Virtio(v) => { return port_base(v.io); },
+    Blk::Nvme(n) => { return 0; },
   }
 }
 
 fn blk_ports_hi(b: &Blk) -> u64
   ensures b is Blk::Virtio ==> result == port_base(b.Virtio.io) + VIO_PORTS
-  ensures b is Blk::Ata ==> result == 0
+  ensures !(b is Blk::Virtio) ==> result == 0
 {
   match b {
     Blk::Ata(a) => { return 0; },
     Blk::Virtio(v) => { return port_base(v.io) + VIO_PORTS; },
+    Blk::Nvme(n) => { return 0; },
   }
 }
 
@@ -95,11 +178,16 @@ fn blk_is_virtio(b: &Blk) -> bool {
   return b is Blk::Virtio;
 }
 
+fn blk_is_nvme(b: &Blk) -> bool {
+  return b is Blk::Nvme;
+}
+
 /// The disk's size in sectors (0 if there is none).
 fn blk_sectors(b: &Blk) -> u64 {
   match b {
     Blk::Ata(a) => { return a.sectors; },
     Blk::Virtio(v) => { return v.sectors; },
+    Blk::Nvme(n) => { return n.sectors; },
   }
 }
 
@@ -120,6 +208,11 @@ fn blk_read(b: &mut Blk, lba: u64, buf: &mut Bytes) -> bool
       b = Blk::Virtio(v);
       return ok;
     },
+    Blk::Nvme(mut n) => {
+      let ok = nvme_read(&mut n, lba, &mut buf);
+      b = Blk::Nvme(n);
+      return ok;
+    },
   }
 }
 
@@ -138,6 +231,11 @@ fn blk_write(b: &mut Blk, lba: u64, buf: &Bytes) -> bool
     Blk::Virtio(mut v) => {
       let ok = virtio_write(&mut v, lba, buf);
       b = Blk::Virtio(v);
+      return ok;
+    },
+    Blk::Nvme(mut n) => {
+      let ok = nvme_write(&mut n, lba, buf);
+      b = Blk::Nvme(n);
       return ok;
     },
   }
