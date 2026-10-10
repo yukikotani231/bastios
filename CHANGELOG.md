@@ -55,6 +55,10 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
   disk, every path a Linux program passes is followed through them (at
   most 8 links), and `lstat`, `readlink`, `unlink` and `rename` act on
   the link itself. BusyBox's `ln` and `readlink` are built in.
+- Hard links: `link`/`linkat` give a file another name on the same file
+  system (not a directory), `st_nlink` counts the names, and the file
+  lives until its last name goes. On the disk a link is a new entry kind
+  (4) naming the file's entry; a mount drops any link whose file is gone.
 - A generated, read-only `/proc` for Linux programs: `mounts`,
   `meminfo`, `uptime`, a directory per process with `stat`, `status`,
   `cmdline` and `exe` (a link `readlink` reads), and `/proc/self`.

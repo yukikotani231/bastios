@@ -70,12 +70,14 @@ const DISK_MISS: u64 = 18446744073709551614;    // not in the cache yet: try aga
 // Directory entry fields.
 const E_KIND: u64 = 0;
 const K_ORPHAN: u64 = 3;               // kind: a file removed while open
+const K_LINK: u64 = 4;                 // kind: a hard link to the file entry in E_LINK
 const E_NLEN: u64 = 1;
 const E_PARENT: u64 = 8;
 const E_SIZE: u64 = 16;
 const E_ROOT: u64 = 24;
 const E_MODE: u64 = 32;
 const E_MTIME: u64 = 40;
+const E_LINK: u64 = 48;
 const E_NAME: u64 = 56;
 
 const MODE_FILE: u64 = 420;           // 0644
@@ -444,6 +446,21 @@ fn disk_mount(dev: Blk) -> DiskFs
     }
     i = i + 1;
   }
+  // A hard link must name a file; a power cut while the file was being
+  // removed can leave one naming a free entry, and it goes too.
+  i = 0;
+  while i < DSLOTS
+    invariant i <= DSLOTS && disk_ok(d)
+  {
+    if cast[u64](bget(d.dir, i * DENT + E_KIND)) == K_LINK {
+      let t = get_u64(d.dir, i * DENT + E_LINK);
+      if t >= DSLOTS || bget(d.dir, t * DENT + E_KIND) != 1 {
+        bset(&mut d.dir, i * DENT + E_KIND, 0);
+        dir_flush(&mut d, i / 2);
+      }
+    }
+    i = i + 1;
+  }
   d.slots = DSLOTS;
   return d;
 }
@@ -483,14 +500,16 @@ fn dent_used(d: &DiskFs, i: u64) -> bool
   requires disk_ok(d) && i < DSLOTS
 {
   let k = cast[u64](bget(d.dir, i * DENT));
-  return i < d.slots && (k == 1 || k == 2 || k == K_ORPHAN);
+  return i < d.slots && (k == 1 || k == 2 || k == K_ORPHAN || k == K_LINK);
 }
 
-/// Does entry i have a name (a file or a directory, not an orphan)?
+/// Does entry i have a name (a file, a directory or a hard link, not an
+/// orphan)?
 fn dent_live(d: &DiskFs, i: u64) -> bool
   requires disk_ok(d) && i < DSLOTS
 {
-  return i < d.slots && (bget(d.dir, i * DENT) == 1 || bget(d.dir, i * DENT) == 2);
+  let k = cast[u64](bget(d.dir, i * DENT));
+  return i < d.slots && (k == 1 || k == 2 || k == K_LINK);
 }
 
 /// Is entry i an orphan?
@@ -663,6 +682,75 @@ fn disk_create(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, now: 
   requires disk_ok(d) && from + n <= blen(name)
   ensures disk_ok(d) && result <= DSLOTS
 {
+  return disk_entry(&mut d, name, from, n, dir, DSLOTS, now);
+}
+
+/// Creates a hard link at the path name[from..from + n] to file entry t
+/// (the caller checks it is one), as disk_create does a file: one sector
+/// write. Returns the new entry, or DSLOTS.
+fn disk_link(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, t: u64, now: u64) -> u64
+  requires disk_ok(d) && from + n <= blen(name) && t < DSLOTS
+  ensures disk_ok(d) && result <= DSLOTS
+{
+  return disk_entry(&mut d, name, from, n, false, t, now);
+}
+
+/// The file entry that entry i is a hard link to, or DSLOTS if it is not
+/// one.
+fn disk_link_of(d: &DiskFs, i: u64) -> u64
+  requires disk_ok(d) && i < DSLOTS
+  ensures result <= DSLOTS
+{
+  if i >= d.slots || cast[u64](bget(d.dir, i * DENT)) != K_LINK {
+    return DSLOTS;
+  }
+  let t = dent_get(d, i, E_LINK);
+  if t >= DSLOTS {
+    return DSLOTS;
+  }
+  return t;
+}
+
+/// A hard link to entry t, or DSLOTS if there is none.
+fn disk_link_to(d: &DiskFs, t: u64) -> u64
+  requires disk_ok(d)
+  ensures result <= DSLOTS
+{
+  let mut i = 0;
+  while i < DSLOTS
+    invariant i <= DSLOTS
+  {
+    if disk_link_of(d, i) == t {
+      return i;
+    }
+    i = i + 1;
+  }
+  return DSLOTS;
+}
+
+/// How many hard links name entry t, besides its own name.
+fn disk_links(d: &DiskFs, t: u64) -> u64
+  requires disk_ok(d)
+  ensures result <= DSLOTS
+{
+  let mut c = 0;
+  let mut i = 0;
+  while i < DSLOTS
+    invariant i <= DSLOTS && c <= i
+  {
+    if disk_link_of(d, i) == t {
+      c = c + 1;
+    }
+    i = i + 1;
+  }
+  return c;
+}
+
+/// disk_create, or a hard link to entry `link` when it is below DSLOTS.
+fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: u64, now: u64) -> u64
+  requires disk_ok(d) && from + n <= blen(name)
+  ensures disk_ok(d) && result <= DSLOTS
+{
   disk_drain(&mut d);                 // queued writes reach the disk first
   let end = from + n;
   let mut k = end;
@@ -691,6 +779,9 @@ fn disk_create(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, now: 
       if dir {
         bset(&mut d.dir, i * DENT + E_KIND, 2);
         dent_set(&mut d, i, E_MODE, MODE_DIR);
+      } else if link < DSLOTS {
+        bset(&mut d.dir, i * DENT + E_KIND, cast[u8](K_LINK));
+        dent_set(&mut d, i, E_LINK, link);
       } else {
         bset(&mut d.dir, i * DENT + E_KIND, 1);
         dent_set(&mut d, i, E_MODE, MODE_FILE);

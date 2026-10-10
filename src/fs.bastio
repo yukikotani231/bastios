@@ -150,6 +150,9 @@ fn vfs_open(v: &mut Vfs, mem: &mut Mem, base: u64, flags: u64, n: u64) -> u64
     return disk_open(&mut v, base + fd, flags, n);
   }
   let mut i = ram_find(&mut v.ram, v.xfer, n);
+  if i < NFILES && ram_link_of(&mut v.ram, i) < NFILES {
+    i = ram_link_of(&mut v.ram, i);
+  }
   if i >= NFILES {
     if flags / O_CREATE % 2 == 0 || !path_ok(v, n) || !parent_ok(&mut v, n) {
       return NO_FD;
@@ -186,6 +189,9 @@ fn disk_open(v: &mut Vfs, row: u64, flags: u64, n: u64) -> u64
   ensures result < NFD || result == NO_FD
 {
   let mut i = disk_find(v.disk, v.xfer, DISK_PREFIX, n - DISK_PREFIX);
+  if i < DSLOTS && disk_link_of(v.disk, i) < DSLOTS {
+    i = disk_link_of(v.disk, i);
+  }
   if i >= DSLOTS {
     if flags / O_CREATE % 2 == 0 || !path_ok(v, n) || !parent_ok(&mut v, n) {
       return NO_FD;
@@ -412,6 +418,10 @@ fn vfs_unlink(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
     if d >= DSLOTS || dent_dir(v.disk, d) {
       return false;
     }
+    let l = disk_link_to(v.disk, d);
+    if l < DSLOTS {
+      return disk_unlink_named(&mut v, d, l);
+    }
     if node_open(v.ftab, FS_DISK, d) {
       return disk_orphan(&mut v.disk, d);
     }
@@ -420,6 +430,18 @@ fn vfs_unlink(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
   let i = ram_find(&mut v.ram, v.xfer, n);
   if i >= NFILES || ram_is_dir(&mut v.ram, i) {
     return false;
+  }
+  let l = ram_link_to(&mut v.ram, i);
+  if l < NFILES {
+    // The file keeps its node (descriptors and other links name it) and
+    // takes the link's name instead.
+    let ll = ram_name(&mut v.ram, l, &mut v.name);
+    let il = ram_len(&mut v.ram, i);
+    if ll > NAMEBUF || il == NO_FILE {
+      return false;
+    }
+    ram_remove(&mut v.ram, &mut mem, l);
+    return ram_reprefix(&mut v.ram, i, il, v.name, ll);
   }
   if node_open(v.ftab, FS_RAM, i) {
     ram_orphan(&mut v.ram, i);
@@ -443,20 +465,59 @@ fn vfs_lookup(v: &mut Vfs, n: u64) -> u64
     if d >= DSLOTS {
       return NO_FILE;
     }
-    return NFILES + d;
+    return vfs_target(&mut v, NFILES + d);
   }
   let i = ram_find(&mut v.ram, v.xfer, n);
   if i >= NFILES {
     return NO_FILE;
   }
-  return i;
+  return vfs_target(&mut v, i);
 }
 
-/// The size of file f (a vfs_lookup handle), or NO_FILE.
-fn vfs_size(v: &mut Vfs, f: u64) -> u64
+/// The file that handle f names: f itself, or what f is a hard link to.
+fn vfs_target(v: &mut Vfs, f: u64) -> u64
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+  ensures f < NFILES + DSLOTS ==> result < NFILES + DSLOTS
+  ensures f >= NFILES + DSLOTS ==> result == f
+{
+  if f < NFILES {
+    let t = ram_link_of(&mut v.ram, f);
+    if t < NFILES {
+      return t;
+    }
+    return f;
+  }
+  if f < NFILES + DSLOTS {
+    let t = disk_link_of(v.disk, f - NFILES);
+    if t < DSLOTS {
+      return NFILES + t;
+    }
+  }
+  return f;
+}
+
+/// How many names file f (a vfs_lookup handle) has: 1 and its hard links.
+fn vfs_nlink(v: &mut Vfs, f: u64) -> u64
   requires vfs_ok(v)
   ensures vfs_ok(v)
 {
+  let t = vfs_target(&mut v, f);
+  if t < NFILES {
+    return 1 + ram_links(&mut v.ram, t);
+  }
+  if t < NFILES + DSLOTS {
+    return 1 + disk_links(v.disk, t - NFILES);
+  }
+  return 1;
+}
+
+/// The size of file f (a vfs_lookup handle), or NO_FILE.
+fn vfs_size(v: &mut Vfs, f0: u64) -> u64
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  let f = vfs_target(&mut v, f0);
   if f < NFILES {
     return ram_size(&mut v.ram, f);
   }
@@ -473,11 +534,12 @@ fn vfs_size(v: &mut Vfs, f: u64) -> u64
 /// Copies up to n bytes of file f (a vfs_lookup handle) from offset off
 /// into the start of the transfer buffer, without a descriptor. Returns
 /// the count, short at the end of the file, or NO_FD if f names no file.
-fn vfs_read_at(v: &mut Vfs, f: u64, off: u64, n: u64) -> u64
+fn vfs_read_at(v: &mut Vfs, f0: u64, off: u64, n: u64) -> u64
   requires vfs_ok(v) && n <= XFER
   ensures vfs_ok(v)
   ensures result <= n || result == NO_FD
 {
+  let f = vfs_target(&mut v, f0);
   if f >= NFILES + DSLOTS {
     return NO_FD;
   }
@@ -694,10 +756,11 @@ fn vfs_rmdir(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
 }
 
 /// Is handle f (from vfs_lookup or vfs_dir_lookup) a directory?
-fn vfs_is_dir(v: &mut Vfs, f: u64) -> bool
+fn vfs_is_dir(v: &mut Vfs, f0: u64) -> bool
   requires vfs_ok(v)
   ensures vfs_ok(v)
 {
+  let f = vfs_target(&mut v, f0);
   if f < NFILES {
     return ram_is_dir(&mut v.ram, f);
   }
@@ -974,10 +1037,11 @@ fn vfs_row_file(v: &Vfs, row: u64) -> u64
 /// The permission bits (such as 0644) and modification time (seconds) of
 /// handle f, from vfs_lookup or vfs_dir_lookup. ok is false if it names
 /// nothing. The top directory and "disk" are 0755 from time 0.
-fn vfs_meta(v: &mut Vfs, f: u64) -> FMeta
+fn vfs_meta(v: &mut Vfs, f0: u64) -> FMeta
   requires vfs_ok(v)
   ensures vfs_ok(v)
 {
+  let f = vfs_target(&mut v, f0);
   if f < NFILES {
     return ram_meta(&mut v.ram, f);
   }
@@ -996,10 +1060,11 @@ fn vfs_meta(v: &mut Vfs, f: u64) -> FMeta
 /// Sets handle f's permission bits (when `mode` is below 4096) and its
 /// modification time (when `mtime` is not NO_FILE). False if f names
 /// nothing that keeps them, or the disk fails.
-fn vfs_set_meta(v: &mut Vfs, f: u64, mode: u64, mtime: u64) -> bool
+fn vfs_set_meta(v: &mut Vfs, f0: u64, mode: u64, mtime: u64) -> bool
   requires vfs_ok(v)
   ensures vfs_ok(v)
 {
+  let f = vfs_target(&mut v, f0);
   let mut m = 65536;
   if mode < 4096 {
     let cur = vfs_meta(&mut v, f);
@@ -1093,4 +1158,72 @@ fn xfer_shift(x: &mut Bytes, from: u64, m: u64)
     bset(&mut x, i, bget(x, from + i));
     i = i + 1;
   }
+}
+
+// ---------------------------------------------------------------- hard links
+
+const LINKED: u64 = 0;
+const LINK_NONE: u64 = 1;             // no such file, or the new name's directory is missing
+const LINK_EXISTS: u64 = 2;
+const LINK_XDEV: u64 = 3;             // the names are on different file systems
+const LINK_DIR: u64 = 4;              // the old name is a directory
+const LINK_FULL: u64 = 5;             // no free node or entry
+
+/// Gives the file named xfer[0..n] another name, the m bytes after (a hard
+/// link). The new name is a node of its own that names the file; opening
+/// it opens the file, and the file lives until its last name goes. A link
+/// to a link names the file the first one names.
+fn vfs_link(v: &mut Vfs, n: u64, m: u64) -> u64
+  requires vfs_ok(v) && n <= XFER && m <= XFER - n
+  ensures vfs_ok(v)
+{
+  if n == 0 || m == 0 || n > FNAME_MAX || m > FNAME_MAX {
+    return LINK_NONE;
+  }
+  let src_disk = on_disk(v, n);
+  let f = vfs_lookup(&mut v, n);
+  if f == NO_FILE {
+    return LINK_NONE;
+  }
+  if vfs_is_dir(&mut v, f) {
+    return LINK_DIR;
+  }
+  xfer_shift(&mut v.xfer, n, m);
+  let new_disk = on_disk(v, m);
+  if new_disk != src_disk {
+    return LINK_XDEV;
+  }
+  if !path_ok(v, m) || !parent_ok(&mut v, m) {
+    return LINK_NONE;
+  }
+  if vfs_lookup(&mut v, m) != NO_FILE || vfs_dir_lookup(&mut v, m) != NO_FILE {
+    return LINK_EXISTS;
+  }
+  if new_disk {
+    if f < NFILES || f - NFILES >= DSLOTS || disk_link(&mut v.disk, v.xfer, DISK_PREFIX, m - DISK_PREFIX, f - NFILES, v.now) >= DSLOTS {
+      return LINK_FULL;
+    }
+    return LINKED;
+  }
+  if f >= NFILES || ram_link(&mut v.ram, v.xfer, m, f, v.now) >= NFILES {
+    return LINK_FULL;
+  }
+  return LINKED;
+}
+
+/// vfs_unlink of disk file entry d, which hard link l also names: the
+/// link's entry goes, and the file takes its name. Two sector writes; a
+/// power cut between them leaves the file under its old name only.
+fn disk_unlink_named(v: &mut Vfs, d: u64, l: u64) -> bool
+  requires vfs_ok(v) && d < DSLOTS && l < DSLOTS
+  ensures vfs_ok(v)
+{
+  let k = disk_name(v.disk, l, &mut v.xfer, DISK_PREFIX);
+  if k == NO_DISK_FILE || k > XFER - DISK_PREFIX {
+    return false;
+  }
+  if !disk_remove(&mut v.disk, l) {
+    return false;
+  }
+  return disk_move(&mut v.disk, d, v.xfer, DISK_PREFIX, k);
 }

@@ -19,10 +19,13 @@
 
 import "linux.bastio";
 
+const LX_LINK: u64 = 86;
 const LX_SYMLINK: u64 = 88;
+const LX_LINKAT: u64 = 265;
 const LX_SYMLINKAT: u64 = 266;
 const LINK_HOPS: u64 = 8;
 const SPLICE: u64 = 1024;             // 2 * PATH_OUT: a link's directory, its target and the rest
+const AT_SYMLINK_FOLLOW: u64 = 0x400;
 
 /// Normalizes src[..sl] into dst: empty parts and "." dropped, ".." going
 /// up a level, no leading "/". Returns the length, or NO_RESULT if it is
@@ -267,15 +270,76 @@ fn lx_symlink(k: &mut Kernel, pid: u64, tva: u64, dirfd: u64, path: u64) -> u64
   return 0;
 }
 
-fn is_link_call(n: u64) -> bool {
-  return n == LX_SYMLINK || n == LX_SYMLINKAT;
+/// link / linkat(odir, opath, ndir, npath, flags): a hard link (vfs_link).
+/// The old path's last link is followed only with AT_SYMLINK_FOLLOW, as on
+/// Linux, so a hard link can name a symbolic link. Returns 0 or -errno.
+fn lx_hardlink(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags & !AT_SYMLINK_FOLLOW != 0 {
+    return EINVAL;                          // AT_EMPTY_PATH is not offered
+  }
+  let mut n = NO_RESULT;
+  if flags & AT_SYMLINK_FOLLOW != 0 {
+    n = lx_path_at(&mut k, pid, odir, opath);
+  } else {
+    n = lx_path_at_nf(&mut k, pid, odir, opath);
+  }
+  if n == NO_RESULT {
+    return ENOENT;
+  }
+  if dir_at(&mut k, n) != NO_FILE {
+    return EPERM;                           // directories have one name
+  }
+  let mut t = balloc(2 * FNAME_MAX);
+  xfer_save(k, &mut t, 0, n);
+  let m = lx_path_at_nf(&mut k, pid, ndir, npath);
+  if m == NO_RESULT {
+    bfree(t);
+    return ENOENT;
+  }
+  if dir_at(&mut k, m) != NO_FILE {
+    bfree(t);
+    return EEXIST;
+  }
+  xfer_save(k, &mut t, n, m);
+  xfer_load(&mut k, t, 0, n + m);
+  bfree(t);
+  let r = vfs_link(&mut k.fs, n, m);
+  if r == LINKED {
+    return 0;
+  }
+  if r == LINK_EXISTS {
+    return EEXIST;
+  }
+  if r == LINK_XDEV {
+    return EXDEV;
+  }
+  if r == LINK_DIR {
+    return EPERM;
+  }
+  if r == LINK_FULL {
+    return ENOSPC;
+  }
+  return ENOENT;
 }
 
-/// symlink and symlinkat.
+fn is_link_call(n: u64) -> bool {
+  return n == LX_SYMLINK || n == LX_SYMLINKAT || n == LX_LINK || n == LX_LINKAT;
+}
+
+/// symlink, symlinkat, link and linkat.
 fn lx_link_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if n == LX_LINK {
+    return lx_hardlink(&mut k, pid, AT_FDCWD, a, AT_FDCWD, b, 0);
+  }
+  if n == LX_LINKAT {
+    return lx_hardlink(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));
+  }
   if n == LX_SYMLINK {
     return lx_symlink(&mut k, pid, a, AT_FDCWD, b);
   }
