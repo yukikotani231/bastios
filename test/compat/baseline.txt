@@ -239,6 +239,7 @@ t_ltp2: send on an unconnected TCP socket is EPIPE
 t_ltp2: sendto with a huge address length is EINVAL
 t_mem: 64 MiB of address space
 t_mem: MAP_SHARED anonymous across fork
+t_mem: futex across fork on a MAP_SHARED page
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
 t_mem: file for mapping

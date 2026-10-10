@@ -4,6 +4,11 @@
 #include <setjmp.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#define FUTEX_WAIT 0
+#define FUTEX_WAKE 1
+#include <sched.h>
+#include <time.h>
 #include <sys/wait.h>
 
 int main(void) {
@@ -40,6 +45,29 @@ int main(void) {
     unlink("cm_f");
     EXPECT("MAP_SHARED anonymous across fork", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&
            ({ pid_t c = fork(); c == 0 ? (q[0] = 9, _exit(0), 0) : c > 0 && waitpid(c, &st, 0) == c && q[0] == 9; }));
+    {
+        /* The child sleeps on a futex in a MAP_SHARED page; the parent's
+           FUTEX_WAKE through its own mapping of the page must reach it. */
+        volatile int *w = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        int ok = w != MAP_FAILED;
+        if (ok) {
+            w[0] = 0; w[1] = 0;
+            pid_t c = fork();
+            if (c == 0) {
+                struct timespec ts = {3, 0};
+                w[1] = 1;
+                long r = syscall(SYS_futex, (int *)w, FUTEX_WAIT, 0, &ts, 0, 0);
+                _exit(r == 0 || (r < 0 && errno == EAGAIN && w[0] == 1) ? 0 : 1);
+            }
+            while (c > 0 && w[1] == 0) sched_yield();
+            struct timespec d = {0, 100000000};
+            nanosleep(&d, 0);
+            w[0] = 1;
+            syscall(SYS_futex, (int *)w, FUTEX_WAKE, 1, 0, 0, 0);
+            ok = c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+        }
+        EXPECT("futex across fork on a MAP_SHARED page", ok);
+    }
     EXPECT("mlock", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED && mlock(q, 4096) == 0);
     {
         void *a[64]; int ok = 1;
