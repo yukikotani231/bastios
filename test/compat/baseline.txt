@@ -431,6 +431,12 @@ t_sock2: signalfd carries a sigqueue value
 t_sock2: signalfd sees a blocked SIGCHLD
 t_sock2: sigqueue carries a value
 t_sock2: write after SHUT_WR is EPIPE
+t_sys: adjtimex reads and sets
+t_sys: clock_settime moves CLOCK_REALTIME
+t_sys: not root: EPERM
+t_sys: setdomainname
+t_sys: sethostname, uname, /proc/sys/kernel/hostname
+t_sys: settimeofday
 t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: GETNCNT counts a waiting process
 t_sysv: IPC_RMID ends a wait with EIDRM

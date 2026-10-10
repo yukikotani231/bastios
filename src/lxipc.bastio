@@ -14,8 +14,10 @@
 // (type, length, text padded to 8), in the order they were sent; taking
 // one out moves the rest down.
 //
-// Not done: shared memory segments (shmget and the rest). Limits are
-// small and fixed: 16 queues and 16 semaphore sets, SEMMSL 64 semaphores
+// Shared memory segments (shmget, shmat, shmdt, shmctl) keep their pages
+// in k.shm; /proc/sysvipc and the IPC sysctls are printed from here.
+//
+// Limits are small and fixed: 16 queues and 16 semaphore sets, SEMMSL 64 semaphores
 // a set, MQ_MSGS messages a queue whatever msg_qbytes says, and IPC_SET
 // may not raise msg_qbytes past MSGMNB even for root. A wait runs the
 // call again and again rather than sleeping until a change. MSG_COPY is

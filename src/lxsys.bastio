@@ -1,0 +1,469 @@
+// System-wide settings a Linux program may change as root: the host and
+// domain names (sethostname, setdomainname; uname and /proc read them
+// back), the wall clock (clock_settime, settimeofday) and the NTP clock
+// discipline (adjtimex, clock_adjtime).
+//
+// They live in k.sys (SYS_LEN words):
+//   [NM_HOST, + 1 + NAME_MAX)   the host name: its length, then a byte a word
+//   [NM_DOM, + 1 + NAME_MAX)    the domain name, the same way
+//   NM_SET                      bit 0: a host name was set; bit 1: a domain name
+//   [TX_BASE, ...)              what adjtimex keeps, TX_* below
+//
+// The NTP values are kept and handed back, nothing more: the clock does
+// not slew to an ADJ_OFFSET, run faster for ADJ_FREQUENCY or ADJ_TICK, or
+// insert a leap second for STA_INS. Setting the clock moves CLOCK_REALTIME
+// only; CLOCK_MONOTONIC and the boot clock are not settable, as on Linux.
+
+import "lxcred.bastio";
+import "lxtime.bastio";
+
+const LX_ADJTIMEX: u64 = 159;
+const LX_SETTIMEOFDAY: u64 = 164;
+const LX_SETHOSTNAME: u64 = 170;
+const LX_SETDOMAINNAME: u64 = 171;
+const LX_CLOCK_SETTIME: u64 = 227;
+const LX_CLOCK_ADJTIME: u64 = 305;
+
+const NAME_MAX: u64 = 64;              // __NEW_UTS_LEN: a name, without its NUL
+const NM_HOST: u64 = 0;
+const NM_DOM: u64 = 65;
+const NM_SET: u64 = 130;
+const TX_BASE: u64 = 131;
+const TX_TICK: u64 = 131;              // usec a tick; 0 stands for USER_TICK
+const TX_FREQ: u64 = 132;              // ppm << 16
+const TX_MAXERR: u64 = 133;
+const TX_ESTERR: u64 = 134;
+const TX_STATUS: u64 = 135;            // kept XOR STA_UNSYNC, so zero is unsynchronised
+const TX_CONST: u64 = 136;
+const TX_OFFSET: u64 = 137;
+const TX_ADJ: u64 = 138;               // what the last ADJ_OFFSET_SINGLESHOT asked for
+
+const MAX_CLOCKS: u64 = 16;
+const TIMEX_SIZE: u64 = 208;           // struct timex on x86_64
+const ADJ_OFFSET: u64 = 0x0001;
+const ADJ_FREQUENCY: u64 = 0x0002;
+const ADJ_MAXERROR: u64 = 0x0004;
+const ADJ_ESTERROR: u64 = 0x0008;
+const ADJ_STATUS: u64 = 0x0010;
+const ADJ_TIMECONST: u64 = 0x0020;
+const ADJ_SETOFFSET: u64 = 0x0100;
+const ADJ_MICRO: u64 = 0x1000;
+const ADJ_NANO: u64 = 0x2000;
+const ADJ_TICK: u64 = 0x4000;
+const ADJ_ADJTIME: u64 = 0x8000;       // with ADJ_OFFSET: ADJ_OFFSET_SINGLESHOT
+const ADJ_OFFSET_READONLY: u64 = 0x2000;
+const STA_UNSYNC: u64 = 0x0040;
+const STA_NANO: u64 = 0x2000;
+const STA_RONLY: u64 = 0xFF00;         // the bits ADJ_STATUS may not set
+const USER_TICK: u64 = 10000;          // usec, at USER_HZ 100
+const MIN_TICK: u64 = 9000;            // 900000 / USER_HZ
+const MAX_TICK: u64 = 11000;           // 1100000 / USER_HZ
+const MAXFREQ: u64 = 32768000;         // 500 ppm << 16
+const MAXTC: u64 = 10;
+const TIME_OK: u64 = 0;
+const TIME_ERROR: u64 = 5;
+const MAX_SHIFT: u64 = 0x200000000;    // seconds ADJ_SETOFFSET may move the clock, either way
+const MIN_SHIFT: u64 = 0xFFFFFFFE00000000;   // -MAX_SHIFT
+
+// ---------------------------------------------------------------- names
+
+/// Name `base` (NM_HOST or NM_DOM) into field f of the struct utsname in
+/// the transfer buffer.
+fn uts_name(k: &mut Kernel, f: u64, base: u64)
+  requires kok(k) && f < 6 && (base == NM_HOST || base == NM_DOM)
+  ensures kok(k)
+{
+  let mut z = 0;
+  while z < UTS_FIELD
+    invariant z <= UTS_FIELD && f < 6 && kok(k)
+  {
+    bset(&mut k.fs.xfer, f * UTS_FIELD + z, 0);
+    z = z + 1;
+  }
+  let n = smaller(get(k.sys, base), NAME_MAX);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= NAME_MAX && f < 6 && kok(k)
+  {
+    bset(&mut k.fs.xfer, f * UTS_FIELD + i, cast[u8](get(k.sys, base + 1 + i) % 256));
+    i = i + 1;
+  }
+}
+
+/// Puts the names that were set over uname's defaults in the transfer buffer.
+fn uts_names(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  if name_set(k, 1) {
+    uts_name(&mut k, 1, NM_HOST);
+  }
+  if name_set(k, 2) {
+    uts_name(&mut k, 5, NM_DOM);
+  }
+}
+
+/// True if name `bit` (1 host, 2 domain) was set since boot.
+fn name_set(k: &Kernel, bit: u64) -> bool
+  requires kok(k) && (bit == 1 || bit == 2)
+{
+  return get(k.sys, NM_SET) / bit % 2 == 1;
+}
+
+/// sethostname / setdomainname(name, len).
+fn lx_setname(k: &mut Kernel, pid: u64, base: u64, bit: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && (base == NM_HOST || base == NM_DOM) && (bit == 1 || bit == 2)
+  ensures kok(k)
+{
+  if !cred_root(k.procs, pid) {
+    return EPERM;
+  }
+  if n > NAME_MAX {
+    return EINVAL;                          // a negative int is huge here too
+  }
+  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, n) != n {
+    return EFAULT;
+  }
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= NAME_MAX && kok(k)
+  {
+    k.sys = set(k.sys, base + 1 + i, cast[u64](bget(k.fs.xfer, i)));
+    i = i + 1;
+  }
+  k.sys = set(k.sys, base, n);
+  k.sys = set(k.sys, NM_SET, get(k.sys, NM_SET) | bit);
+  return 0;
+}
+
+/// The /proc/sys/kernel files about the system's names, as uname gives them.
+fn uts_proc_name(i: u64) -> Str {
+  if i == 0 {
+    return "sys/kernel/hostname";
+  }
+  if i == 1 {
+    return "sys/kernel/domainname";
+  }
+  if i == 2 {
+    return "sys/kernel/ostype";
+  }
+  if i == 3 {
+    return "sys/kernel/osrelease";
+  }
+  return "sys/kernel/version";
+}
+
+/// The text of uts_proc_name(i) into o.
+fn uts_proc_text(k: &Kernel, i: u64, o: &mut Bytes) -> u64
+  requires kok(k) && blen(o) == XFER
+  ensures blen(o) == XFER && result <= XFER
+{
+  let mut a = 0;
+  if i == 2 {
+    a = put_s(&mut o, 0, "Linux");
+  } else if i == 3 {
+    a = put_s(&mut o, 0, "6.1.0-bastios");
+  } else if i == 4 {
+    a = put_s(&mut o, 0, "BastiOS 0.2");
+  } else {
+    let mut base = NM_HOST;
+    let mut bit = 1;
+    if i == 1 {
+      base = NM_DOM;
+      bit = 2;
+    }
+    if !name_set(k, bit) {
+      if i == 0 {
+        a = put_s(&mut o, 0, "bastios");
+      } else {
+        a = put_s(&mut o, 0, "(none)");
+      }
+    } else {
+      let n = smaller(get(k.sys, base), NAME_MAX);
+      let mut j = 0;
+      while j < n
+        invariant j <= n && n <= NAME_MAX && a <= XFER && blen(o) == XFER && kok(k)
+      {
+        a = put_c(&mut o, a, cast[u8](get(k.sys, base + 1 + j) % 256));
+        j = j + 1;
+      }
+    }
+  }
+  return put_c(&mut o, a, 10);
+}
+
+// ---------------------------------------------------------------- the clock
+
+/// Sets CLOCK_REALTIME to t ns since 1970. EINVAL if that is before boot,
+/// which the clock, kept as an offset from it, cannot show.
+fn set_wall(k: &mut Kernel, t: u64) -> u64
+  requires kok(k)
+  ensures kok(k)
+{
+  if t < k.ns || t >= FOREVER {
+    return EINVAL;
+  }
+  k.epoch = t - k.ns;
+  return 0;
+}
+
+/// clock_settime(clk, ts).
+fn lx_clock_settime(k: &mut Kernel, pid: u64, clk: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if clk >= MAX_CLOCKS {
+    return EINVAL;
+  }
+  let t = ts_in(&mut k, pid, va);
+  if t.err != 0 {
+    return t.err;
+  }
+  if clk != CLOCK_REALTIME {
+    return EINVAL;                          // the other clocks cannot be set
+  }
+  if !cred_root(k.procs, pid) {
+    return EPERM;
+  }
+  return set_wall(&mut k, t.ns);
+}
+
+/// settimeofday(tv, tz): the time zone is not kept.
+fn lx_settimeofday(k: &mut Kernel, pid: u64, tv: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if tv == 0 {
+    if !cred_root(k.procs, pid) {
+      return EPERM;
+    }
+    return 0;
+  }
+  let t = tv_in(&mut k, pid, tv);
+  if t.err != 0 {
+    return t.err;
+  }
+  if !cred_root(k.procs, pid) {
+    return EPERM;
+  }
+  return set_wall(&mut k, t.ns);
+}
+
+/// v clamped to [-lim, lim], as a two's-complement word.
+fn clamp_signed(v: u64, lim: u64) -> u64
+  requires 1 <= lim && lim < 0x8000000000000000
+{
+  let neg = 0xFFFFFFFFFFFFFFFF - lim + 1;
+  if v >= 0x8000000000000000 {
+    if v < neg {
+      return neg;
+    }
+    return v;
+  }
+  return smaller(v, lim);
+}
+
+/// ADJ_SETOFFSET: moves the wall clock by the struct timeval (or, with
+/// ADJ_NANO, timespec) at offset 72 of the struct timex.
+fn shift_wall(k: &mut Kernel, nano: bool) -> u64
+  requires kok(k)
+  ensures kok(k)
+{
+  let sec = get_u64(k.fs.xfer, 72);
+  let frac = get_u64(k.fs.xfer, 80);
+  let mut unit = 1000;
+  if nano {
+    unit = 1;
+  }
+  if frac >= NS_PER_S / unit {
+    return EINVAL;
+  }
+  let part = frac * unit;
+  let now = wall_ns(k);
+  if sec < MAX_SHIFT {
+    return set_wall(&mut k, sat_add(sat_add(now, sec * NS_PER_S), part));
+  }
+  if sec >= MIN_SHIFT {
+    // A negative seconds field with a non-negative fraction: -back + part.
+    let back = (0xFFFFFFFFFFFFFFFF - sec + 1) * NS_PER_S;
+    if now < back {
+      return EINVAL;
+    }
+    return set_wall(&mut k, sat_add(now - back, part));
+  }
+  return EINVAL;
+}
+
+/// The adjtimex fields `modes` names, from the struct timex in the
+/// transfer buffer, into k.sys (ADJ_ADJTIME aside). 0, or why not.
+fn tx_apply(k: &mut Kernel, modes: u64) -> u64
+  requires kok(k)
+  ensures kok(k)
+{
+  let tick = get_u64(k.fs.xfer, 88);
+  if modes / ADJ_TICK % 2 == 1 && (tick < MIN_TICK || tick > MAX_TICK) {
+    return EINVAL;
+  }
+  if modes / ADJ_SETOFFSET % 2 == 1 {
+    let r = shift_wall(&mut k, modes / ADJ_NANO % 2 == 1);
+    if r != 0 {
+      return r;
+    }
+  }
+  let mut status = get(k.sys, TX_STATUS) ^ STA_UNSYNC;
+  if modes / ADJ_NANO % 2 == 1 {
+    status = status | STA_NANO;
+  }
+  if modes / ADJ_MICRO % 2 == 1 {
+    status = status & !STA_NANO;
+  }
+  if modes / ADJ_STATUS % 2 == 1 {
+    status = (status & STA_RONLY) | (get_u64(k.fs.xfer, 40) & 0xFF);
+  }
+  k.sys = set(k.sys, TX_STATUS, (status & 0xFFFF) ^ STA_UNSYNC);
+  if modes % 2 == 1 {
+    let mut lim = 500000;                   // MAXPHASE: 0.5 s
+    if status / STA_NANO % 2 == 1 {
+      lim = 500000000;
+    }
+    k.sys = set(k.sys, TX_OFFSET, clamp_signed(get_u64(k.fs.xfer, 8), lim));
+  }
+  if modes / ADJ_FREQUENCY % 2 == 1 {
+    k.sys = set(k.sys, TX_FREQ, clamp_signed(get_u64(k.fs.xfer, 16), MAXFREQ));
+  }
+  if modes / ADJ_MAXERROR % 2 == 1 {
+    k.sys = set(k.sys, TX_MAXERR, clamp_signed(get_u64(k.fs.xfer, 24), 16000000));
+  }
+  if modes / ADJ_ESTERROR % 2 == 1 {
+    k.sys = set(k.sys, TX_ESTERR, get_u64(k.fs.xfer, 32));
+  }
+  if modes / ADJ_TIMECONST % 2 == 1 {
+    let c = get_u64(k.fs.xfer, 48);
+    if c >= 0x8000000000000000 {
+      k.sys = set(k.sys, TX_CONST, 0);
+    } else {
+      k.sys = set(k.sys, TX_CONST, smaller(c, MAXTC));
+    }
+  }
+  if modes / ADJ_TICK % 2 == 1 {
+    k.sys = set(k.sys, TX_TICK, tick);
+  }
+  return 0;
+}
+
+/// Fills the struct timex in the transfer buffer from k.sys; `offset` is
+/// what its offset field says. Linux zeroes the padding too.
+fn tx_fill(k: &mut Kernel, modes: u64, offset: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < TIMEX_SIZE
+    invariant i <= TIMEX_SIZE && kok(k)
+  {
+    bset(&mut k.fs.xfer, i, 0);
+    i = i + 1;
+  }
+  let status = (get(k.sys, TX_STATUS) ^ STA_UNSYNC) & 0xFFFF;
+  let mut tick = get(k.sys, TX_TICK);
+  if tick == 0 {
+    tick = USER_TICK;
+  }
+  let now = wall_ns(k);
+  let mut part = now % NS_PER_S / 1000;
+  if status / STA_NANO % 2 == 1 {
+    part = now % NS_PER_S;
+  }
+  let freq = get(k.sys, TX_FREQ);
+  let maxerr = get(k.sys, TX_MAXERR);
+  let esterr = get(k.sys, TX_ESTERR);
+  let tc = get(k.sys, TX_CONST);
+  xfer_u64(&mut k.fs.xfer, 0, modes);
+  xfer_u64(&mut k.fs.xfer, 8, offset);
+  xfer_u64(&mut k.fs.xfer, 16, freq);
+  xfer_u64(&mut k.fs.xfer, 24, maxerr);
+  xfer_u64(&mut k.fs.xfer, 32, esterr);
+  xfer_u64(&mut k.fs.xfer, 40, status);
+  xfer_u64(&mut k.fs.xfer, 48, tc);
+  xfer_u64(&mut k.fs.xfer, 56, 1);         // precision: 1 usec
+  xfer_u64(&mut k.fs.xfer, 64, MAXFREQ);   // tolerance
+  xfer_u64(&mut k.fs.xfer, 72, now / NS_PER_S);
+  xfer_u64(&mut k.fs.xfer, 80, part);
+  xfer_u64(&mut k.fs.xfer, 88, tick);
+}
+
+/// adjtimex(buf) and clock_adjtime(CLOCK_REALTIME, buf): applies the
+/// fields `modes` names, then writes every field back. Returns the clock
+/// state, TIME_OK or TIME_ERROR (unsynchronised).
+fn lx_adjtimex(k: &mut Kernel, pid: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, TIMEX_SIZE) != TIMEX_SIZE {
+    return EFAULT;
+  }
+  let modes = get_u64(k.fs.xfer, 0) % 0x100000000;
+  let root = cred_root(k.procs, pid);
+  let mut offset = get(k.sys, TX_ADJ);
+  if modes / ADJ_ADJTIME % 2 == 1 {
+    if modes % 2 == 0 {
+      return EINVAL;                        // ADJ_ADJTIME only goes with ADJ_OFFSET
+    }
+    if modes / ADJ_OFFSET_READONLY % 2 == 0 {
+      if !root {
+        return EPERM;
+      }
+      k.sys = set(k.sys, TX_ADJ, clamp_signed(get_u64(k.fs.xfer, 8), 500000));
+    }
+  } else {
+    if modes != 0 && !root {
+      return EPERM;
+    }
+    let r = tx_apply(&mut k, modes);
+    if r != 0 {
+      return r;
+    }
+    offset = get(k.sys, TX_OFFSET);
+  }
+  tx_fill(&mut k, modes, offset);
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, TIMEX_SIZE) != TIMEX_SIZE {
+    return EFAULT;
+  }
+  if (get(k.sys, TX_STATUS) ^ STA_UNSYNC) / STA_UNSYNC % 2 == 1 {
+    return TIME_ERROR;
+  }
+  return TIME_OK;
+}
+
+// ---------------------------------------------------------------- calls
+
+fn is_sys_call(n: u64) -> bool {
+  return n == LX_ADJTIMEX || n == LX_SETTIMEOFDAY || n == LX_SETHOSTNAME || n == LX_SETDOMAINNAME
+    || n == LX_CLOCK_SETTIME || n == LX_CLOCK_ADJTIME;
+}
+
+fn lx_sys_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut r = EINVAL;
+  if n == LX_SETHOSTNAME {
+    r = lx_setname(&mut k, pid, NM_HOST, 1, a, b);
+  } else if n == LX_SETDOMAINNAME {
+    r = lx_setname(&mut k, pid, NM_DOM, 2, a, b);
+  } else if n == LX_CLOCK_SETTIME {
+    r = lx_clock_settime(&mut k, pid, a, b);
+  } else if n == LX_SETTIMEOFDAY {
+    r = lx_settimeofday(&mut k, pid, a);
+  } else if n == LX_ADJTIMEX {
+    r = lx_adjtimex(&mut k, pid, a);
+  } else if a >= MAX_CLOCKS {
+    r = EINVAL;                             // clock_adjtime
+  } else if a != CLOCK_REALTIME {
+    r = EOPNOTSUPP;
+  } else {
+    r = lx_adjtimex(&mut k, pid, b);
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}
