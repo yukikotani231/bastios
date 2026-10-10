@@ -2,11 +2,9 @@
 
 fn puts(con: &mut Uart, s: Str)
   requires uart_ok(con)
-  ensures uart_ok(con)
 {
   let mut i = 0;
   while i < slen(s)
-    invariant uart_ok(con)
     invariant i <= slen(s)
   {
     uart_write(&mut con, sget(s, i));
@@ -16,7 +14,6 @@ fn puts(con: &mut Uart, s: Str)
 
 fn put_num(con: &mut Uart, n: u64)
   requires uart_ok(con)
-  ensures uart_ok(con)
 {
   let mut p = 1;
   while p <= n / 10
@@ -26,7 +23,6 @@ fn put_num(con: &mut Uart, n: u64)
   }
   let mut q = p;
   while q > 0
-    invariant uart_ok(con)
   {
     uart_write(&mut con, 48 + (n / q) % 10);
     q = q / 10;
@@ -35,12 +31,10 @@ fn put_num(con: &mut Uart, n: u64)
 
 fn put_hex(con: &mut Uart, n: u64)
   requires uart_ok(con)
-  ensures uart_ok(con)
 {
   puts(&mut con, "0x");
   let mut q = 0x1000000000000000;
   while q > 0
-    invariant uart_ok(con)
   {
     let d = (n / q) % 16;
     if d < 10 {
@@ -55,7 +49,6 @@ fn put_hex(con: &mut Uart, n: u64)
 // `n` right-aligned in a field of `w` characters.
 fn put_num_pad(con: &mut Uart, n: u64, w: u64)
   requires uart_ok(con)
-  ensures uart_ok(con)
 {
   let mut digits = 1;
   let mut q = n;
@@ -69,7 +62,6 @@ fn put_num_pad(con: &mut Uart, n: u64, w: u64)
   }
   let mut k = digits;
   while k < w
-    invariant uart_ok(con)
   {
     uart_write(&mut con, 32);
     k = k + 1;

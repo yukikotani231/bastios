@@ -62,8 +62,41 @@ steps = [
     # unmapped page (it returns 4, the exit code).
     ("straddle", [b"page-crossing write ok", b"hello from user mode", b"END![exit 4]"]),
     ("bench", b"ticks"),
+    # Static Linux ELF executables: one linked at a fixed address, one a
+    # static PIE. Each checks its .data, .bss and initial stack (argv, envp,
+    # auxv) and says ok. A truncated ELF must be refused, not loaded.
+    ("elfexec", b"elfexec: ok"),
+    ("elfpie", b"elfpie: ok"),
+    ("elfbad", b"unknown command: elfbad"),
+    # A C program against musl libc: TLS, printf, exit status.
+    ("mhello", [b"hello from musl: mhello, argc 1, 6", b"[exit 3]"]),
+    # Two processes using xmm0 at once, preempting each other: each must
+    # keep its own value (checked again at the end, once both are done).
+    ("fpucheck &", b"]"),
+    ("fpucheck", b"fpucheck: xmm0 kept"),
     ("sh", b"BastiOS 0.2 -- type"),
     ("exit", b""),
+    ("mem", b"free pages"),
+    # Files. motd and about are built into the kernel and installed at boot.
+    ("ls", [b"motd", b"about"]),
+    ("cat motd", b"Welcome to BastiOS"),
+    ("cat about", b"exactly\r\nonce"),
+    ("cat nothere", b"no such file: nothere"),
+    ("echo first line > notes", b""),
+    ("echo second line >> notes", b""),
+    ("cat notes", b"first line\r\nsecond line\r\n"),
+    ("ls", b"      23 notes"),
+    ("echo replaced>notes", b""),
+    ("cat notes", b"replaced\r\n"),
+    ("rm notes", b""),
+    ("cat notes", b"no such file: notes"),
+    ("rm notes", b"cannot remove notes"),
+    # Several pages, seeking, appending, holes, descriptor limits; it exits
+    # with "big" still open, so removing it shows that exit closed it.
+    ("fstest", b"fstest: ok"),
+    ("rm big", b""),
+    ("ls", b"about"),
+    # Every page the files used is back once they are removed.
     ("mem", b"free pages"),
 ]
 fails = 0
@@ -78,6 +111,10 @@ else:
         ok = read_until(b"bastios> ", mark) and all(w in out[mark:] for w in wants)
         print(("ok  " if ok else "FAIL"), repr(line))
         fails += not ok
+    if out.count(b"fpucheck: xmm0 kept") == 2 and b"xmm0 changed" not in out:
+        print("ok   both fpucheck processes kept xmm0")
+    else:
+        print("FAIL fpucheck: SSE state leaked between processes"); fails += 1
     # The timer (src/pit.bastio) runs at 100 Hz and every tick is
     # acknowledged at the interrupt controller (src/pic.bastio): ticks keep
     # coming, about 100 a second. The window is wide because QEMU's clock
@@ -96,10 +133,11 @@ else:
         print(f"ok   timer: {t1 - t0} ticks in {w1 - w0:.1f} s")
     else:
         print("FAIL timer ticks:", t0, t1); fails += 1
-    # Every page the finished processes used must be back in the pool.
+    # Every page the finished processes and removed files used must be
+    # back in the pool.
     mem = [l.strip() for l in out.split(b"\n") if l.strip().endswith(b"free pages")]
-    if len(mem) == 2 and mem[0] == mem[1]:
-        print("ok   no pages leaked:", mem[1].decode())
+    if len(mem) == 3 and mem[0] == mem[1] == mem[2]:
+        print("ok   no pages leaked:", mem[2].decode())
     else:
         print("FAIL page leak:", mem); fails += 1
     qemu.stdin.write(b"halt\r"); qemu.stdin.flush()

@@ -12,7 +12,6 @@ spec fn pit_ok(t: &Pit) -> bool { port_count(t.io) == 4 }
 /// 16 bits, so `hz` must be at least 19.
 fn pit_init(t: &mut Pit, hz: u64)
   requires pit_ok(t) && 19 <= hz
-  ensures pit_ok(t)
 {
   let div = PIT_HZ / hz;
   pio_out8(&mut t.io, 3, 0x36);         // channel 0, low then high byte, mode 3

@@ -5,6 +5,8 @@
 import "pages.bastio";
 import "space.bastio";
 import "proc.bastio";
+import "fs.bastio";
+import "usermem.bastio";
 
 const SYS_EXIT: u64 = 0;
 const SYS_WRITE: u64 = 1;
@@ -17,6 +19,15 @@ const SYS_INFO: u64 = 7;
 const SYS_PS: u64 = 8;
 const SYS_KILL: u64 = 9;
 const SYS_POWEROFF: u64 = 10;
+// Files. User programs make these with sys_call / sys_send / sys_recv.
+const SYS_OPEN: u64 = 11;             // (flags, name, name length) -> fd
+const SYS_CLOSE: u64 = 12;            // (fd) -> 0
+const SYS_FREAD: u64 = 13;            // (fd, buffer, length) -> bytes read
+const SYS_FWRITE: u64 = 14;           // (fd, buffer, length) -> bytes written
+const SYS_UNLINK: u64 = 15;           // (_, name, name length) -> 0
+const SYS_DIRENT: u64 = 16;           // (entry, buffer, length) -> name length, 0 if unused
+const SYS_SEEK: u64 = 17;             // (fd, offset) -> 0
+const SYS_STAT: u64 = 18;             // (_, name, name length) -> size
 
 // What the scheduler does after a system call.
 const KEEP: u64 = 0;
@@ -25,21 +36,11 @@ const POWEROFF: u64 = 2;
 
 // ---------------------------------------------------------------- user memory
 
-/// Is [va, va + n) inside the user window?
-fn user_range(va: u64, n: u64) -> bool
-  ensures result ==> va >= USER_BASE && va - USER_BASE + n <= USER_SIZE
-{
-  if va < USER_BASE || va - USER_BASE > USER_SIZE {
-    return false;
-  }
-  return n <= USER_SIZE - (va - USER_BASE);
-}
-
 /// Writes the n bytes at user address va to the console. Returns the count
 /// written, which stops short at an unmapped page.
 fn do_write(con: &mut Uart, spaces: &mut Vec[Space], pid: u64, va: u64, n: u64) -> u64
   requires uart_ok(con) && spaces_ok(spaces) && pid < NPROC
-  ensures uart_ok(con) && spaces_ok(spaces)
+  ensures spaces_ok(spaces)
 {
   if !user_range(va, n) {
     return NO_RESULT;
@@ -59,7 +60,6 @@ fn do_write(con: &mut Uart, spaces: &mut Vec[Space], pid: u64, va: u64, n: u64) 
 /// stopping short at an unmapped page. Returns the count written.
 fn write_from(con: &mut Uart, root: &mut PageTable, off: u64, n: u64) -> u64
   requires uart_ok(con) && pt_level(root) == 4 && off + n <= USER_SIZE
-  ensures uart_ok(con) && pt_level(root) == 4
 {
   // The window is one level-1 table: walk down to it once, not per byte.
   if !pt_has(root, 1) {
@@ -80,29 +80,15 @@ fn write_from(con: &mut Uart, root: &mut PageTable, off: u64, n: u64) -> u64
   return k;
 }
 
-/// How many of the `left` bytes wanted from window offset `a` lie on a's
-/// page.
-fn chunk(a: u64, left: u64) -> u64
-  ensures result <= left && a % 4096 + result <= 4096
-  ensures left > 0 ==> result > 0
-{
-  let room = 4096 - a % 4096;
-  if room < left {
-    return room;
-  }
-  return left;
-}
-
 /// write_from below the level-1 table: takes each page out once and
 /// writes every wanted byte on it.
 fn write_l1(con: &mut Uart, l1: &mut PageTable, off: u64, n: u64) -> u64
   requires uart_ok(con) && pt_level(l1) == 1 && off + n <= USER_SIZE
-  ensures uart_ok(con) && pt_level(l1) == 1
 {
   let mut k = 0;
   let mut ok = true;
   while ok && k < n
-    invariant uart_ok(con) && k <= n && pt_level(l1) == 1
+    invariant k <= n && pt_level(l1) == 1
   {
     let a = off + k;
     let p = a / 4096;
@@ -111,7 +97,6 @@ fn write_l1(con: &mut Uart, l1: &mut PageTable, off: u64, n: u64) -> u64
       let f = pt_take_frame(&mut l1, p);
       let mut j = 0;
       while j < m
-        invariant uart_ok(con)
         invariant j <= m
       {
         uart_write(&mut con, frame_read8(f, a % 4096 + j));
@@ -216,6 +201,134 @@ fn l1_matches(l1: &mut PageTable, off: u64, n: u64, name: Str) -> bool
   return same;
 }
 
+// ---------------------------------------------------------------- files
+
+// Each of these returns NO_RESULT on failure. A transfer moves at most XFER
+// bytes per call, through the kernel buffer k.fs.xfer.
+
+fn smaller(a: u64, b: u64) -> u64
+  ensures result <= a && result <= b
+{
+  if a < b {
+    return a;
+  }
+  return b;
+}
+
+/// Copies the name at user address va (n bytes) into the transfer buffer.
+fn name_in(k: &mut Kernel, pid: u64, va: u64, n: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result ==> n <= FNAME_MAX
+{
+  if n > FNAME_MAX {
+    return false;
+  }
+  return copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, n) == n;
+}
+
+fn do_open(k: &mut Kernel, pid: u64, flags: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if !name_in(&mut k, pid, va, n) {
+    return NO_RESULT;
+  }
+  return vfs_open(&mut k.fs, &mut k.mem, pid * NFD, flags, n);
+}
+
+fn do_fread(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if fd >= NFD {
+    return NO_RESULT;
+  }
+  let row = pid * NFD + fd;
+  let got = vfs_read(&mut k.fs, row, smaller(n, XFER));
+  if got == NO_FD {
+    return NO_RESULT;
+  }
+  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, got);
+  if put == NO_RESULT {
+    return NO_RESULT;
+  }
+  vfs_advance(&mut k.fs, row, vfs_offset(k.fs, row), put);
+  return put;
+}
+
+fn do_fwrite(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if fd >= NFD {
+    return NO_RESULT;
+  }
+  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, smaller(n, XFER));
+  if got == NO_RESULT {
+    return NO_RESULT;
+  }
+  return vfs_write(&mut k.fs, &mut k.mem, pid * NFD + fd, got);
+}
+
+fn do_dirent(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let nl = vfs_dirent(&mut k.fs, i);
+  if nl == NO_FILE {
+    return NO_RESULT;
+  }
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, smaller(nl, n)) == NO_RESULT {
+    return NO_RESULT;
+  }
+  return nl;
+}
+
+/// The file system calls; NO_RESULT for a number that is not one.
+fn file_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if n == SYS_OPEN {
+    return do_open(&mut k, pid, a, b, c);
+  }
+  if n == SYS_CLOSE {
+    if a < NFD && vfs_close(&mut k.fs, pid * NFD + a) {
+      return 0;
+    }
+    return NO_RESULT;
+  }
+  if n == SYS_FREAD {
+    return do_fread(&mut k, pid, a, b, c);
+  }
+  if n == SYS_FWRITE {
+    return do_fwrite(&mut k, pid, a, b, c);
+  }
+  if n == SYS_UNLINK {
+    if name_in(&mut k, pid, b, c) && vfs_unlink(&mut k.fs, &mut k.mem, c) {
+      return 0;
+    }
+    return NO_RESULT;
+  }
+  if n == SYS_DIRENT {
+    return do_dirent(&mut k, pid, a, b, c);
+  }
+  if n == SYS_SEEK {
+    if a < NFD && vfs_seek(&mut k.fs, pid * NFD + a, b) {
+      return 0;
+    }
+    return NO_RESULT;
+  }
+  if n == SYS_STAT {
+    if name_in(&mut k, pid, b, c) {
+      return vfs_stat(&mut k.fs, c);
+    }
+    return NO_RESULT;
+  }
+  return NO_RESULT;
+}
+
 // ---------------------------------------------------------------- dispatch
 
 fn ret(procs: &mut Buf, pid: u64, v: u64)
@@ -246,11 +359,12 @@ fn do_wait(procs: &mut Buf, pid: u64, c: u64) -> u64
 /// Handles the system call process `pid` just made.
 fn syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   requires uart_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
-  ensures uart_ok(con) && kok(k)
+  ensures kok(k)
 {
   let n = pget(k.procs, pid, F_REGS + R_RAX);
   let a = pget(k.procs, pid, F_REGS + R_RDI);
   let b = pget(k.procs, pid, F_REGS + R_RSI);
+  let c = pget(k.procs, pid, F_REGS + R_RDX);
   if n == SYS_EXIT {
     terminate(&mut k, mmu, pid, a);
     return SWITCH;
@@ -260,9 +374,9 @@ fn syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == SYS_READ {
-    let c = q_pop(&mut k.q);
-    if c < 256 {
-      ret(&mut k.procs, pid, c);
+    let ch = q_pop(&mut k.q);
+    if ch < 256 {
+      ret(&mut k.procs, pid, ch);
       return KEEP;
     }
     pset(&mut k.procs, pid, F_STATE, READING);
@@ -316,6 +430,6 @@ fn syscall(con: &mut Uart, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if n == SYS_POWEROFF {
     return POWEROFF;
   }
-  ret(&mut k.procs, pid, NO_RESULT);
+  ret(&mut k.procs, pid, file_call(&mut k, pid, n, a, b, c));
   return KEEP;
 }

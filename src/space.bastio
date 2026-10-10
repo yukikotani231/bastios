@@ -115,12 +115,25 @@ fn new_space(m: &mut Mem, img: Str, size: u64) -> Space
   ensures mem_ok(m)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
+  match new_l1(&mut m, img, (size + 4095) / 4096) {
+    Space::Empty => { return Space::Empty; },
+    Space::Mapped(l1) => { return space_from_l1(&mut m, l1); },
+  }
+}
+
+/// A level-1 table mapping the first `npages` pages of the window, holding
+/// `img`, and the stack pages; every other page is zero. Returns
+/// `Space::Empty`, with every page given back, when memory runs out.
+fn new_l1(m: &mut Mem, img: Str, npages: u64) -> Space
+  requires mem_ok(m) && npages <= STACK_FIRST
+  ensures mem_ok(m)
+  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 1
+{
   let a = find_free(&mut m);
   if a >= NPAGES {
     return Space::Empty;
   }
   let mut l1 = pt_new(take_page(&mut m, a), 1);
-  let npages = (size + 4095) / 4096;
   let mut p = 0;
   let mut ok = true;
   while ok && p < 512
@@ -147,6 +160,17 @@ fn new_space(m: &mut Mem, img: Str, size: u64) -> Space
     free_l1(&mut m, l1);
     return Space::Empty;
   }
+  return Space::Mapped(l1);
+}
+
+/// Puts the level-1 table `l1` at the bottom of a new address space, so it
+/// maps the window from USER_BASE. Returns `Space::Empty`, with every page
+/// given back, when memory runs out.
+fn space_from_l1(m: &mut Mem, l1: PageTable) -> Space
+  requires mem_ok(m) && pt_level(l1) == 1
+  ensures mem_ok(m)
+  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
+{
   let c = find_free(&mut m);
   if c >= NPAGES {
     free_l1(&mut m, l1);

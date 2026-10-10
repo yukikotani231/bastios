@@ -8,6 +8,7 @@
 extern uint64_t bst_gdt[];
 extern const uint64_t bst_trap_stubs[256];
 extern char bst_trap_stack_top[];
+extern char bst_syscall_entry[];
 
 static struct __attribute__((packed)) {
     uint32_t reserved0;
@@ -25,6 +26,10 @@ static struct __attribute__((packed)) {
     uint16_t off_mid;
     uint32_t off_hi, zero;
 } idt[256];
+
+static inline void wrmsr(uint32_t msr, uint64_t v) {
+    __asm__ volatile ("wrmsr" : : "c"(msr), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
+}
 
 #define SYSCALL_VECTOR 0x80
 
@@ -52,6 +57,13 @@ void bst_platform_init(void) {
     }
     struct __attribute__((packed)) { uint16_t limit; uint64_t base; } idtr = { sizeof idt - 1, (uint64_t)idt };
     __asm__ volatile ("lidt %0" : : "m"(idtr));
+
+    /* The `syscall` instruction (enabled by EFER.SCE in boot.S) enters
+     * bst_syscall_entry on kernel code segment 0x08 with IF, DF, TF and AC
+     * cleared. STAR's sysret half is unused: the return path is iretq. */
+    wrmsr(0xC0000081, (0x10ull << 48) | (0x08ull << 32));   /* STAR */
+    wrmsr(0xC0000082, (uint64_t)bst_syscall_entry);         /* LSTAR */
+    wrmsr(0xC0000084, 0x40700);                             /* FMASK: AC DF IF TF */
 
     /* The interrupt controllers, the timer and the UART are set up by the
      * kernel itself, in Bastio (src/pic.bastio, src/pit.bastio, src/uart.bastio). */

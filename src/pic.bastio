@@ -19,7 +19,6 @@ spec fn pic_ok(p: &Pic) -> bool { port_count(p.master) == 2 && port_count(p.slav
 /// COM1 (IRQ 4).
 fn pic_init(p: &mut Pic)
   requires pic_ok(p)
-  ensures pic_ok(p)
 {
   pio_out8(&mut p.master, 0, 0x11);    // ICW1: initialise, ICW4 follows
   pio_out8(&mut p.slave, 0, 0x11);
@@ -37,7 +36,6 @@ fn pic_init(p: &mut Pic)
 /// next one.
 fn pic_eoi(p: &mut Pic, v: u64)
   requires pic_ok(p) && V_IRQ0 <= v && v < V_IRQ_END
-  ensures pic_ok(p)
 {
   if v >= V_IRQ8 {
     pio_out8(&mut p.slave, 0, 0x20);

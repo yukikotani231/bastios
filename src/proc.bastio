@@ -5,6 +5,8 @@
 import "console.bastio";
 import "pages.bastio";
 import "space.bastio";
+import "elf.bastio";
+import "fs.bastio";
 
 const NPROC: u64 = 16;
 const STRIDE: u64 = 32;
@@ -17,7 +19,7 @@ const F_CODE: u64 = 2;               // exit code of a ZOMBIE
 const F_PARENT: u64 = 3;
 const F_PROG: u64 = 4;               // index into the program table
 const F_TICKS: u64 = 5;              // timer ticks spent running
-const F_REGS: u64 = 8;               // 18 saved registers, in `cpu_get` order
+const F_REGS: u64 = 8;               // 21 saved words, in `cpu_get` order
 
 // Saved register numbers.
 const R_RAX: u64 = 0;
@@ -27,6 +29,7 @@ const R_RDI: u64 = 5;
 const R_RIP: u64 = 15;
 const R_RSP: u64 = 16;
 const R_RFLAGS: u64 = 17;
+const R_FSBASE: u64 = 20;
 
 // States.
 const FREE: u64 = 0;
@@ -120,6 +123,55 @@ fn put_space(s: &mut Vec[Space], pid: u64, x: Space)
   }
 }
 
+// ---------------------------------------------------------------- FPU state
+
+// A process's x87/SSE registers, saved in a page of their own while it is
+// not running. Element `pid` of a vector, like the address spaces.
+enum Fpu { None, State(Frame) }
+
+spec fn fpus_ok(s: &Vec[Fpu]) -> bool {
+  vlen(s) == NPROC
+}
+
+/// Takes process `pid`'s FPU state out, leaving its slot empty.
+fn take_fpu(s: &mut Vec[Fpu], pid: u64) -> Fpu
+  requires fpus_ok(s) && pid < NPROC
+  ensures fpus_ok(s) && vget(s, pid) is Fpu::None
+{
+  return vec_swap(&mut s, pid, Fpu::None);
+}
+
+/// Puts FPU state into an empty slot.
+fn put_fpu(s: &mut Vec[Fpu], pid: u64, x: Fpu)
+  requires fpus_ok(s) && pid < NPROC && vget(s, pid) is Fpu::None
+  ensures fpus_ok(s)
+{
+  match vec_swap(&mut s, pid, x) {
+    Fpu::None => {},
+    Fpu::State(_f) => { unreachable; },     // the slot was empty
+  }
+}
+
+/// Gives the page of FPU state `x`, if any, back to the allocator.
+fn drop_fpu(m: &mut Mem, x: Fpu)
+  requires mem_ok(m)
+  ensures mem_ok(m)
+{
+  match x {
+    Fpu::None => {},
+    Fpu::State(f) => { give_page(&mut m, f); },
+  }
+}
+
+/// The x87/SSE state a Linux process starts with: control word 0x37F and
+/// MXCSR 0x1F80 (every exception masked, round to nearest).
+fn fpu_init(f: &mut Frame) {
+  frame_write8(&mut f, 0, 0x7F);
+  frame_write8(&mut f, 1, 0x03);
+  frame_write8(&mut f, 24, 0x80);
+  frame_write8(&mut f, 25, 0x1F);
+}
+
 // ---------------------------------------------------------------- input queue
 
 // Bytes typed on the console, waiting for a READ: word 0 is the head,
@@ -160,11 +212,10 @@ fn q_pop(q: &mut Buf) -> u64
 /// Moves every byte the UART has received into the queue.
 fn drain(con: &mut Uart, q: &mut Buf)
   requires uart_ok(con) && qok(q)
-  ensures uart_ok(con) && qok(q)
+  ensures qok(q)
 {
   let mut c = uart_poll(&mut con);
   while c < 256
-    invariant uart_ok(con)
     invariant qok(q)
   {
     q_push(&mut q, c);
@@ -196,18 +247,20 @@ fn wake_readers(procs: &mut Buf, q: &mut Buf)
 struct Kernel {
   mem: Mem,             // the page allocator
   spaces: Vec[Space],   // element `pid` is that process's address space
+  fpus: Vec[Fpu],       // element `pid` is that process's FPU state
   procs: Buf,           // the process table
   q: Buf,               // console input waiting for a READ
   ticks: u64,           // timer ticks since boot
+  fs: Vfs,              // files and the open-file table
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && len(k.procs) == PTAB_LEN && qok(k.q)
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && vfs_ok(k.fs)
 }
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 7;
+const NPROGS: u64 = 13;
 
 fn prog_name(i: u64) -> Str {
   if i == 0 {
@@ -227,6 +280,24 @@ fn prog_name(i: u64) -> Str {
   }
   if i == 5 {
     return "straddle";
+  }
+  if i == 6 {
+    return "elfexec";
+  }
+  if i == 7 {
+    return "elfpie";
+  }
+  if i == 8 {
+    return "elfbad";
+  }
+  if i == 9 {
+    return "fstest";
+  }
+  if i == 10 {
+    return "mhello";
+  }
+  if i == 11 {
+    return "fpucheck";
   }
   return "fault";
 }
@@ -249,6 +320,24 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 5 {
     return include_bytes("../build/user/straddle.bin");
+  }
+  if i == 6 {
+    return include_bytes("../build/user/elfexec.elf");
+  }
+  if i == 7 {
+    return include_bytes("../build/user/elfpie.elf");
+  }
+  if i == 8 {
+    return include_bytes("../build/user/elfbad.elf");
+  }
+  if i == 9 {
+    return include_bytes("../build/user/fstest.bin");
+  }
+  if i == 10 {
+    return include_bytes("../build/user/mhello.elf");
+  }
+  if i == 11 {
+    return include_bytes("../build/user/fpucheck.elf");
   }
   return include_bytes("../build/user/fault.bin");
 }
@@ -274,18 +363,32 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   ensures kok(k)
   ensures result < NPROC
 {
-  // The image header: magic, bytes of memory the image needs, entry point.
+  // An image is a Linux ELF executable or a BastiOS image; check its
+  // headers before taking anything.
   let img = prog_image(prog);
-  if slen(img) < 24 || slen(img) > IMAGE_MAX {
-    return 0;
-  }
-  let size = read_u64(img, 8);
-  let entry = read_u64(img, 16);
-  if read_u64(img, 0) != MAGIC || size < slen(img) || size > IMAGE_MAX {
-    return 0;
-  }
-  if entry < USER_BASE + 24 || entry >= USER_BASE + slen(img) {
-    return 0;
+  let elf = is_elf(img);
+  let e = elf_parse(img);
+  let mut size = 0;
+  let mut entry = e.entry;
+  let mut rsp = USER_BASE + ELF_SP;
+  if elf {
+    if !e.ok {
+      return 0;
+    }
+  } else {
+    // The BastiOS header: magic, bytes of memory the image needs, entry point.
+    if slen(img) < 24 || slen(img) > IMAGE_MAX {
+      return 0;
+    }
+    size = read_u64(img, 8);
+    entry = read_u64(img, 16);
+    rsp = USER_BASE + USER_SIZE;
+    if read_u64(img, 0) != MAGIC || size < slen(img) || size > IMAGE_MAX {
+      return 0;
+    }
+    if entry < USER_BASE + 24 || entry >= USER_BASE + slen(img) {
+      return 0;
+    }
   }
   let mut pid = 1;
   while pid < NPROC && state(k.procs, pid) != FREE
@@ -304,12 +407,21 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
       return 0;
     },
   }
-  let sp = new_space(&mut k.mem, img, size);
+  let fp = find_free(&mut k.mem);
+  if fp >= NPAGES {
+    return 0;
+  }
+  let mut fpu = take_page(&mut k.mem, fp);
+  fpu_init(&mut fpu);
+  let sp = build_space(&mut k.mem, img, elf, e, size, prog_name(prog), k.ticks % 0x100000000 * NPROC + pid);
   let ok = sp is Space::Mapped;
   put_space(&mut k.spaces, pid, sp);
   if !ok {
+    give_page(&mut k.mem, fpu);
     return 0;
   }
+  drop_fpu(&mut k.mem, take_fpu(&mut k.fpus, pid));
+  put_fpu(&mut k.fpus, pid, Fpu::State(fpu));
   let mut f = 0;
   while f < STRIDE
     invariant f <= STRIDE && len(k.procs) == PTAB_LEN
@@ -320,14 +432,28 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   pset(&mut k.procs, pid, F_PARENT, parent);
   pset(&mut k.procs, pid, F_PROG, prog);
   pset(&mut k.procs, pid, F_REGS + R_RIP, entry);
-  pset(&mut k.procs, pid, F_REGS + R_RSP, USER_BASE + USER_SIZE);
+  pset(&mut k.procs, pid, F_REGS + R_RSP, rsp);
   pset(&mut k.procs, pid, F_REGS + R_RFLAGS, 0x202);
   pset(&mut k.procs, pid, F_STATE, READY);
   return pid;
 }
 
-/// Ends process `pid` with exit `code`: frees its address space, hands the
-/// code to a parent waiting for it, and orphans its children.
+/// The address space for a checked image: ELF, or a BastiOS image needing
+/// `size` bytes of memory.
+fn build_space(m: &mut Mem, img: Str, elf: bool, e: Elf, size: u64, name: Str, seed: u64) -> Space
+  requires mem_ok(m) && (elf ==> (e.ok && elf_fits(img, e))) && (!elf ==> size <= IMAGE_MAX)
+  ensures mem_ok(m)
+  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
+{
+  if elf {
+    return elf_space(&mut m, img, e, name, seed);
+  }
+  return new_space(&mut m, img, size);
+}
+
+/// Ends process `pid` with exit `code`: frees its address space, closes its
+/// files, hands the code to a parent waiting for it, and orphans its
+/// children.
 fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
   requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
@@ -336,6 +462,8 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
     Space::Empty => {},
     Space::Mapped(t) => { free_space(&mut k.mem, mmu, t); },
   }
+  drop_fpu(&mut k.mem, take_fpu(&mut k.fpus, pid));
+  vfs_close_all(&mut k.fs, pid * NFD);
   pset(&mut k.procs, pid, F_STATE, ZOMBIE);
   pset(&mut k.procs, pid, F_CODE, code);
   let mut c = 1;
@@ -364,7 +492,6 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
 
 fn put_state(con: &mut Uart, s: u64)
   requires uart_ok(con)
-  ensures uart_ok(con)
 {
   if s == READY {
     puts(&mut con, "ready  ");
@@ -379,12 +506,10 @@ fn put_state(con: &mut Uart, s: u64)
 
 fn print_ps(con: &mut Uart, procs: &Buf)
   requires uart_ok(con) && len(procs) == PTAB_LEN
-  ensures uart_ok(con)
 {
   puts(&mut con, "  PID  PPID STATE    TICKS NAME\r\n");
   let mut p = 1;
   while p < NPROC
-    invariant uart_ok(con)
     invariant 1 <= p && p <= NPROC
   {
     if state(procs, p) != FREE {

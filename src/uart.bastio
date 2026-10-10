@@ -20,7 +20,6 @@ spec fn uart_ok(u: &Uart) -> bool { port_count(u.io) == 8 }
 /// kernel sees it as vector 36 and drains the UART).
 fn uart_init(u: &mut Uart)
   requires uart_ok(u)
-  ensures uart_ok(u)
 {
   pio_out8(&mut u.io, UART_IER, 0x00);   // interrupts off while configuring
   pio_out8(&mut u.io, UART_LCR, 0x80);   // DLAB on: the next two are the divisor
@@ -35,7 +34,6 @@ fn uart_init(u: &mut Uart)
 /// Sends byte `b`, waiting until the transmitter has room.
 fn uart_write(u: &mut Uart, b: u64)
   requires uart_ok(u) && b <= 255
-  ensures uart_ok(u)
 {
   // Line status bit 5: the transmit holding register is empty.
   while pio_in8(&mut u.io, UART_LSR) / 32 % 2 == 0 {
@@ -46,7 +44,7 @@ fn uart_write(u: &mut Uart, b: u64)
 /// The next received byte, or 256 when none is waiting.
 fn uart_poll(u: &mut Uart) -> u64
   requires uart_ok(u)
-  ensures uart_ok(u) && result <= 256
+  ensures result <= 256
 {
   // Line status bit 0: a byte is waiting.
   if pio_in8(&mut u.io, UART_LSR) % 2 == 1 {

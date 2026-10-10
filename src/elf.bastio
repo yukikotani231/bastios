@@ -1,0 +1,326 @@
+// Loading static Linux x86-64 ELF executables (the first step toward
+// running Linux programs). An image is either a fixed-address executable
+// (ET_EXEC) whose segments lie in the user window, or a static PIE (ET_DYN)
+// with no interpreter, which is placed at USER_BASE; a static PIE relocates
+// itself, so the kernel applies no relocations.
+//
+// Every field read from the file is untrusted. The proof shows each read is
+// inside the image, and that every byte copied lands in a page of the
+// window below the stack, whatever the file says.
+
+import "pages.bastio";
+import "space.bastio";
+
+const ELF_HDR: u64 = 64;              // size of the ELF64 file header
+const PH_SIZE: u64 = 56;              // size of an ELF64 program header
+const PH_MAX: u64 = 64;               // most program headers we accept
+
+const ET_EXEC: u64 = 2;
+const ET_DYN: u64 = 3;
+const EM_X86_64: u64 = 62;
+const PT_LOAD: u64 = 1;
+const PT_INTERP: u64 = 3;
+
+// Segment kinds, as `seg` reports them.
+const SEG_SKIP: u64 = 0;              // not loaded (PT_NOTE, PT_GNU_STACK, ...)
+const SEG_LOAD: u64 = 1;              // a PT_LOAD that fits the window
+const SEG_BAD: u64 = 2;               // malformed, or something we cannot run
+
+// The initial stack lives in the window's top page.
+const STACK_PAGE: u64 = 511;
+const SP_WORD: u64 = 256;             // rsp points at word 256 of that page
+const NAME_AT: u64 = 3968;            // argv[0], at most NAME_MAX bytes and a NUL
+const NAME_MAX: u64 = 63;
+const RANDOM_AT: u64 = 4032;          // the 16 bytes AT_RANDOM points at
+const ELF_SP: u64 = 0x1FF800;         // window offset of rsp: page 511, word 256
+
+/// What the headers say, once checked.
+struct Elf {
+  ok: bool,
+  bias: u64,      // added to every p_vaddr: 0, or USER_BASE for a static PIE
+  entry: u64,     // user address of the entry point
+  end: u64,       // window offset where the highest segment ends
+  phoff: u64,     // file offset of the program headers
+  phnum: u64,
+  phdr: u64,      // user address of the program headers once loaded, or 0
+}
+
+/// A program header, once checked.
+struct Seg {
+  kind: u64,
+  from: u64,      // file offset of the bytes to copy
+  filesz: u64,    // bytes to copy; the rest of the segment is zero
+  off: u64,       // window offset of the segment
+  memsz: u64,
+}
+
+spec fn seg_fits(img: Str, s: Seg) -> bool {
+  s.kind == SEG_LOAD ==> (s.filesz <= s.memsz && s.from + s.filesz <= slen(img) && s.off + s.memsz <= IMAGE_MAX)
+}
+
+spec fn elf_fits(img: Str, e: Elf) -> bool {
+  e.ok ==> (e.phnum <= PH_MAX && e.phoff + e.phnum * PH_SIZE <= slen(img)
+    && e.end <= IMAGE_MAX && e.bias <= USER_BASE
+    && USER_BASE <= e.entry && e.entry < USER_BASE + e.end)
+}
+
+fn rd16(s: Str, at: u64) -> u64
+  requires at + 2 <= slen(s)
+  ensures result < 0x10000
+{
+  return sget(s, at) + 0x100 * sget(s, at + 1);
+}
+
+fn rd32(s: Str, at: u64) -> u64
+  requires at + 4 <= slen(s)
+  ensures result < 0x100000000
+{
+  return rd16(s, at) + 0x10000 * rd16(s, at + 2);
+}
+
+fn rd64(s: Str, at: u64) -> u64
+  requires at + 8 <= slen(s)
+{
+  return rd32(s, at) + 0x100000000 * rd32(s, at + 4);
+}
+
+/// Does `img` start with the ELF magic? Such an image is loaded as ELF or
+/// not at all.
+fn is_elf(img: Str) -> bool {
+  return slen(img) >= 4 && sget(img, 0) == 0x7F && sget(img, 1) == 0x45
+    && sget(img, 2) == 0x4C && sget(img, 3) == 0x46;
+}
+
+fn bad_seg() -> Seg
+  ensures result.kind == SEG_BAD
+{
+  return Seg { kind: SEG_BAD, from: 0, filesz: 0, off: 0, memsz: 0 };
+}
+
+/// Program header `i` of `img` (headers at `phoff`), placed with `bias`.
+fn seg(img: Str, phoff: u64, i: u64, bias: u64) -> Seg
+  requires i < PH_MAX && phoff + (i + 1) * PH_SIZE <= slen(img) && bias <= USER_BASE
+  ensures seg_fits(img, result)
+{
+  let h = phoff + i * PH_SIZE;
+  let t = rd32(img, h);
+  if t == PT_INTERP {
+    return bad_seg();                 // needs a dynamic linker
+  }
+  if t != PT_LOAD {
+    return Seg { kind: SEG_SKIP, from: 0, filesz: 0, off: 0, memsz: 0 };
+  }
+  let from = rd64(img, h + 8);
+  let vaddr = rd64(img, h + 16);
+  let filesz = rd64(img, h + 32);
+  let memsz = rd64(img, h + 40);
+  if filesz > memsz || from > slen(img) || filesz > slen(img) - from {
+    return bad_seg();
+  }
+  // The segment must lie in the window, below the stack.
+  if vaddr > USER_BASE + IMAGE_MAX || vaddr + bias < USER_BASE {
+    return bad_seg();
+  }
+  let off = vaddr + bias - USER_BASE;
+  if off > IMAGE_MAX || memsz > IMAGE_MAX - off {
+    return bad_seg();
+  }
+  return Seg { kind: SEG_LOAD, from: from, filesz: filesz, off: off, memsz: memsz };
+}
+
+fn bad_elf() -> Elf
+  ensures !result.ok
+{
+  return Elf { ok: false, bias: 0, entry: 0, end: 0, phoff: 0, phnum: 0, phdr: 0 };
+}
+
+/// Checks the file header and every program header of `img`.
+fn elf_parse(img: Str) -> Elf
+  ensures elf_fits(img, result)
+{
+  let n = slen(img);
+  if n < ELF_HDR || !is_elf(img) {
+    return bad_elf();
+  }
+  // 64-bit, little-endian, version 1, x86-64.
+  if sget(img, 4) != 2 || sget(img, 5) != 1 || sget(img, 6) != 1 {
+    return bad_elf();
+  }
+  let ty = rd16(img, 16);
+  if rd16(img, 18) != EM_X86_64 || rd32(img, 20) != 1 {
+    return bad_elf();
+  }
+  let mut bias = 0;
+  if ty == ET_DYN {
+    bias = USER_BASE;
+  } else if ty != ET_EXEC {
+    return bad_elf();
+  }
+  let entry = rd64(img, 24);
+  let phoff = rd64(img, 32);
+  let phnum = rd16(img, 56);
+  if rd16(img, 54) != PH_SIZE || phnum == 0 || phnum > PH_MAX {
+    return bad_elf();
+  }
+  if phoff > n || phnum * PH_SIZE > n - phoff {
+    return bad_elf();
+  }
+  let mut end = 0;
+  let mut phdr = 0;
+  let mut loads = 0;
+  let mut i = 0;
+  while i < phnum
+    invariant i <= phnum && end <= IMAGE_MAX && loads <= i
+  {
+    let s = seg(img, phoff, i, bias);
+    if s.kind == SEG_BAD {
+      return bad_elf();
+    }
+    if s.kind == SEG_LOAD {
+      loads = loads + 1;
+      if s.off + s.memsz > end {
+        end = s.off + s.memsz;
+      }
+      // The program headers, if this segment carries them (for AT_PHDR).
+      if s.from <= phoff && phoff + phnum * PH_SIZE <= s.from + s.filesz {
+        phdr = USER_BASE + s.off + (phoff - s.from);
+      }
+    }
+    i = i + 1;
+  }
+  if loads == 0 {
+    return bad_elf();
+  }
+  if entry > USER_BASE + IMAGE_MAX || entry + bias < USER_BASE || entry + bias >= USER_BASE + end {
+    return bad_elf();
+  }
+  return Elf { ok: true, bias: bias, entry: entry + bias, end: end, phoff: phoff, phnum: phnum, phdr: phdr };
+}
+
+/// How many of the `left` bytes wanted from window offset `a` lie on a's page.
+fn on_page(a: u64, left: u64) -> u64
+  ensures result <= left && a % 4096 + result <= 4096
+  ensures left > 0 ==> result > 0
+{
+  let room = 4096 - a % 4096;
+  if room < left {
+    return room;
+  }
+  return left;
+}
+
+/// Copies the `n` bytes at file offset `from` to window offset `off`, a page
+/// at a time. A page `l1` does not map is skipped (`new_l1` maps them all).
+fn copy_in(l1: &mut PageTable, img: Str, from: u64, off: u64, n: u64)
+  requires pt_level(l1) == 1 && from + n <= slen(img) && off + n <= IMAGE_MAX
+  ensures pt_level(l1) == 1
+{
+  let mut k = 0;
+  while k < n
+    invariant k <= n && pt_level(l1) == 1
+  {
+    let a = off + k;
+    let m = on_page(a, n - k);
+    let p = a / 4096;
+    if pt_has(l1, p) {
+      let mut f = pt_take_frame(&mut l1, p);
+      let mut j = 0;
+      while j < m
+        invariant j <= m
+      {
+        frame_write8(&mut f, a % 4096 + j, sget(img, from + k + j));
+        j = j + 1;
+      }
+      pt_put_frame(&mut l1, p, f, true);
+    }
+    k = k + m;
+  }
+}
+
+/// Writes the initial stack the Linux ABI promises at the entry point:
+/// argc, argv (just the program name), an empty environment and the
+/// auxiliary vector. `seed` fills the AT_RANDOM bytes; it is not a source
+/// of secure randomness.
+fn init_stack(f: &mut Frame, e: Elf, name: Str, seed: u64) {
+  let top = USER_BASE + STACK_PAGE * 4096;
+  let mut n = slen(name);
+  if n > NAME_MAX {
+    n = NAME_MAX;
+  }
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= NAME_MAX
+  {
+    frame_write8(&mut f, NAME_AT + i, sget(name, i));
+    i = i + 1;
+  }
+  frame_write8(&mut f, NAME_AT + n, 0);
+  let mut x = seed % 0x80000000;
+  let mut r = 0;
+  while r < 16
+    invariant r <= 16 && x < 0x80000000
+  {
+    x = (x * 1103515245 + 12345) % 0x80000000;
+    frame_write8(&mut f, RANDOM_AT + r, x / 0x800000);
+    r = r + 1;
+  }
+  let w = SP_WORD;
+  frame_write(&mut f, w, 1);                       // argc
+  frame_write(&mut f, w + 1, top + NAME_AT);       // argv[0]
+  frame_write(&mut f, w + 2, 0);                   // end of argv
+  frame_write(&mut f, w + 3, 0);                   // end of envp
+  aux(&mut f, w + 4, 3, e.phdr);                   // AT_PHDR
+  aux(&mut f, w + 6, 4, PH_SIZE);                  // AT_PHENT
+  aux(&mut f, w + 8, 5, e.phnum);                  // AT_PHNUM
+  aux(&mut f, w + 10, 6, 4096);                    // AT_PAGESZ
+  aux(&mut f, w + 12, 7, 0);                       // AT_BASE: no interpreter
+  aux(&mut f, w + 14, 8, 0);                       // AT_FLAGS
+  aux(&mut f, w + 16, 9, e.entry);                 // AT_ENTRY
+  aux(&mut f, w + 18, 11, 0);                      // AT_UID
+  aux(&mut f, w + 20, 12, 0);                      // AT_EUID
+  aux(&mut f, w + 22, 13, 0);                      // AT_GID
+  aux(&mut f, w + 24, 14, 0);                      // AT_EGID
+  aux(&mut f, w + 26, 17, 100);                    // AT_CLKTCK: the timer runs at 100 Hz
+  aux(&mut f, w + 28, 23, 0);                      // AT_SECURE
+  aux(&mut f, w + 30, 25, top + RANDOM_AT);        // AT_RANDOM
+  aux(&mut f, w + 32, 0, 0);                       // AT_NULL
+}
+
+fn aux(f: &mut Frame, w: u64, key: u64, v: u64)
+  requires w + 1 < 512
+{
+  frame_write(&mut f, w, key);
+  frame_write(&mut f, w + 1, v);
+}
+
+/// Builds an address space for the checked ELF image `img`: its loadable
+/// segments, zero-filled to their memory size, and a stack holding argv,
+/// envp and the auxiliary vector. Returns `Space::Empty`, with every page
+/// given back, when memory runs out.
+fn elf_space(m: &mut Mem, img: Str, e: Elf, name: Str, seed: u64) -> Space
+  requires mem_ok(m) && e.ok && elf_fits(img, e)
+  ensures mem_ok(m)
+  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
+{
+  match new_l1(&mut m, "", (e.end + 4095) / 4096) {
+    Space::Empty => { return Space::Empty; },
+    Space::Mapped(mut l1) => {
+      let mut i = 0;
+      while i < e.phnum
+        invariant i <= e.phnum && pt_level(l1) == 1
+      {
+        let s = seg(img, e.phoff, i, e.bias);
+        if s.kind == SEG_LOAD {
+          copy_in(&mut l1, img, s.from, s.off, s.filesz);
+        }
+        i = i + 1;
+      }
+      if pt_has(l1, STACK_PAGE) {
+        let mut f = pt_take_frame(&mut l1, STACK_PAGE);
+        init_stack(&mut f, e, name, seed);
+        pt_put_frame(&mut l1, STACK_PAGE, f, true);
+      }
+      return space_from_l1(&mut m, l1);
+    },
+  }
+}
