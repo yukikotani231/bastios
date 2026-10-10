@@ -10,11 +10,11 @@
 // the way vfork moves a parent's space to its child. The other rows of
 // the group keep theirs empty.
 //
-// So a group runs on one processor at a time: a READY thread whose group
-// has a member on a processor waits (lx_pick). Threads interleave as on a
-// single processor, which is correct for every program but not parallel.
-// Running a group on several processors at once needs a page table shared
-// between processors, which the language cannot express yet.
+// The address space is not taken out while a thread runs: each processor
+// running a thread of the group holds a lease on it (main.bastio), so the
+// threads of a group run on several processors at once. The rest of the
+// shared state is used only under the kernel lock, by whichever member's
+// trap is being handled: `finish` moves it to that member first.
 //
 // What is left out: futexes shared between processes (there is no shared
 // memory), the leader calling exit while other threads run (it ends the
@@ -88,8 +88,23 @@ fn holder(k: &mut Kernel, g: u64) -> u64
   return 0;
 }
 
-/// Whether thread p can run now: it is not in a group, or no member of
-/// its group is on a processor and one of them holds the address space.
+/// Whether q waits for the rest of its group to leave the processors
+/// (F_QUIET), and is still retrying the call that needs it. A mark left
+/// behind by a thread that has since blocked, died or moved on to another
+/// call stops nobody.
+fn quieting(procs: &Buf, q: u64) -> bool
+  requires len(procs) == PTAB_LEN && q < NPROC
+{
+  let st = state(procs, q);
+  let n = pget(procs, q, F_REGS + R_RAX);       // the call it will run again (lx_retry)
+  let remap = n == LX_MUNMAP || n == LX_MPROTECT || n == LX_MREMAP || n == LX_MMAP;
+  return pget(procs, q, F_QUIET) != 0 && pget(procs, q, F_RESTART) != 0 && remap && (st == READY || st == RUNNING);
+}
+
+/// Whether thread p can run now: it is not in a group, or its group is
+/// not ending (no member is KILLED) and one of them holds the address
+/// space (none does while the group has lent it to a vfork child), and no other
+/// member waits for the group to leave the processors (quieting) ahead of p.
 fn group_free(k: &mut Kernel, p: u64) -> bool
   requires kok(k) && p < NPROC
   ensures kok(k)
@@ -102,7 +117,12 @@ fn group_free(k: &mut Kernel, p: u64) -> bool
   while q < NPROC
     invariant 1 <= q && q <= NPROC && kok(k)
   {
-    if in_group(k.procs, q, g) && (state(k.procs, q) == RUNNING || state(k.procs, q) == KILLED) {
+    if in_group(k.procs, q, g) && state(k.procs, q) == KILLED {
+      return false;
+    }
+    // Of two threads waiting at once (two munmaps), the lower one goes
+    // first; the other waits with the rest.
+    if q != p && in_group(k.procs, q, g) && quieting(k.procs, q) && (q < p || !quieting(k.procs, p)) {
       return false;
     }
     q = q + 1;
@@ -220,9 +240,9 @@ fn thread_free(k: &mut Kernel, mmu: &Mmu, q: u64, g: u64)
 /// For terminate (src/proc.bastio): process `p` ends. If it is one thread
 /// of a group, the whole group ends: the shared state goes to the leader,
 /// every other thread is freed, and the leader is returned to be ended as
-/// a process. Returns p for a process without threads, and 0 if a member
-/// is on another processor: it is marked KILLED, and its group ends when
-/// it comes back.
+/// a process. Returns p for a process without threads, and 0 if members
+/// are on other processors: they are marked KILLED, and the group ends when
+/// the last of them comes back.
 fn group_end(k: &mut Kernel, mmu: &Mmu, p: u64) -> u64
   requires kok(k) && 1 <= p && p < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k) && result < NPROC
@@ -235,20 +255,24 @@ fn group_end(k: &mut Kernel, mmu: &Mmu, p: u64) -> u64
     pset(&mut k.procs, p, F_TGID, 0);
     return p;
   }
+  let mut busy = false;
   let mut q = 1;
   while q < NPROC
     invariant 1 <= q && q <= NPROC && kok(k)
   {
     if q != p && in_group(k.procs, q, g) {
-      if state(k.procs, q) == RUNNING {
+      let st = state(k.procs, q);
+      if st == RUNNING || st == EXITING {
         pset(&mut k.procs, q, F_STATE, KILLED);
-        return 0;
       }
-      if state(k.procs, q) == KILLED {
-        return 0;
+      if st == RUNNING || st == EXITING || st == KILLED {
+        busy = true;
       }
     }
     q = q + 1;
+  }
+  if busy {
+    return 0;
   }
   let h = holder(&mut k, g);
   if h != 0 {
@@ -339,6 +363,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   pset(&mut k.procs, c, F_CODE, 0);
   pset(&mut k.procs, c, F_TICKS, 0);
   pset(&mut k.procs, c, F_PARENT, 0);       // threads are nobody's children
+  pset(&mut k.procs, c, F_QUIET, 0);
   group_fork(&mut k.procs, pid, c);
   pset(&mut k.procs, c, F_REGS + R_RAX, 0);
   if stack != 0 {
@@ -393,29 +418,43 @@ fn thread_only(procs: &Buf, pid: u64) -> bool
   return pget(procs, pid, F_TGID) != 0 && tgid(procs, pid) != pid;
 }
 
-/// Before execve in process pid: its other threads end. False if pid is
-/// a thread other than its group's leader (not supported).
-fn thread_exec(k: &mut Kernel, mmu: &Mmu, pid: u64) -> bool
+/// Before execve in process pid: its other threads end. Those on other
+/// processors are marked EXITING and freed when they come back (finish in
+/// main.bastio); until then execve waits (EXEC_WAIT: the caller runs it
+/// again later).
+fn thread_exec(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
   if pget(k.procs, pid, F_TGID) == 0 {
-    return true;
+    return EXEC_GO;
   }
   if tgid(k.procs, pid) != pid {
-    return false;
+    return EXEC_NO;
   }
+  let mut busy = false;
   let mut q = 1;
   while q < NPROC
     invariant 1 <= q && q <= NPROC && kok(k)
   {
     if q != pid && in_group(k.procs, q, pid) {
-      thread_free(&mut k, mmu, q, pid);
+      let st = state(k.procs, q);
+      if st == RUNNING || st == EXITING {
+        pset(&mut k.procs, q, F_STATE, EXITING);
+        busy = true;
+      } else if st == KILLED {
+        busy = true;                        // the group is ending anyway
+      } else {
+        thread_free(&mut k, mmu, q, pid);
+      }
     }
     q = q + 1;
   }
+  if busy {
+    return EXEC_WAIT;
+  }
   pset(&mut k.procs, pid, F_TGID, 0);
-  return true;
+  return EXEC_GO;
 }
 
 // ---------------------------------------------------------------- futex

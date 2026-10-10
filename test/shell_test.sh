@@ -225,6 +225,9 @@ steps = [
     ("cat /motd", b"Welcome to BastiOS", b"\n# "),
     ("echo one > t; echo two >> t; cat t | wc -l", b"\r\n2\r\n", b"\n# "),
     ("cp t t2; head -n 1 t2; rm t t2; ls", [b"\r\none\r\n", b"elfdemo"], b"\n# "),
+    # A line longer than 256 bytes typed (or pasted) at once arrives whole:
+    # the console's input ring and the terminal line hold 4096 bytes.
+    ("echo " + "x" * 1000 + " | wc -c", b"\r\n1001\r\n", b"\n# "),
     # Signals: a trap handler entered and returned from (rt_sigreturn),
     # a process ending itself with kill, a writer ended by SIGPIPE once
     # head has gone, and Ctrl-C ending a busy loop (the parent ash's own
@@ -285,6 +288,12 @@ steps = [
     # variables (one timed) and joins, and _exit from a thread ending the
     # whole process (user/mthread.c).
     ("mthread", b"mthread: ok, 8000 increments", b"\n# "),
+    # Threads on several processors at once: four compute and map memory
+    # in parallel (the checksum is the same as on Linux), and execve ends
+    # threads that are running elsewhere.
+    ("mthread par", [b"mthread: par 4 threads", b"(7f4)"], b"\n# "),
+    ("mthread exec", b"mthread: exec ok, threads gone", b"\n# "),
+    ("mthread unmap", b"mthread: unmap ok, threads still running", b"\n# "),
     # What Linux programs expect to find: /dev/null swallows, /tmp and
     # /etc/passwd exist, and every file has its own inode number.
     ("echo lost > /dev/null; wc -c < /dev/null; test -d /tmp && echo tmp$((2+2))", b"\r\n0\r\ntmp4\r\n", b"\n# "),

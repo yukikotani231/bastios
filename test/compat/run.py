@@ -320,6 +320,7 @@ def main():
 
     names = syscall_names()
     applets = load_applets(os.path.join(HERE, "applets.txt"))
+    apps = load_applets(os.path.join(HERE, "apps.txt"))
     os.makedirs(args.out, exist_ok=True)
     log = open(os.path.join(args.out, "serial.log"), "wb")
     env = Host(os.path.abspath(args.host)) if args.host else Guest(args.kernel, args.disk, log)
@@ -333,6 +334,8 @@ def main():
             results[prog] = run_program(env, prog, args.timeout)
         print("compat: busybox applets", flush=True)
         results["busybox"] = [run_applet(env, n, c, e, 30, bb) for n, c, e in applets]
+        print("compat: real programs", flush=True)
+        results["apps"] = [run_applet(env, n, c, e, 60, bb) for n, c, e in apps]
     finally:
         env.stop()
         log.close()
