@@ -169,6 +169,10 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Files and disks
 
+- A disk that is not blank and has no BastiOS file system (a partition
+  table, another system's data) is left alone. It used to be formatted on
+  the first boot, which on a real machine would have destroyed the disk
+  with its owner's system on it.
 - USB sticks and disks as the disk (`src/xhci.bastio`): SCSI over the
   bulk-only transport, on the same xHCI controller as the USB keyboard.
   Only a GPT partition of the BastiOS type is used, and it comes before
@@ -285,6 +289,17 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   timer (`-machine hpet=off` used to leave the clock at 0), and the
   processors' local APIC timers are calibrated against the same instead of
   the PIT, which newer PCs may gate off.
+- A hardware report for trying BastiOS on a real machine: the ISO's GRUB
+  menu has a second entry, "BastiOS, with a hardware report" (boot option
+  `diag`), which prints the processor, the memory map, the ACPI tables and
+  registers and every PCI device with its driver, a screenful at a time.
+  [docs/real-hardware.md](docs/real-hardware.md) says what to check and
+  what to send back. Uses bastiolang's new `boot_info`.
+- The ACPI tables are found wherever the firmware put them: between 1 and
+  2 GiB (where they are on a machine with 2 GiB or more below 4 GiB, which
+  used to leave it on one processor and without power off) and above
+  4 GiB. A reset register in memory is used too.
+
 - The console obeys `tcsetattr`: a program can turn off canonical mode
   and echo and read each key as it is typed, with `VMIN` and `VTIME`, and
   turn off `ISIG`, `ICRNL` and output processing. Settings used to be
