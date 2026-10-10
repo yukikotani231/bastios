@@ -305,6 +305,14 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Network
 
+- More Intel network cards on the e1000 driver: the 82544GC and 82545EM,
+  the 82574L (QEMU's `e1000e`), and the igb family: the 82576 (QEMU's
+  `igb`), and the I350, I210 and I211 found on many server and desktop
+  boards (untested: QEMU has none). The igb chips need their queue
+  enabled on its own, advanced descriptors and the PHY told to
+  negotiate. `test/shell_test.sh` gets a lease and a ping through
+  `e1000e` and `igb`, and `make test` runs the TCP test on `igb` too.
+
 - A Linux program blocked on a network socket (`accept`, `read`,
   `recvfrom`, a full TCP send buffer) sleeps instead of being restarted on
   every pass of the scheduler, so it no longer keeps a processor busy

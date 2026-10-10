@@ -984,6 +984,34 @@ session("e1000", None, [
     ("ping 10.0.2.3", b"reply from 10.0.2.3"),
 ], halt=True, ready=e1000_ready)
 
+# The same driver on the other families it knows (src/e1000.bastio): the
+# 82574L, and the 82576 of the igb family, which takes advanced
+# descriptors and its PHY told to negotiate. Each must get a DHCP lease
+# and a ping answered.
+def family_ready(card):
+    def ready():
+        global fails
+        ok = b"net: e1000, mac 52:54:00:12:34:56" in out
+        print(("ok  " if ok else "FAIL"), f"({card} boot) card found")
+        fails += not ok
+        t0 = time.time()
+        leased = False
+        while not leased and time.time() - t0 < 10:
+            mark = len(out)
+            qemu.stdin.write(b"ifconfig\r"); qemu.stdin.flush()
+            read_until(b"bastios> ", mark)
+            leased = b"(DHCP)" in out[mark:]
+            if not leased:
+                time.sleep(0.5)
+        print(("ok  " if leased else "FAIL"), f"({card} boot) DHCP lease")
+        fails += not leased
+    return ready
+for card in ("e1000e", "igb"):
+    qemu = boot(1, net=True, card=card)
+    session(card, None, [
+        ("ping", b"reply from 10.0.2.2"),
+    ], halt=True, ready=family_ready(card))
+
 # The PS/2 keyboard (src/kbd.bastio): keys pressed through QEMU's monitor
 # reach the shell as serial input would, Shift and Backspace included.
 # Booted with -kernel there is no framebuffer, so the console stays on the
