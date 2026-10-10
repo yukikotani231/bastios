@@ -2,6 +2,7 @@
 // master drive), in PIO mode with 28-bit sector numbers. It owns the bus's
 // eight command ports and its control port, and nothing else: the PortIo
 // capabilities say so, and the proof checks every access against them.
+// A command moves one sector, or eight for a 4 KiB block.
 //
 // The drive is polled with interrupts off (nIEN), like the rest of the
 // kernel. Every wait is bounded, so a missing or wedged drive makes an
@@ -103,11 +104,19 @@ fn ata_command(a: &mut Ata, lba: u64, cmd: u64) -> bool
   requires ata_ok(a) && lba < LBA28_MAX && cmd <= 255
   ensures ata_ok(a) && a.sectors == old(a.sectors)
 {
+  return ata_command_n(&mut a, lba, cmd, 1);
+}
+
+/// The same for `count` sectors from `lba` (1 to 255).
+fn ata_command_n(a: &mut Ata, lba: u64, cmd: u64, count: u64) -> bool
+  requires ata_ok(a) && lba < LBA28_MAX && cmd <= 255 && 1 <= count && count <= 255
+  ensures ata_ok(a) && a.sectors == old(a.sectors)
+{
   if !ata_idle(&mut a) {
     return false;
   }
   pio_out8(&mut a.io, ATA_DRIVE, cast[u8](0xE0 + lba / 0x1000000));
-  pio_out8(&mut a.io, ATA_COUNT, 1);
+  pio_out8(&mut a.io, ATA_COUNT, cast[u8](count));
   pio_out8(&mut a.io, ATA_LBA0, cast[u8](lba % 256));
   pio_out8(&mut a.io, ATA_LBA1, cast[u8](lba / 256 % 256));
   pio_out8(&mut a.io, ATA_LBA2, cast[u8](lba / 65536 % 256));
@@ -209,6 +218,73 @@ fn ata_write(a: &mut Ata, lba: u64, buf: &Bytes) -> bool
   {
     pio_out16(&mut a.io, ATA_DATA, cast[u16](bget(buf, 2 * w)) + 256 * cast[u16](bget(buf, 2 * w + 1)));
     w = w + 1;
+  }
+  if !ata_idle(&mut a) {
+    return false;
+  }
+  pio_out8(&mut a.io, ATA_CMD, cast[u8](ATA_FLUSH));
+  return ata_idle(&mut a);
+}
+
+/// Reads the eight sectors from `lba` (a 4 KiB block) into
+/// out[at..at + 4096] with one command: the drive raises DRQ once per
+/// sector.
+fn ata_read_block(a: &mut Ata, lba: u64, out: &mut Bytes, at: u64) -> bool
+  requires ata_ok(a) && at + 8 * SECTOR <= blen(out)
+  ensures ata_ok(a) && a.sectors == old(a.sectors) && blen(out) == old(blen(out))
+{
+  if lba >= a.sectors || a.sectors - lba < 8 || !ata_command_n(&mut a, lba, ATA_READ, 8) {
+    return false;
+  }
+  let l = blen(out);
+  let sz = a.sectors;
+  let mut s = 0;
+  while s < 8
+    invariant s <= 8 && ata_ok(a) && a.sectors == sz && blen(out) == l && at + 8 * SECTOR <= l
+  {
+    if s > 0 && !ata_ready(&mut a) {
+      return false;
+    }
+    let mut w = 0;
+    while w < 256
+      invariant w <= 256 && s < 8 && ata_ok(a) && a.sectors == sz && blen(out) == l && at + 8 * SECTOR <= l
+    {
+      let v = pio_in16(&mut a.io, ATA_DATA);
+      bset(&mut out, at + s * SECTOR + 2 * w, cast[u8](v % 256));
+      bset(&mut out, at + s * SECTOR + 2 * w + 1, cast[u8](v / 256));
+      w = w + 1;
+    }
+    s = s + 1;
+  }
+  return true;
+}
+
+/// Writes src[at..at + 4096] to the eight sectors from `lba` with one
+/// command, then flushes the drive's cache once.
+fn ata_write_block(a: &mut Ata, lba: u64, src: &Bytes, at: u64) -> bool
+  requires ata_ok(a) && at + 8 * SECTOR <= blen(src)
+  ensures ata_ok(a) && a.sectors == old(a.sectors)
+{
+  if lba >= a.sectors || a.sectors - lba < 8 || !ata_command_n(&mut a, lba, ATA_WRITE, 8) {
+    return false;
+  }
+  let sz = a.sectors;
+  let mut s = 0;
+  while s < 8
+    invariant s <= 8 && ata_ok(a) && a.sectors == sz
+  {
+    if s > 0 && !ata_ready(&mut a) {
+      return false;
+    }
+    let mut w = 0;
+    while w < 256
+      invariant w <= 256 && s < 8 && ata_ok(a) && a.sectors == sz
+    {
+      let o = at + s * SECTOR + 2 * w;
+      pio_out16(&mut a.io, ATA_DATA, cast[u16](bget(src, o)) + 256 * cast[u16](bget(src, o + 1)));
+      w = w + 1;
+    }
+    s = s + 1;
   }
   if !ata_idle(&mut a) {
     return false;

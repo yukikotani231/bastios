@@ -68,6 +68,9 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   requires fds_ok(k) && pid < NPROC
   ensures result.kind == K_FILE ==> result.x < FD_ROWS
   ensures (result.kind == K_PIPE_R || result.kind == K_PIPE_W) ==> result.x < NPIPES
+  ensures result.kind == K_EVENT ==> result.x < OFD_N
+  ensures result.kind == K_TIMER ==> result.x < TFD_N
+  ensures result.kind == K_EPOLL ==> result.x < EP_N
 {
   let v = fd_get(k.lxfd, pid, fd) % FD_CLOEXEC;
   if v == FD_CONSOLE {
@@ -97,6 +100,15 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   if kind == OF_DEV {
     return Fd { kind: K_DEV, x: x };
   }
+  if kind == OF_EVENT {
+    return Fd { kind: K_EVENT, x: h };      // the counter lives in the description
+  }
+  if kind == OF_TIMER && x < TFD_N {
+    return Fd { kind: K_TIMER, x: x };
+  }
+  if kind == OF_EPOLL && x < EP_N {
+    return Fd { kind: K_EPOLL, x: x };
+  }
   return Fd { kind: K_BAD, x: 0 };
 }
 
@@ -113,8 +125,9 @@ fn fd_ofd(k: &Kernel, pid: u64, fd: u64) -> u64
   return v - FD_OFD;
 }
 
-/// Whether descriptor `fd` of process `pid` is a pipe end with O_NONBLOCK:
-/// a read or write that would wait fails with -EAGAIN instead.
+/// Whether descriptor `fd` of process `pid` is a pipe end, eventfd, timerfd
+/// or epoll instance with O_NONBLOCK: a read or write that would wait
+/// fails with -EAGAIN instead.
 fn pipe_nonblock(k: &Kernel, pid: u64, fd: u64) -> bool
   requires fds_ok(k) && pid < NPROC
 {
@@ -122,8 +135,13 @@ fn pipe_nonblock(k: &Kernel, pid: u64, fd: u64) -> bool
   if h >= OFD_N {
     return false;
   }
-  let kind = of_get(k.ofd, h, 0);
-  return (kind == OF_PIPE_R || kind == OF_PIPE_W) && of_get(k.ofd, h, 3) == 1;
+  return can_block(of_get(k.ofd, h, 0)) && of_get(k.ofd, h, 3) % 2 == 1;
+}
+
+/// Whether descriptions of this kind keep O_NONBLOCK in the low bit of
+/// word 3.
+fn can_block(kind: u64) -> bool {
+  return kind == OF_PIPE_R || kind == OF_PIPE_W || kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL;
 }
 
 /// Process `pid`'s descriptors as a new program starts: 0 to 2 on the
@@ -191,6 +209,10 @@ fn unref_value(k: &mut Kernel, v: u64)
     sock_close(&mut k.nic, x);
   } else if kind == OF_TCP && x < TCBS {
     tcp_close(&mut k.nic, x);               // sends the FIN after what is buffered
+  } else if kind == OF_TIMER && x < TFD_N {
+    k.evt = set(k.evt, x * TFD_STRIDE, 0);  // the timer is free again
+  } else if kind == OF_EPOLL && x < EP_N {
+    k.evt = set(k.evt, EP_AT + x * EP_STRIDE, 0);
   } else if kind == OF_UNIX {
     ux_close(&mut k, x, w);                 // src/lxunix.bastio
   }
@@ -490,7 +512,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
   if h < OFD_N {
     kind = of_get(k.ofd, h, 0);
   }
-  let pipe = h < OFD_N && (kind == OF_PIPE_R || kind == OF_PIPE_W);
+  let pipe = h < OFD_N && can_block(kind);
   if cmd == F_GETFL {
     if !pipe {
       return LO_RDWR;
@@ -499,15 +521,19 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     if kind == OF_PIPE_W {
       fl = LO_WRONLY;
     }
-    if of_get(k.ofd, h, 3) == 1 {
+    if kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL {
+      fl = LO_RDWR;
+    }
+    if of_get(k.ofd, h, 3) % 2 == 1 {
       fl = fl + LO_NONBLOCK;
     }
     return fl;
   }
   if cmd == F_SETFL {
-    // O_NONBLOCK on a pipe end can change; no other flag (O_APPEND) can.
+    // O_NONBLOCK on a pipe end (or eventfd, timerfd, epoll) can change; no
+    // other flag (O_APPEND) can.
     if pipe {
-      of_set(&mut k.ofd, h, 3, arg / LO_NONBLOCK % 2);
+      of_set(&mut k.ofd, h, 3, of_get(k.ofd, h, 3) / 2 * 2 + arg / LO_NONBLOCK % 2);
     }
     return 0;
   }

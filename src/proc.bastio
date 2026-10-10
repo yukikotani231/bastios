@@ -334,7 +334,18 @@ const LX_TIMES: u64 = 100;
 const OF_SOCK: u64 = 5;               // x: the kernel socket; word 3: 2 * peer + nonblocking
 const OF_DEV: u64 = 7;                // x: the device (src/lxdev.bastio)
 const OF_TCP: u64 = 6;                // x: the kernel connection (TCBS: none yet); word 3: see src/lxtcp.bastio
-const OF_UNIX: u64 = 9;               // an AF_UNIX socket: see src/lxunix.bastio
+const OF_EVENT: u64 = 8;              // an eventfd: x the counter; word 3: nonblocking + 2 * semaphore (src/lxevent.bastio)
+const OF_TIMER: u64 = 9;              // a timerfd: x the timer; word 3: nonblocking
+const OF_EPOLL: u64 = 10;             // an epoll instance: x the instance; word 3: nonblocking
+const TFD_N: u64 = 8;                 // timerfds, in k.evt from 0: TFD_STRIDE words each
+const TFD_STRIDE: u64 = 4;
+const EP_N: u64 = 8;                  // epoll instances, in k.evt from EP_AT: EP_STRIDE words each
+const EP_FDS: u64 = 16;               // descriptors one epoll instance watches
+const EP_ENTRY: u64 = 4;              // fd + 1 (0: empty), its description, events, data
+const EP_STRIDE: u64 = 65;            // 1 + EP_FDS * EP_ENTRY
+const EP_AT: u64 = 32;                // TFD_N * TFD_STRIDE
+const EVT_LEN: u64 = 552;             // EP_AT + EP_N * EP_STRIDE
+const OF_UNIX: u64 = 11;              // an AF_UNIX socket: see src/lxunix.bastio
 const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
 const DIR_VFS: u64 = 2;               // DIR_VFS + a file layer directory handle
@@ -413,6 +424,9 @@ const K_PIPE_W: u64 = 4;
 const K_DIR: u64 = 5;                 // x: DIR_ROOT or DIR_BIN
 const K_SOCK: u64 = 6;                // x: the kernel socket
 const K_DEV: u64 = 7;                 // x: the device (src/lxdev.bastio)
+const K_EVENT: u64 = 8;               // x: the description (src/lxevent.bastio)
+const K_TIMER: u64 = 9;               // x: the timer
+const K_EPOLL: u64 = 10;              // x: the epoll instance
 
 struct Kernel {
   mem: Mem,             // the page allocator
@@ -437,17 +451,18 @@ struct Kernel {
   dpath: Buf,           // the path of each open directory description, laid out like cwd
   sigsave: Buf,         // per process, the mask rt_sigsuspend replaced; then each pending signal's sender (src/lxsig.bastio)
   alarms: Buf,          // Linux ITIMER_REAL per process: deadline (0: off) and interval (src/lxtime.bastio)
+  evt: Buf,             // timerfds and epoll instances (src/lxevent.bastio)
   ux: Buf,              // AF_UNIX channels and names (src/lxunix.bastio)
   uxb: Bytes,           // their bytes
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN
 }
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 26;
+const NPROGS: u64 = 27;
 const LDSO_PROG: u64 = 25;            // musl's dynamic linker, the interpreter of musl programs
 
 fn prog_name(i: u64) -> Str {
@@ -529,6 +544,9 @@ fn prog_name(i: u64) -> Str {
   if i == 25 {
     return "ld-musl-x86_64.so.1";
   }
+  if i == 26 {
+    return "diskbench";
+  }
   return "(file)";                    // a program loaded from a file
 }
 
@@ -607,6 +625,9 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 25 {
     return include_bytes("../build/user/ld-musl.so");
+  }
+  if i == 26 {
+    return include_bytes("../build/user/diskbench.bin");
   }
   return include_bytes("../build/user/fault.bin");
 }
