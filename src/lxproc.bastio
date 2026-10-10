@@ -426,22 +426,52 @@ fn lx_args(k: &mut Kernel, pid: u64, argv: u64, args: &mut Bytes, from: u64, mos
 
 // ---------------------------------------------------------------- wait4
 
+/// Whether wait4's pid argument `want` names child c of pid: -1 any child,
+/// 0 one in pid's process group, -g one in group g, else that pid.
+fn wait_match(procs: &Buf, pid: u64, c: u64, want: u64) -> bool
+  requires len(procs) == PTAB_LEN && pid < NPROC && c < NPROC
+{
+  if want == 0xFFFFFFFFFFFFFFFF {
+    return true;
+  }
+  if want == 0 {
+    return pgid_of(procs, c) == pgid_of(procs, pid);
+  }
+  if want >= 0x8000000000000000 {
+    return pgid_of(procs, c) == 0xFFFFFFFFFFFFFFFF - want + 1;
+  }
+  return c == want;
+}
+
 /// wait4(want, status, options, rusage): collects a child that has ended
-/// (child `want`, or any for -1 or 0), storing its exit code as the Linux
+/// (one wait_match names), storing its exit code as the Linux
 /// status at user address `status` if not NULL. With none ended yet, the
 /// process blocks (WNOHANG: returns 0) and the call is restarted once a
 /// child ends. rusage is not filled in.
-fn lx_wait4(k: &mut Kernel, pid: u64, want: u64, status: u64, options: u64) -> u64
+fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC
   ensures kok(k)
 {
-  let any = want == 0 || want >= 0x8000000000000000;
+  // WNOHANG, WUNTRACED, WCONTINUED, __WNOTHREAD, __WALL and __WCLONE.
+  if options % 0x100000000 & !0xE000000B != 0 {
+    ret(&mut k.procs, pid, EINVAL);
+    return KEEP;
+  }
+  let p32 = pidarg % 0x100000000;           // a pid_t
+  if p32 == 0x80000000 {
+    ret(&mut k.procs, pid, ESRCH);          // INT_MIN has no group to name
+    return KEEP;
+  }
+  let mut want = p32;
+  if p32 > 0x80000000 {
+    want = 0xFFFFFFFF00000000 + p32;        // negative: sign-extend
+  }
   let mut found = false;
   let mut c = 1;
   while c < NPROC
     invariant 1 <= c && c <= NPROC && kok(k)
   {
-    if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE && (any || c == want) {
+    if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
       found = true;
       if state(k.procs, c) == ZOMBIE {
         if status != 0 {
@@ -486,8 +516,8 @@ fn lx_wait4(k: &mut Kernel, pid: u64, want: u64, status: u64, options: u64) -> u
 
 /// waitid(idtype, id, info, options): like wait4, with the answer in a
 /// siginfo (SIGCHLD, CLD_EXITED or CLD_KILLED, the pid and the status).
-/// P_ALL and P_PGID (there are no process groups) wait for any child,
-/// P_PID for one. WNOWAIT leaves the child to be waited for again. Only
+/// P_ALL waits for any child, P_PID for one, P_PGID for one in a group.
+/// WNOWAIT leaves the child to be waited for again. Only
 /// ended children are reported (WEXITED); WNOHANG with none returns 0 with
 /// the siginfo's pid 0.
 fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options: u64) -> u64
@@ -498,13 +528,22 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
     ret(&mut k.procs, pid, EINVAL);         // WEXITED is the only event there is
     return KEEP;
   }
-  let any = idtype != 1;
+  // P_ALL any child, P_PID child id, P_PGID one in group id (0: pid's own).
+  let mut want = 0xFFFFFFFFFFFFFFFF;
+  if idtype == 1 {
+    want = id % 0x80000000;
+  } else if idtype == 2 {
+    want = 0;
+    if id % 0x80000000 != 0 {
+      want = 0xFFFFFFFFFFFFFFFF - id % 0x80000000 + 1;
+    }
+  }
   let mut found = false;
   let mut c = 1;
   while c < NPROC
     invariant 1 <= c && c <= NPROC && kok(k)
   {
-    if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE && (any || c == id) {
+    if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
       found = true;
       if state(k.procs, c) == ZOMBIE {
         if info != 0 {
