@@ -682,7 +682,7 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     }
     k.line = set(k.line, TT_SET, 1);
     if req == TCSETSF {
-      k.q = set(k.q, 1, 0);                 // TCSAFLUSH: drop what was typed and not read
+      ring_clear(&mut k.q.r);               // TCSAFLUSH: drop what was typed and not read
       k.line = set(k.line, 0, 0);
       k.line = set(k.line, 1, 0);
     }
@@ -834,7 +834,7 @@ fn tty_cook(con: &mut Con, k: &mut Kernel)
   if !tt_canon(k.line) {
     let echo = tt_flags(k.line, 12) & ECHO != 0;
     let crnl = tt_flags(k.line, 0) & ICRNL != 0;
-    while get(k.q, 1) > 0 && get(k.line, 0) < LINE_MAX
+    while k.q.r.n > 0 && get(k.line, 0) < LINE_MAX
       invariant kok(k) && con_ok(con)
     {
       let mut c = q_pop(&mut k.q) % 256;
@@ -852,7 +852,7 @@ fn tty_cook(con: &mut Con, k: &mut Kernel)
     return;
   }
   let echo = tt_flags(k.line, 12) & ECHO != 0;
-  while get(k.line, 1) == 0 && get(k.q, 1) > 0
+  while get(k.line, 1) == 0 && k.q.r.n > 0
     invariant kok(k) && con_ok(con)
   {
     tty_key(&mut con, &mut k.line, q_pop(&mut k.q), echo);

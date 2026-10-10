@@ -65,6 +65,25 @@ fn pi_set(t: &mut Buf, p: u64, f: u64, v: u64)
   t = set(t, p * PIPE_STRIDE + f, v);
 }
 
+/// Pipe p's head and count as a core Ring over its PIPE_CAP bytes of
+/// k.pipebuf. The stored words are clamped, so the ring is well formed
+/// whatever they hold.
+fn pipe_ring(t: &Buf, p: u64) -> Ring
+  requires len(t) == PIPES_LEN && p < NPIPES
+  ensures ring_ok(result) && result.cap == PIPE_CAP
+{
+  return Ring { h: pi_get(t, p, 0) % PIPE_CAP, n: smaller(pi_get(t, p, 1), PIPE_CAP), cap: PIPE_CAP };
+}
+
+/// Stores ring r back as pipe p's head and count.
+fn pipe_keep(t: &mut Buf, p: u64, r: &Ring)
+  requires len(t) == PIPES_LEN && p < NPIPES
+  ensures len(t) == PIPES_LEN
+{
+  pi_set(&mut t, p, 0, r.h);
+  pi_set(&mut t, p, 1, r.n);
+}
+
 /// What Linux descriptor `fd` of process `pid` refers to.
 fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   requires fds_ok(k) && pid < NPROC
@@ -764,7 +783,8 @@ fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && p < NPIPES
   ensures kok(k)
 {
-  let count = smaller(pi_get(k.pipes, p, 1), PIPE_CAP);
+  let mut r = pipe_ring(k.pipes, p);
+  let count = r.n;
   if count == 0 {
     if pi_get(k.pipes, p, 3) == 0 && pi_get(k.pipes, p, 5) != 0 {
       return 0;                             // every writer has gone
@@ -775,14 +795,13 @@ fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
     return 0;
   }
   let want = smaller(smaller(n, count), XFER);
-  let head = pi_get(k.pipes, p, 0) % PIPE_CAP;
-  ring_out(&mut k.fs.xfer, 0, k.pipebuf, p * PIPE_CAP, PIPE_CAP, head, want);
+  ring_out(&mut k.fs.xfer, 0, k.pipebuf, p * PIPE_CAP, PIPE_CAP, r.h, want);
   let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
   if put == NO_RESULT || (put == 0 && want > 0) {
     return EFAULT;
   }
-  pi_set(&mut k.pipes, p, 0, (head + put) % PIPE_CAP);
-  pi_set(&mut k.pipes, p, 1, count - put);
+  ring_pop_n(&mut r, put);
+  pipe_keep(&mut k.pipes, p, r);
   return put;
 }
 
@@ -800,8 +819,8 @@ fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   if n == 0 {
     return 0;
   }
-  let count = smaller(pi_get(k.pipes, p, 1), PIPE_CAP);
-  let room = PIPE_CAP - count;
+  let mut r = pipe_ring(k.pipes, p);
+  let room = ring_room(r);
   if room == 0 || (n <= PIPE_ATOM && room < n) {
     return EAGAIN;
   }
@@ -809,9 +828,9 @@ fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   if got == NO_RESULT || (got == 0 && n > 0) {
     return EFAULT;
   }
-  let head = pi_get(k.pipes, p, 0) % PIPE_CAP;
-  ring_in(&mut k.pipebuf, p * PIPE_CAP, PIPE_CAP, (head + count) % PIPE_CAP, k.fs.xfer, 0, got);
-  pi_set(&mut k.pipes, p, 1, count + got);
+  ring_in(&mut k.pipebuf, p * PIPE_CAP, PIPE_CAP, ring_slot(r, r.n), k.fs.xfer, 0, got);
+  ring_push_n(&mut r, got);
+  pipe_keep(&mut k.pipes, p, r);
   return got;
 }
 

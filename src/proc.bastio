@@ -257,14 +257,13 @@ fn fpu_init(f: &mut Frame) {
 
 // ---------------------------------------------------------------- input queue
 
-// Bytes typed on the console, waiting for a READ: word 0 is the head,
-// word 1 the count, then a ring of INQ_CAP bytes. It holds a whole long
-// line pasted at once (as Linux's 4096-byte tty buffer does), not just 256.
+// Bytes typed on the console, waiting for a READ: a core Queue of
+// INQ_CAP bytes, one to a word. It holds a whole long line pasted at once
+// (as Linux's 4096-byte tty buffer does), not just 256.
 const INQ_CAP: u64 = 4096;
-const INQ_LEN: u64 = 4098;
 
-spec fn qok(q: &Buf) -> bool {
-  len(q) == INQ_LEN && get(q, 0) < INQ_CAP && get(q, 1) <= INQ_CAP
+spec fn qok(q: &Queue) -> bool {
+  queue_ok(q) && q.r.cap == INQ_CAP
 }
 
 // The terminal line for Linux programs: word 0 is how many bytes it holds
@@ -284,36 +283,30 @@ spec fn lineok(l: &Buf) -> bool {
   len(l) == LINE_LEN && get(l, 0) <= LINE_MAX && get(l, 1) <= 1
 }
 
-fn q_push(q: &mut Buf, b: u64)
+/// Appends byte b, or drops it when the queue is full.
+fn q_push(q: &mut Queue, b: u64)
   requires qok(q)
   ensures qok(q)
 {
-  let n = get(q, 1);
-  if n < INQ_CAP {
-    q = set(q, 2 + (get(q, 0) + n) % INQ_CAP, b);
-    q = set(q, 1, n + 1);
+  if q.r.n < INQ_CAP {
+    queue_push(&mut q, b);
   }
 }
 
 /// The oldest byte, or 256 if there is none.
-fn q_pop(q: &mut Buf) -> u64
+fn q_pop(q: &mut Queue) -> u64
   requires qok(q)
   ensures qok(q)
 {
-  let n = get(q, 1);
-  if n == 0 {
+  if q.r.n == 0 {
     return 256;
   }
-  let h = get(q, 0);
-  let b = get(q, 2 + h);
-  q = set(q, 0, (h + 1) % INQ_CAP);
-  q = set(q, 1, n - 1);
-  return b;
+  return queue_pop(&mut q);
 }
 
 /// Hands queued bytes to processes blocked in READ, and wakes processes
 /// blocked in a Linux read once a whole line is typed.
-fn wake_readers(procs: &mut Buf, q: &mut Buf, line: &Buf)
+fn wake_readers(procs: &mut Buf, q: &mut Queue, line: &Buf)
   requires len(procs) == PTAB_LEN && qok(q) && lineok(line)
   ensures len(procs) == PTAB_LEN && qok(q)
 {
@@ -321,7 +314,7 @@ fn wake_readers(procs: &mut Buf, q: &mut Buf, line: &Buf)
   while p < NPROC
     invariant 1 <= p && p <= NPROC && len(procs) == PTAB_LEN && qok(q)
   {
-    if state(procs, p) == READING && get(q, 1) > 0 {
+    if state(procs, p) == READING && q.r.n > 0 {
       pset(&mut procs, p, F_REGS + R_RAX, q_pop(&mut q));
       pset(&mut procs, p, F_STATE, READY);
     }
@@ -535,7 +528,7 @@ struct Kernel {
   spaces: Vec[Space],   // element `pid` is that process's address space
   fpus: Vec[Fpu],       // element `pid` is that process's FPU state
   procs: Buf,           // the process table
-  q: Buf,               // console input waiting for a READ
+  q: Queue,             // console input waiting for a READ
   line: Buf,            // the line a Linux program is typing (see tty_cook)
   lxfd: Buf,            // Linux descriptors (src/lxfd.bastio)
   ofd: Buf,             // open file descriptions they share

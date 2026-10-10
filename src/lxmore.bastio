@@ -44,15 +44,15 @@ fn pipe_put_xfer(k: &mut Kernel, p: u64, n: u64) -> u64
   if pi_get(k.pipes, p, 2) == 0 {
     return EPIPE;
   }
-  let count = smaller(pi_get(k.pipes, p, 1), PIPE_CAP);
-  let room = PIPE_CAP - count;
+  let mut r = pipe_ring(k.pipes, p);
+  let room = ring_room(r);
   if room == 0 {
     return EAGAIN;
   }
   let put = smaller(n, room);
-  let head = pi_get(k.pipes, p, 0) % PIPE_CAP;
-  ring_in(&mut k.pipebuf, p * PIPE_CAP, PIPE_CAP, (head + count) % PIPE_CAP, k.fs.xfer, 0, put);
-  pi_set(&mut k.pipes, p, 1, count + put);
+  ring_in(&mut k.pipebuf, p * PIPE_CAP, PIPE_CAP, ring_slot(r, r.n), k.fs.xfer, 0, put);
+  ring_push_n(&mut r, put);
+  pipe_keep(&mut k.pipes, p, r);
   return put;
 }
 
