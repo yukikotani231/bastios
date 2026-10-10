@@ -61,7 +61,7 @@ const SY_UTS_END: u64 = 19;
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
 const S_IFREG_RO: u64 = 0x8124;       // a regular file, r--r--r--
-const INO_PROC: u64 = 4096;           // /proc inode numbers start here
+const INO_PROC: u64 = 8192;           // /proc inode numbers start here (past INO_FILES + HFILES)
 const LX_READLINK: u64 = 89;
 const LX_READLINKAT: u64 = 267;
 
@@ -398,7 +398,7 @@ fn put_prog(k: &mut Kernel, p: u64, o: &mut Bytes, at: u64, base: bool) -> u64
   ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
 {
   let prog = pget(k.procs, p, F_PROG);
-  if prog < NPROGS || prog == NPROGS || prog - NPROGS - 1 >= NFILES + DSLOTS {
+  if prog < NPROGS || prog == NPROGS || prog - NPROGS - 1 >= HFILES {
     let mut a = at;
     if !base {
       a = put_s(&mut o, a, "/bin/");
@@ -513,6 +513,32 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
         }
       }
       s = s + 1;
+    }
+    // The loop mount: "/dev/loopN /NAME bstdisk3 rw 0 0" ("bstdisk3" for
+    // an image mounted from its file).
+    if k.fs.lo_at != 0 && k.fs.lo_at <= NFILES {
+      let l = ram_name(&mut k.fs.ram, k.fs.lo_at - 1, &mut k.fs.name);
+      if l != NO_FILE {
+        if k.fs.lo_dev == LO_NODEV {
+          a = put_s(&mut o, a, "bstdisk3 /");
+        } else {
+          a = put_s(&mut o, a, "/dev/loop");
+          a = put_n(&mut o, a, k.fs.lo_dev);
+          a = put_s(&mut o, a, " /");
+        }
+        let mut j = 0;
+        while j < l
+          invariant j <= l && l <= NAMEBUF && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+        {
+          a = put_c(&mut o, a, bget(k.fs.name, j));
+          j = j + 1;
+        }
+        if k.fs.lo_ro {
+          a = put_s(&mut o, a, " bstdisk3 ro 0 0\n");
+        } else {
+          a = put_s(&mut o, a, " bstdisk3 rw 0 0\n");
+        }
+      }
     }
     return a;
   }

@@ -191,7 +191,8 @@ sudo dd if=build/bastios-usb.img of=/dev/sdX bs=4M conv=fsync
 
 BastiOS has been run only in QEMU so far. On a real PC:
 - **Console.** The first serial port (COM1, 115200 baud), and the screen if GRUB can give it a 32-bit linear framebuffer between 2 GiB and the I/O APIC, which is where PC firmware puts it. Keys come from a PS/2 keyboard, or a USB keyboard on an xHCI (USB 3) controller, on a root port or behind up to two USB 2 hubs (a SuperSpeed device behind a USB 3 hub is not found).
-- **Processor.** It needs 1 GiB pages, which every x86-64 CPU of the last decade has. Other processors are found in the ACPI tables; tables above 1 GiB leave it on one processor.
+- **Processor.** It needs 1 GiB pages, which every x86-64 CPU of the last decade has. Other processors are found in the ACPI tables; tables between 1 and 2 GiB, or above 4 GiB, leave it on one processor.
+- **Power.** `halt` powers off and `reboot` restarts through ACPI (S5, and the FADT's reset register, else the keyboard controller or 0xCF9), and the power button powers off. The clock is the HPET, or the ACPI PM timer without one.
 - **Disk.** The BastiOS partition of a USB stick or disk on an xHCI controller, as for the keyboard (`make usb`; bulk-only transport, 512-byte sectors), else an NVMe drive (namespace 1, 512-byte or 4 KiB sectors), a virtio disk, a SATA disk on an AHCI controller (the first port with a disk, 512-byte sectors), or a legacy ATA disk. The first boot formats it, so give it a disk you can lose, or boot from the `make usb` image.
 - **Network.** A virtio or Intel e1000 (82540EM) card; other cards are ignored.
 - **Devices** are found on any PCI bus the firmware numbered, through the legacy configuration ports, not PCIe's ECAM.

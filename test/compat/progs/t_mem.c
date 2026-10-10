@@ -43,6 +43,29 @@ int main(void) {
            c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0; }) && ({ char c = 0; pread(fd, &c, 1, 2) == 1 && c == 'X'; }));
     EXPECT("MAP_SHARED file mapping across fork", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) != MAP_FAILED &&
            ({ pid_t c = fork(); c == 0 ? (q[3] = 'F', _exit(0), 0) : c > 0 && waitpid(c, &st, 0) == c && q[3] == 'F'; }));
+    {
+        /* Two processes that map the file on their own share its pages,
+           and read(2) and write(2) agree with the mapping. */
+        pid_t c = fork();
+        if (c == 0) {
+            int g = open("cm_f", O_RDWR);
+            char *m = g >= 0 ? mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, g, 0) : MAP_FAILED;
+            if (m == MAP_FAILED) _exit(1);
+            m[4] = 'C';
+            for (int i = 0; i < 3000000 && m[5] != 'P'; i++) sched_yield();
+            _exit(0);
+        }
+        char *m = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        int ok = c > 0 && m != MAP_FAILED;
+        for (int i = 0; ok && i < 3000000 && m[4] != 'C'; i++) sched_yield();
+        EXPECT("MAP_SHARED file mapped by two processes", ok && m[4] == 'C');
+        if (ok) m[5] = 'P';
+        ok = ok && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+        char b = 0;
+        EXPECT("read(2) sees a store into a MAP_SHARED mapping", ok && (m[6] = 'R', pread(fd, &b, 1, 6) == 1) && b == 'R');
+        EXPECT("a MAP_SHARED mapping sees write(2)", ok && pwrite(fd, "W", 1, 7) == 1 && m[7] == 'W');
+        if (m != MAP_FAILED) munmap(m, 4096);
+    }
     close(fd);
     unlink("cm_f");
     EXPECT("MAP_SHARED anonymous across fork", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&

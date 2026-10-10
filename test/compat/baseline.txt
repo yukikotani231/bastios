@@ -248,6 +248,9 @@ t_ltp2: sendto with a huge address length is EINVAL
 t_mem: 64 MiB of address space
 t_mem: MAP_SHARED anonymous across fork
 t_mem: MAP_SHARED file mapping across fork
+t_mem: MAP_SHARED file mapped by two processes
+t_mem: read(2) sees a store into a MAP_SHARED mapping
+t_mem: a MAP_SHARED mapping sees write(2)
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
 t_mem: file for mapping

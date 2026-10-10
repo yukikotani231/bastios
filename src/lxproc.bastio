@@ -619,7 +619,7 @@ fn file_meta(v: &mut Vfs, f: u64) -> Meta
 {
   let size = vfs_size(&mut v, f);
   let fm = vfs_meta(&mut v, f);
-  if size == NO_FILE || !fm.ok || f >= NFILES + DSLOTS {
+  if size == NO_FILE || !fm.ok || f >= HFILES {
     return Meta { ok: false, mode: 0, size: 0, ino: 0, mtime: 0 };
   }
   let mut kind = S_IFMT_REG;
@@ -664,7 +664,7 @@ fn put_stat(k: &mut Kernel, pid: u64, buf: u64, m: Meta) -> u64
   ensures kok(k)
 {
   let mut nlink = 1;
-  if m.ino >= INO_FILES && m.ino < INO_FILES + NFILES + DSLOTS {
+  if m.ino >= INO_FILES && m.ino < INO_FILES + HFILES {
     nlink = vfs_nlink(&mut k.fs, m.ino - INO_FILES);   // a file and its hard links
   }
   lx_fill(&mut k, 0, STAT_SIZE);
@@ -775,7 +775,22 @@ fn applet_name(j: u64) -> Str {
   if j == 16 {
     return "readlink";
   }
-  return "mkfifo";
+  if j == 17 {
+    return "reboot";
+  }
+  if j == 18 {
+    return "poweroff";
+  }
+  if j == 19 {
+    return "mkfifo";
+  }
+  if j == 20 {
+    return "mount";
+  }
+  if j == 21 {
+    return "umount";
+  }
+  return "truncate";
 }
 
 /// Stores v little-endian in bytes at..at+8 of x.
