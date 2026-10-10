@@ -3,7 +3,12 @@
  * sessions and process groups, the terminal's name and group, sched_yield,
  * how much a pipe holds, and a private copy of a read-only page that
  * mprotect makes writable (the kernel shares those pages between the
- * processes running a built-in program). */
+ * processes running a built-in program). Run from a file with its own path
+ * as the argument, it removes that file first: the kernel reads a code
+ * page from the file when the program first runs it (src/lazy.bastio), so
+ * the pages of far_code and far_more, each alone on a page and run only at
+ * the end, come from a file that has no name any more, one of them after
+ * mprotect. */
 #include <errno.h>
 #include <fcntl.h>
 #include <sched.h>
@@ -203,8 +208,30 @@ static int private_copy(void)
     return 0;
 }
 
-int main(void)
+/* Code on pages of its own, run only at the end. */
+__attribute__((noinline, aligned(4096))) static int far_code(int x)
 {
+    return x * 3 + 1;
+}
+
+__attribute__((noinline, aligned(4096))) static int far_more(int x)
+{
+    return x * 5 + 2;
+}
+
+static int late_code(void)
+{
+    if (mprotect((void *)far_code, 4096, PROT_READ | PROT_EXEC) != 0)
+        return fail("mprotect a code page not run yet");
+    if (far_code(4) != 13 || far_more(4) != 22)
+        return fail("code read from the program's file");
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc > 1 && unlink(argv[1]) != 0)
+        return fail("unlink the program");
     struct utsname u;
     char host[64];
     if (uname(&u) != 0 || strcmp(u.sysname, "Linux") != 0 || strcmp(u.machine, "x86_64") != 0)
@@ -271,7 +298,7 @@ int main(void)
     int held = pipes();
     if (held < 0)
         return fail("pipe capacity");
-    if (private_copy() != 0)
+    if (private_copy() != 0 || late_code() != 0)
         return 1;
     printf("mmisc: ok on %s %s, signals, pipe %d\n", u.sysname, u.machine, held);
     return 0;

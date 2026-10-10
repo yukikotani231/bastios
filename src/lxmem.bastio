@@ -284,6 +284,7 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
   }
   let from = r / 4294967296;
   let to = r % 4294967296;
+  lazy_fill(&mut k, pid, from, to);         // code not read yet: read it first
   // Only pages mmap handed out can have been left unmapped by PROT_NONE.
   let low = pget(k.procs, pid, F_MMAP) / 4096;
   if prot != 0 && from >= low && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, from, to, false) {
@@ -509,6 +510,7 @@ fn map_forget(k: &mut Kernel, pid: u64, from: u64, to: u64, wait: bool) -> u64
     }
     i = i + 1;
   }
+  lazy_forget(&mut k, pid, from, to);       // code not read yet stays unread
   return 0;
 }
 

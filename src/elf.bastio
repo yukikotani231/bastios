@@ -104,6 +104,18 @@ struct Seg {
   off: u64,       // window offset of the segment
   memsz: u64,
   w: bool,        // writable (PF_W)
+  x: bool,        // executable (PF_X)
+}
+
+/// The pages exec leaves out of a new address space for the program's
+/// first touch of each to bring in (src/lazy.bastio): window pages first
+/// .. first + pages, the first at file offset off. pages 0: none.
+struct Lz { first: u64, pages: u64, off: u64 }
+
+fn lz_none() -> Lz
+  ensures result.pages == 0 && result.first == 0
+{
+  return Lz { first: 0, pages: 0, off: 0 };
 }
 
 spec fn seg_fits(size: u64, s: Seg) -> bool {
@@ -148,7 +160,7 @@ fn is_elf(img: Str) -> bool {
 fn bad_seg() -> Seg
   ensures result.kind == SEG_BAD
 {
-  return Seg { kind: SEG_BAD, from: 0, filesz: 0, off: 0, memsz: 0, w: true };
+  return Seg { kind: SEG_BAD, from: 0, filesz: 0, off: 0, memsz: 0, w: true, x: false };
 }
 
 /// Program header `i` of `src` (headers at `phoff`), placed with `bias`.
@@ -169,10 +181,10 @@ fn seg(v: &mut Vfs, src: Src, phoff: u64, i: u64, bias: u64) -> Seg
     if plen < 2 || plen > INTERP_MAX || from > n || plen > n - from {
       return bad_seg();
     }
-    return Seg { kind: SEG_INTERP, from: from, filesz: plen, off: 0, memsz: 0, w: true };
+    return Seg { kind: SEG_INTERP, from: from, filesz: plen, off: 0, memsz: 0, w: true, x: false };
   }
   if t != PT_LOAD {
-    return Seg { kind: SEG_SKIP, from: 0, filesz: 0, off: 0, memsz: 0, w: true };
+    return Seg { kind: SEG_SKIP, from: 0, filesz: 0, off: 0, memsz: 0, w: true, x: false };
   }
   let vaddr = rd64(v.xfer, h + 16);
   let filesz = rd64(v.xfer, h + 32);
@@ -188,7 +200,7 @@ fn seg(v: &mut Vfs, src: Src, phoff: u64, i: u64, bias: u64) -> Seg
   if off > IMAGE_MAX || memsz > IMAGE_MAX - off {
     return bad_seg();
   }
-  return Seg { kind: SEG_LOAD, from: from, filesz: filesz, off: off, memsz: memsz, w: flags % 4 >= 2 };
+  return Seg { kind: SEG_LOAD, from: from, filesz: filesz, off: off, memsz: memsz, w: flags % 4 >= 2, x: flags % 2 == 1 };
 }
 
 fn bad_elf() -> Elf
@@ -293,10 +305,10 @@ fn on_page(a: u64, left: u64) -> u64
 }
 
 /// Copies the `n` bytes at offset `from` of `src` to window offset `off`,
-/// XFER bytes at a time. A page the window does not map is skipped
-/// (`new_window` maps them all), and so is a whole page mapped read-only
-/// (a shared page of program text, share_text: it holds these bytes
-/// already). Returns false if the bytes could not all be read.
+/// XFER bytes at a time. A page the window does not map is skipped, and
+/// a whole one is not even read (a page left for the first touch, Lz);
+/// so is a whole page mapped read-only (a shared page of program text,
+/// share_text: it holds these bytes already). Returns false if the bytes could not all be read.
 fn copy_in(l2: &mut PageTable, v: &mut Vfs, src: Src, from: u64, off: u64, n: u64) -> bool
   requires pt_level(l2) == 2 && vfs_ok(v) && off + n <= IMAGE_MAX && from + n <= src.size
   ensures pt_level(l2) == 2 && vfs_ok(v)
@@ -306,7 +318,7 @@ fn copy_in(l2: &mut PageTable, v: &mut Vfs, src: Src, from: u64, off: u64, n: u6
     invariant k <= n && pt_level(l2) == 2 && vfs_ok(v)
   {
     let c = smaller(n - k, XFER);
-    if c == 4096 && (off + k) % 4096 == 0 && w_readonly(&mut l2, (off + k) / 4096) {
+    if c == 4096 && (off + k) % 4096 == 0 && (w_readonly(&mut l2, (off + k) / 4096) || !w_has(&mut l2, (off + k) / 4096)) {
       k = k + c;
     } else {
       if !src_read(&mut v, src, from + k, c) {
@@ -541,6 +553,53 @@ fn share_text(m: &mut Mem, st: &mut PageTable, l2: &mut PageTable, v: &mut Vfs, 
   return ok;
 }
 
+/// The pages of program file `src` (headers `e`) to leave for the first
+/// touch: the whole pages of its largest executable, read-only segment's
+/// file bytes, if they sit at a whole-page file offset and no writable
+/// segment shares a page with them. Programs touch a small part of their
+/// code (Z3, 24 MiB of it, answers a query from a few hundred pages), so
+/// exec reads and maps only the rest. None for a built-in program, whose
+/// code is shared already.
+fn lazy_plan(v: &mut Vfs, src: Src, e: Elf) -> Lz
+  requires vfs_ok(v) && e.ok && elf_fits(src.size, e)
+  ensures vfs_ok(v) && result.first + result.pages <= WPAGES
+{
+  if !src.file {
+    return lz_none();
+  }
+  let mut lo = WPAGES;
+  let mut hi = 0;
+  let mut best = lz_none();
+  let mut i = 0;
+  while i < e.phnum
+    invariant i <= e.phnum && e.phnum <= PH_MAX && vfs_ok(v) && best.first + best.pages <= WPAGES
+  {
+    let s = seg(&mut v, src, e.phoff, i, e.bias);
+    if s.kind == SEG_BAD {
+      return lz_none();
+    }
+    if s.kind == SEG_LOAD && s.w {
+      if s.off / 4096 < lo {
+        lo = s.off / 4096;
+      }
+      if (s.off + s.memsz + 4095) / 4096 > hi {
+        hi = (s.off + s.memsz + 4095) / 4096;
+      }
+    } else if s.kind == SEG_LOAD && s.x {
+      let a0 = (s.off + 4095) / 4096;
+      let a1 = (s.off + s.filesz) / 4096;
+      if a1 > a0 && a1 <= WPAGES && (s.from + (a0 * 4096 - s.off)) % 4096 == 0 && a1 - a0 > best.pages {
+        best = Lz { first: a0, pages: a1 - a0, off: s.from + (a0 * 4096 - s.off) };
+      }
+    }
+    i = i + 1;
+  }
+  if best.pages > 0 && best.first < hi && lo < best.first + best.pages {
+    return lz_none();                       // a writable page among them
+  }
+  return best;
+}
+
 /// share_text with the cache, if there is one.
 fn share_text_in(m: &mut Mem, txt: &mut Store, l2: &mut PageTable, v: &mut Vfs, src: Src, e: Elf) -> bool
   requires mem_ok(m) && store_ok(txt) && pt_level(l2) == 2 && vfs_ok(v)
@@ -566,7 +625,7 @@ fn share_text_in(m: &mut Mem, txt: &mut Store, l2: &mut PageTable, v: &mut Vfs, 
 /// `isrc` too when `ie` is ok, and a stack holding argv, envp and the
 /// auxiliary vector. Returns `Space::Empty`, with every page given back,
 /// when memory runs out.
-fn elf_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, e: Elf, isrc: Src, ie: Elf, args: &Bytes, alen: u64, total: u64, seed: u64, clk: Tsc, epoch: u64) -> Space
+fn elf_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, e: Elf, isrc: Src, ie: Elf, lz: Lz, args: &Bytes, alen: u64, total: u64, seed: u64, clk: Tsc, epoch: u64) -> Space
   requires mem_ok(m) && store_ok(txt) && vfs_ok(v) && e.ok && elf_fits(src.size, e) && elf_fits(isrc.size, ie)
   requires alen <= total && total <= ARGS_MAX && total <= blen(args)
   ensures mem_ok(m) && store_ok(txt) && vfs_ok(v)
@@ -585,7 +644,9 @@ fn elf_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, e: Elf, isrc: 
       while ok && q < (e.end + 4095) / 4096
         invariant pt_level(l2) == 2 && mem_ok(m) && e.end <= IMAGE_MAX
       {
-        ok = w_map(&mut m, &mut l2, q, false);
+        if q < lz.first || q - lz.first >= lz.pages {
+          ok = w_map(&mut m, &mut l2, q, false);   // not left for the first touch
+        }
         q = q + 1;
       }
       let mut i = 0;

@@ -1333,7 +1333,10 @@ fails += not ok
 # (share_text, src/elf.bastio): the second run maps the pages the first
 # read in. mmisc mprotects a page of its constants writable in a child and
 # writes it; that must give the child a copy, so the next run (and the
-# parent) still read the original.
+# parent) still read the original. Its code is read from the file only
+# when first run (src/lazy.bastio); given its own path, it removes the file
+# first and still runs code it had not touched (one page after mprotect),
+# which a later exec of the same name then cannot find.
 subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf"], check=True)
 qemu = boot(2, with_disk=True)
 out = b""
@@ -1342,6 +1345,7 @@ for line, want, until in [
     ("ash", b"built-in shell (ash)", b"\n# "),
     ("/disk/mx", b"mmisc: ok on Linux", b"\n# "),
     ("/disk/mx && /disk/mx && echo twice", b"mmisc: ok on Linux x86_64, signals, pipe 65536\r\ntwice", b"\n# "),
+    ("/disk/mx /disk/mx && echo gone; /disk/mx", [b"mmisc: ok on Linux", b"\r\ngone\r\n", b"not found"], b"\n# "),
 ]:
     mark = len(out)
     if mark == 0 and not read_until(b"bastios> "):
@@ -1349,7 +1353,7 @@ for line, want, until in [
         break
     mark = len(out)
     qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
-    ok = read_until(until, mark) and want in out[mark:]
+    ok = read_until(until, mark) and all(w in out[mark:] for w in (want if isinstance(want, list) else [want]))
     print(("ok  " if ok else "FAIL"), "(disk-program boot)", repr(line)); ok or print(repr(out[mark:]))
     fails += not ok
 qemu.kill(); qemu.wait()

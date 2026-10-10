@@ -16,6 +16,15 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Processors
 
+- A program from a file system is read when it runs, not all at exec: its
+  largest code segment's pages are read from the file the first time the
+  program runs them (`src/lazy.bastio`). Z3 has 24 MiB of code; four Z3
+  starts in a row went from 4.2 s to 1.5 s, and four compiler builds
+  (bastioc1 with Z3 and tcc) at once from 14.8 s to 10.6 s on four
+  processors (15.8 s to 12.9 s on one). The process holds its file, so
+  removing the file's name while it runs changes nothing. The kernel
+  reading such a page for a system call before the program ran it (a
+  `write` straight from the program's code) gets `EFAULT`.
 - Programs on a file system share their code: exec maps each whole page
   that only read-only segments cover from the page cache, read-only,
   instead of copying it into a fresh page, as built-in programs already
