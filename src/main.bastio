@@ -13,6 +13,7 @@ import "pages.bastio";
 import "space.bastio";
 import "proc.bastio";
 import "syscall.bastio";
+import "linux.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
@@ -120,6 +121,10 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
           cur = (p + 1) % NPROC;
         } else if r == POWEROFF {
           running = false;
+        }
+      } else if v == V_LINUX {
+        if linux_syscall(con, &mut k, mmu, p) == SWITCH {
+          cur = (p + 1) % NPROC;
         }
       } else if v < 32 {
         puts(con, "\r\n[pid ");

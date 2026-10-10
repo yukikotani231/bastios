@@ -24,7 +24,8 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench
 UASM    := fault straddle
-UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin)
+ELFPROGS := elfexec elfpie elfbad
+UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf)
 
 build/user/%.c: user/%.bastio $(BASTIOC) | build/user
 	$(BASTIOC) --target user -o $@ $<
@@ -49,11 +50,32 @@ build/user/%.elf: build/user/start.o build/user/%.o build/user/libc.o user/user.
 $(UASM:%=build/user/%.elf): build/user/%.elf: build/user/%.o user/user.ld
 	$(CC) $(ULDFLAGS) -o $@ $<
 
+# Static Linux ELF executables, embedded as they are (not flattened): the
+# kernel's ELF loader maps their segments. elfexec is linked at USER_BASE
+# (ET_EXEC), elfpie as a static PIE (ET_DYN), and elfbad is elfexec cut
+# short, so its segments run past the end of the file and it must be refused.
+ELFCFLAGS := $(UCFLAGS) -fno-asynchronous-unwind-tables
+
+build/user/elfcheck.o: user/elfcheck.c | build/user
+	$(CC) $(ELFCFLAGS) -c -o $@ $<
+
+build/user/elfstart.o: user/elfstart.S | build/user
+	$(CC) -c -o $@ $<
+
+build/user/elfexec.elf: build/user/elfstart.o build/user/elfcheck.o
+	$(CC) -nostdlib -static -no-pie -Wl,-Ttext-segment=0x8000000000 -Wl,--build-id=none -o $@ $^
+
+build/user/elfpie.elf: build/user/elfstart.o build/user/elfcheck.o
+	$(CC) -nostdlib -static-pie -Wl,--build-id=none -o $@ $^
+
+build/user/elfbad.elf: build/user/elfexec.elf
+	head -c 4200 $< > $@
+
 build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := src/console.bastio src/pages.bastio src/space.bastio src/proc.bastio src/syscall.bastio src/main.bastio
+KSRCS := src/console.bastio src/pages.bastio src/space.bastio src/elf.bastio src/proc.bastio src/syscall.bastio src/linux.bastio src/main.bastio
 
 # src/main.bastio imports the rest.
 build/kernel.c: $(KSRCS) $(UBINS) $(BASTIOC) | build
