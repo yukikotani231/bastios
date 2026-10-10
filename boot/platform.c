@@ -1,24 +1,12 @@
 /*
- * Platform setup that must happen before the Bastio kernel runs: the task
- * state segment (the stack user-mode traps land on), the interrupt table,
+ * Platform setup that must happen before the Bastio kernel runs: the
+ * interrupt table,
  * the 8259 interrupt controllers and the timer. Part of the trusted base.
  */
 #include <stdint.h>
 
-extern uint64_t bst_gdt[];
 extern const uint64_t bst_trap_stubs[256];
-extern char bst_trap_stack_top[];
 extern char bst_syscall_entry[];
-
-static struct __attribute__((packed)) {
-    uint32_t reserved0;
-    uint64_t rsp0, rsp1, rsp2;
-    uint64_t reserved1;
-    uint64_t ist[7];
-    uint64_t reserved2;
-    uint16_t reserved3;
-    uint16_t iomap_base;
-} tss;
 
 static struct __attribute__((packed)) {
     uint16_t off_lo, sel;
@@ -36,14 +24,7 @@ static inline void outb(uint16_t port, uint8_t v) { __asm__ volatile ("outb %0, 
 #define SYSCALL_VECTOR 0x80
 
 void bst_platform_init(void) {
-    /* TSS: user-mode traps switch to the trap stack. No I/O permission map. */
-    tss.rsp0 = (uint64_t)bst_trap_stack_top;
-    tss.iomap_base = sizeof tss;
-    uint64_t base = (uint64_t)&tss, limit = sizeof tss - 1;
-    bst_gdt[5] = (limit & 0xFFFF) | ((base & 0xFFFFFF) << 16) | (0x89ull << 40)
-               | (((limit >> 16) & 0xF) << 48) | (((base >> 24) & 0xFF) << 56);
-    bst_gdt[6] = base >> 32;
-    __asm__ volatile ("ltr %w0" : : "r"(0x28));
+    /* Each processor's task state segment is set up by bst_core_init (smp.c). */
 
     /* Interrupt gates: interrupts stay off in the kernel. Only the system
      * call gate can be raised from ring 3 with `int`. */
