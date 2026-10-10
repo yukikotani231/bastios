@@ -209,6 +209,12 @@ t_signal: sigprocmask blocks
 t_signal: sigsuspend
 t_signal: sigwait
 t_signal: unblock delivers
+t_thread: 4 threads, mutex
+t_thread: condition variable
+t_thread: gettid differs in a thread
+t_thread: pthread_create + join
+t_thread: pthread_detach
+t_thread: thread-local storage
 t_time: clock_getres
 t_time: clock_gettime BOOTTIME
 t_time: clock_gettime MONOTONIC
