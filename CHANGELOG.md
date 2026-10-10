@@ -14,6 +14,14 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 ### Added
 
+- A getting-started guide (`docs/getting-started.md`): build, boot in
+  QEMU, write a Bastio program, run a Linux program, boot from a USB
+  stick. `make test` checks its programs and terminal sessions, and the
+  README's, against the real system (`test/guide_test.py`).
+- `make disk FILES="..."` puts files from the build machine on the disk
+  that `make run` boots with.
+- The README describes what BastiOS does now; the list of Linux system
+  calls moved to `docs/linux.md`.
 - Fixes from the LTP file-system tests: a path through a file fails with
   `ENOTDIR`, a loop of symbolic links with `ELOOP`, a too-long name with
   `ENAMETOOLONG`, and a bad directory descriptor with `EBADF`/`ENOTDIR`
