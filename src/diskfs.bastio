@@ -552,7 +552,7 @@ fn disk_find(d: &DiskFs, name: &Bytes, from: u64, n: u64) -> u64
 /// Creates an empty file (or directory) at the path name[from..from + n].
 /// Its directory must exist, its last component be 1 to DNAME_MAX bytes,
 /// and the name be free. Returns the entry or DSLOTS.
-fn disk_create(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool) -> u64
+fn disk_create(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, now: u64) -> u64
   requires disk_ok(d) && from + n <= blen(name)
   ensures disk_ok(d) && result <= DSLOTS
 {
@@ -589,6 +589,7 @@ fn disk_create(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool) -> u6
       }
       bset(&mut d.dir, i * DENT + E_NLEN, cast[u8](l));
       dent_set(&mut d, i, E_PARENT, p);
+      dent_set(&mut d, i, E_MTIME, now);
       let mut j = 0;
       while j < l
         invariant j <= l && disk_ok(d)
@@ -936,7 +937,7 @@ fn valid_in(size: u64, b: u64) -> u64
 /// entirely or not at all, even across a power cut (see the top of this
 /// file). Returns the count (short only at the 1 GiB limit), 0 if the disk
 /// is full or fails, or NO_DISK_FILE if there is no file.
-fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64) -> u64
+fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -> u64
   requires disk_ok(d) && i < DSLOTS && n <= blen(buf) && n <= BLOCK
   ensures disk_ok(d)
   ensures result <= n || result == NO_DISK_FILE
@@ -1035,13 +1036,16 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64) -> u64
   // The switch: one sector.
   let size_raw = dent_get(d, i, E_SIZE);
   let root_raw = dent_get(d, i, E_ROOT);
+  let mtime_raw = dent_get(d, i, E_MTIME);
   dent_set(&mut d, i, E_SIZE, newsize);
   dent_set(&mut d, i, E_ROOT, nr);
+  dent_set(&mut d, i, E_MTIME, now);
   if !ent_flush(&mut d, i) {
     // The sector may or may not be on the disk: keep both trees (the
     // next mount frees the one that lost) and the old one in memory.
     dent_set(&mut d, i, E_SIZE, size_raw);
     dent_set(&mut d, i, E_ROOT, root_raw);
+    dent_set(&mut d, i, E_MTIME, mtime_raw);
     return 0;
   }
   free_block(&mut d, old0);
@@ -1053,7 +1057,7 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64) -> u64
 }
 
 /// Empties the file in entry i.
-fn disk_truncate(d: &mut DiskFs, i: u64) -> bool
+fn disk_truncate(d: &mut DiskFs, i: u64, now: u64) -> bool
   requires disk_ok(d) && i < DSLOTS
   ensures disk_ok(d)
 {
@@ -1063,6 +1067,7 @@ fn disk_truncate(d: &mut DiskFs, i: u64) -> bool
   }
   dent_set(&mut d, i, E_SIZE, 0);
   dent_set(&mut d, i, E_ROOT, 0);
+  dent_set(&mut d, i, E_MTIME, now);
   if !ent_flush(&mut d, i) {
     return false;
   }
@@ -1070,4 +1075,36 @@ fn disk_truncate(d: &mut DiskFs, i: u64) -> bool
     walk(&mut d, r, 0);
   }
   return true;
+}
+
+/// Entry i's mode (permission bits).
+fn disk_mode(d: &DiskFs, i: u64) -> u64
+  requires disk_ok(d) && i < DSLOTS
+{
+  return dent_get(d, i, E_MODE) % 65536;
+}
+
+/// Entry i's modification time, in seconds.
+fn disk_mtime(d: &DiskFs, i: u64) -> u64
+  requires disk_ok(d) && i < DSLOTS
+{
+  return dent_get(d, i, E_MTIME);
+}
+
+/// Sets entry i's mode (when `mode` is below 65536) and modification time
+/// (when `mtime` is not NO_DISK_FILE): one sector write.
+fn disk_set_meta(d: &mut DiskFs, i: u64, mode: u64, mtime: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+  ensures disk_ok(d)
+{
+  if !dent_used(d, i) {
+    return false;
+  }
+  if mode < 65536 {
+    dent_set(&mut d, i, E_MODE, mode);
+  }
+  if mtime != NO_DISK_FILE {
+    dent_set(&mut d, i, E_MTIME, mtime);
+  }
+  return ent_flush(&mut d, i);
 }

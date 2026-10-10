@@ -8,7 +8,6 @@
 
 import "linux.bastio";
 
-const DIR_VFS: u64 = 2;
 const LX_CHDIR: u64 = 80;
 const LX_FCHDIR: u64 = 81;
 const LX_MKDIR: u64 = 83;
