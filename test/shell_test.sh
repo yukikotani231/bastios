@@ -288,6 +288,12 @@ steps = [
     # variables (one timed) and joins, and _exit from a thread ending the
     # whole process (user/mthread.c).
     ("mthread", b"mthread: ok, 8000 increments", b"\n# "),
+    # Threads on several processors at once: four compute and map memory
+    # in parallel (the checksum is the same as on Linux), and execve ends
+    # threads that are running elsewhere.
+    ("mthread par", [b"mthread: par 4 threads", b"(7f4)"], b"\n# "),
+    ("mthread exec", b"mthread: exec ok, threads gone", b"\n# "),
+    ("mthread unmap", b"mthread: unmap ok, threads still running", b"\n# "),
     # What Linux programs expect to find: /dev/null swallows, /tmp and
     # /etc/passwd exist, and every file has its own inode number.
     ("echo lost > /dev/null; wc -c < /dev/null; test -d /tmp && echo tmp$((2+2))", b"\r\n0\r\ntmp4\r\n", b"\n# "),

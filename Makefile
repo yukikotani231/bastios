@@ -327,6 +327,10 @@ compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
 smpbench: build/bastios.elf
 	test/smpbench.sh
 
+# Not part of `make test` either: do one process's threads run in parallel?
+threadbench: build/bastios.elf
+	test/threadbench.sh
+
 # Not part of `make test` either: disk timings for each driver.
 diskbench: build/bastios.elf
 	test/diskbench.sh
@@ -338,4 +342,4 @@ clean:
 	rm -rf build
 
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
-.PHONY: all run test fuzz smpbench diskbench iobench compat compat-baseline compat-host clean
+.PHONY: all run test fuzz smpbench threadbench diskbench iobench compat compat-baseline compat-host clean

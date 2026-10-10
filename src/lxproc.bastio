@@ -156,6 +156,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   group_fork(&mut k.procs, pid, c);
   pset(&mut k.procs, c, F_CTID, 0);
   pset(&mut k.procs, c, F_FUTEX, 0);
+  pset(&mut k.procs, c, F_QUIET, 0);
   lx_fd_fork(&mut k, pid, c);
   map_fork(&mut k, pid, c);
   sig_fork(&mut k.sigact, pid, c);

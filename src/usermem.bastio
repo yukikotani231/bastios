@@ -49,18 +49,25 @@ fn copy_from_user(spaces: &mut Vec[Space], pid: u64, va: u64, buf: &mut Bytes, n
     Space::Mapped(mut root) => {
       let mut k = 0;
       if pt_has(root, 1) {
-        let mut l3 = pt_take(&mut root, 1);
-        if pt_has(l3, 0) {
-          let mut l2 = pt_take(&mut l3, 0);
-          k = l2_to_bytes(&mut l2, off, &mut buf, n);
-          pt_put(&mut l3, 0, l2);
-        }
-        pt_put(&mut root, 1, l3);
+        k = pt_borrow(&mut root, 1, l3_to_bytes, off, &mut buf, n);
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return k;
     },
   }
+}
+
+/// copy_from_user below the top-level table (in place, as other threads
+/// may be running on the space).
+fn l3_to_bytes(l3: &mut PageTable, off: u64, buf: &mut Bytes, n: u64) -> u64
+  requires pt_level(l3) == 3 && off + n <= USER_SIZE && n <= blen(buf)
+  ensures blen(buf) == old(blen(buf))
+  ensures result <= n
+{
+  if !pt_has(l3, 0) {
+    return 0;
+  }
+  return pt_borrow(&mut l3, 0, l2_to_bytes, off, &mut buf, n);
 }
 
 /// copy_from_user below the window table, a page at a time.
@@ -103,18 +110,23 @@ fn copy_to_user(spaces: &mut Vec[Space], pid: u64, va: u64, buf: &Bytes, n: u64)
     Space::Mapped(mut root) => {
       let mut k = 0;
       if pt_has(root, 1) {
-        let mut l3 = pt_take(&mut root, 1);
-        if pt_has(l3, 0) {
-          let mut l2 = pt_take(&mut l3, 0);
-          k = bytes_to_l2(&mut l2, off, buf, n);
-          pt_put(&mut l3, 0, l2);
-        }
-        pt_put(&mut root, 1, l3);
+        k = pt_borrow(&mut root, 1, bytes_to_l3, off, buf, n);
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return k;
     },
   }
+}
+
+/// copy_to_user below the top-level table, in place.
+fn bytes_to_l3(l3: &mut PageTable, off: u64, buf: &Bytes, n: u64) -> u64
+  requires pt_level(l3) == 3 && off + n <= USER_SIZE && n <= blen(buf)
+  ensures result <= n
+{
+  if !pt_has(l3, 0) {
+    return 0;
+  }
+  return pt_borrow(&mut l3, 0, bytes_to_l2, off, buf, n);
 }
 
 /// copy_to_user below the window table, a page at a time.
