@@ -105,6 +105,7 @@ t_cred: getpwnam finds nobody
 t_cred: root starts as uid and gid 0
 t_cred: setreuid and setfsuid follow Linux's rules
 t_cred: the parent is still root
+t_cred: kill needs a matching uid
 t_dir: chdir
 t_dir: chdir ..
 t_dir: create file in directory
@@ -425,6 +426,8 @@ t_sysv: msgrcv waits for a message
 t_sysv: msgsnd, msgrcv and IPC_STAT
 t_sysv: queue permissions follow the ids
 t_sysv: semop, SETALL, GETALL, GETPID, errors
+t_sysv: shmat, a second view, fork, IPC_RMID
+t_sysv: shmget and shmat errors
 t_thread: 4 threads, mutex
 t_thread: condition variable
 t_thread: gettid differs in a thread

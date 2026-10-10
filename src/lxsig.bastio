@@ -454,6 +454,22 @@ fn lx_sigprocmask(k: &mut Kernel, pid: u64, how: u64, setp: u64, oset: u64) -> u
   return 0;
 }
 
+/// Whether pid may send a signal to p (Linux's kill_ok_by_cred): root may,
+/// and so may a sender whose real or effective uid is p's real or saved
+/// uid; SIGCONT also reaches the sender's own session.
+fn may_signal(k: &Kernel, pid: u64, p: u64, s: u64) -> bool
+  requires kok(k) && pid < NPROC && p < NPROC
+{
+  let ruid = id_get(k.procs, pid, F_UID, false);
+  let euid = id_get(k.procs, pid, F_UID, true);
+  if euid == 0 || (s == 18 && sid_of(k.procs, pid) == sid_of(k.procs, p)) {
+    return true;
+  }
+  let tr = id_get(k.procs, p, F_UID, false);
+  let ts = id_get(k.procs, p, F_SUID, false);
+  return euid == tr || euid == ts || ruid == tr || ruid == ts;
+}
+
 /// kill(target, s): one process; with 0 the caller's process group, with
 /// -g group g, with -1 every other Linux program. Signal 0 only checks.
 fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
@@ -470,6 +486,7 @@ fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
       g = 0xFFFFFFFFFFFFFFFF - target + 1;   // -target
     }
     let mut hit = false;
+    let mut sent = false;
     let mut p = 1;
     while p < NPROC
       invariant 1 <= p && p <= NPROC && kok(k)
@@ -477,8 +494,11 @@ fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
       let live = state(k.procs, p) != FREE && state(k.procs, p) != ZOMBIE && is_linux(k.procs, p);
       if live && ((all && p != pid) || (!all && pgid_of(k.procs, p) == g)) {
         hit = true;
-        if s != 0 {
-          post_from(&mut k, p, s, pid);
+        if may_signal(k, pid, p, s) {
+          sent = true;
+          if s != 0 {
+            post_from(&mut k, p, s, pid);
+          }
         }
       }
       p = p + 1;
@@ -486,10 +506,16 @@ fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
     if !hit {
       return ESRCH;
     }
+    if !sent {
+      return EPERM;
+    }
     return 0;
   }
   if target >= NPROC || state(k.procs, target) == FREE || state(k.procs, target) == ZOMBIE {
     return ESRCH;
+  }
+  if !may_signal(k, pid, target, s) {
+    return EPERM;
   }
   if s != 0 {
     post_from(&mut k, target, s, pid);

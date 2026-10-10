@@ -32,6 +32,22 @@ const LX_MSGSND: u64 = 69;
 const LX_MSGRCV: u64 = 70;
 const LX_MSGCTL: u64 = 71;
 const LX_SEMTIMEDOP: u64 = 220;
+const LX_SHMGET: u64 = 29;
+const LX_SHMAT: u64 = 30;
+const LX_SHMCTL: u64 = 31;
+const LX_SHMDT: u64 = 67;
+const SHM_RDONLY: u64 = 4096;          // 010000
+const SHM_RND: u64 = 8192;             // 020000
+const SHM_LOCK: u64 = 11;
+const SHM_UNLOCK: u64 = 12;
+const SHM_STAT: u64 = 13;
+const SHM_INFO: u64 = 14;
+const SHM_STAT_ANY: u64 = 15;
+const SHM_DEST: u64 = 512;             // in the mode: removed, waiting for the last detach
+const SHM_LOCKED: u64 = 1024;
+const SHMMAX: u64 = 2097152;           // a segment is at most one level-1 table of pages
+const SHM_PAGES: u64 = 512;
+const SHMID_DS: u64 = 112;             // struct shmid64_ds
 
 const IPC_CREAT: u64 = 512;            // 01000
 const IPC_EXCL: u64 = 1024;            // 02000
@@ -81,6 +97,9 @@ const H_LRPID: u64 = 12;
 const H_USED: u64 = 13;                // bytes of the queue's region in use
 const H_LAST: u64 = 14;                // the seq the slot gave last
 
+const KQ: u64 = 0;                     // the kinds: message queues,
+const KS: u64 = 1;                     // semaphore sets,
+const KM: u64 = 2;                     // and shared memory segments
 const SH_BASE: u64 = 256;              // IPC_SETS * HW
 const SEMMSL: u64 = 64;
 const SEMVMX: u64 = 32767;
@@ -88,6 +107,10 @@ const SEMOPM: u64 = 500;
 const SV_BASE: u64 = 512;              // SH_BASE + IPC_SETS * HW
 const UN_BASE: u64 = 2560;             // SV_BASE + IPC_SETS * SEMMSL * 2
 const UNDO_N: u64 = 256;
+const SM_BASE: u64 = 3584;             // UN_BASE + UNDO_N * 4: shared memory headers
+const SA_BASE: u64 = 3840;             // SM_BASE + IPC_SETS * HW: attachments
+const SA_N: u64 = 8;                   // attachments a process: segment + 1, first page, pages
+const SA_W: u64 = 3;
 const ADJ_BIAS: u64 = 65536;           // an adjustment is kept + ADJ_BIAS
 
 const MSGMAX: u64 = 8192;
@@ -100,27 +123,30 @@ const SEMID_DS: u64 = 104;             // struct semid64_ds
 
 // ---------------------------------------------------------------- headers
 
-fn hdr(sem: bool, slot: u64) -> u64
+fn hdr(kind: u64, slot: u64) -> u64
   requires slot < IPC_SETS
-  ensures result + HW <= SV_BASE
+  ensures result + HW <= IPC_LEN
 {
-  if sem {
+  if kind == KS {
     return SH_BASE + slot * HW;
+  }
+  if kind == KM {
+    return SM_BASE + slot * HW;
   }
   return slot * HW;
 }
 
-fn hget(k: &Kernel, sem: bool, slot: u64, f: u64) -> u64
+fn hget(k: &Kernel, kind: u64, slot: u64, f: u64) -> u64
   requires kok(k) && slot < IPC_SETS && f < HW
 {
-  return get(k.ipc, hdr(sem, slot) + f);
+  return get(k.ipc, hdr(kind, slot) + f);
 }
 
-fn hset(k: &mut Kernel, sem: bool, slot: u64, f: u64, v: u64)
+fn hset(k: &mut Kernel, kind: u64, slot: u64, f: u64, v: u64)
   requires kok(k) && slot < IPC_SETS && f < HW
   ensures kok(k)
 {
-  k.ipc = set(k.ipc, hdr(sem, slot) + f, v);
+  k.ipc = set(k.ipc, hdr(kind, slot) + f, v);
 }
 
 /// The wall clock in seconds, for the time fields.
@@ -129,7 +155,7 @@ fn ipc_now(k: &Kernel) -> u64 {
 }
 
 /// The slot an id names, or IPC_SETS if none: a slot in use with that seq.
-fn ipc_find(k: &Kernel, sem: bool, id: u64) -> u64
+fn ipc_find(k: &Kernel, kind: u64, id: u64) -> u64
   requires kok(k)
   ensures result <= IPC_SETS
 {
@@ -137,17 +163,17 @@ fn ipc_find(k: &Kernel, sem: bool, id: u64) -> u64
   if slot >= IPC_SETS {
     return IPC_SETS;
   }
-  let seq = hget(k, sem, slot, H_SEQ);
+  let seq = hget(k, kind, slot, H_SEQ);
   if seq == 0 || seq != id / IPC_SPAN {
     return IPC_SETS;
   }
   return slot;
 }
 
-fn ipc_id(k: &Kernel, sem: bool, slot: u64) -> u64
+fn ipc_id(k: &Kernel, kind: u64, slot: u64) -> u64
   requires kok(k) && slot < IPC_SETS
 {
-  let seq = hget(k, sem, slot, H_SEQ);
+  let seq = hget(k, kind, slot, H_SEQ);
   if seq >= 65536 {
     return slot;
   }
@@ -156,7 +182,7 @@ fn ipc_id(k: &Kernel, sem: bool, slot: u64) -> u64
 
 /// Whether pid may have `want` (4 read, 2 write/alter, 6 both) on the set:
 /// Linux's ipcperms. Effective uid 0 may do anything.
-fn ipc_may(k: &Kernel, pid: u64, sem: bool, slot: u64, want: u64) -> bool
+fn ipc_may(k: &Kernel, pid: u64, kind: u64, slot: u64, want: u64) -> bool
   requires kok(k) && pid < NPROC && slot < IPC_SETS
 {
   let euid = id_get(k.procs, pid, F_UID, true);
@@ -164,9 +190,9 @@ fn ipc_may(k: &Kernel, pid: u64, sem: bool, slot: u64, want: u64) -> bool
     return true;
   }
   let egid = id_get(k.procs, pid, F_GID, true);
-  let own = hget(k, sem, slot, H_OWN);
-  let cre = hget(k, sem, slot, H_CRE);
-  let mut g = hget(k, sem, slot, H_MODE) % 512;
+  let own = hget(k, kind, slot, H_OWN);
+  let cre = hget(k, kind, slot, H_CRE);
+  let mut g = hget(k, kind, slot, H_MODE) % 512;
   if euid == own % ID_SPAN || euid == cre % ID_SPAN {
     g = g / 64;
   } else if egid == own / ID_SPAN % ID_SPAN || egid == cre / ID_SPAN % ID_SPAN {
@@ -176,18 +202,18 @@ fn ipc_may(k: &Kernel, pid: u64, sem: bool, slot: u64, want: u64) -> bool
 }
 
 /// Whether pid owns or created the set, or is root: IPC_SET and IPC_RMID.
-fn ipc_owner(k: &Kernel, pid: u64, sem: bool, slot: u64) -> bool
+fn ipc_owner(k: &Kernel, pid: u64, kind: u64, slot: u64) -> bool
   requires kok(k) && pid < NPROC && slot < IPC_SETS
 {
   let euid = id_get(k.procs, pid, F_UID, true);
-  return euid == 0 || euid == hget(k, sem, slot, H_OWN) % ID_SPAN || euid == hget(k, sem, slot, H_CRE) % ID_SPAN;
+  return euid == 0 || euid == hget(k, kind, slot, H_OWN) % ID_SPAN || euid == hget(k, kind, slot, H_CRE) % ID_SPAN;
 }
 
 /// msgget and semget: the id for key and flags, or an error. A new set
 /// gets slot and seq here; the caller fills in the rest when `fresh`.
 struct Got { r: u64, slot: u64, fresh: bool }
 
-fn ipc_get(k: &mut Kernel, pid: u64, sem: bool, key: u64, flg: u64) -> Got
+fn ipc_get(k: &mut Kernel, pid: u64, kind: u64, key: u64, flg: u64) -> Got
   requires kok(k) && pid < NPROC
   ensures kok(k) && result.slot <= IPC_SETS && (result.fresh ==> result.slot < IPC_SETS)
 {
@@ -198,14 +224,14 @@ fn ipc_get(k: &mut Kernel, pid: u64, sem: bool, key: u64, flg: u64) -> Got
     while s < IPC_SETS
       invariant s <= IPC_SETS && kok(k)
     {
-      if hget(k, sem, s, H_SEQ) != 0 && hget(k, sem, s, H_KEY) == key32 {
+      if hget(k, kind, s, H_SEQ) != 0 && hget(k, kind, s, H_KEY) == key32 {
         if flg & IPC_CREAT != 0 && flg & IPC_EXCL != 0 {
           return Got { r: EEXIST, slot: IPC_SETS, fresh: false };
         }
-        if !ipc_may(k, pid, sem, s, flg / 64 | flg / 8 | flg) {
+        if !ipc_may(k, pid, kind, s, flg / 64 | flg / 8 | flg) {
           return Got { r: EACCES, slot: IPC_SETS, fresh: false };
         }
-        return Got { r: ipc_id(k, sem, s), slot: s, fresh: false };
+        return Got { r: ipc_id(k, kind, s), slot: s, fresh: false };
       }
       s = s + 1;
     }
@@ -214,7 +240,7 @@ fn ipc_get(k: &mut Kernel, pid: u64, sem: bool, key: u64, flg: u64) -> Got
     }
   }
   let mut f = 0;
-  while f < IPC_SETS && hget(k, sem, f, H_SEQ) != 0
+  while f < IPC_SETS && hget(k, kind, f, H_SEQ) != 0
     invariant f <= IPC_SETS && kok(k)
   {
     f = f + 1;
@@ -222,22 +248,22 @@ fn ipc_get(k: &mut Kernel, pid: u64, sem: bool, key: u64, flg: u64) -> Got
   if f >= IPC_SETS {
     return Got { r: ENOSPC, slot: IPC_SETS, fresh: false };
   }
-  let seq = hget(k, sem, f, H_LAST) % 65535 + 1;
+  let seq = hget(k, kind, f, H_LAST) % 65535 + 1;
   let mut w = 0;
   while w < HW
     invariant w <= HW && kok(k)
   {
-    hset(&mut k, sem, f, w, 0);
+    hset(&mut k, kind, f, w, 0);
     w = w + 1;
   }
   let ids = id_get(k.procs, pid, F_UID, true) + id_get(k.procs, pid, F_GID, true) * ID_SPAN;
-  hset(&mut k, sem, f, H_SEQ, seq);
-  hset(&mut k, sem, f, H_LAST, seq);
-  hset(&mut k, sem, f, H_KEY, key32);
-  hset(&mut k, sem, f, H_OWN, ids);
-  hset(&mut k, sem, f, H_CRE, ids);
-  hset(&mut k, sem, f, H_MODE, flg % 512);
-  hset(&mut k, sem, f, H_CTIME, ipc_now(k));
+  hset(&mut k, kind, f, H_SEQ, seq);
+  hset(&mut k, kind, f, H_LAST, seq);
+  hset(&mut k, kind, f, H_KEY, key32);
+  hset(&mut k, kind, f, H_OWN, ids);
+  hset(&mut k, kind, f, H_CRE, ids);
+  hset(&mut k, kind, f, H_MODE, flg % 512);
+  hset(&mut k, kind, f, H_CTIME, ipc_now(k));
   return Got { r: seq * IPC_SPAN + f, slot: f, fresh: true };
 }
 
@@ -260,40 +286,40 @@ fn xput(k: &mut Kernel, at: u64, v: u64, n: u64)
 }
 
 /// struct ipc64_perm into xfer[0..48].
-fn perm_out(k: &mut Kernel, sem: bool, slot: u64)
+fn perm_out(k: &mut Kernel, kind: u64, slot: u64)
   requires kok(k) && slot < IPC_SETS
   ensures kok(k)
 {
-  let own = hget(k, sem, slot, H_OWN);
-  let cre = hget(k, sem, slot, H_CRE);
-  xput(&mut k, 0, hget(k, sem, slot, H_KEY), 4);
+  let own = hget(k, kind, slot, H_OWN);
+  let cre = hget(k, kind, slot, H_CRE);
+  xput(&mut k, 0, hget(k, kind, slot, H_KEY), 4);
   xput(&mut k, 4, own % ID_SPAN, 4);
   xput(&mut k, 8, own / ID_SPAN, 4);
   xput(&mut k, 12, cre % ID_SPAN, 4);
   xput(&mut k, 16, cre / ID_SPAN, 4);
-  xput(&mut k, 20, hget(k, sem, slot, H_MODE), 4);
-  xput(&mut k, 24, hget(k, sem, slot, H_SEQ), 4);
+  xput(&mut k, 20, hget(k, kind, slot, H_MODE), 4);
+  xput(&mut k, 24, hget(k, kind, slot, H_SEQ), 4);
   xput(&mut k, 28, 0, 4);
   xput(&mut k, 32, 0, 8);
   xput(&mut k, 40, 0, 8);
 }
 
 /// IPC_SET's new owner and mode, from the struct ipc64_perm at xfer[0..].
-fn perm_in(k: &mut Kernel, sem: bool, slot: u64)
+fn perm_in(k: &mut Kernel, kind: u64, slot: u64)
   requires kok(k) && slot < IPC_SETS
   ensures kok(k)
 {
   let uid = rd32(k.fs.xfer, 4);
   let gid = rd32(k.fs.xfer, 8);
   let mode = rd32(k.fs.xfer, 20) % 512;
-  hset(&mut k, sem, slot, H_OWN, uid + gid * ID_SPAN);
-  let m0 = hget(k, sem, slot, H_MODE);
-  hset(&mut k, sem, slot, H_MODE, m0 - m0 % 512 + mode);
-  hset(&mut k, sem, slot, H_CTIME, ipc_now(k));
+  hset(&mut k, kind, slot, H_OWN, uid + gid * ID_SPAN);
+  let m0 = hget(k, kind, slot, H_MODE);
+  hset(&mut k, kind, slot, H_MODE, m0 - m0 % 512 + mode);
+  hset(&mut k, kind, slot, H_CTIME, ipc_now(k));
 }
 
 /// The highest slot in use (IPC_INFO's answer), and how many are.
-fn ipc_highest(k: &Kernel, sem: bool) -> u64
+fn ipc_highest(k: &Kernel, kind: u64) -> u64
   requires kok(k)
 {
   let mut h = 0;
@@ -301,7 +327,7 @@ fn ipc_highest(k: &Kernel, sem: bool) -> u64
   while s < IPC_SETS
     invariant s <= IPC_SETS
   {
-    if hget(k, sem, s, H_SEQ) != 0 {
+    if hget(k, kind, s, H_SEQ) != 0 {
       h = s;
     }
     s = s + 1;
@@ -309,7 +335,7 @@ fn ipc_highest(k: &Kernel, sem: bool) -> u64
   return h;
 }
 
-fn ipc_count(k: &Kernel, sem: bool) -> u64
+fn ipc_count(k: &Kernel, kind: u64) -> u64
   requires kok(k)
   ensures result <= IPC_SETS
 {
@@ -318,7 +344,7 @@ fn ipc_count(k: &Kernel, sem: bool) -> u64
   while s < IPC_SETS
     invariant s <= IPC_SETS && c <= s
   {
-    if hget(k, sem, s, H_SEQ) != 0 {
+    if hget(k, kind, s, H_SEQ) != 0 {
       c = c + 1;
     }
     s = s + 1;
@@ -347,9 +373,9 @@ fn lx_msgget(k: &mut Kernel, pid: u64, key: u64, flg: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let g = ipc_get(&mut k, pid, false, key, flg);
+  let g = ipc_get(&mut k, pid, KQ, key, flg);
   if g.fresh {
-    hset(&mut k, false, g.slot, H_QBYTES, MSGMNB);
+    hset(&mut k, KQ, g.slot, H_QBYTES, MSGMNB);
   }
   return g.r;
 }
@@ -361,7 +387,7 @@ fn msg_pick(k: &Kernel, slot: u64, t: u64, flg: u64) -> u64
   ensures result <= MQ_CAP
 {
   let base = mq_base(slot);
-  let used = smaller(hget(k, false, slot, H_USED), MQ_CAP);
+  let used = smaller(hget(k, KQ, slot, H_USED), MQ_CAP);
   let mut best = MQ_CAP;
   let mut bt = 0;
   let mut o = 0;
@@ -411,7 +437,7 @@ fn lx_msgsnd(k: &mut Kernel, pid: u64, was: u64, id: u64, va: u64, sz: u64, flg:
     ret(&mut k.procs, pid, EINVAL);
     return KEEP;
   }
-  let slot = ipc_find(k, false, id);
+  let slot = ipc_find(k, KQ, id);
   if slot >= IPC_SETS {
     if was != 0 {
       ret(&mut k.procs, pid, EIDRM);        // removed while it waited
@@ -420,14 +446,14 @@ fn lx_msgsnd(k: &mut Kernel, pid: u64, was: u64, id: u64, va: u64, sz: u64, flg:
     }
     return KEEP;
   }
-  if !ipc_may(k, pid, false, slot, 2) {
+  if !ipc_may(k, pid, KQ, slot, 2) {
     ret(&mut k.procs, pid, EACCES);
     return KEEP;
   }
-  let used = smaller(hget(k, false, slot, H_USED), MQ_CAP);
-  let qnum = smaller(hget(k, false, slot, H_N), MQ_MSGS);
-  let cb = smaller(hget(k, false, slot, H_BYTES), MQ_CAP);
-  let qb = hget(k, false, slot, H_QBYTES);
+  let used = smaller(hget(k, KQ, slot, H_USED), MQ_CAP);
+  let qnum = smaller(hget(k, KQ, slot, H_N), MQ_MSGS);
+  let cb = smaller(hget(k, KQ, slot, H_BYTES), MQ_CAP);
+  let qb = hget(k, KQ, slot, H_QBYTES);
   let room = msg_room(sz);
   if cb + sz > qb || qnum + 1 > qb || qnum >= MQ_MSGS || room > MQ_CAP - used {
     if flg & IPC_NOWAIT != 0 {
@@ -448,11 +474,11 @@ fn lx_msgsnd(k: &mut Kernel, pid: u64, was: u64, id: u64, va: u64, sz: u64, flg:
   put_u64(&mut k.ipcb, at + 8, sz);
   bcopy(&mut k.ipcb, at + MSG_HDR, text, 0, sz);
   bfree(text);
-  hset(&mut k, false, slot, H_USED, used + room);
-  hset(&mut k, false, slot, H_N, qnum + 1);
-  hset(&mut k, false, slot, H_BYTES, cb + sz);
-  hset(&mut k, false, slot, H_LSPID, tgid(k.procs, pid));
-  hset(&mut k, false, slot, H_STIME, ipc_now(k));
+  hset(&mut k, KQ, slot, H_USED, used + room);
+  hset(&mut k, KQ, slot, H_N, qnum + 1);
+  hset(&mut k, KQ, slot, H_BYTES, cb + sz);
+  hset(&mut k, KQ, slot, H_LSPID, tgid(k.procs, pid));
+  hset(&mut k, KQ, slot, H_STIME, ipc_now(k));
   ret(&mut k.procs, pid, 0);
   return KEEP;
 }
@@ -473,7 +499,7 @@ fn lx_msgrcv(k: &mut Kernel, pid: u64, was: u64, id: u64, va: u64, sz: u64, t: u
     }
     return KEEP;
   }
-  let slot = ipc_find(k, false, id);
+  let slot = ipc_find(k, KQ, id);
   if slot >= IPC_SETS {
     if was != 0 {
       ret(&mut k.procs, pid, EIDRM);
@@ -482,13 +508,13 @@ fn lx_msgrcv(k: &mut Kernel, pid: u64, was: u64, id: u64, va: u64, sz: u64, t: u
     }
     return KEEP;
   }
-  if !ipc_may(k, pid, false, slot, 4) {
+  if !ipc_may(k, pid, KQ, slot, 4) {
     ret(&mut k.procs, pid, EACCES);
     return KEEP;
   }
   let o = msg_pick(k, slot, t, flg);
   let base = mq_base(slot);
-  let used = hget(k, false, slot, H_USED);
+  let used = hget(k, KQ, slot, H_USED);
   if o + MSG_HDR > MQ_CAP || used > MQ_CAP || o + MSG_HDR > used {
     if flg & IPC_NOWAIT != 0 {
       ret(&mut k.procs, pid, ENOMSG);
@@ -518,17 +544,17 @@ fn lx_msgrcv(k: &mut Kernel, pid: u64, was: u64, id: u64, va: u64, sz: u64, t: u
   }
   // The rest of the queue moves down over it.
   bmove(&mut k.ipcb, base + o, base + o + room, used - o - room);
-  hset(&mut k, false, slot, H_USED, used - room);
-  let qnum = hget(k, false, slot, H_N);
+  hset(&mut k, KQ, slot, H_USED, used - room);
+  let qnum = hget(k, KQ, slot, H_N);
   if qnum > 0 {
-    hset(&mut k, false, slot, H_N, qnum - 1);
+    hset(&mut k, KQ, slot, H_N, qnum - 1);
   }
-  let cb = hget(k, false, slot, H_BYTES);
+  let cb = hget(k, KQ, slot, H_BYTES);
   if cb >= len {
-    hset(&mut k, false, slot, H_BYTES, cb - len);
+    hset(&mut k, KQ, slot, H_BYTES, cb - len);
   }
-  hset(&mut k, false, slot, H_LRPID, tgid(k.procs, pid));
-  hset(&mut k, false, slot, H_RTIME, ipc_now(k));
+  hset(&mut k, KQ, slot, H_LRPID, tgid(k.procs, pid));
+  hset(&mut k, KQ, slot, H_RTIME, ipc_now(k));
   ret(&mut k.procs, pid, n);
   return KEEP;
 }
@@ -538,29 +564,29 @@ fn msqid_out(k: &mut Kernel, pid: u64, slot: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC && slot < IPC_SETS
   ensures kok(k)
 {
-  perm_out(&mut k, false, slot);
-  xput(&mut k, 48, hget(k, false, slot, H_STIME), 8);
-  xput(&mut k, 56, hget(k, false, slot, H_RTIME), 8);
-  xput(&mut k, 64, hget(k, false, slot, H_CTIME), 8);
-  xput(&mut k, 72, hget(k, false, slot, H_BYTES), 8);
-  xput(&mut k, 80, hget(k, false, slot, H_N), 8);
-  xput(&mut k, 88, hget(k, false, slot, H_QBYTES), 8);
-  xput(&mut k, 96, hget(k, false, slot, H_LSPID), 4);
-  xput(&mut k, 100, hget(k, false, slot, H_LRPID), 4);
+  perm_out(&mut k, KQ, slot);
+  xput(&mut k, 48, hget(k, KQ, slot, H_STIME), 8);
+  xput(&mut k, 56, hget(k, KQ, slot, H_RTIME), 8);
+  xput(&mut k, 64, hget(k, KQ, slot, H_CTIME), 8);
+  xput(&mut k, 72, hget(k, KQ, slot, H_BYTES), 8);
+  xput(&mut k, 80, hget(k, KQ, slot, H_N), 8);
+  xput(&mut k, 88, hget(k, KQ, slot, H_QBYTES), 8);
+  xput(&mut k, 96, hget(k, KQ, slot, H_LSPID), 4);
+  xput(&mut k, 100, hget(k, KQ, slot, H_LRPID), 4);
   xput(&mut k, 104, 0, 8);
   xput(&mut k, 112, 0, 8);
   return lx_put_out(&mut k, pid, va, MSQID_DS);
 }
 
-fn ipc_free(k: &mut Kernel, sem: bool, slot: u64)
+fn ipc_free(k: &mut Kernel, kind: u64, slot: u64)
   requires kok(k) && slot < IPC_SETS
   ensures kok(k)
 {
-  hset(&mut k, sem, slot, H_SEQ, 0);
-  hset(&mut k, sem, slot, H_KEY, 0);
-  hset(&mut k, sem, slot, H_USED, 0);
-  hset(&mut k, sem, slot, H_N, 0);
-  hset(&mut k, sem, slot, H_BYTES, 0);
+  hset(&mut k, kind, slot, H_SEQ, 0);
+  hset(&mut k, kind, slot, H_KEY, 0);
+  hset(&mut k, kind, slot, H_USED, 0);
+  hset(&mut k, kind, slot, H_N, 0);
+  hset(&mut k, kind, slot, H_BYTES, 0);
 }
 
 fn lx_msgctl(k: &mut Kernel, pid: u64, id: u64, cmd0: u64, va: u64) -> u64
@@ -574,15 +600,15 @@ fn lx_msgctl(k: &mut Kernel, pid: u64, id: u64, cmd0: u64, va: u64) -> u64
     let mut map = IPC_SETS * MQ_MSGS;
     let mut tql = IPC_SETS * MQ_MSGS;
     if cmd == MSG_INFO {
-      pool = ipc_count(k, false);
+      pool = ipc_count(k, KQ);
       map = 0;
       tql = 0;
       let mut s = 0;
       while s < IPC_SETS
         invariant s <= IPC_SETS && kok(k) && map <= s * MQ_CAP && tql <= s * MQ_CAP
       {
-        map = map + smaller(hget(k, false, s, H_N), MQ_CAP);
-        tql = tql + smaller(hget(k, false, s, H_BYTES), MQ_CAP);
+        map = map + smaller(hget(k, KQ, s, H_N), MQ_CAP);
+        tql = tql + smaller(hget(k, KQ, s, H_BYTES), MQ_CAP);
         s = s + 1;
       }
     }
@@ -598,20 +624,21 @@ fn lx_msgctl(k: &mut Kernel, pid: u64, id: u64, cmd0: u64, va: u64) -> u64
     if r != 0 {
       return r;
     }
-    return ipc_highest(k, false);
+    return ipc_highest(k, KQ);
   }
   if cmd == MSG_STAT || cmd == MSG_STAT_ANY {
-    if id >= IPC_SETS || hget(k, false, id, H_SEQ) == 0 {
+    let ix = id % IPC_SPAN;                 // an index; an id names its slot too
+    if ix >= IPC_SETS || hget(k, KQ, ix, H_SEQ) == 0 {
       return EINVAL;
     }
-    if cmd == MSG_STAT && !ipc_may(k, pid, false, id, 4) {
+    if cmd == MSG_STAT && !ipc_may(k, pid, KQ, ix, 4) {
       return EACCES;
     }
-    let r = msqid_out(&mut k, pid, id, va);
+    let r = msqid_out(&mut k, pid, ix, va);
     if r != 0 {
       return r;
     }
-    return ipc_id(k, false, id);
+    return ipc_id(k, KQ, ix);
   }
   if cmd != IPC_STAT && cmd != IPC_SET && cmd != IPC_RMID {
     return EINVAL;
@@ -619,29 +646,29 @@ fn lx_msgctl(k: &mut Kernel, pid: u64, id: u64, cmd0: u64, va: u64) -> u64
   if cmd == IPC_SET && copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, MSQID_DS) != MSQID_DS {
     return EFAULT;
   }
-  let slot = ipc_find(k, false, id);
+  let slot = ipc_find(k, KQ, id);
   if slot >= IPC_SETS {
     return EINVAL;
   }
   if cmd == IPC_STAT {
-    if !ipc_may(k, pid, false, slot, 4) {
+    if !ipc_may(k, pid, KQ, slot, 4) {
       return EACCES;
     }
     return msqid_out(&mut k, pid, slot, va);
   }
-  if !ipc_owner(k, pid, false, slot) {
+  if !ipc_owner(k, pid, KQ, slot) {
     return EPERM;
   }
   if cmd == IPC_RMID {
-    ipc_free(&mut k, false, slot);
+    ipc_free(&mut k, KQ, slot);
     return 0;
   }
   let qb = get_u64(k.fs.xfer, 88);
   if qb > MSGMNB {
     return EPERM;                           // even for root: see the top
   }
-  perm_in(&mut k, false, slot);
-  hset(&mut k, false, slot, H_QBYTES, qb);
+  perm_in(&mut k, KQ, slot);
+  hset(&mut k, KQ, slot, H_QBYTES, qb);
   return 0;
 }
 
@@ -666,7 +693,7 @@ fn sem_nsems(k: &Kernel, slot: u64) -> u64
   requires kok(k) && slot < IPC_SETS
   ensures result <= SEMMSL
 {
-  return smaller(hget(k, true, slot, H_N), SEMMSL);
+  return smaller(hget(k, KS, slot, H_N), SEMMSL);
 }
 
 fn lx_semget(k: &mut Kernel, pid: u64, key: u64, n: u64, flg: u64) -> u64
@@ -677,7 +704,7 @@ fn lx_semget(k: &mut Kernel, pid: u64, key: u64, n: u64, flg: u64) -> u64
   if nsems > SEMMSL {
     return EINVAL;                          // a negative count too
   }
-  let g = ipc_get(&mut k, pid, true, key, flg);
+  let g = ipc_get(&mut k, pid, KS, key, flg);
   if g.r >= LONG_NEG {
     return g.r;
   }
@@ -688,10 +715,10 @@ fn lx_semget(k: &mut Kernel, pid: u64, key: u64, n: u64, flg: u64) -> u64
     return g.r;
   }
   if nsems == 0 {
-    ipc_free(&mut k, true, g.slot);
+    ipc_free(&mut k, KS, g.slot);
     return EINVAL;
   }
-  hset(&mut k, true, g.slot, H_N, nsems);
+  hset(&mut k, KS, g.slot, H_N, nsems);
   let mut i = 0;
   while i < SEMMSL
     invariant i <= SEMMSL && kok(k) && g.slot < IPC_SETS
@@ -763,7 +790,7 @@ fn undo_clear(k: &mut Kernel, setw: u64, i: u64)
 fn set_word(k: &Kernel, slot: u64) -> u64
   requires kok(k) && slot < IPC_SETS
 {
-  return ipc_id(k, true, slot);
+  return ipc_id(k, KS, slot);
 }
 
 /// A process leaving applies and drops its SEM_UNDO adjustments, the
@@ -781,7 +808,7 @@ fn sem_exit(k: &mut Kernel, pid: u64)
       let setw = get(k.ipc, a + 1);
       let i = get(k.ipc, a + 2);
       let adj = smaller(get(k.ipc, a + 3), 2 * ADJ_BIAS);
-      let slot = ipc_find(k, true, setw);
+      let slot = ipc_find(k, KS, setw);
       if slot < IPC_SETS && i < sem_nsems(k, slot) {
         let v = sem_val(k, slot, i);
         let mut nv = 0;
@@ -867,7 +894,7 @@ fn lx_semop(k: &mut Kernel, pid: u64, was: u64, id: u64, va: u64, nsops: u64, ts
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
   }
-  let slot = ipc_find(k, true, id);
+  let slot = ipc_find(k, KS, id);
   if slot >= IPC_SETS {
     if was != 0 {
       ret(&mut k.procs, pid, EIDRM);
@@ -899,7 +926,7 @@ fn lx_semop(k: &mut Kernel, pid: u64, was: u64, id: u64, va: u64, nsops: u64, ts
   if alter {
     want = 2;
   }
-  if !ipc_may(k, pid, true, slot, want) {
+  if !ipc_may(k, pid, KS, slot, want) {
     ret(&mut k.procs, pid, EACCES);
     return KEEP;
   }
@@ -1008,7 +1035,7 @@ fn lx_semop(k: &mut Kernel, pid: u64, was: u64, id: u64, va: u64, nsops: u64, ts
     }
     j3 = j3 + 1;
   }
-  hset(&mut k, true, slot, H_STIME, ipc_now(k));
+  hset(&mut k, KS, slot, H_STIME, ipc_now(k));
   ret(&mut k.procs, pid, 0);
   return KEEP;
 }
@@ -1037,10 +1064,10 @@ fn semid_out(k: &mut Kernel, pid: u64, slot: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC && slot < IPC_SETS
   ensures kok(k)
 {
-  perm_out(&mut k, true, slot);
-  xput(&mut k, 48, hget(k, true, slot, H_STIME), 8);
+  perm_out(&mut k, KS, slot);
+  xput(&mut k, 48, hget(k, KS, slot, H_STIME), 8);
   xput(&mut k, 56, 0, 8);
-  xput(&mut k, 64, hget(k, true, slot, H_CTIME), 8);
+  xput(&mut k, 64, hget(k, KS, slot, H_CTIME), 8);
   xput(&mut k, 72, 0, 8);
   xput(&mut k, 80, sem_nsems(k, slot), 8);
   xput(&mut k, 88, 0, 8);
@@ -1059,13 +1086,13 @@ fn lx_semctl(k: &mut Kernel, pid: u64, id: u64, num: u64, cmd0: u64, arg: u64) -
     let mut usz = 20;
     let mut aem = SEMVMX;
     if cmd == SEM_INFO {
-      usz = ipc_count(k, true);
+      usz = ipc_count(k, KS);
       aem = 0;
       let mut s = 0;
       while s < IPC_SETS
         invariant s <= IPC_SETS && kok(k) && aem <= s * SEMMSL
       {
-        if hget(k, true, s, H_SEQ) != 0 {
+        if hget(k, KS, s, H_SEQ) != 0 {
           aem = aem + sem_nsems(k, s);
         }
         s = s + 1;
@@ -1085,20 +1112,21 @@ fn lx_semctl(k: &mut Kernel, pid: u64, id: u64, num: u64, cmd0: u64, arg: u64) -
     if r != 0 {
       return r;
     }
-    return ipc_highest(k, true);
+    return ipc_highest(k, KS);
   }
   if cmd == SEM_STAT || cmd == SEM_STAT_ANY {
-    if id >= IPC_SETS || hget(k, true, id, H_SEQ) == 0 {
+    let ix = id % IPC_SPAN;                 // an index; an id names its slot too
+    if ix >= IPC_SETS || hget(k, KS, ix, H_SEQ) == 0 {
       return EINVAL;
     }
-    if cmd == SEM_STAT && !ipc_may(k, pid, true, id, 4) {
+    if cmd == SEM_STAT && !ipc_may(k, pid, KS, ix, 4) {
       return EACCES;
     }
-    let r = semid_out(&mut k, pid, id, arg);
+    let r = semid_out(&mut k, pid, ix, arg);
     if r != 0 {
       return r;
     }
-    return ipc_id(k, true, id);
+    return ipc_id(k, KS, ix);
   }
   if cmd == SETVAL {
     let v = arg % ID_SPAN;
@@ -1112,31 +1140,31 @@ fn lx_semctl(k: &mut Kernel, pid: u64, id: u64, num: u64, cmd0: u64, arg: u64) -
   if id >= LONG_NEG {
     return EINVAL;
   }
-  let slot = ipc_find(k, true, id);
+  let slot = ipc_find(k, KS, id);
   if slot >= IPC_SETS {
     return EINVAL;
   }
   let nsems = sem_nsems(k, slot);
   if cmd == IPC_RMID || cmd == IPC_SET {
-    if !ipc_owner(k, pid, true, slot) {
+    if !ipc_owner(k, pid, KS, slot) {
       return EPERM;
     }
     if cmd == IPC_RMID {
       undo_clear(&mut k, set_word(k, slot), SEMMSL);
-      ipc_free(&mut k, true, slot);
+      ipc_free(&mut k, KS, slot);
     } else {
-      perm_in(&mut k, true, slot);
+      perm_in(&mut k, KS, slot);
     }
     return 0;
   }
   if cmd == IPC_STAT {
-    if !ipc_may(k, pid, true, slot, 4) {
+    if !ipc_may(k, pid, KS, slot, 4) {
       return EACCES;
     }
     return semid_out(&mut k, pid, slot, arg);
   }
   if cmd == GETALL {
-    if !ipc_may(k, pid, true, slot, 4) {
+    if !ipc_may(k, pid, KS, slot, 4) {
       return EACCES;
     }
     let mut i = 0;
@@ -1149,7 +1177,7 @@ fn lx_semctl(k: &mut Kernel, pid: u64, id: u64, num: u64, cmd0: u64, arg: u64) -
     return lx_put_out(&mut k, pid, arg, nsems * 2);
   }
   if cmd == SETALL {
-    if !ipc_may(k, pid, true, slot, 2) {
+    if !ipc_may(k, pid, KS, slot, 2) {
       return EACCES;
     }
     if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, nsems * 2) != nsems * 2 {
@@ -1174,7 +1202,7 @@ fn lx_semctl(k: &mut Kernel, pid: u64, id: u64, num: u64, cmd0: u64, arg: u64) -
       i2 = i2 + 1;
     }
     undo_clear(&mut k, set_word(k, slot), SEMMSL);
-    hset(&mut k, true, slot, H_CTIME, ipc_now(k));
+    hset(&mut k, KS, slot, H_CTIME, ipc_now(k));
     return 0;
   }
   if cmd != GETVAL && cmd != GETPID && cmd != GETNCNT && cmd != GETZCNT && cmd != SETVAL {
@@ -1185,16 +1213,16 @@ fn lx_semctl(k: &mut Kernel, pid: u64, id: u64, num: u64, cmd0: u64, arg: u64) -
     return EINVAL;
   }
   if cmd == SETVAL {
-    if !ipc_may(k, pid, true, slot, 2) {
+    if !ipc_may(k, pid, KS, slot, 2) {
       return EACCES;
     }
     k.ipc = set(k.ipc, sv(slot, i), smaller(arg % ID_SPAN, SEMVMX));
     k.ipc = set(k.ipc, sv(slot, i) + 1, tgid(k.procs, pid));
     undo_clear(&mut k, set_word(k, slot), i);
-    hset(&mut k, true, slot, H_CTIME, ipc_now(k));
+    hset(&mut k, KS, slot, H_CTIME, ipc_now(k));
     return 0;
   }
-  if !ipc_may(k, pid, true, slot, 4) {
+  if !ipc_may(k, pid, KS, slot, 4) {
     return EACCES;
   }
   if cmd == GETVAL {
@@ -1206,11 +1234,517 @@ fn lx_semctl(k: &mut Kernel, pid: u64, id: u64, num: u64, cmd0: u64, arg: u64) -
   return sem_waiters(k, wait_code(slot, i, cmd == GETZCNT));
 }
 
+// ---------------------------------------------------------------- shared memory
+//
+// A segment's pages are shared pages (src/pages.bastio) held in k.shm, a
+// level-2 table that is never loaded: segment s is its level-1 table in
+// slot s. shmat maps more references to them into the process's window;
+// fork maps them in the child too, as for any MAP_SHARED page, and copies
+// the attachments. IPC_RMID marks a segment; it goes when nothing is
+// attached any more (shm_reap).
+
+/// Attachment record a of process p.
+fn sa_at(p: u64, a: u64) -> u64
+  requires p < NPROC && a < SA_N
+  ensures result + SA_W <= IPC_LEN
+{
+  return SA_BASE + (p * SA_N + a) * SA_W;
+}
+
+/// How many attachments segment slot has, over every process.
+fn shm_nattch(k: &Kernel, slot: u64) -> u64
+  requires kok(k) && slot < IPC_SETS
+  ensures result <= NPROC * SA_N
+{
+  let mut c = 0;
+  let mut p = 0;
+  while p < NPROC
+    invariant p <= NPROC && c <= p * SA_N && kok(k)
+  {
+    let mut a = 0;
+    while a < SA_N
+      invariant a <= SA_N && c <= p * SA_N + a && kok(k) && p < NPROC
+    {
+      if get(k.ipc, sa_at(p, a)) == slot + 1 {
+        c = c + 1;
+      }
+      a = a + 1;
+    }
+    p = p + 1;
+  }
+  return c;
+}
+
+/// Gives back a segment's pages (the references the store holds).
+fn store_free(m: &mut Mem, store: &mut PageTable, slot: u64)
+  requires mem_ok(m) && pt_level(store) == 2 && pt_leases(store) == 0 && slot < IPC_SETS
+  ensures mem_ok(m) && pt_level(store) == 2 && pt_leases(store) == 0
+{
+  if pt_has(store, slot) {
+    free_l1(&mut m, pt_take(&mut store, slot));
+  }
+}
+
+/// Fresh zero pages for a segment of `pages` pages. False if memory ran out.
+fn store_fill(m: &mut Mem, store: &mut PageTable, slot: u64, pages: u64) -> bool
+  requires mem_ok(m) && pt_level(store) == 2 && pt_leases(store) == 0 && slot < IPC_SETS && pages <= SHM_PAGES
+  ensures mem_ok(m) && pt_level(store) == 2 && pt_leases(store) == 0
+{
+  store_free(&mut m, &mut store, slot);
+  let a = find_free(&mut m);
+  if a >= NPAGES {
+    return false;
+  }
+  let mut l1 = pt_new(take_page(&mut m, a), 1);
+  let mut i = 0;
+  while i < pages
+    invariant i <= pages && pages <= SHM_PAGES && mem_ok(m) && pt_level(l1) == 1
+  {
+    let b = find_free(&mut m);
+    if b >= NPAGES {
+      free_l1(&mut m, l1);
+      return false;
+    }
+    if !pt_has(l1, i) {
+      pt_put_shared(&mut l1, i, shared_new(take_page(&mut m, b)), true);
+    }
+    i = i + 1;
+  }
+  if pt_has(store, slot) {
+    free_l1(&mut m, l1);
+    return false;
+  }
+  pt_put(&mut store, slot, l1);
+  return true;
+}
+
+/// The empty store k.shm starts as, if there is a page for it.
+fn new_store(m: &mut Mem) -> Store
+  requires mem_ok(m)
+  ensures mem_ok(m)
+  ensures result is Store::Table ==> (pt_level(result.Table) == 2 && pt_leases(result.Table) == 0)
+{
+  let a = find_free(&mut m);
+  if a >= NPAGES {
+    return Store::None;
+  }
+  return Store::Table(pt_new(take_page(&mut m, a), 2));
+}
+
+/// store_free and store_fill on k.shm.
+fn shm_free_pages(k: &mut Kernel, slot: u64)
+  requires kok(k) && slot < IPC_SETS
+  ensures kok(k)
+{
+  match k.shm {
+    Store::None => { k.shm = Store::None; },
+    Store::Table(t) => {
+      let mut st = t;
+      store_free(&mut k.mem, &mut st, slot);
+      k.shm = Store::Table(st);
+    },
+  }
+}
+
+fn shm_new_pages(k: &mut Kernel, slot: u64, pages: u64) -> bool
+  requires kok(k) && slot < IPC_SETS && pages <= SHM_PAGES
+  ensures kok(k)
+{
+  match k.shm {
+    Store::None => {
+      k.shm = Store::None;
+      return false;
+    },
+    Store::Table(t) => {
+      let mut st = t;
+      let ok = store_fill(&mut k.mem, &mut st, slot, pages);
+      k.shm = Store::Table(st);
+      return ok;
+    },
+  }
+}
+
+/// Maps pages 0 .. n of the segment in store slot seg at window pages
+/// from .. from + n of process pid, where nothing is mapped. False if the
+/// process has no window, a processor runs it, or memory ran out.
+fn win_attach(m: &mut Mem, spaces: &mut Vec[Space], store: &mut PageTable, pid: u64, seg: u64, from: u64, n: u64, w: bool) -> bool
+  requires mem_ok(m) && spaces_ok(spaces) && pid < NPROC && seg < IPC_SETS && n <= SHM_PAGES && from + n <= WPAGES
+  requires pt_level(store) == 2 && pt_leases(store) == 0
+  ensures mem_ok(m) && spaces_ok(spaces) && pt_level(store) == 2 && pt_leases(store) == 0
+{
+  match take_space(&mut spaces, pid) {
+    Space::Empty => { return false; },
+    Space::Mapped(mut root) => {
+      let mut ok = false;
+      if pt_lease_count(&mut root) == 0 && pt_has(root, 1) {
+        let mut l3 = pt_take(&mut root, 1);
+        if pt_has(l3, 0) {
+          let mut l2 = pt_take(&mut l3, 0);
+          if pt_has(store, seg) {
+            let sl1 = pt_take(&mut store, seg);
+            ok = true;
+            let mut i = 0;
+            while ok && i < n
+              invariant i <= n && n <= SHM_PAGES && from + n <= WPAGES && mem_ok(m)
+              invariant pt_level(l2) == 2 && pt_leases(l2) == 0 && pt_level(sl1) == 1
+              invariant pt_level(store) == 2 && pt_leases(store) == 0 && !pt_used(store, seg)
+            {
+              let p = from + i;
+              let t = p / 512;
+              if !pt_has(l2, t) {
+                let a = find_free(&mut m);
+                if a < NPAGES {
+                  pt_put(&mut l2, t, pt_new(take_page(&mut m, a), 1));
+                }
+              }
+              if pt_has(l2, t) {
+                let mut l1 = pt_take(&mut l2, t);
+                if pt_has(sl1, i) && pt_shared(sl1, i) && !pt_has(l1, p % 512) {
+                  pt_put_shared(&mut l1, p % 512, pt_dup_shared(sl1, i), w);
+                }
+                pt_put(&mut l2, t, l1);
+              } else {
+                ok = false;
+              }
+              i = i + 1;
+            }
+            pt_put(&mut store, seg, sl1);
+          }
+          pt_put(&mut l3, 0, l2);
+        }
+        pt_put(&mut root, 1, l3);
+      }
+      put_space(&mut spaces, pid, Space::Mapped(root));
+      return ok;
+    },
+  }
+}
+
+fn shm_pages(k: &Kernel, slot: u64) -> u64
+  requires kok(k) && slot < IPC_SETS
+  ensures result <= SHM_PAGES
+{
+  return smaller((smaller(hget(k, KM, slot, H_N), SHMMAX) + 4095) / 4096, SHM_PAGES);
+}
+
+/// A removed segment goes when its last attachment does.
+fn shm_reap(k: &mut Kernel, slot: u64)
+  requires kok(k) && slot < IPC_SETS
+  ensures kok(k)
+{
+  if hget(k, KM, slot, H_SEQ) != 0 && hget(k, KM, slot, H_MODE) & SHM_DEST != 0 && shm_nattch(k, slot) == 0 {
+    shm_free_pages(&mut k, slot);
+    ipc_free(&mut k, KM, slot);
+  }
+}
+
+fn lx_shmget(k: &mut Kernel, pid: u64, key: u64, size: u64, flg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let g = ipc_get(&mut k, pid, KM, key, flg);
+  if g.r >= LONG_NEG || g.slot >= IPC_SETS {
+    return g.r;
+  }
+  if !g.fresh {
+    if size > hget(k, KM, g.slot, H_N) {
+      return EINVAL;
+    }
+    return g.r;
+  }
+  if size == 0 || size > SHMMAX {
+    ipc_free(&mut k, KM, g.slot);
+    return EINVAL;
+  }
+  if !shm_new_pages(&mut k, g.slot, (size + 4095) / 4096) {
+    ipc_free(&mut k, KM, g.slot);
+    return ENOMEM;
+  }
+  hset(&mut k, KM, g.slot, H_N, size);
+  hset(&mut k, KM, g.slot, H_LSPID, tgid(k.procs, pid));
+  return g.r;
+}
+
+fn lx_shmat(k: &mut Kernel, pid: u64, id: u64, addr: u64, flg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut want = addr;
+  if want % 4096 != 0 {
+    if flg & SHM_RND == 0 {
+      return EINVAL;
+    }
+    want = want - want % 4096;
+  }
+  let slot = ipc_find(k, KM, id);
+  if slot >= IPC_SETS || id >= LONG_NEG {
+    return EINVAL;
+  }
+  let mut perm = 6;
+  if flg & SHM_RDONLY != 0 {
+    perm = 4;
+  }
+  if !ipc_may(k, pid, KM, slot, perm) {
+    return EACCES;
+  }
+  let g = tgid(k.procs, pid);
+  let mut rec = SA_N;
+  let mut a = 0;
+  while a < SA_N
+    invariant a <= SA_N && rec <= SA_N && kok(k)
+  {
+    if rec == SA_N && get(k.ipc, sa_at(g, a)) == 0 {
+      rec = a;
+    }
+    a = a + 1;
+  }
+  if rec >= SA_N {
+    return EMFILE;
+  }
+  let pages = shm_pages(k, slot);
+  if pages == 0 {
+    return EINVAL;
+  }
+  let mut at = 0;
+  if want == 0 {
+    let brk = pget(k.procs, pid, F_BRK);
+    let low = pget(k.procs, pid, F_MMAP);
+    if low > STACK_FIRST * 4096 || brk > low || pages * 4096 > low - brk {
+      return ENOMEM;
+    }
+    at = (low - pages * 4096) / 4096;
+    if at * 4096 < brk {
+      return ENOMEM;
+    }
+    pset(&mut k.procs, pid, F_MMAP, at * 4096);
+  } else {
+    if want < USER_BASE || (want - USER_BASE) / 4096 > STACK_FIRST || pages > STACK_FIRST - (want - USER_BASE) / 4096 {
+      return EINVAL;
+    }
+    at = (want - USER_BASE) / 4096;
+    map_forget(&mut k, pid, at, at + pages, false);
+    win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at, at + pages, 0);
+  }
+  let mut ok = false;
+  match k.shm {
+    Store::None => { k.shm = Store::None; },
+    Store::Table(t) => {
+      let mut st = t;
+      ok = win_attach(&mut k.mem, &mut k.spaces, &mut st, pid, slot, at, pages, flg & SHM_RDONLY == 0);
+      k.shm = Store::Table(st);
+    },
+  }
+  if !ok {
+    win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at, at + pages, 0);
+    return ENOMEM;
+  }
+  k.ipc = set(k.ipc, sa_at(g, rec), slot + 1);
+  k.ipc = set(k.ipc, sa_at(g, rec) + 1, at);
+  k.ipc = set(k.ipc, sa_at(g, rec) + 2, pages);
+  hset(&mut k, KM, slot, H_STIME, ipc_now(k));
+  hset(&mut k, KM, slot, H_LRPID, g);
+  return USER_BASE + at * 4096;
+}
+
+/// Ends attachment a of process g: unmaps it if `unmap` (shmdt; at exit
+/// and execve the window is gone already) and drops the record.
+fn shm_detach(k: &mut Kernel, g: u64, a: u64, unmap: bool)
+  requires kok(k) && g < NPROC && a < SA_N
+  ensures kok(k)
+{
+  let r = sa_at(g, a);
+  let s1 = get(k.ipc, r);
+  if s1 == 0 || s1 > IPC_SETS {
+    k.ipc = set(k.ipc, r, 0);
+    return;
+  }
+  let first = get(k.ipc, r + 1);
+  let pages = get(k.ipc, r + 2);
+  if unmap && first <= WPAGES && pages <= WPAGES - first {
+    win_op(&mut k.mem, &mut k.spaces, g, WOP_UNMAP, first, first + pages, 0);
+  }
+  k.ipc = set(k.ipc, r, 0);
+  hset(&mut k, KM, s1 - 1, H_RTIME, ipc_now(k));
+  hset(&mut k, KM, s1 - 1, H_LRPID, g);
+  shm_reap(&mut k, s1 - 1);
+}
+
+fn lx_shmdt(k: &mut Kernel, pid: u64, addr: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let g = tgid(k.procs, pid);
+  let mut a = 0;
+  while a < SA_N
+    invariant a <= SA_N && kok(k) && g < NPROC
+  {
+    let first = get(k.ipc, sa_at(g, a) + 1);
+    if get(k.ipc, sa_at(g, a)) != 0 && first <= WPAGES && addr == USER_BASE + first * 4096 {
+      shm_detach(&mut k, g, a, true);
+      return 0;
+    }
+    a = a + 1;
+  }
+  return EINVAL;
+}
+
+/// exit and execve: the process's attachments end with its window.
+fn shm_drop_all(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut a = 0;
+  while a < SA_N
+    invariant a <= SA_N && kok(k)
+  {
+    if get(k.ipc, sa_at(pid, a)) != 0 {
+      shm_detach(&mut k, pid, a, false);
+    }
+    a = a + 1;
+  }
+}
+
+/// fork: the child has the same attachments (its window maps the pages).
+fn shm_fork(k: &mut Kernel, pid: u64, c: u64)
+  requires kok(k) && pid < NPROC && c < NPROC
+  ensures kok(k)
+{
+  let g = tgid(k.procs, pid);
+  let mut a = 0;
+  while a < SA_N
+    invariant a <= SA_N && kok(k) && g < NPROC
+  {
+    let mut f = 0;
+    while f < SA_W
+      invariant f <= SA_W && a < SA_N && kok(k) && g < NPROC
+    {
+      k.ipc = set(k.ipc, sa_at(c, a) + f, get(k.ipc, sa_at(g, a) + f));
+      f = f + 1;
+    }
+    a = a + 1;
+  }
+}
+
+/// struct shmid64_ds of a segment to user address va.
+fn shmid_out(k: &mut Kernel, pid: u64, slot: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC && slot < IPC_SETS
+  ensures kok(k)
+{
+  perm_out(&mut k, KM, slot);
+  xput(&mut k, 48, hget(k, KM, slot, H_N), 8);
+  xput(&mut k, 56, hget(k, KM, slot, H_STIME), 8);
+  xput(&mut k, 64, hget(k, KM, slot, H_RTIME), 8);
+  xput(&mut k, 72, hget(k, KM, slot, H_CTIME), 8);
+  xput(&mut k, 80, hget(k, KM, slot, H_LSPID), 4);
+  xput(&mut k, 84, hget(k, KM, slot, H_LRPID), 4);
+  xput(&mut k, 88, shm_nattch(k, slot), 8);
+  xput(&mut k, 96, 0, 8);
+  xput(&mut k, 104, 0, 8);
+  return lx_put_out(&mut k, pid, va, SHMID_DS);
+}
+
+fn lx_shmctl(k: &mut Kernel, pid: u64, id: u64, cmd0: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let cmd = cmd0 & !IPC_64;
+  if cmd == IPC_INFO {
+    // struct shminfo64: shmmax shmmin shmmni shmseg shmall, 4 unused
+    xput(&mut k, 0, SHMMAX, 8);
+    xput(&mut k, 8, 1, 8);
+    xput(&mut k, 16, IPC_SETS, 8);
+    xput(&mut k, 24, SA_N, 8);
+    xput(&mut k, 32, IPC_SETS * SHM_PAGES, 8);
+    xput(&mut k, 40, 0, 8);
+    xput(&mut k, 48, 0, 8);
+    xput(&mut k, 56, 0, 8);
+    xput(&mut k, 64, 0, 8);
+    let r = lx_put_out(&mut k, pid, va, 72);
+    if r != 0 {
+      return r;
+    }
+    return ipc_highest(k, KM);
+  }
+  if cmd == SHM_INFO {
+    // struct shm_info: used_ids, then shm_tot shm_rss shm_swp and two
+    // swap counters
+    let mut tot = 0;
+    let mut s = 0;
+    while s < IPC_SETS
+      invariant s <= IPC_SETS && kok(k) && tot <= s * SHM_PAGES
+    {
+      if hget(k, KM, s, H_SEQ) != 0 {
+        tot = tot + shm_pages(k, s);
+      }
+      s = s + 1;
+    }
+    xput(&mut k, 0, ipc_count(k, KM), 4);
+    xput(&mut k, 4, 0, 4);
+    xput(&mut k, 8, tot, 8);
+    xput(&mut k, 16, tot, 8);
+    xput(&mut k, 24, 0, 8);
+    xput(&mut k, 32, 0, 8);
+    xput(&mut k, 40, 0, 8);
+    let r = lx_put_out(&mut k, pid, va, 48);
+    if r != 0 {
+      return r;
+    }
+    return ipc_highest(k, KM);
+  }
+  if cmd == SHM_STAT || cmd == SHM_STAT_ANY {
+    let ix = id % IPC_SPAN;                 // an index; an id names its slot too
+    if ix >= IPC_SETS || hget(k, KM, ix, H_SEQ) == 0 {
+      return EINVAL;
+    }
+    if cmd == SHM_STAT && !ipc_may(k, pid, KM, ix, 4) {
+      return EACCES;
+    }
+    let r = shmid_out(&mut k, pid, ix, va);
+    if r != 0 {
+      return r;
+    }
+    return ipc_id(k, KM, ix);
+  }
+  if cmd != IPC_STAT && cmd != IPC_SET && cmd != IPC_RMID && cmd != SHM_LOCK && cmd != SHM_UNLOCK {
+    return EINVAL;
+  }
+  if cmd == IPC_SET && copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, SHMID_DS) != SHMID_DS {
+    return EFAULT;
+  }
+  let slot = ipc_find(k, KM, id);
+  if slot >= IPC_SETS || id >= LONG_NEG {
+    return EINVAL;
+  }
+  if cmd == IPC_STAT {
+    if !ipc_may(k, pid, KM, slot, 4) {
+      return EACCES;
+    }
+    return shmid_out(&mut k, pid, slot, va);
+  }
+  if !ipc_owner(k, pid, KM, slot) {
+    return EPERM;
+  }
+  let mode = hget(k, KM, slot, H_MODE);
+  if cmd == SHM_LOCK {
+    hset(&mut k, KM, slot, H_MODE, mode | SHM_LOCKED);
+  } else if cmd == SHM_UNLOCK {
+    hset(&mut k, KM, slot, H_MODE, mode & !SHM_LOCKED);
+  } else if cmd == IPC_RMID {
+    hset(&mut k, KM, slot, H_MODE, mode | SHM_DEST);
+    hset(&mut k, KM, slot, H_KEY, 0);       // no longer found by its key
+    shm_reap(&mut k, slot);
+  } else {
+    perm_in(&mut k, KM, slot);
+  }
+  return 0;
+}
+
 // ---------------------------------------------------------------- calls
 
 fn is_ipc_call(n: u64) -> bool {
   return n == LX_SEMGET || n == LX_SEMOP || n == LX_SEMCTL || n == LX_MSGGET || n == LX_MSGSND
-    || n == LX_MSGRCV || n == LX_MSGCTL || n == LX_SEMTIMEDOP;
+    || n == LX_MSGRCV || n == LX_MSGCTL || n == LX_SEMTIMEDOP || n == LX_SHMGET || n == LX_SHMAT
+    || n == LX_SHMCTL || n == LX_SHMDT;
 }
 
 /// System call n of process pid, with its first three arguments.
@@ -1229,8 +1763,19 @@ fn lx_ipc_call(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u6
   if n == LX_SEMOP || n == LX_SEMTIMEDOP {
     return lx_semop(&mut k, pid, was, a, b, c, r10, n == LX_SEMTIMEDOP);
   }
+  if (n == LX_SHMAT || n == LX_SHMDT) && !win_quiet(&mut k, pid) {
+    return lx_retry(&mut k, pid, n);        // another thread of pid runs on a processor
+  }
   let mut r = EINVAL;
-  if n == LX_MSGGET {
+  if n == LX_SHMGET {
+    r = lx_shmget(&mut k, pid, a, b, c);
+  } else if n == LX_SHMAT {
+    r = lx_shmat(&mut k, pid, a, b, c);
+  } else if n == LX_SHMDT {
+    r = lx_shmdt(&mut k, pid, a);
+  } else if n == LX_SHMCTL {
+    r = lx_shmctl(&mut k, pid, a, b, c);
+  } else if n == LX_MSGGET {
     r = lx_msgget(&mut k, pid, a, b);
   } else if n == LX_MSGCTL {
     r = lx_msgctl(&mut k, pid, a, b, c);
