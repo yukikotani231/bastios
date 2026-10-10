@@ -1,12 +1,18 @@
 /* Time and waiting through the Linux system calls, against musl: the
  * monotonic clock, nanosleep, poll timing out on an empty pipe, poll seeing
  * data and the end of a pipe, poll waking when a child writes, and select
- * and pselect over pipes, and alarm, setitimer and pause. */
+ * and pselect over pipes, alarm, setitimer and pause, and eventfd, timerfd
+ * and epoll. */
 #include <errno.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
+#include <fcntl.h>
+#include <stdint.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/select.h>
+#include <sys/timerfd.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -32,6 +38,92 @@ static long long now_ms(void)
     if (clock_gettime(CLOCK_MONOTONIC, &t) != 0)
         return -1;
     return t.tv_sec * 1000LL + t.tv_nsec / 1000000;
+}
+
+/* eventfd, timerfd and epoll. Returns 0, or what failed. */
+static const char *events(void)
+{
+    uint64_t v;
+    int e = eventfd(3, EFD_NONBLOCK | EFD_CLOEXEC);
+    v = 4;
+    if (e < 0 || write(e, &v, 8) != 8 || read(e, &v, 8) != 8 || v != 7)
+        return "eventfd counting";
+    if (read(e, &v, 8) != -1 || errno != EAGAIN)
+        return "an empty eventfd";
+    int sem = eventfd(2, EFD_SEMAPHORE | EFD_NONBLOCK);
+    if (sem < 0 || read(sem, &v, 8) != 8 || v != 1 || read(sem, &v, 8) != 8 || v != 1
+        || read(sem, &v, 8) != -1 || errno != EAGAIN)
+        return "a semaphore eventfd";
+    close(sem);
+
+    int t = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
+    struct itimerspec its = { { 0, 20000000 }, { 0, 50000000 } }, cur;
+    long long t0 = now_ms();
+    if (t < 0 || timerfd_settime(t, 0, &its, 0) != 0)
+        return "timerfd_settime";
+    if (read(t, &v, 8) != 8 || v < 1 || now_ms() - t0 < 40)
+        return "a timerfd read that waits";
+    if (timerfd_gettime(t, &cur) != 0 || cur.it_interval.tv_nsec != 20000000)
+        return "timerfd_gettime";
+    struct itimerspec off = { { 0, 0 }, { 0, 0 } };
+    if (timerfd_settime(t, 0, &off, &cur) != 0 || cur.it_interval.tv_nsec != 20000000)
+        return "disarming a timerfd";
+
+    int p[2], ep = epoll_create1(EPOLL_CLOEXEC);
+    struct epoll_event ev = { .events = EPOLLIN, .data.u64 = 7 }, out[8];
+    if (ep < 0 || pipe(p) != 0 || epoll_ctl(ep, EPOLL_CTL_ADD, e, &ev) != 0)
+        return "epoll_ctl ADD";
+    if (epoll_ctl(ep, EPOLL_CTL_ADD, e, &ev) != -1 || errno != EEXIST)
+        return "adding twice";
+    ev.data.u64 = 9;
+    if (epoll_ctl(ep, EPOLL_CTL_ADD, p[0], &ev) != 0)
+        return "watching a pipe";
+    ev.data.u64 = 11;
+    if (epoll_ctl(ep, EPOLL_CTL_ADD, t, &ev) != 0)
+        return "watching a timerfd";
+    if (epoll_wait(ep, out, 8, 0) != 0)
+        return "epoll_wait with nothing ready";
+    t0 = now_ms();
+    if (epoll_wait(ep, out, 8, 60) != 0 || now_ms() - t0 < 40)
+        return "an epoll_wait that times out";
+    v = 1;
+    if (write(e, &v, 8) != 8 || epoll_wait(ep, out, 8, 0) != 1 || out[0].data.u64 != 7
+        || !(out[0].events & EPOLLIN))
+        return "epoll_wait seeing an eventfd";
+    read(e, &v, 8);
+    pid_t c = fork();
+    if (c < 0)
+        return "fork";
+    if (c == 0) {
+        struct timespec d = { 0, 100000000 };
+        nanosleep(&d, 0);
+        write(p[1], "x", 1);
+        _exit(0);
+    }
+    int n = epoll_wait(ep, out, 8, 5000);
+    if (n != 1 || out[0].data.u64 != 9)
+        return "epoll_wait woken by a pipe";
+    waitpid(c, 0, 0);
+    if (epoll_ctl(ep, EPOLL_CTL_DEL, p[0], 0) != 0 || epoll_ctl(ep, EPOLL_CTL_DEL, p[0], 0) != -1
+        || errno != ENOENT)
+        return "epoll_ctl DEL";
+    its.it_value.tv_nsec = 10000000;
+    if (timerfd_settime(t, 0, &its, 0) != 0 || epoll_wait(ep, out, 8, 2000) != 1
+        || out[0].data.u64 != 11)
+        return "epoll_wait woken by a timerfd";
+    int f = open("/mtime_f", O_CREAT | O_RDWR, 0644);
+    if (f >= 0 && (epoll_ctl(ep, EPOLL_CTL_ADD, f, &ev) != -1 || errno != EPERM))
+        return "watching a file";
+    if (f >= 0) {
+        close(f);
+        unlink("/mtime_f");
+    }
+    close(t);
+    close(ep);
+    close(e);
+    close(p[0]);
+    close(p[1]);
+    return 0;
 }
 
 int main(void)
@@ -164,7 +256,10 @@ int main(void)
     if (waitpid(child, &status, 0) != child || !WIFSIGNALED(status) || WTERMSIG(status) != SIGALRM)
         return fail("SIGALRM ending a process");
 
-    printf("mtime: rang %d, selected, slept %lld, timed out %lld, woke %s\n", rang >= 3 ? 3 : rang, slept / 100 * 100, waited / 100 * 100,
+    const char *bad = events();
+    if (bad)
+        return fail(bad);
+    printf("mtime: rang %d, selected, slept %lld, timed out %lld, woke %s, events ok\n", rang >= 3 ? 3 : rang, slept / 100 * 100, waited / 100 * 100,
            woke >= 100 && woke < 5000 ? "in time" : "late");
     return 0;
 }
