@@ -62,6 +62,7 @@ const LO_TRUNC: u64 = 0x200;
 const LO_APPEND: u64 = 0x400;
 const LO_NONBLOCK: u64 = 0x800;
 
+const READ_MAX: u64 = 262144;          // the most one read of a file returns
 const MAP_SHARED: u64 = 1;
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANONYMOUS: u64 = 0x20;
@@ -915,24 +916,48 @@ fn line_take(l: &mut Buf, t: u64)
   }
 }
 
-/// read from the file open on native row `row`.
+/// read from the file open on native row `row`: up to READ_MAX bytes, a
+/// transfer buffer at a time, so a regular file is not read short (as
+/// programs expect of one) unless it ends or the disk must be waited for.
 fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && row < FD_ROWS
   ensures kok(k)
 {
-  let got = vfs_read(&mut k.fs, row, smaller(n, XFER));
-  if got == NO_FD {
-    return EBADF;
+  let want = smaller(n, READ_MAX);
+  let mut done = 0;
+  while done < want
+    invariant done <= want && want <= READ_MAX && kok(k)
+  {
+    let got = vfs_read(&mut k.fs, row, smaller(want - done, XFER));
+    if got == NO_FD {
+      return EBADF;
+    }
+    if got == VFS_MISS {
+      if done > 0 {
+        return done;                        // what came so far; the rest waits
+      }
+      return DISK_RETRY;                    // sleep until the disk catches up
+    }
+    if va > 0xFFFFFFFFFFFFFFFF - READ_MAX {
+      return EFAULT;
+    }
+    let put = copy_to_user(&mut k.spaces, pid, va + done, k.fs.xfer, got);
+    if put == NO_RESULT || (put == 0 && got > 0) {
+      if done > 0 {
+        return done;
+      }
+      return EFAULT;
+    }
+    vfs_advance(&mut k.fs, row, vfs_offset(k.fs, row), put);
+    if put > want - done {
+      return want;
+    }
+    done = done + put;
+    if put < XFER {
+      return done;                          // the end of the file
+    }
   }
-  if got == VFS_MISS {
-    return DISK_RETRY;                      // sleep until the disk catches up
-  }
-  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, got);
-  if put == NO_RESULT || (put == 0 && got > 0) {
-    return EFAULT;
-  }
-  vfs_advance(&mut k.fs, row, vfs_offset(k.fs, row), put);
-  return put;
+  return done;
 }
 
 /// write(fd, va, n) to the console, a file or a pipe. Returns the count,
@@ -1517,7 +1542,11 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   if n == 0 || n > USER_SIZE || off % 4096 != 0 {
     return EINVAL;
   }
-  let anon = flags / MAP_ANONYMOUS % 2 == 1;
+  let mut anon = flags / MAP_ANONYMOUS % 2 == 1;
+  if !anon {
+    let z = fd_look(k, pid, fd);
+    anon = z.kind == K_DEV && z.x == 2;     // /dev/zero (DEV_ZERO): fresh zero pages
+  }
   let mut f = NO_FILE;
   if !anon {
     let d = fd_look(k, pid, fd);
@@ -1563,6 +1592,9 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   }
   // Fresh pages are zero: only a file's bytes need copying in.
   if anon {
+    if prot != 0 {
+      read_only(&mut k, pid, at / 4096, pages, prot);
+    }
     return USER_BASE + at;
   }
   let total = pages * 4096;
@@ -1593,7 +1625,19 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   if flags % 4 == MAP_SHARED {
     map_record(&mut k, pid, fd, at / 4096, pages, off);
   }
+  read_only(&mut k, pid, at / 4096, pages, prot);
   return USER_BASE + at;
+}
+
+/// A new mapping without PROT_WRITE (2): its pages, from window page
+/// `first` on, become read-only, so a write faults as on Linux.
+fn read_only(k: &mut Kernel, pid: u64, first: u64, pages: u64, prot: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if prot / 2 % 2 == 0 && first <= WPAGES && pages <= WPAGES - first {
+    win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, first, first + pages, 0);
+  }
 }
 
 /// The file layer's handle for the file open on native row `row`, or
