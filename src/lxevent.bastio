@@ -46,7 +46,6 @@ const EP_OFF: u64 = 0x4000000000000000;      // a one-shot entry that has fired
 const EPOLL_EVENT: u64 = 12;                 // struct epoll_event, packed: u32 events, u64 data
 const INT_NEG: u64 = 0x80000000;             // an int argument this large is negative
 const VA_LAST: u64 = 0xFFFFFFFFFFFF0000;     // an address past this cannot hold two timespecs
-const EPERM: u64 = 18446744073709551615;     // 2^64 - 1
 const ENOSPC: u64 = 18446744073709551588;    // 2^64 - 28
 
 fn is_event_call(n: u64) -> bool {

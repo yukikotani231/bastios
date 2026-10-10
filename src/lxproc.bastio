@@ -153,6 +153,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   pset(&mut k.procs, c, F_PARENT, pid);
   pset(&mut k.procs, c, F_REGS + R_RAX, 0);
   pset(&mut k.procs, c, F_TGID, 0);         // a fork of a thread is a new process
+  group_fork(&mut k.procs, pid, c);
   pset(&mut k.procs, c, F_CTID, 0);
   pset(&mut k.procs, c, F_FUTEX, 0);
   lx_fd_fork(&mut k, pid, c);
@@ -622,7 +623,7 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
   ensures kok(k)
 {
   let d = fd_look(k, pid, fd);
-  let mut m = Meta { ok: true, mode: S_IFCHR, size: 0, ino: 3, mtime: 0 };
+  let mut m = dev_meta(DEV_TTY);           // the console is /dev/tty
   if d.kind == K_BAD {
     return EBADF;
   } else if d.kind == K_PIPE_R || d.kind == K_PIPE_W {
