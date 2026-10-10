@@ -324,6 +324,17 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Network
 
+- The virtio network card sends without the kernel lock waiting for it:
+  a frame goes out through one of two transmit buffers, and the buffers
+  come back when the next frame is sent. Received buffers go back to the
+  card with one notice per poll instead of one per frame. Four hosts each
+  echoing 1 MiB through `mtcp echo` at once went from 4.2 s to 2.0 s on
+  four processors and from 0.9 s to 0.6 s on one (QEMU TCG; four
+  processors stay slower there because the test host has four cores, and
+  QEMU's network thread shares them with the spinning processors).
+- Up to eight frames can wait for an ARP answer, not one. Two connections
+  opened at once before the kernel knew the gateway's MAC lost the first
+  SYN+ACK, and that connection waited a second for the host to try again.
 - More Intel network cards on the e1000 driver: the 82544GC and 82545EM,
   the 82574L (QEMU's `e1000e`), and the igb family: the 82576 (QEMU's
   `igb`), and the I350, I210 and I211 found on many server and desktop

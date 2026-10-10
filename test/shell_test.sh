@@ -1353,6 +1353,42 @@ for line, want, until in [
     print(("ok  " if ok else "FAIL"), "(disk-program boot)", repr(line)); ok or print(repr(out[mark:]))
     fails += not ok
 qemu.kill(); qemu.wait()
+# Two connections opened at once, before the kernel knows the gateway's
+# MAC: both SYN+ACKs wait for one ARP answer (send_via holds up to
+# HELD_N frames). With only one frame held, the first was dropped and its
+# connection waited a second for the host to send its SYN again.
+ports = []
+for _ in range(2):
+    _s = socket.socket(); _s.bind(("127.0.0.1", 0)); ports.append(_s.getsockname()[1]); _s.close()
+qemu = boot(2, extra=["-netdev", f"user,id=n1,hostfwd=tcp:127.0.0.1:{ports[0]}-:7101,hostfwd=tcp:127.0.0.1:{ports[1]}-:7102",
+                      "-device", "virtio-net-pci,netdev=n1"])
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+time.sleep(2)                           # DHCP
+for line, want in [("ash", b"\n# "), ("mtcp echo 7101 &", b"listening on tcp port 7101"), ("mtcp echo 7102 &", b"listening on tcp port 7102")]:
+    mark = len(out)
+    qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+    ok = ok and read_until(want, mark)
+took = []
+if ok:
+    import threading
+    def echo_once(port):
+        try:
+            t0 = time.time()
+            c = socket.create_connection(("127.0.0.1", port), timeout=20)
+            c.sendall(b"ping")
+            got = c.recv(10)
+            took.append((time.time() - t0, got))
+            c.close()
+        except OSError as e:
+            took.append((99, repr(e).encode()))
+    ts = [threading.Thread(target=echo_once, args=(p,)) for p in ports]
+    [t.start() for t in ts]; [t.join(30) for t in ts]
+ok = ok and len(took) == 2 and all(g == b"ping" and t < 0.9 for t, g in took)
+print(("ok  " if ok else "FAIL"), "two TCP connections at once before ARP: both answered", [f"{t:.2f} s" for t, _ in took])
+fails += not ok
+qemu.kill(); qemu.wait()
 # ACPI (src/acpi.bastio) on both of QEMU's PCs, the i440fx (pc) and the
 # q35, without the isa-debug-exit device and without -no-reboot, so only
 # the kernel's own ACPI code can end QEMU: `reboot` restarts the machine
