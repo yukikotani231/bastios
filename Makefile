@@ -215,6 +215,45 @@ test: build/bastios.elf
 	NIC=e1000 test/tcp_test.sh
 	test/iso_test.sh
 
+# The Linux compatibility suite (test/compat): static musl programs that
+# exercise the system call surface, and a BusyBox with a broad set of
+# applets, run from a disk image under ash. Writes build/compat/report.md
+# (pass/fail per check, and missing system calls ranked by how many checks
+# they block). Not part of `make test`: most checks are expected to fail
+# today. It fails only if a check in test/compat/baseline.txt stops passing.
+COMPAT_PROGS := $(patsubst test/compat/progs/%.c,%,$(wildcard test/compat/progs/t_*.c))
+COMPAT_BINS  := $(COMPAT_PROGS:%=build/compat/%)
+
+$(COMPAT_BINS): build/compat/%: test/compat/progs/%.c test/compat/progs/compat.h | build/compat
+	$(MUSLCC) -static-pie -O2 -Wall -Wno-unused-result -o $@ $<
+
+build/compat:
+	mkdir -p $@
+
+build/compat/busybox: build/busybox/Makefile test/compat/busybox.config | build/compat
+	rm -rf build/compat/bb && cp -r build/busybox build/compat/bb
+	$(MAKE) -C build/compat/bb -s clean >/dev/null
+	$(MAKE) -C build/compat/bb -s allnoconfig >/dev/null
+	for o in $$(grep -v '^#' test/compat/busybox.config); do \
+	  sed -i "s/^# $$o is not set/$$o=y/" build/compat/bb/.config; done
+	yes "" | $(MAKE) -C build/compat/bb -s oldconfig >/dev/null
+	$(MAKE) -C build/compat/bb -s CC=$(MUSLCC) EXTRA_CFLAGS=-fPIE CFLAGS_busybox=-static-pie busybox
+	cp build/compat/bb/busybox $@
+
+build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox test/compat/mkdisk.py
+	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox
+
+compat: build/bastios.elf build/compat/disk.img
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --out build/compat $(COMPAT_PROGS)
+
+# Records which checks pass now, so `make compat` catches regressions.
+compat-baseline: build/bastios.elf build/compat/disk.img
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --out build/compat $(COMPAT_PROGS)
+
+# The same checks on this Linux machine: are the expectations right?
+compat-host: $(COMPAT_BINS) build/compat/busybox
+	test/compat/run.py --host build/compat --out build/compat/host $(COMPAT_PROGS)
+
 # Not part of `make test`: prints timings, checks nothing (see the script).
 smpbench: build/bastios.elf
 	test/smpbench.sh
@@ -223,4 +262,4 @@ clean:
 	rm -rf build
 
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
-.PHONY: all run test smpbench clean
+.PHONY: all run test smpbench compat compat-baseline compat-host clean
