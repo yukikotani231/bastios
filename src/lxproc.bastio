@@ -343,11 +343,11 @@ struct Meta { ok: bool, mode: u64, size: u64, ino: u64 }
 /// stat(path, buf): "/", "/bin" and the file layer's directories are
 /// directories, /bin/NAME a built-in program, anything else a file. Owner root, one link, no times. Returns 0 or
 /// -errno; with `buf` 0 it only checks that the path exists (access).
-fn lx_stat(k: &mut Kernel, pid: u64, path: u64, buf: u64) -> u64
+fn lx_stat(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, buf: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let n = lx_path_in(&mut k, pid, path);
+  let n = lx_path_at(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return ENOENT;
   }
