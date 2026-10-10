@@ -1739,6 +1739,213 @@ fn lx_shmctl(k: &mut Kernel, pid: u64, id: u64, cmd0: u64, va: u64) -> u64
   return 0;
 }
 
+// ---------------------------------------------------------------- /proc
+//
+// The files src/lxprocfs.bastio serves for System V IPC: the limits under
+// /proc/sys/kernel, and /proc/sysvipc/msg, sem and shm in Linux's layout.
+
+fn ipc_proc_name(i: u64) -> Str {
+  if i == 0 {
+    return "sys/kernel/shmmax";
+  }
+  if i == 1 {
+    return "sys/kernel/shmall";
+  }
+  if i == 2 {
+    return "sys/kernel/shmmni";
+  }
+  if i == 3 {
+    return "sys/kernel/msgmax";
+  }
+  if i == 4 {
+    return "sys/kernel/msgmnb";
+  }
+  if i == 5 {
+    return "sys/kernel/msgmni";
+  }
+  if i == 6 {
+    return "sys/kernel/sem";
+  }
+  if i == 7 {
+    return "sysvipc/msg";
+  }
+  if i == 8 {
+    return "sysvipc/sem";
+  }
+  return "sysvipc/shm";
+}
+
+/// v in decimal, right-aligned in w columns.
+fn put_w(o: &mut Bytes, at: u64, v: u64, w: u64) -> u64
+  requires blen(o) == XFER && at <= XFER
+  ensures blen(o) == XFER && result <= XFER
+{
+  let mut digits = 1;
+  let mut p = v;
+  while p >= 10 && digits < 20
+    invariant digits >= 1 && digits <= 20
+  {
+    p = p / 10;
+    digits = digits + 1;
+  }
+  let mut a = at;
+  let mut d = digits;
+  while d < w
+    invariant a <= XFER && blen(o) == XFER
+  {
+    a = put_c(&mut o, a, 32);
+    d = d + 1;
+  }
+  return put_n(&mut o, a, v);
+}
+
+/// A key: an int, so a high bit makes it negative.
+fn put_key(o: &mut Bytes, at: u64, key: u64) -> u64
+  requires blen(o) == XFER && at <= XFER
+  ensures blen(o) == XFER && result <= XFER
+{
+  let k32 = key % ID_SPAN;
+  if k32 < 0x80000000 {
+    return put_w(&mut o, at, k32, 10);
+  }
+  let a = put_c(&mut o, at, 45);
+  return put_n(&mut o, a, ID_SPAN - k32);
+}
+
+/// The perms column: the mode in octal, right-aligned in 4.
+fn put_mode(o: &mut Bytes, at: u64, mode: u64) -> u64
+  requires blen(o) == XFER && at <= XFER
+  ensures blen(o) == XFER && result <= XFER
+{
+  let m = mode % 4096;
+  let mut a = put_s(&mut o, at, "  ");
+  if m < 512 {
+    a = put_c(&mut o, a, 32);
+  } else {
+    a = put_c(&mut o, a, cast[u8](48 + m / 512));
+  }
+  a = put_c(&mut o, a, cast[u8](48 + m / 64 % 8));
+  a = put_c(&mut o, a, cast[u8](48 + m / 8 % 8));
+  return put_c(&mut o, a, cast[u8](48 + m % 8));
+}
+
+/// The owner and creator columns: uid gid cuid cgid.
+fn put_owners(k: &Kernel, o: &mut Bytes, at: u64, kind: u64, slot: u64) -> u64
+  requires kok(k) && blen(o) == XFER && at <= XFER && slot < IPC_SETS
+  ensures blen(o) == XFER && result <= XFER
+{
+  let own = hget(k, kind, slot, H_OWN);
+  let cre = hget(k, kind, slot, H_CRE);
+  let mut a = put_c(&mut o, at, 32);
+  a = put_w(&mut o, a, own % ID_SPAN, 5);
+  a = put_c(&mut o, a, 32);
+  a = put_w(&mut o, a, own / ID_SPAN % ID_SPAN, 5);
+  a = put_c(&mut o, a, 32);
+  a = put_w(&mut o, a, cre % ID_SPAN, 5);
+  a = put_c(&mut o, a, 32);
+  return put_w(&mut o, a, cre / ID_SPAN % ID_SPAN, 5);
+}
+
+/// IPC /proc file i (as ipc_proc_name numbers them) into o.
+fn ipc_proc_text(k: &mut Kernel, i: u64, o: &mut Bytes) -> u64
+  requires kok(k) && blen(o) == XFER
+  ensures kok(k) && blen(o) == XFER && result <= XFER
+{
+  if i < 6 {
+    let mut v = SHMMAX;
+    if i == 1 {
+      v = IPC_SETS * SHM_PAGES;
+    } else if i == 2 || i == 5 {
+      v = IPC_SETS;
+    } else if i == 3 {
+      v = MSGMAX;
+    } else if i == 4 {
+      v = MSGMNB;
+    }
+    let a = put_n(&mut o, 0, v);
+    return put_c(&mut o, a, 10);
+  }
+  if i == 6 {
+    // semmsl, semmns, semopm, semmni
+    let mut a = put_n(&mut o, 0, SEMMSL);
+    a = put_c(&mut o, a, 9);
+    a = put_n(&mut o, a, IPC_SETS * SEMMSL);
+    a = put_c(&mut o, a, 9);
+    a = put_n(&mut o, a, SEMOPM);
+    a = put_c(&mut o, a, 9);
+    a = put_n(&mut o, a, IPC_SETS);
+    return put_c(&mut o, a, 10);
+  }
+  let mut kind = KQ;
+  let mut a = 0;
+  if i == 7 {
+    a = put_s(&mut o, 0, "       key      msqid perms      cbytes       qnum lspid lrpid   uid   gid  cuid  cgid      stime      rtime      ctime\n");
+  } else if i == 8 {
+    kind = KS;
+    a = put_s(&mut o, 0, "       key      semid perms      nsems   uid   gid  cuid  cgid      otime      ctime\n");
+  } else {
+    kind = KM;
+    a = put_s(&mut o, 0, "       key      shmid perms                  size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime                   rss                  swap\n");
+  }
+  let mut s = 0;
+  while s < IPC_SETS
+    invariant s <= IPC_SETS && a <= XFER && blen(o) == XFER && kok(k)
+  {
+    if hget(k, kind, s, H_SEQ) != 0 {
+      a = put_key(&mut o, a, hget(k, kind, s, H_KEY));
+      a = put_c(&mut o, a, 32);
+      a = put_w(&mut o, a, ipc_id(k, kind, s), 10);
+      a = put_mode(&mut o, a, hget(k, kind, s, H_MODE));
+      if kind == KQ {
+        a = put_s(&mut o, a, "  ");
+        a = put_w(&mut o, a, hget(k, kind, s, H_BYTES), 10);
+        a = put_c(&mut o, a, 32);
+        a = put_w(&mut o, a, hget(k, kind, s, H_N), 10);
+        a = put_c(&mut o, a, 32);
+        a = put_w(&mut o, a, hget(k, kind, s, H_LSPID), 5);
+        a = put_c(&mut o, a, 32);
+        a = put_w(&mut o, a, hget(k, kind, s, H_LRPID), 5);
+        a = put_owners(k, &mut o, a, kind, s);
+        a = put_c(&mut o, a, 32);
+        a = put_w(&mut o, a, hget(k, kind, s, H_STIME), 10);
+        a = put_c(&mut o, a, 32);
+        a = put_w(&mut o, a, hget(k, kind, s, H_RTIME), 10);
+      } else if kind == KS {
+        a = put_c(&mut o, a, 32);
+        a = put_w(&mut o, a, sem_nsems(k, s), 10);
+        a = put_owners(k, &mut o, a, kind, s);
+        a = put_c(&mut o, a, 32);
+        a = put_w(&mut o, a, hget(k, kind, s, H_STIME), 10);
+      } else {
+        a = put_c(&mut o, a, 32);
+        a = put_w(&mut o, a, hget(k, kind, s, H_N), 21);
+        a = put_c(&mut o, a, 32);
+        a = put_w(&mut o, a, hget(k, kind, s, H_LSPID), 5);
+        a = put_c(&mut o, a, 32);
+        a = put_w(&mut o, a, hget(k, kind, s, H_LRPID), 5);
+        a = put_s(&mut o, a, "  ");
+        a = put_w(&mut o, a, shm_nattch(k, s), 5);
+        a = put_owners(k, &mut o, a, kind, s);
+        a = put_c(&mut o, a, 32);
+        a = put_w(&mut o, a, hget(k, kind, s, H_STIME), 10);
+        a = put_c(&mut o, a, 32);
+        a = put_w(&mut o, a, hget(k, kind, s, H_RTIME), 10);
+      }
+      a = put_c(&mut o, a, 32);
+      a = put_w(&mut o, a, hget(k, kind, s, H_CTIME), 10);
+      if kind == KM {
+        a = put_c(&mut o, a, 32);
+        a = put_w(&mut o, a, shm_pages(k, s) * 4096, 21);
+        a = put_c(&mut o, a, 32);
+        a = put_w(&mut o, a, 0, 21);
+      }
+      a = put_c(&mut o, a, 10);
+    }
+    s = s + 1;
+  }
+  return a;
+}
+
 // ---------------------------------------------------------------- calls
 
 fn is_ipc_call(n: u64) -> bool {
