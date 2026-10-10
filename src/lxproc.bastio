@@ -72,6 +72,9 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   pset(&mut k.procs, c, F_PARENT, pid);
   pset(&mut k.procs, c, F_REGS + R_RAX, 0);
   lx_fd_fork(&mut k, pid, c);
+  sig_fork(&mut k.sigact, pid, c);
+  pset(&mut k.procs, c, F_SIGPEND, 0);
+  pset(&mut k.procs, c, F_RESTART, 0);
   pset(&mut k.procs, c, F_STATE, READY);
   return c;
 }
@@ -130,6 +133,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
     },
   }
   lx_fd_close_all(&mut k, pid, true);
+  sig_reset(&mut k.sigact, pid, true);
   match take_fpu(&mut k.fpus, pid) {
     Fpu::None => {},
     Fpu::State(mut f) => {
@@ -292,7 +296,12 @@ fn lx_wait4(k: &mut Kernel, pid: u64, want: u64, status: u64, options: u64) -> u
       if state(k.procs, c) == ZOMBIE {
         if status != 0 {
           lx_fill(&mut k, 0, 4);
-          bset(&mut k.fs.xfer, 1, pget(k.procs, c, F_CODE) % 256);
+          let code = pget(k.procs, c, F_CODE);
+          if code >= SIG_DEATH {
+            bset(&mut k.fs.xfer, 0, code % 128);   // ended by a signal
+          } else {
+            bset(&mut k.fs.xfer, 1, code % 256);
+          }
           if lx_put_out(&mut k, pid, status, 4) != 0 {
             ret(&mut k.procs, pid, EFAULT);
             return KEEP;
@@ -321,6 +330,7 @@ fn lx_wait4(k: &mut Kernel, pid: u64, want: u64, status: u64, options: u64) -> u
   pset(&mut k.procs, pid, F_REGS + R_RIP, rip - 2);
   pset(&mut k.procs, pid, F_REGS + R_RAX, LX_WAIT4);
   pset(&mut k.procs, pid, F_STATE, LXWAITING);
+  pset(&mut k.procs, pid, F_RESTART, 1);
   return SWITCH;
 }
 
@@ -488,7 +498,10 @@ fn applet_name(j: u64) -> Str {
   if j == 4 {
     return "rm";
   }
-  return "cp";
+  if j == 5 {
+    return "cp";
+  }
+  return "kill";
 }
 
 /// Stores v little-endian in bytes at..at+8 of x.

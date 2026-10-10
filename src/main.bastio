@@ -24,6 +24,7 @@ import "lxproc.bastio";
 import "lxfd.bastio";
 import "lxdir.bastio";
 import "lxsock.bastio";
+import "lxsig.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
@@ -85,6 +86,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, from: u64) -> Job
   nic_poll(&mut s.k.nic);
   net_wake(&mut s.k);
   drain(&mut s.con, &mut s.k.q);
+  tty_intr(&mut s.con, &mut s.k);
   tty_cook(&mut s.con, &mut s.k);
   wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
   let p = pick(s.k.procs, from);
@@ -94,6 +96,9 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, from: u64) -> Job
       return Job::Stop;
     }
     return Job::Idle;
+  }
+  if !lx_deliver(&mut s.k, mmu, p) {
+    return Job::Idle;                       // a signal ended it
   }
   match take_space(&mut s.k.spaces, p) {
     Space::Empty => {
@@ -377,7 +382,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     vec_push(&mut fpus, Fpu::None);
     q = q + 1;
   }
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), ticks: 0, ns: 0, cpus: cpus, fs: vfs_new(disk), nic: nic };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: alloc(INQ_LEN), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), ticks: 0, ns: 0, cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN) };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
@@ -416,6 +421,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.lxfd);
   free(sys.k.ofd);
   free(sys.k.pipes);
+  free(sys.k.sigact);
   pool = sys.k.mem.pool;
   port_release(&mut ports, sys.con.io);
   port_release(&mut ports, sys.pic.master);
