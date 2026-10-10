@@ -4,6 +4,7 @@ busybox: awk
 busybox: base64
 busybox: basename/dirname
 busybox: cat a file
+busybox: chmod
 busybox: cmp
 busybox: cp
 busybox: cut
@@ -86,9 +87,11 @@ t_dir: unlink file in directory
 t_file: /dev/null write
 t_file: /dev/urandom read
 t_file: /dev/zero read
+t_file: O_EXCL on existing
 t_file: O_RDONLY refuses write
 t_file: access F_OK
 t_file: access missing
+t_file: chmod
 t_file: chown to self
 t_file: close
 t_file: close twice is EBADF
@@ -110,6 +113,7 @@ t_file: rename
 t_file: stdio fprintf/fscanf
 t_file: tmpfile
 t_file: unlink
+t_file: utime
 t_file: write
 t_file: writev
 t_ipc: EOF once writers close
@@ -188,6 +192,7 @@ t_proc: umask
 t_proc: uname
 t_proc: wait with no children is ECHILD
 t_proc: waitpid WNOHANG
+t_signal: SIGCHLD on child exit
 t_signal: SIG_IGN
 t_signal: alarm
 t_signal: getitimer
@@ -196,8 +201,12 @@ t_signal: kill self
 t_signal: raise runs the handler
 t_signal: setitimer
 t_signal: sigaction
+t_signal: sigaltstack
 t_signal: signal to a child
+t_signal: sigpending
 t_signal: sigprocmask blocks
+t_signal: sigsuspend
+t_signal: sigwait
 t_signal: unblock delivers
 t_time: clock_getres
 t_time: clock_gettime BOOTTIME

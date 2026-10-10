@@ -360,6 +360,16 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64) -> u64
     return fd_install(&mut k, pid, hv);
   }
   let dir = dir_at(&mut k, n);
+  let excl = flags & LO_CREAT != 0 && flags & LO_EXCL != 0;
+  if excl && (dir != NO_FILE || vfs_lookup(&mut k.fs, n) != NO_FILE) {
+    return EEXIST;
+  }
+  if dir == NO_FILE && flags & LO_DIRECTORY != 0 {
+    if vfs_lookup(&mut k.fs, n) != NO_FILE {
+      return ENOTDIR;
+    }
+    return ENOENT;
+  }
   if dir != NO_FILE {
     // A directory, for getdents64.
     let hd = ofd_new(&mut k, OF_DIR, dir);

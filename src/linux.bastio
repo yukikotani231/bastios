@@ -102,6 +102,9 @@ const STAT_SIZE: u64 = 144;                 // struct stat on x86-64
 const S_IFDIR: u64 = 0x41ED;                // a directory, rwxr-xr-x
 const S_IFREG_X: u64 = 0x81ED;              // a regular file, rwxr-xr-x
 const S_IFREG: u64 = 0x81A4;                // a regular file, rw-r--r--
+const S_IFMT_DIR: u64 = 0x4000;             // the type bits of a directory
+const S_IFMT_REG: u64 = 0x8000;             // and of a regular file
+const INO_FILES: u64 = 1000;                // inode numbers of files: this + the handle
 
 // ---------------------------------------------------------------- user memory
 
@@ -384,6 +387,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if n == LX_GETTID {
     ret(&mut k.procs, pid, pid);            // one thread, whose id is the pid
     return KEEP;
+  }
+  if n == LX_RT_SIGSUSPEND {
+    return lx_sigsuspend(&mut k, pid, was, a);
   }
   if is_sig_call(n) {
     return lx_sig_call(&mut k, pid, n, a, b, c);
@@ -988,8 +994,8 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64) -> u64
   return o;
 }
 
-/// lseek: SEEK_SET (0) and SEEK_CUR (1). SEEK_END needs the file size by
-/// descriptor, which the file layer does not give yet.
+/// lseek: SEEK_SET (0), SEEK_CUR (1) and SEEK_END (2), with a signed
+/// offset. Returns the new offset or -errno.
 fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -1011,7 +1017,11 @@ fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
   if whence == 1 {
     base = vfs_offset(k.fs, row);
   } else if whence == 2 {
-    base = row_size(&mut k.fs, row);
+    let size = vfs_size(&mut k.fs, vfs_row_file(k.fs, row));
+    if size == NO_FILE {
+      return EBADF;
+    }
+    base = size;
   } else if whence != 0 {
     return EINVAL;
   }
