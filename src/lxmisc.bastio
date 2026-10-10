@@ -609,7 +609,14 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
       r = lx_statfs(&mut k, pid, b, RAMFS_MAGIC);
     }
   } else if n == LX_FSTATFS {
-    r = lx_statfs(&mut k, pid, b, RAMFS_MAGIC);
+    let d = fd_look(k, pid, a);
+    if d.kind == K_BAD {
+      r = EBADF;
+    } else if d.kind == K_FILE && vfs_file_in_mount(&mut k.fs, vfs_row_file(k.fs, d.x)) {
+      r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC);
+    } else {
+      r = lx_statfs(&mut k, pid, b, RAMFS_MAGIC);
+    }
   } else if n == LX_GETPGRP {
     r = pgid_of(k.procs, pid);
   } else if n == LX_SETSID {
