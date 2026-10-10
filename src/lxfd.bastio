@@ -94,7 +94,7 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   if kind == OF_DIR {
     return Fd { kind: K_DIR, x: x };
   }
-  if kind == OF_SOCK || kind == OF_TCP {
+  if kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX {
     return Fd { kind: K_SOCK, x: x };
   }
   if kind == OF_DEV {
@@ -142,6 +142,23 @@ fn pipe_nonblock(k: &Kernel, pid: u64, fd: u64) -> bool
 /// word 3.
 fn can_block(kind: u64) -> bool {
   return kind == OF_PIPE_R || kind == OF_PIPE_W || kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL;
+}
+
+/// Whether process pid has a file layer row free: an open file holds
+/// one, and each process has NFD of them.
+fn row_free(k: &Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let mut i = 0;
+  while i < NFD
+    invariant i <= NFD
+  {
+    if fget(k.fs.ftab, pid * NFD + i, FD_FS) == 0 {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
 }
 
 /// Process `pid`'s descriptors as a new program starts: 0 to 2 on the
@@ -196,6 +213,7 @@ fn unref_value(k: &mut Kernel, v: u64)
   }
   let kind = of_get(k.ofd, h, 0);
   let x = of_get(k.ofd, h, 2);
+  let w = of_get(k.ofd, h, 3);
   of_set(&mut k.ofd, h, 0, OF_FREE);
   of_set(&mut k.ofd, h, 1, 0);
   if kind == OF_FILE && x < FD_ROWS {
@@ -212,6 +230,8 @@ fn unref_value(k: &mut Kernel, v: u64)
     k.evt = set(k.evt, x * TFD_STRIDE, 0);  // the timer is free again
   } else if kind == OF_EPOLL && x < EP_N {
     k.evt = set(k.evt, EP_AT + x * EP_STRIDE, 0);
+  } else if kind == OF_UNIX {
+    ux_close(&mut k, x, w);                 // src/lxunix.bastio
   }
 }
 
@@ -427,6 +447,9 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64) -> u64
   }
   if flags / LO_APPEND % 2 == 1 {
     f = f + O_APPEND;
+  }
+  if fd_free(k.lxfd, pid, 0) >= LXNFD || !row_free(k, pid) {
+    return EMFILE;                          // no descriptor, or no file layer row, left
   }
   let nfd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, f, n);
   if nfd == NO_FD || nfd >= NFD {

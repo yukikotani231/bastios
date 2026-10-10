@@ -14,6 +14,7 @@ const LX_GETSOCKNAME: u64 = 51;
 const LX_GETPEERNAME: u64 = 52;
 const LX_SETSOCKOPT: u64 = 54;
 const LX_GETSOCKOPT: u64 = 55;
+const LX_SOCKETPAIR: u64 = 53;
 const SOL_SOCKET: u64 = 1;
 const SOL_TCP: u64 = 6;                 // IPPROTO_TCP, as a level
 const SO_TYPE: u64 = 3;
@@ -128,6 +129,9 @@ fn lx_socket(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64) -> u6
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if domain == 1 {
+    return ux_socket(&mut k, pid, kind, proto);   // AF_UNIX: src/lxunix.bastio
+  }
   if domain != AF_INET {
     return EAFNOSUPPORT;
   }
@@ -163,6 +167,9 @@ fn lx_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if is_tcp(k, pid, fd) {
     return lx_tcp_bind(&mut k, pid, fd, addr, alen);
   }
+  if is_unix(k, pid, fd) {
+    return ux_bind(&mut k, pid, fd, addr, alen);
+  }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
     return sk.err;
@@ -189,6 +196,9 @@ fn lx_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if is_tcp(k, pid, fd) {
     return lx_tcp_connect(&mut k, pid, fd, addr, alen);
   }
+  if is_unix(k, pid, fd) {
+    return ux_connect(&mut k, pid, fd, addr, alen);
+  }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
     return sk.err;
@@ -213,6 +223,9 @@ fn lx_sendto(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, addr: u64, ale
 {
   if is_tcp(k, pid, fd) {
     return lx_tcp_send(&mut k, pid, fd, buf, n);
+  }
+  if is_unix(k, pid, fd) {
+    return ux_send(&mut k, pid, fd, buf, n, false);
   }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
@@ -259,6 +272,9 @@ fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, 
   if is_tcp(k, pid, fd) {
     return lx_tcp_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1);
   }
+  if is_unix(k, pid, fd) {
+    return ux_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1);
+  }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
     return sk.err;
@@ -291,6 +307,9 @@ fn lx_sockname(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
   if is_tcp(k, pid, fd) {
     return lx_tcp_name(&mut k, pid, fd, addr, lenp, peer);
   }
+  if is_unix(k, pid, fd) {
+    return ux_name(&mut k, pid, fd, addr, lenp, peer);
+  }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
     return sk.err;
@@ -317,7 +336,7 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let tcp = is_tcp(k, pid, fd);
+  let tcp = is_tcp(k, pid, fd) || is_unix(k, pid, fd);
   if !tcp {
     let sk = sk_look(k, pid, fd);
     if sk.err != 0 {
@@ -372,8 +391,12 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     r = lx_recvfrom(&mut k, pid, a, b, c, d, e, f);
   } else if n == LX_GETSOCKNAME || n == LX_GETPEERNAME {
     r = lx_sockname(&mut k, pid, a, b, c, n == LX_GETPEERNAME);
+  } else if n == LX_LISTEN && is_unix(k, pid, a) {
+    r = ux_listen(&mut k, pid, a);
   } else if n == LX_LISTEN {
     r = lx_listen(&mut k, pid, a);
+  } else if n == LX_SOCKETPAIR {
+    r = ux_socketpair(&mut k, pid, a, b, c, d);
   } else if n == LX_GETSOCKOPT {
     r = lx_getsockopt(&mut k, pid, a, b, c, d, e);
   } else if n == LX_ACCEPT || n == LX_ACCEPT4 {
@@ -381,13 +404,17 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     if n == LX_ACCEPT4 {
       fl = d;
     }
-    r = lx_accept(&mut k, pid, a, b, c, fl);
+    if is_unix(k, pid, a) {
+      r = ux_accept(&mut k, pid, a, b, c, fl);
+    } else {
+      r = lx_accept(&mut k, pid, a, b, c, fl);
+    }
   } else if n == LX_SHUTDOWN || n == LX_SETSOCKOPT {
     // Accepted and ignored on a socket: options (SO_REUSEADDR and the
     // like), and shutdown (close sends the FIN).
     let sk = sk_look(k, pid, a);
     r = sk.err;
-    if is_tcp(k, pid, a) {
+    if is_tcp(k, pid, a) || is_unix(k, pid, a) {
       r = 0;
     }
   }
@@ -404,6 +431,6 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
 
 fn is_sock_call(n: u64) -> bool {
   return n == LX_SOCKET || n == LX_BIND || n == LX_CONNECT || n == LX_SENDTO || n == LX_RECVFROM
-    || n == LX_GETSOCKNAME || n == LX_GETPEERNAME || n == LX_SETSOCKOPT || n == LX_GETSOCKOPT || n == LX_LISTEN
+    || n == LX_GETSOCKNAME || n == LX_GETPEERNAME || n == LX_SETSOCKOPT || n == LX_GETSOCKOPT || n == LX_SOCKETPAIR || n == LX_LISTEN
     || n == LX_ACCEPT || n == LX_ACCEPT4 || n == LX_SHUTDOWN;
 }

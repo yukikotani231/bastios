@@ -36,6 +36,10 @@ const F_RESTART: u64 = 31;
 const F_TGID: u64 = 32;
 const F_CTID: u64 = 33;
 const F_FUTEX: u64 = 34;
+// Linux process groups and sessions (src/lxsig.bastio): the group and the
+// session, 0 meaning the process's own pid.
+const F_PGID: u64 = 35;
+const F_SID: u64 = 36;
 const SIG_DEATH: u64 = 256;          // F_CODE of a process a signal ended: 256 + the signal
 
 // Saved register numbers.
@@ -349,6 +353,7 @@ const EP_ENTRY: u64 = 4;              // fd + 1 (0: empty), its description, eve
 const EP_STRIDE: u64 = 65;            // 1 + EP_FDS * EP_ENTRY
 const EP_AT: u64 = 32;                // TFD_N * TFD_STRIDE
 const EVT_LEN: u64 = 552;             // EP_AT + EP_N * EP_STRIDE
+const OF_UNIX: u64 = 11;              // an AF_UNIX socket: see src/lxunix.bastio
 const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
 const DIR_VFS: u64 = 2;               // DIR_VFS + a file layer directory handle
@@ -356,6 +361,18 @@ const DIR_PROC: u64 = 0x10000;        // /proc; DIR_PROC + pid: /proc/PID (src/l
 const PROC_DEV: u64 = 256;            // an OF_DEV device from here up is a /proc file: PROC_DEV + 16 * pid + PF_*
 const PF_EXE: u64 = 7;                // /proc/PID/exe, a link
 const EACCES: u64 = 18446744073709551603;   // 2^64 - 13
+
+// AF_UNIX sockets (src/lxunix.bastio): UX_N one-way channels and UX_LIS
+// names to connect to.
+const UX_N: u64 = 16;
+const UX_W: u64 = 4;                  // head, count, read end open, write end open
+const UX_CAP: u64 = 4096;             // bytes a channel holds
+const UX_LIS: u64 = 4;
+const UX_BACKLOG: u64 = 4;            // connections waiting for accept
+const UXL_W: u64 = 8;                 // 4 + UX_BACKLOG
+const UX_PATH: u64 = 108;             // the longest name
+const UX_LEN: u64 = 96;               // UX_N * UX_W + UX_LIS * UXL_W
+const UXB_LEN: u64 = 65968;           // UX_N * UX_CAP + UX_LIS * UX_PATH
 
 const NPIPES: u64 = 8;
 const PIPE_CAP: u64 = 65536;          // bytes a pipe holds, as on Linux
@@ -372,6 +389,7 @@ const AT_REMOVEDIR: u64 = 0x200;
 const DENT_BUF: u64 = 2048;           // the most getdents64 fills in one call
 const ENOTDIR: u64 = 18446744073709551596;  // 2^64 - 20
 const EEXIST: u64 = 18446744073709551599;   // 2^64 - 17
+const EPERM: u64 = 18446744073709551615;    // 2^64 - 1
 const LO_EXCL: u64 = 0x80;
 const LO_DIRECTORY: u64 = 0x10000;
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
@@ -443,10 +461,12 @@ struct Kernel {
   sigsave: Buf,         // per process, the mask rt_sigsuspend replaced; then each pending signal's sender (src/lxsig.bastio)
   alarms: Buf,          // Linux ITIMER_REAL per process: deadline (0: off) and interval (src/lxtime.bastio)
   evt: Buf,             // timerfds and epoll instances (src/lxevent.bastio)
+  ux: Buf,              // AF_UNIX channels and names (src/lxunix.bastio)
+  uxb: Bytes,           // their bytes
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN
 }
 
 // ---------------------------------------------------------------- programs

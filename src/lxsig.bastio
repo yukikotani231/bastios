@@ -150,6 +150,38 @@ fn child_ended(k: &mut Kernel, p: u64, child: u64)
 
 /// A Linux program: started from an ELF image (src/proc.bastio sets its
 /// mmap floor), as opposed to a BastiOS one.
+/// Process p's process group (a pid).
+fn pgid_of(procs: &Buf, p: u64) -> u64
+  requires len(procs) == PTAB_LEN && p < NPROC
+{
+  let g = pget(procs, p, F_PGID);
+  if g == 0 {
+    return p;
+  }
+  return g;
+}
+
+/// Process p's session (a pid).
+fn sid_of(procs: &Buf, p: u64) -> u64
+  requires len(procs) == PTAB_LEN && p < NPROC
+{
+  let g = pget(procs, p, F_SID);
+  if g == 0 {
+    return p;
+  }
+  return g;
+}
+
+/// Makes process c start in the group and session of process p (fork and
+/// clone, which copy the row, would otherwise read p's 0 as c's own pid).
+fn group_fork(procs: &mut Buf, p: u64, c: u64)
+  requires len(procs) == PTAB_LEN && p < NPROC && c < NPROC
+  ensures len(procs) == PTAB_LEN
+{
+  pset(&mut procs, c, F_PGID, pgid_of(procs, p));
+  pset(&mut procs, c, F_SID, sid_of(procs, p));
+}
+
 fn is_linux(procs: &Buf, p: u64) -> bool
   requires len(procs) == PTAB_LEN && p < NPROC
 {
@@ -334,8 +366,8 @@ fn lx_sigprocmask(k: &mut Kernel, pid: u64, how: u64, setp: u64, oset: u64) -> u
   return 0;
 }
 
-/// kill(target, s): one process, or with 0 or a negative target every
-/// Linux program (there are no process groups). Signal 0 only checks.
+/// kill(target, s): one process; with 0 the caller's process group, with
+/// -g group g, with -1 every other Linux program. Signal 0 only checks.
 fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC
   ensures kok(k)
@@ -344,14 +376,27 @@ fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
     return EINVAL;
   }
   if target == 0 || target >= 0x8000000000000000 {
+    let all = target == 0xFFFFFFFFFFFFFFFF;
+    let mut g = pgid_of(k.procs, pid);
+    if target != 0 && !all {
+      g = 0xFFFFFFFFFFFFFFFF - target + 1;   // -target
+    }
+    let mut hit = false;
     let mut p = 1;
     while p < NPROC
       invariant 1 <= p && p <= NPROC && kok(k)
     {
-      if is_linux(k.procs, p) && s != 0 {
-        post_from(&mut k, p, s, pid);
+      let live = state(k.procs, p) != FREE && state(k.procs, p) != ZOMBIE && is_linux(k.procs, p);
+      if live && ((all && p != pid) || (!all && pgid_of(k.procs, p) == g)) {
+        hit = true;
+        if s != 0 {
+          post_from(&mut k, p, s, pid);
+        }
       }
       p = p + 1;
+    }
+    if !hit {
+      return ESRCH;
     }
     return 0;
   }

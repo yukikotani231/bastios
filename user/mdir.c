@@ -52,6 +52,14 @@ int main(void)
         return fail("mmap of a file");
     if (mmap(m, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0) != m || m[0] != 0)
         return fail("mmap with MAP_FIXED");
+    /* Opening until nothing is left ends in EMFILE, not ENOENT. */
+    int many[32], got = 0;
+    while (got < 32 && (many[got] = open("f", O_RDONLY)) >= 0)
+        got++;
+    if (got == 32 || errno != EMFILE)
+        return fail("running out of descriptors");
+    while (got > 0)
+        close(many[--got]);
     close(f);
     if (unlinkat(AT_FDCWD, "f", 0) != 0 || chdir("..") != 0 || rmdir("dx") != 0)
         return fail("cleaning up");
