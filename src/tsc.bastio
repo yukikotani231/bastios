@@ -11,7 +11,6 @@
 // every processor reads the host's). k.ns is kept from going back.
 
 import "hpet.bastio";
-import "acpi.bastio";
 
 const NS_CALIBRATE: u64 = 10000000;    // 10 ms of clock_ns time to measure the rate over
 const CALIBRATE_SPINS: u64 = 100000000; // clock reads before giving up on it
@@ -87,7 +86,7 @@ fn tsc_calibrate(cpu: &Cpu, h: &mut Hpet, a: &mut Acpi) -> Tsc
   let mut h1 = h0;
   let mut n = 0;
   while h1 < h0 + NS_CALIBRATE && n < CALIBRATE_SPINS
-    invariant n <= CALIBRATE_SPINS
+    invariant n <= CALIBRATE_SPINS && hpet_ok(h) && acpi_ok(a)
   {
     h1 = clock_ns(&mut h, &mut a);
     n = n + 1;
