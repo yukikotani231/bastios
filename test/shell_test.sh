@@ -614,6 +614,19 @@ else:
         print("ok   no pages leaked:", mem[2].decode())
     else:
         print("FAIL page leak:", mem); fails += 1
+    # Console output goes through a 64 KiB ring that the scheduler pumps to
+    # the devices; a writer that finds it full waits (CONWAIT) instead of
+    # losing bytes. bench writes 1 MiB of carriage returns, sixteen times
+    # the ring: every one must arrive.
+    mark = len(out)
+    qemu.stdin.write(b"bench\r"); qemu.stdin.flush()
+    read_until(b"write 1024 KiB", mark)
+    crs = out[mark:].count(b"\r")
+    if crs >= 1048576:
+        print("ok   1 MiB through the console ring, nothing lost")
+    else:
+        print(f"FAIL console ring: {crs} of 1048576 bytes arrived"); fails += 1
+    read_until(b"bastios> ", mark)
     # Several processors at once: processes that never make a system call
     # run on the other processors while the shell stays responsive, and
     # `ps` (which runs with the kernel's lock held) catches at least two of

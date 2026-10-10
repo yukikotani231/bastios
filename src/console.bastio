@@ -1,41 +1,130 @@
-// The console: the serial port, and the screen and keyboard when the
-// machine has them. Output goes to both; input comes from the serial
-// line, the PS/2 keyboard or a USB keyboard. Below,
-// output helpers for the kernel's own messages.
+// The console. The devices behind it, the serial port and the screen and
+// keyboards when the machine has them (PS/2, or USB through xHCI), are a
+// `Term`: output goes to both, input comes from any of them. Kernel code never drives a `Term` directly. It
+// writes to a `Con`, an output ring kept with the rest of the kernel state
+// under the kernel lock, and the scheduler moves the bytes to the devices a
+// chunk at a time with that lock free (`pump` in main.bastio), so a slow
+// serial line holds up only the processor pumping it. Below, output helpers
+// for the kernel's own messages.
 
 import "uart.bastio";
 import "fb.bastio";
 import "kbd.bastio";
 import "xhci.bastio";
 
-struct Con { uart: Uart, screen: Screen, kbd: Kbd, usb: Usb }
+struct Term { uart: Uart, screen: Screen, kbd: Kbd, usb: Usb }
+  invariant uart_ok(uart) && screen_ok(screen) && kbd_ok(kbd) && usb_ok(usb);
 
-spec fn con_ok(c: &Con) -> bool {
-  uart_ok(c.uart) && screen_ok(c.screen) && kbd_ok(c.kbd) && usb_ok(c.usb)
+spec fn term_ok(t: &Term) -> bool {
+  uart_ok(t.uart) && screen_ok(t.screen) && kbd_ok(t.kbd) && usb_ok(t.usb)
 }
 
+fn term_write(t: &mut Term, b: u8)
+  requires term_ok(t)
+  ensures term_ok(t)
+{
+  uart_write(&mut t.uart, b);
+  screen_put(&mut t.screen, b);
+}
+
+/// The next byte typed on the serial line or a keyboard, or 256.
+fn term_poll(t: &mut Term) -> u64
+  requires term_ok(t)
+  ensures term_ok(t) && result <= 256
+{
+  let b = uart_poll(&mut t.uart);
+  if b < 256 {
+    return b;
+  }
+  let k = kbd_poll(&mut t.kbd);
+  if k < 256 {
+    return k;
+  }
+  return usb_poll(&mut t.usb);
+}
+
+const OUTCAP: u64 = 65536;
+
+struct Con { out: Bytes, h: u64, n: u64 }
+
+spec fn con_ok(c: &Con) -> bool {
+  blen(c.out) == OUTCAP && c.h < OUTCAP && c.n <= OUTCAP
+}
+
+fn con_new() -> Con
+  ensures con_ok(result)
+{
+  return Con { out: balloc(OUTCAP), h: 0, n: 0 };
+}
+
+fn con_free(c: Con) {
+  bfree(c.out);
+}
+
+/// How many more bytes the ring takes.
+fn con_room(c: &Con) -> u64
+  requires con_ok(c)
+{
+  return OUTCAP - c.n;
+}
+
+/// Appends b to the output ring, or drops it if the ring is full (system
+/// calls check for room first and wait instead).
 fn con_write(c: &mut Con, b: u8)
   requires con_ok(c)
   ensures con_ok(c)
 {
-  uart_write(&mut c.uart, b);
-  screen_put(&mut c.screen, b);
+  if c.n < OUTCAP {
+    bset(&mut c.out, (c.h + c.n) % OUTCAP, b);
+    c.n = c.n + 1;
+  }
 }
 
-/// The next byte typed on the serial line or a keyboard, or 256.
-fn con_poll(c: &mut Con) -> u64
+/// Moves the oldest waiting bytes into buf, as many as fit. Returns the
+/// count moved.
+fn con_take(c: &mut Con, buf: &mut Bytes) -> u64
   requires con_ok(c)
-  ensures con_ok(c) && result <= 256
+  ensures con_ok(c)
 {
-  let b = uart_poll(&mut c.uart);
-  if b < 256 {
-    return b;
+  let mut k = 0;
+  while k < blen(buf) && c.n > 0
+    invariant con_ok(c)
+  {
+    bset(&mut buf, k, bget(c.out, c.h));
+    c.h = (c.h + 1) % OUTCAP;
+    c.n = c.n - 1;
+    k = k + 1;
   }
-  let k = kbd_poll(&mut c.kbd);
-  if k < 256 {
-    return k;
+  return k;
+}
+
+/// Writes everything waiting to the devices. For when one processor owns
+/// both, at boot and at power off.
+fn con_flush(t: &mut Term, c: &mut Con)
+  requires term_ok(t) && con_ok(c)
+  ensures term_ok(t) && con_ok(c)
+{
+  while c.n > 0
+    invariant term_ok(t) && con_ok(c)
+  {
+    term_write(&mut t, bget(c.out, c.h));
+    c.h = (c.h + 1) % OUTCAP;
+    c.n = c.n - 1;
   }
-  return usb_poll(&mut c.usb);
+}
+
+/// Writes the first n bytes of buf to the devices.
+fn term_send(t: &mut Term, buf: &Bytes, n: u64)
+  requires term_ok(t)
+  ensures term_ok(t)
+{
+  let mut i = 0;
+  while i < n && i < blen(buf)
+    invariant term_ok(t)
+  {
+    term_write(&mut t, bget(buf, i));
+    i = i + 1;
+  }
 }
 
 fn puts(con: &mut Con, s: Str)

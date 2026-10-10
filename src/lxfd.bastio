@@ -547,3 +547,32 @@ fn lx_retry(k: &mut Kernel, pid: u64, n: u64) -> u64
   pset(&mut k.procs, pid, F_RESTART, 1);
   return SWITCH;
 }
+
+/// Blocks process pid until the console's ring has room (`wake_writers`),
+/// then restarts its system call n, as lx_retry does.
+fn con_block(k: &mut Kernel, pid: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let r = lx_retry(&mut k, pid, n);
+  if r == SWITCH {
+    pset(&mut k.procs, pid, F_STATE, CONWAIT);
+  }
+  return r;
+}
+
+/// Makes every process waiting for room in the console's ring READY.
+fn wake_writers(procs: &mut Buf)
+  requires len(procs) == PTAB_LEN
+  ensures len(procs) == PTAB_LEN
+{
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && len(procs) == PTAB_LEN
+  {
+    if state(procs, p) == CONWAIT {
+      pset(&mut procs, p, F_STATE, READY);
+    }
+    p = p + 1;
+  }
+}
