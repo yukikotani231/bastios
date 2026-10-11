@@ -1753,21 +1753,36 @@ fn nic_ping_check(c: &mut Nic, now: u64) -> u64
 }
 
 /// Has a frame come in, or the clock ticked, since the last call? Each
-/// can change what a socket call waiting in SOCKWAIT would find. Then
-/// also returns, in `rx`, the frame count, for the waiters to compare.
+/// can change what a socket call waiting in SOCKWAIT would find.
+///
+/// Most calls find nothing new, and the card's state is several hundred
+/// bytes: matching it by value to update the marks copied it out and back
+/// on every system call (a tenth of a getppid). So the test only reads,
+/// and the marks are written only when it says yes.
 fn nic_moved(c: &mut Nic, now: u64) -> bool
   requires nic_ok(c)
   ensures nic_ok(c)
 {
+  if !nic_changed(c, now) {
+    return false;
+  }
   match c {
     Nic::None => { c = Nic::None; return false; },
     Nic::Up(mut n) => {
-      let moved = n.rx != n.seen_rx || now != n.seen_tick;
       n.seen_rx = n.rx;
       n.seen_tick = now;
       c = Nic::Up(n);
-      return moved;
+      return true;
     },
+  }
+}
+
+/// True if frames were received since the marks were last set, or the tick
+/// count is not the marked one (read only; see nic_moved).
+fn nic_changed(c: &Nic, now: u64) -> bool {
+  match c {
+    Nic::None => { return false; },
+    Nic::Up(n) => { return n.rx != n.seen_rx || now != n.seen_tick; },
   }
 }
 
