@@ -655,7 +655,9 @@ fn ack(pic: &mut Pic, apic: &mut Lapic, v: u64)
 // /etc/passwd and /etc/group name root and a few unprivileged users (nobody,
 // bin, daemon) for Linux programs
 // (whoami, ls -l, getpwuid). /etc/hosts names localhost (getaddrinfo).
-const NINIT: u64 = 6;
+// /etc/shells lists the login shells (getusershell; an SSH server refuses
+// a user whose shell is not there).
+const NINIT: u64 = 7;
 
 fn init_name(i: u64) -> Str {
   if i == 0 {
@@ -672,6 +674,9 @@ fn init_name(i: u64) -> Str {
   }
   if i == 4 {
     return "etc/hosts";
+  }
+  if i == 5 {
+    return "etc/shells";
   }
   return "elfdemo";
 }
@@ -691,6 +696,9 @@ fn init_data(i: u64) -> Str {
   }
   if i == 4 {
     return include_bytes("../files/hosts");
+  }
+  if i == 5 {
+    return include_bytes("../files/shells");
   }
   return include_bytes("../build/user/elfpie.elf");
 }

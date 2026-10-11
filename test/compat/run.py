@@ -22,6 +22,11 @@ the port alone): a web server this script runs on the host machine
 (http://10.0.2.2:PORT). HOSTSURL is the same files over HTTPS, with a
 certificate made for the run by `openssl` (empty without it).
 
+ssh.txt runs only in the guest. QEMU forwards a port on the host to the
+guest's port 22 (SSHPORT); a command starting with "@host " runs on this
+machine instead, from the repository, so a client here can log in to the
+server the guest started.
+
 The kernel prints "[pid N: Linux system call X not implemented]" for each
 call it does not know. Those notes are charged to the check or case that
 was running, which gives the list of missing system calls ranked by how
@@ -40,7 +45,7 @@ measurement, so failing checks are expected, but it must not go backwards.
 --host runs the same programs and cases on this machine instead (from a
 scratch directory), to check that the expectations are right for Linux.
 """
-import argparse, codecs, fcntl, functools, http.server, json, os, pty, re, select, shutil, signal, ssl, struct, subprocess, sys, tempfile, termios, threading, time
+import argparse, codecs, fcntl, functools, http.server, json, os, pty, re, select, shutil, signal, socket, ssl, struct, subprocess, sys, tempfile, termios, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROMPT = b"\n# "
@@ -169,6 +174,10 @@ class Guest:
         self.hostaddr = f"10.0.2.2 {web.port}" if web else ""
         self.hostport = f"{web.port}" if web else ""
         self.hostsurl = f"https://10.0.2.2:{web.sport}" if web and web.sport else ""
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        self.sshport = str(s.getsockname()[1])
+        s.close()
 
     def boot(self):
         self.stop()
@@ -178,7 +187,7 @@ class Guest:
              "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
              "-serial", "stdio", "-monitor", "none",
              "-drive", f"file={self.disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd",
-             "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0"],
+             "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{self.sshport}-:22", "-device", "virtio-net-pci,netdev=n0"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if not self.read_until(b"bastios> ", 0, 60):
             raise SystemExit("compat: the kernel did not reach its shell prompt")
@@ -389,7 +398,10 @@ def run_program(env, prog, timeout):
 
 def run_applet(env, name, cmd, expected, timeout, bb):
     cmd = (cmd.replace("HOSTSURL", env.hostsurl).replace("HOSTURL", env.hosturl)
-           .replace("HOSTADDR", env.hostaddr).replace("HOSTPORT", env.hostport))
+           .replace("HOSTADDR", env.hostaddr).replace("HOSTPORT", env.hostport)
+           .replace("SSHPORT", getattr(env, "sshport", "")))
+    if cmd.startswith("@host "):
+        return run_on_host(name, cmd[6:], expected, timeout)
     text, status = env.run(f"echo @@begin; {with_bb(cmd, bb)}; echo @@end $?", timeout)
     lines = text.split("\n")
     try:
@@ -412,6 +424,22 @@ def run_applet(env, name, cmd, expected, timeout, bb):
     ok = body == expected
     detail = "" if ok else "got " + json.dumps("\n".join(body)[:200]) + ", expected " + json.dumps("\n".join(expected))
     return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": sorted(set(calls))}
+
+
+def run_on_host(name, cmd, expected, timeout):
+    """A case's command run on this machine (from the repository), with
+    its output (stdout and stderr) checked as a guest command's is."""
+    try:
+        p = subprocess.run(cmd, shell=True, cwd=os.path.dirname(os.path.dirname(HERE)), stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"name": name, "result": "hang", "detail": "did not finish (on the host)", "syscalls": []}
+    body = p.stdout.decode(errors="replace").replace("\r", "").split("\n")
+    while body and not body[-1]:
+        body.pop()
+    ok = body == expected
+    detail = "" if ok else "got " + json.dumps("\n".join(body)[:200]) + ", expected " + json.dumps("\n".join(expected))
+    return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": []}
 
 
 def run_tty(env, name, prog, keys, check, expected, timeout, bb):
@@ -494,6 +522,7 @@ def main():
     names = syscall_names()
     applets = load_applets(os.path.join(HERE, "applets.txt"))
     apps = load_applets(os.path.join(HERE, "apps.txt"))
+    sshc = load_applets(os.path.join(HERE, "ssh.txt"))
     dev = load_applets(os.path.join(HERE, "dev.txt"))
     bastio = load_applets(os.path.join(HERE, "bastio.txt"))
     tty = load_tty(os.path.join(HERE, "tty.txt"))
@@ -513,6 +542,9 @@ def main():
         results["busybox"] = [run_applet(env, n, c, e, 30, bb) for n, c, e in applets]
         print("compat: real programs", flush=True)
         results["apps"] = [run_applet(env, n, c, e, 60, bb) for n, c, e in apps]
+        if not args.host:
+            print("compat: logging in over SSH", flush=True)
+            results["ssh"] = [run_applet(env, n, c, e, 60, bb) for n, c, e in sshc]
         print("compat: programs on the terminal", flush=True)
         results["tty"] = [run_tty(env, n, p, k, c, e, 30, bb) for n, p, k, c, e in tty]
         if args.dev_disk and not args.host:
