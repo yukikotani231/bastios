@@ -32,7 +32,7 @@ const INT_SPAN: u64 = 0x100000000;          // an int argument's 32 bits
 
 /// Process p's nice value plus 20: 0 (nice -20) to 39 (nice 19).
 fn nice_of(procs: &Buf, p: u64) -> u64
-  requires len(procs) == PTAB_LEN && p < NPROC
+  requires ptab_ok(procs) && p < NPROC
   ensures result < 40
 {
   let w = pget(procs, p, F_NICE);
@@ -64,7 +64,7 @@ fn nice_arg(a: u64) -> u64
 /// Does process p (alive) match getpriority's (which, who)? who is
 /// already resolved: a pid, a process group or a real user id.
 fn prio_match(procs: &Buf, p: u64, which: u64, who: u64) -> bool
-  requires len(procs) == PTAB_LEN && p < NPROC
+  requires ptab_ok(procs) && p < NPROC
 {
   if state(procs, p) == FREE || state(procs, p) == ZOMBIE {
     return false;
@@ -80,7 +80,7 @@ fn prio_match(procs: &Buf, p: u64, which: u64, who: u64) -> bool
 
 /// who 0 resolved to the caller's own pid, group or real user.
 fn prio_who(procs: &Buf, pid: u64, which: u64, who: u64) -> u64
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
 {
   let w = who % INT_SPAN;
   if w != 0 {
@@ -162,7 +162,7 @@ fn lx_setpriority(k: &mut Kernel, pid: u64, which: u64, who: u64, prio: u64) -> 
 /// The process a sched_* call names: pid, or the caller for 0; NPROC
 /// when the pid is negative (EINVAL) and NPROC + 1 when there is none.
 fn sched_target(procs: &Buf, pid: u64, who: u64) -> u64
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
   ensures result <= NPROC + 1
 {
   let w = who % INT_SPAN;
@@ -181,7 +181,7 @@ fn sched_target(procs: &Buf, pid: u64, who: u64) -> u64
 /// May pid change process t's scheduling? Root may; anyone else only
 /// when its effective user is t's real or effective user (else EPERM).
 fn may_sched(procs: &Buf, pid: u64, t: u64) -> bool
-  requires len(procs) == PTAB_LEN && pid < NPROC && t < NPROC
+  requires ptab_ok(procs) && pid < NPROC && t < NPROC
 {
   if cred_root(procs, pid) {
     return true;
