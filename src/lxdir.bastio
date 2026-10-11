@@ -719,7 +719,7 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
   if e != 0 {
     return e;
   }
-  let src_disk = vfs_fs_of(&mut k.fs, n);
+  let src_disk = vfs_dev_of(&mut k.fs, n);
   let mut t = balloc(2 * FNAME_MAX);
   xfer_save(k, &mut t, 0, n);
   let m = lx_path_at_nf(&mut k, pid, ndir, npath);
@@ -752,7 +752,7 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
     bfree(t);
     return 0;                               // a name renamed to itself, or to another name of its file
   }
-  if vfs_fs_of(&mut k.fs, m) != src_disk {
+  if vfs_dev_of(&mut k.fs, m) != src_disk {
     bfree(t);
     return EXDEV;
   }
@@ -782,7 +782,7 @@ fn lx_exchange(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
   }
   let a = vfs_lookup(&mut k.fs, n);
   let ad = dir_at(&mut k, n);
-  let a_disk = vfs_fs_of(&mut k.fs, n);
+  let a_disk = vfs_dev_of(&mut k.fs, n);
   if (a != NO_FILE || ad != NO_FILE) && vfs_ro(&mut k.fs, n) {
     return EROFS;
   }
@@ -807,7 +807,7 @@ fn lx_exchange(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
     bfree(t);
     return EINVAL;
   }
-  if vfs_fs_of(&mut k.fs, m) != a_disk {
+  if vfs_dev_of(&mut k.fs, m) != a_disk {
     bfree(t);
     return EXDEV;
   }

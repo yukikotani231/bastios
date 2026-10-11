@@ -4,7 +4,7 @@
  * fallocate(FALLOC_FL_KEEP_SIZE), file handles (name_to_handle_at and
  * open_by_handle_at), unlinkat's flag check, and fchmod and fchown on a
  * closed descriptor, on a file of a read-only mount, and chmod of a file
- * that keeps no mode. */
+ * that keeps no mode; link and rename across a mount (EXDEV). */
 #include "compat.h"
 #include <fcntl.h>
 #include <sys/epoll.h>
@@ -119,6 +119,9 @@ int main(void) {
     mkdir("l3_ro", 0755);
     int m = mount("none", "l3_ro", "tmpfs", 0, NULL);
     close(open("l3_ro/f", O_CREAT | O_WRONLY, 0644));
+    EXPECT("link out of a mount is EXDEV", m == 0 && link("l3_ro/f", "l3_x") == -1 && errno == EXDEV);
+    EXPECT("rename out of a mount is EXDEV", rename("l3_ro/f", "l3_x") == -1 && errno == EXDEV);
+    EXPECT("link within the mount works", link("l3_ro/f", "l3_ro/g") == 0 && unlink("l3_ro/g") == 0);
     m = m || mount("none", "l3_ro", "tmpfs", MS_REMOUNT | MS_RDONLY, NULL);
     ro_fd = open("l3_ro/f", O_RDONLY);
     EXPECT("fchmod of a file on a read-only mount is EROFS",
