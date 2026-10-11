@@ -1,16 +1,24 @@
 # Checks that pass on BastiOS (make compat-baseline rewrites this).
 # make compat fails if one of them stops passing.
 alpine: alpine: unpack the root, chroot into it
+alpine: apk: install bash, make, jq, rsync, openssl, file and xmllint over HTTP
 alpine: apk: install from a repository over HTTP
 alpine: apk: install git, curl and less, with what they depend on
 alpine: apk: remove a package and its files
 alpine: apk: the packages the root came with
 alpine: apk: they are in its database
+alpine: bash: arrays, brace expansion, here-strings
 alpine: curl: 1 MiB from the host
 alpine: curl: a file from the host
+alpine: file: what a file is (libmagic)
 alpine: git: commit, log and diff
+alpine: jq: query JSON
 alpine: less: copies a pipe through
+alpine: make: rebuild only what is out of date
+alpine: openssl: a digest and random bytes
+alpine: rsync: copy a tree
 alpine: ssh-keygen: an ed25519 key
+alpine: xmllint: an XPath query
 apps: ash: a 1200-byte typed line
 apps: httpd: serve a page, fetch it over loopback
 apps: lua: arithmetic and strings
