@@ -5,7 +5,10 @@
 set -u
 cd "$(dirname "$0")/.."
 KERNEL=${KERNEL:-build/bastios.elf}
-TIMEOUT=${TIMEOUT:-60}
+# Seconds each boot's steps may take in all. The longest boot's steps take
+# about 35 s alone; with make test's other lanes running beside it (test/all.sh)
+# they took over 60 s, and its last steps failed for want of time, on main too.
+TIMEOUT=${TIMEOUT:-120}
 SMP=${SMP:-4}
 
 python3 - "$KERNEL" "$TIMEOUT" "$SMP" <<'PY'
