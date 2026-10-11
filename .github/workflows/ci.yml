@@ -44,6 +44,8 @@ jobs:
     timeout-minutes: 150
     env:
       CACHE_V: 1
+      BASTIOC0: bastiolang/stage0/target/release/bastioc0
+      BASTIOLIB: bastiolang
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -95,7 +97,7 @@ jobs:
             build/compat/alpine/*.tar.gz
             build/compat/alpine/*.json
       - name: Build the disks
-        run: make -j4 BASTIOC0=bastiolang/stage0/target/release/bastioc0 build/bastios.elf
+        run: make -j4 build/bastios.elf
           build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img
       - name: Save the third-party programs
         if: always() && steps.tp.outputs.cache-hit != 'true'
@@ -133,7 +135,7 @@ jobs:
             build/compat/alpine/*.tar.gz
             build/compat/alpine/*.json
         continue-on-error: true
-      - run: make compat BASTIOC0=bastiolang/stage0/target/release/bastioc0
+      - run: make compat
       - if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -150,6 +152,9 @@ jobs:
   compat-ltp:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      BASTIOC0: bastiolang/stage0/target/release/bastioc0
+      BASTIOLIB: bastiolang
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -176,7 +181,7 @@ jobs:
           key: ltp-times-${{ github.run_id }}
           restore-keys: ltp-times-
           path: build/compat/ltp/results.json
-      - run: make -j4 BASTIOC0=bastiolang/stage0/target/release/bastioc0 build/bastios.elf build/ltp/.built
+      - run: make -j4 build/bastios.elf build/ltp/.built
       - name: Save LTP
         if: steps.ltp.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -184,7 +189,7 @@ jobs:
           key: ltp-${{ steps.keys.outputs.ltp }}
           path: build/ltp
         continue-on-error: true
-      - run: make compat-ltp BASTIOC0=bastiolang/stage0/target/release/bastioc0
+      - run: make compat-ltp
       - name: Save this run's timings
         if: always()
         uses: actions/cache/save@v4
