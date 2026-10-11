@@ -1,0 +1,231 @@
+// Code pages read when first touched.
+//
+// execve maps a program's pages before it runs, reading each from its
+// file. A program from a file system leaves out its largest code segment
+// instead (lazy_plan, src/elf.bastio): Z3 has 24 MiB of code and answers a
+// query from a few hundred pages of it. The process keeps a record of
+// those pages here, LZ_W words in k.lazy: the first page + 1 (0: no
+// record), how many, a hold on the file (vfs_hold, so removing the file's
+// name while it runs changes nothing) and the file offset of the first.
+// A page fault on one of them reads the page from the file and maps it
+// read-only (lazy_fault); the instruction then runs again.
+//
+// What is trusted: nothing new. The page is filled before it is mapped,
+// and pt_put_frame writes the entry in one store, so another thread of
+// the process sees either no page or the whole of it.
+//
+// What is different from mapping every page: the kernel reading the
+// program's own code (write(2) from it, say) gets EFAULT for a page the
+// program has not run yet. Only code is left out, never data, for that
+// reason.
+
+import "linux.bastio";
+
+fn lz_at(p: u64, f: u64) -> u64
+  requires p < NPROC && f < LZ_W
+  ensures result < LAZY_LEN
+{
+  return p * LZ_W + f;
+}
+
+/// Process pid's program was just installed from `src`, with file hold
+/// `hold` (HOLD_N: none): records the code pages it left out, or lets go
+/// of the hold if there are none.
+fn lazy_set(k: &mut Kernel, pid: u64, src: Src, hold: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut lz = lz_none();
+  if hold < HOLD_N && src.file {
+    let e = elf_parse(&mut k.fs, src);
+    if e.ok {
+      lz = lazy_plan(&mut k.fs, src, e);
+    }
+  }
+  if lz.pages == 0 {
+    vfs_unhold(&mut k.fs, &mut k.mem, hold);
+    k.lazy = set(k.lazy, lz_at(pid, 0), 0);
+    return;
+  }
+  k.lazy = set(k.lazy, lz_at(pid, 0), lz.first + 1);
+  k.lazy = set(k.lazy, lz_at(pid, 1), lz.pages);
+  k.lazy = set(k.lazy, lz_at(pid, 2), hold);
+  k.lazy = set(k.lazy, lz_at(pid, 3), lz.off);
+}
+
+/// Process pid's record goes, and its reference on the file.
+fn lazy_drop(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if get(k.lazy, lz_at(pid, 0)) != 0 {
+    k.lazy = set(k.lazy, lz_at(pid, 0), 0);
+    vfs_unhold(&mut k.fs, &mut k.mem, get(k.lazy, lz_at(pid, 2)));
+  }
+}
+
+/// A new thread's row: the group's record stays with its holder, so the
+/// row has none (no reference to drop).
+fn lazy_clear(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  k.lazy = set(k.lazy, lz_at(pid, 0), 0);
+}
+
+/// fork: the child's window is a copy of the parent's, pages not read yet
+/// included, so it gets the record too, with a reference of its own.
+fn lazy_fork(k: &mut Kernel, pid: u64, c: u64)
+  requires kok(k) && pid < NPROC && c < NPROC
+  ensures kok(k)
+{
+  let mut f = 0;
+  while f < LZ_W
+    invariant f <= LZ_W && kok(k)
+  {
+    k.lazy = set(k.lazy, lz_at(c, f), get(k.lazy, lz_at(pid, f)));
+    f = f + 1;
+  }
+  if get(k.lazy, lz_at(c, 0)) != 0 {
+    vfs_hold_dup(&mut k.fs, get(k.lazy, lz_at(c, 2)));
+  }
+}
+
+/// Window pages from .. to of process pid are going away (munmap, a
+/// mapping over them, exit, execve): the record no longer covers them. A
+/// hole in the middle drops it; pages after it that were never touched
+/// stay unmapped, as Linux would leave them if they had been unmapped.
+fn lazy_forget(k: &mut Kernel, pid: u64, from: u64, to: u64)
+  requires kok(k) && pid < NPROC && from <= to && to <= WPAGES
+  ensures kok(k)
+{
+  let first1 = get(k.lazy, lz_at(pid, 0));
+  if first1 == 0 {
+    return;
+  }
+  let first = first1 - 1;
+  let end = sat_add(first, get(k.lazy, lz_at(pid, 1)));
+  if to <= first || end <= from {
+    return;                                 // none of it
+  }
+  if from <= first && end <= to {
+    lazy_drop(&mut k, pid);                 // all of it
+  } else if from <= first {
+    // The head goes: the record starts at `to`.
+    k.lazy = set(k.lazy, lz_at(pid, 0), to + 1);
+    k.lazy = set(k.lazy, lz_at(pid, 1), end - to);
+    k.lazy = set(k.lazy, lz_at(pid, 3), sat_add(get(k.lazy, lz_at(pid, 3)), (to - first) * 4096));
+  } else if end <= to {
+    k.lazy = set(k.lazy, lz_at(pid, 1), from - first);   // the tail goes
+  } else {
+    lazy_drop(&mut k, pid);
+  }
+}
+
+/// Reads window page q of process pid, if its record covers it and it is
+/// not mapped, and maps it read-only. True if it did.
+fn lazy_read(k: &mut Kernel, pid: u64, q: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let first1 = get(k.lazy, lz_at(pid, 0));
+  if first1 == 0 || q >= WPAGES || q < first1 - 1 || q - (first1 - 1) >= get(k.lazy, lz_at(pid, 1)) {
+    return false;
+  }
+  if copy_from_user(&mut k.spaces, pid, USER_BASE + q * 4096, &mut k.fs.xfer, 1) == 1 {
+    return false;                           // mapped already
+  }
+  let h = vfs_held(k.fs, get(k.lazy, lz_at(pid, 2)));
+  let off = sat_add(get(k.lazy, lz_at(pid, 3)), (q - (first1 - 1)) * 4096);
+  if h == NO_FILE || vfs_read_at(&mut k.fs, h, off, 4096) != 4096 {
+    return false;
+  }
+  let b = find_free(&mut k.mem);
+  if b >= NPAGES {
+    return false;
+  }
+  let f = dirty_fill(take_dirty(&mut k.mem, b), k.fs.xfer, 0);
+  match take_space(&mut k.spaces, pid) {
+    Space::Empty => {
+      give_page(&mut k.mem, f);
+      return false;
+    },
+    Space::Mapped(mut root) => {
+      let mut ok = false;
+      if pt_has(root, 1) {
+        ok = pt_borrow(&mut root, 1, lazy_l3, &mut k.mem, q, f);
+      } else {
+        give_page(&mut k.mem, f);
+      }
+      put_space(&mut k.spaces, pid, Space::Mapped(root));
+      return ok;
+    },
+  }
+}
+
+fn lazy_l3(l3: &mut PageTable, m: &mut Mem, q: u64, f: Frame) -> bool
+  requires pt_level(l3) == 3 && mem_ok(m) && q < WPAGES
+  ensures mem_ok(m)
+{
+  if !pt_has(l3, 0) {
+    give_page(&mut m, f);
+    return false;
+  }
+  return pt_borrow(&mut l3, 0, lazy_l2, &mut m, q, f);
+}
+
+fn lazy_l2(l2: &mut PageTable, m: &mut Mem, q: u64, f: Frame) -> bool
+  requires pt_level(l2) == 2 && mem_ok(m) && q < WPAGES
+  ensures mem_ok(m)
+{
+  let t = q / 512;
+  if !pt_has(l2, t) {
+    let a = find_free(&mut m);
+    if a >= NPAGES {
+      give_page(&mut m, f);
+      return false;
+    }
+    pt_put(&mut l2, t, pt_new(take_page(&mut m, a), 1));
+  }
+  return pt_borrow(&mut l2, t, lazy_l1, &mut m, q % 512, f);
+}
+
+fn lazy_l1(l1: &mut PageTable, m: &mut Mem, i: u64, f: Frame) -> bool
+  requires pt_level(l1) == 1 && mem_ok(m) && i < 512
+  ensures mem_ok(m)
+{
+  if pt_has(l1, i) {
+    give_page(&mut m, f);                   // another thread got there first
+    return true;
+  }
+  pt_put_frame(&mut l1, i, f, false);
+  return true;
+}
+
+/// A page fault of process p on a code page not read yet: reads it, and
+/// true says to run p again.
+fn lazy_fault(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let va = pget(k.procs, p, F_REGS + 19);   // CR2
+  if va < USER_BASE {
+    return false;
+  }
+  return lazy_read(&mut k, p, (va - USER_BASE) / 4096);
+}
+
+/// Reads every page of window pages from .. to the record covers (before
+/// mprotect changes them, which needs them mapped).
+fn lazy_fill(k: &mut Kernel, pid: u64, from: u64, to: u64)
+  requires kok(k) && pid < NPROC && to <= WPAGES
+  ensures kok(k)
+{
+  let mut q = from;
+  while q < to
+    invariant kok(k) && pid < NPROC
+  {
+    let r = lazy_read(&mut k, pid, q);
+    q = q + 1;
+  }
+}

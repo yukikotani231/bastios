@@ -141,6 +141,11 @@ build/user/ash.elf: build/busybox/Makefile user/busybox.config | build/user
 	for o in $$(grep -v '^#' user/busybox.config); do \
 	  sed -i "s/^# $$o is not set/$$o=y/" build/busybox/.config; done
 	yes "" | $(MAKE) -C build/busybox -s oldconfig >/dev/null
+	# The non-boolean options for users: SHA-512 passwords, and ids for
+	# new users from 1000 (BusyBox's defaults, which allnoconfig zeroes).
+	sed -i -e 's/^CONFIG_FEATURE_DEFAULT_PASSWD_ALGO=.*/CONFIG_FEATURE_DEFAULT_PASSWD_ALGO="sha512"/' \
+	  -e 's/^CONFIG_LAST_ID=.*/CONFIG_LAST_ID=60000/' -e 's/^CONFIG_FIRST_SYSTEM_ID=.*/CONFIG_FIRST_SYSTEM_ID=100/' \
+	  -e 's/^CONFIG_LAST_SYSTEM_ID=.*/CONFIG_LAST_SYSTEM_ID=999/' build/busybox/.config
 	$(MAKE) -C build/busybox -s CC=$(MUSLCC) EXTRA_CFLAGS=-fPIE CFLAGS_busybox=-static-pie busybox
 	cp build/busybox/busybox $@
 
@@ -505,6 +510,10 @@ smpbench: build/bastios.elf
 threadbench: build/bastios.elf
 	test/threadbench.sh
 
+# Not part of `make test` either: how fast ash forks and execs, 4 at a time.
+forkbench: build/bastios.elf
+	test/forkbench.sh
+
 # Not part of `make test` either: disk timings for each driver.
 diskbench: build/bastios.elf
 	test/diskbench.sh
@@ -520,4 +529,4 @@ clean:
 	rm -rf build
 
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
-.PHONY: all run disk usb run-usb test fuzz smpbench threadbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+.PHONY: all run disk usb run-usb test fuzz smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean

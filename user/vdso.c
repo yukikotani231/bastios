@@ -25,12 +25,13 @@ struct timespec { long tv_sec; long tv_nsec; };
 static uint64_t scale(uint64_t d, uint64_t mult)
 {
     uint64_t hi = d / TWO32, lo = d % TWO32, mh = mult / TWO32, ml = mult % TWO32;
-    if (hi != 0 && mh != 0)
+    if (mh != 0 && hi > (TWO32 - 1) / mh)
         return NS_MAX;
+    uint64_t top = hi * mh * TWO32;
     uint64_t a = hi * ml, b = lo * mh, c = lo * ml / TWO32;
-    if (a > NS_MAX - b || a + b > NS_MAX - c)
+    if (a > NS_MAX - b || a + b > NS_MAX - c || a + b + c > NS_MAX - top)
         return NS_MAX;
-    return a + b + c;
+    return top + a + b + c;
 }
 
 int __vdso_clock_gettime(int clk, struct timespec *ts)

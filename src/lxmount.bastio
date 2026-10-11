@@ -226,6 +226,9 @@ fn lx_mount_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u6
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if !cred_root(k.procs, pid) {
+    return EPERM;                           // CAP_SYS_ADMIN on Linux: root's alone here
+  }
   if n == LX_MOUNT {
     return lx_mount(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
   }
