@@ -53,7 +53,6 @@ const UXLC0: u64 = 144;                // UXC0 + 2 * UX_N: the listeners' creden
 const SO_PEERCRED: u64 = 17;
 const UX_DG: u64 = 16;                 // word 3: a datagram socket
 const SUN_LEN: u64 = 110;              // sizeof(struct sockaddr_un)
-const T_SOCK: u64 = 0xC000;            // mode type bits of a socket file
 const ECONNABORTED: u64 = 18446744073709551513;    // 2^64 - 103
 
 // A unix socket descriptor: description h, word 2 x, nonblocking, mode;

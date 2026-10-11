@@ -177,6 +177,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   shm_fork(&mut k, pid, c);
   sig_fork(&mut k.sigact, pid, c);
   cwd_fork(&mut k.cwd, pid, c);
+  cwd_fork(&mut k.croot, pid, c);
   pset(&mut k.procs, c, F_SIGPEND, 0);
   pset(&mut k.procs, c, F_RESTART, 0);
   pset(&mut k.procs, c, F_STATE, READY);
@@ -694,6 +695,30 @@ fn lx_stat(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, buf: u64, follow: bo
   return put_stat(&mut k, pid, buf, m);
 }
 
+/// fstat for the *at calls with AT_EMPTY_PATH: dirfd itself, or the
+/// working directory for AT_FDCWD.
+fn lx_fstat_at(k: &mut Kernel, pid: u64, dirfd: u64, buf: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if dirfd % 0x100000000 != AT_FDCWD {
+    return lx_fstat(&mut k, pid, dirfd, buf);
+  }
+  let cl = base_len(k, pid, OFD_N);
+  let mut i = 0;
+  while i < cl
+    invariant i <= cl && cl <= FNAME_MAX && kok(k) && pid < NPROC
+  {
+    bset(&mut k.fs.xfer, i, base_byte(k, pid, OFD_N, i));
+    i = i + 1;
+  }
+  let m = path_meta(&mut k, cl);
+  if !m.ok {
+    return ENOENT;
+  }
+  return put_stat(&mut k, pid, buf, m);
+}
+
 /// The metadata of the path in the first n bytes of the transfer buffer.
 fn path_meta(k: &mut Kernel, n: u64) -> Meta
   requires kok(k) && n <= FNAME_MAX
@@ -713,14 +738,7 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
   }
   let dir = dir_at(&mut k, n);
   if dir != NO_FILE {
-    if dir >= DIR_PROC {
-      return proc_dir_meta(dir);
-    }
-    if dir >= DIR_VFS {
-      let dm = vfs_meta(&mut k.fs, dir - DIR_VFS);
-      return Meta { ok: true, mode: S_IFMT_DIR + dm.mode % 4096, size: 0, ino: 1 + dir, mtime: dm.mtime, own: dm.own };
-    }
-    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1 + dir, mtime: 0, own: 0 };
+    return dir_meta(&mut k, dir);
   }
   if n > 4 && xfer_bin(k.fs.xfer) {
     let prog = bin_prog(k.fs.xfer, n);
@@ -734,6 +752,21 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
     return Meta { ok: true, mode: bm, size: slen(prog_image(prog)), ino: INO_PROGS + prog, mtime: 0, own: 0 };
   }
   return file_meta(&mut k.fs, vfs_lookup(&mut k.fs, n));
+}
+
+/// The metadata of directory dir (a DIR_* number, as dir_at gives).
+fn dir_meta(k: &mut Kernel, dir: u64) -> Meta
+  requires kok(k)
+  ensures kok(k)
+{
+  if dir >= DIR_PROC {
+    return proc_dir_meta(dir);
+  }
+  if dir >= DIR_VFS {
+    let dm = vfs_meta(&mut k.fs, dir - DIR_VFS);
+    return Meta { ok: true, mode: S_IFMT_DIR + dm.mode % 4096, size: 0, ino: 1 + dir, mtime: dm.mtime, own: dm.own };
+  }
+  return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1 + dir, mtime: 0, own: 0 };
 }
 
 /// The metadata of file f (a vfs_lookup handle). Its inode number is the
@@ -752,8 +785,12 @@ fn file_meta(v: &mut Vfs, f: u64) -> Meta
     kind = T_LINK;                          // a symbolic link: only lstat gets this far
   } else if fm.mode % 65536 / 4096 * 4096 == T_FIFO {
     kind = T_FIFO;                          // a named pipe
-  } else if fm.mode % 65536 / 4096 * 4096 == 0xC000 {
-    kind = 0xC000;                          // a unix socket's file (src/lxunix.bastio)
+  } else if fm.mode % 65536 / 4096 * 4096 == T_SOCK {
+    return Meta { ok: true, mode: T_SOCK + fm.mode % 4096, size: 0, ino: INO_FILES + f, mtime: fm.mtime, own: fm.own };
+  } else if fm.mode % 65536 / 4096 * 4096 == T_CHR || fm.mode % 65536 / 4096 * 4096 == T_BLK {
+    // A device node: size carries its number (see put_stat).
+    let t = fm.mode % 65536 / 4096 * 4096;
+    return Meta { ok: true, mode: t + fm.mode % 4096, size: vfs_node_dev(&mut v, f), ino: INO_FILES + f, mtime: fm.mtime, own: fm.own };
   }
   return Meta { ok: true, mode: kind + fm.mode % 4096, size: size, ino: INO_FILES + f, mtime: fm.mtime, own: fm.own };
 }
@@ -771,7 +808,7 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
   } else if d.kind == K_PIPE_R || d.kind == K_PIPE_W {
     m = Meta { ok: true, mode: S_IFIFO, size: 0, ino: 4, mtime: 0, own: 0 };
   } else if d.kind == K_DIR {
-    m = Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1, mtime: 0, own: 0 };
+    m = dir_meta(&mut k, d.x);
   } else if d.kind == K_SOCK {
     m = Meta { ok: true, mode: S_IFSOCK, size: 0, ino: 5, mtime: 0, own: 0 };
   } else if d.kind == K_DEV {
@@ -786,10 +823,18 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
 }
 
 /// Writes a struct stat for m to user address buf. Returns 0 or -EFAULT.
-fn put_stat(k: &mut Kernel, pid: u64, buf: u64, m: Meta) -> u64
+/// For a character or block device, m.size is the device number (st_rdev)
+/// and the size is 0.
+fn put_stat(k: &mut Kernel, pid: u64, buf: u64, mo: Meta) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  let mut m = mo;
+  let mut rdev = 0;
+  if m.mode % 65536 / 4096 * 4096 == T_CHR || m.mode % 65536 / 4096 * 4096 == T_BLK {
+    rdev = m.size;
+    m.size = 0;
+  }
   let mut nlink = 1;
   if m.ino >= INO_FILES && m.ino < INO_FILES + HFILES {
     nlink = vfs_nlink(&mut k.fs, m.ino - INO_FILES);   // a file and its hard links
@@ -799,6 +844,7 @@ fn put_stat(k: &mut Kernel, pid: u64, buf: u64, m: Meta) -> u64
   xfer_u64(&mut k.fs.xfer, 16, nlink);        // st_nlink
   xfer_u64(&mut k.fs.xfer, 24, m.mode % 0x100000000 + m.own % 0x100000000 * 0x100000000);   // st_mode, st_uid
   xfer_u64(&mut k.fs.xfer, 32, m.own / 0x100000000);                 // st_gid
+  xfer_u64(&mut k.fs.xfer, 40, rdev);         // st_rdev
   xfer_u64(&mut k.fs.xfer, 48, m.size);       // st_size
   xfer_u64(&mut k.fs.xfer, 56, 4096);         // st_blksize
   let mut blocks = m.size / 512;

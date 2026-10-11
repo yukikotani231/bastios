@@ -8,35 +8,12 @@
 // code; 20 is added for the disk run).
 
 import "lib/file.bastio";
-
-fn puts(con: &Serial, s: Str) {
-  let mut i = 0;
-  while i < slen(s)
-    invariant i <= slen(s)
-  {
-    serial_write(con, sget(s, i));
-    i = i + 1;
-  }
-}
-
-fn put_num(con: &Serial, n: u64) {
-  let mut p = 1;
-  while p <= n / 10
-    invariant p >= 1
-  {
-    p = p * 10;
-  }
-  let mut q = p;
-  while q > 0 {
-    serial_write(con, cast[u8](48 + (n / q) % 10));
-    q = q / 10;
-  }
-}
+import "core/print.bastio";
 
 fn fail(con: &Serial, step: u64) -> u64 {
-  puts(con, "fstest: step ");
-  put_num(con, step);
-  puts(con, " failed\r\n");
+  print_str(con, "fstest: step ");
+  print_u64(con, step);
+  print_str(con, " failed\r\n");
   return step;
 }
 
@@ -269,22 +246,22 @@ fn run(big: &Bytes, nl: u64, buf: &mut Bytes, keep_open: bool) -> u64
     step = 11;
   }
   f_close(op);
-  // 12. Sixteen descriptors per process, then no more.
+  // 12. 256 descriptors per process (NFD), then no more.
   let mut i = 0;
   let mut opened = 0;
-  while i < 17
-    invariant i <= 17 && opened <= i
+  while i < 257
+    invariant i <= 257 && opened <= i
   {
     if f_open(big, nl, O_WRITE + O_CREATE) != NOT_OK {
       opened = opened + 1;
     }
     i = i + 1;
   }
-  if step == 0 && opened != 16 {
+  if step == 0 && opened != 256 {
     step = 12;
   }
   i = 0;
-  while i < 16 {
+  while i < 256 {
     f_close(i);
     i = i + 1;
   }
@@ -322,7 +299,7 @@ fn main(con: &mut Serial) -> u64 {
     if step != 0 {
       step = step + 20;
     } else {
-      puts(con, "fstest: disk ok\r\n");
+      print_str(con, "fstest: disk ok\r\n");
     }
   }
   bfree(disk);
@@ -335,6 +312,6 @@ fn main(con: &mut Serial) -> u64 {
   if step != 0 {
     return fail(con, step);
   }
-  puts(con, "fstest: ok\r\n");
+  print_str(con, "fstest: ok\r\n");
   return 0;
 }
