@@ -5,9 +5,9 @@ package repository (/disk/a/repo/x86_64: .apk files and an APKINDEX; and
 /disk/a/repo2/x86_64), next to Alpine's own BusyBox at /disk/busybox. The checks unpack the root under
 /disk/a, chroot into it and run apk there.
 
-    alpinedisk.py OUT.img CACHE_DIR BASE_IMAGE PKG_IMAGE... --disk NAME,...
+    alpinedisk.py OUT.img WORK_DIR BASE_IMAGE PKG_IMAGE... --disk NAME,... [--cache DIR]
 
-Every package the PKG_IMAGEs hold goes in a repository CACHE_DIR/disk/http,
+Every package the PKG_IMAGEs hold goes in a repository WORK_DIR/disk/http,
 which run.py serves over HTTP (alpine.txt's ALPINEURL): it is larger than
 a disk. The disk gets the packages named after --disk, with everything they
 depend on that the root lacks, so that the checks install them with no
@@ -22,8 +22,15 @@ from what the images hold: every file a package installed (as listed in
 /lib/apk/db/installed, with its owner and mode) goes back into an .apk with
 the package's metadata. The binaries are Alpine's; the packages and the
 index are not signed by Alpine, so apk needs --allow-untrusted.
+
+The image layers are kept in the cache directory (--cache, WORK_DIR when
+it is not given) under their digests, with each image's layer list, and
+are checked against their digests each time they are used. Docker Hub is
+asked only for what the cache lacks, so a cache kept outside the build
+directory (ALPINE_CACHE in the Makefile) spares Docker Hub's rate limit
+on fresh checkouts; a 429 from it is waited out and retried.
 """
-import base64, gzip, hashlib, http.client, io, json, os, re, shutil, subprocess, sys, tarfile, urllib.request
+import base64, gzip, hashlib, http.client, io, json, os, re, shutil, subprocess, sys, tarfile, time, urllib.error, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REGISTRY = "https://registry-1.docker.io/v2"
@@ -35,11 +42,25 @@ ACCEPT = ", ".join([
 
 # ---------------------------------------------------------------- Docker Hub
 
+def opened(req):
+    """urlopen, waiting out Docker Hub's rate limit (429): as long as it
+    says, or a minute, up to ten times."""
+    for i in range(10):
+        try:
+            return urllib.request.urlopen(req)
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or i == 9:
+                raise
+            wait = e.headers.get("Retry-After", "60")
+            wait = int(wait) if wait.isdigit() else 60
+            print(f"alpinedisk: Docker Hub's rate limit; waiting {wait} s", file=sys.stderr)
+            time.sleep(min(wait, 600))
+
 def fetch(url, token, accept=None):
     h = {"Authorization": "Bearer " + token}
     if accept:
         h["Accept"] = accept
-    with urllib.request.urlopen(urllib.request.Request(url, headers=h)) as r:
+    with opened(urllib.request.Request(url, headers=h)) as r:
         return r.read()
 
 def download(url, token, path, size):
@@ -53,7 +74,7 @@ def download(url, token, path, size):
             return
         h = {"Authorization": "Bearer " + token, "Range": f"bytes={have}-"}
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers=h)) as r, open(path, "ab") as f:
+            with opened(urllib.request.Request(url, headers=h)) as r, open(path, "ab") as f:
                 if r.status != 206 and have:
                     f.truncate(0)
                 while True:
@@ -65,19 +86,31 @@ def download(url, token, path, size):
             pass
     sys.exit(f"alpinedisk: {url}: the download keeps failing")
 
+def sound(path, digest):
+    """Whether the file at path is there and has sha256 digest `digest`."""
+    if not os.path.exists(path):
+        return False
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return "sha256:" + h.hexdigest() == digest
+
 def layers(image, cache):
     """The layers of an amd64 image NAME@sha256:DIGEST, as paths of gzip
     tar files in the cache, base first. Each blob is checked against its
-    digest."""
+    digest, when it is fetched and each time it comes from the cache."""
     name, digest = image.split("@")
     # Docker Hub limits how many manifests one address may fetch, so the
-    # layer list is kept too, by the image's digest.
+    # layer list is kept too, by the image's digest: the layers' digests.
     listed = os.path.join(cache, digest.replace(":", "-") + ".json")
     if os.path.exists(listed):
-        paths = json.load(open(listed))
-        if all(os.path.exists(p) for p in paths):
+        # Older lists hold paths; a layer's file name is its digest either way.
+        ds = [os.path.basename(p)[:-len(".tar.gz")].replace("-", ":", 1) for p in json.load(open(listed))]
+        paths = [os.path.join(cache, d.replace(":", "-") + ".tar.gz") for d in ds]
+        if all(sound(p, d) for p, d in zip(paths, ds)):
             return paths
-    token = json.load(urllib.request.urlopen(
+    token = json.load(opened(
         "https://auth.docker.io/token?service=registry.docker.io&scope=repository:" + name + ":pull"))["token"]
     m = json.loads(fetch(f"{REGISTRY}/{name}/manifests/{digest}", token, ACCEPT))
     if "manifests" in m:
@@ -87,15 +120,16 @@ def layers(image, cache):
     out = []
     for l in m["layers"]:
         path = os.path.join(cache, l["digest"].replace(":", "-") + ".tar.gz")
-        if not os.path.exists(path):
+        if not sound(path, l["digest"]):
             download(f"{REGISTRY}/{name}/blobs/{l['digest']}", token, path + ".part", l["size"])
             with open(path + ".part", "rb") as f:
                 if "sha256:" + hashlib.sha256(f.read()).hexdigest() != l["digest"]:
                     sys.exit(f"alpinedisk: {image}: layer {l['digest']} does not match its digest")
             os.rename(path + ".part", path)
         out.append(path)
-    with open(listed, "w") as f:
-        json.dump(out, f)
+    with open(listed + ".part", "w") as f:
+        json.dump([l["digest"].replace(":", "-") + ".tar.gz" for l in m["layers"]], f)
+    os.rename(listed + ".part", listed)
     return out
 
 def merged(paths):
@@ -373,12 +407,18 @@ def main():
     want = args[args.index("--disk") + 1].split(",") if "--disk" in args else []
     if "--disk" in args:
         del args[args.index("--disk"):args.index("--disk") + 2]
-    out, cache, base, images = args[0], args[1], args[2], args[3:]
+    cache = None
+    if "--cache" in args:
+        cache = args[args.index("--cache") + 1]
+        del args[args.index("--cache"):args.index("--cache") + 2]
+    out, top, base, images = args[0], args[1], args[2], args[3:]
+    cache = cache or top
     os.makedirs(cache, exist_ok=True)
+    os.makedirs(top, exist_ok=True)
     root = layers(base, cache)
     if len(root) != 1:
         sys.exit(f"alpinedisk: {base} should be one layer, the minirootfs")
-    work = os.path.join(cache, "disk")
+    work = os.path.join(top, "disk")
     subprocess.run(["rm", "-rf", work], check=True)
     os.makedirs(work)
     with gzip.open(root[0]) as f, open(os.path.join(work, "root.tar"), "wb") as o:
