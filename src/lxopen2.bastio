@@ -1,0 +1,392 @@
+// openat2(dirfd, path, how, size): open with a struct open_how { flags,
+// mode, resolve } that says how the path may be resolved.
+//
+// The flags are checked more strictly than open's (unknown bits, a mode
+// without O_CREAT, O_PATH with flags it does not take are -EINVAL), then
+// the resolve flags are checked against the path before lx_open opens it:
+//
+// - RESOLVE_IN_ROOT resolves as if dirfd were the process's root: the
+//   process's root (k.croot) is set to dirfd's directory for the call, so
+//   "/", ".." and absolute symbolic links stop there, as under chroot.
+// - RESOLVE_BENEATH: an absolute path, a ".." out of dirfd's directory, or
+//   a path that ends outside it after its symbolic links are followed is
+//   -EXDEV.
+// - RESOLVE_NO_SYMLINKS: a path that changes when its symbolic links are
+//   followed is -ELOOP. It implies RESOLVE_NO_MAGICLINKS.
+// - RESOLVE_NO_MAGICLINKS: a path through /proc/PID/{exe,cwd,root,fd/N}
+//   (or ending at one, when it would be followed) is -ELOOP.
+// - RESOLVE_NO_XDEV: a path that enters another file system than the one
+//   it starts on is -EXDEV. File systems are told apart by where they hang:
+//   /proc, /sys, /dev, a loop mount and the tmpfs mounts each count as one,
+//   the rest as the root's.
+// - RESOLVE_CACHED: everything is cached here, so only O_CREAT, O_TRUNC
+//   and O_TMPFILE, which Linux will not try from the cache, are -EAGAIN.
+//
+// Not done as on Linux: the checks look at the path once and lx_open
+// resolves it again, so another process renaming a directory in between
+// can move what is opened (Linux checks during its one walk).
+// RESOLVE_BENEATH allows an absolute symbolic link whose target is inside
+// dirfd's directory (Linux refuses any). RESOLVE_NO_XDEV does not see a
+// mount crossed and left again by "..".
+
+const LX_OPENAT2: u64 = 437;
+const HOW_SIZE: u64 = 24;               // struct open_how, version 0
+const OPEN_VALID: u64 = 0x7FFFC3;       // Linux's VALID_OPEN_FLAGS on x86-64
+const OPEN_PATH_OK: u64 = 0x2B0000;     // O_PATH with O_DIRECTORY, O_NOFOLLOW, O_CLOEXEC
+const RES_NO_XDEV: u64 = 1;
+const RES_NO_MAGICLINKS: u64 = 2;
+const RES_NO_SYMLINKS: u64 = 4;
+const RES_BENEATH: u64 = 8;
+const RES_IN_ROOT: u64 = 0x10;
+const RES_CACHED: u64 = 0x20;
+const RES_ALL: u64 = 0x3F;
+
+fn is_open2_call(n: u64) -> bool {
+  return n == LX_OPENAT2;
+}
+
+/// openat2: the struct at user address how (size bytes of it), checked,
+/// then the path opened as its resolve flags allow. Returns the descriptor
+/// or -errno.
+fn lx_openat2(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, how: u64, size: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if size < HOW_SIZE {
+    return EINVAL;
+  }
+  if size > 4096 {
+    return E2BIG;
+  }
+  if copy_from_user(&mut k.spaces, pid, how, &mut k.fs.xfer, size) != size {
+    return EFAULT;
+  }
+  let mut i = HOW_SIZE;
+  while i < size
+    invariant HOW_SIZE <= i && i <= size && size <= XFER && kok(k)
+  {
+    if bget(k.fs.xfer, i) != 0 {
+      return E2BIG;                         // a newer struct, with fields this kernel lacks
+    }
+    i = i + 1;
+  }
+  let flags = get_u64(k.fs.xfer, 0);
+  let mode = get_u64(k.fs.xfer, 8);
+  let res = get_u64(k.fs.xfer, 16);
+  if flags & OPEN_VALID != flags {
+    return EINVAL;
+  }
+  if flags & (LO_CREAT | LO_TMPFILE) == 0 && mode != 0 {
+    return EINVAL;                          // a mode with nothing to create
+  }
+  if mode > 4095 {
+    return EINVAL;
+  }
+  if flags & LO_PATH != 0 && flags & OPEN_PATH_OK != flags {
+    return EINVAL;
+  }
+  if res & RES_ALL != res || (res & RES_BENEATH != 0 && res & RES_IN_ROOT != 0) {
+    return EINVAL;
+  }
+  if res & RES_CACHED != 0 && flags & (LO_CREAT | LO_TRUNC | LO_TMPFILE) != 0 {
+    return EAGAIN;
+  }
+  let h = dir_ofd(k, pid, dirfd);
+  if res & RES_IN_ROOT == 0 || h > OFD_N {
+    return open2_go(&mut k, pid, dirfd, h, path, flags, mode, res);
+  }
+  // RESOLVE_IN_ROOT: the directory is the root for this call.
+  let mut was = balloc(CWD_STRIDE);
+  let wl = root_len(k, pid);
+  let mut j = 0;
+  while j < wl
+    invariant j <= wl && wl <= FNAME_MAX && blen(was) == CWD_STRIDE && kok(k) && pid < NPROC
+  {
+    bset(&mut was, j, cast[u8](get(k.croot, pid * CWD_STRIDE + 1 + j) % 256));
+    j = j + 1;
+  }
+  let mut base = balloc(CWD_STRIDE);
+  let bl = base_len(k, pid, h);
+  j = 0;
+  while j < bl
+    invariant j <= bl && bl <= FNAME_MAX && blen(base) == CWD_STRIDE && kok(k) && pid < NPROC && h <= OFD_N
+  {
+    bset(&mut base, j, base_byte(k, pid, h, j));
+    j = j + 1;
+  }
+  name_keep(&mut k.croot, CWD_LEN, pid, base, bl);
+  bfree(base);
+  let r = open2_go(&mut k, pid, dirfd, h, path, flags, mode, res);
+  name_keep(&mut k.croot, CWD_LEN, pid, was, wl);
+  bfree(was);
+  return r;
+}
+
+/// The resolve checks other than RESOLVE_IN_ROOT, then the open.
+fn open2_go(k: &mut Kernel, pid: u64, dirfd: u64, h: u64, path: u64, flags: u64, mode: u64, res: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if res & (RES_NO_XDEV | RES_NO_MAGICLINKS | RES_NO_SYMLINKS | RES_BENEATH) != 0 {
+    let e = open2_check(&mut k, pid, h, path, flags, res);
+    if e != 0 {
+      return e;
+    }
+  }
+  return lx_open(&mut k, pid, dirfd, path, flags, mode);
+}
+
+/// 0 if the path at user address path, from base h, may be resolved as
+/// res allows, else -errno.
+fn open2_check(k: &mut Kernel, pid: u64, h: u64, path: u64, flags: u64, res: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let x = lx_path_lex(&mut k, pid, path, h);
+  if x.n == NO_RESULT || x.n > FNAME_MAX {
+    return k.perr;
+  }
+  if res & RES_BENEATH != 0 && (x.abs || x.esc) {
+    return EXDEV;
+  }
+  let ln = proc_self(&mut k.fs.xfer, x.n, pid);
+  let last = flags & LO_NOFOLLOW == 0 || x.trail;
+  let no_magic = res & (RES_NO_MAGICLINKS | RES_NO_SYMLINKS) != 0;
+  if no_magic && is_magic(k.fs.xfer, ln, last) {
+    return ELOOP;
+  }
+  // Where it starts: the root for an absolute path, else the base
+  // (lx_path_lex refused a relative path with no base).
+  let mut sp = balloc(CWD_STRIDE);
+  let mut sl = 0;
+  if x.abs || h > OFD_N {
+    sl = root_len(k, pid);
+    let mut j = 0;
+    while j < sl
+      invariant j <= sl && sl <= FNAME_MAX && blen(sp) == CWD_STRIDE && kok(k) && pid < NPROC
+    {
+      bset(&mut sp, j, cast[u8](get(k.croot, pid * CWD_STRIDE + 1 + j) % 256));
+      j = j + 1;
+    }
+  } else {
+    sl = base_len(k, pid, h);
+    let mut j = 0;
+    while j < sl
+      invariant j <= sl && sl <= FNAME_MAX && blen(sp) == CWD_STRIDE && kok(k) && pid < NPROC && h <= OFD_N
+    {
+      bset(&mut sp, j, base_byte(k, pid, h, j));
+      j = j + 1;
+    }
+  }
+  let mut lp = balloc(CWD_STRIDE);
+  let mut j = 0;
+  while j < ln
+    invariant j <= ln && ln <= FNAME_MAX && blen(lp) == CWD_STRIDE && kok(k)
+  {
+    bset(&mut lp, j, bget(k.fs.xfer, j));
+    j = j + 1;
+  }
+  let fl = lx_follow(&mut k, ln, last, smaller(x.floor, ln));
+  let mut e = 0;
+  if fl == NO_RESULT || fl > FNAME_MAX {
+    e = k.perr;
+  } else if res & RES_NO_SYMLINKS != 0 && !same_span(lp, ln, k.fs.xfer, fl) {
+    e = ELOOP;                              // a symbolic link on the way
+  } else if no_magic && is_magic(k.fs.xfer, fl, last) {
+    e = ELOOP;
+  } else if res & RES_BENEATH != 0 && !is_under(k.fs.xfer, fl, sp, sl) {
+    e = EXDEV;                              // a link led out
+  } else if res & RES_NO_XDEV != 0 {
+    let mut fp = balloc(CWD_STRIDE);
+    let mut c = 0;
+    while c < fl
+      invariant c <= fl && fl <= FNAME_MAX && blen(fp) == CWD_STRIDE && kok(k)
+    {
+      bset(&mut fp, c, bget(k.fs.xfer, c));
+      c = c + 1;
+    }
+    c = 0;
+    while c < sl
+      invariant c <= sl && sl <= FNAME_MAX && blen(sp) == CWD_STRIDE && kok(k)
+    {
+      bset(&mut k.fs.xfer, c, bget(sp, c));
+      c = c + 1;
+    }
+    let id = xdev_at(&mut k, sl);
+    if !xdev_same(&mut k, lp, ln, sp, sl, id) || !xdev_same(&mut k, fp, fl, sp, sl, id) {
+      e = EXDEV;
+    }
+    bfree(fp);
+  }
+  bfree(lp);
+  bfree(sp);
+  return e;
+}
+
+/// Do a[..an] and b[..bn] hold the same bytes?
+fn same_span(a: &Bytes, an: u64, b: &Bytes, bn: u64) -> bool
+  requires an <= blen(a) && bn <= blen(b)
+{
+  if an != bn {
+    return false;
+  }
+  let mut i = 0;
+  while i < an
+    invariant i <= an && an == bn && an <= blen(a) && bn <= blen(b)
+  {
+    if bget(a, i) != bget(b, i) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+/// Is the name x[..n] the directory d[..dl] or inside it?
+fn is_under(x: &Bytes, n: u64, d: &Bytes, dl: u64) -> bool
+  requires n <= blen(x) && dl <= blen(d)
+{
+  if dl == 0 {
+    return true;                            // everything is under the top
+  }
+  if n < dl || (n > dl && bget(x, dl) != 47) {
+    return false;
+  }
+  let mut i = 0;
+  while i < dl
+    invariant i <= dl && dl <= n && n <= blen(x) && dl <= blen(d)
+  {
+    if bget(x, i) != bget(d, i) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+/// Does the name x[..n] go through a /proc magic link: /proc/PID/exe, cwd,
+/// root or fd/N? One at the end counts only when it is followed (last).
+fn is_magic(x: &Bytes, n: u64, last: bool) -> bool
+  requires n <= blen(x)
+{
+  if n < 5 || !xfer_is(x, 0, 5, "proc/") {
+    return false;
+  }
+  let s2 = comp_end(x, 5, n);               // after PID
+  if s2 >= n {
+    return false;
+  }
+  let s3 = comp_end(x, s2 + 1, n);
+  if xfer_is(x, s2 + 1, s3, "exe") || xfer_is(x, s2 + 1, s3, "cwd") || xfer_is(x, s2 + 1, s3, "root") {
+    return s3 < n || last;
+  }
+  if xfer_is(x, s2 + 1, s3, "fd") && s3 < n {
+    let s4 = comp_end(x, s3 + 1, n);
+    return s4 > s3 + 1 && (s4 < n || last);
+  }
+  return false;
+}
+
+/// Which file system the name in the first n bytes of the transfer buffer
+/// is on, as RESOLVE_NO_XDEV tells them apart: 0 the root's, 1 /proc, 2
+/// /sys, 3 /dev, 4 a loop mount, 5 a tmpfs mount.
+fn xdev_at(k: &mut Kernel, n: u64) -> u64
+  requires kok(k) && n <= FNAME_MAX
+  ensures kok(k)
+{
+  let c = comp_end(k.fs.xfer, 0, n);
+  if xfer_is(k.fs.xfer, 0, c, "proc") {
+    return 1;
+  }
+  if xfer_is(k.fs.xfer, 0, c, "sys") {
+    return 2;
+  }
+  if xfer_is(k.fs.xfer, 0, c, "dev") {
+    return 3;
+  }
+  if vfs_in_lo(&mut k.fs, n) {
+    return 4;
+  }
+  if vfs_in_mount(&mut k.fs, n, false) {
+    return 5;
+  }
+  return 0;
+}
+
+/// Is every directory the name p[..pl] passes through, and the name itself,
+/// on file system id, leaving out those it shares with the start s[..sl]?
+fn xdev_same(k: &mut Kernel, p: &Bytes, pl: u64, s: &Bytes, sl: u64, id: u64) -> bool
+  requires kok(k) && pl <= FNAME_MAX && pl <= blen(p) && sl <= blen(s)
+  ensures kok(k)
+{
+  // How far p and s agree.
+  let mut cp = 0;
+  while cp < pl && cp < sl && bget(p, cp) == bget(s, cp)
+    invariant cp <= pl && pl <= blen(p) && cp <= sl && sl <= blen(s)
+  {
+    cp = cp + 1;
+  }
+  let mut i = 1;
+  while i <= pl
+    invariant 1 <= i && pl <= FNAME_MAX && pl <= blen(p) && sl <= blen(s) && cp <= pl && cp <= sl && kok(k)
+  {
+    if i == pl || bget(p, i) == 47 {
+      let shared = i <= cp && (i == sl || (i < sl && bget(s, i) == 47));
+      if !shared {
+        let mut c = 0;
+        while c < i
+          invariant c <= i && i <= pl && pl <= FNAME_MAX && pl <= blen(p) && kok(k)
+        {
+          bset(&mut k.fs.xfer, c, bget(p, c));
+          c = c + 1;
+        }
+        if xdev_at(&mut k, i) != id {
+          return false;
+        }
+      }
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+/// For /proc file f, a /proc/PID/exe link: its program's name, from the
+/// top, in the transfer buffer (for open, which opens the program).
+/// Returns the length, or NO_RESULT.
+fn exe_name(k: &mut Kernel, f: u64) -> u64
+  requires kok(k)
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  if f < PROC_DEV || (f - PROC_DEV) / 16 >= NPROC {
+    return NO_RESULT;
+  }
+  let mut out = balloc(PROC_OUT);
+  let l = put_prog(&mut k, (f - PROC_DEV) / 16, &mut out, 0, false);
+  if l < 2 || l - 1 > FNAME_MAX || bget(out, 0) != 47 {
+    bfree(out);
+    return NO_RESULT;
+  }
+  let mut i = 1;
+  while i < l
+    invariant 1 <= i && i <= l && l - 1 <= FNAME_MAX && l <= PROC_OUT && blen(out) == PROC_OUT && kok(k)
+  {
+    bset(&mut k.fs.xfer, i - 1, bget(out, i));
+    i = i + 1;
+  }
+  bfree(out);
+  return l - 1;
+}
+
+/// The flags of the struct open_how at user address how (0 if it is not
+/// there), for inotify's IN_OPEN and IN_CREATE (src/lxinotify.bastio).
+fn how_flags(k: &mut Kernel, pid: u64, how: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let w = user_u64(&mut k.spaces, pid, how);
+  if !w.ok {
+    return 0;
+  }
+  return w.v;
+}

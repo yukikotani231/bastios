@@ -611,13 +611,21 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, mode: u6
       return k.perr;
     }
     let f = vfs_lookup(&mut k.fs, m);
-    if f != NO_FILE && vfs_is_link(&mut k.fs, f) {
+    if (f != NO_FILE && vfs_is_link(&mut k.fs, f)) || is_exe_file(proc_file(k.procs, k.fs.xfer, m)) {
       return ELOOP;
     }
   }
-  let n = lx_path_at(&mut k, pid, dirfd, path);
+  let mut n = lx_path_at(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return k.perr;
+  }
+  let pf = proc_file(k.procs, k.fs.xfer, n);
+  if is_exe_file(pf) && flags & LO_PATH == 0 && flags % 4 == 0 {
+    // /proc/PID/exe is a link to the program: open that (src/lxopen2.bastio).
+    n = exe_name(&mut k, pf);
+    if n == NO_RESULT {
+      return ENOENT;
+    }
   }
   return lx_open_n(&mut k, pid, n, flags, mode);
 }

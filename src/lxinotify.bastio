@@ -34,6 +34,7 @@
 // them.
 
 import "lxperm.bastio";
+import "lxopen2.bastio";
 
 const LX_INOTIFY_INIT: u64 = 253;
 const LX_INOTIFY_ADD_WATCH: u64 = 254;
@@ -805,7 +806,7 @@ fn ino_before(k: &mut Kernel, pid: u64)
     keep_arg(&mut k, pid, P2, c, r10, false);
   } else if n == LX_OPEN || n == LX_CREAT {
     keep_arg(&mut k, pid, P1, AT_FDCWD, a, true);
-  } else if n == LX_OPENAT {
+  } else if n == LX_OPENAT || n == LX_OPENAT2 {
     keep_arg(&mut k, pid, P1, a, b, true);
   } else {
     return;
@@ -932,19 +933,21 @@ fn ino_after_call(k: &mut Kernel, pid: u64, call: u64, r: u64, kept: bool, a: u6
     note_entry(&mut k, P1, IN_CREATE, 0);
     return;
   }
-  if (call == LX_OPEN || call == LX_CREAT || call == LX_OPENAT) && r < LXNFD {
+  if (call == LX_OPEN || call == LX_CREAT || call == LX_OPENAT || call == LX_OPENAT2) && r < LXNFD {
     let mut flags = b;
     if call == LX_CREAT {
       flags = LO_CREAT | LO_TRUNC | 1;
     } else if call == LX_OPENAT {
       flags = c;
+    } else if call == LX_OPENAT2 {
+      flags = how_flags(&mut k, pid, c);
     }
     if flags & LO_PATH != 0 {
       return;                               // only a name: not opened
     }
     let existed = kept && iget(k, INO_G + P1 + P_F) != NO_FILE;
     if kept && !existed {
-      if call == LX_OPENAT {
+      if call == LX_OPENAT || call == LX_OPENAT2 {
         keep_arg(&mut k, pid, P1, a, b, true);
       } else {
         keep_arg(&mut k, pid, P1, AT_FDCWD, a, true);
