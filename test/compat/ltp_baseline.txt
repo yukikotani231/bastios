@@ -371,6 +371,7 @@ memfd_create02
 memset01
 mincore01
 mincore02
+mincore03
 mincore04
 mkdir02
 mkdir04

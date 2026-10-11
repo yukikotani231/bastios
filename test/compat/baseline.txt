@@ -464,6 +464,10 @@ t_ltp3: getsockopt on an O_PATH descriptor is EBADF
 t_ltp3: link out of a mount is EXDEV
 t_ltp3: link within the mount works
 t_ltp3: mremap grows a shared file mapping and its tail writes reach the file
+t_ltp3: mincore says untouched anonymous pages are not resident
+t_ltp3: and a touched one is
+t_ltp3: pipe on a full descriptor table is EMFILE
+t_ltp3: mlock makes the pages resident
 t_ltp3: name_to_handle_at with no room is EOVERFLOW and says how much it needs
 t_ltp3: open_by_handle_at opens the same file
 t_ltp3: readlinkat of that descriptor and "" reads the link
