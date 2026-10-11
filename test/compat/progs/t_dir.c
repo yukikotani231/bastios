@@ -54,6 +54,34 @@ int main(void) {
     EXPECT("unlink file in directory", unlink("cd_x/f") == 0);
     EXPECT("rmdir", rmdir("cd_x") == 0 && stat("cd_x", &st) == -1);
     EXPECT("mkdir nested missing parent is ENOENT", mkdir("cd_y/z", 0755) == -1 && errno == ENOENT);
+    if (begin("readdir: d_type and d_ino as lstat sees each entry")) {
+        mkdir("cd_t", 0755); mkdir("cd_t/d", 0755);
+        close(open("cd_t/f", O_CREAT | O_WRONLY, 0644));
+        symlink("f", "cd_t/l"); symlink("d", "cd_t/dl"); symlink("none", "cd_t/b"); mkfifo("cd_t/p", 0644);
+        DIR *d = opendir("cd_t");
+        struct dirent *e;
+        int seen = 0, bad = 0;
+        char why[192] = "";
+        while (d && (e = readdir(d)) != NULL) {
+            if (e->d_name[0] == '.') continue;
+            char p[64];
+            snprintf(p, sizeof p, "cd_t/%s", e->d_name);
+            struct stat ls;
+            int want = -1;
+            if (lstat(p, &ls) == 0)
+                want = S_ISLNK(ls.st_mode) ? DT_LNK : S_ISDIR(ls.st_mode) ? DT_DIR : S_ISFIFO(ls.st_mode) ? DT_FIFO : DT_REG;
+            if (e->d_type != want || e->d_ino != ls.st_ino) {
+                bad++;
+                snprintf(why, sizeof why, "%s: d_type %d (want %d), d_ino %lu (lstat %lu)", e->d_name, e->d_type, want,
+                         (unsigned long)e->d_ino, (unsigned long)ls.st_ino);
+            }
+            seen++;
+        }
+        if (d) closedir(d);
+        unlink("cd_t/f"); unlink("cd_t/l"); unlink("cd_t/dl"); unlink("cd_t/b"); unlink("cd_t/p"); rmdir("cd_t/d"); rmdir("cd_t");
+        if (seen == 6 && !bad) pass(); else if (bad) fail("%s", why); else fail("saw %d entries", seen);
+    }
+    EXPECT("fchmod on a closed descriptor is EBADF", fchmod(1000, 0644) == -1 && errno == EBADF);
     EXPECT("stat /tmp", stat("/tmp", &st) == 0 && S_ISDIR(st.st_mode));
     EXPECT("stat /dev", stat("/dev", &st) == 0 && S_ISDIR(st.st_mode));
     EXPECT("stat /proc/self", stat("/proc/self", &st) == 0);

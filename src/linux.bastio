@@ -1241,6 +1241,9 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
   if d.kind == K_DEV && is_pty_dev(d.x) {
     return pty_write(&mut k, pid, d.x, va, n);   // src/lxpty.bastio
   }
+  if d.kind == K_DEV && d.x >= PROC_DEV {
+    return proc_write(&mut k, pid, d.x, va, n);   // a sysctl open for writing (src/lxprocfs.bastio)
+  }
   if d.kind == K_DEV {
     return n;                               // a device swallows what it is given
   }
@@ -1981,9 +1984,11 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     return EINVAL;
   }
   let mut anon = flags / MAP_ANONYMOUS % 2 == 1;
+  let mut zero = false;
   if !anon {
     let z = fd_look(k, pid, fd);
-    anon = z.kind == K_DEV && z.x == 2;     // /dev/zero (DEV_ZERO): fresh zero pages
+    zero = z.kind == K_DEV && z.x == 2;     // /dev/zero (DEV_ZERO): fresh zero pages
+    anon = zero;
   }
   let mut f = NO_FILE;
   let mut mode = 0;
@@ -2018,6 +2023,13 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   // As on Linux: a file is mapped only if it was opened for reading, and
   // a writable MAP_SHARED mapping only if for writing (and not O_APPEND).
   if !anon && (mode / O_READ % 2 == 0 || (sh && prot / 2 % 2 == 1 && (mode / O_WRITE % 2 == 0 || mode / O_APPEND % 2 == 1))) {
+    return EACCES;
+  }
+  // The same for /dev/zero, whose description notes the access it lacks
+  // (ofd_access). A read-only shared mapping of it is recorded, so
+  // mprotect can refuse PROT_WRITE (lx_mprotect).
+  let zh = fd_ofd(k, pid, fd);
+  if zero && (ofd_lacks(k, zh, ACC_NOREAD) || (sh && prot / 2 % 2 == 1 && ofd_lacks(k, zh, ACC_NOWRITE))) {
     return EACCES;
   }
   let can_write = mode / O_WRITE % 2 == 1;
@@ -2094,6 +2106,10 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
   if anon {
     if prot != 0 {
       read_only(&mut k, pid, at / 4096, pages, prot);
+    }
+    // /dev/zero opened read-only (lx_mmap checked the rest)
+    if flags / MAP_ANONYMOUS % 2 == 0 && sh && ofd_lacks(k, fd_ofd(k, pid, fd), ACC_NOWRITE) {
+      map_record(&mut k, pid, fd, at / 4096, pages, off);
     }
     return USER_BASE + at;
   }

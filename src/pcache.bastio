@@ -4,48 +4,77 @@
 // mappings hold. exec puts the read-only pages of a program on a file
 // system here too and maps them read-only (share_text, src/elf.bastio), so
 // every process running that program shares its code, as the built-in
-// programs' processes share theirs (src/text.bastio). Those pages are
-// marked TXT_PAGE in the page bitmap: `mem` counts them as available, and
-// mprotect gives a process its own copy before it may write one.
+// programs' processes share theirs (src/text.bastio); so does a code page
+// read when first touched (lazy_read, src/lazy.bastio), so a second run of
+// a program finds the code the first one ran without going to the disk.
+// Those pages are marked TXT_PAGE in the page bitmap: `mem` counts them as
+// available, and mprotect gives a process its own copy before it may write
+// one.
 //
-// The pages are `Shared` references (bastiolang), held in slots of a
-// level-1 page table that no processor ever loads: it is only a place the
-// proof lets a `Shared` live. A mapping holds a reference of its own
-// (pt_dup_shared), so a page dropped from the cache stays alive while it is
-// mapped; it only stops being the one later mappings get.
+// The pages are `Shared` references (bastiolang), held in the level-1
+// tables under a level-2 table that no processor ever loads: it is only a
+// place the proof lets a `Shared` live. Slot s is page s % 512 of table
+// s / 512. A mapping holds a reference of its own (pt_dup_shared), so a
+// page dropped from the cache stays alive while it is mapped; it only
+// stops being the one later mappings get.
+//
+// The cache uses at most an eighth of the page pool (pc_cap). When it is
+// full a new page takes the slot of one not used since the clock hand last
+// passed it (a lookup that finds a page marks it used, pc_get), so pages
+// that keep being mapped stay while pages used once go first.
 //
 // The file layer keeps it current (src/fs.bastio): a write copies the new
 // bytes into the cached pages it covers (pc_wrote), a read sees the cached
 // bytes over the file's (pc_overlay), a truncate drops the pages past the
-// end and zeroes the tail of the last (pc_resize), and a file that goes
-// away drops all of its pages (pc_forget), because its handle names the
-// next file made in its place.
+// end and zeroes the tail of the last (pc_resize). A file's pages stay
+// after its last close, so the next run of a program finds its code here
+// (the other pages go then, pc_close); they go when the file is removed
+// while open, and whatever makes a new
+// file drops the pages cached under its handle first (pc_forget), because
+// a handle names the next file made in a removed one's place. A mount or
+// unmount of the loop file system drops every page of its handles
+// (pc_forget_range).
 //
 // Not done: the cache does not replace the file's own bytes, so a mapped
 // page is still written back at msync, munmap and exit (src/lxmem.bastio);
-// when all PC_N slots are used the oldest slot is reused even if a process
-// still maps its page (a later mmap of that part of the file then gets a
-// fresh copy, which the next write-back reconciles).
+// a slot the clock takes may hold a page a process still maps (a later
+// mmap of that part of the file then gets a fresh copy, which the next
+// write-back reconciles); and nothing gives cached pages back when the
+// pool runs low: the cap is what bounds them.
 
 import "pages.bastio";
-import "core/hashmap.bastio";
 
-const PC_N: u64 = 512;                // pages the cache holds (one table)
-const PCK_LEN: u64 = 1026;            // PC_N * 2 keys, the next slot to reuse, 1 once the table is made
+const PC_T: u64 = 8;                  // level-1 tables
+const PC_N: u64 = 4096;               // PC_T * 512 pages the cache can hold
+const PCK_LEN: u64 = 12291;           // 3 words a slot, the clock hand, 1 once the table is made, slots in use
+const PC_HAND: u64 = 12288;           // 3 * PC_N
+const PC_ONW: u64 = 12289;
+const PC_USED: u64 = 12290;
 const PC_NONE: u64 = 18446744073709551615;
+const PC_B: u64 = 8192;               // index buckets
+const PC_LK: u64 = 12288;             // PC_B bucket heads, then PC_N chain links
+const PC_HN: u64 = 16384;             // handles below this have a mark in `has`
 
 enum PcTab { Off, On(PageTable) }
 
-/// Element 0 of `tab` is the table, made on first use. Its slot i holds
-/// the page for key (keys[2i] - 1, keys[2i + 1]); keys[2i] == 0 means the
-/// slot is free. `idx` maps pc_key(h, pg) to the slot, so a lookup costs
-/// one hash probe rather than a scan of every slot; a hit is checked
-/// against `keys`, which stay the truth.
-struct PCache { tab: Vec[PcTab], keys: Buf, idx: HashMap[u64] }
+/// Element 0 of `tab` is the level-2 table, made on first use. Slot i
+/// holds the page for key (keys[3i] - 1, keys[3i + 1]); keys[3i] == 0
+/// means the slot is free, and keys[3i + 2] is 1 if a lookup found it
+/// since the clock hand last passed. keys[PC_USED] counts the slots in
+/// use, so a full cache goes straight to the clock. `link` indexes the
+/// slots by pc_key(h, pg): link[b] is 1 + the first slot of bucket b (0:
+/// none) and link[PC_B + i] is 1 + the slot after slot i in its bucket, so
+/// a lookup walks one short chain rather than every slot. It is fixed in
+/// size: the cache takes nothing from the kernel's heap after boot (a
+/// growing hash map did, and ran the heap out under Python). A hit is
+/// checked against `keys`, which stay the truth. `has[h]` is 1 if
+/// file h may have pages here, so dropping a file that has none (every new
+/// file, src/fs.bastio) skips the scan of every slot.
+struct PCache { tab: Vec[PcTab], keys: Buf, link: Buf, has: Bytes }
 
 spec fn pc_ok(c: &PCache) -> bool {
-  len(c.keys) == PCK_LEN && vlen(c.tab) == 1 && (vget(c.tab, 0) is PcTab::On ==> pt_level(vget(c.tab, 0).On) == 1)
-    && hmap_ok[u64](c.idx)
+  len(c.keys) == PCK_LEN && vlen(c.tab) == 1 && (vget(c.tab, 0) is PcTab::On ==> pt_level(vget(c.tab, 0).On) == 2)
+    && len(c.link) == PC_LK && blen(c.has) == PC_HN
 }
 
 /// (h, pg) packed into one map key: h below 2^20 (handles are far fewer)
@@ -58,19 +87,66 @@ fn pc_key(h: u64, pg: u64) -> u64 {
   return h * 17592186044416 + pg;
 }
 
-/// Frees slot i's key, and takes it out of the index.
-fn pc_unkey(keys: &mut Buf, idx: &mut HashMap[u64], i: u64)
-  requires len(keys) == PCK_LEN && hmap_ok[u64](idx) && i < PC_N
-  ensures len(keys) == PCK_LEN && hmap_ok[u64](idx)
-  ensures get(keys, 2 * PC_N) == get(old(keys), 2 * PC_N) && get(keys, 2 * PC_N + 1) == get(old(keys), 2 * PC_N + 1)
+/// The index bucket of key k.
+fn pc_bucket(k: u64) -> u64
+  ensures result < PC_B
 {
-  let h1 = get(keys, 2 * i);
-  if h1 != 0 {
-    let k = pc_key(h1 - 1, get(keys, 2 * i + 1));
-    if k != PC_NONE {
-      hmap_remove[u64](&mut idx, k);
+  return (k ^ (k / 8192) ^ (k / 17592186044416)) % PC_B;
+}
+
+/// Puts slot i, holding key k, at the front of k's bucket.
+fn pc_link(link: &mut Buf, k: u64, i: u64)
+  requires len(link) == PC_LK && i < PC_N
+  ensures len(link) == PC_LK
+{
+  let b = pc_bucket(k);
+  link = set(link, PC_B + i, get(link, b));
+  link = set(link, b, i + 1);
+}
+
+/// Takes slot i, holding key k, out of k's bucket.
+fn pc_unlink(link: &mut Buf, k: u64, i: u64)
+  requires len(link) == PC_LK && i < PC_N
+  ensures len(link) == PC_LK
+{
+  let b = pc_bucket(k);
+  if get(link, b) == i + 1 {
+    link = set(link, b, get(link, PC_B + i));
+  } else {
+    let mut j = get(link, b);
+    let mut steps = 0;
+    while j != 0 && j <= PC_N && steps < PC_N
+      invariant len(link) == PC_LK
+    {
+      if get(link, PC_B + j - 1) == i + 1 {
+        link = set(link, PC_B + j - 1, get(link, PC_B + i));
+        j = 0;
+      } else {
+        j = get(link, PC_B + j - 1);
+      }
+      steps = steps + 1;
     }
-    keys = set(keys, 2 * i, 0);
+  }
+  link = set(link, PC_B + i, 0);
+}
+
+/// Frees slot i's key, and takes it out of the index.
+fn pc_unkey(keys: &mut Buf, link: &mut Buf, i: u64)
+  requires len(keys) == PCK_LEN && len(link) == PC_LK && i < PC_N
+  ensures len(keys) == PCK_LEN && len(link) == PC_LK
+  ensures get(keys, PC_HAND) == get(old(keys), PC_HAND) && get(keys, PC_ONW) == get(old(keys), PC_ONW)
+{
+  let h1 = get(keys, 3 * i);
+  if h1 != 0 {
+    let k = pc_key(h1 - 1, get(keys, 3 * i + 1));
+    if k != PC_NONE {
+      pc_unlink(&mut link, k, i);
+    }
+    keys = set(keys, 3 * i, 0);
+    keys = set(keys, 3 * i + 2, 0);
+    if get(keys, PC_USED) > 0 {
+      keys = set(keys, PC_USED, get(keys, PC_USED) - 1);
+    }
   }
 }
 
@@ -79,21 +155,21 @@ fn pc_new() -> PCache
 {
   let mut v = vec_new[PcTab]();
   vec_push(&mut v, PcTab::Off);
-  return PCache { tab: v, keys: alloc(PCK_LEN), idx: hmap_new[u64]() };
+  return PCache { tab: v, keys: alloc(PCK_LEN), link: alloc(PC_LK), has: balloc(PC_HN) };
 }
 
 /// Takes the table out (pc_put puts it back).
 fn pc_take(c: &mut PCache) -> PcTab
   requires pc_ok(c)
-  ensures len(c.keys) == PCK_LEN && vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && hmap_ok[u64](c.idx)
-  ensures result is PcTab::On ==> pt_level(result.On) == 1
+  ensures len(c.keys) == PCK_LEN && vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && len(c.link) == PC_LK && blen(c.has) == PC_HN
+  ensures result is PcTab::On ==> pt_level(result.On) == 2
 {
   return vec_swap(&mut c.tab, 0, PcTab::Off);
 }
 
 fn pc_put(c: &mut PCache, x: PcTab)
-  requires len(c.keys) == PCK_LEN && vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && hmap_ok[u64](c.idx)
-  requires x is PcTab::On ==> pt_level(x.On) == 1
+  requires len(c.keys) == PCK_LEN && vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && len(c.link) == PC_LK && blen(c.has) == PC_HN
+  requires x is PcTab::On ==> pt_level(x.On) == 2
   ensures pc_ok(c)
 {
   match vec_swap(&mut c.tab, 0, x) {
@@ -102,12 +178,30 @@ fn pc_put(c: &mut PCache, x: PcTab)
   }
 }
 
-/// Is any page cached? Cheap: the reads and writes of a system with no
-/// MAP_SHARED file mapping stop here.
+/// Is any page cached? Cheap: the reads and writes of a system that has
+/// never cached a page stop here.
 fn pc_on(c: &PCache) -> bool
   requires pc_ok(c)
 {
-  return get(c.keys, 2 * PC_N + 1) == 1;
+  return get(c.keys, PC_ONW) == 1;
+}
+
+/// How many pages are cached (`Cached:` in /proc/meminfo).
+fn pc_count(c: &PCache) -> u64
+  requires pc_ok(c)
+{
+  return get(c.keys, PC_USED);
+}
+
+/// How many slots the cache may use: an eighth of the pool.
+fn pc_cap(m: &Mem) -> u64
+  ensures result <= PC_N
+{
+  let n = pool_size(m.pool) / 8;
+  if n > PC_N {
+    return PC_N;
+  }
+  return n;
 }
 
 /// The slot holding page pg of file h, or PC_NONE.
@@ -120,26 +214,43 @@ fn pc_find(c: &PCache, h: u64, pg: u64) -> u64
   }
   let k = pc_key(h, pg);
   if k != PC_NONE {
-    match hmap_get[u64](c.idx, k) {
-      Option::Some(s) => {
-        if s < PC_N && get(c.keys, 2 * s) == h + 1 && get(c.keys, 2 * s + 1) == pg {
-          return s;
-        }
-        return PC_NONE;
-      },
-      Option::None => { return PC_NONE; },
+    let mut j = get(c.link, pc_bucket(k));
+    let mut steps = 0;
+    while j != 0 && j <= PC_N && steps < PC_N
+      invariant pc_ok(c)
+    {
+      if get(c.keys, 3 * (j - 1)) == h + 1 && get(c.keys, 3 * (j - 1) + 1) == pg {
+        return j - 1;
+      }
+      j = get(c.link, PC_B + j - 1);
+      steps = steps + 1;
     }
+    return PC_NONE;
   }
   let mut i = 0;
   while i < PC_N
     invariant i <= PC_N && pc_ok(c)
   {
-    if get(c.keys, 2 * i) == h + 1 && get(c.keys, 2 * i + 1) == pg {
+    if get(c.keys, 3 * i) == h + 1 && get(c.keys, 3 * i + 1) == pg {
       return i;
     }
     i = i + 1;
   }
   return PC_NONE;
+}
+
+/// pc_find for a page about to be mapped: marks it used, so the clock
+/// keeps it.
+fn pc_get(c: &mut PCache, h: u64, pg: u64) -> u64
+  requires pc_ok(c)
+  ensures pc_ok(c)
+  ensures result < PC_N || result == PC_NONE
+{
+  let s = pc_find(c, h, pg);
+  if s < PC_N {
+    c.keys = set(c.keys, 3 * s + 2, 1);
+  }
+  return s;
 }
 
 /// Drops whatever slot i of t holds.
@@ -160,70 +271,144 @@ fn fill_frame(f: &mut Frame, src: &Bytes, n: u64)
   bytes_to_frame(&mut f, 0, src, 0, n);
 }
 
+/// Puts a new page in slot i of t, its first n bytes from src: true if
+/// memory held out.
+fn add_l1(t: &mut PageTable, m: &mut Mem, i: u64, src: &Bytes, n: u64, text: bool) -> bool
+  requires pt_level(t) == 1 && mem_ok(m) && i < 512 && pt_leases(t) == 0 && n <= 4096 && n <= blen(src)
+  ensures pt_level(t) == 1 && mem_ok(m) && pt_leases(t) == 0
+{
+  pc_clear(&mut t, &mut m, i);
+  let b = find_free(&mut m);
+  if b >= NPAGES || pt_has(t, i) {
+    return false;
+  }
+  if text {
+    pt_put_shared(&mut t, i, shared_new(take_text_page(&mut m, b)), true);
+  } else {
+    pt_put_shared(&mut t, i, shared_new(take_page(&mut m, b)), true);
+  }
+  pt_borrow_frame(&mut t, i, fill_frame, src, n);
+  return true;
+}
+
+/// The slot the next page goes in, among the first `cap`: a free one,
+/// else the first the clock hand finds unused (clearing the marks it
+/// passes).
+fn pc_victim(c: &mut PCache, cap: u64) -> u64
+  requires pc_ok(c) && 0 < cap && cap <= PC_N
+  ensures pc_ok(c) && result < cap
+{
+  let mut i = 0;
+  if get(c.keys, PC_USED) < cap {
+    while i < cap && get(c.keys, 3 * i) != 0
+      invariant i <= cap && pc_ok(c)
+    {
+      i = i + 1;
+    }
+    if i < cap {
+      return i;
+    }
+  }
+  i = get(c.keys, PC_HAND) % cap;
+  let mut n = 0;
+  while n < cap && get(c.keys, 3 * i + 2) != 0
+    invariant n <= cap && i < cap && pc_ok(c)
+  {
+    c.keys = set(c.keys, 3 * i + 2, 0);
+    i = (i + 1) % cap;
+    n = n + 1;
+  }
+  c.keys = set(c.keys, PC_HAND, (i + 1) % cap);
+  return i;
+}
+
+/// Makes the cache's tables: the level-2 one and every level-1 one the
+/// cap needs. The kernel calls it once at boot, so the cache's own pages
+/// are taken before the first `mem` and never change after (a run that
+/// fills the cache reads the same free pages before and after). pc_add
+/// calls it too, for a table memory was short of then.
+fn pc_tables(c: &mut PCache, m: &mut Mem)
+  requires pc_ok(c) && mem_ok(m)
+  ensures pc_ok(c) && mem_ok(m)
+{
+  let cap = pc_cap(m);
+  if cap == 0 {
+    return;
+  }
+  match pc_take(&mut c) {
+    PcTab::Off => {
+      let a = find_free(&mut m);
+      if a < NPAGES {
+        pc_put(&mut c, PcTab::On(pt_new(take_page(&mut m, a), 2)));
+        c.keys = set(c.keys, PC_ONW, 1);
+      }
+    },
+    PcTab::On(t) => { pc_put(&mut c, PcTab::On(t)); },
+  }
+  match pc_take(&mut c) {
+    PcTab::Off => {},
+    PcTab::On(mut t) => {
+      let mut j = 0;
+      while j <= (cap - 1) / 512
+        invariant pt_level(t) == 2 && mem_ok(m) && j <= PC_T && len(c.keys) == PCK_LEN
+        invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && len(c.link) == PC_LK && blen(c.has) == PC_HN
+      {
+        if !pt_has(t, j) {
+          let a = find_free(&mut m);
+          if a < NPAGES {
+            pt_put(&mut t, j, pt_new(take_page(&mut m, a), 1));
+          }
+        }
+        j = j + 1;
+      }
+      pc_put(&mut c, PcTab::On(t));
+    },
+  }
+}
+
 /// Caches page pg of file h, its first n bytes taken from src (the rest
 /// zero), as a page of program text (TXT_PAGE) if `text`. Returns its
-/// slot, or PC_NONE if memory ran out. The caller has checked pc_find
-/// first.
+/// slot, marked used, or PC_NONE if memory ran out. The caller has
+/// checked pc_find first.
 fn pc_add(c: &mut PCache, m: &mut Mem, h: u64, pg: u64, src: &Bytes, n: u64, text: bool) -> u64
   requires pc_ok(c) && mem_ok(m) && n <= 4096 && n <= blen(src)
   ensures pc_ok(c) && mem_ok(m)
   ensures result < PC_N || result == PC_NONE
 {
-  if h >= PC_NONE - 1 {
+  let cap = pc_cap(m);
+  if h >= PC_NONE - 1 || cap == 0 {
     return PC_NONE;
   }
-  // A free slot, else the next one round.
-  let mut i = 0;
-  while i < PC_N && get(c.keys, 2 * i) != 0
-    invariant i <= PC_N && pc_ok(c)
-  {
-    i = i + 1;
-  }
-  if i >= PC_N {
-    i = get(c.keys, 2 * PC_N) % PC_N;
-    c.keys = set(c.keys, 2 * PC_N, (i + 1) % PC_N);
-  }
-  pc_unkey(&mut c.keys, &mut c.idx, i);
-  match pc_take(&mut c) {
-    PcTab::Off => {
-      let a = find_free(&mut m);
-      if a >= NPAGES {
-        return PC_NONE;
-      }
-      pc_put(&mut c, PcTab::On(pt_new(take_page(&mut m, a), 1)));
-      c.keys = set(c.keys, 2 * PC_N + 1, 1);
-    },
-    PcTab::On(t) => { pc_put(&mut c, PcTab::On(t)); },
-  }
-  let mut r = PC_NONE;
+  let i = pc_victim(&mut c, cap);
+  pc_unkey(&mut c.keys, &mut c.link, i);
+  pc_tables(&mut c, &mut m);
+  let mut ok = false;
   match pc_take(&mut c) {
     PcTab::Off => {},
     PcTab::On(mut t) => {
-      if pt_lease_count(&mut t) == 0 {
-        pc_clear(&mut t, &mut m, i);
-      }
-      let b = find_free(&mut m);
-      if b < NPAGES && !pt_has(t, i) && text {
-        pt_put_shared(&mut t, i, shared_new(take_text_page(&mut m, b)), true);
-        pt_borrow_frame(&mut t, i, fill_frame, src, n);
-        r = i;
-      } else if b < NPAGES && !pt_has(t, i) {
-        pt_put_shared(&mut t, i, shared_new(take_page(&mut m, b)), true);
-        pt_borrow_frame(&mut t, i, fill_frame, src, n);
-        r = i;
+      if pt_has(t, i / 512) && pt_lease_count(&mut t) == 0 {
+        ok = pt_borrow(&mut t, i / 512, add_l1, &mut m, i % 512, src, n, text);
       }
       pc_put(&mut c, PcTab::On(t));
     },
   }
-  if r < PC_N {
-    c.keys = set(c.keys, 2 * r, h + 1);
-    c.keys = set(c.keys, 2 * r + 1, pg);
-    let k = pc_key(h, pg);
-    if k != PC_NONE {
-      hmap_insert[u64](&mut c.idx, k, r);
-    }
+  if !ok {
+    return PC_NONE;
   }
-  return r;
+  c.keys = set(c.keys, 3 * i, h + 1);
+  c.keys = set(c.keys, 3 * i + 1, pg);
+  c.keys = set(c.keys, 3 * i + 2, 1);
+  if get(c.keys, PC_USED) < PC_N {
+    c.keys = set(c.keys, PC_USED, get(c.keys, PC_USED) + 1);
+  }
+  if h < PC_HN {
+    bset(&mut c.has, h, 1);
+  }
+  let k = pc_key(h, pg);
+  if k != PC_NONE {
+    pc_link(&mut c.link, k, i);
+  }
+  return i;
 }
 
 fn bytes_in(f: &mut Frame, o: u64, src: &Bytes, s: u64, n: u64)
@@ -237,6 +422,24 @@ fn bytes_out(f: &mut Frame, o: u64, dst: &mut Bytes, d: u64, n: u64)
   ensures blen(dst) == old(blen(dst))
 {
   frame_to_bytes(&mut dst, d, f, o, n);
+}
+
+fn in_l1(t: &mut PageTable, i: u64, o: u64, src: &Bytes, s: u64, n: u64)
+  requires pt_level(t) == 1 && i < 512 && o + n <= 4096 && s + n <= blen(src)
+  ensures pt_level(t) == 1
+{
+  if pt_has(t, i) {
+    pt_borrow_frame(&mut t, i, bytes_in, o, src, s, n);
+  }
+}
+
+fn out_l1(t: &mut PageTable, i: u64, o: u64, dst: &mut Bytes, d: u64, n: u64)
+  requires pt_level(t) == 1 && i < 512 && o + n <= 4096 && d + n <= blen(dst)
+  ensures pt_level(t) == 1 && blen(dst) == old(blen(dst))
+{
+  if pt_has(t, i) {
+    pt_borrow_frame(&mut t, i, bytes_out, o, &mut dst, d, n);
+  }
 }
 
 /// Where the bytes from off on start within the page at ps.
@@ -282,8 +485,8 @@ fn pc_wrote(c: &mut PCache, h: u64, off: u64, buf: &Bytes, n: u64)
       match pc_take(&mut c) {
         PcTab::Off => {},
         PcTab::On(mut t) => {
-          if pt_has(t, s) {
-            pt_borrow_frame(&mut t, s, bytes_in, a - ps, buf, a - off, b - a);
+          if pt_has(t, s / 512) {
+            pt_borrow(&mut t, s / 512, in_l1, s % 512, a - ps, buf, a - off, b - a);
           }
           pc_put(&mut c, PcTab::On(t));
         },
@@ -317,8 +520,8 @@ fn pc_overlay(c: &mut PCache, h: u64, off: u64, buf: &mut Bytes, n: u64)
       match pc_take(&mut c) {
         PcTab::Off => {},
         PcTab::On(mut t) => {
-          if pt_has(t, s) {
-            pt_borrow_frame(&mut t, s, bytes_out, a - ps, &mut buf, a - off, b - a);
+          if pt_has(t, s / 512) {
+            pt_borrow(&mut t, s / 512, out_l1, s % 512, a - ps, &mut buf, a - off, b - a);
           }
           pc_put(&mut c, PcTab::On(t));
         },
@@ -340,14 +543,33 @@ fn zero_from(f: &mut Frame, o: u64)
   }
 }
 
+fn zero_l1(t: &mut PageTable, i: u64, o: u64)
+  requires pt_level(t) == 1 && i < 512 && o <= 4096
+  ensures pt_level(t) == 1
+{
+  if pt_has(t, i) {
+    pt_borrow_frame(&mut t, i, zero_from, o);
+  }
+}
+
+fn clear_l1(t: &mut PageTable, m: &mut Mem, i: u64)
+  requires pt_level(t) == 1 && mem_ok(m) && i < 512 && pt_leases(t) == 0
+  ensures pt_level(t) == 1 && mem_ok(m) && pt_leases(t) == 0
+{
+  pc_clear(&mut t, &mut m, i);
+}
+
 /// File h is now size bytes long: drops its cached pages past the end and
 /// zeroes the bytes past the end on the last.
 fn pc_resize(c: &mut PCache, m: &mut Mem, h: u64, size: u64)
   requires pc_ok(c) && mem_ok(m)
   ensures pc_ok(c) && mem_ok(m)
 {
-  if h >= PC_NONE - 1 {
+  if h >= PC_NONE - 1 || (h < PC_HN && bget(c.has, h) == 0) {
     return;
+  }
+  if h < PC_HN && size == 0 {
+    bset(&mut c.has, h, 0);
   }
   match pc_take(&mut c) {
     PcTab::Off => {},
@@ -355,22 +577,71 @@ fn pc_resize(c: &mut PCache, m: &mut Mem, h: u64, size: u64)
       let quiet = pt_lease_count(&mut t) == 0;
       let mut i = 0;
       while i < PC_N
-        invariant i <= PC_N && pt_level(t) == 1 && mem_ok(m) && len(c.keys) == PCK_LEN
-        invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && hmap_ok[u64](c.idx)
+        invariant i <= PC_N && pt_level(t) == 2 && mem_ok(m) && len(c.keys) == PCK_LEN
+        invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && len(c.link) == PC_LK && blen(c.has) == PC_HN
         invariant quiet ==> pt_leases(t) == 0
       {
-        if get(c.keys, 2 * i) == h + 1 {
-          let pg = get(c.keys, 2 * i + 1);
+        if get(c.keys, 3 * i) == h + 1 {
+          let pg = get(c.keys, 3 * i + 1);
           if pg >= size / 4096 + 1 || (pg == size / 4096 && size % 4096 == 0) {
-            pc_unkey(&mut c.keys, &mut c.idx, i);
-            if quiet {
-              pc_clear(&mut t, &mut m, i);
+            pc_unkey(&mut c.keys, &mut c.link, i);
+            if quiet && pt_has(t, i / 512) {
+              pt_borrow(&mut t, i / 512, clear_l1, &mut m, i % 512);
             }
-          } else if pg == size / 4096 && pt_has(t, i) {
-            pt_borrow_frame(&mut t, i, zero_from, size % 4096);
+          } else if pg == size / 4096 && pt_has(t, i / 512) {
+            pt_borrow(&mut t, i / 512, zero_l1, i % 512, size % 4096);
           }
         }
         i = i + 1;
+      }
+      pc_put(&mut c, PcTab::On(t));
+    },
+  }
+}
+
+/// Drops slot i's page unless it is program text; true if the slot is
+/// empty afterwards.
+fn data_l1(t: &mut PageTable, m: &mut Mem, i: u64) -> bool
+  requires pt_level(t) == 1 && mem_ok(m) && i < 512 && pt_leases(t) == 0
+  ensures pt_level(t) == 1 && mem_ok(m) && pt_leases(t) == 0
+{
+  if pt_has(t, i) && pt_shared(t, i) {
+    let s = pt_take_shared(&mut t, i);
+    if is_text_page(m, s) {
+      pt_put_shared(&mut t, i, s, true);
+      return false;
+    }
+    drop_shared(&mut m, s);
+    return true;
+  }
+  pc_clear(&mut t, &mut m, i);
+  return true;
+}
+
+/// File h was closed for the last time: drops its pages but the program
+/// text ones. Those are what a next run of the program wants, and `mem`
+/// counts them as available; a page a MAP_SHARED mapping wrote is neither.
+fn pc_close(c: &mut PCache, m: &mut Mem, h: u64)
+  requires pc_ok(c) && mem_ok(m)
+  ensures pc_ok(c) && mem_ok(m)
+{
+  if h >= PC_NONE - 1 || (h < PC_HN && bget(c.has, h) == 0) {
+    return;
+  }
+  match pc_take(&mut c) {
+    PcTab::Off => {},
+    PcTab::On(mut t) => {
+      if pt_lease_count(&mut t) == 0 {
+        let mut i = 0;
+        while i < PC_N
+          invariant i <= PC_N && pt_level(t) == 2 && mem_ok(m) && len(c.keys) == PCK_LEN && pt_leases(t) == 0
+          invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && len(c.link) == PC_LK && blen(c.has) == PC_HN
+        {
+          if get(c.keys, 3 * i) == h + 1 && pt_has(t, i / 512) && pt_borrow(&mut t, i / 512, data_l1, &mut m, i % 512) {
+            pc_unkey(&mut c.keys, &mut c.link, i);
+          }
+          i = i + 1;
+        }
       }
       pc_put(&mut c, PcTab::On(t));
     },
@@ -385,6 +656,24 @@ fn pc_forget(c: &mut PCache, m: &mut Mem, h: u64)
   pc_resize(&mut c, &mut m, h, 0);
 }
 
+/// Every file with a handle in lo .. hi went away at once (a mount or an
+/// unmount, src/fs.bastio): drops their pages.
+fn pc_forget_range(c: &mut PCache, m: &mut Mem, lo: u64, hi: u64)
+  requires pc_ok(c) && mem_ok(m)
+  ensures pc_ok(c) && mem_ok(m)
+{
+  let mut i = 0;
+  while i < PC_N
+    invariant i <= PC_N && pc_ok(c) && mem_ok(m)
+  {
+    let h1 = get(c.keys, 3 * i);
+    if h1 != 0 && h1 - 1 >= lo && h1 - 1 < hi {
+      pc_forget(&mut c, &mut m, h1 - 1);
+    }
+    i = i + 1;
+  }
+}
+
 /// Shutdown: every page goes back to m.
 fn pc_free(c: PCache, m: &mut Mem)
   requires pc_ok(c) && mem_ok(m)
@@ -393,7 +682,19 @@ fn pc_free(c: PCache, m: &mut Mem)
   let mut cc = c;
   match pc_take(&mut cc) {
     PcTab::Off => {},
-    PcTab::On(t) => { free_cache_table(&mut m, t); },
+    PcTab::On(mut t) => {
+      let mut j = 0;
+      while j < 512
+        invariant j <= 512 && mem_ok(m) && pt_level(t) == 2
+        invariant forall i: u64 :: i < j ==> !pt_used(t, i)
+      {
+        if pt_has(t, j) {
+          free_cache_table(&mut m, pt_take(&mut t, j));
+        }
+        j = j + 1;
+      }
+      give_page(&mut m, pt_free(t));
+    },
   }
   match vec_pop(&mut cc.tab) {
     PcTab::Off => {},
@@ -401,17 +702,18 @@ fn pc_free(c: PCache, m: &mut Mem)
   }
   vec_free(cc.tab);
   free(cc.keys);
-  hmap_free[u64](cc.idx);
+  bfree(cc.has);
+  free(cc.link);
 }
 
 fn free_cache_table(m: &mut Mem, t: PageTable)
-  requires mem_ok(m) && pt_level(t) == 1
+  requires mem_ok(m) && pt_level(t) == 1 && pt_leases(t) == 0
   ensures mem_ok(m)
 {
   let mut t1 = t;
   let mut i = 0;
   while i < 512
-    invariant i <= 512 && mem_ok(m) && pt_level(t1) == 1
+    invariant i <= 512 && mem_ok(m) && pt_level(t1) == 1 && pt_leases(t1) == 0
     invariant forall j: u64 :: j < i ==> !pt_used(t1, j)
   {
     if pt_has(t1, i) {
@@ -426,6 +728,40 @@ fn free_cache_table(m: &mut Mem, t: PageTable)
   give_page(&mut m, pt_free(t1));
 }
 
+/// Gives process table l1 a reference to the page in slot j of cache
+/// table t at slot i, writable if `w`. True if it did, or, unless `w`
+/// (exec's read-only text), if something is at i already.
+fn dup_l1(t: &mut PageTable, j: u64, l1: &mut PageTable, i: u64, w: bool) -> bool
+  requires pt_level(t) == 1 && j < 512 && pt_level(l1) == 1 && i < 512
+  ensures pt_level(t) == 1 && pt_level(l1) == 1
+{
+  if pt_has(l1, i) {
+    return !w;
+  }
+  if pt_has(t, j) && pt_shared(t, j) {
+    pt_put_shared(&mut l1, i, pt_dup_shared(t, j), w);
+    return true;
+  }
+  return false;
+}
+
+fn pc_map(l1: &mut PageTable, c: &mut PCache, slot: u64, i: u64, w: bool) -> bool
+  requires pt_level(l1) == 1 && i < 512 && pc_ok(c) && slot < PC_N
+  ensures pc_ok(c) && pt_level(l1) == 1
+{
+  let mut ok = false;
+  match pc_take(&mut c) {
+    PcTab::Off => {},
+    PcTab::On(mut t) => {
+      if pt_has(t, slot / 512) {
+        ok = pt_borrow(&mut t, slot / 512, dup_l1, slot % 512, &mut l1, i, w);
+      }
+      pc_put(&mut c, PcTab::On(t));
+    },
+  }
+  return ok;
+}
+
 /// Maps the page in slot `slot` at slot i of a process's level-1 table l1,
 /// writable (mprotect and read_only narrow it after). False if i is in use
 /// or the slot holds nothing.
@@ -433,21 +769,7 @@ fn pc_map_slot(l1: &mut PageTable, c: &mut PCache, slot: u64, i: u64) -> bool
   requires pt_level(l1) == 1 && i < 512 && pc_ok(c) && slot < PC_N
   ensures pc_ok(c)
 {
-  if pt_has(l1, i) {
-    return false;
-  }
-  let mut ok = false;
-  match pc_take(&mut c) {
-    PcTab::Off => {},
-    PcTab::On(t) => {
-      if pt_has(t, slot) && pt_shared(t, slot) {
-        pt_put_shared(&mut l1, i, pt_dup_shared(t, slot), true);
-        ok = true;
-      }
-      pc_put(&mut c, PcTab::On(t));
-    },
-  }
-  return ok;
+  return pc_map(&mut l1, &mut c, slot, i, true);
 }
 
 /// Maps the page in slot `slot` read-only at slot i of a process's level-1
@@ -457,19 +779,5 @@ fn pc_map_text(l1: &mut PageTable, c: &mut PCache, slot: u64, i: u64) -> bool
   requires pt_level(l1) == 1 && i < 512 && pc_ok(c) && slot < PC_N
   ensures pc_ok(c)
 {
-  if pt_has(l1, i) {
-    return true;
-  }
-  let mut ok = false;
-  match pc_take(&mut c) {
-    PcTab::Off => {},
-    PcTab::On(t) => {
-      if pt_has(t, slot) && pt_shared(t, slot) {
-        pt_put_shared(&mut l1, i, pt_dup_shared(t, slot), false);
-        ok = true;
-      }
-      pc_put(&mut c, PcTab::On(t));
-    },
-  }
-  return ok;
+  return pc_map(&mut l1, &mut c, slot, i, false);
 }
