@@ -124,16 +124,43 @@ fn time_out(k: &mut Kernel, pid: u64, va: u64, t: u64, unit: u64) -> u64
   return 0;
 }
 
-/// What clock `clk` reads now, or FOREVER for a clock there is not.
+/// The CPU time process (or thread) p has used, in ns.
+fn cpu_ns(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+{
+  let t = pget(k.procs, p, F_TICKS);
+  if t >= FOREVER / NS_PER_TICK {
+    return FOREVER - 1;
+  }
+  return t * NS_PER_TICK;
+}
+
+/// What clock `clk` reads now, or FOREVER for a clock there is not. A
+/// negative clock is another process's or thread's CPU-time clock
+/// (clock_getcpuclockid, pthread_getcpuclockid): the bitwise not of its
+/// id (0: the caller) times 8, plus 4 for a thread, plus the kind (0
+/// prof, 1 virt, 2 sched; all three count the same ticks here).
 fn clock_now(k: &Kernel, pid: u64, clk: u64) -> u64
   requires kok(k) && pid < NPROC
 {
   if clk == CLOCK_PROCESS_CPUTIME_ID || clk == CLOCK_THREAD_CPUTIME_ID {
-    let t = pget(k.procs, pid, F_TICKS);
-    if t >= FOREVER / NS_PER_TICK {
-      return FOREVER - 1;
+    return cpu_ns(k, pid);
+  }
+  if clk >= 0x8000000000000000 {
+    if clk % 4 == 3 {
+      return FOREVER;
     }
-    return t * NS_PER_TICK;
+    let mut t = (!clk) >> 3;
+    if t == 0 {
+      t = pid;
+    }
+    if t >= NPROC || state(k.procs, t) == FREE {
+      return FOREVER;
+    }
+    if clk % 8 >= 4 && tgid(k.procs, t) != tgid(k.procs, pid) {
+      return FOREVER;                       // a thread of another process
+    }
+    return cpu_ns(k, t);
   }
   if clk == CLOCK_REALTIME || clk == CLOCK_REALTIME_COARSE {
     return smaller(wall_ns(k), FOREVER - 1);
@@ -159,6 +186,10 @@ fn lx_sleep(k: &mut Kernel, pid: u64, n: u64, was: u64, clk: u64, flags: u64, re
   }
   if clk == 3 {
     ret(&mut k.procs, pid, EOPNOTSUPP);     // CLOCK_THREAD_CPUTIME_ID: Linux cannot sleep on it either
+    return KEEP;
+  }
+  if clk >= 0x8000000000000000 && clk % 8 >= 4 {
+    ret(&mut k.procs, pid, EINVAL);         // another thread's CPU time: nor on this
     return KEEP;
   }
   let ts = ts_in(&mut k, pid, req);
@@ -315,7 +346,7 @@ fn lx_poll(k: &mut Kernel, pid: u64, n: u64, was: u64, fds: u64, nfds: u64, wait
       rv = poll_bits(k, pid, fd) & (ev | POLLERR | POLLHUP | POLLNVAL);
     }
     bset(&mut k.fs.xfer, at + 6, cast[u8](rv % 256));
-    bset(&mut k.fs.xfer, at + 7, 0);
+    bset(&mut k.fs.xfer, at + 7, cast[u8](rv / 256 % 256));   // POLLRDHUP is 0x2000
     if rv != 0 {
       ready = ready + 1;
     }

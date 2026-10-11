@@ -214,10 +214,14 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
     return k.perr;
   }
   let mut args = balloc(ARGS_MAX);
-  let alen = lx_args(&mut k, pid, argv, &mut args, 0, ARGV_MAX);
+  let mut alen = lx_args(&mut k, pid, argv, &mut args, 0, ARGV_MAX);
   if alen > ARGS_MAX {
     bfree(args);
     return alen;                              // -errno
+  }
+  if alen == 0 {
+    bset(&mut args, 0, 0);                  // no arguments: argv[0] is "", as on Linux
+    alen = 1;
   }
   let total = lx_args(&mut k, pid, envp, &mut args, alen, ENVC_MAX);
   if total > ARGS_MAX || total < alen {

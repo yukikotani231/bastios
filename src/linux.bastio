@@ -81,6 +81,9 @@ const PATH_MAX_LX: u64 = 4096;          // the longest path read from user memor
 const PATH_OUT: u64 = 512;              // room for a name being built
 
 const ARCH_SET_FS: u64 = 0x1002;
+const ARCH_GET_FS: u64 = 0x1003;
+const ARCH_GET_CPUID: u64 = 0x1011;
+const ARCH_SET_CPUID: u64 = 0x1012;
 const IOV_MAX: u64 = 1024;
 const EISDIR: u64 = 18446744073709551595;     // 2^64 - 21
 const ESRCH: u64 = 18446744073709551613;      // 2^64 - 3
@@ -616,6 +619,13 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if a == ARCH_SET_FS {
       pset(&mut k.procs, pid, F_REGS + R_FSBASE, b);
       ret(&mut k.procs, pid, 0);
+    } else if a == ARCH_GET_FS {
+      xfer_u64(&mut k.fs.xfer, 0, pget(k.procs, pid, F_REGS + R_FSBASE));
+      ret(&mut k.procs, pid, lx_put_out(&mut k, pid, b, 8));
+    } else if a == ARCH_GET_CPUID {
+      ret(&mut k.procs, pid, 1);              // cpuid runs
+    } else if a == ARCH_SET_CPUID {
+      ret(&mut k.procs, pid, 18446744073709551597);   // -ENODEV: no CPUID faulting to turn it off with
     } else {
       ret(&mut k.procs, pid, EINVAL);
     }

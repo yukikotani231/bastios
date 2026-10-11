@@ -3,7 +3,9 @@
  * and socket errors (listen on UDP, send before connect, a bad address
  * length, MSG_OOB on UDP), clone with a stack, unshare, sched_getattr,
  * a socket's O_NONBLOCK, and errno corners of dup3, getrusage, getrandom,
- * timer_settime, the socket calls, mremap and munlock, and nested epoll. */
+ * timer_settime, the socket calls, mremap and munlock, and nested epoll;
+ * shutdown(SHUT_RD), CPU-time clocks of a thread, arch_prctl, memfd_create
+ * names, madvise and timerfd flags. */
 #include <mqueue.h>
 #include <sys/prctl.h>
 #include "compat.h"
@@ -28,6 +30,9 @@
 #include <sys/random.h>
 #include <sys/epoll.h>
 #include <time.h>
+#include <poll.h>
+#include <pthread.h>
+#include <sys/timerfd.h>
 
 static volatile int ticks;
 static void vt(int s) { (void)s; ticks++; }
@@ -447,5 +452,45 @@ int main(void) {
                _exit(r == 0 && me == (SCHED_FIFO | 0x40000000) && gp == SCHED_OTHER && gq.sched_priority == 0 ? 0 : 1);
            }
            int st; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("shutdown(SHUT_RD) on a unix socket: reads end, the peer's sends are EPIPE, poll reports POLLRDHUP", ({
+           int sv[2]; socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+           write(sv[1], "ab", 2);
+           int s = shutdown(sv[0], SHUT_RD);
+           char b[4]; int n1 = read(sv[0], b, 4); int n2 = read(sv[0], b, 4);
+           int w = send(sv[1], "c", 1, MSG_NOSIGNAL); int we = errno;
+           struct pollfd pf = { sv[0], POLLIN | POLLRDHUP, 0 }; int pr = poll(&pf, 1, 0);
+           close(sv[0]); close(sv[1]);
+           s == 0 && n1 == 2 && n2 == 0 && w == -1 && we == EPIPE && pr == 1 && (pf.revents & POLLRDHUP); }));
+    EXPECT("the CPU-time clocks of this thread and this process can be read by id", ({
+           clockid_t tc, pc; struct timespec t1, t2;
+           int a = pthread_getcpuclockid(pthread_self(), &tc); int b = clock_getcpuclockid(0, &pc);
+           a == 0 && b == 0 && clock_gettime(tc, &t1) == 0 && clock_gettime(pc, &t2) == 0
+             && clock_gettime((clockid_t)((~0u << 3) | 3), &t1) == -1 && errno == EINVAL; }));
+    EXPECT("arch_prctl: ARCH_GET_FS gives what ARCH_SET_FS set, ARCH_GET_CPUID is 1", ({
+           unsigned long fs = 0; int r = syscall(SYS_arch_prctl, 0x1003, &fs);
+           r == 0 && fs != 0 && syscall(SYS_arch_prctl, 0x1011, 0) == 1; }));
+    EXPECT("memfd_create: a NULL name is EFAULT, a name over 249 bytes EINVAL", ({
+           char nm[300]; memset(nm, 'a', sizeof nm); nm[299] = 0;
+           int a = syscall(SYS_memfd_create, 0, 0); int ae = errno;
+           int b = syscall(SYS_memfd_create, nm, 0); int be = errno;
+           nm[249] = 0; int c = syscall(SYS_memfd_create, nm, 0);
+           if (c >= 0) close(c);
+           a == -1 && ae == EFAULT && b == -1 && be == EINVAL && c >= 0; }));
+    EXPECT("madvise(MADV_DONTNEED) leaves private anonymous pages reading zeros; bad advice is EINVAL", ({
+           char *p = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           memset(p, 1, 8192);
+           int r = madvise(p, 8192, MADV_DONTNEED);
+           int z = 1; for (int i = 0; i < 8192; i++) if (p[i]) z = 0;
+           int bad = madvise(p, 4096, 1212); int be = errno;
+           int mis = madvise(p + 1, 4096, MADV_NORMAL); int me = errno;
+           munmap(p, 8192);
+           r == 0 && z && bad == -1 && be == EINVAL && mis == -1 && me == EINVAL; }));
+    EXPECT("timerfd_settime takes TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET, and other flags are EINVAL", ({
+           int fd = timerfd_create(CLOCK_REALTIME, 0);
+           struct itimerspec its = { {0, 0}, {0, 0} };
+           int a = timerfd_settime(fd, TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET, &its, 0);
+           int b = timerfd_settime(fd, 4, &its, 0); int be = errno;
+           close(fd);
+           a == 0 && b == -1 && be == EINVAL; }));
     return done();
 }

@@ -204,6 +204,7 @@ fn set_wall(k: &mut Kernel, t: u64) -> u64
     return EINVAL;
   }
   k.epoch = t - k.ns;
+  tfd_clock_set(&mut k);
   return 0;
 }
 

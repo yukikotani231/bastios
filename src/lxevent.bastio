@@ -2,8 +2,11 @@
 //
 // An eventfd is an open file description of kind OF_EVENT whose word 2 is
 // the counter (src/lxfd.bastio). A timerfd's description names one of
-// TFD_N timers in k.evt, at t * TFD_STRIDE: in use, the clock it was made
-// for, the deadline on the HPET clock (k.ns; 0: disarmed) and the interval
+// TFD_N timers in k.evt, at t * TFD_STRIDE: in use (1, plus
+// TFD_MAYCANCEL for an absolute CLOCK_REALTIME timer set with
+// TFD_TIMER_CANCEL_ON_SET, plus TFD_CANCELED once the wall clock has been
+// set since: its next read is -ECANCELED), the clock it was made for,
+// the deadline on the HPET clock (k.ns; 0: disarmed) and the interval
 // (0: it fires once). Expirations are counted when they are looked at, so
 // no timer tick has to visit them.
 //
@@ -64,6 +67,8 @@ const ENXIO: u64 = 18446744073709551610;     // 2^64 - 6
 const EFD_SEMAPHORE: u64 = 1;
 const EV_MAX: u64 = 18446744073709551614;    // 2^64 - 2: the most an eventfd holds
 const TFD_TIMER_ABSTIME: u64 = 1;
+const TFD_TIMER_CANCEL_ON_SET: u64 = 2;
+const ECANCELED: u64 = 18446744073709551491;    // 2^64 - 125
 const CLOCK_MONOTONIC: u64 = 1;
 const EPOLL_CTL_ADD: u64 = 1;
 const EPOLL_CTL_DEL: u64 = 2;
@@ -317,6 +322,11 @@ fn ev_read(k: &mut Kernel, pid: u64, kind: u64, x: u64, va: u64, n: u64) -> u64
   if x >= TFD_N {
     return EBADF;
   }
+  let w0 = get(k.evt, x * TFD_STRIDE);
+  if w0 / TFD_CANCELED % 2 == 1 {
+    k.evt = set(k.evt, x * TFD_STRIDE, w0 % TFD_CANCELED);
+    return ECANCELED;
+  }
   let due = tfd_due(k, x);
   if due == 0 {
     return EAGAIN;
@@ -407,8 +417,8 @@ fn lx_timerfd_settime(k: &mut Kernel, pid: u64, fd: u64, flags: u64, nv: u64, ov
   if t >= TFD_N {
     return t;
   }
-  if flags & !TFD_TIMER_ABSTIME > 1 {
-    return EINVAL;                          // TFD_TIMER_CANCEL_ON_SET (2) is accepted and ignored
+  if flags & !(TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET) != 0 {
+    return EINVAL;
   }
   if nv > VA_LAST {
     return EFAULT;
@@ -440,7 +450,30 @@ fn lx_timerfd_settime(k: &mut Kernel, pid: u64, fd: u64, flags: u64, nv: u64, ov
   }
   k.evt = set(k.evt, t * TFD_STRIDE + 2, dl);
   k.evt = set(k.evt, t * TFD_STRIDE + 3, iv.ns);
+  let mut w0 = 1;
+  if flags == (TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET) && get(k.evt, t * TFD_STRIDE + 1) == CLOCK_REALTIME {
+    w0 = 1 + TFD_MAYCANCEL;
+  }
+  k.evt = set(k.evt, t * TFD_STRIDE, w0);
   return 0;
+}
+
+/// The wall clock was set: every timer that asked to be told so
+/// (TFD_TIMER_CANCEL_ON_SET) is cancelled.
+fn tfd_clock_set(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut t = 0;
+  while t < TFD_N
+    invariant t <= TFD_N && kok(k)
+  {
+    let w0 = get(k.evt, t * TFD_STRIDE);
+    if w0 % TFD_CANCELED == 1 + TFD_MAYCANCEL {
+      k.evt = set(k.evt, t * TFD_STRIDE, 1 + TFD_MAYCANCEL + TFD_CANCELED);
+    }
+    t = t + 1;
+  }
 }
 
 // ---------------------------------------------------------------- epoll
@@ -792,7 +825,7 @@ fn ev_bits(k: &Kernel, kind: u64, x: u64) -> u64
     }
     return b;
   }
-  if kind == K_TIMER && x < TFD_N && tfd_due(k, x) > 0 {
+  if kind == K_TIMER && x < TFD_N && (tfd_due(k, x) > 0 || get(k.evt, x * TFD_STRIDE) / TFD_CANCELED % 2 == 1) {
     return POLLIN;
   }
   return 0;
