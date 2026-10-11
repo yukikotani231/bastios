@@ -126,6 +126,33 @@ if read_until(b"bastios> ", mark) and b"no network" in out[mark:]:
     print("ok   no network card: no sockets either")
 else:
     print("FAIL no network card: udpsend"); fails += 1
+# Nor a sound card: /dev/dsp does not open (ENODEV).
+mark = len(out)
+qemu.stdin.write(b"mtone\r"); qemu.stdin.flush()
+if read_until(b"bastios> ", mark) and b"mtone: no sound card (ENODEV)" in out[mark:]:
+    print("ok   no sound card: /dev/dsp says ENODEV")
+else:
+    print("FAIL no sound card: mtone"); fails += 1
+# A sleeping process does not run (wait_asleep): two seconds of BusyBox's
+# sleep cost QEMU well under a second of host CPU. Before, nanosleep ran
+# again on every pass and took the whole two seconds.
+def qemu_cpu():
+    try:
+        f = open(f"/proc/{qemu.pid}/stat").read().rsplit(")", 1)[1].split()
+        return (int(f[11]) + int(f[12])) / os.sysconf("SC_CLK_TCK")
+    except (OSError, IndexError, ValueError):
+        return None
+mark = len(out)
+qemu.stdin.write(b"ash\r"); qemu.stdin.flush()
+read_until(b"# ", mark)
+mark = len(out)
+c0, t0 = qemu_cpu(), time.time()
+qemu.stdin.write(b"sleep 2; echo slept$((1+1))\r"); qemu.stdin.flush()
+ok = read_until(b"slept2", mark)
+c1, t1 = qemu_cpu(), time.time()
+good = ok and c0 is not None and c1 is not None and t1 - t0 >= 1.9 and c1 - c0 < 1.0
+print(("ok  " if good else "FAIL"), f"sleep 2 sleeps: {t1 - t0:.2f} s, QEMU CPU {(c1 or 0) - (c0 or 0):.2f} s")
+fails += not good
 qemu.kill(); qemu.wait()
 print("---- one-processor transcript ----")
 print(out.decode(errors="replace").replace("\r", ""))
@@ -134,6 +161,11 @@ print(out.decode(errors="replace").replace("\r", ""))
 # the shell and its programs run on whichever one picks them.
 qemu = boot(smp, with_disk=True, net=True)
 out = b""
+# Each part of the test gets TIMEOUT seconds of its own: this boot and the
+# steps below, then the checks after them. Sharing one budget with the
+# one-processor boot left the checks at the end (bench, the parallel spins,
+# halt) only what the steps had not used, and a few more steps used it up.
+deadline = time.time() + timeout
 
 # (input line, expected text in the reply). The shell is a user process;
 # the later steps exercise process creation, waiting, preemption, killing
@@ -294,7 +326,7 @@ steps = [
     # Users (docs/security.md): adduser, su to the new user and back,
     # /etc/shadow is root's, su and passwd are the only set-user-ID
     # programs, and su asks for root's password once root has one.
-    ("adduser -D alice; id alice; stat -c '%a %U' /bin/su /bin/ls /etc/shadow /root",
+    ("adduser -D alice; id alice; stat -c '%a %U' /bin/su /bin/ls /etc/shadow /root/",
      [b"uid=1000(alice) gid=1000(alice)", b"\r\n4755 root\r\n755 root\r\n600 root\r\n700 root\r\n"], b"\n# "),
     ("su alice -c 'id -u; whoami; cd; pwd; cat /etc/shadow; echo s=$?; ls /root; echo r=$?'",
      [b"\r\n1000\r\nalice\r\n/home/alice\r\n", b"Permission denied", b"s=1", b"r=1"], b"\n# "),
@@ -303,6 +335,9 @@ steps = [
     # (BusyBox keeps the old /etc files as NAME-: gone, so no pages stay.)
     ("deluser alice; id alice; passwd -d root; echo u=$?; rm -rf /home/alice /etc/passwd- /etc/group- /etc/shadow-",
      [b"unknown user alice", b"u=0"], b"\n# "),
+    # With a disk, /etc, /root and /home are links into it (src/main.bastio,
+    # install_files): a user made now is still there at the next boot.
+    ("adduser -D kept; echo hi > /root/kept; ls -l /etc /root /home", [b"/etc -> /disk/etc", b"/root -> /disk/root", b"/home -> /disk/home"], b"\n# "),
     # Small calls: uname, readv, pread/pwrite, limits, sysinfo, statfs,
     # getrandom, priorities, sessions, process groups, ttyname, pipe capacity (user/mmisc.c).
     ("mmisc", b"mmisc: ok on Linux x86_64, signals, pipe 65536", b"\n# "),
@@ -488,6 +523,7 @@ else:
         ok = read_until(until, mark) and all(w in out[mark:] for w in wants)
         print(("ok  " if ok else "FAIL"), repr(line)); ok or print(repr(out[mark:]))
         fails += not ok
+    deadline = time.time() + timeout
     if out.count(b"fpucheck: xmm0 kept") == 2 and b"xmm0 changed" not in out:
         print("ok   both fpucheck processes kept xmm0")
     else:
@@ -870,10 +906,13 @@ def session(name, want_banner, steps, halt=False, ready=None):
             ok = (b"disk: virtio" in out) == want_banner
             print(("ok  " if ok else "FAIL"), f"({name} boot) disk driver: {'virtio' if want_banner else 'ATA'}")
             fails += not ok
-        for line, want in steps:
+        for step in steps:
+            line, want = step[0], step[1]
+            until = step[2] if len(step) > 2 else b"bastios> "
+            wants = want if isinstance(want, list) else [want]
             mark = len(out)
             qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
-            ok = read_until(b"bastios> ", mark) and want in out[mark:]
+            ok = read_until(until, mark) and all(w in out[mark:] for w in wants)
             print(("ok  " if ok else "FAIL"), f"({name} boot)", repr(line))
             fails += not ok
         if halt:
@@ -914,6 +953,10 @@ session("virtio", True, [
     ("cat disk/hk1", b"no such file"),
     ("ls disk", b"pf"),
     ("rm disk/pf", b""),
+    # The user made at the first boot, kept on the disk.
+    ("ash", b"built-in shell (ash)", b"\n# "),
+    ("id kept; cat /root/kept; stat -c %a /etc/shadow; deluser kept; rm -rf /home/kept /root/kept /etc/*-", [b"uid=1000(kept)", b"\r\nhi\r\n600\r\n"], b"\n# "),
+    ("exit", b""),
 ], halt=True, ready=lambda: irq_found("virtio"))
 
 # The same disk as an NVMe drive: what virtio wrote is there, and what is
@@ -1136,9 +1179,21 @@ for _ in range(100):
 try:
     mon = socket.socket(socket.AF_UNIX)
     mon.connect(mon_path)
-    time.sleep(8)                     # the boot, which nothing shows
-    sendkeys(mon, ["h", "a", "l", "t", "ret"])
-    code = q.wait(timeout=30)
+    # Nothing shows when the shell is up, so type `halt` again every 1.5 s
+    # until QEMU exits. The leading Enter ends any line that a copy typed
+    # during the boot left half done.
+    end = time.time() + 30
+    while code is None:
+        try:
+            sendkeys(mon, ["ret", "h", "a", "l", "t", "ret"])
+        except OSError:               # QEMU exited while we typed
+            code = q.wait(timeout=5)
+            break
+        try:
+            code = q.wait(timeout=1.5)
+        except subprocess.TimeoutExpired:
+            if time.time() > end:
+                raise
     mon.close()
 except (OSError, subprocess.TimeoutExpired):
     q.kill(); q.wait()
@@ -1146,14 +1201,42 @@ good = code == 0
 print(("ok  " if good else "FAIL"), f"(no COM1) `halt` typed on the keyboard powers off (status {code})")
 fails += not good
 
-# A USB keyboard on an xHCI controller (src/xhci.bastio), on a machine with
-# no PS/2 controller at all (i8042=off), so the keys can only come over
-# USB. They are sent through QMP; at power off the controller is reset and
-# its fourteen pages are back.
+# A USB keyboard and a USB mouse on an xHCI controller (src/xhci.bastio),
+# on a machine with no PS/2 controller at all (i8042=off), so the keys and
+# the moves can only come over USB. They are sent through QMP; at power
+# off the controller is reset and its fifteen pages are back.
 import json
 qmp_path = os.path.join(disk_dir.name, "qmp.sock")
+def usbmouse(name, qmp_cmd):
+    # mmouse reads two packets: a move 10 right and 5 up, then the left
+    # button. A USB mouse says y down positive; the PS/2 packet, up. Then
+    # it switches to ImPS/2 and reads the wheel turned up one step, which
+    # a USB mouse says as +1 and ImPS/2 as -1.
+    global fails
+    mark = len(out)
+    qemu.stdin.write(b"mmouse\r"); qemu.stdin.flush()
+    if read_until(b"mmouse: ready", mark):
+        qmp_cmd({"execute": "input-send-event", "arguments": {"events": [
+            {"type": "rel", "data": {"axis": "x", "value": 10}}, {"type": "rel", "data": {"axis": "y", "value": -5}}]}})
+        time.sleep(0.3)
+        for down in (True, False):
+            qmp_cmd({"execute": "input-send-event", "arguments": {"events": [
+                {"type": "btn", "data": {"down": down, "button": "left"}}]}})
+            time.sleep(0.3)
+        if read_until(b"mmouse: wheel ready", mark):
+            for down in (True, False):
+                qmp_cmd({"execute": "input-send-event", "arguments": {"events": [
+                    {"type": "btn", "data": {"down": down, "button": "wheel-up"}}]}})
+                time.sleep(0.3)
+    read_until(b"bastios> ", mark)
+    good = b"mmouse: buttons 0 dx 10 dy 5\r\nmmouse: buttons 1 dx 0 dy 0\r\n" in out[mark:]
+    print(("ok  " if good else "FAIL"), f"({name} boot) the USB mouse's move and button come through /dev/psaux")
+    fails += not good
+    good = b"mmouse: wheel ready\r\nmmouse: wheel -1\r\n" in out[mark:]
+    print(("ok  " if good else "FAIL"), f"({name} boot) ImPS/2 mode, and the USB mouse's wheel turned up reads -1")
+    fails += not good
 qemu = boot(1, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci", "-device", "usb-kbd",
-                      "-qmp", f"unix:{qmp_path},server,nowait"])
+                      "-device", "usb-mouse", "-qmp", f"unix:{qmp_path},server,nowait"])
 out = b""
 deadline = time.time() + timeout
 ok = read_until(b"bastios> ")
@@ -1182,6 +1265,7 @@ if ok:
     good = read_until(b"Usb_ok\r\n", mark) and read_until(b"bastios> ", mark + 1)
     print(("ok  " if good else "FAIL"), "(USB boot) a line typed on the USB keyboard runs")
     fails += not good
+    usbmouse("USB", qmp_cmd)
     qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
     read_until(b"pages free at power off")
     booted = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
@@ -1201,7 +1285,9 @@ print(out.decode(errors="replace").replace("\r", "")[-400:])
 # The controller's event ring raises V_DISK by MSI-X, so a process waiting
 # for the stick sleeps. A second boot finds the file, with the stick and
 # the keyboard behind two tiers of USB hubs (as a stick in a real PC's
-# front panel often is); test/fsck.py then checks the partition.
+# front panel often is), and a USB mouse too, which takes the fifth and
+# last device slot and is read through the disk's driver as well;
+# test/fsck.py then checks the partition.
 stick = os.path.join(disk_dir.name, "stick.img")
 subprocess.run(["tools/mkusb.py", stick, "--blank", "--mib", "33"], check=True, stdout=subprocess.DEVNULL)
 before = open(disk, "rb").read()
@@ -1210,7 +1296,8 @@ def stick_boot(name, steps, keys=False, image=None, hubs=False):
     usb = ["-device", "usb-storage,bus=xh.0,drive=st", "-device", "usb-kbd,bus=xh.0"]
     if hubs:
         usb = ["-device", "usb-hub,bus=xh.0,port=1", "-device", "usb-hub,bus=xh.0,port=1.2",
-               "-device", "usb-storage,bus=xh.0,port=1.2.3,drive=st", "-device", "usb-kbd,bus=xh.0,port=1.4"]
+               "-device", "usb-storage,bus=xh.0,port=1.2.3,drive=st", "-device", "usb-mouse,bus=xh.0,port=1.2.4",
+               "-device", "usb-kbd,bus=xh.0,port=1.4"]
     qemu = boot(1, virtio=True, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci,id=xh",
                                        "-drive", f"file={image or stick},format=raw,if=none,id=st"] + usb +
                                       ["-qmp", f"unix:{qmp_path},server,nowait"])
@@ -1244,6 +1331,8 @@ def stick_boot(name, steps, keys=False, image=None, hubs=False):
         good = read_until(b"Stick\r\n", mark) and read_until(b"bastios> ", mark + 1)
         print(("ok  " if good else "FAIL"), f"({name} boot) a line typed on the USB keyboard runs, read through the disk")
         fails += not good
+        if hubs:
+            usbmouse(name, qmp_cmd)
         qmp.close()
     for line, w in steps:
         if not ok:
@@ -1409,7 +1498,7 @@ fails += not ok
 # when first run (src/lazy.bastio); given its own path, it removes the file
 # first and still runs code it had not touched (one page after mprotect),
 # which a later exec of the same name then cannot find.
-subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf"], check=True)
+subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf", "mh=build/user/mhello.elf"], check=True)
 qemu = boot(2, with_disk=True)
 out = b""
 deadline = time.time() + timeout
@@ -1423,6 +1512,15 @@ for line, want, until in [
     # ash gives a background job /dev/null as stdin, and mmisc checks the tty.)
     ("mkdir /tmp/a /tmp/b; (cd /tmp/a; /disk/mx </dev/tty) & (cd /tmp/b; /disk/mx); wait; echo both", b"pipe 65536\r\nmmisc: ok on Linux x86_64, signals, pipe 65536\r\nboth", b"\n# "),
     ("/disk/mx /disk/mx && echo gone; /disk/mx", [b"mmisc: ok on Linux", b"\r\ngone\r\n", b"not found"], b"\n# "),
+    # A new program in the entry mx left: it runs its own code, and its
+    # second run maps the pages the first left in the page cache after
+    # its last close.
+    ("cp /disk/mh /disk/my; /disk/my; /disk/my; echo rc=$?", b"hello from musl: /disk/my, argc 1, 8\r\nhello from musl: /disk/my, argc 1, 8\r\nrc=3", b"\n# "),
+    # A new file takes the removed program's entry, and with it the handle
+    # its cached code pages are filed under (src/fs.bastio, pc_forget at
+    # create): made by extending it, so nothing writes over those pages,
+    # it must read as zeros: no newline byte, which the code has.
+    ("s=$(stat -c %s /disk/my); rm /disk/my; truncate -s $s /disk/mz; echo nl=$(wc -l < /disk/mz); rm /disk/mz", b"nl=0\r\n", b"\n# "),
 ]:
     mark = len(out)
     if mark == 0 and not read_until(b"bastios> "):
@@ -1629,6 +1727,7 @@ for want, what in (
         ("acpi: tables FACP@0x7f", "the tables are listed where they are"),
         ("timer: the local APIC timer, counted against the HPET", "the timer's calibration"),
         ("tick: the PIT\n", "the PIT ticks"),
+        ("idle: hlt; the other processors' timers stop while they idle", "an idle processor stops its timer"),
         ("keyboard: PS/2 (no USB keyboard)", "the PS/2 keyboard"),
         ("MiB usable in a map of", "the memory map"),
         ("pci 00:1f.2 8086:2922 class 010601 AHCI disk", "the PCI devices, with their drivers"),
@@ -1647,11 +1746,105 @@ good = ok and b"hardware report" not in out
 print(("ok  " if good else "FAIL"), "(hardware report) only with diag")
 fails += not good
 
+# Sound (src/hda.bastio, src/lxsnd.bastio): an HD Audio controller with
+# QEMU's output codec, whose sound QEMU writes to a WAV file. mtone plays
+# half a second of a 1 kHz square wave through /dev/dsp: the file must hold
+# exactly that, 500 periods of 24 frames up and 24 down, nothing lost or
+# played twice.
+import wave
+wav = os.path.join(disk_dir.name, "sound.wav")
+def play():
+    global out
+    mark = len(out)
+    qemu.stdin.write(b"mtone\r"); qemu.stdin.flush()
+    read_until(b"bastios> ", mark)
+ok, code = report_boot(["-machine", "pc", "-m", "64M",
+                        "-audiodev", f"wav,id=snd0,path={wav},out.frequency=48000,out.channels=2,out.format=s16",
+                        "-device", "intel-hda", "-device", "hda-output,audiodev=snd0"], "sound", 0, between=play)
+text = out.decode(errors="replace").replace("\r", "")
+good = ok and "sound: HD Audio, 1 output\n" in text
+print(("ok  " if good else "FAIL"), "(sound) the HD Audio controller and its output are found")
+fails += not good
+good = ok and "mtone: ok, 96000 bytes" in text
+print(("ok  " if good else "FAIL"), "(sound) mtone writes half a second to /dev/dsp")
+fails += not good
+runs = []
+try:
+    w = wave.open(wav)
+    frames = w.readframes(w.getnframes())
+    left = [int.from_bytes(frames[i:i + 2], "little", signed=True) for i in range(0, len(frames), 4)]
+    loud = [i for i, v in enumerate(left) if v != 0]
+    if loud:
+        for v in left[loud[0]:loud[-1] + 1]:
+            if runs and runs[-1][0] == v:
+                runs[-1][1] += 1
+            else:
+                runs.append([v, 1])
+except (OSError, EOFError, wave.Error):
+    pass
+good = len(runs) == 1000 and all(n == 24 and v == (8000 if i % 2 == 0 else -8000) for i, (v, n) in enumerate(runs))
+print(("ok  " if good else "FAIL"), f"(sound) QEMU played the square wave whole ({len(runs)} half periods)")
+fails += not good
+booted = re.findall(r"BastiOS 0.2: (\d+) pages of memory", text)
+off = re.search(r"BastiOS: (\d+) pages free at power off", text)
+good = code == 0 and booted and off and booted[-1] == off.group(1)
+print(("ok  " if good else "FAIL"), f"(sound) every page back at power off (status {code})")
+fails += not good
+
+# The PS/2 mouse (src/kbd.bastio, src/lxmouse.bastio): QEMU's monitor
+# moves it 10 right and 5 up, then presses the left button, while mmouse
+# reads /dev/psaux; before that it checks that /dev/input/mice opened
+# O_NONBLOCK has nothing to read and polls empty. The kernel finds the
+# wheel QEMU's PS/2 mouse has (the IntelliMouse sequence); mmouse turns
+# ImPS/2 on and reads the wheel turned up (`mouse_move 0 0 1`).
+mon = os.path.join(disk_dir.name, "mouse.sock")
+def move():
+    global out
+    mark = len(out)
+    qemu.stdin.write(b"mmouse\r"); qemu.stdin.flush()
+    if not read_until(b"mmouse: ready", mark):
+        return
+    try:
+        m = socket.socket(socket.AF_UNIX)
+        m.connect(mon)
+        m.sendall(b"mouse_move 10 -5\n")
+        time.sleep(0.3)
+        m.sendall(b"mouse_button 1\n")
+        time.sleep(0.3)
+        m.sendall(b"mouse_button 0\n")
+        read_until(b"mmouse: wheel ready", mark)
+        m.sendall(b"mouse_move 0 0 1\n")       # the monitor's dz 1 is the wheel turned up
+        time.sleep(0.3)
+        m.close()
+    except OSError:
+        pass
+    read_until(b"bastios> ", mark)
+ok, code = report_boot(["-machine", "pc", "-m", "64M", "-append", "diag", "-monitor", f"unix:{mon},server,nowait"],
+                       "mouse", 3, between=move)
+text = out.decode(errors="replace").replace("\r", "")
+for want, what in (
+        ("mouse: PS/2, with a wheel\n", "the report finds the PS/2 mouse, and its wheel"),
+        ("mmouse: ready", "nothing to read before the mouse moves, O_NONBLOCK and poll"),
+        ("mmouse: buttons 0 dx 10 dy 5\n", "a move comes through as one packet, y up positive"),
+        ("mmouse: buttons 1 dx 0 dy 0\n", "the left button comes through"),
+        ("mmouse: wheel ready\nmmouse: wheel -1\n", "ImPS/2 mode, and the wheel turned up reads -1")):
+    good = ok and want in text
+    print(("ok  " if good else "FAIL"), f"(mouse) {what}")
+    fails += not good
+
 # No i8042 at all (many recent PCs, with only USB keyboards): its ports
 # read 0xFF, which src/kbd.bastio took as a mouse byte always waiting, and
 # polled for on every turn. Now the keyboard is left alone, and the report
 # says so; the serial line still works.
-ok, code = report_boot(["-machine", "pc,i8042=off", "-m", "64M", "-append", "diag"], "no i8042", 3)
+def no_mouse():
+    global out
+    mark = len(out)
+    qemu.stdin.write(b"mmouse\r"); qemu.stdin.flush()
+    read_until(b"bastios> ", mark)
+ok, code = report_boot(["-machine", "pc,i8042=off", "-m", "64M", "-append", "diag"], "no i8042", 3, between=no_mouse)
+good = ok and b"mouse: none found" in out and b"mmouse: no mouse (ENODEV)" in out
+print(("ok  " if good else "FAIL"), "(no i8042) no mouse: the report says so, /dev/input/mice says ENODEV")
+fails += not good
 good = ok and b"keyboard: none found (no USB keyboard, no PS/2 controller)" in out and code == 0
 print(("ok  " if good else "FAIL"), f"(no i8042) no keyboard found, the shell works, S5 (status {code})")
 fails += not good
@@ -1727,7 +1920,8 @@ else:
             (["-device", "qemu64-x86_64-cpu,socket-id=1,core-id=0,thread-id=0"], "x2APIC id 256", (
                 ("pages of memory, 3 processors", "the processor with APIC id 256 starts too"),
                 ("the MADT lists 2 (and 1 x2APIC entries), 3 running", "the MADT's x2APIC entry is counted"),
-                ("local APIC: x2APIC, for ids of 255 and up", "the local APICs stay in x2APIC mode")))):
+                ("local APIC: x2APIC, for ids of 255 and up", "the local APICs stay in x2APIC mode"),
+                ("idle: hlt; every processor's timer keeps ticking", "without wake-up interrupts the timers keep ticking")))):
         ok, code = report_boot(many + extra, name, 3, qemu9)
         text = out.decode(errors="replace").replace("\r", "")
         for want, what in checks:
@@ -1789,6 +1983,35 @@ for name, at, data in (("an MBR", 510, b"\x55\xaa"), ("a backup GPT header", (33
     good = open(other, "rb").read() == before
     print(("ok  " if good else "FAIL"), f"(foreign disk) not a byte of the disk with {name} changed")
     fails += not good
+
+# With the boot option `login`, the console is BusyBox's login instead of
+# the native shell, and a new login starts whenever the last one ends
+# (relogin, src/main.bastio). Root has no password here (passwd -d above).
+qemu = boot(1, with_disk=True, extra=["-append", "login"])
+out = b""
+deadline = time.time() + timeout
+def login_step(line, want, until):
+    global fails
+    mark = len(out)
+    qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+    wants = want if isinstance(want, list) else [want]
+    ok = read_until(until, mark + len(line)) and all(w in out[mark:] for w in wants)
+    print(("ok  " if ok else "FAIL"), "(login boot)", repr(line)); ok or print(repr(out[mark:]))
+    fails += not ok
+if not read_until(b"login: "):
+    print("FAIL (login boot) no login prompt"); fails += 1
+else:
+    print("ok   (login boot) a login prompt at boot")
+    login_step("root", b"", b"\n# ")
+    login_step("id -u; adduser -D carol; echo carol:pw | chpasswd; exit", b"\r\n0\r\n", b"login: ")
+    login_step("carol", b"", b"Password: ")
+    login_step("wrong", b"Login incorrect", b"login: ")
+    login_step("carol", b"", b"Password: ")
+    login_step("pw", b"", b"\n$ ")
+    login_step("id -u; cat /etc/shadow; exit", [b"\r\n1000\r\n", b"Permission denied"], b"login: ")
+    login_step("root", b"", b"\n# ")
+    login_step("deluser carol; rm -rf /home/carol /etc/passwd- /etc/group- /etc/shadow-; id carol", b"unknown user carol", b"\n# ")
+qemu.kill(); qemu.wait()
 
 print(f"---- {fails} failed ----")
 sys.exit(1 if fails else 0)

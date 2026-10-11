@@ -22,8 +22,13 @@ const LX_RENAMEAT: u64 = 264;
 const LX_RENAMEAT2: u64 = 316;
 const RENAME_NOREPLACE: u64 = 1;
 const RENAME_EXCHANGE: u64 = 2;
+const DT_FIFO: u64 = 1;
+const DT_CHR: u64 = 2;
 const DT_DIR: u64 = 4;
+const DT_BLK: u64 = 6;
 const DT_REG: u64 = 8;
+const DT_LNK: u64 = 10;
+const DT_SOCK: u64 = 12;
 const DENT_HDR: u64 = 19;             // d_ino, d_off, d_reclen, d_type
 
 // One entry: its name is in the transfer buffer.
@@ -72,6 +77,63 @@ fn vfs_entry(k: &mut Kernel, d: u64, i: u64) -> Ent
     return Ent { len: 0, dir: false, end: false };
   }
   return Ent { len: n, dir: vfs_is_dir(&mut k.fs, vfs_child(d, i)), end: false };
+}
+
+// What getdents64 reports for an entry: d_type and d_ino.
+struct Dt { typ: u64, ino: u64 }
+
+/// d_type and d_ino of entry i of directory dir (which dir_entry found):
+/// for the file layer's entries the type of the entry itself (a symbolic
+/// link is DT_LNK, not what it points to) and the inode number stat
+/// reports for it, so scandir's is_dir and inode agree with stat.
+fn ent_dt(k: &mut Kernel, dir: u64, i: u64, e: Ent) -> Dt
+  requires kok(k) && i < 0x100000000
+  ensures kok(k)
+{
+  let mut fallback = DT_REG;
+  if e.dir {
+    fallback = DT_DIR;
+  }
+  let mut d = NO_FILE;
+  let mut j = i;
+  if dir == DIR_ROOT && i >= 2 {
+    d = VDIR_ROOT;
+    j = i - 2;
+  } else if dir >= DIR_VFS && dir < DIR_PROC {
+    d = dir - DIR_VFS;
+  } else if dir == DIR_BIN && i < NPROGS {
+    return Dt { typ: DT_REG, ino: INO_PROGS + i };
+  }
+  if d == NO_FILE {
+    return Dt { typ: fallback, ino: i + 1 };
+  }
+  let c = vfs_child(d, j);
+  if c == NO_FILE {
+    return Dt { typ: fallback, ino: i + 1 };
+  }
+  let fm = vfs_meta(&mut k.fs, c);
+  let t = fm.mode % 65536 / 4096 * 4096;
+  let f = vfs_target(&mut k.fs, c);
+  if fm.ok && t == T_LINK {
+    return Dt { typ: DT_LNK, ino: sat_add(INO_FILES, f) };
+  }
+  if e.dir {
+    return Dt { typ: DT_DIR, ino: sat_add(1 + DIR_VFS, c) };
+  }
+  let mut typ = DT_REG;
+  if fm.ok && t == T_FIFO {
+    typ = DT_FIFO;
+  } else if fm.ok && t == T_SOCK {
+    typ = DT_SOCK;
+  } else if fm.ok && t == T_CHR {
+    typ = DT_CHR;
+  } else if fm.ok && t == T_BLK {
+    typ = DT_BLK;
+  }
+  if f >= HFILES {
+    return Dt { typ: typ, ino: i + 1 };
+  }
+  return Dt { typ: typ, ino: INO_FILES + f };
 }
 
 /// Copies `name` (up to FNAME_MAX bytes) into the start of x.
@@ -151,7 +213,6 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64, legacy: b
           bset(&mut out, used + z, 0);
           z = z + 1;
         }
-        xfer_u64(&mut out, used, i + 1);              // d_ino
         xfer_u64(&mut out, used + 8, i + 1);          // d_off: the next entry
         bset(&mut out, used + 16, cast[u8](reclen % 256));      // d_reclen
         bset(&mut out, used + 17, cast[u8](reclen / 256 % 256));
@@ -161,11 +222,6 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64, legacy: b
           at = used + reclen - 1;
           name = DENT_HDR - 1;
         }
-        if e.dir {
-          bset(&mut out, at, cast[u8](DT_DIR));
-        } else {
-          bset(&mut out, at, cast[u8](DT_REG));
-        }
         let mut j = 0;
         while j < e.len
           invariant j <= e.len && e.len <= XFER && DENT_HDR + e.len < reclen && name <= DENT_HDR
@@ -174,6 +230,13 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64, legacy: b
           bset(&mut out, used + name + j, bget(k.fs.xfer, j));
           j = j + 1;
         }
+        // After the name: ent_dt may use k.fs.xfer. "." and ".." are directories.
+        let mut dt = Dt { typ: DT_DIR, ino: sat_add(1, dir) };
+        if i >= 2 {
+          dt = ent_dt(&mut k, dir, i - 2, e);
+        }
+        xfer_u64(&mut out, used, dt.ino);             // d_ino
+        bset(&mut out, at, cast[u8](dt.typ % 256));
         used = used + reclen;
         i = i + 1;
       }
@@ -656,6 +719,10 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
   if m == NO_RESULT {
     bfree(t);
     return k.perr;
+  }
+  if k.pdir && d == NO_FILE {
+    bfree(t);
+    return ENOTDIR;                         // a file renamed to "new/"
   }
   if vfs_ro(&mut k.fs, m) {
     bfree(t);

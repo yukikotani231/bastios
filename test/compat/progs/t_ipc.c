@@ -93,9 +93,31 @@ int main(void) {
                _exit(connect(t, (void *)&a, sizeof a) == 0 && write(t, "un", 2) == 2 ? 0 : 1); 0; }) :
                ({ int t = accept(s, 0, 0); t >= 0 && read(t, b, 2) == 2 && memcmp(b, "un", 2) == 0; }) &&
                waitpid(c, &st, 0) == c && WEXITSTATUS(st) == 0));
+        /* connect finds the socket by its file, whatever the file is called now */
+        struct sockaddr_un r = {.sun_family = AF_UNIX}, h = {.sun_family = AF_UNIX};
+        strcpy(r.sun_path, "/cu_sock2");
+        strcpy(h.sun_path, "/cu_sock3");
+        unlink(r.sun_path);
+        unlink(h.sun_path);
+        int t = -1, u = -1;
+        EXPECT("AF_UNIX connect through a renamed socket file", rename(a.sun_path, r.sun_path) == 0 &&
+               (t = socket(AF_UNIX, SOCK_STREAM, 0)) >= 0 && connect(t, (void *)&r, sizeof r) == 0 &&
+               (u = accept(s, 0, 0)) >= 0 && close(u) == 0 && close(t) == 0);
+        EXPECT("AF_UNIX connect through a hard link of the socket file", link(r.sun_path, h.sun_path) == 0 &&
+               (t = socket(AF_UNIX, SOCK_STREAM, 0)) >= 0 && connect(t, (void *)&h, sizeof h) == 0 &&
+               (u = accept(s, 0, 0)) >= 0 && close(u) == 0 && close(t) == 0);
+        EXPECT("AF_UNIX the old name of a renamed socket file is gone", (t = socket(AF_UNIX, SOCK_STREAM, 0)) >= 0 &&
+               connect(t, (void *)&a, sizeof a) == -1 && errno == ENOENT && close(t) == 0);
+        unlink(r.sun_path);
+        unlink(h.sun_path);
+        close(s);
         unlink(a.sun_path);
     }
     EXPECT("mkfifo", mkfifo("/cu_fifo", 0644) == 0);
+    EXPECT("fstat on an open FIFO shows the file lstat shows", ({ struct stat a, b; int fd = open("/cu_fifo", O_RDONLY | O_NONBLOCK);
+           int ok = fd >= 0 && lstat("/cu_fifo", &a) == 0 && fstat(fd, &b) == 0 && S_ISFIFO(b.st_mode) &&
+                    a.st_ino == b.st_ino && a.st_dev == b.st_dev && a.st_mode == b.st_mode;
+           close(fd); ok; }));
     unlink("/cu_fifo");
     EXPECT("isatty(0)", isatty(0) == 1);
     EXPECT("ttyname(0)", ttyname(0) != NULL);

@@ -9,24 +9,7 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  # bastiolang is private for now, and the workflow token cannot read it.
-  # Until a BASTIOLANG_TOKEN secret (read access to bastiolang) is set, the
-  # test job is skipped, which GitHub shows as skipped, not passed. Once
-  # bastiolang is public, drop this gate and the token line.
-  gate:
-    runs-on: ubuntu-24.04
-    outputs:
-      ok: ${{ steps.check.outputs.ok }}
-    steps:
-      - id: check
-        env:
-          TOKEN: ${{ secrets.BASTIOLANG_TOKEN }}
-        run: |
-          if [ -n "$TOKEN" ]; then echo ok=true >> "$GITHUB_OUTPUT"
-          else echo "::warning::BASTIOLANG_TOKEN is not set; skipping the QEMU test"; fi
   test:
-    needs: gate
-    if: needs.gate.outputs.ok == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -36,7 +19,6 @@ jobs:
           repository: yukikotani231/bastiolang
           ref: main
           path: bastiolang
-          token: ${{ secrets.BASTIOLANG_TOKEN }}
       - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86 musl-tools
       - name: Tool versions
         run: |
@@ -47,4 +29,179 @@ jobs:
           qemu-system-x86_64 --version | head -1
           python3 --version
       - run: cd bastiolang/stage0 && cargo build --release --locked
-      - run: make test BASTIOC=bastiolang/stage0/target/release/bastioc0
+      - run: make test BASTIOC=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
+  # The Linux compatibility suite (test/compat). Most of its time on a fresh
+  # runner goes to building third-party programs from source (Z3, CPython,
+  # Perl, git, ...) and to fetching Alpine's images from Docker Hub, so both
+  # are cached. A cache entry is used only when every input it was built
+  # from is unchanged: the pinned versions (every `?=` setting in the
+  # Makefile), the BusyBox configuration, the patches, pyzip.py and
+  # alpinedisk.py. A change to a recipe alone is not seen: bump CACHE_V to
+  # rebuild. Disk images and everything built from this repository are
+  # never cached.
+  compat:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      CACHE_V: 1
+      BASTIOC0: bastiolang/stage0/target/release/bastioc0
+      BASTIOLIB: bastiolang
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: yukikotani231/bastiolang
+          ref: main
+          path: bastiolang
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y z3 qemu-system-x86 musl-tools autoconf automake autopoint libtool \
+            bison flex texinfo pkg-config tcl gettext
+      - run: cd bastiolang/stage0 && cargo build --release --locked
+      - name: Cache keys
+        id: keys
+        run: |
+          echo "pins=$(grep -E '^[A-Z0-9_]+ *\?=' Makefile | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - name: Restore the third-party programs
+        id: tp
+        uses: actions/cache/restore@v4
+        with:
+          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py') }}
+          path: |
+            build/busybox
+            build/compat/src/tcc
+            build/compat/busybox
+            build/compat/dropbear
+            build/compat/dbclient
+            build/compat/dropbearkey
+            build/compat/ssh_*
+            build/compat/lua
+            build/compat/qjs
+            build/compat/sqlite3
+            build/compat/micropython
+            build/compat/kilo
+            build/compat/git
+            build/compat/perl
+            build/compat/perllib
+            build/compat/py
+            build/compat/python
+            build/compat/tcc
+            build/compat/make
+            build/compat/z3
+      - name: Restore Alpine's images
+        id: al
+        uses: actions/cache/restore@v4
+        with:
+          key: compat-alpine-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/alpinedisk.py') }}
+          path: |
+            build/compat/alpine/*.tar.gz
+            build/compat/alpine/*.json
+      - name: Build the disks
+        run: make -j4 build/bastios.elf
+          build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img
+      - name: Save the third-party programs
+        if: always() && steps.tp.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py') }}
+          path: |
+            build/busybox
+            build/compat/src/tcc
+            build/compat/busybox
+            build/compat/dropbear
+            build/compat/dbclient
+            build/compat/dropbearkey
+            build/compat/ssh_*
+            build/compat/lua
+            build/compat/qjs
+            build/compat/sqlite3
+            build/compat/micropython
+            build/compat/kilo
+            build/compat/git
+            build/compat/perl
+            build/compat/perllib
+            build/compat/py
+            build/compat/python
+            build/compat/tcc
+            build/compat/make
+            build/compat/z3
+        continue-on-error: true
+      - name: Save Alpine's images
+        if: always() && steps.al.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          key: compat-alpine-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/alpinedisk.py') }}
+          path: |
+            build/compat/alpine/*.tar.gz
+            build/compat/alpine/*.json
+        continue-on-error: true
+      - run: make compat
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compat-report
+          path: |
+            build/compat/report.md
+            build/compat/results.json
+            build/compat/serial.log
+          if-no-files-found: ignore
+  # The Linux Test Project's system call tests (test/compat/ltp.py), with
+  # LTP built once per LTP_TAG and kept in the cache. The previous run's
+  # results.json is kept too: ltp.py uses its timings to put the tests that
+  # only wait out a timeout on machines of their own.
+  compat-ltp:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      BASTIOC0: bastiolang/stage0/target/release/bastioc0
+      BASTIOLIB: bastiolang
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: yukikotani231/bastiolang
+          ref: main
+          path: bastiolang
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y z3 qemu-system-x86 musl-tools autoconf automake libtool pkg-config
+      - run: cd bastiolang/stage0 && cargo build --release --locked
+      - name: Cache keys
+        id: keys
+        run: echo "ltp=$(grep -E '^LTP_[A-Z]+ *\?=' Makefile | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - name: Restore LTP
+        id: ltp
+        uses: actions/cache/restore@v4
+        with:
+          key: ltp-${{ steps.keys.outputs.ltp }}
+          path: build/ltp
+      - name: Restore the last run's timings
+        uses: actions/cache/restore@v4
+        with:
+          key: ltp-times-${{ github.run_id }}
+          restore-keys: ltp-times-
+          path: build/compat/ltp/results.json
+      - run: make -j4 build/bastios.elf build/ltp/.built
+      - name: Save LTP
+        if: steps.ltp.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          key: ltp-${{ steps.keys.outputs.ltp }}
+          path: build/ltp
+        continue-on-error: true
+      - run: make compat-ltp
+      - name: Save this run's timings
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          key: ltp-times-${{ github.run_id }}
+          path: build/compat/ltp/results.json
+        continue-on-error: true
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ltp-report
+          path: |
+            build/compat/ltp/report.md
+            build/compat/ltp/results.json
+          if-no-files-found: ignore

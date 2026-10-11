@@ -159,7 +159,7 @@ fn lazy_read(k: &mut Kernel, pid: u64, q: u64, wait: bool) -> u64
   }
   let mut slot = PC_N;
   if off % 4096 == 0 {
-    slot = pc_find(k.fs.pc, h, off / 4096);
+    slot = pc_get(&mut k.fs.pc, h, off / 4096);
   }
   if slot >= PC_N {
     let mut r = VFS_MISS;
