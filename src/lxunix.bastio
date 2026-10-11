@@ -7,6 +7,15 @@
 //   UM_BOUND   bound to a name: the listener slot holding it
 //   UM_LISTEN  listening: the same slot
 //   UM_CONN    connected: rx + UX_N * tx, the channels it reads and writes
+//   UM_DGRAM   a datagram socket from socket(): own + 8 * peer + 64 * stamp,
+//              where own is 1 + the slot it is bound to (0: unbound) and
+//              peer is 1 + the slot it is connected to (0: none), bound
+//              at `stamp`, so a slot freed and bound again is not taken
+//              for the old peer
+//
+// A slot of a bound datagram socket (UL_DGRAM) holds no backlog: its
+// word 2 is the channel every sender to the name writes into and the
+// socket reads, and word 3 the stamp of the bind.
 //
 // k.ux holds UX_N channels of UX_W words (head, count, read end open:
 // 1, or 2 once shut for reading; write end open: 1, or 2 once shut for
@@ -33,7 +42,9 @@
 //
 // Different from Linux: a socket file that is renamed (or reached through
 // a hard link of another name) no longer leads to its socket, which is
-// found by the path it was bound at; ECONNREFUSED then.
+// found by the path it was bound at; ECONNREFUSED then. A datagram
+// receiver gets no sender address (recvfrom reports an unnamed peer),
+// and no descriptors or credentials travel with datagrams to a name.
 
 import "linux.bastio";
 
@@ -45,6 +56,9 @@ const UM_CONN: u64 = 3;
 const UL_FREE: u64 = 0;
 const UL_BOUND: u64 = 1;
 const UL_LISTEN: u64 = 2;
+const UL_DGRAM: u64 = 3;
+const UM_DGRAM: u64 = 4;
+const EPROTOTYPE: u64 = 18446744073709551525;      // 2^64 - 91
 const UXL0: u64 = 64;                  // UX_N * UX_W: the first listener word
 const UXP0: u64 = 65536;               // UX_N * UX_CAP: the first name byte
 const UXF0: u64 = 96;                  // UXL0 + UX_LIS * UXL_W: the in-flight words
@@ -178,7 +192,8 @@ fn ux_peercred(k: &mut Kernel, pid: u64, fd: u64)
 
 fn ux_look(k: &Kernel, pid: u64, fd: u64) -> Ux
   requires kok(k) && pid < NPROC
-  ensures result.err == 0 ==> (result.h < OFD_N && result.nb <= 1 && result.mode <= UM_CONN)
+  ensures result.err == 0 ==> (result.h < OFD_N && result.nb <= 1 && result.mode <= UM_DGRAM)
+  ensures result.err == 0 && result.mode == UM_DGRAM ==> (result.x % 8 <= UX_LIS && result.x / 8 % 8 <= UX_LIS && result.dg)
   ensures result.err == 0 && result.mode == UM_CONN ==> result.x < UX_N * UX_N
   ensures result.err == 0 && (result.mode == UM_BOUND || result.mode == UM_LISTEN) ==> result.x < UX_LIS
 {
@@ -197,11 +212,13 @@ fn ux_look(k: &Kernel, pid: u64, fd: u64) -> Ux
   let w = of_get(k.ofd, h, 3);
   let x = of_get(k.ofd, h, 2);
   let mode = w / 2 % 8;
-  if mode > UM_CONN || (mode == UM_CONN && x >= UX_N * UX_N)
-    || ((mode == UM_BOUND || mode == UM_LISTEN) && x >= UX_LIS) {
+  let dg = w / UX_DG % 2 == 1;
+  if mode > UM_DGRAM || (mode == UM_CONN && x >= UX_N * UX_N)
+    || ((mode == UM_BOUND || mode == UM_LISTEN) && x >= UX_LIS)
+    || (mode == UM_DGRAM && (x % 8 > UX_LIS || x / 8 % 8 > UX_LIS || !dg)) {
     return none;
   }
-  return Ux { err: 0, h: h, x: x, nb: w % 2, mode: mode, dg: w / UX_DG % 2 == 1 };
+  return Ux { err: 0, h: h, x: x, nb: w % 2, mode: mode, dg: dg };
 }
 
 /// A datagram (or seqpacket) unix socket.
@@ -291,6 +308,19 @@ fn ux_close(k: &mut Kernel, x: u64, w: u64) -> u64
   ensures kok(k)
 {
   let mode = w / 2 % 8;
+  if mode == UM_DGRAM && x % 8 >= 1 && x % 8 <= UX_LIS {
+    // A bound datagram socket: its name and its channel go, with any
+    // datagrams nobody read.
+    let l = x % 8 - 1;
+    let c = ul_get(k, l, 2);
+    if ul_get(k, l, 0) == UL_DGRAM && c < UX_N {
+      uc_set(&mut k, c, 2, 0);
+      uc_set(&mut k, c, 3, 0);
+    }
+    ul_set(&mut k, l, 0, UL_FREE);
+    ul_set(&mut k, l, 3, 0);
+    return 0;
+  }
   if mode == UM_CONN && x < UX_N * UX_N {
     let rx = x % UX_N;
     uc_set(&mut k, rx, 2, 0);             // nobody reads what comes in
@@ -339,19 +369,23 @@ fn ux_close(k: &mut Kernel, x: u64, w: u64) -> u64
   return 0;
 }
 
-/// socket(AF_UNIX, SOCK_STREAM, 0).
+/// socket(AF_UNIX, SOCK_STREAM or SOCK_DGRAM, 0).
 fn ux_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if kind % 16 != SOCK_STREAM || proto != 0 {
+  if (kind % 16 != SOCK_STREAM && kind % 16 != SOCK_DGRAM) || proto != 0 {
     return EPROTONOSUPPORT;
   }
   let h = ofd_new(&mut k, OF_UNIX, 0);
   if h >= OFD_N {
     return ENFILE;
   }
-  of_set(&mut k.ofd, h, 3, kind / SOCK_NONBLOCK % 2 + 2 * UM_NEW);
+  let mut w = 2 * UM_NEW;
+  if kind % 16 == SOCK_DGRAM {
+    w = 2 * UM_DGRAM + UX_DG;
+  }
+  of_set(&mut k.ofd, h, 3, kind / SOCK_NONBLOCK % 2 + w);
   let fd = fd_install(&mut k, pid, h);
   if fd < LXNFD && kind / SOCK_CLOEXEC % 2 == 1 {
     fd_set(&mut k.lxfd, pid, fd, FD_OFD + h + FD_CLOEXEC);
@@ -576,8 +610,8 @@ fn ux_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if u.err != 0 {
     return u.err;
   }
-  if u.mode != UM_NEW {
-    return EINVAL;
+  if u.mode != UM_NEW && (u.mode != UM_DGRAM || u.x % 8 != 0) {
+    return EINVAL;                          // bound already, or connected
   }
   let mut n = sun_in(&mut k, pid, addr, alen);
   if n > UX_PATH {
@@ -592,6 +626,58 @@ fn ux_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if l >= UX_LIS {
     return ENOBUFS;
   }
+  // A datagram socket reads from a channel of its own.
+  let mut c = UX_N;
+  if u.mode == UM_DGRAM {
+    c = uc_new(&mut k);
+    if c >= UX_N {
+      return ENOBUFS;
+    }
+  }
+  let e = ux_claim(&mut k, pid, addr, n);
+  if e > UX_PATH {
+    if c < UX_N {
+      uc_set(&mut k, c, 2, 0);
+      uc_set(&mut k, c, 3, 0);
+    }
+    return e;
+  }
+  n = e;
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= UX_PATH && l < UX_LIS && kok(k)
+  {
+    bset(&mut k.uxb, UXP0 + l * UX_PATH + i, bget(k.fs.xfer, i));
+    i = i + 1;
+  }
+  ul_set(&mut k, l, 1, n);
+  if c < UX_N {
+    let stamp = k.ns % 1099511627776 + 1;   // below 2^40
+    ul_set(&mut k, l, 0, UL_DGRAM);
+    ul_set(&mut k, l, 2, c);
+    ul_set(&mut k, l, 3, stamp);
+    of_set(&mut k.ofd, u.h, 2, u.x + l + 1);
+    return 0;
+  }
+  ul_set(&mut k, l, 0, UL_BOUND);
+  ul_set(&mut k, l, 2, 0);
+  ul_set(&mut k, l, 3, 0);
+  of_set(&mut k.ofd, u.h, 2, l);
+  of_set(&mut k.ofd, u.h, 3, u.nb + 2 * UM_BOUND);
+  return 0;
+}
+
+/// bind's name, which sun_in left at the start of the transfer buffer
+/// (n bytes): a path name gets its socket file (and a socket still bound
+/// to a file removed since loses the name); an abstract name must be
+/// free. The name's length, or an error; the name is then at the start of
+/// the transfer buffer.
+fn ux_claim(k: &mut Kernel, pid: u64, addr: u64, n0: u64) -> u64
+  requires kok(k) && pid < NPROC && n0 <= UX_PATH
+  ensures kok(k)
+  ensures result <= UX_PATH || result >= 18446744073709547520
+{
+  let mut n = n0;
   if bget(k.fs.xfer, 0) != 0 {
     n = ux_resolve(&mut k, pid, addr, true);
     if n > UX_PATH {
@@ -610,20 +696,7 @@ fn ux_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   } else if ul_find(k, n) < UX_LIS {
     return EADDRINUSE;
   }
-  let mut i = 0;
-  while i < n
-    invariant i <= n && n <= UX_PATH && l < UX_LIS && kok(k)
-  {
-    bset(&mut k.uxb, UXP0 + l * UX_PATH + i, bget(k.fs.xfer, i));
-    i = i + 1;
-  }
-  ul_set(&mut k, l, 0, UL_BOUND);
-  ul_set(&mut k, l, 1, n);
-  ul_set(&mut k, l, 2, 0);
-  ul_set(&mut k, l, 3, 0);
-  of_set(&mut k.ofd, u.h, 2, l);
-  of_set(&mut k.ofd, u.h, 3, u.nb + 2 * UM_BOUND);
-  return 0;
+  return n;
 }
 
 /// listen on a bound unix socket.
@@ -648,8 +721,59 @@ fn ux_listen(k: &mut Kernel, pid: u64, fd: u64) -> u64
   return 0;
 }
 
+/// The slot of the bound datagram socket named by the struct sockaddr_un
+/// at va (alen bytes), with the checks connect makes; or an error:
+/// -ECONNREFUSED if no socket has the name, -EPROTOTYPE if a stream
+/// socket has it.
+fn ux_dg_target(k: &mut Kernel, pid: u64, addr: u64, alen: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result < UX_LIS || result >= 18446744073709547520
+{
+  let mut n = sun_in(&mut k, pid, addr, alen);
+  if n > UX_PATH {
+    return n;
+  }
+  if bget(k.fs.xfer, 0) != 0 {
+    n = ux_resolve(&mut k, pid, addr, false);
+    if n > UX_PATH {
+      return n;
+    }
+    let e = ux_may_connect(&mut k, pid, n);
+    if e != 0 {
+      return e;
+    }
+  }
+  let l = ul_find(k, n);
+  if l >= UX_LIS {
+    return ECONNREFUSED;
+  }
+  if ul_get(k, l, 0) != UL_DGRAM {
+    return EPROTOTYPE;
+  }
+  return l;
+}
+
+/// The channel that datagram slot l + 1 == `peer`, bound at `stamp`,
+/// reads; UX_N if that socket is gone.
+fn ux_dg_chan(k: &Kernel, peer: u64, stamp: u64) -> u64
+  requires kok(k)
+  ensures result <= UX_N
+{
+  if peer == 0 || peer > UX_LIS {
+    return UX_N;
+  }
+  let l = peer - 1;
+  let c = ul_get(k, l, 2);
+  if ul_get(k, l, 0) != UL_DGRAM || ul_get(k, l, 3) != stamp || c >= UX_N {
+    return UX_N;
+  }
+  return c;
+}
+
 /// connect on a unix socket: joins it to a new description that waits in
-/// the listener's backlog for accept. Never waits for accept itself.
+/// the listener's backlog for accept. Never waits for accept itself. A
+/// datagram socket only takes the name as where its sends go.
 fn ux_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -657,6 +781,14 @@ fn ux_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   let u = ux_look(k, pid, fd);
   if u.err != 0 {
     return u.err;
+  }
+  if u.mode == UM_DGRAM {
+    let l = ux_dg_target(&mut k, pid, addr, alen);
+    if l >= UX_LIS {
+      return l;
+    }
+    of_set(&mut k.ofd, u.h, 2, u.x % 8 + 8 * (l + 1) + 64 * ul_get(k, l, 3));
+    return 0;
   }
   if u.mode == UM_CONN {
     return EISCONN;
@@ -789,8 +921,10 @@ fn sun_out(k: &mut Kernel, pid: u64, va: u64, lenp: u64) -> u64
 /// write / send on a connected unix socket: what fits in its outgoing
 /// channel; SK_WAIT (or -EAGAIN) while that is full; -EPIPE once the other
 /// end is closed or this one shut for writing. A datagram socket sends the
-/// whole message or waits for room for it (-EMSGSIZE if it never fits).
-fn ux_send(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool) -> u64
+/// whole message or waits for room for it (-EMSGSIZE if it never fits);
+/// one from socket() sends to the name at addr (alen bytes), or with addr
+/// 0 to the one it connected to.
+fn ux_send(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, addr: u64, alen: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
@@ -798,10 +932,25 @@ fn ux_send(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool) -
   if u.err != 0 {
     return u.err;
   }
-  if u.mode != UM_CONN {
+  let mut c = u.x / UX_N;
+  if u.mode == UM_DGRAM {
+    if addr != 0 {
+      let l = ux_dg_target(&mut k, pid, addr, alen);
+      if l >= UX_LIS {
+        return l;
+      }
+      c = ul_get(k, l, 2);
+    } else if u.x / 8 % 8 == 0 {
+      return ENOTCONN;
+    } else {
+      c = ux_dg_chan(k, u.x / 8 % 8, u.x / 64);
+    }
+    if c >= UX_N {
+      return ECONNREFUSED;                  // the socket at that name is gone
+    }
+  } else if u.mode != UM_CONN {
     return ENOTCONN;
   }
-  let c = u.x / UX_N;
   if uc_get(k, c, 2) != 1 || uc_get(k, c, 3) != 1 {
     return EPIPE;
   }
@@ -852,10 +1001,22 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
   if u.err != 0 {
     return u.err;
   }
-  if u.mode != UM_CONN {
+  let mut c = u.x % UX_N;
+  if u.mode == UM_DGRAM {
+    // Datagrams come to a bound socket's name; an unbound one waits.
+    c = UX_N;
+    if u.x % 8 != 0 {
+      c = ul_get(k, u.x % 8 - 1, 2);
+    }
+    if c >= UX_N {
+      if dontwait || u.nb == 1 {
+        return EAGAIN;
+      }
+      return SK_WAIT;
+    }
+  } else if u.mode != UM_CONN {
     return ENOTCONN;
   }
-  let c = u.x % UX_N;
   let mut r = uc_ring(k, c);
   let count = r.n;
   if count == 0 {
@@ -966,6 +1127,20 @@ fn ux_poll_bits(k: &Kernel, pid: u64, fd: u64) -> u64
       return POLLIN;
     }
     return 0;
+  }
+  if u.mode == UM_DGRAM {
+    let mut d = 0;
+    if u.x % 8 != 0 {
+      let rc = ul_get(k, u.x % 8 - 1, 2);
+      if rc < UX_N && uc_get(k, rc, 1) > 0 {
+        d = POLLIN;
+      }
+    }
+    let tc = ux_dg_chan(k, u.x / 8 % 8, u.x / 64);
+    if u.x / 8 % 8 == 0 || (tc < UX_N && uc_get(k, tc, 1) + 2 < UX_CAP) {
+      d = d | POLLOUT;
+    }
+    return d;
   }
   if u.mode != UM_CONN {
     return POLLOUT;

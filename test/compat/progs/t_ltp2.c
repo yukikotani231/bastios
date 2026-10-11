@@ -548,5 +548,26 @@ int main(void) {
            int b = epoll_ctl(ep, EPOLL_CTL_ADD, z, &ev); int be = errno;
            close(z); close(ep);
            a == -1 && ae == EFAULT && b == -1 && be == EPERM; }));
+    EXPECT("AF_UNIX SOCK_DGRAM: a bound socket gets datagrams from sendto and from a connected sender", ({
+           unlink("/tmp/t_ltp2_dg");
+           struct sockaddr_un a = { AF_UNIX, "/tmp/t_ltp2_dg" };
+           int r = socket(AF_UNIX, SOCK_DGRAM, 0);
+           int b = bind(r, (struct sockaddr *)&a, sizeof a);
+           int s1 = socket(AF_UNIX, SOCK_DGRAM, 0), s2 = socket(AF_UNIX, SOCK_DGRAM, 0);
+           int x = sendto(s1, "one", 3, 0, (struct sockaddr *)&a, sizeof a);
+           int c = connect(s2, (struct sockaddr *)&a, sizeof a);
+           int y = send(s2, "two!", 4, 0);
+           char m[16]; struct sockaddr_un f; socklen_t fl = sizeof f;
+           int n1 = recvfrom(r, m, sizeof m, 0, (struct sockaddr *)&f, &fl);
+           int ok1 = n1 == 3 && memcmp(m, "one", 3) == 0 && fl == 0;    /* the sender is not bound */
+           int n2 = recv(r, m, sizeof m, MSG_DONTWAIT);
+           int ok2 = n2 == 4 && memcmp(m, "two!", 4) == 0;
+           int n3 = recv(r, m, sizeof m, MSG_DONTWAIT); int e3 = errno;
+           int u = send(s1, "x", 1, 0); int ue = errno;
+           close(r);
+           int g = send(s2, "gone", 4, 0); int ge = errno;
+           close(s1); close(s2); unlink("/tmp/t_ltp2_dg");
+           b == 0 && x == 3 && c == 0 && y == 4 && ok1 && ok2 && n3 == -1 && e3 == EAGAIN
+             && u == -1 && ue == ENOTCONN && g == -1 && ge == ECONNREFUSED; }));
     return done();
 }

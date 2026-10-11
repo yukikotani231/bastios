@@ -389,7 +389,7 @@ fn lx_sendto(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, addr: u64, ale
     return lx_tcp_send(&mut k, pid, fd, buf, n, more);
   }
   if is_unix(k, pid, fd) {
-    return ux_send(&mut k, pid, fd, buf, n, false);
+    return ux_send(&mut k, pid, fd, buf, n, false, addr, alen);
   }
   let d = udp_dest(&mut k, pid, fd, addr, alen);
   if d.err != 0 {
@@ -463,7 +463,16 @@ fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, 
     return lx_tcp_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1);
   }
   if is_unix(k, pid, fd) {
-    return ux_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1);
+    let r = ux_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1);
+    if r <= 0x7FFFFFFFFFFFFFFF && addr != 0 && ux_dgram(k, pid, fd) {
+      // No sender name is kept: a length of 0, as Linux gives for a
+      // sender that is not bound.
+      lx_fill(&mut k, 0, 4);
+      if copy_to_user(&mut k.spaces, pid, alenp, k.fs.xfer, 4) != 4 {
+        return EFAULT;
+      }
+    }
+    return r;
   }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
