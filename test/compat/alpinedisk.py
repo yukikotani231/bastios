@@ -175,9 +175,30 @@ def owned(ti, acl, default):
         ti.uid, ti.gid, ti.mode = int(uid), int(gid), int(mode, 8)
     return ti
 
-def package(files, p):
-    """The .apk for package p: a gzip stream of its .PKGINFO, then one of
-    its files. Returns (control stream, whole package)."""
+def scripts(files):
+    """The install scripts apk kept (lib/apk/db/scripts.tar.gz, named
+    NAME-VERSION.HASH.KIND) and the trigger paths (lib/apk/db/triggers,
+    by the package's C field): ({"NAME-VERSION": [(KIND, body)]},
+    {C: [path]})."""
+    kept, trig = {}, {}
+    for name in ("lib/apk/db/scripts.tar.gz", "lib/apk/db/scripts.tar"):
+        if name in files:
+            with tarfile.open(fileobj=io.BytesIO(files[name][1])) as t:
+                for m in t.getmembers():
+                    if m.isfile():
+                        pv, _, kind = m.name.rsplit(".", 2)
+                        kept.setdefault(pv, []).append((kind, t.extractfile(m).read()))
+    if "lib/apk/db/triggers" in files:
+        for line in files["lib/apk/db/triggers"][1].decode().split("\n"):
+            if line.strip():
+                c, *paths = line.split()
+                trig[c] = paths
+    return kept, trig
+
+def package(files, p, kept=({}, {})):
+    """The .apk for package p: a gzip stream of its .PKGINFO and install
+    scripts (from kept, as scripts() gives them), then one of its files.
+    Returns (control stream, whole package)."""
     when = int(p.get("t", 0))
     data = []
     for d, acl in p["dirs"]:
@@ -207,10 +228,17 @@ def package(files, p):
     info = "".join(f"{n} = {p[k]}\n" for k, n in PKGINFO if k in p)
     for k, n in LISTS:
         info += "".join(f"{n} = {v}\n" for v in p.get(k, "").split())
+    info += "".join(f"triggers = {t}\n" for t in kept[1].get(p.get("C"), []))
     info += f"datahash = {hashlib.sha256(dgz).hexdigest()}\n"
     ti = tarfile.TarInfo(".PKGINFO")
     ti.size, ti.mode, ti.mtime = len(info.encode()), 0o644, when
-    cgz = gz(tar([(ti, info.encode())], cut=True))
+    control = [(ti, info.encode())]
+    # The scripts: a package's pre-install adds the users it needs, say.
+    for kind, body in kept[0].get(f"{p['P']}-{p['V']}", []):
+        ti = tarfile.TarInfo("." + kind)
+        ti.size, ti.mode, ti.mtime = len(body), 0o755, when
+        control.append((ti, body))
+    cgz = gz(tar(control, cut=True))
     return cgz, cgz + dgz
 
 def repository(images, cache, outs):
@@ -224,11 +252,12 @@ def repository(images, cache, outs):
         os.makedirs(o, exist_ok=True)
     for image, first in images:
         files = merged(layers(image, cache))   # one image at a time: they are large
+        kept = scripts(files)
         for p in installed(files["lib/apk/db/installed"][1]):
             to = [o for o in (outs if first else outs[:1]) if (p["P"], p["V"]) not in seen[o]]
             if not to:
                 continue                   # images built at different times may hold two versions
-            cgz, apk = package(files, p)
+            cgz, apk = package(files, p, kept)
             e = dict(p)
             e["C"] = "Q1" + base64.b64encode(hashlib.sha1(cgz).digest()).decode()
             e["S"] = str(len(apk))
@@ -272,4 +301,5 @@ def main():
     env = dict(os.environ, MKDISK_FREE_MB="160")
     subprocess.run([os.path.join(HERE, "mkdisk.py"), out] + args, check=True, env=env)
 
-main()
+if __name__ == "__main__":
+    main()
