@@ -303,7 +303,7 @@ fn lx_fcntl_lock(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
   if ofd && h >= OFD_N {
     return EBADF;
   }
-  if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, FLOCK_SIZE) != FLOCK_SIZE {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, FLOCK_SIZE) != FLOCK_SIZE {
     return EFAULT;
   }
   let ty = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1));
@@ -403,7 +403,7 @@ fn lx_fcntl_lock(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
       bset(&mut k.fs.xfer, 26, cast[u8](p / 65536 % 256));
       bset(&mut k.fs.xfer, 27, cast[u8](p / 16777216 % 256));
     }
-    if copy_to_user(&mut k.spaces, pid, arg, k.fs.xfer, FLOCK_SIZE) != FLOCK_SIZE {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, k.fs.xfer, FLOCK_SIZE) != FLOCK_SIZE {
       return EFAULT;
     }
     return 0;
@@ -519,7 +519,7 @@ fn flock_check(k: &mut Kernel, pid: u64, arg: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, FLOCK_SIZE) != FLOCK_SIZE {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, FLOCK_SIZE) != FLOCK_SIZE {
     return EFAULT;
   }
   let ty = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1));

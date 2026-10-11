@@ -75,7 +75,7 @@ fn off_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 8) != 8 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 8) != 8 {
     return NO_RESULT;
   }
   let o = get_u64(k.fs.xfer, 0);
@@ -142,7 +142,7 @@ fn splice_from_pipe(con: &mut Con, k: &mut Kernel, pid: u64, p: u64, out: u64, o
   }
   if outp != 0 && !to_pipe {
     xfer_u64(&mut k.fs.xfer, 0, sat_add(ooff, done));
-    if copy_to_user(&mut k.spaces, pid, outp, k.fs.xfer, 8) != 8 {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, outp, k.fs.xfer, 8) != 8 {
       return EFAULT;
     }
   }
@@ -210,7 +210,7 @@ fn splice_to_pipe(k: &mut Kernel, pid: u64, row: u64, inp: u64, p: u64, len: u64
   }
   if inp != 0 {
     xfer_u64(&mut k.fs.xfer, 0, sat_add(ioff, done));
-    if copy_to_user(&mut k.spaces, pid, inp, k.fs.xfer, 8) != 8 {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, inp, k.fs.xfer, 8) != 8 {
       return EFAULT;
     }
   } else {

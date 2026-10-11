@@ -135,6 +135,16 @@ busybox: which
 busybox: whoami
 busybox: xargs
 busybox: yes | head
+debian: debian: bash
+debian: debian: coreutils make, copy, move, link and look at files
+debian: debian: coreutils, sed, grep and awk in a pipeline
+debian: debian: dpkg knows the packages
+debian: debian: find, xargs and du
+debian: debian: perl
+debian: debian: tar and gzip (GNU tar makes its archive with creat)
+debian: debian: the dynamic linker through its links, by hand
+debian: debian: unpack the root, chroot into it
+debian: debian: users and the machine
 dev: make: a project of two files
 dev: make: parallel jobs
 dev: make: rebuilds only what changed
@@ -319,9 +329,9 @@ t_ipc: fcntl F_DUPFD
 t_ipc: fcntl F_GETFD sees FD_CLOEXEC
 t_ipc: fcntl F_GETFL sees O_NONBLOCK
 t_ipc: fcntl F_SETFL
+t_ipc: fstat on an open FIFO shows the file lstat shows
 t_ipc: isatty(0)
 t_ipc: mkfifo
-t_ipc: fstat on an open FIFO shows the file lstat shows
 t_ipc: pipe
 t_ipc: pipe across fork
 t_ipc: pipe holds 64 KiB, then EAGAIN
@@ -428,7 +438,10 @@ t_mem: MAP_SHARED file mapping across fork
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
 t_mem: a MAP_SHARED mapping sees write(2)
+t_mem: a big window: 1.2 GiB of PROT_NONE reservations as the Go runtime makes, then 4 GiB of mmap touched at both ends
+t_mem: an 8 MiB stack: 6 MiB of locals in a function
 t_mem: file for mapping
+t_mem: fork: parent and child each see only their own writes (copy-on-write), read(2) into a shared page, a second thread, mprotect and MADV_DONTNEED
 t_mem: futex across fork on a MAP_SHARED page
 t_mem: large malloc and free, many times
 t_mem: madvise
@@ -441,12 +454,15 @@ t_mem: mmap anonymous
 t_mem: mmap is zeroed
 t_mem: mmap of a closed descriptor is EBADF
 t_mem: mmap of a file opened write-only is EACCES
+t_mem: mmap takes a free address hint and grows from it, as the Go runtime's heap at 0xc000000000 does
+t_mem: more than the old 64 MiB window: a 96 MiB mmap, then a 100 MiB malloc
 t_mem: mprotect read-only faults on write
 t_mem: mremap grow
 t_mem: mremap growth reuses address space
 t_mem: munmap
 t_mem: munmap faults on touch
 t_mem: munmap gives address space back
+t_mem: pages come when first touched: 640 MiB of mmap, system calls and fork on pages never touched
 t_mem: read(2) sees a store into a MAP_SHARED mapping
 t_mem: writable MAP_SHARED of a read-only file is EACCES
 t_misc: /etc/passwd
@@ -506,6 +522,7 @@ t_more: splice a pipe into a file
 t_more: splice rejects two files and a pipe offset
 t_more: statx
 t_more: utimensat
+t_more: utimensat and llistxattr act on a dangling link itself
 t_more: vfork + _exit
 t_more: vmsplice into a pipe, EAGAIN on an empty tee
 t_net: AF_INET6 TCP over ::1
@@ -541,6 +558,8 @@ t_newer: getdents into a byte
 t_newer: getdents64 at the end
 t_newer: getdents64 lists . and ..
 t_newer: lseek rewinds a directory
+t_newer: membarrier query
+t_newer: membarrier unknown command
 t_newer: pidfd_getfd takes the child's pipe end
 t_newer: pidfd_open of itself is close-on-exec
 t_newer: pidfd_open with bad flags
@@ -571,13 +590,14 @@ t_newer: ustat for /'s device
 t_newer: waitid P_PIDFD
 t_path: O_NOFOLLOW, O_NOATIME, EISDIR, rmdir of . and mkdir over a name
 t_path: a loop of links through a long path is ELOOP
+t_path: a name ending in / or /. must be a directory
 t_path: a path in unmapped memory is EFAULT
 t_path: a set-group-ID bit at create is kept only for a member of the group
 t_path: an empty path is ENOENT, except with AT_EMPTY_PATH
 t_path: chroot keeps absolute paths, links and .. inside the new root
+t_path: execve of a missing /bin program is ENOENT
 t_path: fstat of a directory gives its mode
 t_path: mknod makes device and socket nodes; a device node opens its device
-t_path: a name ending in / or /. must be a directory
 t_path: paths are read up to PATH_MAX
 t_path: pread and pwrite take no negative offset
 t_path: sendfile checks its descriptors and offset; statx its flags
@@ -735,6 +755,7 @@ t_sysv: queue permissions follow the ids
 t_sysv: semop, SETALL, GETALL, GETPID, errors
 t_sysv: shmat, a second view, fork, IPC_RMID
 t_sysv: shmget and shmat errors
+t_thread: /proc/self/stat and status count the threads
 t_thread: 4 threads, mutex
 t_thread: condition variable
 t_thread: gettid differs in a thread

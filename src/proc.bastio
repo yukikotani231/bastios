@@ -523,6 +523,8 @@ const HOLE_N: u64 = 16;              // address space holes munmap left, per pro
 const HOLES_LEN: u64 = 8192;         // NPROC * HOLE_N * 2
 const LZ_W: u64 = 4;                  // lazy code: first page + 1 (0: none), pages, file hold, file offset
 const LAZY_LEN: u64 = NPROC * LZ_W;
+const AN_N: u64 = 16;                  // anonymous memory not touched yet: records per process (src/lxanon.bastio)
+const ANON_LEN: u64 = NPROC * AN_N * 2;  // first page + 1 (0: free), pages
 const LX_PAUSE: u64 = 34;
 const LX_RT_SIGSUSPEND: u64 = 130;
 const LX_WAITID: u64 = 247;
@@ -734,6 +736,7 @@ struct Kernel {
   maps: Buf,            // Linux MAP_SHARED file mappings, MAP_N per process (src/lxmem.bastio)
   holes: Buf,           // address space munmap gave back, HOLE_N ranges per process (src/lxmem.bastio)
   lazy: Buf,            // code pages read from a file when first touched, LZ_W words per process (src/lazy.bastio)
+  anon: Buf,            // anonymous memory mapped when first touched, AN_N records per process (src/lxanon.bastio)
   inet6: Buf,           // word h: 1 if open file description h is an AF_INET6 socket (src/lxsock.bastio)
   locks: Buf,           // file locks held (src/lxlock.bastio)
   loops: Buf,           // loop devices (src/lxloop.bastio)
@@ -751,7 +754,7 @@ struct Kernel {
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
     && (k.txt is Store::Table ==> (pt_level(k.txt.Table) == 2 && pt_leases(k.txt.Table) == 0))
 }
@@ -1025,11 +1028,12 @@ fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
   let alen = name_arg(&mut args, name);
   let total = start_env(&mut args, alen);
   let src = Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
-  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, total, false);
+  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, Src { file: false, prog: NPROGS, f: 0, size: 0 }, args, alen, total, false);
   bfree(args);
   let ok = sp is Space::Mapped;
   put_space(&mut k.spaces, pid, sp);
   hole_clear(&mut k, pid);
+  anon_clear(&mut k, pid);
   if !ok {
     give_page(&mut k.mem, fpu);
     return 0;
@@ -1171,11 +1175,12 @@ fn start_env(args: &mut Bytes, from: u64) -> u64
 
 /// Builds the address space for program `prog`, with the argument strings
 /// in the first `alen` bytes of `args` and the environment strings from
-/// there to `total` (each ending in a NUL), and sets
+/// there to `total` (each ending in a NUL), and the interpreter execve
+/// found for it (elf_interp, src/lxproc.bastio; a file, or none), and sets
 /// process `pid` up to start it: program, registers, program break.
 /// Returns `Space::Empty`, changing nothing, if the image is malformed or
 /// memory runs out. The caller installs the space.
-fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: u64, t: Tsc, epoch: u64, pid: u64, src: Src, args: &Bytes, alen: u64, total: u64, lazy: bool) -> Space
+fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: u64, t: Tsc, epoch: u64, pid: u64, src: Src, isrc0: Src, args: &Bytes, alen: u64, total: u64, lazy: bool) -> Space
   requires mem_ok(m) && store_ok(txt) && vfs_ok(v) && ptab_ok(procs) && pid < NPROC && alen <= total && total <= ARGS_MAX && total <= blen(args)
   ensures mem_ok(m) && store_ok(txt) && vfs_ok(v) && ptab_ok(procs)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
@@ -1202,7 +1207,10 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
     if e.ilen != 0 {
       // A dynamically linked program: its interpreter goes just below
       // where mmap starts, and runs first.
-      isrc = interp_src(&mut v, src, e);
+      isrc = isrc0;
+      if !isrc.file {
+        isrc = interp_src(&mut v, src, e);
+      }
       if !isrc.file && isrc.prog >= NPROGS {
         return Space::Empty;
       }
