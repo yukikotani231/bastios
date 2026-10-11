@@ -283,6 +283,18 @@ steps = [
     # chown keeps its owner, on the disk too.
     ("umask 077; echo x > po; chown 65534:100 po; stat -c 'p%a %u %g' po; rm po; umask 022; echo y > /disk/po; chown 7:8 /disk/po; stat -c 'd%a %u %g' /disk/po; rm /disk/po",
      [b"p600 65534 100", b"d644 7 8"], b"\n# "),
+    # Users (docs/security.md): adduser, su to the new user and back,
+    # /etc/shadow is root's, su and passwd are the only set-user-ID
+    # programs, and su asks for root's password once root has one.
+    ("adduser -D alice; id alice; stat -c '%a %U' /bin/su /bin/ls /etc/shadow /root",
+     [b"uid=1000(alice) gid=1000(alice)", b"\r\n4755 root\r\n755 root\r\n600 root\r\n700 root\r\n"], b"\n# "),
+    ("su alice -c 'id -u; whoami; cd; pwd; cat /etc/shadow; echo s=$?; ls /root; echo r=$?'",
+     [b"\r\n1000\r\nalice\r\n/home/alice\r\n", b"Permission denied", b"s=1", b"r=1"], b"\n# "),
+    ("echo root:pw | chpasswd; read l < /etc/shadow; case $l in 'root:$6$'*) echo sha512;; esac; su alice -c 'echo no | su -c id root; echo w=$?; echo pw | su -c id root'",
+     [b"\r\nsha512\r\n", b"w=1", b"uid=0(root) gid=0(root)"], b"\n# "),
+    # (BusyBox keeps the old /etc files as NAME-: gone, so no pages stay.)
+    ("deluser alice; id alice; passwd -d root; echo u=$?; rm -rf /home/alice /etc/passwd- /etc/group- /etc/shadow-",
+     [b"unknown user alice", b"u=0"], b"\n# "),
     # Small calls: uname, readv, pread/pwrite, limits, sysinfo, statfs,
     # getrandom, priorities, sessions, process groups, ttyname, pipe capacity (user/mmisc.c).
     ("mmisc", b"mmisc: ok on Linux x86_64, signals, pipe 65536", b"\n# "),
@@ -334,6 +346,8 @@ steps = [
     # /dev/loop-control a character device; test/compat/progs/t_dev.c
     # binds one to a file and reads and writes through it.
     ("stat -c %F /dev/loop0 /dev/loop-control", b"block special file\r\ncharacter special file\r\n", b"\n# "),
+    # An unbound loop device's /sys/block entry: no sectors, not read-only.
+    ("cat /sys/block/loop0/size /sys/block/loop0/ro", b"0\r\n0\r\n", b"\n# "),
     # The disk's directory grows past its first 64 entries (dir_grow); the
     # power cuts below check that what it grew survives.
     ("mkdir disk/many; i=0; while [ $i -lt 150 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; cat disk/many/f149", b"\r\n150\r\n149\r\n", b"\n# "),
@@ -349,6 +363,8 @@ steps = [
     # types, a process's own mount table, and three fixed sysctls.
     ("n=0; while read k r; do [ \"$k\" = processor ] && n=$((n+1)); done < /proc/cpuinfo; echo cpus=$n; cat /proc/filesystems; cat /proc/self/mounts", [f"cpus={smp}\r\n".encode(), b"nodev\tramfs", b"nodev\ttmpfs", b"\tbstdisk3", b"proc /proc proc"], b"\n# "),
     ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n32\r\n", b"mounts"], b"\n# "),
+    # The kernel's command line, and a process's fixed regions.
+    ("cat /proc/cmdline /proc/self/maps", [b"BOOT_IMAGE=", b"[vdso]", b"[stack]"], b"\n# "),
     ("exit 5", b"[exit 5]"),
     ("rm lxout", b""),
     ("sh", b"BastiOS 0.2 -- type"),

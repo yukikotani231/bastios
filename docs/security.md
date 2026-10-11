@@ -16,11 +16,32 @@ root.
 
 Everything starts as root. The kernel's first program, the native shell,
 runs with every id 0, and so does anything it starts. A process becomes
-unprivileged only by calling `setuid` (or `setresuid` and friends) itself,
-or by running a file whose set-user-ID bit names another owner. There is
-no login, `su` or `passwd` yet (see "Not done" below). `/etc/passwd` and
-`/etc/group` (`files/`) name root, bin, daemon and nobody, for programs
-that look names up.
+unprivileged by calling `setuid` (or `setresuid` and friends) itself, by
+running a file whose set-user-ID bit names another owner, or through
+BusyBox's `login` and `su`.
+
+## Users and passwords
+
+`/etc/passwd`, `/etc/group` and `/etc/shadow` (`files/`, installed at
+boot) name root, bin, daemon and nobody, and the group disk. `/etc/shadow`
+is `0600`; root has no password until `passwd` sets one, and the others
+cannot log in. `/root` is root's home (`0700`), `/home` holds everyone
+else's.
+
+BusyBox's `adduser`, `addgroup`, `deluser`, `delgroup`, `passwd`,
+`chpasswd`, `su`, `login`, `id` and `whoami` are built in (`/bin/NAME`).
+New users get ids from 1000, and passwords are hashed with SHA-512 by
+BusyBox's own `crypt`. From the native shell, `ash` then `login` (or `su
+NAME`) starts a session as another user.
+
+`/bin/su` and `/bin/passwd` are set-user-ID root, as on a system where
+BusyBox is installed set-user-ID: running either starts BusyBox with
+effective user 0 (`exec_ids`, `src/lxperm.bastio`; `bin_suid`,
+`src/lxproc.bastio`), and BusyBox, built with `CONFIG_FEATURE_SUID`, drops
+root at once unless the applet its `argv[0]` names needs it. So `/bin/su`
+run under another name gets nothing, and every other `/bin/NAME` runs with
+the caller's ids. That puts BusyBox's `su`, `passwd` and its start-up code
+in the trusted base for this.
 
 Memory is isolated by construction: each process has its own address
 space (`src/space.bastio`), and the proofs show the kernel reads and
@@ -57,10 +78,11 @@ by root. The rest are checked by tests, not proved: `test/compat/progs/t_cred.c`
 
 Known gaps, most serious first.
 
-1. **No login.** There is no `login`, `su`, `passwd`, `/etc/shadow` or
-   password hashing; BusyBox is built without those applets. A system
-   with several users needs them, and a way to start the console as
-   someone other than root.
+1. **Users do not survive a reboot.** `/etc` and `/home` are in memory,
+   so users, passwords and home directories made after boot are lost at
+   the next one. They need the root file system on the disk.
+   The console starts in the native shell as root; there is no `getty`
+   or boot to a login prompt yet.
 2. **Native processes.** The native shell and the programs it starts run
    as root, and `SYS_SPAWN` starts any built-in program; that is safe only
    because a process that is not root cannot gain anything by it (the
