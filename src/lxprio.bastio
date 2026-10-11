@@ -27,6 +27,7 @@ const SCHED_RR: u64 = 2;
 const SCHED_BATCH: u64 = 3;
 const SCHED_IDLE: u64 = 5;
 const SCHED_RESET_ON_FORK: u64 = 0x40000000;
+const RESET_KEPT: u64 = 0x10000;         // F_SCHED: SCHED_RESET_ON_FORK is set
 const INT_SPAN: u64 = 0x100000000;          // an int argument's 32 bits
 
 /// Process p's nice value plus 20: 0 (nice -20) to 39 (nice 19).
@@ -134,7 +135,7 @@ fn lx_setpriority(k: &mut Kernel, pid: u64, which: u64, who: u64, prio: u64) -> 
   }
   let w = prio_who(k.procs, pid, which, who);
   let v = nice_arg(prio);
-  let root = cred_root(k.procs, pid);
+  let root = cap_has(k, pid, CAP_SYS_NICE);
   let euid = id_get(k.procs, pid, F_UID, true);
   let mut r = ESRCH;
   let mut p = 1;
@@ -205,7 +206,11 @@ fn sched_set(k: &mut Kernel, pid: u64, who: u64, policy: u64, param: u64, keep: 
 {
   let t = sched_target(k.procs, pid, who);
   let mut pol = policy % INT_SPAN;
+  let mut reset = 0;
   if !keep {
+    if pol & SCHED_RESET_ON_FORK != 0 {
+      reset = RESET_KEPT;
+    }
     pol = pol & (0xFFFFFFFF - SCHED_RESET_ON_FORK);
     if !good_policy(pol) {
       return EINVAL;
@@ -226,18 +231,19 @@ fn sched_set(k: &mut Kernel, pid: u64, who: u64, policy: u64, param: u64, keep: 
   }
   if keep {
     pol = pget(k.procs, t, F_SCHED) % 256;
+    reset = pget(k.procs, t, F_SCHED) / RESET_KEPT % 2 * RESET_KEPT;
   }
   if rt_policy(pol) {
     if prio < 1 || prio > 99 {
       return EINVAL;
     }
-    if !cred_root(k.procs, pid) {
+    if !cap_has(k, pid, CAP_SYS_NICE) {
       return EPERM;
     }
   } else if prio != 0 {
     return EINVAL;
   }
-  pset(&mut k.procs, t, F_SCHED, pol + 256 * prio);
+  pset(&mut k.procs, t, F_SCHED, pol + 256 * prio + reset);
   return 0;
 }
 
@@ -255,9 +261,9 @@ fn sched_get(k: &mut Kernel, pid: u64, who: u64, param: u64, want_param: bool) -
   }
   let s = pget(k.procs, t, F_SCHED);
   if !want_param {
-    return s % 256;
+    return s % 256 + s / RESET_KEPT % 2 * SCHED_RESET_ON_FORK;
   }
-  xfer_u64(&mut k.fs.xfer, 0, s / 256 % 100);
+  xfer_u64(&mut k.fs.xfer, 0, s / 256 % 256);
   return lx_put_out(&mut k, pid, param, 4);
 }
 
@@ -347,7 +353,7 @@ fn dl_set(k: &mut Kernel, p: u64, i: u64, v: u64)
 }
 
 /// A new process or thread c of p keeps its deadline parameters along with
-/// its policy.
+/// its policy, unless p asked for SCHED_RESET_ON_FORK.
 fn dl_fork(k: &mut Kernel, p: u64, c: u64)
   requires kok(k) && p < NPROC && c < NPROC
   ensures kok(k)
@@ -355,6 +361,19 @@ fn dl_fork(k: &mut Kernel, p: u64, c: u64)
   dl_set(&mut k, c, 0, dl_get(k, p, 0));
   dl_set(&mut k, c, 1, dl_get(k, p, 1));
   dl_set(&mut k, c, 2, dl_get(k, p, 2));
+  // SCHED_RESET_ON_FORK: the child starts as SCHED_OTHER, with no
+  // priority and a nice value no lower than 0, and without the flag.
+  let s = pget(k.procs, c, F_SCHED);
+  if s / RESET_KEPT % 2 == 1 {
+    if rt_policy(s % 256) || s % 256 == SCHED_DEADLINE {
+      pset(&mut k.procs, c, F_SCHED, 0);
+    } else {
+      pset(&mut k.procs, c, F_SCHED, s % 256);
+    }
+    if nice_of(k.procs, c) < 20 {
+      pset(&mut k.procs, c, F_NICE, 0);
+    }
+  }
 }
 
 /// sched_setattr with SCHED_DEADLINE for process t (runtime, deadline and
@@ -373,7 +392,7 @@ fn sched_set_dl(k: &mut Kernel, pid: u64, t: u64) -> u64
   if dl == 0 || run < 1024 || run > dl || dl > per || per >= 0x8000000000000000 {
     return EINVAL;
   }
-  if !may_sched(k.procs, pid, t) || !cred_root(k.procs, pid) {
+  if !may_sched(k.procs, pid, t) || !cap_has(k, pid, CAP_SYS_NICE) {
     return EPERM;
   }
   dl_set(&mut k, t, 0, run);
@@ -429,19 +448,19 @@ fn sched_setattr(k: &mut Kernel, pid: u64, who: u64, attr: u64, flags: u64) -> u
     if prio < 1 || prio > 99 {
       return EINVAL;
     }
-    if !cred_root(k.procs, pid) {
+    if !cap_has(k, pid, CAP_SYS_NICE) {
       return EPERM;
     }
   } else {
     if prio != 0 {
       return EINVAL;
     }
-    if nice < nice_of(k.procs, t) && !cred_root(k.procs, pid) {
+    if nice < nice_of(k.procs, t) && !cap_has(k, pid, CAP_SYS_NICE) {
       return EPERM;
     }
     pset(&mut k.procs, t, F_NICE, nice + 1);
   }
-  pset(&mut k.procs, t, F_SCHED, pol + 256 * prio);
+  pset(&mut k.procs, t, F_SCHED, pol + 256 * prio + sflags * RESET_KEPT);
   return 0;
 }
 
@@ -473,7 +492,8 @@ fn sched_getattr(k: &mut Kernel, pid: u64, who: u64, attr: u64, size: u64, flags
   }
   xfer_zero(&mut k, ATTR_SIZE);
   xfer_u64(&mut k.fs.xfer, 0, n + s % 256 * INT_SPAN);
-  xfer_u64(&mut k.fs.xfer, 16, nice + s / 256 % 100 * INT_SPAN);
+  xfer_u64(&mut k.fs.xfer, 8, s / RESET_KEPT % 2);     // sched_flags: SCHED_FLAG_RESET_ON_FORK
+  xfer_u64(&mut k.fs.xfer, 16, nice + s / 256 % 256 * INT_SPAN);
   if s % 256 == SCHED_DEADLINE {
     xfer_u64(&mut k.fs.xfer, 16, 0);
     xfer_u64(&mut k.fs.xfer, 24, dl_get(k, t, 0));

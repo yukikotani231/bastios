@@ -68,6 +68,15 @@ const READ_MAX: u64 = 262144;          // the most one read of a file returns
 const MAP_SHARED: u64 = 1;
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANONYMOUS: u64 = 0x20;
+const MAP_PRIVATE: u64 = 2;
+const MAP_SHARED_VALIDATE: u64 = 3;
+const MAP_32BIT: u64 = 0x40;
+const MAP_FIXED_NOREPLACE: u64 = 0x100000;
+// The flags MAP_SHARED_VALIDATE accepts (Linux's LEGACY_MAP_MASK): the
+// type, FIXED, ANONYMOUS, 32BIT, GROWSDOWN, DENYWRITE, EXECUTABLE, LOCKED,
+// NORESERVE, POPULATE, NONBLOCK, STACK, HUGETLB, the huge page sizes and
+// UNINITIALIZED; and FIXED_NOREPLACE.
+const MAP_LEGACY_MASK: u64 = 0xFC17F973;
 const PATH_MAX_LX: u64 = 256;           // the longest path read from user memory
 const PATH_OUT: u64 = 512;              // room for a name being built
 
@@ -227,7 +236,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     // the machine, POWER_OFF and HALT power it off. CAD_ON and CAD_OFF
     // (what Ctrl-Alt-Del does) succeed doing nothing: the console never
     // reboots on it.
-    if !cred_root(k.procs, pid) {
+    if !cap_has(k, pid, CAP_SYS_BOOT) {
       ret(&mut k.procs, pid, EPERM);
       return KEEP;
     }
@@ -1775,7 +1784,8 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if n == 0 || n > USER_SIZE || off % 4096 != 0 {
+  // In Linux's order: the offset, the descriptor, the length, the type.
+  if off % 4096 != 0 {
     return EINVAL;
   }
   let mut anon = flags / MAP_ANONYMOUS % 2 == 1;
@@ -1784,6 +1794,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     anon = z.kind == K_DEV && z.x == 2;     // /dev/zero (DEV_ZERO): fresh zero pages
   }
   let mut f = NO_FILE;
+  let mut mode = 0;
   if !anon {
     let d = fd_look(k, pid, fd);
     if d.kind != K_FILE {
@@ -1793,24 +1804,49 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     if f == NO_FILE || d.x >= FD_ROWS {
       return EBADF;
     }
-    // As on Linux: a file is mapped only if it was opened for reading, and
-    // a writable MAP_SHARED mapping only if for writing (and not O_APPEND).
-    let mode = fget(k.fs.ftab, d.x, FD_MODE);
-    if mode / O_READ % 2 == 0 || (flags % 4 == MAP_SHARED && prot / 2 % 2 == 1 && (mode / O_WRITE % 2 == 0 || mode / O_APPEND % 2 == 1)) {
-      return EACCES;
-    }
+    mode = fget(k.fs.ftab, d.x, FD_MODE);
+  }
+  if n == 0 {
+    return EINVAL;
+  }
+  if n > USER_SIZE {
+    return ENOMEM;
+  }
+  let ty = flags % 16;                      // MAP_TYPE
+  if ty != MAP_SHARED && ty != MAP_PRIVATE && ty != MAP_SHARED_VALIDATE {
+    return EINVAL;
+  }
+  let sh = ty != MAP_PRIVATE;
+  if ty == MAP_SHARED_VALIDATE && !anon && flags & !MAP_LEGACY_MASK != 0 {
+    return EOPNOTSUPP;                      // a flag this kernel does not know
+  }
+  if flags & MAP_32BIT != 0 {
+    return ENOMEM;                          // the window is far above 2 GiB: no room there
+  }
+  // As on Linux: a file is mapped only if it was opened for reading, and
+  // a writable MAP_SHARED mapping only if for writing (and not O_APPEND).
+  if !anon && (mode / O_READ % 2 == 0 || (sh && prot / 2 % 2 == 1 && (mode / O_WRITE % 2 == 0 || mode / O_APPEND % 2 == 1))) {
+    return EACCES;
   }
   let pages = (n + 4095) / 4096;
-  let sh = flags % 4 == MAP_SHARED;
   // A shared file mapping maps the page cache's pages (src/pcache.bastio)
   // instead of fresh ones.
   let cached = sh && !anon && f != NO_FILE;
   let mut at = 0;
-  if flags / MAP_FIXED % 2 == 1 {
+  let noreplace = flags & MAP_FIXED_NOREPLACE != 0;
+  if flags / MAP_FIXED % 2 == 1 || noreplace {
     if addr % 4096 != 0 || addr < USER_BASE || addr - USER_BASE > STACK_FIRST * 4096 || pages > STACK_FIRST - (addr - USER_BASE) / 4096 {
+      if noreplace && addr % 4096 == 0 {
+        return ENOMEM;                      // outside the window: nothing can go there
+      }
       return EINVAL;
     }
     at = addr - USER_BASE;
+    // MAP_FIXED_NOREPLACE: any page mapped in the range is EEXIST. (A
+    // PROT_NONE reservation maps nothing, so it is not seen.)
+    if noreplace && win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, at / 4096, at / 4096 + pages, 0) != 0 {
+      return EEXIST;
+    }
     // What was there goes, read-only pages too: the new mapping is writable.
     map_forget(&mut k, pid, at / 4096, at / 4096 + pages, false);
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
@@ -1880,7 +1916,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     }
     done = done + step;
   }
-  if flags % 4 == MAP_SHARED {
+  if sh {
     map_record(&mut k, pid, fd, at / 4096, pages, off);
   }
   read_only(&mut k, pid, at / 4096, pages, prot);

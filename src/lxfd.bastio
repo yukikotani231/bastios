@@ -113,7 +113,7 @@ fn pipe_room(t: &Buf, p: u64, count: u64) -> u64
 /// F_GETPIPE_SZ and F_SETPIPE_SZ on pipe p. A new size is rounded up to
 /// a power of two pages; it may not drop below what the pipe holds
 /// (EBUSY) or rise past PIPE_CAP, /proc/sys/fs/pipe-max-size (EPERM, or
-/// ENOMEM for root, whom Linux would let go further).
+/// ENOMEM with CAP_SYS_RESOURCE, which Linux would let go further).
 fn pipe_size(k: &mut Kernel, pid: u64, p: u64, set: bool, arg: u64) -> u64
   requires kok(k) && pid < NPROC && p < NPIPES
   ensures kok(k)
@@ -122,8 +122,11 @@ fn pipe_size(k: &mut Kernel, pid: u64, p: u64, set: bool, arg: u64) -> u64
     return pipe_cap(k.pipes, p);
   }
   let want = arg % 0x100000000;
+  if want > 0x80000000 {
+    return EINVAL;                          // past the largest size Linux rounds to
+  }
   if want > PIPE_CAP {
-    if cred_root(k.procs, pid) {
+    if cap_has(k, pid, CAP_SYS_RESOURCE) {
       return ENOMEM;
     }
     return EPERM;

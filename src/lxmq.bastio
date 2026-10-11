@@ -217,7 +217,7 @@ fn pq_create(k: &mut Kernel, pid: u64, n: u64, mode: u64, attr: u64) -> u64
     if max == 0 || size == 0 || max > PQ_HARD_MAX || size > PQ_HARD_SIZE {
       return EINVAL;                        // also a negative one
     }
-    if !cred_root(k.procs, pid) && (max > PQ_DEF_MAX || size > PQ_DEF_SIZE) {
+    if !cap_has(k, pid, CAP_SYS_RESOURCE) && (max > PQ_DEF_MAX || size > PQ_DEF_SIZE) {
       return EINVAL;
     }
   }

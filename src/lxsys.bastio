@@ -115,7 +115,7 @@ fn lx_setname(k: &mut Kernel, pid: u64, base: u64, bit: u64, va: u64, n: u64) ->
   requires kok(k) && pid < NPROC && (base == NM_HOST || base == NM_DOM) && (bit == 1 || bit == 2)
   ensures kok(k)
 {
-  if !cred_root(k.procs, pid) {
+  if !cap_has(k, pid, CAP_SYS_ADMIN) {
     return EPERM;
   }
   if n > NAME_MAX {
@@ -222,7 +222,7 @@ fn lx_clock_settime(k: &mut Kernel, pid: u64, clk: u64, va: u64) -> u64
   if clk != CLOCK_REALTIME {
     return EINVAL;                          // the other clocks cannot be set
   }
-  if !cred_root(k.procs, pid) {
+  if !cap_has(k, pid, CAP_SYS_TIME) {
     return EPERM;
   }
   return set_wall(&mut k, t.ns);
@@ -234,7 +234,7 @@ fn lx_settimeofday(k: &mut Kernel, pid: u64, tv: u64) -> u64
   ensures kok(k)
 {
   if tv == 0 {
-    if !cred_root(k.procs, pid) {
+    if !cap_has(k, pid, CAP_SYS_TIME) {
       return EPERM;
     }
     return 0;
@@ -243,7 +243,7 @@ fn lx_settimeofday(k: &mut Kernel, pid: u64, tv: u64) -> u64
   if t.err != 0 {
     return t.err;
   }
-  if !cred_root(k.procs, pid) {
+  if !cap_has(k, pid, CAP_SYS_TIME) {
     return EPERM;
   }
   return set_wall(&mut k, t.ns);
@@ -403,7 +403,7 @@ fn lx_adjtimex(k: &mut Kernel, pid: u64, va: u64) -> u64
     return EFAULT;
   }
   let modes = get_u64(k.fs.xfer, 0) % 0x100000000;
-  let root = cred_root(k.procs, pid);
+  let root = cap_has(k, pid, CAP_SYS_TIME);
   let mut offset = get(k.sys, TX_ADJ);
   if modes / ADJ_ADJTIME % 2 == 1 {
     if modes % 2 == 0 {

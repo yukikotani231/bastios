@@ -85,6 +85,7 @@ fn pr_fork(k: &mut Kernel, p: u64, c: u64)
   rl_fork(&mut k, p, c);                  // and the resource limits
   dl_fork(&mut k, p, c);                  // and the deadline parameters
   jc_set(&mut k, c, 0);                   // nothing to report about the child yet
+  cap_fork(&mut k, p, c);                 // and the capabilities (src/lxcap.bastio)
 }
 
 /// execve: the name goes back to the program's.
@@ -96,6 +97,7 @@ fn pr_exec(k: &mut Kernel, p: u64)
   pr_set(&mut k, p, PRW_NAME + 1, 0);
   rl_exec(&mut k, p);                     // and nothing stays locked
   jc_exec(&mut k, p);                     // and setpgid may no longer move it
+  cap_exec(&mut k, p);                    // and the bounding set gives the capabilities
 }
 
 /// Process p is ending: each child that asked for a parent-death signal
@@ -131,6 +133,7 @@ fn pr_clear(k: &mut Kernel, p: u64)
     w = w + 1;
   }
   rl_clear(&mut k, p);
+  cap_clear(&mut k, p);
 }
 
 /// prctl(op, a, ...) for process pid: the result, or -EINVAL for an
@@ -139,6 +142,9 @@ fn lx_prctl(k: &mut Kernel, pid: u64, op: u64, a: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if op == 23 || op == 24 || op == 27 || op == 28 {
+    return cap_prctl(&mut k, pid, op, a);   // capabilities (src/lxcap.bastio)
+  }
   if op == PR_SET_NAME {
     // Up to 15 bytes of the string at a, read a byte at a time so that a
     // short name at the end of a page is fine.

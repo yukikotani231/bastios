@@ -37,6 +37,12 @@ static void segv(int s) { (void)s; siglongjmp(back, 1); }
 /* Three connections in turn to a server that accepts, greets and closes
  * each: the closed ones must not be handed out by accept again. */
 static void nop(int s) { (void)s; }
+/* <linux/capability.h>, which musl does not ship. */
+struct __user_cap_header_struct { unsigned version; int pid; };
+struct __user_cap_data_struct { unsigned effective, permitted, inheritable; };
+#define _LINUX_CAPABILITY_VERSION_3 0x20080522
+#define CAP_SETPCAP 8
+#define CAP_SYS_TIME 25
 static struct rnode { struct rnode *next; unsigned word; } rnode;
 static struct { struct rnode *next; long off; struct rnode *pending; } rhead;
 static long rgot = -1;
@@ -383,5 +389,63 @@ int main(void) {
            clone(robust_thread, robust_stack + sizeof robust_stack, CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM, 0);
            for (int i = 0; i < 200 && *(volatile unsigned *)&rnode.word != 0x40000000; i++) usleep(10000);
            rgot > 0 && rnode.word == 0x40000000; }));
+    EXPECT("capget reports root's capabilities; an unknown version is EINVAL and gets the preferred one", ({
+           struct __user_cap_header_struct h = { _LINUX_CAPABILITY_VERSION_3, 0 }; struct __user_cap_data_struct d[2];
+           int r = syscall(SYS_capget, &h, d);
+           struct __user_cap_header_struct bad = { 0x12345678, 0 }; int r2 = syscall(SYS_capget, &bad, d); int e2 = errno;
+           r == 0 && (d[0].effective >> CAP_SYS_TIME) % 2 == 1 && (d[0].permitted >> CAP_SETPCAP) % 2 == 1
+             && r2 == -1 && e2 == EINVAL && bad.version == _LINUX_CAPABILITY_VERSION_3; }));
+    EXPECT("capset drops capabilities: then setting the clock, PR_CAPBSET_DROP and PR_SET_SECUREBITS are EPERM", ({
+           pid_t c = fork();
+           if (c == 0) {
+               struct __user_cap_header_struct h = { _LINUX_CAPABILITY_VERSION_3, 0 }; struct __user_cap_data_struct d[2];
+               syscall(SYS_capget, &h, d);
+               int bset = prctl(PR_CAPBSET_READ, CAP_SYS_TIME, 0, 0, 0);
+               d[0].effective &= ~((1u << CAP_SYS_TIME) | (1u << CAP_SETPCAP));
+               int r = syscall(SYS_capset, &h, d);
+               struct timeval tv; gettimeofday(&tv, 0);
+               int t = settimeofday(&tv, 0); int te = errno;
+               int b = prctl(PR_CAPBSET_DROP, 1, 0, 0, 0); int be = errno;
+               int sb = prctl(PR_SET_SECUREBITS, 0, 0, 0, 0); int se = errno;
+               struct __user_cap_data_struct d2[2]; syscall(SYS_capget, &h, d2);
+               _exit(bset == 1 && r == 0 && t == -1 && te == EPERM && b == -1 && be == EPERM && sb == -1 && se == EPERM
+                     && (d2[0].effective >> CAP_SYS_TIME) % 2 == 0 && (d2[0].permitted >> CAP_SYS_TIME) % 2 == 1 ? 0 : 1);
+           }
+           int st; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("capset may not add to the permitted set, nor change another process", ({
+           pid_t c = fork();
+           if (c == 0) {
+               struct __user_cap_header_struct h = { _LINUX_CAPABILITY_VERSION_3, 0 }; struct __user_cap_data_struct d[2];
+               syscall(SYS_capget, &h, d);
+               d[0].permitted &= ~(1u << CAP_SYS_TIME); d[0].effective &= ~(1u << CAP_SYS_TIME);
+               int r = syscall(SYS_capset, &h, d);
+               d[0].permitted |= 1u << CAP_SYS_TIME;
+               int r2 = syscall(SYS_capset, &h, d); int e2 = errno;
+               h.pid = getppid(); int r3 = syscall(SYS_capset, &h, d); int e3 = errno;
+               _exit(r == 0 && r2 == -1 && e2 == EPERM && r3 == -1 && e3 == EPERM ? 0 : 1);
+           }
+           int st; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("mmap: MAP_FIXED_NOREPLACE over a mapping is EEXIST, an unknown MAP_SHARED_VALIDATE flag EOPNOTSUPP, no type EINVAL", ({
+           char *p = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           void *q = mmap(p, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0); int qe = errno;
+           int fd = open("/tmp/t_ltp2_v", O_RDWR | O_CREAT | O_TRUNC, 0600); ftruncate(fd, 4096);
+           void *v = mmap(0, 4096, PROT_READ, MAP_SHARED_VALIDATE | 0x400, fd, 0); int ve = errno;
+           void *w = mmap(0, 4096, PROT_READ, 0, fd, 0); int we = errno;
+           void *x = mmap(0, 0, PROT_READ, MAP_SHARED, -1, 0); int xe = errno;
+           close(fd); unlink("/tmp/t_ltp2_v"); munmap(p, 8192);
+           q == MAP_FAILED && qe == EEXIST && v == MAP_FAILED && ve == EOPNOTSUPP && w == MAP_FAILED && we == EINVAL
+             && x == MAP_FAILED && xe == EBADF; }));
+    EXPECT("SCHED_RESET_ON_FORK: the child of a SCHED_FIFO process starts as SCHED_OTHER with priority 0", ({
+           pid_t c = fork();
+           if (c == 0) {
+               struct sched_param sp = { 10 };
+               int r = syscall(SYS_sched_setscheduler, 0, SCHED_FIFO | 0x40000000, &sp);
+               int me = syscall(SYS_sched_getscheduler, 0);
+               pid_t g = fork(); if (g == 0) _exit(0);
+               int gp = syscall(SYS_sched_getscheduler, g); struct sched_param gq = { 7 }; syscall(SYS_sched_getparam, g, &gq);
+               waitpid(g, 0, 0);
+               _exit(r == 0 && me == (SCHED_FIFO | 0x40000000) && gp == SCHED_OTHER && gq.sched_priority == 0 ? 0 : 1);
+           }
+           int st; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
     return done();
 }

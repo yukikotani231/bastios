@@ -1,0 +1,253 @@
+// Capabilities (capget, capset, PR_CAPBSET_*, PR_*_SECUREBITS).
+//
+// Who holds a capability still follows from the user ids, as before: a
+// process whose effective user is root holds every capability, and any
+// other holds none. What this file adds is giving them up. Each process
+// has CAP_W words in k.sys from SYS_CAP: the capabilities dropped from
+// its effective set, those dropped from its permitted set, its
+// inheritable set, and those dropped from its bounding set. All 0 means
+// the full sets of root. A fork copies the words; execve gives back what
+// the bounding set allows (as Linux does for root) and keeps the
+// inheritable set.
+//
+// Only some checks ask for a capability (cap_has) instead of root:
+// CAP_SYS_TIME (setting the clock, adjtimex), CAP_SYS_RESOURCE (pipe
+// sizes, raising a hard limit, message queue sizes), CAP_SYS_NICE
+// (priorities and policies), CAP_IPC_LOCK (mlock past RLIMIT_MEMLOCK),
+// CAP_NET_BIND_SERVICE (ports below 1024), CAP_SYS_ADMIN (host names,
+// namespaces), CAP_SYS_BOOT (reboot) and CAP_SETPCAP (the bounding set).
+// The others (file permissions, credentials, signals) still test for an
+// effective user of root.
+
+import "lxprctl.bastio";
+
+const CAP_W: u64 = 4;
+const CAPW_EFF: u64 = 0;                 // dropped from the effective set
+const CAPW_PERM: u64 = 1;                // dropped from the permitted set
+const CAPW_INH: u64 = 2;                 // the inheritable set
+const CAPW_BSET: u64 = 3;                // dropped from the bounding set
+const CAP_LAST: u64 = 40;                // CAP_CHECKPOINT_RESTORE
+const CAP_FULL: u64 = 0x1FFFFFFFFFF;     // capabilities 0 to CAP_LAST
+const CAP_V1: u64 = 0x19980330;          // _LINUX_CAPABILITY_VERSION_1: 32-bit sets
+const CAP_V2: u64 = 0x20071026;
+const CAP_V3: u64 = 0x20080522;          // the version this kernel prefers
+
+fn cap_word(k: &Kernel, p: u64, w: u64) -> u64
+  requires kok(k) && p < NPROC && w < CAP_W
+{
+  return get(k.sys, SYS_CAP + p * CAP_W + w) & CAP_FULL;
+}
+
+fn cap_put(k: &mut Kernel, p: u64, w: u64, v: u64)
+  requires kok(k) && p < NPROC && w < CAP_W
+  ensures kok(k)
+{
+  k.sys = set(k.sys, SYS_CAP + p * CAP_W + w, v & CAP_FULL);
+}
+
+/// Process p's effective set: everything not dropped, for root.
+fn cap_eff(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+{
+  if !cred_root(k.procs, p) {
+    return 0;
+  }
+  return CAP_FULL & !cap_word(k, p, CAPW_EFF) & !cap_word(k, p, CAPW_PERM);
+}
+
+/// Process p's permitted set: kept while any of its user ids is root.
+fn cap_perm(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+{
+  let r = id_get(k.procs, p, F_UID, false);
+  let e = id_get(k.procs, p, F_UID, true);
+  let s = id_get(k.procs, p, F_SUID, false);
+  if r != 0 && e != 0 && s != 0 {
+    return 0;
+  }
+  return CAP_FULL & !cap_word(k, p, CAPW_PERM);
+}
+
+/// Whether process p holds capability c in its effective set.
+fn cap_has(k: &Kernel, p: u64, c: u64) -> bool
+  requires kok(k) && p < NPROC && c <= CAP_LAST
+{
+  return (cap_eff(k, p) >> c) % 2 == 1;
+}
+
+
+/// A new process or thread c of p: the sets carry over.
+fn cap_fork(k: &mut Kernel, p: u64, c: u64)
+  requires kok(k) && p < NPROC && c < NPROC
+  ensures kok(k)
+{
+  let mut w = 0;
+  while w < CAP_W
+    invariant w <= CAP_W && kok(k)
+  {
+    cap_put(&mut k, c, w, cap_word(k, p, w));
+    w = w + 1;
+  }
+}
+
+/// execve: the effective and permitted sets become the bounding set.
+fn cap_exec(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let b = cap_word(k, p, CAPW_BSET);
+  cap_put(&mut k, p, CAPW_EFF, b);
+  cap_put(&mut k, p, CAPW_PERM, b);
+}
+
+/// Clears process p's words for the next process in its slot.
+fn cap_clear(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let mut w = 0;
+  while w < CAP_W
+    invariant w <= CAP_W && kok(k)
+  {
+    cap_put(&mut k, p, w, 0);
+    w = w + 1;
+  }
+}
+
+/// The header at hdr: its version (EINVAL for an unknown one, which is
+/// replaced by CAP_V3 there) and pid. Returns the number of 32-bit set
+/// structures the version moves (1 or 2), or -errno; the pid is in
+/// k.fs.xfer bytes 4..8.
+fn cap_header(k: &mut Kernel, pid: u64, hdr: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if hdr == 0 || copy_from_user(&mut k.spaces, pid, hdr, &mut k.fs.xfer, 8) != 8 {
+    return EFAULT;
+  }
+  let v = get_u64(k.fs.xfer, 0) % 0x100000000;
+  if v == CAP_V1 {
+    return 1;
+  }
+  if v == CAP_V2 || v == CAP_V3 {
+    return 2;
+  }
+  if !put_user_u32(&mut k, pid, hdr, CAP_V3) {
+    return EFAULT;
+  }
+  return EINVAL;
+}
+
+/// capget(hdr, data): the effective, permitted and inheritable sets of
+/// the process hdr names (0: the caller).
+fn lx_capget(k: &mut Kernel, pid: u64, hdr: u64, data: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = cap_header(&mut k, pid, hdr);
+  if data == 0 && (n == 1 || n == 2 || n == EINVAL) {
+    return 0;                               // asking only for the version
+  }
+  if n != 1 && n != 2 {
+    return n;
+  }
+  let who = get_u64(k.fs.xfer, 0) / 0x100000000;
+  if who >= 0x80000000 {
+    return EINVAL;
+  }
+  let mut t = pid;
+  if who != 0 {
+    t = who;
+  }
+  if t >= NPROC || state(k.procs, t) == FREE {
+    return ESRCH;
+  }
+  let e = cap_eff(k, t);
+  let p = cap_perm(k, t);
+  let i = cap_word(k, t, CAPW_INH);
+  xfer_u64(&mut k.fs.xfer, 0, e % 0x100000000 + 0x100000000 * (p % 0x100000000));
+  xfer_u64(&mut k.fs.xfer, 8, i % 0x100000000 + 0x100000000 * (e / 0x100000000));
+  xfer_u64(&mut k.fs.xfer, 16, p / 0x100000000 + 0x100000000 * (i / 0x100000000));
+  if copy_to_user(&mut k.spaces, pid, data, k.fs.xfer, 12 * n) != 12 * n {
+    return EFAULT;
+  }
+  return 0;
+}
+
+/// capset(hdr, data): the caller's own sets only (EPERM for another
+/// process). A set may only shrink: the new permitted set within the old
+/// one, the new effective set within the new permitted one, and the new
+/// inheritable set within the old inheritable and permitted sets.
+fn lx_capset(k: &mut Kernel, pid: u64, hdr: u64, data: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = cap_header(&mut k, pid, hdr);
+  if n != 1 && n != 2 {
+    return n;
+  }
+  let who = get_u64(k.fs.xfer, 0) / 0x100000000;
+  if who >= 0x80000000 {
+    return EINVAL;
+  }
+  if who != 0 && who != pid {
+    return EPERM;
+  }
+  xfer_u64(&mut k.fs.xfer, 0, 0);
+  xfer_u64(&mut k.fs.xfer, 8, 0);
+  xfer_u64(&mut k.fs.xfer, 16, 0);
+  if copy_from_user(&mut k.spaces, pid, data, &mut k.fs.xfer, 12 * n) != 12 * n {
+    return EFAULT;
+  }
+  let w0 = get_u64(k.fs.xfer, 0);
+  let w1 = get_u64(k.fs.xfer, 8);
+  let w2 = get_u64(k.fs.xfer, 16);
+  let e = (w0 % 0x100000000 + 0x100000000 * (w1 / 0x100000000 % 0x200)) & CAP_FULL;
+  let p = (w0 / 0x100000000 + 0x100000000 * (w2 % 0x200)) & CAP_FULL;
+  let i = (w1 % 0x100000000 + 0x100000000 * (w2 / 0x100000000 % 0x200)) & CAP_FULL;
+  let op = cap_perm(k, pid);
+  let oi = cap_word(k, pid, CAPW_INH);
+  if p & !op != 0 || e & !p != 0 || i & !(oi | op) != 0 {
+    return EPERM;
+  }
+  cap_put(&mut k, pid, CAPW_PERM, CAP_FULL & !p);
+  cap_put(&mut k, pid, CAPW_EFF, CAP_FULL & !e);
+  cap_put(&mut k, pid, CAPW_INH, i);
+  return 0;
+}
+
+/// prctl's capability options: PR_CAPBSET_READ (23), PR_CAPBSET_DROP
+/// (24), PR_GET_SECUREBITS (27) and PR_SET_SECUREBITS (28). No securebits
+/// are kept: only 0 may be set. EINVAL for any other option.
+fn cap_prctl(k: &mut Kernel, pid: u64, op: u64, a: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if op == 23 || op == 24 {
+    if op == 24 && !cap_has(k, pid, CAP_SETPCAP) {
+      return EPERM;
+    }
+    if a > CAP_LAST {
+      return EINVAL;
+    }
+    let b = cap_word(k, pid, CAPW_BSET);
+    if op == 23 {
+      return 1 - (b >> a) % 2;
+    }
+    cap_put(&mut k, pid, CAPW_BSET, b | (1 << a));
+    return 0;
+  }
+  if op == 27 {
+    return 0;
+  }
+  if op == 28 {
+    if !cap_has(k, pid, CAP_SETPCAP) {
+      return EPERM;
+    }
+    if a != 0 {
+      return EINVAL;
+    }
+    return 0;
+  }
+  return EINVAL;
+}
