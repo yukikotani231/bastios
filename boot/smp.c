@@ -44,6 +44,7 @@ static int x2apic;                  /* every local APIC runs in x2APIC mode: reg
 static uint32_t lapic_ticks_10ms;   /* local APIC timer count for 10 ms, divide by 16 */
 static int idle_untimed;            /* an idle AP stops its periodic timer: the kernel wakes it (V_WAKE) */
 static uint32_t bsp_lapic_tick;     /* no PIT: the BSP's 10 ms tick comes from its local APIC timer */
+#define WAKE_VECTOR 0x32            /* V_WAKE in src/lapic.bastio: one processor to the others */
 #define BSP_TICK_VECTOR 32          /* the vector the kernel takes the PIT's tick on (V_TIMER) */
 static uint32_t timer_from;         /* what it was counted against: 1 HPET, 2 PM timer, 3 PIT, 4 none (a guess), 5 RTC */
 static uint64_t tsc_hz;             /* the time-stamp counter's rate, measured with the PIT or the RTC (else 0) */
@@ -386,7 +387,16 @@ void bst_ap_main(void) {
             __atomic_fetch_add(&work_done, 1, __ATOMIC_RELEASE);
             continue;
         }
-        __asm__ volatile ("sti; hlt; cli");
+        /* The kernel sends V_WAKE to every other processor, parked ones
+         * too (one still parked when smp_run starts, or one that left the
+         * scheduler at power off). The kernel acknowledges the V_WAKEs its
+         * scheduler takes; one taken here must be acknowledged here, or it
+         * stays in service and masks the local timer (same priority class)
+         * and every later V_WAKE for good. */
+        uint64_t *taken = (uint64_t *)(this_core() + CORE_IDLE);
+        *taken = 0;
+        __asm__ volatile ("sti; hlt; cli" ::: "memory");
+        if (*taken == WAKE_VECTOR) lw(0xB0, 0);
     }
 }
 

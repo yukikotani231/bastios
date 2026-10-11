@@ -19,7 +19,7 @@
 #define CORE_CTX       0                        /* 21 words: the saved user context */
 #define CORE_KRSP      168                      /* kernel %rsp while in user mode */
 #define CORE_URSP      176                      /* user %rsp at `syscall` */
-#define CORE_IDLE      184                      /* vector that ended bst_cpu_halt */
+#define CORE_IDLE      184                      /* vector that ended bst_cpu_halt, or a parked AP's hlt */
 #define CORE_TRAP_TOP  192                      /* end of the block, for `syscall` */
 #define CORE_TSS       256                      /* 104-byte task state segment */
 #define CORE_IST_TOP   0x1400                   /* top of the 4 KiB IST1 stack above the TSS */

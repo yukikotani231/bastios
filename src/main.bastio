@@ -204,6 +204,11 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
   ensures !(result is Job::Run) ==> mmu_root(mmu) == KERNEL_ROOT
 {
   if s.stop {
+    // An idle application processor sleeps up to a second (see below):
+    // wake it to leave too.
+    if s.idle > 0 {
+      lapic_wake(&mut s.apic);
+    }
     return Job::Stop;
   }
   let mut woke = false;
