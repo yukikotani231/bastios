@@ -121,7 +121,7 @@ fn lx_setname(k: &mut Kernel, pid: u64, base: u64, bit: u64, va: u64, n: u64) ->
   if n > NAME_MAX {
     return EINVAL;                          // a negative int is huge here too
   }
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, n) != n {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, n) != n {
     return EFAULT;
   }
   let mut i = 0;
@@ -400,7 +400,7 @@ fn lx_adjtimex(k: &mut Kernel, pid: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, TIMEX_SIZE) != TIMEX_SIZE {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, TIMEX_SIZE) != TIMEX_SIZE {
     return EFAULT;
   }
   let modes = get_u64(k.fs.xfer, 0) % 0x100000000;
@@ -427,7 +427,7 @@ fn lx_adjtimex(k: &mut Kernel, pid: u64, va: u64) -> u64
     offset = get(k.sys, TX_OFFSET);
   }
   tx_fill(&mut k, modes, offset);
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, TIMEX_SIZE) != TIMEX_SIZE {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, TIMEX_SIZE) != TIMEX_SIZE {
     return EFAULT;
   }
   if (get(k.sys, TX_STATUS) ^ STA_UNSYNC) / STA_UNSYNC % 2 == 1 {

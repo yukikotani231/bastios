@@ -204,6 +204,23 @@ static int device_nodes(void) {
     return ok;
 }
 
+/* A name ending in "/" or "/." must be a directory: a file there is
+ * ENOTDIR, and open(O_CREAT) does not make a file under such a name
+ * (shutil.copyfile to "missing_dir/" relies on the EISDIR). */
+static int trailing_slash(void) {
+    struct stat st;
+    int ok = make("pt_f") && mkdir("pt_d", 0755) == 0
+        && fails(open("pt_new/", O_WRONLY | O_CREAT, 0644), EISDIR) && fails(access("pt_new", F_OK), ENOENT)
+        && fails(open("pt_new/", O_RDONLY), ENOENT)
+        && fails(open("pt_f/", O_RDONLY), ENOTDIR) && fails(open("pt_f/.", O_RDONLY), ENOTDIR)
+        && fails(stat("pt_f/", &st), ENOTDIR) && fails(lstat("pt_f/", &st), ENOTDIR)
+        && fails(unlink("pt_f/"), ENOTDIR) && fails(rename("pt_f", "pt_g/"), ENOTDIR) && access("pt_f", F_OK) == 0
+        && stat("pt_d/", &st) == 0 && S_ISDIR(st.st_mode) && stat("pt_d/.", &st) == 0
+        && mkdir("pt_e/", 0755) == 0 && rmdir("pt_e/") == 0;
+    unlink("pt_f"); rmdir("pt_d"); rmdir("pt_e"); unlink("pt_new");
+    return ok;
+}
+
 int main(void) {
     setup();
     EXPECT("a path in unmapped memory is EFAULT", unreadable_is_efault());
@@ -217,5 +234,8 @@ int main(void) {
     EXPECT("sendfile checks its descriptors and offset; statx its flags", sendfile_statx());
     EXPECT("chroot keeps absolute paths, links and .. inside the new root", chroot_jail());
     EXPECT("mknod makes device and socket nodes; a device node opens its device", device_nodes());
+    EXPECT("a name ending in / or /. must be a directory", trailing_slash());
+    EXPECT("execve of a missing /bin program is ENOENT", ({ char *av[] = {"nope", 0};
+           fails(execve("/bin/no_such_program", av, 0), ENOENT); }));
     return done();
 }

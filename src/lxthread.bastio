@@ -47,11 +47,10 @@ const CLONE_SYSVSEM: u64 = 0x40000;
 const CLONE_DETACHED: u64 = 0x400000;
 const CLONE_IO: u64 = 0x80000000;
 
-const SIGACT_ROW: u64 = 256;         // SIGACT_LEN / NPROC
 
 /// The leader of p's thread group: p itself for a process without threads.
 fn tgid(procs: &Buf, p: u64) -> u64
-  requires len(procs) == PTAB_LEN && p < NPROC
+  requires ptab_ok(procs) && p < NPROC
   ensures result < NPROC
 {
   let g = pget(procs, p, F_TGID);
@@ -63,7 +62,7 @@ fn tgid(procs: &Buf, p: u64) -> u64
 
 /// q is a live member of the thread group led by g (g itself included).
 fn in_group(procs: &Buf, q: u64, g: u64) -> bool
-  requires len(procs) == PTAB_LEN && q < NPROC
+  requires ptab_ok(procs) && q < NPROC
 {
   return q != 0 && state(procs, q) != FREE && pget(procs, q, F_TGID) != 0 && pget(procs, q, F_TGID) == g;
 }
@@ -104,7 +103,7 @@ fn holder(k: &mut Kernel, g: u64) -> u64
 /// behind by a thread that has since blocked, died or moved on to another
 /// call stops nobody.
 fn quieting(procs: &Buf, q: u64) -> bool
-  requires len(procs) == PTAB_LEN && q < NPROC
+  requires ptab_ok(procs) && q < NPROC
 {
   let st = state(procs, q);
   let n = pget(procs, q, F_REGS + R_RAX);       // the call it will run again (lx_retry)
@@ -197,13 +196,20 @@ fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
   pset(&mut k.procs, p, F_BRK0, pget(k.procs, h, F_BRK0));
   pset(&mut k.procs, p, F_MMAP, pget(k.procs, h, F_MMAP));
   pset(&mut k.procs, p, F_PROG, pget(k.procs, h, F_PROG));
-  swap_words(&mut k.lxfd, h * LXNFD, p * LXNFD, LXNFD);
-  swap_words(&mut k.cwd, h * CWD_STRIDE, p * CWD_STRIDE, CWD_STRIDE);
-  swap_words(&mut k.sigact, h * SIGACT_ROW, p * SIGACT_ROW, SIGACT_ROW);
+  if (h + 1) * LXNFD <= len(k.lxfd) && (p + 1) * LXNFD <= len(k.lxfd) {
+    swap_words(&mut k.lxfd, h * LXNFD, p * LXNFD, LXNFD);
+  }
+  if (h + 1) * CWD_STRIDE <= len(k.cwd) && (p + 1) * CWD_STRIDE <= len(k.cwd) {      // live processes have rows
+    swap_words(&mut k.cwd, h * CWD_STRIDE, p * CWD_STRIDE, CWD_STRIDE);
+  }
+  if (h + 1) * SIGACT_ROW <= len(k.sigact) && (p + 1) * SIGACT_ROW <= len(k.sigact) {
+    swap_words(&mut k.sigact, h * SIGACT_ROW, p * SIGACT_ROW, SIGACT_ROW);
+  }
   swap_words(&mut k.alarms, h * 2, p * 2, 2);
   swap_words(&mut k.maps, h * MAP_N * MAP_W, p * MAP_N * MAP_W, MAP_N * MAP_W);
   swap_words(&mut k.holes, h * HOLE_N * 2, p * HOLE_N * 2, HOLE_N * 2);
   swap_words(&mut k.lazy, h * LZ_W, p * LZ_W, LZ_W);
+  swap_words(&mut k.anon, h * AN_N * 2, p * AN_N * 2, AN_N * 2);
   swap_words(&mut k.alarms, PT_BASE + h * PT_N * PT_W, PT_BASE + p * PT_N * PT_W, PT_N * PT_W);
   return true;
 }
@@ -318,7 +324,7 @@ fn user_u32(k: &mut Kernel, pid: u64, va: u64) -> Word
   requires kok(k) && pid < NPROC
   ensures kok(k) && result.v < 0x100000000
 {
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 4) != 4 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 4) != 4 {
     return Word { ok: false, v: 0 };
   }
   return Word { ok: true, v: rd32(k.fs.xfer, 0) };
@@ -329,7 +335,7 @@ fn put_user_u32(k: &mut Kernel, pid: u64, va: u64, v: u64) -> bool
   ensures kok(k)
 {
   xfer_u64(&mut k.fs.xfer, 0, v % 0x100000000);
-  return copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, 4) == 4;
+  return copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, 4) == 4;
 }
 
 // ---------------------------------------------------------------- clone
@@ -344,7 +350,10 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   if flags & CLONE_VM == 0 || flags & CLONE_SIGHAND == 0 || flags & CLONE_VFORK != 0 {
     return EINVAL;
   }
-  let c = free_pid(k.procs);
+  if !cow_break_all(&mut k, pid) {
+    return ENOMEM;                          // its copy-on-write pages need copies first (src/lxcow.bastio)
+  }
+  let c = new_pid(&mut k);
   if c == 0 {
     return EAGAIN;
   }
@@ -353,6 +362,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
     return EAGAIN;                          // a FREE row has no space; check it
   }
   hole_clear(&mut k, c);                    // the group's holes stay with its holder
+  anon_clear(&mut k, c);
   lazy_clear(&mut k, c);
   let fp = find_free(&mut k.mem);
   if fp >= NPAGES {
@@ -521,7 +531,7 @@ fn lx_thread_exit(k: &mut Kernel, mmu: &Mmu, pid: u64)
 
 /// Whether thread pid's exit ends only that thread.
 fn thread_only(procs: &Buf, pid: u64) -> bool
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
 {
   return pget(procs, pid, F_TGID) != 0 && tgid(procs, pid) != pid;
 }
@@ -573,7 +583,7 @@ fn thread_exec(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
 // its call with 0 instead, as if it had returned.
 
 fn futex_waiting(procs: &Buf, q: u64, g: u64, addr: u64) -> bool
-  requires len(procs) == PTAB_LEN && q < NPROC
+  requires ptab_ok(procs) && q < NPROC
 {
   let st = state(procs, q);
   return (st == FUTEXWAIT || st == READY) && (g == 0 || tgid(procs, q) == g) && pget(procs, q, F_FUTEX) == addr
@@ -584,7 +594,7 @@ fn futex_waiting(procs: &Buf, q: u64, g: u64, addr: u64) -> bool
 /// now, between two tries of the call (a timed wait tries again each time
 /// it is scheduled, src/lxtime.bastio's wait_until).
 fn futex_polling(procs: &Buf, q: u64, g: u64, addr: u64) -> bool
-  requires len(procs) == PTAB_LEN && q < NPROC
+  requires ptab_ok(procs) && q < NPROC
 {
   return state(procs, q) == RUNNING && (g == 0 || tgid(procs, q) == g) && pget(procs, q, F_FUTEX) == addr
     && pget(procs, q, F_RESTART) >= 2 && pget(procs, q, F_REGS + R_RAX) == LX_FUTEX;
@@ -598,7 +608,7 @@ fn futex_key(k: &mut Kernel, pid: u64, addr: u64, op: u64) -> u64
   ensures kok(k)
 {
   if op & FUTEX_PRIVATE == 0 && addr < FUTEX_PHYS {
-    let pg = user_shared_page(&mut k.spaces, pid, addr);
+    let pg = user_shared_page(&mut k.spaces, k.mem.bm, pid, addr);
     if pg < NPAGES {
       return FUTEX_PHYS + pg * 4096 + addr % 4096;
     }
@@ -608,7 +618,7 @@ fn futex_key(k: &mut Kernel, pid: u64, addr: u64, op: u64) -> u64
 
 /// The thread group whose waiters a key reaches: any (0) for a shared page.
 fn futex_group(procs: &Buf, pid: u64, key: u64) -> u64
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
 {
   if key >= FUTEX_PHYS {
     return 0;
@@ -845,11 +855,11 @@ fn lx_get_robust_list(k: &mut Kernel, pid: u64, target: u64, hp: u64, lp: u64) -
     return EPERM;
   }
   xfer_u64(&mut k.fs.xfer, 0, get(k.sys, SYS_RB + t));
-  if copy_to_user(&mut k.spaces, pid, hp, k.fs.xfer, 8) != 8 {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, hp, k.fs.xfer, 8) != 8 {
     return EFAULT;
   }
   xfer_u64(&mut k.fs.xfer, 0, ROBUST_HEAD);
-  if copy_to_user(&mut k.spaces, pid, lp, k.fs.xfer, 8) != 8 {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, lp, k.fs.xfer, 8) != 8 {
     return EFAULT;
   }
   return 0;

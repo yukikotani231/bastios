@@ -277,7 +277,7 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, more: bool) 
   if n == 0 {
     return 0;
   }
-  let got = copy_from_user(&mut k.spaces, pid, buf, &mut k.fs.xfer, smaller(n, XFER));
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, &mut k.fs.xfer, smaller(n, XFER));
   if got == NO_RESULT || got == 0 {
     return EFAULT;
   }
@@ -291,7 +291,7 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, more: bool) 
   while go && buf < 0x800000000000 && total < n && total <= TCP_RING - XFER
     invariant kok(k) && pid < NPROC && total <= TCP_RING
   {
-    let c = copy_from_user(&mut k.spaces, pid, buf + total, &mut k.fs.xfer, smaller(n - total, XFER));
+    let c = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf + total, &mut k.fs.xfer, smaller(n - total, XFER));
     if c == NO_RESULT || c == 0 {
       go = false;                           // as a short write
     } else {
@@ -368,7 +368,7 @@ fn lx_tcp_recv(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, dontwait: bo
     }
     return SK_WAIT;
   }
-  if copy_to_user(&mut k.spaces, pid, buf, k.fs.xfer, got) != got {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, k.fs.xfer, got) != got {
     return EFAULT;
   }
   // More than one transfer buffer's worth, while more has arrived.
@@ -380,7 +380,7 @@ fn lx_tcp_recv(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, dontwait: bo
     let r = tcp_recv(&mut k.nic, tk.t, &mut k.fs.xfer, smaller(n - total, XFER), false);
     if r == 0 || r > XFER {
       more = false;                         // nothing more yet, the end, or reset: say it next time
-    } else if copy_to_user(&mut k.spaces, pid, buf + total, k.fs.xfer, r) != r {
+    } else if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf + total, k.fs.xfer, r) != r {
       more = false;                         // as a short read
     } else {
       total = total + r;

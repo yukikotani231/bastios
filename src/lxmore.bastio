@@ -45,12 +45,12 @@ fn pipe_put_xfer(k: &mut Kernel, p: u64, n: u64) -> u64
     return EPIPE;
   }
   let mut r = pipe_ring(k.pipes, p);
-  let room = pipe_room(k.pipes, p, r.n);
+  let room = pipe_room_for(&mut k, p, r.n, n);
   if room == 0 {
     return EAGAIN;
   }
   let put = smaller(n, room);
-  ring_in(&mut k.pipebuf, p * PIPE_CAP, PIPE_CAP, ring_slot(r, r.n), k.fs.xfer, 0, put);
+  pipe_ring_in(&mut k, p, ring_slot(r, r.n), 0, put);
   ring_push_n(&mut r, put);
   pipe_keep(&mut k.pipes, p, r);
   sigio_pipe(&mut k, p);
@@ -157,7 +157,7 @@ fn lx_copy(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, outp: u64, inp: u6
   let f = vfs_row_file(k.fs, d.x);
   let mut ioff = vfs_offset(k.fs, d.x);
   if inp != 0 {
-    if copy_from_user(&mut k.spaces, pid, inp, &mut k.fs.xfer, 8) != 8 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, inp, &mut k.fs.xfer, 8) != 8 {
       return EFAULT;
     }
     ioff = get_u64(k.fs.xfer, 0);
@@ -167,7 +167,7 @@ fn lx_copy(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, outp: u64, inp: u6
   }
   let mut ooff = 0xFFFFFFFFFFFFFFFF;
   if outp != 0 {
-    if copy_from_user(&mut k.spaces, pid, outp, &mut k.fs.xfer, 8) != 8 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, outp, &mut k.fs.xfer, 8) != 8 {
       return EFAULT;
     }
     ooff = get_u64(k.fs.xfer, 0);
@@ -208,7 +208,7 @@ fn lx_copy(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, outp: u64, inp: u6
   // own offsets.
   if inp != 0 {
     xfer_u64(&mut k.fs.xfer, 0, sat_add(ioff, done));
-    if copy_to_user(&mut k.spaces, pid, inp, k.fs.xfer, 8) != 8 {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, inp, k.fs.xfer, 8) != 8 {
       return EFAULT;
     }
   } else {
@@ -216,7 +216,7 @@ fn lx_copy(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, outp: u64, inp: u6
   }
   if outp != 0 {
     xfer_u64(&mut k.fs.xfer, 0, sat_add(ooff, done));
-    if copy_to_user(&mut k.spaces, pid, outp, k.fs.xfer, 8) != 8 {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, outp, k.fs.xfer, 8) != 8 {
       return EFAULT;
     }
   }
@@ -268,7 +268,7 @@ fn lx_piov(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, iov: u
   while v < cnt
     invariant v <= cnt && cnt <= 1024 && total < 0x8000000000000000 && kok(k)
   {
-    if iov > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, iov + 16 * v, &mut k.fs.xfer, 16) != 16 {
+    if iov > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, iov + 16 * v, &mut k.fs.xfer, 16) != 16 {
       return EFAULT;
     }
     let len = get_u64(k.fs.xfer, 8);
@@ -283,7 +283,7 @@ fn lx_piov(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, iov: u
   while i < cnt
     invariant i <= cnt && cnt <= 1024 && kok(k) && con_ok(con)
   {
-    if iov > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, iov + 16 * i, &mut k.fs.xfer, 16) != 16 {
+    if iov > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, iov + 16 * i, &mut k.fs.xfer, 16) != 16 {
       return EFAULT;
     }
     let base = get_u64(k.fs.xfer, 0);
@@ -332,7 +332,7 @@ fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u6
   if r != 0 {
     return r;
   }
-  if copy_from_user(&mut k.spaces, pid, buf, &mut k.fs.xfer, STAT_SIZE) != STAT_SIZE {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, &mut k.fs.xfer, STAT_SIZE) != STAT_SIZE {
     return EFAULT;
   }
   let ino = get_u64(k.fs.xfer, 8);
@@ -364,7 +364,7 @@ fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u6
   xfer_u64(&mut k.fs.xfer, 112, mtime);                             // stx_mtime.tv_sec
   // stx_rdev_major and stx_rdev_minor, from Linux's 32-bit encoding
   xfer_u64(&mut k.fs.xfer, 128, rdev % 0x100000 / 256 + (rdev % 256 + rdev / 4096 / 256 * 256) * 0x100000000);
-  if copy_to_user(&mut k.spaces, pid, buf, k.fs.xfer, STATX_SIZE) != STATX_SIZE {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, k.fs.xfer, STATX_SIZE) != STATX_SIZE {
     return EFAULT;
   }
   return 0;
@@ -437,7 +437,7 @@ fn memfd_name_ok(k: &mut Kernel, pid: u64, va: u64) -> u64
   while i < 250
     invariant i <= 250 && kok(k)
   {
-    if va >= 0x800000000000 || copy_from_user(&mut k.spaces, pid, va + i, &mut k.fs.xfer, 1) != 1 {
+    if va >= 0x800000000000 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + i, &mut k.fs.xfer, 1) != 1 {
       return EFAULT;
     }
     if bget(k.fs.xfer, 0) == 0 {
@@ -501,9 +501,10 @@ fn memfd_name(k: &mut Kernel, pid: u64, t: u64) -> u64
     bset(&mut k.fs.xfer, i, sget(pre, i));
     i = i + 1;
   }
-  bset(&mut k.fs.xfer, 11, cast[u8](48 + pid % 10));
+  bset(&mut k.fs.xfer, 11, cast[u8](48 + pid % 10));      // the pid, digits reversed
   bset(&mut k.fs.xfer, 12, cast[u8](48 + pid / 10 % 10));
-  bset(&mut k.fs.xfer, 13, 45);             // '-'
+  bset(&mut k.fs.xfer, 13, cast[u8](48 + pid / 100 % 10));
+  bset(&mut k.fs.xfer, 14, 45);             // '-'
   let mut j = 0;
   while j < 16
     invariant j <= 16 && kok(k)
@@ -513,10 +514,10 @@ fn memfd_name(k: &mut Kernel, pid: u64, t: u64) -> u64
     if digit >= 10 {
       ch = 87 + digit;                      // 'a' ..
     }
-    bset(&mut k.fs.xfer, 14 + j, cast[u8](ch));
+    bset(&mut k.fs.xfer, 15 + j, cast[u8](ch));
     j = j + 1;
   }
-  return 30;
+  return 31;
 }
 
 fn out_is_file(k: &Kernel, pid: u64, fd: u64) -> bool

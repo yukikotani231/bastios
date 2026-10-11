@@ -479,6 +479,27 @@ fn tcp_port_used(n: &Net, port: u64) -> bool
   return false;
 }
 
+/// Does a listener, or a connection a program still holds, use port?
+/// A connection its program has let go of (closing, or in TIME_WAIT)
+/// does not keep a new listener off its port: segments go to the
+/// connection whose addresses they carry first (tcb_find), so the two
+/// never mix. This is Linux with SO_REUSEADDR, which servers set.
+fn tcp_port_taken(n: &Net, port: u64) -> bool
+  requires net_ok(n)
+{
+  let mut t = 0;
+  while t < TCBS
+    invariant t <= TCBS
+  {
+    let st = tw(n, t, W_STATE);
+    if (st == T_LISTEN || tw(n, t, W_HELD) == 1) && tw(n, t, W_LPORT) == port {
+      return true;
+    }
+    t = t + 1;
+  }
+  return false;
+}
+
 /// Ends connection t: CLOSED, and reset if `reset`.
 fn tcb_close(n: &mut Net, t: u64, reset: bool)
   requires net_ok(n) && t < TCBS
@@ -926,7 +947,7 @@ fn tcp_listen_on(n: &mut Net, want: u64) -> u64
   if port == 0 {
     port = tcp_eph_port(&mut n);
   }
-  if port == 0 || port > 65535 || n.ip == 0 || tcp_port_used(n, port) {
+  if port == 0 || port > 65535 || n.ip == 0 || tcp_port_taken(n, port) {
     return NO_SOCK;
   }
   let t = tcb_free_slot(n);
@@ -1131,6 +1152,9 @@ fn tcp_release(n: &mut Net, t: u64) -> bool
   tset(&mut n, t, W_HELD, 0);
   tset(&mut n, t, W_PARENT, TCBS);          // accepted once: never handed out again
   let st = tw(n, t, W_STATE);
+  if st == T_LISTEN {
+    tcp_orphans(&mut n, t);
+  }
   if st == T_LISTEN || st == T_SYN_SENT {
     tcb_close(&mut n, t, false);
   } else if (st == T_ESTABLISHED || st == T_CLOSE_WAIT || st == T_SYN_RCVD) && tw(n, t, W_FIN) == 0 {
@@ -1138,6 +1162,29 @@ fn tcp_release(n: &mut Net, t: u64) -> bool
     tcp_output(&mut n, t, false);
   }
   return true;
+}
+
+/// Listener lis stops: the connections that came in on it and were never
+/// accepted close (their FIN after anything buffered), and no longer name
+/// it, so a new listener in its slot does not hand them out.
+fn tcp_orphans(n: &mut Net, lis: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let mut c = 0;
+  while c < TCBS
+    invariant c <= TCBS && net_ok(n)
+  {
+    if tw(n, c, W_PARENT) == lis && tw(n, c, W_HELD) == 0 {
+      tset(&mut n, c, W_PARENT, TCBS);
+      let st = tw(n, c, W_STATE);
+      if (st == T_ESTABLISHED || st == T_CLOSE_WAIT || st == T_SYN_RCVD) && tw(n, c, W_FIN) == 0 {
+        tset(&mut n, c, W_FIN, 1);
+        tcp_output(&mut n, c, false);
+      }
+    }
+    c = c + 1;
+  }
 }
 
 /// shutdown(SHUT_WR): connection t sends its FIN after the data still

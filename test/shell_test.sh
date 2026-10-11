@@ -219,7 +219,7 @@ steps = [
     ("fpucheck", b"fpucheck: xmm0 kept"),
     # musl malloc (brk, mmap), stdio on a file, and a line read from the
     # console; the third field is what to wait for instead of the prompt.
-    ("mtest", [b"mtest: malloc heap 75", b"mtest: big memory 4096 1024", b"mtest: direction flag spun", b"mtest: file line 42"], b"type a line"),
+    ("mtest", [b"mtest: malloc heap 75", b"mtest: big memory 4096 1024", b"mtest: wide 4", b"mtest: cow kept", b"mtest: direction flag spun", b"mtest: file line 42"], b"type a line"),
     ("typed for mtest", b"mtest: got typed for mtest"),
     # BusyBox's shell, unmodified, reading commands from the console. The
     # console is a terminal (ioctl TCGETS works), so ash is interactive and
@@ -281,6 +281,11 @@ steps = [
     # when a line is typed.
     ("mtime", [b"mtime: rang 3, selected, slept ", b"woke in time, events ok"], b"\n# "),
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
+    # More processes at once than the 32 rows the process table starts with:
+    # it grows (new_pid), and /proc lists three-digit pids. (stdin from the
+    # terminal: ash gives each background job its own /dev/null otherwise,
+    # and open files system-wide run out first.)
+    ("i=0; while [ $i -lt 120 ]; do sleep 10 </dev/tty & i=$((i+1)); done; n=0; for d in /proc/[0-9]*; do n=$((n+1)); done; [ $n -gt 120 ] && [ -d /proc/120 ] && echo many$((1+1)); wait", b"\r\nmany2\r\n", b"\n# "),
     ("read -t 1 x; echo rt=$?", b"rt=1", b"\n# "),
     ("read -t 9 x; echo rt=$? x=$x", b"rt=0 x=late", b"\n# ", b"late\r"),
     # Directories: mkdir, a working directory (chdir, getcwd through
@@ -400,7 +405,10 @@ steps = [
     # What Linux programs look for besides: processors, the file system
     # types, a process's own mount table, and three fixed sysctls.
     ("n=0; while read k r; do [ \"$k\" = processor ] && n=$((n+1)); done < /proc/cpuinfo; echo cpus=$n; cat /proc/filesystems; cat /proc/self/mounts", [f"cpus={smp}\r\n".encode(), b"nodev\tramfs", b"nodev\ttmpfs", b"\tbstdisk3", b"proc /proc proc"], b"\n# "),
-    ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n32\r\n", b"mounts"], b"\n# "),
+    ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n256\r\n", b"mounts"], b"\n# "),
+    # An 8 MiB stack, Linux's default (t_mem in make compat maps 640 MiB
+    # of the 1 GiB window and grows the stack past 6 MiB).
+    ("ulimit -s", b"\r\n8192\r\n", b"\n# "),
     # The kernel's command line, and a process's fixed regions.
     ("cat /proc/cmdline /proc/self/maps", [b"BOOT_IMAGE=", b"[vdso]", b"[stack]"], b"\n# "),
     ("exit 5", b"[exit 5]"),
@@ -1171,9 +1179,21 @@ for _ in range(100):
 try:
     mon = socket.socket(socket.AF_UNIX)
     mon.connect(mon_path)
-    time.sleep(8)                     # the boot, which nothing shows
-    sendkeys(mon, ["h", "a", "l", "t", "ret"])
-    code = q.wait(timeout=30)
+    # Nothing shows when the shell is up, so type `halt` again every 1.5 s
+    # until QEMU exits. The leading Enter ends any line that a copy typed
+    # during the boot left half done.
+    end = time.time() + 30
+    while code is None:
+        try:
+            sendkeys(mon, ["ret", "h", "a", "l", "t", "ret"])
+        except OSError:               # QEMU exited while we typed
+            code = q.wait(timeout=5)
+            break
+        try:
+            code = q.wait(timeout=1.5)
+        except subprocess.TimeoutExpired:
+            if time.time() > end:
+                raise
     mon.close()
 except (OSError, subprocess.TimeoutExpired):
     q.kill(); q.wait()
@@ -1184,12 +1204,14 @@ fails += not good
 # A USB keyboard and a USB mouse on an xHCI controller (src/xhci.bastio),
 # on a machine with no PS/2 controller at all (i8042=off), so the keys and
 # the moves can only come over USB. They are sent through QMP; at power
-# off the controller is reset and its fifteen pages are back.
+# off the controller is reset and its pages are back.
 import json
 qmp_path = os.path.join(disk_dir.name, "qmp.sock")
 def usbmouse(name, qmp_cmd):
     # mmouse reads two packets: a move 10 right and 5 up, then the left
-    # button. A USB mouse says y down positive; the PS/2 packet, up.
+    # button. A USB mouse says y down positive; the PS/2 packet, up. Then
+    # it switches to ImPS/2 and reads the wheel turned up one step, which
+    # a USB mouse says as +1 and ImPS/2 as -1.
     global fails
     mark = len(out)
     qemu.stdin.write(b"mmouse\r"); qemu.stdin.flush()
@@ -1201,12 +1223,23 @@ def usbmouse(name, qmp_cmd):
             qmp_cmd({"execute": "input-send-event", "arguments": {"events": [
                 {"type": "btn", "data": {"down": down, "button": "left"}}]}})
             time.sleep(0.3)
+        if read_until(b"mmouse: wheel ready", mark):
+            for down in (True, False):
+                qmp_cmd({"execute": "input-send-event", "arguments": {"events": [
+                    {"type": "btn", "data": {"down": down, "button": "wheel-up"}}]}})
+                time.sleep(0.3)
     read_until(b"bastios> ", mark)
     good = b"mmouse: buttons 0 dx 10 dy 5\r\nmmouse: buttons 1 dx 0 dy 0\r\n" in out[mark:]
     print(("ok  " if good else "FAIL"), f"({name} boot) the USB mouse's move and button come through /dev/psaux")
     fails += not good
-qemu = boot(1, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci", "-device", "usb-kbd",
-                      "-device", "usb-mouse", "-qmp", f"unix:{qmp_path},server,nowait"])
+    good = b"mmouse: wheel ready\r\nmmouse: wheel -1\r\n" in out[mark:]
+    print(("ok  " if good else "FAIL"), f"({name} boot) ImPS/2 mode, and the USB mouse's wheel turned up reads -1")
+    fails += not good
+# A first controller with nothing on it stands for a PC's USB-C one: the
+# keyboard and mouse are on the second, which must be found.
+qemu = boot(1, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci,id=empty", "-device", "qemu-xhci,id=xu",
+                      "-device", "usb-kbd,bus=xu.0", "-device", "usb-mouse,bus=xu.0",
+                      "-qmp", f"unix:{qmp_path},server,nowait"])
 out = b""
 deadline = time.time() + timeout
 ok = read_until(b"bastios> ")
@@ -1715,6 +1748,9 @@ ok, code = report_boot(["-machine", "pc", "-m", "64M"], "no report", 0)
 good = ok and b"hardware report" not in out
 print(("ok  " if good else "FAIL"), "(hardware report) only with diag")
 fails += not good
+good = ok and b"disk: none found" in out and b"net: none" in out
+print(("ok  " if good else "FAIL"), "(hardware report) a boot without a disk or network card says so, even without diag")
+fails += not good
 
 # Sound (src/hda.bastio, src/lxsnd.bastio): an HD Audio controller with
 # QEMU's output codec, whose sound QEMU writes to a WAV file. mtone plays
@@ -1764,7 +1800,9 @@ fails += not good
 # The PS/2 mouse (src/kbd.bastio, src/lxmouse.bastio): QEMU's monitor
 # moves it 10 right and 5 up, then presses the left button, while mmouse
 # reads /dev/psaux; before that it checks that /dev/input/mice opened
-# O_NONBLOCK has nothing to read and polls empty.
+# O_NONBLOCK has nothing to read and polls empty. The kernel finds the
+# wheel QEMU's PS/2 mouse has (the IntelliMouse sequence); mmouse turns
+# ImPS/2 on and reads the wheel turned up (`mouse_move 0 0 1`).
 mon = os.path.join(disk_dir.name, "mouse.sock")
 def move():
     global out
@@ -1780,6 +1818,9 @@ def move():
         m.sendall(b"mouse_button 1\n")
         time.sleep(0.3)
         m.sendall(b"mouse_button 0\n")
+        read_until(b"mmouse: wheel ready", mark)
+        m.sendall(b"mouse_move 0 0 1\n")       # the monitor's dz 1 is the wheel turned up
+        time.sleep(0.3)
         m.close()
     except OSError:
         pass
@@ -1788,10 +1829,11 @@ ok, code = report_boot(["-machine", "pc", "-m", "64M", "-append", "diag", "-moni
                        "mouse", 3, between=move)
 text = out.decode(errors="replace").replace("\r", "")
 for want, what in (
-        ("mouse: PS/2\n", "the report finds the PS/2 mouse"),
+        ("mouse: PS/2, with a wheel\n", "the report finds the PS/2 mouse, and its wheel"),
         ("mmouse: ready", "nothing to read before the mouse moves, O_NONBLOCK and poll"),
         ("mmouse: buttons 0 dx 10 dy 5\n", "a move comes through as one packet, y up positive"),
-        ("mmouse: buttons 1 dx 0 dy 0\n", "the left button comes through")):
+        ("mmouse: buttons 1 dx 0 dy 0\n", "the left button comes through"),
+        ("mmouse: wheel ready\nmmouse: wheel -1\n", "ImPS/2 mode, and the wheel turned up reads -1")):
     good = ok and want in text
     print(("ok  " if good else "FAIL"), f"(mouse) {what}")
     fails += not good

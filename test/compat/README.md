@@ -77,6 +77,15 @@ the real programs, and `script` (util-linux, only for `compat-host`).
     packages and the index are unsigned, so apk runs with
     `--allow-untrusted`.
   - The cases change the disk, so `run.py` runs them on a copy.
+- `debian.txt`: Debian 13, from a fifth disk (`debiandisk.py`). The first
+  case unpacks Debian's root file system (the `debian:stable-slim` image,
+  `DEBIAN_IMAGE`, without `/usr/share`, dpkg's file lists, gconv and Perl's
+  modules, so that it fits in the disk's 1024 entries) and enters it with
+  `chroot`. Its programs are linked against glibc and start in glibc's
+  dynamic linker: bash, coreutils, sed, grep, awk, find, GNU tar and gzip,
+  perl and dpkg-query run. The expected output is what the same commands
+  print in a chroot on Linux. The cases change the disk, so `run.py` runs
+  them on a copy.
 
 `mkdisk.py` puts the programs and that BusyBox on a disk image in BastiOS's
 own disk format, so they appear as `/disk/NAME`. `run.py` boots the kernel

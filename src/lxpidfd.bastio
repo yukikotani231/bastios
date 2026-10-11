@@ -120,7 +120,7 @@ fn pidfd_signal(k: &mut Kernel, pid: u64, fd: u64, s: u64, info: u64, flags: u64
   if info == 0 {
     return lx_kill(&mut k, pid, p, s);
   }
-  if info > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, info, &mut k.fs.xfer, 32) != 32 {
+  if info > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, info, &mut k.fs.xfer, 32) != 32 {
     return EFAULT;
   }
   if get_u64(k.fs.xfer, 0) % 0x100000000 != s {
@@ -166,7 +166,7 @@ fn pidfd_getfd(k: &mut Kernel, pid: u64, fd: u64, target: u64, flags: u64) -> u6
 /// Whether processes a and b have the same real, effective and saved
 /// user and group ids.
 fn same_ids(procs: &Buf, a: u64, b: u64) -> bool
-  requires len(procs) == PTAB_LEN && a < NPROC && b < NPROC
+  requires ptab_ok(procs) && a < NPROC && b < NPROC
 {
   return pget(procs, a, F_UID) == pget(procs, b, F_UID) && pget(procs, a, F_SUID) == pget(procs, b, F_SUID)
     && pget(procs, a, F_GID) == pget(procs, b, F_GID) && pget(procs, a, F_SGID) == pget(procs, b, F_SGID);
@@ -251,7 +251,7 @@ fn iov_entry(k: &mut Kernel, pid: u64, arr: u64, i: u64) -> Iov
   requires kok(k) && pid < NPROC && i < IOV_MAX
   ensures kok(k)
 {
-  if arr > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, arr + 16 * i, &mut k.fs.xfer, 16) != 16 {
+  if arr > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arr + 16 * i, &mut k.fs.xfer, 16) != 16 {
     return Iov { err: EFAULT, base: 0, len: 0 };
   }
   return Iov { err: 0, base: get_u64(k.fs.xfer, 0), len: get_u64(k.fs.xfer, 8) };
@@ -311,14 +311,14 @@ fn process_vm(k: &mut Kernel, pid: u64, write: bool, p: u64, local: u64, lcnt: u
       let mut got = 0;
       let mut put = 0;
       if write {
-        got = copy_from_user(&mut k.spaces, pid, sat_add(l.base, lo), &mut buf, m);
+        got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, sat_add(l.base, lo), &mut buf, m);
         if got <= m {
-          put = copy_to_user(&mut k.spaces, tp, sat_add(r.base, ro), buf, got);
+          put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, tp, sat_add(r.base, ro), buf, got);
         }
       } else {
-        got = copy_from_user(&mut k.spaces, tp, sat_add(r.base, ro), &mut buf, m);
+        got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, tp, sat_add(r.base, ro), &mut buf, m);
         if got <= m {
-          put = copy_to_user(&mut k.spaces, pid, sat_add(l.base, lo), buf, got);
+          put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, sat_add(l.base, lo), buf, got);
         }
       }
       if got > m || put > got {

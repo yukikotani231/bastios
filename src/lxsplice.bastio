@@ -41,7 +41,7 @@ fn pipe_peek_xfer(k: &mut Kernel, p: u64, skip: u64, n: u64) -> u64
     return 0;
   }
   let got = smaller(n, r.n - skip);
-  ring_out(&mut k.fs.xfer, 0, k.pipebuf, p * PIPE_CAP, PIPE_CAP, (r.h + skip) % PIPE_CAP, got);
+  pipe_ring_out(&mut k, p, 0, (r.h + skip) % PIPE_CAP, got);
   return got;
 }
 
@@ -75,7 +75,7 @@ fn off_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 8) != 8 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 8) != 8 {
     return NO_RESULT;
   }
   let o = get_u64(k.fs.xfer, 0);
@@ -142,7 +142,7 @@ fn splice_from_pipe(con: &mut Con, k: &mut Kernel, pid: u64, p: u64, out: u64, o
   }
   if outp != 0 && !to_pipe {
     xfer_u64(&mut k.fs.xfer, 0, sat_add(ooff, done));
-    if copy_to_user(&mut k.spaces, pid, outp, k.fs.xfer, 8) != 8 {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, outp, k.fs.xfer, 8) != 8 {
       return EFAULT;
     }
   }
@@ -176,7 +176,7 @@ fn splice_to_pipe(k: &mut Kernel, pid: u64, row: u64, inp: u64, p: u64, len: u64
   {
     let step = smaller(XFER, len - done);
     let pr = pipe_ring(k.pipes, p);
-    let room = pipe_room(k.pipes, p, pr.n);
+    let room = pipe_room_for(&mut k, p, pr.n, step);
     if room == 0 {
       if done == 0 {
         if pi_get(k.pipes, p, 2) == 0 {
@@ -210,7 +210,7 @@ fn splice_to_pipe(k: &mut Kernel, pid: u64, row: u64, inp: u64, p: u64, len: u64
   }
   if inp != 0 {
     xfer_u64(&mut k.fs.xfer, 0, sat_add(ioff, done));
-    if copy_to_user(&mut k.spaces, pid, inp, k.fs.xfer, 8) != 8 {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, inp, k.fs.xfer, 8) != 8 {
       return EFAULT;
     }
   } else {

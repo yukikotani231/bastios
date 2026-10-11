@@ -543,12 +543,35 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - A PS/2 mouse (`src/kbd.bastio`) for Linux programs as `/dev/input/mice`
   and `/dev/psaux` (`src/lxmouse.bastio`): 3-byte PS/2 packets, blocking
   or `O_NONBLOCK` reads, and `poll`. The hardware report says
-  `mouse: PS/2` or `mouse: none found`. No wheel.
+  `mouse: PS/2` or `mouse: none found`.
+- The mouse wheel: the PS/2 mouse is asked for it with the IntelliMouse
+  sequence, a USB mouse gives it as the fourth byte of its boot report,
+  and `/dev/input/mice` answers mouse commands as Linux's mousedev does,
+  switching to ImPS/2 (4-byte packets with the wheel) when a program sends
+  the sequence. The hardware report says `mouse: PS/2, with a wheel`.
 - A USB mouse on the xHCI controller (`src/xhci.bastio`), through the
   same device: HID boot reports become PS/2 packets. A wireless receiver
   that is both keyboard and mouse serves as both. The controller now has a
-  fifth device slot, and fifteen pages. The hardware report says
+  fifth device slot. The hardware report says
   `mouse: USB (xHCI)`.
+
+
+### Real hardware
+
+- xHCI controllers that ask for more than four scratchpad pages, as
+  Intel's do (34 or so), were given up on, so a PC with only USB ports had
+  no keyboard. The driver now takes up to 256 scratchpad pages from the
+  pool. The controller's fixed pages are down to eleven.
+- The xHCI driver powers every root port and waits for devices to
+  connect (at least 300 ms, at most a second) before looking at them: a
+  real controller's devices reconnect after the reset at start, which
+  QEMU's do at once.
+- A boot with no keyboard, no disk or no network card says so on the
+  screen, not only with the boot option `diag`.
+- With several xHCI controllers (recent Intel PCs have one for the USB-C
+  ports ahead of the chipset's; AMD ones two or three), each is tried in
+  turn until one has a keyboard, a mouse or a BastiOS stick on it. Only
+  the first was looked at before.
 
 ### Sound
 
@@ -675,6 +698,17 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Fixed
 
+- A TCP listener could not start on a port while a connection on it that
+  its program had already closed was still finishing (waiting in
+  `LAST_ACK` for the peer's last ACK, say): `listen` failed with
+  `EADDRINUSE` and the shell's `tcpecho` said `cannot listen`, until the
+  connection gave up. Now only a listener or a connection a program still
+  holds keeps the port, as on Linux with `SO_REUSEADDR`; segments still
+  go to the connection whose addresses they carry first. Closing a
+  listener also closes the connections that came in on it and were never
+  accepted, so a new listener on the port does not hand them out.
+  `test/tcp_test.sh` loses the guest's last ACK and checks that `tcpecho`
+  listens again at once.
 - mmap without an address, shmat without one, and brk could hand out
   pages a mapping made with MAP_FIXED (or shmat at an address, or mremap
   with MREMAP_FIXED) already held, with that mapping's bytes in them, and
