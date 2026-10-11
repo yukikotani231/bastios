@@ -403,7 +403,7 @@ const LK_WW: u64 = 4;
 const LK_LEN: u64 = 896;              // LK_WAITS + NPROC * LK_WW
 const IPC_LEN: u64 = 4608;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
 const RNG_LEN: u64 = 19;              // the random generator's words (src/lxdev.bastio)
-const SYS_LEN: u64 = 1888;             // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities
+const SYS_LEN: u64 = 1920;             // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities
 const SYS_PQ: u64 = 160;
 const SYS_PR: u64 = 256;               // SYS_PQ + PQ_N * 12; NPROC * PR_W words
 const SYS_RL: u64 = 416;               // SYS_PR + NPROC * PR_W; NPROC * RL_W words (src/lxrlimit.bastio)
@@ -413,6 +413,7 @@ const SYS_TM: u64 = 1632;              // SYS_JC + NPROC; NPROC * 3 words (syste
 const SYS_RB: u64 = 1728;              // SYS_TM + NPROC * 3; a word per thread (robust futex list head, src/lxthread.bastio)
 const SYS_CAP: u64 = 1760;             // SYS_RB + NPROC; NPROC * CAP_W words (capabilities, src/lxcap.bastio)
 const SYS_PIPEMAX: u64 = 150;          // /proc/sys/fs/pipe-max-size (0: PIPE_CAP), past the adjtimex words (src/lxsys.bastio)
+const SYS_IOP: u64 = 1888;             // SYS_CAP + NPROC * CAP_W; a word per thread (ioprio_set, src/lxprio.bastio)
 // Capabilities the kernel checks (src/lxcap.bastio).
 const CAP_SYS_TIME: u64 = 25;
 const CAP_SYS_RESOURCE: u64 = 24;
