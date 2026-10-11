@@ -1,7 +1,7 @@
 # The trusted base of BastiOS: non-blank lines per file. Regenerate with
 # `test/trusted_base.sh --update` and review the diff.
 boot/ap.S: 84 lines
-boot/boot.S: 464 lines
+boot/boot.S: 472 lines
 boot/core.h: 26 lines
 boot/grub.cfg: 25 lines
 boot/libc.c: 35 lines
@@ -11,4 +11,4 @@ boot/platform.c: 47 lines
 boot/smp.c: 607 lines
 user/start.S: 19 lines
 user/user.ld: 15 lines
-total: 1464 lines
+total: 1472 lines
