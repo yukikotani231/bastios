@@ -11,6 +11,8 @@
 //   limits shmmax, shmall, shmmni, msgmax, msgmnb, msgmni, sem
 //                           read-only sysctls with their fixed values
 //   /proc/sys/fs/pipe-max-size  the most F_SETPIPE_SZ gives
+//   /proc/sys/fs/inotify/max_queued_events, max_user_instances,
+//   max_user_watches        inotify's fixed limits (src/lxinotify.bastio)
 //   /proc/sys/kernel/hostname, domainname, ostype, osrelease, version
 //                           what uname says (src/lxsys.bastio)
 //   /proc/sysvipc/msg, sem, shm
@@ -68,6 +70,7 @@ const SY_IPC_END: u64 = 14;
 const SY_UTS: u64 = 14;                // 14 .. 17: uts_proc_text (src/lxsys.bastio)
 const SY_UTS_END: u64 = 19;
 const SY_PIPE_MAX: u64 = 19;
+const SY_INO: u64 = 20;                // 20 .. 22: /proc/sys/fs/inotify (src/lxinotify.bastio)
 const SY_LOOP: u64 = 32;               // 32 ..: loop device n's attribute a at n * LOOP_SYS + a
 const LOOP_SYS: u64 = 8;               // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
@@ -224,6 +227,15 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   }
   if xfer_is(x, 5, n, "sys/fs/pipe-max-size") {
     return PROC_DEV + PSYS + SY_PIPE_MAX;
+  }
+  if xfer_is(x, 5, n, "sys/fs/inotify/max_queued_events") {
+    return PROC_DEV + PSYS + SY_INO;
+  }
+  if xfer_is(x, 5, n, "sys/fs/inotify/max_user_instances") {
+    return PROC_DEV + PSYS + SY_INO + 1;
+  }
+  if xfer_is(x, 5, n, "sys/fs/inotify/max_user_watches") {
+    return PROC_DEV + PSYS + SY_INO + 2;
   }
   let mut i = 0;
   while i < SY_IPC_END - SY_IPC
@@ -664,6 +676,18 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
       let a = put_n(&mut o, 0, PIPE_CAP);   // F_SETPIPE_SZ goes no higher
       return put_c(&mut o, a, 10);
     }
+    if what >= SY_INO && what < SY_INO + 3 {
+      // inotify's fixed limits: events queued before IN_Q_OVERFLOW,
+      // instances (in all, not per user), watches per instance.
+      let mut v = INO_Q - 1;
+      if what == SY_INO + 1 {
+        v = INO_N;
+      } else if what == SY_INO + 2 {
+        v = INO_W;
+      }
+      let a = put_n(&mut o, 0, v);
+      return put_c(&mut o, a, 10);
+    }
     return 0;
   }
   let what = f % 16;
@@ -728,8 +752,8 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     return a;
   }
   if what == PF_MEMINFO {
-    let total = NPAGES * 4;
-    let avail = smaller(count_free(k.mem.bm), NPAGES) * 4;
+    let total = pool_size(k.mem.pool) * 4;   // the RAM the pool holds
+    let avail = count_free(k.mem.bm) * 4;
     let mut a = put_s(&mut o, 0, "MemTotal: ");
     a = put_n(&mut o, a, total);
     a = put_s(&mut o, a, " kB\nMemFree: ");

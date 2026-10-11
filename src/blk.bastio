@@ -51,7 +51,7 @@ spec fn drive_claims(d: &Drive, a: u64) -> bool {
 /// `take_page`, also saying that every other page's entry is unchanged, so
 /// several pages can be taken in a row.
 fn take_low_page(m: &mut Mem, i: u64) -> Frame
-  requires mem_ok(m) && i < NPAGES && get(m.bm, i) == 1
+  requires mem_ok(m) && i < len(m.bm) && get(m.bm, i) == 1
   ensures mem_ok(m) && frame_id(result) == i
   ensures forall j: u64 :: j != i ==> get(m.bm, j) == old(get(m.bm, j))
 {
@@ -239,13 +239,13 @@ fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, l
       let mut extra = vec_new[Extra]();
       let mut pages = 0;
       let mut more = true;
-      let mut top = NPAGES;
+      let mut top = len(m.bm);
       while vec_len(extra) < VIO_BATCH - 1
-        invariant mem_ok(m) && vlen(extra) < VIO_BATCH && pages <= vlen(extra) && top <= NPAGES
+        invariant mem_ok(m) && vlen(extra) < VIO_BATCH && pages <= vlen(extra) && top <= len(m.bm)
       {
         let mut a = NPAGES;
         while top > 0 && a == NPAGES
-          invariant mem_ok(m) && top <= NPAGES && (a == NPAGES || (a < NPAGES && get(m.bm, a) == 1))
+          invariant mem_ok(m) && top <= len(m.bm) && (a == NPAGES || (a < len(m.bm) && get(m.bm, a) == 1))
         {
           top = top - 1;
           if get(m.bm, top) == 1 {

@@ -1,6 +1,14 @@
 # BastiOS
 
-A small x86-64 kernel written in [Bastio](https://github.com/yukikotani231/bastiolang), a language whose memory safety is proved at compile time. It runs its own programs and unmodified Linux ones (BusyBox, Lua, sqlite, a C compiler), on several processors, with files on a USB stick or an NVMe, virtio, SATA or ATA disk and a TCP/IP stack on a virtio or e1000 network card. It boots under QEMU, or from a GRUB image on a USB stick under BIOS or UEFI.
+A small x86-64 kernel written in [Bastio](https://github.com/yukikotani231/bastiolang), a language whose memory safety is proved at compile time. It runs its own programs and unmodified Linux ones (BusyBox, Lua, sqlite, a C compiler), on several processors, with files on a USB stick or an NVMe, virtio, SATA or ATA disk and a TCP/IP stack on a virtio or e1000 network card. It boots under QEMU, or from a Limine image on a USB stick under BIOS or UEFI.
+
+> **Status: experimental.** Everything here has been tried in QEMU only; no real PC has booted it yet. The system call ABI and the disk format can still change.
+>
+> **Works today, in QEMU:** a Unix shell (BusyBox), users and passwords with `login` and `su`, files kept on a disk, DHCP, DNS, TCP/IP over IPv4 and IPv6, an SSH server (Dropbear), a web server, Alpine Linux's binaries and its package manager `apk` in a `chroot`, and programs such as Lua, Python, sqlite, git and a C compiler.
+>
+> **Not yet:** a real PC, a login prompt at boot, users and SSH keys that survive a reboot, more than 31 processes or 1023 files on the disk, a graphical desktop.
+>
+> [Using BastiOS](docs/using.md) walks through all of it, from `make run` to logging in over SSH.
 
 <!-- guide-test: session -->
 ```text
@@ -42,7 +50,7 @@ git clone https://github.com/yukikotani231/bastios
 cd bastios && make run
 ```
 
-The first build proves every source file and fetches BusyBox, so it takes a while. `make run` boots on your terminal; type `help`, and Ctrl-A X quits. [Getting started](docs/getting-started.md) goes on from there: writing a program in Bastio, running a Linux program, and booting from a USB stick.
+The first build proves every source file and fetches BusyBox, so it takes a while. `make run` boots on your terminal; type `help`, and Ctrl-A X quits. [Getting started](docs/getting-started.md) goes on from there: writing a program in Bastio, running a Linux program, and booting from a USB stick. [Using BastiOS](docs/using.md) is for using it as a system: users, the network, SSH and Alpine's packages.
 
 ## What it does
 
@@ -50,7 +58,7 @@ The first build proves every source file and fetches BusyBox, so it takes a whil
 - **Programs.** BastiOS's own programs use its system call ABI (`int 0x80`). Linux x86-64 ELF executables use the Linux ABI (`syscall`): static or dynamic, against musl, or static against glibc. Much of the Linux system call interface is implemented: files, pipes, signals, threads and futexes, `poll` and `epoll`, timers, and sockets; [docs/linux.md](docs/linux.md) lists them. `make compat` runs a compatibility suite (`test/compat`).
 - **Files.** An in-memory file system, and one on the disk under `disk/` that keeps every write whole across a power cut (copy-on-write). The disk is a partition on a USB stick (the one it booted from, with `make usb`), an NVMe drive, a virtio disk, a SATA disk on an AHCI controller or a legacy ATA disk; commands are queued behind a block cache and, except on ATA, finish by interrupt (MSI-X or MSI), so a process waiting for the disk sleeps.
 - **Network.** A virtio card or an Intel card of the e1000 families (8254x, 82574L, 82576 and the igb chips after it); DHCP, ARP, IPv4, ICMP, UDP and TCP (retransmission, out-of-order data, zero windows), IPv6 (neighbor discovery, an address from the router's prefix, UDP and TCP), a name server for the C library's resolver, loopback, and Unix sockets.
-- **Console.** The first serial port, and with GRUB the screen (the framebuffer it sets up) with a PS/2 or USB keyboard.
+- **Console.** The first serial port, and from the ISO or USB image the screen (the framebuffer the boot loader sets up) with a PS/2 or USB keyboard.
 
 How the pieces fit together, and what is proved where, is in [docs/architecture.md](docs/architecture.md).
 
@@ -67,7 +75,7 @@ Requirements:
 | Python 3 | 3.12, 3.13 | Only for the test driver |
 | musl-gcc | musl 1.2.4 | Builds the musl test programs and BusyBox (`musl-tools` on Ubuntu) |
 | git and network access | | The first build clones BusyBox 1.36.1 from github.com/mirror/busybox into `build/busybox` (set `BUSYBOX_GIT` for another mirror) |
-| GRUB, xorriso, mtools, OVMF | GRUB 2.12, xorriso 1.5.6, OVMF 2024.02 | Only for `make iso` and `test/iso_test.sh` (which skips without them; UEFI is skipped without OVMF) |
+| xorriso, OVMF | xorriso 1.5.6, OVMF 2024.02 | Only for `make iso`, `make usb` and `test/iso_test.sh` (which skips without xorriso; UEFI is skipped without OVMF). The first `make iso` also clones [Limine](https://github.com/limine-bootloader/limine)'s binary release (BSD-2-Clause) at a pinned tag into `build/limine` and builds its installer |
 
 Tested on x86-64 Linux (Ubuntu 24.04), which is what CI runs; other platforms are untested.
 
@@ -75,13 +83,13 @@ Tested on x86-64 Linux (Ubuntu 24.04), which is what CI runs; other platforms ar
 make            # build/bastios.elf
 make run        # boot on this terminal with build/disk.img as the disk; Ctrl-A X quits
 make disk FILES="..."   # put files from this machine on that disk
-make iso        # build/bastios.iso: GRUB + the kernel, bootable under BIOS or UEFI
+make iso        # build/bastios.iso: Limine + the kernel, bootable under BIOS or UEFI
 make test       # boot in QEMU, type commands over the serial line, check the replies
 make fuzz       # fuzz the system calls with hostile arguments (SEED, SEEDS, CALLS, SMP, PAR)
 make compat     # the Linux compatibility suite; writes build/compat/report.md
 ```
 
-`make test` also checks the sessions in this README and in [Getting started](docs/getting-started.md) (`test/guide_test.py`). Set `BASTIOC0=/path/to/bastioc0` if bastiolang is not next to this checkout.
+`make test` also checks the sessions in this README, [Getting started](docs/getting-started.md) and [Using BastiOS](docs/using.md) (`test/guide_test.py`). Set `BASTIOC0=/path/to/bastioc0` if bastiolang is not next to this checkout.
 
 The kernel is built by bastioc1, bastiolang's compiler written in Bastio, through C: the compiler proves each file, writes C, and `cc` compiles it. The first build makes bastioc1 itself with bastiolang's bootstrap compiler, `bastioc0`, into `build/bastioc1`. `make NATIVE=1` uses bastioc1's native backend instead, which writes x86-64 assembly and takes the C compiler out of the trusted base for Bastio code; BastiOS built that way passes `make test`, but its code is about ten times larger, so it is not the default yet.
 
@@ -91,7 +99,7 @@ The proof covers everything in `src/` and `user/*.bastio`. Everything below it i
 
 | Part | Where | Role |
 | --- | --- | --- |
-| Boot loader | GRUB, configured by `boot/grub.cfg` (only for the ISO) | Loads the kernel as a Multiboot 2 image and passes the memory map, a copy of the ACPI RSDP and the framebuffer it set up (address, pitch, size, pixel layout: the screen console trusts these); `make run` and the tests use QEMU's own Multiboot loader instead |
+| Boot loader | [Limine](https://github.com/limine-bootloader/limine) (BSD-2-Clause, fetched at a pinned tag), configured by `boot/limine.conf` (only for the ISO and the USB image) | Loads the kernel as a Multiboot 2 image and passes the memory map, a copy of the ACPI RSDP and the framebuffer it set up (address, pitch, size, pixel layout: the screen console trusts these); `make run` and the tests use QEMU's own Multiboot loader instead |
 | Boot and trap entry | `boot/boot.S` | Multiboot 1 and 2 headers and entry (`boot/multiboot.c` turns Multiboot 2 information into the Multiboot 1 form), identity map (the first 2 GiB, and the device window from 2 GiB to 2^46 uncached, with 1 GiB pages above 4 GiB), the Multiboot header's video request, long mode; GDT with user segments; the trap stubs and the `syscall` entry; enabling SSE; entering user mode (which also loads the FS base) (`bst_cpu_enter`) and idling (`bst_cpu_wait`) |
 | Processor startup | `boot/smp.c`, `boot/ap.S` | Finding the ACPI tables (the processors in the MADT; any table, a byte at a time, for the kernel's `boot_acpi`), mapping the local APIC and calibrating its timer, INIT and startup IPIs; the real-mode trampoline that takes each application processor to long mode on the kernel's tables, where it checks in and parks until `smp_run` hands it work; each processor's TSS. C because the firmware tables lie outside the device window `Mmio` covers |
 | Platform setup | `boot/platform.c` | Interrupt table, `syscall` MSRs |
@@ -135,7 +143,7 @@ The direction is in bastiolang's [ROADMAP.md](https://github.com/yukikotani231/b
 | `user/*.c`, `user/*.S` | Test programs in C and assembly: musl programs for the Linux system calls, freestanding ELF and fault tests, the system call fuzzer |
 | `files/` | Files installed in memory at boot (built into the kernel image) |
 | `test/` | `make test` and the benchmarks; `test/compat/` is the Linux compatibility suite |
-| `docs/` | [Getting started](docs/getting-started.md), [architecture](docs/architecture.md), [Linux programs](docs/linux.md), [trusted base](docs/trusted-base.md), [users and permissions](docs/security.md), [releasing](docs/releasing.md) |
+| `docs/` | [Getting started](docs/getting-started.md), [using BastiOS](docs/using.md), [architecture](docs/architecture.md), [Linux programs](docs/linux.md), [trusted base](docs/trusted-base.md), [users and permissions](docs/security.md), [releasing](docs/releasing.md) |
 
 ## Contributing
 

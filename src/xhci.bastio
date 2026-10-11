@@ -19,7 +19,7 @@
 // command block wrapper out, the data, and a 13-byte status wrapper in.
 // The driver uses the disk only if its GPT has a partition of the BastiOS
 // type (BASTIOS_PART), and then only that partition: a stick holding the
-// boot image (`make usb`) keeps GRUB and the kernel in the partitions
+// boot image (`make usb`) keeps Limine and the kernel in the partitions
 // before it. A stick without one is left alone.
 // Hubs (USB 2) are followed two deep: a device on a hub's port gets a
 // route string and, if it is low or full speed behind a high-speed hub,

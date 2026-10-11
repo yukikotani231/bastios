@@ -33,13 +33,15 @@ notes. Once bastiolang has releases, set `BASTIOLANG_REF` in
 
 To try the build without making a release, start the workflow from the
 Actions tab with a tag that already exists: it uploads the files as a
-workflow artifact and stops there. While bastiolang is private, the
-workflow needs the same `BASTIOLANG_TOKEN` secret as CI.
+workflow artifact and stops there.
 
 ## What a release contains
 
-- `bastios-vX.Y.Z.iso`: GRUB and the kernel, a hybrid image that boots from
-  CD or USB under BIOS or UEFI (`make iso`).
+- `bastios-vX.Y.Z.iso`: Limine and the kernel, a hybrid image that boots from
+  CD or USB under BIOS or UEFI (`make iso`). Limine is BSD-2-Clause; its
+  license is copied into the image as `boot/limine/LICENSE`.
+- `bastios-usb-vX.Y.Z.img`: the same files for a USB stick (`make usb`), with
+  a 64 MiB partition after them where BastiOS keeps its files.
 - `bastios-vX.Y.Z.elf`: the kernel alone, a Multiboot image for
   `qemu-system-x86_64 -kernel`.
 - `busybox-1.36.1-source.tar.gz` and `busybox-vX.Y.Z.config`: the kernel
