@@ -514,6 +514,15 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   passes, so every processor starts (it ran on one).
 - `make run-iso` and `make run-uefi` open a QEMU window.
 
+### Build
+
+- The kernel and its programs are built with bastioc1, bastiolang's
+  compiler written in Bastio, which the Makefile builds once with stage0's
+  bastioc0 (`BASTIOC0`). `BASTIOC` still names another compiler.
+- `make NATIVE=1` builds the kernel with bastioc1's x86-64 backend instead
+  of through C (#151). It passes `make test`, but its code is about ten
+  times larger than gcc's, so it is opt-in.
+
 ### Tests and documentation
 
 - A getting-started guide (`docs/getting-started.md`): build, boot in
