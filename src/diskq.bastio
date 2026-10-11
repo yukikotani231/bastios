@@ -24,7 +24,7 @@ import "blk.bastio";
 import "core/ring.bastio";
 
 const CBLOCK: u64 = 4096;            // a block
-const NC: u64 = 64;                   // cache slots (256 KiB)
+const NC: u64 = 256;                  // cache slots (1 MiB: more than BusyBox, re-read on each exec at 256 KiB)
 const NQ: u64 = 128;                  // queued operations
 const QW: u64 = 3;                    // words per operation: kind, slot, block
 const DQ_NONE: u64 = 18446744073709551615;
@@ -56,6 +56,7 @@ struct DiskQ {
   r: Ring,              // the queue's head (the oldest operation) and count
                         // (operations queued, the one running included)
   running: bool,        // the head operation is on the device
+  batch: u64,           // and with it the next batch - 1 reads, of the blocks after its (blk_begin_n)
   since: u64,           // the tick it started
   hand: u64,            // the eviction clock's hand
   next: u64,            // the number the next transaction gets
@@ -67,14 +68,14 @@ struct DiskQ {
 
 spec fn dq_ok(q: &DiskQ) -> bool {
   blen(q.cache) == NC * CBLOCK && len(q.tag) == NC && len(q.st) == NC && len(q.q) == NQ * QW
-  && ring_ok(q.r) && q.r.cap == NQ && q.hand < NC
+  && ring_ok(q.r) && q.r.cap == NQ && q.hand < NC && q.batch >= 1 && q.batch <= VIO_BATCH
 }
 
 fn dq_new() -> DiskQ
   ensures dq_ok(result)
 {
   let mut q = DiskQ { cache: balloc(NC * CBLOCK), tag: alloc(NC), st: alloc(NC), q: alloc(NQ * QW),
-    r: ring_new(NQ), running: false, since: 0, hand: 0, next: 1, done: 0, moved: 0, dead: false, good: 0 };
+    r: ring_new(NQ), running: false, batch: 1, since: 0, hand: 0, next: 1, done: 0, moved: 0, dead: false, good: 0 };
   let mut i = 0;
   while i < NC
     invariant i <= NC && dq_ok(q)
@@ -345,6 +346,7 @@ fn dq_pop(q: &mut DiskQ)
 {
   ring_pop_n(&mut q.r, 1);
   q.running = false;
+  q.batch = 1;
   q.moved = (q.moved % 0x4000000000000000) + 1;
 }
 
@@ -384,6 +386,30 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
     }
     if r != BIO_OK {
       dq_kill(&mut q);
+    }
+    if q.batch > 1 {
+      // A batched read (blk_begin_n): its blocks go to the slots of the
+      // reads it took, which are the head and the operations after it.
+      let n = q.batch;
+      let mut j = 0;
+      while j < n && q.r.n > 0
+        invariant dq_ok(q) && blk_ok(dev)
+      {
+        let a2 = q.r.h * QW;
+        let s2 = get(q.q, a2 + 1);
+        if s2 < NC && get(q.q, a2) == Q_READ {
+          if r == BIO_OK {
+            blk_fetch_n(&mut dev, j, &mut q.cache, s2 * CBLOCK);
+            dq_settle(&mut q, s2);
+          } else {
+            q.st = set(q.st, s2, CS_FREE);
+            q.tag = set(q.tag, s2, NOTAG);
+          }
+        }
+        dq_pop(&mut q);
+        j = j + 1;
+      }
+      return DQ_MOVED;
     }
     if s < NC {
       if kind == Q_READ && r == BIO_OK {
@@ -428,6 +454,29 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
     op = BIO_READ;
   } else if kind == Q_WRITE {
     op = BIO_WRITE;
+  }
+  if kind == Q_READ {
+    // The reads queued after it of the blocks that follow b (read_ahead
+    // queues them so) go along in one request where the device can.
+    let mut want = 1;
+    let mut more = true;
+    while more && want < VIO_BATCH && want < q.r.n
+      invariant want >= 1 && want <= VIO_BATCH && dq_ok(q)
+    {
+      let a2 = ((q.r.h + want) % NQ) * QW;
+      if get(q.q, a2) == Q_READ && get(q.q, a2 + 1) < NC && get(q.q, a2 + 2) == b + want {
+        want = want + 1;
+      } else {
+        more = false;
+      }
+    }
+    let n = blk_room(dev, b * 8, want);
+    if n > 1 && blk_begin_n(&mut dev, b * 8, n) {
+      q.running = true;
+      q.batch = n;
+      q.since = now;
+      return DQ_MOVED;
+    }
   }
   if !blk_begin(&mut dev, op, b * 8, &mut q.cache, s * CBLOCK) {
     dq_kill(&mut q);

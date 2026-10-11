@@ -1,0 +1,448 @@
+// Resource limits (getrlimit, setrlimit, prlimit64) and locked memory.
+//
+// Each process row has RL_W words in k.sys from SYS_RL: the soft and the
+// hard limit of each of the RLIM_NLIMITS resources, then the bytes mlock
+// and mlockall count as locked, then the mlockall flags. A limit word of
+// 0 is the default (rlimit_of), RLIM_INFINITY is unlimited, and anything
+// else is the limit + 1. A new process or thread copies its parent's
+// limits; locked memory is neither inherited nor kept across execve.
+//
+// Enforced: RLIMIT_NOFILE (new descriptors), RLIMIT_FSIZE (a write to a
+// file stops at it; at it, SIGXFSZ and EFBIG), RLIMIT_CPU (SIGXCPU each
+// second from the soft limit, SIGKILL at the hard one), RLIMIT_MEMLOCK
+// (mlock and mlockall for non-root) and RLIMIT_NPROC (fork for a real
+// user other than root). The others are only kept. Every page stays in
+// memory anyway, so locking changes nothing but the count, and mlock of
+// a range already locked counts it again. The limits of the threads of a
+// process are copies: setrlimit in one does not reach the others.
+
+import "lxmisc.bastio";
+
+const RL_W: u64 = 34;
+const RLW_LOCKED: u64 = 32;
+const RLW_MCL: u64 = 33;
+const RLIMIT_CPU: u64 = 0;
+const RLIMIT_FSIZE: u64 = 1;
+const RLIMIT_NPROC: u64 = 6;
+const RLIMIT_MEMLOCK: u64 = 8;
+const RLIMIT_SIGPENDING: u64 = 11;
+const MLOCK_DEFAULT: u64 = 8388608;    // 8 MiB, as Linux
+const MCL_CURRENT: u64 = 1;
+const MCL_FUTURE: u64 = 2;
+const MCL_ONFAULT: u64 = 4;
+const SIGXCPU: u64 = 24;
+const SIGXFSZ: u64 = 25;
+const MAP_LOCKED: u64 = 0x2000;
+
+fn rl_word(k: &Kernel, p: u64, w: u64) -> u64
+  requires kok(k) && p < NPROC && w < RL_W
+{
+  return get(k.sys, SYS_RL + RL_W * p + w);
+}
+
+fn rl_put(k: &mut Kernel, p: u64, w: u64, v: u64)
+  requires kok(k) && p < NPROC && w < RL_W
+  ensures kok(k)
+{
+  k.sys = set(k.sys, SYS_RL + RL_W * p + w, v);
+}
+
+/// The limit a stored word s of resource r stands for.
+fn rl_dec(s: u64, r: u64) -> u64 {
+  if s == 0 {
+    return rlimit_of(r);
+  }
+  if s == RLIM_INFINITY {
+    return RLIM_INFINITY;
+  }
+  return s - 1;
+}
+
+/// The word that stores limit v (RLIM_INFINITY - 1 becomes unlimited).
+fn rl_enc(v: u64) -> u64 {
+  if v >= RLIM_INFINITY - 1 {
+    return RLIM_INFINITY;
+  }
+  return v + 1;
+}
+
+/// Process p's soft limit on resource r.
+fn rl_cur(k: &Kernel, p: u64, r: u64) -> u64
+  requires kok(k) && p < NPROC && r < RLIM_NLIMITS
+{
+  return rl_dec(rl_word(k, p, 2 * r), r);
+}
+
+/// Process p's hard limit on resource r.
+fn rl_max(k: &Kernel, p: u64, r: u64) -> u64
+  requires kok(k) && p < NPROC && r < RLIM_NLIMITS
+{
+  return rl_dec(rl_word(k, p, 2 * r + 1), r);
+}
+
+/// A new process or thread c of p: the limits carry over, locks do not.
+fn rl_fork(k: &mut Kernel, p: u64, c: u64)
+  requires kok(k) && p < NPROC && c < NPROC
+  ensures kok(k)
+{
+  let mut w = 0;
+  while w < RLW_LOCKED
+    invariant w <= RLW_LOCKED && kok(k)
+  {
+    rl_put(&mut k, c, w, rl_word(k, p, w));
+    w = w + 1;
+  }
+  rl_put(&mut k, c, RLW_LOCKED, 0);
+  rl_put(&mut k, c, RLW_MCL, 0);
+  tm_clear(&mut k, c);
+  k.sys = set(k.sys, SYS_RB + c, 0);      // no robust list (src/lxthread.bastio)
+}
+
+/// execve: a new address space, so nothing is locked.
+fn rl_exec(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  rl_put(&mut k, p, RLW_LOCKED, 0);
+  rl_put(&mut k, p, RLW_MCL, 0);
+  k.sys = set(k.sys, SYS_RB + p, 0);
+}
+
+/// Clears process p's row for the next process in its slot.
+fn rl_clear(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let mut w = 0;
+  while w < RL_W
+    invariant w <= RL_W && kok(k)
+  {
+    rl_put(&mut k, p, w, 0);
+    w = w + 1;
+  }
+}
+
+/// The descriptors process pid may have: 0 .. this - 1.
+fn fd_limit(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= LXNFD
+{
+  return smaller(rl_cur(k, pid, RLIMIT_NOFILE), LXNFD);
+}
+
+/// The lowest closed descriptor of pid >= from, below its RLIMIT_NOFILE;
+/// LXNFD if there is none.
+fn fd_free(k: &Kernel, pid: u64, from: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= LXNFD
+{
+  let lim = fd_limit(k, pid);
+  let fd = fd_free_in(k.lxfd, pid, from);
+  if fd >= lim {
+    return LXNFD;
+  }
+  return fd;
+}
+
+/// getrlimit, setrlimit and prlimit64(target, r, new, was) for process
+/// pid: the limits at `was` (if not 0) are those before new (if not 0)
+/// applies. Only root raises a hard limit, or changes another user's
+/// process.
+fn lx_prlimit(k: &mut Kernel, pid: u64, target: u64, r: u64, new: u64, was: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut t = pid;
+  if target != 0 {
+    if target >= NPROC || state(k.procs, target) == FREE || state(k.procs, target) == ZOMBIE {
+      return ESRCH;
+    }
+    t = target;
+    let uid = pget(k.procs, pid, F_UID) % 0x100000000;
+    if !cred_root(k.procs, pid) && pget(k.procs, t, F_UID) % 0x100000000 != uid {
+      return EPERM;
+    }
+  }
+  if r >= RLIM_NLIMITS {
+    return EINVAL;
+  }
+  let mut cur = 0;
+  let mut max = 0;
+  if new != 0 {
+    if copy_from_user(&mut k.spaces, pid, new, &mut k.fs.xfer, 16) != 16 {
+      return EFAULT;
+    }
+    cur = get_u64(k.fs.xfer, 0);
+    max = get_u64(k.fs.xfer, 8);
+    if cur > max {
+      return EINVAL;
+    }
+    if max > rl_max(k, t, r) && !cap_has(k, pid, CAP_SYS_RESOURCE) {
+      return EPERM;
+    }
+    if r == RLIMIT_NOFILE && max > NR_OPEN {
+      return EPERM;                         // past /proc/sys/fs/nr_open, even for root
+    }
+  }
+  if was != 0 {
+    xfer_u64(&mut k.fs.xfer, 0, rl_cur(k, t, r));
+    xfer_u64(&mut k.fs.xfer, 8, rl_max(k, t, r));
+    if lx_put_out(&mut k, pid, was, 16) != 0 {
+      return EFAULT;
+    }
+  }
+  if new != 0 {
+    rl_put(&mut k, t, 2 * r, rl_enc(cur));
+    rl_put(&mut k, t, 2 * r + 1, rl_enc(max));
+  }
+  return 0;
+}
+
+/// A timer tick that found process p running: past its soft CPU limit,
+/// SIGXCPU once a second; at the hard one, SIGKILL.
+fn rl_cpu_tick(k: &mut Kernel, p: u64)
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let soft = rl_cur(k, p, RLIMIT_CPU);
+  if soft == RLIM_INFINITY {
+    return;
+  }
+  let per = NS_PER_S / NS_PER_TICK;
+  let t = pget(k.procs, p, F_TICKS);
+  if per == 0 || t % per != 0 {
+    return;
+  }
+  let secs = t / per;
+  if secs >= rl_max(k, p, RLIMIT_CPU) {
+    post_sig(&mut k, p, SIGKILL);
+  } else if secs >= soft {
+    post_sig(&mut k, p, SIGXCPU);
+  }
+}
+
+/// How much of an n-byte write at open file row `row` RLIMIT_FSIZE lets
+/// process pid make: n or fewer, or -EFBIG (with SIGXFSZ) if the file
+/// position is already at the limit.
+fn fsize_room(k: &mut Kernel, pid: u64, row: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result <= n || result == EFBIG
+{
+  let lim = rl_cur(k, pid, RLIMIT_FSIZE);
+  if lim == RLIM_INFINITY || row >= FD_ROWS || n == 0 {
+    return n;
+  }
+  let mut pos = vfs_offset(k.fs, row);
+  if fget(k.fs.ftab, row, FD_MODE) / O_APPEND % 2 == 1 {
+    let s = vfs_size(&mut k.fs, vfs_row_file(k.fs, row));
+    if s != NO_FILE {
+      pos = s;
+    }
+  }
+  if pos >= lim {
+    if pid != 0 {
+      post_sig(&mut k, pid, SIGXFSZ);
+    }
+    return EFBIG;
+  }
+  return smaller(n, lim - pos);
+}
+
+/// May process pid lock `more` bytes besides those it holds? 0, or
+/// -EPERM (non-root with a limit of 0) or -ENOMEM.
+fn lock_check(k: &Kernel, pid: u64, held: u64, more: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  if cap_has(k, pid, CAP_IPC_LOCK) {
+    return 0;
+  }
+  let lim = rl_cur(k, pid, RLIMIT_MEMLOCK);
+  if lim == 0 {
+    return EPERM;
+  }
+  if more > lim || held > lim - more {
+    return ENOMEM;
+  }
+  return 0;
+}
+
+/// mlock (lock) or munlock of `bytes` more, after the range was checked.
+fn lock_count(k: &mut Kernel, pid: u64, bytes: u64, lock: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let held = rl_word(k, pid, RLW_LOCKED);
+  if lock {
+    let e = lock_check(k, pid, held, bytes);
+    if e != 0 {
+      return e;
+    }
+    rl_put(&mut k, pid, RLW_LOCKED, smaller(held, USER_SIZE) + smaller(bytes, USER_SIZE));
+  } else {
+    rl_put(&mut k, pid, RLW_LOCKED, held - smaller(held, bytes));
+  }
+  return 0;
+}
+
+/// A MAP_LOCKED mapping of n bytes: counted as locked.
+fn lock_mapped(k: &mut Kernel, pid: u64, n: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let held = smaller(rl_word(k, pid, RLW_LOCKED), USER_SIZE);
+  rl_put(&mut k, pid, RLW_LOCKED, held + smaller((smaller(n, USER_SIZE) + 4095) / 4096 * 4096, USER_SIZE));
+}
+
+/// mlockall(flags): MCL_CURRENT counts every mapped page as locked.
+fn lx_mlockall(k: &mut Kernel, pid: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags == 0 || flags & !(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0 || flags == MCL_ONFAULT {
+    return EINVAL;
+  }
+  let mut bytes = rl_word(k, pid, RLW_LOCKED);
+  if flags & MCL_CURRENT != 0 {
+    bytes = 4096 * smaller(win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, 0, WPAGES, 0), WPAGES);
+  }
+  let e = lock_check(k, pid, 0, bytes);
+  if e != 0 {
+    return e;
+  }
+  rl_put(&mut k, pid, RLW_LOCKED, bytes);
+  rl_put(&mut k, pid, RLW_MCL, flags);
+  return 0;
+}
+
+/// munlockall: nothing is locked.
+fn lx_munlockall(k: &mut Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  rl_put(&mut k, pid, RLW_LOCKED, 0);
+  rl_put(&mut k, pid, RLW_MCL, 0);
+  return 0;
+}
+
+// ---------------------------------------------------------------- CPU times
+// Timer ticks that find a process running count as its user time
+// (F_TICKS). Its system calls run in the kernel, where no tick lands, so
+// their time is measured with the TSC instead: three words per process in
+// k.sys from SYS_TM, the ns spent in system calls, then the user ticks and
+// the system ns of the children it has waited for (and theirs).
+
+fn tm_get(k: &Kernel, p: u64, i: u64) -> u64
+  requires kok(k) && p < NPROC && i < 3
+{
+  return get(k.sys, SYS_TM + 3 * p + i);
+}
+
+fn tm_set(k: &mut Kernel, p: u64, i: u64, v: u64)
+  requires kok(k) && p < NPROC && i < 3
+  ensures kok(k)
+{
+  k.sys = set(k.sys, SYS_TM + 3 * p + i, v);
+}
+
+/// Process p spent ns in a system call.
+fn tm_sys_add(k: &mut Kernel, p: u64, ns: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  if state(k.procs, p) != FREE {
+    tm_set(&mut k, p, 0, sat_add(tm_get(k, p, 0), ns));
+  }
+}
+
+/// The parent waited for child c: c's times, and its children's, become
+/// the parent's children's times.
+fn tm_reap(k: &mut Kernel, parent: u64, c: u64)
+  requires kok(k) && parent < NPROC && c < NPROC
+  ensures kok(k)
+{
+  let u = sat_add(pget(k.procs, c, F_TICKS), tm_get(k, c, 1));
+  let s = sat_add(tm_get(k, c, 0), tm_get(k, c, 2));
+  tm_set(&mut k, parent, 1, sat_add(tm_get(k, parent, 1), u));
+  tm_set(&mut k, parent, 2, sat_add(tm_get(k, parent, 2), s));
+}
+
+/// A new process or thread c starts with no times.
+fn tm_clear(k: &mut Kernel, c: u64)
+  requires kok(k) && c < NPROC
+  ensures kok(k)
+{
+  tm_set(&mut k, c, 0, 0);
+  tm_set(&mut k, c, 1, 0);
+  tm_set(&mut k, c, 2, 0);
+}
+
+/// Process p's system time in timer ticks, its children's user time in
+/// ticks (i 1), or their system time in ticks (i 2).
+fn tm_ticks(k: &Kernel, p: u64, i: u64) -> u64
+  requires kok(k) && p < NPROC && i < 3
+{
+  if i == 1 {
+    return tm_get(k, p, 1);
+  }
+  return tm_get(k, p, i) / NS_PER_TICK;
+}
+
+/// The bytes process p has locked, for /proc/<pid>/status.
+fn rl_locked(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+{
+  return rl_word(k, p, RLW_LOCKED);
+}
+
+/// fork for a real user other than root: -EAGAIN once that user has
+/// RLIMIT_NPROC processes and threads; else 0.
+fn nproc_check(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  let uid = pget(k.procs, pid, F_UID) % 0x100000000;
+  if uid == 0 {
+    return 0;
+  }
+  let lim = rl_cur(k, pid, RLIMIT_NPROC);
+  let mut n = 0;
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && n < p
+  {
+    if state(k.procs, p) != FREE && pget(k.procs, p, F_UID) % 0x100000000 == uid {
+      n = n + 1;
+    }
+    p = p + 1;
+  }
+  if n >= lim {
+    return EAGAIN;
+  }
+  return 0;
+}
+
+/// Whether a real-time signal s (32 and up) to process p would go past
+/// p's RLIMIT_SIGPENDING (EAGAIN). Signals here are pending bits, not a
+/// queue, so p's pending count is the number of bits set; Linux counts
+/// the queued signals of p's user.
+fn sigpending_full(k: &Kernel, p: u64, s: u64) -> bool
+  requires kok(k) && p < NPROC
+{
+  if s < 32 {
+    return false;
+  }
+  let lim = rl_cur(k, p, RLIMIT_SIGPENDING);
+  let mut m = pget(k.procs, p, F_SIGPEND);
+  let mut n = 0;
+  let mut i = 0;
+  while i < 64
+    invariant i <= 64 && n <= i
+  {
+    if m % 2 == 1 {
+      n = n + 1;
+    }
+    m = m / 2;
+    i = i + 1;
+  }
+  return n >= lim;
+}

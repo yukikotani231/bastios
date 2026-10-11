@@ -40,6 +40,7 @@ const PING_ID: u64 = 0x4253;          // "BS"
 const PING_DATA: u64 = 32;
 
 const ARP_N: u64 = 4;
+const HELD_N: u64 = 8;                // frames held for ARP answers
 
 // DHCP (RFC 2131), as a client.
 const DHCP_OFF: u64 = 0;              // no lease being sought: static address
@@ -81,12 +82,13 @@ const S_PEER_IP: u64 = 4;             // who sent the last datagram taken
 const S_PEER_PORT: u64 = 5;
 const S_SLOTS: u64 = 6;               // then per slot: length, address, port
 const SLOT_W: u64 = 3;
-const SOCK_FIELDS: u64 = 18;          // S_SLOTS + RXQ * SLOT_W
+const S_CORK: u64 = 18;               // bytes held back by MSG_MORE, in cork
+const SOCK_FIELDS: u64 = 19;          // S_SLOTS + RXQ * SLOT_W + 1
 
 // The TCP table's size (src/tcp.bastio has the rest).
 const TCBS: u64 = 32;                 // connections (listeners and TIME_WAIT hold some)
 const TCP_BUF: u64 = 4096;            // bytes in each receive and send buffer
-const TCB_W: u64 = 22;                // words per connection
+const TCB_W: u64 = 23;                // words per connection
 
 struct Net {
   dev: Card,
@@ -97,9 +99,10 @@ struct Net {
   span: u64,          // subnet when a / span == b / span)
   arp: Buf,           // ARP_N entries of (address, MAC); MAC 0: empty
   arp_next: u64,      // the entry the next new address replaces
-  held: Bytes,        // a frame waiting for its next hop's MAC ...
-  held_len: u64,      // ... this long (0: none) ...
-  held_hop: u64,      // ... to this address
+  held: Bytes,        // frames waiting for their next hop's MAC, HELD_N slots
+  held_len: Buf,      // of RX_BUF bytes, oldest first: their lengths ...
+  held_hop: Buf,      // ... and the addresses they go to
+  held_n: u64,        // how many are held
   dhcp_state: u64,
   dhcp_xid: u64,      // the transaction id our messages carry
   dhcp_offer: u64,    // the address offered ...
@@ -117,6 +120,7 @@ struct Net {
   tx: u64,
   socks: Buf,         // the UDP sockets, SOCK_FIELDS words each
   dq: Bytes,          // their queued datagrams, RXQ slots of UDP_MAX bytes each
+  cork: Bytes,        // the datagram each is putting together (MSG_MORE), UDP_MAX bytes each
   eph: u64,           // where the next ephemeral port search starts
   tcbs: Buf,          // TCP connections (src/tcp.bastio), TCB_W words each
   trx: Bytes,         // their receive buffers, TCP_BUF bytes each
@@ -132,11 +136,11 @@ struct Net {
 }
 
 spec fn net_ok(n: &Net) -> bool {
-  card_ok(n.dev) && blen(n.pkt) == RX_BUF && blen(n.out) == RX_BUF && blen(n.held) == RX_BUF
+  card_ok(n.dev) && blen(n.pkt) == RX_BUF && blen(n.out) == RX_BUF && blen(n.held) == HELD_N * RX_BUF
   && n.ip <= IP_MAX && n.gw <= IP_MAX && 1 <= n.span && n.span <= 4294967296
-  && len(n.arp) == ARP_N * 2 && n.held_len <= FRAME_MAX && n.seq <= 65535 && n.ping_pid < PID_LIMIT && n.ping_ip <= IP_MAX
+  && len(n.arp) == ARP_N * 2 && len(n.held_len) == HELD_N && len(n.held_hop) == HELD_N && n.held_n <= HELD_N && n.seq <= 65535 && n.ping_pid < PID_LIMIT && n.ping_ip <= IP_MAX
   && n.dhcp_xid <= IP_MAX && n.dhcp_offer <= IP_MAX && n.dhcp_server <= IP_MAX
-  && len(n.socks) == SOCKS * SOCK_FIELDS && blen(n.dq) == SOCKS * RXQ * UDP_MAX
+  && len(n.socks) == SOCKS * SOCK_FIELDS && blen(n.dq) == SOCKS * RXQ * UDP_MAX && blen(n.cork) == SOCKS * UDP_MAX
   && len(n.tcbs) == TCBS * TCB_W && blen(n.trx) == TCBS * TCP_BUF && blen(n.ttx) == TCBS * TCP_BUF
   && blen(n.lo) == LOQ * RX_BUF && len(n.lo_len) == LOQ && n.lo_head < LOQ && n.lo_n <= LOQ
 }
@@ -379,9 +383,11 @@ fn reply_send(n: &mut Net, ip: u64, flen: u64) -> bool
 }
 
 /// Sends the outgoing frame (its first flen bytes, Ethernet header aside)
-/// to `hop`: now if its MAC is cached, else once ARP answers. A frame
-/// already held for an answer is replaced. A frame for this machine goes
-/// round the loopback queue instead.
+/// to `hop`: now if its MAC is cached, else once ARP answers. Up to HELD_N
+/// frames wait for answers at once (two connections opened together each
+/// send one); past that the frame is dropped, as a busy card would, and
+/// TCP sends it again. A frame for this machine goes round the loopback
+/// queue instead.
 fn send_via(n: &mut Net, hop: u64, flen: u64) -> bool
   requires net_ok(n) && hop <= IP_MAX && 14 <= flen && flen <= FRAME_MAX
   ensures net_ok(n)
@@ -394,10 +400,58 @@ fn send_via(n: &mut Net, hop: u64, flen: u64) -> bool
     put48(&mut n.out, 0, mac);
     return net_send(&mut n, flen);
   }
-  bcopy(&mut n.held, 0, n.out, 0, flen);
-  n.held_len = flen;
-  n.held_hop = hop;
+  let mut asked = false;
+  let mut i = 0;
+  while i < n.held_n
+    invariant i <= n.held_n && net_ok(n)
+  {
+    if get(n.held_hop, i) == hop {
+      asked = true;
+    }
+    i = i + 1;
+  }
+  if n.held_n < HELD_N {
+    bcopy(&mut n.held, n.held_n * RX_BUF, n.out, 0, flen);
+    n.held_len = set(n.held_len, n.held_n, flen);
+    n.held_hop = set(n.held_hop, n.held_n, hop);
+    n.held_n = n.held_n + 1;
+  }
+  if asked {
+    return true;                      // its ARP request is already out
+  }
   return arp_send(&mut n, 1, MAC_BCAST, 0, hop);
+}
+
+/// ARP answered for `ip` (at `mac`): the frames held for it go out, oldest
+/// first, and the others move down to stay in order.
+fn held_release(n: &mut Net, ip: u64, mac: u64)
+  requires net_ok(n) && mac < MAC_LIMIT
+  ensures net_ok(n)
+{
+  let mut kept = 0;
+  let mut i = 0;
+  while i < n.held_n
+    invariant kept <= i && i <= n.held_n && net_ok(n)
+  {
+    let l = get(n.held_len, i);
+    let hop = get(n.held_hop, i);
+    if l <= FRAME_MAX {
+      bcopy(&mut n.out, 0, n.held, i * RX_BUF, l);
+      if hop == ip {
+        if l >= 14 {
+          put48(&mut n.out, 0, mac);
+          net_send(&mut n, l);
+        }
+      } else {
+        bcopy(&mut n.held, kept * RX_BUF, n.out, 0, l);
+        n.held_len = set(n.held_len, kept, l);
+        n.held_hop = set(n.held_hop, kept, hop);
+        kept = kept + 1;
+      }
+    }
+    i = i + 1;
+  }
+  n.held_n = kept;
 }
 
 fn arp_in(n: &mut Net, flen: u64)
@@ -421,14 +475,7 @@ fn arp_in(n: &mut Net, flen: u64)
   if op == 1 && tip == n.ip {
     arp_send(&mut n, 2, smac, smac, sip);
   }
-  if n.held_len >= 14 && n.held_hop == sip {
-    // The frame waiting for this answer goes out now.
-    let l = n.held_len;
-    bcopy(&mut n.out, 0, n.held, 0, l);
-    n.held_len = 0;
-    put48(&mut n.out, 0, smac);
-    net_send(&mut n, l);
-  }
+  held_release(&mut n, sip, smac);
   if n.ping_state == PING_ARP && n.ping_hop == sip {
     ping_send(&mut n, smac);
   }
@@ -876,6 +923,7 @@ fn udp_open(n: &mut Net) -> u64
       sk_set(&mut n, s, S_COUNT, 0);
       sk_set(&mut n, s, S_PEER_IP, 0);
       sk_set(&mut n, s, S_PEER_PORT, 0);
+      sk_set(&mut n, s, S_CORK, 0);
       return s;
     }
     s = s + 1;
@@ -977,6 +1025,39 @@ fn udp_sendto(n: &mut Net, s: u64, to: u64, port: u64, buf: &Bytes, size: u64) -
   return size;
 }
 
+/// Sends bytes 0..size of buf to ip:port after what MSG_MORE held back on
+/// s; with more, holds them back too. Returns size, or NO_SOCK (also when
+/// the datagram would outgrow UDP_MAX: see sock_corked).
+fn udp_send_more(n: &mut Net, s: u64, to: u64, port: u64, buf: &Bytes, size: u64, more: bool) -> u64
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  if !udp_is_open(n, s) || s >= SOCKS || size > blen(buf) {
+    return NO_SOCK;
+  }
+  let have = sk_get(n, s, S_CORK);
+  if have == 0 && !more {
+    return udp_sendto(&mut n, s, to, port, buf, size);
+  }
+  if have > UDP_MAX || size > UDP_MAX - have {
+    return NO_SOCK;
+  }
+  bcopy(&mut n.cork, s * UDP_MAX + have, buf, 0, size);
+  if more {
+    sk_set(&mut n, s, S_CORK, have + size);
+    return size;
+  }
+  sk_set(&mut n, s, S_CORK, 0);
+  let mut g = balloc(UDP_MAX);
+  bcopy(&mut g, 0, n.cork, s * UDP_MAX, have + size);
+  let r = udp_sendto(&mut n, s, to, port, g, have + size);
+  bfree(g);
+  if r == NO_SOCK {
+    return NO_SOCK;
+  }
+  return size;
+}
+
 /// Takes the oldest datagram queued on socket s, if any: copies up to
 /// `max` bytes of it (and no more than buf holds) to the start of buf and
 /// returns that count, dropping the rest as Linux does; its sender becomes
@@ -1046,6 +1127,7 @@ fn net_poll(n: &mut Net)
   {
     let flen = card_recv(&mut n.dev, &mut n.pkt);
     if flen == 0 {
+      card_rx_flush(&mut n.dev);
       return;
     }
     if n.rx < 18446744073709551615 {
@@ -1061,6 +1143,7 @@ fn net_poll(n: &mut Net)
     }
     k = k + 1;
   }
+  card_rx_flush(&mut n.dev);
 }
 
 // ---------------------------------------------------------------- the card, or none
@@ -1166,10 +1249,10 @@ fn net_up(d: Card) -> Nic
   ensures nic_ok(result)
 {
   let mut n = Net { dev: d, pkt: balloc(RX_BUF), out: balloc(RX_BUF), ip: 0, gw: 0, span: 1,
-    arp: alloc(ARP_N * 2), arp_next: 0, held: balloc(RX_BUF), held_len: 0, held_hop: 0,
+    arp: alloc(ARP_N * 2), arp_next: 0, held: balloc(HELD_N * RX_BUF), held_len: alloc(HELD_N), held_hop: alloc(HELD_N), held_n: 0,
     dhcp_state: DHCP_OFF, dhcp_xid: 0, dhcp_offer: 0, dhcp_server: 0, dhcp_tries: 0, dhcp_until: 0, now: 0,
     ping_state: PING_IDLE, ping_pid: 0, ping_ip: 0, ping_hop: 0, ping_until: 0, seq: 0, rx: 0, tx: 0,
-    socks: alloc(SOCKS * SOCK_FIELDS), dq: balloc(SOCKS * RXQ * UDP_MAX), eph: 0,
+    socks: alloc(SOCKS * SOCK_FIELDS), dq: balloc(SOCKS * RXQ * UDP_MAX), cork: balloc(SOCKS * UDP_MAX), eph: 0,
     tcbs: alloc(TCBS * TCB_W), trx: balloc(TCBS * TCP_BUF), ttx: balloc(TCBS * TCP_BUF), iss: 0,
     lo: balloc(LOQ * RX_BUF), lo_len: alloc(LOQ), lo_head: 0, lo_n: 0, seen_rx: 0, seen_tick: 0, irq_on: false };
   // The address comes from DHCP, sought from now on.
@@ -1409,9 +1492,12 @@ fn nic_free(ports: &mut Ports, win: &mut MmioSpace, c: Nic, m: &mut Mem)
       bfree(n.pkt);
       bfree(n.out);
       bfree(n.held);
+      free(n.held_len);
+      free(n.held_hop);
       free(n.tcbs);
       bfree(n.trx);
       bfree(n.ttx);
+      bfree(n.cork);
       free(n.arp);
       free(n.socks);
       bfree(n.dq);
@@ -1476,6 +1562,41 @@ fn sock_sendto(c: &mut Nic, s: u64, ip: u64, port: u64, buf: &Bytes, size: u64) 
       let r = udp_sendto(&mut n, s, ip, port, buf, size);
       c = Nic::Up(n);
       return r;
+    },
+  }
+}
+
+/// sock_sendto, but after what MSG_MORE held back on s, and with more,
+/// held back too.
+fn sock_send_more(c: &mut Nic, s: u64, ip: u64, port: u64, buf: &Bytes, size: u64, more: bool) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => {
+      c = Nic::None;
+      return NO_SOCK;
+    },
+    Nic::Up(mut n) => {
+      let r = udp_send_more(&mut n, s, ip, port, buf, size, more);
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+/// The bytes MSG_MORE holds back on s.
+fn sock_corked(c: &Nic, s: u64) -> u64
+  requires nic_ok(c)
+  ensures result <= UDP_MAX
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if udp_is_open(n, s) && s < SOCKS {
+        return smaller(sk_get(n, s, S_CORK), UDP_MAX);
+      }
+      return 0;
     },
   }
 }
@@ -1575,6 +1696,7 @@ fn sock_close(c: &mut Nic, s: u64) -> bool
         sk_set(&mut n, s, S_OPEN, 0);
         sk_set(&mut n, s, S_PORT, 0);
         sk_set(&mut n, s, S_COUNT, 0);
+        sk_set(&mut n, s, S_CORK, 0);
       }
       c = Nic::Up(n);
       return ok;

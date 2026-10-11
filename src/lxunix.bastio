@@ -8,17 +8,32 @@
 //   UM_LISTEN  listening: the same slot
 //   UM_CONN    connected: rx + UX_N * tx, the channels it reads and writes
 //
-// k.ux holds UX_N channels of UX_W words (head, count, read end open,
-// write end open: 1, or 2 once shut for writing), then UX_LIS listener slots of UXL_W words (state,
+// k.ux holds UX_N channels of UX_W words (head, count, read end open:
+// 1, or 2 once shut for reading; write end open: 1, or 2 once shut for
+// writing), then UX_LIS listener slots of UXL_W words (state,
 // name length, backlog head, backlog count, then UX_BACKLOG descriptions
 // waiting to be accepted), then one word per channel: a description sent
 // over it with SCM_RIGHTS and not yet received (its number + 1), or 0.
+// Then two words per channel, the credentials of the process at its
+// write end (pid, then effective uid + 2^32 * effective gid), and two per
+// listener slot, those of the process that called listen: SO_PEERCRED.
 // k.uxb holds each channel's ring of UX_CAP bytes, then each slot's name.
 // A datagram channel keeps each message as its length (two bytes, low
 // first) and then its bytes.
 //
-// Unlike Linux, bind makes no file: the name lives in the slot until the
-// socket closes, and is matched byte for byte (no path resolution).
+// A name that starts with a byte other than 0 is a path. bind makes a
+// socket file there (type S_IFSOCK, rwxrwxrwx less the umask, owned by its
+// maker), with the same checks as making any file, and keeps the path the
+// name resolves to in the slot; connect resolves its name the same way and
+// needs write permission on the socket file, as on Linux, so chmod on the
+// file says who may connect. The file outlives the socket, as on Linux: a
+// program removes it before binding the name again. A name that starts
+// with 0 is in Linux's abstract namespace: no file and no permissions,
+// matched byte for byte.
+//
+// Different from Linux: a socket file that is renamed (or reached through
+// a hard link of another name) no longer leads to its socket, which is
+// found by the path it was bound at; ECONNREFUSED then.
 
 import "linux.bastio";
 
@@ -33,8 +48,12 @@ const UL_LISTEN: u64 = 2;
 const UXL0: u64 = 64;                  // UX_N * UX_W: the first listener word
 const UXP0: u64 = 65536;               // UX_N * UX_CAP: the first name byte
 const UXF0: u64 = 96;                  // UXL0 + UX_LIS * UXL_W: the in-flight words
+const UXC0: u64 = 112;                 // UXF0 + UX_N: the channels' credentials
+const UXLC0: u64 = 144;                // UXC0 + 2 * UX_N: the listeners' credentials
+const SO_PEERCRED: u64 = 17;
 const UX_DG: u64 = 16;                 // word 3: a datagram socket
 const SUN_LEN: u64 = 110;              // sizeof(struct sockaddr_un)
+const T_SOCK: u64 = 0xC000;            // mode type bits of a socket file
 const ECONNABORTED: u64 = 18446744073709551513;    // 2^64 - 103
 
 // A unix socket descriptor: description h, word 2 x, nonblocking, mode;
@@ -117,6 +136,44 @@ fn uc_set_fly(k: &mut Kernel, c: u64, v: u64)
   ensures kok(k)
 {
   k.ux = set(k.ux, UXF0 + c, v);
+}
+
+/// Process pid's credentials as SO_PEERCRED reports them: effective uid
+/// + 2^32 * effective gid.
+fn ux_ids(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  return pget(k.procs, pid, F_UID) / 0x100000000 + 0x100000000 * (pget(k.procs, pid, F_GID) / 0x100000000);
+}
+
+/// Process pid writes into channel c.
+fn uc_set_cred(k: &mut Kernel, c: u64, pid: u64, ids: u64)
+  requires kok(k) && c < UX_N
+  ensures kok(k)
+{
+  k.ux = set(k.ux, UXC0 + 2 * c, pid);
+  k.ux = set(k.ux, UXC0 + 2 * c + 1, ids);
+}
+
+/// getsockopt(SO_PEERCRED) on unix socket fd: struct ucred of the process
+/// at the other end (as it was when it connected, or listened) into
+/// xfer[0..12]. A socket with no peer gets pid 0 and the overflow ids, as
+/// on Linux.
+fn ux_peercred(k: &mut Kernel, pid: u64, fd: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let u = ux_look(k, pid, fd);
+  let mut p = 0;
+  let mut ids = 65534 + 0x100000000 * 65534;
+  if u.err == 0 && u.mode == UM_CONN {
+    let rx = u.x % UX_N;
+    p = get(k.ux, UXC0 + 2 * rx);
+    ids = get(k.ux, UXC0 + 2 * rx + 1);
+  }
+  xput(&mut k, 0, p, 4);
+  xput(&mut k, 4, ids % 0x100000000, 4);
+  xput(&mut k, 8, ids / 0x100000000, 4);
 }
 
 fn ux_look(k: &Kernel, pid: u64, fd: u64) -> Ux
@@ -319,11 +376,11 @@ fn ux_socketpair(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64, s
   if ty != SOCK_STREAM {
     dg = UX_DG;
   }
-  let a = fd_free(k.lxfd, pid, 0);
+  let a = fd_free(k, pid, 0);
   if a >= LXNFD {
     return EMFILE;
   }
-  let b = fd_free(k.lxfd, pid, a + 1);
+  let b = fd_free(k, pid, a + 1);
   if b >= LXNFD {
     return EMFILE;
   }
@@ -343,6 +400,9 @@ fn ux_socketpair(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64, s
   }
   fd_set(&mut k.lxfd, pid, a, FD_OFD + p % 4294967296 + ce);
   fd_set(&mut k.lxfd, pid, b, FD_OFD + p / 4294967296 + ce);
+  let x = of_get(k.ofd, p % 4294967296, 2);
+  uc_set_cred(&mut k, x % UX_N, pid, ux_ids(k, pid));
+  uc_set_cred(&mut k, x / UX_N % UX_N, pid, ux_ids(k, pid));
   return 0;
 }
 
@@ -412,6 +472,101 @@ fn ul_find(k: &Kernel, n: u64) -> u64
   return UX_LIS;
 }
 
+/// For a path name (sun_in has put it at the start of the transfer
+/// buffer): resolves the path at sockaddr va + 2 from the working
+/// directory, through links on the way (and the last one too unless
+/// `bind`), checking search permission. The canonical path is then the
+/// first `result` transfer bytes; or an error.
+fn ux_resolve(k: &mut Kernel, pid: u64, va: u64, bind: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures (1 <= result && result <= UX_PATH) || result >= 18446744073709547520
+{
+  if va > 0xFFFFFFFFFFFF0000 {
+    return EFAULT;
+  }
+  let mut n = NO_RESULT;
+  if bind {
+    n = lx_path_at_nf(&mut k, pid, AT_FDCWD, va + 2);
+  } else {
+    n = lx_path_at(&mut k, pid, AT_FDCWD, va + 2);
+  }
+  if n == NO_RESULT {
+    if k.perr < 18446744073709547520 {
+      return EINVAL;
+    }
+    return k.perr;
+  }
+  if n == 0 {
+    return ENOENT;
+  }
+  if n > UX_PATH {
+    return ENAMETOOLONG;                    // the canonical path does not fit a slot
+  }
+  return n;
+}
+
+/// bind on a path name, at canonical path xfer[0..n]: makes the socket
+/// file. 0 or an error; the transfer buffer still starts with the path.
+fn ux_mkfile(k: &mut Kernel, pid: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && 1 <= n && n <= UX_PATH && UX_PATH <= FNAME_MAX
+  ensures kok(k)
+{
+  let mut t = balloc(2 * FNAME_MAX);
+  xfer_save(k, &mut t, 0, n);
+  let there = path_meta(&mut k, n);
+  xfer_load(&mut k, t, 0, n);
+  let mut e = 0;
+  if there.ok {
+    e = EADDRINUSE;                         // a file, or a socket file left behind
+  } else if vfs_ro(&mut k.fs, n) {
+    e = EROFS;
+  } else {
+    e = may_dir(&mut k, pid, n);
+  }
+  if e == 0 {
+    xfer_load(&mut k, t, 0, n);
+    let own = new_owner(&mut k, pid, n);
+    xfer_load(&mut k, t, 0, n);
+    if !vfs_mknode(&mut k.fs, &mut k.mem, n, T_SOCK + 511) {
+      e = ENOENT;                           // no such directory, or no room
+    } else {
+      xfer_load(&mut k, t, 0, n);
+      let h = vfs_lookup(&mut k.fs, n);
+      if h != NO_FILE {
+        made_by(&mut k, pid, h, own, 511, false);   // the umask and owner (src/lxperm.bastio)
+      }
+    }
+  }
+  xfer_load(&mut k, t, 0, n);
+  bfree(t);
+  return e;
+}
+
+/// connect on a path name, at canonical path xfer[0..n]: the file must be
+/// a socket file the caller may write. 0 or an error; the transfer buffer
+/// still starts with the path.
+fn ux_may_connect(k: &mut Kernel, pid: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= UX_PATH && UX_PATH <= FNAME_MAX
+  ensures kok(k)
+{
+  let mut t = balloc(2 * FNAME_MAX);
+  xfer_save(k, &mut t, 0, n);
+  let m = path_meta(&mut k, n);
+  xfer_load(&mut k, t, 0, n);
+  bfree(t);
+  if !m.ok {
+    return ENOENT;
+  }
+  if m.mode % 65536 / 4096 * 4096 != T_SOCK {
+    return ECONNREFUSED;                    // not a socket
+  }
+  if !may_meta(k.procs, pid, m.mode, m.own, MAY_W) {
+    return EACCES;
+  }
+  return 0;
+}
+
 /// bind on a unix socket: claims the name.
 fn ux_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -424,12 +579,9 @@ fn ux_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if u.mode != UM_NEW {
     return EINVAL;
   }
-  let n = sun_in(&mut k, pid, addr, alen);
+  let mut n = sun_in(&mut k, pid, addr, alen);
   if n > UX_PATH {
     return n;
-  }
-  if ul_find(k, n) < UX_LIS {
-    return EADDRINUSE;
   }
   let mut l = 0;
   while l < UX_LIS && ul_get(k, l, 0) != UL_FREE
@@ -439,6 +591,24 @@ fn ux_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   }
   if l >= UX_LIS {
     return ENOBUFS;
+  }
+  if bget(k.fs.xfer, 0) != 0 {
+    n = ux_resolve(&mut k, pid, addr, true);
+    if n > UX_PATH {
+      return n;
+    }
+    let e = ux_mkfile(&mut k, pid, n);
+    if e != 0 {
+      return e;
+    }
+    // A socket still bound to a socket file removed since: no longer
+    // found by this name.
+    let stale = ul_find(k, n);
+    if stale < UX_LIS {
+      ul_set(&mut k, stale, 1, UX_PATH + 1);
+    }
+  } else if ul_find(k, n) < UX_LIS {
+    return EADDRINUSE;
   }
   let mut i = 0;
   while i < n
@@ -472,6 +642,8 @@ fn ux_listen(k: &mut Kernel, pid: u64, fd: u64) -> u64
     return EINVAL;                          // no autobind
   }
   ul_set(&mut k, u.x, 0, UL_LISTEN);
+  k.ux = set(k.ux, UXLC0 + 2 * u.x, pid);
+  k.ux = set(k.ux, UXLC0 + 2 * u.x + 1, ux_ids(k, pid));
   of_set(&mut k.ofd, u.h, 3, u.nb + 2 * UM_LISTEN);
   return 0;
 }
@@ -492,12 +664,26 @@ fn ux_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if u.mode != UM_NEW {
     return EINVAL;
   }
-  let n = sun_in(&mut k, pid, addr, alen);
+  let mut n = sun_in(&mut k, pid, addr, alen);
   if n > UX_PATH {
     return n;
   }
+  let path = bget(k.fs.xfer, 0) != 0;
+  if path {
+    n = ux_resolve(&mut k, pid, addr, false);
+    if n > UX_PATH {
+      return n;
+    }
+    let e = ux_may_connect(&mut k, pid, n);
+    if e != 0 {
+      return e;
+    }
+  }
   let l = ul_find(k, n);
   if l >= UX_LIS {
+    if path {
+      return ECONNREFUSED;                  // a socket file no socket listens on
+    }
     return ENOENT;
   }
   if ul_get(k, l, 0) != UL_LISTEN {
@@ -516,6 +702,11 @@ fn ux_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   }
   let mine = p % 4294967296;
   let theirs = p / 4294967296;
+  // The accepted end reads what we write, and we read what the listener's
+  // process will write.
+  let x = of_get(k.ofd, mine, 2);
+  uc_set_cred(&mut k, x / UX_N % UX_N, pid, ux_ids(k, pid));
+  uc_set_cred(&mut k, x % UX_N, get(k.ux, UXLC0 + 2 * l), get(k.ux, UXLC0 + 2 * l + 1));
   // Our description takes over the first end; the one ux_pair made for it
   // is dropped.
   of_set(&mut k.ofd, u.h, 2, of_get(k.ofd, mine, 2));
@@ -611,7 +802,7 @@ fn ux_send(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool) -
     return ENOTCONN;
   }
   let c = u.x / UX_N;
-  if uc_get(k, c, 2) == 0 || uc_get(k, c, 3) != 1 {
+  if uc_get(k, c, 2) != 1 || uc_get(k, c, 3) != 1 {
     return EPIPE;
   }
   if n == 0 && !u.dg {
@@ -668,8 +859,8 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
   let mut r = uc_ring(k, c);
   let count = r.n;
   if count == 0 {
-    if uc_get(k, c, 3) != 1 {
-      return 0;
+    if uc_get(k, c, 3) != 1 || uc_get(k, c, 2) != 1 {
+      return 0;                             // the writer or this side shut
     }
     if dontwait || u.nb == 1 {
       return EAGAIN;
@@ -716,7 +907,9 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
 
 /// shutdown(fd, how) on a connected unix socket: SHUT_WR (and SHUT_RDWR)
 /// close its write end, so the peer reads the end and later sends are
-/// -EPIPE; SHUT_RD changes nothing.
+/// -EPIPE; SHUT_RD (and SHUT_RDWR) close its read end: reads end once
+/// the bytes waiting are taken, and the peer's sends are -EPIPE, as on
+/// Linux.
 fn ux_shutdown(k: &mut Kernel, pid: u64, fd: u64, how: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -731,10 +924,13 @@ fn ux_shutdown(k: &mut Kernel, pid: u64, fd: u64, how: u64) -> u64
   if u.mode != UM_CONN {
     return ENOTCONN;
   }
+  // 2, not 0: the channel stays this socket's until it closes (with
+  // both ends 0, uc_new would hand it out again).
   if how != 0 {
-    // 2, not 0: the channel stays this socket's until it closes (with
-    // both ends 0, uc_new would hand it out again).
     uc_set(&mut k, u.x / UX_N, 3, 2);
+  }
+  if how != 1 && uc_get(k, u.x % UX_N, 2) == 1 {
+    uc_set(&mut k, u.x % UX_N, 2, 2);
   }
   return 0;
 }
@@ -781,9 +977,12 @@ fn ux_poll_bits(k: &Kernel, pid: u64, fd: u64) -> u64
     b = POLLIN;
   }
   if uc_get(k, rx, 3) != 1 {
-    b = b | POLLIN | POLLHUP;
+    b = b | POLLIN | POLLHUP | POLLRDHUP;
   }
-  if uc_get(k, tx, 2) == 0 {
+  if uc_get(k, rx, 2) != 1 {
+    b = b | POLLIN | POLLRDHUP;             // shut for reading here
+  }
+  if uc_get(k, tx, 2) != 1 {
     b = b | POLLERR;
   } else if uc_get(k, tx, 1) < UX_CAP {
     b = b | POLLOUT;
