@@ -321,6 +321,7 @@ t_ipc: fcntl F_GETFL sees O_NONBLOCK
 t_ipc: fcntl F_SETFL
 t_ipc: isatty(0)
 t_ipc: mkfifo
+t_ipc: fstat on an open FIFO shows the file lstat shows
 t_ipc: pipe
 t_ipc: pipe across fork
 t_ipc: pipe holds 64 KiB, then EAGAIN
@@ -403,6 +404,7 @@ t_ltp2: mqueue: priorities order messages, getattr counts, unlink, bad sigevent 
 t_ltp2: nested epoll: readiness passes up, a loop is ELOOP
 t_ltp2: nice: root lowers and raises it, a child inherits it, nobody may not lower it
 t_ltp2: personality is kept
+t_ltp2: pipe: pipes run out of descriptors (EMFILE) before the kernel runs out of pipes (LTP pipe06)
 t_ltp2: prctl: a name shows in /proc/self/comm; death signal and timer slack read back
 t_ltp2: pread/pwrite: negative offset EINVAL, a directory EISDIR, 0 bytes 0
 t_ltp2: rlimits: bad resource EINVAL; soft over hard EINVAL
@@ -575,6 +577,7 @@ t_path: an empty path is ENOENT, except with AT_EMPTY_PATH
 t_path: chroot keeps absolute paths, links and .. inside the new root
 t_path: fstat of a directory gives its mode
 t_path: mknod makes device and socket nodes; a device node opens its device
+t_path: a name ending in / or /. must be a directory
 t_path: paths are read up to PATH_MAX
 t_path: pread and pwrite take no negative offset
 t_path: sendfile checks its descriptors and offset; statx its flags

@@ -539,7 +539,7 @@ fn lx_setsid(k: &mut Kernel, pid: u64) -> u64
   // leads one, or left one that still has members.
   let mut p = 1;
   while p < NPROC
-    invariant 1 <= p && p <= NPROC && len(k.procs) == PTAB_LEN
+    invariant 1 <= p && p <= NPROC && ptab_ok(k.procs)
   {
     if state(k.procs, p) != FREE && pgid_of(k.procs, p) == pid {
       return EPERM;
@@ -585,7 +585,7 @@ fn lx_setpgid(k: &mut Kernel, pid: u64, target: u64, g: u64) -> u64
     let mut found = false;
     let mut p = 1;
     while p < NPROC
-      invariant 1 <= p && p <= NPROC && len(k.procs) == PTAB_LEN
+      invariant 1 <= p && p <= NPROC && ptab_ok(k.procs)
     {
       if state(k.procs, p) != FREE && pgid_of(k.procs, p) == want && sid_of(k.procs, p) == sid_of(k.procs, t) {
         found = true;
