@@ -84,6 +84,7 @@ struct Vfs {
   lo_dev: u64,          // the loop device's number
   lo_ro: bool,          // mounted read-only
   pc: PCache,           // file pages that MAP_SHARED mappings share (src/pcache.bastio)
+  rlinked: bool,        // a hard link to an in-memory file was ever made: false lets vfs_nlink skip counting them
 }
 
 spec fn vfs_ok(v: &Vfs) -> bool {
@@ -96,7 +97,7 @@ fn vfs_new(disk: DiskFs) -> Vfs
   ensures vfs_ok(result)
 {
   return Vfs { ram: ram_new(), ftab: alloc(FTAB_START), holds: alloc(HOLD_LEN), xfer: balloc(XFER), disk: disk, name: balloc(NAMEBUF), mnt: alloc(MNT_LEN), now: 0,
-    lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0))), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, pc: pc_new() };
+    lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0))), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, pc: pc_new(), rlinked: false };
 }
 
 /// The next byte typed on a USB keyboard that sits on the disk's xHCI
@@ -875,6 +876,9 @@ fn vfs_nlink(v: &mut Vfs, f: u64) -> u64
 {
   let t = vfs_target(&mut v, f);
   if t < NFILES {
+    if !v.rlinked {
+      return 1;                             // no link node exists, so the count would be 0 (and costs a pass over every node)
+    }
     return 1 + ram_links(&mut v.ram, t);
   }
   if t < NFILES + DSLOTS {
@@ -1970,6 +1974,7 @@ fn vfs_link(v: &mut Vfs, n: u64, m: u64) -> u64
   if f >= NFILES || ram_link(&mut v.ram, v.xfer, m, f, v.now) >= NFILES {
     return LINK_FULL;
   }
+  v.rlinked = true;
   return LINKED;
 }
 
