@@ -928,6 +928,15 @@ fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
   if h >= OFD_N || is_exe_file(f) {
     return EBADF;
   }
+  // A process that ended after its file was opened: ESRCH, as on Linux.
+  // An empty file instead makes BusyBox's ps (procps_scan) look for the
+  // ')' of a /proc/PID/stat that has none and write through NULL.
+  if f >= PROC_DEV && f < PROC_DEV + PSYS {
+    let p = (f - PROC_DEV) / 16;
+    if p != 0 && state(k.procs, p) == FREE {
+      return ESRCH;
+    }
+  }
   let off = of_get(k.ofd, h, 3);
   let mut out = balloc(PROC_OUT);
   let l = proc_text(&mut k, f, &mut out);

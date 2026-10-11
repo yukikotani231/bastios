@@ -121,7 +121,7 @@ const MAX_IDLE: u64 = 1024;           // more than there are processors
 // (an idle application processor sleeps through its own; see `next_job`).
 // `acpi` holds the clock's PM timer (without an HPET) and the power
 // button; `reboot` says the stop is a restart.
-struct Sys { k: Kernel, con: Con, pic: Pic, apic: Lapic, clock: Hpet, acpi: Acpi, stop: bool, reboot: bool, idle: u64, ticked: bool }
+struct Sys { k: Kernel, con: Con, pic: Pic, apic: Lapic, clock: Hpet, acpi: Acpi, stop: bool, reboot: bool, idle: u64, ticked: bool, login: u64 }
   invariant kok(k) && con_ok(con) && pic_ok(pic) && lapic_ok(apic) && hpet_ok(clock) && acpi_ok(acpi);
 
 spec fn sys_ok(s: &Sys) -> bool {
@@ -196,6 +196,28 @@ fn any_ready(procs: &Buf) -> bool
   return false;
 }
 
+/// With the boot option `login`, the console is BusyBox's `login` (its
+/// pid in s.login) instead of the native shell, and a new one starts once
+/// it has ended, as init restarts a getty: logging out of the shell it
+/// started brings the prompt back.
+fn relogin(s: &mut Sys)
+  requires sys_ok(s)
+  ensures sys_ok(s)
+{
+  let l = s.login;
+  if l == 0 || l >= NPROC {
+    return;
+  }
+  let st = state(s.k.procs, l);
+  if st != FREE && st != ZOMBIE && pget(s.k.procs, l, F_PARENT) == 0 {
+    return;                                 // still there (login, then the shell it ran)
+  }
+  let n = spawn_as(&mut s.k, ASH_PROG, 0, "login");
+  if n != 0 {
+    s.login = n;
+  }
+}
+
 /// Under the lock: this processor has nothing to run.
 fn go_idle(s: &mut Sys) -> Job
   requires sys_ok(s)
@@ -239,6 +261,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
       woke = true;
     }
   }
+  relogin(&mut s);
   let p = lx_pick(&mut s.k, from);
   // Only the bootstrap processor takes V_DISK. A process the disk woke
   // that this processor is not about to run would wait for an idle
@@ -540,8 +563,8 @@ fn exchange(s: &mut Sys, tx: &mut Bytes, rx: &Bytes, rn: u64, mx: &Bytes, mn: u6
     q_push(&mut s.k.q, cast[u64](bget(rx, i)));
     i = i + 1;
   }
-  // A USB keyboard on the disk's controller is polled here, under this
-  // lock, since the controller is part of the disk.
+  // A USB keyboard (and mouse) on the disk's controller is polled here,
+  // under this lock, since the controller is part of the disk.
   let mut k = 0;
   while k < CHUNK
     invariant sys_ok(s)
@@ -550,6 +573,9 @@ fn exchange(s: &mut Sys, tx: &mut Bytes, rx: &Bytes, rn: u64, mx: &Bytes, mn: u6
     if c < 256 {
       q_push(&mut s.k.q, c);
       typed = true;
+      k = k + 1;
+    } else if c > 256 {
+      mice_put(&mut s.k, c - MOUSE_PKT);
       k = k + 1;
     } else {
       k = CHUNK;
@@ -726,7 +752,9 @@ fn ack(pic: &mut Pic, apic: &mut Lapic, v: u64)
 // a user whose shell is not there).
 const NINIT: u64 = 8;
 
-fn init_name(i: u64) -> Str {
+fn init_name(i: u64) -> Str
+  ensures slen(result) <= 16
+{
   if i == 0 {
     return "motd";
   }
@@ -776,6 +804,17 @@ fn init_data(i: u64) -> Str {
   return include_bytes("../build/user/elfpie.elf");
 }
 
+/// The permission bits of init file i.
+fn init_mode(i: u64) -> u64 {
+  if i == 5 {
+    return 384;                           // 0600: password hashes are root's (docs/security.md)
+  }
+  if i == NINIT - 1 {
+    return 493;                           // 0755: elfdemo, a program
+  }
+  return 420;                             // 0644
+}
+
 /// Gives the file or directory at path `name` permission bits `mode`.
 fn set_mode(v: &mut Vfs, name: Str, mode: u64)
   requires vfs_ok(v) && slen(name) <= FNAME_MAX
@@ -812,15 +851,126 @@ fn make_dir(v: &mut Vfs, name: Str) -> bool
   return vfs_mkdir(&mut v, slen(name));
 }
 
+/// Puts `a` then `b` in the transfer buffer; returns their length.
+fn put_name(v: &mut Vfs, a: Str, b: Str) -> u64
+  requires vfs_ok(v) && slen(a) + slen(b) <= FNAME_MAX
+  ensures vfs_ok(v) && result == slen(a) + slen(b) && result <= FNAME_MAX
+{
+  let mut i = 0;
+  while i < slen(a)
+    invariant i <= slen(a) && vfs_ok(v) && slen(a) + slen(b) <= FNAME_MAX
+  {
+    bset(&mut v.xfer, i, sget(a, i));
+    i = i + 1;
+  }
+  let mut j = 0;
+  while j < slen(b)
+    invariant j <= slen(b) && vfs_ok(v) && slen(a) + slen(b) <= FNAME_MAX
+  {
+    bset(&mut v.xfer, slen(a) + j, sget(b, j));
+    j = j + 1;
+  }
+  return slen(a) + slen(b);
+}
+
+/// Copies built-in file `name` (under etc/) to disk/`name` with mode
+/// `mode`, unless the disk has it already. False if it could not.
+fn seed_file(v: &mut Vfs, mem: &mut Mem, name: Str, data: Str, mode: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem) && slen(name) + 5 <= FNAME_MAX
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  let n = put_name(&mut v, "disk/", name);
+  if vfs_lookup(&mut v, n) != NO_FILE {
+    return true;                          // kept from an earlier boot
+  }
+  let fd = vfs_open(&mut v, &mut mem, 0, O_WRITE + O_CREATE, n);
+  if fd >= NFD {
+    return false;
+  }
+  let mut ok = true;
+  let mut at = 0;
+  while ok && at < slen(data)
+    invariant at <= slen(data) && vfs_ok(v) && mem_ok(mem)
+  {
+    let mut c = 0;
+    while c < XFER && at + c < slen(data)
+      invariant c <= XFER && at + c <= slen(data) && vfs_ok(v)
+    {
+      bset(&mut v.xfer, c, sget(data, at + c));
+      c = c + 1;
+    }
+    ok = vfs_write(&mut v, &mut mem, fd, c) == c;
+    at = at + c;
+  }
+  vfs_close(&mut v, &mut mem, fd);
+  disk_drain(&mut v.disk);
+  let m = put_name(&mut v, "disk/", name);
+  let f = vfs_lookup(&mut v, m);
+  if f != NO_FILE {
+    vfs_set_meta(&mut v, f, mode, NO_FILE);
+  }
+  return ok;
+}
+
+/// Makes top-level `name` a link to disk/`name`, making that directory
+/// (with mode `mode`) if it is not there yet. False, with nothing made in
+/// memory, if it could not.
+fn keep_on_disk(v: &mut Vfs, mem: &mut Mem, name: Str, mode: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem) && slen(name) + 6 <= FNAME_MAX
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  let n = put_name(&mut v, "disk/", name);
+  if vfs_dir_lookup(&mut v, n) == NO_FILE {
+    if !vfs_mkdir(&mut v, n) {
+      return false;
+    }
+    disk_drain(&mut v.disk);
+    let m = put_name(&mut v, "disk/", name);
+    let d = vfs_dir_lookup(&mut v, m);
+    if d != NO_FILE {
+      vfs_set_meta(&mut v, d, mode, NO_FILE);
+    }
+  }
+  // The link's name is xfer[0..slen(name)], its target "/disk/NAME" after it.
+  let t = put_name(&mut v, name, "/disk/");
+  let mut j = 0;
+  while j < slen(name)
+    invariant j <= slen(name) && slen(name) + 6 <= FNAME_MAX && t == slen(name) + 6 && vfs_ok(v)
+  {
+    bset(&mut v.xfer, t + j, sget(name, j));
+    j = j + 1;
+  }
+  let ok = vfs_symlink(&mut v, &mut mem, slen(name), 6 + slen(name));
+  disk_drain(&mut v.disk);
+  return ok;
+}
+
 fn install_files(con: &mut Con, k: &mut Kernel)
   requires con_ok(con) && kok(k)
   ensures kok(k) && con_ok(con)
 {
   pc_tables(&mut k.fs.pc, &mut k.mem);   // the page cache's tables, before the first `mem` (src/pcache.bastio)
-  // /tmp and /etc, which Linux programs expect, root's home and /home:
-  // RAM directories.
-  if !make_dir(&mut k.fs, "tmp") || !make_dir(&mut k.fs, "etc") || !make_dir(&mut k.fs, "root") || !make_dir(&mut k.fs, "home") {
-    puts(&mut con, "cannot make /tmp, /etc, /root or /home\r\n");
+  // /tmp is a RAM directory. /etc, root's home and /home, which hold the
+  // users and their files, are links into the disk when there is one, so
+  // they are kept across boots; the files under etc/ built into the kernel
+  // seed disk/etc on the first boot. Without a disk they are RAM
+  // directories, filled afresh at each boot.
+  if !make_dir(&mut k.fs, "tmp") {
+    puts(&mut con, "cannot make /tmp\r\n");
+  }
+  let disk = k.fs.disk.blocks > 0;
+  let etc = disk && keep_on_disk(&mut k.fs, &mut k.mem, "etc", 493);
+  if !etc && !make_dir(&mut k.fs, "etc") {
+    puts(&mut con, "cannot make /etc\r\n");
+  }
+  if !(disk && keep_on_disk(&mut k.fs, &mut k.mem, "root", 448)) {
+    if !make_dir(&mut k.fs, "root") {
+      puts(&mut con, "cannot make /root\r\n");
+    }
+    set_mode(&mut k.fs, "root", 448);       // 0700
+  }
+  if !(disk && keep_on_disk(&mut k.fs, &mut k.mem, "home", 493)) && !make_dir(&mut k.fs, "home") {
+    puts(&mut con, "cannot make /home\r\n");
   }
   // /dev/shm, where musl's sem_open and shm_open make their files (for
   // Python's multiprocessing). The devices themselves are not files
@@ -832,7 +982,14 @@ fn install_files(con: &mut Con, k: &mut Kernel)
   while i < NINIT
     invariant i <= NINIT && kok(k) && con_ok(con)
   {
-    if !vfs_install(&mut k.fs, &mut k.mem, init_name(i), init_data(i)) {
+    let mut ok = true;
+    if etc && in_etc(init_name(i)) {
+      ok = seed_file(&mut k.fs, &mut k.mem, init_name(i), init_data(i), init_mode(i));
+    } else {
+      ok = vfs_install(&mut k.fs, &mut k.mem, init_name(i), init_data(i));
+      set_mode(&mut k.fs, init_name(i), init_mode(i));
+    }
+    if !ok {
       puts(&mut con, "cannot install file ");
       puts(&mut con, init_name(i));
       puts(&mut con, "\r\n");
@@ -841,9 +998,11 @@ fn install_files(con: &mut Con, k: &mut Kernel)
   }
   set_mode(&mut k.fs, "tmp", 1023);         // 01777: anyone may make names, only owners remove them
   set_mode(&mut k.fs, "dev/shm", 1023);
-  set_mode(&mut k.fs, "elfdemo", 493);      // 0755: a program
-  set_mode(&mut k.fs, "etc/shadow", 384);   // 0600: password hashes are root's (docs/security.md)
-  set_mode(&mut k.fs, "root", 448);         // 0700
+}
+
+/// Is `name` under etc/?
+fn in_etc(name: Str) -> bool {
+  return slen(name) > 4 && sget(name, 0) == 101 && sget(name, 1) == 116 && sget(name, 2) == 99 && sget(name, 3) == 47;
 }
 
 /// A MAC address as six hex bytes, colon-separated.
@@ -1038,6 +1197,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     puts(&mut con, "disk: completions by message-signalled interrupt\r\n");
   }
   let usb_on = usb_live(usb) || blk_kbd(disk.dev);
+  let usb_mouse_on = usb_mouse(usb) || blk_mouse(disk.dev);
   match term.usb {
     Usb::None => {},
     Usb::Xhci(stale) => { mmio_release(&mut win, xhci_free(stale, &mut m)); },
@@ -1102,7 +1262,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     } else if !usb_on {
       puts(&mut con, "keyboard: none found (no USB keyboard, no PS/2 controller)\r\n");
     }
-    if term.kbd.aux {
+    if usb_mouse_on {
+      puts(&mut con, "mouse: USB (xHCI)\r\n");
+    } else if term.kbd.aux {
       puts(&mut con, "mouse: PS/2\r\n");
     } else {
       puts(&mut con, "mouse: none found\r\n");
@@ -1153,15 +1315,21 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   let shm = new_store(&mut m);
   let txt = new_store(&mut m);
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: rng_new(epoch ^ at), cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), croot: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), holes: alloc(HOLES_LEN), lazy: alloc(LAZY_LEN), inet6: alloc(OFD_N), locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, txt: txt, sys: alloc(SYS_LEN), loops: alloc(LOOP_LEN), ptys: alloc(PTY_LEN), ptyb: balloc(PTYB_LEN), snd: snd, mice: mice_new(term.kbd.aux) };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: rng_new(epoch ^ at), cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), croot: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), holes: alloc(HOLES_LEN), lazy: alloc(LAZY_LEN), inet6: alloc(OFD_N), locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, txt: txt, sys: alloc(SYS_LEN), loops: alloc(LOOP_LEN), ptys: alloc(PTY_LEN), ptyb: balloc(PTYB_LEN), snd: snd, mice: mice_new(term.kbd.aux || usb_mouse_on) };
   install_files(&mut con, &mut k);
-  if spawn(&mut k, 0, 0) == 0 {
+  let mut login = 0;
+  if boot_word(cpu, "login") {
+    login = spawn_as(&mut k, ASH_PROG, 0, "login");
+    if login == 0 {
+      puts(&mut con, "cannot start login\r\n");
+    }
+  } else if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
   }
   // Every processor runs the scheduler until the kernel stops; then they
   // are all back in their park loops and the state is this one's again.
   con_flush(&mut term, &mut con);
-  let sl = lock_new(Sys { k: k, con: con, pic: pic, apic: apic, clock: clock, acpi: acpi, stop: false, reboot: false, idle: 0, ticked: false });
+  let sl = lock_new(Sys { k: k, con: con, pic: pic, apic: apic, clock: clock, acpi: acpi, stop: false, reboot: false, idle: 0, ticked: false, login: login });
   let tl = lock_new(term);
   let pumping = atomic_new(false);
   let pend = atomic_new(0);
