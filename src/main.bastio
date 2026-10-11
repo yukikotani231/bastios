@@ -239,6 +239,10 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
       woke = true;
     }
   }
+  if s.k.naps {
+    s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
+    sleepers_due(&mut s.k);
+  }
   let p = lx_pick(&mut s.k, from);
   // Only the bootstrap processor takes V_DISK. A process the disk woke
   // that this processor is not about to run would wait for an idle
@@ -311,6 +315,7 @@ fn idled(s: &mut Sys, cpu: &Cpu, v: u64)
     lx_alarms(&mut s.k);
     power_button(&mut s);
   }
+  sleepers_wake(&mut s.k);                    // an interrupt may end a timed wait
 }
 
 /// Under the lock, after process `p` ran on this processor until a trap
@@ -467,6 +472,18 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
 // What `turn` hands back: the next job, and where the round robin goes on.
 struct Next { job: Job, from: u64 }
 
+/// After finish handled process p's trap: the trap may have ended a timed
+/// wait (sleepers_wake), unless it was a wait that goes on (its restart
+/// word is set, lx_retry), which changed nothing.
+fn after_trap(s: &mut Sys, p: u64)
+  requires sys_ok(s) && p < NPROC
+  ensures sys_ok(s)
+{
+  if pget(s.k.procs, p, F_RESTART) == 0 {
+    sleepers_wake(&mut s.k);
+  }
+}
+
 /// `finish` for task `t`, then `next_job` from where it leaves the round
 /// robin, in one critical section, so a system call costs one round trip
 /// of the lock. Publishes how much console output waits in `pend`.
@@ -478,6 +495,7 @@ fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, p
   ensures !(result.job is Job::Run) ==> mmu_root(mmu) == KERNEL_ROOT
 {
   let c = finish(&mut s, &mut cpu, mmu, p, fpu, v);
+  after_trap(&mut s, p);
   let j = next_job(&mut s, &mut cpu, &mut mmu, c, poll);
   atomic_store(pend, s.con.r.n);
   atomic_store(others, any_ready(s.k.procs));
@@ -517,6 +535,7 @@ fn finish_p(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64, p
   ensures sys_ok(s) && result < NPROC
 {
   let c = finish(&mut s, &mut cpu, mmu, p, fpu, v);
+  after_trap(&mut s, p);
   atomic_store(pend, s.con.r.n);
   return c;
 }
@@ -1153,7 +1172,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   let shm = new_store(&mut m);
   let txt = new_store(&mut m);
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: rng_new(epoch ^ at), cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), croot: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), holes: alloc(HOLES_LEN), lazy: alloc(LAZY_LEN), inet6: alloc(OFD_N), locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, txt: txt, sys: alloc(SYS_LEN), loops: alloc(LOOP_LEN), ptys: alloc(PTY_LEN), ptyb: balloc(PTYB_LEN), snd: snd, mice: mice_new(term.kbd.aux) };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: rng_new(epoch ^ at), cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), croot: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), holes: alloc(HOLES_LEN), lazy: alloc(LAZY_LEN), inet6: alloc(OFD_N), locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, txt: txt, sys: alloc(SYS_LEN), naps: false, loops: alloc(LOOP_LEN), ptys: alloc(PTY_LEN), ptyb: balloc(PTYB_LEN), snd: snd, mice: mice_new(term.kbd.aux) };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");

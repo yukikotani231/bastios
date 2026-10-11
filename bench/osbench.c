@@ -255,6 +255,25 @@ static int t_pipelat(long n) {
   return 0;
 }
 
+// nanosleep for 1 ms: the time over 1 ms is how late a sleeper wakes.
+static int t_sleep(long n) {
+  struct timespec ts = {0, 1000000};
+  begin("sleep");
+  for (long i = 0; i < n; i++) nanosleep(&ts, 0);
+  end(n);
+  return 0;
+}
+
+// One nanosleep of n ms. bench/run.py reports the host CPU time QEMU used
+// meanwhile: an idle guest should use almost none.
+static int t_idle(long n) {
+  struct timespec ts = {n / 1000, n % 1000 * 1000000};
+  begin("idle");
+  nanosleep(&ts, 0);
+  end(1);
+  return 0;
+}
+
 // Bulk data through one pipe in 64 KiB writes. OPS counts KiB.
 static int t_pipebw(long n) {
   int a[2];
@@ -416,6 +435,7 @@ static const struct test tests[] = {
     {"spawn", t_spawn, 200},    {"fault", t_fault, 32},      {"pipelat", t_pipelat, 5000},
     {"pipebw", t_pipebw, 2000}, {"filewrite", t_filewrite, 8}, {"fileread", t_fileread, 8},
     {"create", t_create, 2000}, {"tcplat", t_tcplat, 2000},  {"tcpbw", t_tcpbw, 500},
+    {"sleep", t_sleep, 500},    {"idle", t_idle, 3000},
 };
 
 int main(int argc, char **argv) {

@@ -47,6 +47,8 @@ TESTS = [
     ("pipebw", "MiB/s", None, False),
     ("tcplat", "us", 1e-3, False),
     ("tcpbw", "MiB/s", None, False),
+    ("sleep", "us", 1e-3, False),
+    ("idle", "% host CPU", 1, False),
 ]
 EXTRA_QEMU = []                     # bench/prof.py adds its gdb stub here
 DIRS = {"bastios": {"tmp": "/tmp", "disk": "/disk"}, "linux": {"tmp": "/tmp", "disk": "/disk"}}
@@ -224,8 +226,18 @@ def boot(osname, args, osbench, tmp):
     return g
 
 
+def qemu_cpu(g):
+    """Host CPU seconds QEMU has used so far."""
+    with open(f"/proc/{g.q.pid}/stat") as f:
+        st = f.read().rsplit(")", 1)[1].split()
+    return (int(st[11]) + int(st[12])) / os.sysconf("SC_CLK_TCK")
+
+
 def measure(g, test, d):
-    """One run: (host ns per op, guest ns per op, ops) or a skip reason."""
+    """One run: (host ns per op, guest ns per op, ops) or a skip reason.
+    For "idle", "host" is instead the host CPU QEMU used, in percent of
+    the time the guest slept."""
+    cpu0 = qemu_cpu(g)
     at, text = g.run(f"{g.exe} -d {d} {'filewrite fileread' if test == 'fileread' else test}")
     if text is None:
         return {"error": "timeout"}
@@ -242,6 +254,9 @@ def measure(g, test, d):
     t1 = g.time_at(at + e.start())
     ops, guest = int(e.group(1)), int(e.group(2))
     host = (t1 - t0) * 1e9
+    if test == "idle":
+        # Taken over the whole command, so starting the program counts too.
+        return {"host": 100 * (qemu_cpu(g) - cpu0) * 1e9 / guest, "guest": guest, "ops": ops}
     # Lines that came in one read have one host time; a run that short is
     # timed by the guest.
     if host < 50e6:
