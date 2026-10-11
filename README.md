@@ -2,6 +2,14 @@
 
 A small x86-64 kernel written in [Bastio](https://github.com/yukikotani231/bastiolang), a language whose memory safety is proved at compile time. It runs its own programs and unmodified Linux ones (BusyBox, Lua, sqlite, a C compiler), on several processors, with files on a USB stick or an NVMe, virtio, SATA or ATA disk and a TCP/IP stack on a virtio or e1000 network card. It boots under QEMU, or from a Limine image on a USB stick under BIOS or UEFI.
 
+> **Status: experimental.** Everything here has been tried in QEMU only; no real PC has booted it yet. The system call ABI and the disk format can still change.
+>
+> **Works today, in QEMU:** a Unix shell (BusyBox), users and passwords with `login` and `su`, files kept on a disk, DHCP, DNS, TCP/IP over IPv4 and IPv6, an SSH server (Dropbear), a web server, Alpine Linux's binaries and its package manager `apk` in a `chroot`, and programs such as Lua, Python, sqlite, git and a C compiler.
+>
+> **Not yet:** a real PC, a login prompt at boot, users and SSH keys that survive a reboot, more than 31 processes or 1023 files on the disk, a graphical desktop.
+>
+> [Using BastiOS](docs/using.md) walks through all of it, from `make run` to logging in over SSH.
+
 <!-- guide-test: session -->
 ```text
 bastios> hello
@@ -42,7 +50,7 @@ git clone https://github.com/yukikotani231/bastios
 cd bastios && make run
 ```
 
-The first build proves every source file and fetches BusyBox, so it takes a while. `make run` boots on your terminal; type `help`, and Ctrl-A X quits. [Getting started](docs/getting-started.md) goes on from there: writing a program in Bastio, running a Linux program, and booting from a USB stick.
+The first build proves every source file and fetches BusyBox, so it takes a while. `make run` boots on your terminal; type `help`, and Ctrl-A X quits. [Getting started](docs/getting-started.md) goes on from there: writing a program in Bastio, running a Linux program, and booting from a USB stick. [Using BastiOS](docs/using.md) is for using it as a system: users, the network, SSH and Alpine's packages.
 
 ## What it does
 
@@ -81,7 +89,7 @@ make fuzz       # fuzz the system calls with hostile arguments (SEED, SEEDS, CAL
 make compat     # the Linux compatibility suite; writes build/compat/report.md
 ```
 
-`make test` also checks the sessions in this README and in [Getting started](docs/getting-started.md) (`test/guide_test.py`). Set `BASTIOC0=/path/to/bastioc0` if bastiolang is not next to this checkout.
+`make test` also checks the sessions in this README, [Getting started](docs/getting-started.md) and [Using BastiOS](docs/using.md) (`test/guide_test.py`). Set `BASTIOC0=/path/to/bastioc0` if bastiolang is not next to this checkout.
 
 The kernel is built by bastioc1, bastiolang's compiler written in Bastio, through C: the compiler proves each file, writes C, and `cc` compiles it. The first build makes bastioc1 itself with bastiolang's bootstrap compiler, `bastioc0`, into `build/bastioc1`. `make NATIVE=1` uses bastioc1's native backend instead, which writes x86-64 assembly and takes the C compiler out of the trusted base for Bastio code; BastiOS built that way passes `make test`, but its code is about ten times larger, so it is not the default yet.
 
@@ -135,7 +143,7 @@ The direction is in bastiolang's [ROADMAP.md](https://github.com/yukikotani231/b
 | `user/*.c`, `user/*.S` | Test programs in C and assembly: musl programs for the Linux system calls, freestanding ELF and fault tests, the system call fuzzer |
 | `files/` | Files installed in memory at boot (built into the kernel image) |
 | `test/` | `make test` and the benchmarks; `test/compat/` is the Linux compatibility suite |
-| `docs/` | [Getting started](docs/getting-started.md), [architecture](docs/architecture.md), [Linux programs](docs/linux.md), [trusted base](docs/trusted-base.md), [users and permissions](docs/security.md), [releasing](docs/releasing.md) |
+| `docs/` | [Getting started](docs/getting-started.md), [using BastiOS](docs/using.md), [architecture](docs/architecture.md), [Linux programs](docs/linux.md), [trusted base](docs/trusted-base.md), [users and permissions](docs/security.md), [releasing](docs/releasing.md) |
 
 ## Contributing
 
