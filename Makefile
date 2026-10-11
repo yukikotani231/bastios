@@ -505,6 +505,11 @@ compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img bu
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
 	test/compat/run.py --host build/compat --out build/compat/host $(COMPAT_PROGS)
 
+# Power cuts on a disk with a write cache, at every point of two crashme
+# runs (see test/crashsim.py; `make test` runs a short pass).
+crashsim: build/bastios.elf
+	test/crashsim.py
+
 # The Linux Test Project's system call tests (test/compat/ltp.py). LTP
 # (GPL-2.0-or-later, not part of this repository) is fetched at a pinned tag
 # and built against musl as static PIEs; the three files LTP's own Alpine CI
@@ -581,4 +586,4 @@ clean:
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
 FORCE:
 
-.PHONY: FORCE all run disk usb run-usb test fuzz bench smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
