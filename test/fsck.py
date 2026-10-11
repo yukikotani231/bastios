@@ -32,14 +32,14 @@ import struct, sys
 
 BLOCK = 4096
 DIR_AT = BLOCK
-DSLOTS = 1024
+DSLOTS = 4096
 DENT = 256
 DPB = BLOCK // DENT
 DIR_FIXED = 4
 DIR_BLOCKS = DSLOTS // DPB
 DATA_B0 = 5
 PTRS = 512
-MAX_BLOCKS = 65536
+MAX_BLOCKS = 1 << 28
 DTOP = 64
 DNAME_MAX = 200
 FILE_MAX = PTRS * PTRS * BLOCK
@@ -81,18 +81,25 @@ def entries(img):
                 dblocks.append(b)
     slots = DPB * len(dblocks)
     ents = []
-    for i in range(DSLOTS):
-        if i < slots:
-            at = dblocks[i // DPB] * BLOCK + (i % DPB) * DENT
-            e = img[at:at + DENT]
-        else:
-            e = bytes(DENT)
-        ents.append({
-            "kind": e[0], "nlen": e[1], "parent": u64(e, 8), "size": u64(e, 16),
-            "root": u64(e, 24), "mode": u64(e, 32), "link": u64(e, 48),
-            "name": bytes(e[E_NAME:E_NAME + e[1]]), "tail": bytes(e[E_NAME + e[1]:]),
-        })
+    for i in range(min(slots, DSLOTS)):
+        at = dblocks[i // DPB] * BLOCK + (i % DPB) * DENT
+        ents.append(_entry(img[at:at + DENT]))
+    # The slots past the directory's blocks are all free: one shared entry
+    # (nothing changes an entry), so a small disk costs no more to check
+    # than its directory.
+    ents.extend([_EMPTY] * (DSLOTS - len(ents)))
     return dblocks, ents, errors
+
+
+def _entry(e):
+    return {
+        "kind": e[0], "nlen": e[1], "parent": u64(e, 8), "size": u64(e, 16),
+        "root": u64(e, 24), "mode": u64(e, 32), "link": u64(e, 48),
+        "name": bytes(e[E_NAME:E_NAME + e[1]]), "tail": bytes(e[E_NAME + e[1]:]),
+    }
+
+
+_EMPTY = _entry(bytes(DENT))
 
 
 def check(img):
