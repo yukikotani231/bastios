@@ -5,33 +5,10 @@
 // last digit of the pid, so two copies can run at once.
 
 import "lib/file.bastio";
+import "core/print.bastio";
 
 const CHUNK: u64 = 4096;
 const CHUNKS: u64 = 512;               // 2 MiB
-
-fn puts(con: &Serial, s: Str) {
-  let mut i = 0;
-  while i < slen(s)
-    invariant i <= slen(s)
-  {
-    serial_write(con, sget(s, i));
-    i = i + 1;
-  }
-}
-
-fn put_num(con: &Serial, n: u64) {
-  let mut p = 1;
-  while p <= n / 10
-    invariant p >= 1
-  {
-    p = p * 10;
-  }
-  let mut q = p;
-  while q > 0 {
-    serial_write(con, cast[u8](48 + (n / q) % 10));
-    q = q / 10;
-  }
-}
 
 fn since(t0: u64) -> u64 {
   let t1 = sys_info(1);
@@ -43,17 +20,17 @@ fn since(t0: u64) -> u64 {
 
 /// Prints "<what>: <ticks> ticks, <rate> KiB/s".
 fn report(con: &Serial, what: Str, ticks: u64) {
-  puts(con, what);
-  puts(con, ": ");
-  put_num(con, ticks);
-  puts(con, " ticks, ");
+  print_str(con, what);
+  print_str(con, ": ");
+  print_u64(con, ticks);
+  print_str(con, " ticks, ");
   let t = ticks;
   if t == 0 {
-    puts(con, "fast");
+    print_str(con, "fast");
   } else {
-    put_num(con, CHUNK * CHUNKS / 1024 * 100 / t);
+    print_u64(con, CHUNK * CHUNKS / 1024 * 100 / t);
   }
-  puts(con, " KiB/s\r\n");
+  print_str(con, " KiB/s\r\n");
 }
 
 fn main(con: &mut Serial) -> u64 {
@@ -69,7 +46,7 @@ fn main(con: &mut Serial) -> u64 {
   bset(&mut name, 10, cast[u8](48 + sys_getpid() % 10));
   let fd = f_open(name, 11, O_WRITE + O_CREATE + O_TRUNC);
   if fd == NOT_OK {
-    puts(con, "diskbench: no disk\r\n");
+    print_str(con, "diskbench: no disk\r\n");
     bfree(name);
     bfree(buf);
     return 1;
@@ -100,7 +77,7 @@ fn main(con: &mut Serial) -> u64 {
   bfree(name);
   bfree(buf);
   if !ok {
-    puts(con, "diskbench: failed\r\n");
+    print_str(con, "diskbench: failed\r\n");
     return 2;
   }
   report(con, "write 2 MiB", wt);
