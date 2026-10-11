@@ -26,8 +26,11 @@ int main(int argc, char **argv)
     if (recv(nb, buf, sizeof buf, 0) != -1 || errno != EAGAIN)
         return fail("nonblocking recv");
     close(nb);
-    if (socket(AF_INET, SOCK_RAW, 1) != -1)
-        return fail("refusing a raw socket");
+    if (socket(AF_INET, SOCK_RAW, 6) != -1)
+        return fail("refusing a raw TCP socket");
+    int raw = socket(AF_INET, SOCK_RAW, 1);
+    if (raw < 0 || close(raw) != 0)
+        return fail("a raw ICMP socket");
 
     int s = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in me = { .sin_family = AF_INET, .sin_port = htons(port) };

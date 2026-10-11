@@ -26,10 +26,12 @@ import "diskfs.bastio";
 import "pcache.bastio";
 
 const NFD: u64 = 256;                 // open files per process
-const FD_ROWS: u64 = 8192;            // NPROC * NFD
+const FD_ROWS: u64 = 65536;           // NPROC * NFD
 const FD_STRIDE: u64 = 4;
-const HOLD_N: u64 = 128;              // holds (vfs_hold): rows after the FD_ROWS open files
-const FTAB_LEN: u64 = 33280;          // (FD_ROWS + HOLD_N) * FD_STRIDE
+const HOLD_N: u64 = 128;              // holds (vfs_hold), in their own table
+const HOLD_LEN: u64 = 512;            // HOLD_N * FD_STRIDE
+const FTAB_LEN: u64 = FD_ROWS * FD_STRIDE;   // the most the table grows to (new_pid, src/proc.bastio)
+const FTAB_START: u64 = 32768;        // what it starts with: 32 processes' rows (PGROW * NFD * FD_STRIDE)
 const XFER: u64 = 4096;               // the most bytes one call moves
 
 // Row fields.
@@ -67,7 +69,8 @@ const MNT_LEN: u64 = 16;              // MNT_N * 2: per mount, its directory nod
 
 struct Vfs {
   ram: Vec[Node],       // the in-memory file system
-  ftab: Buf,            // open files: FD_ROWS rows of FD_STRIDE words, then HOLD_N holds
+  ftab: Buf,            // open files: NFD rows of FD_STRIDE words per process, as many processes as the process table has rows
+  holds: Buf,           // HOLD_N holds of FD_STRIDE words
   xfer: Bytes,          // the transfer buffer
   disk: DiskFs,         // the file system on the disk
   name: Bytes,          // a directory's name, while vfs_readdir lists it
@@ -84,7 +87,7 @@ struct Vfs {
 }
 
 spec fn vfs_ok(v: &Vfs) -> bool {
-  nodes_ok(v.ram) && len(v.ftab) == FTAB_LEN && blen(v.xfer) == XFER && disk_ok(v.disk) && blen(v.name) == NAMEBUF && len(v.mnt) == MNT_LEN
+  nodes_ok(v.ram) && len(v.ftab) <= FTAB_LEN && len(v.holds) == HOLD_LEN && blen(v.xfer) == XFER && disk_ok(v.disk) && blen(v.name) == NAMEBUF && len(v.mnt) == MNT_LEN
     && disk_ok(v.lo) && blen(v.lname) == NAMEBUF && pc_ok(v.pc)
 }
 
@@ -92,15 +95,16 @@ fn vfs_new(disk: DiskFs) -> Vfs
   requires disk_ok(disk)
   ensures vfs_ok(result)
 {
-  return Vfs { ram: ram_new(), ftab: alloc(FTAB_LEN), xfer: balloc(XFER), disk: disk, name: balloc(NAMEBUF), mnt: alloc(MNT_LEN), now: 0,
+  return Vfs { ram: ram_new(), ftab: alloc(FTAB_START), holds: alloc(HOLD_LEN), xfer: balloc(XFER), disk: disk, name: balloc(NAMEBUF), mnt: alloc(MNT_LEN), now: 0,
     lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0))), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, pc: pc_new() };
 }
 
 /// The next byte typed on a USB keyboard that sits on the disk's xHCI
-/// controller (see blk_find), or 256.
+/// controller (see blk_find), a packet from a USB mouse there (MOUSE_PKT
+/// plus its bytes), or 256.
 fn vfs_kbd_poll(v: &mut Vfs) -> u64
   requires vfs_ok(v)
-  ensures vfs_ok(v) && result <= 256
+  ensures vfs_ok(v) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT))
 {
   return blk_kbd_poll(&mut v.disk.dev);
 }
@@ -114,6 +118,7 @@ fn vfs_free(v: Vfs, mem: &mut Mem, ports: &mut Ports, win: &mut MmioSpace) -> Bl
 {
   ram_free(v.ram, &mut mem);
   free(v.ftab);
+  free(v.holds);
   bfree(v.xfer);
   bfree(v.name);
   bfree(v.lname);
@@ -199,28 +204,45 @@ fn lo_settle(v: &mut Vfs)
   v.lo.txn = 0;
 }
 
+// A row past the table's end (a process the table has not grown to yet)
+// reads as closed, and writing it does nothing: open_row only opens rows
+// the table has.
 fn fget(t: &Buf, row: u64, f: u64) -> u64
-  requires len(t) == FTAB_LEN && row < FD_ROWS && f < FD_STRIDE
+  requires len(t) <= FTAB_LEN && row < FD_ROWS && f < FD_STRIDE
 {
+  if row * FD_STRIDE + f >= len(t) {
+    return 0;
+  }
   return get(t, row * FD_STRIDE + f);
 }
 
 fn fset(t: &mut Buf, row: u64, f: u64, x: u64)
-  requires len(t) == FTAB_LEN && row < FD_ROWS && f < FD_STRIDE
-  ensures len(t) == FTAB_LEN
+  requires len(t) <= FTAB_LEN && row < FD_ROWS && f < FD_STRIDE
+  ensures len(t) == old(len(t))
 {
-  t = set(t, row * FD_STRIDE + f, x);
+  if row * FD_STRIDE + f < len(t) {
+    t = set(t, row * FD_STRIDE + f, x);
+  }
 }
 
 /// Is any row open on node i of file system fs, or any hold on it?
-fn node_open(t: &Buf, fs: u64, i: u64) -> bool
-  requires len(t) == FTAB_LEN
+fn node_open(t: &Buf, holds: &Buf, fs: u64, i: u64) -> bool
+  requires len(t) <= FTAB_LEN && len(holds) == HOLD_LEN
 {
   let mut r = 0;
-  while r < FD_ROWS + HOLD_N
-    invariant r <= FD_ROWS + HOLD_N
+  while r + FD_STRIDE <= len(t)
+    invariant r <= len(t) && len(t) <= FTAB_LEN
   {
-    if get(t, r * FD_STRIDE + FD_FS) == fs && get(t, r * FD_STRIDE + FD_NODE) == i {
+    if get(t, r + FD_FS) == fs && get(t, r + FD_NODE) == i {
+      return true;
+    }
+    r = r + FD_STRIDE;
+  }
+  r = 0;
+  while r < HOLD_N
+    invariant r <= HOLD_N
+  {
+    if get(holds, r * FD_STRIDE + FD_FS) == fs && get(holds, r * FD_STRIDE + FD_NODE) == i {
       return true;
     }
     r = r + 1;
@@ -250,6 +272,9 @@ fn open_row(v: &mut Vfs, mem: &mut Mem, base: u64, flags: u64, n: u64) -> u64
   ensures vfs_ok(v) && mem_ok(mem)
   ensures result < NFD || result == NO_FD
 {
+  if (base + NFD) * FD_STRIDE > len(v.ftab) {
+    return NO_FD;                           // the table has not grown to this process
+  }
   let mut fd = 0;
   while fd < NFD && fget(v.ftab, base + fd, FD_FS) != 0
     invariant fd <= NFD
@@ -311,8 +336,8 @@ fn open_row(v: &mut Vfs, mem: &mut Mem, base: u64, flags: u64, n: u64) -> u64
 /// table), whose names start p bytes in, into the free row `row`. It may
 /// create the file only if `mk` (a good name whose directory exists).
 fn dk_open(d: &mut DiskFs, ftab: &mut Buf, pc: &mut PCache, mem: &mut Mem, x: &Bytes, row: u64, flags: u64, p: u64, n: u64, fs: u64, mk: bool, now: u64) -> u64
-  requires disk_ok(d) && len(ftab) == FTAB_LEN && row < FD_ROWS && p < n && n <= blen(x) && pc_ok(pc) && mem_ok(mem)
-  ensures disk_ok(d) && len(ftab) == FTAB_LEN && pc_ok(pc) && mem_ok(mem)
+  requires disk_ok(d) && len(ftab) <= FTAB_LEN && row < FD_ROWS && p < n && n <= blen(x) && pc_ok(pc) && mem_ok(mem)
+  ensures disk_ok(d) && len(ftab) <= FTAB_LEN && pc_ok(pc) && mem_ok(mem)
   ensures result < NFD || result == NO_FD
 {
   let mut i = disk_find(d, x, p, n - p);
@@ -356,7 +381,7 @@ fn vfs_close(v: &mut Vfs, mem: &mut Mem, row: u64) -> bool
   let h = vfs_row_file(v, row);
   let mut f = 0;
   while f < FD_STRIDE
-    invariant f <= FD_STRIDE && len(v.ftab) == FTAB_LEN
+    invariant f <= FD_STRIDE && len(v.ftab) <= FTAB_LEN
   {
     fset(&mut v.ftab, row, f, 0);
     f = f + 1;
@@ -376,7 +401,7 @@ fn node_settle(v: &mut Vfs, mem: &mut Mem, fs: u64, node: u64, h: u64)
   requires vfs_ok(v) && mem_ok(mem)
   ensures vfs_ok(v) && mem_ok(mem)
 {
-  if !node_open(v.ftab, fs, node) {
+  if !node_open(v.ftab, v.holds, fs, node) {
     if fs == FS_RAM && node < NFILES && ram_len(&mut v.ram, node) == 0 && node != v.lo_file {
       pc_forget(&mut v.pc, &mut mem, h);
       ram_remove(&mut v.ram, &mut mem, node);
@@ -428,15 +453,15 @@ fn vfs_hold(v: &mut Vfs, h: u64) -> u64
     return HOLD_N;
   }
   let mut i = 0;
-  while i < HOLD_N && get(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_FS) != 0
+  while i < HOLD_N && get(v.holds, i * FD_STRIDE + FD_FS) != 0
     invariant i <= HOLD_N && vfs_ok(v)
   {
     i = i + 1;
   }
   if i < HOLD_N {
-    v.ftab = set(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_FS, fs);
-    v.ftab = set(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_NODE, node);
-    v.ftab = set(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_OFF, 1);   // its references
+    v.holds = set(v.holds, i * FD_STRIDE + FD_FS, fs);
+    v.holds = set(v.holds, i * FD_STRIDE + FD_NODE, node);
+    v.holds = set(v.holds, i * FD_STRIDE + FD_OFF, 1);   // its references
   }
   return i;
 }
@@ -446,10 +471,10 @@ fn vfs_hold_dup(v: &mut Vfs, i: u64)
   requires vfs_ok(v)
   ensures vfs_ok(v)
 {
-  if i < HOLD_N && get(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_FS) != 0 {
-    let at = (FD_ROWS + i) * FD_STRIDE + FD_OFF;
-    if get(v.ftab, at) < 4294967296 {
-      v.ftab = set(v.ftab, at, get(v.ftab, at) + 1);
+  if i < HOLD_N && get(v.holds, i * FD_STRIDE + FD_FS) != 0 {
+    let at = i * FD_STRIDE + FD_OFF;
+    if get(v.holds, at) < 4294967296 {
+      v.holds = set(v.holds, at, get(v.holds, at) + 1);
     }
   }
 }
@@ -462,8 +487,8 @@ fn vfs_held(v: &Vfs, i: u64) -> u64
   if i >= HOLD_N {
     return NO_FILE;
   }
-  let fs = get(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_FS);
-  let node = get(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_NODE);
+  let fs = get(v.holds, i * FD_STRIDE + FD_FS);
+  let node = get(v.holds, i * FD_STRIDE + FD_NODE);
   if fs == FS_RAM && node < NFILES {
     return node;
   }
@@ -483,16 +508,16 @@ fn vfs_unhold(v: &mut Vfs, mem: &mut Mem, i: u64)
   if i >= HOLD_N || h == NO_FILE {
     return;
   }
-  let at = (FD_ROWS + i) * FD_STRIDE + FD_OFF;
-  if get(v.ftab, at) > 1 {
-    v.ftab = set(v.ftab, at, get(v.ftab, at) - 1);
+  let at = i * FD_STRIDE + FD_OFF;
+  if get(v.holds, at) > 1 {
+    v.holds = set(v.holds, at, get(v.holds, at) - 1);
     return;
   }
-  v.ftab = set(v.ftab, at, 0);
-  let fs = get(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_FS);
-  let node = get(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_NODE);
-  v.ftab = set(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_FS, 0);
-  v.ftab = set(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_NODE, 0);
+  v.holds = set(v.holds, at, 0);
+  let fs = get(v.holds, i * FD_STRIDE + FD_FS);
+  let node = get(v.holds, i * FD_STRIDE + FD_NODE);
+  v.holds = set(v.holds, i * FD_STRIDE + FD_FS, 0);
+  v.holds = set(v.holds, i * FD_STRIDE + FD_NODE, 0);
   node_settle(&mut v, &mut mem, fs, node, h);
 }
 
@@ -731,11 +756,11 @@ fn vfs_unlink(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
   ensures vfs_ok(v) && mem_ok(mem)
 {
   if on_disk(v, n) {
-    return dk_unlink(&mut v.disk, v.ftab, v.xfer, DISK_PREFIX, n, FS_DISK);
+    return dk_unlink(&mut v.disk, v.ftab, v.holds, v.xfer, DISK_PREFIX, n, FS_DISK);
   }
   let lp = lo_pfx(&mut v, n);
   if lp != 0 {
-    let ok = dk_unlink(&mut v.lo, v.ftab, v.xfer, lp, n, FS_LO);
+    let ok = dk_unlink(&mut v.lo, v.ftab, v.holds, v.xfer, lp, n, FS_LO);
     lo_settle(&mut v);
     return ok;
   }
@@ -755,7 +780,7 @@ fn vfs_unlink(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
     ram_remove(&mut v.ram, &mut mem, l);
     return ram_reprefix(&mut v.ram, i, il, v.name, ll);
   }
-  if node_open(v.ftab, FS_RAM, i) || i == v.lo_file {
+  if node_open(v.ftab, v.holds, FS_RAM, i) || i == v.lo_file {
     ram_orphan(&mut v.ram, i);          // a mounted image goes at its unmount
   } else {
     ram_remove(&mut v.ram, &mut mem, i);
@@ -765,8 +790,8 @@ fn vfs_unlink(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
 
 /// vfs_unlink of x[0..n] on disk file system d (fs in the table), whose
 /// names start p bytes in.
-fn dk_unlink(d: &mut DiskFs, ftab: &Buf, x: &Bytes, p: u64, n: u64, fs: u64) -> bool
-  requires disk_ok(d) && len(ftab) == FTAB_LEN && p < n && n <= blen(x)
+fn dk_unlink(d: &mut DiskFs, ftab: &Buf, holds: &Buf, x: &Bytes, p: u64, n: u64, fs: u64) -> bool
+  requires disk_ok(d) && len(ftab) <= FTAB_LEN && len(holds) == HOLD_LEN && p < n && n <= blen(x)
   ensures disk_ok(d)
 {
   let e = disk_find(d, x, p, n - p);
@@ -777,7 +802,7 @@ fn dk_unlink(d: &mut DiskFs, ftab: &Buf, x: &Bytes, p: u64, n: u64, fs: u64) -> 
   if l < DSLOTS {
     return disk_take_name(&mut d, e, l);
   }
-  if node_open(ftab, fs, e) {
+  if node_open(ftab, holds, fs, e) {
     return disk_orphan(&mut d, e);
   }
   return disk_remove(&mut d, e);
@@ -1079,6 +1104,39 @@ fn vfs_install_bytes(v: &mut Vfs, mem: &mut Mem, name: Str, d: &Bytes, m: u64) -
     },
   }
   return ok;
+}
+
+/// Writes d[0..m] to the file `name` (a path from the top, such as
+/// "disk/etc/resolv.conf"), made or emptied first, for the kernel itself:
+/// through descriptor rows of pid 0, which is never a process, and waiting
+/// for the disk. False if it could not, such as when the write needs a
+/// block the cache does not have.
+fn vfs_put(v: &mut Vfs, mem: &mut Mem, name: Str, d: &Bytes, m: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem) && m <= blen(d) && m <= XFER && slen(name) <= FNAME_MAX
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  let mut i = 0;
+  while i < slen(name)
+    invariant i <= slen(name) && slen(name) <= FNAME_MAX && vfs_ok(v)
+  {
+    bset(&mut v.xfer, i, sget(name, i));
+    i = i + 1;
+  }
+  let fd = vfs_open(&mut v, &mut mem, 0, O_WRITE + O_CREATE + O_TRUNC, slen(name));
+  if fd >= NFD {
+    return false;
+  }
+  let mut j = 0;
+  while j < m
+    invariant j <= m && m <= blen(d) && m <= XFER && vfs_ok(v)
+  {
+    bset(&mut v.xfer, j, bget(d, j));
+    j = j + 1;
+  }
+  let w = vfs_write(&mut v, &mut mem, fd, m);
+  vfs_close(&mut v, &mut mem, fd);
+  disk_drain(&mut v.disk);
+  return w == m;
 }
 
 // ---------------------------------------------------------------- directories
@@ -2179,7 +2237,7 @@ fn vfs_umount(v: &mut Vfs, mem: &mut Mem, s: u64) -> bool
       while j < NFILES
         invariant j <= NFILES && vfs_ok(v) && mem_ok(mem) && l <= NAMEBUF
       {
-        if ram_under(&mut v.ram, j, v.name, l) && (node_open(v.ftab, FS_RAM, j) || j == v.lo_file || j + 1 == v.lo_at) {
+        if ram_under(&mut v.ram, j, v.name, l) && (node_open(v.ftab, v.holds, FS_RAM, j) || j == v.lo_file || j + 1 == v.lo_at) {
           return false;
         }
         j = j + 1;
@@ -2272,7 +2330,8 @@ fn vfs_lo_umount(v: &mut Vfs, mem: &mut Mem) -> bool
     return false;
   }
   let mut r = 0;
-  while r < FD_ROWS
+  let rows = len(v.ftab) / FD_STRIDE;       // the rows the table has grown to
+  while r < rows && r < FD_ROWS
     invariant r <= FD_ROWS && vfs_ok(v)
   {
     if fget(v.ftab, r, FD_FS) == FS_LO {
@@ -2286,7 +2345,7 @@ fn vfs_lo_umount(v: &mut Vfs, mem: &mut Mem) -> bool
   lo_give_back(&mut v, &mut mem, f);
   v.lo_at = 0;
   v.lo_file = NFILES;
-  if ram_len(&mut v.ram, f) == 0 && !node_open(v.ftab, FS_RAM, f) {
+  if ram_len(&mut v.ram, f) == 0 && !node_open(v.ftab, v.holds, FS_RAM, f) {
     ram_remove(&mut v.ram, &mut mem, f);  // its name was removed while it was mounted
   }
   return true;

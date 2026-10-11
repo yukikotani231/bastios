@@ -656,6 +656,18 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   return NO_RESULT;
 }
 
+/// Is /etc a link (to /disk/etc)?
+fn etc_on_disk(v: &mut Vfs) -> bool
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  bset(&mut v.xfer, 0, 101);
+  bset(&mut v.xfer, 1, 116);
+  bset(&mut v.xfer, 2, 99);
+  let f = vfs_lookup(&mut v, 3);
+  return f != NO_FILE && vfs_is_link(&mut v, f);
+}
+
 /// Writes /etc/resolv.conf naming name server ns (a.b.c.d), which the C
 /// library's resolver reads; nothing is written for no server (0). A file
 /// a program wrote there is replaced when a lease names a new server.
@@ -698,7 +710,12 @@ fn write_resolv(k: &mut Kernel, ns: u64)
     o = o + 1;
     i = i + 1;
   }
-  vfs_install_bytes(&mut k.fs, &mut k.mem, "etc/resolv.conf", b, o);
+  // With a disk, /etc is a link to /disk/etc (install_files).
+  if etc_on_disk(&mut k.fs) {
+    vfs_put(&mut k.fs, &mut k.mem, "disk/etc/resolv.conf", b, o);
+  } else {
+    vfs_install_bytes(&mut k.fs, &mut k.mem, "etc/resolv.conf", b, o);
+  }
   bfree(b);
 }
 
@@ -728,15 +745,15 @@ fn net_wake(k: &mut Kernel)
 // ---------------------------------------------------------------- dispatch
 
 fn ret(procs: &mut Buf, pid: u64, v: u64)
-  requires len(procs) == PTAB_LEN && pid < NPROC
-  ensures len(procs) == PTAB_LEN
+  requires ptab_ok(procs) && pid < NPROC
+  ensures ptab_ok(procs)
 {
   pset(&mut procs, pid, F_REGS + R_RAX, v);
 }
 
 fn do_wait(procs: &mut Buf, pid: u64, c: u64) -> u64
-  requires len(procs) == PTAB_LEN && 1 <= pid && pid < NPROC
-  ensures len(procs) == PTAB_LEN
+  requires ptab_ok(procs) && 1 <= pid && pid < NPROC
+  ensures ptab_ok(procs)
 {
   if c == 0 || c >= NPROC || state(procs, c) == FREE || pget(procs, c, F_PARENT) != pid {
     ret(&mut procs, pid, NO_RESULT);
@@ -762,7 +779,7 @@ fn do_wait(procs: &mut Buf, pid: u64, c: u64) -> u64
 /// this is what keeps an unprivileged Linux process from going around the
 /// Linux layer's checks.
 fn native_allowed(procs: &Buf, pid: u64, n: u64) -> bool
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
   ensures !is_root(procs, pid) && n > SYS_KILL ==> !result
 {
   return cred_root(procs, pid) || n <= SYS_KILL;
