@@ -1,0 +1,634 @@
+// UTS and IPC namespaces, the /proc/PID/ns links, and setns.
+//
+// Besides its mount namespace (src/lxns.bastio), a process has a UTS, an
+// IPC and a PID namespace, each a number kept in k.mns (MNS_KID, 0 the
+// first namespace, which every process starts in). Numbers are never
+// given twice, so a namespace no process is in any more is gone for good;
+// a descriptor of /proc/PID/ns/* does not keep it alive, as it does on
+// Linux, and setns to a namespace that is gone is -EINVAL.
+//
+//   UTS  the host and domain names. The first namespace's are in k.sys
+//        (src/lxsys.bastio); each other one has a slot of UTS_W words in
+//        k.mns, freed when no process is in it (UTS_N at once).
+//   IPC  System V queues, semaphore sets and shared memory segments carry
+//        the namespace they were made in (H_NS, src/lxipc.bastio), and so
+//        do POSIX queues (MNS_PQ, src/lxmq.bastio); keys, ids and names
+//        are looked up only among the caller's. When the last process of
+//        a namespace has ended, its objects go the next time one of the
+//        same kind is made.
+//   PID  only the first one so far: every process is in namespace 0.
+//
+// /proc/PID/ns/ holds a link per kind (cgroup, ipc, mnt, net, pid,
+// pid_for_children, user, uts) whose target is "KIND:[INODE]", with
+// Linux's inode numbers for the first namespaces and a distinct one for
+// every other (ns_inode). Opening a link gives a descriptor that remembers
+// the namespace (word 3 of its open file description, + 1); stat and
+// fstat on it show the inode, as on nsfs, and setns joins it. setns also
+// takes a pidfd and a mask of CLONE_NEW* flags, joining the process's
+// namespaces of those kinds. The network, user and cgroup links show the
+// first namespace; setns to them is accepted when it changes nothing.
+
+import "lxns.bastio";
+
+const LX_SETNS: u64 = 308;
+
+// The links of /proc/PID/ns/, in the order getdents lists them.
+const NF_CGROUP: u64 = 0;
+const NF_IPC: u64 = 1;
+const NF_MNT: u64 = 2;
+const NF_NET: u64 = 3;
+const NF_PID: u64 = 4;
+const NF_PIDC: u64 = 5;                    // pid_for_children
+const NF_USER: u64 = 6;
+const NF_UTS: u64 = 7;
+const NS_INO0: u64 = 4026531835;           // the first cgroup namespace's inode (PROC_CGROUP_INIT_INO)
+const NS_INO: u64 = 4026532000;            // other namespaces' inodes start here
+const S_IFREG_NS: u64 = 0x8124;            // what stat says an nsfs file is: r--r--r--
+
+// ---------------------------------------------------------------- ids
+
+fn nsk_at(kind: u64, pid: u64) -> u64
+  requires kind < NSK_N && pid < NPROC
+  ensures result < MNS_LEN
+{
+  return MNS_KID + kind * NPROC + pid;
+}
+
+/// The namespace of kind `kind` (NSK_*) process pid is in.
+fn nsk_of(k: &Kernel, kind: u64, pid: u64) -> u64
+  requires kok(k) && kind < NSK_N && pid < NPROC
+  ensures result < MNS_MAX
+{
+  return smaller(get(k.mns, nsk_at(kind, pid)), MNS_MAX - 1);
+}
+
+fn nsk_set(k: &mut Kernel, kind: u64, pid: u64, id: u64)
+  requires kok(k) && kind < NSK_N && pid < NPROC
+  ensures kok(k)
+{
+  k.mns = set(k.mns, nsk_at(kind, pid), id);
+}
+
+/// A process the kernel starts is in the first namespaces.
+fn nsk_reset(t: &mut Buf, pid: u64)
+  requires len(t) == MNS_LEN && pid < NPROC
+  ensures len(t) == old(len(t))
+{
+  let mut i = 0;
+  while i < NSK_N
+    invariant i <= NSK_N && len(t) == MNS_LEN && pid < NPROC
+  {
+    t = set(t, nsk_at(i, pid), 0);
+    i = i + 1;
+  }
+}
+
+/// A child starts in its parent's namespaces.
+fn nsk_fork(t: &mut Buf, pid: u64, c: u64)
+  requires len(t) == MNS_LEN && pid < NPROC && c < NPROC
+  ensures len(t) == old(len(t))
+{
+  let mut i = 0;
+  while i < NSK_N
+    invariant i <= NSK_N && len(t) == MNS_LEN && pid < NPROC && c < NPROC
+  {
+    t = set(t, nsk_at(i, c), get(t, nsk_at(i, pid)));
+    i = i + 1;
+  }
+}
+
+/// execve from a thread: the thread takes over the leader's slot h.
+fn nsk_swap(t: &mut Buf, h: u64, p: u64)
+  requires len(t) == MNS_LEN && h < NPROC && p < NPROC
+  ensures len(t) == old(len(t))
+{
+  let mut i = 0;
+  while i < NSK_N
+    invariant i <= NSK_N && len(t) == MNS_LEN && h < NPROC && p < NPROC
+  {
+    let a = get(t, nsk_at(i, h));
+    t = set(t, nsk_at(i, h), get(t, nsk_at(i, p)));
+    t = set(t, nsk_at(i, p), a);
+    i = i + 1;
+  }
+}
+
+/// Is a process (not a zombie) in namespace id of kind `kind`?
+fn nsk_live(k: &Kernel, kind: u64, id: u64) -> bool
+  requires kok(k) && kind < NSK_N
+{
+  if id == 0 {
+    return true;
+  }
+  let mut q = 0;
+  while q < NPROC
+    invariant q <= NPROC && kok(k) && kind < NSK_N
+  {
+    let s = pget(k.procs, q, F_STATE);
+    if s != FREE && s != ZOMBIE && get(k.mns, nsk_at(kind, q)) == id {
+      return true;
+    }
+    q = q + 1;
+  }
+  return false;
+}
+
+/// A new namespace number of kind `kind`, or 0 if they ran out.
+fn nsk_new(k: &mut Kernel, kind: u64) -> u64
+  requires kok(k) && kind < NSK_N
+  ensures kok(k) && result < MNS_MAX
+{
+  let n = get(k.mns, MNS_KNEXT + kind);
+  if n >= MNS_MAX - 2 {
+    return 0;                               // never, at one a microsecond for decades
+  }
+  k.mns = set(k.mns, MNS_KNEXT + kind, n + 1);
+  return n + 1;
+}
+
+// ---------------------------------------------------------------- UTS
+
+/// The k.mns slot of UTS namespace id, or UTS_N (the first namespace, or
+/// one without a slot).
+fn uts_slot(k: &Kernel, id: u64) -> u64
+  requires kok(k) && id < MNS_MAX
+  ensures result <= UTS_N
+{
+  if id == 0 {
+    return UTS_N;
+  }
+  let mut s = 0;
+  while s < UTS_N
+    invariant s <= UTS_N && kok(k)
+  {
+    if get(k.mns, MNS_UTS + s * UTS_W) == id + 1 {
+      return s;
+    }
+    s = s + 1;
+  }
+  return UTS_N;
+}
+
+/// The slot of pid's UTS namespace, or UTS_N for the first one.
+fn uts_slot_of(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= UTS_N
+{
+  return uts_slot(k, nsk_of(k, NSK_UTS, pid));
+}
+
+/// Frees the slots of UTS namespaces no process is in; returns a free
+/// slot, or UTS_N if there is none.
+fn uts_gc(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k) && result <= UTS_N
+{
+  let mut free = UTS_N;
+  let mut s = 0;
+  while s < UTS_N
+    invariant s <= UTS_N && free <= UTS_N && kok(k)
+  {
+    let v = get(k.mns, MNS_UTS + s * UTS_W);
+    if v != 0 && !nsk_live(k, NSK_UTS, v - 1) {
+      k.mns = set(k.mns, MNS_UTS + s * UTS_W, 0);
+    }
+    if get(k.mns, MNS_UTS + s * UTS_W) == 0 && free == UTS_N {
+      free = s;
+    }
+    s = s + 1;
+  }
+  return free;
+}
+
+/// Process pid moves to a new UTS namespace, with a copy of the names it
+/// saw. 0, or -ENOMEM if every slot is taken.
+fn uts_unshare(k: &mut Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let s = uts_gc(&mut k);
+  if s >= UTS_N {
+    return ENOMEM;
+  }
+  let id = nsk_new(&mut k, NSK_UTS);
+  if id == 0 {
+    return ENOMEM;
+  }
+  let mut w = 0;
+  while w < UTS_W - 1
+    invariant w <= UTS_W - 1 && s < UTS_N && pid < NPROC && kok(k)
+  {
+    k.mns = set(k.mns, MNS_UTS + s * UTS_W + 1 + w, uts_rd(k, pid, w));
+    w = w + 1;
+  }
+  k.mns = set(k.mns, MNS_UTS + s * UTS_W, id + 1);
+  nsk_set(&mut k, NSK_UTS, pid, id);
+  return 0;
+}
+
+/// Is there a UTS slot for a new namespace?
+fn uts_room(k: &mut Kernel) -> bool
+  requires kok(k)
+  ensures kok(k)
+{
+  return uts_gc(&mut k) < UTS_N;
+}
+
+/// Process pid moves to a new IPC namespace, empty. 0 or -ENOMEM.
+fn ipc_unshare(k: &mut Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let id = nsk_new(&mut k, NSK_IPC);
+  if id == 0 {
+    return ENOMEM;
+  }
+  nsk_set(&mut k, NSK_IPC, pid, id);
+  return 0;
+}
+
+/// unshare or clone's namespaces other than the mount one (flags holds
+/// only CLONE_NEWUTS and CLONE_NEWIPC here) for process pid. The caller
+/// checked uts_room for a new UTS namespace.
+fn nsk_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags & CLONE_NEWUTS != 0 {
+    let e = uts_unshare(&mut k, pid);
+    if e != 0 {
+      return e;
+    }
+  }
+  if flags & CLONE_NEWIPC != 0 {
+    return ipc_unshare(&mut k, pid);
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------- /proc/PID/ns
+
+/// The inode number of namespace id of link kind f (NF_*).
+fn ns_inode(f: u64, id: u64) -> u64
+  requires id < MNS_MAX
+{
+  if id == 0 {
+    if f == NF_CGROUP {
+      return NS_INO0;
+    }
+    if f == NF_IPC {
+      return NS_INO0 + 4;                   // 4026531839
+    }
+    if f == NF_MNT {
+      return NS_INO0 + 6;                   // 4026531841
+    }
+    if f == NF_NET {
+      return NS_INO0 + 5;                   // 4026531840
+    }
+    if f == NF_PID || f == NF_PIDC {
+      return NS_INO0 + 1;                   // 4026531836
+    }
+    if f == NF_USER {
+      return NS_INO0 + 2;                   // 4026531837
+    }
+    return NS_INO0 + 3;                     // uts: 4026531838
+  }
+  let mut g = f;
+  if f == NF_PIDC {
+    g = NF_PID;
+  }
+  return NS_INO + id * 8 + g % 8;
+}
+
+/// The name of link f.
+fn nf_name(f: u64) -> Str {
+  if f == NF_CGROUP {
+    return "cgroup";
+  }
+  if f == NF_IPC {
+    return "ipc";
+  }
+  if f == NF_MNT {
+    return "mnt";
+  }
+  if f == NF_NET {
+    return "net";
+  }
+  if f == NF_PID {
+    return "pid";
+  }
+  if f == NF_PIDC {
+    return "pid_for_children";
+  }
+  if f == NF_USER {
+    return "user";
+  }
+  return "uts";
+}
+
+/// The namespace process p's link f names.
+fn nf_id(k: &Kernel, p: u64, f: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures result < MNS_MAX
+{
+  if f == NF_MNT {
+    return ns_of(k, p);
+  }
+  if f == NF_UTS {
+    return nsk_of(k, NSK_UTS, p);
+  }
+  if f == NF_IPC {
+    return nsk_of(k, NSK_IPC, p);
+  }
+  if f == NF_PID || f == NF_PIDC {
+    return nsk_of(k, NSK_PID, p);
+  }
+  return 0;
+}
+
+/// Is /proc device d one of the /proc/PID/ns links?
+fn is_ns_file(d: u64) -> bool
+  ensures result == (d >= PROC_DEV + PSYS + SY_NS && d < PROC_DEV + PSYS + SY_NS + NPROC * NF_N)
+{
+  return d >= PROC_DEV + PSYS + SY_NS && d < PROC_DEV + PSYS + SY_NS + NPROC * NF_N;
+}
+
+/// The process of ns link d.
+fn nsf_proc(d: u64) -> u64
+  requires d >= PROC_DEV + PSYS + SY_NS && d < PROC_DEV + PSYS + SY_NS + NPROC * NF_N
+  ensures result < NPROC
+{
+  return (d - PROC_DEV - PSYS - SY_NS) / NF_N;
+}
+
+fn nsf_kind(d: u64) -> u64
+  ensures result < NF_N
+{
+  return d % NF_N;
+}
+
+/// The device of link `name` (x[from..to]) in /proc/P/ns, or 0.
+fn nsf_at(x: &Bytes, from: u64, to: u64, p: u64) -> u64
+  requires from <= to && to <= blen(x) && p < NPROC
+{
+  let mut f = 0;
+  while f < NF_N
+    invariant f <= NF_N
+  {
+    if xfer_is(x, from, to, nf_name(f)) {
+      return PROC_DEV + PSYS + SY_NS + p * NF_N + f;
+    }
+    f = f + 1;
+  }
+  return 0;
+}
+
+/// The target of link d into o: "KIND:[INODE]".
+fn nsf_text(k: &Kernel, d: u64, o: &mut Bytes) -> u64
+  requires kok(k) && d >= PROC_DEV + PSYS + SY_NS && d < PROC_DEV + PSYS + SY_NS + NPROC * NF_N && blen(o) == PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let f = nsf_kind(d);
+  let mut nm = nf_name(f);
+  if f == NF_PIDC {
+    nm = "pid";
+  }
+  let mut a = put_s(&mut o, 0, nm);
+  a = put_s(&mut o, a, ":[");
+  a = put_n(&mut o, a, ns_inode(f, nf_id(k, nsf_proc(d), f)));
+  return put_c(&mut o, a, 93);
+}
+
+/// Entry i of /proc/P/ns, its name in the transfer buffer.
+fn nsf_entry(k: &mut Kernel, i: u64) -> Ent
+  requires kok(k)
+  ensures kok(k) && result.len <= XFER
+{
+  if i >= NF_N {
+    return Ent { len: 0, dir: false, end: true };
+  }
+  return Ent { len: name_out(&mut k.fs.xfer, nf_name(i)), dir: false, end: false };
+}
+
+/// A link was opened as description h: it keeps the namespace.
+fn nsf_open(k: &mut Kernel, h: u64, d: u64)
+  requires kok(k) && h < OFD_N && d >= PROC_DEV + PSYS + SY_NS && d < PROC_DEV + PSYS + SY_NS + NPROC * NF_N
+  ensures kok(k)
+{
+  of_set(&mut k.ofd, h, 3, nf_id(k, nsf_proc(d), nsf_kind(d)) + 1);
+}
+
+/// The namespace an open link names, through description h.
+fn nsf_held(k: &Kernel, h: u64) -> u64
+  requires kok(k) && h < OFD_N
+  ensures result < MNS_MAX
+{
+  let v = of_get(k.ofd, h, 3);
+  if v == 0 {
+    return 0;
+  }
+  return smaller(v - 1, MNS_MAX - 1);
+}
+
+/// What stat says about link d (followed: the namespace's nsfs file).
+fn nsf_meta(k: &Kernel, d: u64) -> Meta
+  requires kok(k) && d >= PROC_DEV + PSYS + SY_NS && d < PROC_DEV + PSYS + SY_NS + NPROC * NF_N
+{
+  let f = nsf_kind(d);
+  return Meta { ok: true, mode: S_IFREG_NS, size: 0, ino: ns_inode(f, nf_id(k, nsf_proc(d), f)), mtime: 0, own: 0 };
+}
+
+/// What lstat says about link d: a symbolic link.
+fn nsf_link_meta(d: u64) -> Meta {
+  return Meta { ok: true, mode: S_IFLNK, size: 0, ino: INO_PROC + d % 4096, mtime: 0, own: 0 };
+}
+
+/// fstat on fd, a descriptor of link d.
+fn nsf_fd_meta(k: &Kernel, pid: u64, fd: u64, d: u64) -> Meta
+  requires kok(k) && pid < NPROC && d >= PROC_DEV + PSYS + SY_NS && d < PROC_DEV + PSYS + SY_NS + NPROC * NF_N
+{
+  let h = fd_ofd(k, pid, fd);
+  let mut id = 0;
+  if h < OFD_N {
+    id = nsf_held(k, h);
+  }
+  return Meta { ok: true, mode: S_IFREG_NS, size: 0, ino: ns_inode(nsf_kind(d), id), mtime: 0, own: 0 };
+}
+
+// ---------------------------------------------------------------- setns
+
+/// The CLONE_NEW* flag of link kind f.
+fn nf_flag(f: u64) -> u64 {
+  if f == NF_CGROUP {
+    return CLONE_NEWCGROUP;
+  }
+  if f == NF_IPC {
+    return CLONE_NEWIPC;
+  }
+  if f == NF_MNT {
+    return CLONE_NEWNS;
+  }
+  if f == NF_NET {
+    return CLONE_NEWNET;
+  }
+  if f == NF_PID || f == NF_PIDC {
+    return CLONE_NEWPID;
+  }
+  if f == NF_USER {
+    return CLONE_NEWUSER;
+  }
+  return CLONE_NEWUTS;
+}
+
+/// Can pid join namespace id of link kind f? 0, or -errno.
+fn ns_may_join(k: &Kernel, pid: u64, f: u64, id: u64) -> u64
+  requires kok(k) && pid < NPROC && id < MNS_MAX
+{
+  if id == nf_id(k, pid, f) {
+    return 0;                               // already there
+  }
+  if f == NF_MNT {
+    if !ns_live(k, id) {
+      return EINVAL;
+    }
+    return 0;
+  }
+  if f == NF_UTS {
+    if !nsk_live(k, NSK_UTS, id) || uts_slot(k, id) >= UTS_N {
+      return EINVAL;
+    }
+    return 0;
+  }
+  if f == NF_IPC {
+    if !nsk_live(k, NSK_IPC, id) {
+      return EINVAL;
+    }
+    return 0;
+  }
+  return EINVAL;                            // a PID namespace not yet; the rest are all the first
+}
+
+/// pid joins mount namespace id: its root and working directory become
+/// the root of a process in it (p, if it is still there).
+fn mnt_join(k: &mut Kernel, pid: u64, id: u64, p: u64)
+  requires kok(k) && pid < NPROC && p < NPROC
+  ensures kok(k)
+{
+  let mut from = NPROC;
+  if pget(k.procs, p, F_STATE) != FREE && ns_of(k, p) == id {
+    from = p;
+  }
+  let mut q = 0;
+  while q < NPROC && from == NPROC
+    invariant q <= NPROC && from <= NPROC && kok(k)
+  {
+    let s = pget(k.procs, q, F_STATE);
+    if s != FREE && s != ZOMBIE && ns_of(k, q) == id {
+      from = q;
+    }
+    q = q + 1;
+  }
+  k.mns = set(k.mns, pid, id);
+  let mut rl = 0;
+  if from < NPROC {
+    rl = root_len(k, from);
+    let mut i = 0;
+    while i < rl
+      invariant i <= rl && rl <= FNAME_MAX && from < NPROC && pid < NPROC && kok(k)
+    {
+      let c = get(k.croot, from * CWD_STRIDE + 1 + i);
+      k.croot = set(k.croot, pid * CWD_STRIDE + 1 + i, c);
+      k.cwd = set(k.cwd, pid * CWD_STRIDE + 1 + i, c);
+      i = i + 1;
+    }
+  }
+  k.croot = set(k.croot, pid * CWD_STRIDE, rl);
+  k.cwd = set(k.cwd, pid * CWD_STRIDE, rl);
+}
+
+/// pid joins namespace id of link kind f, which ns_may_join allowed.
+fn ns_join(k: &mut Kernel, pid: u64, f: u64, id: u64, p: u64)
+  requires kok(k) && pid < NPROC && p < NPROC
+  ensures kok(k)
+{
+  if id == nf_id(k, pid, f) {
+    return;
+  }
+  if f == NF_MNT {
+    mnt_join(&mut k, pid, id, p);
+  } else if f == NF_UTS {
+    nsk_set(&mut k, NSK_UTS, pid, id);
+  } else if f == NF_IPC {
+    nsk_set(&mut k, NSK_IPC, pid, id);
+  }
+}
+
+/// setns(fd, nstype): fd a /proc/PID/ns link (nstype 0 or its CLONE_NEW*
+/// flag) or a pidfd (nstype the CLONE_NEW* flags of the namespaces to
+/// join, all or none of them joined).
+fn lx_setns(k: &mut Kernel, pid: u64, fd: u64, nstype: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let all = CLONE_NEWCGROUP + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWNET + CLONE_NEWUSER + CLONE_NEWNS;
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
+    return EBADF;
+  }
+  if !cap_has(k, pid, CAP_SYS_ADMIN) {
+    return EPERM;
+  }
+  if pget(k.procs, pid, F_TGID) != 0 {
+    return EINVAL;                          // a thread that shares them: not supported
+  }
+  if d.kind == K_DEV && is_ns_file(d.x) {
+    let f = nsf_kind(d.x);
+    if nstype != 0 && nstype != nf_flag(f) {
+      return EINVAL;
+    }
+    let h = fd_ofd(k, pid, fd);
+    if h >= OFD_N {
+      return EBADF;
+    }
+    let id = nsf_held(k, h);
+    let e = ns_may_join(k, pid, f, id);
+    if e != 0 {
+      return e;
+    }
+    ns_join(&mut k, pid, f, id, nsf_proc(d.x));
+    return 0;
+  }
+  if d.kind != K_PIDFD {
+    return EINVAL;
+  }
+  if nstype == 0 || nstype & all != nstype {
+    return EINVAL;
+  }
+  let p = smaller(d.x, NPROC);
+  if p >= NPROC || pget(k.procs, p, F_STATE) == FREE || pget(k.procs, p, F_STATE) == ZOMBIE {
+    return ESRCH;
+  }
+  // Check every kind first, so that either all are joined or none.
+  let mut f = 0;
+  while f < NF_N
+    invariant f <= NF_N && p < NPROC && kok(k) && pid < NPROC
+  {
+    if f != NF_PIDC && nstype & nf_flag(f) != 0 {
+      let e = ns_may_join(k, pid, f, nf_id(k, p, f));
+      if e != 0 {
+        return e;
+      }
+    }
+    f = f + 1;
+  }
+  let mut g = 0;
+  while g < NF_N
+    invariant g <= NF_N && p < NPROC && kok(k) && pid < NPROC
+  {
+    if g != NF_PIDC && nstype & nf_flag(g) != 0 {
+      ns_join(&mut k, pid, g, nf_id(k, p, g), p);
+    }
+    g = g + 1;
+  }
+  return 0;
+}

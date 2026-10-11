@@ -186,6 +186,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   cwd_fork(&mut k.cwd, pid, c);
   cwd_fork(&mut k.croot, pid, c);
   k.mns = set(k.mns, c, get(k.mns, pid));   // the same mount namespace (src/lxns.bastio)
+  nsk_fork(&mut k.mns, pid, c);             // and the same others (src/lxnsk.bastio)
   pset(&mut k.procs, c, F_SIGPEND, 0);
   pset(&mut k.procs, c, F_RESTART, 0);
   pset(&mut k.procs, c, F_STATE, READY);
@@ -1038,7 +1039,11 @@ fn lx_stat(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, buf: u64, follow: bo
   if n == NO_RESULT {
     return k.perr;
   }
-  let m = path_meta(&mut k, n);
+  let pf = proc_file(k.procs, k.fs.xfer, n);
+  let mut m = path_meta(&mut k, n);
+  if !follow && pf != 0 && is_ns_file(pf) {
+    m = nsf_link_meta(pf);                  // lstat: the /proc/PID/ns link itself
+  }
   if !m.ok {
     return ENOENT;
   }
@@ -1086,6 +1091,9 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
     return dev_meta(dev);
   }
   let pf = proc_file(k.procs, k.fs.xfer, n);
+  if pf != 0 && is_ns_file(pf) {
+    return nsf_meta(k, pf);                 // the namespace's nsfs file (src/lxnsk.bastio)
+  }
   if pf != 0 {
     return proc_meta(pf);
   }
@@ -1177,6 +1185,8 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
     m = dir_meta(&mut k, d.x);              // as stat on its path says, so shutil.rmtree trusts it
   } else if d.kind == K_SOCK {
     m = Meta { ok: true, mode: S_IFSOCK, size: 0, ino: 5, mtime: 0, own: 0 };
+  } else if d.kind == K_DEV && is_ns_file(d.x) {
+    m = nsf_fd_meta(k, pid, fd, d.x);       // src/lxnsk.bastio
   } else if d.kind == K_DEV {
     m = dev_meta(d.x);
   } else if d.kind == K_FILE {
@@ -1350,7 +1360,13 @@ fn ns_applet(j: u64) -> Str {
   if j == 1 {
     return "pivot_root";
   }
-  return "chroot";
+  if j == 2 {
+    return "chroot";
+  }
+  if j == 3 {
+    return "hostname";
+  }
+  return "nsenter";
 }
 
 /// The applets past applet 23, which deal with users: su and passwd first

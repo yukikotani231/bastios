@@ -123,16 +123,25 @@ fn pq_name_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   return n;
 }
 
-/// The live (named) queue whose name is the n bytes in xfer, or PQ_N.
-fn pq_find(k: &Kernel, n: u64) -> u64
-  requires kok(k) && 1 <= n && n <= PQ_NAME_MAX
+/// The IPC namespace queue q was made in (src/lxns.bastio).
+fn pq_ns(k: &Kernel, q: u64) -> u64
+  requires kok(k) && q < PQ_N
+{
+  return get(k.mns, MNS_PQ + q);
+}
+
+/// The live (named) queue of pid's IPC namespace whose name is the n
+/// bytes in xfer, or PQ_N.
+fn pq_find(k: &Kernel, pid: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && 1 <= n && n <= PQ_NAME_MAX
   ensures result <= PQ_N
 {
+  let ns = nsk_of(k, NSK_IPC, pid);
   let mut q = 0;
   while q < PQ_N
     invariant q <= PQ_N
   {
-    if pq_get(k, q, PW_LIVE) == 1 && pq_get(k, q, PW_NLEN) == n {
+    if pq_get(k, q, PW_LIVE) == 1 && pq_get(k, q, PW_NLEN) == n && pq_ns(k, q) == ns {
       let base = PQ_NAMES + q * PQ_NAME_ROOM;
       let mut i = 0;
       while i < n && bget(k.ipcb, base + i) == bget(k.fs.xfer, i)
@@ -195,6 +204,18 @@ fn pq_create(k: &mut Kernel, pid: u64, n: u64, mode: u64, attr: u64) -> u64
   ensures kok(k)
   ensures result < PQ_N || result > PQ_ERRS
 {
+  // The names in IPC namespaces no process is in any more go: their
+  // queues are unlinked, and freed once nothing has them open.
+  let mut d = 0;
+  while d < PQ_N
+    invariant d <= PQ_N && kok(k)
+  {
+    if pq_get(k, d, PW_LIVE) == 1 && pq_ns(k, d) != 0 && !nsk_live(k, NSK_IPC, pq_ns(k, d)) {
+      pq_set(&mut k, d, PW_LIVE, 2);
+      pq_reap(&mut k, d);
+    }
+    d = d + 1;
+  }
   // Keep the name before xfer is used for the attributes.
   let mut q = 0;
   while q < PQ_N && pq_get(k, q, PW_LIVE) != 0
@@ -235,6 +256,7 @@ fn pq_create(k: &mut Kernel, pid: u64, n: u64, mode: u64, attr: u64) -> u64
   pq_set(&mut k, q, PW_NSIG, 0);
   pq_set(&mut k, q, PW_NVAL, 0);
   pq_set(&mut k, q, PW_NLEN, n);
+  k.mns = set(k.mns, MNS_PQ + q, nsk_of(k, NSK_IPC, pid));
   return q;
 }
 
@@ -251,7 +273,7 @@ fn lx_mq_open(k: &mut Kernel, pid: u64, va: u64, oflag: u64, mode: u64, attr: u6
   if acc == LO_ACCMODE {
     return EINVAL;
   }
-  let mut q = pq_find(k, n);
+  let mut q = pq_find(k, pid, n);
   if q < PQ_N && oflag & (LO_CREAT + LO_EXCL) == LO_CREAT + LO_EXCL {
     return EEXIST;
   }
@@ -295,7 +317,7 @@ fn lx_mq_unlink(k: &mut Kernel, pid: u64, va: u64) -> u64
   if n > PQ_NAME_MAX {
     return n;
   }
-  let q = pq_find(k, n);
+  let q = pq_find(k, pid, n);
   if q >= PQ_N {
     return ENOENT;
   }

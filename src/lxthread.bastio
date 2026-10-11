@@ -44,7 +44,6 @@ const CLONE_CHILD_CLEARTID: u64 = 0x200000;
 const CLONE_CHILD_SETTID: u64 = 0x1000000;
 const CLONE_PARENT: u64 = 0x8000;
 const CLONE_SYSVSEM: u64 = 0x40000;
-const CLONE_NEWNS: u64 = 0x20000;
 const CLONE_DETACHED: u64 = 0x400000;
 const CLONE_IO: u64 = 0x80000000;
 
@@ -207,6 +206,7 @@ fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
     swap_words(&mut k.croot, h * CWD_STRIDE, p * CWD_STRIDE, CWD_STRIDE);
   }
   swap_words(&mut k.mns, h, p, 1);
+  nsk_swap(&mut k.mns, h, p);
   if (h + 1) * SIGACT_ROW <= len(k.sigact) && (p + 1) * SIGACT_ROW <= len(k.sigact) {
     swap_words(&mut k.sigact, h * SIGACT_ROW, p * SIGACT_ROW, SIGACT_ROW);
   }
@@ -432,12 +432,14 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
 /// The clone flags a new process (not a thread, not a vfork) may carry:
 /// the exit signal, CLONE_PARENT, the tid and TLS flags, and the ones
 /// that change nothing here (CLONE_SYSVSEM, CLONE_DETACHED, CLONE_IO).
-/// CLONE_NEWNS gives the child a mount namespace of its own. Sharing
-/// files, the cwd, signal handlers or memory with a separate process, and
-/// the other namespaces, are not supported.
+/// CLONE_NEWNS, CLONE_NEWUTS and CLONE_NEWIPC give the child a mount, UTS
+/// or IPC namespace of its own. Sharing files, the cwd, signal handlers or
+/// memory with a separate process, and the other namespaces, are not
+/// supported.
 fn clone_proc_flags(flags: u64) -> bool {
   let known = 0xff + CLONE_PARENT + CLONE_SYSVSEM + CLONE_SETTLS + CLONE_PARENT_SETTID
-    + CLONE_CHILD_CLEARTID + CLONE_DETACHED + CLONE_CHILD_SETTID + CLONE_IO + CLONE_NEWNS;
+    + CLONE_CHILD_CLEARTID + CLONE_DETACHED + CLONE_CHILD_SETTID + CLONE_IO + CLONE_NEWNS
+    + CLONE_NEWUTS + CLONE_NEWIPC;
   return flags & known == flags;
 }
 
@@ -456,13 +458,15 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
       return EINVAL;                        // init has no parent to share
     }
   }
-  if flags & CLONE_NEWNS != 0 {
-    if !cap_has(k, pid, CAP_SYS_ADMIN) {
-      return EPERM;
-    }
-    if !ns_room(&mut k, pid) {
-      return ENOMEM;
-    }
+  let nsf = flags & (CLONE_NEWNS + CLONE_NEWUTS + CLONE_NEWIPC);
+  if nsf != 0 && !cap_has(k, pid, CAP_SYS_ADMIN) {
+    return EPERM;
+  }
+  if flags & CLONE_NEWNS != 0 && !ns_room(&mut k, pid) {
+    return ENOMEM;
+  }
+  if flags & CLONE_NEWUTS != 0 && !uts_room(&mut k) {
+    return ENOMEM;
   }
   let c = lx_fork(&mut k, mmu, pid);
   if c == 0 || c >= NPROC {
@@ -471,6 +475,7 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
   if flags & CLONE_NEWNS != 0 {
     let e = ns_unshare(&mut k, c);          // cannot fail: ns_room said so
   }
+  let e2 = nsk_unshare(&mut k, c, flags);   // nor this: uts_room did (src/lxnsk.bastio)
   pset(&mut k.procs, c, F_PARENT, par);
   if stack != 0 {
     pset(&mut k.procs, c, F_REGS + R_RSP, stack);
@@ -495,15 +500,15 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
 
 const CLONE_FS: u64 = 0x200;
 const CLONE_FILES: u64 = 0x400;
-const CLONE_NEWUSER: u64 = 0x10000000;
 // CLONE_NEWNS, NEWCGROUP, NEWUTS, NEWIPC, NEWUSER, NEWPID, NEWNET and
 // NEWTIME: the namespaces.
 const CLONE_NEWALL: u64 = 0x7e020080;
 
 /// unshare(flags). A process (not a thread group) shares nothing with
 /// another one here, so unsharing its files, cwd, memory, signal handlers
-/// or semaphore undo list changes nothing. CLONE_NEWNS gives it a mount
-/// namespace of its own (src/lxns.bastio). The other namespaces are not
+/// or semaphore undo list changes nothing. CLONE_NEWNS, CLONE_NEWUTS and
+/// CLONE_NEWIPC give it a mount, UTS or IPC namespace of its own
+/// (src/lxns.bastio, src/lxnsk.bastio). The other namespaces are not
 /// supported: EINVAL, as on a Linux built without them, or EPERM for one
 /// that only root may make.
 fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
@@ -519,15 +524,18 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
     if ns & CLONE_NEWUSER != ns && !cap_has(k, pid, CAP_SYS_ADMIN) {
       return EPERM;
     }
-    if ns & (CLONE_NEWNS + CLONE_NEWNET) != ns {
-      return EINVAL;                        // only mount and network namespaces so far
+    if ns & (CLONE_NEWNS + CLONE_NEWNET + CLONE_NEWUTS + CLONE_NEWIPC) != ns {
+      return EINVAL;                        // only mount, network, UTS and IPC namespaces so far
     }
   }
   if flags != ns && pget(k.procs, pid, F_TGID) != 0 {
     return EINVAL;                          // threads that share them: not supported
   }
-  if ns & CLONE_NEWNS != 0 && ns & CLONE_NEWNET != 0 && !ns_room(&mut k, pid) {
-    return ENOMEM;                          // so the network namespace is not made alone
+  if ns & CLONE_NEWNS != 0 && ns & (CLONE_NEWNET + CLONE_NEWUTS + CLONE_NEWIPC) != 0 && !ns_room(&mut k, pid) {
+    return ENOMEM;                          // so the others are not made alone
+  }
+  if ns & CLONE_NEWUTS != 0 && !uts_room(&mut k) {
+    return ENOMEM;
   }
   if ns & CLONE_NEWNET != 0 {
     let e = netns_unshare(&mut k, pid);     // src/lxnetlink.bastio
@@ -536,9 +544,12 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
     }
   }
   if ns & CLONE_NEWNS != 0 {
-    return ns_unshare(&mut k, pid);         // src/lxns.bastio
+    let e = ns_unshare(&mut k, pid);        // src/lxns.bastio
+    if e != 0 {
+      return e;
+    }
   }
-  return 0;
+  return nsk_unshare(&mut k, pid, ns);      // src/lxnsk.bastio
 }
 
 /// exit(code) from thread pid of a group, not its leader: clears and

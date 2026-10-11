@@ -3,7 +3,9 @@
 // back), the wall clock (clock_settime, settimeofday) and the NTP clock
 // discipline (adjtimex, clock_adjtime).
 //
-// They live in k.sys (SYS_LEN words):
+// They live in k.sys (SYS_LEN words), the names those of the first UTS
+// namespace; another UTS namespace keeps its names in k.mns, laid out the
+// same way (uts_rd, src/lxns.bastio):
 //   [NM_HOST, + 1 + NAME_MAX)   the host name: its length, then a byte a word
 //   [NM_DOM, + 1 + NAME_MAX)    the domain name, the same way
 //   NM_SET                      bit 0: a host name was set; bit 1: a domain name
@@ -67,10 +69,34 @@ const MIN_SHIFT: u64 = 0xFFFFFFFE00000000;   // -MAX_SHIFT
 
 // ---------------------------------------------------------------- names
 
-/// Name `base` (NM_HOST or NM_DOM) into field f of the struct utsname in
-/// the transfer buffer.
-fn uts_name(k: &mut Kernel, f: u64, base: u64)
-  requires kok(k) && f < 6 && (base == NM_HOST || base == NM_DOM)
+/// Word w of the names pid sees: k.sys's in the first UTS namespace, a
+/// slot of k.mns's in the others (src/lxns.bastio).
+fn uts_rd(k: &Kernel, pid: u64, w: u64) -> u64
+  requires kok(k) && pid < NPROC && w < UTS_W - 1
+{
+  let s = uts_slot_of(k, pid);
+  if s < UTS_N {
+    return get(k.mns, MNS_UTS + s * UTS_W + 1 + w);
+  }
+  return get(k.sys, w);
+}
+
+fn uts_wr(k: &mut Kernel, pid: u64, w: u64, v: u64)
+  requires kok(k) && pid < NPROC && w < UTS_W - 1
+  ensures kok(k)
+{
+  let s = uts_slot_of(k, pid);
+  if s < UTS_N {
+    k.mns = set(k.mns, MNS_UTS + s * UTS_W + 1 + w, v);
+  } else {
+    k.sys = set(k.sys, w, v);
+  }
+}
+
+/// Name `base` (NM_HOST or NM_DOM), as pid sees it, into field f of the
+/// struct utsname in the transfer buffer.
+fn uts_name(k: &mut Kernel, pid: u64, f: u64, base: u64)
+  requires kok(k) && pid < NPROC && f < 6 && (base == NM_HOST || base == NM_DOM)
   ensures kok(k)
 {
   let mut z = 0;
@@ -80,37 +106,37 @@ fn uts_name(k: &mut Kernel, f: u64, base: u64)
     bset(&mut k.fs.xfer, f * UTS_FIELD + z, 0);
     z = z + 1;
   }
-  let n = smaller(get(k.sys, base), NAME_MAX);
+  let n = smaller(uts_rd(k, pid, base), NAME_MAX);
   let mut i = 0;
   while i < n
-    invariant i <= n && n <= NAME_MAX && f < 6 && kok(k)
+    invariant i <= n && n <= NAME_MAX && f < 6 && pid < NPROC && (base == NM_HOST || base == NM_DOM) && kok(k)
   {
-    bset(&mut k.fs.xfer, f * UTS_FIELD + i, cast[u8](get(k.sys, base + 1 + i) % 256));
+    bset(&mut k.fs.xfer, f * UTS_FIELD + i, cast[u8](uts_rd(k, pid, base + 1 + i) % 256));
     i = i + 1;
   }
 }
 
 /// Puts the names that were set over uname's defaults in the transfer buffer.
-fn uts_names(k: &mut Kernel)
-  requires kok(k)
+fn uts_names(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if name_set(k, 1) {
-    uts_name(&mut k, 1, NM_HOST);
+  if name_set(k, pid, 1) {
+    uts_name(&mut k, pid, 1, NM_HOST);
   }
-  if name_set(k, 2) {
-    uts_name(&mut k, 5, NM_DOM);
+  if name_set(k, pid, 2) {
+    uts_name(&mut k, pid, 5, NM_DOM);
   }
 }
 
-/// True if name `bit` (1 host, 2 domain) was set since boot.
-fn name_set(k: &Kernel, bit: u64) -> bool
-  requires kok(k) && (bit == 1 || bit == 2)
+/// True if name `bit` (1 host, 2 domain) was set in pid's UTS namespace.
+fn name_set(k: &Kernel, pid: u64, bit: u64) -> bool
+  requires kok(k) && pid < NPROC && (bit == 1 || bit == 2)
 {
-  return get(k.sys, NM_SET) / bit % 2 == 1;
+  return uts_rd(k, pid, NM_SET) / bit % 2 == 1;
 }
 
-/// sethostname / setdomainname(name, len).
+/// sethostname / setdomainname(name, len), in the caller's UTS namespace.
 fn lx_setname(k: &mut Kernel, pid: u64, base: u64, bit: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && (base == NM_HOST || base == NM_DOM) && (bit == 1 || bit == 2)
   ensures kok(k)
@@ -126,13 +152,13 @@ fn lx_setname(k: &mut Kernel, pid: u64, base: u64, bit: u64, va: u64, n: u64) ->
   }
   let mut i = 0;
   while i < n
-    invariant i <= n && n <= NAME_MAX && kok(k)
+    invariant i <= n && n <= NAME_MAX && pid < NPROC && (base == NM_HOST || base == NM_DOM) && kok(k)
   {
-    k.sys = set(k.sys, base + 1 + i, cast[u64](bget(k.fs.xfer, i)));
+    uts_wr(&mut k, pid, base + 1 + i, cast[u64](bget(k.fs.xfer, i)));
     i = i + 1;
   }
-  k.sys = set(k.sys, base, n);
-  k.sys = set(k.sys, NM_SET, get(k.sys, NM_SET) | bit);
+  uts_wr(&mut k, pid, base, n);
+  uts_wr(&mut k, pid, NM_SET, uts_rd(k, pid, NM_SET) | bit);
   return 0;
 }
 
@@ -153,9 +179,9 @@ fn uts_proc_name(i: u64) -> Str {
   return "sys/kernel/version";
 }
 
-/// The text of uts_proc_name(i) into o.
-fn uts_proc_text(k: &Kernel, i: u64, o: &mut Bytes) -> u64
-  requires kok(k) && blen(o) == XFER
+/// The text of uts_proc_name(i), as pid sees it, into o.
+fn uts_proc_text(k: &Kernel, pid: u64, i: u64, o: &mut Bytes) -> u64
+  requires kok(k) && pid < NPROC && blen(o) == XFER
   ensures blen(o) == XFER && result <= XFER
 {
   let mut a = 0;
@@ -172,19 +198,19 @@ fn uts_proc_text(k: &Kernel, i: u64, o: &mut Bytes) -> u64
       base = NM_DOM;
       bit = 2;
     }
-    if !name_set(k, bit) {
+    if !name_set(k, pid, bit) {
       if i == 0 {
         a = put_s(&mut o, 0, "bastios");
       } else {
         a = put_s(&mut o, 0, "(none)");
       }
     } else {
-      let n = smaller(get(k.sys, base), NAME_MAX);
+      let n = smaller(uts_rd(k, pid, base), NAME_MAX);
       let mut j = 0;
       while j < n
-        invariant j <= n && n <= NAME_MAX && a <= XFER && blen(o) == XFER && kok(k)
+        invariant j <= n && n <= NAME_MAX && a <= XFER && blen(o) == XFER && pid < NPROC && (base == NM_HOST || base == NM_DOM) && kok(k)
       {
-        a = put_c(&mut o, a, cast[u8](get(k.sys, base + 1 + j) % 256));
+        a = put_c(&mut o, a, cast[u8](uts_rd(k, pid, base + 1 + j) % 256));
         j = j + 1;
       }
     }

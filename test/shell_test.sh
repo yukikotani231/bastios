@@ -333,6 +333,16 @@ steps = [
     ("unshare -m sh -c 'mount --bind /tmp/nr /tmp/nr && mount --bind /bin /tmp/nr/bin && mount --bind /tmp/nd /tmp/nr/vol && mount -t proc proc /tmp/nr/proc && cd /tmp/nr && pivot_root . . && umount -l . && cd / && cat /marker && cat /vol/f && cat /vol/esc/passwd; echo x > /vol/new; mount -o remount,bind,ro /vol && echo y > /vol/y; cat /proc/self/mounts; ls /tmp'; cat /tmp/nd/new; echo ns2",
      [b"\r\ninroot\r\nhostfile\r\n", b"can't open '/vol/esc/passwd'", b"none / none rw 0 0", b"none /vol none ro 0 0", b"proc /proc proc rw 0 0", b"/tmp: No such file", b"Read-only file system", b"\r\nx\r\nns2"], b"\n# "),
     ("pivot_root /tmp/nr /tmp/nr; echo p=$?; rm -r /tmp/nr /tmp/nd; echo ns3", [b"Invalid argument", b"p=1", b"ns3"], b"\n# "),
+    # UTS and IPC namespaces, /proc/PID/ns and setns (src/lxnsk.bastio): a
+    # host name set in a new UTS namespace stays there; IPC objects made
+    # in one IPC namespace are not seen from another, and setns joins one
+    # through /proc/PID/ns/ipc or a pidfd (user/mns.c); nsenter joins a
+    # process's UTS namespace through its /proc/PID/ns/uts link.
+    ("unshare -u sh -c 'hostname box; hostname; cat /proc/sys/kernel/hostname'; hostname; echo uts1",
+     b"\r\nbox\r\nbox\r\nbastios\r\nuts1", b"\n# "),
+    ("mns", b"mns: ok", b"\n# "),
+    ("unshare -u sh -c 'hostname inner; sleep 5' & sleep 1; nsenter -t $! -u hostname; readlink /proc/self/ns/uts; readlink /proc/$!/ns/uts; stat -L -c %i /proc/self/ns/mnt; ls /proc/self/ns; hostname; kill $!; echo ns5",
+     [b"\r\ninner\r\nuts:[4026531838]\r\nuts:[40265320", b"\r\n4026531841\r\n", b"pid_for_children", b"\r\nbastios\r\n", b"ns5"], b"\n# "),
     # Owners and the umask (src/lxperm.bastio): a new file takes the umask,
     # chown keeps its owner, on the disk too.
     ("umask 077; echo x > po; chown 65534:100 po; stat -c 'p%a %u %g' po; rm po; umask 022; echo y > /disk/po; chown 7:8 /disk/po; stat -c 'd%a %u %g' /disk/po; rm /disk/po",

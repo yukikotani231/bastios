@@ -25,6 +25,7 @@
 //   /proc/PID/exe           a symbolic link to the program (readlink; open
 //                           opens the program, src/lxopen2.bastio)
 //   /proc/PID/mounts        the same as /proc/mounts
+//   /proc/PID/ns/           a link per namespace (src/lxnsk.bastio)
 //   /proc/self              the caller's own directory
 //   /sys/block/loopN/size, ro, and loop/backing_file, offset, sizelimit,
 //   autoclear, partscan, dio
@@ -77,6 +78,9 @@ const SY_UTS_END: u64 = 19;
 const SY_PIPE_MAX: u64 = 19;
 const SY_INO: u64 = 20;                // 20 .. 22: /proc/sys/fs/inotify (src/lxinotify.bastio)
 const SY_LOOP: u64 = 32;               // 32 ..: loop device n's attribute a at n * LOOP_SYS + a
+const SY_NS: u64 = 128;                // 128 ..: /proc/P/ns link f at P * NF_N + f (src/lxnsk.bastio)
+const NF_N: u64 = 8;
+const NS_DIRS: u64 = 0x100;            // DIR_PROC + NS_DIRS + pid: /proc/PID/ns
 const LOOP_SYS: u64 = 8;               // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
@@ -188,7 +192,18 @@ fn proc_dir(procs: &Buf, x: &Bytes, n: u64) -> u64
   if n == 4 && xfer_is(x, 0, 4, "proc") {
     return DIR_PROC;
   }
-  if n < 6 || !xfer_is(x, 0, 5, "proc/") || comp_end(x, 5, n) != n {
+  if n < 6 || !xfer_is(x, 0, 5, "proc/") {
+    return NO_FILE;
+  }
+  let e = comp_end(x, 5, n);
+  if e + 3 == n && xfer_is(x, e, n, "/ns") {
+    let q = proc_pid(procs, x, 5, e);
+    if q >= NPROC {
+      return NO_FILE;
+    }
+    return DIR_PROC + NS_DIRS + q;          // /proc/PID/ns
+  }
+  if e != n {
     return NO_FILE;
   }
   let p = proc_pid(procs, x, 5, n);
@@ -304,6 +319,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   }
   if xfer_is(x, e + 1, n, "timerslack_ns") {
     return base + PF_SLACK;
+  }
+  if e + 4 < n && xfer_is(x, e + 1, e + 4, "ns/") {
+    return nsf_at(x, e + 4, n, p);          // a namespace link (src/lxnsk.bastio)
   }
   // task/TID/comm, for a thread of the group (or the group itself).
   if e + 6 < n && xfer_is(x, e + 1, e + 6, "task/") {
@@ -424,6 +442,9 @@ fn proc_meta(f: u64) -> Meta {
 
 /// What stat says about /proc directory d (a proc_dir description).
 fn proc_dir_meta(d: u64) -> Meta {
+  if d >= DIR_PROC + NS_DIRS {
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 4096 + d % 256, mtime: 0, own: 0 };
+  }
   return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + d % 256, mtime: 0, own: 0 };
 }
 
@@ -434,6 +455,9 @@ fn proc_entry(k: &mut Kernel, dir: u64, i: u64) -> Ent
   ensures kok(k) && result.len <= XFER
 {
   let end = Ent { len: 0, dir: false, end: true };
+  if dir >= DIR_PROC + NS_DIRS {
+    return nsf_entry(&mut k, i);            // /proc/PID/ns (src/lxnsk.bastio)
+  }
   if dir > DIR_PROC {
     if i == 0 {
       return Ent { len: name_out(&mut k.fs.xfer, "stat"), dir: false, end: false };
@@ -452,6 +476,9 @@ fn proc_entry(k: &mut Kernel, dir: u64, i: u64) -> Ent
     }
     if i == 5 {
       return Ent { len: name_out(&mut k.fs.xfer, "maps"), dir: false, end: false };
+    }
+    if i == 6 {
+      return Ent { len: name_out(&mut k.fs.xfer, "ns"), dir: true, end: false };
     }
     return end;
   }
@@ -642,8 +669,8 @@ fn state_letter(s: u64, waiting: bool) -> u8 {
 }
 
 /// Writes /proc file f into o. Returns its length.
-fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
-  requires kok(k) && blen(o) == PROC_OUT
+fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
+  requires kok(k) && pid < NPROC && blen(o) == PROC_OUT
   ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
 {
   if f < PROC_DEV {
@@ -652,6 +679,9 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
   if f >= PROC_DEV + PSYS {
     // A /proc/sys file, numbered from 0 (src/lxprocfs.bastio's SY_*).
     let what = f - PROC_DEV - PSYS;
+    if is_ns_file(f) {
+      return nsf_text(k, f, &mut o);        // a namespace link (src/lxnsk.bastio)
+    }
     if what >= SY_LOOP && what - SY_LOOP < LOOP_N * LOOP_SYS {
       return loop_sys_text(&mut k, what - SY_LOOP, &mut o);
     }
@@ -666,10 +696,10 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
       return put_s(&mut o, 0, "7\t4\t1\t7\n");
     }
     if what >= SY_IPC && what < SY_IPC_END {
-      return ipc_proc_text(&mut k, what - SY_IPC, &mut o);
+      return ipc_proc_text(&mut k, pid, what - SY_IPC, &mut o);
     }
     if what >= SY_UTS && what < SY_UTS_END {
-      return uts_proc_text(k, what - SY_UTS, &mut o);
+      return uts_proc_text(k, pid, what - SY_UTS, &mut o);
     }
     if what == SY_PIPE_MAX {
       let a = put_n(&mut o, 0, pipe_max(k));
@@ -962,13 +992,16 @@ fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
       return ESRCH;
     }
   }
+  if is_ns_file(f) {
+    return EINVAL;                          // as reading an nsfs file is
+  }
   let off = of_get(k.ofd, h, 3);
   let mut out = balloc(PROC_OUT);
   let mut g = f;
   if f == PROC_DEV + PF_MOUNTS {
     g = PROC_DEV + pid * 16 + PF_MOUNTS;    // /proc/mounts: the reader's mount namespace
   }
-  let l = proc_text(&mut k, g, &mut out);
+  let l = proc_text(&mut k, pid, g, &mut out);
   if off >= l || n == 0 {
     bfree(out);
     return 0;
@@ -1126,7 +1159,7 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
     return m;
   }
   let f = proc_file(k.procs, k.fs.xfer, n);
-  if f == 0 || !is_exe_file(f) {
+  if f == 0 || (!is_exe_file(f) && !is_ns_file(f)) {
     let m = path_meta(&mut k, n);
     if m.ok {
       return EINVAL;
@@ -1137,7 +1170,7 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
     return EINVAL;
   }
   let mut out = balloc(PROC_OUT);
-  let l = smaller(proc_text(&mut k, f, &mut out), smaller(size, XFER));
+  let l = smaller(proc_text(&mut k, pid, f, &mut out), smaller(size, XFER));
   let mut i = 0;
   while i < l
     invariant i <= l && l <= PROC_OUT && l <= XFER && blen(out) == PROC_OUT && kok(k)
