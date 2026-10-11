@@ -714,6 +714,10 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
     bfree(t);
     return k.perr;
   }
+  if k.pdir && d == NO_FILE {
+    bfree(t);
+    return ENOTDIR;                         // a file renamed to "new/"
+  }
   if path_ro(&mut k, m) {
     bfree(t);
     return EROFS;
