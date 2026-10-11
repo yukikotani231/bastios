@@ -505,6 +505,7 @@ t_more: splice a pipe into a file
 t_more: splice rejects two files and a pipe offset
 t_more: statx
 t_more: utimensat
+t_more: utimensat and llistxattr act on a dangling link itself
 t_more: vfork + _exit
 t_more: vmsplice into a pipe, EAGAIN on an empty tee
 t_net: AF_INET6 TCP over ::1

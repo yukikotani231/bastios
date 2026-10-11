@@ -635,8 +635,12 @@ fn lx_meta_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, r10: u
       } else if d.kind == K_FILE {
         r = set_times(&mut k, pid, vfs_row_file(k.fs, d.x), c, TIMES_TIMESPEC);
       }
+    } else if (r10 % 0x100000000) & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+      r = EINVAL;
     } else {
-      let f = meta_target(&mut k, pid, a, b);
+      // AT_SYMLINK_NOFOLLOW: a link's own times (shutil.copystat on a
+      // dangling link).
+      let f = meta_target_at(&mut k, pid, a, b, r10 & AT_SYMLINK_NOFOLLOW == 0);
       r = set_times(&mut k, pid, f, c, TIMES_TIMESPEC);
     }
   }

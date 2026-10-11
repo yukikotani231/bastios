@@ -30,7 +30,7 @@ fn lx_xattr_call(k: &mut Kernel, pid: u64, n: u64, a: u64) -> u64
       r = EBADF;
     }
   } else {
-    r = path_exists(&mut k, pid, AT_FDCWD, a);
+    r = lx_stat(&mut k, pid, AT_FDCWD, a, 0, form == 0);   // the l- forms: the link itself
   }
   if r == 0 && call != 2 {
     r = EOPNOTSUPP_X;

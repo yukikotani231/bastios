@@ -18,6 +18,7 @@
 #include <sys/sendfile.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
+#include <sys/xattr.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/syscall.h>
@@ -69,6 +70,11 @@ int main(int argc, char **argv) {
            futimens(fd, t) == 0 && fstat(fd, &s) == 0 && s.st_mtime == 1000000000; }));
     EXPECT("utimensat", ({ struct timespec t[2] = {{0, UTIME_OMIT}, {1100000000, 0}};
            utimensat(AT_FDCWD, "cx_a", t, 0) == 0 && stat("cx_a", &s) == 0 && s.st_mtime == 1100000000; }));
+    EXPECT("utimensat and llistxattr act on a dangling link itself", ({ struct timespec t[2] = {{1200000000, 0}, {1200000000, 0}};
+           char x[64]; unlink("cx_dl"); int ok = symlink("cx_none", "cx_dl") == 0
+               && utimensat(AT_FDCWD, "cx_dl", t, AT_SYMLINK_NOFOLLOW) == 0 && lstat("cx_dl", &s) == 0 && s.st_mtime == 1200000000
+               && llistxattr("cx_dl", x, sizeof x) == 0 && utimensat(AT_FDCWD, "cx_dl", t, 0x2) == -1 && errno == EINVAL;
+           unlink("cx_dl"); ok; }));
     EXPECT("fallocate grows a file", ({ int r = posix_fallocate(g, 0, 8192); r == 0; }) && fstat(g, &s) == 0 && s.st_size == 8192);
     EXPECT("posix_fadvise", posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL) == 0);
     EXPECT("dup3 O_CLOEXEC", ({ int d = dup3(fd, 15, O_CLOEXEC); d == 15 && (fcntl(d, F_GETFD) & FD_CLOEXEC) && close(d) == 0; }));
