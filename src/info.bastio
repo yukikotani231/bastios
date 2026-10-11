@@ -562,6 +562,10 @@ fn put_driver(con: &mut Con, vendor: u64, device: u64, cls: u64)
     puts(&mut con, " e1000 network (igb)");
   } else if cls == XHCI_CLASS {
     puts(&mut con, " xHCI USB (keyboard, disk)");
+  } else if cls == HDA_CLASS {
+    puts(&mut con, " HD Audio sound");
+  } else if cls / 256 == 0x0401 {
+    puts(&mut con, " sound (AC'97): no driver");
   } else if cls / 65536 == 1 {
     puts(&mut con, " storage: no driver");
   } else if cls / 65536 == 2 {

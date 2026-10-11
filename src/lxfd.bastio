@@ -625,6 +625,9 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if dev == DEV_PTMX {
     return pty_open_master(&mut k, pid, flags);       // src/lxpty.bastio
   }
+  if dev == DEV_DSP && !snd_live(k.snd) {
+    return 18446744073709551597;                      // -ENODEV: no sound card
+  }
   if dev >= DEV_PTS && dev < DEV_PTS + PTY_N {
     return pty_open_slave(&mut k, pid, dev - DEV_PTS, flags);
   }

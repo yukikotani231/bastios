@@ -479,6 +479,17 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   refused. `/etc/shells` lists `/bin/sh` and `/bin/ash`, and `/etc/group`
   has a `tty` group.
 
+### Sound
+
+- An Intel HD Audio driver (`src/hda.bastio`) and `/dev/dsp`
+  (`src/lxsnd.bastio`), the Open Sound System's playback device: 48 kHz
+  16-bit stereo through every output the first codec has wired up
+  (speakers, headphones, line out), found by walking the codec's widgets.
+  Polled on the timer tick, no interrupts; no mixer, recording or other
+  formats. Without a card `/dev/dsp` fails with `ENODEV`. Tested on QEMU's
+  `intel-hda` with `hda-output` and its WAV backend: `mtone`'s 1 kHz square
+  wave comes out whole. Real codecs (Realtek and others) are untested.
+
 ### Console and boot
 
 - A framebuffer above 4 GiB is used. Many PCs put the graphics memory

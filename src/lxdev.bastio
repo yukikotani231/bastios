@@ -1,5 +1,6 @@
 // Device files for Linux programs: /dev/null, /dev/zero, /dev/random,
-// /dev/urandom and /dev/tty, the loop devices (src/lxloop.bastio), and /dev
+// /dev/urandom and /dev/tty, the loop devices (src/lxloop.bastio), /dev/dsp
+// (src/lxsnd.bastio), and /dev
 // itself as a directory to stat.
 // Opening one makes an open file description of kind OF_DEV whose x is the
 // device; /dev/tty opens the console itself.
@@ -35,6 +36,9 @@ fn dev_at(x: &Bytes, n: u64) -> u64
   }
   if xfer_is(x, 0, n, "dev/tty") || xfer_is(x, 0, n, "dev/console") {
     return DEV_TTY;
+  }
+  if xfer_is(x, 0, n, "dev/dsp") {
+    return DEV_DSP;                         // src/lxsnd.bastio
   }
   if xfer_is(x, 0, n, "dev/ptmx") {
     return DEV_PTMX;
