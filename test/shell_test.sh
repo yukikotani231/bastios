@@ -286,7 +286,7 @@ steps = [
     # Users (docs/security.md): adduser, su to the new user and back,
     # /etc/shadow is root's, su and passwd are the only set-user-ID
     # programs, and su asks for root's password once root has one.
-    ("adduser -D alice; id alice; stat -c '%a %U' /bin/su /bin/ls /etc/shadow /root",
+    ("adduser -D alice; id alice; stat -c '%a %U' /bin/su /bin/ls /etc/shadow /root/",
      [b"uid=1000(alice) gid=1000(alice)", b"\r\n4755 root\r\n755 root\r\n600 root\r\n700 root\r\n"], b"\n# "),
     ("su alice -c 'id -u; whoami; cd; pwd; cat /etc/shadow; echo s=$?; ls /root; echo r=$?'",
      [b"\r\n1000\r\nalice\r\n/home/alice\r\n", b"Permission denied", b"s=1", b"r=1"], b"\n# "),
@@ -295,6 +295,9 @@ steps = [
     # (BusyBox keeps the old /etc files as NAME-: gone, so no pages stay.)
     ("deluser alice; id alice; passwd -d root; echo u=$?; rm -rf /home/alice /etc/passwd- /etc/group- /etc/shadow-",
      [b"unknown user alice", b"u=0"], b"\n# "),
+    # With a disk, /etc, /root and /home are links into it (src/main.bastio,
+    # install_files): a user made now is still there at the next boot.
+    ("adduser -D kept; echo hi > /root/kept; ls -l /etc /root /home", [b"/etc -> /disk/etc", b"/root -> /disk/root", b"/home -> /disk/home"], b"\n# "),
     # Small calls: uname, readv, pread/pwrite, limits, sysinfo, statfs,
     # getrandom, priorities, sessions, process groups, ttyname, pipe capacity (user/mmisc.c).
     ("mmisc", b"mmisc: ok on Linux x86_64, signals, pipe 65536", b"\n# "),
@@ -847,10 +850,13 @@ def session(name, want_banner, steps, halt=False, ready=None):
             ok = (b"disk: virtio" in out) == want_banner
             print(("ok  " if ok else "FAIL"), f"({name} boot) disk driver: {'virtio' if want_banner else 'ATA'}")
             fails += not ok
-        for line, want in steps:
+        for step in steps:
+            line, want = step[0], step[1]
+            until = step[2] if len(step) > 2 else b"bastios> "
+            wants = want if isinstance(want, list) else [want]
             mark = len(out)
             qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
-            ok = read_until(b"bastios> ", mark) and want in out[mark:]
+            ok = read_until(until, mark) and all(w in out[mark:] for w in wants)
             print(("ok  " if ok else "FAIL"), f"({name} boot)", repr(line))
             fails += not ok
         if halt:
@@ -891,6 +897,10 @@ session("virtio", True, [
     ("cat disk/hk1", b"no such file"),
     ("ls disk", b"pf"),
     ("rm disk/pf", b""),
+    # The user made at the first boot, kept on the disk.
+    ("ash", b"built-in shell (ash)", b"\n# "),
+    ("id kept; cat /root/kept; stat -c %a /etc/shadow; deluser kept; rm -rf /home/kept /root/kept /etc/*-", [b"uid=1000(kept)", b"\r\nhi\r\n600\r\n"], b"\n# "),
+    ("exit", b""),
 ], halt=True, ready=lambda: irq_found("virtio"))
 
 # The same disk as an NVMe drive: what virtio wrote is there, and what is

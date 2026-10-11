@@ -277,7 +277,10 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   `chpasswd`, `su`, `login`, `id` and `whoami` as `/bin/NAME`. `/bin/su`
   and `/bin/passwd` are set-user-ID root, and BusyBox
   (`CONFIG_FEATURE_SUID`) drops root for every other applet. Passwords
-  are SHA-512. Users made after boot do not survive a reboot yet.
+  are SHA-512.
+- With a disk, `/etc`, `/root` and `/home` live on it (symbolic links to
+  `/disk/etc`, `/disk/root` and `/disk/home`), so users and their files
+  survive a reboot. The first boot seeds `/disk/etc` from the built-in files.
 
 ### Programs that run
 

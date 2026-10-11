@@ -22,11 +22,20 @@ BusyBox's `login` and `su`.
 
 ## Users and passwords
 
-`/etc/passwd`, `/etc/group` and `/etc/shadow` (`files/`, installed at
-boot) name root, bin, daemon and nobody, and the group disk. `/etc/shadow`
+`/etc/passwd`, `/etc/group` and `/etc/shadow` (`files/`, built into the
+kernel) name root, bin, daemon and nobody, and the group disk. `/etc/shadow`
 is `0600`; root has no password until `passwd` sets one, and the others
 cannot log in. `/root` is root's home (`0700`), `/home` holds everyone
 else's.
+
+With a disk, `/etc`, `/root` and `/home` are symbolic links to
+`/disk/etc`, `/disk/root` and `/disk/home` (`install_files`,
+`src/main.bastio`), so users, passwords and homes survive a reboot. The
+first boot that finds no `/disk/etc` makes it and copies the built-in
+files there; later boots keep what is on the disk (a built-in file that
+is missing there is copied again). The disk file system keeps modes and
+owner ids up to 2^24. Without a disk the three are directories in
+memory, filled afresh at each boot.
 
 BusyBox's `adduser`, `addgroup`, `deluser`, `delgroup`, `passwd`,
 `chpasswd`, `su`, `login`, `id` and `whoami` are built in (`/bin/NAME`).
@@ -78,11 +87,8 @@ by root. The rest are checked by tests, not proved: `test/compat/progs/t_cred.c`
 
 Known gaps, most serious first.
 
-1. **Users do not survive a reboot.** `/etc` and `/home` are in memory,
-   so users, passwords and home directories made after boot are lost at
-   the next one. They need the root file system on the disk.
-   The console starts in the native shell as root; there is no `getty`
-   or boot to a login prompt yet.
+1. **No login at boot.** The console starts in the native shell as root;
+   there is no `getty` or boot to a login prompt yet.
 2. **Native processes.** The native shell and the programs it starts run
    as root, and `SYS_SPAWN` starts any built-in program; that is safe only
    because a process that is not root cannot gain anything by it (the

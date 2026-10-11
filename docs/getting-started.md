@@ -151,7 +151,7 @@ bastios> ash
 # /disk/hi
 hello from Linux C, pid 3
 # ls /disk
-greet  hi
+home   root   etc    greet  hi
 # echo one two three | wc -w
 3
 # exit
@@ -159,7 +159,7 @@ bastios> halt
 ...
 ```
 
-`ash` is BusyBox, built unmodified, and `ls`, `wc`, `cat` and its other applets in the kernel image are under `/bin`. [docs/linux.md](linux.md) lists the system calls and how each behaves, and `make compat` measures how much ordinary Linux userland runs (see [test/compat/README.md](../test/compat/README.md)).
+`home`, `root` and `etc` are made on the disk at its first boot: `/home`, `/root` and `/etc` link there, so users and their files are kept (see [security.md](security.md)). `ash` is BusyBox, built unmodified, and `ls`, `wc`, `cat` and its other applets in the kernel image are under `/bin`. [docs/linux.md](linux.md) lists the system calls and how each behaves, and `make compat` measures how much ordinary Linux userland runs (see [test/compat/README.md](../test/compat/README.md)).
 
 ## 5. Boot from a USB stick
 
