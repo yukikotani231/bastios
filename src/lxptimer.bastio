@@ -132,7 +132,7 @@ fn lx_timer_create(k: &mut Kernel, pid: u64, clk: u64, sev: u64, idp: u64) -> u6
   let mut sig = SIGALRM;
   if sev != 0 {
     // struct sigevent: sigval (8 bytes), int signo, int notify.
-    if copy_from_user(&mut k.spaces, pid, sev, &mut k.fs.xfer, 16) != 16 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, sev, &mut k.fs.xfer, 16) != 16 {
       return EFAULT;
     }
     let w = get_u64(k.fs.xfer, 8);
@@ -154,7 +154,7 @@ fn lx_timer_create(k: &mut Kernel, pid: u64, clk: u64, sev: u64, idp: u64) -> u6
     return EAGAIN;
   }
   xfer_u64(&mut k.fs.xfer, 0, t);
-  if copy_to_user(&mut k.spaces, pid, idp, k.fs.xfer, 4) != 4 {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, idp, k.fs.xfer, 4) != 4 {
     return EFAULT;
   }
   k.alarms = set(k.alarms, pt_at(pid, t, 0), 0);

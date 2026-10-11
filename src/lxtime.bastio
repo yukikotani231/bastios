@@ -10,9 +10,9 @@
 // k.alarms, which every timer tick checks (lx_alarms) against k.ns.
 //
 // CLOCK_REALTIME (and gettimeofday, time) is k.epoch, read from the CMOS
-// clock at boot (src/rtc.bastio), plus k.ns. Programs linked against musl
-// read the monotonic and real-time clocks through the vDSO (user/vdso.c)
-// instead, from the same counter with the same arithmetic.
+// clock at boot (src/rtc.bastio), plus k.ns. Programs read the monotonic
+// clocks through the vDSO (user/vdso.c) instead, from the same counter with
+// the same arithmetic; the vDSO makes the system call for the others.
 
 import "linux.bastio";
 
@@ -191,7 +191,7 @@ fn ts_in(k: &mut Kernel, pid: u64, va: u64) -> Ts
   requires kok(k) && pid < NPROC
   ensures kok(k) && result.ns <= FOREVER
 {
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 16) != 16 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 16) != 16 {
     return Ts { err: EFAULT, ns: 0 };
   }
   let sec = get_u64(k.fs.xfer, 0);
@@ -213,7 +213,7 @@ fn time_out(k: &mut Kernel, pid: u64, va: u64, t: u64, unit: u64) -> u64
 {
   xfer_u64(&mut k.fs.xfer, 0, t / NS_PER_S);
   xfer_u64(&mut k.fs.xfer, 8, t % NS_PER_S / unit);
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, 16) != 16 {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, 16) != 16 {
     return EFAULT;
   }
   return 0;
@@ -447,7 +447,7 @@ fn lx_poll(k: &mut Kernel, pid: u64, n: u64, was: u64, fds: u64, nfds: u64, wait
   }
   let size = 8 * nfds;
   // No descriptors (a plain wait, often with fds NULL): nothing to copy.
-  if size > 0 && copy_from_user(&mut k.spaces, pid, fds, &mut k.fs.xfer, size) != size {
+  if size > 0 && copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, fds, &mut k.fs.xfer, size) != size {
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
   }
@@ -478,7 +478,7 @@ fn lx_poll(k: &mut Kernel, pid: u64, n: u64, was: u64, fds: u64, nfds: u64, wait
       return wait_asleep(&mut k, pid, n, dl);
     }
   }
-  if size > 0 && copy_to_user(&mut k.spaces, pid, fds, k.fs.xfer, size) != size {
+  if size > 0 && copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, fds, k.fs.xfer, size) != size {
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
   }
@@ -513,7 +513,7 @@ fn set_load(k: &mut Kernel, pid: u64, va: u64, slot: u64, nb: u64) -> bool
   ensures kok(k)
 {
   if va != 0 {
-    if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, nb) != nb {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, nb) != nb {
       return false;
     }
   }
@@ -549,7 +549,7 @@ fn set_store(k: &mut Kernel, pid: u64, va: u64, slot: u64, nb: u64) -> bool
     bset(&mut k.fs.xfer, i, cast[u8](v % 256));
     i = i + 1;
   }
-  return copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, nb) == nb;
+  return copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, nb) == nb;
 }
 
 /// select and pselect6 over the first nfds descriptors: rd, wr and ex are
@@ -619,7 +619,7 @@ fn tv_in(k: &mut Kernel, pid: u64, va: u64) -> Ts
   requires kok(k) && pid < NPROC
   ensures kok(k) && result.ns <= FOREVER
 {
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 16) != 16 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 16) != 16 {
     return Ts { err: EFAULT, ns: 0 };
   }
   let sec = get_u64(k.fs.xfer, 0);
@@ -707,7 +707,7 @@ fn itimer_out(k: &mut Kernel, pid: u64, va: u64, which: u64) -> u64
   xfer_u64(&mut k.fs.xfer, 8, iv % NS_PER_S / 1000);
   xfer_u64(&mut k.fs.xfer, 16, left / NS_PER_S);
   xfer_u64(&mut k.fs.xfer, 24, left % NS_PER_S / 1000);
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, 32) != 32 {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, 32) != 32 {
     return EFAULT;
   }
   return 0;
@@ -826,7 +826,7 @@ fn lx_sigtimedwait(k: &mut Kernel, pid: u64, n: u64, was: u64, setp: u64, info: 
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if copy_from_user(&mut k.spaces, pid, setp, &mut k.fs.xfer, 8) != 8 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, setp, &mut k.fs.xfer, 8) != 8 {
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
   }
@@ -923,7 +923,7 @@ fn lx_time_call(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
     // The sixth argument points at { const sigset_t *ss; size_t len }.
     let r9 = pget(k.procs, pid, F_REGS + R_R9);
     if was == 0 && r9 != 0 {
-      if copy_from_user(&mut k.spaces, pid, r9, &mut k.fs.xfer, 8) != 8 {
+      if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, r9, &mut k.fs.xfer, 8) != 8 {
         ret(&mut k.procs, pid, EFAULT);
         return KEEP;
       }
@@ -951,7 +951,7 @@ fn mask_swap(k: &mut Kernel, pid: u64, va: u64) -> bool
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 8) != 8 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 8) != 8 {
     return false;
   }
   wset(&mut k.sigsave, pid * SIGSAVE_ROW, pget(k.procs, pid, F_SIGMASK) | MASK_SWAPPED);
@@ -1064,7 +1064,7 @@ fn lx_time_rest(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
     }
     if b != 0 {
       xfer_u64(&mut k.fs.xfer, 0, 0);       // the time zone: UTC, no daylight saving
-      if copy_to_user(&mut k.spaces, pid, b, k.fs.xfer, 8) != 8 {
+      if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, b, k.fs.xfer, 8) != 8 {
         ret(&mut k.procs, pid, EFAULT);
         return KEEP;
       }
@@ -1076,7 +1076,7 @@ fn lx_time_rest(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
   let sec = wall_ns(k) / NS_PER_S;
   if a != 0 {
     xfer_u64(&mut k.fs.xfer, 0, sec);
-    if copy_to_user(&mut k.spaces, pid, a, k.fs.xfer, 8) != 8 {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, a, k.fs.xfer, 8) != 8 {
       ret(&mut k.procs, pid, EFAULT);
       return KEEP;
     }

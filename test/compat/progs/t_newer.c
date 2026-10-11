@@ -228,6 +228,10 @@ int main(int argc, char **argv) {
         EXPECT("execveat of a link with AT_SYMLINK_NOFOLLOW", symlink(argv[0], "nw_x") == 0 &&
                syscall(SYS_execveat, AT_FDCWD, "nw_x", (char *[]){NULL}, environ, AT_SYMLINK_NOFOLLOW) == -1 && errno == ELOOP);
     }
+    /* membarrier: a query answers with the commands there are (none here,
+     * a mask on Linux); an unknown command is EINVAL. */
+    EXPECT("membarrier query", syscall(324, 0, 0) >= 0);
+    EXPECT("membarrier unknown command", syscall(324, 1 << 30, 0) == -1 && errno == EINVAL);
     unlink("nw_x");
     unlink("nw_l");
     unlink("nw_f");

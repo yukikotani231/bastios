@@ -181,7 +181,7 @@ fn mice_write(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
   ensures kok(k)
 {
   let want = smaller(n, XFER);
-  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, want);
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, want);
   if got == NO_RESULT || (got == 0 && n > 0) {
     return EFAULT;
   }
@@ -298,7 +298,7 @@ fn mice_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u6
     put_u64(&mut k.mice, M_HEAD, head);
     put_u64(&mut k.mice, M_COUNT, left);
   }
-  let done = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, put);
+  let done = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, put);
   if done == NO_RESULT || done < put {
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;

@@ -135,7 +135,7 @@ fn ev_write(k: &mut Kernel, pid: u64, h: u64, va: u64, n: u64) -> u64
   if n < 8 {
     return EINVAL;
   }
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 8) != 8 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 8) != 8 {
     return EFAULT;
   }
   let v = get_u64(k.fs.xfer, 0);
@@ -162,7 +162,7 @@ fn lx_signalfd(k: &mut Kernel, pid: u64, fd: u64, maskp: u64, size: u64, flags: 
   if size != 8 || flags & !(LO_NONBLOCK | LO_CLOEXEC) != 0 {
     return EINVAL;
   }
-  if maskp > VA_LAST || copy_from_user(&mut k.spaces, pid, maskp, &mut k.fs.xfer, 8) != 8 {
+  if maskp > VA_LAST || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, maskp, &mut k.fs.xfer, 8) != 8 {
     return EFAULT;
   }
   let mask = get_u64(k.fs.xfer, 0) & !(sbit(SIGKILL) | sbit(SIGSTOP));
@@ -212,7 +212,7 @@ fn sfd_one(k: &mut Kernel, pid: u64, s: u64, va: u64) -> bool
       i = i + 1;
     }
   }
-  return va <= VA_LAST && copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, SFD_INFO) == SFD_INFO;
+  return va <= VA_LAST && copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, SFD_INFO) == SFD_INFO;
 }
 
 /// read(2) on signalfd description h: takes the pending signals in its set,
@@ -312,7 +312,7 @@ fn ev_read(k: &mut Kernel, pid: u64, kind: u64, x: u64, va: u64, n: u64) -> u64
       v = 1;                                // EFD_SEMAPHORE: one at a time
     }
     xfer_u64(&mut k.fs.xfer, 0, v);
-    if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, 8) != 8 {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, 8) != 8 {
       return EFAULT;
     }
     of_set(&mut k.ofd, x, 2, c - v);
@@ -331,7 +331,7 @@ fn ev_read(k: &mut Kernel, pid: u64, kind: u64, x: u64, va: u64, n: u64) -> u64
     return EAGAIN;
   }
   xfer_u64(&mut k.fs.xfer, 0, due);
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, 8) != 8 {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, 8) != 8 {
     return EFAULT;
   }
   k.evt = set(k.evt, x * TFD_STRIDE + 2, tfd_next(k, x));
@@ -591,7 +591,7 @@ fn lx_epoll_ctl(k: &mut Kernel, pid: u64, epfd: u64, op: u64, fd: u64, ev: u64) 
   if op == EPOLL_CTL_MOD && !live {
     return ENOENT;
   }
-  if copy_from_user(&mut k.spaces, pid, ev, &mut k.fs.xfer, EPOLL_EVENT) != EPOLL_EVENT {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, ev, &mut k.fs.xfer, EPOLL_EVENT) != EPOLL_EVENT {
     return EFAULT;
   }
   let events = cast[u64](bget(k.fs.xfer, 0)) | cast[u64](bget(k.fs.xfer, 1)) << 8 | cast[u64](bget(k.fs.xfer, 2)) << 16 | cast[u64](bget(k.fs.xfer, 3)) << 24;
@@ -901,7 +901,7 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
     }
   }
   let size = got * EPOLL_EVENT;
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, size) != size {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, size) != size {
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
   }
