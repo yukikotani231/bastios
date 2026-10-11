@@ -40,6 +40,7 @@ const LX_IO_SETUP: u64 = 206;          // Linux AIO: nginx tries it and does wit
 const LX_MEMBARRIER: u64 = 324;
 const LX_IO_URING_SETUP: u64 = 425;    // libuv and BIND try it and do without
 const LX_OPENAT: u64 = 257;
+const LX_CREAT: u64 = 85;
 const LX_STAT: u64 = 4;
 const LX_LSTAT: u64 = 6;
 const LX_ACCESS: u64 = 21;
@@ -416,10 +417,12 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, r);
     return KEEP;
   }
-  if n == LX_OPEN || n == LX_OPENAT {
+  if n == LX_OPEN || n == LX_OPENAT || n == LX_CREAT {
     let mut r = 0;
     if n == LX_OPEN {
       r = lx_open(&mut k, pid, AT_FDCWD, a, b, c);
+    } else if n == LX_CREAT {
+      r = lx_open(&mut k, pid, AT_FDCWD, a, 0x241, b);   // O_CREAT | O_WRONLY | O_TRUNC
     } else {
       r = lx_open(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
     }

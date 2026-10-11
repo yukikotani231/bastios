@@ -135,6 +135,16 @@ busybox: which
 busybox: whoami
 busybox: xargs
 busybox: yes | head
+debian: debian: bash
+debian: debian: coreutils make, copy, move, link and look at files
+debian: debian: coreutils, sed, grep and awk in a pipeline
+debian: debian: dpkg knows the packages
+debian: debian: find, xargs and du
+debian: debian: perl
+debian: debian: tar and gzip (GNU tar makes its archive with creat)
+debian: debian: the dynamic linker through its links, by hand
+debian: debian: unpack the root, chroot into it
+debian: debian: users and the machine
 dev: make: a project of two files
 dev: make: parallel jobs
 dev: make: rebuilds only what changed

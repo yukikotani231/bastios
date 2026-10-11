@@ -976,7 +976,7 @@ fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
   let alen = name_arg(&mut args, name);
   let total = start_env(&mut args, alen);
   let src = Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
-  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, total, false);
+  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, Src { file: false, prog: NPROGS, f: 0, size: 0 }, args, alen, total, false);
   bfree(args);
   let ok = sp is Space::Mapped;
   put_space(&mut k.spaces, pid, sp);
@@ -1061,11 +1061,12 @@ fn start_env(args: &mut Bytes, from: u64) -> u64
 
 /// Builds the address space for program `prog`, with the argument strings
 /// in the first `alen` bytes of `args` and the environment strings from
-/// there to `total` (each ending in a NUL), and sets
+/// there to `total` (each ending in a NUL), and the interpreter execve
+/// found for it (elf_interp, src/lxproc.bastio; a file, or none), and sets
 /// process `pid` up to start it: program, registers, program break.
 /// Returns `Space::Empty`, changing nothing, if the image is malformed or
 /// memory runs out. The caller installs the space.
-fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: u64, t: Tsc, epoch: u64, pid: u64, src: Src, args: &Bytes, alen: u64, total: u64, lazy: bool) -> Space
+fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: u64, t: Tsc, epoch: u64, pid: u64, src: Src, isrc0: Src, args: &Bytes, alen: u64, total: u64, lazy: bool) -> Space
   requires mem_ok(m) && store_ok(txt) && vfs_ok(v) && len(procs) == PTAB_LEN && pid < NPROC && alen <= total && total <= ARGS_MAX && total <= blen(args)
   ensures mem_ok(m) && store_ok(txt) && vfs_ok(v) && len(procs) == PTAB_LEN
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
@@ -1092,7 +1093,10 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
     if e.ilen != 0 {
       // A dynamically linked program: its interpreter goes just below
       // where mmap starts, and runs first.
-      isrc = interp_src(&mut v, src, e);
+      isrc = isrc0;
+      if !isrc.file {
+        isrc = interp_src(&mut v, src, e);
+      }
       if !isrc.file && isrc.prog >= NPROGS {
         return Space::Empty;
       }

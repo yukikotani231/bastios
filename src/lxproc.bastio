@@ -267,6 +267,9 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
     bfree(args);
     return E2BIG;
   }
+  // A dynamically linked program's interpreter, found as execve finds a
+  // program: from the caller's root (chroot), through symbolic links.
+  let isrc = elf_interp(&mut k, pid, src);
   let from_file = src.file;
   let image = src.f;
   // A hold keeps the file in place while its code is read on demand
@@ -275,7 +278,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
   if src.file {
     hold = vfs_hold(&mut k.fs, src.f);
   }
-  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, total, hold < HOLD_N);
+  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, isrc, args, alen, total, hold < HOLD_N);
   bfree(args);
   match sp {
     Space::Empty => {
@@ -718,6 +721,44 @@ fn bang_src(k: &mut Kernel, pid: u64, line: &Bytes) -> Src
   }
   let n = perm_walk(&mut k, pid, lx_path_xfer(&mut k, pid, e, OFD_N, true));
   return src_named(&mut k, pid, n);
+}
+
+/// The interpreter (PT_INTERP) the ELF program src names, found as execve
+/// finds a program: its path is taken from the caller's root, so a chroot
+/// sees its own /lib64/ld-linux-x86-64.so.2, and symbolic links on the way
+/// are followed. A built-in Src with prog NPROGS when src names none or it
+/// is not found; load_image then looks the path up itself (interp_src),
+/// which knows musl's built-in /lib/ld-musl-x86_64.so.1.
+fn elf_interp(k: &mut Kernel, pid: u64, src: Src) -> Src
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let none = Src { file: false, prog: NPROGS, f: 0, size: 0 };
+  if !src.file {
+    return none;
+  }
+  let e = elf_parse(&mut k.fs, src);
+  if !e.ok || e.ilen < 2 || !src_read(&mut k.fs, src, e.interp, e.ilen) {
+    return none;
+  }
+  let n = e.ilen - 1;                       // less the NUL
+  if bget(k.fs.xfer, n) != 0 {
+    return none;
+  }
+  let mut i = 0;
+  while i < n && bget(k.fs.xfer, i) != 0
+    invariant i <= n && n < INTERP_MAX && kok(k)
+  {
+    i = i + 1;
+  }
+  if i < n || n == 0 {
+    return none;                            // a NUL inside the path
+  }
+  let found = src_named(&mut k, pid, perm_walk(&mut k, pid, lx_path_xfer(&mut k, pid, n, OFD_N, true)));
+  if !found.file {
+    return none;
+  }
+  return found;
 }
 
 // ---------------------------------------------------------------- wait4
