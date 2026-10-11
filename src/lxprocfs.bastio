@@ -22,6 +22,10 @@
 //   /proc/PID/exe           a symbolic link to the program (readlink)
 //   /proc/PID/mounts        the same as /proc/mounts
 //   /proc/self              the caller's own directory
+//   /sys/block/loopN/size, ro, and loop/backing_file, offset, sizelimit,
+//   autoclear, partscan, dio
+//                           a loop device's settings (src/lxloop.bastio),
+//                           as losetup and LTP read them
 //
 // "self" is rewritten to the caller's pid when a path is read from user
 // memory (lx_path_from), so everything after sees /proc/PID. A file is an
@@ -64,6 +68,8 @@ const SY_IPC_END: u64 = 14;
 const SY_UTS: u64 = 14;                // 14 .. 17: uts_proc_text (src/lxsys.bastio)
 const SY_UTS_END: u64 = 19;
 const SY_PIPE_MAX: u64 = 19;
+const SY_LOOP: u64 = 32;               // 32 ..: loop device n's attribute a at n * LOOP_SYS + a
+const LOOP_SYS: u64 = 8;               // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
 const S_IFREG_RO: u64 = 0x8124;       // a regular file, r--r--r--
@@ -175,6 +181,10 @@ fn proc_dir(procs: &Buf, x: &Bytes, n: u64) -> u64
 fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   requires len(procs) == PTAB_LEN && n <= blen(x)
 {
+  let s = loop_sys_at(x, n);
+  if s != 0 {
+    return PROC_DEV + PSYS + SY_LOOP + s - 1;
+  }
   if n < 6 || !xfer_is(x, 0, 5, "proc/") {
     return 0;
   }
@@ -271,6 +281,95 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
     }
   }
   return 0;
+}
+
+/// The /sys/block/loopN file the n-byte path in x names: N * LOOP_SYS +
+/// its attribute + 1, or 0. The loop/ files are there whether or not the
+/// device is bound (on Linux, only while it is).
+fn loop_sys_at(x: &Bytes, n: u64) -> u64
+  requires n <= blen(x)
+  ensures result <= LOOP_N * LOOP_SYS
+{
+  if n < 17 || !xfer_is(x, 0, 14, "sys/block/loop") || cast[u64](bget(x, 15)) != 47 {
+    return 0;
+  }
+  let c = cast[u64](bget(x, 14));
+  if c < 48 || c >= 48 + LOOP_N {
+    return 0;
+  }
+  let base = (c - 48) * LOOP_SYS + 1;
+  if xfer_is(x, 16, n, "size") {
+    return base;
+  }
+  if xfer_is(x, 16, n, "ro") {
+    return base + 1;
+  }
+  if xfer_is(x, 16, n, "loop/backing_file") {
+    return base + 2;
+  }
+  if xfer_is(x, 16, n, "loop/offset") {
+    return base + 3;
+  }
+  if xfer_is(x, 16, n, "loop/sizelimit") {
+    return base + 4;
+  }
+  if xfer_is(x, 16, n, "loop/autoclear") {
+    return base + 5;
+  }
+  if xfer_is(x, 16, n, "loop/partscan") {
+    return base + 6;
+  }
+  if xfer_is(x, 16, n, "loop/dio") {
+    return base + 7;
+  }
+  return 0;
+}
+
+/// The text of /sys/block/loopN attribute s (N * LOOP_SYS + attribute).
+fn loop_sys_text(k: &mut Kernel, s: u64, o: &mut Bytes) -> u64
+  requires kok(k) && s < LOOP_N * LOOP_SYS && blen(o) == PROC_OUT
+  ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let d = s / LOOP_SYS;
+  let a = s % LOOP_SYS;
+  let flags = lo_get(k.loops, d, 3);
+  let mut v = 0;
+  if a == 0 {
+    v = loop_size(&mut k, d) / 512;         // in 512-byte sectors
+  } else if a == 1 {
+    v = flags % 2;
+  } else if a == 2 {
+    let row = loop_row(k, d);
+    if row >= FD_ROWS {
+      return put_c(&mut o, 0, 10);
+    }
+    let f = vfs_row_file(k.fs, row);
+    let n = vfs_dirent(&mut k.fs, f);
+    if f == NO_FILE || n == NO_FILE || n > XFER {
+      return put_c(&mut o, 0, 10);
+    }
+    let mut at = put_c(&mut o, 0, 47);
+    let mut j = 0;
+    while j < n
+      invariant j <= n && n <= XFER && at <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+    {
+      at = put_c(&mut o, at, bget(k.fs.xfer, j));
+      j = j + 1;
+    }
+    return put_c(&mut o, at, 10);
+  } else if a == 3 {
+    v = lo_get(k.loops, d, 1);
+  } else if a == 4 {
+    v = lo_get(k.loops, d, 2);
+  } else if a == 5 {
+    v = flags / 4 % 2;
+  } else if a == 6 {
+    v = flags / 8 % 2;
+  } else {
+    v = flags / 16 % 2;
+  }
+  let e = put_n(&mut o, 0, v);
+  return put_c(&mut o, e, 10);
 }
 
 /// What stat says about /proc file f (a proc_file device).
@@ -542,6 +641,9 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
   if f >= PROC_DEV + PSYS {
     // A /proc/sys file, numbered from 0 (src/lxprocfs.bastio's SY_*).
     let what = f - PROC_DEV - PSYS;
+    if what >= SY_LOOP && what - SY_LOOP < LOOP_N * LOOP_SYS {
+      return loop_sys_text(&mut k, what - SY_LOOP, &mut o);
+    }
     if what == SY_TAINTED {
       return put_s(&mut o, 0, "0\n");
     }
