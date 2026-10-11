@@ -618,7 +618,18 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   checks that pass.
 - A system call fuzzer (`user/sysfuzz.c`, `make fuzz`, and a short run in
   `make test`): hostile arguments through both entry points, on several
-  processors.
+  processors. It aims at every Linux call the kernel implements (it had
+  missed 99 of them, among them System V IPC, epoll, select, splice,
+  timers, signalfd, links and renames, mount, clone3 and rseq), with the
+  calls that could wait made not to: zero timeouts, IPC_NOWAIT, LOCK_NB,
+  SPLICE_F_NONBLOCK, WNOHANG, and timers only disarmed. It opens a
+  pseudo-terminal pair, a pipe, a socket pair, an eventfd, an epoll and a
+  file first, so the small descriptor numbers it picks reach them; it
+  sends half its ioctls to requests the kernel knows; it runs execve and
+  execveat in a child, on programs that end at once and on `#!` scripts;
+  and it reaps its children as it goes, so forks keep succeeding.
+  `test/sysfuzz_calls.sh` (in `make test`) fails when the kernel
+  dispatches a call the fuzzer does not aim at.
 - `make test` counts the trusted base (`test/trusted_base.sh`), and
   warnings in `boot/`'s C are errors.
 
@@ -649,6 +660,15 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Fixed
 
+- mmap without an address, shmat without one, and brk could hand out
+  pages a mapping made with MAP_FIXED (or shmat at an address, or mremap
+  with MREMAP_FIXED) already held, with that mapping's bytes in them, and
+  a munmap or shmdt of the new range, or a shrinking brk, then unmapped
+  the old mapping too. Such a mapping in the free space between the break
+  and the mmap area now starts the mmap area, and what was free above it
+  becomes a hole that mmap reuses; mremap with MREMAP_FIXED also stops
+  leaving its new pages listed as a hole. The system call fuzzer found it;
+  `mdir` checks it.
 - The clock went wrong a few seconds after boot under QEMU, which broke
   about 30 `make compat` checks (sleeps took 0 ms, poll and socket
   timeouts fired at once, `date` said 2554). There were two bugs. First,

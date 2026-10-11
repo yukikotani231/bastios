@@ -1,6 +1,7 @@
 /* Directories through the Linux system calls, against musl: openat,
  * fstatat, mkdirat and unlinkat relative to a directory descriptor,
  * fchdir to it, getcwd, a file mapped with mmap and MAP_FIXED over it,
+ * mmap without an address and brk keeping off a MAP_FIXED mapping,
  * running out of descriptors, a named pipe (mkfifo), the errors a path
  * walk gives (ENOTDIR, ELOOP), renameat2 with RENAME_EXCHANGE, mknod of a
  * regular file, one write of more than 4096 bytes, O_TMPFILE refused, a
@@ -22,6 +23,37 @@
 #include <unistd.h>
 
 static char big[10000];
+
+/* Pages mapped with MAP_FIXED in the free space between the break and the
+ * mmap area: mmap without an address must not hand them out again, and
+ * brk must not grow over them (both did: then a munmap of the new range
+ * unmapped them). */
+static int fixed_kept(void)
+{
+    unsigned long top = (unsigned long)syscall(SYS_brk, 0);
+    char *f = (char *)((top + (8ul << 20)) & ~4095ul);
+    if (mmap(f, 4 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0) != f)
+        return 0;
+    memset(f, 0x5a, 4 * 4096);
+    char *got[64];
+    int n = 0;
+    while (n < 64) {
+        char *q = mmap(0, 1 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (q == MAP_FAILED)
+            break;
+        got[n++] = q;
+        if (q < f + 4 * 4096 && f < q + (1 << 20))
+            return 0;
+    }
+    while (n > 0)
+        munmap(got[--n], 1 << 20);
+    if ((unsigned long)syscall(SYS_brk, (unsigned long)f + 8 * 4096) != top)
+        return 0;
+    for (int i = 0; i < 4 * 4096; i++)
+        if (f[i] != 0x5a)
+            return 0;
+    return munmap(f, 4 * 4096) == 0;
+}
 
 static int fail(const char *what)
 {
@@ -185,6 +217,8 @@ int main(void)
         return fail("mmap of a file");
     if (mmap(m, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0) != m || m[0] != 0)
         return fail("mmap with MAP_FIXED");
+    if (!fixed_kept())
+        return fail("keeping a MAP_FIXED mapping from mmap and brk");
     /* Opening until nothing is left ends in EMFILE, not ENOENT. */
     int many[300], got = 0;
     while (got < 300 && (many[got] = open("f", O_RDONLY)) >= 0)
