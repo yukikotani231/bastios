@@ -30,7 +30,7 @@
 .long 0                               /* a linear framebuffer, preferably */
 .long 1024, 768, 32                   /* 1024x768, 32 bits per pixel */
 
-/* The Multiboot 2 header, which GRUB uses (boot/grub.cfg): it passes the
+/* The Multiboot 2 header, which Limine uses (boot/limine.conf): it passes the
  * ACPI RSDP as well, and boot/multiboot.c turns its information into the
  * Multiboot 1 form above. */
 .set MB2_MAGIC,   0xE85250D6

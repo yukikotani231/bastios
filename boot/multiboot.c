@@ -3,7 +3,7 @@
  * prelude reads. Part of the trusted base.
  *
  * The kernel carries both headers. QEMU's -kernel loader speaks only
- * Multiboot 1; GRUB loads the ISO's kernel with Multiboot 2, which also
+ * Multiboot 1; Limine loads the ISO's kernel with Multiboot 2, which also
  * passes a copy of the ACPI RSDP (UEFI firmware gives its address only to
  * EFI programs, so a Multiboot 1 loader cannot pass it on). Converting the
  * few fields the kernel uses keeps one format for everything after this:
