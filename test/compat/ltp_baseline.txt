@@ -307,6 +307,13 @@ gettimeofday01
 gettimeofday02
 getuid01
 getuid03
+inotify01
+inotify04
+inotify05
+inotify10
+inotify11
+inotify_init1_01
+inotify_init1_02
 ioctl05
 ioctl_loop01
 ioctl_loop02

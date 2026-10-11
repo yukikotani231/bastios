@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Checks the sessions and programs in the docs against the real system.
 
-    test/guide_test.py [FILE.md...]     (default: README.md and
-                                         docs/getting-started.md)
+    test/guide_test.py [FILE.md...]     (default: README.md,
+                                         docs/getting-started.md and
+                                         docs/using.md)
 
 A fenced block right after a line `<!-- guide-test: WHAT -->` is checked:
 
@@ -23,7 +24,7 @@ Environment: KERNEL (build/bastios.elf), BASTIOC, BASTIOLIB, MUSLCC, TIMEOUT
 import os, re, select, subprocess, sys, tempfile, time
 
 os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-GUIDES = sys.argv[1:] or ["README.md", "docs/getting-started.md"]
+GUIDES = sys.argv[1:] or ["README.md", "docs/getting-started.md", "docs/using.md"]
 KERNEL = os.environ.get("KERNEL", "build/bastios.elf")
 BASTIOC = os.environ.get("BASTIOC", "build/bastioc1")
 BASTIOLIB = os.environ.get("BASTIOLIB", "../bastiolang")

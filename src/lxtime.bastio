@@ -88,6 +88,23 @@ fn wait_until(k: &mut Kernel, pid: u64, n: u64, dl: u64) -> u64
   return r;
 }
 
+/// As wait_until, but asleep (nap) until a frame comes in, the clock ticks
+/// or a signal is posted, rather than run again on every pass of the
+/// scheduler: for poll, select, epoll_wait and pause, which servers sit in
+/// (nginx's master and workers kept two processors busy). Readiness
+/// that comes from elsewhere, such as a pipe written, is seen at the next
+/// tick, up to 10 ms late, and so is the deadline.
+fn wait_asleep(k: &mut Kernel, pid: u64, n: u64, dl: u64) -> u64
+  requires kok(k) && pid < NPROC && dl <= FOREVER
+  ensures kok(k)
+{
+  let r = wait_until(&mut k, pid, n, dl);
+  if r == SWITCH {
+    nap(&mut k, pid, n != LX_PAUSE);        // pause waits only for a signal
+  }
+  return r;
+}
+
 /// A struct timespec read from user memory, in ns (FOREVER at most); err
 /// is -EFAULT or -EINVAL when it cannot be read or is out of range.
 struct Ts { err: u64, ns: u64 }
@@ -273,6 +290,9 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   if f.kind == K_DEV && is_pty_dev(f.x) {
     return pty_bits(k, f.x);                // src/lxpty.bastio
   }
+  if f.kind == K_INOTIFY {
+    return ino_bits(k, f.x);                // src/lxinotify.bastio
+  }
   if f.kind == K_PIDFD {
     if f.x >= NPROC || state(k.procs, f.x) == FREE || state(k.procs, f.x) == ZOMBIE {
       return POLLIN;                        // the process has ended (src/lxpidfd.bastio)
@@ -364,7 +384,7 @@ fn lx_poll(k: &mut Kernel, pid: u64, n: u64, was: u64, fds: u64, nfds: u64, wait
   if ready == 0 {
     let dl = deadline(k, was, wait);
     if k.ns < dl {
-      return wait_until(&mut k, pid, n, dl);
+      return wait_asleep(&mut k, pid, n, dl);
     }
   }
   if size > 0 && copy_to_user(&mut k.spaces, pid, fds, k.fs.xfer, size) != size {
@@ -489,7 +509,7 @@ fn lx_select(k: &mut Kernel, pid: u64, n: u64, was: u64, nfds: u64, rd: u64, wr:
   if ready == 0 {
     let dl = deadline(k, was, wait);
     if k.ns < dl {
-      return wait_until(&mut k, pid, n, dl);
+      return wait_asleep(&mut k, pid, n, dl);
     }
   }
   let st_r = set_store(&mut k, pid, rd, 0, nb);
@@ -883,7 +903,7 @@ fn lx_time_rest(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
     return lx_sigtimedwait(&mut k, pid, n, was, a, b, c);
   }
   if n == LX_PAUSE {
-    return wait_until(&mut k, pid, n, FOREVER);   // until a signal handler runs
+    return wait_asleep(&mut k, pid, n, FOREVER);   // until a signal handler runs
   }
   if n == LX_ALARM || n == LX_GETITIMER || n == LX_SETITIMER {
     return lx_itimer(&mut k, pid, n, a, b, c);
