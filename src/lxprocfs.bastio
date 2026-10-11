@@ -744,7 +744,9 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, avail);
     a = put_s(&mut o, a, " kB\nMemAvailable: ");
     a = put_n(&mut o, a, avail);
-    return put_s(&mut o, a, " kB\nBuffers: 0 kB\nCached: 0 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n");
+    a = put_s(&mut o, a, " kB\nBuffers: 0 kB\nCached: ");
+    a = put_n(&mut o, a, smaller(pc_count(k.fs.pc), PC_N) * 4);
+    return put_s(&mut o, a, " kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n");
   }
   if what == PF_CPUINFO && p == 0 {
     let mut a = 0;
