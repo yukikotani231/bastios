@@ -51,7 +51,7 @@ spec fn drive_claims(d: &Drive, a: u64) -> bool {
 /// `take_page`, also saying that every other page's entry is unchanged, so
 /// several pages can be taken in a row.
 fn take_low_page(m: &mut Mem, i: u64) -> Frame
-  requires mem_ok(m) && i < NPAGES && get(m.bm, i) == 1
+  requires mem_ok(m) && i < len(m.bm) && get(m.bm, i) == 1
   ensures mem_ok(m) && frame_id(result) == i
   ensures forall j: u64 :: j != i ==> get(m.bm, j) == old(get(m.bm, j))
 {
