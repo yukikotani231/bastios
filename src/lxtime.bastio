@@ -88,6 +88,48 @@ fn wait_until(k: &mut Kernel, pid: u64, n: u64, dl: u64) -> u64
   return r;
 }
 
+/// wait_until for a call that only waits for its deadline or a signal
+/// (nanosleep, clock_nanosleep, pause): unless the deadline is less than
+/// a tick away, the process sleeps (SLEEPWAIT) instead of running the
+/// call again on every pass, and `sleep_wake` makes it ready on the last
+/// tick before the deadline; from there it runs the call again as
+/// wait_until does, so the deadline is kept to the clock's precision. A
+/// signal wakes it (post_sig).
+fn sleep_until(k: &mut Kernel, pid: u64, n: u64, dl: u64) -> u64
+  requires kok(k) && pid < NPROC && dl <= FOREVER
+  ensures kok(k)
+{
+  let r = wait_until(&mut k, pid, n, dl);
+  if r == SWITCH && dl > sat_add(k.ns, NS_PER_TICK) {
+    pset(&mut k.procs, pid, F_STATE, SLEEPWAIT);
+  }
+  return r;
+}
+
+/// Makes ready the processes in SLEEPWAIT whose deadline is less than a
+/// tick away. True if it woke any.
+fn sleep_wake(k: &mut Kernel) -> bool
+  requires kok(k)
+  ensures kok(k)
+{
+  let soon = sat_add(k.ns, NS_PER_TICK);
+  let mut woke = false;
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && kok(k)
+  {
+    if state(k.procs, p) == SLEEPWAIT {
+      let w = pget(k.procs, p, F_RESTART);
+      if w < 2 || w - 2 <= soon {
+        pset(&mut k.procs, p, F_STATE, READY);
+        woke = true;
+      }
+    }
+    p = p + 1;
+  }
+  return woke;
+}
+
 /// A struct timespec read from user memory, in ns (FOREVER at most); err
 /// is -EFAULT or -EINVAL when it cannot be read or is out of range.
 struct Ts { err: u64, ns: u64 }
@@ -211,7 +253,7 @@ fn lx_sleep(k: &mut Kernel, pid: u64, n: u64, was: u64, clk: u64, flags: u64, re
     ret(&mut k.procs, pid, 0);
     return KEEP;
   }
-  return wait_until(&mut k, pid, n, dl);
+  return sleep_until(&mut k, pid, n, dl);
 }
 
 /// A nanosleep or relative clock_nanosleep of process p that a signal
@@ -877,7 +919,7 @@ fn lx_time_rest(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
     return lx_sigtimedwait(&mut k, pid, n, was, a, b, c);
   }
   if n == LX_PAUSE {
-    return wait_until(&mut k, pid, n, FOREVER);   // until a signal handler runs
+    return sleep_until(&mut k, pid, n, FOREVER);  // until a signal handler runs
   }
   if n == LX_ALARM || n == LX_GETITIMER || n == LX_SETITIMER {
     return lx_itimer(&mut k, pid, n, a, b, c);

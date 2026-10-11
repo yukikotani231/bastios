@@ -16,6 +16,12 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Processors
 
+- `nanosleep`, `clock_nanosleep` and `pause` sleep instead of running
+  again on every scheduler pass until their deadline: BusyBox's `sleep 5`
+  went from 5.0 s of host CPU under QEMU to 0.2 s. They wake on the last
+  tick before the deadline and finish to the clock's precision, or at once
+  on a signal. Other timed waits (`poll`, `select`, futex timeouts) still
+  run again on every pass.
 - An idle application processor stops its 10 ms timer (a one-second
   one-shot backstop instead); the kernel wakes it with `V_WAKE` on the
   bootstrap processor's tick while a process is left ready, which is when

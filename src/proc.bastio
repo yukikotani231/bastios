@@ -130,6 +130,7 @@ const DISKWAIT: u64 = 13;            // waiting for the disk: F_WAIT says for wh
 const EXITING: u64 = 14;             // RUNNING, a thread whose leader is in execve: freed when it comes back
 const SOCKWAIT: u64 = 15;            // a Linux call on a network socket that has to wait (sock_wake)
 const STOPPED: u64 = 16;             // stopped by SIGSTOP, SIGTSTP, SIGTTIN or SIGTTOU until SIGCONT
+const SLEEPWAIT: u64 = 17;           // in nanosleep or pause, until a tick before F_RESTART's deadline (sleep_wake)
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -1219,6 +1220,8 @@ fn put_state(con: &mut Con, s: u64)
     puts(&mut con, "disk   ");
   } else if s == SOCKWAIT {
     puts(&mut con, "socket ");
+  } else if s == SLEEPWAIT {
+    puts(&mut con, "sleep  ");
   } else if s == LXVFORK {
     puts(&mut con, "vfork  ");
   } else {

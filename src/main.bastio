@@ -233,6 +233,9 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
     if sock_wake(&mut s.k) {
       woke = true;
     }
+    if sleep_wake(&mut s.k) {
+      woke = true;
+    }
   }
   let p = lx_pick(&mut s.k, from);
   // Only the bootstrap processor takes V_DISK. A process the disk woke

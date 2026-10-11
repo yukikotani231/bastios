@@ -311,6 +311,10 @@ The disk driver (`src/ata.bastio`) talks to the first drive of the legacy ATA co
 
 At boot the kernel installs the files in `files/` (built into the image with `include_bytes`). A process's descriptors are closed when it ends, and a file cannot be removed while a descriptor has it open.
 
+### Waiting for the clock
+
+A timed wait (`wait_until` in `src/lxtime.bastio`) keeps its deadline in `F_RESTART` and runs its call again on every pass of the scheduler until the deadline or what it waits for comes. For `nanosleep`, `clock_nanosleep` and `pause`, which wait for nothing but the deadline or a signal, that kept a processor busy for the whole sleep: BusyBox's `sleep 5` cost QEMU 5.0 s of host CPU on one processor. Now such a call sleeps in `SLEEPWAIT` (`sleep_until`; `ps` says `sleep`) unless its deadline is less than a tick away. `sleep_wake`, on each polling pass of the bootstrap processor, makes it ready on the last tick before its deadline, and from there the call runs again as before, so the deadline is still kept to the clock's precision; a signal wakes it at once (`post_sig`). The same `sleep 5` now costs 0.2 s, what five idle seconds cost. `poll`, `select`, `epoll_wait`, futex and message-queue timeouts still run again on every pass: they also wait for events that nothing yet wakes a sleeper for.
+
 ### Waiting for the network
 
 A Linux socket call with nothing to do yet (`read` or `recvfrom` with no data, `accept` with no connection, `write` on a TCP connection with a full send buffer) used to be restarted on every pass of the scheduler, so a process blocked in `accept` kept a processor busy. Now it sleeps in `SOCKWAIT` (`sock_retry` in `src/syscall.bastio`; `ps` says `socket`) and restarts once the card has received a frame or the clock has ticked since it went to sleep (`sock_wake`, after every system call and every device poll). AF_UNIX sockets are not on the card and still restart as before; so do the shell's native socket calls, which return at once and leave the waiting to the program.

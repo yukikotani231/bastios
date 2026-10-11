@@ -133,6 +133,26 @@ if read_until(b"bastios> ", mark) and b"mtone: no sound card (ENODEV)" in out[ma
     print("ok   no sound card: /dev/dsp says ENODEV")
 else:
     print("FAIL no sound card: mtone"); fails += 1
+# A sleeping process does not run (SLEEPWAIT): two seconds of BusyBox's
+# sleep cost QEMU well under a second of host CPU. Before, nanosleep ran
+# again on every pass and took the whole two seconds.
+def qemu_cpu():
+    try:
+        f = open(f"/proc/{qemu.pid}/stat").read().rsplit(")", 1)[1].split()
+        return (int(f[11]) + int(f[12])) / os.sysconf("SC_CLK_TCK")
+    except (OSError, IndexError, ValueError):
+        return None
+mark = len(out)
+qemu.stdin.write(b"ash\r"); qemu.stdin.flush()
+read_until(b"# ", mark)
+mark = len(out)
+c0, t0 = qemu_cpu(), time.time()
+qemu.stdin.write(b"sleep 2; echo slept$((1+1))\r"); qemu.stdin.flush()
+ok = read_until(b"slept2", mark)
+c1, t1 = qemu_cpu(), time.time()
+good = ok and c0 is not None and c1 is not None and t1 - t0 >= 1.9 and c1 - c0 < 1.0
+print(("ok  " if good else "FAIL"), f"sleep 2 sleeps: {t1 - t0:.2f} s, QEMU CPU {(c1 or 0) - (c0 or 0):.2f} s")
+fails += not good
 qemu.kill(); qemu.wait()
 print("---- one-processor transcript ----")
 print(out.decode(errors="replace").replace("\r", ""))
