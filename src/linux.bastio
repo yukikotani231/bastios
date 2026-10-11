@@ -2046,7 +2046,8 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
     if prot != 0 {
       read_only(&mut k, pid, at / 4096, pages, prot);
     }
-    if zero && sh && ofd_lacks(k, zh, ACC_NOWRITE) {
+    // /dev/zero opened read-only (lx_mmap checked the rest)
+    if flags / MAP_ANONYMOUS % 2 == 0 && sh && ofd_lacks(k, fd_ofd(k, pid, fd), ACC_NOWRITE) {
       map_record(&mut k, pid, fd, at / 4096, pages, off);
     }
     return USER_BASE + at;
