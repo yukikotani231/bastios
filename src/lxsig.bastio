@@ -724,7 +724,12 @@ fn lx_sigsuspend(k: &mut Kernel, pid: u64, was: u64, setp: u64) -> u64
     k.sigsave = set(k.sigsave, pid, pget(k.procs, pid, F_SIGMASK));
     pset(&mut k.procs, pid, F_SIGMASK, blockable(rd64(k.fs.xfer, 0)));
   }
-  return lx_retry(&mut k, pid, LX_RT_SIGSUSPEND);
+  let r = lx_retry(&mut k, pid, LX_RT_SIGSUSPEND);
+  let pend = pget(k.procs, pid, F_SIGPEND);
+  if r == SWITCH && pend & pget(k.procs, pid, F_SIGMASK) == pend {
+    nap(&mut k, pid, false);                // nothing to deliver yet: asleep until a signal (or a tick) comes
+  }
+  return r;
 }
 
 /// Is rsp on process p's alternate signal stack?
