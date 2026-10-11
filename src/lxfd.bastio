@@ -113,7 +113,7 @@ fn pipe_room(t: &Buf, p: u64, count: u64) -> u64
 /// F_GETPIPE_SZ and F_SETPIPE_SZ on pipe p. A new size is rounded up to
 /// a power of two pages; it may not drop below what the pipe holds
 /// (EBUSY) or rise past PIPE_CAP, /proc/sys/fs/pipe-max-size (EPERM, or
-/// ENOMEM for root, whom Linux would let go further).
+/// ENOMEM with CAP_SYS_RESOURCE, which Linux would let go further).
 fn pipe_size(k: &mut Kernel, pid: u64, p: u64, set: bool, arg: u64) -> u64
   requires kok(k) && pid < NPROC && p < NPIPES
   ensures kok(k)
@@ -122,8 +122,11 @@ fn pipe_size(k: &mut Kernel, pid: u64, p: u64, set: bool, arg: u64) -> u64
     return pipe_cap(k.pipes, p);
   }
   let want = arg % 0x100000000;
+  if want > 0x80000000 {
+    return EINVAL;                          // past the largest size Linux rounds to
+  }
   if want > PIPE_CAP {
-    if cred_root(k.procs, pid) {
+    if cap_has(k, pid, CAP_SYS_RESOURCE) {
       return ENOMEM;
     }
     return EPERM;
@@ -179,8 +182,8 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   if kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX {
     return Fd { kind: K_SOCK, x: x };
   }
-  if kind == OF_DEV {
-    return Fd { kind: K_DEV, x: x };
+  if kind == OF_DEV || kind == OF_PTY {
+    return Fd { kind: K_DEV, x: x };        // a pty end is a device too (src/lxpty.bastio)
   }
   if kind == OF_EVENT {
     return Fd { kind: K_EVENT, x: h };      // the counter lives in the description
@@ -235,7 +238,7 @@ fn pipe_nonblock(k: &Kernel, pid: u64, fd: u64) -> bool
 /// Whether descriptions of this kind keep O_NONBLOCK in the low bit of
 /// word 3.
 fn can_block(kind: u64) -> bool {
-  return kind == OF_PIPE_R || kind == OF_PIPE_W || kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD;
+  return kind == OF_PIPE_R || kind == OF_PIPE_W || kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD || kind == OF_PTY;
 }
 
 /// Whether process pid has a file layer row free: an open file holds
@@ -353,6 +356,10 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
     k.evt = set(k.evt, x * TFD_STRIDE, 0);  // the timer is free again
   } else if kind == OF_EPOLL && x < EP_N {
     k.evt = set(k.evt, EP_AT + x * EP_STRIDE, 0);
+  } else if kind == OF_PTY {
+    pty_drop(&mut k, x);                    // src/lxpty.bastio
+  } else if kind == OF_PQ && x < PQ_N {
+    pq_close(&mut k, x);                    // src/lxmq.bastio
   } else if kind == OF_UNIX {
     return ux_close(&mut k, x, w);          // src/lxunix.bastio
   }
@@ -470,7 +477,7 @@ fn ofd_new(k: &mut Kernel, kind: u64, x: u64) -> u64
 }
 
 /// The lowest closed descriptor of process pid at or above `from`, or LXNFD.
-fn fd_free(t: &Buf, pid: u64, from: u64) -> u64
+fn fd_free_in(t: &Buf, pid: u64, from: u64) -> u64
   requires len(t) == LXFD_LEN && pid < NPROC
   ensures result <= LXNFD
 {
@@ -491,7 +498,7 @@ fn fd_install(k: &mut Kernel, pid: u64, h: u64) -> u64
   requires kok(k) && pid < NPROC && h < OFD_N
   ensures kok(k)
 {
-  let fd = fd_free(k.lxfd, pid, 0);
+  let fd = fd_free(k, pid, 0);
   if fd >= LXNFD {
     unref_value(&mut k, FD_OFD + h);
     return EMFILE;
@@ -506,7 +513,7 @@ fn fd_install_console(k: &mut Kernel, pid: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let fd = fd_free(k.lxfd, pid, 0);
+  let fd = fd_free(k, pid, 0);
   if fd >= LXNFD {
     return EMFILE;
   }
@@ -581,7 +588,17 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   }
   let dev = dev_at(k.fs.xfer, n);
   if dev == DEV_TTY {
+    let ct = pty_ctty(k, pid);
+    if ct < PTY_N && xfer_is(k.fs.xfer, 0, n, "dev/tty") {
+      return pty_open_slave(&mut k, pid, ct, flags);   // the session's terminal is a pty
+    }
     return fd_install_console(&mut k, pid);
+  }
+  if dev == DEV_PTMX {
+    return pty_open_master(&mut k, pid, flags);       // src/lxpty.bastio
+  }
+  if dev >= DEV_PTS && dev < DEV_PTS + PTY_N {
+    return pty_open_slave(&mut k, pid, dev - DEV_PTS, flags);
   }
   if (is_loop(dev) || dev == DEV_LOOPCTL) && flags & LO_PATH == 0 {
     // A loop device reads and writes the file it is bound to, whoever
@@ -659,7 +676,7 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if flags / LO_APPEND % 2 == 1 {
     f = f + O_APPEND;
   }
-  if fd_free(k.lxfd, pid, 0) >= LXNFD || !row_free(k, pid) {
+  if fd_free(k, pid, 0) >= LXNFD || !row_free(k, pid) {
     return EMFILE;                          // no descriptor, or no file layer row, left
   }
   let fresh = f / O_CREATE % 2 == 1 && vfs_lookup(&mut k.fs, n) == NO_FILE;
@@ -697,7 +714,7 @@ fn lx_dup2(k: &mut Kernel, pid: u64, src: u64, new: u64, cloexec: bool) -> u64
   ensures kok(k)
 {
   let v = fd_get(k.lxfd, pid, src) % FD_CLOEXEC;
-  if v == 0 || new >= LXNFD {
+  if v == 0 || new >= fd_limit(k, pid) {
     return EBADF;
   }
   if src == new {
@@ -722,10 +739,10 @@ fn lx_dup(k: &mut Kernel, pid: u64, src: u64, from: u64, cloexec: bool) -> u64
   if v == 0 {
     return EBADF;
   }
-  if from >= LXNFD {
+  if from >= fd_limit(k, pid) {
     return EINVAL;
   }
-  let fd = fd_free(k.lxfd, pid, from);
+  let fd = fd_free(k, pid, from);
   if fd >= LXNFD {
     return EMFILE;
   }
@@ -785,6 +802,11 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     of_set(&mut k.ofd, h, 3, arg / LO_NONBLOCK % 2);
     return 0;
   }
+  // A socket's word 3 has its O_NONBLOCK in bit 0, as a pipe end's does.
+  let sock = kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX;
+  if cmd == F_GETFL && sock {
+    return LO_RDWR + of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK;
+  }
   if cmd == F_GETFL {
     if !pipe {
       return LO_RDWR;
@@ -796,7 +818,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     if kind == OF_PIPE_R && of_get(k.ofd, h, 3) / PIPE_BOTH % 2 == 1 {
       fl = LO_RDWR;
     }
-    if kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD {
+    if kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD || kind == OF_PTY {
       fl = LO_RDWR;
     }
     if of_get(k.ofd, h, 3) % 2 == 1 {
@@ -805,9 +827,9 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     return fl;
   }
   if cmd == F_SETFL {
-    // O_NONBLOCK on a pipe end (or eventfd, timerfd, epoll) can change; no
+    // O_NONBLOCK on a pipe end (or eventfd, timerfd, epoll, socket) can change; no
     // other flag (O_APPEND) can.
-    if pipe {
+    if pipe || sock {
       of_set(&mut k.ofd, h, 3, of_get(k.ofd, h, 3) / 2 * 2 + arg / LO_NONBLOCK % 2);
     }
     return 0;
@@ -851,11 +873,11 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
   if p >= NPIPES {
     return ENFILE;
   }
-  let r = fd_free(k.lxfd, pid, 0);
+  let r = fd_free(k, pid, 0);
   if r >= LXNFD {
     return EMFILE;
   }
-  let w = fd_free(k.lxfd, pid, r + 1);
+  let w = fd_free(k, pid, r + 1);
   if w >= LXNFD {
     return EMFILE;
   }

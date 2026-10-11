@@ -1,0 +1,784 @@
+// Pseudo-terminals: /dev/ptmx and /dev/pts/N, as an SSH server or a
+// terminal multiplexer uses them. Opening /dev/ptmx makes a new pair and
+// gives its master end; TIOCGPTN says its number N, TIOCSPTLCK unlocks it,
+// and /dev/pts/N then opens the slave end, which a shell takes as its
+// terminal. What the master writes is the slave's input; what the slave
+// writes comes out of the master.
+//
+// Between them sits a line discipline like the console's (tty_cook): in
+// canonical mode input is gathered into lines, echoed, and erased with
+// VERASE and VKILL, and VEOF ends a line (an empty one reads as end of
+// file); with ISIG, VINTR and VQUIT send SIGINT and SIGQUIT to the
+// terminal's foreground process group; ICRNL turns CR into LF; output gets
+// OPOST/ONLCR. In noncanonical mode each byte can be read at once. The
+// settings are a struct termios per terminal, which the slave and the
+// master both read and set.
+//
+// Each end is an open file description of kind OF_PTY whose x is the
+// device, DEV_PTM + N or DEV_PTS + N (fd_look reports it as K_DEV); word 3
+// holds O_NONBLOCK. When the last master description goes, the terminal is
+// hung up: its session gets SIGHUP, a slave read finds end of file and a
+// slave write fails with EIO. A master read with every slave closed fails
+// with EIO, as on Linux, which is how a server learns the shell is gone.
+//
+// k.ptys, PTY_W words per terminal (fields below); k.ptyb, two rings of
+// PTY_CAP bytes per terminal: input (master to slave), then output.
+//
+// Not done: job control signals for background reads and writes
+// (SIGTTIN, SIGTTOU), VSUSP, VMIN above 1 (read as 1), VTIME, flow control
+// (IXON), and packet mode. A canonical read can return more than one line.
+// /dev/tty names the console unless the process's session has a terminal.
+
+import "lxfd.bastio";
+
+const PT_W_USED: u64 = 0;              // 1 while the pair exists
+const PT_W_MASTERS: u64 = 1;           // master descriptions open
+const PT_W_SLAVES: u64 = 2;            // slave descriptions open
+const PT_W_LOCKED: u64 = 3;            // 1 until TIOCSPTLCK unlocks it
+const PT_W_IN_H: u64 = 4;              // the input ring: head, count, and the
+const PT_W_IN_N: u64 = 5;              //   bytes a read may take (whole lines in
+const PT_W_READY: u64 = 6;             //   canonical mode)
+const PT_W_OUT_H: u64 = 7;             // the output ring: head, count
+const PT_W_OUT_N: u64 = 8;
+const PT_W_EOF: u64 = 9;               // 1 after VEOF on an empty line, until a read sees it
+const PT_W_FG: u64 = 10;               // the foreground process group (0: none yet)
+const PT_W_SID: u64 = 11;              // the session it controls (0: none)
+const PT_W_ROWS: u64 = 12;             // the window size (TIOCSWINSZ), rows and columns
+const PT_W_COLS: u64 = 13;
+const PT_W_SET: u64 = 14;              // 1 once its termios was set
+const PT_W_OPENED: u64 = 15;           // 1 once a slave was opened
+const PT_W_TT: u64 = 16;               // the termios, a byte a word (TERMIOS_SIZE)
+
+const SIGHUP: u64 = 1;
+const SIGQUIT: u64 = 3;
+const TIOCSWINSZ: u64 = 0x5414;
+const TIOCSCTTY: u64 = 0x540E;
+const TIOCNOTTY: u64 = 0x5422;
+const TIOCGPTN: u64 = 0x80045430;
+const TIOCSPTLCK: u64 = 0x40045431;
+const TCSBRK: u64 = 0x5409;
+const TCXONC: u64 = 0x540A;
+const TCFLSH: u64 = 0x540B;
+const FIONBIO_PTY: u64 = 0x5421;
+const ECHOE: u64 = 0x10;              // c_lflag: VERASE erases on the screen
+const EIO_PTY: u64 = 18446744073709551611;   // EIO (2^64 - 5)
+
+fn is_pty_dev(d: u64) -> bool
+  ensures result == (d >= DEV_PTM && d < DEV_PTS + PTY_N)
+{
+  return d >= DEV_PTM && d < DEV_PTS + PTY_N;
+}
+
+fn is_ptm(d: u64) -> bool
+  ensures result == (d >= DEV_PTM && d < DEV_PTM + PTY_N)
+{
+  return d >= DEV_PTM && d < DEV_PTM + PTY_N;
+}
+
+/// The terminal a pty device belongs to.
+fn pty_of(d: u64) -> u64
+  requires d >= DEV_PTM && d < DEV_PTS + PTY_N
+  ensures result < PTY_N
+{
+  if d >= DEV_PTS {
+    return d - DEV_PTS;
+  }
+  return (d - DEV_PTM) % PTY_N;
+}
+
+fn pt_get(t: &Buf, p: u64, f: u64) -> u64
+  requires len(t) == PTY_LEN && p < PTY_N && f < PTY_W
+{
+  return get(t, p * PTY_W + f);
+}
+
+fn pt_set(t: &mut Buf, p: u64, f: u64, v: u64)
+  requires len(t) == PTY_LEN && p < PTY_N && f < PTY_W
+  ensures len(t) == PTY_LEN
+{
+  t = set(t, p * PTY_W + f, v);
+}
+
+/// The slave device the n-byte path in the transfer buffer names
+/// ("dev/pts/3"), or DEV_NONE.
+fn pts_at(x: &Bytes, n: u64) -> u64
+  requires blen(x) == XFER && n <= FNAME_MAX
+{
+  if n == 9 && xfer_is(x, 0, 8, "dev/pts/") {
+    let c = cast[u64](bget(x, 8));
+    if c >= 48 && c < 48 + PTY_N {
+      return DEV_PTS + c - 48;
+    }
+  }
+  return DEV_NONE;
+}
+
+/// Whether terminal p exists (a slave path names nothing otherwise).
+fn pty_live(k: &Kernel, p: u64) -> bool
+  requires kok(k) && p < PTY_N
+{
+  return pt_get(k.ptys, p, PT_W_USED) == 1;
+}
+
+/// Ring `at` (0 input, 1 output) of terminal p, from its stored head and
+/// count, clamped so it is well formed whatever they hold.
+fn pty_ring(t: &Buf, p: u64, out: bool) -> Ring
+  requires len(t) == PTY_LEN && p < PTY_N
+  ensures ring_ok(result) && result.cap == PTY_CAP
+{
+  let mut f = PT_W_IN_H;
+  if out {
+    f = PT_W_OUT_H;
+  }
+  return Ring { h: pt_get(t, p, f) % PTY_CAP, n: smaller(pt_get(t, p, f + 1), PTY_CAP), cap: PTY_CAP };
+}
+
+fn pty_keep(t: &mut Buf, p: u64, out: bool, r: &Ring)
+  requires len(t) == PTY_LEN && p < PTY_N
+  ensures len(t) == PTY_LEN
+{
+  let mut f = PT_W_IN_H;
+  if out {
+    f = PT_W_OUT_H;
+  }
+  pt_set(&mut t, p, f, r.h);
+  pt_set(&mut t, p, f + 1, r.n);
+}
+
+/// How many bytes ring `out` of terminal p holds.
+fn pty_count(t: &Buf, p: u64, out: bool) -> u64
+  requires len(t) == PTY_LEN && p < PTY_N
+  ensures result <= PTY_CAP
+{
+  let r = pty_ring(t, p, out);
+  return r.n;
+}
+
+/// Where ring `out` of terminal p starts in k.ptyb.
+fn pty_base(p: u64, out: bool) -> u64
+  requires p < PTY_N
+  ensures result + PTY_CAP <= PTYB_LEN
+{
+  if out {
+    return (2 * p + 1) * PTY_CAP;
+  }
+  return 2 * p * PTY_CAP;
+}
+
+/// Byte i of terminal p's struct termios (the console's defaults until set).
+fn pt_byte(t: &Buf, p: u64, i: u64) -> u64
+  requires len(t) == PTY_LEN && p < PTY_N && i < TERMIOS_SIZE
+  ensures result < 256
+{
+  if pt_get(t, p, PT_W_SET) == 0 {
+    return tt_default(i) % 256;
+  }
+  return pt_get(t, p, PT_W_TT + i) % 256;
+}
+
+/// The 16-bit flag word at byte i of the settings, as tt_flags.
+fn pt_flags(t: &Buf, p: u64, i: u64) -> u64
+  requires len(t) == PTY_LEN && p < PTY_N && i + 1 < TERMIOS_SIZE
+{
+  return pt_byte(t, p, i) + 256 * pt_byte(t, p, i + 1);
+}
+
+/// Bytes a slave read may take now.
+fn pty_ready(t: &Buf, p: u64) -> u64
+  requires len(t) == PTY_LEN && p < PTY_N
+  ensures result <= PTY_CAP
+{
+  return smaller(pt_get(t, p, PT_W_READY), smaller(pt_get(t, p, PT_W_IN_N), PTY_CAP));
+}
+
+// ---------------------------------------------------------------- opening and closing
+
+/// open("/dev/ptmx"): a new pair, locked, with its master end in a new
+/// descriptor. Returns it, or -errno.
+fn pty_open_master(k: &mut Kernel, pid: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut p = 0;
+  while p < PTY_N && pt_get(k.ptys, p, PT_W_USED) != 0
+    invariant p <= PTY_N && kok(k)
+  {
+    p = p + 1;
+  }
+  if p >= PTY_N {
+    return ENOSPC;                          // as Linux when /dev/pts is full
+  }
+  let h = ofd_new(&mut k, OF_PTY, DEV_PTM + p);
+  if h >= OFD_N {
+    return ENFILE;
+  }
+  let mut f = 0;
+  while f < PTY_W
+    invariant f <= PTY_W && kok(k)
+  {
+    pt_set(&mut k.ptys, p, f, 0);
+    f = f + 1;
+  }
+  pt_set(&mut k.ptys, p, PT_W_USED, 1);
+  pt_set(&mut k.ptys, p, PT_W_MASTERS, 1);
+  pt_set(&mut k.ptys, p, PT_W_LOCKED, 1);
+  pt_set(&mut k.ptys, p, PT_W_ROWS, 24);
+  pt_set(&mut k.ptys, p, PT_W_COLS, 80);
+  return pty_install(&mut k, pid, h, flags);
+}
+
+/// open("/dev/pts/N"): the slave end of terminal p. -EIO while it is
+/// locked or after its master is gone.
+fn pty_open_slave(k: &mut Kernel, pid: u64, p: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC && p < PTY_N
+  ensures kok(k)
+{
+  if !pty_live(k, p) {
+    return ENOENT;
+  }
+  if pt_get(k.ptys, p, PT_W_LOCKED) != 0 || pt_get(k.ptys, p, PT_W_MASTERS) == 0 {
+    return EIO_PTY;
+  }
+  let h = ofd_new(&mut k, OF_PTY, DEV_PTS + p);
+  if h >= OFD_N {
+    return ENFILE;
+  }
+  let s = pt_get(k.ptys, p, PT_W_SLAVES);
+  if s < OFD_N {
+    pt_set(&mut k.ptys, p, PT_W_SLAVES, s + 1);
+  }
+  pt_set(&mut k.ptys, p, PT_W_OPENED, 1);
+  return pty_install(&mut k, pid, h, flags);
+}
+
+/// Puts new description h in a descriptor, with O_NONBLOCK and O_CLOEXEC
+/// as the open flags say.
+fn pty_install(k: &mut Kernel, pid: u64, h: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC && h < OFD_N
+  ensures kok(k)
+{
+  of_set(&mut k.ofd, h, 3, flags / LO_NONBLOCK % 2);
+  let fd = fd_install(&mut k, pid, h);
+  if fd < LXNFD && flags / LO_CLOEXEC % 2 == 1 {
+    fd_set(&mut k.lxfd, pid, fd, FD_OFD + h + FD_CLOEXEC);
+  }
+  return fd;
+}
+
+/// The last reference to a description of device d went (unref_one). The
+/// last master hangs the terminal up; the pair goes once neither end is open.
+fn pty_drop(k: &mut Kernel, d: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if !is_pty_dev(d) {
+    return;
+  }
+  let p = pty_of(d);
+  if is_ptm(d) {
+    let m = pt_get(k.ptys, p, PT_W_MASTERS);
+    if m > 0 {
+      pt_set(&mut k.ptys, p, PT_W_MASTERS, m - 1);
+    }
+    if m == 1 {
+      pty_hangup(&mut k, p);
+    }
+  } else {
+    let s = pt_get(k.ptys, p, PT_W_SLAVES);
+    if s > 0 {
+      pt_set(&mut k.ptys, p, PT_W_SLAVES, s - 1);
+    }
+  }
+  if pt_get(k.ptys, p, PT_W_MASTERS) == 0 && pt_get(k.ptys, p, PT_W_SLAVES) == 0 {
+    pt_set(&mut k.ptys, p, PT_W_USED, 0);
+  }
+}
+
+/// The master is gone: every process in the terminal's session gets SIGHUP.
+fn pty_hangup(k: &mut Kernel, p: u64)
+  requires kok(k) && p < PTY_N
+  ensures kok(k)
+{
+  let sid = pt_get(k.ptys, p, PT_W_SID);
+  if sid == 0 {
+    return;
+  }
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && kok(k)
+  {
+    if is_linux(k.procs, q) && sid_of(k.procs, q) == sid {
+      post_sig(&mut k, q, SIGHUP);
+    }
+    q = q + 1;
+  }
+}
+
+/// Signal s to every process in group g.
+fn pty_signal(k: &mut Kernel, g: u64, s: u64)
+  requires kok(k) && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
+  if g == 0 {
+    return;
+  }
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && kok(k)
+  {
+    if is_linux(k.procs, q) && pgid_of(k.procs, q) == g {
+      post_sig(&mut k, q, s);
+    }
+    q = q + 1;
+  }
+}
+
+/// The terminal whose session is process pid's, for open("/dev/tty"), or
+/// PTY_N if it has none (the console, then).
+fn pty_ctty(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= PTY_N
+{
+  let sid = sid_of(k.procs, pid);
+  let mut p = 0;
+  while p < PTY_N
+    invariant p <= PTY_N && kok(k)
+  {
+    if pt_get(k.ptys, p, PT_W_USED) == 1 && pt_get(k.ptys, p, PT_W_SID) == sid && pt_get(k.ptys, p, PT_W_MASTERS) > 0 {
+      return p;
+    }
+    p = p + 1;
+  }
+  return PTY_N;
+}
+
+// ---------------------------------------------------------------- the line discipline
+
+/// Puts byte c in terminal p's output ring. False if it is full.
+fn out_raw(k: &mut Kernel, p: u64, c: u64) -> bool
+  requires kok(k) && p < PTY_N
+  ensures kok(k)
+{
+  let mut r = pty_ring(k.ptys, p, true);
+  if r.n >= r.cap {
+    return false;
+  }
+  let s = ring_push(&mut r);
+  bset(&mut k.ptyb, pty_base(p, true) + s, cast[u8](c % 256));
+  pty_keep(&mut k.ptys, p, true, r);
+  return true;
+}
+
+/// Byte c written to the slave (or echoed), with output processing: LF
+/// goes out as CR LF under OPOST and ONLCR. False, with nothing put, if
+/// there is no room.
+fn out_byte(k: &mut Kernel, p: u64, c: u64) -> bool
+  requires kok(k) && p < PTY_N
+  ensures kok(k)
+{
+  let of = pt_flags(k.ptys, p, 4);
+  if c == 10 && of & OPOST != 0 && of & ONLCR != 0 {
+    let r = pty_ring(k.ptys, p, true);
+    if r.cap - r.n < 2 {
+      return false;
+    }
+    out_raw(&mut k, p, 13);
+  }
+  return out_raw(&mut k, p, c);
+}
+
+/// Echoes c if ECHO is on; a full output ring drops the echo.
+fn echo(k: &mut Kernel, p: u64, c: u64)
+  requires kok(k) && p < PTY_N
+  ensures kok(k)
+{
+  if pt_flags(k.ptys, p, 12) & ECHO != 0 {
+    out_byte(&mut k, p, c);
+  }
+}
+
+/// Takes back the last byte of the unfinished line, echoing its erasure.
+/// False if the line is empty.
+fn erase1(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && p < PTY_N
+  ensures kok(k)
+{
+  let mut r = pty_ring(k.ptys, p, false);
+  if r.n == 0 || r.n <= pt_get(k.ptys, p, PT_W_READY) {
+    return false;
+  }
+  r.n = r.n - 1;
+  pty_keep(&mut k.ptys, p, false, r);
+  let lf = pt_flags(k.ptys, p, 12);
+  if lf & ECHO != 0 && lf & ECHOE != 0 {
+    out_raw(&mut k, p, 8);
+    out_raw(&mut k, p, 32);
+    out_raw(&mut k, p, 8);
+  }
+  return true;
+}
+
+/// Byte c, written to the master, as the slave's input. False if there is
+/// no room for it yet (the master's write stops there).
+fn pty_input(k: &mut Kernel, p: u64, ch: u64) -> bool
+  requires kok(k) && p < PTY_N
+  ensures kok(k)
+{
+  let mut c = ch % 256;
+  let lf = pt_flags(k.ptys, p, 12);
+  if c == 13 && pt_flags(k.ptys, p, 0) & ICRNL != 0 {
+    c = 10;
+  }
+  if lf & ISIG != 0 && c != 0 && (c == pt_byte(k.ptys, p, 17) || c == pt_byte(k.ptys, p, 18)) {
+    // VINTR or VQUIT: the signal, and what was typed is thrown away.
+    let mut s = SIGINT;
+    if c == pt_byte(k.ptys, p, 18) {
+      s = SIGQUIT;
+    }
+    let mut r = pty_ring(k.ptys, p, false);
+    ring_clear(&mut r);
+    pty_keep(&mut k.ptys, p, false, r);
+    pt_set(&mut k.ptys, p, PT_W_READY, 0);
+    if lf & ECHO != 0 {
+      out_raw(&mut k, p, 94);               // "^C"
+      out_raw(&mut k, p, c + 64);
+    }
+    pty_signal(&mut k, pt_get(k.ptys, p, PT_W_FG), s);
+    return true;
+  }
+  let canon = lf & ICANON != 0;
+  if canon && c != 0 && c == pt_byte(k.ptys, p, 19) {
+    erase1(&mut k, p);                      // VERASE
+    return true;
+  }
+  if canon && c != 0 && c == pt_byte(k.ptys, p, 20) {
+    let mut i = 0;
+    while i < PTY_CAP && erase1(&mut k, p)  // VKILL: the whole line
+      invariant kok(k)
+    {
+      i = i + 1;
+    }
+    return true;
+  }
+  let r = pty_ring(k.ptys, p, false);
+  if canon && c != 0 && c == pt_byte(k.ptys, p, 21) {
+    // VEOF: the line so far can be read; on an empty line, end of file.
+    if r.n == pt_get(k.ptys, p, PT_W_READY) {
+      pt_set(&mut k.ptys, p, PT_W_EOF, 1);
+    }
+    pt_set(&mut k.ptys, p, PT_W_READY, r.n);
+    return true;
+  }
+  if r.n >= r.cap {
+    return false;
+  }
+  if canon && c != 10 && r.n + 1 >= r.cap {
+    return true;                            // a full line takes nothing but its end (as Linux)
+  }
+  let mut w = r;
+  let s = ring_push(&mut w);
+  bset(&mut k.ptyb, pty_base(p, false) + s, cast[u8](c));
+  pty_keep(&mut k.ptys, p, false, w);
+  if !canon || c == 10 {
+    pt_set(&mut k.ptys, p, PT_W_READY, w.n);
+  }
+  echo(&mut k, p, c);
+  return true;
+}
+
+// ---------------------------------------------------------------- reading and writing
+
+/// read(2) on pty device d. Returns the count, 0 at end of file, -EIO, or
+/// EAGAIN when the caller must wait.
+fn pty_read(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && d >= DEV_PTM && d < DEV_PTS + PTY_N
+  ensures kok(k)
+{
+  let p = pty_of(d);
+  let master = is_ptm(d);
+  let mut avail = 0;
+  if master {
+    avail = pty_count(k.ptys, p, true);
+    if avail == 0 && pt_get(k.ptys, p, PT_W_SLAVES) == 0 && pt_get(k.ptys, p, PT_W_OPENED) != 0 {
+      return EIO_PTY;                       // the slave side has closed
+    }
+  } else {
+    avail = pty_ready(k.ptys, p);
+    if avail == 0 && pt_get(k.ptys, p, PT_W_EOF) != 0 {
+      pt_set(&mut k.ptys, p, PT_W_EOF, 0);
+      return 0;                             // VEOF on an empty line
+    }
+    if avail == 0 && pt_get(k.ptys, p, PT_W_MASTERS) == 0 {
+      return 0;                             // hung up
+    }
+    if avail == 0 && pt_flags(k.ptys, p, 12) & ICANON == 0 && pt_byte(k.ptys, p, VMIN_AT) == 0 {
+      return 0;                             // VMIN 0: a read never waits
+    }
+  }
+  if n == 0 {
+    return 0;
+  }
+  if avail == 0 {
+    return EAGAIN;
+  }
+  let mut r = pty_ring(k.ptys, p, master);
+  let want = smaller(smaller(n, avail), smaller(r.n, XFER));
+  if want == 0 {
+    return EAGAIN;
+  }
+  ring_out(&mut k.fs.xfer, 0, k.ptyb, pty_base(p, master), PTY_CAP, r.h, want);
+  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
+  if put == NO_RESULT || put == 0 || put > r.n {
+    return EFAULT;
+  }
+  ring_pop_n(&mut r, put);
+  pty_keep(&mut k.ptys, p, master, r);
+  if !master {
+    let ready = pt_get(k.ptys, p, PT_W_READY);
+    if ready >= put {
+      pt_set(&mut k.ptys, p, PT_W_READY, ready - put);
+    } else {
+      pt_set(&mut k.ptys, p, PT_W_READY, 0);
+    }
+  }
+  return put;
+}
+
+/// write(2) on pty device d. Returns the count, -EIO on a hung-up slave,
+/// or EAGAIN when nothing fits yet.
+fn pty_write(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && d >= DEV_PTM && d < DEV_PTS + PTY_N
+  ensures kok(k)
+{
+  let p = pty_of(d);
+  let master = is_ptm(d);
+  if !master && pt_get(k.ptys, p, PT_W_MASTERS) == 0 {
+    return EIO_PTY;
+  }
+  if n == 0 {
+    return 0;
+  }
+  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, smaller(n, XFER));
+  if got == NO_RESULT || got == 0 {
+    return EFAULT;
+  }
+  let mut i = 0;
+  while i < got
+    invariant i <= got && got <= XFER && kok(k)
+  {
+    let c = cast[u64](bget(k.fs.xfer, i));
+    let mut ok = false;
+    if master {
+      ok = pty_input(&mut k, p, c);
+    } else {
+      ok = out_byte(&mut k, p, c);
+    }
+    if !ok {
+      if i == 0 {
+        return EAGAIN;
+      }
+      return i;
+    }
+    i = i + 1;
+  }
+  return got;
+}
+
+/// What poll finds on pty device d.
+fn pty_bits(k: &Kernel, d: u64) -> u64
+  requires kok(k) && d >= DEV_PTM && d < DEV_PTS + PTY_N
+{
+  let p = pty_of(d);
+  let mut b = 0;
+  if is_ptm(d) {
+    if pty_count(k.ptys, p, true) > 0 {
+      b = POLLIN;
+    }
+    if pt_get(k.ptys, p, PT_W_SLAVES) == 0 && pt_get(k.ptys, p, PT_W_OPENED) != 0 {
+      b = b | POLLIN | POLLHUP;             // a read says EIO
+    }
+    if pty_count(k.ptys, p, false) < PTY_CAP {
+      b = b | POLLOUT;
+    }
+    return b;
+  }
+  if pty_ready(k.ptys, p) > 0 || pt_get(k.ptys, p, PT_W_EOF) != 0 {
+    b = POLLIN;
+  }
+  if pt_get(k.ptys, p, PT_W_MASTERS) == 0 {
+    return b | POLLIN | POLLHUP;
+  }
+  if pty_count(k.ptys, p, true) + 2 <= PTY_CAP {
+    b = b | POLLOUT;
+  }
+  return b;
+}
+
+// ---------------------------------------------------------------- ioctl
+
+/// Reads a 32-bit int from user address arg into the low word of the
+/// transfer buffer. NO_RESULT if it cannot.
+fn pty_int_in(k: &mut Kernel, pid: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, 4) != 4 {
+    return NO_RESULT;
+  }
+  return cast[u64](bget(k.fs.xfer, 0)) | cast[u64](bget(k.fs.xfer, 1)) << 8 | cast[u64](bget(k.fs.xfer, 2)) << 16 | cast[u64](bget(k.fs.xfer, 3)) << 24;
+}
+
+/// ioctl on descriptor fd, pty device d: the terminal's settings, window
+/// size, process groups, and the master's number and lock.
+fn pty_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC && d >= DEV_PTM && d < DEV_PTS + PTY_N
+  ensures kok(k)
+{
+  let p = pty_of(d);
+  if req == TCGETS {
+    let mut i = 0;
+    while i < TERMIOS_SIZE
+      invariant i <= TERMIOS_SIZE && kok(k)
+    {
+      bset(&mut k.fs.xfer, i, cast[u8](pt_byte(k.ptys, p, i)));
+      i = i + 1;
+    }
+    return lx_put_out(&mut k, pid, arg, TERMIOS_SIZE);
+  }
+  if req == TCSETS || (req > TCSETS && req <= TCSETSF) {
+    if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, TERMIOS_SIZE) != TERMIOS_SIZE {
+      return EFAULT;
+    }
+    let mut i = 0;
+    while i < TERMIOS_SIZE
+      invariant i <= TERMIOS_SIZE && kok(k)
+    {
+      pt_set(&mut k.ptys, p, PT_W_TT + i, cast[u64](bget(k.fs.xfer, i)));
+      i = i + 1;
+    }
+    pt_set(&mut k.ptys, p, PT_W_SET, 1);
+    if req == TCSETSF {
+      pty_flush(&mut k, p, false);
+    }
+    if pt_flags(k.ptys, p, 12) & ICANON == 0 {
+      pt_set(&mut k.ptys, p, PT_W_READY, pty_count(k.ptys, p, false));   // every byte is ready now
+    }
+    return 0;
+  }
+  if req == TIOCGWINSZ {
+    lx_fill(&mut k, 0, WINSIZE_SIZE);
+    xfer_u64(&mut k.fs.xfer, 0, pt_get(k.ptys, p, PT_W_ROWS) % 65536 + pt_get(k.ptys, p, PT_W_COLS) % 65536 * 65536);
+    return lx_put_out(&mut k, pid, arg, WINSIZE_SIZE);
+  }
+  if req == TIOCSWINSZ {
+    if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, WINSIZE_SIZE) != WINSIZE_SIZE {
+      return EFAULT;
+    }
+    let rows = cast[u64](bget(k.fs.xfer, 0)) | cast[u64](bget(k.fs.xfer, 1)) << 8;
+    let cols = cast[u64](bget(k.fs.xfer, 2)) | cast[u64](bget(k.fs.xfer, 3)) << 8;
+    if rows != pt_get(k.ptys, p, PT_W_ROWS) || cols != pt_get(k.ptys, p, PT_W_COLS) {
+      pt_set(&mut k.ptys, p, PT_W_ROWS, rows);
+      pt_set(&mut k.ptys, p, PT_W_COLS, cols);
+      pty_signal(&mut k, pt_get(k.ptys, p, PT_W_FG), SIGWINCH);
+    }
+    return 0;
+  }
+  if req == TIOCGPTN || req == TIOCSPTLCK {
+    if !is_ptm(d) {
+      return ENOTTY;
+    }
+    if req == TIOCGPTN {
+      lx_fill(&mut k, 0, 4);
+      bset(&mut k.fs.xfer, 0, cast[u8](p));
+      return lx_put_out(&mut k, pid, arg, 4);
+    }
+    let v = pty_int_in(&mut k, pid, arg);
+    if v == NO_RESULT {
+      return EFAULT;
+    }
+    pt_set(&mut k.ptys, p, PT_W_LOCKED, smaller(v, 1));
+    return 0;
+  }
+  if req == TIOCSCTTY {
+    // The caller's session takes the terminal; its group is in front.
+    pt_set(&mut k.ptys, p, PT_W_SID, sid_of(k.procs, pid));
+    pt_set(&mut k.ptys, p, PT_W_FG, pgid_of(k.procs, pid));
+    return 0;
+  }
+  if req == TIOCNOTTY {
+    if pt_get(k.ptys, p, PT_W_SID) == sid_of(k.procs, pid) {
+      pt_set(&mut k.ptys, p, PT_W_SID, 0);
+    }
+    return 0;
+  }
+  if req == TIOCGPGRP || req == TIOCGSID {
+    let mut g = pt_get(k.ptys, p, PT_W_FG);
+    if req == TIOCGSID {
+      g = pt_get(k.ptys, p, PT_W_SID);
+      if g == 0 {
+        return ENOTTY;                      // not anyone's controlling terminal
+      }
+    }
+    if g == 0 {
+      g = pgid_of(k.procs, pid);
+    }
+    lx_fill(&mut k, 0, 4);
+    xfer_u64(&mut k.fs.xfer, 0, g % 0x100000000);
+    return lx_put_out(&mut k, pid, arg, 4);
+  }
+  if req == TIOCSPGRP {
+    let g = pty_int_in(&mut k, pid, arg);
+    if g == NO_RESULT {
+      return EFAULT;
+    }
+    pt_set(&mut k.ptys, p, PT_W_FG, g);
+    return 0;
+  }
+  if req == FIONREAD {
+    let mut c = pty_ready(k.ptys, p);
+    if is_ptm(d) {
+      c = pty_count(k.ptys, p, true);
+    }
+    lx_fill(&mut k, 0, 4);
+    xfer_u64(&mut k.fs.xfer, 0, c);
+    return lx_put_out(&mut k, pid, arg, 4);
+  }
+  if req == FIONBIO_PTY {
+    let v = pty_int_in(&mut k, pid, arg);
+    let h = fd_ofd(k, pid, fd);
+    if v == NO_RESULT {
+      return EFAULT;
+    }
+    if h < OFD_N {
+      of_set(&mut k.ofd, h, 3, smaller(v, 1));
+    }
+    return 0;
+  }
+  if req == TCFLSH {
+    if arg == 0 || arg == 2 {
+      pty_flush(&mut k, p, false);
+    }
+    if arg == 1 || arg == 2 {
+      pty_flush(&mut k, p, true);
+    }
+    return 0;
+  }
+  if req == TCSBRK || req == TCXONC {
+    return 0;                               // tcdrain, tcsendbreak, tcflow: nothing to wait for
+  }
+  return EINVAL;
+}
+
+/// Throws away terminal p's unread input or unread output.
+fn pty_flush(k: &mut Kernel, p: u64, out: bool)
+  requires kok(k) && p < PTY_N
+  ensures kok(k)
+{
+  let mut r = pty_ring(k.ptys, p, out);
+  ring_clear(&mut r);
+  pty_keep(&mut k.ptys, p, out, r);
+  if !out {
+    pt_set(&mut k.ptys, p, PT_W_READY, 0);
+    pt_set(&mut k.ptys, p, PT_W_EOF, 0);
+  }
+}

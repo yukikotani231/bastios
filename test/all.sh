@@ -4,7 +4,8 @@
 # one test after another within a lane and the lanes at once:
 #   a: the shell test, the longest, on 4 processors;
 #   b: the TCP tests;
-#   c: everything else.
+#   c: everything else (the two IPv6 tests share build/ipv6, so they stay
+#      in one lane).
 # Three lanes and not more: the TCP tests time a stalled wire against the
 # guest's resend timer, and a test of the shell's checks that a process is
 # asleep, so a machine much busier than this makes them fail for the wrong
@@ -24,6 +25,8 @@ tests=(
   "tcp virtio|b|test/tcp_test.sh"
   "tcp e1000|b|NIC=e1000 test/tcp_test.sh"
   "tcp igb|b|NIC=igb test/tcp_test.sh"
+  "ipv6 virtio|c|test/ipv6_test.sh"
+  "ipv6 e1000|c|NIC=e1000 test/ipv6_test.sh"
   "iso|c|test/iso_test.sh"
   "nmi|c|test/nmi_test.sh"
   "fuzz|c|test/fuzz_test.sh 1 2 2000"
