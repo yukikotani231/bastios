@@ -140,17 +140,20 @@ fn lk_conflict(t: &Buf, file: u64, class: u64, owner: u64, ty: u64, s: u64, e: u
   requires len(t) == LK_LEN && file < LK_EOF
   ensures result <= LK_N
 {
+  // The one that starts first, as Linux's sorted list gives for F_GETLK.
+  let mut best = LK_N;
   let mut i = 0;
   while i < LK_N
-    invariant i <= LK_N
+    invariant i <= LK_N && best <= LK_N
   {
     if lk_touches(t, i, file, class, s, e) && lk_get(t, i, 1) != owner
-      && (ty == F_WRLCK || lk_get(t, i, 2) == F_WRLCK) {
-      return i;
+      && (ty == F_WRLCK || lk_get(t, i, 2) == F_WRLCK)
+      && (best == LK_N || lk_get(t, i, 3) < lk_get(t, best, 3)) {
+      best = i;
     }
     i = i + 1;
   }
-  return LK_N;
+  return best;
 }
 
 fn lk_free_count(t: &Buf) -> u64
@@ -317,6 +320,11 @@ fn lx_fcntl_lock(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
   if file == LK_EOF {
     return EBADF;
   }
+  let getlk = cmd == F_GETLK || cmd == F_OFD_GETLK;
+  let mode = fget(k.fs.ftab, d.x, FD_MODE);
+  if !getlk && ((ty == F_RDLCK && mode / O_READ % 2 == 0) || (ty == F_WRLCK && mode / O_WRITE % 2 == 0)) {
+    return EBADF;                           // a read lock needs reading, a write lock writing
+  }
   // The range: l_start from SEEK_SET, SEEK_CUR or SEEK_END, then l_len
   // bytes on (to the end of the file when 0, before l_start when negative).
   let mut base = 0;
@@ -419,6 +427,106 @@ fn lx_fcntl_lock(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
   }
   lk_wait_set(&mut k.locks, pid, 0, 0);
   return lk_apply(&mut k.locks, file, LKC_FCNTL, owner, ty, s, e);
+}
+
+
+/// How many open files of the file layer name file `file`, and of those,
+/// how many are open for writing (count + writers * 2^32).
+fn lk_opens(k: &Kernel, file: u64) -> u64
+  requires kok(k)
+{
+  let mut n = 0;
+  let mut w = 0;
+  let mut row = 0;
+  while row < FD_ROWS
+    invariant row <= FD_ROWS && n <= row && w <= row && kok(k)
+  {
+    if fget(k.fs.ftab, row, FD_FS) != 0 && lk_file(k, row) == file {
+      n = n + 1;
+      if fget(k.fs.ftab, row, FD_MODE) / O_WRITE % 2 == 1 {
+        w = w + 1;
+      }
+    }
+    row = row + 1;
+  }
+  return n + w * 0x100000000;
+}
+
+/// fcntl F_SETLEASE and F_GETLEASE on descriptor fd. A lease is kept
+/// (and reported back) but never broken: nothing tells its holder when
+/// another process opens the file, so a lease is only what F_GETLEASE
+/// says. As on Linux, a read lease needs the file open for reading only
+/// and nobody writing it, a write lease nobody else having it open, and
+/// either is for the file's owner or root.
+fn lx_lease(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let d = fd_look(k, pid, fd);
+  let h = fd_ofd(k, pid, fd);
+  if d.kind != K_FILE || h >= OFD_N || d.x >= FD_ROWS {
+    return EBADF;
+  }
+  let file = lk_file(k, d.x);
+  if file == LK_EOF {
+    return EINVAL;
+  }
+  let owner = LK_DESC + h;
+  if cmd == F_GETLEASE {
+    let mut i = 0;
+    while i < LK_N
+      invariant i <= LK_N && kok(k)
+    {
+      if lk_get(k.locks, i, 0) == file + 1 && lk_get(k.locks, i, 1) == owner && lk_get(k.locks, i, 5) == LKC_LEASE {
+        return lk_get(k.locks, i, 2);
+      }
+      i = i + 1;
+    }
+    return F_UNLCK;
+  }
+  let ty = arg % 0x100000000;
+  if ty != F_RDLCK && ty != F_WRLCK && ty != F_UNLCK {
+    return EINVAL;
+  }
+  let m = vfs_meta(&mut k.fs, file);
+  if m.ok && !owns(k.procs, pid, m.own) {
+    return EACCES;
+  }
+  lock_drop(&mut k.locks, owner, file, LKC_LEASE);
+  if ty == F_UNLCK {
+    return 0;
+  }
+  let o = lk_opens(k, file);
+  let opens = o % 0x100000000;
+  let writers = o / 0x100000000;
+  if ty == F_RDLCK && (writers > 0 || fget(k.fs.ftab, d.x, FD_MODE) / O_WRITE % 2 == 1) {
+    return EAGAIN;
+  }
+  if ty == F_WRLCK && opens > 1 {
+    return EAGAIN;
+  }
+  if lk_free_slot(k.locks) >= LK_N {
+    return ENOLCK;
+  }
+  lk_put(&mut k.locks, file, LKC_LEASE, owner, ty, 0, LK_EOF);
+  return 0;
+}
+
+/// Whether the struct flock at user address arg is well formed: 0, or
+/// EFAULT, or EINVAL for an unknown l_type or l_whence.
+fn flock_check(k: &mut Kernel, pid: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, FLOCK_SIZE) != FLOCK_SIZE {
+    return EFAULT;
+  }
+  let ty = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1));
+  let whence = cast[u64](bget(k.fs.xfer, 2)) + 256 * cast[u64](bget(k.fs.xfer, 3));
+  if (ty != F_RDLCK && ty != F_WRLCK && ty != F_UNLCK) || whence > 2 {
+    return EINVAL;
+  }
+  return 0;
 }
 
 /// flock(fd, op): LOCK_SH, LOCK_EX or LOCK_UN on the whole file, owned

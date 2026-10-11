@@ -63,6 +63,7 @@ const LO_CREAT: u64 = 0x40;
 const LO_TRUNC: u64 = 0x200;
 const LO_APPEND: u64 = 0x400;
 const LO_NONBLOCK: u64 = 0x800;
+const LO_ASYNC: u64 = 0x2000;
 
 const READ_MAX: u64 = 262144;          // the most one read of a file returns
 const MAP_SHARED: u64 = 1;
@@ -77,7 +78,8 @@ const MAP_FIXED_NOREPLACE: u64 = 0x100000;
 // NORESERVE, POPULATE, NONBLOCK, STACK, HUGETLB, the huge page sizes and
 // UNINITIALIZED; and FIXED_NOREPLACE.
 const MAP_LEGACY_MASK: u64 = 0xFC17F973;
-const PATH_MAX_LX: u64 = 4096;          // the longest path read from user memory (PATH_MAX)
+const PATH_MAX_LX: u64 = 4096;          // the longest path read from user memory (Linux's PATH_MAX)
+const PATH_FIRST: u64 = 256;            // read first; most paths end within it
 const PATH_OUT: u64 = 512;              // room for a name being built
 
 const ARCH_SET_FS: u64 = 0x1002;
@@ -87,6 +89,7 @@ const ARCH_SET_CPUID: u64 = 0x1012;
 const IOV_MAX: u64 = 1024;
 const EISDIR: u64 = 18446744073709551595;     // 2^64 - 21
 const ESRCH: u64 = 18446744073709551613;      // 2^64 - 3
+const ENXIO: u64 = 18446744073709551610;      // 2^64 - 6
 const TOTAL_MAX: u64 = 0x100000000000;      // more than writev can move in the window
 const LX_EXIT_GROUP: u64 = 231;
 
@@ -380,7 +383,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_DUP2 || n == LX_DUP3 {
-    if n == LX_DUP3 && (a == b || (c != 0 && c != LO_CLOEXEC)) {
+    if n == LX_DUP3 && (a == b || c % 0x100000000 & !LO_CLOEXEC != 0) {
       ret(&mut k.procs, pid, EINVAL);
     } else {
       ret(&mut k.procs, pid, lx_dup2(&mut k, pid, a, b, n == LX_DUP3 && c / LO_CLOEXEC % 2 == 1));
@@ -488,7 +491,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if (r10 % 0x100000000) & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH) != 0 {
       ret(&mut k.procs, pid, EINVAL);
     } else if r10 / AT_EMPTY_PATH % 2 == 1 && user_empty(&mut k, pid, b) {
-      ret(&mut k.procs, pid, lx_fstat(&mut k, pid, a, c));      // fstat by another name
+      ret(&mut k.procs, pid, lx_fstat_at(&mut k, pid, a, c));   // fstat by another name
     } else {
       ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b, c, (r10 & AT_SYMLINK_NOFOLLOW) == 0));
     }
@@ -669,6 +672,9 @@ const TCSETS: u64 = 0x5402;
 const TCSETSF: u64 = 0x5404;              // TCSETSW (0x5403) lies between
 const TIOCGWINSZ: u64 = 0x5413;
 const FIONREAD: u64 = 0x541B;
+const FIONBIO: u64 = 0x5421;
+const FIONCLEX: u64 = 0x5450;
+const FIOCLEX: u64 = 0x5451;
 const SIOCATMARK: u64 = 0x8905;
 const SIOCGIFCONF: u64 = 0x8912;
 const SIOCGIFFLAGS: u64 = 0x8913;
@@ -750,6 +756,31 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     // The bytes waiting in the pipe, as an int.
     xfer_u64(&mut k.fs.xfer, 0, smaller(pi_get(k.pipes, d.x, 1), PIPE_CAP));
     return lx_put_out(&mut k, pid, arg, 4);
+  }
+  // On any descriptor: FIONBIO is fcntl's O_NONBLOCK (from the int at
+  // arg), FIOCLEX and FIONCLEX its FD_CLOEXEC, as CPython's setblocking and
+  // set_inheritable use them.
+  if req == FIONBIO {
+    if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, 4) != 4 {
+      return EFAULT;
+    }
+    let on = bget(k.fs.xfer, 0) != 0 || bget(k.fs.xfer, 1) != 0 || bget(k.fs.xfer, 2) != 0 || bget(k.fs.xfer, 3) != 0;
+    let fl = lx_fcntl(&mut k, pid, fd, F_GETFL, 0);
+    if fl > 0xFFFFFFFF {
+      return fl;
+    }
+    let mut nf = fl / (LO_NONBLOCK * 2) * (LO_NONBLOCK * 2) + fl % LO_NONBLOCK;
+    if on {
+      nf = nf + LO_NONBLOCK;
+    }
+    return lx_fcntl(&mut k, pid, fd, F_SETFL, nf);
+  }
+  if req == FIOCLEX || req == FIONCLEX {
+    let mut c = 0;
+    if req == FIOCLEX {
+      c = 1;
+    }
+    return lx_fcntl(&mut k, pid, fd, F_SETFD, c);
   }
   if d.kind == K_DEV && (is_loop(d.x) || d.x == DEV_LOOPCTL) {
     return loop_ioctl(&mut k, pid, d.x, req % 0x100000000, arg);   // the request is an unsigned int
@@ -1515,6 +1546,32 @@ fn base_byte(k: &Kernel, pid: u64, h: u64, i: u64) -> u8
   return cast[u8](get(k.dpath, h * CWD_STRIDE + 1 + i) % 256);
 }
 
+/// The length of process pid's root if the name out[0..o] is inside it,
+/// else 0 (a working directory left outside by chroot: ".." can climb
+/// to the top from there, as on Linux).
+fn root_under(k: &Kernel, pid: u64, out: &Bytes, o: u64) -> u64
+  requires kok(k) && pid < NPROC && o <= blen(out)
+  ensures result <= o && result <= FNAME_MAX
+{
+  let rl = root_len(k, pid);
+  if rl == 0 || o < rl {
+    return 0;
+  }
+  let mut i = 0;
+  while i < rl
+    invariant i <= rl && rl <= o && o <= blen(out) && rl <= FNAME_MAX && kok(k) && pid < NPROC
+  {
+    if cast[u64](bget(out, i)) != get(k.croot, pid * CWD_STRIDE + 1 + i) % 256 {
+      return 0;
+    }
+    i = i + 1;
+  }
+  if o > rl && bget(out, rl) != 47 {
+    return 0;
+  }
+  return rl;
+}
+
 /// lx_path_in from base h (see dir_ofd), following symbolic links (the
 /// last one too when `follow`).
 fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
@@ -1527,33 +1584,59 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
     return NO_RESULT;
   }
   let n = smaller(PATH_MAX_LX, USER_SIZE - (va - USER_BASE));
-  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, n);
+  let mut want = smaller(PATH_FIRST, n);
+  let mut got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, want);
   if got == NO_RESULT {
     return NO_RESULT;
   }
-  k.perr = ENAMETOOLONG;
   let mut e = 0;
   while e < got && bget(k.fs.xfer, e) != 0
     invariant e <= got && got <= XFER && kok(k)
   {
     e = e + 1;
   }
-  if e >= got {
-    if got < n {
-      k.perr = EFAULT;                      // it runs into memory that is not there
+  if e >= got && got == want && want < n {
+    // Longer than the first read: read up to PATH_MAX.
+    want = n;
+    got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, want);
+    if got == NO_RESULT {
+      return NO_RESULT;
     }
-    return NO_RESULT;                       // no NUL in reach
+    e = 0;
+    while e < got && bget(k.fs.xfer, e) != 0
+      invariant e <= got && got <= XFER && kok(k)
+    {
+      e = e + 1;
+    }
+  }
+  if e >= got {
+    if got == want {
+      k.perr = ENAMETOOLONG;                // no NUL within PATH_MAX
+    }
+    return NO_RESULT;                       // or EFAULT: unmapped before the NUL
   }
   if e == 0 {
-    k.perr = ENOENT;                        // "" names nothing (AT_EMPTY_PATH is the caller's)
+    k.perr = ENOENT;                        // "" names nothing, as on Linux
     return NO_RESULT;
   }
+  k.perr = ENAMETOOLONG;
   let trail = bget(k.fs.xfer, e - 1) == 47;  // "link/" names what the link points to, as on Linux
   // Build the name in `out`, starting from the working directory unless
-  // the path starts at "/".
+  // the path starts at "/", which is the process's root (chroot). ".."
+  // stops at `floor`: the root, for a name inside it.
   let mut out = balloc(PATH_OUT);
   let mut o = 0;
-  if bget(k.fs.xfer, 0) != 47 {
+  let rl = root_len(k, pid);
+  let mut floor = 0;
+  if bget(k.fs.xfer, 0) == 47 {
+    while o < rl
+      invariant o <= rl && rl <= FNAME_MAX && blen(out) == PATH_OUT && kok(k) && pid < NPROC
+    {
+      bset(&mut out, o, cast[u8](get(k.croot, pid * CWD_STRIDE + 1 + o) % 256));
+      o = o + 1;
+    }
+    floor = rl;
+  } else {
     if h > OFD_N {
       bfree(out);
       k.perr = EBADF;
@@ -1569,6 +1652,7 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
       bset(&mut out, o, base_byte(k, pid, h, o));
       o = o + 1;
     }
+    floor = root_under(k, pid, out, o);
   }
   let mut i = 0;
   let mut ok = true;
@@ -1588,16 +1672,16 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
       if w == 1 && bget(k.fs.xfer, i) == 46 {
         // "." stays here
       } else if w == 2 && bget(k.fs.xfer, i) == 46 && bget(k.fs.xfer, i + 1) == 46 {
-        // "..": drop the last part (the top's parent is the top)
-        while o > 0 && bget(out, o - 1) != 47
+        // "..": drop the last part (the root's parent is the root)
+        while o > floor && bget(out, o - 1) != 47
           invariant o <= PATH_OUT && blen(out) == PATH_OUT
         {
           o = o - 1;
         }
-        if o > 0 {
+        if o > floor {
           o = o - 1;
         }
-      } else if o + 1 + w > PATH_OUT {
+      } else if o + 1 + w > FNAME_MAX {
         ok = false;
       } else {
         if o > 0 {
@@ -1617,8 +1701,22 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
     }
   }
   if !ok || o > FNAME_MAX {
+    // Too long for the file layer. Walk what fits, so a loop of links
+    // (ELOOP) or a missing directory (ENOENT) on the way is still reported
+    // as Linux reports it.
+    let mut c = 0;
+    while c < o && c < FNAME_MAX
+      invariant c <= o && blen(out) == PATH_OUT && kok(k)
+    {
+      bset(&mut k.fs.xfer, c, bget(out, c));
+      c = c + 1;
+    }
     bfree(out);
-    return NO_RESULT;                       // k.perr is ENAMETOOLONG
+    if c > 0 && lx_follow(&mut k, c, true, smaller(floor, c)) == NO_RESULT {
+      return NO_RESULT;                     // k.perr says why
+    }
+    k.perr = ENAMETOOLONG;
+    return NO_RESULT;
   }
   let mut c = 0;
   while c < o
@@ -1629,7 +1727,7 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
   }
   bfree(out);
   let o2 = proc_self(&mut k.fs.xfer, o, pid);   // "proc/self" is the caller's /proc/PID
-  return lx_follow(&mut k, o2, follow || trail);  // symbolic links (src/lxlink.bastio)
+  return lx_follow(&mut k, o2, follow || trail, smaller(floor, o2));  // symbolic links (src/lxlink.bastio)
 }
 
 /// lseek: SEEK_SET (0), SEEK_CUR (1) and SEEK_END (2), with a signed
@@ -1888,10 +1986,21 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // What was there goes, read-only pages too: the new mapping is writable.
     map_forget(&mut k, pid, at / 4096, at / 4096 + pages, false);
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
+    hole_cut(&mut k, pid, at / 4096, at / 4096 + pages);
     if !cached && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
       return ENOMEM;
     }
   } else {
+    let reserve = (anon && prot == 0) || cached;
+    // A hole munmap left first (src/lxmem.bastio): its pages are unmapped.
+    let h = hole_take(&mut k, pid, pages);
+    if h < STACK_FIRST {
+      if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, h, h + pages, sh) {
+        hole_add(&mut k, pid, h, h + pages);
+        return ENOMEM;
+      }
+      return lx_mmap_fill(&mut k, pid, h * 4096, pages, prot, flags, fd, off, anon, cached, f, sh);
+    }
     let brk = pget(k.procs, pid, F_BRK);
     let low = pget(k.procs, pid, F_MMAP);
     if low > STACK_FIRST * 4096 || brk > low || pages * 4096 > low - brk {
@@ -1904,12 +2013,22 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // Fresh PROT_NONE memory is only address space: its pages are mapped
     // when an mprotect makes them usable (lx_mprotect), and touching it
     // before that faults, as on Linux.
-    let reserve = (anon && prot == 0) || cached;
     if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096, sh) {
       return ENOMEM;
     }
     pset(&mut k.procs, pid, F_MMAP, at);
   }
+  return lx_mmap_fill(&mut k, pid, at, pages, prot, flags, fd, off, anon, cached, f, sh);
+}
+
+/// The rest of mmap once window offset `at` has its pages (a `cached`
+/// mapping gets the page cache's instead): a file's bytes copied in, the
+/// mapping recorded if shared, and write access taken away without
+/// PROT_WRITE.
+fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags: u64, fd: u64, off: u64, anon: bool, cached: bool, f: u64, sh: bool) -> u64
+  requires kok(k) && pid < NPROC && at <= USER_SIZE && pages <= WPAGES && off % 4096 == 0
+  ensures kok(k)
+{
   // Fresh pages are zero: only a file's bytes need copying in.
   if anon {
     if prot != 0 {

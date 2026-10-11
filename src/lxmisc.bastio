@@ -718,6 +718,8 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     let pn = lx_path_at(&mut k, pid, AT_FDCWD, a);
     if pn == NO_RESULT {
       r = k.perr;
+    } else if !path_there(&mut k, pn) {
+      r = ENOENT;
     } else if vfs_in_mount(&mut k.fs, pn, false) {
       r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC);
     } else {
