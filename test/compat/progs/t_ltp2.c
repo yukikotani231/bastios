@@ -569,5 +569,22 @@ int main(void) {
            close(s1); close(s2); unlink("/tmp/t_ltp2_dg");
            b == 0 && x == 3 && c == 0 && y == 4 && ok1 && ok2 && n3 == -1 && e3 == EAGAIN
              && u == -1 && ue == ENOTCONN && g == -1 && ge == ECONNREFUSED; }));
+    EXPECT("AF_UNIX SOCK_DGRAM: getsockname gives the bound path, recvfrom a bound sender's, and replies reach it", ({
+           unlink("/tmp/t_ltp2_d1"); unlink("/tmp/t_ltp2_d2");
+           struct sockaddr_un a = { AF_UNIX, "/tmp/t_ltp2_d1" }, b = { AF_UNIX, "/tmp/t_ltp2_d2" };
+           int s = socket(AF_UNIX, SOCK_DGRAM, 0), p = socket(AF_UNIX, SOCK_DGRAM, 0);
+           bind(s, (struct sockaddr *)&a, sizeof a); bind(p, (struct sockaddr *)&b, sizeof b);
+           struct sockaddr_un n; socklen_t nl = sizeof n;
+           int g = getsockname(s, (struct sockaddr *)&n, &nl);
+           int gok = g == 0 && nl == 2 + strlen(a.sun_path) + 1 && strcmp(n.sun_path, a.sun_path) == 0;
+           int c = connect(p, (struct sockaddr *)&n, nl);
+           int w = write(p, "ping", 4);
+           char m[8]; struct sockaddr_un f; socklen_t fl = sizeof f;
+           int r1 = recvfrom(s, m, sizeof m, 0, (struct sockaddr *)&f, &fl);
+           int fok = r1 == 4 && fl > 2 && strcmp(f.sun_path, b.sun_path) == 0;
+           int x = sendto(s, "pong", 4, 0, (struct sockaddr *)&f, fl);
+           int r2 = read(p, m, sizeof m);
+           close(s); close(p); unlink(a.sun_path); unlink(b.sun_path);
+           gok && c == 0 && w == 4 && fok && x == 4 && r2 == 4 && memcmp(m, "pong", 4) == 0; }));
     return done();
 }

@@ -472,16 +472,7 @@ fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, 
     return lx_tcp_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1);
   }
   if is_unix(k, pid, fd) {
-    let r = ux_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1);
-    if r <= 0x7FFFFFFFFFFFFFFF && addr != 0 && ux_dgram(k, pid, fd) {
-      // No sender name is kept: a length of 0, as Linux gives for a
-      // sender that is not bound.
-      lx_fill(&mut k, 0, 4);
-      if copy_to_user(&mut k.spaces, pid, alenp, k.fs.xfer, 4) != 4 {
-        return EFAULT;
-      }
-    }
-    return r;
+    return ux_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1, addr, alenp);
   }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
