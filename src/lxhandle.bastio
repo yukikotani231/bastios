@@ -146,7 +146,7 @@ fn lx_name_to_handle(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, fh: u64, m
   if e != 0 {
     out = 4;
   }
-  if copy_to_user(&mut k.spaces, pid, fh, k.fs.xfer, out) != out {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, fh, k.fs.xfer, out) != out {
     return EFAULT;
   }
   return e;
@@ -168,7 +168,7 @@ fn lx_open_by_handle(k: &mut Kernel, pid: u64, mfd: u64, fh: u64, flags: u64) ->
     }
     other = d.kind != K_FILE && d.kind != K_DIR;   // on no file system of the file layer
   }
-  if copy_from_user(&mut k.spaces, pid, fh, &mut k.fs.xfer, 8) != 8 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, fh, &mut k.fs.xfer, 8) != 8 {
     return EFAULT;
   }
   let hb = get_u64(k.fs.xfer, 0) % 0x100000000;
@@ -179,7 +179,7 @@ fn lx_open_by_handle(k: &mut Kernel, pid: u64, mfd: u64, fh: u64, flags: u64) ->
   if other || ty != FH_FILE || hb != FH_BYTES {
     return ESTALE;
   }
-  if fh >= USER_BASE + USER_SIZE || copy_from_user(&mut k.spaces, pid, fh + 8, &mut k.fs.xfer, 8) != 8 {
+  if fh >= USER_BASE + USER_SIZE || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, fh + 8, &mut k.fs.xfer, 8) != 8 {
     return EFAULT;
   }
   let f = get_u64(k.fs.xfer, 0);

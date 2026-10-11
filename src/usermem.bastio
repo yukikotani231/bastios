@@ -242,14 +242,15 @@ fn user_page_writable(spaces: &mut Vec[Space], pid: u64, va: u64) -> bool
 fn l3_writable(l3: &mut PageTable, off: u64) -> bool
   requires pt_level(l3) == 3 && off < USER_SIZE
 {
-  if !pt_has(l3, 0) {
+  let t = off / L2_SIZE;
+  if !pt_has(l3, t) {
     return false;
   }
-  return pt_borrow(&mut l3, 0, l2_writable, off);
+  return pt_borrow(&mut l3, t, l2_writable, off % L2_SIZE);
 }
 
 fn l2_writable(l2: &mut PageTable, off: u64) -> bool
-  requires pt_level(l2) == 2 && off < USER_SIZE
+  requires pt_level(l2) == 2 && off < L2_SIZE
 {
   let p = off / 4096;
   let t = p / 512;
