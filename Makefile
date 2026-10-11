@@ -609,9 +609,13 @@ ALPINE_PKGS ?= alpine/git@sha256:a4bb51f1a3553df194ce679fc1db721d8bfba2046fa1a88
                alpine/xml@sha256:836f531a7e38bbdaab8f1c1ce76bf868412f253671625ebf54cf14fa28544de6 \
                heywoodlh/vim@sha256:c8c4f0de47f20de92af6d3b0544898e857f6c2eecd7ab397a1e7daf0b5fc6292
 ALPINE_DISK_PKGS ?= git,curl,less,openssh-keygen,bash,make,jq,rsync,openssl,file,libxml2-utils
+# Where the images' layers are kept, checked against their digests on each
+# use. Point it outside build/ to keep them across fresh checkouts: Docker
+# Hub rate-limits anonymous pulls, and only what is missing is fetched.
+ALPINE_CACHE ?= build/compat/alpine
 
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py | build/compat
-	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) --disk $(ALPINE_DISK_PKGS)
+	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE)
 
 build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) test/compat/mkdisk.py
 	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) perllib=build/compat/perllib py=build/compat/py
