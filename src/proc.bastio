@@ -472,6 +472,7 @@ const LAZY_LEN: u64 = 128;            // NPROC * LZ_W
 const LX_PAUSE: u64 = 34;
 const LX_RT_SIGSUSPEND: u64 = 130;
 const LX_WAITID: u64 = 247;
+const P_PIDFD: u64 = 3;               // waitid's idtype for a pidfd (src/lxpidfd.bastio)
 const LX_TIMES: u64 = 100;
 const OF_SOCK: u64 = 5;               // x: the kernel socket; word 3: 2 * peer + nonblocking
 const OF_DEV: u64 = 7;                // x: the device (src/lxdev.bastio)
@@ -496,6 +497,7 @@ const OF_UNIX: u64 = 11;              // an AF_UNIX socket: see src/lxunix.basti
 const OF_PTY: u64 = 14;               // a pseudo-terminal end: x DEV_PTM + N or DEV_PTS + N; word 3: nonblocking (src/lxpty.bastio)
 const OF_PQ: u64 = 13;                // a POSIX message queue: x the queue; word 3: nonblocking + 2 * access mode (src/lxmq.bastio)
 const OF_SIGFD: u64 = 12;             // a signalfd: word 2 the signals it takes; word 3: nonblocking (src/lxevent.bastio)
+const OF_PIDFD: u64 = 15;             // a pidfd: x the process, NPROC once its slot was reused; word 3: nonblocking (src/lxpidfd.bastio)
 const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
 const DIR_VFS: u64 = 2;               // DIR_VFS + a file layer directory handle
@@ -627,6 +629,7 @@ const K_EVENT: u64 = 8;               // x: the description (src/lxevent.bastio)
 const K_TIMER: u64 = 9;               // x: the timer
 const K_EPOLL: u64 = 10;              // x: the epoll instance
 const K_SIGFD: u64 = 11;              // x: the description (src/lxevent.bastio)
+const K_PIDFD: u64 = 15;              // x: the process, NPROC if it is gone (src/lxpidfd.bastio)
 
 
 struct Kernel {
@@ -884,6 +887,7 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   if pid == 0 {
     return 0;
   }
+  pidfd_reuse(&mut k, pid);                 // pidfds on the slot's last process (src/lxpidfd.bastio)
   // A FREE process has no address space; check it rather than assume it.
   match take_space(&mut k.spaces, pid) {
     Space::Empty => {},

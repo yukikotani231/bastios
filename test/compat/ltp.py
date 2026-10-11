@@ -153,9 +153,10 @@ def run_batch(args, group, progs, work, log):
         for tag, argv, _ in group:
             # From /disk, where LTP finds a test's helper programs. A test
             # that wants a file system on its device is given tmpfs, which
-            # needs no mkfs (there is no ext2 here).
+            # needs no mkfs (there is no ext2 here). PATH has the helpers
+            # and BusyBox's tools (cp for SAFE_CP), as runltp's would.
             cmd = " ".join(shlex.quote(a) for a in ["/disk/" + argv[0]] + argv[1:])
-            text, status = g.run(f"cd /disk; TMPDIR=/tmp KCONFIG_PATH=/disk/kconfig LTP_DEV_FS_TYPE=tmpfs LTP_COLORIZE_OUTPUT=0 {cmd}; "
+            text, status = g.run(f"cd /disk; PATH=/disk:/bin TMPDIR=/tmp KCONFIG_PATH=/disk/kconfig LTP_DEV_FS_TYPE=tmpfs LTP_COLORIZE_OUTPUT=0 {cmd}; "
                                  "echo @@end $?", args.timeout)
             results.append(record(tag, text, status))
     except SystemExit as e:
