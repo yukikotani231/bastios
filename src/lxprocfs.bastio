@@ -51,6 +51,10 @@ const PF_CMDLINE: u64 = 5;
 const PF_STATUS: u64 = 6;
 const PF_CPUINFO: u64 = 8;            // these two with pid 0; 7 is PF_EXE
 const PF_FILESYSTEMS: u64 = 9;
+const PF_MAPS: u64 = 10;
+const PF_COMM: u64 = 11;
+const PF_SLACK: u64 = 12;
+const PF_LOADAVG: u64 = 13;           // with pid 0
 const PSYS: u64 = 16 * NPROC;         // PROC_DEV + PSYS + SY_*: a /proc/sys file
 const SY_TAINTED: u64 = 1;
 const SY_PID_MAX: u64 = 2;
@@ -185,11 +189,17 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
     if xfer_is(x, 5, n, "uptime") {
       return PROC_DEV + PF_UPTIME;
     }
+    if xfer_is(x, 5, n, "loadavg") {
+      return PROC_DEV + PF_LOADAVG;
+    }
     if xfer_is(x, 5, n, "cpuinfo") {
       return PROC_DEV + PF_CPUINFO;
     }
     if xfer_is(x, 5, n, "filesystems") {
       return PROC_DEV + PF_FILESYSTEMS;
+    }
+    if xfer_is(x, 5, n, "cmdline") {
+      return PROC_DEV + PF_CMDLINE;         // pid 0: the kernel's command line
     }
     return 0;
   }
@@ -243,6 +253,23 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   if xfer_is(x, e + 1, n, "mounts") {
     return base + PF_MOUNTS;
   }
+  if xfer_is(x, e + 1, n, "maps") {
+    return base + PF_MAPS;
+  }
+  if xfer_is(x, e + 1, n, "comm") {
+    return base + PF_COMM;
+  }
+  if xfer_is(x, e + 1, n, "timerslack_ns") {
+    return base + PF_SLACK;
+  }
+  // task/TID/comm, for a thread of the group (or the group itself).
+  if e + 6 < n && xfer_is(x, e + 1, e + 6, "task/") {
+    let te = comp_end(x, e + 6, n);
+    let t = proc_pid(procs, x, e + 6, te);
+    if t < NPROC && (t == p || tgid(procs, t) == p) && te < n && xfer_is(x, te + 1, n, "comm") {
+      return PROC_DEV + 16 * t + PF_COMM;
+    }
+  }
   return 0;
 }
 
@@ -282,6 +309,9 @@ fn proc_entry(k: &mut Kernel, dir: u64, i: u64) -> Ent
     if i == 4 {
       return Ent { len: name_out(&mut k.fs.xfer, "mounts"), dir: false, end: false };
     }
+    if i == 5 {
+      return Ent { len: name_out(&mut k.fs.xfer, "maps"), dir: false, end: false };
+    }
     return end;
   }
   if i == 0 {
@@ -302,7 +332,10 @@ fn proc_entry(k: &mut Kernel, dir: u64, i: u64) -> Ent
   if i == 5 {
     return Ent { len: name_out(&mut k.fs.xfer, "filesystems"), dir: false, end: false };
   }
-  let p = i - 5;
+  if i == 6 {
+    return Ent { len: name_out(&mut k.fs.xfer, "cmdline"), dir: false, end: false };
+  }
+  let p = i - 6;
   if p >= NPROC {
     return end;
   }
@@ -347,6 +380,27 @@ fn put_c(o: &mut Bytes, at: u64, c: u8) -> u64
   }
   bset(&mut o, at, c);
   return at + 1;
+}
+
+/// Appends the low 40 bits of v as 10 hex digits (a user address).
+fn put_x(o: &mut Bytes, at: u64, v: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = at;
+  let mut sh = 10;
+  while sh > 0
+    invariant sh <= 10 && blen(o) == PROC_OUT && a <= PROC_OUT
+  {
+    sh = sh - 1;
+    let d = (v >> (4 * sh)) & 15;
+    if d < 10 {
+      a = put_c(&mut o, a, cast[u8](48 + d));
+    } else {
+      a = put_c(&mut o, a, cast[u8](87 + d));
+    }
+  }
+  return a;
 }
 
 /// Appends v in decimal.
@@ -394,6 +448,23 @@ fn put_2(o: &mut Bytes, at: u64, v: u64) -> u64
 {
   let a = put_c(&mut o, at, cast[u8](48 + v / 10 % 10));
   return put_c(&mut o, a, cast[u8](48 + v % 10));
+}
+
+/// Appends process p's name (see pr_comm).
+fn put_comm(k: &mut Kernel, p: u64, o: &mut Bytes, at: u64) -> u64
+  requires kok(k) && p < NPROC && blen(o) == PROC_OUT && at <= PROC_OUT
+  ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let n = pr_comm(&mut k, p);
+  let mut a = at;
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= 15 && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+  {
+    a = put_c(&mut o, a, bget(k.fs.xfer, i));
+    i = i + 1;
+  }
+  return a;
 }
 
 /// Appends the path of process p's program ("/bin/NAME", or the file it
@@ -453,6 +524,9 @@ fn state_letter(s: u64, waiting: bool) -> u8 {
   }
   if s == ZOMBIE {
     return 90;                              // Z
+  }
+  if s == STOPPED {
+    return 84;                              // T
   }
   return 83;                                // S: waiting for something
 }
@@ -578,6 +652,37 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
   if what == PF_FILESYSTEMS && p == 0 {
     return put_s(&mut o, 0, "nodev\tramfs\nnodev\tproc\nnodev\ttmpfs\n\tbstdisk3\n");
   }
+  if what == PF_CMDLINE && p == 0 {
+    return put_s(&mut o, 0, "BOOT_IMAGE=/boot/bastios.elf\n");
+  }
+  if what == PF_LOADAVG && p == 0 {
+    // No load average is kept (sysinfo's loads are 0 too): then the
+    // runnable and existing processes, and the newest process id.
+    let mut live = 0;
+    let mut run = 0;
+    let mut last = 0;
+    let mut q = 1;
+    while q < NPROC
+      invariant 1 <= q && q <= NPROC && live < q && run <= live && last < q && kok(k)
+    {
+      let st = state(k.procs, q);
+      if st != FREE && st != ZOMBIE {
+        live = live + 1;
+        last = q;
+        if st == READY || st == RUNNING {
+          run = run + 1;
+        }
+      }
+      q = q + 1;
+    }
+    let mut a = put_s(&mut o, 0, "0.00 0.00 0.00 ");
+    a = put_n(&mut o, a, run);
+    a = put_c(&mut o, a, 47);
+    a = put_n(&mut o, a, live);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, last);
+    return put_c(&mut o, a, 10);
+  }
   if what == PF_UPTIME {
     let mut a = put_n(&mut o, 0, k.ns / NS_PER_S);
     a = put_c(&mut o, a, 46);
@@ -595,7 +700,7 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     // itrealvalue starttime, then 30 more fields of zeros.
     let mut a = put_n(&mut o, 0, p);
     a = put_s(&mut o, a, " (");
-    a = put_prog(&mut k, p, &mut o, a, true);
+    a = put_comm(&mut k, p, &mut o, a);
     a = put_s(&mut o, a, ") ");
     a = put_c(&mut o, a, state_letter(s, pget(k.procs, p, F_ASLEEP) != 0));
     a = put_c(&mut o, a, 32);
@@ -606,7 +711,17 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, p);
     a = put_s(&mut o, a, " 0 -1 0 0 0 0 0 ");
     a = put_n(&mut o, a, pget(k.procs, p, F_TICKS));
-    a = put_s(&mut o, a, " 0 0 0 20 0 1 0 0");
+    let ni = nice_of(k.procs, p);
+    a = put_s(&mut o, a, " 0 0 0 ");
+    a = put_n(&mut o, a, ni);               // the priority: 20 + nice
+    a = put_c(&mut o, a, 32);
+    if ni < 20 {
+      a = put_c(&mut o, a, 45);
+      a = put_n(&mut o, a, 20 - ni);
+    } else {
+      a = put_n(&mut o, a, ni - 20);
+    }
+    a = put_s(&mut o, a, " 1 0 0");
     let mut z = 0;
     while z < 30
       invariant z <= 30 && a <= PROC_OUT && blen(o) == PROC_OUT
@@ -618,7 +733,7 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
   }
   if what == PF_STATUS {
     let mut a = put_s(&mut o, 0, "Name:\t");
-    a = put_prog(&mut k, p, &mut o, a, true);
+    a = put_comm(&mut k, p, &mut o, a);
     a = put_s(&mut o, a, "\nState:\t");
     a = put_c(&mut o, a, state_letter(s, pget(k.procs, p, F_ASLEEP) != 0));
     a = put_s(&mut o, a, "\nTgid:\t");
@@ -641,7 +756,30 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
       a = put_c(&mut o, a, 32);
       i = i + 1;
     }
-    return put_s(&mut o, a, "\nThreads:\t1\n");
+    a = put_s(&mut o, a, "\nVmLck:\t");
+    a = put_n(&mut o, a, rl_locked(k, p) / 1024);
+    return put_s(&mut o, a, " kB\nThreads:\t1\n");
+  }
+  if what == PF_COMM {
+    let a = put_comm(&mut k, p, &mut o, 0);
+    return put_c(&mut o, a, 10);
+  }
+  if what == PF_SLACK {
+    let a = put_n(&mut o, 0, pr_slack(k, p));
+    return put_c(&mut o, a, 10);
+  }
+  if what == PF_MAPS {
+    // Only the regions whose place is fixed: the stack (mapped on demand
+    // over its whole reach) and the vDSO. The program, its heap and its
+    // mmaps are not listed: no list of them is kept, only page tables.
+    let mut a = put_x(&mut o, 0, USER_BASE + VDSO_PAGE * 4096);
+    a = put_c(&mut o, a, 45);
+    a = put_x(&mut o, a, USER_BASE + (VDSO_PAGE + 1) * 4096);
+    a = put_s(&mut o, a, " r-xp 00000000 00:00 0                          [vdso]\n");
+    a = put_x(&mut o, a, USER_BASE + STACK_FIRST * 4096);
+    a = put_c(&mut o, a, 45);
+    a = put_x(&mut o, a, USER_BASE + USER_SIZE);
+    return put_s(&mut o, a, " rw-p 00000000 00:00 0                          [stack]\n");
   }
   if what == PF_CMDLINE {
     let a = put_prog(&mut k, p, &mut o, 0, true);

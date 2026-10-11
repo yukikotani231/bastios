@@ -291,7 +291,7 @@ fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u6
     return EFAULT;
   }
   let mut r = 0;
-  if flags / AT_EMPTY_PATH % 2 == 1 && lx_path_in(&mut k, pid, path) == 0 {
+  if flags / AT_EMPTY_PATH % 2 == 1 && user_empty(&mut k, pid, path) {
     r = lx_fstat(&mut k, pid, dirfd, buf);
   } else {
     r = lx_stat(&mut k, pid, dirfd, path, buf, (flags & AT_SYMLINK_NOFOLLOW) == 0);
@@ -366,12 +366,41 @@ fn lx_fallocate(k: &mut Kernel, pid: u64, fd: u64, mode: u64, off: u64, len: u64
   return 0;
 }
 
-/// memfd_create(name, flags): a file in /tmp that is unlinked at once, so
-/// it lives as long as a descriptor or mapping holds it.
-fn lx_memfd(k: &mut Kernel, pid: u64, flags: u64) -> u64
+/// Checks memfd_create's name at user address va: -EFAULT if it cannot
+/// be read, -EINVAL if it is longer than 249 bytes (MFD_NAME_MAX_LEN),
+/// else 0. The name itself is only for /proc on Linux, so it is not kept.
+fn memfd_name_ok(k: &mut Kernel, pid: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  let mut i = 0;
+  while i < 250
+    invariant i <= 250 && kok(k)
+  {
+    if va >= 0x800000000000 || copy_from_user(&mut k.spaces, pid, va + i, &mut k.fs.xfer, 1) != 1 {
+      return EFAULT;
+    }
+    if bget(k.fs.xfer, 0) == 0 {
+      return 0;
+    }
+    i = i + 1;
+  }
+  return EINVAL;
+}
+
+/// memfd_create(name, flags): a file in /tmp that is unlinked at once, so
+/// it lives as long as a descriptor or mapping holds it.
+fn lx_memfd(k: &mut Kernel, pid: u64, name: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if name == 0 || name >= 0x800000000000 {   // not a user address
+    return EFAULT;
+  }
+  let nm = memfd_name_ok(&mut k, pid, name);
+  if nm != 0 {
+    return nm;
+  }
   if flags / 2 != 0 && flags != MFD_CLOEXEC + 2 {
     return EINVAL;                          // MFD_ALLOW_SEALING (2) is accepted; nothing else
   }
@@ -483,7 +512,7 @@ fn lx_more_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
       r = lx_put_out(&mut k, pid, b, 4);
     }
   } else if n == LX_MEMFD_CREATE {
-    r = lx_memfd(&mut k, pid, b);
+    r = lx_memfd(&mut k, pid, a, b);
   }
   if r == EAGAIN && n != LX_FLOCK {
     if n == LX_SENDFILE && pipe_nonblock(k, pid, a) {
