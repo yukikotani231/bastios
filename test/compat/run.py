@@ -45,7 +45,7 @@ measurement, so failing checks are expected, but it must not go backwards.
 --host runs the same programs and cases on this machine instead (from a
 scratch directory), to check that the expectations are right for Linux.
 """
-import argparse, codecs, fcntl, functools, http.server, json, os, pty, re, select, shutil, signal, socket, ssl, struct, subprocess, sys, tempfile, termios, threading, time
+import argparse, codecs, concurrent.futures, fcntl, functools, http.server, io, json, os, pty, re, select, shutil, signal, socket, ssl, struct, subprocess, sys, tempfile, termios, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROMPT = b"\n# "
@@ -537,7 +537,47 @@ def main():
     bb = os.path.join(os.path.abspath(args.host), "busybox") if args.host else BB
     t0 = time.time()
     results = {}
+
+    def other_disk(disk, what, cases, timeout):
+        """Runs cases on a guest booted from a disk of its own. Returns the
+        results and the guest's serial output."""
+        out = io.BytesIO()
+        g = Guest(args.kernel, disk, out, web)
+        try:
+            g.boot()
+            print(f"compat: {what}", flush=True)
+            return [run_applet(g, n, c, e, timeout, bb) for n, c, e in cases], out.getvalue()
+        finally:
+            g.stop()
+
+    # tcc and make are on a disk of their own (the disk's directory has room
+    # for 64 entries, and the C runtime needs most of them), the Bastio
+    # compiler, Z3 and tcc fill a third, and Alpine a fourth. Each disk gets
+    # its own guest, and with JOBS above 1 (the default is the number of
+    # CPUs) those guests run at the same time as the first one: they share
+    # nothing but the host's web server.
+    others = []
+    if not args.host:
+        if args.dev_disk:
+            others.append(("dev", args.dev_disk, "building C (tcc, make)", dev, 60))
+        if args.bastio_disk:
+            others.append(("bastio", args.bastio_disk, "the Bastio compiler (bastioc1, z3, tcc)", bastio, 900))
+        if args.alpine_disk:
+            # Alpine's root and its packages. The cases change the disk
+            # (they unpack and install), so they get a copy and every run
+            # starts from the same disk.
+            disk = os.path.join(args.out, "alpine-run.img")
+            shutil.copyfile(args.alpine_disk, disk)
+            if args.alpine_repo:
+                os.makedirs(os.path.join(web.dir, "alpine"), exist_ok=True)
+                os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", "x86_64"))
+            others.append(("alpine", disk, "Alpine Linux (apk)", alpine, 300))
+    jobs = max(1, int(os.environ.get("JOBS") or os.cpu_count() or 1))
+    pool = concurrent.futures.ThreadPoolExecutor(max(1, len(others)))
+    pending = {}
     try:
+        if jobs > 1:
+            pending = {k: pool.submit(other_disk, d, w, c, t) for k, d, w, c, t in others}
         env.boot()
         for prog in args.programs:
             print(f"compat: {prog}", flush=True)
@@ -551,37 +591,13 @@ def main():
             results["ssh"] = [run_applet(env, n, c, e, 60, bb) for n, c, e in sshc]
         print("compat: programs on the terminal", flush=True)
         results["tty"] = [run_tty(env, n, p, k, c, e, 30, bb) for n, p, k, c, e in tty]
-        if args.dev_disk and not args.host:
-            # tcc and make are on a disk of their own: the disk's directory
-            # has room for 64 entries, and the C runtime needs most of them.
-            env.stop()
-            env = Guest(args.kernel, args.dev_disk, log, web)
-            env.boot()
-            print("compat: building C (tcc, make)", flush=True)
-            results["dev"] = [run_applet(env, n, c, e, 60, bb) for n, c, e in dev]
-        if args.bastio_disk and not args.host:
-            # The Bastio compiler, Z3 and tcc fill a third disk.
-            env.stop()
-            env = Guest(args.kernel, args.bastio_disk, log, web)
-            env.boot()
-            print("compat: the Bastio compiler (bastioc1, z3, tcc)", flush=True)
-            results["bastio"] = [run_applet(env, n, c, e, 900, bb) for n, c, e in bastio]
-        if args.alpine_disk and not args.host:
-            # Alpine's root and its packages, on a fourth disk.
-            env.stop()
-            # The cases change the disk (they unpack and install), so
-            # they get a copy and every run starts from the same disk.
-            disk = os.path.join(args.out, "alpine-run.img")
-            shutil.copyfile(args.alpine_disk, disk)
-            if args.alpine_repo:
-                os.makedirs(os.path.join(web.dir, "alpine"), exist_ok=True)
-                os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", "x86_64"))
-            env = Guest(args.kernel, disk, log, web)
-            env.boot()
-            print("compat: Alpine Linux (apk)", flush=True)
-            results["alpine"] = [run_applet(env, n, c, e, 300, bb) for n, c, e in alpine]
+        env.stop()
+        for k, d, w, c, t in others:
+            results[k], out = pending[k].result() if k in pending else other_disk(d, w, c, t)
+            log.write(out)
     finally:
         env.stop()
+        pool.shutdown(wait=True, cancel_futures=True)
         log.close()
         web.shutdown()
     report(results, names, args.out, time.time() - t0)

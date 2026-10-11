@@ -35,6 +35,18 @@ apps: micropython: classes, generators, exceptions, big integers
 apps: micropython: json, re, files, os
 apps: micropython: threads and a lock
 apps: nc: a raw HTTP request to the host
+apps: perl: HTTP::Tiny from the host
+apps: perl: files, directories and in-place editing
+apps: perl: fork, pipes, signals and alarm
+apps: perl: modules
+apps: perl: sockets over loopback
+apps: perl: the language
+apps: python: files, shutil and tempfile
+apps: python: http.server and urllib over loopback
+apps: python: multiprocessing
+apps: python: the language and the standard library
+apps: python: threads, subprocess and asyncio
+apps: python: urllib from the host
 apps: qjs: files and exec
 apps: qjs: language
 apps: qjs: promises and timers
@@ -376,6 +388,7 @@ t_mem: MAP_SHARED write-back at munmap
 t_mem: a MAP_SHARED mapping sees write(2)
 t_mem: file for mapping
 t_mem: futex across fork on a MAP_SHARED page
+t_mem: large malloc and free, many times
 t_mem: madvise
 t_mem: malloc churn
 t_mem: mlock
@@ -388,8 +401,10 @@ t_mem: mmap of a closed descriptor is EBADF
 t_mem: mmap of a file opened write-only is EACCES
 t_mem: mprotect read-only faults on write
 t_mem: mremap grow
+t_mem: mremap growth reuses address space
 t_mem: munmap
 t_mem: munmap faults on touch
+t_mem: munmap gives address space back
 t_mem: read(2) sees a store into a MAP_SHARED mapping
 t_mem: writable MAP_SHARED of a read-only file is EACCES
 t_misc: /etc/passwd
@@ -410,18 +425,23 @@ t_misc: tcgetattr
 t_misc: tcgetpgrp
 t_misc: tcsetattr
 t_more: FIONREAD on a pipe
+t_more: O_NONBLOCK by fcntl on a listening socket
 t_more: a full nonblocking pipe is EAGAIN
+t_more: bind to port 0 names a port before listen
 t_more: copy_file_range
 t_more: dup3 O_CLOEXEC
 t_more: fallocate grows a file
 t_more: fchmodat
 t_more: fcntl F_SETLK and F_GETLK
 t_more: flock exclusive
+t_more: fstat on a directory agrees with stat
 t_more: fstatat AT_EMPTY_PATH
 t_more: fstatat with AT_SYMLINK_NOFOLLOW
 t_more: fstatfs
 t_more: futimens
 t_more: getrusage children
+t_more: ioctl FIOCLEX and FIONCLEX
+t_more: ioctl FIONBIO makes a read EAGAIN
 t_more: memfd_create
 t_more: mkdirat and unlinkat AT_REMOVEDIR
 t_more: open O_CLOEXEC
@@ -433,6 +453,7 @@ t_more: pwritev
 t_more: readdir counts the files
 t_more: renameat2 RENAME_NOREPLACE
 t_more: sched_getcpu
+t_more: sem_open in /dev/shm
 t_more: sendfile file to file
 t_more: sendfile needs a readable source
 t_more: sendfile to a pipe
@@ -648,5 +669,6 @@ t_time: time
 tty: kilo: edit and save a file
 tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
 tty: micropython: REPL line editing and history
+tty: python: the REPL, and Ctrl-C is KeyboardInterrupt
 tty: stty: the terminal is in canonical mode again after an editor
 tty: vi: edit and save a file

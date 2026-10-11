@@ -38,6 +38,7 @@
 // "crashme: done N" at the end.
 
 import "lib/file.bastio";
+import "core/print.bastio";
 
 const REC: u64 = 16;
 const SNAP: u64 = 2000;
@@ -51,30 +52,6 @@ const TR_SMALL: u64 = 3000;
 const TR_BIG: u64 = 9000;              // three blocks: the shrink drops two and zeroes a tail
 const PAY: u64 = 100;
 const GMAX: u64 = 600;                 // the most files in disk/g
-
-fn puts(con: &Serial, s: Str) {
-  let mut i = 0;
-  while i < slen(s)
-    invariant i <= slen(s)
-  {
-    serial_write(con, sget(s, i));
-    i = i + 1;
-  }
-}
-
-fn put_num(con: &Serial, n: u64) {
-  let mut p = 1;
-  while p <= n / 10
-    invariant p >= 1
-  {
-    p = p * 10;
-  }
-  let mut q = p;
-  while q > 0 {
-    serial_write(con, cast[u8](48 + (n / q) % 10));
-    q = q / 10;
-  }
-}
 
 /// Byte j (0 to REC - 1) of record i.
 fn rec_byte(i: u64, j: u64) -> u8
@@ -609,9 +586,9 @@ fn put_g(nm: &mut Bytes, buf: &mut Bytes, k: u64) -> bool
 }
 
 fn bad(con: &Serial, what: Str) -> u64 {
-  puts(con, "crashme: bad ");
-  puts(con, what);
-  puts(con, "\r\n");
+  print_str(con, "crashme: bad ");
+  print_str(con, what);
+  print_str(con, "\r\n");
   return 1;
 }
 
@@ -648,9 +625,9 @@ fn main(con: &mut Serial) -> u64 {
   } else if gs == NOT_OK {
     code = bad(con, "g");
   } else {
-    puts(con, "crashme: clean, ");
-    put_num(con, n);
-    puts(con, " records\r\n");
+    print_str(con, "crashme: clean, ");
+    print_u64(con, n);
+    print_str(con, " records\r\n");
   }
   // A cut-off run may have left disk/t behind.
   f_unlink(t, 6);
@@ -723,17 +700,17 @@ fn main(con: &mut Serial) -> u64 {
       }
     }
     if i % 64 == 63 {
-      puts(con, "crashme: ");
-      put_num(con, i + 1);
-      puts(con, "\r\n");
+      print_str(con, "crashme: ");
+      print_u64(con, i + 1);
+      print_str(con, "\r\n");
     }
     k = k + 1;
   }
   f_close(fd);
   if code == 0 {
-    puts(con, "crashme: done ");
-    put_num(con, base + k);
-    puts(con, "\r\n");
+    print_str(con, "crashme: done ");
+    print_u64(con, base + k);
+    print_str(con, "\r\n");
   }
   bfree(buf);
   bfree(rec);

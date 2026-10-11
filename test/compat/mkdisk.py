@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Writes a BastiOS disk image (src/diskfs.bastio's format) holding files.
 
-    mkdisk.py OUT.img FILE... [DEST=FILE]...
+    mkdisk.py OUT.img FILE... [DEST=FILE]... [DEST=DIR]...
 
 Each FILE is stored under its base name, so a program shows up in the guest
 as /disk/NAME. DEST=FILE stores FILE as /disk/DEST, where DEST may name
-directories (a/b/c.h), which are made as needed. The format ("BSTDISK3"),
+directories (a/b/c.h), which are made as needed. DEST=DIR stores every file
+under DIR, keeping its path below DIR, under /disk/DEST. The format ("BSTDISK3"),
 in 4096-byte blocks: block 0 the superblock, its first 8 bytes the magic,
 then at byte 8 * db the block holding directory block db for db = 4..63;
 blocks 1..4 directory blocks 0..3. The directory holds up to 1024 entries
@@ -33,8 +34,21 @@ DISK_BYTES = 33 << 20             # at least; more when the files need it
 FREE_BYTES = int(os.environ.get("MKDISK_FREE_MB", "16")) << 20
 MAX_DISK = 65536 * BLOCK          # src/diskfs.bastio's MAX_BLOCKS
 
+def expand(args):
+    """DEST=DIR arguments as one DEST/PATH=FILE argument per file under DIR."""
+    for a in args:
+        dest, src = a.split("=", 1) if "=" in a else (None, a)
+        if dest is None or not os.path.isdir(src):
+            yield a
+            continue
+        for root, dirs, files in os.walk(src):
+            dirs.sort()
+            for f in sorted(files):
+                path = os.path.join(root, f)
+                yield dest + "/" + os.path.relpath(path, src) + "=" + path
+
 def main():
-    out, args = sys.argv[1], sys.argv[2:]
+    out, args = sys.argv[1], list(expand(sys.argv[2:]))
     need = sum(os.path.getsize(a.split("=", 1)[-1]) for a in args)
     size = max(DISK_BYTES, min(MAX_DISK, (need * 101 // 100 + FREE_BYTES) // BLOCK * BLOCK))
     img = bytearray(size)

@@ -16,8 +16,10 @@
 // block size, and the 64-byte file name, eight bytes a word.
 //
 // A device whose file is mounted (mount -t bstdisk3 /dev/loopN,
-// src/lxmount.bastio) gives EBUSY for read, write, LOOP_CLR_FD and
-// LOOP_SET_STATUS until the unmount: the mount holds the file's pages.
+// src/lxmount.bastio) gives EBUSY for read, write, LOOP_CLR_FD,
+// LOOP_SET_STATUS, LOOP_SET_CAPACITY and LOOP_CHANGE_FD until the
+// unmount: the mount holds the file's pages.
+//
 // /sys/block/loopN shows a device's size, read-only flag, file, offset,
 // size limit and flags (src/lxprocfs.bastio).
 //
@@ -444,7 +446,7 @@ fn loop_ioctl(k: &mut Kernel, pid: u64, d: u64, req: u64, arg: u64) -> u64
   if lo_get(k.loops, n, 0) == 0 {
     return ENXIO;                           // the rest need a bound device
   }
-  if (req == LOOP_CLR_FD || req == LOOP_SET_STATUS || req == LOOP_SET_STATUS64 || req == LOOP_SET_CAPACITY) && loop_mounted(k, n) {
+  if (req == LOOP_CLR_FD || req == LOOP_SET_STATUS || req == LOOP_SET_STATUS64 || req == LOOP_SET_CAPACITY || req == LOOP_CHANGE_FD) && loop_mounted(k, n) {
     return EBUSY;                           // mounted (src/lxmount.bastio)
   }
   if req == LOOP_CLR_FD {

@@ -653,9 +653,8 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   return lx_open_node(&mut k, pid, n, flags, mode);
 }
 
-/// lx_open_n past the special names: a file, FIFO, device node or
-/// directory of the file system. (Split out so each half stays within
-/// what the solver proves in one query.)
+/// lx_open_n for a path that names no /proc file and no device path:
+/// a node in a file system (split off to keep each proof small).
 fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   requires kok(k) && pid < NPROC && n <= FNAME_MAX
   ensures kok(k)
@@ -750,6 +749,9 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   }
   let nfd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, f, n);
   if nfd == NO_FD || nfd >= NFD {
+    if fresh && path_ok(k.fs, n) && parent_ok(&mut k.fs, n) {
+      return ENOSPC;                        // no free node for it
+    }
     return ENOENT;
   }
   let row = pid * NFD + nfd;
@@ -837,6 +839,9 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     kind = of_get(k.ofd, h, 0);
   }
   let pipe = h < OFD_N && can_block(kind);
+  // Sockets keep O_NONBLOCK in the low bit of word 3 too (src/lxsock.bastio,
+  // src/lxtcp.bastio, src/lxunix.bastio), above their other state.
+  let sock = h < OFD_N && (kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX);
   let mut row = FD_ROWS;
   if h < OFD_N && kind == OF_FILE {
     row = of_get(k.ofd, h, 2);
@@ -867,12 +872,10 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     of_set(&mut k.ofd, h, OF_ASYNC, arg / LO_ASYNC % 2);
     return 0;
   }
-  // A socket's word 3 has its O_NONBLOCK in bit 0, as a pipe end's does.
-  let sock = kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX;
-  if cmd == F_GETFL && sock {
-    return LO_RDWR + of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK;
-  }
   if cmd == F_GETFL {
+    if sock {
+      return LO_RDWR + of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK;
+    }
     if !pipe {
       return LO_RDWR;
     }

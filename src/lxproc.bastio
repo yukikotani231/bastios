@@ -175,6 +175,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   }
   lx_fd_fork(&mut k, pid, c);
   map_fork(&mut k, pid, c);
+  hole_fork(&mut k, pid, c);
   lazy_fork(&mut k, pid, c);
   shm_fork(&mut k, pid, c);
   sig_fork(&mut k.sigact, pid, c);
@@ -284,6 +285,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
       put_space(&mut k.spaces, pid, Space::Mapped(new));
     },
   }
+  hole_clear(&mut k, pid);                // a new window has no holes
   lazy_set(&mut k, pid, src, hold);       // map_drop_all dropped the old record
   shm_drop_all(&mut k, pid);
   lx_fd_close_all(&mut k, pid, true);
@@ -452,28 +454,42 @@ fn lx_str(k: &mut Kernel, pid: u64, va: u64, args: &mut Bytes, from: u64) -> u64
   if va < USER_BASE || va >= USER_BASE + USER_SIZE {
     return EFAULT;
   }
-  let want = smaller(ARGS_MAX - from, USER_SIZE - (va - USER_BASE));
-  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, want);
-  if got == NO_RESULT {
-    return EFAULT;
-  }
-  let mut e = 0;
-  while e < got && bget(k.fs.xfer, e) != 0
-    invariant e <= got && got <= want && kok(k)
+  // A transfer buffer at a time, up to the NUL.
+  let mut alen = from;
+  let mut at = va;
+  let mut done = false;
+  while !done
+    invariant from <= alen && alen <= ARGS_MAX && kok(k) && blen(args) == ARGS_MAX && USER_BASE <= at
+    invariant done ==> from < alen
   {
-    e = e + 1;
+    if alen >= ARGS_MAX {
+      return E2BIG;                         // no NUL in what fits
+    }
+    if at >= USER_BASE + USER_SIZE {
+      return EFAULT;
+    }
+    let want = smaller(smaller(ARGS_MAX - alen, XFER), USER_SIZE - (at - USER_BASE));
+    let got = copy_from_user(&mut k.spaces, pid, at, &mut k.fs.xfer, want);
+    if got == NO_RESULT || got == 0 {
+      return EFAULT;
+    }
+    let mut i = 0;
+    while i < got && !done
+      invariant i <= got && got <= want && want <= ARGS_MAX - alen && want <= XFER && kok(k) && blen(args) == ARGS_MAX
+      invariant from <= alen && alen < ARGS_MAX && USER_BASE <= at
+      invariant done ==> i > 0
+    {
+      let c = bget(k.fs.xfer, i);
+      bset(&mut args, alen + i, c);
+      if c == 0 {
+        done = true;
+      }
+      i = i + 1;
+    }
+    alen = alen + i;
+    at = at + i;
   }
-  if e >= got {
-    return E2BIG;                           // no NUL in what fits
-  }
-  let mut i = 0;
-  while i <= e
-    invariant i <= e + 1 && e < got && got <= ARGS_MAX - from && kok(k) && blen(args) == ARGS_MAX
-  {
-    bset(&mut args, from + i, bget(k.fs.xfer, i));
-    i = i + 1;
-  }
-  return from + e + 1;
+  return alen;
 }
 
 // ---------------------------------------------------------------- "#!" scripts
@@ -930,7 +946,8 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
   return file_meta(&mut k.fs, vfs_lookup(&mut k.fs, n));
 }
 
-/// The metadata of directory dir (a DIR_* number, as dir_at gives).
+/// The metadata of directory dir (as dir_at gives it), the same whether
+/// it is reached by path or by an open descriptor.
 fn dir_meta(k: &mut Kernel, dir: u64) -> Meta
   requires kok(k)
   ensures kok(k)
@@ -984,7 +1001,7 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
   } else if d.kind == K_PIPE_R || d.kind == K_PIPE_W {
     m = Meta { ok: true, mode: S_IFIFO, size: 0, ino: 4, mtime: 0, own: 0 };
   } else if d.kind == K_DIR {
-    m = dir_meta(&mut k, d.x);
+    m = dir_meta(&mut k, d.x);              // as stat on its path says, so shutil.rmtree trusts it
   } else if d.kind == K_SOCK {
     m = Meta { ok: true, mode: S_IFSOCK, size: 0, ino: 5, mtime: 0, own: 0 };
   } else if d.kind == K_DEV {
