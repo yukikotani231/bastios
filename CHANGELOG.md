@@ -556,7 +556,18 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   checks that pass.
 - A system call fuzzer (`user/sysfuzz.c`, `make fuzz`, and a short run in
   `make test`): hostile arguments through both entry points, on several
-  processors.
+  processors. It aims at every Linux call the kernel implements (it had
+  missed 99 of them, among them System V IPC, epoll, select, splice,
+  timers, signalfd, links and renames, mount, clone3 and rseq), with the
+  calls that could wait made not to: zero timeouts, IPC_NOWAIT, LOCK_NB,
+  SPLICE_F_NONBLOCK, WNOHANG, and timers only disarmed. It opens a
+  pseudo-terminal pair, a pipe, a socket pair, an eventfd, an epoll and a
+  file first, so the small descriptor numbers it picks reach them; it
+  sends half its ioctls to requests the kernel knows; it runs execve and
+  execveat in a child, on programs that end at once and on `#!` scripts;
+  and it reaps its children as it goes, so forks keep succeeding.
+  `test/sysfuzz_calls.sh` (in `make test`) fails when the kernel
+  dispatches a call the fuzzer does not aim at.
 - `make test` counts the trusted base (`test/trusted_base.sh`), and
   warnings in `boot/`'s C are errors.
 

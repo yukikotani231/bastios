@@ -11,7 +11,8 @@
  *
  * The same seed makes the same calls, so a failure can be replayed. Calls
  * that would end the run or wait for something that never comes are left
- * out or tamed (see `tame`): exit, execve, signals to other processes, a
+ * out or tamed (see `tame`): exit, execve (made in a child), signals to other
+ * processes, waits (given a zero timeout or a nonblocking flag), a
  * read with nothing to read. Those are not where the kernel is weak, and a
  * run that stops early tests nothing.
  *
@@ -54,6 +55,37 @@ static u64 lx_fork(u64 n, u64 a, u64 b, u64 c, u64 d, u64 e) {
     return r;
 }
 
+/* execve and execveat, in a child: fork, and the child makes call n with
+ * the arguments (kept in registers the fork leaves alone) and exits if it
+ * returns. Returns the child's pid, which the parent reaps. */
+static u64 lx_fork_then(u64 n, u64 a, u64 b, u64 c, u64 d, u64 e) {
+    register u64 r12 __asm__("r12") = a;
+    register u64 r13 __asm__("r13") = b;
+    register u64 r14 __asm__("r14") = c;
+    register u64 r15 __asm__("r15") = d;
+    register u64 rbx __asm__("rbx") = e;
+    u64 r;
+    __asm__ volatile("mov $57, %%eax\n\t"
+                     "syscall\n\t"
+                     "test %%rax, %%rax\n\t"
+                     "jnz 1f\n\t"
+                     "mov %[n], %%rax\n\t"
+                     "mov %%r12, %%rdi\n\t"
+                     "mov %%r13, %%rsi\n\t"
+                     "mov %%r14, %%rdx\n\t"
+                     "mov %%r15, %%r10\n\t"
+                     "mov %%rbx, %%r8\n\t"
+                     "syscall\n\t"
+                     "mov $231, %%eax\n\t"
+                     "xor %%edi, %%edi\n\t"
+                     "syscall\n\t"
+                     "ud2\n"
+                     "1:"
+                     : "=&a"(r) : [n] "r"(n), "r"(r12), "r"(r13), "r"(r14), "r"(r15), "r"(rbx)
+                     : "rcx", "r11", "rdi", "rsi", "rdx", "r10", "r8", "memory");
+    return r;
+}
+
 static u64 native(u64 n, u64 a, u64 b, u64 c) {
     u64 r;
     __asm__ volatile("int $0x80" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c) : "memory");
@@ -92,8 +124,18 @@ static const char *paths[] = {
     "/motd", "/about", "/elfdemo", "/", ".", "..", "", "/bin", "/bin/cat", "fz", "fz/a",
     "/fz", "disk", "disk/f", "/nothere", "//", "/./motd", "../../..", "true", "hello",
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "/dev/ptmx", "/dev/pts/0", "/dev/pts/1", "/dev/tty", "/dev/null", "/dev/zero", "/dev/loop0",
+    "/dev/loop-control", "/proc/self/stat", "/proc/self/fd", "/etc/passwd",
 };
 #define NPATHS (sizeof paths / sizeof paths[0])
+
+/* What execve may run: programs that end at once whatever their arguments
+ * (one never waits for input, which would stall the run), a script with
+ * an interpreter line (written at start), and paths that are no program. */
+static const char *progs[] = {
+    "/bin/mhello", "/bin/true", "/fzscript", "/fzscript2", "/motd", "/", "/nothere", "", "/bin",
+};
+#define NPROGS (sizeof progs / sizeof progs[0])
 
 static u64 stack_lo, stack_hi;      /* around the stack the fuzzer runs on */
 extern char __ehdr_start[], _end[];
@@ -187,17 +229,65 @@ static u64 arg(void) {
 }
 
 /* The Linux calls BastiOS implements (most of the fuzzing goes here), and
- * the rest of the table now and then. */
+ * the rest of the table now and then. test/sysfuzz_calls.sh checks that
+ * every call the kernel dispatches is here or in this list of calls that
+ * `tame` leaves out:
+ *
+ * left out: 15 34 42 60 130 153 169 231
+ */
 static const unsigned short linux_calls[] = {
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 22, 24, 25, 28,
-    32, 33, 35, 39, 41, 42, 43, 44, 45, 48, 49, 50, 51, 52, 54, 56, 57, 58, 61, 63, 72, 74, 75,
-    79, 80, 81, 83, 84, 87, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 102, 104, 105, 106, 107,
-    108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 124, 132, 137, 138,
-    140, 141, 149, 150, 157, 158, 160, 162, 186, 201, 204, 217, 218, 228, 229, 230, 235, 257,
-    258, 260, 261, 262, 263, 268, 269, 271, 280, 288, 292, 293, 302, 318, 439,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31, 32, 33, 35, 36, 37, 38, 39, 40, 41, 43, 44, 45, 46, 47, 48, 49, 50,
+    51, 52, 53, 54, 55, 56, 57, 58, 59, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74,
+    75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98,
+    99, 100, 102, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118,
+    119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 131, 132, 133, 135, 136, 137, 138,
+    139, 140, 141, 142, 143, 144, 145, 146, 148, 149, 150, 151, 152, 157, 158, 159, 160, 161,
+    162, 164, 165, 166, 170, 171, 186, 187, 200, 201, 202, 203, 204, 213, 217, 218, 220, 221,
+    222, 223, 224, 226, 227, 228, 229, 230, 232, 233, 234, 235, 240, 241, 242, 243, 244, 245,
+    247, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273,
+    274, 275, 276, 277, 278, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292,
+    293, 295, 296, 299, 302, 305, 307, 309, 310, 311, 312, 314, 315, 316, 318, 319, 322, 325,
+    326, 327, 328, 332, 334, 424, 434, 435, 438, 439, 441, 452,
 };
 #define NLINUX (sizeof linux_calls / sizeof linux_calls[0])
 
+
+/* ioctl requests the kernel implements: terminals and pseudo-terminals,
+ * descriptors, loop devices. Left out: those that wait for output to drain
+ * (TCSETSW, TCSETSF, TCSBRK, TCSBRKP, TIOCSBRK, TCSETAW, TCSETAF). */
+static const u64 ioctls[] = {
+    0x5401, 0x5402, 0x5405, 0x5406, 0x540A, 0x540B, 0x540E, 0x540F, 0x5410, 0x5411,
+    0x5412, 0x5413, 0x5414, 0x5415, 0x541B, 0x541C, 0x541D, 0x5420, 0x5421, 0x5422,
+    0x5424, 0x5429, 0x5432, 0x5441, 0x5450, 0x5451, 0x80045430, 0x40045431, 0x80045432,
+    0x80045439, 0x40045436, 0x80045438, 0x5437, 0x4C00, 0x4C01, 0x4C02, 0x4C03, 0x4C04,
+    0x4C05, 0x4C06, 0x4C07, 0x4C08, 0x4C09, 0x4C0A, 0x4C80, 0x4C81, 0x4C82, 0x8008127A,
+};
+#define NIOCTLS (sizeof ioctls / sizeof ioctls[0])
+
+/* The console the fuzzer shares with the shell that runs it: what a call
+ * changes on it (its termios, its foreground group, its O_NONBLOCK, input
+ * pushed into it) changes for the shell too, and a shell that reads EOF
+ * or stops ends the test for the wrong reason. Known by fstat: up to three
+ * (st_dev, st_ino, st_rdev) triples, from fd 0, /dev/console and /dev/tty. */
+static u64 cons[3][3];
+static int ncons;
+
+static void note_console(u64 fd_or_path, int is_path) {
+    u64 st[18];
+    u64 r = is_path ? lx(4, fd_or_path, (u64)st, 0, 0, 0, 0) : lx(5, fd_or_path, (u64)st, 0, 0, 0, 0);
+    if (r != 0 || ncons == 3) return;
+    cons[ncons][0] = st[0]; cons[ncons][1] = st[1]; cons[ncons][2] = st[5];
+    ncons++;
+}
+
+static int is_console(u64 f) {
+    u64 st[18];
+    if (lx(5, f, (u64)st, 0, 0, 0, 0) != 0) return 0;
+    for (int i = 0; i < ncons; i++)
+        if (st[0] == cons[i][0] && st[1] == cons[i][1] && st[5] == cons[i][2]) return 1;
+    return 0;
+}
 
 /* poll(fd, events) with no timeout: whether a call on fd would go ahead
  * rather than wait. A bad descriptor goes ahead (it fails at once). */
@@ -211,12 +301,87 @@ static int ready(u64 f, short events) {
  * not, or rules it out (returns 0). */
 static int tame(u64 n, u64 *a) {
     switch (n) {
-    case 59: case 60: case 231: case 322: case 169:    /* execve, exit, exit_group, execveat, reboot */
-    case 34: case 128: case 130:                      /* pause, rt_sigtimedwait, rt_sigsuspend */
+    case 59: case 322: {                              /* execve(at), in a child: a program */
+        u64 *v = (u64 *)(buf + 4096 + 256);           /* that ends at once; argv and envp */
+        u64 p = path(progs[pick(NPROGS)]);            /* real, or a quarter of the time hostile */
+        v[0] = p; v[1] = path("x=y"); v[2] = 0;
+        if (n == 59) { a[0] = p; if (pick(4)) a[1] = (u64)v; if (pick(4)) a[2] = (u64)(v + 1); }
+        else { a[1] = p; if (pick(4)) a[2] = (u64)v; if (pick(4)) a[3] = (u64)(v + 1); }
+        return 1;
+    }
+    case 60: case 231: case 169:                      /* exit, exit_group, reboot */
+    case 34: case 130:                                /* pause, rt_sigsuspend */
     case 15:                                          /* rt_sigreturn: registers from the stack */
-    case 202:                                         /* futex: waits on a word */
     case 42:                                          /* connect: TCP waits for a SYN reply */
+    case 37:                                          /* alarm: SIGALRM would end the run */
+    case 153:                                         /* vhangup: would hang up the shell */
         return 0;
+    case 202:                                         /* futex: the ops that cannot wait for */
+        switch (a[1] & 127) {                         /* ever, and a zero timeout (in buf) */
+        case 0: case 9: a[3] = (u64)buf; return 1;    /* WAIT, WAIT_BITSET */
+        case 1: case 3: case 4: case 5: case 10: return 1;   /* WAKE, REQUEUE, CMP_REQUEUE, WAKE_OP, WAKE_BITSET */
+        }
+        return 0;
+    case 128:                                         /* rt_sigtimedwait: zero timeout */
+        a[2] = (u64)buf; return 1;
+    case 434:                                         /* pidfd_open: ourselves only, so */
+        a[0] = lx(39, 0, 0, 0, 0, 0, 0); return 1;    /* pidfd_send_signal can reach no one else */
+    case 424:                                         /* pidfd_send_signal: signal 0 */
+        a[1] = 0; return 1;
+    case 310: case 311:                               /* process_vm_readv/writev: ourselves, */
+        a[0] = lx(39, 0, 0, 0, 0, 0, 0);              /* and no remote iovecs (zeros in buf), */
+        a[3] = (u64)buf; return 1;                    /* so the fuzzer writes nothing of its own */
+    case 129:                                         /* rt_sigqueueinfo: ourselves, signal 0 */
+        a[0] = lx(39, 0, 0, 0, 0, 0, 0); a[1] = 0; return 1;
+    case 38:                                          /* setitimer: only disarm */
+        a[1] = (u64)buf; return 1;
+    case 223:                                         /* timer_settime: only disarm */
+        a[2] = (u64)buf; return 1;
+    case 23:                                          /* select: zero timeout */
+        a[4] = (u64)buf; return 1;
+    case 270:                                         /* pselect6 */
+        a[4] = (u64)buf; return 1;
+    case 232: case 281:                               /* epoll_wait, epoll_pwait: no waiting */
+        a[3] = 0; return 1;
+    case 441:                                         /* epoll_pwait2 */
+        a[3] = (u64)buf; return 1;
+    case 242: case 243:                               /* mq_timedsend, mq_timedreceive: */
+        a[4] = (u64)buf; return 1;                    /* a deadline long past */
+    case 244:                                         /* mq_notify: never a signal */
+        a[1] = 0; return 1;
+    case 299:                                         /* recvmmsg: MSG_DONTWAIT, zero */
+        a[3] |= 0x40; a[4] = (u64)buf;                /* timeout, and only if ready */
+        return ready(a[0], 1);
+    case 307:                                         /* sendmmsg */
+        return ready(a[0], 4);
+    case 247:                                         /* waitid: WNOHANG */
+        a[3] |= 1; return 1;
+    case 65: case 220: {                              /* semop, semtimedop: one op, */
+        short *op = (short *)(buf + 4096);            /* IPC_NOWAIT, zero timeout */
+        op[0] = (short)pick(4); op[1] = (short)(pick(5) - 2); op[2] = 04000;
+        a[1] = (u64)op; a[2] = 1; a[3] = (u64)buf;
+        return 1;
+    }
+    case 69:                                          /* msgsnd: IPC_NOWAIT */
+        a[3] |= 04000; return 1;
+    case 70:                                          /* msgrcv */
+        a[4] |= 04000; return 1;
+    case 73:                                          /* flock: LOCK_NB */
+        a[1] |= 4; return 1;
+    case 275:                                         /* splice: SPLICE_F_NONBLOCK, and */
+        a[5] |= 2;                                    /* both ends ready (a pipe end may */
+        return ready(a[0], 1) && ready(a[2], 4);      /* ignore the flag) */
+    case 276:                                         /* tee */
+        a[3] |= 2; return ready(a[0], 1) && ready(a[1], 4);
+    case 278:                                         /* vmsplice */
+        a[3] |= 2; return ready(a[0], 5);
+    case 40: case 326:                                /* sendfile, copy_file_range */
+        return ready(n == 40 ? a[1] : a[0], 1) && ready(n == 40 ? a[0] : a[2], 4);
+    case 30:                                          /* shmat: never over ourselves (an */
+        if (a[1] && hits_mine(a[1] & ~0xFFFul, 64ul << 20)) a[1] = 0;   /* address replaces */
+        return 1;                                     /* what is mapped there) */
+    case 435:                                         /* clone3: flags from buf, all zero */
+        a[0] = (u64)buf; return 1;
     case 62: case 200:                                /* kill, tkill: only ourselves, signal 0 */
         a[0] = lx(39, 0, 0, 0, 0, 0, 0); a[1] = 0; return 1;
     case 234:                                         /* tgkill */
@@ -235,20 +400,30 @@ static int tame(u64 n, u64 *a) {
         a[2] = (u64)buf; return 1;
     case 61:                                          /* wait4: WNOHANG */
         a[2] |= 1; return 1;
-    case 0: case 17: case 19: case 43: case 45: case 288:   /* read-like: only if ready */
+    case 0: case 17: case 19: case 43: case 45: case 47: case 288: case 295: case 327:   /* read-like: only if ready */
         return ready(a[0], 1);
-    case 1: case 18: case 20: case 44:                /* write-like */
+    case 1: case 18: case 20: case 44: case 46: case 296: case 328:   /* write-like */
         if (a[0] <= 2 && a[2] > 256) a[2] = 256;      /* keep the console readable */
         return ready(a[0], 4);
     case 9:                                           /* mmap: never over ourselves */
         if ((a[3] & 0x100010) && hits_mine(a[0], a[1])) return 0;
         return 1;
-    case 11: case 10: case 28: case 149: case 150:    /* munmap, mprotect, madvise, mlock */
+    case 11: case 10: case 28: case 149: case 150: case 325:   /* munmap, mprotect, madvise, mlock(2) */
         return !hits_mine(a[0], a[1]);
     case 25:                                          /* mremap */
         return !hits_mine(a[0], a[1]) && !((a[3] & 2) && hits_mine(a[4], a[2]));
     case 158:                                         /* arch_prctl: the fuzzer has no TLS */
         return 1;
+    case 16:                                          /* ioctl: half the time a request the */
+        if (pick(2)) a[1] = ioctls[pick(NIOCTLS)];    /* kernel knows; on the console only */
+        if (is_console(a[0]))                         /* the ones that change nothing */
+            switch (a[1]) {
+            case 0x5401: case 0x5413: case 0x540F: case 0x5429: case 0x541B: return 1;
+            default: return 0;
+            }
+        return 1;
+    case 72:                                          /* fcntl: F_SETFL not on the console */
+        return !((a[1] & 0xFFFFFFFF) == 4 && is_console(a[0]));
     }
     return 1;
 }
@@ -288,6 +463,42 @@ u64 elf_main(u64 *sp) {
         say("sysfuzz: cannot map the buffer\n");
         return 2;
     }
+    note_console(0, 0);
+    note_console((u64)"/dev/console", 1);
+    note_console((u64)"/dev/tty", 1);
+
+    /* Descriptors of many kinds, so the small numbers `fd` picks reach
+     * more than the console: a pseudo-terminal pair, a pipe, a socket pair,
+     * an eventfd, an epoll, a file. (Each may fail; the calls go ahead.) */
+    u64 m = lx(2, path("/dev/ptmx"), 2, 0, 0, 0, 0);
+    unsigned *pn = (unsigned *)(buf + 4096);
+    if (lx(16, m, 0x40045431, (u64)pn, 0, 0, 0) == 0 && lx(16, m, 0x80045430, (u64)pn, 0, 0, 0) == 0) {
+        char *d = buf + 4096 + 64;                    /* TIOCSPTLCK 0, TIOCGPTN */
+        const char *pts = "/dev/pts/";
+        u64 j = 0;
+        while (pts[j]) { d[j] = pts[j]; j++; }
+        char dig[11]; int nd = 0; u64 v = *pn;
+        do { dig[nd++] = (char)('0' + v % 10); v /= 10; } while (v);
+        while (nd) d[j++] = dig[--nd];
+        d[j] = 0;
+        lx(2, path(d), 0x102, 0, 0, 0, 0);            /* O_RDWR|O_NOCTTY */
+    }
+    lx(22, (u64)buf, 0, 0, 0, 0, 0);                  /* pipe */
+    lx(53, 1, 1, 0, (u64)buf, 0, 0);                  /* socketpair(AF_UNIX, SOCK_STREAM) */
+    lx(290, 0, 0, 0, 0, 0, 0);                        /* eventfd2 */
+    lx(291, 0, 0, 0, 0, 0, 0);                        /* epoll_create1 */
+    lx(2, path("/motd"), 0, 0, 0, 0, 0);
+
+    /* Scripts for execve: one with an interpreter that ends at once, one
+     * whose interpreter is the script itself. */
+    static const char s1[] = "#!/bin/mhello an argument\n", s2[] = "#!/fzscript2\n";
+    u64 f1 = lx(2, path("/fzscript"), 0x241, 0755, 0, 0, 0);   /* O_WRONLY|O_CREAT|O_TRUNC */
+    lx(1, f1, (u64)s1, sizeof s1 - 1, 0, 0, 0);
+    lx(3, f1, 0, 0, 0, 0, 0);
+    u64 f2 = lx(2, path("/fzscript2"), 0x241, 0755, 0, 0, 0);
+    lx(1, f2, (u64)s2, sizeof s2 - 1, 0, 0, 0);
+    lx(3, f2, 0, 0, 0, 0, 0);
+
     say("sysfuzz: seed "); say_num(seed); say("\n");
     u64 done = 0, skipped = 0;
     for (u64 i = 0; i < calls; i++) {
@@ -306,11 +517,24 @@ u64 elf_main(u64 *sp) {
             say("\n");
         }
         if (nat) native(n, a[0], a[1], a[2]);
-        else if (n == 56 || n == 57 || n == 58) {
+        else if (n == 59 || n == 322) {
+            u64 c = lx_fork_then(n, a[0], a[1], a[2], a[3], a[4]);
+            /* The program ends at once, unless what it inherited makes it
+             * wait (a write to a full pipe nobody reads): then it is killed. */
+            for (int t = 0; (i64)c > 0 && t < 100; t++) {
+                if (lx(61, c, 0, 1, 0, 0, 0) != 0) c = 0;   /* wait4 WNOHANG */
+                else lx(24, 0, 0, 0, 0, 0, 0);             /* sched_yield */
+            }
+            if ((i64)c > 0) { lx(62, c, 9, 0, 0, 0, 0); lx(61, c, 0, 0, 0, 0, 0); }
+        }
+        else if (n == 56 || n == 57 || n == 58 || n == 435) {
             if (n == 56) a[1] = 0;                    /* clone: the child keeps our stack */
             lx_fork(n, a[0], a[1], a[2], a[3], a[4]);
         } else lx(n, a[0], a[1], a[2], a[3], a[4], a[5]);
         done++;
+        /* Reap the children that have ended (forks exit at once), or they
+         * fill the process table and every later fork fails. */
+        if (i % 8 == 0) while ((i64)lx(61, ~0ul, 0, 1, 0, 0, 0) > 0) {}
     }
     /* Reap the children (forks exit at once; spawned programs soon). */
     while ((i64)lx(61, ~0ul, 0, 0, 0, 0, 0) > 0) {}
