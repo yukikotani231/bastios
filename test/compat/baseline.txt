@@ -449,6 +449,7 @@ t_ltp3: fchown of it is EROFS
 t_ltp3: getsockopt on an O_PATH descriptor is EBADF
 t_ltp3: link out of a mount is EXDEV
 t_ltp3: link within the mount works
+t_ltp3: mremap grows a shared file mapping and its tail writes reach the file
 t_ltp3: name_to_handle_at with no room is EOVERFLOW and says how much it needs
 t_ltp3: open_by_handle_at opens the same file
 t_ltp3: readlinkat of that descriptor and "" reads the link

@@ -414,6 +414,7 @@ mq_notify02
 mq_timedreceive01
 mq_timedsend01
 mq_unlink01
+mremap01
 mremap02
 mremap03
 mremap04

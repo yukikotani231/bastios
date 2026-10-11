@@ -176,6 +176,54 @@ fn user_shared_page(spaces: &mut Vec[Space], pid: u64, va: u64) -> u64
   }
 }
 
+/// Is the page at user address va of process pid mapped writable?
+fn user_page_writable(spaces: &mut Vec[Space], pid: u64, va: u64) -> bool
+  requires spaces_ok(spaces) && pid < NPROC
+  ensures spaces_ok(spaces)
+{
+  if !user_range(va, 1) {
+    return false;
+  }
+  let off = va - USER_BASE;
+  match take_space(&mut spaces, pid) {
+    Space::Empty => { return false; },
+    Space::Mapped(mut root) => {
+      let mut r = false;
+      if pt_has(root, 1) {
+        r = pt_borrow(&mut root, 1, l3_writable, off);
+      }
+      put_space(&mut spaces, pid, Space::Mapped(root));
+      return r;
+    },
+  }
+}
+
+fn l3_writable(l3: &mut PageTable, off: u64) -> bool
+  requires pt_level(l3) == 3 && off < USER_SIZE
+{
+  if !pt_has(l3, 0) {
+    return false;
+  }
+  return pt_borrow(&mut l3, 0, l2_writable, off);
+}
+
+fn l2_writable(l2: &mut PageTable, off: u64) -> bool
+  requires pt_level(l2) == 2 && off < USER_SIZE
+{
+  let p = off / 4096;
+  let t = p / 512;
+  if !pt_has(l2, t) {
+    return false;
+  }
+  return pt_borrow(&mut l2, t, l1_writable, p % 512);
+}
+
+fn l1_writable(l1: &mut PageTable, i: u64) -> bool
+  requires pt_level(l1) == 1 && i < 512
+{
+  return pt_has(l1, i) && pt_writable(l1, i);
+}
+
 fn l3_shared(l3: &mut PageTable, off: u64) -> u64
   requires pt_level(l3) == 3 && off < USER_SIZE
   ensures result < NPAGES || result == NO_RESULT

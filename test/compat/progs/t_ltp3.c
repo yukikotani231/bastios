@@ -8,6 +8,7 @@
 #include "compat.h"
 #include <fcntl.h>
 #include <sys/epoll.h>
+#include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -131,6 +132,21 @@ int main(void) {
     close(ro_fd);
     umount("l3_ro");
     rmdir("l3_ro");
+
+    int mf = open("l3_mm", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    char pg[4096];
+    memset(pg, 'a', sizeof pg);
+    int mok = mf >= 0 && write(mf, pg, sizeof pg) == sizeof pg && ftruncate(mf, 3 * 4096) == 0;
+    char *m1 = mok ? mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, mf, 0) : MAP_FAILED;
+    char *m2 = m1 == MAP_FAILED ? MAP_FAILED : mremap(m1, 4096, 3 * 4096, MREMAP_MAYMOVE);
+    if (m2 != MAP_FAILED) { m2[0] = 'x'; m2[2 * 4096 + 5] = 'z'; msync(m2, 3 * 4096, MS_SYNC); }
+    char rb[3 * 4096] = {0};
+    EXPECT("mremap grows a shared file mapping and its tail writes reach the file",
+           m2 != MAP_FAILED && pread(mf, rb, sizeof rb, 0) == sizeof rb
+           && rb[0] == 'x' && rb[1] == 'a' && rb[2 * 4096 + 5] == 'z');
+    if (m2 != MAP_FAILED) munmap(m2, 3 * 4096);
+    if (mf >= 0) close(mf);
+    unlink("l3_mm");
 
     unlink("l3_d/f2");
     unlink("l3_link");
