@@ -25,7 +25,7 @@ test listed in test/compat/ltp_baseline.txt no longer passes;
 tests change the machine they run on (the clock, mounts, swap, limits), so
 they are not run on the build machine. LTP's own CI runs them on Linux.
 """
-import argparse, concurrent.futures, io, json, os, re, shlex, shutil, subprocess, sys, tempfile, time
+import argparse, concurrent.futures, io, json, math, os, re, shlex, shutil, subprocess, sys, tempfile, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from run import Guest, NOTE, esc, syscall_names  # noqa: E402
@@ -33,6 +33,7 @@ from run import Guest, NOTE, esc, syscall_names  # noqa: E402
 HERE = os.path.dirname(os.path.abspath(__file__))
 BATCH = 63              # programs per disk image (the disk holds 64 files, one is kconfig)
 TFAIL, TBROK, TWARN, TCONF = 1, 2, 4, 32
+WAITED = 20             # seconds: a failing test this slow was waiting out a timeout
 # LTP's result lines: "file.c:12: TFAIL: why", or from tests on its old
 # library, "name 1 TFAIL : file.c:12: why".
 RESULT = re.compile(r"^(?:\S+:\d+:|\S+\s+\d+) +(TFAIL|TBROK|TWARN|TCONF|TPASS|TINFO) *: *(.*)$")
@@ -133,7 +134,7 @@ def batches(tests, n):
         yield cur
 
 
-def run_batch(args, group, progs, work, log):
+def run_batch(args, group, progs, work, log, idle=False):
     """Boots a kernel with this batch's programs on its disk and runs its
     tests. Returns their results."""
     os.makedirs(work)
@@ -147,7 +148,7 @@ def run_batch(args, group, progs, work, log):
     shutil.copy(os.path.join(HERE, "ltp_kconfig"), kconfig)
     subprocess.run([os.path.join(HERE, "mkdisk.py"), disk, kconfig] + files, check=True)
     results = []
-    g = Guest(args.kernel, disk, log)
+    g = Guest(args.kernel, disk, log, idle=idle)
     try:
         g.boot()
         for tag, argv, _ in group:
@@ -155,9 +156,11 @@ def run_batch(args, group, progs, work, log):
             # that wants a file system on its device is given tmpfs, which
             # needs no mkfs (there is no ext2 here).
             cmd = " ".join(shlex.quote(a) for a in ["/disk/" + argv[0]] + argv[1:])
+            t0 = time.time()
             text, status = g.run(f"cd /disk; TMPDIR=/tmp KCONFIG_PATH=/disk/kconfig LTP_DEV_FS_TYPE=tmpfs LTP_COLORIZE_OUTPUT=0 {cmd}; "
                                  "echo @@end $?", args.timeout)
             results.append(record(tag, text, status))
+            results[-1]["secs"] = round(time.time() - t0, 1)
     except SystemExit as e:
         # The kernel did not come back up after a hang: the rest of the
         # batch did not run.
@@ -169,29 +172,76 @@ def run_batch(args, group, progs, work, log):
     return results
 
 
-def run_guest(args, tests, progs, log):
-    """Runs the batches, args.jobs machines at a time."""
-    groups = list(batches(tests, BATCH))
+def waiting(tests, last, gated):
+    """Splits the tests into the usual ones and those that, last time,
+    failed after waiting out a timeout (LTP's own, or ours) and are not in
+    the baseline: those run on machines of their own that get only idle
+    CPU time (see run_guest). A test in the baseline (gated) always runs as usual, so a
+    timing test that once failed slowly is not moved where it would fail
+    again. last is the previous run's results.json, if any; without one
+    every test runs as usual, and so does every test when gated is None
+    (--update-baseline: a test that passes now must not be starved of the
+    chance)."""
+    prev = {}
+    try:
+        with open(last) as f:
+            prev = {t["name"]: t for t in json.load(f)["tests"]}
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    busy, idle = [], []
+    for t in tests:
+        p = prev.get(t[0])
+        slow = gated is not None and t[0] not in gated and p and p.get("result") != "pass" and p.get("secs", 0) >= WAITED
+        (idle if slow else busy).append(t)
+    return busy, idle, {k: p.get("secs", 0) for k, p in prev.items()}
+
+
+def run_guest(args, tests, progs, log, gated):
+    """Runs the batches, args.jobs machines at a time. The tests that only
+    wait (see waiting()) run besides those, on as many more machines as it
+    takes to finish them within about the time the others take. A machine
+    waiting in a sleep still keeps a host CPU busy (the kernel retries a
+    sleeping call until its time is up), so those machines run under
+    SCHED_IDLE: the others, where the timing tests are, keep the CPUs they
+    had. (At nice 19 they still took enough to fail epoll_pwait03's
+    timing in 4 runs of 4.)"""
+    busy, idle, secs = waiting(tests, os.path.join(args.out, "results.json"), gated)
+    groups = list(batches(busy, BATCH))
+    lanes = []
+    if idle:
+        per_lane = max(WAITED, sum(secs.get(t[0], 0) for t in busy) / args.jobs)
+        n = max(1, math.ceil(sum(secs[t[0]] for t in idle) / per_lane))
+        lanes = [[] for _ in range(n)]
+        load = [0.0] * n
+        for t in sorted(idle, key=lambda t: -secs[t[0]]):
+            i = load.index(min(load))
+            lanes[i].append(t)
+            load[i] += secs[t[0]]
+        lanes = [sorted(l, key=tests.index) for l in lanes if l]
+    every = groups + lanes
     work = tempfile.mkdtemp(prefix="ltp-disk-")
-    logs = [io.BytesIO() for _ in groups]
+    logs = [io.BytesIO() for _ in every]
     done = []
 
     def one(i):
-        r = run_batch(args, groups[i], progs, os.path.join(work, str(i)), logs[i])
+        r = run_batch(args, every[i], progs, os.path.join(work, str(i)), logs[i], i >= len(groups))
         done.append(i)
         bad = sum(1 for x in r if x["result"] not in ("pass", "unsupported"))
-        print(f"ltp: batch {i + 1} done ({len(done)} of {len(groups)}): "
+        print(f"ltp: batch {i + 1} done ({len(done)} of {len(every)}): "
               f"{sum(1 for x in r if x['result'] == 'pass')} of {len(r)} pass, {bad} fail", flush=True)
         return r
 
     try:
-        with concurrent.futures.ThreadPoolExecutor(args.jobs) as ex:
-            per = list(ex.map(one, range(len(groups))))
+        with concurrent.futures.ThreadPoolExecutor(max(1, len(lanes))) as side, \
+             concurrent.futures.ThreadPoolExecutor(args.jobs) as ex:
+            later = [side.submit(one, len(groups) + i) for i in range(len(lanes))]
+            per = list(ex.map(one, range(len(groups)))) + [f.result() for f in later]
     finally:
         shutil.rmtree(work, ignore_errors=True)
         for b in logs:
             log.write(b.getvalue())
-    return [r for rs in per for r in rs]
+    order = {t[0]: i for i, t in enumerate(tests)}
+    return sorted((r for rs in per for r in rs), key=lambda r: order[r["name"]])
 
 
 def record(tag, text, status):
@@ -262,16 +312,19 @@ def main():
     ap.add_argument("--update-baseline", action="store_true")
     args = ap.parse_args()
 
+    base = os.path.join(HERE, "ltp_baseline.txt")
+    gated = None
+    if os.path.exists(base) and not args.update_baseline:
+        gated = {l.strip() for l in open(base) if l.strip() and not l.startswith("#")}
     skip = load_skip()
     tests, progs, missing = load_tests(args.ltp, args.only, skip)
     os.makedirs(args.out, exist_ok=True)
     t0 = time.time()
     with open(os.path.join(args.out, "serial.log"), "wb") as log:
-        results = run_guest(args, tests, progs, log)
+        results = run_guest(args, tests, progs, log, gated)
     report(results, missing, skip, syscall_names(), args.out, time.time() - t0)
 
     ids = sorted(r["name"] for r in results if r["result"] == "pass")
-    base = os.path.join(HERE, "ltp_baseline.txt")
     if args.only:
         return 0
     if args.update_baseline:
