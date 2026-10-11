@@ -182,28 +182,17 @@ fn read_root(root: &mut PageTable, off: u64) -> Word
 fn read_l3(l3: &mut PageTable, off: u64) -> Word
   requires pt_level(l3) == 3 && off + 8 <= USER_SIZE
 {
-  if !pt_has(l3, 0) {
-    return Word { ok: false, v: 0 };
-  }
-  return pt_borrow(&mut l3, 0, read_l2, off);
-}
-
-/// The 8 bytes at window offset off, most significant first.
-fn read_l2(l2: &mut PageTable, off: u64) -> Word
-  requires pt_level(l2) == 2 && off + 8 <= USER_SIZE
-  ensures pt_level(l2) == 2
-{
   let mut v = 0;
   let mut i = 8;
   while i > 0
-    invariant i <= 8 && pt_level(l2) == 2
+    invariant i <= 8 && pt_level(l3) == 3
     invariant (i == 8 ==> v == 0) && (i == 7 ==> v < 0x100) && (i == 6 ==> v < 0x10000)
     invariant (i == 5 ==> v < 0x1000000) && (i == 4 ==> v < 0x100000000)
     invariant (i == 3 ==> v < 0x10000000000) && (i == 2 ==> v < 0x1000000000000)
     invariant (i == 1 ==> v < 0x100000000000000)
   {
     i = i - 1;
-    let ch = w_byte(&mut l2, off + i);
+    let ch = w_byte(&mut l3, off + i);
     if ch == 256 {
       return Word { ok: false, v: 0 };
     }
@@ -1876,22 +1865,12 @@ fn map_l3(l3: &mut PageTable, m: &mut Mem, from: u64, to: u64, sh: bool) -> bool
   requires pt_level(l3) == 3 && mem_ok(m) && to <= WPAGES
   ensures mem_ok(m)
 {
-  if !pt_has(l3, 0) {
-    return false;
-  }
-  return pt_borrow(&mut l3, 0, map_l2, &mut m, from, to, sh);
-}
-
-fn map_l2(l2: &mut PageTable, m: &mut Mem, from: u64, to: u64, sh: bool) -> bool
-  requires pt_level(l2) == 2 && mem_ok(m) && to <= WPAGES
-  ensures mem_ok(m)
-{
   let mut ok = true;
   let mut p = from;
   while ok && p < to
-    invariant mem_ok(m) && pt_level(l2) == 2 && to <= WPAGES
+    invariant mem_ok(m) && pt_level(l3) == 3 && to <= WPAGES
   {
-    ok = w_map(&mut m, &mut l2, p, sh);
+    ok = w_map(&mut m, &mut l3, p, sh);
     p = p + 1;
   }
   return ok;
@@ -2062,6 +2041,15 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     }
   } else {
     let reserve = (anon && prot == 0) || cached;
+    // Where addr asks, if nothing is there (mmap_hint, src/lxmem.bastio).
+    let hp = mmap_hint(&mut k, pid, addr, pages);
+    if hp < STACK_FIRST {
+      if !reserve && !(lazy && anon_add(&mut k, pid, hp, hp + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, hp, hp + pages, sh) {
+        hole_add(&mut k, pid, hp, hp + pages);
+        return ENOMEM;
+      }
+      return lx_mmap_fill(&mut k, pid, hp * 4096, pages, prot, flags, fd, off, anon, cached, f, sh);
+    }
     // A hole munmap left first (src/lxmem.bastio): its pages are unmapped.
     let h = hole_take(&mut k, pid, pages);
     if h < STACK_FIRST {

@@ -105,22 +105,12 @@ fn write_l3(l3: &mut PageTable, con: &mut Con, off: u64, n: u64) -> u64
   requires con_ok(con) && pt_level(l3) == 3 && off + n <= USER_SIZE
   ensures con_ok(con)
 {
-  if !pt_has(l3, 0) {
-    return 0;
-  }
-  return pt_borrow(&mut l3, 0, write_l2, &mut con, off, n);
-}
-
-fn write_l2(l2: &mut PageTable, con: &mut Con, off: u64, n: u64) -> u64
-  requires con_ok(con) && pt_level(l2) == 2 && off + n <= USER_SIZE
-  ensures con_ok(con)
-{
   let mut k = 0;
   let mut ok = true;
   while ok && k < n
-    invariant k <= n && pt_level(l2) == 2 && con_ok(con)
+    invariant k <= n && pt_level(l3) == 3 && con_ok(con)
   {
-    let ch = w_byte(&mut l2, off + k);
+    let ch = w_byte(&mut l3, off + k);
     if ch == 256 {
       ok = false;
     } else {
@@ -169,22 +159,12 @@ fn find_l3(l3: &mut PageTable, off: u64, n: u64) -> u64
   requires pt_level(l3) == 3 && off + n <= USER_SIZE
   ensures result <= NPROGS
 {
-  if !pt_has(l3, 0) {
-    return NPROGS;
-  }
-  return pt_borrow(&mut l3, 0, find_l2, off, n);
-}
-
-fn find_l2(l2: &mut PageTable, off: u64, n: u64) -> u64
-  requires pt_level(l2) == 2 && off + n <= USER_SIZE
-  ensures result <= NPROGS
-{
   let mut found = NPROGS;
   let mut i = 0;
   while i < NPROGS
-    invariant i <= NPROGS && found <= NPROGS && pt_level(l2) == 2
+    invariant i <= NPROGS && found <= NPROGS && pt_level(l3) == 3
   {
-    if found == NPROGS && w_matches(&mut l2, off, n, prog_name(i)) {
+    if found == NPROGS && w_matches(&mut l3, off, n, prog_name(i)) {
       found = i;
     }
     i = i + 1;
@@ -192,19 +172,19 @@ fn find_l2(l2: &mut PageTable, off: u64, n: u64) -> u64
   return found;
 }
 
-/// Do the n bytes at offset off of the window `l2` maps spell `name`?
-fn w_matches(l2: &mut PageTable, off: u64, n: u64, name: Str) -> bool
-  requires pt_level(l2) == 2 && off + n <= USER_SIZE
-  ensures pt_level(l2) == 2
+/// Do the n bytes at offset off of the window `l3` maps spell `name`?
+fn w_matches(l3: &mut PageTable, off: u64, n: u64, name: Str) -> bool
+  requires pt_level(l3) == 3 && off + n <= USER_SIZE
+  ensures pt_level(l3) == 3
 {
   if n != slen(name) {
     return false;
   }
   let mut k = 0;
   while k < n
-    invariant k <= n && pt_level(l2) == 2
+    invariant k <= n && pt_level(l3) == 3
   {
-    if w_byte(&mut l2, off + k) != cast[u64](sget(name, k)) {
+    if w_byte(&mut l3, off + k) != cast[u64](sget(name, k)) {
       return false;
     }
     k = k + 1;

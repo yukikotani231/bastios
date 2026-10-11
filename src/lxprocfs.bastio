@@ -500,22 +500,24 @@ fn put_c(o: &mut Bytes, at: u64, c: u8) -> u64
   return at + 1;
 }
 
-/// Appends the low 40 bits of v as 10 hex digits (a user address).
+/// Appends v in hex, at least 8 digits, as Linux's %08lx.
 fn put_x(o: &mut Bytes, at: u64, v: u64) -> u64
   requires blen(o) == PROC_OUT && at <= PROC_OUT
   ensures blen(o) == PROC_OUT && result <= PROC_OUT
 {
   let mut a = at;
-  let mut sh = 10;
+  let mut sh = 16;
   while sh > 0
-    invariant sh <= 10 && blen(o) == PROC_OUT && a <= PROC_OUT
+    invariant sh <= 16 && blen(o) == PROC_OUT && a <= PROC_OUT
   {
     sh = sh - 1;
     let d = (v >> (4 * sh)) & 15;
-    if d < 10 {
-      a = put_c(&mut o, a, cast[u8](48 + d));
-    } else {
-      a = put_c(&mut o, a, cast[u8](87 + d));
+    if sh < 8 || v >> (4 * sh) != 0 {       // at least 8 digits, as Linux's %08lx
+      if d < 10 {
+        a = put_c(&mut o, a, cast[u8](48 + d));
+      } else {
+        a = put_c(&mut o, a, cast[u8](87 + d));
+      }
     }
   }
   return a;

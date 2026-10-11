@@ -22,7 +22,7 @@ typedef unsigned long u64;
 typedef long i64;
 
 #define USER_BASE 0x8000000000ul
-#define USER_SIZE (1ul << 30)
+#define USER_SIZE (1ul << 39)
 
 static u64 lx(u64 n, u64 a, u64 b, u64 c, u64 d, u64 e, u64 f) {
     register u64 r10 __asm__("r10") = d;

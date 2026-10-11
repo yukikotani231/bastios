@@ -423,6 +423,7 @@ t_mem: MAP_SHARED file mapping across fork
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
 t_mem: a MAP_SHARED mapping sees write(2)
+t_mem: a big window: 1.2 GiB of PROT_NONE reservations as the Go runtime makes, then 4 GiB of mmap touched at both ends
 t_mem: an 8 MiB stack: 6 MiB of locals in a function
 t_mem: file for mapping
 t_mem: fork: parent and child each see only their own writes (copy-on-write), read(2) into a shared page, a second thread, mprotect and MADV_DONTNEED
@@ -438,6 +439,7 @@ t_mem: mmap anonymous
 t_mem: mmap is zeroed
 t_mem: mmap of a closed descriptor is EBADF
 t_mem: mmap of a file opened write-only is EACCES
+t_mem: mmap takes a free address hint and grows from it, as the Go runtime's heap at 0xc000000000 does
 t_mem: more than the old 64 MiB window: a 96 MiB mmap, then a 100 MiB malloc
 t_mem: mprotect read-only faults on write
 t_mem: mremap grow

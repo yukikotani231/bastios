@@ -251,5 +251,37 @@ int main(void) {
                close(pf[0]); close(pf[1]);
            }
            ok; }));
+    EXPECT("a big window: 1.2 GiB of PROT_NONE reservations as the Go runtime makes, then 4 GiB of mmap touched at both ends", ({
+           size_t sz[6] = { 128 << 10, 1 << 20, 8 << 20, 64 << 20, 512 << 20, 512 << 20 };
+           void *res[6]; int ok = 1;
+           for (int i = 0; i < 6; i++) {
+               res[i] = mmap(0, sz[i], PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+               ok = ok && res[i] != MAP_FAILED;
+           }
+           size_t n = (size_t)4 << 30;
+           char *r = mmap(0, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           ok = ok && r != MAP_FAILED;
+           if (r != MAP_FAILED) {
+               r[0] = 1; r[n - 1] = 2;
+               ok = ok && r[0] == 1 && r[n - 1] == 2 && r[n / 2] == 0;
+               munmap(r, n);
+           }
+           for (int i = 0; i < 6; i++) if (res[i] != MAP_FAILED) munmap(res[i], sz[i]);
+           ok; }));
+    EXPECT("mmap takes a free address hint and grows from it, as the Go runtime's heap at 0xc000000000 does", ({
+           char *want = (char *)0xc000000000ul;
+           char *a = mmap(want, 64 << 20, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           char *b = mmap(want + (64 << 20), 64 << 20, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int ok = a == want && b == want + (64 << 20);
+           /* made usable piece by piece, as Go does */
+           ok = ok && mmap(a, 1 << 20, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == a;
+           if (ok) { a[0] = 3; a[(1 << 20) - 1] = 4; ok = a[0] == 3 && a[(1 << 20) - 1] == 4; }
+           /* a hint on memory in use is not taken */
+           char *c = mmap(want, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           ok = ok && c != MAP_FAILED && c != want;
+           if (c != MAP_FAILED) munmap(c, 4096);
+           if (a != MAP_FAILED) munmap(a, 64 << 20);
+           if (b != MAP_FAILED) munmap(b, 64 << 20);
+           ok; }));
     return done();
 }

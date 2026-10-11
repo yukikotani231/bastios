@@ -1380,19 +1380,27 @@ fn win_attach(m: &mut Mem, spaces: &mut Vec[Space], store: &mut PageTable, pid: 
       let mut ok = false;
       if pt_lease_count(&mut root) == 0 && pt_has(root, 1) {
         let mut l3 = pt_take(&mut root, 1);
-        if pt_has(l3, 0) {
-          let mut l2 = pt_take(&mut l3, 0);
-          if pt_has(store, seg) {
-            let sl1 = pt_take(&mut store, seg);
-            ok = true;
-            let mut i = 0;
-            while ok && i < n
-              invariant i <= n && n <= SHM_PAGES && from + n <= WPAGES && mem_ok(m)
-              invariant pt_level(l2) == 2 && pt_leases(l2) == 0 && pt_level(sl1) == 1
-              invariant pt_level(store) == 2 && pt_leases(store) == 0 && !pt_used(store, seg)
-            {
-              let p = from + i;
-              let t = p / 512;
+        if pt_has(store, seg) {
+          let sl1 = pt_take(&mut store, seg);
+          ok = true;
+          let mut i = 0;
+          while ok && i < n
+            invariant i <= n && n <= SHM_PAGES && from + n <= WPAGES && mem_ok(m)
+            invariant pt_level(l3) == 3 && pt_leases(l3) == 0 && pt_level(sl1) == 1
+            invariant pt_level(store) == 2 && pt_leases(store) == 0 && !pt_used(store, seg)
+          {
+            let p = from + i;
+            let t2 = p / L2_PAGES;
+            if !pt_has(l3, t2) {
+              let a = find_free(&mut m);
+              if a < NPAGES {
+                pt_put(&mut l3, t2, pt_new(take_page(&mut m, a), 2));
+              }
+            }
+            if pt_has(l3, t2) {
+              let mut l2 = pt_take(&mut l3, t2);
+              let q = p % L2_PAGES;
+              let t = q / 512;
               if !pt_has(l2, t) {
                 let a = find_free(&mut m);
                 if a < NPAGES {
@@ -1401,18 +1409,20 @@ fn win_attach(m: &mut Mem, spaces: &mut Vec[Space], store: &mut PageTable, pid: 
               }
               if pt_has(l2, t) {
                 let mut l1 = pt_take(&mut l2, t);
-                if pt_has(sl1, i) && pt_shared(sl1, i) && !pt_has(l1, p % 512) {
-                  pt_put_shared(&mut l1, p % 512, pt_dup_shared(sl1, i), w);
+                if pt_has(sl1, i) && pt_shared(sl1, i) && !pt_has(l1, q % 512) {
+                  pt_put_shared(&mut l1, q % 512, pt_dup_shared(sl1, i), w);
                 }
                 pt_put(&mut l2, t, l1);
               } else {
                 ok = false;
               }
-              i = i + 1;
+              pt_put(&mut l3, t2, l2);
+            } else {
+              ok = false;
             }
-            pt_put(&mut store, seg, sl1);
+            i = i + 1;
           }
-          pt_put(&mut l3, 0, l2);
+          pt_put(&mut store, seg, sl1);
         }
         pt_put(&mut root, 1, l3);
       }

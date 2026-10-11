@@ -76,16 +76,17 @@ int main(void) {
         free(huge);
     }
 
-    /* More than the machine has: 256 MiB of mmap on a 64 MiB machine,
-     * whose pages come only when first touched. */
-    char *wide = mmap(0, (size_t)256 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    /* More than the machine has: 8 GiB of mmap on a 64 MiB machine,
+     * whose pages come only when first touched (and past the first GiB
+     * of the window). */
+    char *wide = mmap(0, (size_t)8 << 30, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (wide == MAP_FAILED) { puts("mtest: wide mmap failed"); bad++; }
     else {
         int ws = 0;
-        for (int i = 0; i < 4; i++) wide[(size_t)i << 26] = (char)(i + 1);
-        for (int i = 0; i < 4; i++) ws += wide[(size_t)i << 26] == (char)(i + 1) && wide[((size_t)i << 26) + 4096] == 0;
+        for (int i = 0; i < 4; i++) wide[(size_t)i << 31] = (char)(i + 1);
+        for (int i = 0; i < 4; i++) ws += wide[(size_t)i << 31] == (char)(i + 1) && wide[((size_t)i << 31) + 4096] == 0;
         printf("mtest: wide %d\n", ws);
-        munmap(wide, (size_t)256 << 20);
+        munmap(wide, (size_t)8 << 30);
     }
 
     /* fork shares the pages until one side writes (copy-on-write): the

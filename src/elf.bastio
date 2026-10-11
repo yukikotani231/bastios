@@ -44,11 +44,11 @@ const INTERP_MAX: u64 = 256;          // the longest interpreter path, NUL inclu
 const ARGS_MAX: u64 = 131072;         // string bytes, NULs included (Linux's ARG_MAX)
 const ARGV_MAX: u64 = 8192;           // the most arguments
 const ENVC_MAX: u64 = 1024;           // the most environment strings
-const RANDOM_AT: u64 = 0x3FFFFFF0;    // USER_SIZE - 16
+const RANDOM_AT: u64 = 0x7FFFFFFFF0;  // USER_SIZE - 16
 const AUX_WORDS: u64 = 32;            // the auxiliary vector: 16 pairs
 // The vDSO (user/vdso.c): one read-only page just below the stack, holding
 // the image and, from byte VDSO_DATA, the clock it reads (src/tsc.bastio).
-const VDSO_PAGE: u64 = 260095;        // STACK_FIRST - 1
+const VDSO_PAGE: u64 = 134215679;     // STACK_FIRST - 1
 const VDSO_DATA: u64 = 496;           // word of the page: mult, base, at, epoch
 const AT_SYSINFO_EHDR: u64 = 33;
 const AT_IGNORE: u64 = 1;
@@ -309,22 +309,22 @@ fn on_page(a: u64, left: u64) -> u64
 /// a whole one is not even read (a page left for the first touch, Lz);
 /// so is a whole page mapped read-only (a shared page of program text,
 /// share_text: it holds these bytes already). Returns false if the bytes could not all be read.
-fn copy_in(l2: &mut PageTable, v: &mut Vfs, src: Src, from: u64, off: u64, n: u64) -> bool
-  requires pt_level(l2) == 2 && vfs_ok(v) && off + n <= IMAGE_MAX && from + n <= src.size
-  ensures pt_level(l2) == 2 && vfs_ok(v)
+fn copy_in(l3: &mut PageTable, v: &mut Vfs, src: Src, from: u64, off: u64, n: u64) -> bool
+  requires pt_level(l3) == 3 && vfs_ok(v) && off + n <= IMAGE_MAX && from + n <= src.size
+  ensures pt_level(l3) == 3 && vfs_ok(v)
 {
   let mut k = 0;
   while k < n
-    invariant k <= n && pt_level(l2) == 2 && vfs_ok(v)
+    invariant k <= n && pt_level(l3) == 3 && vfs_ok(v)
   {
     let c = smaller(n - k, XFER);
-    if c == 4096 && (off + k) % 4096 == 0 && (w_readonly(&mut l2, (off + k) / 4096) || !w_has(&mut l2, (off + k) / 4096)) {
+    if c == 4096 && (off + k) % 4096 == 0 && (w_readonly(&mut l3, (off + k) / 4096) || !w_has(&mut l3, (off + k) / 4096)) {
       k = k + c;
     } else {
       if !src_read(&mut v, src, from + k, c) {
         return false;
       }
-      put_window(&mut l2, v.xfer, off + k, c);
+      put_window(&mut l3, v.xfer, off + k, c);
       k = k + c;
     }
   }
@@ -333,17 +333,17 @@ fn copy_in(l2: &mut PageTable, v: &mut Vfs, src: Src, from: u64, off: u64, n: u6
 
 /// Copies the first `n` bytes of `x` to window offset `off`, a page at a
 /// time; pages the window does not map are skipped.
-fn put_window(l2: &mut PageTable, x: &Bytes, off: u64, n: u64)
-  requires pt_level(l2) == 2 && n <= blen(x) && off + n <= USER_SIZE
-  ensures pt_level(l2) == 2
+fn put_window(l3: &mut PageTable, x: &Bytes, off: u64, n: u64)
+  requires pt_level(l3) == 3 && n <= blen(x) && off + n <= USER_SIZE
+  ensures pt_level(l3) == 3
 {
   let mut k = 0;
   while k < n
-    invariant k <= n && pt_level(l2) == 2
+    invariant k <= n && pt_level(l3) == 3
   {
     let a = off + k;
     let m = on_page(a, n - k);
-    w_write(&mut l2, a, x, k, m);
+    w_write(&mut l3, a, x, k, m);
     k = k + m;
   }
 }
@@ -402,9 +402,9 @@ fn elf_sp(args: &Bytes, alen: u64, total: u64) -> u64
 /// ENVC_MAX are not passed). `seed` fills the AT_RANDOM bytes; it is not a
 /// source of secure randomness. `base` is where the interpreter was placed,
 /// or 0. False if memory ran out.
-fn init_stack(m: &mut Mem, l2: &mut PageTable, e: Elf, base: u64, vdso: bool, args: &Bytes, alen: u64, total: u64, seed: u64) -> bool
-  requires mem_ok(m) && pt_level(l2) == 2 && alen <= total && total <= ARGS_MAX && total <= blen(args)
-  ensures mem_ok(m) && pt_level(l2) == 2
+fn init_stack(m: &mut Mem, l3: &mut PageTable, e: Elf, base: u64, vdso: bool, args: &Bytes, alen: u64, total: u64, seed: u64) -> bool
+  requires mem_ok(m) && pt_level(l3) == 3 && alen <= total && total <= ARGS_MAX && total <= blen(args)
+  ensures mem_ok(m) && pt_level(l3) == 3
 {
   let argc = nul_count(args, 0, alen, ARGV_MAX);
   let envc = nul_count(args, alen, total, ENVC_MAX);
@@ -412,9 +412,9 @@ fn init_stack(m: &mut Mem, l2: &mut PageTable, e: Elf, base: u64, vdso: bool, ar
   let at = vec_at(s, argc, envc);
   let mut p = at / 4096;
   while p < WPAGES
-    invariant pt_level(l2) == 2 && mem_ok(m)
+    invariant pt_level(l3) == 3 && mem_ok(m)
   {
-    if !w_map(&mut m, &mut l2, p, false) {
+    if !w_map(&mut m, &mut l3, p, false) {
       return false;
     }
     p = p + 1;
@@ -475,9 +475,9 @@ fn init_stack(m: &mut Mem, l2: &mut PageTable, e: Elf, base: u64, vdso: bool, ar
     bset(&mut rnd, r, cast[u8](x / 0x800000));
     r = r + 1;
   }
-  put_window(&mut l2, vec, at, 8 * words);
-  put_window(&mut l2, args, s, total);
-  put_window(&mut l2, rnd, RANDOM_AT, 16);
+  put_window(&mut l3, vec, at, 8 * words);
+  put_window(&mut l3, args, s, total);
+  put_window(&mut l3, rnd, RANDOM_AT, 16);
   bfree(vec);
   bfree(rnd);
   return true;
@@ -494,22 +494,28 @@ fn vdso_fill(f: &mut Frame, t: Tsc, epoch: u64) {
 
 /// Maps the vDSO, read-only, at window page VDSO_PAGE (which must not be
 /// mapped yet). False if memory ran out.
-fn vdso_map(m: &mut Mem, l2: &mut PageTable, t: Tsc, epoch: u64) -> bool
-  requires mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0
-  ensures mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0
+fn vdso_map(m: &mut Mem, l3: &mut PageTable, t: Tsc, epoch: u64) -> bool
+  requires mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
+  ensures mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
 {
-  if !w_map(&mut m, &mut l2, VDSO_PAGE, false) {
+  if !w_map(&mut m, &mut l3, VDSO_PAGE, false) {
     return false;
   }
-  let i = VDSO_PAGE / 512;
-  if pt_has(l2, i) {
-    let mut l1 = pt_take(&mut l2, i);
-    if pt_has(l1, VDSO_PAGE % 512) && !pt_shared(l1, VDSO_PAGE % 512) {
-      let mut f = pt_take_frame(&mut l1, VDSO_PAGE % 512);
-      vdso_fill(&mut f, t, epoch);
-      pt_put_frame(&mut l1, VDSO_PAGE % 512, f, false);
+  let t2 = VDSO_PAGE / L2_PAGES;
+  let q = VDSO_PAGE % L2_PAGES;
+  if pt_has(l3, t2) {
+    let mut l2 = pt_take(&mut l3, t2);
+    let i = q / 512;
+    if pt_has(l2, i) {
+      let mut l1 = pt_take(&mut l2, i);
+      if pt_has(l1, q % 512) && !pt_shared(l1, q % 512) {
+        let mut f = pt_take_frame(&mut l1, q % 512);
+        vdso_fill(&mut f, t, epoch);
+        pt_put_frame(&mut l1, q % 512, f, false);
+      }
+      pt_put(&mut l2, i, l1);
     }
-    pt_put(&mut l2, i, l1);
+    pt_put(&mut l3, t2, l2);
   }
   return true;
 }
@@ -523,13 +529,13 @@ fn aux(vec: &mut Bytes, w: u64, key: u64, v: u64)
 }
 
 /// The window page cache for file h's page pg: maps it read-only at
-/// window page p of l2 from the page cache (src/pcache.bastio), reading it
+/// window page p of l3 from the page cache (src/pcache.bastio), reading it
 /// in first if no process has it. A page that cannot be cached (the file
 /// is shorter than it was, or memory ran out) is left to be copied, so
 /// this is false only if a level-1 table could not be made.
-fn share_file_page(m: &mut Mem, v: &mut Vfs, h: u64, pg: u64, l2: &mut PageTable, p: u64) -> bool
-  requires mem_ok(m) && vfs_ok(v) && pt_level(l2) == 2 && p < WPAGES && pg < 512
-  ensures mem_ok(m) && vfs_ok(v) && pt_level(l2) == 2
+fn share_file_page(m: &mut Mem, v: &mut Vfs, h: u64, pg: u64, l3: &mut PageTable, p: u64) -> bool
+  requires mem_ok(m) && vfs_ok(v) && pt_level(l3) == 3 && p < WPAGES && pg < 512
+  ensures mem_ok(m) && vfs_ok(v) && pt_level(l3) == 3
 {
   let mut slot = pc_find(v.pc, h, pg);
   if slot >= PC_N {
@@ -541,28 +547,35 @@ fn share_file_page(m: &mut Mem, v: &mut Vfs, h: u64, pg: u64, l2: &mut PageTable
       return true;
     }
   }
-  let t = p / 512;
-  if !pt_has(l2, t) {
-    let a = find_free(&mut m);
-    if a >= NPAGES {
-      return false;
-    }
-    pt_put(&mut l2, t, pt_new(take_page(&mut m, a), 1));
+  if !w_tables(&mut m, &mut l3, p) {
+    return false;
   }
-  pt_borrow(&mut l2, t, pc_map_text, &mut v.pc, slot, p % 512);
+  let t = p / L2_PAGES;
+  if pt_has(l3, t) {
+    pt_borrow(&mut l3, t, l2_map_text, &mut v.pc, slot, p % L2_PAGES);
+  }
   return true;
 }
 
+fn l2_map_text(l2: &mut PageTable, c: &mut PCache, slot: u64, q: u64)
+  requires pt_level(l2) == 2 && q < L2_PAGES && pc_ok(c) && slot < PC_N
+  ensures pt_level(l2) == 2 && pc_ok(c)
+{
+  if pt_has(l2, q / 512) {
+    pt_borrow(&mut l2, q / 512, pc_map_text, &mut c, slot, q % 512);
+  }
+}
+
 /// Maps the pages of program `src` (checked headers `e`) that only its
-/// read-only segments cover, read-only, into window `l2`: a built-in
+/// read-only segments cover, read-only, into window `l3`: a built-in
 /// program's from the cache k.txt (`st`, src/text.bastio), a file's from
 /// the page cache. A page a writable segment touches, one past the
 /// segment's file bytes, or one whose file offset is not page-aligned is
 /// left to be copied. False if memory ran out.
-fn share_text(m: &mut Mem, st: &mut PageTable, l2: &mut PageTable, v: &mut Vfs, src: Src, e: Elf) -> bool
-  requires mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l2) == 2 && vfs_ok(v)
+fn share_text(m: &mut Mem, st: &mut PageTable, l3: &mut PageTable, v: &mut Vfs, src: Src, e: Elf) -> bool
+  requires mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l3) == 3 && vfs_ok(v)
   requires e.ok && elf_fits(src.size, e)
-  ensures mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l2) == 2 && vfs_ok(v)
+  ensures mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l3) == 3 && vfs_ok(v)
 {
   if !src.file && src.prog >= 512 {
     return true;
@@ -591,7 +604,7 @@ fn share_text(m: &mut Mem, st: &mut PageTable, l2: &mut PageTable, v: &mut Vfs, 
   i = 0;
   while ok && i < e.phnum
     invariant i <= e.phnum && e.phnum <= PH_MAX && vfs_ok(v) && mem_ok(m)
-    invariant pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l2) == 2
+    invariant pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l3) == 3
   {
     let s = seg(&mut v, src, e.phoff, i, e.bias);
     if s.kind == SEG_LOAD && !s.w {
@@ -602,14 +615,14 @@ fn share_text(m: &mut Mem, st: &mut PageTable, l2: &mut PageTable, v: &mut Vfs, 
       }
       while ok && a + 4096 <= s.off + s.filesz
         invariant s.off <= a && a <= IMAGE_MAX + 4096 && s.off + s.filesz <= IMAGE_MAX && s.from + s.filesz <= src.size
-        invariant mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l2) == 2 && vfs_ok(v)
+        invariant mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l3) == 3 && vfs_ok(v)
       {
         let fo = s.from + (a - s.off);
         let p = a / 4096;
         if (p < lo || p >= hi) && fo % 4096 == 0 && fo / 4096 < 512 && src.file {
-          ok = share_file_page(&mut m, &mut v, src.f, fo / 4096, &mut l2, p);
+          ok = share_file_page(&mut m, &mut v, src.f, fo / 4096, &mut l3, p);
         } else if (p < lo || p >= hi) && fo % 4096 == 0 && fo / 4096 < 512 && src.prog < 512 {
-          ok = share_page(&mut m, &mut st, src.prog, prog_image(src.prog), fo / 4096, &mut l2, p);
+          ok = share_page(&mut m, &mut st, src.prog, prog_image(src.prog), fo / 4096, &mut l3, p);
         }
         a = a + 4096;
       }
@@ -667,10 +680,10 @@ fn lazy_plan(v: &mut Vfs, src: Src, e: Elf) -> Lz
 }
 
 /// share_text with the cache, if there is one.
-fn share_text_in(m: &mut Mem, txt: &mut Store, l2: &mut PageTable, v: &mut Vfs, src: Src, e: Elf) -> bool
-  requires mem_ok(m) && store_ok(txt) && pt_level(l2) == 2 && vfs_ok(v)
+fn share_text_in(m: &mut Mem, txt: &mut Store, l3: &mut PageTable, v: &mut Vfs, src: Src, e: Elf) -> bool
+  requires mem_ok(m) && store_ok(txt) && pt_level(l3) == 3 && vfs_ok(v)
   requires e.ok && elf_fits(src.size, e)
-  ensures mem_ok(m) && store_ok(txt) && pt_level(l2) == 2 && vfs_ok(v)
+  ensures mem_ok(m) && store_ok(txt) && pt_level(l3) == 3 && vfs_ok(v)
 {
   match txt {
     Store::None => {
@@ -679,7 +692,7 @@ fn share_text_in(m: &mut Mem, txt: &mut Store, l2: &mut PageTable, v: &mut Vfs, 
     },
     Store::Table(t) => {
       let mut st = t;
-      let ok = share_text(&mut m, &mut st, &mut l2, &mut v, src, e);
+      let ok = share_text(&mut m, &mut st, &mut l3, &mut v, src, e);
       txt = Store::Table(st);
       return ok;
     },
@@ -699,29 +712,29 @@ fn elf_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, e: Elf, isrc: 
 {
   match new_window(&mut m, "", 0) {
     Space::Empty => { return Space::Empty; },
-    Space::Mapped(mut l2) => {
+    Space::Mapped(mut l3) => {
       // Shared read-only pages first; the rest of the image gets fresh
       // pages, and the copy below skips the read-only ones.
-      let mut ok = share_text_in(&mut m, &mut txt, &mut l2, &mut v, src, e);
+      let mut ok = share_text_in(&mut m, &mut txt, &mut l3, &mut v, src, e);
       if ok && ie.ok {
-        ok = share_text_in(&mut m, &mut txt, &mut l2, &mut v, isrc, ie);
+        ok = share_text_in(&mut m, &mut txt, &mut l3, &mut v, isrc, ie);
       }
       let mut q = 0;
       while ok && q < (e.end + 4095) / 4096
-        invariant pt_level(l2) == 2 && mem_ok(m) && e.end <= IMAGE_MAX
+        invariant pt_level(l3) == 3 && mem_ok(m) && e.end <= IMAGE_MAX
       {
         if q < lz.first || q - lz.first >= lz.pages {
-          ok = w_map(&mut m, &mut l2, q, false);   // not left for the first touch
+          ok = w_map(&mut m, &mut l3, q, false);   // not left for the first touch
         }
         q = q + 1;
       }
       let mut i = 0;
       while ok && i < e.phnum
-        invariant i <= e.phnum && e.phnum <= PH_MAX && pt_level(l2) == 2 && vfs_ok(v)
+        invariant i <= e.phnum && e.phnum <= PH_MAX && pt_level(l3) == 3 && vfs_ok(v)
       {
         let s = seg(&mut v, src, e.phoff, i, e.bias);
         if s.kind == SEG_LOAD {
-          ok = copy_in(&mut l2, &mut v, src, s.from, s.off, s.filesz);
+          ok = copy_in(&mut l3, &mut v, src, s.from, s.off, s.filesz);
         } else if s.kind == SEG_BAD {
           ok = false;                       // the file changed since elf_parse
         }
@@ -734,19 +747,19 @@ fn elf_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, e: Elf, isrc: 
       }
       let mut j = 0;
       while ok && j < iph
-        invariant j <= iph && iph <= PH_MAX && pt_level(l2) == 2 && vfs_ok(v) && mem_ok(m)
+        invariant j <= iph && iph <= PH_MAX && pt_level(l3) == 3 && vfs_ok(v) && mem_ok(m)
       {
         let s = seg(&mut v, isrc, ie.phoff, j, ie.bias);
         if s.kind == SEG_LOAD {
           let mut p = s.off / 4096;
           while ok && p < (s.off + s.memsz + 4095) / 4096
-            invariant pt_level(l2) == 2 && mem_ok(m) && s.off + s.memsz <= IMAGE_MAX
+            invariant pt_level(l3) == 3 && mem_ok(m) && s.off + s.memsz <= IMAGE_MAX
           {
-            ok = w_map(&mut m, &mut l2, p, false);
+            ok = w_map(&mut m, &mut l3, p, false);
             p = p + 1;
           }
           if ok {
-            ok = copy_in(&mut l2, &mut v, isrc, s.from, s.off, s.filesz);
+            ok = copy_in(&mut l3, &mut v, isrc, s.from, s.off, s.filesz);
           }
         } else if s.kind == SEG_BAD {
           ok = false;
@@ -755,23 +768,23 @@ fn elf_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, e: Elf, isrc: 
       }
       // The vDSO, unless the program's own pages reach that high.
       let mut vdso = false;
-      if ok && !w_has(&mut l2, VDSO_PAGE) {
-        ok = vdso_map(&mut m, &mut l2, clk, epoch);
+      if ok && !w_has(&mut l3, VDSO_PAGE) {
+        ok = vdso_map(&mut m, &mut l3, clk, epoch);
         vdso = true;
       }
       if !ok {
-        free_l2(&mut m, l2);
+        free_l3(&mut m, l3);
         return Space::Empty;
       }
       let mut base = 0;
       if ie.ok {
         base = ie.bias;
       }
-      if !init_stack(&mut m, &mut l2, e, base, vdso, args, alen, total, seed) {
-        free_l2(&mut m, l2);
+      if !init_stack(&mut m, &mut l3, e, base, vdso, args, alen, total, seed) {
+        free_l3(&mut m, l3);
         return Space::Empty;
       }
-      return space_from_l2(&mut m, l2);
+      return space_from_l3(&mut m, l3);
     },
   }
 }

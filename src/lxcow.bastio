@@ -89,12 +89,18 @@ fn cow_break_all(k: &mut Kernel, pid: u64) -> bool
 
 fn break_l3(l3: &mut PageTable, m: &mut Mem) -> bool
   requires pt_level(l3) == 3 && pt_leases(l3) == 0 && mem_ok(m)
-  ensures mem_ok(m)
+  ensures pt_level(l3) == 3 && pt_leases(l3) == 0 && mem_ok(m)
 {
-  if !pt_has(l3, 0) {
-    return true;
+  let mut t = 0;
+  while t < WIN_L2S
+    invariant t <= WIN_L2S && pt_level(l3) == 3 && pt_leases(l3) == 0 && mem_ok(m)
+  {
+    if pt_has(l3, t) && !pt_borrow(&mut l3, t, break_l2, &mut m) {
+      return false;
+    }
+    t = t + 1;
   }
-  return pt_borrow(&mut l3, 0, break_l2, &mut m);
+  return true;
 }
 
 fn break_l2(l2: &mut PageTable, m: &mut Mem) -> bool
