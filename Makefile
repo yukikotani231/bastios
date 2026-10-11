@@ -360,7 +360,9 @@ $(COMPAT_BINS): build/compat/%: test/compat/progs/%.c test/compat/progs/compat.h
 build/compat:
 	mkdir -p $@
 
-build/compat/busybox: build/busybox/Makefile test/compat/busybox.config | build/compat
+# Copies build/busybox, so it waits for build/user/ash.elf, which builds in
+# that tree: under -j, cp met an object file being written and failed.
+build/compat/busybox: build/busybox/Makefile test/compat/busybox.config | build/compat build/user/ash.elf
 	rm -rf build/compat/bb && cp -r build/busybox build/compat/bb
 	$(MAKE) -C build/compat/bb -s clean >/dev/null
 	$(MAKE) -C build/compat/bb -s allnoconfig >/dev/null
