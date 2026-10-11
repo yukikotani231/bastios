@@ -3,11 +3,12 @@
 # forwards from SSHPORT on the host; "$ @host" commands run on the host, where
 # Dropbear's client logs in with the key made for the test
 # (build/compat/ssh_id, whose public half is on the disk). The client's
-# warnings go to /dev/null: it skips the host key check (-y -y). Root's home is
-# /, so its keys go in /.ssh. Guest only: run.py skips this file with --host.
+# warnings go to /dev/null: it skips the host key check (-y -y). Its key goes in
+# root's home (~root, from /etc/passwd), in .ssh/authorized_keys. Guest
+# only: run.py skips this file with --host.
 
 == dropbear: the server starts
-$ mkdir -p /.ssh && cp /disk/ssh_authorized_keys /.ssh/authorized_keys && chmod 700 /.ssh && chmod 600 /.ssh/authorized_keys && (/disk/dropbear -F -r /disk/ssh_host_key -p 22 -P /tmp/ca_db.pid > /tmp/ca_db.log 2>&1 &); sleep 1; echo started
+$ mkdir -p ~root/.ssh && cp /disk/ssh_authorized_keys ~root/.ssh/authorized_keys && chmod 700 ~root/.ssh && chmod 600 ~root/.ssh/authorized_keys && (/disk/dropbear -F -r /disk/ssh_host_key -p 22 -P /tmp/ca_db.pid > /tmp/ca_db.log 2>&1 &); sleep 1; echo started
 started
 
 == ssh: run a command
