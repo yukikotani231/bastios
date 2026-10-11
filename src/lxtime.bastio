@@ -94,13 +94,16 @@ fn wait_until(k: &mut Kernel, pid: u64, n: u64, dl: u64) -> u64
 /// scheduler: for poll, select, epoll_wait, pause and nanosleep, which servers sit in
 /// (nginx's master and workers kept two processors busy). Readiness
 /// that comes from elsewhere, such as a pipe written, is seen at the next
-/// tick, up to 10 ms late, and so is the deadline.
+/// tick, up to 10 ms late. The deadline is not: within a tick of it the
+/// call runs again on every pass instead, as nanosleep does, so a short
+/// timeout ends on time (LTP's select02, pselect01, poll02 and
+/// epoll_wait02 measure it).
 fn wait_asleep(k: &mut Kernel, pid: u64, n: u64, dl: u64) -> u64
   requires kok(k) && pid < NPROC && dl <= FOREVER
   ensures kok(k)
 {
   let r = wait_until(&mut k, pid, n, dl);
-  if r == SWITCH {
+  if r == SWITCH && (n == LX_PAUSE || dl == FOREVER || dl > k.ns && dl - k.ns > NS_PER_TICK) {
     nap(&mut k, pid, n != LX_PAUSE);        // pause waits only for a signal
   }
   return r;
