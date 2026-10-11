@@ -16,13 +16,17 @@
 // block size, and the 64-byte file name, eight bytes a word.
 //
 // A device whose file is mounted (mount -t bstdisk3 /dev/loopN,
-// src/lxmount.bastio) gives EBUSY for read, write, LOOP_CLR_FD and
-// LOOP_SET_STATUS until the unmount: the mount holds the file's pages.
+// src/lxmount.bastio) gives EBUSY for read, write, LOOP_CLR_FD,
+// LOOP_SET_STATUS, LOOP_SET_CAPACITY and LOOP_CHANGE_FD until the
+// unmount: the mount holds the file's pages.
+//
+// /sys/block/loopN shows a device's size, read-only flag, file, offset,
+// size limit and flags (src/lxprocfs.bastio).
 //
 // Not done: partitions (LO_FLAGS_PARTSCAN is kept, nothing is scanned),
 // autoclear (kept, the device is not unbound on its last close), direct
-// I/O (there is no page cache to bypass), and binding a device to another
-// block device. LOOP_CTL_ADD and LOOP_CTL_REMOVE do not add or remove
+// I/O (the flag is kept; there is no page cache to bypass), and binding a
+// device to another block device. LOOP_CTL_ADD and LOOP_CTL_REMOVE do not add or remove
 // devices: there are always eight.
 
 import "lxfd.bastio";
@@ -52,7 +56,7 @@ const BLKBSZGET: u64 = 0x80081270;
 const BLKGETSIZE64: u64 = 0x80081272;
 
 const LO_FLAGS_READ_ONLY: u64 = 1;
-const LO_FLAGS_SETTABLE: u64 = 28;       // AUTOCLEAR (4) | PARTSCAN (8) | DIRECT_IO (16)
+const LO_FLAGS_DIRECT_IO: u64 = 16;
 const LOOP_INFO_SIZE: u64 = 168;         // struct loop_info
 const LOOP_INFO64_SIZE: u64 = 232;       // struct loop_info64
 const LOOP_CONFIG_SIZE: u64 = 304;       // struct loop_config
@@ -201,29 +205,85 @@ fn loop_bind(k: &mut Kernel, pid: u64, n: u64, fd: u64) -> u64
   return 0;
 }
 
-/// LOOP_SET_STATUS and LOOP_SET_STATUS64: the offset, size limit, settable
-/// flags and name from the struct loop_info(64) in the transfer buffer.
-fn loop_status_in(k: &mut Kernel, n: u64, wide: bool, at: u64)
+/// LOOP_CHANGE_FD: swaps the file under bound, read-only device n for the
+/// one open as descriptor fd, which must be a file of the same size (as on
+/// Linux, so that what the device holds can change but not its size).
+fn loop_change(k: &mut Kernel, pid: u64, n: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC && n < LOOP_N
+  ensures kok(k)
+{
+  let prev = lo_get(k.loops, n, 0);
+  if prev == 0 || prev > OFD_N || lo_get(k.loops, n, 3) % 2 == 0 {
+    return EINVAL;
+  }
+  let h = fd_ofd(k, pid, fd);
+  let d = fd_look(k, pid, fd);
+  if h >= OFD_N || d.kind == K_BAD {
+    return EBADF;
+  }
+  let row = loop_row(k, n);
+  if d.kind != K_FILE || row >= FD_ROWS || d.x >= FD_ROWS {
+    return EINVAL;
+  }
+  let was = vfs_size(&mut k.fs, vfs_row_file(k.fs, row));
+  let now = vfs_size(&mut k.fs, vfs_row_file(k.fs, d.x));
+  if was == NO_FILE || was != now {
+    return EINVAL;
+  }
+  ref_value(&mut k, FD_OFD + h);
+  lo_set(&mut k.loops, n, 0, h + 1);
+  unref_value(&mut k, FD_OFD + prev - 1);
+  return 0;
+}
+
+/// LOOP_SET_STATUS(64) and LOOP_CONFIGURE: the offset, size limit, flags
+/// and name from the struct loop_info(64) at `at` in the transfer buffer.
+/// As on Linux, LOOP_SET_STATUS sets AUTOCLEAR and PARTSCAN and clears
+/// only AUTOCLEAR; LOOP_CONFIGURE (`config`) also sets READ_ONLY and
+/// DIRECT_IO. A device over a file opened read-only stays read-only.
+fn loop_status_in(k: &mut Kernel, n: u64, wide: bool, config: bool, at: u64)
   requires kok(k) && n < LOOP_N && at <= XFER - LOOP_INFO64_SIZE
   ensures kok(k)
 {
   let mut off = 0;
   let mut lim = 0;
   let mut flags = 0;
-  let mut name = at + 36;
+  let mut name = at + 48;
   if wide {
     off = get_u64(k.fs.xfer, at + 24);
     lim = get_u64(k.fs.xfer, at + 32);
     flags = get_u64(k.fs.xfer, at + 52) % 0x100000000;
     name = at + 56;
   } else {
-    off = get_u64(k.fs.xfer, at + 20) % 0x80000000;   // an int
-    flags = get_u64(k.fs.xfer, at + 32) % 0x100000000;
+    // struct loop_info on x86-64: lo_number, then three 8-byte device and
+    // inode fields, so lo_offset is at 32, lo_flags at 44, lo_name at 48.
+    off = get_u64(k.fs.xfer, at + 32) % 0x80000000;   // an int
+    flags = get_u64(k.fs.xfer, at + 44) % 0x100000000;
   }
   lo_set(&mut k.loops, n, 1, off);
   lo_set(&mut k.loops, n, 2, lim);
-  let keep = lo_get(k.loops, n, 3) % 2;     // read-only comes from the file
-  lo_set(&mut k.loops, n, 3, keep + (flags & LO_FLAGS_SETTABLE));
+  let cur = lo_get(k.loops, n, 3) % 0x100000000;
+  let mut f = cur % 2;                      // read-only comes from the file
+  let mut bit = 4;
+  while bit <= LO_FLAGS_DIRECT_IO
+    invariant bit <= 2 * LO_FLAGS_DIRECT_IO && f < bit && kok(k) && n < LOOP_N
+  {
+    // Bit 4 AUTOCLEAR, 8 PARTSCAN, 16 DIRECT_IO.
+    let had = cur / bit % 2 == 1;
+    let want = flags / bit % 2 == 1;
+    if config {
+      if want {
+        f = f + bit;
+      }
+    } else if (want && bit != LO_FLAGS_DIRECT_IO) || (had && bit != 4) {
+      f = f + bit;                          // AUTOCLEAR follows; PARTSCAN sticks; DIRECT_IO is its own ioctl's
+    }
+    bit = bit * 2;
+  }
+  if config && flags % 2 == 1 && f % 2 == 0 {
+    f = f + LO_FLAGS_READ_ONLY;
+  }
+  lo_set(&mut k.loops, n, 3, f);
   let mut w = 0;
   while w < 8
     invariant w <= 8 && kok(k) && n < LOOP_N && name + LO_NAME_SIZE <= XFER
@@ -250,7 +310,7 @@ fn loop_status_out(k: &mut Kernel, n: u64, wide: bool) -> u64
     bset(&mut k.fs.xfer, i, 0);
     i = i + 1;
   }
-  let mut name = 36;
+  let mut name = 48;
   if wide {
     xfer_u64(&mut k.fs.xfer, 24, lo_get(k.loops, n, 1));
     xfer_u64(&mut k.fs.xfer, 32, lo_get(k.loops, n, 2));
@@ -259,8 +319,8 @@ fn loop_status_out(k: &mut Kernel, n: u64, wide: bool) -> u64
     name = 56;
   } else {
     xfer_u64(&mut k.fs.xfer, 0, n);         // lo_number; lo_device stays 0
-    xfer_u64(&mut k.fs.xfer, 20, smaller(lo_get(k.loops, n, 1), 0x7FFFFFFF));
-    xfer_u64(&mut k.fs.xfer, 32, lo_get(k.loops, n, 3));   // lo_flags; the name follows
+    xfer_u64(&mut k.fs.xfer, 32, smaller(lo_get(k.loops, n, 1), 0x7FFFFFFF));
+    xfer_u64(&mut k.fs.xfer, 44, lo_get(k.loops, n, 3) % 0x100000000);   // lo_flags; the name follows
   }
   let mut w = 0;
   while w < 8
@@ -353,7 +413,7 @@ fn loop_ioctl(k: &mut Kernel, pid: u64, d: u64, req: u64, arg: u64) -> u64
     }
     // loop_bind used the transfer buffer only to look, so the info is
     // still there.
-    loop_status_in(&mut k, n, true, 8);
+    loop_status_in(&mut k, n, true, true, 8);
     if bs != 0 {
       lo_set(&mut k.loops, n, 4, bs);
     }
@@ -386,7 +446,7 @@ fn loop_ioctl(k: &mut Kernel, pid: u64, d: u64, req: u64, arg: u64) -> u64
   if lo_get(k.loops, n, 0) == 0 {
     return ENXIO;                           // the rest need a bound device
   }
-  if (req == LOOP_CLR_FD || req == LOOP_SET_STATUS || req == LOOP_SET_STATUS64 || req == LOOP_SET_CAPACITY) && loop_mounted(k, n) {
+  if (req == LOOP_CLR_FD || req == LOOP_SET_STATUS || req == LOOP_SET_STATUS64 || req == LOOP_SET_CAPACITY || req == LOOP_CHANGE_FD) && loop_mounted(k, n) {
     return EBUSY;                           // mounted (src/lxmount.bastio)
   }
   if req == LOOP_CLR_FD {
@@ -403,7 +463,7 @@ fn loop_ioctl(k: &mut Kernel, pid: u64, d: u64, req: u64, arg: u64) -> u64
     if r != 0 {
       return r;
     }
-    loop_status_in(&mut k, n, wide, 0);
+    loop_status_in(&mut k, n, wide, false, 0);
     return 0;
   }
   if req == LOOP_GET_STATUS || req == LOOP_GET_STATUS64 {
@@ -425,8 +485,18 @@ fn loop_ioctl(k: &mut Kernel, pid: u64, d: u64, req: u64, arg: u64) -> u64
     lo_set(&mut k.loops, n, 3, lo_get(k.loops, n, 3) / 2 * 2 + ro);
     return 0;
   }
-  if req == LOOP_SET_CAPACITY || req == LOOP_SET_DIRECT_IO {
-    return 0;                               // the size is read each time; no page cache
+  if req == LOOP_SET_CAPACITY {
+    return 0;                               // the size is read each time
+  }
+  if req == LOOP_SET_DIRECT_IO {
+    // Kept for /sys/block/loopN/loop/dio; there is no cache to bypass.
+    let flags = lo_get(k.loops, n, 3) % 0x100000000;
+    let mut dio = 0;
+    if arg != 0 {
+      dio = LO_FLAGS_DIRECT_IO;
+    }
+    lo_set(&mut k.loops, n, 3, flags - (flags & LO_FLAGS_DIRECT_IO) + dio);
+    return 0;
   }
   if req == LOOP_SET_BLOCK_SIZE {
     if arg != 512 && arg != 1024 && arg != 2048 && arg != 4096 {
@@ -436,7 +506,7 @@ fn loop_ioctl(k: &mut Kernel, pid: u64, d: u64, req: u64, arg: u64) -> u64
     return 0;
   }
   if req == LOOP_CHANGE_FD {
-    return EINVAL;                          // only allowed on read-only devices, and not done here
+    return loop_change(&mut k, pid, n, arg);
   }
   return ENOTTY;
 }
@@ -446,6 +516,30 @@ fn loop_ioctl(k: &mut Kernel, pid: u64, d: u64, req: u64, arg: u64) -> u64
 /// the bound file past the device's offset, never past the device's end.
 /// Returns the count or -errno (DISK_RETRY while the disk catches up).
 fn loop_io(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, d: u64, write: bool, va: u64, n: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  let first = loop_io_part(&mut con, &mut k, pid, fd, d, write, va, n);
+  if first == 0 || first > n || va > 0xFFFFFFFFFFFFFFFF - n {
+    return first;                           // done, an error, or nothing more to do
+  }
+  // One part moves at most XFER bytes; go on until all n have moved, the
+  // device ends, or an error, which then shows as a short count.
+  let mut done = first;
+  while done < n
+    invariant done <= n && va <= 0xFFFFFFFFFFFFFFFF - n && kok(k) && con_ok(con) && pid < NPROC
+  {
+    let r = loop_io_part(&mut con, &mut k, pid, fd, d, write, va + done, n - done);
+    if r == 0 || r > n - done {
+      return done;
+    }
+    done = done + r;
+  }
+  return done;
+}
+
+/// One part of loop_io: at most XFER bytes.
+fn loop_io_part(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, d: u64, write: bool, va: u64, n: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
   ensures kok(k) && con_ok(con)
 {

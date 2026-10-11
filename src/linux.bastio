@@ -32,8 +32,10 @@ const LX_GETPPID: u64 = 110;
 const LX_ARCH_PRCTL: u64 = 158;
 const LX_SET_TID_ADDRESS: u64 = 218;
 const LX_SET_ROBUST_LIST: u64 = 273;
+const LX_GET_ROBUST_LIST: u64 = 274;
 const LX_RSEQ: u64 = 334;
 const LX_CLONE3: u64 = 435;
+const LX_UNSHARE: u64 = 272;
 const LX_OPENAT: u64 = 257;
 const LX_STAT: u64 = 4;
 const LX_LSTAT: u64 = 6;
@@ -67,11 +69,23 @@ const READ_MAX: u64 = 262144;          // the most one read of a file returns
 const MAP_SHARED: u64 = 1;
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANONYMOUS: u64 = 0x20;
+const MAP_PRIVATE: u64 = 2;
+const MAP_SHARED_VALIDATE: u64 = 3;
+const MAP_32BIT: u64 = 0x40;
+const MAP_FIXED_NOREPLACE: u64 = 0x100000;
+// The flags MAP_SHARED_VALIDATE accepts (Linux's LEGACY_MAP_MASK): the
+// type, FIXED, ANONYMOUS, 32BIT, GROWSDOWN, DENYWRITE, EXECUTABLE, LOCKED,
+// NORESERVE, POPULATE, NONBLOCK, STACK, HUGETLB, the huge page sizes and
+// UNINITIALIZED; and FIXED_NOREPLACE.
+const MAP_LEGACY_MASK: u64 = 0xFC17F973;
 const PATH_MAX_LX: u64 = 4096;          // the longest path read from user memory (Linux's PATH_MAX)
 const PATH_FIRST: u64 = 256;            // read first; most paths end within it
 const PATH_OUT: u64 = 512;              // room for a name being built
 
 const ARCH_SET_FS: u64 = 0x1002;
+const ARCH_GET_FS: u64 = 0x1003;
+const ARCH_GET_CPUID: u64 = 0x1011;
+const ARCH_SET_CPUID: u64 = 0x1012;
 const IOV_MAX: u64 = 1024;
 const EISDIR: u64 = 18446744073709551595;     // 2^64 - 21
 const ESRCH: u64 = 18446744073709551613;      // 2^64 - 3
@@ -224,10 +238,12 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return lx_futex(&mut k, pid, was, a, b, c);
   }
   if n == LX_REBOOT {
-    // reboot(2), for root alone (CAP_SYS_BOOT on Linux, checked first
-    // there too), after its two magic numbers: RESTART restarts the
-    // machine, POWER_OFF and HALT power it off.
-    if !cred_root(k.procs, pid) {
+    // reboot(2), for root alone holding CAP_SYS_BOOT (cap_has implies
+    // root; Linux checks it first too), after its two magic numbers:
+    // RESTART restarts the machine, POWER_OFF and HALT power it off.
+    // CAD_ON and CAD_OFF (what Ctrl-Alt-Del does) succeed doing nothing:
+    // the console never reboots on it.
+    if !cap_has(k, pid, CAP_SYS_BOOT) {
       ret(&mut k.procs, pid, EPERM);
       return KEEP;
     }
@@ -236,11 +252,15 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       return KEEP;
     }
     ret(&mut k.procs, pid, 0);
-    if c == 0x01234567 {
+    let cmd = c % 0x100000000;                // an int: HALT, POWER_OFF and CAD_ON are negative
+    if cmd == 0x01234567 {
       return REBOOT;
     }
-    if c == 0x4321FEDC || c == 0xCDEF0123 {
+    if cmd == 0x4321FEDC || cmd == 0xCDEF0123 {
       return POWEROFF;
+    }
+    if cmd == 0x89ABCDEF || cmd == 0 {
+      return KEEP;                          // LINUX_REBOOT_CMD_CAD_ON, CAD_OFF
     }
     ret(&mut k.procs, pid, EINVAL);
     return KEEP;
@@ -453,7 +473,11 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if flags / MAP_FIXED % 2 == 1 && !win_quiet(&mut k, pid) {
       return lx_retry(&mut k, pid, n);      // MAP_FIXED unmaps: another thread of pid runs on a processor
     }
-    ret(&mut k.procs, pid, lx_mmap(&mut k, pid, a, b, c, flags, fd, off));
+    let r = lx_mmap(&mut k, pid, a, b, c, flags, fd, off);
+    if flags & 0x2000 != 0 && r < 0x8000000000000000 {
+      lock_mapped(&mut k, pid, b);          // MAP_LOCKED
+    }
+    ret(&mut k.procs, pid, r);
     return KEEP;
   }
   if n == LX_STAT || n == LX_LSTAT {
@@ -503,7 +527,15 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, lx_thread_clone(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8)));
     return KEEP;
   }
-  if n == LX_FORK || n == LX_VFORK || (n == LX_CLONE && a == SIGCHLD && b == 0) {
+  if n == LX_UNSHARE {
+    ret(&mut k.procs, pid, lx_unshare(&mut k, pid, a));
+    return KEEP;
+  }
+  if n == LX_CLONE && clone_proc_flags(a) {
+    ret(&mut k.procs, pid, lx_clone_proc(&mut k, mmu, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8)));
+    return KEEP;
+  }
+  if n == LX_FORK || n == LX_VFORK {
     ret(&mut k.procs, pid, lx_fork(&mut k, mmu, pid));
     return KEEP;
   }
@@ -539,11 +571,18 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_sig_call(n) {
     return lx_sig_call(&mut k, pid, n, a, b, c);
   }
+  if is_pq_call(n) {
+    return lx_pq_call(&mut k, pid, n, was, a, b, c);
+  }
   if is_ipc_call(n) {
     return lx_ipc_call(&mut k, pid, n, was, a, b, c);
   }
   if is_sys_call(n) {
     return lx_sys_call(&mut k, pid, n, a, b);
+  }
+  if is_prio_call(n) {
+    ret(&mut k.procs, pid, lx_prio_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10)));
+    return KEEP;
   }
   if is_cred_call(n) {
     return lx_cred_call(&mut k, pid, n, a, b, c);
@@ -584,6 +623,13 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if a == ARCH_SET_FS {
       pset(&mut k.procs, pid, F_REGS + R_FSBASE, b);
       ret(&mut k.procs, pid, 0);
+    } else if a == ARCH_GET_FS {
+      xfer_u64(&mut k.fs.xfer, 0, pget(k.procs, pid, F_REGS + R_FSBASE));
+      ret(&mut k.procs, pid, lx_put_out(&mut k, pid, b, 8));
+    } else if a == ARCH_GET_CPUID {
+      ret(&mut k.procs, pid, 1);              // cpuid runs
+    } else if a == ARCH_SET_CPUID {
+      ret(&mut k.procs, pid, 18446744073709551597);   // -ENODEV: no CPUID faulting to turn it off with
     } else {
       ret(&mut k.procs, pid, EINVAL);
     }
@@ -594,11 +640,19 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, pid);
     return KEEP;
   }
-  // glibc asks for these and carries on without them: robust futex lists
-  // (no robust mutexes), restartable sequences (sched_getcpu falls back to
-  // the system call), and clone3 (pthread_create falls back to clone, as
-  // on Linux before 5.3). Refused quietly, as known gaps.
-  if n == LX_SET_ROBUST_LIST || n == LX_RSEQ || n == LX_CLONE3 {
+  if n == LX_SET_ROBUST_LIST {
+    ret(&mut k.procs, pid, lx_set_robust_list(&mut k, pid, a, b));
+    return KEEP;
+  }
+  if n == LX_GET_ROBUST_LIST {
+    ret(&mut k.procs, pid, lx_get_robust_list(&mut k, pid, a, b, c));
+    return KEEP;
+  }
+  // glibc asks for these and carries on without them: restartable
+  // sequences (sched_getcpu falls back to the system call), and clone3
+  // (pthread_create falls back to clone, as on Linux before 5.3). Refused
+  // quietly, as known gaps.
+  if n == LX_RSEQ || n == LX_CLONE3 {
     ret(&mut k.procs, pid, ENOSYS);
     return KEEP;
   }
@@ -1085,10 +1139,11 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
 
 /// write(fd, va, n) to the console, a file or a pipe. Returns the count,
 /// -errno, or EAGAIN when a pipe is full.
-fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
+fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
   ensures kok(k) && con_ok(con)
 {
+  let mut n = n0;
   let d = fd_look(k, pid, fd);
   if d.kind == K_PIPE_W || (d.kind == K_PIPE_R && pipe_both(k, pid, fd)) {
     return pipe_write(&mut k, pid, d.x, va, n);
@@ -1097,7 +1152,7 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64
     return ev_write(&mut k, pid, d.x, va, n);
   }
   if d.kind == K_SOCK {
-    return lx_sendto(&mut k, pid, fd, va, n, 0, 0);   // to the connected peer
+    return lx_sendto(&mut k, pid, fd, va, n, 0, 0, 0);   // to the connected peer
   }
   if d.kind == K_DEV && is_loop(d.x) {
     return loop_io(&mut con, &mut k, pid, fd, d.x, true, va, n);
@@ -1107,6 +1162,13 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64
   }
   if d.kind != K_CONSOLE && d.kind != K_FILE {
     return EBADF;
+  }
+  if d.kind == K_FILE {
+    let lim = fsize_room(&mut k, pid, d.x, n);
+    if lim > n {
+      return lim;                           // -EFBIG: RLIMIT_FSIZE
+    }
+    n = lim;
   }
   let room = con_room(con);
   if d.kind == K_CONSOLE && 2 * smaller(n, XFER) > room && room < OUTCAP {
@@ -1769,8 +1831,10 @@ fn stack_fault(k: &mut Kernel, p: u64) -> bool
   return stack_reach(&mut k.mem, &mut k.spaces, p, va);
 }
 
-/// brk: grows the heap (page by page) up to `want`; never shrinks it, and
-/// never into mmap's pages. Returns the break, as Linux does on failure too.
+/// brk: moves the heap's end to `want`, mapping the pages it grows into
+/// and unmapping the pages it gives back; never below where it started,
+/// and never into mmap's pages. Returns the break, as Linux does on
+/// failure too.
 fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -1780,10 +1844,21 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
   if cur > USER_SIZE || low > STACK_FIRST * 4096 {
     return USER_BASE;                       // not a Linux process
   }
-  if want <= USER_BASE + cur || want > USER_BASE + low {
+  let start = smaller(pget(k.procs, pid, F_BRK0), cur);
+  if want < USER_BASE + start || want > USER_BASE + low || want == USER_BASE + cur {
     return USER_BASE + cur;
   }
   let new = want - USER_BASE;
+  if new < cur {
+    // Shrinking: the pages wholly above the new break go.
+    let from = (new + 4095) / 4096;
+    let to = (cur + 4095) / 4096;
+    if to <= WPAGES {
+      win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, from, to, 0);
+    }
+    pset(&mut k.procs, pid, F_BRK, new);
+    return want;
+  }
   if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, (cur + 4095) / 4096, (new + 4095) / 4096, false) {
     return USER_BASE + cur;
   }
@@ -1804,7 +1879,8 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if n == 0 || n > USER_SIZE || off % 4096 != 0 {
+  // In Linux's order: the offset, the descriptor, the length, the type.
+  if off % 4096 != 0 {
     return EINVAL;
   }
   let mut anon = flags / MAP_ANONYMOUS % 2 == 1;
@@ -1813,7 +1889,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     anon = z.kind == K_DEV && z.x == 2;     // /dev/zero (DEV_ZERO): fresh zero pages
   }
   let mut f = NO_FILE;
-  let mut can_write = false;
+  let mut mode = 0;
   if !anon {
     let d = fd_look(k, pid, fd);
     if d.kind != K_FILE {
@@ -1823,16 +1899,32 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     if f == NO_FILE || d.x >= FD_ROWS {
       return EBADF;
     }
-    // As on Linux: a file is mapped only if it was opened for reading, and
-    // a writable MAP_SHARED mapping only if for writing (and not O_APPEND).
-    let mode = fget(k.fs.ftab, d.x, FD_MODE);
-    if mode / O_READ % 2 == 0 || (flags % 4 == MAP_SHARED && prot / 2 % 2 == 1 && (mode / O_WRITE % 2 == 0 || mode / O_APPEND % 2 == 1)) {
-      return EACCES;
-    }
-    can_write = mode / O_WRITE % 2 == 1;
+    mode = fget(k.fs.ftab, d.x, FD_MODE);
   }
+  if n == 0 {
+    return EINVAL;
+  }
+  if n > USER_SIZE {
+    return ENOMEM;
+  }
+  let ty = flags % 16;                      // MAP_TYPE
+  if ty != MAP_SHARED && ty != MAP_PRIVATE && ty != MAP_SHARED_VALIDATE {
+    return EINVAL;
+  }
+  let sh = ty != MAP_PRIVATE;
+  if ty == MAP_SHARED_VALIDATE && !anon && flags & !MAP_LEGACY_MASK != 0 {
+    return EOPNOTSUPP;                      // a flag this kernel does not know
+  }
+  if flags & MAP_32BIT != 0 {
+    return ENOMEM;                          // the window is far above 2 GiB: no room there
+  }
+  // As on Linux: a file is mapped only if it was opened for reading, and
+  // a writable MAP_SHARED mapping only if for writing (and not O_APPEND).
+  if !anon && (mode / O_READ % 2 == 0 || (sh && prot / 2 % 2 == 1 && (mode / O_WRITE % 2 == 0 || mode / O_APPEND % 2 == 1))) {
+    return EACCES;
+  }
+  let can_write = mode / O_WRITE % 2 == 1;
   let pages = (n + 4095) / 4096;
-  let sh = flags % 4 == MAP_SHARED;
   // A shared file mapping maps the page cache's pages (src/pcache.bastio)
   // instead of fresh ones, if the file was opened for writing. From a
   // descriptor that may only read, it gets a copy, as a private mapping
@@ -1841,11 +1933,20 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   // (docs/security.md). Such a copy does not see later writes to the file.
   let cached = sh && !anon && f != NO_FILE && can_write;
   let mut at = 0;
-  if flags / MAP_FIXED % 2 == 1 {
+  let noreplace = flags & MAP_FIXED_NOREPLACE != 0;
+  if flags / MAP_FIXED % 2 == 1 || noreplace {
     if addr % 4096 != 0 || addr < USER_BASE || addr - USER_BASE > STACK_FIRST * 4096 || pages > STACK_FIRST - (addr - USER_BASE) / 4096 {
+      if noreplace && addr % 4096 == 0 {
+        return ENOMEM;                      // outside the window: nothing can go there
+      }
       return EINVAL;
     }
     at = addr - USER_BASE;
+    // MAP_FIXED_NOREPLACE: any page mapped in the range is EEXIST. (A
+    // PROT_NONE reservation maps nothing, so it is not seen.)
+    if noreplace && win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, at / 4096, at / 4096 + pages, 0) != 0 {
+      return EEXIST;
+    }
     // What was there goes, read-only pages too: the new mapping is writable.
     map_forget(&mut k, pid, at / 4096, at / 4096 + pages, false);
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
@@ -1915,7 +2016,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     }
     done = done + step;
   }
-  if flags % 4 == MAP_SHARED {
+  if sh {
     map_record(&mut k, pid, fd, at / 4096, pages, off);
   }
   read_only(&mut k, pid, at / 4096, pages, prot);
