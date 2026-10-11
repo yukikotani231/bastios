@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """Writes the Alpine disk for the compat suite (test/compat/alpine.txt):
 Alpine Linux's root file system as a tar file (/disk/root.tar) and a local
-package repository (/disk/a/repo/x86_64: .apk files and an APKINDEX), next
-to Alpine's own BusyBox at /disk/busybox. The checks unpack the root under
+package repository (/disk/a/repo/x86_64: .apk files and an APKINDEX; and
+/disk/a/repo2/x86_64), next to Alpine's own BusyBox at /disk/busybox. The checks unpack the root under
 /disk/a, chroot into it and run apk there.
 
-    alpinedisk.py OUT.img CACHE_DIR BASE_IMAGE PKG_IMAGE... [-- HTTP_IMAGE...]
+    alpinedisk.py OUT.img CACHE_DIR BASE_IMAGE PKG_IMAGE... --disk NAME,...
 
-The packages of the PKG_IMAGEs go on the disk; those and the HTTP_IMAGEs'
-make a second repository, CACHE_DIR/disk/http, that run.py serves over
-HTTP (alpine.txt's ALPINEURL): the large ones (gcc, Python) do not fit on
-the disk next to the root they are installed into.
+Every package the PKG_IMAGEs hold goes in a repository CACHE_DIR/disk/http,
+which run.py serves over HTTP (alpine.txt's ALPINEURL): it is larger than
+a disk. The disk gets the packages named after --disk, with everything they
+depend on that the root lacks, so that the checks install them with no
+network; and the test packages made here (SYNTH: version 1 in /repo,
+version 2 in /repo2).
 
 The images are Docker Hub's (NAME@sha256:DIGEST, pinned in the Makefile):
 BASE_IMAGE is Alpine's minirootfs, and each PKG_IMAGE an image that apk
@@ -21,7 +23,7 @@ from what the images hold: every file a package installed (as listed in
 the package's metadata. The binaries are Alpine's; the packages and the
 index are not signed by Alpine, so apk needs --allow-untrusted.
 """
-import base64, gzip, hashlib, http.client, io, json, os, subprocess, sys, tarfile, urllib.request
+import base64, gzip, hashlib, http.client, io, json, os, re, shutil, subprocess, sys, tarfile, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REGISTRY = "https://registry-1.docker.io/v2"
@@ -241,45 +243,137 @@ def package(files, p, kept=({}, {})):
     cgz = gz(tar(control, cut=True))
     return cgz, cgz + dgz
 
-def repository(images, cache, outs):
-    """Writes every package the images hold to the directories in outs, with
-    an APKINDEX.tar.gz in each: outs[0] gets all of them, outs[1] those of
-    the first `first` images. images is [(image, first?)]. Returns how many
-    packages each got."""
-    index = {o: "" for o in outs}
-    seen = {o: set() for o in outs}
-    for o in outs:
-        os.makedirs(o, exist_ok=True)
-    for image, first in images:
+# Small packages made here, to test what apk does around the files: a
+# dependency, an upgrade with a version constraint, the install, upgrade
+# and deinstall scripts (each appends to /var/log/bt.log), a trigger on a
+# directory, and a dependency that nothing provides. Version 1 of each
+# goes in the disk repository, version 2 in a second one.
+APP = "#!/bin/sh\ncat /usr/share/bt/lib\necho app {v}\n"
+LOG = "#!/bin/sh\necho {kind} \"$@\" >> /var/log/bt.log\n"
+SYNTH = [
+    # (name, version, depends, files {path: body}, scripts, triggers)
+    ("bt-lib", "1.0-r0", "", {"usr/share/bt/lib": "lib 1.0\n"}, [], []),
+    ("bt-app", "1.0-r0", "bt-lib", {"usr/bin/bt-app": APP.format(v="1.0")},
+     ["post-install", "post-upgrade", "pre-deinstall", "post-deinstall"], []),
+    ("bt-trig", "1.0-r0", "", {"usr/share/doc/bt-trig": "watches /usr/share/bt\n"},
+     ["trigger"], ["/usr/share/bt"]),
+    ("bt-broken", "1.0-r0", "bt-missing", {"usr/share/doc/bt-broken": "never installed\n"}, [], []),
+]
+SYNTH2 = [
+    ("bt-lib", "2.0-r0", "", {"usr/share/bt/lib": "lib 2.0\n"}, [], []),
+    ("bt-app", "2.0-r0", "bt-lib>=2.0", {"usr/bin/bt-app": APP.format(v="2.0")},
+     ["post-install", "post-upgrade", "pre-deinstall", "post-deinstall"], []),
+]
+
+def synthetic(pkgs):
+    """The packages of SYNTH or SYNTH2, as (package dict, files, kept) for
+    package()."""
+    out = []
+    for name, ver, dep, body, kinds, trig in pkgs:
+        files, p = {}, {"P": name, "V": ver, "T": "BastiOS compat test package", "A": "x86_64",
+                        "t": "1760140800", "L": "MIT", "U": "https://github.com/yukikotani231/bastios",
+                        "o": name, "m": "BastiOS", "I": str(sum(len(b) for b in body.values())),
+                        "D": dep, "C": name + ver, "dirs": [], "files": []}
+        for path, b in body.items():
+            d, n = path.rsplit("/", 1)
+            for i in range(1, d.count("/") + 2):
+                sub = "/".join(d.split("/")[:i])
+                if [sub, None] not in p["dirs"]:
+                    p["dirs"].append([sub, None])
+            ti = tarfile.TarInfo(path)
+            files[path] = (ti, b.encode())
+            p["files"].append([d, n, "0:0:755" if d.endswith("bin") else None])
+        kept = ({f"{name}-{ver}": [(k, LOG.format(kind=k).encode()) for k in kinds]},
+                {name + ver: trig})
+        if "trigger" in kinds:
+            kept[0][f"{name}-{ver}"] = [("trigger", b"#!/bin/sh\necho trigger \"$@\" >> /var/log/bt.log\n")]
+        out.append((p, files, kept))
+    return out
+
+def write_repo(o, pkgs, index=""):
+    """A repository in directory o: each (p, files, kept) of pkgs as an
+    .apk, and the APKINDEX.tar.gz, which lists index's entries too."""
+    os.makedirs(o, exist_ok=True)
+    for p, files, kept in pkgs:
+        cgz, apk = package(files, p, kept)
+        e = dict(p)
+        e["C"] = "Q1" + base64.b64encode(hashlib.sha1(cgz).digest()).decode()
+        e["S"] = str(len(apk))
+        with open(os.path.join(o, f"{p['P']}-{p['V']}.apk"), "wb") as f:
+            f.write(apk)
+        index += "".join(f"{k}:{e[k]}\n" for k in "CPVASITULomtckDpri" if e.get(k)) + "\n"
+    ti = tarfile.TarInfo("APKINDEX")
+    ti.size, ti.mode = len(index.encode()), 0o644
+    with open(os.path.join(o, "APKINDEX.tar.gz"), "wb") as f:
+        f.write(gz(tar([(ti, index.encode())])))
+
+def repository(images, cache, o):
+    """Writes every package the images hold to directory o, with an
+    APKINDEX.tar.gz. Returns how many packages it got."""
+    index, seen = "", set()
+    os.makedirs(o, exist_ok=True)
+    for image in images:
         files = merged(layers(image, cache))   # one image at a time: they are large
         kept = scripts(files)
         for p in installed(files["lib/apk/db/installed"][1]):
-            to = [o for o in (outs if first else outs[:1]) if (p["P"], p["V"]) not in seen[o]]
-            if not to:
+            if (p["P"], p["V"]) in seen:
                 continue                   # images built at different times may hold two versions
+            seen.add((p["P"], p["V"]))
             cgz, apk = package(files, p, kept)
             e = dict(p)
             e["C"] = "Q1" + base64.b64encode(hashlib.sha1(cgz).digest()).decode()
             e["S"] = str(len(apk))
-            for o in to:
-                seen[o].add((p["P"], p["V"]))
-                with open(os.path.join(o, f"{p['P']}-{p['V']}.apk"), "wb") as f:
-                    f.write(apk)
-                index[o] += "".join(f"{k}:{e[k]}\n" for k in "CPVASITULomtckDpri" if k in e) + "\n"
+            with open(os.path.join(o, f"{p['P']}-{p['V']}.apk"), "wb") as f:
+                f.write(apk)
+            index += "".join(f"{k}:{e[k]}\n" for k in "CPVASITULomtckDpri" if k in e) + "\n"
         del files
-    for o in outs:
-        ti = tarfile.TarInfo("APKINDEX")
-        ti.size, ti.mode = len(index[o].encode()), 0o644
-        with open(os.path.join(o, "APKINDEX.tar.gz"), "wb") as f:
-            f.write(gz(tar([(ti, index[o].encode())])))
-    return [len(seen[o]) for o in outs]
+    ti = tarfile.TarInfo("APKINDEX")
+    ti.size, ti.mode = len(index.encode()), 0o644
+    with open(os.path.join(o, "APKINDEX.tar.gz"), "wb") as f:
+        f.write(gz(tar([(ti, index.encode())])))
+    return len(seen)
+
+def closure(repo, want, have):
+    """The .apk files of repository directory repo that installing the
+    packages named in want takes, with what they depend on, leaving out
+    what the names in have (the root's own packages) provide."""
+    with tarfile.open(os.path.join(repo, "APKINDEX.tar.gz")) as t:
+        text = t.extractfile("APKINDEX").read().decode()
+    entries = [dict(l.split(":", 1) for l in e.split("\n") if ":" in l) for e in text.split("\n\n") if e.strip()]
+    def name(d):                   # "so:libz.so.1", "cmd:sh=1.2", "bt-lib>=2.0" -> the name
+        return re.split(r"[<>=~]", d, maxsplit=1)[0]
+    who = {}
+    for e in entries:
+        for n in [e["P"]] + [name(x) for x in e.get("p", "").split()]:
+            who.setdefault(n, []).append(e)
+    # A dependency on a version ("libcrypto3=3.5.9-r0") is followed even
+    # when the root has the package: the root's may be older.
+    done, todo, out = set(), list(want), []
+    while todo:
+        n = todo.pop()
+        if n in done or (n in have and not re.search(r"[<>=~]", n)):
+            continue
+        n = name(n)
+        if n in done:
+            continue
+        done.add(n)
+        if n not in who:
+            sys.exit(f"alpinedisk: nothing in the repository provides {n}")
+        for e in who[n]:
+            f = f"{e['P']}-{e['V']}.apk"
+            if f not in out:
+                out.append(f)
+                todo += [d for d in e.get("D", "").split() if not d.startswith("!")]
+    return out
 
 # ---------------------------------------------------------------- the disk
 
 def main():
-    out, cache, base, rest = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
-    disk_pkgs = rest[:rest.index("--")] if "--" in rest else rest
-    http_pkgs = rest[rest.index("--") + 1:] if "--" in rest else []
+    args = sys.argv[1:]
+    want = args[args.index("--disk") + 1].split(",") if "--disk" in args else []
+    if "--disk" in args:
+        del args[args.index("--disk"):args.index("--disk") + 2]
+    out, cache, base, images = args[0], args[1], args[2], args[3:]
     os.makedirs(cache, exist_ok=True)
     root = layers(base, cache)
     if len(root) != 1:
@@ -292,11 +386,28 @@ def main():
     rootfs = merged(root)
     with open(os.path.join(work, "busybox"), "wb") as f:
         f.write(rootfs["bin/busybox"][1])
-    repo, http = os.path.join(work, "repo"), os.path.join(work, "http")
-    n = repository([(i, True) for i in disk_pkgs] + [(i, False) for i in http_pkgs], cache, [http, repo])
-    print(f"alpinedisk: {n[1]} packages on the disk, {n[0]} over HTTP", file=sys.stderr)
+    http = os.path.join(work, "http")
+    n = repository(images, cache, http)
+    have = set()
+    for p in installed(rootfs["lib/apk/db/installed"][1]):
+        have.update([p["P"]] + [re.split(r"[<>=~]", x, maxsplit=1)[0] for x in p.get("p", "").split()])
+    # The disk's repository: what the named packages take, and the test
+    # packages; its index lists both.
+    repo, repo2 = os.path.join(work, "repo"), os.path.join(work, "repo2")
+    pkgs = closure(http, want, have)
+    with tarfile.open(os.path.join(http, "APKINDEX.tar.gz")) as t:
+        text = t.extractfile("APKINDEX").read().decode()
+    keep = [e for e in text.split("\n\n") if e.strip() and
+            "{P}-{V}.apk".format(**dict(l.split(":", 1) for l in e.split("\n") if ":" in l)) in pkgs]
+    write_repo(repo, synthetic(SYNTH), "".join(e + "\n\n" for e in keep))
+    write_repo(repo2, synthetic(SYNTH2))
+    for f in pkgs:
+        shutil.copyfile(os.path.join(http, f), os.path.join(repo, f))
+    print(f"alpinedisk: {len(pkgs)} packages and {len(SYNTH)} test packages on the disk, {n} over HTTP",
+          file=sys.stderr)
     args = [os.path.join(work, "busybox"), os.path.join(work, "root.tar")]
-    args += [f"a/repo/x86_64/{n}={os.path.join(repo, n)}" for n in sorted(os.listdir(repo))]
+    for r in (repo, repo2):
+        args += [f"a/{os.path.basename(r)}/x86_64/{f}={os.path.join(r, f)}" for f in sorted(os.listdir(r))]
     # Room for the unpacked root and what apk installs.
     env = dict(os.environ, MKDISK_FREE_MB="160")
     subprocess.run([os.path.join(HERE, "mkdisk.py"), out] + args, check=True, env=env)

@@ -504,23 +504,26 @@ build/compat/bastio.img: build/compat/bastioc1 build/compat/z3 build/compat/tcc 
 
 # Alpine Linux on BastiOS, on a fourth disk (test/compat/alpinedisk.py) for
 # test/compat/alpine.txt: Alpine's root file system, which the checks enter
-# with chroot, and a local repository apk installs packages from. Both come
+# with chroot, and local repositories apk installs packages from. They come
 # from Docker Hub images, pinned by digest: the minirootfs, and images that
-# apk installed packages into, which alpinedisk.py packs again.
+# apk installed packages into, which alpinedisk.py packs again. All their
+# packages are served over HTTP; ALPINE_DISK_PKGS, with what they depend
+# on, also go on the disk, so the checks that use them need no network.
+# The images: git and curl; Alpine's own CI image (alpine-sdk: gcc, g++,
+# make, binutils, musl-dev); python3 (the ansible image); jq and libxml2's
+# tools; and vim from edge (its runtime is about 2100 files: it waits for a
+# disk directory bigger than 1024 entries, as gcc and python3 do).
 ALPINE_BASE ?= library/alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 ALPINE_PKGS ?= alpine/git@sha256:a4bb51f1a3553df194ce679fc1db721d8bfba2046fa1a88fe9d4ac551ffbce25 \
-               alpine/curl@sha256:e17bf3bdfef2efda277af9b73149ece806d30354b3eebd002555f66a8cabb357
-# Served over HTTP only (too large for the disk): Alpine's own CI image
-# (alpine-sdk: gcc, g++, make, binutils, musl-dev), python3 (from the
-# ansible image), jq and libxml2's tools, and vim (from edge, its runtime
-# about 2100 files: it waits for a disk directory bigger than 1024 entries).
-ALPINE_HTTP_PKGS ?= alpinelinux/alpine-gitlab-ci@sha256:4bce54b0b246967f6ab51476d5511245ba35a49f30b2e63102ca294ab488add9 \
+               alpine/curl@sha256:e17bf3bdfef2efda277af9b73149ece806d30354b3eebd002555f66a8cabb357 \
+               alpinelinux/alpine-gitlab-ci@sha256:4bce54b0b246967f6ab51476d5511245ba35a49f30b2e63102ca294ab488add9 \
                alpine/ansible@sha256:72ed4cb27b533dc2bc608a657b9ed630c2ee53a86ba9111d0b710c5424de0fe2 \
                alpine/xml@sha256:836f531a7e38bbdaab8f1c1ce76bf868412f253671625ebf54cf14fa28544de6 \
                heywoodlh/vim@sha256:c8c4f0de47f20de92af6d3b0544898e857f6c2eecd7ab397a1e7daf0b5fc6292
+ALPINE_DISK_PKGS ?= git,curl,less,openssh-keygen,bash,make,jq,rsync,openssl,file,libxml2-utils
 
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py | build/compat
-	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) -- $(ALPINE_HTTP_PKGS)
+	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) --disk $(ALPINE_DISK_PKGS)
 
 build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) test/compat/mkdisk.py
 	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)

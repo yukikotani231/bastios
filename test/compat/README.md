@@ -52,15 +52,27 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   needs GNU `__auto_type` (`patches/tcc-auto-type.patch`, applied to
   `TCC_REV`). The compiler's own sources are on the disk under `/disk/s`,
   but proving them needs more memory than a process gets.
-- `alpine.txt`: Alpine Linux 3.24, from a fourth disk (`alpinedisk.py`):
-  its minirootfs, which the first case unpacks and enters with `chroot`,
-  and a local repository that `apk` installs git, curl, less,
-  openssh-keygen and tig from, from the disk and then over HTTP from the
-  host (`ALPINEURL`); the packages then run. The packages are rebuilt from
-  Docker Hub images that apk installed them into (`ALPINE_BASE`,
-  `ALPINE_PKGS`, pinned by digest): the binaries are Alpine's, the packages
-  and index are unsigned, so apk runs with `--allow-untrusted`. The cases
-  change the disk, so `run.py` runs them on a copy.
+- `alpine.txt`: Alpine Linux 3.24, from a fourth disk (`alpinedisk.py`).
+  The first case unpacks its minirootfs and enters it with `chroot`. Then
+  `apk` installs packages from a repository on the same disk, and they run:
+  git, curl, less, openssh-keygen, bash, make, jq, rsync, openssl, file
+  and xmllint (`ALPINE_DISK_PKGS`, with what they depend on). These cases
+  need no network.
+  - One case installs tig over HTTP from the host (`ALPINEURL`). The host
+    serves every package of the images, including gcc, python3 and vim,
+    which do not fit on the disk yet.
+  - The `bt-*` packages, made by `alpinedisk.py`, test apk itself:
+    dependency resolution, a missing dependency, `apk upgrade` with a
+    version constraint (version 2 is in a second repository, `/repo2`), the
+    install, upgrade and deinstall scripts, a trigger, and `apk del`
+    removing dependencies no longer needed. The expected output is what the
+    same commands print in a chroot on Linux.
+  - The packages are rebuilt from Docker Hub images that apk installed them
+    into (`ALPINE_BASE`, `ALPINE_PKGS`, pinned by digest), with the install
+    scripts and triggers apk kept for them. The binaries are Alpine's. The
+    packages and the index are unsigned, so apk runs with
+    `--allow-untrusted`.
+  - The cases change the disk, so `run.py` runs them on a copy.
 
 `mkdisk.py` puts the programs and that BusyBox on a disk image in BastiOS's
 own disk format, so they appear as `/disk/NAME`. `run.py` boots the kernel
