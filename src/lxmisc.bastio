@@ -446,6 +446,10 @@ fn lx_ftruncate(k: &mut Kernel, pid: u64, fd: u64, size: u64) -> u64
   if d.kind != K_FILE || size >= 0x8000000000000000 {
     return EINVAL;
   }
+  let big = fsize_trunc(&mut k, pid, size);
+  if big != 0 {
+    return big;
+  }
   if !vfs_truncate(&mut k.fs, &mut k.mem, d.x, size) {
     return EINVAL;                          // not open for writing, too long, or the disk failed
   }
@@ -474,6 +478,13 @@ fn lx_truncate(k: &mut Kernel, pid: u64, path: u64, size: u64) -> u64
   let e = may_path(&mut k, pid, n, MAY_W);
   if e != 0 {
     return e;                               // src/lxperm.bastio
+  }
+  if file_running(k, vfs_lookup(&mut k.fs, n)) {
+    return ETXTBSY;                         // a program a process runs
+  }
+  let big = fsize_trunc(&mut k, pid, size);
+  if big != 0 {
+    return big;
   }
   let nfd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, O_WRITE, n);
   if nfd == NO_FD || nfd >= NFD {
@@ -610,7 +621,9 @@ fn lx_meta_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, r10: u
     let f = meta_target(&mut k, pid, a, b);
     r = set_times(&mut k, pid, f, c, TIMES_TIMEVAL);
   } else if n == LX_UTIMENSAT {
-    if b == 0 {
+    if b == 0 && a % 0x100000000 == AT_FDCWD {
+      r = EFAULT;                           // no path, and no descriptor either
+    } else if b == 0 {
       // futimens(fd, times)
       let d = fd_look(k, pid, a);
       if d.kind == K_BAD {
@@ -661,7 +674,7 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   } else if n == LX_MADVISE {
     r = lx_madvise(&mut k, pid, a, b, c);
   } else if n == LX_MSYNC {
-    r = lx_msync(&mut k, pid, a, b);
+    r = lx_msync(&mut k, pid, a, b, c);
   } else if n == LX_FCHOWN {
     r = chown_handle(&mut k, pid, fd_handle(&mut k, pid, a), b, c);
   } else if n == LX_FSYNC || n == LX_FDATASYNC {
@@ -705,6 +718,8 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     let pn = lx_path_at(&mut k, pid, AT_FDCWD, a);
     if pn == NO_RESULT {
       r = k.perr;
+    } else if !path_there(&mut k, pn) {
+      r = ENOENT;
     } else if vfs_in_mount(&mut k.fs, pn, false) {
       r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC);
     } else {

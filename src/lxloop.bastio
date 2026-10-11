@@ -15,6 +15,11 @@
 // the offset, the size limit (0: none), the LO_FLAGS_* flags, the logical
 // block size, and the 64-byte file name, eight bytes a word.
 //
+// A device whose file is mounted (mount -t bstdisk3 /dev/loopN,
+// src/lxmount.bastio) gives EBUSY for read, write, LOOP_CLR_FD,
+// LOOP_SET_STATUS, LOOP_SET_CAPACITY and LOOP_CHANGE_FD until the
+// unmount: the mount holds the file's pages.
+//
 // /sys/block/loopN shows a device's size, read-only flag, file, offset,
 // size limit and flags (src/lxprocfs.bastio).
 //
@@ -107,6 +112,16 @@ fn loop_row(k: &Kernel, n: u64) -> u64
     return FD_ROWS;
   }
   return row;
+}
+
+/// Is loop device n's file the disk image mounted now (vfs_lo_mount)?
+/// Its pages belong to the mount meanwhile, so the device's bytes cannot
+/// be read or written through it, and it cannot be unbound or changed.
+fn loop_mounted(k: &Kernel, n: u64) -> bool
+  requires kok(k) && n < LOOP_N
+{
+  let row = loop_row(k, n);
+  return row < FD_ROWS && k.fs.lo_at != 0 && vfs_row_file(k.fs, row) == k.fs.lo_file;
 }
 
 /// The size of loop device n in bytes: its file's, less the offset, at
@@ -431,6 +446,9 @@ fn loop_ioctl(k: &mut Kernel, pid: u64, d: u64, req: u64, arg: u64) -> u64
   if lo_get(k.loops, n, 0) == 0 {
     return ENXIO;                           // the rest need a bound device
   }
+  if (req == LOOP_CLR_FD || req == LOOP_SET_STATUS || req == LOOP_SET_STATUS64 || req == LOOP_SET_CAPACITY || req == LOOP_CHANGE_FD) && loop_mounted(k, n) {
+    return EBUSY;                           // mounted (src/lxmount.bastio)
+  }
   if req == LOOP_CLR_FD {
     loop_clear(&mut k, n);
     return 0;
@@ -542,6 +560,9 @@ fn loop_io_part(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, d: u64, write:
   }
   if write && lo_get(k.loops, ln, 3) % 2 == 1 {
     return EPERM;
+  }
+  if loop_mounted(k, ln) {
+    return EBUSY;                           // its pages are the mount's now
   }
   let pos = of_get(k.ofd, h, 3);
   let size = loop_size(&mut k, ln);

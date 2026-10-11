@@ -256,7 +256,7 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
       }
       let mut r = 0;
       if unix {
-        r = ux_send(&mut k, pid, fd, base, len, sent || flags / MSG_DONTWAIT % 2 == 1);
+        r = ux_send(&mut k, pid, fd, base, len, sent || flags / MSG_DONTWAIT % 2 == 1, name, nlen);
       } else {
         r = lx_sendto(&mut k, pid, fd, base, len, name, nlen, flags);
       }

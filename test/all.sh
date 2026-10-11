@@ -20,6 +20,7 @@ JOBS=${JOBS:-$( [ "$(nproc 2>/dev/null || echo 1)" -ge 4 ] && echo 3 || echo 1 )
 tests=(
   "trusted_base|c|test/trusted_base.sh"
   "fsck|c|test/fsck_test.py"
+  "crashsim|c|test/crashsim.py --runs 1 --boots 8 --every 8"
   "shell|a|test/shell_test.sh"
   "guide|c|test/guide_test.py"
   "tcp virtio|b|test/tcp_test.sh"

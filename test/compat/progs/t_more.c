@@ -6,7 +6,9 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <netinet/in.h>
 #include <sched.h>
+#include <semaphore.h>
 #include <signal.h>
 #include <spawn.h>
 #include <sys/file.h>
@@ -15,6 +17,7 @@
 #include <sys/resource.h>
 #include <sys/sendfile.h>
 #include <sys/signalfd.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/syscall.h>
@@ -96,5 +99,23 @@ int main(int argc, char **argv) {
            waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 7; }));
     EXPECT("vfork + _exit", (c = vfork()) >= 0 && (c == 0 ? (_exit(7), 0) : waitpid(c, &st, 0) == c && WEXITSTATUS(st) == 7));
     EXPECT("getrusage children", ({ struct rusage r; getrusage(RUSAGE_CHILDREN, &r) == 0; }));
+    /* What CPython's socket, os and shutil modules lean on. */
+    EXPECT("ioctl FIONBIO makes a read EAGAIN", ({ int one = 1; char ch; pipe(p) == 0 && ioctl(p[0], FIONBIO, &one) == 0 &&
+           (fcntl(p[0], F_GETFL) & O_NONBLOCK) && read(p[0], &ch, 1) == -1 && errno == EAGAIN; }));
+    close(p[0]); close(p[1]);
+    EXPECT("ioctl FIOCLEX and FIONCLEX", ({ int f = dup(1); f >= 0 && ioctl(f, FIOCLEX) == 0 && fcntl(f, F_GETFD) == FD_CLOEXEC &&
+           ioctl(f, FIONCLEX) == 0 && fcntl(f, F_GETFD) == 0 && close(f) == 0; }));
+    EXPECT("bind to port 0 names a port before listen", ({ struct sockaddr_in a = {.sin_family = AF_INET,
+           .sin_addr.s_addr = htonl(INADDR_LOOPBACK)}; socklen_t l = sizeof a; int s = socket(AF_INET, SOCK_STREAM, 0);
+           s >= 0 && bind(s, (void *)&a, sizeof a) == 0 && getsockname(s, (void *)&a, &l) == 0 && a.sin_port != 0 && close(s) == 0; }));
+    EXPECT("O_NONBLOCK by fcntl on a listening socket", ({ struct sockaddr_in a = {.sin_family = AF_INET,
+           .sin_addr.s_addr = htonl(INADDR_LOOPBACK)}; int s = socket(AF_INET, SOCK_STREAM, 0); s >= 0 &&
+           bind(s, (void *)&a, sizeof a) == 0 && listen(s, 1) == 0 && fcntl(s, F_SETFL, O_NONBLOCK) == 0 &&
+           (fcntl(s, F_GETFL) & O_NONBLOCK) && accept(s, 0, 0) == -1 && errno == EAGAIN && close(s) == 0; }));
+    EXPECT("fstat on a directory agrees with stat", ({ struct stat a, b; mkdir("cm_fsd", 0755) == 0 &&
+           ({ int d = open("cm_fsd", O_RDONLY | O_DIRECTORY); d >= 0 && fstat(d, &a) == 0 && close(d) == 0; }) &&
+           stat("cm_fsd", &b) == 0 && a.st_ino == b.st_ino && a.st_dev == b.st_dev && rmdir("cm_fsd") == 0; }));
+    EXPECT("sem_open in /dev/shm", ({ sem_t *m = sem_open("/cm_sem", O_CREAT | O_EXCL, 0600, 1);
+           m != SEM_FAILED && sem_wait(m) == 0 && sem_post(m) == 0 && sem_close(m) == 0 && sem_unlink("/cm_sem") == 0; }));
     return done();
 }

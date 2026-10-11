@@ -290,6 +290,12 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   if f.kind == K_DEV && is_pty_dev(f.x) {
     return pty_bits(k, f.x);                // src/lxpty.bastio
   }
+  if f.kind == K_PIDFD {
+    if f.x >= NPROC || state(k.procs, f.x) == FREE || state(k.procs, f.x) == ZOMBIE {
+      return POLLIN;                        // the process has ended (src/lxpidfd.bastio)
+    }
+    return 0;
+  }
   if f.kind == K_CONSOLE {
     if get(k.line, 1) != 0 {
       return POLLIN | POLLOUT;              // a line is waiting

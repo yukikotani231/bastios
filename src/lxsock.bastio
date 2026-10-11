@@ -136,7 +136,7 @@ fn sin_in(k: &mut Kernel, pid: u64, va: u64, alen: u64) -> Sin
 
 /// Whether open file description h is an AF_INET6 socket.
 fn ofd_v6(k: &Kernel, h: u64) -> bool {
-  return h < OFD_N && (k.inet6 >> h) % 2 == 1;
+  return h < len(k.inet6) && get(k.inet6, h) == 1;
 }
 
 /// Whether descriptor fd of process pid is an AF_INET6 socket.
@@ -229,7 +229,7 @@ fn lx_socket(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64) -> u6
   if domain == AF_INET6 {
     let h = fd_ofd(k, pid, fd);
     if h < OFD_N {
-      k.inet6 = k.inet6 | (1 << h);
+      k.inet6 = set(k.inet6, h, 1);
     }
   }
   return fd;
@@ -398,7 +398,7 @@ fn lx_sendto(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, addr: u64, ale
     return lx_tcp_send(&mut k, pid, fd, buf, n, more);
   }
   if is_unix(k, pid, fd) {
-    return ux_send(&mut k, pid, fd, buf, n, false);
+    return ux_send(&mut k, pid, fd, buf, n, false, addr, alen);
   }
   let d = udp_dest(&mut k, pid, fd, addr, alen);
   if d.err != 0 {
@@ -472,7 +472,7 @@ fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, 
     return lx_tcp_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1);
   }
   if is_unix(k, pid, fd) {
-    return ux_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1);
+    return ux_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1, addr, alenp);
   }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {

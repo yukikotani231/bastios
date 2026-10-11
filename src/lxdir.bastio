@@ -10,6 +10,7 @@
 import "linux.bastio";
 
 const LX_CHDIR: u64 = 80;
+const LX_CHROOT: u64 = 161;
 const LX_FCHDIR: u64 = 81;
 const LX_MKDIR: u64 = 83;
 const LX_RMDIR: u64 = 84;
@@ -91,8 +92,10 @@ fn name_out(x: &mut Bytes, name: Str) -> u64
 
 /// getdents64(fd, buf, count): as many struct linux_dirent64 records as
 /// fit in count bytes (and DENT_BUF), from where the last call stopped.
-/// Returns the bytes filled, 0 at the end, or -errno.
-fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64) -> u64
+/// Returns the bytes filled, 0 at the end, or -errno. With `legacy`, the
+/// old getdents's struct linux_dirent instead: the same size, with the
+/// name a byte earlier and d_type in the record's last byte.
+fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64, legacy: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
@@ -108,15 +111,28 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64) -> u64
     return ENOTDIR;
   }
   let dir = of_get(k.ofd, h, 2);
+  if dir >= DIR_VFS && dir < DIR_PROC && !vfs_is_dir(&mut k.fs, dir - DIR_VFS) {
+    return ENOENT;                          // removed while open
+  }
   let cap = smaller(count, DENT_BUF);
   let mut out = balloc(DENT_BUF);
   let mut used = 0;
   let mut i = of_get(k.ofd, h, 3);
   let mut more = true;
+  let mut full = false;
   while more && i < 0x100000000
     invariant used <= cap && cap <= DENT_BUF && blen(out) == DENT_BUF && kok(k)
   {
-    let e = dir_entry(&mut k, dir, i);
+    // Positions 0 and 1 are "." and "..", as on Linux; the directory's
+    // own entries follow.
+    let mut e = Ent { len: 0, dir: true, end: false };
+    if i < 2 {
+      bset(&mut k.fs.xfer, 0, 46);
+      bset(&mut k.fs.xfer, 1, 46);
+      e = Ent { len: i + 1, dir: true, end: false };
+    } else {
+      e = dir_entry(&mut k, dir, i - 2);
+    }
     if e.end {
       more = false;
     } else if e.len == 0 {
@@ -126,6 +142,7 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64) -> u64
       let reclen = (DENT_HDR + e.len + 1 + 7) / 8 * 8;
       if reclen > cap - used {
         more = false;
+        full = true;
       } else {
         let mut z = 0;
         while z < reclen
@@ -138,17 +155,23 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64) -> u64
         xfer_u64(&mut out, used + 8, i + 1);          // d_off: the next entry
         bset(&mut out, used + 16, cast[u8](reclen % 256));      // d_reclen
         bset(&mut out, used + 17, cast[u8](reclen / 256 % 256));
+        let mut at = used + 18;               // d_type
+        let mut name = DENT_HDR;
+        if legacy {
+          at = used + reclen - 1;
+          name = DENT_HDR - 1;
+        }
         if e.dir {
-          bset(&mut out, used + 18, cast[u8](DT_DIR));
+          bset(&mut out, at, cast[u8](DT_DIR));
         } else {
-          bset(&mut out, used + 18, cast[u8](DT_REG));
+          bset(&mut out, at, cast[u8](DT_REG));
         }
         let mut j = 0;
         while j < e.len
-          invariant j <= e.len && e.len <= XFER && DENT_HDR + e.len < reclen
+          invariant j <= e.len && e.len <= XFER && DENT_HDR + e.len < reclen && name <= DENT_HDR
           invariant used + reclen <= cap && cap <= DENT_BUF && blen(out) == DENT_BUF && kok(k)
         {
-          bset(&mut out, used + DENT_HDR + j, bget(k.fs.xfer, j));
+          bset(&mut out, used + name + j, bget(k.fs.xfer, j));
           j = j + 1;
         }
         used = used + reclen;
@@ -156,7 +179,7 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64) -> u64
       }
     }
   }
-  if used == 0 && more {
+  if used == 0 && full {
     bfree(out);
     return EINVAL;                          // not even one entry fits
   }
@@ -167,6 +190,39 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64) -> u64
   }
   of_set(&mut k.ofd, h, 3, i);
   return used;
+}
+
+/// lseek on a directory: the position is getdents's, the count of entries
+/// already read ("." and ".." included). SEEK_SET and SEEK_CUR move it, as
+/// rewinddir, seekdir and telldir need; SEEK_END is EINVAL, as on Linux's
+/// in-memory file systems.
+fn dir_seek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let v = fd_get(k.lxfd, pid, fd) % FD_CLOEXEC;
+  if v < FD_OFD || v - FD_OFD >= OFD_N {
+    return EBADF;
+  }
+  let h = v - FD_OFD;
+  let pos = of_get(k.ofd, h, 3) % 0x100000000;
+  let mut to = off;
+  if whence == 1 {
+    if off < 0x8000000000000000 {
+      to = sat_add(pos, off);
+    } else if 0xFFFFFFFFFFFFFFFF - off + 1 <= pos {
+      to = pos - (0xFFFFFFFFFFFFFFFF - off + 1);
+    } else {
+      return EINVAL;
+    }
+  } else if whence != 0 {
+    return EINVAL;
+  }
+  if to >= 0x100000000 {
+    return EINVAL;
+  }
+  of_set(&mut k.ofd, h, 3, to);
+  return to;
 }
 
 // ---------------------------------------------------------------- paths
@@ -232,6 +288,64 @@ fn lx_chdir(k: &mut Kernel, pid: u64, path: u64) -> u64
   return 0;
 }
 
+/// chroot(path): the directory becomes process pid's root, which absolute
+/// paths, absolute link targets and ".." at the top stay inside (see
+/// lx_path_from). The working directory does not move, as on Linux.
+/// Needs root (CAP_SYS_CHROOT), checked after the path, as Linux does.
+fn lx_chroot(k: &mut Kernel, pid: u64, path: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = lx_path_in(&mut k, pid, path);
+  if n == NO_RESULT {
+    return k.perr;
+  }
+  if dir_at(&mut k, n) == NO_FILE {
+    if vfs_lookup(&mut k.fs, n) != NO_FILE {
+      return ENOTDIR;
+    }
+    return ENOENT;
+  }
+  let e = may_path(&mut k, pid, n, MAY_X);
+  if e != 0 {
+    return e;
+  }
+  if id_get(k.procs, pid, F_UID, true) != 0 {
+    return EPERM;
+  }
+  name_keep(&mut k.croot, CWD_LEN, pid, k.fs.xfer, n);   // dir_at and may_path left the name there
+  return 0;
+}
+
+/// The length of process pid's root (0: the top).
+fn root_len(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= FNAME_MAX
+{
+  return smaller(get(k.croot, pid * CWD_STRIDE), FNAME_MAX);
+}
+
+/// Is the working directory of process pid inside its root?
+fn cwd_in_root(k: &Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let rl = root_len(k, pid);
+  let n = smaller(get(k.cwd, pid * CWD_STRIDE), FNAME_MAX);
+  if n < rl {
+    return false;
+  }
+  let mut i = 0;
+  while i < rl
+    invariant i <= rl && rl <= n && n <= FNAME_MAX && kok(k) && pid < NPROC
+  {
+    if get(k.cwd, pid * CWD_STRIDE + 1 + i) != get(k.croot, pid * CWD_STRIDE + 1 + i) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return n == rl || rl == 0 || get(k.cwd, pid * CWD_STRIDE + 1 + rl) == 47;
+}
+
 /// Keeps x[0..n] as row `row` of a path table (cwd or dpath).
 fn name_keep(t: &mut Buf, tlen: u64, row: u64, x: &Bytes, n: u64)
   requires len(t) == tlen && (row + 1) * CWD_STRIDE <= tlen && n <= FNAME_MAX && n <= blen(x)
@@ -269,29 +383,35 @@ fn lx_fchdir(k: &mut Kernel, pid: u64, fd: u64) -> u64
   return 0;
 }
 
-/// getcwd(buf, size): "/" and the working directory, NUL-terminated.
-/// Returns the bytes written, NUL included.
+/// getcwd(buf, size): "/" and the working directory, NUL-terminated, as
+/// seen from the process's root. Returns the bytes written, NUL included.
 fn lx_getcwd(k: &mut Kernel, pid: u64, va: u64, size: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
   let n = smaller(get(k.cwd, pid * CWD_STRIDE), FNAME_MAX);
-  if size < n + 2 {
+  let rl = root_len(k, pid);
+  let mut s = 0;                            // where the part shown starts
+  if rl > 0 && cwd_in_root(k, pid) {
+    s = smaller(rl + 1, n);                 // past the root and its "/"
+  }
+  let m = n - s;
+  if size < m + 2 {
     return ERANGE;
   }
   bset(&mut k.fs.xfer, 0, 47);
   let mut i = 0;
-  while i < n
-    invariant i <= n && n <= FNAME_MAX && kok(k) && pid < NPROC
+  while i < m
+    invariant i <= m && s + m == n && n <= FNAME_MAX && kok(k) && pid < NPROC
   {
-    bset(&mut k.fs.xfer, 1 + i, cast[u8](get(k.cwd, pid * CWD_STRIDE + 1 + i) % 256));
+    bset(&mut k.fs.xfer, 1 + i, cast[u8](get(k.cwd, pid * CWD_STRIDE + 1 + s + i) % 256));
     i = i + 1;
   }
-  bset(&mut k.fs.xfer, n + 1, 0);
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n + 2) != n + 2 {
+  bset(&mut k.fs.xfer, m + 1, 0);
+  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, m + 2) != m + 2 {
     return EFAULT;
   }
-  return n + 2;
+  return m + 2;
 }
 
 /// mkdir(path, mode): the mode less the umask, and the owner, as for a
@@ -306,6 +426,10 @@ fn lx_mkdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64) -> u64
   }
   if n == 0 || is_bin(k.fs.xfer, n) || vfs_lookup(&mut k.fs, n) != NO_FILE || vfs_dir_lookup(&mut k.fs, n) != NO_FILE {
     return EEXIST;
+  }
+  let em = meta_keep(&mut k, n, n);
+  if em.ok {
+    return EEXIST;                          // /dev, /proc and the like
   }
   if vfs_ro(&mut k.fs, n) {
     return EROFS;
@@ -330,10 +454,38 @@ fn lx_mkdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64) -> u64
 }
 
 /// rmdir(path): only an empty directory goes.
+/// Whether the path at user address va (read as far as its first 256
+/// bytes) ends in a "." component.
+fn ends_in_dot(k: &mut Kernel, pid: u64, va: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if va < USER_BASE || va >= USER_BASE + USER_SIZE {
+    return false;
+  }
+  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, smaller(256, USER_SIZE - (va - USER_BASE)));
+  if got == NO_RESULT {
+    return false;
+  }
+  let mut e = 0;
+  while e < got && bget(k.fs.xfer, e) != 0
+    invariant e <= got && got <= XFER && kok(k)
+  {
+    e = e + 1;
+  }
+  if e >= got || e == 0 || bget(k.fs.xfer, e - 1) != 46 {
+    return false;
+  }
+  return e == 1 || bget(k.fs.xfer, e - 2) == 47;
+}
+
 fn lx_rmdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if ends_in_dot(&mut k, pid, path) {
+    return EINVAL;                          // rmdir(".") and "dir/.", as on Linux
+  }
   let n = lx_path_at_nf(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return k.perr;
@@ -606,11 +758,11 @@ fn lx_exchange(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
 }
 
 fn is_dir_call(n: u64) -> bool {
-  return n == LX_CHDIR || n == LX_FCHDIR || n == LX_MKDIR || n == LX_RMDIR || n == LX_MKDIRAT
+  return n == LX_CHDIR || n == LX_CHROOT || n == LX_FCHDIR || n == LX_MKDIR || n == LX_RMDIR || n == LX_MKDIRAT
     || n == LX_RENAME || n == LX_RENAMEAT || n == LX_RENAMEAT2;
 }
 
-/// chdir, fchdir, mkdir, mkdirat, rmdir and the renames.
+/// chdir, chroot, fchdir, mkdir, mkdirat, rmdir and the renames.
 fn lx_dir_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -620,6 +772,9 @@ fn lx_dir_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   }
   if n == LX_FCHDIR {
     return lx_fchdir(&mut k, pid, a);
+  }
+  if n == LX_CHROOT {
+    return lx_chroot(&mut k, pid, a);
   }
   if n == LX_MKDIR {
     return lx_mkdir(&mut k, pid, AT_FDCWD, a, b);

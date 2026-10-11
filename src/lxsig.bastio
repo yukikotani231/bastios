@@ -352,6 +352,12 @@ fn lx_sigqueue(k: &mut Kernel, pid: u64, target: u64, s: u64, info: u64) -> u64
   if info > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, info, &mut k.fs.xfer, 32) != 32 {
     return EFAULT;
   }
+  // Another process may not pretend to be the kernel or kill/tkill: a
+  // si_code of 0 or more, or SI_TKILL (-6), is for a process's own use.
+  let code = get_u64(k.fs.xfer, 8) % 4294967296;
+  if (code < 0x80000000 || code == 0xFFFFFFFA) && target != pid {
+    return EPERM;
+  }
   if !may_signal(k, pid, target, s) {
     return EPERM;                           // the same rule as kill
   }
