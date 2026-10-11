@@ -425,6 +425,10 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
     if is_unix(k, pid, fd) {
       return ux_poll_bits(k, pid, fd);
     }
+    let q = nl_of(k, pid, fd);
+    if q < NLS && nic_nl_queued(k.nic, q) > 0 {
+      return POLLIN | POLLOUT;
+    }
     if sock_ready(k.nic, f.x) {
       return POLLIN | POLLOUT;
     }

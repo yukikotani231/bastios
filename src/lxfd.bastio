@@ -217,7 +217,7 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   if kind == OF_DIR {
     return Fd { kind: K_DIR, x: x };
   }
-  if kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX {
+  if kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX || kind == OF_NETLINK {
     return Fd { kind: K_SOCK, x: x };
   }
   if kind == OF_DEV || kind == OF_PTY {
@@ -284,7 +284,7 @@ fn pipe_nonblock(k: &Kernel, pid: u64, fd: u64) -> bool
 /// src/lxunix.bastio).
 fn can_block(kind: u64) -> bool {
   return kind == OF_PIPE_R || kind == OF_PIPE_W || kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD || kind == OF_PTY
-    || kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX || kind == OF_PIDFD || kind == OF_INOTIFY;
+    || kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX || kind == OF_PIDFD || kind == OF_INOTIFY || kind == OF_NETLINK;
 }
 
 /// Whether process pid has a file layer row free: an open file holds
@@ -407,6 +407,8 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
     pipe_release(&mut k, x);
   } else if kind == OF_SOCK {
     sock_close(&mut k.nic, x);
+  } else if kind == OF_NETLINK {
+    nic_nl_close(&mut k.nic, x);           // src/rtnl.bastio
   } else if kind == OF_TCP && x < TCBS {
     tcp_close(&mut k.nic, x);               // sends the FIN after what is buffered
   } else if kind == OF_TIMER && x < TFD_N {
@@ -953,7 +955,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
   let pipe = h < OFD_N && can_block(kind);
   // Sockets keep O_NONBLOCK in the low bit of word 3 too (src/lxsock.bastio,
   // src/lxtcp.bastio, src/lxunix.bastio), above their other state.
-  let sock = h < OFD_N && (kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX);
+  let sock = h < OFD_N && (kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX || kind == OF_NETLINK);
   let mut row = FD_ROWS;
   if h < OFD_N && kind == OF_FILE {
     row = of_get(k.ofd, h, 2);

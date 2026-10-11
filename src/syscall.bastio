@@ -561,7 +561,7 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   ensures kok(k)
 {
   if n == SYS_SOCKET {
-    return sock_new(&mut k.nic);
+    return sock_new(&mut k.nic, 0);
   }
   if n == SYS_BIND {
     if sock_bind(&mut k.nic, a, b) {
@@ -596,13 +596,13 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     if a == 0 {
       return NO_SOCK;                 // a listener nobody could find
     }
-    return tcp_listen(&mut k.nic, a);
+    return tcp_listen(&mut k.nic, 0, a);
   }
   if n == SYS_TCP_ACCEPT {
     return tcp_accept(&mut k.nic, a);
   }
   if n == SYS_TCP_CONNECT {
-    return tcp_connect(&mut k.nic, a / 65536, a % 65536);
+    return tcp_connect(&mut k.nic, 0, a / 65536, a % 65536);
   }
   if n == SYS_TCP_SEND {
     let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, b, &mut k.fs.xfer, smaller(c, XFER));

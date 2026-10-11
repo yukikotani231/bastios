@@ -9,6 +9,8 @@ import "elf.bastio";
 import "fs.bastio";
 import "net.bastio";
 import "tcp.bastio";
+import "netns.bastio";
+import "rtnl.bastio";
 import "hda.bastio";
 
 // The most processes; the tables grow to it (new_pid). Raising it: the
@@ -16,7 +18,7 @@ import "hda.bastio";
 // ALARMS_LEN and HOLES_LEN follow it, and a
 // signal's sender word keeps the pid in 8 bits (post_from, src/lxsig.bastio).
 const NPROC: u64 = 256;
-const STRIDE: u64 = 64;
+const STRIDE: u64 = 72;
 const PTAB_LEN: u64 = NPROC * STRIDE;   // the most the table grows to
 const PGROW: u64 = 32;               // rows the process table starts with (it doubles from there)
 
@@ -86,6 +88,10 @@ const NGROUPS_KEPT: u64 = 16;
 const F_NICE: u64 = 61;
 const F_SCHED: u64 = 62;
 const F_BRK0: u64 = 63;              // Linux: where the program break started (brk goes no lower)
+// Namespaces: an index per kind, 0 the one the machine boots in. A fork or
+// a thread keeps its parent's (the whole row is copied); a native spawn
+// starts in the first ones. Words 65 .. 71 are for the other kinds.
+const F_NETNS: u64 = 64;             // network (src/netns.bastio, src/lxnetlink.bastio)
 // File permission bits (src/lxperm.bastio).
 const MAY_X: u64 = 1;
 const MAY_W: u64 = 2;
@@ -569,6 +575,7 @@ const OF_PTY: u64 = 14;               // a pseudo-terminal end: x DEV_PTM + N or
 const OF_PQ: u64 = 13;                // a POSIX message queue: x the queue; word 3: nonblocking + 2 * access mode (src/lxmq.bastio)
 const OF_SIGFD: u64 = 12;             // a signalfd: word 2 the signals it takes; word 3: nonblocking (src/lxevent.bastio)
 const OF_INOTIFY: u64 = 16;           // an inotify instance: x the instance; word 3: nonblocking (src/lxinotify.bastio)
+const OF_NETLINK: u64 = 17;           // a netlink socket: x its slot; word 3: nonblocking (src/lxnetlink.bastio)
 const OF_PIDFD: u64 = 15;             // a pidfd: x the process, NPROC once its slot was reused; word 3: nonblocking (src/lxpidfd.bastio)
 const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
@@ -1387,6 +1394,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
   lx_fd_close_all(&mut k, pid, false);
   close_unshared(&mut k, pid);
   pr_exit(&mut k, pid);                    // children asking for a parent-death signal
+  netns_exit(&mut k, pid);                 // its network namespace ends with its last process
   pset(&mut k.procs, pid, F_STATE, ZOMBIE);
   pset(&mut k.procs, pid, F_CODE, code);
   let mut c = 1;

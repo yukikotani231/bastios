@@ -519,14 +519,23 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
     if ns & CLONE_NEWUSER != ns && !cap_has(k, pid, CAP_SYS_ADMIN) {
       return EPERM;
     }
-    if ns != CLONE_NEWNS {
-      return EINVAL;                        // only mount namespaces so far
+    if ns & (CLONE_NEWNS + CLONE_NEWNET) != ns {
+      return EINVAL;                        // only mount and network namespaces so far
     }
   }
-  if flags != 0 && pget(k.procs, pid, F_TGID) != 0 {
+  if flags != ns && pget(k.procs, pid, F_TGID) != 0 {
     return EINVAL;                          // threads that share them: not supported
   }
-  if ns != 0 {
+  if ns & CLONE_NEWNS != 0 && ns & CLONE_NEWNET != 0 && !ns_room(&mut k, pid) {
+    return ENOMEM;                          // so the network namespace is not made alone
+  }
+  if ns & CLONE_NEWNET != 0 {
+    let e = netns_unshare(&mut k, pid);     // src/lxnetlink.bastio
+    if e != 0 {
+      return e;
+    }
+  }
+  if ns & CLONE_NEWNS != 0 {
     return ns_unshare(&mut k, pid);         // src/lxns.bastio
   }
   return 0;

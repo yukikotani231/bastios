@@ -1,0 +1,308 @@
+// Network namespaces for Linux processes, and rtnetlink: the NETLINK_ROUTE
+// sockets `ip` uses to list and change interfaces, addresses and routes.
+//
+// A process's network namespace is word F_NETNS of its row
+// (src/proc.bastio): a fork or a thread keeps its parent's, and
+// unshare(CLONE_NEWNET) gives it a new one with only "lo". A namespace
+// ends when no process is left in it (netns_exit); its interfaces go with
+// it, and a veth's peer in another namespace too, as on Linux.
+
+import "linux.bastio";
+
+const CLONE_NEWNET: u64 = 0x40000000;
+
+/// Process pid's network namespace.
+fn net_ns(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result < NNET
+{
+  let s = pget(k.procs, pid, F_NETNS);
+  if s >= NNET {
+    return 0;
+  }
+  return s;
+}
+
+/// Is any process other than `but` in namespace s?
+fn ns_has_procs(k: &Kernel, s: u64, but: u64) -> bool
+  requires kok(k)
+{
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC
+  {
+    let st = state(k.procs, p);
+    if p != but && st != FREE && st != ZOMBIE && pget(k.procs, p, F_NETNS) == s {
+      return true;
+    }
+    p = p + 1;
+  }
+  return false;
+}
+
+/// unshare(CLONE_NEWNET) for pid (the caller has checked CAP_SYS_ADMIN):
+/// 0, or an errno. The namespace it leaves ends if it was the last one in.
+fn netns_unshare(k: &mut Kernel, pid: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  netns_gc(&mut k);
+  let s = nic_ns_new(&mut k.nic);
+  if s >= NNET {
+    return ENOSPC;                           // as Linux past max_net_namespaces
+  }
+  netns_exit(&mut k, pid);
+  pset(&mut k.procs, pid, F_NETNS, s);
+  return 0;
+}
+
+/// Process pid leaves its namespace (it exits, or moves): the namespace
+/// ends if nobody else is in it.
+fn netns_exit(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let s = net_ns(k, pid);
+  if s != 0 && !ns_has_procs(k, s, pid) {
+    nic_ns_end(&mut k.nic, s);
+  }
+}
+
+/// Ends every namespace no process is in (one whose last thread left
+/// without its group ending, say).
+fn netns_gc(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut s = 1;
+  while s < NNET
+    invariant 1 <= s && s <= NNET && kok(k)
+  {
+    if nic_ns_live(k.nic, s) && !ns_has_procs(k, s, 0) {
+      nic_ns_end(&mut k.nic, s);
+    }
+    s = s + 1;
+  }
+}
+
+// ---------------------------------------------------------------- netlink sockets
+// A netlink socket is a description of kind OF_NETLINK whose x is its
+// slot in the stack's table (src/rtnl.bastio); word 3 is 1 when it is
+// nonblocking. Only NETLINK_ROUTE.
+
+const NETLINK_ROUTE: u64 = 0;
+const SOCKADDR_NL: u64 = 12;            // struct sockaddr_nl
+const MSG_TRUNC: u64 = 0x20;
+
+/// Is fd a netlink socket? Its slot, or NLS.
+fn nl_of(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= NLS
+{
+  let h = fd_ofd(k, pid, fd);
+  if h >= OFD_N || of_get(k.ofd, h, 0) != OF_NETLINK {
+    return NLS;
+  }
+  let q = of_get(k.ofd, h, 2);
+  if q >= NLS {
+    return NLS;
+  }
+  return q;
+}
+
+fn is_nl(k: &Kernel, pid: u64, fd: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  return nl_of(k, pid, fd) < NLS;
+}
+
+/// socket(AF_NETLINK, SOCK_RAW or SOCK_DGRAM, NETLINK_ROUTE).
+fn nl_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let t = kind % 16;
+  if t != SOCK_RAW && t != SOCK_DGRAM {
+    return 18446744073709551522;            // ESOCKTNOSUPPORT
+  }
+  if proto != NETLINK_ROUTE {
+    return EPROTONOSUPPORT;
+  }
+  // The first socket of a process takes its pid as port id, as on Linux;
+  // others take a number from the top down.
+  let mut port = tgid(k.procs, pid);
+  let mut tries = 0;
+  while nic_nl_port_used(k.nic, port) && tries < NLS + 1
+    invariant kok(k) && tries <= NLS + 1
+  {
+    port = 4294967295 - tries * 4096 - pid;
+    tries = tries + 1;
+  }
+  let q = nic_nl_open(&mut k.nic, net_ns(k, pid), port);
+  if q >= NLS {
+    return ENOBUFS;
+  }
+  let h = ofd_new(&mut k, OF_NETLINK, q);
+  if h >= OFD_N {
+    nic_nl_close(&mut k.nic, q);
+    return ENFILE;
+  }
+  of_set(&mut k.ofd, h, 3, kind / SOCK_NONBLOCK % 2);
+  let fd = fd_install(&mut k, pid, h);
+  if fd < LXNFD && kind / SOCK_CLOEXEC % 2 == 1 {
+    fd_set(&mut k.lxfd, pid, fd, FD_OFD + h + FD_CLOEXEC);
+  }
+  return fd;
+}
+
+/// The namespace a request moves a link to: what its first
+/// IFLA_NET_NS_PID names (the process's), NS_UNSAID if no message names
+/// one, NNET if it names none we can find (IFLA_NET_NS_FD included: no
+/// namespace files yet).
+fn nl_target(k: &Kernel, len: u64) -> u64
+  requires kok(k) && len <= XFER
+{
+  let mut at = 0;
+  while at < len && len - at >= 32
+    invariant kok(k) && at <= len && len <= XFER
+  {
+    let ml = rd32(k.fs.xfer, at);
+    if ml < 16 || ml > len - at {
+      return NS_UNSAID;
+    }
+    let kind = rd16(k.fs.xfer, at + 4);
+    if (kind == RTM_NEWLINK || kind == RTM_SETLINK) && ml >= 32 {
+      let p = nla_u32(k.fs.xfer, at + 32, at + ml, IFLA_NET_NS_PID, NO_IF);
+      if p != NO_IF {
+        if 1 <= p && p < NPROC && state(k.procs, p) != FREE && state(k.procs, p) != ZOMBIE {
+          return net_ns(k, p);
+        }
+        return NNET;
+      }
+      if nla_find(k.fs.xfer, at + 32, at + ml, IFLA_NET_NS_FD) != 0 {
+        return NNET;
+      }
+    }
+    let step = (ml + 3) / 4 * 4;
+    if step > len - at {
+      return NS_UNSAID;
+    }
+    at = at + step;
+  }
+  return NS_UNSAID;
+}
+
+/// send on a netlink socket: the requests in buf[0..n], answered on the
+/// socket. Returns n.
+fn nl_send(k: &mut Kernel, pid: u64, q: u64, buf: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if n > XFER {
+    return EMSGSIZE;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, &mut k.fs.xfer, n) != n {
+    return EFAULT;
+  }
+  netns_gc(&mut k);                          // a link whose namespace ended is gone
+  let tgt = nl_target(k, n);
+  let admin = cap_has(k, pid, CAP_NET_ADMIN);
+  nic_nl_request(&mut k.nic, q, k.fs.xfer, n, tgt, admin);
+  return n;
+}
+
+/// recv on a netlink socket: whole answers, up to n bytes; the source
+/// (the kernel, port 0) to addr. EAGAIN or SK_WAIT if none is queued.
+fn nl_recv(k: &mut Kernel, pid: u64, fd: u64, q: u64, buf: u64, n: u64, flags: u64, addr: u64, alenp: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if nic_nl_queued(k.nic, q) == 0 {
+    let h = fd_ofd(k, pid, fd);
+    if flags / MSG_DONTWAIT % 2 == 1 || (h < OFD_N && of_get(k.ofd, h, 3) % 2 == 1) {
+      return EAGAIN;
+    }
+    return SK_WAIT;
+  }
+  let got = nic_nl_take(&mut k.nic, q, &mut k.fs.xfer, smaller(n, XFER), flags / MSG_PEEK % 2 == 1);
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, k.fs.xfer, got) != got {
+    return EFAULT;
+  }
+  if addr != 0 && alenp != 0 {
+    let r = nl_name_out(&mut k, pid, addr, alenp, 0);
+    if r != 0 {
+      return r;
+    }
+  }
+  return got;
+}
+
+/// A struct sockaddr_nl with port id `port` to va, its length to lenp.
+fn nl_name_out(k: &mut Kernel, pid: u64, va: u64, lenp: u64, port: u64) -> u64
+  requires kok(k) && pid < NPROC && port <= 4294967295
+  ensures kok(k)
+{
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, lenp, &mut k.fs.xfer, 4) != 4 {
+    return EFAULT;
+  }
+  let room = rd32(k.fs.xfer, 0);
+  if room >= 0x80000000 {
+    return EINVAL;
+  }
+  lx_fill(&mut k, 0, SOCKADDR_NL);
+  bset(&mut k.fs.xfer, 0, cast[u8](AF_NETLINK));
+  bset(&mut k.fs.xfer, 4, cast[u8](port % 256));
+  bset(&mut k.fs.xfer, 5, cast[u8](port / 256 % 256));
+  bset(&mut k.fs.xfer, 6, cast[u8](port / 65536 % 256));
+  bset(&mut k.fs.xfer, 7, cast[u8](port / 16777216 % 256));
+  let w = smaller(room, SOCKADDR_NL);
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, w) != w {
+    return EFAULT;
+  }
+  lx_fill(&mut k, 0, 4);
+  bset(&mut k.fs.xfer, 0, cast[u8](SOCKADDR_NL));
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, lenp, k.fs.xfer, 4) != 4 {
+    return EFAULT;
+  }
+  return 0;
+}
+
+/// getsockname (our port id) and getpeername (the kernel's, 0).
+fn nl_name(k: &mut Kernel, pid: u64, q: u64, va: u64, lenp: u64, peer: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut port = nic_nl_port(k.nic, q);
+  if peer {
+    port = 0;
+  }
+  return nl_name_out(&mut k, pid, va, lenp, port);
+}
+
+/// bind (and connect) on a netlink socket: a struct sockaddr_nl naming
+/// AF_NETLINK and port 0 or the socket's own (its port id is fixed when it
+/// is made); multicast groups are accepted and nothing is ever sent to
+/// them.
+fn nl_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let q = nl_of(k, pid, fd);
+  if q >= NLS {
+    return ENOTSOCK;
+  }
+  if alen < SOCKADDR_NL || alen > 128 {
+    return EINVAL;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, addr, &mut k.fs.xfer, SOCKADDR_NL) != SOCKADDR_NL {
+    return EFAULT;
+  }
+  if rd16(k.fs.xfer, 0) != AF_NETLINK {
+    return EINVAL;
+  }
+  let port = rd32(k.fs.xfer, 4);
+  if port != 0 && port != nic_nl_port(k.nic, q) {
+    return EINVAL;
+  }
+  return 0;
+}

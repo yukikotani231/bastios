@@ -1,0 +1,705 @@
+// Network namespaces and virtual interfaces: the tables, and how a packet
+// finds its way between them.
+//
+// A namespace (up to NNET; 0 is the one the machine boots in) has its own
+// interfaces, addresses, routes, sockets and port numbers. Namespace 0
+// owns the network card (interface slot 1, "eth0", whose address is the
+// one DHCP gave: n.ip) and loopback slot 0; each other namespace starts
+// with only its own "lo". veth pairs and bridges are interfaces too, made
+// and configured over rtnetlink (src/lxnetlink.bastio).
+//
+// The stack keeps one set of buffers: n.ns says which namespace the
+// packet or call being handled belongs to, and every lookup (is_local,
+// src_ip, next_hop, the socket and connection tables) is made in it. A
+// socket or connection remembers its namespace, and the calls on it set
+// n.ns from there; a frame sets it from the interface it came in on.
+//
+// Every endpoint of a virtual link is this kernel, so a frame sent out of
+// a virtual interface is handed straight to the interface on the same
+// link (a veth's peer, or a port of the same bridge, or the bridge itself)
+// that owns the next hop's address: no ARP is needed, and the frame goes
+// round the loopback queue tagged with the interface it arrives on.
+
+// The constants are in src/net.bastio, which needs them first.
+
+spec fn netns_ok(n: &Net) -> bool {
+  len(n.ifs) == IFN * IF_W && len(n.nss) == NNET * NS_W && n.ns < NNET
+}
+
+fn iw(n: &Net, i: u64, f: u64) -> u64
+  requires netns_ok(n) && i < IFN && f < IF_W
+{
+  return get(n.ifs, i * IF_W + f);
+}
+
+fn iset(n: &mut Net, i: u64, f: u64, v: u64)
+  requires net_ok(n) && i < IFN && f < IF_W
+  ensures net_ok(n)
+{
+  n.ifs = set(n.ifs, i * IF_W + f, v);
+}
+
+fn nsw(n: &Net, ns: u64, f: u64) -> u64
+  requires netns_ok(n) && ns < NNET && f < NS_W
+{
+  return get(n.nss, ns * NS_W + f);
+}
+
+fn nsset(n: &mut Net, ns: u64, f: u64, v: u64)
+  requires net_ok(n) && ns < NNET && f < NS_W
+  ensures net_ok(n)
+{
+  n.nss = set(n.nss, ns * NS_W + f, v);
+}
+
+/// The tables at boot: namespace 0 with "lo" (slot 0) and the card's
+/// "eth0" (slot 1), both up.
+fn netns_init(n: &mut Net)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nsset(&mut n, 0, NS_USED, 1);
+  nsset(&mut n, 0, NS_LO, 0);
+  nsset(&mut n, 0, NS_INO, 4026531992);    // Linux's initial net namespace
+  iset(&mut n, 0, IF_KIND, IFK_LO);
+  iset(&mut n, 0, IF_FLAGS, IFF_UP);
+  iset(&mut n, 0, IF_NAME, NAME_LO);
+  iset(&mut n, IF_ETH, IF_KIND, IFK_ETH);
+  iset(&mut n, IF_ETH, IF_FLAGS, IFF_UP);
+  iset(&mut n, IF_ETH, IF_MAC, card_mac(n.dev));
+  iset(&mut n, IF_ETH, IF_NAME, NAME_ETH0);
+  nsset(&mut n, 0, NS_FWD, 1);              // namespace 0 routes for the others
+}
+
+/// Interface i's address: the card's comes from DHCP.
+fn if_ip(n: &Net, i: u64) -> u64
+  requires net_ok(n) && i < IFN
+  ensures result <= IP_MAX
+{
+  let mut a = iw(n, i, IF_IP);
+  if i == IF_ETH {
+    a = n.ip;
+  }
+  if a > IP_MAX {
+    return 0;
+  }
+  return a;
+}
+
+fn if_span(n: &Net, i: u64) -> u64
+  requires net_ok(n) && i < IFN
+  ensures 1 <= result && result <= 4294967296
+{
+  let mut s = iw(n, i, IF_SPAN);
+  if i == IF_ETH {
+    s = n.span;
+  }
+  if s < 1 || s > 4294967296 {
+    return 4294967296;
+  }
+  return s;
+}
+
+fn if_up(n: &Net, i: u64) -> bool
+  requires net_ok(n)
+  ensures result ==> i < IFN
+{
+  return i < IFN && iw(n, i, IF_KIND) != IFK_FREE && iw(n, i, IF_FLAGS) % 2 == 1;
+}
+
+/// A virtual interface (veth or bridge) of namespace n.ns, up, whose
+/// subnet holds ip; NO_IF if none.
+fn route_if(n: &Net, ip: u64) -> u64
+  requires net_ok(n)
+  ensures result == NO_IF || result < IFN
+{
+  if ip == 0 || ip > IP_MAX {
+    return NO_IF;
+  }
+  let mut i = 2;
+  while i < IFN
+    invariant i <= IFN
+  {
+    let k = iw(n, i, IF_KIND);
+    if (k == IFK_VETH || k == IFK_BRIDGE) && iw(n, i, IF_NS) == n.ns && if_up(n, i) && if_ip(n, i) != 0 {
+      let s = if_span(n, i);
+      if ip / s == if_ip(n, i) / s {
+        return i;
+      }
+    }
+    i = i + 1;
+  }
+  return NO_IF;
+}
+
+/// Is ip one of namespace ns's own addresses (an interface's that is up)?
+fn ns_owns(n: &Net, ns: u64, ip: u64) -> bool
+  requires net_ok(n)
+{
+  if ip == 0 || ip > IP_MAX {
+    return false;
+  }
+  let mut i = 2;
+  while i < IFN
+    invariant i <= IFN
+  {
+    if iw(n, i, IF_NS) == ns && if_up(n, i) && if_ip(n, i) == ip {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+/// The link a virtual interface is on, as one slot every interface on it
+/// agrees on: a bridge, the bridge a veth (or its peer) is a port of, or
+/// else the lower slot of a veth pair.
+fn if_link(n: &Net, i: u64) -> u64
+  requires net_ok(n) && i < IFN
+  ensures result < IFN
+{
+  if iw(n, i, IF_KIND) == IFK_BRIDGE {
+    return i;
+  }
+  let m = iw(n, i, IF_MASTER);
+  if 1 <= m && m <= IFN {
+    return m - 1;
+  }
+  let p = iw(n, i, IF_PEER);
+  if p < IFN && iw(n, i, IF_KIND) == IFK_VETH {
+    let pm = iw(n, p, IF_MASTER);
+    if 1 <= pm && pm <= IFN {
+      return pm - 1;
+    }
+    if p < i {
+      return p;
+    }
+  }
+  return i;
+}
+
+/// Can a frame cross from virtual interface i: it is up, and if it is a
+/// veth, so is its peer.
+fn if_carries(n: &Net, i: u64) -> bool
+  requires net_ok(n) && i < IFN
+{
+  if !if_up(n, i) {
+    return false;
+  }
+  if iw(n, i, IF_KIND) == IFK_VETH {
+    return if_up(n, iw(n, i, IF_PEER));
+  }
+  return true;
+}
+
+/// The interface on the same link as o that owns address ip and takes
+/// frames; NO_IF if none.
+fn link_owner(n: &Net, o: u64, ip: u64) -> u64
+  requires net_ok(n) && o < IFN
+  ensures result == NO_IF || result < IFN
+{
+  if ip == 0 || ip > IP_MAX || !if_carries(n, o) {
+    return NO_IF;
+  }
+  let l = if_link(n, o);
+  let mut j = 2;
+  while j < IFN
+    invariant j <= IFN
+  {
+    let k = iw(n, j, IF_KIND);
+    if j != o && (k == IFK_VETH || k == IFK_BRIDGE) && if_link(n, j) == l && if_carries(n, j) && if_ip(n, j) == ip {
+      return j;
+    }
+    j = j + 1;
+  }
+  return NO_IF;
+}
+
+/// Sends the outgoing frame (flen bytes) out of virtual interface o to the
+/// interface that owns hop, through the loopback queue. False if nobody
+/// on o's link has that address, or the queue is full.
+fn virt_send(n: &mut Net, o: u64, hop: u64, flen: u64) -> bool
+  requires net_ok(n) && o < IFN && flen <= FRAME_MAX
+  ensures net_ok(n)
+{
+  let to = link_owner(n, o, hop);
+  if to >= IFN || flen < 14 {
+    return false;
+  }
+  let dmac = iw(n, to, IF_MAC) % MAC_LIMIT;
+  let smac = iw(n, o, IF_MAC) % MAC_LIMIT;
+  put48(&mut n.out, 0, dmac);
+  put48(&mut n.out, 6, smac);
+  return q_send(&mut n, to, flen);
+}
+
+/// The loopback interface of namespace n.ns.
+fn ns_lo(n: &Net) -> u64
+  requires net_ok(n)
+  ensures result < IFN
+{
+  let l = nsw(n, n.ns, NS_LO);
+  if l >= IFN {
+    return 0;
+  }
+  return l;
+}
+
+/// A free interface slot (2 on: 0 and 1 are namespace 0's), or NO_IF.
+fn if_free_slot(n: &Net) -> u64
+  requires net_ok(n)
+  ensures result == NO_IF || (2 <= result && result < IFN)
+{
+  let mut i = 2;
+  while i < IFN
+    invariant 2 <= i && i <= IFN
+  {
+    if iw(n, i, IF_KIND) == IFK_FREE {
+      return i;
+    }
+    i = i + 1;
+  }
+  return NO_IF;
+}
+
+/// Makes interface slot i (free) of kind k in namespace ns, down, with no
+/// address, named by the two name words.
+fn if_make(n: &mut Net, i: u64, k: u64, ns: u64, name0: u64, name1: u64)
+  requires net_ok(n) && i < IFN
+  ensures net_ok(n)
+{
+  let mut f = 0;
+  while f < IF_W
+    invariant f <= IF_W && net_ok(n)
+  {
+    iset(&mut n, i, f, 0);
+    f = f + 1;
+  }
+  iset(&mut n, i, IF_KIND, k);
+  iset(&mut n, i, IF_NS, ns);
+  iset(&mut n, i, IF_PEER, NO_IF);
+  iset(&mut n, i, IF_NAME, name0);
+  iset(&mut n, i, IF_NAME + 1, name1);
+  // A locally administered address: 02:42 (as Docker's), then a mix of the
+  // slot and the clock so a remade interface does not reuse one at once.
+  iset(&mut n, i, IF_MAC, 0x024200000000 + (n.now % 65536) * 65536 + i * 256 + 1);
+}
+
+/// Frees interface i, and with a veth its peer too, as Linux does. A
+/// bridge's ports stay, no longer ports.
+fn if_drop(n: &mut Net, i: u64)
+  requires net_ok(n) && i < IFN
+  ensures net_ok(n)
+{
+  if i < 2 {
+    return;                          // namespace 0's lo and eth0 stay
+  }
+  let k = iw(n, i, IF_KIND);
+  let p = iw(n, i, IF_PEER);
+  iset(&mut n, i, IF_KIND, IFK_FREE);
+  iset(&mut n, i, IF_FLAGS, 0);
+  if k == IFK_VETH && 2 <= p && p < IFN && iw(n, p, IF_KIND) == IFK_VETH {
+    iset(&mut n, p, IF_KIND, IFK_FREE);
+    iset(&mut n, p, IF_FLAGS, 0);
+  }
+  let mut j = 0;
+  while j < IFN
+    invariant j <= IFN && net_ok(n)
+  {
+    if iw(n, j, IF_MASTER) == i + 1 {
+      iset(&mut n, j, IF_MASTER, 0);
+    }
+    j = j + 1;
+  }
+}
+
+/// Makes a new namespace with its own "lo" (down, as on Linux): its index,
+/// or NNET if the tables are full.
+fn ns_new(n: &mut Net) -> u64
+  requires net_ok(n)
+  ensures net_ok(n) && result <= NNET
+{
+  let lo = if_free_slot(n);
+  if lo >= IFN {
+    return NNET;
+  }
+  let mut s = 1;
+  while s < NNET
+    invariant 1 <= s && s <= NNET && net_ok(n)
+  {
+    if nsw(n, s, NS_USED) == 0 {
+      nsset(&mut n, s, NS_USED, 1);
+      nsset(&mut n, s, NS_GW, 0);
+      nsset(&mut n, s, NS_FWD, 0);
+      nsset(&mut n, s, NS_LO, lo);
+      n.ns_seq = n.ns_seq % 1048576 + 1;
+      nsset(&mut n, s, NS_INO, 4026532000 + n.ns_seq);
+      if_make(&mut n, lo, IFK_LO, s, NAME_LO, 0);
+      iset(&mut n, lo, IF_MAC, 0);
+      return s;
+    }
+    s = s + 1;
+  }
+  return NNET;
+}
+
+/// Ends namespace s (not 0): its interfaces go (a veth's peer in another
+/// namespace with it), and so do its sockets and the connections nobody
+/// holds; a held one is reset.
+fn ns_end(n: &mut Net, s: u64)
+  requires net_ok(n) && 1 <= s && s < NNET
+  ensures net_ok(n)
+{
+  let mut i = 2;
+  while i < IFN
+    invariant i <= IFN && net_ok(n)
+  {
+    if iw(n, i, IF_KIND) != IFK_FREE && iw(n, i, IF_NS) == s {
+      if_drop(&mut n, i);
+    }
+    i = i + 1;
+  }
+  let mut k = 0;
+  while k < SOCKS
+    invariant k <= SOCKS && net_ok(n)
+  {
+    if sk_get(n, k, S_NS) == s {
+      sk_set(&mut n, k, S_OPEN, 0);
+    }
+    k = k + 1;
+  }
+  let mut t = 0;
+  while t < TCBS
+    invariant t <= TCBS && net_ok(n)
+  {
+    if tw(n, t, W_NS) == s && tw(n, t, W_STATE) != T_CLOSED {
+      tcb_close(&mut n, t, true);
+    }
+    t = t + 1;
+  }
+  nsset(&mut n, s, NS_USED, 0);
+}
+
+/// Does namespace s exist?
+fn ns_live(n: &Net, s: u64) -> bool
+  requires net_ok(n)
+  ensures result ==> s < NNET
+{
+  return s < NNET && (s == 0 || nsw(n, s, NS_USED) == 1);
+}
+
+/// Interface slot of the one named by the two name words in namespace ns,
+/// or NO_IF.
+fn if_by_name(n: &Net, ns: u64, name0: u64, name1: u64) -> u64
+  requires net_ok(n)
+  ensures result == NO_IF || result < IFN
+{
+  let mut i = 0;
+  while i < IFN
+    invariant i <= IFN
+  {
+    if iw(n, i, IF_KIND) != IFK_FREE && iw(n, i, IF_NS) == ns && iw(n, i, IF_NAME) == name0 && iw(n, i, IF_NAME + 1) == name1 {
+      return i;
+    }
+    i = i + 1;
+  }
+  return NO_IF;
+}
+
+/// The Linux interface index of slot i: 1 for every namespace's "lo",
+/// else the slot + 1 (so the card is 2, as eth0 usually is).
+fn if_index(n: &Net, i: u64) -> u64
+  requires net_ok(n) && i < IFN
+  ensures 1 <= result && result <= IFN
+{
+  if iw(n, i, IF_KIND) == IFK_LO {
+    return 1;
+  }
+  return i + 1;
+}
+
+/// The slot of the interface with Linux index x in namespace ns, or NO_IF.
+fn if_of_index(n: &Net, ns: u64, x: u64) -> u64
+  requires net_ok(n)
+  ensures result == NO_IF || result < IFN
+{
+  if x == 0 || x > IFN {
+    return NO_IF;
+  }
+  if x == 1 {
+    if ns >= NNET || !ns_live(n, ns) {
+      return NO_IF;
+    }
+    let l = nsw(n, ns, NS_LO);
+    if l < IFN && iw(n, l, IF_KIND) == IFK_LO {
+      return l;
+    }
+    return NO_IF;
+  }
+  let i = x - 1;
+  if iw(n, i, IF_KIND) == IFK_FREE || iw(n, i, IF_KIND) == IFK_LO || iw(n, i, IF_NS) != ns {
+    return NO_IF;
+  }
+  return i;
+}
+
+// ---------------------------------------------------------------- for system calls
+
+/// A new namespace (ns_new), or NNET.
+fn nic_ns_new(c: &mut Nic) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c) && result <= NNET
+{
+  match c {
+    Nic::None => { c = Nic::None; return NNET; },
+    Nic::Up(mut n) => {
+      let r = ns_new(&mut n);
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+fn nic_ns_end(c: &mut Nic, s: u64)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if 1 <= s && s < NNET && nsw(n, s, NS_USED) == 1 {
+        ns_end(&mut n, s);
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
+fn nic_ns_live(c: &Nic, s: u64) -> bool
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return s == 0; },
+    Nic::Up(n) => { return ns_live(n, s); },
+  }
+}
+
+/// Namespace s's inode number, as /proc/PID/ns/net shows it.
+fn nic_ns_ino(c: &Nic, s: u64) -> u64
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return 4026531992; },
+    Nic::Up(n) => {
+      if ns_live(n, s) {
+        return nsw(n, s, NS_INO);
+      }
+      return 0;
+    },
+  }
+}
+
+// ---------------------------------------------------------------- forwarding and masquerade
+// A namespace with NS_FWD set (namespace 0; the others never) passes on a
+// packet that comes in on a virtual interface for an address that is not
+// its own: to the virtual interface whose subnet holds it, or else out of
+// the card. What leaves by the card is masqueraded: it goes out from the
+// card's address and a port of its own (NAT_BASE + its flow's slot, an
+// echo's id for ICMP), and the answers to that port are turned back and
+// handed to the inside address. TCP, UDP and ICMP echo are masqueraded;
+// anything else, or a fragment, is dropped. A flow's slot is reused,
+// oldest first, once all NATN are taken.
+
+/// The IPv4 header checksum of the outgoing frame, again.
+fn ip_resum(n: &mut Net)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  put16(&mut n.out, 24, 0);
+  put16(&mut n.out, 24, csum(n.out, 14, 20));
+}
+
+/// The TCP, UDP or ICMP checksum of the outgoing packet (total bytes
+/// from its IP header), again. A UDP datagram sent with none keeps none.
+fn l4_resum(n: &mut Net, proto: u64, total: u64)
+  requires net_ok(n) && 28 <= total && total <= FRAME_MAX - 14
+  ensures net_ok(n)
+{
+  let src = be32(n.out, 26);
+  let dst = be32(n.out, 30);
+  if proto == IP_ICMP {
+    put16(&mut n.out, 36, 0);
+    put16(&mut n.out, 36, csum(n.out, 34, total - 20));
+  } else if proto == IP_UDP && be16(n.out, 40) != 0 {
+    put16(&mut n.out, 40, 0);
+    let mut c = 65535 - l4_sum(n.out, src, dst, IP_UDP, total - 20);
+    if c == 0 {
+      c = 65535;
+    }
+    put16(&mut n.out, 40, c);
+  } else if proto == IP_TCP && total >= 40 {
+    put16(&mut n.out, 50, 0);
+    put16(&mut n.out, 50, 65535 - l4_sum(n.out, src, dst, IP_TCP, total - 20));
+  }
+}
+
+/// The packet's ports (TCP, UDP: source * 65536 + destination) or echo id
+/// (ICMP echo request or reply: id * 65536), from b; NAT_NONE if it has
+/// none we can masquerade.
+fn flow_ports(b: &Bytes, total: u64, back: bool) -> u64
+  requires blen(b) == RX_BUF && 28 <= total && total <= FRAME_MAX - 14
+  ensures result == NAT_NONE || result < 4294967296
+{
+  let proto = cast[u64](bget(b, 23));
+  if be16(b, 20) % 16384 != 0 {
+    return NAT_NONE;                          // a fragment
+  }
+  if proto == IP_UDP || (proto == IP_TCP && total >= 40) {
+    return be16(b, 34) * 65536 + be16(b, 36);
+  }
+  let kind = cast[u64](bget(b, 34));
+  if proto == IP_ICMP && ((!back && kind == ICMP_ECHO) || (back && kind == ICMP_ECHO_REPLY)) {
+    return be16(b, 38) * 65536;
+  }
+  return NAT_NONE;
+}
+
+/// The flow for proto from ip:port to peer:pport, made if it is new: its
+/// slot.
+fn nat_flow(n: &mut Net, proto: u64, ip: u64, port: u64, peer: u64, pport: u64) -> u64
+  requires net_ok(n)
+  ensures net_ok(n) && result < NATN
+{
+  let mut f = 0;
+  let mut free = NATN;
+  while f < NATN
+    invariant f <= NATN && free <= NATN
+  {
+    let b = f * NAT_W;
+    let p = get(n.nat, b + NAT_PROTO);
+    if p == proto && get(n.nat, b + NAT_IP) == ip && get(n.nat, b + NAT_PORT) == port
+      && get(n.nat, b + NAT_PEER) == peer && get(n.nat, b + NAT_PEER_PORT) == pport {
+      return f;
+    }
+    if p == 0 && free == NATN {
+      free = f;
+    }
+    f = f + 1;
+  }
+  if free == NATN {
+    free = n.nat_next % NATN;
+    n.nat_next = (n.nat_next % NATN + 1) % NATN;
+  }
+  let b = free * NAT_W;
+  n.nat = set(n.nat, b + NAT_PROTO, proto);
+  n.nat = set(n.nat, b + NAT_IP, ip);
+  n.nat = set(n.nat, b + NAT_PORT, port);
+  n.nat = set(n.nat, b + NAT_PEER, peer);
+  n.nat = set(n.nat, b + NAT_PEER_PORT, pport);
+  return free;
+}
+
+/// Forwards the packet that came in (flen bytes), in namespace n.ns.
+fn fwd(n: &mut Net, flen: u64)
+  requires net_ok(n) && flen <= RX_BUF
+  ensures net_ok(n)
+{
+  let total = be16(n.pkt, 16);
+  if flen < 34 || total < 28 || 14 + total > flen || 14 + total > FRAME_MAX {
+    return;
+  }
+  let ttl = cast[u64](bget(n.pkt, 22));
+  if ttl <= 1 {
+    return;                                   // no time-exceeded message is sent
+  }
+  let src = be32(n.pkt, 26);
+  let dst = be32(n.pkt, 30);
+  let ports = flow_ports(n.pkt, total, false);
+  net_copy(&mut n, 14 + total);
+  bset(&mut n.out, 22, cast[u8](ttl - 1));
+  let o = route_if(n, dst);
+  if o < IFN {
+    ip_resum(&mut n);
+    virt_send(&mut n, o, dst, 14 + total);
+    return;
+  }
+  if n.ns != 0 {
+    let g = nsw(n, n.ns, NS_GW);
+    let go = route_if(n, g);
+    if go < IFN && g <= IP_MAX {
+      ip_resum(&mut n);
+      virt_send(&mut n, go, g, 14 + total);
+    }
+    return;
+  }
+  // Out of the card, masqueraded.
+  if !card_live(n.dev) || n.ip == 0 || ports == NAT_NONE || is_v6tok(dst) {
+    return;
+  }
+  let proto = cast[u64](bget(n.out, 23));
+  let f = nat_flow(&mut n, proto, src, ports / 65536, dst, ports % 65536);
+  put32(&mut n.out, 26, n.ip);
+  if proto == IP_ICMP {
+    put16(&mut n.out, 38, NAT_BASE + f);
+  } else {
+    put16(&mut n.out, 34, NAT_BASE + f);
+  }
+  ip_resum(&mut n);
+  l4_resum(&mut n, proto, total);
+  eth_header(&mut n, 0, ETH_IP);
+  let hop = next_hop(n, dst);
+  if hop <= IP_MAX {
+    send_via(&mut n, hop, 14 + total);
+  }
+}
+
+/// An answer to a masqueraded flow, come in on the card (flen bytes): it
+/// goes on to the inside address. False if it is not one.
+fn nat_back(n: &mut Net, flen: u64) -> bool
+  requires net_ok(n) && flen <= RX_BUF
+  ensures net_ok(n)
+{
+  let total = be16(n.pkt, 16);
+  if flen < 34 || total < 28 || 14 + total > flen || 14 + total > FRAME_MAX {
+    return false;
+  }
+  let ports = flow_ports(n.pkt, total, true);
+  if ports == NAT_NONE {
+    return false;
+  }
+  let proto = cast[u64](bget(n.pkt, 23));
+  let mut mine = ports % 65536;               // our port: TCP, UDP
+  let mut theirs = ports / 65536;
+  if proto == IP_ICMP {
+    mine = ports / 65536;                     // the echo id
+    theirs = 0;
+  }
+  if mine < NAT_BASE || mine >= NAT_BASE + NATN {
+    return false;
+  }
+  let f = mine - NAT_BASE;
+  let b = f * NAT_W;
+  let src = be32(n.pkt, 26);
+  if get(n.nat, b + NAT_PROTO) != proto || get(n.nat, b + NAT_PEER) != src || get(n.nat, b + NAT_PEER_PORT) != theirs {
+    return false;
+  }
+  let inner = get(n.nat, b + NAT_IP);
+  let iport = get(n.nat, b + NAT_PORT);
+  let o = route_if(n, inner);
+  let ttl = cast[u64](bget(n.pkt, 22));
+  if o >= IFN || inner > IP_MAX || iport > 65535 || ttl <= 1 {
+    return true;                              // ours, but nowhere to go now
+  }
+  net_copy(&mut n, 14 + total);
+  bset(&mut n.out, 22, cast[u8](ttl - 1));
+  put32(&mut n.out, 30, inner);
+  if proto == IP_ICMP {
+    put16(&mut n.out, 38, iport);
+  } else {
+    put16(&mut n.out, 36, iport);
+  }
+  ip_resum(&mut n);
+  l4_resum(&mut n, proto, total);
+  virt_send(&mut n, o, inner, 14 + total);
+  return true;
+}

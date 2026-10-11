@@ -115,6 +115,20 @@ over ::1
 $ printf 'GET /hello.txt HTTP/1.0\r\n\r\n' | /disk/busybox nc HOSTADDR | /disk/busybox tail -n 1
 hello from the host
 
+== netns: a new network namespace has only lo, down
+$ /disk/busybox unshare -n /disk/busybox ip link
+1: lo: <LOOPBACK> mtu 65536 qdisc noop state DOWN qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+
+== netns: a veth pair on a bridge; ping across, wget out through masquerade
+$ B=/disk/busybox; export B; $B ip link add ca_br type bridge && $B ip addr add 10.0.3.1/24 dev ca_br && $B ip link set ca_br up && $B ip link add ca_v0 type veth && $B ip link set veth0 name ca_v1 && $B ip link set ca_v0 master ca_br && $B ip link set ca_v0 up && ($B unshare -n $B sh -c 'touch ca_nr; until $B ip link show ca_v1 >/dev/null 2>&1; do sleep 1; done; $B ip addr add 10.0.3.2/24 dev ca_v1 && $B ip link set ca_v1 up && $B ip link set lo up && $B ip route add default via 10.0.3.1 && $B ip -4 addr show dev ca_v1 | $B grep -o "inet [0-9./]*" && $B ip route && $B ping -c 1 10.0.3.1 >/dev/null && echo ping ok && $B wget -q -O - HOSTURL/hello.txt' & P=$!; until [ -e ca_nr ]; do sleep 1; done; $B ip link set ca_v1 netns $P; wait $P); rm -f ca_nr; $B ip link show ca_v0 2>&1; $B ip link del ca_br
+inet 10.0.3.2/24
+default via 10.0.3.1 dev ca_v1 
+10.0.3.0/24 dev ca_v1 scope link  src 10.0.3.2 
+ping ok
+hello from the host
+ip: can't find device 'ca_v0'
+
 == git: init, commit, log and diff
 $ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_EXEC_PATH=/disk; G="/disk/git --no-pager -c user.name=T -c user.email=t@x -c init.defaultBranch=main -c maintenance.auto=false -c color.ui=false"; mkdir ca_g && (cd ca_g && $G init -q --template= && echo one > a && $G add a && $G commit -qm first && echo two >> a && $G commit -qam second && $G log --format=%s && $G diff --stat HEAD~1 && $G show HEAD~1:a); rm -rf ca_g
 second
