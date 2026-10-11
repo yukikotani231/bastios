@@ -292,6 +292,13 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   socket, or take its name first. `open` of a socket file is `ENXIO`.
 - The loop devices are `rw-rw----` for root and the new group disk (6),
   and open checks it.
+- `readlink` of another user's `/proc/PID/exe` or `/proc/PID/fd/N` is
+  `EACCES`, as Linux's ptrace read check gives; before, anyone could see
+  which program and which files any process had open. `/dev/console` is
+  root's, as its `rw--w----` mode already said: before, any user could
+  open the console and read what was typed on it. SysV IPC's group bits
+  count supplementary groups, and `SHM_LOCK` by an owner who is not root
+  needs a nonzero `RLIMIT_MEMLOCK`, both as on Linux.
 - Users and passwords: `/etc/shadow` (`0600`), `/root` and `/home`, and
   BusyBox's `adduser`, `addgroup`, `deluser`, `delgroup`, `passwd`,
   `chpasswd`, `su`, `login`, `id` and `whoami` as `/bin/NAME`. `/bin/su`

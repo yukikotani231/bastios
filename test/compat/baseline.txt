@@ -335,8 +335,12 @@ t_ipc: socketpair both ways, EOF after close
 t_ipc: timerfd
 t_ipc: ttyname(0)
 t_isol: a loop-mounted image is nosuid
+t_isol: /dev/console is root's
+t_isol: SHM_LOCK needs RLIMIT_MEMLOCK or root
+t_isol: SysV group bits count supplementary groups
 t_isol: a shared mapping of a read-only file stays read-only
 t_isol: a unix socket's file says who may connect
+t_isol: another user's /proc exe and fd links are hidden
 t_isol: loop devices are root's and group disk's
 t_isol: mount and umount2 are root's
 t_isol: native system calls are root's

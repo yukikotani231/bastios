@@ -1042,9 +1042,20 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
   return put_s(&mut o, 0, "anon_inode:[file]");
 }
 
+/// Whether process pid may read process p's /proc links (exe and fd/N):
+/// p itself, root, or a process with the same real, effective and saved
+/// user and group ids, as Linux's PTRACE_MODE_READ_FSCREDS asks (without
+/// its dumpable flag).
+fn proc_peek(procs: &Buf, pid: u64, p: u64) -> bool
+  requires len(procs) == PTAB_LEN && pid < NPROC && p < NPROC
+{
+  return pid == p || cred_root(procs, pid) || same_ids(procs, pid, p);
+}
+
 /// readlink / readlinkat(dirfd, path, buf, size): the target of
-/// /proc/PID/exe or /proc/PID/fd/N, without a NUL; -EINVAL for anything
-/// else that exists, since nothing else is a symbolic link.
+/// /proc/PID/exe or /proc/PID/fd/N, without a NUL (-EACCES unless
+/// proc_peek); -EINVAL for anything else that exists, since nothing else
+/// is a symbolic link.
 fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -1064,6 +1075,9 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
   if pfd != NO_RESULT {
     if size == 0 || size > 0x7FFFFFFF {
       return EINVAL;
+    }
+    if !proc_peek(k.procs, pid, pfd / LXNFD) {
+      return EACCES;
     }
     let mut lo = balloc(PROC_OUT);
     let ln = fd_link(&mut k, pfd / LXNFD, pfd % LXNFD, &mut lo);
@@ -1095,6 +1109,10 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
   }
   if size == 0 || size > 0x7FFFFFFF {
     return EINVAL;
+  }
+  let t = (f - PROC_DEV) / 16;
+  if t >= NPROC || !proc_peek(k.procs, pid, t) {
+    return EACCES;
   }
   let mut out = balloc(PROC_OUT);
   let l = smaller(proc_text(&mut k, f, &mut out), smaller(size, XFER));

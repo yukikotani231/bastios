@@ -687,6 +687,18 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   }
   let dev = dev_at(k.fs.xfer, n);
   if dev == DEV_TTY {
+    if xfer_is(k.fs.xfer, 0, n, "dev/console") && flags & LO_PATH == 0 {
+      let mut cwant = 0;
+      if flags % 4 != LO_WRONLY {
+        cwant = MAY_R;
+      }
+      if flags % 4 != 0 {
+        cwant = cwant + MAY_W;
+      }
+      if !may_meta(k.procs, pid, S_IFCHR, 0, cwant) {
+        return EACCES;                      // the console is root's (rw--w----), as stat says
+      }
+    }
     let ct = pty_ctty(k, pid);
     if ct < PTY_N && xfer_is(k.fs.xfer, 0, n, "dev/tty") {
       return pty_open_slave(&mut k, pid, ct, flags);   // the session's terminal is a pty

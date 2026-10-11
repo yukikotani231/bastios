@@ -8,12 +8,18 @@
  * whose file, kill and power calls check nothing and so are root's.
  * A set-user-ID file in a loop-mounted image does not raise its runner:
  * the image's maker chose its owners and modes (BastiOS mounts them
- * nosuid). */
+ * nosuid). It may not read where a root process's /proc exe and fd links
+ * lead, nor open /dev/console, nor SHM_LOCK under a zero RLIMIT_MEMLOCK;
+ * and a SysV set's group bits reach it through a supplementary group. */
 #include "compat.h"
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/ipc.h>
 #include <sys/mount.h>
+#include <sys/msg.h>
+#include <sys/resource.h>
+#include <sys/shm.h>
 #include <sys/reboot.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -262,6 +268,63 @@ static int loop_nosuid(void) {      /* in memory: a loop mount takes an in-memor
     return ok;
 }
 
+#define OTHERS 200
+
+/* The links of the root parent are hidden; its own are not. */
+static int no_proc_links(void) {
+    char p[64], buf[256];
+    pid_t root = getppid();
+    if (!become_nobody()) return 0;
+    snprintf(p, sizeof p, "/proc/%d/exe", (int)root);
+    int ok = readlink(p, buf, sizeof buf) == -1 && errno == EACCES;
+    snprintf(p, sizeof p, "/proc/%d/fd/0", (int)root);
+    ok = ok && readlink(p, buf, sizeof buf) == -1 && errno == EACCES;
+    return ok && readlink("/proc/self/exe", buf, sizeof buf) > 0;
+}
+
+static int no_console(void) {
+    if (!become_nobody()) return 0;
+    return open("/dev/console", O_RDWR) == -1 && errno == EACCES;
+}
+
+/* A set of group OTHERS, mode 040: readable by a member of OTHERS only
+ * through its supplementary groups. */
+static int sysv_msq;
+static int reads_through_group(void) {
+    gid_t g = OTHERS;
+    if (setgroups(1, &g) != 0 || !become_nobody()) return 0;
+    struct msqid_ds ds;
+    return msgctl(sysv_msq, IPC_STAT, &ds) == 0;
+}
+static int stranger_cannot_read(void) {
+    if (setgroups(0, NULL) != 0 || !become_nobody()) return 0;
+    struct msqid_ds ds;
+    return msgctl(sysv_msq, IPC_STAT, &ds) == -1 && errno == EACCES;
+}
+static int sysv_groups(void) {
+    sysv_msq = msgget(IPC_PRIVATE, 0040);
+    if (sysv_msq < 0) return 0;
+    struct msqid_ds ds;
+    int ok = msgctl(sysv_msq, IPC_STAT, &ds) == 0;
+    ds.msg_perm.gid = OTHERS;
+    ok = ok && msgctl(sysv_msq, IPC_SET, &ds) == 0;
+    ok = ok && in_child(reads_through_group) && in_child(stranger_cannot_read);
+    msgctl(sysv_msq, IPC_RMID, NULL);
+    return ok;
+}
+
+/* The segment's owner, under a zero RLIMIT_MEMLOCK. */
+static int no_shm_lock(void) {
+    if (!become_nobody()) return 0;
+    int id = shmget(IPC_PRIVATE, 4096, 0600);
+    if (id < 0) return 0;
+    struct rlimit rl = { 0, 0 };
+    int ok = setrlimit(RLIMIT_MEMLOCK, &rl) == 0;
+    ok = ok && shmctl(id, SHM_LOCK, NULL) == -1 && errno == EPERM;
+    shmctl(id, IPC_RMID, NULL);
+    return ok;
+}
+
 static int bastios(void) {
     struct utsname u;
     return uname(&u) == 0 && strstr(u.release, "bastios") != NULL;
@@ -287,6 +350,10 @@ int main(int argc, char **argv) {
     EXPECT("loop devices are root's and group disk's", loop_devices());
     EXPECT("ports below 1024 are root's", in_child(low_ports));
     EXPECT("root binds a port below 1024", root_binds_low());
+    EXPECT("another user's /proc exe and fd links are hidden", in_child(no_proc_links));
+    EXPECT("/dev/console is root's", in_child(no_console));
+    EXPECT("SysV group bits count supplementary groups", sysv_groups());
+    EXPECT("SHM_LOCK needs RLIMIT_MEMLOCK or root", in_child(no_shm_lock));
     if (bastios())
         EXPECT("native system calls are root's", in_child(no_native));
     if (bastios())
