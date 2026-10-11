@@ -742,6 +742,7 @@ t_sysv: shmat, a second view, fork, IPC_RMID
 t_sysv: shmget and shmat errors
 t_thread: 4 threads, mutex
 t_thread: condition variable
+t_thread: exit_group while another thread runs keeps its code
 t_thread: gettid differs in a thread
 t_thread: pthread_create + join
 t_thread: pthread_detach
