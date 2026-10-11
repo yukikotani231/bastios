@@ -89,13 +89,15 @@ fn lex_norm(src: &Bytes, sl: u64, dst: &mut Bytes) -> u64
 
 /// Follows the symbolic links in the normalized path in xfer[..n] (the
 /// last component's too when `last`), leaving the result there. Returns
-/// its length, or NO_RESULT for a loop, a broken link or a result too long.
+/// its length, or NO_RESULT (and k.perr) for a loop, a broken link, a
+/// result too long, or a component under something not a directory.
 fn lx_follow(k: &mut Kernel, n: u64, last: bool) -> u64
   requires kok(k)
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
   if n > FNAME_MAX {
+    k.perr = ENAMETOOLONG;
     return NO_RESULT;
   }
   if n == 0 {
@@ -136,8 +138,12 @@ fn lx_follow(k: &mut Kernel, n: u64, last: bool) -> u64
     }
     if f != NO_FILE && vfs_is_link(&mut k.fs, f) {
       let t = vfs_read_at(&mut k.fs, f, 0, FNAME_MAX);
-      if hops >= LINK_HOPS || t == NO_FD || t == 0 || t > FNAME_MAX {
+      if hops >= LINK_HOPS {
         bad = true;
+        k.perr = ELOOP;
+      } else if t == NO_FD || t == 0 || t > FNAME_MAX {
+        bad = true;
+        k.perr = ENOENT;
       } else {
         hops = hops + 1;
         // The link's directory (for a relative target), the target, then
@@ -170,12 +176,17 @@ fn lx_follow(k: &mut Kernel, n: u64, last: bool) -> u64
         let nl = lex_norm(q, ql, &mut p);
         if nl == NO_RESULT {
           bad = true;
+          k.perr = ENAMETOOLONG;
         } else {
           pl = nl;
           e = 0;                            // look again from the top
         }
       }
     } else if c < pl {
+      if f != NO_FILE && !vfs_is_dir(&mut k.fs, f) {
+        bad = true;                         // a file with something under it
+        k.perr = ENOTDIR;
+      }
       e = c + 1;
     } else {
       e = pl;
@@ -250,12 +261,26 @@ fn lx_symlink(k: &mut Kernel, pid: u64, tva: u64, dirfd: u64, path: u64) -> u64
   let n = lx_path_at_nf(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     bfree(tb);
-    return ENOENT;
+    return k.perr;
   }
-  if n == 0 || vfs_lookup(&mut k.fs, n) != NO_FILE || dir_at(&mut k, n) != NO_FILE {
+  if n == 0 {
+    bfree(tb);
+    return ENOENT;                          // an empty path names nothing to make
+  }
+  if vfs_lookup(&mut k.fs, n) != NO_FILE || dir_at(&mut k, n) != NO_FILE {
     bfree(tb);
     return EEXIST;
   }
+  if vfs_ro(&mut k.fs, n) {
+    bfree(tb);
+    return EROFS;
+  }
+  let e = may_dir(&mut k, pid, n);
+  if e != 0 {
+    bfree(tb);
+    return e;
+  }
+  let own = new_owner(&mut k, pid, n);
   let mut j = 0;
   while j < tl
     invariant j <= tl && tl <= FNAME_MAX && n <= FNAME_MAX && blen(tb) == FNAME_MAX && kok(k)
@@ -266,6 +291,10 @@ fn lx_symlink(k: &mut Kernel, pid: u64, tva: u64, dirfd: u64, path: u64) -> u64
   bfree(tb);
   if !vfs_symlink(&mut k.fs, &mut k.mem, n, tl) {
     return ENOENT;                          // no such directory, or no room
+  }
+  let f = vfs_lookup(&mut k.fs, n);
+  if own != 0 && f < HFILES {
+    vfs_set_owner(&mut k.fs, f, own % 0x100000000, own / 0x100000000 % 0x100000000);
   }
   return 0;
 }
@@ -287,21 +316,37 @@ fn lx_hardlink(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
     n = lx_path_at_nf(&mut k, pid, odir, opath);
   }
   if n == NO_RESULT {
-    return ENOENT;
+    return k.perr;
   }
   if dir_at(&mut k, n) != NO_FILE {
     return EPERM;                           // directories have one name
+  }
+  if vfs_lookup(&mut k.fs, n) == NO_FILE {
+    let there = path_meta(&mut k, n);
+    if there.ok {
+      return EXDEV;                         // /proc, /dev or /bin: not in the file system
+    }
+    return ENOENT;
   }
   let mut t = balloc(2 * FNAME_MAX);
   xfer_save(k, &mut t, 0, n);
   let m = lx_path_at_nf(&mut k, pid, ndir, npath);
   if m == NO_RESULT {
     bfree(t);
-    return ENOENT;
+    return k.perr;
   }
   if dir_at(&mut k, m) != NO_FILE {
     bfree(t);
     return EEXIST;
+  }
+  if vfs_ro(&mut k.fs, m) && vfs_lookup(&mut k.fs, m) == NO_FILE {
+    bfree(t);
+    return EROFS;
+  }
+  let e = may_dir(&mut k, pid, m);
+  if e != 0 && vfs_lookup(&mut k.fs, m) == NO_FILE {
+    bfree(t);
+    return e;
   }
   xfer_save(k, &mut t, n, m);
   xfer_load(&mut k, t, 0, n + m);

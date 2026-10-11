@@ -21,6 +21,7 @@
 // its disk I/O synchronously.
 
 import "blk.bastio";
+import "core/ring.bastio";
 
 const CBLOCK: u64 = 4096;            // a block
 const NC: u64 = 64;                   // cache slots (256 KiB)
@@ -52,8 +53,8 @@ struct DiskQ {
   tag: Buf,             // per slot: the block it holds, or NOTAG
   st: Buf,              // per slot: CS_*
   q: Buf,               // NQ operations, a ring
-  head: u64,            // the oldest operation
-  count: u64,           // operations queued (the one running included)
+  r: Ring,              // the queue's head (the oldest operation) and count
+                        // (operations queued, the one running included)
   running: bool,        // the head operation is on the device
   since: u64,           // the tick it started
   hand: u64,            // the eviction clock's hand
@@ -66,14 +67,14 @@ struct DiskQ {
 
 spec fn dq_ok(q: &DiskQ) -> bool {
   blen(q.cache) == NC * CBLOCK && len(q.tag) == NC && len(q.st) == NC && len(q.q) == NQ * QW
-  && q.head < NQ && q.count <= NQ && q.hand < NC
+  && ring_ok(q.r) && q.r.cap == NQ && q.hand < NC
 }
 
 fn dq_new() -> DiskQ
   ensures dq_ok(result)
 {
   let mut q = DiskQ { cache: balloc(NC * CBLOCK), tag: alloc(NC), st: alloc(NC), q: alloc(NQ * QW),
-    head: 0, count: 0, running: false, since: 0, hand: 0, next: 1, done: 0, moved: 0, dead: false, good: 0 };
+    r: ring_new(NQ), running: false, since: 0, hand: 0, next: 1, done: 0, moved: 0, dead: false, good: 0 };
   let mut i = 0;
   while i < NC
     invariant i <= NC && dq_ok(q)
@@ -95,7 +96,7 @@ fn dq_free(q: DiskQ)
 
 /// Has every queued operation finished?
 fn dq_idle(q: &DiskQ) -> bool {
-  return q.count == 0;
+  return q.r.n == 0;
 }
 
 /// The disk failed: nothing more is sent to it. Transactions up to
@@ -104,7 +105,7 @@ fn dq_idle(q: &DiskQ) -> bool {
 fn dq_kill(q: &mut DiskQ)
   requires dq_ok(q)
   ensures dq_ok(q) && q.dead
-  ensures q.head == old(q.head) && q.count == old(q.count) && q.running == old(q.running)
+  ensures q.r.h == old(q.r.h) && q.r.n == old(q.r.n) && q.running == old(q.running)
   ensures q.next == old(q.next) && q.done == old(q.done) && q.moved == old(q.moved)
 {
   if !q.dead {
@@ -203,19 +204,19 @@ fn dq_room(q: &DiskQ) -> u64
 fn dq_fits(q: &DiskQ, slots: u64, ops: u64) -> bool
   requires dq_ok(q)
 {
-  return ops <= NQ - q.count && slots <= dq_room(q);
+  return ops <= NQ - q.r.n && slots <= dq_room(q);
 }
 
 /// Forgets any copy of block b (it was freed and is being reused): a
 /// valid slot becomes free, a pinned one finishes untagged.
 fn dq_forget(q: &mut DiskQ, b: u64)
   requires dq_ok(q)
-  ensures dq_ok(q) && q.count == old(q.count)
+  ensures dq_ok(q) && q.r.n == old(q.r.n)
 {
   let mut i = 0;
-  let c0 = q.count;
+  let c0 = q.r.n;
   while i < NC
-    invariant i <= NC && dq_ok(q) && q.count == c0
+    invariant i <= NC && dq_ok(q) && q.r.n == c0
   {
     if get(q.tag, i) == b {
       if get(q.st, i) == CS_VALID {
@@ -229,16 +230,15 @@ fn dq_forget(q: &mut DiskQ, b: u64)
 
 /// Appends an operation.
 fn dq_push(q: &mut DiskQ, kind: u64, slot: u64, b: u64)
-  requires dq_ok(q) && q.count < NQ
-  ensures dq_ok(q) && q.count == old(q.count) + 1
+  requires dq_ok(q) && q.r.n < NQ
+  ensures dq_ok(q) && q.r.n == old(q.r.n) + 1
   ensures forall i: u64 :: get(q.st, i) == old(get(q.st, i))
   ensures forall i: u64 :: get(q.tag, i) == old(get(q.tag, i))
 {
-  let at = (q.head + q.count) % NQ * QW;
+  let at = ring_push(&mut q.r) * QW;
   q.q = set(q.q, at, kind);
   q.q = set(q.q, at + 1, slot);
   q.q = set(q.q, at + 2, b);
-  q.count = q.count + 1;
 }
 
 /// Block b's slot if it is cached; otherwise queues a read of it (unless
@@ -257,7 +257,7 @@ fn dq_want(q: &mut DiskQ, b: u64) -> u64
   if dq_reading(q, b) {
     return NC;
   }
-  if q.count >= NQ {
+  if q.r.n >= NQ {
     return DQ_NONE;
   }
   let s = dq_slot(&mut q);
@@ -278,7 +278,7 @@ fn dq_put(q: &mut DiskQ, b: u64, src: &Bytes, at: u64, look: bool) -> bool
   requires dq_ok(q) && at + CBLOCK <= blen(src)
   ensures dq_ok(q)
 {
-  if q.count >= NQ {
+  if q.r.n >= NQ {
     return false;
   }
   if look {
@@ -288,13 +288,7 @@ fn dq_put(q: &mut DiskQ, b: u64, src: &Bytes, at: u64, look: bool) -> bool
   if s >= NC {
     return false;
   }
-  let mut j = 0;
-  while j < CBLOCK
-    invariant j <= CBLOCK && j % 8 == 0 && dq_ok(q) && s < NC && q.count < NQ
-  {
-    put_u64(&mut q.cache, s * CBLOCK + j, get_u64(src, at + j));
-    j = j + 8;
-  }
+  bcopy(&mut q.cache, s * CBLOCK, src, at, CBLOCK);
   if look {
     q.tag = set(q.tag, s, b);
   } else {
@@ -310,7 +304,7 @@ fn dq_flush(q: &mut DiskQ) -> bool
   requires dq_ok(q)
   ensures dq_ok(q)
 {
-  if q.count >= NQ {
+  if q.r.n >= NQ {
     return false;
   }
   dq_push(&mut q, Q_FLUSH, 0, 0);
@@ -322,7 +316,7 @@ fn dq_release(q: &mut DiskQ, b: u64) -> bool
   requires dq_ok(q)
   ensures dq_ok(q)
 {
-  if q.count >= NQ {
+  if q.r.n >= NQ {
     return false;
   }
   dq_push(&mut q, Q_FREE, 0, b);
@@ -335,7 +329,7 @@ fn dq_end(q: &mut DiskQ) -> u64
   requires dq_ok(q)
   ensures dq_ok(q)
 {
-  if q.count >= NQ || q.next >= 0x4000000000000000 {
+  if q.r.n >= NQ || q.next >= 0x4000000000000000 {
     return 0;                         // (2^62 transactions take centuries)
   }
   let t = q.next;
@@ -346,11 +340,10 @@ fn dq_end(q: &mut DiskQ) -> u64
 
 /// Drops the head operation.
 fn dq_pop(q: &mut DiskQ)
-  requires dq_ok(q) && q.count > 0
+  requires dq_ok(q) && q.r.n > 0
   ensures dq_ok(q)
 {
-  q.head = (q.head + 1) % NQ;
-  q.count = q.count - 1;
+  ring_pop_n(&mut q.r, 1);
   q.running = false;
   q.moved = (q.moved % 0x4000000000000000) + 1;
 }
@@ -373,10 +366,10 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
   requires dq_ok(q) && blk_ok(dev)
   ensures dq_ok(q) && blk_ok(dev)
 {
-  if q.count == 0 {
+  if q.r.n == 0 {
     return DQ_IDLE;
   }
-  let at = q.head * QW;
+  let at = q.r.h * QW;
   let kind = get(q.q, at);
   let s = get(q.q, at + 1);
   let b = get(q.q, at + 2);

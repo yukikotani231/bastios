@@ -28,10 +28,18 @@ const LX_ACCEPT4: u64 = 288;
 const AF_INET: u64 = 2;
 const SOCK_STREAM: u64 = 1;
 const SOCK_DGRAM: u64 = 2;
+const SOCK_SEQPACKET: u64 = 5;
 const IPPROTO_UDP: u64 = 17;
 const SOCK_NONBLOCK: u64 = 0x800;
 const SOCK_CLOEXEC: u64 = 0x80000;
 const MSG_DONTWAIT: u64 = 0x40;
+const MSG_PEEK: u64 = 2;
+const MSG_NOSIGNAL: u64 = 0x4000;
+const MSG_OOB: u64 = 1;
+const MSG_ERRQUEUE: u64 = 0x2000;
+const SOCKADDR_MAX: u64 = 128;         // sizeof(struct sockaddr_storage)
+const SO_SNDBUF: u64 = 7;
+const SO_RCVBUF: u64 = 8;
 const SIN_LEN: u64 = 16;               // struct sockaddr_in
 const SIN6_LEN: u64 = 28;              // struct sockaddr_in6
 const AF_INET6: u64 = 10;
@@ -81,8 +89,8 @@ fn sin_in(k: &mut Kernel, pid: u64, va: u64, alen: u64) -> Sin
   ensures kok(k)
   ensures result.err == 0 ==> (result.ip <= 4294967295 && result.port <= 65535)
 {
-  if alen < 8 {
-    return Sin { err: EINVAL, ip: 0, port: 0 };
+  if alen < 8 || alen % 4294967296 > SOCKADDR_MAX {
+    return Sin { err: EINVAL, ip: 0, port: 0 };   // a socklen_t past sockaddr_storage too
   }
   if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 8) != 8 {
     return Sin { err: EFAULT, ip: 0, port: 0 };
@@ -345,10 +353,26 @@ fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, 
   ensures kok(k)
 {
   if is_tcp(k, pid, fd) {
-    return lx_tcp_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1);
+    if flags % 2 == MSG_OOB {
+      return EINVAL;                        // no urgent data is ever kept
+    }
+    if flags / MSG_ERRQUEUE % 2 == 1 {
+      return EAGAIN;                        // the error queue is always empty
+    }
+    if addr != 0 && alenp != 0 {
+      // A stream socket fills in no address, but a negative length is
+      // still EINVAL, as on Linux.
+      if copy_from_user(&mut k.spaces, pid, alenp, &mut k.fs.xfer, 4) != 4 {
+        return EFAULT;
+      }
+      if bget(k.fs.xfer, 3) >= 128 {
+        return EINVAL;
+      }
+    }
+    return lx_tcp_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1);
   }
   if is_unix(k, pid, fd) {
-    return ux_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1);
+    return ux_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1);
   }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
@@ -404,7 +428,8 @@ fn lx_sockname(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
 }
 
 /// getsockopt(fd, level, name, val, lenp): SO_TYPE says stream or
-/// datagram; SO_ERROR and every other option the kernel accepts and
+/// datagram; SO_SNDBUF and SO_RCVBUF the buffer sizes; SO_ERROR and every
+/// other option the kernel accepts and
 /// ignores (setsockopt) read as 0. Options at other levels than
 /// SOL_SOCKET and (on TCP) SOL_TCP are -ENOPROTOOPT.
 fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u64, lenp: u64) -> u64
@@ -424,16 +449,20 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
   let mut v = 0;
   if level == SOL_SOCKET && name == SO_TYPE {
     v = 2;                                  // SOCK_DGRAM
-    if tcp {
+    if tcp && !ux_dgram(k, pid, fd) {
       v = 1;                                // SOCK_STREAM
     }
+  }
+  if level == SOL_SOCKET && (name == SO_SNDBUF || name == SO_RCVBUF) {
+    v = 4096;                               // a unix channel; a TCP buffer is as big
   }
   if copy_from_user(&mut k.spaces, pid, lenp, &mut k.fs.xfer, 4) != 4 {
     return EFAULT;
   }
   let room = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1)) + 65536 * cast[u64](bget(k.fs.xfer, 2)) + 16777216 * cast[u64](bget(k.fs.xfer, 3));
   lx_fill(&mut k, 0, 4);
-  bset(&mut k.fs.xfer, 0, cast[u8](v));
+  bset(&mut k.fs.xfer, 0, cast[u8](v % 256));
+  bset(&mut k.fs.xfer, 1, cast[u8](v / 256 % 256));
   let n = smaller(room, 4);
   if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {
     return EFAULT;
@@ -454,12 +483,15 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   let e = pget(k.procs, pid, F_REGS + R_R8);
   let f = pget(k.procs, pid, F_REGS + R_R9);
   let mut r = ENOSYS;
+  let dgram = sk_look(k, pid, a);
   if n == LX_SOCKET {
     r = lx_socket(&mut k, pid, a, b, c);
   } else if n == LX_BIND {
     r = lx_bind(&mut k, pid, a, b, c);
   } else if n == LX_CONNECT {
     r = lx_connect(&mut k, pid, a, b, c);
+  } else if n == LX_SENDTO && d % 2 == MSG_OOB && dgram.err == 0 {
+    r = EOPNOTSUPP;                         // a datagram has no out-of-band data
   } else if n == LX_SENDTO {
     r = lx_sendto(&mut k, pid, a, b, c, e, f);
   } else if n == LX_RECVFROM {
@@ -468,6 +500,8 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     r = lx_sockname(&mut k, pid, a, b, c, n == LX_GETPEERNAME);
   } else if n == LX_LISTEN && is_unix(k, pid, a) {
     r = ux_listen(&mut k, pid, a);
+  } else if n == LX_LISTEN && dgram.err == 0 {
+    r = EOPNOTSUPP;                         // a datagram socket cannot listen
   } else if n == LX_LISTEN {
     r = lx_listen(&mut k, pid, a);
   } else if n == LX_SOCKETPAIR {
@@ -484,20 +518,27 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     } else {
       r = lx_accept(&mut k, pid, a, b, c, fl);
     }
+  } else if n == LX_SHUTDOWN && is_tcp(k, pid, a) {
+    r = lx_tcp_shutdown(&mut k, pid, a, b);
+  } else if n == LX_SHUTDOWN && is_unix(k, pid, a) {
+    r = ux_shutdown(&mut k, pid, a, b);
   } else if n == LX_SHUTDOWN || n == LX_SETSOCKOPT {
     // Accepted and ignored on a socket: options (SO_REUSEADDR and the
-    // like), and shutdown (close sends the FIN).
+    // like), and shutdown of a datagram socket.
     let sk = sk_look(k, pid, a);
     r = sk.err;
     if is_tcp(k, pid, a) || is_unix(k, pid, a) {
       r = 0;
     }
   }
+  if r == SK_WAIT && !is_unix(k, pid, a) {
+    return sock_retry(&mut k, pid, n);       // nothing yet: sleep until a frame comes in
+  }
   if r == SK_WAIT {
     return lx_retry(&mut k, pid, n);         // nothing yet: a datagram, a connection, room
   }
   ret(&mut k.procs, pid, r);
-  if r == EPIPE {
+  if r == EPIPE && !(n == LX_SENDTO && d / MSG_NOSIGNAL % 2 == 1) {
     post_sig(&mut k, pid, SIGPIPE);          // the connection cannot send any more
     return SWITCH;
   }

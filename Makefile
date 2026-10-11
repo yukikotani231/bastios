@@ -1,7 +1,10 @@
 # BastiOS build.
 #   make            build build/bastios.elf
 #   make run        boot it in QEMU on this terminal (Ctrl-A X to quit)
+#   make disk       put files from this machine on the disk (FILES="...")
 #   make iso        build/bastios.iso: bootable from CD or USB, BIOS or UEFI
+#   make usb        build/bastios-usb.img: the ISO plus a partition for the files
+#   make run-usb    boot that image from a USB stick in QEMU
 #   make run-iso    boot the ISO in QEMU (run-uefi: under UEFI firmware)
 #   make test       boot it in QEMU and drive the shell over the serial line
 #   make fuzz       fuzz the system calls (SEED, SEEDS, CALLS, SMP)
@@ -9,6 +12,8 @@
 # BASTIOC points at the Bastio stage0 compiler (github.com/yukikotani231/bastiolang).
 
 BASTIOC ?= ../bastiolang/stage0/target/release/bastioc0
+# Where `import "core/..."` finds the Bastio core library.
+BASTIOLIB ?= ../bastiolang
 CC      ?= cc
 QEMU    ?= qemu-system-x86_64
 
@@ -35,11 +40,11 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest crashme diskbench
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash
-UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs
+UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so build/user/vdso.so
 
 build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
-	$(BASTIOC) --target user -o $@ $<
+	$(BASTIOC) --lib $(BASTIOLIB) --target user -o $@ $<
 
 build/user/%.o: build/user/%.c
 	$(CC) $(UCFLAGS) -c -o $@ $<
@@ -94,10 +99,20 @@ build/user/sysfuzz.o: user/sysfuzz.c | build/user
 build/user/sysfuzz.elf: build/user/elfstart.o build/user/sysfuzz.o
 	$(CC) -nostdlib -static -no-pie -Wl,-Ttext-segment=0x8000000000 -Wl,--build-id=none -o $@ $^
 
+# The vDSO (user/vdso.c): a tiny shared object the kernel copies onto one
+# page of every Linux process, with the clock from byte 0xF80 of it. The
+# whole file must fit below that (user/vdso.ld fails the link otherwise,
+# and the size check catches the section headers at its end).
+build/user/vdso.so: user/vdso.c user/vdso.ld user/vdso.map | build/user
+	$(CC) -O2 -fPIC -ffreestanding -fno-stack-protector -fno-asynchronous-unwind-tables -mgeneral-regs-only \
+	  -Wall -Wextra -Werror -nostdlib -shared -Wl,-T,user/vdso.ld -Wl,--version-script=user/vdso.map \
+	  -Wl,--hash-style=both -Wl,-soname=linux-vdso.so.1 -Wl,--build-id=none -o $@ user/vdso.c
+	@test $$(stat -c %s $@) -le 3968 || { echo "$@ does not fit below the vDSO's clock"; rm -f $@; exit 1; }
+
 # A C program against musl libc, static PIE (the musl-tools package).
 MUSLCC ?= musl-gcc
 
-build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf: build/user/%.elf: user/%.c | build/user
+build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf build/user/mkfs.elf: build/user/%.elf: user/%.c | build/user
 	$(MUSLCC) -static-pie -O2 -o $@ $<
 
 # A dynamically linked PIE, and musl's dynamic linker (libc.so, which is
@@ -141,7 +156,7 @@ KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
 build/kernel.c: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
-	$(BASTIOC) --target kernel -o $@ src/main.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --target kernel -o $@ src/main.bastio
 
 build/kernel.o: build/kernel.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -187,6 +202,15 @@ build/bastios.iso: build/bastios.elf boot/grub.cfg
 
 iso: build/bastios.iso
 
+# A USB stick image: the ISO, then a GPT partition of USB_MIB MiB for the
+# file system (tools/mkusb.py). Booted from, the stick is also the disk,
+# and the machine's own disks are left alone.
+USB_MIB ?= 64
+build/bastios-usb.img: build/bastios.iso tools/mkusb.py
+	tools/mkusb.py $@ --iso build/bastios.iso --mib $(USB_MIB)
+
+usb: build/bastios-usb.img
+
 # The disk: a raw image, here as a virtio block device. BastiOS formats it
 # the first time it boots, and the files under disk/ live there across
 # boots.
@@ -212,6 +236,13 @@ ISO_DISPLAY ?=
 $(DISK): | build
 	truncate -s 33M $@
 
+# A disk holding files from this machine, which then show up under disk/
+# (in ash: /disk/NAME). FILES lists them: PATH stores PATH under its base
+# name, NAME=PATH under NAME. This replaces $(DISK) and what was on it.
+#   make disk FILES="hi greet=build/user/greet.elf"
+disk: | build
+	test/compat/mkdisk.py $(DISK) $(FILES)
+
 # QEMU exits with 33 when the kernel powers off through isa-debug-exit
 # (`halt`), which is a clean stop, not a failure.
 CLEAN_EXIT := ; s=$$?; [ $$s -eq 0 ] || [ $$s -eq 33 ]
@@ -224,6 +255,14 @@ run: build/bastios.elf $(DISK)
 run-iso: build/bastios.iso $(DISK)
 	$(QEMU) -cdrom build/bastios.iso $(ISO_DISPLAY) $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
 
+# From the USB stick image, on an xHCI controller, with a USB keyboard.
+run-usb: build/bastios-usb.img
+	$(QEMU) -drive file=build/bastios-usb.img,format=raw,if=none,id=st -device qemu-xhci,id=xh \
+	  -device usb-storage,bus=xh.0,drive=st,bootindex=0 -device usb-kbd,bus=xh.0 \
+	  $(ISO_DISPLAY) -cpu qemu64,+pdpe1gb -m 256M -smp $(SMP) -no-reboot \
+	  -device isa-debug-exit,iobase=0xf4,iosize=0x04 -nic user,model=virtio-net-pci \
+	  -serial mon:stdio $(CLEAN_EXIT)
+
 run-uefi: build/bastios.iso $(DISK)
 	cp $(OVMF_VARS) build/ovmf_vars.fd
 	$(QEMU) -drive if=pflash,format=raw,readonly=on,file=$(OVMF) \
@@ -232,9 +271,12 @@ run-uefi: build/bastios.iso $(DISK)
 
 test: build/bastios.elf
 	test/trusted_base.sh
+	test/fsck_test.py
 	test/shell_test.sh
+	BASTIOC=$(BASTIOC) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/guide_test.py
 	test/tcp_test.sh
 	NIC=e1000 test/tcp_test.sh
+	NIC=igb test/tcp_test.sh
 	test/iso_test.sh
 	test/nmi_test.sh
 	test/fuzz_test.sh 1 2 2000
@@ -282,7 +324,11 @@ QUICKJS_GIT   ?= https://github.com/bellard/quickjs
 QUICKJS_REV   ?= 535a7c250ff4a577ec36c3e103daab6dadeea650
 SQLITE_GIT    ?= https://github.com/sqlite/sqlite
 SQLITE_TAG    ?= version-3.52.0
-COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3
+MPY_GIT       ?= https://github.com/micropython/micropython
+MPY_TAG       ?= v1.24.1
+KILO_GIT      ?= https://github.com/antirez/kilo
+KILO_REV      ?= 323d93b29bd89a2cb446de90c4ed4fea1764176e
+COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo
 APP_CFLAGS    := -static-pie -fPIE -O2 -w -s
 
 build/compat/src:
@@ -309,15 +355,103 @@ build/compat/sqlite3: | build/compat/src
 	$(MUSLCC) $(APP_CFLAGS) -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION -o $@ \
 	  build/compat/src/sqlite/shell.c build/compat/src/sqlite/sqlite3.c -lm
 
+# MicroPython's unix port, without the modules that need libraries musl
+# does not bring (ffi, btree, ssl).
+build/compat/micropython: | build/compat/src
+	rm -rf build/compat/src/micropython
+	git clone -q --depth 1 --branch $(MPY_TAG) $(MPY_GIT) build/compat/src/micropython
+	git -C build/compat/src/micropython submodule -q update --init --depth 1 lib/micropython-lib
+	$(MAKE) -C build/compat/src/micropython/mpy-cross -s >/dev/null
+	$(MAKE) -C build/compat/src/micropython/ports/unix -s CC=$(MUSLCC) CFLAGS_EXTRA=-fPIE LDFLAGS_EXTRA=-static-pie \
+	  MICROPY_PY_FFI=0 MICROPY_PY_BTREE=0 MICROPY_PY_SSL=0 MICROPY_SSL_AXTLS=0 >/dev/null
+	cp build/compat/src/micropython/ports/unix/build-standard/micropython $@
+
+# kilo, a small editor that puts the terminal in raw mode (test/compat/tty.txt).
+build/compat/kilo: | build/compat/src
+	rm -rf build/compat/src/kilo && mkdir build/compat/src/kilo
+	git -C build/compat/src/kilo init -q
+	git -C build/compat/src/kilo fetch -q --depth 1 $(KILO_GIT) $(KILO_REV)
+	git -C build/compat/src/kilo checkout -q FETCH_HEAD
+	$(MUSLCC) $(APP_CFLAGS) -o $@ build/compat/src/kilo/kilo.c
+
+# Building C on BastiOS: tcc and GNU make on a second disk (test/compat/
+# devdisk.sh) with a small C runtime under /disk/c, which tcc is configured
+# to look in; test/compat/dev.txt compiles and runs programs with them.
+# make's sources come from its GitHub mirror and gnulib's, and bootstrapping
+# them needs autoconf, automake, autopoint and texinfo.
+TCC_GIT       ?= https://github.com/TinyCC/tinycc
+TCC_REV       ?= 43c7708b85681a2fd4451c8a541af4494a8919b2
+GMAKE_GIT     ?= https://github.com/mirror/make
+GMAKE_TAG     ?= 4.4.1
+GNULIB_GIT    ?= https://github.com/coreutils/gnulib
+GNULIB_TAG    ?= stable-202301
+MUSL_INC      ?= /usr/include/x86_64-linux-musl
+MUSL_LIB      ?= /usr/lib/x86_64-linux-musl
+TCC_SRC       := build/compat/src/tcc
+
+build/compat/tcc: test/compat/patches/tcc-auto-type.patch | build/compat/src
+	rm -rf $(TCC_SRC) && mkdir $(TCC_SRC)
+	git -C $(TCC_SRC) init -q
+	git -C $(TCC_SRC) fetch -q --depth 1 $(TCC_GIT) $(TCC_REV)
+	git -C $(TCC_SRC) checkout -q FETCH_HEAD
+	git -C $(TCC_SRC) apply $(CURDIR)/test/compat/patches/tcc-auto-type.patch
+	cd $(TCC_SRC) && ./configure --cc=$(MUSLCC) --config-musl --config-pie --extra-cflags="-O2 -fPIE" \
+	  --extra-ldflags="-static-pie -s" --sysincludepaths=/disk/c/include --libpaths=/disk/c/lib \
+	  --crtprefix=/disk/c/lib --tccdir=/disk/c/lib --elfinterp=/lib/ld-musl-x86_64.so.1 >/dev/null
+	$(MAKE) -C $(TCC_SRC) -s tcc
+	$(MAKE) -C $(TCC_SRC) -s libtcc1.a XFLAGS-unx="-B$(CURDIR)/$(TCC_SRC) -I$(CURDIR)/$(TCC_SRC)/include -I$(MUSL_INC)"
+	cp $(TCC_SRC)/tcc $@
+
+build/compat/make: | build/compat/src
+	rm -rf build/compat/src/make build/compat/src/gnulib
+	git clone -q --depth 1 --branch $(GMAKE_TAG) $(GMAKE_GIT) build/compat/src/make
+	git clone -q --depth 1 --branch $(GNULIB_TAG) $(GNULIB_GIT) build/compat/src/gnulib
+	cd build/compat/src/make && ./bootstrap --no-git --gnulib-srcdir=../gnulib --skip-po >/dev/null && \
+	  CC=$(MUSLCC) CFLAGS="-O2 -fPIE" LDFLAGS="-static-pie -s" ./configure -q --disable-nls --without-guile
+	$(MAKE) -C build/compat/src/make -s >/dev/null
+	cp build/compat/src/make/make $@
+
+build/compat/dev.img: build/compat/tcc build/compat/make test/compat/devdisk.sh test/compat/dev_headers.c test/compat/mkdisk.py
+	test/compat/devdisk.sh $@ build/compat/tcc build/compat/make $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)
+
+# The Bastio compiler on BastiOS: bastioc1 (bastiolang's stage1, as C from
+# bastioc0, built here with musl), Z3 to discharge its proofs, and tcc to
+# build the C it writes, on a third disk (test/compat/bastiodisk.sh) for
+# test/compat/bastio.txt. Z3 is built against glibc, statically: there is
+# no C++ compiler for musl here. Its build takes a while, once.
+BASTIOLANG    ?= $(patsubst %/stage0/target/release/bastioc0,%,$(BASTIOC))
+Z3_GIT        ?= https://github.com/Z3Prover/z3
+Z3_TAG        ?= z3-4.8.12
+Z3_JOBS       ?= 4
+
+build/compat/z3: | build/compat/src
+	rm -rf build/compat/src/z3
+	git clone -q --depth 1 --branch $(Z3_TAG) $(Z3_GIT) build/compat/src/z3
+	cd build/compat/src/z3 && CXX=g++ CC=gcc CXXFLAGS=-fPIE LDFLAGS=-static-pie \
+	  python3 scripts/mk_make.py --single-threaded >/dev/null
+	$(MAKE) -C build/compat/src/z3/build -s -j$(Z3_JOBS) z3 >/dev/null
+	strip -o $@ build/compat/src/z3/build/z3
+
+build/compat/bastioc1.c: $(BASTIOC) $(wildcard $(BASTIOLANG)/stage1/*.bastio) | build/compat
+	$(BASTIOC) --emit-c -o $@ $(BASTIOLANG)/stage1/bastioc1.bastio
+
+build/compat/bastioc1: build/compat/bastioc1.c
+	$(MUSLCC) $(APP_CFLAGS) -o $@ $<
+
+build/compat/bastio.img: build/compat/bastioc1 build/compat/z3 build/compat/tcc test/compat/bastiodisk.sh \
+    $(wildcard test/compat/bastio/*.bastio) test/compat/mkdisk.py
+	test/compat/bastiodisk.sh $@ build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc \
+	  $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB) $(BASTIOLANG)/stage1
+
 build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) test/compat/mkdisk.py
 	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
 
-compat: build/bastios.elf build/compat/disk.img
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --out build/compat $(COMPAT_PROGS)
+compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --out build/compat $(COMPAT_PROGS)
 
 # Records which checks pass now, so `make compat` catches regressions.
-compat-baseline: build/bastios.elf build/compat/disk.img
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --out build/compat $(COMPAT_PROGS)
+compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --out build/compat $(COMPAT_PROGS)
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
@@ -378,8 +512,12 @@ diskbench: build/bastios.elf
 iobench: build/bastios.elf
 	test/iobench.sh
 
+# Network timings on virtio-net and e1000.
+netbench: build/bastios.elf
+	test/netbench.sh
+
 clean:
 	rm -rf build
 
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
-.PHONY: all run test fuzz smpbench threadbench diskbench iobench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+.PHONY: all run disk usb run-usb test fuzz smpbench threadbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean

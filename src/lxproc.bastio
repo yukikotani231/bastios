@@ -5,6 +5,8 @@
 
 import "linux.bastio";
 import "lxdev.bastio";
+import "core/endian.bastio";
+import "core/bytes.bastio";
 
 // ---------------------------------------------------------------- fork
 
@@ -157,8 +159,16 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   pset(&mut k.procs, c, F_CTID, 0);
   pset(&mut k.procs, c, F_FUTEX, 0);
   pset(&mut k.procs, c, F_QUIET, 0);
+  let mut w = F_VTIMER;
+  while w < F_PTIMER + 2
+    invariant F_VTIMER <= w && w <= F_PTIMER + 2 && len(k.procs) == PTAB_LEN && kok(k)
+  {
+    pset(&mut k.procs, c, w, 0);            // a child does not inherit interval timers
+    w = w + 1;
+  }
   lx_fd_fork(&mut k, pid, c);
   map_fork(&mut k, pid, c);
+  shm_fork(&mut k, pid, c);
   sig_fork(&mut k.sigact, pid, c);
   cwd_fork(&mut k.cwd, pid, c);
   pset(&mut k.procs, c, F_SIGPEND, 0);
@@ -193,9 +203,10 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
   requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
+  k.perr = ENOENT;
   let src = lx_src_at(&mut k, pid, path);
   if !src.file && src.prog >= NPROGS {
-    return ENOENT;
+    return k.perr;
   }
   let mut args = balloc(ARGS_MAX);
   let alen = lx_args(&mut k, pid, argv, &mut args, 0, ARGV_MAX);
@@ -208,7 +219,9 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
     bfree(args);
     return E2BIG;
   }
-  let sp = load_image(&mut k.mem, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, pid, src, args, alen, total);
+  let from_file = src.file;
+  let image = src.f;
+  let sp = load_image(&mut k.mem, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, total);
   bfree(args);
   match sp {
     Space::Empty => { return ENOEXEC; },
@@ -222,9 +235,12 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
       put_space(&mut k.spaces, pid, Space::Mapped(new));
     },
   }
+  shm_drop_all(&mut k, pid);
   lx_fd_close_all(&mut k, pid, true);
   sig_reset(&mut k.sigact, pid, true);
+  pset(&mut k.procs, pid, F_ALTSIZE, 0);  // and the alternate signal stack
   ptimer_clear(&mut k, pid);              // execve deletes POSIX timers
+  exec_ids(&mut k, pid, from_file, image); // set-user-ID and set-group-ID files
   match take_fpu(&mut k.fpus, pid) {
     Fpu::None => {},
     Fpu::State(mut f) => {
@@ -243,7 +259,8 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
 }
 
 /// The executable at user path `va`: built-in image NAME for /bin/NAME,
-/// otherwise the file. Not found: a built-in Src with prog NPROGS.
+/// otherwise the file. Not found: a built-in Src with prog NPROGS, and
+/// the -errno in k.perr (EACCES for a file the process may not run).
 fn lx_src_at(k: &mut Kernel, pid: u64, va: u64) -> Src
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -257,15 +274,23 @@ fn lx_src_at(k: &mut Kernel, pid: u64, va: u64) -> Src
   if n <= XFER {
     pf = proc_file(k.procs, k.fs.xfer, n);
   }
-  if pf >= PROC_DEV && pf % 16 == PF_EXE {
+  if is_exe_file(pf) {
     return exe_src(&mut k, (pf - PROC_DEV) / 16);
   }
   if n > 4 && xfer_bin(k.fs.xfer) {
     let prog = lx_prog_at(&mut k, pid, va);
     return Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
   }
+  k.perr = ENOENT;
   let f = vfs_lookup(&mut k.fs, n);
   if f == NO_FILE {
+    if dir_at(&mut k, n) != NO_FILE {
+      k.perr = EACCES;                      // a directory
+    }
+    return none;
+  }
+  if may_path(&mut k, pid, n, MAY_X) != 0 {
+    k.perr = EACCES;                        // no execute permission (src/lxperm.bastio)
     return none;
   }
   let size = vfs_size(&mut k.fs, f);
@@ -325,19 +350,7 @@ fn xfer_bin(x: &Bytes) -> bool
 fn xfer_is(x: &Bytes, from: u64, to: u64, name: Str) -> bool
   requires from <= to && to <= blen(x)
 {
-  if to - from != slen(name) {
-    return false;
-  }
-  let mut i = 0;
-  while i < slen(name)
-    invariant i <= slen(name) && from + slen(name) == to
-  {
-    if bget(x, from + i) != sget(name, i) {
-      return false;
-    }
-    i = i + 1;
-  }
-  return true;
+  return bytes_span_eq_str(x, from, to, name);
 }
 
 /// Copies the strings of the NULL-ended array of at most `most` string
@@ -400,22 +413,52 @@ fn lx_args(k: &mut Kernel, pid: u64, argv: u64, args: &mut Bytes, from: u64, mos
 
 // ---------------------------------------------------------------- wait4
 
+/// Whether wait4's pid argument `want` names child c of pid: -1 any child,
+/// 0 one in pid's process group, -g one in group g, else that pid.
+fn wait_match(procs: &Buf, pid: u64, c: u64, want: u64) -> bool
+  requires len(procs) == PTAB_LEN && pid < NPROC && c < NPROC
+{
+  if want == 0xFFFFFFFFFFFFFFFF {
+    return true;
+  }
+  if want == 0 {
+    return pgid_of(procs, c) == pgid_of(procs, pid);
+  }
+  if want >= 0x8000000000000000 {
+    return pgid_of(procs, c) == 0xFFFFFFFFFFFFFFFF - want + 1;
+  }
+  return c == want;
+}
+
 /// wait4(want, status, options, rusage): collects a child that has ended
-/// (child `want`, or any for -1 or 0), storing its exit code as the Linux
+/// (one wait_match names), storing its exit code as the Linux
 /// status at user address `status` if not NULL. With none ended yet, the
 /// process blocks (WNOHANG: returns 0) and the call is restarted once a
 /// child ends. rusage is not filled in.
-fn lx_wait4(k: &mut Kernel, pid: u64, want: u64, status: u64, options: u64) -> u64
+fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC
   ensures kok(k)
 {
-  let any = want == 0 || want >= 0x8000000000000000;
+  // WNOHANG, WUNTRACED, WCONTINUED, __WNOTHREAD, __WALL and __WCLONE.
+  if options % 0x100000000 & !0xE000000B != 0 {
+    ret(&mut k.procs, pid, EINVAL);
+    return KEEP;
+  }
+  let p32 = pidarg % 0x100000000;           // a pid_t
+  if p32 == 0x80000000 {
+    ret(&mut k.procs, pid, ESRCH);          // INT_MIN has no group to name
+    return KEEP;
+  }
+  let mut want = p32;
+  if p32 > 0x80000000 {
+    want = 0xFFFFFFFF00000000 + p32;        // negative: sign-extend
+  }
   let mut found = false;
   let mut c = 1;
   while c < NPROC
     invariant 1 <= c && c <= NPROC && kok(k)
   {
-    if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE && (any || c == want) {
+    if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
       found = true;
       if state(k.procs, c) == ZOMBIE {
         if status != 0 {
@@ -460,8 +503,8 @@ fn lx_wait4(k: &mut Kernel, pid: u64, want: u64, status: u64, options: u64) -> u
 
 /// waitid(idtype, id, info, options): like wait4, with the answer in a
 /// siginfo (SIGCHLD, CLD_EXITED or CLD_KILLED, the pid and the status).
-/// P_ALL and P_PGID (there are no process groups) wait for any child,
-/// P_PID for one. WNOWAIT leaves the child to be waited for again. Only
+/// P_ALL waits for any child, P_PID for one, P_PGID for one in a group.
+/// WNOWAIT leaves the child to be waited for again. Only
 /// ended children are reported (WEXITED); WNOHANG with none returns 0 with
 /// the siginfo's pid 0.
 fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options: u64) -> u64
@@ -472,13 +515,22 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
     ret(&mut k.procs, pid, EINVAL);         // WEXITED is the only event there is
     return KEEP;
   }
-  let any = idtype != 1;
+  // P_ALL any child, P_PID child id, P_PGID one in group id (0: pid's own).
+  let mut want = 0xFFFFFFFFFFFFFFFF;
+  if idtype == 1 {
+    want = id % 0x80000000;
+  } else if idtype == 2 {
+    want = 0;
+    if id % 0x80000000 != 0 {
+      want = 0xFFFFFFFFFFFFFFFF - id % 0x80000000 + 1;
+    }
+  }
   let mut found = false;
   let mut c = 1;
   while c < NPROC
     invariant 1 <= c && c <= NPROC && kok(k)
   {
-    if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE && (any || c == id) {
+    if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
       found = true;
       if state(k.procs, c) == ZOMBIE {
         if info != 0 {
@@ -548,10 +600,10 @@ fn lx_times(k: &mut Kernel, pid: u64, buf: u64) -> u64
 // ---------------------------------------------------------------- stat
 
 /// What stat says about a path or descriptor.
-struct Meta { ok: bool, mode: u64, size: u64, ino: u64, mtime: u64 }
+struct Meta { ok: bool, mode: u64, size: u64, ino: u64, mtime: u64, own: u64 }   // own: uid + gid * 2^32
 
 /// stat(path, buf): "/", "/bin" and the file layer's directories are
-/// directories, /bin/NAME a built-in program, anything else a file. Owner root, one link; the mode's permission bits and the times come from the file system. Returns 0 or
+/// directories, /bin/NAME a built-in program, anything else a file. The mode's permission bits, the owner and the times come from the file system (root owns the rest). Returns 0 or
 /// -errno; with `buf` 0 it only checks that the path exists (access).
 fn lx_stat(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, buf: u64, follow: bool) -> u64
   requires kok(k) && pid < NPROC
@@ -564,7 +616,7 @@ fn lx_stat(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, buf: u64, follow: bo
     n = lx_path_at_nf(&mut k, pid, dirfd, path);   // lstat: a link itself
   }
   if n == NO_RESULT {
-    return ENOENT;
+    return k.perr;
   }
   let m = path_meta(&mut k, n);
   if !m.ok {
@@ -581,7 +633,7 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
   requires kok(k) && n <= FNAME_MAX
   ensures kok(k)
 {
-  let none = Meta { ok: false, mode: 0, size: 0, ino: 0, mtime: 0 };
+  let none = Meta { ok: false, mode: 0, size: 0, ino: 0, mtime: 0, own: 0 };
   let dev = dev_at(k.fs.xfer, n);
   if dev != DEV_NONE {
     return dev_meta(dev);
@@ -597,16 +649,16 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
     }
     if dir >= DIR_VFS {
       let dm = vfs_meta(&mut k.fs, dir - DIR_VFS);
-      return Meta { ok: true, mode: S_IFMT_DIR + dm.mode % 4096, size: 0, ino: 1 + dir, mtime: dm.mtime };
+      return Meta { ok: true, mode: S_IFMT_DIR + dm.mode % 4096, size: 0, ino: 1 + dir, mtime: dm.mtime, own: dm.own };
     }
-    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1 + dir, mtime: 0 };
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1 + dir, mtime: 0, own: 0 };
   }
   if n > 4 && xfer_bin(k.fs.xfer) {
     let prog = bin_prog(k.fs.xfer, n);
     if prog >= NPROGS {
       return none;
     }
-    return Meta { ok: true, mode: S_IFREG_X, size: slen(prog_image(prog)), ino: 10 + prog, mtime: 0 };
+    return Meta { ok: true, mode: S_IFREG_X, size: slen(prog_image(prog)), ino: INO_PROGS + prog, mtime: 0, own: 0 };
   }
   return file_meta(&mut k.fs, vfs_lookup(&mut k.fs, n));
 }
@@ -619,8 +671,8 @@ fn file_meta(v: &mut Vfs, f: u64) -> Meta
 {
   let size = vfs_size(&mut v, f);
   let fm = vfs_meta(&mut v, f);
-  if size == NO_FILE || !fm.ok || f >= NFILES + DSLOTS {
-    return Meta { ok: false, mode: 0, size: 0, ino: 0, mtime: 0 };
+  if size == NO_FILE || !fm.ok || f >= HFILES {
+    return Meta { ok: false, mode: 0, size: 0, ino: 0, mtime: 0, own: 0 };
   }
   let mut kind = S_IFMT_REG;
   if fm.mode % 65536 / 4096 * 4096 == T_LINK {
@@ -628,7 +680,7 @@ fn file_meta(v: &mut Vfs, f: u64) -> Meta
   } else if fm.mode % 65536 / 4096 * 4096 == T_FIFO {
     kind = T_FIFO;                          // a named pipe
   }
-  return Meta { ok: true, mode: kind + fm.mode % 4096, size: size, ino: INO_FILES + f, mtime: fm.mtime };
+  return Meta { ok: true, mode: kind + fm.mode % 4096, size: size, ino: INO_FILES + f, mtime: fm.mtime, own: fm.own };
 }
 
 /// fstat(fd, buf): the console is a terminal, a pipe a FIFO; a file's size
@@ -642,17 +694,17 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
   if d.kind == K_BAD {
     return EBADF;
   } else if d.kind == K_PIPE_R || d.kind == K_PIPE_W {
-    m = Meta { ok: true, mode: S_IFIFO, size: 0, ino: 4, mtime: 0 };
+    m = Meta { ok: true, mode: S_IFIFO, size: 0, ino: 4, mtime: 0, own: 0 };
   } else if d.kind == K_DIR {
-    m = Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1, mtime: 0 };
+    m = Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1, mtime: 0, own: 0 };
   } else if d.kind == K_SOCK {
-    m = Meta { ok: true, mode: S_IFSOCK, size: 0, ino: 5, mtime: 0 };
+    m = Meta { ok: true, mode: S_IFSOCK, size: 0, ino: 5, mtime: 0, own: 0 };
   } else if d.kind == K_DEV {
     m = dev_meta(d.x);
   } else if d.kind == K_FILE {
     m = file_meta(&mut k.fs, vfs_row_file(k.fs, d.x));
     if !m.ok {
-      m = Meta { ok: true, mode: S_IFREG, size: 0, ino: 100, mtime: 0 };
+      m = Meta { ok: true, mode: S_IFREG, size: 0, ino: 100, mtime: 0, own: 0 };
     }
   }
   return put_stat(&mut k, pid, buf, m);
@@ -664,13 +716,14 @@ fn put_stat(k: &mut Kernel, pid: u64, buf: u64, m: Meta) -> u64
   ensures kok(k)
 {
   let mut nlink = 1;
-  if m.ino >= INO_FILES && m.ino < INO_FILES + NFILES + DSLOTS {
+  if m.ino >= INO_FILES && m.ino < INO_FILES + HFILES {
     nlink = vfs_nlink(&mut k.fs, m.ino - INO_FILES);   // a file and its hard links
   }
   lx_fill(&mut k, 0, STAT_SIZE);
   xfer_u64(&mut k.fs.xfer, 8, m.ino);         // st_ino
   xfer_u64(&mut k.fs.xfer, 16, nlink);        // st_nlink
-  xfer_u64(&mut k.fs.xfer, 24, m.mode);       // st_mode (and st_uid 0)
+  xfer_u64(&mut k.fs.xfer, 24, m.mode % 0x100000000 + m.own % 0x100000000 * 0x100000000);   // st_mode, st_uid
+  xfer_u64(&mut k.fs.xfer, 32, m.own / 0x100000000);                 // st_gid
   xfer_u64(&mut k.fs.xfer, 48, m.size);       // st_size
   xfer_u64(&mut k.fs.xfer, 56, 4096);         // st_blksize
   let mut blocks = m.size / 512;
@@ -775,7 +828,25 @@ fn applet_name(j: u64) -> Str {
   if j == 16 {
     return "readlink";
   }
-  return "mkfifo";
+  if j == 17 {
+    return "reboot";
+  }
+  if j == 18 {
+    return "poweroff";
+  }
+  if j == 19 {
+    return "mkfifo";
+  }
+  if j == 20 {
+    return "mount";
+  }
+  if j == 21 {
+    return "umount";
+  }
+  if j == 22 {
+    return "truncate";
+  }
+  return "chown";
 }
 
 /// Stores v little-endian in bytes at..at+8 of x.
@@ -783,13 +854,5 @@ fn xfer_u64(x: &mut Bytes, at: u64, v: u64)
   requires at + 8 <= blen(x)
   ensures blen(x) == old(blen(x))
 {
-  let mut r = v;
-  let mut i = 0;
-  while i < 8
-    invariant i <= 8 && at + 8 <= blen(x)
-  {
-    bset(&mut x, at + i, cast[u8](r % 256));
-    r = r / 256;
-    i = i + 1;
-  }
+  store_le64(&mut x, at, v);
 }

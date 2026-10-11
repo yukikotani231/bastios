@@ -20,10 +20,38 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   line per check (`progs/compat.h`).
 - `applets.txt`: one-line shell commands using a BusyBox built with a broad
   set of applets (`busybox.config`), each with its exact expected output.
-- `apps.txt`: real programs, in the same format: Lua 5.4.7, QuickJS and the
-  sqlite3 3.52 shell (files, WAL, an index over 20000 rows). The Makefile
-  clones each at a pinned tag or commit and builds it against musl as a
-  static PIE (`LUA_TAG`, `QUICKJS_REV`, `SQLITE_TAG` pick the versions).
+- `apps.txt`: real programs, in the same format: Lua 5.4.7, QuickJS, the
+  sqlite3 3.52 shell (files, WAL, an index over 20000 rows), MicroPython
+  1.24 (its unix port without ffi, btree and ssl) and BusyBox's `wget`,
+  `httpd` and `nc`. The Makefile clones each at a pinned tag or commit and
+  builds it against musl as a static PIE (`LUA_TAG`, `QUICKJS_REV`,
+  `SQLITE_TAG`, `MPY_TAG` pick the versions).
+- `tty.txt`: programs driven by keystrokes on the console: MicroPython's
+  REPL (line editing, history, Ctrl-C), BusyBox `vi` and kilo
+  (`KILO_REV`), each of which puts the terminal in raw mode. `run.py`
+  starts the program, waits for it to draw, types the keys, then checks
+  what it wrote with a shell command. On the host (`--host`) the program
+  gets a pseudo-terminal.
+- `HOSTURL` and `HOSTADDR` in a command name a web server `run.py` runs on
+  the host, which the guest reaches through QEMU's user network; the
+  `wget` and `nc` cases in `apps.txt` fetch from it.
+- `dev.txt`: building C on BastiOS, in the same format. tcc and GNU make
+  run from a second disk (`devdisk.sh`, booted after everything else)
+  with the headers `dev_headers.c` pulls in, the C runtime objects and
+  musl's `libc.so`, on a disk of its own (split out when the disk's
+  directory held only 64 entries; it now holds 1023). tcc (pinned by `TCC_REV`) is configured to find
+  them under `/disk/c` and builds dynamic PIEs, which the kernel runs
+  with its built-in musl dynamic linker. Building make needs autoconf,
+  automake, autopoint and texinfo for its bootstrap.
+- `bastio.txt`: the Bastio compiler on BastiOS, from a third disk
+  (`bastiodisk.sh`): bastiolang's `bastioc1` (C from `bastioc0`, built
+  against musl), Z3 (`Z3_TAG`, a static PIE against glibc, as there is no
+  musl C++ toolchain; its build takes a while, once) and tcc, with the
+  headers the generated C includes, and the programs in `bastio/`.
+  `bastioc1` proves each program with Z3, then builds it with tcc, which
+  needs GNU `__auto_type` (`patches/tcc-auto-type.patch`, applied to
+  `TCC_REV`). The compiler's own sources are on the disk under `/disk/s`,
+  but proving them needs more memory than a process gets.
 
 `mkdisk.py` puts the programs and that BusyBox on a disk image in BastiOS's
 own disk format, so they appear as `/disk/NAME`. `run.py` boots the kernel

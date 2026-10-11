@@ -10,9 +10,9 @@ import "fs.bastio";
 import "net.bastio";
 import "tcp.bastio";
 
-const NPROC: u64 = 16;
-const STRIDE: u64 = 40;
-const PTAB_LEN: u64 = 640;           // NPROC * STRIDE
+const NPROC: u64 = 32;
+const STRIDE: u64 = 64;
+const PTAB_LEN: u64 = 2048;          // NPROC * STRIDE
 
 // Row fields.
 const F_STATE: u64 = 0;
@@ -43,7 +43,53 @@ const F_SID: u64 = 36;
 // Nonzero while a Linux thread waits for the other threads of its group to
 // leave the processors, to change their shared page tables (src/lxmem.bastio).
 const F_QUIET: u64 = 37;
+// Nonzero while a Linux process runs a system call again and again until
+// what it waits for comes (lx_retry): /proc shows it asleep, as Linux would
+// have it, though it is READY or RUNNING (src/lxprocfs.bastio).
+const F_ASLEEP: u64 = 39;
+// The personality(2) value, kept and handed back; nothing acts on it.
+const F_PERSONA: u64 = 38;
+// A Linux thread's alternate signal stack (sigaltstack): its address and
+// size; size 0 means none (src/lxsig.bastio).
+const F_ALTSP: u64 = 40;
+const F_ALTSIZE: u64 = 41;
+// setitimer's CPU-time timers (src/lxtime.bastio): ns left and the
+// interval, for ITIMER_VIRTUAL and then ITIMER_PROF; 0 left is off.
+const F_VTIMER: u64 = 42;
+const F_PTIMER: u64 = 44;
+// Credentials (src/lxcred.bastio), two 32-bit ids a word: real and
+// effective user, saved and file-system user, then the same for groups.
+// All 0 (root) at boot; a fork or a thread copies them.
+const F_UID: u64 = 46;
+const F_SUID: u64 = 47;
+const F_GID: u64 = 48;
+const F_SGID: u64 = 49;
+// While a semop waits: which semaphore, and for what (src/lxipc.bastio).
+const F_IPCW: u64 = 50;
+// A Linux process's umask plus 1; 0 means 0022 (src/lxperm.bastio).
+const F_UMASK: u64 = 51;
+// Supplementary groups (src/lxcred.bastio): how many, then up to
+// NGROUPS_KEPT ids, two 32-bit ids a word.
+const F_NGROUPS: u64 = 52;
+const F_GROUPS: u64 = 53;
+const NGROUPS_KEPT: u64 = 16;
+// File permission bits (src/lxperm.bastio).
+const MAY_X: u64 = 1;
+const MAY_W: u64 = 2;
+const MAY_R: u64 = 4;
+const S_ISVTX: u64 = 512;            // sticky: only a name's owner may remove it
+const S_ISGID: u64 = 1024;
+const S_ISUID: u64 = 2048;
 const SIG_DEATH: u64 = 256;          // F_CODE of a process a signal ended: 256 + the signal
+
+/// The exit code sys_wait reports for F_CODE `code`: 128 + the signal for
+/// a process a signal ended, as a Linux shell shows it.
+fn shown_code(code: u64) -> u64 {
+  if code >= SIG_DEATH {
+    return 128 + code % 128;
+  }
+  return code;
+}
 
 // Saved register numbers.
 const R_RAX: u64 = 0;
@@ -74,6 +120,7 @@ const CONWAIT: u64 = 11;             // writing to the console, whose ring is fu
 const FUTEXWAIT: u64 = 12;           // in a Linux futex wait with no timeout
 const DISKWAIT: u64 = 13;            // waiting for the disk: F_WAIT says for what (disk_wake)
 const EXITING: u64 = 14;             // RUNNING, a thread whose leader is in execve: freed when it comes back
+const SOCKWAIT: u64 = 15;            // a Linux call on a network socket that has to wait (sock_wake)
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -233,57 +280,56 @@ fn fpu_init(f: &mut Frame) {
 
 // ---------------------------------------------------------------- input queue
 
-// Bytes typed on the console, waiting for a READ: word 0 is the head,
-// word 1 the count, then a ring of INQ_CAP bytes. It holds a whole long
-// line pasted at once (as Linux's 4096-byte tty buffer does), not just 256.
+// Bytes typed on the console, waiting for a READ: a core Queue of
+// INQ_CAP bytes, one to a word. It holds a whole long line pasted at once
+// (as Linux's 4096-byte tty buffer does), not just 256.
 const INQ_CAP: u64 = 4096;
-const INQ_LEN: u64 = 4098;
 
-spec fn qok(q: &Buf) -> bool {
-  len(q) == INQ_LEN && get(q, 0) < INQ_CAP && get(q, 1) <= INQ_CAP
+spec fn qok(q: &Queue) -> bool {
+  queue_ok(q) && q.r.cap == INQ_CAP
 }
 
 // The terminal line for Linux programs: word 0 is how many bytes it holds
-// (at most LINE_MAX), word 1 is 1 once it is finished (Enter or Ctrl-D),
-// and the bytes follow from word 2.
-// Like Linux's 4096-byte canonical line; one read moves it whole (XFER).
+// (at most LINE_MAX), word 1 is 1 once it is finished (Enter or Ctrl-D;
+// in noncanonical mode, as soon as it holds a byte), and the bytes follow
+// from word 2. Like Linux's 4096-byte canonical line; one read moves it
+// whole (XFER). After it, the terminal's settings: word TT_SET is 1 once a
+// program has set them (TCSETS), and the TERMIOS_SIZE bytes of its struct
+// termios follow from word TT0, one to a word (src/linux.bastio's tt_byte).
 const LINE_MAX: u64 = 4095;
-const LINE_LEN: u64 = 4097;
+const TT_SET: u64 = 4097;             // LINE_MAX + 2
+const TT0: u64 = 4098;
+const TERMIOS_SIZE: u64 = 36;         // the kernel's struct termios
+const LINE_LEN: u64 = 4134;           // TT0 + TERMIOS_SIZE
 
 spec fn lineok(l: &Buf) -> bool {
   len(l) == LINE_LEN && get(l, 0) <= LINE_MAX && get(l, 1) <= 1
 }
 
-fn q_push(q: &mut Buf, b: u64)
+/// Appends byte b, or drops it when the queue is full.
+fn q_push(q: &mut Queue, b: u64)
   requires qok(q)
   ensures qok(q)
 {
-  let n = get(q, 1);
-  if n < INQ_CAP {
-    q = set(q, 2 + (get(q, 0) + n) % INQ_CAP, b);
-    q = set(q, 1, n + 1);
+  if q.r.n < INQ_CAP {
+    queue_push(&mut q, b);
   }
 }
 
 /// The oldest byte, or 256 if there is none.
-fn q_pop(q: &mut Buf) -> u64
+fn q_pop(q: &mut Queue) -> u64
   requires qok(q)
   ensures qok(q)
 {
-  let n = get(q, 1);
-  if n == 0 {
+  if q.r.n == 0 {
     return 256;
   }
-  let h = get(q, 0);
-  let b = get(q, 2 + h);
-  q = set(q, 0, (h + 1) % INQ_CAP);
-  q = set(q, 1, n - 1);
-  return b;
+  return queue_pop(&mut q);
 }
 
 /// Hands queued bytes to processes blocked in READ, and wakes processes
 /// blocked in a Linux read once a whole line is typed.
-fn wake_readers(procs: &mut Buf, q: &mut Buf, line: &Buf)
+fn wake_readers(procs: &mut Buf, q: &mut Queue, line: &Buf)
   requires len(procs) == PTAB_LEN && qok(q) && lineok(line)
   ensures len(procs) == PTAB_LEN && qok(q)
 {
@@ -291,7 +337,7 @@ fn wake_readers(procs: &mut Buf, q: &mut Buf, line: &Buf)
   while p < NPROC
     invariant 1 <= p && p <= NPROC && len(procs) == PTAB_LEN && qok(q)
   {
-    if state(procs, p) == READING && get(q, 1) > 0 {
+    if state(procs, p) == READING && q.r.n > 0 {
       pset(&mut procs, p, F_REGS + R_RAX, q_pop(&mut q));
       pset(&mut procs, p, F_STATE, READY);
     }
@@ -309,7 +355,7 @@ fn wake_readers(procs: &mut Buf, q: &mut Buf, line: &Buf)
 // `main`, which lends them where they are needed.
 // Linux file descriptors (src/lxfd.bastio).
 const LXNFD: u64 = 16;
-const LXFD_LEN: u64 = 256;            // NPROC * LXNFD
+const LXFD_LEN: u64 = 512;            // NPROC * LXNFD
 const FD_CONSOLE: u64 = 1;
 const FD_OFD: u64 = 2;
 const FD_CLOEXEC: u64 = 1024;
@@ -323,10 +369,16 @@ const DEV_LOOPCTL: u64 = 6;            // OF_DEV device /dev/loop-control
 const DEV_LOOP: u64 = 16;              // OF_DEV device /dev/loopN is DEV_LOOP + N
 const S_IFBLK: u64 = 0x61B0;           // a block device, rw-rw----
 
-// File locks (src/lxlock.bastio): LK_N entries of LK_W words.
+// File locks (src/lxlock.bastio): LK_N entries of LK_W words, then for
+// each process the record lock it waits for in F_SETLKW, LK_WW words.
 const LK_N: u64 = 128;
 const LK_W: u64 = 6;
-const LK_LEN: u64 = 768;              // LK_N * LK_W
+const LK_WAITS: u64 = 768;            // LK_N * LK_W
+const LK_WW: u64 = 4;
+const LK_LEN: u64 = 896;              // LK_WAITS + NPROC * LK_WW
+const IPC_LEN: u64 = 4608;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
+const SYS_LEN: u64 = 160;              // host and domain names, adjtimex state (src/lxsys.bastio)
+const IPCB_LEN: u64 = 278528;         // its message bytes: IPC_SETS * MQ_CAP
 const LK_EOF: u64 = 18446744073709551615;   // a range to the end of the file; no file
 const LK_DESC: u64 = 4294967296;      // 2^32: lock owners from here are descriptions
 const LKC_FCNTL: u64 = 0;             // record and OFD locks
@@ -338,6 +390,7 @@ const OF_FREE: u64 = 0;
 const OF_FILE: u64 = 1;
 const OF_PIPE_R: u64 = 2;
 const OF_PIPE_W: u64 = 3;
+const PIPE_BOTH: u64 = 2;              // OF_PIPE_R word 3: also a writer (a FIFO opened O_RDWR)
 const OF_DIR: u64 = 4;                // x: DIR_ROOT or DIR_BIN; word 3: next entry
 // lx_recvfrom's answer when the caller must wait: no count or errno.
 const SK_WAIT: u64 = 0x8000000000000000;
@@ -350,21 +403,21 @@ const DISK_RETRY: u64 = 0x8000000000000002;
 // Linux working directories: per process, word 0 the length of the path
 // (without the leading "/", at most FNAME_MAX) and one byte a word after.
 const CWD_STRIDE: u64 = 256;           // FNAME_MAX + 1
-const CWD_LEN: u64 = 4096;            // NPROC * CWD_STRIDE
+const CWD_LEN: u64 = 8192;            // NPROC * CWD_STRIDE
 const DPATH_LEN: u64 = 16384;         // OFD_N * CWD_STRIDE
 const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
 
 // Linux signal actions: per process, 64 signals of 4 words each (handler,
 // flags, restorer, mask).
-const SIGACT_LEN: u64 = 4096;
-const SIGSAVE_LEN: u64 = 1040;        // NPROC + NPROC * 64
-const ALARMS_LEN: u64 = 224;         // NPROC * 2, then PT_N POSIX timers of PT_W words per process
-const PT_BASE: u64 = 32;             // where the POSIX timers start in k.alarms (src/lxptimer.bastio)
+const SIGACT_LEN: u64 = 8192;           // NPROC * SIGACT_ROW
+const SIGSAVE_LEN: u64 = 2080;        // NPROC + NPROC * 64
+const ALARMS_LEN: u64 = 448;         // NPROC * 2, then PT_N POSIX timers of PT_W words per process
+const PT_BASE: u64 = 64;             // where the POSIX timers start in k.alarms (src/lxptimer.bastio)
 const PT_N: u64 = 4;                 // POSIX timers per process
 const PT_W: u64 = 3;                 // words per timer: deadline, interval, state
 const MAP_N: u64 = 4;                // MAP_SHARED file mappings per process
 const MAP_W: u64 = 4;                // words per mapping: first page + 1, pages, description, offset
-const MAPS_LEN: u64 = 256;           // NPROC * MAP_N * MAP_W
+const MAPS_LEN: u64 = 512;           // NPROC * MAP_N * MAP_W
 const LX_PAUSE: u64 = 34;
 const LX_RT_SIGSUSPEND: u64 = 130;
 const LX_WAITID: u64 = 247;
@@ -387,6 +440,7 @@ const FIFO_STRIDE: u64 = 2;           // the FIFO's file handle + 1 (0: free), i
 const FIFO_AT: u64 = 552;             // EP_AT + EP_N * EP_STRIDE
 const EVT_LEN: u64 = 560;             // FIFO_AT + FIFO_N * FIFO_STRIDE
 const OF_UNIX: u64 = 11;              // an AF_UNIX socket: see src/lxunix.bastio
+const OF_SIGFD: u64 = 12;             // a signalfd: word 2 the signals it takes; word 3: nonblocking (src/lxevent.bastio)
 const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
 const DIR_VFS: u64 = 2;               // DIR_VFS + a file layer directory handle
@@ -395,6 +449,14 @@ const PROC_DEV: u64 = 256;            // an OF_DEV device from here up is a /pro
 const PF_EXE: u64 = 7;                // /proc/PID/exe, a link
 const EACCES: u64 = 18446744073709551603;   // 2^64 - 13
 const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+
+/// Whether /proc file f is a /proc/PID/exe link (the /proc/sys files above
+/// the per-process ones are numbered on, so their f % 16 means nothing).
+fn is_exe_file(f: u64) -> bool
+  ensures result ==> f >= PROC_DEV
+{
+  return f >= PROC_DEV && f < PROC_DEV + 16 * NPROC && f % 16 == PF_EXE;
+}
 
 // AF_UNIX sockets (src/lxunix.bastio): UX_N one-way channels and UX_LIS
 // names to connect to.
@@ -405,34 +467,49 @@ const UX_LIS: u64 = 4;
 const UX_BACKLOG: u64 = 4;            // connections waiting for accept
 const UXL_W: u64 = 8;                 // 4 + UX_BACKLOG
 const UX_PATH: u64 = 108;             // the longest name
-const UX_LEN: u64 = 96;               // UX_N * UX_W + UX_LIS * UXL_W
+const UX_LEN: u64 = 112;              // UX_N * UX_W + UX_LIS * UXL_W + UX_N
 const UXB_LEN: u64 = 65968;           // UX_N * UX_CAP + UX_LIS * UX_PATH
 
 const NPIPES: u64 = 8;
 const PIPE_CAP: u64 = 65536;          // bytes a pipe holds, as on Linux
+const PIPE_PAGE: u64 = 4096;          // the least F_SETPIPE_SZ gives a pipe
 const PIPE_ATOM: u64 = 4096;          // PIPE_BUF: writes this small go in whole
-const PIPE_STRIDE: u64 = 6;           // head, count, readers, writers, FIFO + 1 (0: none), a writer came
-const PIPES_LEN: u64 = 48;            // NPIPES * PIPE_STRIDE
+const PIPE_STRIDE: u64 = 7;           // head, count, readers, writers, FIFO + 1 (0: none), a writer came, capacity
+const PIPES_LEN: u64 = 56;            // NPIPES * PIPE_STRIDE
 const PIPE_BYTES: u64 = 524288;       // NPIPES * PIPE_CAP
 
 const LX_PIPE: u64 = 22;
 const LX_FSTAT: u64 = 5;
 const LX_GETDENTS64: u64 = 217;
 const AT_EMPTY_PATH: u64 = 0x1000;
+const AT_NO_AUTOMOUNT: u64 = 0x800;
 const AT_REMOVEDIR: u64 = 0x200;
 const DENT_BUF: u64 = 2048;           // the most getdents64 fills in one call
 const ENOTDIR: u64 = 18446744073709551596;  // 2^64 - 20
+const ENAMETOOLONG: u64 = 18446744073709551580;  // 2^64 - 36
+const EIO: u64 = 18446744073709551611;       // 2^64 - 5
+const ELOOP: u64 = 18446744073709551576;    // 2^64 - 40
 const EEXIST: u64 = 18446744073709551599;   // 2^64 - 17
 const EPERM: u64 = 18446744073709551615;    // 2^64 - 1
 const LO_EXCL: u64 = 0x80;
 const LO_DIRECTORY: u64 = 0x10000;
+const LO_TMPFILE: u64 = 0x400000;      // with LO_DIRECTORY: an unnamed file, which BastiOS lacks
+const EOPNOTSUPP: u64 = 18446744073709551521; // 2^64 - 95
+const ENOSPC: u64 = 18446744073709551588;    // 2^64 - 28
+const EROFS: u64 = 18446744073709551586;     // 2^64 - 30
+const ENOTBLK: u64 = 18446744073709551601;   // 2^64 - 15
+const EBUSY: u64 = 18446744073709551600;     // 2^64 - 16
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
-const NAPPLETS: u64 = 18;
+const NAPPLETS: u64 = 24;
 const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----
 const S_IFIFO: u64 = 0x1180;           // a FIFO, rw-------
 const S_IFSOCK: u64 = 0xC1B6;          // a socket, rw-rw-rw-
 const LX_POLL: u64 = 7;
 const LX_PPOLL: u64 = 271;
+const LX_PSELECT6: u64 = 270;
+// In k.sigsave's word for a process: its mask was swapped by ppoll or
+// pselect6 (bit 8 is SIGKILL's, which no saved mask holds).
+const MASK_SWAPPED: u64 = 256;
 const POLL_MAX: u64 = 64;
 const POLLIN: u64 = 1;
 const POLLOUT: u64 = 4;
@@ -451,6 +528,8 @@ const F_SETFD: u64 = 2;
 const F_GETFL: u64 = 3;
 const F_SETFL: u64 = 4;
 const F_DUPFD_CLOEXEC: u64 = 1030;
+const F_SETPIPE_SZ: u64 = 1031;
+const F_GETPIPE_SZ: u64 = 1032;
 const F_GETLK: u64 = 5;
 const F_SETLK: u64 = 6;
 const F_SETLKW: u64 = 7;
@@ -459,6 +538,7 @@ const F_OFD_SETLK: u64 = 37;
 const F_OFD_SETLKW: u64 = 38;
 const F_UNLCK: u64 = 2;
 const LO_CLOEXEC: u64 = 0x80000;
+const LO_PATH: u64 = 0x200000;         // a handle for the name only: no permission needed
 
 const EMFILE: u64 = 18446744073709551592;   // 2^64 - 24
 const ENFILE: u64 = 18446744073709551593;   // 2^64 - 23
@@ -477,21 +557,31 @@ const K_DEV: u64 = 7;                 // x: the device (src/lxdev.bastio)
 const K_EVENT: u64 = 8;               // x: the description (src/lxevent.bastio)
 const K_TIMER: u64 = 9;               // x: the timer
 const K_EPOLL: u64 = 10;              // x: the epoll instance
+const K_SIGFD: u64 = 11;              // x: the description (src/lxevent.bastio)
+
+/// The pages of System V shared memory segments: a level-2 table, never
+/// loaded, whose slot s is segment s's level-1 table (src/lxipc.bastio).
+/// None only if there was no page for it at boot.
+enum Store {
+  None,
+  Table(PageTable),
+}
 
 struct Kernel {
   mem: Mem,             // the page allocator
   spaces: Vec[Space],   // element `pid` is that process's address space
   fpus: Vec[Fpu],       // element `pid` is that process's FPU state
   procs: Buf,           // the process table
-  q: Buf,               // console input waiting for a READ
+  q: Queue,             // console input waiting for a READ
   line: Buf,            // the line a Linux program is typing (see tty_cook)
   lxfd: Buf,            // Linux descriptors (src/lxfd.bastio)
   ofd: Buf,             // open file descriptions they share
   pipes: Buf,           // pipe state, PIPE_STRIDE words each
   pipebuf: Bytes,       // pipe rings, PIPE_CAP bytes each
   ticks: u64,           // timer ticks since boot
-  ns: u64,              // the HPET clock at the last system call, in nanoseconds
-  epoch: u64,           // CLOCK_REALTIME minus the HPET clock, in ns (src/rtc.bastio)
+  ns: u64,              // the clock at the last system call, in nanoseconds since boot
+  tsc: Tsc,             // how to read that clock (src/tsc.bastio), also copied into each vDSO
+  epoch: u64,           // CLOCK_REALTIME minus the clock, in ns (src/rtc.bastio)
   rng: u64,             // the state behind /dev/urandom (src/lxdev.bastio)
   cpus: u64,            // processors running, the bootstrap one included
   fs: Vfs,              // files and the open-file table
@@ -508,15 +598,21 @@ struct Kernel {
   inet6: u64,           // bit h: open file description h is an AF_INET6 socket (src/lxsock.bastio)
   locks: Buf,           // file locks held (src/lxlock.bastio)
   loops: Buf,           // loop devices (src/lxloop.bastio)
+  perr: u64,            // why lx_path_from last gave NO_RESULT: -ENOENT, -ENOTDIR, ... (src/linux.bastio)
+  ipc: Buf,             // System V message queues and semaphores (src/lxipc.bastio)
+  ipcb: Bytes,          // the queues' messages
+  shm: Store,           // System V shared memory pages (src/lxipc.bastio)
+  sys: Buf,             // settings root may change: names, the clock discipline (src/lxsys.bastio)
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN
+    && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
 }
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 27;
+const NPROGS: u64 = 28;
 const LDSO_PROG: u64 = 25;            // musl's dynamic linker, the interpreter of musl programs
 
 fn prog_name(i: u64) -> Str {
@@ -601,6 +697,9 @@ fn prog_name(i: u64) -> Str {
   if i == 26 {
     return "diskbench";
   }
+  if i == 27 {
+    return "mkfs.bstdisk3";
+  }
   return "(file)";                    // a program loaded from a file
 }
 
@@ -683,6 +782,9 @@ fn prog_image(i: u64) -> Str {
   if i == 26 {
     return include_bytes("../build/user/diskbench.bin");
   }
+  if i == 27 {
+    return include_bytes("../build/user/mkfs.elf");
+  }
   return include_bytes("../build/user/fault.bin");
 }
 
@@ -740,7 +842,7 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   let mut args = balloc(ARGV0_MAX + 1);
   let alen = name_arg(&mut args, prog_name(prog));
   let src = Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
-  let sp = load_image(&mut k.mem, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, pid, src, args, alen, alen);
+  let sp = load_image(&mut k.mem, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, alen);
   bfree(args);
   let ok = sp is Space::Mapped;
   put_space(&mut k.spaces, pid, sp);
@@ -796,7 +898,7 @@ fn name_arg(args: &mut Bytes, name: Str) -> u64
 /// process `pid` up to start it: program, registers, program break.
 /// Returns `Space::Empty`, changing nothing, if the image is malformed or
 /// memory runs out. The caller installs the space.
-fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, pid: u64, src: Src, args: &Bytes, alen: u64, total: u64) -> Space
+fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, t: Tsc, epoch: u64, pid: u64, src: Src, args: &Bytes, alen: u64, total: u64) -> Space
   requires mem_ok(m) && vfs_ok(v) && len(procs) == PTAB_LEN && pid < NPROC && alen <= total && total <= ARGS_MAX && total <= blen(args)
   ensures mem_ok(m) && vfs_ok(v) && len(procs) == PTAB_LEN
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
@@ -811,7 +913,7 @@ fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, pid: u64, sr
   let mut rsp = USER_BASE + ELF_SP;
   let mut isrc = Src { file: false, prog: NPROGS, f: 0, size: 0 };
   let mut ie = bad_elf();
-  let mut mmap_top = STACK_FIRST * 4096;
+  let mut mmap_top = VDSO_PAGE * 4096;     // the vDSO's page is above it
   if elf {
     if !e.ok {
       return Space::Empty;
@@ -825,10 +927,10 @@ fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, pid: u64, sr
       }
       let probe = elf_parse(&mut v, isrc);
       let low = (e.end + 4095) / 4096 * 4096;
-      if !probe.ok || probe.bias != USER_BASE || probe.ilen != 0 || probe.end > IMAGE_MAX - low {
+      if !probe.ok || probe.bias != USER_BASE || probe.ilen != 0 || low > VDSO_PAGE * 4096 || probe.end > VDSO_PAGE * 4096 - low {
         return Space::Empty;
       }
-      let place = (IMAGE_MAX - probe.end) / 4096 * 4096;
+      let place = (VDSO_PAGE * 4096 - probe.end) / 4096 * 4096;
       ie = elf_parse_at(&mut v, isrc, place);
       if !ie.ok {
         return Space::Empty;
@@ -851,7 +953,7 @@ fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, pid: u64, sr
       return Space::Empty;
     }
   }
-  let sp = build_space(&mut m, &mut v, src, img, elf, e, isrc, ie, size, args, alen, total, seed);
+  let sp = build_space(&mut m, &mut v, src, img, elf, e, isrc, ie, size, args, alen, total, seed, t, epoch);
   if sp is Space::Empty {
     return sp;
   }
@@ -863,7 +965,7 @@ fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, pid: u64, sr
     r = r + 1;
   }
   pset(&mut procs, pid, F_PROG, NPROGS);       // a file: NPROGS + 1 + its handle, for /proc/PID/exe
-  if src.file && src.f < NFILES + DSLOTS {
+  if src.file && src.f < HFILES {
     pset(&mut procs, pid, F_PROG, NPROGS + 1 + src.f);
   }
   if !src.file {
@@ -932,14 +1034,14 @@ fn interp_src(v: &mut Vfs, src: Src, e: Elf) -> Src
 
 /// The address space for a checked image: ELF, or a BastiOS image needing
 /// `size` bytes of memory.
-fn build_space(m: &mut Mem, v: &mut Vfs, src: Src, img: Str, elf: bool, e: Elf, isrc: Src, ie: Elf, size: u64, args: &Bytes, alen: u64, total: u64, seed: u64) -> Space
+fn build_space(m: &mut Mem, v: &mut Vfs, src: Src, img: Str, elf: bool, e: Elf, isrc: Src, ie: Elf, size: u64, args: &Bytes, alen: u64, total: u64, seed: u64, t: Tsc, epoch: u64) -> Space
   requires mem_ok(m) && vfs_ok(v) && (elf ==> (e.ok && elf_fits(src.size, e) && elf_fits(isrc.size, ie))) && (!elf ==> size <= IMAGE_MAX)
   requires alen <= total && total <= ARGS_MAX && total <= blen(args)
   ensures mem_ok(m) && vfs_ok(v)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
   if elf {
-    return elf_space(&mut m, &mut v, src, e, isrc, ie, args, alen, total, seed);
+    return elf_space(&mut m, &mut v, src, e, isrc, ie, args, alen, total, seed, t, epoch);
   }
   return new_space(&mut m, img, size);
 }
@@ -965,6 +1067,8 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code: u64)
   drop_fpu(&mut k.mem, take_fpu(&mut k.fpus, pid));
   k.alarms = set(k.alarms, 2 * pid, 0);   // its timers stop
   ptimer_clear(&mut k, pid);
+  sem_exit(&mut k, pid);                   // its SEM_UNDO adjustments
+  shm_drop_all(&mut k, pid);               // and its shared memory attachments
   lx_fd_close_all(&mut k, pid, false);
   close_unshared(&mut k, pid);
   pset(&mut k.procs, pid, F_STATE, ZOMBIE);
@@ -985,11 +1089,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code: u64)
   if par == 0 || par >= NPROC {
     pset(&mut k.procs, pid, F_STATE, FREE);       // nobody will collect it
   } else if state(k.procs, par) == WAITING && pget(k.procs, par, F_WAIT) == pid {
-    let mut shown = code;
-    if code >= SIG_DEATH {
-      shown = 128 + code % 128;             // as a Linux shell shows it
-    }
-    pset(&mut k.procs, par, F_REGS + R_RAX, shown);
+    pset(&mut k.procs, par, F_REGS + R_RAX, shown_code(code));
     pset(&mut k.procs, par, F_STATE, READY);
     pset(&mut k.procs, pid, F_STATE, FREE);
   } else if state(k.procs, par) == LXWAITING {
@@ -1023,6 +1123,8 @@ fn put_state(con: &mut Con, s: u64)
     puts(&mut con, "netwait");
   } else if s == DISKWAIT {
     puts(&mut con, "disk   ");
+  } else if s == SOCKWAIT {
+    puts(&mut con, "socket ");
   } else if s == LXVFORK {
     puts(&mut con, "vfork  ");
   } else {

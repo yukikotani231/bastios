@@ -1,0 +1,567 @@
+// The hardware report: what the kernel found at boot, for someone trying
+// BastiOS on a real machine (docs/real-hardware.md). It is printed when the
+// boot command line has the word `diag` (the ISO's GRUB menu has an entry
+// for it), on the screen and the serial line like the rest of the boot log,
+// a screenful at a time: after each part the kernel waits for a key (or a
+// minute), so the screen can be photographed on a machine without a serial
+// port.
+//
+// Most of it comes from the platform through the boot_info builtin, whose
+// queries boot/smp.c answers (bst_platform_info; the numbers below must
+// match it). Nothing is promised about an answer, so each one is checked
+// before it is used, like any other input. The rest the kernel knows
+// itself: the ACPI registers it drives, and the PCI devices it can see.
+
+const INFO_CMDLINE: u64 = 0;     // byte i of the boot command line, 256 past its end
+const INFO_MEM: u64 = 1;         // the memory map: i = 3 * region + 0 base, 1 length, 2 type (0 past the end)
+const INFO_CPUID: u64 = 2;       // 2-5: CPUID eax, ebx, ecx, edx for leaf i / 2^32, subleaf i % 2^32
+const INFO_SMP: u64 = 6;         // 0 processors the MADT lists, 1 x2APIC ones, 2 why not all run (SMP_*),
+                                 // 3 the local APIC's mode, 4 the mode the firmware left it in (APIC_*)
+const APIC_XAPIC: u64 = 1;       // INFO_SMP 3 and 4: 0 off, 1 xAPIC, 2 x2APIC, 3 x2APIC locked by the firmware
+const APIC_X2APIC: u64 = 2;
+const INFO_TIMER: u64 = 7;       // 0 what the local APIC timer was counted against, 1 its count for 10 ms, 2 it ticks for the PIT,
+                                 // 3 the time-stamp counter's rate when measured against the PIT or RTC
+const INFO_FB: u64 = 9;          // the boot loader's framebuffer, at any address: i as boot_fb's field
+const INFO_ACPI: u64 = 8;        // 0 where the RSDP came from, 1 its revision, 2 + 2k / 3 + 2k table k's signature / address
+const MEM_REGIONS: u64 = 128;    // boot/multiboot.c keeps at most this many
+const ACPI_TABLES: u64 = 64;     // the most tables listed
+const INFO_BYTE: u64 = 256;      // INFO_CMDLINE past the end
+
+/// Does the boot command line have the word `w` (between spaces, or at
+/// either end)?
+fn boot_word(cpu: &Cpu, w: Str) -> bool
+  requires slen(w) > 0 && slen(w) < 64
+{
+  let n = slen(w);
+  let mut p = 0;
+  while p < INFO_BYTE
+    invariant p <= INFO_BYTE
+  {
+    let mut before = 32;
+    if p > 0 {
+      before = boot_info(cpu, INFO_CMDLINE, p - 1);
+    }
+    if before == 32 {
+      let mut k = 0;
+      let mut same = true;
+      while k < n && same
+        invariant k <= n
+      {
+        if boot_info(cpu, INFO_CMDLINE, p + k) != cast[u64](sget(w, k)) {
+          same = false;
+        }
+        k = k + 1;
+      }
+      let after = boot_info(cpu, INFO_CMDLINE, p + n);
+      if same && (after == 32 || after == INFO_BYTE) {
+        return true;
+      }
+    }
+    p = p + 1;
+  }
+  return false;
+}
+
+/// CPUID register `r` (0 eax, 1 ebx, 2 ecx, 3 edx) of `leaf` and `sub`.
+fn cpuid(cpu: &Cpu, leaf: u64, sub: u64, r: u64) -> u64
+  requires leaf <= 4294967295 && sub <= 4294967295 && r < 4
+{
+  return boot_info(cpu, INFO_CPUID + r, leaf * 4294967296 + sub);
+}
+
+/// Does boot.S map the device window above 4 GiB? Only on a processor
+/// with 1 GiB pages (CPUID 0x80000001, EDX bit 26).
+fn high_window(cpu: &Cpu) -> bool {
+  return (cpuid(cpu, 0x80000001, 0, 3) >> 26) % 2 == 1;
+}
+
+/// Bit `b` of `x`.
+fn bit(x: u64, b: u64) -> bool
+  requires b < 64
+{
+  return (x >> b) % 2 == 1;
+}
+
+/// `n` in hex, without leading zeros.
+fn put_hexn(con: &mut Con, n: u64)
+  requires con_ok(con)
+  ensures con_ok(con)
+{
+  puts(&mut con, "0x");
+  put_hexw(&mut con, n, 1);
+}
+
+/// `n` in hex, at least `w` digits (no prefix).
+fn put_hexw(con: &mut Con, n: u64, w: u64)
+  requires con_ok(con) && w >= 1 && w <= 16
+  ensures con_ok(con)
+{
+  let mut q = 1;
+  let mut digits = 1;
+  while digits < 16 && (digits < w || q <= n / 16)
+    invariant digits >= 1 && digits <= 16 && q >= 1
+  {
+    if q <= 1152921504606846975 {
+      q = q * 16;
+    }
+    digits = digits + 1;
+  }
+  while q > 0
+    invariant con_ok(con)
+  {
+    let d = (n / q) % 16;
+    if d < 10 {
+      con_write(&mut con, cast[u8](48 + d));
+    } else {
+      con_write(&mut con, cast[u8](87 + d));
+    }
+    q = q / 16;
+  }
+}
+
+/// The four bytes of `r`, low first, as text (what CPUID's vendor and
+/// brand strings and ACPI's signatures are); only printable ones.
+fn put_chars4(con: &mut Con, r: u64)
+  requires con_ok(con)
+  ensures con_ok(con)
+{
+  let mut v = r;
+  let mut k = 0;
+  while k < 4
+    invariant con_ok(con)
+  {
+    let b = v % 256;
+    if b >= 32 && b < 127 {
+      con_write(&mut con, cast[u8](b));
+    }
+    v = v / 256;
+    k = k + 1;
+  }
+}
+
+/// `name` if bit `b` of `x` is set.
+fn put_flag(con: &mut Con, x: u64, b: u64, name: Str)
+  requires con_ok(con) && b < 64
+  ensures con_ok(con)
+{
+  if bit(x, b) {
+    puts(&mut con, " ");
+    puts(&mut con, name);
+  }
+}
+
+/// The processor: who made it, its name, its family, and the features the
+/// kernel needs or a tester should know about.
+fn hw_cpu(con: &mut Con, cpu: &Cpu)
+  requires con_ok(con)
+  ensures con_ok(con)
+{
+  puts(&mut con, "cpu: ");
+  put_chars4(&mut con, cpuid(cpu, 0, 0, 1));
+  put_chars4(&mut con, cpuid(cpu, 0, 0, 3));
+  put_chars4(&mut con, cpuid(cpu, 0, 0, 2));
+  let top = cpuid(cpu, 0x80000000, 0, 0);
+  if top >= 0x80000004 && top <= 0x8000FFFF {
+    puts(&mut con, ", ");
+    let mut l = 0x80000002;
+    while l <= 0x80000004
+      invariant con_ok(con) && l <= 0x80000005
+    {
+      let mut r = 0;
+      while r < 4
+        invariant con_ok(con)
+      {
+        put_chars4(&mut con, cpuid(cpu, l, 0, r));
+        r = r + 1;
+      }
+      l = l + 1;
+    }
+  }
+  puts(&mut con, "\r\n");
+  let a = cpuid(cpu, 1, 0, 0) % 4294967296;
+  let mut family = (a >> 8) % 16;
+  let mut model = (a >> 4) % 16;
+  if family == 15 {
+    family = family + (a >> 20) % 256;
+  }
+  if family == 6 || family >= 15 {
+    model = model + ((a >> 16) % 16) * 16;
+  }
+  puts(&mut con, "cpu: family ");
+  put_hexn(&mut con, family);
+  puts(&mut con, " model ");
+  put_hexn(&mut con, model);
+  puts(&mut con, " stepping ");
+  put_num(&mut con, a % 16);
+  puts(&mut con, "; features:");
+  let d = cpuid(cpu, 1, 0, 3);
+  let c = cpuid(cpu, 1, 0, 2);
+  put_flag(&mut con, d, 9, "apic");
+  put_flag(&mut con, c, 21, "x2apic");
+  put_flag(&mut con, d, 6, "pae");
+  put_flag(&mut con, d, 26, "sse2");
+  put_flag(&mut con, c, 31, "hypervisor");
+  let mut e = 0;
+  if top >= 0x80000001 && top <= 0x8000FFFF {
+    e = cpuid(cpu, 0x80000001, 0, 3);
+  }
+  put_flag(&mut con, e, 20, "nx");
+  put_flag(&mut con, e, 26, "1gb-pages");
+  puts(&mut con, "\r\n");
+  if !bit(e, 26) {
+    puts(&mut con, "cpu: no 1 GiB pages: devices above 4 GiB are out of reach\r\n");
+  }
+}
+
+/// The memory map the boot loader gave, and how much of it the kernel
+/// uses (its page pool lies below 1 GiB).
+fn hw_mem(con: &mut Con, cpu: &Cpu, pool_pages: u64)
+  requires con_ok(con)
+  ensures con_ok(con)
+{
+  let mut n = 0;
+  let mut usable = 0;
+  let mut more = true;
+  while n < MEM_REGIONS && more
+    invariant n <= MEM_REGIONS
+  {
+    let len = boot_info(cpu, INFO_MEM, 3 * n + 1);
+    let ty = boot_info(cpu, INFO_MEM, 3 * n + 2);
+    if ty == 0 {
+      more = false;
+    } else {
+      if ty == 1 {
+        if len > U64_MAX - usable {
+          usable = U64_MAX;
+        } else {
+          usable = usable + len;
+        }
+      }
+      n = n + 1;
+    }
+  }
+  puts(&mut con, "memory: ");
+  put_num(&mut con, usable / 1048576);
+  puts(&mut con, " MiB usable in a map of ");
+  put_num(&mut con, n);
+  puts(&mut con, " regions; the kernel uses ");
+  put_num(&mut con, pool_pages);
+  puts(&mut con, " pages (");
+  put_num(&mut con, pool_pages / 256);
+  puts(&mut con, " MiB) below 1 GiB\r\n");
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= MEM_REGIONS && con_ok(con)
+  {
+    let ty = boot_info(cpu, INFO_MEM, 3 * i + 2);
+    puts(&mut con, "  ");
+    put_hexn(&mut con, boot_info(cpu, INFO_MEM, 3 * i));
+    puts(&mut con, " +");
+    put_hexn(&mut con, boot_info(cpu, INFO_MEM, 3 * i + 1));
+    if ty == 1 {
+      puts(&mut con, " usable\r\n");
+    } else if ty == 3 {
+      puts(&mut con, " ACPI tables\r\n");
+    } else if ty == 4 {
+      puts(&mut con, " ACPI NVS\r\n");
+    } else if ty == 5 {
+      puts(&mut con, " bad\r\n");
+    } else {
+      puts(&mut con, " reserved (type ");
+      put_num(&mut con, ty);
+      puts(&mut con, ")\r\n");
+    }
+    i = i + 1;
+  }
+}
+
+/// Where the ACPI tables were, which there are, and the registers the
+/// kernel drives (src/acpi.bastio).
+fn hw_acpi(con: &mut Con, cpu: &Cpu, a: &Acpi)
+  requires con_ok(con)
+  ensures con_ok(con)
+{
+  let from = boot_info(cpu, INFO_ACPI, 0);
+  if from == 1 {
+    puts(&mut con, "acpi: RSDP from the boot loader (Multiboot 2), revision ");
+  } else if from == 2 {
+    puts(&mut con, "acpi: RSDP found in the BIOS area, revision ");
+  } else {
+    puts(&mut con, "acpi: no RSDP: no ACPI tables (one processor, no power off)\r\n");
+    return;
+  }
+  put_num(&mut con, boot_info(cpu, INFO_ACPI, 1) % 256);
+  puts(&mut con, "\r\nacpi: tables");
+  let mut k = 0;
+  let mut more = true;
+  while k < ACPI_TABLES && more
+    invariant k <= ACPI_TABLES && con_ok(con)
+  {
+    let at = boot_info(cpu, INFO_ACPI, 3 + 2 * k);
+    if at == 0 {
+      more = false;
+    } else {
+      if k % 4 == 0 && k > 0 {
+        puts(&mut con, "\r\n     ");
+      }
+      puts(&mut con, " ");
+      let sig = boot_info(cpu, INFO_ACPI, 2 + 2 * k);
+      if sig == 0 {
+        puts(&mut con, "(out of reach)");
+      } else {
+        put_chars4(&mut con, sig);
+      }
+      puts(&mut con, "@");
+      put_hexn(&mut con, at);
+      k = k + 1;
+    }
+  }
+  puts(&mut con, "\r\n");
+  let base = port_base(a.io);
+  if port_count(a.io) == 0 {
+    puts(&mut con, "acpi: no usable PM1a/PM timer block (missing, or overlapping the legacy ports)\r\n");
+  } else {
+    puts(&mut con, "acpi: ports ");
+    put_hexn(&mut con, base);
+    puts(&mut con, "-");
+    put_hexn(&mut con, base + port_count(a.io) - 1);
+    puts(&mut con, ": PM1a event");
+    put_offset(&mut con, base, a.evt);
+    puts(&mut con, ", control");
+    put_offset(&mut con, base, a.cnt);
+    puts(&mut con, ", PM timer");
+    put_offset(&mut con, base, a.tmr);
+    if a.tmr != ACPI_NONE {
+      if a.mask == 0xFFFFFFFF {
+        puts(&mut con, " (32-bit)");
+      } else {
+        puts(&mut con, " (24-bit)");
+      }
+    }
+    puts(&mut con, "\r\n");
+  }
+  if a.s5 == ACPI_NONE {
+    puts(&mut con, "acpi: no \\_S5 in the DSDT: halt cannot switch the machine off\r\n");
+  } else {
+    puts(&mut con, "acpi: S5 sleep type ");
+    put_num(&mut con, a.s5);
+    puts(&mut con, "\r\n");
+  }
+  if a.reset != ACPI_NONE {
+    puts(&mut con, "acpi: reset register: port ");
+    put_hexn(&mut con, a.reset);
+  } else if a.mreset != 0 {
+    puts(&mut con, "acpi: reset register: memory ");
+    put_hexn(&mut con, a.mreset);
+  } else {
+    puts(&mut con, "acpi: no reset register (reboot uses the keyboard controller, then 0xCF9)\r\n");
+    return;
+  }
+  puts(&mut con, ", value ");
+  put_hexn(&mut con, a.rval);
+  puts(&mut con, "\r\n");
+}
+
+/// ` 0xPORT`, or ` none`.
+fn put_offset(con: &mut Con, base: u64, off: u64)
+  requires con_ok(con)
+  ensures con_ok(con)
+{
+  if off == ACPI_NONE || off > 65535 || base > 65535 {
+    puts(&mut con, " none");
+  } else {
+    puts(&mut con, " ");
+    put_hexn(&mut con, base + off);
+  }
+}
+
+/// The framebuffer the boot loader set up, wherever it is, and whether the
+/// console draws on it.
+fn hw_screen(con: &mut Con, cpu: &Cpu, used: bool)
+  requires con_ok(con)
+  ensures con_ok(con)
+{
+  let at = boot_info(cpu, INFO_FB, 0);
+  if at == 0 {
+    puts(&mut con, "screen: no 32-bit RGB framebuffer from the boot loader\r\n");
+    return;
+  }
+  puts(&mut con, "screen: framebuffer at ");
+  put_hexn(&mut con, at);
+  puts(&mut con, ", ");
+  put_num(&mut con, boot_info(cpu, INFO_FB, 2) % 65536);
+  puts(&mut con, "x");
+  put_num(&mut con, boot_info(cpu, INFO_FB, 3) % 65536);
+  puts(&mut con, ", ");
+  put_num(&mut con, boot_info(cpu, INFO_FB, 1) % 4294967296);
+  puts(&mut con, " bytes a line");
+  if used {
+    puts(&mut con, "; in use\r\n");
+  } else {
+    puts(&mut con, "; not used (outside the device window, or above 4 GiB without 1 GiB pages)\r\n");
+  }
+}
+
+/// How the processors started, and what the timers were set by.
+fn hw_smp(con: &mut Con, cpu: &Cpu, hpet: bool, pm: bool)
+  requires con_ok(con)
+  ensures con_ok(con)
+{
+  puts(&mut con, "processors: the MADT lists ");
+  put_num(&mut con, boot_info(cpu, INFO_SMP, 0) % 65536);
+  let x2 = boot_info(cpu, INFO_SMP, 1) % 65536;
+  if x2 > 0 {
+    puts(&mut con, " (and ");
+    put_num(&mut con, x2);
+    puts(&mut con, " x2APIC entries)");
+  }
+  puts(&mut con, ", ");
+  put_num(&mut con, cpu_count(cpu));
+  puts(&mut con, " running");
+  let why = boot_info(cpu, INFO_SMP, 2);
+  if why == 1 {
+    puts(&mut con, "; the local APIC is disabled");
+  } else if why == 2 {
+    puts(&mut con, "; no MADT");
+  } else if why == 3 {
+    puts(&mut con, "; the local APIC is outside 3-4 GiB");
+  } else if why == 4 {
+    puts(&mut con, "; a processor did not answer, so no more were started");
+  } else if why == 5 {
+    puts(&mut con, "; more than the kernel's limit");
+  } else if why == 6 {
+    puts(&mut con, "; ids of 255 and up need x2APIC, which this processor lacks");
+  }
+  puts(&mut con, "\r\nlocal APIC: ");
+  let mode = boot_info(cpu, INFO_SMP, 3);
+  let fw = boot_info(cpu, INFO_SMP, 4);
+  if mode == APIC_XAPIC {
+    puts(&mut con, "xAPIC");
+  } else if mode == APIC_X2APIC {
+    puts(&mut con, "x2APIC");
+    if fw > APIC_X2APIC {
+      puts(&mut con, ", locked by the firmware");
+    } else {
+      puts(&mut con, ", for ids of 255 and up");
+    }
+  } else {
+    puts(&mut con, "off");
+  }
+  if fw == APIC_X2APIC {
+    puts(&mut con, "; the firmware left it in x2APIC mode");
+  }
+  if mode == APIC_X2APIC {
+    puts(&mut con, " (so no MSI, no wake-up interrupts)");
+  }
+  puts(&mut con, "\r\ntimer: the local APIC timer, counted against ");
+  let src = boot_info(cpu, INFO_TIMER, 0);
+  let hz = boot_info(cpu, INFO_TIMER, 3);
+  if src == 1 {
+    puts(&mut con, "the HPET");
+  } else if src == 2 {
+    puts(&mut con, "the ACPI PM timer");
+  } else if src == 3 {
+    puts(&mut con, "the PIT");
+  } else if src == 5 {
+    puts(&mut con, "the RTC");
+  } else {
+    puts(&mut con, "nothing (a guess)");
+  }
+  puts(&mut con, ": ");
+  put_num(&mut con, boot_info(cpu, INFO_TIMER, 1) % 4294967296);
+  puts(&mut con, " ticks in 10 ms\r\ntick: ");
+  if boot_info(cpu, INFO_TIMER, 2) == 1 {
+    puts(&mut con, "the local APIC timer (the PIT does not count)");
+  } else {
+    puts(&mut con, "the PIT");
+  }
+  puts(&mut con, "\r\nclock: ");
+  if hpet {
+    puts(&mut con, "the HPET\r\n");
+  } else if pm {
+    puts(&mut con, "the ACPI PM timer\r\n");
+  } else if hz >= 4000000 && hz <= 100000000000 {
+    puts(&mut con, "the time-stamp counter at ");
+    put_num(&mut con, hz / 1000);
+    puts(&mut con, " kHz, as measured against the ");
+    if src == 5 {
+      puts(&mut con, "RTC\r\n");
+    } else {
+      puts(&mut con, "PIT\r\n");
+    }
+  } else {
+    puts(&mut con, "none (time stands still)\r\n");
+  }
+}
+
+/// Every PCI function, with the driver BastiOS has for it, if any.
+fn hw_pci(con: &mut Con, pci: &mut Pci)
+  requires con_ok(con) && pci_ok(pci)
+  ensures con_ok(con) && pci_ok(pci)
+{
+  let mut d = 0;
+  let mut n = 0;
+  while d < PCI_NONE
+    invariant d <= PCI_NONE && n <= d && con_ok(con) && pci_ok(pci)
+  {
+    let id = pci_read(&mut pci, d, PCI_ID);
+    if id != 0xFFFFFFFF && id % 65536 != 0xFFFF {
+      let vendor = id % 65536;
+      let device = id / 65536;
+      let cls = pci_read(&mut pci, d, PCI_CLASS) / 256;
+      puts(&mut con, "pci ");
+      put_hexw(&mut con, d / 256, 2);
+      puts(&mut con, ":");
+      put_hexw(&mut con, (d / 8) % 32, 2);
+      puts(&mut con, ".");
+      put_num(&mut con, d % 8);
+      puts(&mut con, " ");
+      put_hexw(&mut con, vendor, 4);
+      puts(&mut con, ":");
+      put_hexw(&mut con, device, 4);
+      puts(&mut con, " class ");
+      put_hexw(&mut con, cls, 6);
+      put_driver(&mut con, vendor, device, cls);
+      puts(&mut con, "\r\n");
+      n = n + 1;
+    }
+    d = pci_next(&mut pci, d);
+  }
+  puts(&mut con, "pci: ");
+  put_num(&mut con, n);
+  puts(&mut con, " functions\r\n");
+}
+
+/// What BastiOS does with a PCI function of this kind.
+fn put_driver(con: &mut Con, vendor: u64, device: u64, cls: u64)
+  requires con_ok(con)
+  ensures con_ok(con)
+{
+  if cls == NVME_CLASS {
+    puts(&mut con, " NVMe disk");
+  } else if cls == AHCI_CLASS {
+    puts(&mut con, " AHCI disk");
+  } else if cls / 256 == 0x0101 {
+    puts(&mut con, " IDE (the ATA driver, legacy ports only)");
+  } else if vendor == VIRTIO_VENDOR && device == VIRTIO_BLK {
+    puts(&mut con, " virtio disk");
+  } else if vendor == VIRTIO_VENDOR && device == VIRTIO_NET {
+    puts(&mut con, " virtio network");
+  } else if e1k_model(vendor, device) == E1K_8254X {
+    puts(&mut con, " e1000 network");
+  } else if e1k_model(vendor, device) == E1K_82574 {
+    puts(&mut con, " e1000 network (82574)");
+  } else if e1k_model(vendor, device) == E1K_IGB {
+    puts(&mut con, " e1000 network (igb)");
+  } else if cls == XHCI_CLASS {
+    puts(&mut con, " xHCI USB (keyboard, disk)");
+  } else if cls / 65536 == 1 {
+    puts(&mut con, " storage: no driver");
+  } else if cls / 65536 == 2 {
+    puts(&mut con, " network: no driver");
+  } else if cls / 65536 == 3 {
+    puts(&mut con, " display: the boot loader's framebuffer only");
+  } else if cls / 256 == 0x0C03 {
+    puts(&mut con, " USB 1/2: no driver");
+  }
+}

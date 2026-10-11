@@ -25,6 +25,42 @@ static void *waiter(void *arg) {
     return arg;
 }
 
+/* Waits up to 5 s for `ready`, on the clock the condition variable uses. */
+static pthread_cond_t tcv;
+static void *timed_waiter(void *arg) {
+    struct timespec ts;
+    clock_gettime((long)arg, &ts);
+    ts.tv_sec += 5;
+    pthread_mutex_lock(&mu);
+    int r = 0;
+    while (!ready && r == 0) r = pthread_cond_timedwait(&tcv, &mu, &ts);
+    pthread_mutex_unlock(&mu);
+    return (void *)(long)r;
+}
+
+/* A timed wait ends as soon as it is signalled, not at its deadline. */
+static int timed_wake(clockid_t clock) {
+    pthread_condattr_t a;
+    pthread_condattr_init(&a);
+    pthread_condattr_setclock(&a, clock);
+    pthread_cond_init(&tcv, &a);
+    ready = 0;
+    pthread_t t;
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    if (pthread_create(&t, 0, timed_waiter, (void *)(long)clock) != 0) return 0;
+    usleep(100000);
+    pthread_mutex_lock(&mu);
+    ready = 1;
+    pthread_cond_signal(&tcv);
+    pthread_mutex_unlock(&mu);
+    void *r = (void *)1;
+    pthread_join(t, &r);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    pthread_cond_destroy(&tcv);
+    return r == 0 && t1.tv_sec - t0.tv_sec < 3;
+}
+
 static void *tlsf(void *arg) { tls = 2; return (void *)(long)tls; }
 
 int main(void) {
@@ -43,6 +79,8 @@ int main(void) {
     EXPECT("condition variable", pthread_create(&t[0], 0, waiter, 0) == 0 &&
            (usleep(50000), pthread_mutex_lock(&mu), ready = 1, pthread_cond_signal(&cv), pthread_mutex_unlock(&mu), 1) &&
            pthread_join(t[0], 0) == 0);
+    EXPECT("timed condition wait, signalled early (realtime)", timed_wake(CLOCK_REALTIME));
+    EXPECT("timed condition wait, signalled early (monotonic)", timed_wake(CLOCK_MONOTONIC));
     EXPECT("thread-local storage", pthread_create(&t[0], 0, tlsf, 0) == 0 && pthread_join(t[0], &r) == 0 && r == (void *)2 && tls == 1);
     EXPECT("pthread_detach", pthread_create(&t[0], 0, tlsf, 0) == 0 && pthread_detach(t[0]) == 0);
     EXPECT("gettid differs in a thread", ({ pthread_t x; long other = 0;

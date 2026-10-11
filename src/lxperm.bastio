@@ -1,0 +1,495 @@
+// Linux file permissions: who owns a file, and who may read, write,
+// search or run it. A file keeps its owner's user and group ids
+// (vfs_set_owner, src/fs.bastio) next to its mode. Each path walk checks
+// search (x) permission on every directory above the name it ends at;
+// open, execve, truncate and access check the file itself; creating,
+// removing and renaming a name check write and search permission on its
+// directory, and a sticky directory (S_ISVTX) lets only the owner of a
+// name, or of the directory, take it away. chmod and utime with times
+// are for the owner; chown is for root, or the owner moving a file to
+// one of its groups. A process is in a file's group through its group id
+// or a supplementary group. Effective user 0 passes every check, except
+// that it may run only a file with some execute bit set. A file with the
+// set-user-ID (or set-group-ID) bit runs with its owner's user (or group)
+// id (exec_ids).
+//
+// Different from Linux: no capabilities beyond user 0, at most
+// NGROUPS_KEPT supplementary groups, and the search check of access(2)
+// uses the file-system ids, as every other path walk does (the final
+// check uses the real ids, as Linux does). A file on a disk keeps ids
+// below 2^24 (EINVAL for larger ones).
+
+import "linux.bastio";
+
+const AT_EACCESS: u64 = 512;
+const ACCESS_MODES: u64 = 7;           // R_OK | W_OK | X_OK
+
+/// The file-system user id (or group id, with `group`) of process pid:
+/// the one that file permissions are checked with.
+fn fs_id(procs: &Buf, pid: u64, group: bool) -> u64
+  requires len(procs) == PTAB_LEN && pid < NPROC
+  ensures result < 0x100000000
+{
+  let mut f = F_SUID;
+  if group {
+    f = F_SGID;
+  }
+  return pget(procs, pid, f) / 0x100000000 % 0x100000000;
+}
+
+/// Whether a process with user id uid and group id gid may do `want`
+/// (MAY_R, MAY_W and MAY_X added up) to a file of mode `mode` (with its
+/// type bits) owned by `own` (user id + group id * 2^32).
+fn mode_allows(mode: u64, own: u64, uid: u64, gid: u64, want: u64) -> bool {
+  return mode_allows_g(mode, own, uid, gid == own / 0x100000000 % 0x100000000, want);
+}
+
+/// mode_allows, with `ingroup` saying whether the process is in the
+/// file's group (its group id or a supplementary group).
+fn mode_allows_g(mode: u64, own: u64, uid: u64, ingroup: bool, want: u64) -> bool {
+  if uid == 0 {
+    // Root reads and writes anything; it runs only what someone may run,
+    // and searches any directory.
+    return want & MAY_X == 0 || mode / 4096 % 16 == 4 || mode & 73 != 0;
+  }
+  let mut bits = mode % 8;
+  if uid == own % 0x100000000 {
+    bits = mode / 64 % 8;
+  } else if ingroup {
+    bits = mode / 8 % 8;
+  }
+  return bits & want == want;
+}
+
+/// Whether process pid is in group g: its file-system group id (or its
+/// real one, unless `fs`), or one of its supplementary groups.
+fn has_group(procs: &Buf, pid: u64, g: u64, fs: bool) -> bool
+  requires len(procs) == PTAB_LEN && pid < NPROC
+{
+  if fs && fs_id(procs, pid, true) == g {
+    return true;
+  }
+  if !fs && pget(procs, pid, F_GID) % 0x100000000 == g {
+    return true;
+  }
+  return in_groups(procs, pid, g);
+}
+
+/// Whether process pid may do `want` to a file of mode `mode` owned by
+/// `own`, with its file-system ids.
+fn may_meta(procs: &Buf, pid: u64, mode: u64, own: u64, want: u64) -> bool
+  requires len(procs) == PTAB_LEN && pid < NPROC
+{
+  return mode_allows_g(mode, own, fs_id(procs, pid, false), has_group(procs, pid, own / 0x100000000 % 0x100000000, true), want);
+}
+
+/// Whether the path in the first n bytes of the transfer buffer names a
+/// file or directory of the file layer, the ones that keep an owner and
+/// a mode. The rest (/bin, /proc, /dev) is root's, with fixed modes.
+fn kept_meta(k: &mut Kernel, n: u64) -> bool
+  requires kok(k) && n <= FNAME_MAX
+  ensures kok(k)
+{
+  if vfs_lookup(&mut k.fs, n) != NO_FILE {
+    return true;
+  }
+  let d = dir_at(&mut k, n);
+  return d != NO_FILE && d >= DIR_VFS && d < DIR_PROC;
+}
+
+/// 0 if process pid may do `want` to the path in the first n bytes of the
+/// transfer buffer (or nothing is there), else EACCES. Only files and
+/// directories of the file layer are checked.
+fn may_path(k: &mut Kernel, pid: u64, n: u64, want: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+  ensures kok(k)
+{
+  if fs_id(k.procs, pid, false) == 0 && want & MAY_X == 0 {
+    return 0;                               // root reads and writes anything
+  }
+  if !kept_meta(&mut k, n) {
+    return 0;
+  }
+  let m = meta_keep(&mut k, n, n);
+  if m.ok && !may_meta(k.procs, pid, m.mode, m.own, want) {
+    return EACCES;
+  }
+  return 0;
+}
+
+/// path_meta of the first j bytes of the transfer buffer, leaving its
+/// first n bytes as they were (path_meta may use it).
+fn meta_keep(k: &mut Kernel, n: u64, j: u64) -> Meta
+  requires kok(k) && j <= n && n <= FNAME_MAX
+  ensures kok(k)
+{
+  let mut t = balloc(2 * FNAME_MAX);
+  xfer_save(k, &mut t, 0, n);
+  let m = path_meta(&mut k, j);
+  xfer_load(&mut k, t, 0, n);
+  bfree(t);
+  return m;
+}
+
+/// The length of the directory part of the name in the first n bytes of
+/// the transfer buffer: up to its last "/", or 0 for the top directory.
+fn dir_part(k: &Kernel, n: u64) -> u64
+  requires kok(k) && n <= FNAME_MAX
+  ensures result < n || result == 0
+{
+  let mut j = n;
+  while j > 0
+    invariant j <= n
+  {
+    if bget(k.fs.xfer, j - 1) == 47 {
+      return j - 1;
+    }
+    j = j - 1;
+  }
+  return 0;
+}
+
+/// 0 if process pid may add or remove names in the directory that holds
+/// the name in the first n bytes of the transfer buffer (write and
+/// search permission on it), else EACCES.
+fn may_dir(k: &mut Kernel, pid: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+  ensures kok(k)
+{
+  if fs_id(k.procs, pid, false) == 0 {
+    return 0;
+  }
+  let j = dir_part(k, n);
+  let m = meta_keep(&mut k, n, j);
+  if m.ok && !may_meta(k.procs, pid, m.mode, m.own, MAY_W + MAY_X) {
+    return EACCES;
+  }
+  return 0;
+}
+
+/// may_dir, and for a name that is going away: in a sticky directory
+/// only the owner of the name, or of the directory, may take it (EPERM).
+fn may_remove(k: &mut Kernel, pid: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+  ensures kok(k)
+{
+  let uid = fs_id(k.procs, pid, false);
+  if uid == 0 {
+    return 0;
+  }
+  let e = may_dir(&mut k, pid, n);
+  if e != 0 {
+    return e;
+  }
+  let j = dir_part(k, n);
+  let dm = meta_keep(&mut k, n, j);
+  if !dm.ok || dm.mode & S_ISVTX == 0 || dm.own % 0x100000000 == uid {
+    return 0;
+  }
+  let m = meta_keep(&mut k, n, n);
+  if m.ok && m.own % 0x100000000 != uid {
+    return EPERM;
+  }
+  return 0;
+}
+
+/// The path walk's search check: n (a name from lx_path_from) if process
+/// pid may search every directory above it, else NO_RESULT with EACCES
+/// in k.perr. NO_RESULT stays as it is.
+fn perm_walk(k: &mut Kernel, pid: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  requires n == NO_RESULT || n <= FNAME_MAX
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  if n == NO_RESULT || fs_id(k.procs, pid, false) == 0 {
+    return n;
+  }
+  // Every directory part, from the top: "", "a", "a/b" for "a/b/c". The
+  // names are checked in the transfer buffer, which no check changes.
+  let mut j = 0;
+  while j <= n
+    invariant j <= n + 1 && n <= FNAME_MAX && kok(k)
+  {
+    if j == 0 || (j < n && bget(k.fs.xfer, j) == 47) {
+      let m = meta_keep(&mut k, n, j);
+      if m.ok && !may_meta(k.procs, pid, m.mode, m.own, MAY_X) {
+        k.perr = EACCES;
+        return NO_RESULT;
+      }
+    }
+    j = j + 1;
+  }
+  return n;
+}
+
+/// The owner a file that process pid makes in the directory holding the
+/// name in the first n bytes of the transfer buffer gets: the process's
+/// file-system user id, and its group id, or the directory's group for a
+/// set-group-ID directory.
+fn new_owner(k: &mut Kernel, pid: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+  ensures kok(k)
+{
+  let uid = fs_id(k.procs, pid, false);
+  let mut gid = fs_id(k.procs, pid, true);
+  let dm = meta_keep(&mut k, n, dir_part(k, n));
+  if dm.ok && dm.mode & S_ISGID != 0 {
+    gid = dm.own / 0x100000000 % 0x100000000;
+  }
+  return uid + gid * 0x100000000;
+}
+
+/// Whether the directory holding the name in the first n bytes of the
+/// transfer buffer is set-group-ID: a directory made in it is too.
+fn dir_sgid(k: &mut Kernel, n: u64) -> bool
+  requires kok(k) && n <= FNAME_MAX
+  ensures kok(k)
+{
+  let dm = meta_keep(&mut k, n, dir_part(k, n));
+  return dm.ok && dm.mode & S_ISGID != 0;
+}
+
+/// Gives file handle f, just made by process pid, owner `own` (from
+/// new_owner, taken before the name was made) and mode `mode` less the
+/// process's umask, set-group-ID too if `sgid`.
+fn made_by(k: &mut Kernel, pid: u64, f: u64, own: u64, mode: u64, sgid: bool)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if f >= HFILES {
+    return;
+  }
+  let mut m = mode % 4096 & !umask_of(k.procs, pid);
+  if sgid && m & S_ISGID == 0 {
+    m = m + S_ISGID;
+  }
+  vfs_set_meta(&mut k.fs, f, m, NO_FILE);
+  if own != 0 {
+    vfs_set_owner(&mut k.fs, f, own % 0x100000000, own / 0x100000000 % 0x100000000);
+  }
+}
+
+/// Process pid's umask (0022 until it sets one): kept plus 1, so that a
+/// row of zeros means 0022.
+fn umask_of(procs: &Buf, pid: u64) -> u64
+  requires len(procs) == PTAB_LEN && pid < NPROC
+  ensures result < 512
+{
+  let s = pget(procs, pid, F_UMASK);
+  if s == 0 {
+    return 18;
+  }
+  return (s - 1) % 512;
+}
+
+fn lx_umask(k: &mut Kernel, pid: u64, mask: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let prev = umask_of(k.procs, pid);
+  pset(&mut k.procs, pid, F_UMASK, mask % 512 + 1);
+  return prev;
+}
+
+/// access, faccessat and faccessat2: does the path exist, and may the
+/// process (with its real ids, or its effective ones for AT_EACCESS) do
+/// what `mode` asks?
+fn lx_access(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if mode & !ACCESS_MODES != 0 || flags & !(AT_EACCESS + AT_SYMLINK_NOFOLLOW) != 0 {
+    return EINVAL;
+  }
+  let mut n = NO_RESULT;
+  if flags & AT_SYMLINK_NOFOLLOW != 0 {
+    n = lx_path_at_nf(&mut k, pid, dirfd, path);
+  } else {
+    n = lx_path_at(&mut k, pid, dirfd, path);
+  }
+  if n == NO_RESULT {
+    return k.perr;
+  }
+  let m = meta_keep(&mut k, n, n);
+  if !m.ok {
+    return ENOENT;
+  }
+  if mode & MAY_W != 0 && vfs_ro(&mut k.fs, n) && kept_meta(&mut k, n) {
+    return EROFS;
+  }
+  let mut uid = pget(k.procs, pid, F_UID) % 0x100000000;
+  let mut ingroup = has_group(k.procs, pid, m.own / 0x100000000 % 0x100000000, false);
+  if flags & AT_EACCESS != 0 {
+    uid = fs_id(k.procs, pid, false);
+    ingroup = has_group(k.procs, pid, m.own / 0x100000000 % 0x100000000, true);
+  }
+  if mode != 0 && !mode_allows_g(m.mode, m.own, uid, ingroup, mode) {
+    return EACCES;
+  }
+  return 0;
+}
+
+/// Whether process pid may change the mode or times of a file owned by
+/// `own`: it owns it, or it is root.
+fn owns(procs: &Buf, pid: u64, own: u64) -> bool
+  requires len(procs) == PTAB_LEN && pid < NPROC
+{
+  let uid = fs_id(procs, pid, false);
+  return uid == 0 || uid == own % 0x100000000;
+}
+
+/// chown and friends on handle f (from meta_target; NO_FILE for a path
+/// that keeps no owner) of mode `mode`, owned by `own`: user id u and group id g,
+/// (u32) -1 leaving one as it is. Root may set anything; the owner may
+/// set the group to its own. A change clears a regular file's
+/// set-user-ID bit, and its set-group-ID bit if the group may run it.
+fn set_owner(k: &mut Kernel, pid: u64, f: u64, mode: u64, own: u64, u: u64, g: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if f == NO_RESULT {
+    return k.perr;
+  }
+  let uid = fs_id(k.procs, pid, false);
+  let mut nu = own % 0x100000000;
+  let mut ng = own / 0x100000000 % 0x100000000;
+  if u % 0x100000000 != NO_ID {
+    nu = u % 0x100000000;
+  }
+  if g % 0x100000000 != NO_ID {
+    ng = g % 0x100000000;
+  }
+  if uid != 0 && (uid != own % 0x100000000 || nu != own % 0x100000000 || (ng != own / 0x100000000 % 0x100000000 && !has_group(k.procs, pid, ng, true))) {
+    return EPERM;
+  }
+  if f >= HFILES {
+    if nu == 0 && ng == 0 {
+      return 0;                             // root's already, and it keeps no other
+    }
+    return EPERM;
+  }
+  if !vfs_set_owner(&mut k.fs, f, nu, ng) {
+    return EINVAL;                          // ids a disk cannot keep
+  }
+  if mode / 4096 % 16 == 8 && mode & (S_ISUID + S_ISGID) != 0 {
+    let mut keep = mode % 4096 & !S_ISUID;
+    if mode & 8 != 0 {
+      keep = keep & !S_ISGID;
+    }
+    vfs_set_meta(&mut k.fs, f, keep, NO_FILE);
+  }
+  return 0;
+}
+
+/// The mode chmod by process pid gives a file of mode `cur` owned by
+/// `own`: `mode`, without the set-group-ID bit when the file's group is
+/// not one of the process's (unless it is root), directories included.
+fn chmod_bits(procs: &Buf, pid: u64, cur: u64, own: u64, mode: u64) -> u64
+  requires len(procs) == PTAB_LEN && pid < NPROC
+  ensures result < 4096
+{
+  let mut r = mode % 4096;
+  if fs_id(procs, pid, false) != 0 && !has_group(procs, pid, own / 0x100000000 % 0x100000000, true) {
+    r = r & !S_ISGID;
+  }
+  return r;
+}
+
+/// The file layer handle of what Linux fd `fd` names, for changing its
+/// mode, times or owner: a file's, or a directory's; NO_FILE for anything
+/// that keeps none (a pipe, a socket, /dev, /proc); NO_RESULT for an fd
+/// that is not open (k.perr = EBADF).
+fn fd_handle(k: &mut Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
+    k.perr = EBADF;
+    return NO_RESULT;
+  }
+  if d.kind == K_FILE {
+    let f = vfs_row_file(k.fs, d.x);
+    if f >= HFILES {
+      return NO_FILE;
+    }
+    return f;
+  }
+  if d.kind == K_DIR && d.x >= DIR_VFS && d.x < DIR_PROC {
+    return d.x - DIR_VFS;
+  }
+  return NO_FILE;
+}
+
+/// chown on handle f (meta_target or fd_handle): its mode and owner come
+/// from the file layer, or are root's for NO_FILE.
+fn chown_handle(k: &mut Kernel, pid: u64, f: u64, u: u64, g: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if f == NO_RESULT {
+    return k.perr;
+  }
+  if f >= HFILES {
+    return set_owner(&mut k, pid, NO_FILE, 0, 0, u, g);
+  }
+  let m = vfs_meta(&mut k.fs, f);
+  if !m.ok {
+    return ENOENT;
+  }
+  let mut kind = 8;                         // a regular file, as far as set_owner cares
+  if vfs_is_dir(&mut k.fs, f) {
+    kind = 4;
+  }
+  return set_owner(&mut k, pid, f, kind * 4096 + m.mode % 4096, m.own, u, g);
+}
+
+/// chown, lchown and fchownat (with AT_SYMLINK_NOFOLLOW, or AT_EMPTY_PATH
+/// for dirfd itself).
+fn lx_chown(k: &mut Kernel, pid: u64, dirfd: u64, va: u64, u: u64, g: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags & !(AT_SYMLINK_NOFOLLOW + AT_EMPTY_PATH) != 0 {
+    return EINVAL;
+  }
+  if flags & AT_EMPTY_PATH != 0 && user_empty(&mut k, pid, va) {
+    return chown_handle(&mut k, pid, fd_handle(&mut k, pid, dirfd), u, g);
+  }
+  return chown_handle(&mut k, pid, meta_target_at(&mut k, pid, dirfd, va, flags & AT_SYMLINK_NOFOLLOW == 0), u, g);
+}
+
+/// Whether the NUL-terminated string at user address va is empty.
+fn user_empty(k: &mut Kernel, pid: u64, va: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  return copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 1) == 1 && bget(k.fs.xfer, 0) == 0;
+}
+
+/// The ids of process pid after it execs a program: from a file with the
+/// set-user-ID bit (f, a file handle, when `file`), the effective user id
+/// becomes the file's owner; with the set-group-ID bit and group execute,
+/// the effective group id its group. As on Linux, the saved ids then
+/// follow the effective ones, and so do the file-system ids.
+fn exec_ids(k: &mut Kernel, pid: u64, file: bool, f: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut euid = id_get(k.procs, pid, F_UID, true);
+  let mut egid = id_get(k.procs, pid, F_GID, true);
+  if file && f < HFILES {
+    let m = vfs_meta(&mut k.fs, f);
+    if m.ok && m.mode & S_ISUID != 0 {
+      euid = m.own % ID_SPAN;
+    }
+    if m.ok && m.mode & S_ISGID != 0 && m.mode & 8 != 0 {
+      egid = m.own / ID_SPAN % ID_SPAN;
+    }
+  }
+  id_put(&mut k.procs, pid, F_UID, id_get(k.procs, pid, F_UID, false), euid);
+  id_put(&mut k.procs, pid, F_SUID, euid, euid);
+  id_put(&mut k.procs, pid, F_GID, id_get(k.procs, pid, F_GID, false), egid);
+  id_put(&mut k.procs, pid, F_SGID, egid, egid);
+}

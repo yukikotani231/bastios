@@ -2,9 +2,9 @@
 // polling: the controller runs, but never interrupts.
 //
 // The driver resets the controller, sets up the admin queue pair, asks
-// namespace 1 for its size, and creates one I/O queue pair. Each read or
-// write is one command, for one 512-byte sector or one 4 KiB block of
-// eight, whose data goes through a page lent to the controller; the driver
+// the first active namespace (usually 1) for its size, and creates one I/O
+// queue pair. Each read or write is one command, for one 512-byte sector
+// or one 4 KiB block of eight, whose data goes through a page lent to the controller; the driver
 // waits for its completion before doing anything else, so there is never
 // more than one command in flight. A write is followed by a flush, so the
 // data is on the medium (not just in the drive's cache) when it returns.
@@ -57,6 +57,7 @@ const OP_CREATE_SQ: u64 = 0x01;
 const OP_CREATE_CQ: u64 = 0x05;
 const OP_IDENTIFY: u64 = 0x06;
 const OP_FLUSH: u64 = 0x00;
+const CNS_ACTIVE_NS: u64 = 2;         // Identify: the active namespace ids, from 1
 const OP_WRITE: u64 = 0x01;
 const OP_READ: u64 = 0x02;
 
@@ -70,6 +71,7 @@ struct Nvme {
   cq_at: u64,
   sectors: u64,       // 512-byte sectors; 0 when the drive could not be started
   shift: u64,         // log2 of the drive's block size, minus 9: 0 or 3
+  ns: u64,            // the namespace used: the first active one
   busy: bool,         // a command started by nvme_begin has not been reaped
   irq: bool,          // I/O completions raise MSI-X message 0 (nvme_msix)
 }
@@ -78,7 +80,7 @@ spec fn nvme_ok(n: &Nvme) -> bool {
   mmio_base(n.regs) % 4096 == 0 && mmio_len(n.regs) <= NVME_MAX_LEN
   && n.stride % 4 == 0 && 4 <= n.stride && NV_DB + 4 * n.stride <= mmio_len(n.regs)
   && n.asq_at < Q_N && n.sq_at < Q_N && n.acq_at < Q_N * 2 && n.cq_at < Q_N * 2
-  && (n.shift == 0 || n.shift == 3)
+  && (n.shift == 0 || n.shift == 3) && 1 <= n.ns && n.ns <= 4294967294
 }
 
 fn nr32(n: &mut Nvme, off: u64) -> u64
@@ -180,7 +182,7 @@ fn nvme_submit(n: &mut Nvme, op: u64, prp: u64, c10: u64, c11: u64, c12: u64)
   requires nvme_ok(n) && op < 256 && c10 <= 4294967295 && c11 <= 4294967295 && c12 <= 4294967295
   ensures nvme_ok(n) && n.sectors == old(n.sectors) && n.busy == old(n.busy)
 {
-  sqe(&mut n.sq, n.sq_at, op, 1, prp, c10, c11, c12);
+  sqe(&mut n.sq, n.sq_at, op, n.ns, prp, c10, c11, c12);
   n.sq_at = (n.sq_at + 1) % Q_N;
   ring(&mut n, 2, n.sq_at);
 }
@@ -257,7 +259,7 @@ fn nvme_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, i
   ensures nvme_ok(result) && mmio_base(result.regs) == mmio_base(regs) && mmio_len(result.regs) == mmio_len(regs)
 {
   let mut n = Nvme { regs: regs, asq: dma_lend(f0), acq: dma_lend(f1), sq: dma_lend(f2), cq: dma_lend(f3),
-    buf: dma_lend(f4), stride: 4, asq_at: 0, sq_at: 0, acq_at: 1, cq_at: 1, sectors: 0, shift: 0, busy: false, irq: false };
+    buf: dma_lend(f4), stride: 4, asq_at: 0, sq_at: 0, acq_at: 1, cq_at: 1, sectors: 0, shift: 0, ns: 1, busy: false, irq: false };
   let cap_lo = nr32(&mut n, NV_CAP);
   let cap_hi = nr32(&mut n, NV_CAP + 4);
   let mut stride = 4;
@@ -295,10 +297,20 @@ fn nvme_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, i
   if !wait_ready(&mut n, 1) {
     return n;
   }
-  // Namespace 1: its size in blocks (bytes 0-7), and the size of a block
-  // from the LBA format in use (byte 26 picks one of the formats from
-  // byte 128, 4 bytes each; byte 2 of a format is log2 of the block size).
-  if !nvme_cmd(&mut n, false, OP_IDENTIFY, 1, dma_phys(n.buf), 0, 0, 0) {
+  // The first active namespace: the head of the active namespace list
+  // (CNS 2, NVMe 1.1). Usually namespace 1, but a drive set up with others
+  // (or with 1 deleted) need not have it. A controller that does not know
+  // the command gets namespace 1.
+  if nvme_cmd(&mut n, false, OP_IDENTIFY, 0, dma_phys(n.buf), CNS_ACTIVE_NS, 0, 0) {
+    let first = cast[u64](dma_read32(&mut n.buf, 0));
+    if 1 <= first && first <= 4294967294 {
+      n.ns = first;
+    }
+  }
+  // Its size in blocks (bytes 0-7), and the size of a block from the LBA
+  // format in use (byte 26 picks one of the formats from byte 128, 4 bytes
+  // each; byte 2 of a format is log2 of the block size).
+  if !nvme_cmd(&mut n, false, OP_IDENTIFY, n.ns, dma_phys(n.buf), 0, 0, 0) {
     return n;
   }
   let size = dma_read64(&mut n.buf, 0);
@@ -383,7 +395,7 @@ fn nvme_io(n: &mut Nvme, op: u64, dlba: u64, count: u64) -> bool
   requires nvme_ok(n) && op < 256 && 1 <= count && count <= 8
   ensures nvme_ok(n) && n.sectors == old(n.sectors) && n.busy == old(n.busy)
 {
-  return nvme_cmd(&mut n, true, op, 1, dma_phys(n.buf), dlba % 4294967296, dlba / 4294967296 % 4294967296, count - 1);
+  return nvme_cmd(&mut n, true, op, n.ns, dma_phys(n.buf), dlba % 4294967296, dlba / 4294967296 % 4294967296, count - 1);
 }
 
 /// Copies the data page's bytes from `from` (n bytes, a multiple of 8) to
@@ -392,27 +404,14 @@ fn nvme_out(d: &mut Dma, from: u64, cnt: u64, out: &mut Bytes, at: u64)
   requires from + cnt <= 4096 && from % 8 == 0 && cnt % 8 == 0 && at + cnt <= blen(out)
   ensures blen(out) == old(blen(out))
 {
-  let l = blen(out);
-  let mut i = 0;
-  while i < cnt
-    invariant i <= cnt && i % 8 == 0 && blen(out) == l
-  {
-    put_u64(&mut out, at + i, dma_read64(&mut d, from + i));
-    i = i + 8;
-  }
+  dma_to_bytes(&mut out, at, &mut d, from, cnt);
 }
 
 /// Copies src[at..at + cnt] into the data page from `to`.
 fn nvme_in(d: &mut Dma, to: u64, cnt: u64, src: &Bytes, at: u64)
   requires to + cnt <= 4096 && to % 8 == 0 && cnt % 8 == 0 && at + cnt <= blen(src)
 {
-  let mut i = 0;
-  while i < cnt
-    invariant i <= cnt && i % 8 == 0
-  {
-    dma_write64(&mut d, to + i, get_u64(src, at + i));
-    i = i + 8;
-  }
+  bytes_to_dma(&mut d, to, src, at, cnt);
 }
 
 /// Reads sector `lba` into buf[0..512]. Returns false if the drive fails
@@ -457,7 +456,7 @@ fn nvme_write(n: &mut Nvme, lba: u64, buf: &Bytes) -> bool
     nvme_in(&mut n.buf, 0, NVME_SECTOR, buf, 0);
     ok = nvme_io(&mut n, OP_WRITE, lba, 1);
   }
-  return ok && nvme_cmd(&mut n, true, OP_FLUSH, 1, 0, 0, 0, 0);
+  return ok && nvme_cmd(&mut n, true, OP_FLUSH, n.ns, 0, 0, 0, 0);
 }
 
 /// Reads the 4 KiB block at sector `lba` (a multiple of 8) into
@@ -498,7 +497,7 @@ fn nvme_write_block(n: &mut Nvme, lba: u64, src: &Bytes, at: u64) -> bool
   } else {
     ok = nvme_io(&mut n, OP_WRITE, lba, 8);
   }
-  return ok && nvme_cmd(&mut n, true, OP_FLUSH, 1, 0, 0, 0, 0);
+  return ok && nvme_cmd(&mut n, true, OP_FLUSH, n.ns, 0, 0, 0, 0);
 }
 
 // Commands that run while the kernel does something else: nvme_begin

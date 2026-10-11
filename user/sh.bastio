@@ -556,7 +556,7 @@ fn cmd_help(con: &Serial) {
   puts(con, "  mem              free physical pages\r\n");
   puts(con, "  uptime           timer ticks since boot (100 a second)\r\n");
   puts(con, "  cpus             processors running\r\n");
-  puts(con, "  clock            nanoseconds since boot (HPET)\r\n");
+  puts(con, "  clock            nanoseconds since boot (time-stamp counter)\r\n");
   puts(con, "  kill PID         stop a process\r\n");
   puts(con, "  ping [A.B.C.D]   ICMP echo (default: the gateway)\r\n");
   puts(con, "  ifconfig         the network address (from DHCP)\r\n");
@@ -567,6 +567,7 @@ fn cmd_help(con: &Serial) {
   puts(con, "  NAME [&]         run a program and wait for it (`&`: don't wait)\r\n");
   puts(con, "  about            what this is\r\n");
   puts(con, "  halt             power off\r\n");
+  puts(con, "  reboot           restart the machine\r\n");
   puts(con, "programs: hello, spin, fault, straddle, true, bench, fstest, sh\r\n");
 }
 
@@ -634,6 +635,7 @@ fn cmd_kill(con: &Serial, line: &Buf, n: u64)
 // gateway, 10.0.2.2, if no address is given).
 const NOT_IP: u64 = 18446744073709551615;
 const IP_END: u64 = 4294967296;
+const SYS_REBOOT: u64 = 25;
 const SYS_PING: u64 = 40;
 const SYS_SOCKET: u64 = 41;
 const SYS_BIND: u64 = 42;
@@ -1244,6 +1246,10 @@ fn main(con: &mut Serial) -> u64 {
     } else if is_cmd(line, n, "halt") {
       puts(con, "bye\r\n");
       sys_poweroff();
+      running = false;
+    } else if is_cmd(line, n, "reboot") {
+      puts(con, "restarting\r\n");
+      sys_call(SYS_REBOOT, 0, 0);
       running = false;
     } else if n > 0 {
       cmd_run(con, line, n);

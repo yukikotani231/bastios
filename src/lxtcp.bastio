@@ -212,7 +212,7 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64) -> u64
     return tk.err;
   }
   if tk.mode != TM_CONN {
-    return ENOTCONN;
+    return EPIPE;                           // Linux too: never connected is EPIPE on send
   }
   if n == 0 {
     return 0;
@@ -231,9 +231,10 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64) -> u64
   return w;
 }
 
-/// read / recv on a connection: the bytes that arrived, 0 at the end,
-/// SK_WAIT (or -EAGAIN when nonblocking) while none have.
-fn lx_tcp_recv(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, dontwait: bool) -> u64
+/// read / recv on a connection: the bytes that arrived (left there with
+/// peek), 0 at the end, SK_WAIT (or -EAGAIN when nonblocking) while none
+/// have.
+fn lx_tcp_recv(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, dontwait: bool, peek: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
@@ -244,7 +245,7 @@ fn lx_tcp_recv(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, dontwait: bo
   if tk.mode != TM_CONN {
     return ENOTCONN;
   }
-  let got = tcp_recv(&mut k.nic, tk.t, &mut k.fs.xfer, smaller(n, XFER));
+  let got = tcp_recv(&mut k.nic, tk.t, &mut k.fs.xfer, smaller(n, XFER), peek);
   if got == NO_SOCK {
     return ECONNRESET;
   }
@@ -258,6 +259,29 @@ fn lx_tcp_recv(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, dontwait: bo
     return EFAULT;
   }
   return got;
+}
+
+/// shutdown(fd, how) on a stream socket: SHUT_WR and SHUT_RDWR send the
+/// FIN now (later sends are -EPIPE); SHUT_RD changes nothing (Linux too
+/// goes on taking what the peer sends).
+fn lx_tcp_shutdown(k: &mut Kernel, pid: u64, fd: u64, how: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let tk = tk_look(k, pid, fd);
+  if tk.err != 0 {
+    return tk.err;
+  }
+  if how > 2 {
+    return EINVAL;
+  }
+  if tk.mode != TM_CONN {
+    return ENOTCONN;
+  }
+  if how != 0 {
+    tcp_shutdown(&mut k.nic, tk.t);
+  }
+  return 0;
 }
 
 /// getsockname / getpeername on a stream socket.

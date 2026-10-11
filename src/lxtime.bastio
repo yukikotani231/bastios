@@ -1,15 +1,18 @@
-// Time and waiting for Linux programs: clocks off the HPET (k.ns, read as
+// Time and waiting for Linux programs: clocks off the clock of
+// src/tsc.bastio (k.ns, read as
 // each system call comes in), sleeps, and poll over the console, pipes and
 // sockets. A call that has to wait runs again later (the restart in
 // lx_retry); a timed wait keeps its deadline in the restart word, as 2 +
-// the HPET time it ends at, so the later runs wait for the first run's
+// the time it ends at, so the later runs wait for the first run's
 // deadline rather than starting the clock again.
 //
 // alarm and setitimer(ITIMER_REAL) keep a deadline per process in
-// k.alarms, which every timer tick checks (lx_alarms) against the HPET.
+// k.alarms, which every timer tick checks (lx_alarms) against k.ns.
 //
 // CLOCK_REALTIME (and gettimeofday, time) is k.epoch, read from the CMOS
-// clock at boot (src/rtc.bastio), plus the HPET clock.
+// clock at boot (src/rtc.bastio), plus k.ns. Programs linked against musl
+// read the monotonic and real-time clocks through the vDSO (user/vdso.c)
+// instead, from the same counter with the same arithmetic.
 
 import "linux.bastio";
 
@@ -30,7 +33,6 @@ const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
 const CLOCK_THREAD_CPUTIME_ID: u64 = 3;
 const CLOCK_BOOTTIME: u64 = 7;
 const LX_SELECT: u64 = 23;
-const LX_PSELECT6: u64 = 270;
 const FD_SETSIZE: u64 = 1024;
 const SET_BYTES: u64 = 128;             // FD_SETSIZE / 8
 const SEL_IN: u64 = 1024;              // where in xfer select keeps the three sets it was given
@@ -39,6 +41,8 @@ const LX_GETITIMER: u64 = 36;
 const LX_ALARM: u64 = 37;
 const LX_SETITIMER: u64 = 38;
 const ITIMER_REAL: u64 = 0;
+const ITIMER_VIRTUAL: u64 = 1;
+const ITIMER_PROF: u64 = 2;
 const SIGALRM: u64 = 14;
 const LX_RT_SIGTIMEDWAIT: u64 = 128;
 const CLOCK_REALTIME: u64 = 0;
@@ -160,7 +164,7 @@ fn lx_sleep(k: &mut Kernel, pid: u64, n: u64, was: u64, clk: u64, flags: u64, re
     ret(&mut k.procs, pid, ts.err);
     return KEEP;
   }
-  // Every clock runs at the HPET's pace (the CPU-time ones too, here).
+  // Every clock runs at the same pace (the CPU-time ones too, here).
   let mut wait = ts.ns;
   if flags & TIMER_ABSTIME != 0 {
     if ts.ns <= now {
@@ -203,6 +207,9 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   if f.kind == K_EVENT || f.kind == K_TIMER || f.kind == K_EPOLL {
     return ev_bits(k, f.kind, f.x);
   }
+  if f.kind == K_SIGFD {
+    return sfd_bits(k, pid, f.x);
+  }
   if f.kind == K_CONSOLE {
     if get(k.line, 1) != 0 {
       return POLLIN | POLLOUT;              // a line is waiting
@@ -217,13 +224,16 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
     if pi_get(k.pipes, f.x, 3) == 0 && pi_get(k.pipes, f.x, 5) != 0 {
       b = b | POLLHUP;                      // no writer left: end of file
     }
+    if pipe_both(k, pid, fd) && pipe_room(k.pipes, f.x, smaller(pi_get(k.pipes, f.x, 1), PIPE_CAP)) >= PIPE_ATOM {
+      b = b | POLLOUT;                      // a FIFO opened O_RDWR writes too
+    }
     return b;
   }
   if f.kind == K_PIPE_W {
     if pi_get(k.pipes, f.x, 2) == 0 {
       return POLLERR;                       // no reader left
     }
-    if pi_get(k.pipes, f.x, 1) <= PIPE_CAP - PIPE_ATOM {
+    if pipe_room(k.pipes, f.x, smaller(pi_get(k.pipes, f.x, 1), PIPE_CAP)) >= PIPE_ATOM {
       return POLLOUT;                       // room for a whole PIPE_BUF write
     }
     return 0;
@@ -246,7 +256,7 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
 /// poll and ppoll: fills in revents for each of the nfds struct pollfd at
 /// fds and returns how many have something, waiting (a run again) until
 /// one does or `wait` ns have passed (FOREVER: no timeout). ppoll's signal
-/// mask is not applied.
+/// mask is applied by lx_time_call (mask_swap).
 fn lx_poll(k: &mut Kernel, pid: u64, n: u64, was: u64, fds: u64, nfds: u64, wait: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -256,7 +266,8 @@ fn lx_poll(k: &mut Kernel, pid: u64, n: u64, was: u64, fds: u64, nfds: u64, wait
     return KEEP;
   }
   let size = 8 * nfds;
-  if copy_from_user(&mut k.spaces, pid, fds, &mut k.fs.xfer, size) != size {
+  // No descriptors (a plain wait, often with fds NULL): nothing to copy.
+  if size > 0 && copy_from_user(&mut k.spaces, pid, fds, &mut k.fs.xfer, size) != size {
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
   }
@@ -287,7 +298,7 @@ fn lx_poll(k: &mut Kernel, pid: u64, n: u64, was: u64, fds: u64, nfds: u64, wait
       return wait_until(&mut k, pid, n, dl);
     }
   }
-  if copy_to_user(&mut k.spaces, pid, fds, k.fs.xfer, size) != size {
+  if size > 0 && copy_to_user(&mut k.spaces, pid, fds, k.fs.xfer, size) != size {
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
   }
@@ -364,7 +375,7 @@ fn set_store(k: &mut Kernel, pid: u64, va: u64, slot: u64, nb: u64) -> bool
 /// select and pselect6 over the first nfds descriptors: rd, wr and ex are
 /// the user's fd_sets (0 for none). Waits like poll. Nothing is ever
 /// exceptional, the time left is not written back to select's timeout,
-/// and pselect6's signal mask is not applied.
+/// and pselect6's signal mask is applied by lx_time_call (mask_swap).
 fn lx_select(k: &mut Kernel, pid: u64, n: u64, was: u64, nfds: u64, rd: u64, wr: u64, ex: u64, wait: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -501,12 +512,17 @@ fn alarm_set(k: &mut Kernel, pid: u64, value: u64, interval: u64)
 
 /// Writes process pid's real-time timer to user address va as a struct
 /// itimerval (the interval, then the value, each a timeval).
-fn itimer_out(k: &mut Kernel, pid: u64, va: u64) -> u64
-  requires kok(k) && pid < NPROC
+fn itimer_out(k: &mut Kernel, pid: u64, va: u64, which: u64) -> u64
+  requires kok(k) && pid < NPROC && which <= ITIMER_PROF
   ensures kok(k)
 {
-  let iv = get(k.alarms, 2 * pid + 1);
-  let left = alarm_left(k, pid);
+  let mut iv = get(k.alarms, 2 * pid + 1);
+  let mut left = alarm_left(k, pid);
+  if which != ITIMER_REAL {
+    let w = cpu_timer(which);
+    left = pget(k.procs, pid, w);
+    iv = pget(k.procs, pid, w + 1);
+  }
   xfer_u64(&mut k.fs.xfer, 0, iv / NS_PER_S);
   xfer_u64(&mut k.fs.xfer, 8, iv % NS_PER_S / 1000);
   xfer_u64(&mut k.fs.xfer, 16, left / NS_PER_S);
@@ -517,8 +533,42 @@ fn itimer_out(k: &mut Kernel, pid: u64, va: u64) -> u64
   return 0;
 }
 
-/// alarm, getitimer and setitimer. Only ITIMER_REAL is kept; the CPU-time
-/// timers are refused with -EINVAL.
+/// The row word of CPU-time timer `which` (its interval is the next one).
+fn cpu_timer(which: u64) -> u64
+  ensures result + 1 < STRIDE
+{
+  if which == ITIMER_VIRTUAL {
+    return F_VTIMER;
+  }
+  return F_PTIMER;
+}
+
+/// On a timer tick that found process p running: its CPU-time timers run
+/// down by the tick, and one that runs out sends its signal (SIGVTALRM or
+/// SIGPROF) and starts again from its interval. Time in the kernel counts
+/// as the process's own: ITIMER_VIRTUAL and ITIMER_PROF run alike.
+fn cpu_timers_tick(k: &mut Kernel, p: u64)
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let mut which = ITIMER_VIRTUAL;
+  while which <= ITIMER_PROF
+    invariant ITIMER_VIRTUAL <= which && which <= ITIMER_PROF + 1 && kok(k)
+  {
+    let w = cpu_timer(which);
+    let left = pget(k.procs, p, w);
+    if left > NS_PER_TICK {
+      pset(&mut k.procs, p, w, left - NS_PER_TICK);
+    } else if left != 0 {
+      pset(&mut k.procs, p, w, pget(k.procs, p, w + 1));
+      post_sig(&mut k, p, 25 + which);      // SIGVTALRM (26), SIGPROF (27)
+    }
+    which = which + 1;
+  }
+}
+
+/// alarm, getitimer and setitimer: ITIMER_REAL, and the CPU-time timers
+/// ITIMER_VIRTUAL and ITIMER_PROF (counted in timer ticks).
 fn lx_itimer(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -538,12 +588,12 @@ fn lx_itimer(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     ret(&mut k.procs, pid, secs);
     return KEEP;
   }
-  if a != ITIMER_REAL {
+  if a > ITIMER_PROF {
     ret(&mut k.procs, pid, EINVAL);
     return KEEP;
   }
   if n == LX_GETITIMER {
-    ret(&mut k.procs, pid, itimer_out(&mut k, pid, b));
+    ret(&mut k.procs, pid, itimer_out(&mut k, pid, b, a));
     return KEEP;
   }
   // setitimer(which, new, old): read new before writing old, which may be
@@ -569,11 +619,18 @@ fn lx_itimer(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     interval = ti.ns;
   }
   if c != 0 {
-    let r = itimer_out(&mut k, pid, c);
+    let r = itimer_out(&mut k, pid, c, a);
     if r != 0 {
       ret(&mut k.procs, pid, r);
       return KEEP;
     }
+  }
+  if a != ITIMER_REAL {
+    let w = cpu_timer(a);
+    pset(&mut k.procs, pid, w, value);
+    pset(&mut k.procs, pid, w + 1, interval);
+    ret(&mut k.procs, pid, 0);
+    return KEEP;
   }
   alarm_set(&mut k, pid, value, interval);
   ret(&mut k.procs, pid, 0);
@@ -618,7 +675,7 @@ fn lx_sigtimedwait(k: &mut Kernel, pid: u64, n: u64, was: u64, setp: u64, info: 
           i = i + 1;
         }
         bset(&mut k.fs.xfer, 0, cast[u8](s));
-        bset(&mut k.fs.xfer, 16, cast[u8](get(k.sigsave, sender_at(pid, s)) % 256));   // si_pid
+        info_from(&mut k.fs.xfer, 0, get(k.sigsave, sender_at(pid, s)));   // si_pid, si_value
         if lx_put_out(&mut k, pid, info, 128) != 0 {
           ret(&mut k.procs, pid, EFAULT);
           return KEEP;
@@ -663,18 +720,97 @@ fn lx_time_call(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
     return lx_poll(&mut k, pid, n, was, a, b, wait);
   }
   if n == LX_PPOLL {
-    let mut wait = FOREVER;
-    if c != 0 {
-      let ts = ts_in(&mut k, pid, c);
-      if ts.err != 0 {
-        ret(&mut k.procs, pid, ts.err);
+    // ppoll(fds, nfds, tsp, sigmask, size): waits with sigmask blocked.
+    let r10 = pget(k.procs, pid, F_REGS + R_R10);
+    if was == 0 && r10 != 0 && !mask_swap(&mut k, pid, r10) {
+      ret(&mut k.procs, pid, EFAULT);
+      return KEEP;
+    }
+    let pr = lx_ppoll(&mut k, pid, n, was, a, b, c);
+    if pr == KEEP {
+      mask_back(&mut k, pid);
+    }
+    return pr;
+  }
+  if n == LX_PSELECT6 {
+    // The sixth argument points at { const sigset_t *ss; size_t len }.
+    let r9 = pget(k.procs, pid, F_REGS + R_R9);
+    if was == 0 && r9 != 0 {
+      if copy_from_user(&mut k.spaces, pid, r9, &mut k.fs.xfer, 8) != 8 {
+        ret(&mut k.procs, pid, EFAULT);
         return KEEP;
       }
-      wait = ts.ns;
+      let ss = get_u64(k.fs.xfer, 0);
+      if ss != 0 && !mask_swap(&mut k, pid, ss) {
+        ret(&mut k.procs, pid, EFAULT);
+        return KEEP;
+      }
     }
-    return lx_poll(&mut k, pid, n, was, a, b, wait);
+    let sr = lx_time_rest(&mut k, pid, n, was, a, b, c);
+    if sr == KEEP {
+      mask_back(&mut k, pid);
+    }
+    return sr;
   }
+  return lx_time_rest(&mut k, pid, n, was, a, b, c);
+}
+
+/// ppoll and pselect6 with a signal mask: like rt_sigsuspend, the call
+/// waits with the mask at user address va blocked. The old one is kept in
+/// k.sigsave, flagged MASK_SWAPPED, until the call returns (mask_back) or
+/// a handler interrupts it (enter_handler puts it in the frame). False if
+/// va cannot be read.
+fn mask_swap(k: &mut Kernel, pid: u64, va: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 8) != 8 {
+    return false;
+  }
+  k.sigsave = set(k.sigsave, pid, pget(k.procs, pid, F_SIGMASK) | MASK_SWAPPED);
+  pset(&mut k.procs, pid, F_SIGMASK, blockable(get_u64(k.fs.xfer, 0)));
+  return true;
+}
+
+/// Puts back the mask mask_swap replaced, if it did.
+fn mask_back(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let w = get(k.sigsave, pid);
+  if w & MASK_SWAPPED != 0 {
+    pset(&mut k.procs, pid, F_SIGMASK, w & !MASK_SWAPPED);
+    k.sigsave = set(k.sigsave, pid, w & !MASK_SWAPPED);
+  }
+}
+
+/// ppoll's timeout, then lx_poll.
+fn lx_ppoll(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut wait = FOREVER;
+  if c != 0 {
+    let ts = ts_in(&mut k, pid, c);
+    if ts.err != 0 {
+      ret(&mut k.procs, pid, ts.err);
+      return KEEP;
+    }
+    wait = ts.ns;
+  }
+  return lx_poll(&mut k, pid, n, was, a, b, wait);
+}
+
+/// The rest of lx_time_call.
+fn lx_time_rest(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
   if n == LX_RT_SIGTIMEDWAIT {
+    if pget(k.procs, pid, F_REGS + R_R10) != 8 {
+      ret(&mut k.procs, pid, EINVAL);       // the sigset size
+      return KEEP;
+    }
     return lx_sigtimedwait(&mut k, pid, n, was, a, b, c);
   }
   if n == LX_PAUSE {
@@ -721,7 +857,7 @@ fn lx_time_call(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
       return KEEP;
     }
     if n == LX_CLOCK_GETRES {
-      ret(&mut k.procs, pid, time_out(&mut k, pid, b, 1, 1));   // the HPET counts in ns
+      ret(&mut k.procs, pid, time_out(&mut k, pid, b, 1, 1));   // the clock is kept in ns
       return KEEP;
     }
     ret(&mut k.procs, pid, time_out(&mut k, pid, b, t, 1));

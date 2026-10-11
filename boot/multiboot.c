@@ -26,6 +26,9 @@ static uint32_t mb1[30];                         /* 120 bytes: up to the colour 
 static uint8_t mmap1[MAX_REGIONS * 24];          /* Multiboot 1 entries: size, base, length, type */
 uint8_t bst_boot_rsdp[36];                       /* the RSDP copy Multiboot 2 passed, if any */
 uint32_t bst_boot_rsdp_len;
+static char cmdline[256];                        /* the boot command line, cut at 255 bytes */
+static uint32_t cmdline_len;
+static uint64_t info_mb1;                        /* the Multiboot 1 information the kernel gets */
 
 static uint32_t rd8(uint64_t a) { return *(volatile uint8_t *)a; }
 static uint32_t rd32(uint64_t a) { return rd8(a) | rd8(a + 1) << 8 | rd8(a + 2) << 16 | rd8(a + 3) << 24; }
@@ -34,10 +37,26 @@ static uint64_t rd64(uint64_t a) { return rd32(a) | (uint64_t)rd32(a + 4) << 32;
 static void put32(uint8_t *p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = (uint8_t)(v >> (8 * i)); }
 static void put64(uint8_t *p, uint64_t v) { put32(p, (uint32_t)v); put32(p + 4, (uint32_t)(v >> 32)); }
 
+/* Copy the NUL-terminated command line at `a` (if it lies below `limit`). */
+static void keep_cmdline(uint64_t a, uint64_t limit) {
+    cmdline_len = 0;
+    while (a < limit && cmdline_len < sizeof cmdline - 1) {
+        uint8_t c = (uint8_t)rd8(a++);
+        if (!c) break;
+        cmdline[cmdline_len++] = (char)c;
+    }
+}
+
 /* The Multiboot 1 information for the kernel, from what the loader passed
  * in %eax (magic) and %ebx (info); 0 if it is neither form. */
 uint32_t bst_multiboot_info(uint32_t magic, uint32_t info) {
-    if (magic == MB1_MAGIC) return info;
+    if (magic == MB1_MAGIC) {
+        if (info != 0 && info <= IDENT_LIMIT - 52) {
+            info_mb1 = info;
+            if (rd32(info) & (1u << 2)) keep_cmdline(rd32(info + 16), IDENT_LIMIT);
+        }
+        return info;
+    }
     if (magic != MB2_MAGIC || info == 0 || info % 8 != 0 || info > IDENT_LIMIT - 16) return 0;
     uint64_t total = rd32(info);
     if (total < 16 || total > IDENT_LIMIT - info) return 0;
@@ -47,7 +66,9 @@ uint32_t bst_multiboot_info(uint32_t magic, uint32_t info) {
     for (uint64_t t = info + 8; t + 8 <= end; ) {
         uint32_t type = rd32(t), size = rd32(t + 4);
         if (type == 0 || size < 8 || size > end - t) break;
-        if (type == 4 && size >= 16) {                 /* basic memory information */
+        if (type == 1 && size > 8) {                   /* the command line */
+            keep_cmdline(t + 8, t + size);
+        } else if (type == 4 && size >= 16) {                 /* basic memory information */
             put32(out + 4, rd32(t + 8));
             put32(out + 8, rd32(t + 12));
             flags |= 1u << 0;
@@ -77,5 +98,39 @@ uint32_t bst_multiboot_info(uint32_t magic, uint32_t info) {
         t += (size + 7) & ~7u;
     }
     put32(out, flags);
+    info_mb1 = (uint64_t)mb1;
     return (uint32_t)(uint64_t)mb1;
+}
+
+/* Byte `i` of the boot command line, or 256 past its end. */
+uint64_t bst_boot_cmdline(uint64_t i) {
+    return i < cmdline_len ? (uint8_t)cmdline[i] : 256;
+}
+
+/* Field `f` of the boot loader's framebuffer if it is 32-bit RGB, wherever
+ * it is: 0 its address, 1 bytes per line, 2 width, 3 height, 4 the bit
+ * positions of red, green and blue (a byte each); 0 without one. The
+ * `boot_fb` builtin says the same but only for one below 4 GiB, and a
+ * GPU's framebuffer is often above (Intel graphics at 0x4000000000). */
+uint64_t bst_boot_framebuffer(uint64_t f) {
+    uint64_t mb = info_mb1;
+    if (!mb || !(rd32(mb) & (1u << 12)) || rd8(mb + 109) != 1 || rd8(mb + 108) != 32) return 0;
+    uint64_t addr = rd64(mb + 88), pitch = rd32(mb + 96), w = rd32(mb + 100), h = rd32(mb + 104);
+    if (addr == 0 || pitch < w * 4) return 0;
+    return f == 0 ? addr : f == 1 ? pitch : f == 2 ? w : f == 3 ? h
+         : f == 4 ? rd8(mb + 110) | (uint64_t)rd8(mb + 112) << 8 | (uint64_t)rd8(mb + 114) << 16 : 0;
+}
+
+/* Field `f` (0 base, 1 length, 2 type) of region `n` of the memory map
+ * the kernel was given, or 0 past its end. */
+uint64_t bst_boot_region(uint64_t n, uint64_t f) {
+    uint64_t mb = info_mb1;
+    if (!mb || !(rd32(mb) & (1u << 6)) || f > 2) return 0;
+    uint64_t at = rd32(mb + 48), end = at + rd32(mb + 44);
+    if (end > IDENT_LIMIT) return 0;
+    for (uint64_t e = at; e + 24 <= end; e += rd32(e) + 4, n--) {
+        if (rd32(e) < 20) return 0;
+        if (n == 0) return f == 0 ? rd64(e + 4) : f == 1 ? rd64(e + 12) : rd32(e + 20);
+    }
+    return 0;
 }

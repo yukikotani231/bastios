@@ -1,0 +1,40 @@
+# The Bastio compiler on BastiOS, for the compatibility suite (test/compat):
+# bastioc1 (bastiolang's self-hosted compiler) proves a program with Z3 and
+# builds the C it writes with tcc, all inside BastiOS, from the Bastio disk
+# (bastiodisk.sh), which the suite boots separately. The format is
+# applets.txt's:
+#
+#   == NAME
+#   $ COMMAND        (one line, run by ash in /)
+#   expected output, line by line, compared exactly
+#
+# Each case works in a directory /cb_NAME that it removes at the end.
+
+== z3: a query
+$ echo '(declare-const x Int) (assert (= (* x x) 49)) (assert (> x 0)) (check-sat) (get-value (x))' | /disk/z3 -in -smt2
+sat
+((x 7))
+
+== bastioc1: prove a program
+$ mkdir /cb_p && cd /cb_p && BASTIO_SOLVER=/disk/z3 /disk/bastioc1 --check /disk/sieve.bastio; cd /; rm -rf /cb_p
+bastioc1: /disk/sieve.bastio: 15 proof obligation(s) discharged
+
+== bastioc1: prove, build with tcc, run
+$ mkdir /cb_b && cd /cb_b && CC=/disk/tcc BASTIO_SOLVER=/disk/z3 /disk/bastioc1 -o sieve /disk/sieve.bastio && ./sieve; cd /; rm -rf /cb_b
+bastioc1: /disk/sieve.bastio: 15 proof obligation(s) discharged
+168
+
+== bastioc1: a failed proof builds nothing
+$ mkdir /cb_f && cd /cb_f && CC=/disk/tcc BASTIO_SOLVER=/disk/z3 /disk/bastioc1 -o ov /disk/overflow.bastio; echo status $?; ls; cd /; rm -rf /cb_f
+/disk/overflow.bastio:5:12: error[E-VERIFY-OVERFLOW]: could not prove that `a + b` does not overflow u64
+  |   return a + b;
+  |            ^
+  = counterexample: a = 18446744073709551615, b = 1
+status 1
+
+== bastioc1: a type error
+$ mkdir /cb_t && cd /cb_t && printf 'fn main() -> u64 {\n  return true;\n}\n' > t.bastio && /disk/bastioc1 --check t.bastio; echo status $?; cd /; rm -rf /cb_t
+t.bastio:2:3: error[E-TYPE]: the returned value must be u64, found bool
+  |   return true;
+  |   ^
+status 1

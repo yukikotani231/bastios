@@ -1,0 +1,45 @@
+# Building C on BastiOS, for the compatibility suite (test/compat): tcc and
+# GNU make from the development disk (devdisk.sh), which the suite boots
+# separately. The format is applets.txt's:
+#
+#   == NAME
+#   $ COMMAND        (one line, run by ash in /)
+#   expected output, line by line, compared exactly
+#
+# Each case works in a directory /cd_NAME that it removes at the end.
+
+== tcc: hello
+$ mkdir /cd_h && cd /cd_h && printf '#include <stdio.h>\nint main(void) { printf("hello %%d\\n", 6 * 7); return 0; }\n' > h.c && /disk/tcc -o h h.c && ./h; cd /; rm -rf /cd_h
+hello 42
+
+== tcc: arguments, exit status, an executable file
+$ mkdir /cd_a && cd /cd_a && printf '#include <stdlib.h>\nint main(int c, char **v) { return c > 1 ? atoi(v[1]) : 9; }\n' > a.c && /disk/tcc -o a a.c && ./a 5; echo $?; stat -c %A a; cd /; rm -rf /cd_a
+5
+-rwxr-xr-x
+
+== tcc: the library (malloc, qsort, files, strings)
+$ mkdir /cd_l && cd /cd_l && printf '#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\nstatic int cmp(const void *a, const void *b) { return *(int *)a - *(int *)b; }\nint main(void) { int n = 1000, *v = malloc(n * sizeof *v), i; for (i = 0; i < n; i++) v[i] = (i * 7919) %% n; qsort(v, n, sizeof *v, cmp); FILE *f = fopen("out", "w"); for (i = 0; i < n; i += 250) fprintf(f, "%%d ", v[i]); fclose(f); char b[64] = ""; f = fopen("out", "r"); fgets(b, sizeof b, f); fclose(f); printf("%%s|%%zu\\n", b, strlen(b)); free(v); return 0; }\n' > l.c && /disk/tcc -o l l.c && ./l; cd /; rm -rf /cd_l
+0 250 500 750 |14
+
+== tcc: a compile error
+$ mkdir /cd_e && cd /cd_e && printf 'int main(void) {\n  return x;\n}\n' > e.c; /disk/tcc -o e e.c; echo status $?; cd /; rm -rf /cd_e
+e.c:2: error: 'x' undeclared
+status 1
+
+== make: a project of two files
+$ mkdir /cd_m && cd /cd_m && printf 'int add(int a, int b);\n' > add.h && printf '#include "add.h"\nint add(int a, int b) { return a + b; }\n' > add.c && printf '#include <stdio.h>\n#include "add.h"\nint main(void) { printf("2+3=%%d\\n", add(2, 3)); return 0; }\n' > main.c && printf 'CC = /disk/tcc\nprog: main.o add.o\n\t$(CC) -o $@ $^\n%%.o: %%.c add.h\n\t$(CC) -c -o $@ $<\n' > Makefile && /disk/make && ./prog && /disk/make; cd /; rm -rf /cd_m
+/disk/tcc -c -o main.o main.c
+/disk/tcc -c -o add.o add.c
+/disk/tcc -o prog main.o add.o
+2+3=5
+make: 'prog' is up to date.
+
+== make: rebuilds only what changed
+$ mkdir /cd_r && cd /cd_r && printf 'int f(void) { return 1; }\n' > f.c && printf 'int f(void);\nint main(void) { return f(); }\n' > m.c && printf 'p: m.o f.o\n\t/disk/tcc -o $@ $^\n%%.o: %%.c\n\t/disk/tcc -c -o $@ $<\n' > Makefile && /disk/make -s && sleep 1 && printf 'int f(void) { return 7; }\n' > f.c && /disk/make && ./p; echo $?; cd /; rm -rf /cd_r
+/disk/tcc -c -o f.o f.c
+/disk/tcc -o p m.o f.o
+7
+
+== make: parallel jobs
+$ mkdir /cd_j && cd /cd_j && for i in 1 2 3 4; do printf "int f$i(void) { return $i; }\n" > f$i.c; done && printf 'int f1(void), f2(void), f3(void), f4(void);\nint main(void) { return f1() + f2() + f3() + f4(); }\n' > m.c && printf 'p: m.o f1.o f2.o f3.o f4.o\n\t@/disk/tcc -o $@ $^\n%%.o: %%.c\n\t@/disk/tcc -c -o $@ $<\n' > Makefile && /disk/make -j4 && ./p; echo $?; cd /; rm -rf /cd_j
+10

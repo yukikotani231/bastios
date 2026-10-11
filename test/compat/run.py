@@ -12,7 +12,13 @@ applets), starts the kernel's built-in ash, and runs:
     prints "@@ NAME", then "ok NAME" or "FAIL NAME: why" for each
     (progs/compat.h);
   * each case in applets.txt, a one-line shell command whose output must
-    match exactly.
+    match exactly;
+  * each case in tty.txt: a program driven by keystrokes on the console
+    (an editor, a REPL), then a shell command whose output must match.
+
+Commands may name HOSTURL (or HOSTADDR, its address and port): a web server this script runs on the host
+machine (WebServer), which the guest reaches through QEMU's user network
+(http://10.0.2.2:PORT).
 
 The kernel prints "[pid N: Linux system call X not implemented]" for each
 call it does not know. Those notes are charged to the check or case that
@@ -32,7 +38,7 @@ measurement, so failing checks are expected, but it must not go backwards.
 --host runs the same programs and cases on this machine instead (from a
 scratch directory), to check that the expectations are right for Linux.
 """
-import argparse, json, os, re, select, shutil, subprocess, sys, tempfile, time
+import argparse, codecs, fcntl, functools, http.server, json, os, pty, re, select, shutil, signal, struct, subprocess, sys, tempfile, termios, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROMPT = b"\n# "
@@ -74,6 +80,59 @@ def load_applets(path):
     return out
 
 
+def load_tty(path):
+    """The cases in tty.txt: (name, program, keystrokes, check, expected lines).
+
+        == NAME
+        $ PROGRAM        (one line, run by ash in /, in the foreground)
+        > KEYS           (typed once the program has drawn something; one
+                          line each, with Python's escapes: \\r, \\x1b)
+        $ CHECK          (one line, run once the program is back at the shell)
+        expected output of CHECK, line by line
+    """
+    cases, cur = [], None
+    for raw in open(path):
+        line = raw.rstrip("\n")
+        if line.startswith("== "):
+            cur = {"name": line[3:].strip(), "prog": None, "keys": [], "check": None, "exp": []}
+            cases.append(cur)
+        elif cur is None or (cur["check"] is None and (line.startswith("#") or not line.strip())):
+            continue
+        elif cur["prog"] is None and line.startswith("$ "):
+            cur["prog"] = line[2:]
+        elif cur["check"] is None and line.startswith("> "):
+            cur["keys"].append(codecs.decode(line[2:], "unicode_escape").encode("latin-1"))
+        elif cur["check"] is None and line.startswith("$ "):
+            cur["check"] = line[2:]
+        elif cur["check"] is not None:
+            cur["exp"].append(line)
+    for c in cases:
+        while c["exp"] and not c["exp"][-1].strip():
+            c["exp"].pop()
+    return [(c["name"], c["prog"], c["keys"], c["check"], c["exp"]) for c in cases]
+
+
+class WebServer:
+    """A web server on the host, for HOSTURL: /hello.txt, a line, and
+    /mib.bin, 1 MiB whose md5 is 85bfb9943e6f0cb09f0f52679e9eac2b."""
+
+    def __init__(self):
+        self.dir = tempfile.mkdtemp(prefix="compat-www-")
+        with open(os.path.join(self.dir, "hello.txt"), "w") as f:
+            f.write("hello from the host\n")
+        with open(os.path.join(self.dir, "mib.bin"), "wb") as f:
+            f.write(bytes((i * 7 + i // 256) % 256 for i in range(1 << 20)))
+        handler = functools.partial(Quiet, directory=self.dir)
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.port = self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+
+class Quiet(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+
 def with_bb(cmd, bb):
     return re.sub(r"\bbb\b", bb, cmd)
 
@@ -81,9 +140,11 @@ def with_bb(cmd, bb):
 # ---------------------------------------------------------------- the guest
 
 class Guest:
-    def __init__(self, kernel, disk, log):
+    def __init__(self, kernel, disk, log, web=None):
         self.kernel, self.disk, self.log = kernel, disk, log
         self.q = None
+        self.hosturl = f"http://10.0.2.2:{web.port}" if web else ""
+        self.hostaddr = f"10.0.2.2 {web.port}" if web else ""
 
     def boot(self):
         self.stop()
@@ -128,6 +189,43 @@ class Guest:
             self.out += chunk
         return True
 
+    def keys(self, prog, keys, timeout):
+        """Starts prog and types keys at it once it has drawn something.
+        Returns whether it got back to the shell prompt."""
+        mark = len(self.out)
+        # The marker shows the shell is back: a full-screen program's last
+        # output can run into the prompt.
+        cmd = prog.encode() + b"; echo @@back\r"
+        self.send(cmd)
+        # Its command line echoes; then wait for the program's own output, so
+        # the keys reach it after it has set up the terminal.
+        if not self.read_until(b"\n", mark, 10):
+            return False
+        echoed = len(self.out)
+        deadline = time.time() + 30
+        while len(self.out) == echoed and time.time() < deadline:
+            self.read_until(b"\x00never", echoed, 0.2)
+        time.sleep(0.5)
+        for k in keys:
+            self.send(k)
+            time.sleep(0.4)
+        typed = len(self.out)
+        # Back at the shell: the marker and a prompt, or a prompt on a line
+        # of its own if a Ctrl-C the program took also cut the shell's list
+        # short (as ash does on Linux).
+        end = time.time() + timeout
+        done = False
+        while not done and time.time() < end:
+            at = self.out.find(b"@@back\r\n", echoed)
+            done = (at >= 0 and PROMPT in self.out[at:]) or self.out[typed:].endswith(b"\r\n# ")
+            if not done:
+                self.read_until(b"\x00never", len(self.out), 0.2)
+        if not done:
+            self.send(b"\x03")
+            if not self.read_until(PROMPT, len(self.out), 10):
+                self.boot()
+        return done
+
     def run(self, line, timeout):
         """Runs a shell line ending in `echo @@end $?`. Returns (text, status),
         status None if it never finished (the guest is then made usable
@@ -153,15 +251,52 @@ class Guest:
 class Host:
     """The same interface, on this machine, for checking expectations."""
 
-    def __init__(self, bindir):
+    def __init__(self, bindir, web=None):
         self.bindir = bindir
         self.cwd = tempfile.mkdtemp(prefix="compat-host-")
+        self.hosturl = f"http://127.0.0.1:{web.port}" if web else ""
+        self.hostaddr = f"127.0.0.1 {web.port}" if web else ""
 
     def boot(self):
         pass
 
     def stop(self):
         shutil.rmtree(self.cwd, ignore_errors=True)
+
+    def keys(self, prog, keys, timeout):
+        """As Guest.keys, with the program on a pseudo-terminal here."""
+        prog = prog.replace("/disk/", self.bindir + "/")
+        pid, fd = pty.fork()
+        if pid == 0:
+            # 24 rows of 80 columns, as the guest's console reports.
+            fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+            os.chdir(self.cwd)
+            os.execv("/bin/sh", ["sh", "-c", prog])
+        def drain(t):
+            got, end = b"", time.time() + t
+            while time.time() < end:
+                r, _, _ = select.select([fd], [], [], 0.05)
+                if r:
+                    try:
+                        got += os.read(fd, 65536)
+                    except OSError:
+                        break
+            return got
+        drain(1.0)
+        for k in keys:
+            os.write(fd, k)
+            drain(0.4)
+        end = time.time() + timeout
+        while time.time() < end:
+            drain(0.2)
+            done, _ = os.waitpid(pid, os.WNOHANG)
+            if done:
+                os.close(fd)
+                return True
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        os.close(fd)
+        return False
 
     def run(self, line, timeout):
         line = line.replace("/disk/", self.bindir + "/")
@@ -227,6 +362,7 @@ def run_program(env, prog, timeout):
 
 
 def run_applet(env, name, cmd, expected, timeout, bb):
+    cmd = cmd.replace("HOSTURL", env.hosturl).replace("HOSTADDR", env.hostaddr)
     text, status = env.run(f"echo @@begin; {with_bb(cmd, bb)}; echo @@end $?", timeout)
     lines = text.split("\n")
     try:
@@ -249,6 +385,14 @@ def run_applet(env, name, cmd, expected, timeout, bb):
     ok = body == expected
     detail = "" if ok else "got " + json.dumps("\n".join(body)[:200]) + ", expected " + json.dumps("\n".join(expected))
     return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": sorted(set(calls))}
+
+
+def run_tty(env, name, prog, keys, check, expected, timeout, bb):
+    """A tty.txt case: prog driven by keys, then check as an applet case."""
+    if not env.keys(with_bb(prog, bb), keys, timeout):
+        return {"name": name, "result": "hang", "detail": "the program did not return to the shell",
+                "syscalls": []}
+    return run_applet(env, name, check, expected, timeout, bb)
 
 
 # ---------------------------------------------------------------- reporting
@@ -312,6 +456,8 @@ def main():
     ap.add_argument("--kernel", default="build/bastios.elf")
     ap.add_argument("--disk", default="build/compat/disk.img")
     ap.add_argument("--out", default="build/compat")
+    ap.add_argument("--dev-disk", help="the development disk (tcc and make) for dev.txt")
+    ap.add_argument("--bastio-disk", help="the Bastio disk (bastioc1, z3, tcc) for bastio.txt")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--update-baseline", action="store_true")
@@ -321,9 +467,13 @@ def main():
     names = syscall_names()
     applets = load_applets(os.path.join(HERE, "applets.txt"))
     apps = load_applets(os.path.join(HERE, "apps.txt"))
+    dev = load_applets(os.path.join(HERE, "dev.txt"))
+    bastio = load_applets(os.path.join(HERE, "bastio.txt"))
+    tty = load_tty(os.path.join(HERE, "tty.txt"))
     os.makedirs(args.out, exist_ok=True)
     log = open(os.path.join(args.out, "serial.log"), "wb")
-    env = Host(os.path.abspath(args.host)) if args.host else Guest(args.kernel, args.disk, log)
+    web = WebServer()
+    env = Host(os.path.abspath(args.host), web) if args.host else Guest(args.kernel, args.disk, log, web)
     bb = os.path.join(os.path.abspath(args.host), "busybox") if args.host else BB
     t0 = time.time()
     results = {}
@@ -336,9 +486,28 @@ def main():
         results["busybox"] = [run_applet(env, n, c, e, 30, bb) for n, c, e in applets]
         print("compat: real programs", flush=True)
         results["apps"] = [run_applet(env, n, c, e, 60, bb) for n, c, e in apps]
+        print("compat: programs on the terminal", flush=True)
+        results["tty"] = [run_tty(env, n, p, k, c, e, 30, bb) for n, p, k, c, e in tty]
+        if args.dev_disk and not args.host:
+            # tcc and make are on a disk of their own: the disk's directory
+            # has room for 64 entries, and the C runtime needs most of them.
+            env.stop()
+            env = Guest(args.kernel, args.dev_disk, log, web)
+            env.boot()
+            print("compat: building C (tcc, make)", flush=True)
+            results["dev"] = [run_applet(env, n, c, e, 60, bb) for n, c, e in dev]
+        if args.bastio_disk and not args.host:
+            # The Bastio compiler, Z3 and tcc fill a third disk.
+            env.stop()
+            env = Guest(args.kernel, args.bastio_disk, log, web)
+            env.boot()
+            print("compat: the Bastio compiler (bastioc1, z3, tcc)", flush=True)
+            results["bastio"] = [run_applet(env, n, c, e, 900, bb) for n, c, e in bastio]
     finally:
         env.stop()
         log.close()
+        web.httpd.shutdown()
+        shutil.rmtree(web.dir, ignore_errors=True)
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]

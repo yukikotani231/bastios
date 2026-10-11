@@ -174,13 +174,7 @@ fn tcp_emit(n: &mut Net, t: u64, flags: u64, seq: u64, off: u64, dl: u64)
     put16(&mut n.out, 56, TCP_MSS);
   }
   let at = t * TCP_BUF + off;
-  let mut i = 0;
-  while i < dl
-    invariant i <= dl && net_ok(n)
-  {
-    bset(&mut n.out, 34 + hl + i, bget(n.ttx, at + i));
-    i = i + 1;
-  }
+  bcopy(&mut n.out, 34 + hl, n.ttx, at, dl);
   put16(&mut n.out, 50, 65535 - l4_sum(n.out, src_ip(n, rip), rip, IP_TCP, tlen));
   send_via(&mut n, next_hop(n, rip), 34 + tlen);
 }
@@ -639,13 +633,7 @@ fn tcp_in(n: &mut Net, total: u64)
       take = TCP_BUF - rxlen;         // beyond our window: the peer resends
     }
     let base = t * TCP_BUF + rxlen;
-    let mut i = 0;
-    while i < take
-      invariant i <= take && net_ok(n)
-    {
-      bset(&mut n.trx, base + i, bget(n.pkt, doff + i));
-      i = i + 1;
-    }
+    bcopy(&mut n.trx, base, n.pkt, doff, take);
     let mut got = rxlen + take;
     let hlo = twb(n, t, W_HLO, TCP_BUF + 1);
     let hhi = twb(n, t, W_HHI, TCP_BUF + 1);
@@ -711,13 +699,7 @@ fn tcp_hold(n: &mut Net, t: u64, ahead: u64, doff: u64, dl: u64)
     }
   }
   let base = t * TCP_BUF + lo;
-  let mut i = 0;
-  while i < hi - lo
-    invariant i <= hi - lo && net_ok(n)
-  {
-    bset(&mut n.trx, base + i, bget(n.pkt, doff + i));
-    i = i + 1;
-  }
+  bcopy(&mut n.trx, base, n.pkt, doff, hi - lo);
   tset(&mut n, t, W_HLO, nlo);
   tset(&mut n, t, W_HHI, nhi);
 }
@@ -916,23 +898,18 @@ fn tcp_write(n: &mut Net, t: u64, buf: &Bytes, size: u64) -> u64
     k = blen(buf);
   }
   let base = t * TCP_BUF + txlen;
-  let mut i = 0;
-  while i < k
-    invariant i <= k && net_ok(n)
-  {
-    bset(&mut n.ttx, base + i, bget(buf, i));
-    i = i + 1;
-  }
+  bcopy(&mut n.ttx, base, buf, 0, k);
   tset(&mut n, t, W_TXLEN, txlen + k);
   tcp_output(&mut n, t, false);
   return k;
 }
 
 /// Takes up to `max` received bytes (no more than buf holds) from
-/// connection t into the start of buf. Returns the count; 0 at the end
-/// (the peer closed and everything was read); TCP_AGAIN if nothing has
-/// arrived yet; NO_SOCK if t was reset or is not a connection.
-fn tcp_read(n: &mut Net, t: u64, buf: &mut Bytes, max: u64) -> u64
+/// connection t into the start of buf; with peek, copies them and leaves
+/// them received (MSG_PEEK). Returns the count; 0 at the end (the peer
+/// closed and everything was read); TCP_AGAIN if nothing has arrived yet;
+/// NO_SOCK if t was reset or is not a connection.
+fn tcp_read(n: &mut Net, t: u64, buf: &mut Bytes, max: u64, peek: bool) -> u64
   requires net_ok(n)
   ensures net_ok(n) && blen(buf) == old(blen(buf))
   ensures result == NO_SOCK || result == TCP_AGAIN || (result <= blen(buf) && result <= max)
@@ -960,12 +937,9 @@ fn tcp_read(n: &mut Net, t: u64, buf: &mut Bytes, max: u64) -> u64
   }
   let base = t * TCP_BUF;
   let bl = blen(buf);
-  let mut i = 0;
-  while i < k
-    invariant i <= k && net_ok(n) && blen(buf) == bl
-  {
-    bset(&mut buf, i, bget(n.trx, base + i));
-    i = i + 1;
+  bcopy(&mut buf, 0, n.trx, base, k);
+  if peek {
+    return k;
   }
   // Shift the rest down, with any data held past a gap.
   let hhi = twb(n, t, W_HHI, TCP_BUF + 1);
@@ -1009,10 +983,29 @@ fn tcp_release(n: &mut Net, t: u64) -> bool
     return false;
   }
   tset(&mut n, t, W_HELD, 0);
+  tset(&mut n, t, W_PARENT, TCBS);          // accepted once: never handed out again
   let st = tw(n, t, W_STATE);
   if st == T_LISTEN || st == T_SYN_SENT {
     tcb_close(&mut n, t, false);
   } else if (st == T_ESTABLISHED || st == T_CLOSE_WAIT || st == T_SYN_RCVD) && tw(n, t, W_FIN) == 0 {
+    tset(&mut n, t, W_FIN, 1);
+    tcp_output(&mut n, t, false);
+  }
+  return true;
+}
+
+/// shutdown(SHUT_WR): connection t sends its FIN after the data still
+/// buffered, and sends nothing more; the caller still holds t and can
+/// read what the peer sends. False if t cannot send.
+fn tcp_shut(n: &mut Net, t: u64) -> bool
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  if !tcb_held(n, t) {
+    return false;
+  }
+  let st = tw(n, t, W_STATE);
+  if (st == T_ESTABLISHED || st == T_CLOSE_WAIT) && tw(n, t, W_FIN) == 0 {
     tset(&mut n, t, W_FIN, 1);
     tcp_output(&mut n, t, false);
   }
@@ -1088,7 +1081,7 @@ fn tcp_send(c: &mut Nic, t: u64, buf: &Bytes, size: u64) -> u64
   }
 }
 
-fn tcp_recv(c: &mut Nic, t: u64, buf: &mut Bytes, max: u64) -> u64
+fn tcp_recv(c: &mut Nic, t: u64, buf: &mut Bytes, max: u64, peek: bool) -> u64
   requires nic_ok(c)
   ensures nic_ok(c) && blen(buf) == old(blen(buf))
   ensures result == NO_SOCK || result == TCP_AGAIN || (result <= blen(buf) && result <= max)
@@ -1096,7 +1089,21 @@ fn tcp_recv(c: &mut Nic, t: u64, buf: &mut Bytes, max: u64) -> u64
   match c {
     Nic::None => { c = Nic::None; return NO_SOCK; },
     Nic::Up(mut n) => {
-      let r = tcp_read(&mut n, t, &mut buf, max);
+      let r = tcp_read(&mut n, t, &mut buf, max, peek);
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+fn tcp_shutdown(c: &mut Nic, t: u64) -> bool
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; return false; },
+    Nic::Up(mut n) => {
+      let r = tcp_shut(&mut n, t);
       c = Nic::Up(n);
       return r;
     },

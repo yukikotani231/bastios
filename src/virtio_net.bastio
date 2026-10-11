@@ -27,20 +27,23 @@ struct VNet {
   tb: Dma,            // the frame being sent
   mac: u64,           // 48 bits, first byte most significant
   live: bool,
+  irq: bool,          // a received frame can raise MSI-X message 0 (see vnet_irq)
 }
 
 spec fn vnet_ok(v: &VNet) -> bool {
   port_count(v.io) == VIO_PORTS && vq_ok(v.rx) && vq_ok(v.tx) && v.mac < 281474976710656
 }
 
-/// Byte `off` of receive buffer `b`.
-fn rxbuf_read8(v: &mut VNet, b: u64, off: u64) -> u8
-  requires b < RX_BUFS && off < RX_BUF
+/// Copies n bytes of receive buffer `b`, from offset `off`, into pkt.
+fn rxbuf_copy(v: &mut VNet, b: u64, off: u64, pkt: &mut Bytes, n: u64)
+  requires vnet_ok(v) && b < RX_BUFS && off + n <= RX_BUF && n <= blen(pkt)
+  ensures vnet_ok(v) && blen(pkt) == old(blen(pkt)) && v.live == old(v.live)
 {
   if b < 2 {
-    return dma_read8(&mut v.rb0, b * RX_BUF + off);
+    dma_to_bytes(&mut pkt, 0, &mut v.rb0, b * RX_BUF + off, n);
+  } else {
+    dma_to_bytes(&mut pkt, 0, &mut v.rb1, (b - 2) * RX_BUF + off, n);
   }
-  return dma_read8(&mut v.rb1, (b - 2) * RX_BUF + off);
 }
 
 /// Offers receive buffer `b` (descriptor `b`) to the card again.
@@ -54,15 +57,18 @@ fn rx_give(v: &mut VNet, b: u64)
 
 /// Claims the card's ports, lends it nine pages, posts the receive buffers
 /// and reads its MAC address. A card that cannot be started is left with
-/// `live` false: it sends nothing and receives nothing.
-fn vnet_new(ports: &mut Ports, base: u64, q0: Frame, q1: Frame, q2: Frame, t0: Frame, t1: Frame, t2: Frame, b0: Frame, b1: Frame, b2: Frame) -> VNet
+/// `live` false: it sends nothing and receives nothing. `msix`: MSI-X is
+/// on at the card, entry 0 aimed at V_NET; the receive queue is then given
+/// message 0, still quiet until `vnet_irq` (transmits are waited for, so
+/// they raise nothing).
+fn vnet_new(ports: &mut Ports, base: u64, q0: Frame, q1: Frame, q2: Frame, t0: Frame, t1: Frame, t2: Frame, b0: Frame, b1: Frame, b2: Frame, msix: bool) -> VNet
   requires base + VIO_PORTS <= 65536
   requires forall k: u64 :: base <= k && k < base + VIO_PORTS ==> port_free(ports, k)
   ensures vnet_ok(result)
 {
   let mut v = VNet {
     io: port_claim(&mut ports, base, VIO_PORTS), rx: vq_new(q0, q1, q2), tx: vq_new(t0, t1, t2),
-    rb0: dma_lend(b0), rb1: dma_lend(b1), tb: dma_lend(b2), mac: 0, live: false,
+    rb0: dma_lend(b0), rb1: dma_lend(b1), tb: dma_lend(b2), mac: 0, live: false, irq: false,
   };
   let a0 = dma_addr(v.rb0);
   let a1 = dma_addr(v.rb1);
@@ -80,12 +86,23 @@ fn vnet_new(ports: &mut Ports, base: u64, q0: Frame, q1: Frame, q2: Frame, t0: F
   vq_desc(&mut v.rx, 1, a0 + RX_BUF, RX_BUF, DESC_WRITE, 0);
   vq_desc(&mut v.rx, 2, a1, RX_BUF, DESC_WRITE, 0);
   vq_desc(&mut v.rx, 3, a1 + RX_BUF, RX_BUF, DESC_WRITE, 0);
-  let m0 = cast[u64](pio_in8(&mut v.io, VIO_CONFIG));
-  let m1 = cast[u64](pio_in8(&mut v.io, VIO_CONFIG + 1));
-  let m2 = cast[u64](pio_in8(&mut v.io, VIO_CONFIG + 2));
-  let m3 = cast[u64](pio_in8(&mut v.io, VIO_CONFIG + 3));
-  let m4 = cast[u64](pio_in8(&mut v.io, VIO_CONFIG + 4));
-  let m5 = cast[u64](pio_in8(&mut v.io, VIO_CONFIG + 5));
+  let mut cfg = VIO_CONFIG;
+  if msix {
+    // The device answers VIO_NO_VECTOR if it cannot take the message.
+    cfg = VIO_CONFIG_MSIX;
+    pio_out16(&mut v.io, VIO_MSIX_CONFIG, cast[u16](VIO_NO_VECTOR));
+    pio_out16(&mut v.io, VIO_QUEUE_SEL, 1);
+    pio_out16(&mut v.io, VIO_MSIX_QUEUE, cast[u16](VIO_NO_VECTOR));
+    pio_out16(&mut v.io, VIO_QUEUE_SEL, 0);
+    pio_out16(&mut v.io, VIO_MSIX_QUEUE, 0);
+    v.irq = cast[u64](pio_in16(&mut v.io, VIO_MSIX_QUEUE)) == 0;
+  }
+  let m0 = cast[u64](pio_in8(&mut v.io, cfg));
+  let m1 = cast[u64](pio_in8(&mut v.io, cfg + 1));
+  let m2 = cast[u64](pio_in8(&mut v.io, cfg + 2));
+  let m3 = cast[u64](pio_in8(&mut v.io, cfg + 3));
+  let m4 = cast[u64](pio_in8(&mut v.io, cfg + 4));
+  let m5 = cast[u64](pio_in8(&mut v.io, cfg + 5));
   v.mac = ((((m0 * 256 + m1) * 256 + m2) * 256 + m3) * 256 + m4) * 256 + m5;
   pio_out8(&mut v.io, VIO_STATUS, cast[u8](VIO_ACK + VIO_DRIVER + VIO_DRIVER_OK));
   v.live = true;
@@ -97,6 +114,18 @@ fn vnet_new(ports: &mut Ports, base: u64, q0: Frame, q1: Frame, q2: Frame, t0: F
     b = b + 1;
   }
   return v;
+}
+
+/// Whether a received frame raises the card's message, if it can.
+fn vnet_irq(v: &mut VNet, on: bool)
+  requires vnet_ok(v)
+  ensures vnet_ok(v)
+{
+  if v.irq && on {
+    vq_interrupts(&mut v.rx);
+  } else if v.irq {
+    vq_quiet(&mut v.rx);
+  }
 }
 
 /// Resets the card, so it stops using the pages, takes them back and gives
@@ -138,14 +167,7 @@ fn vnet_recv(v: &mut VNet, pkt: &mut Bytes) -> u64
   if got > NET_HDR && got <= RX_BUF {
     n = got - NET_HDR;
   }
-  let l = blen(pkt);
-  let mut i = 0;
-  while i < n
-    invariant i <= n && n <= RX_BUF - NET_HDR && vnet_ok(v) && blen(pkt) == l && l >= RX_BUF && b < RX_BUFS
-  {
-    bset(&mut pkt, i, rxbuf_read8(&mut v, b, NET_HDR + i));
-    i = i + 1;
-  }
+  rxbuf_copy(&mut v, b, NET_HDR, &mut pkt, n);
   rx_give(&mut v, b);
   return n;
 }
@@ -166,13 +188,7 @@ fn vnet_send(v: &mut VNet, pkt: &Bytes, n: u64) -> bool
     dma_write8(&mut v.tb, i, 0);      // no checksum offload, no segmentation
     i = i + 1;
   }
-  let mut j = 0;
-  while j < n
-    invariant j <= n && n <= FRAME_MAX && n <= blen(pkt)
-  {
-    dma_write8(&mut v.tb, NET_HDR + j, bget(pkt, j));
-    j = j + 1;
-  }
+  bytes_to_dma(&mut v.tb, NET_HDR, pkt, 0, n);
   let a = dma_addr(v.tb);
   vq_desc(&mut v.tx, 0, a, NET_HDR + n, 0, 0);
   vq_push(&mut v.tx, 0);

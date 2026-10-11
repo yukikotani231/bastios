@@ -30,6 +30,59 @@ fn card_is_e1000(d: &Card) -> bool {
   return d is Card::E1000;
 }
 
+/// True if received frames raise an interrupt rather than wait for a poll.
+fn card_irq(d: &Card) -> bool {
+  match d {
+    Card::Virtio(v) => { return v.irq; },
+    Card::E1000(e) => { return e.irq; },
+  }
+}
+
+/// An e1000's line is unmasked at the 8259 (see `e1k_irq_on`).
+fn card_irq_on(d: &mut Card)
+  requires card_ok(d)
+  ensures card_ok(d)
+{
+  match d {
+    Card::Virtio(v) => { d = Card::Virtio(v); },
+    Card::E1000(mut e) => {
+      e1k_irq_on(&mut e);
+      d = Card::E1000(e);
+    },
+  }
+}
+
+/// Whether received frames raise the card's interrupt (when it has one).
+fn card_irq_set(d: &mut Card, on: bool)
+  requires card_ok(d)
+  ensures card_ok(d)
+{
+  match d {
+    Card::Virtio(mut v) => {
+      vnet_irq(&mut v, on);
+      d = Card::Virtio(v);
+    },
+    Card::E1000(mut e) => {
+      e1k_irq(&mut e, on);
+      d = Card::E1000(e);
+    },
+  }
+}
+
+/// Before a poll: lets an e1000 lower its interrupt line.
+fn card_ack(d: &mut Card)
+  requires card_ok(d)
+  ensures card_ok(d)
+{
+  match d {
+    Card::Virtio(v) => { d = Card::Virtio(v); },
+    Card::E1000(mut e) => {
+      e1k_ack(&mut e);
+      d = Card::E1000(e);
+    },
+  }
+}
+
 fn card_recv(d: &mut Card, pkt: &mut Bytes) -> u64
   requires card_ok(d) && blen(pkt) >= RX_BUF
   ensures card_ok(d) && blen(pkt) == old(blen(pkt)) && result <= RX_BUF - NET_HDR

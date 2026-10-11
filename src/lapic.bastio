@@ -7,14 +7,16 @@
 //   V_DISK  a disk command finished: the disk raises it by MSI or MSI-X,
 //           aimed at the bootstrap processor;
 //   V_WAKE  sent from one processor to the others, so the ones halted in
-//           cpu_idle look for work (a process the disk just woke).
-// Both are acknowledged in `lapic_eoi`, under the lock, on the processor
+//           cpu_idle look for work (a process the disk just woke);
+//   V_NET   the virtio network card received a frame (MSI-X).
+// All three are acknowledged in `lapic_eoi`, under the lock, on the processor
 // that took them, as the 8259's interrupts are.
 
 const LAPIC: u64 = 0xFEE00000;
 const LAPIC_LEN: u64 = 4096;
 const V_DISK: u64 = 0x31;
 const V_WAKE: u64 = 0x32;
+const V_NET: u64 = 0x33;
 
 // Register offsets.
 const LA_ID: u64 = 0x20;
@@ -36,16 +38,22 @@ spec fn lapic_ok(a: &Lapic) -> bool {
   mmio_base(a.regs) == LAPIC && mmio_len(a.regs) == LAPIC_LEN && a.id < 256
 }
 
-/// Takes the bootstrap processor's local APIC and turns it on, if it
-/// answers at LAPIC like an xAPIC (version 0x10-0x15); otherwise `on` is
-/// false and nothing is written. The 8259 stays the timer's and the
+/// Takes the bootstrap processor's local APIC and turns it on, if it is in
+/// xAPIC mode (`xapic`, from boot/smp.c, which puts it in x2APIC mode only
+/// when it must) and answers at LAPIC like an xAPIC (version 0x10-0x15);
+/// otherwise `on` is false and nothing is written. In x2APIC mode its
+/// registers are MSRs, which Bastio cannot reach yet: the kernel then does
+/// without MSI and wake-up interrupts. The 8259 stays the timer's and the
 /// keyboard's: LINT0 passes its interrupts through (ExtINT), as the
 /// firmware left it, and LINT1 is NMI.
-fn lapic_new(regs: Mmio) -> Lapic
+fn lapic_new(regs: Mmio, xapic: bool) -> Lapic
   requires mmio_base(regs) == LAPIC && mmio_len(regs) == LAPIC_LEN
   ensures lapic_ok(result)
 {
   let mut r = regs;
+  if !xapic {
+    return Lapic { regs: r, on: false, id: 0 };
+  }
   let ver = cast[u64](mmio_read32(&mut r, LA_VERSION)) % 256;
   if ver < 0x10 || ver > 0x15 {
     return Lapic { regs: r, on: false, id: 0 };
@@ -66,12 +74,12 @@ fn lapic_msi_addr(a: &Lapic) -> u64
   return LAPIC + a.id * 4096;
 }
 
-/// End of interrupt for V_DISK and V_WAKE, on this processor's APIC.
+/// End of interrupt for V_DISK, V_WAKE and V_NET, on this processor's APIC.
 fn lapic_eoi(a: &mut Lapic, v: u64)
   requires lapic_ok(a)
   ensures lapic_ok(a) && a.on == old(a.on) && a.id == old(a.id)
 {
-  if a.on && (v == V_DISK || v == V_WAKE) {
+  if a.on && (v == V_DISK || v == V_WAKE || v == V_NET) {
     mmio_write32(&mut a.regs, LA_EOI, 0);
   }
 }

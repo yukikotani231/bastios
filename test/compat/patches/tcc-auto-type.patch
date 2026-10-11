@@ -1,0 +1,94 @@
+diff --git a/tccgen.c b/tccgen.c
+index 1b63467..415580c 100644
+--- a/tccgen.c
++++ b/tccgen.c
+@@ -141,6 +141,9 @@ static int type_qualifiers(CType *type);
+ static void parse_btype_qualify(CType *type, int qualifiers);
+ static int is_compatible_types(CType *type1, CType *type2);
+ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label);
++/* set by parse_btype when it reads GNU __auto_type; decl() infers the type
++   from the initializer */
++static int auto_type_seen;
+ static CType *type_decl(CType *type, AttributeDef *ad, int *v, int td);
+ static void parse_expr_type(CType *type);
+ static void init_putv(init_params *p, CType *type, unsigned long c);
+@@ -4799,6 +4802,10 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
+         case TOK_INT:
+             u = VT_INT;
+             goto basic_type;
++        case TOK_AUTO_TYPE:
++            auto_type_seen = 1;
++            u = VT_INT;
++            goto basic_type;
+         case TOK_ALIGNAS:
+             { int n;
+               AttributeDef ad1;
+@@ -8794,7 +8801,7 @@ static void pe_check_linkage(CType *type, AttributeDef *ad)
+    or VT_JMP if parsing c99 for decl: for (int i = 0, ...) */
+ static int decl(int l)
+ {
+-    int v, has_init, r, oldint;
++    int v, has_init, r, oldint, is_auto;
+     CType type, btype;
+     Sym *sym, *sa;
+     AttributeDef ad, adbase;
+@@ -8803,6 +8810,7 @@ static int decl(int l)
+     while (1) {
+ 
+         oldint = 0;
++        auto_type_seen = 0;
+         if (!parse_btype(&btype, &adbase, l == VT_LOCAL)) {
+             if (l == VT_JMP)
+                 return 0;
+@@ -8848,6 +8856,7 @@ static int decl(int l)
+             continue;
+         }
+ 
++        is_auto = auto_type_seen;
+         while (1) { /* iterate thru each declaration */
+             type = btype;
+ 	    ad = adbase;
+@@ -9014,6 +9023,31 @@ static int decl(int l)
+                         else if (l == VT_CONST)
+                             /* uninitialized global variables may be overridden */
+                             type.t |= VT_EXTERN;
++                        if (has_init && is_auto) {
++                            /* __auto_type: parse the initializer once without
++                               code for its type, then again for real */
++                            TokenString *init;
++                            CType it;
++                            int storage = type.t & VT_STORAGE;
++                            skip_or_save_block(&init);
++                            unget_tok(0);
++                            begin_macro(init, 1);
++                            next();
++                            expr_type(&it, expr_eq);
++                            if (it.t & VT_ARRAY)
++                                it = it.ref->type, mk_pointer(&it);
++                            else if ((it.t & VT_BTYPE) == VT_FUNC)
++                                mk_pointer(&it);
++                            it.t &= ~(VT_STORAGE | VT_CONSTANT | VT_VOLATILE);
++                            type = it;
++                            type.t |= storage;
++                            r = VT_LVAL | (r & ~VT_LVAL);
++                            macro_ptr = init->str;
++                            next();
++                            decl_initializer_alloc(&type, &ad, r, has_init, v, l);
++                            end_macro();
++                            next();
++                        } else
+                         decl_initializer_alloc(&type, &ad, r, has_init, v, l);
+                     }
+ 
+diff --git a/tcctok.h b/tcctok.h
+index d8e7b44..d2db797 100644
+--- a/tcctok.h
++++ b/tcctok.h
+@@ -67,6 +67,7 @@
+      DEF(TOK_TYPEOF1, "typeof")
+      DEF(TOK_TYPEOF2, "__typeof")
+      DEF(TOK_TYPEOF3, "__typeof__")
++     DEF(TOK_AUTO_TYPE, "__auto_type")
+      DEF(TOK_LABEL, "__label__")
+ 
+ /*********************************************************************/

@@ -50,12 +50,15 @@ const SYS_RMDIR: u64 = 20;            // (_, name, name length) -> 0
 const SYS_READDIR: u64 = 21;          // (256 * entry + name length, buffer, length) -> length (+ DIR_BIT)
 const SYS_RENAME: u64 = 22;           // (old name length, buffer, length) -> 0: the buffer holds both names
 const SYS_FTRUNCATE: u64 = 23;        // (fd, length) -> 0: zeros past the old end
+const SYS_LINK: u64 = 24;             // (old name length, buffer, length) -> 0: a hard link, the buffer holding both names
+const SYS_REBOOT: u64 = 25;           // () -> does not return: the machine restarts
 const DIR_BIT: u64 = 4294967296;      // marks a directory in SYS_STAT and SYS_READDIR
 
 // What the scheduler does after a system call.
 const KEEP: u64 = 0;
 const SWITCH: u64 = 1;
 const POWEROFF: u64 = 2;
+const REBOOT: u64 = 3;
 
 // ---------------------------------------------------------------- user memory
 
@@ -325,6 +328,60 @@ fn disk_wake(k: &mut Kernel) -> bool
   return woke;
 }
 
+/// Process pid's Linux call n on a network socket has nothing to do yet:
+/// no data, no connection, or no room to send. It sleeps until a frame
+/// comes in or the clock ticks, then its call restarts (as lx_retry
+/// does). Before, it was restarted on every pass of the scheduler, so a
+/// process blocked in accept kept a processor busy.
+fn sock_retry(k: &mut Kernel, pid: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let r = lx_retry(&mut k, pid, n);
+  if r == SWITCH {
+    // A frame nic_listen finds changes the count, so the sock_wake after
+    // this call wakes it straight away.
+    pset(&mut k.procs, pid, F_STATE, SOCKWAIT);
+    pset(&mut k.procs, pid, F_WAIT, nic_rx(k.nic));
+    pset(&mut k.procs, pid, F_CODE, k.ticks);
+    nic_listen(&mut k.nic);
+  }
+  return r;
+}
+
+/// Wakes the processes in SOCKWAIT once a frame has come in or the clock
+/// has ticked since they went to sleep. True if it woke any. With none
+/// left asleep, the card stops interrupting (nic_quiet).
+fn sock_wake(k: &mut Kernel) -> bool
+  requires kok(k)
+  ensures kok(k)
+{
+  if !nic_moved(&mut k.nic, k.ticks) {
+    return false;
+  }
+  let rx = nic_rx(k.nic);
+  let mut woke = false;
+  let mut left = false;
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && kok(k)
+  {
+    if state(k.procs, p) == SOCKWAIT {
+      if pget(k.procs, p, F_WAIT) != rx || pget(k.procs, p, F_CODE) != k.ticks {
+        pset(&mut k.procs, p, F_STATE, READY);
+        woke = true;
+      } else {
+        left = true;
+      }
+    }
+    p = p + 1;
+  }
+  if !left {
+    nic_quiet(&mut k.nic);
+  }
+  return woke;
+}
+
 /// Is a disk command queued or running on a disk that raises no
 /// interrupt when it ends, so that it has to be polled?
 fn disk_polled(k: &Kernel) -> bool
@@ -486,6 +543,13 @@ fn file_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     }
     return NO_RESULT;
   }
+  if n == SYS_LINK {
+    if a <= c && c <= XFER && copy_from_user(&mut k.spaces, pid, b, &mut k.fs.xfer, c) == c
+      && vfs_link(&mut k.fs, a, c - a) == LINKED {
+      return 0;
+    }
+    return NO_RESULT;
+  }
   if n == SYS_FTRUNCATE {
     if a < NFD && vfs_truncate(&mut k.fs, &mut k.mem, pid * NFD + a, b) {
       return 0;
@@ -552,7 +616,7 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     return tcp_send(&mut k.nic, a, k.fs.xfer, got);
   }
   if n == SYS_TCP_RECV {
-    let got = tcp_recv(&mut k.nic, a, &mut k.fs.xfer, smaller(c, XFER));
+    let got = tcp_recv(&mut k.nic, a, &mut k.fs.xfer, smaller(c, XFER), false);
     if got == NO_SOCK || got == TCP_AGAIN {
       return got;
     }
@@ -614,7 +678,7 @@ fn do_wait(procs: &mut Buf, pid: u64, c: u64) -> u64
     return KEEP;
   }
   if state(procs, c) == ZOMBIE {
-    ret(&mut procs, pid, pget(procs, c, F_CODE));
+    ret(&mut procs, pid, shown_code(pget(procs, c, F_CODE)));
     pset(&mut procs, c, F_STATE, FREE);
     return KEEP;
   }
@@ -712,6 +776,9 @@ fn syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if n == SYS_POWEROFF {
     return POWEROFF;
+  }
+  if n == SYS_REBOOT {
+    return REBOOT;
   }
   if n == SYS_PING {
     // The reply is collected by net_wake; the process waits off the lock.

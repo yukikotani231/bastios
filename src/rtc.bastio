@@ -1,6 +1,6 @@
 // The CMOS real-time clock (the MC146818 behind ports 0x70 and 0x71), read
 // once at boot to give CLOCK_REALTIME its starting point. After that the
-// HPET keeps time; the RTC is not read again, and it is never written.
+// clock (src/tsc.bastio) keeps time; the RTC is not read again, and it is never written.
 
 const RTC: u64 = 0x70;
 
