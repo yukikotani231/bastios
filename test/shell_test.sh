@@ -1725,6 +1725,9 @@ ok, code = report_boot(["-machine", "pc", "-m", "64M"], "no report", 0)
 good = ok and b"hardware report" not in out
 print(("ok  " if good else "FAIL"), "(hardware report) only with diag")
 fails += not good
+good = ok and b"disk: none found" in out and b"net: none" in out
+print(("ok  " if good else "FAIL"), "(hardware report) a boot without a disk or network card says so, even without diag")
+fails += not good
 
 # Sound (src/hda.bastio, src/lxsnd.bastio): an HD Audio controller with
 # QEMU's output codec, whose sound QEMU writes to a WAV file. mtone plays
