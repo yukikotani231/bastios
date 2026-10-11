@@ -220,6 +220,9 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
   if !src.file && src.prog >= NPROGS {
     return k.perr;
   }
+  if src.file && file_writing(k, src.f) {
+    return ETXTBSY;                         // open for writing somewhere
+  }
   let mut args = balloc(ARGS_MAX);
   let mut alen = lx_args(&mut k, pid, argv, &mut args, 0, ARGV_MAX);
   if alen > ARGS_MAX {
@@ -375,6 +378,44 @@ fn fd_src(k: &mut Kernel, pid: u64, fd: u64) -> Src
     return none;
   }
   return Src { file: true, prog: NPROGS, f: f, size: size };
+}
+
+/// Whether file f is open for writing (by any open file description,
+/// which includes a writable MAP_SHARED mapping's): execve of it is then
+/// ETXTBSY, as on Linux.
+fn file_writing(k: &Kernel, f: u64) -> bool
+  requires kok(k)
+{
+  let mut row = 0;
+  while row < FD_ROWS
+    invariant row <= FD_ROWS && kok(k)
+  {
+    if fget(k.fs.ftab, row, FD_MODE) / O_WRITE % 2 == 1 && row_file(k.fs, row) == f {
+      return true;
+    }
+    row = row + 1;
+  }
+  return false;
+}
+
+/// Whether a live process runs the program in file f: opening it for
+/// writing or truncating it is then ETXTBSY, as on Linux.
+fn file_running(k: &Kernel, f: u64) -> bool
+  requires kok(k)
+{
+  if f >= NO_FILE - NPROGS - 1 {
+    return false;
+  }
+  let mut p = 1;
+  while p < NPROC
+    invariant p <= NPROC && kok(k)
+  {
+    if state(k.procs, p) != FREE && state(k.procs, p) != ZOMBIE && pget(k.procs, p, F_PROG) == NPROGS + 1 + f {
+      return true;
+    }
+    p = p + 1;
+  }
+  return false;
 }
 
 /// The program process p is running, for an exec of /proc/PID/exe (as
