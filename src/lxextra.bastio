@@ -1,0 +1,265 @@
+// Linux calls that newer kernels added beside older ones, and small
+// leftovers: preadv2 and pwritev2, fchmodat2, sysfs, ustat, readahead,
+// sync_file_range, vhangup and mlock2. (getdents is src/lxdir.bastio's,
+// execveat src/lxproc.bastio's.)
+//
+// Not done: preadv2 and pwritev2 take RWF_HIPRI, RWF_DSYNC and RWF_SYNC as
+// they come (writes go straight through, as fsync says), and RWF_NOWAIT
+// only for reads at an offset, which return -EAGAIN instead of waiting for
+// the disk; RWF_APPEND, RWF_NOAPPEND, RWF_ATOMIC and RWF_DONTCACHE are
+// -EOPNOTSUPP. readahead and sync_file_range check their arguments and do
+// nothing more: there is no read-ahead, and writes are not cached. mlock2
+// is mlock, which keeps nothing locked (pages are never swapped out).
+// ustat knows one device, 0, the one stat reports for every file.
+
+import "lxmore.bastio";
+
+const LX_USTAT: u64 = 136;
+const LX_SYSFS: u64 = 139;
+const LX_VHANGUP: u64 = 153;
+const LX_READAHEAD: u64 = 187;
+const LX_SYNC_FILE_RANGE: u64 = 277;
+const LX_MLOCK2: u64 = 325;
+const LX_PREADV2: u64 = 327;
+const LX_PWRITEV2: u64 = 328;
+const LX_FCHMODAT2: u64 = 452;
+
+const RWF_HIPRI: u64 = 1;
+const RWF_DSYNC: u64 = 2;
+const RWF_SYNC: u64 = 4;
+const RWF_NOWAIT: u64 = 8;
+const RWF_TAKEN: u64 = 15;                 // the flags above
+const MLOCK_ONFAULT: u64 = 1;
+const SFR_FLAGS: u64 = 7;                  // SYNC_FILE_RANGE_WAIT_BEFORE | _WRITE | _WAIT_AFTER
+const USTAT_SIZE: u64 = 32;                // struct ustat on x86_64
+const FSNAME_MAX: u64 = 32;                // longer than any name sysfs knows
+const XATTR_FIRST: u64 = 188;              // setxattr .. fremovexattr (src/lxxattr.bastio):
+const XATTR_LAST: u64 = 199;               // path, l-path, fd for each
+
+/// The file system types mount knows, in /proc/filesystems's order (sysfs
+/// numbers them so too). Only the last, the disk's, needs a device.
+const FS_TYPES: u64 = 4;
+
+fn fs_type_name(t: u64) -> Str {
+  if t == 0 {
+    return "ramfs";
+  }
+  if t == 1 {
+    return "proc";
+  }
+  if t == 2 {
+    return "tmpfs";
+  }
+  return "bstdisk3";
+}
+
+fn is_extra_call(n: u64) -> bool {
+  return n == LX_USTAT || n == LX_SYSFS || n == LX_VHANGUP || n == LX_READAHEAD || n == LX_SYNC_FILE_RANGE
+    || n == LX_MLOCK2 || n == LX_PREADV2 || n == LX_PWRITEV2 || n == LX_FCHMODAT2;
+}
+
+/// The call process pid's registers ask for, as the dispatcher should see
+/// it: preadv2 and pwritev2 at offset -1 (the file's own) with flags it
+/// takes are readv and writev, whose arguments are the first three.
+fn lx_alias(k: &Kernel, pid: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  if n == LX_PREADV2 || n == LX_PWRITEV2 {
+    let flags = pget(k.procs, pid, F_REGS + R_R9);
+    if pget(k.procs, pid, F_REGS + R_R10) == 0xFFFFFFFFFFFFFFFF && flags & !RWF_TAKEN == 0 {
+      if n == LX_PREADV2 {
+        return LX_READV;
+      }
+      return LX_WRITEV;
+    }
+  }
+  return n;
+}
+
+/// Whether descriptor fd of process pid is an O_PATH handle on a file:
+/// open for neither reading nor writing, which no other open makes.
+fn is_opath(k: &Kernel, pid: u64, fd: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let d = fd_look(k, pid, fd);
+  return d.kind == K_FILE && fget(k.fs.ftab, d.x, FD_MODE) % 4 == 0;
+}
+
+/// Whether call n of process pid acts on an O_PATH handle's file (its
+/// mode, owner, data, mapping, extended attributes or terminal), which
+/// Linux refuses with -EBADF: such a handle only names the file. Reads and
+/// writes find no access to use and fail on their own.
+fn opath_denied(k: &Kernel, pid: u64, n: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let a = pget(k.procs, pid, F_REGS + R_RDI);
+  if n == LX_MMAP {
+    return pget(k.procs, pid, F_REGS + R_R10) & MAP_ANONYMOUS == 0 && is_opath(k, pid, pget(k.procs, pid, F_REGS + R_R8));
+  }
+  let on_a = n == LX_FCHMOD || n == LX_FCHOWN || n == LX_IOCTL || n == LX_FTRUNCATE || n == LX_FSYNC
+    || n == LX_FDATASYNC || n == LX_FALLOCATE || n == LX_FADVISE64 || n == LX_READAHEAD || n == LX_FLOCK
+    || n == LX_SYNC_FILE_RANGE || (n >= XATTR_FIRST && n <= XATTR_LAST && (n - XATTR_FIRST) % 3 == 2);
+  return on_a && is_opath(k, pid, a);
+}
+
+/// System call n of the ones is_extra_call names.
+fn lx_extra_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  let r10 = pget(k.procs, pid, F_REGS + R_R10);
+  let mut r = 0;
+  if n == LX_PREADV2 || n == LX_PWRITEV2 {
+    let flags = pget(k.procs, pid, F_REGS + R_R9);
+    if flags & !RWF_TAKEN != 0 {
+      r = EOPNOTSUPP;
+    } else {
+      // Offset -1 went to readv and writev (lx_alias).
+      r = lx_piov(&mut con, &mut k, pid, n == LX_PWRITEV2, a, b, c, r10);
+      if r == DISK_RETRY && n == LX_PREADV2 && flags & RWF_NOWAIT != 0 {
+        r = EAGAIN;                         // not cached: say so rather than wait
+      }
+    }
+  } else if n == LX_FCHMODAT2 {
+    r = lx_fchmodat2(&mut k, pid, a, b, c, r10);
+  } else if n == LX_SYSFS {
+    r = lx_sysfs(&mut k, pid, a, b, c);
+  } else if n == LX_USTAT {
+    r = lx_ustat(&mut k, pid, a, b);
+  } else if n == LX_READAHEAD {
+    let d = fd_look(k, pid, a);
+    if d.kind == K_BAD || (d.kind == K_FILE && fget(k.fs.ftab, d.x, FD_MODE) / O_READ % 2 == 0) {
+      r = EBADF;
+    } else if d.kind != K_FILE {
+      r = EINVAL;                           // nothing to read ahead from
+    }
+  } else if n == LX_SYNC_FILE_RANGE {
+    let d = fd_look(k, pid, a);
+    if b >= 0x8000000000000000 || c >= 0x8000000000000000 || b > 0x7FFFFFFFFFFFFFFF - c || r10 & !SFR_FLAGS != 0 {
+      r = EINVAL;
+    } else if d.kind == K_BAD {
+      r = EBADF;
+    } else if d.kind != K_FILE && d.kind != K_DIR && !(d.kind == K_DEV && is_loop(d.x)) {
+      r = ESPIPE;                           // a pipe, socket or character device
+    }
+  } else if n == LX_VHANGUP {
+    if !cred_root(k.procs, pid) {
+      r = EPERM;                            // CAP_SYS_TTY_CONFIG on Linux
+    }
+  } else if n == LX_MLOCK2 {
+    if c & !MLOCK_ONFAULT != 0 {
+      r = EINVAL;
+    }
+  }
+  if r == DISK_RETRY {
+    return disk_retry(&mut k, pid, n);
+  }
+  if r == EAGAIN && n == LX_PWRITEV2 {
+    return lx_retry(&mut k, pid, n);         // a full pipe: wait for room
+  }
+  if r == CON_FULL {
+    return con_block(&mut k, pid, n);
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}
+
+/// fchmodat2(dirfd, path, mode, flags): fchmodat with flags. A symbolic
+/// link's own mode cannot change (-EOPNOTSUPP), as on Linux; AT_EMPTY_PATH
+/// with "" changes dirfd's file (not the working directory's for
+/// AT_FDCWD: that is -EBADF here).
+fn lx_fchmodat2(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+    return EINVAL;
+  }
+  if flags & AT_EMPTY_PATH != 0 && user_empty(&mut k, pid, path) {
+    return fd_set_meta(&mut k, pid, dirfd, mode % 4096, NO_FILE);
+  }
+  let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
+  if !follow {
+    let n = lx_path_at_nf(&mut k, pid, dirfd, path);
+    if n != NO_RESULT {
+      let lf = vfs_lookup(&mut k.fs, n);
+      if lf != NO_FILE && vfs_is_link(&mut k.fs, lf) {
+        return EOPNOTSUPP;
+      }
+    }
+  }
+  let f = meta_target_at(&mut k, pid, dirfd, path, follow);
+  return set_meta(&mut k, pid, f, mode % 4096, NO_FILE, false);
+}
+
+/// sysfs(option, ...): 1 turns a file system type's name into its index
+/// in /proc/filesystems, 2 the other way (into a buffer), 3 counts them.
+fn lx_sysfs(k: &mut Kernel, pid: u64, option: u64, a: u64, buf: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if option == 3 {
+    return FS_TYPES;
+  }
+  if option == 2 {
+    if a >= FS_TYPES {
+      return EINVAL;
+    }
+    let name = fs_type_name(a);
+    let m = smaller(slen(name), FSNAME_MAX);
+    lx_fill(&mut k, 0, m + 1);
+    let mut i = 0;
+    while i < m
+      invariant i <= m && m <= FSNAME_MAX && kok(k)
+    {
+      bset(&mut k.fs.xfer, i, sget(name, i));
+      i = i + 1;
+    }
+    return lx_put_out(&mut k, pid, buf, m + 1);
+  }
+  if option != 1 {
+    return EINVAL;
+  }
+  let got = copy_from_user(&mut k.spaces, pid, a, &mut k.fs.xfer, FSNAME_MAX);
+  if got == NO_RESULT || got == 0 {
+    return EFAULT;
+  }
+  let mut e = 0;
+  while e < got && bget(k.fs.xfer, e) != 0
+    invariant e <= got && got <= FSNAME_MAX && kok(k)
+  {
+    e = e + 1;
+  }
+  if e == got {
+    if got < FSNAME_MAX {
+      return EFAULT;                        // the name runs into unmapped memory
+    }
+    return EINVAL;
+  }
+  let mut t = 0;
+  while t < FS_TYPES
+    invariant t <= FS_TYPES && e < got && got <= FSNAME_MAX && kok(k)
+  {
+    if xfer_is(k.fs.xfer, 0, e, fs_type_name(t)) {
+      return t;
+    }
+    t = t + 1;
+  }
+  return EINVAL;
+}
+
+/// ustat(dev, buf): free blocks and inodes of the file system on device
+/// dev, as statfs counts them for "/".
+fn lx_ustat(k: &mut Kernel, pid: u64, dev: u64, buf: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if dev % 0x100000000 != 0 {
+    return EINVAL;                          // no mounted file system has that device
+  }
+  let nfree = smaller(count_free(k.mem.bm), 0x7FFFFFFF);
+  lx_fill(&mut k, 0, USTAT_SIZE);
+  xfer_u64(&mut k.fs.xfer, 0, nfree);       // f_tfree (an int)
+  xfer_u64(&mut k.fs.xfer, 8, NFILES);      // f_tinode
+  return lx_put_out(&mut k, pid, buf, USTAT_SIZE);
+}

@@ -738,8 +738,8 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     return a;
   }
   if what == PF_MEMINFO {
-    let total = NPAGES * 4;
-    let avail = smaller(count_free(k.mem.bm), NPAGES) * 4;
+    let total = pool_size(k.mem.pool) * 4;   // the RAM the pool holds
+    let avail = count_free(k.mem.bm) * 4;
     let mut a = put_s(&mut o, 0, "MemTotal: ");
     a = put_n(&mut o, a, total);
     a = put_s(&mut o, a, " kB\nMemFree: ");
@@ -762,7 +762,20 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     return a;
   }
   if what == PF_FILESYSTEMS && p == 0 {
-    return put_s(&mut o, 0, "nodev\tramfs\nnodev\tproc\nnodev\ttmpfs\n\tbstdisk3\n");
+    let mut a = 0;
+    let mut t = 0;
+    while t < FS_TYPES
+      invariant a <= PROC_OUT && blen(o) == PROC_OUT
+    {
+      if t + 1 < FS_TYPES {
+        a = put_s(&mut o, a, "nodev");      // all but the disk's need no device
+      }
+      a = put_c(&mut o, a, 9);
+      a = put_s(&mut o, a, fs_type_name(t));
+      a = put_c(&mut o, a, 10);
+      t = t + 1;
+    }
+    return a;
   }
   if what == PF_CMDLINE && p == 0 {
     return put_s(&mut o, 0, "BOOT_IMAGE=/boot/bastios.elf\n");

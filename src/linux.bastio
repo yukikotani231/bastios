@@ -110,6 +110,8 @@ const CLONE_THREAD: u64 = 0x10000;
 const LX_FORK: u64 = 57;
 const LX_VFORK: u64 = 58;
 const LX_EXECVE: u64 = 59;
+const LX_GETDENTS: u64 = 78;
+const LX_EXECVEAT: u64 = 322;
 const LX_WAIT4: u64 = 61;
 const LX_GETTID: u64 = 186;
 const LX_FUTEX: u64 = 202;
@@ -214,7 +216,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k) && con_ok(con)
 {
-  let n = pget(k.procs, pid, F_REGS + R_RAX);
+  let n = lx_alias(k, pid, pget(k.procs, pid, F_REGS + R_RAX));   // src/lxextra.bastio
   let sp = pget(k.procs, pid, F_REGS + R_RSP);
   if sp >= USER_BASE + 128 {
     stack_reach(&mut k.mem, &mut k.spaces, pid, sp - 128);   // the red zone too
@@ -224,6 +226,10 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   let a = pget(k.procs, pid, F_REGS + R_RDI);
   let b = pget(k.procs, pid, F_REGS + R_RSI);
   let c = pget(k.procs, pid, F_REGS + R_RDX);
+  if opath_denied(k, pid, n) {
+    ret(&mut k.procs, pid, EBADF);          // an O_PATH handle (src/lxextra.bastio)
+    return KEEP;
+  }
   if n == LX_EXIT && thread_only(k.procs, pid) {
     lx_thread_exit(&mut k, mmu, pid);
     return SWITCH;
@@ -414,6 +420,12 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_ptimer_call(n) {
     return lx_ptimer_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
   }
+  if is_pidfd_call(n) {
+    return lx_pidfd_call(&mut k, pid, n, a, b, c);   // src/lxpidfd.bastio
+  }
+  if is_extra_call(n) {
+    return lx_extra_call(&mut con, &mut k, pid, n, a, b, c);   // src/lxextra.bastio
+  }
   if is_event_call(n) {
     return lx_event_call(&mut k, pid, n, was, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
   }
@@ -501,8 +513,8 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, lx_fstat(&mut k, pid, a, b));
     return KEEP;
   }
-  if n == LX_GETDENTS64 {
-    ret(&mut k.procs, pid, lx_getdents(&mut k, pid, a, b, c));
+  if n == LX_GETDENTS64 || n == LX_GETDENTS {
+    ret(&mut k.procs, pid, lx_getdents(&mut k, pid, a, b, c, n == LX_GETDENTS));
     return KEEP;
   }
   if n == LX_FACCESSAT || n == LX_FACCESSAT2 {
@@ -541,16 +553,29 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, lx_fork(&mut k, mmu, pid));
     return KEEP;
   }
-  if n == LX_EXECVE {
+  if n == LX_EXECVE || n == LX_EXECVEAT {
     let te = thread_exec(&mut k, mmu, pid);
     if te == EXEC_NO {
       ret(&mut k.procs, pid, EINVAL);       // from a thread other than the leader
       return KEEP;
     }
     if te == EXEC_WAIT {
-      return lx_retry(&mut k, pid, LX_EXECVE);   // its other threads are still ending
+      return lx_retry(&mut k, pid, n);      // its other threads are still ending
     }
-    ret(&mut k.procs, pid, lx_execve(&mut k, mmu, pid, a, b, c));
+    let mut at = AT_FDCWD;
+    let mut path = a;
+    let mut argv = b;
+    let mut envp = c;
+    let mut flags = 0;
+    if n == LX_EXECVEAT {
+      at = a;
+      path = b;
+      argv = c;
+      envp = pget(k.procs, pid, F_REGS + R_R10);
+      flags = pget(k.procs, pid, F_REGS + R_R8);
+    }
+    let r = lx_execve(&mut k, mmu, pid, at, path, argv, envp, flags);
+    ret(&mut k.procs, pid, r);
     return KEEP;
   }
   if n == LX_WAITID {
@@ -1748,6 +1773,9 @@ fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
   }
   if d.kind == K_DEV {
     return 0;                               // other devices have no position
+  }
+  if d.kind == K_DIR {
+    return dir_seek(&mut k, pid, fd, off, whence);   // src/lxdir.bastio
   }
   if d.kind != K_FILE {
     return ESPIPE;

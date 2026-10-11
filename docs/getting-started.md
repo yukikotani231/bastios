@@ -163,16 +163,16 @@ bastios> halt
 
 ## 5. Boot from a USB stick
 
-`make iso` builds `build/bastios.iso`: GRUB with the same kernel, as a hybrid image that boots from CD or USB, under BIOS or UEFI. It needs GRUB's BIOS and UEFI files, `xorriso` and `mtools`:
+`make iso` builds `build/bastios.iso`: the [Limine](https://github.com/limine-bootloader/limine) boot loader with the same kernel, as a hybrid image that boots from CD or USB, under BIOS or UEFI. It needs `xorriso` (and `ovmf` for UEFI in QEMU); the first build clones Limine's binary release at a pinned tag and builds its installer:
 
 ```text
-sudo apt-get install grub-pc-bin grub-efi-amd64-bin xorriso mtools ovmf
+sudo apt-get install xorriso ovmf
 make iso
 make run-iso     # in QEMU under BIOS
 make run-uefi    # in QEMU under UEFI (OVMF)
 ```
 
-Both open a QEMU window, where the kernel draws its console on the framebuffer GRUB sets up and reads the keyboard; the serial console stays on your terminal. `make test` boots the image both ways (`test/iso_test.sh`, skipped when the tools are missing).
+Both open a QEMU window, where the kernel draws its console on the framebuffer Limine sets up and reads the keyboard; the serial console stays on your terminal. `make test` boots the image both ways (`test/iso_test.sh`, skipped when the tools are missing).
 
 To write it to a USB stick, find the stick's device name (`lsblk`), then:
 
@@ -189,8 +189,8 @@ make usb
 sudo dd if=build/bastios-usb.img of=/dev/sdX bs=4M conv=fsync
 ```
 
-BastiOS has been run only in QEMU so far. To try it on a real machine and tell us what worked, see [real-hardware.md](real-hardware.md): its GRUB menu has an entry that prints a hardware report. On a real PC:
-- **Console.** The first serial port (COM1, 115200 baud), and the screen if GRUB can give it a 32-bit linear framebuffer between 2 GiB and the I/O APIC, which is where PC firmware puts it. Keys come from a PS/2 keyboard, or a USB keyboard on an xHCI (USB 3) controller, on a root port or behind up to two USB 2 hubs (a SuperSpeed device behind a USB 3 hub is not found).
+BastiOS has been run only in QEMU so far. To try it on a real machine and tell us what worked, see [real-hardware.md](real-hardware.md): its boot menu has an entry that prints a hardware report. On a real PC:
+- **Console.** The first serial port (COM1, 115200 baud), and the screen if Limine can give it a 32-bit linear framebuffer between 2 GiB and the I/O APIC, which is where PC firmware puts it. Keys come from a PS/2 keyboard, or a USB keyboard on an xHCI (USB 3) controller, on a root port or behind up to two USB 2 hubs (a SuperSpeed device behind a USB 3 hub is not found).
 - **Processor.** It needs 1 GiB pages, which every x86-64 CPU of the last decade has. Other processors are found in the ACPI tables, wherever below 4 GiB the firmware put them (above 4 GiB too, with 1 GiB pages). Local APICs in x2APIC mode work too (processors with ids of 255 and up included), though without MSI.
 - **Power.** `halt` powers off and `reboot` restarts through ACPI (S5, and the FADT's reset register, a port or a memory register, else the keyboard controller or 0xCF9), and the power button powers off. The clock is the HPET, or the ACPI PM timer without one.
 - **Disk.** The BastiOS partition of a USB stick or disk on an xHCI controller, as for the keyboard (`make usb`; bulk-only transport, 512-byte sectors), else an NVMe drive (namespace 1, 512-byte or 4 KiB sectors), a virtio disk, a SATA disk on an AHCI controller (the first port with a disk, 512-byte sectors), or a legacy ATA disk. A blank disk is formatted on the first boot; a disk with a partition table or other data on it (the first and last 34 sectors not all zeros) is left alone, and the boot log says so.

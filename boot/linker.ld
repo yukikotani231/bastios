@@ -1,7 +1,7 @@
 ENTRY(_start)
 SECTIONS
 {
-    . = 1M;
+    . = 16M;               /* above the holes UEFI firmware leaves low in RAM */
     .text : {
         KEEP(*(.multiboot))
         *(.text .text.*)
