@@ -31,6 +31,8 @@ const SOCK_STREAM: u64 = 1;
 const SOCK_DGRAM: u64 = 2;
 const SOCK_SEQPACKET: u64 = 5;
 const IPPROTO_UDP: u64 = 17;
+const SOCK_RAW: u64 = 3;
+const IPPROTO_ICMP: u64 = 1;
 const SOCK_NONBLOCK: u64 = 0x800;
 const SOCK_CLOEXEC: u64 = 0x80000;
 const MSG_DONTWAIT: u64 = 0x40;
@@ -45,6 +47,7 @@ const SO_RCVBUF: u64 = 8;
 const SIN_LEN: u64 = 16;               // struct sockaddr_in
 const SIN6_LEN: u64 = 28;              // struct sockaddr_in6
 const AF_INET6: u64 = 10;
+const AF_NETLINK: u64 = 16;
 const EADDRNOTAVAIL: u64 = 18446744073709551517;   // 2^64 - 99
 
 const ENOTSOCK: u64 = 18446744073709551528;        // 2^64 - 88
@@ -220,6 +223,9 @@ fn lx_socket(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64) -> u6
   if domain == 1 {
     return ux_socket(&mut k, pid, kind, proto);   // AF_UNIX: src/lxunix.bastio
   }
+  if domain == AF_NETLINK {
+    return nl_socket(&mut k, pid, kind, proto);   // src/lxnetlink.bastio
+  }
   // AF_INET6 is AF_INET underneath: its addresses are the IPv6 forms of
   // IPv4 ones (sin_in), and names come back as struct sockaddr_in6.
   if domain != AF_INET && domain != AF_INET6 {
@@ -243,12 +249,22 @@ fn lx_inet_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   if kind % 16 == SOCK_STREAM {
     return lx_tcp_socket(&mut k, pid, kind, proto);   // src/lxtcp.bastio
   }
-  if kind % 16 != SOCK_DGRAM || (proto != 0 && proto != IPPROTO_UDP) {
+  let raw = kind % 16 == SOCK_RAW;
+  if raw && proto != IPPROTO_ICMP {
+    return EPROTONOSUPPORT;                 // raw sockets: ICMP only (ping)
+  }
+  if raw && !cap_has(k, pid, CAP_NET_RAW) {
+    return EPERM;
+  }
+  if !raw && (kind % 16 != SOCK_DGRAM || (proto != 0 && proto != IPPROTO_UDP)) {
     return EPROTONOSUPPORT;
   }
-  let s = sock_new(&mut k.nic);
+  let s = sock_new(&mut k.nic, net_ns(k, pid));
   if s >= SOCKS {
     return ENOBUFS;                         // every socket taken, or no network card
+  }
+  if raw {
+    sock_make_raw(&mut k.nic, s);
   }
   let h = ofd_new(&mut k, OF_SOCK, s);
   if h >= OFD_N {
@@ -285,6 +301,9 @@ fn lx_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if is_unix(k, pid, fd) {
     return ux_bind(&mut k, pid, fd, addr, alen);
   }
+  if is_nl(k, pid, fd) {
+    return nl_bind(&mut k, pid, fd, addr, alen);
+  }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
     return sk.err;
@@ -292,6 +311,9 @@ fn lx_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   let sin = sin_in(&mut k, pid, addr, alen);
   if sin.err != 0 {
     return sin.err;
+  }
+  if sock_is_raw(k.nic, sk.s) {
+    return 0;                               // a raw socket has no port; any address will do
   }
   if sock_port(k.nic, sk.s) != 0 {
     return EINVAL;                          // already bound
@@ -321,6 +343,9 @@ fn lx_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if is_unix(k, pid, fd) {
     return ux_connect(&mut k, pid, fd, addr, alen);
   }
+  if is_nl(k, pid, fd) {
+    return nl_bind(&mut k, pid, fd, addr, alen);
+  }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
     return sk.err;
@@ -348,19 +373,20 @@ fn lx_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
 fn bind_check(k: &Kernel, pid: u64, ip: u64, port: u64) -> u64
   requires kok(k) && pid < NPROC
 {
-  if ip != 0 && !addr_local(k.nic, ip) {
+  if ip != 0 && !addr_local(k.nic, net_ns(k, pid), ip) {
     return EADDRNOTAVAIL;
   }
   return 0;
 }
 
-/// Is ip one of this machine's addresses (loopback, or the card's)?
-fn addr_local(c: &Nic, ip: u64) -> bool
+/// Is ip one of network namespace ns's addresses (loopback, or an
+/// interface's)?
+fn addr_local(c: &Nic, ns: u64, ip: u64) -> bool
   requires nic_ok(c)
 {
   match c {
     Nic::None => { return ip / 16777216 == LO_NET; },
-    Nic::Up(n) => { return is_local(n, ip); },
+    Nic::Up(n) => { return is_local_in(n, ns, ip); },
   }
 }
 
@@ -400,9 +426,25 @@ fn lx_sendto(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, addr: u64, ale
   if is_unix(k, pid, fd) {
     return ux_send(&mut k, pid, fd, buf, n, false, addr, alen);
   }
+  let q = nl_of(k, pid, fd);
+  if q < NLS {
+    return nl_send(&mut k, pid, q, buf, n);
+  }
   let d = udp_dest(&mut k, pid, fd, addr, alen);
   if d.err != 0 {
     return d.err;
+  }
+  if sock_is_raw(k.nic, d.s) {
+    if n > UDP_MAX + 8 {
+      return EMSGSIZE;
+    }
+    if copy_from_user(&mut k.spaces, pid, buf, &mut k.fs.xfer, n) != n {
+      return EFAULT;
+    }
+    if sock_raw_send(&mut k.nic, d.s, d.ip, k.fs.xfer, n) == NO_SOCK {
+      return ENETUNREACH;
+    }
+    return n;
   }
   if n > UDP_MAX - sock_corked(k.nic, d.s) {
     return EMSGSIZE;
@@ -473,6 +515,10 @@ fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, 
   }
   if is_unix(k, pid, fd) {
     return ux_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1, addr, alenp);
+  }
+  let q = nl_of(k, pid, fd);
+  if q < NLS {
+    return nl_recv(&mut k, pid, fd, q, buf, n, flags, addr, alenp);
   }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
@@ -546,6 +592,10 @@ fn sockname_of(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
   if is_unix(k, pid, fd) {
     return ux_name(&mut k, pid, fd, addr, lenp, peer);
   }
+  let q = nl_of(k, pid, fd);
+  if q < NLS {
+    return nl_name(&mut k, pid, q, addr, lenp, peer);
+  }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
     return sk.err;
@@ -574,7 +624,7 @@ fn lx_setsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
   ensures kok(k)
 {
   let tcp = is_tcp(k, pid, fd);
-  let unix = is_unix(k, pid, fd);
+  let unix = is_unix(k, pid, fd) || is_nl(k, pid, fd);
   if !tcp && !unix {
     let sk = sk_look(k, pid, fd);
     if sk.err != 0 {
@@ -609,7 +659,7 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
   ensures kok(k)
 {
   let tcp = is_tcp(k, pid, fd) || is_unix(k, pid, fd);
-  if !tcp {
+  if !tcp && !is_nl(k, pid, fd) {
     let sk = sk_look(k, pid, fd);
     if sk.err != 0 {
       return sk.err;
@@ -694,7 +744,7 @@ fn sock_call_rest(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, d: u
     let sk = sk_look(k, pid, a);
     if is_unix(k, pid, a) {
       r = ux_accept(&mut k, pid, a, b, c, fl);
-    } else if sk.err == 0 {
+    } else if sk.err == 0 || is_nl(k, pid, a) {
       r = EOPNOTSUPP;                       // a UDP socket takes no connections
     } else {
       r = lx_accept(&mut k, pid, a, b, c, fl);
@@ -709,7 +759,7 @@ fn sock_call_rest(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, d: u
     // Accepted and ignored: shutdown of a datagram socket.
     let sk = sk_look(k, pid, a);
     r = sk.err;
-    if is_tcp(k, pid, a) || is_unix(k, pid, a) {
+    if is_tcp(k, pid, a) || is_unix(k, pid, a) || is_nl(k, pid, a) {
       r = 0;
     }
   }
@@ -742,7 +792,7 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     r = lx_sockname(&mut k, pid, a, b, c, n == LX_GETPEERNAME);
   } else if n == LX_LISTEN && is_unix(k, pid, a) {
     r = ux_listen(&mut k, pid, a);
-  } else if n == LX_LISTEN && dgram.err == 0 {
+  } else if n == LX_LISTEN && (dgram.err == 0 || is_nl(k, pid, a)) {
     r = EOPNOTSUPP;                         // a datagram socket cannot listen
   } else if n == LX_LISTEN {
     r = lx_listen(&mut k, pid, a);
@@ -762,7 +812,7 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     r = sock_call_rest(&mut k, pid, n, a, b, c, d, e);
   }
   assert kok(k);                            // a hint for the solver
-  if r == SK_WAIT && !is_unix(k, pid, a) {
+  if r == SK_WAIT && !is_unix(k, pid, a) && !is_nl(k, pid, a) {
     return sock_retry(&mut k, pid, n);       // nothing yet: sleep until a frame comes in
   }
   if r == SK_WAIT {

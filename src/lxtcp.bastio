@@ -106,7 +106,7 @@ fn lx_tcp_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   }
   let mut port = sin.port;
   if port == 0 {
-    port = tcp_pick_port(&mut k.nic);
+    port = tcp_pick_port(&mut k.nic, net_ns(k, pid));
     if port == 0 {
       return EADDRINUSE;
     }
@@ -116,13 +116,16 @@ fn lx_tcp_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
 }
 
 /// An ephemeral TCP port no connection or listener uses, or 0.
-fn tcp_pick_port(c: &mut Nic) -> u64
+fn tcp_pick_port(c: &mut Nic, ns: u64) -> u64
   requires nic_ok(c)
   ensures nic_ok(c) && result <= 65535
 {
   match c {
     Nic::None => { c = Nic::None; return 0; },
     Nic::Up(mut n) => {
+      if ns < NNET {
+        n.ns = ns;
+      }
       let p = tcp_eph_port(&mut n);
       c = Nic::Up(n);
       return p;
@@ -145,7 +148,7 @@ fn lx_listen(k: &mut Kernel, pid: u64, fd: u64) -> u64
   if tk.mode != TM_NEW {
     return EINVAL;
   }
-  let t = tcp_listen(&mut k.nic, tk.port);    // port 0: an ephemeral one
+  let t = tcp_listen(&mut k.nic, net_ns(k, pid), tk.port);    // port 0: an ephemeral one
   if t >= TCBS {
     return EADDRINUSE;
   }
@@ -232,7 +235,7 @@ fn lx_tcp_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u6
     if sin.err != 0 {
       return sin.err;
     }
-    t = tcp_connect(&mut k.nic, sin.ip, sin.port);
+    t = tcp_connect(&mut k.nic, net_ns(k, pid), sin.ip, sin.port);
     if t >= TCBS {
       return ENETUNREACH;
     }

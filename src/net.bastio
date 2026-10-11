@@ -92,11 +92,68 @@ const S_PEER_PORT: u64 = 5;
 const S_SLOTS: u64 = 6;               // then per slot: length, address, port
 const SLOT_W: u64 = 3;
 const S_CORK: u64 = 18;               // bytes held back by MSG_MORE, in cork
-const SOCK_FIELDS: u64 = 19;          // S_SLOTS + RXQ * SLOT_W + 1
+const S_NS: u64 = 19;                 // its network namespace (src/netns.bastio)
+const RAW_ICMP: u64 = 65537;           // S_PORT of a raw ICMP socket (no port number is)
+const SOCK_FIELDS: u64 = 20;          // S_SLOTS + RXQ * SLOT_W + 2
+
+// Network namespaces and interfaces (src/netns.bastio).
+const NNET: u64 = 16;                  // network namespaces
+const NS_W: u64 = 5;                   // words per namespace:
+const NS_USED: u64 = 0;                //   1 while it exists
+const NS_GW: u64 = 1;                  //   the default route's gateway (0: none; ns 0 uses n.gw)
+const NS_FWD: u64 = 2;                 //   1: forwards packets between interfaces (ip_forward)
+const NS_LO: u64 = 3;                  //   its loopback interface's slot
+const NS_INO: u64 = 4;                 //   its inode number (/proc/PID/ns/net)
+
+const IFN: u64 = 32;                   // interfaces, all namespaces together
+const IF_W: u64 = 10;                  // words per interface:
+const IF_KIND: u64 = 0;                //   IFK_*
+const IF_NS: u64 = 1;                  //   its namespace
+const IF_FLAGS: u64 = 2;               //   IFF_UP
+const IF_PEER: u64 = 3;                //   a veth's other end
+const IF_MASTER: u64 = 4;              //   the bridge it is a port of, + 1 (0: none)
+const IF_IP: u64 = 5;                  //   its IPv4 address (0: none; slot 1 uses n.ip)
+const IF_SPAN: u64 = 6;                //   2^(32 - prefix length) (0 with no address)
+const IF_MAC: u64 = 7;
+const IF_NAME: u64 = 8;                //   two words: the name's 16 bytes, low byte first
+
+const IFK_FREE: u64 = 0;
+const IFK_LO: u64 = 1;
+const IFK_ETH: u64 = 2;                // the network card (slot 1)
+const IFK_VETH: u64 = 3;
+const IFK_BRIDGE: u64 = 4;
+
+const IF_ETH: u64 = 1;                 // the card's slot
+const IFF_UP: u64 = 1;                 // Linux's interface flags
+const IFF_LOOPBACK: u64 = 8;
+const IFF_RUNNING: u64 = 64;
+const IFF_BROADCAST: u64 = 2;
+const IFF_MULTICAST: u64 = 4096;
+const NO_IF: u64 = 18446744073709551615;
+const NAME_LO: u64 = 0x6F6C;           // "lo"
+const NAME_ETH0: u64 = 0x30687465;     // "eth0"
+const CAP_NET_ADMIN: u64 = 12;          // configuring interfaces, addresses, routes
+const CAP_NET_RAW: u64 = 13;            // raw sockets (ping)
+const NLS: u64 = 8;                    // netlink sockets (src/rtnl.bastio)
+const NLQ: u64 = 8192;                 // the answers each can queue, in bytes
+const NL_W: u64 = 4;                   // words per socket:
+const NL_USED: u64 = 0;
+const NL_LEN: u64 = 1;                 //   bytes queued
+const NL_PORT: u64 = 2;                //   its port id
+const NL_NS: u64 = 3;                  //   its namespace
+const NATN: u64 = 64;                  // masqueraded flows (src/netns.bastio)
+const NAT_W: u64 = 5;                  // words per flow:
+const NAT_PROTO: u64 = 0;              //   IP_TCP, IP_UDP or IP_ICMP; 0: free
+const NAT_IP: u64 = 1;                 //   the inside address ...
+const NAT_PORT: u64 = 2;               //   ... and port (an echo's id)
+const NAT_PEER: u64 = 3;               //   the outside address
+const NAT_PEER_PORT: u64 = 4;          //   ... and port (0 for ICMP)
+const NAT_BASE: u64 = 40000;           // flow f goes out from port NAT_BASE + f
+const NAT_NONE: u64 = 18446744073709551615;
 
 // The TCP table's size (src/tcp.bastio has the rest).
 const TCBS: u64 = 32;                 // connections (listeners and TIME_WAIT hold some)
-const TCB_W: u64 = 27;                // words per connection (TCP_RING, the size of
+const TCB_W: u64 = 28;                // words per connection (TCP_RING, the size of
                                       // its buffers, is in src/tcpbuf.bastio)
 
 struct Net {
@@ -154,6 +211,20 @@ struct Net {
   rtr_mac: u64,       // the IPv6 default router's MAC, 0: none
   rs_n: u64,          // router solicitations sent
   rs_until: u64,      // the tick to send the next at
+  ns: u64,            // the network namespace being handled (src/netns.bastio)
+  ifs: Buf,           // interfaces, IF_W words each
+  nss: Buf,           // namespaces, NS_W words each
+  ns_seq: u64,        // numbers the namespaces' inodes
+  lo_if: Buf,         // the interface each frame in the loopback queue arrives on
+  in_if: u64,         // the interface the frame in pkt came in on
+  nlq: Bytes,         // netlink sockets' queued answers, NLQ bytes each (src/rtnl.bastio)
+  nls: Buf,           // netlink sockets, NL_W words each
+  nl_at: u64,         // where the answer being written goes, ...
+  nl_lim: u64,        // ... how far it may go, ...
+  nl_msg: u64,        // ... where its message starts,
+  nl_full: bool,      // ... and whether something did not fit
+  nat: Buf,           // masqueraded flows, NAT_W words each
+  nat_next: u64,      // the flow replaced when every one is in use
 }
 
 spec fn net_ok(n: &Net) -> bool {
@@ -165,6 +236,9 @@ spec fn net_ok(n: &Net) -> bool {
   && len(n.tcbs) == TCBS * TCB_W && rings_ok(n.rb)
   && blen(n.lo) == LOQ * RX_BUF && len(n.lo_len) == LOQ && n.lo_head < LOQ && n.lo_n <= LOQ
   && len(n.v6) == V6N * V6W && n.rtr_mac < MAC_LIMIT
+  && len(n.ifs) == IFN * IF_W && len(n.nss) == NNET * NS_W && n.ns < NNET && len(n.lo_if) == LOQ
+  && blen(n.nlq) == NLS * NLQ && len(n.nls) == NLS * NL_W
+  && len(n.nat) == NATN * NAT_W
 }
 
 // ---------------------------------------------------------------- bytes
@@ -310,17 +384,22 @@ fn arp_learn(n: &mut Net, ip: u64, mac: u64)
   n.arp_next = (e + 1) % ARP_N;
 }
 
-/// The address a frame for `ip` goes to: ip itself on our subnet, else the
-/// gateway.
-/// Is `ip` this machine: 127.0.0.0/8, or our own address?
+/// Is `ip` this machine, in namespace n.ns: 127.0.0.0/8, or one of its
+/// interfaces' addresses (in namespace 0, the card's too)?
 fn is_local(n: &Net, ip: u64) -> bool
   requires net_ok(n)
 {
-  return ip / 16777216 == LO_NET || (ip == n.ip && n.ip != 0);
+  return is_local_in(n, n.ns, ip);
+}
+
+fn is_local_in(n: &Net, ns: u64, ip: u64) -> bool
+  requires net_ok(n)
+{
+  return ip / 16777216 == LO_NET || (ns == 0 && ip == n.ip && n.ip != 0) || ns_owns(n, ns, ip);
 }
 
 /// The source address for a packet to `dst`: a loopback address answers
-/// from itself, everything else comes from our address.
+/// from itself; else the address of the interface it goes out of.
 fn src_ip(n: &Net, dst: u64) -> u64
   requires net_ok(n)
   ensures result <= IP_MAX || result == dst
@@ -328,7 +407,18 @@ fn src_ip(n: &Net, dst: u64) -> u64
   if dst / 16777216 == LO_NET {
     return dst;
   }
-  return n.ip;
+  let i = route_if(n, dst);
+  if i < IFN {
+    return if_ip(n, i);
+  }
+  if n.ns == 0 {
+    return n.ip;
+  }
+  let g = route_if(n, nsw(n, n.ns, NS_GW));
+  if g < IFN {
+    return if_ip(n, g);
+  }
+  return 0;
 }
 
 /// Where a packet addressed to `ip` goes: to 0.0.0.0 means this machine,
@@ -342,14 +432,39 @@ fn dst_ip(ip: u64) -> u64
   return ip;
 }
 
+/// The address a frame for `ip` goes to: ip itself on one of our subnets,
+/// else the gateway.
 fn next_hop(n: &Net, ip: u64) -> u64
   requires net_ok(n)
   ensures result <= IP_MAX || result == ip
 {
-  if is_local(n, ip) || ip / n.span == n.ip / n.span || is_v6tok(ip) {
+  if is_local(n, ip) || route_if(n, ip) < IFN {
+    return ip;
+  }
+  if n.ns != 0 {
+    let g = nsw(n, n.ns, NS_GW);
+    if g <= IP_MAX {
+      return g;
+    }
+    return 0;
+  }
+  if ip / n.span == n.ip / n.span || is_v6tok(ip) {
     return ip;                        // an IPv6 peer's token: src/net6.bastio
   }
   return n.gw;
+}
+
+/// Is there a way to send to ip from namespace n.ns?
+fn can_reach(n: &Net, ip: u64) -> bool
+  requires net_ok(n)
+{
+  if is_local(n, ip) || route_if(n, ip) < IFN {
+    return true;
+  }
+  if n.ns != 0 {
+    return route_if(n, nsw(n, n.ns, NS_GW)) < IFN;
+  }
+  return card_live(n.dev) && n.ip != 0;
 }
 
 /// An ARP packet: operation, and the target's MAC and address. We are
@@ -375,12 +490,22 @@ fn arp_send(n: &mut Net, op: u64, eth_dst: u64, tmac: u64, tip: u64) -> bool
 fn lo_full(n: &Net, ip: u64) -> bool
   requires net_ok(n)
 {
-  return n.lo_n >= LOQ && is_local(n, ip);
+  return n.lo_n >= LOQ && (is_local(n, ip) || route_if(n, ip) < IFN || n.ns != 0);
 }
 
-/// Queues the outgoing frame for net_poll to take in as if it had arrived.
-/// A full queue drops it, as a busy card would; TCP sends it again.
+/// Queues the outgoing frame for net_poll to take in as if it had arrived
+/// on loopback.
 fn lo_send(n: &mut Net, flen: u64) -> bool
+  requires net_ok(n) && flen <= FRAME_MAX
+  ensures net_ok(n)
+{
+  return q_send(&mut n, ns_lo(n), flen);
+}
+
+/// Queues the outgoing frame for net_poll to take in as if it had arrived
+/// on interface `to` (loopback, or a virtual one: src/netns.bastio). A
+/// full queue drops it, as a busy card would; TCP sends it again.
+fn q_send(n: &mut Net, to: u64, flen: u64) -> bool
   requires net_ok(n) && flen <= FRAME_MAX
   ensures net_ok(n)
 {
@@ -391,6 +516,7 @@ fn lo_send(n: &mut Net, flen: u64) -> bool
   let base = slot * RX_BUF;
   bcopy(&mut n.lo, base, n.out, 0, flen);
   n.lo_len = set(n.lo_len, slot, flen);
+  n.lo_if = set(n.lo_if, slot, to);
   n.lo_n = n.lo_n + 1;
   if n.tx < 18446744073709551615 {
     n.tx = n.tx + 1;
@@ -407,6 +533,13 @@ fn reply_send(n: &mut Net, ip: u64, flen: u64) -> bool
 {
   if is_local(n, ip) {
     return lo_send(&mut n, flen);
+  }
+  if n.ns != 0 || route_if(n, ip) < IFN {
+    let hop = next_hop(n, ip);
+    if hop > IP_MAX || flen < 14 {
+      return false;
+    }
+    return send_via(&mut n, hop, flen);
   }
   if is_v6tok(ip) {
     return v6_out(&mut n, flen);
@@ -426,6 +559,13 @@ fn send_via(n: &mut Net, hop: u64, flen: u64) -> bool
 {
   if is_local(n, hop) {
     return lo_send(&mut n, flen);
+  }
+  let o = route_if(n, hop);
+  if o < IFN {
+    return virt_send(&mut n, o, hop, flen);
+  }
+  if n.ns != 0 {
+    return false;                     // no route out of this namespace
   }
   if is_v6tok(hop) {
     return v6_out(&mut n, flen);
@@ -598,7 +738,7 @@ fn udp_in(n: &mut Net, total: u64)
     return;
   }
   let dport = be16(n.pkt, 36);
-  if dport == PORT_DHCP_CLIENT {
+  if dport == PORT_DHCP_CLIENT && n.ns == 0 {
     dhcp_in(&mut n, ulen);
     return;
   }
@@ -623,8 +763,18 @@ fn ip_in(n: &mut Net, flen: u64)
   // For us: our address, or (UDP only) the broadcast address, or while a
   // lease is being sought the address offered.
   let dst = be32(n.pkt, 30);
-  let seeking = n.dhcp_state == DHCP_DISCOVER || n.dhcp_state == DHCP_REQUEST;
+  let seeking = n.ns == 0 && (n.dhcp_state == DHCP_DISCOVER || n.dhcp_state == DHCP_REQUEST);
   let mine = is_local(n, dst) || (seeking && dst == n.dhcp_offer && dst != 0);
+  // A namespace that forwards passes on what comes in on a virtual
+  // interface for elsewhere; namespace 0 masquerades what goes out of the
+  // card, and turns the answers back (src/netns.bastio).
+  if !mine && n.lo_in && 2 <= n.in_if && n.in_if < IFN && dst != IP_MAX && nsw(n, n.ns, NS_FWD) == 1 {
+    fwd(&mut n, flen);
+    return;
+  }
+  if n.ns == 0 && !n.lo_in && dst == n.ip && dst != 0 && nat_back(&mut n, flen) {
+    return;
+  }
   if !mine && !(dst == IP_MAX && cast[u64](bget(n.pkt, 23)) == IP_UDP) {
     return;
   }
@@ -641,6 +791,9 @@ fn ip_in(n: &mut Net, flen: u64)
     } else if kind == ICMP_ECHO_REPLY && n.ping_state == PING_ECHO
       && be16(n.pkt, 38) == PING_ID && be16(n.pkt, 40) == n.seq {
       n.ping_state = PING_DONE;
+    }
+    if mine {
+      raw_deliver(&mut n, total);
     }
   } else if proto == IP_UDP {
     udp_in(&mut n, total);
@@ -1028,7 +1181,7 @@ fn sock_find(n: &Net, port: u64) -> u64
   while s < SOCKS
     invariant s <= SOCKS
   {
-    if sk_get(n, s, S_OPEN) == 1 && sk_get(n, s, S_PORT) == port {
+    if sk_get(n, s, S_OPEN) == 1 && sk_get(n, s, S_PORT) == port && sk_get(n, s, S_NS) == n.ns {
       return s;
     }
     s = s + 1;
@@ -1057,6 +1210,62 @@ fn udp_deliver(n: &mut Net, s: u64, ulen: u64)
   sk_set(&mut n, s, S_COUNT, count + 1);
 }
 
+/// Queues the ICMP packet that came in (total bytes from its IP header,
+/// at 14) on every raw ICMP socket of namespace n.ns, header and all, as
+/// Linux does; what is past UDP_MAX is dropped. A full queue drops it.
+fn raw_deliver(n: &mut Net, total: u64)
+  requires net_ok(n) && 28 <= total && total <= FRAME_MAX - 14
+  ensures net_ok(n)
+{
+  let plen = smaller(total, UDP_MAX);
+  let src = be32(n.pkt, 26);
+  let mut s = 0;
+  while s < SOCKS
+    invariant s <= SOCKS && net_ok(n) && plen <= UDP_MAX
+  {
+    let count = sk_get(n, s, S_COUNT);
+    if sk_get(n, s, S_OPEN) == 1 && sk_get(n, s, S_PORT) == RAW_ICMP && sk_get(n, s, S_NS) == n.ns && count < RXQ {
+      let slot = (sk_get(n, s, S_HEAD) % RXQ + count) % RXQ;
+      let at = (s * RXQ + slot) * UDP_MAX;
+      bcopy(&mut n.dq, at, n.pkt, 14, plen);
+      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W, plen);
+      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 1, src);
+      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 2, 0);
+      sk_set(&mut n, s, S_COUNT, count + 1);
+    }
+    s = s + 1;
+  }
+}
+
+/// Sends the ICMP message in bytes 0..size of buf (its checksum the
+/// caller's, as on Linux) from raw socket s to ip, in an IP header the
+/// stack writes. Returns size, or NO_SOCK.
+fn raw_sendto(n: &mut Net, s: u64, to: u64, buf: &Bytes, size: u64) -> u64
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let ip = dst_ip(to);
+  if !udp_is_open(n, s) || sk_get(n, s, S_PORT) != RAW_ICMP || ip > IP_MAX || ip == 0
+    || size < 8 || size > UDP_MAX + 8 || size > blen(buf) {
+    return NO_SOCK;
+  }
+  sk_enter(&mut n, s);
+  if !can_reach(n, ip) {
+    return NO_SOCK;
+  }
+  let hop = next_hop(n, ip);
+  if hop > IP_MAX {
+    return NO_SOCK;
+  }
+  eth_header(&mut n, 0, ETH_IP);
+  ip_header(&mut n, 20 + size, IP_ICMP, ip);
+  bcopy(&mut n.out, 34, buf, 0, size);
+  if !send_via(&mut n, hop, 34 + size) {
+    return NO_SOCK;
+  }
+  return size;
+}
+
 /// Opens a socket: its index, or NO_SOCK if all are taken.
 fn udp_open(n: &mut Net) -> u64
   requires net_ok(n)
@@ -1074,11 +1283,22 @@ fn udp_open(n: &mut Net) -> u64
       sk_set(&mut n, s, S_PEER_IP, 0);
       sk_set(&mut n, s, S_PEER_PORT, 0);
       sk_set(&mut n, s, S_CORK, 0);
+      sk_set(&mut n, s, S_NS, n.ns);
       return s;
     }
     s = s + 1;
   }
   return NO_SOCK;
+}
+
+/// Makes socket s's namespace the one being handled.
+fn sk_enter(n: &mut Net, s: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  if s < SOCKS && sk_get(n, s, S_NS) < NNET {
+    n.ns = sk_get(n, s, S_NS);
+  }
 }
 
 fn udp_is_open(n: &Net, s: u64) -> bool
@@ -1130,6 +1350,7 @@ fn udp_bind(n: &mut Net, s: u64, port: u64) -> bool
   if !udp_is_open(n, s) || sk_get(n, s, S_PORT) != 0 || port > 65535 {
     return false;
   }
+  sk_enter(&mut n, s);
   if port == 0 {
     return udp_bind_any(&mut n, s) != 0;
   }
@@ -1151,7 +1372,11 @@ fn udp_sendto(n: &mut Net, s: u64, to: u64, port: u64, buf: &Bytes, size: u64) -
 {
   let ip = dst_ip(to);
   if !udp_is_open(n, s) || ip > IP_MAX || port == 0 || port > 65535
-    || size > UDP_MAX || size > blen(buf) || (!card_live(n.dev) && !is_local(n, ip)) || (n.ip == 0 && ip / 16777216 != LO_NET) {
+    || size > UDP_MAX || size > blen(buf) {
+    return NO_SOCK;
+  }
+  sk_enter(&mut n, s);
+  if !can_reach(n, ip) {
     return NO_SOCK;
   }
   if sk_get(n, s, S_PORT) == 0 && udp_bind_any(&mut n, s) == 0 {
@@ -1250,54 +1475,68 @@ fn net_poll(n: &mut Net)
   requires net_ok(n)
   ensures net_ok(n)
 {
+  let was = n.ns;
   // Frames we sent ourselves first: those queued now, not the answers
-  // they cause, which wait for the next poll.
+  // they cause, which wait for the next poll. Each is taken in by the
+  // namespace of the interface it arrives on.
   let mut q = n.lo_n;
   while q > 0
     invariant net_ok(n)
   {
     let slot = n.lo_head;
     let flen = get(n.lo_len, slot);
+    let to = get(n.lo_if, slot);
+    let mut ns = NNET;
+    if to < IFN && iw(n, to, IF_KIND) != IFK_FREE {
+      ns = iw(n, to, IF_NS);
+    }
     n.lo_head = (slot + 1) % LOQ;
     if n.lo_n > 0 {
       n.lo_n = n.lo_n - 1;
     }
-    if flen <= FRAME_MAX {
+    if flen <= FRAME_MAX && ns < NNET {
       bcopy(&mut n.pkt, 0, n.lo, slot * RX_BUF, flen);
       if n.rx < 18446744073709551615 {
         n.rx = n.rx + 1;
       }
+      n.ns = ns;
+      n.in_if = to;
       n.lo_in = true;
       ip_in(&mut n, flen);
       n.lo_in = false;
     }
     q = q - 1;
   }
+  n.ns = 0;                           // the card is namespace 0's
+  n.in_if = IF_ETH;
   let mut k = 0;
-  while k < RX_BUFS
+  let mut more = true;
+  while more && k < RX_BUFS
     invariant k <= RX_BUFS && net_ok(n)
   {
     let flen = card_recv(&mut n.dev, &mut n.pkt);
     if flen == 0 {
-      card_rx_flush(&mut n.dev);
-      return;
-    }
-    if n.rx < 18446744073709551615 {
-      n.rx = n.rx + 1;
-    }
-    if flen >= 14 {
-      let kind = be16(n.pkt, 12);
-      if kind == ETH_ARP {
-        arp_in(&mut n, flen);
-      } else if kind == ETH_IP {
-        ip_in(&mut n, flen);
-      } else if kind == ETH_IP6 {
-        v6_in(&mut n, flen);
+      more = false;
+    } else {
+      if n.rx < 18446744073709551615 {
+        n.rx = n.rx + 1;
       }
+      if flen >= 14 {
+        let kind = be16(n.pkt, 12);
+        if kind == ETH_ARP {
+          arp_in(&mut n, flen);
+        } else if kind == ETH_IP {
+          ip_in(&mut n, flen);
+        } else if kind == ETH_IP6 {
+          v6_in(&mut n, flen);
+        }
+      }
+      n.ns = 0;
+      k = k + 1;
     }
-    k = k + 1;
   }
   card_rx_flush(&mut n.dev);
+  n.ns = was;
 }
 
 // ---------------------------------------------------------------- the card, or none
@@ -1412,7 +1651,11 @@ fn net_up(d: Card) -> Nic
     socks: alloc(SOCKS * SOCK_FIELDS), dq: balloc(SOCKS * RXQ * UDP_MAX), cork: balloc(SOCKS * UDP_MAX), eph: 0,
     tcbs: alloc(TCBS * TCB_W), rb: rings_new(), iss: 0,
     lo: balloc(LOQ * RX_BUF), lo_len: alloc(LOQ), lo_head: 0, lo_n: 0, lo_in: false, seen_rx: 0, seen_tick: 0, irq_on: false,
-    v6: alloc(V6N * V6W), v6_next: 0, iid: 0, pfx: 0, rtr_mac: 0, rs_n: 0, rs_until: 0 };
+    v6: alloc(V6N * V6W), v6_next: 0, iid: 0, pfx: 0, rtr_mac: 0, rs_n: 0, rs_until: 0,
+    ns: 0, ifs: alloc(IFN * IF_W), nss: alloc(NNET * NS_W), ns_seq: 0, lo_if: alloc(LOQ), in_if: IF_ETH,
+    nlq: balloc(NLS * NLQ), nls: alloc(NLS * NL_W), nl_at: 0, nl_lim: 0, nl_msg: 0, nl_full: false,
+    nat: alloc(NATN * NAT_W), nat_next: 0 };
+  netns_init(&mut n);
   n.iid = v6_iid(card_mac(n.dev));
   // The address comes from DHCP, sought from now on.
   if card_live(n.dev) {
@@ -1470,6 +1713,7 @@ fn nic_ping_start(c: &mut Nic, ip: u64, pid: u64, now: u64) -> u64
       return 3;
     },
     Nic::Up(mut n) => {
+      n.ns = 0;                       // the shell's ping
       let mut r = 3;
       let mut to = ip;
       if ip == 0 {
@@ -1499,6 +1743,7 @@ fn nic_ping_check(c: &mut Nic, now: u64) -> u64
       return NET_NONE;
     },
     Nic::Up(mut n) => {
+      n.ns = 0;
       let r = ping_check(&mut n, now);
       c = Nic::Up(n);
       return r;
@@ -1581,6 +1826,7 @@ fn nic_tick(c: &mut Nic, now: u64)
   match c {
     Nic::None => { c = Nic::None; },
     Nic::Up(mut n) => {
+      n.ns = 0;                       // DHCP and IPv6 are the card's: namespace 0
       dhcp_tick(&mut n, now);
       v6_tick(&mut n, now);
       tcp_tick(&mut n, now);
@@ -1706,6 +1952,12 @@ fn nic_free(ports: &mut Ports, win: &mut MmioSpace, c: Nic, m: &mut Mem)
       bfree(n.dq);
       bfree(n.lo);
       free(n.lo_len);
+      free(n.ifs);
+      free(n.nss);
+      free(n.lo_if);
+      bfree(n.nlq);
+      free(n.nls);
+      free(n.nat);
       free(n.v6);
       card_free(&mut ports, &mut win, n.dev, &mut m);
     },
@@ -1717,7 +1969,7 @@ fn nic_free(ports: &mut Ports, win: &mut MmioSpace, c: Nic, m: &mut Mem)
 
 /// Opens a UDP socket: its number, or NO_SOCK if there is no card or every
 /// socket is taken.
-fn sock_new(c: &mut Nic) -> u64
+fn sock_new(c: &mut Nic, ns: u64) -> u64
   requires nic_ok(c)
   ensures nic_ok(c) && (result < SOCKS || result == NO_SOCK)
 {
@@ -1727,9 +1979,53 @@ fn sock_new(c: &mut Nic) -> u64
       return NO_SOCK;
     },
     Nic::Up(mut n) => {
+      if !ns_live(n, ns) {
+        c = Nic::Up(n);
+        return NO_SOCK;
+      }
+      n.ns = ns;                      // the socket's namespace
       let s = udp_open(&mut n);
       c = Nic::Up(n);
       return s;
+    },
+  }
+}
+
+/// Makes socket s (just opened) a raw ICMP socket.
+fn sock_make_raw(c: &mut Nic, s: u64)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if udp_is_open(n, s) {
+        sk_set(&mut n, s, S_PORT, RAW_ICMP);
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
+fn sock_is_raw(c: &Nic, s: u64) -> bool
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return false; },
+    Nic::Up(n) => { return udp_is_open(n, s) && sk_get(n, s, S_PORT) == RAW_ICMP; },
+  }
+}
+
+fn sock_raw_send(c: &mut Nic, s: u64, ip: u64, buf: &Bytes, size: u64) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; return NO_SOCK; },
+    Nic::Up(mut n) => {
+      let r = raw_sendto(&mut n, s, ip, buf, size);
+      c = Nic::Up(n);
+      return r;
     },
   }
 }

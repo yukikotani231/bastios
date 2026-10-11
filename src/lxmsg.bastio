@@ -235,7 +235,7 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
     }
   }
   let dgram = !is_tcp(k, pid, fd) && (!unix || ux_dgram(k, pid, fd));
-  if dgram && !unix {
+  if dgram && !unix && !is_nl(k, pid, fd) {
     return udp_gather(&mut k, pid, fd, iov, cnt, name, nlen, flags);
   }
   let mut done = 0;
@@ -420,7 +420,7 @@ fn lx_msg_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     fl = pget(k.procs, pid, F_REGS + R_R10);
     r = lx_mmsg(&mut k, pid, n, a, b, c, fl);
   }
-  if r == SK_WAIT && !is_unix(k, pid, a) {
+  if r == SK_WAIT && !is_unix(k, pid, a) && !is_nl(k, pid, a) {
     return sock_retry(&mut k, pid, n);       // sleep until a frame comes in
   }
   if r == SK_WAIT {

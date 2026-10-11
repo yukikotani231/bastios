@@ -1,0 +1,1438 @@
+// rtnetlink (NETLINK_ROUTE), the stack's half: requests from a netlink
+// socket are taken in whole when they are sent, and the answers queued on
+// that socket for recv (src/lxnetlink.bastio has the socket calls).
+//
+// What it knows: links (list, make a veth pair or a bridge, delete, move
+// to a namespace, make a port of a bridge, rename, set up or down, set
+// the MAC), IPv4 addresses (list, add, delete; one per interface), and
+// routes (list; add or delete a namespace's default route). Everything
+// else is EOPNOTSUPP, or for a dump an empty answer.
+//
+// A message's length fields come from the caller and are checked against
+// the bytes that came in before anything is read; the answers are built
+// with every write checked against the socket's queue, and a message that
+// does not fit is dropped whole.
+
+// Netlink.
+const NLMSG_NOOP: u64 = 1;
+const NLMSG_ERROR: u64 = 2;
+const NLMSG_DONE: u64 = 3;
+const NLM_F_REQUEST: u64 = 1;
+const NLM_F_MULTI: u64 = 2;
+const NLM_F_ACK: u64 = 4;
+const NLM_F_DUMP: u64 = 0x300;
+const NLM_F_REPLACE: u64 = 0x100;
+const NLM_F_CREATE: u64 = 0x400;
+const RTM_NEWLINK: u64 = 16;
+const RTM_DELLINK: u64 = 17;
+const RTM_GETLINK: u64 = 18;
+const RTM_SETLINK: u64 = 19;
+const RTM_NEWADDR: u64 = 20;
+const RTM_DELADDR: u64 = 21;
+const RTM_GETADDR: u64 = 22;
+const RTM_NEWROUTE: u64 = 24;
+const RTM_DELROUTE: u64 = 25;
+const RTM_GETROUTE: u64 = 26;
+const IFLA_ADDRESS: u64 = 1;
+const IFLA_BROADCAST: u64 = 2;
+const IFLA_IFNAME: u64 = 3;
+const IFLA_MTU: u64 = 4;
+const IFLA_LINK: u64 = 5;
+const IFLA_MASTER: u64 = 10;
+const IFLA_TXQLEN: u64 = 13;
+const IFLA_OPERSTATE: u64 = 16;
+const IFLA_LINKINFO: u64 = 18;
+const IFLA_NET_NS_PID: u64 = 19;
+const IFLA_NET_NS_FD: u64 = 28;
+const IFLA_INFO_KIND: u64 = 1;
+const IFLA_INFO_DATA: u64 = 2;
+const VETH_INFO_PEER: u64 = 1;
+const IFA_ADDRESS: u64 = 1;
+const IFA_LOCAL: u64 = 2;
+const IFA_LABEL: u64 = 3;
+const IFA_BROADCAST: u64 = 4;
+const RTA_DST: u64 = 1;
+const RTA_OIF: u64 = 4;
+const RTA_GATEWAY: u64 = 5;
+const RTA_PREFSRC: u64 = 7;
+const RTA_TABLE: u64 = 15;
+const ARPHRD_ETHER: u64 = 1;
+const ARPHRD_LOOPBACK: u64 = 772;
+const IFF_LOWER_UP: u64 = 0x10000;
+const KIND_VETH: u64 = 0x68746576;        // "veth", low byte first
+const KIND_BRIDGE: u64 = 0x656764697262;  // "bridge"
+// Errors, as netlink sends them: positive here, negated in the message.
+const NE_PERM: u64 = 1;
+const NE_SRCH: u64 = 3;
+const NE_EXIST: u64 = 17;
+const NE_NODEV: u64 = 19;
+const NE_INVAL: u64 = 22;
+const NE_NOSPC: u64 = 28;
+const NE_OPNOTSUPP: u64 = 95;
+const NE_NETUNREACH: u64 = 101;
+// The namespace a request moves a link to, when it names none.
+const NS_UNSAID: u64 = 18446744073709551615;
+
+// ---------------------------------------------------------------- reading a request
+
+fn rd8(b: &Bytes, o: u64) -> u64
+  requires o < blen(b)
+  ensures result <= 255
+{
+  return cast[u64](bget(b, o));
+}
+
+// rd16 and rd32 (little-endian reads) are src/elf.bastio's.
+
+/// The payload offset of the first attribute of type t (its flag bits
+/// aside) among those at from..to, or 0 if there is none (see nla_len).
+fn nla_find(b: &Bytes, from: u64, to: u64, t: u64) -> u64
+  requires to <= blen(b)
+  ensures result == 0 || (4 <= result && result <= to)
+{
+  if from > to {
+    return 0;
+  }
+  let mut at = from;
+  while at < to && to - at >= 4
+    invariant at <= to && to <= blen(b)
+  {
+    let l = rd16(b, at);
+    if l < 4 || l > to - at {
+      return 0;
+    }
+    if rd16(b, at + 2) % 16384 == t {
+      return at + 4;
+    }
+    let step = (l + 3) / 4 * 4;
+    if step > to - at {
+      return 0;
+    }
+    at = at + step;
+  }
+  return 0;
+}
+
+/// The length of the payload at a (from nla_find), 0 if it does not fit
+/// in b.
+fn nla_len(b: &Bytes, a: u64) -> u64
+  ensures result == 0 || (a + result <= blen(b) && a >= 4)
+{
+  if a < 4 || a > blen(b) {
+    return 0;
+  }
+  let l = rd16(b, a - 4);
+  if l < 4 || l - 4 > blen(b) - a {
+    return 0;
+  }
+  return l - 4;
+}
+
+/// The u32 payload of attribute type t at from..to, or `none`.
+fn nla_u32(b: &Bytes, from: u64, to: u64, t: u64, none: u64) -> u64
+  requires to <= blen(b)
+{
+  let a = nla_find(b, from, to, t);
+  if nla_len(b, a) < 4 {
+    return none;
+  }
+  return rd32(b, a);
+}
+
+/// Half `half` (0 or 1) of an interface name at b[at..at + l] (up to its
+/// NUL; 1 to 15 bytes) as a word, low byte first. Both halves are 0 for a
+/// name that is empty or too long.
+fn name_w(b: &Bytes, at: u64, l: u64, half: u64) -> u64
+  requires at + l <= blen(b) && half <= 1
+{
+  let mut n = 0;
+  while n < l && n < 16 && bget(b, at + n) != 0
+    invariant n <= l && n <= 16 && at + l <= blen(b)
+  {
+    n = n + 1;
+  }
+  if n == 0 || n > 15 {
+    return 0;
+  }
+  let mut t = balloc(16);
+  bcopy(&mut t, 0, b, at, n);
+  let w = load_le64(t, half * 8);
+  bfree(t);
+  return w;
+}
+
+/// The name in attribute a (from nla_find), half `half`.
+fn nla_name(b: &Bytes, a: u64, half: u64) -> u64
+  requires half <= 1
+{
+  let l = nla_len(b, a);
+  if l == 0 {
+    return 0;
+  }
+  return name_w(b, a, l, half);
+}
+
+/// The first word of attribute a's payload (up to 8 bytes; a NUL ends it),
+/// for comparing a short string such as a link kind.
+fn nla_word(b: &Bytes, a: u64) -> u64
+{
+  let l = nla_len(b, a);
+  if l == 0 {
+    return 0;
+  }
+  let mut n = 0;
+  while n < l && n < 8 && bget(b, a + n) != 0
+    invariant n <= l && n <= 8 && a + l <= blen(b)
+  {
+    n = n + 1;
+  }
+  let mut t = balloc(8);
+  bcopy(&mut t, 0, b, a, n);
+  let w = load_le64(t, 0);
+  bfree(t);
+  return w;
+}
+
+// ---------------------------------------------------------------- writing answers
+// The answers go into socket q's part of n.nlq, from n.nl_at up to
+// n.nl_lim. A write that does not fit sets n.nl_full, and nl_end then
+// drops the message it was part of.
+
+/// Starts writing answers at the end of what socket q has queued.
+fn nlw_open(n: &mut Net, q: u64)
+  requires net_ok(n) && q < NLS
+  ensures net_ok(n)
+{
+  let have = smaller(get(n.nls, q * NL_W + NL_LEN), NLQ);
+  n.nl_at = q * NLQ + have;
+  n.nl_lim = q * NLQ + NLQ;
+  n.nl_full = false;
+}
+
+/// Ends writing: what was written is queued on q.
+fn nlw_close(n: &mut Net, q: u64)
+  requires net_ok(n) && q < NLS
+  ensures net_ok(n)
+{
+  if n.nl_at >= q * NLQ && n.nl_at <= q * NLQ + NLQ {
+    n.nls = set(n.nls, q * NL_W + NL_LEN, n.nl_at - q * NLQ);
+  }
+}
+
+fn nl_b(n: &mut Net, v: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  if n.nl_at >= n.nl_lim || n.nl_at >= blen(n.nlq) {
+    n.nl_full = true;
+    return;
+  }
+  bset(&mut n.nlq, n.nl_at, cast[u8](v % 256));
+  n.nl_at = n.nl_at + 1;
+}
+
+fn nl_16(n: &mut Net, v: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nl_b(&mut n, v % 256);
+  nl_b(&mut n, v / 256 % 256);
+}
+
+fn nl_32(n: &mut Net, v: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nl_16(&mut n, v % 65536);
+  nl_16(&mut n, v / 65536 % 65536);
+}
+
+/// Zero bytes up to a 4-byte boundary.
+fn nl_pad(n: &mut Net)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let mut k = 0;
+  while n.nl_at % 4 != 0 && k < 4
+    invariant net_ok(n) && k <= 4
+  {
+    nl_b(&mut n, 0);
+    k = k + 1;
+  }
+}
+
+/// A message header; its length is filled in by nl_end.
+fn nl_begin(n: &mut Net, kind: u64, flags: u64, seq: u64, port: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  n.nl_msg = n.nl_at;
+  nl_32(&mut n, 0);
+  nl_16(&mut n, kind % 65536);
+  nl_16(&mut n, flags % 65536);
+  nl_32(&mut n, seq);
+  nl_32(&mut n, port);
+}
+
+/// Ends the message nl_begin started: its length, or, if it did not fit,
+/// it is taken back.
+fn nl_end(n: &mut Net)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nl_pad(&mut n);
+  let m = n.nl_msg;
+  if n.nl_full {
+    if m <= n.nl_at {
+      n.nl_at = m;
+    }
+    return;
+  }
+  if m < blen(n.nlq) && blen(n.nlq) - m >= 4 && m <= n.nl_at {
+    let l = n.nl_at - m;
+    bset(&mut n.nlq, m, cast[u8](l % 256));
+    bset(&mut n.nlq, m + 1, cast[u8](l / 256 % 256));
+    bset(&mut n.nlq, m + 2, cast[u8](l / 65536 % 256));
+    bset(&mut n.nlq, m + 3, 0);
+  }
+}
+
+/// An attribute's header, for a payload of l bytes.
+fn nla_head(n: &mut Net, t: u64, l: u64)
+  requires net_ok(n) && l <= 65531
+  ensures net_ok(n)
+{
+  nl_16(&mut n, (l + 4) % 65536);
+  nl_16(&mut n, t % 65536);
+}
+
+fn nla_put32(n: &mut Net, t: u64, v: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nla_head(&mut n, t, 4);
+  nl_32(&mut n, v);
+}
+
+fn nla_put8(n: &mut Net, t: u64, v: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nla_head(&mut n, t, 1);
+  nl_b(&mut n, v);
+  nl_pad(&mut n);
+}
+
+/// An IPv4 address, in network order.
+fn nla_ip(n: &mut Net, t: u64, ip: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nla_head(&mut n, t, 4);
+  nl_b(&mut n, ip / 16777216 % 256);
+  nl_b(&mut n, ip / 65536 % 256);
+  nl_b(&mut n, ip / 256 % 256);
+  nl_b(&mut n, ip % 256);
+}
+
+/// A MAC address: six bytes, most significant first.
+fn nla_mac(n: &mut Net, t: u64, mac: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nla_head(&mut n, t, 6);
+  nl_b(&mut n, mac / 1099511627776 % 256);
+  nl_b(&mut n, mac / 4294967296 % 256);
+  nl_b(&mut n, mac / 16777216 % 256);
+  nl_b(&mut n, mac / 65536 % 256);
+  nl_b(&mut n, mac / 256 % 256);
+  nl_b(&mut n, mac % 256);
+  nl_pad(&mut n);
+}
+
+/// A string attribute from up to 16 bytes held as two words, with its NUL.
+fn nla_str(n: &mut Net, t: u64, w0: u64, w1: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let mut l = 0;
+  while l < 16 && name_byte(w0, w1, l) != 0
+    invariant l <= 16
+  {
+    l = l + 1;
+  }
+  nla_head(&mut n, t, l + 1);
+  let mut i = 0;
+  while i < l
+    invariant i <= l && l <= 16 && net_ok(n)
+  {
+    nl_b(&mut n, name_byte(w0, w1, i));
+    i = i + 1;
+  }
+  nl_b(&mut n, 0);
+  nl_pad(&mut n);
+}
+
+/// Byte i (0 to 15) of a name held as two words.
+fn name_byte(w0: u64, w1: u64, i: u64) -> u64
+  ensures result <= 255
+{
+  let mut w = w0;
+  let mut k = i;
+  if i >= 8 {
+    w = w1;
+    k = i - 8;
+  }
+  let mut j = 0;
+  while j < k && j < 8
+    invariant j <= 8
+  {
+    w = w / 256;
+    j = j + 1;
+  }
+  return w % 256;
+}
+
+/// NLMSG_ERROR answering the request header at b[at..at + 16]: e is 0
+/// (an acknowledgement) or a positive errno.
+fn nl_error(n: &mut Net, b: &Bytes, at: u64, e: u64, port: u64)
+  requires net_ok(n) && at + 16 <= blen(b)
+  ensures net_ok(n)
+{
+  nl_begin(&mut n, NLMSG_ERROR, 0, rd32(b, at + 8), port);
+  if e == 0 {
+    nl_32(&mut n, 0);
+  } else {
+    nl_32(&mut n, 4294967296 - e % 4096);
+  }
+  let mut i = 0;
+  while i < 16
+    invariant i <= 16 && at + 16 <= blen(b) && net_ok(n)
+  {
+    nl_b(&mut n, rd8(b, at + i));
+    i = i + 1;
+  }
+  nl_end(&mut n);
+}
+
+fn nl_done(n: &mut Net, seq: u64, port: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nl_begin(&mut n, NLMSG_DONE, NLM_F_MULTI, seq, port);
+  nl_32(&mut n, 0);
+  nl_end(&mut n);
+}
+
+// ---------------------------------------------------------------- what is listed
+
+/// The prefix length of a subnet of `span` addresses.
+fn plen_of(span: u64) -> u64
+  ensures result <= 32
+{
+  let mut p = 32;
+  let mut s = span;
+  while s > 1 && p > 0
+    invariant p <= 32
+  {
+    s = s / 2;
+    p = p - 1;
+  }
+  return p;
+}
+
+/// The subnet size of prefix length p (at most 32).
+fn span_of(p: u64) -> u64
+  requires p <= 32
+  ensures 1 <= result && result <= 4294967296
+{
+  let mut s = 1;
+  let mut k = p;
+  while k < 32
+    invariant p <= k && k <= 32 && 1 <= s && s <= 4294967296
+  {
+    if s <= 2147483648 {
+      s = s * 2;
+    }
+    k = k + 1;
+  }
+  return s;
+}
+
+/// Linux's flags for interface i.
+fn if_lxflags(n: &Net, i: u64) -> u64
+  requires net_ok(n) && i < IFN
+{
+  let mut f = 0;
+  if iw(n, i, IF_KIND) == IFK_LO {
+    f = IFF_LOOPBACK;
+  } else {
+    f = IFF_BROADCAST + IFF_MULTICAST;
+  }
+  if if_up(n, i) {
+    f = f + IFF_UP;
+    if iw(n, i, IF_KIND) == IFK_LO || iw(n, i, IF_KIND) == IFK_ETH || if_carries(n, i) {
+      f = f + IFF_RUNNING + IFF_LOWER_UP;
+    }
+  }
+  return f;
+}
+
+/// RTM_NEWLINK for interface i.
+fn nl_link(n: &mut Net, i: u64, flags: u64, seq: u64, port: u64)
+  requires net_ok(n) && i < IFN
+  ensures net_ok(n)
+{
+  let k = iw(n, i, IF_KIND);
+  let lo = k == IFK_LO;
+  nl_begin(&mut n, RTM_NEWLINK, flags, seq, port);
+  nl_b(&mut n, 0);                    // ifinfomsg: family, padding
+  nl_b(&mut n, 0);
+  if lo {
+    nl_16(&mut n, ARPHRD_LOOPBACK);
+  } else {
+    nl_16(&mut n, ARPHRD_ETHER);
+  }
+  nl_32(&mut n, if_index(n, i));
+  nl_32(&mut n, if_lxflags(n, i));
+  nl_32(&mut n, 0);
+  nla_str(&mut n, IFLA_IFNAME, iw(n, i, IF_NAME), iw(n, i, IF_NAME + 1));
+  let mut oper = 2;                   // IF_OPER_DOWN
+  if lo {
+    oper = 0;                         // unknown, as Linux says of lo
+    nla_put32(&mut n, IFLA_TXQLEN, 1000);
+    nla_put32(&mut n, IFLA_MTU, 65536);
+  } else {
+    nla_put32(&mut n, IFLA_TXQLEN, 1000);
+    nla_put32(&mut n, IFLA_MTU, 1500);
+    if if_lxflags(n, i) / IFF_LOWER_UP % 2 == 1 {
+      oper = 6;                       // IF_OPER_UP
+    }
+  }
+  nla_put8(&mut n, IFLA_OPERSTATE, oper);
+  let m = iw(n, i, IF_MASTER);
+  if 1 <= m && m <= IFN {
+    nla_put32(&mut n, IFLA_MASTER, if_index(n, m - 1));
+  }
+  let p = iw(n, i, IF_PEER);
+  if k == IFK_VETH && p < IFN {
+    nla_put32(&mut n, IFLA_LINK, if_index(n, p));
+  }
+  if lo {
+    nla_mac(&mut n, IFLA_ADDRESS, 0);
+    nla_mac(&mut n, IFLA_BROADCAST, 0);
+  } else {
+    nla_mac(&mut n, IFLA_ADDRESS, iw(n, i, IF_MAC) % MAC_LIMIT);
+    nla_mac(&mut n, IFLA_BROADCAST, MAC_BCAST);
+  }
+  if k == IFK_VETH || k == IFK_BRIDGE {
+    nla_head(&mut n, IFLA_LINKINFO, 12);
+    if k == IFK_VETH {
+      nla_str(&mut n, IFLA_INFO_KIND, KIND_VETH, 0);
+    } else {
+      nla_str(&mut n, IFLA_INFO_KIND, KIND_BRIDGE, 0);
+    }
+  }
+  nl_end(&mut n);
+}
+
+/// RTM_NEWADDR for interface i's address, if it has one.
+fn nl_addr(n: &mut Net, i: u64, flags: u64, seq: u64, port: u64)
+  requires net_ok(n) && i < IFN
+  ensures net_ok(n)
+{
+  let lo = iw(n, i, IF_KIND) == IFK_LO;
+  let mut ip = if_ip(n, i);
+  let mut span = if_span(n, i);
+  if lo {
+    if !if_up(n, i) {
+      return;                         // lo has 127.0.0.1 once it is up
+    }
+    ip = LO_IP;
+    span = 16777216;
+  }
+  if ip == 0 {
+    return;
+  }
+  nl_begin(&mut n, RTM_NEWADDR, flags, seq, port);
+  nl_b(&mut n, 2);                    // ifaddrmsg: AF_INET
+  nl_b(&mut n, plen_of(span));
+  nl_b(&mut n, 0x80);                 // IFA_F_PERMANENT
+  if lo {
+    nl_b(&mut n, 254);                // RT_SCOPE_HOST
+  } else {
+    nl_b(&mut n, 0);                  // RT_SCOPE_UNIVERSE
+  }
+  nl_32(&mut n, if_index(n, i));
+  nla_ip(&mut n, IFA_ADDRESS, ip);
+  nla_ip(&mut n, IFA_LOCAL, ip);
+  if !lo {
+    nla_ip(&mut n, IFA_BROADCAST, ip / span * span + (span - 1));
+  }
+  nla_str(&mut n, IFA_LABEL, iw(n, i, IF_NAME), iw(n, i, IF_NAME + 1));
+  nl_end(&mut n);
+}
+
+/// RTM_NEWROUTE: to dst/len through gw (0: on the link) out of interface
+/// i, from src (0: unsaid).
+fn nl_route(n: &mut Net, dst: u64, len: u64, gw: u64, i: u64, src: u64, flags: u64, seq: u64, port: u64)
+  requires net_ok(n) && i < IFN && len <= 32
+  ensures net_ok(n)
+{
+  nl_begin(&mut n, RTM_NEWROUTE, flags, seq, port);
+  nl_b(&mut n, 2);                    // rtmsg: AF_INET
+  nl_b(&mut n, len);
+  nl_b(&mut n, 0);
+  nl_b(&mut n, 0);
+  nl_b(&mut n, 254);                  // RT_TABLE_MAIN
+  if gw == 0 {
+    nl_b(&mut n, 2);                  // RTPROT_KERNEL
+    nl_b(&mut n, 253);                // RT_SCOPE_LINK
+  } else {
+    nl_b(&mut n, 3);                  // RTPROT_BOOT
+    nl_b(&mut n, 0);
+  }
+  nl_b(&mut n, 1);                    // RTN_UNICAST
+  nl_32(&mut n, 0);
+  nla_put32(&mut n, RTA_TABLE, 254);
+  if len > 0 {
+    nla_ip(&mut n, RTA_DST, dst);
+  }
+  if gw != 0 {
+    nla_ip(&mut n, RTA_GATEWAY, gw);
+  }
+  if src != 0 {
+    nla_ip(&mut n, RTA_PREFSRC, src);
+  }
+  nla_put32(&mut n, RTA_OIF, if_index(n, i));
+  nl_end(&mut n);
+}
+
+/// Every route of namespace n.ns: the default one, then one for each
+/// interface's subnet.
+fn nl_routes(n: &mut Net, seq: u64, port: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  if n.ns == 0 {
+    if n.ip != 0 && n.gw != 0 {
+      nl_route(&mut n, 0, 0, n.gw, IF_ETH, 0, NLM_F_MULTI, seq, port);
+    }
+    if n.ip != 0 {
+      let s = if_span(n, IF_ETH);
+      nl_route(&mut n, n.ip / s * s, plen_of(s), 0, IF_ETH, n.ip, NLM_F_MULTI, seq, port);
+    }
+  } else {
+    let g = nsw(n, n.ns, NS_GW);
+    let o = route_if(n, g);
+    if g != 0 && o < IFN {
+      nl_route(&mut n, 0, 0, g, o, 0, NLM_F_MULTI, seq, port);
+    }
+  }
+  let mut i = 2;
+  while i < IFN
+    invariant i <= IFN && net_ok(n)
+  {
+    let ip = if_ip(n, i);
+    if iw(n, i, IF_NS) == n.ns && iw(n, i, IF_KIND) != IFK_LO && if_up(n, i) && ip != 0 {
+      let s = if_span(n, i);
+      nl_route(&mut n, ip / s * s, plen_of(s), 0, i, ip, NLM_F_MULTI, seq, port);
+    }
+    i = i + 1;
+  }
+}
+
+// ---------------------------------------------------------------- what is changed
+
+/// An IPv4 address in network order at b[a..a + 4].
+fn be_ip(b: &Bytes, a: u64) -> u64
+  requires a + 4 <= blen(b)
+  ensures result <= IP_MAX
+{
+  return rd8(b, a) * 16777216 + rd8(b, a + 1) * 65536 + rd8(b, a + 2) * 256 + rd8(b, a + 3);
+}
+
+/// A name nobody in namespace ns has: the kind's word with a number after
+/// its klen bytes (veth0, veth1, ... or bridge0, ...); half `half`.
+fn auto_name(n: &Net, ns: u64, kind: u64, klen: u64, half: u64) -> u64
+  requires net_ok(n) && (klen == 4 || klen == 6) && kind < 281474976710656
+{
+  let mut d = 0;
+  while d < 100
+    invariant d <= 100
+  {
+    let mut w = 0;
+    if klen == 4 {
+      if d < 10 {
+        w = kind + (48 + d) * 4294967296;
+      } else {
+        w = kind + (48 + d / 10) * 4294967296 + (48 + d % 10) * 1099511627776;
+      }
+    } else {
+      if d < 10 {
+        w = kind + (48 + d) * 281474976710656;
+      } else {
+        w = kind + (48 + d / 10) * 281474976710656 + (48 + d % 10) * 72057594037927936;
+      }
+    }
+    if if_by_name(n, ns, w, 0) == NO_IF {
+      if half == 0 {
+        return w;
+      }
+      return 0;
+    }
+    d = d + 1;
+  }
+  return 0;
+}
+
+/// RTM_NEWLINK and RTM_SETLINK (the message at b[at..end]): makes a veth
+/// pair or a bridge, or changes an interface. Returns 0 or an errno.
+/// tgt: the namespace IFLA_NET_NS_PID or _FD names, NS_UNSAID, or NNET if
+/// it named none that exists.
+fn rt_newlink(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, tgt: u64, flags: u64) -> u64
+  requires net_ok(n) && at + 32 <= end && end <= blen(b) && ns < NNET
+  ensures net_ok(n)
+{
+  let attrs = at + 32;
+  let idx = rd32(b, at + 20);
+  let na = nla_find(b, attrs, end, IFLA_IFNAME);
+  let name0 = nla_name(b, na, 0);
+  let name1 = nla_name(b, na, 1);
+  if na != 0 && name0 == 0 {
+    return NE_INVAL;                  // empty, or 16 bytes or more
+  }
+  let li = nla_find(b, attrs, end, IFLA_LINKINFO);
+  let ll = nla_len(b, li);
+  let mut kind = 0;
+  let mut data = 0;
+  if ll > 0 {
+    kind = nla_word(b, nla_find(b, li, li + ll, IFLA_INFO_KIND));
+    data = nla_find(b, li, li + ll, IFLA_INFO_DATA);
+  }
+  if flags / NLM_F_CREATE % 2 == 1 && idx == 0 && (na == 0 || if_by_name(n, ns, name0, name1) == NO_IF) {
+    return rt_make(&mut n, b, ns, kind, data, name0, name1);
+  }
+  let mut i = NO_IF;
+  if idx != 0 {
+    i = if_of_index(n, ns, idx);
+  } else if na != 0 {
+    i = if_by_name(n, ns, name0, name1);
+  }
+  if i >= IFN {
+    return NE_NODEV;
+  }
+  if flags / NLM_F_CREATE % 2 == 1 && flags / 0x200 % 2 == 1 {
+    return NE_EXIST;                  // NLM_F_EXCL: it is there already
+  }
+  // Up or down: ifi_change says which flags ifi_flags sets.
+  if rd32(b, at + 28) % 2 == 1 {
+    let up = rd32(b, at + 24) % 2;
+    iset(&mut n, i, IF_FLAGS, up);
+  }
+  let mac = nla_find(b, attrs, end, IFLA_ADDRESS);
+  if nla_len(b, mac) == 6 && i >= 2 {
+    iset(&mut n, i, IF_MAC, rd8(b, mac) * 1099511627776 + rd8(b, mac + 1) * 4294967296 + rd8(b, mac + 2) * 16777216
+      + rd8(b, mac + 3) * 65536 + rd8(b, mac + 4) * 256 + rd8(b, mac + 5));
+  }
+  if idx != 0 && na != 0 {
+    let other = if_by_name(n, ns, name0, name1);
+    if other != NO_IF && other != i {
+      return NE_EXIST;
+    }
+    iset(&mut n, i, IF_NAME, name0);
+    iset(&mut n, i, IF_NAME + 1, name1);
+  }
+  let m = nla_u32(b, attrs, end, IFLA_MASTER, NO_IF);
+  if m != NO_IF {
+    if m == 0 {
+      iset(&mut n, i, IF_MASTER, 0);
+    } else {
+      let br = if_of_index(n, ns, m);
+      if br >= IFN || iw(n, br, IF_KIND) != IFK_BRIDGE || iw(n, i, IF_KIND) != IFK_VETH {
+        return NE_INVAL;
+      }
+      iset(&mut n, i, IF_MASTER, br + 1);
+    }
+  }
+  if tgt != NS_UNSAID {
+    return rt_move(&mut n, i, tgt);
+  }
+  return 0;
+}
+
+/// Makes a veth pair or a bridge in namespace ns named name0/1 (0: one is
+/// made up). data: the IFLA_INFO_DATA attribute (a veth's peer), or 0.
+fn rt_make(n: &mut Net, b: &Bytes, ns: u64, kind: u64, data: u64, name0: u64, name1: u64) -> u64
+  requires net_ok(n) && ns < NNET
+  ensures net_ok(n)
+{
+  if kind != KIND_VETH && kind != KIND_BRIDGE {
+    return NE_OPNOTSUPP;
+  }
+  let mut w0 = name0;
+  let mut w1 = name1;
+  if w0 == 0 {
+    if kind == KIND_VETH {
+      w0 = auto_name(n, ns, KIND_VETH, 4, 0);
+    } else {
+      w0 = auto_name(n, ns, KIND_BRIDGE, 6, 0);
+    }
+    w1 = 0;
+  }
+  let a = if_free_slot(n);
+  if a >= IFN || w0 == 0 {
+    return NE_NOSPC;
+  }
+  if kind == KIND_BRIDGE {
+    if_make(&mut n, a, IFK_BRIDGE, ns, w0, w1);
+    return 0;
+  }
+  // The peer's name: VETH_INFO_PEER holds an ifinfomsg and its attributes.
+  let dl = nla_len(b, data);
+  let mut p0 = 0;
+  let mut p1 = 0;
+  if dl > 0 {
+    let pe = nla_find(b, data, data + dl, VETH_INFO_PEER);
+    let pl = nla_len(b, pe);
+    if pl >= 16 {
+      let pn = nla_find(b, pe + 16, pe + pl, IFLA_IFNAME);
+      p0 = nla_name(b, pn, 0);
+      p1 = nla_name(b, pn, 1);
+    }
+  }
+  if p0 != 0 && if_by_name(n, ns, p0, p1) != NO_IF {
+    return NE_EXIST;
+  }
+  if_make(&mut n, a, IFK_VETH, ns, w0, w1);
+  if p0 == 0 {
+    p0 = auto_name(n, ns, KIND_VETH, 4, 0);
+    p1 = 0;
+  }
+  let c = if_free_slot(n);
+  if c >= IFN || p0 == 0 {
+    iset(&mut n, a, IF_KIND, IFK_FREE);
+    return NE_NOSPC;
+  }
+  if_make(&mut n, c, IFK_VETH, ns, p0, p1);
+  iset(&mut n, a, IF_PEER, c);
+  iset(&mut n, c, IF_PEER, a);
+  return 0;
+}
+
+/// Moves interface i to namespace tgt: down, with no address and in no
+/// bridge, as Linux leaves it.
+fn rt_move(n: &mut Net, i: u64, tgt: u64) -> u64
+  requires net_ok(n) && i < IFN
+  ensures net_ok(n)
+{
+  let k = iw(n, i, IF_KIND);
+  if i < 2 || k == IFK_LO {
+    return NE_INVAL;                  // lo stays; so does the card here
+  }
+  if !ns_live(n, tgt) {
+    return NE_INVAL;
+  }
+  if iw(n, i, IF_NS) == tgt {
+    return 0;
+  }
+  if if_by_name(n, tgt, iw(n, i, IF_NAME), iw(n, i, IF_NAME + 1)) != NO_IF {
+    return NE_EXIST;
+  }
+  iset(&mut n, i, IF_NS, tgt);
+  iset(&mut n, i, IF_FLAGS, 0);
+  iset(&mut n, i, IF_IP, 0);
+  iset(&mut n, i, IF_SPAN, 0);
+  iset(&mut n, i, IF_MASTER, 0);
+  let mut j = 0;
+  while j < IFN
+    invariant j <= IFN && net_ok(n)
+  {
+    if iw(n, j, IF_MASTER) == i + 1 {
+      iset(&mut n, j, IF_MASTER, 0);  // a bridge's ports stay behind
+    }
+    j = j + 1;
+  }
+  return 0;
+}
+
+/// RTM_DELLINK.
+fn rt_dellink(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64) -> u64
+  requires net_ok(n) && at + 32 <= end && end <= blen(b)
+  ensures net_ok(n)
+{
+  let idx = rd32(b, at + 20);
+  let mut i = NO_IF;
+  if idx != 0 {
+    i = if_of_index(n, ns, idx);
+  } else {
+    let na = nla_find(b, at + 32, end, IFLA_IFNAME);
+    i = if_by_name(n, ns, nla_name(b, na, 0), nla_name(b, na, 1));
+  }
+  if i >= IFN {
+    return NE_NODEV;
+  }
+  let k = iw(n, i, IF_KIND);
+  if k != IFK_VETH && k != IFK_BRIDGE {
+    return NE_OPNOTSUPP;
+  }
+  if_drop(&mut n, i);
+  return 0;
+}
+
+/// RTM_NEWADDR and RTM_DELADDR: one IPv4 address per interface.
+fn rt_addr(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, del: bool) -> u64
+  requires net_ok(n) && at + 24 <= end && end <= blen(b)
+  ensures net_ok(n)
+{
+  let fam = rd8(b, at + 16);
+  let plen = rd8(b, at + 17);
+  let i = if_of_index(n, ns, rd32(b, at + 20));
+  if fam != 2 {
+    return NE_OPNOTSUPP;
+  }
+  if i >= IFN {
+    return NE_NODEV;
+  }
+  let mut a = nla_find(b, at + 24, end, IFA_LOCAL);
+  if nla_len(b, a) < 4 {
+    a = nla_find(b, at + 24, end, IFA_ADDRESS);
+  }
+  if nla_len(b, a) < 4 || plen > 32 {
+    return NE_INVAL;
+  }
+  let ip = be_ip(b, a);
+  if iw(n, i, IF_KIND) == IFK_LO {
+    if ip / 16777216 == LO_NET {
+      return 0;                       // 127.0.0.1/8 comes with lo
+    }
+    return NE_OPNOTSUPP;
+  }
+  if i == IF_ETH {
+    return NE_OPNOTSUPP;              // the card's address is DHCP's
+  }
+  let have = iw(n, i, IF_IP);
+  if del {
+    if have != ip {
+      return 99;                      // EADDRNOTAVAIL
+    }
+    iset(&mut n, i, IF_IP, 0);
+    iset(&mut n, i, IF_SPAN, 0);
+    return 0;
+  }
+  if have == ip {
+    return NE_EXIST;
+  }
+  if have != 0 {
+    return NE_OPNOTSUPP;              // one address per interface
+  }
+  iset(&mut n, i, IF_IP, ip);
+  iset(&mut n, i, IF_SPAN, span_of(plen));
+  return 0;
+}
+
+/// RTM_NEWROUTE and RTM_DELROUTE: a namespace's default route (not
+/// namespace 0's, which DHCP gives).
+fn rt_route(n: &mut Net, b: &Bytes, at: u64, end: u64, del: bool, flags: u64) -> u64
+  requires net_ok(n) && at + 28 <= end && end <= blen(b)
+  ensures net_ok(n)
+{
+  if rd8(b, at + 16) != 2 || rd8(b, at + 17) != 0 || n.ns == 0 {
+    return NE_OPNOTSUPP;
+  }
+  let have = nsw(n, n.ns, NS_GW);
+  if del {
+    if have == 0 {
+      return NE_SRCH;
+    }
+    nsset(&mut n, n.ns, NS_GW, 0);
+    return 0;
+  }
+  let g = nla_find(b, at + 28, end, RTA_GATEWAY);
+  if nla_len(b, g) < 4 {
+    return NE_OPNOTSUPP;              // a route with no gateway
+  }
+  let gw = be_ip(b, g);
+  if route_if(n, gw) >= IFN {
+    return NE_NETUNREACH;
+  }
+  if have != 0 && flags / NLM_F_REPLACE % 2 == 0 {
+    return NE_EXIST;
+  }
+  nsset(&mut n, n.ns, NS_GW, gw);
+  return 0;
+}
+
+/// The requests in b[0..len] from netlink socket q (of namespace ns), each
+/// answered on q. admin: the sender may change things (CAP_NET_ADMIN).
+fn rt_request(n: &mut Net, q: u64, b: &Bytes, len: u64, tgt: u64, admin: bool)
+  requires net_ok(n) && q < NLS && len <= blen(b)
+  ensures net_ok(n)
+{
+  let was = n.ns;
+  let ns = get(n.nls, q * NL_W + NL_NS);
+  let port = get(n.nls, q * NL_W + NL_PORT);
+  if ns >= NNET || !ns_live(n, ns) {
+    return;
+  }
+  n.ns = ns;
+  nlw_open(&mut n, q);
+  let mut at = 0;
+  let mut go = true;
+  while go && at < len && len - at >= 16
+    invariant at <= len && len <= blen(b) && net_ok(n) && ns < NNET
+  {
+    let ml = rd32(b, at);
+    if ml < 16 || ml > len - at {
+      go = false;
+    } else {
+      let kind = rd16(b, at + 4);
+      let fl = rd16(b, at + 6);
+      let seq = rd32(b, at + 8);
+      let end = at + ml;
+      let change = kind == RTM_NEWLINK || kind == RTM_DELLINK || kind == RTM_SETLINK || kind == RTM_NEWADDR
+        || kind == RTM_DELADDR || kind == RTM_NEWROUTE || kind == RTM_DELROUTE;
+      let mut e = 0;
+      if change && !admin {
+        e = NE_PERM;
+      } else if kind == RTM_GETLINK && fl / 256 % 4 != 0 {
+        let mut i = 0;
+        while i < IFN
+          invariant i <= IFN && net_ok(n)
+        {
+          if iw(n, i, IF_KIND) != IFK_FREE && iw(n, i, IF_NS) == ns {
+            nl_link(&mut n, i, NLM_F_MULTI, seq, port);
+          }
+          i = i + 1;
+        }
+        nl_done(&mut n, seq, port);
+      } else if kind == RTM_GETLINK {
+        let mut i = NO_IF;
+        if ml >= 32 {
+          let idx = rd32(b, at + 20);
+          if idx != 0 {
+            i = if_of_index(n, ns, idx);
+          } else {
+            let na = nla_find(b, at + 32, end, IFLA_IFNAME);
+            i = if_by_name(n, ns, nla_name(b, na, 0), nla_name(b, na, 1));
+          }
+        }
+        if i < IFN {
+          nl_link(&mut n, i, 0, seq, port);
+        } else {
+          e = NE_NODEV;
+        }
+      } else if kind == RTM_GETADDR && fl / 256 % 4 != 0 {
+        let mut fam = 0;
+        if ml >= 17 {
+          fam = rd8(b, at + 16);
+        }
+        if fam == 0 || fam == 2 {
+          let mut i = 0;
+          while i < IFN
+            invariant i <= IFN && net_ok(n)
+          {
+            if iw(n, i, IF_KIND) != IFK_FREE && iw(n, i, IF_NS) == ns {
+              nl_addr(&mut n, i, NLM_F_MULTI, seq, port);
+            }
+            i = i + 1;
+          }
+        }
+        nl_done(&mut n, seq, port);
+      } else if kind == RTM_GETROUTE && fl / 256 % 4 != 0 {
+        let mut fam = 0;
+        if ml >= 17 {
+          fam = rd8(b, at + 16);
+        }
+        if fam == 0 || fam == 2 {
+          nl_routes(&mut n, seq, port);
+        }
+        nl_done(&mut n, seq, port);
+      } else if (kind == RTM_NEWLINK || kind == RTM_SETLINK) && ml >= 32 {
+        e = rt_newlink(&mut n, b, at, end, ns, tgt, fl);
+      } else if kind == RTM_DELLINK && ml >= 32 {
+        e = rt_dellink(&mut n, b, at, end, ns);
+      } else if (kind == RTM_NEWADDR || kind == RTM_DELADDR) && ml >= 24 {
+        e = rt_addr(&mut n, b, at, end, ns, kind == RTM_DELADDR);
+      } else if (kind == RTM_NEWROUTE || kind == RTM_DELROUTE) && ml >= 28 {
+        e = rt_route(&mut n, b, at, end, kind == RTM_DELROUTE, fl);
+      } else if fl / 256 % 4 != 0 {
+        nl_done(&mut n, seq, port);   // a dump of something not kept: empty
+      } else if kind != NLMSG_NOOP && kind != NLMSG_DONE {
+        e = NE_OPNOTSUPP;
+      }
+      n.ns = ns;
+      if e != 0 || (fl / NLM_F_ACK % 2 == 1 && fl / 256 % 4 == 0) {
+        nl_error(&mut n, b, at, e, port);
+      }
+      let step = (ml + 3) / 4 * 4;
+      if step > len - at {
+        go = false;
+      } else {
+        at = at + step;
+      }
+    }
+  }
+  nlw_close(&mut n, q);
+  n.ns = was;
+}
+
+// ---------------------------------------------------------------- the sockets
+
+/// A netlink socket of namespace ns, with port id `port`: its slot, or NLS.
+fn nl_open(n: &mut Net, ns: u64, port: u64) -> u64
+  requires net_ok(n)
+  ensures net_ok(n) && result <= NLS
+{
+  let mut q = 0;
+  while q < NLS
+    invariant q <= NLS && net_ok(n)
+  {
+    if get(n.nls, q * NL_W + NL_USED) == 0 {
+      n.nls = set(n.nls, q * NL_W + NL_USED, 1);
+      n.nls = set(n.nls, q * NL_W + NL_LEN, 0);
+      n.nls = set(n.nls, q * NL_W + NL_PORT, port);
+      n.nls = set(n.nls, q * NL_W + NL_NS, ns);
+      return q;
+    }
+    q = q + 1;
+  }
+  return NLS;
+}
+
+/// Is a netlink socket using port id `port`?
+fn nl_port_used(n: &Net, port: u64) -> bool
+  requires net_ok(n)
+{
+  let mut q = 0;
+  while q < NLS
+    invariant q <= NLS
+  {
+    if get(n.nls, q * NL_W + NL_USED) == 1 && get(n.nls, q * NL_W + NL_PORT) == port {
+      return true;
+    }
+    q = q + 1;
+  }
+  return false;
+}
+
+/// Bytes queued on socket q.
+fn nl_queued(n: &Net, q: u64) -> u64
+  requires net_ok(n)
+  ensures result <= NLQ
+{
+  if q >= NLS || get(n.nls, q * NL_W + NL_USED) != 1 {
+    return 0;
+  }
+  return smaller(get(n.nls, q * NL_W + NL_LEN), NLQ);
+}
+
+/// Takes whole messages queued on q, up to max bytes (and what out holds),
+/// into the start of out: the count. With peek they stay queued.
+fn nl_take(n: &mut Net, q: u64, out: &mut Bytes, max: u64, peek: bool) -> u64
+  requires net_ok(n)
+  ensures net_ok(n) && blen(out) == old(blen(out))
+  ensures result <= blen(out) && result <= max
+{
+  let have = nl_queued(n, q);
+  if have == 0 || q >= NLS {
+    return 0;
+  }
+  let base = q * NLQ;
+  let room = smaller(max, blen(out));
+  // Whole messages: each starts with its length.
+  let mut take = 0;
+  let mut go = true;
+  while go && take + 16 <= have
+    invariant take <= have && take <= room && have <= NLQ && q < NLS && net_ok(n)
+  {
+    let l = rd32(n.nlq, base + take);
+    let step = (l + 3) / 4 * 4;
+    if l < 16 || take + step > have || take + step > room {
+      go = false;
+    } else {
+      take = take + step;
+    }
+  }
+  if take == 0 {
+    // The first message does not fit: what fits of it, and it is gone
+    // (MSG_TRUNC), as Linux does with a datagram.
+    take = smaller(room, have);
+    bcopy(&mut out, 0, n.nlq, base, take);
+    if !peek {
+      nl_drop(&mut n, q, smaller(have, (rd32(n.nlq, base) + 3) / 4 * 4));
+    }
+    return take;
+  }
+  bcopy(&mut out, 0, n.nlq, base, take);
+  if !peek {
+    nl_drop(&mut n, q, take);
+  }
+  return take;
+}
+
+/// Drops the first k bytes queued on q.
+fn nl_drop(n: &mut Net, q: u64, k: u64)
+  requires net_ok(n) && q < NLS
+  ensures net_ok(n)
+{
+  let have = nl_queued(n, q);
+  if k >= have {
+    n.nls = set(n.nls, q * NL_W + NL_LEN, 0);
+    return;
+  }
+  let base = q * NLQ;
+  let mut i = 0;
+  while i + k < have
+    invariant i + k <= have && have <= NLQ && q < NLS && net_ok(n)
+  {
+    bset(&mut n.nlq, base + i, bget(n.nlq, base + i + k));
+    i = i + 1;
+  }
+  n.nls = set(n.nls, q * NL_W + NL_LEN, have - k);
+}
+
+// ---------------------------------------------------------------- for system calls
+
+fn nic_nl_open(c: &mut Nic, ns: u64, port: u64) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c) && result <= NLS
+{
+  match c {
+    Nic::None => { c = Nic::None; return NLS; },
+    Nic::Up(mut n) => {
+      let q = nl_open(&mut n, ns, port);
+      c = Nic::Up(n);
+      return q;
+    },
+  }
+}
+
+fn nic_nl_close(c: &mut Nic, q: u64)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if q < NLS {
+        n.nls = set(n.nls, q * NL_W + NL_USED, 0);
+        n.nls = set(n.nls, q * NL_W + NL_LEN, 0);
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
+fn nic_nl_port_used(c: &Nic, port: u64) -> bool
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return false; },
+    Nic::Up(n) => { return nl_port_used(n, port); },
+  }
+}
+
+/// Socket q's port id.
+fn nic_nl_port(c: &Nic, q: u64) -> u64
+  requires nic_ok(c)
+  ensures result <= 4294967295
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if q < NLS && get(n.nls, q * NL_W + NL_PORT) <= 4294967295 {
+        return get(n.nls, q * NL_W + NL_PORT);
+      }
+      return 0;
+    },
+  }
+}
+
+fn nic_nl_queued(c: &Nic, q: u64) -> u64
+  requires nic_ok(c)
+  ensures result <= NLQ
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => { return nl_queued(n, q); },
+  }
+}
+
+fn nic_nl_request(c: &mut Nic, q: u64, b: &Bytes, len: u64, tgt: u64, admin: bool)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if q < NLS && len <= blen(b) {
+        rt_request(&mut n, q, b, len, tgt, admin);
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
+fn nic_nl_take(c: &mut Nic, q: u64, out: &mut Bytes, max: u64, peek: bool) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c) && blen(out) == old(blen(out))
+  ensures result <= blen(out) && result <= max
+{
+  match c {
+    Nic::None => { c = Nic::None; return 0; },
+    Nic::Up(mut n) => {
+      let r = nl_take(&mut n, q, &mut out, max, peek);
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+// ---------------------------------------------------------------- for the ioctls
+// With no network card there is no table; the answers are then those of
+// a loopback "lo", up, in namespace 0.
+
+/// Interface slot named w0/w1 in namespace ns, or NO_IF.
+fn nic_if_by_name(c: &Nic, ns: u64, w0: u64, w1: u64) -> u64
+  requires nic_ok(c)
+  ensures result == NO_IF || result < IFN
+{
+  match c {
+    Nic::None => {
+      if ns == 0 && w0 == NAME_LO && w1 == 0 {
+        return 0;
+      }
+      return NO_IF;
+    },
+    Nic::Up(n) => { return if_by_name(n, ns, w0, w1); },
+  }
+}
+
+/// Interface slot of index x in namespace ns, or NO_IF.
+fn nic_if_of_index(c: &Nic, ns: u64, x: u64) -> u64
+  requires nic_ok(c)
+  ensures result == NO_IF || result < IFN
+{
+  match c {
+    Nic::None => {
+      if ns == 0 && x == 1 {
+        return 0;
+      }
+      return NO_IF;
+    },
+    Nic::Up(n) => { return if_of_index(n, ns, x); },
+  }
+}
+
+/// Is slot i an interface of namespace ns?
+fn nic_if_in(c: &Nic, ns: u64, i: u64) -> bool
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return ns == 0 && i == 0; },
+    Nic::Up(n) => { return i < IFN && iw(n, i, IF_KIND) != IFK_FREE && iw(n, i, IF_NS) == ns; },
+  }
+}
+
+fn nic_if_index(c: &Nic, i: u64) -> u64
+  requires nic_ok(c) && i < IFN
+  ensures 1 <= result && result <= IFN
+{
+  match c {
+    Nic::None => { return 1; },
+    Nic::Up(n) => { return if_index(n, i); },
+  }
+}
+
+/// Half `half` of slot i's name.
+fn nic_if_name(c: &Nic, i: u64, half: u64) -> u64
+  requires nic_ok(c) && i < IFN && half <= 1
+{
+  match c {
+    Nic::None => {
+      if half == 0 {
+        return NAME_LO;
+      }
+      return 0;
+    },
+    Nic::Up(n) => { return iw(n, i, IF_NAME + half); },
+  }
+}
+
+/// Linux's flags for slot i.
+fn nic_if_flags(c: &Nic, i: u64) -> u64
+  requires nic_ok(c) && i < IFN
+{
+  match c {
+    Nic::None => { return IFF_UP + IFF_LOOPBACK + IFF_RUNNING; },
+    Nic::Up(n) => { return if_lxflags(n, i); },
+  }
+}
+
+/// Slot i's IPv4 address (lo's once it is up), or 0.
+fn nic_if_addr(c: &Nic, i: u64) -> u64
+  requires nic_ok(c) && i < IFN
+  ensures result <= IP_MAX
+{
+  match c {
+    Nic::None => { return LO_IP; },
+    Nic::Up(n) => {
+      if iw(n, i, IF_KIND) == IFK_LO {
+        if if_up(n, i) {
+          return LO_IP;
+        }
+        return 0;
+      }
+      return if_ip(n, i);
+    },
+  }
+}
+
+/// Sets slot i up or down. Namespace 0's lo and the card stay up.
+fn nic_if_set_up(c: &mut Nic, i: u64, up: bool)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if 2 <= i && i < IFN && iw(n, i, IF_KIND) != IFK_FREE {
+        if up {
+          iset(&mut n, i, IF_FLAGS, IFF_UP);
+        } else {
+          iset(&mut n, i, IF_FLAGS, 0);
+        }
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
+/// Renames slot i (down, as Linux requires) to w0/w1 unless namespace ns
+/// has that name: 0, or a positive errno.
+fn nic_if_rename(c: &mut Nic, ns: u64, i: u64, w0: u64, w1: u64) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; return NE_OPNOTSUPP; },
+    Nic::Up(mut n) => {
+      let mut e = 0;
+      if i < 2 || i >= IFN || iw(n, i, IF_KIND) == IFK_FREE || iw(n, i, IF_KIND) == IFK_LO {
+        e = NE_OPNOTSUPP;
+      } else if if_up(n, i) {
+        e = 16;                             // EBUSY
+      } else if w0 == 0 {
+        e = NE_INVAL;
+      } else if if_by_name(n, ns, w0, w1) != NO_IF {
+        e = NE_EXIST;
+      } else {
+        iset(&mut n, i, IF_NAME, w0);
+        iset(&mut n, i, IF_NAME + 1, w1);
+      }
+      c = Nic::Up(n);
+      return e;
+    },
+  }
+}
