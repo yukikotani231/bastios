@@ -10,7 +10,7 @@
 //   /proc/sys/kernel/tainted, pid_max, printk, and the System V IPC
 //   limits shmmax, shmall, shmmni, msgmax, msgmnb, msgmni, sem
 //                           read-only sysctls with their fixed values
-//   /proc/sys/fs/pipe-max-size  the most F_SETPIPE_SZ gives
+//   /proc/sys/fs/pipe-max-size  the most F_SETPIPE_SZ gives; root may write it
 //   /proc/sys/fs/inotify/max_queued_events, max_user_instances,
 //   max_user_watches        inotify's fixed limits (src/lxinotify.bastio)
 //   /proc/sys/kernel/hostname, domainname, ostype, osrelease, version
@@ -39,12 +39,14 @@
 // can on Linux too.
 //
 // Not here: argv in cmdline, readlink of /proc/self itself (it reads as
-// the directory), /proc/PID/fd, maps and environ, writable sysctls, and
+// the directory), /proc/PID/fd, maps and environ, writable sysctls but
+// pipe-max-size (proc_write), and
 // /proc/sys as a directory (its files open and stat, but are not listed).
 // A sysctl for a feature BastiOS lacks (core dumps, splice) is left out,
 // so a program that checks for it finds the feature missing.
 
 import "linux.bastio";
+import "core/num.bastio";
 
 // PROC_DEV, DIR_PROC, PF_EXE and EACCES are in src/proc.bastio, which the
 // files that hook in here are compiled after.
@@ -384,10 +386,19 @@ fn loop_sys_text(k: &mut Kernel, s: u64, o: &mut Bytes) -> u64
   return put_c(&mut o, e, 10);
 }
 
+/// Whether /proc file f may be opened for writing (by root: it is
+/// rw-r--r--): /proc/sys/fs/pipe-max-size, the one writable sysctl.
+fn proc_writable(f: u64) -> bool {
+  return f == PROC_DEV + PSYS + SY_PIPE_MAX;
+}
+
 /// What stat says about /proc file f (a proc_file device).
 fn proc_meta(f: u64) -> Meta {
   if is_exe_file(f) {
     return Meta { ok: true, mode: S_IFLNK, size: 0, ino: INO_PROC + f % 4096, mtime: 0, own: 0 };
+  }
+  if proc_writable(f) {
+    return Meta { ok: true, mode: 0x81A4, size: 0, ino: INO_PROC + f % 4096, mtime: 0, own: 0 };
   }
   return Meta { ok: true, mode: S_IFREG_RO, size: 0, ino: INO_PROC + f % 4096, mtime: 0, own: 0 };
 }
@@ -469,16 +480,7 @@ fn put_s(o: &mut Bytes, at: u64, s: Str) -> u64
   requires blen(o) == PROC_OUT && at <= PROC_OUT
   ensures blen(o) == PROC_OUT && result <= PROC_OUT
 {
-  let mut a = at;
-  let mut i = 0;
-  while i < slen(s) && a < PROC_OUT
-    invariant a <= PROC_OUT && blen(o) == PROC_OUT
-  {
-    bset(&mut o, a, sget(s, i));
-    a = a + 1;
-    i = i + 1;
-  }
-  return a;
+  return bytes_put_str(&mut o, at, s);
 }
 
 /// Appends byte c.
@@ -486,11 +488,7 @@ fn put_c(o: &mut Bytes, at: u64, c: u8) -> u64
   requires blen(o) == PROC_OUT && at <= PROC_OUT
   ensures blen(o) == PROC_OUT && result <= PROC_OUT
 {
-  if at >= PROC_OUT {
-    return at;
-  }
-  bset(&mut o, at, c);
-  return at + 1;
+  return bytes_put_byte(&mut o, at, c);
 }
 
 /// Appends the low 40 bits of v as 10 hex digits (a user address).
@@ -519,21 +517,7 @@ fn put_n(o: &mut Bytes, at: u64, v: u64) -> u64
   requires blen(o) == PROC_OUT && at <= PROC_OUT
   ensures blen(o) == PROC_OUT && result <= PROC_OUT
 {
-  let mut p = 1;
-  while p <= v / 10
-    invariant p >= 1
-  {
-    p = p * 10;
-  }
-  let mut a = at;
-  let mut q = p;
-  while q > 0
-    invariant a <= PROC_OUT && blen(o) == PROC_OUT
-  {
-    a = put_c(&mut o, a, cast[u8](48 + v / q % 10));
-    q = q / 10;
-  }
-  return a;
+  return bytes_put_u64(&mut o, at, v);
 }
 
 /// A status line's four ids (real, effective, saved, file system) from
@@ -673,7 +657,7 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
       return uts_proc_text(k, what - SY_UTS, &mut o);
     }
     if what == SY_PIPE_MAX {
-      let a = put_n(&mut o, 0, PIPE_CAP);   // F_SETPIPE_SZ goes no higher
+      let a = put_n(&mut o, 0, pipe_max(k));
       return put_c(&mut o, a, 10);
     }
     if what >= SY_INO && what < SY_INO + 3 {
@@ -763,7 +747,9 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, avail);
     a = put_s(&mut o, a, " kB\nMemAvailable: ");
     a = put_n(&mut o, a, avail);
-    return put_s(&mut o, a, " kB\nBuffers: 0 kB\nCached: 0 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n");
+    a = put_s(&mut o, a, " kB\nBuffers: 0 kB\nCached: ");
+    a = put_n(&mut o, a, smaller(pc_count(k.fs.pc), PC_N) * 4);
+    return put_s(&mut o, a, " kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n");
   }
   if what == PF_CPUINFO && p == 0 {
     let mut a = 0;
@@ -1137,4 +1123,56 @@ fn lx_procfs_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u
     return lx_readlink(&mut k, pid, AT_FDCWD, a, b, c);
   }
   return lx_readlink(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
+}
+
+/// write(2) to /proc file f, open for writing (proc_writable): a decimal
+/// number for pipe-max-size, rounded up to a power of two pages as Linux
+/// does (round_pipe_size), at least a page and at most 2^31. Returns n,
+/// or -EINVAL for anything else. Past PIPE_CAP it is kept and read back,
+/// but a pipe still holds no more than PIPE_CAP (F_SETPIPE_SZ: ENOMEM).
+fn proc_write(k: &mut Kernel, pid: u64, f: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if !proc_writable(f) || n == 0 || n > 32 {
+    return EINVAL;
+  }
+  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, n) != n {
+    return EFAULT;
+  }
+  let mut i = 0;
+  while i < n && (bget(k.fs.xfer, i) == 32 || bget(k.fs.xfer, i) == 9)
+    invariant i <= n && n <= 32 && kok(k)
+  {
+    i = i + 1;
+  }
+  let mut v = 0;
+  let mut any = false;
+  while i < n && bget(k.fs.xfer, i) >= 48 && bget(k.fs.xfer, i) <= 57 && v <= 0x80000000
+    invariant i <= n && n <= 32 && v <= 0x80000009 * 10 && kok(k)
+  {
+    v = v * 10 + cast[u64](bget(k.fs.xfer, i)) - 48;
+    any = true;
+    i = i + 1;
+  }
+  while i < n && (bget(k.fs.xfer, i) == 10 || bget(k.fs.xfer, i) == 32 || bget(k.fs.xfer, i) == 9)
+    invariant i <= n && n <= 32 && kok(k)
+  {
+    i = i + 1;
+  }
+  if !any || i < n || v > 0x80000000 {
+    return EINVAL;
+  }
+  let mut size = PIPE_PAGE;
+  while size < v && size < 0x80000000
+    invariant PIPE_PAGE <= size && size <= 0x80000000
+  {
+    if size >= 0x40000000 {
+      size = 0x80000000;
+    } else {
+      size = size * 2;
+    }
+  }
+  k.sys = set(k.sys, SYS_PIPEMAX, size);
+  return n;
 }

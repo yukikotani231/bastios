@@ -65,6 +65,9 @@ import "lxns.bastio";
 import "lxperm.bastio";
 import "lxinotify.bastio";
 import "lazy.bastio";
+import "hda.bastio";
+import "lxsnd.bastio";
+import "lxmouse.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
@@ -114,10 +117,12 @@ const MAX_IDLE: u64 = 1024;           // more than there are processors
 // processor through a lock. The invariant is what each processor may assume
 // when it takes the lock, and must restore before it lets go.
 // `idle` counts the processors that found nothing to run and have not
-// come back for more: those a V_WAKE may be worth sending to.
+// come back for more: those a V_WAKE may be worth sending to. `ticked`
+// says the bootstrap processor's timer ticked since the last `next_job`
+// (an idle application processor sleeps through its own; see `next_job`).
 // `acpi` holds the clock's PM timer (without an HPET) and the power
 // button; `reboot` says the stop is a restart.
-struct Sys { k: Kernel, con: Con, pic: Pic, apic: Lapic, clock: Hpet, acpi: Acpi, stop: bool, reboot: bool, idle: u64 }
+struct Sys { k: Kernel, con: Con, pic: Pic, apic: Lapic, clock: Hpet, acpi: Acpi, stop: bool, reboot: bool, idle: u64, ticked: bool }
   invariant kok(k) && con_ok(con) && pic_ok(pic) && lapic_ok(apic) && hpet_ok(clock) && acpi_ok(acpi);
 
 spec fn sys_ok(s: &Sys) -> bool {
@@ -214,6 +219,11 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
   ensures !(result is Job::Run) ==> mmu_root(mmu) == KERNEL_ROOT
 {
   if s.stop {
+    // An idle application processor sleeps up to a second (see below):
+    // wake it to leave too.
+    if s.idle > 0 {
+      lapic_wake(&mut s.apic);
+    }
     return Job::Stop;
   }
   let mut woke = false;
@@ -233,10 +243,14 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
   let p = lx_pick(&mut s.k, from);
   // Only the bootstrap processor takes V_DISK. A process the disk woke
   // that this processor is not about to run would wait for an idle
-  // processor's next tick without a V_WAKE.
-  if woke && s.idle > 0 && any_ready(s.k.procs) {
+  // processor's next tick without a V_WAKE. An idle application processor
+  // stops its own timer (boot/smp.c, bst_cpu_wait), so a process left
+  // ready after the bootstrap processor's tick wakes the idle ones, which
+  // is when their own ticks, 10 ms apart, would have found it.
+  if (woke || s.ticked) && s.idle > 0 && any_ready(s.k.procs) {
     lapic_wake(&mut s.apic);
   }
+  s.ticked = false;
   if p == 0 {
     if live_count(s.k.procs) == 0 {
       s.stop = true;
@@ -292,6 +306,8 @@ fn idled(s: &mut Sys, cpu: &Cpu, v: u64)
   ack(&mut s.pic, &mut s.apic, v);
   if v == V_TIMER {
     s.k.ticks = tick(s.k.ticks);
+    s.ticked = true;
+    snd_poll(&mut s.k.snd);
     s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
     lx_alarms(&mut s.k);
     power_button(&mut s);
@@ -319,6 +335,8 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   ack(&mut s.pic, &mut s.apic, v);
   if v == V_TIMER {
     s.k.ticks = tick(s.k.ticks);
+    s.ticked = true;
+    snd_poll(&mut s.k.snd);
   }
   if state(s.k.procs, p) == EXITING {
     thread_free(&mut s.k, mmu, p, tgid(s.k.procs, p));   // its leader is in execve
@@ -510,10 +528,11 @@ const CHUNK: u64 = 256;
 /// Under the kernel lock, for `pump`: queues the rn bytes received in rx as
 /// typed input, and moves the next chunk of output into tx. Returns how
 /// many bytes of tx to send.
-fn exchange(s: &mut Sys, tx: &mut Bytes, rx: &Bytes, rn: u64, pend: &Atomic[u64]) -> u64
+fn exchange(s: &mut Sys, tx: &mut Bytes, rx: &Bytes, rn: u64, mx: &Bytes, mn: u64, pend: &Atomic[u64]) -> u64
   requires sys_ok(s)
   ensures sys_ok(s)
 {
+  mice_push(&mut s.k, mx, mn);              // mouse packets (src/lxmouse.bastio)
   let mut typed = rn > 0;
   let mut i = 0;
   while i < rn && i < blen(rx)
@@ -563,29 +582,38 @@ fn pump(t: &mut Term, s: &Lock[Sys], pend: &Atomic[u64])
 {
   let mut tx = balloc(CHUNK);
   let mut rx = balloc(CHUNK);
+  let mut mx = balloc(CHUNK);
   let mut rounds = 0;
   let mut more = true;
   while more && rounds < 16
-    invariant term_ok(t) && blen(rx) == CHUNK
+    invariant term_ok(t) && blen(rx) == CHUNK && blen(mx) == CHUNK
   {
     let mut rn = 0;
+    let mut mn = 0;
     let mut c = 0;
-    while c < 256 && rn < CHUNK
-      invariant term_ok(t) && rn <= CHUNK && blen(rx) == CHUNK
+    while c != 256 && rn < CHUNK && mn + 3 <= CHUNK
+      invariant term_ok(t) && rn <= CHUNK && mn <= CHUNK && blen(rx) == CHUNK && blen(mx) == CHUNK
     {
       c = term_poll(&mut t);
       if c < 256 {
         bset(&mut rx, rn, cast[u8](c));
         rn = rn + 1;
+      } else if c > 256 {
+        let p = c - MOUSE_PKT;              // a mouse packet: its three bytes
+        bset(&mut mx, mn, cast[u8](p / 65536 % 256));
+        bset(&mut mx, mn + 1, cast[u8](p / 256 % 256));
+        bset(&mut mx, mn + 2, cast[u8](p % 256));
+        mn = mn + 3;
       }
     }
-    let tn = locked(s, exchange, &mut tx, rx, rn, pend);
+    let tn = locked(s, exchange, &mut tx, rx, rn, mx, mn, pend);
     term_send(&mut t, tx, tn);
-    more = tn == CHUNK || rn == CHUNK;
+    more = tn == CHUNK || rn == CHUNK || mn + 3 > CHUNK;
     rounds = rounds + 1;
   }
   bfree(tx);
   bfree(rx);
+  bfree(mx);
 }
 
 /// Pumps the console if no other processor is already doing it. One that
@@ -789,6 +817,7 @@ fn install_files(con: &mut Con, k: &mut Kernel)
   requires con_ok(con) && kok(k)
   ensures kok(k) && con_ok(con)
 {
+  pc_tables(&mut k.fs.pc, &mut k.mem);   // the page cache's tables, before the first `mem` (src/pcache.bastio)
   // /tmp and /etc, which Linux programs expect, root's home and /home:
   // RAM directories.
   if !make_dir(&mut k.fs, "tmp") || !make_dir(&mut k.fs, "etc") || !make_dir(&mut k.fs, "root") || !make_dir(&mut k.fs, "home") {
@@ -884,7 +913,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut debug_exit = port_claim(&mut ports, DEBUG_EXIT, 1);
   let mut uart = Uart { io: port_claim(&mut ports, COM1, 8), present: true };
   let mut kbd = Kbd { data: port_claim(&mut ports, KBD_DATA, 1), status: port_claim(&mut ports, KBD_STATUS, 1),
-    shift: false, ctrl: false, ext: false, present: true };
+    shift: false, ctrl: false, ext: false, present: true, aux: false, mb: 0, mn: 0 };
   let mut pic = Pic { master: port_claim(&mut ports, PIC1, 2), slave: port_claim(&mut ports, PIC2, 2) };
   let mut pit = Pit { io: port_claim(&mut ports, PIT, 4) };
   let mut rtc = Rtc { io: port_claim(&mut ports, RTC, 2) };
@@ -1022,9 +1051,22 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   } else if xdev < PCI_NONE {
     puts(&mut con, "usb: no keyboard on the xHCI controller's root ports\r\n");
   }
+  // The sound card, if any, with six pages from SND_AT.
+  let snd = snd_find(&mut pci, &mut m, &mut win, SND_AT, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi);
+  let snd_l = snd_lo(snd);
+  let snd_h = snd_hi(snd);
+  if snd_live(snd) {
+    puts(&mut con, "sound: HD Audio, ");
+    put_num(&mut con, snd_outs(snd));
+    if snd_outs(snd) == 1 {
+      puts(&mut con, " output\r\n");
+    } else {
+      puts(&mut con, " outputs\r\n");
+    }
+  }
   // The network card, if any: nine pages after the disk's four (an e1000
   // takes six of them).
-  let mut nic = nic_new(&mut ports, &mut pci, &mut m, &mut win, 4, dev_lo, dev_hi, acpi_lo, acpi_hi, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi, msi);
+  let mut nic = nic_new(&mut ports, &mut pci, &mut m, &mut win, 4, dev_lo, dev_hi, acpi_lo, acpi_hi, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi, snd_l, snd_h, msi);
   // An e1000 has no MSI: its line goes through the 8259 (vectors 32-47,
   // acknowledged like the timer's), unless it shares the timer's, the
   // keyboard's, the cascade or COM1's.
@@ -1060,6 +1102,11 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
       puts(&mut con, "keyboard: PS/2 (no USB keyboard)\r\n");
     } else if !usb_on {
       puts(&mut con, "keyboard: none found (no USB keyboard, no PS/2 controller)\r\n");
+    }
+    if term.kbd.aux {
+      puts(&mut con, "mouse: PS/2\r\n");
+    } else {
+      puts(&mut con, "mouse: none found\r\n");
     }
     if blk_sectors(disk.dev) == 0 {
       puts(&mut con, "disk: none found\r\n");
@@ -1107,7 +1154,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   let shm = new_store(&mut m);
   let txt = new_store(&mut m);
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: rng_new(epoch ^ at), cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), croot: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), holes: alloc(HOLES_LEN), lazy: alloc(LAZY_LEN), inet6: alloc(OFD_N), locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, txt: txt, sys: alloc(SYS_LEN), loops: alloc(LOOP_LEN), ptys: alloc(PTY_LEN), ptyb: balloc(PTYB_LEN), mns: alloc(MNS_LEN), mstr: balloc(MSTR_LEN) };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: rng_new(epoch ^ at), cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), croot: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), holes: alloc(HOLES_LEN), lazy: alloc(LAZY_LEN), inet6: alloc(OFD_N), locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, txt: txt, sys: alloc(SYS_LEN), loops: alloc(LOOP_LEN), ptys: alloc(PTY_LEN), ptyb: balloc(PTYB_LEN), snd: snd, mice: mice_new(term.kbd.aux), mns: alloc(MNS_LEN), mstr: balloc(MSTR_LEN) };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
@@ -1115,7 +1162,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // Every processor runs the scheduler until the kernel stops; then they
   // are all back in their park loops and the state is this one's again.
   con_flush(&mut term, &mut con);
-  let sl = lock_new(Sys { k: k, con: con, pic: pic, apic: apic, clock: clock, acpi: acpi, stop: false, reboot: false, idle: 0 });
+  let sl = lock_new(Sys { k: k, con: con, pic: pic, apic: apic, clock: clock, acpi: acpi, stop: false, reboot: false, idle: 0, ticked: false });
   let tl = lock_new(term);
   let pumping = atomic_new(false);
   let pend = atomic_new(0);
@@ -1154,6 +1201,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let dk = vfs_free(sys.k.fs, &mut sys.k.mem, &mut ports, &mut win);
   blk_free(&mut ports, &mut win, dk, &mut sys.k.mem);
   nic_free(&mut ports, &mut win, sys.k.nic, &mut sys.k.mem);
+  snd_free(&mut win, sys.k.snd, &mut sys.k.mem);
   usb_off(&mut devices.usb, &mut win, &mut sys.k.mem);
   puts(&mut sys.con, "BastiOS: ");
   put_num(&mut sys.con, count_free(sys.k.mem.bm));
@@ -1189,6 +1237,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.loops);
   free(sys.k.ptys);
   bfree(sys.k.ptyb);
+  bfree(sys.k.mice);
   free(sys.k.ipc);
   bfree(sys.k.ipcb);
   free(sys.k.sys);
