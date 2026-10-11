@@ -136,6 +136,7 @@ const DISKWAIT: u64 = 13;            // waiting for the disk: F_WAIT says for wh
 const EXITING: u64 = 14;             // RUNNING, a thread whose leader is in execve: freed when it comes back
 const SOCKWAIT: u64 = 15;            // a Linux call that has to wait: a network socket, or a poll, epoll_wait or sigsuspend (sock_wake)
 const STOPPED: u64 = 16;             // stopped by SIGSTOP, SIGTSTP, SIGTTIN or SIGTTOU until SIGCONT
+const TIMEWAIT: u64 = 17;            // a timed Linux wait (wait_until) between two tries: see sleepers_wake
 
 const NO_RESULT: u64 = 18446744073709551615;
 
@@ -751,6 +752,7 @@ struct Kernel {
   sys: Buf,             // settings root may change: names, the clock discipline (src/lxsys.bastio)
   snd: Snd,             // the sound card, if any (src/hda.bastio)
   mice: Bytes,          // mouse packets for /dev/input/mice (src/lxmouse.bastio)
+  naps: bool,           // a process may be in TIMEWAIT: false lets sleepers_wake skip its scan
 }
 
 spec fn kok(k: &Kernel) -> bool {
@@ -1432,6 +1434,8 @@ fn put_state(con: &mut Con, s: u64)
     puts(&mut con, "disk   ");
   } else if s == SOCKWAIT {
     puts(&mut con, "socket ");
+  } else if s == TIMEWAIT {
+    puts(&mut con, "sleep  ");
   } else if s == LXVFORK {
     puts(&mut con, "vfork  ");
   } else {
