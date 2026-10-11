@@ -19,7 +19,7 @@ const NO_ID: u64 = 0xFFFFFFFF;             // (uid_t) -1: "leave this one as it 
 
 /// The low (hi false) or high id kept in word f of pid's row.
 fn id_get(procs: &Buf, pid: u64, f: u64, hi: bool) -> u64
-  requires len(procs) == PTAB_LEN && pid < NPROC && f < STRIDE
+  requires ptab_ok(procs) && pid < NPROC && f < STRIDE
   ensures result < ID_SPAN
 {
   let w = pget(procs, pid, f);
@@ -30,29 +30,33 @@ fn id_get(procs: &Buf, pid: u64, f: u64, hi: bool) -> u64
 }
 
 fn id_put(procs: &mut Buf, pid: u64, f: u64, lo: u64, hi: u64)
-  requires len(procs) == PTAB_LEN && pid < NPROC && f < STRIDE && lo < ID_SPAN && hi < ID_SPAN
-  ensures len(procs) == PTAB_LEN
+  requires ptab_ok(procs) && pid < NPROC && f < STRIDE && lo < ID_SPAN && hi < ID_SPAN
+  ensures ptab_ok(procs)
 {
   pset(&mut procs, pid, f, hi * ID_SPAN + lo);
 }
 
 /// Effective user 0, for specifications.
 spec fn is_root(procs: &Buf, pid: u64) -> bool {
-  get(procs, pid * STRIDE + F_UID) / ID_SPAN == 0
+  pid * STRIDE + F_UID >= len(procs) || get(procs, pid * STRIDE + F_UID) / ID_SPAN == 0
 }
 
 /// Root: effective user 0, the only privilege there is (see docs/security.md).
 fn cred_root(procs: &Buf, pid: u64) -> bool
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
   ensures result == is_root(procs, pid)
 {
-  return get(procs, pid * STRIDE + F_UID) / ID_SPAN == 0;
+  let i = pid * STRIDE + F_UID;
+  if i >= len(procs) {
+    return true;     // no row: a FREE process, all 0
+  }
+  return get(procs, i) / ID_SPAN == 0;
 }
 
 /// setuid (w F_UID, s F_SUID) or setgid (F_GID, F_SGID) to id a.
 fn set_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64) -> u64
-  requires len(procs) == PTAB_LEN && pid < NPROC && w < STRIDE && s < STRIDE
-  ensures len(procs) == PTAB_LEN
+  requires ptab_ok(procs) && pid < NPROC && w < STRIDE && s < STRIDE
+  ensures ptab_ok(procs)
 {
   let u = a % ID_SPAN;
   if u == NO_ID {
@@ -75,8 +79,8 @@ fn set_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64) -> u64
 
 /// setreuid or setregid: real a and effective b, NO_ID leaving one alone.
 fn set_re_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64, b: u64) -> u64
-  requires len(procs) == PTAB_LEN && pid < NPROC && w < STRIDE && s < STRIDE
-  ensures len(procs) == PTAB_LEN
+  requires ptab_ok(procs) && pid < NPROC && w < STRIDE && s < STRIDE
+  ensures ptab_ok(procs)
 {
   let r = a % ID_SPAN;
   let e = b % ID_SPAN;
@@ -114,8 +118,8 @@ fn holds(x: u64, r0: u64, e0: u64, s0: u64) -> bool {
 
 /// setresuid or setresgid.
 fn set_res_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64, b: u64, c: u64) -> u64
-  requires len(procs) == PTAB_LEN && pid < NPROC && w < STRIDE && s < STRIDE
-  ensures len(procs) == PTAB_LEN
+  requires ptab_ok(procs) && pid < NPROC && w < STRIDE && s < STRIDE
+  ensures ptab_ok(procs)
 {
   let r = a % ID_SPAN;
   let e = b % ID_SPAN;
@@ -145,8 +149,8 @@ fn set_res_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64, b: u64, c: u64)
 
 /// setfsuid or setfsgid: always the old file-system id back.
 fn set_fs_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64) -> u64
-  requires len(procs) == PTAB_LEN && pid < NPROC && w < STRIDE && s < STRIDE
-  ensures len(procs) == PTAB_LEN
+  requires ptab_ok(procs) && pid < NPROC && w < STRIDE && s < STRIDE
+  ensures ptab_ok(procs)
 {
   let f = a % ID_SPAN;
   let r0 = id_get(procs, pid, w, false);
@@ -179,7 +183,7 @@ fn get_res_id(k: &mut Kernel, pid: u64, w: u64, s: u64, a: u64, b: u64, c: u64) 
 
 /// How many supplementary groups process pid has.
 fn ngroups(procs: &Buf, pid: u64) -> u64
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
   ensures result <= NGROUPS_KEPT
 {
   let n = pget(procs, pid, F_NGROUPS);
@@ -191,7 +195,7 @@ fn ngroups(procs: &Buf, pid: u64) -> u64
 
 /// Process pid's supplementary group i.
 fn group_at(procs: &Buf, pid: u64, i: u64) -> u64
-  requires len(procs) == PTAB_LEN && pid < NPROC && i < NGROUPS_KEPT
+  requires ptab_ok(procs) && pid < NPROC && i < NGROUPS_KEPT
   ensures result < ID_SPAN
 {
   return id_get(procs, pid, F_GROUPS + i / 2, i % 2 == 1);
@@ -199,7 +203,7 @@ fn group_at(procs: &Buf, pid: u64, i: u64) -> u64
 
 /// Whether group g is one of process pid's supplementary groups.
 fn in_groups(procs: &Buf, pid: u64, g: u64) -> bool
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
 {
   let n = ngroups(procs, pid);
   let mut i = 0;
