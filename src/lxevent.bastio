@@ -749,12 +749,17 @@ fn ep_nest_check(k: &Kernel, pid: u64, e: u64, t: u64) -> u64
   return 0;
 }
 
-/// Which instances have something ready, as a bit mask.
+/// Which instances have something ready, as a bit mask. One pass over
+/// the entries finds the leaves that are ready and, in byte f of
+/// `wants`, the instances that instance f waits on; the EP_DEPTH rounds
+/// then pass readiness up with bit masks only (it runs on every try of an
+/// epoll_wait, so looking up every entry each round cost most of a try).
 fn ep_ready(k: &Kernel, pid: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures result < 256
 {
   let mut m = 0;
+  let mut wants = 0;
   let mut e = 0;
   while e < EP_N
     invariant e <= EP_N && m < 256
@@ -763,30 +768,30 @@ fn ep_ready(k: &Kernel, pid: u64) -> u64
     while j < EP_FDS
       invariant j <= EP_FDS && e < EP_N && m < 256
     {
-      if ep_entry_bits(k, pid, e, j) != 0 {
-        m = (m | (1 << e)) % 256;
+      if get(k.evt, ep_at(e, j, 0)) != 0 {
+        let t = ep_target(k, pid, e, j);
+        if t < EP_N {
+          if get(k.evt, ep_at(e, j, 2)) & (POLLIN + EP_OFF) == POLLIN {
+            wants = wants | (1 << (8 * e + t));
+          }
+        } else if ep_entry_bits(k, pid, e, j) != 0 {
+          m = (m | (1 << e)) % 256;
+        }
       }
       j = j + 1;
     }
     e = e + 1;
   }
   let mut round = 0;
-  while round < EP_DEPTH
+  while round < EP_DEPTH && wants != 0
     invariant round <= EP_DEPTH && m < 256
   {
     let mut f = 0;
     while f < EP_N
       invariant f <= EP_N && m < 256
     {
-      let mut j = 0;
-      while j < EP_FDS
-        invariant j <= EP_FDS && f < EP_N && m < 256
-      {
-        let t = ep_target(k, pid, f, j);
-        if t < EP_N && (m >> t) % 2 == 1 && get(k.evt, ep_at(f, j, 2)) & (POLLIN + EP_OFF) == POLLIN {
-          m = (m | (1 << f)) % 256;
-        }
-        j = j + 1;
+      if ((wants >> (8 * f)) % 256) & m != 0 {
+        m = (m | (1 << f)) % 256;
       }
       f = f + 1;
     }

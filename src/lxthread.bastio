@@ -601,15 +601,16 @@ fn thread_exec(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
 // ---------------------------------------------------------------- futex
 
 // A waiter is a thread whose futex call runs again later (lx_retry): its
-// F_FUTEX is the address, and it is either FUTEXWAIT (no timeout) or
-// READY polling its deadline (a timeout, src/lxtime.bastio). A wake ends
+// F_FUTEX is the address, and it is either FUTEXWAIT (no timeout), or
+// TIMEWAIT or READY between tries of a wait with a timeout
+// (src/lxtime.bastio's wait_until). A wake ends
 // its call with 0 instead, as if it had returned.
 
 fn futex_waiting(procs: &Buf, q: u64, g: u64, addr: u64) -> bool
   requires ptab_ok(procs) && q < NPROC
 {
   let st = state(procs, q);
-  return (st == FUTEXWAIT || st == READY) && (g == 0 || tgid(procs, q) == g) && pget(procs, q, F_FUTEX) == addr
+  return (st == FUTEXWAIT || st == TIMEWAIT || st == READY) && (g == 0 || tgid(procs, q) == g) && pget(procs, q, F_FUTEX) == addr
     && pget(procs, q, F_RESTART) != 0 && pget(procs, q, F_REGS + R_RAX) == LX_FUTEX;
 }
 
