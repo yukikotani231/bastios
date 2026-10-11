@@ -104,6 +104,20 @@ fn give_page(m: &mut Mem, f: Frame)
   pool_give(&mut m.pool, f);
 }
 
+/// Shared pages the kernel keeps: a level-2 table, never loaded, whose
+/// slot s is a level-1 table of shared pages. k.shm holds the pages of
+/// System V shared memory segments (slot s: segment s, src/lxipc.bastio),
+/// k.txt the read-only pages of the built-in programs (slot s: program s,
+/// src/text.bastio). None only if there was no page for it at boot.
+enum Store {
+  None,
+  Table(PageTable),
+}
+
+spec fn store_ok(s: &Store) -> bool {
+  s is Store::Table ==> (pt_level(s.Table) == 2 && pt_leases(s.Table) == 0)
+}
+
 /// Gives up one reference to a shared page (a MAP_SHARED page several
 /// address spaces map). The last one gives the page back, which the
 /// bitmap then records as free.
@@ -118,4 +132,56 @@ fn drop_shared(m: &mut Mem, s: Shared)
       m.low = i;
     }
   }
+}
+
+/// Takes page `i` without zeroing it (bastiolang's `Dirty`): for a page
+/// that is about to be overwritten whole, a copy of another.
+fn take_dirty(m: &mut Mem, i: u64) -> Dirty
+  requires mem_ok(m) && i < NPAGES && get(m.bm, i) == 1
+  ensures mem_ok(m)
+  ensures dirty_id(result) == i
+{
+  m.bm = set(m.bm, i, 0);
+  return pool_take_dirty(&mut m.pool, i);
+}
+
+// A page the kernel keeps for good to share between processes, the
+// read-only pages of the built-in programs (src/text.bastio), is marked
+// TXT_PAGE in the bitmap instead of 0: it is in use, but `mem` counts it
+// as available (it is a cache), and mprotect copies it before letting a
+// process write it.
+const TXT_PAGE: u64 = 2;
+
+/// take_page for such a page.
+fn take_text_page(m: &mut Mem, i: u64) -> Frame
+  requires mem_ok(m) && i < NPAGES && get(m.bm, i) == 1
+  ensures mem_ok(m)
+  ensures frame_id(result) == i
+{
+  m.bm = set(m.bm, i, TXT_PAGE);
+  return pool_take(&mut m.pool, i);
+}
+
+/// Is shared page `s` one of those?
+fn is_text_page(m: &Mem, s: &Shared) -> bool
+  requires mem_ok(m)
+{
+  return shared_id(s) < NPAGES && get(m.bm, shared_id(s)) == TXT_PAGE;
+}
+
+/// The free pages plus the cached ones (`mem`).
+fn count_avail(bm: &Buf) -> u64
+  requires len(bm) == NPAGES
+{
+  let mut n = 0;
+  let mut i = 0;
+  while i < NPAGES
+    invariant i <= NPAGES && n <= i
+  {
+    if get(bm, i) == 1 || get(bm, i) == TXT_PAGE {
+      n = n + 1;
+    }
+    i = i + 1;
+  }
+  return n;
 }

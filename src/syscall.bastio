@@ -760,7 +760,7 @@ fn syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if n == SYS_INFO {
     if a == 0 {
-      ret(&mut k.procs, pid, count_free(k.mem.bm));
+      ret(&mut k.procs, pid, count_avail(k.mem.bm));   // cached program pages count: they are reclaimable
     } else if a == 1 {
       ret(&mut k.procs, pid, k.ticks);
     } else if a == 2 {
