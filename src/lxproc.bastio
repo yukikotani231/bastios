@@ -742,6 +742,9 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
 {
   let none = Meta { ok: false, mode: 0, size: 0, ino: 0, mtime: 0, own: 0 };
   let dev = dev_at(k.fs.xfer, n);
+  if dev >= DEV_PTS && dev < DEV_PTS + PTY_N && !pty_live(k, dev - DEV_PTS) {
+    return none;                            // /dev/pts/N exists while pair N does
+  }
   if dev != DEV_NONE {
     return dev_meta(dev);
   }

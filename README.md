@@ -49,7 +49,7 @@ The first build proves every source file and fetches BusyBox, so it takes a whil
 - **Processors.** Every processor runs the scheduler. The kernel's state is under one lock (`Lock[Sys]`) and the console's devices under another, while user code runs in parallel, including the threads of one process, which share its address space.
 - **Programs.** BastiOS's own programs use its system call ABI (`int 0x80`). Linux x86-64 ELF executables use the Linux ABI (`syscall`): static or dynamic, against musl, or static against glibc. Much of the Linux system call interface is implemented: files, pipes, signals, threads and futexes, `poll` and `epoll`, timers, and sockets; [docs/linux.md](docs/linux.md) lists them. `make compat` runs a compatibility suite (`test/compat`).
 - **Files.** An in-memory file system, and one on the disk under `disk/` that keeps every write whole across a power cut (copy-on-write). The disk is a partition on a USB stick (the one it booted from, with `make usb`), an NVMe drive, a virtio disk, a SATA disk on an AHCI controller or a legacy ATA disk; commands are queued behind a block cache and, except on ATA, finish by interrupt (MSI-X or MSI), so a process waiting for the disk sleeps.
-- **Network.** A virtio card or an Intel card of the e1000 families (8254x, 82574L, 82576 and the igb chips after it); DHCP, ARP, IPv4, ICMP, UDP and TCP (retransmission, out-of-order data, zero windows), loopback, and Unix sockets.
+- **Network.** A virtio card or an Intel card of the e1000 families (8254x, 82574L, 82576 and the igb chips after it); DHCP, ARP, IPv4, ICMP, UDP and TCP (retransmission, out-of-order data, zero windows), IPv6 (neighbor discovery, an address from the router's prefix, UDP and TCP), a name server for the C library's resolver, loopback, and Unix sockets.
 - **Console.** The first serial port, and with GRUB the screen (the framebuffer it sets up) with a PS/2 or USB keyboard.
 
 How the pieces fit together, and what is proved where, is in [docs/architecture.md](docs/architecture.md).
@@ -81,9 +81,9 @@ make fuzz       # fuzz the system calls with hostile arguments (SEED, SEEDS, CAL
 make compat     # the Linux compatibility suite; writes build/compat/report.md
 ```
 
-`make test` also checks the sessions in this README and in [Getting started](docs/getting-started.md) (`test/guide_test.py`). Set `BASTIOC=/path/to/bastioc0` if the compiler lives elsewhere.
+`make test` also checks the sessions in this README and in [Getting started](docs/getting-started.md) (`test/guide_test.py`). Set `BASTIOC0=/path/to/bastioc0` if bastiolang is not next to this checkout.
 
-The kernel is built by bastiolang's bootstrap compiler, `bastioc0`, through C: the compiler proves each file, writes C, and `cc` compiles it. bastiolang's self-hosted compiler also has a native backend that writes x86-64 assembly for the kernel and user targets, which takes the C compiler out of the trusted base for Bastio code; BastiOS built that way passes `make test`. The Makefile switches to it once the self-hosted compiler is the default.
+The kernel is built by bastioc1, bastiolang's compiler written in Bastio, through C: the compiler proves each file, writes C, and `cc` compiles it. The first build makes bastioc1 itself with bastiolang's bootstrap compiler, `bastioc0`, into `build/bastioc1`. `make NATIVE=1` uses bastioc1's native backend instead, which writes x86-64 assembly and takes the C compiler out of the trusted base for Bastio code; BastiOS built that way passes `make test`, but its code is about ten times larger, so it is not the default yet.
 
 ## What is trusted
 

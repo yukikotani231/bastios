@@ -21,6 +21,7 @@ import "core/csum.bastio";
 
 const ETH_ARP: u64 = 0x0806;
 const ETH_IP: u64 = 0x0800;
+const ETH_IP6: u64 = 0x86DD;          // src/net6.bastio
 const ETH_MIN: u64 = 60;              // shorter frames are padded
 const MAC_BCAST: u64 = 0xFFFFFFFFFFFF;
 const MAC_LIMIT: u64 = 0x1000000000000;
@@ -29,6 +30,7 @@ const IP_MAX: u64 = 4294967295;
 const MY_IP: u64 = 0x0A00020F;        // 10.0.2.15, if DHCP gets no answer
 const GATEWAY: u64 = 0x0A000202;      // 10.0.2.2
 const NETMASK: u64 = 0xFFFFFF00;      // /24
+const DNS_SERVER: u64 = 0x0A000203;   // 10.0.2.3, QEMU's resolver, with the static address
 
 const IP_ICMP: u64 = 1;
 const IP_UDP: u64 = 17;
@@ -68,6 +70,9 @@ const SOCKS: u64 = 8;                 // UDP sockets in the table
 const RXQ: u64 = 4;                   // datagrams each socket can queue
 const UDP_MAX: u64 = 1472;            // the largest payload one frame carries
 const NO_SOCK: u64 = 18446744073709551615;
+const V6N: u64 = 16;                  // IPv6 peers (src/net6.bastio)
+const V6W: u64 = 4;                   // words per peer: address (2), MAC, in use
+const V6_BASE: u64 = 0xF0000000;      // 240.0.0.0: the first peer's token
 const LOQ: u64 = 8;                   // frames the loopback queue holds
 const LO_NET: u64 = 127;              // 127.0.0.0/8: this machine
 const LO_IP: u64 = 0x7F000001;        // 127.0.0.1
@@ -109,6 +114,8 @@ struct Net {
   dhcp_server: u64,   // ... by this server
   dhcp_tries: u64,
   dhcp_until: u64,    // the tick to retry at
+  dns: u64,           // the name server DHCP named (0: none)
+  dns_new: bool,      // ... not yet written to /etc/resolv.conf (nic_dns_take)
   now: u64,           // the tick count at the last nic_tick
   ping_state: u64,
   ping_pid: u64,      // who asked
@@ -133,16 +140,24 @@ struct Net {
   seen_rx: u64,       // rx and the tick count when sock_wake last looked
   seen_tick: u64,
   irq_on: bool,       // received frames raise the card's interrupt (nic_listen)
+  v6: Buf,            // IPv6 peers, V6W words each (src/net6.bastio)
+  v6_next: u64,       // the slot the next new peer takes
+  iid: u64,           // our interface id (low half of our IPv6 addresses)
+  pfx: u64,           // the advertised prefix (high half of our global address), 0: none yet
+  rtr_mac: u64,       // the IPv6 default router's MAC, 0: none
+  rs_n: u64,          // router solicitations sent
+  rs_until: u64,      // the tick to send the next at
 }
 
 spec fn net_ok(n: &Net) -> bool {
   card_ok(n.dev) && blen(n.pkt) == RX_BUF && blen(n.out) == RX_BUF && blen(n.held) == HELD_N * RX_BUF
   && n.ip <= IP_MAX && n.gw <= IP_MAX && 1 <= n.span && n.span <= 4294967296
   && len(n.arp) == ARP_N * 2 && len(n.held_len) == HELD_N && len(n.held_hop) == HELD_N && n.held_n <= HELD_N && n.seq <= 65535 && n.ping_pid < PID_LIMIT && n.ping_ip <= IP_MAX
-  && n.dhcp_xid <= IP_MAX && n.dhcp_offer <= IP_MAX && n.dhcp_server <= IP_MAX
+  && n.dhcp_xid <= IP_MAX && n.dhcp_offer <= IP_MAX && n.dhcp_server <= IP_MAX && n.dns <= IP_MAX
   && len(n.socks) == SOCKS * SOCK_FIELDS && blen(n.dq) == SOCKS * RXQ * UDP_MAX && blen(n.cork) == SOCKS * UDP_MAX
   && len(n.tcbs) == TCBS * TCB_W && blen(n.trx) == TCBS * TCP_BUF && blen(n.ttx) == TCBS * TCP_BUF
   && blen(n.lo) == LOQ * RX_BUF && len(n.lo_len) == LOQ && n.lo_head < LOQ && n.lo_n <= LOQ
+  && len(n.v6) == V6N * V6W && n.rtr_mac < MAC_LIMIT
 }
 
 // ---------------------------------------------------------------- bytes
@@ -324,8 +339,8 @@ fn next_hop(n: &Net, ip: u64) -> u64
   requires net_ok(n)
   ensures result <= IP_MAX || result == ip
 {
-  if is_local(n, ip) || ip / n.span == n.ip / n.span {
-    return ip;
+  if is_local(n, ip) || ip / n.span == n.ip / n.span || is_v6tok(ip) {
+    return ip;                        // an IPv6 peer's token: src/net6.bastio
   }
   return n.gw;
 }
@@ -379,6 +394,9 @@ fn reply_send(n: &mut Net, ip: u64, flen: u64) -> bool
   if is_local(n, ip) {
     return lo_send(&mut n, flen);
   }
+  if is_v6tok(ip) {
+    return v6_out(&mut n, flen);
+  }
   return net_send(&mut n, flen);
 }
 
@@ -394,6 +412,9 @@ fn send_via(n: &mut Net, hop: u64, flen: u64) -> bool
 {
   if is_local(n, hop) {
     return lo_send(&mut n, flen);
+  }
+  if is_v6tok(hop) {
+    return v6_out(&mut n, flen);
   }
   let mac = arp_find(n, hop);
   if mac != 0 {
@@ -645,19 +666,20 @@ fn dhcp_send(n: &mut Net, kind: u64)
   bset(&mut n.out, 282, 53);          // option: message type
   bset(&mut n.out, 283, 1);
   bset(&mut n.out, 284, cast[u8](kind));
-  bset(&mut n.out, 285, 55);          // option: we want the mask and router
-  bset(&mut n.out, 286, 2);
+  bset(&mut n.out, 285, 55);          // option: we want the mask, router and name server
+  bset(&mut n.out, 286, 3);
   bset(&mut n.out, 287, 1);
   bset(&mut n.out, 288, 3);
-  let mut o = 289;
+  bset(&mut n.out, 289, 6);
+  let mut o = 290;
   if kind == 3 {
-    bset(&mut n.out, 289, 50);        // option: the address we want
-    bset(&mut n.out, 290, 4);
-    put32(&mut n.out, 291, n.dhcp_offer);
-    bset(&mut n.out, 295, 54);        // option: the server we accept
-    bset(&mut n.out, 296, 4);
-    put32(&mut n.out, 297, n.dhcp_server);
-    o = 301;
+    bset(&mut n.out, 290, 50);        // option: the address we want
+    bset(&mut n.out, 291, 4);
+    put32(&mut n.out, 292, n.dhcp_offer);
+    bset(&mut n.out, 296, 54);        // option: the server we accept
+    bset(&mut n.out, 297, 4);
+    put32(&mut n.out, 298, n.dhcp_server);
+    o = 302;
   }
   bset(&mut n.out, o, 255);           // end
   udp_seal(&mut n, IP_MAX, ulen);
@@ -688,11 +710,13 @@ fn dhcp_static(n: &mut Net)
   n.ip = MY_IP;
   n.gw = GATEWAY;
   n.span = 4294967296 - NETMASK;
+  n.dns = DNS_SERVER;
+  n.dns_new = true;
 }
 
 /// A DHCP message to our port (ulen bytes of UDP at 34, checked to fit the
 /// frame): an OFFER gets a REQUEST, an ACK for the address offered sets our
-/// address, mask and gateway, and a NAK starts over. The lease is not
+/// address, mask, gateway and name server, and a NAK starts over. The lease is not
 /// renewed (QEMU's lasts a day).
 fn dhcp_in(n: &mut Net, ulen: u64)
   requires net_ok(n) && 8 <= ulen && ulen <= FRAME_MAX - 34
@@ -708,9 +732,10 @@ fn dhcp_in(n: &mut Net, ulen: u64)
   let mut mask = NETMASK;
   let mut router = 0;
   let mut server = 0;
+  let mut dns = 0;
   let mut o = 282;
   while o < end
-    invariant 282 <= o && mask <= IP_MAX && router <= IP_MAX && server <= IP_MAX
+    invariant 282 <= o && mask <= IP_MAX && router <= IP_MAX && server <= IP_MAX && dns <= IP_MAX
   {
     let code = cast[u64](bget(n.pkt, o));
     if code == 255 || o + 1 >= end {
@@ -730,6 +755,8 @@ fn dhcp_in(n: &mut Net, ulen: u64)
           router = be32(n.pkt, o + 2);
         } else if code == 54 && l >= 4 {
           server = be32(n.pkt, o + 2);
+        } else if code == 6 && l >= 4 {
+          dns = be32(n.pkt, o + 2);   // the first of the servers listed
         }
         o = o + 2 + l;
       }
@@ -745,6 +772,8 @@ fn dhcp_in(n: &mut Net, ulen: u64)
     n.gw = router;
     n.span = 4294967296 - mask;
     n.dhcp_state = DHCP_BOUND;
+    n.dns = dns;
+    n.dns_new = true;
   } else if n.dhcp_state == DHCP_REQUEST && kind == 6 {
     dhcp_start(&mut n);
   }
@@ -1139,6 +1168,8 @@ fn net_poll(n: &mut Net)
         arp_in(&mut n, flen);
       } else if kind == ETH_IP {
         ip_in(&mut n, flen);
+      } else if kind == ETH_IP6 {
+        v6_in(&mut n, flen);
       }
     }
     k = k + 1;
@@ -1250,11 +1281,13 @@ fn net_up(d: Card) -> Nic
 {
   let mut n = Net { dev: d, pkt: balloc(RX_BUF), out: balloc(RX_BUF), ip: 0, gw: 0, span: 1,
     arp: alloc(ARP_N * 2), arp_next: 0, held: balloc(HELD_N * RX_BUF), held_len: alloc(HELD_N), held_hop: alloc(HELD_N), held_n: 0,
-    dhcp_state: DHCP_OFF, dhcp_xid: 0, dhcp_offer: 0, dhcp_server: 0, dhcp_tries: 0, dhcp_until: 0, now: 0,
+    dhcp_state: DHCP_OFF, dhcp_xid: 0, dhcp_offer: 0, dhcp_server: 0, dhcp_tries: 0, dhcp_until: 0, dns: 0, dns_new: false, now: 0,
     ping_state: PING_IDLE, ping_pid: 0, ping_ip: 0, ping_hop: 0, ping_until: 0, seq: 0, rx: 0, tx: 0,
     socks: alloc(SOCKS * SOCK_FIELDS), dq: balloc(SOCKS * RXQ * UDP_MAX), cork: balloc(SOCKS * UDP_MAX), eph: 0,
     tcbs: alloc(TCBS * TCB_W), trx: balloc(TCBS * TCP_BUF), ttx: balloc(TCBS * TCP_BUF), iss: 0,
-    lo: balloc(LOQ * RX_BUF), lo_len: alloc(LOQ), lo_head: 0, lo_n: 0, seen_rx: 0, seen_tick: 0, irq_on: false };
+    lo: balloc(LOQ * RX_BUF), lo_len: alloc(LOQ), lo_head: 0, lo_n: 0, seen_rx: 0, seen_tick: 0, irq_on: false,
+    v6: alloc(V6N * V6W), v6_next: 0, iid: 0, pfx: 0, rtr_mac: 0, rs_n: 0, rs_until: 0 };
+  n.iid = v6_iid(card_mac(n.dev));
   // The address comes from DHCP, sought from now on.
   if card_live(n.dev) {
     n.dhcp_xid = card_mac(n.dev) % 4294967296;
@@ -1408,6 +1441,7 @@ fn nic_tick(c: &mut Nic, now: u64)
     Nic::None => { c = Nic::None; },
     Nic::Up(mut n) => {
       dhcp_tick(&mut n, now);
+      v6_tick(&mut n, now);
       tcp_tick(&mut n, now);
       c = Nic::Up(n);
     },
@@ -1415,7 +1449,8 @@ fn nic_tick(c: &mut Nic, now: u64)
 }
 
 /// What the stack is configured with: 0 our address, 1 the gateway, 2 the
-/// netmask, 3 how (0 not yet, 1 DHCP, 2 static). 0 without a card.
+/// netmask, 3 how (0 not yet, 1 DHCP, 2 static), 4 the name server. 0
+/// without a card.
 fn nic_info(c: &Nic, what: u64) -> u64
   requires nic_ok(c)
 {
@@ -1428,6 +1463,8 @@ fn nic_info(c: &Nic, what: u64) -> u64
         return n.gw;
       } else if what == 2 {
         return 4294967296 - n.span;
+      } else if what == 4 {
+        return n.dns;
       } else if what == 3 {
         if n.dhcp_state == DHCP_BOUND {
           return 1;
@@ -1438,6 +1475,24 @@ fn nic_info(c: &Nic, what: u64) -> u64
       return 0;
     },
   }
+}
+
+/// Whether the name server changed since the last call (a lease, or the
+/// static fallback): /etc/resolv.conf is due to be written.
+fn nic_dns_take(c: &mut Nic) -> bool
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  let mut r = false;
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      r = n.dns_new;
+      n.dns_new = false;
+      c = Nic::Up(n);
+    },
+  }
+  return r;
 }
 
 fn nic_mac(c: &Nic) -> u64 {
@@ -1503,6 +1558,7 @@ fn nic_free(ports: &mut Ports, win: &mut MmioSpace, c: Nic, m: &mut Mem)
       bfree(n.dq);
       bfree(n.lo);
       free(n.lo_len);
+      free(n.v6);
       card_free(&mut ports, &mut win, n.dev, &mut m);
     },
   }
