@@ -4,16 +4,31 @@
 // is CR, Backspace is DEL, Ctrl with a letter is that control code (Ctrl-C
 // is 3). On many PCs without a PS/2 port, the firmware emulates one for a
 // USB keyboard.
+//
+// A PS/2 mouse on the controller's second (aux) port is turned on at start
+// (enable the port, set defaults, enable reporting) and its bytes, which
+// come through the same data port marked by the status register, are put
+// together into 3-byte packets (buttons and sign bits; x; y). kbd_poll
+// answers a whole packet as MOUSE_PKT plus its bytes; the console pump
+// hands packets to the kernel, which gives them to Linux programs as
+// /dev/input/mice (src/lxmouse.bastio). A byte that cannot start a packet
+// (bit 3 clear) is dropped, so a lost byte costs a packet, not the stream.
 
 const KBD_DATA: u64 = 0x60;
 const KBD_STATUS: u64 = 0x64;
 const KST_FULL: u64 = 1;              // a byte is waiting
 const KST_AUX: u64 = 32;              // ... and it is from the mouse
+const KST_BUSY: u64 = 2;              // the controller has not taken the last byte written
+const MOUSE_PKT: u64 = 0x1000000;     // kbd_poll's answer for a mouse packet: MOUSE_PKT + b0 * 65536 + b1 * 256 + b2
+const AUX_SPINS: u64 = 100000;
 
-struct Kbd { data: PortIo, status: PortIo, shift: bool, ctrl: bool, ext: bool, present: bool }
+struct Kbd { data: PortIo, status: PortIo, shift: bool, ctrl: bool, ext: bool, present: bool,
+  aux: bool,          // a PS/2 mouse answered and reports
+  mb: u64,            // the bytes of the mouse packet so far, first in the high byte
+  mn: u64 }           // how many (0 .. 2)
 
 spec fn kbd_ok(k: &Kbd) -> bool {
-  port_count(k.data) == 1 && port_count(k.status) == 1
+  port_count(k.data) == 1 && port_count(k.status) == 1 && k.mn < 3 && k.mb < 65536
 }
 
 // Scan codes 0x00-0x39 to characters (0: none or special).
@@ -31,6 +46,7 @@ fn keymap_shift() -> Str {
 /// is left alone from then on.
 fn kbd_init(k: &mut Kbd)
   requires kbd_ok(k)
+  ensures kbd_ok(k)
 {
   if cast[u64](pio_in8(&mut k.status, 0)) == 0xFF {
     k.present = false;
@@ -38,24 +54,106 @@ fn kbd_init(k: &mut Kbd)
   }
   let mut n = 0;
   while n < 64 && cast[u64](pio_in8(&mut k.status, 0)) % 2 == KST_FULL
-    invariant n <= 64
+    invariant n <= 64 && kbd_ok(k)
   {
     pio_in8(&mut k.data, 0);
     n = n + 1;
   }
+  // The mouse: enable the aux port, then defaults and reporting, each
+  // command acknowledged (0xFA) by the mouse.
+  if kbd_ctl(&mut k, 0xA8) && aux_cmd(&mut k, 0xF6) && aux_cmd(&mut k, 0xF4) {
+    k.aux = true;
+  }
 }
 
-/// The next character typed, or 256 if there is none.
+/// Waits until the controller has taken the last byte written; false on a
+/// timeout.
+fn kbd_idle(k: &mut Kbd) -> bool
+  requires kbd_ok(k)
+  ensures kbd_ok(k) && k.mn == old(k.mn) && k.mb == old(k.mb)
+{
+  let mut i = 0;
+  while i < AUX_SPINS
+    invariant kbd_ok(k) && k.mn == old(k.mn) && k.mb == old(k.mb)
+  {
+    if cast[u64](pio_in8(&mut k.status, 0)) / KST_BUSY % 2 == 0 {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+/// Writes controller command c.
+fn kbd_ctl(k: &mut Kbd, c: u64) -> bool
+  requires kbd_ok(k) && c < 256
+  ensures kbd_ok(k) && k.mn == old(k.mn) && k.mb == old(k.mb)
+{
+  if !kbd_idle(&mut k) {
+    return false;
+  }
+  pio_out8(&mut k.status, 0, cast[u8](c));
+  return true;
+}
+
+/// Sends byte c to the mouse and waits for its acknowledgement; anything
+/// else that comes meanwhile is dropped. False if none comes.
+fn aux_cmd(k: &mut Kbd, c: u64) -> bool
+  requires kbd_ok(k) && c < 256
+  ensures kbd_ok(k) && k.mn == old(k.mn) && k.mb == old(k.mb)
+{
+  if !kbd_ctl(&mut k, 0xD4) || !kbd_idle(&mut k) {
+    return false;
+  }
+  pio_out8(&mut k.data, 0, cast[u8](c));
+  let mut i = 0;
+  while i < AUX_SPINS
+    invariant kbd_ok(k) && k.mn == old(k.mn) && k.mb == old(k.mb)
+  {
+    let st = cast[u64](pio_in8(&mut k.status, 0));
+    if st % 2 == KST_FULL {
+      let b = cast[u64](pio_in8(&mut k.data, 0));
+      if st / KST_AUX % 2 == 1 && b == 0xFA {
+        return true;
+      }
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+/// Takes mouse byte b. Returns the packet it completes as MOUSE_PKT plus
+/// its bytes, or 0.
+fn mouse_byte(k: &mut Kbd, b: u64) -> u64
+  requires kbd_ok(k) && b < 256
+  ensures kbd_ok(k) && (result == 0 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT))
+{
+  if k.mn == 0 && b / 8 % 2 == 0 {
+    return 0;                         // not a first byte: wait for one
+  }
+  if k.mn < 2 {
+    k.mb = k.mb % 256 * 256 + b;
+    k.mn = k.mn + 1;
+    return 0;
+  }
+  let p = MOUSE_PKT + k.mb * 256 + b;
+  k.mb = 0;
+  k.mn = 0;
+  return p;
+}
+
+/// The next character typed, or a mouse packet (MOUSE_PKT plus its bytes),
+/// or 256 if there is neither.
 fn kbd_poll(k: &mut Kbd) -> u64
   requires kbd_ok(k)
-  ensures result <= 256
+  ensures kbd_ok(k) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT))
 {
   if !k.present {
     return 256;
   }
   let mut n = 0;
   while n < 16
-    invariant n <= 16
+    invariant n <= 16 && kbd_ok(k)
   {
     let st = cast[u64](pio_in8(&mut k.status, 0));
     if st % 2 != KST_FULL {
@@ -64,7 +162,12 @@ fn kbd_poll(k: &mut Kbd) -> u64
     let sc = cast[u64](pio_in8(&mut k.data, 0));
     n = n + 1;
     if st / KST_AUX % 2 == 1 {
-      // A mouse byte: not ours.
+      if k.aux {
+        let p = mouse_byte(&mut k, sc);
+        if p != 0 {
+          return p;
+        }
+      }
     } else if sc == 0xE0 {
       k.ext = true;                   // the next code is an extended key
     } else {

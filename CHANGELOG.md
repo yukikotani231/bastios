@@ -16,6 +16,16 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Processors
 
+- `nanosleep` and `clock_nanosleep` sleep until the next tick between
+  looks (`wait_asleep`, as `poll` and `pause` do) instead of running again
+  on every scheduler pass: BusyBox's `sleep 5` went from 5.0 s of host CPU
+  under QEMU to about 0.2 s. A sleep may now end up to a tick (10 ms) late.
+- An idle application processor stops its 10 ms timer (a one-second
+  one-shot backstop instead); the kernel wakes it with `V_WAKE` on the
+  bootstrap processor's tick while a process is left ready, which is when
+  its own tick would have found it. An idle 4-processor guest takes half the
+  host CPU under QEMU (7.3% to 3.6% of a core). The hardware report says
+  whether it applies (`idle:`); with x2APIC every timer keeps ticking.
 - The code pages a program reads when it first runs them (see below) come
   from the page cache, so every process running the program maps the same
   read-only page and the disk is read once; before, each process read and
@@ -513,6 +523,29 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   return up to 256 KiB at once, not 4 KiB, so `dd bs=64k` gets whole
   blocks.
 
+### Mouse
+
+- A PS/2 mouse (`src/kbd.bastio`) for Linux programs as `/dev/input/mice`
+  and `/dev/psaux` (`src/lxmouse.bastio`): 3-byte PS/2 packets, blocking
+  or `O_NONBLOCK` reads, and `poll`. The hardware report says
+  `mouse: PS/2` or `mouse: none found`. No wheel.
+- A USB mouse on the xHCI controller (`src/xhci.bastio`), through the
+  same device: HID boot reports become PS/2 packets. A wireless receiver
+  that is both keyboard and mouse serves as both. The controller now has a
+  fifth device slot, and fifteen pages. The hardware report says
+  `mouse: USB (xHCI)`.
+
+### Sound
+
+- An Intel HD Audio driver (`src/hda.bastio`) and `/dev/dsp`
+  (`src/lxsnd.bastio`), the Open Sound System's playback device: 48 kHz
+  16-bit stereo through every output the first codec has wired up
+  (speakers, headphones, line out), found by walking the codec's widgets.
+  Polled on the timer tick, no interrupts; no mixer, recording or other
+  formats. Without a card `/dev/dsp` fails with `ENODEV`. Tested on QEMU's
+  `intel-hda` with `hda-output` and its WAV backend: `mtone`'s 1 kHz square
+  wave comes out whole. Real codecs (Realtek and others) are untested.
+
 ### Console and boot
 
 - A framebuffer above 4 GiB is used. Many PCs put the graphics memory
@@ -585,7 +618,18 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   checks that pass.
 - A system call fuzzer (`user/sysfuzz.c`, `make fuzz`, and a short run in
   `make test`): hostile arguments through both entry points, on several
-  processors.
+  processors. It aims at every Linux call the kernel implements (it had
+  missed 99 of them, among them System V IPC, epoll, select, splice,
+  timers, signalfd, links and renames, mount, clone3 and rseq), with the
+  calls that could wait made not to: zero timeouts, IPC_NOWAIT, LOCK_NB,
+  SPLICE_F_NONBLOCK, WNOHANG, and timers only disarmed. It opens a
+  pseudo-terminal pair, a pipe, a socket pair, an eventfd, an epoll and a
+  file first, so the small descriptor numbers it picks reach them; it
+  sends half its ioctls to requests the kernel knows; it runs execve and
+  execveat in a child, on programs that end at once and on `#!` scripts;
+  and it reaps its children as it goes, so forks keep succeeding.
+  `test/sysfuzz_calls.sh` (in `make test`) fails when the kernel
+  dispatches a call the fuzzer does not aim at.
 - `make test` counts the trusted base (`test/trusted_base.sh`), and
   warnings in `boot/`'s C are errors.
 
@@ -616,6 +660,15 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Fixed
 
+- mmap without an address, shmat without one, and brk could hand out
+  pages a mapping made with MAP_FIXED (or shmat at an address, or mremap
+  with MREMAP_FIXED) already held, with that mapping's bytes in them, and
+  a munmap or shmdt of the new range, or a shrinking brk, then unmapped
+  the old mapping too. Such a mapping in the free space between the break
+  and the mmap area now starts the mmap area, and what was free above it
+  becomes a hole that mmap reuses; mremap with MREMAP_FIXED also stops
+  leaving its new pages listed as a hole. The system call fuzzer found it;
+  `mdir` checks it.
 - The clock went wrong a few seconds after boot under QEMU, which broke
   about 30 `make compat` checks (sleeps took 0 ms, poll and socket
   timeouts fired at once, `date` said 2554). There were two bugs. First,

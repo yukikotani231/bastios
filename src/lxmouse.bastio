@@ -1,0 +1,162 @@
+// The mouse for Linux programs: /dev/input/mice (and /dev/psaux, the same
+// device under its older name) gives 3-byte PS/2 packets, as Linux's
+// mousedev does in its default mode: byte 0 holds the buttons (bit 0 left,
+// 1 right, 2 middle), bit 3 set, and the signs of x and y (bits 4 and 5);
+// bytes 1 and 2 are the motion in x (right is positive) and y (up is
+// positive). The packets come from the PS/2 mouse (src/kbd.bastio) or a
+// USB mouse (src/xhci.bastio, which turns its boot reports into this form)
+// through the console pump (`exchange` in src/main.bastio) into k.mice, a byte
+// ring: a 24-byte header (where the oldest byte is, how many bytes there
+// are, whether there is a mouse) and MICE_CAP bytes. When the ring is full,
+// new packets are dropped whole.
+//
+// A read takes what is queued (up to what it asks for); with nothing
+// queued it fails with EAGAIN if the file was opened O_NONBLOCK, else it
+// sleeps until the next tick and looks again (`wait_asleep`). poll says POLLIN
+// when something is queued. Writes (the ImPS/2 setup sequences some
+// programs send) are swallowed, and no answers come back for them, so
+// such programs see a plain 3-button mouse. Without a mouse, opening the
+// device fails with ENODEV.
+
+import "linux.bastio";
+
+const MICE_HDR: u64 = 24;
+const MICE_CAP: u64 = 768;              // MICE_LEN - MICE_HDR: 256 packets
+
+/// The ring, empty, saying whether there is a mouse (at boot).
+fn mice_new(present: bool) -> Bytes
+  ensures blen(result) == MICE_LEN
+{
+  let mut b = balloc(MICE_LEN);
+  put_u64(&mut b, 0, 0);
+  put_u64(&mut b, 8, 0);
+  if present {
+    put_u64(&mut b, 16, 1);
+  } else {
+    put_u64(&mut b, 16, 0);
+  }
+  return b;
+}
+
+fn mice_present(k: &Kernel) -> bool
+  requires kok(k)
+{
+  return get_u64(k.mice, 16) == 1;
+}
+
+/// open(2) of the mouse with these flags: a descriptor, -ENODEV without a
+/// mouse, or -ENFILE.
+fn mice_open(k: &mut Kernel, pid: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if !mice_present(k) {
+    return 18446744073709551597;            // -ENODEV
+  }
+  let h = ofd_new(&mut k, OF_DEV, DEV_MICE);
+  if h >= OFD_N {
+    return ENFILE;
+  }
+  of_set(&mut k.ofd, h, 3, flags / LO_NONBLOCK % 2);   // O_NONBLOCK, for mice_read
+  return fd_install(&mut k, pid, h);
+}
+
+/// Bytes queued.
+fn mice_count(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= MICE_CAP
+{
+  return smaller(get_u64(k.mice, 8), MICE_CAP);
+}
+
+/// Queues the first n bytes of src (whole packets), dropping the packets
+/// that do not fit.
+fn mice_push(k: &mut Kernel, src: &Bytes, n: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  let head = get_u64(k.mice, 0) % MICE_CAP;
+  let mut cnt = mice_count(k);
+  let mut i = 0;
+  let m = smaller(n, blen(src));
+  while i < m && m - i >= 3 && cnt + 3 <= MICE_CAP
+    invariant kok(k) && cnt <= MICE_CAP && head < MICE_CAP && i <= m && m <= blen(src)
+  {
+    let mut j = 0;
+    while j < 3
+      invariant kok(k) && j <= 3 && cnt + 3 <= MICE_CAP && head < MICE_CAP && i + 3 <= m && m <= blen(src)
+    {
+      bset(&mut k.mice, MICE_HDR + (head + cnt + j) % MICE_CAP, bget(src, i + j));
+      j = j + 1;
+    }
+    cnt = cnt + 3;
+    i = i + 3;
+  }
+  put_u64(&mut k.mice, 8, cnt);
+}
+
+/// Queues one packet, p (its three bytes, as kbd_poll gives them less
+/// MOUSE_PKT), unless the ring is full.
+fn mice_put(k: &mut Kernel, p: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  let head = get_u64(k.mice, 0) % MICE_CAP;
+  let cnt = mice_count(k);
+  if cnt + 3 > MICE_CAP {
+    return;
+  }
+  bset(&mut k.mice, MICE_HDR + (head + cnt) % MICE_CAP, cast[u8](p / 65536 % 256));
+  bset(&mut k.mice, MICE_HDR + (head + cnt + 1) % MICE_CAP, cast[u8](p / 256 % 256));
+  bset(&mut k.mice, MICE_HDR + (head + cnt + 2) % MICE_CAP, cast[u8](p % 256));
+  put_u64(&mut k.mice, 8, cnt + 3);
+}
+
+/// What poll finds on the mouse.
+fn mice_bits(k: &Kernel) -> u64
+  requires kok(k)
+{
+  if mice_count(k) > 0 {
+    return POLLIN;
+  }
+  return 0;
+}
+
+/// read(2) (system call n) of up to len bytes into va on descriptor fd, the
+/// mouse. Returns KEEP or SWITCH, as linux_syscall does.
+fn mice_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let cnt = mice_count(k);
+  if len == 0 {
+    ret(&mut k.procs, pid, 0);
+    return KEEP;
+  }
+  if cnt == 0 {
+    let h = fd_ofd(k, pid, fd);
+    if h < OFD_N && of_get(k.ofd, h, 3) % 2 == 1 {
+      ret(&mut k.procs, pid, EAGAIN);       // O_NONBLOCK
+      return KEEP;
+    }
+    return wait_asleep(&mut k, pid, n, FOREVER);   // looks again on the next tick
+  }
+  let head = get_u64(k.mice, 0) % MICE_CAP;
+  let want = smaller(smaller(len, cnt), XFER);
+  let mut i = 0;
+  while i < want
+    invariant i <= want && want <= XFER && kok(k) && head < MICE_CAP
+  {
+    bset(&mut k.fs.xfer, i, bget(k.mice, MICE_HDR + (head + i) % MICE_CAP));
+    i = i + 1;
+  }
+  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
+  if put == NO_RESULT || put < want {
+    ret(&mut k.procs, pid, EFAULT);
+    return KEEP;
+  }
+  put_u64(&mut k.mice, 0, (head + want) % MICE_CAP);
+  put_u64(&mut k.mice, 8, cnt - want);
+  ret(&mut k.procs, pid, want);
+  return KEEP;
+}

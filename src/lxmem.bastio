@@ -392,6 +392,28 @@ fn hole_add(k: &mut Kernel, pid: u64, first: u64, end: u64)
   hole_put(&mut k, pid, f, e);
 }
 
+/// Window pages first .. end of process pid were just mapped where the
+/// program asked (MAP_FIXED, shmat at an address, MREMAP_FIXED). mmap
+/// without an address must never hand them out again: they stop being a
+/// hole, and if they start in the free space between the break and the
+/// mmap area, the mmap area starts at them from now on, and what was free
+/// above them becomes a hole. Without that, mmap(NULL) or brk took pages
+/// such a mapping held, and munmap of those unmapped it.
+fn fixed_taken(k: &mut Kernel, pid: u64, first: u64, end: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  hole_cut(&mut k, pid, first, end);
+  let low = pget(k.procs, pid, F_MMAP) / 4096;
+  let b = pget(k.procs, pid, F_BRK);
+  if b <= USER_SIZE && (b + 4095) / 4096 <= first && first < low && low <= STACK_FIRST {
+    pset(&mut k.procs, pid, F_MMAP, first * 4096);
+    if end < low {
+      hole_add(&mut k, pid, end, low);
+    }
+  }
+}
+
 /// Takes `pages` pages from the first hole of process pid that has them
 /// and returns where they start; STACK_FIRST if no hole does.
 fn hole_take(k: &mut Kernel, pid: u64, pages: u64) -> u64
@@ -662,6 +684,7 @@ fn remap_fixed(k: &mut Kernel, pid: u64, r: u64, newn: u64, to_addr: u64) -> u64
   if win_op(&mut k.mem, &mut k.spaces, pid, WOP_MOVE, from, from + keep, at) > WPAGES {
     return ENOMEM;
   }
+  fixed_taken(&mut k, pid, at, at + want);
   return to_addr;
 }
 

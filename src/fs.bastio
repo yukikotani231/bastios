@@ -97,10 +97,11 @@ fn vfs_new(disk: DiskFs) -> Vfs
 }
 
 /// The next byte typed on a USB keyboard that sits on the disk's xHCI
-/// controller (see blk_find), or 256.
+/// controller (see blk_find), a packet from a USB mouse there (MOUSE_PKT
+/// plus its bytes), or 256.
 fn vfs_kbd_poll(v: &mut Vfs) -> u64
   requires vfs_ok(v)
-  ensures vfs_ok(v) && result <= 256
+  ensures vfs_ok(v) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT))
 {
   return blk_kbd_poll(&mut v.disk.dev);
 }
