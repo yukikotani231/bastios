@@ -50,7 +50,8 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   headers the generated C includes, and the programs in `bastio/`.
   `bastioc1` proves each program with Z3, then builds it with tcc, which
   needs GNU `__auto_type` (`patches/tcc-auto-type.patch`, applied to
-  `TCC_REV`). The compiler's own sources are on the disk under `/disk/s`,
+  `TCC_REV`; the patch modifies tcc, so it is under tcc's license,
+  LGPL-2.1-or-later, not this repository's). The compiler's own sources are on the disk under `/disk/s`,
   but proving them needs more memory than a process gets.
 
 `mkdisk.py` puts the programs and that BusyBox on a disk image in BastiOS's
