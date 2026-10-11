@@ -73,7 +73,8 @@ const XHCI_DEPTH: u64 = 2;             // hubs followed: one on a root port, and
 const XHCI_MAX_LEN: u64 = 0x100000;    // registers claimed: the BAR, up to 1 MiB
 const XHCI_SPINS: u64 = 20000000;
 const XHCI_SP_MAX: u64 = 256;          // scratchpad pages: the array's half page holds 256
-const XHCI_SETTLE_MS: u64 = 1000;      // the longest wait for devices to show up on the ports
+const XHCI_SETTLE_MS: u64 = 1000;
+const XHCI_TRIES: u64 = 8;             // the most controllers looked at      // the longest wait for devices to show up on the ports
 const RING_N: u64 = 64;
 const EVT_N: u64 = 252;                // event ring TRBs: offsets 64 .. 4096
 const RAW_AT: u64 = 3072;              // the control-transfer data area
@@ -1595,6 +1596,7 @@ fn xhci_new(regs: Mmio, m: &mut Mem, f0: Frame, f1: Frame, f2: Frame, f3: Frame,
   requires mmio_base(regs) % 4096 == 0 && mmio_len(regs) <= XHCI_MAX_LEN && mmio_len(regs) >= 0x2000
   requires mem_ok(m)
   ensures xhci_ok(result) && mem_ok(m)
+  ensures mmio_base(result.regs) == mmio_base(regs) && mmio_len(result.regs) == mmio_len(regs)
 {
   let mut x = Xhci { regs: regs, dcbaa: dma_lend(f0), cmd: dma_lend(f1), evt: dma_lend(f2), ctx: dma_lend(f3),
     inp: dma_lend(f4), ep0: dma_lend(f5), intr: dma_lend(f6),
@@ -1682,6 +1684,7 @@ fn xhci_new(regs: Mmio, m: &mut Mem, f0: Frame, f1: Frame, f2: Frame, f3: Frame,
 fn xhci_free(x: Xhci, m: &mut Mem) -> Mmio
   requires xhci_ok(x) && mem_ok(m)
   ensures mem_ok(m)
+  ensures mmio_base(result) == mmio_base(x.regs) && mmio_len(result) == mmio_len(x.regs)
 {
   let mut d = x;
   xhci_halt(&mut d);
@@ -1922,6 +1925,8 @@ fn usb_new(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, lo: u64, hi
   requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) ==> mmio_free(win, a)
   ensures usb_ok(result) && mem_ok(m)
   ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) && !(bar <= a && a < bar + size) ==> mmio_free(win, a)
+  ensures result is Usb::Xhci ==> mmio_base(result.Xhci.regs) == bar && mmio_len(result.Xhci.regs) == size
+  ensures !(result is Usb::Xhci) ==> forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) ==> mmio_free(win, a)
 {
   if dev >= PCI_NONE || size < 0x2000 || bar % 4096 != 0
     || !((bar >= WIN_LO && bar + size <= WIN_LOW_TOP) || (bar >= WIN_HIGH && bar + size <= WIN_TOP))
@@ -1961,6 +1966,87 @@ fn usb_new(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, lo: u64, hi
     }
   }
   return Usb::Xhci(x);
+}
+
+spec fn usb_claims(u: &Usb, a: u64) -> bool {
+  u is Usb::Xhci && mmio_base(u.Xhci.regs) <= a && a < mmio_base(u.Xhci.regs) + mmio_len(u.Xhci.regs)
+}
+
+/// Where the kept controller's registers start (0 without one).
+fn usb_base(u: &Usb) -> u64
+  ensures u is Usb::Xhci ==> result == mmio_base(u.Xhci.regs)
+  ensures !(u is Usb::Xhci) ==> result == 0
+{
+  match u {
+    Usb::Xhci(x) => { return mmio_base(x.regs); },
+    Usb::None => { return 0; },
+  }
+}
+
+/// Where they end (0 without one).
+fn usb_top(u: &Usb) -> u64
+  ensures u is Usb::Xhci ==> result == mmio_base(u.Xhci.regs) + mmio_len(u.Xhci.regs)
+  ensures !(u is Usb::Xhci) ==> result == 0
+{
+  match u {
+    Usb::Xhci(x) => { return mmio_base(x.regs) + mmio_len(x.regs); },
+    Usb::None => { return 0; },
+  }
+}
+
+/// The first xHCI controller on PCI that has a keyboard, a mouse or a
+/// disk with a BastiOS partition (usb_new), trying them in turn, at most
+/// XHCI_TRIES: a PC often has several, and the first is not always the
+/// one with the keyboard (recent Intel ones put a controller for the
+/// USB-C ports ahead of the chipset's, AMD ones have two or three). The
+/// controllers it does not keep are stopped and given back. Devices on
+/// two controllers are not both used: the first controller with any
+/// wins.
+fn usb_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, lo: u64, hi: u64, msi: u64, vec: u64) -> Usb
+  requires pci_ok(pci) && mem_ok(m) && at + XHCI_PAGES <= NPAGES && msi <= 4294967295 && vec <= 255
+  requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) ==> mmio_free(win, a)
+  ensures usb_ok(result) && mem_ok(m) && pci_ok(pci)
+  ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !usb_claims(result, a) ==> mmio_free(win, a)
+{
+  let mut d = 0;
+  let mut n = 0;
+  while d < PCI_NONE && n < XHCI_TRIES
+    invariant pci_ok(pci) && mem_ok(m) && d <= PCI_NONE
+    invariant forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) ==> mmio_free(win, a)
+  {
+    d = pci_class_from(&mut pci, XHCI_CLASS, d);
+    if d >= PCI_NONE {
+      return Usb::None;
+    }
+    let bar = usb_bar(&mut pci, d);
+    let size = usb_bar_size(&mut pci, d);
+    match usb_new(&mut pci, &mut m, &mut win, at, lo, hi, 0, 0, d, bar, size, msi, vec) {
+      Usb::None => {},
+      Usb::Xhci(x) => { return Usb::Xhci(x); },
+    }
+    d = pci_next(&mut pci, d);
+    n = n + 1;
+  }
+  return Usb::None;
+}
+
+/// How many xHCI controllers there are on PCI (up to XHCI_TRIES).
+fn usb_count(pci: &mut Pci) -> u64
+  requires pci_ok(pci)
+  ensures pci_ok(pci)
+{
+  let mut d = 0;
+  let mut n = 0;
+  while d < PCI_NONE && n < XHCI_TRIES
+    invariant pci_ok(pci) && d <= PCI_NONE
+  {
+    d = pci_class_from(&mut pci, XHCI_CLASS, d);
+    if d < PCI_NONE {
+      n = n + 1;
+      d = pci_next(&mut pci, d);
+    }
+  }
+  return n;
 }
 
 /// The registers of xHCI controller `dev` (32: none): base, then size

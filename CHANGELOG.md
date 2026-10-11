@@ -568,6 +568,10 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   QEMU's do at once.
 - A boot with no keyboard, no disk or no network card says so on the
   screen, not only with the boot option `diag`.
+- With several xHCI controllers (recent Intel PCs have one for the USB-C
+  ports ahead of the chipset's; AMD ones two or three), each is tried in
+  turn until one has a keyboard, a mouse or a BastiOS stick on it. Only
+  the first was looked at before.
 
 ### Sound
 

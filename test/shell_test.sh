@@ -1196,7 +1196,7 @@ fails += not good
 # A USB keyboard and a USB mouse on an xHCI controller (src/xhci.bastio),
 # on a machine with no PS/2 controller at all (i8042=off), so the keys and
 # the moves can only come over USB. They are sent through QMP; at power
-# off the controller is reset and its fifteen pages are back.
+# off the controller is reset and its pages are back.
 import json
 qmp_path = os.path.join(disk_dir.name, "qmp.sock")
 def usbmouse(name, qmp_cmd):
@@ -1227,8 +1227,11 @@ def usbmouse(name, qmp_cmd):
     good = b"mmouse: wheel ready\r\nmmouse: wheel -1\r\n" in out[mark:]
     print(("ok  " if good else "FAIL"), f"({name} boot) ImPS/2 mode, and the USB mouse's wheel turned up reads -1")
     fails += not good
-qemu = boot(1, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci", "-device", "usb-kbd",
-                      "-device", "usb-mouse", "-qmp", f"unix:{qmp_path},server,nowait"])
+# A first controller with nothing on it stands for a PC's USB-C one: the
+# keyboard and mouse are on the second, which must be found.
+qemu = boot(1, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci,id=empty", "-device", "qemu-xhci,id=xu",
+                      "-device", "usb-kbd,bus=xu.0", "-device", "usb-mouse,bus=xu.0",
+                      "-qmp", f"unix:{qmp_path},server,nowait"])
 out = b""
 deadline = time.time() + timeout
 ok = read_until(b"bastios> ")
