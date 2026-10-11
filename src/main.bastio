@@ -62,6 +62,7 @@ import "lxpty.bastio";
 import "lxxattr.bastio";
 import "lxmount.bastio";
 import "lxperm.bastio";
+import "lxinotify.bastio";
 import "lazy.bastio";
 
 const V_TIMER: u64 = 32;
@@ -363,7 +364,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
     s.k.fs.now = sat_add(s.k.epoch, s.k.ns) / 1000000000;   // wall-clock seconds, as stat reports them
     let began = s.k.ns;
+    ino_before(&mut s.k, p);                // src/lxinotify.bastio
     let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
+    ino_after(&mut s.k, p);
     let ended = tsc_now(s.k.tsc, s.k.ns, cpu);
     if ended > began {
       tm_sys_add(&mut s.k, p, ended - began);   // system time (src/lxrlimit.bastio)

@@ -312,6 +312,8 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       r = ev_read(&mut k, pid, d.kind, d.x, va, cnt);
     } else if d.kind == K_SIGFD {
       r = sfd_read(&mut k, pid, d.x, va, cnt);
+    } else if d.kind == K_INOTIFY && d.x < INO_N {
+      r = ino_read(&mut k, pid, d.x, va, cnt);   // src/lxinotify.bastio
     } else if d.kind == K_DEV && d.x >= PROC_DEV {
       r = proc_read(&mut k, pid, a, d.x, va, cnt);
     } else if d.kind == K_DEV && is_loop(d.x) {
@@ -419,6 +421,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if is_ptimer_call(n) {
     return lx_ptimer_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
+  }
+  if is_inotify_call(n) {
+    return lx_inotify_call(&mut k, pid, n, a, b, c);   // src/lxinotify.bastio
   }
   if is_pidfd_call(n) {
     return lx_pidfd_call(&mut k, pid, n, a, b, c);   // src/lxpidfd.bastio

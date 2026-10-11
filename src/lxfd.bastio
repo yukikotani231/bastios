@@ -203,6 +203,9 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   if kind == OF_PIDFD {
     return Fd { kind: K_PIDFD, x: smaller(x, NPROC) };
   }
+  if kind == OF_INOTIFY && x < INO_N {
+    return Fd { kind: K_INOTIFY, x: x };
+  }
   return Fd { kind: K_BAD, x: 0 };
 }
 
@@ -245,7 +248,7 @@ fn pipe_nonblock(k: &Kernel, pid: u64, fd: u64) -> bool
 /// word 3.
 fn can_block(kind: u64) -> bool {
   return kind == OF_PIPE_R || kind == OF_PIPE_W || kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD || kind == OF_PTY
-    || kind == OF_PIDFD;
+    || kind == OF_PIDFD || kind == OF_INOTIFY;
 }
 
 /// Whether process pid has a file layer row free: an open file holds
@@ -340,7 +343,12 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
   of_set(&mut k.ofd, h, 0, OF_FREE);
   of_set(&mut k.ofd, h, 1, 0);
   if kind == OF_FILE && x < FD_ROWS {
+    ino_closed(&mut k, x, false);           // src/lxinotify.bastio
     vfs_close(&mut k.fs, &mut k.mem, x);
+  } else if kind == OF_DIR {
+    ino_closed(&mut k, x, true);
+  } else if kind == OF_INOTIFY && x < INO_N {
+    ino_free(&mut k, x);
   } else if kind == OF_PIPE_R && x < NPIPES {
     let left = pi_get(k.pipes, x, 2);
     if left > 0 {
@@ -902,7 +910,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     if kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD || kind == OF_PTY {
       fl = LO_RDWR;
     }
-    if kind == OF_PIDFD {
+    if kind == OF_PIDFD || kind == OF_INOTIFY {
       fl = 0;                               // O_RDONLY
     }
     if of_get(k.ofd, h, 3) % 2 == 1 {
