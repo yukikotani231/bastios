@@ -9,15 +9,18 @@
 #   make test       boot it in QEMU and drive the shell over the serial line
 #   make fuzz       fuzz the system calls (SEED, SEEDS, CALLS, SMP)
 #
+# The kernel and its programs are built with bastioc1, bastiolang's compiler
+# (stage1, written in Bastio), which stage0's bastioc0 builds once into
+# build/bastioc1. BASTIOC names another compiler (bastioc0 still works);
+# BASTIOC0 names stage0.
+#
 # NATIVE=1 builds the kernel with bastioc1's own x86-64 backend instead of
 # translating it to C for $(CC): no C compiler between the proved code and
 # the machine code (only the assembler). Opt-in while its code is about ten
-# times the size of gcc's. BASTIOC1 names a bastioc1 binary; by default one
-# is built from $(BASTIOLIB)/stage1.
-#
-# BASTIOC points at the Bastio stage0 compiler (github.com/yukikotani231/bastiolang).
+# times the size of gcc's.
 
-BASTIOC ?= ../bastiolang/stage0/target/release/bastioc0
+BASTIOC0 ?= ../bastiolang/stage0/target/release/bastioc0
+BASTIOC  ?= build/bastioc1
 # Where `import "core/..."` finds the Bastio core library.
 BASTIOLIB ?= ../bastiolang
 CC      ?= cc
@@ -169,16 +172,14 @@ KFILES := $(wildcard files/*)
 build/kernel.c: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
 	$(BASTIOC) --lib $(BASTIOLIB) --target kernel -o $@ src/main.bastio
 
-BASTIOC1 ?= build/bastioc1
-
-build/bastioc1.c: $(BASTIOC) $(wildcard $(BASTIOLIB)/stage1/*.bastio) | build
-	$(BASTIOC) --emit-c -o $@ $(BASTIOLIB)/stage1/bastioc1.bastio
+build/bastioc1.c: $(BASTIOC0) $(wildcard $(BASTIOLIB)/stage1/*.bastio) | build
+	$(BASTIOC0) --emit-c -o $@ $(BASTIOLIB)/stage1/bastioc1.bastio
 
 build/bastioc1: build/bastioc1.c
 	cc -O2 -o $@ $<
 
-build/kernel.s: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC1) | build
-	$(BASTIOC1) --lib $(BASTIOLIB) --target kernel --backend native --emit-asm -o $@ src/main.bastio
+build/kernel.s: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
+	$(BASTIOC) --lib $(BASTIOLIB) --target kernel --backend native --emit-asm -o $@ src/main.bastio
 
 # Which backend built build/kernel.o, rewritten only when it changes, so
 # that switching NATIVE rebuilds the kernel.
@@ -476,7 +477,7 @@ build/compat/dev.img: build/compat/tcc build/compat/make test/compat/devdisk.sh 
 # build the C it writes, on a third disk (test/compat/bastiodisk.sh) for
 # test/compat/bastio.txt. Z3 is built against glibc, statically: there is
 # no C++ compiler for musl here. Its build takes a while, once.
-BASTIOLANG    ?= $(patsubst %/stage0/target/release/bastioc0,%,$(BASTIOC))
+BASTIOLANG    ?= $(patsubst %/stage0/target/release/bastioc0,%,$(BASTIOC0))
 Z3_GIT        ?= https://github.com/Z3Prover/z3
 Z3_TAG        ?= z3-4.8.12
 Z3_JOBS       ?= 4
@@ -489,8 +490,8 @@ build/compat/z3: | build/compat/src
 	$(MAKE) -C build/compat/src/z3/build -s -j$(Z3_JOBS) z3 >/dev/null
 	strip -o $@ build/compat/src/z3/build/z3
 
-build/compat/bastioc1.c: $(BASTIOC) $(wildcard $(BASTIOLANG)/stage1/*.bastio) | build/compat
-	$(BASTIOC) --emit-c -o $@ $(BASTIOLANG)/stage1/bastioc1.bastio
+build/compat/bastioc1.c: $(BASTIOC0) $(wildcard $(BASTIOLANG)/stage1/*.bastio) | build/compat
+	$(BASTIOC0) --emit-c -o $@ $(BASTIOLANG)/stage1/bastioc1.bastio
 
 build/compat/bastioc1: build/compat/bastioc1.c
 	$(MUSLCC) $(APP_CFLAGS) -o $@ $<
