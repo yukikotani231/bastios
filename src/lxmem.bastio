@@ -820,9 +820,10 @@ fn lock_range(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
 // ------------------------------------------------ cached file pages
 
 /// Maps the page cache's slot `slot` (src/pcache.bastio) at window page p
-/// of process pid, making the level-1 table if need be. False if the
-/// process has no window, memory ran out, or p is in use.
-fn lx_map_cached(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, p: u64, c: &mut PCache, slot: u64) -> bool
+/// of process pid, making the level-1 table if need be, writable if `w`.
+/// False if the process has no window, memory ran out, or p is in use
+/// (for a read-only page, something there already counts as mapped).
+fn lx_map_cached(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, p: u64, c: &mut PCache, slot: u64, w: bool) -> bool
   requires mem_ok(m) && spaces_ok(spaces) && pid < NPROC && p < WPAGES && pc_ok(c) && slot < PC_N
   ensures mem_ok(m) && spaces_ok(spaces) && pc_ok(c)
 {
@@ -831,7 +832,7 @@ fn lx_map_cached(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, p: u64, c: &mut
     Space::Mapped(mut root) => {
       let mut ok = false;
       if pt_has(root, 1) {
-        ok = pt_borrow(&mut root, 1, cached_l3, &mut m, p, &mut c, slot);
+        ok = pt_borrow(&mut root, 1, cached_l3, &mut m, p, &mut c, slot, w);
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return ok;
@@ -839,17 +840,17 @@ fn lx_map_cached(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, p: u64, c: &mut
   }
 }
 
-fn cached_l3(l3: &mut PageTable, m: &mut Mem, p: u64, c: &mut PCache, slot: u64) -> bool
+fn cached_l3(l3: &mut PageTable, m: &mut Mem, p: u64, c: &mut PCache, slot: u64, w: bool) -> bool
   requires pt_level(l3) == 3 && mem_ok(m) && p < WPAGES && pc_ok(c) && slot < PC_N
   ensures mem_ok(m) && pc_ok(c)
 {
   if !pt_has(l3, 0) {
     return false;
   }
-  return pt_borrow(&mut l3, 0, cached_l2, &mut m, p, &mut c, slot);
+  return pt_borrow(&mut l3, 0, cached_l2, &mut m, p, &mut c, slot, w);
 }
 
-fn cached_l2(l2: &mut PageTable, m: &mut Mem, p: u64, c: &mut PCache, slot: u64) -> bool
+fn cached_l2(l2: &mut PageTable, m: &mut Mem, p: u64, c: &mut PCache, slot: u64, w: bool) -> bool
   requires pt_level(l2) == 2 && mem_ok(m) && p < WPAGES && pc_ok(c) && slot < PC_N
   ensures mem_ok(m) && pc_ok(c) && pt_level(l2) == 2
 {
@@ -861,7 +862,7 @@ fn cached_l2(l2: &mut PageTable, m: &mut Mem, p: u64, c: &mut PCache, slot: u64)
     }
     pt_put(&mut l2, t, pt_new(take_page(&mut m, a), 1));
   }
-  return pt_borrow(&mut l2, t, pc_map_slot, &mut c, slot, p % 512);
+  return pt_borrow(&mut l2, t, pc_map, &mut c, slot, p % 512, w);
 }
 
 /// mmap MAP_SHARED of file f from offset off at window pages first ..
@@ -876,7 +877,7 @@ fn lx_map_file_shared(k: &mut Kernel, pid: u64, first: u64, pages: u64, f: u64, 
     invariant j <= pages && kok(k) && pid < NPROC && first + pages <= WPAGES
   {
     let fpg = off / 4096 + j;
-    let mut slot = pc_find(k.fs.pc, f, fpg);
+    let mut slot = pc_get(&mut k.fs.pc, f, fpg);
     if slot >= PC_N {
       let mut got = 0;
       if fpg <= 0xFFFFFFFFFFFFF {
@@ -887,7 +888,7 @@ fn lx_map_file_shared(k: &mut Kernel, pid: u64, first: u64, pages: u64, f: u64, 
       }
       slot = pc_add(&mut k.fs.pc, &mut k.mem, f, fpg, k.fs.xfer, got, false);
     }
-    if slot >= PC_N || !lx_map_cached(&mut k.mem, &mut k.spaces, pid, first + j, &mut k.fs.pc, slot) {
+    if slot >= PC_N || !lx_map_cached(&mut k.mem, &mut k.spaces, pid, first + j, &mut k.fs.pc, slot, true) {
       return ENOMEM;
     }
     j = j + 1;
