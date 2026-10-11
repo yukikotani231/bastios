@@ -14,7 +14,8 @@
 // last report become the bytes a serial terminal would send, as for PS/2.
 // The first that offers a HID boot mouse interface becomes the mouse, the
 // same way: its boot reports (buttons, then the motion in x and y, down
-// positive) become PS/2 packets (src/kbd.bastio), which the console moves
+// positive, then, from most mice, the wheel, up positive) become PS/2
+// packets with the wheel (src/kbd.bastio), which the console moves
 // to /dev/input/mice (src/lxmouse.bastio). A wireless receiver offers both
 // interfaces on one device, which then serves as both, on one slot.
 //
@@ -183,7 +184,7 @@ struct Xhci {
   mslot: u8,
   mdci: u64,          // its endpoint's context index
   m_at: u64,          // its ring's position
-  mq: Bytes,          // packets (3 bytes each), not yet taken
+  mq: Bytes,          // packets (4 bytes each), not yet taken
   mqn: u64,
   mbtn: u64,          // the buttons in the last report
   mlive: bool,        // is there a mouse?
@@ -214,7 +215,7 @@ spec fn xhci_ok(x: &Xhci) -> bool {
   && (x.csz == 32 || x.csz == 64)
   && x.cmd_at < RING_N * 2 && x.e0a < RING_N * 2 && x.e0b < RING_N * 2
   && x.e0c < RING_N * 2 && x.e0d < RING_N * 2 && x.e0e < RING_N * 2 && x.int_at < RING_N * 2
-  && x.m_at < RING_N * 2 && x.mdci < 32 && blen(x.mq) == MQ_N * 3 && x.mqn <= MQ_N && x.mbtn < 8
+  && x.m_at < RING_N * 2 && x.mdci < 32 && blen(x.mq) == MQ_N * 4 && x.mqn <= MQ_N && x.mbtn < 8
   && x.evt_at < EVT_N * 2 && x.out_at < RING_N * 2 && x.in_at < RING_N * 2
   && x.dci < 32 && x.dout < 32 && x.din < 32
   && x.plo <= 4294967296 && x.sectors <= 4294967296
@@ -343,7 +344,7 @@ fn evt_step(x: &mut Xhci) -> u64
     }
     if x.mlive && s == cast[u64](x.mslot) && e == x.mdci {
       if cc == CC_SUCCESS || cc == CC_SHORT {
-        mouse_report(&mut x);
+        mouse_report(&mut x, 8 - smaller(cast[u64](x.ev_s & 0xFFFFFF), 8));
       }
       mouse_queue(&mut x);
       return EV_TAKEN;
@@ -1515,7 +1516,7 @@ fn xhci_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, f
     sp2: dma_lend(f9), sp3: dma_lend(f10), bulk: dma_lend(f11), data: dma_lend(f12), ctx2: dma_lend(f13), ctx3: dma_lend(f14), op: 0, rt: 0, db: 0,
     csz: 32, ports: 0, cmd_at: 1, evt_at: 1, e0a: 1, e0b: 1, e0c: 1, e0d: 1, e0e: 1, int_at: 1, ev_p: 0, ev_s: 0, ev_c: 0, slot: 0,
     dci: 0, port: 0, keys: balloc(6), q: balloc(16), qn: 0, shift: false, ctrl: false, live: false,
-    mslot: 0, mdci: 0, m_at: 1, mq: balloc(MQ_N * 3), mqn: 0, mbtn: 0, mlive: false,
+    mslot: 0, mdci: 0, m_at: 1, mq: balloc(MQ_N * 4), mqn: 0, mbtn: 0, mlive: false,
     msd: MSD_NONE, ds: 0, dout: 0, din: 0, iface: 0, out_at: 1, in_at: 1, tag: 0, plo: 0, sectors: 0,
     busy: false, stage: 0, done: false, dcc: 0, bop: 0, irq: false };
   let cap = cast[u64](xr(&mut x, 0) & 255);
@@ -1703,17 +1704,23 @@ fn kbd_report(x: &mut Xhci)
   }
 }
 
-/// Reads a finished mouse report: the buttons (bit 0 left, 1 right, 2
-/// middle) and the motion in x and y (signed bytes, down positive) become
-/// a PS/2 packet (y up positive), queued unless nothing changed.
-fn mouse_report(x: &mut Xhci)
+/// Reads a finished mouse report of n bytes: the buttons (bit 0 left, 1
+/// right, 2 middle), the motion in x and y (signed bytes, down positive)
+/// and, if there is a fourth byte, the wheel (up positive) become a PS/2
+/// packet (y up positive) with an ImPS/2 wheel byte (up negative), queued
+/// unless nothing changed.
+fn mouse_report(x: &mut Xhci, n: u64)
   requires xhci_ok(x)
   ensures xhci_ok(x)
 {
   let b = cast[u64](dma_read8(&mut x.intr, 3072)) % 8;
   let dx = cast[u64](dma_read8(&mut x.intr, 3073));
   let dy = cast[u64](dma_read8(&mut x.intr, 3074));
-  if (dx == 0 && dy == 0 && b == x.mbtn) || x.mqn >= MQ_N {
+  let mut dz = 0;
+  if n >= 4 {
+    dz = cast[u64](dma_read8(&mut x.intr, 3075));
+  }
+  if (dx == 0 && dy == 0 && dz == 0 && b == x.mbtn) || x.mqn >= MQ_N {
     return;
   }
   x.mbtn = b;
@@ -1724,10 +1731,11 @@ fn mouse_report(x: &mut Xhci)
   if dy >= 1 && dy <= 127 {
     b0 = b0 + 32;                     // down, so y negative
   }
-  let at = x.mqn * 3;
+  let at = x.mqn * 4;
   bset(&mut x.mq, at, cast[u8](b0));
   bset(&mut x.mq, at + 1, cast[u8](dx));
   bset(&mut x.mq, at + 2, cast[u8]((256 - dy) % 256));
+  bset(&mut x.mq, at + 3, cast[u8]((256 - dz) % 256));
   x.mqn = x.mqn + 1;
 }
 
@@ -1747,13 +1755,14 @@ fn xhci_poll(x: &mut Xhci) -> u64
     n = n + 1;
   }
   if x.qn == 0 && x.mqn > 0 {
-    let p = MOUSE_PKT + cast[u64](bget(x.mq, 0)) * 65536 + cast[u64](bget(x.mq, 1)) * 256 + cast[u64](bget(x.mq, 2));
-    let last = x.mqn * 3 - 3;
+    let p = MOUSE_PKT + cast[u64](bget(x.mq, 0)) * 16777216 + cast[u64](bget(x.mq, 1)) * 65536
+      + cast[u64](bget(x.mq, 2)) * 256 + cast[u64](bget(x.mq, 3));
+    let last = x.mqn * 4 - 4;
     let mut j = 0;
     while j < last
-      invariant xhci_ok(x) && x.mqn >= 1 && last + 3 <= MQ_N * 3 && j <= last
+      invariant xhci_ok(x) && x.mqn >= 1 && last + 4 <= MQ_N * 4 && j <= last
     {
-      bset(&mut x.mq, j, bget(x.mq, j + 3));
+      bset(&mut x.mq, j, bget(x.mq, j + 4));
       j = j + 1;
     }
     x.mqn = x.mqn - 1;

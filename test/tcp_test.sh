@@ -439,8 +439,12 @@ def pattern(n, salt):
 def listen_7001():
     """`tcpecho 7001` in the guest, typed again if the port is still taken
     (the last connection on it can still be waiting for our final ACK when
-    the shell prompt comes back). Returns where its output starts."""
+    the shell prompt comes back). Returns where its output starts;
+    `listen_tries` says how many times it was typed."""
+    global listen_tries
+    listen_tries = 0
     for _ in range(5):
+        listen_tries += 1
         mark = len(out)
         type_line("tcpecho 7001")
         until(lambda: b"listening on tcp port 7001" in out[mark:] or b"cannot listen" in out[mark:], 10)
@@ -613,6 +617,15 @@ def chaos_setup(p):
     link.out_rule = chaos_out
     link.in_rule = chaos
 p = echo_run(f"random loss (SEED={seed})", pattern(30000, 5), chaos_setup, secs=120)
+
+# 5b. A connection the guest has let go of but not finished closing (our
+#     ACK of its FIN is lost, so it waits in LAST_ACK, sending the FIN
+#     again to nobody) does not keep a new listener off its port.
+def lose_last_ack(p):
+    link.out_rule = lambda f: None if tcp_of(f) and p.peer_fin else 0
+p = echo_run("our last ACK lost", pattern(3000, 7), lose_last_ack)
+p = echo_run("a new listener beside a closing connection", pattern(3000, 8), lambda p: None)
+check(listen_tries == 1, f"a new listener beside a closing connection: tcpecho listens at once ({listen_tries} tries)")
 
 # 6. Window scaling and SACK (RFC 7323, RFC 2018): we offer both, so the
 #    guest offers a window past 64 KiB, and when one of our segments is
