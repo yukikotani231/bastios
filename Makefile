@@ -310,6 +310,8 @@ test: build/bastios.elf
 	test/tcp_test.sh
 	NIC=e1000 test/tcp_test.sh
 	NIC=igb test/tcp_test.sh
+	MUSLCC=$(MUSLCC) test/ipv6_test.sh
+	NIC=e1000 MUSLCC=$(MUSLCC) test/ipv6_test.sh
 	test/iso_test.sh
 	test/nmi_test.sh
 	test/fuzz_test.sh 1 2 2000
@@ -361,11 +363,33 @@ MPY_GIT       ?= https://github.com/micropython/micropython
 MPY_TAG       ?= v1.24.1
 KILO_GIT      ?= https://github.com/antirez/kilo
 KILO_REV      ?= 323d93b29bd89a2cb446de90c4ed4fea1764176e
-COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo
+DROPBEAR_GIT  ?= https://github.com/mkj/dropbear
+DROPBEAR_TAG  ?= DROPBEAR_2024.86
+COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo \
+                 build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys
 APP_CFLAGS    := -static-pie -fPIE -O2 -w -s
 
 build/compat/src:
 	mkdir -p $@
+
+# Dropbear, the SSH server (and its client and key tool, which also run on
+# the host: ssh.txt logs in from here). The keys are made for the test:
+# the server's host key and a client key whose public half goes in
+# root's authorized_keys on the disk.
+build/compat/dropbear: | build/compat/src
+	rm -rf build/compat/src/dropbear
+	git clone -q --depth 1 --branch $(DROPBEAR_TAG) $(DROPBEAR_GIT) build/compat/src/dropbear
+	cd build/compat/src/dropbear && CC=$(MUSLCC) CFLAGS="-O2 -fPIE" LDFLAGS="-static-pie -s" ./configure -q \
+	  --disable-zlib --disable-lastlog --disable-utmp --disable-utmpx --disable-wtmp --disable-wtmpx \
+	  --disable-pututline --disable-pututxline --disable-syslog >/dev/null
+	$(MAKE) -C build/compat/src/dropbear -s PROGRAMS="dropbear dbclient dropbearkey" >/dev/null
+	cp build/compat/src/dropbear/dbclient build/compat/src/dropbear/dropbearkey build/compat/
+	cp build/compat/src/dropbear/dropbear $@
+
+build/compat/ssh_host_key build/compat/ssh_authorized_keys &: build/compat/dropbear
+	rm -f build/compat/ssh_host_key build/compat/ssh_id
+	build/compat/dropbearkey -t ed25519 -f build/compat/ssh_host_key >/dev/null
+	build/compat/dropbearkey -t ed25519 -f build/compat/ssh_id | grep '^ssh-' > build/compat/ssh_authorized_keys
 
 build/compat/lua: | build/compat/src
 	rm -rf build/compat/src/lua
