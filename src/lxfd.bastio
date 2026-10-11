@@ -197,6 +197,9 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   if kind == OF_EPOLL && x < EP_N {
     return Fd { kind: K_EPOLL, x: x };
   }
+  if kind == OF_PIDFD {
+    return Fd { kind: K_PIDFD, x: smaller(x, NPROC) };
+  }
   return Fd { kind: K_BAD, x: 0 };
 }
 
@@ -238,7 +241,8 @@ fn pipe_nonblock(k: &Kernel, pid: u64, fd: u64) -> bool
 /// Whether descriptions of this kind keep O_NONBLOCK in the low bit of
 /// word 3.
 fn can_block(kind: u64) -> bool {
-  return kind == OF_PIPE_R || kind == OF_PIPE_W || kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD || kind == OF_PTY;
+  return kind == OF_PIPE_R || kind == OF_PIPE_W || kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD || kind == OF_PTY
+    || kind == OF_PIDFD;
 }
 
 /// Whether process pid has a file layer row free: an open file holds
@@ -676,6 +680,9 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if flags / LO_APPEND % 2 == 1 {
     f = f + O_APPEND;
   }
+  if flags & LO_PATH != 0 {
+    f = 0;                                  // O_PATH: neither read nor write, and no other flag counts
+  }
   if fd_free(k, pid, 0) >= LXNFD || !row_free(k, pid) {
     return EMFILE;                          // no descriptor, or no file layer row, left
   }
@@ -820,6 +827,9 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     }
     if kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD || kind == OF_PTY {
       fl = LO_RDWR;
+    }
+    if kind == OF_PIDFD {
+      fl = 0;                               // O_RDONLY
     }
     if of_get(k.ofd, h, 3) % 2 == 1 {
       fl = fl + LO_NONBLOCK;

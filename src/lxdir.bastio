@@ -91,8 +91,10 @@ fn name_out(x: &mut Bytes, name: Str) -> u64
 
 /// getdents64(fd, buf, count): as many struct linux_dirent64 records as
 /// fit in count bytes (and DENT_BUF), from where the last call stopped.
-/// Returns the bytes filled, 0 at the end, or -errno.
-fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64) -> u64
+/// Returns the bytes filled, 0 at the end, or -errno. With `legacy`, the
+/// old getdents's struct linux_dirent instead: the same size, with the
+/// name a byte earlier and d_type in the record's last byte.
+fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64, legacy: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
@@ -108,15 +110,28 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64) -> u64
     return ENOTDIR;
   }
   let dir = of_get(k.ofd, h, 2);
+  if dir >= DIR_VFS && dir < DIR_PROC && !vfs_is_dir(&mut k.fs, dir - DIR_VFS) {
+    return ENOENT;                          // removed while open
+  }
   let cap = smaller(count, DENT_BUF);
   let mut out = balloc(DENT_BUF);
   let mut used = 0;
   let mut i = of_get(k.ofd, h, 3);
   let mut more = true;
+  let mut full = false;
   while more && i < 0x100000000
     invariant used <= cap && cap <= DENT_BUF && blen(out) == DENT_BUF && kok(k)
   {
-    let e = dir_entry(&mut k, dir, i);
+    // Positions 0 and 1 are "." and "..", as on Linux; the directory's
+    // own entries follow.
+    let mut e = Ent { len: 0, dir: true, end: false };
+    if i < 2 {
+      bset(&mut k.fs.xfer, 0, 46);
+      bset(&mut k.fs.xfer, 1, 46);
+      e = Ent { len: i + 1, dir: true, end: false };
+    } else {
+      e = dir_entry(&mut k, dir, i - 2);
+    }
     if e.end {
       more = false;
     } else if e.len == 0 {
@@ -126,6 +141,7 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64) -> u64
       let reclen = (DENT_HDR + e.len + 1 + 7) / 8 * 8;
       if reclen > cap - used {
         more = false;
+        full = true;
       } else {
         let mut z = 0;
         while z < reclen
@@ -138,17 +154,23 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64) -> u64
         xfer_u64(&mut out, used + 8, i + 1);          // d_off: the next entry
         bset(&mut out, used + 16, cast[u8](reclen % 256));      // d_reclen
         bset(&mut out, used + 17, cast[u8](reclen / 256 % 256));
+        let mut at = used + 18;               // d_type
+        let mut name = DENT_HDR;
+        if legacy {
+          at = used + reclen - 1;
+          name = DENT_HDR - 1;
+        }
         if e.dir {
-          bset(&mut out, used + 18, cast[u8](DT_DIR));
+          bset(&mut out, at, cast[u8](DT_DIR));
         } else {
-          bset(&mut out, used + 18, cast[u8](DT_REG));
+          bset(&mut out, at, cast[u8](DT_REG));
         }
         let mut j = 0;
         while j < e.len
-          invariant j <= e.len && e.len <= XFER && DENT_HDR + e.len < reclen
+          invariant j <= e.len && e.len <= XFER && DENT_HDR + e.len < reclen && name <= DENT_HDR
           invariant used + reclen <= cap && cap <= DENT_BUF && blen(out) == DENT_BUF && kok(k)
         {
-          bset(&mut out, used + DENT_HDR + j, bget(k.fs.xfer, j));
+          bset(&mut out, used + name + j, bget(k.fs.xfer, j));
           j = j + 1;
         }
         used = used + reclen;
@@ -156,7 +178,7 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64) -> u64
       }
     }
   }
-  if used == 0 && more {
+  if used == 0 && full {
     bfree(out);
     return EINVAL;                          // not even one entry fits
   }
@@ -167,6 +189,39 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64) -> u64
   }
   of_set(&mut k.ofd, h, 3, i);
   return used;
+}
+
+/// lseek on a directory: the position is getdents's, the count of entries
+/// already read ("." and ".." included). SEEK_SET and SEEK_CUR move it, as
+/// rewinddir, seekdir and telldir need; SEEK_END is EINVAL, as on Linux's
+/// in-memory file systems.
+fn dir_seek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let v = fd_get(k.lxfd, pid, fd) % FD_CLOEXEC;
+  if v < FD_OFD || v - FD_OFD >= OFD_N {
+    return EBADF;
+  }
+  let h = v - FD_OFD;
+  let pos = of_get(k.ofd, h, 3) % 0x100000000;
+  let mut to = off;
+  if whence == 1 {
+    if off < 0x8000000000000000 {
+      to = sat_add(pos, off);
+    } else if 0xFFFFFFFFFFFFFFFF - off + 1 <= pos {
+      to = pos - (0xFFFFFFFFFFFFFFFF - off + 1);
+    } else {
+      return EINVAL;
+    }
+  } else if whence != 0 {
+    return EINVAL;
+  }
+  if to >= 0x100000000 {
+    return EINVAL;
+  }
+  of_set(&mut k.ofd, h, 3, to);
+  return to;
 }
 
 // ---------------------------------------------------------------- paths
