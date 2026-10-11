@@ -1,5 +1,30 @@
 # Checks that pass on BastiOS (make compat-baseline rewrites this).
 # make compat fails if one of them stops passing.
+alpine: alpine: unpack the root, chroot into it
+alpine: apk: a dependency comes along; install scripts run
+alpine: apk: a dependency nothing provides stops the install
+alpine: apk: a new trigger runs on the directory it watches
+alpine: apk: install bash, make, jq, rsync, openssl, file and xmllint
+alpine: apk: install from a repository over HTTP, then remove it
+alpine: apk: install git, curl and less, with what they depend on
+alpine: apk: remove a package and its files
+alpine: apk: remove a package: its scripts run, its dependency goes too
+alpine: apk: remove them, and what only they needed
+alpine: apk: the packages the root came with
+alpine: apk: they are in its database
+alpine: apk: upgrade, with a version constraint on the dependency
+alpine: bash: arrays, brace expansion, here-strings
+alpine: curl: 1 MiB from the host
+alpine: curl: a file from the host
+alpine: file: what a file is (libmagic)
+alpine: git: commit, log and diff
+alpine: jq: query JSON
+alpine: less: copies a pipe through
+alpine: make: rebuild only what is out of date
+alpine: openssl: a digest and random bytes
+alpine: rsync: copy a tree
+alpine: ssh-keygen: an ed25519 key
+alpine: xmllint: an XPath query
 apps: ash: a 1200-byte typed line
 apps: git: 300 files, a branch and a merge
 apps: git: gc, fsck and a clone through upload-pack
@@ -565,10 +590,13 @@ t_perm: setgroups and getgroups keep supplementary groups
 t_perm: the disk keeps owners
 t_perm: umask applies to new files and directories
 t_perm: without the group, the group's bits do not apply
+t_proc: #! naming a missing interpreter is ENOENT
+t_proc: #! naming no interpreter is ENOEXEC
 t_proc: child's getppid is the parent
 t_proc: environment
 t_proc: execve
 t_proc: execve missing is ENOENT
+t_proc: execve of a #! script
 t_proc: fork + exit status
 t_proc: fork copies memory
 t_proc: getgroups
