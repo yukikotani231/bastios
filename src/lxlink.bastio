@@ -104,9 +104,6 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
     k.perr = ENAMETOOLONG;
     return NO_RESULT;
   }
-  if n == 0 {
-    return 0;
-  }
   let mut p = balloc(PATH_OUT);
   let mut q = balloc(SPLICE);
   let mut i = 0;
