@@ -987,7 +987,7 @@ fn lx_mknod(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64, dev: u64
   }
   xfer_load(&mut k, t, 0, n);               // path_meta may have used the transfer buffer
   bfree(t);
-  if vfs_ro(&mut k.fs, n) {
+  if path_ro(&mut k, n) {
     return EROFS;
   }
   let e = may_dir(&mut k, pid, n);

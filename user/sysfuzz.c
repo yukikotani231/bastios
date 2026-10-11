@@ -233,7 +233,7 @@ static u64 arg(void) {
  * every call the kernel dispatches is here or in this list of calls that
  * `tame` leaves out:
  *
- * left out: 15 34 42 60 130 153 169 231
+ * left out: 15 34 42 60 130 153 155 169 231
  */
 static const unsigned short linux_calls[] = {
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
@@ -316,6 +316,7 @@ static int tame(u64 n, u64 *a) {
     case 42:                                          /* connect: TCP waits for a SYN reply */
     case 37:                                          /* alarm: SIGALRM would end the run */
     case 153:                                         /* vhangup: would hang up the shell */
+    case 155:                                         /* pivot_root: would move the shell's root */
         return 0;
     case 202:                                         /* futex: the ops that cannot wait for */
         switch (a[1] & 127) {                         /* ever, and a zero timeout (in buf) */

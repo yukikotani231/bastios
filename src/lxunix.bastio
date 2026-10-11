@@ -611,7 +611,7 @@ fn ux_mkfile(k: &mut Kernel, pid: u64, n: u64) -> u64
   let mut e = 0;
   if there.ok {
     e = EADDRINUSE;                         // a file, or a socket file left behind
-  } else if vfs_ro(&mut k.fs, n) {
+  } else if path_ro(&mut k, n) {
     e = EROFS;
   } else {
     e = may_dir(&mut k, pid, n);

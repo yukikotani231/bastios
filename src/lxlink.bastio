@@ -92,18 +92,17 @@ fn lex_norm(src: &Bytes, sl: u64, dst: &mut Bytes, floor: u64) -> u64
 /// its length, or NO_RESULT (and k.perr) for a loop, a broken link, a
 /// result too long, or a component under something not a directory.
 /// xfer[..floor] is the caller's root (chroot): an absolute target starts
-/// there, and ".." does not climb above it.
-fn lx_follow(k: &mut Kernel, n: u64, last: bool, floor: u64) -> u64
-  requires kok(k) && floor <= n
+/// there, and ".." does not climb above it. The path is process pid's
+/// logical one: each lookup goes through its mount namespace, and so does
+/// the result (src/lxns.bastio).
+fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
+  requires kok(k) && pid < NPROC && floor <= n
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
   if n > FNAME_MAX {
     k.perr = ENAMETOOLONG;
     return NO_RESULT;
-  }
-  if n == 0 {
-    return 0;
   }
   let mut p = balloc(PATH_OUT);
   let mut q = balloc(SPLICE);
@@ -114,6 +113,7 @@ fn lx_follow(k: &mut Kernel, n: u64, last: bool, floor: u64) -> u64
     bset(&mut p, i, bget(k.fs.xfer, i));
     i = i + 1;
   }
+  let ns = ns_of(k, pid);
   let mut pl = n;
   let mut e = 0;                            // where the component being looked at starts
   let mut hops = 0;
@@ -129,16 +129,17 @@ fn lx_follow(k: &mut Kernel, n: u64, last: bool, floor: u64) -> u64
     }
     let mut f = NO_FILE;
     if c < pl || last {
-      let mut j = 0;
-      while j < c
-        invariant j <= c && c <= pl && pl <= FNAME_MAX && blen(p) == PATH_OUT && kok(k)
-      {
-        bset(&mut k.fs.xfer, j, bget(p, j));
-        j = j + 1;
+      // Looked up where the mount namespace maps it (src/lxns.bastio).
+      let tl = ns_tr(&mut k, ns, p, c);
+      if tl == NO_RESULT {
+        bad = true;
+      } else {
+        f = vfs_lookup(&mut k.fs, tl);
       }
-      f = vfs_lookup(&mut k.fs, c);
     }
-    if f != NO_FILE && vfs_is_link(&mut k.fs, f) {
+    if bad {
+      // the name is too long where the mount namespace maps it
+    } else if f != NO_FILE && vfs_is_link(&mut k.fs, f) {
       let t = vfs_read_at(&mut k.fs, f, 0, FNAME_MAX);
       if hops >= LINK_HOPS {
         bad = true;
@@ -201,15 +202,16 @@ fn lx_follow(k: &mut Kernel, n: u64, last: bool, floor: u64) -> u64
     bfree(p);
     return NO_RESULT;
   }
-  let mut o = 0;
-  while o < pl
-    invariant o <= pl && pl <= FNAME_MAX && blen(p) == PATH_OUT && kok(k)
-  {
-    bset(&mut k.fs.xfer, o, bget(p, o));
-    o = o + 1;
-  }
+  // The logical path is kept (for a working directory, an open
+  // directory's base or a root); the file layer's goes in the transfer
+  // buffer.
+  ns_keep(&mut k, p, pl);
+  let tl = ns_tr(&mut k, ns, p, pl);
   bfree(p);
-  return pl;
+  if tl == NO_RESULT {
+    return NO_RESULT;
+  }
+  return proc_self(&mut k.fs.xfer, tl, pid);   // "proc/self" in a mounted proc too
 }
 
 /// readlink of the link with handle f: its target into user memory at va,
@@ -275,7 +277,7 @@ fn lx_symlink(k: &mut Kernel, pid: u64, tva: u64, dirfd: u64, path: u64) -> u64
     bfree(tb);
     return EEXIST;
   }
-  if vfs_ro(&mut k.fs, n) {
+  if path_ro(&mut k, n) {
     bfree(tb);
     return EROFS;
   }
@@ -348,7 +350,7 @@ fn lx_hardlink(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
     bfree(t);
     return EXDEV;                           // another file system: a mount, the disk
   }
-  if vfs_ro(&mut k.fs, m) && vfs_lookup(&mut k.fs, m) == NO_FILE {
+  if path_ro(&mut k, m) && vfs_lookup(&mut k.fs, m) == NO_FILE {
     bfree(t);
     return EROFS;
   }

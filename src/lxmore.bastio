@@ -469,6 +469,7 @@ fn lx_memfd(k: &mut Kernel, pid: u64, name: u64, flags: u64) -> u64
     oflags = oflags + LO_CLOEXEC;
   }
   let mut tries = 0;
+  lpath_ro_clear(&mut k);                   // a name made here, in no mount of a namespace
   while tries < 16
     invariant tries <= 16 && kok(k)
   {

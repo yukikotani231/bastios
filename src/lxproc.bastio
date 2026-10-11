@@ -185,6 +185,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   sig_fork(&mut k.sigact, pid, c);
   cwd_fork(&mut k.cwd, pid, c);
   cwd_fork(&mut k.croot, pid, c);
+  k.mns = set(k.mns, c, get(k.mns, pid));   // the same mount namespace (src/lxns.bastio)
   pset(&mut k.procs, c, F_SIGPEND, 0);
   pset(&mut k.procs, c, F_RESTART, 0);
   pset(&mut k.procs, c, F_STATE, READY);
@@ -1335,7 +1336,21 @@ fn applet_name(j: u64) -> Str {
   if j == 23 {
     return "chown";
   }
+  if j >= 34 {
+    return ns_applet(j - 34);
+  }
   return suid_name(j - 24);
+}
+
+/// The applets past applet 33: mount namespaces (src/lxns.bastio).
+fn ns_applet(j: u64) -> Str {
+  if j == 0 {
+    return "unshare";
+  }
+  if j == 1 {
+    return "pivot_root";
+  }
+  return "chroot";
 }
 
 /// The applets past applet 23, which deal with users: su and passwd first

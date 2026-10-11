@@ -322,6 +322,17 @@ steps = [
     # and the file still there after an unmount and a second mount.
     ("truncate -s 1M im; mkfs.bstdisk3 im && mkdir mm && mount -t bstdisk3 im mm && echo kept > mm/f && umount mm && mount -t bstdisk3 im mm && cat mm/f; cat /proc/mounts; umount mm; rm im; rmdir mm; echo lo$((1+1))",
      [b"\r\nkept\r\n", b"bstdisk3 /mm bstdisk3 rw", b"\r\nlo2\r\n"], b"\n# "),
+    # Mount namespaces (src/lxns.bastio): a bind mount made in one is seen
+    # there and not by the shell outside; pivot_root into a directory bound
+    # onto itself, with /bin, a volume and proc mounted in it, as OCI
+    # runtimes do it; a relative link in the volume cannot climb out of the
+    # new root; a read-only bind remount; pivot_root in the first namespace
+    # is refused.
+    ("mkdir -p /tmp/nr/bin /tmp/nr/proc /tmp/nr/vol /tmp/nd; echo hostfile > /tmp/nd/f; echo inroot > /tmp/nr/marker; ln -s ../../../../etc /tmp/nd/esc; unshare -m sh -c 'mount --bind /tmp/nd /tmp/nr/vol && cat /tmp/nr/vol/f && cat /proc/self/mounts'; cat /proc/mounts; ls /tmp/nr/vol; echo ns1",
+     [b"\r\nhostfile\r\n", b"none /tmp/nr/vol none rw 0 0", b"disk /disk bstdisk3 rw 0 0\r\nns1"], b"\n# "),
+    ("unshare -m sh -c 'mount --bind /tmp/nr /tmp/nr && mount --bind /bin /tmp/nr/bin && mount --bind /tmp/nd /tmp/nr/vol && mount -t proc proc /tmp/nr/proc && cd /tmp/nr && pivot_root . . && umount -l . && cd / && cat /marker && cat /vol/f && cat /vol/esc/passwd; echo x > /vol/new; mount -o remount,bind,ro /vol && echo y > /vol/y; cat /proc/self/mounts; ls /tmp'; cat /tmp/nd/new; echo ns2",
+     [b"\r\ninroot\r\nhostfile\r\n", b"can't open '/vol/esc/passwd'", b"none / none rw 0 0", b"none /vol none ro 0 0", b"proc /proc proc rw 0 0", b"/tmp: No such file", b"Read-only file system", b"\r\nx\r\nns2"], b"\n# "),
+    ("pivot_root /tmp/nr /tmp/nr; echo p=$?; rm -r /tmp/nr /tmp/nd; echo ns3", [b"Invalid argument", b"p=1", b"ns3"], b"\n# "),
     # Owners and the umask (src/lxperm.bastio): a new file takes the umask,
     # chown keeps its owner, on the disk too.
     ("umask 077; echo x > po; chown 65534:100 po; stat -c 'p%a %u %g' po; rm po; umask 022; echo y > /disk/po; chown 7:8 /disk/po; stat -c 'd%a %u %g' /disk/po; rm /disk/po",

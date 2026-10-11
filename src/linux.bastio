@@ -1777,7 +1777,7 @@ fn lx_finish(k: &mut Kernel, pid: u64, x: Lex, follow: bool) -> u64
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
   let o2 = proc_self(&mut k.fs.xfer, x.n, pid);   // "proc/self" is the caller's /proc/PID
-  let r = lx_follow(&mut k, o2, follow || x.trail, smaller(x.floor, o2));  // symbolic links (src/lxlink.bastio)
+  let r = lx_follow(&mut k, pid, o2, follow || x.trail, smaller(x.floor, o2));  // symbolic links (src/lxlink.bastio)
   if r == NO_RESULT || !x.dirend {
     return r;
   }
@@ -1986,7 +1986,7 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
       c = c + 1;
     }
     bfree(out);
-    if c > 0 && lx_follow(&mut k, c, true, smaller(floor, c)) == NO_RESULT {
+    if c > 0 && lx_follow(&mut k, pid, c, true, smaller(floor, c)) == NO_RESULT {
       return bad;                           // k.perr says why
     }
     k.perr = ENAMETOOLONG;

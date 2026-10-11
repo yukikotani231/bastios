@@ -197,7 +197,7 @@ fn open2_check(k: &mut Kernel, pid: u64, h: u64, path: u64, flags: u64, res: u64
     bset(&mut lp, j, bget(k.fs.xfer, j));
     j = j + 1;
   }
-  let fl = lx_follow(&mut k, ln, last, smaller(x.floor, ln));
+  let fl = lx_follow(&mut k, pid, ln, last, smaller(x.floor, ln));
   let mut e = 0;
   if fl == NO_RESULT || fl > FNAME_MAX {
     e = k.perr;

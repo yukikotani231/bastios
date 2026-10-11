@@ -512,6 +512,10 @@ const DISK_RETRY: u64 = 0x8000000000000002;
 const CWD_STRIDE: u64 = 256;           // FNAME_MAX + 1
 const CWD_LEN: u64 = NPROC * CWD_STRIDE;
 const DPATH_LEN: u64 = 262144;        // OFD_N * CWD_STRIDE
+const MT_N: u64 = 64;                 // mounts of mount namespaces, in all (src/lxns.bastio)
+const ME_W: u64 = 5;                  // words per mount
+const MNS_LEN: u64 = NPROC + 8 + MT_N * ME_W;
+const MSTR_LEN: u64 = 256 + MT_N * 512;   // the last lookup's logical path, then a key and a source per mount
 const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
 
 // Linux signal actions: per process, 64 signals of 4 words each (handler,
@@ -638,7 +642,7 @@ const ENOTBLK: u64 = 18446744073709551601;   // 2^64 - 15
 const EBUSY: u64 = 18446744073709551600;     // 2^64 - 16
 const ETXTBSY: u64 = 18446744073709551590;   // 2^64 - 26
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
-const NAPPLETS: u64 = 34;
+const NAPPLETS: u64 = 37;
 const NSUID_APPLETS: u64 = 2;          // su and passwd (bin_suid, src/lxproc.bastio)
 const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----
 const S_IFIFO: u64 = 0x1180;           // a FIFO, rw-------
@@ -760,11 +764,13 @@ struct Kernel {
   sys: Buf,             // settings root may change: names, the clock discipline (src/lxsys.bastio)
   snd: Snd,             // the sound card, if any (src/hda.bastio)
   mice: Bytes,          // mouse packets for /dev/input/mice (src/lxmouse.bastio)
+  mns: Buf,             // mount namespaces: each process's, and their mounts (src/lxns.bastio)
+  mstr: Bytes,          // the mounts' paths, and the logical path of the last lookup
   naps: bool,           // a process may be in TIMEWAIT: false lets sleepers_wake skip its scan
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN && len(k.mns) == MNS_LEN && blen(k.mstr) == MSTR_LEN
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
     && (k.txt is Store::Table ==> (pt_level(k.txt.Table) == 2 && pt_leases(k.txt.Table) == 0))
 }
@@ -1034,6 +1040,7 @@ fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
   sig_reset(&mut k.sigact, pid, false);
   wset(&mut k.cwd, pid * CWD_STRIDE, 0);   // starts at "/"
   wset(&mut k.croot, pid * CWD_STRIDE, 0);
+  k.mns = set(k.mns, pid, 0);               // in the first mount namespace
   let mut args = balloc(ARGV0_MAX + 1 + START_ENV_LEN);
   let alen = name_arg(&mut args, name);
   let total = start_env(&mut args, alen);

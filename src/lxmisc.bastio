@@ -298,7 +298,7 @@ fn meta_target_at(k: &mut Kernel, pid: u64, dirfd: u64, va: u64, follow: bool) -
   }
   let f = vfs_lookup(&mut k.fs, n);
   let d = vfs_dir_lookup(&mut k.fs, n);
-  if (f != NO_FILE || d != NO_FILE) && vfs_ro(&mut k.fs, n) {
+  if (f != NO_FILE || d != NO_FILE) && path_ro(&mut k, n) {
     k.perr = EROFS;                         // in a read-only mount (src/lxmount.bastio)
     return NO_RESULT;
   }
@@ -506,7 +506,7 @@ fn lx_truncate(k: &mut Kernel, pid: u64, path: u64, size: u64) -> u64
   if dir_at(&mut k, n) != NO_FILE {
     return EISDIR;
   }
-  if vfs_ro(&mut k.fs, n) && vfs_lookup(&mut k.fs, n) != NO_FILE {
+  if path_ro(&mut k, n) && vfs_lookup(&mut k.fs, n) != NO_FILE {
     return EROFS;
   }
   let e = may_path(&mut k, pid, n, MAY_W);
