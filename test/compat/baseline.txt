@@ -18,8 +18,11 @@ apps: sqlite3: WAL
 apps: sqlite3: a database file
 apps: sqlite3: in memory
 apps: wget: 1 MiB from the host
+apps: wget: 1 MiB over HTTPS
+apps: wget: HTTPS from the host (BusyBox's own TLS)
 apps: wget: a file from the host
 apps: wget: a missing file is an error
+apps: wget: an IPv6 loopback server
 bastio: bastioc1: a failed proof builds nothing
 bastio: bastioc1: a type error
 bastio: bastioc1: prove a program
@@ -130,6 +133,18 @@ t_dir: stat file in directory
 t_dir: stat new directory
 t_dir: statvfs
 t_dir: unlink file in directory
+t_dns: connect to a looked-up name
+t_dns: getaddrinfo AF_INET
+t_dns: getaddrinfo AF_INET6 v4-mapped
+t_dns: getaddrinfo AF_UNSPEC (A and AAAA)
+t_dns: getaddrinfo second name
+t_dns: getaddrinfo: no such name
+t_dns: gethostbyname
+t_dns: getnameinfo reverse lookup
+t_dns: name server binds UDP port 53
+t_dns: point resolv.conf at it
+t_dns: resolv.conf names a server
+t_dns: resolv.conf put back
 t_file: /dev/null write
 t_file: /dev/urandom read
 t_file: /dev/zero read
