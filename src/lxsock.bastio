@@ -5,6 +5,7 @@
 
 import "linux.bastio";
 
+const PROT_SOCK: u64 = 1024;           // the first port anyone may bind
 const LX_SOCKET: u64 = 41;
 const LX_CONNECT: u64 = 42;
 const LX_SENDTO: u64 = 44;
@@ -241,6 +242,15 @@ fn lx_inet_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   return fd;
 }
 
+/// Whether process pid may bind port `port`: the ports below 1024 are
+/// root's (CAP_NET_BIND_SERVICE on Linux); 0 asks for any free port.
+fn may_bind(procs: &Buf, pid: u64, port: u64) -> bool
+  requires len(procs) == PTAB_LEN && pid < NPROC
+  ensures result ==> (port == 0 || port >= PROT_SOCK || is_root(procs, pid))
+{
+  return port == 0 || port >= PROT_SOCK || cred_root(procs, pid);
+}
+
 /// bind(fd, addr, len): the port only; the address is ignored (there is
 /// one).
 fn lx_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
@@ -263,6 +273,9 @@ fn lx_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   }
   if sock_port(k.nic, sk.s) != 0 {
     return EINVAL;                          // already bound
+  }
+  if !may_bind(k.procs, pid, sin.port) {
+    return EACCES;
   }
   if !sock_bind(&mut k.nic, sk.s, sin.port) {
     return EADDRINUSE;
@@ -531,6 +544,7 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
       r = 0;
     }
   }
+  assert kok(k);                            // a hint for the solver
   if r == SK_WAIT && !is_unix(k, pid, a) {
     return sock_retry(&mut k, pid, n);       // nothing yet: sleep until a frame comes in
   }

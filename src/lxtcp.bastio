@@ -91,6 +91,9 @@ fn lx_tcp_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if sin.err != 0 {
     return sin.err;
   }
+  if !may_bind(k.procs, pid, sin.port) {
+    return EACCES;
+  }
   of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, sin.port, TM_NEW));
   return 0;
 }
