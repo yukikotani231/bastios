@@ -714,13 +714,21 @@ else:
     reply = b""
     line = b""
     if read_until(b"listening on tcp port 7001", mark):
-        time.sleep(0.5)
-        m2 = len(out)
-        qemu.stdin.write(b"ps\r"); qemu.stdin.flush()
-        # ps's own line names mtcp; wait for the prompt after it (the one
-        # `mtcp &` printed can arrive after m2, under SMP).
-        if (read_until(b" mtcp", m2) and read_until(b"bastios> ", out.index(b" mtcp", m2))
-                and re.search(rb"socket\s+\d+\s+mtcp", out[m2:])):
+        # mtcp prints that line just before it calls accept, so ps may still
+        # find it ready on a loaded machine: ask again, a few times.
+        asleep = False
+        for _ in range(10):
+            time.sleep(0.5)
+            m2 = len(out)
+            qemu.stdin.write(b"ps\r"); qemu.stdin.flush()
+            # ps's own line names mtcp; wait for the prompt after it (the one
+            # `mtcp &` printed can arrive after m2, under SMP).
+            if not (read_until(b" mtcp", m2) and read_until(b"bastios> ", out.index(b" mtcp", m2))):
+                break
+            if re.search(rb"socket\s+\d+\s+mtcp", out[m2:]):
+                asleep = True
+                break
+        if asleep:
             print("ok   Linux TCP: a process blocked in accept sleeps")
         else:
             print("FAIL Linux TCP accept sleep:", repr(out[m2:])); fails += 1

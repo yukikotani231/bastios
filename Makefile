@@ -303,19 +303,9 @@ run-uefi: build/bastios.iso $(DISK)
 	  -drive if=pflash,format=raw,file=build/ovmf_vars.fd \
 	  -cdrom build/bastios.iso $(ISO_DISPLAY) $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
 
+# The tests are listed in test/all.sh, which runs JOBS of them at a time.
 test: build/bastios.elf
-	test/trusted_base.sh
-	test/fsck_test.py
-	test/shell_test.sh
-	BASTIOC=$(BASTIOC) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/guide_test.py
-	test/tcp_test.sh
-	NIC=e1000 test/tcp_test.sh
-	NIC=igb test/tcp_test.sh
-	MUSLCC=$(MUSLCC) test/ipv6_test.sh
-	NIC=e1000 MUSLCC=$(MUSLCC) test/ipv6_test.sh
-	test/iso_test.sh
-	test/nmi_test.sh
-	test/fuzz_test.sh 1 2 2000
+	BASTIOC=$(BASTIOC) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/all.sh
 
 # The system call fuzzer at length: SEEDS runs of CALLS calls from seed
 # SEED (see test/fuzz_test.sh; `make test` runs a short one).
