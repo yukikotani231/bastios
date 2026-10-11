@@ -687,6 +687,7 @@ struct Kernel {
   ptys: Buf,            // pseudo-terminals (src/lxpty.bastio)
   ptyb: Bytes,          // their rings
   perr: u64,            // why lx_path_from last gave NO_RESULT: -ENOENT, -ENOTDIR, ... (src/linux.bastio)
+  pdir: bool,           // the name lx_path_from last gave ended in "/" or "/." and names nothing yet: only a directory may be made there
   ipc: Buf,             // System V message queues and semaphores (src/lxipc.bastio)
   ipcb: Bytes,          // the queues' messages
   shm: Store,           // System V shared memory pages (src/lxipc.bastio)

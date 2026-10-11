@@ -572,6 +572,7 @@ t_path: an empty path is ENOENT, except with AT_EMPTY_PATH
 t_path: chroot keeps absolute paths, links and .. inside the new root
 t_path: fstat of a directory gives its mode
 t_path: mknod makes device and socket nodes; a device node opens its device
+t_path: a name ending in / or /. must be a directory
 t_path: paths are read up to PATH_MAX
 t_path: pread and pwrite take no negative offset
 t_path: sendfile checks its descriptors and offset; statx its flags
