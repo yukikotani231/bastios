@@ -179,8 +179,8 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   if kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX {
     return Fd { kind: K_SOCK, x: x };
   }
-  if kind == OF_DEV {
-    return Fd { kind: K_DEV, x: x };
+  if kind == OF_DEV || kind == OF_PTY {
+    return Fd { kind: K_DEV, x: x };        // a pty end is a device too (src/lxpty.bastio)
   }
   if kind == OF_EVENT {
     return Fd { kind: K_EVENT, x: h };      // the counter lives in the description
@@ -235,7 +235,7 @@ fn pipe_nonblock(k: &Kernel, pid: u64, fd: u64) -> bool
 /// Whether descriptions of this kind keep O_NONBLOCK in the low bit of
 /// word 3.
 fn can_block(kind: u64) -> bool {
-  return kind == OF_PIPE_R || kind == OF_PIPE_W || kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD;
+  return kind == OF_PIPE_R || kind == OF_PIPE_W || kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD || kind == OF_PTY;
 }
 
 /// Whether process pid has a file layer row free: an open file holds
@@ -353,6 +353,8 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
     k.evt = set(k.evt, x * TFD_STRIDE, 0);  // the timer is free again
   } else if kind == OF_EPOLL && x < EP_N {
     k.evt = set(k.evt, EP_AT + x * EP_STRIDE, 0);
+  } else if kind == OF_PTY {
+    pty_drop(&mut k, x);                    // src/lxpty.bastio
   } else if kind == OF_UNIX {
     return ux_close(&mut k, x, w);          // src/lxunix.bastio
   }
@@ -581,7 +583,17 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   }
   let dev = dev_at(k.fs.xfer, n);
   if dev == DEV_TTY {
+    let ct = pty_ctty(k, pid);
+    if ct < PTY_N && xfer_is(k.fs.xfer, 0, n, "dev/tty") {
+      return pty_open_slave(&mut k, pid, ct, flags);   // the session's terminal is a pty
+    }
     return fd_install_console(&mut k, pid);
+  }
+  if dev == DEV_PTMX {
+    return pty_open_master(&mut k, pid, flags);       // src/lxpty.bastio
+  }
+  if dev >= DEV_PTS && dev < DEV_PTS + PTY_N {
+    return pty_open_slave(&mut k, pid, dev - DEV_PTS, flags);
   }
   if dev != DEV_NONE && dev != DEV_DIR {
     let hv = ofd_new(&mut k, OF_DEV, dev);
@@ -777,7 +789,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     if kind == OF_PIPE_R && of_get(k.ofd, h, 3) / PIPE_BOTH % 2 == 1 {
       fl = LO_RDWR;
     }
-    if kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD {
+    if kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD || kind == OF_PTY {
       fl = LO_RDWR;
     }
     if of_get(k.ofd, h, 3) % 2 == 1 {

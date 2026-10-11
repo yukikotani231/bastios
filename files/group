@@ -4,3 +4,4 @@ daemon:x:2:
 users:x:100:
 nobody:x:65534:
 nogroup:x:65534:
+tty:x:5:

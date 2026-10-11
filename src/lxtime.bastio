@@ -208,6 +208,9 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   if f.kind == K_SIGFD {
     return sfd_bits(k, pid, f.x);
   }
+  if f.kind == K_DEV && is_pty_dev(f.x) {
+    return pty_bits(k, f.x);                // src/lxpty.bastio
+  }
   if f.kind == K_CONSOLE {
     if get(k.line, 1) != 0 {
       return POLLIN | POLLOUT;              // a line is waiting

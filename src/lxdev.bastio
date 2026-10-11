@@ -36,6 +36,16 @@ fn dev_at(x: &Bytes, n: u64) -> u64
   if xfer_is(x, 0, n, "dev/tty") || xfer_is(x, 0, n, "dev/console") {
     return DEV_TTY;
   }
+  if xfer_is(x, 0, n, "dev/ptmx") {
+    return DEV_PTMX;
+  }
+  if xfer_is(x, 0, n, "dev/pts") {
+    return DEV_PTSDIR;
+  }
+  let pts = pts_at(x, n);                   // src/lxpty.bastio
+  if pts != DEV_NONE {
+    return pts;
+  }
   return loop_at(x, n);                     // src/lxloop.bastio
 }
 
@@ -44,11 +54,17 @@ fn dev_meta(d: u64) -> Meta {
   if d >= PROC_DEV {
     return proc_meta(d);                    // a /proc file (src/lxprocfs.bastio)
   }
+  if d == DEV_PTSDIR {
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 6, mtime: 0, own: 0 };
+  }
   if d == DEV_DIR {
     return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 3, mtime: 0, own: 0 };
   }
   if is_loop(d) {
     return Meta { ok: true, mode: S_IFBLK, size: 0, ino: 40 + d % 32, mtime: 0, own: 0 };
+  }
+  if d >= DEV_PTM && d < DEV_PTS + 16 {
+    return Meta { ok: true, mode: S_IFCHR, size: 0, ino: 50 + d - DEV_PTM, mtime: 0, own: 0 };
   }
   return Meta { ok: true, mode: S_IFCHR, size: 0, ino: 30 + d % 16, mtime: 0, own: 0 };
 }
