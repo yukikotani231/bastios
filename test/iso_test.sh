@@ -140,6 +140,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         for want, what in (("---- hardware report", "the menu's second entry gives the report (boot option diag)"),
                            ("acpi: RSDP from the boot loader (Multiboot 2)", "the RSDP came through Multiboot 2"),
                            ("pci 00:", "the PCI devices are listed"),
+                           ("bytes a line; in use", "the report shows the framebuffer the console draws on"),
                            ("---- end of the hardware report", "the report ends")):
             good = ok and want in text
             print(("ok  " if good else "FAIL"), f"({name}) {what}")

@@ -41,6 +41,40 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   code, src/lapic.bastio, reaches the registers only as memory). Tested
   with QEMU 9.2 (`QEMU_X2APIC=... make test`; QEMU 8 cannot emulate
   x2APIC without KVM).
+- A PIT that does not count. Many recent chipsets gate the 8254's clock
+  off by default, and the bootstrap processor took its 10 ms tick only from
+  the PIT: no tick ever came, `uptime` stayed at 0 and nothing that waits
+  on time ran. The kernel now checks at boot whether PIT channel 0 counts
+  and, if not, has the local APIC timer raise the same interrupt every
+  10 ms (`boot/smp.c`). The hardware report's `tick:` line says which.
+  Tested with QEMU's `-machine q35,pit=off`.
+- A clock without the HPET or the ACPI PM timer. Many recent PCs turn both
+  off, and the clock then stood still at 0 ns. `boot/smp.c` now measures
+  the time-stamp counter's rate against PIT channel 2, or, when that is
+  gated too, against one second of the RTC (between two of its updates),
+  and the clock runs on that; the local APIC timer is counted against the
+  same. Where neither the PIT nor the RTC answers, the PIT channel 2 wait
+  is bounded by the time-stamp counter (it used to poll up to 10^8 port
+  reads). The PIT-less tick works without a MADT too. Tested with QEMU's
+  `-machine pc,acpi=off,hpet=off` and `...,pit=off`.
+- SATA ports the firmware did not bring up. A controller with staggered
+  spin-up keeps each disk off until its port's SUD bit is set, and firmware
+  that boots fast from another disk may leave a link down. The AHCI driver
+  now sets SUD (and POD) on every port, gives a port whose link is still
+  down a COMRESET, and tries a port whose device has not yet sent its
+  signature once FIS receiving is on, letting it go again if it is not a
+  SATA disk. The boot option `ahci_reset` resets every port with a device,
+  for disks that are still not found. Tested with that option in QEMU (a CD
+  on port 0, the disk on port 3); staggered spin-up itself is untested, as
+  QEMU's AHCI does not have it.
+- PCs with no PS/2 controller at all. Its ports read 0xFF, which the
+  keyboard driver took for a mouse byte always waiting and polled for on
+  every turn of the console. The driver now notices at boot and leaves
+  the ports alone; the hardware report says `keyboard: none found` when
+  there is no USB keyboard either. Tested with `-machine pc,i8042=off`.
+- NVMe drives whose namespace 1 is not active. The driver used namespace 1
+  unconditionally; it now asks for the active namespace list and takes the
+  first one. Tested with a QEMU NVMe controller whose only namespace is 2.
 
 ### Linux programs
 
@@ -334,6 +368,13 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   reaches the wire.
 
 ### Console and boot
+
+- A framebuffer above 4 GiB is used. Many PCs put the graphics memory
+  there (recent Intel graphics at 0x4000000000), and the console then had
+  no screen at all. It needs 1 GiB pages, as the rest of the device window
+  above 4 GiB does. Untested: no QEMU display puts its framebuffer there.
+  The hardware report gains a `screen:` line with the framebuffer's
+  address, size and whether it is in use.
 
 - ACPI (`src/acpi.bastio`): `halt` powers a PC off through S5 instead of
   only halting it, `reboot` (new, and BusyBox's `reboot -f` and

@@ -815,7 +815,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut debug_exit = port_claim(&mut ports, DEBUG_EXIT, 1);
   let mut uart = Uart { io: port_claim(&mut ports, COM1, 8), present: true };
   let mut kbd = Kbd { data: port_claim(&mut ports, KBD_DATA, 1), status: port_claim(&mut ports, KBD_STATUS, 1),
-    shift: false, ctrl: false, ext: false };
+    shift: false, ctrl: false, ext: false, present: true };
   let mut pic = Pic { master: port_claim(&mut ports, PIC1, 2), slave: port_claim(&mut ports, PIC2, 2) };
   let mut pit = Pit { io: port_claim(&mut ports, PIT, 4) };
   let mut rtc = Rtc { io: port_claim(&mut ports, RTC, 2) };
@@ -836,7 +836,13 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     reset_reg = mmio_claim(&mut win, r, 1);
   }
   let mut clock = hpet_init(mmio_claim(&mut win, hpet_at, HPET_LEN), hpet_there);
-  let tsc = tsc_calibrate(cpu, &mut clock, &mut acpi);
+  // No HPET and no PM timer (many recent PCs turn both off): the counter's
+  // rate boot/smp.c measured against the PIT or the RTC.
+  let mut tsc_hz = 0;
+  if clock.period == 0 && acpi.tmr == ACPI_NONE {
+    tsc_hz = boot_info(cpu, INFO_TIMER, 3);
+  }
+  let tsc = tsc_calibrate(cpu, &mut clock, &mut acpi, tsc_hz);
   let apic = lapic_new(mmio_claim(&mut win, LAPIC, LAPIC_LEN), boot_info(cpu, INFO_SMP, 3) == APIC_XAPIC);
   let mut msi = 0;
   if apic.on {
@@ -854,12 +860,17 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   uart_init(&mut uart);
   kbd_init(&mut kbd);
   // The screen: the framebuffer the boot loader set up, if there is one
-  // and it lies in the device window below the I/O APIC.
-  let fb_lo = boot_fb(cpu, 0);
-  let fb_pitch = boot_fb(cpu, 1);
-  let fb_h = boot_fb(cpu, 3);
-  let fb_hi = fb_lo + fb_pitch * fb_h;
-  let screen = screen_new(&mut win, fb_lo, fb_hi, fb_pitch, boot_fb(cpu, 2), fb_h, boot_fb(cpu, 4));
+  // and it lies in the device window (src/fb.bastio): below the I/O APIC,
+  // or above 4 GiB on a processor with 1 GiB pages.
+  let fb_lo = boot_info(cpu, INFO_FB, 0);
+  let fb_pitch = boot_info(cpu, INFO_FB, 1);
+  let fb_h = boot_info(cpu, INFO_FB, 3);
+  let fb_w = boot_info(cpu, INFO_FB, 2);
+  let mut fb_hi = 0;
+  if fb_lo < FB_HIGH_TOP && fb_pitch <= FB_MAX_PITCH && fb_h <= FB_MAX_SIDE {
+    fb_hi = fb_lo + fb_pitch * fb_h;
+  }
+  let screen = screen_new(&mut win, fb_lo, fb_hi, fb_pitch, fb_w, fb_h, boot_info(cpu, INFO_FB, 4), high_window(cpu));
   let mut term = Term { uart: uart, screen: screen, kbd: kbd, usb: Usb::None };
   let mut con = con_new();
   pic_init(&mut pic);
@@ -880,7 +891,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // it back at power off.
   if screen_on(term.screen) {
     puts(&mut con, "screen: ");
-    put_num(&mut con, boot_fb(cpu, 2));
+    put_num(&mut con, fb_w);
     puts(&mut con, "x");
     put_num(&mut con, fb_h);
     puts(&mut con, " framebuffer\r\n");
@@ -898,7 +909,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut usb = usb_new(&mut pci, &mut m, &mut win, USB_AT, fb_lo, fb_hi, 0, 0, xdev, usb_lo, usb_hi - usb_lo, msi, V_DISK);
   let usb_disk = usb_msd(usb);
   // The disk: that stick, else NVMe, virtio, AHCI or ATA (see blk_new).
-  let dev = blk_find(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi, usb_lo, usb_hi, msi, &mut usb, acpi_lo, acpi_hi);
+  let dev = blk_find(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi, usb_lo, usb_hi, msi, &mut usb, acpi_lo, acpi_hi, boot_word(cpu, "ahci_reset"));
   let dev_lo = blk_ports_lo(dev);
   let dev_hi = blk_ports_hi(dev);
   let dk_lo = blk_mmio_lo(dev);
@@ -971,8 +982,10 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     if !screen_on(term.screen) {
       puts(&mut con, "screen: none (the serial line only)\r\n");
     }
-    if !usb_on {
+    if !usb_on && term.kbd.present {
       puts(&mut con, "keyboard: PS/2 (no USB keyboard)\r\n");
+    } else if !usb_on {
+      puts(&mut con, "keyboard: none found (no USB keyboard, no PS/2 controller)\r\n");
     }
     if blk_sectors(disk.dev) == 0 {
       puts(&mut con, "disk: none found\r\n");
@@ -992,6 +1005,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     puts(&mut con, "---- hardware report (boot option diag; see docs/real-hardware.md) ----\r\n");
     hw_cpu(&mut con, cpu);
     hw_smp(&mut con, cpu, clock.period > 0, acpi.tmr != ACPI_NONE);
+    hw_screen(&mut con, cpu, screen_on(term.screen));
     diag_pause(&mut term, &mut con, &mut clock, &mut acpi);
     hw_mem(&mut con, cpu, pool_pages);
     diag_pause(&mut term, &mut con, &mut clock, &mut acpi);

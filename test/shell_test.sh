@@ -910,6 +910,38 @@ session("AHCI", None, [
     ("rm disk/big", b""),
 ], halt=True, ready=ahci_found)
 
+# Ports the firmware did not bring up (src/ahci.bastio, port_wake): with
+# the boot option ahci_reset every port with a device gets a COMRESET, after
+# which a device sends its signature only once FIS receiving is on. A CD
+# on port 0 is tried first and let go (an ATAPI signature); the disk on
+# port 3 is found and holds what was written above.
+cd_img = os.path.join(disk_dir.name, "cd.iso")
+with open(cd_img, "wb") as f:
+    f.truncate(1 << 20)
+qemu = boot(1, extra=["-machine", "q35", "-drive", f"file={disk},format=raw,if=ide,index=3",
+                      "-drive", f"file={cd_img},format=raw,media=cdrom,if=ide,index=0", "-append", "ahci_reset"])
+def ahci_reset_found():
+    global fails
+    ok = b"disk: AHCI\r\n" in out
+    print(("ok  " if ok else "FAIL"), "(AHCI after COMRESET) disk driver: AHCI, past a CD")
+    fails += not ok
+session("AHCI after COMRESET", None, [
+    ("cat disk/nv", b"written by nvme\r\nand ahci\r\n"),
+], halt=True, ready=ahci_reset_found)
+
+# An NVMe drive whose only namespace is 2 (src/nvme.bastio takes the first
+# active one; it used to ask for namespace 1 and find no disk).
+qemu = boot(1, extra=["-machine", "q35", "-drive", f"file={disk},format=raw,if=none,id=nv2",
+                      "-device", "nvme,serial=bastios,id=nvc", "-device", "nvme-ns,drive=nv2,bus=nvc,nsid=2"])
+def nvme_ns2_found():
+    global fails
+    ok = b"disk: NVMe\r\n" in out
+    print(("ok  " if ok else "FAIL"), "(NVMe namespace 2) disk driver: NVMe")
+    fails += not ok
+session("NVMe namespace 2", None, [
+    ("cat disk/nv", b"written by nvme\r\nand ahci\r\n"),
+], halt=True, ready=nvme_ns2_found)
+
 # And on an NVMe drive with 4 KiB sectors: what AHCI wrote is there, and
 # what is written here is where the ATA boot below looks for it.
 qemu = boot(1, nvme4k=True)
@@ -1452,7 +1484,7 @@ for machine, name in (("pc,hpet=off", "i440fx, no HPET"), ("q35,hpet=off", "q35,
 # 2 GiB, whose firmware puts the ACPI tables just below 2 GiB: the kernel
 # must still find them (the processors, power off). Each pause in the report
 # waits for a key, which the serial line gives.
-def report_boot(args, name, keys, qemu_bin="qemu-system-x86_64"):
+def report_boot(args, name, keys, qemu_bin="qemu-system-x86_64", between=None):
     global qemu, out, deadline
     qemu = subprocess.Popen(
         [qemu_bin, "-kernel", kernel, "-display", "none", "-nic", "none",
@@ -1466,6 +1498,8 @@ def report_boot(args, name, keys, qemu_bin="qemu-system-x86_64"):
             break
         qemu.stdin.write(b" "); qemu.stdin.flush()
     ok = read_until(b"bastios> ")
+    if ok and between:
+        between()
     mark = len(out)
     qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
     read_until(b"pages free at power off", mark)
@@ -1485,6 +1519,8 @@ for want, what in (
         ("acpi: soft power off, power button", "the FADT below 2 GiB gives power off"),
         ("acpi: tables FACP@0x7f", "the tables are listed where they are"),
         ("timer: the local APIC timer, counted against the HPET", "the timer's calibration"),
+        ("tick: the PIT\n", "the PIT ticks"),
+        ("keyboard: PS/2 (no USB keyboard)", "the PS/2 keyboard"),
         ("MiB usable in a map of", "the memory map"),
         ("pci 00:1f.2 8086:2922 class 010601 AHCI disk", "the PCI devices, with their drivers"),
         ("acpi: reset register: port 0xcf9", "the reset register"),
@@ -1501,6 +1537,60 @@ ok, code = report_boot(["-machine", "pc", "-m", "64M"], "no report", 0)
 good = ok and b"hardware report" not in out
 print(("ok  " if good else "FAIL"), "(hardware report) only with diag")
 fails += not good
+
+# No i8042 at all (many recent PCs, with only USB keyboards): its ports
+# read 0xFF, which src/kbd.bastio took as a mouse byte always waiting, and
+# polled for on every turn. Now the keyboard is left alone, and the report
+# says so; the serial line still works.
+ok, code = report_boot(["-machine", "pc,i8042=off", "-m", "64M", "-append", "diag"], "no i8042", 3)
+good = ok and b"keyboard: none found (no USB keyboard, no PS/2 controller)" in out and code == 0
+print(("ok  " if good else "FAIL"), f"(no i8042) no keyboard found, the shell works, S5 (status {code})")
+fails += not good
+
+# Time without the usual timers. A PIT whose clock is gated off (many
+# recent chipsets: Intel's "8254 clock gating"; QEMU's pit=off has none at
+# all): the bootstrap processor ticks on the local APIC timer instead
+# (boot/smp.c); before, no tick ever came and uptime stayed at 0. No HPET
+# and no ACPI PM timer (many recent PCs turn both off; here acpi=off, which
+# also takes the MADT, and with it the other processor, and S5 away, so the
+# kernel ends through isa-debug-exit, status 33): boot/smp.c measures the
+# time-stamp counter against PIT channel 2, else against a second of the
+# RTC, and the clock runs on that; before, it stayed at 0 ns.
+exit_dev = ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
+for machine, name, extra, status, wants in (
+        ("q35,pit=off", "no PIT", [], 0, (
+            ("timer: the local APIC timer, counted against the HPET", "the timer is counted against the HPET"),
+            ("tick: the local APIC timer (the PIT does not count)", "the report says the local APIC timer ticks"))),
+        ("pc,acpi=off,hpet=off", "no HPET or PM timer", exit_dev, 33, (
+            ("timer: the local APIC timer, counted against the PIT", "the timer is counted against the PIT"),
+            ("tick: the PIT\n", "the PIT ticks"),
+            ("clock: the time-stamp counter at", "the clock is the TSC"),
+            ("kHz, as measured against the PIT", "its rate measured against the PIT"))),
+        ("pc,acpi=off,hpet=off,pit=off", "no HPET, PM timer or PIT", exit_dev, 33, (
+            ("timer: the local APIC timer, counted against the RTC", "the timer is counted against the RTC"),
+            ("tick: the local APIC timer (the PIT does not count)", "the local APIC timer ticks"),
+            ("kHz, as measured against the RTC", "the TSC's rate measured against the RTC")))):
+    marks = []
+    def measure():
+        t0, c0, w0 = uptime(), clock(), time.time()
+        time.sleep(2)
+        t1, c1, w1 = uptime(), clock(), time.time()
+        marks.extend([t0, t1, c0, c1, w1 - w0])
+    ok, code = report_boot(["-machine", machine, "-m", "64M", "-append", "diag"] + extra, name, 3, between=measure)
+    text = out.decode(errors="replace").replace("\r", "")
+    for want, what in wants:
+        good = ok and want in text
+        print(("ok  " if good else "FAIL"), f"({name}) {what}")
+        fails += not good
+    good = len(marks) == 5 and None not in marks and 60 * marks[4] <= marks[1] - marks[0] <= 200 * marks[4]
+    print(("ok  " if good else "FAIL"), f"({name}) the timer ticks: {marks[:2]}")
+    fails += not good
+    good = len(marks) == 5 and None not in marks and 0.6e9 * marks[4] <= marks[3] - marks[2] <= 1.5e9 * marks[4]
+    print(("ok  " if good else "FAIL"), f"({name}) the clock runs: {marks[2:4]}")
+    fails += not good
+    good = code == status
+    print(("ok  " if good else "FAIL"), f"({name}) halt ends QEMU (status {code})")
+    fails += not good
 
 # x2APIC (boot/smp.c). SeaBIOS leaves the local APICs in x2APIC mode when
 # the machine may have APIC ids of 255 and up (sockets of 256 cores): with
