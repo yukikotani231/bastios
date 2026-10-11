@@ -16,6 +16,12 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Processors
 
+- virtio-blk reads a run of up to eight consecutive blocks in one request
+  (the blocks a read queues ahead), instead of one request per 4 KiB
+  block: under QEMU each request is a notify and a trip through its I/O
+  thread, made under the kernel lock. Four Z3 starts in a row went from
+  1.3 s to 0.7 s, and four compiler builds at once from 9.4-13.8 s to
+  6.8-7.8 s on four processors (10.2-10.8 s to 9.1-9.2 s on one).
 - A program from a file system is read when it runs, not all at exec: its
   largest code segment's pages are read from the file the first time the
   program runs them (`src/lazy.bastio`). Z3 has 24 MiB of code; four Z3

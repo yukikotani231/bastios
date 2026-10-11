@@ -231,7 +231,44 @@ fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, l
       let f2 = take_low_page(&mut m, 2);
       let f3 = take_low_page(&mut m, 3);
       let f4 = take_low_page(&mut m, VIRTIO_DATA_AT);
-      return Blk::Virtio(virtio_new(&mut ports, base, f0, f1, f2, f3, f4, msix));
+      // The data pages of batched reads (virtio_begin_n): free pages from
+      // the top of the pool down, so the low pages other drivers take by
+      // number (the NIC's, after this) stay free. Pages the device cannot
+      // reach, or none, only make the batches shorter.
+      let mut extra = vec_new[Extra]();
+      let mut pages = 0;
+      let mut more = true;
+      let mut top = NPAGES;
+      while vec_len(extra) < VIO_BATCH - 1
+        invariant mem_ok(m) && vlen(extra) < VIO_BATCH && pages <= vlen(extra) && top <= NPAGES
+      {
+        let mut a = NPAGES;
+        while top > 0 && a == NPAGES
+          invariant mem_ok(m) && top <= NPAGES && (a == NPAGES || (a < NPAGES && get(m.bm, a) == 1))
+        {
+          top = top - 1;
+          if get(m.bm, top) == 1 {
+            a = top;
+          }
+        }
+        if more && a < NPAGES {
+          let x = virtio_extra(&mut m, take_low_page(&mut m, a));
+          match x {
+            Extra::None => {
+              more = false;
+              vec_push(&mut extra, Extra::None);
+            },
+            Extra::Page(d) => {
+              vec_push(&mut extra, Extra::Page(d));
+              pages = pages + 1;
+            },
+          }
+        } else {
+          more = false;
+          vec_push(&mut extra, Extra::None);
+        }
+      }
+      return Blk::Virtio(virtio_new(&mut ports, base, f0, f1, f2, f3, f4, extra, pages, msix));
     }
   }
   let sd = ahci_find(&mut pci, &mut m, &mut win, lo, hi, lo2, hi2, msi);
@@ -627,6 +664,61 @@ fn blk_begin(b: &mut Blk, op: u64, lba: u64, buf: &mut Bytes, at: u64) -> bool
       b = Blk::Loop(l);
       return ok;
     },
+  }
+}
+
+/// How many consecutive blocks from sector `lba` one read can take (up to
+/// `want`): more than one only on virtio, which reads them in one request
+/// (virtio_begin_n).
+fn blk_room(b: &Blk, lba: u64, want: u64) -> u64
+  requires blk_ok(b)
+  ensures result >= 1 && result <= VIO_BATCH
+{
+  match b {
+    Blk::Virtio(v) => { return virtio_room(v, lba, want); },
+    Blk::Ata(a) => { return 1; },
+    Blk::Nvme(n) => { return 1; },
+    Blk::Ahci(h) => { return 1; },
+    Blk::Usb(x) => { return 1; },
+    Blk::Loop(l) => { return 1; },
+  }
+}
+
+/// Starts reading n consecutive blocks from sector `lba` (n from
+/// blk_room); blk_fetch_n then takes each. Only virtio takes n > 1.
+fn blk_begin_n(b: &mut Blk, lba: u64, n: u64) -> bool
+  requires blk_ok(b) && n >= 1 && n <= VIO_BATCH
+  ensures blk_ok(b)
+{
+  match b {
+    Blk::Virtio(mut v) => {
+      let ok = virtio_begin_n(&mut v, lba, n);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+    Blk::Ata(a) => { b = Blk::Ata(a); return false; },
+    Blk::Nvme(x) => { b = Blk::Nvme(x); return false; },
+    Blk::Ahci(h) => { b = Blk::Ahci(h); return false; },
+    Blk::Usb(x) => { b = Blk::Usb(x); return false; },
+    Blk::Loop(l) => { b = Blk::Loop(l); return false; },
+  }
+}
+
+/// After a blk_begin_n read finished well: its block j into buf[at ..].
+fn blk_fetch_n(b: &mut Blk, j: u64, buf: &mut Bytes, at: u64)
+  requires blk_ok(b) && at + 4096 <= blen(buf)
+  ensures blk_ok(b) && blen(buf) == old(blen(buf))
+{
+  match b {
+    Blk::Virtio(mut v) => {
+      virtio_fetch_n(&mut v, j, &mut buf, at);
+      b = Blk::Virtio(v);
+    },
+    Blk::Ata(a) => { b = Blk::Ata(a); },
+    Blk::Nvme(x) => { b = Blk::Nvme(x); },
+    Blk::Ahci(h) => { b = Blk::Ahci(h); },
+    Blk::Usb(x) => { b = Blk::Usb(x); },
+    Blk::Loop(l) => { b = Blk::Loop(l); },
   }
 }
 
