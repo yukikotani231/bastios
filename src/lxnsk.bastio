@@ -42,7 +42,7 @@ const NF_PIDC: u64 = 5;                    // pid_for_children
 const NF_USER: u64 = 6;
 const NF_UTS: u64 = 7;
 const NS_INO0: u64 = 4026531835;           // the first cgroup namespace's inode (PROC_CGROUP_INIT_INO)
-const NS_INO: u64 = 4026532000;            // other namespaces' inodes start here
+const NSK_INO: u64 = 4026532000;            // other namespaces' inodes start here
 const S_IFREG_NS: u64 = 0x8124;            // what stat says an nsfs file is: r--r--r--
 
 // ---------------------------------------------------------------- ids
@@ -297,7 +297,7 @@ fn ns_inode(f: u64, id: u64) -> u64
   if f == NF_PIDC {
     g = NF_PID;
   }
-  return NS_INO + id * 8 + g % 8;
+  return NSK_INO + id * 8 + g % 8;
 }
 
 /// The name of link f.
@@ -342,6 +342,9 @@ fn nf_id(k: &Kernel, p: u64, f: u64) -> u64
   }
   if f == NF_PID || f == NF_PIDC {
     return nsk_of(k, NSK_PID, p);
+  }
+  if f == NF_NET {
+    return net_ns(k, p);                    // the network thread's slot, src/lxnetlink.bastio
   }
   return 0;
 }
@@ -488,7 +491,7 @@ fn ns_may_join(k: &Kernel, pid: u64, f: u64, id: u64) -> u64
     return 0;                               // already there
   }
   if f == NF_MNT {
-    if !ns_live(k, id) {
+    if !mnt_ns_live(k, id) {
       return EINVAL;
     }
     return 0;
@@ -529,12 +532,17 @@ fn mnt_join(k: &mut Kernel, pid: u64, id: u64, p: u64)
     q = q + 1;
   }
   k.mns = set(k.mns, pid, id);
+  if (pid + 1) * CWD_STRIDE > len(k.croot) || (pid + 1) * CWD_STRIDE > len(k.cwd) {
+    return;                                 // no rows for it (not a live process)
+  }
   let mut rl = 0;
-  if from < NPROC {
+  if from < NPROC && (from + 1) * CWD_STRIDE <= len(k.croot) {
     rl = root_len(k, from);
     let mut i = 0;
     while i < rl
       invariant i <= rl && rl <= FNAME_MAX && from < NPROC && pid < NPROC && kok(k)
+        && (from + 1) * CWD_STRIDE <= len(k.croot) && (pid + 1) * CWD_STRIDE <= len(k.croot)
+        && (pid + 1) * CWD_STRIDE <= len(k.cwd)
     {
       let c = get(k.croot, from * CWD_STRIDE + 1 + i);
       k.croot = set(k.croot, pid * CWD_STRIDE + 1 + i, c);

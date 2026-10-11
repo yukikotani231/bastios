@@ -233,7 +233,7 @@ static u64 arg(void) {
  * every call the kernel dispatches is here or in this list of calls that
  * `tame` leaves out:
  *
- * left out: 15 34 42 60 130 153 155 169 231
+ * left out: 15 34 42 60 130 153 169 231
  */
 static const unsigned short linux_calls[] = {
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,

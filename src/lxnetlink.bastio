@@ -9,8 +9,6 @@
 
 import "linux.bastio";
 
-const CLONE_NEWNET: u64 = 0x40000000;
-
 /// Process pid's network namespace.
 fn net_ns(k: &Kernel, pid: u64) -> u64
   requires kok(k) && pid < NPROC
