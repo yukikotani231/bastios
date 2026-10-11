@@ -622,7 +622,9 @@ fn lx_meta_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, r10: u
     let f = meta_target(&mut k, pid, a, b);
     r = set_times(&mut k, pid, f, c, TIMES_TIMEVAL);
   } else if n == LX_UTIMENSAT {
-    if b == 0 {
+    if b == 0 && a % 0x100000000 == AT_FDCWD {
+      r = EFAULT;                           // no path, and no descriptor either
+    } else if b == 0 {
       // futimens(fd, times)
       let d = fd_look(k, pid, a);
       if d.kind == K_BAD {
@@ -673,7 +675,7 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   } else if n == LX_MADVISE {
     r = lx_madvise(&mut k, pid, a, b, c);
   } else if n == LX_MSYNC {
-    r = lx_msync(&mut k, pid, a, b);
+    r = lx_msync(&mut k, pid, a, b, c);
   } else if n == LX_FCHOWN {
     r = chown_handle(&mut k, pid, fd_handle(&mut k, pid, a), b, c);
   } else if n == LX_FSYNC || n == LX_FDATASYNC {

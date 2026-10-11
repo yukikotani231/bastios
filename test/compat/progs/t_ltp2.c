@@ -511,5 +511,42 @@ int main(void) {
            }
            int st; waitpid(c, &st, 0);
            d == -1 && de == EISDIR && WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("fallocate checks its range, the descriptor's access and the size limit before the mode", ({
+           int w = open("/tmp/t_ltp2_fa", O_RDWR | O_CREAT | O_TRUNC, 0600);
+           int r = open("/tmp/t_ltp2_fa", O_RDONLY);
+           int a = fallocate(r, FALLOC_FL_KEEP_SIZE, 0, 4096); int ae = errno;
+           int b = fallocate(w, FALLOC_FL_KEEP_SIZE, -4096, 4096); int be = errno;
+           int c = fallocate(w, FALLOC_FL_KEEP_SIZE, 4096, 0); int ce = errno;
+           int d = fallocate(w, FALLOC_FL_KEEP_SIZE, 0x7FFFFFFFFFFFF000LL, 8192); int de = errno;
+           int g = fallocate(w, 0, 0, 4096); struct stat s; fstat(w, &s);
+           close(w); close(r); unlink("/tmp/t_ltp2_fa");
+           a == -1 && ae == EBADF && b == -1 && be == EINVAL && c == -1 && ce == EINVAL
+             && d == -1 && de == EFBIG && g == 0 && s.st_size == 4096; }));
+    EXPECT("msync: bad flags are EINVAL, an unmapped range ENOMEM", ({
+           char *p = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int a = msync(p, 4096, MS_ASYNC | MS_SYNC); int ae = errno;
+           int b = msync(p, 4096, -1); int be = errno;
+           int c = msync(p, 8192, MS_SYNC);
+           munmap(p + 4096, 4096);
+           int d = msync(p, 8192, MS_SYNC); int de = errno;
+           munmap(p, 4096);
+           a == -1 && ae == EINVAL && b == -1 && be == EINVAL && c == 0 && d == -1 && de == ENOMEM; }));
+    EXPECT("rt_sigqueueinfo with a si_code of 0 or more to another process is EPERM", ({
+           pid_t c = fork();
+           if (c == 0) { pause(); _exit(0); }
+           siginfo_t si; memset(&si, 0, sizeof si);
+           si.si_signo = SIGUSR1; si.si_code = 0; si.si_pid = getpid(); si.si_uid = getuid();
+           int a = syscall(SYS_rt_sigqueueinfo, c, SIGUSR1, &si); int ae = errno;
+           si.si_code = SI_QUEUE;
+           kill(c, SIGKILL); waitpid(c, 0, 0);
+           int b = syscall(SYS_rt_sigqueueinfo, getpid(), 0, &si);
+           a == -1 && ae == EPERM && b == 0; }));
+    EXPECT("utimensat with no path and AT_FDCWD is EFAULT; epoll_ctl on /dev/zero is EPERM", ({
+           int a = syscall(SYS_utimensat, AT_FDCWD, 0, 0, 0); int ae = errno;
+           int z = open("/dev/zero", O_RDONLY); int ep = epoll_create1(0);
+           struct epoll_event ev = { EPOLLIN, { 0 } };
+           int b = epoll_ctl(ep, EPOLL_CTL_ADD, z, &ev); int be = errno;
+           close(z); close(ep);
+           a == -1 && ae == EFAULT && b == -1 && be == EPERM; }));
     return done();
 }
