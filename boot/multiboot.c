@@ -107,6 +107,20 @@ uint64_t bst_boot_cmdline(uint64_t i) {
     return i < cmdline_len ? (uint8_t)cmdline[i] : 256;
 }
 
+/* Field `f` of the boot loader's framebuffer if it is 32-bit RGB, wherever
+ * it is: 0 its address, 1 bytes per line, 2 width, 3 height, 4 the bit
+ * positions of red, green and blue (a byte each); 0 without one. The
+ * `boot_fb` builtin says the same but only for one below 4 GiB, and a
+ * GPU's framebuffer is often above (Intel graphics at 0x4000000000). */
+uint64_t bst_boot_framebuffer(uint64_t f) {
+    uint64_t mb = info_mb1;
+    if (!mb || !(rd32(mb) & (1u << 12)) || rd8(mb + 109) != 1 || rd8(mb + 108) != 32) return 0;
+    uint64_t addr = rd64(mb + 88), pitch = rd32(mb + 96), w = rd32(mb + 100), h = rd32(mb + 104);
+    if (addr == 0 || pitch < w * 4) return 0;
+    return f == 0 ? addr : f == 1 ? pitch : f == 2 ? w : f == 3 ? h
+         : f == 4 ? rd8(mb + 110) | (uint64_t)rd8(mb + 112) << 8 | (uint64_t)rd8(mb + 114) << 16 : 0;
+}
+
 /* Field `f` (0 base, 1 length, 2 type) of region `n` of the memory map
  * the kernel was given, or 0 past its end. */
 uint64_t bst_boot_region(uint64_t n, uint64_t f) {

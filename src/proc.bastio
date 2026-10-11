@@ -361,6 +361,14 @@ const FD_OFD: u64 = 2;
 const FD_CLOEXEC: u64 = 1024;
 
 const OFD_N: u64 = 1024;
+// Loop devices (src/lxloop.bastio): LOOP_N devices of LOOP_W words.
+const LOOP_N: u64 = 8;
+const LOOP_W: u64 = 13;
+const LOOP_LEN: u64 = 104;             // LOOP_N * LOOP_W
+const DEV_LOOPCTL: u64 = 6;            // OF_DEV device /dev/loop-control
+const DEV_LOOP: u64 = 16;              // OF_DEV device /dev/loopN is DEV_LOOP + N
+const S_IFBLK: u64 = 0x61B0;           // a block device, rw-rw----
+
 // File locks (src/lxlock.bastio): LK_N entries of LK_W words, then for
 // each process the record lock it waits for in F_SETLKW, LK_WW words.
 const LK_N: u64 = 128;
@@ -610,6 +618,7 @@ struct Kernel {
   maps: Buf,            // Linux MAP_SHARED file mappings, MAP_N per process (src/lxmem.bastio)
   inet6: Buf,           // word h: 1 if open file description h is an AF_INET6 socket (src/lxsock.bastio)
   locks: Buf,           // file locks held (src/lxlock.bastio)
+  loops: Buf,           // loop devices (src/lxloop.bastio)
   perr: u64,            // why lx_path_from last gave NO_RESULT: -ENOENT, -ENOTDIR, ... (src/linux.bastio)
   ipc: Buf,             // System V message queues and semaphores (src/lxipc.bastio)
   ipcb: Bytes,          // the queues' messages
@@ -618,7 +627,7 @@ struct Kernel {
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.croot) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.locks) == LK_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.inet6) == OFD_N
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.croot) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.inet6) == OFD_N
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
 }
 

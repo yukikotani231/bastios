@@ -91,6 +91,27 @@ busybox: which
 busybox: whoami
 busybox: xargs
 busybox: yes | head
+t_dev: /dev/loop-control
+t_dev: BLKGETSIZE64
+t_dev: BLKSSZGET
+t_dev: LOOP_CLR_FD
+t_dev: LOOP_CTL_GET_FREE
+t_dev: LOOP_CTL_GET_FREE skips it
+t_dev: LOOP_GET_STATUS64
+t_dev: LOOP_SET_FD
+t_dev: LOOP_SET_STATUS64
+t_dev: bound twice is EBUSY
+t_dev: cleared twice is ENXIO
+t_dev: file stays bound after close
+t_dev: lands past the offset
+t_dev: loop device is a block device
+t_dev: lseek SEEK_END is the device size
+t_dev: open loop device
+t_dev: read through the device
+t_dev: unbound reads nothing
+t_dev: unbound: LOOP_GET_STATUS64 is ENXIO
+t_dev: write at the end is ENOSPC
+t_dev: write through the device
 dev: make: a project of two files
 dev: make: parallel jobs
 dev: make: rebuilds only what changed
@@ -152,11 +173,13 @@ t_file: close twice is EBADF
 t_file: faccessat
 t_file: fchmod
 t_file: fdatasync
+t_file: fgetxattr unsupported
 t_file: fstat size
 t_file: fsync
 t_file: ftruncate grow
 t_file: ftruncate shrink
 t_file: link
+t_file: listxattr empty
 t_file: lseek SEEK_CUR
 t_file: lseek SEEK_END
 t_file: lseek SEEK_SET
@@ -169,8 +192,10 @@ t_file: pwrite
 t_file: read back
 t_file: readlink
 t_file: readv
+t_file: removexattr of a missing file
 t_file: rename
 t_file: rename over existing
+t_file: setxattr unsupported
 t_file: stat
 t_file: stdio fprintf/fscanf
 t_file: symlink

@@ -1,5 +1,6 @@
 // Device files for Linux programs: /dev/null, /dev/zero, /dev/random,
-// /dev/urandom and /dev/tty, and /dev itself as a directory to stat.
+// /dev/urandom and /dev/tty, the loop devices (src/lxloop.bastio), and /dev
+// itself as a directory to stat.
 // Opening one makes an open file description of kind OF_DEV whose x is the
 // device; /dev/tty opens the console itself.
 //
@@ -37,7 +38,7 @@ fn dev_at(x: &Bytes, n: u64) -> u64
   if xfer_is(x, 0, n, "dev/tty") || xfer_is(x, 0, n, "dev/console") {
     return DEV_TTY;
   }
-  return DEV_NONE;
+  return loop_at(x, n);                     // src/lxloop.bastio
 }
 
 /// Device d's number, as Linux numbers it (major * 256 + minor).
@@ -53,6 +54,9 @@ fn dev_rdev(d: u64) -> u64 {
   }
   if d == DEV_TTY {
     return 0x500;
+  }
+  if d >= DEV_LOOP && d < DEV_LOOP + LOOP_N {
+    return 0x700 + d - DEV_LOOP;            // block major 7
   }
   return 0;
 }
@@ -71,6 +75,9 @@ fn rdev_dev(rdev: u64) -> u64 {
   if rdev == 0x500 || rdev == 0x501 {
     return DEV_TTY;
   }
+  if rdev >= 0x700 && rdev < 0x700 + LOOP_N {
+    return DEV_LOOP + rdev - 0x700;
+  }
   return DEV_NONE;
 }
 
@@ -82,6 +89,9 @@ fn dev_meta(d: u64) -> Meta {
   }
   if d == DEV_DIR {
     return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 3, mtime: 0, own: 0 };
+  }
+  if d >= DEV_LOOP && d < DEV_LOOP + LOOP_N {
+    return Meta { ok: true, mode: S_IFBLK, size: dev_rdev(d), ino: 40 + d % 32, mtime: 0, own: 0 };
   }
   return Meta { ok: true, mode: S_IFCHR, size: dev_rdev(d), ino: 30 + d % 16, mtime: 0, own: 0 };
 }

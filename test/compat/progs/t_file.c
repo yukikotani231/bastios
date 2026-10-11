@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
+#include <sys/xattr.h>
 #include <utime.h>
 
 static int fd = -1;
@@ -109,6 +110,18 @@ int main(void) {
     {
         FILE *f = tmpfile();
         EXPECT("tmpfile", f && fputs("t", f) >= 0 && fclose(f) == 0);
+    }
+    {
+        /* No extended attributes: EOPNOTSUPP on a file that exists (as on
+         * a Linux file system without them), ENOENT on one that does not. */
+        char v[16];
+        int x = open("cx_f", O_RDWR | O_CREAT, 0644);
+        EXPECT("setxattr unsupported", setxattr("cx_f", "user.a", "1", 1, 0) == -1 && errno == EOPNOTSUPP);
+        EXPECT("fgetxattr unsupported", fgetxattr(x, "user.a", v, sizeof v) == -1 && errno == EOPNOTSUPP);
+        EXPECT("listxattr empty", listxattr("cx_f", v, sizeof v) == 0);
+        EXPECT("removexattr of a missing file", removexattr("cx_none", "user.a") == -1 && errno == ENOENT);
+        if (x >= 0) close(x);
+        unlink("cx_f");
     }
     return done();
 }
