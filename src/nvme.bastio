@@ -71,7 +71,7 @@ struct Nvme {
   cq_at: u64,
   sectors: u64,       // 512-byte sectors; 0 when the drive could not be started
   shift: u64,         // log2 of the drive's block size, minus 9: 0 or 3
-  ns: u64,            // the namespace used: the first active one
+  ns: u32,            // the namespace used: the first active one
   busy: bool,         // a command started by nvme_begin has not been reaped
   irq: bool,          // I/O completions raise MSI-X message 0 (nvme_msix)
 }
@@ -83,17 +83,16 @@ spec fn nvme_ok(n: &Nvme) -> bool {
   && (n.shift == 0 || n.shift == 3) && 1 <= n.ns && n.ns <= 4294967294
 }
 
-fn nr32(n: &mut Nvme, off: u64) -> u64
+fn nr32(n: &mut Nvme, off: u64) -> u32
   requires mmio_base(n.regs) % 4096 == 0 && off % 4 == 0 && off + 4 <= mmio_len(n.regs)
-  ensures result <= 4294967295
 {
-  return cast[u64](mmio_read32(&mut n.regs, off));
+  return mmio_read32(&mut n.regs, off);
 }
 
-fn nw32(n: &mut Nvme, off: u64, v: u64)
-  requires mmio_base(n.regs) % 4096 == 0 && off % 4 == 0 && off + 4 <= mmio_len(n.regs) && v <= 4294967295
+fn nw32(n: &mut Nvme, off: u64, v: u32)
+  requires mmio_base(n.regs) % 4096 == 0 && off % 4 == 0 && off + 4 <= mmio_len(n.regs)
 {
-  mmio_write32(&mut n.regs, off, cast[u32](v));
+  mmio_write32(&mut n.regs, off, v);
 }
 
 fn nw64(n: &mut Nvme, off: u64, v: u64)
@@ -103,15 +102,15 @@ fn nw64(n: &mut Nvme, off: u64, v: u64)
 }
 
 /// Rings doorbell i (0: admin tail, 1: admin head, 2: I/O tail, 3: I/O head).
-fn ring(n: &mut Nvme, i: u64, v: u64)
-  requires nvme_ok(n) && i < 4 && v <= 4294967295
+fn ring(n: &mut Nvme, i: u64, v: u32)
+  requires nvme_ok(n) && i < 4
   ensures nvme_ok(n) && n.sectors == old(n.sectors) && n.busy == old(n.busy)
 {
   nw32(&mut n, NV_DB + i * n.stride, v);
 }
 
 /// Waits until CSTS.RDY is `rdy`; false on a timeout or a fatal error.
-fn wait_ready(n: &mut Nvme, rdy: u64) -> bool
+fn wait_ready(n: &mut Nvme, rdy: u32) -> bool
   requires nvme_ok(n)
   ensures nvme_ok(n) && n.sectors == old(n.sectors) && n.busy == old(n.busy)
 {
@@ -134,8 +133,8 @@ fn wait_ready(n: &mut Nvme, rdy: u64) -> bool
 
 /// Fills command slot `slot` of a submission queue page: opcode, command
 /// id, namespace, the data page and command dwords 10 to 12.
-fn sqe(d: &mut Dma, slot: u64, op: u64, nsid: u64, prp: u64, c10: u64, c11: u64, c12: u64)
-  requires slot < Q_N && op < 256 && nsid <= 4294967295 && c10 <= 4294967295 && c11 <= 4294967295 && c12 <= 4294967295
+fn sqe(d: &mut Dma, slot: u64, op: u8, nsid: u32, prp: u64, c10: u32, c11: u32, c12: u32)
+  requires slot < Q_N
 {
   let at = slot * 64;
   let mut i = 0;
@@ -145,12 +144,12 @@ fn sqe(d: &mut Dma, slot: u64, op: u64, nsid: u64, prp: u64, c10: u64, c11: u64,
     dma_write64(&mut d, at + i, 0);
     i = i + 8;
   }
-  dma_write32(&mut d, at, cast[u32](op + slot * 65536));
-  dma_write32(&mut d, at + 4, cast[u32](nsid));
+  dma_write32(&mut d, at, cast[u32](op) + cast[u32](slot) * 65536);
+  dma_write32(&mut d, at + 4, nsid);
   dma_write64(&mut d, at + 24, prp);
-  dma_write32(&mut d, at + 40, cast[u32](c10));
-  dma_write32(&mut d, at + 44, cast[u32](c11));
-  dma_write32(&mut d, at + 48, cast[u32](c12));
+  dma_write32(&mut d, at + 40, c10);
+  dma_write32(&mut d, at + 44, c11);
+  dma_write32(&mut d, at + 48, c12);
 }
 
 /// The completion head after `at`.
@@ -178,13 +177,13 @@ fn cqe_status(d: &mut Dma, at: u64) -> u64
 }
 
 /// Puts a command on the I/O queue and rings its doorbell.
-fn nvme_submit(n: &mut Nvme, op: u64, prp: u64, c10: u64, c11: u64, c12: u64)
-  requires nvme_ok(n) && op < 256 && c10 <= 4294967295 && c11 <= 4294967295 && c12 <= 4294967295
+fn nvme_submit(n: &mut Nvme, op: u8, prp: u64, c10: u32, c11: u32, c12: u32)
+  requires nvme_ok(n)
   ensures nvme_ok(n) && n.sectors == old(n.sectors) && n.busy == old(n.busy)
 {
   sqe(&mut n.sq, n.sq_at, op, n.ns, prp, c10, c11, c12);
   n.sq_at = (n.sq_at + 1) % Q_N;
-  ring(&mut n, 2, n.sq_at);
+  ring(&mut n, 2, cast[u32](n.sq_at));
 }
 
 /// The status of the next I/O completion, consumed, or 65536 if the
@@ -196,15 +195,15 @@ fn nvme_reap(n: &mut Nvme) -> u64
   let s = cqe_status(&mut n.cq, n.cq_at);
   if s < 65536 {
     n.cq_at = cq_next(n.cq_at);
-    ring(&mut n, 3, n.cq_at / 2);
+    ring(&mut n, 3, cast[u32](n.cq_at / 2));
   }
   return s;
 }
 
 /// Submits a command on the admin queue (`io` false) or the I/O queue and
 /// waits for its completion; true if it succeeded.
-fn nvme_cmd(n: &mut Nvme, io: bool, op: u64, nsid: u64, prp: u64, c10: u64, c11: u64, c12: u64) -> bool
-  requires nvme_ok(n) && op < 256 && nsid <= 4294967295 && c10 <= 4294967295 && c11 <= 4294967295 && c12 <= 4294967295
+fn nvme_cmd(n: &mut Nvme, io: bool, op: u8, nsid: u32, prp: u64, c10: u32, c11: u32, c12: u32) -> bool
+  requires nvme_ok(n)
   ensures nvme_ok(n) && n.sectors == old(n.sectors) && n.busy == old(n.busy)
 {
   if io {
@@ -215,7 +214,7 @@ fn nvme_cmd(n: &mut Nvme, io: bool, op: u64, nsid: u64, prp: u64, c10: u64, c11:
   } else {
     sqe(&mut n.asq, n.asq_at, op, nsid, prp, c10, c11, c12);
     n.asq_at = (n.asq_at + 1) % Q_N;
-    ring(&mut n, 0, n.asq_at);
+    ring(&mut n, 0, cast[u32](n.asq_at));
   }
   let mut i = 0;
   let sec0 = n.sectors;
@@ -232,7 +231,7 @@ fn nvme_cmd(n: &mut Nvme, io: bool, op: u64, nsid: u64, prp: u64, c10: u64, c11:
       let s = cqe_status(&mut n.acq, n.acq_at);
       if s < 65536 {
         n.acq_at = cq_next(n.acq_at);
-        ring(&mut n, 1, n.acq_at / 2);
+        ring(&mut n, 1, cast[u32](n.acq_at / 2));
         return s == 0;
       }
     }
@@ -260,8 +259,8 @@ fn nvme_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, i
 {
   let mut n = Nvme { regs: regs, asq: dma_lend(f0), acq: dma_lend(f1), sq: dma_lend(f2), cq: dma_lend(f3),
     buf: dma_lend(f4), stride: 4, asq_at: 0, sq_at: 0, acq_at: 1, cq_at: 1, sectors: 0, shift: 0, ns: 1, busy: false, irq: false };
-  let cap_lo = nr32(&mut n, NV_CAP);
-  let cap_hi = nr32(&mut n, NV_CAP + 4);
+  let cap_lo = cast[u64](nr32(&mut n, NV_CAP));
+  let cap_hi = cast[u64](nr32(&mut n, NV_CAP + 4));
   let mut stride = 4;
   let mut k = 0;
   while k < cap_hi % 16 && stride <= 65536
@@ -290,10 +289,10 @@ fn nvme_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, i
     dma_write64(&mut n.cq, i, 0);
     i = i + 8;
   }
-  nw32(&mut n, NV_AQA, (Q_N - 1) * 65536 + Q_N - 1);
+  nw32(&mut n, NV_AQA, cast[u32]((Q_N - 1) * 65536 + Q_N - 1));
   nw64(&mut n, NV_ASQ, dma_phys(n.asq));
   nw64(&mut n, NV_ACQ, dma_phys(n.acq));
-  nw32(&mut n, NV_CC, CC_QUEUES + CC_EN);
+  nw32(&mut n, NV_CC, cast[u32](CC_QUEUES + CC_EN));
   if !wait_ready(&mut n, 1) {
     return n;
   }
@@ -302,7 +301,7 @@ fn nvme_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, i
   // (or with 1 deleted) need not have it. A controller that does not know
   // the command gets namespace 1.
   if nvme_cmd(&mut n, false, OP_IDENTIFY, 0, dma_phys(n.buf), CNS_ACTIVE_NS, 0, 0) {
-    let first = cast[u64](dma_read32(&mut n.buf, 0));
+    let first = dma_read32(&mut n.buf, 0);
     if 1 <= first && first <= 4294967294 {
       n.ns = first;
     }
@@ -327,8 +326,8 @@ fn nvme_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, i
   if irq {
     ien = 3;
   }
-  if !nvme_cmd(&mut n, false, OP_CREATE_CQ, 0, dma_phys(n.cq), (Q_N - 1) * 65536 + 1, ien, 0)
-    || !nvme_cmd(&mut n, false, OP_CREATE_SQ, 0, dma_phys(n.sq), (Q_N - 1) * 65536 + 1, 65536 + 1, 0) {
+  if !nvme_cmd(&mut n, false, OP_CREATE_CQ, 0, dma_phys(n.cq), cast[u32]((Q_N - 1) * 65536 + 1), cast[u32](ien), 0)
+    || !nvme_cmd(&mut n, false, OP_CREATE_SQ, 0, dma_phys(n.sq), cast[u32]((Q_N - 1) * 65536 + 1), cast[u32](65536 + 1), 0) {
     return n;
   }
   if lbads == 12 {
@@ -351,9 +350,9 @@ fn nvme_msix(n: &mut Nvme, table: u64, addr: u64, data: u64) -> bool
   if table % 16 != 0 || table < NV_DB + 4 * n.stride || table >= mmio_len(n.regs) || mmio_len(n.regs) - table < 16 {
     return false;
   }
-  nw32(&mut n, table, addr);
+  nw32(&mut n, table, cast[u32](addr));
   nw32(&mut n, table + 4, 0);
-  nw32(&mut n, table + 8, data);
+  nw32(&mut n, table + 8, cast[u32](data));
   nw32(&mut n, table + 12, 0);
   n.irq = true;
   return true;
@@ -391,11 +390,11 @@ fn nvme_free(n: Nvme, m: &mut Mem) -> Mmio
 
 /// Reads or writes (`op`) `count` of the drive's blocks from block `dlba`
 /// through the data page.
-fn nvme_io(n: &mut Nvme, op: u64, dlba: u64, count: u64) -> bool
-  requires nvme_ok(n) && op < 256 && 1 <= count && count <= 8
+fn nvme_io(n: &mut Nvme, op: u8, dlba: u64, count: u64) -> bool
+  requires nvme_ok(n) && 1 <= count && count <= 8
   ensures nvme_ok(n) && n.sectors == old(n.sectors) && n.busy == old(n.busy)
 {
-  return nvme_cmd(&mut n, true, op, n.ns, dma_phys(n.buf), dlba % 4294967296, dlba / 4294967296 % 4294967296, count - 1);
+  return nvme_cmd(&mut n, true, op, n.ns, dma_phys(n.buf), wrap[u32](dlba), cast[u32](dlba / 4294967296), cast[u32](count - 1));
 }
 
 /// Copies the data page's bytes from `from` (n bytes, a multiple of 8) to
@@ -525,17 +524,17 @@ fn nvme_begin(n: &mut Nvme, op: u64, lba: u64, src: &Bytes, at: u64) -> bool
     return false;
   }
   let mut dlba = lba;
-  let mut c12 = 7;
+  let mut c12: u32 = 7;
   if n.shift == 3 {
     dlba = lba / 8;
     c12 = 0;
   }
-  let mut code = OP_READ;
+  let mut code: u8 = OP_READ;
   if op == BIO_WRITE {
     nvme_in(&mut n.buf, 0, 4096, src, at);
     code = OP_WRITE;
   }
-  nvme_submit(&mut n, code, dma_phys(n.buf), dlba % 4294967296, dlba / 4294967296 % 4294967296, c12);
+  nvme_submit(&mut n, code, dma_phys(n.buf), wrap[u32](dlba), cast[u32](dlba / 4294967296), c12);
   n.busy = true;
   return true;
 }
