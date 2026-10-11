@@ -242,10 +242,11 @@ fn pipe_nonblock(k: &Kernel, pid: u64, fd: u64) -> bool
 }
 
 /// Whether descriptions of this kind keep O_NONBLOCK in the low bit of
-/// word 3.
+/// word 3 (sockets too: src/lxsock.bastio, src/lxtcp.bastio,
+/// src/lxunix.bastio).
 fn can_block(kind: u64) -> bool {
   return kind == OF_PIPE_R || kind == OF_PIPE_W || kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD || kind == OF_PTY
-    || kind == OF_PIDFD;
+    || kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX || kind == OF_PIDFD;
 }
 
 /// Whether process pid has a file layer row free: an open file holds
