@@ -458,6 +458,7 @@ def main():
     ap.add_argument("--out", default="build/compat")
     ap.add_argument("--dev-disk", help="the development disk (tcc and make) for dev.txt")
     ap.add_argument("--bastio-disk", help="the Bastio disk (bastioc1, z3, tcc) for bastio.txt")
+    ap.add_argument("--alpine-disk", help="the Alpine disk (root file system, apk repository) for alpine.txt")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--update-baseline", action="store_true")
@@ -469,6 +470,7 @@ def main():
     apps = load_applets(os.path.join(HERE, "apps.txt"))
     dev = load_applets(os.path.join(HERE, "dev.txt"))
     bastio = load_applets(os.path.join(HERE, "bastio.txt"))
+    alpine = load_applets(os.path.join(HERE, "alpine.txt"))
     tty = load_tty(os.path.join(HERE, "tty.txt"))
     os.makedirs(args.out, exist_ok=True)
     log = open(os.path.join(args.out, "serial.log"), "wb")
@@ -503,6 +505,17 @@ def main():
             env.boot()
             print("compat: the Bastio compiler (bastioc1, z3, tcc)", flush=True)
             results["bastio"] = [run_applet(env, n, c, e, 900, bb) for n, c, e in bastio]
+        if args.alpine_disk and not args.host:
+            # Alpine's root and its packages, on a fourth disk.
+            env.stop()
+            # The cases change the disk (they unpack and install), so
+            # they get a copy and every run starts from the same disk.
+            disk = os.path.join(args.out, "alpine-run.img")
+            shutil.copyfile(args.alpine_disk, disk)
+            env = Guest(args.kernel, disk, log, web)
+            env.boot()
+            print("compat: Alpine Linux (apk)", flush=True)
+            results["alpine"] = [run_applet(env, n, c, e, 300, bb) for n, c, e in alpine]
     finally:
         env.stop()
         log.close()
