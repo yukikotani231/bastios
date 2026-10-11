@@ -1266,6 +1266,9 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
   if d.kind == K_DEV && d.x == DEV_DSP {
     return dsp_write(&mut k, pid, va, n);   // src/lxsnd.bastio
   }
+  if d.kind == K_DEV && d.x == DEV_MICE {
+    return mice_write(&mut k, pid, va, n);  // mouse commands (src/lxmouse.bastio)
+  }
   if d.kind == K_DEV && d.x >= PROC_DEV {
     return proc_write(&mut k, pid, d.x, va, n);   // a sysctl open for writing (src/lxprocfs.bastio)
   }

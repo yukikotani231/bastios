@@ -6,10 +6,13 @@
 // USB keyboard.
 //
 // A PS/2 mouse on the controller's second (aux) port is turned on at start
-// (enable the port, set defaults, enable reporting) and its bytes, which
-// come through the same data port marked by the status register, are put
-// together into 3-byte packets (buttons and sign bits; x; y). kbd_poll
-// answers a whole packet as MOUSE_PKT plus its bytes; the console pump
+// (enable the port, set defaults, ask for the wheel with the IntelliMouse
+// sequence, enable reporting) and its bytes, which come through the same
+// data port marked by the status register, are put together into 3-byte
+// packets (buttons and sign bits; x; y), or 4-byte ones with the wheel if
+// the mouse then says it is an IntelliMouse (id 3). kbd_poll answers a
+// whole packet as MOUSE_PKT plus its four bytes (the wheel 0 without
+// one); the console pump
 // hands packets to the kernel, which gives them to Linux programs as
 // /dev/input/mice (src/lxmouse.bastio). A byte that cannot start a packet
 // (bit 3 clear) is dropped, so a lost byte costs a packet, not the stream.
@@ -19,16 +22,17 @@ const KBD_STATUS: u64 = 0x64;
 const KST_FULL: u64 = 1;              // a byte is waiting
 const KST_AUX: u64 = 32;              // ... and it is from the mouse
 const KST_BUSY: u64 = 2;              // the controller has not taken the last byte written
-const MOUSE_PKT: u64 = 0x1000000;     // kbd_poll's answer for a mouse packet: MOUSE_PKT + b0 * 65536 + b1 * 256 + b2
+const MOUSE_PKT: u64 = 0x100000000;   // kbd_poll's answer for a mouse packet: MOUSE_PKT + b0 * 2^24 + x * 65536 + y * 256 + wheel
 const AUX_SPINS: u64 = 100000;
 
 struct Kbd { data: PortIo, status: PortIo, shift: bool, ctrl: bool, ext: bool, present: bool,
   aux: bool,          // a PS/2 mouse answered and reports
+  wheel: bool,        // ... with a wheel: 4-byte packets
   mb: u64,            // the bytes of the mouse packet so far, first in the high byte
-  mn: u64 }           // how many (0 .. 2)
+  mn: u64 }           // how many (0 .. 3)
 
 spec fn kbd_ok(k: &Kbd) -> bool {
-  port_count(k.data) == 1 && port_count(k.status) == 1 && k.mn < 3 && k.mb < 65536
+  port_count(k.data) == 1 && port_count(k.status) == 1 && k.mn < 4 && k.mb < 16777216
 }
 
 // Scan codes 0x00-0x39 to characters (0: none or special).
@@ -59,11 +63,50 @@ fn kbd_init(k: &mut Kbd)
     pio_in8(&mut k.data, 0);
     n = n + 1;
   }
-  // The mouse: enable the aux port, then defaults and reporting, each
-  // command acknowledged (0xFA) by the mouse.
-  if kbd_ctl(&mut k, 0xA8) && aux_cmd(&mut k, 0xF6) && aux_cmd(&mut k, 0xF4) {
-    k.aux = true;
+  // The mouse: enable the aux port, then defaults, the wheel if it has
+  // one, and reporting, each command acknowledged (0xFA) by the mouse.
+  if kbd_ctl(&mut k, 0xA8) && aux_cmd(&mut k, 0xF6) {
+    k.wheel = mouse_wheel(&mut k);
+    k.aux = aux_cmd(&mut k, 0xF4);
   }
+}
+
+/// The IntelliMouse sequence: sample rates 200, 100 and 80, after which a
+/// mouse with a wheel says id 3 and sends 4-byte packets. The rate is set
+/// back to 100 either way. True if it said 3.
+fn mouse_wheel(k: &mut Kbd) -> bool
+  requires kbd_ok(k)
+  ensures kbd_ok(k) && k.mn == old(k.mn) && k.mb == old(k.mb)
+{
+  if !(aux_cmd(&mut k, 0xF3) && aux_cmd(&mut k, 200) && aux_cmd(&mut k, 0xF3) && aux_cmd(&mut k, 100)
+      && aux_cmd(&mut k, 0xF3) && aux_cmd(&mut k, 80) && aux_cmd(&mut k, 0xF2)) {
+    return false;
+  }
+  let id = aux_read(&mut k);
+  aux_cmd(&mut k, 0xF3);
+  aux_cmd(&mut k, 100);
+  return id == 3;
+}
+
+/// The next byte from the mouse, or 256 if none comes.
+fn aux_read(k: &mut Kbd) -> u64
+  requires kbd_ok(k)
+  ensures kbd_ok(k) && k.mn == old(k.mn) && k.mb == old(k.mb) && result <= 256
+{
+  let mut i = 0;
+  while i < AUX_SPINS
+    invariant kbd_ok(k) && k.mn == old(k.mn) && k.mb == old(k.mb)
+  {
+    let st = cast[u64](pio_in8(&mut k.status, 0));
+    if st % 2 == KST_FULL {
+      let b = cast[u64](pio_in8(&mut k.data, 0));
+      if st / KST_AUX % 2 == 1 {
+        return b;
+      }
+    }
+    i = i + 1;
+  }
+  return 256;
 }
 
 /// Waits until the controller has taken the last byte written; false on a
@@ -131,12 +174,19 @@ fn mouse_byte(k: &mut Kbd, b: u64) -> u64
   if k.mn == 0 && b / 8 % 2 == 0 {
     return 0;                         // not a first byte: wait for one
   }
-  if k.mn < 2 {
-    k.mb = k.mb % 256 * 256 + b;
+  let mut last = 2;
+  if k.wheel {
+    last = 3;
+  }
+  if k.mn < last {
+    k.mb = k.mb % 65536 * 256 + b;
     k.mn = k.mn + 1;
     return 0;
   }
-  let p = MOUSE_PKT + k.mb * 256 + b;
+  let mut p = MOUSE_PKT + k.mb * 256 + b;      // b is the wheel
+  if !k.wheel {
+    p = MOUSE_PKT + k.mb % 65536 * 65536 + b * 256;
+  }
   k.mb = 0;
   k.mn = 0;
   return p;
