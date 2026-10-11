@@ -15,7 +15,7 @@ Still, BastiOS is young software with drivers that have only met QEMU's devices.
 
 ## What you need
 
-- An x86-64 PC. It boots under BIOS (legacy/CSM) or UEFI. **Turn Secure Boot off**: the GRUB on the image is not signed.
+- An x86-64 PC. It boots under BIOS (legacy/CSM) or UEFI. **Turn Secure Boot off**: the Limine on the image is not signed.
 - A USB stick you can erase.
 - A camera (a phone is fine) for the screen.
 - Optional, and the best record if you have it: a serial port (COM1) and a null-modem or USB-serial cable to another computer. Set it to 115200 baud, 8N1, and capture everything.
@@ -62,7 +62,7 @@ Use [Rufus](https://rufus.ie): pick the stick under Device, choose the image wit
 ## Boot it
 
 1. Plug the stick in and open the firmware's boot menu. The key is usually F12, F11, F10, F8 or Esc, pressed right after power on. Pick the USB stick: under UEFI it may be listed as "UEFI: (the stick's name)".
-2. The GRUB menu waits three seconds. Choose **BastiOS, with a hardware report** with the arrow keys and Enter.
+2. The Limine menu waits three seconds. Choose **BastiOS, with a hardware report** with the arrow keys and Enter.
 3. The kernel prints its boot log and then the hardware report, one screenful at a time. After each part it waits for a key, or a minute: **photograph the screen each time it stops**, then press a key. There are three parts.
 4. The shell prompt `bastios>` appears.
 
@@ -72,7 +72,7 @@ Note for each step whether it worked. If something goes wrong, note what it did 
 
 | # | Do | Expected |
 |---|---|---|
-| 1 | Boot from the stick | The GRUB menu, with two BastiOS entries |
+| 1 | Boot from the stick | The Limine menu, with two BastiOS entries |
 | 2 | Pick the hardware report entry | `BastiOS 0.2: N pages of memory, P processors`, then the report |
 | 3 | Look at the screen | Text on the screen, not only on the serial line. If the screen stays black but the machine has a serial port, the log is there |
 | 4 | Type `help` and Enter | The list of commands. Try both a PS/2 keyboard (or the laptop's own) and a USB one if you have them |
@@ -91,10 +91,10 @@ If the machine stops responding at any point, photograph the screen. Any line th
 Each of these is worth a report on its own; try the next step only if you have time.
 
 - **The machine does not offer the stick, or goes straight to its own system.** Check that Secure Boot is off, and that USB boot is allowed in the firmware settings. Under UEFI, also try the stick's entry without "UEFI:" (that boots it through the BIOS compatibility mode, if the machine has one), and the other way round.
-- **GRUB appears, then the screen goes black or freezes.** Photograph the last screen. If the machine has a serial port, the log is there even when the screen shows nothing: capture it at 115200 baud. Then try the first GRUB entry, **BastiOS**, which skips the report.
+- **The Limine menu appears, then the screen goes black or freezes.** Photograph the last screen. If the machine has a serial port, the log is there even when the screen shows nothing: capture it at 115200 baud. Then try the first entry, **BastiOS**, which skips the report.
 - **The boot log stops partway.** Photograph it: the last line says how far the kernel got.
 - **The prompt appears but typing does nothing.** Try another keyboard: the laptop's own (PS/2 inside), a USB keyboard on another port, or one plugged in directly rather than through a hub or dock.
-- **A SATA disk is plugged in, but the log does not say `disk: AHCI`.** Reboot, press `e` on the GRUB entry, add ` ahci_reset` at the end of the line that starts with `multiboot2`, and press F10 or Ctrl-X to boot.
+- **A SATA disk is plugged in, but the log does not say `disk: AHCI`.** Reboot, select the first entry, **BastiOS**, press `e`, add a line `cmdline: ahci_reset` at the end of the entry, and press F10 to boot.
 
 ## What to send back
 
@@ -127,8 +127,8 @@ These are expected on real machines today, so there is no need to report them un
 
 - Network: only the Intel e1000 families (8254x, 82574L, 82576, I350, I210, I211: the I350, I210 and I211 are untested, so a report on one of them is especially welcome) and virtio cards. Most desktop and laptop cards (Intel I219 and I225/I226, Realtek RTL8111/8168, and Wi-Fi) have no driver.
 - USB: only xHCI (USB 3) controllers, with keyboards and BastiOS-partitioned sticks, on a root port or behind up to two USB 2 hubs.
-- Disks: NVMe, AHCI (SATA), legacy ATA and USB sticks. A disk is used only if it is blank or already BastiOS's. If a SATA disk is plugged in but the boot log does not say `disk: AHCI`, try again with the boot option `ahci_reset` (press `e` on the GRUB entry and add it at the end of the `multiboot2` line): it resets every SATA link before looking for the disk.
-- Screen: a 32-bit framebuffer that GRUB sets up, in the device window below 4 GiB or anywhere above 4 GiB (where many PCs put the graphics memory; this case is untested, because no QEMU display has its framebuffer there). There is no GPU driver.
+- Disks: NVMe, AHCI (SATA), legacy ATA and USB sticks. A disk is used only if it is blank or already BastiOS's. If a SATA disk is plugged in but the boot log does not say `disk: AHCI`, try again with the boot option `ahci_reset` (press `e` on the first menu entry and add a line `cmdline: ahci_reset`): it resets every SATA link before looking for the disk.
+- Screen: a 32-bit framebuffer that Limine sets up, in the device window below 4 GiB or anywhere above 4 GiB (where many PCs put the graphics memory; this case is untested, because no QEMU display has its framebuffer there). There is no GPU driver.
 - Processors: when the local APICs have to run in x2APIC mode (the report's `local APIC:` line says so: the firmware locked that mode, or a processor has an id of 255 or more), the kernel does without MSI and wake-up interrupts, so disks and the network are polled more.
 - ACPI: only the PM1a registers; PM1b is not used. The only AML read is `\_S5`. A reset register in memory has not been tested, because QEMU has none.
 - Memory: the kernel uses at most 256 MiB, below 1 GiB, whatever the machine has.

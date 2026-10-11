@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boot build/bastios.iso (make iso) through GRUB under BIOS and under UEFI
+# Boot build/bastios.iso (make iso) through Limine under BIOS and under UEFI
 # (OVMF), with the devices `make run` gives it, and check that the shell
 # comes up, runs a program, uses the disk and the network, and gets every
 # page back at power off. A line typed on the PS/2 keyboard must run and
@@ -10,8 +10,8 @@ set -u
 cd "$(dirname "$0")/.."
 OVMF=${OVMF:-/usr/share/OVMF/OVMF_CODE_4M.fd}
 OVMF_VARS=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
-if ! command -v grub-mkrescue >/dev/null || ! command -v xorriso >/dev/null; then
-  echo "SKIP iso: grub-mkrescue or xorriso missing"
+if ! command -v xorriso >/dev/null; then
+  echo "SKIP iso: xorriso missing"
   exit 0
 fi
 make -s build/bastios.iso || exit 1
@@ -82,8 +82,8 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
     # and the page count are checked. nvme: the disk is an NVMe drive.
     # stick: no CD; the machine boots from this USB stick image (make usb)
     # on the xHCI controller, whose BastiOS partition must then be the
-    # disk, and the virtio disk is left untouched. diag: GRUB's second entry,
-    # the hardware report (Ctrl-N on the menu, then Enter), paged through on
+    # disk, and the virtio disk is left untouched. diag: Limine's second entry,
+    # the hardware report (Down on the menu, then Enter), paged through on
     # the serial line; only the report and the page count are checked.
     global fails
     qmp_path = os.path.join(tmp.name, "qmp.sock")
@@ -128,8 +128,14 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             out += chunk
         return True
     if diag:
-        ok = until(b"BastiOS, with a hardware report", 0)
-        q.stdin.write(b"\x0e\r"); q.stdin.flush()
+        # Limine draws its menu with a cursor move before every character,
+        # so the countdown line is waited for with the escapes taken out.
+        while b"Booting automatically" not in re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", out):
+            if not until(b"\x1b", len(out)):
+                break
+        q.stdin.write(b"\x1b[B"); q.stdin.flush()
+        time.sleep(0.3)
+        q.stdin.write(b"\r"); q.stdin.flush()
         for _ in range(3):
             mark = len(out)
             if not until(b"(or wait a minute) --", mark):
@@ -146,7 +152,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             print(("ok  " if good else "FAIL"), f"({name}) {what}")
             fails += not good
     ok = until(b"bastios> ", 0)
-    print(("ok  " if ok else "FAIL"), f"({name}) GRUB boots the kernel to the shell")
+    print(("ok  " if ok else "FAIL"), f"({name}) Limine boots the kernel to the shell")
     fails += not ok
     # Both processors: under UEFI the ACPI tables are found through the
     # Multiboot memory map, not the BIOS areas.
