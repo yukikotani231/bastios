@@ -1164,13 +1164,13 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // PCI's configuration ports are claimed for the drivers that look for
   // their devices there.
   let mut pci = Pci { addr: port_claim(&mut ports, PCI_ADDR, 4), data: port_claim(&mut ports, PCI_DATA, 4) };
-  // The xHCI controller first, if there is one, with fourteen pages from
-  // USB_AT: a USB stick with a BastiOS partition on it becomes the disk,
-  // and a USB keyboard the keyboard.
-  let xdev = pci_find_class(&mut pci, XHCI_CLASS);
-  let usb_lo = usb_bar(&mut pci, xdev);
-  let usb_hi = usb_lo + usb_bar_size(&mut pci, xdev);
-  let mut usb = usb_new(&mut pci, &mut m, &mut win, USB_AT, fb_lo, fb_hi, 0, 0, xdev, usb_lo, usb_hi - usb_lo, msi, V_DISK);
+  // The xHCI controller first, the first of them with anything on it,
+  // with pages from USB_AT: a USB stick with a BastiOS partition on it
+  // becomes the disk, and a USB keyboard and mouse the keyboard and mouse.
+  let xn = usb_count(&mut pci);
+  let mut usb = usb_find(&mut pci, &mut m, &mut win, USB_AT, fb_lo, fb_hi, msi, V_DISK);
+  let usb_lo = usb_base(usb);
+  let usb_hi = usb_top(usb);
   let usb_disk = usb_msd(usb);
   // The disk: that stick, else NVMe, virtio, AHCI or ATA (see blk_new).
   let dev = blk_find(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi, usb_lo, usb_hi, msi, &mut usb, acpi_lo, acpi_hi, boot_word(cpu, "ahci_reset"));
@@ -1208,10 +1208,10 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   term.usb = usb;
   if usb_on {
     puts(&mut con, "keyboard: USB (xHCI)\r\n");
-  } else if xdev < PCI_NONE && usb_lo == 0 {
-    puts(&mut con, "usb: the xHCI controller's registers are outside the device window; not used\r\n");
-  } else if xdev < PCI_NONE {
-    puts(&mut con, "usb: no keyboard on the xHCI controller's root ports\r\n");
+  } else if xn > 0 {
+    puts(&mut con, "usb: no keyboard on the xHCI controllers (");
+    put_num(&mut con, xn);
+    puts(&mut con, ")\r\n");
   }
   // The sound card, if any, with six pages from SND_AT.
   let snd = snd_find(&mut pci, &mut m, &mut win, SND_AT, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi);
@@ -1254,6 +1254,17 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
       puts(&mut con, "net: frames received by interrupt\r\n");
     }
   }
+  // What is missing, on every boot: on a PC, the screen is all there is
+  // to see why nothing can be typed or nothing is kept.
+  if !usb_on && !term.kbd.present {
+    puts(&mut con, "keyboard: none found (no USB keyboard, no PS/2 controller)\r\n");
+  }
+  if blk_sectors(disk.dev) == 0 {
+    puts(&mut con, "disk: none found (NVMe, AHCI, ATA, virtio, USB); files are kept in memory only\r\n");
+  }
+  if !nic_live(nic) {
+    puts(&mut con, "net: none (drivers: virtio and e1000 only)\r\n");
+  }
   // The hardware report, with the boot option `diag` (src/info.bastio),
   // after a line for each thing the boot log above says nothing about.
   if boot_word(cpu, "diag") {
@@ -1262,8 +1273,6 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     }
     if !usb_on && term.kbd.present {
       puts(&mut con, "keyboard: PS/2 (no USB keyboard)\r\n");
-    } else if !usb_on {
-      puts(&mut con, "keyboard: none found (no USB keyboard, no PS/2 controller)\r\n");
     }
     if usb_mouse_on {
       puts(&mut con, "mouse: USB (xHCI)\r\n");
@@ -1274,9 +1283,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     } else {
       puts(&mut con, "mouse: none found\r\n");
     }
-    if blk_sectors(disk.dev) == 0 {
-      puts(&mut con, "disk: none found\r\n");
-    } else if !blk_is_virtio(disk.dev) && !blk_is_nvme(disk.dev) && !blk_is_ahci(disk.dev) && !blk_is_usb(disk.dev) {
+    if blk_sectors(disk.dev) != 0 && !blk_is_virtio(disk.dev) && !blk_is_nvme(disk.dev) && !blk_is_ahci(disk.dev) && !blk_is_usb(disk.dev) {
       puts(&mut con, "disk: ATA (");
       put_num(&mut con, blk_sectors(disk.dev));
       puts(&mut con, " sectors)\r\n");
@@ -1285,9 +1292,6 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
       puts(&mut con, "disk: the BastiOS file system, ");
       put_num(&mut con, disk.blocks);
       puts(&mut con, " blocks of 4 KiB\r\n");
-    }
-    if !nic_live(nic) {
-      puts(&mut con, "net: none (drivers: virtio and e1000 only)\r\n");
     }
     puts(&mut con, "---- hardware report (boot option diag; see docs/real-hardware.md) ----\r\n");
     hw_cpu(&mut con, cpu);

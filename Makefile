@@ -360,7 +360,9 @@ $(COMPAT_BINS): build/compat/%: test/compat/progs/%.c test/compat/progs/compat.h
 build/compat:
 	mkdir -p $@
 
-build/compat/busybox: build/busybox/Makefile test/compat/busybox.config | build/compat
+# Copy the tree only after build/user/ash.elf has finished configuring and
+# building it in place: under make -j the copy otherwise races that build.
+build/compat/busybox: build/busybox/Makefile test/compat/busybox.config | build/compat build/user/ash.elf
 	rm -rf build/compat/bb && cp -r build/busybox build/compat/bb
 	$(MAKE) -C build/compat/bb -s clean >/dev/null
 	$(MAKE) -C build/compat/bb -s allnoconfig >/dev/null
