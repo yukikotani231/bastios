@@ -196,7 +196,9 @@ fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
   pset(&mut k.procs, p, F_BRK0, pget(k.procs, h, F_BRK0));
   pset(&mut k.procs, p, F_MMAP, pget(k.procs, h, F_MMAP));
   pset(&mut k.procs, p, F_PROG, pget(k.procs, h, F_PROG));
-  swap_words(&mut k.lxfd, h * LXNFD, p * LXNFD, LXNFD);
+  if (h + 1) * LXNFD <= len(k.lxfd) && (p + 1) * LXNFD <= len(k.lxfd) {
+    swap_words(&mut k.lxfd, h * LXNFD, p * LXNFD, LXNFD);
+  }
   if (h + 1) * CWD_STRIDE <= len(k.cwd) && (p + 1) * CWD_STRIDE <= len(k.cwd) {      // live processes have rows
     swap_words(&mut k.cwd, h * CWD_STRIDE, p * CWD_STRIDE, CWD_STRIDE);
   }

@@ -17,7 +17,7 @@ import "tcp.bastio";
 const NPROC: u64 = 256;
 const STRIDE: u64 = 64;
 const PTAB_LEN: u64 = NPROC * STRIDE;   // the most the table grows to
-const PGROW: u64 = 32;               // rows the process table starts with, and grows by
+const PGROW: u64 = 32;               // rows the process table starts with (it doubles from there)
 
 // Row fields.
 const F_STATE: u64 = 0;
@@ -719,7 +719,7 @@ struct Kernel {
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
     && (k.txt is Store::Table ==> (pt_level(k.txt.Table) == 2 && pt_leases(k.txt.Table) == 0))
 }
@@ -1030,8 +1030,10 @@ fn zgrow(t: &mut Buf, n: u64) -> bool
 }
 
 /// A FREE process id for a new process, or 0 if there is none. When every
-/// row is taken, the process table grows by PGROW rows, up to NPROC; when
-/// memory runs out, there is none.
+/// row is taken, the per-process tables double, up to NPROC rows; when
+/// memory runs out, there is none. Doubling and not a fixed step: the
+/// kernel's allocator reuses a freed block only for a buffer of the same
+/// size, so every table a growth leaves behind stays unused.
 fn new_pid(k: &mut Kernel) -> u64
   requires kok(k)
   ensures kok(k) && result < NPROC
@@ -1041,12 +1043,20 @@ fn new_pid(k: &mut Kernel) -> u64
     return pid;
   }
   let cap = len(k.procs) / STRIDE;
-  if cap + PGROW > NPROC {
+  if cap >= NPROC {
     return 0;
   }
+  let mut n = cap * 2;
+  if n < PGROW {
+    n = PGROW;
+  }
+  if n > NPROC {
+    n = NPROC;
+  }
   // The process table last: its length is how many rows every table has.
-  if !zgrow(&mut k.sigact, (cap + PGROW) * SIGACT_ROW) || !zgrow(&mut k.cwd, (cap + PGROW) * CWD_STRIDE)
-     || !zgrow(&mut k.croot, (cap + PGROW) * CWD_STRIDE) || !zgrow(&mut k.sigsave, (cap + PGROW) * SIGSAVE_ROW) || !zgrow(&mut k.procs, (cap + PGROW) * STRIDE) {
+  if !zgrow(&mut k.sigact, n * SIGACT_ROW) || !zgrow(&mut k.cwd, n * CWD_STRIDE)
+     || !zgrow(&mut k.croot, n * CWD_STRIDE) || !zgrow(&mut k.lxfd, n * LXNFD)
+     || !zgrow(&mut k.fs.ftab, n * NFD * FD_STRIDE) || !zgrow(&mut k.sigsave, n * SIGSAVE_ROW) || !zgrow(&mut k.procs, n * STRIDE) {
     return 0;
   }
   return free_pid(k.procs);

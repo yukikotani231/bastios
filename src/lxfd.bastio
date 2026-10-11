@@ -23,24 +23,26 @@ import "lxdev.bastio";
 struct Fd { kind: u64, x: u64 }
 
 spec fn fds_ok(k: &Kernel) -> bool {
-  len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN
+  len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN
 }
 
 fn fd_get(t: &Buf, pid: u64, fd: u64) -> u64
-  requires len(t) == LXFD_LEN && pid < NPROC
+  requires len(t) <= LXFD_LEN && pid < NPROC
   ensures fd >= LXNFD ==> result == 0
 {
-  if fd >= LXNFD {
+  if fd >= LXNFD || pid * LXNFD + fd >= len(t) {   // a process past the table's end has none open
     return 0;
   }
   return get(t, pid * LXNFD + fd);
 }
 
 fn fd_set(t: &mut Buf, pid: u64, fd: u64, v: u64)
-  requires len(t) == LXFD_LEN && pid < NPROC && fd < LXNFD
-  ensures len(t) == LXFD_LEN
+  requires len(t) <= LXFD_LEN && pid < NPROC && fd < LXNFD
+  ensures len(t) == old(len(t))
 {
-  t = set(t, pid * LXNFD + fd, v);
+  if pid * LXNFD + fd < len(t) {             // live processes have their rows (new_pid)
+    t = set(t, pid * LXNFD + fd, v);
+  }
 }
 
 fn of_get(t: &Buf, h: u64, f: u64) -> u64
@@ -249,6 +251,9 @@ fn can_block(kind: u64) -> bool {
 fn row_free(k: &Kernel, pid: u64) -> bool
   requires kok(k) && pid < NPROC
 {
+  if (pid + 1) * NFD * FD_STRIDE > len(k.fs.ftab) {
+    return false;
+  }
   let mut i = 0;
   while i < NFD
     invariant i <= NFD
@@ -264,12 +269,13 @@ fn row_free(k: &Kernel, pid: u64) -> bool
 /// Process `pid`'s descriptors as a new program starts: 0 to 2 on the
 /// console, the rest closed. They must hold no references.
 fn lx_fd_reset(t: &mut Buf, pid: u64)
-  requires len(t) == LXFD_LEN && pid < NPROC
-  ensures len(t) == LXFD_LEN
+  requires len(t) <= LXFD_LEN && pid < NPROC
+  ensures len(t) == old(len(t))
 {
+  let n = len(t);
   let mut fd = 0;
   while fd < LXNFD
-    invariant fd <= LXNFD && len(t) == LXFD_LEN
+    invariant fd <= LXNFD && len(t) == n && n <= LXFD_LEN
   {
     if fd < 3 {
       fd_set(&mut t, pid, fd, FD_CONSOLE);
@@ -486,9 +492,12 @@ fn ofd_new(k: &mut Kernel, kind: u64, x: u64) -> u64
 
 /// The lowest closed descriptor of process pid at or above `from`, or LXNFD.
 fn fd_free_in(t: &Buf, pid: u64, from: u64) -> u64
-  requires len(t) == LXFD_LEN && pid < NPROC
+  requires len(t) <= LXFD_LEN && pid < NPROC
   ensures result <= LXNFD
 {
+  if (pid + 1) * LXNFD > len(t) {
+    return LXNFD;                           // no row: nothing can be installed
+  }
   let mut fd = from;
   while fd < LXNFD && fd_get(t, pid, fd) != 0
   {
