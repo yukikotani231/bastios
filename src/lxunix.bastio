@@ -21,8 +21,19 @@
 // A datagram channel keeps each message as its length (two bytes, low
 // first) and then its bytes.
 //
-// Unlike Linux, bind makes no file: the name lives in the slot until the
-// socket closes, and is matched byte for byte (no path resolution).
+// A name that starts with a byte other than 0 is a path. bind makes a
+// socket file there (type S_IFSOCK, rwxrwxrwx less the umask, owned by its
+// maker), with the same checks as making any file, and keeps the path the
+// name resolves to in the slot; connect resolves its name the same way and
+// needs write permission on the socket file, as on Linux, so chmod on the
+// file says who may connect. The file outlives the socket, as on Linux: a
+// program removes it before binding the name again. A name that starts
+// with 0 is in Linux's abstract namespace: no file and no permissions,
+// matched byte for byte.
+//
+// Different from Linux: a socket file that is renamed (or reached through
+// a hard link of another name) no longer leads to its socket, which is
+// found by the path it was bound at; ECONNREFUSED then.
 
 import "linux.bastio";
 
@@ -42,6 +53,7 @@ const UXLC0: u64 = 144;                // UXC0 + 2 * UX_N: the listeners' creden
 const SO_PEERCRED: u64 = 17;
 const UX_DG: u64 = 16;                 // word 3: a datagram socket
 const SUN_LEN: u64 = 110;              // sizeof(struct sockaddr_un)
+const T_SOCK: u64 = 0xC000;            // mode type bits of a socket file
 const ECONNABORTED: u64 = 18446744073709551513;    // 2^64 - 103
 
 // A unix socket descriptor: description h, word 2 x, nonblocking, mode;
@@ -460,6 +472,101 @@ fn ul_find(k: &Kernel, n: u64) -> u64
   return UX_LIS;
 }
 
+/// For a path name (sun_in has put it at the start of the transfer
+/// buffer): resolves the path at sockaddr va + 2 from the working
+/// directory, through links on the way (and the last one too unless
+/// `bind`), checking search permission. The canonical path is then the
+/// first `result` transfer bytes; or an error.
+fn ux_resolve(k: &mut Kernel, pid: u64, va: u64, bind: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures (1 <= result && result <= UX_PATH) || result >= 18446744073709547520
+{
+  if va > 0xFFFFFFFFFFFF0000 {
+    return EFAULT;
+  }
+  let mut n = NO_RESULT;
+  if bind {
+    n = lx_path_at_nf(&mut k, pid, AT_FDCWD, va + 2);
+  } else {
+    n = lx_path_at(&mut k, pid, AT_FDCWD, va + 2);
+  }
+  if n == NO_RESULT {
+    if k.perr < 18446744073709547520 {
+      return EINVAL;
+    }
+    return k.perr;
+  }
+  if n == 0 {
+    return ENOENT;
+  }
+  if n > UX_PATH {
+    return ENAMETOOLONG;                    // the canonical path does not fit a slot
+  }
+  return n;
+}
+
+/// bind on a path name, at canonical path xfer[0..n]: makes the socket
+/// file. 0 or an error; the transfer buffer still starts with the path.
+fn ux_mkfile(k: &mut Kernel, pid: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && 1 <= n && n <= UX_PATH && UX_PATH <= FNAME_MAX
+  ensures kok(k)
+{
+  let mut t = balloc(2 * FNAME_MAX);
+  xfer_save(k, &mut t, 0, n);
+  let there = path_meta(&mut k, n);
+  xfer_load(&mut k, t, 0, n);
+  let mut e = 0;
+  if there.ok {
+    e = EADDRINUSE;                         // a file, or a socket file left behind
+  } else if vfs_ro(&mut k.fs, n) {
+    e = EROFS;
+  } else {
+    e = may_dir(&mut k, pid, n);
+  }
+  if e == 0 {
+    xfer_load(&mut k, t, 0, n);
+    let own = new_owner(&mut k, pid, n);
+    xfer_load(&mut k, t, 0, n);
+    if !vfs_mknode(&mut k.fs, &mut k.mem, n, T_SOCK + 511) {
+      e = ENOENT;                           // no such directory, or no room
+    } else {
+      xfer_load(&mut k, t, 0, n);
+      let h = vfs_lookup(&mut k.fs, n);
+      if h != NO_FILE {
+        made_by(&mut k, pid, h, own, 511, false);   // the umask and owner (src/lxperm.bastio)
+      }
+    }
+  }
+  xfer_load(&mut k, t, 0, n);
+  bfree(t);
+  return e;
+}
+
+/// connect on a path name, at canonical path xfer[0..n]: the file must be
+/// a socket file the caller may write. 0 or an error; the transfer buffer
+/// still starts with the path.
+fn ux_may_connect(k: &mut Kernel, pid: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= UX_PATH && UX_PATH <= FNAME_MAX
+  ensures kok(k)
+{
+  let mut t = balloc(2 * FNAME_MAX);
+  xfer_save(k, &mut t, 0, n);
+  let m = path_meta(&mut k, n);
+  xfer_load(&mut k, t, 0, n);
+  bfree(t);
+  if !m.ok {
+    return ENOENT;
+  }
+  if m.mode % 65536 / 4096 * 4096 != T_SOCK {
+    return ECONNREFUSED;                    // not a socket
+  }
+  if !may_meta(k.procs, pid, m.mode, m.own, MAY_W) {
+    return EACCES;
+  }
+  return 0;
+}
+
 /// bind on a unix socket: claims the name.
 fn ux_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -472,12 +579,9 @@ fn ux_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if u.mode != UM_NEW {
     return EINVAL;
   }
-  let n = sun_in(&mut k, pid, addr, alen);
+  let mut n = sun_in(&mut k, pid, addr, alen);
   if n > UX_PATH {
     return n;
-  }
-  if ul_find(k, n) < UX_LIS {
-    return EADDRINUSE;
   }
   let mut l = 0;
   while l < UX_LIS && ul_get(k, l, 0) != UL_FREE
@@ -487,6 +591,24 @@ fn ux_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   }
   if l >= UX_LIS {
     return ENOBUFS;
+  }
+  if bget(k.fs.xfer, 0) != 0 {
+    n = ux_resolve(&mut k, pid, addr, true);
+    if n > UX_PATH {
+      return n;
+    }
+    let e = ux_mkfile(&mut k, pid, n);
+    if e != 0 {
+      return e;
+    }
+    // A socket still bound to a socket file removed since: no longer
+    // found by this name.
+    let stale = ul_find(k, n);
+    if stale < UX_LIS {
+      ul_set(&mut k, stale, 1, UX_PATH + 1);
+    }
+  } else if ul_find(k, n) < UX_LIS {
+    return EADDRINUSE;
   }
   let mut i = 0;
   while i < n
@@ -542,12 +664,26 @@ fn ux_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if u.mode != UM_NEW {
     return EINVAL;
   }
-  let n = sun_in(&mut k, pid, addr, alen);
+  let mut n = sun_in(&mut k, pid, addr, alen);
   if n > UX_PATH {
     return n;
   }
+  let path = bget(k.fs.xfer, 0) != 0;
+  if path {
+    n = ux_resolve(&mut k, pid, addr, false);
+    if n > UX_PATH {
+      return n;
+    }
+    let e = ux_may_connect(&mut k, pid, n);
+    if e != 0 {
+      return e;
+    }
+  }
   let l = ul_find(k, n);
   if l >= UX_LIS {
+    if path {
+      return ECONNREFUSED;                  // a socket file no socket listens on
+    }
     return ENOENT;
   }
   if ul_get(k, l, 0) != UL_LISTEN {

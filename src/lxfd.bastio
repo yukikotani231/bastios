@@ -588,6 +588,21 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if dev == DEV_TTY {
     return fd_install_console(&mut k, pid);
   }
+  if (is_loop(dev) || dev == DEV_LOOPCTL) && flags & LO_PATH == 0 {
+    // A loop device reads and writes the file it is bound to, whoever
+    // that file belongs to: rw-rw---- for root and group disk, as on
+    // Linux (dev_meta).
+    let mut lwant = 0;
+    if flags % 4 != LO_WRONLY {
+      lwant = MAY_R;
+    }
+    if flags % 4 != 0 {
+      lwant = lwant + MAY_W;
+    }
+    if !may_meta(k.procs, pid, S_IFBLK, DISK_GID * 0x100000000, lwant) {
+      return EACCES;
+    }
+  }
   if dev != DEV_NONE && dev != DEV_DIR {
     let hv = ofd_new(&mut k, OF_DEV, dev);
     if hv >= OFD_N {
@@ -596,6 +611,10 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     return fd_install(&mut k, pid, hv);
   }
   let fh = vfs_lookup(&mut k.fs, n);
+  let fm = vfs_meta(&mut k.fs, fh);
+  if fh != NO_FILE && fm.ok && fm.mode % 65536 / 4096 * 4096 == 0xC000 {
+    return 18446744073709551610;            // ENXIO: a socket file is not opened (src/lxunix.bastio)
+  }
   if fh != NO_FILE && vfs_is_fifo(&mut k.fs, fh) {
     if flags & LO_CREAT != 0 && flags & LO_EXCL != 0 {
       return EEXIST;

@@ -48,6 +48,7 @@ fn cap_put(k: &mut Kernel, p: u64, w: u64, v: u64)
 /// Process p's effective set: everything not dropped, for root.
 fn cap_eff(k: &Kernel, p: u64) -> u64
   requires kok(k) && p < NPROC
+  ensures !is_root(k.procs, p) ==> result == 0
 {
   if !cred_root(k.procs, p) {
     return 0;
@@ -68,9 +69,12 @@ fn cap_perm(k: &Kernel, p: u64) -> u64
   return CAP_FULL & !cap_word(k, p, CAPW_PERM);
 }
 
-/// Whether process p holds capability c in its effective set.
+/// Whether process p holds capability c in its effective set. Only root
+/// holds any: a capability refines the root rule of docs/security.md,
+/// never widens it.
 fn cap_has(k: &Kernel, p: u64, c: u64) -> bool
   requires kok(k) && p < NPROC && c <= CAP_LAST
+  ensures result ==> is_root(k.procs, p)
 {
   return (cap_eff(k, p) >> c) % 2 == 1;
 }

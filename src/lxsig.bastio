@@ -352,6 +352,9 @@ fn lx_sigqueue(k: &mut Kernel, pid: u64, target: u64, s: u64, info: u64) -> u64
   if info > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, info, &mut k.fs.xfer, 32) != 32 {
     return EFAULT;
   }
+  if !may_signal(k, pid, target, s) {
+    return EPERM;                           // the same rule as kill
+  }
   if sigpending_full(k, target, s) {
     return EAGAIN;
   }

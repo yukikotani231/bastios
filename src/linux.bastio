@@ -235,10 +235,11 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return lx_futex(&mut k, pid, was, a, b, c);
   }
   if n == LX_REBOOT {
-    // reboot(2), for root, after its two magic numbers: RESTART restarts
-    // the machine, POWER_OFF and HALT power it off. CAD_ON and CAD_OFF
-    // (what Ctrl-Alt-Del does) succeed doing nothing: the console never
-    // reboots on it.
+    // reboot(2), for root alone holding CAP_SYS_BOOT (cap_has implies
+    // root; Linux checks it first too), after its two magic numbers:
+    // RESTART restarts the machine, POWER_OFF and HALT power it off.
+    // CAD_ON and CAD_OFF (what Ctrl-Alt-Del does) succeed doing nothing:
+    // the console never reboots on it.
     if !cap_has(k, pid, CAP_SYS_BOOT) {
       ret(&mut k.procs, pid, EPERM);
       return KEEP;
@@ -1852,10 +1853,15 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   if !anon && (mode / O_READ % 2 == 0 || (sh && prot / 2 % 2 == 1 && (mode / O_WRITE % 2 == 0 || mode / O_APPEND % 2 == 1))) {
     return EACCES;
   }
+  let can_write = mode / O_WRITE % 2 == 1;
   let pages = (n + 4095) / 4096;
   // A shared file mapping maps the page cache's pages (src/pcache.bastio)
-  // instead of fresh ones.
-  let cached = sh && !anon && f != NO_FILE;
+  // instead of fresh ones, if the file was opened for writing. From a
+  // descriptor that may only read, it gets a copy, as a private mapping
+  // does: mprotect could make the mapping writable later, and a write to
+  // the cache's page would reach every reader of the file
+  // (docs/security.md). Such a copy does not see later writes to the file.
+  let cached = sh && !anon && f != NO_FILE && can_write;
   let mut at = 0;
   let noreplace = flags & MAP_FIXED_NOREPLACE != 0;
   if flags / MAP_FIXED % 2 == 1 || noreplace {

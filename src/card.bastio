@@ -101,6 +101,20 @@ fn card_recv(d: &mut Card, pkt: &mut Bytes) -> u64
   }
 }
 
+/// After a run of card_recv: the card learns of the buffers it got back.
+fn card_rx_flush(d: &mut Card)
+  requires card_ok(d)
+  ensures card_ok(d)
+{
+  match d {
+    Card::Virtio(mut v) => {
+      vnet_rx_flush(&mut v);
+      d = Card::Virtio(v);
+    },
+    Card::E1000(e) => { d = Card::E1000(e); },
+  }
+}
+
 fn card_send(d: &mut Card, pkt: &Bytes, n: u64) -> bool
   requires card_ok(d) && n <= FRAME_MAX && n <= blen(pkt)
   ensures card_ok(d)

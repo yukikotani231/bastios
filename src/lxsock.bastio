@@ -5,6 +5,7 @@
 
 import "linux.bastio";
 
+const PROT_SOCK: u64 = 1024;           // the first port anyone may bind
 const LX_SOCKET: u64 = 41;
 const LX_CONNECT: u64 = 42;
 const LX_SENDTO: u64 = 44;
@@ -253,6 +254,16 @@ fn lx_inet_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   return fd;
 }
 
+/// Whether process pid may bind port `port`: the ports below 1024 are
+/// root's, and only while it holds CAP_NET_BIND_SERVICE (a refinement:
+/// cap_has implies root); 0 asks for any free port.
+fn may_bind(k: &Kernel, pid: u64, port: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures result ==> (port == 0 || port >= PROT_SOCK || is_root(k.procs, pid))
+{
+  return port == 0 || port >= PROT_SOCK || cap_has(k, pid, CAP_NET_BIND_SERVICE);
+}
+
 /// bind(fd, addr, len): the port only; the address is ignored (there is
 /// one).
 fn lx_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
@@ -279,6 +290,9 @@ fn lx_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   let why = bind_check(k, pid, sin.ip, sin.port);
   if why != 0 {
     return why;
+  }
+  if !may_bind(k, pid, sin.port) {
+    return EACCES;
   }
   if !sock_bind(&mut k.nic, sk.s, sin.port) {
     return EADDRINUSE;
@@ -319,17 +333,14 @@ fn lx_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   return 0;
 }
 
-/// Whether process pid may bind ip:port: 0, -EADDRNOTAVAIL for an
-/// address that is not this machine's, or -EACCES for a port below 1024
-/// without root.
+/// Whether process pid may bind ip: 0, or -EADDRNOTAVAIL for an address
+/// that is not this machine's. Linux checks this before the port
+/// (may_bind).
 fn bind_check(k: &Kernel, pid: u64, ip: u64, port: u64) -> u64
   requires kok(k) && pid < NPROC
 {
   if ip != 0 && !addr_local(k.nic, ip) {
     return EADDRNOTAVAIL;
-  }
-  if port != 0 && port < 1024 && !cap_has(k, pid, CAP_NET_BIND_SERVICE) {
-    return EACCES;
   }
   return 0;
 }
@@ -741,6 +752,7 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   } else {
     r = sock_call_rest(&mut k, pid, n, a, b, c, d, e);
   }
+  assert kok(k);                            // a hint for the solver
   if r == SK_WAIT && !is_unix(k, pid, a) {
     return sock_retry(&mut k, pid, n);       // nothing yet: sleep until a frame comes in
   }

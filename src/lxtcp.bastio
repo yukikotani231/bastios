@@ -101,6 +101,9 @@ fn lx_tcp_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if why != 0 {
     return why;
   }
+  if !may_bind(k, pid, sin.port) {
+    return EACCES;
+  }
   let mut port = sin.port;
   if port == 0 {
     port = tcp_pick_port(&mut k.nic);
