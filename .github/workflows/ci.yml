@@ -29,4 +29,4 @@ jobs:
           qemu-system-x86_64 --version | head -1
           python3 --version
       - run: cd bastiolang/stage0 && cargo build --release --locked
-      - run: make test BASTIOC=bastiolang/stage0/target/release/bastioc0
+      - run: make test BASTIOC=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang

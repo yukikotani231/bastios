@@ -46,10 +46,10 @@ jobs:
           grep -q "^## \[$version\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }
       - run: cd bastiolang/stage0 && cargo build --release --locked
       - name: Tests (they also build the kernel and the ISO)
-        run: make test BASTIOC=bastiolang/stage0/target/release/bastioc0
+        run: make test BASTIOC=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
       - name: Package
         run: |
-          make iso usb BASTIOC=bastiolang/stage0/target/release/bastioc0
+          make iso usb BASTIOC=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
           mkdir -p dist
           cp build/bastios.iso dist/bastios-$TAG.iso
           cp build/bastios-usb.img dist/bastios-usb-$TAG.img
