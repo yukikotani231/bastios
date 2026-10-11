@@ -97,6 +97,20 @@ served by bastios
 wget: server returned error: HTTP/1.1 404 Not Found
 status 1
 
+== wget: HTTPS from the host (BusyBox's own TLS)
+$ /disk/busybox wget -q -O - HOSTSURL/hello.txt
+wget: note: TLS certificate validation not implemented
+hello from the host
+
+== wget: 1 MiB over HTTPS
+$ /disk/busybox wget -q -O ca_s.bin HOSTSURL/mib.bin && /disk/busybox md5sum ca_s.bin; rm -f ca_s.bin
+wget: note: TLS certificate validation not implemented
+85bfb9943e6f0cb09f0f52679e9eac2b  ca_s.bin
+
+== wget: an IPv6 loopback server
+$ mkdir ca_w6 && echo over ::1 > ca_w6/index.html && (/disk/busybox httpd -f -p [::1]:18089 -h ca_w6 & echo $! > ca_pid; sleep 1; /disk/busybox wget -q -O - 'http://[::1]:18089/'; kill $(cat ca_pid)); rm -rf ca_w6 ca_pid
+over ::1
+
 == nc: a raw HTTP request to the host
 $ printf 'GET /hello.txt HTTP/1.0\r\n\r\n' | /disk/busybox nc HOSTADDR | /disk/busybox tail -n 1
 hello from the host

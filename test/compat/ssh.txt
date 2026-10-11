@@ -1,0 +1,51 @@
+# Logging in to BastiOS over SSH (test/compat), in applets.txt's format.
+# Dropbear (built by the Makefile) runs in the guest on port 22, which QEMU
+# forwards from SSHPORT on the host; "$ @host" commands run on the host, where
+# Dropbear's client logs in with the key made for the test
+# (build/compat/ssh_id, whose public half is on the disk). The client's
+# warnings go to /dev/null: it skips the host key check (-y -y). Its key goes in
+# root's home (~root, from /etc/passwd), in .ssh/authorized_keys. Guest
+# only: run.py skips this file with --host.
+
+== dropbear: the server starts
+$ mkdir -p ~root/.ssh && cp /disk/ssh_authorized_keys ~root/.ssh/authorized_keys && chmod 700 ~root/.ssh && chmod 600 ~root/.ssh/authorized_keys && (/disk/dropbear -F -r /disk/ssh_host_key -p 22 -P /tmp/ca_db.pid > /tmp/ca_db.log 2>&1 &); sleep 1; echo started
+started
+
+== ssh: run a command
+$ @host build/compat/dbclient -y -y -i build/compat/ssh_id -p SSHPORT root@127.0.0.1 'echo hello over ssh; /disk/busybox uname -s; /disk/busybox id -u' 2>/dev/null
+hello over ssh
+Linux
+0
+
+== ssh: standard input and the exit status
+$ @host printf 'echo piped in\nexit 3\n' | build/compat/dbclient -y -y -i build/compat/ssh_id -p SSHPORT root@127.0.0.1 sh 2>/dev/null; echo status $?
+piped in
+status 3
+
+== ssh: 1 MiB from the guest
+$ @host build/compat/dbclient -y -y -i build/compat/ssh_id -p SSHPORT root@127.0.0.1 '/disk/busybox dd if=/dev/zero bs=1024 count=1024 2>/dev/null' 2>/dev/null | md5sum
+b6d81b360a5672d80c27430f39153e2c  -
+
+== ssh: an unknown key is refused
+$ @host build/compat/dropbearkey -t ed25519 -f build/compat/ssh_other >/dev/null 2>&1; build/compat/dbclient -y -y -i build/compat/ssh_other -p SSHPORT root@127.0.0.1 'echo logged in' 2>/dev/null; echo done; rm -f build/compat/ssh_other
+done
+
+== ssh -t: a command on a terminal (a pty in the guest)
+$ @host test/compat/ssh_tty.py -- build/compat/dbclient -y -y -t -i build/compat/ssh_id -p SSHPORT root@127.0.0.1 '/disk/busybox readlink /proc/self/fd/0; /disk/busybox stty size; /disk/busybox stty -a | /disk/busybox grep -o icanon' | grep -v -e Caution -e '^$'
+/dev/pts/0
+24 80
+icanon
+
+== ssh: an interactive login, the shell's exit status
+$ @host (test/compat/ssh_tty.py 'echo $((6*7))' 'exit 5' -- build/compat/dbclient -y -y -i build/compat/ssh_id -p SSHPORT root@127.0.0.1; echo status $?) | grep -x -e 42 -e 'status 5'
+42
+status 5
+
+== ssh: Ctrl-C stops the foreground command, not the shell
+$ @host (test/compat/ssh_tty.py --wait 3 '/disk/busybox sleep 30' "$(printf '\003')" 'echo after $?' 'exit' -- build/compat/dbclient -y -y -i build/compat/ssh_id -p SSHPORT root@127.0.0.1; echo status $?) | grep -x -e 'after 130' -e 'status 0'
+after 130
+status 0
+
+== dropbear: the server stops
+$ kill $(cat /tmp/ca_db.pid) && sleep 1 && /disk/busybox grep -c 'Pubkey auth succeeded' /tmp/ca_db.log; rm -f /tmp/ca_db.pid /tmp/ca_db.log
+6
