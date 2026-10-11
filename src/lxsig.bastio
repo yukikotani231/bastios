@@ -69,6 +69,7 @@ const FP_AT: u64 = 440;               // 16-byte aligned when rsp is 8 past a mu
 const FRAME_SIZE: u64 = 952;
 const RED_ZONE: u64 = 128;
 const FLAGS_USER: u64 = 0xCD5;        // CF PF AF ZF SF DF OF
+const FLAG_DF: u64 = 0x400;           // the direction flag
 const MXCSR_OK: u64 = 0xFFBF;
 
 /// The bit for signal s (1 to 64) in a signal set.
@@ -1066,6 +1067,10 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   pset(&mut k.procs, p, F_REGS + R_RSI, base + INFO_AT);
   pset(&mut k.procs, p, F_REGS + R_RDX, base + UC_AT);
   pset(&mut k.procs, p, F_REGS + R_RAX, 0);
+  // The handler starts with the direction flag clear, as the ABI says and
+  // Linux does; the frame keeps the flags it interrupted for rt_sigreturn.
+  let fl = pget(k.procs, p, F_REGS + R_RFLAGS);
+  pset(&mut k.procs, p, F_REGS + R_RFLAGS, fl & !FLAG_DF);
   return true;
 }
 
