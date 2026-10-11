@@ -468,6 +468,8 @@ const PT_W: u64 = 4;                 // words per timer: deadline, interval, sta
 const MAP_N: u64 = 4;                // MAP_SHARED file mappings per process
 const MAP_W: u64 = 4;                // words per mapping: first page + 1, pages, description, offset
 const MAPS_LEN: u64 = 512;           // NPROC * MAP_N * MAP_W
+const HOLE_N: u64 = 16;              // address space holes munmap left, per process
+const HOLES_LEN: u64 = 1024;         // NPROC * HOLE_N * 2
 const LZ_W: u64 = 4;                  // lazy code: first page + 1 (0: none), pages, file hold, file offset
 const LAZY_LEN: u64 = 128;            // NPROC * LZ_W
 const LX_PAUSE: u64 = 34;
@@ -659,6 +661,7 @@ struct Kernel {
   ux: Buf,              // AF_UNIX channels and names (src/lxunix.bastio)
   uxb: Bytes,           // their bytes
   maps: Buf,            // Linux MAP_SHARED file mappings, MAP_N per process (src/lxmem.bastio)
+  holes: Buf,           // address space munmap gave back, HOLE_N ranges per process (src/lxmem.bastio)
   lazy: Buf,            // code pages read from a file when first touched, LZ_W words per process (src/lazy.bastio)
   inet6: Buf,           // word h: 1 if open file description h is an AF_INET6 socket (src/lxsock.bastio)
   locks: Buf,           // file locks held (src/lxlock.bastio)
@@ -675,7 +678,7 @@ struct Kernel {
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.croot) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd)
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.croot) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd)
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
     && (k.txt is Store::Table ==> (pt_level(k.txt.Table) == 2 && pt_leases(k.txt.Table) == 0))
 }
@@ -934,6 +937,7 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   bfree(args);
   let ok = sp is Space::Mapped;
   put_space(&mut k.spaces, pid, sp);
+  hole_clear(&mut k, pid);
   if !ok {
     give_page(&mut k.mem, fpu);
     return 0;
@@ -998,7 +1002,7 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
   let e = elf_parse(&mut v, src);
   let mut size = 0;
   let mut entry = e.entry;
-  let mut rsp = USER_BASE + ELF_SP;
+  let mut rsp = USER_BASE + elf_sp(args, alen, total);
   let mut isrc = Src { file: false, prog: NPROGS, f: 0, size: 0 };
   let mut ie = bad_elf();
   let mut mmap_top = VDSO_PAGE * 4096;     // the vDSO's page is above it

@@ -148,6 +148,36 @@ int main(void) {
     }
     EXPECT("mlock", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED && mlock(q, 4096) == 0);
     {
+        int ok = 1;
+        for (int i = 0; i < 200 && ok; i++) {
+            char *m = mmap(0, 1 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            ok = m != MAP_FAILED && m[0] == 0 && m[(1 << 20) - 1] == 0;
+            if (ok) { memset(m, 0xAA, 1 << 20); ok = munmap(m, 1 << 20) == 0; }
+        }
+        EXPECT("munmap gives address space back", ok);
+        for (int i = 0; i < 200 && ok; i++) {
+            char *m = malloc(600000);
+            ok = m != NULL;
+            if (ok) { m[0] = m[599999] = 1; free(m); }
+        }
+        EXPECT("large malloc and free, many times", ok);
+        /* A buffer that doubles by mremap, as realloc grows a big one. If
+         * each move took fresh address space, a round would use 63 MiB and
+         * the rounds together far more than the window has. */
+        for (int r = 0; r < 6 && ok; r++) {
+            char *m = mmap(0, 1 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            ok = m != MAP_FAILED;
+            for (size_t n = 1 << 20; ok && n < (32 << 20); n *= 2) {
+                m[n - 1] = 7;
+                char *g = mremap(m, n, 2 * n, MREMAP_MAYMOVE);
+                ok = g != MAP_FAILED && g[n - 1] == 7;
+                if (ok) m = g;
+            }
+            if (ok) ok = munmap(m, 32 << 20) == 0;
+        }
+        EXPECT("mremap growth reuses address space", ok);
+    }
+    {
         void *a[64]; int ok = 1;
         for (int i = 0; i < 64; i++) { a[i] = malloc(1000 + i * 3000); ok &= a[i] != NULL; if (a[i]) memset(a[i], i, 1000 + i * 3000); }
         for (int i = 0; i < 64; i += 2) free(a[i]);

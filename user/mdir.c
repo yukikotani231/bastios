@@ -258,13 +258,13 @@ int main(void)
     /* Making directories until the in-memory table is full ends in ENOSPC. */
     int made = 0;
     char nm[16];
-    while (made < 1000) {
+    while (made < 2000) {
         snprintf(nm, sizeof nm, "n%d", made);
         if (mkdir(nm, 0755) != 0)
             break;
         made++;
     }
-    if (made == 1000 || errno != ENOSPC)
+    if (made == 2000 || errno != ENOSPC)
         return fail("filling the in-memory table");
     while (made > 0) {
         snprintf(nm, sizeof nm, "n%d", --made);

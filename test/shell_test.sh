@@ -267,6 +267,9 @@ steps = [
     # A script with no #! line: execve says ENOEXEC, so ash runs it itself,
     # through an execve of /proc/self/exe.
     ("echo 'echo script $1' > /sc; chmod +x /sc; /sc ran; rm /sc", b"script ran", b"\n# "),
+    # execve passes up to 8192 arguments and 1024 environment strings, laid
+    # out at the top of the stack (it used to stop at 32 and 16).
+    ("(set --; i=0; while [ $i -lt 400 ]; do set -- \"$@\" arg$i; export V$i=x$i; i=$((i+1)); done; ash -c 'echo argc=$# last=${400} env=$V399' x \"$@\")", b"argc=400 last=arg399 env=x399", b"\n# "),
     # Time: clocks, nanosleep, poll that waits, select, alarms and pause, and
     # eventfd, timerfd and epoll (user/mtime.c); the sleep applet; ash's
     # read -t, a poll on the console that times out, then one that wakes
