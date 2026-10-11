@@ -1171,9 +1171,21 @@ for _ in range(100):
 try:
     mon = socket.socket(socket.AF_UNIX)
     mon.connect(mon_path)
-    time.sleep(8)                     # the boot, which nothing shows
-    sendkeys(mon, ["h", "a", "l", "t", "ret"])
-    code = q.wait(timeout=30)
+    # Nothing shows when the shell is up, so type `halt` again every 1.5 s
+    # until QEMU exits. The leading Enter ends any line that a copy typed
+    # during the boot left half done.
+    end = time.time() + 30
+    while code is None:
+        try:
+            sendkeys(mon, ["ret", "h", "a", "l", "t", "ret"])
+        except OSError:               # QEMU exited while we typed
+            code = q.wait(timeout=5)
+            break
+        try:
+            code = q.wait(timeout=1.5)
+        except subprocess.TimeoutExpired:
+            if time.time() > end:
+                raise
     mon.close()
 except (OSError, subprocess.TimeoutExpired):
     q.kill(); q.wait()
