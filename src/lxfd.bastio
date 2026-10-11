@@ -578,7 +578,7 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if (flags % 4 != 0 || flags & LO_CREAT != 0) && flags & LO_PATH == 0 && dir_at(&mut k, n) != NO_FILE {
     return EISDIR;                          // a directory is not written through open
   }
-  if (flags % 4 != 0 || flags & LO_TRUNC != 0 || flags & LO_CREAT != 0) && vfs_ro(&mut k.fs, n) {
+  if (flags % 4 != 0 || flags & LO_TRUNC != 0 || flags & LO_CREAT != 0) && path_ro(&mut k, n) {
     let exists = vfs_lookup(&mut k.fs, n) != NO_FILE || dir_at(&mut k, n) != NO_FILE;
     if (exists && (flags % 4 != 0 || flags & LO_TRUNC != 0)) || (!exists && flags & LO_CREAT != 0) {
       return EROFS;                         // a read-only mount (src/lxmount.bastio)
@@ -736,7 +736,7 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     if hd >= OFD_N {
       return ENFILE;
     }
-    name_keep(&mut k.dpath, DPATH_LEN, hd, k.fs.xfer, n);   // for *at calls and fchdir
+    name_keep(&mut k.dpath, DPATH_LEN, hd, k.mstr, lpath_len(k));   // for *at calls and fchdir: the logical name
     return fd_install(&mut k, pid, hd);
   }
   let acc = flags % 4;

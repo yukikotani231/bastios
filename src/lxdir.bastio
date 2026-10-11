@@ -283,8 +283,8 @@ fn lx_chdir(k: &mut Kernel, pid: u64, path: u64) -> u64
   if e != 0 {
     return e;
   }
-  // dir_at and may_path leave the name in the transfer buffer.
-  name_keep(&mut k.cwd, CWD_LEN, pid, k.fs.xfer, n);
+  // The logical name, as the lookup left it (src/lxns.bastio).
+  name_keep(&mut k.cwd, CWD_LEN, pid, k.mstr, lpath_len(k));
   return 0;
 }
 
@@ -313,7 +313,7 @@ fn lx_chroot(k: &mut Kernel, pid: u64, path: u64) -> u64
   if id_get(k.procs, pid, F_UID, true) != 0 {
     return EPERM;
   }
-  name_keep(&mut k.croot, CWD_LEN, pid, k.fs.xfer, n);   // dir_at and may_path left the name there
+  name_keep(&mut k.croot, CWD_LEN, pid, k.mstr, lpath_len(k));   // the logical name (src/lxns.bastio)
   return 0;
 }
 
@@ -431,7 +431,7 @@ fn lx_mkdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64) -> u64
   if em.ok {
     return EEXIST;                          // /dev, /proc and the like
   }
-  if vfs_ro(&mut k.fs, n) {
+  if path_ro(&mut k, n) {
     return EROFS;
   }
   let e = may_dir(&mut k, pid, n);
@@ -503,7 +503,7 @@ fn lx_rmdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
   if vfs_is_mount(&mut k.fs, n) {
     return EBUSY;                           // a tmpfs mount's directory (src/lxmount.bastio)
   }
-  if vfs_ro(&mut k.fs, n) {
+  if path_ro(&mut k, n) {
     return EROFS;
   }
   let e = may_remove(&mut k, pid, n);
@@ -528,7 +528,7 @@ fn lx_unlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
   if dir_at(&mut k, n) != NO_FILE {
     return EISDIR;
   }
-  if vfs_ro(&mut k.fs, n) && vfs_lookup(&mut k.fs, n) != NO_FILE {
+  if path_ro(&mut k, n) && vfs_lookup(&mut k.fs, n) != NO_FILE {
     return EROFS;
   }
   if vfs_lookup(&mut k.fs, n) != NO_FILE {
@@ -636,7 +636,7 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
   if vfs_is_mount(&mut k.fs, n) {
     return EBUSY;
   }
-  if vfs_ro(&mut k.fs, n) {
+  if path_ro(&mut k, n) {
     return EROFS;
   }
   let e = may_remove(&mut k, pid, n);
@@ -651,7 +651,7 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
     bfree(t);
     return k.perr;
   }
-  if vfs_ro(&mut k.fs, m) {
+  if path_ro(&mut k, m) {
     bfree(t);
     return EROFS;
   }
@@ -707,7 +707,7 @@ fn lx_exchange(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
   let a = vfs_lookup(&mut k.fs, n);
   let ad = dir_at(&mut k, n);
   let a_disk = vfs_fs_of(&mut k.fs, n);
-  if (a != NO_FILE || ad != NO_FILE) && vfs_ro(&mut k.fs, n) {
+  if (a != NO_FILE || ad != NO_FILE) && path_ro(&mut k, n) {
     return EROFS;
   }
   let e = may_remove(&mut k, pid, n);
@@ -739,7 +739,7 @@ fn lx_exchange(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
     bfree(t);
     return 0;                               // two names of one file
   }
-  if vfs_ro(&mut k.fs, m) {
+  if path_ro(&mut k, m) {
     bfree(t);
     return EROFS;
   }

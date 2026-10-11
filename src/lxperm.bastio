@@ -329,7 +329,7 @@ fn lx_access(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64, flags: 
   if !m.ok {
     return ENOENT;
   }
-  if mode & MAY_W != 0 && vfs_ro(&mut k.fs, n) && kept_meta(&mut k, n) {
+  if mode & MAY_W != 0 && path_ro(&mut k, n) && kept_meta(&mut k, n) {
     return EROFS;
   }
   let mut uid = pget(k.procs, pid, F_UID) % 0x100000000;

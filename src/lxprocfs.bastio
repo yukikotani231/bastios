@@ -749,6 +749,9 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
         }
       }
     }
+    if p < NPROC {
+      a = ns_mounts_text(k, p, &mut o, a);   // the mount namespace's own (src/lxns.bastio)
+    }
     return a;
   }
   if what == PF_MEMINFO {
@@ -944,7 +947,11 @@ fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
   }
   let off = of_get(k.ofd, h, 3);
   let mut out = balloc(PROC_OUT);
-  let l = proc_text(&mut k, f, &mut out);
+  let mut g = f;
+  if f == PROC_DEV + PF_MOUNTS {
+    g = PROC_DEV + pid * 16 + PF_MOUNTS;    // /proc/mounts: the reader's mount namespace
+  }
+  let l = proc_text(&mut k, g, &mut out);
   if off >= l || n == 0 {
     bfree(out);
     return 0;

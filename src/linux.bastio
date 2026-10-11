@@ -1760,7 +1760,7 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
       c = c + 1;
     }
     bfree(out);
-    if c > 0 && lx_follow(&mut k, c, true, smaller(floor, c)) == NO_RESULT {
+    if c > 0 && lx_follow(&mut k, pid, c, true, smaller(floor, c)) == NO_RESULT {
       return NO_RESULT;                     // k.perr says why
     }
     k.perr = ENAMETOOLONG;
@@ -1775,7 +1775,7 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
   }
   bfree(out);
   let o2 = proc_self(&mut k.fs.xfer, o, pid);   // "proc/self" is the caller's /proc/PID
-  return lx_follow(&mut k, o2, follow || trail, smaller(floor, o2));  // symbolic links (src/lxlink.bastio)
+  return lx_follow(&mut k, pid, o2, follow || trail, smaller(floor, o2));  // symbolic links (src/lxlink.bastio)
 }
 
 /// lseek: SEEK_SET (0), SEEK_CUR (1) and SEEK_END (2), with a signed

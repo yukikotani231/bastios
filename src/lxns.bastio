@@ -1,0 +1,874 @@
+// Mount namespaces: bind mounts, the special file systems mounted again
+// somewhere else (proc, devtmpfs, devpts), and pivot_root, per namespace.
+//
+// A process sees paths through its mount namespace. Every path a Linux
+// program names is first built as a "logical" path: its root (chroot or
+// pivot_root), then the name, with "." and ".." taken away and symbolic
+// links followed (lx_path_from, lx_follow). A namespace's mounts map
+// logical paths to the paths of the file layer: a mount at key K with
+// source S makes K and everything under it the same as S and what is under
+// it. The longest key that is a prefix of a path (at a "/") wins, and of
+// two mounts at the same key the later one, so mounts stack as on Linux. A
+// source is a path of the file layer, fixed when the mount is made, so a
+// bind of a directory onto itself (what OCI runtimes do with a rootfs
+// before pivot_root) maps the directory to itself.
+//
+// Each lookup lx_follow makes on the way goes through the mapping
+// (ns_tr), but the path it builds, and the one kept as a working
+// directory, an open directory's base or a root, stays logical: ".." at
+// the top of a mount goes back to where the mount is, and a symbolic link
+// inside a bind mount cannot climb out of the root, since links are spliced
+// into the logical path and the root is its floor.
+//
+// k.mns, words: the namespace of each process (0: the first one, which
+// every process starts in), the next namespace id, the length of the
+// logical path of the last lookup (kept in k.mstr[0..LPATH]), whether that
+// lookup went through a read-only mount, the next mount sequence number,
+// then MT_N mounts of ME_W words: namespace + 1 (0: free), flags (kind and
+// MT_RO), key length, source length, sequence number. k.mstr holds each
+// mount's key and source, FNAME_MAX + 1 bytes each.
+//
+// The global mounts of the file layer (tmpfs mounts and the loop mount,
+// src/lxmount.bastio) are not per namespace: a tmpfs mounted in a new
+// namespace marks its directory for everyone. A namespace's mounts go
+// when the last process in it has ended (ns_gc, when the table fills up or
+// a namespace is made). There is no propagation between namespaces:
+// MS_SHARED, MS_SLAVE, MS_PRIVATE and MS_UNBINDABLE are accepted and
+// change nothing, which is MS_PRIVATE's behaviour.
+//
+// Permission checks on the way (perm_walk) look at the file layer's path,
+// not the logical one: a directory a bind mount hides is not checked.
+
+import "linux.bastio";
+import "lxfd.bastio";
+import "lxcap.bastio";
+import "lxprocfs.bastio";
+
+const MNS_NEXT: u64 = NPROC;
+const MNS_LPLEN: u64 = NPROC + 1;
+const MNS_LRO: u64 = NPROC + 2;
+const MNS_SEQ: u64 = NPROC + 3;
+const MNS_ENT: u64 = NPROC + 8;
+const MS_ROW: u64 = 256;                  // FNAME_MAX + 1
+const LPATH: u64 = 256;                   // where the mounts' strings start in k.mstr
+
+const MNS_MAX: u64 = 0x10000000000;       // namespace ids and sequence numbers stay below it
+const ME_NS: u64 = 0;
+const ME_FLAGS: u64 = 1;
+const ME_KLEN: u64 = 2;
+const ME_SLEN: u64 = 3;
+const ME_SEQ: u64 = 4;
+
+const MT_RO: u64 = 16;                    // flags: read-only; the rest is the kind
+const MK_BIND: u64 = 1;
+const MK_PROC: u64 = 2;
+const MK_DEV: u64 = 3;
+const MK_PTS: u64 = 4;
+const MK_SYS: u64 = 5;
+const MK_MQUEUE: u64 = 6;
+const MK_OLDROOT: u64 = 7;
+
+const LX_PIVOT_ROOT: u64 = 155;
+
+fn me_get(k: &Kernel, e: u64, f: u64) -> u64
+  requires kok(k) && e < MT_N && f < ME_W
+{
+  return get(k.mns, MNS_ENT + e * ME_W + f);
+}
+
+fn me_set(k: &mut Kernel, e: u64, f: u64, v: u64)
+  requires kok(k) && e < MT_N && f < ME_W
+  ensures kok(k)
+{
+  k.mns = set(k.mns, MNS_ENT + e * ME_W + f, v);
+}
+
+/// The mount namespace of process pid.
+fn ns_of(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result < MNS_MAX
+{
+  return smaller(get(k.mns, pid), MNS_MAX - 1);
+}
+
+/// Is mount e one of namespace ns's?
+fn me_in(k: &Kernel, e: u64, ns: u64) -> bool
+  requires kok(k) && e < MT_N
+{
+  let v = me_get(k, e, ME_NS);
+  return v != 0 && v - 1 == ns;
+}
+
+/// Where mount e's key starts in k.mstr (its source is MS_ROW later).
+fn me_key(e: u64) -> u64
+  requires e < MT_N
+  ensures result + 2 * MS_ROW <= MSTR_LEN
+{
+  return LPATH + e * 2 * MS_ROW;
+}
+
+/// The key length of mount e, at most FNAME_MAX.
+fn me_klen(k: &Kernel, e: u64) -> u64
+  requires kok(k) && e < MT_N
+  ensures result <= FNAME_MAX
+{
+  return smaller(me_get(k, e, ME_KLEN), FNAME_MAX);
+}
+
+fn me_slen(k: &Kernel, e: u64) -> u64
+  requires kok(k) && e < MT_N
+  ensures result <= FNAME_MAX
+{
+  return smaller(me_get(k, e, ME_SLEN), FNAME_MAX);
+}
+
+/// Is mount e's key a prefix of p[0..c] that ends at a "/" or at c?
+fn me_covers(k: &Kernel, e: u64, p: &Bytes, c: u64) -> bool
+  requires kok(k) && e < MT_N && c <= blen(p)
+{
+  let kl = me_klen(k, e);
+  if kl > c {
+    return false;
+  }
+  if kl > 0 && kl < c && bget(p, kl) != 47 {
+    return false;
+  }
+  let at = me_key(e);
+  let mut i = 0;
+  while i < kl
+    invariant i <= kl && kl <= c && c <= blen(p) && kl <= FNAME_MAX && at + 2 * MS_ROW <= MSTR_LEN && kok(k)
+  {
+    if bget(k.mstr, at + i) != bget(p, i) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+/// The mount of namespace ns that p[0..c] goes through: the longest key,
+/// the latest of equal ones. MT_N if none.
+fn ns_find(k: &Kernel, ns: u64, p: &Bytes, c: u64) -> u64
+  requires kok(k) && c <= blen(p)
+  ensures result <= MT_N
+{
+  let mut best = MT_N;
+  let mut e = 0;
+  while e < MT_N
+    invariant e <= MT_N && best <= MT_N && kok(k) && c <= blen(p)
+  {
+    if me_in(k, e, ns) && me_covers(k, e, p, c) {
+      if best == MT_N {
+        best = e;
+      } else if me_klen(k, e) > me_klen(k, best) || (me_klen(k, e) == me_klen(k, best) && me_get(k, e, ME_SEQ) > me_get(k, best, ME_SEQ)) {
+        best = e;
+      }
+    }
+    e = e + 1;
+  }
+  return best;
+}
+
+/// The file layer's path for the logical path p[0..c] in namespace ns,
+/// into the transfer buffer. Returns its length, or NO_RESULT (k.perr is
+/// ENAMETOOLONG) if it is longer than FNAME_MAX. Notes in MNS_LRO
+/// whether the mount it went through is read-only.
+fn ns_tr(k: &mut Kernel, ns: u64, p: &Bytes, c: u64) -> u64
+  requires kok(k) && c <= FNAME_MAX && c <= blen(p)
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  let e = ns_find(k, ns, p, c);
+  let mut kl = 0;
+  if e < MT_N {
+    kl = me_klen(k, e);
+  }
+  if e >= MT_N || kl > c {
+    k.mns = set(k.mns, MNS_LRO, 0);
+    let mut i = 0;
+    while i < c
+      invariant i <= c && c <= FNAME_MAX && c <= blen(p) && kok(k)
+    {
+      bset(&mut k.fs.xfer, i, bget(p, i));
+      i = i + 1;
+    }
+    return c;
+  }
+  let sl = me_slen(k, e);
+  let at = me_key(e) + MS_ROW;
+  let mut r = kl;                           // the rest of the path, p[r..c]
+  let mut sep = false;
+  if sl == 0 {
+    if r < c && bget(p, r) == 47 {
+      r = r + 1;                            // the top: no "/" before the rest
+    }
+  } else if kl == 0 && c > 0 {
+    sep = true;                             // a mount on "/": "S/" then the path
+  }
+  let mut o = sl + (c - r);
+  if sep {
+    o = o + 1;
+  }
+  if o > FNAME_MAX {
+    k.perr = ENAMETOOLONG;
+    return NO_RESULT;
+  }
+  let mut i = 0;
+  while i < sl
+    invariant i <= sl && sl <= FNAME_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
+  {
+    bset(&mut k.fs.xfer, i, bget(k.mstr, at + i));
+    i = i + 1;
+  }
+  let mut w = sl;
+  if sep {
+    bset(&mut k.fs.xfer, w, 47);
+    w = w + 1;
+  }
+  let mut j = r;
+  while j < c
+    invariant r <= j && j <= c && c <= blen(p) && w + (c - j) <= FNAME_MAX && kok(k)
+  {
+    bset(&mut k.fs.xfer, w, bget(p, j));
+    w = w + 1;
+    j = j + 1;
+  }
+  if me_get(k, e, ME_FLAGS) & MT_RO != 0 {
+    k.mns = set(k.mns, MNS_LRO, 1);
+  } else {
+    k.mns = set(k.mns, MNS_LRO, 0);
+  }
+  return w;
+}
+
+/// Keeps p[0..c] as the logical path of the last lookup.
+fn ns_keep(k: &mut Kernel, p: &Bytes, c: u64)
+  requires kok(k) && c <= FNAME_MAX && c <= blen(p)
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < c
+    invariant i <= c && c <= FNAME_MAX && c <= blen(p) && kok(k)
+  {
+    bset(&mut k.mstr, i, bget(p, i));
+    i = i + 1;
+  }
+  k.mns = set(k.mns, MNS_LPLEN, c);
+}
+
+/// The length of the last lookup's logical path (in k.mstr from 0).
+fn lpath_len(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= FNAME_MAX && result <= blen(k.mstr)
+{
+  return smaller(get(k.mns, MNS_LPLEN), FNAME_MAX);
+}
+
+/// Did the last lookup go through a read-only mount?
+fn lpath_ro(k: &Kernel) -> bool
+  requires kok(k)
+{
+  return get(k.mns, MNS_LRO) != 0;
+}
+
+/// For a name the kernel makes itself, not looked up: in no mount.
+fn lpath_ro_clear(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  k.mns = set(k.mns, MNS_LRO, 0);
+}
+
+/// Is the path in the first n bytes of the transfer buffer, which the
+/// last lookup left there, in a read-only mount: the file layer's, or one
+/// of the namespace's it went through?
+fn path_ro(k: &mut Kernel, n: u64) -> bool
+  requires kok(k) && n <= XFER
+  ensures kok(k)
+{
+  return lpath_ro(k) || vfs_ro(&mut k.fs, n);
+}
+
+// ---------------------------------------------------------------- the table
+
+/// Is namespace ns held by a process that has not ended? The first one
+/// always is.
+fn ns_live(k: &Kernel, ns: u64) -> bool
+  requires kok(k)
+{
+  if ns == 0 {
+    return true;
+  }
+  let mut q = 0;
+  while q < NPROC
+    invariant q <= NPROC && kok(k)
+  {
+    let s = pget(k.procs, q, F_STATE);
+    if s != FREE && s != ZOMBIE && get(k.mns, q) == ns {
+      return true;
+    }
+    q = q + 1;
+  }
+  return false;
+}
+
+/// Frees the mounts of namespaces no process is in any more.
+fn ns_gc(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut e = 0;
+  while e < MT_N
+    invariant e <= MT_N && kok(k)
+  {
+    let v = me_get(k, e, ME_NS);
+    if v != 0 && !ns_live(k, v - 1) {
+      me_set(&mut k, e, ME_NS, 0);
+    }
+    e = e + 1;
+  }
+}
+
+/// How many mounts are free.
+fn ns_free(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= MT_N
+{
+  let mut n = 0;
+  let mut e = 0;
+  while e < MT_N
+    invariant e <= MT_N && n <= e && kok(k)
+  {
+    if me_get(k, e, ME_NS) == 0 {
+      n = n + 1;
+    }
+    e = e + 1;
+  }
+  return n;
+}
+
+/// How many mounts namespace ns has.
+fn ns_count(k: &Kernel, ns: u64) -> u64
+  requires kok(k)
+  ensures result <= MT_N
+{
+  let mut n = 0;
+  let mut e = 0;
+  while e < MT_N
+    invariant e <= MT_N && n <= e && kok(k)
+  {
+    if me_in(k, e, ns) {
+      n = n + 1;
+    }
+    e = e + 1;
+  }
+  return n;
+}
+
+/// A free mount, after freeing those of ended namespaces if need be; MT_N
+/// if there is none.
+fn me_alloc(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k) && result <= MT_N
+{
+  if ns_free(k) == 0 {
+    ns_gc(&mut k);
+  }
+  let mut e = 0;
+  while e < MT_N
+    invariant e <= MT_N && kok(k)
+  {
+    if me_get(k, e, ME_NS) == 0 {
+      return e;
+    }
+    e = e + 1;
+  }
+  return MT_N;
+}
+
+/// Adds a mount to namespace ns: its key is the last lookup's logical path,
+/// its source src[0..sl]. Returns false if the table is full.
+fn ns_add(k: &mut Kernel, ns: u64, flags: u64, src: &Bytes, sl: u64) -> bool
+  requires kok(k) && ns < MNS_MAX && sl <= FNAME_MAX && sl <= blen(src)
+  ensures kok(k)
+{
+  let e = me_alloc(&mut k);
+  if e >= MT_N {
+    return false;
+  }
+  let kl = lpath_len(k);
+  let at = me_key(e);
+  let mut i = 0;
+  while i < kl
+    invariant i <= kl && kl <= FNAME_MAX && at + 2 * MS_ROW <= MSTR_LEN && kok(k)
+  {
+    bset(&mut k.mstr, at + i, bget(k.mstr, i));
+    i = i + 1;
+  }
+  i = 0;
+  while i < sl
+    invariant i <= sl && sl <= FNAME_MAX && sl <= blen(src) && at + 2 * MS_ROW <= MSTR_LEN && kok(k)
+  {
+    bset(&mut k.mstr, at + MS_ROW + i, bget(src, i));
+    i = i + 1;
+  }
+  let seq = smaller(get(k.mns, MNS_SEQ), MNS_MAX) + 1;
+  k.mns = set(k.mns, MNS_SEQ, seq);
+  me_set(&mut k, e, ME_FLAGS, flags);
+  me_set(&mut k, e, ME_KLEN, kl);
+  me_set(&mut k, e, ME_SLEN, sl);
+  me_set(&mut k, e, ME_SEQ, seq);
+  me_set(&mut k, e, ME_NS, ns + 1);
+  return true;
+}
+
+/// The latest mount of namespace ns whose key is exactly the last
+/// lookup's logical path, or MT_N.
+fn ns_at(k: &Kernel, ns: u64) -> u64
+  requires kok(k)
+  ensures result <= MT_N
+{
+  let n = lpath_len(k);
+  let mut best = MT_N;
+  let mut e = 0;
+  while e < MT_N
+    invariant e <= MT_N && best <= MT_N && kok(k) && n <= FNAME_MAX
+  {
+    if me_in(k, e, ns) && me_klen(k, e) == n && me_covers(k, e, k.mstr, n) {
+      if best == MT_N || me_get(k, e, ME_SEQ) > me_get(k, best, ME_SEQ) {
+        best = e;
+      }
+    }
+    e = e + 1;
+  }
+  return best;
+}
+
+/// A new mount namespace for process pid, holding a copy of the mounts of
+/// the one it was in. ENOMEM if the table has no room for the copy.
+fn ns_unshare(k: &mut Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let was = ns_of(k, pid);
+  ns_gc(&mut k);
+  if ns_free(k) < ns_count(k, was) {
+    return ENOMEM;
+  }
+  if get(k.mns, MNS_NEXT) >= MNS_MAX - 2 {
+    return ENOMEM;                          // never, at one a microsecond for decades
+  }
+  let id = get(k.mns, MNS_NEXT) + 1;
+  k.mns = set(k.mns, MNS_NEXT, id);
+  let mut e = 0;
+  while e < MT_N
+    invariant e <= MT_N && kok(k) && id < MNS_MAX && pid < NPROC
+  {
+    if me_in(k, e, was) {
+      let d = me_alloc(&mut k);
+      if d < MT_N {
+        let mut i = 0;
+        while i < 2 * MS_ROW
+          invariant i <= 2 * MS_ROW && kok(k) && d < MT_N && e < MT_N && id < MNS_MAX
+        {
+          bset(&mut k.mstr, me_key(d) + i, bget(k.mstr, me_key(e) + i));
+          i = i + 1;
+        }
+        let mut f = 1;
+        while f < ME_W
+          invariant 1 <= f && f <= ME_W && kok(k) && d < MT_N && e < MT_N && id < MNS_MAX
+        {
+          me_set(&mut k, d, f, me_get(k, e, f));
+          f = f + 1;
+        }
+        me_set(&mut k, d, ME_NS, id + 1);
+      }
+    }
+    e = e + 1;
+  }
+  k.mns = set(k.mns, pid, id);
+  return 0;
+}
+
+/// Can process pid get a new mount namespace (ns_unshare would succeed)?
+fn ns_room(k: &mut Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  ns_gc(&mut k);
+  return ns_free(k) >= ns_count(k, ns_of(k, pid));
+}
+
+// ---------------------------------------------------------------- mount and pivot_root
+
+/// The source a special file system mounted again stands for, by kind: a
+/// path of the file layer, into src. Returns its length. sysfs and mqueue
+/// have nothing behind them here: their mounts show the directory they are
+/// on.
+fn kind_source(kind: u64, src: &mut Bytes) -> u64
+  requires blen(src) == MS_ROW
+  ensures blen(src) == MS_ROW && result <= 8
+{
+  if kind == MK_PROC {
+    bset(&mut src, 0, 112);                 // "proc"
+    bset(&mut src, 1, 114);
+    bset(&mut src, 2, 111);
+    bset(&mut src, 3, 99);
+    return 4;
+  }
+  if kind == MK_DEV || kind == MK_PTS {
+    bset(&mut src, 0, 100);                 // "dev"
+    bset(&mut src, 1, 101);
+    bset(&mut src, 2, 118);
+    if kind == MK_PTS {
+      bset(&mut src, 3, 47);                // "dev/pts"
+      bset(&mut src, 4, 112);
+      bset(&mut src, 5, 116);
+      bset(&mut src, 6, 115);
+      return 7;
+    }
+    return 3;
+  }
+  return 0;
+}
+
+/// mount for a namespace's own mounts: a bind (MS_BIND; MS_REC changes
+/// nothing, the mounts under the source do not come along) or a special
+/// file system of `kind` at the path named at user address target. The source path is at
+/// user address source (a bind's). Returns 0 or -errno.
+fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let ns = ns_of(k, pid);
+  let mut src = balloc(MS_ROW);
+  let mut sl = 0;
+  let mut sdir = true;
+  if kind == MK_BIND {
+    let n = lx_path_at(&mut k, pid, AT_FDCWD, source);
+    if n == NO_RESULT {
+      bfree(src);
+      return k.perr;
+    }
+    if dir_at(&mut k, n) == NO_FILE {
+      if vfs_lookup(&mut k.fs, n) == NO_FILE && dev_at(k.fs.xfer, n) == DEV_NONE {
+        bfree(src);
+        return ENOENT;
+      }
+      sdir = false;
+    }
+    let mut i = 0;
+    while i < n
+      invariant i <= n && n <= FNAME_MAX && blen(src) == MS_ROW && kok(k)
+    {
+      bset(&mut src, i, bget(k.fs.xfer, i));
+      i = i + 1;
+    }
+    sl = n;
+  } else {
+    sl = kind_source(kind, &mut src);
+  }
+  let n = lx_path_at(&mut k, pid, AT_FDCWD, target);
+  if n == NO_RESULT {
+    bfree(src);
+    return k.perr;
+  }
+  let tdir = dir_at(&mut k, n) != NO_FILE;
+  if !tdir && vfs_lookup(&mut k.fs, n) == NO_FILE && dev_at(k.fs.xfer, n) == DEV_NONE {
+    bfree(src);
+    return ENOENT;
+  }
+  if kind != MK_BIND && !tdir {
+    bfree(src);
+    return ENOTDIR;
+  }
+  if kind == MK_BIND && sdir != tdir {
+    bfree(src);
+    if sdir {
+      return ENOTDIR;
+    }
+    return EISDIR;                          // a file onto a directory
+  }
+  if kind == MK_SYS || kind == MK_MQUEUE {
+    // Nothing behind them: the directory itself, as the file layer has it.
+    let mut i = 0;
+    while i < n
+      invariant i <= n && n <= FNAME_MAX && blen(src) == MS_ROW && kok(k)
+    {
+      bset(&mut src, i, bget(k.fs.xfer, i));
+      i = i + 1;
+    }
+    sl = n;
+  }
+  let mut mf = kind;
+  if kind == MK_SYS {
+    mf = mf + MT_RO;                        // nothing in it may be changed
+  }
+  let ok = ns_add(&mut k, ns, mf, src, sl);
+  bfree(src);
+  if !ok {
+    return ENOMEM;
+  }
+  return 0;
+}
+
+/// MS_REMOUNT with MS_BIND: makes the latest mount at the target read-only
+/// or writable.
+fn ns_remount(k: &mut Kernel, pid: u64, target: u64, ro: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = lx_path_at(&mut k, pid, AT_FDCWD, target);
+  if n == NO_RESULT {
+    return k.perr;
+  }
+  let e = ns_at(k, ns_of(k, pid));
+  if e >= MT_N {
+    return EINVAL;                          // not a mount
+  }
+  let f = me_get(k, e, ME_FLAGS) % MT_RO;
+  if ro {
+    me_set(&mut k, e, ME_FLAGS, f + MT_RO);
+  } else {
+    me_set(&mut k, e, ME_FLAGS, f);
+  }
+  return 0;
+}
+
+/// umount2 of a namespace's own mount: removes the latest mount at the
+/// last lookup's logical path. False if there is none (the file layer's
+/// mounts are tried next).
+fn ns_umount(k: &mut Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let e = ns_at(k, ns_of(k, pid));
+  if e >= MT_N {
+    return false;
+  }
+  me_set(&mut k, e, ME_NS, 0);
+  return true;
+}
+
+/// Is the logical path the first n bytes of k.mstr row `row` of table t
+/// (cwd or croot) equal to k.mstr[at..at + n]?
+fn row_is(t: &Buf, row: u64, s: &Bytes, at: u64, n: u64) -> bool
+  requires len(t) == CWD_LEN && row < NPROC && n <= FNAME_MAX && at + n <= blen(s)
+{
+  if get(t, row * CWD_STRIDE) != n {
+    return false;
+  }
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= FNAME_MAX && at + n <= blen(s) && len(t) == CWD_LEN && row < NPROC
+  {
+    if get(t, row * CWD_STRIDE + 1 + i) != cast[u64](bget(s, at + i)) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+/// pivot_root(new_root, put_old): in a mount namespace other than the
+/// first, the mount at new_root becomes the root of every process of the
+/// namespace whose root was the caller's, and their working directories
+/// there move with it; the old root is mounted at put_old, which must be
+/// new_root or under it. pivot_root(".", ".") then umount2(".",
+/// MNT_DETACH) leaves only the new root, as OCI runtimes do it.
+fn lx_pivot_root(k: &mut Kernel, pid: u64, new_root: u64, put_old: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if !cap_has(k, pid, CAP_SYS_ADMIN) {
+    return EPERM;
+  }
+  let ns = ns_of(k, pid);
+  // The old root: logical, and as the file layer has it.
+  let rl = root_len(k, pid);
+  let mut orl = balloc(MS_ROW);
+  let mut i = 0;
+  while i < rl
+    invariant i <= rl && rl <= FNAME_MAX && blen(orl) == MS_ROW && kok(k) && pid < NPROC
+  {
+    bset(&mut orl, i, cast[u8](get(k.croot, pid * CWD_STRIDE + 1 + i) % 256));
+    i = i + 1;
+  }
+  let ol = ns_tr(&mut k, ns, orl, rl);
+  if ol == NO_RESULT {
+    bfree(orl);
+    return ENAMETOOLONG;
+  }
+  let mut ophys = balloc(MS_ROW);
+  i = 0;
+  while i < ol
+    invariant i <= ol && ol <= FNAME_MAX && blen(ophys) == MS_ROW && kok(k)
+  {
+    bset(&mut ophys, i, bget(k.fs.xfer, i));
+    i = i + 1;
+  }
+  // The new root, which must be a directory that is a mount.
+  let n = lx_path_at(&mut k, pid, AT_FDCWD, new_root);
+  if n == NO_RESULT {
+    bfree(orl);
+    bfree(ophys);
+    return k.perr;
+  }
+  if dir_at(&mut k, n) == NO_FILE {
+    bfree(orl);
+    bfree(ophys);
+    return ENOTDIR;
+  }
+  let nl = lpath_len(k);
+  let mut nr = balloc(MS_ROW);
+  i = 0;
+  while i < nl
+    invariant i <= nl && nl <= FNAME_MAX && blen(nr) == MS_ROW && kok(k)
+  {
+    bset(&mut nr, i, bget(k.mstr, i));
+    i = i + 1;
+  }
+  let mut bad = ns == 0 || ns_at(k, ns) >= MT_N || (nl == rl && row_is(k.croot, pid, nr, 0, nl));
+  // put_old: new_root or under it, a directory.
+  let m = lx_path_at(&mut k, pid, AT_FDCWD, put_old);
+  if m == NO_RESULT {
+    bfree(orl);
+    bfree(ophys);
+    bfree(nr);
+    return k.perr;
+  }
+  if dir_at(&mut k, m) == NO_FILE {
+    bfree(orl);
+    bfree(ophys);
+    bfree(nr);
+    return ENOTDIR;
+  }
+  let pl = lpath_len(k);
+  if pl < nl || (pl > nl && nl > 0 && bget(k.mstr, nl) != 47) {
+    bad = true;
+  } else {
+    i = 0;
+    while i < nl
+      invariant i <= nl && nl <= pl && pl <= FNAME_MAX && blen(nr) == MS_ROW && kok(k)
+    {
+      if bget(k.mstr, i) != bget(nr, i) {
+        bad = true;
+      }
+      i = i + 1;
+    }
+  }
+  if bad {
+    bfree(orl);
+    bfree(ophys);
+    bfree(nr);
+    return EINVAL;
+  }
+  // The old root goes on put_old (the last lookup).
+  if !ns_add(&mut k, ns, MK_OLDROOT, ophys, ol) {
+    bfree(orl);
+    bfree(ophys);
+    bfree(nr);
+    return ENOMEM;
+  }
+  // Every process of the namespace with the old root moves to the new one.
+  let mut q = 0;
+  while q < NPROC
+    invariant q <= NPROC && kok(k) && blen(orl) == MS_ROW && blen(nr) == MS_ROW && rl <= FNAME_MAX && nl <= FNAME_MAX
+  {
+    if pget(k.procs, q, F_STATE) != FREE && ns_of(k, q) == ns {
+      if row_is(k.croot, q, orl, 0, rl) {
+        name_keep(&mut k.croot, CWD_LEN, q, nr, nl);
+      }
+      if row_is(k.cwd, q, orl, 0, rl) {
+        name_keep(&mut k.cwd, CWD_LEN, q, nr, nl);
+      }
+    }
+    q = q + 1;
+  }
+  bfree(orl);
+  bfree(ophys);
+  bfree(nr);
+  return 0;
+}
+
+fn is_ns_call(n: u64) -> bool {
+  return n == LX_PIVOT_ROOT;
+}
+
+// ---------------------------------------------------------------- /proc/PID/mounts
+
+/// Appends the mounts of process p's namespace that lie in its root to
+/// o[a..], one "SOURCE /PATH TYPE rw 0 0" line each. Returns where the
+/// text ends.
+fn ns_mounts_text(k: &Kernel, p: u64, o: &mut Bytes, a: u64) -> u64
+  requires kok(k) && p < NPROC && a <= PROC_OUT && blen(o) == PROC_OUT
+  ensures result <= PROC_OUT && blen(o) == PROC_OUT
+{
+  let ns = ns_of(k, p);
+  let rl = root_len(k, p);
+  let mut w = a;
+  let mut e = 0;
+  while e < MT_N
+    invariant e <= MT_N && w <= PROC_OUT && blen(o) == PROC_OUT && kok(k) && p < NPROC && rl <= FNAME_MAX
+  {
+    if me_in(k, e, ns) {
+      let kl = me_klen(k, e);
+      let at = me_key(e);
+      // In the root: the key starts with it, at a "/".
+      let mut inr = kl >= rl && (kl == rl || rl == 0 || bget(k.mstr, at + rl) == 47);
+      if inr {
+        let mut i = 0;
+        while i < rl
+          invariant i <= rl && rl <= kl && kl <= FNAME_MAX && at + 2 * MS_ROW <= MSTR_LEN && kok(k) && p < NPROC
+        {
+          if cast[u64](bget(k.mstr, at + i)) != get(k.croot, p * CWD_STRIDE + 1 + i) % 256 {
+            inr = false;
+          }
+          i = i + 1;
+        }
+      }
+      if inr {
+        let kind = me_get(k, e, ME_FLAGS) % MT_RO;
+        let mut src = "none";
+        let mut ty = "none";
+        if kind == MK_PROC {
+          src = "proc";
+          ty = "proc";
+        } else if kind == MK_DEV {
+          src = "devtmpfs";
+          ty = "devtmpfs";
+        } else if kind == MK_PTS {
+          src = "devpts";
+          ty = "devpts";
+        } else if kind == MK_SYS {
+          src = "sysfs";
+          ty = "sysfs";
+        } else if kind == MK_MQUEUE {
+          src = "mqueue";
+          ty = "mqueue";
+        }
+        w = put_s(&mut o, w, src);
+        w = put_s(&mut o, w, " /");
+        let mut j = rl;
+        if rl > 0 && kl > rl {
+          j = rl + 1;                       // past the root's "/"
+        }
+        while j < kl
+          invariant j <= kl && kl <= FNAME_MAX && at + 2 * MS_ROW <= MSTR_LEN && w <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+        {
+          w = put_c(&mut o, w, bget(k.mstr, at + j));
+          j = j + 1;
+        }
+        w = put_c(&mut o, w, 32);
+        w = put_s(&mut o, w, ty);
+        if me_get(k, e, ME_FLAGS) & MT_RO != 0 {
+          w = put_s(&mut o, w, " ro 0 0\n");
+        } else {
+          w = put_s(&mut o, w, " rw 0 0\n");
+        }
+      }
+    }
+    e = e + 1;
+  }
+  return w;
+}
