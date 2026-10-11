@@ -168,6 +168,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   }
   lx_fd_fork(&mut k, pid, c);
   map_fork(&mut k, pid, c);
+  lazy_fork(&mut k, pid, c);
   shm_fork(&mut k, pid, c);
   sig_fork(&mut k.sigact, pid, c);
   cwd_fork(&mut k.cwd, pid, c);
@@ -221,10 +222,19 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
   }
   let from_file = src.file;
   let image = src.f;
-  let sp = load_image(&mut k.mem, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, total);
+  // A hold keeps the file in place while its code is read on demand
+  // (src/lazy.bastio); without one, every page is read now.
+  let mut hold = HOLD_N;
+  if src.file {
+    hold = vfs_hold(&mut k.fs, src.f);
+  }
+  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, total, hold < HOLD_N);
   bfree(args);
   match sp {
-    Space::Empty => { return ENOEXEC; },
+    Space::Empty => {
+      vfs_unhold(&mut k.fs, &mut k.mem, hold);
+      return ENOEXEC;
+    },
     Space::Mapped(new) => {
       map_drop_all(&mut k, pid);            // shared file pages go back first
       vfork_give_back(&mut k, mmu, pid);
@@ -235,6 +245,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
       put_space(&mut k.spaces, pid, Space::Mapped(new));
     },
   }
+  lazy_set(&mut k, pid, src, hold);       // map_drop_all dropped the old record
   shm_drop_all(&mut k, pid);
   lx_fd_close_all(&mut k, pid, true);
   sig_reset(&mut k.sigact, pid, true);
@@ -679,6 +690,8 @@ fn file_meta(v: &mut Vfs, f: u64) -> Meta
     kind = T_LINK;                          // a symbolic link: only lstat gets this far
   } else if fm.mode % 65536 / 4096 * 4096 == T_FIFO {
     kind = T_FIFO;                          // a named pipe
+  } else if fm.mode % 65536 / 4096 * 4096 == 0xC000 {
+    kind = 0xC000;                          // a unix socket's file (src/lxunix.bastio)
   }
   return Meta { ok: true, mode: kind + fm.mode % 4096, size: size, ino: INO_FILES + f, mtime: fm.mtime, own: fm.own };
 }

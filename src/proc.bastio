@@ -59,7 +59,8 @@ const F_VTIMER: u64 = 42;
 const F_PTIMER: u64 = 44;
 // Credentials (src/lxcred.bastio), two 32-bit ids a word: real and
 // effective user, saved and file-system user, then the same for groups.
-// All 0 (root) at boot; a fork or a thread copies them.
+// All 0 (root) at boot; a fork, a thread or a native spawn copies them
+// (docs/security.md).
 const F_UID: u64 = 46;
 const F_SUID: u64 = 47;
 const F_GID: u64 = 48;
@@ -368,6 +369,7 @@ const LOOP_LEN: u64 = 104;             // LOOP_N * LOOP_W
 const DEV_LOOPCTL: u64 = 6;            // OF_DEV device /dev/loop-control
 const DEV_LOOP: u64 = 16;              // OF_DEV device /dev/loopN is DEV_LOOP + N
 const S_IFBLK: u64 = 0x61B0;           // a block device, rw-rw----
+const DISK_GID: u64 = 6;               // group disk (files/group): the loop devices'
 
 // File locks (src/lxlock.bastio): LK_N entries of LK_W words, then for
 // each process the record lock it waits for in F_SETLKW, LK_WW words.
@@ -418,6 +420,8 @@ const PT_W: u64 = 3;                 // words per timer: deadline, interval, sta
 const MAP_N: u64 = 4;                // MAP_SHARED file mappings per process
 const MAP_W: u64 = 4;                // words per mapping: first page + 1, pages, description, offset
 const MAPS_LEN: u64 = 512;           // NPROC * MAP_N * MAP_W
+const LZ_W: u64 = 4;                  // lazy code: first page + 1 (0: none), pages, file hold, file offset
+const LAZY_LEN: u64 = 128;            // NPROC * LZ_W
 const LX_PAUSE: u64 = 34;
 const LX_RT_SIGSUSPEND: u64 = 130;
 const LX_WAITID: u64 = 247;
@@ -559,13 +563,6 @@ const K_TIMER: u64 = 9;               // x: the timer
 const K_EPOLL: u64 = 10;              // x: the epoll instance
 const K_SIGFD: u64 = 11;              // x: the description (src/lxevent.bastio)
 
-/// The pages of System V shared memory segments: a level-2 table, never
-/// loaded, whose slot s is segment s's level-1 table (src/lxipc.bastio).
-/// None only if there was no page for it at boot.
-enum Store {
-  None,
-  Table(PageTable),
-}
 
 struct Kernel {
   mem: Mem,             // the page allocator
@@ -595,6 +592,7 @@ struct Kernel {
   ux: Buf,              // AF_UNIX channels and names (src/lxunix.bastio)
   uxb: Bytes,           // their bytes
   maps: Buf,            // Linux MAP_SHARED file mappings, MAP_N per process (src/lxmem.bastio)
+  lazy: Buf,            // code pages read from a file when first touched, LZ_W words per process (src/lazy.bastio)
   inet6: u64,           // bit h: open file description h is an AF_INET6 socket (src/lxsock.bastio)
   locks: Buf,           // file locks held (src/lxlock.bastio)
   loops: Buf,           // loop devices (src/lxloop.bastio)
@@ -602,12 +600,14 @@ struct Kernel {
   ipc: Buf,             // System V message queues and semaphores (src/lxipc.bastio)
   ipcb: Bytes,          // the queues' messages
   shm: Store,           // System V shared memory pages (src/lxipc.bastio)
+  txt: Store,           // the built-in programs' read-only pages (src/text.bastio)
   sys: Buf,             // settings root may change: names, the clock discipline (src/lxsys.bastio)
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
+    && (k.txt is Store::Table ==> (pt_level(k.txt.Table) == 2 && pt_leases(k.txt.Table) == 0))
 }
 
 // ---------------------------------------------------------------- programs
@@ -836,13 +836,24 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
     pset(&mut k.procs, pid, f, 0);
     f = f + 1;
   }
+  if 1 <= parent && parent < NPROC {
+    // A child keeps its parent's user and group ids and umask: starting a
+    // program must not make anyone root.
+    f = F_UID;
+    while f < F_GROUPS + NGROUPS_KEPT / 2
+      invariant F_UID <= f && f <= F_GROUPS + NGROUPS_KEPT / 2 && len(k.procs) == PTAB_LEN
+    {
+      pset(&mut k.procs, pid, f, pget(k.procs, parent, f));
+      f = f + 1;
+    }
+  }
   lx_fd_reset(&mut k.lxfd, pid);
   sig_reset(&mut k.sigact, pid, false);
   k.cwd = set(k.cwd, pid * CWD_STRIDE, 0);   // starts at "/"
   let mut args = balloc(ARGV0_MAX + 1);
   let alen = name_arg(&mut args, prog_name(prog));
   let src = Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
-  let sp = load_image(&mut k.mem, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, alen);
+  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, alen, false);
   bfree(args);
   let ok = sp is Space::Mapped;
   put_space(&mut k.spaces, pid, sp);
@@ -898,9 +909,9 @@ fn name_arg(args: &mut Bytes, name: Str) -> u64
 /// process `pid` up to start it: program, registers, program break.
 /// Returns `Space::Empty`, changing nothing, if the image is malformed or
 /// memory runs out. The caller installs the space.
-fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, t: Tsc, epoch: u64, pid: u64, src: Src, args: &Bytes, alen: u64, total: u64) -> Space
-  requires mem_ok(m) && vfs_ok(v) && len(procs) == PTAB_LEN && pid < NPROC && alen <= total && total <= ARGS_MAX && total <= blen(args)
-  ensures mem_ok(m) && vfs_ok(v) && len(procs) == PTAB_LEN
+fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: u64, t: Tsc, epoch: u64, pid: u64, src: Src, args: &Bytes, alen: u64, total: u64, lazy: bool) -> Space
+  requires mem_ok(m) && store_ok(txt) && vfs_ok(v) && len(procs) == PTAB_LEN && pid < NPROC && alen <= total && total <= ARGS_MAX && total <= blen(args)
+  ensures mem_ok(m) && store_ok(txt) && vfs_ok(v) && len(procs) == PTAB_LEN
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
   // A built-in image is a Linux ELF executable or a BastiOS image; a file
@@ -914,9 +925,13 @@ fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, t: Tsc, epoc
   let mut isrc = Src { file: false, prog: NPROGS, f: 0, size: 0 };
   let mut ie = bad_elf();
   let mut mmap_top = VDSO_PAGE * 4096;     // the vDSO's page is above it
+  let mut lz = lz_none();
   if elf {
     if !e.ok {
       return Space::Empty;
+    }
+    if lazy {
+      lz = lazy_plan(&mut v, src, e);
     }
     if e.ilen != 0 {
       // A dynamically linked program: its interpreter goes just below
@@ -953,7 +968,7 @@ fn load_image(m: &mut Mem, v: &mut Vfs, procs: &mut Buf, seed: u64, t: Tsc, epoc
       return Space::Empty;
     }
   }
-  let sp = build_space(&mut m, &mut v, src, img, elf, e, isrc, ie, size, args, alen, total, seed, t, epoch);
+  let sp = build_space(&mut m, &mut txt, &mut v, src, img, elf, e, isrc, ie, lz, size, args, alen, total, seed, t, epoch);
   if sp is Space::Empty {
     return sp;
   }
@@ -1034,14 +1049,14 @@ fn interp_src(v: &mut Vfs, src: Src, e: Elf) -> Src
 
 /// The address space for a checked image: ELF, or a BastiOS image needing
 /// `size` bytes of memory.
-fn build_space(m: &mut Mem, v: &mut Vfs, src: Src, img: Str, elf: bool, e: Elf, isrc: Src, ie: Elf, size: u64, args: &Bytes, alen: u64, total: u64, seed: u64, t: Tsc, epoch: u64) -> Space
-  requires mem_ok(m) && vfs_ok(v) && (elf ==> (e.ok && elf_fits(src.size, e) && elf_fits(isrc.size, ie))) && (!elf ==> size <= IMAGE_MAX)
+fn build_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, img: Str, elf: bool, e: Elf, isrc: Src, ie: Elf, lz: Lz, size: u64, args: &Bytes, alen: u64, total: u64, seed: u64, t: Tsc, epoch: u64) -> Space
+  requires mem_ok(m) && store_ok(txt) && vfs_ok(v) && (elf ==> (e.ok && elf_fits(src.size, e) && elf_fits(isrc.size, ie))) && (!elf ==> size <= IMAGE_MAX)
   requires alen <= total && total <= ARGS_MAX && total <= blen(args)
-  ensures mem_ok(m) && vfs_ok(v)
+  ensures mem_ok(m) && store_ok(txt) && vfs_ok(v)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
   if elf {
-    return elf_space(&mut m, &mut v, src, e, isrc, ie, args, alen, total, seed, t, epoch);
+    return elf_space(&mut m, &mut txt, &mut v, src, e, isrc, ie, lz, args, alen, total, seed, t, epoch);
   }
   return new_space(&mut m, img, size);
 }
