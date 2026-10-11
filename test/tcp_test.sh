@@ -393,13 +393,25 @@ def pattern(n, salt):
     r = random.Random(salt)
     return bytes(r.randrange(256) for _ in range(n))
 
+def listen_7001():
+    """`tcpecho 7001` in the guest, typed again if the port is still taken
+    (the last connection on it can still be waiting for our final ACK when
+    the shell prompt comes back). Returns where its output starts."""
+    for _ in range(5):
+        mark = len(out)
+        type_line("tcpecho 7001")
+        until(lambda: b"listening on tcp port 7001" in out[mark:] or b"cannot listen" in out[mark:], 10)
+        if b"listening on tcp port 7001" in out[mark:]:
+            break
+        until(lambda: b"bastios> " in out[mark:], 5)
+        until(lambda: False, 0.5)
+    return mark
+
 def echo_run(name, data, setup, secs=60):
     """`tcpecho 7001` in the guest and a connection to it from here that
     sends `data` and closes once it all came back. `setup(peer)` sets the
     rules. Returns the peer."""
-    mark = len(out)
-    type_line("tcpecho 7001")
-    until(lambda: b"listening on tcp port 7001" in out[mark:], 10)
+    mark = listen_7001()
     p = Peer(net, 40000 + (len(out) % 20000), 7001, data, active=True)
     p.close_when = lambda q: len(q.got) >= len(data)
     net.peer = p
@@ -506,10 +518,8 @@ check(len(seqs) > len(set(seqs)), f"late ACKs: the guest timed out and went back
 #    we answer. Meanwhile its own buffers fill and its window closes, and
 #    we probe it in turn. Then ours reopens.
 def zero_window_scenario():
-    mark = len(out)
     data = pattern(20000, 4)
-    type_line("tcpecho 7001")
-    until(lambda: b"listening on tcp port 7001" in out[mark:], 10)
+    mark = listen_7001()
     q = Peer(net, 45000, 7001, data, active=True)
     q.close_when = lambda r: len(r.got) >= len(data)
     q.rwin = 0
