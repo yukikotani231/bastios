@@ -17,7 +17,10 @@ const FB_MAX_PITCH: u64 = 1048576;
 const FB_MAX_SIDE: u64 = 65535;
 const FG_LEVEL: u64 = 0xC0;           // light grey text on black
 const FB_LO: u64 = 0x80000000;        // where the device window starts
-const FB_TOP: u64 = 0xFEC00000;       // the framebuffer must end below the I/O APIC
+const FB_TOP: u64 = 0xFEC00000;       // below 4 GiB the framebuffer must end below the I/O APIC
+const FB_HIGH: u64 = 0x100000000;     // or it lies in the window's part above 4 GiB
+const FB_HIGH_TOP: u64 = 0x400000000000;
+const FB_MAX_SIZE: u64 = 68718428160; // FB_MAX_PITCH * FB_MAX_SIDE
 
 struct Fb {
   regs: Mmio,
@@ -213,7 +216,7 @@ fn fb_put(f: &mut Fb, b: u64)
 /// width pixels), cleared, with the cursor at the top left. `rgb`: the bit
 /// positions of red, green and blue, a byte each.
 fn fb_new(regs: Mmio, size: u64, pitch: u64, width: u64, height: u64, rgb: u64) -> Fb
-  requires mmio_base(regs) % 4 == 0 && size <= mmio_len(regs) && size <= FB_TOP && pitch <= FB_MAX_PITCH
+  requires mmio_base(regs) % 4 == 0 && size <= mmio_len(regs) && size <= FB_MAX_SIZE && pitch <= FB_MAX_PITCH
   requires CELL_W <= width && width <= FB_MAX_SIDE && CELL_H <= height && height <= FB_MAX_SIDE
   ensures fb_ok(result)
 {
@@ -259,13 +262,17 @@ enum Screen { None, Fb(Fb) }
 
 /// The screen on the framebuffer at lo .. hi (pitch bytes per line, width
 /// by height pixels), if it is one this console can draw on and lies in
-/// the device window below FB_TOP; else none. Claims the block.
-fn screen_new(win: &mut MmioSpace, lo: u64, hi: u64, pitch: u64, width: u64, height: u64, rgb: u64) -> Screen
+/// the device window: below FB_TOP, or above 4 GiB when that part is
+/// mapped (`high`), where a GPU often has it (Intel graphics at
+/// 0x4000000000 on many PCs); else none. Claims the block.
+fn screen_new(win: &mut MmioSpace, lo: u64, hi: u64, pitch: u64, width: u64, height: u64, rgb: u64, high: bool) -> Screen
   requires forall a: u64 :: bar_space(a) ==> mmio_free(win, a)
   ensures screen_ok(result)
   ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) ==> mmio_free(win, a)
 {
-  if lo < FB_LO || hi > FB_TOP || hi <= lo || lo % 4 != 0 || pitch > FB_MAX_PITCH
+  let low_ok = lo >= FB_LO && hi <= FB_TOP;
+  let high_ok = high && lo >= FB_HIGH && hi <= FB_HIGH_TOP;
+  if !(low_ok || high_ok) || hi <= lo || hi - lo > FB_MAX_SIZE || lo % 4 != 0 || pitch > FB_MAX_PITCH
     || width < CELL_W || width > FB_MAX_SIDE || height < CELL_H || height > FB_MAX_SIDE || pitch < width * 4 {
     return Screen::None;
   }
