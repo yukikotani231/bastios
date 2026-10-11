@@ -218,7 +218,7 @@ $ bb dd if=/dev/zero bs=512 count=2 2>ca_e | bb wc -c; bb rm ca_e
 1024
 
 == dd large blocks
-$ bb dd if=/dev/zero bs=65536 count=16 2>ca_e | bb wc -c; bb head -1 ca_e; bb rm ca_e
+$ bb dd if=/dev/zero bs=65536 count=16 2>ca_e | bb wc -c; bb head -n 1 ca_e; bb rm ca_e
 1048576
 16+0 records in
 
