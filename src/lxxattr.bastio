@@ -1,0 +1,40 @@
+// Extended attributes: no file system here keeps them. setxattr,
+// getxattr and removexattr (and their l- and f- forms) find the file and
+// then fail with -EOPNOTSUPP, as Linux does on a file system without
+// extended attributes; listxattr finds none. Programs and test suites
+// (LTP) take EOPNOTSUPP to mean "not supported here" and skip.
+
+import "lxmisc.bastio";
+
+const LX_SETXATTR: u64 = 188;            // 188 .. 199: set, get, list,
+const LX_FREMOVEXATTR: u64 = 199;        // remove, each as path, l-path, fd
+const EOPNOTSUPP_X: u64 = 18446744073709551521;  // 2^64 - 95
+
+fn is_xattr_call(n: u64) -> bool
+  ensures result == (n >= LX_SETXATTR && n <= LX_FREMOVEXATTR)
+{
+  return n >= LX_SETXATTR && n <= LX_FREMOVEXATTR;
+}
+
+/// System call n (188 .. 199) of process pid; a is the path or the fd.
+fn lx_xattr_call(k: &mut Kernel, pid: u64, n: u64, a: u64) -> u64
+  requires kok(k) && pid < NPROC && n >= LX_SETXATTR
+  ensures kok(k)
+{
+  let form = (n - LX_SETXATTR) % 3;       // 0 path, 1 path without following links, 2 fd
+  let call = (n - LX_SETXATTR) / 3;       // 0 set, 1 get, 2 list, 3 remove
+  let mut r = 0;
+  if form == 2 {
+    let d = fd_look(k, pid, a);
+    if d.kind == K_BAD {
+      r = EBADF;
+    }
+  } else {
+    r = path_exists(&mut k, pid, AT_FDCWD, a);
+  }
+  if r == 0 && call != 2 {
+    r = EOPNOTSUPP_X;
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}
