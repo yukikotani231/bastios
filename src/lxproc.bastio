@@ -679,6 +679,8 @@ fn file_meta(v: &mut Vfs, f: u64) -> Meta
     kind = T_LINK;                          // a symbolic link: only lstat gets this far
   } else if fm.mode % 65536 / 4096 * 4096 == T_FIFO {
     kind = T_FIFO;                          // a named pipe
+  } else if fm.mode % 65536 / 4096 * 4096 == 0xC000 {
+    kind = 0xC000;                          // a unix socket's file (src/lxunix.bastio)
   }
   return Meta { ok: true, mode: kind + fm.mode % 4096, size: size, ino: INO_FILES + f, mtime: fm.mtime, own: fm.own };
 }

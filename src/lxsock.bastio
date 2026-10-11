@@ -544,6 +544,7 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
       r = 0;
     }
   }
+  assert kok(k);                            // a hint for the solver
   if r == SK_WAIT && !is_unix(k, pid, a) {
     return sock_retry(&mut k, pid, n);       // nothing yet: sleep until a frame comes in
   }

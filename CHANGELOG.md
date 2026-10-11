@@ -225,6 +225,14 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - `reboot`, `mount` and `umount2` are root's (`EPERM`), `rt_sigqueueinfo`
   follows `kill`'s rule, and binding a port below 1024 is root's
   (`EACCES`). `test/compat/progs/t_isol.c` tries each as nobody.
+- A `MAP_SHARED` mapping of a file opened read-only is a copy rather than
+  the page cache's pages: before, `mprotect(PROT_WRITE)` on it let a
+  process that may only read a file change what every other reader of
+  it saw.
+- `bind` of an `AF_UNIX` socket to a path makes a socket file there, and
+  `connect` needs write permission on it, as on Linux. Before, the name
+  lived only in a table of its own, so any user could connect to any
+  socket, or take its name first. `open` of a socket file is `ENXIO`.
 
 ### Programs that run
 

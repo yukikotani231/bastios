@@ -41,6 +41,8 @@ whoever its mode admits.
 | Waiting | `wait4` and `waitid` reach only the caller's own children. | `src/lxproc.bastio` |
 | SysV IPC | message queues, semaphores and shared memory check their mode bits; `IPC_SET` and `IPC_RMID` are for the owner, the creator or root. | `ipc_may`, `ipc_owner`, `src/lxipc.bastio` |
 | The system | `reboot`, `mount`, `umount2`, `sethostname`, `setdomainname`, `settimeofday`, `clock_settime`, `adjtimex` and `clock_adjtime` (when they change something) are root's; device nodes cannot be made at all. | `src/linux.bastio`, `src/lxmount.bastio`, `src/lxsys.bastio`, `src/lxevent.bastio` |
+| Shared file mappings | `mmap` refuses a writable `MAP_SHARED` mapping of a file opened without write permission. Only a file opened for writing is mapped through the page cache's own pages; from a read-only descriptor, a shared mapping is a copy, so `mprotect(PROT_WRITE)` on it (which BastiOS does not refuse, unlike Linux) changes no one else's view of the file. The cost: such a mapping does not see later writes to the file. | `lx_mmap`, `src/linux.bastio` |
+| Unix sockets | `bind` to a path makes a socket file there, with the checks for making any file (write and search permission on the directory) and the umask; `connect` needs write permission on that file, so its mode, owner and group say who may connect. | `ux_mkfile`, `ux_may_connect`, `src/lxunix.bastio` |
 | Ports | binding a UDP or TCP port below 1024 is root's (`EACCES`). | `may_bind`, `src/lxsock.bastio` |
 | Native calls | Any program can raise `int 0x80`, the native ABI (`src/syscall.bastio`), a Linux program included. Its file, network, power and reboot calls check no permissions, so a process that is not root may make only the calls that touch nothing of anyone else's: console I/O, starting and waiting for its own children (which keep its ids), yielding, its pid, `SYS_INFO`'s counters, the process list, and `SYS_KILL` of a process `may_signal` allows. Everything else gives `NO_RESULT`. | `native_allowed`, `src/syscall.bastio`; `spawn`, `src/proc.bastio` |
 
@@ -54,33 +56,26 @@ by root. The rest are checked by tests, not proved: `test/compat/progs/t_cred.c`
 
 Known gaps, most serious first.
 
-1. **`mprotect` can make a read-only shared file mapping writable.** `mmap`
-   refuses a writable `MAP_SHARED` mapping of a file opened read-only, but
-   a later `mprotect(PROT_WRITE)` is not checked, and such a mapping maps
-   the page cache's own pages (`src/lxmem.bastio`), so the writes reach
-   every other reader of the file (they are not written back to the disk:
-   `map_flush` writes only for a writable descriptor).
-2. **`AF_UNIX` sockets have no permissions.** Their names live in a table
-   of their own (`src/lxunix.bastio`), not in the file system, so any user
-   can connect to any name, or take one first.
-3. **No login.** There is no `login`, `su`, `passwd`, `/etc/shadow` or
+1. **No login.** There is no `login`, `su`, `passwd`, `/etc/shadow` or
    password hashing; BusyBox is built without those applets. A system
    with several users needs them, and a way to start the console as
    someone other than root.
-4. **Native processes.** The native shell and the programs it starts run
+2. **Native processes.** The native shell and the programs it starts run
    as root, and `SYS_SPAWN` starts any built-in program; that is safe only
    because a process that is not root cannot gain anything by it (the
    child keeps its ids). Native sockets are global indices with no owner,
    so root processes can reach one another's.
-5. **Loop mounts are not `nosuid`.** A `bstdisk3` image is mounted with
+3. **Loop mounts are not `nosuid`.** A `bstdisk3` image is mounted with
    `LO_NODEV` only. Mounting is root's, so this matters only when root
    mounts an image someone else made.
-6. Smaller ones: `prlimit64` and `setpriority` ignore their target pid
+4. Smaller ones: `prlimit64` and `setpriority` ignore their target pid
    (neither changes anything); `setpgid` does not check that the child is
    in the caller's session or has not run `execve`; SysV IPC checks only a
    process's effective group, not its supplementary groups; `SHM_LOCK`
    needs only ownership; `/proc/PID/exe` of anyone's process can be read;
-   `/dev/console` is open to all.
-7. Not implemented, so not a hole: `ptrace`, `process_vm_readv`,
+   `/dev/console` is open to all; a unix socket's file that is renamed no
+   longer leads to its socket, and names in the abstract namespace (a
+   leading 0 byte) have no permissions, as on Linux.
+5. Not implemented, so not a hole: `ptrace`, `process_vm_readv`,
    `/proc/PID/mem`, `environ` and `maps`, `chroot`, `iopl` and `ioperm`,
    `syslog`, `swapon` and `pivot_root` all fail (`ENOSYS` or missing).
