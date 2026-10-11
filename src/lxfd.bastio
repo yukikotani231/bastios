@@ -597,12 +597,6 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     if e != 0 {
       return e;
     }
-    if flags & LO_NOATIME != 0 {
-      let m = meta_keep(&mut k, n, n);
-      if m.ok && !owns(k.procs, pid, m.own) {
-        return EPERM;                       // O_NOATIME: the owner's (or root's) alone
-      }
-    }
   } else if flags & LO_CREAT != 0 && dir_at(&mut k, n) == NO_FILE && dev_at(k.fs.xfer, n) == DEV_NONE {
     let e = may_dir(&mut k, pid, n);
     if e != 0 {
