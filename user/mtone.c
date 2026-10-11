@@ -1,13 +1,12 @@
 /* /dev/dsp, against musl: asks for 48 kHz 16-bit stereo through the OSS
  * ioctls, plays half a second of a 1 kHz square wave (24 frames at +8000,
  * 24 at -8000, both channels), waits for it to play out and prints
- * "mtone: ok". With the argument "none" it expects there to be no sound
- * card: opening /dev/dsp fails with ENODEV. test/shell_test.sh records
+ * "mtone: ok". Without a sound card, opening /dev/dsp must fail with
+ * ENODEV, which it reports (exit status 2). test/shell_test.sh records
  * what QEMU's HD Audio codec played into a WAV file and looks for the wave. */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
-#include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
@@ -20,16 +19,12 @@
 
 static short wave[48000 / 2 * 2];       /* half a second, two channels */
 
-int main(int argc, char **argv)
+int main(void)
 {
     int fd = open("/dev/dsp", O_WRONLY);
-    if (argc > 1 && strcmp(argv[1], "none") == 0) {
-        if (fd < 0 && errno == ENODEV) {
-            puts("mtone: no sound card (ENODEV)");
-            return 0;
-        }
-        printf("mtone: open gave %d, errno %d\n", fd, errno);
-        return 1;
+    if (fd < 0 && errno == ENODEV) {
+        puts("mtone: no sound card (ENODEV)");
+        return 2;
     }
     if (fd < 0) {
         printf("mtone: open /dev/dsp: errno %d\n", errno);

@@ -128,11 +128,11 @@ else:
     print("FAIL no network card: udpsend"); fails += 1
 # Nor a sound card: /dev/dsp does not open (ENODEV).
 mark = len(out)
-qemu.stdin.write(b"mtone none\r"); qemu.stdin.flush()
+qemu.stdin.write(b"mtone\r"); qemu.stdin.flush()
 if read_until(b"bastios> ", mark) and b"mtone: no sound card (ENODEV)" in out[mark:]:
     print("ok   no sound card: /dev/dsp says ENODEV")
 else:
-    print("FAIL no sound card: mtone none"); fails += 1
+    print("FAIL no sound card: mtone"); fails += 1
 qemu.kill(); qemu.wait()
 print("---- one-processor transcript ----")
 print(out.decode(errors="replace").replace("\r", ""))
