@@ -318,6 +318,7 @@ t_ipc: fcntl F_GETFL sees O_NONBLOCK
 t_ipc: fcntl F_SETFL
 t_ipc: isatty(0)
 t_ipc: mkfifo
+t_ipc: fstat on an open FIFO shows the file lstat shows
 t_ipc: pipe
 t_ipc: pipe across fork
 t_ipc: pipe holds 64 KiB, then EAGAIN

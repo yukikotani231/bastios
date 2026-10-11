@@ -96,6 +96,10 @@ int main(void) {
         unlink(a.sun_path);
     }
     EXPECT("mkfifo", mkfifo("/cu_fifo", 0644) == 0);
+    EXPECT("fstat on an open FIFO shows the file lstat shows", ({ struct stat a, b; int fd = open("/cu_fifo", O_RDONLY | O_NONBLOCK);
+           int ok = fd >= 0 && lstat("/cu_fifo", &a) == 0 && fstat(fd, &b) == 0 && S_ISFIFO(b.st_mode) &&
+                    a.st_ino == b.st_ino && a.st_dev == b.st_dev && a.st_mode == b.st_mode;
+           close(fd); ok; }));
     unlink("/cu_fifo");
     EXPECT("isatty(0)", isatty(0) == 1);
     EXPECT("ttyname(0)", ttyname(0) != NULL);
