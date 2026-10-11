@@ -31,7 +31,7 @@ match
 5
 
 == debian: coreutils make, copy, move, link and look at files
-$ bb chroot /disk/d /bin/bash -c 'cd /tmp && echo hello > f && cp f g && mv g h && ln -s h l && readlink l && cat l && stat -c "%s %F" h && ls l h && rm f h l && ls'
+$ bb chroot /disk/d /bin/bash -c 'cd /tmp && echo hello > f && cp f g && mv g h && ln -s h l && readlink l && cat l && stat -c "%s %F" h && ls -1 l h && rm f h l && ls'
 h
 hello
 6 regular file
@@ -59,11 +59,12 @@ passwd-
 du ok
 
 == debian: users and the machine
-$ bb chroot /disk/d /bin/bash -c 'id; whoami; uname -s -m; date -u -d @0 +%Y-%m-%dT%H:%M:%S'
+$ bb chroot /disk/d /bin/bash -c 'id; whoami; uname -s -m; date -u -d @0 +%Y-%m-%dT%H:%M:%S; [ $(date +%s) -gt 1700000000 ] && echo the clock is past 2023'
 uid=0(root) gid=0(root) groups=0(root)
 root
 Linux x86_64
 1970-01-01T00:00:00
+the clock is past 2023
 
 == debian: perl
 $ bb chroot /disk/d /usr/bin/perl -e 'my %h = (a => 1, b => 2); print join(",", map { "$_=$h{$_}" } sort keys %h), "\n"; print length("x" x 1000), "\n"'

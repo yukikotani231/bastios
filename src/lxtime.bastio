@@ -10,9 +10,9 @@
 // k.alarms, which every timer tick checks (lx_alarms) against k.ns.
 //
 // CLOCK_REALTIME (and gettimeofday, time) is k.epoch, read from the CMOS
-// clock at boot (src/rtc.bastio), plus k.ns. Programs linked against musl
-// read the monotonic and real-time clocks through the vDSO (user/vdso.c)
-// instead, from the same counter with the same arithmetic.
+// clock at boot (src/rtc.bastio), plus k.ns. Programs read the monotonic
+// clocks through the vDSO (user/vdso.c) instead, from the same counter with
+// the same arithmetic; the vDSO makes the system call for the others.
 
 import "linux.bastio";
 
