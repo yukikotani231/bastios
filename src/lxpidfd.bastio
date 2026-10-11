@@ -166,7 +166,7 @@ fn pidfd_getfd(k: &mut Kernel, pid: u64, fd: u64, target: u64, flags: u64) -> u6
 /// Whether processes a and b have the same real, effective and saved
 /// user and group ids.
 fn same_ids(procs: &Buf, a: u64, b: u64) -> bool
-  requires len(procs) == PTAB_LEN && a < NPROC && b < NPROC
+  requires ptab_ok(procs) && a < NPROC && b < NPROC
 {
   return pget(procs, a, F_UID) == pget(procs, b, F_UID) && pget(procs, a, F_SUID) == pget(procs, b, F_SUID)
     && pget(procs, a, F_GID) == pget(procs, b, F_GID) && pget(procs, a, F_SGID) == pget(procs, b, F_SGID);

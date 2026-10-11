@@ -198,7 +198,7 @@ fn sfd_one(k: &mut Kernel, pid: u64, s: u64, va: u64) -> bool
 {
   lx_fill(&mut k, 0, SFD_INFO);
   bset(&mut k.fs.xfer, 0, cast[u8](s));                 // ssi_signo
-  let word = get(k.sigsave, sender_at(pid, s));
+  let word = wget(k.sigsave, sender_at(pid, s));
   bset(&mut k.fs.xfer, 12, cast[u8](word % 256));       // ssi_pid
   if word / 256 % 2 == 1 {
     let v = word / 512;
@@ -1055,7 +1055,7 @@ fn fifo_open(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
     {
       q = q + 1;
     }
-    if q >= NPIPES {
+    if q >= NPIPES || !pipe_ready(&mut k, q) {
       return ENFILE;
     }
     pi_set(&mut k.pipes, q, 0, 0);

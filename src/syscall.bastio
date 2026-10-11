@@ -745,15 +745,15 @@ fn net_wake(k: &mut Kernel)
 // ---------------------------------------------------------------- dispatch
 
 fn ret(procs: &mut Buf, pid: u64, v: u64)
-  requires len(procs) == PTAB_LEN && pid < NPROC
-  ensures len(procs) == PTAB_LEN
+  requires ptab_ok(procs) && pid < NPROC
+  ensures ptab_ok(procs)
 {
   pset(&mut procs, pid, F_REGS + R_RAX, v);
 }
 
 fn do_wait(procs: &mut Buf, pid: u64, c: u64) -> u64
-  requires len(procs) == PTAB_LEN && 1 <= pid && pid < NPROC
-  ensures len(procs) == PTAB_LEN
+  requires ptab_ok(procs) && 1 <= pid && pid < NPROC
+  ensures ptab_ok(procs)
 {
   if c == 0 || c >= NPROC || state(procs, c) == FREE || pget(procs, c, F_PARENT) != pid {
     ret(&mut procs, pid, NO_RESULT);
@@ -779,7 +779,7 @@ fn do_wait(procs: &mut Buf, pid: u64, c: u64) -> u64
 /// this is what keeps an unprivileged Linux process from going around the
 /// Linux layer's checks.
 fn native_allowed(procs: &Buf, pid: u64, n: u64) -> bool
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
   ensures !is_root(procs, pid) && n > SYS_KILL ==> !result
 {
   return cred_root(procs, pid) || n <= SYS_KILL;
