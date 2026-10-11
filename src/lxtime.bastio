@@ -91,7 +91,7 @@ fn wait_until(k: &mut Kernel, pid: u64, n: u64, dl: u64) -> u64
 
 /// As wait_until, but asleep (nap) until a frame comes in, the clock ticks
 /// or a signal is posted, rather than run again on every pass of the
-/// scheduler: for poll, select, epoll_wait and pause, which servers sit in
+/// scheduler: for poll, select, epoll_wait, pause and nanosleep, which servers sit in
 /// (nginx's master and workers kept two processors busy). Readiness
 /// that comes from elsewhere, such as a pipe written, is seen at the next
 /// tick, up to 10 ms late, and so is the deadline.
@@ -239,7 +239,7 @@ fn lx_sleep(k: &mut Kernel, pid: u64, n: u64, was: u64, clk: u64, flags: u64, re
     ret(&mut k.procs, pid, 0);
     return KEEP;
   }
-  return wait_until(&mut k, pid, n, dl);
+  return wait_asleep(&mut k, pid, n, dl);   // up to a tick late
 }
 
 /// A nanosleep or relative clock_nanosleep of process p that a signal
@@ -300,6 +300,9 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   }
   if f.kind == K_DEV && is_pty_dev(f.x) {
     return pty_bits(k, f.x);                // src/lxpty.bastio
+  }
+  if f.kind == K_DEV && f.x == DEV_MICE {
+    return mice_bits(k);                    // src/lxmouse.bastio
   }
   if f.kind == K_INOTIFY {
     return ino_bits(k, f.x);                // src/lxinotify.bastio
