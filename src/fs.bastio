@@ -2057,16 +2057,7 @@ fn vfs_set_ro(v: &mut Vfs, s: u64, ro: bool)
 fn same_start(a: &Bytes, b: &Bytes, l: u64) -> bool
   requires l <= blen(a) && l <= blen(b)
 {
-  let mut j = 0;
-  while j < l
-    invariant j <= l
-  {
-    if bget(a, j) != bget(b, j) {
-      return false;
-    }
-    j = j + 1;
-  }
-  return true;
+  return bytes_span_eq(a, 0, b, 0, l);
 }
 
 /// Does the path in the first n bytes of the transfer buffer lie in a
