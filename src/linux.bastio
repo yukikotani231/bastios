@@ -1280,6 +1280,9 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
   if d.kind == K_DEV && d.x == DEV_DSP {
     return dsp_write(&mut k, pid, va, n);   // src/lxsnd.bastio
   }
+  if d.kind == K_DEV && d.x == DEV_MICE {
+    return mice_write(&mut k, pid, va, n);  // mouse commands (src/lxmouse.bastio)
+  }
   if d.kind == K_DEV && d.x >= PROC_DEV {
     return proc_write(&mut k, pid, d.x, va, n);   // a sysctl open for writing (src/lxprocfs.bastio)
   }
@@ -1720,7 +1723,10 @@ fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
   k.perr = ENAMETOOLONG;
+  k.pdir = false;
   let trail = bget(k.fs.xfer, e - 1) == 47;  // "link/" names what the link points to, as on Linux
+  // A name ending in "/" or "/." must be a directory, as on Linux.
+  let dirend = trail || (bget(k.fs.xfer, e - 1) == 46 && (e == 1 || bget(k.fs.xfer, e - 2) == 47));
   // Build the name in `out`, starting from the working directory unless
   // the path starts at "/", which is the process's root (chroot). ".."
   // stops at `floor`: the root, for a name inside it.
@@ -1827,7 +1833,18 @@ fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
   }
   bfree(out);
   let o2 = proc_self(&mut k.fs.xfer, o, pid);   // "proc/self" is the caller's /proc/PID
-  return lx_follow(&mut k, o2, follow || trail, smaller(floor, o2));  // symbolic links (src/lxlink.bastio)
+  let r = lx_follow(&mut k, o2, follow || trail, smaller(floor, o2));  // symbolic links (src/lxlink.bastio)
+  if r == NO_RESULT || !dirend {
+    return r;
+  }
+  let m = path_meta(&mut k, r);
+  if !m.ok {
+    k.pdir = true;                          // open(O_CREAT) says EISDIR; mkdir goes ahead
+  } else if m.mode % 65536 / 4096 * 4096 != S_IFMT_DIR {
+    k.perr = ENOTDIR;                       // "file/" and "file/."
+    return NO_RESULT;
+  }
+  return r;
 }
 
 /// lseek: SEEK_SET (0), SEEK_CUR (1) and SEEK_END (2), with a signed
