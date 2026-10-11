@@ -28,17 +28,18 @@ fn term_write(t: &mut Term, b: u8)
   screen_put(&mut t.screen, b);
 }
 
-/// The next byte typed on the serial line or a keyboard, or 256.
+/// The next byte typed on the serial line or a keyboard, a PS/2 mouse
+/// packet (MOUSE_PKT plus its bytes, src/kbd.bastio), or 256.
 fn term_poll(t: &mut Term) -> u64
   requires term_ok(t)
-  ensures term_ok(t) && result <= 256
+  ensures term_ok(t) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT))
 {
   let b = uart_poll(&mut t.uart);
   if b < 256 {
     return b;
   }
   let k = kbd_poll(&mut t.kbd);
-  if k < 256 {
+  if k != 256 {
     return k;
   }
   return usb_poll(&mut t.usb);
