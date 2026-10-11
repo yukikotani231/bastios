@@ -11,7 +11,7 @@
 //
 // A read takes what is queued (up to what it asks for); with nothing
 // queued it fails with EAGAIN if the file was opened O_NONBLOCK, else it
-// sleeps for two ticks and looks again (`sleep_until`). poll says POLLIN
+// sleeps until the next tick and looks again (`wait_asleep`). poll says POLLIN
 // when something is queued. Writes (the ImPS/2 setup sequences some
 // programs send) are swallowed, and no answers come back for them, so
 // such programs see a plain 3-button mouse. Without a mouse, opening the
@@ -121,7 +121,7 @@ fn mice_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u6
       ret(&mut k.procs, pid, EAGAIN);       // O_NONBLOCK
       return KEEP;
     }
-    return sleep_until(&mut k, pid, n, sat_add(k.ns, 2 * NS_PER_TICK));
+    return wait_asleep(&mut k, pid, n, FOREVER);   // looks again on the next tick
   }
   let head = get_u64(k.mice, 0) % MICE_CAP;
   let want = smaller(smaller(len, cnt), XFER);

@@ -133,7 +133,7 @@ if read_until(b"bastios> ", mark) and b"mtone: no sound card (ENODEV)" in out[ma
     print("ok   no sound card: /dev/dsp says ENODEV")
 else:
     print("FAIL no sound card: mtone"); fails += 1
-# A sleeping process does not run (SLEEPWAIT): two seconds of BusyBox's
+# A sleeping process does not run (wait_asleep): two seconds of BusyBox's
 # sleep cost QEMU well under a second of host CPU. Before, nanosleep ran
 # again on every pass and took the whole two seconds.
 def qemu_cpu():

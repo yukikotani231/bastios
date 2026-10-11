@@ -125,8 +125,18 @@ machine, because they come from algorithms, not from emulation.
    only the slots the directory holds, which made `stat@disk` 4.9 times
    faster (351 to 72 us, measured on e7b211b). On tmpfs, `ram_links` still scans all 128
    nodes.
-4. **TCP bulk (14x).** Each connection has 4 KiB buffers and no window
-   scaling, and loopback holds eight frames.
+4. **TCP bulk (14x before).** Each connection had 4 KiB buffers and no
+   window scaling, loopback held eight frames, and a `read` or `write`
+   moved at most 4 KiB. Connections now have 256 KiB rings of pages taken
+   as data arrives, window scaling, a 64-frame loopback queue that TCP
+   does not overflow, no TCP checksum round the loopback, and calls that
+   move up to the ring's size (`src/tcpbuf.bastio`). `tcpbw` went from
+   14.7 to 73.8 MiB/s on one host under TCG (`-smp 2`, median of 5,
+   main and this change run back to back); `tcplat` did not change
+   beyond the noise (276-336 us before, 313-338 after).
+   What is left is per segment: every 1460 bytes is a frame built, queued,
+   copied and taken in again, where Linux's loopback carries 64 KiB
+   segments.
 5. **`forkbig` (2.1x).** Fork copies every page. bastios #146 moved the
    copying off the lock (plain `fork` went from 1270 to 340 us) but does
    not share pages copy-on-write.

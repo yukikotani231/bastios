@@ -88,46 +88,21 @@ fn wait_until(k: &mut Kernel, pid: u64, n: u64, dl: u64) -> u64
   return r;
 }
 
-/// wait_until for a call that only waits for its deadline or a signal
-/// (nanosleep, clock_nanosleep): unless the deadline is less than
-/// a tick away, the process sleeps (SLEEPWAIT) instead of running the
-/// call again on every pass, and `sleep_wake` makes it ready on the last
-/// tick before the deadline; from there it runs the call again as
-/// wait_until does, so the deadline is kept to the clock's precision. A
-/// signal wakes it (post_sig).
-fn sleep_until(k: &mut Kernel, pid: u64, n: u64, dl: u64) -> u64
+/// As wait_until, but asleep (nap) until a frame comes in, the clock ticks
+/// or a signal is posted, rather than run again on every pass of the
+/// scheduler: for poll, select, epoll_wait, pause and nanosleep, which servers sit in
+/// (nginx's master and workers kept two processors busy). Readiness
+/// that comes from elsewhere, such as a pipe written, is seen at the next
+/// tick, up to 10 ms late, and so is the deadline.
+fn wait_asleep(k: &mut Kernel, pid: u64, n: u64, dl: u64) -> u64
   requires kok(k) && pid < NPROC && dl <= FOREVER
   ensures kok(k)
 {
   let r = wait_until(&mut k, pid, n, dl);
-  if r == SWITCH && dl > sat_add(k.ns, NS_PER_TICK) {
-    pset(&mut k.procs, pid, F_STATE, SLEEPWAIT);
+  if r == SWITCH {
+    nap(&mut k, pid, n != LX_PAUSE);        // pause waits only for a signal
   }
   return r;
-}
-
-/// Makes ready the processes in SLEEPWAIT whose deadline is less than a
-/// tick away. True if it woke any.
-fn sleep_wake(k: &mut Kernel) -> bool
-  requires kok(k)
-  ensures kok(k)
-{
-  let soon = sat_add(k.ns, NS_PER_TICK);
-  let mut woke = false;
-  let mut p = 1;
-  while p < NPROC
-    invariant 1 <= p && p <= NPROC && kok(k)
-  {
-    if state(k.procs, p) == SLEEPWAIT {
-      let w = pget(k.procs, p, F_RESTART);
-      if w < 2 || w - 2 <= soon {
-        pset(&mut k.procs, p, F_STATE, READY);
-        woke = true;
-      }
-    }
-    p = p + 1;
-  }
-  return woke;
 }
 
 /// A struct timespec read from user memory, in ns (FOREVER at most); err
@@ -253,7 +228,7 @@ fn lx_sleep(k: &mut Kernel, pid: u64, n: u64, was: u64, clk: u64, flags: u64, re
     ret(&mut k.procs, pid, 0);
     return KEEP;
   }
-  return sleep_until(&mut k, pid, n, dl);
+  return wait_asleep(&mut k, pid, n, dl);   // up to a tick late
 }
 
 /// A nanosleep or relative clock_nanosleep of process p that a signal
@@ -317,6 +292,9 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   }
   if f.kind == K_DEV && f.x == DEV_MICE {
     return mice_bits(k);                    // src/lxmouse.bastio
+  }
+  if f.kind == K_INOTIFY {
+    return ino_bits(k, f.x);                // src/lxinotify.bastio
   }
   if f.kind == K_PIDFD {
     if f.x >= NPROC || state(k.procs, f.x) == FREE || state(k.procs, f.x) == ZOMBIE {
@@ -409,7 +387,7 @@ fn lx_poll(k: &mut Kernel, pid: u64, n: u64, was: u64, fds: u64, nfds: u64, wait
   if ready == 0 {
     let dl = deadline(k, was, wait);
     if k.ns < dl {
-      return wait_until(&mut k, pid, n, dl);
+      return wait_asleep(&mut k, pid, n, dl);
     }
   }
   if size > 0 && copy_to_user(&mut k.spaces, pid, fds, k.fs.xfer, size) != size {
@@ -534,7 +512,7 @@ fn lx_select(k: &mut Kernel, pid: u64, n: u64, was: u64, nfds: u64, rd: u64, wr:
   if ready == 0 {
     let dl = deadline(k, was, wait);
     if k.ns < dl {
-      return wait_until(&mut k, pid, n, dl);
+      return wait_asleep(&mut k, pid, n, dl);
     }
   }
   let st_r = set_store(&mut k, pid, rd, 0, nb);
@@ -928,7 +906,7 @@ fn lx_time_rest(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
     return lx_sigtimedwait(&mut k, pid, n, was, a, b, c);
   }
   if n == LX_PAUSE {
-    return wait_until(&mut k, pid, n, FOREVER);   // until a signal handler runs
+    return wait_asleep(&mut k, pid, n, FOREVER);   // until a signal handler runs
   }
   if n == LX_ALARM || n == LX_GETITIMER || n == LX_SETITIMER {
     return lx_itimer(&mut k, pid, n, a, b, c);

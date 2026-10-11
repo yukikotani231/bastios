@@ -1,0 +1,175 @@
+# Alpine Linux on BastiOS, for the compatibility suite (test/compat): its
+# root file system unpacked on the disk, entered with chroot, and apk
+# installing ordinary, dynamically linked Alpine packages from a local
+# repository, which then run. The Alpine disk (alpinedisk.py) holds
+# Alpine's minirootfs as /disk/root.tar, the repository under
+# /disk/a/repo and Alpine's BusyBox as /disk/busybox; the suite boots it
+# separately. The format is applets.txt's:
+#
+#   == NAME
+#   $ COMMAND        (one line, run by ash in /)
+#   expected output, line by line, compared exactly
+#
+# The cases run in order and build on each other: the first unpacks the
+# root, the next ones install into it. ALPINEURL is the same repository,
+# served over HTTP by the web server run.py runs on the host, with every
+# package of the images alpinedisk.py packs: only the case that says so
+# uses it, so the rest need no network. The bt-* packages are made by
+# alpinedisk.py to test apk itself: dependencies, upgrades, scripts and
+# triggers (version 1 in /repo, version 2 in /repo2).
+
+== alpine: unpack the root, chroot into it
+$ cd /disk/a && bb tar -xf /disk/root.tar && for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; echo /repo > etc/apk/repositories; cd /; bb chroot /disk/a /bin/sh -c 'cat /etc/alpine-release; ls /dev | cat'
+3.24.2
+console
+null
+random
+tty
+urandom
+zero
+
+== apk: the packages the root came with
+$ bb chroot /disk/a /sbin/apk info 2>/dev/null | bb wc -l
+16
+
+== apk: install git, curl and less, with what they depend on
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted --no-progress git curl less openssh-keygen 2>&1 | bb grep -v -e '^(' -e '^WARNING' -e '^OK:'; echo status $?
+Executing busybox-1.37.0-r31.trigger
+status 0
+
+== apk: they are in its database
+$ bb chroot /disk/a /sbin/apk info -e git curl less openssh-keygen 2>/dev/null
+git
+curl
+less
+openssh-keygen
+
+== git: commit, log and diff
+$ bb chroot /disk/a /bin/sh -lc 'cd /root && git init -q --template= r && cd r && git config user.name a && git config user.email a@b && printf "a\nb\n" > f && git add f && git commit -qm one && printf "a\nc\n" > f && git commit -qam two && git --no-pager log --format=%s && git diff --stat HEAD~1 | cat'
+two
+one
+ f | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+== git: clone, gc and fsck
+$ bb chroot /disk/a /bin/sh -lc 'cd /root && git clone -q --template= r r2 && cd r2 && git --no-pager log --oneline | wc -l && git gc -q && git fsck --no-progress 2>&1 && ls .git/objects/pack | wc -l; cd /root && rm -rf r r2'
+2
+3
+
+== curl: a file from the host
+$ bb chroot /disk/a /usr/bin/curl -s HOSTURL/hello.txt
+hello from the host
+
+== curl: 1 MiB from the host
+$ bb chroot /disk/a /bin/sh -lc 'curl -s -o /root/m.bin HOSTURL/mib.bin && md5sum /root/m.bin; rm /root/m.bin'
+85bfb9943e6f0cb09f0f52679e9eac2b  /root/m.bin
+
+== ssh-keygen: an ed25519 key
+$ bb chroot /disk/a /bin/sh -lc 'ssh-keygen -q -t ed25519 -N "" -C k -f /root/k && ssh-keygen -l -f /root/k | cut -d" " -f1,4; head -c 11 /root/k.pub; echo; rm /root/k /root/k.pub'
+256 (ED25519)
+ssh-ed25519
+
+== less: copies a pipe through
+$ printf 'one\ntwo\n' | bb chroot /disk/a /usr/bin/less -FX > /disk/a/root/o; bb cat /disk/a/root/o; rm /disk/a/root/o
+one
+two
+
+== apk: remove a package and its files
+$ bb chroot /disk/a /sbin/apk del --no-progress -q less 2>/dev/null; echo status $?; bb chroot /disk/a /sbin/apk info -e less 2>/dev/null; test -e /disk/a/usr/bin/less || echo gone
+status 0
+gone
+
+== apk: install from a repository over HTTP, then remove it
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL tig 2>/dev/null; echo status $?; bb chroot /disk/a /usr/bin/tig --version | bb head -n 1; bb chroot /disk/a /sbin/apk del -q --no-progress tig 2>/dev/null; echo status $?; test -e /disk/a/usr/bin/tig || echo gone
+status 0
+tig version 2.6.1
+status 0
+gone
+
+== apk: install bash, make, jq, rsync, openssl, file and xmllint
+$ bb chroot /disk/a /sbin/apk info 2>/dev/null | bb wc -l > /disk/a/root/before; bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress bash make jq rsync openssl file libxml2-utils 2>/dev/null; echo status $?
+status 0
+
+== bash: arrays, brace expansion, here-strings
+$ bb chroot /disk/a /bin/bash -c 'declare -A m=([a]=1 [b]=2); echo ${#m[@]} ${m[b]}; echo {1..3}; read x y <<< "p q"; echo $y$x'
+2 2
+1 2 3
+qp
+
+== make: rebuild only what is out of date
+$ bb chroot /disk/a /bin/sh -c 'mkdir /root/mk && cd /root/mk && printf "out: in\n\tcp in out\n" > Makefile && echo 1 > in && make && make && echo 2 > in && sleep 1 && touch in && make; cd /root && rm -rf mk'
+cp in out
+make: 'out' is up to date.
+cp in out
+
+== jq: query JSON
+$ echo '{"a":[1,2,{"b":3}]}' | bb chroot /disk/a /usr/bin/jq -M -c '.a[2].b, (.a|length)'
+3
+3
+
+== rsync: copy a tree
+$ bb chroot /disk/a /bin/sh -c 'mkdir -p /root/s/d && echo hi > /root/s/d/f && rsync -a /root/s/ /root/t/ && cat /root/t/d/f; rm -rf /root/s /root/t'
+hi
+
+== openssl: a digest and random bytes
+$ bb chroot /disk/a /bin/sh -c 'echo abc | openssl dgst -sha256; openssl rand -hex 4 | wc -c'
+SHA2-256(stdin)= edeaaff3f1774ad2888673770c6d64097e391bc362d7d6fb34982ddf0efd18cb
+9
+
+== file: what a file is (libmagic)
+$ bb chroot /disk/a /bin/sh -c 'file -b /etc/passwd; file -b /bin/busybox | cut -d, -f1'
+ASCII text
+ELF 64-bit LSB pie executable
+
+== xmllint: an XPath query
+$ echo '<a><b>1</b><b>2</b></a>' | bb chroot /disk/a /usr/bin/xmllint --xpath 'count(//b)' -
+2
+
+== apk: remove them, and what only they needed
+$ bb chroot /disk/a /sbin/apk del -q --no-progress bash make jq rsync openssl file libxml2-utils 2>/dev/null; echo status $?; bb chroot /disk/a /sbin/apk info -e bash jq oniguruma libmagic libxml2 popt 2>/dev/null; for f in bin/bash usr/bin/jq usr/bin/make usr/lib/libonig.so.5; do test -e /disk/a/$f && echo left $f; done; bb chroot /disk/a /sbin/apk info 2>/dev/null | bb wc -l | bb cmp -s - /disk/a/root/before && echo as before; rm /disk/a/root/before
+status 0
+as before
+
+== apk: a dependency comes along; install scripts run
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress bt-app 2>/dev/null; echo status $?; bb chroot /disk/a /sbin/apk info -e bt-app bt-lib 2>/dev/null; bb chroot /disk/a /usr/bin/bt-app; bb cat /disk/a/var/log/bt.log; : > /disk/a/var/log/bt.log
+status 0
+bt-app
+bt-lib
+lib 1.0
+app 1.0
+post-install 1.0-r0
+
+== apk: a dependency nothing provides stops the install
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted --no-progress bt-broken 2>&1 | bb grep -e bt-missing -e ERROR; bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress bt-broken >/dev/null 2>&1; echo status $?; bb chroot /disk/a /sbin/apk info -e bt-broken 2>/dev/null; test -e /disk/a/usr/share/doc/bt-broken || echo not installed
+ERROR: unable to select packages:
+  bt-missing (no such package):
+    required by: bt-broken-1.0-r0[bt-missing]
+status 2
+not installed
+
+== apk: a new trigger runs on the directory it watches
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress bt-trig 2>/dev/null; echo status $?; bb cat /disk/a/var/log/bt.log; : > /disk/a/var/log/bt.log
+status 0
+trigger /usr/share/bt
+
+== apk: upgrade, with a version constraint on the dependency
+$ echo /repo2 >> /disk/a/etc/apk/repositories; bb chroot /disk/a /sbin/apk upgrade --allow-untrusted -q --no-progress 2>/dev/null; echo status $?; bb chroot /disk/a /sbin/apk info -e bt-app bt-lib 2>/dev/null; bb chroot /disk/a /sbin/apk list -I 2>/dev/null | bb grep -o 'bt-[a-z]*-[0-9.]*-r0' | bb sort; bb chroot /disk/a /usr/bin/bt-app; bb cat /disk/a/var/log/bt.log; : > /disk/a/var/log/bt.log
+status 0
+bt-app
+bt-lib
+bt-app-2.0-r0
+bt-lib-2.0-r0
+bt-trig-1.0-r0
+lib 2.0
+app 2.0
+post-upgrade 2.0-r0 1.0-r0
+trigger /usr/share/bt
+
+== apk: remove a package: its scripts run, its dependency goes too
+$ bb chroot /disk/a /sbin/apk del -q --no-progress bt-app 2>/dev/null; echo status $?; bb chroot /disk/a /sbin/apk info -e bt-app bt-lib 2>/dev/null; test -e /disk/a/usr/bin/bt-app || echo app gone; test -e /disk/a/usr/share/bt/lib || echo lib gone; bb cat /disk/a/var/log/bt.log
+status 0
+app gone
+lib gone
+pre-deinstall 2.0-r0
+post-deinstall 2.0-r0
+trigger /usr/share/bt

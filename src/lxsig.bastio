@@ -250,7 +250,7 @@ fn post_sig(k: &mut Kernel, p: u64, s: u64)
   }
   pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
   k.sigsave = set(k.sigsave, sender_at(p, s), 0);     // the kernel, unless post_from says
-  if !blocked && (st == LXREADING || st == LXWAITING || st == FUTEXWAIT || st == SOCKWAIT || st == SLEEPWAIT) {
+  if !blocked && (st == LXREADING || st == LXWAITING || st == FUTEXWAIT || st == SOCKWAIT) {
     pset(&mut k.procs, p, F_STATE, READY);
   }
 }
@@ -724,7 +724,12 @@ fn lx_sigsuspend(k: &mut Kernel, pid: u64, was: u64, setp: u64) -> u64
     k.sigsave = set(k.sigsave, pid, pget(k.procs, pid, F_SIGMASK));
     pset(&mut k.procs, pid, F_SIGMASK, blockable(rd64(k.fs.xfer, 0)));
   }
-  return lx_retry(&mut k, pid, LX_RT_SIGSUSPEND);
+  let r = lx_retry(&mut k, pid, LX_RT_SIGSUSPEND);
+  let pend = pget(k.procs, pid, F_SIGPEND);
+  if r == SWITCH && pend & pget(k.procs, pid, F_SIGMASK) == pend {
+    nap(&mut k, pid, false);                // nothing to deliver yet: asleep until a signal (or a tick) comes
+  }
+  return r;
 }
 
 /// Is rsp on process p's alternate signal stack?
