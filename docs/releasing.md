@@ -33,8 +33,7 @@ notes. Once bastiolang has releases, set `BASTIOLANG_REF` in
 
 To try the build without making a release, start the workflow from the
 Actions tab with a tag that already exists: it uploads the files as a
-workflow artifact and stops there. While bastiolang is private, the
-workflow needs the same `BASTIOLANG_TOKEN` secret as CI.
+workflow artifact and stops there.
 
 ## What a release contains
 
