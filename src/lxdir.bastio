@@ -442,6 +442,19 @@ fn lx_fchdir(k: &mut Kernel, pid: u64, fd: u64) -> u64
     }
     return ENOTDIR;
   }
+  // Search permission on it, as chdir needs (src/lxperm.bastio).
+  let dl = base_len(k, pid, h);
+  let mut c = 0;
+  while c < dl
+    invariant c <= dl && dl <= FNAME_MAX && kok(k) && pid < NPROC && h < OFD_N
+  {
+    bset(&mut k.fs.xfer, c, base_byte(k, pid, h, c));
+    c = c + 1;
+  }
+  let e = may_path(&mut k, pid, dl, MAY_X);
+  if e != 0 {
+    return e;
+  }
   let mut i = 0;
   while i < CWD_STRIDE
     invariant i <= CWD_STRIDE && kok(k) && pid < NPROC && h < OFD_N
@@ -712,7 +725,7 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
   if e != 0 {
     return e;
   }
-  let src_disk = vfs_fs_of(&mut k.fs, n);
+  let src_disk = vfs_dev_of(&mut k.fs, n);
   let mut t = balloc(2 * FNAME_MAX);
   xfer_save(k, &mut t, 0, n);
   let m = lx_path_at_nf(&mut k, pid, ndir, npath);
@@ -749,7 +762,7 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
     bfree(t);
     return 0;                               // a name renamed to itself, or to another name of its file
   }
-  if vfs_fs_of(&mut k.fs, m) != src_disk {
+  if vfs_dev_of(&mut k.fs, m) != src_disk {
     bfree(t);
     return EXDEV;
   }
@@ -779,7 +792,7 @@ fn lx_exchange(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
   }
   let a = vfs_lookup(&mut k.fs, n);
   let ad = dir_at(&mut k, n);
-  let a_disk = vfs_fs_of(&mut k.fs, n);
+  let a_disk = vfs_dev_of(&mut k.fs, n);
   if (a != NO_FILE || ad != NO_FILE) && vfs_ro(&mut k.fs, n) {
     return EROFS;
   }
@@ -804,7 +817,7 @@ fn lx_exchange(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
     bfree(t);
     return EINVAL;
   }
-  if vfs_fs_of(&mut k.fs, m) != a_disk {
+  if vfs_dev_of(&mut k.fs, m) != a_disk {
     bfree(t);
     return EXDEV;
   }

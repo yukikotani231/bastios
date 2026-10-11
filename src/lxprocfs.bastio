@@ -7,6 +7,7 @@
 //   /proc/uptime            seconds since boot
 //   /proc/cpuinfo           one block per running processor
 //   /proc/filesystems       the file system types mount names
+//   /proc/version           the release uname gives, as a Linux banner
 //   /proc/sys/kernel/tainted, pid_max, printk, and the System V IPC
 //   limits shmmax, shmall, shmmni, msgmax, msgmnb, msgmni, sem
 //                           read-only sysctls with their fixed values
@@ -21,7 +22,8 @@
 //   /proc/PID/stat          the one-line status ps reads (52 fields)
 //   /proc/PID/status        the same as "Name:\t..." lines
 //   /proc/PID/cmdline       the program's name: argv is not kept
-//   /proc/PID/exe           a symbolic link to the program (readlink)
+//   /proc/PID/exe           a symbolic link to the program (readlink; open
+//                           opens the program, src/lxopen2.bastio)
 //   /proc/PID/mounts        the same as /proc/mounts
 //   /proc/self              the caller's own directory
 //   /sys/block/loopN/size, ro, and loop/backing_file, offset, sizelimit,
@@ -63,6 +65,7 @@ const PF_MAPS: u64 = 10;
 const PF_COMM: u64 = 11;
 const PF_SLACK: u64 = 12;
 const PF_LOADAVG: u64 = 13;           // with pid 0
+const PF_VERSION: u64 = 14;           // with pid 0
 const PSYS: u64 = 16 * NPROC;         // PROC_DEV + PSYS + SY_*: a /proc/sys file
 const SY_TAINTED: u64 = 1;
 const SY_PID_MAX: u64 = 2;
@@ -219,6 +222,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
     }
     if xfer_is(x, 5, n, "loadavg") {
       return PROC_DEV + PF_LOADAVG;
+    }
+    if xfer_is(x, 5, n, "version") {
+      return PROC_DEV + PF_VERSION;
     }
     if xfer_is(x, 5, n, "cpuinfo") {
       return PROC_DEV + PF_CPUINFO;
@@ -789,6 +795,9 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
   if what == PF_CMDLINE && p == 0 {
     return put_s(&mut o, 0, "BOOT_IMAGE=/boot/bastios.elf\n");
   }
+  if what == PF_VERSION && p == 0 {
+    return put_s(&mut o, 0, "Linux version 6.1.0-bastios (root@bastios) #1 SMP\n");   // the release uname gives
+  }
   if what == PF_LOADAVG && p == 0 {
     // No load average is kept (sysinfo's loads are 0 too): then the
     // runnable and existing processes, and the newest process id.
@@ -1062,6 +1071,17 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if dirfd % 0x100000000 != AT_FDCWD && user_empty(&mut k, pid, path) {
+    // readlinkat(fd, "") on an O_PATH | O_NOFOLLOW handle on a link
+    // reads that link, as on Linux; on anything else "" names nothing.
+    let d = fd_look(k, pid, dirfd);
+    if d.kind == K_FILE {
+      let f = vfs_row_file(k.fs, d.x);
+      if f != NO_FILE && vfs_is_link(&mut k.fs, f) {
+        return link_out(&mut k, pid, f, va, size);
+      }
+    }
+  }
   let n = lx_path_at_nf(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return k.perr;

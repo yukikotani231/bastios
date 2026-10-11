@@ -803,6 +803,10 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
     return ENOMEM;
   }
   anon_reach(&mut k, pid, from, oend);      // the pages move: every one is there first
+  let ri = map_whole(k, pid, from, have);
+  if ri < MAP_N {
+    return remap_shared(&mut k, pid, ri, from, oend, want);
+  }
   let brk = pget(k.procs, pid, F_BRK);
   let low = pget(k.procs, pid, F_MMAP);
   let extra = want - have;
@@ -853,6 +857,92 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
   if win_op(&mut k.mem, &mut k.spaces, pid, WOP_MOVE, from, oend, at) > WPAGES {
     return ENOMEM;
   }
+  if fresh {
+    pset(&mut k.procs, pid, F_MMAP, at * 4096);
+  }
+  if from >= low / 4096 {
+    hole_add(&mut k, pid, from, oend);      // where the pages were
+  }
+  return USER_BASE + at * 4096;
+}
+
+/// The record of process pid that is a shared mapping of the page cache
+/// (src/pcache.bastio) covering exactly window pages first .. first +
+/// pages, or MAP_N. Only a file opened for writing is mapped from the
+/// cache (lx_mmap); other shared mappings are copies.
+fn map_whole(k: &Kernel, pid: u64, first: u64, pages: u64) -> u64
+  requires kok(k) && pid < NPROC && first < WPAGES
+  ensures result <= MAP_N
+{
+  let mut i = 0;
+  while i < MAP_N
+    invariant i <= MAP_N
+  {
+    let h = get(k.maps, mp_at(pid, i, 2));
+    if get(k.maps, mp_at(pid, i, 0)) == first + 1 && get(k.maps, mp_at(pid, i, 1)) == pages
+      && h < OFD_N && of_get(k.ofd, h, 0) == OF_FILE && get(k.maps, mp_at(pid, i, 3)) % 4096 == 0 {
+      let row = of_get(k.ofd, h, 2);
+      if row < FD_ROWS && fget(k.fs.ftab, row, FD_MODE) / O_WRITE % 2 == 1 && row_file(k.fs, row) != NO_FILE {
+        return i;
+      }
+    }
+    i = i + 1;
+  }
+  return MAP_N;
+}
+
+/// mremap growing the shared file mapping of record ri (window pages
+/// from .. oend) to `want` pages, moving it: its pages move, the new tail
+/// maps the file's next pages from the page cache, so what is written
+/// there reaches the file as in the rest, and the record follows. The
+/// tail is read-only if the mapping was.
+fn remap_shared(k: &mut Kernel, pid: u64, ri: u64, from: u64, oend: u64, want: u64) -> u64
+  requires kok(k) && pid < NPROC && ri < MAP_N && from < oend && oend <= WPAGES && oend - from < want && want <= WPAGES
+  ensures kok(k)
+{
+  let have = oend - from;
+  let h = get(k.maps, mp_at(pid, ri, 2));
+  let off = get(k.maps, mp_at(pid, ri, 3));
+  if h >= OFD_N || off % 4096 != 0 || off > 0xFFFFFFFFFFFF {
+    return EINVAL;
+  }
+  let row = of_get(k.ofd, h, 2);
+  if row >= FD_ROWS {
+    return EINVAL;
+  }
+  let f = row_file(k.fs, row);
+  let brk = pget(k.procs, pid, F_BRK);
+  let low = pget(k.procs, pid, F_MMAP);
+  let mut at = hole_take(&mut k, pid, want);
+  let fresh = at >= STACK_FIRST;
+  if fresh {
+    if low > STACK_FIRST * 4096 || brk > low || want * 4096 > low - brk {
+      return ENOMEM;
+    }
+    at = (low - want * 4096) / 4096;
+    if at * 4096 < brk || at + want > STACK_FIRST {
+      return ENOMEM;
+    }
+  }
+  let w = user_page_writable(&mut k.spaces, pid, USER_BASE + from * 4096);
+  // The tail first, so running out of memory leaves the mapping as it was.
+  win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at, at + want, 0);
+  let r = lx_map_file_shared(&mut k, pid, at + have, want - have, f, off + have * 4096);
+  if r != 0 {
+    win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at, at + want, 0);
+    if !fresh {
+      hole_add(&mut k, pid, at, at + want);
+    }
+    return r;
+  }
+  if !w {
+    win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, at + have, at + want, 0);
+  }
+  if win_op(&mut k.mem, &mut k.spaces, pid, WOP_MOVE, from, oend, at) > WPAGES {
+    return ENOMEM;
+  }
+  k.maps = set(k.maps, mp_at(pid, ri, 0), at + 1);
+  k.maps = set(k.maps, mp_at(pid, ri, 1), want);
   if fresh {
     pset(&mut k.procs, pid, F_MMAP, at * 4096);
   }
