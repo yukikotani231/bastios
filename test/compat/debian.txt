@@ -1,0 +1,78 @@
+# Debian on BastiOS, for the compatibility suite (test/compat): Debian's
+# root file system unpacked on the disk and entered with chroot, where its
+# programs run. They are linked against glibc, so each starts in glibc's
+# dynamic linker, /lib64/ld-linux-x86-64.so.2: a link to a link, which the
+# kernel follows from inside the chroot. The Debian disk (debiandisk.py)
+# holds the root as /disk/root.tar and a BusyBox as /disk/busybox; the
+# suite boots it separately. The format is applets.txt's:
+#
+#   == NAME
+#   $ COMMAND        (one line, run by ash in /)
+#   expected output, line by line, compared exactly
+#
+# The cases run in order: the first unpacks the root. The expected output
+# is what Linux prints for the same commands in a chroot of the same root.
+
+== debian: unpack the root, chroot into it
+$ mkdir -p /disk/d && cd /disk/d && bb tar -xf /disk/root.tar && for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; cd /; bb chroot /disk/d /usr/bin/true; echo status $?; bb cat /disk/d/etc/debian_version
+status 0
+13.7
+
+== debian: the dynamic linker through its links, by hand
+$ bb chroot /disk/d /lib64/ld-linux-x86-64.so.2 --list /usr/bin/true | bb sed 's/ (0x[0-9a-f]*)//' | bb tr -d '\t'
+linux-vdso.so.1
+libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6
+/lib64/ld-linux-x86-64.so.2
+
+== debian: bash
+$ bb chroot /disk/d /bin/bash -c 'x=(a b c); echo ${#x[@]} ${x[1]} $((6 * 7)); [[ abc == a* ]] && echo match; echo ${BASH_VERSINFO[0]}'
+3 b 42
+match
+5
+
+== debian: coreutils make, copy, move, link and look at files
+$ bb chroot /disk/d /bin/bash -c 'cd /tmp && echo hello > f && cp f g && mv g h && ln -s h l && readlink l && cat l && stat -c "%s %F" h && ls -1 l h && rm f h l && ls'
+h
+hello
+6 regular file
+h
+l
+
+== debian: coreutils, sed, grep and awk in a pipeline
+$ bb chroot /disk/d /bin/bash -c 'printf "b 2\na 1\nc 3\n" | sort | sed "s/ /=/" | grep -v c | tr a-z A-Z; seq 1 10 | awk "{s += \$1} END {print s}"; echo hello | sha256sum'
+A=1
+B=2
+55
+5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03  -
+
+== debian: tar and gzip (GNU tar makes its archive with creat)
+$ bb chroot /disk/d /bin/bash -c 'cd /tmp && mkdir -p t/d && echo x > t/d/f && tar -czf t.tgz t && rm -r t && tar -xzf t.tgz && cat t/d/f && tar -tzf t.tgz && rm -r t t.tgz'
+x
+t/
+t/d/
+t/d/f
+
+== debian: find, xargs and du
+$ bb chroot /disk/d /bin/bash -c 'find /etc -maxdepth 1 -name "pass*" | sort | xargs -n1 basename; du -s /etc > /dev/null && echo du ok'
+passwd
+passwd-
+du ok
+
+== debian: users and the machine
+$ bb chroot /disk/d /bin/bash -c 'id; whoami; uname -s -m; date -u -d @0 +%Y-%m-%dT%H:%M:%S; [ $(date +%s) -gt 1700000000 ] && echo the clock is past 2023'
+uid=0(root) gid=0(root) groups=0(root)
+root
+Linux x86_64
+1970-01-01T00:00:00
+the clock is past 2023
+
+== debian: perl
+$ bb chroot /disk/d /usr/bin/perl -e 'my %h = (a => 1, b => 2); print join(",", map { "$_=$h{$_}" } sort keys %h), "\n"; print length("x" x 1000), "\n"'
+a=1,b=2
+1000
+
+== debian: dpkg knows the packages
+$ bb chroot /disk/d /usr/bin/dpkg-query -W -f '${Package}\n' bash coreutils libc6
+bash
+coreutils
+libc6

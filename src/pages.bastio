@@ -224,6 +224,34 @@ fn is_text_page(m: &Mem, s: &Shared) -> bool
   return shared_id(s) < len(m.bm) && get(m.bm, shared_id(s)) == TXT_PAGE;
 }
 
+// A private page fork shares between parent and child until one of them
+// writes it (copy-on-write, src/lxcow.bastio) is a shared page marked
+// COW_PAGE: in use, mapped read-only in every space that holds it, and
+// copied on the first write. The mark is the page's, not a mapping's: a
+// COW_PAGE is only ever mapped where the memory is private and writable,
+// and anything that would change that (mprotect, MADV_DONTNEED) gives the
+// space its own copy first. The last reference's drop_shared marks the
+// page free again.
+const COW_PAGE: u64 = 3;
+
+/// Marks the page of `s`, which a private mapping held, COW_PAGE.
+fn mark_cow(m: &mut Mem, s: &Shared)
+  requires mem_ok(m)
+  ensures mem_ok(m)
+{
+  let i = shared_id(s);
+  if i < len(m.bm) && get(m.bm, i) != 1 {
+    m.bm = set(m.bm, i, COW_PAGE);
+  }
+}
+
+/// Is shared page `s` copy-on-write?
+fn is_cow_page(m: &Mem, s: &Shared) -> bool
+  requires mem_ok(m)
+{
+  return shared_id(s) < len(m.bm) && get(m.bm, shared_id(s)) == COW_PAGE;
+}
+
 /// The free pages plus the cached ones (`mem`).
 fn count_avail(bm: &Buf) -> u64
 {

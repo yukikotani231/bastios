@@ -199,6 +199,27 @@ fn pci_find_class(p: &mut Pci, cls: u64) -> u64
   return PCI_NONE;
 }
 
+/// The first device from `from` on (in pci_next's order) whose class is
+/// `cls`, as pci_find_class, or PCI_NONE.
+fn pci_class_from(p: &mut Pci, cls: u64, from: u64) -> u64
+  requires pci_ok(p)
+  ensures result <= PCI_NONE && (result == PCI_NONE || result >= from)
+{
+  if from >= PCI_NONE {
+    return PCI_NONE;
+  }
+  let mut d = from;
+  while d < PCI_NONE
+    invariant d <= PCI_NONE && d >= from
+  {
+    if pci_read(&mut p, d, PCI_ID) != 0xFFFFFFFF && pci_read(&mut p, d, PCI_CLASS) >> 8 == cls {
+      return d;
+    }
+    d = pci_next(&mut p, d);
+  }
+  return PCI_NONE;
+}
+
 /// The size of the device's first BAR, a memory BAR, found the usual way:
 /// write all ones, read back which address bits stick, restore it. The
 /// device must not be decoding it meanwhile (it is not enabled yet).
