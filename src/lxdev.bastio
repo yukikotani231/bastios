@@ -58,6 +58,9 @@ fn dev_rdev(d: u64) -> u64 {
   if d >= DEV_LOOP && d < DEV_LOOP + LOOP_N {
     return 0x700 + d - DEV_LOOP;            // block major 7
   }
+  if d == DEV_LOOPCTL {
+    return 0xAED;                           // 10:237
+  }
   return 0;
 }
 
@@ -78,6 +81,9 @@ fn rdev_dev(rdev: u64) -> u64 {
   if rdev >= 0x700 && rdev < 0x700 + LOOP_N {
     return DEV_LOOP + rdev - 0x700;
   }
+  if rdev == 0xAED {
+    return DEV_LOOPCTL;
+  }
   return DEV_NONE;
 }
 
@@ -90,8 +96,13 @@ fn dev_meta(d: u64) -> Meta {
   if d == DEV_DIR {
     return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 3, mtime: 0, own: 0 };
   }
-  if d >= DEV_LOOP && d < DEV_LOOP + LOOP_N {
-    return Meta { ok: true, mode: S_IFBLK, size: dev_rdev(d), ino: 40 + d % 32, mtime: 0, own: 0 };
+  // The loop devices are root's and group disk's (src/lxfd.bastio checks
+  // it at open); /dev/loop-control is a character device.
+  if is_loop(d) {
+    return Meta { ok: true, mode: S_IFBLK, size: dev_rdev(d), ino: 40 + d % 32, mtime: 0, own: DISK_GID * 0x100000000 };
+  }
+  if d == DEV_LOOPCTL {
+    return Meta { ok: true, mode: 0x21B0, size: dev_rdev(d), ino: 30 + d % 16, mtime: 0, own: DISK_GID * 0x100000000 };
   }
   return Meta { ok: true, mode: S_IFCHR, size: dev_rdev(d), ino: 30 + d % 16, mtime: 0, own: 0 };
 }

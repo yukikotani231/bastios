@@ -59,7 +59,8 @@ const F_VTIMER: u64 = 42;
 const F_PTIMER: u64 = 44;
 // Credentials (src/lxcred.bastio), two 32-bit ids a word: real and
 // effective user, saved and file-system user, then the same for groups.
-// All 0 (root) at boot; a fork or a thread copies them.
+// All 0 (root) at boot; a fork, a thread or a native spawn copies them
+// (docs/security.md).
 const F_UID: u64 = 46;
 const F_SUID: u64 = 47;
 const F_GID: u64 = 48;
@@ -368,6 +369,7 @@ const LOOP_LEN: u64 = 104;             // LOOP_N * LOOP_W
 const DEV_LOOPCTL: u64 = 6;            // OF_DEV device /dev/loop-control
 const DEV_LOOP: u64 = 16;              // OF_DEV device /dev/loopN is DEV_LOOP + N
 const S_IFBLK: u64 = 0x61B0;           // a block device, rw-rw----
+const DISK_GID: u64 = 6;               // group disk (files/group): the loop devices'
 
 // File locks (src/lxlock.bastio): LK_N entries of LK_W words, then for
 // each process the record lock it waits for in F_SETLKW, LK_WW words.
@@ -856,6 +858,17 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   {
     pset(&mut k.procs, pid, f, 0);
     f = f + 1;
+  }
+  if 1 <= parent && parent < NPROC {
+    // A child keeps its parent's user and group ids and umask: starting a
+    // program must not make anyone root.
+    f = F_UID;
+    while f < F_GROUPS + NGROUPS_KEPT / 2
+      invariant F_UID <= f && f <= F_GROUPS + NGROUPS_KEPT / 2 && len(k.procs) == PTAB_LEN
+    {
+      pset(&mut k.procs, pid, f, pget(k.procs, parent, f));
+      f = f + 1;
+    }
   }
   lx_fd_reset(&mut k.lxfd, pid);
   sig_reset(&mut k.sigact, pid, false);
