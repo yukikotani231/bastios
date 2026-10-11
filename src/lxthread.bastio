@@ -353,6 +353,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   if c == 0 {
     return EAGAIN;
   }
+  pidfd_reuse(&mut k, c);                   // pidfds on the slot's last process (src/lxpidfd.bastio)
   if has_space(&mut k.spaces, c) {
     return EAGAIN;                          // a FREE row has no space; check it
   }

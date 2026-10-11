@@ -5,7 +5,7 @@
  * a socket's O_NONBLOCK, and errno corners of dup3, getrusage, getrandom,
  * timer_settime, the socket calls, mremap and munlock, and nested epoll;
  * shutdown(SHUT_RD), CPU-time clocks of a thread, arch_prctl, memfd_create
- * names, madvise and timerfd flags. */
+ * names, madvise, timerfd flags and ETXTBSY. */
 #include <mqueue.h>
 #include <sys/prctl.h>
 #include "compat.h"
@@ -492,6 +492,100 @@ int main(void) {
            int b = timerfd_settime(fd, 4, &its, 0); int be = errno;
            close(fd);
            a == 0 && b == -1 && be == EINVAL; }));
+    EXPECT("opening the program a process runs for writing is ETXTBSY", ({
+           char exe[256]; ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+           int fd = -1, e = 0;
+           if (n > 0) { exe[n] = 0; fd = open(exe, O_WRONLY); e = errno; }
+           if (fd >= 0) close(fd);
+           n > 0 && fd == -1 && e == ETXTBSY; }));
+    EXPECT("open of a directory for writing is EISDIR; ftruncate past RLIMIT_FSIZE is EFBIG", ({
+           int d = open("/tmp", O_RDWR); int de = errno;
+           pid_t c = fork();
+           if (c == 0) {
+               signal(SIGXFSZ, SIG_IGN);
+               struct rlimit rl = { 4096, 4096 }; setrlimit(RLIMIT_FSIZE, &rl);
+               int fd = open("/tmp/t_ltp2_fb", O_RDWR | O_CREAT | O_TRUNC, 0600);
+               int r = ftruncate(fd, 8192); int e = errno; int r2 = ftruncate(fd, 4096);
+               close(fd); unlink("/tmp/t_ltp2_fb");
+               _exit(r == -1 && e == EFBIG && r2 == 0 ? 0 : 1);
+           }
+           int st; waitpid(c, &st, 0);
+           d == -1 && de == EISDIR && WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("fallocate checks its range, the descriptor's access and the size limit before the mode", ({
+           int w = open("/tmp/t_ltp2_fa", O_RDWR | O_CREAT | O_TRUNC, 0600);
+           int r = open("/tmp/t_ltp2_fa", O_RDONLY);
+           int a = fallocate(r, FALLOC_FL_KEEP_SIZE, 0, 4096); int ae = errno;
+           int b = fallocate(w, FALLOC_FL_KEEP_SIZE, -4096, 4096); int be = errno;
+           int c = fallocate(w, FALLOC_FL_KEEP_SIZE, 4096, 0); int ce = errno;
+           int d = fallocate(w, FALLOC_FL_KEEP_SIZE, 0x7FFFFFFFFFFFF000LL, 8192); int de = errno;
+           int g = fallocate(w, 0, 0, 4096); struct stat s; fstat(w, &s);
+           close(w); close(r); unlink("/tmp/t_ltp2_fa");
+           a == -1 && ae == EBADF && b == -1 && be == EINVAL && c == -1 && ce == EINVAL
+             && d == -1 && de == EFBIG && g == 0 && s.st_size == 4096; }));
+    EXPECT("msync: bad flags are EINVAL, an unmapped range ENOMEM", ({
+           char *p = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int a = msync(p, 4096, MS_ASYNC | MS_SYNC); int ae = errno;
+           int b = msync(p, 4096, -1); int be = errno;
+           int c = msync(p, 8192, MS_SYNC);
+           munmap(p + 4096, 4096);
+           int d = msync(p, 8192, MS_SYNC); int de = errno;
+           munmap(p, 4096);
+           a == -1 && ae == EINVAL && b == -1 && be == EINVAL && c == 0 && d == -1 && de == ENOMEM; }));
+    EXPECT("rt_sigqueueinfo with a si_code of 0 or more to another process is EPERM", ({
+           pid_t c = fork();
+           if (c == 0) { pause(); _exit(0); }
+           siginfo_t si; memset(&si, 0, sizeof si);
+           si.si_signo = SIGUSR1; si.si_code = 0; si.si_pid = getpid(); si.si_uid = getuid();
+           int a = syscall(SYS_rt_sigqueueinfo, c, SIGUSR1, &si); int ae = errno;
+           si.si_code = SI_QUEUE;
+           kill(c, SIGKILL); waitpid(c, 0, 0);
+           int b = syscall(SYS_rt_sigqueueinfo, getpid(), 0, &si);
+           a == -1 && ae == EPERM && b == 0; }));
+    EXPECT("utimensat with no path and AT_FDCWD is EFAULT; epoll_ctl on /dev/zero is EPERM", ({
+           int a = syscall(SYS_utimensat, AT_FDCWD, 0, 0, 0); int ae = errno;
+           int z = open("/dev/zero", O_RDONLY); int ep = epoll_create1(0);
+           struct epoll_event ev = { EPOLLIN, { 0 } };
+           int b = epoll_ctl(ep, EPOLL_CTL_ADD, z, &ev); int be = errno;
+           close(z); close(ep);
+           a == -1 && ae == EFAULT && b == -1 && be == EPERM; }));
+    EXPECT("AF_UNIX SOCK_DGRAM: a bound socket gets datagrams from sendto and from a connected sender", ({
+           unlink("/tmp/t_ltp2_dg");
+           struct sockaddr_un a = { AF_UNIX, "/tmp/t_ltp2_dg" };
+           int r = socket(AF_UNIX, SOCK_DGRAM, 0);
+           int b = bind(r, (struct sockaddr *)&a, sizeof a);
+           int s1 = socket(AF_UNIX, SOCK_DGRAM, 0), s2 = socket(AF_UNIX, SOCK_DGRAM, 0);
+           int x = sendto(s1, "one", 3, 0, (struct sockaddr *)&a, sizeof a);
+           int c = connect(s2, (struct sockaddr *)&a, sizeof a);
+           int y = send(s2, "two!", 4, 0);
+           char m[16]; struct sockaddr_un f; socklen_t fl = sizeof f;
+           int n1 = recvfrom(r, m, sizeof m, 0, (struct sockaddr *)&f, &fl);
+           int ok1 = n1 == 3 && memcmp(m, "one", 3) == 0 && fl == 0;    /* the sender is not bound */
+           int n2 = recv(r, m, sizeof m, MSG_DONTWAIT);
+           int ok2 = n2 == 4 && memcmp(m, "two!", 4) == 0;
+           int n3 = recv(r, m, sizeof m, MSG_DONTWAIT); int e3 = errno;
+           int u = send(s1, "x", 1, 0); int ue = errno;
+           close(r);
+           int g = send(s2, "gone", 4, 0); int ge = errno;
+           close(s1); close(s2); unlink("/tmp/t_ltp2_dg");
+           b == 0 && x == 3 && c == 0 && y == 4 && ok1 && ok2 && n3 == -1 && e3 == EAGAIN
+             && u == -1 && ue == ENOTCONN && g == -1 && ge == ECONNREFUSED; }));
+    EXPECT("AF_UNIX SOCK_DGRAM: getsockname gives the bound path, recvfrom a bound sender's, and replies reach it", ({
+           unlink("/tmp/t_ltp2_d1"); unlink("/tmp/t_ltp2_d2");
+           struct sockaddr_un a = { AF_UNIX, "/tmp/t_ltp2_d1" }, b = { AF_UNIX, "/tmp/t_ltp2_d2" };
+           int s = socket(AF_UNIX, SOCK_DGRAM, 0), p = socket(AF_UNIX, SOCK_DGRAM, 0);
+           bind(s, (struct sockaddr *)&a, sizeof a); bind(p, (struct sockaddr *)&b, sizeof b);
+           struct sockaddr_un n; socklen_t nl = sizeof n;
+           int g = getsockname(s, (struct sockaddr *)&n, &nl);
+           int gok = g == 0 && nl == 2 + strlen(a.sun_path) + 1 && strcmp(n.sun_path, a.sun_path) == 0;
+           int c = connect(p, (struct sockaddr *)&n, nl);
+           int w = write(p, "ping", 4);
+           char m[8]; struct sockaddr_un f; socklen_t fl = sizeof f;
+           int r1 = recvfrom(s, m, sizeof m, 0, (struct sockaddr *)&f, &fl);
+           int fok = r1 == 4 && fl > 2 && strcmp(f.sun_path, b.sun_path) == 0;
+           int x = sendto(s, "pong", 4, 0, (struct sockaddr *)&f, fl);
+           int r2 = read(p, m, sizeof m);
+           close(s); close(p); unlink(a.sun_path); unlink(b.sun_path);
+           gok && c == 0 && w == 4 && fok && x == 4 && r2 == 4 && memcmp(m, "pong", 4) == 0; }));
     EXPECT("pipe: pipes run out of descriptors (EMFILE) before the kernel runs out of pipes (LTP pipe06)", ({
            int fds[2], n = 0, e = 0, ok = 1, keep[2] = { -1, -1 };
            for (;;) {

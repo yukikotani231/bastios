@@ -93,6 +93,7 @@ const S_ISVTX: u64 = 512;            // sticky: only a name's owner may remove i
 const S_ISGID: u64 = 1024;
 const S_ISUID: u64 = 2048;
 const SIG_DEATH: u64 = 256;          // F_CODE of a process a signal ended: 256 + the signal
+const EXIT_PENDING: u64 = 4294967296;  // F_CODE of a group leader whose exit waits for its threads: 2^32 + the code
 
 /// The exit code sys_wait reports for F_CODE `code`: 128 + the signal for
 /// a process a signal ended, as a Linux shell shows it.
@@ -517,6 +518,7 @@ const LAZY_LEN: u64 = NPROC * LZ_W;
 const LX_PAUSE: u64 = 34;
 const LX_RT_SIGSUSPEND: u64 = 130;
 const LX_WAITID: u64 = 247;
+const P_PIDFD: u64 = 3;               // waitid's idtype for a pidfd (src/lxpidfd.bastio)
 const LX_TIMES: u64 = 100;
 const OF_SOCK: u64 = 5;               // x: the kernel socket; word 3: 2 * peer + nonblocking
 const OF_DEV: u64 = 7;                // x: the device (src/lxdev.bastio)
@@ -541,6 +543,7 @@ const OF_UNIX: u64 = 11;              // an AF_UNIX socket: see src/lxunix.basti
 const OF_PTY: u64 = 14;               // a pseudo-terminal end: x DEV_PTM + N or DEV_PTS + N; word 3: nonblocking (src/lxpty.bastio)
 const OF_PQ: u64 = 13;                // a POSIX message queue: x the queue; word 3: nonblocking + 2 * access mode (src/lxmq.bastio)
 const OF_SIGFD: u64 = 12;             // a signalfd: word 2 the signals it takes; word 3: nonblocking (src/lxevent.bastio)
+const OF_PIDFD: u64 = 15;             // a pidfd: x the process, NPROC once its slot was reused; word 3: nonblocking (src/lxpidfd.bastio)
 const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
 const DIR_VFS: u64 = 2;               // DIR_VFS + a file layer directory handle
@@ -604,6 +607,7 @@ const ENOSPC: u64 = 18446744073709551588;    // 2^64 - 28
 const EROFS: u64 = 18446744073709551586;     // 2^64 - 30
 const ENOTBLK: u64 = 18446744073709551601;   // 2^64 - 15
 const EBUSY: u64 = 18446744073709551600;     // 2^64 - 16
+const ETXTBSY: u64 = 18446744073709551590;   // 2^64 - 26
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
 const NAPPLETS: u64 = 34;
 const NSUID_APPLETS: u64 = 2;          // su and passwd (bin_suid, src/lxproc.bastio)
@@ -677,6 +681,7 @@ const K_EVENT: u64 = 8;               // x: the description (src/lxevent.bastio)
 const K_TIMER: u64 = 9;               // x: the timer
 const K_EPOLL: u64 = 10;              // x: the epoll instance
 const K_SIGFD: u64 = 11;              // x: the description (src/lxevent.bastio)
+const K_PIDFD: u64 = 15;              // x: the process, NPROC if it is gone (src/lxpidfd.bastio)
 
 
 struct Kernel {
@@ -934,6 +939,7 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   if pid == 0 {
     return 0;
   }
+  pidfd_reuse(&mut k, pid);                 // pidfds on the slot's last process (src/lxpidfd.bastio)
   // A FREE process has no address space; check it rather than assume it.
   match take_space(&mut k.spaces, pid) {
     Space::Empty => {},
@@ -1248,13 +1254,28 @@ fn build_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, img: Str, el
 /// Ends process `pid` with exit `code`: frees its address space, closes its
 /// files, hands the code to a parent waiting for it, and orphans its
 /// children.
-fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code: u64)
+fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
   requires kok(k) && 1 <= who && who < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
-  // A thread ends its whole group, which ends as its leader.
+  // A thread ends its whole group, which ends as its leader. If threads
+  // on other processors must come back first, the leader keeps the code
+  // (+ EXIT_PENDING): the first exit wins, as Linux's group exit code,
+  // not the 137 of the last killed thread to come back.
+  let mut code = code0;
+  let mut g = 0;
+  if pget(k.procs, who, F_TGID) != 0 {
+    g = tgid(k.procs, who);
+    let pend = pget(k.procs, g, F_CODE);
+    if pend >= EXIT_PENDING && pend - EXIT_PENDING < EXIT_PENDING {
+      code = pend - EXIT_PENDING;
+    }
+  }
   let pid = group_end(&mut k, mmu, who);
   if pid == 0 {
+    if g != 0 && code < EXIT_PENDING {
+      pset(&mut k.procs, g, F_CODE, code + EXIT_PENDING);
+    }
     return;
   }
   map_drop_all(&mut k, pid);                 // shared file pages go back first

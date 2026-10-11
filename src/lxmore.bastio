@@ -363,24 +363,44 @@ fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u6
   return 0;
 }
 
+/// The mode bits Linux's fallocate knows (FALLOC_FL_SUPPORTED_MASK:
+/// KEEP_SIZE, PUNCH_HOLE, COLLAPSE_RANGE, ZERO_RANGE, INSERT_RANGE,
+/// UNSHARE_RANGE, WRITE_ZEROES).
+const FALLOC_KNOWN: u64 = 0xFB;
+
 /// fallocate(fd, mode, off, len): mode 0 only, which grows the file to
-/// off + len if it is shorter.
+/// off + len if it is shorter; other known modes fail with -EOPNOTSUPP
+/// after the checks Linux makes first.
 fn lx_fallocate(k: &mut Kernel, pid: u64, fd: u64, mode: u64, off: u64, len: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  // In Linux's order: the descriptor, then vfs_fallocate's checks of the
+  // range, the mode bits, the access, the kind of file and the size.
   let d = fd_look(k, pid, fd);
   if d.kind == K_BAD {
     return EBADF;
   }
+  if len == 0 || off >= 0x8000000000000000 || len >= 0x8000000000000000 {
+    return EINVAL;
+  }
+  if mode & !FALLOC_KNOWN != 0 {
+    return EOPNOTSUPP;
+  }
+  if d.kind == K_PIPE_R || d.kind == K_DIR || d.kind == K_FILE && (d.x >= FD_ROWS || fget(k.fs.ftab, d.x, FD_MODE) / O_WRITE % 2 == 0) {
+    return EBADF;                           // not open for writing
+  }
+  if d.kind == K_PIPE_W {
+    return ESPIPE;
+  }
   if d.kind != K_FILE {
     return ENODEV;
   }
-  if mode != 0 {
-    return EOPNOTSUPP;
+  if off + len >= 0x8000000000000000 {
+    return EFBIG;                           // past the largest file offset
   }
-  if len == 0 || off >= 0x8000000000000000 || len >= 0x8000000000000000 {
-    return EINVAL;
+  if mode != 0 {
+    return EOPNOTSUPP;                      // no blocks are reserved, punched or zeroed
   }
   let size = vfs_size(&mut k.fs, vfs_row_file(k.fs, d.x));
   if size == NO_FILE {
