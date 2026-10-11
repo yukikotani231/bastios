@@ -1573,11 +1573,11 @@ fn pages_free(m: &Mem, lo: u64, k: u64) -> bool
 /// first e1000 whose registers lie in the part of the device window below
 /// E1K_TOP, with pages from page `at` on.
 fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, avoid_lo: u64, avoid_hi: u64,
-  plo: u64, phi: u64, fb_lo: u64, fb_hi: u64, usb_lo: u64, usb_hi: u64, dk_lo: u64, dk_hi: u64, msi: u64) -> Nic
+  plo: u64, phi: u64, fb_lo: u64, fb_hi: u64, usb_lo: u64, usb_hi: u64, dk_lo: u64, dk_hi: u64, sn_lo: u64, sn_hi: u64, msi: u64) -> Nic
   requires pci_ok(pci) && mem_ok(m) && at + NET_PAGES <= NPAGES && E1K_PAGES <= NET_PAGES && msi <= 4294967295
   requires forall k: u64 :: 0x1000 <= k && k < 65536 && !(avoid_lo <= k && k < avoid_hi) && !(plo <= k && k < phi) ==> port_free(ports, k)
   requires forall a: u64 :: 0xC0000000 <= a && a < E1K_TOP && !(fb_lo <= a && a < fb_hi) && !(usb_lo <= a && a < usb_hi)
-    && !(dk_lo <= a && a < dk_hi) ==> mmio_free(win, a)
+    && !(dk_lo <= a && a < dk_hi) && !(sn_lo <= a && a < sn_hi) ==> mmio_free(win, a)
   ensures nic_ok(result) && mem_ok(m)
 {
   let dev = pci_find(&mut pci, VIRTIO_VENDOR, VIRTIO_NET);
@@ -1596,7 +1596,8 @@ fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, a
     if msi > 0 && cap > 0 && cap < 252 {
       let e = pci_msix_at(&mut pci, dev, cap);
       if e >= 0xC0000000 && e + 16 <= E1K_TOP && (e + 16 <= fb_lo || e >= fb_hi)
-        && (e + 16 <= usb_lo || e >= usb_hi) && (e + 16 <= dk_lo || e >= dk_hi) {
+        && (e + 16 <= usb_lo || e >= usb_hi) && (e + 16 <= dk_lo || e >= dk_hi)
+        && (e + 16 <= sn_lo || e >= sn_hi) {
         pci_intx_off(&mut pci, dev);
         pci_msix_on(&mut pci, dev, cap);
         let mut r = mmio_claim(&mut win, e, 16);
@@ -1623,7 +1624,7 @@ fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, a
   let bar = pci_mem_bar(&mut pci, e);
   if bar < 0xC0000000 || bar + E1K_LEN > E1K_TOP || bar % 4096 != 0 || !pages_free(m, at, E1K_PAGES)
     || !(bar + E1K_LEN <= fb_lo || bar >= fb_hi) || !(bar + E1K_LEN <= usb_lo || bar >= usb_hi)
-    || !(bar + E1K_LEN <= dk_lo || bar >= dk_hi) {
+    || !(bar + E1K_LEN <= dk_lo || bar >= dk_hi) || !(bar + E1K_LEN <= sn_lo || bar >= sn_hi) {
     return Nic::None;
   }
   pci_enable(&mut pci, e);

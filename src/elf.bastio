@@ -531,7 +531,7 @@ fn share_file_page(m: &mut Mem, v: &mut Vfs, h: u64, pg: u64, l2: &mut PageTable
   requires mem_ok(m) && vfs_ok(v) && pt_level(l2) == 2 && p < WPAGES && pg < 512
   ensures mem_ok(m) && vfs_ok(v) && pt_level(l2) == 2
 {
-  let mut slot = pc_find(v.pc, h, pg);
+  let mut slot = pc_get(&mut v.pc, h, pg);
   if slot >= PC_N {
     if vfs_read_at(&mut v, h, pg * 4096, XFER) != XFER {
       return true;

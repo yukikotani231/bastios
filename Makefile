@@ -49,7 +49,7 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest crashme diskbench
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs mtone mmouse
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so build/user/vdso.so
 
 build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
@@ -121,7 +121,7 @@ build/user/vdso.so: user/vdso.c user/vdso.ld user/vdso.map | build/user
 # A C program against musl libc, static PIE (the musl-tools package).
 MUSLCC ?= musl-gcc
 
-build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf build/user/mkfs.elf: build/user/%.elf: user/%.c | build/user
+build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf build/user/mkfs.elf build/user/mtone.elf build/user/mmouse.elf: build/user/%.elf: user/%.c | build/user
 	$(MUSLCC) -static-pie -O2 -o $@ $<
 
 # A dynamically linked PIE, and musl's dynamic linker (libc.so, which is
@@ -590,19 +590,51 @@ build/compat/bastio.img: build/compat/bastioc1 build/compat/z3 build/compat/tcc 
 	test/compat/bastiodisk.sh $@ build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc \
 	  $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB) $(BASTIOLANG)/stage1
 
+# Alpine Linux on BastiOS, on a fourth disk (test/compat/alpinedisk.py) for
+# test/compat/alpine.txt: Alpine's root file system, which the checks enter
+# with chroot, and local repositories apk installs packages from. They come
+# from Docker Hub images, pinned by digest: the minirootfs, and images that
+# apk installed packages into, which alpinedisk.py packs again. All their
+# packages are served over HTTP; ALPINE_DISK_PKGS, with what they depend
+# on, also go on the disk, so the checks that use them need no network.
+# The images: git and curl; Alpine's own CI image (alpine-sdk: gcc, g++,
+# make, binutils, musl-dev); python3 (the ansible image); jq and libxml2's
+# tools; and vim from edge (its runtime is about 2100 files: it waits for a
+# disk directory bigger than 1024 entries, as gcc and python3 do).
+ALPINE_BASE ?= library/alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+ALPINE_PKGS ?= alpine/git@sha256:a4bb51f1a3553df194ce679fc1db721d8bfba2046fa1a88fe9d4ac551ffbce25 \
+               alpine/curl@sha256:e17bf3bdfef2efda277af9b73149ece806d30354b3eebd002555f66a8cabb357 \
+               alpinelinux/alpine-gitlab-ci@sha256:4bce54b0b246967f6ab51476d5511245ba35a49f30b2e63102ca294ab488add9 \
+               alpine/ansible@sha256:72ed4cb27b533dc2bc608a657b9ed630c2ee53a86ba9111d0b710c5424de0fe2 \
+               alpine/xml@sha256:836f531a7e38bbdaab8f1c1ce76bf868412f253671625ebf54cf14fa28544de6 \
+               heywoodlh/vim@sha256:c8c4f0de47f20de92af6d3b0544898e857f6c2eecd7ab397a1e7daf0b5fc6292
+ALPINE_DISK_PKGS ?= git,curl,less,openssh-keygen,bash,make,jq,rsync,openssl,file,libxml2-utils
+# Where the images' layers are kept, checked against their digests on each
+# use. Point it outside build/ to keep them across fresh checkouts: Docker
+# Hub rate-limits anonymous pulls, and only what is missing is fetched.
+ALPINE_CACHE ?= build/compat/alpine
+
+build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py | build/compat
+	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE)
+
 build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) test/compat/mkdisk.py
 	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) perllib=build/compat/perllib py=build/compat/py
 
-compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --out build/compat $(COMPAT_PROGS)
+compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --out build/compat $(COMPAT_PROGS)
 
 # Records which checks pass now, so `make compat` catches regressions.
-compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --out build/compat $(COMPAT_PROGS)
+compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --out build/compat $(COMPAT_PROGS)
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
 	test/compat/run.py --host build/compat --out build/compat/host $(COMPAT_PROGS)
+
+# Power cuts on a disk with a write cache, at every point of two crashme
+# runs (see test/crashsim.py; `make test` runs a short pass).
+crashsim: build/bastios.elf
+	test/crashsim.py
 
 # The Linux Test Project's system call tests (test/compat/ltp.py). LTP
 # (GPL-2.0-or-later, not part of this repository) is fetched at a pinned tag
@@ -680,4 +712,4 @@ clean:
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
 FORCE:
 
-.PHONY: FORCE all run disk usb run-usb test fuzz bench smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean

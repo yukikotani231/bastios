@@ -167,8 +167,9 @@ def with_bb(cmd, bb):
 # ---------------------------------------------------------------- the guest
 
 class Guest:
-    def __init__(self, kernel, disk, log, web=None):
-        self.kernel, self.disk, self.log = kernel, disk, log
+    def __init__(self, kernel, disk, log, web=None, idle=False):
+        # idle: QEMU runs under SCHED_IDLE, on CPU time no other process wants.
+        self.kernel, self.disk, self.log, self.idle = kernel, disk, log, idle
         self.q = None
         self.hosturl = f"http://10.0.2.2:{web.port}" if web else ""
         self.hostaddr = f"10.0.2.2 {web.port}" if web else ""
@@ -188,7 +189,8 @@ class Guest:
              "-serial", "stdio", "-monitor", "none",
              "-drive", f"file={self.disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd",
              "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{self.sshport}-:22", "-device", "virtio-net-pci,netdev=n0"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            preexec_fn=(lambda: os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))) if self.idle else None)
         if not self.read_until(b"bastios> ", 0, 60):
             raise SystemExit("compat: the kernel did not reach its shell prompt")
         mark = len(self.out)
@@ -397,6 +399,7 @@ def run_program(env, prog, timeout):
 
 
 def run_applet(env, name, cmd, expected, timeout, bb):
+    cmd = cmd.replace("ALPINEURL", env.hosturl + "/alpine")
     cmd = (cmd.replace("HOSTSURL", env.hostsurl).replace("HOSTURL", env.hosturl)
            .replace("HOSTADDR", env.hostaddr).replace("HOSTPORT", env.hostport)
            .replace("SSHPORT", getattr(env, "sshport", "")))
@@ -513,6 +516,8 @@ def main():
     ap.add_argument("--out", default="build/compat")
     ap.add_argument("--dev-disk", help="the development disk (tcc and make) for dev.txt")
     ap.add_argument("--bastio-disk", help="the Bastio disk (bastioc1, z3, tcc) for bastio.txt")
+    ap.add_argument("--alpine-disk", help="the Alpine disk (root file system, apk repository) for alpine.txt")
+    ap.add_argument("--alpine-repo", help="the same repository's directory, served at ALPINEURL")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--update-baseline", action="store_true")
@@ -525,67 +530,103 @@ def main():
     sshc = load_applets(os.path.join(HERE, "ssh.txt"))
     dev = load_applets(os.path.join(HERE, "dev.txt"))
     bastio = load_applets(os.path.join(HERE, "bastio.txt"))
+    alpine = load_applets(os.path.join(HERE, "alpine.txt"))
     tty = load_tty(os.path.join(HERE, "tty.txt"))
     os.makedirs(args.out, exist_ok=True)
     log = open(os.path.join(args.out, "serial.log"), "wb")
     web = WebServer()
-    env = Host(os.path.abspath(args.host), web) if args.host else Guest(args.kernel, args.disk, log, web)
+    env = Host(os.path.abspath(args.host), web) if args.host else None
     bb = os.path.join(os.path.abspath(args.host), "busybox") if args.host else BB
     t0 = time.time()
     results = {}
 
-    def other_disk(disk, what, cases, timeout):
-        """Runs cases on a guest booted from a disk of its own. Returns the
-        results and the guest's serial output."""
+    def on_main_disk():
+        """The groups the first disk holds, as (name, what, run) with run
+        taking a guest."""
+        g = [(prog, prog, lambda e, p=prog: run_program(e, p, args.timeout)) for prog in args.programs]
+        g.append(("busybox", "busybox applets", lambda e: [run_applet(e, n, c, x, 30, bb) for n, c, x in applets]))
+        g.append(("apps", "real programs", lambda e: [run_applet(e, n, c, x, 60, bb) for n, c, x in apps]))
+        if not args.host:
+            g.append(("ssh", "logging in over SSH", lambda e: [run_applet(e, n, c, x, 60, bb) for n, c, x in sshc]))
+        g.append(("tty", "programs on the terminal", lambda e: [run_tty(e, n, p, k, c, x, 30, bb) for n, p, k, c, x in tty]))
+        return g
+
+    def lane(disk, groups):
+        """Boots a guest from disk and runs groups on it, one after another.
+        Returns their results and the guest's serial output."""
         out = io.BytesIO()
         g = Guest(args.kernel, disk, out, web)
         try:
             g.boot()
-            print(f"compat: {what}", flush=True)
-            return [run_applet(g, n, c, e, timeout, bb) for n, c, e in cases], out.getvalue()
+            res = {}
+            for k, what, run in groups:
+                print(f"compat: {what}", flush=True)
+                res[k] = run(g)
+            return res, out.getvalue()
         finally:
             g.stop()
 
-    # tcc and make are on a disk of their own (the disk's directory has room
-    # for 64 entries, and the C runtime needs most of them), and the Bastio
-    # compiler, Z3 and tcc fill a third. Each disk gets its own guest, and
-    # with JOBS above 1 (the default is the number of CPUs) those guests run
-    # at the same time as the first one: they share nothing but the host's
-    # web server.
-    others = []
-    if not args.host:
-        if args.dev_disk:
-            others.append(("dev", args.dev_disk, "building C (tcc, make)", dev, 60))
-        if args.bastio_disk:
-            others.append(("bastio", args.bastio_disk, "the Bastio compiler (bastioc1, z3, tcc)", bastio, 900))
-    jobs = max(1, int(os.environ.get("JOBS") or os.cpu_count() or 1))
-    pool = concurrent.futures.ThreadPoolExecutor(max(1, len(others)))
-    pending = {}
-    try:
-        if jobs > 1:
-            pending = {k: pool.submit(other_disk, d, w, c, t) for k, d, w, c, t in others}
+    def applets_lane(cases, timeout):
+        return lambda e: [run_applet(e, n, c, x, timeout, bb) for n, c, x in cases]
+
+    main_groups = on_main_disk()
+    order = [k for k, _, _ in main_groups]
+    if args.host:
         env.boot()
-        for prog in args.programs:
-            print(f"compat: {prog}", flush=True)
-            results[prog] = run_program(env, prog, args.timeout)
-        print("compat: busybox applets", flush=True)
-        results["busybox"] = [run_applet(env, n, c, e, 30, bb) for n, c, e in applets]
-        print("compat: real programs", flush=True)
-        results["apps"] = [run_applet(env, n, c, e, 60, bb) for n, c, e in apps]
-        if not args.host:
-            print("compat: logging in over SSH", flush=True)
-            results["ssh"] = [run_applet(env, n, c, e, 60, bb) for n, c, e in sshc]
-        print("compat: programs on the terminal", flush=True)
-        results["tty"] = [run_tty(env, n, p, k, c, e, 30, bb) for n, p, k, c, e in tty]
-        env.stop()
-        for k, d, w, c, t in others:
-            results[k], out = pending[k].result() if k in pending else other_disk(d, w, c, t)
+        try:
+            for k, what, run in main_groups:
+                print(f"compat: {what}", flush=True)
+                results[k] = run(env)
+        finally:
+            env.stop()
+            log.close()
+            web.shutdown()
+        report(results, names, args.out, time.time() - t0)
+        return 0
+
+    # Every lane is a guest booted from a disk of its own, running its
+    # groups one after another. tcc and make are on a disk of their own (the
+    # C runtime needs most of a directory), the Bastio compiler, Z3 and tcc
+    # fill a third, and Alpine a fourth. With JOBS above 1 (the default is the number of
+    # CPUs) the lanes run at the same time, and the first disk's groups are
+    # split over two guests, the second on a copy of that disk: the guests
+    # share nothing but the host's web server. Each lane's checks run in the
+    # same order as before, and the serial logs are written in lane order.
+    jobs = max(1, int(os.environ.get("JOBS") or os.cpu_count() or 1))
+    scratch = tempfile.mkdtemp(prefix="compat-")
+    if jobs > 1:
+        cut = order.index("apps") + 1 if "ssh" in order else len(order)
+        copy = os.path.join(scratch, "disk.img")
+        shutil.copyfile(args.disk, copy)
+        lanes = [(args.disk, main_groups[:cut]), (copy, main_groups[cut:])]
+    else:
+        lanes = [(args.disk, main_groups)]
+    if args.dev_disk:
+        lanes.append((args.dev_disk, [("dev", "building C (tcc, make)", applets_lane(dev, 60))]))
+    if args.bastio_disk:
+        lanes.append((args.bastio_disk, [("bastio", "the Bastio compiler (bastioc1, z3, tcc)", applets_lane(bastio, 900))]))
+    if args.alpine_disk:
+        # Alpine's root and its packages. The cases change the disk (they
+        # unpack and install), so they get a copy and every run starts from
+        # the same disk.
+        disk = os.path.join(args.out, "alpine-run.img")
+        shutil.copyfile(args.alpine_disk, disk)
+        if args.alpine_repo:
+            os.makedirs(os.path.join(web.dir, "alpine"), exist_ok=True)
+            os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", "x86_64"))
+        lanes.append((disk, [("alpine", "Alpine Linux (apk)", applets_lane(alpine, 300))]))
+    lanes = [l for l in lanes if l[1]]
+    try:
+        with concurrent.futures.ThreadPoolExecutor(len(lanes) if jobs > 1 else 1) as pool:
+            done = list(pool.map(lambda l: lane(*l), lanes))
+        for res, out in done:
+            results.update(res)
             log.write(out)
     finally:
-        env.stop()
-        pool.shutdown(wait=True, cancel_futures=True)
         log.close()
         web.shutdown()
+        shutil.rmtree(scratch, ignore_errors=True)
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]

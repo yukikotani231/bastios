@@ -9,7 +9,8 @@
 // k.ofd, words h * OFD_STRIDE: kind, references, row, pipe or directory,
 // and a directory's next entry (for a pipe end: 1 if it is nonblocking);
 // then the F_SETOWN owner, F_SETSIG signal, the owner's setter's ids and
-// O_ASYNC (src/lxowner.bastio).
+// O_ASYNC (src/lxowner.bastio), then the access the open did not ask for
+// (OF_ACC: a device's description keeps no mode of its own otherwise).
 // k.pipes, words p * PIPE_STRIDE: head, count, the descriptions of its
 // read end and of its write end, the FIFO it belongs to + 1 (0 for an
 // anonymous pipe; src/lxevent.bastio), 1 once a writer has opened it,
@@ -113,6 +114,33 @@ fn pipe_room(t: &Buf, p: u64, count: u64) -> u64
   return c - count;
 }
 
+/// /proc/sys/fs/pipe-max-size: the most a process without
+/// CAP_SYS_RESOURCE may give a pipe with F_SETPIPE_SZ, and what its new
+/// pipes get if that is less than PIPE_CAP.
+fn pipe_max(k: &Kernel) -> u64
+  requires kok(k)
+  ensures PIPE_PAGE <= result
+{
+  let v = get(k.sys, SYS_PIPEMAX);
+  if v < PIPE_PAGE {
+    return PIPE_CAP;                        // never written
+  }
+  return v;
+}
+
+/// Word 6 for a pipe process pid makes: 0 (PIPE_CAP), or less if
+/// pipe-max-size is below PIPE_CAP and pid lacks CAP_SYS_RESOURCE, as on
+/// Linux (alloc_pipe_info).
+fn pipe_birth_cap(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  let m = pipe_max(k);
+  if m < PIPE_CAP && !cap_has(k, pid, CAP_SYS_RESOURCE) {
+    return m;
+  }
+  return 0;
+}
+
 /// F_GETPIPE_SZ and F_SETPIPE_SZ on pipe p. A new size is rounded up to
 /// a power of two pages; it may not drop below what the pipe holds
 /// (EBUSY) or rise past PIPE_CAP, /proc/sys/fs/pipe-max-size (EPERM, or
@@ -143,6 +171,9 @@ fn pipe_size(k: &mut Kernel, pid: u64, p: u64, set: bool, arg: u64) -> u64
     } else {
       size = size * 2;
     }
+  }
+  if size > pipe_max(k) && !cap_has(k, pid, CAP_SYS_RESOURCE) {
+    return EPERM;
   }
   if pi_get(k.pipes, p, 1) > size {
     return EBUSY;
@@ -496,7 +527,31 @@ fn ofd_new(k: &mut Kernel, kind: u64, x: u64) -> u64
   of_set(&mut k.ofd, h, OF_SIG, 0);
   of_set(&mut k.ofd, h, OF_CRED, 0);
   of_set(&mut k.ofd, h, OF_ASYNC, 0);
+  of_set(&mut k.ofd, h, OF_ACC, 0);
   return h;
+}
+
+/// Description h was just made by an open with Linux `flags`: notes the
+/// access it did not ask for in OF_ACC.
+fn ofd_access(k: &mut Kernel, h: u64, flags: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if h >= OFD_N {
+    return;
+  }
+  if flags % 4 == 0 {
+    of_set(&mut k.ofd, h, OF_ACC, ACC_NOWRITE);
+  } else if flags % 4 == 1 {
+    of_set(&mut k.ofd, h, OF_ACC, ACC_NOREAD);
+  }
+}
+
+/// Whether description h lacks the access `bit` (ACC_*).
+fn ofd_lacks(k: &Kernel, h: u64, bit: u64) -> bool
+  requires kok(k)
+{
+  return h < OFD_N && of_get(k.ofd, h, OF_ACC) & bit != 0;
 }
 
 /// The lowest closed descriptor of process pid at or above `from`, or LXNFD.
@@ -620,13 +675,16 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   }
   let pf = proc_file(k.procs, k.fs.xfer, n);
   if pf != 0 {
-    if flags % 4 != 0 || is_exe_file(pf) {
-      return EACCES;                        // /proc is read-only; exe is only a link
+    // /proc is read-only but for a sysctl root may write (rw-r--r--);
+    // exe is only a link.
+    if (flags % 4 != 0 && (!proc_writable(pf) || fs_id(k.procs, pid, false) != 0)) || is_exe_file(pf) {
+      return EACCES;
     }
     let hp = ofd_new(&mut k, OF_DEV, pf);
     if hp >= OFD_N {
       return ENFILE;
     }
+    ofd_access(&mut k, hp, flags);
     return fd_install(&mut k, pid, hp);
   }
   let dev = dev_at(k.fs.xfer, n);
@@ -639,6 +697,9 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   }
   if dev == DEV_PTMX {
     return pty_open_master(&mut k, pid, flags);       // src/lxpty.bastio
+  }
+  if dev == DEV_DSP && !snd_live(k.snd) {
+    return 18446744073709551597;                      // -ENODEV: no sound card
   }
   if dev >= DEV_PTS && dev < DEV_PTS + PTY_N {
     return pty_open_slave(&mut k, pid, dev - DEV_PTS, flags);
@@ -658,11 +719,15 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
       return EACCES;
     }
   }
+  if dev == DEV_MICE {
+    return mice_open(&mut k, pid, flags);   // src/lxmouse.bastio
+  }
   if dev != DEV_NONE && dev != DEV_DIR {
     let hv = ofd_new(&mut k, OF_DEV, dev);
     if hv >= OFD_N {
       return ENFILE;
     }
+    ofd_access(&mut k, hv, flags);
     return fd_install(&mut k, pid, hv);
   }
   return lx_open_node(&mut k, pid, n, flags, mode);
@@ -1006,7 +1071,7 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
   pi_set(&mut k.pipes, p, 3, 1);
   pi_set(&mut k.pipes, p, 4, 0);
   pi_set(&mut k.pipes, p, 5, 1);
-  pi_set(&mut k.pipes, p, 6, 0);
+  pi_set(&mut k.pipes, p, 6, pipe_birth_cap(k, pid));
   pi_set(&mut k.pipes, p, 7, 0);
   of_set(&mut k.ofd, hr, 3, flags / LO_NONBLOCK % 2);
   of_set(&mut k.ofd, hw, 3, flags / LO_NONBLOCK % 2);
