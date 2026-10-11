@@ -206,7 +206,12 @@ def run_guest(args, tests, progs, log, gated):
     had. (At nice 19 they still took enough to fail epoll_pwait03's
     timing in 4 runs of 4.)"""
     busy, idle, secs = waiting(tests, os.path.join(args.out, "results.json"), gated)
-    groups = list(batches(busy, BATCH))
+    # The batches are made from every test, as before, and then lose the
+    # waiting ones, so that each test runs after the same tests as before
+    # (a test can leave the kernel short of something, like pipes, that a
+    # later one in its batch needs).
+    moved = {t[0] for t in idle}
+    groups = [g for g in ([t for t in b if t[0] not in moved] for b in batches(tests, BATCH)) if g]
     lanes = []
     if idle:
         per_lane = max(WAITED, sum(secs.get(t[0], 0) for t in busy) / args.jobs)
