@@ -29,6 +29,9 @@ const AHCI_CLASS: u64 = 0x010601;      // mass storage, SATA, AHCI 1.0
 const AHCI_PAGES: u64 = 2;
 const AHCI_MAX_LEN: u64 = 0x1100;      // the generic registers and 32 ports
 const AHCI_SPINS: u64 = 20000000;
+// Polls a command may take; as long as ATA's, since a command that times out
+// is still pending in the port and would be mistaken for the next one.
+const AHCI_IO_SPINS: u64 = 500000000;
 const AHCI_SECTOR: u64 = 512;
 const PCI_BAR5: u64 = 0x24;
 
@@ -236,7 +239,7 @@ fn ahci_issue(h: &mut Ahci) -> bool
   let sec0 = h.sectors;
   let busy0 = h.busy;
   let mut i = 0;
-  while i < AHCI_SPINS
+  while i < AHCI_IO_SPINS
     invariant ahci_ok(h) && h.sectors == sec0 && h.busy == busy0
   {
     let st = ahci_check(&mut h);
