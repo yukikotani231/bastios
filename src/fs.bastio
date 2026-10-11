@@ -884,6 +884,31 @@ fn vfs_read_at(v: &mut Vfs, f0: u64, off: u64, n: u64) -> u64
   return r;
 }
 
+/// vfs_read_at for a caller that can sleep: VFS_MISS, with the reads of
+/// what is missing queued, where vfs_read_at would wait for the disk file
+/// system's queue. The other file systems answer as vfs_read_at does.
+fn vfs_read_try(v: &mut Vfs, f0: u64, off: u64, n: u64) -> u64
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+  ensures result <= n || result == NO_FD || result == VFS_MISS
+{
+  let f = vfs_target(&mut v, f0);
+  if f < NFILES || f >= LO0 {
+    return vfs_read_at(&mut v, f0, off, n);
+  }
+  let r = disk_read(&mut v.disk, f - NFILES, off, &mut v.xfer, n);
+  if r == DISK_MISS {
+    return VFS_MISS;
+  }
+  if r == NO_DISK_FILE || r > n {
+    return NO_FD;
+  }
+  if pc_on(v.pc) {
+    pc_overlay(&mut v.pc, f, off, &mut v.xfer, r);
+  }
+  return r;
+}
+
 /// vfs_read_at without the page cache's bytes over the file's.
 fn read_at(v: &mut Vfs, f0: u64, off: u64, n: u64) -> u64
   requires vfs_ok(v) && n <= XFER
