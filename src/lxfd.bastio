@@ -16,7 +16,9 @@
 // anonymous pipe; src/lxevent.bastio), 1 once a writer has opened it,
 // the size F_SETPIPE_SZ gave it (0: PIPE_CAP), and 1 once a read end
 // has had O_ASYNC; the ring itself is
-// PIPE_CAP bytes of k.pipebuf at p * PIPE_CAP.
+// slot p of k.pipebuf: PIPE_PAGE bytes at first, doubling up to PIPE_CAP
+// as the pipe fills (pipe_ready, pipe_grow), a position's byte at that
+// position modulo the ring's length.
 
 import "linux.bastio";
 import "lxdev.bastio";
@@ -24,24 +26,26 @@ import "lxdev.bastio";
 struct Fd { kind: u64, x: u64 }
 
 spec fn fds_ok(k: &Kernel) -> bool {
-  len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN
+  len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN
 }
 
 fn fd_get(t: &Buf, pid: u64, fd: u64) -> u64
-  requires len(t) == LXFD_LEN && pid < NPROC
+  requires len(t) <= LXFD_LEN && pid < NPROC
   ensures fd >= LXNFD ==> result == 0
 {
-  if fd >= LXNFD {
+  if fd >= LXNFD || pid * LXNFD + fd >= len(t) {   // a process past the table's end has none open
     return 0;
   }
   return get(t, pid * LXNFD + fd);
 }
 
 fn fd_set(t: &mut Buf, pid: u64, fd: u64, v: u64)
-  requires len(t) == LXFD_LEN && pid < NPROC && fd < LXNFD
-  ensures len(t) == LXFD_LEN
+  requires len(t) <= LXFD_LEN && pid < NPROC && fd < LXNFD
+  ensures len(t) == old(len(t))
 {
-  t = set(t, pid * LXNFD + fd, v);
+  if pid * LXNFD + fd < len(t) {             // live processes have their rows (new_pid)
+    t = set(t, pid * LXNFD + fd, v);
+  }
 }
 
 fn of_get(t: &Buf, h: u64, f: u64) -> u64
@@ -70,7 +74,7 @@ fn pi_set(t: &mut Buf, p: u64, f: u64, v: u64)
   t = set(t, p * PIPE_STRIDE + f, v);
 }
 
-/// Pipe p's head and count as a core Ring over its PIPE_CAP bytes of
+/// Pipe p's head and count as a core Ring over its PIPE_CAP bytes in
 /// k.pipebuf. The stored words are clamped, so the ring is well formed
 /// whatever they hold.
 fn pipe_ring(t: &Buf, p: u64) -> Ring
@@ -288,6 +292,9 @@ fn can_block(kind: u64) -> bool {
 fn row_free(k: &Kernel, pid: u64) -> bool
   requires kok(k) && pid < NPROC
 {
+  if (pid + 1) * NFD * FD_STRIDE > len(k.fs.ftab) {
+    return false;
+  }
   let mut i = 0;
   while i < NFD
     invariant i <= NFD
@@ -303,12 +310,13 @@ fn row_free(k: &Kernel, pid: u64) -> bool
 /// Process `pid`'s descriptors as a new program starts: 0 to 2 on the
 /// console, the rest closed. They must hold no references.
 fn lx_fd_reset(t: &mut Buf, pid: u64)
-  requires len(t) == LXFD_LEN && pid < NPROC
-  ensures len(t) == LXFD_LEN
+  requires len(t) <= LXFD_LEN && pid < NPROC
+  ensures len(t) == old(len(t))
 {
+  let n = len(t);
   let mut fd = 0;
   while fd < LXNFD
-    invariant fd <= LXNFD && len(t) == LXFD_LEN
+    invariant fd <= LXNFD && len(t) == n && n <= LXFD_LEN
   {
     if fd < 3 {
       fd_set(&mut t, pid, fd, FD_CONSOLE);
@@ -390,11 +398,13 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
     if w / PIPE_BOTH % 2 == 1 && wl > 0 {
       pi_set(&mut k.pipes, x, 3, wl - 1);     // it was a writer too (a FIFO opened O_RDWR)
     }
+    pipe_release(&mut k, x);
   } else if kind == OF_PIPE_W && x < NPIPES {
     let left = pi_get(k.pipes, x, 3);
     if left > 0 {
       pi_set(&mut k.pipes, x, 3, left - 1);   // one description fewer on this end
     }
+    pipe_release(&mut k, x);
   } else if kind == OF_SOCK {
     sock_close(&mut k.nic, x);
   } else if kind == OF_TCP && x < TCBS {
@@ -554,9 +564,12 @@ fn ofd_lacks(k: &Kernel, h: u64, bit: u64) -> bool
 
 /// The lowest closed descriptor of process pid at or above `from`, or LXNFD.
 fn fd_free_in(t: &Buf, pid: u64, from: u64) -> u64
-  requires len(t) == LXFD_LEN && pid < NPROC
+  requires len(t) <= LXFD_LEN && pid < NPROC
   ensures result <= LXNFD
 {
+  if (pid + 1) * LXNFD > len(t) {
+    return LXNFD;                           // no row: nothing can be installed
+  }
   let mut fd = from;
   while fd < LXNFD && fd_get(t, pid, fd) != 0
   {
@@ -618,6 +631,9 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, mode: u6
   let n = lx_path_at(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return k.perr;
+  }
+  if k.pdir && flags & LO_CREAT != 0 {
+    return EISDIR;                          // "new/": a file is not made there, as on Linux
   }
   return lx_open_n(&mut k, pid, n, flags, mode);
 }
@@ -1037,7 +1053,7 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
   {
     p = p + 1;
   }
-  if p >= NPIPES {
+  if p >= NPIPES || !pipe_ready(&mut k, p) {
     return ENFILE;
   }
   let r = fd_free(k, pid, 0);
@@ -1100,7 +1116,7 @@ fn pipe_read1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
     return 0;
   }
   let want = smaller(smaller(n, count), XFER);
-  ring_out(&mut k.fs.xfer, 0, k.pipebuf, p * PIPE_CAP, PIPE_CAP, r.h, want);
+  pipe_ring_out(&mut k, p, 0, r.h, want);
   let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
   if put == NO_RESULT || (put == 0 && want > 0) {
     return EFAULT;
@@ -1125,7 +1141,7 @@ fn pipe_write1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
     return 0;
   }
   let mut r = pipe_ring(k.pipes, p);
-  let room = pipe_room(k.pipes, p, r.n);
+  let room = pipe_room_for(&mut k, p, r.n, smaller(n, XFER));
   if room == 0 || (n <= PIPE_ATOM && room < n) {
     return EAGAIN;
   }
@@ -1133,7 +1149,7 @@ fn pipe_write1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   if got == NO_RESULT || (got == 0 && n > 0) {
     return EFAULT;
   }
-  ring_in(&mut k.pipebuf, p * PIPE_CAP, PIPE_CAP, ring_slot(r, r.n), k.fs.xfer, 0, got);
+  pipe_ring_in(&mut k, p, ring_slot(r, r.n), 0, got);
   ring_push_n(&mut r, got);
   pipe_keep(&mut k.pipes, p, r);
   sigio_pipe(&mut k, p);
@@ -1183,6 +1199,187 @@ fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
     done = done + more;
   }
   return done;
+}
+
+/// Makes sure pipe slot p has its ring, taking PIPE_PAGE bytes for it if
+/// the slot has none (it is new, or its last pipe let go of it). False
+/// when there is no memory for it, or p is past the next slot (a new pipe
+/// takes the lowest free one, so it never is).
+fn pipe_ready(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && p < NPIPES
+  ensures kok(k)
+{
+  let n = vec_len(k.pipebuf);
+  if p < n {
+    match vec_swap(&mut k.pipebuf, p, PipeBuf::None) {
+      PipeBuf::Ring(b) => {
+        match vec_swap(&mut k.pipebuf, p, PipeBuf::Ring(b)) {
+          PipeBuf::None => {},
+          PipeBuf::Ring(x) => { bfree(x); },
+        }
+        return true;
+      },
+      PipeBuf::None => {
+        let r = try_balloc(PIPE_PAGE);
+        if blen(r) != PIPE_PAGE {
+          bfree(r);
+          return false;
+        }
+        match vec_swap(&mut k.pipebuf, p, PipeBuf::Ring(r)) {
+          PipeBuf::None => {},
+          PipeBuf::Ring(x) => { bfree(x); },
+        }
+        return true;
+      },
+    }
+  }
+  if p > n {
+    return false;
+  }
+  let b = try_balloc(PIPE_PAGE);
+  if blen(b) != PIPE_PAGE || !vec_try_reserve(&mut k.pipebuf, 1) {
+    bfree(b);
+    return false;
+  }
+  vec_push_within(&mut k.pipebuf, PipeBuf::Ring(b));
+  return true;
+}
+
+/// The room for a write of `want` bytes into pipe p, which holds `count`:
+/// pipe_room, after growing its ring to fit them if it can. A ring starts
+/// at PIPE_PAGE bytes and doubles up to PIPE_CAP, so a pipe that never
+/// holds much costs a page, as on Linux; if memory runs out, the room is
+/// what the ring holds now.
+fn pipe_room_for(k: &mut Kernel, p: u64, count: u64, want: u64) -> u64
+  requires kok(k) && p < NPIPES && count <= PIPE_CAP
+  ensures kok(k) && result <= PIPE_CAP - count
+{
+  let room = pipe_room(k.pipes, p, count);
+  let l = pipe_grow(&mut k, p, count + smaller(room, want), count);
+  if l <= count {
+    return 0;
+  }
+  return smaller(room, l - count);
+}
+
+/// Grows pipe p's ring to `need` bytes (rounded up to a power of two) if
+/// it is smaller, keeping the `count` bytes it holds where ring positions
+/// (the head and on, modulo the ring's length) find them. The ring's
+/// length afterwards, 0 if it has none.
+fn pipe_grow(k: &mut Kernel, p: u64, need: u64, count: u64) -> u64
+  requires kok(k) && p < NPIPES && need <= PIPE_CAP
+  ensures kok(k)
+{
+  if p >= vec_len(k.pipebuf) {
+    return 0;
+  }
+  match vec_swap(&mut k.pipebuf, p, PipeBuf::None) {
+    PipeBuf::None => { return 0; },
+    PipeBuf::Ring(b) => {
+      let l = blen(b);
+      if l >= need || l == 0 || count > l {
+        match vec_swap(&mut k.pipebuf, p, PipeBuf::Ring(b)) {
+          PipeBuf::None => {},
+          PipeBuf::Ring(x) => { bfree(x); },
+        }
+        return l;
+      }
+      let mut nl = l;
+      while nl < need && nl < PIPE_CAP
+        invariant 0 < nl && nl <= PIPE_CAP
+      {
+        nl = nl * 2;
+        if nl > PIPE_CAP {
+          nl = PIPE_CAP;
+        }
+      }
+      let mut nb = try_balloc(nl);
+      if blen(nb) != nl || nl < l {
+        bfree(nb);
+        match vec_swap(&mut k.pipebuf, p, PipeBuf::Ring(b)) {
+          PipeBuf::None => {},
+          PipeBuf::Ring(x) => { bfree(x); },
+        }
+        return l;
+      }
+      let h = pi_get(k.pipes, p, 0) % PIPE_CAP;
+      let mut i = 0;
+      while i < count
+        invariant i <= count && count <= l && l == blen(b) && 0 < nl && nl == blen(nb)
+      {
+        bset(&mut nb, (h + i) % nl, bget(b, (h + i) % l));
+        i = i + 1;
+      }
+      bfree(b);
+      match vec_swap(&mut k.pipebuf, p, PipeBuf::Ring(nb)) {
+        PipeBuf::None => {},
+        PipeBuf::Ring(x) => { bfree(x); },
+      }
+      return nl;
+    },
+  }
+}
+
+/// Pipe p has no descriptor left on either end: its ring goes back to the
+/// kernel's memory, so only pipes in use hold one (a pipe holds 64 KiB).
+fn pipe_release(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPIPES
+  ensures kok(k)
+{
+  if p >= vec_len(k.pipebuf) || pi_get(k.pipes, p, 2) != 0 || pi_get(k.pipes, p, 3) != 0 {
+    return;
+  }
+  match vec_swap(&mut k.pipebuf, p, PipeBuf::None) {
+    PipeBuf::None => {},
+    PipeBuf::Ring(b) => { bfree(b); },
+  }
+}
+
+/// ring_out from pipe p's ring into the transfer buffer at d.
+fn pipe_ring_out(k: &mut Kernel, p: u64, d: u64, from: u64, n: u64)
+  requires kok(k) && p < NPIPES && from < PIPE_CAP && n <= PIPE_CAP && d + n <= XFER
+  ensures kok(k)
+{
+  if p >= vec_len(k.pipebuf) {
+    return;                                 // no ring: pipe_ready keeps it from being used
+  }
+  match vec_swap(&mut k.pipebuf, p, PipeBuf::None) {
+    PipeBuf::None => {},
+    PipeBuf::Ring(b) => {
+      let l = blen(b);
+      if l > 0 && n <= l {
+        ring_out(&mut k.fs.xfer, d, b, 0, l, from % l, n);
+      }
+      match vec_swap(&mut k.pipebuf, p, PipeBuf::Ring(b)) {
+        PipeBuf::None => {},
+        PipeBuf::Ring(x) => { bfree(x); },
+      }
+    },
+  }
+}
+
+/// ring_in into pipe p's ring at `at` from the transfer buffer at s.
+fn pipe_ring_in(k: &mut Kernel, p: u64, at: u64, s: u64, n: u64)
+  requires kok(k) && p < NPIPES && at < PIPE_CAP && n <= PIPE_CAP && s + n <= XFER
+  ensures kok(k)
+{
+  if p >= vec_len(k.pipebuf) {
+    return;
+  }
+  match vec_swap(&mut k.pipebuf, p, PipeBuf::None) {
+    PipeBuf::None => {},
+    PipeBuf::Ring(b) => {
+      let mut rb = b;
+      let l = blen(rb);
+      if l > 0 && n <= l {
+        ring_in(&mut rb, 0, l, at % l, k.fs.xfer, s, n);
+      }
+      match vec_swap(&mut k.pipebuf, p, PipeBuf::Ring(rb)) {
+        PipeBuf::None => {},
+        PipeBuf::Ring(x) => { bfree(x); },
+      }
+    },
+  }
 }
 
 /// Copies n bytes out of the ring buffer src[base .. base + cap], starting
@@ -1238,12 +1435,12 @@ fn con_block(k: &mut Kernel, pid: u64, n: u64) -> u64
 
 /// Makes every process waiting for room in the console's ring READY.
 fn wake_writers(procs: &mut Buf)
-  requires len(procs) == PTAB_LEN
-  ensures len(procs) == PTAB_LEN
+  requires ptab_ok(procs)
+  ensures ptab_ok(procs)
 {
   let mut p = 1;
   while p < NPROC
-    invariant 1 <= p && p <= NPROC && len(procs) == PTAB_LEN
+    invariant 1 <= p && p <= NPROC && ptab_ok(procs)
   {
     if state(procs, p) == CONWAIT {
       pset(&mut procs, p, F_STATE, READY);

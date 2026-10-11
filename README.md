@@ -58,7 +58,7 @@ The first build proves every source file and fetches BusyBox, so it takes a whil
 - **Programs.** BastiOS's own programs use its system call ABI (`int 0x80`). Linux x86-64 ELF executables use the Linux ABI (`syscall`): static or dynamic, against musl, or static against glibc. Much of the Linux system call interface is implemented: files, pipes, signals, threads and futexes, `poll` and `epoll`, timers, and sockets; [docs/linux.md](docs/linux.md) lists them. `make compat` runs a compatibility suite (`test/compat`).
 - **Files.** An in-memory file system, and one on the disk under `disk/` that keeps every write whole across a power cut (copy-on-write). The disk is a partition on a USB stick (the one it booted from, with `make usb`), an NVMe drive, a virtio disk, a SATA disk on an AHCI controller or a legacy ATA disk; commands are queued behind a block cache and, except on ATA, finish by interrupt (MSI-X or MSI), so a process waiting for the disk sleeps.
 - **Network.** A virtio card or an Intel card of the e1000 families (8254x, 82574L, 82576 and the igb chips after it); DHCP, ARP, IPv4, ICMP, UDP and TCP (retransmission, out-of-order data, zero windows), IPv6 (neighbor discovery, an address from the router's prefix, UDP and TCP), a name server for the C library's resolver, loopback, and Unix sockets.
-- **Console.** The first serial port, and from the ISO or USB image the screen (the framebuffer the boot loader sets up) with a PS/2 or USB keyboard.
+- **Console.** The first serial port, and from the ISO or USB image the screen (the framebuffer the boot loader sets up) with a PS/2 or USB keyboard (and mouse, for Linux programs).
 
 How the pieces fit together, and what is proved where, is in [docs/architecture.md](docs/architecture.md).
 
@@ -117,7 +117,7 @@ The proof covers everything in `src/` and `user/*.bastio`. Everything below it i
 v0.2, pre-release: the system call ABI, the disk format and the build can change. Known limits:
 - one lock for the whole kernel state; system calls from different processors wait for each other;
 - user pages are always executable: `mprotect` sets only whether a page is writable;
-- a user window of 64 MiB per process (pages are mapped as a program asks for them, and `fork` copies every mapped page but the built-in programs' read-only ones, which processes share), at most 31 processes;
+- a user window of 64 MiB per process (pages are mapped as a program asks for them, and `fork` copies every mapped page but the built-in programs' read-only ones, which processes share), at most 255 processes;
 - 1024 files and directories in memory and 1023 under `disk/`, paths up to 255 bytes, files up to 64 MiB in memory and 1 GiB on disk, 256 open files per process; one disk, one command at a time; a write call returns once the disk has it, but work spread over several calls can be cut between them by a power cut;
 - running out of memory when starting a program fails the spawn cleanly, but the kernel's own arena (for `Buf`) still halts the machine when it runs out;
 - it has only been run in QEMU; [Getting started](docs/getting-started.md#5-boot-from-a-usb-stick) lists what real hardware it supports.
@@ -134,7 +134,7 @@ The direction is in bastiolang's [ROADMAP.md](https://github.com/yukikotani231/b
 | `src/fs.bastio`, `ramfs.bastio`, `diskfs.bastio`, `diskq.bastio`, `bio.bastio` | Open files, the in-memory and disk file systems, the disk queue and block cache |
 | `src/blk.bastio`, `nvme.bastio`, `virtio_blk.bastio`, `ahci.bastio`, `ata.bastio` | Disk drivers (USB sticks: `xhci.bastio`) |
 | `src/net.bastio`, `tcp.bastio`, `card.bastio`, `virtio_net.bastio`, `e1000.bastio` | The network stack and card drivers |
-| `src/console.bastio`, `uart.bastio`, `fb.bastio`, `kbd.bastio`, `xhci.bastio` | The console: serial port, screen, PS/2 and USB keyboards; `xhci.bastio` also drives USB sticks |
+| `src/console.bastio`, `uart.bastio`, `fb.bastio`, `kbd.bastio`, `xhci.bastio` | The console: serial port, screen, PS/2 and USB keyboards and mice; `xhci.bastio` also drives USB sticks |
 | `src/pic.bastio`, `pit.bastio`, `lapic.bastio`, `hpet.bastio`, `rtc.bastio`, `pci.bastio`, `virtq.bastio` | Interrupt controllers, clocks, PCI, virtqueues |
 | `src/acpi.bastio` | ACPI: power off (S5), restart, the power button, the PM timer clock; the FADT and the DSDT's `\_S5` parsed in Bastio |
 | `src/info.bastio` | The hardware report (boot option `diag`): processor, memory map, ACPI tables and registers, PCI devices; see [docs/real-hardware.md](docs/real-hardware.md) |

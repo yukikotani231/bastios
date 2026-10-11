@@ -1,38 +1,61 @@
 // The mouse for Linux programs: /dev/input/mice (and /dev/psaux, the same
-// device under its older name) gives 3-byte PS/2 packets, as Linux's
-// mousedev does in its default mode: byte 0 holds the buttons (bit 0 left,
-// 1 right, 2 middle), bit 3 set, and the signs of x and y (bits 4 and 5);
-// bytes 1 and 2 are the motion in x (right is positive) and y (up is
-// positive). The packets come from the PS/2 mouse (src/kbd.bastio) through
-// the console pump (`exchange` in src/main.bastio) into k.mice, a byte
-// ring: a 24-byte header (where the oldest byte is, how many bytes there
-// are, whether there is a mouse) and MICE_CAP bytes. When the ring is full,
-// new packets are dropped whole.
+// device under its older name), as Linux's mousedev gives it. A read gets
+// 3-byte PS/2 packets: byte 0 holds the buttons (bit 0 left, 1 right, 2
+// middle), bit 3 set, and the signs of x and y (bits 4 and 5); bytes 1 and
+// 2 are the motion in x (right is positive) and y (up is positive). A
+// program that writes the IntelliMouse sequence (set sample rate 200, 100,
+// 80) switches the device to ImPS/2: packets get a fourth byte, the wheel
+// (negative is up, at most 7 a packet). Each byte written is answered as
+// a mouse would: 0xFA, then, for 0xF2 (get id), 3 in ImPS/2 mode or 0,
+// for 0xE9 (status) three bytes, for 0xFF (reset) 0xAA 0 and back to PS/2
+// mode. As in Linux, only the answer to the last byte of a write is kept,
+// and it is read before any packet.
 //
-// A read takes what is queued (up to what it asks for); with nothing
-// queued it fails with EAGAIN if the file was opened O_NONBLOCK, else it
-// sleeps until the next tick and looks again (`wait_asleep`). poll says POLLIN
-// when something is queued. Writes (the ImPS/2 setup sequences some
-// programs send) are swallowed, and no answers come back for them, so
-// such programs see a plain 3-button mouse. Without a mouse, opening the
-// device fails with ENODEV.
+// The packets come from the PS/2 mouse (src/kbd.bastio) or a USB mouse
+// (src/xhci.bastio, which turns its boot reports into this form) through
+// the console pump (`exchange` in src/main.bastio) into k.mice: a header
+// (MICE_HDR bytes: where the oldest byte is, how many bytes there are,
+// whether there is a mouse, whether the mode is ImPS/2, how far into the
+// IntelliMouse sequence the writes are, and the answer waiting: its
+// length and up to 4 bytes) and a ring of MICE_CAP bytes holding 4-byte
+// packets (byte 0, x, y, wheel). When the ring is full, new packets are
+// dropped. The mode and the answer belong to the device, not to each open
+// file as in Linux: opening the device resets them, so the last program
+// to open it decides.
+//
+// A read takes the answer waiting, else whole packets (a read shorter
+// than a packet gets its start; the rest is dropped); with nothing there
+// it fails with EAGAIN if the file was opened O_NONBLOCK, else it sleeps
+// until the next tick and looks again (`wait_asleep`). poll says POLLIN
+// when something is there. Without a mouse, opening the device fails with
+// ENODEV.
 
 import "linux.bastio";
 
-const MICE_HDR: u64 = 24;
-const MICE_CAP: u64 = 768;              // MICE_LEN - MICE_HDR: 256 packets
+const MICE_HDR: u64 = 56;
+const MICE_CAP: u64 = 768;              // MICE_LEN - MICE_HDR: 192 packets
+const M_HEAD: u64 = 0;
+const M_COUNT: u64 = 8;
+const M_PRESENT: u64 = 16;
+const M_IMPS: u64 = 24;
+const M_SEQ: u64 = 32;
+const M_RLEN: u64 = 40;
+const M_REPLY: u64 = 48;
 
 /// The ring, empty, saying whether there is a mouse (at boot).
 fn mice_new(present: bool) -> Bytes
   ensures blen(result) == MICE_LEN
 {
   let mut b = balloc(MICE_LEN);
-  put_u64(&mut b, 0, 0);
-  put_u64(&mut b, 8, 0);
+  let mut i = 0;
+  while i < MICE_HDR
+    invariant blen(b) == MICE_LEN && i <= MICE_HDR
+  {
+    bset(&mut b, i, 0);
+    i = i + 1;
+  }
   if present {
-    put_u64(&mut b, 16, 1);
-  } else {
-    put_u64(&mut b, 16, 0);
+    put_u64(&mut b, M_PRESENT, 1);
   }
   return b;
 }
@@ -40,11 +63,11 @@ fn mice_new(present: bool) -> Bytes
 fn mice_present(k: &Kernel) -> bool
   requires kok(k)
 {
-  return get_u64(k.mice, 16) == 1;
+  return get_u64(k.mice, M_PRESENT) == 1;
 }
 
 /// open(2) of the mouse with these flags: a descriptor, -ENODEV without a
-/// mouse, or -ENFILE.
+/// mouse, or -ENFILE. The device goes back to PS/2 mode.
 fn mice_open(k: &mut Kernel, pid: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -57,51 +80,161 @@ fn mice_open(k: &mut Kernel, pid: u64, flags: u64) -> u64
     return ENFILE;
   }
   of_set(&mut k.ofd, h, 3, flags / LO_NONBLOCK % 2);   // O_NONBLOCK, for mice_read
+  put_u64(&mut k.mice, M_IMPS, 0);
+  put_u64(&mut k.mice, M_SEQ, 0);
+  put_u64(&mut k.mice, M_RLEN, 0);
   return fd_install(&mut k, pid, h);
 }
 
-/// Bytes queued.
+/// Bytes queued (4 a packet).
 fn mice_count(k: &Kernel) -> u64
   requires kok(k)
   ensures result <= MICE_CAP
 {
-  return smaller(get_u64(k.mice, 8), MICE_CAP);
+  return smaller(get_u64(k.mice, M_COUNT), MICE_CAP);
 }
 
-/// Queues the first n bytes of src (whole packets), dropping the packets
-/// that do not fit.
+/// Bytes of the answer waiting.
+fn mice_rlen(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= 4
+{
+  return smaller(get_u64(k.mice, M_RLEN), 4);
+}
+
+/// Queues one packet, p (byte 0, x, y and the wheel, first in the high
+/// byte, as kbd_poll gives them less MOUSE_PKT), unless the ring is full.
+fn mice_put(k: &mut Kernel, p: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  let head = get_u64(k.mice, M_HEAD) % MICE_CAP;
+  let cnt = mice_count(k);
+  if cnt + 4 > MICE_CAP {
+    return;
+  }
+  bset(&mut k.mice, MICE_HDR + (head + cnt) % MICE_CAP, cast[u8](p / 16777216 % 256));
+  bset(&mut k.mice, MICE_HDR + (head + cnt + 1) % MICE_CAP, cast[u8](p / 65536 % 256));
+  bset(&mut k.mice, MICE_HDR + (head + cnt + 2) % MICE_CAP, cast[u8](p / 256 % 256));
+  bset(&mut k.mice, MICE_HDR + (head + cnt + 3) % MICE_CAP, cast[u8](p % 256));
+  put_u64(&mut k.mice, M_COUNT, cnt + 4);
+}
+
+/// Queues the first n bytes of src: packets of 4 bytes, as mice_put takes
+/// them.
 fn mice_push(k: &mut Kernel, src: &Bytes, n: u64)
   requires kok(k)
   ensures kok(k)
 {
-  let head = get_u64(k.mice, 0) % MICE_CAP;
-  let mut cnt = mice_count(k);
-  let mut i = 0;
   let m = smaller(n, blen(src));
-  while i < m && m - i >= 3 && cnt + 3 <= MICE_CAP
-    invariant kok(k) && cnt <= MICE_CAP && head < MICE_CAP && i <= m && m <= blen(src)
+  let mut i = 0;
+  while i < m && m - i >= 4
+    invariant kok(k) && m <= blen(src) && i <= m
   {
-    let mut j = 0;
-    while j < 3
-      invariant kok(k) && j <= 3 && cnt + 3 <= MICE_CAP && head < MICE_CAP && i + 3 <= m && m <= blen(src)
-    {
-      bset(&mut k.mice, MICE_HDR + (head + cnt + j) % MICE_CAP, bget(src, i + j));
-      j = j + 1;
-    }
-    cnt = cnt + 3;
-    i = i + 3;
+    let p = cast[u64](bget(src, i)) * 16777216 + cast[u64](bget(src, i + 1)) * 65536
+      + cast[u64](bget(src, i + 2)) * 256 + cast[u64](bget(src, i + 3));
+    mice_put(&mut k, p);
+    i = i + 4;
   }
-  put_u64(&mut k.mice, 8, cnt);
 }
 
 /// What poll finds on the mouse.
 fn mice_bits(k: &Kernel) -> u64
   requires kok(k)
 {
-  if mice_count(k) > 0 {
+  if mice_count(k) > 0 || mice_rlen(k) > 0 {
     return POLLIN;
   }
   return 0;
+}
+
+/// Sets the answer waiting: n bytes, a first.
+fn mice_answer(k: &mut Kernel, n: u64, a: u64, b: u64, c: u64, d: u64)
+  requires kok(k) && n <= 4 && a < 256 && b < 256 && c < 256 && d < 256
+  ensures kok(k)
+{
+  bset(&mut k.mice, M_REPLY, cast[u8](a));
+  bset(&mut k.mice, M_REPLY + 1, cast[u8](b));
+  bset(&mut k.mice, M_REPLY + 2, cast[u8](c));
+  bset(&mut k.mice, M_REPLY + 3, cast[u8](d));
+  put_u64(&mut k.mice, M_RLEN, n);
+}
+
+/// The byte at step i of the IntelliMouse sequence (F3 C8 F3 64 F3 50).
+fn imps_seq(i: u64) -> u64 {
+  if i % 2 == 0 {
+    return 0xF3;                            // set sample rate
+  }
+  if i == 1 {
+    return 200;
+  }
+  if i == 3 {
+    return 100;
+  }
+  return 80;
+}
+
+/// write(2) of n bytes at va to the mouse: commands, each answered (see
+/// the top of this file).
+fn mice_write(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let want = smaller(n, XFER);
+  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, want);
+  if got == NO_RESULT || (got == 0 && n > 0) {
+    return EFAULT;
+  }
+  let mut i = 0;
+  while i < got && i < XFER
+    invariant kok(k)
+  {
+    let c = cast[u64](bget(k.fs.xfer, i));
+    let seq = get_u64(k.mice, M_SEQ) % 6;
+    if c == imps_seq(seq) {
+      if seq == 5 {
+        put_u64(&mut k.mice, M_IMPS, 1);
+        put_u64(&mut k.mice, M_SEQ, 0);
+      } else {
+        put_u64(&mut k.mice, M_SEQ, seq + 1);
+      }
+    } else if c == 0xF3 {
+      put_u64(&mut k.mice, M_SEQ, 1);
+    } else {
+      put_u64(&mut k.mice, M_SEQ, 0);
+    }
+    if c == 0xF2 {
+      let mut id = 0;
+      if get_u64(k.mice, M_IMPS) == 1 {
+        id = 3;
+      }
+      mice_answer(&mut k, 2, 0xFA, id, 0, 0);
+    } else if c == 0xE9 {
+      mice_answer(&mut k, 4, 0xFA, 0x60, 3, 200);
+    } else if c == 0xFF {
+      mice_answer(&mut k, 3, 0xFA, 0xAA, 0, 0);
+      put_u64(&mut k.mice, M_IMPS, 0);
+      put_u64(&mut k.mice, M_SEQ, 0);
+    } else {
+      mice_answer(&mut k, 1, 0xFA, 0, 0, 0);
+    }
+    i = i + 1;
+  }
+  return got;
+}
+
+/// The wheel byte of a packet, for ImPS/2: at most 7 either way.
+fn wheel_byte(z: u64) -> u64
+  requires z < 256
+  ensures result < 256
+{
+  if z >= 8 && z < 128 {
+    return 7;
+  }
+  if z >= 128 && z < 249 {
+    return 249;                             // -7
+  }
+  return z;
 }
 
 /// read(2) (system call n) of up to len bytes into va on descriptor fd, the
@@ -111,11 +244,12 @@ fn mice_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u6
   ensures kok(k)
 {
   let cnt = mice_count(k);
+  let rlen = mice_rlen(k);
   if len == 0 {
     ret(&mut k.procs, pid, 0);
     return KEEP;
   }
-  if cnt == 0 {
+  if cnt < 4 && rlen == 0 {
     let h = fd_ofd(k, pid, fd);
     if h < OFD_N && of_get(k.ofd, h, 3) % 2 == 1 {
       ret(&mut k.procs, pid, EAGAIN);       // O_NONBLOCK
@@ -123,22 +257,52 @@ fn mice_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u6
     }
     return wait_asleep(&mut k, pid, n, FOREVER);   // looks again on the next tick
   }
-  let head = get_u64(k.mice, 0) % MICE_CAP;
-  let want = smaller(smaller(len, cnt), XFER);
-  let mut i = 0;
-  while i < want
-    invariant i <= want && want <= XFER && kok(k) && head < MICE_CAP
-  {
-    bset(&mut k.fs.xfer, i, bget(k.mice, MICE_HDR + (head + i) % MICE_CAP));
-    i = i + 1;
+  let room = smaller(len, XFER);
+  let mut put = 0;
+  if rlen > 0 {
+    // The answer to the last command written, first.
+    while put < rlen && put < room
+      invariant put <= rlen && rlen <= 4 && room <= XFER && kok(k)
+    {
+      bset(&mut k.fs.xfer, put, bget(k.mice, M_REPLY + put));
+      put = put + 1;
+    }
+    put_u64(&mut k.mice, M_RLEN, 0);
+  } else {
+    let mut size = 3;
+    if get_u64(k.mice, M_IMPS) == 1 {
+      size = 4;
+    }
+    let mut head = get_u64(k.mice, M_HEAD) % MICE_CAP;
+    let mut left = cnt - cnt % 4;
+    let mut first = true;
+    while left >= 4 && (put + size <= room || (first && put < room))
+      invariant put <= room && room <= XFER && left <= MICE_CAP && head < MICE_CAP && kok(k) && size <= 4
+    {
+      let mut j = 0;
+      while j < size && put < room
+        invariant put <= room && room <= XFER && head < MICE_CAP && kok(k) && j <= size && size <= 4
+      {
+        let mut b = cast[u64](bget(k.mice, MICE_HDR + (head + j) % MICE_CAP));
+        if j == 3 {
+          b = wheel_byte(b);
+        }
+        bset(&mut k.fs.xfer, put, cast[u8](b));
+        put = put + 1;
+        j = j + 1;
+      }
+      head = (head + 4) % MICE_CAP;
+      left = left - 4;
+      first = false;
+    }
+    put_u64(&mut k.mice, M_HEAD, head);
+    put_u64(&mut k.mice, M_COUNT, left);
   }
-  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
-  if put == NO_RESULT || put < want {
+  let done = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, put);
+  if done == NO_RESULT || done < put {
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
   }
-  put_u64(&mut k.mice, 0, (head + want) % MICE_CAP);
-  put_u64(&mut k.mice, 8, cnt - want);
-  ret(&mut k.procs, pid, want);
+  ret(&mut k.procs, pid, put);
   return KEEP;
 }
