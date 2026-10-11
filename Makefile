@@ -9,9 +9,18 @@
 #   make test       boot it in QEMU and drive the shell over the serial line
 #   make fuzz       fuzz the system calls (SEED, SEEDS, CALLS, SMP)
 #
-# BASTIOC points at the Bastio stage0 compiler (github.com/yukikotani231/bastiolang).
+# The kernel and its programs are built with bastioc1, bastiolang's compiler
+# (stage1, written in Bastio), which stage0's bastioc0 builds once into
+# build/bastioc1. BASTIOC names another compiler (bastioc0 still works);
+# BASTIOC0 names stage0.
+#
+# NATIVE=1 builds the kernel with bastioc1's own x86-64 backend instead of
+# translating it to C for $(CC): no C compiler between the proved code and
+# the machine code (only the assembler). Opt-in while its code is about ten
+# times the size of gcc's.
 
-BASTIOC ?= ../bastiolang/stage0/target/release/bastioc0
+BASTIOC0 ?= ../bastiolang/stage0/target/release/bastioc0
+BASTIOC  ?= build/bastioc1
 # Where `import "core/..."` finds the Bastio core library.
 BASTIOLIB ?= ../bastiolang
 CC      ?= cc
@@ -163,8 +172,28 @@ KFILES := $(wildcard files/*)
 build/kernel.c: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
 	$(BASTIOC) --lib $(BASTIOLIB) --target kernel -o $@ src/main.bastio
 
-build/kernel.o: build/kernel.c
+build/bastioc1.c: $(BASTIOC0) $(wildcard $(BASTIOLIB)/stage1/*.bastio) | build
+	$(BASTIOC0) --emit-c -o $@ $(BASTIOLIB)/stage1/bastioc1.bastio
+
+build/bastioc1: build/bastioc1.c
+	cc -O2 -o $@ $<
+
+build/kernel.s: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
+	$(BASTIOC) --lib $(BASTIOLIB) --target kernel --backend native --emit-asm -o $@ src/main.bastio
+
+# Which backend built build/kernel.o, rewritten only when it changes, so
+# that switching NATIVE rebuilds the kernel.
+KBACKEND := $(if $(filter 1,$(NATIVE)),native,c)
+build/kernel.backend: FORCE | build
+	@echo $(KBACKEND) | cmp -s - $@ || echo $(KBACKEND) > $@
+
+ifeq ($(KBACKEND),native)
+build/kernel.o: build/kernel.s build/kernel.backend
+	$(CC) -c -o $@ $<
+else
+build/kernel.o: build/kernel.c build/kernel.backend
 	$(CC) $(CFLAGS) -c -o $@ $<
+endif
 
 build/libc.o: boot/libc.c | build
 	$(CC) $(TCFLAGS) -c -o $@ $<
@@ -274,17 +303,9 @@ run-uefi: build/bastios.iso $(DISK)
 	  -drive if=pflash,format=raw,file=build/ovmf_vars.fd \
 	  -cdrom build/bastios.iso $(ISO_DISPLAY) $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
 
+# The tests are listed in test/all.sh, which runs JOBS of them at a time.
 test: build/bastios.elf
-	test/trusted_base.sh
-	test/fsck_test.py
-	test/shell_test.sh
-	BASTIOC=$(BASTIOC) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/guide_test.py
-	test/tcp_test.sh
-	NIC=e1000 test/tcp_test.sh
-	NIC=igb test/tcp_test.sh
-	test/iso_test.sh
-	test/nmi_test.sh
-	test/fuzz_test.sh 1 2 2000
+	BASTIOC=$(BASTIOC) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/all.sh
 
 # The system call fuzzer at length: SEEDS runs of CALLS calls from seed
 # SEED (see test/fuzz_test.sh; `make test` runs a short one).
@@ -333,11 +354,33 @@ MPY_GIT       ?= https://github.com/micropython/micropython
 MPY_TAG       ?= v1.24.1
 KILO_GIT      ?= https://github.com/antirez/kilo
 KILO_REV      ?= 323d93b29bd89a2cb446de90c4ed4fea1764176e
-COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo
+DROPBEAR_GIT  ?= https://github.com/mkj/dropbear
+DROPBEAR_TAG  ?= DROPBEAR_2024.86
+COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo \
+                 build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys
 APP_CFLAGS    := -static-pie -fPIE -O2 -w -s
 
 build/compat/src:
 	mkdir -p $@
+
+# Dropbear, the SSH server (and its client and key tool, which also run on
+# the host: ssh.txt logs in from here). The keys are made for the test:
+# the server's host key and a client key whose public half goes in
+# root's authorized_keys on the disk.
+build/compat/dropbear: | build/compat/src
+	rm -rf build/compat/src/dropbear
+	git clone -q --depth 1 --branch $(DROPBEAR_TAG) $(DROPBEAR_GIT) build/compat/src/dropbear
+	cd build/compat/src/dropbear && CC=$(MUSLCC) CFLAGS="-O2 -fPIE" LDFLAGS="-static-pie -s" ./configure -q \
+	  --disable-zlib --disable-lastlog --disable-utmp --disable-utmpx --disable-wtmp --disable-wtmpx \
+	  --disable-pututline --disable-pututxline --disable-syslog >/dev/null
+	$(MAKE) -C build/compat/src/dropbear -s PROGRAMS="dropbear dbclient dropbearkey" >/dev/null
+	cp build/compat/src/dropbear/dbclient build/compat/src/dropbear/dropbearkey build/compat/
+	cp build/compat/src/dropbear/dropbear $@
+
+build/compat/ssh_host_key build/compat/ssh_authorized_keys &: build/compat/dropbear
+	rm -f build/compat/ssh_host_key build/compat/ssh_id
+	build/compat/dropbearkey -t ed25519 -f build/compat/ssh_host_key >/dev/null
+	build/compat/dropbearkey -t ed25519 -f build/compat/ssh_id | grep '^ssh-' > build/compat/ssh_authorized_keys
 
 build/compat/lua: | build/compat/src
 	rm -rf build/compat/src/lua
@@ -424,7 +467,7 @@ build/compat/dev.img: build/compat/tcc build/compat/make test/compat/devdisk.sh 
 # build the C it writes, on a third disk (test/compat/bastiodisk.sh) for
 # test/compat/bastio.txt. Z3 is built against glibc, statically: there is
 # no C++ compiler for musl here. Its build takes a while, once.
-BASTIOLANG    ?= $(patsubst %/stage0/target/release/bastioc0,%,$(BASTIOC))
+BASTIOLANG    ?= $(patsubst %/stage0/target/release/bastioc0,%,$(BASTIOC0))
 Z3_GIT        ?= https://github.com/Z3Prover/z3
 Z3_TAG        ?= z3-4.8.12
 Z3_JOBS       ?= 4
@@ -437,8 +480,8 @@ build/compat/z3: | build/compat/src
 	$(MAKE) -C build/compat/src/z3/build -s -j$(Z3_JOBS) z3 >/dev/null
 	strip -o $@ build/compat/src/z3/build/z3
 
-build/compat/bastioc1.c: $(BASTIOC) $(wildcard $(BASTIOLANG)/stage1/*.bastio) | build/compat
-	$(BASTIOC) --emit-c -o $@ $(BASTIOLANG)/stage1/bastioc1.bastio
+build/compat/bastioc1.c: $(BASTIOC0) $(wildcard $(BASTIOLANG)/stage1/*.bastio) | build/compat
+	$(BASTIOC0) --emit-c -o $@ $(BASTIOLANG)/stage1/bastioc1.bastio
 
 build/compat/bastioc1: build/compat/bastioc1.c
 	$(MUSLCC) $(APP_CFLAGS) -o $@ $<
@@ -502,6 +545,13 @@ compat-ltp: build/bastios.elf build/ltp/.built
 compat-ltp-baseline: build/bastios.elf build/ltp/.built
 	test/compat/ltp.py --update-baseline --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp
 
+# Not part of `make test`: the same micro-benchmarks (bench/osbench.c) on
+# BastiOS and on Linux in the same QEMU machine, side by side; see
+# docs/performance.md. BENCH_ARGS passes options to bench/run.py
+# (--os bastios, --runs 5, --tests syscall,fork, --smp 4).
+bench: build/bastios.elf
+	bench/run.py $(BENCH_ARGS)
+
 # Not part of `make test`: prints timings, checks nothing (see the script).
 smpbench: build/bastios.elf
 	test/smpbench.sh
@@ -529,4 +579,6 @@ clean:
 	rm -rf build
 
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
-.PHONY: all run disk usb run-usb test fuzz smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+FORCE:
+
+.PHONY: FORCE all run disk usb run-usb test fuzz bench smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean

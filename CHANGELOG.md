@@ -22,6 +22,13 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   its own tick would have found it. An idle 4-processor guest takes half the
   host CPU under QEMU (7.3% to 3.6% of a core). The hardware report says
   whether it applies (`idle:`); with x2APIC every timer keeps ticking.
+- The code pages a program reads when it first runs them (see below) come
+  from the page cache, so every process running the program maps the same
+  read-only page and the disk is read once; before, each process read and
+  copied its own. A fault whose blocks are not in the disk's cache sleeps
+  until they are read, instead of the kernel polling the disk with its
+  lock held. Four compiler builds at once went from 7.2-9.1 s to 5.5-5.6 s
+  on four processors and from 8.5-8.9 s to 4.8-5.3 s on one.
 - virtio-blk reads a run of up to eight consecutive blocks in one request
   (the blocks a read queues ahead), instead of one request per 4 KiB
   block: under QEMU each request is a notify and a trip through its I/O
@@ -287,6 +294,17 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Programs that run
 
+- Pseudo-terminals (`src/lxpty.bastio`): `/dev/ptmx` and `/dev/pts/N`
+  (four pairs), so `openpty`, `ttyname` and SSH servers work. The line
+  discipline between the ends is the console's: echo, canonical lines with
+  erase and kill, Ctrl-D, `ICRNL`, `ONLCR`, raw mode, and Ctrl-C and
+  Ctrl-\\ sending SIGINT and SIGQUIT to the foreground group. `TIOCSCTTY`
+  makes one a session's terminal (`/dev/tty` then opens it),
+  `TIOCSPGRP`/`TIOCGPGRP` move the foreground group, `TIOCSWINSZ` sends
+  SIGWINCH, closing the master hangs up the session (SIGHUP), and a master
+  read fails with `EIO` once the slave is closed. `test/compat/progs/t_pty.c`
+  checks each. No `SIGTTIN`/`SIGTTOU`, `VSUSP`, flow control or packet mode.
+
 - Real programs in `make compat` (`test/compat/apps.txt`): Lua 5.4.7,
   QuickJS and the sqlite3 3.52 shell, built from source as static PIEs,
   run their files, pipes, timers, WAL databases and a 20000-row index.
@@ -436,6 +454,30 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   e1000, asked for only while someone sleeps. `make netbench` measures it.
 - Loopback: a packet for 127.0.0.0/8 or the machine's own address never
   reaches the wire.
+- Name lookups: DHCP asks for the name server and the kernel writes
+  `/etc/resolv.conf` from it (10.0.2.3 with the static address), so musl's
+  `getaddrinfo` resolves names through QEMU's resolver. `t_dns` in the
+  compatibility suite checks the resolver against a name server of its own.
+- `/dev/urandom` and `getrandom` come from ChaCha20 over an entropy pool
+  fed by the time-stamp counter, instead of splitmix64 over a boot-time
+  seed. BusyBox's `wget` fetches over HTTPS with its own TLS.
+- IPv6 (`src/net6.bastio`): a link-local address and one from the prefix a
+  router advertises (EUI-64 interface ids), neighbor discovery, echo
+  replies, and UDP and TCP to IPv6 peers through `AF_INET6` sockets. The
+  packets are translated to and from the IPv4 stack, with each peer stood
+  in for by an address in 240.0.0.0/8, so the UDP and TCP code is shared.
+  No extension headers, fragments, duplicate address detection or path MTU
+  discovery; 16 peers at a time. `test/ipv6_test.sh` (in `make test`)
+  plays a router and hosts on the card's wire, as QEMU's user network needs
+  IPv6 on the host. The e1000 now takes all multicast frames.
+- An SSH server: Dropbear 2024.86 (built as a static PIE by the Makefile)
+  runs in BastiOS, and a host logs in with a key through QEMU's port
+  forwarding: commands, piped input and exit status, 1 MiB transfers, and
+  an interactive shell on a terminal, where Ctrl-C stops the foreground
+  command. `test/compat/ssh.txt` (in `make compat`) does all of it from
+  the host with Dropbear's client; a key that is not authorized is
+  refused. `/etc/shells` lists `/bin/sh` and `/bin/ash`, and `/etc/group`
+  has a `tty` group.
 
 ### Console and boot
 
@@ -484,6 +526,15 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - Under UEFI the kernel finds the ACPI tables through the RSDP GRUB
   passes, so every processor starts (it ran on one).
 - `make run-iso` and `make run-uefi` open a QEMU window.
+
+### Build
+
+- The kernel and its programs are built with bastioc1, bastiolang's
+  compiler written in Bastio, which the Makefile builds once with stage0's
+  bastioc0 (`BASTIOC0`). `BASTIOC` still names another compiler.
+- `make NATIVE=1` builds the kernel with bastioc1's x86-64 backend instead
+  of through C (#151). It passes `make test`, but its code is about ten
+  times larger than gcc's, so it is opt-in.
 
 ### Tests and documentation
 

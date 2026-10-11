@@ -18,8 +18,11 @@ apps: sqlite3: WAL
 apps: sqlite3: a database file
 apps: sqlite3: in memory
 apps: wget: 1 MiB from the host
+apps: wget: 1 MiB over HTTPS
+apps: wget: HTTPS from the host (BusyBox's own TLS)
 apps: wget: a file from the host
 apps: wget: a missing file is an error
+apps: wget: an IPv6 loopback server
 bastio: bastioc1: a failed proof builds nothing
 bastio: bastioc1: a type error
 bastio: bastioc1: prove a program
@@ -91,6 +94,15 @@ busybox: which
 busybox: whoami
 busybox: xargs
 busybox: yes | head
+ssh: dropbear: the server starts
+ssh: dropbear: the server stops
+ssh: ssh -t: a command on a terminal (a pty in the guest)
+ssh: ssh: 1 MiB from the guest
+ssh: ssh: Ctrl-C stops the foreground command, not the shell
+ssh: ssh: an interactive login, the shell's exit status
+ssh: ssh: an unknown key is refused
+ssh: ssh: run a command
+ssh: ssh: standard input and the exit status
 dev: make: a project of two files
 dev: make: parallel jobs
 dev: make: rebuilds only what changed
@@ -151,6 +163,24 @@ t_dir: stat file in directory
 t_dir: stat new directory
 t_dir: statvfs
 t_dir: unlink file in directory
+t_dns: connect to a looked-up name
+t_dns: getaddrinfo AF_INET
+t_dns: getaddrinfo AF_INET6 v4-mapped
+t_dns: getaddrinfo AF_UNSPEC (A and AAAA)
+t_dns: getaddrinfo second name
+t_dns: getaddrinfo: no such name
+t_dns: gethostbyname
+t_dns: getnameinfo reverse lookup
+t_dns: name server binds UDP port 53
+t_dns: point resolv.conf at it
+t_dns: resolv.conf names a server
+t_dns: resolv.conf put back
+t_fdlock: 200 descriptors, dup2 to 200 and F_DUPFD from 100
+t_fdlock: F_GETLK reports the conflicting lock that starts first
+t_fdlock: F_SETLEASE and F_GETLEASE
+t_fdlock: F_SETOWN, F_SETOWN_EX and F_SETSIG set a description's owner
+t_fdlock: O_ASYNC on a pipe signals its owner when input arrives
+t_fdlock: a lock needs the matching access mode; bad requests are EINVAL
 t_file: /dev/null write
 t_file: /dev/urandom read
 t_file: /dev/zero read
@@ -263,15 +293,28 @@ t_lock: lock file
 t_lock: read locks are shared
 t_lock: the owner relocks freely
 t_lock: unlocking a middle part splits it
+t_ltp2: /proc/cmdline
+t_ltp2: /proc/loadavg reads as five fields
+t_ltp2: F_GETFL and F_SETFL see a socket's O_NONBLOCK
 t_ltp2: F_GETFL reports the access mode of a file
 t_ltp2: F_SETFL O_APPEND appends to a file
 t_ltp2: ITIMER_VIRTUAL sends SIGVTALRM
 t_ltp2: MSG_OOB on UDP is EOPNOTSUPP
 t_ltp2: SIOCGIFCONF lists lo
+t_ltp2: TCP: bind to port 0 picks one, a second connect is EISCONN, AF_UNSPEC disconnects
+t_ltp2: UDP sendmsg joins its buffers into one datagram; bind errors
+t_ltp2: a CPU-time POSIX timer, and overruns of a timer set in the past
 t_ltp2: a FIFO opened O_RDWR reads what it writes
 t_ltp2: a file reads 8 KiB in one read
 t_ltp2: a page fault runs the SIGSEGV handler
 t_ltp2: accept never hands out a closed connection
+t_ltp2: an empty path is ENOENT, an unmapped one EFAULT
+t_ltp2: an interrupted nanosleep writes the time left; kill of a zombie succeeds
+t_ltp2: brk shrinks and grows back, never below its start
+t_ltp2: clone with a child stack makes a process
+t_ltp2: errors: dup3 flags, getrusage who, getrandom flags, a null timer setting
+t_ltp2: errors: mremap MREMAP_FIXED alone, munlock of unmapped pages
+t_ltp2: errors: socket types, socketpair of inet, option levels, a negative name length
 t_ltp2: fsync of a pipe is EINVAL
 t_ltp2: getgroups counts and lists the groups
 t_ltp2: getgroups with a negative size is EINVAL
@@ -279,11 +322,21 @@ t_ltp2: listen on a UDP socket is EOPNOTSUPP
 t_ltp2: mincore errors
 t_ltp2: mincore marks mapped pages
 t_ltp2: mlockall and munlockall succeed
+t_ltp2: mqueue: priorities order messages, getattr counts, unlink, bad sigevent EINVAL
+t_ltp2: nested epoll: readiness passes up, a loop is ELOOP
+t_ltp2: nice: root lowers and raises it, a child inherits it, nobody may not lower it
 t_ltp2: personality is kept
+t_ltp2: prctl: a name shows in /proc/self/comm; death signal and timer slack read back
 t_ltp2: pread/pwrite: negative offset EINVAL, a directory EISDIR, 0 bytes 0
 t_ltp2: rlimits: bad resource EINVAL; soft over hard EINVAL
+t_ltp2: sched_getattr reads the policy; a short size is EINVAL
+t_ltp2: sched_setaffinity to processor 0
+t_ltp2: sched_setscheduler: SCHED_FIFO 10, read back, bad priority EINVAL
 t_ltp2: send on an unconnected TCP socket is EPIPE
+t_ltp2: sendmmsg and recvmmsg over UDP loopback; accept on UDP is EOPNOTSUPP
 t_ltp2: sendto with a huge address length is EINVAL
+t_ltp2: tkill and tgkill reject a zero or negative id
+t_ltp2: unshare: files and cwd succeed, bad flags EINVAL
 t_ltp2: waitpid with bad options is EINVAL
 t_ltp2: waitpid(0) waits only for the caller's group
 t_mem: 64 MiB of address space
@@ -382,6 +435,17 @@ t_net: getaddrinfo localhost
 t_net: getaddrinfo numeric
 t_net: getsockopt SO_TYPE
 t_net: inet_pton
+t_path: O_NOFOLLOW, O_NOATIME, EISDIR, rmdir of . and mkdir over a name
+t_path: a loop of links through a long path is ELOOP
+t_path: a path in unmapped memory is EFAULT
+t_path: a set-group-ID bit at create is kept only for a member of the group
+t_path: an empty path is ENOENT, except with AT_EMPTY_PATH
+t_path: chroot keeps absolute paths, links and .. inside the new root
+t_path: fstat of a directory gives its mode
+t_path: mknod makes device and socket nodes; a device node opens its device
+t_path: paths are read up to PATH_MAX
+t_path: pread and pwrite take no negative offset
+t_path: sendfile checks its descriptors and offset; statx its flags
 t_perm: a new file belongs to its maker
 t_perm: a path needs search permission on its directories
 t_perm: a set-group-ID directory passes on its group
@@ -431,6 +495,32 @@ t_proc: uname
 t_proc: wait with no children is ECHILD
 t_proc: waitid
 t_proc: waitpid WNOHANG
+t_pty: /dev/tty in the child's session is its pty
+t_pty: Ctrl-C sends SIGINT to the foreground group
+t_pty: Ctrl-D on an empty line reads as end of file
+t_pty: TIOCGPTN on the master
+t_pty: TIOCSCTTY made the child's group the foreground
+t_pty: TIOCSWINSZ on the master: SIGWINCH and the size on the slave
+t_pty: a locked slave does not open
+t_pty: a slave read after the master closes is end of file
+t_pty: an unfinished line is not readable yet
+t_pty: and a slave write fails with EIO
+t_pty: both ends are terminals
+t_pty: erase takes back a byte
+t_pty: its slave is /dev/pts/N
+t_pty: openpty
+t_pty: output LF goes out as CR LF
+t_pty: poll on the master says the slave hung up
+t_pty: raw mode: LF goes out alone
+t_pty: raw mode: no echo, bytes readable at once
+t_pty: stat of the slave's path matches fstat
+t_pty: the master sees the settings the slave made
+t_pty: the slave reads the finished line
+t_pty: then a master read fails with EIO
+t_pty: ttyname of the slave
+t_pty: typing echoes back, CR read as LF
+t_pty: unlockpt lets it open
+t_pty: with both ends closed its /dev/pts entry is gone
 t_sig2: 24 processes at once
 t_sig2: SA_ONSTACK runs on the alternate stack
 t_sig2: SA_RESETHAND runs the handler once

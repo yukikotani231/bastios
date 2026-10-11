@@ -22,6 +22,7 @@ const WOP_UNMAP: u64 = 0;
 const WOP_PROTECT: u64 = 1;             // arg: 1 writable, 0 read-only
 const WOP_MOVE: u64 = 2;                // arg: where the first page goes
 const WOP_COUNT: u64 = 3;               // only count the mapped pages
+const WOP_ZERO: u64 = 4;                // fill the private pages with zeros (madvise)
 const WIN_L1S: u64 = 32;              // level-1 tables the window may hold
 const WPAGES: u64 = 16384;            // WIN_L1S * 512
 const USER_SIZE: u64 = 0x4000000;     // WPAGES * 4096

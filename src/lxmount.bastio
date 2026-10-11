@@ -57,9 +57,8 @@ fn fs_type(k: &mut Kernel, pid: u64, va: u64) -> u64
 }
 
 /// The in-memory file holding the disk image that the path at user
-/// address va names (a loop device bound to one, or the file itself),
-/// and that loop device's number (0 for a file): or NFILES with the
-/// -errno in k.perr.
+/// address va names (a loop device bound to one, or the file itself):
+/// or NFILES with the -errno in k.perr.
 fn image_file(k: &mut Kernel, pid: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k) && result <= NFILES
@@ -67,6 +66,25 @@ fn image_file(k: &mut Kernel, pid: u64, va: u64) -> u64
   let n = lx_path_at(&mut k, pid, AT_FDCWD, va);
   if n == NO_RESULT {
     return NFILES;
+  }
+  let ld = loop_at(k.fs.xfer, n);
+  if is_loop(ld) {
+    // /dev/loopN: the file it is bound to, the whole of it.
+    let row = loop_row(k, ld - DEV_LOOP);
+    if row >= FD_ROWS {
+      k.perr = ENXIO;                       // not bound to a file
+      return NFILES;
+    }
+    if lo_get(k.loops, ld - DEV_LOOP, 1) != 0 || lo_get(k.loops, ld - DEV_LOOP, 2) != 0 {
+      k.perr = EINVAL;                      // an offset or a size limit: not done
+      return NFILES;
+    }
+    let lf = vfs_row_file(k.fs, row);
+    if lf >= NFILES {
+      k.perr = ENOTBLK;                     // only an image in memory mounts
+      return NFILES;
+    }
+    return lf;
   }
   let f = vfs_lookup(&mut k.fs, n);
   if f == NO_FILE {
@@ -78,6 +96,23 @@ fn image_file(k: &mut Kernel, pid: u64, va: u64) -> u64
     return NFILES;
   }
   return f;
+}
+
+/// The loop device the source path at user address va names, or LO_NODEV
+/// (a file, or nothing that mounts: image_file says why).
+fn source_loop(k: &mut Kernel, pid: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = lx_path_at(&mut k, pid, AT_FDCWD, va);
+  if n == NO_RESULT {
+    return LO_NODEV;
+  }
+  let ld = loop_at(k.fs.xfer, n);
+  if is_loop(ld) {
+    return ld - DEV_LOOP;
+  }
+  return LO_NODEV;
 }
 
 /// The in-memory directory node at the path in the first n bytes of the
@@ -121,7 +156,9 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
     return ENODEV;                          // no other file system type mounts
   }
   let mut img = NFILES;
+  let mut ldev = LO_NODEV;
   if t == FST_BSTDISK {
+    ldev = source_loop(&mut k, pid, source);
     img = image_file(&mut k, pid, source);
     if img >= NFILES {
       return k.perr;
@@ -151,7 +188,7 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
     return EBUSY;
   }
   if t == FST_BSTDISK {
-    let r = vfs_lo_mount(&mut k.fs, &mut k.mem, img, i, LO_NODEV, flags & MS_RDONLY != 0);
+    let r = vfs_lo_mount(&mut k.fs, &mut k.mem, img, i, ldev, flags & MS_RDONLY != 0);
     if r == LO_BUSY {
       return EBUSY;
     }
@@ -226,8 +263,8 @@ fn lx_mount_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u6
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if !cred_root(k.procs, pid) {
-    return EPERM;                           // CAP_SYS_ADMIN on Linux: root's alone here
+  if !cap_has(k, pid, CAP_SYS_ADMIN) {
+    return EPERM;                           // root's alone, while it holds CAP_SYS_ADMIN
   }
   if n == LX_MOUNT {
     return lx_mount(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10));

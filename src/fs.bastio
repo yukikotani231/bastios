@@ -25,11 +25,11 @@ import "ramfs.bastio";
 import "diskfs.bastio";
 import "pcache.bastio";
 
-const NFD: u64 = 16;                  // open files per process
-const FD_ROWS: u64 = 512;             // NPROC * NFD
+const NFD: u64 = 256;                 // open files per process
+const FD_ROWS: u64 = 8192;            // NPROC * NFD
 const FD_STRIDE: u64 = 4;
 const HOLD_N: u64 = 128;              // holds (vfs_hold): rows after the FD_ROWS open files
-const FTAB_LEN: u64 = 2560;           // (FD_ROWS + HOLD_N) * FD_STRIDE
+const FTAB_LEN: u64 = 33280;          // (FD_ROWS + HOLD_N) * FD_STRIDE
 const XFER: u64 = 4096;               // the most bytes one call moves
 
 // Row fields.
@@ -884,6 +884,31 @@ fn vfs_read_at(v: &mut Vfs, f0: u64, off: u64, n: u64) -> u64
   return r;
 }
 
+/// vfs_read_at for a caller that can sleep: VFS_MISS, with the reads of
+/// what is missing queued, where vfs_read_at would wait for the disk file
+/// system's queue. The other file systems answer as vfs_read_at does.
+fn vfs_read_try(v: &mut Vfs, f0: u64, off: u64, n: u64) -> u64
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+  ensures result <= n || result == NO_FD || result == VFS_MISS
+{
+  let f = vfs_target(&mut v, f0);
+  if f < NFILES || f >= LO0 {
+    return vfs_read_at(&mut v, f0, off, n);
+  }
+  let r = disk_read(&mut v.disk, f - NFILES, off, &mut v.xfer, n);
+  if r == DISK_MISS {
+    return VFS_MISS;
+  }
+  if r == NO_DISK_FILE || r > n {
+    return NO_FD;
+  }
+  if pc_on(v.pc) {
+    pc_overlay(&mut v.pc, f, off, &mut v.xfer, r);
+  }
+  return r;
+}
+
 /// vfs_read_at without the page cache's bytes over the file's.
 fn read_at(v: &mut Vfs, f0: u64, off: u64, n: u64) -> u64
   requires vfs_ok(v) && n <= XFER
@@ -1002,6 +1027,17 @@ fn vfs_install(v: &mut Vfs, mem: &mut Mem, name: Str, data: Str) -> bool
   requires vfs_ok(v) && mem_ok(mem)
   ensures vfs_ok(v) && mem_ok(mem)
 {
+  let d = bfrom(data);
+  let ok = vfs_install_bytes(&mut v, &mut mem, name, d, blen(d));
+  bfree(d);
+  return ok;
+}
+
+/// vfs_install, with the first m bytes of d as the contents.
+fn vfs_install_bytes(v: &mut Vfs, mem: &mut Mem, name: Str, d: &Bytes, m: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem) && m <= blen(d)
+  ensures vfs_ok(v) && mem_ok(mem)
+{
   let nm = bfrom(name);
   let n = blen(nm);
   let mut i = ram_find(&mut v.ram, nm, n);
@@ -1018,10 +1054,7 @@ fn vfs_install(v: &mut Vfs, mem: &mut Mem, name: Str, data: Str) -> bool
     Node::File(f) => {
       let mut g = f;
       file_truncate(&mut g, &mut mem);
-      let d = bfrom(data);
-      let m = blen(d);
       ok = file_write(&mut g, &mut mem, 0, d, m) == m;
-      bfree(d);
       put_node(&mut v.ram, i, Node::File(g));
     },
   }
@@ -1600,6 +1633,37 @@ const T_LINK: u64 = 0xA000;           // mode type bits of a symbolic link
 const LINK_MODE: u64 = 0xA1FF;        // a link: rwxrwxrwx, as Linux shows them
 
 const T_FIFO: u64 = 0x1000;           // mode type bits of a named pipe
+const T_CHR: u64 = 0x2000;            // a character device node: its contents are its device number
+const T_BLK: u64 = 0x6000;            // a block device node, the same
+const T_SOCK: u64 = 0xC000;           // a socket node, empty
+
+/// The type bits of file f's mode (0 for a regular file or no file).
+fn vfs_node_type(v: &mut Vfs, f: u64) -> u64
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  let m = vfs_meta(&mut v, f);
+  if !m.ok {
+    return 0;
+  }
+  return m.mode % 65536 / 4096 * 4096;
+}
+
+/// The device number a device node keeps (Linux's 32-bit encoding, as
+/// mknod got it), 0 if it has none. The transfer buffer is left as it was.
+fn vfs_node_dev(v: &mut Vfs, f: u64) -> u64
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  let keep = load_le32(v.xfer, 0);
+  let got = vfs_read_at(&mut v, f, 0, 4);
+  let mut dev = 0;
+  if got == 4 {
+    dev = cast[u64](load_le32(v.xfer, 0));
+  }
+  store_le32(&mut v.xfer, 0, keep);
+  return dev;
+}
 
 /// Is handle f a named pipe? The Linux layer opens it as a pipe
 /// (src/lxevent.bastio); its data never lives in the file.
@@ -1686,15 +1750,24 @@ fn vfs_symlink(v: &mut Vfs, mem: &mut Mem, n: u64, m: u64) -> bool
   requires vfs_ok(v) && mem_ok(mem)
   ensures vfs_ok(v) && mem_ok(mem)
 {
-  if n > FNAME_MAX || m == 0 || m > FNAME_MAX || !path_ok(v, n) || !parent_ok(&mut v, n) || vfs_lookup(&mut v, n) != NO_FILE {
+  return vfs_mkdata(&mut v, &mut mem, n, m, LINK_MODE);
+}
+
+/// vfs_symlink for any mode: a node called xfer[0..n] holding the m bytes
+/// after the name (a link's target, a device node's number).
+fn vfs_mkdata(v: &mut Vfs, mem: &mut Mem, n: u64, m: u64, mode: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem)
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  if mode >= 65536 || n > FNAME_MAX || m == 0 || m > FNAME_MAX || !path_ok(v, n) || !parent_ok(&mut v, n) || vfs_lookup(&mut v, n) != NO_FILE {
     return false;
   }
   if on_disk(v, n) {
-    return dk_symlink(&mut v.disk, &mut v.xfer, DISK_PREFIX, n, m, v.now);
+    return dk_symlink(&mut v.disk, &mut v.xfer, DISK_PREFIX, n, m, mode, v.now);
   }
   let lp = lo_pfx(&mut v, n);
   if lp != 0 {
-    let ok = !v.lo_ro && dk_symlink(&mut v.lo, &mut v.xfer, lp, n, m, v.now);
+    let ok = !v.lo_ro && dk_symlink(&mut v.lo, &mut v.xfer, lp, n, m, mode, v.now);
     lo_settle(&mut v);
     return ok;
   }
@@ -1708,7 +1781,7 @@ fn vfs_symlink(v: &mut Vfs, mem: &mut Mem, n: u64, m: u64) -> bool
     Node::Free => {},
     Node::File(f) => {
       let mut g = f;
-      g.mode = LINK_MODE;
+      g.mode = mode;
       w = file_write(&mut g, &mut mem, 0, v.xfer, m);
       put_node(&mut v.ram, i, Node::File(g));
     },
@@ -1720,9 +1793,9 @@ fn vfs_symlink(v: &mut Vfs, mem: &mut Mem, n: u64, m: u64) -> bool
   return true;
 }
 
-/// vfs_symlink on disk file system d, whose names start p bytes in.
-fn dk_symlink(d: &mut DiskFs, x: &mut Bytes, p: u64, n: u64, m: u64, now: u64) -> bool
-  requires disk_ok(d) && blen(x) == XFER && p < n && n <= XFER && m <= FNAME_MAX
+/// vfs_mkdata on disk file system d, whose names start p bytes in.
+fn dk_symlink(d: &mut DiskFs, x: &mut Bytes, p: u64, n: u64, m: u64, mode: u64, now: u64) -> bool
+  requires disk_ok(d) && blen(x) == XFER && p < n && n <= XFER && m <= FNAME_MAX && mode < 65536
   ensures disk_ok(d) && blen(x) == XFER
 {
   let e = disk_create(&mut d, x, p, n - p, false, now);
@@ -1730,7 +1803,7 @@ fn dk_symlink(d: &mut DiskFs, x: &mut Bytes, p: u64, n: u64, m: u64, now: u64) -
     return false;
   }
   xfer_shift(&mut x, n, m);
-  if !disk_set_meta(&mut d, e, LINK_MODE, NO_DISK_FILE) || disk_write_wait(&mut d, e, x, m, now) != m {
+  if !disk_set_meta(&mut d, e, mode, NO_DISK_FILE) || disk_write_wait(&mut d, e, x, m, now) != m {
     disk_remove(&mut d, e);
     return false;
   }

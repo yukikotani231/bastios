@@ -25,7 +25,7 @@ import os, re, select, subprocess, sys, tempfile, time
 os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 GUIDES = sys.argv[1:] or ["README.md", "docs/getting-started.md"]
 KERNEL = os.environ.get("KERNEL", "build/bastios.elf")
-BASTIOC = os.environ.get("BASTIOC", "../bastiolang/stage0/target/release/bastioc0")
+BASTIOC = os.environ.get("BASTIOC", "build/bastioc1")
 BASTIOLIB = os.environ.get("BASTIOLIB", "../bastiolang")
 MUSLCC = os.environ.get("MUSLCC", "musl-gcc")
 TIMEOUT = float(os.environ.get("TIMEOUT", "60"))
