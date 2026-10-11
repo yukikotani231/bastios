@@ -45,12 +45,12 @@ fn pipe_put_xfer(k: &mut Kernel, p: u64, n: u64) -> u64
     return EPIPE;
   }
   let mut r = pipe_ring(k.pipes, p);
-  let room = pipe_room(k.pipes, p, r.n);
+  let room = pipe_room_for(&mut k, p, r.n, n);
   if room == 0 {
     return EAGAIN;
   }
   let put = smaller(n, room);
-  ring_in(&mut k.pipebuf, p * PIPE_CAP, PIPE_CAP, ring_slot(r, r.n), k.fs.xfer, 0, put);
+  pipe_ring_in(&mut k, p, ring_slot(r, r.n), 0, put);
   ring_push_n(&mut r, put);
   pipe_keep(&mut k.pipes, p, r);
   sigio_pipe(&mut k, p);
@@ -498,9 +498,10 @@ fn memfd_name(k: &mut Kernel, pid: u64, t: u64) -> u64
     bset(&mut k.fs.xfer, i, sget(pre, i));
     i = i + 1;
   }
-  bset(&mut k.fs.xfer, 11, cast[u8](48 + pid % 10));
+  bset(&mut k.fs.xfer, 11, cast[u8](48 + pid % 10));      // the pid, digits reversed
   bset(&mut k.fs.xfer, 12, cast[u8](48 + pid / 10 % 10));
-  bset(&mut k.fs.xfer, 13, 45);             // '-'
+  bset(&mut k.fs.xfer, 13, cast[u8](48 + pid / 100 % 10));
+  bset(&mut k.fs.xfer, 14, 45);             // '-'
   let mut j = 0;
   while j < 16
     invariant j <= 16 && kok(k)
@@ -510,10 +511,10 @@ fn memfd_name(k: &mut Kernel, pid: u64, t: u64) -> u64
     if digit >= 10 {
       ch = 87 + digit;                      // 'a' ..
     }
-    bset(&mut k.fs.xfer, 14 + j, cast[u8](ch));
+    bset(&mut k.fs.xfer, 15 + j, cast[u8](ch));
     j = j + 1;
   }
-  return 30;
+  return 31;
 }
 
 fn out_is_file(k: &Kernel, pid: u64, fd: u64) -> bool
