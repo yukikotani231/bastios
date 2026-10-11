@@ -293,7 +293,7 @@ fn path_ro(k: &mut Kernel, n: u64) -> bool
 
 /// Is namespace ns held by a process that has not ended? The first one
 /// always is.
-fn ns_live(k: &Kernel, ns: u64) -> bool
+fn mnt_ns_live(k: &Kernel, ns: u64) -> bool
   requires kok(k)
 {
   if ns == 0 {
@@ -322,7 +322,7 @@ fn ns_gc(k: &mut Kernel)
     invariant e <= MT_N && kok(k)
   {
     let v = me_get(k, e, ME_NS);
-    if v != 0 && !ns_live(k, v - 1) {
+    if v != 0 && !mnt_ns_live(k, v - 1) {
       me_set(&mut k, e, ME_NS, 0);
     }
     e = e + 1;
