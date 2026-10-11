@@ -23,6 +23,7 @@
 #define CORE_IDLE      184                      /* vector that ended bst_cpu_halt, or a parked AP's hlt */
 #define CORE_TRAP_TOP  192                      /* end of the block, for `syscall` */
 #define CORE_INDEX     200                      /* the processor's number: 0 for the bootstrap one */
+#define CORE_MMU       208                      /* 3 words: the prelude's lazy CR3 state */
 #define CORE_TSS       256                      /* 104-byte task state segment */
 #define CORE_IST_TOP   0x1400                   /* top of the 4 KiB IST1 stack above the TSS */
 

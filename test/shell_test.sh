@@ -1428,7 +1428,7 @@ fails += not ok
 # when first run (src/lazy.bastio); given its own path, it removes the file
 # first and still runs code it had not touched (one page after mprotect),
 # which a later exec of the same name then cannot find.
-subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf"], check=True)
+subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf", "mh=build/user/mhello.elf"], check=True)
 qemu = boot(2, with_disk=True)
 out = b""
 deadline = time.time() + timeout
@@ -1442,6 +1442,15 @@ for line, want, until in [
     # ash gives a background job /dev/null as stdin, and mmisc checks the tty.)
     ("mkdir /tmp/a /tmp/b; (cd /tmp/a; /disk/mx </dev/tty) & (cd /tmp/b; /disk/mx); wait; echo both", b"pipe 65536\r\nmmisc: ok on Linux x86_64, signals, pipe 65536\r\nboth", b"\n# "),
     ("/disk/mx /disk/mx && echo gone; /disk/mx", [b"mmisc: ok on Linux", b"\r\ngone\r\n", b"not found"], b"\n# "),
+    # A new program in the entry mx left: it runs its own code, and its
+    # second run maps the pages the first left in the page cache after
+    # its last close.
+    ("cp /disk/mh /disk/my; /disk/my; /disk/my; echo rc=$?", b"hello from musl: /disk/my, argc 1, 8\r\nhello from musl: /disk/my, argc 1, 8\r\nrc=3", b"\n# "),
+    # A new file takes the removed program's entry, and with it the handle
+    # its cached code pages are filed under (src/fs.bastio, pc_forget at
+    # create): made by extending it, so nothing writes over those pages,
+    # it must read as zeros: no newline byte, which the code has.
+    ("s=$(stat -c %s /disk/my); rm /disk/my; truncate -s $s /disk/mz; echo nl=$(wc -l < /disk/mz); rm /disk/mz", b"nl=0\r\n", b"\n# "),
 ]:
     mark = len(out)
     if mark == 0 and not read_until(b"bastios> "):

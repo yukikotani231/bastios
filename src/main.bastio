@@ -816,6 +816,7 @@ fn install_files(con: &mut Con, k: &mut Kernel)
   requires con_ok(con) && kok(k)
   ensures kok(k) && con_ok(con)
 {
+  pc_tables(&mut k.fs.pc, &mut k.mem);   // the page cache's tables, before the first `mem` (src/pcache.bastio)
   // /tmp and /etc, which Linux programs expect, root's home and /home:
   // RAM directories.
   if !make_dir(&mut k.fs, "tmp") || !make_dir(&mut k.fs, "etc") || !make_dir(&mut k.fs, "root") || !make_dir(&mut k.fs, "home") {

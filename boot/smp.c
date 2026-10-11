@@ -67,6 +67,11 @@ static inline uint8_t *this_core(void) {
 /* The saved user context of the processor running the caller. */
 uint64_t *bst_platform_ctx(void) { return (uint64_t *)(this_core() + CORE_CTX); }
 
+/* Three words the compiled kernel keeps per processor to skip CR3 loads
+ * (the table it left in CR3, when it last loaded CR3, and how many locks
+ * it holds); zero at boot, as bst_cores is. */
+uint64_t *bst_platform_mmu_state(void) { return (uint64_t *)(this_core() + CORE_MMU); }
+
 uint64_t bst_platform_cpus(void) { return __atomic_load_n(&cpus_online, __ATOMIC_SEQ_CST); }
 
 static inline void outb(uint16_t port, uint8_t v) { __asm__ volatile ("outb %0, %1" : : "a"(v), "Nd"(port)); }
