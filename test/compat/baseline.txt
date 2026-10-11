@@ -225,8 +225,11 @@ t_file: utime
 t_file: write
 t_file: writev
 t_ipc: AF_UNIX bind/listen
+t_ipc: AF_UNIX connect through a hard link of the socket file
+t_ipc: AF_UNIX connect through a renamed socket file
 t_ipc: AF_UNIX connect to no listener fails
 t_ipc: AF_UNIX connect/accept
+t_ipc: AF_UNIX the old name of a renamed socket file is gone
 t_ipc: EOF once writers close
 t_ipc: F_SETPIPE_SZ limits a pipe
 t_ipc: O_NONBLOCK read of an empty pipe is EAGAIN

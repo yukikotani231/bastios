@@ -288,6 +288,11 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   set-group-ID files run with the caller's ids.
 - The boot option `login` starts BusyBox's `login` on the console instead
   of the native shell, and starts a new one after each logout.
+- `mprotect(PROT_WRITE)` on a `MAP_SHARED` mapping of a file opened
+  read-only fails with `EACCES`, as on Linux (it used to succeed on a
+  private copy).
+- `connect` finds a unix socket by its socket file, so a renamed socket
+  file, or another hard link to it, still leads to the socket.
 
 ### Programs that run
 

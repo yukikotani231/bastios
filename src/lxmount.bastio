@@ -194,6 +194,7 @@ fn lx_umount2(k: &mut Kernel, pid: u64, target: u64, flags: u64) -> u64
     if !vfs_lo_umount(&mut k.fs, &mut k.mem) {
       return EBUSY;                         // a file in it is open
     }
+    ux_forget_loop(&mut k);
     return 0;
   }
   let s = vfs_mount_slot(k.fs, i);

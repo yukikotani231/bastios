@@ -94,16 +94,18 @@ static int root_binds_low(void) {
     return bind_port(SOCK_DGRAM, 83) == 0 && bind_port(SOCK_STREAM, 84) == 0;
 }
 
-/* A file it may only read, mapped shared: mprotect may refuse PROT_WRITE
- * (Linux) or give a mapping whose writes reach no one else (BastiOS);
- * either way the file keeps its bytes. */
+/* A file it may only read, mapped shared: mprotect refuses PROT_WRITE,
+ * and the file keeps its bytes. */
 static int no_mprotect_write(void) {
     if (!become_nobody()) return 0;
     int fd = open("i_public", O_RDONLY);
     char *p = mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 0);
     if (fd < 0 || p == MAP_FAILED || p[0] != 'p') return 0;
-    if (mprotect(p, 4096, PROT_READ | PROT_WRITE) == 0) p[0] = 'X';
-    else if (errno != EACCES) return 0;
+    if (mprotect(p, 4096, PROT_READ | PROT_WRITE) == 0) {
+        p[0] = 'X';
+        return 0;
+    }
+    if (errno != EACCES) return 0;
     munmap(p, 4096);
     char c = 0;
     int ok = pread(fd, &c, 1, 0) == 1 && c == 'p';

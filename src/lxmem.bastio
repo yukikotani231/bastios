@@ -299,7 +299,8 @@ fn lx_munmap(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
   return 0;
 }
 
-/// mprotect(addr, n, prot): writable with PROT_WRITE, read-only without.
+/// mprotect(addr, n, prot): writable with PROT_WRITE, read-only without;
+/// -EACCES for PROT_WRITE on a shared mapping of a file opened read-only.
 /// Pages of a PROT_NONE mmap that were never mapped (lx_mmap) get fresh
 /// zero pages when prot allows access. -ENOMEM if a page in the range is
 /// not mapped (the others still change, where Linux would change none).
@@ -323,6 +324,11 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
   }
   let from = r / 4294967296;
   let to = r % 4294967296;
+  // As on Linux: a MAP_SHARED mapping of a file opened without write
+  // permission does not become writable (lx_mmap refuses it at mmap).
+  if w == 1 && map_ro_shared(k, pid, from, to) {
+    return EACCES;
+  }
   lazy_fill(&mut k, pid, from, to);         // code not read yet: read it first
   // Only pages mmap handed out can have been left unmapped by PROT_NONE.
   let low = pget(k.procs, pid, F_MMAP) / 4096;
@@ -619,6 +625,33 @@ fn map_forget(k: &mut Kernel, pid: u64, from: u64, to: u64, wait: bool) -> u64
   }
   lazy_forget(&mut k, pid, from, to);       // code not read yet stays unread
   return 0;
+}
+
+/// Whether a recorded MAP_SHARED mapping of process pid over window pages
+/// from .. to is of a file description that may not write (opened
+/// read-only, or O_APPEND): mprotect may not make such pages writable.
+fn map_ro_shared(k: &Kernel, pid: u64, from: u64, to: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let mut i = 0;
+  while i < MAP_N
+    invariant i <= MAP_N && kok(k)
+  {
+    let first1 = get(k.maps, mp_at(pid, i, 0));
+    let h = get(k.maps, mp_at(pid, i, 2));
+    if first1 != 0 && first1 - 1 < to && from < sat_add(first1 - 1, get(k.maps, mp_at(pid, i, 1))) && h < OFD_N && of_get(k.ofd, h, 0) == OF_FILE {
+      let row = of_get(k.ofd, h, 2);
+      if row >= FD_ROWS {
+        return true;
+      }
+      let mode = fget(k.fs.ftab, row, FD_MODE);
+      if mode / O_WRITE % 2 == 0 || mode / O_APPEND % 2 == 1 {
+        return true;
+      }
+    }
+    i = i + 1;
+  }
+  return false;
 }
 
 /// Exit or execve: writes back and drops every record of process pid,

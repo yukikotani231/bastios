@@ -17,6 +17,8 @@
 // Then two words per channel, the credentials of the process at its
 // write end (pid, then effective uid + 2^32 * effective gid), and two per
 // listener slot, those of the process that called listen: SO_PEERCRED.
+// Last, one word per listener slot: the socket file it is bound to (its
+// file handle + 1), or 0 for a name in the abstract namespace.
 // k.uxb holds each channel's ring of UX_CAP bytes, then each slot's name.
 // A datagram channel keeps each message as its length (two bytes, low
 // first) and then its bytes.
@@ -26,14 +28,12 @@
 // maker), with the same checks as making any file, and keeps the path the
 // name resolves to in the slot; connect resolves its name the same way and
 // needs write permission on the socket file, as on Linux, so chmod on the
-// file says who may connect. The file outlives the socket, as on Linux: a
-// program removes it before binding the name again. A name that starts
-// with 0 is in Linux's abstract namespace: no file and no permissions,
-// matched byte for byte.
-//
-// Different from Linux: a socket file that is renamed (or reached through
-// a hard link of another name) no longer leads to its socket, which is
-// found by the path it was bound at; ECONNREFUSED then.
+// file says who may connect. connect finds the socket by the file, not
+// by its path, so a socket file that is renamed or has another hard link
+// still leads to its socket, as on Linux. The file outlives the socket, as
+// on Linux: a program removes it before binding the name again. A name
+// that starts with 0 is in Linux's abstract namespace: no file and no
+// permissions, matched byte for byte.
 
 import "linux.bastio";
 
@@ -50,6 +50,7 @@ const UXP0: u64 = 65536;               // UX_N * UX_CAP: the first name byte
 const UXF0: u64 = 96;                  // UXL0 + UX_LIS * UXL_W: the in-flight words
 const UXC0: u64 = 112;                 // UXF0 + UX_N: the channels' credentials
 const UXLC0: u64 = 144;                // UXC0 + 2 * UX_N: the listeners' credentials
+const UXH0: u64 = 152;                 // UXLC0 + 2 * UX_LIS: the listeners' socket files
 const SO_PEERCRED: u64 = 17;
 const UX_DG: u64 = 16;                 // word 3: a datagram socket
 const SUN_LEN: u64 = 110;              // sizeof(struct sockaddr_un)
@@ -472,6 +473,59 @@ fn ul_find(k: &Kernel, n: u64) -> u64
   return UX_LIS;
 }
 
+/// The listener slot bound to socket file h, or UX_LIS.
+fn ul_find_file(k: &Kernel, h: u64) -> u64
+  requires kok(k)
+  ensures result <= UX_LIS
+{
+  if h >= HFILES {
+    return UX_LIS;
+  }
+  let mut l = 0;
+  while l < UX_LIS
+    invariant l <= UX_LIS
+  {
+    if ul_get(k, l, 0) != UL_FREE && get(k.ux, UXH0 + l) == h + 1 {
+      return l;
+    }
+    l = l + 1;
+  }
+  return UX_LIS;
+}
+
+/// The socket file at canonical path xfer[0..n] (the transfer buffer is
+/// kept): its handle, or NO_FILE.
+fn ux_file(k: &mut Kernel, n: u64) -> u64
+  requires kok(k) && n <= UX_PATH && UX_PATH <= FNAME_MAX
+  ensures kok(k)
+{
+  let mut t = balloc(2 * FNAME_MAX);
+  xfer_save(k, &mut t, 0, n);
+  let h = vfs_lookup(&mut k.fs, n);
+  xfer_load(&mut k, t, 0, n);
+  bfree(t);
+  return h;
+}
+
+/// Loop mount gone (src/lxmount.bastio): sockets bound to files in it
+/// are found by no file now. Another image could put a socket file of
+/// its own at the same handle.
+fn ux_forget_loop(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut l = 0;
+  while l < UX_LIS
+    invariant l <= UX_LIS && kok(k)
+  {
+    if get(k.ux, UXH0 + l) > LO0 {
+      k.ux = set(k.ux, UXH0 + l, 0);
+      ul_set(&mut k, l, 1, UX_PATH + 1);
+    }
+    l = l + 1;
+  }
+}
+
 /// For a path name (sun_in has put it at the start of the transfer
 /// buffer): resolves the path at sockaddr va + 2 from the working
 /// directory, through links on the way (and the last one too unless
@@ -592,6 +646,7 @@ fn ux_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if l >= UX_LIS {
     return ENOBUFS;
   }
+  let mut file = NO_FILE;
   if bget(k.fs.xfer, 0) != 0 {
     n = ux_resolve(&mut k, pid, addr, true);
     if n > UX_PATH {
@@ -601,10 +656,15 @@ fn ux_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
     if e != 0 {
       return e;
     }
-    // A socket still bound to a socket file removed since: no longer
-    // found by this name.
-    let stale = ul_find(k, n);
+    file = ux_file(&mut k, n);
+    if file >= HFILES {
+      return ENOENT;
+    }
+    // A socket still bound to a socket file removed since, whose handle
+    // the new file now has: no longer found by it.
+    let stale = ul_find_file(k, file);
     if stale < UX_LIS {
+      k.ux = set(k.ux, UXH0 + stale, 0);
       ul_set(&mut k, stale, 1, UX_PATH + 1);
     }
   } else if ul_find(k, n) < UX_LIS {
@@ -619,6 +679,11 @@ fn ux_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   }
   ul_set(&mut k, l, 0, UL_BOUND);
   ul_set(&mut k, l, 1, n);
+  if file < HFILES {
+    k.ux = set(k.ux, UXH0 + l, file + 1);
+  } else {
+    k.ux = set(k.ux, UXH0 + l, 0);
+  }
   ul_set(&mut k, l, 2, 0);
   ul_set(&mut k, l, 3, 0);
   of_set(&mut k.ofd, u.h, 2, l);
@@ -679,7 +744,12 @@ fn ux_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
       return e;
     }
   }
-  let l = ul_find(k, n);
+  let mut l = UX_LIS;
+  if path {
+    l = ul_find_file(k, ux_file(&mut k, n));
+  } else {
+    l = ul_find(k, n);
+  }
   if l >= UX_LIS {
     if path {
       return ECONNREFUSED;                  // a socket file no socket listens on
