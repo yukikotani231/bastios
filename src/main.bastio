@@ -377,8 +377,22 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     }
     return p;
   }
-  if v == 14 && (lazy_fault(&mut s.k, p) || stack_fault(&mut s.k, p)) {
-    return p;                               // code read, or the stack grew: run the instruction again
+  if v == 14 {
+    let lz = lazy_fault(&mut s.k, p);
+    if lz == LZ_WAIT && state(s.k.procs, p) == READY {
+      // Its code page's blocks are being read: it sleeps until the disk's
+      // queue moves, then faults again (and finds them in the cache).
+      pset(&mut s.k.procs, p, F_STATE, DISKWAIT);
+      pset(&mut s.k.procs, p, F_WAIT, RETRY_BIT + s.k.fs.disk.q.moved % RETRY_BIT);
+      disk_wake(&mut s.k);
+      if state(s.k.procs, p) == DISKWAIT {
+        return (p + 1) % NPROC;
+      }
+      return p;
+    }
+    if lz != LZ_NO || stack_fault(&mut s.k, p) {
+      return p;                             // code read, or the stack grew: run the instruction again
+    }
   }
   if v < 32 {
     // Dies of the signal Linux would send: a parent's wait4 sees a
