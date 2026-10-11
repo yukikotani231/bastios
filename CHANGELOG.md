@@ -16,7 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Processors
 
-- `nanosleep`, `clock_nanosleep` and `pause` sleep instead of running
+- `nanosleep` and `clock_nanosleep` sleep instead of running
   again on every scheduler pass until their deadline: BusyBox's `sleep 5`
   went from 5.0 s of host CPU under QEMU to 0.2 s. They wake on the last
   tick before the deadline and finish to the clock's precision, or at once

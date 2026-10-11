@@ -89,7 +89,7 @@ fn wait_until(k: &mut Kernel, pid: u64, n: u64, dl: u64) -> u64
 }
 
 /// wait_until for a call that only waits for its deadline or a signal
-/// (nanosleep, clock_nanosleep, pause): unless the deadline is less than
+/// (nanosleep, clock_nanosleep): unless the deadline is less than
 /// a tick away, the process sleeps (SLEEPWAIT) instead of running the
 /// call again on every pass, and `sleep_wake` makes it ready on the last
 /// tick before the deadline; from there it runs the call again as
@@ -919,7 +919,7 @@ fn lx_time_rest(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
     return lx_sigtimedwait(&mut k, pid, n, was, a, b, c);
   }
   if n == LX_PAUSE {
-    return sleep_until(&mut k, pid, n, FOREVER);  // until a signal handler runs
+    return wait_until(&mut k, pid, n, FOREVER);   // until a signal handler runs
   }
   if n == LX_ALARM || n == LX_GETITIMER || n == LX_SETITIMER {
     return lx_itimer(&mut k, pid, n, a, b, c);
