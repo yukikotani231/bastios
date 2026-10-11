@@ -812,6 +812,11 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
       // The pages the range covers.
       let bytes = (a % 4096 + smaller(b, USER_SIZE) + 4095) / 4096 * 4096;
       r = lock_count(&mut k, pid, bytes, n == LX_MLOCK);
+      if r == 0 && n == LX_MLOCK && a >= USER_BASE {
+        // Locked pages are resident: map those not touched yet (src/lxanon.bastio).
+        let from = (a - USER_BASE) / 4096;
+        anon_reach(&mut k, pid, from, smaller(from + bytes / 4096, WPAGES));
+      }
     }
   } else if n == LX_MLOCKALL {
     r = lx_mlockall(&mut k, pid, a);

@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <sys/epoll.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -147,6 +148,43 @@ int main(void) {
     if (m2 != MAP_FAILED) munmap(m2, 3 * 4096);
     if (mf >= 0) close(mf);
     unlink("l3_mm");
+
+    {
+        int pf[2], n = 0, e = 0, opened[1024];
+        struct rlimit old, lo;
+        getrlimit(RLIMIT_NOFILE, &old);
+        lo = old;
+        lo.rlim_cur = 64;
+        setrlimit(RLIMIT_NOFILE, &lo);
+        long lim = sysconf(_SC_OPEN_MAX);
+        while (n < 1020) {
+            if (pipe(pf) == -1) { e = errno; break; }
+            opened[n++] = pf[0];
+            opened[n++] = pf[1];
+        }
+        printf("# pipes: %d fds opened, limit %ld, errno %d\n", n, lim, e);
+        EXPECT("pipe on a full descriptor table is EMFILE", e == EMFILE);
+        for (int i = 0; i < n; i++) close(opened[i]);
+        setrlimit(RLIMIT_NOFILE, &old);
+    }
+
+    {
+        unsigned char vec[3] = {9, 9, 9};
+        char *a = mmap(NULL, 3 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        int r0 = a == MAP_FAILED ? -1 : mincore(a, 3 * 4096, vec);
+        EXPECT("mincore says untouched anonymous pages are not resident",
+               r0 == 0 && !(vec[0] & 1) && !(vec[1] & 1) && !(vec[2] & 1));
+        if (a != MAP_FAILED) a[4096] = 1;
+        int r1 = a == MAP_FAILED ? -1 : mincore(a, 3 * 4096, vec);
+        EXPECT("and a touched one is", r1 == 0 && !(vec[0] & 1) && (vec[1] & 1) && !(vec[2] & 1));
+        if (a != MAP_FAILED) munmap(a, 3 * 4096);
+        a = mmap(NULL, 3 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        int rl = a == MAP_FAILED ? -1 : mlock(a, 3 * 4096);
+        int r2 = rl == 0 ? mincore(a, 3 * 4096, vec) : -1;
+        EXPECT("mlock makes the pages resident", r2 == 0 && (vec[0] & 1) && (vec[1] & 1) && (vec[2] & 1));
+        if (rl == 0) munlock(a, 3 * 4096);
+        if (a != MAP_FAILED) munmap(a, 3 * 4096);
+    }
 
     unlink("l3_d/f2");
     unlink("l3_link");
