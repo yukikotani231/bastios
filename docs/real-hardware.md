@@ -131,4 +131,4 @@ These are expected on real machines today, so there is no need to report them un
 - Screen: a 32-bit framebuffer that GRUB sets up, in the device window below 4 GiB or anywhere above 4 GiB (where many PCs put the graphics memory; this case is untested, because no QEMU display has its framebuffer there). There is no GPU driver.
 - Processors: when the local APICs have to run in x2APIC mode (the report's `local APIC:` line says so: the firmware locked that mode, or a processor has an id of 255 or more), the kernel does without MSI and wake-up interrupts, so disks and the network are polled more.
 - ACPI: only the PM1a registers; PM1b is not used. The only AML read is `\_S5`. A reset register in memory has not been tested, because QEMU has none.
-- Memory: the kernel uses at most 256 MiB, below 1 GiB, whatever the machine has.
+- Memory: the kernel uses every run of RAM the firmware reports, up to 512 GiB (above 4 GiB only on processors with 1 GiB pages).

@@ -728,8 +728,8 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     return a;
   }
   if what == PF_MEMINFO {
-    let total = NPAGES * 4;
-    let avail = smaller(count_free(k.mem.bm), NPAGES) * 4;
+    let total = pool_size(k.mem.pool) * 4;   // the RAM the pool holds
+    let avail = count_free(k.mem.bm) * 4;
     let mut a = put_s(&mut o, 0, "MemTotal: ");
     a = put_n(&mut o, a, total);
     a = put_s(&mut o, a, " kB\nMemFree: ");
