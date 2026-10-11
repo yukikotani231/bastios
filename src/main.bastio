@@ -214,6 +214,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
   let mut woke = false;
   rng_stir(&mut s.k, cpu);
   if poll {
+    nic_feed(&mut s.k.nic, &mut s.k.mem);
     nic_poll(&mut s.k.nic);
     net_wake(&mut s.k);
     tty_intr(&mut s.con, &mut s.k);

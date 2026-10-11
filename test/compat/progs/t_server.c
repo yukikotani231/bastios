@@ -109,7 +109,7 @@ int main(void) {
            close(s);
            long res[2] = {-1, -1}; read(p[0], res, sizeof res); waitpid(k, 0, 0); close(p[0]); close(p[1]);
            total == SIZE && at == SIZE && res[0] == SIZE && res[1] == 0; }));
-    // (Linux's loopback takes the whole file; BastiOS's 4 KiB buffers do not.)
+    // (Linux's loopback takes the whole file; BastiOS's 256 KiB rings may not.)
     EXPECT("sendfile to a full nonblocking connection is EAGAIN after what fits", tcp_pair(&c, &s) &&
            ioctl(s, FIONBIO, &on) == 0 && ({
            off_t at = 0; ssize_t r; long total = 0;

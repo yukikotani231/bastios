@@ -421,6 +421,15 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Network
 
+- TCP buffers are no longer 4 KiB: each connection has a receive and a
+  send ring of 256 KiB whose pages are taken as data arrives and given
+  back once it is read or acknowledged, so idle connections cost nothing.
+  Windows are scaled (RFC 7323) when the peer offers it, and ACKs carry a
+  SACK block (RFC 2018) for data held past a gap. A `read` or `write` on
+  a connection moves up to the ring's size instead of 4 KiB, the loopback
+  queue holds 64 frames and TCP waits for room in it instead of losing
+  segments, and segments round the loopback carry no checksum. `make
+  bench`'s `tcpbw` went from 14.7 to 73.8 MiB/s under TCG.
 - The virtio network card sends without the kernel lock waiting for it:
   a frame goes out through one of two transmit buffers, and the buffers
   come back when the next frame is sent. Received buffers go back to the

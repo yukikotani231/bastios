@@ -104,7 +104,25 @@ def tcp_of(frame):
     t = frame[14 + ihl:14 + total]
     sport, dport, seq, ack, off, flags, wnd = struct.unpack("!HHIIBBH", t[:16])
     return dict(sport=sport, dport=dport, seq=seq, ack=ack, flags=flags,
-                wnd=wnd, data=t[(off >> 4) * 4:], frame=frame)
+                wnd=wnd, data=t[(off >> 4) * 4:], frame=frame, opts=options(t[20:(off >> 4) * 4]))
+
+def options(raw):
+    """A TCP header's options: kind -> its bytes after the length."""
+    o, found = 0, {}
+    while o < len(raw) and raw[o] != 0:
+        if raw[o] == 1:
+            o += 1
+            continue
+        if o + 1 >= len(raw) or raw[o + 1] < 2:
+            break
+        found[raw[o]] = raw[o + 2:o + raw[o + 1]]
+        o += raw[o + 1]
+    return found
+
+def sack_blocks(s):
+    """The (left, right) sequence numbers of a segment's SACK blocks."""
+    b = s["opts"].get(5, b"")
+    return [struct.unpack("!II", b[i:i + 8]) for i in range(0, len(b) - 7, 8)]
 
 # ------------------------------------------------------------------ a TCP peer
 
@@ -133,6 +151,9 @@ class Peer:
         self.rto = 0.25
         self.log = []                   # (time, segment) of every guest segment seen
         self.close_when = lambda p: False
+        self.ws = None                  # the window scale we offer in our SYN, if any
+        self.sack_ok = False            # whether our SYN says we take SACK blocks
+        self.peer_ws = None             # the guest's, once both sides scale
         if active:
             self.timer = time.time()
 
@@ -144,12 +165,21 @@ class Peer:
 
     def emit(self, flags, seq, data=b"", window=None):
         win = self.rwin if window is None else window
+        if not flags & SYN and self.peer_ws is not None:
+            win >>= self.ws                 # scaled, except in a SYN
+        win = min(win, 65535)
         ack = self.rcv_abs() if self.irs is not None else 0
-        hl = 24 if flags & SYN else 20
+        opts = b""
+        if flags & SYN:
+            opts = struct.pack("!BBH", 2, 4, self.mss)
+            if self.ws is not None:
+                opts += bytes([1, 3, 3, self.ws])
+            if self.sack_ok:
+                opts += bytes([1, 1, 4, 2])
+        hl = 20 + len(opts)
         seg = struct.pack("!HHIIBBHHH", self.lport, self.rport, seq, ack, hl // 4 << 4,
                           flags | (ACK if self.irs is not None else 0), win, 0, 0)
-        if flags & SYN:
-            seg += struct.pack("!BBH", 2, 4, self.mss)
+        seg += opts
         seg += data
         seg = seg[:16] + struct.pack("!H", l4_sum(6, HOST_IP, GUEST_IP, seg)) + seg[18:]
         self.net.send_ip(6, seg)
@@ -203,6 +233,17 @@ class Peer:
             self.recover = self.max
             self.resend_head()
 
+    def scaled(self, s):
+        """The window a segment from the guest gives, scaled as agreed."""
+        if s["flags"] & SYN or self.peer_ws is None:
+            return s["wnd"]
+        return s["wnd"] << self.peer_ws
+
+    def agree(self, s):
+        """Window scaling is on if both SYNs offered it."""
+        if self.ws is not None and 3 in s["opts"]:
+            self.peer_ws = min(s["opts"][3][0], 14)
+
     def take(self, s):
         self.log.append((time.time(), s))
         if s["flags"] & RST:
@@ -212,6 +253,7 @@ class Peer:
             if s["flags"] & SYN:
                 self.irs = s["seq"]
                 self.peer_wnd = s["wnd"]
+                self.agree(s)
                 self.state = "SYN_RCVD"
                 self.emit(SYN, self.iss)
                 self.timer = time.time() + self.rto
@@ -222,6 +264,7 @@ class Peer:
                 self.state = "ESTABLISHED"
                 self.timer = None
                 self.peer_wnd = s["wnd"]
+                self.agree(s)
                 self.ack_now()
                 self.output()
             return
@@ -235,7 +278,7 @@ class Peer:
             self.timer = None
         if s["flags"] & ACK:
             a = (s["ack"] - self.iss - 1) % M32
-            self.peer_wnd = s["wnd"]
+            self.peer_wnd = self.scaled(s)
             if self.una < a <= self.max:
                 self.una = a
                 self.nxt = max(self.nxt, a)
@@ -393,13 +436,25 @@ def pattern(n, salt):
     r = random.Random(salt)
     return bytes(r.randrange(256) for _ in range(n))
 
+def listen_7001():
+    """`tcpecho 7001` in the guest, typed again if the port is still taken
+    (the last connection on it can still be waiting for our final ACK when
+    the shell prompt comes back). Returns where its output starts."""
+    for _ in range(5):
+        mark = len(out)
+        type_line("tcpecho 7001")
+        until(lambda: b"listening on tcp port 7001" in out[mark:] or b"cannot listen" in out[mark:], 10)
+        if b"listening on tcp port 7001" in out[mark:]:
+            break
+        until(lambda: b"bastios> " in out[mark:], 5)
+        until(lambda: False, 0.5)
+    return mark
+
 def echo_run(name, data, setup, secs=60):
     """`tcpecho 7001` in the guest and a connection to it from here that
     sends `data` and closes once it all came back. `setup(peer)` sets the
     rules. Returns the peer."""
-    mark = len(out)
-    type_line("tcpecho 7001")
-    until(lambda: b"listening on tcp port 7001" in out[mark:], 10)
+    mark = listen_7001()
     p = Peer(net, 40000 + (len(out) % 20000), 7001, data, active=True)
     p.close_when = lambda q: len(q.got) >= len(data)
     net.peer = p
@@ -504,12 +559,11 @@ check(len(seqs) > len(set(seqs)), f"late ACKs: the guest timed out and went back
 # 4. Our window is shut from the start and stays shut for longer than the
 #    guest's resend limit: the guest must probe it, and not give up while
 #    we answer. Meanwhile its own buffers fill and its window closes, and
-#    we probe it in turn. Then ours reopens.
+#    we probe it in turn. Then ours reopens. (The data is more than the
+#    guest's send and receive rings hold together.)
 def zero_window_scenario():
-    mark = len(out)
-    data = pattern(20000, 4)
-    type_line("tcpecho 7001")
-    until(lambda: b"listening on tcp port 7001" in out[mark:], 10)
+    data = pattern(700000, 4)
+    mark = listen_7001()
     q = Peer(net, 45000, 7001, data, active=True)
     q.close_when = lambda r: len(r.got) >= len(data)
     q.rwin = 0
@@ -560,7 +614,32 @@ def chaos_setup(p):
     link.in_rule = chaos
 p = echo_run(f"random loss (SEED={seed})", pattern(30000, 5), chaos_setup, secs=120)
 
-# 6. The guest connects out: its first SYN is lost.
+# 6. Window scaling and SACK (RFC 7323, RFC 2018): we offer both, so the
+#    guest offers a window past 64 KiB, and when one of our segments is
+#    lost its ACKs say with a SACK block what came after the gap.
+lost3 = {"n": 0, "end": None}
+def lose_third(f):
+    s = tcp_of(f)
+    if s and s["data"]:
+        lost3["n"] += 1
+        if lost3["n"] == 3:
+            lost3["end"] = (s["seq"] + len(s["data"])) % M32
+            return None
+    return 0
+def scale_setup(p):
+    p.ws, p.sack_ok, p.rwin, p.mss = 3, True, 200000, 1460
+    link.out_rule = lose_third
+p = echo_run("window scaling and SACK", pattern(300000, 6), scale_setup)
+synacks = [s for _, s in p.log if s["flags"] & SYN]
+check(synacks and 3 in synacks[0]["opts"] and 4 in synacks[0]["opts"],
+      "window scaling and SACK: the guest's SYN+ACK takes up both")
+wide = max([p.scaled(s) for _, s in p.log if not s["flags"] & SYN] + [0])
+check(p.peer_ws is not None and wide > 65535, f"window scaling: the guest offers a window past 64 KiB ({wide} bytes)")
+sacked = [b for _, s in p.log for b in sack_blocks(s)]
+check(lost3["end"] is not None and any(l == lost3["end"] and r != l for l, r in sacked),
+      f"SACK: the guest's ACKs name what it holds past the lost segment ({len(sacked)} blocks)")
+
+# 7. The guest connects out: its first SYN is lost.
 mark = len(out)
 srv = Peer(net, 8080, 0, b"hello from the host\n", active=False)
 srv.close_when = lambda q: b"\n" in q.got
@@ -584,6 +663,8 @@ link.in_rule = lambda f: 0
 syns = [s for _, s in srv.log if s["flags"] & SYN]
 check(finished and b"hello from the host" in out[mark:] and bytes(srv.got) == b"hi\n",
       f"connecting out: SYN sent again after a loss ({len(syns)} seen), reply read")
+check(syns and all(k in syns[0]["opts"] for k in (2, 3, 4)),
+      "connecting out: the SYN offers an MSS, window scaling and SACK (and nothing is scaled when we do not)")
 net.peer = None
 
 qemu.kill(); qemu.wait()
