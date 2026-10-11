@@ -51,8 +51,10 @@ static long sys_clock_gettime(long clk, struct timespec *ts)
 int __vdso_clock_gettime(int clk, struct timespec *ts)
 {
     uint64_t mult = vdso_data.mult, base = vdso_data.base, at = vdso_data.at;
-    /* MONOTONIC(_RAW, _COARSE) 1, 4, 6; BOOTTIME 7 */
-    if (mult == 0 || mult >= MULT_MAX || (clk != 1 && clk != 4 && clk != 6 && clk != 7))
+    /* MONOTONIC(_RAW) 1, 4; BOOTTIME 7. MONOTONIC_COARSE (6) is the system
+     * call's, which counts in ticks: reading it here by the TSC would run
+     * ahead of a later system call's answer (LTP's clock_gettime04). */
+    if (mult == 0 || mult >= MULT_MAX || (clk != 1 && clk != 4 && clk != 7))
         return (int)sys_clock_gettime(clk, ts);
     uint32_t lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
