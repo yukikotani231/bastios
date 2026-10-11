@@ -125,9 +125,10 @@ fn nvme_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, 
 /// The first AHCI controller on PCI, if its registers (BAR 5) lie in
 /// the device window clear of the framebuffer at lo .. hi, two pages from
 /// AHCI_AT are free, and one of its ports has a SATA disk; else none (and
-/// everything it claimed or took is back). Unless `msi` is 0, and if the
+/// everything it claimed or took is back). `reset`: every port with a
+/// device gets a COMRESET (boot option ahci_reset). Unless `msi` is 0, and if the
 /// controller has MSI, its completions raise V_DISK by a message to `msi`.
-fn ahci_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64) -> Drive
+fn ahci_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64, reset: bool) -> Drive
   requires pci_ok(pci) && mem_ok(m) && msi <= 4294967295
   requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) ==> mmio_free(win, a)
   ensures mem_ok(m) && (result is Drive::Ahci ==> ahci_ok(result.Ahci)) && !(result is Drive::Nvme)
@@ -150,7 +151,7 @@ fn ahci_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, 
   pci_enable(&mut pci, dev);
   let f0 = take_low_page(&mut m, AHCI_AT);
   let f1 = take_low_page(&mut m, AHCI_AT + 1);
-  let mut h = ahci_new(mmio_claim(&mut win, bar, size), f0, f1);
+  let mut h = ahci_new(mmio_claim(&mut win, bar, size), f0, f1, reset);
   if h.sectors == 0 {
     mmio_release(&mut win, ahci_free(h, &mut m));
     return Drive::None;
@@ -202,7 +203,7 @@ fn virtio_msix(pci: &mut Pci, win: &mut MmioSpace, dev: u64, lo: u64, hi: u64, l
 /// request and page 31 for block data, else a SATA disk on AHCI (see `ahci_find`), or else the ATA
 /// drive. `msi` is where a device's interrupt messages go (0 for none).
 fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64,
-  plo: u64, phi: u64) -> Blk
+  plo: u64, phi: u64, reset: bool) -> Blk
   requires pci_ok(pci) && mem_ok(m) && msi <= 4294967295
   requires forall k: u64 :: ATA_IO <= k && k < ATA_IO + 8 ==> port_free(ports, k)
   requires port_free(ports, ATA_CTL)
@@ -271,7 +272,7 @@ fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, l
       return Blk::Virtio(virtio_new(&mut ports, base, f0, f1, f2, f3, f4, extra, pages, msix));
     }
   }
-  let sd = ahci_find(&mut pci, &mut m, &mut win, lo, hi, lo2, hi2, msi);
+  let sd = ahci_find(&mut pci, &mut m, &mut win, lo, hi, lo2, hi2, msi, reset);
   match sd {
     Drive::Ahci(h) => { return Blk::Ahci(h); },
     Drive::Nvme(n) => { unreachable; },
@@ -286,7 +287,7 @@ fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, l
 /// A stick booted from is the one the user chose, so it goes before the
 /// machine's own disks, which are then left untouched.
 fn blk_find(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64, u: &mut Usb,
-  plo: u64, phi: u64) -> Blk
+  plo: u64, phi: u64, reset: bool) -> Blk
   requires pci_ok(pci) && mem_ok(m) && msi <= 4294967295 && usb_ok(u)
   requires forall k: u64 :: ATA_IO <= k && k < ATA_IO + 8 ==> port_free(ports, k)
   requires port_free(ports, ATA_CTL)
@@ -306,7 +307,7 @@ fn blk_find(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, 
     },
     Usb::None => { u = Usb::None; },
   }
-  return blk_new(&mut ports, &mut pci, &mut m, &mut win, lo, hi, lo2, hi2, msi, plo, phi);
+  return blk_new(&mut ports, &mut pci, &mut m, &mut win, lo, hi, lo2, hi2, msi, plo, phi, reset);
 }
 
 /// Does the disk raise V_DISK when a command started by blk_begin ends?

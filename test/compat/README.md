@@ -99,3 +99,42 @@ Add an `EXPECT("name", condition)` line to a program, or a case to
 needs outside it (as `t_ipc.c` does with its pipe), so a rerun past a hang
 still has it. A check must not leave a child behind that could signal
 someone later; reap every child it forks.
+
+## LTP system call tests
+
+```sh
+make compat-ltp            # writes build/compat/ltp/report.md
+make compat-ltp-baseline   # record which tests pass now (ltp_baseline.txt)
+```
+
+The [Linux Test Project](https://github.com/linux-test-project/ltp)'s system
+call tests are a much larger and more exacting set than the checks above:
+about 1,500 tests, each written against the man pages and the kernel's own
+behaviour, error cases included. LTP is GPL-2.0-or-later and is not part of
+this repository: `make compat-ltp` clones it at a pinned tag (`LTP_TAG`) into
+`build/ltp` and builds `testcases/kernel/syscalls` against musl as static
+PIEs, as the BusyBox build does. The three files LTP's own Alpine (musl) CI
+removes are removed here too.
+
+`ltp.py` takes the tests from LTP's own list (`runtest/syscalls`), puts their
+programs on disk images (the disk holds 64 files, so the tests run in batches
+of up to 63 programs, each batch in its own QEMU, several at once with
+`--jobs`), and runs each from ash in `/disk` with `TMPDIR=/tmp`. A test's
+helper programs (`execve_child` and the like) go on the same disk, since LTP
+copies them from the directory a test starts in. Tests that ask about the
+kernel's configuration read `ltp_kconfig`, which lists only what BastiOS
+really has; a test needing anything else reports `TCONF`. A test's exit status gives its result:
+pass, fail (`TFAIL`), broken (`TBROK`: it could not set itself up),
+unsupported (`TCONF`: it needs something this system does not claim to
+have, such as a kernel config or a block device), hang (interrupted after
+`--timeout` seconds) or crash. `--only REGEX` runs a subset by tag.
+
+The report ranks missing system calls by how many tests they block, as
+`run.py` does, and lists every test that did not pass with its first
+`TFAIL`/`TBROK` line. `make compat-ltp` fails only if a test listed in
+`ltp_baseline.txt` stops passing. `ltp_skip.txt` lists tests that are not
+run, with the reason.
+
+There is no `--host` mode for these: many of the tests change the machine
+they run on (the clock, mounts, swap, resource limits), so they are not run
+on the build machine. LTP's own CI runs them on Linux.

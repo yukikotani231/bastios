@@ -66,7 +66,7 @@ const READ_MAX: u64 = 262144;          // the most one read of a file returns
 const MAP_SHARED: u64 = 1;
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANONYMOUS: u64 = 0x20;
-const PATH_MAX_LX: u64 = 256;           // the longest path read from user memory
+const PATH_MAX_LX: u64 = 4096;          // the longest path read from user memory (PATH_MAX)
 const PATH_OUT: u64 = 512;              // room for a name being built
 
 const ARCH_SET_FS: u64 = 0x1002;
@@ -280,6 +280,8 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       r = sfd_read(&mut k, pid, d.x, va, cnt);
     } else if d.kind == K_DEV && d.x >= PROC_DEV {
       r = proc_read(&mut k, pid, a, d.x, va, cnt);
+    } else if d.kind == K_DEV && is_loop(d.x) {
+      r = loop_io(&mut con, &mut k, pid, a, d.x, false, va, cnt);
     } else if d.kind == K_DEV {
       r = dev_read(&mut k, pid, d.x, va, cnt);
     } else if d.kind == K_SOCK {
@@ -372,6 +374,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if is_more_call(n) {
     return lx_more_call(&mut con, &mut k, pid, n, a, b, c);
+  }
+  if is_xattr_call(n) {
+    return lx_xattr_call(&mut k, pid, n, a);  // src/lxxattr.bastio
   }
   if is_splice_call(n) {
     return lx_splice_call(&mut con, &mut k, pid, n, a, b, c);
@@ -684,6 +689,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     // The bytes waiting in the pipe, as an int.
     xfer_u64(&mut k.fs.xfer, 0, smaller(pi_get(k.pipes, d.x, 1), PIPE_CAP));
     return lx_put_out(&mut k, pid, arg, 4);
+  }
+  if d.kind == K_DEV && (is_loop(d.x) || d.x == DEV_LOOPCTL) {
+    return loop_ioctl(&mut k, pid, d.x, req % 0x100000000, arg);   // the request is an unsigned int
   }
   if d.kind == K_SOCK && (req == SIOCATMARK || (req >= SIOCGIFCONF && req <= SIOCSIFFLAGS)) {
     return sock_ioctl(&mut k, pid, fd, req, arg);
@@ -1082,6 +1090,9 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64
   }
   if d.kind == K_SOCK {
     return lx_sendto(&mut k, pid, fd, va, n, 0, 0);   // to the connected peer
+  }
+  if d.kind == K_DEV && is_loop(d.x) {
+    return loop_io(&mut con, &mut k, pid, fd, d.x, true, va, n);
   }
   if d.kind == K_DEV {
     return n;                               // a device swallows what it is given
@@ -1552,8 +1563,11 @@ fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
   if d.kind == K_BAD {
     return EBADF;
   }
+  if d.kind == K_DEV && is_loop(d.x) {
+    return loop_seek(&mut k, pid, fd, d.x, off, whence);
+  }
   if d.kind == K_DEV {
-    return 0;                               // devices have no position
+    return 0;                               // other devices have no position
   }
   if d.kind != K_FILE {
     return ESPIPE;

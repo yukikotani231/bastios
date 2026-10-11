@@ -457,6 +457,46 @@ compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img bu
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
 	test/compat/run.py --host build/compat --out build/compat/host $(COMPAT_PROGS)
 
+# The Linux Test Project's system call tests (test/compat/ltp.py). LTP
+# (GPL-2.0-or-later, not part of this repository) is fetched at a pinned tag
+# and built against musl as static PIEs; the three files LTP's own Alpine CI
+# removes as unsupported on musl are removed here too. musl-gcc has no Linux
+# headers of its own, so the system's are put on its include path.
+LTP_GIT ?= https://github.com/linux-test-project/ltp
+LTP_TAG ?= 20260930
+LTP_HDRS ?= /usr/include
+
+build/ltp/configure: | build
+	rm -rf build/ltp
+	git clone -q --depth 1 --branch $(LTP_TAG) $(LTP_GIT) build/ltp
+	rm -f build/ltp/testcases/kernel/syscalls/fmtmsg/fmtmsg01.c \
+	  build/ltp/testcases/kernel/syscalls/timer_create/timer_create01.c \
+	  build/ltp/testcases/kernel/syscalls/timer_create/timer_create03.c
+	# LTP images a 300 MB file for a test's block device; a RAM file holds
+	# 64 MiB here (FILE_MAX, src/ramfs.bastio), so ask for 32 MB.
+	sed -i 's/^#define DEV_SIZE_MB 300u$$/#define DEV_SIZE_MB 32u/' build/ltp/lib/tst_device.c
+	$(MAKE) -C build/ltp -s autotools >/dev/null
+
+build/ltp/.built: build/ltp/configure
+	rm -rf build/ltp-hdrs && mkdir -p build/ltp-hdrs
+	ln -s $(LTP_HDRS)/linux $(LTP_HDRS)/asm-generic build/ltp-hdrs/
+	ln -s $$(dirname $$(find $(LTP_HDRS) -path '*/asm/unistd_64.h' | head -1)) build/ltp-hdrs/asm
+	cd build/ltp && ./configure -q CC="$(MUSLCC) -isystem $(CURDIR)/build/ltp-hdrs" \
+	  CFLAGS="-O2 -fPIE" LDFLAGS=-static-pie --without-tirpc >/dev/null
+	$(MAKE) -C build/ltp/lib -s
+	$(MAKE) -C build/ltp/libs -s
+	$(MAKE) -C build/ltp/testcases/kernel/syscalls -s -k || true
+	touch $@
+
+# Not part of `make test`: a full run boots the kernel once per 63 programs
+# (25 boots, three at a time; about 10 minutes on four processors). Fails
+# only if a test in ltp_baseline.txt stops passing.
+compat-ltp: build/bastios.elf build/ltp/.built
+	test/compat/ltp.py --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp
+
+compat-ltp-baseline: build/bastios.elf build/ltp/.built
+	test/compat/ltp.py --update-baseline --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp
+
 # Not part of `make test`: prints timings, checks nothing (see the script).
 smpbench: build/bastios.elf
 	test/smpbench.sh
@@ -484,4 +524,4 @@ clean:
 	rm -rf build
 
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
-.PHONY: all run disk usb run-usb test fuzz smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host clean
+.PHONY: all run disk usb run-usb test fuzz smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
