@@ -16,6 +16,13 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Processors
 
+- The code pages a program reads when it first runs them (see below) come
+  from the page cache, so every process running the program maps the same
+  read-only page and the disk is read once; before, each process read and
+  copied its own. A fault whose blocks are not in the disk's cache sleeps
+  until they are read, instead of the kernel polling the disk with its
+  lock held. Four compiler builds at once went from 7.2-9.1 s to 5.5-5.6 s
+  on four processors and from 8.5-8.9 s to 4.8-5.3 s on one.
 - virtio-blk reads a run of up to eight consecutive blocks in one request
   (the blocks a read queues ahead), instead of one request per 4 KiB
   block: under QEMU each request is a notify and a trip through its I/O

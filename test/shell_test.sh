@@ -1398,6 +1398,11 @@ for line, want, until in [
     ("ash", b"built-in shell (ash)", b"\n# "),
     ("/disk/mx", b"mmisc: ok on Linux", b"\n# "),
     ("/disk/mx && /disk/mx && echo twice", b"mmisc: ok on Linux x86_64, signals, pipe 65536\r\ntwice", b"\n# "),
+    # Two at once: their code pages come from one page cache entry each,
+    # and a fault that waits for the disk sleeps while the other runs.
+    # (mmisc makes a file "mm" in its working directory, so each has its own;
+    # ash gives a background job /dev/null as stdin, and mmisc checks the tty.)
+    ("mkdir /tmp/a /tmp/b; (cd /tmp/a; /disk/mx </dev/tty) & (cd /tmp/b; /disk/mx); wait; echo both", b"pipe 65536\r\nmmisc: ok on Linux x86_64, signals, pipe 65536\r\nboth", b"\n# "),
     ("/disk/mx /disk/mx && echo gone; /disk/mx", [b"mmisc: ok on Linux", b"\r\ngone\r\n", b"not found"], b"\n# "),
 ]:
     mark = len(out)
