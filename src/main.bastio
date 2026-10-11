@@ -128,8 +128,7 @@ struct Task { pid: u64, tgid: u64, lease: Lease, fpu: Frame }
 enum Job { Stop, Idle, Disk, Run(Task) }   // Disk: idle, but a polled disk command is running
 
 /// The system calls a processor answers without the lock, from what it
-/// knows of the task it runs: the thread and process ids, the user and
-/// group ids (everyone is root), and a yield while no other process waits
+/// knows of the task it runs: the thread and process ids, and a yield while no other process waits
 /// for a processor (`others`, published under the lock by turn and
 /// next_job_p). True if `v` was one of them; the result is in rax and the
 /// task runs on. Anything they skip (a signal, a kill, the tick's

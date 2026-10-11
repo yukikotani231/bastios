@@ -203,6 +203,12 @@ t_ipc: socketpair AF_UNIX
 t_ipc: socketpair both ways, EOF after close
 t_ipc: timerfd
 t_ipc: ttyname(0)
+t_isol: mount and umount2 are root's
+t_isol: native system calls are root's
+t_isol: ports below 1024 are root's
+t_isol: reboot is root's
+t_isol: root binds a port below 1024
+t_isol: rt_sigqueueinfo follows kill's rule
 t_lock: F_GETLK names the holder
 t_lock: F_GETLK sees no lock of ours
 t_lock: F_SETLK bad type is EINVAL

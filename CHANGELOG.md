@@ -178,6 +178,20 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   `ENOSYS` quietly; glibc carries on without them (static glibc programs
   run).
 
+### Users and permissions
+
+- `docs/security.md` audits what BastiOS enforces between users and
+  processes, and lists what it does not yet.
+- The native system calls (`int 0x80`) are root's, except console I/O,
+  starting and waiting for children, yielding, the pid, `SYS_INFO`, the
+  process list and a `SYS_KILL` that `kill`'s rule allows. Any program can
+  raise `int 0x80`, so before this an unprivileged Linux process could
+  open, unlink, kill and reboot through it with no check. A native
+  `SYS_SPAWN` child keeps its parent's ids instead of starting as root.
+- `reboot`, `mount` and `umount2` are root's (`EPERM`), `rt_sigqueueinfo`
+  follows `kill`'s rule, and binding a port below 1024 is root's
+  (`EACCES`). `test/compat/progs/t_isol.c` tries each as nobody.
+
 ### Programs that run
 
 - Real programs in `make compat` (`test/compat/apps.txt`): Lua 5.4.7,

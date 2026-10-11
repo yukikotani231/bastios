@@ -221,8 +221,13 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return lx_futex(&mut k, pid, was, a, b, c);
   }
   if n == LX_REBOOT {
-    // reboot(2), after its two magic numbers: RESTART restarts the
-    // machine, POWER_OFF and HALT power it off (everyone is root).
+    // reboot(2), for root alone (CAP_SYS_BOOT on Linux, checked first
+    // there too), after its two magic numbers: RESTART restarts the
+    // machine, POWER_OFF and HALT power it off.
+    if !cred_root(k.procs, pid) {
+      ret(&mut k.procs, pid, EPERM);
+      return KEEP;
+    }
     if a != 0xFEE1DEAD || (b != 672274793 && b != 85072278 && b != 369367448 && b != 537993216) {
       ret(&mut k.procs, pid, EINVAL);
       return KEEP;
