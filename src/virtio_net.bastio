@@ -5,7 +5,8 @@
 // off, and every access to those pages is proved inside the page.
 //
 // Memory, nine pages: two queues of three pages, two pages of receive
-// buffers (four buffers of 2 KiB) and one transmit page. Each buffer starts
+// buffers (four buffers of 2 KiB) and one transmit page (two buffers of
+// 2 KiB, so a frame can be built while the card still sends the last). Each buffer starts
 // with the 10-byte legacy virtio-net header, then the Ethernet frame.
 
 import "virtq.bastio";
@@ -15,6 +16,7 @@ const NET_F_MAC: u64 = 32;            // feature bit 5: the card has a MAC addre
 const NET_HDR: u64 = 10;
 const RX_BUFS: u64 = 4;
 const RX_BUF: u64 = 2048;
+const TX_BUF: u64 = 2048;             // the transmit page holds two
 const FRAME_MAX: u64 = 1514;          // Ethernet header + 1500 bytes
 const NET_PAGES: u64 = 9;
 
@@ -24,7 +26,10 @@ struct VNet {
   tx: Vq,
   rb0: Dma,           // receive buffers 0 and 1
   rb1: Dma,           // receive buffers 2 and 3
-  tb: Dma,            // the frame being sent
+  tb: Dma,            // the two transmit buffers (descriptors 0 and 1)
+  tx_busy0: bool,     // the card has not handed transmit buffer 0 back yet
+  tx_busy1: bool,
+  rx_kick: bool,      // buffers were offered again since the card was told
   mac: u64,           // 48 bits, first byte most significant
   live: bool,
   irq: bool,          // a received frame can raise MSI-X message 0 (see vnet_irq)
@@ -59,8 +64,8 @@ fn rx_give(v: &mut VNet, b: u64)
 /// and reads its MAC address. A card that cannot be started is left with
 /// `live` false: it sends nothing and receives nothing. `msix`: MSI-X is
 /// on at the card, entry 0 aimed at V_NET; the receive queue is then given
-/// message 0, still quiet until `vnet_irq` (transmits are waited for, so
-/// they raise nothing).
+/// message 0, still quiet until `vnet_irq` (sent frames are collected
+/// when the next one is sent, so they raise nothing).
 fn vnet_new(ports: &mut Ports, base: u64, q0: Frame, q1: Frame, q2: Frame, t0: Frame, t1: Frame, t2: Frame, b0: Frame, b1: Frame, b2: Frame, msix: bool) -> VNet
   requires base + VIO_PORTS <= 65536
   requires forall k: u64 :: base <= k && k < base + VIO_PORTS ==> port_free(ports, k)
@@ -68,7 +73,7 @@ fn vnet_new(ports: &mut Ports, base: u64, q0: Frame, q1: Frame, q2: Frame, t0: F
 {
   let mut v = VNet {
     io: port_claim(&mut ports, base, VIO_PORTS), rx: vq_new(q0, q1, q2), tx: vq_new(t0, t1, t2),
-    rb0: dma_lend(b0), rb1: dma_lend(b1), tb: dma_lend(b2), mac: 0, live: false, irq: false,
+    rb0: dma_lend(b0), rb1: dma_lend(b1), tb: dma_lend(b2), tx_busy0: false, tx_busy1: false, rx_kick: false, mac: 0, live: false, irq: false,
   };
   let a0 = dma_addr(v.rb0);
   let a1 = dma_addr(v.rb1);
@@ -149,7 +154,9 @@ fn vnet_free(ports: &mut Ports, v: VNet, m: &mut Mem)
 }
 
 /// Copies the next received frame into `pkt` and returns its length, or 0
-/// if none has arrived. The buffer goes straight back to the card.
+/// if none has arrived. The buffer goes straight back to the card, which
+/// is told once per poll (vnet_rx_flush): each notice is a port write,
+/// slow in a virtual machine, and made under the kernel lock.
 fn vnet_recv(v: &mut VNet, pkt: &mut Bytes) -> u64
   requires vnet_ok(v) && blen(pkt) >= RX_BUF
   ensures vnet_ok(v) && blen(pkt) == old(blen(pkt)) && result <= RX_BUF - NET_HDR
@@ -168,12 +175,47 @@ fn vnet_recv(v: &mut VNet, pkt: &mut Bytes) -> u64
     n = got - NET_HDR;
   }
   rxbuf_copy(&mut v, b, NET_HDR, &mut pkt, n);
-  rx_give(&mut v, b);
+  vq_push(&mut v.rx, b);
+  v.rx_kick = true;
   return n;
 }
 
-/// Sends the first `n` bytes of `pkt` as one frame and waits until the card
-/// has taken it.
+/// Tells the card about the receive buffers vnet_recv offered again.
+fn vnet_rx_flush(v: &mut VNet)
+  requires vnet_ok(v)
+  ensures vnet_ok(v)
+{
+  if v.rx_kick {
+    pio_out16(&mut v.io, VIO_QUEUE_NOTIFY, 0);
+    v.rx_kick = false;
+  }
+}
+
+/// Takes back the transmit buffers the card has finished with.
+fn tx_collect(v: &mut VNet)
+  requires vnet_ok(v)
+  ensures vnet_ok(v) && v.live == old(v.live)
+{
+  let mut k = 0;
+  while k < 2 && vq_has_used(&mut v.tx)
+    invariant vnet_ok(v) && v.live == old(v.live)
+  {
+    let b = vq_used_id(&mut v.tx);
+    vq_next(&mut v.tx);
+    if b == 0 {
+      v.tx_busy0 = false;
+    } else if b == 1 {
+      v.tx_busy1 = false;
+    }
+    k = k + 1;
+  }
+}
+
+/// Sends the first `n` bytes of `pkt` as one frame. It does not wait for
+/// the card to take it, only, if both transmit buffers are still out, for
+/// one of them to come back; false if the card never hands one back.
+/// Before, every frame was waited for, and under QEMU the card sends from
+/// its I/O thread, so the kernel lock was held across that thread's turn.
 fn vnet_send(v: &mut VNet, pkt: &Bytes, n: u64) -> bool
   requires vnet_ok(v) && n <= FRAME_MAX && n <= blen(pkt)
   ensures vnet_ok(v)
@@ -181,17 +223,41 @@ fn vnet_send(v: &mut VNet, pkt: &Bytes, n: u64) -> bool
   if !v.live {
     return false;
   }
+  tx_collect(&mut v);
+  let mut spins = 0;
+  while v.tx_busy0 && v.tx_busy1 && spins < VIO_SPINS
+    invariant vnet_ok(v) && v.live
+  {
+    tx_collect(&mut v);
+    spins = spins + 1;
+  }
+  if v.tx_busy0 && v.tx_busy1 {
+    return false;
+  }
+  let mut b = 0;
+  if v.tx_busy0 {
+    b = 1;
+  }
+  let at = b * TX_BUF;
   let mut i = 0;
   while i < NET_HDR
-    invariant i <= NET_HDR
+    invariant i <= NET_HDR && at <= TX_BUF
   {
-    dma_write8(&mut v.tb, i, 0);      // no checksum offload, no segmentation
+    dma_write8(&mut v.tb, at + i, 0);  // no checksum offload, no segmentation
     i = i + 1;
   }
-  bytes_to_dma(&mut v.tb, NET_HDR, pkt, 0, n);
+  bytes_to_dma(&mut v.tb, at + NET_HDR, pkt, 0, n);
   let a = dma_addr(v.tb);
-  vq_desc(&mut v.tx, 0, a, NET_HDR + n, 0, 0);
-  vq_push(&mut v.tx, 0);
+  if a > ADDR_LIMIT {
+    return false;                     // vnet_new checked it: never
+  }
+  vq_desc(&mut v.tx, b, a + at, NET_HDR + n, 0, 0);
+  if b == 0 {
+    v.tx_busy0 = true;
+  } else {
+    v.tx_busy1 = true;
+  }
+  vq_push(&mut v.tx, b);
   pio_out16(&mut v.io, VIO_QUEUE_NOTIFY, 1);
-  return vq_wait(&mut v.tx);
+  return true;
 }
