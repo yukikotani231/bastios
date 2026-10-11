@@ -43,6 +43,13 @@ New users get ids from 1000, and passwords are hashed with SHA-512 by
 BusyBox's own `crypt`. From the native shell, `ash` then `login` (or `su
 NAME`) starts a session as another user.
 
+With the boot option `login` (`-append login` under QEMU's own loader,
+or added to GRUB's `multiboot2` line), the console runs BusyBox's `login`
+instead of the native shell, and the kernel starts a new one whenever the
+last has ended, as init restarts a getty (`relogin`, `src/main.bastio`):
+logging out brings the prompt back. As BusyBox's `login` does, an
+unanswered prompt gives up after 60 seconds and a new one appears.
+
 `/bin/su` and `/bin/passwd` are set-user-ID root, as on a system where
 BusyBox is installed set-user-ID: running either starts BusyBox with
 effective user 0 (`exec_ids`, `src/lxperm.bastio`; `bin_suid`,
@@ -87,8 +94,10 @@ by root. The rest are checked by tests, not proved: `test/compat/progs/t_cred.c`
 
 Known gaps, most serious first.
 
-1. **No login at boot.** The console starts in the native shell as root;
-   there is no `getty` or boot to a login prompt yet.
+1. **Login is a boot option.** By default the console starts in the
+   native shell as root (the tests drive it). With the boot option `login`
+   it starts BusyBox's `login` instead (see "Users and passwords"); the
+   ISO's GRUB menu has no entry for it yet.
 2. **Native processes.** The native shell and the programs it starts run
    as root, and `SYS_SPAWN` starts any built-in program; that is safe only
    because a process that is not root cannot gain anything by it (the
@@ -102,6 +111,6 @@ Known gaps, most serious first.
    `/dev/console` is open to all; a unix socket's file that is renamed no
    longer leads to its socket, and names in the abstract namespace (a
    leading 0 byte) have no permissions, as on Linux.
-5. Not implemented, so not a hole: `ptrace`, `process_vm_readv`,
+4. Not implemented, so not a hole: `ptrace`, `process_vm_readv`,
    `/proc/PID/mem`, `environ` and `maps`, `chroot`, `iopl` and `ioperm`,
    `syslog`, `swapon` and `pivot_root` all fail (`ENOSYS` or missing).

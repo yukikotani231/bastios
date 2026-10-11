@@ -283,6 +283,8 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   survive a reboot. The first boot seeds `/disk/etc` from the built-in files.
 - A loop-mounted `bstdisk3` image is `nosuid`: its set-user-ID and
   set-group-ID files run with the caller's ids.
+- The boot option `login` starts BusyBox's `login` on the console instead
+  of the native shell, and starts a new one after each logout.
 
 ### Programs that run
 

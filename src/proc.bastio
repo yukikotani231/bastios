@@ -856,6 +856,16 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   ensures kok(k)
   ensures result < NPROC
 {
+  return spawn_as(&mut k, prog, parent, prog_name(prog));
+}
+
+/// spawn, with `name` as the program's argv[0] (BusyBox picks its applet
+/// by it).
+fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
+  requires kok(k)
+  ensures kok(k)
+  ensures result < NPROC
+{
   let pid = free_pid(k.procs);
   if pid == 0 {
     return 0;
@@ -896,7 +906,7 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   sig_reset(&mut k.sigact, pid, false);
   k.cwd = set(k.cwd, pid * CWD_STRIDE, 0);   // starts at "/"
   let mut args = balloc(ARGV0_MAX + 1);
-  let alen = name_arg(&mut args, prog_name(prog));
+  let alen = name_arg(&mut args, name);
   let src = Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
   let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, alen, false);
   bfree(args);

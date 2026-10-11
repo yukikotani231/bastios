@@ -1745,6 +1745,35 @@ for name, at, data in (("an MBR", 510, b"\x55\xaa"), ("a backup GPT header", (33
     print(("ok  " if good else "FAIL"), f"(foreign disk) not a byte of the disk with {name} changed")
     fails += not good
 
+# With the boot option `login`, the console is BusyBox's login instead of
+# the native shell, and a new login starts whenever the last one ends
+# (relogin, src/main.bastio). Root has no password here (passwd -d above).
+qemu = boot(1, with_disk=True, extra=["-append", "login"])
+out = b""
+deadline = time.time() + timeout
+def login_step(line, want, until):
+    global fails
+    mark = len(out)
+    qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+    wants = want if isinstance(want, list) else [want]
+    ok = read_until(until, mark + len(line)) and all(w in out[mark:] for w in wants)
+    print(("ok  " if ok else "FAIL"), "(login boot)", repr(line)); ok or print(repr(out[mark:]))
+    fails += not ok
+if not read_until(b"login: "):
+    print("FAIL (login boot) no login prompt"); fails += 1
+else:
+    print("ok   (login boot) a login prompt at boot")
+    login_step("root", b"", b"\n# ")
+    login_step("id -u; adduser -D carol; echo carol:pw | chpasswd; exit", b"\r\n0\r\n", b"login: ")
+    login_step("carol", b"", b"Password: ")
+    login_step("wrong", b"Login incorrect", b"login: ")
+    login_step("carol", b"", b"Password: ")
+    login_step("pw", b"", b"\n$ ")
+    login_step("id -u; cat /etc/shadow; exit", [b"\r\n1000\r\n", b"Permission denied"], b"login: ")
+    login_step("root", b"", b"\n# ")
+    login_step("deluser carol; rm -rf /home/carol /etc/passwd- /etc/group- /etc/shadow-; id carol", b"unknown user carol", b"\n# ")
+qemu.kill(); qemu.wait()
+
 print(f"---- {fails} failed ----")
 sys.exit(1 if fails else 0)
 PY

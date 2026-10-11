@@ -112,7 +112,7 @@ const MAX_IDLE: u64 = 1024;           // more than there are processors
 // come back for more: those a V_WAKE may be worth sending to.
 // `acpi` holds the clock's PM timer (without an HPET) and the power
 // button; `reboot` says the stop is a restart.
-struct Sys { k: Kernel, con: Con, pic: Pic, apic: Lapic, clock: Hpet, acpi: Acpi, stop: bool, reboot: bool, idle: u64 }
+struct Sys { k: Kernel, con: Con, pic: Pic, apic: Lapic, clock: Hpet, acpi: Acpi, stop: bool, reboot: bool, idle: u64, login: u64 }
   invariant kok(k) && con_ok(con) && pic_ok(pic) && lapic_ok(apic) && hpet_ok(clock) && acpi_ok(acpi);
 
 spec fn sys_ok(s: &Sys) -> bool {
@@ -187,6 +187,28 @@ fn any_ready(procs: &Buf) -> bool
   return false;
 }
 
+/// With the boot option `login`, the console is BusyBox's `login` (its
+/// pid in s.login) instead of the native shell, and a new one starts once
+/// it has ended, as init restarts a getty: logging out of the shell it
+/// started brings the prompt back.
+fn relogin(s: &mut Sys)
+  requires sys_ok(s)
+  ensures sys_ok(s)
+{
+  let l = s.login;
+  if l == 0 || l >= NPROC {
+    return;
+  }
+  let st = state(s.k.procs, l);
+  if st != FREE && st != ZOMBIE && pget(s.k.procs, l, F_PARENT) == 0 {
+    return;                                 // still there (login, then the shell it ran)
+  }
+  let n = spawn_as(&mut s.k, ASH_PROG, 0, "login");
+  if n != 0 {
+    s.login = n;
+  }
+}
+
 /// Under the lock: this processor has nothing to run.
 fn go_idle(s: &mut Sys) -> Job
   requires sys_ok(s)
@@ -224,6 +246,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
       woke = true;
     }
   }
+  relogin(&mut s);
   let p = lx_pick(&mut s.k, from);
   // Only the bootstrap processor takes V_DISK. A process the disk woke
   // that this processor is not about to run would wait for an idle
@@ -1202,13 +1225,19 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let txt = new_store(&mut m);
   let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: rng_new(epoch ^ at), cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), lazy: alloc(LAZY_LEN), inet6: 0, locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, txt: txt, sys: alloc(SYS_LEN), loops: alloc(LOOP_LEN), ptys: alloc(PTY_LEN), ptyb: balloc(PTYB_LEN) };
   install_files(&mut con, &mut k);
-  if spawn(&mut k, 0, 0) == 0 {
+  let mut login = 0;
+  if boot_word(cpu, "login") {
+    login = spawn_as(&mut k, ASH_PROG, 0, "login");
+    if login == 0 {
+      puts(&mut con, "cannot start login\r\n");
+    }
+  } else if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
   }
   // Every processor runs the scheduler until the kernel stops; then they
   // are all back in their park loops and the state is this one's again.
   con_flush(&mut term, &mut con);
-  let sl = lock_new(Sys { k: k, con: con, pic: pic, apic: apic, clock: clock, acpi: acpi, stop: false, reboot: false, idle: 0 });
+  let sl = lock_new(Sys { k: k, con: con, pic: pic, apic: apic, clock: clock, acpi: acpi, stop: false, reboot: false, idle: 0, login: login });
   let tl = lock_new(term);
   let pumping = atomic_new(false);
   let pend = atomic_new(0);
