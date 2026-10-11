@@ -29,7 +29,8 @@ DTOP = 64
 DNAME_MAX = 200
 MODE = 0o755
 DISK_BYTES = 33 << 20             # at least; more when the files need it
-FREE_BYTES = 16 << 20             # room left for the guest to write
+# room left for the guest to write (MKDISK_FREE_MB overrides)
+FREE_BYTES = int(os.environ.get("MKDISK_FREE_MB", "16")) << 20
 MAX_DISK = 65536 * BLOCK          # src/diskfs.bastio's MAX_BLOCKS
 
 def main():
