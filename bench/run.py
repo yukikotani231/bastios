@@ -48,6 +48,7 @@ TESTS = [
     ("tcplat", "us", 1e-3, False),
     ("tcpbw", "MiB/s", None, False),
     ("sleep", "us", 1e-3, False),
+    ("epwait", "us", 1e-3, False),
     ("idle", "% host CPU", 1, False),
 ]
 EXTRA_QEMU = []                     # bench/prof.py adds its gdb stub here
