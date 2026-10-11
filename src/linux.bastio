@@ -672,6 +672,9 @@ const TCSETS: u64 = 0x5402;
 const TCSETSF: u64 = 0x5404;              // TCSETSW (0x5403) lies between
 const TIOCGWINSZ: u64 = 0x5413;
 const FIONREAD: u64 = 0x541B;
+const FIONBIO: u64 = 0x5421;
+const FIONCLEX: u64 = 0x5450;
+const FIOCLEX: u64 = 0x5451;
 const SIOCATMARK: u64 = 0x8905;
 const SIOCGIFCONF: u64 = 0x8912;
 const SIOCGIFFLAGS: u64 = 0x8913;
@@ -753,6 +756,31 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     // The bytes waiting in the pipe, as an int.
     xfer_u64(&mut k.fs.xfer, 0, smaller(pi_get(k.pipes, d.x, 1), PIPE_CAP));
     return lx_put_out(&mut k, pid, arg, 4);
+  }
+  // On any descriptor: FIONBIO is fcntl's O_NONBLOCK (from the int at
+  // arg), FIOCLEX and FIONCLEX its FD_CLOEXEC, as CPython's setblocking and
+  // set_inheritable use them.
+  if req == FIONBIO {
+    if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, 4) != 4 {
+      return EFAULT;
+    }
+    let on = bget(k.fs.xfer, 0) != 0 || bget(k.fs.xfer, 1) != 0 || bget(k.fs.xfer, 2) != 0 || bget(k.fs.xfer, 3) != 0;
+    let fl = lx_fcntl(&mut k, pid, fd, F_GETFL, 0);
+    if fl > 0xFFFFFFFF {
+      return fl;
+    }
+    let mut nf = fl / (LO_NONBLOCK * 2) * (LO_NONBLOCK * 2) + fl % LO_NONBLOCK;
+    if on {
+      nf = nf + LO_NONBLOCK;
+    }
+    return lx_fcntl(&mut k, pid, fd, F_SETFL, nf);
+  }
+  if req == FIOCLEX || req == FIONCLEX {
+    let mut c = 0;
+    if req == FIOCLEX {
+      c = 1;
+    }
+    return lx_fcntl(&mut k, pid, fd, F_SETFD, c);
   }
   if d.kind == K_DEV && (is_loop(d.x) || d.x == DEV_LOOPCTL) {
     return loop_ioctl(&mut k, pid, d.x, req % 0x100000000, arg);   // the request is an unsigned int
@@ -1958,10 +1986,21 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // What was there goes, read-only pages too: the new mapping is writable.
     map_forget(&mut k, pid, at / 4096, at / 4096 + pages, false);
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
+    hole_cut(&mut k, pid, at / 4096, at / 4096 + pages);
     if !cached && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
       return ENOMEM;
     }
   } else {
+    let reserve = (anon && prot == 0) || cached;
+    // A hole munmap left first (src/lxmem.bastio): its pages are unmapped.
+    let h = hole_take(&mut k, pid, pages);
+    if h < STACK_FIRST {
+      if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, h, h + pages, sh) {
+        hole_add(&mut k, pid, h, h + pages);
+        return ENOMEM;
+      }
+      return lx_mmap_fill(&mut k, pid, h * 4096, pages, prot, flags, fd, off, anon, cached, f, sh);
+    }
     let brk = pget(k.procs, pid, F_BRK);
     let low = pget(k.procs, pid, F_MMAP);
     if low > STACK_FIRST * 4096 || brk > low || pages * 4096 > low - brk {
@@ -1974,12 +2013,22 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // Fresh PROT_NONE memory is only address space: its pages are mapped
     // when an mprotect makes them usable (lx_mprotect), and touching it
     // before that faults, as on Linux.
-    let reserve = (anon && prot == 0) || cached;
     if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096, sh) {
       return ENOMEM;
     }
     pset(&mut k.procs, pid, F_MMAP, at);
   }
+  return lx_mmap_fill(&mut k, pid, at, pages, prot, flags, fd, off, anon, cached, f, sh);
+}
+
+/// The rest of mmap once window offset `at` has its pages (a `cached`
+/// mapping gets the page cache's instead): a file's bytes copied in, the
+/// mapping recorded if shared, and write access taken away without
+/// PROT_WRITE.
+fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags: u64, fd: u64, off: u64, anon: bool, cached: bool, f: u64, sh: bool) -> u64
+  requires kok(k) && pid < NPROC && at <= USER_SIZE && pages <= WPAGES && off % 4096 == 0
+  ensures kok(k)
+{
   // Fresh pages are zero: only a file's bytes need copying in.
   if anon {
     if prot != 0 {
