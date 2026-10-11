@@ -369,6 +369,7 @@ const LOOP_LEN: u64 = 104;             // LOOP_N * LOOP_W
 const DEV_LOOPCTL: u64 = 6;            // OF_DEV device /dev/loop-control
 const DEV_LOOP: u64 = 16;              // OF_DEV device /dev/loopN is DEV_LOOP + N
 const S_IFBLK: u64 = 0x61B0;           // a block device, rw-rw----
+const DISK_GID: u64 = 6;               // group disk (files/group): the loop devices'
 
 // File locks (src/lxlock.bastio): LK_N entries of LK_W words, then for
 // each process the record lock it waits for in F_SETLKW, LK_WW words.

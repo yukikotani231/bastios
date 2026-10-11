@@ -233,6 +233,8 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   `connect` needs write permission on it, as on Linux. Before, the name
   lived only in a table of its own, so any user could connect to any
   socket, or take its name first. `open` of a socket file is `ENXIO`.
+- The loop devices are `rw-rw----` for root and the new group disk (6),
+  and open checks it.
 
 ### Programs that run
 

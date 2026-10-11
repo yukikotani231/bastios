@@ -14,6 +14,7 @@
 #include <sys/reboot.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <grp.h>
 #include <sys/syscall.h>
 #include <sys/un.h>
 #include <sys/utsname.h>
@@ -166,6 +167,28 @@ static int unix_socket_files(void) {
     return ok;
 }
 
+/* Loop devices are root's and group disk's (6). */
+static int nobody_no_loop(void) {
+    return become_nobody() && open("/dev/loop0", O_RDONLY) == -1 && errno == EACCES;
+}
+
+static int disk_member_loop(void) {
+    gid_t disk = 6;
+    if (setgroups(1, &disk) != 0 || !become_nobody()) return 0;
+    int fd = open("/dev/loop0", O_RDONLY);
+    close(fd);
+    return fd >= 0;
+}
+
+static int loop_devices(void) {
+    struct stat st;
+    if (stat("/dev/loop0", &st) != 0) return 1;                      /* none here */
+    int ok = S_ISBLK(st.st_mode) && (st.st_mode & 07) == 0 && in_child(nobody_no_loop);
+    if (st.st_gid == 6 && (st.st_mode & 060) == 060)                 /* BastiOS, and most Linux systems */
+        ok = ok && in_child(disk_member_loop);
+    return ok;
+}
+
 /* BastiOS's own system calls (src/syscall.bastio), raised with int 0x80. */
 static long native(long n, long a, long b, long c) {
     long r;
@@ -204,6 +227,7 @@ int main(void) {
     EXPECT("rt_sigqueueinfo follows kill's rule", in_child(no_sigqueue));
     EXPECT("a shared mapping of a read-only file stays read-only", in_child(no_mprotect_write));
     EXPECT("a unix socket's file says who may connect", unix_socket_files());
+    EXPECT("loop devices are root's and group disk's", loop_devices());
     EXPECT("ports below 1024 are root's", in_child(low_ports));
     EXPECT("root binds a port below 1024", root_binds_low());
     if (bastios())
