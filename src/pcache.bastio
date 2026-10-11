@@ -27,8 +27,9 @@
 // bytes into the cached pages it covers (pc_wrote), a read sees the cached
 // bytes over the file's (pc_overlay), a truncate drops the pages past the
 // end and zeroes the tail of the last (pc_resize). A file's pages stay
-// after its last close, so the next run of a program finds its code here;
-// they go when the file is removed while open, and whatever makes a new
+// after its last close, so the next run of a program finds its code here
+// (the other pages go then, pc_close); they go when the file is removed
+// while open, and whatever makes a new
 // file drops the pages cached under its handle first (pc_forget), because
 // a handle names the next file made in a removed one's place. A mount or
 // unmount of the loop file system drops every page of its handles
@@ -270,6 +271,50 @@ fn pc_victim(c: &mut PCache, cap: u64) -> u64
   return i;
 }
 
+/// Makes the cache's tables: the level-2 one and every level-1 one the
+/// cap needs. The kernel calls it once at boot, so the cache's own pages
+/// are taken before the first `mem` and never change after (a run that
+/// fills the cache reads the same free pages before and after). pc_add
+/// calls it too, for a table memory was short of then.
+fn pc_tables(c: &mut PCache, m: &mut Mem)
+  requires pc_ok(c) && mem_ok(m)
+  ensures pc_ok(c) && mem_ok(m)
+{
+  let cap = pc_cap(m);
+  if cap == 0 {
+    return;
+  }
+  match pc_take(&mut c) {
+    PcTab::Off => {
+      let a = find_free(&mut m);
+      if a < NPAGES {
+        pc_put(&mut c, PcTab::On(pt_new(take_page(&mut m, a), 2)));
+        c.keys = set(c.keys, PC_ONW, 1);
+      }
+    },
+    PcTab::On(t) => { pc_put(&mut c, PcTab::On(t)); },
+  }
+  match pc_take(&mut c) {
+    PcTab::Off => {},
+    PcTab::On(mut t) => {
+      let mut j = 0;
+      while j <= (cap - 1) / 512
+        invariant pt_level(t) == 2 && mem_ok(m) && j <= PC_T && len(c.keys) == PCK_LEN
+        invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && hmap_ok[u64](c.idx) && blen(c.has) == PC_HN
+      {
+        if !pt_has(t, j) {
+          let a = find_free(&mut m);
+          if a < NPAGES {
+            pt_put(&mut t, j, pt_new(take_page(&mut m, a), 1));
+          }
+        }
+        j = j + 1;
+      }
+      pc_put(&mut c, PcTab::On(t));
+    },
+  }
+}
+
 /// Caches page pg of file h, its first n bytes taken from src (the rest
 /// zero), as a page of program text (TXT_PAGE) if `text`. Returns its
 /// slot, marked used, or PC_NONE if memory ran out. The caller has
@@ -285,27 +330,11 @@ fn pc_add(c: &mut PCache, m: &mut Mem, h: u64, pg: u64, src: &Bytes, n: u64, tex
   }
   let i = pc_victim(&mut c, cap);
   pc_unkey(&mut c.keys, &mut c.idx, i);
-  match pc_take(&mut c) {
-    PcTab::Off => {
-      let a = find_free(&mut m);
-      if a >= NPAGES {
-        return PC_NONE;
-      }
-      pc_put(&mut c, PcTab::On(pt_new(take_page(&mut m, a), 2)));
-      c.keys = set(c.keys, PC_ONW, 1);
-    },
-    PcTab::On(t) => { pc_put(&mut c, PcTab::On(t)); },
-  }
+  pc_tables(&mut c, &mut m);
   let mut ok = false;
   match pc_take(&mut c) {
     PcTab::Off => {},
     PcTab::On(mut t) => {
-      if !pt_has(t, i / 512) {
-        let a = find_free(&mut m);
-        if a < NPAGES {
-          pt_put(&mut t, i / 512, pt_new(take_page(&mut m, a), 1));
-        }
-      }
       if pt_has(t, i / 512) && pt_lease_count(&mut t) == 0 {
         ok = pt_borrow(&mut t, i / 512, add_l1, &mut m, i % 512, src, n, text);
       }
@@ -513,6 +542,55 @@ fn pc_resize(c: &mut PCache, m: &mut Mem, h: u64, size: u64)
           }
         }
         i = i + 1;
+      }
+      pc_put(&mut c, PcTab::On(t));
+    },
+  }
+}
+
+/// Drops slot i's page unless it is program text; true if the slot is
+/// empty afterwards.
+fn data_l1(t: &mut PageTable, m: &mut Mem, i: u64) -> bool
+  requires pt_level(t) == 1 && mem_ok(m) && i < 512 && pt_leases(t) == 0
+  ensures pt_level(t) == 1 && mem_ok(m) && pt_leases(t) == 0
+{
+  if pt_has(t, i) && pt_shared(t, i) {
+    let s = pt_take_shared(&mut t, i);
+    if is_text_page(m, s) {
+      pt_put_shared(&mut t, i, s, true);
+      return false;
+    }
+    drop_shared(&mut m, s);
+    return true;
+  }
+  pc_clear(&mut t, &mut m, i);
+  return true;
+}
+
+/// File h was closed for the last time: drops its pages but the program
+/// text ones. Those are what a next run of the program wants, and `mem`
+/// counts them as available; a page a MAP_SHARED mapping wrote is neither.
+fn pc_close(c: &mut PCache, m: &mut Mem, h: u64)
+  requires pc_ok(c) && mem_ok(m)
+  ensures pc_ok(c) && mem_ok(m)
+{
+  if h >= PC_NONE - 1 || (h < PC_HN && bget(c.has, h) == 0) {
+    return;
+  }
+  match pc_take(&mut c) {
+    PcTab::Off => {},
+    PcTab::On(mut t) => {
+      if pt_lease_count(&mut t) == 0 {
+        let mut i = 0;
+        while i < PC_N
+          invariant i <= PC_N && pt_level(t) == 2 && mem_ok(m) && len(c.keys) == PCK_LEN && pt_leases(t) == 0
+          invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && hmap_ok[u64](c.idx) && blen(c.has) == PC_HN
+        {
+          if get(c.keys, 3 * i) == h + 1 && pt_has(t, i / 512) && pt_borrow(&mut t, i / 512, data_l1, &mut m, i % 512) {
+            pc_unkey(&mut c.keys, &mut c.idx, i);
+          }
+          i = i + 1;
+        }
       }
       pc_put(&mut c, PcTab::On(t));
     },

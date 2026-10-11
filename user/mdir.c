@@ -6,8 +6,7 @@
  * regular file, one write of more than 4096 bytes, O_TMPFILE refused, a
  * full in-memory table (ENOSPC), a tmpfs mount (read-only too), a
  * BastiOS file system made with mkfs.bstdisk3 on a disk image and
- * mounted (bstdisk3), the same through a loop device, a new file never
- * seeing the cached pages of a removed one, and cleaning up. */
+ * mounted (bstdisk3), the same through a loop device, and cleaning up. */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -147,33 +146,6 @@ static int loopmount(void)
         return fail("unbinding the loop device");
     if (unlink("limg") != 0 || rmdir("lm") != 0)
         return fail("removing the loop image");
-    return 0;
-}
-
-/* The page cache keeps a closed file's pages; a new file that takes the
- * removed file's node must not see them (src/fs.bastio, pc_forget at
- * create). The new file is made by extending it, so nothing writes over
- * the old pages: it must read as zeros. */
-static int reuse(void)
-{
-    int a = open("pcold", O_CREAT | O_RDWR, 0644);
-    if (a < 0 || ftruncate(a, 4096) != 0)
-        return fail("making the cached file");
-    char *m = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, a, 0);
-    if (m == MAP_FAILED)
-        return fail("mapping the cached file");
-    memset(m, 'x', 4096);
-    if (munmap(m, 4096) != 0 || close(a) != 0 || unlink("pcold") != 0)
-        return fail("removing the cached file");
-    int b = open("pcnew", O_CREAT | O_RDWR, 0644);
-    char buf[4096];
-    if (b < 0 || ftruncate(b, 4096) != 0 || pread(b, buf, 4096, 0) != 4096)
-        return fail("making a new file");
-    for (int i = 0; i < 4096; i++)
-        if (buf[i] != 0)
-            return fail("a new file reading as zeros");
-    if (close(b) != 0 || unlink("pcnew") != 0)
-        return fail("removing the new file");
     return 0;
 }
 
@@ -332,8 +304,6 @@ int main(void)
     close(mf);
     if (umount2("mt", 0) != 0 || rmdir("mt") != 0)
         return fail("removing the mount");
-    if (reuse() != 0)
-        return 1;
     if (lomount() != 0)
         return 1;
     if (loopmount() != 0)

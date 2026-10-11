@@ -1414,9 +1414,13 @@ for line, want, until in [
     ("/disk/mx /disk/mx && echo gone; /disk/mx", [b"mmisc: ok on Linux", b"\r\ngone\r\n", b"not found"], b"\n# "),
     # A new program in the entry mx left: it runs its own code, and its
     # second run maps the pages the first left in the page cache after
-    # its last close. (user/mdir.c checks that a new file never sees a
-    # removed one's cached pages.)
+    # its last close.
     ("cp /disk/mh /disk/my; /disk/my; /disk/my; echo rc=$?", b"hello from musl: /disk/my, argc 1, 8\r\nhello from musl: /disk/my, argc 1, 8\r\nrc=3", b"\n# "),
+    # A new file takes the removed program's entry, and with it the handle
+    # its cached code pages are filed under (src/fs.bastio, pc_forget at
+    # create): made by extending it, so nothing writes over those pages,
+    # it must read as zeros: no newline byte, which the code has.
+    ("s=$(stat -c %s /disk/my); rm /disk/my; truncate -s $s /disk/mz; echo nl=$(wc -l < /disk/mz); rm /disk/mz", b"nl=0\r\n", b"\n# "),
 ]:
     mark = len(out)
     if mark == 0 and not read_until(b"bastios> "):

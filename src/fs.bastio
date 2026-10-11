@@ -387,6 +387,8 @@ fn node_settle(v: &mut Vfs, mem: &mut Mem, fs: u64, node: u64, h: u64)
       pc_forget(&mut v.pc, &mut mem, h);
       disk_remove(&mut v.lo, node);
       lo_settle(&mut v);
+    } else {
+      pc_close(&mut v.pc, &mut mem, h);
     }
   }
 }
