@@ -1526,6 +1526,7 @@ fn lx_shmat(k: &mut Kernel, pid: u64, id: u64, addr: u64, flg: u64) -> u64
     at = (want - USER_BASE) / 4096;
     map_forget(&mut k, pid, at, at + pages, false);
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at, at + pages, 0);
+    hole_cut(&mut k, pid, at, at + pages);  // in use now: not a hole mmap may hand out
   }
   let mut ok = false;
   match k.shm {
