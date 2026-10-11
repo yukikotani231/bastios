@@ -512,10 +512,12 @@ ALPINE_PKGS ?= alpine/git@sha256:a4bb51f1a3553df194ce679fc1db721d8bfba2046fa1a88
                alpine/curl@sha256:e17bf3bdfef2efda277af9b73149ece806d30354b3eebd002555f66a8cabb357
 # Served over HTTP only (too large for the disk): Alpine's own CI image
 # (alpine-sdk: gcc, g++, make, binutils, musl-dev), python3 (from the
-# ansible image), and jq and libxml2's tools.
+# ansible image), jq and libxml2's tools, and vim (from edge, its runtime
+# about 2100 files: it waits for a disk directory bigger than 1024 entries).
 ALPINE_HTTP_PKGS ?= alpinelinux/alpine-gitlab-ci@sha256:4bce54b0b246967f6ab51476d5511245ba35a49f30b2e63102ca294ab488add9 \
                alpine/ansible@sha256:72ed4cb27b533dc2bc608a657b9ed630c2ee53a86ba9111d0b710c5424de0fe2 \
-               alpine/xml@sha256:836f531a7e38bbdaab8f1c1ce76bf868412f253671625ebf54cf14fa28544de6
+               alpine/xml@sha256:836f531a7e38bbdaab8f1c1ce76bf868412f253671625ebf54cf14fa28544de6 \
+               heywoodlh/vim@sha256:c8c4f0de47f20de92af6d3b0544898e857f6c2eecd7ab397a1e7daf0b5fc6292
 
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py | build/compat
 	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) -- $(ALPINE_HTTP_PKGS)
