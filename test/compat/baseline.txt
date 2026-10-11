@@ -362,6 +362,7 @@ t_mem: MAP_SHARED file mapping across fork
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
 t_mem: a MAP_SHARED mapping sees write(2)
+t_mem: an 8 MiB stack: 6 MiB of locals in a function
 t_mem: file for mapping
 t_mem: futex across fork on a MAP_SHARED page
 t_mem: large malloc and free, many times
@@ -375,6 +376,7 @@ t_mem: mmap anonymous
 t_mem: mmap is zeroed
 t_mem: mmap of a closed descriptor is EBADF
 t_mem: mmap of a file opened write-only is EACCES
+t_mem: more than the old 64 MiB window: a 96 MiB mmap, then a 100 MiB malloc
 t_mem: mprotect read-only faults on write
 t_mem: mremap grow
 t_mem: mremap growth reuses address space

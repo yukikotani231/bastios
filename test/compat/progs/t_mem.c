@@ -187,5 +187,17 @@ int main(void) {
     }
     EXPECT("64 MiB of address space", (q = mmap(0, 48 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&
            (q[0] = 1, q[(48 << 20) - 1] = 1, 1));
+    EXPECT("more than the old 64 MiB window: a 96 MiB mmap, then a 100 MiB malloc", ({
+           char *r = mmap(0, 96 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int ok = r != MAP_FAILED;
+           if (ok) { r[0] = 1; r[(96 << 20) - 1] = 2; ok = r[0] == 1 && r[(96 << 20) - 1] == 2; munmap(r, 96 << 20); }
+           char *b = malloc(100 << 20);
+           if (b) { b[0] = 3; b[(100 << 20) - 1] = 4; ok = ok && b[(100 << 20) - 1] == 4; free(b); }
+           ok && b != 0; }));
+    EXPECT("an 8 MiB stack: 6 MiB of locals in a function", ({
+           pid_t c = fork();
+           if (c == 0) { volatile char big[6 << 20]; big[0] = 1; big[sizeof big - 1] = 2; _exit(big[0] + big[sizeof big - 1] == 3 ? 0 : 1); }
+           int st; waitpid(c, &st, 0);
+           WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
     return done();
 }

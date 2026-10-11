@@ -65,7 +65,7 @@ The Bastio compiler turns each Bastio file into freestanding C, after proving it
 | Slot | Maps | Owner |
 | --- | --- | --- |
 | 0 | The kernel: the boot identity map of the first 512 GiB (RAM write-back, the device window uncached), without the user bit | Not owned; `pt_new` points it at the kernel's own map in every new level-4 table, and the prover rejects any `pt_put` or `pt_take` on slot 0 |
-| 1 | The process's user window: `WPAGES` = 16384 pages (64 MiB) from `USER_BASE` = `0x8000000000` | The process, through one table at each of levels 3 and 2 and up to `WIN_L1S` = 32 level-1 tables, each made when a page under it is first mapped |
+| 1 | The process's user window: `WPAGES` = 262144 pages (1 GiB) from `USER_BASE` = `0x8000000000` | The process, through one table at each of levels 3 and 2 and up to `WIN_L1S` = 512 level-1 tables, each made when a page under it is first mapped |
 
 The program image starts at page 0 of the window and the stack takes the top `STACK_PAGES` pages. Nothing else is mapped at the start: a Linux program's heap (`brk`) grows up from the image and its `mmap` pages come down from the stack, each page mapped when asked for. `new_space` (`src/space.bastio`) builds this from the bottom up, taking every page from `Mem`; if memory runs out half way, it frees what it built and returns `Space::Empty`, so a failed spawn leaks nothing. `free_space` tears it down level by level; `pt_free` and `pt_free_root` require an empty table, so the proof shows every page is returned, and `pt_free_root` also requires that the table is not the one in CR3.
 
@@ -337,7 +337,7 @@ Trusted, and listed in the README's "What is trusted" table and in [trusted-base
 
 These are current choices, not design limits; the README's "Status" lists them with the plan:
 - one lock for the whole kernel state (the console's devices have their own); the kernel runs with interrupts off and polls the UART and the keyboard, console and PIT interrupts reach only the bootstrap processor, and an idle processor notices new work only at its next timer tick (no wake-up interrupts between processors);
-- a 64 MiB user window per process, at most `NPROC - 1` (255) processes;
+- a 1 GiB user window per process (an 8 MiB stack at its top), at most `NPROC - 1` (255) processes;
 - files are simple (32 in memory and 64 on disk, paths up to 255 bytes, files up to 64 MiB in memory and 1 GiB on disk, 8 descriptors per process; every write is copy-on-write, so a block written costs four block writes), and programs cannot be run from files yet;
 - user pages are mapped writable and executable;
 - the kernel's arena halts the machine when it runs out (the page pool does not: spawns fail cleanly).

@@ -1,7 +1,7 @@
 // User address spaces. Each process has a four-level page table whose slot
 // 1 holds its whole user window: one table at each of levels 3 and 2, and
 // up to WIN_L1S level-1 tables under the level-2 one, so the window is the
-// WPAGES pages (64 MiB) from USER_BASE. A level-1 table exists only once a
+// WPAGES pages (1 GiB, a whole level-2 table) from USER_BASE. A level-1 table exists only once a
 // page under it is mapped. The program image starts at page 0 and the
 // stack takes the top STACK_PAGES pages, of which the top STACK_MAPPED are
 // mapped at first; a Linux program's stack grows down into the rest as it
@@ -23,14 +23,14 @@ const WOP_PROTECT: u64 = 1;             // arg: 1 writable, 0 read-only
 const WOP_MOVE: u64 = 2;                // arg: where the first page goes
 const WOP_COUNT: u64 = 3;               // only count the mapped pages
 const WOP_ZERO: u64 = 4;                // fill the private pages with zeros (madvise)
-const WIN_L1S: u64 = 32;              // level-1 tables the window may hold
-const WPAGES: u64 = 16384;            // WIN_L1S * 512
-const USER_SIZE: u64 = 0x4000000;     // WPAGES * 4096
-const STACK_PAGES: u64 = 256;         // 1 MiB
-const STACK_FIRST: u64 = 16128;       // WPAGES - STACK_PAGES
+const WIN_L1S: u64 = 512;             // level-1 tables the window may hold: all of the level-2 table
+const WPAGES: u64 = 262144;           // WIN_L1S * 512
+const USER_SIZE: u64 = 0x40000000;    // WPAGES * 4096 (1 GiB)
+const STACK_PAGES: u64 = 2048;        // 8 MiB, Linux's default RLIMIT_STACK
+const STACK_FIRST: u64 = 260096;      // WPAGES - STACK_PAGES
 const STACK_MAPPED: u64 = 16;         // stack pages a new window maps
-const STACK_LOW: u64 = 16368;         // WPAGES - STACK_MAPPED
-const IMAGE_MAX: u64 = 0x3F00000;     // STACK_FIRST * 4096
+const STACK_LOW: u64 = 262128;        // WPAGES - STACK_MAPPED
+const IMAGE_MAX: u64 = 0x3F800000;    // STACK_FIRST * 4096
 const KERNEL_ROOT: u64 = 0x8000000;    // mmu_root while CR3 holds the kernel's own map
 
 // A process's address space (its level-4 table), if it has one.

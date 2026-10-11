@@ -44,11 +44,11 @@ const INTERP_MAX: u64 = 256;          // the longest interpreter path, NUL inclu
 const ARGS_MAX: u64 = 131072;         // string bytes, NULs included (Linux's ARG_MAX)
 const ARGV_MAX: u64 = 8192;           // the most arguments
 const ENVC_MAX: u64 = 1024;           // the most environment strings
-const RANDOM_AT: u64 = 0x3FFFFF0;     // USER_SIZE - 16
+const RANDOM_AT: u64 = 0x3FFFFFF0;    // USER_SIZE - 16
 const AUX_WORDS: u64 = 32;            // the auxiliary vector: 16 pairs
 // The vDSO (user/vdso.c): one read-only page just below the stack, holding
 // the image and, from byte VDSO_DATA, the clock it reads (src/tsc.bastio).
-const VDSO_PAGE: u64 = 16127;         // STACK_FIRST - 1
+const VDSO_PAGE: u64 = 260095;        // STACK_FIRST - 1
 const VDSO_DATA: u64 = 496;           // word of the page: mult, base, at, epoch
 const AT_SYSINFO_EHDR: u64 = 33;
 const AT_IGNORE: u64 = 1;
