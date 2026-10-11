@@ -5,7 +5,12 @@ package repository (/disk/a/repo/x86_64: .apk files and an APKINDEX), next
 to Alpine's own BusyBox at /disk/busybox. The checks unpack the root under
 /disk/a, chroot into it and run apk there.
 
-    alpinedisk.py OUT.img CACHE_DIR BASE_IMAGE PKG_IMAGE...
+    alpinedisk.py OUT.img CACHE_DIR BASE_IMAGE PKG_IMAGE... [-- HTTP_IMAGE...]
+
+The packages of the PKG_IMAGEs go on the disk; those and the HTTP_IMAGEs'
+make a second repository, CACHE_DIR/disk/http, that run.py serves over
+HTTP (alpine.txt's ALPINEURL): the large ones (gcc, Python) do not fit on
+the disk next to the root they are installed into.
 
 The images are Docker Hub's (NAME@sha256:DIGEST, pinned in the Makefile):
 BASE_IMAGE is Alpine's minirootfs, and each PKG_IMAGE an image that apk
@@ -16,7 +21,7 @@ from what the images hold: every file a package installed (as listed in
 the package's metadata. The binaries are Alpine's; the packages and the
 index are not signed by Alpine, so apk needs --allow-untrusted.
 """
-import base64, gzip, hashlib, io, json, os, subprocess, sys, tarfile, urllib.request
+import base64, gzip, hashlib, http.client, io, json, os, subprocess, sys, tarfile, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REGISTRY = "https://registry-1.docker.io/v2"
@@ -34,6 +39,29 @@ def fetch(url, token, accept=None):
         h["Accept"] = accept
     with urllib.request.urlopen(urllib.request.Request(url, headers=h)) as r:
         return r.read()
+
+def download(url, token, path, size):
+    """Fetches url into path, resuming where a cut connection left off
+    (large layers often are cut)."""
+    with open(path, "wb"):
+        pass
+    for _ in range(20):
+        have = os.path.getsize(path)
+        if have >= size:
+            return
+        h = {"Authorization": "Bearer " + token, "Range": f"bytes={have}-"}
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=h)) as r, open(path, "ab") as f:
+                if r.status != 206 and have:
+                    f.truncate(0)
+                while True:
+                    chunk = r.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        except (OSError, http.client.HTTPException):
+            pass
+    sys.exit(f"alpinedisk: {url}: the download keeps failing")
 
 def layers(image, cache):
     """The layers of an amd64 image NAME@sha256:DIGEST, as paths of gzip
@@ -58,11 +86,10 @@ def layers(image, cache):
     for l in m["layers"]:
         path = os.path.join(cache, l["digest"].replace(":", "-") + ".tar.gz")
         if not os.path.exists(path):
-            blob = fetch(f"{REGISTRY}/{name}/blobs/{l['digest']}", token)
-            if "sha256:" + hashlib.sha256(blob).hexdigest() != l["digest"]:
-                sys.exit(f"alpinedisk: {image}: layer {l['digest']} does not match its digest")
-            with open(path + ".part", "wb") as f:
-                f.write(blob)
+            download(f"{REGISTRY}/{name}/blobs/{l['digest']}", token, path + ".part", l["size"])
+            with open(path + ".part", "rb") as f:
+                if "sha256:" + hashlib.sha256(f.read()).hexdigest() != l["digest"]:
+                    sys.exit(f"alpinedisk: {image}: layer {l['digest']} does not match its digest")
             os.rename(path + ".part", path)
         out.append(path)
     with open(listed, "w") as f:
@@ -186,33 +213,44 @@ def package(files, p):
     cgz = gz(tar([(ti, info.encode())], cut=True))
     return cgz, cgz + dgz
 
-def repository(images, out):
-    """Writes every package the images hold, and their APKINDEX.tar.gz,
-    to directory out. Returns the (name, version) pairs."""
-    os.makedirs(out, exist_ok=True)
-    seen, index = {}, ""
-    for files in images:
+def repository(images, cache, outs):
+    """Writes every package the images hold to the directories in outs, with
+    an APKINDEX.tar.gz in each: outs[0] gets all of them, outs[1] those of
+    the first `first` images. images is [(image, first?)]. Returns how many
+    packages each got."""
+    index = {o: "" for o in outs}
+    seen = {o: set() for o in outs}
+    for o in outs:
+        os.makedirs(o, exist_ok=True)
+    for image, first in images:
+        files = merged(layers(image, cache))   # one image at a time: they are large
         for p in installed(files["lib/apk/db/installed"][1]):
-            if (p["P"], p["V"]) in seen:
+            to = [o for o in (outs if first else outs[:1]) if (p["P"], p["V"]) not in seen[o]]
+            if not to:
                 continue                   # images built at different times may hold two versions
-            seen[p["P"], p["V"]] = True
             cgz, apk = package(files, p)
-            with open(os.path.join(out, f"{p['P']}-{p['V']}.apk"), "wb") as f:
-                f.write(apk)
             e = dict(p)
             e["C"] = "Q1" + base64.b64encode(hashlib.sha1(cgz).digest()).decode()
             e["S"] = str(len(apk))
-            index += "".join(f"{k}:{e[k]}\n" for k in "CPVASITULomtckDpri" if k in e) + "\n"
-    ti = tarfile.TarInfo("APKINDEX")
-    ti.size, ti.mode = len(index.encode()), 0o644
-    with open(os.path.join(out, "APKINDEX.tar.gz"), "wb") as f:
-        f.write(gz(tar([(ti, index.encode())])))
-    return sorted(seen)
+            for o in to:
+                seen[o].add((p["P"], p["V"]))
+                with open(os.path.join(o, f"{p['P']}-{p['V']}.apk"), "wb") as f:
+                    f.write(apk)
+                index[o] += "".join(f"{k}:{e[k]}\n" for k in "CPVASITULomtckDpri" if k in e) + "\n"
+        del files
+    for o in outs:
+        ti = tarfile.TarInfo("APKINDEX")
+        ti.size, ti.mode = len(index[o].encode()), 0o644
+        with open(os.path.join(o, "APKINDEX.tar.gz"), "wb") as f:
+            f.write(gz(tar([(ti, index[o].encode())])))
+    return [len(seen[o]) for o in outs]
 
 # ---------------------------------------------------------------- the disk
 
 def main():
-    out, cache, base, pkgs = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+    out, cache, base, rest = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+    disk_pkgs = rest[:rest.index("--")] if "--" in rest else rest
+    http_pkgs = rest[rest.index("--") + 1:] if "--" in rest else []
     os.makedirs(cache, exist_ok=True)
     root = layers(base, cache)
     if len(root) != 1:
@@ -225,9 +263,9 @@ def main():
     rootfs = merged(root)
     with open(os.path.join(work, "busybox"), "wb") as f:
         f.write(rootfs["bin/busybox"][1])
-    repo = os.path.join(work, "repo")
-    names = repository([merged(layers(i, cache)) for i in pkgs], repo)
-    print(f"alpinedisk: {len(names)} packages", file=sys.stderr)
+    repo, http = os.path.join(work, "repo"), os.path.join(work, "http")
+    n = repository([(i, True) for i in disk_pkgs] + [(i, False) for i in http_pkgs], cache, [http, repo])
+    print(f"alpinedisk: {n[1]} packages on the disk, {n[0]} over HTTP", file=sys.stderr)
     args = [os.path.join(work, "busybox"), os.path.join(work, "root.tar")]
     args += [f"a/repo/x86_64/{n}={os.path.join(repo, n)}" for n in sorted(os.listdir(repo))]
     # Room for the unpacked root and what apk installs.
