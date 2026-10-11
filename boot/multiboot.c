@@ -51,11 +51,28 @@ static void keep_cmdline(uint64_t a, uint64_t limit) {
  * in %eax (magic) and %ebx (info); 0 if it is neither form. */
 uint32_t bst_multiboot_info(uint32_t magic, uint32_t info) {
     if (magic == MB1_MAGIC) {
-        if (info != 0 && info <= IDENT_LIMIT - 52) {
-            info_mb1 = info;
-            if (rd32(info) & (1u << 2)) keep_cmdline(rd32(info + 16), IDENT_LIMIT);
+        /* Copied as well, memory map included, so that bst_boot_take can
+         * take memory out of the map before the kernel reads it. */
+        if (info == 0 || info > IDENT_LIMIT - sizeof mb1) return 0;
+        uint8_t *out = (uint8_t *)mb1;
+        for (uint32_t i = 0; i < sizeof mb1; i++) out[i] = (uint8_t)rd8(info + i);
+        uint32_t flags = rd32(info);
+        if (flags & (1u << 2)) keep_cmdline(rd32(info + 16), IDENT_LIMIT);
+        if (flags & (1u << 6)) {
+            uint64_t at = rd32(info + 48), end = at + rd32(info + 44), n = 0;
+            if (end > IDENT_LIMIT) end = at;
+            for (uint64_t e = at; e + 24 <= end && n < MAX_REGIONS && rd32(e) >= 20; e += rd32(e) + 4, n++) {
+                uint8_t *m = mmap1 + 24 * n;
+                put32(m, 20);
+                put64(m + 4, rd64(e + 4));
+                put64(m + 12, rd64(e + 12));
+                put32(m + 20, rd32(e + 20));
+            }
+            put32(out + 44, 24 * n);
+            put32(out + 48, (uint32_t)(uint64_t)mmap1);
         }
-        return info;
+        info_mb1 = (uint64_t)mb1;
+        return (uint32_t)(uint64_t)mb1;
     }
     if (magic != MB2_MAGIC || info == 0 || info % 8 != 0 || info > IDENT_LIMIT - 16) return 0;
     uint64_t total = rd32(info);
@@ -133,4 +150,103 @@ uint64_t bst_boot_region(uint64_t n, uint64_t f) {
         if (n == 0) return f == 0 ? rd64(e + 4) : f == 1 ? rd64(e + 12) : rd32(e + 20);
     }
     return 0;
+}
+
+/* Takes `size` bytes, aligned to `align` (a power of two), out of the
+ * memory map the kernel gets: from the start of the first available region
+ * with room for them above the kernel image and below IDENT_LIMIT. The
+ * region then starts after them, so the page pool never sees them. Returns
+ * their address, or 0 if no region has room. */
+extern char _end[];
+uint64_t bst_boot_take(uint64_t size, uint64_t align) {
+    uint64_t mb = info_mb1;
+    if (!mb || !(rd32(mb) & (1u << 6)) || (uint64_t)rd32(mb + 48) != (uint64_t)mmap1) return 0;
+    for (uint64_t n = 0; n < MAX_REGIONS && 24 * n < rd32(mb + 44); n++) {
+        uint8_t *m = mmap1 + 24 * n;
+        uint64_t a = rd64((uint64_t)m + 4), end = a + rd64((uint64_t)m + 12);
+        if (rd32((uint64_t)m + 20) != 1 || end < a) continue;
+        uint64_t at = a > (uint64_t)_end ? a : (uint64_t)_end;
+        at = (at + align - 1) & ~(align - 1);
+        if (at < a || at + size > end || at + size > IDENT_LIMIT) continue;
+        put64(m + 4, at + size);
+        put64(m + 12, end - (at + size));
+        return at;
+    }
+    return 0;
+}
+
+/*
+ * RAM above 2 GiB, mapped write-back. boot.S maps the first 2 GiB
+ * write-back and the device window above them (2 GiB up to 2^46) uncached;
+ * the page pool spans every run of RAM the memory map lists (the kernel
+ * prelude's bst_pool_init), so the parts of the window that are RAM are
+ * remapped write-back here, before the kernel runs. bst_ram_limit tells the
+ * prelude how far that reaches: 4 GiB on a processor without 1 GiB pages
+ * (boot.S maps nothing above then), else 512 GiB, the end of the kernel's
+ * first top-level slot (a user window starts at the second).
+ *
+ * A 1 GiB page that is only partly RAM is split into 2 MiB pages, from
+ * SPARE_PDS spare tables; a 2 MiB page that is only partly RAM stays
+ * uncached. Either is correct, only slower (the device window can never
+ * be claimed over RAM: the prelude's mmio_claim stops the machine).
+ */
+#define PTE_P_W_HUGE 0x83ull
+#define PTE_UC       0x18ull                    /* PWT | PCD */
+#define PTE_ADDR     0x000FFFFFFFFFF000ull
+#define SPARE_PDS    16
+
+extern uint64_t bst_kernel_pml4[512];
+uint64_t bst_ram_limit = IDENT_LIMIT;
+static uint64_t spare_pd[SPARE_PDS][512] __attribute__((aligned(4096)));
+
+/* Does some available (type 1) region of the memory map overlap [lo, hi)?
+ * And do they cover all of it, joined end to end? */
+static int ram_overlaps(uint64_t lo, uint64_t hi) {
+    for (uint64_t n = 0; n < MAX_REGIONS; n++) {
+        uint64_t type = bst_boot_region(n, 2), a = bst_boot_region(n, 0), len = bst_boot_region(n, 1);
+        if (type == 0) break;
+        if (type == 1 && a < hi && lo < a + len && a + len > a) return 1;
+    }
+    return 0;
+}
+static int ram_covers(uint64_t lo, uint64_t hi) {
+    for (int grew = 1; grew && lo < hi; ) {
+        grew = 0;
+        for (uint64_t n = 0; n < MAX_REGIONS; n++) {
+            uint64_t type = bst_boot_region(n, 2), a = bst_boot_region(n, 0), len = bst_boot_region(n, 1);
+            if (type == 0) break;
+            if (type == 1 && a <= lo && lo < a + len) { lo = a + len; grew = 1; }
+        }
+    }
+    return lo >= hi;
+}
+
+void bst_map_ram(void) {
+    uint64_t *pdpt = (uint64_t *)(bst_kernel_pml4[0] & PTE_ADDR);
+    bst_ram_limit = 4ull << 30;
+    for (uint64_t g = 2; g < 4; g++) {             /* 2-4 GiB: 2 MiB pages (devpd) */
+        uint64_t *pd = (uint64_t *)(pdpt[g] & PTE_ADDR);
+        for (uint64_t i = 0; i < 512; i++) {
+            uint64_t a = (g << 30) + (i << 21);
+            if (ram_covers(a, a + (1ull << 21))) pd[i] &= ~PTE_UC;
+        }
+    }
+    if (pdpt[4] & 1) {                               /* 4-512 GiB: 1 GiB pages */
+        int spare = 0;
+        bst_ram_limit = 512ull << 30;
+        for (uint64_t g = 4; g < 512; g++) {
+            uint64_t a = g << 30;
+            if (!ram_overlaps(a, a + (1ull << 30))) continue;
+            if (ram_covers(a, a + (1ull << 30))) { pdpt[g] &= ~PTE_UC; continue; }
+            if (spare == SPARE_PDS) continue;
+            uint64_t *pd = spare_pd[spare++];
+            for (uint64_t i = 0; i < 512; i++) {
+                uint64_t b = a + (i << 21);
+                pd[i] = b | PTE_P_W_HUGE | (ram_covers(b, b + (1ull << 21)) ? 0 : PTE_UC);
+            }
+            pdpt[g] = (uint64_t)pd | 3;
+        }
+    }
+    uint64_t cr3;
+    __asm__ volatile ("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) : : "memory");
 }
