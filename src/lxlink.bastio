@@ -334,6 +334,7 @@ fn lx_hardlink(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
     }
     return ENOENT;
   }
+  let src_dev = vfs_dev_of(&mut k.fs, n);
   let mut t = balloc(2 * FNAME_MAX);
   xfer_save(k, &mut t, 0, n);
   let m = lx_path_at_nf(&mut k, pid, ndir, npath);
@@ -344,6 +345,10 @@ fn lx_hardlink(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
   if dir_at(&mut k, m) != NO_FILE {
     bfree(t);
     return EEXIST;
+  }
+  if vfs_dev_of(&mut k.fs, m) != src_dev {
+    bfree(t);
+    return EXDEV;                           // another file system: a mount, the disk
   }
   if path_ro(&mut k, m) && vfs_lookup(&mut k.fs, m) == NO_FILE {
     bfree(t);

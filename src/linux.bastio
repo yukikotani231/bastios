@@ -386,6 +386,22 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_ptimer_call(n) {
     return lx_ptimer_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
   }
+  if is_open2_call(n) {
+    let r = lx_openat2(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10));   // src/lxopen2.bastio
+    if r == SK_WAIT {
+      return lx_retry(&mut k, pid, n);      // a FIFO's writer waits for a reader
+    }
+    ret(&mut k.procs, pid, r);
+    return KEEP;
+  }
+  if is_handle_call(n) {
+    let r = lx_handle_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));   // src/lxhandle.bastio
+    if r == SK_WAIT {
+      return lx_retry(&mut k, pid, n);      // a FIFO's writer waits for a reader
+    }
+    ret(&mut k.procs, pid, r);
+    return KEEP;
+  }
   if is_inotify_call(n) {
     return lx_inotify_call(&mut k, pid, n, a, b, c);   // src/lxinotify.bastio
   }
@@ -427,6 +443,10 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if n == LX_UNLINKAT {
       path = b;
       dirfd = a;
+    }
+    if n == LX_UNLINKAT && (c % 0x100000000) & !AT_REMOVEDIR != 0 {
+      ret(&mut k.procs, pid, EINVAL);      // before the path, as on Linux
+      return KEEP;
     }
     if n == LX_UNLINKAT && c & AT_REMOVEDIR != 0 {
       ret(&mut k.procs, pid, lx_rmdir(&mut k, pid, dirfd, path));
@@ -1748,6 +1768,29 @@ fn root_under(k: &Kernel, pid: u64, out: &Bytes, o: u64) -> u64
   return rl;
 }
 
+/// The end of lx_path_from: the lexed path x, "proc/self" made the
+/// caller's /proc/PID, its symbolic links followed (the last one too when
+/// `follow`), and a name ending in "/" or "/." checked to be a directory.
+fn lx_finish(k: &mut Kernel, pid: u64, x: Lex, follow: bool) -> u64
+  requires kok(k) && pid < NPROC && x.n <= FNAME_MAX
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  let o2 = proc_self(&mut k.fs.xfer, x.n, pid);   // "proc/self" is the caller's /proc/PID
+  let r = lx_follow(&mut k, pid, o2, follow || x.trail, smaller(x.floor, o2));  // symbolic links (src/lxlink.bastio)
+  if r == NO_RESULT || !x.dirend {
+    return r;
+  }
+  let m = path_meta(&mut k, r);
+  if !m.ok {
+    k.pdir = true;                          // open(O_CREAT) says EISDIR; mkdir goes ahead
+  } else if m.mode % 65536 / 4096 * 4096 != S_IFMT_DIR {
+    k.perr = ENOTDIR;                       // "file/" and "file/."
+    return NO_RESULT;
+  }
+  return r;
+}
+
 /// lx_path_in from base h (see dir_ofd), following symbolic links (the
 /// last one too when `follow`).
 fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
@@ -1755,15 +1798,37 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
+  let x = lx_path_lex(&mut k, pid, va, h);
+  if x.n == NO_RESULT || x.n > FNAME_MAX {
+    return NO_RESULT;
+  }
+  return lx_finish(&mut k, pid, x, follow);
+}
+
+/// A path as lx_path_lex leaves it: its length n (or NO_RESULT, with
+/// k.perr), where ".." stopped (floor: the root), whether it ended in "/",
+/// started at "/", and whether a ".." climbed out of the directory it
+/// started from (openat2's RESOLVE_BENEATH, src/lxopen2.bastio), and
+/// whether it ended in "/" or "/." (so it must name a directory).
+struct Lex { n: u64, floor: u64, trail: bool, abs: bool, esc: bool, dirend: bool }
+
+/// The path at user address va, from base h (see dir_ofd), made absolute
+/// and normalized in the transfer buffer: "." and ".." taken out, symbolic
+/// links not yet followed.
+fn lx_path_lex(k: &mut Kernel, pid: u64, va: u64, h: u64) -> Lex
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let bad = Lex { n: NO_RESULT, floor: 0, trail: false, abs: false, esc: false, dirend: false };
   k.perr = EFAULT;
   if va < USER_BASE || va >= USER_BASE + USER_SIZE {
-    return NO_RESULT;
+    return bad;
   }
   let n = smaller(PATH_MAX_LX, USER_SIZE - (va - USER_BASE));
   let mut want = smaller(PATH_FIRST, n);
   let mut got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, want);
   if got == NO_RESULT {
-    return NO_RESULT;
+    return bad;
   }
   let mut e = 0;
   while e < got && bget(k.fs.xfer, e) != 0
@@ -1776,7 +1841,7 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
     want = n;
     got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, want);
     if got == NO_RESULT {
-      return NO_RESULT;
+      return bad;
     }
     e = 0;
     while e < got && bget(k.fs.xfer, e) != 0
@@ -1789,13 +1854,13 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
     if got == want {
       k.perr = ENAMETOOLONG;                // no NUL within PATH_MAX
     }
-    return NO_RESULT;                       // or EFAULT: unmapped before the NUL
+    return bad;                             // or EFAULT: unmapped before the NUL
   }
   if e == 0 {
     k.perr = ENOENT;                        // "" names nothing, as on Linux
-    return NO_RESULT;
+    return bad;
   }
-  return lx_path_xfer(&mut k, pid, e, h, follow);
+  return lx_lex_xfer(&mut k, pid, e, h);
 }
 
 /// lx_path_from for a path already in the transfer buffer, bytes 0..e: an
@@ -1805,6 +1870,19 @@ fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
+  let x = lx_lex_xfer(&mut k, pid, e, h);
+  if x.n == NO_RESULT || x.n > FNAME_MAX {
+    return NO_RESULT;
+  }
+  return lx_finish(&mut k, pid, x, follow);
+}
+
+/// lx_path_lex for a path already in the transfer buffer, bytes 0..e.
+fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
+  requires kok(k) && pid < NPROC && 0 < e && e < XFER
+  ensures kok(k)
+{
+  let bad = Lex { n: NO_RESULT, floor: 0, trail: false, abs: false, esc: false, dirend: false };
   k.perr = ENAMETOOLONG;
   k.pdir = false;
   let trail = bget(k.fs.xfer, e - 1) == 47;  // "link/" names what the link points to, as on Linux
@@ -1817,7 +1895,10 @@ fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
   let mut o = 0;
   let rl = root_len(k, pid);
   let mut floor = 0;
-  if bget(k.fs.xfer, 0) == 47 {
+  let abs = bget(k.fs.xfer, 0) == 47;
+  let mut start = 0;                        // the base's length: ".." below it climbs out
+  let mut esc = false;
+  if abs {
     while o < rl
       invariant o <= rl && rl <= FNAME_MAX && blen(out) == PATH_OUT && kok(k) && pid < NPROC
     {
@@ -1832,7 +1913,7 @@ fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
       if h > OFD_N + 1 {
         k.perr = ENOTDIR;
       }
-      return NO_RESULT;                     // relative to no directory
+      return bad;                           // relative to no directory
     }
     let cl = base_len(k, pid, h);
     while o < cl
@@ -1841,6 +1922,7 @@ fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
       bset(&mut out, o, base_byte(k, pid, h, o));
       o = o + 1;
     }
+    start = o;
     floor = root_under(k, pid, out, o);
   }
   let mut i = 0;
@@ -1862,6 +1944,9 @@ fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
         // "." stays here
       } else if w == 2 && bget(k.fs.xfer, i) == 46 && bget(k.fs.xfer, i + 1) == 46 {
         // "..": drop the last part (the root's parent is the root)
+        if o <= start {
+          esc = true;                       // from the base itself
+        }
         while o > floor && bget(out, o - 1) != 47
           invariant o <= PATH_OUT && blen(out) == PATH_OUT
         {
@@ -1902,10 +1987,10 @@ fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
     }
     bfree(out);
     if c > 0 && lx_follow(&mut k, pid, c, true, smaller(floor, c)) == NO_RESULT {
-      return NO_RESULT;                     // k.perr says why
+      return bad;                           // k.perr says why
     }
     k.perr = ENAMETOOLONG;
-    return NO_RESULT;
+    return bad;
   }
   let mut c = 0;
   while c < o
@@ -1915,19 +2000,7 @@ fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
     c = c + 1;
   }
   bfree(out);
-  let o2 = proc_self(&mut k.fs.xfer, o, pid);   // "proc/self" is the caller's /proc/PID
-  let r = lx_follow(&mut k, pid, o2, follow || trail, smaller(floor, o2));  // symbolic links (src/lxlink.bastio)
-  if r == NO_RESULT || !dirend {
-    return r;
-  }
-  let m = path_meta(&mut k, r);
-  if !m.ok {
-    k.pdir = true;                          // open(O_CREAT) says EISDIR; mkdir goes ahead
-  } else if m.mode % 65536 / 4096 * 4096 != S_IFMT_DIR {
-    k.perr = ENOTDIR;                       // "file/" and "file/."
-    return NO_RESULT;
-  }
-  return r;
+  return Lex { n: o, floor: floor, trail: trail, abs: abs, esc: esc, dirend: dirend };
 }
 
 /// lseek: SEEK_SET (0), SEEK_CUR (1) and SEEK_END (2), with a signed

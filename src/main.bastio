@@ -64,6 +64,8 @@ import "lxxattr.bastio";
 import "lxmount.bastio";
 import "lxns.bastio";
 import "lxperm.bastio";
+import "lxopen2.bastio";
+import "lxhandle.bastio";
 import "lxinotify.bastio";
 import "lazy.bastio";
 import "lxanon.bastio";

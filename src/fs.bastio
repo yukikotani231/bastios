@@ -2176,6 +2176,38 @@ fn vfs_in_mount(v: &mut Vfs, n: u64, ro_only: bool) -> bool
   return false;
 }
 
+/// Which file system the name in the first n bytes of the transfer buffer
+/// is on, as a number to compare: FS_DISK, FS_LO, 4 + s for tmpfs mount
+/// slot s (the innermost one holding the name, or whose directory it
+/// names), or FS_RAM. Names on different ones cannot be linked or renamed
+/// into each other (EXDEV).
+fn vfs_dev_of(v: &mut Vfs, n: u64) -> u64
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+{
+  let k = vfs_fs_of(&mut v, n);
+  if k != FS_RAM {
+    return k;
+  }
+  let mut best = FS_RAM;
+  let mut best_l = 0;
+  let mut s = 0;
+  while s < MNT_N
+    invariant s <= MNT_N && vfs_ok(v) && n <= XFER
+  {
+    let i = vfs_mount_node(v, s);
+    if i < NFILES {
+      let l = ram_name(&mut v.ram, i, &mut v.name);
+      if l != NO_FILE && l <= n && (l == n || bget(v.xfer, l) == 47) && same_start(v.xfer, v.name, l) && (best == FS_RAM || l > best_l) {
+        best = 4 + s;
+        best_l = l;
+      }
+    }
+    s = s + 1;
+  }
+  return best;
+}
+
 /// Does file f (a vfs_lookup handle) lie in a mount? Uses the transfer
 /// buffer.
 fn vfs_file_in_mount(v: &mut Vfs, f: u64) -> bool
