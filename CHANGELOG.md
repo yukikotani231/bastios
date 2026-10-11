@@ -528,7 +528,12 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - A PS/2 mouse (`src/kbd.bastio`) for Linux programs as `/dev/input/mice`
   and `/dev/psaux` (`src/lxmouse.bastio`): 3-byte PS/2 packets, blocking
   or `O_NONBLOCK` reads, and `poll`. The hardware report says
-  `mouse: PS/2` or `mouse: none found`. No wheel, and no USB mouse yet.
+  `mouse: PS/2` or `mouse: none found`. No wheel.
+- A USB mouse on the xHCI controller (`src/xhci.bastio`), through the
+  same device: HID boot reports become PS/2 packets. A wireless receiver
+  that is both keyboard and mouse serves as both. The controller now has a
+  fifth device slot, and fifteen pages. The hardware report says
+  `mouse: USB (xHCI)`.
 
 ### Sound
 

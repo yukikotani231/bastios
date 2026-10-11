@@ -1171,14 +1171,32 @@ good = code == 0
 print(("ok  " if good else "FAIL"), f"(no COM1) `halt` typed on the keyboard powers off (status {code})")
 fails += not good
 
-# A USB keyboard on an xHCI controller (src/xhci.bastio), on a machine with
-# no PS/2 controller at all (i8042=off), so the keys can only come over
-# USB. They are sent through QMP; at power off the controller is reset and
-# its fourteen pages are back.
+# A USB keyboard and a USB mouse on an xHCI controller (src/xhci.bastio),
+# on a machine with no PS/2 controller at all (i8042=off), so the keys and
+# the moves can only come over USB. They are sent through QMP; at power
+# off the controller is reset and its fifteen pages are back.
 import json
 qmp_path = os.path.join(disk_dir.name, "qmp.sock")
+def usbmouse(name, qmp_cmd):
+    # mmouse reads two packets: a move 10 right and 5 up, then the left
+    # button. A USB mouse says y down positive; the PS/2 packet, up.
+    global fails
+    mark = len(out)
+    qemu.stdin.write(b"mmouse\r"); qemu.stdin.flush()
+    if read_until(b"mmouse: ready", mark):
+        qmp_cmd({"execute": "input-send-event", "arguments": {"events": [
+            {"type": "rel", "data": {"axis": "x", "value": 10}}, {"type": "rel", "data": {"axis": "y", "value": -5}}]}})
+        time.sleep(0.3)
+        for down in (True, False):
+            qmp_cmd({"execute": "input-send-event", "arguments": {"events": [
+                {"type": "btn", "data": {"down": down, "button": "left"}}]}})
+            time.sleep(0.3)
+    read_until(b"bastios> ", mark)
+    good = b"mmouse: buttons 0 dx 10 dy 5\r\nmmouse: buttons 1 dx 0 dy 0\r\n" in out[mark:]
+    print(("ok  " if good else "FAIL"), f"({name} boot) the USB mouse's move and button come through /dev/psaux")
+    fails += not good
 qemu = boot(1, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci", "-device", "usb-kbd",
-                      "-qmp", f"unix:{qmp_path},server,nowait"])
+                      "-device", "usb-mouse", "-qmp", f"unix:{qmp_path},server,nowait"])
 out = b""
 deadline = time.time() + timeout
 ok = read_until(b"bastios> ")
@@ -1207,6 +1225,7 @@ if ok:
     good = read_until(b"Usb_ok\r\n", mark) and read_until(b"bastios> ", mark + 1)
     print(("ok  " if good else "FAIL"), "(USB boot) a line typed on the USB keyboard runs")
     fails += not good
+    usbmouse("USB", qmp_cmd)
     qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
     read_until(b"pages free at power off")
     booted = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
@@ -1226,7 +1245,9 @@ print(out.decode(errors="replace").replace("\r", "")[-400:])
 # The controller's event ring raises V_DISK by MSI-X, so a process waiting
 # for the stick sleeps. A second boot finds the file, with the stick and
 # the keyboard behind two tiers of USB hubs (as a stick in a real PC's
-# front panel often is); test/fsck.py then checks the partition.
+# front panel often is), and a USB mouse too, which takes the fifth and
+# last device slot and is read through the disk's driver as well;
+# test/fsck.py then checks the partition.
 stick = os.path.join(disk_dir.name, "stick.img")
 subprocess.run(["tools/mkusb.py", stick, "--blank", "--mib", "33"], check=True, stdout=subprocess.DEVNULL)
 before = open(disk, "rb").read()
@@ -1235,7 +1256,8 @@ def stick_boot(name, steps, keys=False, image=None, hubs=False):
     usb = ["-device", "usb-storage,bus=xh.0,drive=st", "-device", "usb-kbd,bus=xh.0"]
     if hubs:
         usb = ["-device", "usb-hub,bus=xh.0,port=1", "-device", "usb-hub,bus=xh.0,port=1.2",
-               "-device", "usb-storage,bus=xh.0,port=1.2.3,drive=st", "-device", "usb-kbd,bus=xh.0,port=1.4"]
+               "-device", "usb-storage,bus=xh.0,port=1.2.3,drive=st", "-device", "usb-mouse,bus=xh.0,port=1.2.4",
+               "-device", "usb-kbd,bus=xh.0,port=1.4"]
     qemu = boot(1, virtio=True, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci,id=xh",
                                        "-drive", f"file={image or stick},format=raw,if=none,id=st"] + usb +
                                       ["-qmp", f"unix:{qmp_path},server,nowait"])
@@ -1269,6 +1291,8 @@ def stick_boot(name, steps, keys=False, image=None, hubs=False):
         good = read_until(b"Stick\r\n", mark) and read_until(b"bastios> ", mark + 1)
         print(("ok  " if good else "FAIL"), f"({name} boot) a line typed on the USB keyboard runs, read through the disk")
         fails += not good
+        if hubs:
+            usbmouse(name, qmp_cmd)
         qmp.close()
     for line, w in steps:
         if not ok:
