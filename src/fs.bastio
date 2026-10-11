@@ -28,7 +28,8 @@ import "pcache.bastio";
 const NFD: u64 = 256;                 // open files per process
 const FD_ROWS: u64 = 8192;            // NPROC * NFD
 const FD_STRIDE: u64 = 4;
-const FTAB_LEN: u64 = 32768;          // FD_ROWS * FD_STRIDE
+const HOLD_N: u64 = 128;              // holds (vfs_hold): rows after the FD_ROWS open files
+const FTAB_LEN: u64 = 33280;          // (FD_ROWS + HOLD_N) * FD_STRIDE
 const XFER: u64 = 4096;               // the most bytes one call moves
 
 // Row fields.
@@ -66,7 +67,7 @@ const MNT_LEN: u64 = 16;              // MNT_N * 2: per mount, its directory nod
 
 struct Vfs {
   ram: Vec[Node],       // the in-memory file system
-  ftab: Buf,            // open files: FD_ROWS rows of FD_STRIDE words
+  ftab: Buf,            // open files: FD_ROWS rows of FD_STRIDE words, then HOLD_N holds
   xfer: Bytes,          // the transfer buffer
   disk: DiskFs,         // the file system on the disk
   name: Bytes,          // a directory's name, while vfs_readdir lists it
@@ -211,15 +212,15 @@ fn fset(t: &mut Buf, row: u64, f: u64, x: u64)
   t = set(t, row * FD_STRIDE + f, x);
 }
 
-/// Is any row open on node i of file system fs?
+/// Is any row open on node i of file system fs, or any hold on it?
 fn node_open(t: &Buf, fs: u64, i: u64) -> bool
   requires len(t) == FTAB_LEN
 {
   let mut r = 0;
-  while r < FD_ROWS
-    invariant r <= FD_ROWS
+  while r < FD_ROWS + HOLD_N
+    invariant r <= FD_ROWS + HOLD_N
   {
-    if fget(t, r, FD_FS) == fs && fget(t, r, FD_NODE) == i {
+    if get(t, r * FD_STRIDE + FD_FS) == fs && get(t, r * FD_STRIDE + FD_NODE) == i {
       return true;
     }
     r = r + 1;
@@ -358,9 +359,18 @@ fn vfs_close(v: &mut Vfs, mem: &mut Mem, row: u64) -> bool
     fset(&mut v.ftab, row, f, 0);
     f = f + 1;
   }
-  // The last close of a file removed while open frees it. The page cache
-  // keeps only open files' pages (a mapping holds its file open), so a
-  // handle is never freed, and named again, with pages still cached.
+  node_settle(&mut v, &mut mem, fs, node, h);
+  return true;
+}
+
+/// Node `node` of file system `fs` (handle h) lost a row or a hold. The
+/// last close of a file removed while open frees it. The page cache keeps
+/// only open files' pages (a mapping holds its file open), so a handle is
+/// never freed, and named again, with pages still cached.
+fn node_settle(v: &mut Vfs, mem: &mut Mem, fs: u64, node: u64, h: u64)
+  requires vfs_ok(v) && mem_ok(mem)
+  ensures vfs_ok(v) && mem_ok(mem)
+{
   if !node_open(v.ftab, fs, node) {
     pc_forget(&mut v.pc, &mut mem, h);
     if fs == FS_RAM && node < NFILES && ram_len(&mut v.ram, node) == 0 && node != v.lo_file {
@@ -372,7 +382,99 @@ fn vfs_close(v: &mut Vfs, mem: &mut Mem, row: u64) -> bool
       lo_settle(&mut v);
     }
   }
-  return true;
+}
+
+/// Holds file handle h (in memory or on the disk, not the loop mount)
+/// open without a descriptor, as a running program holds the file it was
+/// started from (src/lazy.bastio): removing its name leaves it in place
+/// until vfs_unhold, so the handle never names another file meanwhile.
+/// Returns the hold, with one reference (vfs_hold_dup adds more), or
+/// HOLD_N if h is no such file or every hold is taken.
+fn vfs_hold(v: &mut Vfs, h: u64) -> u64
+  requires vfs_ok(v)
+  ensures vfs_ok(v) && result <= HOLD_N
+{
+  let mut fs = 0;
+  let mut node = 0;
+  if h < NFILES {
+    fs = FS_RAM;
+    node = h;
+  } else if h < NFILES + DSLOTS {
+    fs = FS_DISK;
+    node = h - NFILES;
+  } else {
+    return HOLD_N;
+  }
+  if vfs_size(&mut v, h) == NO_FILE {
+    return HOLD_N;
+  }
+  let mut i = 0;
+  while i < HOLD_N && get(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_FS) != 0
+    invariant i <= HOLD_N && vfs_ok(v)
+  {
+    i = i + 1;
+  }
+  if i < HOLD_N {
+    v.ftab = set(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_FS, fs);
+    v.ftab = set(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_NODE, node);
+    v.ftab = set(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_OFF, 1);   // its references
+  }
+  return i;
+}
+
+/// One more reference to hold i (a forked process's).
+fn vfs_hold_dup(v: &mut Vfs, i: u64)
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  if i < HOLD_N && get(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_FS) != 0 {
+    let at = (FD_ROWS + i) * FD_STRIDE + FD_OFF;
+    if get(v.ftab, at) < 4294967296 {
+      v.ftab = set(v.ftab, at, get(v.ftab, at) + 1);
+    }
+  }
+}
+
+/// The file handle hold i is on, or NO_FILE.
+fn vfs_held(v: &Vfs, i: u64) -> u64
+  requires vfs_ok(v)
+  ensures result < HFILES || result == NO_FILE
+{
+  if i >= HOLD_N {
+    return NO_FILE;
+  }
+  let fs = get(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_FS);
+  let node = get(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_NODE);
+  if fs == FS_RAM && node < NFILES {
+    return node;
+  }
+  if fs == FS_DISK && node < DSLOTS {
+    return NFILES + node;
+  }
+  return NO_FILE;
+}
+
+/// Drops a reference to hold i; with the last, lets go of the file (a
+/// file whose names are all gone goes with it).
+fn vfs_unhold(v: &mut Vfs, mem: &mut Mem, i: u64)
+  requires vfs_ok(v) && mem_ok(mem)
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  let h = vfs_held(v, i);
+  if i >= HOLD_N || h == NO_FILE {
+    return;
+  }
+  let at = (FD_ROWS + i) * FD_STRIDE + FD_OFF;
+  if get(v.ftab, at) > 1 {
+    v.ftab = set(v.ftab, at, get(v.ftab, at) - 1);
+    return;
+  }
+  v.ftab = set(v.ftab, at, 0);
+  let fs = get(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_FS);
+  let node = get(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_NODE);
+  v.ftab = set(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_FS, 0);
+  v.ftab = set(v.ftab, (FD_ROWS + i) * FD_STRIDE + FD_NODE, 0);
+  node_settle(&mut v, &mut mem, fs, node, h);
 }
 
 /// Closes every row of process row block `base` (when the process ends).

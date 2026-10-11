@@ -1,7 +1,14 @@
 /* Small Linux system calls, against musl: uname and gethostname, readv,
  * pread and pwrite, limits, sysinfo, statfs, getrandom, priorities, umask,
  * sessions and process groups, the terminal's name and group, sched_yield,
- * and how much a pipe holds. */
+ * how much a pipe holds, and a private copy of a read-only page that
+ * mprotect makes writable (the kernel shares those pages between the
+ * processes running a built-in program). Run from a file with its own path
+ * as the argument, it removes that file first: the kernel reads a code
+ * page from the file when the program first runs it (src/lazy.bastio), so
+ * the pages of far_code and far_more, each alone on a page and run only at
+ * the end, come from a file that has no name any more, one of them after
+ * mprotect. */
 #include <errno.h>
 #include <fcntl.h>
 #include <sched.h>
@@ -10,6 +17,7 @@
 #include <string.h>
 #include <sys/random.h>
 #include <sys/resource.h>
+#include <sys/mman.h>
 #include <sys/statfs.h>
 #include <sys/stat.h>
 #include <sys/sysinfo.h>
@@ -175,8 +183,55 @@ static int pipes(void)
     return held;
 }
 
-int main(void)
+/* Big enough to hold a whole page of constants, which the kernel maps
+ * from one shared copy in every process running this program. */
+static const char motto[8192] = "read-only, and shared";
+
+/* A child that makes a page of constants writable and writes it gets its
+ * own copy: the parent, which runs on the same shared page, still reads
+ * what the program says. */
+static int private_copy(void)
 {
+    volatile char *p = (volatile char *)(((unsigned long)motto + 4095) & ~4095UL);
+    pid_t c = fork();
+    if (c == 0) {
+        if (mprotect((void *)p, 4096, PROT_READ | PROT_WRITE) != 0)
+            _exit(2);
+        p[0] = 'R';
+        _exit(p[0] == 'R' ? 0 : 3);
+    }
+    int st;
+    if (c < 0 || waitpid(c, &st, 0) != c || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        return fail("mprotect a page of constants");
+    if (p[0] != 0 || motto[0] != 'r')
+        return fail("a written page of constants stays private");
+    return 0;
+}
+
+/* Code on pages of its own, run only at the end. */
+__attribute__((noinline, aligned(4096))) static int far_code(int x)
+{
+    return x * 3 + 1;
+}
+
+__attribute__((noinline, aligned(4096))) static int far_more(int x)
+{
+    return x * 5 + 2;
+}
+
+static int late_code(void)
+{
+    if (mprotect((void *)far_code, 4096, PROT_READ | PROT_EXEC) != 0)
+        return fail("mprotect a code page not run yet");
+    if (far_code(4) != 13 || far_more(4) != 22)
+        return fail("code read from the program's file");
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc > 1 && unlink(argv[1]) != 0)
+        return fail("unlink the program");
     struct utsname u;
     char host[64];
     if (uname(&u) != 0 || strcmp(u.sysname, "Linux") != 0 || strcmp(u.machine, "x86_64") != 0)
@@ -243,6 +298,8 @@ int main(void)
     int held = pipes();
     if (held < 0)
         return fail("pipe capacity");
+    if (private_copy() != 0 || late_code() != 0)
+        return 1;
     printf("mmisc: ok on %s %s, signals, pipe %d\n", u.sysname, u.machine, held);
     return 0;
 }
