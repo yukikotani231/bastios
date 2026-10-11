@@ -3,8 +3,9 @@
 // mousedev does in its default mode: byte 0 holds the buttons (bit 0 left,
 // 1 right, 2 middle), bit 3 set, and the signs of x and y (bits 4 and 5);
 // bytes 1 and 2 are the motion in x (right is positive) and y (up is
-// positive). The packets come from the PS/2 mouse (src/kbd.bastio) through
-// the console pump (`exchange` in src/main.bastio) into k.mice, a byte
+// positive). The packets come from the PS/2 mouse (src/kbd.bastio) or a
+// USB mouse (src/xhci.bastio, which turns its boot reports into this form)
+// through the console pump (`exchange` in src/main.bastio) into k.mice, a byte
 // ring: a 24-byte header (where the oldest byte is, how many bytes there
 // are, whether there is a mouse) and MICE_CAP bytes. When the ring is full,
 // new packets are dropped whole.
@@ -92,6 +93,23 @@ fn mice_push(k: &mut Kernel, src: &Bytes, n: u64)
     i = i + 3;
   }
   put_u64(&mut k.mice, 8, cnt);
+}
+
+/// Queues one packet, p (its three bytes, as kbd_poll gives them less
+/// MOUSE_PKT), unless the ring is full.
+fn mice_put(k: &mut Kernel, p: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  let head = get_u64(k.mice, 0) % MICE_CAP;
+  let cnt = mice_count(k);
+  if cnt + 3 > MICE_CAP {
+    return;
+  }
+  bset(&mut k.mice, MICE_HDR + (head + cnt) % MICE_CAP, cast[u8](p / 65536 % 256));
+  bset(&mut k.mice, MICE_HDR + (head + cnt + 1) % MICE_CAP, cast[u8](p / 256 % 256));
+  bset(&mut k.mice, MICE_HDR + (head + cnt + 2) % MICE_CAP, cast[u8](p % 256));
+  put_u64(&mut k.mice, 8, cnt + 3);
 }
 
 /// What poll finds on the mouse.

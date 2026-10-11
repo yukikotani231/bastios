@@ -28,7 +28,7 @@ import "pages.bastio";
 
 const HDA_CLASS: u64 = 0x040300;       // multimedia, HD Audio
 const HDA_PAGES: u64 = 6;              // the rings, the buffer list, four data pages
-const SND_AT: u64 = 46;                // those pages: 46 .. 51, after the xHCI controller's
+const SND_AT: u64 = 47;                // those pages: 47 .. 52, after the xHCI controller's
 const HDA_MAX_LEN: u64 = 0x4000;       // registers claimed: the BAR, up to 16 KiB
 const HDA_MIN_LEN: u64 = 0x1000;
 const HDA_SPINS: u64 = 1000000;

@@ -416,10 +416,11 @@ fn blk_is_usb(b: &Blk) -> bool {
 }
 
 /// The next byte typed on a USB keyboard on the disk's controller (when
-/// the disk is a USB one, the keyboard is polled through it), or 256.
+/// the disk is a USB one, the keyboard is polled through it), a packet
+/// from a USB mouse there (MOUSE_PKT plus its bytes), or 256.
 fn blk_kbd_poll(b: &mut Blk) -> u64
   requires blk_ok(b)
-  ensures blk_ok(b) && result <= 256
+  ensures blk_ok(b) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT))
 {
   match b {
     Blk::Usb(mut x) => {
@@ -439,6 +440,18 @@ fn blk_kbd_poll(b: &mut Blk) -> u64
 fn blk_kbd(b: &Blk) -> bool {
   match b {
     Blk::Usb(x) => { return x.live; },
+    Blk::Ata(a) => { return false; },
+    Blk::Virtio(v) => { return false; },
+    Blk::Nvme(n) => { return false; },
+    Blk::Ahci(h) => { return false; },
+    Blk::Loop(l) => { return false; },
+  }
+}
+
+/// Is there a USB mouse on the disk's controller?
+fn blk_mouse(b: &Blk) -> bool {
+  match b {
+    Blk::Usb(x) => { return x.mlive; },
     Blk::Ata(a) => { return false; },
     Blk::Virtio(v) => { return false; },
     Blk::Nvme(n) => { return false; },

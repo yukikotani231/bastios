@@ -151,7 +151,7 @@ bastios> ash
 # /disk/hi
 hello from Linux C, pid 3
 # ls /disk
-greet  hi
+home   root   etc    greet  hi
 # echo one two three | wc -w
 3
 # exit
@@ -159,7 +159,7 @@ bastios> halt
 ...
 ```
 
-`ash` is BusyBox, built unmodified, and `ls`, `wc`, `cat` and its other applets in the kernel image are under `/bin`. [docs/linux.md](linux.md) lists the system calls and how each behaves, and `make compat` measures how much ordinary Linux userland runs (see [test/compat/README.md](../test/compat/README.md)).
+`home`, `root` and `etc` are made on the disk at its first boot: `/home`, `/root` and `/etc` link there, so users and their files are kept (see [security.md](security.md)). `ash` is BusyBox, built unmodified, and `ls`, `wc`, `cat` and its other applets in the kernel image are under `/bin`. [docs/linux.md](linux.md) lists the system calls and how each behaves, and `make compat` measures how much ordinary Linux userland runs (see [test/compat/README.md](../test/compat/README.md)).
 
 ## 5. Boot from a USB stick
 
@@ -190,7 +190,7 @@ sudo dd if=build/bastios-usb.img of=/dev/sdX bs=4M conv=fsync
 ```
 
 BastiOS has been run only in QEMU so far. To try it on a real machine and tell us what worked, see [real-hardware.md](real-hardware.md): its boot menu has an entry that prints a hardware report. On a real PC:
-- **Console.** The first serial port (COM1, 115200 baud), and the screen if Limine can give it a 32-bit linear framebuffer between 2 GiB and the I/O APIC, which is where PC firmware puts it. Keys come from a PS/2 keyboard, or a USB keyboard on an xHCI (USB 3) controller, on a root port or behind up to two USB 2 hubs (a SuperSpeed device behind a USB 3 hub is not found).
+- **Console.** The first serial port (COM1, 115200 baud), and the screen if Limine can give it a 32-bit linear framebuffer between 2 GiB and the I/O APIC, which is where PC firmware puts it. Keys come from a PS/2 keyboard, or a USB keyboard on an xHCI (USB 3) controller, on a root port or behind up to two USB 2 hubs (a SuperSpeed device behind a USB 3 hub is not found). A PS/2 or USB mouse is there for Linux programs as `/dev/input/mice`.
 - **Processor.** It needs 1 GiB pages, which every x86-64 CPU of the last decade has. Other processors are found in the ACPI tables, wherever below 4 GiB the firmware put them (above 4 GiB too, with 1 GiB pages). Local APICs in x2APIC mode work too (processors with ids of 255 and up included), though without MSI.
 - **Power.** `halt` powers off and `reboot` restarts through ACPI (S5, and the FADT's reset register, a port or a memory register, else the keyboard controller or 0xCF9), and the power button powers off. The clock is the HPET, or the ACPI PM timer without one.
 - **Disk.** The BastiOS partition of a USB stick or disk on an xHCI controller, as for the keyboard (`make usb`; bulk-only transport, 512-byte sectors), else an NVMe drive (namespace 1, 512-byte or 4 KiB sectors), a virtio disk, a SATA disk on an AHCI controller (the first port with a disk, 512-byte sectors), or a legacy ATA disk. A blank disk is formatted on the first boot; a disk with a partition table or other data on it (the first and last 34 sectors not all zeros) is left alone, and the boot log says so.

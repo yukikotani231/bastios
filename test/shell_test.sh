@@ -332,7 +332,7 @@ steps = [
     # Users (docs/security.md): adduser, su to the new user and back,
     # /etc/shadow is root's, su and passwd are the only set-user-ID
     # programs, and su asks for root's password once root has one.
-    ("adduser -D alice; id alice; stat -c '%a %U' /bin/su /bin/ls /etc/shadow /root",
+    ("adduser -D alice; id alice; stat -c '%a %U' /bin/su /bin/ls /etc/shadow /root/",
      [b"uid=1000(alice) gid=1000(alice)", b"\r\n4755 root\r\n755 root\r\n600 root\r\n700 root\r\n"], b"\n# "),
     ("su alice -c 'id -u; whoami; cd; pwd; cat /etc/shadow; echo s=$?; ls /root; echo r=$?'",
      [b"\r\n1000\r\nalice\r\n/home/alice\r\n", b"Permission denied", b"s=1", b"r=1"], b"\n# "),
@@ -341,6 +341,9 @@ steps = [
     # (BusyBox keeps the old /etc files as NAME-: gone, so no pages stay.)
     ("deluser alice; id alice; passwd -d root; echo u=$?; rm -rf /home/alice /etc/passwd- /etc/group- /etc/shadow-",
      [b"unknown user alice", b"u=0"], b"\n# "),
+    # With a disk, /etc, /root and /home are links into it (src/main.bastio,
+    # install_files): a user made now is still there at the next boot.
+    ("adduser -D kept; echo hi > /root/kept; ls -l /etc /root /home", [b"/etc -> /disk/etc", b"/root -> /disk/root", b"/home -> /disk/home"], b"\n# "),
     # Small calls: uname, readv, pread/pwrite, limits, sysinfo, statfs,
     # getrandom, priorities, sessions, process groups, ttyname, pipe capacity (user/mmisc.c).
     ("mmisc", b"mmisc: ok on Linux x86_64, signals, pipe 65536", b"\n# "),
@@ -906,10 +909,13 @@ def session(name, want_banner, steps, halt=False, ready=None):
             ok = (b"disk: virtio" in out) == want_banner
             print(("ok  " if ok else "FAIL"), f"({name} boot) disk driver: {'virtio' if want_banner else 'ATA'}")
             fails += not ok
-        for line, want in steps:
+        for step in steps:
+            line, want = step[0], step[1]
+            until = step[2] if len(step) > 2 else b"bastios> "
+            wants = want if isinstance(want, list) else [want]
             mark = len(out)
             qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
-            ok = read_until(b"bastios> ", mark) and want in out[mark:]
+            ok = read_until(until, mark) and all(w in out[mark:] for w in wants)
             print(("ok  " if ok else "FAIL"), f"({name} boot)", repr(line))
             fails += not ok
         if halt:
@@ -950,6 +956,10 @@ session("virtio", True, [
     ("cat disk/hk1", b"no such file"),
     ("ls disk", b"pf"),
     ("rm disk/pf", b""),
+    # The user made at the first boot, kept on the disk.
+    ("ash", b"built-in shell (ash)", b"\n# "),
+    ("id kept; cat /root/kept; stat -c %a /etc/shadow; deluser kept; rm -rf /home/kept /root/kept /etc/*-", [b"uid=1000(kept)", b"\r\nhi\r\n600\r\n"], b"\n# "),
+    ("exit", b""),
 ], halt=True, ready=lambda: irq_found("virtio"))
 
 # The same disk as an NVMe drive: what virtio wrote is there, and what is
@@ -1182,14 +1192,32 @@ good = code == 0
 print(("ok  " if good else "FAIL"), f"(no COM1) `halt` typed on the keyboard powers off (status {code})")
 fails += not good
 
-# A USB keyboard on an xHCI controller (src/xhci.bastio), on a machine with
-# no PS/2 controller at all (i8042=off), so the keys can only come over
-# USB. They are sent through QMP; at power off the controller is reset and
-# its fourteen pages are back.
+# A USB keyboard and a USB mouse on an xHCI controller (src/xhci.bastio),
+# on a machine with no PS/2 controller at all (i8042=off), so the keys and
+# the moves can only come over USB. They are sent through QMP; at power
+# off the controller is reset and its fifteen pages are back.
 import json
 qmp_path = os.path.join(disk_dir.name, "qmp.sock")
+def usbmouse(name, qmp_cmd):
+    # mmouse reads two packets: a move 10 right and 5 up, then the left
+    # button. A USB mouse says y down positive; the PS/2 packet, up.
+    global fails
+    mark = len(out)
+    qemu.stdin.write(b"mmouse\r"); qemu.stdin.flush()
+    if read_until(b"mmouse: ready", mark):
+        qmp_cmd({"execute": "input-send-event", "arguments": {"events": [
+            {"type": "rel", "data": {"axis": "x", "value": 10}}, {"type": "rel", "data": {"axis": "y", "value": -5}}]}})
+        time.sleep(0.3)
+        for down in (True, False):
+            qmp_cmd({"execute": "input-send-event", "arguments": {"events": [
+                {"type": "btn", "data": {"down": down, "button": "left"}}]}})
+            time.sleep(0.3)
+    read_until(b"bastios> ", mark)
+    good = b"mmouse: buttons 0 dx 10 dy 5\r\nmmouse: buttons 1 dx 0 dy 0\r\n" in out[mark:]
+    print(("ok  " if good else "FAIL"), f"({name} boot) the USB mouse's move and button come through /dev/psaux")
+    fails += not good
 qemu = boot(1, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci", "-device", "usb-kbd",
-                      "-qmp", f"unix:{qmp_path},server,nowait"])
+                      "-device", "usb-mouse", "-qmp", f"unix:{qmp_path},server,nowait"])
 out = b""
 deadline = time.time() + timeout
 ok = read_until(b"bastios> ")
@@ -1218,6 +1246,7 @@ if ok:
     good = read_until(b"Usb_ok\r\n", mark) and read_until(b"bastios> ", mark + 1)
     print(("ok  " if good else "FAIL"), "(USB boot) a line typed on the USB keyboard runs")
     fails += not good
+    usbmouse("USB", qmp_cmd)
     qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
     read_until(b"pages free at power off")
     booted = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
@@ -1237,7 +1266,9 @@ print(out.decode(errors="replace").replace("\r", "")[-400:])
 # The controller's event ring raises V_DISK by MSI-X, so a process waiting
 # for the stick sleeps. A second boot finds the file, with the stick and
 # the keyboard behind two tiers of USB hubs (as a stick in a real PC's
-# front panel often is); test/fsck.py then checks the partition.
+# front panel often is), and a USB mouse too, which takes the fifth and
+# last device slot and is read through the disk's driver as well;
+# test/fsck.py then checks the partition.
 stick = os.path.join(disk_dir.name, "stick.img")
 subprocess.run(["tools/mkusb.py", stick, "--blank", "--mib", "33"], check=True, stdout=subprocess.DEVNULL)
 before = open(disk, "rb").read()
@@ -1246,7 +1277,8 @@ def stick_boot(name, steps, keys=False, image=None, hubs=False):
     usb = ["-device", "usb-storage,bus=xh.0,drive=st", "-device", "usb-kbd,bus=xh.0"]
     if hubs:
         usb = ["-device", "usb-hub,bus=xh.0,port=1", "-device", "usb-hub,bus=xh.0,port=1.2",
-               "-device", "usb-storage,bus=xh.0,port=1.2.3,drive=st", "-device", "usb-kbd,bus=xh.0,port=1.4"]
+               "-device", "usb-storage,bus=xh.0,port=1.2.3,drive=st", "-device", "usb-mouse,bus=xh.0,port=1.2.4",
+               "-device", "usb-kbd,bus=xh.0,port=1.4"]
     qemu = boot(1, virtio=True, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci,id=xh",
                                        "-drive", f"file={image or stick},format=raw,if=none,id=st"] + usb +
                                       ["-qmp", f"unix:{qmp_path},server,nowait"])
@@ -1280,6 +1312,8 @@ def stick_boot(name, steps, keys=False, image=None, hubs=False):
         good = read_until(b"Stick\r\n", mark) and read_until(b"bastios> ", mark + 1)
         print(("ok  " if good else "FAIL"), f"({name} boot) a line typed on the USB keyboard runs, read through the disk")
         fails += not good
+        if hubs:
+            usbmouse(name, qmp_cmd)
         qmp.close()
     for line, w in steps:
         if not ok:
@@ -1924,6 +1958,35 @@ for name, at, data in (("an MBR", 510, b"\x55\xaa"), ("a backup GPT header", (33
     good = open(other, "rb").read() == before
     print(("ok  " if good else "FAIL"), f"(foreign disk) not a byte of the disk with {name} changed")
     fails += not good
+
+# With the boot option `login`, the console is BusyBox's login instead of
+# the native shell, and a new login starts whenever the last one ends
+# (relogin, src/main.bastio). Root has no password here (passwd -d above).
+qemu = boot(1, with_disk=True, extra=["-append", "login"])
+out = b""
+deadline = time.time() + timeout
+def login_step(line, want, until):
+    global fails
+    mark = len(out)
+    qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+    wants = want if isinstance(want, list) else [want]
+    ok = read_until(until, mark + len(line)) and all(w in out[mark:] for w in wants)
+    print(("ok  " if ok else "FAIL"), "(login boot)", repr(line)); ok or print(repr(out[mark:]))
+    fails += not ok
+if not read_until(b"login: "):
+    print("FAIL (login boot) no login prompt"); fails += 1
+else:
+    print("ok   (login boot) a login prompt at boot")
+    login_step("root", b"", b"\n# ")
+    login_step("id -u; adduser -D carol; echo carol:pw | chpasswd; exit", b"\r\n0\r\n", b"login: ")
+    login_step("carol", b"", b"Password: ")
+    login_step("wrong", b"Login incorrect", b"login: ")
+    login_step("carol", b"", b"Password: ")
+    login_step("pw", b"", b"\n$ ")
+    login_step("id -u; cat /etc/shadow; exit", [b"\r\n1000\r\n", b"Permission denied"], b"login: ")
+    login_step("root", b"", b"\n# ")
+    login_step("deluser carol; rm -rf /home/carol /etc/passwd- /etc/group- /etc/shadow-; id carol", b"unknown user carol", b"\n# ")
+qemu.kill(); qemu.wait()
 
 print(f"---- {fails} failed ----")
 sys.exit(1 if fails else 0)
