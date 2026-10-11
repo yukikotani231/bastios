@@ -253,15 +253,19 @@ SMP     ?= 2
 OVMF    ?= /usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
 # A virtio disk and network card (QEMU's user network: DHCP, and the host
-# reachable at 10.0.2.2; TCP port 7001 on this machine reaches the guest's
-# port 7001, for `tcpecho 7001`). QEMU's default CPU model lacks 1 GiB
+# reachable at 10.0.2.2). TCP ports on this machine reach the guest's:
+# 7001 for `tcpecho 7001`, SSH_PORT its 22 and HTTP_PORT its 80, for an SSH
+# server and a web server (docs/using.md). QEMU's default CPU model lacks 1 GiB
 # pages, which boot.S needs to map the device window above 4 GiB (where
 # UEFI firmware puts 64-bit PCI BARs); every real x86-64 CPU of the last
 # decade has them.
+SSH_PORT  ?= 2222
+HTTP_PORT ?= 8080
 QEMU_DEVS := -cpu qemu64,+pdpe1gb -m 256M -smp $(SMP) -no-reboot \
              -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
              -drive file=$(DISK),format=raw,if=none,id=vd -device virtio-blk-pci,drive=vd \
-             -netdev user,id=n0,hostfwd=tcp:127.0.0.1:7001-:7001 -device virtio-net-pci,netdev=n0
+             -netdev user,id=n0,hostfwd=tcp:127.0.0.1:7001-:7001,hostfwd=tcp:127.0.0.1:$(SSH_PORT)-:22,hostfwd=tcp:127.0.0.1:$(HTTP_PORT)-:80 \
+             -device virtio-net-pci,netdev=n0
 QEMU_ARGS := -kernel build/bastios.elf -display none $(QEMU_DEVS)
 # The ISO targets open QEMU's window, for the screen and keyboard
 # (ISO_DISPLAY="-display none" for serial only).
