@@ -21,6 +21,7 @@ import "space.bastio";
 import "proc.bastio";
 import "fs.bastio";
 import "net.bastio";
+import "net6.bastio";
 import "syscall.bastio";
 import "linux.bastio";
 import "lxproc.bastio";

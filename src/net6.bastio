@@ -1,0 +1,536 @@
+// IPv6 on the wire, translated to and from the IPv4 stack in net.bastio.
+//
+// The UDP and TCP code (net.bastio, tcp.bastio) knows only 32-bit
+// addresses. Each IPv6 peer gets a stand-in for one: a token in 240.0.0.0/8
+// (reserved, never a real IPv4 address), V6_BASE + its slot in a small
+// table of (address, MAC). A UDP datagram or TCP segment that arrives over
+// IPv6 is rewritten in the receive buffer into the IPv4 frame it would have
+// been, from the peer's token to our IPv4 address, and handed to ip_in; a
+// frame the stack builds for a token is rewritten into IPv6 just before it
+// is sent (v6_out). The translation moves the transport header by the 20
+// bytes the two IP headers differ in and recomputes its checksum over the
+// other pseudo-header, after checking the one it arrived with. This is
+// stateless translation (RFC 7915) inside one machine, so sockets and TCP
+// need no second address family.
+//
+// ICMPv6 is answered here: neighbor solicitations for our addresses,
+// neighbor advertisements (which fill in a peer's MAC), router
+// advertisements (the prefix our global address is made from, and the
+// router frames for other prefixes go to), and echo requests. Our
+// addresses: the link-local fe80::/64 one and, once a router advertises a
+// prefix with the autonomous flag, prefix::iid, both with the interface id
+// made from the card's MAC (EUI-64, RFC 4291). Router solicitations go out
+// at start and are retried from v6_tick.
+//
+// Not done: extension headers (such packets are dropped), fragments, path
+// MTU discovery (a datagram whose IPv6 frame would pass 1500 bytes is
+// dropped), duplicate address detection, multicast listener reports, and
+// address lifetimes (an address lasts until power off). The table holds
+// V6N peers; a new peer takes the oldest slot, so a connection whose peer
+// was pushed out loses its packets.
+
+const IP6_HDR: u64 = 40;
+const NH_TCP: u64 = 6;
+const NH_UDP: u64 = 17;
+const NH_ICMP6: u64 = 58;
+const ICMP6_ECHO: u64 = 128;
+const ICMP6_ECHO_REPLY: u64 = 129;
+const ICMP6_RS: u64 = 133;
+const ICMP6_RA: u64 = 134;
+const ICMP6_NS: u64 = 135;
+const ICMP6_NA: u64 = 136;
+const LL_HI: u64 = 0xFE80000000000000;    // fe80::/64
+const MC_HI: u64 = 0xFF02000000000000;    // ff02::/16, link-scope multicast
+const SNM_LO: u64 = 0x00000001FF000000;   // ff02::1:ff00:0/104, solicited-node
+const RS_TRIES: u64 = 3;
+const RS_WAIT: u64 = 100;                  // ticks between router solicitations
+const TWO24: u64 = 16777216;
+const TWO48: u64 = 281474976710656;
+
+// ---------------------------------------------------------------- addresses
+
+/// Is `ip` the token of a table slot?
+fn is_v6tok(ip: u64) -> bool
+  ensures result == (V6_BASE <= ip && ip < V6_BASE + V6N)
+{
+  return V6_BASE <= ip && ip < V6_BASE + V6N;
+}
+
+/// A 64-bit big-endian word at o.
+fn be64(b: &Bytes, o: u64) -> u64
+  requires o + 8 <= blen(b)
+{
+  return load_be64(b, o);
+}
+
+fn put64(b: &mut Bytes, o: u64, v: u64)
+  requires o + 8 <= blen(b)
+  ensures blen(b) == old(blen(b))
+{
+  store_be64(&mut b, o, v);
+}
+
+/// Our interface id, from the card's MAC (modified EUI-64): the MAC's
+/// first three bytes with the universal/local bit flipped, ff:fe, the last
+/// three.
+fn v6_iid(mac: u64) -> u64
+  requires mac < MAC_LIMIT
+{
+  let mut top = mac / TWO24;
+  if (top / 0x20000) % 2 == 1 {
+    top = top - 0x20000;
+  } else {
+    top = top + 0x20000;
+  }
+  return top * 1099511627776 + 0xFFFE * TWO24 + mac % TWO24;
+}
+
+/// Is hi:lo one of our unicast addresses?
+fn v6_mine(n: &Net, hi: u64, lo: u64) -> bool
+  requires net_ok(n)
+{
+  return lo == n.iid && (hi == LL_HI || (hi == n.pfx && n.pfx != 0));
+}
+
+/// Is the address with high half hi on our link: link-local, or in the
+/// advertised prefix?
+fn v6_onlink(n: &Net, hi: u64) -> bool
+  requires net_ok(n)
+{
+  return hi / TWO48 / 64 == 0xFE80 / 64 || (hi == n.pfx && n.pfx != 0);
+}
+
+/// The slot holding hi:lo, or V6N.
+fn v6_find(n: &Net, hi: u64, lo: u64) -> u64
+  requires net_ok(n)
+  ensures result <= V6N
+{
+  let mut i = 0;
+  while i < V6N
+    invariant i <= V6N && net_ok(n)
+  {
+    if get(n.v6, i * V6W + 3) == 1 && get(n.v6, i * V6W) == hi && get(n.v6, i * V6W + 1) == lo {
+      return i;
+    }
+    i = i + 1;
+  }
+  return V6N;
+}
+
+/// The token for peer hi:lo, making a slot for it (the oldest one, if all
+/// are taken). mac, when not 0, is where its frames come from: its own
+/// MAC, or the router's for a peer off the link.
+fn v6_token(n: &mut Net, hi: u64, lo: u64, mac: u64) -> u64
+  requires net_ok(n) && mac < MAC_LIMIT
+  ensures net_ok(n) && V6_BASE <= result && result < V6_BASE + V6N
+{
+  let mut i = v6_find(n, hi, lo);
+  if i >= V6N {
+    i = n.v6_next % V6N;
+    n.v6_next = (i + 1) % V6N;
+    n.v6 = set(n.v6, i * V6W, hi);
+    n.v6 = set(n.v6, i * V6W + 1, lo);
+    n.v6 = set(n.v6, i * V6W + 2, 0);
+    n.v6 = set(n.v6, i * V6W + 3, 1);
+  }
+  if mac != 0 {
+    n.v6 = set(n.v6, i * V6W + 2, mac);
+  }
+  return V6_BASE + i;
+}
+
+// ---------------------------------------------------------------- sending
+
+/// The checksum field's offset in a transport header of protocol nh, or
+/// 0 for none we translate.
+fn l4_csum_at(nh: u64) -> u64
+  ensures result <= 16
+{
+  if nh == NH_UDP {
+    return 6;
+  }
+  if nh == NH_TCP {
+    return 16;
+  }
+  if nh == NH_ICMP6 {
+    return 2;
+  }
+  return 0;
+}
+
+/// The checksum to store in the IPv6 packet being sent (plen bytes of
+/// protocol nh at 54, its addresses already in the header).
+fn v6_csum(b: &Bytes, nh: u64, plen: u64) -> u64
+  requires 54 + plen <= blen(b) && nh <= 255 && plen <= 65535
+  ensures result <= 65535
+{
+  let mut s = csum_sum16(b, 22, 32, 0);
+  s = csum_add(s, plen);
+  s = csum_add(s, nh);
+  s = csum_sum16(b, 54, plen, s);
+  let c = 65535 - s;
+  if c == 0 && nh == NH_UDP {
+    return 65535;                     // 0 would mean "no checksum"
+  }
+  return c;
+}
+
+/// Fills in the IPv6 header at 14 of the outgoing frame and the Ethernet
+/// header before it, and the transport checksum of the plen bytes at 54.
+fn v6_header(n: &mut Net, mac: u64, nh: u64, plen: u64, shi: u64, slo: u64, dhi: u64, dlo: u64, hops: u64)
+  requires net_ok(n) && mac < MAC_LIMIT && nh <= 255 && 54 + plen <= FRAME_MAX && hops <= 255
+  ensures net_ok(n)
+{
+  eth_header(&mut n, mac, ETH_IP6);
+  put32(&mut n.out, 14, 0x60000000);  // version 6, no traffic class or flow
+  put16(&mut n.out, 18, plen);
+  bset(&mut n.out, 20, cast[u8](nh));
+  bset(&mut n.out, 21, cast[u8](hops));
+  put64(&mut n.out, 22, shi);
+  put64(&mut n.out, 30, slo);
+  put64(&mut n.out, 38, dhi);
+  put64(&mut n.out, 46, dlo);
+  let at = l4_csum_at(nh);
+  if at != 0 && at + 2 <= plen {
+    put16(&mut n.out, 54 + at, 0);
+    put16(&mut n.out, 54 + at, v6_csum(n.out, nh, plen));
+  }
+}
+
+/// Our source address for a packet to hi: link-local for a link-local
+/// peer or while we have no prefix, else the global one.
+fn v6_src_hi(n: &Net, dhi: u64) -> u64
+  requires net_ok(n)
+{
+  if n.pfx == 0 || dhi / TWO48 / 64 == 0xFE80 / 64 {
+    return LL_HI;
+  }
+  return n.pfx;
+}
+
+/// The Ethernet multicast MAC for IPv6 multicast address ...:lo.
+fn mc_mac(lo: u64) -> u64
+  ensures result < MAC_LIMIT
+{
+  return 0x333300000000 + lo % 4294967296;
+}
+
+/// Sends a neighbor solicitation for hi:lo to its solicited-node group.
+fn ns_send(n: &mut Net, hi: u64, lo: u64) -> bool
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let dlo = SNM_LO + lo % TWO24;
+  bset(&mut n.out, 54, cast[u8](ICMP6_NS));
+  bset(&mut n.out, 55, 0);
+  put32(&mut n.out, 56, 0);
+  put32(&mut n.out, 58, 0);
+  put64(&mut n.out, 62, hi);
+  put64(&mut n.out, 70, lo);
+  bset(&mut n.out, 78, 1);            // option: our link-layer address
+  bset(&mut n.out, 79, 1);
+  put48(&mut n.out, 80, card_mac(n.dev));
+  v6_header(&mut n, mc_mac(dlo), NH_ICMP6, 32, v6_src_hi(n, hi), n.iid, MC_HI, dlo, 255);
+  return net_send(&mut n, 86);
+}
+
+/// Sends a router solicitation to all routers (ff02::2).
+fn rs_send(n: &mut Net) -> bool
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  bset(&mut n.out, 54, cast[u8](ICMP6_RS));
+  bset(&mut n.out, 55, 0);
+  put32(&mut n.out, 56, 0);
+  put32(&mut n.out, 58, 0);
+  bset(&mut n.out, 62, 1);
+  bset(&mut n.out, 63, 1);
+  put48(&mut n.out, 64, card_mac(n.dev));
+  v6_header(&mut n, mc_mac(2), NH_ICMP6, 16, LL_HI, n.iid, MC_HI, 2, 255);
+  return net_send(&mut n, 70);
+}
+
+/// Sends the IPv4 frame being built (flen bytes, to token dst) as IPv6:
+/// to the peer's MAC if known; to the router's for a peer off the link;
+/// otherwise it is held and a neighbor solicitation sent (v6_na sends it
+/// when the answer comes). False if it could not go.
+fn v6_out(n: &mut Net, flen: u64) -> bool
+  requires net_ok(n) && flen <= FRAME_MAX
+  ensures net_ok(n)
+{
+  if flen < 34 {
+    return false;
+  }
+  let total = be16(n.out, 16);
+  let nh = cast[u64](bget(n.out, 23));
+  let dst = be32(n.out, 30);
+  if total < 28 || 14 + total > flen || !is_v6tok(dst) || l4_csum_at(nh) == 0 || nh == NH_ICMP6 {
+    return false;
+  }
+  let plen = total - 20;
+  if 54 + plen > FRAME_MAX {
+    return false;                     // no room for the longer header
+  }
+  let i = dst - V6_BASE;
+  let dhi = get(n.v6, i * V6W);
+  let dlo = get(n.v6, i * V6W + 1);
+  let mut mac = get(n.v6, i * V6W + 2);
+  if mac == 0 || mac >= MAC_LIMIT {
+    if v6_onlink(n, dhi) {
+      bcopy(&mut n.held, 0, n.out, 0, flen);
+      n.held_len = flen;
+      n.held_hop = dst;
+      return ns_send(&mut n, dhi, dlo);
+    }
+    mac = n.rtr_mac;
+    if mac == 0 || mac >= MAC_LIMIT {
+      return false;                   // no router to send it through
+    }
+  }
+  // Move the transport header and data up by 20 bytes, from the end.
+  let mut k = plen;
+  while k > 0
+    invariant k <= plen && 54 + plen <= FRAME_MAX && net_ok(n)
+  {
+    bset(&mut n.out, 53 + k, bget(n.out, 33 + k));
+    k = k - 1;
+  }
+  v6_header(&mut n, mac, nh, plen, v6_src_hi(n, dhi), n.iid, dhi, dlo, 64);
+  return net_send(&mut n, 54 + plen);
+}
+
+// ---------------------------------------------------------------- receiving
+
+/// The sum over the received IPv6 packet's pseudo-header and its plen
+/// bytes at 54: 65535 when the transport checksum is right.
+fn v6_sum_in(b: &Bytes, nh: u64, plen: u64) -> u64
+  requires 54 + plen <= blen(b) && nh <= 255 && plen <= 65535
+  ensures result <= 65535
+{
+  let mut s = csum_sum16(b, 22, 32, 0);
+  s = csum_add(s, plen);
+  s = csum_add(s, nh);
+  return csum_sum16(b, 54, plen, s);
+}
+
+/// An IPv6 frame (flen bytes): ICMPv6 for us is answered here; UDP and TCP
+/// for one of our addresses go to ip_in as IPv4 from the sender's token.
+fn v6_in(n: &mut Net, flen: u64)
+  requires net_ok(n) && flen <= RX_BUF
+  ensures net_ok(n)
+{
+  if flen < 54 || bget(n.pkt, 14) / 16 != 6 {
+    return;
+  }
+  let plen = be16(n.pkt, 18);
+  if 54 + plen > flen || 54 + plen > FRAME_MAX {
+    return;
+  }
+  let nh = cast[u64](bget(n.pkt, 20));
+  let shi = be64(n.pkt, 22);
+  let slo = be64(n.pkt, 30);
+  let dhi = be64(n.pkt, 38);
+  let dlo = be64(n.pkt, 46);
+  let smac = be48(n.pkt, 6);
+  let mine = v6_mine(n, dhi, dlo);
+  let group = dhi == MC_HI && (dlo == 1 || dlo == SNM_LO + n.iid % TWO24);
+  if !mine && !group {
+    return;
+  }
+  if nh == NH_ICMP6 {
+    if plen >= 4 && v6_sum_in(n.pkt, nh, plen) == 65535 {
+      icmp6_in(&mut n, plen, shi, slo, smac);
+    }
+    return;
+  }
+  if !mine || (nh != NH_UDP && nh != NH_TCP) || shi / TWO48 == 0xFF02 || shi == 0 {
+    return;
+  }
+  if (nh == NH_UDP && (plen < 8 || be16(n.pkt, 60) == 0)) || (nh == NH_TCP && plen < 20) {
+    return;                           // IPv6 requires the UDP checksum
+  }
+  if v6_sum_in(n.pkt, nh, plen) != 65535 || n.ip == 0 || n.ip > IP_MAX {
+    return;
+  }
+  let tok = v6_token(&mut n, shi, slo, smac);
+  // Rewrite it as the IPv4 packet it stands for, and take that in.
+  let mut k = 0;
+  while k < plen
+    invariant k <= plen && 54 + plen <= FRAME_MAX && net_ok(n)
+  {
+    bset(&mut n.pkt, 34 + k, bget(n.pkt, 54 + k));
+    k = k + 1;
+  }
+  put16(&mut n.pkt, 12, ETH_IP);
+  bset(&mut n.pkt, 14, 0x45);
+  bset(&mut n.pkt, 15, 0);
+  put16(&mut n.pkt, 16, plen + 20);
+  put32(&mut n.pkt, 18, 0);
+  bset(&mut n.pkt, 22, 64);
+  bset(&mut n.pkt, 23, cast[u8](nh));
+  put16(&mut n.pkt, 24, 0);
+  put32(&mut n.pkt, 26, tok);
+  put32(&mut n.pkt, 30, n.ip);
+  put16(&mut n.pkt, 24, csum(n.pkt, 14, 20));
+  let at = 34 + l4_csum_at(nh);
+  put16(&mut n.pkt, at, 0);
+  let mut c = 65535 - l4_sum(n.pkt, tok, n.ip, nh, plen);
+  if c == 0 && nh == NH_UDP {
+    c = 65535;
+  }
+  put16(&mut n.pkt, at, c);
+  ip_in(&mut n, 34 + plen);
+}
+
+/// An ICMPv6 message (checked) of plen bytes at 54, from shi:slo at MAC
+/// smac.
+fn icmp6_in(n: &mut Net, plen: u64, shi: u64, slo: u64, smac: u64)
+  requires net_ok(n) && 4 <= plen && 54 + plen <= FRAME_MAX && smac < MAC_LIMIT
+  ensures net_ok(n)
+{
+  let kind = cast[u64](bget(n.pkt, 54));
+  let hops = cast[u64](bget(n.pkt, 21));
+  if kind == ICMP6_ECHO && plen >= 8 && v6_mine(n, be64(n.pkt, 38), be64(n.pkt, 46)) {
+    net_copy(&mut n, 54 + plen);
+    bset(&mut n.out, 54, cast[u8](ICMP6_ECHO_REPLY));
+    v6_header(&mut n, smac, NH_ICMP6, plen, be64(n.pkt, 38), n.iid, shi, slo, 64);
+    net_send(&mut n, 54 + plen);
+  } else if kind == ICMP6_NS && plen >= 24 && hops == 255 {
+    let thi = be64(n.pkt, 62);
+    let tlo = be64(n.pkt, 70);
+    if v6_mine(n, thi, tlo) && shi != 0 {
+      if v6_onlink(n, shi) {
+        v6_token(&mut n, shi, slo, smac);   // it will want an answer back
+      }
+      na_send(&mut n, smac, shi, slo, thi, tlo);
+    }
+  } else if kind == ICMP6_NA && plen >= 24 && hops == 255 {
+    let thi = be64(n.pkt, 62);
+    let tlo = be64(n.pkt, 70);
+    let i = v6_find(n, thi, tlo);
+    if i < V6N {
+      v6_token(&mut n, thi, tlo, smac);
+      let tok = V6_BASE + i;
+      if n.held_len >= 34 && n.held_hop == tok {
+        let l = n.held_len;
+        bcopy(&mut n.out, 0, n.held, 0, l);
+        n.held_len = 0;
+        v6_out(&mut n, l);
+      }
+    }
+  } else if kind == ICMP6_RA && plen >= 16 && hops == 255 && shi == LL_HI {
+    ra_in(&mut n, plen, smac);
+  }
+}
+
+/// A neighbor advertisement for our address thi:tlo, solicited by dhi:dlo.
+fn na_send(n: &mut Net, mac: u64, dhi: u64, dlo: u64, thi: u64, tlo: u64)
+  requires net_ok(n) && mac < MAC_LIMIT
+  ensures net_ok(n)
+{
+  bset(&mut n.out, 54, cast[u8](ICMP6_NA));
+  bset(&mut n.out, 55, 0);
+  put32(&mut n.out, 56, 0);
+  put32(&mut n.out, 58, 0x60000000);  // solicited, override
+  put64(&mut n.out, 62, thi);
+  put64(&mut n.out, 70, tlo);
+  bset(&mut n.out, 78, 2);            // option: our link-layer address
+  bset(&mut n.out, 79, 1);
+  put48(&mut n.out, 80, card_mac(n.dev));
+  v6_header(&mut n, mac, NH_ICMP6, 32, thi, tlo, dhi, dlo, 255);
+  net_send(&mut n, 86);
+}
+
+/// A router advertisement (plen bytes at 54) from MAC smac: the router is
+/// where frames off the link go, and a prefix information option of
+/// length 64 with the autonomous flag gives our global address.
+fn ra_in(n: &mut Net, plen: u64, smac: u64)
+  requires net_ok(n) && 16 <= plen && 54 + plen <= FRAME_MAX && smac < MAC_LIMIT
+  ensures net_ok(n)
+{
+  if be16(n.pkt, 60) != 0 {
+    n.rtr_mac = smac;                 // a router lifetime: a default router
+  }
+  let end = 54 + plen;
+  let mut o = 70;
+  while o + 8 <= end
+    invariant 70 <= o && o <= end && end <= FRAME_MAX && net_ok(n)
+  {
+    let kind = cast[u64](bget(n.pkt, o));
+    let l = 8 * cast[u64](bget(n.pkt, o + 1));
+    if l == 0 || o + l > end {
+      return;
+    }
+    if kind == 3 && l == 32 && cast[u64](bget(n.pkt, o + 2)) == 64 && (cast[u64](bget(n.pkt, o + 3)) / 64) % 2 == 1 {
+      let p = be64(n.pkt, o + 16);
+      if p / TWO48 / 64 != 0xFE80 / 64 && p / TWO48 / 256 != 0xFF {
+        n.pfx = p;
+      }
+    }
+    o = o + l;
+  }
+}
+
+/// The timer side: router solicitations until a router answers.
+fn v6_tick(n: &mut Net, now: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  if n.pfx != 0 || n.rs_n >= RS_TRIES || now < n.rs_until || !card_live(n.dev) {
+    return;
+  }
+  n.rs_n = n.rs_n + 1;
+  n.rs_until = now;
+  if now <= 18446744073709551615 - RS_WAIT {
+    n.rs_until = now + RS_WAIT;
+  }
+  rs_send(&mut n);
+}
+
+// ---------------------------------------------------------------- for sockets
+
+/// The token standing for IPv6 address hi:lo: our own addresses are our
+/// IPv4 address, others get a slot. NO_SOCK if there is no network.
+fn nic_v6_token(c: &mut Nic, hi: u64, lo: u64) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c) && (result == NO_SOCK || result <= IP_MAX)
+{
+  let mut r = NO_SOCK;
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if v6_mine(n, hi, lo) {
+        if n.ip <= IP_MAX {
+          r = n.ip;
+        }
+      } else {
+        r = v6_token(&mut n, hi, lo, 0);
+      }
+      c = Nic::Up(n);
+    },
+  }
+  return r;
+}
+
+/// Half `half` (0 high, 1 low) of the IPv6 address token `ip` stands for,
+/// or of our own address when `ip` is our IPv4 address and `half` is 2 or
+/// 3 (global if we have one, else link-local). 0 if none.
+fn nic_v6_addr(c: &Nic, ip: u64, half: u64) -> u64
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if half >= 2 {
+        if half == 2 {
+          return v6_src_hi(n, 0);
+        }
+        return n.iid;
+      }
+      if !is_v6tok(ip) {
+        return 0;
+      }
+      return get(n.v6, (ip - V6_BASE) * V6W + half % 2);
+    },
+  }
+}

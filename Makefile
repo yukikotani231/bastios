@@ -277,6 +277,8 @@ test: build/bastios.elf
 	test/tcp_test.sh
 	NIC=e1000 test/tcp_test.sh
 	NIC=igb test/tcp_test.sh
+	MUSLCC=$(MUSLCC) test/ipv6_test.sh
+	NIC=e1000 MUSLCC=$(MUSLCC) test/ipv6_test.sh
 	test/iso_test.sh
 	test/nmi_test.sh
 	test/fuzz_test.sh 1 2 2000

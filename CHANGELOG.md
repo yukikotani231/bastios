@@ -359,6 +359,15 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - `/dev/urandom` and `getrandom` come from ChaCha20 over an entropy pool
   fed by the time-stamp counter, instead of splitmix64 over a boot-time
   seed. BusyBox's `wget` fetches over HTTPS with its own TLS.
+- IPv6 (`src/net6.bastio`): a link-local address and one from the prefix a
+  router advertises (EUI-64 interface ids), neighbor discovery, echo
+  replies, and UDP and TCP to IPv6 peers through `AF_INET6` sockets. The
+  packets are translated to and from the IPv4 stack, with each peer stood
+  in for by an address in 240.0.0.0/8, so the UDP and TCP code is shared.
+  No extension headers, fragments, duplicate address detection or path MTU
+  discovery; 16 peers at a time. `test/ipv6_test.sh` (in `make test`)
+  plays a router and hosts on the card's wire, as QEMU's user network needs
+  IPv6 on the host. The e1000 now takes all multicast frames.
 
 ### Console and boot
 
