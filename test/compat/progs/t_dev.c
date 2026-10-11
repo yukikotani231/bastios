@@ -9,6 +9,7 @@
 
 #define LOOP_SET_FD 0x4C00
 #define LOOP_CLR_FD 0x4C01
+#define LOOP_GET_STATUS 0x4C03
 #define LOOP_SET_STATUS64 0x4C04
 #define LOOP_GET_STATUS64 0x4C05
 #define LOOP_CTL_GET_FREE 0x4C82
@@ -22,11 +23,37 @@ struct loop_info64 {
     uint64_t lo_init[2];
 };
 
+/* struct loop_info, x86-64 layout. */
+struct loop_info {
+    int lo_number;
+    unsigned long lo_device, lo_inode, lo_rdevice;
+    int lo_offset, lo_encrypt_type, lo_encrypt_key_size, lo_flags;
+    char lo_name[64];
+    unsigned char lo_encrypt_key[32];
+    unsigned long lo_init[2];
+    char reserved[4];
+};
+
+/* Reads /sys/block/loopN/ATTR into buf. */
+static int read_sys(int n, const char *attr, char *buf) {
+    char path[64];
+    snprintf(path, sizeof path, "/sys/block/loop%d/%s", n, attr);
+    int f = open(path, O_RDONLY);
+    if (f < 0) return 0;
+    int r = read(f, buf, 255);
+    close(f);
+    if (r <= 0) return 0;
+    buf[r] = 0;
+    return 1;
+}
+
 int main(void) {
     setup();
     char dev[32], buf[4096];
     struct stat st;
     struct loop_info64 li;
+    struct loop_info old;
+    static char big[6000];
     uint64_t size = 0;
     int n = -1, ctl = -1, fd = -1, file = -1, bs = 0;
 
@@ -53,12 +80,23 @@ int main(void) {
     memset(&li, 0, sizeof li);
     EXPECT("LOOP_GET_STATUS64", ioctl(fd, LOOP_GET_STATUS64, &li) == 0 && li.lo_offset == 4096
            && strcmp((char *)li.lo_file_name, "ld_img") == 0 && li.lo_number == (uint32_t)n);
+    EXPECT("/sys/block size in sectors", read_sys(n, "size", buf) && strcmp(buf, "120\n") == 0);
+    EXPECT("/sys/block loop/offset", read_sys(n, "loop/offset", buf) && strcmp(buf, "4096\n") == 0);
+    EXPECT("/sys/block ro", read_sys(n, "ro", buf) && strcmp(buf, "0\n") == 0);
+    EXPECT("/sys/block loop/backing_file", read_sys(n, "loop/backing_file", buf)
+           && strstr(buf, "/ld_img\n") != 0 && buf[0] == '/');
+    memset(&old, 0, sizeof old);
+    EXPECT("LOOP_GET_STATUS (old struct)", ioctl(fd, LOOP_GET_STATUS, &old) == 0 && old.lo_offset == 4096
+           && old.lo_number == n && strcmp(old.lo_name, "ld_img") == 0);
     EXPECT("write through the device", write(fd, "hello", 5) == 5);
     EXPECT("lands past the offset", pread(file, buf, 6, 4096) == 6 && memcmp(buf, "hellox", 6) == 0);
     EXPECT("lseek SEEK_END is the device size", lseek(fd, 0, SEEK_END) == 61440);
     EXPECT("write at the end is ENOSPC", write(fd, "z", 1) == -1 && errno == ENOSPC);
     EXPECT("read through the device", lseek(fd, 0, SEEK_SET) == 0 && read(fd, buf, 7) == 7
            && memcmp(buf, "helloxx", 7) == 0);
+    memset(big, 'y', sizeof big);
+    EXPECT("one write of 6000 bytes", lseek(fd, 0, SEEK_SET) == 0 && write(fd, big, sizeof big) == sizeof big
+           && pread(fd, buf, 4, 5996) == 4 && memcmp(buf, "yyyy", 4) == 0);
     EXPECT("file stays bound after close", close(file) == 0 && pread(fd, buf, 2, 0) == 2);
     EXPECT("LOOP_CLR_FD", ioctl(fd, LOOP_CLR_FD, 0) == 0);
     EXPECT("cleared twice is ENXIO", ioctl(fd, LOOP_CLR_FD, 0) == -1 && errno == ENXIO);

@@ -22,6 +22,8 @@ import "linux.bastio";
 
 const PROT_WRITE: u64 = 2;
 const MREMAP_MAYMOVE: u64 = 1;
+const MREMAP_FIXED: u64 = 2;
+const MREMAP_DONTUNMAP: u64 = 4;
 
 /// Window page p out of l2: its frame goes back to m. Nothing if p is not
 /// mapped.
@@ -74,6 +76,38 @@ fn w_protect(m: &mut Mem, l2: &mut PageTable, p: u64, writable: bool) -> bool
     let f = pt_take_frame(&mut l1, p % 512);
     pt_put_frame(&mut l1, p % 512, f, writable);
     ok = true;
+  }
+  pt_put(&mut l2, t, l1);
+  return ok;
+}
+
+/// Fills window page p with zeros if it is a private page, keeping its
+/// permission; a shared page (MAP_SHARED) keeps what it holds. False if p
+/// is not mapped.
+fn w_zero(l2: &mut PageTable, p: u64) -> bool
+  requires pt_level(l2) == 2 && p < WPAGES && pt_leases(l2) == 0
+  ensures pt_level(l2) == 2 && pt_leases(l2) == 0
+{
+  let t = p / 512;
+  if !pt_has(l2, t) {
+    return false;
+  }
+  let mut l1 = pt_take(&mut l2, t);
+  let mut ok = false;
+  if pt_has(l1, p % 512) {
+    ok = true;
+    if !pt_shared(l1, p % 512) {
+      let w = pt_writable(l1, p % 512);
+      let mut f = pt_take_frame(&mut l1, p % 512);
+      let mut i = 0;
+      while i < 512
+        invariant i <= 512
+      {
+        frame_write(&mut f, i, 0);
+        i = i + 1;
+      }
+      pt_put_frame(&mut l1, p % 512, f, w);
+    }
   }
   pt_put(&mut l2, t, l1);
   return ok;
@@ -164,7 +198,8 @@ fn win_quiet(k: &mut Kernel, pid: u64) -> bool
 }
 
 /// Does `op` to window pages from .. to of process pid: unmap them,
-/// protect them (arg: 1 writable), move them to arg ..., or only count them. Returns how many
+/// protect them (arg: 1 writable), move them to arg ..., zero the private
+/// ones, or only count them. Returns how many
 /// of them were mapped, or WPAGES + 1 if the process has no window, a move
 /// ran out of memory, or a processor runs the space (win_quiet says first).
 fn win_op(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, op: u64, from: u64, to: u64, arg: u64) -> u64
@@ -203,6 +238,10 @@ fn win_op(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, op: u64, from: u64, to
               w_unmap(&mut m, &mut l2, p);
             } else if op == WOP_COUNT {
               if w_has(&mut l2, p) && r < WPAGES {
+                r = r + 1;
+              }
+            } else if op == WOP_ZERO {
+              if w_zero(&mut l2, p) && r < WPAGES {
                 r = r + 1;
               }
             } else if op == WOP_PROTECT {
@@ -471,14 +510,43 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
 /// (with MREMAP_MAYMOVE) moves the pages down into free space if the
 /// mapping is the lowest, else to a hole or below the lowest mmap; the
 /// rest are fresh zero pages. Growing at the same address is not tried:
-/// without MREMAP_MAYMOVE it is -ENOMEM.
-fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u64) -> u64
+/// without MREMAP_MAYMOVE it is -ENOMEM. MREMAP_FIXED moves the pages to
+/// the address the caller chooses (remap_fixed).
+fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u64, to_addr: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
   let r = win_range(addr, oldn);
-  if r == 18446744073709551615 || newn == 0 || newn > USER_SIZE {
+  if addr % 4096 != 0 || oldn > USER_SIZE || newn == 0 || newn > USER_SIZE {
     return EINVAL;
+  }
+  let fl = flags % 0x100000000;
+  // MREMAP_MAYMOVE, MREMAP_FIXED and MREMAP_DONTUNMAP; the last two only
+  // with the first.
+  if fl > 7 || (fl > 1 && fl % 2 == 0) {
+    return EINVAL;
+  }
+  if r == 18446744073709551615 {
+    return EFAULT;                          // not all in the mappable part of the window
+  }
+  // No mapping at addr (Linux finds no VMA there): EFAULT.
+  let f0 = r / 4294967296;
+  let e0 = r % 4294967296;
+  if win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, f0, e0, 0) != e0 - f0 {
+    return EFAULT;
+  }
+  if fl / MREMAP_FIXED % 2 == 1 {
+    if to_addr % 4096 != 0 || to_addr < USER_BASE || to_addr - USER_BASE > USER_SIZE - newn
+      || oldn > USER_SIZE || addr < USER_BASE || addr - USER_BASE > USER_SIZE - oldn {
+      return EINVAL;                        // unaligned, or outside the user space
+    }
+    if to_addr < addr + oldn && addr < to_addr + newn {
+      return EINVAL;                        // over the old pages
+    }
+    return remap_fixed(&mut k, pid, r, newn, to_addr);
+  }
+  if fl / MREMAP_DONTUNMAP % 2 == 1 {
+    return EINVAL;                          // not supported
   }
   let from = r / 4294967296;
   let oend = r % 4294967296;
@@ -553,6 +621,45 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
     hole_add(&mut k, pid, from, oend);      // where the pages were
   }
   return USER_BASE + at * 4096;
+}
+
+/// mremap with MREMAP_FIXED: the pages of window range r (as win_range
+/// gives it) move to to_addr, unmapping what was there; past the old
+/// size, the rest are fresh zero pages. to_addr .. to_addr + newn is in
+/// the user space and does not overlap the old range.
+fn remap_fixed(k: &mut Kernel, pid: u64, r: u64, newn: u64, to_addr: u64) -> u64
+  requires kok(k) && pid < NPROC && to_addr >= USER_BASE && newn <= USER_SIZE && to_addr - USER_BASE <= USER_SIZE - newn
+  ensures kok(k)
+{
+  let from = r / 4294967296;
+  let oend = r % 4294967296;
+  if oend < from || oend > WPAGES {
+    return EINVAL;
+  }
+  let have = oend - from;
+  let want = (newn + 4095) / 4096;
+  let at = (to_addr - USER_BASE) / 4096;
+  if at + want > WPAGES {
+    return ENOMEM;
+  }
+  map_forget(&mut k, pid, at, at + want, false);
+  win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at, at + want, 0);
+  let mut keep = have;
+  if want < have {
+    keep = want;
+    map_forget(&mut k, pid, from + want, oend, false);
+    win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, from + want, oend, 0);
+  } else if want > have {
+    if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at + have, at + want, false) {
+      win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at + have, at + want, 0);
+      return ENOMEM;
+    }
+  }
+  map_forget(&mut k, pid, from, from + keep, false);
+  if win_op(&mut k.mem, &mut k.spaces, pid, WOP_MOVE, from, from + keep, at) > WPAGES {
+    return ENOMEM;
+  }
+  return to_addr;
 }
 
 // ------------------------------------------------- shared file mappings
@@ -817,6 +924,105 @@ fn lx_mincore(k: &mut Kernel, pid: u64, addr: u64, n: u64, vec: u64) -> u64
       return EFAULT;
     }
     done = done + m;
+  }
+  return 0;
+}
+
+const MADV_DONTNEED: u64 = 4;
+const MADV_FREE: u64 = 8;
+const MADV_REMOVE: u64 = 9;
+const MADV_WIPEONFORK: u64 = 18;
+const MADV_KEEPONFORK: u64 = 19;
+
+/// Whether window page p of process pid belongs to a MAP_SHARED file
+/// mapping (a record of k.maps).
+fn map_covers(k: &Kernel, pid: u64, p: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let mut i = 0;
+  while i < MAP_N
+    invariant i <= MAP_N
+  {
+    let first1 = get(k.maps, mp_at(pid, i, 0));
+    if first1 != 0 && first1 - 1 <= p && p - (first1 - 1) < get(k.maps, mp_at(pid, i, 1)) {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+/// madvise(addr, n, advice). Every page stays in memory, so most advice
+/// changes nothing. MADV_DONTNEED drops what the private pages hold: they
+/// read as zeros afterwards, as fresh anonymous pages do on Linux. (A
+/// private file mapping reads zeros too, where Linux reads the file
+/// again.) -EINVAL for a misaligned addr, advice there is not, or advice
+/// that needs what this kernel lacks (KSM, huge pages, memory-failure
+/// handling, hole punching for MADV_REMOVE, MADV_WIPEONFORK), and for
+/// MADV_FREE on a shared mapping. -ENOMEM if a page in the range is not
+/// mapped.
+fn lx_madvise(k: &mut Kernel, pid: u64, addr: u64, n: u64, advice: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if addr % 4096 != 0 || n >= 0x8000000000000000 {
+    return EINVAL;
+  }
+  // NORMAL, RANDOM, SEQUENTIAL, WILLNEED, DONTNEED; FREE, REMOVE,
+  // DONTFORK, DOFORK; DONTDUMP, DODUMP, WIPEONFORK, KEEPONFORK, COLD,
+  // PAGEOUT, POPULATE_READ, POPULATE_WRITE.
+  if advice > 23 || (advice > 4 && advice < 8) || (advice > 11 && advice < 16) {
+    return EINVAL;
+  }
+  if n == 0 {
+    return 0;
+  }
+  if addr < USER_BASE || n > USER_SIZE || addr - USER_BASE > USER_SIZE - n {
+    return ENOMEM;
+  }
+  let from = (addr - USER_BASE) / 4096;
+  let to = smaller((addr - USER_BASE + n + 4095) / 4096, WPAGES);
+  if from > to || win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, from, to, 0) != to - from {
+    return ENOMEM;
+  }
+  if advice == MADV_REMOVE || advice == MADV_WIPEONFORK {
+    return EINVAL;                          // not supported: no hole punching; a child would see the pages
+  }
+  if advice == MADV_FREE || advice == MADV_KEEPONFORK {
+    // Only for private anonymous memory: Linux checks the first mapping
+    // in the range.
+    if map_covers(k, pid, from) || user_shared_page(&mut k.spaces, pid, USER_BASE + from * 4096) != NO_RESULT {
+      return EINVAL;
+    }
+  }
+  if advice == MADV_DONTNEED {
+    let mut p = from;
+    while p < to
+      invariant from <= p && p <= to && to <= WPAGES && kok(k)
+    {
+      if !map_covers(k, pid, p) {
+        win_op(&mut k.mem, &mut k.spaces, pid, WOP_ZERO, p, p + 1, 0);
+      }
+      p = p + 1;
+    }
+  }
+  return 0;
+}
+
+/// mlock and munlock (which change nothing, as every page stays in
+/// memory): ENOMEM when part of the range, rounded out to pages, is not
+/// mapped.
+fn lock_range(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if addr < USER_BASE || n > USER_SIZE || addr - USER_BASE > USER_SIZE - n {
+    return ENOMEM;
+  }
+  let from = (addr - USER_BASE) / 4096;
+  let to = smaller((addr - USER_BASE + n + 4095) / 4096, WPAGES);
+  if from > to || win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, from, to, 0) != to - from {
+    return ENOMEM;
   }
   return 0;
 }

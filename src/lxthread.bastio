@@ -42,6 +42,10 @@ const CLONE_SETTLS: u64 = 0x80000;
 const CLONE_PARENT_SETTID: u64 = 0x100000;
 const CLONE_CHILD_CLEARTID: u64 = 0x200000;
 const CLONE_CHILD_SETTID: u64 = 0x1000000;
+const CLONE_PARENT: u64 = 0x8000;
+const CLONE_SYSVSEM: u64 = 0x40000;
+const CLONE_DETACHED: u64 = 0x400000;
+const CLONE_IO: u64 = 0x80000000;
 
 const SIGACT_ROW: u64 = 256;         // SIGACT_LEN / NPROC
 
@@ -190,6 +194,7 @@ fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
     Space::Mapped(t) => { restore_space(&mut k.mem, &mut k.spaces, mmu, p, Space::Mapped(t)); },
   }
   pset(&mut k.procs, p, F_BRK, pget(k.procs, h, F_BRK));
+  pset(&mut k.procs, p, F_BRK0, pget(k.procs, h, F_BRK0));
   pset(&mut k.procs, p, F_MMAP, pget(k.procs, h, F_MMAP));
   pset(&mut k.procs, p, F_PROG, pget(k.procs, h, F_PROG));
   swap_words(&mut k.lxfd, h * LXNFD, p * LXNFD, LXNFD);
@@ -238,6 +243,7 @@ fn thread_free(k: &mut Kernel, mmu: &Mmu, q: u64, g: u64)
     }
     c = c + 1;
   }
+  pr_clear(&mut k, q);
   pset(&mut k.procs, q, F_TGID, 0);
   pset(&mut k.procs, q, F_CTID, 0);
   pset(&mut k.procs, q, F_FUTEX, 0);
@@ -374,6 +380,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   pset(&mut k.procs, c, F_CODE, 0);
   pset(&mut k.procs, c, F_TICKS, 0);
   pset(&mut k.procs, c, F_PARENT, 0);       // threads are nobody's children
+  pr_fork(&mut k, pid, c);
   pset(&mut k.procs, c, F_ALTSIZE, 0);      // nor have an alternate signal stack
   pset(&mut k.procs, c, F_VTIMER, 0);       // the CPU-time timers belong to the leader
   pset(&mut k.procs, c, F_PTIMER, 0);
@@ -406,6 +413,91 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   return c;
 }
 
+/// The clone flags a new process (not a thread, not a vfork) may carry:
+/// the exit signal, CLONE_PARENT, the tid and TLS flags, and the ones
+/// that change nothing here (CLONE_SYSVSEM, CLONE_DETACHED, CLONE_IO).
+/// Sharing files, the cwd, signal handlers or memory with a separate
+/// process, and the namespaces, are not supported.
+fn clone_proc_flags(flags: u64) -> bool {
+  let known = 0xff + CLONE_PARENT + CLONE_SYSVSEM + CLONE_SETTLS + CLONE_PARENT_SETTID
+    + CLONE_CHILD_CLEARTID + CLONE_DETACHED + CLONE_CHILD_SETTID + CLONE_IO;
+  return flags & known == flags;
+}
+
+/// clone(flags, stack, ptid, ctid, tls) that makes a new process: fork,
+/// then the child starts on `stack` (if not 0) with the flags' extras.
+/// With CLONE_PARENT the child is its parent's sibling. Returns the
+/// child's pid, or -errno.
+fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k)
+{
+  let mut par = pid;
+  if flags & CLONE_PARENT != 0 {
+    par = pget(k.procs, tgid(k.procs, pid), F_PARENT);
+    if par == 0 || par >= NPROC {
+      return EINVAL;                        // init has no parent to share
+    }
+  }
+  let c = lx_fork(&mut k, mmu, pid);
+  if c == 0 || c >= NPROC {
+    return c;
+  }
+  pset(&mut k.procs, c, F_PARENT, par);
+  if stack != 0 {
+    pset(&mut k.procs, c, F_REGS + R_RSP, stack);
+  }
+  if flags & CLONE_SETTLS != 0 {
+    pset(&mut k.procs, c, F_REGS + R_FSBASE, tls);
+  }
+  if flags & CLONE_CHILD_CLEARTID != 0 {
+    pset(&mut k.procs, c, F_CTID, ctid);
+  }
+  // The child has its own copy of the space now: CLONE_PARENT_SETTID
+  // writes into both, CLONE_CHILD_SETTID into the child's.
+  if flags & CLONE_PARENT_SETTID != 0 {
+    let a = put_user_u32(&mut k, pid, ptid, c);
+    let b = put_user_u32(&mut k, c, ptid, c);
+  }
+  if flags & CLONE_CHILD_SETTID != 0 {
+    let d = put_user_u32(&mut k, c, ctid, c);
+  }
+  return c;
+}
+
+const CLONE_FS: u64 = 0x200;
+const CLONE_FILES: u64 = 0x400;
+const CLONE_NEWUSER: u64 = 0x10000000;
+// CLONE_NEWNS, NEWCGROUP, NEWUTS, NEWIPC, NEWUSER, NEWPID, NEWNET and
+// NEWTIME: the namespaces.
+const CLONE_NEWALL: u64 = 0x7e020080;
+
+/// unshare(flags). A process (not a thread group) shares nothing with
+/// another one here, so unsharing its files, cwd, memory, signal handlers
+/// or semaphore undo list changes nothing. Namespaces are not supported:
+/// EINVAL, as on a Linux built without them, or EPERM for one that only
+/// root may make.
+fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  let share = CLONE_VM + CLONE_FS + CLONE_FILES + CLONE_SIGHAND + CLONE_THREAD + CLONE_SYSVSEM;
+  if flags & (share + CLONE_NEWALL) != flags {
+    return EINVAL;
+  }
+  let ns = flags & CLONE_NEWALL;
+  if ns != 0 {
+    if ns & CLONE_NEWUSER != ns && !cap_has(k, pid, CAP_SYS_ADMIN) {
+      return EPERM;
+    }
+    return EINVAL;
+  }
+  if flags != 0 && pget(k.procs, pid, F_TGID) != 0 {
+    return EINVAL;                          // threads that share them: not supported
+  }
+  return 0;
+}
+
 /// exit(code) from thread pid of a group, not its leader: clears and
 /// wakes its clear_child_tid word (how pthread_join learns of it), hands
 /// the shared state back to the leader and frees the row.
@@ -414,6 +506,7 @@ fn lx_thread_exit(k: &mut Kernel, mmu: &Mmu, pid: u64)
   ensures kok(k)
 {
   let g = tgid(k.procs, pid);
+  robust_exit(&mut k, pid);
   let ct = pget(k.procs, pid, F_CTID);
   if ct != 0 && put_user_u32(&mut k, pid, ct, 0) {
     let n = futex_wake(&mut k, pid, ct, 1);
@@ -712,4 +805,126 @@ fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) ->
     pset(&mut k.procs, pid, F_STATE, FUTEXWAIT);
   }
   return r;
+}
+
+// ---------------------------------------------------------------- robust futexes
+
+const ROBUST_HEAD: u64 = 24;               // sizeof(struct robust_list_head)
+const ROBUST_LIMIT: u64 = 2048;            // entries walked at most, as Linux
+const FUTEX_WAITERS: u64 = 0x80000000;
+const FUTEX_OWNER_DIED: u64 = 0x40000000;
+const FUTEX_TID_MASK: u64 = 0x3FFFFFFF;
+
+/// set_robust_list(head, len): thread pid's list of held robust futexes,
+/// which its exit walks (robust_exit). len must be the head's size.
+fn lx_set_robust_list(k: &mut Kernel, pid: u64, head: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if n != ROBUST_HEAD {
+    return EINVAL;
+  }
+  k.sys = set(k.sys, SYS_RB + pid, head);
+  return 0;
+}
+
+/// get_robust_list(target, head_ptr, len_ptr): target 0 is the caller.
+fn lx_get_robust_list(k: &mut Kernel, pid: u64, target: u64, hp: u64, lp: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  let mut t = pid;
+  if target != 0 {
+    t = target % 0x100000000;
+  }
+  if t >= NPROC || t == 0 || state(k.procs, t) == FREE {
+    return ESRCH;
+  }
+  if !may_signal(k, pid, t, 0) {
+    return EPERM;
+  }
+  xfer_u64(&mut k.fs.xfer, 0, get(k.sys, SYS_RB + t));
+  if copy_to_user(&mut k.spaces, pid, hp, k.fs.xfer, 8) != 8 {
+    return EFAULT;
+  }
+  xfer_u64(&mut k.fs.xfer, 0, ROBUST_HEAD);
+  if copy_to_user(&mut k.spaces, pid, lp, k.fs.xfer, 8) != 8 {
+    return EFAULT;
+  }
+  return 0;
+}
+
+/// a + off, off a signed 64-bit offset; ok false if it wraps.
+fn add_signed(a: u64, off: u64) -> Word {
+  if off >= 0x8000000000000000 {
+    let neg = 0xFFFFFFFFFFFFFFFF - off + 1;
+    if a < neg {
+      return Word { ok: false, v: 0 };
+    }
+    return Word { ok: true, v: a - neg };
+  }
+  if a > 0xFFFFFFFFFFFFFFFF - off {
+    return Word { ok: false, v: 0 };
+  }
+  return Word { ok: true, v: a + off };
+}
+
+/// One robust futex word at uaddr, held by the dying thread pid: it gets
+/// FUTEX_OWNER_DIED (keeping FUTEX_WAITERS), and one waiter wakes.
+fn robust_one(k: &mut Kernel, pid: u64, uaddr: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let w = user_u32(&mut k, pid, uaddr);
+  if !w.ok || w.v & FUTEX_TID_MASK != pid {
+    return;
+  }
+  if put_user_u32(&mut k, pid, uaddr, (w.v & FUTEX_WAITERS) | FUTEX_OWNER_DIED) && w.v & FUTEX_WAITERS != 0 {
+    let n = futex_wake(&mut k, pid, uaddr, 1);
+  }
+}
+
+/// Thread pid is ending: walks its robust list, as Linux does, so that
+/// the next owner of each futex it held sees FUTEX_OWNER_DIED.
+fn robust_exit(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let head = get(k.sys, SYS_RB + pid);
+  k.sys = set(k.sys, SYS_RB + pid, 0);
+  if head == 0 || head > 0xFFFFFFFFFFFFFF00 {
+    return;
+  }
+  let first = user_u64(&mut k.spaces, pid, head);
+  let off = user_u64(&mut k.spaces, pid, head + 8);
+  let pending = user_u64(&mut k.spaces, pid, head + 16);
+  if !first.ok || !off.ok || !pending.ok {
+    return;
+  }
+  let pend = pending.v / 2 * 2;             // bit 0 marks a PI futex
+  let mut e = first.v / 2 * 2;
+  let mut i = 0;
+  while e != head && i < ROBUST_LIMIT
+    invariant i <= ROBUST_LIMIT && kok(k)
+  {
+    let next = user_u64(&mut k.spaces, pid, e);
+    if e != pend {
+      let a = add_signed(e, off.v);
+      if a.ok {
+        robust_one(&mut k, pid, a.v);
+      }
+    }
+    if !next.ok {
+      i = ROBUST_LIMIT;
+    } else {
+      e = next.v / 2 * 2;
+      i = i + 1;
+    }
+  }
+  if pend != 0 {
+    let a = add_signed(pend, off.v);
+    if a.ok {
+      robust_one(&mut k, pid, a.v);
+    }
+  }
 }
