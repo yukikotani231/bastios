@@ -615,7 +615,12 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, mode: u6
       return ELOOP;
     }
   }
-  let mut n = lx_path_at(&mut k, pid, dirfd, path);
+  let mut n = NO_RESULT;
+  if flags & LO_PATH != 0 && flags & LO_NOFOLLOW != 0 {
+    n = lx_path_at_nf(&mut k, pid, dirfd, path);   // a handle on a symbolic link itself, for readlinkat and fstat
+  } else {
+    n = lx_path_at(&mut k, pid, dirfd, path);
+  }
   if n == NO_RESULT {
     return k.perr;
   }

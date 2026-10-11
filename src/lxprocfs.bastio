@@ -1058,6 +1058,17 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if dirfd % 0x100000000 != AT_FDCWD && user_empty(&mut k, pid, path) {
+    // readlinkat(fd, "") on an O_PATH | O_NOFOLLOW handle on a link
+    // reads that link, as on Linux; on anything else "" names nothing.
+    let d = fd_look(k, pid, dirfd);
+    if d.kind == K_FILE {
+      let f = vfs_row_file(k.fs, d.x);
+      if f != NO_FILE && vfs_is_link(&mut k.fs, f) {
+        return link_out(&mut k, pid, f, va, size);
+      }
+    }
+  }
   let n = lx_path_at_nf(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return k.perr;

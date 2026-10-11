@@ -436,6 +436,19 @@ fn lx_fchdir(k: &mut Kernel, pid: u64, fd: u64) -> u64
     }
     return ENOTDIR;
   }
+  // Search permission on it, as chdir needs (src/lxperm.bastio).
+  let dl = base_len(k, pid, h);
+  let mut c = 0;
+  while c < dl
+    invariant c <= dl && dl <= FNAME_MAX && kok(k) && pid < NPROC && h < OFD_N
+  {
+    bset(&mut k.fs.xfer, c, base_byte(k, pid, h, c));
+    c = c + 1;
+  }
+  let e = may_path(&mut k, pid, dl, MAY_X);
+  if e != 0 {
+    return e;
+  }
   let mut i = 0;
   while i < CWD_STRIDE
     invariant i <= CWD_STRIDE && kok(k) && pid < NPROC && h < OFD_N

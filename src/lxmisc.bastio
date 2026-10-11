@@ -245,9 +245,10 @@ const UTIME_NOW: u64 = 1073741823;     // tv_nsec: now
 const UTIME_OMIT: u64 = 1073741822;    // tv_nsec: leave it
 
 /// The file layer handle of the path at va (relative to dirfd), for
-/// changing its mode or times: NO_FILE if it exists but keeps none ("/",
+/// changing its mode or times: HFILES if it exists but keeps none ("/",
 /// /bin and the built-in programs), NO_RESULT (k.perr says why) if it
-/// does not exist.
+/// does not exist. (Not NO_FILE for the first: it is the same number as
+/// NO_RESULT.)
 fn meta_target(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -283,7 +284,7 @@ fn meta_target_at(k: &mut Kernel, pid: u64, dirfd: u64, va: u64, follow: bool) -
   }
   let m = path_meta(&mut k, n);
   if m.ok {
-    return NO_FILE;
+    return HFILES;
   }
   k.perr = ENOENT;
   return NO_RESULT;
@@ -336,8 +337,11 @@ fn fd_set_meta(k: &mut Kernel, pid: u64, fd: u64, mode: u64, mtime: u64) -> u64
     return EBADF;
   }
   let f = fd_handle(&mut k, pid, fd);
-  if f == NO_FILE {
+  if f == HFILES {
     return 0;                               // a pipe, socket or device: nothing kept
+  }
+  if f != NO_RESULT && handle_ro(&mut k, f) {
+    return EROFS;                           // before the owner, as on Linux
   }
   return set_meta(&mut k, pid, f, mode, mtime, false);
 }
@@ -680,7 +684,12 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   } else if n == LX_MSYNC {
     r = lx_msync(&mut k, pid, a, b, c);
   } else if n == LX_FCHOWN {
-    r = chown_handle(&mut k, pid, fd_handle(&mut k, pid, a), b, c);
+    let f = fd_handle(&mut k, pid, a);
+    if f != NO_RESULT && handle_ro(&mut k, f) {
+      r = EROFS;
+    } else {
+      r = chown_handle(&mut k, pid, f, b, c);
+    }
   } else if n == LX_FSYNC || n == LX_FDATASYNC {
     let d = fd_look(k, pid, a);
     if d.kind == K_BAD {

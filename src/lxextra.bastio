@@ -86,15 +86,24 @@ fn is_opath(k: &Kernel, pid: u64, fd: u64) -> bool
 }
 
 /// Whether call n of process pid acts on an O_PATH handle's file (its
-/// mode, owner, data, mapping, extended attributes or terminal), which
-/// Linux refuses with -EBADF: such a handle only names the file. Reads and
-/// writes find no access to use and fail on their own.
+/// mode, owner, data, mapping, extended attributes or terminal, a socket
+/// call on it, or adding it to an epoll set), which Linux refuses with
+/// -EBADF: such a handle only names the file. Reads and writes find no
+/// access to use and fail on their own.
 fn opath_denied(k: &Kernel, pid: u64, n: u64) -> bool
   requires kok(k) && pid < NPROC
 {
   let a = pget(k.procs, pid, F_REGS + R_RDI);
   if n == LX_MMAP {
     return pget(k.procs, pid, F_REGS + R_R10) & MAP_ANONYMOUS == 0 && is_opath(k, pid, pget(k.procs, pid, F_REGS + R_R8));
+  }
+  if n == LX_EPOLL_CTL {
+    return is_opath(k, pid, pget(k.procs, pid, F_REGS + R_RDX));   // the descriptor to watch
+  }
+  // connect .. getsockopt (42 .. 55, sendmsg and recvmsg among them) and
+  // accept4: the socket calls, which Linux looks up as files to use.
+  if (n >= LX_CONNECT && n <= LX_GETSOCKOPT && n != LX_SOCKETPAIR) || n == LX_ACCEPT4 {
+    return is_opath(k, pid, a);
   }
   let on_a = n == LX_FCHMOD || n == LX_FCHOWN || n == LX_IOCTL || n == LX_FTRUNCATE || n == LX_FSYNC
     || n == LX_FDATASYNC || n == LX_FALLOCATE || n == LX_FADVISE64 || n == LX_READAHEAD || n == LX_FLOCK

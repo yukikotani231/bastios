@@ -402,6 +402,14 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, r);
     return KEEP;
   }
+  if is_handle_call(n) {
+    let r = lx_handle_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));   // src/lxhandle.bastio
+    if r == SK_WAIT {
+      return lx_retry(&mut k, pid, n);      // a FIFO's writer waits for a reader
+    }
+    ret(&mut k.procs, pid, r);
+    return KEEP;
+  }
   if is_inotify_call(n) {
     return lx_inotify_call(&mut k, pid, n, a, b, c);   // src/lxinotify.bastio
   }
@@ -441,6 +449,10 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if n == LX_UNLINKAT {
       path = b;
       dirfd = a;
+    }
+    if n == LX_UNLINKAT && (c % 0x100000000) & !AT_REMOVEDIR != 0 {
+      ret(&mut k.procs, pid, EINVAL);      // before the path, as on Linux
+      return KEEP;
     }
     if n == LX_UNLINKAT && c & AT_REMOVEDIR != 0 {
       ret(&mut k.procs, pid, lx_rmdir(&mut k, pid, dirfd, path));
