@@ -372,6 +372,9 @@ fn src_named(k: &mut Kernel, pid: u64, n: u64) -> Src
       suid = 1;                             // f marks a set-user-ID-root built-in (exec_ids)
     }
     let prog = bin_prog(k.fs.xfer, n);
+    if prog >= NPROGS {
+      k.perr = ENOENT;                      // no such built-in (not the path walk's last word)
+    }
     return Src { file: false, prog: prog, f: suid, size: slen(prog_image(prog)) };
   }
   k.perr = ENOENT;

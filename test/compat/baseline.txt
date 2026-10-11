@@ -329,9 +329,9 @@ t_ipc: fcntl F_DUPFD
 t_ipc: fcntl F_GETFD sees FD_CLOEXEC
 t_ipc: fcntl F_GETFL sees O_NONBLOCK
 t_ipc: fcntl F_SETFL
+t_ipc: fstat on an open FIFO shows the file lstat shows
 t_ipc: isatty(0)
 t_ipc: mkfifo
-t_ipc: fstat on an open FIFO shows the file lstat shows
 t_ipc: pipe
 t_ipc: pipe across fork
 t_ipc: pipe holds 64 KiB, then EAGAIN
@@ -516,6 +516,7 @@ t_more: splice a pipe into a file
 t_more: splice rejects two files and a pipe offset
 t_more: statx
 t_more: utimensat
+t_more: utimensat and llistxattr act on a dangling link itself
 t_more: vfork + _exit
 t_more: vmsplice into a pipe, EAGAIN on an empty tee
 t_net: AF_INET6 TCP over ::1
@@ -583,13 +584,14 @@ t_newer: ustat for /'s device
 t_newer: waitid P_PIDFD
 t_path: O_NOFOLLOW, O_NOATIME, EISDIR, rmdir of . and mkdir over a name
 t_path: a loop of links through a long path is ELOOP
+t_path: a name ending in / or /. must be a directory
 t_path: a path in unmapped memory is EFAULT
 t_path: a set-group-ID bit at create is kept only for a member of the group
 t_path: an empty path is ENOENT, except with AT_EMPTY_PATH
 t_path: chroot keeps absolute paths, links and .. inside the new root
+t_path: execve of a missing /bin program is ENOENT
 t_path: fstat of a directory gives its mode
 t_path: mknod makes device and socket nodes; a device node opens its device
-t_path: a name ending in / or /. must be a directory
 t_path: paths are read up to PATH_MAX
 t_path: pread and pwrite take no negative offset
 t_path: sendfile checks its descriptors and offset; statx its flags
@@ -747,6 +749,7 @@ t_sysv: queue permissions follow the ids
 t_sysv: semop, SETALL, GETALL, GETPID, errors
 t_sysv: shmat, a second view, fork, IPC_RMID
 t_sysv: shmget and shmat errors
+t_thread: /proc/self/stat and status count the threads
 t_thread: 4 threads, mutex
 t_thread: condition variable
 t_thread: gettid differs in a thread
