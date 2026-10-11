@@ -535,6 +535,8 @@ t_newer: getdents into a byte
 t_newer: getdents64 at the end
 t_newer: getdents64 lists . and ..
 t_newer: lseek rewinds a directory
+t_newer: membarrier query
+t_newer: membarrier unknown command
 t_newer: pidfd_getfd takes the child's pipe end
 t_newer: pidfd_open of itself is close-on-exec
 t_newer: pidfd_open with bad flags

@@ -37,6 +37,8 @@ const LX_RSEQ: u64 = 334;
 const LX_CLONE3: u64 = 435;
 const LX_UNSHARE: u64 = 272;
 const LX_IO_SETUP: u64 = 206;          // Linux AIO: nginx tries it and does without
+const LX_MEMBARRIER: u64 = 324;
+const LX_IO_URING_SETUP: u64 = 425;    // libuv and BIND try it and do without
 const LX_OPENAT: u64 = 257;
 const LX_STAT: u64 = 4;
 const LX_LSTAT: u64 = 6;
@@ -652,9 +654,21 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   // glibc asks for these and carries on without them: restartable
   // sequences (sched_getcpu falls back to the system call), and clone3
   // (pthread_create falls back to clone, as on Linux before 5.3); nginx
-  // goes on without Linux AIO (io_setup). Refused quietly, as known gaps.
-  if n == LX_RSEQ || n == LX_CLONE3 || n == LX_IO_SETUP {
+  // goes on without Linux AIO (io_setup), and libuv and BIND without
+  // io_uring. Refused quietly, as known gaps.
+  if n == LX_RSEQ || n == LX_CLONE3 || n == LX_IO_SETUP || n == LX_IO_URING_SETUP {
     ret(&mut k.procs, pid, ENOSYS);
+    return KEEP;
+  }
+  // membarrier: MEMBARRIER_CMD_QUERY answers that no command is
+  // supported, so callers (liburcu, which BIND uses) keep to their own
+  // barriers; any other command is EINVAL, as Linux says for one it lacks.
+  if n == LX_MEMBARRIER {
+    if a == 0 && b == 0 {
+      ret(&mut k.procs, pid, 0);
+    } else {
+      ret(&mut k.procs, pid, EINVAL);
+    }
     return KEEP;
   }
   puts(&mut con, "[pid ");
