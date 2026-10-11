@@ -67,6 +67,7 @@ import "blk.bastio";
 import "diskq.bastio";
 import "core/endian.bastio";
 import "core/bitmap.bastio";
+import "core/bytes.bastio";
 
 const DSLOTS: u64 = 1024;             // directory entries, at most
 const DENT: u64 = 256;
@@ -717,16 +718,7 @@ fn dent_named(d: &DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
   if !dent_live(d, i) || cast[u64](bget(d.dir, i * DENT + E_NLEN)) != n || n > DNAME_MAX {
     return false;
   }
-  let mut k = 0;
-  while k < n
-    invariant k <= n
-  {
-    if bget(d.dir, i * DENT + E_NAME + k) != bget(name, from + k) {
-      return false;
-    }
-    k = k + 1;
-  }
-  return true;
+  return bytes_span_eq(d.dir, i * DENT + E_NAME, name, from, n);
 }
 
 /// The entry in directory p named name[from..from + n], or DSLOTS.
@@ -875,16 +867,7 @@ fn same_name(d: &DiskFs, i: u64, t: u64) -> bool
   if dent_get(d, i, E_PARENT) != dent_get(d, t, E_PARENT) || bget(d.dir, i * DENT + E_NLEN) != bget(d.dir, t * DENT + E_NLEN) {
     return false;
   }
-  let mut j = 0;
-  while j < DENT - E_NAME
-    invariant j <= DENT - E_NAME
-  {
-    if bget(d.dir, i * DENT + E_NAME + j) != bget(d.dir, t * DENT + E_NAME + j) {
-      return false;
-    }
-    j = j + 1;
-  }
-  return true;
+  return bytes_span_eq(d.dir, i * DENT + E_NAME, d.dir, t * DENT + E_NAME, DENT - E_NAME);
 }
 
 /// File entry i takes the name (parent and last component) of hard link l,

@@ -9,6 +9,7 @@ import "elf.bastio";
 import "fs.bastio";
 import "net.bastio";
 import "tcp.bastio";
+import "hda.bastio";
 
 const NPROC: u64 = 32;
 const STRIDE: u64 = 64;
@@ -386,6 +387,9 @@ const PTY_CAP: u64 = 4096;
 const PTYB_LEN: u64 = 32768;           // 2 * PTY_N * PTY_CAP
 const DEV_PTMX: u64 = 7;               // OF_DEV path /dev/ptmx (opening it makes a pair)
 const DEV_PTSDIR: u64 = 8;             // /dev/pts, a directory to stat
+const DEV_DSP: u64 = 9;                // OF_DEV device /dev/dsp, the sound card (src/lxsnd.bastio)
+const DEV_MICE: u64 = 10;               // OF_DEV device /dev/input/mice and /dev/psaux (src/lxmouse.bastio)
+const MICE_LEN: u64 = 792;              // its packets: a 24-byte header (head, count, present) and 256 packets of 3 bytes
 const DEV_PTM: u64 = 32;               // an OF_PTY master is DEV_PTM + N
 const DEV_PTS: u64 = 48;               // and its slave, /dev/pts/N, DEV_PTS + N
 const DISK_GID: u64 = 6;               // group disk (files/group): the loop devices'
@@ -408,6 +412,7 @@ const SYS_JC: u64 = 1600;              // SYS_DL + NPROC * 3; a word per process
 const SYS_TM: u64 = 1632;              // SYS_JC + NPROC; NPROC * 3 words (system and children's times, src/lxrlimit.bastio)
 const SYS_RB: u64 = 1728;              // SYS_TM + NPROC * 3; a word per thread (robust futex list head, src/lxthread.bastio)
 const SYS_CAP: u64 = 1760;             // SYS_RB + NPROC; NPROC * CAP_W words (capabilities, src/lxcap.bastio)
+const SYS_PIPEMAX: u64 = 150;          // /proc/sys/fs/pipe-max-size (0: PIPE_CAP), past the adjtimex words (src/lxsys.bastio)
 // Capabilities the kernel checks (src/lxcap.bastio).
 const CAP_SYS_TIME: u64 = 25;
 const CAP_SYS_RESOURCE: u64 = 24;
@@ -427,12 +432,15 @@ const LKC_LEASE: u64 = 3;             // a lease: the whole file, owned by a des
 const F_SETLEASE: u64 = 1024;
 const F_GETLEASE: u64 = 1025;
 const LK_WAIT: u64 = 18446744073709551000;   // not an errno: wait and run the call again
-const OFD_STRIDE: u64 = 8;
-const OFD_LEN: u64 = 8192;            // OFD_N * OFD_STRIDE
+const OFD_STRIDE: u64 = 9;
+const OFD_LEN: u64 = 9216;            // OFD_N * OFD_STRIDE
 const OF_OWNER: u64 = 4;              // who gets the I/O signal: 0, or (type + 1) * OWN_TYPE + id
 const OF_SIG: u64 = 5;                // F_SETSIG's signal (0: SIGIO)
 const OF_CRED: u64 = 6;               // the owner setter's real uid * ID_SPAN + effective uid
 const OF_ASYNC: u64 = 7;              // 1 with O_ASYNC: signal the owner when input arrives
+const OF_ACC: u64 = 8;                // the access an open did not ask for: ACC_NOWRITE, ACC_NOREAD (src/lxfd.bastio)
+const ACC_NOWRITE: u64 = 1;
+const ACC_NOREAD: u64 = 2;
 const OWN_TYPE: u64 = 4294967296;     // 2^32
 const OF_FREE: u64 = 0;
 const OF_FILE: u64 = 1;
@@ -688,17 +696,19 @@ struct Kernel {
   shm: Store,           // System V shared memory pages (src/lxipc.bastio)
   txt: Store,           // the built-in programs' read-only pages (src/text.bastio)
   sys: Buf,             // settings root may change: names, the clock discipline (src/lxsys.bastio)
+  snd: Snd,             // the sound card, if any (src/hda.bastio)
+  mice: Bytes,          // mouse packets for /dev/input/mice (src/lxmouse.bastio)
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.croot) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.croot) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
     && (k.txt is Store::Table ==> (pt_level(k.txt.Table) == 2 && pt_leases(k.txt.Table) == 0))
 }
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 28;
+const NPROGS: u64 = 30;
 const LDSO_PROG: u64 = 25;            // musl's dynamic linker, the interpreter of musl programs
 
 fn prog_name(i: u64) -> Str {
@@ -786,6 +796,12 @@ fn prog_name(i: u64) -> Str {
   if i == 27 {
     return "mkfs.bstdisk3";
   }
+  if i == 28 {
+    return "mtone";
+  }
+  if i == 29 {
+    return "mmouse";
+  }
   return "(file)";                    // a program loaded from a file
 }
 
@@ -870,6 +886,12 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 27 {
     return include_bytes("../build/user/mkfs.elf");
+  }
+  if i == 28 {
+    return include_bytes("../build/user/mtone.elf");
+  }
+  if i == 29 {
+    return include_bytes("../build/user/mmouse.elf");
   }
   return include_bytes("../build/user/fault.bin");
 }

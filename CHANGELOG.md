@@ -16,6 +16,16 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Processors
 
+- `nanosleep` and `clock_nanosleep` sleep until the next tick between
+  looks (`wait_asleep`, as `poll` and `pause` do) instead of running again
+  on every scheduler pass: BusyBox's `sleep 5` went from 5.0 s of host CPU
+  under QEMU to about 0.2 s. A sleep may now end up to a tick (10 ms) late.
+- An idle application processor stops its 10 ms timer (a one-second
+  one-shot backstop instead); the kernel wakes it with `V_WAKE` on the
+  bootstrap processor's tick while a process is left ready, which is when
+  its own tick would have found it. An idle 4-processor guest takes half the
+  host CPU under QEMU (7.3% to 3.6% of a core). The hardware report says
+  whether it applies (`idle:`); with x2APIC every timer keeps ticking.
 - The code pages a program reads when it first runs them (see below) come
   from the page cache, so every process running the program maps the same
   read-only page and the disk is read once; before, each process read and
@@ -512,6 +522,24 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - Reads of `/dev/zero`, `/dev/urandom` and the other character devices
   return up to 256 KiB at once, not 4 KiB, so `dd bs=64k` gets whole
   blocks.
+
+### Mouse
+
+- A PS/2 mouse (`src/kbd.bastio`) for Linux programs as `/dev/input/mice`
+  and `/dev/psaux` (`src/lxmouse.bastio`): 3-byte PS/2 packets, blocking
+  or `O_NONBLOCK` reads, and `poll`. The hardware report says
+  `mouse: PS/2` or `mouse: none found`. No wheel, and no USB mouse yet.
+
+### Sound
+
+- An Intel HD Audio driver (`src/hda.bastio`) and `/dev/dsp`
+  (`src/lxsnd.bastio`), the Open Sound System's playback device: 48 kHz
+  16-bit stereo through every output the first codec has wired up
+  (speakers, headphones, line out), found by walking the codec's widgets.
+  Polled on the timer tick, no interrupts; no mixer, recording or other
+  formats. Without a card `/dev/dsp` fails with `ENODEV`. Tested on QEMU's
+  `intel-hda` with `hda-output` and its WAV backend: `mtone`'s 1 kHz square
+  wave comes out whole. Real codecs (Realtek and others) are untested.
 
 ### Console and boot
 

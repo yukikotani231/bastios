@@ -4,7 +4,7 @@
  * Multiboot 1 or 2 entry in 32-bit protected mode, switch to 64-bit long mode,
  * set up the descriptor tables (platform.c), call the Bastio kernel
  * (`bst_kmain`), then power off. Also the only code that crosses between
- * user mode and the kernel: `bst_cpu_enter`, the trap stubs, `bst_cpu_wait`.
+ * user mode and the kernel: `bst_cpu_enter`, the trap stubs, `bst_cpu_halt`.
  *
  * Part of the trusted base (see README). Bastio code reaches it only through
  * the `Cpu` capability's builtins.
@@ -307,9 +307,10 @@ bst_cpu_enter:
         mov     4*8(%rsi), %rsi
         iretq
 
-/* uint64_t bst_cpu_wait(void): sleep until an interrupt; return its vector. */
-.global bst_cpu_wait
-bst_cpu_wait:
+/* uint64_t bst_cpu_halt(void): sleep until an interrupt; return its vector.
+ * The kernel's cpu_idle reaches it through bst_cpu_wait (smp.c). */
+.global bst_cpu_halt
+bst_cpu_halt:
         mov     %rsp, %rdx
         and     $-CORE_BLOCK, %rdx
         movq    $0, CORE_IDLE(%rdx)
@@ -460,7 +461,7 @@ trap_common:
         ret
 
 from_kernel:
-        /* The kernel runs with interrupts off except inside bst_cpu_wait, so
+        /* The kernel runs with interrupts off except inside bst_cpu_halt, so
          * this is either the interrupt that wakes it, or a fault: a bug in the
          * trusted base or the compiler. */
         mov     120(%rsp), %rdi
@@ -469,7 +470,7 @@ from_kernel:
         mov     %rsp, %rax
         and     $-CORE_BLOCK, %rax
         mov     %rdi, CORE_IDLE(%rax)
-        /* Return with interrupts off. bst_cpu_wait reports one vector; a
+        /* Return with interrupts off. bst_cpu_halt reports one vector; a
          * second interrupt taken between its `hlt` and `cli` would overwrite
          * it, and an 8259 interrupt lost that way is never acknowledged,
          * which blocks its line and every lower-priority one for good. */

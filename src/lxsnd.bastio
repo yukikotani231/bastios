@@ -1,0 +1,88 @@
+// /dev/dsp for Linux programs: the Open Sound System's playback device on
+// the sound card (src/hda.bastio). It plays one format, 48 kHz 16-bit
+// little-endian stereo, and the ioctls that would change it answer with
+// that format, as OSS lets a driver do. A write queues what fits and
+// returns how much that was; a write to a full queue waits for room.
+// Reading (recording) is not supported. Without a sound card, opening
+// /dev/dsp fails with ENODEV.
+
+import "linux.bastio";
+
+const AFMT_S16_LE: u64 = 0x10;
+const DSP_RATE: u64 = 48000;
+const DSP_FRAG: u64 = 4096;
+
+// OSS ioctl requests.
+const SNDCTL_DSP_RESET: u64 = 0x5000;
+const SNDCTL_DSP_SYNC: u64 = 0x5001;
+const SNDCTL_DSP_SPEED: u64 = 0xC0045002;
+const SNDCTL_DSP_STEREO: u64 = 0xC0045003;
+const SNDCTL_DSP_GETBLKSIZE: u64 = 0xC0045004;
+const SNDCTL_DSP_SETFMT: u64 = 0xC0045005;
+const SNDCTL_DSP_CHANNELS: u64 = 0xC0045006;
+const SNDCTL_DSP_GETFMTS: u64 = 0x8004500B;
+const SNDCTL_DSP_GETOSPACE: u64 = 0x8010500C;
+
+/// write(2) on /dev/dsp: queues up to n bytes (whole frames) from va.
+/// Returns the count, -EFAULT, -ENODEV, or EAGAIN when the queue is full.
+fn dsp_write(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if !snd_live(k.snd) {
+    return ENODEV;
+  }
+  if n < 4 {
+    return n;                           // less than a frame: nothing to play
+  }
+  let want = smaller(n, XFER);
+  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, want);
+  if got == NO_RESULT || got == 0 {
+    return EFAULT;
+  }
+  let put = snd_put(&mut k.snd, k.fs.xfer, got);
+  if put == 0 {
+    return EAGAIN;
+  }
+  return put;
+}
+
+/// The int an OSS "set" request answers with: the one format played.
+fn dsp_answer(req: u64) -> u64 {
+  if req == SNDCTL_DSP_SPEED {
+    return DSP_RATE;
+  }
+  if req == SNDCTL_DSP_STEREO {
+    return 1;
+  }
+  if req == SNDCTL_DSP_CHANNELS {
+    return 2;
+  }
+  if req == SNDCTL_DSP_GETBLKSIZE {
+    return DSP_FRAG;
+  }
+  return AFMT_S16_LE;                   // SETFMT and GETFMTS
+}
+
+/// ioctl(2) on /dev/dsp.
+fn dsp_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if req == SNDCTL_DSP_RESET || req == SNDCTL_DSP_SYNC {
+    return 0;                           // what is queued plays out either way
+  }
+  if req == SNDCTL_DSP_SPEED || req == SNDCTL_DSP_STEREO || req == SNDCTL_DSP_GETBLKSIZE || req == SNDCTL_DSP_SETFMT
+    || req == SNDCTL_DSP_CHANNELS || req == SNDCTL_DSP_GETFMTS {
+    xfer_u64(&mut k.fs.xfer, 0, dsp_answer(req));
+    return lx_put_out(&mut k, pid, arg, 4);
+  }
+  if req == SNDCTL_DSP_GETOSPACE {
+    // struct audio_buf_info { int fragments, fragstotal, fragsize, bytes; }
+    let free = snd_room(k.snd);
+    xfer_u64(&mut k.fs.xfer, 0, free / DSP_FRAG + (snd_size(k.snd) / DSP_FRAG) * 4294967296);
+    xfer_u64(&mut k.fs.xfer, 8, DSP_FRAG + free * 4294967296);
+    return lx_put_out(&mut k, pid, arg, 16);
+  }
+  return EINVAL;
+}

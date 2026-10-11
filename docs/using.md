@@ -166,7 +166,7 @@ What has been tested is this sequence with the mirror replaced by a copy served 
 
 ## 7. On a real PC
 
-[Getting started](getting-started.md#5-boot-from-a-usb-stick) builds a bootable ISO and a USB stick image, and lists the hardware BastiOS supports. Until now the image has used GRUB (it needs `grub-pc-bin grub-efi-amd64-bin xorriso mtools`); the first public release switches it to [Limine](https://github.com/limine-bootloader/limine), which the build fetches itself and which needs only `xorriso`. Either way `make iso` and `make usb` are the commands, and `make run-iso` / `make run-uefi` try the image in QEMU first. No real PC has booted it yet; [real-hardware.md](real-hardware.md) says how to try and what to report.
+[Getting started](getting-started.md#5-boot-from-a-usb-stick) builds a bootable ISO and a USB stick image, and lists the hardware BastiOS supports. The image boots through [Limine](https://github.com/limine-bootloader/limine), which the build fetches itself, so the only package it needs is `xorriso`. `make iso` and `make usb` build it, and `make run-iso` / `make run-uefi` try the image in QEMU first. No real PC has booted it yet; [real-hardware.md](real-hardware.md) says how to try and what to report.
 
 ## What does not work yet
 

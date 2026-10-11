@@ -588,5 +588,43 @@ int main(void) {
            int r2 = read(p, m, sizeof m);
            close(s); close(p); unlink(a.sun_path); unlink(b.sun_path);
            gok && c == 0 && w == 4 && fok && x == 4 && r2 == 4 && memcmp(m, "pong", 4) == 0; }));
+    EXPECT("pipe-max-size: root sets it, rounded up to pages; a new pipe of a user without CAP_SYS_RESOURCE starts that small", ({
+           int ok = 1;
+           if (geteuid() == 0) {
+             char was[32] = {0};
+             int r = open("/proc/sys/fs/pipe-max-size", O_RDONLY); read(r, was, sizeof was - 1); close(r);
+             int w = open("/proc/sys/fs/pipe-max-size", O_WRONLY);
+             int n = write(w, "5000\n", 5); close(w);
+             char now[32] = {0};
+             r = open("/proc/sys/fs/pipe-max-size", O_RDONLY); read(r, now, sizeof now - 1); close(r);
+             pid_t c = fork();
+             if (c == 0) {
+               setuid(65534);
+               int p[2]; pipe(p);
+               int sz = fcntl(p[1], F_GETPIPE_SZ);
+               int big = fcntl(p[1], F_SETPIPE_SZ, 65536); int e = errno;
+               _exit(sz == 8192 && big == -1 && e == EPERM ? 0 : 1);
+             }
+             int st; waitpid(c, &st, 0);
+             int p[2]; pipe(p); int rsz = fcntl(p[1], F_GETPIPE_SZ); close(p[0]); close(p[1]);
+             w = open("/proc/sys/fs/pipe-max-size", O_WRONLY); write(w, was, strlen(was)); close(w);
+             struct __user_cap_header_struct h = { _LINUX_CAPABILITY_VERSION_3, 0 };
+             struct __user_cap_data_struct d[2]; syscall(SYS_capget, &h, d);
+             int res = d[0].effective >> 24 & 1;   /* CAP_SYS_RESOURCE: root's new pipes are not limited */
+             ok = n == 5 && strcmp(now, "8192\n") == 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0 && rsz == (res ? 65536 : 8192);
+           }
+           ok; }));
+    EXPECT("mprotect: a shared mapping of /dev/zero opened read-only cannot become writable (EACCES)", ({
+           int z = open("/dev/zero", O_RDONLY);
+           void *m = mmap(0, 4096, PROT_READ, MAP_SHARED, z, 0);
+           int r = mprotect(m, 4096, PROT_WRITE); int e = errno;
+           void *w = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, z, 0); int we = errno;
+           int r2 = mprotect(m, 4096, PROT_READ);
+           munmap(m, 4096); close(z);
+           m != MAP_FAILED && r == -1 && e == EACCES && w == MAP_FAILED && we == EACCES && r2 == 0; }));
+    EXPECT("clock_getres: the coarse clocks report their tick, at least 1 ms", ({
+           struct timespec a, b;
+           int x = clock_getres(CLOCK_REALTIME_COARSE, &a), y = clock_getres(CLOCK_MONOTONIC_COARSE, &b);
+           x == 0 && y == 0 && a.tv_nsec >= 1000000 && b.tv_nsec >= 1000000; }));
     return done();
 }
