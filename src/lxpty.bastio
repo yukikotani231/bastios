@@ -526,7 +526,7 @@ fn pty_read(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
     return EAGAIN;
   }
   ring_out(&mut k.fs.xfer, 0, k.ptyb, pty_base(p, master), PTY_CAP, r.h, want);
-  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
+  let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, want);
   if put == NO_RESULT || put == 0 || put > r.n {
     return EFAULT;
   }
@@ -557,7 +557,7 @@ fn pty_write(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
   if n == 0 {
     return 0;
   }
-  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, smaller(n, XFER));
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, smaller(n, XFER));
   if got == NO_RESULT || got == 0 {
     return EFAULT;
   }
@@ -621,7 +621,7 @@ fn pty_int_in(k: &mut Kernel, pid: u64, arg: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, 4) != 4 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, 4) != 4 {
     return NO_RESULT;
   }
   return cast[u64](bget(k.fs.xfer, 0)) | cast[u64](bget(k.fs.xfer, 1)) << 8 | cast[u64](bget(k.fs.xfer, 2)) << 16 | cast[u64](bget(k.fs.xfer, 3)) << 24;
@@ -645,7 +645,7 @@ fn pty_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u
     return lx_put_out(&mut k, pid, arg, TERMIOS_SIZE);
   }
   if req == TCSETS || (req > TCSETS && req <= TCSETSF) {
-    if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, TERMIOS_SIZE) != TERMIOS_SIZE {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, TERMIOS_SIZE) != TERMIOS_SIZE {
       return EFAULT;
     }
     let mut i = 0;
@@ -670,7 +670,7 @@ fn pty_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u
     return lx_put_out(&mut k, pid, arg, WINSIZE_SIZE);
   }
   if req == TIOCSWINSZ {
-    if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, WINSIZE_SIZE) != WINSIZE_SIZE {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, WINSIZE_SIZE) != WINSIZE_SIZE {
       return EFAULT;
     }
     let rows = cast[u64](bget(k.fs.xfer, 0)) | cast[u64](bget(k.fs.xfer, 1)) << 8;

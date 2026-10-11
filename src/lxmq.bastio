@@ -98,7 +98,7 @@ fn pq_name_in(k: &mut Kernel, pid: u64, va: u64) -> u64
   ensures kok(k)
   ensures (1 <= result && result <= PQ_NAME_MAX) || result > PQ_ERRS
 {
-  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, PQ_NAME_ROOM);
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, PQ_NAME_ROOM);
   if got == NO_RESULT || got == 0 {
     return EFAULT;
   }
@@ -209,7 +209,7 @@ fn pq_create(k: &mut Kernel, pid: u64, n: u64, mode: u64, attr: u64) -> u64
   let mut max = PQ_DEF_MAX;
   let mut size = PQ_DEF_SIZE;
   if attr != 0 {
-    if copy_from_user(&mut k.spaces, pid, attr, &mut k.fs.xfer, 32) != 32 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, attr, &mut k.fs.xfer, 32) != 32 {
       return EFAULT;
     }
     max = get_u64(k.fs.xfer, 8);
@@ -441,7 +441,7 @@ fn lx_mq_send(k: &mut Kernel, pid: u64, was: u64, fd: u64, va: u64, len: u64, pr
     return KEEP;
   }
   let mut text = balloc(PQ_REGION);
-  let got = copy_from_user(&mut k.spaces, pid, va, &mut text, len);
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut text, len);
   if got != len {
     bfree(text);
     ret(&mut k.procs, pid, EFAULT);
@@ -520,7 +520,7 @@ fn lx_mq_receive(k: &mut Kernel, pid: u64, was: u64, fd: u64, va: u64, len: u64,
   }
   let mut out = balloc(PQ_REGION);
   bcopy(&mut out, 0, k.ipcb, base + 8, n);
-  let put = copy_to_user(&mut k.spaces, pid, va, out, n);
+  let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, out, n);
   bfree(out);
   if put != n {
     ret(&mut k.procs, pid, EFAULT);
@@ -528,7 +528,7 @@ fn lx_mq_receive(k: &mut Kernel, pid: u64, was: u64, fd: u64, va: u64, len: u64,
   }
   if priop != 0 {
     xfer_u64(&mut k.fs.xfer, 0, w % PQ_LEN);
-    if copy_to_user(&mut k.spaces, pid, priop, k.fs.xfer, 4) != 4 {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, priop, k.fs.xfer, 4) != 4 {
       ret(&mut k.procs, pid, EFAULT);
       return KEEP;
     }
@@ -557,7 +557,7 @@ fn lx_mq_notify(k: &mut Kernel, pid: u64, fd: u64, sev: u64) -> u64
   let mut sig = 0;
   let mut how = SIGEV_NONE;
   if sev != 0 {
-    if copy_from_user(&mut k.spaces, pid, sev, &mut k.fs.xfer, 16) != 16 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, sev, &mut k.fs.xfer, 16) != 16 {
       return EFAULT;
     }
     val = get_u64(k.fs.xfer, 0);
@@ -616,7 +616,7 @@ fn lx_mq_getsetattr(k: &mut Kernel, pid: u64, fd: u64, nv: u64, ov: u64) -> u64
   }
   let mut nb = 0;
   if nv != 0 {
-    if copy_from_user(&mut k.spaces, pid, nv, &mut k.fs.xfer, 8) != 8 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, nv, &mut k.fs.xfer, 8) != 8 {
       return EFAULT;
     }
     nb = get_u64(k.fs.xfer, 0) / LO_NONBLOCK % 2;
@@ -627,7 +627,7 @@ fn lx_mq_getsetattr(k: &mut Kernel, pid: u64, fd: u64, nv: u64, ov: u64) -> u64
     xfer_u64(&mut k.fs.xfer, 8, pq_get(k, q, PW_MAX));
     xfer_u64(&mut k.fs.xfer, 16, pq_get(k, q, PW_SIZE));
     xfer_u64(&mut k.fs.xfer, 24, pq_get(k, q, PW_CUR));
-    if copy_to_user(&mut k.spaces, pid, ov, k.fs.xfer, PQ_ATTR) != PQ_ATTR {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, ov, k.fs.xfer, PQ_ATTR) != PQ_ATTR {
       return EFAULT;
     }
   }

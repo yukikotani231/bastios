@@ -98,7 +98,7 @@ fn sin_in(k: &mut Kernel, pid: u64, va: u64, alen: u64) -> Sin
   if alen < 8 || alen % 4294967296 > SOCKADDR_MAX {
     return Sin { err: EINVAL, ip: 0, port: 0 };   // a socklen_t past sockaddr_storage too
   }
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 8) != 8 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 8) != 8 {
     return Sin { err: EFAULT, ip: 0, port: 0 };
   }
   let family = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1));
@@ -108,7 +108,7 @@ fn sin_in(k: &mut Kernel, pid: u64, va: u64, alen: u64) -> Sin
     if alen < SIN6_LEN - 4 {
       return Sin { err: EINVAL, ip: 0, port: 0 };
     }
-    if va > 0xFFFFFFFFFFFFFF00 || copy_from_user(&mut k.spaces, pid, va + 8, &mut k.fs.xfer, 16) != 16 {
+    if va > 0xFFFFFFFFFFFFFF00 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + 8, &mut k.fs.xfer, 16) != 16 {
       return Sin { err: EFAULT, ip: 0, port: 0 };
     }
     let hi = get_u64(k.fs.xfer, 0);         // the first 8 bytes of the address
@@ -161,7 +161,7 @@ fn sin_out(k: &mut Kernel, pid: u64, va: u64, lenp: u64, ip: u64, port: u64, v6:
   if va == 0 {
     return 0;
   }
-  if copy_from_user(&mut k.spaces, pid, lenp, &mut k.fs.xfer, 4) != 4 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, lenp, &mut k.fs.xfer, 4) != 4 {
     return EFAULT;
   }
   let room = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1)) + 65536 * cast[u64](bget(k.fs.xfer, 2)) + 16777216 * cast[u64](bget(k.fs.xfer, 3));
@@ -193,12 +193,12 @@ fn sin_out(k: &mut Kernel, pid: u64, va: u64, lenp: u64, ip: u64, port: u64, v6:
     bset(&mut k.fs.xfer, 7, cast[u8](ip % 256));
   }
   let n = smaller(room, len);
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, n) != n {
     return EFAULT;
   }
   lx_fill(&mut k, 0, 4);
   bset(&mut k.fs.xfer, 0, cast[u8](len));
-  if copy_to_user(&mut k.spaces, pid, lenp, k.fs.xfer, 4) != 4 {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, lenp, k.fs.xfer, 4) != 4 {
     return EFAULT;
   }
   return 0;
@@ -396,7 +396,7 @@ fn is_unspec(k: &mut Kernel, pid: u64, va: u64, alen: u64) -> bool
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if alen < 2 || copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 2) != 2 {
+  if alen < 2 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 2) != 2 {
     return false;
   }
   return bget(k.fs.xfer, 0) == 0 && bget(k.fs.xfer, 1) == 0;
@@ -438,7 +438,7 @@ fn lx_sendto(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, addr: u64, ale
     if n > UDP_MAX + 8 {
       return EMSGSIZE;
     }
-    if copy_from_user(&mut k.spaces, pid, buf, &mut k.fs.xfer, n) != n {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, &mut k.fs.xfer, n) != n {
       return EFAULT;
     }
     if sock_raw_send(&mut k.nic, d.s, d.ip, k.fs.xfer, n) == NO_SOCK {
@@ -449,7 +449,7 @@ fn lx_sendto(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, addr: u64, ale
   if n > UDP_MAX - sock_corked(k.nic, d.s) {
     return EMSGSIZE;
   }
-  if copy_from_user(&mut k.spaces, pid, buf, &mut k.fs.xfer, n) != n {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, &mut k.fs.xfer, n) != n {
     return EFAULT;
   }
   let r = sock_send_more(&mut k.nic, d.s, d.ip, d.port, k.fs.xfer, n, more);
@@ -504,7 +504,7 @@ fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, 
     if addr != 0 && alenp != 0 {
       // A stream socket fills in no address, but a negative length is
       // still EINVAL, as on Linux.
-      if copy_from_user(&mut k.spaces, pid, alenp, &mut k.fs.xfer, 4) != 4 {
+      if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, alenp, &mut k.fs.xfer, 4) != 4 {
         return EFAULT;
       }
       if bget(k.fs.xfer, 3) >= 128 {
@@ -531,7 +531,7 @@ fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, 
     }
     return SK_WAIT;
   }
-  if copy_to_user(&mut k.spaces, pid, buf, k.fs.xfer, got) != got {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, k.fs.xfer, got) != got {
     return EFAULT;
   }
   let ip = sock_peer_ip(k.nic, sk.s);
@@ -569,7 +569,7 @@ fn name_args(k: &mut Kernel, pid: u64, addr: u64, lenp: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if copy_from_user(&mut k.spaces, pid, lenp, &mut k.fs.xfer, 4) != 4 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, lenp, &mut k.fs.xfer, 4) != 4 {
     return EFAULT;
   }
   let len = get_u64(k.fs.xfer, 0) % 0x100000000;
@@ -637,7 +637,7 @@ fn lx_setsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
     if ln < 4 || ln >= 0x80000000 {
       return EINVAL;
     }
-    if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 4) != 4 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 4) != 4 {
       return EFAULT;
     }
     return 0;
@@ -678,7 +678,7 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
     return ENOPROTOOPT;
   }
   if level == SOL_SOCKET && name == 17 {     // SO_PEERCRED: struct ucred
-    if copy_from_user(&mut k.spaces, pid, lenp, &mut k.fs.xfer, 4) != 4 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, lenp, &mut k.fs.xfer, 4) != 4 {
       return EFAULT;
     }
     let room = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1)) + 65536 * cast[u64](bget(k.fs.xfer, 2)) + 16777216 * cast[u64](bget(k.fs.xfer, 3));
@@ -687,11 +687,11 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
     }
     ux_peercred(&mut k, pid, fd);
     let n = smaller(room, 12);
-    if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, n) != n {
       return EFAULT;
     }
     xput(&mut k, 0, n, 4);
-    if copy_to_user(&mut k.spaces, pid, lenp, k.fs.xfer, 4) != 4 {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, lenp, k.fs.xfer, 4) != 4 {
       return EFAULT;
     }
     return 0;
@@ -706,7 +706,7 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
   if level == SOL_SOCKET && (name == SO_SNDBUF || name == SO_RCVBUF) {
     v = 4096;                               // a unix channel; a TCP buffer is as big
   }
-  if copy_from_user(&mut k.spaces, pid, lenp, &mut k.fs.xfer, 4) != 4 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, lenp, &mut k.fs.xfer, 4) != 4 {
     return EFAULT;
   }
   let room = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1)) + 65536 * cast[u64](bget(k.fs.xfer, 2)) + 16777216 * cast[u64](bget(k.fs.xfer, 3));
@@ -717,11 +717,11 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
     return EINVAL;                          // a negative length
   }
   let n = smaller(room, 4);
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, n) != n {
     return EFAULT;
   }
   bset(&mut k.fs.xfer, 0, cast[u8](n));
-  if copy_to_user(&mut k.spaces, pid, lenp, k.fs.xfer, 4) != 4 {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, lenp, k.fs.xfer, 4) != 4 {
     return EFAULT;
   }
   return 0;
