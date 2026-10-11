@@ -650,9 +650,10 @@ fn ack(pic: &mut Pic, apic: &mut Lapic, v: u64)
 // The files the file system starts with, built into the kernel image.
 // elfdemo is a Linux program (the elfpie test) that execve runs as a file.
 // /etc/passwd and /etc/group name root and a few unprivileged users (nobody,
-// bin, daemon) for Linux programs
+// bin, daemon) for Linux programs, and /etc/shadow keeps their passwords
+// (root has none until `passwd` sets one; the others cannot log in)
 // (whoami, ls -l, getpwuid). /etc/hosts names localhost (getaddrinfo).
-const NINIT: u64 = 6;
+const NINIT: u64 = 7;
 
 fn init_name(i: u64) -> Str {
   if i == 0 {
@@ -669,6 +670,9 @@ fn init_name(i: u64) -> Str {
   }
   if i == 4 {
     return "etc/hosts";
+  }
+  if i == 5 {
+    return "etc/shadow";
   }
   return "elfdemo";
 }
@@ -688,6 +692,9 @@ fn init_data(i: u64) -> Str {
   }
   if i == 4 {
     return include_bytes("../files/hosts");
+  }
+  if i == 5 {
+    return include_bytes("../files/shadow");
   }
   return include_bytes("../build/user/elfpie.elf");
 }
@@ -732,9 +739,10 @@ fn install_files(con: &mut Con, k: &mut Kernel)
   requires con_ok(con) && kok(k)
   ensures kok(k) && con_ok(con)
 {
-  // /tmp and /etc, which Linux programs expect: RAM directories.
-  if !make_dir(&mut k.fs, "tmp") || !make_dir(&mut k.fs, "etc") {
-    puts(&mut con, "cannot make /tmp or /etc\r\n");
+  // /tmp and /etc, which Linux programs expect, root's home and /home:
+  // RAM directories.
+  if !make_dir(&mut k.fs, "tmp") || !make_dir(&mut k.fs, "etc") || !make_dir(&mut k.fs, "root") || !make_dir(&mut k.fs, "home") {
+    puts(&mut con, "cannot make /tmp, /etc, /root or /home\r\n");
   }
   let mut i = 0;
   while i < NINIT
@@ -749,6 +757,8 @@ fn install_files(con: &mut Con, k: &mut Kernel)
   }
   set_mode(&mut k.fs, "tmp", 1023);         // 01777: anyone may make names, only owners remove them
   set_mode(&mut k.fs, "elfdemo", 493);      // 0755: a program
+  set_mode(&mut k.fs, "etc/shadow", 384);   // 0600: password hashes are root's (docs/security.md)
+  set_mode(&mut k.fs, "root", 448);         // 0700
 }
 
 /// A MAC address as six hex bytes, colon-separated.

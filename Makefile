@@ -141,6 +141,11 @@ build/user/ash.elf: build/busybox/Makefile user/busybox.config | build/user
 	for o in $$(grep -v '^#' user/busybox.config); do \
 	  sed -i "s/^# $$o is not set/$$o=y/" build/busybox/.config; done
 	yes "" | $(MAKE) -C build/busybox -s oldconfig >/dev/null
+	# The non-boolean options for users: SHA-512 passwords, and ids for
+	# new users from 1000 (BusyBox's defaults, which allnoconfig zeroes).
+	sed -i -e 's/^CONFIG_FEATURE_DEFAULT_PASSWD_ALGO=.*/CONFIG_FEATURE_DEFAULT_PASSWD_ALGO="sha512"/' \
+	  -e 's/^CONFIG_LAST_ID=.*/CONFIG_LAST_ID=60000/' -e 's/^CONFIG_FIRST_SYSTEM_ID=.*/CONFIG_FIRST_SYSTEM_ID=100/' \
+	  -e 's/^CONFIG_LAST_SYSTEM_ID=.*/CONFIG_LAST_SYSTEM_ID=999/' build/busybox/.config
 	$(MAKE) -C build/busybox -s CC=$(MUSLCC) EXTRA_CFLAGS=-fPIE CFLAGS_busybox=-static-pie busybox
 	cp build/busybox/busybox $@
 
