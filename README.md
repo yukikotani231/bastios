@@ -81,9 +81,9 @@ make fuzz       # fuzz the system calls with hostile arguments (SEED, SEEDS, CAL
 make compat     # the Linux compatibility suite; writes build/compat/report.md
 ```
 
-`make test` also checks the sessions in this README and in [Getting started](docs/getting-started.md) (`test/guide_test.py`). Set `BASTIOC=/path/to/bastioc0` if the compiler lives elsewhere.
+`make test` also checks the sessions in this README and in [Getting started](docs/getting-started.md) (`test/guide_test.py`). Set `BASTIOC0=/path/to/bastioc0` if bastiolang is not next to this checkout.
 
-The kernel is built by bastiolang's bootstrap compiler, `bastioc0`, through C: the compiler proves each file, writes C, and `cc` compiles it. bastiolang's self-hosted compiler also has a native backend that writes x86-64 assembly for the kernel and user targets, which takes the C compiler out of the trusted base for Bastio code; BastiOS built that way passes `make test`. The Makefile switches to it once the self-hosted compiler is the default.
+The kernel is built by bastioc1, bastiolang's compiler written in Bastio, through C: the compiler proves each file, writes C, and `cc` compiles it. The first build makes bastioc1 itself with bastiolang's bootstrap compiler, `bastioc0`, into `build/bastioc1`. `make NATIVE=1` uses bastioc1's native backend instead, which writes x86-64 assembly and takes the C compiler out of the trusted base for Bastio code; BastiOS built that way passes `make test`, but its code is about ten times larger, so it is not the default yet.
 
 ## What is trusted
 
