@@ -632,6 +632,9 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, mode: u6
   if n == NO_RESULT {
     return k.perr;
   }
+  if k.pdir && flags & LO_CREAT != 0 {
+    return EISDIR;                          // "new/": a file is not made there, as on Linux
+  }
   return lx_open_n(&mut k, pid, n, flags, mode);
 }
 
