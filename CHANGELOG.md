@@ -265,6 +265,9 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - `set_robust_list`, `rseq` and `clone3`, which glibc asks for, fail with
   `ENOSYS` quietly; glibc carries on without them (static glibc programs
   run).
+- Reading a `/proc/PID` file of a process that ended after the file was
+  opened fails with `ESRCH`, as on Linux, instead of giving an empty file.
+  BusyBox's `ps` wrote through NULL when a process ended while it ran.
 
 ### Users and permissions
 
@@ -294,7 +297,19 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   `chpasswd`, `su`, `login`, `id` and `whoami` as `/bin/NAME`. `/bin/su`
   and `/bin/passwd` are set-user-ID root, and BusyBox
   (`CONFIG_FEATURE_SUID`) drops root for every other applet. Passwords
-  are SHA-512. Users made after boot do not survive a reboot yet.
+  are SHA-512.
+- With a disk, `/etc`, `/root` and `/home` live on it (symbolic links to
+  `/disk/etc`, `/disk/root` and `/disk/home`), so users and their files
+  survive a reboot. The first boot seeds `/disk/etc` from the built-in files.
+- A loop-mounted `bstdisk3` image is `nosuid`: its set-user-ID and
+  set-group-ID files run with the caller's ids.
+- The boot option `login` starts BusyBox's `login` on the console instead
+  of the native shell, and starts a new one after each logout.
+- `mprotect(PROT_WRITE)` on a `MAP_SHARED` mapping of a file opened
+  read-only fails with `EACCES`, as on Linux (it used to succeed on a
+  private copy).
+- `connect` finds a unix socket by its socket file, so a renamed socket
+  file, or another hard link to it, still leads to the socket.
 
 ### Programs that run
 

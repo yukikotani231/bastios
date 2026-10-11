@@ -89,9 +89,19 @@ for seed in range(first, first + seeds, par):
     send(("".join(f"sysfuzz {s} {calls} & " for s in group[:-1])
           + f"sysfuzz {group[-1]} {calls}\r").encode())
     finished = read_until(PROMPT, mark, 120)
+    # The others get up to a minute more. Their last line does not always
+    # reach the console, so rather than wait for it, ask the kernel once a
+    # second whether a fuzzer is still there.
     end = time.time() + 60
     while finished and time.time() < end and len(re.findall(rb"made \d+ calls|\(sysfuzz\): [^\]]*killed\]", out[mark:])) < len(group):
-        read_until(b"made ", len(out), end - time.time())
+        m2 = len(out)
+        send(b"cat /proc/[0-9]*/stat\r")
+        if not read_until(PROMPT, m2, 30):
+            finished = False
+            break
+        if b"(sysfuzz)" not in out[m2:]:
+            break
+        time.sleep(1)
     if not finished:
         send(b"\x03")
         finished = read_until(PROMPT, mark, 20)

@@ -304,8 +304,11 @@ t_inotify: rmdir: delete-self, ignored, then delete in the directory
 t_inotify: two equal events in a row coalesce
 t_inotify: unlink: attrib, ignored, then delete in the directory
 t_ipc: AF_UNIX bind/listen
+t_ipc: AF_UNIX connect through a hard link of the socket file
+t_ipc: AF_UNIX connect through a renamed socket file
 t_ipc: AF_UNIX connect to no listener fails
 t_ipc: AF_UNIX connect/accept
+t_ipc: AF_UNIX the old name of a renamed socket file is gone
 t_ipc: EOF once writers close
 t_ipc: F_SETPIPE_SZ limits a pipe
 t_ipc: O_NONBLOCK read of an empty pipe is EAGAIN
@@ -331,6 +334,7 @@ t_ipc: socketpair AF_UNIX
 t_ipc: socketpair both ways, EOF after close
 t_ipc: timerfd
 t_ipc: ttyname(0)
+t_isol: a loop-mounted image is nosuid
 t_isol: a shared mapping of a read-only file stays read-only
 t_isol: a unix socket's file says who may connect
 t_isol: loop devices are root's and group disk's
@@ -592,6 +596,7 @@ t_perm: setgroups and getgroups keep supplementary groups
 t_perm: the disk keeps owners
 t_perm: umask applies to new files and directories
 t_perm: without the group, the group's bits do not apply
+t_proc: /proc/PID/stat of an ended process is ESRCH
 t_proc: #! naming a missing interpreter is ENOENT
 t_proc: #! naming no interpreter is ENOEXEC
 t_proc: child's getppid is the parent

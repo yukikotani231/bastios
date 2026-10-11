@@ -1082,6 +1082,39 @@ fn vfs_install_bytes(v: &mut Vfs, mem: &mut Mem, name: Str, d: &Bytes, m: u64) -
   return ok;
 }
 
+/// Writes d[0..m] to the file `name` (a path from the top, such as
+/// "disk/etc/resolv.conf"), made or emptied first, for the kernel itself:
+/// through descriptor rows of pid 0, which is never a process, and waiting
+/// for the disk. False if it could not, such as when the write needs a
+/// block the cache does not have.
+fn vfs_put(v: &mut Vfs, mem: &mut Mem, name: Str, d: &Bytes, m: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem) && m <= blen(d) && m <= XFER && slen(name) <= FNAME_MAX
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  let mut i = 0;
+  while i < slen(name)
+    invariant i <= slen(name) && slen(name) <= FNAME_MAX && vfs_ok(v)
+  {
+    bset(&mut v.xfer, i, sget(name, i));
+    i = i + 1;
+  }
+  let fd = vfs_open(&mut v, &mut mem, 0, O_WRITE + O_CREATE + O_TRUNC, slen(name));
+  if fd >= NFD {
+    return false;
+  }
+  let mut j = 0;
+  while j < m
+    invariant j <= m && m <= blen(d) && m <= XFER && vfs_ok(v)
+  {
+    bset(&mut v.xfer, j, bget(d, j));
+    j = j + 1;
+  }
+  let w = vfs_write(&mut v, &mut mem, fd, m);
+  vfs_close(&mut v, &mut mem, fd);
+  disk_drain(&mut v.disk);
+  return w == m;
+}
+
 // ---------------------------------------------------------------- directories
 
 /// Is the name in the first n bytes of the transfer buffer fit for a new
