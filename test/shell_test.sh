@@ -309,7 +309,8 @@ steps = [
     # What Linux programs expect to find: /dev/null swallows, /tmp and
     # /etc/passwd exist, and every file has its own inode number.
     ("echo lost > /dev/null; wc -c < /dev/null; test -d /tmp && echo tmp$((2+2))", b"\r\n0\r\ntmp4\r\n", b"\n# "),
-    ("cat /etc/passwd", b"root:x:0:0", b"\n# "),
+    ("cat /etc/passwd", b"nobody:x:65534:65534:", b"\n# "),
+    ("cat /etc/group", b"nogroup:x:65534:", b"\n# "),
     ("echo a > /tmp/i1; echo b > /tmp/i2; set -- $(ls -i /tmp/i1); a=$1; set -- $(ls -i /tmp/i2); [ $a != $1 ] && echo distinct; rm /tmp/i1 /tmp/i2", b"\r\ndistinct\r\n", b"\n# "),
     # Symbolic links: made by ln -s, read by readlink, followed by
     # everything else (relative and absolute targets, a link to a
@@ -329,6 +330,10 @@ steps = [
     # boot below).
     ("mkfifo pp; ls -l pp; echo hi > pp & cat pp; wait; mv pp pq; rm pq; ls pq; mkfifo disk/pf; stat -c %F disk/pf", [b"prw", b"\r\nhi\r\n", b"pq: No such file", b"fifo"], b"\n# "),
     ("echo dh > disk/hk1; ln disk/hk1 disk/hk2; ln disk/hk1 h3; mkdir hd; ln hd hd2; rmdir hd; stat -c %h disk/hk2", [b"Cross-device link", b"not permitted", b"\r\n2\r\n"], b"\n# "),
+    # Loop devices (src/lxloop.bastio): /dev/loopN are block devices and
+    # /dev/loop-control a character device; test/compat/progs/t_dev.c
+    # binds one to a file and reads and writes through it.
+    ("stat -c %F /dev/loop0 /dev/loop-control", b"block special file\r\ncharacter special file\r\n", b"\n# "),
     # The disk's directory grows past its first 64 entries (dir_grow); the
     # power cuts below check that what it grew survives.
     ("mkdir disk/many; i=0; while [ $i -lt 150 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; cat disk/many/f149", b"\r\n150\r\n149\r\n", b"\n# "),

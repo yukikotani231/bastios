@@ -1,0 +1,17 @@
+# What BastiOS offers, in the names of Linux's kernel configuration, for
+# LTP tests that ask (make compat-ltp passes this file as KCONFIG_PATH).
+# An option missing here reads as "not set", so a test that needs it
+# reports TCONF. List only what the kernel really does.
+CONFIG_64BIT=y
+CONFIG_X86_64=y
+CONFIG_MMU=y
+CONFIG_SMP=y
+CONFIG_POSIX_TIMERS=y
+CONFIG_FUTEX=y
+CONFIG_EPOLL=y
+CONFIG_TIMERFD=y
+CONFIG_EVENTFD=y
+CONFIG_PROC_FS=y
+CONFIG_INET=y
+CONFIG_UNIX=y
+CONFIG_HIGH_RES_TIMERS=y
