@@ -545,6 +545,13 @@ compat-ltp: build/bastios.elf build/ltp/.built
 compat-ltp-baseline: build/bastios.elf build/ltp/.built
 	test/compat/ltp.py --update-baseline --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp
 
+# Not part of `make test`: the same micro-benchmarks (bench/osbench.c) on
+# BastiOS and on Linux in the same QEMU machine, side by side; see
+# docs/performance.md. BENCH_ARGS passes options to bench/run.py
+# (--os bastios, --runs 5, --tests syscall,fork, --smp 4).
+bench: build/bastios.elf
+	bench/run.py $(BENCH_ARGS)
+
 # Not part of `make test`: prints timings, checks nothing (see the script).
 smpbench: build/bastios.elf
 	test/smpbench.sh
@@ -574,4 +581,4 @@ clean:
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
 FORCE:
 
-.PHONY: FORCE all run disk usb run-usb test fuzz smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+.PHONY: FORCE all run disk usb run-usb test fuzz bench smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
