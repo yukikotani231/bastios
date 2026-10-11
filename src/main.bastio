@@ -616,7 +616,7 @@ fn pump(t: &mut Term, s: &Lock[Sys], pend: &Atomic[u64])
     let mut rn = 0;
     let mut mn = 0;
     let mut c = 0;
-    while c != 256 && rn < CHUNK && mn + 3 <= CHUNK
+    while c != 256 && rn < CHUNK && mn + 4 <= CHUNK
       invariant term_ok(t) && rn <= CHUNK && mn <= CHUNK && blen(rx) == CHUNK && blen(mx) == CHUNK
     {
       c = term_poll(&mut t);
@@ -624,16 +624,17 @@ fn pump(t: &mut Term, s: &Lock[Sys], pend: &Atomic[u64])
         bset(&mut rx, rn, cast[u8](c));
         rn = rn + 1;
       } else if c > 256 {
-        let p = c - MOUSE_PKT;              // a mouse packet: its three bytes
-        bset(&mut mx, mn, cast[u8](p / 65536 % 256));
-        bset(&mut mx, mn + 1, cast[u8](p / 256 % 256));
-        bset(&mut mx, mn + 2, cast[u8](p % 256));
-        mn = mn + 3;
+        let p = c - MOUSE_PKT;              // a mouse packet: its four bytes
+        bset(&mut mx, mn, cast[u8](p / 16777216 % 256));
+        bset(&mut mx, mn + 1, cast[u8](p / 65536 % 256));
+        bset(&mut mx, mn + 2, cast[u8](p / 256 % 256));
+        bset(&mut mx, mn + 3, cast[u8](p % 256));
+        mn = mn + 4;
       }
     }
     let tn = locked(s, exchange, &mut tx, rx, rn, mx, mn, pend);
     term_send(&mut t, tx, tn);
-    more = tn == CHUNK || rn == CHUNK || mn + 3 > CHUNK;
+    more = tn == CHUNK || rn == CHUNK || mn + 4 > CHUNK;
     rounds = rounds + 1;
   }
   bfree(tx);
@@ -1071,7 +1072,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut debug_exit = port_claim(&mut ports, DEBUG_EXIT, 1);
   let mut uart = Uart { io: port_claim(&mut ports, COM1, 8), present: true };
   let mut kbd = Kbd { data: port_claim(&mut ports, KBD_DATA, 1), status: port_claim(&mut ports, KBD_STATUS, 1),
-    shift: false, ctrl: false, ext: false, present: true, aux: false, mb: 0, mn: 0 };
+    shift: false, ctrl: false, ext: false, present: true, aux: false, wheel: false, mb: 0, mn: 0 };
   let mut pic = Pic { master: port_claim(&mut ports, PIC1, 2), slave: port_claim(&mut ports, PIC2, 2) };
   let mut pit = Pit { io: port_claim(&mut ports, PIT, 4) };
   let mut rtc = Rtc { io: port_claim(&mut ports, RTC, 2) };
@@ -1264,6 +1265,8 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     }
     if usb_mouse_on {
       puts(&mut con, "mouse: USB (xHCI)\r\n");
+    } else if term.kbd.aux && term.kbd.wheel {
+      puts(&mut con, "mouse: PS/2, with a wheel\r\n");
     } else if term.kbd.aux {
       puts(&mut con, "mouse: PS/2\r\n");
     } else {
