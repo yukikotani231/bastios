@@ -45,6 +45,7 @@ const SIGALRM: u64 = 14;
 const LX_RT_SIGTIMEDWAIT: u64 = 128;
 const CLOCK_REALTIME: u64 = 0;
 const CLOCK_REALTIME_COARSE: u64 = 5;
+const CLOCK_MONOTONIC_COARSE: u64 = 6;
 
 /// The wall clock, in ns since 1970-01-01 00:00 UTC.
 fn wall_ns(k: &Kernel) -> u64
@@ -179,7 +180,17 @@ fn clock_now(k: &Kernel, pid: u64, clk: u64) -> u64
     }
     return cpu_ns(k, t);
   }
-  if clk == CLOCK_REALTIME || clk == CLOCK_REALTIME_COARSE {
+  // The coarse clocks move a tick at a time, as Linux's do (they read
+  // the time of the last tick), and clock_getres says so.
+  if clk == CLOCK_REALTIME_COARSE {
+    let w = smaller(wall_ns(k), FOREVER - 1);
+    return w / NS_PER_TICK * NS_PER_TICK;
+  }
+  if clk == CLOCK_MONOTONIC_COARSE {
+    let m = smaller(k.ns, FOREVER - 1);
+    return m / NS_PER_TICK * NS_PER_TICK;
+  }
+  if clk == CLOCK_REALTIME {
     return smaller(wall_ns(k), FOREVER - 1);
   }
   // MONOTONIC, MONOTONIC_RAW, MONOTONIC_COARSE and BOOTTIME count from boot.
@@ -946,7 +957,11 @@ fn lx_time_rest(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
       return KEEP;
     }
     if n == LX_CLOCK_GETRES {
-      ret(&mut k.procs, pid, time_out(&mut k, pid, b, 1, 1));   // the clock is kept in ns
+      let mut res = 1;                      // the clock is kept in ns
+      if a == CLOCK_REALTIME_COARSE || a == CLOCK_MONOTONIC_COARSE {
+        res = NS_PER_TICK;
+      }
+      ret(&mut k.procs, pid, time_out(&mut k, pid, b, res, 1));
       return KEEP;
     }
     ret(&mut k.procs, pid, time_out(&mut k, pid, b, t, 1));

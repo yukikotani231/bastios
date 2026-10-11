@@ -918,6 +918,7 @@ fn install_files(con: &mut Con, k: &mut Kernel)
   requires con_ok(con) && kok(k)
   ensures kok(k) && con_ok(con)
 {
+  pc_tables(&mut k.fs.pc, &mut k.mem);   // the page cache's tables, before the first `mem` (src/pcache.bastio)
   // /tmp is a RAM directory. /etc, root's home and /home, which hold the
   // users and their files, are links into the disk when there is one, so
   // they are kept across boots; the files under etc/ built into the kernel

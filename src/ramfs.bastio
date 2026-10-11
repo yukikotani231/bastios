@@ -14,6 +14,7 @@
 // top and moves bytes between files and user memory through a kernel buffer.
 
 import "pages.bastio";
+import "core/bytes.bastio";
 
 const NFILES: u64 = 1024;           // enough for every descriptor of a process to be its own file
 const FNAME_MAX: u64 = 255;
@@ -89,16 +90,7 @@ fn name_is(f: &RamFile, name: &Bytes, n: u64) -> bool
   if blen(f.name) != n {
     return false;
   }
-  let mut i = 0;
-  while i < n
-    invariant i <= n
-  {
-    if bget(f.name, i) != bget(name, i) {
-      return false;
-    }
-    i = i + 1;
-  }
-  return true;
+  return bytes_span_eq(f.name, 0, name, 0, n);
 }
 
 /// Writes m zeros into buf from `at`.
