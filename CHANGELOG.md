@@ -598,6 +598,15 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Fixed
 
+- mmap without an address, shmat without one, and brk could hand out
+  pages a mapping made with MAP_FIXED (or shmat at an address, or mremap
+  with MREMAP_FIXED) already held, with that mapping's bytes in them, and
+  a munmap or shmdt of the new range, or a shrinking brk, then unmapped
+  the old mapping too. Such a mapping in the free space between the break
+  and the mmap area now starts the mmap area, and what was free above it
+  becomes a hole that mmap reuses; mremap with MREMAP_FIXED also stops
+  leaving its new pages listed as a hole. The system call fuzzer found it;
+  `mdir` checks it.
 - The clock went wrong a few seconds after boot under QEMU, which broke
   about 30 `make compat` checks (sleeps took 0 ms, poll and socket
   timeouts fired at once, `date` said 2554). There were two bugs. First,
