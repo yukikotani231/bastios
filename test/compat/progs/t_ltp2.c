@@ -1,7 +1,13 @@
 /* Small system call corners LTP's tests found: file status flags, the
  * supplementary groups, fsync on a pipe, mlockall, personality, mincore,
  * and socket errors (listen on UDP, send before connect, a bad address
- * length, MSG_OOB on UDP). */
+ * length, MSG_OOB on UDP), clone with a stack, unshare, sched_getattr,
+ * a socket's O_NONBLOCK, and errno corners of dup3, getrusage, getrandom,
+ * timer_settime, the socket calls, mremap and munlock, and nested epoll;
+ * shutdown(SHUT_RD), CPU-time clocks of a thread, arch_prctl, memfd_create
+ * names, madvise and timerfd flags. */
+#include <mqueue.h>
+#include <sys/prctl.h>
 #include "compat.h"
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -14,9 +20,19 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/times.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <setjmp.h>
+#include <sched.h>
+#include <sys/syscall.h>
+#include <sys/random.h>
+#include <sys/epoll.h>
+#include <time.h>
+#include <poll.h>
+#include <pthread.h>
+#include <sys/timerfd.h>
 
 static volatile int ticks;
 static void vt(int s) { (void)s; ticks++; }
@@ -25,6 +41,31 @@ static void segv(int s) { (void)s; siglongjmp(back, 1); }
 
 /* Three connections in turn to a server that accepts, greets and closes
  * each: the closed ones must not be handed out by accept again. */
+static void nop(int s) { (void)s; }
+/* <linux/capability.h>, which musl does not ship. */
+struct __user_cap_header_struct { unsigned version; int pid; };
+struct __user_cap_data_struct { unsigned effective, permitted, inheritable; };
+#define _LINUX_CAPABILITY_VERSION_3 0x20080522
+#define CAP_SETPCAP 8
+#define CAP_SYS_TIME 25
+static struct rnode { struct rnode *next; unsigned word; } rnode;
+static struct { struct rnode *next; long off; struct rnode *pending; } rhead;
+static long rgot = -1;
+static char robust_stack[16384] __attribute__((aligned(16)));
+static int robust_thread(void *a) {
+    (void)a;
+    rnode.word = syscall(SYS_gettid); rnode.next = (struct rnode *)&rhead;
+    rhead.next = &rnode; rhead.off = 8; rhead.pending = 0;
+    void *h = 0; size_t n = 0;
+    if (syscall(SYS_set_robust_list, &rhead, 24) == 0 && syscall(SYS_get_robust_list, 0, &h, &n) == 0 && h == (void *)&rhead && n == 24)
+        rgot = rnode.word;
+    syscall(SYS_exit, 0);                  /* the kernel walks the list */
+    return 0;
+}
+
+static int seven(void *a) { (void)a; return 7; }
+static char kid_stack[16384] __attribute__((aligned(16)));
+
 static int serve_three(void) {
     struct sockaddr_in a = {.sin_family = AF_INET}; socklen_t l = sizeof a;
     int sfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -113,5 +154,343 @@ int main(void) {
     EXPECT("waitpid with bad options is EINVAL", waitpid(-1, NULL, 0x7fff) == -1 && errno == EINVAL);
     EXPECT("rlimits: bad resource EINVAL; soft over hard EINVAL", ({ struct rlimit r, w = { 2, 1 };
            getrlimit(99, &r) == -1 && errno == EINVAL && setrlimit(RLIMIT_CORE, &w) == -1 && errno == EINVAL; }));
+    EXPECT("nice: root lowers and raises it, a child inherits it, nobody may not lower it", ({ pid_t c = fork();
+           if (c == 0) { errno = 0; int a = nice(-5); int g = getpriority(PRIO_PROCESS, 0); int b = nice(10);
+               pid_t d = fork(); if (d == 0) _exit(getpriority(PRIO_PROCESS, 0) == 5 ? 0 : 1);
+               int st; waitpid(d, &st, 0); setuid(65534); int e = nice(-1);
+               _exit(a == -5 && g == -5 && b == 5 && WEXITSTATUS(st) == 0 && e == -1 && errno == EPERM ? 0 : 2); }
+           int st = 0; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0 &&
+           getpriority(PRIO_PROCESS, 0) == 0 && getpriority(9, 0) == -1 && errno == EINVAL &&
+           getpriority(PRIO_PROCESS, 0x7ffffff0) == -1 && errno == ESRCH; }));
+    EXPECT("sched_setscheduler: SCHED_FIFO 10, read back, bad priority EINVAL", ({ pid_t c = fork();
+           if (c == 0) { struct sched_param p = {10}, q = {0}, bad = {100};
+               int ok = sched_get_priority_max(SCHED_FIFO) == 99 && sched_get_priority_min(SCHED_RR) == 1 &&
+                   syscall(SYS_sched_setscheduler, 0, SCHED_FIFO, &p) == 0 && syscall(SYS_sched_getscheduler, 0) == SCHED_FIFO &&
+                   syscall(SYS_sched_getparam, 0, &q) == 0 && q.sched_priority == 10 &&
+                   syscall(SYS_sched_setparam, 0, &bad) == -1 && errno == EINVAL &&
+                   syscall(SYS_sched_setscheduler, 0, 7, &p) == -1 && errno == EINVAL;
+               _exit(ok ? 0 : 1); }
+           int st = 0; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("sched_setaffinity to processor 0", ({ cpu_set_t s; CPU_ZERO(&s); CPU_SET(0, &s); sched_setaffinity(0, sizeof s, &s) == 0; }));
+    EXPECT("an empty path is ENOENT, an unmapped one EFAULT", ({ struct stat st; void *bad = mmap(0, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           stat("", &st) == -1 && errno == ENOENT && unlink("") == -1 && errno == ENOENT &&
+           stat(bad, &st) == -1 && errno == EFAULT &&
+           ({ int d = open(".", O_RDONLY); int r = fstatat(d, "", &st, AT_EMPTY_PATH); close(d); r == 0 && S_ISDIR(st.st_mode); }); }));
+    EXPECT("tkill and tgkill reject a zero or negative id", syscall(SYS_tkill, 0, 0) == -1 && errno == EINVAL &&
+           syscall(SYS_tgkill, -1, getpid(), 0) == -1 && errno == EINVAL && syscall(SYS_tgkill, getpid(), getpid(), 0) == 0);
+    EXPECT("/proc/cmdline", ({ int fd = open("/proc/cmdline", O_RDONLY); char b[1024]; int n = fd >= 0 ? read(fd, b, sizeof b) : -1;
+           if (fd >= 0) close(fd); n > 0 && b[n - 1] == '\n'; }));
+    EXPECT("clone with a child stack makes a process", ({ pid_t t = 0;
+           pid_t c = clone(seven, kid_stack + sizeof kid_stack, SIGCHLD | CLONE_PARENT_SETTID, 0, &t);
+           int st = 0; c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 7 && t == c; }));
+    EXPECT("unshare: files and cwd succeed, bad flags EINVAL", unshare(CLONE_FILES | CLONE_FS) == 0 &&
+           unshare(-1) == -1 && errno == EINVAL);
+    EXPECT("sched_getattr reads the policy; a short size is EINVAL", ({ unsigned a[14] = {0};
+           syscall(SYS_sched_getattr, 0, a, 56, 0) == 0 && a[0] == 56 && a[1] == SCHED_OTHER &&
+           syscall(SYS_sched_getattr, 0, a, 47, 0) == -1 && errno == EINVAL; }));
+    EXPECT("F_GETFL and F_SETFL see a socket's O_NONBLOCK", ({ int s = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+           int a = fcntl(s, F_GETFL); fcntl(s, F_SETFL, 0); int b = fcntl(s, F_GETFL); close(s);
+           (a & O_NONBLOCK) && !(b & O_NONBLOCK) && (a & O_ACCMODE) == O_RDWR; }));
+    EXPECT("errors: dup3 flags, getrusage who, getrandom flags, a null timer setting", ({ struct rusage ru; char b[4]; timer_t t;
+           int ok = dup3(0, 9, 1) == -1 && errno == EINVAL && getrusage(-2, &ru) == -1 && errno == EINVAL &&
+               getrandom(b, 4, -1) == -1 && errno == EINVAL && timer_create(CLOCK_MONOTONIC, 0, &t) == 0;
+           ok = ok && syscall(SYS_timer_settime, t, 0, 0, 0) == -1 && errno == EINVAL; timer_delete(t); ok; }));
+    EXPECT("errors: socket types, socketpair of inet, option levels, a negative name length", ({ int s = socket(AF_INET, SOCK_STREAM, 0);
+           int v = 1, sv[2]; socklen_t l = -1; struct sockaddr_in a;
+           int ok = socket(AF_INET, 75, 0) == -1 && errno == EINVAL &&
+               socketpair(AF_INET, SOCK_STREAM, 0, sv) == -1 && errno == EOPNOTSUPP &&
+               setsockopt(s, 500, 1, &v, sizeof v) == -1 && errno == ENOPROTOOPT &&
+               setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &v, 0) == -1 && errno == EINVAL &&
+               getsockopt(s, 500, 1, &v, &(socklen_t){4}) == -1 && errno == EOPNOTSUPP &&
+               getsockname(s, (struct sockaddr *)&a, &l) == -1 && errno == EINVAL; close(s); ok; }));
+    EXPECT("errors: mremap MREMAP_FIXED alone, munlock of unmapped pages", ({ char *p = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int ok = mremap(p, 4096, 4096, MREMAP_FIXED, p + 4096) == MAP_FAILED && errno == EINVAL;
+           munmap(p, 8192); ok && munlock(p, 4096) == -1 && errno == ENOMEM; }));
+    EXPECT("nested epoll: readiness passes up, a loop is ELOOP", ({ int p[2]; pipe(p); int a = epoll_create1(0), b = epoll_create1(0);
+           struct epoll_event ev = {.events = EPOLLIN}, out; ev.data.fd = p[0]; epoll_ctl(a, EPOLL_CTL_ADD, p[0], &ev);
+           ev.data.fd = a; int ok = epoll_ctl(b, EPOLL_CTL_ADD, a, &ev) == 0 && epoll_wait(b, &out, 1, 0) == 0;
+           write(p[1], "x", 1); ok = ok && epoll_wait(b, &out, 1, 0) == 1 && out.data.fd == a && (out.events & EPOLLIN);
+           ev.data.fd = b; ok = ok && epoll_ctl(a, EPOLL_CTL_ADD, b, &ev) == -1 && errno == ELOOP;
+           close(a); close(b); close(p[0]); close(p[1]); ok; }));
+    EXPECT("mqueue: priorities order messages, getattr counts, unlink, bad sigevent EINVAL", ({
+           struct mq_attr at = {.mq_maxmsg = 4, .mq_msgsize = 16}, g; char b[16]; unsigned pr = 0;
+           mq_unlink("/ltp2q"); mqd_t q = mq_open("/ltp2q", O_RDWR | O_CREAT | O_EXCL, 0600, &at);
+           struct sigevent se = {.sigev_notify = 77};
+           int ok = q != (mqd_t)-1 && mq_send(q, "lo", 2, 1) == 0 && mq_send(q, "hi", 2, 9) == 0 &&
+               mq_getattr(q, &g) == 0 && g.mq_curmsgs == 2 && g.mq_maxmsg == 4 &&
+               mq_receive(q, b, 16, &pr) == 2 && pr == 9 && !memcmp(b, "hi", 2) &&
+               mq_receive(q, b, 8, &pr) == -1 && errno == EMSGSIZE &&
+               syscall(SYS_mq_notify, q, &se) == -1 && errno == EINVAL &&
+               mq_open("/ltp2q", O_RDWR | O_CREAT | O_EXCL, 0600, &at) == (mqd_t)-1 && errno == EEXIST;
+           mq_close(q); ok && mq_unlink("/ltp2q") == 0 && mq_unlink("/ltp2q") == -1 && errno == ENOENT; }));
+    EXPECT("prctl: a name shows in /proc/self/comm; death signal and timer slack read back", ({ char b[16] = {0}, c[32] = {0}; int d = 0;
+           prctl(PR_SET_NAME, "abcdefghijklmnopq"); prctl(PR_GET_NAME, b);
+           int fd = open("/proc/self/comm", O_RDONLY); int n = fd >= 0 ? read(fd, c, sizeof c) : -1; if (fd >= 0) close(fd);
+           int ok = !strcmp(b, "abcdefghijklmno") && n == 16 && !memcmp(c, "abcdefghijklmno\n", 16) &&
+               prctl(PR_SET_PDEATHSIG, SIGUSR2) == 0 && prctl(PR_GET_PDEATHSIG, &d) == 0 && d == SIGUSR2 &&
+               prctl(PR_SET_PDEATHSIG, 0) == 0 && prctl(PR_SET_TIMERSLACK, 70000) == 0 && prctl(PR_GET_TIMERSLACK) == 70000;
+           prctl(PR_SET_TIMERSLACK, 0); prctl(PR_SET_NAME, "t_ltp2"); ok; }));
+    EXPECT("an interrupted nanosleep writes the time left; kill of a zombie succeeds", ({ signal(SIGALRM, nop);
+           struct timespec rq = {5, 0}, rm = {0, 0}; alarm(1); int r = nanosleep(&rq, &rm); int e = errno; signal(SIGALRM, SIG_DFL);
+           pid_t c = fork(); if (c == 0) _exit(0); usleep(200000);
+           int k = kill(c, SIGTERM); int st; waitpid(c, &st, 0);
+           r == -1 && e == EINTR && rm.tv_sec >= 2 && rm.tv_sec <= 4 && k == 0; }));
+    EXPECT("a CPU-time POSIX timer, and overruns of a timer set in the past", ({ timer_t t, u; struct sigevent se = {.sigev_notify = SIGEV_NONE};
+           struct itimerspec v = {{0, 0}, {0, 500000000}}, g; struct timespec now;
+           int ok = timer_create(CLOCK_PROCESS_CPUTIME_ID, &se, &t) == 0 && timer_settime(t, 0, &v, 0) == 0 &&
+               timer_gettime(t, &g) == 0 && g.it_value.tv_sec == 0 && g.it_value.tv_nsec > 0; timer_delete(t);
+           sigset_t m; sigemptyset(&m); sigaddset(&m, SIGUSR1); sigprocmask(SIG_BLOCK, &m, 0);
+           struct sigevent su = {.sigev_notify = SIGEV_SIGNAL, .sigev_signo = SIGUSR1}; timer_create(CLOCK_MONOTONIC, &su, &u);
+           clock_gettime(CLOCK_MONOTONIC, &now); struct itimerspec w = {{0, 1000000}, {now.tv_sec - 1, now.tv_nsec}};
+           timer_settime(u, TIMER_ABSTIME, &w, 0); usleep(50000); int sig = 0; sigwait(&m, &sig);
+           int o = timer_getoverrun(u); timer_delete(u); sigprocmask(SIG_UNBLOCK, &m, 0);
+           ok && sig == SIGUSR1 && o >= 1000; }));
+    EXPECT("brk shrinks and grows back, never below its start", ({ char *b0 = (char *)syscall(SYS_brk, 0);
+           char *up = (char *)syscall(SYS_brk, b0 + 8191); b0[8000] = 1;
+           char *down = (char *)syscall(SYS_brk, b0 + 10); char *low = (char *)syscall(SYS_brk, 4096);
+           char *back = (char *)syscall(SYS_brk, b0 + 8191); int z = b0[8000];
+           syscall(SYS_brk, b0); up == b0 + 8191 && down == b0 + 10 && low == b0 + 10 && back == b0 + 8191 && z == 0; }));
+    EXPECT("sendmmsg and recvmmsg over UDP loopback; accept on UDP is EOPNOTSUPP", ({
+           int r = socket(AF_INET, SOCK_DGRAM, 0), w = socket(AF_INET, SOCK_DGRAM, 0);
+           struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)}; socklen_t l = sizeof a;
+           bind(r, (struct sockaddr *)&a, sizeof a); getsockname(r, (struct sockaddr *)&a, &l); connect(w, (struct sockaddr *)&a, sizeof a);
+           char m1[] = "one", m2[] = "three", b1[8] = {0}, b2[8] = {0};
+           struct iovec s1 = {m1, 3}, s2 = {m2, 5}, d1 = {b1, 8}, d2 = {b2, 8};
+           struct mmsghdr sm[2] = {{.msg_hdr = {.msg_iov = &s1, .msg_iovlen = 1}}, {.msg_hdr = {.msg_iov = &s2, .msg_iovlen = 1}}};
+           struct mmsghdr rm[2] = {{.msg_hdr = {.msg_iov = &d1, .msg_iovlen = 1}}, {.msg_hdr = {.msg_iov = &d2, .msg_iovlen = 1}}};
+           int ns = sendmmsg(w, sm, 2, 0); usleep(20000); int nr = recvmmsg(r, rm, 2, MSG_DONTWAIT, 0);
+           int e = accept(r, 0, 0) == -1 && errno == EOPNOTSUPP; close(r); close(w);
+           ns == 2 && sm[1].msg_len == 5 && nr == 2 && rm[0].msg_len == 3 && !strcmp(b1, "one") && !strcmp(b2, "three") && e; }));
+    EXPECT("/proc/loadavg reads as five fields", ({ char b[128] = {0}; int fd = open("/proc/loadavg", O_RDONLY);
+           int n = fd >= 0 ? read(fd, b, sizeof b - 1) : -1; if (fd >= 0) close(fd);
+           float x, y, z; int run, all, last; n > 0 && sscanf(b, "%f %f %f %d/%d %d", &x, &y, &z, &run, &all, &last) == 6 && all >= 1; }));
+    EXPECT("TCP: bind to port 0 picks one, a second connect is EISCONN, AF_UNSPEC disconnects", ({
+           struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)}; socklen_t l = sizeof a;
+           int s = socket(AF_INET, SOCK_STREAM, 0); bind(s, (struct sockaddr *)&a, sizeof a); getsockname(s, (struct sockaddr *)&a, &l);
+           int port = ntohs(a.sin_port); listen(s, 4);
+           int c = socket(AF_INET, SOCK_STREAM, 0); int r1 = connect(c, (struct sockaddr *)&a, sizeof a);
+           int r2 = connect(c, (struct sockaddr *)&a, sizeof a); int e2 = errno;
+           int d = accept(s, 0, 0); struct sockaddr u = {.sa_family = AF_UNSPEC};
+           int r3 = connect(d, &u, sizeof u); struct sockaddr_in b = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+           int r4 = bind(d, (struct sockaddr *)&b, sizeof b); close(d); close(c); close(s);
+           port != 0 && r1 == 0 && r2 == -1 && e2 == EISCONN && r3 == 0 && r4 == 0; }));
+    EXPECT("UDP sendmsg joins its buffers into one datagram; bind errors", ({
+           int r = socket(AF_INET, SOCK_DGRAM, 0), w = socket(AF_INET, SOCK_DGRAM, 0);
+           struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)}; socklen_t l = sizeof a;
+           bind(r, (struct sockaddr *)&a, sizeof a); getsockname(r, (struct sockaddr *)&a, &l);
+           struct iovec v[2] = {{"one", 3}, {"two", 3}}; struct msghdr m = {.msg_name = &a, .msg_namelen = sizeof a, .msg_iov = v, .msg_iovlen = 2};
+           int n = sendmsg(w, &m, 0); char b[16] = {0}; usleep(20000); int got = recv(r, b, sizeof b, MSG_DONTWAIT);
+           struct sockaddr_in far = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(0x0AFFFEFD)};
+           int f = socket(AF_INET, SOCK_DGRAM, 0); int nb = bind(f, (struct sockaddr *)&far, sizeof far) == -1 && errno == EADDRNOTAVAIL;
+           pid_t c = fork(); if (c == 0) { setuid(65534); struct sockaddr_in lo = {.sin_family = AF_INET, .sin_port = htons(80)};
+               int g = socket(AF_INET, SOCK_STREAM, 0); _exit(bind(g, (struct sockaddr *)&lo, sizeof lo) == -1 && errno == EACCES ? 0 : 1); }
+           int st = 0; waitpid(c, &st, 0); close(r); close(w); close(f);
+           n == 6 && got == 6 && !strcmp(b, "onetwo") && nb && WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("SO_PEERCRED: the connecting child on the accepted socket, ourselves on a socketpair", ({
+           struct sockaddr_un a = {.sun_family = AF_UNIX, .sun_path = "\0ltp2-peercred"};
+           int s = socket(AF_UNIX, SOCK_STREAM, 0); bind(s, (struct sockaddr *)&a, sizeof a); listen(s, 4);
+           int go[2]; pipe(go);
+           pid_t c = fork(); if (c == 0) { int t = socket(AF_UNIX, SOCK_STREAM, 0); connect(t, (struct sockaddr *)&a, sizeof a);
+               char x; read(go[0], &x, 1); _exit(0); }
+           int d = accept(s, 0, 0); struct ucred u = {0}; socklen_t ul = sizeof u;
+           int r = getsockopt(d, SOL_SOCKET, SO_PEERCRED, &u, &ul); write(go[1], "x", 1);
+           int st; waitpid(c, &st, 0); int sv[2]; socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+           struct ucred v = {0}; socklen_t vl = sizeof v; int r2 = getsockopt(sv[0], SOL_SOCKET, SO_PEERCRED, &v, &vl);
+           close(d); close(s); close(sv[0]); close(sv[1]); close(go[0]); close(go[1]);
+           r == 0 && ul == sizeof u && u.pid == c && u.uid == geteuid() && r2 == 0 && v.pid == getpid(); }));
+    EXPECT("MSG_MORE holds a UDP datagram and a short TCP segment back until the next send", ({
+           int r = socket(AF_INET, SOCK_DGRAM, 0), w = socket(AF_INET, SOCK_DGRAM, 0);
+           struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)}; socklen_t l = sizeof a;
+           bind(r, (struct sockaddr *)&a, sizeof a); getsockname(r, (struct sockaddr *)&a, &l); connect(w, (struct sockaddr *)&a, sizeof a);
+           char b[32] = {0}; send(w, "ab", 2, MSG_MORE); usleep(20000); int u1 = recv(r, b, sizeof b, MSG_DONTWAIT);
+           send(w, "cd", 2, 0); usleep(20000); int u2 = recv(r, b, sizeof b, MSG_DONTWAIT);
+           int ok = u1 == -1 && u2 == 4 && !memcmp(b, "abcd", 4); close(r); close(w);
+           struct sockaddr_in t = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)}; l = sizeof t;
+           int s = socket(AF_INET, SOCK_STREAM, 0); bind(s, (struct sockaddr *)&t, sizeof t); getsockname(s, (struct sockaddr *)&t, &l); listen(s, 1);
+           int c = socket(AF_INET, SOCK_STREAM, 0); connect(c, (struct sockaddr *)&t, sizeof t); int d = accept(s, 0, 0);
+           send(c, "ef", 2, MSG_MORE); usleep(20000); int t1 = recv(d, b, sizeof b, MSG_DONTWAIT);
+           send(c, "g", 1, 0); usleep(20000); int t2 = recv(d, b, sizeof b, MSG_DONTWAIT);
+           close(c); close(d); close(s); ok && t1 == -1 && t2 == 3 && !memcmp(b, "efg", 3); }));
+    EXPECT("resource limits: NOFILE caps descriptors, FSIZE cuts writes, prlimit reports the old limit", ({
+           pid_t c = fork(); if (c == 0) {
+               struct rlimit n = {8, 8}; if (setrlimit(RLIMIT_NOFILE, &n)) _exit(1);
+               if (getdtablesize() != 8 || dup2(0, 9) != -1 || errno != EBADF) _exit(2);
+               int fds = 0; while (dup(0) >= 0) fds++; if (errno != EMFILE) _exit(3);
+               signal(SIGXFSZ, SIG_IGN); struct rlimit f = {10, 10}; struct rlimit was;
+               if (prlimit(0, RLIMIT_FSIZE, &f, &was) || was.rlim_cur != RLIM_INFINITY) _exit(4);
+               for (int i = 3; i < 8; i++) close(i);
+               int fd = open("/tmp/ltp2-fsize", O_CREAT | O_TRUNC | O_WRONLY, 0644);
+               int w1 = write(fd, "abcdefghijklmnop", 16); int w2 = write(fd, "x", 1); int e2 = errno;
+               close(fd); unlink("/tmp/ltp2-fsize");
+               _exit(w1 == 10 && w2 == -1 && e2 == EFBIG ? 0 : 5); }
+           int st = 0; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("mlock counts locked memory in VmLck; non-root over RLIMIT_MEMLOCK is ENOMEM", ({
+           pid_t c = fork(); if (c == 0) {
+               char *m = mmap(0, 65536, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+               if (mlock(m, 65536)) _exit(1);
+               char b[2048] = {0}; int fd = open("/proc/self/status", O_RDONLY); read(fd, b, sizeof b - 1); close(fd);
+               char *l = strstr(b, "VmLck:"); if (!l || atol(l + 6) != 64) _exit(2);
+               munlockall(); struct rlimit r = {4096, 4096}; setrlimit(RLIMIT_MEMLOCK, &r); setuid(65534);
+               _exit(mlock(m, 8192) == -1 && errno == ENOMEM && mlock(m, 4096) == 0 ? 0 : 3); }
+           int st = 0; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("mremap MREMAP_FIXED moves pages to the address asked for; an unmapped address is EFAULT", ({
+           char *a = mmap(0, 3 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           char *t = mmap(0, 2 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           a[0] = 'x'; a[4096] = 'y'; t[0] = 'z';
+           char *m = mremap(a, 2 * 4096, 2 * 4096, MREMAP_MAYMOVE | MREMAP_FIXED, t);
+           int ok = m == t && t[0] == 'x' && t[4096] == 'y';
+           munmap(t, 2 * 4096); munmap(a + 2 * 4096, 4096);
+           void *e = mremap(a, 4096, 8192, MREMAP_MAYMOVE); ok && e == MAP_FAILED && errno == EFAULT; }));
+    EXPECT("sched_setattr keeps SCHED_DEADLINE runtime, deadline and period", ({
+           struct { unsigned size, policy; unsigned long long flags; int nice; unsigned prio; unsigned long long run, dl, per; }
+               at = {48, 6, 0, 0, 0, 10000000, 30000000, 40000000}, g = {0};
+           pid_t c = fork(); if (c == 0) { cpu_set_t all; memset(&all, 0xff, sizeof all); sched_setaffinity(0, sizeof all, &all);
+               if (syscall(SYS_sched_setattr, 0, &at, 0)) _exit(1);
+               if (syscall(SYS_sched_getattr, 0, &g, 48, 0)) _exit(2);
+               _exit(g.policy == 6 && g.run == 10000000 && g.dl == 30000000 && g.per == 40000000 ? 0 : 3); }
+           int st = 0; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("SIGSTOP stops a child (wait WUNTRACED, state T), SIGCONT continues it (WCONTINUED, waitid CLD_CONTINUED)", ({
+           pid_t c = fork(); if (c == 0) { for (;;) pause(); }
+           kill(c, SIGSTOP); int st = 0; int w1 = waitpid(c, &st, WUNTRACED);
+           int stopped = w1 == c && WIFSTOPPED(st) && WSTOPSIG(st) == SIGSTOP;
+           char path[32], b[128] = {0}; snprintf(path, sizeof path, "/proc/%d/stat", c);
+           int fd = open(path, O_RDONLY); read(fd, b, sizeof b - 1); close(fd);
+           char *r = strrchr(b, ')'); int tee = r && r[2] == 'T';
+           kill(c, SIGCONT); siginfo_t si = {0}; int w2 = waitid(P_PID, c, &si, WCONTINUED | WNOWAIT);
+           int w3 = waitpid(c, &st, WCONTINUED);
+           int cont = w2 == 0 && si.si_pid == c && si.si_code == CLD_CONTINUED && w3 == c && WIFCONTINUED(st);
+           kill(c, SIGKILL); waitpid(c, &st, 0);
+           stopped && tee && cont && WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL; }));
+    EXPECT("times: system calls count as system time; a waited-for child's times reach tms_cutime/cstime", ({
+           struct tms a, b; times(&a); time_t t0 = time(0); while (time(0) - t0 < 2) getppid();
+           pid_t c = fork(); if (c == 0) { time_t t1 = time(0); while (time(0) - t1 < 2) getppid(); volatile long x = 0; for (long i = 0; i < 100000000; i++) x += i; _exit(0); }
+           waitpid(c, 0, 0); times(&b);
+           b.tms_stime > a.tms_stime && b.tms_cutime > 0 && b.tms_cstime > 0; }));
+    EXPECT("setpgid on a child after its execve is EACCES", ({
+           int go[2]; pipe(go); pid_t c = fork();
+           if (c == 0) { close(go[0]); fcntl(go[1], F_SETFD, FD_CLOEXEC); execl("/disk/busybox", "sleep", "1", (char *)0); execl("/bin/sleep", "sleep", "1", (char *)0); _exit(1); }
+           close(go[1]); char x; read(go[0], &x, 1); close(go[0]);   /* EOF once the child execs */
+           int r = setpgid(c, c); int e = errno; int st; waitpid(c, &st, 0); r == -1 && e == EACCES; }));
+    EXPECT("setsid is EPERM while a process group with the caller's id has members", ({
+           pid_t c = fork();
+           if (c == 0) {
+               setpgid(0, 0); pid_t g = fork(); if (g == 0) { pause(); _exit(0); }
+               setpgid(0, getpgid(getppid()));
+               int r = setsid(); int e = errno; kill(g, SIGKILL); waitpid(g, 0, 0);
+               _exit(r == -1 && e == EPERM ? 0 : 1);
+           }
+           int st; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("a real-time signal from tgkill past RLIMIT_SIGPENDING is EAGAIN; kill still sends it", ({
+           pid_t c = fork();
+           if (c == 0) {
+               sigset_t m; sigemptyset(&m); sigaddset(&m, SIGRTMIN); sigprocmask(SIG_BLOCK, &m, 0);
+               struct rlimit z = {0, 0}; setrlimit(RLIMIT_SIGPENDING, &z);
+               int r = syscall(SYS_tgkill, getpid(), syscall(SYS_gettid), SIGRTMIN); int e = errno;
+               _exit(r == -1 && e == EAGAIN && kill(getpid(), SIGRTMIN) == 0 ? 0 : 1);
+           }
+           int st; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("a thread that ends holding a robust futex leaves FUTEX_OWNER_DIED in it", ({
+           /* A bare clone thread: musl's pthread_join would wait for its own exit path. */
+           clone(robust_thread, robust_stack + sizeof robust_stack, CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM, 0);
+           for (int i = 0; i < 200 && *(volatile unsigned *)&rnode.word != 0x40000000; i++) usleep(10000);
+           rgot > 0 && rnode.word == 0x40000000; }));
+    EXPECT("capget reports root's capabilities; an unknown version is EINVAL and gets the preferred one", ({
+           struct __user_cap_header_struct h = { _LINUX_CAPABILITY_VERSION_3, 0 }; struct __user_cap_data_struct d[2];
+           int r = syscall(SYS_capget, &h, d);
+           struct __user_cap_header_struct bad = { 0x12345678, 0 }; int r2 = syscall(SYS_capget, &bad, d); int e2 = errno;
+           r == 0 && (d[0].effective >> CAP_SYS_TIME) % 2 == 1 && (d[0].permitted >> CAP_SETPCAP) % 2 == 1
+             && r2 == -1 && e2 == EINVAL && bad.version == _LINUX_CAPABILITY_VERSION_3; }));
+    EXPECT("capset drops capabilities: then setting the clock, PR_CAPBSET_DROP and PR_SET_SECUREBITS are EPERM", ({
+           pid_t c = fork();
+           if (c == 0) {
+               struct __user_cap_header_struct h = { _LINUX_CAPABILITY_VERSION_3, 0 }; struct __user_cap_data_struct d[2];
+               syscall(SYS_capget, &h, d);
+               int bset = prctl(PR_CAPBSET_READ, CAP_SYS_TIME, 0, 0, 0);
+               d[0].effective &= ~((1u << CAP_SYS_TIME) | (1u << CAP_SETPCAP));
+               int r = syscall(SYS_capset, &h, d);
+               struct timeval tv; gettimeofday(&tv, 0);
+               int t = settimeofday(&tv, 0); int te = errno;
+               int b = prctl(PR_CAPBSET_DROP, 1, 0, 0, 0); int be = errno;
+               int sb = prctl(PR_SET_SECUREBITS, 0, 0, 0, 0); int se = errno;
+               struct __user_cap_data_struct d2[2]; syscall(SYS_capget, &h, d2);
+               _exit(bset == 1 && r == 0 && t == -1 && te == EPERM && b == -1 && be == EPERM && sb == -1 && se == EPERM
+                     && (d2[0].effective >> CAP_SYS_TIME) % 2 == 0 && (d2[0].permitted >> CAP_SYS_TIME) % 2 == 1 ? 0 : 1);
+           }
+           int st; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("capset may not add to the permitted set, nor change another process", ({
+           pid_t c = fork();
+           if (c == 0) {
+               struct __user_cap_header_struct h = { _LINUX_CAPABILITY_VERSION_3, 0 }; struct __user_cap_data_struct d[2];
+               syscall(SYS_capget, &h, d);
+               d[0].permitted &= ~(1u << CAP_SYS_TIME); d[0].effective &= ~(1u << CAP_SYS_TIME);
+               int r = syscall(SYS_capset, &h, d);
+               d[0].permitted |= 1u << CAP_SYS_TIME;
+               int r2 = syscall(SYS_capset, &h, d); int e2 = errno;
+               h.pid = getppid(); int r3 = syscall(SYS_capset, &h, d); int e3 = errno;
+               _exit(r == 0 && r2 == -1 && e2 == EPERM && r3 == -1 && e3 == EPERM ? 0 : 1);
+           }
+           int st; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("mmap: MAP_FIXED_NOREPLACE over a mapping is EEXIST, an unknown MAP_SHARED_VALIDATE flag EOPNOTSUPP, no type EINVAL", ({
+           char *p = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           void *q = mmap(p, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0); int qe = errno;
+           int fd = open("/tmp/t_ltp2_v", O_RDWR | O_CREAT | O_TRUNC, 0600); ftruncate(fd, 4096);
+           void *v = mmap(0, 4096, PROT_READ, MAP_SHARED_VALIDATE | 0x400, fd, 0); int ve = errno;
+           void *w = mmap(0, 4096, PROT_READ, 0, fd, 0); int we = errno;
+           void *x = mmap(0, 0, PROT_READ, MAP_SHARED, -1, 0); int xe = errno;
+           close(fd); unlink("/tmp/t_ltp2_v"); munmap(p, 8192);
+           q == MAP_FAILED && qe == EEXIST && v == MAP_FAILED && ve == EOPNOTSUPP && w == MAP_FAILED && we == EINVAL
+             && x == MAP_FAILED && xe == EBADF; }));
+    EXPECT("SCHED_RESET_ON_FORK: the child of a SCHED_FIFO process starts as SCHED_OTHER with priority 0", ({
+           pid_t c = fork();
+           if (c == 0) {
+               struct sched_param sp = { 10 };
+               int r = syscall(SYS_sched_setscheduler, 0, SCHED_FIFO | 0x40000000, &sp);
+               int me = syscall(SYS_sched_getscheduler, 0);
+               pid_t g = fork(); if (g == 0) _exit(0);
+               int gp = syscall(SYS_sched_getscheduler, g); struct sched_param gq = { 7 }; syscall(SYS_sched_getparam, g, &gq);
+               waitpid(g, 0, 0);
+               _exit(r == 0 && me == (SCHED_FIFO | 0x40000000) && gp == SCHED_OTHER && gq.sched_priority == 0 ? 0 : 1);
+           }
+           int st; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("shutdown(SHUT_RD) on a unix socket: reads end, the peer's sends are EPIPE, poll reports POLLRDHUP", ({
+           int sv[2]; socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+           write(sv[1], "ab", 2);
+           int s = shutdown(sv[0], SHUT_RD);
+           char b[4]; int n1 = read(sv[0], b, 4); int n2 = read(sv[0], b, 4);
+           int w = send(sv[1], "c", 1, MSG_NOSIGNAL); int we = errno;
+           struct pollfd pf = { sv[0], POLLIN | POLLRDHUP, 0 }; int pr = poll(&pf, 1, 0);
+           close(sv[0]); close(sv[1]);
+           s == 0 && n1 == 2 && n2 == 0 && w == -1 && we == EPIPE && pr == 1 && (pf.revents & POLLRDHUP); }));
+    EXPECT("the CPU-time clocks of this thread and this process can be read by id", ({
+           clockid_t tc, pc; struct timespec t1, t2;
+           int a = pthread_getcpuclockid(pthread_self(), &tc); int b = clock_getcpuclockid(0, &pc);
+           a == 0 && b == 0 && clock_gettime(tc, &t1) == 0 && clock_gettime(pc, &t2) == 0
+             && clock_gettime((clockid_t)((~0u << 3) | 3), &t1) == -1 && errno == EINVAL; }));
+    EXPECT("arch_prctl: ARCH_GET_FS gives what ARCH_SET_FS set, ARCH_GET_CPUID is 1", ({
+           unsigned long fs = 0; int r = syscall(SYS_arch_prctl, 0x1003, &fs);
+           r == 0 && fs != 0 && syscall(SYS_arch_prctl, 0x1011, 0) == 1; }));
+    EXPECT("memfd_create: a NULL name is EFAULT, a name over 249 bytes EINVAL", ({
+           char nm[300]; memset(nm, 'a', sizeof nm); nm[299] = 0;
+           int a = syscall(SYS_memfd_create, 0, 0); int ae = errno;
+           int b = syscall(SYS_memfd_create, nm, 0); int be = errno;
+           nm[249] = 0; int c = syscall(SYS_memfd_create, nm, 0);
+           if (c >= 0) close(c);
+           a == -1 && ae == EFAULT && b == -1 && be == EINVAL && c >= 0; }));
+    EXPECT("madvise(MADV_DONTNEED) leaves private anonymous pages reading zeros; bad advice is EINVAL", ({
+           char *p = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           memset(p, 1, 8192);
+           int r = madvise(p, 8192, MADV_DONTNEED);
+           int z = 1; for (int i = 0; i < 8192; i++) if (p[i]) z = 0;
+           int bad = madvise(p, 4096, 1212); int be = errno;
+           int mis = madvise(p + 1, 4096, MADV_NORMAL); int me = errno;
+           munmap(p, 8192);
+           r == 0 && z && bad == -1 && be == EINVAL && mis == -1 && me == EINVAL; }));
+    EXPECT("timerfd_settime takes TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET, and other flags are EINVAL", ({
+           int fd = timerfd_create(CLOCK_REALTIME, 0);
+           struct itimerspec its = { {0, 0}, {0, 0} };
+           int a = timerfd_settime(fd, TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET, &its, 0);
+           int b = timerfd_settime(fd, 4, &its, 0); int be = errno;
+           close(fd);
+           a == 0 && b == -1 && be == EINVAL; }));
     return done();
 }

@@ -832,14 +832,15 @@ fn disk_link_of(d: &DiskFs, i: u64) -> u64
   return t;
 }
 
-/// A hard link to entry t, or DSLOTS if there is none.
+/// A hard link to entry t, or DSLOTS if there is none. Only the slots the
+/// directory holds now can be links (disk_link_of), so the scans stop there.
 fn disk_link_to(d: &DiskFs, t: u64) -> u64
   requires disk_ok(d)
   ensures result <= DSLOTS
 {
   let mut i = 0;
-  while i < DSLOTS
-    invariant i <= DSLOTS
+  while i < d.slots
+    invariant i <= d.slots && d.slots <= DSLOTS
   {
     if disk_link_of(d, i) == t {
       return i;
@@ -856,8 +857,8 @@ fn disk_links(d: &DiskFs, t: u64) -> u64
 {
   let mut c = 0;
   let mut i = 0;
-  while i < DSLOTS
-    invariant i <= DSLOTS && c <= i
+  while i < d.slots
+    invariant i <= d.slots && d.slots <= DSLOTS && c <= i
   {
     if disk_link_of(d, i) == t {
       c = c + 1;

@@ -21,6 +21,7 @@ import "core/csum.bastio";
 
 const ETH_ARP: u64 = 0x0806;
 const ETH_IP: u64 = 0x0800;
+const ETH_IP6: u64 = 0x86DD;          // src/net6.bastio
 const ETH_MIN: u64 = 60;              // shorter frames are padded
 const MAC_BCAST: u64 = 0xFFFFFFFFFFFF;
 const MAC_LIMIT: u64 = 0x1000000000000;
@@ -29,6 +30,7 @@ const IP_MAX: u64 = 4294967295;
 const MY_IP: u64 = 0x0A00020F;        // 10.0.2.15, if DHCP gets no answer
 const GATEWAY: u64 = 0x0A000202;      // 10.0.2.2
 const NETMASK: u64 = 0xFFFFFF00;      // /24
+const DNS_SERVER: u64 = 0x0A000203;   // 10.0.2.3, QEMU's resolver, with the static address
 
 const IP_ICMP: u64 = 1;
 const IP_UDP: u64 = 17;
@@ -40,6 +42,7 @@ const PING_ID: u64 = 0x4253;          // "BS"
 const PING_DATA: u64 = 32;
 
 const ARP_N: u64 = 4;
+const HELD_N: u64 = 8;                // frames held for ARP answers
 
 // DHCP (RFC 2131), as a client.
 const DHCP_OFF: u64 = 0;              // no lease being sought: static address
@@ -67,6 +70,9 @@ const SOCKS: u64 = 8;                 // UDP sockets in the table
 const RXQ: u64 = 4;                   // datagrams each socket can queue
 const UDP_MAX: u64 = 1472;            // the largest payload one frame carries
 const NO_SOCK: u64 = 18446744073709551615;
+const V6N: u64 = 16;                  // IPv6 peers (src/net6.bastio)
+const V6W: u64 = 4;                   // words per peer: address (2), MAC, in use
+const V6_BASE: u64 = 0xF0000000;      // 240.0.0.0: the first peer's token
 const LOQ: u64 = 8;                   // frames the loopback queue holds
 const LO_NET: u64 = 127;              // 127.0.0.0/8: this machine
 const LO_IP: u64 = 0x7F000001;        // 127.0.0.1
@@ -81,12 +87,13 @@ const S_PEER_IP: u64 = 4;             // who sent the last datagram taken
 const S_PEER_PORT: u64 = 5;
 const S_SLOTS: u64 = 6;               // then per slot: length, address, port
 const SLOT_W: u64 = 3;
-const SOCK_FIELDS: u64 = 18;          // S_SLOTS + RXQ * SLOT_W
+const S_CORK: u64 = 18;               // bytes held back by MSG_MORE, in cork
+const SOCK_FIELDS: u64 = 19;          // S_SLOTS + RXQ * SLOT_W + 1
 
 // The TCP table's size (src/tcp.bastio has the rest).
 const TCBS: u64 = 32;                 // connections (listeners and TIME_WAIT hold some)
 const TCP_BUF: u64 = 4096;            // bytes in each receive and send buffer
-const TCB_W: u64 = 22;                // words per connection
+const TCB_W: u64 = 23;                // words per connection
 
 struct Net {
   dev: Card,
@@ -97,15 +104,18 @@ struct Net {
   span: u64,          // subnet when a / span == b / span)
   arp: Buf,           // ARP_N entries of (address, MAC); MAC 0: empty
   arp_next: u64,      // the entry the next new address replaces
-  held: Bytes,        // a frame waiting for its next hop's MAC ...
-  held_len: u64,      // ... this long (0: none) ...
-  held_hop: u64,      // ... to this address
+  held: Bytes,        // frames waiting for their next hop's MAC, HELD_N slots
+  held_len: Buf,      // of RX_BUF bytes, oldest first: their lengths ...
+  held_hop: Buf,      // ... and the addresses they go to
+  held_n: u64,        // how many are held
   dhcp_state: u64,
   dhcp_xid: u64,      // the transaction id our messages carry
   dhcp_offer: u64,    // the address offered ...
   dhcp_server: u64,   // ... by this server
   dhcp_tries: u64,
   dhcp_until: u64,    // the tick to retry at
+  dns: u64,           // the name server DHCP named (0: none)
+  dns_new: bool,      // ... not yet written to /etc/resolv.conf (nic_dns_take)
   now: u64,           // the tick count at the last nic_tick
   ping_state: u64,
   ping_pid: u64,      // who asked
@@ -117,6 +127,7 @@ struct Net {
   tx: u64,
   socks: Buf,         // the UDP sockets, SOCK_FIELDS words each
   dq: Bytes,          // their queued datagrams, RXQ slots of UDP_MAX bytes each
+  cork: Bytes,        // the datagram each is putting together (MSG_MORE), UDP_MAX bytes each
   eph: u64,           // where the next ephemeral port search starts
   tcbs: Buf,          // TCP connections (src/tcp.bastio), TCB_W words each
   trx: Bytes,         // their receive buffers, TCP_BUF bytes each
@@ -129,16 +140,24 @@ struct Net {
   seen_rx: u64,       // rx and the tick count when sock_wake last looked
   seen_tick: u64,
   irq_on: bool,       // received frames raise the card's interrupt (nic_listen)
+  v6: Buf,            // IPv6 peers, V6W words each (src/net6.bastio)
+  v6_next: u64,       // the slot the next new peer takes
+  iid: u64,           // our interface id (low half of our IPv6 addresses)
+  pfx: u64,           // the advertised prefix (high half of our global address), 0: none yet
+  rtr_mac: u64,       // the IPv6 default router's MAC, 0: none
+  rs_n: u64,          // router solicitations sent
+  rs_until: u64,      // the tick to send the next at
 }
 
 spec fn net_ok(n: &Net) -> bool {
-  card_ok(n.dev) && blen(n.pkt) == RX_BUF && blen(n.out) == RX_BUF && blen(n.held) == RX_BUF
+  card_ok(n.dev) && blen(n.pkt) == RX_BUF && blen(n.out) == RX_BUF && blen(n.held) == HELD_N * RX_BUF
   && n.ip <= IP_MAX && n.gw <= IP_MAX && 1 <= n.span && n.span <= 4294967296
-  && len(n.arp) == ARP_N * 2 && n.held_len <= FRAME_MAX && n.seq <= 65535 && n.ping_pid < PID_LIMIT && n.ping_ip <= IP_MAX
-  && n.dhcp_xid <= IP_MAX && n.dhcp_offer <= IP_MAX && n.dhcp_server <= IP_MAX
-  && len(n.socks) == SOCKS * SOCK_FIELDS && blen(n.dq) == SOCKS * RXQ * UDP_MAX
+  && len(n.arp) == ARP_N * 2 && len(n.held_len) == HELD_N && len(n.held_hop) == HELD_N && n.held_n <= HELD_N && n.seq <= 65535 && n.ping_pid < PID_LIMIT && n.ping_ip <= IP_MAX
+  && n.dhcp_xid <= IP_MAX && n.dhcp_offer <= IP_MAX && n.dhcp_server <= IP_MAX && n.dns <= IP_MAX
+  && len(n.socks) == SOCKS * SOCK_FIELDS && blen(n.dq) == SOCKS * RXQ * UDP_MAX && blen(n.cork) == SOCKS * UDP_MAX
   && len(n.tcbs) == TCBS * TCB_W && blen(n.trx) == TCBS * TCP_BUF && blen(n.ttx) == TCBS * TCP_BUF
   && blen(n.lo) == LOQ * RX_BUF && len(n.lo_len) == LOQ && n.lo_head < LOQ && n.lo_n <= LOQ
+  && len(n.v6) == V6N * V6W && n.rtr_mac < MAC_LIMIT
 }
 
 // ---------------------------------------------------------------- bytes
@@ -320,8 +339,8 @@ fn next_hop(n: &Net, ip: u64) -> u64
   requires net_ok(n)
   ensures result <= IP_MAX || result == ip
 {
-  if is_local(n, ip) || ip / n.span == n.ip / n.span {
-    return ip;
+  if is_local(n, ip) || ip / n.span == n.ip / n.span || is_v6tok(ip) {
+    return ip;                        // an IPv6 peer's token: src/net6.bastio
   }
   return n.gw;
 }
@@ -375,13 +394,18 @@ fn reply_send(n: &mut Net, ip: u64, flen: u64) -> bool
   if is_local(n, ip) {
     return lo_send(&mut n, flen);
   }
+  if is_v6tok(ip) {
+    return v6_out(&mut n, flen);
+  }
   return net_send(&mut n, flen);
 }
 
 /// Sends the outgoing frame (its first flen bytes, Ethernet header aside)
-/// to `hop`: now if its MAC is cached, else once ARP answers. A frame
-/// already held for an answer is replaced. A frame for this machine goes
-/// round the loopback queue instead.
+/// to `hop`: now if its MAC is cached, else once ARP answers. Up to HELD_N
+/// frames wait for answers at once (two connections opened together each
+/// send one); past that the frame is dropped, as a busy card would, and
+/// TCP sends it again. A frame for this machine goes round the loopback
+/// queue instead.
 fn send_via(n: &mut Net, hop: u64, flen: u64) -> bool
   requires net_ok(n) && hop <= IP_MAX && 14 <= flen && flen <= FRAME_MAX
   ensures net_ok(n)
@@ -389,15 +413,66 @@ fn send_via(n: &mut Net, hop: u64, flen: u64) -> bool
   if is_local(n, hop) {
     return lo_send(&mut n, flen);
   }
+  if is_v6tok(hop) {
+    return v6_out(&mut n, flen);
+  }
   let mac = arp_find(n, hop);
   if mac != 0 {
     put48(&mut n.out, 0, mac);
     return net_send(&mut n, flen);
   }
-  bcopy(&mut n.held, 0, n.out, 0, flen);
-  n.held_len = flen;
-  n.held_hop = hop;
+  let mut asked = false;
+  let mut i = 0;
+  while i < n.held_n
+    invariant i <= n.held_n && net_ok(n)
+  {
+    if get(n.held_hop, i) == hop {
+      asked = true;
+    }
+    i = i + 1;
+  }
+  if n.held_n < HELD_N {
+    bcopy(&mut n.held, n.held_n * RX_BUF, n.out, 0, flen);
+    n.held_len = set(n.held_len, n.held_n, flen);
+    n.held_hop = set(n.held_hop, n.held_n, hop);
+    n.held_n = n.held_n + 1;
+  }
+  if asked {
+    return true;                      // its ARP request is already out
+  }
   return arp_send(&mut n, 1, MAC_BCAST, 0, hop);
+}
+
+/// ARP answered for `ip` (at `mac`): the frames held for it go out, oldest
+/// first, and the others move down to stay in order.
+fn held_release(n: &mut Net, ip: u64, mac: u64)
+  requires net_ok(n) && mac < MAC_LIMIT
+  ensures net_ok(n)
+{
+  let mut kept = 0;
+  let mut i = 0;
+  while i < n.held_n
+    invariant kept <= i && i <= n.held_n && net_ok(n)
+  {
+    let l = get(n.held_len, i);
+    let hop = get(n.held_hop, i);
+    if l <= FRAME_MAX {
+      bcopy(&mut n.out, 0, n.held, i * RX_BUF, l);
+      if hop == ip {
+        if l >= 14 {
+          put48(&mut n.out, 0, mac);
+          net_send(&mut n, l);
+        }
+      } else {
+        bcopy(&mut n.held, kept * RX_BUF, n.out, 0, l);
+        n.held_len = set(n.held_len, kept, l);
+        n.held_hop = set(n.held_hop, kept, hop);
+        kept = kept + 1;
+      }
+    }
+    i = i + 1;
+  }
+  n.held_n = kept;
 }
 
 fn arp_in(n: &mut Net, flen: u64)
@@ -421,14 +496,7 @@ fn arp_in(n: &mut Net, flen: u64)
   if op == 1 && tip == n.ip {
     arp_send(&mut n, 2, smac, smac, sip);
   }
-  if n.held_len >= 14 && n.held_hop == sip {
-    // The frame waiting for this answer goes out now.
-    let l = n.held_len;
-    bcopy(&mut n.out, 0, n.held, 0, l);
-    n.held_len = 0;
-    put48(&mut n.out, 0, smac);
-    net_send(&mut n, l);
-  }
+  held_release(&mut n, sip, smac);
   if n.ping_state == PING_ARP && n.ping_hop == sip {
     ping_send(&mut n, smac);
   }
@@ -598,19 +666,20 @@ fn dhcp_send(n: &mut Net, kind: u64)
   bset(&mut n.out, 282, 53);          // option: message type
   bset(&mut n.out, 283, 1);
   bset(&mut n.out, 284, cast[u8](kind));
-  bset(&mut n.out, 285, 55);          // option: we want the mask and router
-  bset(&mut n.out, 286, 2);
+  bset(&mut n.out, 285, 55);          // option: we want the mask, router and name server
+  bset(&mut n.out, 286, 3);
   bset(&mut n.out, 287, 1);
   bset(&mut n.out, 288, 3);
-  let mut o = 289;
+  bset(&mut n.out, 289, 6);
+  let mut o = 290;
   if kind == 3 {
-    bset(&mut n.out, 289, 50);        // option: the address we want
-    bset(&mut n.out, 290, 4);
-    put32(&mut n.out, 291, n.dhcp_offer);
-    bset(&mut n.out, 295, 54);        // option: the server we accept
-    bset(&mut n.out, 296, 4);
-    put32(&mut n.out, 297, n.dhcp_server);
-    o = 301;
+    bset(&mut n.out, 290, 50);        // option: the address we want
+    bset(&mut n.out, 291, 4);
+    put32(&mut n.out, 292, n.dhcp_offer);
+    bset(&mut n.out, 296, 54);        // option: the server we accept
+    bset(&mut n.out, 297, 4);
+    put32(&mut n.out, 298, n.dhcp_server);
+    o = 302;
   }
   bset(&mut n.out, o, 255);           // end
   udp_seal(&mut n, IP_MAX, ulen);
@@ -641,11 +710,13 @@ fn dhcp_static(n: &mut Net)
   n.ip = MY_IP;
   n.gw = GATEWAY;
   n.span = 4294967296 - NETMASK;
+  n.dns = DNS_SERVER;
+  n.dns_new = true;
 }
 
 /// A DHCP message to our port (ulen bytes of UDP at 34, checked to fit the
 /// frame): an OFFER gets a REQUEST, an ACK for the address offered sets our
-/// address, mask and gateway, and a NAK starts over. The lease is not
+/// address, mask, gateway and name server, and a NAK starts over. The lease is not
 /// renewed (QEMU's lasts a day).
 fn dhcp_in(n: &mut Net, ulen: u64)
   requires net_ok(n) && 8 <= ulen && ulen <= FRAME_MAX - 34
@@ -661,9 +732,10 @@ fn dhcp_in(n: &mut Net, ulen: u64)
   let mut mask = NETMASK;
   let mut router = 0;
   let mut server = 0;
+  let mut dns = 0;
   let mut o = 282;
   while o < end
-    invariant 282 <= o && mask <= IP_MAX && router <= IP_MAX && server <= IP_MAX
+    invariant 282 <= o && mask <= IP_MAX && router <= IP_MAX && server <= IP_MAX && dns <= IP_MAX
   {
     let code = cast[u64](bget(n.pkt, o));
     if code == 255 || o + 1 >= end {
@@ -683,6 +755,8 @@ fn dhcp_in(n: &mut Net, ulen: u64)
           router = be32(n.pkt, o + 2);
         } else if code == 54 && l >= 4 {
           server = be32(n.pkt, o + 2);
+        } else if code == 6 && l >= 4 {
+          dns = be32(n.pkt, o + 2);   // the first of the servers listed
         }
         o = o + 2 + l;
       }
@@ -698,6 +772,8 @@ fn dhcp_in(n: &mut Net, ulen: u64)
     n.gw = router;
     n.span = 4294967296 - mask;
     n.dhcp_state = DHCP_BOUND;
+    n.dns = dns;
+    n.dns_new = true;
   } else if n.dhcp_state == DHCP_REQUEST && kind == 6 {
     dhcp_start(&mut n);
   }
@@ -876,6 +952,7 @@ fn udp_open(n: &mut Net) -> u64
       sk_set(&mut n, s, S_COUNT, 0);
       sk_set(&mut n, s, S_PEER_IP, 0);
       sk_set(&mut n, s, S_PEER_PORT, 0);
+      sk_set(&mut n, s, S_CORK, 0);
       return s;
     }
     s = s + 1;
@@ -977,6 +1054,39 @@ fn udp_sendto(n: &mut Net, s: u64, to: u64, port: u64, buf: &Bytes, size: u64) -
   return size;
 }
 
+/// Sends bytes 0..size of buf to ip:port after what MSG_MORE held back on
+/// s; with more, holds them back too. Returns size, or NO_SOCK (also when
+/// the datagram would outgrow UDP_MAX: see sock_corked).
+fn udp_send_more(n: &mut Net, s: u64, to: u64, port: u64, buf: &Bytes, size: u64, more: bool) -> u64
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  if !udp_is_open(n, s) || s >= SOCKS || size > blen(buf) {
+    return NO_SOCK;
+  }
+  let have = sk_get(n, s, S_CORK);
+  if have == 0 && !more {
+    return udp_sendto(&mut n, s, to, port, buf, size);
+  }
+  if have > UDP_MAX || size > UDP_MAX - have {
+    return NO_SOCK;
+  }
+  bcopy(&mut n.cork, s * UDP_MAX + have, buf, 0, size);
+  if more {
+    sk_set(&mut n, s, S_CORK, have + size);
+    return size;
+  }
+  sk_set(&mut n, s, S_CORK, 0);
+  let mut g = balloc(UDP_MAX);
+  bcopy(&mut g, 0, n.cork, s * UDP_MAX, have + size);
+  let r = udp_sendto(&mut n, s, to, port, g, have + size);
+  bfree(g);
+  if r == NO_SOCK {
+    return NO_SOCK;
+  }
+  return size;
+}
+
 /// Takes the oldest datagram queued on socket s, if any: copies up to
 /// `max` bytes of it (and no more than buf holds) to the start of buf and
 /// returns that count, dropping the rest as Linux does; its sender becomes
@@ -1046,6 +1156,7 @@ fn net_poll(n: &mut Net)
   {
     let flen = card_recv(&mut n.dev, &mut n.pkt);
     if flen == 0 {
+      card_rx_flush(&mut n.dev);
       return;
     }
     if n.rx < 18446744073709551615 {
@@ -1057,10 +1168,13 @@ fn net_poll(n: &mut Net)
         arp_in(&mut n, flen);
       } else if kind == ETH_IP {
         ip_in(&mut n, flen);
+      } else if kind == ETH_IP6 {
+        v6_in(&mut n, flen);
       }
     }
     k = k + 1;
   }
+  card_rx_flush(&mut n.dev);
 }
 
 // ---------------------------------------------------------------- the card, or none
@@ -1169,12 +1283,14 @@ fn net_up(d: Card) -> Nic
   ensures nic_ok(result)
 {
   let mut n = Net { dev: d, pkt: balloc(RX_BUF), out: balloc(RX_BUF), ip: 0, gw: 0, span: 1,
-    arp: alloc(ARP_N * 2), arp_next: 0, held: balloc(RX_BUF), held_len: 0, held_hop: 0,
-    dhcp_state: DHCP_OFF, dhcp_xid: 0, dhcp_offer: 0, dhcp_server: 0, dhcp_tries: 0, dhcp_until: 0, now: 0,
+    arp: alloc(ARP_N * 2), arp_next: 0, held: balloc(HELD_N * RX_BUF), held_len: alloc(HELD_N), held_hop: alloc(HELD_N), held_n: 0,
+    dhcp_state: DHCP_OFF, dhcp_xid: 0, dhcp_offer: 0, dhcp_server: 0, dhcp_tries: 0, dhcp_until: 0, dns: 0, dns_new: false, now: 0,
     ping_state: PING_IDLE, ping_pid: 0, ping_ip: 0, ping_hop: 0, ping_until: 0, seq: 0, rx: 0, tx: 0,
-    socks: alloc(SOCKS * SOCK_FIELDS), dq: balloc(SOCKS * RXQ * UDP_MAX), eph: 0,
+    socks: alloc(SOCKS * SOCK_FIELDS), dq: balloc(SOCKS * RXQ * UDP_MAX), cork: balloc(SOCKS * UDP_MAX), eph: 0,
     tcbs: alloc(TCBS * TCB_W), trx: balloc(TCBS * TCP_BUF), ttx: balloc(TCBS * TCP_BUF), iss: 0,
-    lo: balloc(LOQ * RX_BUF), lo_len: alloc(LOQ), lo_head: 0, lo_n: 0, seen_rx: 0, seen_tick: 0, irq_on: false };
+    lo: balloc(LOQ * RX_BUF), lo_len: alloc(LOQ), lo_head: 0, lo_n: 0, seen_rx: 0, seen_tick: 0, irq_on: false,
+    v6: alloc(V6N * V6W), v6_next: 0, iid: 0, pfx: 0, rtr_mac: 0, rs_n: 0, rs_until: 0 };
+  n.iid = v6_iid(card_mac(n.dev));
   // The address comes from DHCP, sought from now on.
   if card_live(n.dev) {
     n.dhcp_xid = card_mac(n.dev) % 4294967296;
@@ -1328,6 +1444,7 @@ fn nic_tick(c: &mut Nic, now: u64)
     Nic::None => { c = Nic::None; },
     Nic::Up(mut n) => {
       dhcp_tick(&mut n, now);
+      v6_tick(&mut n, now);
       tcp_tick(&mut n, now);
       c = Nic::Up(n);
     },
@@ -1335,7 +1452,8 @@ fn nic_tick(c: &mut Nic, now: u64)
 }
 
 /// What the stack is configured with: 0 our address, 1 the gateway, 2 the
-/// netmask, 3 how (0 not yet, 1 DHCP, 2 static). 0 without a card.
+/// netmask, 3 how (0 not yet, 1 DHCP, 2 static), 4 the name server. 0
+/// without a card.
 fn nic_info(c: &Nic, what: u64) -> u64
   requires nic_ok(c)
 {
@@ -1348,6 +1466,8 @@ fn nic_info(c: &Nic, what: u64) -> u64
         return n.gw;
       } else if what == 2 {
         return 4294967296 - n.span;
+      } else if what == 4 {
+        return n.dns;
       } else if what == 3 {
         if n.dhcp_state == DHCP_BOUND {
           return 1;
@@ -1358,6 +1478,24 @@ fn nic_info(c: &Nic, what: u64) -> u64
       return 0;
     },
   }
+}
+
+/// Whether the name server changed since the last call (a lease, or the
+/// static fallback): /etc/resolv.conf is due to be written.
+fn nic_dns_take(c: &mut Nic) -> bool
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  let mut r = false;
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      r = n.dns_new;
+      n.dns_new = false;
+      c = Nic::Up(n);
+    },
+  }
+  return r;
 }
 
 fn nic_mac(c: &Nic) -> u64 {
@@ -1412,14 +1550,18 @@ fn nic_free(ports: &mut Ports, win: &mut MmioSpace, c: Nic, m: &mut Mem)
       bfree(n.pkt);
       bfree(n.out);
       bfree(n.held);
+      free(n.held_len);
+      free(n.held_hop);
       free(n.tcbs);
       bfree(n.trx);
       bfree(n.ttx);
+      bfree(n.cork);
       free(n.arp);
       free(n.socks);
       bfree(n.dq);
       bfree(n.lo);
       free(n.lo_len);
+      free(n.v6);
       card_free(&mut ports, &mut win, n.dev, &mut m);
     },
   }
@@ -1479,6 +1621,41 @@ fn sock_sendto(c: &mut Nic, s: u64, ip: u64, port: u64, buf: &Bytes, size: u64) 
       let r = udp_sendto(&mut n, s, ip, port, buf, size);
       c = Nic::Up(n);
       return r;
+    },
+  }
+}
+
+/// sock_sendto, but after what MSG_MORE held back on s, and with more,
+/// held back too.
+fn sock_send_more(c: &mut Nic, s: u64, ip: u64, port: u64, buf: &Bytes, size: u64, more: bool) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => {
+      c = Nic::None;
+      return NO_SOCK;
+    },
+    Nic::Up(mut n) => {
+      let r = udp_send_more(&mut n, s, ip, port, buf, size, more);
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+/// The bytes MSG_MORE holds back on s.
+fn sock_corked(c: &Nic, s: u64) -> u64
+  requires nic_ok(c)
+  ensures result <= UDP_MAX
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if udp_is_open(n, s) && s < SOCKS {
+        return smaller(sk_get(n, s, S_CORK), UDP_MAX);
+      }
+      return 0;
     },
   }
 }
@@ -1578,6 +1755,7 @@ fn sock_close(c: &mut Nic, s: u64) -> bool
         sk_set(&mut n, s, S_OPEN, 0);
         sk_set(&mut n, s, S_PORT, 0);
         sk_set(&mut n, s, S_COUNT, 0);
+        sk_set(&mut n, s, S_CORK, 0);
       }
       c = Nic::Up(n);
       return ok;

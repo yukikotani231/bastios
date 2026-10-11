@@ -119,6 +119,15 @@ fn may_path(k: &mut Kernel, pid: u64, n: u64, want: u64) -> u64
 
 /// path_meta of the first j bytes of the transfer buffer, leaving its
 /// first n bytes as they were (path_meta may use it).
+/// Whether something is at the path in xfer[..n], which stays.
+fn path_there(k: &mut Kernel, n: u64) -> bool
+  requires kok(k) && n <= FNAME_MAX
+  ensures kok(k)
+{
+  let m = meta_keep(&mut k, n, n);
+  return m.ok;
+}
+
 fn meta_keep(k: &mut Kernel, n: u64, j: u64) -> Meta
   requires kok(k) && j <= n && n <= FNAME_MAX
   ensures kok(k)
@@ -252,7 +261,9 @@ fn dir_sgid(k: &mut Kernel, n: u64) -> bool
 
 /// Gives file handle f, just made by process pid, owner `own` (from
 /// new_owner, taken before the name was made) and mode `mode` less the
-/// process's umask, set-group-ID too if `sgid`.
+/// process's umask, set-group-ID too if `sgid`. As on Linux, a
+/// set-group-ID bit asked for is dropped when the new file's group is not
+/// one of the process's and it is not root.
 fn made_by(k: &mut Kernel, pid: u64, f: u64, own: u64, mode: u64, sgid: bool)
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -261,6 +272,9 @@ fn made_by(k: &mut Kernel, pid: u64, f: u64, own: u64, mode: u64, sgid: bool)
     return;
   }
   let mut m = mode % 4096 & !umask_of(k.procs, pid);
+  if m & S_ISGID != 0 && fs_id(k.procs, pid, false) != 0 && !has_group(k.procs, pid, own / 0x100000000 % 0x100000000, true) {
+    m = m & !S_ISGID;
+  }
   if sgid && m & S_ISGID == 0 {
     m = m + S_ISGID;
   }
@@ -470,7 +484,8 @@ fn user_empty(k: &mut Kernel, pid: u64, va: u64) -> bool
 
 /// The ids of process pid after it execs a program: from a file with the
 /// set-user-ID bit (f, a file handle, when `file`), the effective user id
-/// becomes the file's owner; with the set-group-ID bit and group execute,
+/// becomes the file's owner, and from a built-in program with f 1 (su and
+/// passwd) it becomes 0; with the set-group-ID bit and group execute,
 /// the effective group id its group. As on Linux, the saved ids then
 /// follow the effective ones, and so do the file-system ids.
 fn exec_ids(k: &mut Kernel, pid: u64, file: bool, f: u64)
@@ -479,6 +494,9 @@ fn exec_ids(k: &mut Kernel, pid: u64, file: bool, f: u64)
 {
   let mut euid = id_get(k.procs, pid, F_UID, true);
   let mut egid = id_get(k.procs, pid, F_GID, true);
+  if !file && f == 1 {
+    euid = 0;                               // su or passwd (bin_suid, src/lxproc.bastio)
+  }
   if file && f < HFILES {
     let m = vfs_meta(&mut k.fs, f);
     if m.ok && m.mode & S_ISUID != 0 {

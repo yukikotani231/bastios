@@ -1,5 +1,6 @@
 # Real programs for the compatibility suite (test/compat), built by the
-# Makefile from their own sources: Lua, QuickJS and the sqlite3 shell.
+# Makefile from their own sources: Lua, QuickJS, the sqlite3 shell, MicroPython,
+# git, Perl and CPython (kilo is driven from tty.txt).
 # The format is applets.txt's:
 #
 #   == NAME
@@ -96,6 +97,124 @@ served by bastios
 wget: server returned error: HTTP/1.1 404 Not Found
 status 1
 
+== wget: HTTPS from the host (BusyBox's own TLS)
+$ /disk/busybox wget -q -O - HOSTSURL/hello.txt
+wget: note: TLS certificate validation not implemented
+hello from the host
+
+== wget: 1 MiB over HTTPS
+$ /disk/busybox wget -q -O ca_s.bin HOSTSURL/mib.bin && /disk/busybox md5sum ca_s.bin; rm -f ca_s.bin
+wget: note: TLS certificate validation not implemented
+85bfb9943e6f0cb09f0f52679e9eac2b  ca_s.bin
+
+== wget: an IPv6 loopback server
+$ mkdir ca_w6 && echo over ::1 > ca_w6/index.html && (/disk/busybox httpd -f -p [::1]:18089 -h ca_w6 & echo $! > ca_pid; sleep 1; /disk/busybox wget -q -O - 'http://[::1]:18089/'; kill $(cat ca_pid)); rm -rf ca_w6 ca_pid
+over ::1
+
 == nc: a raw HTTP request to the host
 $ printf 'GET /hello.txt HTTP/1.0\r\n\r\n' | /disk/busybox nc HOSTADDR | /disk/busybox tail -n 1
 hello from the host
+
+== git: init, commit, log and diff
+$ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_EXEC_PATH=/disk; G="/disk/git --no-pager -c user.name=T -c user.email=t@x -c init.defaultBranch=main -c maintenance.auto=false -c color.ui=false"; mkdir ca_g && (cd ca_g && $G init -q --template= && echo one > a && $G add a && $G commit -qm first && echo two >> a && $G commit -qam second && $G log --format=%s && $G diff --stat HEAD~1 && $G show HEAD~1:a); rm -rf ca_g
+second
+first
+ a | 1 +
+ 1 file changed, 1 insertion(+)
+one
+
+== git: 300 files, a branch and a merge
+$ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_EXEC_PATH=/disk; G="/disk/git --no-pager -c user.name=T -c user.email=t@x -c init.defaultBranch=main -c maintenance.auto=false -c color.ui=false"; mkdir ca_g && (cd ca_g && $G init -q --template= && i=0 && while [ $i -lt 300 ]; do /disk/busybox seq $i $((i + 50)) > f$i; i=$((i + 1)); done && $G add . && $G commit -qm many && $G checkout -qb side && /disk/busybox sed -i 's/^7$/seven/' f* && $G commit -qam side && $G checkout -q main && echo x > new && $G add new && $G commit -qm new && $G merge -q --no-edit side && $G rev-list --count HEAD && $G grep -l seven | /disk/busybox wc -l && $G ls-files | /disk/busybox wc -l); rm -rf ca_g
+4
+8
+301
+
+== git: gc, fsck and a clone through upload-pack
+# pack.threads=1: with threads, about 1 run in 12 ends in a kernel fault
+# (garbage in k.fpus, found by give_page in finish, src/main.bastio), on
+# main as well. It still happens now and then without them, here and in
+# the other git cases, so no git case is in baseline.txt until that bug
+# is fixed: they are reported but cannot fail the suite.
+$ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_EXEC_PATH=/disk; G="/disk/git --no-pager -c user.name=T -c user.email=t@x -c init.defaultBranch=main -c maintenance.auto=false -c color.ui=false"; mkdir ca_g && (cd ca_g && $G init -q --template= && for i in 1 2 3 4 5 6; do /disk/busybox seq 1 $((i * 500)) > f && $G add f && $G commit -qm c$i; done && $G -c pack.threads=1 gc -q && $G fsck --no-progress && $G count-objects -v | /disk/busybox grep -e '^count' -e '^packs') && $G clone -q --template= --no-local -u '/disk/git upload-pack' ca_g ca_g2 && $G -C ca_g2 log --format=%s | /disk/busybox head -n 2 && /disk/busybox cmp ca_g/f ca_g2/f && echo same; rm -rf ca_g ca_g2
+count: 0
+packs: 1
+c6
+c5
+same
+
+== git: stash, revert and bisect run
+$ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_EXEC_PATH=/disk; G="/disk/git --no-pager -c user.name=T -c user.email=t@x -c init.defaultBranch=main -c maintenance.auto=false -c color.ui=false"; mkdir ca_g && (cd ca_g && $G init -q --template= && for i in 1 2 3 4 5 6 7 8; do echo $i >> f && $G add f && $G commit -qm c$i; done && echo wip >> f && $G stash -q && $G stash list | /disk/busybox wc -l && $G stash pop -q && $G checkout -q f && $G revert --no-edit HEAD >/dev/null && /disk/busybox tail -n 1 f && $G bisect start HEAD HEAD~8 >/dev/null && $G bisect run /disk/busybox sh -c '! /disk/busybox grep -qx 5 f' >/dev/null && $G log -1 --format=%s refs/bisect/bad && $G bisect reset >/dev/null 2>&1); rm -rf ca_g
+1
+7
+c5
+
+== perl: the language
+$ /disk/perl -I/disk/perllib -e 'use strict; use warnings; my %h; $h{$_}++ for split //, "mississippi"; print join(" ", map {"$_=$h{$_}"} sort keys %h), "\n"; (my $t = "the quick brown fox") =~ s/(\w+)/\u$1/g; print "$t\n"; printf "%.3f %s %s\n", 3.14159, join(",", sort { $a <=> $b } 10, 9, 100, 1), scalar reverse "olleh"'
+i=4 m=1 p=2 s=4
+The Quick Brown Fox
+3.142 1,9,10,100 hello
+
+== perl: modules
+$ /disk/perl -I/disk/perllib -MData::Dumper -MJSON::PP -MDigest::MD5=md5_hex -MDigest::SHA=sha256_hex -MPOSIX=floor,strftime -MList::Util=sum,reduce -e '$Data::Dumper::Indent = 0; $Data::Dumper::Sortkeys = 1; print Dumper({a => [1, 2], b => "x"}), "\n"; print JSON::PP->new->canonical->encode(JSON::PP->new->decode(q({"b":[1,{"c":null}],"a":2}))), "\n"; print md5_hex("abc"), " ", substr(sha256_hex("abc"), 0, 16), "\n"; print floor(-2.5), " ", strftime("%Y-%m-%d", gmtime(86400 * 365)), " ", sum(1 .. 100), " ", (reduce { $a * $b } 1 .. 20), "\n"'
+$VAR1 = {'a' => [1,2],'b' => 'x'};
+{"a":2,"b":[1,{"c":null}]}
+900150983cd24fb0d6963f7d28e17f72 ba7816bf8f01cfea
+-3 1971-01-01 5050 2432902008176640000
+
+== perl: fork, pipes, signals and alarm
+$ /disk/perl -e 'pipe(my $r, my $w); my $p = fork; if (!$p) { close $r; print $w "child\n"; exit 7 } close $w; my $l = <$r>; waitpid($p, 0); print "got $l", "status ", $? >> 8, "\n"; print `/disk/busybox echo backtick`; system("/bin/sh", "-c", "exit 3"); print "system ", $? >> 8, "\n"; $SIG{USR1} = sub { print "usr1\n" }; kill USR1 => $$; $SIG{ALRM} = sub { die "alarm\n" }; eval { alarm 1; sleep 5 }; print "eval $@"'
+got child
+status 7
+backtick
+system 3
+usr1
+eval alarm
+
+== perl: files, directories and in-place editing
+$ /disk/perl -I/disk/perllib -MFcntl=:flock -e 'mkdir "ca_pd" or die; open(my $f, ">", "ca_pd/x") or die; flock($f, LOCK_EX) or die; print $f "hello\n"; close $f; system("/disk/perl", "-pi", "-e", "s/hello/HELLO/", "ca_pd/x"); open($f, "<", "ca_pd/x") or die; print <$f>; opendir(my $d, "ca_pd") or die; print join(",", grep !/^\./, readdir $d), " ", (stat "ca_pd/x")[7], "\n"; rename "ca_pd/x", "ca_pd/y" or die; unlink "ca_pd/y"; rmdir "ca_pd" or die; print "clean\n"'
+HELLO
+x 6
+clean
+
+== perl: sockets over loopback
+$ /disk/perl -I/disk/perllib -MIO::Socket::INET -e 'my $s = IO::Socket::INET->new(Listen => 5, LocalAddr => "127.0.0.1", LocalPort => 18099, ReuseAddr => 1) or die "listen: $!"; my $p = fork; if (!$p) { my $c = IO::Socket::INET->new(PeerAddr => "127.0.0.1:18099") or die "connect: $!"; print $c "ping\n"; my $a = <$c>; print "child got $a"; exit 0 } my $c = $s->accept; my $l = <$c>; print $c "pong\n"; close $c; waitpid($p, 0); print "server got $l"'
+child got pong
+server got ping
+
+== perl: HTTP::Tiny from the host
+$ /disk/perl -I/disk/perllib -MHTTP::Tiny -MDigest::MD5=md5_hex -e 'my $h = HTTP::Tiny->new; my $r = $h->get("HOSTURL/hello.txt"); print "$r->{status} $r->{content}"; $r = $h->get("HOSTURL/mib.bin"); print "$r->{status} ", length($r->{content}), " ", md5_hex($r->{content}), "\n"'
+200 hello from the host
+200 1048576 85bfb9943e6f0cb09f0f52679e9eac2b
+
+== python: the language and the standard library
+$ printf '%s\n' 'import json, re, collections, hashlib, decimal, fractions, datetime, itertools, math' 'print(json.dumps(json.loads("{\"b\": [1, {\"c\": null}], \"a\": 2}"), sort_keys=True))' 'print(sorted(collections.Counter("mississippi").items()))' 'print(re.sub(r"(\w+)@(\w+)", r"\2 at \1", "me@host"), hashlib.sha256(b"abc").hexdigest()[:16])' 'print(decimal.Decimal(1) / decimal.Decimal(7), fractions.Fraction(3, 4) + fractions.Fraction(1, 6))' 'print(datetime.date(2026, 10, 10).isoformat(), math.factorial(25), list(itertools.accumulate(range(6))))' 'class P:' '    def __init__(self, x): self.x = x' '    def __repr__(self): return f"P({self.x})"' 'print(sorted([P(3), P(1)], key=lambda p: p.x), [n * n for n in range(5) if n % 2], {k: len(k) for k in ("ab", "c")})' > ca_py.py && PYTHONHOME=/disk/py /disk/python ca_py.py; rm -f ca_py.py
+{"a": 2, "b": [1, {"c": null}]}
+[('i', 4), ('m', 1), ('p', 2), ('s', 4)]
+host at me ba7816bf8f01cfea
+0.1428571428571428571428571429 11/12
+2026-10-10 15511210043330985984000000 [0, 1, 3, 6, 10, 15]
+[P(1), P(3)] [1, 9] {'ab': 2, 'c': 1}
+
+== python: threads, subprocess and asyncio
+$ printf '%s\n' 'import threading, queue, subprocess, asyncio' 'q = queue.Queue()' 'ts = [threading.Thread(target=lambda i=i: q.put(i * i)) for i in range(8)]' 'for t in ts: t.start()' 'for t in ts: t.join()' 'print(sorted(q.get() for _ in range(8)))' 'print(subprocess.run(["/bin/sh", "-c", "echo out; exit 3"], capture_output=True, text=True))' 'async def f(i):' '    await asyncio.sleep(0.01 * (5 - i))' '    return i' 'async def main(): return await asyncio.gather(*(f(i) for i in range(5)))' 'print(asyncio.run(main()))' > ca_py.py && PYTHONHOME=/disk/py /disk/python ca_py.py; rm -f ca_py.py
+[0, 1, 4, 9, 16, 25, 36, 49]
+CompletedProcess(args=['/bin/sh', '-c', 'echo out; exit 3'], returncode=3, stdout='out\n', stderr='')
+[0, 1, 2, 3, 4]
+
+== python: files, shutil and tempfile
+$ printf '%s\n' 'import os, shutil, tempfile, pathlib' 'd = tempfile.mkdtemp(dir=".")' 'p = pathlib.Path(d, "a", "b.txt")' 'p.parent.mkdir(parents=True)' 'p.write_text("x" * 5000)' 'shutil.copytree(os.path.join(d, "a"), os.path.join(d, "c"))' 'print(sorted(str(q.relative_to(d)) for q in pathlib.Path(d).rglob("*")), os.path.getsize(os.path.join(d, "c", "b.txt")))' 'shutil.rmtree(d)' 'print(os.path.exists(d))' > ca_py.py && PYTHONHOME=/disk/py /disk/python ca_py.py; rm -f ca_py.py
+['a', 'a/b.txt', 'c', 'c/b.txt'] 5000
+False
+
+== python: http.server and urllib over loopback
+$ printf '%s\n' 'import http.server, threading, urllib.request' 'class H(http.server.BaseHTTPRequestHandler):' '    def do_GET(self):' '        b = ("you asked for " + self.path).encode()' '        self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)' '    def log_message(self, *a): pass' 's = http.server.HTTPServer(("127.0.0.1", 0), H)' 't = threading.Thread(target=s.handle_request); t.start()' 'r = urllib.request.urlopen("http://127.0.0.1:%d/hello" % s.server_port, timeout=20)' 'print(r.status, r.read().decode())' 't.join(); s.server_close()' > ca_py.py && PYTHONHOME=/disk/py /disk/python ca_py.py; rm -f ca_py.py
+200 you asked for /hello
+
+== python: multiprocessing
+$ printf '%s\n' 'import multiprocessing' 'def sq(x): return x * x' 'if __name__ == "__main__":' '    with multiprocessing.Pool(2) as p: print(p.map(sq, range(6)))' > ca_py.py && PYTHONHOME=/disk/py /disk/python ca_py.py; rm -f ca_py.py
+[0, 1, 4, 9, 16, 25]
+
+== python: urllib from the host
+$ printf '%s\n' 'import urllib.request, hashlib' 'print(urllib.request.urlopen("HOSTURL/hello.txt", timeout=30).read().decode(), end="")' 'b = urllib.request.urlopen("HOSTURL/mib.bin", timeout=60).read()' 'print(len(b), hashlib.md5(b).hexdigest())' > ca_py.py && PYTHONHOME=/disk/py /disk/python ca_py.py; rm -f ca_py.py
+hello from the host
+1048576 85bfb9943e6f0cb09f0f52679e9eac2b

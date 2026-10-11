@@ -7,11 +7,14 @@
 // k.lxfd, word pid * LXNFD + fd: 0 closed, FD_CONSOLE, or FD_OFD + h for
 // description h; plus FD_CLOEXEC if execve closes it.
 // k.ofd, words h * OFD_STRIDE: kind, references, row, pipe or directory,
-// and a directory's next entry (for a pipe end: 1 if it is nonblocking).
+// and a directory's next entry (for a pipe end: 1 if it is nonblocking);
+// then the F_SETOWN owner, F_SETSIG signal, the owner's setter's ids and
+// O_ASYNC (src/lxowner.bastio).
 // k.pipes, words p * PIPE_STRIDE: head, count, the descriptions of its
 // read end and of its write end, the FIFO it belongs to + 1 (0 for an
-// anonymous pipe; src/lxevent.bastio), 1 once a writer has opened it, and
-// the size F_SETPIPE_SZ gave it (0: PIPE_CAP); the ring itself is
+// anonymous pipe; src/lxevent.bastio), 1 once a writer has opened it,
+// the size F_SETPIPE_SZ gave it (0: PIPE_CAP), and 1 once a read end
+// has had O_ASYNC; the ring itself is
 // PIPE_CAP bytes of k.pipebuf at p * PIPE_CAP.
 
 import "linux.bastio";
@@ -113,7 +116,7 @@ fn pipe_room(t: &Buf, p: u64, count: u64) -> u64
 /// F_GETPIPE_SZ and F_SETPIPE_SZ on pipe p. A new size is rounded up to
 /// a power of two pages; it may not drop below what the pipe holds
 /// (EBUSY) or rise past PIPE_CAP, /proc/sys/fs/pipe-max-size (EPERM, or
-/// ENOMEM for root, whom Linux would let go further).
+/// ENOMEM with CAP_SYS_RESOURCE, which Linux would let go further).
 fn pipe_size(k: &mut Kernel, pid: u64, p: u64, set: bool, arg: u64) -> u64
   requires kok(k) && pid < NPROC && p < NPIPES
   ensures kok(k)
@@ -122,8 +125,11 @@ fn pipe_size(k: &mut Kernel, pid: u64, p: u64, set: bool, arg: u64) -> u64
     return pipe_cap(k.pipes, p);
   }
   let want = arg % 0x100000000;
+  if want > 0x80000000 {
+    return EINVAL;                          // past the largest size Linux rounds to
+  }
   if want > PIPE_CAP {
-    if cred_root(k.procs, pid) {
+    if cap_has(k, pid, CAP_SYS_RESOURCE) {
       return ENOMEM;
     }
     return EPERM;
@@ -179,8 +185,8 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   if kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX {
     return Fd { kind: K_SOCK, x: x };
   }
-  if kind == OF_DEV {
-    return Fd { kind: K_DEV, x: x };
+  if kind == OF_DEV || kind == OF_PTY {
+    return Fd { kind: K_DEV, x: x };        // a pty end is a device too (src/lxpty.bastio)
   }
   if kind == OF_EVENT {
     return Fd { kind: K_EVENT, x: h };      // the counter lives in the description
@@ -235,7 +241,7 @@ fn pipe_nonblock(k: &Kernel, pid: u64, fd: u64) -> bool
 /// Whether descriptions of this kind keep O_NONBLOCK in the low bit of
 /// word 3.
 fn can_block(kind: u64) -> bool {
-  return kind == OF_PIPE_R || kind == OF_PIPE_W || kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD;
+  return kind == OF_PIPE_R || kind == OF_PIPE_W || kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD || kind == OF_PTY;
 }
 
 /// Whether process pid has a file layer row free: an open file holds
@@ -353,6 +359,10 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
     k.evt = set(k.evt, x * TFD_STRIDE, 0);  // the timer is free again
   } else if kind == OF_EPOLL && x < EP_N {
     k.evt = set(k.evt, EP_AT + x * EP_STRIDE, 0);
+  } else if kind == OF_PTY {
+    pty_drop(&mut k, x);                    // src/lxpty.bastio
+  } else if kind == OF_PQ && x < PQ_N {
+    pq_close(&mut k, x);                    // src/lxmq.bastio
   } else if kind == OF_UNIX {
     return ux_close(&mut k, x, w);          // src/lxunix.bastio
   }
@@ -425,7 +435,8 @@ fn close_unshared(k: &mut Kernel, pid: u64)
     invariant f <= NFD && kok(k)
   {
     let row = pid * NFD + f;
-    if !row_shared(k.ofd, row) {
+    // Only open rows: row_shared looks through every description.
+    if fget(k.fs.ftab, row, FD_FS) != 0 && !row_shared(k.ofd, row) {
       vfs_close(&mut k.fs, &mut k.mem, row);
     }
     f = f + 1;
@@ -463,14 +474,18 @@ fn ofd_new(k: &mut Kernel, kind: u64, x: u64) -> u64
   }
   of_set(&mut k.ofd, h, 0, kind);
   of_set(&mut k.ofd, h, 1, 1);
-  k.inet6 = k.inet6 & !(1 << h);            // not AF_INET6 unless lx_socket says so
+  k.inet6 = set(k.inet6, h, 0);             // not AF_INET6 unless lx_socket says so
   of_set(&mut k.ofd, h, 2, x);
   of_set(&mut k.ofd, h, 3, 0);
+  of_set(&mut k.ofd, h, OF_OWNER, 0);
+  of_set(&mut k.ofd, h, OF_SIG, 0);
+  of_set(&mut k.ofd, h, OF_CRED, 0);
+  of_set(&mut k.ofd, h, OF_ASYNC, 0);
   return h;
 }
 
 /// The lowest closed descriptor of process pid at or above `from`, or LXNFD.
-fn fd_free(t: &Buf, pid: u64, from: u64) -> u64
+fn fd_free_in(t: &Buf, pid: u64, from: u64) -> u64
   requires len(t) == LXFD_LEN && pid < NPROC
   ensures result <= LXNFD
 {
@@ -491,7 +506,7 @@ fn fd_install(k: &mut Kernel, pid: u64, h: u64) -> u64
   requires kok(k) && pid < NPROC && h < OFD_N
   ensures kok(k)
 {
-  let fd = fd_free(k.lxfd, pid, 0);
+  let fd = fd_free(k, pid, 0);
   if fd >= LXNFD {
     unref_value(&mut k, FD_OFD + h);
     return EMFILE;
@@ -506,7 +521,7 @@ fn fd_install_console(k: &mut Kernel, pid: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let fd = fd_free(k.lxfd, pid, 0);
+  let fd = fd_free(k, pid, 0);
   if fd >= LXNFD {
     return EMFILE;
   }
@@ -521,6 +536,17 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, mode: u6
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if flags & LO_NOFOLLOW != 0 && flags & LO_PATH == 0 {
+    // O_NOFOLLOW: a symbolic link at the end is ELOOP, as on Linux.
+    let m = lx_path_at_nf(&mut k, pid, dirfd, path);
+    if m == NO_RESULT {
+      return k.perr;
+    }
+    let f = vfs_lookup(&mut k.fs, m);
+    if f != NO_FILE && vfs_is_link(&mut k.fs, f) {
+      return ELOOP;
+    }
+  }
   let n = lx_path_at(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return k.perr;
@@ -536,6 +562,9 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if flags & LO_TMPFILE != 0 {
     return EOPNOTSUPP;                      // so a program falls back to a named file
   }
+  if (flags % 4 != 0 || flags & LO_CREAT != 0) && flags & LO_PATH == 0 && dir_at(&mut k, n) != NO_FILE {
+    return EISDIR;                          // a directory is not written through open
+  }
   if (flags % 4 != 0 || flags & LO_TRUNC != 0 || flags & LO_CREAT != 0) && vfs_ro(&mut k.fs, n) {
     let exists = vfs_lookup(&mut k.fs, n) != NO_FILE || dir_at(&mut k, n) != NO_FILE;
     if (exists && (flags % 4 != 0 || flags & LO_TRUNC != 0)) || (!exists && flags & LO_CREAT != 0) {
@@ -548,6 +577,12 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   // Permissions (src/lxperm.bastio): on the file, for what the flags
   // ask; on its directory, for a new name.
   let kept = kept_meta(&mut k, n);
+  if kept && flags & LO_NOATIME != 0 {
+    let nm = meta_keep(&mut k, n, n);
+    if nm.ok && !owns(k.procs, pid, nm.own) {
+      return EPERM;                         // O_NOATIME is for the owner and root
+    }
+  }
   if kept && flags & LO_CREAT != 0 && flags & LO_EXCL != 0 {
     // EEXIST, below
   } else if kept && flags & LO_PATH == 0 {
@@ -581,7 +616,32 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   }
   let dev = dev_at(k.fs.xfer, n);
   if dev == DEV_TTY {
+    let ct = pty_ctty(k, pid);
+    if ct < PTY_N && xfer_is(k.fs.xfer, 0, n, "dev/tty") {
+      return pty_open_slave(&mut k, pid, ct, flags);   // the session's terminal is a pty
+    }
     return fd_install_console(&mut k, pid);
+  }
+  if dev == DEV_PTMX {
+    return pty_open_master(&mut k, pid, flags);       // src/lxpty.bastio
+  }
+  if dev >= DEV_PTS && dev < DEV_PTS + PTY_N {
+    return pty_open_slave(&mut k, pid, dev - DEV_PTS, flags);
+  }
+  if (is_loop(dev) || dev == DEV_LOOPCTL) && flags & LO_PATH == 0 {
+    // A loop device reads and writes the file it is bound to, whoever
+    // that file belongs to: rw-rw---- for root and group disk, as on
+    // Linux (dev_meta).
+    let mut lwant = 0;
+    if flags % 4 != LO_WRONLY {
+      lwant = MAY_R;
+    }
+    if flags % 4 != 0 {
+      lwant = lwant + MAY_W;
+    }
+    if !may_meta(k.procs, pid, S_IFBLK, DISK_GID * 0x100000000, lwant) {
+      return EACCES;
+    }
   }
   if dev != DEV_NONE && dev != DEV_DIR {
     let hv = ofd_new(&mut k, OF_DEV, dev);
@@ -590,7 +650,20 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     }
     return fd_install(&mut k, pid, hv);
   }
+  return lx_open_node(&mut k, pid, n, flags, mode);
+}
+
+/// lx_open_n for a path that names no /proc file and no device path:
+/// a node in a file system (split off to keep each proof small).
+fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+  ensures kok(k)
+{
   let fh = vfs_lookup(&mut k.fs, n);
+  let fm = vfs_meta(&mut k.fs, fh);
+  if fh != NO_FILE && fm.ok && fm.mode % 65536 / 4096 * 4096 == 0xC000 {
+    return 18446744073709551610;            // ENXIO: a socket file is not opened (src/lxunix.bastio)
+  }
   if fh != NO_FILE && vfs_is_fifo(&mut k.fs, fh) {
     if flags & LO_CREAT != 0 && flags & LO_EXCL != 0 {
       return EEXIST;
@@ -603,6 +676,32 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
       return ENFILE;                        // FIFO_N named pipes are open already
     }
     return fifo_open(&mut k, pid, ff, flags);
+  }
+  let nt = vfs_node_type(&mut k.fs, fh);
+  if fh != NO_FILE && (nt == T_CHR || nt == T_BLK || nt == T_SOCK) {
+    // A device node (src/lxevent.bastio lx_mknod) opens the device its
+    // number names; a socket node, or a device BastiOS lacks, is ENXIO.
+    if flags & LO_CREAT != 0 && flags & LO_EXCL != 0 {
+      return EEXIST;
+    }
+    if flags & LO_DIRECTORY != 0 {
+      return ENOTDIR;
+    }
+    let mut nd = DEV_NONE;
+    if nt == T_CHR {
+      nd = rdev_dev(vfs_node_dev(&mut k.fs, fh));
+    }
+    if nd == DEV_TTY {
+      return fd_install_console(&mut k, pid);
+    }
+    if nd == DEV_NONE {
+      return ENXIO;
+    }
+    let hn = ofd_new(&mut k, OF_DEV, nd);
+    if hn >= OFD_N {
+      return ENFILE;
+    }
+    return fd_install(&mut k, pid, hn);
   }
   let dir = dir_at(&mut k, n);
   let excl = flags & LO_CREAT != 0 && flags & LO_EXCL != 0;
@@ -640,7 +739,7 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if flags / LO_APPEND % 2 == 1 {
     f = f + O_APPEND;
   }
-  if fd_free(k.lxfd, pid, 0) >= LXNFD || !row_free(k, pid) {
+  if fd_free(k, pid, 0) >= LXNFD || !row_free(k, pid) {
     return EMFILE;                          // no descriptor, or no file layer row, left
   }
   let fresh = f / O_CREATE % 2 == 1 && vfs_lookup(&mut k.fs, n) == NO_FILE;
@@ -650,13 +749,16 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   }
   let nfd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, f, n);
   if nfd == NO_FD || nfd >= NFD {
+    if fresh && path_ok(k.fs, n) && parent_ok(&mut k.fs, n) {
+      return ENOSPC;                        // no free node for it
+    }
     return ENOENT;
   }
   let row = pid * NFD + nfd;
   if fresh {
     let made = vfs_row_file(k.fs, row);
     if made != NO_FILE {
-      made_by(&mut k, pid, made, own, mode % 512, false);   // 0777 bits, less the umask
+      made_by(&mut k, pid, made, own, mode % 4096, false);  // less the umask
     }
   }
   let h = ofd_new(&mut k, OF_FILE, row);
@@ -678,7 +780,7 @@ fn lx_dup2(k: &mut Kernel, pid: u64, src: u64, new: u64, cloexec: bool) -> u64
   ensures kok(k)
 {
   let v = fd_get(k.lxfd, pid, src) % FD_CLOEXEC;
-  if v == 0 || new >= LXNFD {
+  if v == 0 || new >= fd_limit(k, pid) {
     return EBADF;
   }
   if src == new {
@@ -703,10 +805,10 @@ fn lx_dup(k: &mut Kernel, pid: u64, src: u64, from: u64, cloexec: bool) -> u64
   if v == 0 {
     return EBADF;
   }
-  if from >= LXNFD {
+  if from >= fd_limit(k, pid) {
     return EINVAL;
   }
-  let fd = fd_free(k.lxfd, pid, from);
+  let fd = fd_free(k, pid, from);
   if fd >= LXNFD {
     return EMFILE;
   }
@@ -737,6 +839,9 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     kind = of_get(k.ofd, h, 0);
   }
   let pipe = h < OFD_N && can_block(kind);
+  // Sockets keep O_NONBLOCK in the low bit of word 3 too (src/lxsock.bastio,
+  // src/lxtcp.bastio, src/lxunix.bastio), above their other state.
+  let sock = h < OFD_N && (kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX);
   let mut row = FD_ROWS;
   if h < OFD_N && kind == OF_FILE {
     row = of_get(k.ofd, h, 2);
@@ -753,7 +858,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     if m / O_APPEND % 2 == 1 {
       fl = fl + LO_APPEND;
     }
-    return fl + of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK;
+    return fl + of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK + of_get(k.ofd, h, OF_ASYNC) % 2 * LO_ASYNC;
   }
   if cmd == F_SETFL && row < FD_ROWS {
     // O_APPEND takes effect; O_NONBLOCK is only reported back (a file never blocks).
@@ -764,9 +869,13 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     }
     fset(&mut k.fs.ftab, row, FD_MODE, nm);
     of_set(&mut k.ofd, h, 3, arg / LO_NONBLOCK % 2);
+    of_set(&mut k.ofd, h, OF_ASYNC, arg / LO_ASYNC % 2);
     return 0;
   }
   if cmd == F_GETFL {
+    if sock {
+      return LO_RDWR + of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK;
+    }
     if !pipe {
       return LO_RDWR;
     }
@@ -777,19 +886,22 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     if kind == OF_PIPE_R && of_get(k.ofd, h, 3) / PIPE_BOTH % 2 == 1 {
       fl = LO_RDWR;
     }
-    if kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD {
+    if kind == OF_EVENT || kind == OF_TIMER || kind == OF_EPOLL || kind == OF_SIGFD || kind == OF_PTY {
       fl = LO_RDWR;
     }
     if of_get(k.ofd, h, 3) % 2 == 1 {
       fl = fl + LO_NONBLOCK;
     }
-    return fl;
+    return fl + of_get(k.ofd, h, OF_ASYNC) % 2 * LO_ASYNC;
   }
   if cmd == F_SETFL {
-    // O_NONBLOCK on a pipe end (or eventfd, timerfd, epoll) can change; no
+    // O_NONBLOCK on a pipe end (or eventfd, timerfd, epoll, socket) can change; no
     // other flag (O_APPEND) can.
-    if pipe {
+    if pipe || sock {
       of_set(&mut k.ofd, h, 3, of_get(k.ofd, h, 3) / 2 * 2 + arg / LO_NONBLOCK % 2);
+    }
+    if h < OFD_N {
+      set_async(&mut k, h, arg / LO_ASYNC % 2 == 1);   // src/lxowner.bastio
     }
     return 0;
   }
@@ -799,6 +911,12 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
       return EBADF;
     }
     return pipe_size(&mut k, pid, pd.x, cmd == F_SETPIPE_SZ, arg);
+  }
+  if cmd == F_SETOWN || cmd == F_GETOWN || cmd == F_SETOWN_EX || cmd == F_GETOWN_EX || cmd == F_SETSIG || cmd == F_GETSIG {
+    return lx_owner(&mut k, pid, h, cmd, arg);    // src/lxowner.bastio
+  }
+  if cmd == F_SETLEASE || cmd == F_GETLEASE {
+    return lx_lease(&mut k, pid, fd, cmd, arg);   // src/lxlock.bastio
   }
   let lock = cmd == F_SETLK || cmd == F_SETLKW || cmd == F_OFD_SETLK || cmd == F_OFD_SETLKW;
   let fk = fd_look(k, pid, fd);
@@ -812,7 +930,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     return lx_put_out(&mut k, pid, arg, 2);
   }
   if lock {
-    return 0;                               // accepted, not kept
+    return flock_check(&mut k, pid, arg);   // accepted if well formed, not kept
   }
   return EINVAL;
 }
@@ -832,11 +950,11 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
   if p >= NPIPES {
     return ENFILE;
   }
-  let r = fd_free(k.lxfd, pid, 0);
+  let r = fd_free(k, pid, 0);
   if r >= LXNFD {
     return EMFILE;
   }
-  let w = fd_free(k.lxfd, pid, r + 1);
+  let w = fd_free(k, pid, r + 1);
   if w >= LXNFD {
     return EMFILE;
   }
@@ -862,6 +980,7 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
   pi_set(&mut k.pipes, p, 4, 0);
   pi_set(&mut k.pipes, p, 5, 1);
   pi_set(&mut k.pipes, p, 6, 0);
+  pi_set(&mut k.pipes, p, 7, 0);
   of_set(&mut k.ofd, hr, 3, flags / LO_NONBLOCK % 2);
   of_set(&mut k.ofd, hw, 3, flags / LO_NONBLOCK % 2);
   let mut ce = 0;
@@ -927,6 +1046,7 @@ fn pipe_write1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   ring_in(&mut k.pipebuf, p * PIPE_CAP, PIPE_CAP, ring_slot(r, r.n), k.fs.xfer, 0, got);
   ring_push_n(&mut r, got);
   pipe_keep(&mut k.pipes, p, r);
+  sigio_pipe(&mut k, p);
   return got;
 }
 

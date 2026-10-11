@@ -16,6 +16,50 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Processors
 
+- The code pages a program reads when it first runs them (see below) come
+  from the page cache, so every process running the program maps the same
+  read-only page and the disk is read once; before, each process read and
+  copied its own. A fault whose blocks are not in the disk's cache sleeps
+  until they are read, instead of the kernel polling the disk with its
+  lock held. Four compiler builds at once went from 7.2-9.1 s to 5.5-5.6 s
+  on four processors and from 8.5-8.9 s to 4.8-5.3 s on one.
+- virtio-blk reads a run of up to eight consecutive blocks in one request
+  (the blocks a read queues ahead), instead of one request per 4 KiB
+  block: under QEMU each request is a notify and a trip through its I/O
+  thread, made under the kernel lock. Four Z3 starts in a row went from
+  1.3 s to 0.7 s, and four compiler builds at once from 9.4-13.8 s to
+  6.8-7.8 s on four processors (10.2-10.8 s to 9.1-9.2 s on one).
+- A program from a file system is read when it runs, not all at exec: its
+  largest code segment's pages are read from the file the first time the
+  program runs them (`src/lazy.bastio`). Z3 has 24 MiB of code; four Z3
+  starts in a row went from 4.2 s to 1.5 s, and four compiler builds
+  (bastioc1 with Z3 and tcc) at once from 14.8 s to 10.6 s on four
+  processors (15.8 s to 12.9 s on one). The process holds its file, so
+  removing the file's name while it runs changes nothing. The kernel
+  reading such a page for a system call before the program ran it (a
+  `write` straight from the program's code) gets `EFAULT`.
+- Programs on a file system share their code: exec maps each whole page
+  that only read-only segments cover from the page cache, read-only,
+  instead of copying it into a fresh page, as built-in programs already
+  share theirs. Four shells running BusyBox pipelines from the disk at once
+  went from 9.0 s on one processor and 6.6 s on four to 1.3 s on either
+  (QEMU, which also no longer translates BusyBox's code again for every
+  process). A process that mprotects such a page writable gets its own
+  copy first.
+- Four shells running BusyBox pipelines from the disk at once went from
+  17.0 s on four processors (15.4 s on one) to 6.4 s (8.6 s). The block
+  cache, at 256 KiB, was smaller than BusyBox, so every exec read the whole
+  program from the disk again, a block at a time, under the kernel lock.
+  It is now 1 MiB.
+- The read-only pages of the built-in programs (code and constants) are
+  made once and shared, read-only, by every process running the program
+  (`src/text.bastio`, bastiolang's `Shared`), so `execve` maps them instead
+  of copying them out of the image and `fork` maps them again instead of
+  copying them. `fork` copies the rest into pages it does not zero first
+  (bastiolang's `Dirty`). A process that makes such a page writable with
+  `mprotect` gets its own copy. `make forkbench` (4 shells starting a
+  program 100 times each): 3.8 s → 0.6 s on one processor, 5.4 s → 0.7 s
+  on four. `mem` counts the cached pages as free.
 - A vDSO (`user/vdso.c`): `clock_gettime` for the monotonic and real-time
   clocks runs in user mode, with no system call and no kernel lock. The
   kernel now keeps time with the time-stamp counter, its rate measured
@@ -212,7 +256,48 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   `ENOSYS` quietly; glibc carries on without them (static glibc programs
   run).
 
+### Users and permissions
+
+- `docs/security.md` audits what BastiOS enforces between users and
+  processes, and lists what it does not yet.
+- The native system calls (`int 0x80`) are root's, except console I/O,
+  starting and waiting for children, yielding, the pid, `SYS_INFO`, the
+  process list and a `SYS_KILL` that `kill`'s rule allows. Any program can
+  raise `int 0x80`, so before this an unprivileged Linux process could
+  open, unlink, kill and reboot through it with no check. A native
+  `SYS_SPAWN` child keeps its parent's ids instead of starting as root.
+- `reboot`, `mount` and `umount2` are root's (`EPERM`), `rt_sigqueueinfo`
+  follows `kill`'s rule, and binding a port below 1024 is root's
+  (`EACCES`). `test/compat/progs/t_isol.c` tries each as nobody.
+- A `MAP_SHARED` mapping of a file opened read-only is a copy rather than
+  the page cache's pages: before, `mprotect(PROT_WRITE)` on it let a
+  process that may only read a file change what every other reader of
+  it saw.
+- `bind` of an `AF_UNIX` socket to a path makes a socket file there, and
+  `connect` needs write permission on it, as on Linux. Before, the name
+  lived only in a table of its own, so any user could connect to any
+  socket, or take its name first. `open` of a socket file is `ENXIO`.
+- The loop devices are `rw-rw----` for root and the new group disk (6),
+  and open checks it.
+- Users and passwords: `/etc/shadow` (`0600`), `/root` and `/home`, and
+  BusyBox's `adduser`, `addgroup`, `deluser`, `delgroup`, `passwd`,
+  `chpasswd`, `su`, `login`, `id` and `whoami` as `/bin/NAME`. `/bin/su`
+  and `/bin/passwd` are set-user-ID root, and BusyBox
+  (`CONFIG_FEATURE_SUID`) drops root for every other applet. Passwords
+  are SHA-512. Users made after boot do not survive a reboot yet.
+
 ### Programs that run
+
+- Pseudo-terminals (`src/lxpty.bastio`): `/dev/ptmx` and `/dev/pts/N`
+  (four pairs), so `openpty`, `ttyname` and SSH servers work. The line
+  discipline between the ends is the console's: echo, canonical lines with
+  erase and kill, Ctrl-D, `ICRNL`, `ONLCR`, raw mode, and Ctrl-C and
+  Ctrl-\\ sending SIGINT and SIGQUIT to the foreground group. `TIOCSCTTY`
+  makes one a session's terminal (`/dev/tty` then opens it),
+  `TIOCSPGRP`/`TIOCGPGRP` move the foreground group, `TIOCSWINSZ` sends
+  SIGWINCH, closing the master hangs up the session (SIGHUP), and a master
+  read fails with `EIO` once the slave is closed. `test/compat/progs/t_pty.c`
+  checks each. No `SIGTTIN`/`SIGTTOU`, `VSUSP`, flow control or packet mode.
 
 - Real programs in `make compat` (`test/compat/apps.txt`): Lua 5.4.7,
   QuickJS and the sqlite3 3.52 shell, built from source as static PIEs,
@@ -235,6 +320,17 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   `nc` talking HTTP with a web server on the host (`run.py` runs one) and
   over loopback. A new group, `test/compat/tty.txt`, types keys at
   full-screen programs on the console and checks what they wrote.
+- git 2.47 and Perl 5.40 in `make compat`: git commits, branches, merges
+  300 files, packs with `gc`, clones through `upload-pack` and runs
+  `bisect run`; Perl runs its core modules, fork, signals, sockets and
+  HTTP::Tiny from the host. They found three gaps, fixed here: `execve`
+  passed at most 32 arguments, 16 environment strings and 1280 bytes of
+  them, now 8192 arguments, 1024 environment strings and 128 KiB, as on
+  Linux (`sed -i ... f*` over 300 files failed); `munmap` never gave the
+  address space back, so a program that maps and unmaps as it runs, as
+  musl's `malloc` does for every large block, used up its window (`git
+  add` of 300 files ran out); and the in-memory file system held 128
+  files, and a create past that failed with `ENOENT` instead of `ENOSPC`.
 
 ### Files and disks
 
@@ -292,7 +388,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - Files on the disk can grow to 1 GiB (as far as the disk allows) and in
   memory to 64 MiB; they were capped at 1 MiB.
 - Paths can be up to 255 bytes; they were capped at 28.
-- The in-memory file system holds 128 files and directories (it held 32).
+- The in-memory file system holds 1024 files and directories (it held 32).
 - The disk's directory grows: up to 1023 files and directories under
   `disk/` (it held 64). The format is now `BSTDISK3`, which names the
   directory's extra blocks in the superblock; a `BSTDISK2` disk is mounted
@@ -336,6 +432,17 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Network
 
+- The virtio network card sends without the kernel lock waiting for it:
+  a frame goes out through one of two transmit buffers, and the buffers
+  come back when the next frame is sent. Received buffers go back to the
+  card with one notice per poll instead of one per frame. Four hosts each
+  echoing 1 MiB through `mtcp echo` at once went from 4.2 s to 2.0 s on
+  four processors and from 0.9 s to 0.6 s on one (QEMU TCG; four
+  processors stay slower there because the test host has four cores, and
+  QEMU's network thread shares them with the spinning processors).
+- Up to eight frames can wait for an ARP answer, not one. Two connections
+  opened at once before the kernel knew the gateway's MAC lost the first
+  SYN+ACK, and that connection waited a second for the host to try again.
 - More Intel network cards on the e1000 driver: the 82544GC and 82545EM,
   the 82574L (QEMU's `e1000e`), and the igb family: the 82576 (QEMU's
   `igb`), and the I350, I210 and I211 found on many server and desktop
@@ -352,6 +459,30 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   e1000, asked for only while someone sleeps. `make netbench` measures it.
 - Loopback: a packet for 127.0.0.0/8 or the machine's own address never
   reaches the wire.
+- Name lookups: DHCP asks for the name server and the kernel writes
+  `/etc/resolv.conf` from it (10.0.2.3 with the static address), so musl's
+  `getaddrinfo` resolves names through QEMU's resolver. `t_dns` in the
+  compatibility suite checks the resolver against a name server of its own.
+- `/dev/urandom` and `getrandom` come from ChaCha20 over an entropy pool
+  fed by the time-stamp counter, instead of splitmix64 over a boot-time
+  seed. BusyBox's `wget` fetches over HTTPS with its own TLS.
+- IPv6 (`src/net6.bastio`): a link-local address and one from the prefix a
+  router advertises (EUI-64 interface ids), neighbor discovery, echo
+  replies, and UDP and TCP to IPv6 peers through `AF_INET6` sockets. The
+  packets are translated to and from the IPv4 stack, with each peer stood
+  in for by an address in 240.0.0.0/8, so the UDP and TCP code is shared.
+  No extension headers, fragments, duplicate address detection or path MTU
+  discovery; 16 peers at a time. `test/ipv6_test.sh` (in `make test`)
+  plays a router and hosts on the card's wire, as QEMU's user network needs
+  IPv6 on the host. The e1000 now takes all multicast frames.
+- An SSH server: Dropbear 2024.86 (built as a static PIE by the Makefile)
+  runs in BastiOS, and a host logs in with a key through QEMU's port
+  forwarding: commands, piped input and exit status, 1 MiB transfers, and
+  an interactive shell on a terminal, where Ctrl-C stops the foreground
+  command. `test/compat/ssh.txt` (in `make compat`) does all of it from
+  the host with Dropbear's client; a key that is not authorized is
+  refused. `/etc/shells` lists `/bin/sh` and `/bin/ash`, and `/etc/group`
+  has a `tty` group.
 
 ### Console and boot
 
@@ -401,6 +532,15 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   passes, so every processor starts (it ran on one).
 - `make run-iso` and `make run-uefi` open a QEMU window.
 
+### Build
+
+- The kernel and its programs are built with bastioc1, bastiolang's
+  compiler written in Bastio, which the Makefile builds once with stage0's
+  bastioc0 (`BASTIOC0`). `BASTIOC` still names another compiler.
+- `make NATIVE=1` builds the kernel with bastioc1's x86-64 backend instead
+  of through C (#151). It passes `make test`, but its code is about ten
+  times larger than gcc's, so it is opt-in.
+
 ### Tests and documentation
 
 - A getting-started guide (`docs/getting-started.md`): build, boot in
@@ -435,6 +575,18 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   CPU model has no 1 GiB pages (on such a CPU the window stops at 4 GiB).
 
 ### Fixed
+
+- The clock went wrong a few seconds after boot under QEMU, which broke
+  about 30 `make compat` checks (sleeps took 0 ms, poll and socket
+  timeouts fired at once, `date` said 2554). There were two bugs. First,
+  the TSC rate was measured from a stale first HPET read, about 12 ms
+  behind the next one, so the clock ran 50 to 200 times too fast. The
+  measurement now starts when the clock next moves. Second, `tsc_scale`,
+  and its copy in the vDSO, dropped the `hi * mh * 2^32` term and
+  returned the maximum instead. With a rate under 1 GHz, which the bad
+  measurement produced, that happened once the counter had moved 2^32
+  ticks, and the clock stuck at the end of time. Both now compute the
+  term.
 
 - A PC without a serial port (most of those of the last decade) took no
   keyboard input: COM1's ports read as 0xFF there, which said a byte was

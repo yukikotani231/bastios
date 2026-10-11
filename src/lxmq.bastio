@@ -1,0 +1,669 @@
+// POSIX message queues: mq_open, mq_unlink, mq_timedsend,
+// mq_timedreceive, mq_notify and mq_getsetattr (musl's mq_* functions).
+//
+// There are PQ_N queues, each named by up to PQ_NAME_MAX bytes (musl
+// strips the leading '/'). A queue's header is PQ_W words of k.sys from
+// SYS_PQ; its name and its messages are bytes of k.ipcb after the System
+// V queues: the names from PQ_NAMES, then each queue's region of
+// PQ_REGION bytes. The messages lie in the region in the order they are
+// received in: highest priority first, oldest first within a priority.
+// Each is a word (priority + PQ_LEN * length), then the text, rounded up
+// to whole words.
+//
+// The attributes are kept as given, but a queue holds at most PQ_REGION
+// bytes of messages at once: a send that does not fit waits (or fails
+// with EAGAIN) as a send to a full queue does. A descriptor is an open
+// file description of kind OF_PQ: x the queue, word 3 O_NONBLOCK in bit
+// 0 and the access mode (0 read, 1 write, 2 both) above it. read, write,
+// poll and select on one are not supported.
+
+import "lxipc.bastio";
+
+const LX_MQ_OPEN: u64 = 240;
+const LX_MQ_UNLINK: u64 = 241;
+const LX_MQ_TIMEDSEND: u64 = 242;
+const LX_MQ_TIMEDRECEIVE: u64 = 243;
+const LX_MQ_NOTIFY: u64 = 244;
+const LX_MQ_GETSETATTR: u64 = 245;
+
+const PQ_W: u64 = 12;                  // header words a queue
+const PW_LIVE: u64 = 0;                // 0 free, 1 named, 2 unlinked but still open
+const PW_MAX: u64 = 1;                 // mq_maxmsg
+const PW_SIZE: u64 = 2;                // mq_msgsize
+const PW_CUR: u64 = 3;                 // mq_curmsgs
+const PW_USED: u64 = 4;                // bytes of the region in use
+const PW_OWN: u64 = 5;                 // owner uid, then gid << 32
+const PW_MODE: u64 = 6;
+const PW_OPENS: u64 = 7;               // open file descriptions of it
+const PW_NPID: u64 = 8;                // the process mq_notify registered, + 1; 0: none
+const PW_NSIG: u64 = 9;                // its signal; 0 for SIGEV_NONE
+const PW_NVAL: u64 = 10;               // its sigval
+const PW_NLEN: u64 = 11;               // the name's length
+const PQ_NAME_MAX: u64 = 255;          // NAME_MAX
+const PQ_ERRS: u64 = 0xFFFFFFFFFFFFF000; // above this, a result is -errno
+const PQ_NAMES: u64 = 278528;          // IPC_SETS * MQ_CAP: where k.ipcb's System V part ends
+const PQ_NAME_ROOM: u64 = 256;
+const PQ_REGIONS: u64 = 280576;        // PQ_NAMES + PQ_N * PQ_NAME_ROOM
+const PQ_REGION: u64 = 16384;
+const PQ_LEN: u64 = 32768;             // MQ_PRIO_MAX: a message word is prio + PQ_LEN * len
+const PQ_HARD_MAX: u64 = 65536;        // HARD_MSGMAX
+const PQ_HARD_SIZE: u64 = 16777216;    // HARD_MSGSIZEMAX
+const PQ_DEF_MAX: u64 = 10;            // msg_default, and msg_max for all but root
+const PQ_DEF_SIZE: u64 = 8192;         // msgsize_default and msgsize_max
+const PQ_ATTR: u64 = 64;               // struct mq_attr: flags, maxmsg, msgsize, curmsgs, 4 reserved
+const SIGEV_THREAD: u64 = 2;
+
+fn pq_at(q: u64, w: u64) -> u64
+  requires q < PQ_N && w < PQ_W
+  ensures result < SYS_LEN
+{
+  return SYS_PQ + q * PQ_W + w;
+}
+
+fn pq_get(k: &Kernel, q: u64, w: u64) -> u64
+  requires kok(k) && q < PQ_N && w < PQ_W
+{
+  return get(k.sys, pq_at(q, w));
+}
+
+fn pq_set(k: &mut Kernel, q: u64, w: u64, v: u64)
+  requires kok(k) && q < PQ_N && w < PQ_W
+  ensures kok(k)
+{
+  k.sys = set(k.sys, pq_at(q, w), v);
+}
+
+fn pq_region(q: u64) -> u64
+  requires q < PQ_N
+  ensures result + PQ_REGION <= IPCB_LEN
+{
+  return PQ_REGIONS + q * PQ_REGION;
+}
+
+/// Bytes a message of n text bytes takes in a region.
+fn pq_room(n: u64) -> u64
+  requires n <= PQ_REGION
+  ensures result >= 8 + n && result <= 8 + PQ_REGION
+{
+  return 8 + (n + 7) / 8 * 8;
+}
+
+// ---------------------------------------------------------------- names
+
+/// Reads the queue name at user address va into xfer[0..]: its length
+/// (1 ..= PQ_NAME_MAX), or -EFAULT, -ENOENT (empty), -ENAMETOOLONG, or
+/// -EACCES (it holds a '/').
+fn pq_name_in(k: &mut Kernel, pid: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures (1 <= result && result <= PQ_NAME_MAX) || result > PQ_ERRS
+{
+  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, PQ_NAME_ROOM);
+  if got == NO_RESULT || got == 0 {
+    return EFAULT;
+  }
+  let mut n = 0;
+  while n < got && n < PQ_NAME_ROOM && bget(k.fs.xfer, n) != 0
+    invariant n <= got && n <= PQ_NAME_ROOM && kok(k)
+  {
+    if bget(k.fs.xfer, n) == 47 {
+      return EACCES;                        // '/': there are no directories
+    }
+    n = n + 1;
+  }
+  if n == got && got < PQ_NAME_ROOM {
+    return EFAULT;                          // it runs into an unmapped page
+  }
+  if n == 0 {
+    return ENOENT;
+  }
+  if n > PQ_NAME_MAX {
+    return ENAMETOOLONG;
+  }
+  return n;
+}
+
+/// The live (named) queue whose name is the n bytes in xfer, or PQ_N.
+fn pq_find(k: &Kernel, n: u64) -> u64
+  requires kok(k) && 1 <= n && n <= PQ_NAME_MAX
+  ensures result <= PQ_N
+{
+  let mut q = 0;
+  while q < PQ_N
+    invariant q <= PQ_N
+  {
+    if pq_get(k, q, PW_LIVE) == 1 && pq_get(k, q, PW_NLEN) == n {
+      let base = PQ_NAMES + q * PQ_NAME_ROOM;
+      let mut i = 0;
+      while i < n && bget(k.ipcb, base + i) == bget(k.fs.xfer, i)
+        invariant i <= n && q < PQ_N
+      {
+        i = i + 1;
+      }
+      if i == n {
+        return q;
+      }
+    }
+    q = q + 1;
+  }
+  return PQ_N;
+}
+
+/// Whether process pid may have `want` (4 read, 2 write) on queue q.
+fn pq_may(k: &Kernel, pid: u64, q: u64, want: u64) -> bool
+  requires kok(k) && pid < NPROC && q < PQ_N
+{
+  if cred_root(k.procs, pid) {
+    return true;
+  }
+  let own = pq_get(k, q, PW_OWN);
+  let mode = pq_get(k, q, PW_MODE);
+  let mut bits = mode % 8;
+  if id_get(k.procs, pid, F_UID, true) == own % 0x100000000 {
+    bits = mode / 64 % 8;
+  } else if id_get(k.procs, pid, F_GID, true) == own / 0x100000000 % 0x100000000 {
+    bits = mode / 8 % 8;
+  }
+  return bits & want == want;
+}
+
+/// Frees queue q if nothing names it or has it open.
+fn pq_reap(k: &mut Kernel, q: u64)
+  requires kok(k) && q < PQ_N
+  ensures kok(k)
+{
+  if pq_get(k, q, PW_LIVE) == 2 && pq_get(k, q, PW_OPENS) == 0 {
+    pq_set(&mut k, q, PW_LIVE, 0);
+  }
+}
+
+/// An open file description of queue q went away (src/lxfd.bastio).
+fn pq_close(k: &mut Kernel, q: u64)
+  requires kok(k) && q < PQ_N
+  ensures kok(k)
+{
+  let o = pq_get(k, q, PW_OPENS);
+  if o > 0 {
+    pq_set(&mut k, q, PW_OPENS, o - 1);
+  }
+  pq_reap(&mut k, q);
+}
+
+/// A new queue for the n-byte name in xfer: its slot, or -errno.
+fn pq_create(k: &mut Kernel, pid: u64, n: u64, mode: u64, attr: u64) -> u64
+  requires kok(k) && pid < NPROC && 1 <= n && n <= PQ_NAME_MAX
+  ensures kok(k)
+  ensures result < PQ_N || result > PQ_ERRS
+{
+  // Keep the name before xfer is used for the attributes.
+  let mut q = 0;
+  while q < PQ_N && pq_get(k, q, PW_LIVE) != 0
+    invariant q <= PQ_N && kok(k)
+  {
+    q = q + 1;
+  }
+  if q >= PQ_N {
+    return ENOSPC;                          // queues_max
+  }
+  bcopy(&mut k.ipcb, PQ_NAMES + q * PQ_NAME_ROOM, k.fs.xfer, 0, n);
+  let mut max = PQ_DEF_MAX;
+  let mut size = PQ_DEF_SIZE;
+  if attr != 0 {
+    if copy_from_user(&mut k.spaces, pid, attr, &mut k.fs.xfer, 32) != 32 {
+      return EFAULT;
+    }
+    max = get_u64(k.fs.xfer, 8);
+    size = get_u64(k.fs.xfer, 16);
+    if max == 0 || size == 0 || max > PQ_HARD_MAX || size > PQ_HARD_SIZE {
+      return EINVAL;                        // also a negative one
+    }
+    if !cap_has(k, pid, CAP_SYS_RESOURCE) && (max > PQ_DEF_MAX || size > PQ_DEF_SIZE) {
+      return EINVAL;
+    }
+  }
+  let uid = id_get(k.procs, pid, F_UID, true) % 0x100000000;
+  let gid = id_get(k.procs, pid, F_GID, true) % 0x100000000;
+  pq_set(&mut k, q, PW_LIVE, 1);
+  pq_set(&mut k, q, PW_MAX, max);
+  pq_set(&mut k, q, PW_SIZE, size);
+  pq_set(&mut k, q, PW_CUR, 0);
+  pq_set(&mut k, q, PW_USED, 0);
+  pq_set(&mut k, q, PW_OWN, uid + gid * 0x100000000);
+  pq_set(&mut k, q, PW_MODE, mode % 512 & (511 - umask_of(k.procs, pid)));
+  pq_set(&mut k, q, PW_OPENS, 0);
+  pq_set(&mut k, q, PW_NPID, 0);
+  pq_set(&mut k, q, PW_NSIG, 0);
+  pq_set(&mut k, q, PW_NVAL, 0);
+  pq_set(&mut k, q, PW_NLEN, n);
+  return q;
+}
+
+/// mq_open(name, oflag, mode, attr).
+fn lx_mq_open(k: &mut Kernel, pid: u64, va: u64, oflag: u64, mode: u64, attr: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = pq_name_in(&mut k, pid, va);
+  if n > PQ_NAME_MAX {
+    return n;
+  }
+  let acc = oflag % 4;
+  if acc == LO_ACCMODE {
+    return EINVAL;
+  }
+  let mut q = pq_find(k, n);
+  if q < PQ_N && oflag & (LO_CREAT + LO_EXCL) == LO_CREAT + LO_EXCL {
+    return EEXIST;
+  }
+  if q >= PQ_N {
+    if oflag & LO_CREAT == 0 {
+      return ENOENT;
+    }
+    if fd_free(k, pid, 0) >= LXNFD {
+      return EMFILE;
+    }
+    q = pq_create(&mut k, pid, n, mode, attr);
+    if q >= PQ_N {
+      return q;
+    }
+  } else {
+    let mut want = 4;
+    if acc == 1 {
+      want = 2;
+    } else if acc == 2 {
+      want = 6;
+    }
+    if !pq_may(k, pid, q, want) {
+      return EACCES;
+    }
+  }
+  let fd = ev_install(&mut k, pid, OF_PQ, q, oflag / LO_NONBLOCK % 2 + 2 * acc, oflag / LO_CLOEXEC % 2 == 1);
+  if fd < LXNFD {
+    pq_set(&mut k, q, PW_OPENS, smaller(pq_get(k, q, PW_OPENS), OFD_N) + 1);
+  }
+  pq_reap(&mut k, q);                       // a queue just made that no descriptor took
+  return fd;
+}
+
+/// mq_unlink(name): the queue loses its name now and goes when the last
+/// descriptor of it closes.
+fn lx_mq_unlink(k: &mut Kernel, pid: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = pq_name_in(&mut k, pid, va);
+  if n > PQ_NAME_MAX {
+    return n;
+  }
+  let q = pq_find(k, n);
+  if q >= PQ_N {
+    return ENOENT;
+  }
+  // /dev/mqueue is sticky: only root and the owner may remove a queue.
+  if !cred_root(k.procs, pid) && id_get(k.procs, pid, F_UID, true) != pq_get(k, q, PW_OWN) % 0x100000000 {
+    return EACCES;
+  }
+  pq_set(&mut k, q, PW_LIVE, 2);
+  pq_reap(&mut k, q);
+  return 0;
+}
+
+// ---------------------------------------------------------------- descriptors
+
+/// The queue descriptor fd names, with the access it needs (`want`: 1
+/// read, 2 write, 0 any): the open file description, or OFD_N if it is
+/// not a queue or lacks that access (EBADF).
+fn pq_desc(k: &Kernel, pid: u64, fd: u64, want: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= OFD_N
+{
+  if fd >= LXNFD {
+    return OFD_N;
+  }
+  let h = fd_ofd(k, pid, fd);
+  if h >= OFD_N || of_get(k.ofd, h, 0) != OF_PQ || of_get(k.ofd, h, 2) >= PQ_N {
+    return OFD_N;
+  }
+  let acc = of_get(k.ofd, h, 3) / 2 % 4;
+  if (want == 1 && acc == 1) || (want == 2 && acc == 0) {
+    return OFD_N;
+  }
+  return h;
+}
+
+/// The deadline (in k.ns) of an absolute CLOCK_REALTIME timeout at va
+/// (FOREVER for none), or err -EFAULT / -EINVAL. A retry keeps the one it
+/// worked out first (`was`).
+fn pq_deadline(k: &mut Kernel, pid: u64, was: u64, va: u64) -> Ts
+  requires kok(k) && pid < NPROC
+  ensures kok(k) && result.ns <= FOREVER
+{
+  if va == 0 {
+    return Ts { err: 0, ns: FOREVER };
+  }
+  if was >= 2 {
+    return Ts { err: 0, ns: deadline(k, was, 0) };
+  }
+  let t = ts_in(&mut k, pid, va);
+  if t.err != 0 {
+    return t;
+  }
+  let now = wall_ns(k);
+  if t.ns <= now {
+    return Ts { err: 0, ns: smaller(k.ns, FOREVER) };   // already past
+  }
+  return Ts { err: 0, ns: sat_add(k.ns, t.ns - now) };
+}
+
+/// Waits for queue room or a message, until dl: retries call n, or ends
+/// it with -ETIMEDOUT once dl has passed.
+fn pq_wait(k: &mut Kernel, pid: u64, n: u64, dl: u64) -> u64
+  requires kok(k) && pid < NPROC && dl <= FOREVER
+  ensures kok(k)
+{
+  if dl < FOREVER {
+    if k.ns >= dl {
+      ret(&mut k.procs, pid, ETIMEDOUT);
+      return KEEP;
+    }
+    return wait_until(&mut k, pid, n, dl);
+  }
+  return lx_retry(&mut k, pid, n);
+}
+
+/// The offset in queue q's region where a message of priority prio goes:
+/// after every message of the same or a higher priority.
+fn pq_slot(k: &Kernel, q: u64, prio: u64) -> u64
+  requires kok(k) && q < PQ_N
+  ensures result <= PQ_REGION
+{
+  let base = pq_region(q);
+  let used = smaller(pq_get(k, q, PW_USED), PQ_REGION);
+  let mut o = 0;
+  while o + 8 <= used
+    invariant o <= used && used <= PQ_REGION && base + PQ_REGION <= IPCB_LEN
+  {
+    let w = get_u64(k.ipcb, base + o);
+    if w % PQ_LEN < prio {
+      return o;
+    }
+    let len = smaller(w / PQ_LEN, PQ_REGION);
+    let r = pq_room(len);
+    if r > used - o {
+      return used;                          // never: a message lies within the region
+    }
+    o = o + r;
+  }
+  return used;
+}
+
+/// Tells the process mq_notify registered for queue q (if any) that a
+/// message came to the empty queue, and drops the registration.
+fn pq_notify_fire(k: &mut Kernel, pid: u64, q: u64)
+  requires kok(k) && pid < NPROC && q < PQ_N
+  ensures kok(k)
+{
+  let np = pq_get(k, q, PW_NPID);
+  let s = pq_get(k, q, PW_NSIG);
+  pq_set(&mut k, q, PW_NPID, 0);
+  if np < 2 || np > NPROC || s == 0 || s > NSIG || state(k.procs, np - 1) == FREE {
+    return;
+  }
+  post_mesgq(&mut k, np - 1, s, tgid(k.procs, pid), pq_get(k, q, PW_NVAL));
+}
+
+/// mq_timedsend(fd, msg, len, prio, abs_timeout).
+fn lx_mq_send(k: &mut Kernel, pid: u64, was: u64, fd: u64, va: u64, len: u64, prio: u64, tsva: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if prio >= PQ_LEN {
+    ret(&mut k.procs, pid, EINVAL);
+    return KEEP;
+  }
+  let dl = pq_deadline(&mut k, pid, was, tsva);
+  if dl.err != 0 {
+    ret(&mut k.procs, pid, dl.err);
+    return KEEP;
+  }
+  let h = pq_desc(k, pid, fd, 2);
+  if h >= OFD_N {
+    ret(&mut k.procs, pid, EBADF);
+    return KEEP;
+  }
+  let q = of_get(k.ofd, h, 2);
+  if q >= PQ_N {
+    ret(&mut k.procs, pid, EBADF);
+    return KEEP;
+  }
+  if len > pq_get(k, q, PW_SIZE) || len > PQ_REGION - 8 {
+    ret(&mut k.procs, pid, EMSGSIZE);
+    return KEEP;
+  }
+  let mut text = balloc(PQ_REGION);
+  let got = copy_from_user(&mut k.spaces, pid, va, &mut text, len);
+  if got != len {
+    bfree(text);
+    ret(&mut k.procs, pid, EFAULT);
+    return KEEP;
+  }
+  let used = smaller(pq_get(k, q, PW_USED), PQ_REGION);
+  let cur = pq_get(k, q, PW_CUR);
+  let room = pq_room(len);
+  if cur >= pq_get(k, q, PW_MAX) || room > PQ_REGION - used {
+    bfree(text);
+    if of_get(k.ofd, h, 3) % 2 == 1 {
+      ret(&mut k.procs, pid, EAGAIN);
+      return KEEP;
+    }
+    return pq_wait(&mut k, pid, LX_MQ_TIMEDSEND, dl.ns);
+  }
+  let base = pq_region(q);
+  let o = pq_slot(k, q, prio);
+  if o > used {
+    bfree(text);
+    ret(&mut k.procs, pid, EINVAL);         // never
+    return KEEP;
+  }
+  bmove(&mut k.ipcb, base + o + room, base + o, used - o);
+  put_u64(&mut k.ipcb, base + o, prio + PQ_LEN * len);
+  bcopy(&mut k.ipcb, base + o + 8, text, 0, len);
+  bfree(text);
+  pq_set(&mut k, q, PW_USED, used + room);
+  pq_set(&mut k, q, PW_CUR, cur + 1);
+  if cur == 0 {
+    pq_notify_fire(&mut k, pid, q);
+  }
+  ret(&mut k.procs, pid, 0);
+  return KEEP;
+}
+
+/// mq_timedreceive(fd, buf, len, prio_ptr, abs_timeout).
+fn lx_mq_receive(k: &mut Kernel, pid: u64, was: u64, fd: u64, va: u64, len: u64, priop: u64, tsva: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let dl = pq_deadline(&mut k, pid, was, tsva);
+  if dl.err != 0 {
+    ret(&mut k.procs, pid, dl.err);
+    return KEEP;
+  }
+  let h = pq_desc(k, pid, fd, 1);
+  if h >= OFD_N {
+    ret(&mut k.procs, pid, EBADF);
+    return KEEP;
+  }
+  let q = of_get(k.ofd, h, 2);
+  if q >= PQ_N {
+    ret(&mut k.procs, pid, EBADF);
+    return KEEP;
+  }
+  if len < pq_get(k, q, PW_SIZE) {
+    ret(&mut k.procs, pid, EMSGSIZE);
+    return KEEP;
+  }
+  let used = smaller(pq_get(k, q, PW_USED), PQ_REGION);
+  if used < 8 {
+    if of_get(k.ofd, h, 3) % 2 == 1 {
+      ret(&mut k.procs, pid, EAGAIN);
+      return KEEP;
+    }
+    return pq_wait(&mut k, pid, LX_MQ_TIMEDRECEIVE, dl.ns);
+  }
+  let base = pq_region(q);
+  let w = get_u64(k.ipcb, base);
+  let n = smaller(w / PQ_LEN, PQ_REGION - 8);
+  let room = pq_room(n);
+  if room > used {
+    ret(&mut k.procs, pid, EINVAL);         // never: a message lies within the region
+    return KEEP;
+  }
+  let mut out = balloc(PQ_REGION);
+  bcopy(&mut out, 0, k.ipcb, base + 8, n);
+  let put = copy_to_user(&mut k.spaces, pid, va, out, n);
+  bfree(out);
+  if put != n {
+    ret(&mut k.procs, pid, EFAULT);
+    return KEEP;
+  }
+  if priop != 0 {
+    xfer_u64(&mut k.fs.xfer, 0, w % PQ_LEN);
+    if copy_to_user(&mut k.spaces, pid, priop, k.fs.xfer, 4) != 4 {
+      ret(&mut k.procs, pid, EFAULT);
+      return KEEP;
+    }
+  }
+  bmove(&mut k.ipcb, base, base + room, used - room);
+  pq_set(&mut k, q, PW_USED, used - room);
+  let cur = pq_get(k, q, PW_CUR);
+  if cur > 0 {
+    pq_set(&mut k, q, PW_CUR, cur - 1);
+  }
+  ret(&mut k.procs, pid, n);
+  return KEEP;
+}
+
+/// mq_notify(fd, sevp): registers pid for a signal when a message comes
+/// to the empty queue (one process at a time), or with sevp null drops
+/// its registration. SIGEV_THREAD is musl's business: it needs a netlink
+/// socket, which there is not, so it never gets here.
+fn lx_mq_notify(k: &mut Kernel, pid: u64, fd: u64, sev: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  // struct sigevent: sigval (8 bytes), int signo, int notify. Linux
+  // checks it before the descriptor, so EINVAL wins over EBADF.
+  let mut val = 0;
+  let mut sig = 0;
+  let mut how = SIGEV_NONE;
+  if sev != 0 {
+    if copy_from_user(&mut k.spaces, pid, sev, &mut k.fs.xfer, 16) != 16 {
+      return EFAULT;
+    }
+    val = get_u64(k.fs.xfer, 0);
+    let w = get_u64(k.fs.xfer, 8);
+    sig = w % 0x100000000;
+    how = w / 0x100000000;
+    if how != SIGEV_NONE && how != SIGEV_SIGNAL {
+      return EINVAL;                        // SIGEV_THREAD needs netlink
+    }
+    if how == SIGEV_SIGNAL && (sig == 0 || sig > NSIG) {
+      return EINVAL;
+    }
+  }
+  let h = pq_desc(k, pid, fd, 0);
+  if h >= OFD_N {
+    return EBADF;
+  }
+  let q = of_get(k.ofd, h, 2);
+  if q >= PQ_N {
+    return EBADF;
+  }
+  let me = tgid(k.procs, pid) + 1;
+  let np = pq_get(k, q, PW_NPID);
+  if sev == 0 {
+    if np == me {
+      pq_set(&mut k, q, PW_NPID, 0);
+    }
+    return 0;
+  }
+  if np != 0 && np != me {
+    return EBUSY;
+  }
+  pq_set(&mut k, q, PW_NPID, me);
+  if how == SIGEV_NONE {
+    pq_set(&mut k, q, PW_NSIG, 0);
+  } else {
+    pq_set(&mut k, q, PW_NSIG, sig);
+  }
+  pq_set(&mut k, q, PW_NVAL, val);
+  return 0;
+}
+
+/// mq_getsetattr(fd, new, old): the old attributes out, then O_NONBLOCK
+/// from new (the only one that changes).
+fn lx_mq_getsetattr(k: &mut Kernel, pid: u64, fd: u64, nv: u64, ov: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let h = pq_desc(k, pid, fd, 0);
+  if h >= OFD_N {
+    return EBADF;
+  }
+  let q = of_get(k.ofd, h, 2);
+  if q >= PQ_N {
+    return EBADF;
+  }
+  let mut nb = 0;
+  if nv != 0 {
+    if copy_from_user(&mut k.spaces, pid, nv, &mut k.fs.xfer, 8) != 8 {
+      return EFAULT;
+    }
+    nb = get_u64(k.fs.xfer, 0) / LO_NONBLOCK % 2;
+  }
+  if ov != 0 {
+    xfer_zero(&mut k, PQ_ATTR);
+    xfer_u64(&mut k.fs.xfer, 0, of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK);
+    xfer_u64(&mut k.fs.xfer, 8, pq_get(k, q, PW_MAX));
+    xfer_u64(&mut k.fs.xfer, 16, pq_get(k, q, PW_SIZE));
+    xfer_u64(&mut k.fs.xfer, 24, pq_get(k, q, PW_CUR));
+    if copy_to_user(&mut k.spaces, pid, ov, k.fs.xfer, PQ_ATTR) != PQ_ATTR {
+      return EFAULT;
+    }
+  }
+  if nv != 0 {
+    of_set(&mut k.ofd, h, 3, of_get(k.ofd, h, 3) / 2 * 2 + nb);
+  }
+  return 0;
+}
+
+fn is_pq_call(n: u64) -> bool {
+  return LX_MQ_OPEN <= n && n <= LX_MQ_GETSETATTR;
+}
+
+/// The mq_* system calls. Returns KEEP or SWITCH.
+fn lx_pq_call(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let r10 = pget(k.procs, pid, F_REGS + R_R10);
+  let r8 = pget(k.procs, pid, F_REGS + R_R8);
+  if n == LX_MQ_TIMEDSEND {
+    return lx_mq_send(&mut k, pid, was, a, b, c, r10, r8);
+  }
+  if n == LX_MQ_TIMEDRECEIVE {
+    return lx_mq_receive(&mut k, pid, was, a, b, c, r10, r8);
+  }
+  let mut r = ENOSYS;
+  if n == LX_MQ_OPEN {
+    r = lx_mq_open(&mut k, pid, a, b, c, r10);
+  } else if n == LX_MQ_UNLINK {
+    r = lx_mq_unlink(&mut k, pid, a);
+  } else if n == LX_MQ_NOTIFY {
+    r = lx_mq_notify(&mut k, pid, a, b);
+  } else if n == LX_MQ_GETSETATTR {
+    r = lx_mq_getsetattr(&mut k, pid, a, b, c);
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}

@@ -58,3 +58,14 @@ $ /disk/kilo /tmp/ct_s
 > \x11
 $ bb stty -a < /dev/tty 2>/dev/null | bb tr ' ;' '\n\n' | bb grep -x -e icanon -e -icanon -e echo -e -echo | bb tr '\n' ,; echo
 icanon,echo,
+
+== python: the REPL, and Ctrl-C is KeyboardInterrupt
+$ PYTHONHOME=/disk/py /disk/python
+> x = 6 * 7\r
+> while True: pass\r
+> \r
+> \x03
+> open('/tmp/ct_py', 'w').write('x=%d' % x)\r
+> \x04
+$ cat /tmp/ct_py; echo; rm /tmp/ct_py
+x=42

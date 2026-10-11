@@ -406,6 +406,14 @@ trap_common:
         push    %r13
         push    %r14
         push    %r15
+        /* An interrupt or exception gate leaves RFLAGS.DF as it was, and a
+         * user program may be stopped inside a backward copy (musl's memmove
+         * runs std; rep movsq; cld). The C code below, like every SysV
+         * function, assumes DF clear: gcc's rep stos/movs for struct copies
+         * and fills, and bst_copy_fwd, would run backwards over the memory
+         * below their target. iretq gives the user its own DF back from the
+         * saved RFLAGS. (syscall clears DF through FMASK already.) */
+        cld
         mov     $KDATA, %ax
         mov     %ax, %ds
         mov     %ax, %es

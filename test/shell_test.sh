@@ -187,7 +187,7 @@ steps = [
     ("fpucheck", b"fpucheck: xmm0 kept"),
     # musl malloc (brk, mmap), stdio on a file, and a line read from the
     # console; the third field is what to wait for instead of the prompt.
-    ("mtest", [b"mtest: malloc heap 75", b"mtest: big memory 4096 1024", b"mtest: file line 42"], b"type a line"),
+    ("mtest", [b"mtest: malloc heap 75", b"mtest: big memory 4096 1024", b"mtest: direction flag spun", b"mtest: file line 42"], b"type a line"),
     ("typed for mtest", b"mtest: got typed for mtest"),
     # BusyBox's shell, unmodified, reading commands from the console. The
     # console is a terminal (ioctl TCGETS works), so ash is interactive and
@@ -240,6 +240,9 @@ steps = [
     # A script with no #! line: execve says ENOEXEC, so ash runs it itself,
     # through an execve of /proc/self/exe.
     ("echo 'echo script $1' > /sc; chmod +x /sc; /sc ran; rm /sc", b"script ran", b"\n# "),
+    # execve passes up to 8192 arguments and 1024 environment strings, laid
+    # out at the top of the stack (it used to stop at 32 and 16).
+    ("(set --; i=0; while [ $i -lt 400 ]; do set -- \"$@\" arg$i; export V$i=x$i; i=$((i+1)); done; ash -c 'echo argc=$# last=${400} env=$V399' x \"$@\")", b"argc=400 last=arg399 env=x399", b"\n# "),
     # Time: clocks, nanosleep, poll that waits, select, alarms and pause, and
     # eventfd, timerfd and epoll (user/mtime.c); the sleep applet; ash's
     # read -t, a poll on the console that times out, then one that wakes
@@ -283,6 +286,18 @@ steps = [
     # chown keeps its owner, on the disk too.
     ("umask 077; echo x > po; chown 65534:100 po; stat -c 'p%a %u %g' po; rm po; umask 022; echo y > /disk/po; chown 7:8 /disk/po; stat -c 'd%a %u %g' /disk/po; rm /disk/po",
      [b"p600 65534 100", b"d644 7 8"], b"\n# "),
+    # Users (docs/security.md): adduser, su to the new user and back,
+    # /etc/shadow is root's, su and passwd are the only set-user-ID
+    # programs, and su asks for root's password once root has one.
+    ("adduser -D alice; id alice; stat -c '%a %U' /bin/su /bin/ls /etc/shadow /root",
+     [b"uid=1000(alice) gid=1000(alice)", b"\r\n4755 root\r\n755 root\r\n600 root\r\n700 root\r\n"], b"\n# "),
+    ("su alice -c 'id -u; whoami; cd; pwd; cat /etc/shadow; echo s=$?; ls /root; echo r=$?'",
+     [b"\r\n1000\r\nalice\r\n/home/alice\r\n", b"Permission denied", b"s=1", b"r=1"], b"\n# "),
+    ("echo root:pw | chpasswd; read l < /etc/shadow; case $l in 'root:$6$'*) echo sha512;; esac; su alice -c 'echo no | su -c id root; echo w=$?; echo pw | su -c id root'",
+     [b"\r\nsha512\r\n", b"w=1", b"uid=0(root) gid=0(root)"], b"\n# "),
+    # (BusyBox keeps the old /etc files as NAME-: gone, so no pages stay.)
+    ("deluser alice; id alice; passwd -d root; echo u=$?; rm -rf /home/alice /etc/passwd- /etc/group- /etc/shadow-",
+     [b"unknown user alice", b"u=0"], b"\n# "),
     # Small calls: uname, readv, pread/pwrite, limits, sysinfo, statfs,
     # getrandom, priorities, sessions, process groups, ttyname, pipe capacity (user/mmisc.c).
     ("mmisc", b"mmisc: ok on Linux x86_64, signals, pipe 65536", b"\n# "),
@@ -309,7 +324,8 @@ steps = [
     # What Linux programs expect to find: /dev/null swallows, /tmp and
     # /etc/passwd exist, and every file has its own inode number.
     ("echo lost > /dev/null; wc -c < /dev/null; test -d /tmp && echo tmp$((2+2))", b"\r\n0\r\ntmp4\r\n", b"\n# "),
-    ("cat /etc/passwd", b"root:x:0:0", b"\n# "),
+    ("cat /etc/passwd", b"nobody:x:65534:65534:", b"\n# "),
+    ("cat /etc/group", b"nogroup:x:65534:", b"\n# "),
     ("echo a > /tmp/i1; echo b > /tmp/i2; set -- $(ls -i /tmp/i1); a=$1; set -- $(ls -i /tmp/i2); [ $a != $1 ] && echo distinct; rm /tmp/i1 /tmp/i2", b"\r\ndistinct\r\n", b"\n# "),
     # Symbolic links: made by ln -s, read by readlink, followed by
     # everything else (relative and absolute targets, a link to a
@@ -329,6 +345,12 @@ steps = [
     # boot below).
     ("mkfifo pp; ls -l pp; echo hi > pp & cat pp; wait; mv pp pq; rm pq; ls pq; mkfifo disk/pf; stat -c %F disk/pf", [b"prw", b"\r\nhi\r\n", b"pq: No such file", b"fifo"], b"\n# "),
     ("echo dh > disk/hk1; ln disk/hk1 disk/hk2; ln disk/hk1 h3; mkdir hd; ln hd hd2; rmdir hd; stat -c %h disk/hk2", [b"Cross-device link", b"not permitted", b"\r\n2\r\n"], b"\n# "),
+    # Loop devices (src/lxloop.bastio): /dev/loopN are block devices and
+    # /dev/loop-control a character device; test/compat/progs/t_dev.c
+    # binds one to a file and reads and writes through it.
+    ("stat -c %F /dev/loop0 /dev/loop-control", b"block special file\r\ncharacter special file\r\n", b"\n# "),
+    # An unbound loop device's /sys/block entry: no sectors, not read-only.
+    ("cat /sys/block/loop0/size /sys/block/loop0/ro", b"0\r\n0\r\n", b"\n# "),
     # The disk's directory grows past its first 64 entries (dir_grow); the
     # power cuts below check that what it grew survives.
     ("mkdir disk/many; i=0; while [ $i -lt 150 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; cat disk/many/f149", b"\r\n150\r\n149\r\n", b"\n# "),
@@ -344,6 +366,8 @@ steps = [
     # types, a process's own mount table, and three fixed sysctls.
     ("n=0; while read k r; do [ \"$k\" = processor ] && n=$((n+1)); done < /proc/cpuinfo; echo cpus=$n; cat /proc/filesystems; cat /proc/self/mounts", [f"cpus={smp}\r\n".encode(), b"nodev\tramfs", b"nodev\ttmpfs", b"\tbstdisk3", b"proc /proc proc"], b"\n# "),
     ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n32\r\n", b"mounts"], b"\n# "),
+    # The kernel's command line, and a process's fixed regions.
+    ("cat /proc/cmdline /proc/self/maps", [b"BOOT_IMAGE=", b"[vdso]", b"[stack]"], b"\n# "),
     ("exit 5", b"[exit 5]"),
     ("rm lxout", b""),
     ("sh", b"BastiOS 0.2 -- type"),
@@ -693,13 +717,21 @@ else:
     reply = b""
     line = b""
     if read_until(b"listening on tcp port 7001", mark):
-        time.sleep(0.5)
-        m2 = len(out)
-        qemu.stdin.write(b"ps\r"); qemu.stdin.flush()
-        # ps's own line names mtcp; wait for the prompt after it (the one
-        # `mtcp &` printed can arrive after m2, under SMP).
-        if (read_until(b" mtcp", m2) and read_until(b"bastios> ", out.index(b" mtcp", m2))
-                and re.search(rb"socket\s+\d+\s+mtcp", out[m2:])):
+        # mtcp prints that line just before it calls accept, so ps may still
+        # find it ready on a loaded machine: ask again, a few times.
+        asleep = False
+        for _ in range(10):
+            time.sleep(0.5)
+            m2 = len(out)
+            qemu.stdin.write(b"ps\r"); qemu.stdin.flush()
+            # ps's own line names mtcp; wait for the prompt after it (the one
+            # `mtcp &` printed can arrive after m2, under SMP).
+            if not (read_until(b" mtcp", m2) and read_until(b"bastios> ", out.index(b" mtcp", m2))):
+                break
+            if re.search(rb"socket\s+\d+\s+mtcp", out[m2:]):
+                asleep = True
+                break
+        if asleep:
             print("ok   Linux TCP: a process blocked in accept sleeps")
         else:
             print("FAIL Linux TCP accept sleep:", repr(out[m2:])); fails += 1
@@ -1361,6 +1393,75 @@ with open(disk, "rb") as f:
     ok = f.read(8) == b"BSTDISK3"
 print(("ok  " if ok else "FAIL"), "a BSTDISK2 disk is upgraded to BSTDISK3 at mount")
 fails += not ok
+# A program on the disk shares its read-only pages through the page cache
+# (share_text, src/elf.bastio): the second run maps the pages the first
+# read in. mmisc mprotects a page of its constants writable in a child and
+# writes it; that must give the child a copy, so the next run (and the
+# parent) still read the original. Its code is read from the file only
+# when first run (src/lazy.bastio); given its own path, it removes the file
+# first and still runs code it had not touched (one page after mprotect),
+# which a later exec of the same name then cannot find.
+subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf"], check=True)
+qemu = boot(2, with_disk=True)
+out = b""
+deadline = time.time() + timeout
+for line, want, until in [
+    ("ash", b"built-in shell (ash)", b"\n# "),
+    ("/disk/mx", b"mmisc: ok on Linux", b"\n# "),
+    ("/disk/mx && /disk/mx && echo twice", b"mmisc: ok on Linux x86_64, signals, pipe 65536\r\ntwice", b"\n# "),
+    # Two at once: their code pages come from one page cache entry each,
+    # and a fault that waits for the disk sleeps while the other runs.
+    # (mmisc makes a file "mm" in its working directory, so each has its own;
+    # ash gives a background job /dev/null as stdin, and mmisc checks the tty.)
+    ("mkdir /tmp/a /tmp/b; (cd /tmp/a; /disk/mx </dev/tty) & (cd /tmp/b; /disk/mx); wait; echo both", b"pipe 65536\r\nmmisc: ok on Linux x86_64, signals, pipe 65536\r\nboth", b"\n# "),
+    ("/disk/mx /disk/mx && echo gone; /disk/mx", [b"mmisc: ok on Linux", b"\r\ngone\r\n", b"not found"], b"\n# "),
+]:
+    mark = len(out)
+    if mark == 0 and not read_until(b"bastios> "):
+        print("FAIL: no prompt after the disk-program boot"); fails += 1
+        break
+    mark = len(out)
+    qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+    ok = read_until(until, mark) and all(w in out[mark:] for w in (want if isinstance(want, list) else [want]))
+    print(("ok  " if ok else "FAIL"), "(disk-program boot)", repr(line)); ok or print(repr(out[mark:]))
+    fails += not ok
+qemu.kill(); qemu.wait()
+# Two connections opened at once, before the kernel knows the gateway's
+# MAC: both SYN+ACKs wait for one ARP answer (send_via holds up to
+# HELD_N frames). With only one frame held, the first was dropped and its
+# connection waited a second for the host to send its SYN again.
+ports = []
+for _ in range(2):
+    _s = socket.socket(); _s.bind(("127.0.0.1", 0)); ports.append(_s.getsockname()[1]); _s.close()
+qemu = boot(2, extra=["-netdev", f"user,id=n1,hostfwd=tcp:127.0.0.1:{ports[0]}-:7101,hostfwd=tcp:127.0.0.1:{ports[1]}-:7102",
+                      "-device", "virtio-net-pci,netdev=n1"])
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+time.sleep(2)                           # DHCP
+for line, want in [("ash", b"\n# "), ("mtcp echo 7101 &", b"listening on tcp port 7101"), ("mtcp echo 7102 &", b"listening on tcp port 7102")]:
+    mark = len(out)
+    qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+    ok = ok and read_until(want, mark)
+took = []
+if ok:
+    import threading
+    def echo_once(port):
+        try:
+            t0 = time.time()
+            c = socket.create_connection(("127.0.0.1", port), timeout=20)
+            c.sendall(b"ping")
+            got = c.recv(10)
+            took.append((time.time() - t0, got))
+            c.close()
+        except OSError as e:
+            took.append((99, repr(e).encode()))
+    ts = [threading.Thread(target=echo_once, args=(p,)) for p in ports]
+    [t.start() for t in ts]; [t.join(30) for t in ts]
+ok = ok and len(took) == 2 and all(g == b"ping" and t < 0.9 for t, g in took)
+print(("ok  " if ok else "FAIL"), "two TCP connections at once before ARP: both answered", [f"{t:.2f} s" for t, _ in took])
+fails += not ok
+qemu.kill(); qemu.wait()
 # ACPI (src/acpi.bastio) on both of QEMU's PCs, the i440fx (pc) and the
 # q35, without the isa-debug-exit device and without -no-reboot, so only
 # the kernel's own ACPI code can end QEMU: `reboot` restarts the machine

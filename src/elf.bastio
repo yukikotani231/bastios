@@ -18,6 +18,7 @@ import "space.bastio";
 import "fs.bastio";
 import "core/endian.bastio";
 import "tsc.bastio";
+import "text.bastio";
 
 const ELF_HDR: u64 = 64;              // size of the ELF64 file header
 const PH_SIZE: u64 = 56;              // size of an ELF64 program header
@@ -36,15 +37,15 @@ const SEG_BAD: u64 = 2;               // malformed, or something we cannot run
 const SEG_INTERP: u64 = 3;            // PT_INTERP: from and filesz locate the interpreter's path
 const INTERP_MAX: u64 = 256;          // the longest interpreter path, NUL included
 
-// The initial stack lives in the window's top page.
-const STACK_PAGE: u64 = 16383;       // WPAGES - 1
-const SP_WORD: u64 = 256;             // rsp points at word 256 of that page
-const ARGS_AT: u64 = 2752;            // argument and environment strings, above the vectors
-const ARGS_MAX: u64 = 1280;           // their bytes, NULs included (up to RANDOM_AT)
-const ARGV_MAX: u64 = 32;             // the most arguments
-const ENVC_MAX: u64 = 16;             // the most environment strings
-const RANDOM_AT: u64 = 4032;          // the 16 bytes AT_RANDOM points at
-const ELF_SP: u64 = 0x3FFF800;        // window offset of rsp: page STACK_PAGE, word 256
+// The initial stack, at the top of the window as on Linux: the 16 bytes
+// AT_RANDOM points at on top, the argument and environment strings below
+// them, then argc, argv, envp and the auxiliary vector, where rsp points.
+// The stack grows down from there (stack_reach, src/linux.bastio).
+const ARGS_MAX: u64 = 131072;         // string bytes, NULs included (Linux's ARG_MAX)
+const ARGV_MAX: u64 = 8192;           // the most arguments
+const ENVC_MAX: u64 = 1024;           // the most environment strings
+const RANDOM_AT: u64 = 0x3FFFFF0;     // USER_SIZE - 16
+const AUX_WORDS: u64 = 32;            // the auxiliary vector: 16 pairs
 // The vDSO (user/vdso.c): one read-only page just below the stack, holding
 // the image and, from byte VDSO_DATA, the clock it reads (src/tsc.bastio).
 const VDSO_PAGE: u64 = 16127;         // STACK_FIRST - 1
@@ -102,6 +103,19 @@ struct Seg {
   filesz: u64,    // bytes to copy; the rest of the segment is zero
   off: u64,       // window offset of the segment
   memsz: u64,
+  w: bool,        // writable (PF_W)
+  x: bool,        // executable (PF_X)
+}
+
+/// The pages exec leaves out of a new address space for the program's
+/// first touch of each to bring in (src/lazy.bastio): window pages first
+/// .. first + pages, the first at file offset off. pages 0: none.
+struct Lz { first: u64, pages: u64, off: u64 }
+
+fn lz_none() -> Lz
+  ensures result.pages == 0 && result.first == 0
+{
+  return Lz { first: 0, pages: 0, off: 0 };
 }
 
 spec fn seg_fits(size: u64, s: Seg) -> bool {
@@ -146,7 +160,7 @@ fn is_elf(img: Str) -> bool {
 fn bad_seg() -> Seg
   ensures result.kind == SEG_BAD
 {
-  return Seg { kind: SEG_BAD, from: 0, filesz: 0, off: 0, memsz: 0 };
+  return Seg { kind: SEG_BAD, from: 0, filesz: 0, off: 0, memsz: 0, w: true, x: false };
 }
 
 /// Program header `i` of `src` (headers at `phoff`), placed with `bias`.
@@ -160,16 +174,17 @@ fn seg(v: &mut Vfs, src: Src, phoff: u64, i: u64, bias: u64) -> Seg
   let h = 0;
   let n = src.size;
   let t = rd32(v.xfer, h);
+  let flags = rd32(v.xfer, h + 4);
   let from = rd64(v.xfer, h + 8);
   if t == PT_INTERP {
     let plen = rd64(v.xfer, h + 32);
     if plen < 2 || plen > INTERP_MAX || from > n || plen > n - from {
       return bad_seg();
     }
-    return Seg { kind: SEG_INTERP, from: from, filesz: plen, off: 0, memsz: 0 };
+    return Seg { kind: SEG_INTERP, from: from, filesz: plen, off: 0, memsz: 0, w: true, x: false };
   }
   if t != PT_LOAD {
-    return Seg { kind: SEG_SKIP, from: 0, filesz: 0, off: 0, memsz: 0 };
+    return Seg { kind: SEG_SKIP, from: 0, filesz: 0, off: 0, memsz: 0, w: true, x: false };
   }
   let vaddr = rd64(v.xfer, h + 16);
   let filesz = rd64(v.xfer, h + 32);
@@ -185,7 +200,7 @@ fn seg(v: &mut Vfs, src: Src, phoff: u64, i: u64, bias: u64) -> Seg
   if off > IMAGE_MAX || memsz > IMAGE_MAX - off {
     return bad_seg();
   }
-  return Seg { kind: SEG_LOAD, from: from, filesz: filesz, off: off, memsz: memsz };
+  return Seg { kind: SEG_LOAD, from: from, filesz: filesz, off: off, memsz: memsz, w: flags % 4 >= 2, x: flags % 2 == 1 };
 }
 
 fn bad_elf() -> Elf
@@ -290,9 +305,10 @@ fn on_page(a: u64, left: u64) -> u64
 }
 
 /// Copies the `n` bytes at offset `from` of `src` to window offset `off`,
-/// XFER bytes at a time. A page the window does not map is skipped
-/// (`new_window` maps them all). Returns false if the bytes could not all
-/// be read.
+/// XFER bytes at a time. A page the window does not map is skipped, and
+/// a whole one is not even read (a page left for the first touch, Lz);
+/// so is a whole page mapped read-only (a shared page of program text,
+/// share_text: it holds these bytes already). Returns false if the bytes could not all be read.
 fn copy_in(l2: &mut PageTable, v: &mut Vfs, src: Src, from: u64, off: u64, n: u64) -> bool
   requires pt_level(l2) == 2 && vfs_ok(v) && off + n <= IMAGE_MAX && from + n <= src.size
   ensures pt_level(l2) == 2 && vfs_ok(v)
@@ -302,11 +318,15 @@ fn copy_in(l2: &mut PageTable, v: &mut Vfs, src: Src, from: u64, off: u64, n: u6
     invariant k <= n && pt_level(l2) == 2 && vfs_ok(v)
   {
     let c = smaller(n - k, XFER);
-    if !src_read(&mut v, src, from + k, c) {
-      return false;
+    if c == 4096 && (off + k) % 4096 == 0 && (w_readonly(&mut l2, (off + k) / 4096) || !w_has(&mut l2, (off + k) / 4096)) {
+      k = k + c;
+    } else {
+      if !src_read(&mut v, src, from + k, c) {
+        return false;
+      }
+      put_window(&mut l2, v.xfer, off + k, c);
+      k = k + c;
     }
-    put_window(&mut l2, v.xfer, off + k, c);
-    k = k + c;
   }
   return true;
 }
@@ -314,7 +334,7 @@ fn copy_in(l2: &mut PageTable, v: &mut Vfs, src: Src, from: u64, off: u64, n: u6
 /// Copies the first `n` bytes of `x` to window offset `off`, a page at a
 /// time; pages the window does not map are skipped.
 fn put_window(l2: &mut PageTable, x: &Bytes, off: u64, n: u64)
-  requires pt_level(l2) == 2 && n <= blen(x) && off + n <= IMAGE_MAX
+  requires pt_level(l2) == 2 && n <= blen(x) && off + n <= USER_SIZE
   ensures pt_level(l2) == 2
 {
   let mut k = 0;
@@ -328,74 +348,139 @@ fn put_window(l2: &mut PageTable, x: &Bytes, off: u64, n: u64)
   }
 }
 
-/// Writes the initial stack the Linux ABI promises at the entry point:
-/// argc, argv, envp and the auxiliary vector. The first `alen` bytes of
-/// `args` are the argument strings and the bytes from there to `total` the
-/// environment strings, each ending in a NUL (bytes after the last NUL,
-/// arguments past ARGV_MAX and strings past ENVC_MAX are not passed).
-/// `seed` fills the AT_RANDOM bytes; it is not a source of secure
-/// randomness. `base` is where the interpreter was placed, or 0.
-fn init_stack(f: &mut Frame, e: Elf, base: u64, vdso: bool, args: &Bytes, alen: u64, total: u64, seed: u64)
-  requires alen <= total && total <= ARGS_MAX && total <= blen(args)
+/// How many strings end (in a NUL) in args[from..to], counting at most `most`.
+fn nul_count(args: &Bytes, from: u64, to: u64, most: u64) -> u64
+  requires from <= to && to <= blen(args)
+  ensures result <= most
 {
-  let top = USER_BASE + STACK_PAGE * 4096;
-  let w = SP_WORD;
-  let mut argc = 0;
-  let mut envc = 0;
+  let mut n = 0;
+  let mut i = from;
+  while i < to
+    invariant from <= i && i <= to && to <= blen(args) && n <= most
+  {
+    if bget(args, i) == 0 && n < most {
+      n = n + 1;
+    }
+    i = i + 1;
+  }
+  return n;
+}
+
+/// The window offset the strings start at: below the AT_RANDOM bytes.
+fn str_at(total: u64) -> u64
+  requires total <= ARGS_MAX
+  ensures result + total <= RANDOM_AT && result + ARGS_MAX + 16 >= RANDOM_AT
+{
+  return (RANDOM_AT - total) / 16 * 16;
+}
+
+/// The window offset of the initial rsp: below the strings, with room for
+/// argc, argv, envp and the auxiliary vector, 16-aligned as the ABI wants.
+/// `s` is where the strings start (str_at).
+fn vec_at(s: u64, argc: u64, envc: u64) -> u64
+  requires s <= RANDOM_AT && s + ARGS_MAX + 16 >= RANDOM_AT && argc <= ARGV_MAX && envc <= ENVC_MAX
+  ensures result + 8 * (3 + argc + envc + AUX_WORDS) <= s
+  ensures result >= STACK_FIRST * 4096 && result % 16 == 0
+{
+  return (s - 8 * (3 + argc + envc + AUX_WORDS)) / 16 * 16;
+}
+
+/// The window offset of rsp at the entry point, for the strings in the
+/// first `total` bytes of `args`, the first `alen` of them the arguments.
+fn elf_sp(args: &Bytes, alen: u64, total: u64) -> u64
+  requires alen <= total && total <= ARGS_MAX && total <= blen(args)
+  ensures result >= STACK_FIRST * 4096 && result < USER_SIZE
+{
+  return vec_at(str_at(total), nul_count(args, 0, alen, ARGV_MAX), nul_count(args, alen, total, ENVC_MAX));
+}
+
+/// Writes the initial stack the Linux ABI promises at the entry point,
+/// mapping its pages: argc, argv, envp and the auxiliary vector at elf_sp.
+/// The first `alen` bytes of `args` are the argument strings and the bytes
+/// from there to `total` the environment strings, each ending in a NUL
+/// (bytes after the last NUL, arguments past ARGV_MAX and strings past
+/// ENVC_MAX are not passed). `seed` fills the AT_RANDOM bytes; it is not a
+/// source of secure randomness. `base` is where the interpreter was placed,
+/// or 0. False if memory ran out.
+fn init_stack(m: &mut Mem, l2: &mut PageTable, e: Elf, base: u64, vdso: bool, args: &Bytes, alen: u64, total: u64, seed: u64) -> bool
+  requires mem_ok(m) && pt_level(l2) == 2 && alen <= total && total <= ARGS_MAX && total <= blen(args)
+  ensures mem_ok(m) && pt_level(l2) == 2
+{
+  let argc = nul_count(args, 0, alen, ARGV_MAX);
+  let envc = nul_count(args, alen, total, ENVC_MAX);
+  let s = str_at(total);
+  let at = vec_at(s, argc, envc);
+  let mut p = at / 4096;
+  while p < WPAGES
+    invariant pt_level(l2) == 2 && mem_ok(m)
+  {
+    if !w_map(&mut m, &mut l2, p, false) {
+      return false;
+    }
+    p = p + 1;
+  }
+  let words = 3 + argc + envc + AUX_WORDS;
+  let mut vec = balloc(8 * words);
+  // argv[na] and envp[ne] point at the strings as they end; the counts
+  // above bound them, so a string past ARGV_MAX or ENVC_MAX is skipped.
+  let mut na = 0;
+  let mut ne = 0;
   let mut start = 0;
   let mut i = 0;
   while i < total
     invariant i <= total && total <= ARGS_MAX && total <= blen(args) && start <= i
-    invariant argc <= ARGV_MAX && envc <= ENVC_MAX
+    invariant na <= argc && ne <= envc && blen(vec) == 8 * words && words == 3 + argc + envc + AUX_WORDS
   {
-    let ch = bget(args, i);
-    frame_write8(&mut f, ARGS_AT + i, ch);
-    if ch == 0 {
-      if i < alen && argc < ARGV_MAX {
-        frame_write(&mut f, w + 1 + argc, top + ARGS_AT + start);
-        argc = argc + 1;
-      } else if i >= alen && envc < ENVC_MAX {
-        // Every argument string comes first, so argc is final here.
-        frame_write(&mut f, w + 2 + argc + envc, top + ARGS_AT + start);
-        envc = envc + 1;
+    if bget(args, i) == 0 {
+      if i < alen && na < argc {
+        put_u64(&mut vec, 8 * (1 + na), USER_BASE + s + start);
+        na = na + 1;
+      } else if i >= alen && ne < envc {
+        put_u64(&mut vec, 8 * (2 + argc + ne), USER_BASE + s + start);
+        ne = ne + 1;
       }
       start = i + 1;
     }
     i = i + 1;
   }
+  put_u64(&mut vec, 0, argc);                      // argv and envp end in the zeros balloc gave
+  let v = 3 + argc + envc;
+  aux(&mut vec, v, 3, e.phdr);                     // AT_PHDR
+  aux(&mut vec, v + 2, 4, PH_SIZE);                // AT_PHENT
+  aux(&mut vec, v + 4, 5, e.phnum);                // AT_PHNUM
+  aux(&mut vec, v + 6, 6, 4096);                   // AT_PAGESZ
+  aux(&mut vec, v + 8, 7, base);                   // AT_BASE: the interpreter, if any
+  aux(&mut vec, v + 10, 8, 0);                     // AT_FLAGS
+  aux(&mut vec, v + 12, 9, e.entry);               // AT_ENTRY
+  aux(&mut vec, v + 14, 11, 0);                    // AT_UID
+  aux(&mut vec, v + 16, 12, 0);                    // AT_EUID
+  aux(&mut vec, v + 18, 13, 0);                    // AT_GID
+  aux(&mut vec, v + 20, 14, 0);                    // AT_EGID
+  aux(&mut vec, v + 22, 17, 100);                  // AT_CLKTCK: the timer runs at 100 Hz
+  aux(&mut vec, v + 24, 23, 0);                    // AT_SECURE
+  aux(&mut vec, v + 26, 25, USER_BASE + RANDOM_AT); // AT_RANDOM
+  if vdso {
+    aux(&mut vec, v + 28, AT_SYSINFO_EHDR, USER_BASE + VDSO_PAGE * 4096);
+  } else {
+    aux(&mut vec, v + 28, AT_IGNORE, 0);
+  }
+  aux(&mut vec, v + 30, 0, 0);                     // AT_NULL
+  let mut rnd = balloc(16);
   let mut x = seed % 0x80000000;
   let mut r = 0;
   while r < 16
-    invariant r <= 16 && x < 0x80000000
+    invariant r <= 16 && x < 0x80000000 && blen(rnd) == 16
   {
     x = (x * 1103515245 + 12345) % 0x80000000;
-    frame_write8(&mut f, RANDOM_AT + r, cast[u8](x / 0x800000));
+    bset(&mut rnd, r, cast[u8](x / 0x800000));
     r = r + 1;
   }
-  frame_write(&mut f, w, argc);
-  frame_write(&mut f, w + 1 + argc, 0);            // end of argv
-  frame_write(&mut f, w + 2 + argc + envc, 0);     // end of envp
-  let v = w + 3 + argc + envc;
-  aux(&mut f, v, 3, e.phdr);                       // AT_PHDR
-  aux(&mut f, v + 2, 4, PH_SIZE);                  // AT_PHENT
-  aux(&mut f, v + 4, 5, e.phnum);                  // AT_PHNUM
-  aux(&mut f, v + 6, 6, 4096);                     // AT_PAGESZ
-  aux(&mut f, v + 8, 7, base);                     // AT_BASE: the interpreter, if any
-  aux(&mut f, v + 10, 8, 0);                       // AT_FLAGS
-  aux(&mut f, v + 12, 9, e.entry);                 // AT_ENTRY
-  aux(&mut f, v + 14, 11, 0);                      // AT_UID
-  aux(&mut f, v + 16, 12, 0);                      // AT_EUID
-  aux(&mut f, v + 18, 13, 0);                      // AT_GID
-  aux(&mut f, v + 20, 14, 0);                      // AT_EGID
-  aux(&mut f, v + 22, 17, 100);                    // AT_CLKTCK: the timer runs at 100 Hz
-  aux(&mut f, v + 24, 23, 0);                      // AT_SECURE
-  aux(&mut f, v + 26, 25, top + RANDOM_AT);        // AT_RANDOM
-  if vdso {
-    aux(&mut f, v + 28, AT_SYSINFO_EHDR, USER_BASE + VDSO_PAGE * 4096);
-  } else {
-    aux(&mut f, v + 28, AT_IGNORE, 0);
-  }
-  aux(&mut f, v + 30, 0, 0);                       // AT_NULL
+  put_window(&mut l2, vec, at, 8 * words);
+  put_window(&mut l2, args, s, total);
+  put_window(&mut l2, rnd, RANDOM_AT, 16);
+  bfree(vec);
+  bfree(rnd);
+  return true;
 }
 
 /// Fills the vDSO page: the image, then the clock it reads.
@@ -429,11 +514,176 @@ fn vdso_map(m: &mut Mem, l2: &mut PageTable, t: Tsc, epoch: u64) -> bool
   return true;
 }
 
-fn aux(f: &mut Frame, w: u64, key: u64, v: u64)
-  requires w + 1 < 512
+fn aux(vec: &mut Bytes, w: u64, key: u64, v: u64)
+  requires 8 * (w + 2) <= blen(vec)
+  ensures blen(vec) == old(blen(vec))
 {
-  frame_write(&mut f, w, key);
-  frame_write(&mut f, w + 1, v);
+  put_u64(&mut vec, 8 * w, key);
+  put_u64(&mut vec, 8 * (w + 1), v);
+}
+
+/// The window page cache for file h's page pg: maps it read-only at
+/// window page p of l2 from the page cache (src/pcache.bastio), reading it
+/// in first if no process has it. A page that cannot be cached (the file
+/// is shorter than it was, or memory ran out) is left to be copied, so
+/// this is false only if a level-1 table could not be made.
+fn share_file_page(m: &mut Mem, v: &mut Vfs, h: u64, pg: u64, l2: &mut PageTable, p: u64) -> bool
+  requires mem_ok(m) && vfs_ok(v) && pt_level(l2) == 2 && p < WPAGES && pg < 512
+  ensures mem_ok(m) && vfs_ok(v) && pt_level(l2) == 2
+{
+  let mut slot = pc_find(v.pc, h, pg);
+  if slot >= PC_N {
+    if vfs_read_at(&mut v, h, pg * 4096, XFER) != XFER {
+      return true;
+    }
+    slot = pc_add(&mut v.pc, &mut m, h, pg, v.xfer, XFER, true);
+    if slot >= PC_N {
+      return true;
+    }
+  }
+  let t = p / 512;
+  if !pt_has(l2, t) {
+    let a = find_free(&mut m);
+    if a >= NPAGES {
+      return false;
+    }
+    pt_put(&mut l2, t, pt_new(take_page(&mut m, a), 1));
+  }
+  pt_borrow(&mut l2, t, pc_map_text, &mut v.pc, slot, p % 512);
+  return true;
+}
+
+/// Maps the pages of program `src` (checked headers `e`) that only its
+/// read-only segments cover, read-only, into window `l2`: a built-in
+/// program's from the cache k.txt (`st`, src/text.bastio), a file's from
+/// the page cache. A page a writable segment touches, one past the
+/// segment's file bytes, or one whose file offset is not page-aligned is
+/// left to be copied. False if memory ran out.
+fn share_text(m: &mut Mem, st: &mut PageTable, l2: &mut PageTable, v: &mut Vfs, src: Src, e: Elf) -> bool
+  requires mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l2) == 2 && vfs_ok(v)
+  requires e.ok && elf_fits(src.size, e)
+  ensures mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l2) == 2 && vfs_ok(v)
+{
+  if !src.file && src.prog >= 512 {
+    return true;
+  }
+  // The window pages the writable segments touch, lo .. hi.
+  let mut lo = WPAGES;
+  let mut hi = 0;
+  let mut i = 0;
+  while i < e.phnum
+    invariant i <= e.phnum && e.phnum <= PH_MAX && vfs_ok(v)
+  {
+    let s = seg(&mut v, src, e.phoff, i, e.bias);
+    if s.kind == SEG_LOAD && s.w {
+      if s.off / 4096 < lo {
+        lo = s.off / 4096;
+      }
+      if (s.off + s.memsz + 4095) / 4096 > hi {
+        hi = (s.off + s.memsz + 4095) / 4096;
+      }
+    } else if s.kind == SEG_BAD {
+      return true;                          // elf_space finds it and gives up
+    }
+    i = i + 1;
+  }
+  let mut ok = true;
+  i = 0;
+  while ok && i < e.phnum
+    invariant i <= e.phnum && e.phnum <= PH_MAX && vfs_ok(v) && mem_ok(m)
+    invariant pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l2) == 2
+  {
+    let s = seg(&mut v, src, e.phoff, i, e.bias);
+    if s.kind == SEG_LOAD && !s.w {
+      // Each whole page of the segment's file bytes.
+      let mut a = s.off - s.off % 4096;
+      if a < s.off {
+        a = a + 4096;
+      }
+      while ok && a + 4096 <= s.off + s.filesz
+        invariant s.off <= a && a <= IMAGE_MAX + 4096 && s.off + s.filesz <= IMAGE_MAX && s.from + s.filesz <= src.size
+        invariant mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l2) == 2 && vfs_ok(v)
+      {
+        let fo = s.from + (a - s.off);
+        let p = a / 4096;
+        if (p < lo || p >= hi) && fo % 4096 == 0 && fo / 4096 < 512 && src.file {
+          ok = share_file_page(&mut m, &mut v, src.f, fo / 4096, &mut l2, p);
+        } else if (p < lo || p >= hi) && fo % 4096 == 0 && fo / 4096 < 512 && src.prog < 512 {
+          ok = share_page(&mut m, &mut st, src.prog, prog_image(src.prog), fo / 4096, &mut l2, p);
+        }
+        a = a + 4096;
+      }
+    }
+    i = i + 1;
+  }
+  return ok;
+}
+
+/// The pages of program file `src` (headers `e`) to leave for the first
+/// touch: the whole pages of its largest executable, read-only segment's
+/// file bytes, if they sit at a whole-page file offset and no writable
+/// segment shares a page with them. Programs touch a small part of their
+/// code (Z3, 24 MiB of it, answers a query from a few hundred pages), so
+/// exec reads and maps only the rest. None for a built-in program, whose
+/// code is shared already.
+fn lazy_plan(v: &mut Vfs, src: Src, e: Elf) -> Lz
+  requires vfs_ok(v) && e.ok && elf_fits(src.size, e)
+  ensures vfs_ok(v) && result.first + result.pages <= WPAGES
+{
+  if !src.file {
+    return lz_none();
+  }
+  let mut lo = WPAGES;
+  let mut hi = 0;
+  let mut best = lz_none();
+  let mut i = 0;
+  while i < e.phnum
+    invariant i <= e.phnum && e.phnum <= PH_MAX && vfs_ok(v) && best.first + best.pages <= WPAGES
+  {
+    let s = seg(&mut v, src, e.phoff, i, e.bias);
+    if s.kind == SEG_BAD {
+      return lz_none();
+    }
+    if s.kind == SEG_LOAD && s.w {
+      if s.off / 4096 < lo {
+        lo = s.off / 4096;
+      }
+      if (s.off + s.memsz + 4095) / 4096 > hi {
+        hi = (s.off + s.memsz + 4095) / 4096;
+      }
+    } else if s.kind == SEG_LOAD && s.x {
+      let a0 = (s.off + 4095) / 4096;
+      let a1 = (s.off + s.filesz) / 4096;
+      if a1 > a0 && a1 <= WPAGES && (s.from + (a0 * 4096 - s.off)) % 4096 == 0 && a1 - a0 > best.pages {
+        best = Lz { first: a0, pages: a1 - a0, off: s.from + (a0 * 4096 - s.off) };
+      }
+    }
+    i = i + 1;
+  }
+  if best.pages > 0 && best.first < hi && lo < best.first + best.pages {
+    return lz_none();                       // a writable page among them
+  }
+  return best;
+}
+
+/// share_text with the cache, if there is one.
+fn share_text_in(m: &mut Mem, txt: &mut Store, l2: &mut PageTable, v: &mut Vfs, src: Src, e: Elf) -> bool
+  requires mem_ok(m) && store_ok(txt) && pt_level(l2) == 2 && vfs_ok(v)
+  requires e.ok && elf_fits(src.size, e)
+  ensures mem_ok(m) && store_ok(txt) && pt_level(l2) == 2 && vfs_ok(v)
+{
+  match txt {
+    Store::None => {
+      txt = Store::None;
+      return true;
+    },
+    Store::Table(t) => {
+      let mut st = t;
+      let ok = share_text(&mut m, &mut st, &mut l2, &mut v, src, e);
+      txt = Store::Table(st);
+      return ok;
+    },
+  }
 }
 
 /// Builds an address space for the checked ELF image `src`: its loadable
@@ -441,17 +691,31 @@ fn aux(f: &mut Frame, w: u64, key: u64, v: u64)
 /// `isrc` too when `ie` is ok, and a stack holding argv, envp and the
 /// auxiliary vector. Returns `Space::Empty`, with every page given back,
 /// when memory runs out.
-fn elf_space(m: &mut Mem, v: &mut Vfs, src: Src, e: Elf, isrc: Src, ie: Elf, args: &Bytes, alen: u64, total: u64, seed: u64, clk: Tsc, epoch: u64) -> Space
-  requires mem_ok(m) && vfs_ok(v) && e.ok && elf_fits(src.size, e) && elf_fits(isrc.size, ie)
+fn elf_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, e: Elf, isrc: Src, ie: Elf, lz: Lz, args: &Bytes, alen: u64, total: u64, seed: u64, clk: Tsc, epoch: u64) -> Space
+  requires mem_ok(m) && store_ok(txt) && vfs_ok(v) && e.ok && elf_fits(src.size, e) && elf_fits(isrc.size, ie)
   requires alen <= total && total <= ARGS_MAX && total <= blen(args)
-  ensures mem_ok(m) && vfs_ok(v)
+  ensures mem_ok(m) && store_ok(txt) && vfs_ok(v)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
-  match new_window(&mut m, "", (e.end + 4095) / 4096) {
+  match new_window(&mut m, "", 0) {
     Space::Empty => { return Space::Empty; },
     Space::Mapped(mut l2) => {
+      // Shared read-only pages first; the rest of the image gets fresh
+      // pages, and the copy below skips the read-only ones.
+      let mut ok = share_text_in(&mut m, &mut txt, &mut l2, &mut v, src, e);
+      if ok && ie.ok {
+        ok = share_text_in(&mut m, &mut txt, &mut l2, &mut v, isrc, ie);
+      }
+      let mut q = 0;
+      while ok && q < (e.end + 4095) / 4096
+        invariant pt_level(l2) == 2 && mem_ok(m) && e.end <= IMAGE_MAX
+      {
+        if q < lz.first || q - lz.first >= lz.pages {
+          ok = w_map(&mut m, &mut l2, q, false);   // not left for the first touch
+        }
+        q = q + 1;
+      }
       let mut i = 0;
-      let mut ok = true;
       while ok && i < e.phnum
         invariant i <= e.phnum && e.phnum <= PH_MAX && pt_level(l2) == 2 && vfs_ok(v)
       {
@@ -503,15 +767,9 @@ fn elf_space(m: &mut Mem, v: &mut Vfs, src: Src, e: Elf, isrc: Src, ie: Elf, arg
       if ie.ok {
         base = ie.bias;
       }
-      let t = STACK_PAGE / 512;
-      if pt_has(l2, t) {
-        let mut l1 = pt_take(&mut l2, t);
-        if pt_has(l1, STACK_PAGE % 512) && !pt_shared(l1, STACK_PAGE % 512) {
-          let mut f = pt_take_frame(&mut l1, STACK_PAGE % 512);
-          init_stack(&mut f, e, base, vdso, args, alen, total, seed);
-          pt_put_frame(&mut l1, STACK_PAGE % 512, f, true);
-        }
-        pt_put(&mut l2, t, l1);
+      if !init_stack(&mut m, &mut l2, e, base, vdso, args, alen, total, seed) {
+        free_l2(&mut m, l2);
+        return Space::Empty;
       }
       return space_from_l2(&mut m, l2);
     },

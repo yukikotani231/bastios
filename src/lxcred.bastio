@@ -36,11 +36,17 @@ fn id_put(procs: &mut Buf, pid: u64, f: u64, lo: u64, hi: u64)
   pset(&mut procs, pid, f, hi * ID_SPAN + lo);
 }
 
-/// Root, as far as changing ids goes: effective user 0.
+/// Effective user 0, for specifications.
+spec fn is_root(procs: &Buf, pid: u64) -> bool {
+  get(procs, pid * STRIDE + F_UID) / ID_SPAN == 0
+}
+
+/// Root: effective user 0, the only privilege there is (see docs/security.md).
 fn cred_root(procs: &Buf, pid: u64) -> bool
   requires len(procs) == PTAB_LEN && pid < NPROC
+  ensures result == is_root(procs, pid)
 {
-  return id_get(procs, pid, F_UID, true) == 0;
+  return get(procs, pid * STRIDE + F_UID) / ID_SPAN == 0;
 }
 
 /// setuid (w F_UID, s F_SUID) or setgid (F_GID, F_SGID) to id a.
@@ -248,7 +254,16 @@ fn lx_setgroups(k: &mut Kernel, pid: u64, size: u64, list: u64) -> u64
     return EPERM;
   }
   let n = size % ID_SPAN;
+  if n > 65536 {
+    return EINVAL;                          // past Linux's NGROUPS_MAX
+  }
   if n > NGROUPS_KEPT {
+    // More than BastiOS keeps: still EFAULT first for a list that cannot
+    // be read, as Linux reads it before anything else.
+    let m = smaller(4 * n, XFER);
+    if copy_from_user(&mut k.spaces, pid, list, &mut k.fs.xfer, m) != m {
+      return EFAULT;
+    }
     return EINVAL;
   }
   if n > 0 && copy_from_user(&mut k.spaces, pid, list, &mut k.fs.xfer, 4 * n) != 4 * n {

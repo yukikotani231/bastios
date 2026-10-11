@@ -22,6 +22,7 @@ const WOP_UNMAP: u64 = 0;
 const WOP_PROTECT: u64 = 1;             // arg: 1 writable, 0 read-only
 const WOP_MOVE: u64 = 2;                // arg: where the first page goes
 const WOP_COUNT: u64 = 3;               // only count the mapped pages
+const WOP_ZERO: u64 = 4;                // fill the private pages with zeros (madvise)
 const WIN_L1S: u64 = 32;              // level-1 tables the window may hold
 const WPAGES: u64 = 16384;            // WIN_L1S * 512
 const USER_SIZE: u64 = 0x4000000;     // WPAGES * 4096
@@ -147,6 +148,24 @@ fn l1_has(l1: &mut PageTable, i: u64) -> bool
   requires pt_level(l1) == 1 && i < 512
 {
   return pt_has(l1, i);
+}
+
+fn l1_readonly(l1: &mut PageTable, i: u64) -> bool
+  requires pt_level(l1) == 1 && i < 512
+{
+  return pt_has(l1, i) && !pt_writable(l1, i);
+}
+
+/// Is window page p mapped read-only?
+fn w_readonly(l2: &mut PageTable, p: u64) -> bool
+  requires pt_level(l2) == 2 && p < WPAGES
+  ensures pt_level(l2) == 2
+{
+  let t = p / 512;
+  if !pt_has(l2, t) {
+    return false;
+  }
+  return pt_borrow(&mut l2, t, l1_readonly, p % 512);
 }
 
 /// Is window page p mapped?
@@ -481,10 +500,13 @@ fn clone_l2(src: &mut PageTable, m: &mut Mem) -> Space
   return Space::Mapped(l2);
 }
 
-/// Copies page `src` into page `dst` (for `pt_borrow_frame`, which lends
-/// the first argument).
-fn copy_from(src: &mut Frame, dst: &mut Frame) {
-  copy_frame(&mut dst, src);
+/// A copy of page `src` on page `d`, which is taken without zeroing:
+/// every byte is overwritten (for `pt_borrow_frame`, which lends the first
+/// argument).
+fn copy_to(src: &mut Frame, d: Dirty) -> Frame
+  ensures frame_id(result) == dirty_id(d)
+{
+  return frame_copy(d, src);
 }
 
 /// clone_l2 below a level-1 table.
@@ -513,9 +535,8 @@ fn clone_l1(src: &mut PageTable, m: &mut Mem) -> Space
       if b >= NPAGES {
         ok = false;
       } else {
-        let mut f = take_page(&mut m, b);
         let w = pt_writable(src, p);      // a read-only page stays read-only in both
-        pt_borrow_frame(&mut src, p, copy_from, &mut f);
+        let f = pt_borrow_frame(&mut src, p, copy_to, take_dirty(&mut m, b));
         pt_put_frame(&mut l1, p, f, w);
       }
     }

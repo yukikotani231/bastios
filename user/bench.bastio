@@ -2,29 +2,7 @@
 // tearing down address spaces, and copying bytes out of user memory for
 // `write`. The numbers are only comparable between runs on the same host.
 
-fn puts(con: &Serial, s: Str) {
-  let mut i = 0;
-  while i < slen(s)
-    invariant i <= slen(s)
-  {
-    serial_write(con, sget(s, i));
-    i = i + 1;
-  }
-}
-
-fn put_num(con: &Serial, n: u64) {
-  let mut p = 1;
-  while p <= n / 10
-    invariant p >= 1
-  {
-    p = p * 10;
-  }
-  let mut q = p;
-  while q > 0 {
-    serial_write(con, cast[u8](48 + (n / q) % 10));
-    q = q / 10;
-  }
-}
+import "core/print.bastio";
 
 fn since(t0: u64) -> u64 {
   let t1 = sys_info(1);
@@ -70,18 +48,18 @@ fn main(con: &mut Serial) -> u64 {
     i = i + 1;
   }
   let write_ticks = since(t1);
-  puts(con, "getpid x");
-  put_num(con, SYSCALLS);
-  puts(con, ": ");
-  put_num(con, syscall_ticks);
-  puts(con, " ticks\r\nspawn+exit x");
-  put_num(con, SPAWNS);
-  puts(con, ": ");
-  put_num(con, spawn_ticks);
-  puts(con, " ticks\r\nwrite ");
-  put_num(con, WRITE_BYTES / 1024);
-  puts(con, " KiB: ");
-  put_num(con, write_ticks);
-  puts(con, " ticks\r\n");
+  print_str(con, "getpid x");
+  print_u64(con, SYSCALLS);
+  print_str(con, ": ");
+  print_u64(con, syscall_ticks);
+  print_str(con, " ticks\r\nspawn+exit x");
+  print_u64(con, SPAWNS);
+  print_str(con, ": ");
+  print_u64(con, spawn_ticks);
+  print_str(con, " ticks\r\nwrite ");
+  print_u64(con, WRITE_BYTES / 1024);
+  print_str(con, " KiB: ");
+  print_u64(con, write_ticks);
+  print_str(con, " ticks\r\n");
   return 0;
 }

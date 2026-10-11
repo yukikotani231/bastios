@@ -9,33 +9,9 @@
 // freed exactly once.
 
 import "lib/file.bastio";
+import "core/print.bastio";
 
 // ---------------------------------------------------------------- output
-
-fn puts(con: &Serial, s: Str) {
-  let mut i = 0;
-  while i < slen(s)
-    invariant i <= slen(s)
-  {
-    serial_write(con, sget(s, i));
-    i = i + 1;
-  }
-}
-
-fn put_num(con: &Serial, n: u64) {
-  let mut p = 1;
-  while p <= n / 10
-    invariant p >= 1
-  {
-    p = p * 10;
-  }
-  let mut q = p;
-  while q > 0 {
-    let d = (n / q) % 10;
-    serial_write(con, cast[u8](48 + d));
-    q = q / 10;
-  }
-}
 
 // Line buffers hold the line length in slot 0 and the bytes in 1..=length.
 // Every slot from 1 up holds a byte; the prover carries that fact around.
@@ -72,7 +48,7 @@ fn read_line(con: &Serial, mut line: Buf) -> Buf
   {
     let c = serial_read(con);
     if c == 13 || c == 10 {
-      puts(con, "\r\n");
+      print_str(con, "\r\n");
       done = true;
     } else if c == 4 {
       // Ctrl-D on an empty line ends the session.
@@ -185,26 +161,6 @@ fn parse_num(line: &Buf, from: u64, to: u64) -> u64
 
 // ---------------------------------------------------------------- files
 
-// `n` right-aligned in a field of `w` characters.
-fn put_num_pad(con: &Serial, n: u64, w: u64) {
-  let mut digits = 1;
-  let mut q = n;
-  while q >= 10
-    invariant digits <= 20
-  {
-    q = q / 10;
-    if digits < 20 {
-      digits = digits + 1;
-    }
-  }
-  let mut k = digits;
-  while k < w {
-    serial_write(con, 32);
-    k = k + 1;
-  }
-  put_num(con, n);
-}
-
 /// The first n bytes of b, with each newline written as CR LF.
 fn put_bytes(con: &Serial, b: &Bytes, n: u64)
   requires n <= blen(b)
@@ -267,7 +223,7 @@ fn cmd_ls(con: &Serial, line: &Buf, n: u64)
   let mut name = balloc(256);
   let mut i = 0;
   let mut more = true;
-  while more && i < 1000
+  while more && i < 4096
     invariant blen(name) == 256
   {
     let r = f_dirent(i, &mut name);
@@ -276,14 +232,14 @@ fn cmd_ls(con: &Serial, line: &Buf, n: u64)
     } else if r > 0 && r <= 256 {
       let size = f_stat(name, r);
       if size == DIR_BIT {
-        puts(con, "         ");
+        print_str(con, "         ");
         put_bytes(con, name, r);
-        puts(con, "/\r\n");
+        print_str(con, "/\r\n");
       } else {
-        put_num_pad(con, size, 8);
-        puts(con, " ");
+        print_u64_pad(con, size, 8);
+        print_str(con, " ");
         put_bytes(con, name, r);
-        puts(con, "\r\n");
+        print_str(con, "\r\n");
       }
     }
     i = i + 1;
@@ -302,14 +258,14 @@ fn ls_dir(con: &Serial, line: &Buf, a: u64, n: u64)
     dl = 0;                             // "/": the top
   }
   if dl > 255 {
-    puts(con, "not a directory\r\n");
+    print_str(con, "not a directory\r\n");
     bfree(dir);
     return;
   }
   let mut buf = balloc(256);
   let mut i = 0;
   let mut more = true;
-  while more && i < 1000
+  while more && i < 4096
     invariant blen(buf) == 256 && dl <= 255 && dl <= blen(dir)
   {
     let mut j = 0;
@@ -322,9 +278,9 @@ fn ls_dir(con: &Serial, line: &Buf, a: u64, n: u64)
     let r = f_readdir(i, dl, &mut buf);
     if r == NOT_OK {
       if i == 0 {
-        puts(con, "not a directory: ");
+        print_str(con, "not a directory: ");
         put_bytes(con, dir, blen(dir));
-        puts(con, "\r\n");
+        print_str(con, "\r\n");
       }
       more = false;
     } else if r > 0 {
@@ -332,9 +288,9 @@ fn ls_dir(con: &Serial, line: &Buf, a: u64, n: u64)
       if m <= 256 {
         put_bytes(con, buf, m);
         if r >= DIR_BIT {
-          puts(con, "/");
+          print_str(con, "/");
         }
-        puts(con, "\r\n");
+        print_str(con, "\r\n");
       }
     }
     i = i + 1;
@@ -350,20 +306,20 @@ fn cmd_dir(con: &Serial, line: &Buf, n: u64, make: bool)
 {
   let a = arg_start(line, n, 5);
   if a == 0 {
-    puts(con, "usage: mkdir DIR, rmdir DIR\r\n");
+    print_str(con, "usage: mkdir DIR, rmdir DIR\r\n");
     return;
   }
   let name = line_bytes(line, a, n + 1);
   if make {
     if f_mkdir(name, blen(name)) == NOT_OK {
-      puts(con, "cannot make ");
+      print_str(con, "cannot make ");
       put_bytes(con, name, blen(name));
-      puts(con, ": it exists, or its parent does not\r\n");
+      print_str(con, ": it exists, or its parent does not\r\n");
     }
   } else if f_rmdir(name, blen(name)) == NOT_OK {
-    puts(con, "cannot remove ");
+    print_str(con, "cannot remove ");
     put_bytes(con, name, blen(name));
-    puts(con, ": not an empty directory\r\n");
+    print_str(con, ": not an empty directory\r\n");
   }
   bfree(name);
 }
@@ -375,7 +331,7 @@ fn cmd_mv(con: &Serial, line: &Buf, n: u64)
 {
   let a = arg_start(line, n, 2);
   if a == 0 {
-    puts(con, "usage: mv OLD NEW\r\n");
+    print_str(con, "usage: mv OLD NEW\r\n");
     return;
   }
   let args = line_bytes(line, a, n + 1);
@@ -393,7 +349,7 @@ fn cmd_mv(con: &Serial, line: &Buf, n: u64)
     t = t + 1;
   }
   if sp == 0 || t >= l {
-    puts(con, "usage: mv OLD NEW\r\n");
+    print_str(con, "usage: mv OLD NEW\r\n");
     bfree(args);
     return;
   }
@@ -413,9 +369,9 @@ fn cmd_mv(con: &Serial, line: &Buf, n: u64)
     j = j + 1;
   }
   if f_rename(names, sp, l - t) == NOT_OK {
-    puts(con, "cannot move ");
+    print_str(con, "cannot move ");
     put_bytes(con, names, sp);
-    puts(con, "\r\n");
+    print_str(con, "\r\n");
   }
   bfree(names);
   bfree(args);
@@ -427,15 +383,15 @@ fn cmd_cat(con: &Serial, line: &Buf, n: u64)
 {
   let a = arg_start(line, n, 3);
   if a == 0 {
-    puts(con, "usage: cat FILE\r\n");
+    print_str(con, "usage: cat FILE\r\n");
     return;
   }
   let name = line_bytes(line, a, n + 1);
   let fd = f_open(name, blen(name), O_READ);
   if fd == NOT_OK {
-    puts(con, "no such file: ");
+    print_str(con, "no such file: ");
     put_bytes(con, name, blen(name));
-    puts(con, "\r\n");
+    print_str(con, "\r\n");
     bfree(name);
     return;
   }
@@ -462,14 +418,14 @@ fn cmd_rm(con: &Serial, line: &Buf, n: u64)
 {
   let a = arg_start(line, n, 2);
   if a == 0 {
-    puts(con, "usage: rm FILE\r\n");
+    print_str(con, "usage: rm FILE\r\n");
     return;
   }
   let name = line_bytes(line, a, n + 1);
   if f_unlink(name, blen(name)) == NOT_OK {
-    puts(con, "cannot remove ");
+    print_str(con, "cannot remove ");
     put_bytes(con, name, blen(name));
-    puts(con, ": no such file, or it is open\r\n");
+    print_str(con, ": no such file, or it is open\r\n");
   }
   bfree(name);
 }
@@ -488,7 +444,7 @@ fn echo_to(con: &Serial, line: &Buf, n: u64, g: u64)
   }
   let a = skip_spaces(line, n, op);
   if a > n {
-    puts(con, "usage: echo TEXT > FILE\r\n");
+    print_str(con, "usage: echo TEXT > FILE\r\n");
     return;
   }
   // The text ends before the spaces in front of `>`.
@@ -502,7 +458,7 @@ fn echo_to(con: &Serial, line: &Buf, n: u64, g: u64)
   let fd = f_open(name, blen(name), flags);
   bfree(name);
   if fd == NOT_OK {
-    puts(con, "cannot open the file\r\n");
+    print_str(con, "cannot open the file\r\n");
     return;
   }
   let mut text = balloc(e - 6 + 1);
@@ -515,7 +471,7 @@ fn echo_to(con: &Serial, line: &Buf, n: u64, g: u64)
   }
   bset(&mut text, e - 6, 10);
   if f_write(fd, text, blen(text)) != blen(text) {
-    puts(con, "write failed\r\n");
+    print_str(con, "write failed\r\n");
   }
   bfree(text);
   f_close(fd);
@@ -541,41 +497,41 @@ fn find_gt(line: &Buf, n: u64) -> u64
 // ---------------------------------------------------------------- commands
 
 fn cmd_help(con: &Serial) {
-  puts(con, "commands:\r\n");
-  puts(con, "  help             this list\r\n");
-  puts(con, "  echo TEXT        print TEXT\r\n");
-  puts(con, "  echo TEXT > FILE write TEXT to FILE (`>>`: append)\r\n");
-  puts(con, "  ls [DIR]         list files with their sizes (or what is in DIR)\r\n");
-  puts(con, "  mkdir DIR        make a directory (rmdir: remove an empty one)\r\n");
-  puts(con, "  cat FILE         print FILE\r\n");
-  puts(con, "  rm FILE          remove FILE\r\n");
-  puts(con, "  mv OLD NEW       rename a file or directory\r\n");
-  puts(con, "  add A B          add two numbers (overflow is checked)\r\n");
-  puts(con, "  mul A B          multiply two numbers (overflow is checked)\r\n");
-  puts(con, "  ps               list processes\r\n");
-  puts(con, "  mem              free physical pages\r\n");
-  puts(con, "  uptime           timer ticks since boot (100 a second)\r\n");
-  puts(con, "  cpus             processors running\r\n");
-  puts(con, "  clock            nanoseconds since boot (time-stamp counter)\r\n");
-  puts(con, "  kill PID         stop a process\r\n");
-  puts(con, "  ping [A.B.C.D]   ICMP echo (default: the gateway)\r\n");
-  puts(con, "  ifconfig         the network address (from DHCP)\r\n");
-  puts(con, "  tcpecho PORT     accept a TCP connection, echo it until closed\r\n");
-  puts(con, "  tcpget A.B.C.D PORT TEXT  connect, send TEXT, print the reply\r\n");
-  puts(con, "  udpecho PORT [N] wait for N UDP datagrams, send each back\r\n");
-  puts(con, "  udpsend A.B.C.D PORT TEXT  send TEXT as a UDP datagram\r\n");
-  puts(con, "  NAME [&]         run a program and wait for it (`&`: don't wait)\r\n");
-  puts(con, "  about            what this is\r\n");
-  puts(con, "  halt             power off\r\n");
-  puts(con, "  reboot           restart the machine\r\n");
-  puts(con, "programs: hello, spin, fault, straddle, true, bench, fstest, sh\r\n");
+  print_str(con, "commands:\r\n");
+  print_str(con, "  help             this list\r\n");
+  print_str(con, "  echo TEXT        print TEXT\r\n");
+  print_str(con, "  echo TEXT > FILE write TEXT to FILE (`>>`: append)\r\n");
+  print_str(con, "  ls [DIR]         list files with their sizes (or what is in DIR)\r\n");
+  print_str(con, "  mkdir DIR        make a directory (rmdir: remove an empty one)\r\n");
+  print_str(con, "  cat FILE         print FILE\r\n");
+  print_str(con, "  rm FILE          remove FILE\r\n");
+  print_str(con, "  mv OLD NEW       rename a file or directory\r\n");
+  print_str(con, "  add A B          add two numbers (overflow is checked)\r\n");
+  print_str(con, "  mul A B          multiply two numbers (overflow is checked)\r\n");
+  print_str(con, "  ps               list processes\r\n");
+  print_str(con, "  mem              free physical pages\r\n");
+  print_str(con, "  uptime           timer ticks since boot (100 a second)\r\n");
+  print_str(con, "  cpus             processors running\r\n");
+  print_str(con, "  clock            nanoseconds since boot (time-stamp counter)\r\n");
+  print_str(con, "  kill PID         stop a process\r\n");
+  print_str(con, "  ping [A.B.C.D]   ICMP echo (default: the gateway)\r\n");
+  print_str(con, "  ifconfig         the network address (from DHCP)\r\n");
+  print_str(con, "  tcpecho PORT     accept a TCP connection, echo it until closed\r\n");
+  print_str(con, "  tcpget A.B.C.D PORT TEXT  connect, send TEXT, print the reply\r\n");
+  print_str(con, "  udpecho PORT [N] wait for N UDP datagrams, send each back\r\n");
+  print_str(con, "  udpsend A.B.C.D PORT TEXT  send TEXT as a UDP datagram\r\n");
+  print_str(con, "  NAME [&]         run a program and wait for it (`&`: don't wait)\r\n");
+  print_str(con, "  about            what this is\r\n");
+  print_str(con, "  halt             power off\r\n");
+  print_str(con, "  reboot           restart the machine\r\n");
+  print_str(con, "programs: hello, spin, fault, straddle, true, bench, fstest, sh\r\n");
 }
 
 fn cmd_about(con: &Serial) {
-  puts(con, "BastiOS 0.2: a kernel written in Bastio.\r\n");
-  puts(con, "This shell is a user program. Every memory access, byte write and\r\n");
-  puts(con, "arithmetic step in it, and in the kernel under it, was proved safe\r\n");
-  puts(con, "at compile time; the binaries have no runtime checks.\r\n");
+  print_str(con, "BastiOS 0.2: a kernel written in Bastio.\r\n");
+  print_str(con, "This shell is a user program. Every memory access, byte write and\r\n");
+  print_str(con, "arithmetic step in it, and in the kernel under it, was proved safe\r\n");
+  print_str(con, "at compile time; the binaries have no runtime checks.\r\n");
 }
 
 // `add A B` / `mul A B`. `op` is 0 for add, 1 for mul.
@@ -589,27 +545,27 @@ fn cmd_arith(con: &Serial, line: &Buf, n: u64, op: u64)
   let b0 = skip_spaces(line, n, a1);
   let b1 = digits_end(line, n, b0);
   if a0 == a1 || b0 == b1 || b1 != n + 1 || a1 == b0 {
-    puts(con, "usage: add A B / mul A B\r\n");
+    print_str(con, "usage: add A B / mul A B\r\n");
     return;
   }
   let a = parse_num(line, a0, a1);
   let b = parse_num(line, b0, b1);
   if a == 18446744073709551615 || b == 18446744073709551615 {
-    puts(con, "number too large (limit 10^18)\r\n");
+    print_str(con, "number too large (limit 10^18)\r\n");
     return;
   }
   if op == 0 {
-    put_num(con, a + b);
-    puts(con, "\r\n");
+    print_u64(con, a + b);
+    print_str(con, "\r\n");
     return;
   }
   // a * b can overflow; the prover insists on this check.
   if b != 0 && a > 18446744073709551615 / b {
-    puts(con, "overflow: the product does not fit in 64 bits\r\n");
+    print_str(con, "overflow: the product does not fit in 64 bits\r\n");
     return;
   }
-  put_num(con, a * b);
-  puts(con, "\r\n");
+  print_u64(con, a * b);
+  print_str(con, "\r\n");
 }
 
 fn cmd_kill(con: &Serial, line: &Buf, n: u64)
@@ -619,12 +575,12 @@ fn cmd_kill(con: &Serial, line: &Buf, n: u64)
   let a0 = skip_spaces(line, n, 5);
   let a1 = digits_end(line, n, a0);
   if a0 == a1 || a1 != n + 1 {
-    puts(con, "usage: kill PID\r\n");
+    print_str(con, "usage: kill PID\r\n");
     return;
   }
   let pid = parse_num(line, a0, a1);
   if sys_kill(pid) != 0 {
-    puts(con, "no such process\r\n");
+    print_str(con, "no such process\r\n");
     return;
   }
   // Collect it if it was ours, so it does not linger as a zombie.
@@ -696,13 +652,13 @@ fn parse_ip(line: &Buf, n: u64, start: u64) -> u64
 }
 
 fn put_ip(con: &Serial, ip: u64) {
-  put_num(con, ip / 16777216 % 256);
-  puts(con, ".");
-  put_num(con, ip / 65536 % 256);
-  puts(con, ".");
-  put_num(con, ip / 256 % 256);
-  puts(con, ".");
-  put_num(con, ip % 256);
+  print_u64(con, ip / 16777216 % 256);
+  print_str(con, ".");
+  print_u64(con, ip / 65536 % 256);
+  print_str(con, ".");
+  print_u64(con, ip / 256 % 256);
+  print_str(con, ".");
+  print_u64(con, ip % 256);
 }
 
 fn cmd_ping(con: &Serial, line: &Buf, n: u64)
@@ -714,45 +670,45 @@ fn cmd_ping(con: &Serial, line: &Buf, n: u64)
   if i <= n {
     let r = parse_ip(line, n, i);
     if r == NOT_IP || r / IP_END != n + 1 {
-      puts(con, "usage: ping [A.B.C.D]\r\n");
+      print_str(con, "usage: ping [A.B.C.D]\r\n");
       return;
     }
     ip = r % IP_END;
   }
   let r = sys_call(SYS_PING, ip, 0);
   if r == 1 {
-    puts(con, "reply from ");
+    print_str(con, "reply from ");
   } else if r == 2 {
-    puts(con, "no answer to ARP for ");
+    print_str(con, "no answer to ARP for ");
   } else if r == 3 {
-    puts(con, "no network\r\n");
+    print_str(con, "no network\r\n");
     return;
   } else if r == 4 {
-    puts(con, "another ping is in flight\r\n");
+    print_str(con, "another ping is in flight\r\n");
     return;
   } else {
-    puts(con, "no reply from ");
+    print_str(con, "no reply from ");
   }
   put_ip(con, ip);
-  puts(con, "\r\n");
+  print_str(con, "\r\n");
 }
 
 // ifconfig: the address, netmask and gateway, and where they came from.
 fn cmd_ifconfig(con: &Serial) {
   let how = sys_call(SYS_NETINFO, 3, 0);
   if how == 0 {
-    puts(con, "no address\r\n");
+    print_str(con, "no address\r\n");
     return;
   }
   put_ip(con, sys_call(SYS_NETINFO, 0, 0));
-  puts(con, " netmask ");
+  print_str(con, " netmask ");
   put_ip(con, sys_call(SYS_NETINFO, 2, 0));
-  puts(con, " gateway ");
+  print_str(con, " gateway ");
   put_ip(con, sys_call(SYS_NETINFO, 1, 0));
   if how == 1 {
-    puts(con, " (DHCP)\r\n");
+    print_str(con, " (DHCP)\r\n");
   } else {
-    puts(con, " (static)\r\n");
+    print_str(con, " (static)\r\n");
   }
 }
 
@@ -815,18 +771,18 @@ fn echo_one(con: &Serial, s: u64, buf: &mut Bytes) -> bool
     return false;
   }
   let peer = sys_call(SYS_PEER, s, 0);
-  puts(con, "from ");
+  print_str(con, "from ");
   put_ip(con, peer / 65536);
-  puts(con, ":");
-  put_num(con, peer % 65536);
-  puts(con, ": ");
+  print_str(con, ":");
+  print_u64(con, peer % 65536);
+  print_str(con, ": ");
   put_text(con, buf, got);
-  puts(con, "\r\n");
+  print_str(con, "\r\n");
   // Back to the sender, from the bound port.
   if peer / 65536 <= 4294967295 && s < 256 {
     let to = s + 256 * (peer % 65536) + 16777216 * (peer / 65536);
     if sys_send(SYS_SENDTO, to, buf, got) == got {
-      puts(con, "sent it back\r\n");
+      print_str(con, "sent it back\r\n");
     }
   }
   return true;
@@ -848,22 +804,22 @@ fn cmd_udpecho(con: &Serial, line: &Buf, n: u64)
     count = parse_num(line, j, f);
   }
   if e == i || f != n + 1 || (f == j && j != e) || port == 0 || port > 65535 || count == 0 || count > 9 {
-    puts(con, "usage: udpecho PORT [N]\r\n");
+    print_str(con, "usage: udpecho PORT [N]\r\n");
     return;
   }
   let s = sys_call(SYS_SOCKET, 0, 0);
   if s == NOT_OK {
-    puts(con, "no network\r\n");
+    print_str(con, "no network\r\n");
     return;
   }
   if sys_call(SYS_BIND, s, port) != 0 {
-    puts(con, "port in use\r\n");
+    print_str(con, "port in use\r\n");
     sys_call(SYS_SCLOSE, s, 0);
     return;
   }
-  puts(con, "listening on udp port ");
-  put_num(con, port);
-  puts(con, "\r\n");
+  print_str(con, "listening on udp port ");
+  print_u64(con, port);
+  print_str(con, "\r\n");
   if count > 1 {
     sleep_ticks(100);
   }
@@ -873,7 +829,7 @@ fn cmd_udpecho(con: &Serial, line: &Buf, n: u64)
     if echo_one(con, s, &mut buf) {
       k = k + 1;
     } else {
-      puts(con, "nothing arrived\r\n");
+      print_str(con, "nothing arrived\r\n");
       k = count;
     }
   }
@@ -928,17 +884,17 @@ fn cmd_tcpecho(con: &Serial, line: &Buf, n: u64)
   let e = digits_end(line, n, i);
   let port = parse_num(line, i, e);
   if e == i || e != n + 1 || port == 0 || port > 65535 {
-    puts(con, "usage: tcpecho PORT\r\n");
+    print_str(con, "usage: tcpecho PORT\r\n");
     return;
   }
   let lis = sys_call(SYS_TCP_LISTEN, port, 0);
   if lis == NOT_OK {
-    puts(con, "cannot listen\r\n");
+    print_str(con, "cannot listen\r\n");
     return;
   }
-  puts(con, "listening on tcp port ");
-  put_num(con, port);
-  puts(con, "\r\n");
+  print_str(con, "listening on tcp port ");
+  print_u64(con, port);
+  print_str(con, "\r\n");
   let mut t = NOT_OK;
   let t0 = sys_info(1);
   let mut waiting = true;
@@ -953,15 +909,15 @@ fn cmd_tcpecho(con: &Serial, line: &Buf, n: u64)
   }
   sys_call(SYS_TCP_CLOSE, lis, 0);
   if t == NOT_OK {
-    puts(con, "nobody connected\r\n");
+    print_str(con, "nobody connected\r\n");
     return;
   }
   let peer = sys_call(SYS_TCP_PEER, t, 0);
-  puts(con, "connection from ");
+  print_str(con, "connection from ");
   put_ip(con, peer / 65536);
-  puts(con, ":");
-  put_num(con, peer % 65536);
-  puts(con, "\r\n");
+  print_str(con, ":");
+  print_u64(con, peer % 65536);
+  print_str(con, "\r\n");
   let mut buf = balloc(2048);
   let mut total = 0;
   let mut going = true;
@@ -971,7 +927,7 @@ fn cmd_tcpecho(con: &Serial, line: &Buf, n: u64)
     if r == TCP_AGAIN {
       let now = sys_info(1);
       if now >= idle && now - idle > UDP_WAIT {
-        puts(con, "timed out\r\n");
+        print_str(con, "timed out\r\n");
         going = false;
       } else {
         sys_yield();
@@ -979,11 +935,11 @@ fn cmd_tcpecho(con: &Serial, line: &Buf, n: u64)
     } else if r == 0 {
       going = false;                  // the other side closed
     } else if r > blen(buf) {
-      puts(con, "connection reset\r\n");
+      print_str(con, "connection reset\r\n");
       going = false;
     } else {
       if !tcp_send_all(t, &mut buf, r) {
-        puts(con, "send failed\r\n");
+        print_str(con, "send failed\r\n");
         going = false;
       }
       if total < 1000000000 {
@@ -994,9 +950,9 @@ fn cmd_tcpecho(con: &Serial, line: &Buf, n: u64)
   }
   bfree(buf);
   sys_call(SYS_TCP_CLOSE, t, 0);
-  puts(con, "echoed ");
-  put_num(con, total);
-  puts(con, " bytes\r\n");
+  print_str(con, "echoed ");
+  print_u64(con, total);
+  print_str(con, " bytes\r\n");
 }
 
 // tcpget A.B.C.D PORT TEXT: connects, sends TEXT and a newline, and prints
@@ -1008,7 +964,7 @@ fn cmd_tcpget(con: &Serial, line: &Buf, n: u64)
   let i = skip_spaces(line, n, 7);
   let r = parse_ip(line, n, i);
   if r == NOT_IP || r / IP_END > n {
-    puts(con, "usage: tcpget A.B.C.D PORT TEXT\r\n");
+    print_str(con, "usage: tcpget A.B.C.D PORT TEXT\r\n");
     return;
   }
   let ip = r % IP_END;
@@ -1017,12 +973,12 @@ fn cmd_tcpget(con: &Serial, line: &Buf, n: u64)
   let port = parse_num(line, a, e);
   let x = skip_spaces(line, n, e);
   if a == r / IP_END || e == a || port == 0 || port > 65535 || x > n || x == e {
-    puts(con, "usage: tcpget A.B.C.D PORT TEXT\r\n");
+    print_str(con, "usage: tcpget A.B.C.D PORT TEXT\r\n");
     return;
   }
   let t = sys_call(SYS_TCP_CONNECT, ip * 65536 + port, 0);
   if t == NOT_OK {
-    puts(con, "no network\r\n");
+    print_str(con, "no network\r\n");
     return;
   }
   let t0 = sys_info(1);
@@ -1037,11 +993,11 @@ fn cmd_tcpget(con: &Serial, line: &Buf, n: u64)
     }
   }
   if st != 1 {
-    puts(con, "connection refused\r\n");
+    print_str(con, "connection refused\r\n");
     sys_call(SYS_TCP_CLOSE, t, 0);
     return;
   }
-  puts(con, "connected\r\n");
+  print_str(con, "connected\r\n");
   let mut text = balloc(n + 2 - x);
   let mut j = 0;
   while j < n + 1 - x
@@ -1053,7 +1009,7 @@ fn cmd_tcpget(con: &Serial, line: &Buf, n: u64)
   bset(&mut text, n + 1 - x, 10);
   let tl = blen(text);
   if !tcp_send_all(t, &mut text, tl) {
-    puts(con, "send failed\r\n");
+    print_str(con, "send failed\r\n");
   }
   bfree(text);
   let mut buf = balloc(1024);
@@ -1064,7 +1020,7 @@ fn cmd_tcpget(con: &Serial, line: &Buf, n: u64)
     if got == TCP_AGAIN {
       let now = sys_info(1);
       if now >= idle && now - idle > UDP_WAIT {
-        puts(con, "timed out\r\n");
+        print_str(con, "timed out\r\n");
         going = false;
       } else {
         sys_yield();
@@ -1072,7 +1028,7 @@ fn cmd_tcpget(con: &Serial, line: &Buf, n: u64)
     } else if got == 0 {
       going = false;
     } else if got > blen(buf) {
-      puts(con, "connection reset\r\n");
+      print_str(con, "connection reset\r\n");
       going = false;
     } else {
       put_bytes(con, buf, got);
@@ -1081,7 +1037,7 @@ fn cmd_tcpget(con: &Serial, line: &Buf, n: u64)
   }
   bfree(buf);
   sys_call(SYS_TCP_CLOSE, t, 0);
-  puts(con, "closed\r\n");
+  print_str(con, "closed\r\n");
 }
 
 // udpsend A.B.C.D PORT TEXT: sends TEXT as one datagram, from an
@@ -1093,7 +1049,7 @@ fn cmd_udpsend(con: &Serial, line: &Buf, n: u64)
   let i = skip_spaces(line, n, 8);
   let r = parse_ip(line, n, i);
   if r == NOT_IP || r / IP_END > n {
-    puts(con, "usage: udpsend A.B.C.D PORT TEXT\r\n");
+    print_str(con, "usage: udpsend A.B.C.D PORT TEXT\r\n");
     return;
   }
   let ip = r % IP_END;
@@ -1102,26 +1058,26 @@ fn cmd_udpsend(con: &Serial, line: &Buf, n: u64)
   let port = parse_num(line, a, e);
   let t = skip_spaces(line, n, e);
   if a == r / IP_END || e == a || port == 0 || port > 65535 || t > n || t == e {
-    puts(con, "usage: udpsend A.B.C.D PORT TEXT\r\n");
+    print_str(con, "usage: udpsend A.B.C.D PORT TEXT\r\n");
     return;
   }
   let s = sys_call(SYS_SOCKET, 0, 0);
   if s == NOT_OK || s >= 256 {
-    puts(con, "no network\r\n");
+    print_str(con, "no network\r\n");
     return;
   }
   let text = line_bytes(line, t, n + 1);
   let sent = sys_send(SYS_SENDTO, s + 256 * port + 16777216 * ip, text, blen(text));
   if sent == blen(text) {
-    puts(con, "sent ");
-    put_num(con, sent);
-    puts(con, " bytes to ");
+    print_str(con, "sent ");
+    print_u64(con, sent);
+    print_str(con, " bytes to ");
     put_ip(con, ip);
-    puts(con, ":");
-    put_num(con, port);
-    puts(con, "\r\n");
+    print_str(con, ":");
+    print_u64(con, port);
+    print_str(con, "\r\n");
   } else {
-    puts(con, "could not send\r\n");
+    print_str(con, "could not send\r\n");
   }
   bfree(text);
   sys_call(SYS_SCLOSE, s, 0);
@@ -1143,29 +1099,29 @@ fn cmd_run(con: &Serial, line: &Buf, n: u64)
   let bg = get(line, n) == 38 && n > 1;
   let pid = sys_spawn(line, 1, e);
   if pid == 0 {
-    puts(con, "unknown command: ");
+    print_str(con, "unknown command: ");
     put_range(con, line, 1, n);
-    puts(con, "\r\n");
+    print_str(con, "\r\n");
     return;
   }
   if bg {
-    puts(con, "[");
-    put_num(con, pid);
-    puts(con, "]\r\n");
+    print_str(con, "[");
+    print_u64(con, pid);
+    print_str(con, "]\r\n");
     return;
   }
   let code = sys_wait(pid);
   if code != 0 {
-    puts(con, "[exit ");
-    put_num(con, code);
-    puts(con, "]\r\n");
+    print_str(con, "[exit ");
+    print_u64(con, code);
+    print_str(con, "]\r\n");
   }
 }
 
 // ---------------------------------------------------------------- main
 
 fn main(con: &mut Serial) -> u64 {
-  puts(con, "\r\nBastiOS 0.2 -- type `help`\r\n");
+  print_str(con, "\r\nBastiOS 0.2 -- type `help`\r\n");
   let mut line = alloc(128);
   let mut running = true;
   let mut code = 0;
@@ -1173,11 +1129,11 @@ fn main(con: &mut Serial) -> u64 {
     invariant len(line) == 128
     invariant forall j: u64 :: 1 <= j && j < len(line) ==> get(line, j) <= 255
   {
-    puts(con, "bastios> ");
+    print_str(con, "bastios> ");
     line = read_line(con, line);
     let n = get(line, 0);
     if n == len(line) {
-      puts(con, "\r\nbye\r\n");
+      print_str(con, "\r\nbye\r\n");
       running = false;
     } else if is_cmd(line, n, "help") {
       cmd_help(con);
@@ -1191,7 +1147,7 @@ fn main(con: &mut Serial) -> u64 {
         if n >= 6 {
           put_range(con, line, 6, n);
         }
-        puts(con, "\r\n");
+        print_str(con, "\r\n");
       }
     } else if is_cmd(line, n, "ls") {
       cmd_ls(con, line, n);
@@ -1212,21 +1168,21 @@ fn main(con: &mut Serial) -> u64 {
     } else if is_cmd(line, n, "ps") {
       sys_ps();
     } else if is_cmd(line, n, "mem") {
-      put_num(con, sys_info(0));
-      puts(con, " free pages\r\n");
+      print_u64(con, sys_info(0));
+      print_str(con, " free pages\r\n");
     } else if is_cmd(line, n, "uptime") {
       let t = sys_info(1);
-      put_num(con, t);
-      puts(con, " ticks, ");
-      put_num(con, t / 100);
-      puts(con, " s\r\n");
+      print_u64(con, t);
+      print_str(con, " ticks, ");
+      print_u64(con, t / 100);
+      print_str(con, " s\r\n");
     } else if is_cmd(line, n, "clock") {
-      put_num(con, sys_info(3));
-      puts(con, " ns since boot\r\n");
+      print_u64(con, sys_info(3));
+      print_str(con, " ns since boot\r\n");
     } else if is_cmd(line, n, "cpus") {
-      puts(con, "processors running: ");
-      put_num(con, sys_info(2));
-      puts(con, "\r\n");
+      print_str(con, "processors running: ");
+      print_u64(con, sys_info(2));
+      print_str(con, "\r\n");
     } else if is_cmd(line, n, "kill") {
       cmd_kill(con, line, n);
     } else if is_cmd(line, n, "ping") {
@@ -1244,11 +1200,11 @@ fn main(con: &mut Serial) -> u64 {
     } else if is_cmd(line, n, "exit") {
       running = false;
     } else if is_cmd(line, n, "halt") {
-      puts(con, "bye\r\n");
+      print_str(con, "bye\r\n");
       sys_poweroff();
       running = false;
     } else if is_cmd(line, n, "reboot") {
-      puts(con, "restarting\r\n");
+      print_str(con, "restarting\r\n");
       sys_call(SYS_REBOOT, 0, 0);
       running = false;
     } else if n > 0 {

@@ -42,14 +42,13 @@ const LX_GETSID: u64 = 124;
 const LX_UTIME: u64 = 132;
 const LX_STATFS: u64 = 137;
 const LX_FSTATFS: u64 = 138;
-const LX_GETPRIORITY: u64 = 140;
-const LX_SETPRIORITY: u64 = 141;
 const LX_MLOCK: u64 = 149;
 const LX_MUNLOCK: u64 = 150;
 const LX_PRCTL: u64 = 157;
+const LX_CAPGET: u64 = 125;
+const LX_CAPSET: u64 = 126;
 const LX_SETRLIMIT: u64 = 160;
 const LX_SYNC: u64 = 162;
-const LX_SCHED_GETAFFINITY: u64 = 204;
 const LX_UTIMES: u64 = 235;
 const LX_FUTIMESAT: u64 = 261;
 const LX_FCHOWNAT: u64 = 260;
@@ -131,8 +130,9 @@ fn lx_uname(k: &mut Kernel, pid: u64, va: u64) -> u64
   return 0;
 }
 
-/// The limit on resource r: descriptors and stack are what the kernel
-/// gives, core files none; everything else is unlimited.
+/// The default limit on resource r (src/lxrlimit.bastio keeps the ones
+/// set): descriptors and stack are what the kernel gives, core files none,
+/// locked memory 8 MiB; everything else is unlimited.
 fn rlimit_of(r: u64) -> u64 {
   if r == RLIMIT_CORE {
     return 0;                               // no core files are written
@@ -143,53 +143,10 @@ fn rlimit_of(r: u64) -> u64 {
   if r == RLIMIT_STACK {
     return STACK_BYTES;
   }
+  if r == 8 {
+    return 8388608;                         // RLIMIT_MEMLOCK: 8 MiB, as Linux
+  }
   return RLIM_INFINITY;
-}
-
-/// The checks setrlimit and prlimit make of a new limit for resource r at
-/// va (if not 0): a resource there is, soft at most hard, and only root
-/// raising a hard limit. The limits stay as they are.
-fn rlimit_check(k: &mut Kernel, pid: u64, r: u64, va: u64) -> u64
-  requires kok(k) && pid < NPROC
-  ensures kok(k)
-{
-  if r >= RLIM_NLIMITS {
-    return EINVAL;
-  }
-  if va == 0 {
-    return 0;
-  }
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 16) != 16 {
-    return EFAULT;
-  }
-  let cur = get_u64(k.fs.xfer, 0);
-  let max = get_u64(k.fs.xfer, 8);
-  if cur > max {
-    return EINVAL;
-  }
-  if max > rlimit_of(r) && !cred_root(k.procs, pid) {
-    return EPERM;
-  }
-  if r == RLIMIT_NOFILE && max > NR_OPEN {
-    return EPERM;                           // past /proc/sys/fs/nr_open, even for root
-  }
-  return 0;
-}
-
-/// Writes struct rlimit {cur, max} for resource r to va (if not 0).
-fn rlimit_out(k: &mut Kernel, pid: u64, r: u64, va: u64) -> u64
-  requires kok(k) && pid < NPROC
-  ensures kok(k)
-{
-  if r >= RLIM_NLIMITS {
-    return EINVAL;
-  }
-  if va == 0 {
-    return 0;
-  }
-  xfer_u64(&mut k.fs.xfer, 0, rlimit_of(r));
-  xfer_u64(&mut k.fs.xfer, 8, rlimit_of(r));
-  return lx_put_out(&mut k, pid, va, 16);
 }
 
 /// sysinfo(info): uptime, memory in bytes (mem_unit 1) and the number of
@@ -221,16 +178,24 @@ fn lx_sysinfo(k: &mut Kernel, pid: u64, va: u64) -> u64
   return 0;
 }
 
-/// getrusage(who, usage): user time is the ticks spent running; the rest
+/// getrusage(who, usage): the user and system times (see tm_ticks) of the
+/// caller, or with RUSAGE_CHILDREN of its waited-for children; the rest
 /// is zero.
-fn lx_getrusage(k: &mut Kernel, pid: u64, va: u64) -> u64
+fn lx_getrusage(k: &mut Kernel, pid: u64, children: bool, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let t = smaller(pget(k.procs, pid, F_TICKS), 0xFFFFFFFFFFFF);
+  let mut t = smaller(pget(k.procs, pid, F_TICKS), 0xFFFFFFFFFFFF);
+  let mut st = smaller(tm_ticks(k, pid, 0), 0xFFFFFFFFFFFF);
+  if children {
+    t = smaller(tm_ticks(k, pid, 1), 0xFFFFFFFFFFFF);
+    st = smaller(tm_ticks(k, pid, 2), 0xFFFFFFFFFFFF);
+  }
   xfer_zero(&mut k, RUSAGE_SIZE);
   xfer_u64(&mut k.fs.xfer, 0, t / 100);              // ru_utime.tv_sec
   xfer_u64(&mut k.fs.xfer, 8, t % 100 * 10000);      // ru_utime.tv_usec
+  xfer_u64(&mut k.fs.xfer, 16, st / 100);            // ru_stime
+  xfer_u64(&mut k.fs.xfer, 24, st % 100 * 10000);
   if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, RUSAGE_SIZE) != RUSAGE_SIZE {
     return EFAULT;
   }
@@ -263,9 +228,8 @@ fn lx_statfs(k: &mut Kernel, pid: u64, va: u64, magic: u64) -> u64
 }
 
 /// getrandom(buf, n, flags): the bytes /dev/urandom gives, from the kernel's
-/// generator (rng_next), seeded at boot from the clocks. Not a secure
-/// source; there is no entropy pool yet. Two calls in one tick no longer
-/// return the same bytes, as they did when each call reseeded from the HPET.
+/// ChaCha20 generator (rng_next, src/lxdev.bastio). It never blocks: the
+/// pool is seeded from the clocks at boot.
 fn lx_getrandom(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -432,6 +396,20 @@ fn lx_pio(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, va: u64
   if d.kind == K_PIPE_R || d.kind == K_PIPE_W || d.kind == K_SOCK || d.kind == K_CONSOLE {
     return ESPIPE;
   }
+  if d.kind == K_DEV && is_loop(d.x) {
+    // A loop device: at off, leaving the descriptor's position as it was.
+    let h = fd_ofd(k, pid, fd);
+    if h >= OFD_N || off >= 0x8000000000000000 {
+      return EINVAL;
+    }
+    let at = of_get(k.ofd, h, 3);
+    of_set(&mut k.ofd, h, 3, off);
+    let r = loop_io(&mut con, &mut k, pid, fd, d.x, write, va, n);
+    if h < OFD_N {
+      of_set(&mut k.ofd, h, 3, at);
+    }
+    return r;
+  }
   if d.kind == K_DIR && !write {
     return EISDIR;
   }
@@ -516,8 +494,16 @@ fn lx_setsid(k: &mut Kernel, pid: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if pgid_of(k.procs, pid) == pid {
-    return EPERM;
+  // EPERM when a process group with the caller's id exists: the caller
+  // leads one, or left one that still has members.
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && len(k.procs) == PTAB_LEN
+  {
+    if state(k.procs, p) != FREE && pgid_of(k.procs, p) == pid {
+      return EPERM;
+    }
+    p = p + 1;
   }
   pset(&mut k.procs, pid, F_PGID, pid);
   pset(&mut k.procs, pid, F_SID, pid);
@@ -536,6 +522,15 @@ fn lx_setpgid(k: &mut Kernel, pid: u64, target: u64, g: u64) -> u64
   }
   if t >= NPROC || state(k.procs, t) == FREE || (t != pid && pget(k.procs, t, F_PARENT) != pid) {
     return ESRCH;
+  }
+  if g % 0x100000000 >= 0x80000000 {
+    return EINVAL;                          // a negative group
+  }
+  if t != pid && sid_of(k.procs, t) != sid_of(k.procs, pid) {
+    return EPERM;                           // a child in another session
+  }
+  if t != pid && jc_execed(k, t) {
+    return EACCES;                          // a child that has called execve
   }
   let mut want = t;
   if g != 0 {
@@ -571,12 +566,12 @@ fn is_misc_call(n: u64) -> bool {
     || n == LX_GETRUSAGE || n == LX_SYSINFO || n == LX_SETPGID
     || n == LX_GETPGRP || n == LX_SETSID
     || n == LX_GETGROUPS || n == LX_GETPGID || n == LX_GETSID
-    || n == LX_UTIME || n == LX_STATFS || n == LX_FSTATFS || n == LX_GETPRIORITY
-    || n == LX_SETPRIORITY || n == LX_MLOCK || n == LX_MUNLOCK || n == LX_PRCTL
-    || n == LX_SETRLIMIT || n == LX_SYNC || n == LX_SCHED_GETAFFINITY || n == LX_UTIMES
+    || n == LX_UTIME || n == LX_STATFS || n == LX_FSTATFS
+    || n == LX_MLOCK || n == LX_MUNLOCK || n == LX_PRCTL
+    || n == LX_SETRLIMIT || n == LX_SYNC || n == LX_UTIMES
     || n == LX_FUTIMESAT || n == LX_FCHOWNAT || n == LX_FCHMODAT || n == LX_UTIMENSAT
     || n == LX_PRLIMIT64 || n == LX_GETRANDOM || n == LX_UNAME || n == LX_MINCORE
-    || n == LX_PERSONALITY || n == LX_MLOCKALL || n == LX_MUNLOCKALL;
+    || n == LX_PERSONALITY || n == LX_MLOCKALL || n == LX_MUNLOCKALL || n == LX_CAPGET || n == LX_CAPSET;
 }
 
 fn is_meta_call(n: u64) -> bool {
@@ -649,7 +644,7 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     ret(&mut k.procs, pid, 0);
     return SWITCH;
   }
-  if (n == LX_MREMAP || n == LX_MUNMAP || n == LX_MPROTECT) && !win_quiet(&mut k, pid) {
+  if (n == LX_MREMAP || n == LX_MUNMAP || n == LX_MPROTECT || n == LX_MADVISE) && !win_quiet(&mut k, pid) {
     return lx_retry(&mut k, pid, n);      // another thread of pid runs on a processor
   }
   let mut r = 0;
@@ -658,11 +653,13 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   } else if n == LX_UNAME {
     r = lx_uname(&mut k, pid, a);
   } else if n == LX_MREMAP {
-    r = lx_mremap(&mut k, pid, a, b, c, r10);
+    r = lx_mremap(&mut k, pid, a, b, c, r10, pget(k.procs, pid, F_REGS + R_R8));
   } else if n == LX_MUNMAP {
     r = lx_munmap(&mut k, pid, a, b);
   } else if n == LX_MPROTECT {
     r = lx_mprotect(&mut k, pid, a, b, c);
+  } else if n == LX_MADVISE {
+    r = lx_madvise(&mut k, pid, a, b, c);
   } else if n == LX_MSYNC {
     r = lx_msync(&mut k, pid, a, b);
   } else if n == LX_FCHOWN {
@@ -687,23 +684,29 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_meta_call(&mut k, pid, n, a, b, c, r10);
   } else if n == LX_UMASK {
     r = lx_umask(&mut k, pid, a);
+  } else if (n == LX_GETRLIMIT || n == LX_SETRLIMIT) && b == 0 {
+    r = EFAULT;
   } else if n == LX_GETRLIMIT {
-    r = rlimit_out(&mut k, pid, a, b);
+    r = lx_prlimit(&mut k, pid, 0, a, 0, b);
   } else if n == LX_SETRLIMIT {
-    r = rlimit_check(&mut k, pid, a, b);    // a new limit is checked and not applied
+    r = lx_prlimit(&mut k, pid, 0, a, b, 0);
   } else if n == LX_PRLIMIT64 {
-    r = rlimit_check(&mut k, pid, b, c);
-    if r == 0 {
-      r = rlimit_out(&mut k, pid, b, r10);
-    }
+    r = lx_prlimit(&mut k, pid, a % 0x100000000, b, c, r10);
   } else if n == LX_GETRUSAGE {
-    r = lx_getrusage(&mut k, pid, b);
+    let who = a % 0x100000000;
+    if who != 0 && who != 1 && who != 0xFFFFFFFF {
+      r = EINVAL;                           // RUSAGE_SELF, RUSAGE_THREAD, RUSAGE_CHILDREN
+    } else {
+      r = lx_getrusage(&mut k, pid, who == 0xFFFFFFFF, b);
+    }
   } else if n == LX_SYSINFO {
     r = lx_sysinfo(&mut k, pid, a);
   } else if n == LX_STATFS {
     let pn = lx_path_at(&mut k, pid, AT_FDCWD, a);
     if pn == NO_RESULT {
       r = k.perr;
+    } else if !path_there(&mut k, pn) {
+      r = ENOENT;
     } else if vfs_in_mount(&mut k.fs, pn, false) {
       r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC);
     } else {
@@ -737,31 +740,32 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
         r = sid_of(k.procs, p);
       }
     }
-  } else if n == LX_GETPRIORITY {
-    r = 20;                                 // nice 0, as the system call encodes it
+  } else if n == LX_CAPGET {
+    r = lx_capget(&mut k, pid, a, b);
+  } else if n == LX_CAPSET {
+    r = lx_capset(&mut k, pid, a, b);
   } else if n == LX_PRCTL {
-    if a != PR_SET_NAME && a != PR_GET_NAME {
-      r = EINVAL;
-    } else if a == PR_GET_NAME {
-      xfer_zero(&mut k, 16);
-      r = lx_put_out(&mut k, pid, b, 16);
+    r = lx_prctl(&mut k, pid, a, b);
+  } else if n == LX_MLOCK || n == LX_MUNLOCK {
+    r = lock_range(&mut k, pid, a, b);
+    if r == 0 {
+      // The pages the range covers.
+      let bytes = (a % 4096 + smaller(b, USER_SIZE) + 4095) / 4096 * 4096;
+      r = lock_count(&mut k, pid, bytes, n == LX_MLOCK);
     }
-  } else if n == LX_SCHED_GETAFFINITY {
-    if b < 8 {
+  } else if n == LX_MLOCKALL {
+    r = lx_mlockall(&mut k, pid, a);
+  } else if n == LX_MUNLOCKALL {
+    r = lx_munlockall(&mut k, pid);
+  } else if n == LX_GETRANDOM {
+    // GRND_NONBLOCK, GRND_RANDOM and GRND_INSECURE; the last two not together.
+    if c % 0x100000000 > 7 || c % 8 == 6 {
       r = EINVAL;
     } else {
-      xfer_u64(&mut k.fs.xfer, 0, 1);       // the process runs on any processor; say one
-      r = lx_put_out(&mut k, pid, c, 8);
-      if r == 0 {
-        r = 8;
-      }
+      r = lx_getrandom(&mut k, pid, a, b);
     }
-  } else if n == LX_GETRANDOM {
-    r = lx_getrandom(&mut k, pid, a, b);
   }
-  // Everything else (setpriority, setrlimit, madvise, mlock, munlock,
-  // mlockall, munlockall, sync) succeeds doing nothing: every page stays
-  // in memory anyway.
+  // Everything else (madvise, sync) succeeds doing nothing.
   if r == DISK_RETRY {
     return disk_retry(&mut k, pid, n);       // pread/pwrite: blocks not cached yet
   }

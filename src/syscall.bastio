@@ -640,6 +640,52 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   return NO_RESULT;
 }
 
+/// Writes /etc/resolv.conf naming name server ns (a.b.c.d), which the C
+/// library's resolver reads; nothing is written for no server (0). A file
+/// a program wrote there is replaced when a lease names a new server.
+fn write_resolv(k: &mut Kernel, ns: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if ns == 0 || ns > 4294967295 {
+    return;
+  }
+  let mut b = balloc(32);
+  let head = "nameserver ";
+  let mut o = 0;
+  while o < slen(head)
+    invariant o <= slen(head) && slen(head) == 11 && blen(b) == 32
+  {
+    bset(&mut b, o, sget(head, o));
+    o = o + 1;
+  }
+  let mut i = 0;
+  while i < 4
+    invariant i <= 4 && o <= 11 + 4 * i && blen(b) == 32
+  {
+    let part = ns / pow256(3 - i) % 256;
+    if part >= 100 {
+      bset(&mut b, o, cast[u8](48 + part / 100));
+      o = o + 1;
+    }
+    if part >= 10 {
+      bset(&mut b, o, cast[u8](48 + part / 10 % 10));
+      o = o + 1;
+    }
+    bset(&mut b, o, cast[u8](48 + part % 10));
+    o = o + 1;
+    if i < 3 {
+      bset(&mut b, o, 46);              // .
+    } else {
+      bset(&mut b, o, 10);              // newline
+    }
+    o = o + 1;
+    i = i + 1;
+  }
+  vfs_install_bytes(&mut k.fs, &mut k.mem, "etc/resolv.conf", b, o);
+  bfree(b);
+}
+
 /// Runs the network's timers (DHCP retries) and wakes the process whose
 /// ping has finished, if one has, with its result. Called on every
 /// scheduler pass, after the card is polled.
@@ -648,6 +694,9 @@ fn net_wake(k: &mut Kernel)
   ensures kok(k)
 {
   nic_tick(&mut k.nic, k.ticks);
+  if nic_dns_take(&mut k.nic) {
+    write_resolv(&mut k, nic_info(k.nic, 4));
+  }
   let w = nic_ping_check(&mut k.nic, k.ticks);
   if w == NET_NONE {
     return;
@@ -687,6 +736,22 @@ fn do_wait(procs: &mut Buf, pid: u64, c: u64) -> u64
   return SWITCH;
 }
 
+/// Whether process pid may make native call n. The native ABI predates
+/// users: its file, network, power and reboot calls check no permissions,
+/// so they are root's (effective user 0) alone. Everyone may write to and
+/// read from the console, start and wait for its own children (which keep
+/// its ids, see spawn), yield, ask for its pid, the counters of SYS_INFO
+/// and the process list, and kill a process it may signal (may_signal,
+/// src/lxsig.bastio). Any program can raise int 0x80, a Linux one too, so
+/// this is what keeps an unprivileged Linux process from going around the
+/// Linux layer's checks.
+fn native_allowed(procs: &Buf, pid: u64, n: u64) -> bool
+  requires len(procs) == PTAB_LEN && pid < NPROC
+  ensures !is_root(procs, pid) && n > SYS_KILL ==> !result
+{
+  return cred_root(procs, pid) || n <= SYS_KILL;
+}
+
 /// Handles the system call process `pid` just made.
 fn syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
@@ -699,6 +764,10 @@ fn syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if n == SYS_EXIT {
     terminate(&mut k, mmu, pid, a);
     return SWITCH;
+  }
+  if !native_allowed(k.procs, pid, n) {
+    ret(&mut k.procs, pid, NO_RESULT);      // root's: see native_allowed
+    return KEEP;
   }
   if n == SYS_WRITE {
     let room = con_room(con);
@@ -740,7 +809,7 @@ fn syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if n == SYS_INFO {
     if a == 0 {
-      ret(&mut k.procs, pid, count_free(k.mem.bm));
+      ret(&mut k.procs, pid, count_avail(k.mem.bm));   // cached program pages count: they are reclaimable
     } else if a == 1 {
       ret(&mut k.procs, pid, k.ticks);
     } else if a == 2 {
@@ -757,7 +826,7 @@ fn syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == SYS_KILL {
-    if a == 0 || a >= NPROC || state(k.procs, a) == FREE || state(k.procs, a) == ZOMBIE || state(k.procs, a) == KILLED {
+    if a == 0 || a >= NPROC || state(k.procs, a) == FREE || state(k.procs, a) == ZOMBIE || state(k.procs, a) == KILLED || !may_signal(k, pid, a, 9) {   // 9: SIGKILL
       ret(&mut k.procs, pid, 1);
       return KEEP;
     }

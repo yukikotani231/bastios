@@ -16,13 +16,14 @@
 // Not done: mprotect to PROT_NONE leaves the pages mapped read-only, not
 // inaccessible (a page is either mapped, and readable, or gone); an
 // mprotect that allows access maps fresh pages into any hole munmap left
-// in the mmap area, where Linux fails with -ENOMEM; PROT_EXEC is not enforced;
-// the address space holes munmap leaves are not reused by later mmaps.
+// in the mmap area, where Linux fails with -ENOMEM; PROT_EXEC is not enforced.
 
 import "linux.bastio";
 
 const PROT_WRITE: u64 = 2;
 const MREMAP_MAYMOVE: u64 = 1;
+const MREMAP_FIXED: u64 = 2;
+const MREMAP_DONTUNMAP: u64 = 4;
 
 /// Window page p out of l2: its frame goes back to m. Nothing if p is not
 /// mapped.
@@ -42,10 +43,13 @@ fn w_unmap(m: &mut Mem, l2: &mut PageTable, p: u64)
   }
 }
 
-/// Maps window page p writable or not, if it is mapped. False if not.
-fn w_protect(l2: &mut PageTable, p: u64, writable: bool) -> bool
-  requires pt_level(l2) == 2 && p < WPAGES && pt_leases(l2) == 0
-  ensures pt_level(l2) == 2 && pt_leases(l2) == 0
+/// Maps window page p writable or not, if it is mapped. False if not. A
+/// shared page of program text (src/text.bastio) made writable is first
+/// replaced by a private copy, so the process cannot write the others'
+/// (it stays read-only if there is no page for the copy).
+fn w_protect(m: &mut Mem, l2: &mut PageTable, p: u64, writable: bool) -> bool
+  requires mem_ok(m) && pt_level(l2) == 2 && p < WPAGES && pt_leases(l2) == 0
+  ensures mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0
 {
   let t = p / 512;
   if !pt_has(l2, t) {
@@ -55,12 +59,55 @@ fn w_protect(l2: &mut PageTable, p: u64, writable: bool) -> bool
   let mut ok = false;
   if pt_has(l1, p % 512) && pt_shared(l1, p % 512) {
     let s = pt_take_shared(&mut l1, p % 512);
-    pt_put_shared(&mut l1, p % 512, s, writable);
+    if writable && is_text_page(m, s) {
+      let b = find_free(&mut m);
+      if b < NPAGES {
+        let f = shared_copy(take_dirty(&mut m, b), s);
+        drop_shared(&mut m, s);
+        pt_put_frame(&mut l1, p % 512, f, true);
+      } else {
+        pt_put_shared(&mut l1, p % 512, s, false);
+      }
+    } else {
+      pt_put_shared(&mut l1, p % 512, s, writable);
+    }
     ok = true;
   } else if pt_has(l1, p % 512) {
     let f = pt_take_frame(&mut l1, p % 512);
     pt_put_frame(&mut l1, p % 512, f, writable);
     ok = true;
+  }
+  pt_put(&mut l2, t, l1);
+  return ok;
+}
+
+/// Fills window page p with zeros if it is a private page, keeping its
+/// permission; a shared page (MAP_SHARED) keeps what it holds. False if p
+/// is not mapped.
+fn w_zero(l2: &mut PageTable, p: u64) -> bool
+  requires pt_level(l2) == 2 && p < WPAGES && pt_leases(l2) == 0
+  ensures pt_level(l2) == 2 && pt_leases(l2) == 0
+{
+  let t = p / 512;
+  if !pt_has(l2, t) {
+    return false;
+  }
+  let mut l1 = pt_take(&mut l2, t);
+  let mut ok = false;
+  if pt_has(l1, p % 512) {
+    ok = true;
+    if !pt_shared(l1, p % 512) {
+      let w = pt_writable(l1, p % 512);
+      let mut f = pt_take_frame(&mut l1, p % 512);
+      let mut i = 0;
+      while i < 512
+        invariant i <= 512
+      {
+        frame_write(&mut f, i, 0);
+        i = i + 1;
+      }
+      pt_put_frame(&mut l1, p % 512, f, w);
+    }
   }
   pt_put(&mut l2, t, l1);
   return ok;
@@ -151,7 +198,8 @@ fn win_quiet(k: &mut Kernel, pid: u64) -> bool
 }
 
 /// Does `op` to window pages from .. to of process pid: unmap them,
-/// protect them (arg: 1 writable), move them to arg ..., or only count them. Returns how many
+/// protect them (arg: 1 writable), move them to arg ..., zero the private
+/// ones, or only count them. Returns how many
 /// of them were mapped, or WPAGES + 1 if the process has no window, a move
 /// ran out of memory, or a processor runs the space (win_quiet says first).
 fn win_op(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, op: u64, from: u64, to: u64, arg: u64) -> u64
@@ -192,8 +240,12 @@ fn win_op(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, op: u64, from: u64, to
               if w_has(&mut l2, p) && r < WPAGES {
                 r = r + 1;
               }
+            } else if op == WOP_ZERO {
+              if w_zero(&mut l2, p) && r < WPAGES {
+                r = r + 1;
+              }
             } else if op == WOP_PROTECT {
-              if w_protect(&mut l2, p, arg == 1) && r < WPAGES {
+              if w_protect(&mut m, &mut l2, p, arg == 1) && r < WPAGES {
                 r = r + 1;
               }
             } else if op == WOP_MOVE && r <= WPAGES {
@@ -230,6 +282,171 @@ fn win_range(addr: u64, n: u64) -> u64
   return first * 4294967296 + first + pages;
 }
 
+// Holes: munmap gives back address space as well as pages. Each process
+// records up to HOLE_N ranges of window pages it unmapped in its mmap area
+// in k.holes (first page, end page; end 0 if the slot is free), and mmap
+// takes the first one large enough before going lower. Without this, a
+// program that maps and unmaps as it runs (musl's malloc does for every
+// large block) uses up the window even though little is mapped at once.
+// A range always leaves the list before it is used again (mmap,
+// MAP_FIXED, mprotect), so no page is handed out twice; a range that
+// finds no free slot is only address space lost, as before.
+
+/// Where word f of hole slot i of process p is in k.holes.
+fn hl_at(p: u64, i: u64, f: u64) -> u64
+  requires p < NPROC && i < HOLE_N && f < 2
+  ensures result < HOLES_LEN
+{
+  return (p * HOLE_N + i) * 2 + f;
+}
+
+/// Records pages first .. end as a hole of process pid in a free slot, if
+/// there is one.
+fn hole_put(k: &mut Kernel, pid: u64, first: u64, end: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if first >= end {
+    return;
+  }
+  let mut i = 0;
+  while i < HOLE_N
+    invariant i <= HOLE_N && kok(k) && pid < NPROC
+  {
+    if get(k.holes, hl_at(pid, i, 1)) == 0 {
+      k.holes = set(k.holes, hl_at(pid, i, 0), first);
+      k.holes = set(k.holes, hl_at(pid, i, 1), end);
+      return;
+    }
+    i = i + 1;
+  }
+}
+
+/// Takes pages first .. end out of process pid's holes.
+fn hole_cut(k: &mut Kernel, pid: u64, first: u64, end: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < HOLE_N
+    invariant i <= HOLE_N && kok(k) && pid < NPROC
+  {
+    let a = get(k.holes, hl_at(pid, i, 0));
+    let b = get(k.holes, hl_at(pid, i, 1));
+    if b != 0 && a < end && first < b {
+      if first <= a && b <= end {
+        k.holes = set(k.holes, hl_at(pid, i, 1), 0);         // all of it
+      } else if first <= a {
+        k.holes = set(k.holes, hl_at(pid, i, 0), end);       // its low part
+      } else if b <= end {
+        k.holes = set(k.holes, hl_at(pid, i, 1), first);     // its high part
+      } else {
+        k.holes = set(k.holes, hl_at(pid, i, 1), first);     // its middle: two holes
+        hole_put(&mut k, pid, end, b);
+      }
+    }
+    i = i + 1;
+  }
+}
+
+/// munmap (or mremap) left pages first .. end of process pid unmapped:
+/// they become a hole, merged with the holes next to them.
+fn hole_add(k: &mut Kernel, pid: u64, first: u64, end: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if first >= end {
+    return;
+  }
+  hole_cut(&mut k, pid, first, end);
+  let mut f = first;
+  let mut e = end;
+  let mut pass = 0;
+  while pass < 2
+    invariant pass <= 2 && kok(k) && pid < NPROC
+  {
+    let mut i = 0;
+    while i < HOLE_N
+      invariant i <= HOLE_N && kok(k) && pid < NPROC
+    {
+      let a = get(k.holes, hl_at(pid, i, 0));
+      let b = get(k.holes, hl_at(pid, i, 1));
+      if b != 0 && (b == f || a == e) {
+        if a < f {
+          f = a;
+        }
+        if b > e {
+          e = b;
+        }
+        k.holes = set(k.holes, hl_at(pid, i, 1), 0);
+      }
+      i = i + 1;
+    }
+    pass = pass + 1;
+  }
+  // A hole at the bottom of the mmap area is free space below it again.
+  if e <= STACK_FIRST && f < e && f * 4096 == pget(k.procs, pid, F_MMAP) {
+    pset(&mut k.procs, pid, F_MMAP, e * 4096);
+    return;
+  }
+  hole_put(&mut k, pid, f, e);
+}
+
+/// Takes `pages` pages from the first hole of process pid that has them
+/// and returns where they start; STACK_FIRST if no hole does.
+fn hole_take(k: &mut Kernel, pid: u64, pages: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result < STACK_FIRST ==> pages <= STACK_FIRST - result
+{
+  let mut i = 0;
+  while i < HOLE_N
+    invariant i <= HOLE_N && kok(k) && pid < NPROC
+  {
+    let a = get(k.holes, hl_at(pid, i, 0));
+    let b = get(k.holes, hl_at(pid, i, 1));
+    if b != 0 && a < b && b <= STACK_FIRST && pages > 0 && pages <= b - a {
+      if pages == b - a {
+        k.holes = set(k.holes, hl_at(pid, i, 1), 0);
+      } else {
+        k.holes = set(k.holes, hl_at(pid, i, 0), a + pages);
+      }
+      return a;
+    }
+    i = i + 1;
+  }
+  return STACK_FIRST;
+}
+
+/// Process pid starts with no holes (a new program, process or thread).
+fn hole_clear(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < HOLE_N
+    invariant i <= HOLE_N && kok(k) && pid < NPROC
+  {
+    k.holes = set(k.holes, hl_at(pid, i, 1), 0);
+    i = i + 1;
+  }
+}
+
+/// fork: the child's window is a copy, so are its holes.
+fn hole_fork(k: &mut Kernel, pid: u64, c: u64)
+  requires kok(k) && pid < NPROC && c < NPROC
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < HOLE_N
+    invariant i <= HOLE_N && kok(k) && pid < NPROC && c < NPROC
+  {
+    k.holes = set(k.holes, hl_at(c, i, 0), get(k.holes, hl_at(pid, i, 0)));
+    k.holes = set(k.holes, hl_at(c, i, 1), get(k.holes, hl_at(pid, i, 1)));
+    i = i + 1;
+  }
+}
+
 /// munmap(addr, n).
 fn lx_munmap(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -242,7 +459,11 @@ fn lx_munmap(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
   if map_forget(&mut k, pid, r / 4294967296, r % 4294967296, true) == DISK_RETRY {
     return DISK_RETRY;                      // nothing unmapped yet: the call starts again
   }
-  win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, r / 4294967296, r % 4294967296, 0);
+  let from = r / 4294967296;
+  let to = r % 4294967296;
+  if win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, from, to, 0) <= WPAGES && from >= pget(k.procs, pid, F_MMAP) / 4096 {
+    hole_add(&mut k, pid, from, to);        // address space mmap can use again
+  }
   return 0;
 }
 
@@ -270,10 +491,14 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
   }
   let from = r / 4294967296;
   let to = r % 4294967296;
+  lazy_fill(&mut k, pid, from, to);         // code not read yet: read it first
   // Only pages mmap handed out can have been left unmapped by PROT_NONE.
   let low = pget(k.procs, pid, F_MMAP) / 4096;
-  if prot != 0 && from >= low && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, from, to, false) {
-    return ENOMEM;
+  if prot != 0 && from >= low {
+    if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, from, to, false) {
+      return ENOMEM;
+    }
+    hole_cut(&mut k, pid, from, to);        // mapped now: not a hole to hand out
   }
   if win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, from, to, w) != to - from {
     return ENOMEM;
@@ -282,16 +507,46 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
 }
 
 /// mremap(addr, oldn, newn, flags): shrinking unmaps the tail; growing
-/// moves the pages (with MREMAP_MAYMOVE) to a new place below the lowest
-/// mmap, where the rest are fresh zero pages. Growing in place is not
-/// tried: without MREMAP_MAYMOVE it is -ENOMEM.
-fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u64) -> u64
+/// (with MREMAP_MAYMOVE) moves the pages down into free space if the
+/// mapping is the lowest, else to a hole or below the lowest mmap; the
+/// rest are fresh zero pages. Growing at the same address is not tried:
+/// without MREMAP_MAYMOVE it is -ENOMEM. MREMAP_FIXED moves the pages to
+/// the address the caller chooses (remap_fixed).
+fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u64, to_addr: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
   let r = win_range(addr, oldn);
-  if r == 18446744073709551615 || newn == 0 || newn > USER_SIZE {
+  if addr % 4096 != 0 || oldn > USER_SIZE || newn == 0 || newn > USER_SIZE {
     return EINVAL;
+  }
+  let fl = flags % 0x100000000;
+  // MREMAP_MAYMOVE, MREMAP_FIXED and MREMAP_DONTUNMAP; the last two only
+  // with the first.
+  if fl > 7 || (fl > 1 && fl % 2 == 0) {
+    return EINVAL;
+  }
+  if r == 18446744073709551615 {
+    return EFAULT;                          // not all in the mappable part of the window
+  }
+  // No mapping at addr (Linux finds no VMA there): EFAULT.
+  let f0 = r / 4294967296;
+  let e0 = r % 4294967296;
+  if win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, f0, e0, 0) != e0 - f0 {
+    return EFAULT;
+  }
+  if fl / MREMAP_FIXED % 2 == 1 {
+    if to_addr % 4096 != 0 || to_addr < USER_BASE || to_addr - USER_BASE > USER_SIZE - newn
+      || oldn > USER_SIZE || addr < USER_BASE || addr - USER_BASE > USER_SIZE - oldn {
+      return EINVAL;                        // unaligned, or outside the user space
+    }
+    if to_addr < addr + oldn && addr < to_addr + newn {
+      return EINVAL;                        // over the old pages
+    }
+    return remap_fixed(&mut k, pid, r, newn, to_addr);
+  }
+  if fl / MREMAP_DONTUNMAP % 2 == 1 {
+    return EINVAL;                          // not supported
   }
   let from = r / 4294967296;
   let oend = r % 4294967296;
@@ -301,7 +556,9 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
   // pages leave (the tail) or move (all of them).
   if want <= have {
     map_forget(&mut k, pid, from + want, oend, false);
-    win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, from + want, oend, 0);
+    if win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, from + want, oend, 0) <= WPAGES && from + want >= pget(k.procs, pid, F_MMAP) / 4096 {
+      hole_add(&mut k, pid, from + want, oend);
+    }
     return addr;
   }
   if flags / MREMAP_MAYMOVE % 2 == 0 {
@@ -309,25 +566,100 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
   }
   let brk = pget(k.procs, pid, F_BRK);
   let low = pget(k.procs, pid, F_MMAP);
-  if low > STACK_FIRST * 4096 || brk > low || want * 4096 > low - brk {
-    return ENOMEM;
+  let extra = want - have;
+  // The lowest mapping grows down into the free space below it: its pages
+  // move down by `extra` and fresh ones follow them, so a buffer that
+  // keeps doubling there (realloc of a big block) takes no more address
+  // space than its size.
+  if from * 4096 == low && low <= STACK_FIRST * 4096 && brk <= low && extra * 4096 <= low - brk && extra <= from {
+    let at = from - extra;
+    map_forget(&mut k, pid, from, oend, false);
+    if win_op(&mut k.mem, &mut k.spaces, pid, WOP_MOVE, from, oend, at) > WPAGES {
+      return ENOMEM;
+    }
+    pset(&mut k.procs, pid, F_MMAP, at * 4096);
+    if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at + have, oend, false) {
+      // Out of memory: the pages go back where they were.
+      win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at + have, oend, 0);
+      if win_op(&mut k.mem, &mut k.spaces, pid, WOP_MOVE, at, at + have, from) <= WPAGES {
+        pset(&mut k.procs, pid, F_MMAP, low);
+      }
+      return ENOMEM;
+    }
+    return USER_BASE + at * 4096;
   }
-  let at = (low - want * 4096) / 4096;
-  if at * 4096 < brk || at + want > STACK_FIRST {
-    return ENOMEM;
+  // Elsewhere it moves: to a hole munmap or an earlier move left if one
+  // is large enough, as mmap does, else below the lowest mapping.
+  let mut at = hole_take(&mut k, pid, want);
+  let fresh = at >= STACK_FIRST;
+  if fresh {
+    if low > STACK_FIRST * 4096 || brk > low || want * 4096 > low - brk {
+      return ENOMEM;
+    }
+    at = (low - want * 4096) / 4096;
+    if at * 4096 < brk || at + want > STACK_FIRST {
+      return ENOMEM;
+    }
   }
   // Fresh pages for the new tail first, so running out of memory leaves
   // the addr mapping as it was.
   if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at + have, at + want, false) {
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at + have, at + want, 0);
+    if !fresh {
+      hole_add(&mut k, pid, at, at + want);
+    }
     return ENOMEM;
   }
   map_forget(&mut k, pid, from, oend, false);
   if win_op(&mut k.mem, &mut k.spaces, pid, WOP_MOVE, from, oend, at) > WPAGES {
     return ENOMEM;
   }
-  pset(&mut k.procs, pid, F_MMAP, at * 4096);
+  if fresh {
+    pset(&mut k.procs, pid, F_MMAP, at * 4096);
+  }
+  if from >= low / 4096 {
+    hole_add(&mut k, pid, from, oend);      // where the pages were
+  }
   return USER_BASE + at * 4096;
+}
+
+/// mremap with MREMAP_FIXED: the pages of window range r (as win_range
+/// gives it) move to to_addr, unmapping what was there; past the old
+/// size, the rest are fresh zero pages. to_addr .. to_addr + newn is in
+/// the user space and does not overlap the old range.
+fn remap_fixed(k: &mut Kernel, pid: u64, r: u64, newn: u64, to_addr: u64) -> u64
+  requires kok(k) && pid < NPROC && to_addr >= USER_BASE && newn <= USER_SIZE && to_addr - USER_BASE <= USER_SIZE - newn
+  ensures kok(k)
+{
+  let from = r / 4294967296;
+  let oend = r % 4294967296;
+  if oend < from || oend > WPAGES {
+    return EINVAL;
+  }
+  let have = oend - from;
+  let want = (newn + 4095) / 4096;
+  let at = (to_addr - USER_BASE) / 4096;
+  if at + want > WPAGES {
+    return ENOMEM;
+  }
+  map_forget(&mut k, pid, at, at + want, false);
+  win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at, at + want, 0);
+  let mut keep = have;
+  if want < have {
+    keep = want;
+    map_forget(&mut k, pid, from + want, oend, false);
+    win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, from + want, oend, 0);
+  } else if want > have {
+    if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at + have, at + want, false) {
+      win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at + have, at + want, 0);
+      return ENOMEM;
+    }
+  }
+  map_forget(&mut k, pid, from, from + keep, false);
+  if win_op(&mut k.mem, &mut k.spaces, pid, WOP_MOVE, from, from + keep, at) > WPAGES {
+    return ENOMEM;
+  }
+  return to_addr;
 }
 
 // ------------------------------------------------- shared file mappings
@@ -495,6 +827,7 @@ fn map_forget(k: &mut Kernel, pid: u64, from: u64, to: u64, wait: bool) -> u64
     }
     i = i + 1;
   }
+  lazy_forget(&mut k, pid, from, to);       // code not read yet stays unread
   return 0;
 }
 
@@ -595,6 +928,105 @@ fn lx_mincore(k: &mut Kernel, pid: u64, addr: u64, n: u64, vec: u64) -> u64
   return 0;
 }
 
+const MADV_DONTNEED: u64 = 4;
+const MADV_FREE: u64 = 8;
+const MADV_REMOVE: u64 = 9;
+const MADV_WIPEONFORK: u64 = 18;
+const MADV_KEEPONFORK: u64 = 19;
+
+/// Whether window page p of process pid belongs to a MAP_SHARED file
+/// mapping (a record of k.maps).
+fn map_covers(k: &Kernel, pid: u64, p: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let mut i = 0;
+  while i < MAP_N
+    invariant i <= MAP_N
+  {
+    let first1 = get(k.maps, mp_at(pid, i, 0));
+    if first1 != 0 && first1 - 1 <= p && p - (first1 - 1) < get(k.maps, mp_at(pid, i, 1)) {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+/// madvise(addr, n, advice). Every page stays in memory, so most advice
+/// changes nothing. MADV_DONTNEED drops what the private pages hold: they
+/// read as zeros afterwards, as fresh anonymous pages do on Linux. (A
+/// private file mapping reads zeros too, where Linux reads the file
+/// again.) -EINVAL for a misaligned addr, advice there is not, or advice
+/// that needs what this kernel lacks (KSM, huge pages, memory-failure
+/// handling, hole punching for MADV_REMOVE, MADV_WIPEONFORK), and for
+/// MADV_FREE on a shared mapping. -ENOMEM if a page in the range is not
+/// mapped.
+fn lx_madvise(k: &mut Kernel, pid: u64, addr: u64, n: u64, advice: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if addr % 4096 != 0 || n >= 0x8000000000000000 {
+    return EINVAL;
+  }
+  // NORMAL, RANDOM, SEQUENTIAL, WILLNEED, DONTNEED; FREE, REMOVE,
+  // DONTFORK, DOFORK; DONTDUMP, DODUMP, WIPEONFORK, KEEPONFORK, COLD,
+  // PAGEOUT, POPULATE_READ, POPULATE_WRITE.
+  if advice > 23 || (advice > 4 && advice < 8) || (advice > 11 && advice < 16) {
+    return EINVAL;
+  }
+  if n == 0 {
+    return 0;
+  }
+  if addr < USER_BASE || n > USER_SIZE || addr - USER_BASE > USER_SIZE - n {
+    return ENOMEM;
+  }
+  let from = (addr - USER_BASE) / 4096;
+  let to = smaller((addr - USER_BASE + n + 4095) / 4096, WPAGES);
+  if from > to || win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, from, to, 0) != to - from {
+    return ENOMEM;
+  }
+  if advice == MADV_REMOVE || advice == MADV_WIPEONFORK {
+    return EINVAL;                          // not supported: no hole punching; a child would see the pages
+  }
+  if advice == MADV_FREE || advice == MADV_KEEPONFORK {
+    // Only for private anonymous memory: Linux checks the first mapping
+    // in the range.
+    if map_covers(k, pid, from) || user_shared_page(&mut k.spaces, pid, USER_BASE + from * 4096) != NO_RESULT {
+      return EINVAL;
+    }
+  }
+  if advice == MADV_DONTNEED {
+    let mut p = from;
+    while p < to
+      invariant from <= p && p <= to && to <= WPAGES && kok(k)
+    {
+      if !map_covers(k, pid, p) {
+        win_op(&mut k.mem, &mut k.spaces, pid, WOP_ZERO, p, p + 1, 0);
+      }
+      p = p + 1;
+    }
+  }
+  return 0;
+}
+
+/// mlock and munlock (which change nothing, as every page stays in
+/// memory): ENOMEM when part of the range, rounded out to pages, is not
+/// mapped.
+fn lock_range(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if addr < USER_BASE || n > USER_SIZE || addr - USER_BASE > USER_SIZE - n {
+    return ENOMEM;
+  }
+  let from = (addr - USER_BASE) / 4096;
+  let to = smaller((addr - USER_BASE + n + 4095) / 4096, WPAGES);
+  if from > to || win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, from, to, 0) != to - from {
+    return ENOMEM;
+  }
+  return 0;
+}
+
 // ------------------------------------------------ cached file pages
 
 /// Maps the page cache's slot `slot` (src/pcache.bastio) at window page p
@@ -663,7 +1095,7 @@ fn lx_map_file_shared(k: &mut Kernel, pid: u64, first: u64, pages: u64, f: u64, 
           got = 0;
         }
       }
-      slot = pc_add(&mut k.fs.pc, &mut k.mem, f, fpg, k.fs.xfer, got);
+      slot = pc_add(&mut k.fs.pc, &mut k.mem, f, fpg, k.fs.xfer, got, false);
     }
     if slot >= PC_N || !lx_map_cached(&mut k.mem, &mut k.spaces, pid, first + j, &mut k.fs.pc, slot) {
       return ENOMEM;
