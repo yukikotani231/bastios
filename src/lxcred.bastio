@@ -254,7 +254,15 @@ fn lx_setgroups(k: &mut Kernel, pid: u64, size: u64, list: u64) -> u64
     return EPERM;
   }
   let n = size % ID_SPAN;
+  if n > 65536 {
+    return EINVAL;                          // NGROUPS_MAX
+  }
   if n > NGROUPS_KEPT {
+    // More than a process keeps here: still EFAULT first for a bad list,
+    // as Linux reads it before anything else can fail.
+    if copy_from_user(&mut k.spaces, pid, list, &mut k.fs.xfer, 4 * NGROUPS_KEPT) != 4 * NGROUPS_KEPT {
+      return EFAULT;
+    }
     return EINVAL;
   }
   if n > 0 && copy_from_user(&mut k.spaces, pid, list, &mut k.fs.xfer, 4 * n) != 4 * n {
