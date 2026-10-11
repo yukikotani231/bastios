@@ -36,6 +36,7 @@ const LX_GET_ROBUST_LIST: u64 = 274;
 const LX_RSEQ: u64 = 334;
 const LX_CLONE3: u64 = 435;
 const LX_UNSHARE: u64 = 272;
+const LX_IO_SETUP: u64 = 206;          // Linux AIO: nginx tries it and does without
 const LX_OPENAT: u64 = 257;
 const LX_STAT: u64 = 4;
 const LX_LSTAT: u64 = 6;
@@ -333,39 +334,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_WRITE || n == LX_WRITEV {
-    let early = rw_early(&mut k, pid, n, a, b, c);
-    if early != NO_RESULT {
-      ret(&mut k.procs, pid, early);
-      return KEEP;
-    }
-    let mut w = 0;
-    if n == LX_WRITE {
-      w = lx_write_fd(&mut con, &mut k, pid, a, b, c);
-    } else {
-      w = do_writev(&mut con, &mut k, pid, a, b, c);
-    }
-    if w == EAGAIN && pipe_nonblock(k, pid, a) {
-      ret(&mut k.procs, pid, EAGAIN);        // a full nonblocking pipe: say so
-      return KEEP;
-    }
-    if w == SK_WAIT && is_tcp(k, pid, a) {
-      return sock_retry(&mut k, pid, n);     // a full connection: sleep until an ACK comes in
-    }
-    if w == EAGAIN || w == SK_WAIT {
-      return lx_retry(&mut k, pid, n);       // a full pipe or connection: wait for room
-    }
-    if w == CON_FULL {
-      return con_block(&mut k, pid, n);      // a full console: wait for the pump
-    }
-    if w == DISK_RETRY {
-      return disk_retry(&mut k, pid, n);     // blocks not cached yet: wait for the disk
-    }
-    ret(&mut k.procs, pid, w);
-    if w == EPIPE {
-      post_sig(&mut k, pid, SIGPIPE);        // no reader left
-      return SWITCH;
-    }
-    return KEEP;
+    return lx_write_call(&mut con, &mut k, pid, n, a, b, c);
   }
   if n == LX_PIPE || n == LX_PIPE2 {
     let mut flags = 0;
@@ -649,9 +618,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   // glibc asks for these and carries on without them: restartable
   // sequences (sched_getcpu falls back to the system call), and clone3
-  // (pthread_create falls back to clone, as on Linux before 5.3). Refused
-  // quietly, as known gaps.
-  if n == LX_RSEQ || n == LX_CLONE3 {
+  // (pthread_create falls back to clone, as on Linux before 5.3); nginx
+  // goes on without Linux AIO (io_setup). Refused quietly, as known gaps.
+  if n == LX_RSEQ || n == LX_CLONE3 || n == LX_IO_SETUP {
     ret(&mut k.procs, pid, ENOSYS);
     return KEEP;
   }
@@ -664,11 +633,56 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   return KEEP;
 }
 
+/// write and writev, from linux_syscall: the call, then what its result
+/// means for the caller (an answer, or a wait for room).
+fn lx_write_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  let early = rw_early(&mut k, pid, n, a, b, c);
+  if early != NO_RESULT {
+    ret(&mut k.procs, pid, early);
+    return KEEP;
+  }
+  let mut w = 0;
+  if n == LX_WRITE {
+    w = lx_write_fd(&mut con, &mut k, pid, a, b, c);
+  } else {
+    w = do_writev(&mut con, &mut k, pid, a, b, c);
+  }
+  if (w == EAGAIN || w == SK_WAIT) && pipe_nonblock(k, pid, a) {
+    ret(&mut k.procs, pid, EAGAIN);        // a full nonblocking pipe or connection: say so
+    return KEEP;
+  }
+  if w == SK_WAIT && is_tcp(k, pid, a) {
+    return sock_retry(&mut k, pid, n);     // a full connection: sleep until an ACK comes in
+  }
+  if w == EAGAIN || w == SK_WAIT {
+    return lx_retry(&mut k, pid, n);       // a full pipe or connection: wait for room
+  }
+  if w == CON_FULL {
+    return con_block(&mut k, pid, n);      // a full console: wait for the pump
+  }
+  if w == DISK_RETRY {
+    return disk_retry(&mut k, pid, n);     // blocks not cached yet: wait for the disk
+  }
+  ret(&mut k.procs, pid, w);
+  if w == EPIPE {
+    post_sig(&mut k, pid, SIGPIPE);        // no reader left
+    return SWITCH;
+  }
+  return KEEP;
+}
+
 const TCGETS: u64 = 0x5401;
 const TCSETS: u64 = 0x5402;
 const TCSETSF: u64 = 0x5404;              // TCSETSW (0x5403) lies between
 const TIOCGWINSZ: u64 = 0x5413;
 const FIONREAD: u64 = 0x541B;
+const FIONBIO: u64 = 0x5421;
+const FIONCLEX: u64 = 0x5450;
+const FIOCLEX: u64 = 0x5451;
+const FIOASYNC: u64 = 0x5452;
 const SIOCATMARK: u64 = 0x8905;
 const SIOCGIFCONF: u64 = 0x8912;
 const SIOCGIFFLAGS: u64 = 0x8913;
@@ -745,6 +759,38 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   let d = fd_look(k, pid, fd);
   if d.kind == K_BAD {
     return EBADF;
+  }
+  // On any descriptor, as on Linux: FIONBIO sets or clears O_NONBLOCK
+  // (nginx and CPython use it rather than fcntl), FIOASYNC O_ASYNC, and
+  // FIOCLEX and FIONCLEX close-on-exec. They go through fcntl, which
+  // knows where each kind of description keeps the flag.
+  if req == FIONBIO || req == FIOASYNC {
+    let v = pty_int_in(&mut k, pid, arg);
+    if v == NO_RESULT {
+      return EFAULT;
+    }
+    let mut bit = LO_NONBLOCK;
+    if req == FIOASYNC {
+      bit = 0x2000;                           // O_ASYNC
+    }
+    let fl = lx_fcntl(&mut k, pid, fd, F_GETFL, 0);
+    if fl >= 0x100000000 {
+      return fl;                              // an errno
+    }
+    let mut nf = fl - fl / bit % 2 * bit;
+    if v != 0 {
+      nf = nf + bit;
+    }
+    let r = lx_fcntl(&mut k, pid, fd, F_SETFL, nf);
+    return r;
+  }
+  if req == FIOCLEX || req == FIONCLEX {
+    let mut on = 0;
+    if req == FIOCLEX {
+      on = 1;
+    }
+    let r = lx_fcntl(&mut k, pid, fd, F_SETFD, on);
+    return r;
   }
   if req == FIONREAD && (d.kind == K_PIPE_R || d.kind == K_PIPE_W) {
     // The bytes waiting in the pipe, as an int.

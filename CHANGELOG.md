@@ -472,6 +472,26 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   the host with Dropbear's client; a key that is not authorized is
   refused. `/etc/shells` lists `/bin/sh` and `/bin/ash`, and `/etc/group`
   has a `tty` group.
+- DHCP leases are renewed: at T1 the kernel asks its server to extend the
+  lease, at T2 any server, and when the lease runs out the address is
+  dropped and the search starts again; a NAK starts it at once. Before,
+  the first lease was kept forever. `test/dhcp_test.sh` (in `make test`,
+  on virtio and e1000) plays a server with a 6-second lease through all
+  of it.
+- Servers that wait for events: `ioctl(FIONBIO)` makes any descriptor
+  nonblocking (it worked on pseudo-terminals only), a nonblocking send to
+  a full connection gives `EAGAIN` instead of waiting, `sendfile` writes to TCP
+  connections, `FIOASYNC`, `FIOCLEX` and `FIONCLEX` work on any
+  descriptor, and `prctl(PR_SET_DUMPABLE)` is accepted. With these, nginx
+  installed with `apk` serves pages to the host. `poll`, `select`,
+  `epoll_wait`, `pause` and `rt_sigsuspend` sleep until a frame, a clock
+  tick or a signal instead of running on every scheduler pass (see
+  [docs/linux.md](docs/linux.md)): a 16 MiB download from nginx went from
+  0.86 MB/s to 7 MB/s. `t_server` in the compatibility suite checks the
+  calls.
+- Reads of `/dev/zero`, `/dev/urandom` and the other character devices
+  return up to 256 KiB at once, not 4 KiB, so `dd bs=64k` gets whole
+  blocks.
 
 ### Console and boot
 

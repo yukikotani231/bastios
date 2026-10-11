@@ -260,7 +260,9 @@ fn lx_tcp_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u6
 }
 
 /// write / send on a connection: what the send buffer takes; SK_WAIT
-/// while it is full; -EPIPE once the connection cannot send.
+/// while it is full (-EAGAIN when nonblocking); -EPIPE once the
+/// connection cannot send. With `more` (MSG_MORE), a short segment waits
+/// for more data.
 fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, more: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -279,10 +281,34 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, more: bool) 
   if got == NO_RESULT || got == 0 {
     return EFAULT;
   }
+  return tcp_send_xfer(&mut k, pid, fd, got, more);
+}
+
+/// Sends the first n bytes of k.fs.xfer on connection fd (send, and
+/// sendfile's put_xfer): what the send buffer takes; SK_WAIT while it is
+/// full (-EAGAIN when the socket is nonblocking); -EPIPE once the
+/// connection cannot send.
+fn tcp_send_xfer(k: &mut Kernel, pid: u64, fd: u64, n: u64, more: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let tk = tk_look(k, pid, fd);
+  if tk.err != 0 {
+    return tk.err;
+  }
+  if tk.mode != TM_CONN {
+    return EPIPE;
+  }
+  if n == 0 {
+    return 0;
+  }
   tcp_cork(&mut k.nic, tk.t, more);
-  let w = tcp_send(&mut k.nic, tk.t, k.fs.xfer, got);
+  let w = tcp_send(&mut k.nic, tk.t, k.fs.xfer, n);
   if w == NO_SOCK {
     return EPIPE;
+  }
+  if w == 0 && tk.nb == 1 {
+    return EAGAIN;                          // full, and the caller will not wait
   }
   if w == 0 {
     return SK_WAIT;

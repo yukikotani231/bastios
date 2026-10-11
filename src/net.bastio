@@ -1642,6 +1642,14 @@ fn nic_irq_on(c: &mut Nic)
   }
 }
 
+/// Is there a card?
+fn nic_up(c: &Nic) -> bool {
+  match c {
+    Nic::None => { return false; },
+    Nic::Up(n) => { return true; },
+  }
+}
+
 fn nic_live(c: &Nic) -> bool {
   match c {
     Nic::None => { return false; },

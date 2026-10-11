@@ -879,7 +879,7 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
   if got == 0 {
     let dl = deadline(k, was, wait);
     if k.ns < dl {
-      return wait_until(&mut k, pid, n, dl);
+      return wait_asleep(&mut k, pid, n, dl);
     }
   }
   let size = got * EPOLL_EVENT;

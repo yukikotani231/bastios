@@ -59,7 +59,6 @@ const TIOCSPTLCK: u64 = 0x40045431;
 const TCSBRK: u64 = 0x5409;
 const TCXONC: u64 = 0x540A;
 const TCFLSH: u64 = 0x540B;
-const FIONBIO_PTY: u64 = 0x5421;
 const ECHOE: u64 = 0x10;              // c_lflag: VERASE erases on the screen
 const EIO_PTY: u64 = 18446744073709551611;   // EIO (2^64 - 5)
 
@@ -742,17 +741,6 @@ fn pty_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u
     lx_fill(&mut k, 0, 4);
     xfer_u64(&mut k.fs.xfer, 0, c);
     return lx_put_out(&mut k, pid, arg, 4);
-  }
-  if req == FIONBIO_PTY {
-    let v = pty_int_in(&mut k, pid, arg);
-    let h = fd_ofd(k, pid, fd);
-    if v == NO_RESULT {
-      return EFAULT;
-    }
-    if h < OFD_N {
-      of_set(&mut k.ofd, h, 3, smaller(v, 1));
-    }
-    return 0;
   }
   if req == TCFLSH {
     if arg == 0 || arg == 2 {
