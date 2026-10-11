@@ -1058,7 +1058,7 @@ fn tty_cook(con: &mut Con, k: &mut Kernel)
 /// waits in poll (which may be for the console: a poll on pipes or sockets
 /// alone also lets typed bytes go to the Linux line).
 fn lx_reading(procs: &Buf) -> bool
-  requires len(procs) == PTAB_LEN
+  requires ptab_ok(procs)
 {
   let mut p = 1;
   while p < NPROC
@@ -1611,7 +1611,7 @@ fn base_len(k: &Kernel, pid: u64, h: u64) -> u64
   ensures result <= FNAME_MAX
 {
   if h == OFD_N {
-    return smaller(get(k.cwd, pid * CWD_STRIDE), FNAME_MAX);
+    return smaller(wget(k.cwd, pid * CWD_STRIDE), FNAME_MAX);
   }
   return smaller(get(k.dpath, h * CWD_STRIDE), FNAME_MAX);
 }
@@ -1620,7 +1620,7 @@ fn base_byte(k: &Kernel, pid: u64, h: u64, i: u64) -> u8
   requires kok(k) && pid < NPROC && h <= OFD_N && i < FNAME_MAX
 {
   if h == OFD_N {
-    return cast[u8](get(k.cwd, pid * CWD_STRIDE + 1 + i) % 256);
+    return cast[u8](wget(k.cwd, pid * CWD_STRIDE + 1 + i) % 256);
   }
   return cast[u8](get(k.dpath, h * CWD_STRIDE + 1 + i) % 256);
 }
@@ -1640,7 +1640,7 @@ fn root_under(k: &Kernel, pid: u64, out: &Bytes, o: u64) -> u64
   while i < rl
     invariant i <= rl && rl <= o && o <= blen(out) && rl <= FNAME_MAX && kok(k) && pid < NPROC
   {
-    if cast[u64](bget(out, i)) != get(k.croot, pid * CWD_STRIDE + 1 + i) % 256 {
+    if cast[u64](bget(out, i)) != wget(k.croot, pid * CWD_STRIDE + 1 + i) % 256 {
       return 0;
     }
     i = i + 1;
@@ -1724,7 +1724,7 @@ fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
     while o < rl
       invariant o <= rl && rl <= FNAME_MAX && blen(out) == PATH_OUT && kok(k) && pid < NPROC
     {
-      bset(&mut out, o, cast[u8](get(k.croot, pid * CWD_STRIDE + 1 + o) % 256));
+      bset(&mut out, o, cast[u8](wget(k.croot, pid * CWD_STRIDE + 1 + o) % 256));
       o = o + 1;
     }
     floor = rl;

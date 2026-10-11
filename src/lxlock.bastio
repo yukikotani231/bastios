@@ -438,8 +438,9 @@ fn lk_opens(k: &Kernel, file: u64) -> u64
   let mut n = 0;
   let mut w = 0;
   let mut row = 0;
-  while row < FD_ROWS
-    invariant row <= FD_ROWS && n <= row && w <= row && kok(k)
+  let rows = smaller(len(k.fs.ftab) / FD_STRIDE, FD_ROWS);   // the rows the table has grown to
+  while row < rows
+    invariant row <= rows && rows <= FD_ROWS && n <= row && w <= row && kok(k)
   {
     if fget(k.fs.ftab, row, FD_FS) != 0 && lk_file(k, row) == file {
       n = n + 1;

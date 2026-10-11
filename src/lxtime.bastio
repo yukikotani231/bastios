@@ -779,7 +779,7 @@ fn lx_sigtimedwait(k: &mut Kernel, pid: u64, n: u64, was: u64, setp: u64, info: 
           i = i + 1;
         }
         bset(&mut k.fs.xfer, 0, cast[u8](s));
-        info_from(&mut k.fs.xfer, 0, get(k.sigsave, sender_at(pid, s)));   // si_pid, si_value
+        info_from(&mut k.fs.xfer, 0, wget(k.sigsave, sender_at(pid, s)));   // si_pid, si_value
         if lx_put_out(&mut k, pid, info, 128) != 0 {
           ret(&mut k.procs, pid, EFAULT);
           return KEEP;
@@ -870,7 +870,7 @@ fn mask_swap(k: &mut Kernel, pid: u64, va: u64) -> bool
   if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 8) != 8 {
     return false;
   }
-  k.sigsave = set(k.sigsave, pid, pget(k.procs, pid, F_SIGMASK) | MASK_SWAPPED);
+  wset(&mut k.sigsave, pid * SIGSAVE_ROW, pget(k.procs, pid, F_SIGMASK) | MASK_SWAPPED);
   pset(&mut k.procs, pid, F_SIGMASK, blockable(get_u64(k.fs.xfer, 0)));
   return true;
 }
@@ -880,10 +880,10 @@ fn mask_back(k: &mut Kernel, pid: u64)
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let w = get(k.sigsave, pid);
+  let w = wget(k.sigsave, pid * SIGSAVE_ROW);
   if w & MASK_SWAPPED != 0 {
     pset(&mut k.procs, pid, F_SIGMASK, w & !MASK_SWAPPED);
-    k.sigsave = set(k.sigsave, pid, w & !MASK_SWAPPED);
+    wset(&mut k.sigsave, pid * SIGSAVE_ROW, w & !MASK_SWAPPED);
   }
 }
 
