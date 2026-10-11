@@ -306,6 +306,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if d.kind == K_CONSOLE {
       return console_read(&mut k, pid, va, cnt, was);
     }
+    if d.kind == K_DEV && d.x == DEV_MICE {
+      return mice_read(&mut k, pid, n, a, va, cnt);   // src/lxmouse.bastio
+    }
     let mut r = EBADF;
     if d.kind == K_FILE {
       r = lx_file_read(&mut k, pid, d.x, va, cnt);
@@ -470,39 +473,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, r);
     return KEEP;
   }
-  if n == LX_STAT || n == LX_LSTAT {
-    ret(&mut k.procs, pid, lx_stat(&mut k, pid, AT_FDCWD, a, b, n == LX_STAT));
-    return KEEP;
-  }
-  if n == LX_NEWFSTATAT {
-    let r10 = pget(k.procs, pid, F_REGS + R_R10);
-    if (r10 % 0x100000000) & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH) != 0 {
-      ret(&mut k.procs, pid, EINVAL);
-    } else if r10 / AT_EMPTY_PATH % 2 == 1 && user_empty(&mut k, pid, b) {
-      ret(&mut k.procs, pid, lx_fstat_at(&mut k, pid, a, c));   // fstat by another name
-    } else {
-      ret(&mut k.procs, pid, lx_stat(&mut k, pid, a, b, c, (r10 & AT_SYMLINK_NOFOLLOW) == 0));
-    }
-    return KEEP;
-  }
-  if n == LX_FSTAT {
-    ret(&mut k.procs, pid, lx_fstat(&mut k, pid, a, b));
-    return KEEP;
-  }
-  if n == LX_GETDENTS64 || n == LX_GETDENTS {
-    ret(&mut k.procs, pid, lx_getdents(&mut k, pid, a, b, c, n == LX_GETDENTS));
-    return KEEP;
-  }
-  if n == LX_FACCESSAT || n == LX_FACCESSAT2 {
-    let mut fl = 0;
-    if n == LX_FACCESSAT2 {
-      fl = pget(k.procs, pid, F_REGS + R_R10);
-    }
-    ret(&mut k.procs, pid, lx_access(&mut k, pid, a, b, c, fl));
-    return KEEP;
-  }
-  if n == LX_ACCESS {
-    ret(&mut k.procs, pid, lx_access(&mut k, pid, AT_FDCWD, a, b, 0));
+  if n == LX_STAT || n == LX_LSTAT || n == LX_NEWFSTATAT || n == LX_FSTAT || n == LX_GETDENTS64 || n == LX_GETDENTS
+    || n == LX_FACCESSAT || n == LX_FACCESSAT2 || n == LX_ACCESS {
+    ret(&mut k.procs, pid, lx_stat_call(&mut k, pid, n, a, b, c));
     return KEEP;
   }
   if n == LX_CLONE && a & CLONE_VM != 0 && a & CLONE_VFORK != 0 && a & CLONE_THREAD == 0 {
@@ -590,6 +563,52 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_cred_call(n) {
     return lx_cred_call(&mut k, pid, n, a, b, c);
   }
+  return lx_last_call(&mut con, &mut k, pid, n, a, b, c);
+}
+
+/// stat, fstat, getdents and access for linux_syscall, kept apart so that
+/// its proof stays small.
+fn lx_stat_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  if n == LX_STAT || n == LX_LSTAT {
+    return lx_stat(&mut k, pid, AT_FDCWD, a, b, n == LX_STAT);
+  }
+  if n == LX_NEWFSTATAT {
+    let r10 = pget(k.procs, pid, F_REGS + R_R10);
+    if (r10 % 0x100000000) & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH) != 0 {
+      return EINVAL;
+    }
+    if r10 / AT_EMPTY_PATH % 2 == 1 && user_empty(&mut k, pid, b) {
+      return lx_fstat_at(&mut k, pid, a, c);   // fstat by another name
+    }
+    return lx_stat(&mut k, pid, a, b, c, (r10 & AT_SYMLINK_NOFOLLOW) == 0);
+  }
+  if n == LX_FSTAT {
+    return lx_fstat(&mut k, pid, a, b);
+  }
+  if n == LX_GETDENTS64 || n == LX_GETDENTS {
+    return lx_getdents(&mut k, pid, a, b, c, n == LX_GETDENTS);
+  }
+  if n == LX_FACCESSAT || n == LX_FACCESSAT2 {
+    let mut fl = 0;
+    if n == LX_FACCESSAT2 {
+      fl = pget(k.procs, pid, F_REGS + R_R10);
+    }
+    return lx_access(&mut k, pid, a, b, c, fl);
+  }
+  if n == LX_ACCESS {
+    return lx_access(&mut k, pid, AT_FDCWD, a, b, 0);
+  }
+  return ENOSYS;
+}
+
+/// The rest of linux_syscall, kept apart so that its proof stays small.
+fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
   if n == LX_GETCWD {
     ret(&mut k.procs, pid, lx_getcwd(&mut k, pid, a, b));
     return KEEP;
@@ -849,6 +868,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   }
   if d.kind == K_DEV && is_pty_dev(d.x) {
     return pty_ioctl(&mut k, pid, fd, d.x, req % 0x100000000, arg);   // src/lxpty.bastio
+  }
+  if d.kind == K_DEV && d.x == DEV_DSP {
+    return dsp_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxsnd.bastio
   }
   if d.kind == K_SOCK && (req == SIOCATMARK || (req >= SIOCGIFCONF && req <= SIOCSIFFLAGS)) {
     return sock_ioctl(&mut k, pid, fd, req, arg);
@@ -1254,6 +1276,9 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
   }
   if d.kind == K_DEV && is_pty_dev(d.x) {
     return pty_write(&mut k, pid, d.x, va, n);   // src/lxpty.bastio
+  }
+  if d.kind == K_DEV && d.x == DEV_DSP {
+    return dsp_write(&mut k, pid, va, n);   // src/lxsnd.bastio
   }
   if d.kind == K_DEV && d.x >= PROC_DEV {
     return proc_write(&mut k, pid, d.x, va, n);   // a sysctl open for writing (src/lxprocfs.bastio)
@@ -2073,7 +2098,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // What was there goes, read-only pages too: the new mapping is writable.
     map_forget(&mut k, pid, at / 4096, at / 4096 + pages, false);
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
-    hole_cut(&mut k, pid, at / 4096, at / 4096 + pages);
+    fixed_taken(&mut k, pid, at / 4096, at / 4096 + pages);
     if !cached && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
       return ENOMEM;
     }
