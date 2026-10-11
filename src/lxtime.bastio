@@ -19,8 +19,6 @@ import "linux.bastio";
 const LX_NANOSLEEP: u64 = 35;
 const LX_GETTIMEOFDAY: u64 = 96;
 const LX_TIME: u64 = 201;
-const LX_SETTIMEOFDAY: u64 = 164;
-const LX_CLOCK_SETTIME: u64 = 227;
 const LX_CLOCK_GETTIME: u64 = 228;
 const LX_CLOCK_GETRES: u64 = 229;
 const LX_CLOCK_NANOSLEEP: u64 = 230;
@@ -699,7 +697,6 @@ fn lx_sigtimedwait(k: &mut Kernel, pid: u64, n: u64, was: u64, setp: u64, info: 
 fn is_time_call(n: u64) -> bool {
   return n == LX_POLL || n == LX_PPOLL || n == LX_NANOSLEEP || n == LX_CLOCK_NANOSLEEP
     || n == LX_CLOCK_GETTIME || n == LX_CLOCK_GETRES || n == LX_GETTIMEOFDAY || n == LX_TIME
-    || n == LX_CLOCK_SETTIME || n == LX_SETTIMEOFDAY
     || n == LX_SELECT || n == LX_PSELECT6 || n == LX_PAUSE || n == LX_ALARM || n == LX_GETITIMER
     || n == LX_SETITIMER || n == LX_RT_SIGTIMEDWAIT;
 }
@@ -861,37 +858,6 @@ fn lx_time_rest(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
       return KEEP;
     }
     ret(&mut k.procs, pid, time_out(&mut k, pid, b, t, 1));
-    return KEEP;
-  }
-  if n == LX_CLOCK_SETTIME || n == LX_SETTIMEOFDAY {
-    // clock_settime(clk, struct timespec *) sets only CLOCK_REALTIME;
-    // settimeofday(struct timeval *, tz) with no time sets nothing.
-    if n == LX_SETTIMEOFDAY && a == 0 {
-      ret(&mut k.procs, pid, 0);
-      return KEEP;
-    }
-    if n == LX_CLOCK_SETTIME && a != CLOCK_REALTIME {
-      ret(&mut k.procs, pid, EINVAL);
-      return KEEP;
-    }
-    let mut t = Ts { err: 0, ns: 0 };
-    if n == LX_CLOCK_SETTIME {
-      t = ts_in(&mut k, pid, b);
-    } else {
-      t = tv_in(&mut k, pid, a);
-    }
-    if t.err != 0 {
-      ret(&mut k.procs, pid, t.err);
-      return KEEP;
-    }
-    // The wall clock is kept as an offset from the boot clock, so it
-    // cannot be set before the moment the machine started (in 1970).
-    if t.ns >= FOREVER || t.ns < k.ns {
-      ret(&mut k.procs, pid, EINVAL);
-      return KEEP;
-    }
-    k.epoch = t.ns - k.ns;
-    ret(&mut k.procs, pid, 0);
     return KEEP;
   }
   if n == LX_GETTIMEOFDAY {
