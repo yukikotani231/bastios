@@ -2,7 +2,7 @@
 // pwritev, statx, fallocate and fadvise64, flock, memfd_create and getcpu.
 //
 // Not done: sendfile and copy_file_range read only from files, and write
-// only to files, pipes and the console. flock is src/lxlock.bastio's.
+// only to files, pipes, TCP connections and the console. flock is src/lxlock.bastio's.
 // fallocate only grows a file (mode 0).
 // getcpu says processor 0, node 0, wherever the caller runs.
 
@@ -45,7 +45,7 @@ fn pipe_put_xfer(k: &mut Kernel, p: u64, n: u64) -> u64
     return EPIPE;
   }
   let mut r = pipe_ring(k.pipes, p);
-  let room = pipe_room(k.pipes, p, r.n);
+  let room = pipe_room_for(&mut k, p, r.n, n);
   if room == 0 {
     return EAGAIN;
   }
@@ -90,8 +90,15 @@ fn put_xfer(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, n: u64, off: u64)
   if d.kind == K_DEV {
     return n;
   }
+  if d.kind == K_SOCK && is_tcp(k, pid, out) {
+    let w = tcp_send_xfer(&mut k, pid, out, n, false);  // src/lxtcp.bastio
+    if w > n && w <= XFER {
+      return n;                             // (tcp_send never takes more than it is given)
+    }
+    return w;
+  }
   if d.kind != K_FILE {
-    return EINVAL;                          // sockets and the rest: not done
+    return EINVAL;                          // other sockets and the rest: not done
   }
   let was = vfs_offset(k.fs, d.x);
   if off != 0xFFFFFFFFFFFFFFFF {
@@ -516,17 +523,46 @@ fn out_is_file(k: &Kernel, pid: u64, fd: u64) -> bool
   return d.kind == K_FILE;
 }
 
+/// sendfile(out, in, offp, count). A full pipe or connection (put_xfer
+/// says EAGAIN or SK_WAIT) is -EAGAIN when `out` is nonblocking, as nginx
+/// expects, and otherwise a wait for room.
+fn lx_sendfile(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, from: u64, offp: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  let r = lx_copy(&mut con, &mut k, pid, out, 0, offp, from, pget(k.procs, pid, F_REGS + R_R10));
+  if (r == EAGAIN || r == SK_WAIT) && pipe_nonblock(k, pid, out) {
+    ret(&mut k.procs, pid, EAGAIN);
+    return KEEP;
+  }
+  if r == SK_WAIT {
+    return sock_retry(&mut k, pid, LX_SENDFILE);   // sleep until an ACK makes room
+  }
+  if r == EAGAIN {
+    return lx_retry(&mut k, pid, LX_SENDFILE);
+  }
+  if r == CON_FULL {
+    return con_block(&mut k, pid, LX_SENDFILE);
+  }
+  if r == DISK_RETRY {
+    return disk_retry(&mut k, pid, LX_SENDFILE);
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}
+
 /// System call n of the ones is_more_call names.
 fn lx_more_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
   ensures kok(k) && con_ok(con)
 {
+  if n == LX_SENDFILE {
+    return lx_sendfile(&mut con, &mut k, pid, a, b, c);
+  }
   let r10 = pget(k.procs, pid, F_REGS + R_R10);
   let r8 = pget(k.procs, pid, F_REGS + R_R8);
   let mut r = 0;
-  if n == LX_SENDFILE {
-    r = lx_copy(&mut con, &mut k, pid, a, 0, c, b, r10);
-  } else if n == LX_COPY_FILE_RANGE {
+  if n == LX_COPY_FILE_RANGE {
     if pget(k.procs, pid, F_REGS + R_R9) != 0 {
       r = EINVAL;                           // no flags are defined
     } else if !out_is_file(k, pid, c) {
@@ -565,10 +601,6 @@ fn lx_more_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_memfd(&mut k, pid, a, b);
   }
   if r == EAGAIN && n != LX_FLOCK {
-    if n == LX_SENDFILE && pipe_nonblock(k, pid, a) {
-      ret(&mut k.procs, pid, EAGAIN);
-      return KEEP;
-    }
     return lx_retry(&mut k, pid, n);         // a full pipe: wait for room
   }
   if r == CON_FULL {

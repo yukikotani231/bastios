@@ -1,0 +1,1044 @@
+// inotify: watches on files and directories, and the events on them, the
+// Linux x86-64 way (inotify_init, inotify_init1, inotify_add_watch,
+// inotify_rm_watch, then read and poll on the descriptor).
+//
+// An inotify descriptor is an open file description of kind OF_INOTIFY
+// whose word 2 names one of INO_N instances in k.evt, at INO_AT + i *
+// INO_STRIDE: in use, the next watch descriptor, how many events are
+// queued and where the first is, then INO_W watches of INO_WAT words (the
+// file layer handle + 1 it watches, 0: free; the mask; the watch
+// descriptor), then a ring of INO_Q events of INO_EV words (wd, mask,
+// cookie, name length, and the name, 8 bytes to a word). A watch names a
+// file or directory by its handle (vfs_lookup, vfs_dir_lookup), which
+// stays the same through renames.
+//
+// Events come from the Linux system calls, not from the file layer:
+// ino_before looks at a call before it runs (what it will remove or
+// rename, whether a file it opens exists) and ino_after reports what the
+// call did once it has succeeded; closing a file's last description
+// reports IN_CLOSE_WRITE or IN_CLOSE_NOWRITE (ino_closed). Nothing is
+// looked at while no watch exists anywhere, so inotify costs a call
+// nothing until it is used. An event on a file goes to the watches on its
+// directory, with its name, and then to the watches on the file itself,
+// as on Linux. An event equal to the last one queued is dropped, and when
+// the queue is one short of full an IN_Q_OVERFLOW event takes the last
+// place.
+//
+// Not done: events from BastiOS's native system calls (src/syscall.bastio)
+// and from writes through shared mappings; IN_UNMOUNT; IN_DELETE_SELF is
+// reported when the last name goes, not when the last open description
+// closes; an unlinked file that is still open has no name, so its events
+// reach only watches on the file itself (as IN_EXCL_UNLINK would ask);
+// /proc/PID/fdinfo; FIONREAD. The limits (INO_N instances, INO_W watches
+// each, INO_Q - 1 queued events) are fixed, and /proc/sys/fs/inotify shows
+// them.
+
+import "lxperm.bastio";
+
+const LX_INOTIFY_INIT: u64 = 253;
+const LX_INOTIFY_ADD_WATCH: u64 = 254;
+const LX_INOTIFY_RM_WATCH: u64 = 255;
+const LX_INOTIFY_INIT1: u64 = 294;
+const IN_ACCESS: u64 = 0x1;
+const IN_MODIFY: u64 = 0x2;
+const IN_ATTRIB: u64 = 0x4;
+const IN_CLOSE_WRITE: u64 = 0x8;
+const IN_CLOSE_NOWRITE: u64 = 0x10;
+const IN_OPEN: u64 = 0x20;
+const IN_MOVED_FROM: u64 = 0x40;
+const IN_MOVED_TO: u64 = 0x80;
+const IN_CREATE: u64 = 0x100;
+const IN_DELETE: u64 = 0x200;
+const IN_DELETE_SELF: u64 = 0x400;
+const IN_MOVE_SELF: u64 = 0x800;
+const IN_ALL_EVENTS: u64 = 0xFFF;
+const IN_Q_OVERFLOW: u64 = 0x4000;
+const IN_IGNORED: u64 = 0x8000;
+const IN_ONLYDIR: u64 = 0x1000000;
+const IN_DONT_FOLLOW: u64 = 0x2000000;
+const IN_EXCL_UNLINK: u64 = 0x4000000;
+const IN_MASK_CREATE: u64 = 0x10000000;
+const IN_MASK_ADD: u64 = 0x20000000;
+const IN_ISDIR: u64 = 0x40000000;
+const IN_ONESHOT: u64 = 0x80000000;
+const IN_KEEP: u64 = 0x84000FFF;              // what a watch keeps of its mask: the events, ONESHOT, EXCL_UNLINK
+const IN_EVENT: u64 = 16;                     // struct inotify_event before its name
+
+// The calls ino_before and ino_after look at, besides those named elsewhere.
+const LX_CREAT: u64 = 85;
+const IX_LSETXATTR: u64 = 189;
+const IX_FSETXATTR: u64 = 190;
+const IX_REMOVEXATTR: u64 = 197;
+const IX_LREMOVEXATTR: u64 = 198;
+
+// Words of k.evt after the instances (INO_G): watches in all, the last
+// rename cookie, then what ino_before found for the call: two paths (P1,
+// P2) of P_LEN words each, and a name ino_child works with (P3).
+const G_WATCHES: u64 = 0;
+const G_COOKIE: u64 = 1;
+const G_CALL: u64 = 2;                         // the call ino_before looked at + 1 (0: none)
+const G_KEPT: u64 = 3;                         // 1 if it kept paths in P1 and P2
+const P1: u64 = 4;
+const P2: u64 = 42;
+const P3: u64 = 80;                            // P1 + 2 * P_LEN; INO_GLEN is P3 + P_LEN
+const P_LEN: u64 = 38;
+const P_F: u64 = 0;                            // the handle the path names, or NO_FILE
+const P_PAR: u64 = 1;                          // its directory's handle, or NO_FILE
+const P_DIR: u64 = 2;                          // 1 if it is a directory
+const P_NLINK: u64 = 3;                        // its names
+const P_NAMELEN: u64 = 4;                      // its last part, in the next INO_NAMEW words
+const P_NAME: u64 = 5;
+
+fn is_inotify_call(n: u64) -> bool {
+  return n == LX_INOTIFY_INIT || n == LX_INOTIFY_INIT1 || n == LX_INOTIFY_ADD_WATCH || n == LX_INOTIFY_RM_WATCH;
+}
+
+fn lx_inotify_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut r = 0;
+  if n == LX_INOTIFY_INIT {
+    r = ino_init(&mut k, pid, 0);
+  } else if n == LX_INOTIFY_INIT1 {
+    r = ino_init(&mut k, pid, a);
+  } else if n == LX_INOTIFY_ADD_WATCH {
+    r = ino_add_watch(&mut k, pid, a, b, c);
+  } else {
+    r = ino_rm_watch(&mut k, pid, a, b);
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}
+
+// ---------------------------------------------------------------- the table
+
+fn iget(k: &Kernel, at: u64) -> u64
+  requires kok(k) && at < EVT_LEN
+{
+  return get(k.evt, at);
+}
+
+fn iput(k: &mut Kernel, at: u64, v: u64)
+  requires kok(k) && at < EVT_LEN
+  ensures kok(k)
+{
+  k.evt = set(k.evt, at, v);
+}
+
+/// Word f of instance i.
+fn ino_base(i: u64) -> u64
+  requires i < INO_N
+  ensures result + INO_STRIDE <= INO_G
+{
+  return INO_AT + i * INO_STRIDE;
+}
+
+/// Where watch w of instance i starts.
+fn wat_at(i: u64, w: u64) -> u64
+  requires i < INO_N && w < INO_W
+  ensures result + INO_WAT <= INO_G
+{
+  return ino_base(i) + INO_HEAD + w * INO_WAT;
+}
+
+/// Where event slot e of instance i starts.
+fn ev_at(i: u64, e: u64) -> u64
+  requires i < INO_N && e < INO_Q
+  ensures result + INO_EV <= INO_G
+{
+  return ino_base(i) + INO_HEAD + INO_W * INO_WAT + e * INO_EV;
+}
+
+/// inotify_init1(flags): a new instance with no watches.
+fn ino_init(k: &mut Kernel, pid: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags & !(LO_NONBLOCK | LO_CLOEXEC) != 0 {
+    return EINVAL;
+  }
+  let mut i = 0;
+  while i < INO_N && iget(k, ino_base(i)) != 0
+    invariant i <= INO_N && kok(k)
+  {
+    i = i + 1;
+  }
+  if i >= INO_N {
+    return EMFILE;
+  }
+  let fd = ev_install(&mut k, pid, OF_INOTIFY, i, flags / LO_NONBLOCK % 2, flags & LO_CLOEXEC != 0);
+  if fd >= LXNFD {
+    return fd;                              // EMFILE or ENFILE
+  }
+  let b = ino_base(i);
+  iput(&mut k, b, 1);
+  iput(&mut k, b + 1, 1);                   // the first watch descriptor
+  iput(&mut k, b + 2, 0);
+  iput(&mut k, b + 3, 0);
+  let mut w = 0;
+  while w < INO_W
+    invariant w <= INO_W && kok(k)
+  {
+    iput(&mut k, wat_at(i, w), 0);
+    w = w + 1;
+  }
+  return fd;
+}
+
+/// The last description of instance i has closed: its watches go.
+fn ino_free(k: &mut Kernel, i: u64)
+  requires kok(k) && i < INO_N
+  ensures kok(k)
+{
+  let mut w = 0;
+  while w < INO_W
+    invariant w <= INO_W && kok(k)
+  {
+    if iget(k, wat_at(i, w)) != 0 {
+      wat_drop(&mut k, i, w);
+    }
+    w = w + 1;
+  }
+  iput(&mut k, ino_base(i), 0);
+}
+
+/// Frees watch w of instance i.
+fn wat_drop(k: &mut Kernel, i: u64, w: u64)
+  requires kok(k) && i < INO_N && w < INO_W
+  ensures kok(k)
+{
+  iput(&mut k, wat_at(i, w), 0);
+  let all = iget(k, INO_G + G_WATCHES);
+  if all > 0 {
+    iput(&mut k, INO_G + G_WATCHES, all - 1);
+  }
+}
+
+/// The instance descriptor fd of process pid names, INO_N if fd is open
+/// but not an inotify descriptor, or INO_N + 1 if it is not open.
+fn ino_of(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= INO_N + 1
+{
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
+    return INO_N + 1;
+  }
+  if d.kind != K_INOTIFY || d.x >= INO_N {
+    return INO_N;
+  }
+  return d.x;
+}
+
+/// The handle the n-byte name in the transfer buffer names: a directory
+/// (vfs_dir_lookup, which also knows the top directory and "disk"), or a
+/// file. NO_FILE if nothing is there.
+fn node_at(k: &mut Kernel, n: u64) -> u64
+  requires kok(k) && n <= FNAME_MAX
+  ensures kok(k)
+{
+  let d = vfs_dir_lookup(&mut k.fs, n);
+  if d != NO_FILE {
+    return d;
+  }
+  return vfs_lookup(&mut k.fs, n);
+}
+
+/// inotify_add_watch(fd, path, mask): the watch descriptor of the watch
+/// instance fd now has on path.
+fn ino_add_watch(k: &mut Kernel, pid: u64, fd: u64, va: u64, mask: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let i = ino_of(k, pid, fd);
+  if i == INO_N + 1 {
+    return EBADF;
+  }
+  if i >= INO_N {
+    return EINVAL;
+  }
+  let m = mask % 0x100000000;
+  if m & IN_ALL_EVENTS == 0 || (m & IN_MASK_ADD != 0 && m & IN_MASK_CREATE != 0) {
+    return EINVAL;
+  }
+  let mut n = 0;
+  if m & IN_DONT_FOLLOW != 0 {
+    n = lx_path_at_nf(&mut k, pid, AT_FDCWD, va);
+  } else {
+    n = lx_path_in(&mut k, pid, va);
+  }
+  if n == NO_RESULT {
+    return k.perr;
+  }
+  let f = node_at(&mut k, n);
+  if f == NO_FILE {
+    return ENOENT;
+  }
+  if m & IN_ONLYDIR != 0 && !vfs_is_dir(&mut k.fs, f) {
+    return ENOTDIR;
+  }
+  if may_path(&mut k, pid, n, MAY_R) != 0 {
+    return EACCES;
+  }
+  let mut free = INO_W;
+  let mut w = 0;
+  while w < INO_W
+    invariant w <= INO_W && free <= INO_W && kok(k)
+  {
+    let at = wat_at(i, w);
+    let h = iget(k, at);
+    if h == f + 1 && f < NO_FILE {
+      if m & IN_MASK_CREATE != 0 {
+        return EEXIST;
+      }
+      let mut nm = m & IN_KEEP;
+      if m & IN_MASK_ADD != 0 {
+        nm = nm | iget(k, at + 1);
+      }
+      iput(&mut k, at + 1, nm);
+      return iget(k, at + 2);
+    }
+    if h == 0 && free == INO_W {
+      free = w;
+    }
+    w = w + 1;
+  }
+  if free >= INO_W {
+    return ENOSPC;
+  }
+  let b = ino_base(i);
+  let wd = iget(k, b + 1);
+  if wd >= 0x7FFFFFFF {
+    return ENOSPC;
+  }
+  iput(&mut k, b + 1, wd + 1);
+  let at = wat_at(i, free);
+  iput(&mut k, at, f + 1);
+  iput(&mut k, at + 1, m & IN_KEEP);
+  iput(&mut k, at + 2, wd);
+  let all = iget(k, INO_G + G_WATCHES);
+  if all < INO_N * INO_W {
+    iput(&mut k, INO_G + G_WATCHES, all + 1);
+  }
+  return wd;
+}
+
+/// inotify_rm_watch(fd, wd): the watch goes, after an IN_IGNORED event.
+fn ino_rm_watch(k: &mut Kernel, pid: u64, fd: u64, wd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let i = ino_of(k, pid, fd);
+  if i == INO_N + 1 {
+    return EBADF;
+  }
+  if i >= INO_N {
+    return EINVAL;
+  }
+  let mut w = 0;
+  while w < INO_W
+    invariant w <= INO_W && kok(k)
+  {
+    let at = wat_at(i, w);
+    if iget(k, at) != 0 && iget(k, at + 2) == wd % 0x100000000 {
+      ino_queue(&mut k, i, iget(k, at + 2), IN_IGNORED, 0, 0, 0);
+      wat_drop(&mut k, i, w);
+      return 0;
+    }
+    w = w + 1;
+  }
+  return EINVAL;
+}
+
+// ---------------------------------------------------------------- events
+
+/// Queues an event on instance i: watch wd, mask, cookie, and the name of
+/// nlen bytes kept at k.evt[nat..] (none if nlen is 0). Equal to the last
+/// event queued, it is dropped; one short of full, IN_Q_OVERFLOW goes in
+/// instead.
+fn ino_queue(k: &mut Kernel, i: u64, wd: u64, mask: u64, cookie: u64, nat: u64, nlen: u64)
+  requires kok(k) && i < INO_N && nat + INO_NAMEW <= EVT_LEN && nlen <= FNAME_MAX
+  ensures kok(k)
+{
+  let b = ino_base(i);
+  let q = iget(k, b + 2);
+  let first = iget(k, b + 3) % INO_Q;
+  if q >= INO_Q {
+    return;
+  }
+  if q > 0 {
+    let last = ev_at(i, (first + q - 1) % INO_Q);
+    if iget(k, last) == wd && iget(k, last + 1) == mask && iget(k, last + 2) == cookie
+      && iget(k, last + 3) == nlen && ino_same_name(k, last + 4, nat, nlen) {
+      return;                               // the same again: coalesced
+    }
+  }
+  let e = ev_at(i, (first + q) % INO_Q);
+  if q == INO_Q - 1 {
+    iput(&mut k, e, 0xFFFFFFFF);            // wd -1
+    iput(&mut k, e + 1, IN_Q_OVERFLOW);
+    iput(&mut k, e + 2, 0);
+    iput(&mut k, e + 3, 0);
+  } else {
+    iput(&mut k, e, wd);
+    iput(&mut k, e + 1, mask);
+    iput(&mut k, e + 2, cookie);
+    iput(&mut k, e + 3, nlen);
+    let mut j = 0;
+    while j < INO_NAMEW
+      invariant j <= INO_NAMEW && kok(k)
+    {
+      iput(&mut k, e + 4 + j, iget(k, nat + j));
+      j = j + 1;
+    }
+  }
+  iput(&mut k, b + 2, q + 1);
+}
+
+/// Whether the names of nlen bytes at k.evt[a..] and k.evt[c..] are equal.
+fn ino_same_name(k: &Kernel, a: u64, c: u64, nlen: u64) -> bool
+  requires kok(k) && a + INO_NAMEW <= EVT_LEN && c + INO_NAMEW <= EVT_LEN
+{
+  let words = (smaller(nlen, FNAME_MAX) + 7) / 8;
+  let mut j = 0;
+  while j < words
+    invariant j <= words && words <= INO_NAMEW
+  {
+    if iget(k, a + j) != iget(k, c + j) {
+      return false;
+    }
+    j = j + 1;
+  }
+  return true;
+}
+
+/// Reports an event to the watches on handle h: with the name of nlen
+/// bytes at k.evt[nat..] (none if nlen is 0) for a watch on the directory
+/// it happened in, without one for a watch on the file itself. A one-shot
+/// watch goes once it has reported.
+fn ino_note(k: &mut Kernel, h: u64, mask: u64, cookie: u64, nat: u64, nlen: u64)
+  requires kok(k) && nat + INO_NAMEW <= EVT_LEN && nlen <= FNAME_MAX
+  ensures kok(k)
+{
+  if h == NO_FILE {
+    return;
+  }
+  let mut i = 0;
+  while i < INO_N
+    invariant i <= INO_N && kok(k)
+  {
+    if iget(k, ino_base(i)) != 0 {
+      let mut w = 0;
+      while w < INO_W
+        invariant w <= INO_W && i < INO_N && kok(k)
+      {
+        let at = wat_at(i, w);
+        let wm = iget(k, at + 1);
+        if iget(k, at) == h + 1 && wm & mask & IN_ALL_EVENTS != 0 {
+          let wd = iget(k, at + 2);
+          ino_queue(&mut k, i, wd, mask, cookie, nat, nlen);
+          if wm & IN_ONESHOT != 0 {
+            ino_queue(&mut k, i, wd, IN_IGNORED, 0, nat, 0);
+            wat_drop(&mut k, i, w);
+          }
+        }
+        w = w + 1;
+      }
+    }
+    i = i + 1;
+  }
+}
+
+/// Handle h is gone (its last name removed): IN_DELETE_SELF to the
+/// watches on it that asked, then IN_IGNORED, and they go.
+fn ino_gone(k: &mut Kernel, h: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if h == NO_FILE {
+    return;
+  }
+  let mut i = 0;
+  while i < INO_N
+    invariant i <= INO_N && kok(k)
+  {
+    if iget(k, ino_base(i)) != 0 {
+      let mut w = 0;
+      while w < INO_W
+        invariant w <= INO_W && i < INO_N && kok(k)
+      {
+        let at = wat_at(i, w);
+        if iget(k, at) == h + 1 {
+          let wd = iget(k, at + 2);
+          if iget(k, at + 1) & IN_DELETE_SELF != 0 {
+            ino_queue(&mut k, i, wd, IN_DELETE_SELF, 0, INO_G + P3 + P_NAME, 0);
+          }
+          ino_queue(&mut k, i, wd, IN_IGNORED, 0, INO_G + P3 + P_NAME, 0);
+          wat_drop(&mut k, i, w);
+        }
+        w = w + 1;
+      }
+    }
+    i = i + 1;
+  }
+}
+
+/// Byte j of x if it is below `end`, else 0.
+fn byte_or0(x: &Bytes, j: u64, end: u64) -> u64
+  ensures result < 256
+{
+  if j < end && j < blen(x) {
+    return cast[u64](bget(x, j)) % 256;
+  }
+  return 0;
+}
+
+/// Keeps x[from..from + l] (l <= FNAME_MAX) as the name of path slot p:
+/// 8 bytes to a word, the first in the low byte.
+fn keep_name(k: &mut Kernel, p: u64, from: u64, l: u64)
+  requires kok(k) && (p == P1 || p == P2 || p == P3) && l <= FNAME_MAX && from <= XFER
+  ensures kok(k)
+{
+  let at = INO_G + p + P_NAME;
+  let end = from + l;
+  let mut j = 0;
+  while j < INO_NAMEW
+    invariant j <= INO_NAMEW && kok(k) && at + INO_NAMEW <= EVT_LEN
+  {
+    let s = from + 8 * j;
+    let b7 = byte_or0(k.fs.xfer, s + 7, end);
+    let b6 = byte_or0(k.fs.xfer, s + 6, end) + 256 * b7;
+    let b5 = byte_or0(k.fs.xfer, s + 5, end) + 256 * b6;
+    let b4 = byte_or0(k.fs.xfer, s + 4, end) + 256 * b5;
+    let b3 = byte_or0(k.fs.xfer, s + 3, end) + 256 * b4;
+    let b2 = byte_or0(k.fs.xfer, s + 2, end) + 256 * b3;
+    let b1 = byte_or0(k.fs.xfer, s + 1, end) + 256 * b2;
+    let w = byte_or0(k.fs.xfer, s, end) + 256 * b1;
+    iput(&mut k, at + j, w);
+    j = j + 1;
+  }
+  iput(&mut k, INO_G + p + P_NAMELEN, l);
+}
+
+/// Fills path slot p from the n-byte name in the transfer buffer: the
+/// handle there, its directory's, whether it is a directory, its names,
+/// and its last part. The transfer buffer's first bytes are used up.
+fn keep_path(k: &mut Kernel, p: u64, n: u64)
+  requires kok(k) && (p == P1 || p == P2 || p == P3) && n <= FNAME_MAX
+  ensures kok(k)
+{
+  let at = INO_G + p;
+  let f = node_at(&mut k, n);
+  iput(&mut k, at + P_F, f);
+  let mut dir = 0;
+  let mut links = 0;
+  if f != NO_FILE {
+    if vfs_is_dir(&mut k.fs, f) {
+      dir = 1;
+    }
+    links = vfs_nlink(&mut k.fs, f);
+  }
+  iput(&mut k, at + P_DIR, dir);
+  iput(&mut k, at + P_NLINK, links);
+  // The last part, after the last "/".
+  let mut s = n;
+  while s > 0 && bget(k.fs.xfer, s - 1) != 47
+    invariant s <= n && n <= FNAME_MAX && kok(k)
+  {
+    s = s - 1;
+  }
+  if n == 0 {
+    iput(&mut k, at + P_PAR, NO_FILE);      // the top directory has none
+    keep_name(&mut k, p, 0, 0);
+    return;
+  }
+  keep_name(&mut k, p, s, n - s);
+  let mut pl = 0;
+  if s > 0 {
+    pl = s - 1;
+  }
+  iput(&mut k, at + P_PAR, vfs_dir_lookup(&mut k.fs, pl));
+}
+
+/// keep_path for a path argument: from dirfd (AT_FDCWD: the working
+/// directory), following a link at the end if `follow`. A path that does
+/// not resolve leaves the slot naming nothing.
+fn keep_arg(k: &mut Kernel, pid: u64, p: u64, dirfd: u64, va: u64, follow: bool)
+  requires kok(k) && pid < NPROC && (p == P1 || p == P2 || p == P3)
+  ensures kok(k)
+{
+  let mut n = 0;
+  if follow {
+    n = lx_path_at(&mut k, pid, dirfd, va);
+  } else {
+    n = lx_path_at_nf(&mut k, pid, dirfd, va);
+  }
+  if n == NO_RESULT {
+    iput(&mut k, INO_G + p + P_F, NO_FILE);
+    iput(&mut k, INO_G + p + P_PAR, NO_FILE);
+    iput(&mut k, INO_G + p + P_NAMELEN, 0);
+    return;
+  }
+  keep_path(&mut k, p, n);
+}
+
+/// An event on the directory entry kept in path slot p: to the watches on
+/// its directory, with its name.
+fn note_entry(k: &mut Kernel, p: u64, mask: u64, cookie: u64)
+  requires kok(k) && (p == P1 || p == P2 || p == P3)
+  ensures kok(k)
+{
+  let at = INO_G + p;
+  let mut m = mask;
+  if iget(k, at + P_DIR) == 1 {
+    m = m | IN_ISDIR;
+  }
+  ino_note(&mut k, iget(k, at + P_PAR), m, cookie, at + P_NAME, smaller(iget(k, at + P_NAMELEN), FNAME_MAX));
+}
+
+/// An event on handle f that its directory hears of too (IN_ACCESS,
+/// IN_MODIFY, IN_ATTRIB, IN_OPEN, IN_CLOSE_*): to the watches on the
+/// directory its name is in, with that name, then to those on f. The
+/// transfer buffer is used up.
+fn ino_child(k: &mut Kernel, f: u64, mask: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if f == NO_FILE {
+    return;
+  }
+  let mut m = mask;
+  if vfs_is_dir(&mut k.fs, f) {
+    m = m | IN_ISDIR;
+  }
+  if f < HFILES {
+    let n = vfs_dirent(&mut k.fs, f);
+    if n > 0 && n <= FNAME_MAX {
+      keep_path(&mut k, P3, n);
+      ino_note(&mut k, iget(k, INO_G + P3 + P_PAR), m, 0, INO_G + P3 + P_NAME,
+        smaller(iget(k, INO_G + P3 + P_NAMELEN), FNAME_MAX));
+    }
+  }
+  ino_note(&mut k, f, m, 0, INO_G + P3 + P_NAME, 0);
+}
+
+/// ino_child for what descriptor fd of process pid has open: a file, or a
+/// directory of the file layer.
+fn ino_fd(k: &mut Kernel, pid: u64, fd: u64, mask: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_FILE {
+    ino_child(&mut k, vfs_row_file(k.fs, d.x), mask);
+  } else if d.kind == K_DIR && d.x >= DIR_VFS && d.x < DIR_PROC {
+    ino_child(&mut k, d.x - DIR_VFS, mask);
+  }
+}
+
+/// The last description of open file row (or, with `dir`, directory
+/// handle x) has closed: IN_CLOSE_WRITE if it could write, else
+/// IN_CLOSE_NOWRITE. Leaves the transfer buffer as it was: a close can
+/// come in the middle of another call (dup2, execve, exit).
+fn ino_closed(k: &mut Kernel, x: u64, dir: bool)
+  requires kok(k)
+  ensures kok(k)
+{
+  if iget(k, INO_G + G_WATCHES) == 0 {
+    return;
+  }
+  let mut f = NO_FILE;
+  let mut mask = IN_CLOSE_NOWRITE;
+  if dir {
+    if x >= DIR_VFS && x < DIR_PROC {
+      f = x - DIR_VFS;
+    }
+  } else if x < FD_ROWS {
+    f = vfs_row_file(k.fs, x);
+    if fget(k.fs.ftab, x, FD_MODE) / O_WRITE % 2 == 1 {
+      mask = IN_CLOSE_WRITE;
+    }
+    if fget(k.fs.ftab, x, FD_MODE) % 4 == 0 {
+      return;                               // O_PATH: it was never opened
+    }
+  }
+  if f == NO_FILE {
+    return;
+  }
+  let mut t = balloc(XFER);
+  let mut j = 0;
+  while j < XFER
+    invariant j <= XFER && blen(t) == XFER && kok(k)
+  {
+    bset(&mut t, j, bget(k.fs.xfer, j));
+    j = j + 1;
+  }
+  ino_child(&mut k, f, mask);
+  j = 0;
+  while j < XFER
+    invariant j <= XFER && blen(t) == XFER && kok(k)
+  {
+    bset(&mut k.fs.xfer, j, bget(t, j));
+    j = j + 1;
+  }
+  bfree(t);
+}
+
+// ---------------------------------------------------------------- reading
+
+/// read on instance i: as many whole events as fit in n bytes, -EINVAL if
+/// not even the first does, -EAGAIN if none is queued.
+fn ino_read(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && i < INO_N
+  ensures kok(k)
+{
+  let b = ino_base(i);
+  let q = smaller(iget(k, b + 2), INO_Q);
+  let first = iget(k, b + 3) % INO_Q;
+  if q == 0 {
+    return EAGAIN;
+  }
+  let room = smaller(n, XFER);
+  let mut off = 0;
+  let mut taken = 0;
+  let mut full = false;
+  while taken < q && !full
+    invariant taken <= q && q <= INO_Q && off <= room && room <= XFER && kok(k)
+  {
+    let e = ev_at(i, (first + taken) % INO_Q);
+    let nlen = smaller(iget(k, e + 3), FNAME_MAX);
+    let mut plen = 0;
+    if nlen > 0 {
+      plen = (nlen + 16) / 16 * 16;         // the name, its NUL and padding to 16
+    }
+    if off + IN_EVENT + plen > room {
+      full = true;                          // no more fit
+    } else {
+      store_le32(&mut k.fs.xfer, off, cast[u32](iget(k, e) % 0x100000000));
+      store_le32(&mut k.fs.xfer, off + 4, cast[u32](iget(k, e + 1) % 0x100000000));
+      store_le32(&mut k.fs.xfer, off + 8, cast[u32](iget(k, e + 2) % 0x100000000));
+      store_le32(&mut k.fs.xfer, off + 12, cast[u32](plen));
+      let mut j = 0;
+      while j < plen
+        invariant j <= plen && plen <= 272 && off + IN_EVENT + plen <= room && room <= XFER && kok(k)
+      {
+        let mut c = 0;
+        if j < nlen {
+          c = iget(k, e + 4 + j / 8) / ino_pow(j % 8) % 256;
+        }
+        bset(&mut k.fs.xfer, off + IN_EVENT + j, cast[u8](c));
+        j = j + 1;
+      }
+      off = off + IN_EVENT + plen;
+      taken = taken + 1;
+    }
+  }
+  if off == 0 {
+    return EINVAL;                          // the buffer is too small for the first event
+  }
+  let done = taken;
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, off) != off {
+    return EFAULT;
+  }
+  iput(&mut k, b + 3, (first + done) % INO_Q);
+  iput(&mut k, b + 2, q - smaller(done, q));
+  return off;
+}
+
+fn ino_pow(j: u64) -> u64
+  requires j < 8
+  ensures result >= 1
+{
+  if j == 0 { return 1; }
+  if j == 1 { return 0x100; }
+  if j == 2 { return 0x10000; }
+  if j == 3 { return 0x1000000; }
+  if j == 4 { return 0x100000000; }
+  if j == 5 { return 0x10000000000; }
+  if j == 6 { return 0x1000000000000; }
+  return 0x100000000000000;
+}
+
+/// What poll sees on instance x: POLLIN while an event is queued.
+fn ino_bits(k: &Kernel, x: u64) -> u64
+  requires kok(k)
+{
+  if x < INO_N && iget(k, ino_base(x) + 2) > 0 {
+    return POLLIN;
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------- the calls
+
+/// Before process pid's Linux system call runs: which call it is, and
+/// what it will remove, rename or create, looked up now while its old
+/// names still resolve.
+fn ino_before(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  iput(&mut k, INO_G + G_CALL, 0);
+  iput(&mut k, INO_G + G_KEPT, 0);
+  if iget(k, INO_G + G_WATCHES) == 0 {
+    return;
+  }
+  let n = pget(k.procs, pid, F_REGS + R_RAX);
+  let a = pget(k.procs, pid, F_REGS + R_RDI);
+  let b = pget(k.procs, pid, F_REGS + R_RSI);
+  let c = pget(k.procs, pid, F_REGS + R_RDX);
+  let r10 = pget(k.procs, pid, F_REGS + R_R10);
+  if n >= 0x10000 {
+    return;
+  }
+  iput(&mut k, INO_G + G_CALL, n + 1);
+  if n == LX_UNLINK || n == LX_RMDIR {
+    keep_arg(&mut k, pid, P1, AT_FDCWD, a, false);
+  } else if n == LX_UNLINKAT {
+    keep_arg(&mut k, pid, P1, a, b, false);
+  } else if n == LX_RENAME {
+    keep_arg(&mut k, pid, P1, AT_FDCWD, a, false);
+    keep_arg(&mut k, pid, P2, AT_FDCWD, b, false);
+  } else if n == LX_RENAMEAT || n == LX_RENAMEAT2 {
+    keep_arg(&mut k, pid, P1, a, b, false);
+    keep_arg(&mut k, pid, P2, c, r10, false);
+  } else if n == LX_OPEN || n == LX_CREAT {
+    keep_arg(&mut k, pid, P1, AT_FDCWD, a, true);
+  } else if n == LX_OPENAT {
+    keep_arg(&mut k, pid, P1, a, b, true);
+  } else {
+    return;
+  }
+  iput(&mut k, INO_G + G_KEPT, 1);
+}
+
+/// After process pid's Linux system call: the events it made, if it
+/// succeeded (and is not waiting to run again).
+fn ino_after(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let call = iget(k, INO_G + G_CALL);
+  if call == 0 || iget(k, INO_G + G_WATCHES) == 0 {
+    return;
+  }
+  iput(&mut k, INO_G + G_CALL, 0);
+  if pget(k.procs, pid, F_RESTART) != 0 {
+    return;                                 // it waits, and runs again
+  }
+  let r = pget(k.procs, pid, F_REGS + R_RAX);   // the result, now
+  if r >= 0x8000000000000000 {
+    return;                                 // it failed
+  }
+  let a = pget(k.procs, pid, F_REGS + R_RDI);
+  let b = pget(k.procs, pid, F_REGS + R_RSI);
+  let c = pget(k.procs, pid, F_REGS + R_RDX);
+  let r10 = pget(k.procs, pid, F_REGS + R_R10);
+  ino_after_call(&mut k, pid, call - 1, r, iget(k, INO_G + G_KEPT) == 1, a, b, c, r10);
+}
+
+fn ino_after_call(k: &mut Kernel, pid: u64, call: u64, r: u64, kept: bool, a: u64, b: u64, c: u64, r10: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  // Data read or written.
+  if (call == LX_READ || call == LX_PREAD64 || call == LX_READV || call == LX_PREADV || call == LX_PREADV2) && r > 0 {
+    ino_fd(&mut k, pid, a, IN_ACCESS);
+    return;
+  }
+  if (call == LX_WRITE || call == LX_PWRITE64 || call == LX_WRITEV || call == LX_PWRITEV || call == LX_PWRITEV2) && r > 0 {
+    ino_fd(&mut k, pid, a, IN_MODIFY);
+    return;
+  }
+  if call == LX_SENDFILE && r > 0 {
+    ino_fd(&mut k, pid, b, IN_ACCESS);
+    ino_fd(&mut k, pid, a, IN_MODIFY);
+    return;
+  }
+  if call == LX_COPY_FILE_RANGE && r > 0 {
+    ino_fd(&mut k, pid, a, IN_ACCESS);
+    ino_fd(&mut k, pid, c, IN_MODIFY);
+    return;
+  }
+  if call == LX_FTRUNCATE || call == LX_FALLOCATE {
+    ino_fd(&mut k, pid, a, IN_MODIFY);
+    return;
+  }
+  if call == LX_TRUNCATE {
+    path_event(&mut k, pid, AT_FDCWD, a, true, IN_MODIFY);
+    return;
+  }
+  // Metadata.
+  if call == LX_FCHMOD || call == LX_FCHOWN || call == IX_FSETXATTR || call == LX_FREMOVEXATTR {
+    ino_fd(&mut k, pid, a, IN_ATTRIB);
+    return;
+  }
+  if call == LX_CHMOD || call == LX_CHOWN || call == LX_UTIME || call == LX_UTIMES || call == LX_SETXATTR
+    || call == IX_REMOVEXATTR {
+    path_event(&mut k, pid, AT_FDCWD, a, true, IN_ATTRIB);
+    return;
+  }
+  if call == LX_LCHOWN || call == IX_LSETXATTR || call == IX_LREMOVEXATTR {
+    path_event(&mut k, pid, AT_FDCWD, a, false, IN_ATTRIB);
+    return;
+  }
+  if call == LX_FCHMODAT || call == LX_FUTIMESAT {
+    path_event(&mut k, pid, a, b, true, IN_ATTRIB);
+    return;
+  }
+  if call == LX_FCHMODAT2 || call == LX_FCHOWNAT {
+    let mut flags = r10;                    // fchmodat2(dirfd, path, mode, flags)
+    if call == LX_FCHOWNAT {
+      flags = pget(k.procs, pid, F_REGS + R_R8);   // fchownat(dirfd, path, owner, group, flags)
+    }
+    path_event(&mut k, pid, a, b, flags & AT_SYMLINK_NOFOLLOW == 0, IN_ATTRIB);
+    return;
+  }
+  if call == LX_UTIMENSAT {
+    if b == 0 {
+      ino_fd(&mut k, pid, a, IN_ATTRIB);    // utimensat(fd, NULL, ...): futimens
+    } else {
+      path_event(&mut k, pid, a, b, r10 & AT_SYMLINK_NOFOLLOW == 0, IN_ATTRIB);
+    }
+    return;
+  }
+  // New names.
+  if call == LX_MKDIR || call == LX_SYMLINK || call == LX_MKNOD {
+    let mut va = a;
+    if call == LX_SYMLINK {
+      va = b;
+    }
+    keep_arg(&mut k, pid, P1, AT_FDCWD, va, false);
+    note_entry(&mut k, P1, IN_CREATE, 0);
+    return;
+  }
+  if call == LX_MKDIRAT || call == LX_MKNODAT || call == LX_SYMLINKAT {
+    if call == LX_SYMLINKAT {
+      keep_arg(&mut k, pid, P1, b, c, false);
+    } else {
+      keep_arg(&mut k, pid, P1, a, b, false);
+    }
+    note_entry(&mut k, P1, IN_CREATE, 0);
+    return;
+  }
+  if call == LX_LINK || call == LX_LINKAT {
+    if call == LX_LINK {
+      keep_arg(&mut k, pid, P1, AT_FDCWD, b, false);
+    } else {
+      keep_arg(&mut k, pid, P1, c, r10, false);
+    }
+    ino_note(&mut k, iget(k, INO_G + P1 + P_F), IN_ATTRIB, 0, INO_G + P1 + P_NAME, 0);   // one more name
+    note_entry(&mut k, P1, IN_CREATE, 0);
+    return;
+  }
+  if (call == LX_OPEN || call == LX_CREAT || call == LX_OPENAT) && r < LXNFD {
+    let mut flags = b;
+    if call == LX_CREAT {
+      flags = LO_CREAT | LO_TRUNC | 1;
+    } else if call == LX_OPENAT {
+      flags = c;
+    }
+    if flags & LO_PATH != 0 {
+      return;                               // only a name: not opened
+    }
+    let existed = kept && iget(k, INO_G + P1 + P_F) != NO_FILE;
+    if kept && !existed {
+      if call == LX_OPENAT {
+        keep_arg(&mut k, pid, P1, a, b, true);
+      } else {
+        keep_arg(&mut k, pid, P1, AT_FDCWD, a, true);
+      }
+      note_entry(&mut k, P1, IN_CREATE, 0);
+    } else if flags & LO_TRUNC != 0 && flags & LO_ACCMODE != 0 {
+      ino_fd(&mut k, pid, r, IN_MODIFY);    // truncated
+    }
+    ino_fd(&mut k, pid, r, IN_OPEN);
+    return;
+  }
+  if !kept {
+    return;
+  }
+  // Names removed or moved, as ino_before found them.
+  if call == LX_UNLINK || call == LX_RMDIR || call == LX_UNLINKAT {
+    let f = iget(k, INO_G + P1 + P_F);
+    if f == NO_FILE {
+      return;
+    }
+    // As on Linux, the file hears first, then its directory.
+    if iget(k, INO_G + P1 + P_DIR) == 1 {
+      ino_gone(&mut k, f);
+    } else {
+      ino_note(&mut k, f, IN_ATTRIB, 0, INO_G + P1 + P_NAME, 0);   // one name fewer
+      if iget(k, INO_G + P1 + P_NLINK) <= 1 {
+        ino_gone(&mut k, f);
+      }
+    }
+    note_entry(&mut k, P1, IN_DELETE, 0);
+    return;
+  }
+  if call == LX_RENAME || call == LX_RENAMEAT || call == LX_RENAMEAT2 {
+    let f = iget(k, INO_G + P1 + P_F);
+    let g = iget(k, INO_G + P2 + P_F);
+    if f == NO_FILE {
+      return;
+    }
+    let mut flags = 0;
+    if call == LX_RENAMEAT2 {
+      flags = pget(k.procs, pid, F_REGS + R_R8);
+    }
+    let cookie = next_cookie(&mut k);
+    let fdir = iget(k, INO_G + P1 + P_DIR);
+    let gdir = iget(k, INO_G + P2 + P_DIR);
+    note_entry(&mut k, P1, IN_MOVED_FROM, cookie);
+    iput(&mut k, INO_G + P2 + P_DIR, fdir);      // what arrives is f
+    note_entry(&mut k, P2, IN_MOVED_TO, cookie);
+    ino_note(&mut k, f, IN_MOVE_SELF, 0, INO_G + P1 + P_NAME, 0);
+    if g == NO_FILE || g == f {
+      return;
+    }
+    if flags & RENAME_EXCHANGE != 0 {
+      let back = next_cookie(&mut k);
+      iput(&mut k, INO_G + P2 + P_DIR, gdir);
+      iput(&mut k, INO_G + P1 + P_DIR, gdir);
+      note_entry(&mut k, P2, IN_MOVED_FROM, back);
+      note_entry(&mut k, P1, IN_MOVED_TO, back);
+      ino_note(&mut k, g, IN_MOVE_SELF, 0, INO_G + P1 + P_NAME, 0);
+      return;
+    }
+    // g was replaced: it lost that name.
+    if gdir == 1 || iget(k, INO_G + P2 + P_NLINK) <= 1 {
+      ino_gone(&mut k, g);
+    } else {
+      ino_note(&mut k, g, IN_ATTRIB, 0, INO_G + P1 + P_NAME, 0);
+    }
+  }
+}
+
+/// ino_child for the file a path argument names, now.
+fn path_event(k: &mut Kernel, pid: u64, dirfd: u64, va: u64, follow: bool, mask: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut n = 0;
+  if follow {
+    n = lx_path_at(&mut k, pid, dirfd, va);
+  } else {
+    n = lx_path_at_nf(&mut k, pid, dirfd, va);
+  }
+  if n == NO_RESULT {
+    ino_fd(&mut k, pid, dirfd, mask);       // an empty path (AT_EMPTY_PATH): the descriptor's file
+    return;
+  }
+  ino_child(&mut k, node_at(&mut k, n), mask);
+}
+
+/// A new cookie tying an IN_MOVED_FROM to its IN_MOVED_TO: never 0.
+fn next_cookie(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k)
+{
+  let c = iget(k, INO_G + G_COOKIE) % 0xFFFFFFFF + 1;
+  iput(&mut k, INO_G + G_COOKIE, c);
+  return c;
+}

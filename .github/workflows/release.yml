@@ -41,7 +41,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y z3 qemu-system-x86 musl-tools grub-pc-bin grub-efi-amd64-bin xorriso mtools ovmf
+          sudo apt-get install -y z3 qemu-system-x86 musl-tools xorriso ovmf
       - name: The tag matches the boot banner and the changelog
         run: |
           version=${TAG#v}
@@ -52,9 +52,10 @@ jobs:
         run: make test BASTIOC=bastiolang/stage0/target/release/bastioc0
       - name: Package
         run: |
-          make iso BASTIOC=bastiolang/stage0/target/release/bastioc0
+          make iso usb BASTIOC=bastiolang/stage0/target/release/bastioc0
           mkdir -p dist
           cp build/bastios.iso dist/bastios-$TAG.iso
+          cp build/bastios-usb.img dist/bastios-usb-$TAG.img
           cp build/bastios.elf dist/bastios-$TAG.elf
           # The kernel image embeds BusyBox, which is GPL-2.0-only: its
           # complete source goes out next to the binaries.

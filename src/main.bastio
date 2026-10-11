@@ -62,6 +62,7 @@ import "lxpty.bastio";
 import "lxxattr.bastio";
 import "lxmount.bastio";
 import "lxperm.bastio";
+import "lxinotify.bastio";
 import "lazy.bastio";
 import "lxanon.bastio";
 
@@ -218,6 +219,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
   let mut woke = false;
   rng_stir(&mut s.k, cpu);
   if poll {
+    nic_feed(&mut s.k.nic, &mut s.k.mem);
     nic_poll(&mut s.k.nic);
     net_wake(&mut s.k);
     tty_intr(&mut s.con, &mut s.k);
@@ -334,8 +336,14 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     return (p + 1) % NPROC;
   }
   if v == V_TIMER || v == V_LTIMER {
-    pset(&mut s.k.procs, p, F_TICKS, tick(pget(s.k.procs, p, F_TICKS)));
-    cpu_timers_tick(&mut s.k, p);
+    // A process waiting in a system call is READY with its rip on the
+    // syscall instruction and F_RESTART set, and retries the call each
+    // time it runs; a tick that finds it there has run none of its own
+    // code, so it is not charged CPU time (a sleep would count otherwise).
+    if pget(s.k.procs, p, F_RESTART) == 0 {
+      pset(&mut s.k.procs, p, F_TICKS, tick(pget(s.k.procs, p, F_TICKS)));
+      cpu_timers_tick(&mut s.k, p);
+    }
     s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
     lx_alarms(&mut s.k);
     if v == V_TIMER {
@@ -364,7 +372,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
     s.k.fs.now = sat_add(s.k.epoch, s.k.ns) / 1000000000;   // wall-clock seconds, as stat reports them
     let began = s.k.ns;
+    ino_before(&mut s.k, p);                // src/lxinotify.bastio
     let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
+    ino_after(&mut s.k, p);
     let ended = tsc_now(s.k.tsc, s.k.ns, cpu);
     if ended > began {
       tm_sys_add(&mut s.k, p, ended - began);   // system time (src/lxrlimit.bastio)
