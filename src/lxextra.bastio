@@ -220,7 +220,7 @@ fn lx_sysfs(k: &mut Kernel, pid: u64, option: u64, a: u64, buf: u64) -> u64
   if option != 1 {
     return EINVAL;
   }
-  let got = copy_from_user(&mut k.spaces, pid, a, &mut k.fs.xfer, FSNAME_MAX);
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, a, &mut k.fs.xfer, FSNAME_MAX);
   if got == NO_RESULT || got == 0 {
     return EFAULT;
   }

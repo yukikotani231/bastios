@@ -70,34 +70,43 @@ fn l1_put_text(l1: &mut PageTable, m: &mut Mem, i: u64, s: Shared)
   }
 }
 
-/// In program table `c`: maps a new reference to file page `n` read-only
-/// at window page `p` of `l2`. False if memory ran out.
-fn txt_map(c: &mut PageTable, m: &mut Mem, n: u64, l2: &mut PageTable, p: u64) -> bool
-  requires pt_level(c) == 1 && mem_ok(m) && n < 512 && pt_level(l2) == 2 && p < WPAGES
+fn l2_put_text(l2: &mut PageTable, m: &mut Mem, q: u64, s: Shared)
+  requires pt_level(l2) == 2 && mem_ok(m) && q < L2_PAGES
   ensures mem_ok(m) && pt_level(l2) == 2
+{
+  if pt_has(l2, q / 512) {
+    pt_borrow(&mut l2, q / 512, l1_put_text, &mut m, q % 512, s);
+  } else {
+    drop_shared(&mut m, s);
+  }
+}
+
+/// In program table `c`: maps a new reference to file page `n` read-only
+/// at window page `p` of `l3`. False if memory ran out.
+fn txt_map(c: &mut PageTable, m: &mut Mem, n: u64, l3: &mut PageTable, p: u64) -> bool
+  requires pt_level(c) == 1 && mem_ok(m) && n < 512 && pt_level(l3) == 3 && p < WPAGES
+  ensures mem_ok(m) && pt_level(l3) == 3
 {
   if !pt_has(c, n) || !pt_shared(c, n) {
     return true;
   }
-  let t = p / 512;
-  if !pt_has(l2, t) {
-    let a = find_free(&mut m);
-    if a >= NPAGES {
-      return false;
-    }
-    pt_put(&mut l2, t, pt_new(take_page(&mut m, a), 1));
+  if !w_tables(&mut m, &mut l3, p) {
+    return false;
   }
-  pt_borrow(&mut l2, t, l1_put_text, &mut m, p % 512, pt_dup_shared(c, n));
+  let t = p / L2_PAGES;
+  if pt_has(l3, t) {
+    pt_borrow(&mut l3, t, l2_put_text, &mut m, p % L2_PAGES, pt_dup_shared(c, n));
+  }
   return true;
 }
 
 /// Maps file page `n` of built-in program `prog` (image `img`) read-only
-/// at window page `p` of `l2`, from the cache, putting it there first if
+/// at window page `p` of `l3`, from the cache, putting it there first if
 /// need be. False if memory ran out.
-fn share_page(m: &mut Mem, st: &mut PageTable, prog: u64, img: Str, n: u64, l2: &mut PageTable, p: u64) -> bool
+fn share_page(m: &mut Mem, st: &mut PageTable, prog: u64, img: Str, n: u64, l3: &mut PageTable, p: u64) -> bool
   requires mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && prog < 512 && n < 512
-  requires pt_level(l2) == 2 && p < WPAGES
-  ensures mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l2) == 2
+  requires pt_level(l3) == 3 && p < WPAGES
+  ensures mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l3) == 3
 {
   if !txt_table(&mut m, &mut st, prog) {
     return false;
@@ -105,5 +114,5 @@ fn share_page(m: &mut Mem, st: &mut PageTable, prog: u64, img: Str, n: u64, l2: 
   if !pt_borrow(&mut st, prog, txt_fill, &mut m, n, img) {
     return false;
   }
-  return pt_borrow(&mut st, prog, txt_map, &mut m, n, &mut l2, p);
+  return pt_borrow(&mut st, prog, txt_map, &mut m, n, &mut l3, p);
 }

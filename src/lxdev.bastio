@@ -404,7 +404,7 @@ fn dev_read1(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
     bset(&mut k.fs.xfer, i, v);
     i = i + 1;
   }
-  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
+  let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, want);
   if put == NO_RESULT {
     return 0;
   }

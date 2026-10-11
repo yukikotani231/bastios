@@ -265,12 +265,12 @@ fn lx_setgroups(k: &mut Kernel, pid: u64, size: u64, list: u64) -> u64
     // More than BastiOS keeps: still EFAULT first for a list that cannot
     // be read, as Linux reads it before anything else.
     let m = smaller(4 * n, XFER);
-    if copy_from_user(&mut k.spaces, pid, list, &mut k.fs.xfer, m) != m {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, list, &mut k.fs.xfer, m) != m {
       return EFAULT;
     }
     return EINVAL;
   }
-  if n > 0 && copy_from_user(&mut k.spaces, pid, list, &mut k.fs.xfer, 4 * n) != 4 * n {
+  if n > 0 && copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, list, &mut k.fs.xfer, 4 * n) != 4 * n {
     return EFAULT;
   }
   let mut i = 0;

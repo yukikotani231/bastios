@@ -71,7 +71,7 @@ const RLIMIT_NOFILE: u64 = 7;
 const RLIMIT_CORE: u64 = 4;
 const RLIM_NLIMITS: u64 = 16;
 const NR_OPEN: u64 = 1048576;          // Linux's default /proc/sys/fs/nr_open
-const STACK_BYTES: u64 = 1048576;     // STACK_PAGES pages
+const STACK_BYTES: u64 = 8388608;     // STACK_PAGES pages
 const PR_SET_NAME: u64 = 15;
 const PR_GET_NAME: u64 = 16;
 const RAMFS_MAGIC: u64 = 0x858458F6;
@@ -124,7 +124,7 @@ fn lx_uname(k: &mut Kernel, pid: u64, va: u64) -> u64
   uts_put(&mut k, 4, "x86_64");
   uts_put(&mut k, 5, "(none)");
   uts_names(&mut k);                        // what sethostname and setdomainname set
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, UTS_SIZE) != UTS_SIZE {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, UTS_SIZE) != UTS_SIZE {
     return EFAULT;
   }
   return 0;
@@ -172,7 +172,7 @@ fn lx_sysinfo(k: &mut Kernel, pid: u64, va: u64) -> u64
   xfer_u64(&mut k.fs.xfer, 40, nfree * 4096);     // freeram
   bset(&mut k.fs.xfer, 80, cast[u8](procs));      // procs (u16)
   bset(&mut k.fs.xfer, 104, 1);                   // mem_unit
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, SYSINFO_SIZE) != SYSINFO_SIZE {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, SYSINFO_SIZE) != SYSINFO_SIZE {
     return EFAULT;
   }
   return 0;
@@ -196,7 +196,7 @@ fn lx_getrusage(k: &mut Kernel, pid: u64, children: bool, va: u64) -> u64
   xfer_u64(&mut k.fs.xfer, 8, t % 100 * 10000);      // ru_utime.tv_usec
   xfer_u64(&mut k.fs.xfer, 16, st / 100);            // ru_stime
   xfer_u64(&mut k.fs.xfer, 24, st % 100 * 10000);
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, RUSAGE_SIZE) != RUSAGE_SIZE {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, RUSAGE_SIZE) != RUSAGE_SIZE {
     return EFAULT;
   }
   return 0;
@@ -221,7 +221,7 @@ fn lx_statfs(k: &mut Kernel, pid: u64, va: u64, magic: u64) -> u64
   xfer_u64(&mut k.fs.xfer, 48, NFILES);           // f_ffree (a guess: the table is not counted)
   xfer_u64(&mut k.fs.xfer, 64, FNAME_MAX);        // f_namelen
   xfer_u64(&mut k.fs.xfer, 72, 4096);             // f_frsize
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, STATFS_SIZE) != STATFS_SIZE {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, STATFS_SIZE) != STATFS_SIZE {
     return EFAULT;
   }
   return 0;
@@ -354,7 +354,7 @@ fn set_times(k: &mut Kernel, pid: u64, f: u64, va: u64, kind: u64) -> u64
   let mut t = k.fs.now;
   let mut now = va == 0;
   if va != 0 {
-    if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 32) != 32 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 32) != 32 {
       return EFAULT;
     }
     if kind == TIMES_UTIMBUF {

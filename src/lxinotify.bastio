@@ -737,7 +737,7 @@ fn ino_read(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
     return EINVAL;                          // the buffer is too small for the first event
   }
   let done = taken;
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, off) != off {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, off) != off {
     return EFAULT;
   }
   iput(&mut k, b + 3, (first + done) % INO_Q);

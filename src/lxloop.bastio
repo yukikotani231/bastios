@@ -341,7 +341,7 @@ fn loop_take(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && n <= XFER
   ensures kok(k)
 {
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, n) != n {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, n) != n {
     return EFAULT;
   }
   return 0;
@@ -353,7 +353,7 @@ fn loop_put(k: &mut Kernel, pid: u64, va: u64, v: u64, size: u64) -> u64
   ensures kok(k)
 {
   xfer_u64(&mut k.fs.xfer, 0, v);
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, size) != size {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, size) != size {
     return EFAULT;
   }
   return 0;
@@ -468,7 +468,7 @@ fn loop_ioctl(k: &mut Kernel, pid: u64, d: u64, req: u64, arg: u64) -> u64
   }
   if req == LOOP_GET_STATUS || req == LOOP_GET_STATUS64 {
     let size = loop_status_out(&mut k, n, req == LOOP_GET_STATUS64);
-    if copy_to_user(&mut k.spaces, pid, arg, k.fs.xfer, size) != size {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, k.fs.xfer, size) != size {
       return EFAULT;
     }
     return 0;
@@ -583,7 +583,7 @@ fn loop_io_part(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, d: u64, write:
   }
   let mut r = 0;
   if write {
-    let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, cnt);
+    let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, cnt);
     if got == NO_RESULT || (got == 0 && cnt > 0) {
       vfs_seek(&mut k.fs, row, was);
       return EFAULT;
