@@ -1,6 +1,6 @@
 // The hardware report: what the kernel found at boot, for someone trying
 // BastiOS on a real machine (docs/real-hardware.md). It is printed when the
-// boot command line has the word `diag` (the ISO's GRUB menu has an entry
+// boot command line has the word `diag` (the ISO's Limine menu has an entry
 // for it), on the screen and the serial line like the rest of the boot log,
 // a screenful at a time: after each part the kernel waits for a key (or a
 // minute), so the screen can be photographed on a machine without a serial

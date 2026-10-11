@@ -1,4 +1,4 @@
-// A text console on the linear framebuffer the boot loader set up (GRUB
+// A text console on the linear framebuffer the boot loader set up (Limine
 // through VBE under BIOS, or UEFI's GOP), drawn with an 8x8 font doubled
 // vertically into 8x16 cells. The framebuffer is a block of the device
 // window claimed as an `Mmio`, so every pixel write is proved inside it.
