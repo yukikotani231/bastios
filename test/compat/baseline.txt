@@ -103,6 +103,21 @@ ssh: ssh: an interactive login, the shell's exit status
 ssh: ssh: an unknown key is refused
 ssh: ssh: run a command
 ssh: ssh: standard input and the exit status
+dev: make: a project of two files
+dev: make: parallel jobs
+dev: make: rebuilds only what changed
+dev: tcc: a compile error
+dev: tcc: arguments, exit status, an executable file
+dev: tcc: hello
+dev: tcc: the library (malloc, qsort, files, strings)
+t_cred: a child inherits ids; /proc/self/status shows them
+t_cred: an unprivileged process keeps to the ids it holds
+t_cred: getgrnam finds users
+t_cred: getpwnam finds nobody
+t_cred: kill needs a matching uid
+t_cred: root starts as uid and gid 0
+t_cred: setreuid and setfsuid follow Linux's rules
+t_cred: the parent is still root
 t_dev: /dev/loop-control
 t_dev: BLKGETSIZE64
 t_dev: BLKSSZGET
@@ -124,21 +139,6 @@ t_dev: unbound reads nothing
 t_dev: unbound: LOOP_GET_STATUS64 is ENXIO
 t_dev: write at the end is ENOSPC
 t_dev: write through the device
-dev: make: a project of two files
-dev: make: parallel jobs
-dev: make: rebuilds only what changed
-dev: tcc: a compile error
-dev: tcc: arguments, exit status, an executable file
-dev: tcc: hello
-dev: tcc: the library (malloc, qsort, files, strings)
-t_cred: a child inherits ids; /proc/self/status shows them
-t_cred: an unprivileged process keeps to the ids it holds
-t_cred: getgrnam finds users
-t_cred: getpwnam finds nobody
-t_cred: kill needs a matching uid
-t_cred: root starts as uid and gid 0
-t_cred: setreuid and setfsuid follow Linux's rules
-t_cred: the parent is still root
 t_dir: chdir
 t_dir: chdir ..
 t_dir: create file in directory
@@ -252,6 +252,15 @@ t_ipc: socketpair AF_UNIX
 t_ipc: socketpair both ways, EOF after close
 t_ipc: timerfd
 t_ipc: ttyname(0)
+t_isol: a shared mapping of a read-only file stays read-only
+t_isol: a unix socket's file says who may connect
+t_isol: loop devices are root's and group disk's
+t_isol: mount and umount2 are root's
+t_isol: native system calls are root's
+t_isol: ports below 1024 are root's
+t_isol: reboot is root's
+t_isol: root binds a port below 1024
+t_isol: rt_sigqueueinfo follows kill's rule
 t_lock: F_GETLK names the holder
 t_lock: F_GETLK sees no lock of ours
 t_lock: F_SETLK bad type is EINVAL

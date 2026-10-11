@@ -277,9 +277,12 @@ fn v6_out(n: &mut Net, flen: u64) -> bool
   let mut mac = get(n.v6, i * V6W + 2);
   if mac == 0 || mac >= MAC_LIMIT {
     if v6_onlink(n, dhi) {
-      bcopy(&mut n.held, 0, n.out, 0, flen);
-      n.held_len = flen;
-      n.held_hop = dst;
+      if n.held_n < HELD_N {
+        bcopy(&mut n.held, n.held_n * RX_BUF, n.out, 0, flen);
+        n.held_len = set(n.held_len, n.held_n, flen);
+        n.held_hop = set(n.held_hop, n.held_n, dst);
+        n.held_n = n.held_n + 1;
+      }
       return ns_send(&mut n, dhi, dlo);
     }
     mac = n.rtr_mac;
@@ -411,12 +414,7 @@ fn icmp6_in(n: &mut Net, plen: u64, shi: u64, slo: u64, smac: u64)
     if i < V6N {
       v6_token(&mut n, thi, tlo, smac);
       let tok = V6_BASE + i;
-      if n.held_len >= 34 && n.held_hop == tok {
-        let l = n.held_len;
-        bcopy(&mut n.out, 0, n.held, 0, l);
-        n.held_len = 0;
-        v6_out(&mut n, l);
-      }
+      v6_release(&mut n, tok);
     }
   } else if kind == ICMP6_RA && plen >= 16 && hops == 255 && shi == LL_HI {
     ra_in(&mut n, plen, smac);
@@ -424,6 +422,42 @@ fn icmp6_in(n: &mut Net, plen: u64, shi: u64, slo: u64, smac: u64)
 }
 
 /// A neighbor advertisement for our address thi:tlo, solicited by dhi:dlo.
+/// A neighbor advertisement gave token tok's MAC: the frames held for it
+/// go out, oldest first, and the others move down to stay in order (as
+/// held_release does for ARP).
+fn v6_release(n: &mut Net, tok: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let mut kept = 0;
+  let mut i = 0;
+  let count = n.held_n;
+  while i < count && i < n.held_n
+    invariant kept <= i && i <= count && net_ok(n)
+  {
+    let l = get(n.held_len, i);
+    let hop = get(n.held_hop, i);
+    if l <= FRAME_MAX {
+      if hop == tok {
+        bcopy(&mut n.out, 0, n.held, i * RX_BUF, l);
+        v6_out(&mut n, l);
+      } else if kept < i {
+        bcopy(&mut n.out, 0, n.held, i * RX_BUF, l);
+        bcopy(&mut n.held, kept * RX_BUF, n.out, 0, l);
+        n.held_len = set(n.held_len, kept, l);
+        n.held_hop = set(n.held_hop, kept, hop);
+        kept = kept + 1;
+      } else {
+        kept = kept + 1;
+      }
+    }
+    i = i + 1;
+  }
+  if kept <= n.held_n {
+    n.held_n = kept;
+  }
+}
+
 fn na_send(n: &mut Net, mac: u64, dhi: u64, dlo: u64, thi: u64, tlo: u64)
   requires net_ok(n) && mac < MAC_LIMIT
   ensures net_ok(n)

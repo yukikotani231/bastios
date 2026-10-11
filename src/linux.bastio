@@ -221,8 +221,13 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return lx_futex(&mut k, pid, was, a, b, c);
   }
   if n == LX_REBOOT {
-    // reboot(2), after its two magic numbers: RESTART restarts the
-    // machine, POWER_OFF and HALT power it off (everyone is root).
+    // reboot(2), for root alone (CAP_SYS_BOOT on Linux, checked first
+    // there too), after its two magic numbers: RESTART restarts the
+    // machine, POWER_OFF and HALT power it off.
+    if !cred_root(k.procs, pid) {
+      ret(&mut k.procs, pid, EPERM);
+      return KEEP;
+    }
     if a != 0xFEE1DEAD || (b != 672274793 && b != 85072278 && b != 369367448 && b != 537993216) {
       ret(&mut k.procs, pid, EINVAL);
       return KEEP;
@@ -1742,6 +1747,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     anon = z.kind == K_DEV && z.x == 2;     // /dev/zero (DEV_ZERO): fresh zero pages
   }
   let mut f = NO_FILE;
+  let mut can_write = false;
   if !anon {
     let d = fd_look(k, pid, fd);
     if d.kind != K_FILE {
@@ -1757,12 +1763,17 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     if mode / O_READ % 2 == 0 || (flags % 4 == MAP_SHARED && prot / 2 % 2 == 1 && (mode / O_WRITE % 2 == 0 || mode / O_APPEND % 2 == 1)) {
       return EACCES;
     }
+    can_write = mode / O_WRITE % 2 == 1;
   }
   let pages = (n + 4095) / 4096;
   let sh = flags % 4 == MAP_SHARED;
   // A shared file mapping maps the page cache's pages (src/pcache.bastio)
-  // instead of fresh ones.
-  let cached = sh && !anon && f != NO_FILE;
+  // instead of fresh ones, if the file was opened for writing. From a
+  // descriptor that may only read, it gets a copy, as a private mapping
+  // does: mprotect could make the mapping writable later, and a write to
+  // the cache's page would reach every reader of the file
+  // (docs/security.md). Such a copy does not see later writes to the file.
+  let cached = sh && !anon && f != NO_FILE && can_write;
   let mut at = 0;
   if flags / MAP_FIXED % 2 == 1 {
     if addr % 4096 != 0 || addr < USER_BASE || addr - USER_BASE > STACK_FIRST * 4096 || pages > STACK_FIRST - (addr - USER_BASE) / 4096 {

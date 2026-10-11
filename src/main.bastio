@@ -54,6 +54,7 @@ import "lxpty.bastio";
 import "lxxattr.bastio";
 import "lxmount.bastio";
 import "lxperm.bastio";
+import "lazy.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
@@ -132,8 +133,7 @@ struct Task { pid: u64, tgid: u64, lease: Lease, fpu: Frame }
 enum Job { Stop, Idle, Disk, Run(Task) }   // Disk: idle, but a polled disk command is running
 
 /// The system calls a processor answers without the lock, from what it
-/// knows of the task it runs: the thread and process ids, the user and
-/// group ids (everyone is root), and a yield while no other process waits
+/// knows of the task it runs: the thread and process ids, and a yield while no other process waits
 /// for a processor (`others`, published under the lock by turn and
 /// next_job_p). True if `v` was one of them; the result is in rax and the
 /// task runs on. Anything they skip (a signal, a kill, the tick's
@@ -366,8 +366,8 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     }
     return p;
   }
-  if v == 14 && stack_fault(&mut s.k, p) {
-    return p;                               // the stack grew: run the instruction again
+  if v == 14 && (lazy_fault(&mut s.k, p) || stack_fault(&mut s.k, p)) {
+    return p;                               // code read, or the stack grew: run the instruction again
   }
   if v < 32 {
     // Dies of the signal Linux would send: a parent's wait4 sees a
@@ -1046,7 +1046,8 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     q = q + 1;
   }
   let shm = new_store(&mut m);
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: rng_new(epoch ^ at), cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), inet6: 0, locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, sys: alloc(SYS_LEN), loops: alloc(LOOP_LEN), ptys: alloc(PTY_LEN), ptyb: balloc(PTYB_LEN) };
+  let txt = new_store(&mut m);
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: rng_new(epoch ^ at), cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), lazy: alloc(LAZY_LEN), inet6: 0, locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, txt: txt, sys: alloc(SYS_LEN), loops: alloc(LOOP_LEN), ptys: alloc(PTY_LEN), ptyb: balloc(PTYB_LEN) };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
@@ -1077,6 +1078,10 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   vec_free(sys.k.spaces);
   match sys.k.shm {
+    Store::None => {},
+    Store::Table(t) => { free_l2(&mut sys.k.mem, t); },
+  }
+  match sys.k.txt {
     Store::None => {},
     Store::Table(t) => { free_l2(&mut sys.k.mem, t); },
   }
@@ -1117,6 +1122,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.dpath);
   free(sys.k.alarms);
   free(sys.k.maps);
+  free(sys.k.lazy);
   free(sys.k.locks);
   free(sys.k.loops);
   free(sys.k.ptys);

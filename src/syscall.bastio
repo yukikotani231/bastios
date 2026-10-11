@@ -736,6 +736,22 @@ fn do_wait(procs: &mut Buf, pid: u64, c: u64) -> u64
   return SWITCH;
 }
 
+/// Whether process pid may make native call n. The native ABI predates
+/// users: its file, network, power and reboot calls check no permissions,
+/// so they are root's (effective user 0) alone. Everyone may write to and
+/// read from the console, start and wait for its own children (which keep
+/// its ids, see spawn), yield, ask for its pid, the counters of SYS_INFO
+/// and the process list, and kill a process it may signal (may_signal,
+/// src/lxsig.bastio). Any program can raise int 0x80, a Linux one too, so
+/// this is what keeps an unprivileged Linux process from going around the
+/// Linux layer's checks.
+fn native_allowed(procs: &Buf, pid: u64, n: u64) -> bool
+  requires len(procs) == PTAB_LEN && pid < NPROC
+  ensures !is_root(procs, pid) && n > SYS_KILL ==> !result
+{
+  return cred_root(procs, pid) || n <= SYS_KILL;
+}
+
 /// Handles the system call process `pid` just made.
 fn syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
@@ -748,6 +764,10 @@ fn syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if n == SYS_EXIT {
     terminate(&mut k, mmu, pid, a);
     return SWITCH;
+  }
+  if !native_allowed(k.procs, pid, n) {
+    ret(&mut k.procs, pid, NO_RESULT);      // root's: see native_allowed
+    return KEEP;
   }
   if n == SYS_WRITE {
     let room = con_room(con);
@@ -789,7 +809,7 @@ fn syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if n == SYS_INFO {
     if a == 0 {
-      ret(&mut k.procs, pid, count_free(k.mem.bm));
+      ret(&mut k.procs, pid, count_avail(k.mem.bm));   // cached program pages count: they are reclaimable
     } else if a == 1 {
       ret(&mut k.procs, pid, k.ticks);
     } else if a == 2 {
@@ -806,7 +826,7 @@ fn syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == SYS_KILL {
-    if a == 0 || a >= NPROC || state(k.procs, a) == FREE || state(k.procs, a) == ZOMBIE || state(k.procs, a) == KILLED {
+    if a == 0 || a >= NPROC || state(k.procs, a) == FREE || state(k.procs, a) == ZOMBIE || state(k.procs, a) == KILLED || !may_signal(k, pid, a, 9) {   // 9: SIGKILL
       ret(&mut k.procs, pid, 1);
       return KEEP;
     }

@@ -60,8 +60,13 @@ fn dev_meta(d: u64) -> Meta {
   if d == DEV_DIR {
     return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 3, mtime: 0, own: 0 };
   }
+  // The loop devices are root's and group disk's (src/lxfd.bastio checks
+  // it at open); /dev/loop-control is a character device.
   if is_loop(d) {
-    return Meta { ok: true, mode: S_IFBLK, size: 0, ino: 40 + d % 32, mtime: 0, own: 0 };
+    return Meta { ok: true, mode: S_IFBLK, size: 0, ino: 40 + d % 32, mtime: 0, own: DISK_GID * 0x100000000 };
+  }
+  if d == DEV_LOOPCTL {
+    return Meta { ok: true, mode: 0x21B0, size: 0, ino: 30 + d % 16, mtime: 0, own: DISK_GID * 0x100000000 };
   }
   if d >= DEV_PTM && d < DEV_PTS + 16 {
     return Meta { ok: true, mode: S_IFCHR, size: 0, ino: 50 + d - DEV_PTM, mtime: 0, own: 0 };
