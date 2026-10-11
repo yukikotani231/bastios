@@ -34,6 +34,12 @@ const NVME_CLASS: u64 = 0x010802;      // mass storage, non-volatile memory, NVM
 const NVME_PAGES: u64 = 5;
 const NVME_MAX_LEN: u64 = 0x100000;    // registers claimed: the BAR, up to 1 MiB
 const NVME_SPINS: u64 = 20000000;
+// Polls an I/O command may take. A command that times out is still in the
+// drive's queue: its late completion would be taken for the next command's
+// and its late DMA would land in the data page the next command uses. So the
+// wait is as long as ATA's (a loaded host running a TCG guest took more than
+// NVME_SPINS), and a timeout means the drive is really gone.
+const NVME_IO_SPINS: u64 = 500000000;
 const NVME_SECTOR: u64 = 512;
 const Q_N: u64 = 64;
 
@@ -217,9 +223,13 @@ fn nvme_cmd(n: &mut Nvme, io: bool, op: u8, nsid: u32, prp: u64, c10: u32, c11: 
     ring(&mut n, 0, cast[u32](n.asq_at));
   }
   let mut i = 0;
+  let mut lim = NVME_SPINS;
+  if io {
+    lim = NVME_IO_SPINS;
+  }
   let sec0 = n.sectors;
   let busy0 = n.busy;
-  while i < NVME_SPINS
+  while i < lim
     invariant nvme_ok(n) && n.sectors == sec0 && n.busy == busy0
   {
     if io {

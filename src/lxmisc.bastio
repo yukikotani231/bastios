@@ -76,6 +76,7 @@ const PR_SET_NAME: u64 = 15;
 const PR_GET_NAME: u64 = 16;
 const RAMFS_MAGIC: u64 = 0x858458F6;
 const TMPFS_MAGIC: u64 = 0x01021994;
+const BSTDISK_MAGIC: u64 = 0x42535444;  // "BSTD": a BastiOS disk file system (src/diskfs.bastio)
 const STATFS_SIZE: u64 = 120;
 const SYSINFO_SIZE: u64 = 112;
 const RUSAGE_SIZE: u64 = 144;
@@ -220,6 +221,31 @@ fn lx_statfs(k: &mut Kernel, pid: u64, va: u64, magic: u64) -> u64
   xfer_u64(&mut k.fs.xfer, 40, NFILES + DSLOTS);  // f_files
   xfer_u64(&mut k.fs.xfer, 48, NFILES);           // f_ffree (a guess: the table is not counted)
   xfer_u64(&mut k.fs.xfer, 64, FNAME_MAX);        // f_namelen
+  xfer_u64(&mut k.fs.xfer, 72, 4096);             // f_frsize
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, STATFS_SIZE) != STATFS_SIZE {
+    return EFAULT;
+  }
+  return 0;
+}
+
+/// statfs / fstatfs for a file under disk/: the disk's own blocks and
+/// directory entries.
+fn lx_statfs_disk(k: &mut Kernel, pid: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let total = disk_space(k.fs.disk, false);
+  let nfree = disk_space(k.fs.disk, true);
+  let efree = disk_free_entries(k.fs.disk);
+  xfer_zero(&mut k, STATFS_SIZE);
+  xfer_u64(&mut k.fs.xfer, 0, BSTDISK_MAGIC);     // f_type
+  xfer_u64(&mut k.fs.xfer, 8, 4096);              // f_bsize
+  xfer_u64(&mut k.fs.xfer, 16, total);            // f_blocks
+  xfer_u64(&mut k.fs.xfer, 24, nfree);            // f_bfree
+  xfer_u64(&mut k.fs.xfer, 32, nfree);            // f_bavail
+  xfer_u64(&mut k.fs.xfer, 40, DSLOTS - 1);       // f_files (entry DTOP is never used)
+  xfer_u64(&mut k.fs.xfer, 48, efree);            // f_ffree
+  xfer_u64(&mut k.fs.xfer, 64, DNAME_MAX);        // f_namelen
   xfer_u64(&mut k.fs.xfer, 72, 4096);             // f_frsize
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, STATFS_SIZE) != STATFS_SIZE {
     return EFAULT;
@@ -739,6 +765,8 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
       r = ENOENT;
     } else if vfs_in_mount(&mut k.fs, pn, false) {
       r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC);
+    } else if on_disk(k.fs, pn) || (pn + 1 == DISK_PREFIX && xfer_is(k.fs.xfer, 0, pn, "disk")) {
+      r = lx_statfs_disk(&mut k, pid, b);   // disk/ itself, or a name under it
     } else {
       r = lx_statfs(&mut k, pid, b, RAMFS_MAGIC);
     }
@@ -748,6 +776,8 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
       r = EBADF;
     } else if d.kind == K_FILE && vfs_file_in_mount(&mut k.fs, vfs_row_file(k.fs, d.x)) {
       r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC);
+    } else if d.kind == K_FILE && vfs_row_file(k.fs, d.x) >= NFILES && vfs_row_file(k.fs, d.x) < NFILES + DSLOTS {
+      r = lx_statfs_disk(&mut k, pid, b);
     } else {
       r = lx_statfs(&mut k, pid, b, RAMFS_MAGIC);
     }

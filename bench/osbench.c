@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -255,6 +256,43 @@ static int t_pipelat(long n) {
   return 0;
 }
 
+// nanosleep for 1 ms: the time over 1 ms is how late a sleeper wakes.
+static int t_sleep(long n) {
+  struct timespec ts = {0, 1000000};
+  begin("sleep");
+  for (long i = 0; i < n; i++) nanosleep(&ts, 0);
+  end(n);
+  return 0;
+}
+
+// epoll_wait for 1 ms on an empty pipe: how late a timed-out wait ends
+// when the call has something to look at (LTP's epoll_wait02 does this).
+static int t_epwait(long n) {
+  int a[2];
+  struct epoll_event ev = {.events = EPOLLIN};
+  int ep = epoll_create1(0);
+  if (ep < 0 || pipe(a)) return skip("epwait", "epoll");
+  ev.data.fd = a[0];
+  if (epoll_ctl(ep, EPOLL_CTL_ADD, a[0], &ev)) return skip("epwait", "epoll_ctl");
+  begin("epwait");
+  for (long i = 0; i < n; i++) epoll_wait(ep, &ev, 1, 1);
+  end(n);
+  close(a[0]);
+  close(a[1]);
+  close(ep);
+  return 0;
+}
+
+// One nanosleep of n ms. bench/run.py reports the host CPU time QEMU used
+// meanwhile: an idle guest should use almost none.
+static int t_idle(long n) {
+  struct timespec ts = {n / 1000, n % 1000 * 1000000};
+  begin("idle");
+  nanosleep(&ts, 0);
+  end(1);
+  return 0;
+}
+
 // Bulk data through one pipe in 64 KiB writes. OPS counts KiB.
 static int t_pipebw(long n) {
   int a[2];
@@ -416,6 +454,8 @@ static const struct test tests[] = {
     {"spawn", t_spawn, 200},    {"fault", t_fault, 32},      {"pipelat", t_pipelat, 5000},
     {"pipebw", t_pipebw, 2000}, {"filewrite", t_filewrite, 8}, {"fileread", t_fileread, 8},
     {"create", t_create, 2000}, {"tcplat", t_tcplat, 2000},  {"tcpbw", t_tcpbw, 500},
+    {"sleep", t_sleep, 500},    {"epwait", t_epwait, 500},
+    {"idle", t_idle, 3000},
 };
 
 int main(int argc, char **argv) {

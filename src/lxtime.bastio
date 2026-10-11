@@ -25,6 +25,17 @@ const LX_CLOCK_NANOSLEEP: u64 = 230;
 
 const NS_PER_S: u64 = 1000000000;
 const NS_PER_TICK: u64 = 10000000;    // the timer runs at 100 Hz
+/// How close to its deadline a timed wait stops sleeping and goes back to
+/// trying its call each time it is scheduled, as all timed waits did
+/// before TIMEWAIT. A tick (every 10 ms) wakes the sleeper (idled,
+/// finish_p) well within that time, so the deadline is met as closely as
+/// before. 200 ms, not two ticks: LTP's timer tests (pselect01,
+/// epoll_pwait03, ...) time sleeps of 1 to 100 ms and fail if a few end
+/// late. Under emulation on a busy host, with 20 or 50 ms, some of them
+/// did end 3 to 9 ms late, and nothing found why. A wait that short then
+/// costs a processor as before; a longer one (sleep 15, a poll with a
+/// timeout of seconds) sleeps for all but its last 200 ms.
+const NEAR: u64 = 200000000;
 const FOREVER: u64 = 18446744073709551613;   // 2^64 - 3: a deadline never reached
 const TIMER_ABSTIME: u64 = 1;
 const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
@@ -77,7 +88,10 @@ fn deadline(k: &Kernel, was: u64, wait: u64) -> u64
   return sat_add(k.ns, wait);
 }
 
-/// Makes process `pid` run system call `n` again until deadline `dl`.
+/// Makes process `pid` run system call `n` again until deadline `dl`. It
+/// sleeps in TIMEWAIT between tries, and tries again when something
+/// happens that could end the wait (sleepers_wake), or at its deadline
+/// (sleepers_due).
 fn wait_until(k: &mut Kernel, pid: u64, n: u64, dl: u64) -> u64
   requires kok(k) && pid < NPROC && dl <= FOREVER
   ensures kok(k)
@@ -85,28 +99,88 @@ fn wait_until(k: &mut Kernel, pid: u64, n: u64, dl: u64) -> u64
   let r = lx_retry(&mut k, pid, n);
   if r == SWITCH {
     pset(&mut k.procs, pid, F_RESTART, 2 + dl);
+    if dl > k.ns && dl - k.ns >= NEAR {
+      pset(&mut k.procs, pid, F_STATE, TIMEWAIT);
+      k.naps = true;
+    }
   }
   return r;
 }
 
-/// As wait_until, but asleep (nap) until a frame comes in, the clock ticks
-/// or a signal is posted, rather than run again on every pass of the
-/// scheduler: for poll, select, epoll_wait, pause and nanosleep, which servers sit in
-/// (nginx's master and workers kept two processors busy). Readiness
-/// that comes from elsewhere, such as a pipe written, is seen at the next
-/// tick, up to 10 ms late. The deadline is not: within a tick of it the
-/// call runs again on every pass instead, as nanosleep does, so a short
-/// timeout ends on time (LTP's select02, pselect01, poll02 and
-/// epoll_wait02 measure it).
+/// As wait_until, for poll, select, epoll_wait and pause, which servers
+/// sit in (nginx's master and workers kept two processors busy): a wait
+/// that may be for a frame also has the network card interrupt when one
+/// comes in, so the interrupt wakes it (idled) rather than the next tick.
 fn wait_asleep(k: &mut Kernel, pid: u64, n: u64, dl: u64) -> u64
   requires kok(k) && pid < NPROC && dl <= FOREVER
   ensures kok(k)
 {
   let r = wait_until(&mut k, pid, n, dl);
-  if r == SWITCH && (n == LX_PAUSE || dl == FOREVER || dl > k.ns && dl - k.ns > NS_PER_TICK) {
-    nap(&mut k, pid, n != LX_PAUSE);        // pause waits only for a signal
+  if r == SWITCH && n != LX_PAUSE {         // pause waits only for a signal
+    nic_listen(&mut k.nic);
   }
   return r;
+}
+
+// A timed wait used to stay READY and run its call again each time it was
+// scheduled. A process asleep for 15 s then kept a processor (and the
+// host CPU under QEMU) busy for all of it. Now it sleeps in TIMEWAIT, and
+// whatever could end its wait wakes it: what a wait waits for (data in a
+// pipe, a futex word, a signal, a child's exit) changes only in a system
+// call or trap of another process, an interrupt, or with time. So it is
+// woken after each trap of another process that is not itself a wait
+// going on (finish_p), after each interrupt on an idle
+// processor (idled), and when its deadline is NEAR (sleepers_due). From
+// then on it tries its call each time it is scheduled, as before: sleeping
+// to the deadline itself would leave it up to a tick late, as nothing
+// wakes an idle processor between ticks. A wake that finds nothing new
+// costs one try of the call, as every try did before.
+
+/// Makes every process in TIMEWAIT READY, to try its call again.
+fn sleepers_wake(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  if !k.naps {
+    return;
+  }
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && kok(k)
+  {
+    if state(k.procs, p) == TIMEWAIT {
+      pset(&mut k.procs, p, F_STATE, READY);
+    }
+    p = p + 1;
+  }
+  k.naps = false;
+}
+
+/// Makes the processes in TIMEWAIT whose deadline is NEAR READY.
+fn sleepers_due(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  if !k.naps {
+    return;
+  }
+  let now = k.ns;
+  let mut left = false;
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && kok(k)
+  {
+    if state(k.procs, p) == TIMEWAIT {
+      let w = pget(k.procs, p, F_RESTART);
+      if w < 2 || w - 2 <= now || w - 2 - now < NEAR {
+        pset(&mut k.procs, p, F_STATE, READY);
+      } else {
+        left = true;
+      }
+    }
+    p = p + 1;
+  }
+  k.naps = left;
 }
 
 /// A struct timespec read from user memory, in ns (FOREVER at most); err
@@ -242,7 +316,7 @@ fn lx_sleep(k: &mut Kernel, pid: u64, n: u64, was: u64, clk: u64, flags: u64, re
     ret(&mut k.procs, pid, 0);
     return KEEP;
   }
-  return wait_asleep(&mut k, pid, n, dl);   // up to a tick late
+  return wait_until(&mut k, pid, n, dl);
 }
 
 /// A nanosleep or relative clock_nanosleep of process p that a signal
@@ -350,6 +424,10 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
     }
     if is_unix(k, pid, fd) {
       return ux_poll_bits(k, pid, fd);
+    }
+    let q = nl_of(k, pid, fd);
+    if q < NLS && nic_nl_queued(k.nic, q) > 0 {
+      return POLLIN | POLLOUT;
     }
     if sock_ready(k.nic, f.x) {
       return POLLIN | POLLOUT;
@@ -792,6 +870,13 @@ fn lx_sigtimedwait(k: &mut Kernel, pid: u64, n: u64, was: u64, setp: u64, info: 
       return KEEP;
     }
     s = s + 1;
+  }
+  // Another signal this process would act on: the wait ends, and the
+  // signal is delivered (lx_deliver lets a waiting call run first).
+  let mask = pget(k.procs, pid, F_SIGMASK);
+  if pend & !mask != 0 || has_sig(pend, SIGKILL) {
+    ret(&mut k.procs, pid, EINTR);
+    return KEEP;
   }
   let dl = deadline(k, was, wait);
   if k.ns < dl {
