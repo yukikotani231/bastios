@@ -429,6 +429,33 @@ t_ltp2: tkill and tgkill reject a zero or negative id
 t_ltp2: unshare: files and cwd succeed, bad flags EINVAL
 t_ltp2: waitpid with bad options is EINVAL
 t_ltp2: waitpid(0) waits only for the caller's group
+t_ltp3: O_PATH|O_NOFOLLOW opens the link itself
+t_ltp3: a directory has a handle too
+t_ltp3: a handle of no bytes is EINVAL
+t_ltp3: a handle still opens its file after a rename
+t_ltp3: accept on an O_PATH descriptor is EBADF
+t_ltp3: and EROFS comes before EPERM for another user
+t_ltp3: and the same directory
+t_ltp3: bad flags are EINVAL
+t_ltp3: chmod of /dev/null by another user is EPERM
+t_ltp3: epoll_ctl of an O_PATH descriptor is EBADF
+t_ltp3: fallocate with KEEP_SIZE succeeds and keeps the size
+t_ltp3: fallocate without it grows the file
+t_ltp3: fchdir into a directory without search permission is EACCES
+t_ltp3: fchmod of a closed descriptor is EBADF
+t_ltp3: fchmod of a file on a read-only mount is EROFS
+t_ltp3: fchown of a closed descriptor is EBADF
+t_ltp3: fchown of it is EROFS
+t_ltp3: getsockopt on an O_PATH descriptor is EBADF
+t_ltp3: link out of a mount is EXDEV
+t_ltp3: link within the mount works
+t_ltp3: name_to_handle_at with no room is EOVERFLOW and says how much it needs
+t_ltp3: open_by_handle_at opens the same file
+t_ltp3: readlinkat of that descriptor and "" reads the link
+t_ltp3: rename out of a mount is EXDEV
+t_ltp3: unlinkat with AT_REMOVEDIR of a file is ENOTDIR
+t_ltp3: unlinkat with an unknown flag is EINVAL, before the path
+t_ltp3: with that room it gives the handle and a mount id
 t_mem: 64 MiB of address space
 t_mem: FUTEX_CMP_REQUEUE moves timed waiters across processes
 t_mem: FUTEX_CMP_REQUEUE with a negative count is EINVAL

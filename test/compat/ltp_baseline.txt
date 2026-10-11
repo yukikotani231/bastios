@@ -1,6 +1,7 @@
 # LTP tests that pass on BastiOS (make compat-ltp-baseline rewrites this).
 # make compat-ltp fails if one of them stops passing.
 accept01
+accept03
 accept4_01
 access01
 access02
@@ -45,6 +46,7 @@ clock_adjtime02
 clock_getres01
 clock_gettime01
 clock_gettime02
+clock_gettime04
 clock_nanosleep01
 clock_nanosleep02
 clock_nanosleep04
@@ -96,6 +98,7 @@ epoll_ctl02
 epoll_ctl03
 epoll_ctl04
 epoll_ctl05
+epoll_ctl06
 epoll_ctl07
 epoll_pwait01
 epoll_pwait02
@@ -141,12 +144,15 @@ faccessat02
 faccessat201
 faccessat202
 fallocate01
+fallocate03
 fallocate04
 fchdir01
 fchdir02
+fchdir03
 fchmod01
 fchmod02
 fchmod03
+fchmod06
 fchmodat01
 fchmodat02
 fchmodat2_01
@@ -154,9 +160,11 @@ fchmodat2_02
 fchown01
 fchown02
 fchown03
+fchown04
 fchown05
 fchownat01
 fchownat02
+fchownat03
 fcntl01
 fcntl01_64
 fcntl03
@@ -342,6 +350,7 @@ lchown02_16
 leapsec01
 link02
 link04
+link08
 linkat01
 listen01
 llseek01
@@ -437,6 +446,9 @@ munlock02
 munlockall01
 munmap01
 munmap03
+name_to_handle_at01
+name_to_handle_at02
+name_to_handle_at03
 nanosleep02
 nanosleep04
 newuname01
@@ -449,6 +461,8 @@ open04
 open06
 open09
 open15
+open_by_handle_at01
+open_by_handle_at02
 openat01
 openat201
 openat202
@@ -537,6 +551,7 @@ read04
 readahead01
 readdir01
 readlink01
+readlinkat01
 readv01
 readv02
 reboot01
@@ -552,6 +567,7 @@ rename07
 rename08
 rename09
 rename10
+rename11
 rename12
 rename13
 rename14
@@ -807,6 +823,7 @@ unlink05
 unlink07
 unlink08
 unlink10
+unlinkat01
 unshare02
 ustat01
 ustat02
