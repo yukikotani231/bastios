@@ -446,6 +446,7 @@ t_perm: setgroups and getgroups keep supplementary groups
 t_perm: the disk keeps owners
 t_perm: umask applies to new files and directories
 t_perm: without the group, the group's bits do not apply
+t_proc: /proc/PID/stat of an ended process is ESRCH
 t_proc: child's getppid is the parent
 t_proc: environment
 t_proc: execve

@@ -7,6 +7,7 @@
 #include <sys/times.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 #include <sched.h>
 
 int main(int argc, char **argv) {
@@ -83,6 +84,16 @@ int main(int argc, char **argv) {
         FILE *f = popen("echo popen", "r");
         char b[16] = "";
         EXPECT("popen", f && fgets(b, sizeof b, f) && strcmp(b, "popen\n") == 0 && pclose(f) == 0);
+    }
+    {
+        /* ps opens /proc/PID/stat, then reads it; a process that ended in
+           between gives ESRCH, not an empty file (BusyBox's ps trusts it). */
+        char path[32], b[64];
+        int fd = -1;
+        EXPECT("/proc/PID/stat of an ended process is ESRCH", (p = fork()) >= 0 && (p == 0 ? (pause(), _exit(0), 0) :
+            (snprintf(path, sizeof path, "/proc/%d/stat", p), (fd = open(path, O_RDONLY)) >= 0 &&
+             kill(p, SIGKILL) == 0 && waitpid(p, &st, 0) == p &&
+             read(fd, b, sizeof b) == -1 && errno == ESRCH && close(fd) == 0)));
     }
     return done();
 }

@@ -248,6 +248,9 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - `set_robust_list`, `rseq` and `clone3`, which glibc asks for, fail with
   `ENOSYS` quietly; glibc carries on without them (static glibc programs
   run).
+- Reading a `/proc/PID` file of a process that ended after the file was
+  opened fails with `ESRCH`, as on Linux, instead of giving an empty file.
+  BusyBox's `ps` wrote through NULL when a process ended while it ran.
 
 ### Users and permissions
 
