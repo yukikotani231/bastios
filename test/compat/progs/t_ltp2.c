@@ -588,6 +588,17 @@ int main(void) {
            int r2 = read(p, m, sizeof m);
            close(s); close(p); unlink(a.sun_path); unlink(b.sun_path);
            gok && c == 0 && w == 4 && fok && x == 4 && r2 == 4 && memcmp(m, "pong", 4) == 0; }));
+    EXPECT("pipe: pipes run out of descriptors (EMFILE) before the kernel runs out of pipes (LTP pipe06)", ({
+           int fds[2], n = 0, e = 0, ok = 1, keep[2] = { -1, -1 };
+           for (;;) {
+               if (pipe(fds) != 0) { e = errno; break; }
+               keep[0] = fds[0]; keep[1] = fds[1];
+               n++;
+           }
+           char c = 0;
+           if (keep[1] < 0 || write(keep[1], "x", 1) != 1 || read(keep[0], &c, 1) != 1 || c != 'x') ok = 0;
+           for (int fd = 3; fd < 1024; fd++) close(fd);
+           ok && e == EMFILE && n >= 100; }));
     EXPECT("pipe-max-size: root sets it, rounded up to pages; a new pipe of a user without CAP_SYS_RESOURCE starts that small", ({
            int ok = 1;
            if (geteuid() == 0) {

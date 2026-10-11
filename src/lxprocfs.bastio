@@ -105,6 +105,26 @@ fn comp_end(x: &Bytes, from: u64, n: u64) -> u64
   return e;
 }
 
+/// Writes pid p (below 1000) in decimal at x[at..]; how many digits.
+fn dec_out(x: &mut Bytes, at: u64, p: u64) -> u64
+  requires p < 1000 && at + 3 <= blen(x)
+  ensures blen(x) == old(blen(x)) && 1 <= result && result <= 3
+{
+  if p >= 100 {
+    bset(&mut x, at, cast[u8](48 + p / 100));
+    bset(&mut x, at + 1, cast[u8](48 + p / 10 % 10));
+    bset(&mut x, at + 2, cast[u8](48 + p % 10));
+    return 3;
+  }
+  if p >= 10 {
+    bset(&mut x, at, cast[u8](48 + p / 10));
+    bset(&mut x, at + 1, cast[u8](48 + p % 10));
+    return 2;
+  }
+  bset(&mut x, at, cast[u8](48 + p));
+  return 1;
+}
+
 /// Rewrites a leading "proc/self" in x[..n] to "proc/PID" for the caller.
 /// Returns the new length, never more than n.
 fn proc_self(x: &mut Bytes, n: u64, pid: u64) -> u64
@@ -114,15 +134,8 @@ fn proc_self(x: &mut Bytes, n: u64, pid: u64) -> u64
   if n < 9 || !xfer_is(x, 0, 5, "proc/") || comp_end(x, 5, n) != 9 || !is_self(x, 5, 9) {
     return n;
   }
-  // "self" (4 bytes) becomes 1 or 2 digits: move the rest left.
-  let mut d = 1;
-  if pid >= 10 {
-    d = 2;
-    bset(&mut x, 5, cast[u8](48 + pid / 10));
-    bset(&mut x, 6, cast[u8](48 + pid % 10));
-  } else {
-    bset(&mut x, 5, cast[u8](48 + pid));
-  }
+  // "self" (4 bytes) becomes 1 to 3 digits: move the rest left.
+  let d = dec_out(&mut x, 5, pid);
   let l = blen(x);
   let mut i = 9;
   while i < n
@@ -137,23 +150,23 @@ fn proc_self(x: &mut Bytes, n: u64, pid: u64) -> u64
 /// The process x[from..to] names, as decimal digits: a live one (zombies
 /// count), or NPROC.
 fn proc_pid(procs: &Buf, x: &Bytes, from: u64, to: u64) -> u64
-  requires len(procs) == PTAB_LEN && from <= to && to <= blen(x)
+  requires ptab_ok(procs) && from <= to && to <= blen(x)
   ensures result <= NPROC
 {
-  if to == from || to - from > 2 || bget(x, from) == 48 {
+  if to == from || to - from > 3 || bget(x, from) == 48 {
     return NPROC;
   }
   let mut p = 0;
   let mut i = from;
   while i < to
-    invariant from <= i && i <= to && p < 100
+    invariant from <= i && i <= to && p < 1000
   {
     let c = cast[u64](bget(x, i));
     if c < 48 || c > 57 {
       return NPROC;
     }
     p = p * 10 + (c - 48);
-    if p >= 100 {
+    if p >= 1000 {
       return NPROC;
     }
     i = i + 1;
@@ -167,7 +180,7 @@ fn proc_pid(procs: &Buf, x: &Bytes, from: u64, to: u64) -> u64
 /// The directory description for x[..n] if it is /proc or /proc/PID, or
 /// NO_FILE.
 fn proc_dir(procs: &Buf, x: &Bytes, n: u64) -> u64
-  requires len(procs) == PTAB_LEN && n <= blen(x)
+  requires ptab_ok(procs) && n <= blen(x)
 {
   if n == 4 && xfer_is(x, 0, 4, "proc") {
     return DIR_PROC;
@@ -184,7 +197,7 @@ fn proc_dir(procs: &Buf, x: &Bytes, n: u64) -> u64
 
 /// The device for x[..n] if it is a /proc file, or 0.
 fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
-  requires len(procs) == PTAB_LEN && n <= blen(x)
+  requires ptab_ok(procs) && n <= blen(x)
 {
   let s = loop_sys_at(x, n);
   if s != 0 {
@@ -464,13 +477,7 @@ fn proc_entry(k: &mut Kernel, dir: u64, i: u64) -> Ent
   if state(k.procs, p) == FREE {
     return Ent { len: 0, dir: false, end: false };
   }
-  let mut o = 0;
-  if p >= 10 {
-    bset(&mut k.fs.xfer, 0, cast[u8](48 + p / 10));
-    o = 1;
-  }
-  bset(&mut k.fs.xfer, o, cast[u8](48 + p % 10));
-  return Ent { len: o + 1, dir: true, end: false };
+  return Ent { len: dec_out(&mut k.fs.xfer, 0, p), dir: true, end: false };
 }
 
 // ---------------------------------------------------------------- text
@@ -523,7 +530,7 @@ fn put_n(o: &mut Bytes, at: u64, v: u64) -> u64
 /// A status line's four ids (real, effective, saved, file system) from
 /// row words w and s, each after a tab.
 fn put_ids(o: &mut Bytes, at: u64, procs: &Buf, p: u64, w: u64, s: u64) -> u64
-  requires blen(o) == PROC_OUT && at <= PROC_OUT && len(procs) == PTAB_LEN && p < NPROC && w < STRIDE && s < STRIDE
+  requires blen(o) == PROC_OUT && at <= PROC_OUT && ptab_ok(procs) && p < NPROC && w < STRIDE && s < STRIDE
   ensures blen(o) == PROC_OUT && result <= PROC_OUT
 {
   let mut a = put_c(&mut o, at, 9);
@@ -964,7 +971,7 @@ fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
 /// If x[..n] is /proc/PID/fd/N: PID * LXNFD + N, else NO_RESULT. Only
 /// readlink knows these links; they are not listed or stat'ed.
 fn proc_fd(procs: &Buf, x: &Bytes, n: u64) -> u64
-  requires len(procs) == PTAB_LEN && n <= blen(x)
+  requires ptab_ok(procs) && n <= blen(x)
   ensures result == NO_RESULT || result < NPROC * LXNFD
 {
   if n < 6 || !xfer_is(x, 0, 5, "proc/") {
