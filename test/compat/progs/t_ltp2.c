@@ -5,7 +5,7 @@
  * a socket's O_NONBLOCK, and errno corners of dup3, getrusage, getrandom,
  * timer_settime, the socket calls, mremap and munlock, and nested epoll;
  * shutdown(SHUT_RD), CPU-time clocks of a thread, arch_prctl, memfd_create
- * names, madvise and timerfd flags. */
+ * names, madvise, timerfd flags and ETXTBSY. */
 #include <mqueue.h>
 #include <sys/prctl.h>
 #include "compat.h"
@@ -492,5 +492,24 @@ int main(void) {
            int b = timerfd_settime(fd, 4, &its, 0); int be = errno;
            close(fd);
            a == 0 && b == -1 && be == EINVAL; }));
+    EXPECT("opening the program a process runs for writing is ETXTBSY", ({
+           char exe[256]; ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+           int fd = -1, e = 0;
+           if (n > 0) { exe[n] = 0; fd = open(exe, O_WRONLY); e = errno; }
+           if (fd >= 0) close(fd);
+           n > 0 && fd == -1 && e == ETXTBSY; }));
+    EXPECT("open of a directory for writing is EISDIR; ftruncate past RLIMIT_FSIZE is EFBIG", ({
+           int d = open("/tmp", O_RDWR); int de = errno;
+           pid_t c = fork();
+           if (c == 0) {
+               signal(SIGXFSZ, SIG_IGN);
+               struct rlimit rl = { 4096, 4096 }; setrlimit(RLIMIT_FSIZE, &rl);
+               int fd = open("/tmp/t_ltp2_fb", O_RDWR | O_CREAT | O_TRUNC, 0600);
+               int r = ftruncate(fd, 8192); int e = errno; int r2 = ftruncate(fd, 4096);
+               close(fd); unlink("/tmp/t_ltp2_fb");
+               _exit(r == -1 && e == EFBIG && r2 == 0 ? 0 : 1);
+           }
+           int st; waitpid(c, &st, 0);
+           d == -1 && de == EISDIR && WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
     return done();
 }
