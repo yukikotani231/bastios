@@ -846,7 +846,9 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     } else {
       a = put_n(&mut o, a, ni - 20);
     }
-    a = put_s(&mut o, a, " 1 0 0");
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, group_size(k, p));  // num_threads: Python warns on fork when there are more
+    a = put_s(&mut o, a, " 0 0");
     let mut z = 0;
     while z < 30
       invariant z <= 30 && a <= PROC_OUT && blen(o) == PROC_OUT
@@ -883,7 +885,9 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     }
     a = put_s(&mut o, a, "\nVmLck:\t");
     a = put_n(&mut o, a, rl_locked(k, p) / 1024);
-    return put_s(&mut o, a, " kB\nThreads:\t1\n");
+    a = put_s(&mut o, a, " kB\nThreads:\t");
+    a = put_n(&mut o, a, group_size(k, p));
+    return put_c(&mut o, a, 10);
   }
   if what == PF_COMM {
     let a = put_comm(&mut k, p, &mut o, 0);
@@ -1176,5 +1180,31 @@ fn proc_write(k: &mut Kernel, pid: u64, f: u64, va: u64, n: u64) -> u64
     }
   }
   k.sys = set(k.sys, SYS_PIPEMAX, size);
+  return n;
+}
+
+/// The number of threads in p's thread group: 1 for a process without
+/// threads.
+fn group_size(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures result <= NPROC
+{
+  if pget(k.procs, p, F_TGID) == 0 {
+    return 1;
+  }
+  let g = tgid(k.procs, p);
+  let mut n = 0;
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && n < q && kok(k)
+  {
+    if in_group(k.procs, q, g) {
+      n = n + 1;
+    }
+    q = q + 1;
+  }
+  if n == 0 {
+    return 1;
+  }
   return n;
 }
