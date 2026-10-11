@@ -169,6 +169,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   lx_fd_fork(&mut k, pid, c);
   map_fork(&mut k, pid, c);
   hole_fork(&mut k, pid, c);
+  lazy_fork(&mut k, pid, c);
   shm_fork(&mut k, pid, c);
   sig_fork(&mut k.sigact, pid, c);
   cwd_fork(&mut k.cwd, pid, c);
@@ -222,10 +223,19 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
   }
   let from_file = src.file;
   let image = src.f;
-  let sp = load_image(&mut k.mem, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, total);
+  // A hold keeps the file in place while its code is read on demand
+  // (src/lazy.bastio); without one, every page is read now.
+  let mut hold = HOLD_N;
+  if src.file {
+    hold = vfs_hold(&mut k.fs, src.f);
+  }
+  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, total, hold < HOLD_N);
   bfree(args);
   match sp {
-    Space::Empty => { return ENOEXEC; },
+    Space::Empty => {
+      vfs_unhold(&mut k.fs, &mut k.mem, hold);
+      return ENOEXEC;
+    },
     Space::Mapped(new) => {
       map_drop_all(&mut k, pid);            // shared file pages go back first
       vfork_give_back(&mut k, mmu, pid);
@@ -237,6 +247,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
     },
   }
   hole_clear(&mut k, pid);                // a new window has no holes
+  lazy_set(&mut k, pid, src, hold);       // map_drop_all dropped the old record
   shm_drop_all(&mut k, pid);
   lx_fd_close_all(&mut k, pid, true);
   sig_reset(&mut k.sigact, pid, true);
@@ -280,8 +291,12 @@ fn lx_src_at(k: &mut Kernel, pid: u64, va: u64) -> Src
     return exe_src(&mut k, (pf - PROC_DEV) / 16);
   }
   if n > 4 && xfer_bin(k.fs.xfer) {
+    let mut suid = 0;
+    if n <= FNAME_MAX && bin_suid(k.fs.xfer, n) {
+      suid = 1;                             // f marks a set-user-ID-root built-in (exec_ids)
+    }
     let prog = lx_prog_at(&mut k, pid, va);
-    return Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
+    return Src { file: false, prog: prog, f: suid, size: slen(prog_image(prog)) };
   }
   k.perr = ENOENT;
   let f = vfs_lookup(&mut k.fs, n);
@@ -664,7 +679,11 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
     if prog >= NPROGS {
       return none;
     }
-    return Meta { ok: true, mode: S_IFREG_X, size: slen(prog_image(prog)), ino: INO_PROGS + prog, mtime: 0, own: 0 };
+    let mut bm = S_IFREG_X;
+    if bin_suid(k.fs.xfer, n) {
+      bm = S_IFREG_X + S_ISUID;
+    }
+    return Meta { ok: true, mode: bm, size: slen(prog_image(prog)), ino: INO_PROGS + prog, mtime: 0, own: 0 };
   }
   return file_meta(&mut k.fs, vfs_lookup(&mut k.fs, n));
 }
@@ -701,6 +720,8 @@ fn file_meta(v: &mut Vfs, f: u64) -> Meta
     kind = T_LINK;                          // a symbolic link: only lstat gets this far
   } else if fm.mode % 65536 / 4096 * 4096 == T_FIFO {
     kind = T_FIFO;                          // a named pipe
+  } else if fm.mode % 65536 / 4096 * 4096 == 0xC000 {
+    kind = 0xC000;                          // a unix socket's file (src/lxunix.bastio)
   }
   return Meta { ok: true, mode: kind + fm.mode % 4096, size: size, ino: INO_FILES + f, mtime: fm.mtime, own: fm.own };
 }
@@ -868,7 +889,63 @@ fn applet_name(j: u64) -> Str {
   if j == 22 {
     return "truncate";
   }
-  return "chown";
+  if j == 23 {
+    return "chown";
+  }
+  return suid_name(j - 24);
+}
+
+/// The applets past applet 23, which deal with users: su and passwd first
+/// (NSUID_APPLETS of them), which run as root (bin_suid), then the rest.
+fn suid_name(j: u64) -> Str {
+  if j == 0 {
+    return "su";
+  }
+  if j == 1 {
+    return "passwd";
+  }
+  if j == 2 {
+    return "login";
+  }
+  if j == 3 {
+    return "id";
+  }
+  if j == 4 {
+    return "whoami";
+  }
+  if j == 5 {
+    return "adduser";
+  }
+  if j == 6 {
+    return "addgroup";
+  }
+  if j == 7 {
+    return "deluser";
+  }
+  if j == 8 {
+    return "delgroup";
+  }
+  return "chpasswd";
+}
+
+/// Whether /bin/NAME (the n-byte path in x) is a set-user-ID-root
+/// program: su and passwd, as a BusyBox installed set-user-ID root has
+/// them. BusyBox itself (CONFIG_FEATURE_SUID) drops root at once unless
+/// the applet its argv[0] names needs it, so a /bin/su run under another
+/// argv[0] gets nothing.
+fn bin_suid(x: &Bytes, n: u64) -> bool
+  requires blen(x) == XFER && 4 <= n && n <= FNAME_MAX
+{
+  let mut j = 0;
+  while j < NSUID_APPLETS
+    invariant j <= NSUID_APPLETS
+  {
+    if xfer_is(x, 4, n, suid_name(j)) {
+      return true;
+    }
+    j = j + 1;
+  }
+  return false;
 }
 
 /// Stores v little-endian in bytes at..at+8 of x.

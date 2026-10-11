@@ -1,0 +1,109 @@
+// The read-only pages of the built-in programs, shared between processes.
+//
+// A page of a built-in ELF program that only read-only segments cover
+// (code, constants) is the same in every process that runs it, so it is
+// made once and then mapped read-only as a shared page (bastiolang's
+// `Shared`): exec maps it instead of copying it out of the image, and fork
+// maps it again instead of copying it. k.txt holds one reference to each,
+// for good: slot `prog` of its level-2 table is a level-1 table whose slot
+// `n` is file page n of program `prog` (the first 2 MiB of each program;
+// pages past that are copied as before). The pages are marked TXT_PAGE in
+// the page bitmap (src/pages.bastio): `mem` counts them as available, and
+// mprotect gives a process its own copy before it may write one
+// (w_protect, src/lxmem.bastio).
+//
+// What is proved: each page the cache hands out is a counted reference, so
+// it is never freed while a process maps it; the cache's own references
+// go back at power off. What is not: that a page's bytes are the image's
+// (the copy is ordinary code, as the copy it replaces was).
+
+import "pages.bastio";
+import "space.bastio";
+
+/// Program `prog`'s level-1 table in the store, made if it is not there.
+/// False if memory ran out.
+fn txt_table(m: &mut Mem, st: &mut PageTable, prog: u64) -> bool
+  requires mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && prog < 512
+  ensures mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0
+  ensures result ==> pt_used(st, prog)
+{
+  if pt_has(st, prog) {
+    return true;
+  }
+  let a = find_free(&mut m);
+  if a >= NPAGES {
+    return false;
+  }
+  pt_put(&mut st, prog, pt_new(take_text_page(&mut m, a), 1));
+  return true;
+}
+
+/// In program `prog`'s table `c`: file page `n` of `img`, made if it is
+/// not there. False if memory ran out.
+fn txt_fill(c: &mut PageTable, m: &mut Mem, n: u64, img: Str) -> bool
+  requires pt_level(c) == 1 && mem_ok(m) && n < 512
+  ensures mem_ok(m)
+{
+  if pt_has(c, n) {
+    return pt_shared(c, n);
+  }
+  let b = find_free(&mut m);
+  if b >= NPAGES {
+    return false;
+  }
+  let mut f = take_text_page(&mut m, b);
+  copy_page(&mut f, img, n * 4096);
+  pt_put_shared(&mut c, n, shared_new(f), false);
+  return true;
+}
+
+/// Maps shared page `s` read-only at slot i of level-1 table l1, unless
+/// something is there (then `s` is given up).
+fn l1_put_text(l1: &mut PageTable, m: &mut Mem, i: u64, s: Shared)
+  requires pt_level(l1) == 1 && mem_ok(m) && i < 512
+  ensures mem_ok(m)
+{
+  if pt_has(l1, i) {
+    drop_shared(&mut m, s);
+  } else {
+    pt_put_shared(&mut l1, i, s, false);
+  }
+}
+
+/// In program table `c`: maps a new reference to file page `n` read-only
+/// at window page `p` of `l2`. False if memory ran out.
+fn txt_map(c: &mut PageTable, m: &mut Mem, n: u64, l2: &mut PageTable, p: u64) -> bool
+  requires pt_level(c) == 1 && mem_ok(m) && n < 512 && pt_level(l2) == 2 && p < WPAGES
+  ensures mem_ok(m) && pt_level(l2) == 2
+{
+  if !pt_has(c, n) || !pt_shared(c, n) {
+    return true;
+  }
+  let t = p / 512;
+  if !pt_has(l2, t) {
+    let a = find_free(&mut m);
+    if a >= NPAGES {
+      return false;
+    }
+    pt_put(&mut l2, t, pt_new(take_page(&mut m, a), 1));
+  }
+  pt_borrow(&mut l2, t, l1_put_text, &mut m, p % 512, pt_dup_shared(c, n));
+  return true;
+}
+
+/// Maps file page `n` of built-in program `prog` (image `img`) read-only
+/// at window page `p` of `l2`, from the cache, putting it there first if
+/// need be. False if memory ran out.
+fn share_page(m: &mut Mem, st: &mut PageTable, prog: u64, img: Str, n: u64, l2: &mut PageTable, p: u64) -> bool
+  requires mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && prog < 512 && n < 512
+  requires pt_level(l2) == 2 && p < WPAGES
+  ensures mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l2) == 2
+{
+  if !txt_table(&mut m, &mut st, prog) {
+    return false;
+  }
+  if !pt_borrow(&mut st, prog, txt_fill, &mut m, n, img) {
+    return false;
+  }
+  return pt_borrow(&mut st, prog, txt_map, &mut m, n, &mut l2, p);
+}

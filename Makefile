@@ -9,6 +9,12 @@
 #   make test       boot it in QEMU and drive the shell over the serial line
 #   make fuzz       fuzz the system calls (SEED, SEEDS, CALLS, SMP)
 #
+# NATIVE=1 builds the kernel with bastioc1's own x86-64 backend instead of
+# translating it to C for $(CC): no C compiler between the proved code and
+# the machine code (only the assembler). Opt-in while its code is about ten
+# times the size of gcc's. BASTIOC1 names a bastioc1 binary; by default one
+# is built from $(BASTIOLIB)/stage1.
+#
 # BASTIOC points at the Bastio stage0 compiler (github.com/yukikotani231/bastiolang).
 
 BASTIOC ?= ../bastiolang/stage0/target/release/bastioc0
@@ -141,6 +147,11 @@ build/user/ash.elf: build/busybox/Makefile user/busybox.config | build/user
 	for o in $$(grep -v '^#' user/busybox.config); do \
 	  sed -i "s/^# $$o is not set/$$o=y/" build/busybox/.config; done
 	yes "" | $(MAKE) -C build/busybox -s oldconfig >/dev/null
+	# The non-boolean options for users: SHA-512 passwords, and ids for
+	# new users from 1000 (BusyBox's defaults, which allnoconfig zeroes).
+	sed -i -e 's/^CONFIG_FEATURE_DEFAULT_PASSWD_ALGO=.*/CONFIG_FEATURE_DEFAULT_PASSWD_ALGO="sha512"/' \
+	  -e 's/^CONFIG_LAST_ID=.*/CONFIG_LAST_ID=60000/' -e 's/^CONFIG_FIRST_SYSTEM_ID=.*/CONFIG_FIRST_SYSTEM_ID=100/' \
+	  -e 's/^CONFIG_LAST_SYSTEM_ID=.*/CONFIG_LAST_SYSTEM_ID=999/' build/busybox/.config
 	$(MAKE) -C build/busybox -s CC=$(MUSLCC) EXTRA_CFLAGS=-fPIE CFLAGS_busybox=-static-pie busybox
 	cp build/busybox/busybox $@
 
@@ -158,8 +169,30 @@ KFILES := $(wildcard files/*)
 build/kernel.c: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
 	$(BASTIOC) --lib $(BASTIOLIB) --target kernel -o $@ src/main.bastio
 
-build/kernel.o: build/kernel.c
+BASTIOC1 ?= build/bastioc1
+
+build/bastioc1.c: $(BASTIOC) $(wildcard $(BASTIOLIB)/stage1/*.bastio) | build
+	$(BASTIOC) --emit-c -o $@ $(BASTIOLIB)/stage1/bastioc1.bastio
+
+build/bastioc1: build/bastioc1.c
+	cc -O2 -o $@ $<
+
+build/kernel.s: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC1) | build
+	$(BASTIOC1) --lib $(BASTIOLIB) --target kernel --backend native --emit-asm -o $@ src/main.bastio
+
+# Which backend built build/kernel.o, rewritten only when it changes, so
+# that switching NATIVE rebuilds the kernel.
+KBACKEND := $(if $(filter 1,$(NATIVE)),native,c)
+build/kernel.backend: FORCE | build
+	@echo $(KBACKEND) | cmp -s - $@ || echo $(KBACKEND) > $@
+
+ifeq ($(KBACKEND),native)
+build/kernel.o: build/kernel.s build/kernel.backend
+	$(CC) -c -o $@ $<
+else
+build/kernel.o: build/kernel.c build/kernel.backend
 	$(CC) $(CFLAGS) -c -o $@ $<
+endif
 
 build/libc.o: boot/libc.c | build
 	$(CC) $(TCFLAGS) -c -o $@ $<
@@ -526,6 +559,46 @@ compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img bu
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
 	test/compat/run.py --host build/compat --out build/compat/host $(COMPAT_PROGS)
 
+# The Linux Test Project's system call tests (test/compat/ltp.py). LTP
+# (GPL-2.0-or-later, not part of this repository) is fetched at a pinned tag
+# and built against musl as static PIEs; the three files LTP's own Alpine CI
+# removes as unsupported on musl are removed here too. musl-gcc has no Linux
+# headers of its own, so the system's are put on its include path.
+LTP_GIT ?= https://github.com/linux-test-project/ltp
+LTP_TAG ?= 20260930
+LTP_HDRS ?= /usr/include
+
+build/ltp/configure: | build
+	rm -rf build/ltp
+	git clone -q --depth 1 --branch $(LTP_TAG) $(LTP_GIT) build/ltp
+	rm -f build/ltp/testcases/kernel/syscalls/fmtmsg/fmtmsg01.c \
+	  build/ltp/testcases/kernel/syscalls/timer_create/timer_create01.c \
+	  build/ltp/testcases/kernel/syscalls/timer_create/timer_create03.c
+	# LTP images a 300 MB file for a test's block device; a RAM file holds
+	# 64 MiB here (FILE_MAX, src/ramfs.bastio), so ask for 32 MB.
+	sed -i 's/^#define DEV_SIZE_MB 300u$$/#define DEV_SIZE_MB 32u/' build/ltp/lib/tst_device.c
+	$(MAKE) -C build/ltp -s autotools >/dev/null
+
+build/ltp/.built: build/ltp/configure
+	rm -rf build/ltp-hdrs && mkdir -p build/ltp-hdrs
+	ln -s $(LTP_HDRS)/linux $(LTP_HDRS)/asm-generic build/ltp-hdrs/
+	ln -s $$(dirname $$(find $(LTP_HDRS) -path '*/asm/unistd_64.h' | head -1)) build/ltp-hdrs/asm
+	cd build/ltp && ./configure -q CC="$(MUSLCC) -isystem $(CURDIR)/build/ltp-hdrs" \
+	  CFLAGS="-O2 -fPIE" LDFLAGS=-static-pie --without-tirpc >/dev/null
+	$(MAKE) -C build/ltp/lib -s
+	$(MAKE) -C build/ltp/libs -s
+	$(MAKE) -C build/ltp/testcases/kernel/syscalls -s -k || true
+	touch $@
+
+# Not part of `make test`: a full run boots the kernel once per 63 programs
+# (25 boots, three at a time; about 10 minutes on four processors). Fails
+# only if a test in ltp_baseline.txt stops passing.
+compat-ltp: build/bastios.elf build/ltp/.built
+	test/compat/ltp.py --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp
+
+compat-ltp-baseline: build/bastios.elf build/ltp/.built
+	test/compat/ltp.py --update-baseline --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp
+
 # Not part of `make test`: prints timings, checks nothing (see the script).
 smpbench: build/bastios.elf
 	test/smpbench.sh
@@ -533,6 +606,10 @@ smpbench: build/bastios.elf
 # Not part of `make test` either: do one process's threads run in parallel?
 threadbench: build/bastios.elf
 	test/threadbench.sh
+
+# Not part of `make test` either: how fast ash forks and execs, 4 at a time.
+forkbench: build/bastios.elf
+	test/forkbench.sh
 
 # Not part of `make test` either: disk timings for each driver.
 diskbench: build/bastios.elf
@@ -549,4 +626,6 @@ clean:
 	rm -rf build
 
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
-.PHONY: all run disk usb run-usb test fuzz smpbench threadbench diskbench iobench netbench compat compat-baseline compat-host clean
+FORCE:
+
+.PHONY: FORCE all run disk usb run-usb test fuzz smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean

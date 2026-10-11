@@ -33,6 +33,8 @@ const AHCI_SECTOR: u64 = 512;
 const PCI_BAR5: u64 = 0x24;
 
 // Generic host control.
+const HBA_CAP: u64 = 0x00;
+const CAP_SSS: u64 = 0x8000000;        // staggered spin-up: each port waits for PxCMD.SUD
 const HBA_GHC: u64 = 0x04;
 const HBA_IS: u64 = 0x08;              // which ports have an interrupt pending
 const GHC_IE: u64 = 2;                 // interrupts on
@@ -50,9 +52,15 @@ const PX_CMD: u64 = 0x18;
 const PX_TFD: u64 = 0x20;
 const PX_SIG: u64 = 0x24;
 const PX_SSTS: u64 = 0x28;
+const PX_SCTL: u64 = 0x2C;
 const PX_SERR: u64 = 0x30;
 const PX_CI: u64 = 0x38;
 const CMD_ST: u64 = 1;
+const CMD_SUD: u64 = 2;                // spin up the device
+const CMD_POD: u64 = 4;                // power it on (when CMD_CPD says the port can)
+const CMD_CPD: u64 = 0x100000;
+const SIG_NONE: u64 = 0xFFFFFFFF;      // no D2H register FIS has come since the link reset
+const RESET_HOLD: u64 = 20000;         // register reads that hold COMRESET for more than 1 ms
 const CMD_FRE: u64 = 0x10;
 const CMD_FR: u64 = 0x4000;
 const CMD_CR: u64 = 0x8000;
@@ -163,6 +171,59 @@ fn port_stop(h: &mut Ahci) -> bool
   let c2 = pr(&mut h, PX_CMD);
   pw(&mut h, PX_CMD, bit_clear(c2, CMD_FRE));
   return port_clear(&mut h, PX_CMD, CMD_FR);
+}
+
+/// Brings up the port's link if the firmware did not. A controller with
+/// staggered spin-up leaves each device off until its port's SUD bit is
+/// set, and firmware that boots fast (from another disk) may leave a port's
+/// link down. Such a port gets SUD (and POD), and, if its link is still not
+/// up, a COMRESET: SCTL's DET field at 1 for over a millisecond, then 0,
+/// and a wait for the link. The device's signature may then come only once
+/// FIS receiving is on (ahci_new). A port whose link is up is left as it
+/// is, unless `reset` (the boot option ahci_reset, for a disk that is not
+/// found otherwise).
+fn port_wake(h: &mut Ahci, sss: bool, reset: bool)
+  requires ahci_ok(h)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy)
+{
+  let c = pr(&mut h, PX_CMD);
+  let mut v = c;
+  if sss {
+    v = bit_set(v, CMD_SUD);
+  }
+  if c / CMD_CPD % 2 == 1 {
+    v = bit_set(v, CMD_POD);
+  }
+  if v != c {
+    pw(&mut h, PX_CMD, v);
+  }
+  let det = pr(&mut h, PX_SSTS) % 16;
+  if (det == 3 && !reset) || (det == 0 && !sss) {
+    return;                           // up, or nothing attached
+  }
+  if !port_stop(&mut h) {
+    return;                           // a COMRESET needs the port stopped
+  }
+  let sctl = pr(&mut h, PX_SCTL);
+  let base = sctl - sctl % 16;
+  pw(&mut h, PX_SCTL, base + 1);
+  let mut i = 0;
+  while i < RESET_HOLD
+    invariant ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy)
+  {
+    pr(&mut h, PX_SSTS);
+    i = i + 1;
+  }
+  pw(&mut h, PX_SCTL, base);
+  let mut up = false;
+  i = 0;
+  while i < AHCI_SPINS && !up
+    invariant ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy)
+  {
+    up = pr(&mut h, PX_SSTS) % 16 == 3;
+    i = i + 1;
+  }
+  pw(&mut h, PX_SERR, 4294967295);
 }
 
 /// Issues the command set up in slot 0 and waits for it; true if the disk
@@ -298,7 +359,47 @@ fn ahci_flush(h: &mut Ahci) -> bool
 
 /// Starts the first SATA disk on the controller whose registers are
 /// `regs`, lending it two pages. Without one, `sectors` stays 0.
-fn ahci_new(regs: Mmio, f0: Frame, f1: Frame) -> Ahci
+/// Points the port at the pages and turns FIS receiving on; true if the
+/// device is then ready and is a SATA disk. Otherwise the port is stopped
+/// again.
+fn port_start(h: &mut Ahci) -> bool
+  requires ahci_ok(h)
+  ensures ahci_ok(h)
+{
+  if !port_stop(&mut h) {
+    return false;
+  }
+  let mut i = 0;
+  while i < 4096
+    invariant i <= 4096 && i % 8 == 0 && ahci_ok(h)
+  {
+    dma_write64(&mut h.cmd, i, 0);
+    i = i + 8;
+  }
+  let c = dma_phys(h.cmd);
+  pw(&mut h, PX_CLB, c % 4294967296);
+  pw(&mut h, PX_CLB + 4, c / 4294967296 % 4294967296);
+  pw(&mut h, PX_FB, (c + FIS_AT) % 4294967296);
+  pw(&mut h, PX_FB + 4, (c + FIS_AT) / 4294967296 % 4294967296);
+  pw(&mut h, PX_SERR, 4294967295);
+  pw(&mut h, PX_IS, 4294967295);
+  pw(&mut h, PX_IE, 0);
+  let c1 = pr(&mut h, PX_CMD);
+  pw(&mut h, PX_CMD, bit_set(c1, CMD_FRE));
+  let mut k = 0;
+  while k < AHCI_SPINS && pr(&mut h, PX_SIG) == SIG_NONE
+    invariant ahci_ok(h)
+  {
+    k = k + 1;
+  }
+  if pr(&mut h, PX_SIG) == SIG_SATA && port_clear(&mut h, PX_TFD, TFD_BUSY) {
+    return true;
+  }
+  port_stop(&mut h);
+  return false;
+}
+
+fn ahci_new(regs: Mmio, f0: Frame, f1: Frame, reset: bool) -> Ahci
   requires mmio_base(regs) % 1024 == 0 && mmio_len(regs) <= AHCI_MAX_LEN && mmio_len(regs) >= 0x180
   ensures ahci_ok(result) && mmio_base(result.regs) == mmio_base(regs) && mmio_len(result.regs) == mmio_len(regs)
 {
@@ -322,8 +423,12 @@ fn ahci_new(regs: Mmio, f0: Frame, f1: Frame) -> Ahci
   let ghc = ar(&mut h, HBA_GHC);
   aw(&mut h, HBA_GHC, bit_set(ghc, GHC_AE));
   // The first implemented port with a device present and a SATA disk's
-  // signature (an ATAPI drive, such as a CD, has another).
+  // signature (an ATAPI drive, such as a CD, has another). A port with its
+  // link up but no signature yet (one the firmware left alone, or that
+  // port_wake reset) is tried too: its device sends the signature only
+  // once FIS receiving is on (port_start).
   let mut pi = ar(&mut h, HBA_PI);
+  let sss = ar(&mut h, HBA_CAP) / CAP_SSS % 2 == 1;
   let n = mmio_len(h.regs);
   let mut p = 0;
   let mut found = false;
@@ -333,8 +438,12 @@ fn ahci_new(regs: Mmio, f0: Frame, f1: Frame) -> Ahci
     let px = 0x100 + p * 128;
     if pi % 2 == 1 && px + 128 <= n {
       h.px = px;
-      if pr(&mut h, PX_SSTS) % 16 == 3 && pr(&mut h, PX_SIG) == SIG_SATA {
-        found = true;
+      port_wake(&mut h, sss, reset);
+      if pr(&mut h, PX_SSTS) % 16 == 3 {
+        let sig = pr(&mut h, PX_SIG);
+        if sig == SIG_SATA || sig == SIG_NONE {
+          found = port_start(&mut h);
+        }
       }
     }
     if !found {
@@ -342,27 +451,7 @@ fn ahci_new(regs: Mmio, f0: Frame, f1: Frame) -> Ahci
       pi = pi / 2;
     }
   }
-  if !found || !port_stop(&mut h) {
-    return h;
-  }
-  let mut i = 0;
-  while i < 4096
-    invariant i <= 4096 && i % 8 == 0 && ahci_ok(h)
-  {
-    dma_write64(&mut h.cmd, i, 0);
-    i = i + 8;
-  }
-  let c = dma_phys(h.cmd);
-  pw(&mut h, PX_CLB, c % 4294967296);
-  pw(&mut h, PX_CLB + 4, c / 4294967296 % 4294967296);
-  pw(&mut h, PX_FB, (c + FIS_AT) % 4294967296);
-  pw(&mut h, PX_FB + 4, (c + FIS_AT) / 4294967296 % 4294967296);
-  pw(&mut h, PX_SERR, 4294967295);
-  pw(&mut h, PX_IS, 4294967295);
-  pw(&mut h, PX_IE, 0);
-  let c1 = pr(&mut h, PX_CMD);
-  pw(&mut h, PX_CMD, bit_set(c1, CMD_FRE));
-  if !port_clear(&mut h, PX_TFD, TFD_BUSY) {
+  if !found {
     return h;
   }
   let c2 = pr(&mut h, PX_CMD);
