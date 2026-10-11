@@ -976,6 +976,12 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
   if d.kind == K_CONSOLE {
     return put_s(&mut o, 0, "/dev/tty");
   }
+  if d.kind == K_DEV && d.x >= DEV_PTS && d.x < DEV_PTS + PTY_N {
+    return put_n(&mut o, put_s(&mut o, 0, "/dev/pts/"), d.x - DEV_PTS);
+  }
+  if d.kind == K_DEV && d.x >= DEV_PTM && d.x < DEV_PTM + PTY_N {
+    return put_s(&mut o, 0, "/dev/ptmx");
+  }
   if d.kind == K_PIPE_R || d.kind == K_PIPE_W {
     let a = put_s(&mut o, 0, "pipe:[");
     return put_c(&mut o, put_n(&mut o, a, d.x), 93);

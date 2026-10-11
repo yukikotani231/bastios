@@ -310,6 +310,8 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       r = proc_read(&mut k, pid, a, d.x, va, cnt);
     } else if d.kind == K_DEV && is_loop(d.x) {
       r = loop_io(&mut con, &mut k, pid, a, d.x, false, va, cnt);
+    } else if d.kind == K_DEV && is_pty_dev(d.x) {
+      r = pty_read(&mut k, pid, d.x, va, cnt);   // src/lxpty.bastio
     } else if d.kind == K_DEV {
       r = dev_read(&mut k, pid, d.x, va, cnt);
     } else if d.kind == K_SOCK {
@@ -755,6 +757,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   if d.kind == K_DEV && (is_loop(d.x) || d.x == DEV_LOOPCTL) {
     return loop_ioctl(&mut k, pid, d.x, req % 0x100000000, arg);   // the request is an unsigned int
   }
+  if d.kind == K_DEV && is_pty_dev(d.x) {
+    return pty_ioctl(&mut k, pid, fd, d.x, req % 0x100000000, arg);   // src/lxpty.bastio
+  }
   if d.kind == K_SOCK && (req == SIOCATMARK || (req >= SIOCGIFCONF && req <= SIOCSIFFLAGS)) {
     return sock_ioctl(&mut k, pid, fd, req, arg);
   }
@@ -1156,6 +1161,9 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
   }
   if d.kind == K_DEV && is_loop(d.x) {
     return loop_io(&mut con, &mut k, pid, fd, d.x, true, va, n);
+  }
+  if d.kind == K_DEV && is_pty_dev(d.x) {
+    return pty_write(&mut k, pid, d.x, va, n);   // src/lxpty.bastio
   }
   if d.kind == K_DEV {
     return n;                               // a device swallows what it is given

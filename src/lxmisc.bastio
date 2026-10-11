@@ -228,9 +228,8 @@ fn lx_statfs(k: &mut Kernel, pid: u64, va: u64, magic: u64) -> u64
 }
 
 /// getrandom(buf, n, flags): the bytes /dev/urandom gives, from the kernel's
-/// generator (rng_next), seeded at boot from the clocks. Not a secure
-/// source; there is no entropy pool yet. Two calls in one tick no longer
-/// return the same bytes, as they did when each call reseeded from the HPET.
+/// ChaCha20 generator (rng_next, src/lxdev.bastio). It never blocks: the
+/// pool is seeded from the clocks at boot.
 fn lx_getrandom(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)

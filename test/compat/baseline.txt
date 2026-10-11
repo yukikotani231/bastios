@@ -18,8 +18,11 @@ apps: sqlite3: WAL
 apps: sqlite3: a database file
 apps: sqlite3: in memory
 apps: wget: 1 MiB from the host
+apps: wget: 1 MiB over HTTPS
+apps: wget: HTTPS from the host (BusyBox's own TLS)
 apps: wget: a file from the host
 apps: wget: a missing file is an error
+apps: wget: an IPv6 loopback server
 bastio: bastioc1: a failed proof builds nothing
 bastio: bastioc1: a type error
 bastio: bastioc1: prove a program
@@ -91,6 +94,15 @@ busybox: which
 busybox: whoami
 busybox: xargs
 busybox: yes | head
+ssh: dropbear: the server starts
+ssh: dropbear: the server stops
+ssh: ssh -t: a command on a terminal (a pty in the guest)
+ssh: ssh: 1 MiB from the guest
+ssh: ssh: Ctrl-C stops the foreground command, not the shell
+ssh: ssh: an interactive login, the shell's exit status
+ssh: ssh: an unknown key is refused
+ssh: ssh: run a command
+ssh: ssh: standard input and the exit status
 dev: make: a project of two files
 dev: make: parallel jobs
 dev: make: rebuilds only what changed
@@ -151,6 +163,18 @@ t_dir: stat file in directory
 t_dir: stat new directory
 t_dir: statvfs
 t_dir: unlink file in directory
+t_dns: connect to a looked-up name
+t_dns: getaddrinfo AF_INET
+t_dns: getaddrinfo AF_INET6 v4-mapped
+t_dns: getaddrinfo AF_UNSPEC (A and AAAA)
+t_dns: getaddrinfo second name
+t_dns: getaddrinfo: no such name
+t_dns: gethostbyname
+t_dns: getnameinfo reverse lookup
+t_dns: name server binds UDP port 53
+t_dns: point resolv.conf at it
+t_dns: resolv.conf names a server
+t_dns: resolv.conf put back
 t_fdlock: 200 descriptors, dup2 to 200 and F_DUPFD from 100
 t_fdlock: F_GETLK reports the conflicting lock that starts first
 t_fdlock: F_SETLEASE and F_GETLEASE
@@ -471,6 +495,32 @@ t_proc: uname
 t_proc: wait with no children is ECHILD
 t_proc: waitid
 t_proc: waitpid WNOHANG
+t_pty: /dev/tty in the child's session is its pty
+t_pty: Ctrl-C sends SIGINT to the foreground group
+t_pty: Ctrl-D on an empty line reads as end of file
+t_pty: TIOCGPTN on the master
+t_pty: TIOCSCTTY made the child's group the foreground
+t_pty: TIOCSWINSZ on the master: SIGWINCH and the size on the slave
+t_pty: a locked slave does not open
+t_pty: a slave read after the master closes is end of file
+t_pty: an unfinished line is not readable yet
+t_pty: and a slave write fails with EIO
+t_pty: both ends are terminals
+t_pty: erase takes back a byte
+t_pty: its slave is /dev/pts/N
+t_pty: openpty
+t_pty: output LF goes out as CR LF
+t_pty: poll on the master says the slave hung up
+t_pty: raw mode: LF goes out alone
+t_pty: raw mode: no echo, bytes readable at once
+t_pty: stat of the slave's path matches fstat
+t_pty: the master sees the settings the slave made
+t_pty: the slave reads the finished line
+t_pty: then a master read fails with EIO
+t_pty: ttyname of the slave
+t_pty: typing echoes back, CR read as LF
+t_pty: unlockpt lets it open
+t_pty: with both ends closed its /dev/pts entry is gone
 t_sig2: 24 processes at once
 t_sig2: SA_ONSTACK runs on the alternate stack
 t_sig2: SA_RESETHAND runs the handler once
