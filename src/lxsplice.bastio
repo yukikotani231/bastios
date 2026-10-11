@@ -41,7 +41,7 @@ fn pipe_peek_xfer(k: &mut Kernel, p: u64, skip: u64, n: u64) -> u64
     return 0;
   }
   let got = smaller(n, r.n - skip);
-  ring_out(&mut k.fs.xfer, 0, k.pipebuf, p * PIPE_CAP, PIPE_CAP, (r.h + skip) % PIPE_CAP, got);
+  pipe_ring_out(&mut k, p, 0, (r.h + skip) % PIPE_CAP, got);
   return got;
 }
 

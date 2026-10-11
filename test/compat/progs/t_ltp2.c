@@ -492,5 +492,16 @@ int main(void) {
            int b = timerfd_settime(fd, 4, &its, 0); int be = errno;
            close(fd);
            a == 0 && b == -1 && be == EINVAL; }));
+    EXPECT("pipe: pipes run out of descriptors (EMFILE) before the kernel runs out of pipes (LTP pipe06)", ({
+           int fds[2], n = 0, e = 0, ok = 1, keep[2] = { -1, -1 };
+           for (;;) {
+               if (pipe(fds) != 0) { e = errno; break; }
+               keep[0] = fds[0]; keep[1] = fds[1];
+               n++;
+           }
+           char c = 0;
+           if (keep[1] < 0 || write(keep[1], "x", 1) != 1 || read(keep[0], &c, 1) != 1 || c != 'x') ok = 0;
+           for (int fd = 3; fd < 1024; fd++) close(fd);
+           ok && e == EMFILE && n >= 100; }));
     return done();
 }

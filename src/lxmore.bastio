@@ -50,7 +50,7 @@ fn pipe_put_xfer(k: &mut Kernel, p: u64, n: u64) -> u64
     return EAGAIN;
   }
   let put = smaller(n, room);
-  ring_in(&mut k.pipebuf, p * PIPE_CAP, PIPE_CAP, ring_slot(r, r.n), k.fs.xfer, 0, put);
+  pipe_ring_in(&mut k, p, ring_slot(r, r.n), 0, put);
   ring_push_n(&mut r, put);
   pipe_keep(&mut k.pipes, p, r);
   sigio_pipe(&mut k, p);

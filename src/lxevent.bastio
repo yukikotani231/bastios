@@ -1041,7 +1041,7 @@ fn fifo_open(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
     {
       q = q + 1;
     }
-    if q >= NPIPES {
+    if q >= NPIPES || !pipe_ready(&mut k, q) {
       return ENFILE;
     }
     pi_set(&mut k.pipes, q, 0, 0);

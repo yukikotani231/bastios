@@ -15,7 +15,7 @@
 // anonymous pipe; src/lxevent.bastio), 1 once a writer has opened it,
 // the size F_SETPIPE_SZ gave it (0: PIPE_CAP), and 1 once a read end
 // has had O_ASYNC; the ring itself is
-// PIPE_CAP bytes of k.pipebuf at p * PIPE_CAP.
+// slot p of k.pipebuf, PIPE_CAP bytes (pipe_ready).
 
 import "linux.bastio";
 import "lxdev.bastio";
@@ -71,7 +71,7 @@ fn pi_set(t: &mut Buf, p: u64, f: u64, v: u64)
   t = set(t, p * PIPE_STRIDE + f, v);
 }
 
-/// Pipe p's head and count as a core Ring over its PIPE_CAP bytes of
+/// Pipe p's head and count as a core Ring over its PIPE_CAP bytes in
 /// k.pipebuf. The stored words are clamped, so the ring is well formed
 /// whatever they hold.
 fn pipe_ring(t: &Buf, p: u64) -> Ring
@@ -956,7 +956,7 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
   {
     p = p + 1;
   }
-  if p >= NPIPES {
+  if p >= NPIPES || !pipe_ready(&mut k, p) {
     return ENFILE;
   }
   let r = fd_free(k, pid, 0);
@@ -1019,7 +1019,7 @@ fn pipe_read1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
     return 0;
   }
   let want = smaller(smaller(n, count), XFER);
-  ring_out(&mut k.fs.xfer, 0, k.pipebuf, p * PIPE_CAP, PIPE_CAP, r.h, want);
+  pipe_ring_out(&mut k, p, 0, r.h, want);
   let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
   if put == NO_RESULT || (put == 0 && want > 0) {
     return EFAULT;
@@ -1052,7 +1052,7 @@ fn pipe_write1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   if got == NO_RESULT || (got == 0 && n > 0) {
     return EFAULT;
   }
-  ring_in(&mut k.pipebuf, p * PIPE_CAP, PIPE_CAP, ring_slot(r, r.n), k.fs.xfer, 0, got);
+  pipe_ring_in(&mut k, p, ring_slot(r, r.n), 0, got);
   ring_push_n(&mut r, got);
   pipe_keep(&mut k.pipes, p, r);
   sigio_pipe(&mut k, p);
@@ -1102,6 +1102,75 @@ fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
     done = done + more;
   }
   return done;
+}
+
+/// Makes sure pipe slot p has its ring, taking PIPE_CAP bytes for it the
+/// first time the slot is used. False when there is no memory for it, or
+/// p is past the next slot (a new pipe takes the lowest free one, so it
+/// never is).
+fn pipe_ready(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && p < NPIPES
+  ensures kok(k)
+{
+  let n = vec_len(k.pipebuf);
+  if p < n {
+    return true;
+  }
+  if p > n {
+    return false;
+  }
+  let b = try_balloc(PIPE_CAP);
+  if blen(b) != PIPE_CAP || !vec_try_reserve(&mut k.pipebuf, 1) {
+    bfree(b);
+    return false;
+  }
+  vec_push_within(&mut k.pipebuf, PipeBuf::Ring(b));
+  return true;
+}
+
+/// ring_out from pipe p's ring into the transfer buffer at d.
+fn pipe_ring_out(k: &mut Kernel, p: u64, d: u64, from: u64, n: u64)
+  requires kok(k) && p < NPIPES && from < PIPE_CAP && n <= PIPE_CAP && d + n <= XFER
+  ensures kok(k)
+{
+  if p >= vec_len(k.pipebuf) {
+    return;                                 // no ring: pipe_ready keeps it from being used
+  }
+  match vec_swap(&mut k.pipebuf, p, PipeBuf::None) {
+    PipeBuf::None => {},
+    PipeBuf::Ring(b) => {
+      if blen(b) == PIPE_CAP {
+        ring_out(&mut k.fs.xfer, d, b, 0, PIPE_CAP, from, n);
+      }
+      match vec_swap(&mut k.pipebuf, p, PipeBuf::Ring(b)) {
+        PipeBuf::None => {},
+        PipeBuf::Ring(x) => { bfree(x); },
+      }
+    },
+  }
+}
+
+/// ring_in into pipe p's ring at `at` from the transfer buffer at s.
+fn pipe_ring_in(k: &mut Kernel, p: u64, at: u64, s: u64, n: u64)
+  requires kok(k) && p < NPIPES && at < PIPE_CAP && n <= PIPE_CAP && s + n <= XFER
+  ensures kok(k)
+{
+  if p >= vec_len(k.pipebuf) {
+    return;
+  }
+  match vec_swap(&mut k.pipebuf, p, PipeBuf::None) {
+    PipeBuf::None => {},
+    PipeBuf::Ring(b) => {
+      let mut rb = b;
+      if blen(rb) == PIPE_CAP {
+        ring_in(&mut rb, 0, PIPE_CAP, at, k.fs.xfer, s, n);
+      }
+      match vec_swap(&mut k.pipebuf, p, PipeBuf::Ring(rb)) {
+        PipeBuf::None => {},
+        PipeBuf::Ring(x) => { bfree(x); },
+      }
+    },
+  }
 }
 
 /// Copies n bytes out of the ring buffer src[base .. base + cap], starting
