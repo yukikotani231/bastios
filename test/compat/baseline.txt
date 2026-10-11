@@ -246,6 +246,38 @@ t_file: unlink an open file, then read it
 t_file: utime
 t_file: write
 t_file: writev
+t_inotify: /proc/sys/fs/inotify/max_queued_events
+t_inotify: /proc/sys/fs/inotify/max_user_instances
+t_inotify: /proc/sys/fs/inotify/max_user_watches
+t_inotify: IN_MASK_CREATE on a watched file is EEXIST
+t_inotify: IN_ONESHOT: one event, then the watch goes
+t_inotify: IN_ONLYDIR on a file is ENOTDIR
+t_inotify: a blocking read waits for the event
+t_inotify: a buffer too small for an event is EINVAL
+t_inotify: a child's event: to the directory, then to the child
+t_inotify: a directory's events name the entry
+t_inotify: a file's events: attrib, open, access, close, open, modify, close-write
+t_inotify: a full queue ends with IN_Q_OVERFLOW (wd -1)
+t_inotify: a rename's two events share a cookie
+t_inotify: a watch on a closed fd is EBADF
+t_inotify: a watch on a missing file is ENOENT
+t_inotify: a watch on a non-inotify fd is EINVAL
+t_inotify: a watch with no events is EINVAL
+t_inotify: adding it again gives the same wd
+t_inotify: an empty queue reads EAGAIN
+t_inotify: closing the descriptor
+t_inotify: epoll sees it readable too
+t_inotify: inotify_add_watch on a directory
+t_inotify: inotify_add_watch on a file
+t_inotify: inotify_init1 rejects unknown flags
+t_inotify: inotify_init1 with NONBLOCK and CLOEXEC
+t_inotify: inotify_rm_watch
+t_inotify: poll says POLLIN once an event is queued
+t_inotify: removing a watch reports IN_IGNORED
+t_inotify: removing it twice is EINVAL
+t_inotify: rmdir: delete-self, ignored, then delete in the directory
+t_inotify: two equal events in a row coalesce
+t_inotify: unlink: attrib, ignored, then delete in the directory
 t_ipc: AF_UNIX bind/listen
 t_ipc: AF_UNIX connect to no listener fails
 t_ipc: AF_UNIX connect/accept
