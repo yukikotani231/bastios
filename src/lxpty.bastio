@@ -31,23 +31,23 @@
 
 import "lxfd.bastio";
 
-const PW_USED: u64 = 0;              // 1 while the pair exists
-const PW_MASTERS: u64 = 1;           // master descriptions open
-const PW_SLAVES: u64 = 2;            // slave descriptions open
-const PW_LOCKED: u64 = 3;            // 1 until TIOCSPTLCK unlocks it
-const PW_IN_H: u64 = 4;              // the input ring: head, count, and the
-const PW_IN_N: u64 = 5;              //   bytes a read may take (whole lines in
-const PW_READY: u64 = 6;             //   canonical mode)
-const PW_OUT_H: u64 = 7;             // the output ring: head, count
-const PW_OUT_N: u64 = 8;
-const PW_EOF: u64 = 9;               // 1 after VEOF on an empty line, until a read sees it
-const PW_FG: u64 = 10;               // the foreground process group (0: none yet)
-const PW_SID: u64 = 11;              // the session it controls (0: none)
-const PW_ROWS: u64 = 12;             // the window size (TIOCSWINSZ), rows and columns
-const PW_COLS: u64 = 13;
-const PW_SET: u64 = 14;              // 1 once its termios was set
-const PW_OPENED: u64 = 15;           // 1 once a slave was opened
-const PW_TT: u64 = 16;               // the termios, a byte a word (TERMIOS_SIZE)
+const PT_W_USED: u64 = 0;              // 1 while the pair exists
+const PT_W_MASTERS: u64 = 1;           // master descriptions open
+const PT_W_SLAVES: u64 = 2;            // slave descriptions open
+const PT_W_LOCKED: u64 = 3;            // 1 until TIOCSPTLCK unlocks it
+const PT_W_IN_H: u64 = 4;              // the input ring: head, count, and the
+const PT_W_IN_N: u64 = 5;              //   bytes a read may take (whole lines in
+const PT_W_READY: u64 = 6;             //   canonical mode)
+const PT_W_OUT_H: u64 = 7;             // the output ring: head, count
+const PT_W_OUT_N: u64 = 8;
+const PT_W_EOF: u64 = 9;               // 1 after VEOF on an empty line, until a read sees it
+const PT_W_FG: u64 = 10;               // the foreground process group (0: none yet)
+const PT_W_SID: u64 = 11;              // the session it controls (0: none)
+const PT_W_ROWS: u64 = 12;             // the window size (TIOCSWINSZ), rows and columns
+const PT_W_COLS: u64 = 13;
+const PT_W_SET: u64 = 14;              // 1 once its termios was set
+const PT_W_OPENED: u64 = 15;           // 1 once a slave was opened
+const PT_W_TT: u64 = 16;               // the termios, a byte a word (TERMIOS_SIZE)
 
 const SIGHUP: u64 = 1;
 const SIGQUIT: u64 = 3;
@@ -117,7 +117,7 @@ fn pts_at(x: &Bytes, n: u64) -> u64
 fn pty_live(k: &Kernel, p: u64) -> bool
   requires kok(k) && p < PTY_N
 {
-  return pt_get(k.ptys, p, PW_USED) == 1;
+  return pt_get(k.ptys, p, PT_W_USED) == 1;
 }
 
 /// Ring `at` (0 input, 1 output) of terminal p, from its stored head and
@@ -126,9 +126,9 @@ fn pty_ring(t: &Buf, p: u64, out: bool) -> Ring
   requires len(t) == PTY_LEN && p < PTY_N
   ensures ring_ok(result) && result.cap == PTY_CAP
 {
-  let mut f = PW_IN_H;
+  let mut f = PT_W_IN_H;
   if out {
-    f = PW_OUT_H;
+    f = PT_W_OUT_H;
   }
   return Ring { h: pt_get(t, p, f) % PTY_CAP, n: smaller(pt_get(t, p, f + 1), PTY_CAP), cap: PTY_CAP };
 }
@@ -137,9 +137,9 @@ fn pty_keep(t: &mut Buf, p: u64, out: bool, r: &Ring)
   requires len(t) == PTY_LEN && p < PTY_N
   ensures len(t) == PTY_LEN
 {
-  let mut f = PW_IN_H;
+  let mut f = PT_W_IN_H;
   if out {
-    f = PW_OUT_H;
+    f = PT_W_OUT_H;
   }
   pt_set(&mut t, p, f, r.h);
   pt_set(&mut t, p, f + 1, r.n);
@@ -170,10 +170,10 @@ fn pt_byte(t: &Buf, p: u64, i: u64) -> u64
   requires len(t) == PTY_LEN && p < PTY_N && i < TERMIOS_SIZE
   ensures result < 256
 {
-  if pt_get(t, p, PW_SET) == 0 {
+  if pt_get(t, p, PT_W_SET) == 0 {
     return tt_default(i) % 256;
   }
-  return pt_get(t, p, PW_TT + i) % 256;
+  return pt_get(t, p, PT_W_TT + i) % 256;
 }
 
 /// The 16-bit flag word at byte i of the settings, as tt_flags.
@@ -188,7 +188,7 @@ fn pty_ready(t: &Buf, p: u64) -> u64
   requires len(t) == PTY_LEN && p < PTY_N
   ensures result <= PTY_CAP
 {
-  return smaller(pt_get(t, p, PW_READY), smaller(pt_get(t, p, PW_IN_N), PTY_CAP));
+  return smaller(pt_get(t, p, PT_W_READY), smaller(pt_get(t, p, PT_W_IN_N), PTY_CAP));
 }
 
 // ---------------------------------------------------------------- opening and closing
@@ -200,7 +200,7 @@ fn pty_open_master(k: &mut Kernel, pid: u64, flags: u64) -> u64
   ensures kok(k)
 {
   let mut p = 0;
-  while p < PTY_N && pt_get(k.ptys, p, PW_USED) != 0
+  while p < PTY_N && pt_get(k.ptys, p, PT_W_USED) != 0
     invariant p <= PTY_N && kok(k)
   {
     p = p + 1;
@@ -219,11 +219,11 @@ fn pty_open_master(k: &mut Kernel, pid: u64, flags: u64) -> u64
     pt_set(&mut k.ptys, p, f, 0);
     f = f + 1;
   }
-  pt_set(&mut k.ptys, p, PW_USED, 1);
-  pt_set(&mut k.ptys, p, PW_MASTERS, 1);
-  pt_set(&mut k.ptys, p, PW_LOCKED, 1);
-  pt_set(&mut k.ptys, p, PW_ROWS, 24);
-  pt_set(&mut k.ptys, p, PW_COLS, 80);
+  pt_set(&mut k.ptys, p, PT_W_USED, 1);
+  pt_set(&mut k.ptys, p, PT_W_MASTERS, 1);
+  pt_set(&mut k.ptys, p, PT_W_LOCKED, 1);
+  pt_set(&mut k.ptys, p, PT_W_ROWS, 24);
+  pt_set(&mut k.ptys, p, PT_W_COLS, 80);
   return pty_install(&mut k, pid, h, flags);
 }
 
@@ -236,18 +236,18 @@ fn pty_open_slave(k: &mut Kernel, pid: u64, p: u64, flags: u64) -> u64
   if !pty_live(k, p) {
     return ENOENT;
   }
-  if pt_get(k.ptys, p, PW_LOCKED) != 0 || pt_get(k.ptys, p, PW_MASTERS) == 0 {
+  if pt_get(k.ptys, p, PT_W_LOCKED) != 0 || pt_get(k.ptys, p, PT_W_MASTERS) == 0 {
     return EIO_PTY;
   }
   let h = ofd_new(&mut k, OF_PTY, DEV_PTS + p);
   if h >= OFD_N {
     return ENFILE;
   }
-  let s = pt_get(k.ptys, p, PW_SLAVES);
+  let s = pt_get(k.ptys, p, PT_W_SLAVES);
   if s < OFD_N {
-    pt_set(&mut k.ptys, p, PW_SLAVES, s + 1);
+    pt_set(&mut k.ptys, p, PT_W_SLAVES, s + 1);
   }
-  pt_set(&mut k.ptys, p, PW_OPENED, 1);
+  pt_set(&mut k.ptys, p, PT_W_OPENED, 1);
   return pty_install(&mut k, pid, h, flags);
 }
 
@@ -276,21 +276,21 @@ fn pty_drop(k: &mut Kernel, d: u64)
   }
   let p = pty_of(d);
   if is_ptm(d) {
-    let m = pt_get(k.ptys, p, PW_MASTERS);
+    let m = pt_get(k.ptys, p, PT_W_MASTERS);
     if m > 0 {
-      pt_set(&mut k.ptys, p, PW_MASTERS, m - 1);
+      pt_set(&mut k.ptys, p, PT_W_MASTERS, m - 1);
     }
     if m == 1 {
       pty_hangup(&mut k, p);
     }
   } else {
-    let s = pt_get(k.ptys, p, PW_SLAVES);
+    let s = pt_get(k.ptys, p, PT_W_SLAVES);
     if s > 0 {
-      pt_set(&mut k.ptys, p, PW_SLAVES, s - 1);
+      pt_set(&mut k.ptys, p, PT_W_SLAVES, s - 1);
     }
   }
-  if pt_get(k.ptys, p, PW_MASTERS) == 0 && pt_get(k.ptys, p, PW_SLAVES) == 0 {
-    pt_set(&mut k.ptys, p, PW_USED, 0);
+  if pt_get(k.ptys, p, PT_W_MASTERS) == 0 && pt_get(k.ptys, p, PT_W_SLAVES) == 0 {
+    pt_set(&mut k.ptys, p, PT_W_USED, 0);
   }
 }
 
@@ -299,7 +299,7 @@ fn pty_hangup(k: &mut Kernel, p: u64)
   requires kok(k) && p < PTY_N
   ensures kok(k)
 {
-  let sid = pt_get(k.ptys, p, PW_SID);
+  let sid = pt_get(k.ptys, p, PT_W_SID);
   if sid == 0 {
     return;
   }
@@ -344,7 +344,7 @@ fn pty_ctty(k: &Kernel, pid: u64) -> u64
   while p < PTY_N
     invariant p <= PTY_N && kok(k)
   {
-    if pt_get(k.ptys, p, PW_USED) == 1 && pt_get(k.ptys, p, PW_SID) == sid && pt_get(k.ptys, p, PW_MASTERS) > 0 {
+    if pt_get(k.ptys, p, PT_W_USED) == 1 && pt_get(k.ptys, p, PT_W_SID) == sid && pt_get(k.ptys, p, PT_W_MASTERS) > 0 {
       return p;
     }
     p = p + 1;
@@ -404,7 +404,7 @@ fn erase1(k: &mut Kernel, p: u64) -> bool
   ensures kok(k)
 {
   let mut r = pty_ring(k.ptys, p, false);
-  if r.n == 0 || r.n <= pt_get(k.ptys, p, PW_READY) {
+  if r.n == 0 || r.n <= pt_get(k.ptys, p, PT_W_READY) {
     return false;
   }
   r.n = r.n - 1;
@@ -438,12 +438,12 @@ fn pty_input(k: &mut Kernel, p: u64, ch: u64) -> bool
     let mut r = pty_ring(k.ptys, p, false);
     ring_clear(&mut r);
     pty_keep(&mut k.ptys, p, false, r);
-    pt_set(&mut k.ptys, p, PW_READY, 0);
+    pt_set(&mut k.ptys, p, PT_W_READY, 0);
     if lf & ECHO != 0 {
       out_raw(&mut k, p, 94);               // "^C"
       out_raw(&mut k, p, c + 64);
     }
-    pty_signal(&mut k, pt_get(k.ptys, p, PW_FG), s);
+    pty_signal(&mut k, pt_get(k.ptys, p, PT_W_FG), s);
     return true;
   }
   let canon = lf & ICANON != 0;
@@ -463,10 +463,10 @@ fn pty_input(k: &mut Kernel, p: u64, ch: u64) -> bool
   let r = pty_ring(k.ptys, p, false);
   if canon && c != 0 && c == pt_byte(k.ptys, p, 21) {
     // VEOF: the line so far can be read; on an empty line, end of file.
-    if r.n == pt_get(k.ptys, p, PW_READY) {
-      pt_set(&mut k.ptys, p, PW_EOF, 1);
+    if r.n == pt_get(k.ptys, p, PT_W_READY) {
+      pt_set(&mut k.ptys, p, PT_W_EOF, 1);
     }
-    pt_set(&mut k.ptys, p, PW_READY, r.n);
+    pt_set(&mut k.ptys, p, PT_W_READY, r.n);
     return true;
   }
   if r.n >= r.cap {
@@ -480,7 +480,7 @@ fn pty_input(k: &mut Kernel, p: u64, ch: u64) -> bool
   bset(&mut k.ptyb, pty_base(p, false) + s, cast[u8](c));
   pty_keep(&mut k.ptys, p, false, w);
   if !canon || c == 10 {
-    pt_set(&mut k.ptys, p, PW_READY, w.n);
+    pt_set(&mut k.ptys, p, PT_W_READY, w.n);
   }
   echo(&mut k, p, c);
   return true;
@@ -499,16 +499,16 @@ fn pty_read(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
   let mut avail = 0;
   if master {
     avail = pty_count(k.ptys, p, true);
-    if avail == 0 && pt_get(k.ptys, p, PW_SLAVES) == 0 && pt_get(k.ptys, p, PW_OPENED) != 0 {
+    if avail == 0 && pt_get(k.ptys, p, PT_W_SLAVES) == 0 && pt_get(k.ptys, p, PT_W_OPENED) != 0 {
       return EIO_PTY;                       // the slave side has closed
     }
   } else {
     avail = pty_ready(k.ptys, p);
-    if avail == 0 && pt_get(k.ptys, p, PW_EOF) != 0 {
-      pt_set(&mut k.ptys, p, PW_EOF, 0);
+    if avail == 0 && pt_get(k.ptys, p, PT_W_EOF) != 0 {
+      pt_set(&mut k.ptys, p, PT_W_EOF, 0);
       return 0;                             // VEOF on an empty line
     }
-    if avail == 0 && pt_get(k.ptys, p, PW_MASTERS) == 0 {
+    if avail == 0 && pt_get(k.ptys, p, PT_W_MASTERS) == 0 {
       return 0;                             // hung up
     }
     if avail == 0 && pt_flags(k.ptys, p, 12) & ICANON == 0 && pt_byte(k.ptys, p, VMIN_AT) == 0 {
@@ -534,11 +534,11 @@ fn pty_read(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
   ring_pop_n(&mut r, put);
   pty_keep(&mut k.ptys, p, master, r);
   if !master {
-    let ready = pt_get(k.ptys, p, PW_READY);
+    let ready = pt_get(k.ptys, p, PT_W_READY);
     if ready >= put {
-      pt_set(&mut k.ptys, p, PW_READY, ready - put);
+      pt_set(&mut k.ptys, p, PT_W_READY, ready - put);
     } else {
-      pt_set(&mut k.ptys, p, PW_READY, 0);
+      pt_set(&mut k.ptys, p, PT_W_READY, 0);
     }
   }
   return put;
@@ -552,7 +552,7 @@ fn pty_write(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
 {
   let p = pty_of(d);
   let master = is_ptm(d);
-  if !master && pt_get(k.ptys, p, PW_MASTERS) == 0 {
+  if !master && pt_get(k.ptys, p, PT_W_MASTERS) == 0 {
     return EIO_PTY;
   }
   if n == 0 {
@@ -594,7 +594,7 @@ fn pty_bits(k: &Kernel, d: u64) -> u64
     if pty_count(k.ptys, p, true) > 0 {
       b = POLLIN;
     }
-    if pt_get(k.ptys, p, PW_SLAVES) == 0 && pt_get(k.ptys, p, PW_OPENED) != 0 {
+    if pt_get(k.ptys, p, PT_W_SLAVES) == 0 && pt_get(k.ptys, p, PT_W_OPENED) != 0 {
       b = b | POLLIN | POLLHUP;             // a read says EIO
     }
     if pty_count(k.ptys, p, false) < PTY_CAP {
@@ -602,10 +602,10 @@ fn pty_bits(k: &Kernel, d: u64) -> u64
     }
     return b;
   }
-  if pty_ready(k.ptys, p) > 0 || pt_get(k.ptys, p, PW_EOF) != 0 {
+  if pty_ready(k.ptys, p) > 0 || pt_get(k.ptys, p, PT_W_EOF) != 0 {
     b = POLLIN;
   }
-  if pt_get(k.ptys, p, PW_MASTERS) == 0 {
+  if pt_get(k.ptys, p, PT_W_MASTERS) == 0 {
     return b | POLLIN | POLLHUP;
   }
   if pty_count(k.ptys, p, true) + 2 <= PTY_CAP {
@@ -653,21 +653,21 @@ fn pty_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u
     while i < TERMIOS_SIZE
       invariant i <= TERMIOS_SIZE && kok(k)
     {
-      pt_set(&mut k.ptys, p, PW_TT + i, cast[u64](bget(k.fs.xfer, i)));
+      pt_set(&mut k.ptys, p, PT_W_TT + i, cast[u64](bget(k.fs.xfer, i)));
       i = i + 1;
     }
-    pt_set(&mut k.ptys, p, PW_SET, 1);
+    pt_set(&mut k.ptys, p, PT_W_SET, 1);
     if req == TCSETSF {
       pty_flush(&mut k, p, false);
     }
     if pt_flags(k.ptys, p, 12) & ICANON == 0 {
-      pt_set(&mut k.ptys, p, PW_READY, pty_count(k.ptys, p, false));   // every byte is ready now
+      pt_set(&mut k.ptys, p, PT_W_READY, pty_count(k.ptys, p, false));   // every byte is ready now
     }
     return 0;
   }
   if req == TIOCGWINSZ {
     lx_fill(&mut k, 0, WINSIZE_SIZE);
-    xfer_u64(&mut k.fs.xfer, 0, pt_get(k.ptys, p, PW_ROWS) % 65536 + pt_get(k.ptys, p, PW_COLS) % 65536 * 65536);
+    xfer_u64(&mut k.fs.xfer, 0, pt_get(k.ptys, p, PT_W_ROWS) % 65536 + pt_get(k.ptys, p, PT_W_COLS) % 65536 * 65536);
     return lx_put_out(&mut k, pid, arg, WINSIZE_SIZE);
   }
   if req == TIOCSWINSZ {
@@ -676,10 +676,10 @@ fn pty_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u
     }
     let rows = cast[u64](bget(k.fs.xfer, 0)) | cast[u64](bget(k.fs.xfer, 1)) << 8;
     let cols = cast[u64](bget(k.fs.xfer, 2)) | cast[u64](bget(k.fs.xfer, 3)) << 8;
-    if rows != pt_get(k.ptys, p, PW_ROWS) || cols != pt_get(k.ptys, p, PW_COLS) {
-      pt_set(&mut k.ptys, p, PW_ROWS, rows);
-      pt_set(&mut k.ptys, p, PW_COLS, cols);
-      pty_signal(&mut k, pt_get(k.ptys, p, PW_FG), SIGWINCH);
+    if rows != pt_get(k.ptys, p, PT_W_ROWS) || cols != pt_get(k.ptys, p, PT_W_COLS) {
+      pt_set(&mut k.ptys, p, PT_W_ROWS, rows);
+      pt_set(&mut k.ptys, p, PT_W_COLS, cols);
+      pty_signal(&mut k, pt_get(k.ptys, p, PT_W_FG), SIGWINCH);
     }
     return 0;
   }
@@ -696,25 +696,25 @@ fn pty_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u
     if v == NO_RESULT {
       return EFAULT;
     }
-    pt_set(&mut k.ptys, p, PW_LOCKED, smaller(v, 1));
+    pt_set(&mut k.ptys, p, PT_W_LOCKED, smaller(v, 1));
     return 0;
   }
   if req == TIOCSCTTY {
     // The caller's session takes the terminal; its group is in front.
-    pt_set(&mut k.ptys, p, PW_SID, sid_of(k.procs, pid));
-    pt_set(&mut k.ptys, p, PW_FG, pgid_of(k.procs, pid));
+    pt_set(&mut k.ptys, p, PT_W_SID, sid_of(k.procs, pid));
+    pt_set(&mut k.ptys, p, PT_W_FG, pgid_of(k.procs, pid));
     return 0;
   }
   if req == TIOCNOTTY {
-    if pt_get(k.ptys, p, PW_SID) == sid_of(k.procs, pid) {
-      pt_set(&mut k.ptys, p, PW_SID, 0);
+    if pt_get(k.ptys, p, PT_W_SID) == sid_of(k.procs, pid) {
+      pt_set(&mut k.ptys, p, PT_W_SID, 0);
     }
     return 0;
   }
   if req == TIOCGPGRP || req == TIOCGSID {
-    let mut g = pt_get(k.ptys, p, PW_FG);
+    let mut g = pt_get(k.ptys, p, PT_W_FG);
     if req == TIOCGSID {
-      g = pt_get(k.ptys, p, PW_SID);
+      g = pt_get(k.ptys, p, PT_W_SID);
       if g == 0 {
         return ENOTTY;                      // not anyone's controlling terminal
       }
@@ -731,7 +731,7 @@ fn pty_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u
     if g == NO_RESULT {
       return EFAULT;
     }
-    pt_set(&mut k.ptys, p, PW_FG, g);
+    pt_set(&mut k.ptys, p, PT_W_FG, g);
     return 0;
   }
   if req == FIONREAD {
@@ -778,7 +778,7 @@ fn pty_flush(k: &mut Kernel, p: u64, out: bool)
   ring_clear(&mut r);
   pty_keep(&mut k.ptys, p, out, r);
   if !out {
-    pt_set(&mut k.ptys, p, PW_READY, 0);
-    pt_set(&mut k.ptys, p, PW_EOF, 0);
+    pt_set(&mut k.ptys, p, PT_W_READY, 0);
+    pt_set(&mut k.ptys, p, PT_W_EOF, 0);
   }
 }
