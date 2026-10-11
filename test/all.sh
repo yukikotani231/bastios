@@ -31,6 +31,7 @@ tests=(
   "iso|c|test/iso_test.sh"
   "nmi|c|test/nmi_test.sh"
   "fuzz|c|test/fuzz_test.sh 1 2 2000"
+  "stress|c|test/stress_test.sh 1 1 20"
 )
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT

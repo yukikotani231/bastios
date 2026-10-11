@@ -532,6 +532,15 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Tests and documentation
 
+- `make stress` (`test/stress_test.sh`, `user/stress.c`): processes with
+  threads make valid system calls at once on four processors and check
+  every answer: fresh memory is zero and memory reads back what was
+  written, files and pipes carry the right bytes, children exit with the
+  status the data they were sent implies, registers, SSE registers and
+  the direction flag survive system calls, preemption and signal
+  handlers, and a mutex-guarded counter adds up. It found the direction
+  flag bug of #164 on its first run and the signal-handler one below.
+  `make test` runs it for 20 seconds.
 - A getting-started guide (`docs/getting-started.md`): build, boot in
   QEMU, write a Bastio program, run a Linux program, boot from a USB
   stick. `make test` checks its programs and terminal sessions, and the
@@ -565,6 +574,10 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Fixed
 
+- A signal handler started with the direction flag the interrupted code
+  had set; the ABI says it starts clear, as Linux does. Code in a handler
+  that copied with `rep movs` (musl's memcpy and memset) would have run
+  backwards. Found by `make stress`.
 - The clock went wrong a few seconds after boot under QEMU, which broke
   about 30 `make compat` checks (sleeps took 0 ms, poll and socket
   timeouts fired at once, `date` said 2554). There were two bugs. First,

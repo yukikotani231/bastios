@@ -78,6 +78,7 @@ make disk FILES="..."   # put files from this machine on that disk
 make iso        # build/bastios.iso: GRUB + the kernel, bootable under BIOS or UEFI
 make test       # boot in QEMU, type commands over the serial line, check the replies
 make fuzz       # fuzz the system calls with hostile arguments (SEED, SEEDS, CALLS, SMP, PAR)
+make stress     # processes and threads making checked calls at once (SEED, STRESS_SEEDS, STRESS_SECS)
 make compat     # the Linux compatibility suite; writes build/compat/report.md
 ```
 

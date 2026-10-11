@@ -8,6 +8,7 @@
 #   make run-iso    boot the ISO in QEMU (run-uefi: under UEFI firmware)
 #   make test       boot it in QEMU and drive the shell over the serial line
 #   make fuzz       fuzz the system calls (SEED, SEEDS, CALLS, SMP)
+#   make stress     many processes and threads at once, checked (SEED, STRESS_SEEDS, STRESS_SECS)
 #
 # The kernel and its programs are built with bastioc1, bastiolang's compiler
 # (stage1, written in Bastio), which stage0's bastioc0 builds once into
@@ -304,7 +305,7 @@ run-uefi: build/bastios.iso $(DISK)
 	  -cdrom build/bastios.iso $(ISO_DISPLAY) $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
 
 # The tests are listed in test/all.sh, which runs JOBS of them at a time.
-test: build/bastios.elf
+test: build/bastios.elf build/user/stress.elf
 	BASTIOC=$(BASTIOC) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/all.sh
 
 # The system call fuzzer at length: SEEDS runs of CALLS calls from seed
@@ -314,6 +315,20 @@ SEEDS ?= 16
 CALLS ?= 5000
 fuzz: build/bastios.elf
 	SMP=$(SMP) test/fuzz_test.sh $(SEED) $(SEEDS) $(CALLS)
+
+# The concurrency stress test (user/stress.c, test/stress_test.sh): PROCS
+# processes of THREADS threads each make valid system calls at once on
+# STRESS_SMP processors and check every answer, for STRESS_SECS seconds per
+# seed (`make test` runs a short one). It is a program on the disk, not
+# built in, so it lives in build/user only.
+build/user/stress.elf: user/stress.c | build/user
+	$(MUSLCC) -static-pie -O2 -Wall -Wno-unused-result -o $@ $<
+
+STRESS_SEEDS ?= 4
+STRESS_SECS  ?= 600
+STRESS_SMP   ?= 4
+stress: build/bastios.elf build/user/stress.elf
+	SMP=$(STRESS_SMP) test/stress_test.sh $(SEED) $(STRESS_SEEDS) $(STRESS_SECS)
 
 # The Linux compatibility suite (test/compat): static musl programs that
 # exercise the system call surface, and a BusyBox with a broad set of
@@ -581,4 +596,4 @@ clean:
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
 FORCE:
 
-.PHONY: FORCE all run disk usb run-usb test fuzz bench smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+.PHONY: FORCE all run disk usb run-usb test fuzz stress bench smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
