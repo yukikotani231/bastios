@@ -1,0 +1,340 @@
+// Process descriptors: pidfd_open, pidfd_send_signal and pidfd_getfd, and
+// waitid's P_PIDFD (src/lxproc.bastio) and poll (src/lxtime.bastio) on
+// them; kcmp, which compares what two processes hold; and
+// process_vm_readv and process_vm_writev, which copy between them.
+//
+// A pidfd is an open file description of kind OF_PIDFD whose word 2 is
+// the process it names. Process ids are table slots, used again once a
+// process has been reaped, so a pidfd must not follow its slot to the next
+// process: when free_pid's slot is taken (pidfd_reuse), every pidfd on it
+// is set to NPROC, a process that is gone (and an open /proc/PID, which
+// pidfd_send_signal also takes, to DIR_PROC + NPROC). Until then a pidfd on a reaped
+// process finds its slot FREE, and acts as on Linux: poll says POLLIN,
+// signals are -ESRCH.
+//
+// Not done: PIDFD_THREAD (a pidfd on a thread other than the leader is
+// -EINVAL, as before Linux 6.9), /proc/PID/fdinfo's Pid line, and fstat's
+// anonymous inode. pidfd_getfd needs the same user ids or root (Linux's
+// PTRACE_MODE_ATTACH_REALCREDS without a ptrace scope), and so does kcmp.
+// kcmp's KCMP_FILE compares open file descriptions; the other kinds
+// (address space, descriptor table, working directory, signal actions, I/O
+// context, System V undo list) are each one per thread group here, so it
+// compares groups. KCMP_EPOLL_TFD is -EOPNOTSUPP. process_vm_writev, like
+// the kernel's other copies to user memory, does not check that a page is
+// writable, only that it is there.
+
+import "lxextra.bastio";
+
+const LX_PROCESS_VM_READV: u64 = 310;
+const LX_PROCESS_VM_WRITEV: u64 = 311;
+const LX_KCMP: u64 = 312;
+const LX_PIDFD_SEND_SIGNAL: u64 = 424;
+const LX_PIDFD_OPEN: u64 = 434;
+const LX_PIDFD_GETFD: u64 = 438;
+const KCMP_FILE: u64 = 0;
+const KCMP_EPOLL_TFD: u64 = 7;
+
+fn is_pidfd_call(n: u64) -> bool {
+  return n == LX_PIDFD_OPEN || n == LX_PIDFD_SEND_SIGNAL || n == LX_PIDFD_GETFD || n == LX_KCMP
+    || n == LX_PROCESS_VM_READV || n == LX_PROCESS_VM_WRITEV;
+}
+
+fn lx_pidfd_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  let mut r = 0;
+  if n == LX_PIDFD_OPEN {
+    r = pidfd_open(&mut k, pid, a, b);
+  } else if n == LX_PIDFD_SEND_SIGNAL {
+    r = pidfd_signal(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
+  } else if n == LX_PIDFD_GETFD {
+    r = pidfd_getfd(&mut k, pid, a, b, c);
+  } else if n == LX_PROCESS_VM_READV || n == LX_PROCESS_VM_WRITEV {
+    r = process_vm(&mut k, pid, n == LX_PROCESS_VM_WRITEV, a, b, c, pget(k.procs, pid, F_REGS + R_R10),
+      pget(k.procs, pid, F_REGS + R_R8), pget(k.procs, pid, F_REGS + R_R9));
+  } else if n == LX_KCMP {
+    r = lx_kcmp(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));
+  }
+  ret(&mut k.procs, pid, r);
+  if pget(k.procs, pid, F_SIGPEND) & !pget(k.procs, pid, F_SIGMASK) != 0 {
+    return SWITCH;                          // it signalled itself
+  }
+  return KEEP;
+}
+
+/// pidfd_open(p, flags): a close-on-exec descriptor for process p, which
+/// must be running (or a zombie) and lead its thread group.
+fn pidfd_open(k: &mut Kernel, pid: u64, p: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags & !LO_NONBLOCK != 0 || p == 0 || p >= 0x80000000 {
+    return EINVAL;
+  }
+  if p >= NPROC || state(k.procs, p) == FREE {
+    return ESRCH;
+  }
+  if tgid(k.procs, p) != p {
+    return EINVAL;                          // a thread, not a process
+  }
+  return ev_install(&mut k, pid, OF_PIDFD, p, flags / LO_NONBLOCK % 2, true);
+}
+
+/// The process pidfd fd of process pid names (NPROC if it is gone), or
+/// -EBADF if fd is not a pidfd. With `dirs`, a /proc/PID directory counts
+/// as one, as pidfd_send_signal takes it.
+fn pidfd_target(k: &Kernel, pid: u64, fd: u64, dirs: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= NPROC || result == EBADF
+{
+  let d = fd_look(k, pid, fd);
+  if dirs && d.kind == K_DIR && d.x > DIR_PROC && d.x - DIR_PROC <= NPROC {
+    return d.x - DIR_PROC;
+  }
+  if d.kind != K_PIDFD {
+    return EBADF;
+  }
+  return smaller(d.x, NPROC);
+}
+
+/// pidfd_send_signal(fd, s, info, flags): kill, or rt_sigqueueinfo with
+/// info, to the process fd names.
+fn pidfd_signal(k: &mut Kernel, pid: u64, fd: u64, s: u64, info: u64, flags: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  if flags != 0 {
+    return EINVAL;
+  }
+  let p = pidfd_target(k, pid, fd, true);
+  if p == EBADF {
+    return EBADF;
+  }
+  if s > NSIG {
+    return EINVAL;
+  }
+  if p >= NPROC || state(k.procs, p) == FREE || state(k.procs, p) == ZOMBIE {
+    return ESRCH;
+  }
+  if info == 0 {
+    return lx_kill(&mut k, pid, p, s);
+  }
+  if info > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, info, &mut k.fs.xfer, 32) != 32 {
+    return EFAULT;
+  }
+  if get_u64(k.fs.xfer, 0) % 0x100000000 != s {
+    return EINVAL;                          // si_signo must be the signal sent
+  }
+  return lx_sigqueue(&mut k, pid, p, s, info);   // which refuses a forged si_code
+}
+
+/// pidfd_getfd(fd, target, flags): a close-on-exec duplicate, in process
+/// pid, of descriptor `target` of the process fd names.
+fn pidfd_getfd(k: &mut Kernel, pid: u64, fd: u64, target: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let p = pidfd_target(k, pid, fd, false);
+  if p == EBADF {
+    return EBADF;
+  }
+  if flags != 0 {
+    return EINVAL;
+  }
+  if p >= NPROC || state(k.procs, p) == FREE || state(k.procs, p) == ZOMBIE {
+    return ESRCH;
+  }
+  if !cred_root(k.procs, pid) && !same_ids(k.procs, pid, p) {
+    return EPERM;
+  }
+  // A thread group's descriptors are in the row of whichever member holds
+  // the group's shared state (src/lxthread.bastio).
+  let h = fd_ofd(k, fd_row(&mut k, p), target);
+  if target >= LXNFD || h >= OFD_N {
+    return EBADF;                           // not open there (the console is not passed on)
+  }
+  let nfd = fd_free(k, pid, 0);
+  if nfd >= LXNFD {
+    return EMFILE;
+  }
+  ref_value(&mut k, FD_OFD + h);
+  fd_set(&mut k.lxfd, pid, nfd, FD_OFD + h + FD_CLOEXEC);
+  return nfd;
+}
+
+/// Whether processes a and b have the same real, effective and saved
+/// user and group ids.
+fn same_ids(procs: &Buf, a: u64, b: u64) -> bool
+  requires len(procs) == PTAB_LEN && a < NPROC && b < NPROC
+{
+  return pget(procs, a, F_UID) == pget(procs, b, F_UID) && pget(procs, a, F_SUID) == pget(procs, b, F_SUID)
+    && pget(procs, a, F_GID) == pget(procs, b, F_GID) && pget(procs, a, F_SGID) == pget(procs, b, F_SGID);
+}
+
+/// Slot c is about to hold a new process: pidfds on the one it held
+/// before now name a process that is gone.
+fn pidfd_reuse(k: &mut Kernel, c: u64)
+  requires kok(k) && c < NPROC
+  ensures kok(k)
+{
+  let mut h = 0;
+  while h < OFD_N
+    invariant h <= OFD_N && kok(k)
+  {
+    if of_get(k.ofd, h, 0) == OF_PIDFD && of_get(k.ofd, h, 2) == c {
+      of_set(&mut k.ofd, h, 2, NPROC);
+    }
+    if of_get(k.ofd, h, 0) == OF_DIR && of_get(k.ofd, h, 2) == DIR_PROC + c && c > 0 {
+      of_set(&mut k.ofd, h, 2, DIR_PROC + NPROC);   // /proc/PID of a process that is gone
+    }
+    h = h + 1;
+  }
+}
+
+/// The descriptor-table row of process p: its group's holder (see
+/// pidfd_getfd), or p.
+fn fd_row(k: &mut Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures kok(k) && result < NPROC
+{
+  if pget(k.procs, p, F_TGID) != 0 {
+    let hd = holder(&mut k, p);
+    if hd != 0 {
+      return hd;
+    }
+  }
+  return p;
+}
+
+/// kcmp(p1, p2, type, i1, i2): 0 if the two processes share the thing
+/// `type` names, else 1 or 2, an order that stays the same.
+fn lx_kcmp(k: &mut Kernel, pid: u64, p1: u64, p2: u64, kind: u64, i1: u64, i2: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if p1 == 0 || p1 >= NPROC || p2 == 0 || p2 >= NPROC || state(k.procs, p1) == FREE || state(k.procs, p2) == FREE {
+    return ESRCH;
+  }
+  if !cred_root(k.procs, pid) && (!same_ids(k.procs, pid, p1) || !same_ids(k.procs, pid, p2)) {
+    return EPERM;
+  }
+  let t = kind % 0x100000000;
+  if t > KCMP_EPOLL_TFD {
+    return EINVAL;
+  }
+  if t == KCMP_EPOLL_TFD {
+    return EOPNOTSUPP;
+  }
+  let mut x = tgid(k.procs, p1);
+  let mut y = tgid(k.procs, p2);
+  if t == KCMP_FILE {
+    let r1 = fd_row(&mut k, tgid(k.procs, p1));
+    let r2 = fd_row(&mut k, tgid(k.procs, p2));
+    x = fd_ofd(k, r1, i1 % 0x100000000);
+    y = fd_ofd(k, r2, i2 % 0x100000000);
+    if x >= OFD_N || y >= OFD_N {
+      return EBADF;
+    }
+  }
+  if x == y {
+    return 0;
+  }
+  if x < y {
+    return 1;
+  }
+  return 2;
+}
+
+/// Entry i of the struct iovec array at user address arr of process pid.
+fn iov_entry(k: &mut Kernel, pid: u64, arr: u64, i: u64) -> Iov
+  requires kok(k) && pid < NPROC && i < IOV_MAX
+  ensures kok(k)
+{
+  if arr > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, arr + 16 * i, &mut k.fs.xfer, 16) != 16 {
+    return Iov { err: EFAULT, base: 0, len: 0 };
+  }
+  return Iov { err: 0, base: get_u64(k.fs.xfer, 0), len: get_u64(k.fs.xfer, 8) };
+}
+
+/// process_vm_readv (or, when `write`, process_vm_writev)(p, local,
+/// lcnt, remote, rcnt, flags): copies from process p's remote iovecs into
+/// the caller's local ones (or the other way). Returns the bytes copied,
+/// short where a page is missing, or -errno if none were.
+fn process_vm(k: &mut Kernel, pid: u64, write: bool, p: u64, local: u64, lcnt: u64, remote: u64, rcnt: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags != 0 {
+    return EINVAL;
+  }
+  let lc = iov_check(&mut k, pid, local, lcnt);
+  if lc != 0 {
+    return lc;
+  }
+  let rc = iov_check(&mut k, pid, remote, rcnt);
+  if rc != 0 {
+    return rc;
+  }
+  if p == 0 || p >= NPROC || state(k.procs, p) == FREE || state(k.procs, p) == ZOMBIE {
+    return ESRCH;
+  }
+  if !cred_root(k.procs, pid) && !same_ids(k.procs, pid, p) {
+    return EPERM;
+  }
+  let tp = fd_row(&mut k, tgid(k.procs, p));   // where the group's space is
+  if lcnt > IOV_MAX || rcnt > IOV_MAX {
+    return EINVAL;                          // iov_check said so already
+  }
+  let mut buf = balloc(XFER);
+  let mut done = 0;
+  let mut li = 0;
+  let mut lo = 0;
+  let mut ri = 0;
+  let mut ro = 0;
+  let mut more = true;
+  while more && li < lcnt && ri < rcnt
+    invariant li <= lcnt && lcnt <= IOV_MAX && ri <= rcnt && rcnt <= IOV_MAX && blen(buf) == XFER && kok(k)
+  {
+    let l = iov_entry(&mut k, pid, local, li);
+    let r = iov_entry(&mut k, pid, remote, ri);
+    if l.err != 0 || r.err != 0 {
+      more = false;
+    } else if lo >= l.len {
+      li = li + 1;
+      lo = 0;
+    } else if ro >= r.len {
+      ri = ri + 1;
+      ro = 0;
+    } else {
+      let m = smaller(smaller(l.len - lo, r.len - ro), XFER);
+      let mut got = 0;
+      let mut put = 0;
+      if write {
+        got = copy_from_user(&mut k.spaces, pid, sat_add(l.base, lo), &mut buf, m);
+        if got <= m {
+          put = copy_to_user(&mut k.spaces, tp, sat_add(r.base, ro), buf, got);
+        }
+      } else {
+        got = copy_from_user(&mut k.spaces, tp, sat_add(r.base, ro), &mut buf, m);
+        if got <= m {
+          put = copy_to_user(&mut k.spaces, pid, sat_add(l.base, lo), buf, got);
+        }
+      }
+      if got > m || put > got {
+        put = 0;                            // NO_RESULT: outside the window
+      }
+      done = sat_add(done, put);
+      lo = lo + put;
+      ro = ro + put;
+      if put < m {
+        more = false;                       // a page is missing
+      }
+    }
+  }
+  bfree(buf);
+  if done == 0 && more == false && li < lcnt && ri < rcnt {
+    return EFAULT;
+  }
+  return done;
+}
