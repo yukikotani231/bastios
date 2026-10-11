@@ -1148,7 +1148,7 @@ fn proc_write(k: &mut Kernel, pid: u64, f: u64, va: u64, n: u64) -> u64
   if !proc_writable(f) || n == 0 || n > 32 {
     return EINVAL;
   }
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, n) != n {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, n) != n {
     return EFAULT;
   }
   let mut i = 0;
