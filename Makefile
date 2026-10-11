@@ -23,6 +23,11 @@ BASTIOC0 ?= ../bastiolang/stage0/target/release/bastioc0
 BASTIOC  ?= build/bastioc1
 # Where `import "core/..."` finds the Bastio core library.
 BASTIOLIB ?= ../bastiolang
+# Functions bastioc1 has proved are recorded here and not sent to the solver
+# again, so a rebuild proves only what changed (`make clean` empties it;
+# BASTIO_PROOF_CACHE= turns it off). The cache is trusted like the solver:
+# it lives in build/, which only this checkout writes.
+export BASTIO_PROOF_CACHE ?= build/proof-cache
 CC      ?= cc
 QEMU    ?= qemu-system-x86_64
 
