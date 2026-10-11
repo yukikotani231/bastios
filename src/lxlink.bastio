@@ -30,7 +30,7 @@ const AT_SYMLINK_FOLLOW: u64 = 0x400;
 /// Normalizes src[..sl] into dst: empty parts and "." dropped, ".." going
 /// up a level, no leading "/". Returns the length, or NO_RESULT if it is
 /// longer than FNAME_MAX.
-fn lex_norm(src: &Bytes, sl: u64, dst: &mut Bytes) -> u64
+fn lex_norm(src: &Bytes, sl: u64, dst: &mut Bytes, floor: u64) -> u64
   requires sl <= blen(src) && blen(dst) == PATH_OUT
   ensures blen(dst) == PATH_OUT
   ensures result == NO_RESULT || result <= FNAME_MAX
@@ -53,12 +53,12 @@ fn lex_norm(src: &Bytes, sl: u64, dst: &mut Bytes) -> u64
       if w == 1 && bget(src, i) == 46 {
         // "." stays here
       } else if w == 2 && bget(src, i) == 46 && bget(src, i + 1) == 46 {
-        while o > 0 && bget(dst, o - 1) != 47
+        while o > floor && bget(dst, o - 1) != 47
           invariant o <= PATH_OUT && blen(dst) == PATH_OUT
         {
           o = o - 1;
         }
-        if o > 0 {
+        if o > floor {
           o = o - 1;
         }
       } else {
@@ -91,8 +91,10 @@ fn lex_norm(src: &Bytes, sl: u64, dst: &mut Bytes) -> u64
 /// last component's too when `last`), leaving the result there. Returns
 /// its length, or NO_RESULT (and k.perr) for a loop, a broken link, a
 /// result too long, or a component under something not a directory.
-fn lx_follow(k: &mut Kernel, n: u64, last: bool) -> u64
-  requires kok(k)
+/// xfer[..floor] is the caller's root (chroot): an absolute target starts
+/// there, and ".." does not climb above it.
+fn lx_follow(k: &mut Kernel, n: u64, last: bool, floor: u64) -> u64
+  requires kok(k) && floor <= n
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
@@ -149,13 +151,15 @@ fn lx_follow(k: &mut Kernel, n: u64, last: bool) -> u64
         // The link's directory (for a relative target), the target, then
         // the rest of the path.
         let mut ql = 0;
+        let mut upto = smaller(floor, pl);  // an absolute target: from the root
         if bget(k.fs.xfer, 0) != 47 {
-          while ql < e
-            invariant ql <= e && e <= pl && pl <= FNAME_MAX && blen(p) == PATH_OUT && blen(q) == SPLICE
-          {
-            bset(&mut q, ql, bget(p, ql));
-            ql = ql + 1;
-          }
+          upto = e;                         // a relative one: from the link's directory
+        }
+        while ql < upto
+          invariant ql <= upto && upto <= pl && pl <= FNAME_MAX && blen(p) == PATH_OUT && blen(q) == SPLICE
+        {
+          bset(&mut q, ql, bget(p, ql));
+          ql = ql + 1;
         }
         let mut a = 0;
         while a < t
@@ -173,7 +177,7 @@ fn lx_follow(k: &mut Kernel, n: u64, last: bool) -> u64
           r = r + 1;
         }
         ql = ql + (pl - c);
-        let nl = lex_norm(q, ql, &mut p);
+        let nl = lex_norm(q, ql, &mut p, smaller(floor, pl));
         if nl == NO_RESULT {
           bad = true;
           k.perr = ENAMETOOLONG;

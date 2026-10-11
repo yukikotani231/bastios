@@ -362,13 +362,13 @@ fn wake_readers(procs: &mut Buf, q: &mut Queue, line: &Buf)
 // Everything the kernel owns, in one place. `mmu` and `cpu` stay with
 // `main`, which lends them where they are needed.
 // Linux file descriptors (src/lxfd.bastio).
-const LXNFD: u64 = 16;
-const LXFD_LEN: u64 = 512;            // NPROC * LXNFD
+const LXNFD: u64 = 256;
+const LXFD_LEN: u64 = 8192;           // NPROC * LXNFD
 const FD_CONSOLE: u64 = 1;
 const FD_OFD: u64 = 2;
 const FD_CLOEXEC: u64 = 1024;
 
-const OFD_N: u64 = 64;
+const OFD_N: u64 = 1024;
 // Loop devices (src/lxloop.bastio): LOOP_N devices of LOOP_W words.
 const LOOP_N: u64 = 8;
 const LOOP_W: u64 = 13;
@@ -422,9 +422,17 @@ const LK_EOF: u64 = 18446744073709551615;   // a range to the end of the file; n
 const LK_DESC: u64 = 4294967296;      // 2^32: lock owners from here are descriptions
 const LKC_FCNTL: u64 = 0;             // record and OFD locks
 const LKC_FLOCK: u64 = 1;
+const LKC_LEASE: u64 = 3;             // a lease: the whole file, owned by a description
+const F_SETLEASE: u64 = 1024;
+const F_GETLEASE: u64 = 1025;
 const LK_WAIT: u64 = 18446744073709551000;   // not an errno: wait and run the call again
-const OFD_STRIDE: u64 = 4;
-const OFD_LEN: u64 = 256;             // OFD_N * OFD_STRIDE
+const OFD_STRIDE: u64 = 8;
+const OFD_LEN: u64 = 8192;            // OFD_N * OFD_STRIDE
+const OF_OWNER: u64 = 4;              // who gets the I/O signal: 0, or (type + 1) * OWN_TYPE + id
+const OF_SIG: u64 = 5;                // F_SETSIG's signal (0: SIGIO)
+const OF_CRED: u64 = 6;               // the owner setter's real uid * ID_SPAN + effective uid
+const OF_ASYNC: u64 = 7;              // 1 with O_ASYNC: signal the owner when input arrives
+const OWN_TYPE: u64 = 4294967296;     // 2^32
 const OF_FREE: u64 = 0;
 const OF_FILE: u64 = 1;
 const OF_PIPE_R: u64 = 2;
@@ -443,7 +451,7 @@ const DISK_RETRY: u64 = 0x8000000000000002;
 // (without the leading "/", at most FNAME_MAX) and one byte a word after.
 const CWD_STRIDE: u64 = 256;           // FNAME_MAX + 1
 const CWD_LEN: u64 = 8192;            // NPROC * CWD_STRIDE
-const DPATH_LEN: u64 = 16384;         // OFD_N * CWD_STRIDE
+const DPATH_LEN: u64 = 262144;        // OFD_N * CWD_STRIDE
 const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
 
 // Linux signal actions: per process, 64 signals of 4 words each (handler,
@@ -519,8 +527,8 @@ const NPIPES: u64 = 8;
 const PIPE_CAP: u64 = 65536;          // bytes a pipe holds, as on Linux
 const PIPE_PAGE: u64 = 4096;          // the least F_SETPIPE_SZ gives a pipe
 const PIPE_ATOM: u64 = 4096;          // PIPE_BUF: writes this small go in whole
-const PIPE_STRIDE: u64 = 7;           // head, count, readers, writers, FIFO + 1 (0: none), a writer came, capacity
-const PIPES_LEN: u64 = 56;            // NPIPES * PIPE_STRIDE
+const PIPE_STRIDE: u64 = 8;           // head, count, readers, writers, FIFO + 1 (0: none), a writer came, capacity, O_ASYNC reader
+const PIPES_LEN: u64 = 64;            // NPIPES * PIPE_STRIDE
 const PIPE_BYTES: u64 = 524288;       // NPIPES * PIPE_CAP
 
 const LX_PIPE: u64 = 22;
@@ -583,9 +591,21 @@ const F_SETLKW: u64 = 7;
 const F_OFD_GETLK: u64 = 36;
 const F_OFD_SETLK: u64 = 37;
 const F_OFD_SETLKW: u64 = 38;
+const F_SETOWN: u64 = 8;
+const F_GETOWN: u64 = 9;
+const F_SETSIG: u64 = 10;
+const F_GETSIG: u64 = 11;
+const F_SETOWN_EX: u64 = 15;
+const F_GETOWN_EX: u64 = 16;
+const F_OWNER_TID: u64 = 0;
+const F_OWNER_PID: u64 = 1;
+const F_OWNER_PGRP: u64 = 2;
+const SIGIO: u64 = 29;
 const F_UNLCK: u64 = 2;
 const LO_CLOEXEC: u64 = 0x80000;
 const LO_PATH: u64 = 0x200000;         // a handle for the name only: no permission needed
+const LO_NOFOLLOW: u64 = 0x20000;      // a symbolic link at the end is ELOOP
+const LO_NOATIME: u64 = 0x40000;       // for the owner and root only
 
 const EMFILE: u64 = 18446744073709551592;   // 2^64 - 24
 const ENFILE: u64 = 18446744073709551593;   // 2^64 - 23
@@ -628,6 +648,7 @@ struct Kernel {
   nic: Nic,             // the network card and its UDP sockets, if any
   sigact: Buf,          // Linux signal actions (src/lxsig.bastio)
   cwd: Buf,             // Linux working directories (src/lxdir.bastio)
+  croot: Buf,           // each process's root (chroot), laid out like cwd; length 0 is the top
   dpath: Buf,           // the path of each open directory description, laid out like cwd
   sigsave: Buf,         // per process, the mask rt_sigsuspend replaced; then each pending signal's sender (src/lxsig.bastio)
   alarms: Buf,          // Linux ITIMER_REAL per process: deadline (0: off) and interval (src/lxtime.bastio)
@@ -636,7 +657,7 @@ struct Kernel {
   uxb: Bytes,           // their bytes
   maps: Buf,            // Linux MAP_SHARED file mappings, MAP_N per process (src/lxmem.bastio)
   lazy: Buf,            // code pages read from a file when first touched, LZ_W words per process (src/lazy.bastio)
-  inet6: u64,           // bit h: open file description h is an AF_INET6 socket (src/lxsock.bastio)
+  inet6: Buf,           // word h: 1 if open file description h is an AF_INET6 socket (src/lxsock.bastio)
   locks: Buf,           // file locks held (src/lxlock.bastio)
   loops: Buf,           // loop devices (src/lxloop.bastio)
   ptys: Buf,            // pseudo-terminals (src/lxpty.bastio)
@@ -650,7 +671,7 @@ struct Kernel {
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.croot) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
     && (k.txt is Store::Table ==> (pt_level(k.txt.Table) == 2 && pt_leases(k.txt.Table) == 0))
 }
@@ -895,6 +916,7 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   lx_fd_reset(&mut k.lxfd, pid);
   sig_reset(&mut k.sigact, pid, false);
   k.cwd = set(k.cwd, pid * CWD_STRIDE, 0);   // starts at "/"
+  k.croot = set(k.croot, pid * CWD_STRIDE, 0);
   let mut args = balloc(ARGV0_MAX + 1);
   let alen = name_arg(&mut args, prog_name(prog));
   let src = Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };

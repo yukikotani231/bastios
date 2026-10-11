@@ -47,14 +47,22 @@ E_NAME = 56
 FILE, DIR, ORPHAN, LINK = 1, 2, 3, 4
 
 
+MAP = struct.Struct(f"<{PTRS}Q")      # a map block: PTRS block numbers
+
+
+def used(img, b):
+    """The (index, block number) pairs of map block b that are not holes."""
+    return [(n, x) for n, x in enumerate(MAP.unpack_from(img, b * BLOCK)) if x]
+
+
 def u64(b, at):
     return struct.unpack_from("<Q", b, at)[0]
 
 
-def check(img):
-    errors, notes = [], []
-    if img[0:8] not in (b"BSTDISK2", b"BSTDISK3"):
-        return ["no BSTDISK3 or BSTDISK2 magic (a blank disk is formatted at mount)"], notes, {}
+def entries(img):
+    """The directory: (its blocks, its DSLOTS entries as dicts), read the
+    way a mount reads them; and the errors in the superblock's list."""
+    errors = []
     blocks = min(len(img) // BLOCK, MAX_BLOCKS)
     # Where each directory block is: the fixed ones, then the superblock's.
     dblocks = [1 + db for db in range(DIR_FIXED)]
@@ -84,6 +92,15 @@ def check(img):
             "root": u64(e, 24), "mode": u64(e, 32), "link": u64(e, 48),
             "name": bytes(e[E_NAME:E_NAME + e[1]]), "tail": bytes(e[E_NAME + e[1]:]),
         })
+    return dblocks, ents, errors
+
+
+def check(img):
+    notes = []
+    if img[0:8] not in (b"BSTDISK2", b"BSTDISK3"):
+        return ["no BSTDISK3 or BSTDISK2 magic (a blank disk is formatted at mount)"], notes, {}
+    blocks = min(len(img) // BLOCK, MAX_BLOCKS)
+    dblocks, ents, errors = entries(img)
 
     def where(i):
         return f"entry {i} ({ents[i]['name'].decode(errors='replace')!r})"
@@ -179,15 +196,11 @@ def check(img):
             continue                    # no root map: all holes
         claim(e["root"], i, "root map")
         nblocks = (size + BLOCK - 1) // BLOCK
-        root = img[e["root"] * BLOCK:(e["root"] + 1) * BLOCK]
-        for m in range(PTRS):
-            l1 = u64(root, 8 * m)
+        for m, l1 in used(img, e["root"]):
             if not block_ok(l1, i, "map"):
                 continue
             claim(l1, i, "map")
-            mp = img[l1 * BLOCK:(l1 + 1) * BLOCK]
-            for k in range(PTRS):
-                b = u64(mp, 8 * k)
+            for k, b in used(img, l1):
                 if not block_ok(b, i, "data"):
                     continue
                 claim(b, i, "data")

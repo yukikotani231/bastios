@@ -136,7 +136,7 @@ fn sin_in(k: &mut Kernel, pid: u64, va: u64, alen: u64) -> Sin
 
 /// Whether open file description h is an AF_INET6 socket.
 fn ofd_v6(k: &Kernel, h: u64) -> bool {
-  return h < OFD_N && (k.inet6 >> h) % 2 == 1;
+  return h < len(k.inet6) && get(k.inet6, h) == 1;
 }
 
 /// Whether descriptor fd of process pid is an AF_INET6 socket.
@@ -229,7 +229,7 @@ fn lx_socket(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64) -> u6
   if domain == AF_INET6 {
     let h = fd_ofd(k, pid, fd);
     if h < OFD_N {
-      k.inet6 = k.inet6 | (1 << h);
+      k.inet6 = set(k.inet6, h, 1);
     }
   }
   return fd;

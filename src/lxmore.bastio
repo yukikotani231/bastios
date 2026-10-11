@@ -53,6 +53,7 @@ fn pipe_put_xfer(k: &mut Kernel, p: u64, n: u64) -> u64
   ring_in(&mut k.pipebuf, p * PIPE_CAP, PIPE_CAP, ring_slot(r, r.n), k.fs.xfer, 0, put);
   ring_push_n(&mut r, put);
   pipe_keep(&mut k.pipes, p, r);
+  sigio_pipe(&mut k, p);
   return put;
 }
 
@@ -253,6 +254,23 @@ fn lx_piov(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, iov: u
   if cnt > 1024 || off >= 0x8000000000000000 {
     return EINVAL;
   }
+  // As on Linux, the whole vector is checked before anything moves: a
+  // length past SSIZE_MAX, alone or in total, is EINVAL.
+  let mut total = 0;
+  let mut v = 0;
+  while v < cnt
+    invariant v <= cnt && cnt <= 1024 && total < 0x8000000000000000 && kok(k)
+  {
+    if iov > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, iov + 16 * v, &mut k.fs.xfer, 16) != 16 {
+      return EFAULT;
+    }
+    let len = get_u64(k.fs.xfer, 8);
+    if len >= 0x8000000000000000 - total {
+      return EINVAL;
+    }
+    total = total + len;
+    v = v + 1;
+  }
   let mut done = 0;
   let mut i = 0;
   while i < cnt
@@ -287,12 +305,20 @@ fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u6
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  let f = flags % 0x100000000;
+  if f & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH | 0x6000) != 0 || f & 0x6000 == 0x6000 {
+    return EINVAL;                          // unknown flags, or both AT_STATX_FORCE_SYNC and DONT_SYNC
+  }
+  let mask = pget(k.procs, pid, F_REGS + R_R10);
+  if mask & 0x80000000 != 0 {
+    return EINVAL;                          // STATX__RESERVED
+  }
   if buf == 0 || buf > 0xFFFFFFFFFFFF0000 {
     return EFAULT;
   }
   let mut r = 0;
   if flags / AT_EMPTY_PATH % 2 == 1 && user_empty(&mut k, pid, path) {
-    r = lx_fstat(&mut k, pid, dirfd, buf);
+    r = lx_fstat_at(&mut k, pid, dirfd, buf);
   } else {
     r = lx_stat(&mut k, pid, dirfd, path, buf, (flags & AT_SYMLINK_NOFOLLOW) == 0);
   }
@@ -308,6 +334,7 @@ fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u6
   let uid = get_u64(k.fs.xfer, 24) / 0x100000000;
   let gid = get_u64(k.fs.xfer, 32) % 0x100000000;
   let size = get_u64(k.fs.xfer, 48);
+  let rdev = get_u64(k.fs.xfer, 40) % 0x100000000;
   let blocks = get_u64(k.fs.xfer, 64);
   let atime = get_u64(k.fs.xfer, 72);
   let mtime = get_u64(k.fs.xfer, 88);
@@ -328,6 +355,8 @@ fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u6
   xfer_u64(&mut k.fs.xfer, 64, atime);                              // stx_atime.tv_sec
   xfer_u64(&mut k.fs.xfer, 96, ctime);                              // stx_ctime.tv_sec
   xfer_u64(&mut k.fs.xfer, 112, mtime);                             // stx_mtime.tv_sec
+  // stx_rdev_major and stx_rdev_minor, from Linux's 32-bit encoding
+  xfer_u64(&mut k.fs.xfer, 128, rdev % 0x100000 / 256 + (rdev % 256 + rdev / 4096 / 256 * 256) * 0x100000000);
   if copy_to_user(&mut k.spaces, pid, buf, k.fs.xfer, STATX_SIZE) != STATX_SIZE {
     return EFAULT;
   }
