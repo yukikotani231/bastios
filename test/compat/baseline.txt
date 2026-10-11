@@ -1,6 +1,35 @@
 # Checks that pass on BastiOS (make compat-baseline rewrites this).
 # make compat fails if one of them stops passing.
+alpine: alpine: unpack the root, chroot into it
+alpine: apk: a dependency comes along; install scripts run
+alpine: apk: a dependency nothing provides stops the install
+alpine: apk: a new trigger runs on the directory it watches
+alpine: apk: install bash, make, jq, rsync, openssl, file and xmllint
+alpine: apk: install from a repository over HTTP, then remove it
+alpine: apk: install git, curl and less, with what they depend on
+alpine: apk: remove a package and its files
+alpine: apk: remove a package: its scripts run, its dependency goes too
+alpine: apk: remove them, and what only they needed
+alpine: apk: the packages the root came with
+alpine: apk: they are in its database
+alpine: apk: upgrade, with a version constraint on the dependency
+alpine: bash: arrays, brace expansion, here-strings
+alpine: curl: 1 MiB from the host
+alpine: curl: a file from the host
+alpine: file: what a file is (libmagic)
+alpine: git: commit, log and diff
+alpine: jq: query JSON
+alpine: less: copies a pipe through
+alpine: make: rebuild only what is out of date
+alpine: openssl: a digest and random bytes
+alpine: rsync: copy a tree
+alpine: ssh-keygen: an ed25519 key
+alpine: xmllint: an XPath query
 apps: ash: a 1200-byte typed line
+apps: git: 300 files, a branch and a merge
+apps: git: gc, fsck and a clone through upload-pack
+apps: git: init, commit, log and diff
+apps: git: stash, revert and bisect run
 apps: httpd: serve a page, fetch it over loopback
 apps: lua: arithmetic and strings
 apps: lua: coroutines and tables
@@ -242,6 +271,38 @@ t_file: unlink an open file, then read it
 t_file: utime
 t_file: write
 t_file: writev
+t_inotify: /proc/sys/fs/inotify/max_queued_events
+t_inotify: /proc/sys/fs/inotify/max_user_instances
+t_inotify: /proc/sys/fs/inotify/max_user_watches
+t_inotify: IN_MASK_CREATE on a watched file is EEXIST
+t_inotify: IN_ONESHOT: one event, then the watch goes
+t_inotify: IN_ONLYDIR on a file is ENOTDIR
+t_inotify: a blocking read waits for the event
+t_inotify: a buffer too small for an event is EINVAL
+t_inotify: a child's event: to the directory, then to the child
+t_inotify: a directory's events name the entry
+t_inotify: a file's events: attrib, open, access, close, open, modify, close-write
+t_inotify: a full queue ends with IN_Q_OVERFLOW (wd -1)
+t_inotify: a rename's two events share a cookie
+t_inotify: a watch on a closed fd is EBADF
+t_inotify: a watch on a missing file is ENOENT
+t_inotify: a watch on a non-inotify fd is EINVAL
+t_inotify: a watch with no events is EINVAL
+t_inotify: adding it again gives the same wd
+t_inotify: an empty queue reads EAGAIN
+t_inotify: closing the descriptor
+t_inotify: epoll sees it readable too
+t_inotify: inotify_add_watch on a directory
+t_inotify: inotify_add_watch on a file
+t_inotify: inotify_init1 rejects unknown flags
+t_inotify: inotify_init1 with NONBLOCK and CLOEXEC
+t_inotify: inotify_rm_watch
+t_inotify: poll says POLLIN once an event is queued
+t_inotify: removing a watch reports IN_IGNORED
+t_inotify: removing it twice is EINVAL
+t_inotify: rmdir: delete-self, ignored, then delete in the directory
+t_inotify: two equal events in a row coalesce
+t_inotify: unlink: attrib, ignored, then delete in the directory
 t_ipc: AF_UNIX bind/listen
 t_ipc: AF_UNIX connect through a hard link of the socket file
 t_ipc: AF_UNIX connect through a renamed socket file
@@ -534,10 +595,13 @@ t_perm: the disk keeps owners
 t_perm: umask applies to new files and directories
 t_perm: without the group, the group's bits do not apply
 t_proc: /proc/PID/stat of an ended process is ESRCH
+t_proc: #! naming a missing interpreter is ENOENT
+t_proc: #! naming no interpreter is ENOEXEC
 t_proc: child's getppid is the parent
 t_proc: environment
 t_proc: execve
 t_proc: execve missing is ENOENT
+t_proc: execve of a #! script
 t_proc: fork + exit status
 t_proc: fork copies memory
 t_proc: getgroups

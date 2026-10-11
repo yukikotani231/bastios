@@ -10,9 +10,17 @@
 #include <fcntl.h>
 #include <sched.h>
 
+/* Writes s to a new file at path. */
+static int put(const char *path, const char *s) {
+    FILE *f = fopen(path, "w");
+    return f && fputs(s, f) >= 0 && fclose(f) == 0;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "child") == 0)
         return 7;                                   /* run by the execve check */
+    if (argc > 1 && strcmp(argv[1], "bang") == 0)   /* run by the "#!" checks */
+        return argc == 4 && strcmp(argv[2], "./cp_bang") == 0 && strcmp(argv[3], "a") == 0 ? 8 : 9;
     setup();
     int st = 0;
     pid_t p;
@@ -94,6 +102,22 @@ int main(int argc, char **argv) {
             (snprintf(path, sizeof path, "/proc/%d/stat", p), (fd = open(path, O_RDONLY)) >= 0 &&
              kill(p, SIGKILL) == 0 && waitpid(p, &st, 0) == p &&
              read(fd, b, sizeof b) == -1 && errno == ESRCH && close(fd) == 0)));
+    }
+    {
+        /* A script runs through the interpreter its "#!" line names, with
+         * the line's argument and the script's path before the rest. */
+        char self[256], line[300];
+        ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
+        self[n > 0 ? n : 0] = 0;
+        snprintf(line, sizeof line, "#! %s  bang \necho not here\n", self);
+        EXPECT("execve of a #! script", put("cp_bang", line) && chmod("cp_bang", 0755) == 0
+            && (p = fork()) >= 0 && (p == 0 ? (execl("./cp_bang", "./cp_bang", "a", (char *)0), _exit(99), 0) :
+            waitpid(p, &st, 0) == p && WIFEXITED(st) && WEXITSTATUS(st) == 8));
+        EXPECT("#! naming no interpreter is ENOEXEC", put("cp_bang", "#!\n") &&
+            execl("./cp_bang", "./cp_bang", (char *)0) == -1 && errno == ENOEXEC);
+        EXPECT("#! naming a missing interpreter is ENOENT", put("cp_bang", "#!/no/such/sh\n") &&
+            execl("./cp_bang", "./cp_bang", (char *)0) == -1 && errno == ENOENT);
+        unlink("cp_bang");
     }
     return done();
 }

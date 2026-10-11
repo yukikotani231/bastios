@@ -352,6 +352,12 @@ fn lx_sigqueue(k: &mut Kernel, pid: u64, target: u64, s: u64, info: u64) -> u64
   if info > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, info, &mut k.fs.xfer, 32) != 32 {
     return EFAULT;
   }
+  // Another process may not pretend to be the kernel or kill/tkill: a
+  // si_code of 0 or more, or SI_TKILL (-6), is for a process's own use.
+  let code = get_u64(k.fs.xfer, 8) % 4294967296;
+  if (code < 0x80000000 || code == 0xFFFFFFFA) && target != pid {
+    return EPERM;
+  }
   if !may_signal(k, pid, target, s) {
     return EPERM;                           // the same rule as kill
   }
@@ -718,7 +724,12 @@ fn lx_sigsuspend(k: &mut Kernel, pid: u64, was: u64, setp: u64) -> u64
     k.sigsave = set(k.sigsave, pid, pget(k.procs, pid, F_SIGMASK));
     pset(&mut k.procs, pid, F_SIGMASK, blockable(rd64(k.fs.xfer, 0)));
   }
-  return lx_retry(&mut k, pid, LX_RT_SIGSUSPEND);
+  let r = lx_retry(&mut k, pid, LX_RT_SIGSUSPEND);
+  let pend = pget(k.procs, pid, F_SIGPEND);
+  if r == SWITCH && pend & pget(k.procs, pid, F_SIGMASK) == pend {
+    nap(&mut k, pid, false);                // nothing to deliver yet: asleep until a signal (or a tick) comes
+  }
+  return r;
 }
 
 /// Is rsp on process p's alternate signal stack?

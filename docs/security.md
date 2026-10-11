@@ -43,7 +43,7 @@ New users get ids from 1000, and passwords are hashed with SHA-512 by
 BusyBox's own `crypt`. From the native shell, `ash` then `login` (or `su
 NAME`) starts a session as another user.
 
-With the boot option `login` (the ISO's third GRUB entry, or `-append
+With the boot option `login` (the third boot menu entry, or `-append
 login` under QEMU's own loader), the console runs BusyBox's `login`
 instead of the native shell, and the kernel starts a new one whenever the
 last has ended, as init restarts a getty (`relogin`, `src/main.bastio`):
@@ -97,7 +97,7 @@ Known gaps, most serious first.
 1. **Login is a boot option.** By default the console starts in the
    native shell as root (the tests drive it). With the boot option `login`
    it starts BusyBox's `login` instead (see "Users and passwords"), as
-   the ISO's third GRUB entry does.
+   the third boot menu entry does.
 2. **Native processes.** The native shell and the programs it starts run
    as root, and `SYS_SPAWN` starts any built-in program; that is safe only
    because a process that is not root cannot gain anything by it (the

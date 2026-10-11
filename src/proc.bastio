@@ -88,6 +88,7 @@ const S_ISVTX: u64 = 512;            // sticky: only a name's owner may remove i
 const S_ISGID: u64 = 1024;
 const S_ISUID: u64 = 2048;
 const SIG_DEATH: u64 = 256;          // F_CODE of a process a signal ended: 256 + the signal
+const EXIT_PENDING: u64 = 4294967296;  // F_CODE of a group leader whose exit waits for its threads: 2^32 + the code
 
 /// The exit code sys_wait reports for F_CODE `code`: 128 + the signal for
 /// a process a signal ended, as a Linux shell shows it.
@@ -127,7 +128,7 @@ const CONWAIT: u64 = 11;             // writing to the console, whose ring is fu
 const FUTEXWAIT: u64 = 12;           // in a Linux futex wait with no timeout
 const DISKWAIT: u64 = 13;            // waiting for the disk: F_WAIT says for what (disk_wake)
 const EXITING: u64 = 14;             // RUNNING, a thread whose leader is in execve: freed when it comes back
-const SOCKWAIT: u64 = 15;            // a Linux call on a network socket that has to wait (sock_wake)
+const SOCKWAIT: u64 = 15;            // a Linux call that has to wait: a network socket, or a poll, epoll_wait or sigsuspend (sock_wake)
 const STOPPED: u64 = 16;             // stopped by SIGSTOP, SIGTSTP, SIGTTIN or SIGTTOU until SIGCONT
 
 const NO_RESULT: u64 = 18446744073709551615;
@@ -492,11 +493,22 @@ const EP_AT: u64 = 32;                // TFD_N * TFD_STRIDE
 const FIFO_N: u64 = 4;                // open named pipes, in k.evt from FIFO_AT: FIFO_STRIDE words each
 const FIFO_STRIDE: u64 = 2;           // the FIFO's file handle + 1 (0: free), its pipe + 1
 const FIFO_AT: u64 = 552;             // EP_AT + EP_N * EP_STRIDE
-const EVT_LEN: u64 = 560;             // FIFO_AT + FIFO_N * FIFO_STRIDE
+const INO_N: u64 = 8;                 // inotify instances, in k.evt from INO_AT: INO_STRIDE words each (src/lxinotify.bastio)
+const INO_W: u64 = 16;                // watches per instance
+const INO_WAT: u64 = 3;               // a watch: the handle + 1 (0: free), its mask, its descriptor
+const INO_Q: u64 = 32;                // events an instance queues, IN_Q_OVERFLOW included
+const INO_NAMEW: u64 = 32;            // words of an event's name: 8 bytes each
+const INO_EV: u64 = 36;               // an event: wd, mask, cookie, name length, then INO_NAMEW words
+const INO_HEAD: u64 = 4;              // in use, the next watch descriptor, events queued, the first
+const INO_STRIDE: u64 = 1204;         // INO_HEAD + INO_W * INO_WAT + INO_Q * INO_EV
+const INO_AT: u64 = 560;              // FIFO_AT + FIFO_N * FIFO_STRIDE
+const INO_G: u64 = 10192;             // INO_AT + INO_N * INO_STRIDE: what all instances share
+const EVT_LEN: u64 = 10310;           // INO_G + 118
 const OF_UNIX: u64 = 11;              // an AF_UNIX socket: see src/lxunix.bastio
 const OF_PTY: u64 = 14;               // a pseudo-terminal end: x DEV_PTM + N or DEV_PTS + N; word 3: nonblocking (src/lxpty.bastio)
 const OF_PQ: u64 = 13;                // a POSIX message queue: x the queue; word 3: nonblocking + 2 * access mode (src/lxmq.bastio)
 const OF_SIGFD: u64 = 12;             // a signalfd: word 2 the signals it takes; word 3: nonblocking (src/lxevent.bastio)
+const OF_INOTIFY: u64 = 16;           // an inotify instance: x the instance; word 3: nonblocking (src/lxinotify.bastio)
 const OF_PIDFD: u64 = 15;             // a pidfd: x the process, NPROC once its slot was reused; word 3: nonblocking (src/lxpidfd.bastio)
 const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
@@ -556,6 +568,7 @@ const ENOSPC: u64 = 18446744073709551588;    // 2^64 - 28
 const EROFS: u64 = 18446744073709551586;     // 2^64 - 30
 const ENOTBLK: u64 = 18446744073709551601;   // 2^64 - 15
 const EBUSY: u64 = 18446744073709551600;     // 2^64 - 16
+const ETXTBSY: u64 = 18446744073709551590;   // 2^64 - 26
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
 const NAPPLETS: u64 = 34;
 const NSUID_APPLETS: u64 = 2;          // su and passwd (bin_suid, src/lxproc.bastio)
@@ -629,6 +642,7 @@ const K_EVENT: u64 = 8;               // x: the description (src/lxevent.bastio)
 const K_TIMER: u64 = 9;               // x: the timer
 const K_EPOLL: u64 = 10;              // x: the epoll instance
 const K_SIGFD: u64 = 11;              // x: the description (src/lxevent.bastio)
+const K_INOTIFY: u64 = 16;            // x: the instance (src/lxinotify.bastio)
 const K_PIDFD: u64 = 15;              // x: the process, NPROC if it is gone (src/lxpidfd.bastio)
 
 
@@ -874,6 +888,7 @@ fn read_u64(s: Str, at: u64) -> u64
 
 const MAGIC: u64 = 0x0A52455355545342;   // "BSTUSER\n"
 const ARGV0_MAX: u64 = 63;              // the most bytes of a program name in argv
+const START_ENV_LEN: u64 = 84;           // start_env_str()'s length
 
 /// Starts program `prog` as a child of `parent` (0 for none), with just
 /// its name as argv. Returns the new process id, or 0 if the image is
@@ -934,10 +949,11 @@ fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
   sig_reset(&mut k.sigact, pid, false);
   k.cwd = set(k.cwd, pid * CWD_STRIDE, 0);   // starts at "/"
   k.croot = set(k.croot, pid * CWD_STRIDE, 0);
-  let mut args = balloc(ARGV0_MAX + 1);
+  let mut args = balloc(ARGV0_MAX + 1 + START_ENV_LEN);
   let alen = name_arg(&mut args, name);
+  let total = start_env(&mut args, alen);
   let src = Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
-  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, alen, false);
+  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, total, false);
   bfree(args);
   let ok = sp is Space::Mapped;
   put_space(&mut k.spaces, pid, sp);
@@ -973,19 +989,51 @@ fn free_pid(procs: &Buf) -> u64
 /// Writes `name` (at most ARGV0_MAX bytes of it) and a NUL into `args`:
 /// an argv of one. Returns the bytes written.
 fn name_arg(args: &mut Bytes, name: Str) -> u64
-  requires blen(args) == ARGV0_MAX + 1
-  ensures blen(args) == ARGV0_MAX + 1 && result <= ARGV0_MAX + 1
+  requires blen(args) == ARGV0_MAX + 1 + START_ENV_LEN
+  ensures blen(args) == ARGV0_MAX + 1 + START_ENV_LEN && result <= ARGV0_MAX + 1
 {
   let n = smaller(slen(name), ARGV0_MAX);
   let mut i = 0;
   while i < n
-    invariant i <= n && n <= ARGV0_MAX && blen(args) == ARGV0_MAX + 1
+    invariant i <= n && n <= ARGV0_MAX && blen(args) == ARGV0_MAX + 1 + START_ENV_LEN
   {
     bset(&mut args, i, sget(name, i));
     i = i + 1;
   }
   bset(&mut args, n, 0);
   return n + 1;
+}
+
+/// The environment a program the kernel starts gets (the shell's ash, and
+/// what it runs): where programs are, a home, and a terminal type that
+/// curses programs know (Alpine's ncurses-terminfo-base has vt100). Each
+/// string ends at a ";", which start_env makes a NUL.
+fn start_env_str() -> Str
+  ensures slen(result) == START_ENV_LEN
+{
+  return "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin;HOME=/;TERM=vt100;";
+}
+
+/// Puts start_env_str() in args after the first `from` bytes. Returns where it ends.
+fn start_env(args: &mut Bytes, from: u64) -> u64
+  requires blen(args) == ARGV0_MAX + 1 + START_ENV_LEN && from <= ARGV0_MAX + 1
+  ensures blen(args) == ARGV0_MAX + 1 + START_ENV_LEN && from <= result && result <= blen(args)
+{
+  let env = start_env_str();
+  let n = START_ENV_LEN;
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n == START_ENV_LEN && slen(env) == n && from <= ARGV0_MAX + 1 && blen(args) == ARGV0_MAX + 1 + n
+  {
+    let c = sget(env, i);
+    if c == 59 {
+      bset(&mut args, from + i, 0);
+    } else {
+      bset(&mut args, from + i, c);
+    }
+    i = i + 1;
+  }
+  return from + n;
 }
 
 /// Builds the address space for program `prog`, with the argument strings
@@ -1151,13 +1199,28 @@ fn build_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, img: Str, el
 /// Ends process `pid` with exit `code`: frees its address space, closes its
 /// files, hands the code to a parent waiting for it, and orphans its
 /// children.
-fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code: u64)
+fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
   requires kok(k) && 1 <= who && who < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
-  // A thread ends its whole group, which ends as its leader.
+  // A thread ends its whole group, which ends as its leader. If threads
+  // on other processors must come back first, the leader keeps the code
+  // (+ EXIT_PENDING): the first exit wins, as Linux's group exit code,
+  // not the 137 of the last killed thread to come back.
+  let mut code = code0;
+  let mut g = 0;
+  if pget(k.procs, who, F_TGID) != 0 {
+    g = tgid(k.procs, who);
+    let pend = pget(k.procs, g, F_CODE);
+    if pend >= EXIT_PENDING && pend - EXIT_PENDING < EXIT_PENDING {
+      code = pend - EXIT_PENDING;
+    }
+  }
   let pid = group_end(&mut k, mmu, who);
   if pid == 0 {
+    if g != 0 && code < EXIT_PENDING {
+      pset(&mut k.procs, g, F_CODE, code + EXIT_PENDING);
+    }
     return;
   }
   map_drop_all(&mut k, pid);                 // shared file pages go back first

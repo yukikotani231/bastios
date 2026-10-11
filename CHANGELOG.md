@@ -447,6 +447,15 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Network
 
+- TCP buffers are no longer 4 KiB: each connection has a receive and a
+  send ring of 256 KiB whose pages are taken as data arrives and given
+  back once it is read or acknowledged, so idle connections cost nothing.
+  Windows are scaled (RFC 7323) when the peer offers it, and ACKs carry a
+  SACK block (RFC 2018) for data held past a gap. A `read` or `write` on
+  a connection moves up to the ring's size instead of 4 KiB, the loopback
+  queue holds 64 frames and TCP waits for room in it instead of losing
+  segments, and segments round the loopback carry no checksum. `make
+  bench`'s `tcpbw` went from 14.7 to 73.8 MiB/s under TCG.
 - The virtio network card sends without the kernel lock waiting for it:
   a frame goes out through one of two transmit buffers, and the buffers
   come back when the next frame is sent. Received buffers go back to the
@@ -498,6 +507,26 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   the host with Dropbear's client; a key that is not authorized is
   refused. `/etc/shells` lists `/bin/sh` and `/bin/ash`, and `/etc/group`
   has a `tty` group.
+- DHCP leases are renewed: at T1 the kernel asks its server to extend the
+  lease, at T2 any server, and when the lease runs out the address is
+  dropped and the search starts again; a NAK starts it at once. Before,
+  the first lease was kept forever. `test/dhcp_test.sh` (in `make test`,
+  on virtio and e1000) plays a server with a 6-second lease through all
+  of it.
+- Servers that wait for events: `ioctl(FIONBIO)` makes any descriptor
+  nonblocking (it worked on pseudo-terminals only), a nonblocking send to
+  a full connection gives `EAGAIN` instead of waiting, `sendfile` writes to TCP
+  connections, `FIOASYNC`, `FIOCLEX` and `FIONCLEX` work on any
+  descriptor, and `prctl(PR_SET_DUMPABLE)` is accepted. With these, nginx
+  installed with `apk` serves pages to the host. `poll`, `select`,
+  `epoll_wait`, `pause` and `rt_sigsuspend` sleep until a frame, a clock
+  tick or a signal instead of running on every scheduler pass (see
+  [docs/linux.md](docs/linux.md)): a 16 MiB download from nginx went from
+  0.86 MB/s to 7 MB/s. `t_server` in the compatibility suite checks the
+  calls.
+- Reads of `/dev/zero`, `/dev/urandom` and the other character devices
+  return up to 256 KiB at once, not 4 KiB, so `dd bs=64k` gets whole
+  blocks.
 
 ### Console and boot
 
@@ -588,6 +617,17 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   4 GiB, where UEFI firmware puts them. Needs bastiolang with the wider
   window. QEMU targets pass `-cpu qemu64,+pdpe1gb`, since QEMU's default
   CPU model has no 1 GiB pages (on such a CPU the window stops at 4 GiB).
+- The ISO boots through Limine (BSD-2-Clause) instead of GRUB
+  (GPL-3.0), so the image ships no GPL-3.0 code. `make iso` fetches
+  Limine's binary release at a pinned tag and needs only `xorriso`. The
+  kernel is now linked at 16 MiB (it was 1 MiB): Limine loads a Multiboot
+  kernel only into RAM the firmware marks free, and under OVMF the range the
+  kernel used to take (1 to 14 MiB) is not all free. The 15 MiB below the
+  kernel go unused. The menu keeps the hardware report entry and talks on
+  the serial line too. `make usb` keeps the stick's GPT: it builds the ISO
+  again with a GPT, adds a BIOS boot partition for Limine's BIOS stage and
+  installs Limine into the image. The ISO itself has an MBR, which Limine's
+  installer makes from the GPT for older firmware.
 
 ### Fixed
 

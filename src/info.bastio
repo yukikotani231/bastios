@@ -1,6 +1,6 @@
 // The hardware report: what the kernel found at boot, for someone trying
 // BastiOS on a real machine (docs/real-hardware.md). It is printed when the
-// boot command line has the word `diag` (the ISO's GRUB menu has an entry
+// boot command line has the word `diag` (the ISO's Limine menu has an entry
 // for it), on the screen and the serial line like the rest of the boot log,
 // a screenful at a time: after each part the kernel waits for a key (or a
 // minute), so the screen can be photographed on a machine without a serial
@@ -214,7 +214,8 @@ fn hw_cpu(con: &mut Con, cpu: &Cpu)
 }
 
 /// The memory map the boot loader gave, and how much of it the kernel
-/// uses (its page pool lies below 1 GiB).
+/// uses (its page pool: every run of RAM above the kernel image, up to
+/// 512 GiB).
 fn hw_mem(con: &mut Con, cpu: &Cpu, pool_pages: u64)
   requires con_ok(con)
   ensures con_ok(con)
@@ -248,7 +249,7 @@ fn hw_mem(con: &mut Con, cpu: &Cpu, pool_pages: u64)
   put_num(&mut con, pool_pages);
   puts(&mut con, " pages (");
   put_num(&mut con, pool_pages / 256);
-  puts(&mut con, " MiB) below 1 GiB\r\n");
+  puts(&mut con, " MiB)\r\n");
   let mut i = 0;
   while i < n
     invariant i <= n && n <= MEM_REGIONS && con_ok(con)

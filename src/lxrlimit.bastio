@@ -249,6 +249,22 @@ fn fsize_room(k: &mut Kernel, pid: u64, row: u64, n: u64) -> u64
   return smaller(n, lim - pos);
 }
 
+/// truncate and ftruncate to `size` bytes: 0, or -EFBIG (with SIGXFSZ)
+/// past process pid's RLIMIT_FSIZE, as on Linux.
+fn fsize_trunc(k: &mut Kernel, pid: u64, size: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let lim = rl_cur(k, pid, RLIMIT_FSIZE);
+  if lim == RLIM_INFINITY || size <= lim {
+    return 0;
+  }
+  if pid != 0 {
+    post_sig(&mut k, pid, SIGXFSZ);
+  }
+  return EFBIG;
+}
+
 /// May process pid lock `more` bytes besides those it holds? 0, or
 /// -EPERM (non-root with a limit of 0) or -ENOMEM.
 fn lock_check(k: &Kernel, pid: u64, held: u64, more: u64) -> u64
