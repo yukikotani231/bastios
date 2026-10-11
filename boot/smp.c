@@ -42,7 +42,10 @@ static struct __attribute__((packed)) { uint16_t limit; uint64_t base; } ap_idtr
 static volatile uint32_t *lapic;    /* its registers in xAPIC mode */
 static int x2apic;                  /* every local APIC runs in x2APIC mode: registers are MSRs */
 static uint32_t lapic_ticks_10ms;   /* local APIC timer count for 10 ms, divide by 16 */
-static uint32_t timer_from;         /* what it was counted against: 1 HPET, 2 PM timer, 3 PIT, 4 none (a guess) */
+static uint32_t bsp_lapic_tick;     /* no PIT: the BSP's 10 ms tick comes from its local APIC timer */
+#define BSP_TICK_VECTOR 32          /* the vector the kernel takes the PIT's tick on (V_TIMER) */
+static uint32_t timer_from;         /* what it was counted against: 1 HPET, 2 PM timer, 3 PIT, 4 none (a guess), 5 RTC */
+static uint64_t tsc_hz;             /* the time-stamp counter's rate, measured with the PIT or the RTC (else 0) */
 static uint32_t madt_cpus, madt_x2; /* enabled processor entries in the MADT: local APIC, x2APIC */
 static uint32_t madt_high;          /* of those, ones with an id of 255 or more (x2APIC mode only) */
 static uint32_t apic_fw, apic_now;  /* how the firmware left the BSP's APIC, and how it runs: APIC_* */
@@ -286,7 +289,7 @@ static int map_lapic(uint64_t base) {
 /* Called from trap_common for every vector: local APIC interrupts must be
  * acknowledged at the local APIC (the 8259's are acknowledged by the kernel). */
 void bst_lapic_ack(uint64_t vector) {
-    if (vector == LAPIC_TIMER_VECTOR && (lapic || x2apic)) lw(0xB0, 0);
+    if ((vector == LAPIC_TIMER_VECTOR || (vector == BSP_TICK_VECTOR && bsp_lapic_tick)) && (lapic || x2apic)) lw(0xB0, 0);
 }
 
 /* Processor i's task state segment: user-mode traps land on the trap stack
@@ -398,10 +401,46 @@ static uint32_t lapic_vs_pmtimer(void) {
     return d >= 35795 ? n : 0;
 }
 
+/* Does PIT channel 0 count? Its count is read twice, about a millisecond
+ * apart. Missing, it reads 0xFFFF both times; gated, it does not move. The
+ * kernel programs channel 0 itself afterwards. */
+static int pit_counts(void) {
+    outb(0x43, 0x34);                               /* channel 0, low then high byte, mode 2 */
+    outb(0x40, 0xFF);
+    outb(0x40, 0xFF);
+    udelay(10);
+    outb(0x43, 0x00);                               /* latch */
+    uint32_t a = inb(0x40);
+    a |= (uint32_t)inb(0x40) << 8;
+    udelay(1000);
+    outb(0x43, 0x00);
+    uint32_t b = inb(0x40);
+    b |= (uint32_t)inb(0x40) << 8;
+    return a != b;
+}
+
+static inline uint64_t rdtsc(void) { uint32_t lo, hi; __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi)); return lo | (uint64_t)hi << 32; }
+
+/* Register A of the CMOS real-time clock: bit 7 (update in progress) is
+ * set for the last 244 us before each second's update. */
+static uint32_t rtc_reg_a(void) { outb(0x70, 0x0A); return inb(0x71); }
+
+/* Wait until the RTC finishes a second's update (bit 7 of register A falls),
+ * for at most 2^33 time-stamp counter cycles (several seconds at any rate a
+ * 64-bit processor runs at). Whether it did. */
+static int rtc_tick(void) {
+    uint64_t t0 = rdtsc();
+    while (!(rtc_reg_a() & 0x80)) if (rdtsc() - t0 > (1ull << 33)) return 0;
+    while (rtc_reg_a() & 0x80) if (rdtsc() - t0 > (1ull << 33)) return 0;
+    return 1;
+}
+
 /* Count the local APIC timer against 10 ms of the HPET, else of the ACPI PM
  * timer, else of PIT channel 2 (the speaker channel, which the kernel never
- * uses; newer PCs may gate it off), on the bootstrap processor with its
- * timer masked. The kernel picks its clock in the same order. */
+ * uses; newer PCs may gate it off), else against one second of the RTC, on
+ * the bootstrap processor with its timer masked. The kernel picks its
+ * clock in the same order; for the last two, which it cannot read itself,
+ * the time-stamp counter's rate is measured here too (tsc_hz). */
 static void calibrate_lapic_timer(void) {
     lw(0x3E0, 0x3);
     lw(0x320, 0x10000);                     /* masked, one-shot */
@@ -421,11 +460,40 @@ static void calibrate_lapic_timer(void) {
     outb(0x42, 11932 & 0xFF);                       /* 1193182 Hz / 100 */
     outb(0x42, 11932 >> 8);
     lw(0x380, 0xFFFFFFFF);
+    uint64_t t0 = rdtsc();
     outb(0x61, inb(0x61) | 0x01);                   /* gate high: count */
-    for (uint64_t i = 0; i < 100000000 && !(inb(0x61) & 0x20); i++) {}
+    /* Its output goes high after 10 ms. High already, there is no PIT
+     * (the port reads 0xFF); still low after 2^30 time-stamp counter
+     * cycles (a fifth of a second or more), it is gated. */
+    int low = !(inb(0x61) & 0x20), done = 0;
+    uint64_t t1 = t0;
+    while (low && !done && t1 - t0 < (1ull << 30)) {
+        done = inb(0x61) & 0x20;
+        t1 = rdtsc();
+    }
     n = 0xFFFFFFFF - lr(0x390);
     outb(0x61, inb(0x61) & ~0x01);
     lw(0x380, 0);
+    if (done && n) {
+        lapic_ticks_10ms = n;
+        tsc_hz = (t1 - t0) * 100;
+        return;
+    }
+    /* No PIT either (gated, as on many recent PCs). The RTC is slow to
+     * count against, but every PC has one: one second, between two of
+     * its updates. Bit 7 of register A reads 1 forever without one. */
+    timer_from = 5;
+    n = 0;
+    if (rtc_reg_a() != 0xFF && rtc_tick()) {
+        lw(0x380, 0xFFFFFFFF);
+        t0 = rdtsc();
+        if (rtc_tick()) {
+            t1 = rdtsc();
+            n = (0xFFFFFFFF - lr(0x390)) / 100;
+            tsc_hz = t1 - t0;
+        }
+        lw(0x380, 0);
+    }
     if (!n) timer_from = 4;
     lapic_ticks_10ms = n ? n : 100000;
 }
@@ -501,13 +569,27 @@ void bst_smp_init(void) {
         lw(0xF0, 0x1FF);
     }
     smp_stop = madt ? SMP_LAPIC_AWAY : SMP_NO_MADT;
-    if (!madt || (!x2apic && !map_lapic(apic_msr & 0xFFFFF000ull))) return;
+    if (!x2apic && !map_lapic(apic_msr & 0xFFFFF000ull)) return;
+    calibrate_lapic_timer();
+    /* The kernel ticks on the PIT (IRQ 0, vector 32) on this processor.
+     * Many recent chipsets gate the PIT's clock off by default (Intel's
+     * "8254 clock gating"), and then no tick ever comes and the kernel
+     * stands still. Without a counting PIT the local APIC timer raises
+     * vector 32 every 10 ms instead (acknowledged in bst_lapic_ack). */
+    if (!pit_counts()) {
+        bsp_lapic_tick = 1;
+        lw(0x3E0, 0x3);                                 /* divide by 16 */
+        lw(0x320, 0x20000 | BSP_TICK_VECTOR);           /* periodic */
+        lw(0x380, lapic_ticks_10ms);
+    }
+    smp_stop = SMP_NO_MADT;
+    if (!madt) return;
     uint64_t size = (uint64_t)(bst_ap_trampoline_end - bst_ap_trampoline);
+    smp_stop = SMP_LAPIC_AWAY;
     if (size > 4096) return;
     for (uint64_t i = 0; i < size; i++) ((volatile char *)AP_TRAMPOLINE)[i] = bst_ap_trampoline[i];
     __asm__ volatile ("sidt %0" : "=m"(ap_idtr));
     for (int m = 0; m < 3; m++) syscall_msrs[m] = rdmsr(0xC0000081 + m + (m == 2));
-    calibrate_lapic_timer();
 
     uint32_t self = x2apic ? lr(0x20) : lr(0x20) >> 24;
     uint32_t seen[MAX_CPUS];
@@ -546,6 +628,7 @@ void bst_smp_init(void) {
  * every answer it relies on. */
 extern uint64_t bst_boot_cmdline(uint64_t i);              /* multiboot.c */
 extern uint64_t bst_boot_region(uint64_t n, uint64_t f);
+extern uint64_t bst_boot_framebuffer(uint64_t f);
 uint64_t bst_platform_info(uint64_t what, uint64_t i) {
     switch (what) {
     case 0: return bst_boot_cmdline(i);                    /* a byte, or 256 */
@@ -561,7 +644,7 @@ uint64_t bst_platform_info(uint64_t what, uint64_t i) {
         return i == 0 ? madt_cpus : i == 1 ? madt_x2 : i == 2 ? smp_stop
              : i == 3 ? apic_now : i == 4 ? apic_fw : 0;
     case 7:                                                /* the local APIC timer's calibration */
-        return i == 0 ? timer_from : i == 1 ? lapic_ticks_10ms : 0;
+        return i == 0 ? timer_from : i == 1 ? lapic_ticks_10ms : i == 2 ? bsp_lapic_tick : i == 3 ? tsc_hz : 0;
     case 8: {                                              /* ACPI: where the RSDP came from, its revision, the tables */
         uint64_t rsdp = find_rsdp();
         if (i == 0) return rsdp_from;
@@ -570,6 +653,7 @@ uint64_t bst_platform_info(uint64_t what, uint64_t i) {
         if (i % 2 == 1) return t;                          /* its address (0: past the end) */
         return t && mapped(t, 36) ? rd32(t) : 0;           /* its signature, 0 if out of reach */
     }
+    case 9: return bst_boot_framebuffer(i);                /* the framebuffer, anywhere: as boot_fb */
     }
     return 0;
 }

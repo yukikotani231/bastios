@@ -10,7 +10,7 @@ const KBD_STATUS: u64 = 0x64;
 const KST_FULL: u64 = 1;              // a byte is waiting
 const KST_AUX: u64 = 32;              // ... and it is from the mouse
 
-struct Kbd { data: PortIo, status: PortIo, shift: bool, ctrl: bool, ext: bool }
+struct Kbd { data: PortIo, status: PortIo, shift: bool, ctrl: bool, ext: bool, present: bool }
 
 spec fn kbd_ok(k: &Kbd) -> bool {
   port_count(k.data) == 1 && port_count(k.status) == 1
@@ -25,10 +25,17 @@ fn keymap_shift() -> Str {
   return "\0\0!@#$%^&*()_+\0\tQWERTYUIOP{}\r\0ASDFGHJKL:\"~\0|ZXCVBNM<>?\0*\0 ";
 }
 
-/// Empties anything the controller holds from before.
+/// Empties anything the controller holds from before. Many recent PCs have
+/// no i8042 at all (and no firmware emulation of one); its ports then read
+/// 0xFF, which would say a mouse byte is always waiting, and the keyboard
+/// is left alone from then on.
 fn kbd_init(k: &mut Kbd)
   requires kbd_ok(k)
 {
+  if cast[u64](pio_in8(&mut k.status, 0)) == 0xFF {
+    k.present = false;
+    return;
+  }
   let mut n = 0;
   while n < 64 && cast[u64](pio_in8(&mut k.status, 0)) % 2 == KST_FULL
     invariant n <= 64
@@ -43,6 +50,9 @@ fn kbd_poll(k: &mut Kbd) -> u64
   requires kbd_ok(k)
   ensures result <= 256
 {
+  if !k.present {
+    return 256;
+  }
   let mut n = 0;
   while n < 16
     invariant n <= 16
