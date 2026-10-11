@@ -199,5 +199,23 @@ int main(void) {
            if (c == 0) { volatile char big[6 << 20]; big[0] = 1; big[sizeof big - 1] = 2; _exit(big[0] + big[sizeof big - 1] == 3 ? 0 : 1); }
            int st; waitpid(c, &st, 0);
            WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("pages come when first touched: 640 MiB of mmap, system calls and fork on pages never touched", ({
+           size_t n = (size_t)640 << 20;
+           char *r = mmap(0, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int ok = r != MAP_FAILED, pf[2] = { -1, -1 };
+           if (ok) {
+               r[0] = 1; r[n - 1] = 2;
+               char z[4] = { 9, 9, 9, 9 };
+               ok = pipe(pf) == 0 && write(pf[1], "abc", 3) == 3 && read(pf[0], r + (300 << 20), 3) == 3 && r[300 << 20] == 'a' &&
+                    write(pf[1], r + (400 << 20), 4) == 4 && read(pf[0], z, 4) == 4 && z[0] == 0 && z[3] == 0;
+               ok = ok && munmap(r + (100 << 20), 4096) == 0 && r[(100 << 20) + 4096] == 0 && r[(100 << 20) - 1] == 0;
+               pid_t c = fork();
+               if (c == 0) { r[500 << 20] = 5; _exit(r[0] == 1 && r[n - 1] == 2 && r[500 << 20] == 5 ? 0 : 1); }
+               int st2; waitpid(c, &st2, 0);
+               ok = ok && WIFEXITED(st2) && WEXITSTATUS(st2) == 0 && r[500 << 20] == 0;
+               munmap(r, n);
+               close(pf[0]); close(pf[1]);
+           }
+           ok; }));
     return done();
 }

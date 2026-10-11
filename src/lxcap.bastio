@@ -126,7 +126,7 @@ fn cap_header(k: &mut Kernel, pid: u64, hdr: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if hdr == 0 || copy_from_user(&mut k.spaces, pid, hdr, &mut k.fs.xfer, 8) != 8 {
+  if hdr == 0 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, hdr, &mut k.fs.xfer, 8) != 8 {
     return EFAULT;
   }
   let v = get_u64(k.fs.xfer, 0) % 0x100000000;
@@ -172,7 +172,7 @@ fn lx_capget(k: &mut Kernel, pid: u64, hdr: u64, data: u64) -> u64
   xfer_u64(&mut k.fs.xfer, 0, e % 0x100000000 + 0x100000000 * (p % 0x100000000));
   xfer_u64(&mut k.fs.xfer, 8, i % 0x100000000 + 0x100000000 * (e / 0x100000000));
   xfer_u64(&mut k.fs.xfer, 16, p / 0x100000000 + 0x100000000 * (i / 0x100000000));
-  if copy_to_user(&mut k.spaces, pid, data, k.fs.xfer, 12 * n) != 12 * n {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, data, k.fs.xfer, 12 * n) != 12 * n {
     return EFAULT;
   }
   return 0;
@@ -200,7 +200,7 @@ fn lx_capset(k: &mut Kernel, pid: u64, hdr: u64, data: u64) -> u64
   xfer_u64(&mut k.fs.xfer, 0, 0);
   xfer_u64(&mut k.fs.xfer, 8, 0);
   xfer_u64(&mut k.fs.xfer, 16, 0);
-  if copy_from_user(&mut k.spaces, pid, data, &mut k.fs.xfer, 12 * n) != 12 * n {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, data, &mut k.fs.xfer, 12 * n) != 12 * n {
     return EFAULT;
   }
   let w0 = get_u64(k.fs.xfer, 0);

@@ -465,7 +465,7 @@ fn lx_msgsnd(k: &mut Kernel, pid: u64, was: u64, id: u64, va: u64, sz: u64, flg:
     return lx_retry(&mut k, pid, LX_MSGSND);
   }
   let mut text = balloc(sz);
-  let got = copy_from_user(&mut k.spaces, pid, va + 8, &mut text, sz);
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + 8, &mut text, sz);
   if got != sz {
     bfree(text);
     ret(&mut k.procs, pid, EFAULT);
@@ -538,7 +538,7 @@ fn lx_msgrcv(k: &mut Kernel, pid: u64, was: u64, id: u64, va: u64, sz: u64, t: u
   let mut out = balloc(8 + n);
   bcopy(&mut out, 0, k.ipcb, base + o, 8);
   bcopy(&mut out, 8, k.ipcb, base + o + MSG_HDR, n);
-  let put = copy_to_user(&mut k.spaces, pid, va, out, 8 + n);
+  let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, out, 8 + n);
   bfree(out);
   if put != 8 + n {
     ret(&mut k.procs, pid, EFAULT);
@@ -645,7 +645,7 @@ fn lx_msgctl(k: &mut Kernel, pid: u64, id: u64, cmd0: u64, va: u64) -> u64
   if cmd != IPC_STAT && cmd != IPC_SET && cmd != IPC_RMID {
     return EINVAL;
   }
-  if cmd == IPC_SET && copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, MSQID_DS) != MSQID_DS {
+  if cmd == IPC_SET && copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, MSQID_DS) != MSQID_DS {
     return EFAULT;
   }
   let slot = ipc_find(k, KQ, id);
@@ -892,7 +892,7 @@ fn lx_semop(k: &mut Kernel, pid: u64, was: u64, id: u64, va: u64, nsops: u64, ts
       dl = sat_add(k.ns, ts.ns);
     }
   }
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, nsops * 6) != nsops * 6 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, nsops * 6) != nsops * 6 {
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
   }
@@ -1136,7 +1136,7 @@ fn lx_semctl(k: &mut Kernel, pid: u64, id: u64, num: u64, cmd0: u64, arg: u64) -
       return ERANGE;                        // a negative value too
     }
   }
-  if cmd == IPC_SET && copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, SEMID_DS) != SEMID_DS {
+  if cmd == IPC_SET && copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, SEMID_DS) != SEMID_DS {
     return EFAULT;
   }
   if id >= LONG_NEG {
@@ -1182,7 +1182,7 @@ fn lx_semctl(k: &mut Kernel, pid: u64, id: u64, num: u64, cmd0: u64, arg: u64) -
     if !ipc_may(k, pid, KS, slot, 2) {
       return EACCES;
     }
-    if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, nsems * 2) != nsems * 2 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, nsems * 2) != nsems * 2 {
       return EFAULT;
     }
     let mut i = 0;
@@ -1711,7 +1711,7 @@ fn lx_shmctl(k: &mut Kernel, pid: u64, id: u64, cmd0: u64, va: u64) -> u64
   if cmd != IPC_STAT && cmd != IPC_SET && cmd != IPC_RMID && cmd != SHM_LOCK && cmd != SHM_UNLOCK {
     return EINVAL;
   }
-  if cmd == IPC_SET && copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, SHMID_DS) != SHMID_DS {
+  if cmd == IPC_SET && copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, SHMID_DS) != SHMID_DS {
     return EFAULT;
   }
   let slot = ipc_find(k, KM, id);

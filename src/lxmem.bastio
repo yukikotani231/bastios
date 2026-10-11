@@ -492,6 +492,7 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
   let from = r / 4294967296;
   let to = r % 4294967296;
   lazy_fill(&mut k, pid, from, to);         // code not read yet: read it first
+  anon_reach(&mut k, pid, from, to);        // memory not touched yet: map it first
   // Only pages mmap handed out can have been left unmapped by PROT_NONE.
   let low = pget(k.procs, pid, F_MMAP) / 4096;
   if prot != 0 && from >= low {
@@ -532,7 +533,7 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
   // No mapping at addr (Linux finds no VMA there): EFAULT.
   let f0 = r / 4294967296;
   let e0 = r % 4294967296;
-  if win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, f0, e0, 0) != e0 - f0 {
+  if anon_count(&mut k, pid, f0, e0) != e0 - f0 {
     return EFAULT;
   }
   if fl / MREMAP_FIXED % 2 == 1 {
@@ -564,6 +565,7 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
   if flags / MREMAP_MAYMOVE % 2 == 0 {
     return ENOMEM;
   }
+  anon_reach(&mut k, pid, from, oend);      // the pages move: every one is there first
   let brk = pget(k.procs, pid, F_BRK);
   let low = pget(k.procs, pid, F_MMAP);
   let extra = want - have;
@@ -642,6 +644,7 @@ fn remap_fixed(k: &mut Kernel, pid: u64, r: u64, newn: u64, to_addr: u64) -> u64
   if at + want > WPAGES {
     return ENOMEM;
   }
+  anon_reach(&mut k, pid, from, oend);      // the pages move: every one is there first
   map_forget(&mut k, pid, at, at + want, false);
   win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at, at + want, 0);
   let mut keep = have;
@@ -756,7 +759,7 @@ fn map_flush(k: &mut Kernel, pid: u64, i: u64, from: u64, to: u64) -> u64
     let foff = sat_add(off, (p - first) * 4096);
     if foff < size {
       let n = smaller(4096, size - foff);
-      if copy_from_user(&mut k.spaces, pid, USER_BASE + p * 4096, &mut k.fs.xfer, n) == n {
+      if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, USER_BASE + p * 4096, &mut k.fs.xfer, n) == n {
         vfs_seek(&mut k.fs, row, foff);
         if vfs_write(&mut k.fs, &mut k.mem, row, n) == VFS_MISS {
           r = DISK_RETRY;
@@ -828,6 +831,7 @@ fn map_forget(k: &mut Kernel, pid: u64, from: u64, to: u64, wait: bool) -> u64
     i = i + 1;
   }
   lazy_forget(&mut k, pid, from, to);       // code not read yet stays unread
+  anon_forget(&mut k, pid, from, to);       // as does memory not touched yet
   return 0;
 }
 
@@ -895,7 +899,7 @@ fn lx_msync(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64) -> u64
   }
   let from = r / 4294967296;
   let to = r % 4294967296;
-  if win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, from, to, 0) != to - from {
+  if anon_count(&mut k, pid, from, to) != to - from {
     return ENOMEM;
   }
   return 0;
@@ -919,7 +923,7 @@ fn lx_mincore(k: &mut Kernel, pid: u64, addr: u64, n: u64, vec: u64) -> u64
   }
   let from = (addr - USER_BASE) / 4096;
   let to = smaller((addr - USER_BASE + n + 4095) / 4096, WPAGES);
-  if from > to || win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, from, to, 0) != to - from {
+  if from > to || anon_count(&mut k, pid, from, to) != to - from {
     return ENOMEM;
   }
   let mut i = 0;
@@ -935,7 +939,7 @@ fn lx_mincore(k: &mut Kernel, pid: u64, addr: u64, n: u64, vec: u64) -> u64
     invariant done <= total && total <= WPAGES && vec <= 18446744073709551615 - USER_SIZE && kok(k)
   {
     let m = smaller(total - done, XFER);
-    if copy_to_user(&mut k.spaces, pid, vec + done, k.fs.xfer, m) != m {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, vec + done, k.fs.xfer, m) != m {
       return EFAULT;
     }
     done = done + m;
@@ -997,7 +1001,7 @@ fn lx_madvise(k: &mut Kernel, pid: u64, addr: u64, n: u64, advice: u64) -> u64
   }
   let from = (addr - USER_BASE) / 4096;
   let to = smaller((addr - USER_BASE + n + 4095) / 4096, WPAGES);
-  if from > to || win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, from, to, 0) != to - from {
+  if from > to || anon_count(&mut k, pid, from, to) != to - from {
     return ENOMEM;
   }
   if advice == MADV_REMOVE || advice == MADV_WIPEONFORK {
@@ -1036,7 +1040,7 @@ fn lock_range(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
   }
   let from = (addr - USER_BASE) / 4096;
   let to = smaller((addr - USER_BASE + n + 4095) / 4096, WPAGES);
-  if from > to || win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, from, to, 0) != to - from {
+  if from > to || anon_count(&mut k, pid, from, to) != to - from {
     return ENOMEM;
   }
   return 0;

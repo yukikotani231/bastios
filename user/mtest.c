@@ -1,6 +1,7 @@
 /*
  * A musl C program that uses more of Linux: malloc (brk and mmap), memory
- * well past 2 MiB (a 16 MiB mmap block and 4 MiB more brk heap), a file
+ * well past 2 MiB (a 16 MiB mmap block and 4 MiB more brk heap), more
+ * address space than the machine has memory (pages come when touched), a file
  * written with stdio and read back, and a line read from the console.
  * Prints one "mtest: ..." line per check and exits with the number that
  * failed.
@@ -8,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -70,6 +72,18 @@ int main(void) {
         for (int i = 0; i < (4 << 20); i += 4096) bs += heap[i] == (char)(i >> 12);
         printf("mtest: big memory %d %d\n", hs, bs);
         free(huge);
+    }
+
+    /* More than the machine has: 256 MiB of mmap on a 64 MiB machine,
+     * whose pages come only when first touched. */
+    char *wide = mmap(0, (size_t)256 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (wide == MAP_FAILED) { puts("mtest: wide mmap failed"); bad++; }
+    else {
+        int ws = 0;
+        for (int i = 0; i < 4; i++) wide[(size_t)i << 26] = (char)(i + 1);
+        for (int i = 0; i < 4; i++) ws += wide[(size_t)i << 26] == (char)(i + 1) && wide[((size_t)i << 26) + 4096] == 0;
+        printf("mtest: wide %d\n", ws);
+        munmap(wide, (size_t)256 << 20);
     }
 
     if (direction_flag()) puts("mtest: direction flag spun");

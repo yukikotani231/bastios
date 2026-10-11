@@ -41,13 +41,13 @@ fn fs_type(k: &mut Kernel, pid: u64, va: u64) -> u64
   if va < USER_BASE || va >= USER_BASE + USER_SIZE - 9 {
     return FST_NONE;
   }
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 6) != 6 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 6) != 6 {
     return FST_NONE;
   }
   if xfer_is(k.fs.xfer, 0, 5, "tmpfs") && bget(k.fs.xfer, 5) == 0 {
     return FST_TMPFS;
   }
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 9) != 9 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 9) != 9 {
     return FST_NONE;
   }
   if xfer_is(k.fs.xfer, 0, 8, "bstdisk3") && bget(k.fs.xfer, 8) == 0 {

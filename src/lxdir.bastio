@@ -183,7 +183,7 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64, legacy: b
     bfree(out);
     return EINVAL;                          // not even one entry fits
   }
-  let put = copy_to_user(&mut k.spaces, pid, va, out, used);
+  let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, out, used);
   bfree(out);
   if put != used {
     return EFAULT;
@@ -414,7 +414,7 @@ fn lx_getcwd(k: &mut Kernel, pid: u64, va: u64, size: u64) -> u64
     i = i + 1;
   }
   bset(&mut k.fs.xfer, m + 1, 0);
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, m + 2) != m + 2 {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, m + 2) != m + 2 {
     return EFAULT;
   }
   return m + 2;
@@ -469,7 +469,7 @@ fn ends_in_dot(k: &mut Kernel, pid: u64, va: u64) -> bool
   if va < USER_BASE || va >= USER_BASE + USER_SIZE {
     return false;
   }
-  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, smaller(256, USER_SIZE - (va - USER_BASE)));
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, smaller(256, USER_SIZE - (va - USER_BASE)));
   if got == NO_RESULT {
     return false;
   }

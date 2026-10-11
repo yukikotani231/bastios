@@ -275,7 +275,7 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, more: bool) 
   if n == 0 {
     return 0;
   }
-  let got = copy_from_user(&mut k.spaces, pid, buf, &mut k.fs.xfer, smaller(n, XFER));
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, &mut k.fs.xfer, smaller(n, XFER));
   if got == NO_RESULT || got == 0 {
     return EFAULT;
   }
@@ -317,7 +317,7 @@ fn lx_tcp_recv(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, dontwait: bo
     }
     return SK_WAIT;
   }
-  if copy_to_user(&mut k.spaces, pid, buf, k.fs.xfer, got) != got {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, k.fs.xfer, got) != got {
     return EFAULT;
   }
   return got;

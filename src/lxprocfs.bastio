@@ -941,7 +941,7 @@ fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
     i = i + 1;
   }
   bfree(out);
-  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, m);
+  let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, m);
   if put == NO_RESULT || put == 0 {
     return EFAULT;
   }
@@ -1068,7 +1068,7 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
       i = i + 1;
     }
     bfree(lo);
-    if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, m) != m {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, m) != m {
       return EFAULT;
     }
     return m;
@@ -1094,7 +1094,7 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
     i = i + 1;
   }
   bfree(out);
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, l) != l {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, l) != l {
     return EFAULT;
   }
   return l;

@@ -786,7 +786,7 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   // arg), FIOCLEX and FIONCLEX its FD_CLOEXEC, as CPython's setblocking and
   // set_inheritable use them.
   if req == FIONBIO {
-    if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, 4) != 4 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, 4) != 4 {
       return EFAULT;
     }
     let on = bget(k.fs.xfer, 0) != 0 || bget(k.fs.xfer, 1) != 0 || bget(k.fs.xfer, 2) != 0 || bget(k.fs.xfer, 3) != 0;
@@ -820,7 +820,7 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     return ENOTTY;
   }
   if req == TCSETS || (req > TCSETS && req <= TCSETSF) {
-    if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, TERMIOS_SIZE) != TERMIOS_SIZE {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, TERMIOS_SIZE) != TERMIOS_SIZE {
       return EFAULT;
     }
     let mut i = 0;
@@ -887,7 +887,7 @@ fn sock_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   }
   if req == SIOCGIFCONF {
     // struct ifconf: int ifc_len, then the buffer's address.
-    if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, 16) != 16 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, 16) != 16 {
       return EFAULT;
     }
     let room = get_u64(k.fs.xfer, 0) % 4294967296;
@@ -912,7 +912,7 @@ fn sock_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     return lx_put_out(&mut k, pid, arg, 4);
   }
   // SIOCGIFFLAGS, SIOCSIFFLAGS: struct ifreq, the name in its first 16 bytes.
-  if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, IFREQ_SIZE) != IFREQ_SIZE {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, IFREQ_SIZE) != IFREQ_SIZE {
     return EFAULT;
   }
   if bget(k.fs.xfer, 0) != 108 || bget(k.fs.xfer, 1) != 111 || bget(k.fs.xfer, 2) != 0 {
@@ -946,7 +946,7 @@ fn lx_put_out(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && n <= 160
   ensures kok(k)
 {
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, n) != n {
     return EFAULT;
   }
   return 0;
@@ -1121,7 +1121,7 @@ fn console_read(k: &mut Kernel, pid: u64, va: u64, n: u64, was: u64) -> u64
     bset(&mut k.fs.xfer, i, cast[u8](get(k.line, 2 + i) % 256));
     i = i + 1;
   }
-  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
+  let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, want);
   if put == NO_RESULT || (put == 0 && want > 0) {
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
@@ -1176,7 +1176,7 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
     if va > 0xFFFFFFFFFFFFFFFF - READ_MAX {
       return EFAULT;
     }
-    let put = copy_to_user(&mut k.spaces, pid, va + done, k.fs.xfer, got);
+    let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + done, k.fs.xfer, got);
     if put == NO_RESULT || (put == 0 && got > 0) {
       if done > 0 {
         return done;
@@ -1235,7 +1235,7 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
   if d.kind == K_CONSOLE && 2 * smaller(n, XFER) > room && room < OUTCAP {
     return CON_FULL;                        // the console's ring is too full: wait
   }
-  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, smaller(n, XFER));
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, smaller(n, XFER));
   if got == NO_RESULT || (got == 0 && n > 0) {
     return EFAULT;
   }
@@ -1273,7 +1273,7 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
       if va > 0xFFFFFFFFFFFFFFFF - total {
         return total;
       }
-      piece = copy_from_user(&mut k.spaces, pid, va + total, &mut k.fs.xfer, smaller(n - total, XFER));
+      piece = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + total, &mut k.fs.xfer, smaller(n - total, XFER));
       if piece == NO_RESULT || piece == 0 {
         return total;
       }
@@ -1610,7 +1610,7 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
   }
   let n = smaller(PATH_MAX_LX, USER_SIZE - (va - USER_BASE));
   let mut want = smaller(PATH_FIRST, n);
-  let mut got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, want);
+  let mut got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, want);
   if got == NO_RESULT {
     return NO_RESULT;
   }
@@ -1623,7 +1623,7 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
   if e >= got && got == want && want < n {
     // Longer than the first read: read up to PATH_MAX.
     want = n;
-    got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, want);
+    got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, want);
     if got == NO_RESULT {
       return NO_RESULT;
     }
@@ -1889,7 +1889,7 @@ fn stack_fault(k: &mut Kernel, p: u64) -> bool
   ensures kok(k)
 {
   let va = pget(k.procs, p, F_REGS + 19);   // CR2
-  if va < USER_BASE || copy_from_user(&mut k.spaces, p, va, &mut k.fs.xfer, 1) == 1 {
+  if va < USER_BASE || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, va, &mut k.fs.xfer, 1) == 1 {
     return false;                           // mapped: not a stack to grow
   }
   return stack_reach(&mut k.mem, &mut k.spaces, p, va);
@@ -1996,6 +1996,10 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   // the cache's page would reach every reader of the file
   // (docs/security.md). Such a copy does not see later writes to the file.
   let cached = sh && !anon && f != NO_FILE && can_write;
+  // Private writable anonymous memory gets its pages when first touched
+  // (src/lxanon.bastio), unless MAP_POPULATE or MAP_LOCKED asks for them
+  // now.
+  let lazy = anon && !sh && prot / 2 % 2 == 1 && flags & 0xA000 == 0;   // MAP_POPULATE, MAP_LOCKED
   let mut at = 0;
   let noreplace = flags & MAP_FIXED_NOREPLACE != 0;
   if flags / MAP_FIXED % 2 == 1 || noreplace {
@@ -2008,14 +2012,14 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     at = addr - USER_BASE;
     // MAP_FIXED_NOREPLACE: any page mapped in the range is EEXIST. (A
     // PROT_NONE reservation maps nothing, so it is not seen.)
-    if noreplace && win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, at / 4096, at / 4096 + pages, 0) != 0 {
+    if noreplace && anon_count(&mut k, pid, at / 4096, at / 4096 + pages) != 0 {
       return EEXIST;
     }
     // What was there goes, read-only pages too: the new mapping is writable.
     map_forget(&mut k, pid, at / 4096, at / 4096 + pages, false);
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
     hole_cut(&mut k, pid, at / 4096, at / 4096 + pages);
-    if !cached && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
+    if !cached && !(lazy && anon_add(&mut k, pid, at / 4096, at / 4096 + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
       return ENOMEM;
     }
   } else {
@@ -2023,7 +2027,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // A hole munmap left first (src/lxmem.bastio): its pages are unmapped.
     let h = hole_take(&mut k, pid, pages);
     if h < STACK_FIRST {
-      if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, h, h + pages, sh) {
+      if !reserve && !(lazy && anon_add(&mut k, pid, h, h + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, h, h + pages, sh) {
         hole_add(&mut k, pid, h, h + pages);
         return ENOMEM;
       }
@@ -2041,7 +2045,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // Fresh PROT_NONE memory is only address space: its pages are mapped
     // when an mprotect makes them usable (lx_mprotect), and touching it
     // before that faults, as on Linux.
-    if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096, sh) {
+    if !reserve && !(lazy && anon_add(&mut k, pid, at / 4096, at / 4096 + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096, sh) {
       return ENOMEM;
     }
     pset(&mut k.procs, pid, F_MMAP, at);
@@ -2096,7 +2100,7 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
       bset(&mut k.fs.xfer, z, 0);
       z = z + 1;
     }
-    if copy_to_user(&mut k.spaces, pid, USER_BASE + at + done, k.fs.xfer, step) != step {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, USER_BASE + at + done, k.fs.xfer, step) != step {
       return EFAULT;
     }
     done = done + step;

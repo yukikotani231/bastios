@@ -176,6 +176,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   lx_fd_fork(&mut k, pid, c);
   map_fork(&mut k, pid, c);
   hole_fork(&mut k, pid, c);
+  anon_fork(&mut k, pid, c);
   lazy_fork(&mut k, pid, c);
   shm_fork(&mut k, pid, c);
   sig_fork(&mut k.sigact, pid, c);
@@ -264,6 +265,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
     },
   }
   hole_clear(&mut k, pid);                // a new window has no holes
+  anon_clear(&mut k, pid);
   lazy_set(&mut k, pid, src, hold);       // map_drop_all dropped the old record
   shm_drop_all(&mut k, pid);
   lx_fd_close_all(&mut k, pid, true);
@@ -516,7 +518,7 @@ fn lx_args(k: &mut Kernel, pid: u64, argv: u64, args: &mut Bytes, from: u64, mos
         return EFAULT;
       }
       let want = smaller(smaller(ARGS_MAX - alen, XFER), USER_SIZE - (at - USER_BASE));
-      let got = copy_from_user(&mut k.spaces, pid, at, &mut k.fs.xfer, want);
+      let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, at, &mut k.fs.xfer, want);
       if got == NO_RESULT || got == 0 {
         return EFAULT;
       }

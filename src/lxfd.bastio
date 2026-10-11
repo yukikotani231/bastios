@@ -1036,7 +1036,7 @@ fn pipe_read1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   }
   let want = smaller(smaller(n, count), XFER);
   pipe_ring_out(&mut k, p, 0, r.h, want);
-  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
+  let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, want);
   if put == NO_RESULT || (put == 0 && want > 0) {
     return EFAULT;
   }
@@ -1064,7 +1064,7 @@ fn pipe_write1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   if room == 0 || (n <= PIPE_ATOM && room < n) {
     return EAGAIN;
   }
-  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, smaller(smaller(n, room), XFER));
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, smaller(smaller(n, room), XFER));
   if got == NO_RESULT || (got == 0 && n > 0) {
     return EFAULT;
   }

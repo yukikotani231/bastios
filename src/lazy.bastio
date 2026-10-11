@@ -149,7 +149,7 @@ fn lazy_read(k: &mut Kernel, pid: u64, q: u64, wait: bool) -> u64
   if first1 == 0 || q >= WPAGES || q < first1 - 1 || q - (first1 - 1) >= get(k.lazy, lz_at(pid, 1)) {
     return LZ_NO;
   }
-  if copy_from_user(&mut k.spaces, pid, USER_BASE + q * 4096, &mut k.fs.xfer, 1) == 1 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, USER_BASE + q * 4096, &mut k.fs.xfer, 1) == 1 {
     return LZ_NO;                           // mapped already
   }
   let h = vfs_held(k.fs, get(k.lazy, lz_at(pid, 2)));

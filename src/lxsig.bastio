@@ -349,7 +349,7 @@ fn lx_sigqueue(k: &mut Kernel, pid: u64, target: u64, s: u64, info: u64) -> u64
   if target >= NPROC || state(k.procs, target) == FREE || target == 0 {
     return ESRCH;
   }
-  if info > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, info, &mut k.fs.xfer, 32) != 32 {
+  if info > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, info, &mut k.fs.xfer, 32) != 32 {
     return EFAULT;
   }
   // Another process may not pretend to be the kernel or kill/tkill: a
@@ -535,7 +535,7 @@ fn lx_sigaction(k: &mut Kernel, pid: u64, s: u64, act: u64, oact: u64) -> u64
     if s == SIGKILL || s == SIGSTOP {
       return EINVAL;
     }
-    if copy_from_user(&mut k.spaces, pid, act, &mut k.fs.xfer, 32) != 32 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, act, &mut k.fs.xfer, 32) != 32 {
       return EFAULT;
     }
     nh = rd64(k.fs.xfer, 0);
@@ -577,7 +577,7 @@ fn lx_sigprocmask(k: &mut Kernel, pid: u64, how: u64, setp: u64, oset: u64) -> u
   let was = pget(k.procs, pid, F_SIGMASK);
   let mut new = was;
   if setp != 0 {
-    if copy_from_user(&mut k.spaces, pid, setp, &mut k.fs.xfer, 8) != 8 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, setp, &mut k.fs.xfer, 8) != 8 {
       return EFAULT;
     }
     let v = rd64(k.fs.xfer, 0);
@@ -717,7 +717,7 @@ fn lx_sigsuspend(k: &mut Kernel, pid: u64, was: u64, setp: u64) -> u64
       ret(&mut k.procs, pid, EINVAL);       // the sigset size
       return KEEP;
     }
-    if copy_from_user(&mut k.spaces, pid, setp, &mut k.fs.xfer, 8) != 8 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, setp, &mut k.fs.xfer, 8) != 8 {
       ret(&mut k.procs, pid, EFAULT);
       return KEEP;
     }
@@ -749,7 +749,7 @@ fn lx_sigaltstack(k: &mut Kernel, pid: u64, ss: u64, oss: u64) -> u64
   let mut nsp = sp;
   let mut nsize = size;
   if ss != 0 {
-    if copy_from_user(&mut k.spaces, pid, ss, &mut k.fs.xfer, 24) != 24 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, ss, &mut k.fs.xfer, 24) != 24 {
       return EFAULT;
     }
     if on {
@@ -1053,7 +1053,7 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
     },
   }
   stack_reach(&mut k.mem, &mut k.spaces, p, base);
-  let put = copy_to_user(&mut k.spaces, p, base, fr, FRAME_SIZE);
+  let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, p, base, fr, FRAME_SIZE);
   bfree(fr);
   if put != FRAME_SIZE {
     return false;
@@ -1085,14 +1085,14 @@ fn lx_sigreturn(k: &mut Kernel, pid: u64) -> u64
 {
   let uc = pget(k.procs, pid, F_REGS + R_RSP);
   let mut fr = balloc(FRAME_SIZE);
-  if uc < 8 || copy_from_user(&mut k.spaces, pid, uc, &mut fr, UC_SIZE) != UC_SIZE {
+  if uc < 8 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, uc, &mut fr, UC_SIZE) != UC_SIZE {
     bfree(fr);
     return EFAULT;
   }
   let fp = rd64(fr, UC_FPPTR);
   if fp != 0 {
     let mut fx = balloc(512);
-    if copy_from_user(&mut k.spaces, pid, fp, &mut fx, 512) == 512 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, fp, &mut fx, 512) == 512 {
       match take_fpu(&mut k.fpus, pid) {
         Fpu::None => {},
         Fpu::State(mut f) => {
