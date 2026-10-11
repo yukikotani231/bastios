@@ -428,14 +428,17 @@ fn copy_frame(dst: &mut Frame, src: &Frame) {
 }
 
 /// A copy of address space `root`: new tables and a new copy of every page
-/// its window maps (fork). Returns `Space::Empty`, with every page given
-/// back, when memory runs out.
-fn clone_space(m: &mut Mem, root: &mut PageTable) -> Space
-  requires mem_ok(m) && pt_level(root) == 4
+/// its window maps (fork). With `cow`, a private writable page is not
+/// copied but shared, read-only in both, until one of them writes it
+/// (COW_PAGE, src/lxcow.bastio); that needs no processor running on
+/// `root`. Returns `Space::Empty`, with every page given back, when memory
+/// runs out.
+fn clone_space(m: &mut Mem, root: &mut PageTable, cow: bool) -> Space
+  requires mem_ok(m) && pt_level(root) == 4 && (cow ==> pt_leases(root) == 0)
   ensures mem_ok(m) && pt_level(root) == 4
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
-  match clone_window(&mut m, &mut root) {
+  match clone_window(&mut m, &mut root, cow) {
     Space::Empty => { return Space::Empty; },
     Space::Mapped(l2) => { return space_from_l2(&mut m, l2); },
   }
@@ -443,32 +446,32 @@ fn clone_space(m: &mut Mem, root: &mut PageTable) -> Space
 
 /// A level-2 table copying the window of address space `root`. The source
 /// is read in place (other threads may be running on it).
-fn clone_window(m: &mut Mem, root: &mut PageTable) -> Space
-  requires mem_ok(m) && pt_level(root) == 4
+fn clone_window(m: &mut Mem, root: &mut PageTable, cow: bool) -> Space
+  requires mem_ok(m) && pt_level(root) == 4 && (cow ==> pt_leases(root) == 0)
   ensures mem_ok(m) && pt_level(root) == 4
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 2
 {
   if !pt_has(root, 1) {
     return Space::Empty;
   }
-  return pt_borrow(&mut root, 1, clone_l3, &mut m);
+  return pt_borrow(&mut root, 1, clone_l3, &mut m, cow);
 }
 
 /// clone_window below the top-level table.
-fn clone_l3(l3: &mut PageTable, m: &mut Mem) -> Space
-  requires mem_ok(m) && pt_level(l3) == 3
+fn clone_l3(l3: &mut PageTable, m: &mut Mem, cow: bool) -> Space
+  requires mem_ok(m) && pt_level(l3) == 3 && (cow ==> pt_leases(l3) == 0)
   ensures mem_ok(m)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 2
 {
   if !pt_has(l3, 0) {
     return Space::Empty;
   }
-  return pt_borrow(&mut l3, 0, clone_l2, &mut m);
+  return pt_borrow(&mut l3, 0, clone_l2, &mut m, cow);
 }
 
 /// clone_window below the level-2 table: each level-1 table in turn.
-fn clone_l2(src: &mut PageTable, m: &mut Mem) -> Space
-  requires mem_ok(m) && pt_level(src) == 2
+fn clone_l2(src: &mut PageTable, m: &mut Mem, cow: bool) -> Space
+  requires mem_ok(m) && pt_level(src) == 2 && (cow ==> pt_leases(src) == 0)
   ensures mem_ok(m) && pt_level(src) == 2
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 2
 {
@@ -480,11 +483,11 @@ fn clone_l2(src: &mut PageTable, m: &mut Mem) -> Space
   let mut t = 0;
   let mut ok = true;
   while ok && t < WIN_L1S
-    invariant t <= WIN_L1S && mem_ok(m) && pt_level(l2) == 2 && pt_level(src) == 2
+    invariant t <= WIN_L1S && mem_ok(m) && pt_level(l2) == 2 && pt_level(src) == 2 && (cow ==> pt_leases(src) == 0)
     invariant forall j: u64 :: t <= j && j < 512 ==> !pt_used(l2, j)
   {
     if pt_has(src, t) {
-      match pt_borrow(&mut src, t, clone_l1, &mut m) {
+      match pt_borrow(&mut src, t, clone_l1, &mut m, cow) {
         Space::Empty => { ok = false; },
         Space::Mapped(c1) => { pt_put(&mut l2, t, c1); },
       }
@@ -510,8 +513,8 @@ fn copy_to(src: &mut Frame, d: Dirty) -> Frame
 }
 
 /// clone_l2 below a level-1 table.
-fn clone_l1(src: &mut PageTable, m: &mut Mem) -> Space
-  requires mem_ok(m) && pt_level(src) == 1
+fn clone_l1(src: &mut PageTable, m: &mut Mem, cow: bool) -> Space
+  requires mem_ok(m) && pt_level(src) == 1 && (cow ==> pt_leases(src) == 0)
   ensures mem_ok(m) && pt_level(src) == 1
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 1
 {
@@ -523,13 +526,20 @@ fn clone_l1(src: &mut PageTable, m: &mut Mem) -> Space
   let mut p = 0;
   let mut ok = true;
   while ok && p < 512
-    invariant p <= 512 && mem_ok(m) && pt_level(l1) == 1 && pt_level(src) == 1
+    invariant p <= 512 && mem_ok(m) && pt_level(l1) == 1 && pt_level(src) == 1 && (cow ==> pt_leases(src) == 0)
     invariant forall j: u64 :: p <= j && j < 512 ==> !pt_used(l1, j)
   {
     if pt_has(src, p) && pt_shared(src, p) {
-      // A MAP_SHARED page stays one page: the child maps it too.
+      // A MAP_SHARED page stays one page: the child maps it too (and a
+      // copy-on-write page stays read-only in both).
       let w = pt_writable(src, p);
       pt_put_shared(&mut l1, p, pt_dup_shared(src, p), w);
+    } else if cow && pt_has(src, p) && pt_writable(src, p) {
+      // Copy-on-write: the page becomes shared, read-only on both sides.
+      let s = shared_new(pt_take_frame(&mut src, p));
+      mark_cow(&mut m, s);
+      pt_put_shared(&mut l1, p, shared_dup(s), false);
+      pt_put_shared(&mut src, p, s, false);
     } else if pt_has(src, p) {
       let b = find_free(&mut m);
       if b >= NPAGES {

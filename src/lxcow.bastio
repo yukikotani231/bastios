@@ -1,0 +1,130 @@
+// Copy-on-write fork.
+//
+// fork used to copy every page of the parent's window into the child. Now,
+// when the parent has one thread, each private writable page is shared
+// instead (clone_l1, src/space.bastio): it becomes a `Shared` page marked
+// COW_PAGE in the page bitmap (src/pages.bastio), mapped read-only in both
+// windows. The first write from either side faults; the fault replaces
+// that side's mapping with a private, writable copy and gives up its
+// reference (cow_touch, src/usermem.bastio). When the kernel writes the
+// page for the process (read(2) into it, a signal frame), copy_to_user
+// does the same. A fork followed by execve copies nothing, and a parent
+// that goes on writing copies only the pages it writes.
+//
+// Taking a page out of a table needs no processor to be running on it (a
+// lease, bastiolang docs/language.md). So copy-on-write pages exist only
+// in processes with one thread: fork makes them only then, and a process
+// gives every one of them its own copy before it starts a second thread
+// (cow_break_all, from lx_thread_clone). A thread in the kernel holds no
+// lease, so in such a process nothing runs on the space while it is
+// handled. If that ever failed, cow_touch would find the lease count
+// above zero and refuse; the program would see a fault or EFAULT, not
+// another process's memory.
+//
+// What is proved: pages and references are owned and given back once, as
+// for MAP_SHARED pages; a copy-on-write page is mapped read-only. What is
+// trusted: the run-time reference counts of shared pages (bastiolang's
+// prelude), as before. What is not proved: that a COW_PAGE is only mapped
+// where the memory is private and writable. mprotect and MADV_DONTNEED
+// copy such a page first (w_protect, w_zero), so the mark never stands
+// for a mapping that may not be written.
+
+import "linux.bastio";
+
+/// Whether process pid is the only thread of its group (or in none).
+fn group_alone(k: &mut Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if pget(k.procs, pid, F_TGID) == 0 {
+    return true;
+  }
+  let g = tgid(k.procs, pid);
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && kok(k)
+  {
+    if q != pid && in_group(k.procs, q, g) {
+      return false;
+    }
+    q = q + 1;
+  }
+  return true;
+}
+
+/// A page fault of process p on a copy-on-write page: p gets its own
+/// writable copy, and true says to run it again.
+fn cow_fault(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let va = pget(k.procs, p, F_REGS + 19);   // CR2
+  if va < USER_BASE || va - USER_BASE >= USER_SIZE {
+    return false;
+  }
+  return cow_touch(&mut k.mem, &mut k.spaces, p, (va - USER_BASE) / 4096);
+}
+
+/// Gives every copy-on-write page of process pid's window its own copy,
+/// before pid starts a second thread. False if memory ran out (the pages
+/// not copied yet stay shared, and the thread must not start).
+fn cow_break_all(k: &mut Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  match take_space(&mut k.spaces, pid) {
+    Space::Empty => { return true; },
+    Space::Mapped(mut root) => {
+      let mut ok = true;
+      // With a processor on the space it has a thread running already,
+      // so (see above) no copy-on-write pages.
+      if pt_lease_count(&mut root) == 0 && pt_has(root, 1) {
+        ok = pt_borrow(&mut root, 1, break_l3, &mut k.mem);
+      }
+      put_space(&mut k.spaces, pid, Space::Mapped(root));
+      return ok;
+    },
+  }
+}
+
+fn break_l3(l3: &mut PageTable, m: &mut Mem) -> bool
+  requires pt_level(l3) == 3 && pt_leases(l3) == 0 && mem_ok(m)
+  ensures mem_ok(m)
+{
+  if !pt_has(l3, 0) {
+    return true;
+  }
+  return pt_borrow(&mut l3, 0, break_l2, &mut m);
+}
+
+fn break_l2(l2: &mut PageTable, m: &mut Mem) -> bool
+  requires pt_level(l2) == 2 && pt_leases(l2) == 0 && mem_ok(m)
+  ensures pt_level(l2) == 2 && pt_leases(l2) == 0 && mem_ok(m)
+{
+  let mut t = 0;
+  while t < WIN_L1S
+    invariant t <= WIN_L1S && pt_level(l2) == 2 && pt_leases(l2) == 0 && mem_ok(m)
+  {
+    if pt_has(l2, t) && !pt_borrow(&mut l2, t, break_l1, &mut m) {
+      return false;
+    }
+    t = t + 1;
+  }
+  return true;
+}
+
+fn break_l1(l1: &mut PageTable, m: &mut Mem) -> bool
+  requires pt_level(l1) == 1 && pt_leases(l1) == 0 && mem_ok(m)
+  ensures pt_level(l1) == 1 && pt_leases(l1) == 0 && mem_ok(m)
+{
+  let mut i = 0;
+  while i < 512
+    invariant i <= 512 && pt_level(l1) == 1 && pt_leases(l1) == 0 && mem_ok(m)
+  {
+    if cow_l1(&mut l1, &mut m, i) == COW_NOMEM {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}

@@ -15,7 +15,9 @@
 // buffer, say), copy_from_user and copy_to_user (src/usermem.bastio) map it
 // the same way, so system calls see no difference.
 //
-// What stays eager: brk, shared and read-only anonymous mappings,
+// brk's new pages are recorded the same way (lx_brk).
+//
+// What stays eager: shared and read-only anonymous mappings,
 // MAP_POPULATE and MAP_LOCKED, and a mapping that finds every record in use.
 // mprotect, mremap, mlock and the calls that need the pages there map the
 // rest of a recorded range first (anon_reach). A record split by an munmap

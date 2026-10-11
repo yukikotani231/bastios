@@ -187,7 +187,7 @@ steps = [
     ("fpucheck", b"fpucheck: xmm0 kept"),
     # musl malloc (brk, mmap), stdio on a file, and a line read from the
     # console; the third field is what to wait for instead of the prompt.
-    ("mtest", [b"mtest: malloc heap 75", b"mtest: big memory 4096 1024", b"mtest: wide 4", b"mtest: direction flag spun", b"mtest: file line 42"], b"type a line"),
+    ("mtest", [b"mtest: malloc heap 75", b"mtest: big memory 4096 1024", b"mtest: wide 4", b"mtest: cow kept", b"mtest: direction flag spun", b"mtest: file line 42"], b"type a line"),
     ("typed for mtest", b"mtest: got typed for mtest"),
     # BusyBox's shell, unmodified, reading commands from the console. The
     # console is a terminal (ioctl TCGETS works), so ash is interactive and

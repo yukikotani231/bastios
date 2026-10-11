@@ -1928,8 +1928,8 @@ fn stack_fault(k: &mut Kernel, p: u64) -> bool
   return stack_reach(&mut k.mem, &mut k.spaces, p, va);
 }
 
-/// brk: moves the heap's end to `want`, mapping the pages it grows into
-/// and unmapping the pages it gives back; never below where it started,
+/// brk: moves the heap's end to `want`, adding the pages it grows into
+/// (mapped when first touched) and unmapping the pages it gives back; never below where it started,
 /// and never into mmap's pages. Returns the break, as Linux does on
 /// failure too.
 fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
@@ -1951,12 +1951,17 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
     let from = (new + 4095) / 4096;
     let to = (cur + 4095) / 4096;
     if to <= WPAGES {
+      anon_forget(&mut k, pid, from, to);
       win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, from, to, 0);
     }
     pset(&mut k.procs, pid, F_BRK, new);
     return want;
   }
-  if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, (cur + 4095) / 4096, (new + 4095) / 4096, false) {
+  // The new pages come when first touched (src/lxanon.bastio), unless
+  // every record is in use.
+  let lo = (cur + 4095) / 4096;
+  let hi = (new + 4095) / 4096;
+  if !(lo < hi && anon_add(&mut k, pid, lo, hi)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, lo, hi, false) {
     return USER_BASE + cur;
   }
   pset(&mut k.procs, pid, F_BRK, new);

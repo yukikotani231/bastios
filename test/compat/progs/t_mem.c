@@ -8,9 +8,13 @@
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
 #define FUTEX_CMP_REQUEUE 4
+#include <pthread.h>
 #include <sched.h>
 #include <time.h>
 #include <sys/wait.h>
+
+static char *cow_buf;
+static void *cow_thread(void *a) { cow_buf[4096 * 3] = 7; return a; }
 
 int main(void) {
     setup();
@@ -213,6 +217,36 @@ int main(void) {
                if (c == 0) { r[500 << 20] = 5; _exit(r[0] == 1 && r[n - 1] == 2 && r[500 << 20] == 5 ? 0 : 1); }
                int st2; waitpid(c, &st2, 0);
                ok = ok && WIFEXITED(st2) && WEXITSTATUS(st2) == 0 && r[500 << 20] == 0;
+               munmap(r, n);
+               close(pf[0]); close(pf[1]);
+           }
+           ok; }));
+    EXPECT("fork: parent and child each see only their own writes (copy-on-write), read(2) into a shared page, a second thread, mprotect and MADV_DONTNEED", ({
+           size_t n = 64 * 4096;
+           char *r = mmap(0, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int ok = r != MAP_FAILED, pf[2] = { -1, -1 };
+           if (ok) {
+               for (size_t i = 0; i < n; i += 4096) r[i] = 1;
+               ok = pipe(pf) == 0;
+               pid_t c = fork();
+               if (c == 0) {
+                   int bad = 0;
+                   r[0] = 2;                                      /* a write fault copies the page */
+                   bad |= r[4096] != 1;
+                   bad |= read(pf[0], r + 4096 * 2, 3) != 3 || r[4096 * 2] != 'a';   /* the kernel writes a shared page */
+                   cow_buf = r; pthread_t t;                      /* a second thread copies the rest first */
+                   bad |= pthread_create(&t, 0, cow_thread, 0) != 0 || pthread_join(t, 0) != 0 || r[4096 * 3] != 7;
+                   bad |= mprotect(r + 4096 * 4, 4096, PROT_READ) != 0 || r[4096 * 4] != 1;
+                   bad |= madvise(r + 4096 * 5, 4096, MADV_DONTNEED) != 0 || r[4096 * 5] != 0;
+                   _exit(bad);
+               }
+               ok = ok && write(pf[1], "abc", 3) == 3;
+               int st2 = -1; waitpid(c, &st2, 0);
+               ok = ok && WIFEXITED(st2) && WEXITSTATUS(st2) == 0;
+               /* None of the child's writes reached the parent; the parent's own still go in. */
+               ok = ok && r[0] == 1 && r[4096 * 2] == 1 && r[4096 * 3] == 1 && r[4096 * 5] == 1;
+               r[4096 * 6] = 9;
+               ok = ok && r[4096 * 6] == 9 && r[4096 * 7] == 1;
                munmap(r, n);
                close(pf[0]); close(pf[1]);
            }

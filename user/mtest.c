@@ -1,7 +1,8 @@
 /*
  * A musl C program that uses more of Linux: malloc (brk and mmap), memory
  * well past 2 MiB (a 16 MiB mmap block and 4 MiB more brk heap), more
- * address space than the machine has memory (pages come when touched), a file
+ * address space than the machine has memory (pages come when touched),
+ * fork's copy-on-write pages, a file
  * written with stdio and read back, and a line read from the console.
  * Prints one "mtest: ..." line per check and exits with the number that
  * failed.
@@ -11,6 +12,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -84,6 +86,20 @@ int main(void) {
         for (int i = 0; i < 4; i++) ws += wide[(size_t)i << 26] == (char)(i + 1) && wide[((size_t)i << 26) + 4096] == 0;
         printf("mtest: wide %d\n", ws);
         munmap(wide, (size_t)256 << 20);
+    }
+
+    /* fork shares the pages until one side writes (copy-on-write): the
+     * child's writes stay in the child. */
+    char *cw = malloc(1 << 20);
+    if (!cw) { puts("mtest: cow malloc failed"); bad++; }
+    else {
+        memset(cw, 1, 1 << 20);
+        pid_t c = fork();
+        if (c == 0) { memset(cw, 2, 1 << 20); _exit(cw[0] == 2 && cw[(1 << 20) - 1] == 2 ? 0 : 1); }
+        int st = -1;
+        waitpid(c, &st, 0);
+        printf("mtest: cow %s\n", c > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0 && cw[0] == 1 && cw[(1 << 20) - 1] == 1 ? "kept" : "broken");
+        free(cw);
     }
 
     if (direction_flag()) puts("mtest: direction flag spun");

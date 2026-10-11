@@ -65,6 +65,7 @@ import "lxperm.bastio";
 import "lxinotify.bastio";
 import "lazy.bastio";
 import "lxanon.bastio";
+import "lxcow.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
@@ -403,8 +404,8 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       }
       return p;
     }
-    if lz != LZ_NO || anon_fault(&mut s.k, p) || stack_fault(&mut s.k, p) {
-      return p;                             // code read, a zero page mapped, or the stack grew: run the instruction again
+    if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) {
+      return p;                             // code read, a page mapped or copied, or the stack grew: run the instruction again
     }
   }
   if v < 32 {

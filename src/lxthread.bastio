@@ -350,6 +350,9 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   if flags & CLONE_VM == 0 || flags & CLONE_SIGHAND == 0 || flags & CLONE_VFORK != 0 {
     return EINVAL;
   }
+  if !cow_break_all(&mut k, pid) {
+    return ENOMEM;                          // its copy-on-write pages need copies first (src/lxcow.bastio)
+  }
   let c = new_pid(&mut k);
   if c == 0 {
     return EAGAIN;
@@ -605,7 +608,7 @@ fn futex_key(k: &mut Kernel, pid: u64, addr: u64, op: u64) -> u64
   ensures kok(k)
 {
   if op & FUTEX_PRIVATE == 0 && addr < FUTEX_PHYS {
-    let pg = user_shared_page(&mut k.spaces, pid, addr);
+    let pg = user_shared_page(&mut k.spaces, k.mem.bm, pid, addr);
     if pg < NPAGES {
       return FUTEX_PHYS + pg * 4096 + addr % 4096;
     }
