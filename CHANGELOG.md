@@ -616,6 +616,17 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Fixed
 
+- A TCP listener could not start on a port while a connection on it that
+  its program had already closed was still finishing (waiting in
+  `LAST_ACK` for the peer's last ACK, say): `listen` failed with
+  `EADDRINUSE` and the shell's `tcpecho` said `cannot listen`, until the
+  connection gave up. Now only a listener or a connection a program still
+  holds keeps the port, as on Linux with `SO_REUSEADDR`; segments still
+  go to the connection whose addresses they carry first. Closing a
+  listener also closes the connections that came in on it and were never
+  accepted, so a new listener on the port does not hand them out.
+  `test/tcp_test.sh` loses the guest's last ACK and checks that `tcpecho`
+  listens again at once.
 - The clock went wrong a few seconds after boot under QEMU, which broke
   about 30 `make compat` checks (sleeps took 0 ms, poll and socket
   timeouts fired at once, `date` said 2554). There were two bugs. First,
