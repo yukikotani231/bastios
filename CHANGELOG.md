@@ -279,6 +279,12 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   socket, or take its name first. `open` of a socket file is `ENXIO`.
 - The loop devices are `rw-rw----` for root and the new group disk (6),
   and open checks it.
+- Users and passwords: `/etc/shadow` (`0600`), `/root` and `/home`, and
+  BusyBox's `adduser`, `addgroup`, `deluser`, `delgroup`, `passwd`,
+  `chpasswd`, `su`, `login`, `id` and `whoami` as `/bin/NAME`. `/bin/su`
+  and `/bin/passwd` are set-user-ID root, and BusyBox
+  (`CONFIG_FEATURE_SUID`) drops root for every other applet. Passwords
+  are SHA-512. Users made after boot do not survive a reboot yet.
 
 ### Programs that run
 
