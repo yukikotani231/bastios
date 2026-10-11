@@ -1148,12 +1148,12 @@ fn con_block(k: &mut Kernel, pid: u64, n: u64) -> u64
 
 /// Makes every process waiting for room in the console's ring READY.
 fn wake_writers(procs: &mut Buf)
-  requires len(procs) == PTAB_LEN
-  ensures len(procs) == PTAB_LEN
+  requires ptab_ok(procs)
+  ensures ptab_ok(procs)
 {
   let mut p = 1;
   while p < NPROC
-    invariant 1 <= p && p <= NPROC && len(procs) == PTAB_LEN
+    invariant 1 <= p && p <= NPROC && ptab_ok(procs)
   {
     if state(procs, p) == CONWAIT {
       pset(&mut procs, p, F_STATE, READY);

@@ -91,6 +91,8 @@ The spec `kok(k)` (allocator consistent, one `Space` per pid with every mapped s
 
 A process is a row of the table, indexed by pid (1 to `NPROC - 1`; pid 0 means "none"). The row holds the state, the parent, the program, a tick count, a wait target or exit code, and the 18 saved user registers in `cpu_get` order. Address spaces live in `spaces`, outside the table, because a `PageTable` is linear and a `Buf` row can only hold numbers. Code that needs a process's space takes it out with `take_space` (which leaves `Space::Empty` behind) and puts it back with `put_space`. While it is out, nothing else can reach it.
 
+The table, and the per-process tables that go with it (`sigact`, `cwd`, `sigsave`), start with 32 rows and grow by 32 when a new process finds every row taken (`new_pid`), up to `NPROC` (256). A row past the end reads as all zeros, a `FREE` process, and a write to one changes nothing, so code indexed by any pid below `NPROC` stays safe without knowing how long the tables are; `new_pid` hands out only ids the tables have rows for. A table that cannot grow because memory ran out makes `fork` fail with `EAGAIN`.
+
 States: `FREE`, `READY`, `READING` (blocked on console input), `WAITING` (blocked on a child), `ZOMBIE` (exited; its code is held for the parent), `RUNNING` (on a processor, with its space and FPU page taken out), `KILLED` (killed while `RUNNING`: it ends when its processor brings it back), `NETWAIT` (waiting for a ping's reply), `CONWAIT` (writing to the console while its output ring is full; the call restarts once the ring is half empty). `spawn` builds the address space first and claims a row only if that succeeded. `terminate` frees the space, hands the exit code to a waiting parent, and orphans the children.
 
 Programs are not loaded from disk: `prog_image` returns each program's flat image with `include_bytes`, and `spawn` checks its header (magic `BSTUSER\n`, memory size, entry point inside the image) before mapping it. Only the image bytes are known at compile time, so the header is checked at run time like any untrusted input.
@@ -335,7 +337,7 @@ Trusted, and listed in the README's "What is trusted" table and in [trusted-base
 
 These are current choices, not design limits; the README's "Status" lists them with the plan:
 - one lock for the whole kernel state (the console's devices have their own); the kernel runs with interrupts off and polls the UART and the keyboard, console and PIT interrupts reach only the bootstrap processor, and an idle processor notices new work only at its next timer tick (no wake-up interrupts between processors);
-- a 64 MiB user window per process, at most `NPROC - 1` processes;
+- a 64 MiB user window per process, at most `NPROC - 1` (255) processes;
 - files are simple (32 in memory and 64 on disk, paths up to 255 bytes, files up to 64 MiB in memory and 1 GiB on disk, 8 descriptors per process; every write is copy-on-write, so a block written costs four block writes), and programs cannot be run from files yet;
 - user pages are mapped writable and executable;
 - the kernel's arena halts the machine when it runs out (the page pool does not: spawns fail cleanly).

@@ -470,9 +470,10 @@ fn memfd_name(k: &mut Kernel, pid: u64, t: u64) -> u64
     bset(&mut k.fs.xfer, i, sget(pre, i));
     i = i + 1;
   }
-  bset(&mut k.fs.xfer, 11, cast[u8](48 + pid % 10));
+  bset(&mut k.fs.xfer, 11, cast[u8](48 + pid % 10));      // the pid, digits reversed
   bset(&mut k.fs.xfer, 12, cast[u8](48 + pid / 10 % 10));
-  bset(&mut k.fs.xfer, 13, 45);             // '-'
+  bset(&mut k.fs.xfer, 13, cast[u8](48 + pid / 100 % 10));
+  bset(&mut k.fs.xfer, 14, 45);             // '-'
   let mut j = 0;
   while j < 16
     invariant j <= 16 && kok(k)
@@ -482,10 +483,10 @@ fn memfd_name(k: &mut Kernel, pid: u64, t: u64) -> u64
     if digit >= 10 {
       ch = 87 + digit;                      // 'a' ..
     }
-    bset(&mut k.fs.xfer, 14 + j, cast[u8](ch));
+    bset(&mut k.fs.xfer, 15 + j, cast[u8](ch));
     j = j + 1;
   }
-  return 30;
+  return 31;
 }
 
 fn out_is_file(k: &Kernel, pid: u64, fd: u64) -> bool

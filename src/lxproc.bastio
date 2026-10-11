@@ -22,7 +22,7 @@ fn lx_fork(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if lim != 0 {
     return lim;                             // -EAGAIN: RLIMIT_NPROC
   }
-  let c = free_pid(k.procs);
+  let c = new_pid(&mut k);
   if c == 0 {
     return EAGAIN;
   }
@@ -55,7 +55,7 @@ fn lx_vfork_vm(k: &mut Kernel, mmu: &Mmu, pid: u64, stack: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
-  let c = free_pid(k.procs);
+  let c = new_pid(&mut k);
   if c == 0 {
     return EAGAIN;
   }
@@ -148,7 +148,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   put_fpu(&mut k.fpus, c, Fpu::State(fpu));
   let mut f = 0;
   while f < STRIDE
-    invariant f <= STRIDE && len(k.procs) == PTAB_LEN
+    invariant f <= STRIDE && ptab_ok(k.procs)
   {
     pset(&mut k.procs, c, f, pget(k.procs, pid, f));
     f = f + 1;
@@ -166,7 +166,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   pset(&mut k.procs, c, F_QUIET, 0);
   let mut w = F_VTIMER;
   while w < F_PTIMER + 2
-    invariant F_VTIMER <= w && w <= F_PTIMER + 2 && len(k.procs) == PTAB_LEN && kok(k)
+    invariant F_VTIMER <= w && w <= F_PTIMER + 2 && ptab_ok(k.procs) && kok(k)
   {
     pset(&mut k.procs, c, w, 0);            // a child does not inherit interval timers
     w = w + 1;
@@ -455,7 +455,7 @@ fn lx_args(k: &mut Kernel, pid: u64, argv: u64, args: &mut Bytes, from: u64, mos
 /// Whether wait4's pid argument `want` names child c of pid: -1 any child,
 /// 0 one in pid's process group, -g one in group g, else that pid.
 fn wait_match(procs: &Buf, pid: u64, c: u64, want: u64) -> bool
-  requires len(procs) == PTAB_LEN && pid < NPROC && c < NPROC
+  requires ptab_ok(procs) && pid < NPROC && c < NPROC
 {
   if want == 0xFFFFFFFFFFFFFFFF {
     return true;

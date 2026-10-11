@@ -249,6 +249,11 @@ steps = [
     # when a line is typed.
     ("mtime", [b"mtime: rang 3, selected, slept ", b"woke in time, events ok"], b"\n# "),
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
+    # More processes at once than the 32 rows the process table starts with:
+    # it grows (new_pid), and /proc lists three-digit pids. (stdin from the
+    # terminal: ash gives each background job its own /dev/null otherwise,
+    # and open files system-wide run out first.)
+    ("i=0; while [ $i -lt 120 ]; do sleep 10 </dev/tty & i=$((i+1)); done; n=0; for d in /proc/[0-9]*; do n=$((n+1)); done; [ $n -gt 120 ] && [ -d /proc/120 ] && echo many$((1+1)); wait", b"\r\nmany2\r\n", b"\n# "),
     ("read -t 1 x; echo rt=$?", b"rt=1", b"\n# "),
     ("read -t 9 x; echo rt=$? x=$x", b"rt=0 x=late", b"\n# ", b"late\r"),
     # Directories: mkdir, a working directory (chdir, getcwd through
@@ -365,7 +370,7 @@ steps = [
     # What Linux programs look for besides: processors, the file system
     # types, a process's own mount table, and three fixed sysctls.
     ("n=0; while read k r; do [ \"$k\" = processor ] && n=$((n+1)); done < /proc/cpuinfo; echo cpus=$n; cat /proc/filesystems; cat /proc/self/mounts", [f"cpus={smp}\r\n".encode(), b"nodev\tramfs", b"nodev\ttmpfs", b"\tbstdisk3", b"proc /proc proc"], b"\n# "),
-    ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n32\r\n", b"mounts"], b"\n# "),
+    ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n256\r\n", b"mounts"], b"\n# "),
     # The kernel's command line, and a process's fixed regions.
     ("cat /proc/cmdline /proc/self/maps", [b"BOOT_IMAGE=", b"[vdso]", b"[stack]"], b"\n# "),
     ("exit 5", b"[exit 5]"),
