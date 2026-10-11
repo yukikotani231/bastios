@@ -311,7 +311,6 @@ inotify01
 inotify04
 inotify05
 inotify10
-inotify11
 inotify_init1_01
 inotify_init1_02
 ioctl05
@@ -322,6 +321,10 @@ ioctl_loop04
 ioctl_loop06
 ioctl_loop07
 ioctl_ns07
+ioprio_get01
+ioprio_set01
+ioprio_set02
+ioprio_set03
 kcmp01
 kcmp02
 keyctl07
@@ -447,6 +450,8 @@ open06
 open09
 open15
 openat01
+openat201
+openat202
 pathconf01
 pause01
 pause02

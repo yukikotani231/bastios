@@ -303,6 +303,19 @@ t_inotify: removing it twice is EINVAL
 t_inotify: rmdir: delete-self, ignored, then delete in the directory
 t_inotify: two equal events in a row coalesce
 t_inotify: unlink: attrib, ignored, then delete in the directory
+t_ioprio: a child inherits it
+t_ioprio: a failed set changes nothing
+t_ioprio: an unknown class is EINVAL
+t_ioprio: an unknown which is EINVAL
+t_ioprio: best effort, level 3
+t_ioprio: idle
+t_ioprio: ioprio_get of a new process is in range
+t_ioprio: no such process is ESRCH
+t_ioprio: none
+t_ioprio: none with a level is EINVAL
+t_ioprio: real time as root
+t_ioprio: the process group
+t_ioprio: the user
 t_ipc: AF_UNIX bind/listen
 t_ipc: AF_UNIX connect through a hard link of the socket file
 t_ipc: AF_UNIX connect through a renamed socket file
@@ -567,6 +580,45 @@ t_newer: sysfs with an unknown name
 t_newer: telldir and seekdir
 t_newer: ustat for /'s device
 t_newer: waitid P_PIDFD
+t_openat2: /proc/self/exe opens the program
+t_openat2: BENEATH inside opens
+t_openat2: BENEATH through a link inside opens
+t_openat2: BENEATH through a link out is EXDEV
+t_openat2: BENEATH with .. out and back is EXDEV
+t_openat2: BENEATH with .. out is EXDEV
+t_openat2: BENEATH with IN_ROOT is EINVAL
+t_openat2: BENEATH with an absolute path is EXDEV
+t_openat2: CACHED alone opens
+t_openat2: CACHED with O_CREAT is EAGAIN
+t_openat2: IN_ROOT leaves the process's root alone
+t_openat2: IN_ROOT: .. stops at it
+t_openat2: IN_ROOT: / is the directory
+t_openat2: IN_ROOT: /proc/version is not there
+t_openat2: IN_ROOT: an absolute link starts at it
+t_openat2: NO_MAGICLINKS on /proc/self/exe is ELOOP
+t_openat2: NO_MAGICLINKS on /proc/version opens
+t_openat2: NO_SYMLINKS on /proc/self/exe is ELOOP
+t_openat2: NO_SYMLINKS on a plain name opens
+t_openat2: NO_SYMLINKS through a link is ELOOP
+t_openat2: NO_SYMLINKS with O_PATH|O_NOFOLLOW opens the link
+t_openat2: NO_XDEV inside one file system opens
+t_openat2: NO_XDEV into /proc is EXDEV
+t_openat2: O_CREAT with a mode makes the file
+t_openat2: O_PATH with O_RDWR is EINVAL
+t_openat2: a NULL path is EFAULT
+t_openat2: a bad dirfd is EBADF
+t_openat2: a larger struct with a nonzero tail is E2BIG
+t_openat2: a larger struct with zeros past it opens
+t_openat2: a link opens without it
+t_openat2: a mode above 07777 is EINVAL
+t_openat2: a mode without O_CREAT is EINVAL
+t_openat2: a size above a page is E2BIG
+t_openat2: a size below 24 is EINVAL
+t_openat2: an unmapped struct is EFAULT
+t_openat2: open of /proc/self/exe with O_NOFOLLOW is ELOOP
+t_openat2: openat2 opens a file
+t_openat2: unknown flags are EINVAL
+t_openat2: unknown resolve flags are EINVAL
 t_path: O_NOFOLLOW, O_NOATIME, EISDIR, rmdir of . and mkdir over a name
 t_path: a loop of links through a long path is ELOOP
 t_path: a path in unmapped memory is EFAULT
