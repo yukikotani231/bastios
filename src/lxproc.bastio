@@ -28,6 +28,7 @@ fn lx_fork(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if c == 0 {
     return EAGAIN;
   }
+  pidfd_reuse(&mut k, c);                   // pidfds on the slot's last process (src/lxpidfd.bastio)
   let fp = find_free(&mut k.mem);
   if fp >= NPAGES {
     return ENOMEM;
@@ -61,6 +62,7 @@ fn lx_vfork_vm(k: &mut Kernel, mmu: &Mmu, pid: u64, stack: u64) -> u64
   if c == 0 {
     return EAGAIN;
   }
+  pidfd_reuse(&mut k, c);                   // pidfds on the slot's last process (src/lxpidfd.bastio)
   // fork_into frees the space it is given if c turns out to have one:
   // that must never be the parent's.
   match take_space(&mut k.spaces, c) {
@@ -208,13 +210,15 @@ fn fork_space(m: &mut Mem, spaces: &mut Vec[Space], pid: u64) -> Space
 /// execve(path, argv, envp): replaces process `pid`'s program with the one
 /// at `path` (/bin/NAME, or an ELF file /NAME), passing argv and envp.
 /// Descriptors stay open unless marked close-on-exec. Returns 0 (the new program's rax) or -errno, in
-/// which case the old program carries on.
-fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u64) -> u64
+/// which case the old program carries on. execveat's dirfd and flags
+/// (AT_FDCWD and 0 for execve) say where a relative path starts, and with
+/// AT_EMPTY_PATH and "" that dirfd itself is the file.
+fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u64, envp: u64, flags: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
   k.perr = ENOENT;
-  let mut src = lx_src_at(&mut k, pid, path);
+  let mut src = lx_src_at(&mut k, pid, dirfd, path, flags);
   if !src.file && src.prog >= NPROGS {
     return k.perr;
   }
@@ -314,11 +318,29 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
 /// The executable at user path `va`: built-in image NAME for /bin/NAME,
 /// otherwise the file. Not found: a built-in Src with prog NPROGS, and
 /// the -errno in k.perr (EACCES for a file the process may not run).
-fn lx_src_at(k: &mut Kernel, pid: u64, va: u64) -> Src
+fn lx_src_at(k: &mut Kernel, pid: u64, dirfd: u64, va: u64, flags: u64) -> Src
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  return src_named(&mut k, pid, lx_path_in(&mut k, pid, va));
+  let none = Src { file: false, prog: NPROGS, f: 0, size: 0 };
+  if flags & !(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW) != 0 {
+    k.perr = EINVAL;
+    return none;
+  }
+  if flags & AT_EMPTY_PATH != 0 && user_empty(&mut k, pid, va) {
+    return fd_src(&mut k, pid, dirfd);
+  }
+  if flags & AT_SYMLINK_NOFOLLOW != 0 {
+    let ln = lx_path_at_nf(&mut k, pid, dirfd, va);
+    if ln != NO_RESULT {
+      let lf = vfs_lookup(&mut k.fs, ln);
+      if lf != NO_FILE && vfs_is_link(&mut k.fs, lf) {
+        k.perr = ELOOP;                     // the file itself is a link
+        return none;
+      }
+    }
+  }
+  return src_named(&mut k, pid, lx_path_at(&mut k, pid, dirfd, va));
 }
 
 /// lx_src_at for the name n that a path walk left in the transfer buffer.
@@ -356,6 +378,34 @@ fn src_named(k: &mut Kernel, pid: u64, n: u64) -> Src
   }
   if may_path(&mut k, pid, n, MAY_X) != 0 {
     k.perr = EACCES;                        // no execute permission (src/lxperm.bastio)
+    return none;
+  }
+  let size = vfs_size(&mut k.fs, f);
+  if size == NO_FILE {
+    return none;
+  }
+  return Src { file: true, prog: NPROGS, f: f, size: size };
+}
+
+/// The file open on descriptor fd of process pid, for execveat's
+/// AT_EMPTY_PATH (fexecve): it needs execute permission, as a path does.
+fn fd_src(k: &mut Kernel, pid: u64, fd: u64) -> Src
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let none = Src { file: false, prog: NPROGS, f: 0, size: 0 };
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
+    k.perr = EBADF;
+    return none;
+  }
+  k.perr = EACCES;                          // a directory, pipe, socket or device
+  if d.kind != K_FILE {
+    return none;
+  }
+  let f = vfs_row_file(k.fs, d.x);
+  let m = file_meta(&mut k.fs, f);
+  if !m.ok || !may_meta(k.procs, pid, m.mode, m.own, MAY_X) {
     return none;
   }
   let size = vfs_size(&mut k.fs, f);
@@ -750,15 +800,30 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
   requires kok(k) && 1 <= pid && pid < NPROC
   ensures kok(k)
 {
-  if options & 14 == 0 || idtype > 2 {
+  // P_PIDFD (src/lxpidfd.bastio) waits as P_PID for the child its pidfd
+  // names; a nonblocking pidfd says -EAGAIN rather than wait.
+  let mut kind = idtype;
+  let mut ident = id;
+  let mut nb = false;
+  if idtype == P_PIDFD {
+    let p = pidfd_target(k, pid, id, false);
+    if p == EBADF {
+      ret(&mut k.procs, pid, EBADF);
+      return KEEP;
+    }
+    kind = 1;
+    ident = p;
+    nb = pipe_nonblock(k, pid, id);
+  }
+  if options & 14 == 0 || kind > 2 {
     ret(&mut k.procs, pid, EINVAL);         // none of WEXITED, WSTOPPED, WCONTINUED
     return KEEP;
   }
   // P_ALL any child, P_PID child id, P_PGID one in group id (0: pid's own).
   let mut want = 0xFFFFFFFFFFFFFFFF;
-  if idtype == 1 {
-    want = id % 0x80000000;
-  } else if idtype == 2 {
+  if kind == 1 {
+    want = ident % 0x80000000;
+  } else if kind == 2 {
     want = 0;
     if id % 0x80000000 != 0 {
       want = 0xFFFFFFFFFFFFFFFF - id % 0x80000000 + 1;
@@ -817,6 +882,10 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
   }
   if !found {
     ret(&mut k.procs, pid, ECHILD);
+    return KEEP;
+  }
+  if nb && options % 2 != WNOHANG {
+    ret(&mut k.procs, pid, EAGAIN);
     return KEEP;
   }
   if options % 2 == WNOHANG {

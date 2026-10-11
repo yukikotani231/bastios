@@ -481,6 +481,52 @@ t_net: getaddrinfo localhost
 t_net: getaddrinfo numeric
 t_net: getsockopt SO_TYPE
 t_net: inet_pton
+t_newer: O_PATH: fchmod is EBADF
+t_newer: O_PATH: fstat works
+t_newer: O_PATH: read is EBADF
+t_newer: a path in unmapped memory is EFAULT
+t_newer: an empty path is ENOENT
+t_newer: execveat a descriptor (fexecve)
+t_newer: execveat a path
+t_newer: execveat of a link with AT_SYMLINK_NOFOLLOW
+t_newer: execveat with bad flags
+t_newer: fchmodat2 follows a link
+t_newer: fchmodat2 on a link itself
+t_newer: fchmodat2 with AT_EMPTY_PATH
+t_newer: fchmodat2 with bad flags
+t_newer: getdents (the old one)
+t_newer: getdents into a byte
+t_newer: getdents64 at the end
+t_newer: getdents64 lists . and ..
+t_newer: lseek rewinds a directory
+t_newer: pidfd_getfd takes the child's pipe end
+t_newer: pidfd_open of itself is close-on-exec
+t_newer: pidfd_open with bad flags
+t_newer: pidfd_send_signal 0
+t_newer: pidfd_send_signal on a file
+t_newer: pidfd_send_signal to a reaped child
+t_newer: poll on a running child's pidfd
+t_newer: poll on an ended child's pidfd
+t_newer: preadv2 at -1 uses and moves the offset
+t_newer: preadv2 at -2
+t_newer: preadv2 at an offset
+t_newer: preadv2 with RWF_HIPRI
+t_newer: preadv2 with an unknown flag
+t_newer: process_vm_readv from unmapped memory
+t_newer: process_vm_readv of a child
+t_newer: process_vm_readv of a reaped child
+t_newer: process_vm_readv of itself
+t_newer: process_vm_readv with flags
+t_newer: process_vm_writev to a child and back
+t_newer: pwritev2 at -1 appends at the offset
+t_newer: pwritev2 at an offset
+t_newer: rewinddir
+t_newer: sysfs counts file system types
+t_newer: sysfs names and numbers agree
+t_newer: sysfs with an unknown name
+t_newer: telldir and seekdir
+t_newer: ustat for /'s device
+t_newer: waitid P_PIDFD
 t_path: O_NOFOLLOW, O_NOATIME, EISDIR, rmdir of . and mkdir over a name
 t_path: a loop of links through a long path is ELOOP
 t_path: a path in unmapped memory is EFAULT
