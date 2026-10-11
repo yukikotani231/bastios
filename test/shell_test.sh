@@ -126,6 +126,33 @@ if read_until(b"bastios> ", mark) and b"no network" in out[mark:]:
     print("ok   no network card: no sockets either")
 else:
     print("FAIL no network card: udpsend"); fails += 1
+# Nor a sound card: /dev/dsp does not open (ENODEV).
+mark = len(out)
+qemu.stdin.write(b"mtone\r"); qemu.stdin.flush()
+if read_until(b"bastios> ", mark) and b"mtone: no sound card (ENODEV)" in out[mark:]:
+    print("ok   no sound card: /dev/dsp says ENODEV")
+else:
+    print("FAIL no sound card: mtone"); fails += 1
+# A sleeping process does not run (wait_asleep): two seconds of BusyBox's
+# sleep cost QEMU well under a second of host CPU. Before, nanosleep ran
+# again on every pass and took the whole two seconds.
+def qemu_cpu():
+    try:
+        f = open(f"/proc/{qemu.pid}/stat").read().rsplit(")", 1)[1].split()
+        return (int(f[11]) + int(f[12])) / os.sysconf("SC_CLK_TCK")
+    except (OSError, IndexError, ValueError):
+        return None
+mark = len(out)
+qemu.stdin.write(b"ash\r"); qemu.stdin.flush()
+read_until(b"# ", mark)
+mark = len(out)
+c0, t0 = qemu_cpu(), time.time()
+qemu.stdin.write(b"sleep 2; echo slept$((1+1))\r"); qemu.stdin.flush()
+ok = read_until(b"slept2", mark)
+c1, t1 = qemu_cpu(), time.time()
+good = ok and c0 is not None and c1 is not None and t1 - t0 >= 1.9 and c1 - c0 < 1.0
+print(("ok  " if good else "FAIL"), f"sleep 2 sleeps: {t1 - t0:.2f} s, QEMU CPU {(c1 or 0) - (c0 or 0):.2f} s")
+fails += not good
 qemu.kill(); qemu.wait()
 print("---- one-processor transcript ----")
 print(out.decode(errors="replace").replace("\r", ""))
@@ -1636,6 +1663,7 @@ for want, what in (
         ("acpi: tables FACP@0x7f", "the tables are listed where they are"),
         ("timer: the local APIC timer, counted against the HPET", "the timer's calibration"),
         ("tick: the PIT\n", "the PIT ticks"),
+        ("idle: hlt; the other processors' timers stop while they idle", "an idle processor stops its timer"),
         ("keyboard: PS/2 (no USB keyboard)", "the PS/2 keyboard"),
         ("MiB usable in a map of", "the memory map"),
         ("pci 00:1f.2 8086:2922 class 010601 AHCI disk", "the PCI devices, with their drivers"),
@@ -1654,11 +1682,99 @@ good = ok and b"hardware report" not in out
 print(("ok  " if good else "FAIL"), "(hardware report) only with diag")
 fails += not good
 
+# Sound (src/hda.bastio, src/lxsnd.bastio): an HD Audio controller with
+# QEMU's output codec, whose sound QEMU writes to a WAV file. mtone plays
+# half a second of a 1 kHz square wave through /dev/dsp: the file must hold
+# exactly that, 500 periods of 24 frames up and 24 down, nothing lost or
+# played twice.
+import wave
+wav = os.path.join(disk_dir.name, "sound.wav")
+def play():
+    global out
+    mark = len(out)
+    qemu.stdin.write(b"mtone\r"); qemu.stdin.flush()
+    read_until(b"bastios> ", mark)
+ok, code = report_boot(["-machine", "pc", "-m", "64M",
+                        "-audiodev", f"wav,id=snd0,path={wav},out.frequency=48000,out.channels=2,out.format=s16",
+                        "-device", "intel-hda", "-device", "hda-output,audiodev=snd0"], "sound", 0, between=play)
+text = out.decode(errors="replace").replace("\r", "")
+good = ok and "sound: HD Audio, 1 output\n" in text
+print(("ok  " if good else "FAIL"), "(sound) the HD Audio controller and its output are found")
+fails += not good
+good = ok and "mtone: ok, 96000 bytes" in text
+print(("ok  " if good else "FAIL"), "(sound) mtone writes half a second to /dev/dsp")
+fails += not good
+runs = []
+try:
+    w = wave.open(wav)
+    frames = w.readframes(w.getnframes())
+    left = [int.from_bytes(frames[i:i + 2], "little", signed=True) for i in range(0, len(frames), 4)]
+    loud = [i for i, v in enumerate(left) if v != 0]
+    if loud:
+        for v in left[loud[0]:loud[-1] + 1]:
+            if runs and runs[-1][0] == v:
+                runs[-1][1] += 1
+            else:
+                runs.append([v, 1])
+except (OSError, EOFError, wave.Error):
+    pass
+good = len(runs) == 1000 and all(n == 24 and v == (8000 if i % 2 == 0 else -8000) for i, (v, n) in enumerate(runs))
+print(("ok  " if good else "FAIL"), f"(sound) QEMU played the square wave whole ({len(runs)} half periods)")
+fails += not good
+booted = re.findall(r"BastiOS 0.2: (\d+) pages of memory", text)
+off = re.search(r"BastiOS: (\d+) pages free at power off", text)
+good = code == 0 and booted and off and booted[-1] == off.group(1)
+print(("ok  " if good else "FAIL"), f"(sound) every page back at power off (status {code})")
+fails += not good
+
+# The PS/2 mouse (src/kbd.bastio, src/lxmouse.bastio): QEMU's monitor
+# moves it 10 right and 5 up, then presses the left button, while mmouse
+# reads /dev/psaux; before that it checks that /dev/input/mice opened
+# O_NONBLOCK has nothing to read and polls empty.
+mon = os.path.join(disk_dir.name, "mouse.sock")
+def move():
+    global out
+    mark = len(out)
+    qemu.stdin.write(b"mmouse\r"); qemu.stdin.flush()
+    if not read_until(b"mmouse: ready", mark):
+        return
+    try:
+        m = socket.socket(socket.AF_UNIX)
+        m.connect(mon)
+        m.sendall(b"mouse_move 10 -5\n")
+        time.sleep(0.3)
+        m.sendall(b"mouse_button 1\n")
+        time.sleep(0.3)
+        m.sendall(b"mouse_button 0\n")
+        m.close()
+    except OSError:
+        pass
+    read_until(b"bastios> ", mark)
+ok, code = report_boot(["-machine", "pc", "-m", "64M", "-append", "diag", "-monitor", f"unix:{mon},server,nowait"],
+                       "mouse", 3, between=move)
+text = out.decode(errors="replace").replace("\r", "")
+for want, what in (
+        ("mouse: PS/2\n", "the report finds the PS/2 mouse"),
+        ("mmouse: ready", "nothing to read before the mouse moves, O_NONBLOCK and poll"),
+        ("mmouse: buttons 0 dx 10 dy 5\n", "a move comes through as one packet, y up positive"),
+        ("mmouse: buttons 1 dx 0 dy 0\n", "the left button comes through")):
+    good = ok and want in text
+    print(("ok  " if good else "FAIL"), f"(mouse) {what}")
+    fails += not good
+
 # No i8042 at all (many recent PCs, with only USB keyboards): its ports
 # read 0xFF, which src/kbd.bastio took as a mouse byte always waiting, and
 # polled for on every turn. Now the keyboard is left alone, and the report
 # says so; the serial line still works.
-ok, code = report_boot(["-machine", "pc,i8042=off", "-m", "64M", "-append", "diag"], "no i8042", 3)
+def no_mouse():
+    global out
+    mark = len(out)
+    qemu.stdin.write(b"mmouse\r"); qemu.stdin.flush()
+    read_until(b"bastios> ", mark)
+ok, code = report_boot(["-machine", "pc,i8042=off", "-m", "64M", "-append", "diag"], "no i8042", 3, between=no_mouse)
+good = ok and b"mouse: none found" in out and b"mmouse: no mouse (ENODEV)" in out
+print(("ok  " if good else "FAIL"), "(no i8042) no mouse: the report says so, /dev/input/mice says ENODEV")
+fails += not good
 good = ok and b"keyboard: none found (no USB keyboard, no PS/2 controller)" in out and code == 0
 print(("ok  " if good else "FAIL"), f"(no i8042) no keyboard found, the shell works, S5 (status {code})")
 fails += not good
@@ -1734,7 +1850,8 @@ else:
             (["-device", "qemu64-x86_64-cpu,socket-id=1,core-id=0,thread-id=0"], "x2APIC id 256", (
                 ("pages of memory, 3 processors", "the processor with APIC id 256 starts too"),
                 ("the MADT lists 2 (and 1 x2APIC entries), 3 running", "the MADT's x2APIC entry is counted"),
-                ("local APIC: x2APIC, for ids of 255 and up", "the local APICs stay in x2APIC mode")))):
+                ("local APIC: x2APIC, for ids of 255 and up", "the local APICs stay in x2APIC mode"),
+                ("idle: hlt; every processor's timer keeps ticking", "without wake-up interrupts the timers keep ticking")))):
         ok, code = report_boot(many + extra, name, 3, qemu9)
         text = out.decode(errors="replace").replace("\r", "")
         for want, what in checks:
