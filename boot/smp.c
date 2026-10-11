@@ -309,7 +309,7 @@ void bst_lapic_ack(uint64_t vector) {
  * version the kernel accepts (lapic_new). */
 extern uint64_t bst_cpu_halt(void);                        /* boot.S */
 uint64_t bst_cpu_wait(void) {
-    int untimed = idle_untimed && this_core() != bst_cores[0];
+    int untimed = idle_untimed && this_core() != bst_core0;
     if (untimed) {
         lw(0x320, LAPIC_TIMER_VECTOR);                     /* one-shot */
         lw(0x380, lapic_ticks_10ms * 100);

@@ -22,18 +22,19 @@ import "linux.bastio";
 const MICE_HDR: u64 = 24;
 const MICE_CAP: u64 = 768;              // MICE_LEN - MICE_HDR: 256 packets
 
-/// Says whether there is a mouse, at boot.
-fn mice_init(k: &mut Kernel, present: bool)
-  requires kok(k)
-  ensures kok(k)
+/// The ring, empty, saying whether there is a mouse (at boot).
+fn mice_new(present: bool) -> Bytes
+  ensures blen(result) == MICE_LEN
 {
-  put_u64(&mut k.mice, 0, 0);
-  put_u64(&mut k.mice, 8, 0);
+  let mut b = balloc(MICE_LEN);
+  put_u64(&mut b, 0, 0);
+  put_u64(&mut b, 8, 0);
   if present {
-    put_u64(&mut k.mice, 16, 1);
+    put_u64(&mut b, 16, 1);
   } else {
-    put_u64(&mut k.mice, 16, 0);
+    put_u64(&mut b, 16, 0);
   }
+  return b;
 }
 
 fn mice_present(k: &Kernel) -> bool
