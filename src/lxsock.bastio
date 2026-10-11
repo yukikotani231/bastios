@@ -657,6 +657,45 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
   return 0;
 }
 
+/// lx_sock_call's getsockopt, setsockopt, accept and shutdown, apart so
+/// that each part proves on its own. Returns the result or SK_WAIT.
+fn sock_call_rest(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  let mut r = ENOSYS;
+  if n == LX_GETSOCKOPT {
+    r = lx_getsockopt(&mut k, pid, a, b, c, d, e);
+  } else if n == LX_ACCEPT || n == LX_ACCEPT4 {
+    let mut fl = 0;
+    if n == LX_ACCEPT4 {
+      fl = d;
+    }
+    let sk = sk_look(k, pid, a);
+    if is_unix(k, pid, a) {
+      r = ux_accept(&mut k, pid, a, b, c, fl);
+    } else if sk.err == 0 {
+      r = EOPNOTSUPP;                       // a UDP socket takes no connections
+    } else {
+      r = lx_accept(&mut k, pid, a, b, c, fl);
+    }
+  } else if n == LX_SHUTDOWN && is_tcp(k, pid, a) {
+    r = lx_tcp_shutdown(&mut k, pid, a, b);
+  } else if n == LX_SHUTDOWN && is_unix(k, pid, a) {
+    r = ux_shutdown(&mut k, pid, a, b);
+  } else if n == LX_SETSOCKOPT {
+    r = lx_setsockopt(&mut k, pid, a, b, c, d, e);
+  } else if n == LX_SHUTDOWN {
+    // Accepted and ignored: shutdown of a datagram socket.
+    let sk = sk_look(k, pid, a);
+    r = sk.err;
+    if is_tcp(k, pid, a) || is_unix(k, pid, a) {
+      r = 0;
+    }
+  }
+  return r;
+}
+
 /// The socket system calls. Returns KEEP or SWITCH, as linux_syscall does.
 fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC
@@ -699,34 +738,8 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
         r = EOPNOTSUPP;
       }
     }
-  } else if n == LX_GETSOCKOPT {
-    r = lx_getsockopt(&mut k, pid, a, b, c, d, e);
-  } else if n == LX_ACCEPT || n == LX_ACCEPT4 {
-    let mut fl = 0;
-    if n == LX_ACCEPT4 {
-      fl = d;
-    }
-    let sk = sk_look(k, pid, a);
-    if is_unix(k, pid, a) {
-      r = ux_accept(&mut k, pid, a, b, c, fl);
-    } else if sk.err == 0 {
-      r = EOPNOTSUPP;                       // a UDP socket takes no connections
-    } else {
-      r = lx_accept(&mut k, pid, a, b, c, fl);
-    }
-  } else if n == LX_SHUTDOWN && is_tcp(k, pid, a) {
-    r = lx_tcp_shutdown(&mut k, pid, a, b);
-  } else if n == LX_SHUTDOWN && is_unix(k, pid, a) {
-    r = ux_shutdown(&mut k, pid, a, b);
-  } else if n == LX_SETSOCKOPT {
-    r = lx_setsockopt(&mut k, pid, a, b, c, d, e);
-  } else if n == LX_SHUTDOWN {
-    // Accepted and ignored: shutdown of a datagram socket.
-    let sk = sk_look(k, pid, a);
-    r = sk.err;
-    if is_tcp(k, pid, a) || is_unix(k, pid, a) {
-      r = 0;
-    }
+  } else {
+    r = sock_call_rest(&mut k, pid, n, a, b, c, d, e);
   }
   if r == SK_WAIT && !is_unix(k, pid, a) {
     return sock_retry(&mut k, pid, n);       // nothing yet: sleep until a frame comes in
