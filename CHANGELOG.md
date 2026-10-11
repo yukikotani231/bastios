@@ -645,6 +645,11 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   and it reaps its children as it goes, so forks keep succeeding.
   `test/sysfuzz_calls.sh` (in `make test`) fails when the kernel
   dispatches a call the fuzzer does not aim at.
+- The system call fuzzer damages executables too (`sysfuzz e SEED RUNS`,
+  `ELFRUNS=` in `test/fuzz_test.sh`, 100 in `make test`): it breaks the
+  headers of three real programs (fixed-address, PIE, and one with an
+  interpreter), points the interpreter at other programs, itself or
+  nothing, cuts the file short, and has a child exec each one.
 - `make test` counts the trusted base (`test/trusted_base.sh`), and
   warnings in `boot/`'s C are errors.
 
