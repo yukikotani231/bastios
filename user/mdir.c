@@ -6,11 +6,12 @@
  * regular file, one write of more than 4096 bytes, O_TMPFILE refused, a
  * full in-memory table (ENOSPC), a tmpfs mount (read-only too), a
  * BastiOS file system made with mkfs.bstdisk3 on a disk image and
- * mounted (bstdisk3), and cleaning up. */
+ * mounted (bstdisk3), the same through a loop device, and cleaning up. */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/statfs.h>
@@ -90,6 +91,61 @@ static int lomount(void)
     if (unlink("img") != 0 || stat("img", &st) == 0 || stat("lm/a", &st) != 0
         || umount2("lm", 0) != 0 || rmdir("lm") != 0)
         return fail("removing the image");
+    return 0;
+}
+
+/* The same through a loop device: bound to an image, formatted and
+ * mounted as /dev/loopN; meanwhile its bytes cannot be read and it cannot
+ * be unbound (EBUSY). (Linux's numbers: musl has no <linux/loop.h>.) */
+#define LOOP_SET_FD 0x4C00
+#define LOOP_CLR_FD 0x4C01
+#define LOOP_CTL_GET_FREE 0x4C82
+static int loopmount(void)
+{
+    int ctl = open("/dev/loop-control", O_RDWR);
+    int n = ctl < 0 ? -1 : ioctl(ctl, LOOP_CTL_GET_FREE);
+    char dev[16];
+    snprintf(dev, sizeof dev, "/dev/loop%d", n);
+    int im = open("limg", O_CREAT | O_RDWR, 0644);
+    int lo = n < 0 ? -1 : open(dev, O_RDWR);
+    if (im < 0 || ftruncate(im, 1 << 20) != 0 || lo < 0 || ioctl(lo, LOOP_SET_FD, im) != 0 || close(im) != 0
+        || mkdir("lm", 0755) != 0)
+        return fail("a loop device on an image");
+    int status = -1;
+    pid_t c = fork();
+    if (c == 0) {
+        execl("/bin/mkfs.bstdisk3", "mkfs.bstdisk3", dev, (char *)0);
+        _exit(127);
+    }
+    if (c < 0 || waitpid(c, &status, 0) != c || status != 0)
+        return fail("mkfs.bstdisk3 on a loop device");
+    if (mount(dev, "lm", "bstdisk3", 0, 0) != 0)
+        return fail("mount of a loop device");
+    char mb[1024] = { 0 }, want[64];
+    snprintf(want, sizeof want, "%s /dx/lm bstdisk3 rw", dev);
+    int pm = open("/proc/self/mounts", O_RDONLY);
+    if (pm < 0 || read(pm, mb, sizeof mb - 1) <= 0 || !strstr(mb, want))
+        return fail("the loop device in /proc/self/mounts");
+    close(pm);
+    char b[16];
+    int w = open("lm/a", O_CREAT | O_WRONLY, 0644);
+    if (w < 0 || write(w, "loop", 4) != 4 || close(w) != 0)
+        return fail("writing to a loop mount");
+    if (pread(lo, b, sizeof b, 0) != -1 || errno != EBUSY || ioctl(lo, LOOP_CLR_FD) != -1 || errno != EBUSY)
+        return fail("a mounted loop device kept busy");
+    if (umount2("lm", 0) != 0 || pread(lo, b, 8, 0) != 8 || memcmp(b, "BSTDISK3", 8) != 0)
+        return fail("the device's bytes after the unmount");
+    if (mount(dev, "lm", "bstdisk3", MS_RDONLY, 0) != 0)
+        return fail("mounting the loop device again");
+    int r = open("lm/a", O_RDONLY);
+    memset(b, 0, sizeof b);
+    if (r < 0 || read(r, b, sizeof b) != 4 || strcmp(b, "loop") != 0 || close(r) != 0)
+        return fail("what the loop mount kept");
+    if (umount2("lm", 0) != 0 || ioctl(lo, LOOP_CLR_FD) != 0 || close(lo) != 0 || close(ctl) != 0
+        || mount(dev, "lm", "bstdisk3", 0, 0) != -1 || errno != ENXIO)
+        return fail("unbinding the loop device");
+    if (unlink("limg") != 0 || rmdir("lm") != 0)
+        return fail("removing the loop image");
     return 0;
 }
 
@@ -249,6 +305,8 @@ int main(void)
     if (umount2("mt", 0) != 0 || rmdir("mt") != 0)
         return fail("removing the mount");
     if (lomount() != 0)
+        return 1;
+    if (loopmount() != 0)
         return 1;
     if (unlinkat(AT_FDCWD, "f", 0) != 0 || chdir("..") != 0 || rmdir("dx") != 0)
         return fail("cleaning up");
