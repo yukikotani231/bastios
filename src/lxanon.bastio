@@ -1,0 +1,220 @@
+// Anonymous memory mapped when first touched.
+//
+// A private, writable anonymous mmap maps no pages: it records the range,
+// and a page fault in it maps a fresh zero page there and runs the
+// instruction again (anon_fault), as Linux does. So a program can reserve
+// more than the machine has (a large malloc, a sparse array) and pay only
+// for the pages it touches. Each process has AN_N records in k.anon: the
+// first window page + 1 (0: free) and the page count. A record says the
+// pages of its range that are not mapped read as zeros; pages it covers
+// that are mapped are ordinary memory. Records never overlap: a range is
+// forgotten (map_forget, src/lxmem.bastio) before anything is mapped over
+// it.
+//
+// When the kernel is the first to touch such a page (read(2) into a fresh
+// buffer, say), copy_from_user and copy_to_user (src/usermem.bastio) map it
+// the same way, so system calls see no difference.
+//
+// brk's new pages are recorded the same way (lx_brk).
+//
+// What stays eager: shared and read-only anonymous mappings,
+// MAP_POPULATE and MAP_LOCKED, and a mapping that finds every record in use.
+// mprotect, mremap, mlock and the calls that need the pages there map the
+// rest of a recorded range first (anon_reach). A record split by an munmap
+// in its middle, with no free record for the right part, maps the right
+// part now.
+//
+// What is trusted: nothing new. The pages are mapped by w_map, as for
+// every other fresh page.
+
+import "linux.bastio";
+
+/// Records that range from .. to of process pid is anonymous memory not
+/// mapped yet: merged into a record it touches, or in a free one. False if
+/// every record is in use (the caller maps the pages now).
+fn anon_add(k: &mut Kernel, pid: u64, from: u64, to: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if from >= to || to > WPAGES {
+    return false;
+  }
+  let mut free = AN_N;
+  let mut i = 0;
+  while i < AN_N
+    invariant i <= AN_N && free <= AN_N && kok(k) && pid < NPROC && from < to && to <= WPAGES
+  {
+    let first1 = get(k.anon, an_at(pid, i, 0));
+    let pages = get(k.anon, an_at(pid, i, 1));
+    if first1 == 0 {
+      if free == AN_N {
+        free = i;
+      }
+    } else if first1 - 1 == to && pages <= WPAGES {
+      // Just above the new range (mmap hands out space downwards).
+      k.anon = set(k.anon, an_at(pid, i, 0), from + 1);
+      k.anon = set(k.anon, an_at(pid, i, 1), pages + (to - from));
+      return true;
+    } else if first1 - 1 <= WPAGES && pages <= WPAGES && first1 - 1 + pages == from {
+      k.anon = set(k.anon, an_at(pid, i, 1), pages + (to - from));
+      return true;
+    }
+    i = i + 1;
+  }
+  if free == AN_N {
+    return false;
+  }
+  k.anon = set(k.anon, an_at(pid, free, 0), from + 1);
+  k.anon = set(k.anon, an_at(pid, free, 1), to - from);
+  return true;
+}
+
+/// Window pages from .. to of process pid are going away or being replaced
+/// (munmap, a mapping over them, mremap, exit, execve): no record covers
+/// them any more.
+fn anon_forget(k: &mut Kernel, pid: u64, from: u64, to: u64)
+  requires kok(k) && pid < NPROC && from <= to && to <= WPAGES
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < AN_N
+    invariant i <= AN_N && kok(k) && pid < NPROC && from <= to && to <= WPAGES
+  {
+    let first1 = get(k.anon, an_at(pid, i, 0));
+    let pages = get(k.anon, an_at(pid, i, 1));
+    if first1 != 0 && first1 - 1 <= WPAGES && pages <= WPAGES - (first1 - 1) {
+      let first = first1 - 1;
+      let end = first + pages;
+      if to <= first || end <= from {
+        // none of it
+      } else if from <= first && end <= to {
+        k.anon = set(k.anon, an_at(pid, i, 0), 0);           // all of it
+      } else if from <= first {
+        k.anon = set(k.anon, an_at(pid, i, 0), to + 1);      // the head goes
+        k.anon = set(k.anon, an_at(pid, i, 1), end - to);
+      } else if end <= to {
+        k.anon = set(k.anon, an_at(pid, i, 1), from - first);   // the tail goes
+      } else {
+        // A hole in the middle: the left part keeps the record, the right
+        // part takes a free one, or gets its pages now.
+        k.anon = set(k.anon, an_at(pid, i, 1), from - first);
+        assert end <= WPAGES;
+        if !anon_add(&mut k, pid, to, end) {
+          lx_map_pages(&mut k.mem, &mut k.spaces, pid, to, end, false);
+        }
+      }
+    }
+    i = i + 1;
+  }
+}
+
+/// Maps every page of window pages from .. to of process pid that a record
+/// covers and that is not mapped yet, and forgets the records there: the
+/// range is ordinary memory afterwards. For the calls that change or move
+/// pages (mprotect, mremap, mlock), which need them there.
+fn anon_reach(k: &mut Kernel, pid: u64, from: u64, to: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if from >= to || to > WPAGES {
+    return;
+  }
+  let mut i = 0;
+  while i < AN_N
+    invariant i <= AN_N && kok(k) && pid < NPROC && from < to && to <= WPAGES
+  {
+    let first1 = get(k.anon, an_at(pid, i, 0));
+    let pages = get(k.anon, an_at(pid, i, 1));
+    if first1 != 0 && first1 - 1 <= WPAGES && pages <= WPAGES - (first1 - 1) {
+      let a = larger(first1 - 1, from);
+      let b = smaller(first1 - 1 + pages, to);
+      if a < b {
+        lx_map_pages(&mut k.mem, &mut k.spaces, pid, a, b, false);
+      }
+    }
+    i = i + 1;
+  }
+  anon_forget(&mut k, pid, from, to);
+}
+
+/// How many of window pages from .. to of process pid are memory the
+/// process has: mapped, or covered by a record.
+fn anon_count(k: &mut Kernel, pid: u64, from: u64, to: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if from >= to || to > WPAGES {
+    return 0;
+  }
+  let mut c = win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, from, to, 0);
+  if c > to - from {
+    return c;
+  }
+  let mut i = 0;
+  while i < AN_N
+    invariant i <= AN_N && kok(k) && pid < NPROC && from < to && to <= WPAGES && c <= to - from
+  {
+    let first1 = get(k.anon, an_at(pid, i, 0));
+    let pages = get(k.anon, an_at(pid, i, 1));
+    if first1 != 0 && first1 - 1 <= WPAGES && pages <= WPAGES - (first1 - 1) {
+      let a = larger(first1 - 1, from);
+      let b = smaller(first1 - 1 + pages, to);
+      if a < b {
+        let have = win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, a, b, 0);
+        if have <= b - a && c + (b - a - have) <= to - from {
+          c = c + (b - a - have);
+        }
+      }
+    }
+    i = i + 1;
+  }
+  return c;
+}
+
+/// A page fault of process p on anonymous memory not touched yet: maps
+/// its zero page, and true says to run p again.
+fn anon_fault(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let va = pget(k.procs, p, F_REGS + 19);   // CR2
+  if va < USER_BASE || va - USER_BASE >= USER_SIZE {
+    return false;
+  }
+  let q = (va - USER_BASE) / 4096;
+  if !anon_covers(k.anon, p, q) || raw_from_user(&mut k.spaces, p, q * 4096, &mut k.fs.xfer, 0, 1) != 0 {
+    return false;                           // not such memory, or mapped (a fault for another reason)
+  }
+  return anon_touch(&mut k.mem, &mut k.spaces, k.anon, p, q);
+}
+
+/// fork: the child's window is a copy of the parent's, pages not touched
+/// yet included, so it gets the records too.
+fn anon_fork(k: &mut Kernel, pid: u64, c: u64)
+  requires kok(k) && pid < NPROC && c < NPROC
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < AN_N
+    invariant i <= AN_N && kok(k) && pid < NPROC && c < NPROC
+  {
+    k.anon = set(k.anon, an_at(c, i, 0), get(k.anon, an_at(pid, i, 0)));
+    k.anon = set(k.anon, an_at(c, i, 1), get(k.anon, an_at(pid, i, 1)));
+    i = i + 1;
+  }
+}
+
+/// A row with a new window, or a new thread's row (the group's records
+/// stay with its holder): no records.
+fn anon_clear(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < AN_N
+    invariant i <= AN_N && kok(k) && pid < NPROC
+  {
+    k.anon = set(k.anon, an_at(pid, i, 0), 0);
+    i = i + 1;
+  }
+}

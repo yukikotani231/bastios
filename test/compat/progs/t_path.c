@@ -235,5 +235,7 @@ int main(void) {
     EXPECT("chroot keeps absolute paths, links and .. inside the new root", chroot_jail());
     EXPECT("mknod makes device and socket nodes; a device node opens its device", device_nodes());
     EXPECT("a name ending in / or /. must be a directory", trailing_slash());
+    EXPECT("execve of a missing /bin program is ENOENT", ({ char *av[] = {"nope", 0};
+           fails(execve("/bin/no_such_program", av, 0), ENOENT); }));
     return done();
 }

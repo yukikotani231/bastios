@@ -498,22 +498,24 @@ fn put_c(o: &mut Bytes, at: u64, c: u8) -> u64
   return bytes_put_byte(&mut o, at, c);
 }
 
-/// Appends the low 40 bits of v as 10 hex digits (a user address).
+/// Appends v in hex, at least 8 digits, as Linux's %08lx.
 fn put_x(o: &mut Bytes, at: u64, v: u64) -> u64
   requires blen(o) == PROC_OUT && at <= PROC_OUT
   ensures blen(o) == PROC_OUT && result <= PROC_OUT
 {
   let mut a = at;
-  let mut sh = 10;
+  let mut sh = 16;
   while sh > 0
-    invariant sh <= 10 && blen(o) == PROC_OUT && a <= PROC_OUT
+    invariant sh <= 16 && blen(o) == PROC_OUT && a <= PROC_OUT
   {
     sh = sh - 1;
     let d = (v >> (4 * sh)) & 15;
-    if d < 10 {
-      a = put_c(&mut o, a, cast[u8](48 + d));
-    } else {
-      a = put_c(&mut o, a, cast[u8](87 + d));
+    if sh < 8 || v >> (4 * sh) != 0 {       // at least 8 digits, as Linux's %08lx
+      if d < 10 {
+        a = put_c(&mut o, a, cast[u8](48 + d));
+      } else {
+        a = put_c(&mut o, a, cast[u8](87 + d));
+      }
     }
   }
   return a;
@@ -856,7 +858,9 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     } else {
       a = put_n(&mut o, a, ni - 20);
     }
-    a = put_s(&mut o, a, " 1 0 0");
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, group_size(k, p));  // num_threads: Python warns on fork when there are more
+    a = put_s(&mut o, a, " 0 0");
     let mut z = 0;
     while z < 30
       invariant z <= 30 && a <= PROC_OUT && blen(o) == PROC_OUT
@@ -893,7 +897,9 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     }
     a = put_s(&mut o, a, "\nVmLck:\t");
     a = put_n(&mut o, a, rl_locked(k, p) / 1024);
-    return put_s(&mut o, a, " kB\nThreads:\t1\n");
+    a = put_s(&mut o, a, " kB\nThreads:\t");
+    a = put_n(&mut o, a, group_size(k, p));
+    return put_c(&mut o, a, 10);
   }
   if what == PF_COMM {
     let a = put_comm(&mut k, p, &mut o, 0);
@@ -967,7 +973,7 @@ fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
     i = i + 1;
   }
   bfree(out);
-  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, m);
+  let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, m);
   if put == NO_RESULT || put == 0 {
     return EFAULT;
   }
@@ -1094,7 +1100,7 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
       i = i + 1;
     }
     bfree(lo);
-    if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, m) != m {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, m) != m {
       return EFAULT;
     }
     return m;
@@ -1120,7 +1126,7 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
     i = i + 1;
   }
   bfree(out);
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, l) != l {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, l) != l {
     return EFAULT;
   }
   return l;
@@ -1153,7 +1159,7 @@ fn proc_write(k: &mut Kernel, pid: u64, f: u64, va: u64, n: u64) -> u64
   if !proc_writable(f) || n == 0 || n > 32 {
     return EINVAL;
   }
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, n) != n {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, n) != n {
     return EFAULT;
   }
   let mut i = 0;
@@ -1190,5 +1196,31 @@ fn proc_write(k: &mut Kernel, pid: u64, f: u64, va: u64, n: u64) -> u64
     }
   }
   k.sys = set(k.sys, SYS_PIPEMAX, size);
+  return n;
+}
+
+/// The number of threads in p's thread group: 1 for a process without
+/// threads.
+fn group_size(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures result <= NPROC
+{
+  if pget(k.procs, p, F_TGID) == 0 {
+    return 1;
+  }
+  let g = tgid(k.procs, p);
+  let mut n = 0;
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && n < q && kok(k)
+  {
+    if in_group(k.procs, q, g) {
+      n = n + 1;
+    }
+    q = q + 1;
+  }
+  if n == 0 {
+    return 1;
+  }
   return n;
 }

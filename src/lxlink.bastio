@@ -227,7 +227,7 @@ fn link_out(k: &mut Kernel, pid: u64, f: u64, va: u64, size: u64) -> u64
   if t == NO_FD {
     return ENOENT;
   }
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, t) != t {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, t) != t {
     return EFAULT;
   }
   return t;
@@ -243,7 +243,7 @@ fn lx_symlink(k: &mut Kernel, pid: u64, tva: u64, dirfd: u64, path: u64) -> u64
     return EFAULT;
   }
   let want = smaller(PATH_MAX_LX, USER_SIZE - (tva - USER_BASE));
-  let got = copy_from_user(&mut k.spaces, pid, tva, &mut k.fs.xfer, want);
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, tva, &mut k.fs.xfer, want);
   if got == NO_RESULT {
     return EFAULT;
   }

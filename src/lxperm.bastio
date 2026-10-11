@@ -479,7 +479,7 @@ fn user_empty(k: &mut Kernel, pid: u64, va: u64) -> bool
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  return copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 1) == 1 && bget(k.fs.xfer, 0) == 0;
+  return copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 1) == 1 && bget(k.fs.xfer, 0) == 0;
 }
 
 /// The ids of process pid after it execs a program: from a file with the

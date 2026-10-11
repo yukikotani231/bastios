@@ -48,7 +48,7 @@ fn type_is(k: &mut Kernel, pid: u64, va: u64, s: Str) -> bool
   if l > 8 {
     return false;
   }
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, l + 1) != l + 1 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, l + 1) != l + 1 {
     return false;
   }
   return xfer_is(k.fs.xfer, 0, l, s) && bget(k.fs.xfer, l) == 0;

@@ -360,8 +360,8 @@ $(COMPAT_BINS): build/compat/%: test/compat/progs/%.c test/compat/progs/compat.h
 build/compat:
 	mkdir -p $@
 
-# After ash.elf: that recipe configures build/busybox in place, and a copy
-# taken while it runs misses files its Kbuild steps are rewriting.
+# Copy the tree only after build/user/ash.elf has finished configuring and
+# building it in place: under make -j the copy otherwise races that build.
 build/compat/busybox: build/busybox/Makefile test/compat/busybox.config | build/compat build/user/ash.elf
 	rm -rf build/compat/bb && cp -r build/busybox build/compat/bb
 	$(MAKE) -C build/compat/bb -s clean >/dev/null
@@ -619,15 +619,25 @@ ALPINE_CACHE ?= build/compat/alpine
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py | build/compat
 	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE)
 
+# Debian on BastiOS, on a fifth disk (test/compat/debiandisk.py) for
+# test/compat/debian.txt: Debian's root file system, whose programs are
+# linked against glibc, entered with chroot. From the debian:stable-slim
+# image on Docker Hub, pinned by digest, with its layer kept in
+# ALPINE_CACHE like the Alpine images'; the BusyBox is Alpine's.
+DEBIAN_IMAGE ?= library/debian@sha256:eb593cf2c358cacef45ca0a424bbc7d30cfa3466265fc2662b9466a0ca6ba1c5
+
+build/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
+	test/compat/debiandisk.py $@ $(DEBIAN_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+
 build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) test/compat/mkdisk.py
 	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) perllib=build/compat/perllib py=build/compat/py
 
-compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --out build/compat $(COMPAT_PROGS)
+compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --debian-disk build/compat/debian.img --out build/compat $(COMPAT_PROGS)
 
 # Records which checks pass now, so `make compat` catches regressions.
-compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --out build/compat $(COMPAT_PROGS)
+compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --debian-disk build/compat/debian.img --out build/compat $(COMPAT_PROGS)
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)

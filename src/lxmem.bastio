@@ -27,8 +27,8 @@ const MREMAP_DONTUNMAP: u64 = 4;
 
 /// Window page p out of l2: its frame goes back to m. Nothing if p is not
 /// mapped.
-fn w_unmap(m: &mut Mem, l2: &mut PageTable, p: u64)
-  requires mem_ok(m) && pt_level(l2) == 2 && p < WPAGES && pt_leases(l2) == 0
+fn l2_unmap(m: &mut Mem, l2: &mut PageTable, p: u64)
+  requires mem_ok(m) && pt_level(l2) == 2 && p < L2_PAGES && pt_leases(l2) == 0
   ensures mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0
 {
   let t = p / 512;
@@ -46,9 +46,11 @@ fn w_unmap(m: &mut Mem, l2: &mut PageTable, p: u64)
 /// Maps window page p writable or not, if it is mapped. False if not. A
 /// shared page of program text (src/text.bastio) made writable is first
 /// replaced by a private copy, so the process cannot write the others'
-/// (it stays read-only if there is no page for the copy).
-fn w_protect(m: &mut Mem, l2: &mut PageTable, p: u64, writable: bool) -> bool
-  requires mem_ok(m) && pt_level(l2) == 2 && p < WPAGES && pt_leases(l2) == 0
+/// (it stays read-only if there is no page for the copy). So is a
+/// copy-on-write page either way: what it may do with the page is now the
+/// mapping's own, not what fork shared.
+fn l2_protect(m: &mut Mem, l2: &mut PageTable, p: u64, writable: bool) -> bool
+  requires mem_ok(m) && pt_level(l2) == 2 && p < L2_PAGES && pt_leases(l2) == 0
   ensures mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0
 {
   let t = p / 512;
@@ -59,7 +61,16 @@ fn w_protect(m: &mut Mem, l2: &mut PageTable, p: u64, writable: bool) -> bool
   let mut ok = false;
   if pt_has(l1, p % 512) && pt_shared(l1, p % 512) {
     let s = pt_take_shared(&mut l1, p % 512);
-    if writable && is_text_page(m, s) {
+    if is_cow_page(m, s) {
+      let b = find_free(&mut m);
+      if b < NPAGES {
+        let f = shared_copy(take_dirty(&mut m, b), s);
+        drop_shared(&mut m, s);
+        pt_put_frame(&mut l1, p % 512, f, writable);
+      } else {
+        pt_put_shared(&mut l1, p % 512, s, false);
+      }
+    } else if writable && is_text_page(m, s) {
       let b = find_free(&mut m);
       if b < NPAGES {
         let f = shared_copy(take_dirty(&mut m, b), s);
@@ -82,11 +93,12 @@ fn w_protect(m: &mut Mem, l2: &mut PageTable, p: u64, writable: bool) -> bool
 }
 
 /// Fills window page p with zeros if it is a private page, keeping its
-/// permission; a shared page (MAP_SHARED) keeps what it holds. False if p
-/// is not mapped.
-fn w_zero(l2: &mut PageTable, p: u64) -> bool
-  requires pt_level(l2) == 2 && p < WPAGES && pt_leases(l2) == 0
-  ensures pt_level(l2) == 2 && pt_leases(l2) == 0
+/// permission; a shared page (MAP_SHARED) keeps what it holds. A
+/// copy-on-write page is private: a fresh zero page replaces it (unless
+/// memory ran out). False if p is not mapped.
+fn l2_zero(m: &mut Mem, l2: &mut PageTable, p: u64) -> bool
+  requires mem_ok(m) && pt_level(l2) == 2 && p < L2_PAGES && pt_leases(l2) == 0
+  ensures mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0
 {
   let t = p / 512;
   if !pt_has(l2, t) {
@@ -107,6 +119,16 @@ fn w_zero(l2: &mut PageTable, p: u64) -> bool
         i = i + 1;
       }
       pt_put_frame(&mut l1, p % 512, f, w);
+    } else if !pt_writable(l1, p % 512) {
+      let s = pt_take_shared(&mut l1, p % 512);
+      let b = find_free(&mut m);
+      if is_cow_page(m, s) && b < NPAGES {
+        let f = take_page(&mut m, b);
+        drop_shared(&mut m, s);
+        pt_put_frame(&mut l1, p % 512, f, true);
+      } else {
+        pt_put_shared(&mut l1, p % 512, s, false);
+      }
     }
   }
   pt_put(&mut l2, t, l1);
@@ -117,11 +139,11 @@ fn w_zero(l2: &mut PageTable, p: u64) -> bool
 /// permission; whatever was at `to` goes back to m first. A `from` with no
 /// page leaves `to` empty. False if a level-1 table for `to` could not be
 /// made.
-fn w_move(m: &mut Mem, l2: &mut PageTable, from: u64, to: u64) -> bool
-  requires mem_ok(m) && pt_level(l2) == 2 && from < WPAGES && to < WPAGES && pt_leases(l2) == 0
+fn l2_move(m: &mut Mem, l2: &mut PageTable, from: u64, to: u64) -> bool
+  requires mem_ok(m) && pt_level(l2) == 2 && from < L2_PAGES && to < L2_PAGES && pt_leases(l2) == 0
   ensures mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0
 {
-  w_unmap(&mut m, &mut l2, to);
+  l2_unmap(&mut m, &mut l2, to);
   let tf = from / 512;
   if !pt_has(l2, tf) {
     return true;
@@ -173,6 +195,125 @@ fn w_move(m: &mut Mem, l2: &mut PageTable, from: u64, to: u64) -> bool
   return true;
 }
 
+/// l2_move between two level-2 tables: the page at page pf of `a` to
+/// page pt of `b`, whose slot is empty already. False if a level-1 table
+/// for it could not be made.
+fn l2_move_x(m: &mut Mem, a: &mut PageTable, b: &mut PageTable, pf: u64, pt: u64) -> bool
+  requires mem_ok(m) && pt_level(a) == 2 && pt_level(b) == 2 && pf < L2_PAGES && pt < L2_PAGES && pt_leases(a) == 0 && pt_leases(b) == 0
+  ensures mem_ok(m) && pt_level(a) == 2 && pt_level(b) == 2 && pt_leases(a) == 0 && pt_leases(b) == 0
+{
+  let tf = pf / 512;
+  if !pt_has(a, tf) {
+    return true;
+  }
+  let tt = pt / 512;
+  if !pt_has(b, tt) {
+    let n = find_free(&mut m);
+    if n >= NPAGES {
+      return false;
+    }
+    pt_put(&mut b, tt, pt_new(take_page(&mut m, n), 1));
+  }
+  let mut src = pt_take(&mut a, tf);
+  if !pt_has(src, pf % 512) {
+    pt_put(&mut a, tf, src);
+    return true;
+  }
+  let w = pt_writable(src, pf % 512);
+  let mut dst = pt_take(&mut b, tt);
+  if pt_shared(src, pf % 512) {
+    let s = pt_take_shared(&mut src, pf % 512);
+    if pt_has(dst, pt % 512) {
+      drop_shared(&mut m, s);                     // cannot happen: `to` was emptied
+    } else {
+      pt_put_shared(&mut dst, pt % 512, s, w);
+    }
+  } else {
+    let f = pt_take_frame(&mut src, pf % 512);
+    if pt_has(dst, pt % 512) {
+      give_page(&mut m, f);                       // cannot happen: `to` was emptied
+    } else {
+      pt_put_frame(&mut dst, pt % 512, f, w);
+    }
+  }
+  pt_put(&mut a, tf, src);
+  pt_put(&mut b, tt, dst);
+  return true;
+}
+
+// The same four on the whole window, through its level-3 table.
+
+fn w_unmap(m: &mut Mem, l3: &mut PageTable, p: u64)
+  requires mem_ok(m) && pt_level(l3) == 3 && p < WPAGES && pt_leases(l3) == 0
+  ensures mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
+{
+  let t = p / L2_PAGES;
+  if pt_has(l3, t) {
+    let mut l2 = pt_take(&mut l3, t);
+    l2_unmap(&mut m, &mut l2, p % L2_PAGES);
+    pt_put(&mut l3, t, l2);
+  }
+}
+
+fn w_protect(m: &mut Mem, l3: &mut PageTable, p: u64, writable: bool) -> bool
+  requires mem_ok(m) && pt_level(l3) == 3 && p < WPAGES && pt_leases(l3) == 0
+  ensures mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
+{
+  let t = p / L2_PAGES;
+  if !pt_has(l3, t) {
+    return false;
+  }
+  let mut l2 = pt_take(&mut l3, t);
+  let r = l2_protect(&mut m, &mut l2, p % L2_PAGES, writable);
+  pt_put(&mut l3, t, l2);
+  return r;
+}
+
+fn w_zero(m: &mut Mem, l3: &mut PageTable, p: u64) -> bool
+  requires mem_ok(m) && pt_level(l3) == 3 && p < WPAGES && pt_leases(l3) == 0
+  ensures mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
+{
+  let t = p / L2_PAGES;
+  if !pt_has(l3, t) {
+    return false;
+  }
+  let mut l2 = pt_take(&mut l3, t);
+  let r = l2_zero(&mut m, &mut l2, p % L2_PAGES);
+  pt_put(&mut l3, t, l2);
+  return r;
+}
+
+fn w_move(m: &mut Mem, l3: &mut PageTable, from: u64, to: u64) -> bool
+  requires mem_ok(m) && pt_level(l3) == 3 && from < WPAGES && to < WPAGES && pt_leases(l3) == 0
+  ensures mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
+{
+  let tf = from / L2_PAGES;
+  let tt = to / L2_PAGES;
+  if tf == tt && pt_has(l3, tf) {
+    let mut l2 = pt_take(&mut l3, tf);
+    let r = l2_move(&mut m, &mut l2, from % L2_PAGES, to % L2_PAGES);
+    pt_put(&mut l3, tf, l2);
+    return r;
+  }
+  w_unmap(&mut m, &mut l3, to);
+  if tf == tt || !pt_has(l3, tf) {
+    return true;                                  // nothing at `from`
+  }
+  if !pt_has(l3, tt) {
+    let n = find_free(&mut m);
+    if n >= NPAGES {
+      return false;
+    }
+    pt_put(&mut l3, tt, pt_new(take_page(&mut m, n), 2));
+  }
+  let mut a = pt_take(&mut l3, tf);
+  let mut b = pt_take(&mut l3, tt);
+  let r = l2_move_x(&mut m, &mut a, &mut b, from % L2_PAGES, to % L2_PAGES);
+  pt_put(&mut l3, tf, a);
+  pt_put(&mut l3, tt, b);
+  return r;
+}
+
 /// Whether no processor runs process pid's space now, so its mappings may
 /// shrink or lose permissions (win_op). If one does, pid is marked F_QUIET:
 /// the other threads of its group are not picked again (group_free) until
@@ -213,49 +354,55 @@ fn win_op(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, op: u64, from: u64, to
       let mut r = WPAGES + 1;
       if pt_lease_count(&mut root) == 0 && pt_has(root, 1) {
         let mut l3 = pt_take(&mut root, 1);
-        if pt_has(l3, 0) {
-          let mut l2 = pt_take(&mut l3, 0);
-          r = 0;
+        r = 0;
+        if op == WOP_MOVE {
           let mut i = 0;
           let n = to - from;
           // A move to higher pages goes from the top, so a page is never
           // moved onto one not moved yet.
-          let up = op == WOP_MOVE && arg > from;
-          while i < n
-            invariant i <= n && n == to - from && from <= to && to <= WPAGES && mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0
-            invariant op == WOP_MOVE ==> arg + n <= WPAGES
-            invariant r <= WPAGES + 1
+          let up = arg > from;
+          while i < n && r <= WPAGES
+            invariant i <= n && n == to - from && from <= to && to <= WPAGES && mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
+            invariant arg + n <= WPAGES
           {
             let mut j = i;
             if up {
               j = n - 1 - i;
             }
-            let p = from + j;
-            if op == WOP_UNMAP {
-              if w_has(&mut l2, p) && r < WPAGES {
-                r = r + 1;
-              }
-              w_unmap(&mut m, &mut l2, p);
-            } else if op == WOP_COUNT {
-              if w_has(&mut l2, p) && r < WPAGES {
-                r = r + 1;
-              }
-            } else if op == WOP_ZERO {
-              if w_zero(&mut l2, p) && r < WPAGES {
-                r = r + 1;
-              }
-            } else if op == WOP_PROTECT {
-              if w_protect(&mut m, &mut l2, p, arg == 1) && r < WPAGES {
-                r = r + 1;
-              }
-            } else if op == WOP_MOVE && r <= WPAGES {
-              if !w_move(&mut m, &mut l2, p, arg + j) {
-                r = WPAGES + 1;
-              }
+            if !w_move(&mut m, &mut l3, from + j, arg + j) {
+              r = WPAGES + 1;
             }
             i = i + 1;
           }
-          pt_put(&mut l3, 0, l2);
+        } else {
+          // Only pages under a level-1 table can be mapped: w_next skips
+          // the rest, so a range of the 512 GiB window costs what it holds.
+          let mut p = from;
+          while p < to
+            invariant from <= p && p <= to && to <= WPAGES && mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
+            invariant r <= WPAGES
+          {
+            let q = w_next(&mut l3, p);
+            if q >= to {
+              p = to;
+            } else {
+              let mut hit = false;
+              if op == WOP_UNMAP {
+                hit = w_has(&mut l3, q);
+                w_unmap(&mut m, &mut l3, q);
+              } else if op == WOP_COUNT {
+                hit = w_has(&mut l3, q);
+              } else if op == WOP_ZERO {
+                hit = w_zero(&mut m, &mut l3, q);
+              } else if op == WOP_PROTECT {
+                hit = w_protect(&mut m, &mut l3, q, arg == 1);
+              }
+              if hit && r < WPAGES {
+                r = r + 1;
+              }
+              p = q + 1;
+            }
+          }
         }
         pt_put(&mut root, 1, l3);
       }
@@ -428,14 +575,76 @@ fn hole_take(k: &mut Kernel, pid: u64, pages: u64) -> u64
     let a = get(k.holes, hl_at(pid, i, 0));
     let b = get(k.holes, hl_at(pid, i, 1));
     if b != 0 && a < b && b <= STACK_FIRST && pages > 0 && pages <= b - a {
+      // From its top, as Linux hands out space top down: the bottom of a
+      // hole may be where a mapping placed by a hint grows (lx_mmap_hint).
       if pages == b - a {
         k.holes = set(k.holes, hl_at(pid, i, 1), 0);
       } else {
-        k.holes = set(k.holes, hl_at(pid, i, 0), a + pages);
+        k.holes = set(k.holes, hl_at(pid, i, 1), b - pages);
       }
-      return a;
+      return b - pages;
     }
     i = i + 1;
+  }
+  return STACK_FIRST;
+}
+
+/// Whether pages first .. end lie in one hole of process pid.
+fn hole_within(k: &Kernel, pid: u64, first: u64, end: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let mut i = 0;
+  while i < HOLE_N
+    invariant i <= HOLE_N
+  {
+    let a = get(k.holes, hl_at(pid, i, 0));
+    let b = get(k.holes, hl_at(pid, i, 1));
+    if b != 0 && a <= first && first < end && end <= b {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+/// mmap's address hint: where `pages` pages from user address addr are,
+/// as window pages, if nothing is there, or STACK_FIRST to place the
+/// mapping as usual. Space is handed out top down from F_MMAP, and what
+/// lies above it is taken, so a hint is taken in two cases: below the
+/// mmap area (and above the program break), where F_MMAP moves down to it
+/// and the space between becomes a hole, so the mapping can grow up into
+/// it with the next hint (the Go runtime's heap arenas start at
+/// 0xc000000000 and grow so); or inside one hole. A PROT_NONE mapping
+/// made with MAP_FIXED below the mmap area leaves no record, so a hint
+/// may still land on one (not Linux's behaviour).
+fn mmap_hint(k: &mut Kernel, pid: u64, addr: u64, pages: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result < STACK_FIRST ==> pages <= STACK_FIRST - result
+{
+  if addr == 0 || addr % 4096 != 0 || addr < USER_BASE || pages == 0 {
+    return STACK_FIRST;
+  }
+  let h = (addr - USER_BASE) / 4096;
+  if h >= STACK_FIRST || pages > STACK_FIRST - h {
+    return STACK_FIRST;
+  }
+  let e = h + pages;
+  let low = pget(k.procs, pid, F_MMAP);
+  if low > STACK_FIRST * 4096 || h * 4096 < pget(k.procs, pid, F_BRK) {
+    return STACK_FIRST;
+  }
+  if win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, h, e, 0) != 0 || anon_count(&mut k, pid, h, e) != 0 {
+    return STACK_FIRST;
+  }
+  if e * 4096 <= low {
+    pset(&mut k.procs, pid, F_MMAP, h * 4096);
+    hole_add(&mut k, pid, e, low / 4096);
+    return h;
+  }
+  if hole_within(k, pid, h, e) {
+    hole_cut(&mut k, pid, h, e);
+    return h;
   }
   return STACK_FIRST;
 }
@@ -520,6 +729,7 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
     return EACCES;
   }
   lazy_fill(&mut k, pid, from, to);         // code not read yet: read it first
+  anon_reach(&mut k, pid, from, to);        // memory not touched yet: map it first
   // Only pages mmap handed out can have been left unmapped by PROT_NONE.
   let low = pget(k.procs, pid, F_MMAP) / 4096;
   if prot != 0 && from >= low {
@@ -560,7 +770,7 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
   // No mapping at addr (Linux finds no VMA there): EFAULT.
   let f0 = r / 4294967296;
   let e0 = r % 4294967296;
-  if win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, f0, e0, 0) != e0 - f0 {
+  if anon_count(&mut k, pid, f0, e0) != e0 - f0 {
     return EFAULT;
   }
   if fl / MREMAP_FIXED % 2 == 1 {
@@ -592,6 +802,7 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
   if flags / MREMAP_MAYMOVE % 2 == 0 {
     return ENOMEM;
   }
+  anon_reach(&mut k, pid, from, oend);      // the pages move: every one is there first
   let brk = pget(k.procs, pid, F_BRK);
   let low = pget(k.procs, pid, F_MMAP);
   let extra = want - have;
@@ -670,6 +881,7 @@ fn remap_fixed(k: &mut Kernel, pid: u64, r: u64, newn: u64, to_addr: u64) -> u64
   if at + want > WPAGES {
     return ENOMEM;
   }
+  anon_reach(&mut k, pid, from, oend);      // the pages move: every one is there first
   map_forget(&mut k, pid, at, at + want, false);
   win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at, at + want, 0);
   let mut keep = have;
@@ -814,7 +1026,7 @@ fn map_flush(k: &mut Kernel, pid: u64, i: u64, from: u64, to: u64) -> u64
     let foff = sat_add(off, (p - first) * 4096);
     if foff < size {
       let n = smaller(4096, size - foff);
-      if copy_from_user(&mut k.spaces, pid, USER_BASE + p * 4096, &mut k.fs.xfer, n) == n {
+      if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, USER_BASE + p * 4096, &mut k.fs.xfer, n) == n {
         vfs_seek(&mut k.fs, row, foff);
         if vfs_write(&mut k.fs, &mut k.mem, row, n) == VFS_MISS {
           r = DISK_RETRY;
@@ -886,6 +1098,7 @@ fn map_forget(k: &mut Kernel, pid: u64, from: u64, to: u64, wait: bool) -> u64
     i = i + 1;
   }
   lazy_forget(&mut k, pid, from, to);       // code not read yet stays unread
+  anon_forget(&mut k, pid, from, to);       // as does memory not touched yet
   return 0;
 }
 
@@ -953,7 +1166,7 @@ fn lx_msync(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64) -> u64
   }
   let from = r / 4294967296;
   let to = r % 4294967296;
-  if win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, from, to, 0) != to - from {
+  if anon_count(&mut k, pid, from, to) != to - from {
     return ENOMEM;
   }
   return 0;
@@ -977,7 +1190,7 @@ fn lx_mincore(k: &mut Kernel, pid: u64, addr: u64, n: u64, vec: u64) -> u64
   }
   let from = (addr - USER_BASE) / 4096;
   let to = smaller((addr - USER_BASE + n + 4095) / 4096, WPAGES);
-  if from > to || win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, from, to, 0) != to - from {
+  if from > to || anon_count(&mut k, pid, from, to) != to - from {
     return ENOMEM;
   }
   let mut i = 0;
@@ -993,7 +1206,7 @@ fn lx_mincore(k: &mut Kernel, pid: u64, addr: u64, n: u64, vec: u64) -> u64
     invariant done <= total && total <= WPAGES && vec <= 18446744073709551615 - USER_SIZE && kok(k)
   {
     let m = smaller(total - done, XFER);
-    if copy_to_user(&mut k.spaces, pid, vec + done, k.fs.xfer, m) != m {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, vec + done, k.fs.xfer, m) != m {
       return EFAULT;
     }
     done = done + m;
@@ -1055,7 +1268,7 @@ fn lx_madvise(k: &mut Kernel, pid: u64, addr: u64, n: u64, advice: u64) -> u64
   }
   let from = (addr - USER_BASE) / 4096;
   let to = smaller((addr - USER_BASE + n + 4095) / 4096, WPAGES);
-  if from > to || win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, from, to, 0) != to - from {
+  if from > to || anon_count(&mut k, pid, from, to) != to - from {
     return ENOMEM;
   }
   if advice == MADV_REMOVE || advice == MADV_WIPEONFORK {
@@ -1064,7 +1277,7 @@ fn lx_madvise(k: &mut Kernel, pid: u64, addr: u64, n: u64, advice: u64) -> u64
   if advice == MADV_FREE || advice == MADV_KEEPONFORK {
     // Only for private anonymous memory: Linux checks the first mapping
     // in the range.
-    if map_covers(k, pid, from) || user_shared_page(&mut k.spaces, pid, USER_BASE + from * 4096) != NO_RESULT {
+    if map_covers(k, pid, from) || user_shared_page(&mut k.spaces, k.mem.bm, pid, USER_BASE + from * 4096) != NO_RESULT {
       return EINVAL;
     }
   }
@@ -1094,7 +1307,7 @@ fn lock_range(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
   }
   let from = (addr - USER_BASE) / 4096;
   let to = smaller((addr - USER_BASE + n + 4095) / 4096, WPAGES);
-  if from > to || win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, from, to, 0) != to - from {
+  if from > to || anon_count(&mut k, pid, from, to) != to - from {
     return ENOMEM;
   }
   return 0;
@@ -1127,14 +1340,19 @@ fn cached_l3(l3: &mut PageTable, m: &mut Mem, p: u64, c: &mut PCache, slot: u64,
   requires pt_level(l3) == 3 && mem_ok(m) && p < WPAGES && pc_ok(c) && slot < PC_N
   ensures mem_ok(m) && pc_ok(c)
 {
-  if !pt_has(l3, 0) {
-    return false;
+  let t = p / L2_PAGES;
+  if !pt_has(l3, t) {
+    let a = find_free(&mut m);
+    if a >= NPAGES {
+      return false;
+    }
+    pt_put(&mut l3, t, pt_new(take_page(&mut m, a), 2));
   }
-  return pt_borrow(&mut l3, 0, cached_l2, &mut m, p, &mut c, slot, w);
+  return pt_borrow(&mut l3, t, cached_l2, &mut m, p % L2_PAGES, &mut c, slot, w);
 }
 
 fn cached_l2(l2: &mut PageTable, m: &mut Mem, p: u64, c: &mut PCache, slot: u64, w: bool) -> bool
-  requires pt_level(l2) == 2 && mem_ok(m) && p < WPAGES && pc_ok(c) && slot < PC_N
+  requires pt_level(l2) == 2 && mem_ok(m) && p < L2_PAGES && pc_ok(c) && slot < PC_N
   ensures mem_ok(m) && pc_ok(c) && pt_level(l2) == 2
 {
   let t = p / 512;

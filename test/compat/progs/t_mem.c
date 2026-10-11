@@ -8,9 +8,13 @@
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
 #define FUTEX_CMP_REQUEUE 4
+#include <pthread.h>
 #include <sched.h>
 #include <time.h>
 #include <sys/wait.h>
+
+static char *cow_buf;
+static void *cow_thread(void *a) { cow_buf[4096 * 3] = 7; return a; }
 
 int main(void) {
     setup();
@@ -187,5 +191,97 @@ int main(void) {
     }
     EXPECT("64 MiB of address space", (q = mmap(0, 48 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&
            (q[0] = 1, q[(48 << 20) - 1] = 1, 1));
+    EXPECT("more than the old 64 MiB window: a 96 MiB mmap, then a 100 MiB malloc", ({
+           char *r = mmap(0, 96 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int ok = r != MAP_FAILED;
+           if (ok) { r[0] = 1; r[(96 << 20) - 1] = 2; ok = r[0] == 1 && r[(96 << 20) - 1] == 2; munmap(r, 96 << 20); }
+           char *b = malloc(100 << 20);
+           if (b) { b[0] = 3; b[(100 << 20) - 1] = 4; ok = ok && b[(100 << 20) - 1] == 4; free(b); }
+           ok && b != 0; }));
+    EXPECT("an 8 MiB stack: 6 MiB of locals in a function", ({
+           pid_t c = fork();
+           if (c == 0) { volatile char big[6 << 20]; big[0] = 1; big[sizeof big - 1] = 2; _exit(big[0] + big[sizeof big - 1] == 3 ? 0 : 1); }
+           int st; waitpid(c, &st, 0);
+           WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("pages come when first touched: 640 MiB of mmap, system calls and fork on pages never touched", ({
+           size_t n = (size_t)640 << 20;
+           char *r = mmap(0, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int ok = r != MAP_FAILED, pf[2] = { -1, -1 };
+           if (ok) {
+               r[0] = 1; r[n - 1] = 2;
+               char z[4] = { 9, 9, 9, 9 };
+               ok = pipe(pf) == 0 && write(pf[1], "abc", 3) == 3 && read(pf[0], r + (300 << 20), 3) == 3 && r[300 << 20] == 'a' &&
+                    write(pf[1], r + (400 << 20), 4) == 4 && read(pf[0], z, 4) == 4 && z[0] == 0 && z[3] == 0;
+               ok = ok && munmap(r + (100 << 20), 4096) == 0 && r[(100 << 20) + 4096] == 0 && r[(100 << 20) - 1] == 0;
+               pid_t c = fork();
+               if (c == 0) { r[500 << 20] = 5; _exit(r[0] == 1 && r[n - 1] == 2 && r[500 << 20] == 5 ? 0 : 1); }
+               int st2; waitpid(c, &st2, 0);
+               ok = ok && WIFEXITED(st2) && WEXITSTATUS(st2) == 0 && r[500 << 20] == 0;
+               munmap(r, n);
+               close(pf[0]); close(pf[1]);
+           }
+           ok; }));
+    EXPECT("fork: parent and child each see only their own writes (copy-on-write), read(2) into a shared page, a second thread, mprotect and MADV_DONTNEED", ({
+           size_t n = 64 * 4096;
+           char *r = mmap(0, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int ok = r != MAP_FAILED, pf[2] = { -1, -1 };
+           if (ok) {
+               for (size_t i = 0; i < n; i += 4096) r[i] = 1;
+               ok = pipe(pf) == 0;
+               pid_t c = fork();
+               if (c == 0) {
+                   int bad = 0;
+                   r[0] = 2;                                      /* a write fault copies the page */
+                   bad |= r[4096] != 1;
+                   bad |= read(pf[0], r + 4096 * 2, 3) != 3 || r[4096 * 2] != 'a';   /* the kernel writes a shared page */
+                   cow_buf = r; pthread_t t;                      /* a second thread copies the rest first */
+                   bad |= pthread_create(&t, 0, cow_thread, 0) != 0 || pthread_join(t, 0) != 0 || r[4096 * 3] != 7;
+                   bad |= mprotect(r + 4096 * 4, 4096, PROT_READ) != 0 || r[4096 * 4] != 1;
+                   bad |= madvise(r + 4096 * 5, 4096, MADV_DONTNEED) != 0 || r[4096 * 5] != 0;
+                   _exit(bad);
+               }
+               ok = ok && write(pf[1], "abc", 3) == 3;
+               int st2 = -1; waitpid(c, &st2, 0);
+               ok = ok && WIFEXITED(st2) && WEXITSTATUS(st2) == 0;
+               /* None of the child's writes reached the parent; the parent's own still go in. */
+               ok = ok && r[0] == 1 && r[4096 * 2] == 1 && r[4096 * 3] == 1 && r[4096 * 5] == 1;
+               r[4096 * 6] = 9;
+               ok = ok && r[4096 * 6] == 9 && r[4096 * 7] == 1;
+               munmap(r, n);
+               close(pf[0]); close(pf[1]);
+           }
+           ok; }));
+    EXPECT("a big window: 1.2 GiB of PROT_NONE reservations as the Go runtime makes, then 4 GiB of mmap touched at both ends", ({
+           size_t sz[6] = { 128 << 10, 1 << 20, 8 << 20, 64 << 20, 512 << 20, 512 << 20 };
+           void *res[6]; int ok = 1;
+           for (int i = 0; i < 6; i++) {
+               res[i] = mmap(0, sz[i], PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+               ok = ok && res[i] != MAP_FAILED;
+           }
+           size_t n = (size_t)4 << 30;
+           char *r = mmap(0, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           ok = ok && r != MAP_FAILED;
+           if (r != MAP_FAILED) {
+               r[0] = 1; r[n - 1] = 2;
+               ok = ok && r[0] == 1 && r[n - 1] == 2 && r[n / 2] == 0;
+               munmap(r, n);
+           }
+           for (int i = 0; i < 6; i++) if (res[i] != MAP_FAILED) munmap(res[i], sz[i]);
+           ok; }));
+    EXPECT("mmap takes a free address hint and grows from it, as the Go runtime's heap at 0xc000000000 does", ({
+           char *want = (char *)0xc000000000ul;
+           char *a = mmap(want, 64 << 20, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           char *b = mmap(want + (64 << 20), 64 << 20, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int ok = a == want && b == want + (64 << 20);
+           /* made usable piece by piece, as Go does */
+           ok = ok && mmap(a, 1 << 20, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == a;
+           if (ok) { a[0] = 3; a[(1 << 20) - 1] = 4; ok = a[0] == 3 && a[(1 << 20) - 1] == 4; }
+           /* a hint on memory in use is not taken */
+           char *c = mmap(want, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           ok = ok && c != MAP_FAILED && c != want;
+           if (c != MAP_FAILED) munmap(c, 4096);
+           if (a != MAP_FAILED) munmap(a, 64 << 20);
+           if (b != MAP_FAILED) munmap(b, 64 << 20);
+           ok; }));
     return done();
 }
