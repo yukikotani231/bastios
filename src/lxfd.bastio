@@ -646,6 +646,9 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
       return EACCES;
     }
   }
+  if dev == DEV_MICE {
+    return mice_open(&mut k, pid, flags);   // src/lxmouse.bastio
+  }
   if dev != DEV_NONE && dev != DEV_DIR {
     let hv = ofd_new(&mut k, OF_DEV, dev);
     if hv >= OFD_N {

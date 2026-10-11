@@ -496,6 +496,13 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   refused. `/etc/shells` lists `/bin/sh` and `/bin/ash`, and `/etc/group`
   has a `tty` group.
 
+### Mouse
+
+- A PS/2 mouse (`src/kbd.bastio`) for Linux programs as `/dev/input/mice`
+  and `/dev/psaux` (`src/lxmouse.bastio`): 3-byte PS/2 packets, blocking
+  or `O_NONBLOCK` reads, and `poll`. The hardware report says
+  `mouse: PS/2` or `mouse: none found`. No wheel, and no USB mouse yet.
+
 ### Sound
 
 - An Intel HD Audio driver (`src/hda.bastio`) and `/dev/dsp`

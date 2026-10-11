@@ -1712,11 +1712,54 @@ good = code == 0 and booted and off and booted[-1] == off.group(1)
 print(("ok  " if good else "FAIL"), f"(sound) every page back at power off (status {code})")
 fails += not good
 
+# The PS/2 mouse (src/kbd.bastio, src/lxmouse.bastio): QEMU's monitor
+# moves it 10 right and 5 up, then presses the left button, while mmouse
+# reads /dev/psaux; before that it checks that /dev/input/mice opened
+# O_NONBLOCK has nothing to read and polls empty.
+mon = os.path.join(disk_dir.name, "mouse.sock")
+def move():
+    global out
+    mark = len(out)
+    qemu.stdin.write(b"mmouse\r"); qemu.stdin.flush()
+    if not read_until(b"mmouse: ready", mark):
+        return
+    try:
+        m = socket.socket(socket.AF_UNIX)
+        m.connect(mon)
+        m.sendall(b"mouse_move 10 -5\n")
+        time.sleep(0.3)
+        m.sendall(b"mouse_button 1\n")
+        time.sleep(0.3)
+        m.sendall(b"mouse_button 0\n")
+        m.close()
+    except OSError:
+        pass
+    read_until(b"bastios> ", mark)
+ok, code = report_boot(["-machine", "pc", "-m", "64M", "-append", "diag", "-monitor", f"unix:{mon},server,nowait"],
+                       "mouse", 3, between=move)
+text = out.decode(errors="replace").replace("\r", "")
+for want, what in (
+        ("mouse: PS/2\n", "the report finds the PS/2 mouse"),
+        ("mmouse: ready", "nothing to read before the mouse moves, O_NONBLOCK and poll"),
+        ("mmouse: buttons 0 dx 10 dy 5\n", "a move comes through as one packet, y up positive"),
+        ("mmouse: buttons 1 dx 0 dy 0\n", "the left button comes through")):
+    good = ok and want in text
+    print(("ok  " if good else "FAIL"), f"(mouse) {what}")
+    fails += not good
+
 # No i8042 at all (many recent PCs, with only USB keyboards): its ports
 # read 0xFF, which src/kbd.bastio took as a mouse byte always waiting, and
 # polled for on every turn. Now the keyboard is left alone, and the report
 # says so; the serial line still works.
-ok, code = report_boot(["-machine", "pc,i8042=off", "-m", "64M", "-append", "diag"], "no i8042", 3)
+def no_mouse():
+    global out
+    mark = len(out)
+    qemu.stdin.write(b"mmouse\r"); qemu.stdin.flush()
+    read_until(b"bastios> ", mark)
+ok, code = report_boot(["-machine", "pc,i8042=off", "-m", "64M", "-append", "diag"], "no i8042", 3, between=no_mouse)
+good = ok and b"mouse: none found" in out and b"mmouse: no mouse (ENODEV)" in out
+print(("ok  " if good else "FAIL"), "(no i8042) no mouse: the report says so, /dev/input/mice says ENODEV")
+fails += not good
 good = ok and b"keyboard: none found (no USB keyboard, no PS/2 controller)" in out and code == 0
 print(("ok  " if good else "FAIL"), f"(no i8042) no keyboard found, the shell works, S5 (status {code})")
 fails += not good

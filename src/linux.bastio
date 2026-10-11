@@ -297,6 +297,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if d.kind == K_CONSOLE {
       return console_read(&mut k, pid, va, cnt, was);
     }
+    if d.kind == K_DEV && d.x == DEV_MICE {
+      return mice_read(&mut k, pid, n, a, va, cnt);   // src/lxmouse.bastio
+    }
     let mut r = EBADF;
     if d.kind == K_FILE {
       r = lx_file_read(&mut k, pid, d.x, va, cnt);
