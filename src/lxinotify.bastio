@@ -65,7 +65,6 @@ const IN_KEEP: u64 = 0x84000FFF;              // what a watch keeps of its mask:
 const IN_EVENT: u64 = 16;                     // struct inotify_event before its name
 
 // The calls ino_before and ino_after look at, besides those named elsewhere.
-const LX_CREAT: u64 = 85;
 const IX_LSETXATTR: u64 = 189;
 const IX_FSETXATTR: u64 = 190;
 const IX_REMOVEXATTR: u64 = 197;
