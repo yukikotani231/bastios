@@ -42,10 +42,13 @@ fn w_unmap(m: &mut Mem, l2: &mut PageTable, p: u64)
   }
 }
 
-/// Maps window page p writable or not, if it is mapped. False if not.
-fn w_protect(l2: &mut PageTable, p: u64, writable: bool) -> bool
-  requires pt_level(l2) == 2 && p < WPAGES && pt_leases(l2) == 0
-  ensures pt_level(l2) == 2 && pt_leases(l2) == 0
+/// Maps window page p writable or not, if it is mapped. False if not. A
+/// shared page of program text (src/text.bastio) made writable is first
+/// replaced by a private copy, so the process cannot write the others'
+/// (it stays read-only if there is no page for the copy).
+fn w_protect(m: &mut Mem, l2: &mut PageTable, p: u64, writable: bool) -> bool
+  requires mem_ok(m) && pt_level(l2) == 2 && p < WPAGES && pt_leases(l2) == 0
+  ensures mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0
 {
   let t = p / 512;
   if !pt_has(l2, t) {
@@ -55,7 +58,18 @@ fn w_protect(l2: &mut PageTable, p: u64, writable: bool) -> bool
   let mut ok = false;
   if pt_has(l1, p % 512) && pt_shared(l1, p % 512) {
     let s = pt_take_shared(&mut l1, p % 512);
-    pt_put_shared(&mut l1, p % 512, s, writable);
+    if writable && is_text_page(m, s) {
+      let b = find_free(&mut m);
+      if b < NPAGES {
+        let f = shared_copy(take_dirty(&mut m, b), s);
+        drop_shared(&mut m, s);
+        pt_put_frame(&mut l1, p % 512, f, true);
+      } else {
+        pt_put_shared(&mut l1, p % 512, s, false);
+      }
+    } else {
+      pt_put_shared(&mut l1, p % 512, s, writable);
+    }
     ok = true;
   } else if pt_has(l1, p % 512) {
     let f = pt_take_frame(&mut l1, p % 512);
@@ -193,7 +207,7 @@ fn win_op(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, op: u64, from: u64, to
                 r = r + 1;
               }
             } else if op == WOP_PROTECT {
-              if w_protect(&mut l2, p, arg == 1) && r < WPAGES {
+              if w_protect(&mut m, &mut l2, p, arg == 1) && r < WPAGES {
                 r = r + 1;
               }
             } else if op == WOP_MOVE && r <= WPAGES {
@@ -270,6 +284,7 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
   }
   let from = r / 4294967296;
   let to = r % 4294967296;
+  lazy_fill(&mut k, pid, from, to);         // code not read yet: read it first
   // Only pages mmap handed out can have been left unmapped by PROT_NONE.
   let low = pget(k.procs, pid, F_MMAP) / 4096;
   if prot != 0 && from >= low && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, from, to, false) {
@@ -495,6 +510,7 @@ fn map_forget(k: &mut Kernel, pid: u64, from: u64, to: u64, wait: bool) -> u64
     }
     i = i + 1;
   }
+  lazy_forget(&mut k, pid, from, to);       // code not read yet stays unread
   return 0;
 }
 
@@ -663,7 +679,7 @@ fn lx_map_file_shared(k: &mut Kernel, pid: u64, first: u64, pages: u64, f: u64, 
           got = 0;
         }
       }
-      slot = pc_add(&mut k.fs.pc, &mut k.mem, f, fpg, k.fs.xfer, got);
+      slot = pc_add(&mut k.fs.pc, &mut k.mem, f, fpg, k.fs.xfer, got, false);
     }
     if slot >= PC_N || !lx_map_cached(&mut k.mem, &mut k.spaces, pid, first + j, &mut k.fs.pc, slot) {
       return ENOMEM;

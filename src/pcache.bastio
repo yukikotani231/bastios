@@ -1,7 +1,12 @@
 // The page cache: one shared page per (file, page of the file) that a
 // MAP_SHARED mapping has asked for, so every process that maps the same
 // part of a file maps the same page, and read(2) and write(2) see what the
-// mappings hold.
+// mappings hold. exec puts the read-only pages of a program on a file
+// system here too and maps them read-only (share_text, src/elf.bastio), so
+// every process running that program shares its code, as the built-in
+// programs' processes share theirs (src/text.bastio). Those pages are
+// marked TXT_PAGE in the page bitmap: `mem` counts them as available, and
+// mprotect gives a process its own copy before it may write one.
 //
 // The pages are `Shared` references (bastiolang), held in slots of a
 // level-1 page table that no processor ever loads: it is only a place the
@@ -23,6 +28,7 @@
 // fresh copy, which the next write-back reconciles).
 
 import "pages.bastio";
+import "core/hashmap.bastio";
 
 const PC_N: u64 = 512;                // pages the cache holds (one table)
 const PCK_LEN: u64 = 1026;            // PC_N * 2 keys, the next slot to reuse, 1 once the table is made
@@ -32,11 +38,40 @@ enum PcTab { Off, On(PageTable) }
 
 /// Element 0 of `tab` is the table, made on first use. Its slot i holds
 /// the page for key (keys[2i] - 1, keys[2i + 1]); keys[2i] == 0 means the
-/// slot is free.
-struct PCache { tab: Vec[PcTab], keys: Buf }
+/// slot is free. `idx` maps pc_key(h, pg) to the slot, so a lookup costs
+/// one hash probe rather than a scan of every slot; a hit is checked
+/// against `keys`, which stay the truth.
+struct PCache { tab: Vec[PcTab], keys: Buf, idx: HashMap[u64] }
 
 spec fn pc_ok(c: &PCache) -> bool {
   len(c.keys) == PCK_LEN && vlen(c.tab) == 1 && (vget(c.tab, 0) is PcTab::On ==> pt_level(vget(c.tab, 0).On) == 1)
+    && hmap_ok[u64](c.idx)
+}
+
+/// (h, pg) packed into one map key: h below 2^20 (handles are far fewer)
+/// and pg below 2^44 (a 64 PiB file). PC_NONE for anything larger, which
+/// pc_find then looks up by a scan.
+fn pc_key(h: u64, pg: u64) -> u64 {
+  if h >= 1048576 || pg >= 17592186044416 {
+    return PC_NONE;
+  }
+  return h * 17592186044416 + pg;
+}
+
+/// Frees slot i's key, and takes it out of the index.
+fn pc_unkey(keys: &mut Buf, idx: &mut HashMap[u64], i: u64)
+  requires len(keys) == PCK_LEN && hmap_ok[u64](idx) && i < PC_N
+  ensures len(keys) == PCK_LEN && hmap_ok[u64](idx)
+  ensures get(keys, 2 * PC_N) == get(old(keys), 2 * PC_N) && get(keys, 2 * PC_N + 1) == get(old(keys), 2 * PC_N + 1)
+{
+  let h1 = get(keys, 2 * i);
+  if h1 != 0 {
+    let k = pc_key(h1 - 1, get(keys, 2 * i + 1));
+    if k != PC_NONE {
+      hmap_remove[u64](&mut idx, k);
+    }
+    keys = set(keys, 2 * i, 0);
+  }
 }
 
 fn pc_new() -> PCache
@@ -44,20 +79,20 @@ fn pc_new() -> PCache
 {
   let mut v = vec_new[PcTab]();
   vec_push(&mut v, PcTab::Off);
-  return PCache { tab: v, keys: alloc(PCK_LEN) };
+  return PCache { tab: v, keys: alloc(PCK_LEN), idx: hmap_new[u64]() };
 }
 
 /// Takes the table out (pc_put puts it back).
 fn pc_take(c: &mut PCache) -> PcTab
   requires pc_ok(c)
-  ensures len(c.keys) == PCK_LEN && vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off
+  ensures len(c.keys) == PCK_LEN && vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && hmap_ok[u64](c.idx)
   ensures result is PcTab::On ==> pt_level(result.On) == 1
 {
   return vec_swap(&mut c.tab, 0, PcTab::Off);
 }
 
 fn pc_put(c: &mut PCache, x: PcTab)
-  requires len(c.keys) == PCK_LEN && vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off
+  requires len(c.keys) == PCK_LEN && vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && hmap_ok[u64](c.idx)
   requires x is PcTab::On ==> pt_level(x.On) == 1
   ensures pc_ok(c)
 {
@@ -82,6 +117,18 @@ fn pc_find(c: &PCache, h: u64, pg: u64) -> u64
 {
   if h >= PC_NONE - 1 {
     return PC_NONE;
+  }
+  let k = pc_key(h, pg);
+  if k != PC_NONE {
+    match hmap_get[u64](c.idx, k) {
+      Option::Some(s) => {
+        if s < PC_N && get(c.keys, 2 * s) == h + 1 && get(c.keys, 2 * s + 1) == pg {
+          return s;
+        }
+        return PC_NONE;
+      },
+      Option::None => { return PC_NONE; },
+    }
   }
   let mut i = 0;
   while i < PC_N
@@ -114,9 +161,10 @@ fn fill_frame(f: &mut Frame, src: &Bytes, n: u64)
 }
 
 /// Caches page pg of file h, its first n bytes taken from src (the rest
-/// zero). Returns its slot, or PC_NONE if memory ran out. The caller has
-/// checked pc_find first.
-fn pc_add(c: &mut PCache, m: &mut Mem, h: u64, pg: u64, src: &Bytes, n: u64) -> u64
+/// zero), as a page of program text (TXT_PAGE) if `text`. Returns its
+/// slot, or PC_NONE if memory ran out. The caller has checked pc_find
+/// first.
+fn pc_add(c: &mut PCache, m: &mut Mem, h: u64, pg: u64, src: &Bytes, n: u64, text: bool) -> u64
   requires pc_ok(c) && mem_ok(m) && n <= 4096 && n <= blen(src)
   ensures pc_ok(c) && mem_ok(m)
   ensures result < PC_N || result == PC_NONE
@@ -135,7 +183,7 @@ fn pc_add(c: &mut PCache, m: &mut Mem, h: u64, pg: u64, src: &Bytes, n: u64) -> 
     i = get(c.keys, 2 * PC_N) % PC_N;
     c.keys = set(c.keys, 2 * PC_N, (i + 1) % PC_N);
   }
-  c.keys = set(c.keys, 2 * i, 0);
+  pc_unkey(&mut c.keys, &mut c.idx, i);
   match pc_take(&mut c) {
     PcTab::Off => {
       let a = find_free(&mut m);
@@ -155,7 +203,11 @@ fn pc_add(c: &mut PCache, m: &mut Mem, h: u64, pg: u64, src: &Bytes, n: u64) -> 
         pc_clear(&mut t, &mut m, i);
       }
       let b = find_free(&mut m);
-      if b < NPAGES && !pt_has(t, i) {
+      if b < NPAGES && !pt_has(t, i) && text {
+        pt_put_shared(&mut t, i, shared_new(take_text_page(&mut m, b)), true);
+        pt_borrow_frame(&mut t, i, fill_frame, src, n);
+        r = i;
+      } else if b < NPAGES && !pt_has(t, i) {
         pt_put_shared(&mut t, i, shared_new(take_page(&mut m, b)), true);
         pt_borrow_frame(&mut t, i, fill_frame, src, n);
         r = i;
@@ -166,6 +218,10 @@ fn pc_add(c: &mut PCache, m: &mut Mem, h: u64, pg: u64, src: &Bytes, n: u64) -> 
   if r < PC_N {
     c.keys = set(c.keys, 2 * r, h + 1);
     c.keys = set(c.keys, 2 * r + 1, pg);
+    let k = pc_key(h, pg);
+    if k != PC_NONE {
+      hmap_insert[u64](&mut c.idx, k, r);
+    }
   }
   return r;
 }
@@ -300,13 +356,13 @@ fn pc_resize(c: &mut PCache, m: &mut Mem, h: u64, size: u64)
       let mut i = 0;
       while i < PC_N
         invariant i <= PC_N && pt_level(t) == 1 && mem_ok(m) && len(c.keys) == PCK_LEN
-        invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off
+        invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && hmap_ok[u64](c.idx)
         invariant quiet ==> pt_leases(t) == 0
       {
         if get(c.keys, 2 * i) == h + 1 {
           let pg = get(c.keys, 2 * i + 1);
           if pg >= size / 4096 + 1 || (pg == size / 4096 && size % 4096 == 0) {
-            c.keys = set(c.keys, 2 * i, 0);
+            pc_unkey(&mut c.keys, &mut c.idx, i);
             if quiet {
               pc_clear(&mut t, &mut m, i);
             }
@@ -345,6 +401,7 @@ fn pc_free(c: PCache, m: &mut Mem)
   }
   vec_free(cc.tab);
   free(cc.keys);
+  hmap_free[u64](cc.idx);
 }
 
 fn free_cache_table(m: &mut Mem, t: PageTable)
@@ -385,6 +442,30 @@ fn pc_map_slot(l1: &mut PageTable, c: &mut PCache, slot: u64, i: u64) -> bool
     PcTab::On(t) => {
       if pt_has(t, slot) && pt_shared(t, slot) {
         pt_put_shared(&mut l1, i, pt_dup_shared(t, slot), true);
+        ok = true;
+      }
+      pc_put(&mut c, PcTab::On(t));
+    },
+  }
+  return ok;
+}
+
+/// Maps the page in slot `slot` read-only at slot i of a process's level-1
+/// table l1, for exec: a page already there is left alone. False only if
+/// the slot holds nothing.
+fn pc_map_text(l1: &mut PageTable, c: &mut PCache, slot: u64, i: u64) -> bool
+  requires pt_level(l1) == 1 && i < 512 && pc_ok(c) && slot < PC_N
+  ensures pc_ok(c)
+{
+  if pt_has(l1, i) {
+    return true;
+  }
+  let mut ok = false;
+  match pc_take(&mut c) {
+    PcTab::Off => {},
+    PcTab::On(t) => {
+      if pt_has(t, slot) && pt_shared(t, slot) {
+        pt_put_shared(&mut l1, i, pt_dup_shared(t, slot), false);
         ok = true;
       }
       pc_put(&mut c, PcTab::On(t));

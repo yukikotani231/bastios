@@ -197,6 +197,7 @@ fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
   swap_words(&mut k.sigact, h * SIGACT_ROW, p * SIGACT_ROW, SIGACT_ROW);
   swap_words(&mut k.alarms, h * 2, p * 2, 2);
   swap_words(&mut k.maps, h * MAP_N * MAP_W, p * MAP_N * MAP_W, MAP_N * MAP_W);
+  swap_words(&mut k.lazy, h * LZ_W, p * LZ_W, LZ_W);
   swap_words(&mut k.alarms, PT_BASE + h * PT_N * PT_W, PT_BASE + p * PT_N * PT_W, PT_N * PT_W);
   return true;
 }
@@ -343,6 +344,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   if has_space(&mut k.spaces, c) {
     return EAGAIN;                          // a FREE row has no space; check it
   }
+  lazy_clear(&mut k, c);
   let fp = find_free(&mut k.mem);
   if fp >= NPAGES {
     return ENOMEM;

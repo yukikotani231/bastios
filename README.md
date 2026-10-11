@@ -109,7 +109,7 @@ The proof covers everything in `src/` and `user/*.bastio`. Everything below it i
 v0.2, pre-release: the system call ABI, the disk format and the build can change. Known limits:
 - one lock for the whole kernel state; system calls from different processors wait for each other;
 - user pages are always executable: `mprotect` sets only whether a page is writable;
-- a user window of 64 MiB per process (pages are mapped as a program asks for them, and `fork` copies every mapped page), at most 31 processes;
+- a user window of 64 MiB per process (pages are mapped as a program asks for them, and `fork` copies every mapped page but the built-in programs' read-only ones, which processes share), at most 31 processes;
 - 512 files and directories in memory and 1023 under `disk/`, paths up to 255 bytes, files up to 64 MiB in memory and 1 GiB on disk, 256 open files per process; one disk, one command at a time; a write call returns once the disk has it, but work spread over several calls can be cut between them by a power cut;
 - running out of memory when starting a program fails the spawn cleanly, but the kernel's own arena (for `Buf`) still halts the machine when it runs out;
 - it has only been run in QEMU; [Getting started](docs/getting-started.md#5-boot-from-a-usb-stick) lists what real hardware it supports.
@@ -135,7 +135,7 @@ The direction is in bastiolang's [ROADMAP.md](https://github.com/yukikotani231/b
 | `user/*.c`, `user/*.S` | Test programs in C and assembly: musl programs for the Linux system calls, freestanding ELF and fault tests, the system call fuzzer |
 | `files/` | Files installed in memory at boot (built into the kernel image) |
 | `test/` | `make test` and the benchmarks; `test/compat/` is the Linux compatibility suite |
-| `docs/` | [Getting started](docs/getting-started.md), [architecture](docs/architecture.md), [Linux programs](docs/linux.md), [trusted base](docs/trusted-base.md), [releasing](docs/releasing.md) |
+| `docs/` | [Getting started](docs/getting-started.md), [architecture](docs/architecture.md), [Linux programs](docs/linux.md), [trusted base](docs/trusted-base.md), [users and permissions](docs/security.md), [releasing](docs/releasing.md) |
 
 ## Contributing
 

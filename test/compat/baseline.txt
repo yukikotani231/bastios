@@ -117,6 +117,27 @@ t_cred: kill needs a matching uid
 t_cred: root starts as uid and gid 0
 t_cred: setreuid and setfsuid follow Linux's rules
 t_cred: the parent is still root
+t_dev: /dev/loop-control
+t_dev: BLKGETSIZE64
+t_dev: BLKSSZGET
+t_dev: LOOP_CLR_FD
+t_dev: LOOP_CTL_GET_FREE
+t_dev: LOOP_CTL_GET_FREE skips it
+t_dev: LOOP_GET_STATUS64
+t_dev: LOOP_SET_FD
+t_dev: LOOP_SET_STATUS64
+t_dev: bound twice is EBUSY
+t_dev: cleared twice is ENXIO
+t_dev: file stays bound after close
+t_dev: lands past the offset
+t_dev: loop device is a block device
+t_dev: lseek SEEK_END is the device size
+t_dev: open loop device
+t_dev: read through the device
+t_dev: unbound reads nothing
+t_dev: unbound: LOOP_GET_STATUS64 is ENXIO
+t_dev: write at the end is ENOSPC
+t_dev: write through the device
 t_dir: chdir
 t_dir: chdir ..
 t_dir: create file in directory
@@ -163,11 +184,13 @@ t_file: close twice is EBADF
 t_file: faccessat
 t_file: fchmod
 t_file: fdatasync
+t_file: fgetxattr unsupported
 t_file: fstat size
 t_file: fsync
 t_file: ftruncate grow
 t_file: ftruncate shrink
 t_file: link
+t_file: listxattr empty
 t_file: lseek SEEK_CUR
 t_file: lseek SEEK_END
 t_file: lseek SEEK_SET
@@ -180,8 +203,10 @@ t_file: pwrite
 t_file: read back
 t_file: readlink
 t_file: readv
+t_file: removexattr of a missing file
 t_file: rename
 t_file: rename over existing
+t_file: setxattr unsupported
 t_file: stat
 t_file: stdio fprintf/fscanf
 t_file: symlink
@@ -220,6 +245,15 @@ t_ipc: socketpair AF_UNIX
 t_ipc: socketpair both ways, EOF after close
 t_ipc: timerfd
 t_ipc: ttyname(0)
+t_isol: a shared mapping of a read-only file stays read-only
+t_isol: a unix socket's file says who may connect
+t_isol: loop devices are root's and group disk's
+t_isol: mount and umount2 are root's
+t_isol: native system calls are root's
+t_isol: ports below 1024 are root's
+t_isol: reboot is root's
+t_isol: root binds a port below 1024
+t_isol: rt_sigqueueinfo follows kill's rule
 t_lock: F_GETLK names the holder
 t_lock: F_GETLK sees no lock of ours
 t_lock: F_SETLK bad type is EINVAL
