@@ -11,7 +11,8 @@
 #   expected output, line by line, compared exactly
 #
 # The cases run in order and build on each other: the first unpacks the
-# root, the next ones install into it.
+# root, the next ones install into it. ALPINEURL is the same repository,
+# served over HTTP by the web server run.py runs on the host.
 
 == alpine: unpack the root, chroot into it
 $ cd /disk/a && bb tar -xf /disk/root.tar && for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; echo /repo > etc/apk/repositories; cd /; bb chroot /disk/a /bin/sh -c 'cat /etc/alpine-release; ls /dev | cat'
@@ -73,3 +74,8 @@ two
 $ bb chroot /disk/a /sbin/apk del --no-progress -q less 2>/dev/null; echo status $?; bb chroot /disk/a /sbin/apk info -e less 2>/dev/null; test -e /disk/a/usr/bin/less || echo gone
 status 0
 gone
+
+== apk: install from a repository over HTTP
+$ echo ALPINEURL > /disk/a/etc/apk/repositories; bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress tig 2>/dev/null; echo status $?; bb chroot /disk/a /usr/bin/tig --version | bb head -n 1
+status 0
+tig version 2.6.1

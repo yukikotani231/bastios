@@ -362,6 +362,7 @@ def run_program(env, prog, timeout):
 
 
 def run_applet(env, name, cmd, expected, timeout, bb):
+    cmd = cmd.replace("ALPINEURL", env.hosturl + "/alpine")
     cmd = cmd.replace("HOSTURL", env.hosturl).replace("HOSTADDR", env.hostaddr)
     text, status = env.run(f"echo @@begin; {with_bb(cmd, bb)}; echo @@end $?", timeout)
     lines = text.split("\n")
@@ -459,6 +460,7 @@ def main():
     ap.add_argument("--dev-disk", help="the development disk (tcc and make) for dev.txt")
     ap.add_argument("--bastio-disk", help="the Bastio disk (bastioc1, z3, tcc) for bastio.txt")
     ap.add_argument("--alpine-disk", help="the Alpine disk (root file system, apk repository) for alpine.txt")
+    ap.add_argument("--alpine-repo", help="the same repository's directory, served at ALPINEURL")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--update-baseline", action="store_true")
@@ -512,6 +514,9 @@ def main():
             # they get a copy and every run starts from the same disk.
             disk = os.path.join(args.out, "alpine-run.img")
             shutil.copyfile(args.alpine_disk, disk)
+            if args.alpine_repo:
+                os.makedirs(os.path.join(web.dir, "alpine"), exist_ok=True)
+                os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", "x86_64"))
             env = Guest(args.kernel, disk, log, web)
             env.boot()
             print("compat: Alpine Linux (apk)", flush=True)

@@ -52,6 +52,15 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   needs GNU `__auto_type` (`patches/tcc-auto-type.patch`, applied to
   `TCC_REV`). The compiler's own sources are on the disk under `/disk/s`,
   but proving them needs more memory than a process gets.
+- `alpine.txt`: Alpine Linux 3.24, from a fourth disk (`alpinedisk.py`):
+  its minirootfs, which the first case unpacks and enters with `chroot`,
+  and a local repository that `apk` installs git, curl, less,
+  openssh-keygen and tig from, from the disk and then over HTTP from the
+  host (`ALPINEURL`); the packages then run. The packages are rebuilt from
+  Docker Hub images that apk installed them into (`ALPINE_BASE`,
+  `ALPINE_PKGS`, pinned by digest): the binaries are Alpine's, the packages
+  and index are unsigned, so apk runs with `--allow-untrusted`. The cases
+  change the disk, so `run.py` runs them on a copy.
 
 `mkdisk.py` puts the programs and that BusyBox on a disk image in BastiOS's
 own disk format, so they appear as `/disk/NAME`. `run.py` boots the kernel
