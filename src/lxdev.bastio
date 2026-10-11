@@ -3,10 +3,8 @@
 // Opening one makes an open file description of kind OF_DEV whose x is the
 // device; /dev/tty opens the console itself.
 //
-// /dev/random and /dev/urandom are NOT a cryptographic source: they come
-// from splitmix64 over a seed of the wall clock and the HPET at boot (see
-// k.rng). Enough for programs that want varied bytes (mktemp names, hash
-// seeds), not for keys.
+// /dev/random and /dev/urandom come from a ChaCha20 generator over an
+// entropy pool (see "randomness" below).
 
 import "linux.bastio";
 
@@ -51,16 +49,215 @@ fn dev_meta(d: u64) -> Meta {
   return Meta { ok: true, mode: S_IFCHR, size: 0, ino: 30 + d % 16, mtime: 0, own: 0 };
 }
 
-/// The next 64 random bits (splitmix64).
+// ---------------------------------------------------------------- randomness
+//
+// /dev/urandom and getrandom come from ChaCha20 (RFC 8439) keyed by a pool
+// that keeps absorbing entropy: the time-stamp counter on every scheduler
+// pass (rng_stir), whose low bits depend on when interrupts, frames and
+// keystrokes arrived, plus the wall clock and the HPET at boot. Each
+// refill folds the pool into the key, makes one block, and keeps half of
+// it as the next key ("fast key erasure"), so earlier output cannot be
+// recomputed from a later state. The counter's jitter is an estimate of
+// entropy, not a measured one; there is no hardware source (RDRAND or
+// virtio-rng) yet.
+//
+// k.rng holds RNG_LEN words:
+const RNG_KEY: u64 = 0;             // 8 key words of 32 bits
+const RNG_CTR: u64 = 8;             // the block counter
+const RNG_HAVE: u64 = 9;            // how many of the buffered words are left
+const RNG_OUT: u64 = 10;            // 4 buffered 64-bit words of output
+const RNG_POOL: u64 = 14;           // 4 pool words
+const RNG_AT: u64 = 18;             // the pool word the next sample goes into
+// RNG_LEN is in src/proc.bastio, which kok needs it before this file.
+
+/// A new generator whose pool starts from `seed`.
+fn rng_new(seed: u64) -> Buf
+  ensures len(result) == RNG_LEN
+{
+  let mut r = alloc(RNG_LEN);
+  let mut i = 0;
+  while i < RNG_LEN
+    invariant i <= RNG_LEN && len(r) == RNG_LEN
+  {
+    r = set(r, i, 0);
+    i = i + 1;
+  }
+  r = set(r, RNG_POOL, seed);
+  return r;
+}
+
+/// Mixes the 64-bit sample x into the pool (a multiply-xorshift step, so
+/// every bit of x reaches every bit of the word).
+fn rng_add(r: &mut Buf, x: u64)
+  requires len(r) == RNG_LEN
+  ensures len(r) == RNG_LEN
+{
+  let j = RNG_POOL + get(r, RNG_AT) % 4;
+  let mut z = get(r, j) ^ x;
+  z = wrap_mul(z ^ (z >> 30), 0xBF58476D1CE4E5B9);
+  z = wrap_mul(z ^ (z >> 27), 0x94D049BB133111EB);
+  r = set(r, j, z ^ (z >> 31));
+  r = set(r, RNG_AT, (get(r, RNG_AT) % 4 + 1) % 4);
+}
+
+/// Adds the time-stamp counter now to the pool (each scheduler pass).
+fn rng_stir(k: &mut Kernel, cpu: &Cpu)
+  requires kok(k)
+  ensures kok(k)
+{
+  rng_add(&mut k.rng, cpu_tsc(cpu));
+}
+
+/// x rotated left by n bits, as a 32-bit word.
+fn rotl32(x: u64, n: u64) -> u64
+  requires x < 4294967296 && 0 < n && n < 32
+  ensures result < 4294967296
+{
+  return ((x << n) % 4294967296) | (x >> (32 - n));
+}
+
+/// The ChaCha quarter round on words a, b, c, d of the 16-word state s.
+fn qround(s: &mut Buf, a: u64, b: u64, c: u64, d: u64)
+  requires len(s) == 16 && a < 16 && b < 16 && c < 16 && d < 16
+  ensures len(s) == 16
+{
+  let mut va = get(s, a) % TWO32;
+  let mut vb = get(s, b) % TWO32;
+  let mut vc = get(s, c) % TWO32;
+  let mut vd = get(s, d) % TWO32;
+  va = (va + vb) % TWO32;
+  vd = rotl32((vd ^ va) % TWO32, 16);
+  vc = (vc + vd) % TWO32;
+  vb = rotl32((vb ^ vc) % TWO32, 12);
+  va = (va + vb) % TWO32;
+  vd = rotl32((vd ^ va) % TWO32, 8);
+  vc = (vc + vd) % TWO32;
+  vb = rotl32((vb ^ vc) % TWO32, 7);
+  s = set(s, a, va);
+  s = set(s, b, vb);
+  s = set(s, c, vc);
+  s = set(s, d, vd);
+}
+
+/// The ChaCha20 constant "expand 32-byte k", word i < 4.
+fn chacha_const(i: u64) -> u64 {
+  if i == 0 {
+    return 0x61707865;
+  }
+  if i == 1 {
+    return 0x3320646E;
+  }
+  if i == 2 {
+    return 0x79622D32;
+  }
+  return 0x6B206574;
+}
+
+/// One ChaCha20 block (RFC 8439 2.3) into `out` (16 words of 32 bits),
+/// with the 8 key words at k[key..], block counter ctr and a zero nonce.
+fn chacha_block(key: &Buf, at: u64, ctr: u64, out: &mut Buf)
+  requires at + 8 <= len(key) && len(out) == 16
+  ensures len(out) == 16
+{
+  let mut i = 0;
+  while i < 16
+    invariant i <= 16 && len(out) == 16
+  {
+    let mut v = 0;
+    if i < 4 {
+      v = chacha_const(i);
+    } else if i < 12 {
+      v = get(key, at + i - 4) % TWO32;
+    } else if i == 12 {
+      v = ctr % TWO32;
+    } else if i == 13 {
+      v = ctr / TWO32 % TWO32;
+    }
+    out = set(out, i, v);
+    i = i + 1;
+  }
+  let mut x = alloc(16);
+  i = 0;
+  while i < 16
+    invariant i <= 16 && len(out) == 16 && len(x) == 16
+  {
+    x = set(x, i, get(out, i));
+    i = i + 1;
+  }
+  let mut round = 0;
+  while round < 10
+    invariant round <= 10 && len(x) == 16 && len(out) == 16
+  {
+    qround(&mut x, 0, 4, 8, 12);
+    qround(&mut x, 1, 5, 9, 13);
+    qround(&mut x, 2, 6, 10, 14);
+    qround(&mut x, 3, 7, 11, 15);
+    qround(&mut x, 0, 5, 10, 15);
+    qround(&mut x, 1, 6, 11, 12);
+    qround(&mut x, 2, 7, 8, 13);
+    qround(&mut x, 3, 4, 9, 14);
+    round = round + 1;
+  }
+  i = 0;
+  while i < 16
+    invariant i <= 16 && len(out) == 16 && len(x) == 16
+  {
+    out = set(out, i, (get(x, i) % TWO32 + get(out, i) % TWO32) % TWO32);
+    i = i + 1;
+  }
+  free(x);
+}
+
+/// Refills the output buffer: folds the pool into the key, makes a block,
+/// takes words 0-7 as the next key and words 8-15 as four 64-bit outputs.
+fn rng_refill(r: &mut Buf)
+  requires len(r) == RNG_LEN
+  ensures len(r) == RNG_LEN && get(r, RNG_HAVE) == 4
+{
+  let mut i = 0;
+  while i < 4
+    invariant i <= 4 && len(r) == RNG_LEN
+  {
+    let p = get(r, RNG_POOL + i);
+    r = set(r, RNG_KEY + 2 * i, (get(r, RNG_KEY + 2 * i) ^ p) % TWO32);
+    r = set(r, RNG_KEY + 2 * i + 1, (get(r, RNG_KEY + 2 * i + 1) ^ (p >> 32)) % TWO32);
+    i = i + 1;
+  }
+  let ctr = get(r, RNG_CTR);
+  r = set(r, RNG_CTR, wrap_add(ctr, 1));
+  let mut b = alloc(16);
+  chacha_block(r, RNG_KEY, ctr, &mut b);
+  i = 0;
+  while i < 8
+    invariant i <= 8 && len(r) == RNG_LEN && len(b) == 16
+  {
+    r = set(r, RNG_KEY + i, get(b, i) % TWO32);
+    i = i + 1;
+  }
+  i = 0;
+  while i < 4
+    invariant i <= 4 && len(r) == RNG_LEN && len(b) == 16
+  {
+    r = set(r, RNG_OUT + i, get(b, 8 + 2 * i) % TWO32 + TWO32 * (get(b, 9 + 2 * i) % TWO32));
+    i = i + 1;
+  }
+  free(b);
+  r = set(r, RNG_HAVE, 4);
+}
+
+/// The next 64 random bits.
 fn rng_next(k: &mut Kernel) -> u64
   requires kok(k)
   ensures kok(k)
 {
-  k.rng = wrap_add(k.rng, 0x9E3779B97F4A7C15);
-  let mut z = k.rng;
-  z = wrap_mul(z ^ (z >> 30), 0xBF58476D1CE4E5B9);
-  z = wrap_mul(z ^ (z >> 27), 0x94D049BB133111EB);
-  return z ^ (z >> 31);
+  if get(k.rng, RNG_HAVE) == 0 || get(k.rng, RNG_HAVE) > 4 {
+    rng_refill(&mut k.rng);
+  }
+  let h = get(k.rng, RNG_HAVE);
+  k.rng = set(k.rng, RNG_HAVE, h - 1);
+  let v = get(k.rng, RNG_OUT + h - 1);
+  k.rng = set(k.rng, RNG_OUT + h - 1, 0);    // given out: not kept
+  return v;
 }
 
 /// read(2) on device d: nothing from /dev/null, zeros or random bytes from

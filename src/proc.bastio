@@ -369,6 +369,7 @@ const LK_WAITS: u64 = 768;            // LK_N * LK_W
 const LK_WW: u64 = 4;
 const LK_LEN: u64 = 896;              // LK_WAITS + NPROC * LK_WW
 const IPC_LEN: u64 = 4608;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
+const RNG_LEN: u64 = 19;              // the random generator's words (src/lxdev.bastio)
 const SYS_LEN: u64 = 160;              // host and domain names, adjtimex state (src/lxsys.bastio)
 const IPCB_LEN: u64 = 278528;         // its message bytes: IPC_SETS * MQ_CAP
 const LK_EOF: u64 = 18446744073709551615;   // a range to the end of the file; no file
@@ -574,7 +575,7 @@ struct Kernel {
   ns: u64,              // the clock at the last system call, in nanoseconds since boot
   tsc: Tsc,             // how to read that clock (src/tsc.bastio), also copied into each vDSO
   epoch: u64,           // CLOCK_REALTIME minus the clock, in ns (src/rtc.bastio)
-  rng: u64,             // the state behind /dev/urandom (src/lxdev.bastio)
+  rng: Buf,             // the generator behind /dev/urandom, RNG_LEN words (src/lxdev.bastio)
   cpus: u64,            // processors running, the bootstrap one included
   fs: Vfs,              // files and the open-file table
   nic: Nic,             // the network card and its UDP sockets, if any
@@ -597,7 +598,7 @@ struct Kernel {
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.locks) == LK_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.locks) == LK_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
 }
 

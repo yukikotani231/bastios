@@ -29,6 +29,7 @@ const IP_MAX: u64 = 4294967295;
 const MY_IP: u64 = 0x0A00020F;        // 10.0.2.15, if DHCP gets no answer
 const GATEWAY: u64 = 0x0A000202;      // 10.0.2.2
 const NETMASK: u64 = 0xFFFFFF00;      // /24
+const DNS_SERVER: u64 = 0x0A000203;   // 10.0.2.3, QEMU's resolver, with the static address
 
 const IP_ICMP: u64 = 1;
 const IP_UDP: u64 = 17;
@@ -106,6 +107,8 @@ struct Net {
   dhcp_server: u64,   // ... by this server
   dhcp_tries: u64,
   dhcp_until: u64,    // the tick to retry at
+  dns: u64,           // the name server DHCP named (0: none)
+  dns_new: bool,      // ... not yet written to /etc/resolv.conf (nic_dns_take)
   now: u64,           // the tick count at the last nic_tick
   ping_state: u64,
   ping_pid: u64,      // who asked
@@ -135,7 +138,7 @@ spec fn net_ok(n: &Net) -> bool {
   card_ok(n.dev) && blen(n.pkt) == RX_BUF && blen(n.out) == RX_BUF && blen(n.held) == RX_BUF
   && n.ip <= IP_MAX && n.gw <= IP_MAX && 1 <= n.span && n.span <= 4294967296
   && len(n.arp) == ARP_N * 2 && n.held_len <= FRAME_MAX && n.seq <= 65535 && n.ping_pid < PID_LIMIT && n.ping_ip <= IP_MAX
-  && n.dhcp_xid <= IP_MAX && n.dhcp_offer <= IP_MAX && n.dhcp_server <= IP_MAX
+  && n.dhcp_xid <= IP_MAX && n.dhcp_offer <= IP_MAX && n.dhcp_server <= IP_MAX && n.dns <= IP_MAX
   && len(n.socks) == SOCKS * SOCK_FIELDS && blen(n.dq) == SOCKS * RXQ * UDP_MAX
   && len(n.tcbs) == TCBS * TCB_W && blen(n.trx) == TCBS * TCP_BUF && blen(n.ttx) == TCBS * TCP_BUF
   && blen(n.lo) == LOQ * RX_BUF && len(n.lo_len) == LOQ && n.lo_head < LOQ && n.lo_n <= LOQ
@@ -598,19 +601,20 @@ fn dhcp_send(n: &mut Net, kind: u64)
   bset(&mut n.out, 282, 53);          // option: message type
   bset(&mut n.out, 283, 1);
   bset(&mut n.out, 284, cast[u8](kind));
-  bset(&mut n.out, 285, 55);          // option: we want the mask and router
-  bset(&mut n.out, 286, 2);
+  bset(&mut n.out, 285, 55);          // option: we want the mask, router and name server
+  bset(&mut n.out, 286, 3);
   bset(&mut n.out, 287, 1);
   bset(&mut n.out, 288, 3);
-  let mut o = 289;
+  bset(&mut n.out, 289, 6);
+  let mut o = 290;
   if kind == 3 {
-    bset(&mut n.out, 289, 50);        // option: the address we want
-    bset(&mut n.out, 290, 4);
-    put32(&mut n.out, 291, n.dhcp_offer);
-    bset(&mut n.out, 295, 54);        // option: the server we accept
-    bset(&mut n.out, 296, 4);
-    put32(&mut n.out, 297, n.dhcp_server);
-    o = 301;
+    bset(&mut n.out, 290, 50);        // option: the address we want
+    bset(&mut n.out, 291, 4);
+    put32(&mut n.out, 292, n.dhcp_offer);
+    bset(&mut n.out, 296, 54);        // option: the server we accept
+    bset(&mut n.out, 297, 4);
+    put32(&mut n.out, 298, n.dhcp_server);
+    o = 302;
   }
   bset(&mut n.out, o, 255);           // end
   udp_seal(&mut n, IP_MAX, ulen);
@@ -641,11 +645,13 @@ fn dhcp_static(n: &mut Net)
   n.ip = MY_IP;
   n.gw = GATEWAY;
   n.span = 4294967296 - NETMASK;
+  n.dns = DNS_SERVER;
+  n.dns_new = true;
 }
 
 /// A DHCP message to our port (ulen bytes of UDP at 34, checked to fit the
 /// frame): an OFFER gets a REQUEST, an ACK for the address offered sets our
-/// address, mask and gateway, and a NAK starts over. The lease is not
+/// address, mask, gateway and name server, and a NAK starts over. The lease is not
 /// renewed (QEMU's lasts a day).
 fn dhcp_in(n: &mut Net, ulen: u64)
   requires net_ok(n) && 8 <= ulen && ulen <= FRAME_MAX - 34
@@ -661,9 +667,10 @@ fn dhcp_in(n: &mut Net, ulen: u64)
   let mut mask = NETMASK;
   let mut router = 0;
   let mut server = 0;
+  let mut dns = 0;
   let mut o = 282;
   while o < end
-    invariant 282 <= o && mask <= IP_MAX && router <= IP_MAX && server <= IP_MAX
+    invariant 282 <= o && mask <= IP_MAX && router <= IP_MAX && server <= IP_MAX && dns <= IP_MAX
   {
     let code = cast[u64](bget(n.pkt, o));
     if code == 255 || o + 1 >= end {
@@ -683,6 +690,8 @@ fn dhcp_in(n: &mut Net, ulen: u64)
           router = be32(n.pkt, o + 2);
         } else if code == 54 && l >= 4 {
           server = be32(n.pkt, o + 2);
+        } else if code == 6 && l >= 4 {
+          dns = be32(n.pkt, o + 2);   // the first of the servers listed
         }
         o = o + 2 + l;
       }
@@ -698,6 +707,8 @@ fn dhcp_in(n: &mut Net, ulen: u64)
     n.gw = router;
     n.span = 4294967296 - mask;
     n.dhcp_state = DHCP_BOUND;
+    n.dns = dns;
+    n.dns_new = true;
   } else if n.dhcp_state == DHCP_REQUEST && kind == 6 {
     dhcp_start(&mut n);
   }
@@ -1167,7 +1178,7 @@ fn net_up(d: Card) -> Nic
 {
   let mut n = Net { dev: d, pkt: balloc(RX_BUF), out: balloc(RX_BUF), ip: 0, gw: 0, span: 1,
     arp: alloc(ARP_N * 2), arp_next: 0, held: balloc(RX_BUF), held_len: 0, held_hop: 0,
-    dhcp_state: DHCP_OFF, dhcp_xid: 0, dhcp_offer: 0, dhcp_server: 0, dhcp_tries: 0, dhcp_until: 0, now: 0,
+    dhcp_state: DHCP_OFF, dhcp_xid: 0, dhcp_offer: 0, dhcp_server: 0, dhcp_tries: 0, dhcp_until: 0, dns: 0, dns_new: false, now: 0,
     ping_state: PING_IDLE, ping_pid: 0, ping_ip: 0, ping_hop: 0, ping_until: 0, seq: 0, rx: 0, tx: 0,
     socks: alloc(SOCKS * SOCK_FIELDS), dq: balloc(SOCKS * RXQ * UDP_MAX), eph: 0,
     tcbs: alloc(TCBS * TCB_W), trx: balloc(TCBS * TCP_BUF), ttx: balloc(TCBS * TCP_BUF), iss: 0,
@@ -1332,7 +1343,8 @@ fn nic_tick(c: &mut Nic, now: u64)
 }
 
 /// What the stack is configured with: 0 our address, 1 the gateway, 2 the
-/// netmask, 3 how (0 not yet, 1 DHCP, 2 static). 0 without a card.
+/// netmask, 3 how (0 not yet, 1 DHCP, 2 static), 4 the name server. 0
+/// without a card.
 fn nic_info(c: &Nic, what: u64) -> u64
   requires nic_ok(c)
 {
@@ -1345,6 +1357,8 @@ fn nic_info(c: &Nic, what: u64) -> u64
         return n.gw;
       } else if what == 2 {
         return 4294967296 - n.span;
+      } else if what == 4 {
+        return n.dns;
       } else if what == 3 {
         if n.dhcp_state == DHCP_BOUND {
           return 1;
@@ -1355,6 +1369,24 @@ fn nic_info(c: &Nic, what: u64) -> u64
       return 0;
     },
   }
+}
+
+/// Whether the name server changed since the last call (a lease, or the
+/// static fallback): /etc/resolv.conf is due to be written.
+fn nic_dns_take(c: &mut Nic) -> bool
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  let mut r = false;
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      r = n.dns_new;
+      n.dns_new = false;
+      c = Nic::Up(n);
+    },
+  }
+  return r;
 }
 
 fn nic_mac(c: &Nic) -> u64 {

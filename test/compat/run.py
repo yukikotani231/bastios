@@ -16,9 +16,11 @@ applets), starts the kernel's built-in ash, and runs:
   * each case in tty.txt: a program driven by keystrokes on the console
     (an editor, a REPL), then a shell command whose output must match.
 
-Commands may name HOSTURL (or HOSTADDR, its address and port): a web server this script runs on the host
-machine (WebServer), which the guest reaches through QEMU's user network
-(http://10.0.2.2:PORT).
+Commands may name HOSTURL (or HOSTADDR, its address and port, or HOSTPORT,
+the port alone): a web server this script runs on the host machine
+(WebServer), which the guest reaches through QEMU's user network
+(http://10.0.2.2:PORT). HOSTSURL is the same files over HTTPS, with a
+certificate made for the run by `openssl` (empty without it).
 
 The kernel prints "[pid N: Linux system call X not implemented]" for each
 call it does not know. Those notes are charged to the check or case that
@@ -38,7 +40,7 @@ measurement, so failing checks are expected, but it must not go backwards.
 --host runs the same programs and cases on this machine instead (from a
 scratch directory), to check that the expectations are right for Linux.
 """
-import argparse, codecs, fcntl, functools, http.server, json, os, pty, re, select, shutil, signal, struct, subprocess, sys, tempfile, termios, threading, time
+import argparse, codecs, fcntl, functools, http.server, json, os, pty, re, select, shutil, signal, ssl, struct, subprocess, sys, tempfile, termios, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROMPT = b"\n# "
@@ -126,6 +128,26 @@ class WebServer:
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.port = self.httpd.server_address[1]
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        # The same files over TLS, with a throwaway self-signed certificate.
+        self.https, self.sport = None, 0
+        cert, key = os.path.join(self.dir, "cert.pem"), os.path.join(self.dir, "key.pem")
+        if shutil.which("openssl") and subprocess.run(
+                ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+                 "-nodes", "-days", "1", "-subj", "/CN=compat.test", "-keyout", key, "-out", cert],
+                capture_output=True).returncode == 0:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(cert, key)
+            os.unlink(key)
+            self.https = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            self.https.socket = ctx.wrap_socket(self.https.socket, server_side=True)
+            self.sport = self.https.server_address[1]
+            threading.Thread(target=self.https.serve_forever, daemon=True).start()
+
+    def shutdown(self):
+        self.httpd.shutdown()
+        if self.https:
+            self.https.shutdown()
+        shutil.rmtree(self.dir, ignore_errors=True)
 
 
 class Quiet(http.server.SimpleHTTPRequestHandler):
@@ -145,6 +167,8 @@ class Guest:
         self.q = None
         self.hosturl = f"http://10.0.2.2:{web.port}" if web else ""
         self.hostaddr = f"10.0.2.2 {web.port}" if web else ""
+        self.hostport = f"{web.port}" if web else ""
+        self.hostsurl = f"https://10.0.2.2:{web.sport}" if web and web.sport else ""
 
     def boot(self):
         self.stop()
@@ -256,6 +280,8 @@ class Host:
         self.cwd = tempfile.mkdtemp(prefix="compat-host-")
         self.hosturl = f"http://127.0.0.1:{web.port}" if web else ""
         self.hostaddr = f"127.0.0.1 {web.port}" if web else ""
+        self.hostport = f"{web.port}" if web else ""
+        self.hostsurl = f"https://127.0.0.1:{web.sport}" if web and web.sport else ""
 
     def boot(self):
         pass
@@ -362,7 +388,8 @@ def run_program(env, prog, timeout):
 
 
 def run_applet(env, name, cmd, expected, timeout, bb):
-    cmd = cmd.replace("HOSTURL", env.hosturl).replace("HOSTADDR", env.hostaddr)
+    cmd = (cmd.replace("HOSTSURL", env.hostsurl).replace("HOSTURL", env.hosturl)
+           .replace("HOSTADDR", env.hostaddr).replace("HOSTPORT", env.hostport))
     text, status = env.run(f"echo @@begin; {with_bb(cmd, bb)}; echo @@end $?", timeout)
     lines = text.split("\n")
     try:
@@ -506,8 +533,7 @@ def main():
     finally:
         env.stop()
         log.close()
-        web.httpd.shutdown()
-        shutil.rmtree(web.dir, ignore_errors=True)
+        web.shutdown()
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]

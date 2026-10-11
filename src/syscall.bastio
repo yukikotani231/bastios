@@ -640,6 +640,52 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   return NO_RESULT;
 }
 
+/// Writes /etc/resolv.conf naming name server ns (a.b.c.d), which the C
+/// library's resolver reads; nothing is written for no server (0). A file
+/// a program wrote there is replaced when a lease names a new server.
+fn write_resolv(k: &mut Kernel, ns: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if ns == 0 || ns > 4294967295 {
+    return;
+  }
+  let mut b = balloc(32);
+  let head = "nameserver ";
+  let mut o = 0;
+  while o < slen(head)
+    invariant o <= slen(head) && slen(head) == 11 && blen(b) == 32
+  {
+    bset(&mut b, o, sget(head, o));
+    o = o + 1;
+  }
+  let mut i = 0;
+  while i < 4
+    invariant i <= 4 && o <= 11 + 4 * i && blen(b) == 32
+  {
+    let part = ns / pow256(3 - i) % 256;
+    if part >= 100 {
+      bset(&mut b, o, cast[u8](48 + part / 100));
+      o = o + 1;
+    }
+    if part >= 10 {
+      bset(&mut b, o, cast[u8](48 + part / 10 % 10));
+      o = o + 1;
+    }
+    bset(&mut b, o, cast[u8](48 + part % 10));
+    o = o + 1;
+    if i < 3 {
+      bset(&mut b, o, 46);              // .
+    } else {
+      bset(&mut b, o, 10);              // newline
+    }
+    o = o + 1;
+    i = i + 1;
+  }
+  vfs_install_bytes(&mut k.fs, &mut k.mem, "etc/resolv.conf", b, o);
+  bfree(b);
+}
+
 /// Runs the network's timers (DHCP retries) and wakes the process whose
 /// ping has finished, if one has, with its result. Called on every
 /// scheduler pass, after the card is polled.
@@ -648,6 +694,9 @@ fn net_wake(k: &mut Kernel)
   ensures kok(k)
 {
   nic_tick(&mut k.nic, k.ticks);
+  if nic_dns_take(&mut k.nic) {
+    write_resolv(&mut k, nic_info(k.nic, 4));
+  }
   let w = nic_ping_check(&mut k.nic, k.ticks);
   if w == NET_NONE {
     return;
