@@ -37,6 +37,20 @@ static void segv(int s) { (void)s; siglongjmp(back, 1); }
 /* Three connections in turn to a server that accepts, greets and closes
  * each: the closed ones must not be handed out by accept again. */
 static void nop(int s) { (void)s; }
+static struct rnode { struct rnode *next; unsigned word; } rnode;
+static struct { struct rnode *next; long off; struct rnode *pending; } rhead;
+static long rgot = -1;
+static char robust_stack[16384] __attribute__((aligned(16)));
+static int robust_thread(void *a) {
+    (void)a;
+    rnode.word = syscall(SYS_gettid); rnode.next = (struct rnode *)&rhead;
+    rhead.next = &rnode; rhead.off = 8; rhead.pending = 0;
+    void *h = 0; size_t n = 0;
+    if (syscall(SYS_set_robust_list, &rhead, 24) == 0 && syscall(SYS_get_robust_list, 0, &h, &n) == 0 && h == (void *)&rhead && n == 24)
+        rgot = rnode.word;
+    syscall(SYS_exit, 0);                  /* the kernel walks the list */
+    return 0;
+}
 
 static int seven(void *a) { (void)a; return 7; }
 static char kid_stack[16384] __attribute__((aligned(16)));
@@ -346,5 +360,28 @@ int main(void) {
            if (c == 0) { close(go[0]); fcntl(go[1], F_SETFD, FD_CLOEXEC); execl("/disk/busybox", "sleep", "1", (char *)0); execl("/bin/sleep", "sleep", "1", (char *)0); _exit(1); }
            close(go[1]); char x; read(go[0], &x, 1); close(go[0]);   /* EOF once the child execs */
            int r = setpgid(c, c); int e = errno; int st; waitpid(c, &st, 0); r == -1 && e == EACCES; }));
+    EXPECT("setsid is EPERM while a process group with the caller's id has members", ({
+           pid_t c = fork();
+           if (c == 0) {
+               setpgid(0, 0); pid_t g = fork(); if (g == 0) { pause(); _exit(0); }
+               setpgid(0, getpgid(getppid()));
+               int r = setsid(); int e = errno; kill(g, SIGKILL); waitpid(g, 0, 0);
+               _exit(r == -1 && e == EPERM ? 0 : 1);
+           }
+           int st; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("a real-time signal from tgkill past RLIMIT_SIGPENDING is EAGAIN; kill still sends it", ({
+           pid_t c = fork();
+           if (c == 0) {
+               sigset_t m; sigemptyset(&m); sigaddset(&m, SIGRTMIN); sigprocmask(SIG_BLOCK, &m, 0);
+               struct rlimit z = {0, 0}; setrlimit(RLIMIT_SIGPENDING, &z);
+               int r = syscall(SYS_tgkill, getpid(), syscall(SYS_gettid), SIGRTMIN); int e = errno;
+               _exit(r == -1 && e == EAGAIN && kill(getpid(), SIGRTMIN) == 0 ? 0 : 1);
+           }
+           int st; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("a thread that ends holding a robust futex leaves FUTEX_OWNER_DIED in it", ({
+           /* A bare clone thread: musl's pthread_join would wait for its own exit path. */
+           clone(robust_thread, robust_stack + sizeof robust_stack, CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM, 0);
+           for (int i = 0; i < 200 && *(volatile unsigned *)&rnode.word != 0x40000000; i++) usleep(10000);
+           rgot > 0 && rnode.word == 0x40000000; }));
     return done();
 }

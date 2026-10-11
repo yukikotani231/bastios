@@ -25,6 +25,7 @@ const RLIMIT_CPU: u64 = 0;
 const RLIMIT_FSIZE: u64 = 1;
 const RLIMIT_NPROC: u64 = 6;
 const RLIMIT_MEMLOCK: u64 = 8;
+const RLIMIT_SIGPENDING: u64 = 11;
 const MLOCK_DEFAULT: u64 = 8388608;    // 8 MiB, as Linux
 const MCL_CURRENT: u64 = 1;
 const MCL_FUTURE: u64 = 2;
@@ -94,6 +95,7 @@ fn rl_fork(k: &mut Kernel, p: u64, c: u64)
   rl_put(&mut k, c, RLW_LOCKED, 0);
   rl_put(&mut k, c, RLW_MCL, 0);
   tm_clear(&mut k, c);
+  k.sys = set(k.sys, SYS_RB + c, 0);      // no robust list (src/lxthread.bastio)
 }
 
 /// execve: a new address space, so nothing is locked.
@@ -103,6 +105,7 @@ fn rl_exec(k: &mut Kernel, p: u64)
 {
   rl_put(&mut k, p, RLW_LOCKED, 0);
   rl_put(&mut k, p, RLW_MCL, 0);
+  k.sys = set(k.sys, SYS_RB + p, 0);
 }
 
 /// Clears process p's row for the next process in its slot.
@@ -416,4 +419,30 @@ fn nproc_check(k: &Kernel, pid: u64) -> u64
     return EAGAIN;
   }
   return 0;
+}
+
+/// Whether a real-time signal s (32 and up) to process p would go past
+/// p's RLIMIT_SIGPENDING (EAGAIN). Signals here are pending bits, not a
+/// queue, so p's pending count is the number of bits set; Linux counts
+/// the queued signals of p's user.
+fn sigpending_full(k: &Kernel, p: u64, s: u64) -> bool
+  requires kok(k) && p < NPROC
+{
+  if s < 32 {
+    return false;
+  }
+  let lim = rl_cur(k, p, RLIMIT_SIGPENDING);
+  let mut m = pget(k.procs, p, F_SIGPEND);
+  let mut n = 0;
+  let mut i = 0;
+  while i < 64
+    invariant i <= 64 && n <= i
+  {
+    if m % 2 == 1 {
+      n = n + 1;
+    }
+    m = m / 2;
+    i = i + 1;
+  }
+  return n >= lim;
 }

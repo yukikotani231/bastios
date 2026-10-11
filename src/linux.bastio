@@ -32,6 +32,7 @@ const LX_GETPPID: u64 = 110;
 const LX_ARCH_PRCTL: u64 = 158;
 const LX_SET_TID_ADDRESS: u64 = 218;
 const LX_SET_ROBUST_LIST: u64 = 273;
+const LX_GET_ROBUST_LIST: u64 = 274;
 const LX_RSEQ: u64 = 334;
 const LX_CLONE3: u64 = 435;
 const LX_UNSHARE: u64 = 272;
@@ -611,11 +612,19 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, pid);
     return KEEP;
   }
-  // glibc asks for these and carries on without them: robust futex lists
-  // (no robust mutexes), restartable sequences (sched_getcpu falls back to
-  // the system call), and clone3 (pthread_create falls back to clone, as
-  // on Linux before 5.3). Refused quietly, as known gaps.
-  if n == LX_SET_ROBUST_LIST || n == LX_RSEQ || n == LX_CLONE3 {
+  if n == LX_SET_ROBUST_LIST {
+    ret(&mut k.procs, pid, lx_set_robust_list(&mut k, pid, a, b));
+    return KEEP;
+  }
+  if n == LX_GET_ROBUST_LIST {
+    ret(&mut k.procs, pid, lx_get_robust_list(&mut k, pid, a, b, c));
+    return KEEP;
+  }
+  // glibc asks for these and carries on without them: restartable
+  // sequences (sched_getcpu falls back to the system call), and clone3
+  // (pthread_create falls back to clone, as on Linux before 5.3). Refused
+  // quietly, as known gaps.
+  if n == LX_RSEQ || n == LX_CLONE3 {
     ret(&mut k.procs, pid, ENOSYS);
     return KEEP;
   }

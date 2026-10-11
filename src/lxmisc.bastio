@@ -479,8 +479,16 @@ fn lx_setsid(k: &mut Kernel, pid: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if pgid_of(k.procs, pid) == pid {
-    return EPERM;
+  // EPERM when a process group with the caller's id exists: the caller
+  // leads one, or left one that still has members.
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && len(k.procs) == PTAB_LEN
+  {
+    if state(k.procs, p) != FREE && pgid_of(k.procs, p) == pid {
+      return EPERM;
+    }
+    p = p + 1;
   }
   pset(&mut k.procs, pid, F_PGID, pid);
   pset(&mut k.procs, pid, F_SID, pid);

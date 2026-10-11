@@ -352,6 +352,9 @@ fn lx_sigqueue(k: &mut Kernel, pid: u64, target: u64, s: u64, info: u64) -> u64
   if info > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, info, &mut k.fs.xfer, 32) != 32 {
     return EFAULT;
   }
+  if sigpending_full(k, target, s) {
+    return EAGAIN;
+  }
   if s != 0 && state(k.procs, target) != ZOMBIE {
     post_queued(&mut k, target, s, pid, get_u64(k.fs.xfer, 24));
   }
@@ -632,6 +635,11 @@ fn lx_tgkill(k: &mut Kernel, pid: u64, tgid: u64, tid: u64, s: u64) -> u64
         return ESRCH;
       }
     }
+  }
+  // Past RLIMIT_SIGPENDING (src/lxrlimit.bastio), a real-time signal from
+  // tgkill or sigqueue fails; one from kill (SI_USER) is still sent.
+  if t < NPROC && state(k.procs, t) != FREE && may_signal(k, pid, t, s) && sigpending_full(k, t, s) {
+    return EAGAIN;
   }
   return lx_kill(&mut k, pid, t, s);
 }
