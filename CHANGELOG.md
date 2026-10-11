@@ -352,6 +352,13 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   e1000, asked for only while someone sleeps. `make netbench` measures it.
 - Loopback: a packet for 127.0.0.0/8 or the machine's own address never
   reaches the wire.
+- Name lookups: DHCP asks for the name server and the kernel writes
+  `/etc/resolv.conf` from it (10.0.2.3 with the static address), so musl's
+  `getaddrinfo` resolves names through QEMU's resolver. `t_dns` in the
+  compatibility suite checks the resolver against a name server of its own.
+- `/dev/urandom` and `getrandom` come from ChaCha20 over an entropy pool
+  fed by the time-stamp counter, instead of splitmix64 over a boot-time
+  seed. BusyBox's `wget` fetches over HTTPS with its own TLS.
 
 ### Console and boot
 
