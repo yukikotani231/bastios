@@ -39,6 +39,8 @@ apps: micropython: classes, generators, exceptions, big integers
 apps: micropython: json, re, files, os
 apps: micropython: threads and a lock
 apps: nc: a raw HTTP request to the host
+apps: netns: a new network namespace has only lo, down
+apps: netns: a veth pair on a bridge; ping across, wget out through masquerade
 apps: perl: HTTP::Tiny from the host
 apps: perl: files, directories and in-place editing
 apps: perl: fork, pipes, signals and alarm

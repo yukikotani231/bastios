@@ -367,7 +367,12 @@ build/compat/busybox: build/busybox/Makefile test/compat/busybox.config | build/
 	for o in $$(grep -v '^#' test/compat/busybox.config); do \
 	  sed -i "s/^# $$o is not set/$$o=y/" build/compat/bb/.config; done
 	yes "" | $(MAKE) -C build/compat/bb -s oldconfig >/dev/null
-	$(MAKE) -C build/compat/bb -s CC=$(MUSLCC) EXTRA_CFLAGS=-fPIE CFLAGS_busybox=-static-pie busybox
+	# `ip` needs the kernel's headers (linux/rtnetlink.h), which musl has
+	# not: the host's, as for LTP below.
+	rm -rf build/compat/khdrs && mkdir -p build/compat/khdrs
+	ln -s $(LTP_HDRS)/linux $(LTP_HDRS)/asm-generic build/compat/khdrs/
+	ln -s $$(dirname $$(find $(LTP_HDRS) -path '*/asm/unistd_64.h' | head -1)) build/compat/khdrs/asm
+	$(MAKE) -C build/compat/bb -s CC=$(MUSLCC) EXTRA_CFLAGS="-fPIE -isystem $(CURDIR)/build/compat/khdrs" CFLAGS_busybox=-static-pie busybox
 	cp build/compat/bb/busybox $@
 
 # Real programs, built from their own sources against musl as static PIEs

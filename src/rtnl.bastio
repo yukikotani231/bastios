@@ -37,6 +37,7 @@ const IFLA_ADDRESS: u64 = 1;
 const IFLA_BROADCAST: u64 = 2;
 const IFLA_IFNAME: u64 = 3;
 const IFLA_MTU: u64 = 4;
+const IFLA_QDISC: u64 = 6;
 const IFLA_LINK: u64 = 5;
 const IFLA_MASTER: u64 = 10;
 const IFLA_TXQLEN: u64 = 13;
@@ -61,6 +62,10 @@ const ARPHRD_LOOPBACK: u64 = 772;
 const IFF_LOWER_UP: u64 = 0x10000;
 const KIND_VETH: u64 = 0x68746576;        // "veth", low byte first
 const KIND_BRIDGE: u64 = 0x656764697262;  // "bridge"
+const QDISC_NOOP: u64 = 0x706F6F6E;       // "noop": what a link that is down has
+const QDISC_NOQUEUE: u64 = 0x65756575716F6E;   // "noqueue": a virtual link's
+const QDISC_FIFO0: u64 = 0x61665F6F66696670;   // "pfifo_fast": the card's
+const QDISC_FIFO1: u64 = 0x7473;
 // Errors, as netlink sends them: positive here, negated in the message.
 const NE_PERM: u64 = 1;
 const NE_SRCH: u64 = 3;
@@ -498,8 +503,17 @@ fn nl_link(n: &mut Net, i: u64, flags: u64, seq: u64, port: u64)
   nl_32(&mut n, 0);
   nla_str(&mut n, IFLA_IFNAME, iw(n, i, IF_NAME), iw(n, i, IF_NAME + 1));
   let mut oper = 2;                   // IF_OPER_DOWN
+  if !if_up(n, i) {
+    nla_str(&mut n, IFLA_QDISC, QDISC_NOOP, 0);
+  } else if k == IFK_ETH {
+    nla_str(&mut n, IFLA_QDISC, QDISC_FIFO0, QDISC_FIFO1);
+  } else {
+    nla_str(&mut n, IFLA_QDISC, QDISC_NOQUEUE, 0);
+  }
   if lo {
-    oper = 0;                         // unknown, as Linux says of lo
+    if if_up(n, i) {
+      oper = 0;                       // unknown, as Linux says of lo when it is up
+    }
     nla_put32(&mut n, IFLA_TXQLEN, 1000);
     nla_put32(&mut n, IFLA_MTU, 65536);
   } else {
@@ -990,12 +1004,16 @@ fn rt_request(n: &mut Net, q: u64, b: &Bytes, len: u64, tgt: u64, admin: bool)
       let fl = rd16(b, at + 6);
       let seq = rd32(b, at + 8);
       let end = at + ml;
+      // A dump: a get (every RTM_GET* is 2 mod 4) with NLM_F_ROOT or
+      // NLM_F_MATCH; on a new request those bits are NLM_F_REPLACE and
+      // NLM_F_EXCL.
+      let dump = kind % 4 == 2 && fl / 256 % 4 != 0;
       let change = kind == RTM_NEWLINK || kind == RTM_DELLINK || kind == RTM_SETLINK || kind == RTM_NEWADDR
         || kind == RTM_DELADDR || kind == RTM_NEWROUTE || kind == RTM_DELROUTE;
       let mut e = 0;
       if change && !admin {
         e = NE_PERM;
-      } else if kind == RTM_GETLINK && fl / 256 % 4 != 0 {
+      } else if kind == RTM_GETLINK && dump {
         let mut i = 0;
         while i < IFN
           invariant i <= IFN && net_ok(n)
@@ -1022,7 +1040,7 @@ fn rt_request(n: &mut Net, q: u64, b: &Bytes, len: u64, tgt: u64, admin: bool)
         } else {
           e = NE_NODEV;
         }
-      } else if kind == RTM_GETADDR && fl / 256 % 4 != 0 {
+      } else if kind == RTM_GETADDR && dump {
         let mut fam = 0;
         if ml >= 17 {
           fam = rd8(b, at + 16);
@@ -1039,7 +1057,7 @@ fn rt_request(n: &mut Net, q: u64, b: &Bytes, len: u64, tgt: u64, admin: bool)
           }
         }
         nl_done(&mut n, seq, port);
-      } else if kind == RTM_GETROUTE && fl / 256 % 4 != 0 {
+      } else if kind == RTM_GETROUTE && dump {
         let mut fam = 0;
         if ml >= 17 {
           fam = rd8(b, at + 16);
@@ -1056,13 +1074,13 @@ fn rt_request(n: &mut Net, q: u64, b: &Bytes, len: u64, tgt: u64, admin: bool)
         e = rt_addr(&mut n, b, at, end, ns, kind == RTM_DELADDR);
       } else if (kind == RTM_NEWROUTE || kind == RTM_DELROUTE) && ml >= 28 {
         e = rt_route(&mut n, b, at, end, kind == RTM_DELROUTE, fl);
-      } else if fl / 256 % 4 != 0 {
+      } else if dump {
         nl_done(&mut n, seq, port);   // a dump of something not kept: empty
       } else if kind != NLMSG_NOOP && kind != NLMSG_DONE {
         e = NE_OPNOTSUPP;
       }
       n.ns = ns;
-      if e != 0 || (fl / NLM_F_ACK % 2 == 1 && fl / 256 % 4 == 0) {
+      if e != 0 || (fl / NLM_F_ACK % 2 == 1 && !dump) {
         nl_error(&mut n, b, at, e, port);
       }
       let step = (ml + 3) / 4 * 4;
@@ -1433,6 +1451,21 @@ fn nic_if_rename(c: &mut Nic, ns: u64, i: u64, w0: u64, w1: u64) -> u64
       }
       c = Nic::Up(n);
       return e;
+    },
+  }
+}
+
+/// Slot i's MTU.
+fn nic_if_mtu(c: &Nic, i: u64) -> u64
+  requires nic_ok(c) && i < IFN
+{
+  match c {
+    Nic::None => { return 65536; },
+    Nic::Up(n) => {
+      if iw(n, i, IF_KIND) == IFK_LO {
+        return 65536;
+      }
+      return 1500;
     },
   }
 }

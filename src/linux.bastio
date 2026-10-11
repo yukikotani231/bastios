@@ -743,6 +743,8 @@ const SIOCGIFADDR: u64 = 0x8915;
 const SIOCGIFNAME: u64 = 0x8910;
 const SIOCSIFNAME: u64 = 0x8923;
 const SIOCGIFINDEX: u64 = 0x8933;
+const SIOCGIFMTU: u64 = 0x8921;
+const SIOCGIFTXQLEN: u64 = 0x8942;
 const IFREQ_SIZE: u64 = 40;
 const TIOCGPGRP: u64 = 0x540F;
 const TIOCSPGRP: u64 = 0x5410;
@@ -861,7 +863,8 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   if d.kind == K_DEV && d.x == DEV_DSP {
     return dsp_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxsnd.bastio
   }
-  if d.kind == K_SOCK && (req == SIOCATMARK || req == SIOCGIFNAME || (req >= SIOCGIFCONF && req <= SIOCGIFADDR) || req == SIOCSIFNAME || req == SIOCGIFINDEX) {
+  if d.kind == K_SOCK && (req == SIOCATMARK || req == SIOCGIFNAME || (req >= SIOCGIFCONF && req <= SIOCGIFADDR) || req == SIOCSIFNAME || req == SIOCGIFINDEX
+    || req == SIOCGIFMTU || req == SIOCGIFTXQLEN) {
     return sock_ioctl(&mut k, pid, fd, req, arg);
   }
   if d.kind != K_CONSOLE {
@@ -973,6 +976,14 @@ fn sock_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     bset(&mut k.fs.xfer, 17, cast[u8](f / 256 % 256));
   } else if req == SIOCGIFINDEX {
     bset(&mut k.fs.xfer, 16, cast[u8](nic_if_index(k.nic, i)));
+  } else if req == SIOCGIFMTU || req == SIOCGIFTXQLEN {
+    let mut v = 1000;                       // every queue's length
+    if req == SIOCGIFMTU {
+      v = nic_if_mtu(k.nic, i);
+    }
+    bset(&mut k.fs.xfer, 16, cast[u8](v % 256));
+    bset(&mut k.fs.xfer, 17, cast[u8](v / 256 % 256));
+    bset(&mut k.fs.xfer, 18, cast[u8](v / 65536 % 256));
   } else if req == SIOCGIFADDR {
     let a = nic_if_addr(k.nic, i);
     if a == 0 {
