@@ -27,7 +27,7 @@ const ACCESS_MODES: u64 = 7;           // R_OK | W_OK | X_OK
 /// The file-system user id (or group id, with `group`) of process pid:
 /// the one that file permissions are checked with.
 fn fs_id(procs: &Buf, pid: u64, group: bool) -> u64
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
   ensures result < 0x100000000
 {
   let mut f = F_SUID;
@@ -64,7 +64,7 @@ fn mode_allows_g(mode: u64, own: u64, uid: u64, ingroup: bool, want: u64) -> boo
 /// Whether process pid is in group g: its file-system group id (or its
 /// real one, unless `fs`), or one of its supplementary groups.
 fn has_group(procs: &Buf, pid: u64, g: u64, fs: bool) -> bool
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
 {
   if fs && fs_id(procs, pid, true) == g {
     return true;
@@ -78,7 +78,7 @@ fn has_group(procs: &Buf, pid: u64, g: u64, fs: bool) -> bool
 /// Whether process pid may do `want` to a file of mode `mode` owned by
 /// `own`, with its file-system ids.
 fn may_meta(procs: &Buf, pid: u64, mode: u64, own: u64, want: u64) -> bool
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
 {
   return mode_allows_g(mode, own, fs_id(procs, pid, false), has_group(procs, pid, own / 0x100000000 % 0x100000000, true), want);
 }
@@ -287,7 +287,7 @@ fn made_by(k: &mut Kernel, pid: u64, f: u64, own: u64, mode: u64, sgid: bool)
 /// Process pid's umask (0022 until it sets one): kept plus 1, so that a
 /// row of zeros means 0022.
 fn umask_of(procs: &Buf, pid: u64) -> u64
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
   ensures result < 512
 {
   let s = pget(procs, pid, F_UMASK);
@@ -347,7 +347,7 @@ fn lx_access(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64, flags: 
 /// Whether process pid may change the mode or times of a file owned by
 /// `own`: it owns it, or it is root.
 fn owns(procs: &Buf, pid: u64, own: u64) -> bool
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
 {
   let uid = fs_id(procs, pid, false);
   return uid == 0 || uid == own % 0x100000000;
@@ -400,7 +400,7 @@ fn set_owner(k: &mut Kernel, pid: u64, f: u64, mode: u64, own: u64, u: u64, g: u
 /// `own`: `mode`, without the set-group-ID bit when the file's group is
 /// not one of the process's (unless it is root), directories included.
 fn chmod_bits(procs: &Buf, pid: u64, cur: u64, own: u64, mode: u64) -> u64
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
   ensures result < 4096
 {
   let mut r = mode % 4096;
@@ -479,7 +479,7 @@ fn user_empty(k: &mut Kernel, pid: u64, va: u64) -> bool
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  return copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 1) == 1 && bget(k.fs.xfer, 0) == 0;
+  return copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 1) == 1 && bget(k.fs.xfer, 0) == 0;
 }
 
 /// The ids of process pid after it execs a program: from a file with the

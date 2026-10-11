@@ -169,7 +169,7 @@ fn lx_prlimit(k: &mut Kernel, pid: u64, target: u64, r: u64, new: u64, was: u64)
   let mut cur = 0;
   let mut max = 0;
   if new != 0 {
-    if copy_from_user(&mut k.spaces, pid, new, &mut k.fs.xfer, 16) != 16 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, new, &mut k.fs.xfer, 16) != 16 {
       return EFAULT;
     }
     cur = get_u64(k.fs.xfer, 0);

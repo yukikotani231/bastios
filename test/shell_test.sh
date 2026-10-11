@@ -219,7 +219,7 @@ steps = [
     ("fpucheck", b"fpucheck: xmm0 kept"),
     # musl malloc (brk, mmap), stdio on a file, and a line read from the
     # console; the third field is what to wait for instead of the prompt.
-    ("mtest", [b"mtest: malloc heap 75", b"mtest: big memory 4096 1024", b"mtest: direction flag spun", b"mtest: file line 42"], b"type a line"),
+    ("mtest", [b"mtest: malloc heap 75", b"mtest: big memory 4096 1024", b"mtest: wide 4", b"mtest: cow kept", b"mtest: direction flag spun", b"mtest: file line 42"], b"type a line"),
     ("typed for mtest", b"mtest: got typed for mtest"),
     # BusyBox's shell, unmodified, reading commands from the console. The
     # console is a terminal (ioctl TCGETS works), so ash is interactive and
@@ -281,6 +281,11 @@ steps = [
     # when a line is typed.
     ("mtime", [b"mtime: rang 3, selected, slept ", b"woke in time, events ok"], b"\n# "),
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
+    # More processes at once than the 32 rows the process table starts with:
+    # it grows (new_pid), and /proc lists three-digit pids. (stdin from the
+    # terminal: ash gives each background job its own /dev/null otherwise,
+    # and open files system-wide run out first.)
+    ("i=0; while [ $i -lt 120 ]; do sleep 10 </dev/tty & i=$((i+1)); done; n=0; for d in /proc/[0-9]*; do n=$((n+1)); done; [ $n -gt 120 ] && [ -d /proc/120 ] && echo many$((1+1)); wait", b"\r\nmany2\r\n", b"\n# "),
     ("read -t 1 x; echo rt=$?", b"rt=1", b"\n# "),
     ("read -t 9 x; echo rt=$? x=$x", b"rt=0 x=late", b"\n# ", b"late\r"),
     # Directories: mkdir, a working directory (chdir, getcwd through
@@ -400,7 +405,10 @@ steps = [
     # What Linux programs look for besides: processors, the file system
     # types, a process's own mount table, and three fixed sysctls.
     ("n=0; while read k r; do [ \"$k\" = processor ] && n=$((n+1)); done < /proc/cpuinfo; echo cpus=$n; cat /proc/filesystems; cat /proc/self/mounts", [f"cpus={smp}\r\n".encode(), b"nodev\tramfs", b"nodev\ttmpfs", b"\tbstdisk3", b"proc /proc proc"], b"\n# "),
-    ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n32\r\n", b"mounts"], b"\n# "),
+    ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n256\r\n", b"mounts"], b"\n# "),
+    # An 8 MiB stack, Linux's default (t_mem in make compat maps 640 MiB
+    # of the 1 GiB window and grows the stack past 6 MiB).
+    ("ulimit -s", b"\r\n8192\r\n", b"\n# "),
     # The kernel's command line, and a process's fixed regions.
     ("cat /proc/cmdline /proc/self/maps", [b"BOOT_IMAGE=", b"[vdso]", b"[stack]"], b"\n# "),
     ("exit 5", b"[exit 5]"),
@@ -1196,7 +1204,7 @@ fails += not good
 # A USB keyboard and a USB mouse on an xHCI controller (src/xhci.bastio),
 # on a machine with no PS/2 controller at all (i8042=off), so the keys and
 # the moves can only come over USB. They are sent through QMP; at power
-# off the controller is reset and its fifteen pages are back.
+# off the controller is reset and its pages are back.
 import json
 qmp_path = os.path.join(disk_dir.name, "qmp.sock")
 def usbmouse(name, qmp_cmd):
@@ -1227,8 +1235,11 @@ def usbmouse(name, qmp_cmd):
     good = b"mmouse: wheel ready\r\nmmouse: wheel -1\r\n" in out[mark:]
     print(("ok  " if good else "FAIL"), f"({name} boot) ImPS/2 mode, and the USB mouse's wheel turned up reads -1")
     fails += not good
-qemu = boot(1, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci", "-device", "usb-kbd",
-                      "-device", "usb-mouse", "-qmp", f"unix:{qmp_path},server,nowait"])
+# A first controller with nothing on it stands for a PC's USB-C one: the
+# keyboard and mouse are on the second, which must be found.
+qemu = boot(1, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci,id=empty", "-device", "qemu-xhci,id=xu",
+                      "-device", "usb-kbd,bus=xu.0", "-device", "usb-mouse,bus=xu.0",
+                      "-qmp", f"unix:{qmp_path},server,nowait"])
 out = b""
 deadline = time.time() + timeout
 ok = read_until(b"bastios> ")
@@ -1736,6 +1747,9 @@ fails += not good
 ok, code = report_boot(["-machine", "pc", "-m", "64M"], "no report", 0)
 good = ok and b"hardware report" not in out
 print(("ok  " if good else "FAIL"), "(hardware report) only with diag")
+fails += not good
+good = ok and b"disk: none found" in out and b"net: none" in out
+print(("ok  " if good else "FAIL"), "(hardware report) a boot without a disk or network card says so, even without diag")
 fails += not good
 
 # Sound (src/hda.bastio, src/lxsnd.bastio): an HD Audio controller with

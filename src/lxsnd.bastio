@@ -36,7 +36,7 @@ fn dsp_write(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
     return n;                           // less than a frame: nothing to play
   }
   let want = smaller(n, XFER);
-  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, want);
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, want);
   if got == NO_RESULT || got == 0 {
     return EFAULT;
   }

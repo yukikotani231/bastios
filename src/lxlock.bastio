@@ -303,7 +303,7 @@ fn lx_fcntl_lock(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
   if ofd && h >= OFD_N {
     return EBADF;
   }
-  if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, FLOCK_SIZE) != FLOCK_SIZE {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, FLOCK_SIZE) != FLOCK_SIZE {
     return EFAULT;
   }
   let ty = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1));
@@ -403,7 +403,7 @@ fn lx_fcntl_lock(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
       bset(&mut k.fs.xfer, 26, cast[u8](p / 65536 % 256));
       bset(&mut k.fs.xfer, 27, cast[u8](p / 16777216 % 256));
     }
-    if copy_to_user(&mut k.spaces, pid, arg, k.fs.xfer, FLOCK_SIZE) != FLOCK_SIZE {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, k.fs.xfer, FLOCK_SIZE) != FLOCK_SIZE {
       return EFAULT;
     }
     return 0;
@@ -438,8 +438,9 @@ fn lk_opens(k: &Kernel, file: u64) -> u64
   let mut n = 0;
   let mut w = 0;
   let mut row = 0;
-  while row < FD_ROWS
-    invariant row <= FD_ROWS && n <= row && w <= row && kok(k)
+  let rows = smaller(len(k.fs.ftab) / FD_STRIDE, FD_ROWS);   // the rows the table has grown to
+  while row < rows
+    invariant row <= rows && rows <= FD_ROWS && n <= row && w <= row && kok(k)
   {
     if fget(k.fs.ftab, row, FD_FS) != 0 && lk_file(k, row) == file {
       n = n + 1;
@@ -518,7 +519,7 @@ fn flock_check(k: &mut Kernel, pid: u64, arg: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, FLOCK_SIZE) != FLOCK_SIZE {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, FLOCK_SIZE) != FLOCK_SIZE {
     return EFAULT;
   }
   let ty = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1));

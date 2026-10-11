@@ -8,10 +8,13 @@
  *
  * It runs in the process, like libc: a bug here can give that process a
  * wrong time, and nothing else. Clocks it does not keep (the CPU-time
- * ones, and any it does not know) go to the system call. So do the
- * wall clocks (REALTIME): clock_settime, settimeofday and adjtimex move
- * the kernel's epoch, and the copy on this page, written at exec, would
- * not follow. */
+ * ones, and any it does not know) go to the system call, made from here
+ * as Linux's vDSO makes it: glibc takes what the vDSO returns as the
+ * answer and never retries with the system call itself, so an -ENOSYS
+ * from here left glibc's programs with no wall clock at all. The wall
+ * clocks (REALTIME) go there too: clock_settime, settimeofday and
+ * adjtimex move the kernel's epoch, and the copy on this page, written at
+ * exec, would not follow. */
 #include <stdint.h>
 
 struct vdata { uint64_t mult, base, at, epoch; };
@@ -23,7 +26,7 @@ struct timespec { long tv_sec; long tv_nsec; };
 #define FOREVER 18446744073709551613ULL  /* src/lxtime.bastio */
 #define TWO32 4294967296ULL
 #define MULT_MAX 1099511627776ULL
-#define ENOSYS 38
+#define SYS_CLOCK_GETTIME 228
 
 static uint64_t scale(uint64_t d, uint64_t mult)
 {
@@ -37,14 +40,20 @@ static uint64_t scale(uint64_t d, uint64_t mult)
     return top + a + b + c;
 }
 
+static long sys_clock_gettime(long clk, struct timespec *ts)
+{
+    long r;
+    __asm__ volatile("syscall" : "=a"(r) : "a"(SYS_CLOCK_GETTIME), "D"(clk), "S"(ts)
+                     : "rcx", "r11", "memory");
+    return r;
+}
+
 int __vdso_clock_gettime(int clk, struct timespec *ts)
 {
     uint64_t mult = vdso_data.mult, base = vdso_data.base, at = vdso_data.at;
-    if (mult == 0 || mult >= MULT_MAX)
-        return -ENOSYS;
     /* MONOTONIC(_RAW, _COARSE) 1, 4, 6; BOOTTIME 7 */
-    if (clk != 1 && clk != 4 && clk != 6 && clk != 7)
-        return -ENOSYS;
+    if (mult == 0 || mult >= MULT_MAX || (clk != 1 && clk != 4 && clk != 6 && clk != 7))
+        return (int)sys_clock_gettime(clk, ts);
     uint32_t lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     uint64_t now = (uint64_t)hi << 32 | lo, t = at;

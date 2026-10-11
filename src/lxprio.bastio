@@ -32,7 +32,7 @@ const INT_SPAN: u64 = 0x100000000;          // an int argument's 32 bits
 
 /// Process p's nice value plus 20: 0 (nice -20) to 39 (nice 19).
 fn nice_of(procs: &Buf, p: u64) -> u64
-  requires len(procs) == PTAB_LEN && p < NPROC
+  requires ptab_ok(procs) && p < NPROC
   ensures result < 40
 {
   let w = pget(procs, p, F_NICE);
@@ -64,7 +64,7 @@ fn nice_arg(a: u64) -> u64
 /// Does process p (alive) match getpriority's (which, who)? who is
 /// already resolved: a pid, a process group or a real user id.
 fn prio_match(procs: &Buf, p: u64, which: u64, who: u64) -> bool
-  requires len(procs) == PTAB_LEN && p < NPROC
+  requires ptab_ok(procs) && p < NPROC
 {
   if state(procs, p) == FREE || state(procs, p) == ZOMBIE {
     return false;
@@ -80,7 +80,7 @@ fn prio_match(procs: &Buf, p: u64, which: u64, who: u64) -> bool
 
 /// who 0 resolved to the caller's own pid, group or real user.
 fn prio_who(procs: &Buf, pid: u64, which: u64, who: u64) -> u64
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
 {
   let w = who % INT_SPAN;
   if w != 0 {
@@ -162,7 +162,7 @@ fn lx_setpriority(k: &mut Kernel, pid: u64, which: u64, who: u64, prio: u64) -> 
 /// The process a sched_* call names: pid, or the caller for 0; NPROC
 /// when the pid is negative (EINVAL) and NPROC + 1 when there is none.
 fn sched_target(procs: &Buf, pid: u64, who: u64) -> u64
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
   ensures result <= NPROC + 1
 {
   let w = who % INT_SPAN;
@@ -181,7 +181,7 @@ fn sched_target(procs: &Buf, pid: u64, who: u64) -> u64
 /// May pid change process t's scheduling? Root may; anyone else only
 /// when its effective user is t's real or effective user (else EPERM).
 fn may_sched(procs: &Buf, pid: u64, t: u64) -> bool
-  requires len(procs) == PTAB_LEN && pid < NPROC && t < NPROC
+  requires ptab_ok(procs) && pid < NPROC && t < NPROC
 {
   if cred_root(procs, pid) {
     return true;
@@ -219,7 +219,7 @@ fn sched_set(k: &mut Kernel, pid: u64, who: u64, policy: u64, param: u64, keep: 
   if t == NPROC || param == 0 {
     return EINVAL;
   }
-  if copy_from_user(&mut k.spaces, pid, param, &mut k.fs.xfer, 4) != 4 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, param, &mut k.fs.xfer, 4) != 4 {
     return EFAULT;
   }
   let prio = get_u64(k.fs.xfer, 0) % INT_SPAN;
@@ -301,7 +301,7 @@ fn sched_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u
   if size == 0 {
     return EINVAL;
   }
-  if copy_from_user(&mut k.spaces, pid, mask, &mut k.fs.xfer, 1) != 1 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, mask, &mut k.fs.xfer, 1) != 1 {
     return EFAULT;
   }
   if t > NPROC {
@@ -413,7 +413,7 @@ fn sched_setattr(k: &mut Kernel, pid: u64, who: u64, attr: u64, flags: u64) -> u
   if t == NPROC || attr == 0 || flags % INT_SPAN != 0 {
     return EINVAL;
   }
-  if copy_from_user(&mut k.spaces, pid, attr, &mut k.fs.xfer, 4) != 4 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, attr, &mut k.fs.xfer, 4) != 4 {
     return EFAULT;
   }
   let mut size = get_u64(k.fs.xfer, 0) % INT_SPAN;
@@ -425,7 +425,7 @@ fn sched_setattr(k: &mut Kernel, pid: u64, who: u64, attr: u64, flags: u64) -> u
     let w = lx_put_out(&mut k, pid, attr, 4);  // tells the caller the size known
     return E2BIG;
   }
-  if copy_from_user(&mut k.spaces, pid, attr, &mut k.fs.xfer, ATTR_VER0) != ATTR_VER0 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, attr, &mut k.fs.xfer, ATTR_VER0) != ATTR_VER0 {
     return EFAULT;
   }
   if t > NPROC {

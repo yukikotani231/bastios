@@ -105,6 +105,26 @@ fn comp_end(x: &Bytes, from: u64, n: u64) -> u64
   return e;
 }
 
+/// Writes pid p (below 1000) in decimal at x[at..]; how many digits.
+fn dec_out(x: &mut Bytes, at: u64, p: u64) -> u64
+  requires p < 1000 && at + 3 <= blen(x)
+  ensures blen(x) == old(blen(x)) && 1 <= result && result <= 3
+{
+  if p >= 100 {
+    bset(&mut x, at, cast[u8](48 + p / 100));
+    bset(&mut x, at + 1, cast[u8](48 + p / 10 % 10));
+    bset(&mut x, at + 2, cast[u8](48 + p % 10));
+    return 3;
+  }
+  if p >= 10 {
+    bset(&mut x, at, cast[u8](48 + p / 10));
+    bset(&mut x, at + 1, cast[u8](48 + p % 10));
+    return 2;
+  }
+  bset(&mut x, at, cast[u8](48 + p));
+  return 1;
+}
+
 /// Rewrites a leading "proc/self" in x[..n] to "proc/PID" for the caller.
 /// Returns the new length, never more than n.
 fn proc_self(x: &mut Bytes, n: u64, pid: u64) -> u64
@@ -114,15 +134,8 @@ fn proc_self(x: &mut Bytes, n: u64, pid: u64) -> u64
   if n < 9 || !xfer_is(x, 0, 5, "proc/") || comp_end(x, 5, n) != 9 || !is_self(x, 5, 9) {
     return n;
   }
-  // "self" (4 bytes) becomes 1 or 2 digits: move the rest left.
-  let mut d = 1;
-  if pid >= 10 {
-    d = 2;
-    bset(&mut x, 5, cast[u8](48 + pid / 10));
-    bset(&mut x, 6, cast[u8](48 + pid % 10));
-  } else {
-    bset(&mut x, 5, cast[u8](48 + pid));
-  }
+  // "self" (4 bytes) becomes 1 to 3 digits: move the rest left.
+  let d = dec_out(&mut x, 5, pid);
   let l = blen(x);
   let mut i = 9;
   while i < n
@@ -137,23 +150,23 @@ fn proc_self(x: &mut Bytes, n: u64, pid: u64) -> u64
 /// The process x[from..to] names, as decimal digits: a live one (zombies
 /// count), or NPROC.
 fn proc_pid(procs: &Buf, x: &Bytes, from: u64, to: u64) -> u64
-  requires len(procs) == PTAB_LEN && from <= to && to <= blen(x)
+  requires ptab_ok(procs) && from <= to && to <= blen(x)
   ensures result <= NPROC
 {
-  if to == from || to - from > 2 || bget(x, from) == 48 {
+  if to == from || to - from > 3 || bget(x, from) == 48 {
     return NPROC;
   }
   let mut p = 0;
   let mut i = from;
   while i < to
-    invariant from <= i && i <= to && p < 100
+    invariant from <= i && i <= to && p < 1000
   {
     let c = cast[u64](bget(x, i));
     if c < 48 || c > 57 {
       return NPROC;
     }
     p = p * 10 + (c - 48);
-    if p >= 100 {
+    if p >= 1000 {
       return NPROC;
     }
     i = i + 1;
@@ -167,7 +180,7 @@ fn proc_pid(procs: &Buf, x: &Bytes, from: u64, to: u64) -> u64
 /// The directory description for x[..n] if it is /proc or /proc/PID, or
 /// NO_FILE.
 fn proc_dir(procs: &Buf, x: &Bytes, n: u64) -> u64
-  requires len(procs) == PTAB_LEN && n <= blen(x)
+  requires ptab_ok(procs) && n <= blen(x)
 {
   if n == 4 && xfer_is(x, 0, 4, "proc") {
     return DIR_PROC;
@@ -184,7 +197,7 @@ fn proc_dir(procs: &Buf, x: &Bytes, n: u64) -> u64
 
 /// The device for x[..n] if it is a /proc file, or 0.
 fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
-  requires len(procs) == PTAB_LEN && n <= blen(x)
+  requires ptab_ok(procs) && n <= blen(x)
 {
   let s = loop_sys_at(x, n);
   if s != 0 {
@@ -464,13 +477,7 @@ fn proc_entry(k: &mut Kernel, dir: u64, i: u64) -> Ent
   if state(k.procs, p) == FREE {
     return Ent { len: 0, dir: false, end: false };
   }
-  let mut o = 0;
-  if p >= 10 {
-    bset(&mut k.fs.xfer, 0, cast[u8](48 + p / 10));
-    o = 1;
-  }
-  bset(&mut k.fs.xfer, o, cast[u8](48 + p % 10));
-  return Ent { len: o + 1, dir: true, end: false };
+  return Ent { len: dec_out(&mut k.fs.xfer, 0, p), dir: true, end: false };
 }
 
 // ---------------------------------------------------------------- text
@@ -491,22 +498,24 @@ fn put_c(o: &mut Bytes, at: u64, c: u8) -> u64
   return bytes_put_byte(&mut o, at, c);
 }
 
-/// Appends the low 40 bits of v as 10 hex digits (a user address).
+/// Appends v in hex, at least 8 digits, as Linux's %08lx.
 fn put_x(o: &mut Bytes, at: u64, v: u64) -> u64
   requires blen(o) == PROC_OUT && at <= PROC_OUT
   ensures blen(o) == PROC_OUT && result <= PROC_OUT
 {
   let mut a = at;
-  let mut sh = 10;
+  let mut sh = 16;
   while sh > 0
-    invariant sh <= 10 && blen(o) == PROC_OUT && a <= PROC_OUT
+    invariant sh <= 16 && blen(o) == PROC_OUT && a <= PROC_OUT
   {
     sh = sh - 1;
     let d = (v >> (4 * sh)) & 15;
-    if d < 10 {
-      a = put_c(&mut o, a, cast[u8](48 + d));
-    } else {
-      a = put_c(&mut o, a, cast[u8](87 + d));
+    if sh < 8 || v >> (4 * sh) != 0 {       // at least 8 digits, as Linux's %08lx
+      if d < 10 {
+        a = put_c(&mut o, a, cast[u8](48 + d));
+      } else {
+        a = put_c(&mut o, a, cast[u8](87 + d));
+      }
     }
   }
   return a;
@@ -523,7 +532,7 @@ fn put_n(o: &mut Bytes, at: u64, v: u64) -> u64
 /// A status line's four ids (real, effective, saved, file system) from
 /// row words w and s, each after a tab.
 fn put_ids(o: &mut Bytes, at: u64, procs: &Buf, p: u64, w: u64, s: u64) -> u64
-  requires blen(o) == PROC_OUT && at <= PROC_OUT && len(procs) == PTAB_LEN && p < NPROC && w < STRIDE && s < STRIDE
+  requires blen(o) == PROC_OUT && at <= PROC_OUT && ptab_ok(procs) && p < NPROC && w < STRIDE && s < STRIDE
   ensures blen(o) == PROC_OUT && result <= PROC_OUT
 {
   let mut a = put_c(&mut o, at, 9);
@@ -846,7 +855,9 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     } else {
       a = put_n(&mut o, a, ni - 20);
     }
-    a = put_s(&mut o, a, " 1 0 0");
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, group_size(k, p));  // num_threads: Python warns on fork when there are more
+    a = put_s(&mut o, a, " 0 0");
     let mut z = 0;
     while z < 30
       invariant z <= 30 && a <= PROC_OUT && blen(o) == PROC_OUT
@@ -883,7 +894,9 @@ fn proc_text(k: &mut Kernel, f: u64, o: &mut Bytes) -> u64
     }
     a = put_s(&mut o, a, "\nVmLck:\t");
     a = put_n(&mut o, a, rl_locked(k, p) / 1024);
-    return put_s(&mut o, a, " kB\nThreads:\t1\n");
+    a = put_s(&mut o, a, " kB\nThreads:\t");
+    a = put_n(&mut o, a, group_size(k, p));
+    return put_c(&mut o, a, 10);
   }
   if what == PF_COMM {
     let a = put_comm(&mut k, p, &mut o, 0);
@@ -953,7 +966,7 @@ fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
     i = i + 1;
   }
   bfree(out);
-  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, m);
+  let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, m);
   if put == NO_RESULT || put == 0 {
     return EFAULT;
   }
@@ -964,7 +977,7 @@ fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
 /// If x[..n] is /proc/PID/fd/N: PID * LXNFD + N, else NO_RESULT. Only
 /// readlink knows these links; they are not listed or stat'ed.
 fn proc_fd(procs: &Buf, x: &Bytes, n: u64) -> u64
-  requires len(procs) == PTAB_LEN && n <= blen(x)
+  requires ptab_ok(procs) && n <= blen(x)
   ensures result == NO_RESULT || result < NPROC * LXNFD
 {
   if n < 6 || !xfer_is(x, 0, 5, "proc/") {
@@ -1080,7 +1093,7 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
       i = i + 1;
     }
     bfree(lo);
-    if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, m) != m {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, m) != m {
       return EFAULT;
     }
     return m;
@@ -1106,7 +1119,7 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
     i = i + 1;
   }
   bfree(out);
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, l) != l {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, l) != l {
     return EFAULT;
   }
   return l;
@@ -1139,7 +1152,7 @@ fn proc_write(k: &mut Kernel, pid: u64, f: u64, va: u64, n: u64) -> u64
   if !proc_writable(f) || n == 0 || n > 32 {
     return EINVAL;
   }
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, n) != n {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, n) != n {
     return EFAULT;
   }
   let mut i = 0;
@@ -1176,5 +1189,31 @@ fn proc_write(k: &mut Kernel, pid: u64, f: u64, va: u64, n: u64) -> u64
     }
   }
   k.sys = set(k.sys, SYS_PIPEMAX, size);
+  return n;
+}
+
+/// The number of threads in p's thread group: 1 for a process without
+/// threads.
+fn group_size(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures result <= NPROC
+{
+  if pget(k.procs, p, F_TGID) == 0 {
+    return 1;
+  }
+  let g = tgid(k.procs, p);
+  let mut n = 0;
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && n < q && kok(k)
+  {
+    if in_group(k.procs, q, g) {
+      n = n + 1;
+    }
+    q = q + 1;
+  }
+  if n == 0 {
+    return 1;
+  }
   return n;
 }

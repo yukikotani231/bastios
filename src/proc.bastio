@@ -11,9 +11,14 @@ import "net.bastio";
 import "tcp.bastio";
 import "hda.bastio";
 
-const NPROC: u64 = 32;
+// The most processes; the tables grow to it (new_pid). Raising it: the
+// literals FD_ROWS (src/fs.bastio), IPC_LEN, SYS_LEN and the SYS_* offsets,
+// ALARMS_LEN and HOLES_LEN follow it, and a
+// signal's sender word keeps the pid in 8 bits (post_from, src/lxsig.bastio).
+const NPROC: u64 = 256;
 const STRIDE: u64 = 64;
-const PTAB_LEN: u64 = 2048;          // NPROC * STRIDE
+const PTAB_LEN: u64 = NPROC * STRIDE;   // the most the table grows to
+const PGROW: u64 = 32;               // rows the process table starts with (it doubles from there)
 
 // Row fields.
 const F_STATE: u64 = 0;
@@ -134,33 +139,67 @@ const STOPPED: u64 = 16;             // stopped by SIGSTOP, SIGTSTP, SIGTTIN or 
 
 const NO_RESULT: u64 = 18446744073709551615;
 
-fn pget(procs: &Buf, pid: u64, f: u64) -> u64
-  requires len(procs) == PTAB_LEN && pid < NPROC && f < STRIDE
+// The table holds rows for the process ids below its capacity
+// (len / STRIDE), and grows by whole rows (grow_procs) up to NPROC. A row
+// past the end reads as all 0, a FREE process; writing one changes
+// nothing, and new_pid hands out no id the table has no row for.
+spec fn ptab_ok(procs: &Buf) -> bool {
+  len(procs) <= PTAB_LEN
+}
+
+// The other per-process tables (k.sigact, k.cwd, k.sigsave) grow with the
+// process table, and are read and written the same way: past the end, a
+// word reads as 0 and a write changes nothing.
+fn wget(t: &Buf, i: u64) -> u64 {
+  if i < len(t) {
+    return get(t, i);
+  }
+  return 0;
+}
+
+fn wset(t: &mut Buf, i: u64, v: u64)
+  ensures len(t) == old(len(t))
 {
-  return get(procs, pid * STRIDE + f);
+  if i < len(t) {
+    t = set(t, i, v);
+  }
+}
+
+fn pget(procs: &Buf, pid: u64, f: u64) -> u64
+  requires ptab_ok(procs) && pid < NPROC && f < STRIDE
+{
+  let i = pid * STRIDE + f;
+  if i < len(procs) {
+    return get(procs, i);
+  }
+  return 0;
 }
 
 fn pset(procs: &mut Buf, pid: u64, f: u64, v: u64)
-  requires len(procs) == PTAB_LEN && pid < NPROC && f < STRIDE
-  ensures len(procs) == PTAB_LEN
+  requires ptab_ok(procs) && pid < NPROC && f < STRIDE
+  ensures len(procs) == old(len(procs))
 {
-  procs = set(procs, pid * STRIDE + f, v);
+  let i = pid * STRIDE + f;
+  if i < len(procs) {
+    procs = set(procs, i, v);
+  }
 }
 
 fn state(procs: &Buf, pid: u64) -> u64
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
 {
   return pget(procs, pid, F_STATE);
 }
 
 /// Processes that are not FREE or ZOMBIE.
 fn live_count(procs: &Buf) -> u64
-  requires len(procs) == PTAB_LEN
+  requires ptab_ok(procs)
 {
+  let cap = len(procs) / STRIDE;     // past it, every process is FREE
   let mut n = 0;
   let mut p = 1;
-  while p < NPROC
-    invariant 1 <= p && p <= NPROC && n <= p
+  while p < cap
+    invariant 1 <= p && n <= p && cap <= NPROC
   {
     let s = state(procs, p);
     if s != FREE && s != ZOMBIE {
@@ -173,14 +212,18 @@ fn live_count(procs: &Buf) -> u64
 
 /// The next READY process at or after `from` (round robin), or 0 if none.
 fn pick(procs: &Buf, from: u64) -> u64
-  requires len(procs) == PTAB_LEN
+  requires ptab_ok(procs)
   ensures result < NPROC
 {
+  let cap = len(procs) / STRIDE;     // past it, every process is FREE
+  if cap == 0 {
+    return 0;
+  }
   let mut k = 0;
-  while k < NPROC
-    invariant k <= NPROC
+  while k < cap
+    invariant k <= cap && cap <= NPROC
   {
-    let p = (from % NPROC + k) % NPROC;
+    let p = (from % cap + k) % cap;
     if p != 0 && state(procs, p) == READY {
       return p;
     }
@@ -340,12 +383,12 @@ fn q_pop(q: &mut Queue) -> u64
 /// Hands queued bytes to processes blocked in READ, and wakes processes
 /// blocked in a Linux read once a whole line is typed.
 fn wake_readers(procs: &mut Buf, q: &mut Queue, line: &Buf)
-  requires len(procs) == PTAB_LEN && qok(q) && lineok(line)
-  ensures len(procs) == PTAB_LEN && qok(q)
+  requires ptab_ok(procs) && qok(q) && lineok(line)
+  ensures ptab_ok(procs) && qok(q)
 {
   let mut p = 1;
   while p < NPROC
-    invariant 1 <= p && p <= NPROC && len(procs) == PTAB_LEN && qok(q)
+    invariant 1 <= p && p <= NPROC && ptab_ok(procs) && qok(q)
   {
     if state(procs, p) == READING && q.r.n > 0 {
       pset(&mut procs, p, F_REGS + R_RAX, q_pop(&mut q));
@@ -365,7 +408,7 @@ fn wake_readers(procs: &mut Buf, q: &mut Queue, line: &Buf)
 // `main`, which lends them where they are needed.
 // Linux file descriptors (src/lxfd.bastio).
 const LXNFD: u64 = 256;
-const LXFD_LEN: u64 = 8192;           // NPROC * LXNFD
+const LXFD_LEN: u64 = NPROC * LXNFD;
 const FD_CONSOLE: u64 = 1;
 const FD_OFD: u64 = 2;
 const FD_CLOEXEC: u64 = 1024;
@@ -400,18 +443,18 @@ const LK_N: u64 = 128;
 const LK_W: u64 = 6;
 const LK_WAITS: u64 = 768;            // LK_N * LK_W
 const LK_WW: u64 = 4;
-const LK_LEN: u64 = 896;              // LK_WAITS + NPROC * LK_WW
-const IPC_LEN: u64 = 4608;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
+const LK_LEN: u64 = LK_WAITS + NPROC * LK_WW;
+const IPC_LEN: u64 = 9984;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
 const RNG_LEN: u64 = 19;              // the random generator's words (src/lxdev.bastio)
-const SYS_LEN: u64 = 1888;             // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities
+const SYS_LEN: u64 = 13312;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities
 const SYS_PQ: u64 = 160;
 const SYS_PR: u64 = 256;               // SYS_PQ + PQ_N * 12; NPROC * PR_W words
-const SYS_RL: u64 = 416;               // SYS_PR + NPROC * PR_W; NPROC * RL_W words (src/lxrlimit.bastio)
-const SYS_DL: u64 = 1504;              // SYS_RL + NPROC * RL_W; NPROC * 3 words
-const SYS_JC: u64 = 1600;              // SYS_DL + NPROC * 3; a word per process (job control, src/lxsig.bastio)
-const SYS_TM: u64 = 1632;              // SYS_JC + NPROC; NPROC * 3 words (system and children's times, src/lxrlimit.bastio)
-const SYS_RB: u64 = 1728;              // SYS_TM + NPROC * 3; a word per thread (robust futex list head, src/lxthread.bastio)
-const SYS_CAP: u64 = 1760;             // SYS_RB + NPROC; NPROC * CAP_W words (capabilities, src/lxcap.bastio)
+const SYS_RL: u64 = 1536;               // SYS_PR + NPROC * PR_W; NPROC * RL_W words (src/lxrlimit.bastio)
+const SYS_DL: u64 = 10240;              // SYS_RL + NPROC * RL_W; NPROC * 3 words
+const SYS_JC: u64 = 11008;              // SYS_DL + NPROC * 3; a word per process (job control, src/lxsig.bastio)
+const SYS_TM: u64 = 11264;              // SYS_JC + NPROC; NPROC * 3 words (system and children's times, src/lxrlimit.bastio)
+const SYS_RB: u64 = 12032;              // SYS_TM + NPROC * 3; a word per thread (robust futex list head, src/lxthread.bastio)
+const SYS_CAP: u64 = 12288;             // SYS_RB + NPROC; NPROC * CAP_W words (capabilities, src/lxcap.bastio)
 const SYS_PIPEMAX: u64 = 150;          // /proc/sys/fs/pipe-max-size (0: PIPE_CAP), past the adjtimex words (src/lxsys.bastio)
 // Capabilities the kernel checks (src/lxcap.bastio).
 const CAP_SYS_TIME: u64 = 25;
@@ -459,25 +502,29 @@ const DISK_RETRY: u64 = 0x8000000000000002;
 // Linux working directories: per process, word 0 the length of the path
 // (without the leading "/", at most FNAME_MAX) and one byte a word after.
 const CWD_STRIDE: u64 = 256;           // FNAME_MAX + 1
-const CWD_LEN: u64 = 8192;            // NPROC * CWD_STRIDE
+const CWD_LEN: u64 = NPROC * CWD_STRIDE;
 const DPATH_LEN: u64 = 262144;        // OFD_N * CWD_STRIDE
 const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
 
 // Linux signal actions: per process, 64 signals of 4 words each (handler,
 // flags, restorer, mask).
-const SIGACT_LEN: u64 = 8192;           // NPROC * SIGACT_ROW
-const SIGSAVE_LEN: u64 = 2080;        // NPROC + NPROC * 64
-const ALARMS_LEN: u64 = 576;         // NPROC * 2, then PT_N POSIX timers of PT_W words per process
-const PT_BASE: u64 = 64;             // where the POSIX timers start in k.alarms (src/lxptimer.bastio)
+const SIGACT_ROW: u64 = 256;          // per process: four words per signal
+const SIGACT_LEN: u64 = NPROC * SIGACT_ROW;
+const SIGSAVE_ROW: u64 = 65;          // per process: the saved mask, then a sender per signal (1 + NSIG)
+const SIGSAVE_LEN: u64 = NPROC * SIGSAVE_ROW;
+const ALARMS_LEN: u64 = 4608;        // NPROC * 2, then PT_N POSIX timers of PT_W words per process
+const PT_BASE: u64 = NPROC * 2;             // where the POSIX timers start in k.alarms (src/lxptimer.bastio)
 const PT_N: u64 = 4;                 // POSIX timers per process
 const PT_W: u64 = 4;                 // words per timer: deadline, interval, state, overruns
 const MAP_N: u64 = 4;                // MAP_SHARED file mappings per process
 const MAP_W: u64 = 4;                // words per mapping: first page + 1, pages, description, offset
-const MAPS_LEN: u64 = 512;           // NPROC * MAP_N * MAP_W
+const MAPS_LEN: u64 = NPROC * MAP_N * MAP_W;
 const HOLE_N: u64 = 16;              // address space holes munmap left, per process
-const HOLES_LEN: u64 = 1024;         // NPROC * HOLE_N * 2
+const HOLES_LEN: u64 = 8192;         // NPROC * HOLE_N * 2
 const LZ_W: u64 = 4;                  // lazy code: first page + 1 (0: none), pages, file hold, file offset
-const LAZY_LEN: u64 = 128;            // NPROC * LZ_W
+const LAZY_LEN: u64 = NPROC * LZ_W;
+const AN_N: u64 = 16;                  // anonymous memory not touched yet: records per process (src/lxanon.bastio)
+const ANON_LEN: u64 = NPROC * AN_N * 2;  // first page + 1 (0: free), pages
 const LX_PAUSE: u64 = 34;
 const LX_RT_SIGSUSPEND: u64 = 130;
 const LX_WAITID: u64 = 247;
@@ -547,13 +594,17 @@ const UX_PATH: u64 = 108;             // the longest name
 const UX_LEN: u64 = 156;              // UX_N * UX_W + UX_LIS * UXL_W + UX_N, then 2 * (UX_N + UX_LIS) credential words, then UX_LIS socket files
 const UXB_LEN: u64 = 65968;           // UX_N * UX_CAP + UX_LIS * UX_PATH
 
-const NPIPES: u64 = 8;
+const NPIPES: u64 = 512;              // OFD_N / 2: each pipe has two descriptions
 const PIPE_CAP: u64 = 65536;          // bytes a pipe holds, as on Linux
 const PIPE_PAGE: u64 = 4096;          // the least F_SETPIPE_SZ gives a pipe
 const PIPE_ATOM: u64 = 4096;          // PIPE_BUF: writes this small go in whole
 const PIPE_STRIDE: u64 = 8;           // head, count, readers, writers, FIFO + 1 (0: none), a writer came, capacity, O_ASYNC reader
-const PIPES_LEN: u64 = 64;            // NPIPES * PIPE_STRIDE
-const PIPE_BYTES: u64 = 524288;       // NPIPES * PIPE_CAP
+const PIPES_LEN: u64 = 4096;          // NPIPES * PIPE_STRIDE
+
+// Pipe p's ring: PIPE_PAGE bytes it takes when it is opened, growing up
+// to PIPE_CAP as it fills, and gives back when both ends are closed. Slot p of k.pipebuf, which grows by one as
+// pipes come into use, so a new pipe takes the lowest free slot.
+enum PipeBuf { None, Ring(Bytes) }
 
 const LX_PIPE: u64 = 22;
 const LX_FSTAT: u64 = 5;
@@ -664,7 +715,7 @@ struct Kernel {
   lxfd: Buf,            // Linux descriptors (src/lxfd.bastio)
   ofd: Buf,             // open file descriptions they share
   pipes: Buf,           // pipe state, PIPE_STRIDE words each
-  pipebuf: Bytes,       // pipe rings, PIPE_CAP bytes each
+  pipebuf: Vec[PipeBuf],  // pipe rings (lxfd.bastio, pipe_ready)
   ticks: u64,           // timer ticks since boot
   ns: u64,              // the clock at the last system call, in nanoseconds since boot
   tsc: Tsc,             // how to read that clock (src/tsc.bastio), also copied into each vDSO
@@ -685,6 +736,7 @@ struct Kernel {
   maps: Buf,            // Linux MAP_SHARED file mappings, MAP_N per process (src/lxmem.bastio)
   holes: Buf,           // address space munmap gave back, HOLE_N ranges per process (src/lxmem.bastio)
   lazy: Buf,            // code pages read from a file when first touched, LZ_W words per process (src/lazy.bastio)
+  anon: Buf,            // anonymous memory mapped when first touched, AN_N records per process (src/lxanon.bastio)
   inet6: Buf,           // word h: 1 if open file description h is an AF_INET6 socket (src/lxsock.bastio)
   locks: Buf,           // file locks held (src/lxlock.bastio)
   loops: Buf,           // loop devices (src/lxloop.bastio)
@@ -702,7 +754,7 @@ struct Kernel {
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.croot) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
     && (k.txt is Store::Table ==> (pt_level(k.txt.Table) == 2 && pt_leases(k.txt.Table) == 0))
 }
@@ -931,7 +983,7 @@ fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
   ensures kok(k)
   ensures result < NPROC
 {
-  let pid = free_pid(k.procs);
+  let pid = new_pid(&mut k);
   if pid == 0 {
     return 0;
   }
@@ -952,7 +1004,7 @@ fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
   fpu_init(&mut fpu);
   let mut f = 0;
   while f < STRIDE
-    invariant f <= STRIDE && len(k.procs) == PTAB_LEN
+    invariant f <= STRIDE && ptab_ok(k.procs)
   {
     pset(&mut k.procs, pid, f, 0);
     f = f + 1;
@@ -962,7 +1014,7 @@ fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
     // program must not make anyone root.
     f = F_UID;
     while f < F_GROUPS + NGROUPS_KEPT / 2
-      invariant F_UID <= f && f <= F_GROUPS + NGROUPS_KEPT / 2 && len(k.procs) == PTAB_LEN
+      invariant F_UID <= f && f <= F_GROUPS + NGROUPS_KEPT / 2 && ptab_ok(k.procs)
     {
       pset(&mut k.procs, pid, f, pget(k.procs, parent, f));
       f = f + 1;
@@ -970,17 +1022,18 @@ fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
   }
   lx_fd_reset(&mut k.lxfd, pid);
   sig_reset(&mut k.sigact, pid, false);
-  k.cwd = set(k.cwd, pid * CWD_STRIDE, 0);   // starts at "/"
-  k.croot = set(k.croot, pid * CWD_STRIDE, 0);
+  wset(&mut k.cwd, pid * CWD_STRIDE, 0);   // starts at "/"
+  wset(&mut k.croot, pid * CWD_STRIDE, 0);
   let mut args = balloc(ARGV0_MAX + 1 + START_ENV_LEN);
   let alen = name_arg(&mut args, name);
   let total = start_env(&mut args, alen);
   let src = Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
-  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, total, false);
+  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, Src { file: false, prog: NPROGS, f: 0, size: 0 }, args, alen, total, false);
   bfree(args);
   let ok = sp is Space::Mapped;
   put_space(&mut k.spaces, pid, sp);
   hole_clear(&mut k, pid);
+  anon_clear(&mut k, pid);
   if !ok {
     give_page(&mut k.mem, fpu);
     return 0;
@@ -992,21 +1045,82 @@ fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
   return pid;
 }
 
-/// A FREE process id, or 0 if there is none.
+/// A FREE process id the table has a row for, or 0 if there is none.
 fn free_pid(procs: &Buf) -> u64
-  requires len(procs) == PTAB_LEN
+  requires ptab_ok(procs)
   ensures result < NPROC
 {
+  let cap = len(procs) / STRIDE;
   let mut pid = 1;
-  while pid < NPROC && state(procs, pid) != FREE
-    invariant 1 <= pid && pid <= NPROC
+  while pid < cap && state(procs, pid) != FREE
+    invariant 1 <= pid && cap <= NPROC
   {
     pid = pid + 1;
   }
-  if pid >= NPROC {
+  if pid >= cap {
     return 0;
   }
   return pid;
+}
+
+/// Makes `t` at least `n` words long: its words stay, the new ones are 0.
+/// False, with `t` as it was, when memory runs out.
+fn zgrow(t: &mut Buf, n: u64) -> bool
+  requires n <= 1152921504606846976
+  ensures len(t) == len(old(t)) || len(t) == n
+{
+  if len(t) >= n {
+    return true;
+  }
+  let mut nt = try_alloc(n);
+  if len(nt) != n {
+    free(nt);
+    return false;
+  }
+  let mut i = 0;
+  while i < len(t)
+    invariant i <= len(t) && len(t) <= n && len(nt) == n
+  {
+    nt = set(nt, i, get(t, i));
+    i = i + 1;
+  }
+  let prev = t;
+  t = nt;
+  free(prev);
+  return true;
+}
+
+/// A FREE process id for a new process, or 0 if there is none. When every
+/// row is taken, the per-process tables double, up to NPROC rows; when
+/// memory runs out, there is none. Doubling and not a fixed step: the
+/// kernel's allocator reuses a freed block only for a buffer of the same
+/// size, so every table a growth leaves behind stays unused.
+fn new_pid(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k) && result < NPROC
+{
+  let pid = free_pid(k.procs);
+  if pid != 0 {
+    return pid;
+  }
+  let cap = len(k.procs) / STRIDE;
+  if cap >= NPROC {
+    return 0;
+  }
+  let mut n = cap * 2;
+  if n < PGROW {
+    n = PGROW;
+  }
+  if n > NPROC {
+    n = NPROC;
+  }
+  // The process table last: its length is how many rows every table has.
+  if !zgrow(&mut k.sigact, n * SIGACT_ROW) || !zgrow(&mut k.cwd, n * CWD_STRIDE)
+     || !zgrow(&mut k.croot, n * CWD_STRIDE) || !zgrow(&mut k.lxfd, n * LXNFD)
+     || !zgrow(&mut k.fs.ftab, n * NFD * FD_STRIDE) || !zgrow(&mut k.sigsave, n * SIGSAVE_ROW) || !zgrow(&mut k.procs, n * STRIDE) {
+    return 0;
+  }
+  return free_pid(k.procs);
 }
 
 /// Writes `name` (at most ARGV0_MAX bytes of it) and a NUL into `args`:
@@ -1061,13 +1175,14 @@ fn start_env(args: &mut Bytes, from: u64) -> u64
 
 /// Builds the address space for program `prog`, with the argument strings
 /// in the first `alen` bytes of `args` and the environment strings from
-/// there to `total` (each ending in a NUL), and sets
+/// there to `total` (each ending in a NUL), and the interpreter execve
+/// found for it (elf_interp, src/lxproc.bastio; a file, or none), and sets
 /// process `pid` up to start it: program, registers, program break.
 /// Returns `Space::Empty`, changing nothing, if the image is malformed or
 /// memory runs out. The caller installs the space.
-fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: u64, t: Tsc, epoch: u64, pid: u64, src: Src, args: &Bytes, alen: u64, total: u64, lazy: bool) -> Space
-  requires mem_ok(m) && store_ok(txt) && vfs_ok(v) && len(procs) == PTAB_LEN && pid < NPROC && alen <= total && total <= ARGS_MAX && total <= blen(args)
-  ensures mem_ok(m) && store_ok(txt) && vfs_ok(v) && len(procs) == PTAB_LEN
+fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: u64, t: Tsc, epoch: u64, pid: u64, src: Src, isrc0: Src, args: &Bytes, alen: u64, total: u64, lazy: bool) -> Space
+  requires mem_ok(m) && store_ok(txt) && vfs_ok(v) && ptab_ok(procs) && pid < NPROC && alen <= total && total <= ARGS_MAX && total <= blen(args)
+  ensures mem_ok(m) && store_ok(txt) && vfs_ok(v) && ptab_ok(procs)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
   // A built-in image is a Linux ELF executable or a BastiOS image; a file
@@ -1092,7 +1207,10 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
     if e.ilen != 0 {
       // A dynamically linked program: its interpreter goes just below
       // where mmap starts, and runs first.
-      isrc = interp_src(&mut v, src, e);
+      isrc = isrc0;
+      if !isrc.file {
+        isrc = interp_src(&mut v, src, e);
+      }
       if !isrc.file && isrc.prog >= NPROGS {
         return Space::Empty;
       }
@@ -1130,7 +1248,7 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
   }
   let mut r = 0;
   while r < 21
-    invariant r <= 21 && len(procs) == PTAB_LEN
+    invariant r <= 21 && ptab_ok(procs)
   {
     pset(&mut procs, pid, F_REGS + r, 0);
     r = r + 1;
@@ -1264,7 +1382,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
   pset(&mut k.procs, pid, F_CODE, code);
   let mut c = 1;
   while c < NPROC
-    invariant 1 <= c && c <= NPROC && len(k.procs) == PTAB_LEN
+    invariant 1 <= c && c <= NPROC && ptab_ok(k.procs)
   {
     if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE {
       pset(&mut k.procs, c, F_PARENT, 0);
@@ -1322,7 +1440,7 @@ fn put_state(con: &mut Con, s: u64)
 }
 
 fn print_ps(con: &mut Con, procs: &Buf)
-  requires con_ok(con) && len(procs) == PTAB_LEN
+  requires con_ok(con) && ptab_ok(procs)
   ensures con_ok(con)
 {
   puts(&mut con, "  PID  PPID STATE    TICKS NAME\r\n");

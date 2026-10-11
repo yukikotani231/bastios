@@ -37,7 +37,10 @@ const LX_RSEQ: u64 = 334;
 const LX_CLONE3: u64 = 435;
 const LX_UNSHARE: u64 = 272;
 const LX_IO_SETUP: u64 = 206;          // Linux AIO: nginx tries it and does without
+const LX_MEMBARRIER: u64 = 324;
+const LX_IO_URING_SETUP: u64 = 425;    // libuv and BIND try it and do without
 const LX_OPENAT: u64 = 257;
+const LX_CREAT: u64 = 85;
 const LX_STAT: u64 = 4;
 const LX_LSTAT: u64 = 6;
 const LX_ACCESS: u64 = 21;
@@ -182,28 +185,17 @@ fn read_root(root: &mut PageTable, off: u64) -> Word
 fn read_l3(l3: &mut PageTable, off: u64) -> Word
   requires pt_level(l3) == 3 && off + 8 <= USER_SIZE
 {
-  if !pt_has(l3, 0) {
-    return Word { ok: false, v: 0 };
-  }
-  return pt_borrow(&mut l3, 0, read_l2, off);
-}
-
-/// The 8 bytes at window offset off, most significant first.
-fn read_l2(l2: &mut PageTable, off: u64) -> Word
-  requires pt_level(l2) == 2 && off + 8 <= USER_SIZE
-  ensures pt_level(l2) == 2
-{
   let mut v = 0;
   let mut i = 8;
   while i > 0
-    invariant i <= 8 && pt_level(l2) == 2
+    invariant i <= 8 && pt_level(l3) == 3
     invariant (i == 8 ==> v == 0) && (i == 7 ==> v < 0x100) && (i == 6 ==> v < 0x10000)
     invariant (i == 5 ==> v < 0x1000000) && (i == 4 ==> v < 0x100000000)
     invariant (i == 3 ==> v < 0x10000000000) && (i == 2 ==> v < 0x1000000000000)
     invariant (i == 1 ==> v < 0x100000000000000)
   {
     i = i - 1;
-    let ch = w_byte(&mut l2, off + i);
+    let ch = w_byte(&mut l3, off + i);
     if ch == 256 {
       return Word { ok: false, v: 0 };
     }
@@ -414,10 +406,12 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, r);
     return KEEP;
   }
-  if n == LX_OPEN || n == LX_OPENAT {
+  if n == LX_OPEN || n == LX_OPENAT || n == LX_CREAT {
     let mut r = 0;
     if n == LX_OPEN {
       r = lx_open(&mut k, pid, AT_FDCWD, a, b, c);
+    } else if n == LX_CREAT {
+      r = lx_open(&mut k, pid, AT_FDCWD, a, 0x241, b);   // O_CREAT | O_WRONLY | O_TRUNC
     } else {
       r = lx_open(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
     }
@@ -671,9 +665,21 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   // glibc asks for these and carries on without them: restartable
   // sequences (sched_getcpu falls back to the system call), and clone3
   // (pthread_create falls back to clone, as on Linux before 5.3); nginx
-  // goes on without Linux AIO (io_setup). Refused quietly, as known gaps.
-  if n == LX_RSEQ || n == LX_CLONE3 || n == LX_IO_SETUP {
+  // goes on without Linux AIO (io_setup), and libuv and BIND without
+  // io_uring. Refused quietly, as known gaps.
+  if n == LX_RSEQ || n == LX_CLONE3 || n == LX_IO_SETUP || n == LX_IO_URING_SETUP {
     ret(&mut k.procs, pid, ENOSYS);
+    return KEEP;
+  }
+  // membarrier: MEMBARRIER_CMD_QUERY answers that no command is
+  // supported, so callers (liburcu, which BIND uses) keep to their own
+  // barriers; any other command is EINVAL, as Linux says for one it lacks.
+  if n == LX_MEMBARRIER {
+    if a == 0 && b == 0 {
+      ret(&mut k.procs, pid, 0);
+    } else {
+      ret(&mut k.procs, pid, EINVAL);
+    }
     return KEEP;
   }
   puts(&mut con, "[pid ");
@@ -865,7 +871,7 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     return ENOTTY;
   }
   if req == TCSETS || (req > TCSETS && req <= TCSETSF) {
-    if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, TERMIOS_SIZE) != TERMIOS_SIZE {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, TERMIOS_SIZE) != TERMIOS_SIZE {
       return EFAULT;
     }
     let mut i = 0;
@@ -932,7 +938,7 @@ fn sock_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   }
   if req == SIOCGIFCONF {
     // struct ifconf: int ifc_len, then the buffer's address.
-    if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, 16) != 16 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, 16) != 16 {
       return EFAULT;
     }
     let room = get_u64(k.fs.xfer, 0) % 4294967296;
@@ -957,7 +963,7 @@ fn sock_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     return lx_put_out(&mut k, pid, arg, 4);
   }
   // SIOCGIFFLAGS, SIOCSIFFLAGS: struct ifreq, the name in its first 16 bytes.
-  if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, IFREQ_SIZE) != IFREQ_SIZE {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, IFREQ_SIZE) != IFREQ_SIZE {
     return EFAULT;
   }
   if bget(k.fs.xfer, 0) != 108 || bget(k.fs.xfer, 1) != 111 || bget(k.fs.xfer, 2) != 0 {
@@ -991,7 +997,7 @@ fn lx_put_out(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && n <= 160
   ensures kok(k)
 {
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, n) != n {
     return EFAULT;
   }
   return 0;
@@ -1058,7 +1064,7 @@ fn tty_cook(con: &mut Con, k: &mut Kernel)
 /// waits in poll (which may be for the console: a poll on pipes or sockets
 /// alone also lets typed bytes go to the Linux line).
 fn lx_reading(procs: &Buf) -> bool
-  requires len(procs) == PTAB_LEN
+  requires ptab_ok(procs)
 {
   let mut p = 1;
   while p < NPROC
@@ -1166,7 +1172,7 @@ fn console_read(k: &mut Kernel, pid: u64, va: u64, n: u64, was: u64) -> u64
     bset(&mut k.fs.xfer, i, cast[u8](get(k.line, 2 + i) % 256));
     i = i + 1;
   }
-  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
+  let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, want);
   if put == NO_RESULT || (put == 0 && want > 0) {
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
@@ -1221,7 +1227,7 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
     if va > 0xFFFFFFFFFFFFFFFF - READ_MAX {
       return EFAULT;
     }
-    let put = copy_to_user(&mut k.spaces, pid, va + done, k.fs.xfer, got);
+    let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + done, k.fs.xfer, got);
     if put == NO_RESULT || (put == 0 && got > 0) {
       if done > 0 {
         return done;
@@ -1289,7 +1295,7 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
   if d.kind == K_CONSOLE && 2 * smaller(n, XFER) > room && room < OUTCAP {
     return CON_FULL;                        // the console's ring is too full: wait
   }
-  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, smaller(n, XFER));
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, smaller(n, XFER));
   if got == NO_RESULT || (got == 0 && n > 0) {
     return EFAULT;
   }
@@ -1327,7 +1333,7 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
       if va > 0xFFFFFFFFFFFFFFFF - total {
         return total;
       }
-      piece = copy_from_user(&mut k.spaces, pid, va + total, &mut k.fs.xfer, smaller(n - total, XFER));
+      piece = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + total, &mut k.fs.xfer, smaller(n - total, XFER));
       if piece == NO_RESULT || piece == 0 {
         return total;
       }
@@ -1611,7 +1617,7 @@ fn base_len(k: &Kernel, pid: u64, h: u64) -> u64
   ensures result <= FNAME_MAX
 {
   if h == OFD_N {
-    return smaller(get(k.cwd, pid * CWD_STRIDE), FNAME_MAX);
+    return smaller(wget(k.cwd, pid * CWD_STRIDE), FNAME_MAX);
   }
   return smaller(get(k.dpath, h * CWD_STRIDE), FNAME_MAX);
 }
@@ -1620,7 +1626,7 @@ fn base_byte(k: &Kernel, pid: u64, h: u64, i: u64) -> u8
   requires kok(k) && pid < NPROC && h <= OFD_N && i < FNAME_MAX
 {
   if h == OFD_N {
-    return cast[u8](get(k.cwd, pid * CWD_STRIDE + 1 + i) % 256);
+    return cast[u8](wget(k.cwd, pid * CWD_STRIDE + 1 + i) % 256);
   }
   return cast[u8](get(k.dpath, h * CWD_STRIDE + 1 + i) % 256);
 }
@@ -1640,7 +1646,7 @@ fn root_under(k: &Kernel, pid: u64, out: &Bytes, o: u64) -> u64
   while i < rl
     invariant i <= rl && rl <= o && o <= blen(out) && rl <= FNAME_MAX && kok(k) && pid < NPROC
   {
-    if cast[u64](bget(out, i)) != get(k.croot, pid * CWD_STRIDE + 1 + i) % 256 {
+    if cast[u64](bget(out, i)) != wget(k.croot, pid * CWD_STRIDE + 1 + i) % 256 {
       return 0;
     }
     i = i + 1;
@@ -1664,7 +1670,7 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
   }
   let n = smaller(PATH_MAX_LX, USER_SIZE - (va - USER_BASE));
   let mut want = smaller(PATH_FIRST, n);
-  let mut got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, want);
+  let mut got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, want);
   if got == NO_RESULT {
     return NO_RESULT;
   }
@@ -1677,7 +1683,7 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
   if e >= got && got == want && want < n {
     // Longer than the first read: read up to PATH_MAX.
     want = n;
-    got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, want);
+    got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, want);
     if got == NO_RESULT {
       return NO_RESULT;
     }
@@ -1724,7 +1730,7 @@ fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
     while o < rl
       invariant o <= rl && rl <= FNAME_MAX && blen(out) == PATH_OUT && kok(k) && pid < NPROC
     {
-      bset(&mut out, o, cast[u8](get(k.croot, pid * CWD_STRIDE + 1 + o) % 256));
+      bset(&mut out, o, cast[u8](wget(k.croot, pid * CWD_STRIDE + 1 + o) % 256));
       o = o + 1;
     }
     floor = rl;
@@ -1921,22 +1927,12 @@ fn map_l3(l3: &mut PageTable, m: &mut Mem, from: u64, to: u64, sh: bool) -> bool
   requires pt_level(l3) == 3 && mem_ok(m) && to <= WPAGES
   ensures mem_ok(m)
 {
-  if !pt_has(l3, 0) {
-    return false;
-  }
-  return pt_borrow(&mut l3, 0, map_l2, &mut m, from, to, sh);
-}
-
-fn map_l2(l2: &mut PageTable, m: &mut Mem, from: u64, to: u64, sh: bool) -> bool
-  requires pt_level(l2) == 2 && mem_ok(m) && to <= WPAGES
-  ensures mem_ok(m)
-{
   let mut ok = true;
   let mut p = from;
   while ok && p < to
-    invariant mem_ok(m) && pt_level(l2) == 2 && to <= WPAGES
+    invariant mem_ok(m) && pt_level(l3) == 3 && to <= WPAGES
   {
-    ok = w_map(&mut m, &mut l2, p, sh);
+    ok = w_map(&mut m, &mut l3, p, sh);
     p = p + 1;
   }
   return ok;
@@ -1967,14 +1963,14 @@ fn stack_fault(k: &mut Kernel, p: u64) -> bool
   ensures kok(k)
 {
   let va = pget(k.procs, p, F_REGS + 19);   // CR2
-  if va < USER_BASE || copy_from_user(&mut k.spaces, p, va, &mut k.fs.xfer, 1) == 1 {
+  if va < USER_BASE || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, va, &mut k.fs.xfer, 1) == 1 {
     return false;                           // mapped: not a stack to grow
   }
   return stack_reach(&mut k.mem, &mut k.spaces, p, va);
 }
 
-/// brk: moves the heap's end to `want`, mapping the pages it grows into
-/// and unmapping the pages it gives back; never below where it started,
+/// brk: moves the heap's end to `want`, adding the pages it grows into
+/// (mapped when first touched) and unmapping the pages it gives back; never below where it started,
 /// and never into mmap's pages. Returns the break, as Linux does on
 /// failure too.
 fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
@@ -1996,12 +1992,17 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
     let from = (new + 4095) / 4096;
     let to = (cur + 4095) / 4096;
     if to <= WPAGES {
+      anon_forget(&mut k, pid, from, to);
       win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, from, to, 0);
     }
     pset(&mut k.procs, pid, F_BRK, new);
     return want;
   }
-  if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, (cur + 4095) / 4096, (new + 4095) / 4096, false) {
+  // The new pages come when first touched (src/lxanon.bastio), unless
+  // every record is in use.
+  let lo = (cur + 4095) / 4096;
+  let hi = (new + 4095) / 4096;
+  if !(lo < hi && anon_add(&mut k, pid, lo, hi)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, lo, hi, false) {
     return USER_BASE + cur;
   }
   pset(&mut k.procs, pid, F_BRK, new);
@@ -2083,6 +2084,10 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   // the cache's page would reach every reader of the file
   // (docs/security.md). Such a copy does not see later writes to the file.
   let cached = sh && !anon && f != NO_FILE && can_write;
+  // Private writable anonymous memory gets its pages when first touched
+  // (src/lxanon.bastio), unless MAP_POPULATE or MAP_LOCKED asks for them
+  // now.
+  let lazy = anon && !sh && prot / 2 % 2 == 1 && flags & 0xA000 == 0;   // MAP_POPULATE, MAP_LOCKED
   let mut at = 0;
   let noreplace = flags & MAP_FIXED_NOREPLACE != 0;
   if flags / MAP_FIXED % 2 == 1 || noreplace {
@@ -2095,22 +2100,31 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     at = addr - USER_BASE;
     // MAP_FIXED_NOREPLACE: any page mapped in the range is EEXIST. (A
     // PROT_NONE reservation maps nothing, so it is not seen.)
-    if noreplace && win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, at / 4096, at / 4096 + pages, 0) != 0 {
+    if noreplace && anon_count(&mut k, pid, at / 4096, at / 4096 + pages) != 0 {
       return EEXIST;
     }
     // What was there goes, read-only pages too: the new mapping is writable.
     map_forget(&mut k, pid, at / 4096, at / 4096 + pages, false);
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
     fixed_taken(&mut k, pid, at / 4096, at / 4096 + pages);
-    if !cached && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
+    if !cached && !(lazy && anon_add(&mut k, pid, at / 4096, at / 4096 + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
       return ENOMEM;
     }
   } else {
     let reserve = (anon && prot == 0) || cached;
+    // Where addr asks, if nothing is there (mmap_hint, src/lxmem.bastio).
+    let hp = mmap_hint(&mut k, pid, addr, pages);
+    if hp < STACK_FIRST {
+      if !reserve && !(lazy && anon_add(&mut k, pid, hp, hp + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, hp, hp + pages, sh) {
+        hole_add(&mut k, pid, hp, hp + pages);
+        return ENOMEM;
+      }
+      return lx_mmap_fill(&mut k, pid, hp * 4096, pages, prot, flags, fd, off, anon, cached, f, sh);
+    }
     // A hole munmap left first (src/lxmem.bastio): its pages are unmapped.
     let h = hole_take(&mut k, pid, pages);
     if h < STACK_FIRST {
-      if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, h, h + pages, sh) {
+      if !reserve && !(lazy && anon_add(&mut k, pid, h, h + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, h, h + pages, sh) {
         hole_add(&mut k, pid, h, h + pages);
         return ENOMEM;
       }
@@ -2128,7 +2142,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // Fresh PROT_NONE memory is only address space: its pages are mapped
     // when an mprotect makes them usable (lx_mprotect), and touching it
     // before that faults, as on Linux.
-    if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096, sh) {
+    if !reserve && !(lazy && anon_add(&mut k, pid, at / 4096, at / 4096 + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096, sh) {
       return ENOMEM;
     }
     pset(&mut k.procs, pid, F_MMAP, at);
@@ -2187,7 +2201,7 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
       bset(&mut k.fs.xfer, z, 0);
       z = z + 1;
     }
-    if copy_to_user(&mut k.spaces, pid, USER_BASE + at + done, k.fs.xfer, step) != step {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, USER_BASE + at + done, k.fs.xfer, step) != step {
       return EFAULT;
     }
     done = done + step;
