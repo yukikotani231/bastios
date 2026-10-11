@@ -591,10 +591,9 @@ const PIPE_ATOM: u64 = 4096;          // PIPE_BUF: writes this small go in whole
 const PIPE_STRIDE: u64 = 8;           // head, count, readers, writers, FIFO + 1 (0: none), a writer came, capacity, O_ASYNC reader
 const PIPES_LEN: u64 = 4096;          // NPIPES * PIPE_STRIDE
 
-// Pipe p's ring: PIPE_CAP bytes it takes when it is first used and keeps
-// (a later pipe in the same slot reuses it). Slot p of k.pipebuf, which
-// grows by one as pipes come into use: a FREE slot below its length has
-// its ring, so a new pipe takes the lowest free slot.
+// Pipe p's ring: PIPE_PAGE bytes it takes when it is opened, growing up
+// to PIPE_CAP as it fills, and gives back when both ends are closed. Slot p of k.pipebuf, which grows by one as
+// pipes come into use, so a new pipe takes the lowest free slot.
 enum PipeBuf { None, Ring(Bytes) }
 
 const LX_PIPE: u64 = 22;

@@ -45,7 +45,7 @@ fn pipe_put_xfer(k: &mut Kernel, p: u64, n: u64) -> u64
     return EPIPE;
   }
   let mut r = pipe_ring(k.pipes, p);
-  let room = pipe_room(k.pipes, p, r.n);
+  let room = pipe_room_for(&mut k, p, r.n, n);
   if room == 0 {
     return EAGAIN;
   }
