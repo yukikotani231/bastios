@@ -753,7 +753,7 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
 /// Whether pid may open /dev/console with these open flags: its mode,
 /// S_IFCHR (rw--w---- for root), allows what they ask; O_PATH asks nothing.
 fn console_may(procs: &Buf, pid: u64, flags: u64) -> bool
-  requires len(procs) == PTAB_LEN && pid < NPROC
+  requires ptab_ok(procs) && pid < NPROC
 {
   if flags & LO_PATH != 0 {
     return true;

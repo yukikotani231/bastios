@@ -362,7 +362,9 @@ $(COMPAT_BINS): build/compat/%: test/compat/progs/%.c test/compat/progs/compat.h
 build/compat:
 	mkdir -p $@
 
-build/compat/busybox: build/busybox/Makefile test/compat/busybox.config | build/compat
+# The copy waits for build/user/ash.elf: under -j its configure step in
+# build/busybox would otherwise rewrite files while cp reads them.
+build/compat/busybox: build/busybox/Makefile test/compat/busybox.config | build/compat build/user/ash.elf
 	rm -rf build/compat/bb && cp -r build/busybox build/compat/bb
 	$(MAKE) -C build/compat/bb -s clean >/dev/null
 	$(MAKE) -C build/compat/bb -s allnoconfig >/dev/null

@@ -1054,7 +1054,7 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
 /// user and group ids, as Linux's PTRACE_MODE_READ_FSCREDS asks (without
 /// its dumpable flag).
 fn proc_peek(procs: &Buf, pid: u64, p: u64) -> bool
-  requires len(procs) == PTAB_LEN && pid < NPROC && p < NPROC
+  requires ptab_ok(procs) && pid < NPROC && p < NPROC
 {
   return pid == p || cred_root(procs, pid) || same_ids(procs, pid, p);
 }
