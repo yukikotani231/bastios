@@ -1,8 +1,9 @@
 /*
  * Per-processor state, shared by boot.S, ap.S and the C platform code.
  *
- * Each processor owns one naturally aligned block of CORE_BLOCK bytes in
- * bst_cores: its saved user context and bookkeeping at the bottom, then its
+ * Each processor owns one naturally aligned block of CORE_BLOCK bytes (the
+ * bootstrap processor's is bst_core0; an application processor's is taken
+ * out of the memory map when it starts, smp.c): its saved user context and bookkeeping at the bottom, then its
  * kernel stack, then the trap stack that user-mode traps land on (TSS.rsp0
  * is the end of the block). A 4 KiB stack just above the bookkeeping is
  * IST1, for #DB, NMI, #DF and #MC, which can arrive while %rsp is not yet
@@ -11,7 +12,7 @@
  * which one it is. The `syscall` entry, which arrives on the user's stack,
  * finds it through KERNEL_GS_BASE and `swapgs`.
  */
-#define MAX_CPUS     16
+#define MAX_CPUS     256                        /* the GDT has a TSS slot for each */
 #define CORE_BLOCK   0x20000                    /* 128 KiB */
 #define CORE_KSTACK  (CORE_BLOCK - 0x8000)      /* kernel stack top; 32 KiB trap stack above */
 
@@ -21,6 +22,7 @@
 #define CORE_URSP      176                      /* user %rsp at `syscall` */
 #define CORE_IDLE      184                      /* vector that ended bst_cpu_wait */
 #define CORE_TRAP_TOP  192                      /* end of the block, for `syscall` */
+#define CORE_INDEX     200                      /* the processor's number: 0 for the bootstrap one */
 #define CORE_TSS       256                      /* 104-byte task state segment */
 #define CORE_IST_TOP   0x1400                   /* top of the 4 KiB IST1 stack above the TSS */
 

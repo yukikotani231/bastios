@@ -6,3 +6,4 @@ A kernel written in Bastio (github.com/yukikotani231/bastiolang). Open source: w
 - Kernel logic goes in Bastio (`src/`). Assembly and C (`boot/`) are the trusted base: add to them only what Bastio cannot express yet, and say why in the commit.
 - Every new shell command or kernel feature gets a case in `test/shell_test.sh`.
 - Commits: `<area>: <summary>`. The body says honestly what is proved and what is trusted.
+- Pull request descriptions and GitHub comments are for outside readers: say what changed, how it was checked and what is left. Leave out how the work was divided between people or sessions, and the state of the account's CI quota.

@@ -399,6 +399,7 @@ def run_program(env, prog, timeout):
 
 
 def run_applet(env, name, cmd, expected, timeout, bb):
+    cmd = cmd.replace("ALPINEURL", env.hosturl + "/alpine")
     cmd = (cmd.replace("HOSTSURL", env.hostsurl).replace("HOSTURL", env.hosturl)
            .replace("HOSTADDR", env.hostaddr).replace("HOSTPORT", env.hostport)
            .replace("SSHPORT", getattr(env, "sshport", "")))
@@ -515,6 +516,8 @@ def main():
     ap.add_argument("--out", default="build/compat")
     ap.add_argument("--dev-disk", help="the development disk (tcc and make) for dev.txt")
     ap.add_argument("--bastio-disk", help="the Bastio disk (bastioc1, z3, tcc) for bastio.txt")
+    ap.add_argument("--alpine-disk", help="the Alpine disk (root file system, apk repository) for alpine.txt")
+    ap.add_argument("--alpine-repo", help="the same repository's directory, served at ALPINEURL")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--update-baseline", action="store_true")
@@ -527,6 +530,7 @@ def main():
     sshc = load_applets(os.path.join(HERE, "ssh.txt"))
     dev = load_applets(os.path.join(HERE, "dev.txt"))
     bastio = load_applets(os.path.join(HERE, "bastio.txt"))
+    alpine = load_applets(os.path.join(HERE, "alpine.txt"))
     tty = load_tty(os.path.join(HERE, "tty.txt"))
     os.makedirs(args.out, exist_ok=True)
     log = open(os.path.join(args.out, "serial.log"), "wb")
@@ -582,8 +586,8 @@ def main():
 
     # Every lane is a guest booted from a disk of its own, running its
     # groups one after another. tcc and make are on a disk of their own (the
-    # C runtime needs most of a directory), and the Bastio compiler, Z3 and
-    # tcc fill a third. With JOBS above 1 (the default is the number of
+    # C runtime needs most of a directory), the Bastio compiler, Z3 and tcc
+    # fill a third, and Alpine a fourth. With JOBS above 1 (the default is the number of
     # CPUs) the lanes run at the same time, and the first disk's groups are
     # split over two guests, the second on a copy of that disk: the guests
     # share nothing but the host's web server. Each lane's checks run in the
@@ -601,6 +605,16 @@ def main():
         lanes.append((args.dev_disk, [("dev", "building C (tcc, make)", applets_lane(dev, 60))]))
     if args.bastio_disk:
         lanes.append((args.bastio_disk, [("bastio", "the Bastio compiler (bastioc1, z3, tcc)", applets_lane(bastio, 900))]))
+    if args.alpine_disk:
+        # Alpine's root and its packages. The cases change the disk (they
+        # unpack and install), so they get a copy and every run starts from
+        # the same disk.
+        disk = os.path.join(args.out, "alpine-run.img")
+        shutil.copyfile(args.alpine_disk, disk)
+        if args.alpine_repo:
+            os.makedirs(os.path.join(web.dir, "alpine"), exist_ok=True)
+            os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", "x86_64"))
+        lanes.append((disk, [("alpine", "Alpine Linux (apk)", applets_lane(alpine, 300))]))
     lanes = [l for l in lanes if l[1]]
     try:
         with concurrent.futures.ThreadPoolExecutor(len(lanes) if jobs > 1 else 1) as pool:
@@ -612,7 +626,7 @@ def main():
         log.close()
         web.shutdown()
         shutil.rmtree(scratch, ignore_errors=True)
-    results = {k: results[k] for k in order + ["dev", "bastio"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]

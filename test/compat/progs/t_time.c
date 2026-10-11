@@ -23,6 +23,14 @@ int main(void) {
         long ms = (b.tv_sec - a.tv_sec) * 1000 + (b.tv_nsec - a.tv_nsec) / 1000000;
         if (ms >= 95 && ms < 2000) pass(); else fail("slept %ld ms", ms);
     }
+    if (begin("a sleep uses no CPU time")) {
+        struct timespec d = {0, 200000000};
+        clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &a);
+        nanosleep(&d, 0);
+        clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &b);
+        long ms = (b.tv_sec - a.tv_sec) * 1000 + (b.tv_nsec - a.tv_nsec) / 1000000;
+        if (ms < 20) pass(); else fail("200 ms of sleep took %ld ms of CPU time", ms);
+    }
     {
         struct timespec d;
         clock_gettime(CLOCK_MONOTONIC, &a);

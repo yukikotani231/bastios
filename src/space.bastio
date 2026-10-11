@@ -31,7 +31,7 @@ const STACK_FIRST: u64 = 16128;       // WPAGES - STACK_PAGES
 const STACK_MAPPED: u64 = 16;         // stack pages a new window maps
 const STACK_LOW: u64 = 16368;         // WPAGES - STACK_MAPPED
 const IMAGE_MAX: u64 = 0x3F00000;     // STACK_FIRST * 4096
-const KERNEL_ROOT: u64 = 0x10000;     // mmu_root while CR3 holds the kernel's own map
+const KERNEL_ROOT: u64 = 0x8000000;    // mmu_root while CR3 holds the kernel's own map
 
 // A process's address space (its level-4 table), if it has one.
 enum Space { Empty, Mapped(PageTable) }

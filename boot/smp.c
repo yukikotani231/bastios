@@ -34,7 +34,9 @@ extern uint64_t bst_gdt[];
 extern const char bst_ap_trampoline[], bst_ap_trampoline_end[];
 
 /* One block per processor (core.h); block 0 is the bootstrap processor's. */
-uint8_t bst_cores[MAX_CPUS][CORE_BLOCK] __attribute__((aligned(CORE_BLOCK)));
+uint8_t bst_core0[CORE_BLOCK] __attribute__((aligned(CORE_BLOCK)));
+static uint8_t *cores[MAX_CPUS] = { bst_core0 };
+extern uint64_t bst_boot_take(uint64_t size, uint64_t align);    /* multiboot.c */
 
 volatile uint64_t bst_ap_stack;     /* read by ap.S; one AP starts at a time */
 static uint64_t cpus_online = 1;    /* the BSP; updated atomically */
@@ -146,7 +148,7 @@ static uint64_t scan_rsdp(uint64_t from, uint64_t to) {
 extern uint8_t bst_boot_rsdp[36];   /* multiboot.c: the copy Multiboot 2 passed */
 extern uint32_t bst_boot_rsdp_len;
 
-/* The RSDP: the copy a Multiboot 2 loader passed (GRUB, from the ISO; under
+/* The RSDP: the copy a Multiboot 2 loader passed (Limine, from the ISO; under
  * UEFI the only way to it), else where BIOS firmware puts it, on a 16-byte
  * boundary in the first KiB of the EBDA or in 0xE0000-0xFFFFF (ACPI 6.5,
  * 5.2.5.1). */
@@ -296,7 +298,7 @@ void bst_lapic_ack(uint64_t vector) {
  * at the end of its block. No I/O permission map. Also points
  * KERNEL_GS_BASE at the block for the `syscall` entry. */
 static void core_init(uint64_t i) {
-    uint8_t *core = bst_cores[i];
+    uint8_t *core = cores[i];
     uint64_t top = (uint64_t)(core + CORE_BLOCK);
     *(uint64_t *)(core + CORE_TRAP_TOP) = top;
     uint8_t *tss = core + CORE_TSS;
@@ -341,7 +343,7 @@ void bst_platform_smp_join(void) {
 void bst_ap_main(void) {
     __asm__ volatile ("lidt %0" : : "m"(ap_idtr));
     for (int m = 0; m < 3; m++) wrmsr(0xC0000081 + m + (m == 2), syscall_msrs[m]);
-    core_init((uint64_t)(this_core() - bst_cores[0]) / CORE_BLOCK);
+    core_init(*(uint64_t *)(this_core() + CORE_INDEX));
     apic_mode();
     lw(0xF0, 0x1FF);                        /* enable, spurious vector 0xFF */
     lw(0x3E0, 0x3);                         /* timer: divide by 16 */
@@ -509,11 +511,13 @@ static void send_ipi(uint32_t apic_id, uint32_t low) {
     while (lr(0x300) & (1u << 12)) {}
 }
 
-/* Start one AP and wait up to a second for it to check in. Returns whether
- * it did. */
+/* Start one AP, as processor n (its block is cores[n]), and wait up to a
+ * second for it to check in. Returns whether it did. */
 static int start_ap(uint32_t apic_id, uint64_t n) {
     uint64_t before = bst_platform_cpus();
-    bst_ap_stack = (uint64_t)(bst_cores[n] + CORE_KSTACK);
+    for (uint64_t b = 0; b < CORE_BLOCK; b += 8) *(uint64_t *)(cores[n] + b) = 0;
+    *(uint64_t *)(cores[n] + CORE_INDEX) = n;
+    bst_ap_stack = (uint64_t)(cores[n] + CORE_KSTACK);
     send_ipi(apic_id, 0x4500);                          /* INIT */
     udelay(10000);
     for (int i = 0; i < 2 && bst_platform_cpus() == before; i++) {
@@ -609,10 +613,15 @@ void bst_smp_init(void) {
         int dup = 0;                                    /* listed twice, or the BSP */
         for (uint64_t k = 0; k <= started; k++) dup |= seen[k] == (uint32_t)id;
         if (dup) continue;
-        if (started + 1 >= MAX_CPUS) {
+        /* Its block comes out of the memory map the kernel gets
+         * (multiboot.c), so the page pool never sees it. No memory left
+         * for one is the kernel's limit too. */
+        uint8_t *core = started + 1 < MAX_CPUS ? (uint8_t *)bst_boot_take(CORE_BLOCK, CORE_BLOCK) : 0;
+        if (!core) {
             smp_stop = SMP_TOO_MANY;
             return;
         }
+        cores[started + 1] = core;
         /* An AP that misses its deadline may still wake up later on
          * bst_ap_stack, so start no other AP after it. */
         seen[started + 1] = (uint32_t)id;

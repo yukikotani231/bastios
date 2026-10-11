@@ -36,6 +36,7 @@ const LX_GET_ROBUST_LIST: u64 = 274;
 const LX_RSEQ: u64 = 334;
 const LX_CLONE3: u64 = 435;
 const LX_UNSHARE: u64 = 272;
+const LX_IO_SETUP: u64 = 206;          // Linux AIO: nginx tries it and does without
 const LX_OPENAT: u64 = 257;
 const LX_STAT: u64 = 4;
 const LX_LSTAT: u64 = 6;
@@ -110,6 +111,8 @@ const CLONE_THREAD: u64 = 0x10000;
 const LX_FORK: u64 = 57;
 const LX_VFORK: u64 = 58;
 const LX_EXECVE: u64 = 59;
+const LX_GETDENTS: u64 = 78;
+const LX_EXECVEAT: u64 = 322;
 const LX_WAIT4: u64 = 61;
 const LX_GETTID: u64 = 186;
 const LX_FUTEX: u64 = 202;
@@ -214,7 +217,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k) && con_ok(con)
 {
-  let n = pget(k.procs, pid, F_REGS + R_RAX);
+  let n = lx_alias(k, pid, pget(k.procs, pid, F_REGS + R_RAX));   // src/lxextra.bastio
   let sp = pget(k.procs, pid, F_REGS + R_RSP);
   if sp >= USER_BASE + 128 {
     stack_reach(&mut k.mem, &mut k.spaces, pid, sp - 128);   // the red zone too
@@ -224,6 +227,10 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   let a = pget(k.procs, pid, F_REGS + R_RDI);
   let b = pget(k.procs, pid, F_REGS + R_RSI);
   let c = pget(k.procs, pid, F_REGS + R_RDX);
+  if opath_denied(k, pid, n) {
+    ret(&mut k.procs, pid, EBADF);          // an O_PATH handle (src/lxextra.bastio)
+    return KEEP;
+  }
   if n == LX_EXIT && thread_only(k.procs, pid) {
     lx_thread_exit(&mut k, mmu, pid);
     return SWITCH;
@@ -306,6 +313,8 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       r = ev_read(&mut k, pid, d.kind, d.x, va, cnt);
     } else if d.kind == K_SIGFD {
       r = sfd_read(&mut k, pid, d.x, va, cnt);
+    } else if d.kind == K_INOTIFY && d.x < INO_N {
+      r = ino_read(&mut k, pid, d.x, va, cnt);   // src/lxinotify.bastio
     } else if d.kind == K_DEV && d.x >= PROC_DEV {
       r = proc_read(&mut k, pid, a, d.x, va, cnt);
     } else if d.kind == K_DEV && is_loop(d.x) {
@@ -336,39 +345,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_WRITE || n == LX_WRITEV {
-    let early = rw_early(&mut k, pid, n, a, b, c);
-    if early != NO_RESULT {
-      ret(&mut k.procs, pid, early);
-      return KEEP;
-    }
-    let mut w = 0;
-    if n == LX_WRITE {
-      w = lx_write_fd(&mut con, &mut k, pid, a, b, c);
-    } else {
-      w = do_writev(&mut con, &mut k, pid, a, b, c);
-    }
-    if w == EAGAIN && pipe_nonblock(k, pid, a) {
-      ret(&mut k.procs, pid, EAGAIN);        // a full nonblocking pipe: say so
-      return KEEP;
-    }
-    if w == SK_WAIT && is_tcp(k, pid, a) {
-      return sock_retry(&mut k, pid, n);     // a full connection: sleep until an ACK comes in
-    }
-    if w == EAGAIN || w == SK_WAIT {
-      return lx_retry(&mut k, pid, n);       // a full pipe or connection: wait for room
-    }
-    if w == CON_FULL {
-      return con_block(&mut k, pid, n);      // a full console: wait for the pump
-    }
-    if w == DISK_RETRY {
-      return disk_retry(&mut k, pid, n);     // blocks not cached yet: wait for the disk
-    }
-    ret(&mut k.procs, pid, w);
-    if w == EPIPE {
-      post_sig(&mut k, pid, SIGPIPE);        // no reader left
-      return SWITCH;
-    }
-    return KEEP;
+    return lx_write_call(&mut con, &mut k, pid, n, a, b, c);
   }
   if n == LX_PIPE || n == LX_PIPE2 {
     let mut flags = 0;
@@ -413,6 +390,15 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if is_ptimer_call(n) {
     return lx_ptimer_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
+  }
+  if is_inotify_call(n) {
+    return lx_inotify_call(&mut k, pid, n, a, b, c);   // src/lxinotify.bastio
+  }
+  if is_pidfd_call(n) {
+    return lx_pidfd_call(&mut k, pid, n, a, b, c);   // src/lxpidfd.bastio
+  }
+  if is_extra_call(n) {
+    return lx_extra_call(&mut con, &mut k, pid, n, a, b, c);   // src/lxextra.bastio
   }
   if is_event_call(n) {
     return lx_event_call(&mut k, pid, n, was, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
@@ -501,8 +487,8 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, lx_fstat(&mut k, pid, a, b));
     return KEEP;
   }
-  if n == LX_GETDENTS64 {
-    ret(&mut k.procs, pid, lx_getdents(&mut k, pid, a, b, c));
+  if n == LX_GETDENTS64 || n == LX_GETDENTS {
+    ret(&mut k.procs, pid, lx_getdents(&mut k, pid, a, b, c, n == LX_GETDENTS));
     return KEEP;
   }
   if n == LX_FACCESSAT || n == LX_FACCESSAT2 {
@@ -541,16 +527,29 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, lx_fork(&mut k, mmu, pid));
     return KEEP;
   }
-  if n == LX_EXECVE {
+  if n == LX_EXECVE || n == LX_EXECVEAT {
     let te = thread_exec(&mut k, mmu, pid);
     if te == EXEC_NO {
       ret(&mut k.procs, pid, EINVAL);       // from a thread other than the leader
       return KEEP;
     }
     if te == EXEC_WAIT {
-      return lx_retry(&mut k, pid, LX_EXECVE);   // its other threads are still ending
+      return lx_retry(&mut k, pid, n);      // its other threads are still ending
     }
-    ret(&mut k.procs, pid, lx_execve(&mut k, mmu, pid, a, b, c));
+    let mut at = AT_FDCWD;
+    let mut path = a;
+    let mut argv = b;
+    let mut envp = c;
+    let mut flags = 0;
+    if n == LX_EXECVEAT {
+      at = a;
+      path = b;
+      argv = c;
+      envp = pget(k.procs, pid, F_REGS + R_R10);
+      flags = pget(k.procs, pid, F_REGS + R_R8);
+    }
+    let r = lx_execve(&mut k, mmu, pid, at, path, argv, envp, flags);
+    ret(&mut k.procs, pid, r);
     return KEEP;
   }
   if n == LX_WAITID {
@@ -652,9 +651,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   // glibc asks for these and carries on without them: restartable
   // sequences (sched_getcpu falls back to the system call), and clone3
-  // (pthread_create falls back to clone, as on Linux before 5.3). Refused
-  // quietly, as known gaps.
-  if n == LX_RSEQ || n == LX_CLONE3 {
+  // (pthread_create falls back to clone, as on Linux before 5.3); nginx
+  // goes on without Linux AIO (io_setup). Refused quietly, as known gaps.
+  if n == LX_RSEQ || n == LX_CLONE3 || n == LX_IO_SETUP {
     ret(&mut k.procs, pid, ENOSYS);
     return KEEP;
   }
@@ -667,6 +666,47 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   return KEEP;
 }
 
+/// write and writev, from linux_syscall: the call, then what its result
+/// means for the caller (an answer, or a wait for room).
+fn lx_write_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  let early = rw_early(&mut k, pid, n, a, b, c);
+  if early != NO_RESULT {
+    ret(&mut k.procs, pid, early);
+    return KEEP;
+  }
+  let mut w = 0;
+  if n == LX_WRITE {
+    w = lx_write_fd(&mut con, &mut k, pid, a, b, c);
+  } else {
+    w = do_writev(&mut con, &mut k, pid, a, b, c);
+  }
+  if (w == EAGAIN || w == SK_WAIT) && pipe_nonblock(k, pid, a) {
+    ret(&mut k.procs, pid, EAGAIN);        // a full nonblocking pipe or connection: say so
+    return KEEP;
+  }
+  if w == SK_WAIT && is_tcp(k, pid, a) {
+    return sock_retry(&mut k, pid, n);     // a full connection: sleep until an ACK comes in
+  }
+  if w == EAGAIN || w == SK_WAIT {
+    return lx_retry(&mut k, pid, n);       // a full pipe or connection: wait for room
+  }
+  if w == CON_FULL {
+    return con_block(&mut k, pid, n);      // a full console: wait for the pump
+  }
+  if w == DISK_RETRY {
+    return disk_retry(&mut k, pid, n);     // blocks not cached yet: wait for the disk
+  }
+  ret(&mut k.procs, pid, w);
+  if w == EPIPE {
+    post_sig(&mut k, pid, SIGPIPE);        // no reader left
+    return SWITCH;
+  }
+  return KEEP;
+}
+
 const TCGETS: u64 = 0x5401;
 const TCSETS: u64 = 0x5402;
 const TCSETSF: u64 = 0x5404;              // TCSETSW (0x5403) lies between
@@ -675,6 +715,7 @@ const FIONREAD: u64 = 0x541B;
 const FIONBIO: u64 = 0x5421;
 const FIONCLEX: u64 = 0x5450;
 const FIOCLEX: u64 = 0x5451;
+const FIOASYNC: u64 = 0x5452;
 const SIOCATMARK: u64 = 0x8905;
 const SIOCGIFCONF: u64 = 0x8912;
 const SIOCGIFFLAGS: u64 = 0x8913;
@@ -752,35 +793,42 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   if d.kind == K_BAD {
     return EBADF;
   }
+  // On any descriptor, as on Linux: FIONBIO sets or clears O_NONBLOCK
+  // (nginx and CPython use it rather than fcntl), FIOASYNC O_ASYNC, and
+  // FIOCLEX and FIONCLEX close-on-exec. They go through fcntl, which
+  // knows where each kind of description keeps the flag.
+  if req == FIONBIO || req == FIOASYNC {
+    let v = pty_int_in(&mut k, pid, arg);
+    if v == NO_RESULT {
+      return EFAULT;
+    }
+    let mut bit = LO_NONBLOCK;
+    if req == FIOASYNC {
+      bit = 0x2000;                           // O_ASYNC
+    }
+    let fl = lx_fcntl(&mut k, pid, fd, F_GETFL, 0);
+    if fl >= 0x100000000 {
+      return fl;                              // an errno
+    }
+    let mut nf = fl - fl / bit % 2 * bit;
+    if v != 0 {
+      nf = nf + bit;
+    }
+    let r = lx_fcntl(&mut k, pid, fd, F_SETFL, nf);
+    return r;
+  }
+  if req == FIOCLEX || req == FIONCLEX {
+    let mut on = 0;
+    if req == FIOCLEX {
+      on = 1;
+    }
+    let r = lx_fcntl(&mut k, pid, fd, F_SETFD, on);
+    return r;
+  }
   if req == FIONREAD && (d.kind == K_PIPE_R || d.kind == K_PIPE_W) {
     // The bytes waiting in the pipe, as an int.
     xfer_u64(&mut k.fs.xfer, 0, smaller(pi_get(k.pipes, d.x, 1), PIPE_CAP));
     return lx_put_out(&mut k, pid, arg, 4);
-  }
-  // On any descriptor: FIONBIO is fcntl's O_NONBLOCK (from the int at
-  // arg), FIOCLEX and FIONCLEX its FD_CLOEXEC, as CPython's setblocking and
-  // set_inheritable use them.
-  if req == FIONBIO {
-    if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, 4) != 4 {
-      return EFAULT;
-    }
-    let on = bget(k.fs.xfer, 0) != 0 || bget(k.fs.xfer, 1) != 0 || bget(k.fs.xfer, 2) != 0 || bget(k.fs.xfer, 3) != 0;
-    let fl = lx_fcntl(&mut k, pid, fd, F_GETFL, 0);
-    if fl > 0xFFFFFFFF {
-      return fl;
-    }
-    let mut nf = fl / (LO_NONBLOCK * 2) * (LO_NONBLOCK * 2) + fl % LO_NONBLOCK;
-    if on {
-      nf = nf + LO_NONBLOCK;
-    }
-    return lx_fcntl(&mut k, pid, fd, F_SETFL, nf);
-  }
-  if req == FIOCLEX || req == FIONCLEX {
-    let mut c = 0;
-    if req == FIOCLEX {
-      c = 1;
-    }
-    return lx_fcntl(&mut k, pid, fd, F_SETFD, c);
   }
   if d.kind == K_DEV && (is_loop(d.x) || d.x == DEV_LOOPCTL) {
     return loop_ioctl(&mut k, pid, d.x, req % 0x100000000, arg);   // the request is an unsigned int
@@ -1619,6 +1667,16 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
     k.perr = ENOENT;                        // "" names nothing, as on Linux
     return NO_RESULT;
   }
+  return lx_path_xfer(&mut k, pid, e, h, follow);
+}
+
+/// lx_path_from for a path already in the transfer buffer, bytes 0..e: an
+/// interpreter named by a script's "#!" line comes this way.
+fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
+  requires kok(k) && pid < NPROC && 0 < e && e < XFER
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
   k.perr = ENAMETOOLONG;
   let trail = bget(k.fs.xfer, e - 1) == 47;  // "link/" names what the link points to, as on Linux
   // Build the name in `out`, starting from the working directory unless
@@ -1657,14 +1715,14 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
   let mut i = 0;
   let mut ok = true;
   while ok && i < e
-    invariant i <= e && e < got && got <= XFER && o <= PATH_OUT && blen(out) == PATH_OUT && kok(k)
+    invariant i <= e && e < XFER && o <= PATH_OUT && blen(out) == PATH_OUT && kok(k)
   {
     if bget(k.fs.xfer, i) == 47 {
       i = i + 1;
     } else {
       let mut j = i;
       while j < e && bget(k.fs.xfer, j) != 47
-        invariant i <= j && j <= e && e < got && got <= XFER && kok(k)
+        invariant i <= j && j <= e && e < XFER && kok(k)
       {
         j = j + 1;
       }
@@ -1690,7 +1748,7 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
         }
         let mut c = 0;
         while c < w
-          invariant c <= w && i + w <= e && e < got && got <= XFER && o + w <= PATH_OUT && blen(out) == PATH_OUT && kok(k)
+          invariant c <= w && i + w <= e && e < XFER && o + w <= PATH_OUT && blen(out) == PATH_OUT && kok(k)
         {
           bset(&mut out, o + c, bget(k.fs.xfer, i + c));
           c = c + 1;
@@ -1745,6 +1803,9 @@ fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
   }
   if d.kind == K_DEV {
     return 0;                               // other devices have no position
+  }
+  if d.kind == K_DIR {
+    return dir_seek(&mut k, pid, fd, off, whence);   // src/lxdir.bastio
   }
   if d.kind != K_FILE {
     return ESPIPE;
