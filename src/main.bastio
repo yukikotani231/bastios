@@ -101,10 +101,12 @@ const MAX_IDLE: u64 = 1024;           // more than there are processors
 // processor through a lock. The invariant is what each processor may assume
 // when it takes the lock, and must restore before it lets go.
 // `idle` counts the processors that found nothing to run and have not
-// come back for more: those a V_WAKE may be worth sending to.
+// come back for more: those a V_WAKE may be worth sending to. `ticked`
+// says the bootstrap processor's timer ticked since the last `next_job`
+// (an idle application processor sleeps through its own; see `next_job`).
 // `acpi` holds the clock's PM timer (without an HPET) and the power
 // button; `reboot` says the stop is a restart.
-struct Sys { k: Kernel, con: Con, pic: Pic, apic: Lapic, clock: Hpet, acpi: Acpi, stop: bool, reboot: bool, idle: u64 }
+struct Sys { k: Kernel, con: Con, pic: Pic, apic: Lapic, clock: Hpet, acpi: Acpi, stop: bool, reboot: bool, idle: u64, ticked: bool }
   invariant kok(k) && con_ok(con) && pic_ok(pic) && lapic_ok(apic) && hpet_ok(clock) && acpi_ok(acpi);
 
 spec fn sys_ok(s: &Sys) -> bool {
@@ -219,10 +221,14 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
   let p = lx_pick(&mut s.k, from);
   // Only the bootstrap processor takes V_DISK. A process the disk woke
   // that this processor is not about to run would wait for an idle
-  // processor's next tick without a V_WAKE.
-  if woke && s.idle > 0 && any_ready(s.k.procs) {
+  // processor's next tick without a V_WAKE. An idle application processor
+  // stops its own timer (boot/smp.c, bst_cpu_wait), so a process left
+  // ready after the bootstrap processor's tick wakes the idle ones, which
+  // is when their own ticks, 10 ms apart, would have found it.
+  if (woke || s.ticked) && s.idle > 0 && any_ready(s.k.procs) {
     lapic_wake(&mut s.apic);
   }
+  s.ticked = false;
   if p == 0 {
     if live_count(s.k.procs) == 0 {
       s.stop = true;
@@ -278,6 +284,7 @@ fn idled(s: &mut Sys, cpu: &Cpu, v: u64)
   ack(&mut s.pic, &mut s.apic, v);
   if v == V_TIMER {
     s.k.ticks = tick(s.k.ticks);
+    s.ticked = true;
     s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
     lx_alarms(&mut s.k);
     power_button(&mut s);
@@ -305,6 +312,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   ack(&mut s.pic, &mut s.apic, v);
   if v == V_TIMER {
     s.k.ticks = tick(s.k.ticks);
+    s.ticked = true;
   }
   if state(s.k.procs, p) == EXITING {
     thread_free(&mut s.k, mmu, p, tgid(s.k.procs, p));   // its leader is in execve
@@ -1043,7 +1051,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // Every processor runs the scheduler until the kernel stops; then they
   // are all back in their park loops and the state is this one's again.
   con_flush(&mut term, &mut con);
-  let sl = lock_new(Sys { k: k, con: con, pic: pic, apic: apic, clock: clock, acpi: acpi, stop: false, reboot: false, idle: 0 });
+  let sl = lock_new(Sys { k: k, con: con, pic: pic, apic: apic, clock: clock, acpi: acpi, stop: false, reboot: false, idle: 0, ticked: false });
   let tl = lock_new(term);
   let pumping = atomic_new(false);
   let pend = atomic_new(0);

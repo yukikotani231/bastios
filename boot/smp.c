@@ -42,6 +42,7 @@ static struct __attribute__((packed)) { uint16_t limit; uint64_t base; } ap_idtr
 static volatile uint32_t *lapic;    /* its registers in xAPIC mode */
 static int x2apic;                  /* every local APIC runs in x2APIC mode: registers are MSRs */
 static uint32_t lapic_ticks_10ms;   /* local APIC timer count for 10 ms, divide by 16 */
+static int idle_untimed;            /* an idle AP stops its periodic timer: the kernel wakes it (V_WAKE) */
 static uint32_t bsp_lapic_tick;     /* no PIT: the BSP's 10 ms tick comes from its local APIC timer */
 #define BSP_TICK_VECTOR 32          /* the vector the kernel takes the PIT's tick on (V_TIMER) */
 static uint32_t timer_from;         /* what it was counted against: 1 HPET, 2 PM timer, 3 PIT, 4 none (a guess), 5 RTC */
@@ -290,6 +291,32 @@ static int map_lapic(uint64_t base) {
  * acknowledged at the local APIC (the 8259's are acknowledged by the kernel). */
 void bst_lapic_ack(uint64_t vector) {
     if ((vector == LAPIC_TIMER_VECTOR || (vector == BSP_TICK_VECTOR && bsp_lapic_tick)) && (lapic || x2apic)) lw(0xB0, 0);
+}
+
+/* The cpu_idle builtin: sleep until an interrupt, return its vector. An
+ * application processor's 10 ms timer only makes it look for work and
+ * preempt what it runs; an idle one has nothing to preempt, and the kernel
+ * sends V_WAKE when there is work it should look at (on the bootstrap
+ * processor's tick, as its own tick would have found it, and when a disk
+ * completion wakes a process). So while idle its timer is one-shot, a
+ * second long, as a backstop: under QEMU's TCG this halves the host CPU an
+ * idle 4-processor guest takes, and on hardware the processor stays halted
+ * (deeper C-states) instead of waking 100 times a second. Only where the
+ * kernel can send V_WAKE: the local APICs in xAPIC mode, and an xAPIC
+ * version the kernel accepts (lapic_new). */
+extern uint64_t bst_cpu_halt(void);                        /* boot.S */
+uint64_t bst_cpu_wait(void) {
+    int untimed = idle_untimed && this_core() != bst_cores[0];
+    if (untimed) {
+        lw(0x320, LAPIC_TIMER_VECTOR);                     /* one-shot */
+        lw(0x380, lapic_ticks_10ms * 100);
+    }
+    uint64_t v = bst_cpu_halt();
+    if (untimed) {
+        lw(0x320, 0x20000 | LAPIC_TIMER_VECTOR);           /* periodic again */
+        lw(0x380, lapic_ticks_10ms);
+    }
+    return v;
 }
 
 /* Processor i's task state segment: user-mode traps land on the trap stack
@@ -571,6 +598,8 @@ void bst_smp_init(void) {
     smp_stop = madt ? SMP_LAPIC_AWAY : SMP_NO_MADT;
     if (!x2apic && !map_lapic(apic_msr & 0xFFFFF000ull)) return;
     calibrate_lapic_timer();
+    uint32_t ver = lr(0x30) & 0xFF;
+    idle_untimed = !x2apic && ver >= 0x10 && ver <= 0x15 && lapic_ticks_10ms > 0 && lapic_ticks_10ms <= 0xFFFFFFFFu / 100;
     /* The kernel ticks on the PIT (IRQ 0, vector 32) on this processor.
      * Many recent chipsets gate the PIT's clock off by default (Intel's
      * "8254 clock gating"), and then no tick ever comes and the kernel
@@ -644,7 +673,7 @@ uint64_t bst_platform_info(uint64_t what, uint64_t i) {
         return i == 0 ? madt_cpus : i == 1 ? madt_x2 : i == 2 ? smp_stop
              : i == 3 ? apic_now : i == 4 ? apic_fw : 0;
     case 7:                                                /* the local APIC timer's calibration */
-        return i == 0 ? timer_from : i == 1 ? lapic_ticks_10ms : i == 2 ? bsp_lapic_tick : i == 3 ? tsc_hz : 0;
+        return i == 0 ? timer_from : i == 1 ? lapic_ticks_10ms : i == 2 ? bsp_lapic_tick : i == 3 ? tsc_hz : i == 4 ? (uint64_t)idle_untimed : 0;
     case 8: {                                              /* ACPI: where the RSDP came from, its revision, the tables */
         uint64_t rsdp = find_rsdp();
         if (i == 0) return rsdp_from;

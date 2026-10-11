@@ -16,6 +16,12 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Processors
 
+- An idle application processor stops its 10 ms timer (a one-second
+  one-shot backstop instead); the kernel wakes it with `V_WAKE` on the
+  bootstrap processor's tick while a process is left ready, which is when
+  its own tick would have found it. An idle 4-processor guest takes half the
+  host CPU under QEMU (7.3% to 3.6% of a core). The hardware report says
+  whether it applies (`idle:`); with x2APIC every timer keeps ticking.
 - A vDSO (`user/vdso.c`): `clock_gettime` for the monotonic and real-time
   clocks runs in user mode, with no system call and no kernel lock. The
   kernel now keeps time with the time-stamp counter, its rate measured

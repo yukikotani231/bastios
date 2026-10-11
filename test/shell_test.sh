@@ -1525,6 +1525,7 @@ for want, what in (
         ("acpi: tables FACP@0x7f", "the tables are listed where they are"),
         ("timer: the local APIC timer, counted against the HPET", "the timer's calibration"),
         ("tick: the PIT\n", "the PIT ticks"),
+        ("idle: hlt; the other processors' timers stop while they idle", "an idle processor stops its timer"),
         ("keyboard: PS/2 (no USB keyboard)", "the PS/2 keyboard"),
         ("MiB usable in a map of", "the memory map"),
         ("pci 00:1f.2 8086:2922 class 010601 AHCI disk", "the PCI devices, with their drivers"),
@@ -1623,7 +1624,8 @@ else:
             (["-device", "qemu64-x86_64-cpu,socket-id=1,core-id=0,thread-id=0"], "x2APIC id 256", (
                 ("pages of memory, 3 processors", "the processor with APIC id 256 starts too"),
                 ("the MADT lists 2 (and 1 x2APIC entries), 3 running", "the MADT's x2APIC entry is counted"),
-                ("local APIC: x2APIC, for ids of 255 and up", "the local APICs stay in x2APIC mode")))):
+                ("local APIC: x2APIC, for ids of 255 and up", "the local APICs stay in x2APIC mode"),
+                ("idle: hlt; every processor's timer keeps ticking", "without wake-up interrupts the timers keep ticking")))):
         ok, code = report_boot(many + extra, name, 3, qemu9)
         text = out.decode(errors="replace").replace("\r", "")
         for want, what in checks:
