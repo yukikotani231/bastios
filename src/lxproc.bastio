@@ -20,6 +20,10 @@ fn lx_fork(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
+  let lim = nproc_check(k, pid);
+  if lim != 0 {
+    return lim;                             // -EAGAIN: RLIMIT_NPROC
+  }
   let c = free_pid(k.procs);
   if c == 0 {
     return EAGAIN;
@@ -157,6 +161,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   pset(&mut k.procs, c, F_PARENT, pid);
   pset(&mut k.procs, c, F_REGS + R_RAX, 0);
   pset(&mut k.procs, c, F_TGID, 0);         // a fork of a thread is a new process
+  pr_fork(&mut k, pid, c);
   group_fork(&mut k.procs, pid, c);
   pset(&mut k.procs, c, F_CTID, 0);
   pset(&mut k.procs, c, F_FUTEX, 0);
@@ -240,10 +245,14 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
     }
   }
   bfree(line);
-  let alen = lx_args(&mut k, pid, av, &mut args, first, ARGV_MAX);
+  let mut alen = lx_args(&mut k, pid, av, &mut args, first, ARGV_MAX);
   if alen > ARGS_MAX {
     bfree(args);
     return alen;                              // -errno
+  }
+  if alen == 0 {
+    bset(&mut args, 0, 0);                  // no arguments: argv[0] is "", as on Linux
+    alen = 1;
   }
   let total = lx_args(&mut k, pid, envp, &mut args, alen, ENVC_MAX);
   if total > ARGS_MAX || total < alen {
@@ -280,6 +289,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, path: u64, argv: u64, envp: u6
   lx_fd_close_all(&mut k, pid, true);
   sig_reset(&mut k.sigact, pid, true);
   pset(&mut k.procs, pid, F_ALTSIZE, 0);  // and the alternate signal stack
+  pr_exec(&mut k, pid);                   // the name becomes the program's
   ptimer_clear(&mut k, pid);              // execve deletes POSIX timers
   exec_ids(&mut k, pid, from_file, image); // set-user-ID and set-group-ID files
   match take_fpu(&mut k.fpus, pid) {
@@ -652,6 +662,26 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
   {
     if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
       found = true;
+      // WUNTRACED: stopped (status sig << 8 | 0x7f); WCONTINUED: 0xffff.
+      let jr = jc_report(&mut k, c, options & 2 != 0, options & 8 != 0, false);
+      if jr != 0 {
+        if status != 0 {
+          lx_fill(&mut k, 0, 4);
+          if jr < 512 {
+            bset(&mut k.fs.xfer, 0, 0x7f);
+            bset(&mut k.fs.xfer, 1, cast[u8](jr % 256));
+          } else {
+            bset(&mut k.fs.xfer, 0, 0xff);
+            bset(&mut k.fs.xfer, 1, 0xff);
+          }
+          if lx_put_out(&mut k, pid, status, 4) != 0 {
+            ret(&mut k.procs, pid, EFAULT);
+            return KEEP;
+          }
+        }
+        ret(&mut k.procs, pid, c);
+        return KEEP;
+      }
       if state(k.procs, c) == ZOMBIE {
         if status != 0 {
           lx_fill(&mut k, 0, 4);
@@ -666,6 +696,7 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
             return KEEP;
           }
         }
+        tm_reap(&mut k, pid, c);
         pset(&mut k.procs, c, F_STATE, FREE);
         ret(&mut k.procs, pid, c);
         return KEEP;
@@ -696,15 +727,15 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
 /// waitid(idtype, id, info, options): like wait4, with the answer in a
 /// siginfo (SIGCHLD, CLD_EXITED or CLD_KILLED, the pid and the status).
 /// P_ALL waits for any child, P_PID for one, P_PGID for one in a group.
-/// WNOWAIT leaves the child to be waited for again. Only
-/// ended children are reported (WEXITED); WNOHANG with none returns 0 with
-/// the siginfo's pid 0.
+/// WNOWAIT leaves the child to be waited for again. WEXITED reports ended
+/// children, WSTOPPED stopped ones and WCONTINUED continued ones; WNOHANG
+/// with none returns 0 with the siginfo's pid 0.
 fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC
   ensures kok(k)
 {
-  if options & 4 == 0 || idtype > 2 {
-    ret(&mut k.procs, pid, EINVAL);         // WEXITED is the only event there is
+  if options & 14 == 0 || idtype > 2 {
+    ret(&mut k.procs, pid, EINVAL);         // none of WEXITED, WSTOPPED, WCONTINUED
     return KEEP;
   }
   // P_ALL any child, P_PID child id, P_PGID one in group id (0: pid's own).
@@ -724,7 +755,23 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
   {
     if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
       found = true;
-      if state(k.procs, c) == ZOMBIE {
+      let jr = jc_report(&mut k, c, options & 2 != 0, options & 8 != 0, options & 0x1000000 != 0);
+      if jr != 0 {
+        if info != 0 {
+          lx_fill(&mut k, 0, 128);
+          bset(&mut k.fs.xfer, 0, 17);              // si_signo: SIGCHLD
+          bset(&mut k.fs.xfer, 8, cast[u8](4 + jr / 256));   // CLD_STOPPED (5), CLD_CONTINUED (6)
+          bset(&mut k.fs.xfer, 16, cast[u8](c));    // si_pid
+          bset(&mut k.fs.xfer, 24, cast[u8](jr % 256));      // si_status: the signal
+          if lx_put_out(&mut k, pid, info, 128) != 0 {
+            ret(&mut k.procs, pid, EFAULT);
+            return KEEP;
+          }
+        }
+        ret(&mut k.procs, pid, 0);
+        return KEEP;
+      }
+      if state(k.procs, c) == ZOMBIE && options & 4 != 0 {
         if info != 0 {
           lx_fill(&mut k, 0, 128);
           let code = pget(k.procs, c, F_CODE);
@@ -743,6 +790,7 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
           }
         }
         if options & 0x1000000 == 0 {
+          tm_reap(&mut k, pid, c);
           pset(&mut k.procs, c, F_STATE, FREE);
         }
         ret(&mut k.procs, pid, 0);
@@ -773,8 +821,8 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
   return r;
 }
 
-/// times(buf): the caller's run time in clock ticks as user time (system
-/// time, and the children's, are 0); returns the ticks since boot.
+/// times(buf): the caller's user and system time, and its waited-for
+/// children's, in clock ticks; returns the ticks since boot.
 fn lx_times(k: &mut Kernel, pid: u64, buf: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -782,6 +830,9 @@ fn lx_times(k: &mut Kernel, pid: u64, buf: u64) -> u64
   if buf != 0 {
     lx_fill(&mut k, 0, 32);
     xfer_u64(&mut k.fs.xfer, 0, pget(k.procs, pid, F_TICKS));
+    xfer_u64(&mut k.fs.xfer, 8, tm_ticks(k, pid, 0));
+    xfer_u64(&mut k.fs.xfer, 16, tm_ticks(k, pid, 1));
+    xfer_u64(&mut k.fs.xfer, 24, tm_ticks(k, pid, 2));
     if lx_put_out(&mut k, pid, buf, 32) != 0 {
       return EFAULT;
     }
@@ -851,6 +902,9 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
 {
   let none = Meta { ok: false, mode: 0, size: 0, ino: 0, mtime: 0, own: 0 };
   let dev = dev_at(k.fs.xfer, n);
+  if dev >= DEV_PTS && dev < DEV_PTS + PTY_N && !pty_live(k, dev - DEV_PTS) {
+    return none;                            // /dev/pts/N exists while pair N does
+  }
   if dev != DEV_NONE {
     return dev_meta(dev);
   }

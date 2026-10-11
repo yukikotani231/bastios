@@ -2,8 +2,11 @@
 //
 // An eventfd is an open file description of kind OF_EVENT whose word 2 is
 // the counter (src/lxfd.bastio). A timerfd's description names one of
-// TFD_N timers in k.evt, at t * TFD_STRIDE: in use, the clock it was made
-// for, the deadline on the HPET clock (k.ns; 0: disarmed) and the interval
+// TFD_N timers in k.evt, at t * TFD_STRIDE: in use (1, plus
+// TFD_MAYCANCEL for an absolute CLOCK_REALTIME timer set with
+// TFD_TIMER_CANCEL_ON_SET, plus TFD_CANCELED once the wall clock has been
+// set since: its next read is -ECANCELED), the clock it was made for,
+// the deadline on the HPET clock (k.ns; 0: disarmed) and the interval
 // (0: it fires once). Expirations are counted when they are looked at, so
 // no timer tick has to visit them.
 //
@@ -63,6 +66,8 @@ const S_IFIFO_TYPE: u64 = 0x1000;
 const EFD_SEMAPHORE: u64 = 1;
 const EV_MAX: u64 = 18446744073709551614;    // 2^64 - 2: the most an eventfd holds
 const TFD_TIMER_ABSTIME: u64 = 1;
+const TFD_TIMER_CANCEL_ON_SET: u64 = 2;
+const ECANCELED: u64 = 18446744073709551491;    // 2^64 - 125
 const CLOCK_MONOTONIC: u64 = 1;
 const EPOLL_CTL_ADD: u64 = 1;
 const EPOLL_CTL_DEL: u64 = 2;
@@ -87,7 +92,7 @@ fn ev_install(k: &mut Kernel, pid: u64, kind: u64, x: u64, w3: u64, cloexec: boo
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let fd = fd_free(k.lxfd, pid, 0);
+  let fd = fd_free(k, pid, 0);
   if fd >= LXNFD {
     return EMFILE;
   }
@@ -316,6 +321,11 @@ fn ev_read(k: &mut Kernel, pid: u64, kind: u64, x: u64, va: u64, n: u64) -> u64
   if x >= TFD_N {
     return EBADF;
   }
+  let w0 = get(k.evt, x * TFD_STRIDE);
+  if w0 / TFD_CANCELED % 2 == 1 {
+    k.evt = set(k.evt, x * TFD_STRIDE, w0 % TFD_CANCELED);
+    return ECANCELED;
+  }
   let due = tfd_due(k, x);
   if due == 0 {
     return EAGAIN;
@@ -406,8 +416,8 @@ fn lx_timerfd_settime(k: &mut Kernel, pid: u64, fd: u64, flags: u64, nv: u64, ov
   if t >= TFD_N {
     return t;
   }
-  if flags & !TFD_TIMER_ABSTIME > 1 {
-    return EINVAL;                          // TFD_TIMER_CANCEL_ON_SET (2) is accepted and ignored
+  if flags & !(TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET) != 0 {
+    return EINVAL;
   }
   if nv > VA_LAST {
     return EFAULT;
@@ -439,7 +449,30 @@ fn lx_timerfd_settime(k: &mut Kernel, pid: u64, fd: u64, flags: u64, nv: u64, ov
   }
   k.evt = set(k.evt, t * TFD_STRIDE + 2, dl);
   k.evt = set(k.evt, t * TFD_STRIDE + 3, iv.ns);
+  let mut w0 = 1;
+  if flags == (TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET) && get(k.evt, t * TFD_STRIDE + 1) == CLOCK_REALTIME {
+    w0 = 1 + TFD_MAYCANCEL;
+  }
+  k.evt = set(k.evt, t * TFD_STRIDE, w0);
   return 0;
+}
+
+/// The wall clock was set: every timer that asked to be told so
+/// (TFD_TIMER_CANCEL_ON_SET) is cancelled.
+fn tfd_clock_set(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut t = 0;
+  while t < TFD_N
+    invariant t <= TFD_N && kok(k)
+  {
+    let w0 = get(k.evt, t * TFD_STRIDE);
+    if w0 % TFD_CANCELED == 1 + TFD_MAYCANCEL {
+      k.evt = set(k.evt, t * TFD_STRIDE, 1 + TFD_MAYCANCEL + TFD_CANCELED);
+    }
+    t = t + 1;
+  }
 }
 
 // ---------------------------------------------------------------- epoll
@@ -519,6 +552,12 @@ fn lx_epoll_ctl(k: &mut Kernel, pid: u64, epfd: u64, op: u64, fd: u64, ev: u64) 
   if target.kind == K_FILE || target.kind == K_DIR {
     return EPERM;                           // a file is always ready: Linux will not watch one
   }
+  if op == EPOLL_CTL_ADD && target.kind == K_EPOLL && target.x < EP_N && e < EP_N {
+    let bad = ep_nest_check(k, pid, e, target.x);
+    if bad != 0 {
+      return bad;
+    }
+  }
   let h = fd_ofd(k, pid, fd);
   let mut j = ep_find(k, e, fd + 1);
   let live = j < EP_FDS && get(k.evt, ep_at(e, j, 1)) == h;
@@ -572,6 +611,190 @@ fn ep_entry_bits(k: &Kernel, pid: u64, e: u64, j: u64) -> u64
   return leaf_bits(k, pid, w - 1) & (events | POLLERR | POLLHUP) & 0xFFFF;
 }
 
+// Epoll instances can watch each other. An entry for one is ready when
+// the instance it names is; ep_ready works that out for every instance
+// at once, without recursion: first from the entries that are not epoll
+// instances, then EP_DEPTH rounds of passing readiness one level up.
+// epoll_ctl keeps the nesting at most EP_DEPTH instances deep and free
+// of loops, as Linux does.
+
+const EP_DEPTH: u64 = 5;                      // instances in the longest chain (Linux's EP_MAX_NESTS + 1)
+
+/// The epoll instance entry j of instance e watches, or EP_N if it
+/// watches something else (or nothing).
+fn ep_target(k: &Kernel, pid: u64, e: u64, j: u64) -> u64
+  requires kok(k) && pid < NPROC && e < EP_N && j < EP_FDS
+  ensures result <= EP_N
+{
+  let w = get(k.evt, ep_at(e, j, 0));
+  if w == 0 || w > LXNFD || fd_ofd(k, pid, w - 1) != get(k.evt, ep_at(e, j, 1)) {
+    return EP_N;
+  }
+  let f = fd_look(k, pid, w - 1);
+  if f.kind != K_EPOLL || f.x >= EP_N {
+    return EP_N;
+  }
+  return f.x;
+}
+
+/// The instances instance e watches, as a bit mask.
+fn ep_adj(k: &Kernel, pid: u64, e: u64) -> u64
+  requires kok(k) && pid < NPROC && e < EP_N
+  ensures result < 256
+{
+  let mut m = 0;
+  let mut j = 0;
+  while j < EP_FDS
+    invariant j <= EP_FDS && m < 256 && e < EP_N
+  {
+    let t = ep_target(k, pid, e, j);
+    if t < EP_N {
+      m = (m | (1 << t)) % 256;
+    }
+    j = j + 1;
+  }
+  return m % 256;
+}
+
+/// The instances some instance in mask m watches.
+fn ep_below(k: &Kernel, pid: u64, m: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result < 256
+{
+  let mut r = 0;
+  let mut i = 0;
+  while i < EP_N
+    invariant i <= EP_N && r < 256
+  {
+    if (m >> i) % 2 == 1 {
+      r = (r | ep_adj(k, pid, i)) % 256;
+    }
+    i = i + 1;
+  }
+  return r;
+}
+
+/// The instances that watch some instance in mask m.
+fn ep_above(k: &Kernel, pid: u64, m: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result < 256
+{
+  let mut r = 0;
+  let mut i = 0;
+  while i < EP_N
+    invariant i <= EP_N && r < 256
+  {
+    if ep_adj(k, pid, i) & m != 0 {
+      r = (r | (1 << i)) % 256;
+    }
+    i = i + 1;
+  }
+  return r;
+}
+
+/// How many levels of instances there are from mask m going down
+/// (`down`) or up, counting m's own: at most EP_N + 1.
+fn ep_levels(k: &Kernel, pid: u64, m: u64, down: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= EP_N + 1
+{
+  let mut cur = m % 256;
+  let mut n = 0;
+  while cur != 0 && n <= EP_N
+    invariant n <= EP_N + 1
+  {
+    if down {
+      cur = ep_below(k, pid, cur);
+    } else {
+      cur = ep_above(k, pid, cur);
+    }
+    n = n + 1;
+  }
+  return n;
+}
+
+/// For EPOLL_CTL_ADD of instance t to instance e: ELOOP if t already
+/// reaches e, EINVAL if the chain would be more than EP_DEPTH deep, else 0.
+fn ep_nest_check(k: &Kernel, pid: u64, e: u64, t: u64) -> u64
+  requires kok(k) && pid < NPROC && e < EP_N && t < EP_N
+{
+  let mut reach = (1 << t) % 256;
+  let mut n = 0;
+  while n < EP_N
+    invariant n <= EP_N && reach < 256
+  {
+    reach = (reach | ep_below(k, pid, reach)) % 256;
+    n = n + 1;
+  }
+  if (reach >> e) % 2 == 1 {
+    return ELOOP;
+  }
+  if ep_levels(k, pid, (1 << e) % 256, false) + ep_levels(k, pid, (1 << t) % 256, true) > EP_DEPTH {
+    return EINVAL;
+  }
+  return 0;
+}
+
+/// Which instances have something ready, as a bit mask.
+fn ep_ready(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result < 256
+{
+  let mut m = 0;
+  let mut e = 0;
+  while e < EP_N
+    invariant e <= EP_N && m < 256
+  {
+    let mut j = 0;
+    while j < EP_FDS
+      invariant j <= EP_FDS && e < EP_N && m < 256
+    {
+      if ep_entry_bits(k, pid, e, j) != 0 {
+        m = (m | (1 << e)) % 256;
+      }
+      j = j + 1;
+    }
+    e = e + 1;
+  }
+  let mut round = 0;
+  while round < EP_DEPTH
+    invariant round <= EP_DEPTH && m < 256
+  {
+    let mut f = 0;
+    while f < EP_N
+      invariant f <= EP_N && m < 256
+    {
+      let mut j = 0;
+      while j < EP_FDS
+        invariant j <= EP_FDS && f < EP_N && m < 256
+      {
+        let t = ep_target(k, pid, f, j);
+        if t < EP_N && (m >> t) % 2 == 1 && get(k.evt, ep_at(f, j, 2)) & (POLLIN + EP_OFF) == POLLIN {
+          m = (m | (1 << f)) % 256;
+        }
+        j = j + 1;
+      }
+      f = f + 1;
+    }
+    round = round + 1;
+  }
+  return m;
+}
+
+/// What entry j of instance e reports, given the ready instances m.
+fn ep_entry_ready(k: &Kernel, pid: u64, e: u64, j: u64, m: u64) -> u64
+  requires kok(k) && pid < NPROC && e < EP_N && j < EP_FDS
+{
+  let t = ep_target(k, pid, e, j);
+  if t >= EP_N {
+    return ep_entry_bits(k, pid, e, j);
+  }
+  if (m >> t) % 2 == 1 && get(k.evt, ep_at(e, j, 2)) & (POLLIN + EP_OFF) == POLLIN {
+    return POLLIN;
+  }
+  return 0;
+}
+
 /// poll on epoll instance e: POLLIN if something it watches is ready.
 fn ep_poll_bits(k: &Kernel, pid: u64, e: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -579,14 +802,8 @@ fn ep_poll_bits(k: &Kernel, pid: u64, e: u64) -> u64
   if e >= EP_N {
     return POLLNVAL;
   }
-  let mut j = 0;
-  while j < EP_FDS
-    invariant j <= EP_FDS && e < EP_N
-  {
-    if ep_entry_bits(k, pid, e, j) != 0 {
-      return POLLIN;
-    }
-    j = j + 1;
+  if (ep_ready(k, pid) >> e) % 2 == 1 {
+    return POLLIN;
   }
   return 0;
 }
@@ -607,7 +824,7 @@ fn ev_bits(k: &Kernel, kind: u64, x: u64) -> u64
     }
     return b;
   }
-  if kind == K_TIMER && x < TFD_N && tfd_due(k, x) > 0 {
+  if kind == K_TIMER && x < TFD_N && (tfd_due(k, x) > 0 || get(k.evt, x * TFD_STRIDE) / TFD_CANCELED % 2 == 1) {
     return POLLIN;
   }
   return 0;
@@ -631,6 +848,7 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
     return KEEP;
   }
   let e = ep.x;
+  let ready = ep_ready(k, pid);
   let most = smaller(maxevents, EP_FDS);
   let mut got = 0;
   let mut j = 0;
@@ -641,7 +859,7 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
     if w != 0 && (w > LXNFD || fd_ofd(k, pid, w - 1) != get(k.evt, ep_at(e, j, 1))) {
       k.evt = set(k.evt, ep_at(e, j, 0), 0);  // its descriptor was closed
     }
-    let bits = ep_entry_bits(k, pid, e, j);
+    let bits = ep_entry_ready(k, pid, e, j, ready);
     if bits != 0 {
       let at = got * EPOLL_EVENT;
       bset(&mut k.fs.xfer, at, cast[u8](bits % 256));
@@ -804,7 +1022,7 @@ fn fifo_open(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
   if acc == 3 {
     return EINVAL;
   }
-  if fd_free(k.lxfd, pid, 0) >= LXNFD {
+  if fd_free(k, pid, 0) >= LXNFD {
     return EMFILE;
   }
   let base = FIFO_AT + f * FIFO_STRIDE;

@@ -2,19 +2,27 @@
 // iovec), with a destination or source address, and SCM_RIGHTS control
 // messages that pass a descriptor over an AF_UNIX socket.
 //
-// Not done: a datagram goes out from the first non-empty buffer alone
-// (sendmsg on a datagram socket with more than one is -EINVAL, not a
-// gather), and one comes in to the first buffer (the rest of the list
-// stays empty). SCM_RIGHTS passes one descriptor per message, at most
+// Not done: on an AF_UNIX datagram socket a message goes out from the
+// first non-empty buffer alone (more than one is -EINVAL, not a gather;
+// UDP gathers them), and a datagram comes in to the first buffer (the
+// rest of the list stays empty). SCM_RIGHTS passes one descriptor per message, at most
 // one in flight per direction (a second waits until the first is
 // received), and it goes with the next bytes read rather than with the
 // bytes it was sent beside. A socket sent over itself and then closed
 // is never freed (Linux has a collector for these cycles).
+//
+// sendmmsg and recvmmsg are sendmsg and recvmsg in a loop. Only the first
+// message may wait; recvmmsg then takes what is already there, as with
+// MSG_WAITFORONE, and its timeout is checked but not waited on.
 
 import "lxmore.bastio";
 
 const LX_SENDMSG: u64 = 46;
 const LX_RECVMSG: u64 = 47;
+const LX_RECVMMSG: u64 = 299;
+const LX_SENDMMSG: u64 = 307;
+const MMSGHDR: u64 = 64;                  // struct mmsghdr: a msghdr, then msg_len
+const UIO_MAXIOV: u64 = 1024;             // the most messages one call takes
 const MSGHDR: u64 = 56;                   // struct msghdr
 const SCM_RIGHTS: u64 = 1;
 const CMSG_ONE: u64 = 20;                 // CMSG_LEN(sizeof(int))
@@ -24,7 +32,68 @@ const MSG_CMSG_CLOEXEC: u64 = 0x40000000;
 const ETOOMANYREFS: u64 = 18446744073709551507;   // 2^64 - 109
 
 fn is_msg_call(n: u64) -> bool {
-  return n == LX_SENDMSG || n == LX_RECVMSG;
+  return n == LX_SENDMSG || n == LX_RECVMSG || n == LX_SENDMMSG || n == LX_RECVMMSG;
+}
+
+/// sendmmsg(fd, vec, vlen, flags) and recvmmsg(fd, vec, vlen, flags,
+/// timeout): the messages of vec in turn, each one's byte count to its
+/// msg_len. Returns how many went, or the first one's error (SK_WAIT if it
+/// must wait).
+fn lx_mmsg(k: &mut Kernel, pid: u64, n: u64, fd: u64, vec: u64, vlen: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if n == LX_RECVMMSG {
+    let tp = pget(k.procs, pid, F_REGS + R_R8);
+    if tp != 0 {
+      let t = ts_in(&mut k, pid, tp);
+      if t.err != 0 {
+        return t.err;
+      }
+    }
+  }
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
+    return EBADF;
+  }
+  if vec > 0xFFFFFFFFFFF00000 {
+    return EFAULT;
+  }
+  let cnt = smaller(vlen % 0x100000000, UIO_MAXIOV);
+  let mut done = 0;
+  let mut stop = false;
+  let mut err = 0;
+  while done < cnt && !stop
+    invariant done <= cnt && cnt <= UIO_MAXIOV && vec <= 0xFFFFFFFFFFF00000 && kok(k)
+  {
+    let m = vec + MMSGHDR * done;
+    let mut fl = flags;
+    if done > 0 {
+      fl = flags | MSG_DONTWAIT;
+    }
+    let mut r = 0;
+    if n == LX_SENDMMSG {
+      r = lx_sendmsg(&mut k, pid, fd, m, fl);
+    } else {
+      r = lx_recvmsg(&mut k, pid, fd, m, fl);
+    }
+    if r > 0x7FFFFFFFFFFFFFFF {
+      err = r;
+      stop = true;
+    } else {
+      xfer_u64(&mut k.fs.xfer, 0, r % 0x100000000);
+      if lx_put_out(&mut k, pid, m + 56, 4) != 0 {
+        err = EFAULT;
+        stop = true;
+      } else {
+        done = done + 1;
+      }
+    }
+  }
+  if done == 0 && err != 0 {
+    return err;
+  }
+  return done;
 }
 
 /// The (base, length) of buffer i of the list at iov, in the transfer
@@ -34,6 +103,57 @@ fn iov_at(k: &mut Kernel, pid: u64, iov: u64, i: u64) -> bool
   ensures kok(k)
 {
   return iov <= 0xFFFFFFFFFFFF0000 && copy_from_user(&mut k.spaces, pid, iov + 16 * i, &mut k.fs.xfer, 16) == 16;
+}
+
+/// sendmsg on a UDP socket: the cnt buffers of the list at iov, joined
+/// into one datagram. Returns its length, or -errno.
+fn udp_gather(k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u64, name: u64, nlen: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC && cnt <= 1024
+  ensures kok(k)
+{
+  let d = udp_dest(&mut k, pid, fd, name, nlen);
+  if d.err != 0 {
+    return d.err;
+  }
+  let room = UDP_MAX - sock_corked(k.nic, d.s);
+  let mut g = balloc(UDP_MAX);
+  let mut total = 0;
+  let mut i = 0;
+  while i < cnt
+    invariant i <= cnt && cnt <= 1024 && total <= room && room <= UDP_MAX && blen(g) == UDP_MAX && kok(k)
+  {
+    if !iov_at(&mut k, pid, iov, i) {
+      bfree(g);
+      return EFAULT;
+    }
+    let base = get_u64(k.fs.xfer, 0);
+    let len = get_u64(k.fs.xfer, 8);
+    if len > room - total {
+      bfree(g);
+      return EMSGSIZE;
+    }
+    if len > 0 {
+      if copy_from_user(&mut k.spaces, pid, base, &mut k.fs.xfer, len) != len {
+        bfree(g);
+        return EFAULT;
+      }
+      let mut j = 0;
+      while j < len
+        invariant j <= len && total + len <= UDP_MAX && blen(g) == UDP_MAX && kok(k)
+      {
+        bset(&mut g, total + j, bget(k.fs.xfer, j));
+        j = j + 1;
+      }
+      total = total + len;
+    }
+    i = i + 1;
+  }
+  let r = sock_send_more(&mut k.nic, d.s, d.ip, d.port, g, total, flags / MSG_MORE % 2 == 1);
+  bfree(g);
+  if r == NO_SOCK {
+    return ENETUNREACH;
+  }
+  return r;
 }
 
 /// The description an SCM_RIGHTS message at user address ctl (clen bytes
@@ -79,6 +199,10 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
+    return EBADF;                           // before the header, as on Linux
+  }
   if msg > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, msg, &mut k.fs.xfer, MSGHDR) != MSGHDR {
     return EFAULT;
   }
@@ -111,6 +235,9 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
     }
   }
   let dgram = !is_tcp(k, pid, fd) && (!unix || ux_dgram(k, pid, fd));
+  if dgram && !unix {
+    return udp_gather(&mut k, pid, fd, iov, cnt, name, nlen, flags);
+  }
   let mut done = 0;
   let mut sent = false;
   let mut stop = false;
@@ -131,7 +258,7 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
       if unix {
         r = ux_send(&mut k, pid, fd, base, len, sent || flags / MSG_DONTWAIT % 2 == 1);
       } else {
-        r = lx_sendto(&mut k, pid, fd, base, len, name, nlen);
+        r = lx_sendto(&mut k, pid, fd, base, len, name, nlen, flags);
       }
       if r > 0x7FFFFFFFFFFFFFFF {
         if !sent {
@@ -163,6 +290,10 @@ fn lx_recvmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
+    return EBADF;                           // before the header, as on Linux
+  }
   if msg > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, msg, &mut k.fs.xfer, MSGHDR) != MSGHDR {
     return EFAULT;
   }
@@ -280,10 +411,14 @@ fn lx_msg_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   ensures kok(k)
 {
   let mut r = 0;
+  let mut fl = c;
   if n == LX_SENDMSG {
     r = lx_sendmsg(&mut k, pid, a, b, c);
-  } else {
+  } else if n == LX_RECVMSG {
     r = lx_recvmsg(&mut k, pid, a, b, c);
+  } else {
+    fl = pget(k.procs, pid, F_REGS + R_R10);
+    r = lx_mmsg(&mut k, pid, n, a, b, c, fl);
   }
   if r == SK_WAIT && !is_unix(k, pid, a) {
     return sock_retry(&mut k, pid, n);       // sleep until a frame comes in
@@ -292,7 +427,7 @@ fn lx_msg_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     return lx_retry(&mut k, pid, n);
   }
   ret(&mut k.procs, pid, r);
-  if r == EPIPE && n == LX_SENDMSG && c / MSG_NOSIGNAL % 2 == 0 {
+  if r == EPIPE && (n == LX_SENDMSG || n == LX_SENDMMSG) && fl / MSG_NOSIGNAL % 2 == 0 {
     post_sig(&mut k, pid, SIGPIPE);
     return SWITCH;
   }

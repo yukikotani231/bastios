@@ -21,6 +21,7 @@ import "space.bastio";
 import "proc.bastio";
 import "fs.bastio";
 import "net.bastio";
+import "net6.bastio";
 import "syscall.bastio";
 import "linux.bastio";
 import "lxproc.bastio";
@@ -43,13 +44,19 @@ import "lxmsg.bastio";
 import "acpi.bastio";
 import "info.bastio";
 import "lxcred.bastio";
+import "lxprio.bastio";
 import "lxipc.bastio";
+import "lxmq.bastio";
 import "lxsys.bastio";
 import "lxlock.bastio";
 import "lxowner.bastio";
 import "lxprocfs.bastio";
+import "lxprctl.bastio";
+import "lxrlimit.bastio";
+import "lxcap.bastio";
 import "lxlink.bastio";
 import "lxloop.bastio";
+import "lxpty.bastio";
 import "lxxattr.bastio";
 import "lxmount.bastio";
 import "lxperm.bastio";
@@ -206,6 +213,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
     return Job::Stop;
   }
   let mut woke = false;
+  rng_stir(&mut s.k, cpu);
   if poll {
     nic_poll(&mut s.k.nic);
     net_wake(&mut s.k);
@@ -352,7 +360,12 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   if v == V_LINUX {
     s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
     s.k.fs.now = sat_add(s.k.epoch, s.k.ns) / 1000000000;   // wall-clock seconds, as stat reports them
+    let began = s.k.ns;
     let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
+    let ended = tsc_now(s.k.tsc, s.k.ns, cpu);
+    if ended > began {
+      tm_sys_add(&mut s.k, p, ended - began);   // system time (src/lxrlimit.bastio)
+    }
     call_done(&mut s.k, p);
     if what == POWEROFF || what == REBOOT {
       s.stop = true;
@@ -655,7 +668,9 @@ fn ack(pic: &mut Pic, apic: &mut Lapic, v: u64)
 // bin, daemon) for Linux programs, and /etc/shadow keeps their passwords
 // (root has none until `passwd` sets one; the others cannot log in)
 // (whoami, ls -l, getpwuid). /etc/hosts names localhost (getaddrinfo).
-const NINIT: u64 = 7;
+// /etc/shells lists the login shells (getusershell; an SSH server refuses
+// a user whose shell is not there).
+const NINIT: u64 = 8;
 
 fn init_name(i: u64) -> Str {
   if i == 0 {
@@ -675,6 +690,9 @@ fn init_name(i: u64) -> Str {
   }
   if i == 5 {
     return "etc/shadow";
+  }
+  if i == 6 {
+    return "etc/shells";
   }
   return "elfdemo";
 }
@@ -697,6 +715,9 @@ fn init_data(i: u64) -> Str {
   }
   if i == 5 {
     return include_bytes("../files/shadow");
+  }
+  if i == 6 {
+    return include_bytes("../files/shells");
   }
   return include_bytes("../build/user/elfpie.elf");
 }
@@ -1047,7 +1068,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   let shm = new_store(&mut m);
   let txt = new_store(&mut m);
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: epoch ^ at, cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), croot: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), lazy: alloc(LAZY_LEN), inet6: alloc(OFD_N), locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, txt: txt, sys: alloc(SYS_LEN), loops: alloc(LOOP_LEN) };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: rng_new(epoch ^ at), cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), croot: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), lazy: alloc(LAZY_LEN), inet6: alloc(OFD_N), locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, txt: txt, sys: alloc(SYS_LEN), loops: alloc(LOOP_LEN), ptys: alloc(PTY_LEN), ptyb: balloc(PTYB_LEN) };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
@@ -1126,10 +1147,13 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.lazy);
   free(sys.k.locks);
   free(sys.k.loops);
+  free(sys.k.ptys);
+  bfree(sys.k.ptyb);
   free(sys.k.ipc);
   bfree(sys.k.ipcb);
   free(sys.k.sys);
   free(sys.k.inet6);
+  free(sys.k.rng);
   free(sys.k.evt);
   free(sys.k.sigsave);
   free(sys.k.ux);

@@ -1002,6 +1002,17 @@ fn vfs_install(v: &mut Vfs, mem: &mut Mem, name: Str, data: Str) -> bool
   requires vfs_ok(v) && mem_ok(mem)
   ensures vfs_ok(v) && mem_ok(mem)
 {
+  let d = bfrom(data);
+  let ok = vfs_install_bytes(&mut v, &mut mem, name, d, blen(d));
+  bfree(d);
+  return ok;
+}
+
+/// vfs_install, with the first m bytes of d as the contents.
+fn vfs_install_bytes(v: &mut Vfs, mem: &mut Mem, name: Str, d: &Bytes, m: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem) && m <= blen(d)
+  ensures vfs_ok(v) && mem_ok(mem)
+{
   let nm = bfrom(name);
   let n = blen(nm);
   let mut i = ram_find(&mut v.ram, nm, n);
@@ -1018,10 +1029,7 @@ fn vfs_install(v: &mut Vfs, mem: &mut Mem, name: Str, data: Str) -> bool
     Node::File(f) => {
       let mut g = f;
       file_truncate(&mut g, &mut mem);
-      let d = bfrom(data);
-      let m = blen(d);
       ok = file_write(&mut g, &mut mem, 0, d, m) == m;
-      bfree(d);
       put_node(&mut v.ram, i, Node::File(g));
     },
   }
