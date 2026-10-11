@@ -252,6 +252,7 @@ t_ipc: socketpair AF_UNIX
 t_ipc: socketpair both ways, EOF after close
 t_ipc: timerfd
 t_ipc: ttyname(0)
+t_isol: a loop-mounted image is nosuid
 t_isol: a shared mapping of a read-only file stays read-only
 t_isol: a unix socket's file says who may connect
 t_isol: loop devices are root's and group disk's

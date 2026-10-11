@@ -281,6 +281,8 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - With a disk, `/etc`, `/root` and `/home` live on it (symbolic links to
   `/disk/etc`, `/disk/root` and `/disk/home`), so users and their files
   survive a reboot. The first boot seeds `/disk/etc` from the built-in files.
+- A loop-mounted `bstdisk3` image is `nosuid`: its set-user-ID and
+  set-group-ID files run with the caller's ids.
 
 ### Programs that run
 

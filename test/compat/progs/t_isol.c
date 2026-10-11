@@ -5,7 +5,10 @@
  * whose file it may not write, signal a root process through
  * rt_sigqueueinfo, or bind a port below 1024; and on BastiOS it may not
  * go around the Linux layer through the native system calls (int 0x80),
- * whose file, kill and power calls check nothing and so are root's. */
+ * whose file, kill and power calls check nothing and so are root's.
+ * A set-user-ID file in a loop-mounted image does not raise its runner:
+ * the image's maker chose its owners and modes (BastiOS mounts them
+ * nosuid). */
 #include "compat.h"
 #include <fcntl.h>
 #include <signal.h>
@@ -207,12 +210,64 @@ static int no_native(void) {
     return ok && stat(name, &st) == 0;                                /* still there */
 }
 
+/* Run as `t_isol euid`, the program reports its effective user id. */
+static int run_euid(const char *path) {
+    pid_t c = fork();
+    if (c == 0) {
+        execl(path, path, "euid", (char *)0);
+        _exit(9);
+    }
+    int st;
+    return waitpid(c, &st, 0) == c && WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+
+static const char *self;                /* argv[0] */
+
+static int copy_self(const char *to) {
+    int in = open(self, O_RDONLY), out = open(to, O_CREAT | O_WRONLY | O_TRUNC, 0755);
+    char buf[4096];
+    ssize_t n;
+    int ok = in >= 0 && out >= 0;
+    while (ok && (n = read(in, buf, sizeof buf)) > 0) ok = write(out, buf, n) == n;
+    close(in);
+    close(out);
+    return ok && chmod(to, 04755) == 0;
+}
+
+static int nobody_runs_suid(void) {     /* exit 0 if the copy outside the image runs as root */
+    return become_nobody() && run_euid("/tmp/i_suid") == 0 && run_euid("/tmp/i_lm/suid") == 65534 % 256;
+}
+
+static int loop_nosuid(void) {      /* in memory: a loop mount takes an in-memory image */
+    int fd = open("/tmp/i_img", O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    int ok = fd >= 0 && ftruncate(fd, 1 << 20) == 0;
+    close(fd);
+    pid_t c = fork();
+    if (c == 0) {
+        execl("/bin/mkfs.bstdisk3", "mkfs.bstdisk3", "/tmp/i_img", (char *)0);
+        _exit(9);
+    }
+    int st;
+    ok = ok && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    mkdir("/tmp/i_lm", 0755);
+    ok = ok && mount("/tmp/i_img", "/tmp/i_lm", "bstdisk3", 0, NULL) == 0;
+    ok = ok && copy_self("/tmp/i_suid") && copy_self("/tmp/i_lm/suid") && in_child(nobody_runs_suid);
+    unlink("/tmp/i_lm/suid");
+    umount2("/tmp/i_lm", 0);
+    rmdir("/tmp/i_lm");
+    unlink("/tmp/i_suid");
+    unlink("/tmp/i_img");
+    return ok;
+}
+
 static int bastios(void) {
     struct utsname u;
     return uname(&u) == 0 && strstr(u.release, "bastios") != NULL;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "euid") == 0) return geteuid() % 256;
+    self = argv[0];
     setup();
     mkdir("i_mnt", 0777);
     chmod("i_mnt", 0777);
@@ -232,6 +287,8 @@ int main(void) {
     EXPECT("root binds a port below 1024", root_binds_low());
     if (bastios())
         EXPECT("native system calls are root's", in_child(no_native));
+    if (bastios())
+        EXPECT("a loop-mounted image is nosuid", loop_nosuid());
 
     unlink("i_secret");
     unlink("i_public");

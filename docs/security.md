@@ -66,7 +66,7 @@ whoever its mode admits.
 |---|---|---|
 | Changing ids | `setuid`, `setgid`, `setreuid`, `setregid`, `setresuid`, `setresgid`, `setfsuid`, `setfsgid`: root sets anything, anyone else moves only between the ids it holds. `setgroups` is root's. | `src/lxcred.bastio` |
 | Files | open, `execve`, `truncate` and `access` check the mode bits; every directory on a path needs search permission; making, removing and renaming names need write and search permission on the directory; a sticky directory keeps others' names; `chmod` and `utime` with times are the owner's; `chown` is root's, or the owner's to one of its groups, and clears the set-ID bits; new files belong to their maker and take the umask; a set-group-ID directory passes its group on. Root passes every check, but runs only files with an execute bit. | `src/lxperm.bastio` |
-| Set-ID programs | `execve` of a file with the set-user-ID (set-group-ID) bit runs it with its owner's user (group) id. | `exec_ids`, `src/lxperm.bastio` |
+| Set-ID programs | `execve` of a file with the set-user-ID (set-group-ID) bit runs it with its owner's user (group) id, except in a loop-mounted image, which is `nosuid`: its maker chose its owners and modes. | `exec_ids`, `src/lxperm.bastio` |
 | Signals | `kill`, `tkill`, `tgkill` and `rt_sigqueueinfo` need root, or the sender's real or effective user id to match the target's real or saved one; `SIGCONT` reaches any process in the sender's session. | `may_signal`, `src/lxsig.bastio` |
 | Waiting | `wait4` and `waitid` reach only the caller's own children. | `src/lxproc.bastio` |
 | SysV IPC | message queues, semaphores and shared memory check their mode bits; `IPC_SET` and `IPC_RMID` are for the owner, the creator or root. | `ipc_may`, `ipc_owner`, `src/lxipc.bastio` |
@@ -94,10 +94,7 @@ Known gaps, most serious first.
    because a process that is not root cannot gain anything by it (the
    child keeps its ids). Native sockets are global indices with no owner,
    so root processes can reach one another's.
-3. **Loop mounts are not `nosuid`.** A `bstdisk3` image is mounted with
-   `LO_NODEV` only. Mounting is root's, so this matters only when root
-   mounts an image someone else made.
-4. Smaller ones: `prlimit64` and `setpriority` ignore their target pid
+3. Smaller ones: `prlimit64` and `setpriority` ignore their target pid
    (neither changes anything); `setpgid` does not check that the child is
    in the caller's session or has not run `execve`; SysV IPC checks only a
    process's effective group, not its supplementary groups; `SHM_LOCK`

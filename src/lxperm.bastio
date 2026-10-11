@@ -472,7 +472,8 @@ fn user_empty(k: &mut Kernel, pid: u64, va: u64) -> bool
 /// set-user-ID bit (f, a file handle, when `file`), the effective user id
 /// becomes the file's owner, and from a built-in program with f 1 (su and
 /// passwd) it becomes 0; with the set-group-ID bit and group execute,
-/// the effective group id its group. As on Linux, the saved ids then
+/// the effective group id its group, unless the file is in a loop-mounted
+/// image (nosuid). As on Linux, the saved ids then
 /// follow the effective ones, and so do the file-system ids.
 fn exec_ids(k: &mut Kernel, pid: u64, file: bool, f: u64)
   requires kok(k) && pid < NPROC
@@ -483,7 +484,9 @@ fn exec_ids(k: &mut Kernel, pid: u64, file: bool, f: u64)
   if !file && f == 1 {
     euid = 0;                               // su or passwd (bin_suid, src/lxproc.bastio)
   }
-  if file && f < HFILES {
+  // A file in a loop-mounted image (handles LO0 on) is as if mounted
+  // nosuid: whoever made the image chose its owners and modes.
+  if file && f < LO0 {
     let m = vfs_meta(&mut k.fs, f);
     if m.ok && m.mode & S_ISUID != 0 {
       euid = m.own % ID_SPAN;
