@@ -286,7 +286,9 @@ fn rng_next(k: &mut Kernel) -> u64
 }
 
 /// read(2) on device d: nothing from /dev/null, zeros or random bytes from
-/// the others (at most XFER bytes a call). Returns the count or -EFAULT.
+/// the others, up to READ_MAX bytes a call (Linux gives a whole read of
+/// /dev/zero, so `dd bs=64k` gets full blocks). Returns the count, or
+/// -EFAULT if nothing could be written.
 fn dev_read(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -297,6 +299,31 @@ fn dev_read(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
   if d != DEV_ZERO && d != DEV_RANDOM {
     return EBADF;
   }
+  if va > 0xFFFFFFFFFFFFFFFF - READ_MAX {
+    return EFAULT;
+  }
+  let total = smaller(n, READ_MAX);
+  let mut done = 0;
+  while done < total
+    invariant done <= total && total <= READ_MAX && kok(k)
+  {
+    let got = dev_read1(&mut k, pid, d, va + done, total - done);
+    if got == 0 || got > total - done {
+      if done == 0 {
+        return EFAULT;
+      }
+      return done;                          // the rest of the buffer faulted
+    }
+    done = done + got;
+  }
+  return done;
+}
+
+/// One piece of dev_read: at most XFER bytes. 0 if it could not be written.
+fn dev_read1(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
   let want = smaller(n, XFER);
   let mut i = 0;
   let mut r = 0;
@@ -315,8 +342,8 @@ fn dev_read(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
     i = i + 1;
   }
   let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
-  if put == NO_RESULT || (put == 0 && want > 0) {
-    return EFAULT;
+  if put == NO_RESULT {
+    return 0;
   }
   return put;
 }

@@ -958,7 +958,6 @@ fn tcp_read(n: &mut Net, t: u64, buf: &mut Bytes, max: u64, peek: bool) -> u64
     k = blen(buf);
   }
   let base = t * TCP_BUF;
-  let bl = blen(buf);
   bcopy(&mut buf, 0, n.trx, base, k);
   if peek {
     return k;
@@ -969,12 +968,8 @@ fn tcp_read(n: &mut Net, t: u64, buf: &mut Bytes, max: u64, peek: bool) -> u64
   if hhi > top {
     top = hhi;
   }
-  let mut j = 0;
-  while j + k < top
-    invariant j + k <= top && top <= TCP_BUF && net_ok(n) && blen(buf) == bl
-  {
-    bset(&mut n.trx, base + j, bget(n.trx, base + j + k));
-    j = j + 1;
+  if k < top {
+    bmove(&mut n.trx, base, base + k, top - k);
   }
   tset(&mut n, t, W_RXLEN, rxlen - k);
   if hhi > 0 {
