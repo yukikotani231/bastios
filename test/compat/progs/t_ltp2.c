@@ -243,7 +243,9 @@ int main(void) {
            struct sigevent su = {.sigev_notify = SIGEV_SIGNAL, .sigev_signo = SIGUSR1}; timer_create(CLOCK_MONOTONIC, &su, &u);
            clock_gettime(CLOCK_MONOTONIC, &now); struct itimerspec w = {{0, 1000000}, {now.tv_sec - 1, now.tv_nsec}};
            timer_settime(u, TIMER_ABSTIME, &w, 0); usleep(50000); int sig = 0; sigwait(&m, &sig);
-           int o = timer_getoverrun(u); timer_delete(u); sigprocmask(SIG_UNBLOCK, &m, 0);
+           int o = timer_getoverrun(u); timer_delete(u);
+           struct timespec z = {0, 0}; while (sigtimedwait(&m, 0, &z) == SIGUSR1) {}   /* an expiry after sigwait, before the delete */
+           sigprocmask(SIG_UNBLOCK, &m, 0);
            ok && sig == SIGUSR1 && o >= 1000; }));
     EXPECT("brk shrinks and grows back, never below its start", ({ char *b0 = (char *)syscall(SYS_brk, 0);
            char *up = (char *)syscall(SYS_brk, b0 + 8191); b0[8000] = 1;
