@@ -728,8 +728,8 @@ fn init_mode(i: u64) -> u64 {
   if i == 5 {
     return 384;                           // 0600: password hashes are root's (docs/security.md)
   }
-  if i == 6 {
-    return 493;                           // 0755: a program
+  if i == NINIT - 1 {
+    return 493;                           // 0755: elfdemo, a program
   }
   return 420;                             // 0644
 }
