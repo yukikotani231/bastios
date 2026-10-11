@@ -27,14 +27,15 @@ bastioc1: /disk/sieve.bastio: 15 proof obligation(s) discharged
 == bastioc1: a failed proof builds nothing
 $ mkdir /cb_f && cd /cb_f && CC=/disk/tcc BASTIO_SOLVER=/disk/z3 /disk/bastioc1 -o ov /disk/overflow.bastio; echo status $?; ls; cd /; rm -rf /cb_f
 /disk/overflow.bastio:5:12: error[E-VERIFY-OVERFLOW]: could not prove that `a + b` does not overflow u64
-  |   return a + b;
-  |            ^
-  = counterexample: a = 18446744073709551615, b = 1
+ 5 |   return a + b;
+   |            ^
+   = counterexample: a = 18446744073709551615 (2^64 - 1), b = 1
+   = bound the operands with a `requires` or an `if`, or use `wrap_add`, `wrap_sub` or `wrap_mul` if wrapping around is meant
 status 1
 
 == bastioc1: a type error
 $ mkdir /cb_t && cd /cb_t && printf 'fn main() -> u64 {\n  return true;\n}\n' > t.bastio && /disk/bastioc1 --check t.bastio; echo status $?; cd /; rm -rf /cb_t
 t.bastio:2:3: error[E-TYPE]: the returned value must be u64, found bool
-  |   return true;
-  |   ^
+ 2 |   return true;
+   |   ^^^^^^
 status 1

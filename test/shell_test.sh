@@ -187,7 +187,7 @@ steps = [
     ("fpucheck", b"fpucheck: xmm0 kept"),
     # musl malloc (brk, mmap), stdio on a file, and a line read from the
     # console; the third field is what to wait for instead of the prompt.
-    ("mtest", [b"mtest: malloc heap 75", b"mtest: big memory 4096 1024", b"mtest: file line 42"], b"type a line"),
+    ("mtest", [b"mtest: malloc heap 75", b"mtest: big memory 4096 1024", b"mtest: direction flag spun", b"mtest: file line 42"], b"type a line"),
     ("typed for mtest", b"mtest: got typed for mtest"),
     # BusyBox's shell, unmodified, reading commands from the console. The
     # console is a terminal (ioctl TCGETS works), so ash is interactive and
@@ -240,6 +240,9 @@ steps = [
     # A script with no #! line: execve says ENOEXEC, so ash runs it itself,
     # through an execve of /proc/self/exe.
     ("echo 'echo script $1' > /sc; chmod +x /sc; /sc ran; rm /sc", b"script ran", b"\n# "),
+    # execve passes up to 8192 arguments and 1024 environment strings, laid
+    # out at the top of the stack (it used to stop at 32 and 16).
+    ("(set --; i=0; while [ $i -lt 400 ]; do set -- \"$@\" arg$i; export V$i=x$i; i=$((i+1)); done; ash -c 'echo argc=$# last=${400} env=$V399' x \"$@\")", b"argc=400 last=arg399 env=x399", b"\n# "),
     # Time: clocks, nanosleep, poll that waits, select, alarms and pause, and
     # eventfd, timerfd and epoll (user/mtime.c); the sleep applet; ash's
     # read -t, a poll on the console that times out, then one that wakes
@@ -717,13 +720,21 @@ else:
     reply = b""
     line = b""
     if read_until(b"listening on tcp port 7001", mark):
-        time.sleep(0.5)
-        m2 = len(out)
-        qemu.stdin.write(b"ps\r"); qemu.stdin.flush()
-        # ps's own line names mtcp; wait for the prompt after it (the one
-        # `mtcp &` printed can arrive after m2, under SMP).
-        if (read_until(b" mtcp", m2) and read_until(b"bastios> ", out.index(b" mtcp", m2))
-                and re.search(rb"socket\s+\d+\s+mtcp", out[m2:])):
+        # mtcp prints that line just before it calls accept, so ps may still
+        # find it ready on a loaded machine: ask again, a few times.
+        asleep = False
+        for _ in range(10):
+            time.sleep(0.5)
+            m2 = len(out)
+            qemu.stdin.write(b"ps\r"); qemu.stdin.flush()
+            # ps's own line names mtcp; wait for the prompt after it (the one
+            # `mtcp &` printed can arrive after m2, under SMP).
+            if not (read_until(b" mtcp", m2) and read_until(b"bastios> ", out.index(b" mtcp", m2))):
+                break
+            if re.search(rb"socket\s+\d+\s+mtcp", out[m2:]):
+                asleep = True
+                break
+        if asleep:
             print("ok   Linux TCP: a process blocked in accept sleeps")
         else:
             print("FAIL Linux TCP accept sleep:", repr(out[m2:])); fails += 1
@@ -1408,6 +1419,11 @@ for line, want, until in [
     ("ash", b"built-in shell (ash)", b"\n# "),
     ("/disk/mx", b"mmisc: ok on Linux", b"\n# "),
     ("/disk/mx && /disk/mx && echo twice", b"mmisc: ok on Linux x86_64, signals, pipe 65536\r\ntwice", b"\n# "),
+    # Two at once: their code pages come from one page cache entry each,
+    # and a fault that waits for the disk sleeps while the other runs.
+    # (mmisc makes a file "mm" in its working directory, so each has its own;
+    # ash gives a background job /dev/null as stdin, and mmisc checks the tty.)
+    ("mkdir /tmp/a /tmp/b; (cd /tmp/a; /disk/mx </dev/tty) & (cd /tmp/b; /disk/mx); wait; echo both", b"pipe 65536\r\nmmisc: ok on Linux x86_64, signals, pipe 65536\r\nboth", b"\n# "),
     ("/disk/mx /disk/mx && echo gone; /disk/mx", [b"mmisc: ok on Linux", b"\r\ngone\r\n", b"not found"], b"\n# "),
 ]:
     mark = len(out)

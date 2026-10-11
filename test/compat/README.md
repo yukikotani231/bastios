@@ -22,10 +22,13 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   set of applets (`busybox.config`), each with its exact expected output.
 - `apps.txt`: real programs, in the same format: Lua 5.4.7, QuickJS, the
   sqlite3 3.52 shell (files, WAL, an index over 20000 rows), MicroPython
-  1.24 (its unix port without ffi, btree and ssl) and BusyBox's `wget`,
-  `httpd` and `nc`. The Makefile clones each at a pinned tag or commit and
-  builds it against musl as a static PIE (`LUA_TAG`, `QUICKJS_REV`,
-  `SQLITE_TAG`, `MPY_TAG` pick the versions).
+  1.24 (its unix port without ffi, btree and ssl), git 2.47 (with zlib and
+  nothing else; it finds its subcommands in `/disk`), Perl 5.40 (its XS
+  modules linked in; the pure-Perl modules the cases use, and what they
+  load, go on the disk as `/disk/perllib`) and BusyBox's `wget`, `httpd`
+  and `nc`. The Makefile clones each at a pinned tag or commit and builds
+  it against musl as a static PIE (`LUA_TAG`, `QUICKJS_REV`, `SQLITE_TAG`,
+  `MPY_TAG`, `GIT_TAG`, `PERL_TAG` pick the versions).
 - `tty.txt`: programs driven by keystrokes on the console: MicroPython's
   REPL (line editing, history, Ctrl-C), BusyBox `vi` and kilo
   (`KILO_REV`), each of which puts the terminal in raw mode. `run.py`
@@ -50,7 +53,8 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   headers the generated C includes, and the programs in `bastio/`.
   `bastioc1` proves each program with Z3, then builds it with tcc, which
   needs GNU `__auto_type` (`patches/tcc-auto-type.patch`, applied to
-  `TCC_REV`). The compiler's own sources are on the disk under `/disk/s`,
+  `TCC_REV`; the patch modifies tcc, so it is under tcc's license,
+  LGPL-2.1-or-later, not this repository's). The compiler's own sources are on the disk under `/disk/s`,
   but proving them needs more memory than a process gets.
 
 `mkdisk.py` puts the programs and that BusyBox on a disk image in BastiOS's

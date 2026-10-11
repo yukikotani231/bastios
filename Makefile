@@ -9,15 +9,18 @@
 #   make test       boot it in QEMU and drive the shell over the serial line
 #   make fuzz       fuzz the system calls (SEED, SEEDS, CALLS, SMP)
 #
+# The kernel and its programs are built with bastioc1, bastiolang's compiler
+# (stage1, written in Bastio), which stage0's bastioc0 builds once into
+# build/bastioc1. BASTIOC names another compiler (bastioc0 still works);
+# BASTIOC0 names stage0.
+#
 # NATIVE=1 builds the kernel with bastioc1's own x86-64 backend instead of
 # translating it to C for $(CC): no C compiler between the proved code and
 # the machine code (only the assembler). Opt-in while its code is about ten
-# times the size of gcc's. BASTIOC1 names a bastioc1 binary; by default one
-# is built from $(BASTIOLIB)/stage1.
-#
-# BASTIOC points at the Bastio stage0 compiler (github.com/yukikotani231/bastiolang).
+# times the size of gcc's.
 
-BASTIOC ?= ../bastiolang/stage0/target/release/bastioc0
+BASTIOC0 ?= ../bastiolang/stage0/target/release/bastioc0
+BASTIOC  ?= build/bastioc1
 # Where `import "core/..."` finds the Bastio core library.
 BASTIOLIB ?= ../bastiolang
 CC      ?= cc
@@ -169,16 +172,14 @@ KFILES := $(wildcard files/*)
 build/kernel.c: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
 	$(BASTIOC) --lib $(BASTIOLIB) --target kernel -o $@ src/main.bastio
 
-BASTIOC1 ?= build/bastioc1
-
-build/bastioc1.c: $(BASTIOC) $(wildcard $(BASTIOLIB)/stage1/*.bastio) | build
-	$(BASTIOC) --emit-c -o $@ $(BASTIOLIB)/stage1/bastioc1.bastio
+build/bastioc1.c: $(BASTIOC0) $(wildcard $(BASTIOLIB)/stage1/*.bastio) | build
+	$(BASTIOC0) --emit-c -o $@ $(BASTIOLIB)/stage1/bastioc1.bastio
 
 build/bastioc1: build/bastioc1.c
 	cc -O2 -o $@ $<
 
-build/kernel.s: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC1) | build
-	$(BASTIOC1) --lib $(BASTIOLIB) --target kernel --backend native --emit-asm -o $@ src/main.bastio
+build/kernel.s: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
+	$(BASTIOC) --lib $(BASTIOLIB) --target kernel --backend native --emit-asm -o $@ src/main.bastio
 
 # Which backend built build/kernel.o, rewritten only when it changes, so
 # that switching NATIVE rebuilds the kernel.
@@ -302,19 +303,9 @@ run-uefi: build/bastios.iso $(DISK)
 	  -drive if=pflash,format=raw,file=build/ovmf_vars.fd \
 	  -cdrom build/bastios.iso $(ISO_DISPLAY) $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
 
+# The tests are listed in test/all.sh, which runs JOBS of them at a time.
 test: build/bastios.elf
-	test/trusted_base.sh
-	test/fsck_test.py
-	test/shell_test.sh
-	BASTIOC=$(BASTIOC) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/guide_test.py
-	test/tcp_test.sh
-	NIC=e1000 test/tcp_test.sh
-	NIC=igb test/tcp_test.sh
-	MUSLCC=$(MUSLCC) test/ipv6_test.sh
-	NIC=e1000 MUSLCC=$(MUSLCC) test/ipv6_test.sh
-	test/iso_test.sh
-	test/nmi_test.sh
-	test/fuzz_test.sh 1 2 2000
+	BASTIOC=$(BASTIOC) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/all.sh
 
 # The system call fuzzer at length: SEEDS runs of CALLS calls from seed
 # SEED (see test/fuzz_test.sh; `make test` runs a short one).
@@ -350,7 +341,8 @@ build/compat/busybox: build/busybox/Makefile test/compat/busybox.config | build/
 	cp build/compat/bb/busybox $@
 
 # Real programs, built from their own sources against musl as static PIEs
-# and checked by test/compat/apps.txt: Lua, QuickJS and the sqlite3 shell.
+# and checked by test/compat/apps.txt: Lua, QuickJS, the sqlite3 shell, MicroPython,
+# kilo, git and Perl.
 # sqlite3's sources come from its GitHub mirror, which has no amalgamation:
 # configuring and generating it needs tclsh (the tcl package).
 LUA_GIT       ?= https://github.com/lua/lua
@@ -363,9 +355,18 @@ MPY_GIT       ?= https://github.com/micropython/micropython
 MPY_TAG       ?= v1.24.1
 KILO_GIT      ?= https://github.com/antirez/kilo
 KILO_REV      ?= 323d93b29bd89a2cb446de90c4ed4fea1764176e
+ZLIB_GIT      ?= https://github.com/madler/zlib
+ZLIB_TAG      ?= v1.3.1
+GIT_GIT       ?= https://github.com/git/git
+GIT_TAG       ?= v2.47.0
+PERL_GIT      ?= https://github.com/Perl/perl5
+PERL_TAG      ?= v5.40.0
+CPYTHON_GIT   ?= https://github.com/python/cpython
+CPYTHON_TAG   ?= v3.12.7
 DROPBEAR_GIT  ?= https://github.com/mkj/dropbear
 DROPBEAR_TAG  ?= DROPBEAR_2024.86
 COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo \
+                 build/compat/git build/compat/perl build/compat/python \
                  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys
 APP_CFLAGS    := -static-pie -fPIE -O2 -w -s
 
@@ -431,6 +432,65 @@ build/compat/kilo: | build/compat/src
 	git -C build/compat/src/kilo checkout -q FETCH_HEAD
 	$(MUSLCC) $(APP_CFLAGS) -o $@ build/compat/src/kilo/kilo.c
 
+# git, with zlib and nothing else (no curl, OpenSSL, expat, gettext or
+# iconv). It looks for its own subcommands in /disk, where it is.
+build/compat/git: | build/compat/src
+	rm -rf build/compat/src/zlib build/compat/src/zlib-out build/compat/src/git
+	git clone -q --depth 1 --branch $(ZLIB_TAG) $(ZLIB_GIT) build/compat/src/zlib
+	cd build/compat/src/zlib && CC=$(MUSLCC) CFLAGS="-O2 -fPIE" ./configure --static --prefix=$(CURDIR)/build/compat/src/zlib-out >/dev/null
+	$(MAKE) -C build/compat/src/zlib -s install >/dev/null
+	git clone -q --depth 1 --branch $(GIT_TAG) $(GIT_GIT) build/compat/src/git
+	$(MAKE) -C build/compat/src/git -s CC=$(MUSLCC) CFLAGS="-O2 -fPIE -I$(CURDIR)/build/compat/src/zlib-out/include" \
+	  LDFLAGS="-static-pie -s -L$(CURDIR)/build/compat/src/zlib-out/lib" NO_OPENSSL=1 NO_CURL=1 NO_EXPAT=1 \
+	  NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 NO_ICONV=1 NO_REGEX=NeedsStartEnd \
+	  prefix=/disk gitexecdir=/disk template_dir=/disk/git-templates git >/dev/null
+	cp build/compat/src/git/git $@
+
+# perl, statically linked with its XS modules, and the pure-Perl modules
+# test/compat/apps.txt uses (with what they load) in build/compat/perllib,
+# which goes on the disk as /disk/perllib.
+PERL_MODULES  := strict warnings Carp Exporter Data::Dumper JSON::PP Digest::MD5 Digest::SHA POSIX List::Util \
+                 Scalar::Util Fcntl Socket IO::Handle IO::Socket::INET HTTP::Tiny Time::HiRes File::Spec \
+                 File::Temp File::Path File::Basename Cwd Getopt::Long Storable Encode
+build/compat/perl: | build/compat/src
+	rm -rf build/compat/src/perl5 build/compat/perllib
+	git clone -q --depth 1 --branch $(PERL_TAG) $(PERL_GIT) build/compat/src/perl5
+	cd build/compat/src/perl5 && sh Configure -des -Dcc=$(MUSLCC) -Doptimize=-O2 -Dccflags=-fPIE -Dldflags="-static-pie -s" \
+	  -Dlibs=-lm -Dlibc=$(MUSL_LIB)/libc.a -Dlibpth=$(MUSL_LIB) -Dlocincpth= -Dloclibpth= -Uusedl -Uusethreads \
+	  -Dprefix=/disk -Dprivlib=/disk/perllib -Darchlib=/disk/perllib -Dsitelib=/disk/perllib -Dsitearch=/disk/perllib \
+	  -Dman1dir=none -Dman3dir=none -Dnoextensions="DB_File GDBM_File NDBM_File ODBM_File" >/dev/null
+	$(MAKE) -C build/compat/src/perl5 -s perl >/dev/null
+	cd build/compat/src/perl5 && ./perl -Ilib -e 'for (@ARGV) { eval "require $$_; 1" or die $$@ } print "$$_\n" for values %INC' \
+	  $(PERL_MODULES) | sed -n 's|^lib/||p' | while read f; do \
+	  mkdir -p $(CURDIR)/build/compat/perllib/$$(dirname $$f) && cp lib/$$f $(CURDIR)/build/compat/perllib/$$f; done
+	cp build/compat/src/perl5/perl $@
+
+# CPython, statically linked with its C modules (zlib from source; no
+# ctypes, sqlite3, readline, lzma, bz2, ssl: their libraries are not built
+# for musl here), and its standard library in one zip, which goes on the
+# disk as /disk/py/lib/python312.zip: run it with PYTHONHOME=/disk/py.
+# configure compares the compiler's multiarch with its triplet, which
+# musl-gcc on a glibc host gets wrong, hence the wrapper.
+build/compat/python: test/compat/pyzip.py | build/compat/src
+	rm -rf build/compat/src/pyzlib build/compat/src/pyzlib-out build/compat/src/cpython build/compat/py
+	git clone -q --depth 1 --branch $(ZLIB_TAG) $(ZLIB_GIT) build/compat/src/pyzlib
+	cd build/compat/src/pyzlib && CC=$(MUSLCC) CFLAGS="-O2 -fPIE" ./configure --static --prefix=$(CURDIR)/build/compat/src/pyzlib-out >/dev/null
+	$(MAKE) -C build/compat/src/pyzlib -s install >/dev/null
+	git clone -q --depth 1 --branch $(CPYTHON_TAG) $(CPYTHON_GIT) build/compat/src/cpython
+	printf '#!/bin/sh\nfor a; do [ "$$a" = --print-multiarch ] && { echo x86_64-linux-musl; exit 0; }; done\nexec $(MUSLCC) "$$@"\n' \
+	  > build/compat/src/cpython/musl-cc && chmod +x build/compat/src/cpython/musl-cc
+	cd build/compat/src/cpython && ZLIB_CFLAGS=-I$(CURDIR)/build/compat/src/pyzlib-out/include \
+	  ZLIB_LIBS="-L$(CURDIR)/build/compat/src/pyzlib-out/lib -lz" PKG_CONFIG_LIBDIR=/nonexistent MODULE_BUILDTYPE=static \
+	  py_cv_module__ctypes=n/a py_cv_module__ctypes_test=n/a py_cv_module_readline=n/a py_cv_module__uuid=n/a \
+	  py_cv_module__lzma=n/a py_cv_module__bz2=n/a py_cv_module__sqlite3=n/a py_cv_module_xxlimited=n/a \
+	  py_cv_module_xxlimited_35=n/a CC=$(CURDIR)/build/compat/src/cpython/musl-cc CFLAGS=-fPIE LDFLAGS=-static-pie \
+	  ./configure --disable-shared --disable-test-modules --without-ensurepip --prefix=/disk/py >/dev/null
+	$(MAKE) -C build/compat/src/cpython -s >/dev/null
+	mkdir -p build/compat/py/lib
+	cp build/compat/src/cpython/build/lib.*/_sysconfigdata_*.py build/compat/src/cpython/Lib/
+	build/compat/src/cpython/python test/compat/pyzip.py build/compat/src/cpython/Lib build/compat/py/lib/python312.zip
+	strip -o $@ build/compat/src/cpython/python
+
 # Building C on BastiOS: tcc and GNU make on a second disk (test/compat/
 # devdisk.sh) with a small C runtime under /disk/c, which tcc is configured
 # to look in; test/compat/dev.txt compiles and runs programs with them.
@@ -476,7 +536,7 @@ build/compat/dev.img: build/compat/tcc build/compat/make test/compat/devdisk.sh 
 # build the C it writes, on a third disk (test/compat/bastiodisk.sh) for
 # test/compat/bastio.txt. Z3 is built against glibc, statically: there is
 # no C++ compiler for musl here. Its build takes a while, once.
-BASTIOLANG    ?= $(patsubst %/stage0/target/release/bastioc0,%,$(BASTIOC))
+BASTIOLANG    ?= $(patsubst %/stage0/target/release/bastioc0,%,$(BASTIOC0))
 Z3_GIT        ?= https://github.com/Z3Prover/z3
 Z3_TAG        ?= z3-4.8.12
 Z3_JOBS       ?= 4
@@ -489,8 +549,8 @@ build/compat/z3: | build/compat/src
 	$(MAKE) -C build/compat/src/z3/build -s -j$(Z3_JOBS) z3 >/dev/null
 	strip -o $@ build/compat/src/z3/build/z3
 
-build/compat/bastioc1.c: $(BASTIOC) $(wildcard $(BASTIOLANG)/stage1/*.bastio) | build/compat
-	$(BASTIOC) --emit-c -o $@ $(BASTIOLANG)/stage1/bastioc1.bastio
+build/compat/bastioc1.c: $(BASTIOC0) $(wildcard $(BASTIOLANG)/stage1/*.bastio) | build/compat
+	$(BASTIOC0) --emit-c -o $@ $(BASTIOLANG)/stage1/bastioc1.bastio
 
 build/compat/bastioc1: build/compat/bastioc1.c
 	$(MUSLCC) $(APP_CFLAGS) -o $@ $<
@@ -501,7 +561,7 @@ build/compat/bastio.img: build/compat/bastioc1 build/compat/z3 build/compat/tcc 
 	  $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB) $(BASTIOLANG)/stage1
 
 build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) test/compat/mkdisk.py
-	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
+	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) perllib=build/compat/perllib py=build/compat/py
 
 compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img
 	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --out build/compat $(COMPAT_PROGS)
@@ -554,6 +614,13 @@ compat-ltp: build/bastios.elf build/ltp/.built
 compat-ltp-baseline: build/bastios.elf build/ltp/.built
 	test/compat/ltp.py --update-baseline --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp
 
+# Not part of `make test`: the same micro-benchmarks (bench/osbench.c) on
+# BastiOS and on Linux in the same QEMU machine, side by side; see
+# docs/performance.md. BENCH_ARGS passes options to bench/run.py
+# (--os bastios, --runs 5, --tests syscall,fork, --smp 4).
+bench: build/bastios.elf
+	bench/run.py $(BENCH_ARGS)
+
 # Not part of `make test`: prints timings, checks nothing (see the script).
 smpbench: build/bastios.elf
 	test/smpbench.sh
@@ -583,4 +650,4 @@ clean:
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
 FORCE:
 
-.PHONY: FORCE all run disk usb run-usb test fuzz smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+.PHONY: FORCE all run disk usb run-usb test fuzz bench smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean

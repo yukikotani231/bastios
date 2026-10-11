@@ -16,6 +16,13 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Processors
 
+- The code pages a program reads when it first runs them (see below) come
+  from the page cache, so every process running the program maps the same
+  read-only page and the disk is read once; before, each process read and
+  copied its own. A fault whose blocks are not in the disk's cache sleeps
+  until they are read, instead of the kernel polling the disk with its
+  lock held. Four compiler builds at once went from 7.2-9.1 s to 5.5-5.6 s
+  on four processors and from 8.5-8.9 s to 4.8-5.3 s on one.
 - virtio-blk reads a run of up to eight consecutive blocks in one request
   (the blocks a read queues ahead), instead of one request per 4 KiB
   block: under QEMU each request is a notify and a trip through its I/O
@@ -328,6 +335,17 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   `nc` talking HTTP with a web server on the host (`run.py` runs one) and
   over loopback. A new group, `test/compat/tty.txt`, types keys at
   full-screen programs on the console and checks what they wrote.
+- git 2.47 and Perl 5.40 in `make compat`: git commits, branches, merges
+  300 files, packs with `gc`, clones through `upload-pack` and runs
+  `bisect run`; Perl runs its core modules, fork, signals, sockets and
+  HTTP::Tiny from the host. They found three gaps, fixed here: `execve`
+  passed at most 32 arguments, 16 environment strings and 1280 bytes of
+  them, now 8192 arguments, 1024 environment strings and 128 KiB, as on
+  Linux (`sed -i ... f*` over 300 files failed); `munmap` never gave the
+  address space back, so a program that maps and unmaps as it runs, as
+  musl's `malloc` does for every large block, used up its window (`git
+  add` of 300 files ran out); and the in-memory file system held 128
+  files, and a create past that failed with `ENOENT` instead of `ENOSPC`.
 
 ### Files and disks
 
@@ -385,7 +403,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - Files on the disk can grow to 1 GiB (as far as the disk allows) and in
   memory to 64 MiB; they were capped at 1 MiB.
 - Paths can be up to 255 bytes; they were capped at 28.
-- The in-memory file system holds 128 files and directories (it held 32).
+- The in-memory file system holds 1024 files and directories (it held 32).
 - The disk's directory grows: up to 1023 files and directories under
   `disk/` (it held 64). The format is now `BSTDISK3`, which names the
   directory's extra blocks in the superblock; a `BSTDISK2` disk is mounted
@@ -528,6 +546,15 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - Under UEFI the kernel finds the ACPI tables through the RSDP GRUB
   passes, so every processor starts (it ran on one).
 - `make run-iso` and `make run-uefi` open a QEMU window.
+
+### Build
+
+- The kernel and its programs are built with bastioc1, bastiolang's
+  compiler written in Bastio, which the Makefile builds once with stage0's
+  bastioc0 (`BASTIOC0`). `BASTIOC` still names another compiler.
+- `make NATIVE=1` builds the kernel with bastioc1's x86-64 backend instead
+  of through C (#151). It passes `make test`, but its code is about ten
+  times larger than gcc's, so it is opt-in.
 
 ### Tests and documentation
 

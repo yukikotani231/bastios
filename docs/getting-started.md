@@ -22,7 +22,7 @@ cd bastios
 make -j4
 ```
 
-`make` proves every kernel and user source file with Z3 (a failed proof stops the build with the line and a counterexample, as for any Bastio program), compiles the result to C and links `build/bastios.elf`. The first build also clones BusyBox 1.36.1 and builds it against musl, for the Linux shell. Set `BASTIOC=/path/to/bastioc0` if the compiler is somewhere else.
+`make` proves every kernel and user source file with Z3 (a failed proof stops the build with the line and a counterexample, as for any Bastio program), compiles the result to C and links `build/bastios.elf`. It first builds the compiler, bastiolang's bastioc1, with bastiolang's bootstrap compiler (about half a minute, once). The first build also clones BusyBox 1.36.1 and builds it against musl, for the Linux shell. Set `BASTIOC0=/path/to/bastioc0` if bastiolang is somewhere else.
 
 ## 2. Boot it in QEMU
 

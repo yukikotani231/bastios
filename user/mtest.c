@@ -9,7 +9,34 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
+
+static unsigned long long tsc(void) {
+    unsigned lo, hi;
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((unsigned long long)hi << 32) | lo;
+}
+
+/* Spins for about a second with the direction flag set, across many timer
+ * interrupts. The kernel's own copies and fills assume DF clear, so it must
+ * clear it on entry rather than run with the user's (musl's memmove sets it
+ * for a backward copy). Returns whether the system survived to say so. */
+static int direction_flag(void) {
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    unsigned long long t0 = tsc();
+    do clock_gettime(CLOCK_MONOTONIC, &b);
+    while ((b.tv_sec - a.tv_sec) * 1000000000L + (b.tv_nsec - a.tv_nsec) < 250000000L);
+    unsigned long long quarter = tsc() - t0;
+    for (int i = 0; i < 4; i++) {
+        unsigned long long s = tsc();
+        __asm__ volatile ("std" ::: "cc");
+        while (tsc() - s < quarter) {}
+        __asm__ volatile ("cld" ::: "cc");
+    }
+    return 1;
+}
 
 int main(void) {
     int bad = 0;
@@ -44,6 +71,8 @@ int main(void) {
         printf("mtest: big memory %d %d\n", hs, bs);
         free(huge);
     }
+
+    if (direction_flag()) puts("mtest: direction flag spun");
 
     FILE *f = fopen("/mtest.txt", "w");
     if (!f) { puts("mtest: fopen w failed"); bad++; }

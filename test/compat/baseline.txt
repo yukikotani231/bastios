@@ -10,6 +10,18 @@ apps: micropython: classes, generators, exceptions, big integers
 apps: micropython: json, re, files, os
 apps: micropython: threads and a lock
 apps: nc: a raw HTTP request to the host
+apps: perl: HTTP::Tiny from the host
+apps: perl: files, directories and in-place editing
+apps: perl: fork, pipes, signals and alarm
+apps: perl: modules
+apps: perl: sockets over loopback
+apps: perl: the language
+apps: python: files, shutil and tempfile
+apps: python: http.server and urllib over loopback
+apps: python: multiprocessing
+apps: python: the language and the standard library
+apps: python: threads, subprocess and asyncio
+apps: python: urllib from the host
 apps: qjs: files and exec
 apps: qjs: language
 apps: qjs: promises and timers
@@ -94,6 +106,13 @@ busybox: which
 busybox: whoami
 busybox: xargs
 busybox: yes | head
+dev: make: a project of two files
+dev: make: parallel jobs
+dev: make: rebuilds only what changed
+dev: tcc: a compile error
+dev: tcc: arguments, exit status, an executable file
+dev: tcc: hello
+dev: tcc: the library (malloc, qsort, files, strings)
 ssh: dropbear: the server starts
 ssh: dropbear: the server stops
 ssh: ssh -t: a command on a terminal (a pty in the guest)
@@ -103,13 +122,6 @@ ssh: ssh: an interactive login, the shell's exit status
 ssh: ssh: an unknown key is refused
 ssh: ssh: run a command
 ssh: ssh: standard input and the exit status
-dev: make: a project of two files
-dev: make: parallel jobs
-dev: make: rebuilds only what changed
-dev: tcc: a compile error
-dev: tcc: arguments, exit status, an executable file
-dev: tcc: hello
-dev: tcc: the library (malloc, qsort, files, strings)
 t_cred: a child inherits ids; /proc/self/status shows them
 t_cred: an unprivileged process keeps to the ids it holds
 t_cred: getgrnam finds users
@@ -175,6 +187,12 @@ t_dns: name server binds UDP port 53
 t_dns: point resolv.conf at it
 t_dns: resolv.conf names a server
 t_dns: resolv.conf put back
+t_fdlock: 200 descriptors, dup2 to 200 and F_DUPFD from 100
+t_fdlock: F_GETLK reports the conflicting lock that starts first
+t_fdlock: F_SETLEASE and F_GETLEASE
+t_fdlock: F_SETOWN, F_SETOWN_EX and F_SETSIG set a description's owner
+t_fdlock: O_ASYNC on a pipe signals its owner when input arrives
+t_fdlock: a lock needs the matching access mode; bad requests are EINVAL
 t_file: /dev/null write
 t_file: /dev/urandom read
 t_file: /dev/zero read
@@ -349,6 +367,7 @@ t_mem: MAP_SHARED write-back at munmap
 t_mem: a MAP_SHARED mapping sees write(2)
 t_mem: file for mapping
 t_mem: futex across fork on a MAP_SHARED page
+t_mem: large malloc and free, many times
 t_mem: madvise
 t_mem: malloc churn
 t_mem: mlock
@@ -361,8 +380,10 @@ t_mem: mmap of a closed descriptor is EBADF
 t_mem: mmap of a file opened write-only is EACCES
 t_mem: mprotect read-only faults on write
 t_mem: mremap grow
+t_mem: mremap growth reuses address space
 t_mem: munmap
 t_mem: munmap faults on touch
+t_mem: munmap gives address space back
 t_mem: read(2) sees a store into a MAP_SHARED mapping
 t_mem: writable MAP_SHARED of a read-only file is EACCES
 t_misc: /etc/passwd
@@ -383,18 +404,23 @@ t_misc: tcgetattr
 t_misc: tcgetpgrp
 t_misc: tcsetattr
 t_more: FIONREAD on a pipe
+t_more: O_NONBLOCK by fcntl on a listening socket
 t_more: a full nonblocking pipe is EAGAIN
+t_more: bind to port 0 names a port before listen
 t_more: copy_file_range
 t_more: dup3 O_CLOEXEC
 t_more: fallocate grows a file
 t_more: fchmodat
 t_more: fcntl F_SETLK and F_GETLK
 t_more: flock exclusive
+t_more: fstat on a directory agrees with stat
 t_more: fstatat AT_EMPTY_PATH
 t_more: fstatat with AT_SYMLINK_NOFOLLOW
 t_more: fstatfs
 t_more: futimens
 t_more: getrusage children
+t_more: ioctl FIOCLEX and FIONCLEX
+t_more: ioctl FIONBIO makes a read EAGAIN
 t_more: memfd_create
 t_more: mkdirat and unlinkat AT_REMOVEDIR
 t_more: open O_CLOEXEC
@@ -406,6 +432,7 @@ t_more: pwritev
 t_more: readdir counts the files
 t_more: renameat2 RENAME_NOREPLACE
 t_more: sched_getcpu
+t_more: sem_open in /dev/shm
 t_more: sendfile file to file
 t_more: sendfile needs a readable source
 t_more: sendfile to a pipe
@@ -433,6 +460,63 @@ t_net: getaddrinfo localhost
 t_net: getaddrinfo numeric
 t_net: getsockopt SO_TYPE
 t_net: inet_pton
+t_newer: O_PATH: fchmod is EBADF
+t_newer: O_PATH: fstat works
+t_newer: O_PATH: read is EBADF
+t_newer: a path in unmapped memory is EFAULT
+t_newer: an empty path is ENOENT
+t_newer: execveat a descriptor (fexecve)
+t_newer: execveat a path
+t_newer: execveat of a link with AT_SYMLINK_NOFOLLOW
+t_newer: execveat with bad flags
+t_newer: fchmodat2 follows a link
+t_newer: fchmodat2 on a link itself
+t_newer: fchmodat2 with AT_EMPTY_PATH
+t_newer: fchmodat2 with bad flags
+t_newer: getdents (the old one)
+t_newer: getdents into a byte
+t_newer: getdents64 at the end
+t_newer: getdents64 lists . and ..
+t_newer: lseek rewinds a directory
+t_newer: pidfd_getfd takes the child's pipe end
+t_newer: pidfd_open of itself is close-on-exec
+t_newer: pidfd_open with bad flags
+t_newer: pidfd_send_signal 0
+t_newer: pidfd_send_signal on a file
+t_newer: pidfd_send_signal to a reaped child
+t_newer: poll on a running child's pidfd
+t_newer: poll on an ended child's pidfd
+t_newer: preadv2 at -1 uses and moves the offset
+t_newer: preadv2 at -2
+t_newer: preadv2 at an offset
+t_newer: preadv2 with RWF_HIPRI
+t_newer: preadv2 with an unknown flag
+t_newer: process_vm_readv from unmapped memory
+t_newer: process_vm_readv of a child
+t_newer: process_vm_readv of a reaped child
+t_newer: process_vm_readv of itself
+t_newer: process_vm_readv with flags
+t_newer: process_vm_writev to a child and back
+t_newer: pwritev2 at -1 appends at the offset
+t_newer: pwritev2 at an offset
+t_newer: rewinddir
+t_newer: sysfs counts file system types
+t_newer: sysfs names and numbers agree
+t_newer: sysfs with an unknown name
+t_newer: telldir and seekdir
+t_newer: ustat for /'s device
+t_newer: waitid P_PIDFD
+t_path: O_NOFOLLOW, O_NOATIME, EISDIR, rmdir of . and mkdir over a name
+t_path: a loop of links through a long path is ELOOP
+t_path: a path in unmapped memory is EFAULT
+t_path: a set-group-ID bit at create is kept only for a member of the group
+t_path: an empty path is ENOENT, except with AT_EMPTY_PATH
+t_path: chroot keeps absolute paths, links and .. inside the new root
+t_path: fstat of a directory gives its mode
+t_path: mknod makes device and socket nodes; a device node opens its device
+t_path: paths are read up to PATH_MAX
+t_path: pread and pwrite take no negative offset
+t_path: sendfile checks its descriptors and offset; statx its flags
 t_perm: a new file belongs to its maker
 t_perm: a path needs search permission on its directories
 t_perm: a set-group-ID directory passes on its group
@@ -608,5 +692,6 @@ t_time: time
 tty: kilo: edit and save a file
 tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
 tty: micropython: REPL line editing and history
+tty: python: the REPL, and Ctrl-C is KeyboardInterrupt
 tty: stty: the terminal is in canonical mode again after an editor
 tty: vi: edit and save a file

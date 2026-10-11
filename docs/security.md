@@ -110,6 +110,11 @@ Known gaps, most serious first.
    needs only ownership; `/proc/PID/exe` of anyone's process can be read;
    `/dev/console` is open to all; names of unix sockets in the abstract
    namespace (a leading 0 byte) have no permissions, as on Linux.
-4. Not implemented, so not a hole: `ptrace`, `process_vm_readv`,
-   `/proc/PID/mem`, `environ` and `maps`, `chroot`, `iopl` and `ioperm`,
-   `syslog`, `swapon` and `pivot_root` all fail (`ENOSYS` or missing).
+4. Not implemented, so not a hole: `ptrace`, `/proc/PID/mem`, `environ`
+   and `maps`, `chroot`, `iopl` and `ioperm`, `syslog`, `swapon` and
+   `pivot_root` all fail (`ENOSYS` or missing). `process_vm_readv`,
+   `process_vm_writev`, `pidfd_getfd` and `kcmp` reach another process only
+   with the same user and group ids (real, effective, saved and
+   file-system), or as root
+   (`src/lxpidfd.bastio`), as Linux's `PTRACE_MODE_ATTACH_REALCREDS` asks;
+   there is no Yama ptrace scope on top of that.
