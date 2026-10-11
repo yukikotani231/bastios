@@ -148,7 +148,7 @@ static uint64_t scan_rsdp(uint64_t from, uint64_t to) {
 extern uint8_t bst_boot_rsdp[36];   /* multiboot.c: the copy Multiboot 2 passed */
 extern uint32_t bst_boot_rsdp_len;
 
-/* The RSDP: the copy a Multiboot 2 loader passed (GRUB, from the ISO; under
+/* The RSDP: the copy a Multiboot 2 loader passed (Limine, from the ISO; under
  * UEFI the only way to it), else where BIOS firmware puts it, on a 16-byte
  * boundary in the first KiB of the EBDA or in 0xE0000-0xFFFFF (ACPI 6.5,
  * 5.2.5.1). */

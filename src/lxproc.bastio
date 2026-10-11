@@ -8,6 +8,8 @@ import "lxdev.bastio";
 import "core/endian.bastio";
 import "core/bytes.bastio";
 
+const BANG_MAX: u64 = 256;               // the bytes of a "#!" line looked at, as Linux
+
 // ---------------------------------------------------------------- fork
 
 /// fork (and vfork, which may share memory but need not): a copy of
@@ -216,7 +218,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
   ensures kok(k)
 {
   k.perr = ENOENT;
-  let src = lx_src_at(&mut k, pid, dirfd, path, flags);
+  let mut src = lx_src_at(&mut k, pid, dirfd, path, flags);
   if !src.file && src.prog >= NPROGS {
     return k.perr;
   }
@@ -224,7 +226,34 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
     return ETXTBSY;                         // open for writing somewhere
   }
   let mut args = balloc(ARGS_MAX);
-  let mut alen = lx_args(&mut k, pid, argv, &mut args, 0, ARGV_MAX);
+  // A script starting with "#!": its interpreter runs instead, with the
+  // line's argument and the script's path before the rest of argv.
+  let mut first = 0;
+  let mut av = argv;
+  let mut line = balloc(BANG_MAX);
+  let bang = bang_line(&mut k.fs, src, &mut line);
+  if bang > BANG_MAX {
+    bfree(line);
+    bfree(args);
+    return ENOEXEC;
+  }
+  if bang > 0 {
+    first = bang_args(&mut k, pid, line, bang, path, &mut args);
+    if first > ARGS_MAX {
+      bfree(line);
+      bfree(args);
+      return first;                           // -errno
+    }
+    av = argv_rest(&mut k, pid, argv);
+    src = bang_src(&mut k, pid, line);
+    if !src.file && src.prog >= NPROGS {
+      bfree(line);
+      bfree(args);
+      return k.perr;
+    }
+  }
+  bfree(line);
+  let mut alen = lx_args(&mut k, pid, av, &mut args, first, ARGV_MAX);
   if alen > ARGS_MAX {
     bfree(args);
     return alen;                              // -errno
@@ -314,7 +343,16 @@ fn lx_src_at(k: &mut Kernel, pid: u64, dirfd: u64, va: u64, flags: u64) -> Src
       }
     }
   }
-  let n = lx_path_at(&mut k, pid, dirfd, va);
+  return src_named(&mut k, pid, lx_path_at(&mut k, pid, dirfd, va));
+}
+
+/// lx_src_at for the name n that a path walk left in the transfer buffer.
+fn src_named(k: &mut Kernel, pid: u64, n: u64) -> Src
+  requires kok(k) && pid < NPROC
+  requires n == NO_RESULT || n <= FNAME_MAX
+  ensures kok(k)
+{
+  let none = Src { file: false, prog: NPROGS, f: 0, size: 0 };
   if n == NO_RESULT {
     return none;
   }
@@ -330,7 +368,7 @@ fn lx_src_at(k: &mut Kernel, pid: u64, dirfd: u64, va: u64, flags: u64) -> Src
     if n <= FNAME_MAX && bin_suid(k.fs.xfer, n) {
       suid = 1;                             // f marks a set-user-ID-root built-in (exec_ids)
     }
-    let prog = lx_prog_at(&mut k, pid, dirfd, va);
+    let prog = bin_prog(k.fs.xfer, n);
     return Src { file: false, prog: prog, f: suid, size: slen(prog_image(prog)) };
   }
   k.perr = ENOENT;
@@ -444,19 +482,6 @@ fn exe_src(k: &mut Kernel, p: u64) -> Src
   return Src { file: true, prog: NPROGS, f: f, size: size };
 }
 
-/// The program at user path `va`: /bin/NAME for a built-in image NAME.
-/// Returns its index, or NPROGS if there is none.
-fn lx_prog_at(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
-  requires kok(k) && pid < NPROC
-  ensures kok(k)
-{
-  let n = lx_path_at(&mut k, pid, dirfd, va);
-  if n == NO_RESULT || n <= 4 || !xfer_bin(k.fs.xfer) {
-    return NPROGS;
-  }
-  return bin_prog(k.fs.xfer, n);
-}
-
 /// Whether the transfer buffer starts with "bin/".
 fn xfer_bin(x: &Bytes) -> bool
   requires blen(x) == XFER
@@ -499,45 +524,200 @@ fn lx_args(k: &mut Kernel, pid: u64, argv: u64, args: &mut Bytes, from: u64, mos
     if w.v == 0 {
       return alen;
     }
-    if w.v < USER_BASE || w.v >= USER_BASE + USER_SIZE {
-      return EFAULT;
+    let end = lx_str(&mut k, pid, w.v, &mut args, alen);
+    if end > ARGS_MAX {
+      return end;                             // -errno
     }
-    // A string is copied a transfer buffer at a time, up to its NUL.
-    let mut at = w.v;
-    let mut done = false;
-    while !done
-      invariant from <= alen && alen <= ARGS_MAX && kok(k) && blen(args) == ARGS_MAX
-      invariant USER_BASE <= at && j < most && most <= ARGV_MAX && argv < USER_BASE + USER_SIZE
-    {
-      if alen >= ARGS_MAX {
-        return E2BIG;                         // no NUL in what fits
-      }
-      if at >= USER_BASE + USER_SIZE {
-        return EFAULT;
-      }
-      let want = smaller(smaller(ARGS_MAX - alen, XFER), USER_SIZE - (at - USER_BASE));
-      let got = copy_from_user(&mut k.spaces, pid, at, &mut k.fs.xfer, want);
-      if got == NO_RESULT || got == 0 {
-        return EFAULT;
-      }
-      let mut i = 0;
-      while i < got && !done
-        invariant i <= got && got <= want && want <= ARGS_MAX - alen && want <= XFER && kok(k) && blen(args) == ARGS_MAX
-        invariant from <= alen && alen < ARGS_MAX && USER_BASE <= at && j < most && most <= ARGV_MAX && argv < USER_BASE + USER_SIZE
-      {
-        let c = bget(k.fs.xfer, i);
-        bset(&mut args, alen + i, c);
-        if c == 0 {
-          done = true;
-        }
-        i = i + 1;
-      }
-      alen = alen + i;
-      at = at + i;
-    }
+    alen = end;
     j = j + 1;
   }
   return E2BIG;
+}
+
+/// Copies the string at user address va, with its NUL, into args from
+/// byte `from`. Returns where it ends, or -errno (more than ARGS_MAX) if va
+/// is bad or the string does not fit.
+fn lx_str(k: &mut Kernel, pid: u64, va: u64, args: &mut Bytes, from: u64) -> u64
+  requires kok(k) && pid < NPROC && blen(args) == ARGS_MAX && from <= ARGS_MAX
+  ensures kok(k) && blen(args) == ARGS_MAX
+  ensures result <= ARGS_MAX ==> from < result
+{
+  if va < USER_BASE || va >= USER_BASE + USER_SIZE {
+    return EFAULT;
+  }
+  // A transfer buffer at a time, up to the NUL.
+  let mut alen = from;
+  let mut at = va;
+  let mut done = false;
+  while !done
+    invariant from <= alen && alen <= ARGS_MAX && kok(k) && blen(args) == ARGS_MAX && USER_BASE <= at
+    invariant done ==> from < alen
+  {
+    if alen >= ARGS_MAX {
+      return E2BIG;                         // no NUL in what fits
+    }
+    if at >= USER_BASE + USER_SIZE {
+      return EFAULT;
+    }
+    let want = smaller(smaller(ARGS_MAX - alen, XFER), USER_SIZE - (at - USER_BASE));
+    let got = copy_from_user(&mut k.spaces, pid, at, &mut k.fs.xfer, want);
+    if got == NO_RESULT || got == 0 {
+      return EFAULT;
+    }
+    let mut i = 0;
+    while i < got && !done
+      invariant i <= got && got <= want && want <= ARGS_MAX - alen && want <= XFER && kok(k) && blen(args) == ARGS_MAX
+      invariant from <= alen && alen < ARGS_MAX && USER_BASE <= at
+      invariant done ==> i > 0
+    {
+      let c = bget(k.fs.xfer, i);
+      bset(&mut args, alen + i, c);
+      if c == 0 {
+        done = true;
+      }
+      i = i + 1;
+    }
+    alen = alen + i;
+    at = at + i;
+  }
+  return alen;
+}
+
+// ---------------------------------------------------------------- "#!" scripts
+
+
+/// Whether byte c ends a word of a "#!" line: space, tab, newline or NUL.
+fn bang_gap(c: u64) -> bool {
+  return c == 32 || c == 9 || c == 10 || c == 0;
+}
+
+/// If the program src starts with "#!", puts the interpreter's path and
+/// then the line's argument, if any, each with a NUL, at the start of
+/// `line`, and returns how many bytes that is. 0 if src is not a script,
+/// more than BANG_MAX for a "#!" line that names no interpreter.
+fn bang_line(v: &mut Vfs, src: Src, line: &mut Bytes) -> u64
+  requires vfs_ok(v) && blen(line) == BANG_MAX
+  ensures vfs_ok(v) && blen(line) == BANG_MAX
+  ensures result <= BANG_MAX || result == BANG_MAX + 1
+  ensures result <= BANG_MAX ==> result == 0 || 2 <= result
+{
+  let n = smaller(src.size, BANG_MAX);
+  if n < 2 || !src_read(&mut v, src, 0, n) {
+    return 0;
+  }
+  if bget(v.xfer, 0) != 35 || bget(v.xfer, 1) != 33 {
+    return 0;                               // not "#!"
+  }
+  let mut i = 2;
+  while i < n && (bget(v.xfer, i) == 32 || bget(v.xfer, i) == 9)
+    invariant 2 <= i && i <= n && n <= BANG_MAX && vfs_ok(v)
+  {
+    i = i + 1;
+  }
+  let start = i;
+  while i < n && !bang_gap(cast[u64](bget(v.xfer, i)))
+    invariant start <= i && i <= n && n <= BANG_MAX && vfs_ok(v)
+  {
+    i = i + 1;
+  }
+  if i == start {
+    return BANG_MAX + 1;
+  }
+  let iend = i;
+  let mut o = 0;
+  while o < i - start
+    invariant o <= i - start && 2 <= start && start <= i && i <= n && n <= BANG_MAX && vfs_ok(v) && blen(line) == BANG_MAX
+  {
+    bset(&mut line, o, bget(v.xfer, start + o));
+    o = o + 1;
+  }
+  bset(&mut line, o, 0);
+  o = o + 1;
+  // The argument: the rest of the line, less the blanks around it.
+  while i < n && (bget(v.xfer, i) == 32 || bget(v.xfer, i) == 9)
+    invariant iend <= i && i <= n && n <= BANG_MAX && o == iend - start + 1 && vfs_ok(v)
+  {
+    i = i + 1;
+  }
+  let a = i;
+  while i < n && bget(v.xfer, i) != 10 && bget(v.xfer, i) != 0
+    invariant a <= i && i <= n && n <= BANG_MAX && vfs_ok(v)
+  {
+    i = i + 1;
+  }
+  let mut e = i;
+  while e > a && (bget(v.xfer, e - 1) == 32 || bget(v.xfer, e - 1) == 9)
+    invariant a <= e && e <= i && i <= n && n <= BANG_MAX && vfs_ok(v)
+  {
+    e = e - 1;
+  }
+  if e > a && o + (e - a) < BANG_MAX {
+    let mut c = 0;
+    while c < e - a
+      invariant c <= e - a && o + (e - a) < BANG_MAX && a <= e && e <= n && n <= BANG_MAX && vfs_ok(v) && blen(line) == BANG_MAX
+    {
+      bset(&mut line, o + c, bget(v.xfer, a + c));
+      c = c + 1;
+    }
+    bset(&mut line, o + c, 0);
+    o = o + c + 1;
+  }
+  return o;
+}
+
+/// The start of a script's arguments: the n bytes of `line` (the
+/// interpreter and its argument), then the script's path as the caller
+/// gave it at user address `path`. Returns where they end, or -errno.
+fn bang_args(k: &mut Kernel, pid: u64, line: &Bytes, n: u64, path: u64, args: &mut Bytes) -> u64
+  requires kok(k) && pid < NPROC && blen(line) == BANG_MAX && n <= BANG_MAX && blen(args) == ARGS_MAX
+  ensures kok(k) && blen(args) == ARGS_MAX
+{
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= BANG_MAX && BANG_MAX < ARGS_MAX && blen(args) == ARGS_MAX && kok(k)
+  {
+    bset(&mut args, i, bget(line, i));
+    i = i + 1;
+  }
+  return lx_str(&mut k, pid, path, &mut args, n);
+}
+
+/// argv without its first string (the interpreter's argv takes the
+/// script's path in its place). An empty or bad argv stays as it is.
+fn argv_rest(k: &mut Kernel, pid: u64, argv: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if argv < USER_BASE || argv >= USER_BASE + USER_SIZE - 8 {
+    return argv;
+  }
+  let w = user_u64(&mut k.spaces, pid, argv);
+  if !w.ok || w.v == 0 {
+    return argv;
+  }
+  return argv + 8;
+}
+
+/// The interpreter a "#!" line names (the first string in `line`), found
+/// as execve finds a program. Not found: a built-in Src with prog NPROGS,
+/// and the -errno in k.perr.
+fn bang_src(k: &mut Kernel, pid: u64, line: &Bytes) -> Src
+  requires kok(k) && pid < NPROC && blen(line) == BANG_MAX
+  ensures kok(k)
+{
+  let mut e = 0;
+  while e < BANG_MAX && bget(line, e) != 0
+    invariant e <= BANG_MAX && blen(line) == BANG_MAX && kok(k)
+  {
+    bset(&mut k.fs.xfer, e, bget(line, e));
+    e = e + 1;
+  }
+  k.perr = ENOENT;
+  if e == 0 || e >= BANG_MAX {
+    return Src { file: false, prog: NPROGS, f: 0, size: 0 };
+  }
+  let n = perm_walk(&mut k, pid, lx_path_xfer(&mut k, pid, e, OFD_N, true));
+  return src_named(&mut k, pid, n);
 }
 
 // ---------------------------------------------------------------- wait4

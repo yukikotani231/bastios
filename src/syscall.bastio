@@ -339,14 +339,28 @@ fn sock_retry(k: &mut Kernel, pid: u64, n: u64) -> u64
 {
   let r = lx_retry(&mut k, pid, n);
   if r == SWITCH {
-    // A frame nic_listen finds changes the count, so the sock_wake after
-    // this call wakes it straight away.
-    pset(&mut k.procs, pid, F_STATE, SOCKWAIT);
-    pset(&mut k.procs, pid, F_WAIT, nic_rx(k.nic));
-    pset(&mut k.procs, pid, F_CODE, k.ticks);
-    nic_listen(&mut k.nic);
+    nap(&mut k, pid, true);
   }
   return r;
+}
+
+/// Puts process pid, whose call is to run again, to sleep in SOCKWAIT:
+/// until the clock ticks or a signal is posted (sock_wake, post_sig), or,
+/// with `frames`, a frame comes in. F_WAIT holds the frame count to wait
+/// past, or NO_RESULT for none.
+fn nap(k: &mut Kernel, pid: u64, frames: bool)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  pset(&mut k.procs, pid, F_STATE, SOCKWAIT);
+  pset(&mut k.procs, pid, F_CODE, k.ticks);
+  pset(&mut k.procs, pid, F_WAIT, NO_RESULT);
+  if frames {
+    // A frame nic_listen finds changes the count, so the sock_wake after
+    // this call wakes it straight away.
+    pset(&mut k.procs, pid, F_WAIT, nic_rx(k.nic));
+    nic_listen(&mut k.nic);
+  }
 }
 
 /// Wakes the processes in SOCKWAIT once a frame has come in or the clock
@@ -356,7 +370,8 @@ fn sock_wake(k: &mut Kernel) -> bool
   requires kok(k)
   ensures kok(k)
 {
-  if !nic_moved(&mut k.nic, k.ticks) {
+  // Without a card nothing moves but the clock: every call looks.
+  if !nic_moved(&mut k.nic, k.ticks) && nic_up(k.nic) {
     return false;
   }
   let rx = nic_rx(k.nic);
@@ -367,11 +382,12 @@ fn sock_wake(k: &mut Kernel) -> bool
     invariant 1 <= p && p <= NPROC && kok(k)
   {
     if state(k.procs, p) == SOCKWAIT {
-      if pget(k.procs, p, F_WAIT) != rx || pget(k.procs, p, F_CODE) != k.ticks {
+      let w = pget(k.procs, p, F_WAIT);
+      if (w != NO_RESULT && w != rx) || pget(k.procs, p, F_CODE) != k.ticks {
         pset(&mut k.procs, p, F_STATE, READY);
         woke = true;
-      } else {
-        left = true;
+      } else if w != NO_RESULT {
+        left = true;                        // still waiting on a frame
       }
     }
     p = p + 1;

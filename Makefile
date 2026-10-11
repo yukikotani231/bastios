@@ -223,25 +223,51 @@ build/bastios64.elf: $(KOBJS) boot/linker.ld
 build/bastios.elf: build/bastios64.elf
 	objcopy -O elf32-i386 $< $@
 
-# A bootable image: GRUB (BIOS and UEFI, as a hybrid ISO that can also be
-# written to a USB stick) loading the same Multiboot kernel. Needs
-# grub-mkrescue, xorriso, mtools, and GRUB's i386-pc and x86_64-efi files
-# (grub-pc-bin and grub-efi-amd64-bin on Ubuntu).
-build/bastios.iso: build/bastios.elf boot/grub.cfg
+# A bootable image: Limine (BSD-2-Clause; BIOS and UEFI, as a hybrid ISO
+# that can also be written to a USB stick) loading the same Multiboot
+# kernel. Limine is not part of this repository: its binary release is
+# fetched at a pinned tag, and its small installer (limine.c, which writes
+# the BIOS boot code into the image) is built here. Needs xorriso.
+LIMINE_GIT ?= https://github.com/limine-bootloader/limine.git
+LIMINE_TAG ?= v11.4.1-binary
+
+build/limine/limine: | build
+	rm -rf build/limine
+	git -c advice.detachedHead=false clone -q --depth 1 --branch $(LIMINE_TAG) $(LIMINE_GIT) build/limine
+	$(MAKE) -C build/limine -s CC=$(CC)
+
+build/bastios.iso: build/bastios.elf boot/limine.conf build/limine/limine
 	rm -rf build/iso
-	mkdir -p build/iso/boot/grub
+	mkdir -p build/iso/boot/limine build/iso/EFI/BOOT
 	cp build/bastios.elf build/iso/boot/
-	cp boot/grub.cfg build/iso/boot/grub/
-	grub-mkrescue -o $@ build/iso 2>/dev/null
+	cp boot/limine.conf build/limine/limine-bios.sys build/limine/limine-bios-cd.bin \
+	  build/limine/limine-uefi-cd.bin build/limine/LICENSE build/iso/boot/limine/
+	cp build/limine/BOOTX64.EFI build/iso/EFI/BOOT/
+	xorriso -as mkisofs -quiet -R -r -J -b boot/limine/limine-bios-cd.bin \
+	  -no-emul-boot -boot-load-size 4 -boot-info-table -hfsplus -apm-block-size 2048 \
+	  --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image \
+	  --protective-msdos-label build/iso -o $@ 2>/dev/null
+	build/limine/limine bios-install --quiet $@
 
 iso: build/bastios.iso
 
 # A USB stick image: the ISO, then a GPT partition of USB_MIB MiB for the
 # file system (tools/mkusb.py). Booted from, the stick is also the disk,
-# and the machine's own disks are left alone.
+# and the machine's own disks are left alone. Limine's installer turns the
+# ISO's GPT into an MBR (better for CDs and old firmware), but the stick
+# needs its GPT, so the stick starts from the same files made into an ISO
+# with a GPT and no Apple map, gets a BIOS boot partition for Limine's BIOS
+# stage, and Limine is installed into it with the GPT kept.
 USB_MIB ?= 64
-build/bastios-usb.img: build/bastios.iso tools/mkusb.py
-	tools/mkusb.py $@ --iso build/bastios.iso --mib $(USB_MIB)
+build/bastios-gpt.iso: build/bastios.iso
+	xorriso -as mkisofs -quiet -R -r -J -b boot/limine/limine-bios-cd.bin \
+	  -no-emul-boot -boot-load-size 4 -boot-info-table \
+	  --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image \
+	  --protective-msdos-label build/iso -o $@ 2>/dev/null
+
+build/bastios-usb.img: build/bastios-gpt.iso tools/mkusb.py
+	tools/mkusb.py $@ --iso build/bastios-gpt.iso --mib $(USB_MIB) --bios-boot
+	build/limine/limine bios-install --quiet --no-gpt-to-mbr-isohybrid-conversion $@
 
 usb: build/bastios-usb.img
 
@@ -253,15 +279,19 @@ SMP     ?= 2
 OVMF    ?= /usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
 # A virtio disk and network card (QEMU's user network: DHCP, and the host
-# reachable at 10.0.2.2; TCP port 7001 on this machine reaches the guest's
-# port 7001, for `tcpecho 7001`). QEMU's default CPU model lacks 1 GiB
+# reachable at 10.0.2.2). TCP ports on this machine reach the guest's:
+# 7001 for `tcpecho 7001`, SSH_PORT its 22 and HTTP_PORT its 80, for an SSH
+# server and a web server (docs/using.md). QEMU's default CPU model lacks 1 GiB
 # pages, which boot.S needs to map the device window above 4 GiB (where
 # UEFI firmware puts 64-bit PCI BARs); every real x86-64 CPU of the last
 # decade has them.
+SSH_PORT  ?= 2222
+HTTP_PORT ?= 8080
 QEMU_DEVS := -cpu qemu64,+pdpe1gb -m 256M -smp $(SMP) -no-reboot \
              -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
              -drive file=$(DISK),format=raw,if=none,id=vd -device virtio-blk-pci,drive=vd \
-             -netdev user,id=n0,hostfwd=tcp:127.0.0.1:7001-:7001 -device virtio-net-pci,netdev=n0
+             -netdev user,id=n0,hostfwd=tcp:127.0.0.1:7001-:7001,hostfwd=tcp:127.0.0.1:$(SSH_PORT)-:22,hostfwd=tcp:127.0.0.1:$(HTTP_PORT)-:80 \
+             -device virtio-net-pci,netdev=n0
 QEMU_ARGS := -kernel build/bastios.elf -display none $(QEMU_DEVS)
 # The ISO targets open QEMU's window, for the screen and keyboard
 # (ISO_DISPLAY="-display none" for serial only).
@@ -285,7 +315,7 @@ CLEAN_EXIT := ; s=$$?; [ $$s -eq 0 ] || [ $$s -eq 33 ]
 run: build/bastios.elf $(DISK)
 	$(QEMU) $(QEMU_ARGS) -serial mon:stdio $(CLEAN_EXIT)
 
-# The ISO through GRUB, under BIOS and under UEFI (OVMF firmware).
+# The ISO through Limine, under BIOS and under UEFI (OVMF firmware).
 run-iso: build/bastios.iso $(DISK)
 	$(QEMU) -cdrom build/bastios.iso $(ISO_DISPLAY) $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
 
@@ -560,15 +590,38 @@ build/compat/bastio.img: build/compat/bastioc1 build/compat/z3 build/compat/tcc 
 	test/compat/bastiodisk.sh $@ build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc \
 	  $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB) $(BASTIOLANG)/stage1
 
+# Alpine Linux on BastiOS, on a fourth disk (test/compat/alpinedisk.py) for
+# test/compat/alpine.txt: Alpine's root file system, which the checks enter
+# with chroot, and local repositories apk installs packages from. They come
+# from Docker Hub images, pinned by digest: the minirootfs, and images that
+# apk installed packages into, which alpinedisk.py packs again. All their
+# packages are served over HTTP; ALPINE_DISK_PKGS, with what they depend
+# on, also go on the disk, so the checks that use them need no network.
+# The images: git and curl; Alpine's own CI image (alpine-sdk: gcc, g++,
+# make, binutils, musl-dev); python3 (the ansible image); jq and libxml2's
+# tools; and vim from edge (its runtime is about 2100 files: it waits for a
+# disk directory bigger than 1024 entries, as gcc and python3 do).
+ALPINE_BASE ?= library/alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+ALPINE_PKGS ?= alpine/git@sha256:a4bb51f1a3553df194ce679fc1db721d8bfba2046fa1a88fe9d4ac551ffbce25 \
+               alpine/curl@sha256:e17bf3bdfef2efda277af9b73149ece806d30354b3eebd002555f66a8cabb357 \
+               alpinelinux/alpine-gitlab-ci@sha256:4bce54b0b246967f6ab51476d5511245ba35a49f30b2e63102ca294ab488add9 \
+               alpine/ansible@sha256:72ed4cb27b533dc2bc608a657b9ed630c2ee53a86ba9111d0b710c5424de0fe2 \
+               alpine/xml@sha256:836f531a7e38bbdaab8f1c1ce76bf868412f253671625ebf54cf14fa28544de6 \
+               heywoodlh/vim@sha256:c8c4f0de47f20de92af6d3b0544898e857f6c2eecd7ab397a1e7daf0b5fc6292
+ALPINE_DISK_PKGS ?= git,curl,less,openssh-keygen,bash,make,jq,rsync,openssl,file,libxml2-utils
+
+build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py | build/compat
+	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) --disk $(ALPINE_DISK_PKGS)
+
 build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) test/compat/mkdisk.py
 	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) perllib=build/compat/perllib py=build/compat/py
 
-compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --out build/compat $(COMPAT_PROGS)
+compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --out build/compat $(COMPAT_PROGS)
 
 # Records which checks pass now, so `make compat` catches regressions.
-compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --out build/compat $(COMPAT_PROGS)
+compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --out build/compat $(COMPAT_PROGS)
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)

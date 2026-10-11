@@ -130,12 +130,7 @@ $ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_EXEC_PATH=/disk; 
 301
 
 == git: gc, fsck and a clone through upload-pack
-# pack.threads=1: with threads, about 1 run in 12 ends in a kernel fault
-# (garbage in k.fpus, found by give_page in finish, src/main.bastio), on
-# main as well. It still happens now and then without them, here and in
-# the other git cases, so no git case is in baseline.txt until that bug
-# is fixed: they are reported but cannot fail the suite.
-$ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_EXEC_PATH=/disk; G="/disk/git --no-pager -c user.name=T -c user.email=t@x -c init.defaultBranch=main -c maintenance.auto=false -c color.ui=false"; mkdir ca_g && (cd ca_g && $G init -q --template= && for i in 1 2 3 4 5 6; do /disk/busybox seq 1 $((i * 500)) > f && $G add f && $G commit -qm c$i; done && $G -c pack.threads=1 gc -q && $G fsck --no-progress && $G count-objects -v | /disk/busybox grep -e '^count' -e '^packs') && $G clone -q --template= --no-local -u '/disk/git upload-pack' ca_g ca_g2 && $G -C ca_g2 log --format=%s | /disk/busybox head -n 2 && /disk/busybox cmp ca_g/f ca_g2/f && echo same; rm -rf ca_g ca_g2
+$ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_EXEC_PATH=/disk; G="/disk/git --no-pager -c user.name=T -c user.email=t@x -c init.defaultBranch=main -c maintenance.auto=false -c color.ui=false"; mkdir ca_g && (cd ca_g && $G init -q --template= && for i in 1 2 3 4 5 6; do /disk/busybox seq 1 $((i * 500)) > f && $G add f && $G commit -qm c$i; done && $G gc -q && $G fsck --no-progress && $G count-objects -v | /disk/busybox grep -e '^count' -e '^packs') && $G clone -q --template= --no-local -u '/disk/git upload-pack' ca_g ca_g2 && $G -C ca_g2 log --format=%s | /disk/busybox head -n 2 && /disk/busybox cmp ca_g/f ca_g2/f && echo same; rm -rf ca_g ca_g2
 count: 0
 packs: 1
 c6
