@@ -126,6 +126,13 @@ if read_until(b"bastios> ", mark) and b"no network" in out[mark:]:
     print("ok   no network card: no sockets either")
 else:
     print("FAIL no network card: udpsend"); fails += 1
+# Nor a sound card: /dev/dsp does not open (ENODEV).
+mark = len(out)
+qemu.stdin.write(b"mtone none\r"); qemu.stdin.flush()
+if read_until(b"bastios> ", mark) and b"mtone: no sound card (ENODEV)" in out[mark:]:
+    print("ok   no sound card: /dev/dsp says ENODEV")
+else:
+    print("FAIL no sound card: mtone none"); fails += 1
 qemu.kill(); qemu.wait()
 print("---- one-processor transcript ----")
 print(out.decode(errors="replace").replace("\r", ""))
@@ -1626,6 +1633,51 @@ fails += not good
 ok, code = report_boot(["-machine", "pc", "-m", "64M"], "no report", 0)
 good = ok and b"hardware report" not in out
 print(("ok  " if good else "FAIL"), "(hardware report) only with diag")
+fails += not good
+
+# Sound (src/hda.bastio, src/lxsnd.bastio): an HD Audio controller with
+# QEMU's output codec, whose sound QEMU writes to a WAV file. mtone plays
+# half a second of a 1 kHz square wave through /dev/dsp: the file must hold
+# exactly that, 500 periods of 24 frames up and 24 down, nothing lost or
+# played twice.
+import wave
+wav = os.path.join(disk_dir.name, "sound.wav")
+def play():
+    global out
+    mark = len(out)
+    qemu.stdin.write(b"mtone\r"); qemu.stdin.flush()
+    read_until(b"bastios> ", mark)
+ok, code = report_boot(["-machine", "pc", "-m", "64M",
+                        "-audiodev", f"wav,id=snd0,path={wav},out.frequency=48000,out.channels=2,out.format=s16",
+                        "-device", "intel-hda", "-device", "hda-output,audiodev=snd0"], "sound", 0, between=play)
+text = out.decode(errors="replace").replace("\r", "")
+good = ok and "sound: HD Audio, 1 output\n" in text
+print(("ok  " if good else "FAIL"), "(sound) the HD Audio controller and its output are found")
+fails += not good
+good = ok and "mtone: ok, 96000 bytes" in text
+print(("ok  " if good else "FAIL"), "(sound) mtone writes half a second to /dev/dsp")
+fails += not good
+runs = []
+try:
+    w = wave.open(wav)
+    frames = w.readframes(w.getnframes())
+    left = [int.from_bytes(frames[i:i + 2], "little", signed=True) for i in range(0, len(frames), 4)]
+    loud = [i for i, v in enumerate(left) if v != 0]
+    if loud:
+        for v in left[loud[0]:loud[-1] + 1]:
+            if runs and runs[-1][0] == v:
+                runs[-1][1] += 1
+            else:
+                runs.append([v, 1])
+except (OSError, EOFError, wave.Error):
+    pass
+good = len(runs) == 1000 and all(n == 24 and v == (8000 if i % 2 == 0 else -8000) for i, (v, n) in enumerate(runs))
+print(("ok  " if good else "FAIL"), f"(sound) QEMU played the square wave whole ({len(runs)} half periods)")
+fails += not good
+booted = re.findall(r"BastiOS 0.2: (\d+) pages of memory", text)
+off = re.search(r"BastiOS: (\d+) pages free at power off", text)
+good = code == 0 and booted and off and booted[-1] == off.group(1)
+print(("ok  " if good else "FAIL"), f"(sound) every page back at power off (status {code})")
 fails += not good
 
 # No i8042 at all (many recent PCs, with only USB keyboards): its ports

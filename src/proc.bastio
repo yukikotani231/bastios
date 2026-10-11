@@ -9,6 +9,7 @@ import "elf.bastio";
 import "fs.bastio";
 import "net.bastio";
 import "tcp.bastio";
+import "hda.bastio";
 
 const NPROC: u64 = 32;
 const STRIDE: u64 = 64;
@@ -385,6 +386,7 @@ const PTY_CAP: u64 = 4096;
 const PTYB_LEN: u64 = 32768;           // 2 * PTY_N * PTY_CAP
 const DEV_PTMX: u64 = 7;               // OF_DEV path /dev/ptmx (opening it makes a pair)
 const DEV_PTSDIR: u64 = 8;             // /dev/pts, a directory to stat
+const DEV_DSP: u64 = 9;                // OF_DEV device /dev/dsp, the sound card (src/lxsnd.bastio)
 const DEV_PTM: u64 = 32;               // an OF_PTY master is DEV_PTM + N
 const DEV_PTS: u64 = 48;               // and its slave, /dev/pts/N, DEV_PTS + N
 const DISK_GID: u64 = 6;               // group disk (files/group): the loop devices'
@@ -647,17 +649,18 @@ struct Kernel {
   shm: Store,           // System V shared memory pages (src/lxipc.bastio)
   txt: Store,           // the built-in programs' read-only pages (src/text.bastio)
   sys: Buf,             // settings root may change: names, the clock discipline (src/lxsys.bastio)
+  snd: Snd,             // the sound card, if any (src/hda.bastio)
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && len(k.procs) == PTAB_LEN && qok(k.q) && lineok(k.line) && len(k.lxfd) == LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && blen(k.pipebuf) == PIPE_BYTES && vfs_ok(k.fs) && nic_ok(k.nic) && snd_ok(k.snd) && len(k.sigact) == SIGACT_LEN && len(k.cwd) == CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) == SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
     && (k.txt is Store::Table ==> (pt_level(k.txt.Table) == 2 && pt_leases(k.txt.Table) == 0))
 }
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 28;
+const NPROGS: u64 = 29;
 const LDSO_PROG: u64 = 25;            // musl's dynamic linker, the interpreter of musl programs
 
 fn prog_name(i: u64) -> Str {
@@ -745,6 +748,9 @@ fn prog_name(i: u64) -> Str {
   if i == 27 {
     return "mkfs.bstdisk3";
   }
+  if i == 28 {
+    return "mtone";
+  }
   return "(file)";                    // a program loaded from a file
 }
 
@@ -829,6 +835,9 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 27 {
     return include_bytes("../build/user/mkfs.elf");
+  }
+  if i == 28 {
+    return include_bytes("../build/user/mtone.elf");
   }
   return include_bytes("../build/user/fault.bin");
 }
