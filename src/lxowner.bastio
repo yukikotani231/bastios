@@ -1,0 +1,194 @@
+// The owner of an open file description: the thread, process or process
+// group F_SETOWN or F_SETOWN_EX names, which gets a signal (SIGIO, or
+// F_SETSIG's) when input arrives on a description with O_ASYNC. Kept in
+// words OF_OWNER .. OF_ASYNC of k.ofd, so dup and fork share it, as on
+// Linux. Input is only signalled for pipes and FIFOs so far.
+//
+// As Linux does, the signal is sent with the ids of whoever set the owner,
+// at the time they set it: an unprivileged program cannot use F_SETOWN to
+// signal another user's process.
+
+/// Is there a live Linux thread or process `id`, or (type F_OWNER_PGRP) a
+/// process group `id`?
+fn owner_there(k: &Kernel, ty: u64, id: u64) -> bool
+  requires kok(k)
+{
+  if ty != F_OWNER_PGRP {
+    return 1 <= id && id < NPROC && state(k.procs, id) != FREE && state(k.procs, id) != ZOMBIE && is_linux(k.procs, id);
+  }
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && kok(k)
+  {
+    if state(k.procs, p) != FREE && state(k.procs, p) != ZOMBIE && is_linux(k.procs, p) && pgid_of(k.procs, p) == id {
+      return true;
+    }
+    p = p + 1;
+  }
+  return false;
+}
+
+/// Makes thread or process id, or process group id, the owner of
+/// description h (none when id is 0), remembering the caller's ids.
+/// Returns 0 or -ESRCH.
+fn own_set(k: &mut Kernel, pid: u64, h: u64, ty: u64, id: u64) -> u64
+  requires kok(k) && pid < NPROC && h <= OFD_N && ty <= F_OWNER_PGRP && id < OWN_TYPE
+  ensures kok(k)
+{
+  if id != 0 && !owner_there(k, ty, id) {
+    return ESRCH;
+  }
+  if h >= OFD_N {
+    return 0;                               // the console keeps no owner
+  }
+  of_set(&mut k.ofd, h, OF_OWNER, (ty + 1) * OWN_TYPE + id);   // the type stays, even with id 0
+  let ruid = id_get(k.procs, pid, F_UID, false);
+  let euid = id_get(k.procs, pid, F_UID, true);
+  of_set(&mut k.ofd, h, OF_CRED, ruid * ID_SPAN + euid);
+  return 0;
+}
+
+/// F_SETOWN, F_GETOWN, F_SETOWN_EX, F_GETOWN_EX, F_SETSIG and F_GETSIG on
+/// description h of process pid (OFD_N for the console, which accepts
+/// them and keeps nothing). Returns the answer, 0, or -errno.
+fn lx_owner(k: &mut Kernel, pid: u64, h: u64, cmd: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC && h <= OFD_N
+  ensures kok(k)
+{
+  let mut own = 0;
+  let mut sig = 0;
+  if h < OFD_N {
+    own = of_get(k.ofd, h, OF_OWNER);
+    sig = of_get(k.ofd, h, OF_SIG);
+  }
+  let ty = own / OWN_TYPE;                  // 0: never set; else the type + 1
+  let id = own % OWN_TYPE;
+  if cmd == F_GETSIG {
+    return sig;
+  }
+  if cmd == F_SETSIG {
+    if arg > NSIG {
+      return EINVAL;
+    }
+    if h < OFD_N {
+      of_set(&mut k.ofd, h, OF_SIG, arg);
+    }
+    return 0;
+  }
+  if cmd == F_GETOWN {
+    if ty == F_OWNER_PGRP + 1 && id != 0 {
+      return 0xFFFFFFFFFFFFFFFF - id + 1;   // -id
+    }
+    return id;
+  }
+  if cmd == F_GETOWN_EX {
+    let mut t = F_OWNER_TID;                // never set: type 0, as on Linux
+    if ty >= 1 && ty <= F_OWNER_PGRP + 1 {
+      t = ty - 1;
+    }
+    xfer_u64(&mut k.fs.xfer, 0, t + id * OWN_TYPE);   // struct f_owner_ex { int type; int pid; }
+    return lx_put_out(&mut k, pid, arg, 8);
+  }
+  if cmd == F_SETOWN {
+    let a = arg % OWN_TYPE;                 // an int
+    if a == 0x80000000 {
+      return EINVAL;                        // INT_MIN has no negation
+    }
+    if a > 0x80000000 {
+      return own_set(&mut k, pid, h, F_OWNER_PGRP, OWN_TYPE - a);
+    }
+    return own_set(&mut k, pid, h, F_OWNER_PID, a);
+  }
+  // F_SETOWN_EX
+  if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, 8) != 8 {
+    return EFAULT;
+  }
+  let w = load_le64(k.fs.xfer, 0);
+  let t = w % OWN_TYPE;
+  let p = w / OWN_TYPE;
+  if t > F_OWNER_PGRP {
+    return EINVAL;
+  }
+  if p >= 0x80000000 {
+    return ESRCH;                           // no thread, process or group has a negative id
+  }
+  return own_set(&mut k, pid, h, t, p);
+}
+
+/// Sets or clears O_ASYNC on description h; on a pipe's read end, marks
+/// the pipe so its writers look for owners to signal.
+fn set_async(k: &mut Kernel, h: u64, on: bool)
+  requires kok(k) && h < OFD_N
+  ensures kok(k)
+{
+  let mut a = 0;
+  if on {
+    a = 1;
+  }
+  of_set(&mut k.ofd, h, OF_ASYNC, a);
+  let p = of_get(k.ofd, h, 2);
+  if on && of_get(k.ofd, h, 0) == OF_PIPE_R && p < NPIPES {
+    pi_set(&mut k.pipes, p, 7, 1);
+  }
+}
+
+/// May the owner set with ids `cred` (real uid * ID_SPAN + effective uid)
+/// signal process p? As kill decides, with the setter's ids.
+fn sigio_perm(k: &Kernel, cred: u64, p: u64) -> bool
+  requires kok(k) && p < NPROC
+{
+  let ruid = cred / ID_SPAN;
+  let euid = cred % ID_SPAN;
+  let tr = id_get(k.procs, p, F_UID, false);
+  let ts = id_get(k.procs, p, F_SUID, false);
+  return euid == 0 || euid == tr || euid == ts || ruid == tr || ruid == ts;
+}
+
+/// Sends description h's I/O signal to its owner, if it has one.
+fn sigio_send(k: &mut Kernel, h: u64)
+  requires kok(k) && h < OFD_N
+  ensures kok(k)
+{
+  let own = of_get(k.ofd, h, OF_OWNER);
+  let ty = own / OWN_TYPE;
+  let id = own % OWN_TYPE;
+  let cred = of_get(k.ofd, h, OF_CRED);
+  let mut s = of_get(k.ofd, h, OF_SIG);
+  if s == 0 || s > NSIG {
+    s = SIGIO;
+  }
+  if ty == 0 || id == 0 {
+    return;
+  }
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && kok(k) && 1 <= s && s <= NSIG
+  {
+    let live = state(k.procs, p) != FREE && state(k.procs, p) != ZOMBIE && is_linux(k.procs, p);
+    let hit = (ty == F_OWNER_PGRP + 1 && pgid_of(k.procs, p) == id) || (ty != F_OWNER_PGRP + 1 && p == id);
+    if live && hit && sigio_perm(k, cred, p) {
+      post_sig(&mut k, p, s);
+    }
+    p = p + 1;
+  }
+}
+
+/// Input arrived in pipe p: signals the owners of its read ends that have
+/// O_ASYNC. Cheap unless some read end of p has ever had O_ASYNC.
+fn sigio_pipe(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPIPES
+  ensures kok(k)
+{
+  if pi_get(k.pipes, p, 7) == 0 {
+    return;
+  }
+  let mut h = 0;
+  while h < OFD_N
+    invariant h <= OFD_N && kok(k)
+  {
+    if of_get(k.ofd, h, 0) == OF_PIPE_R && of_get(k.ofd, h, 2) == p && of_get(k.ofd, h, OF_ASYNC) == 1 {
+      sigio_send(&mut k, h);
+    }
+    h = h + 1;
+  }
+}

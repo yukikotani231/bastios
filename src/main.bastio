@@ -49,6 +49,7 @@ import "lxipc.bastio";
 import "lxmq.bastio";
 import "lxsys.bastio";
 import "lxlock.bastio";
+import "lxowner.bastio";
 import "lxprocfs.bastio";
 import "lxprctl.bastio";
 import "lxrlimit.bastio";
@@ -780,6 +781,12 @@ fn install_files(con: &mut Con, k: &mut Kernel)
   if !make_dir(&mut k.fs, "tmp") || !make_dir(&mut k.fs, "etc") || !make_dir(&mut k.fs, "root") || !make_dir(&mut k.fs, "home") {
     puts(&mut con, "cannot make /tmp, /etc, /root or /home\r\n");
   }
+  // /dev/shm, where musl's sem_open and shm_open make their files (for
+  // Python's multiprocessing). The devices themselves are not files
+  // (src/lxdev.bastio): their paths are matched before the file system.
+  if !make_dir(&mut k.fs, "dev") || !make_dir(&mut k.fs, "dev/shm") {
+    puts(&mut con, "cannot make /dev/shm\r\n");
+  }
   let mut i = 0;
   while i < NINIT
     invariant i <= NINIT && kok(k) && con_ok(con)
@@ -792,6 +799,7 @@ fn install_files(con: &mut Con, k: &mut Kernel)
     i = i + 1;
   }
   set_mode(&mut k.fs, "tmp", 1023);         // 01777: anyone may make names, only owners remove them
+  set_mode(&mut k.fs, "dev/shm", 1023);
   set_mode(&mut k.fs, "elfdemo", 493);      // 0755: a program
   set_mode(&mut k.fs, "etc/shadow", 384);   // 0600: password hashes are root's (docs/security.md)
   set_mode(&mut k.fs, "root", 448);         // 0700
@@ -1081,7 +1089,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   let shm = new_store(&mut m);
   let txt = new_store(&mut m);
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: rng_new(epoch ^ at), cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), lazy: alloc(LAZY_LEN), inet6: 0, locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, txt: txt, sys: alloc(SYS_LEN), loops: alloc(LOOP_LEN), ptys: alloc(PTY_LEN), ptyb: balloc(PTYB_LEN) };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PTAB_LEN), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lxfd: alloc(LXFD_LEN), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: balloc(PIPE_BYTES), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: rng_new(epoch ^ at), cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(SIGACT_LEN), cwd: alloc(CWD_LEN), croot: alloc(CWD_LEN), dpath: alloc(DPATH_LEN), sigsave: alloc(SIGSAVE_LEN), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), holes: alloc(HOLES_LEN), lazy: alloc(LAZY_LEN), inet6: alloc(OFD_N), locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, txt: txt, sys: alloc(SYS_LEN), loops: alloc(LOOP_LEN), ptys: alloc(PTY_LEN), ptyb: balloc(PTYB_LEN) };
   install_files(&mut con, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
@@ -1153,9 +1161,11 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   bfree(sys.k.pipebuf);
   free(sys.k.sigact);
   free(sys.k.cwd);
+  free(sys.k.croot);
   free(sys.k.dpath);
   free(sys.k.alarms);
   free(sys.k.maps);
+  free(sys.k.holes);
   free(sys.k.lazy);
   free(sys.k.locks);
   free(sys.k.loops);
@@ -1164,6 +1174,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.ipc);
   bfree(sys.k.ipcb);
   free(sys.k.sys);
+  free(sys.k.inet6);
   free(sys.k.rng);
   free(sys.k.evt);
   free(sys.k.sigsave);
