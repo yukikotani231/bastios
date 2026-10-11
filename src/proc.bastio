@@ -544,7 +544,7 @@ const UX_LIS: u64 = 4;
 const UX_BACKLOG: u64 = 4;            // connections waiting for accept
 const UXL_W: u64 = 8;                 // 4 + UX_BACKLOG
 const UX_PATH: u64 = 108;             // the longest name
-const UX_LEN: u64 = 152;              // UX_N * UX_W + UX_LIS * UXL_W + UX_N, then 2 * (UX_N + UX_LIS) credential words
+const UX_LEN: u64 = 156;              // UX_N * UX_W + UX_LIS * UXL_W + UX_N, then 2 * (UX_N + UX_LIS) credential words, then UX_LIS socket files
 const UXB_LEN: u64 = 65968;           // UX_N * UX_CAP + UX_LIS * UX_PATH
 
 const NPIPES: u64 = 8;
@@ -920,6 +920,16 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   ensures kok(k)
   ensures result < NPROC
 {
+  return spawn_as(&mut k, prog, parent, prog_name(prog));
+}
+
+/// spawn, with `name` as the program's argv[0] (BusyBox picks its applet
+/// by it).
+fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
+  requires kok(k)
+  ensures kok(k)
+  ensures result < NPROC
+{
   let pid = free_pid(k.procs);
   if pid == 0 {
     return 0;
@@ -962,7 +972,7 @@ fn spawn(k: &mut Kernel, prog: u64, parent: u64) -> u64
   k.cwd = set(k.cwd, pid * CWD_STRIDE, 0);   // starts at "/"
   k.croot = set(k.croot, pid * CWD_STRIDE, 0);
   let mut args = balloc(ARGV0_MAX + 1 + START_ENV_LEN);
-  let alen = name_arg(&mut args, prog_name(prog));
+  let alen = name_arg(&mut args, name);
   let total = start_env(&mut args, alen);
   let src = Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
   let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, total, false);

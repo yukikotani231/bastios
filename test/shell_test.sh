@@ -321,7 +321,7 @@ steps = [
     # Users (docs/security.md): adduser, su to the new user and back,
     # /etc/shadow is root's, su and passwd are the only set-user-ID
     # programs, and su asks for root's password once root has one.
-    ("adduser -D alice; id alice; stat -c '%a %U' /bin/su /bin/ls /etc/shadow /root",
+    ("adduser -D alice; id alice; stat -c '%a %U' /bin/su /bin/ls /etc/shadow /root/",
      [b"uid=1000(alice) gid=1000(alice)", b"\r\n4755 root\r\n755 root\r\n600 root\r\n700 root\r\n"], b"\n# "),
     ("su alice -c 'id -u; whoami; cd; pwd; cat /etc/shadow; echo s=$?; ls /root; echo r=$?'",
      [b"\r\n1000\r\nalice\r\n/home/alice\r\n", b"Permission denied", b"s=1", b"r=1"], b"\n# "),
@@ -330,6 +330,9 @@ steps = [
     # (BusyBox keeps the old /etc files as NAME-: gone, so no pages stay.)
     ("deluser alice; id alice; passwd -d root; echo u=$?; rm -rf /home/alice /etc/passwd- /etc/group- /etc/shadow-",
      [b"unknown user alice", b"u=0"], b"\n# "),
+    # With a disk, /etc, /root and /home are links into it (src/main.bastio,
+    # install_files): a user made now is still there at the next boot.
+    ("adduser -D kept; echo hi > /root/kept; ls -l /etc /root /home", [b"/etc -> /disk/etc", b"/root -> /disk/root", b"/home -> /disk/home"], b"\n# "),
     # Small calls: uname, readv, pread/pwrite, limits, sysinfo, statfs,
     # getrandom, priorities, sessions, process groups, ttyname, pipe capacity (user/mmisc.c).
     ("mmisc", b"mmisc: ok on Linux x86_64, signals, pipe 65536", b"\n# "),
@@ -895,10 +898,13 @@ def session(name, want_banner, steps, halt=False, ready=None):
             ok = (b"disk: virtio" in out) == want_banner
             print(("ok  " if ok else "FAIL"), f"({name} boot) disk driver: {'virtio' if want_banner else 'ATA'}")
             fails += not ok
-        for line, want in steps:
+        for step in steps:
+            line, want = step[0], step[1]
+            until = step[2] if len(step) > 2 else b"bastios> "
+            wants = want if isinstance(want, list) else [want]
             mark = len(out)
             qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
-            ok = read_until(b"bastios> ", mark) and want in out[mark:]
+            ok = read_until(until, mark) and all(w in out[mark:] for w in wants)
             print(("ok  " if ok else "FAIL"), f"({name} boot)", repr(line))
             fails += not ok
         if halt:
@@ -939,6 +945,10 @@ session("virtio", True, [
     ("cat disk/hk1", b"no such file"),
     ("ls disk", b"pf"),
     ("rm disk/pf", b""),
+    # The user made at the first boot, kept on the disk.
+    ("ash", b"built-in shell (ash)", b"\n# "),
+    ("id kept; cat /root/kept; stat -c %a /etc/shadow; deluser kept; rm -rf /home/kept /root/kept /etc/*-", [b"uid=1000(kept)", b"\r\nhi\r\n600\r\n"], b"\n# "),
+    ("exit", b""),
 ], halt=True, ready=lambda: irq_found("virtio"))
 
 # The same disk as an NVMe drive: what virtio wrote is there, and what is
@@ -1953,6 +1963,35 @@ for name, at, data in (("an MBR", 510, b"\x55\xaa"), ("a backup GPT header", (33
     good = open(other, "rb").read() == before
     print(("ok  " if good else "FAIL"), f"(foreign disk) not a byte of the disk with {name} changed")
     fails += not good
+
+# With the boot option `login`, the console is BusyBox's login instead of
+# the native shell, and a new login starts whenever the last one ends
+# (relogin, src/main.bastio). Root has no password here (passwd -d above).
+qemu = boot(1, with_disk=True, extra=["-append", "login"])
+out = b""
+deadline = time.time() + timeout
+def login_step(line, want, until):
+    global fails
+    mark = len(out)
+    qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+    wants = want if isinstance(want, list) else [want]
+    ok = read_until(until, mark + len(line)) and all(w in out[mark:] for w in wants)
+    print(("ok  " if ok else "FAIL"), "(login boot)", repr(line)); ok or print(repr(out[mark:]))
+    fails += not ok
+if not read_until(b"login: "):
+    print("FAIL (login boot) no login prompt"); fails += 1
+else:
+    print("ok   (login boot) a login prompt at boot")
+    login_step("root", b"", b"\n# ")
+    login_step("id -u; adduser -D carol; echo carol:pw | chpasswd; exit", b"\r\n0\r\n", b"login: ")
+    login_step("carol", b"", b"Password: ")
+    login_step("wrong", b"Login incorrect", b"login: ")
+    login_step("carol", b"", b"Password: ")
+    login_step("pw", b"", b"\n$ ")
+    login_step("id -u; cat /etc/shadow; exit", [b"\r\n1000\r\n", b"Permission denied"], b"login: ")
+    login_step("root", b"", b"\n# ")
+    login_step("deluser carol; rm -rf /home/carol /etc/passwd- /etc/group- /etc/shadow-; id carol", b"unknown user carol", b"\n# ")
+qemu.kill(); qemu.wait()
 
 print(f"---- {fails} failed ----")
 sys.exit(1 if fails else 0)
