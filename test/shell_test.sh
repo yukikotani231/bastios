@@ -134,6 +134,11 @@ print(out.decode(errors="replace").replace("\r", ""))
 # the shell and its programs run on whichever one picks them.
 qemu = boot(smp, with_disk=True, net=True)
 out = b""
+# Each part of the test gets TIMEOUT seconds of its own: this boot and the
+# steps below, then the checks after them. Sharing one budget with the
+# one-processor boot left the checks at the end (bench, the parallel spins,
+# halt) only what the steps had not used, and a few more steps used it up.
+deadline = time.time() + timeout
 
 # (input line, expected text in the reply). The shell is a user process;
 # the later steps exercise process creation, waiting, preemption, killing
@@ -480,6 +485,7 @@ else:
         ok = read_until(until, mark) and all(w in out[mark:] for w in wants)
         print(("ok  " if ok else "FAIL"), repr(line)); ok or print(repr(out[mark:]))
         fails += not ok
+    deadline = time.time() + timeout
     if out.count(b"fpucheck: xmm0 kept") == 2 and b"xmm0 changed" not in out:
         print("ok   both fpucheck processes kept xmm0")
     else:
