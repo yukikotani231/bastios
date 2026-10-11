@@ -1,5 +1,16 @@
 # Checks that pass on BastiOS (make compat-baseline rewrites this).
 # make compat fails if one of them stops passing.
+alpine: alpine: unpack the root, chroot into it
+alpine: apk: install from a repository over HTTP
+alpine: apk: install git, curl and less, with what they depend on
+alpine: apk: remove a package and its files
+alpine: apk: the packages the root came with
+alpine: apk: they are in its database
+alpine: curl: 1 MiB from the host
+alpine: curl: a file from the host
+alpine: git: commit, log and diff
+alpine: less: copies a pipe through
+alpine: ssh-keygen: an ed25519 key
 apps: ash: a 1200-byte typed line
 apps: httpd: serve a page, fetch it over loopback
 apps: lua: arithmetic and strings
@@ -381,10 +392,13 @@ t_perm: setgroups and getgroups keep supplementary groups
 t_perm: the disk keeps owners
 t_perm: umask applies to new files and directories
 t_perm: without the group, the group's bits do not apply
+t_proc: #! naming a missing interpreter is ENOENT
+t_proc: #! naming no interpreter is ENOEXEC
 t_proc: child's getppid is the parent
 t_proc: environment
 t_proc: execve
 t_proc: execve missing is ENOENT
+t_proc: execve of a #! script
 t_proc: fork + exit status
 t_proc: fork copies memory
 t_proc: getgroups
