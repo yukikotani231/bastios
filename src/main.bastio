@@ -39,6 +39,8 @@ import "lxdev.bastio";
 import "lxevent.bastio";
 import "lxptimer.bastio";
 import "lxmore.bastio";
+import "lxextra.bastio";
+import "lxpidfd.bastio";
 import "lxsplice.bastio";
 import "lxmsg.bastio";
 import "acpi.bastio";
@@ -984,6 +986,11 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     puts(&mut con, " framebuffer\r\n");
   }
   let mut m = mem_new(pool);
+  // The pool spans every run of RAM (bastiolang's bst_pool_init, and
+  // boot/multiboot.c's bst_map_ram): its last page is checked once.
+  if !probe_top(&mut m) {
+    puts(&mut con, "memory: the last page of RAM does not read back\r\n");
+  }
   // PCI's configuration ports are claimed for the drivers that look for
   // their devices there.
   let mut pci = Pci { addr: port_claim(&mut ports, PCI_ADDR, 4), data: port_claim(&mut ports, PCI_DATA, 4) };

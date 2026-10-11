@@ -2,14 +2,16 @@
 """Makes a USB stick image whose last GPT partition holds the BastiOS file
 system, so the stick BastiOS boots from is also its disk.
 
-    mkusb.py OUT.img --iso build/bastios.iso [--mib N]
+    mkusb.py OUT.img --iso build/bastios-gpt.iso [--mib N] [--bios-boot]
     mkusb.py OUT.img --blank [--mib N]
     mkusb.py --find IMG
 
-With --iso, the image is the hybrid ISO that `make iso` builds (GRUB and
-the kernel, bootable under BIOS and UEFI, with a GPT that grub-mkrescue
-wrote), then N MiB (default 64) for the BastiOS partition, then the GPT's
-backup copy, moved to the new end. With --blank there is no boot image:
+With --iso, the image is a hybrid ISO with a GPT (Limine and the kernel,
+build/bastios-gpt.iso: what `make iso` builds before Limine's installer
+turns its GPT into an MBR), then N MiB (default 64) for the BastiOS
+partition, then the GPT's backup copy, moved to the new end. --bios-boot
+also adds a 1 MiB BIOS boot partition before it, where `limine
+bios-install` puts the BIOS boot code that does not fit in the MBR. With --blank there is no boot image:
 only the GPT and the partition, for a test that boots the kernel another
 way. The partition is left zeroed; BastiOS formats it the first time it
 boots from it.
@@ -25,6 +27,7 @@ import struct, sys, uuid, zlib
 
 SECTOR = 512
 BASTIOS_TYPE = uuid.UUID("e0c9ea2a-d5f1-45b3-a799-0a7bec83d701")
+BIOS_BOOT_TYPE = uuid.UUID("21686148-6449-6e6f-744e-656564454649")
 ESIZE = 128
 
 
@@ -61,7 +64,19 @@ def gpt_header(cur, alt, first_use, last_use, disk_guid, elba, count, ents):
     return bytes(h) + bytes(SECTOR - 92)
 
 
-def build(base, mib):
+def add_entry(ents, count, type_, first, last, name):
+    slot = next((i for i in range(count) if not any(ents[i * ESIZE:i * ESIZE + 16])), None)
+    if slot is None:
+        sys.exit("mkusb: no free GPT entry")
+    e = bytearray(ESIZE)
+    e[0:16] = type_.bytes_le
+    e[16:32] = uuid.uuid4().bytes_le
+    struct.pack_into("<QQQ", e, 32, first, last, 0)
+    e[56:56 + 2 * len(name)] = name.encode("utf-16le")
+    ents[slot * ESIZE:(slot + 1) * ESIZE] = e
+
+
+def build(base, mib, bios_boot=False):
     """base: the boot image (empty for --blank). Returns the new image."""
     count = 128
     ents = bytearray(count * ESIZE)
@@ -76,7 +91,7 @@ def build(base, mib):
         elba, count, esz, old = entries(base, h)
         if esz != ESIZE:
             sys.exit("mkusb: unexpected GPT entry size in the boot image")
-        # The entries stay where they are (grub-mkrescue puts an Apple
+        # The entries stay where they are (an ISO may put an Apple
         # partition map before them).
         pelba = elba
         first_use = struct.unpack_from("<Q", h, 40)[0]
@@ -88,18 +103,13 @@ def build(base, mib):
         used_to = max(used_to, len(base) // SECTOR)
     esec = (count * ESIZE + SECTOR - 1) // SECTOR
     first = (used_to + 2047) // 2048 * 2048              # 1 MiB aligned
+    if bios_boot:
+        add_entry(ents, count, BIOS_BOOT_TYPE, first, first + 2047, "BIOS boot")
+        first += 2048
     size = mib * 2048
     last = first + size - 1
     total = last + 1 + esec + 1                          # the backup entries and header
-    slot = next((i for i in range(count) if not any(ents[i * ESIZE:i * ESIZE + 16])), None)
-    if slot is None:
-        sys.exit("mkusb: no free GPT entry")
-    e = bytearray(ESIZE)
-    e[0:16] = BASTIOS_TYPE.bytes_le
-    e[16:32] = uuid.uuid4().bytes_le
-    struct.pack_into("<QQQ", e, 32, first, last, 0)
-    e[56:56 + 14] = "BastiOS".encode("utf-16le")
-    ents[slot * ESIZE:(slot + 1) * ESIZE] = e
+    add_entry(ents, count, BASTIOS_TYPE, first, last, "BastiOS")
     img = bytearray(total * SECTOR)
     img[:len(base)] = base
     # The ISO's own backup GPT, now in the middle of the image, is wiped so
@@ -134,6 +144,9 @@ def main():
         print(p[0], p[1])
         return
     mib = 64
+    bios_boot = "--bios-boot" in args
+    if bios_boot:
+        args.remove("--bios-boot")
     if "--mib" in args:
         i = args.index("--mib")
         mib = int(args[i + 1])
@@ -144,7 +157,7 @@ def main():
         base = b""
     else:
         sys.exit(__doc__)
-    img = build(base, mib)
+    img = build(base, mib, bios_boot)
     with open(args[0], "wb") as f:
         f.write(img)
     first, n = find(img)

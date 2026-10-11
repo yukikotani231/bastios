@@ -30,7 +30,7 @@
 .long 0                               /* a linear framebuffer, preferably */
 .long 1024, 768, 32                   /* 1024x768, 32 bits per pixel */
 
-/* The Multiboot 2 header, which GRUB uses (boot/grub.cfg): it passes the
+/* The Multiboot 2 header, which Limine uses (boot/limine.conf): it passes the
  * ACPI RSDP as well, and boot/multiboot.c turns its information into the
  * Multiboot 1 form above. */
 .set MB2_MAGIC,   0xE85250D6
@@ -64,7 +64,7 @@ stack_bottom:
         .skip 4096
 stack_top:
 /* The boot stack serves only until long mode: then each processor runs on
- * its own block of bst_cores (core.h). */
+ * its own block (core.h). */
 .align 8
 mb_info:        .skip 8
 mb_magic:       .skip 8
@@ -115,9 +115,9 @@ _start:
         /* The second GiB, identity-mapped (2 MiB pages, kernel-only) for
          * one reader: boot/smp.c, which finds the ACPI tables there on
          * machines with 2 GiB or more below 4 GiB (firmware puts them at
-         * the top of that memory). Nothing else uses these addresses: the
-         * page pool stays below 1 GiB, and Bastio's `mmio_claim` starts
-         * at 2 GiB. */
+         * the top of that memory). The page pool may use the RAM here too
+         * (it spans every run of RAM), and Bastio's `mmio_claim` starts at
+         * 2 GiB. */
         mov     $fwpd, %eax
         or      $3, %eax
         mov     %eax, pdpt+8
@@ -135,9 +135,9 @@ _start:
         /* The device window: 2-4 GiB, where the local APIC, I/O APIC, HPET
          * and PCI devices (a UEFI framebuffer usually sits at 2 GiB) live,
          * identity-mapped uncached (PWT | PCD) with 2 MiB pages, kernel-only.
-         * Bastio code reaches it only through claimed `Mmio` blocks; nothing
-         * else in the kernel uses these addresses, and the page pool stays
-         * below 1 GiB. */
+         * Bastio code reaches it only through claimed `Mmio` blocks. Where
+         * the memory map says it is RAM instead, bst_map_ram (multiboot.c)
+         * maps it write-back for the page pool, and mmio_claim refuses it. */
         mov     $devpd, %eax
         or      $3, %eax
         mov     %eax, pdpt+16
@@ -219,12 +219,13 @@ long_mode:
         xor     %ax, %ax
         mov     %ax, %fs
         mov     %ax, %gs
-        mov     $(bst_cores + CORE_KSTACK), %rsp
+        mov     $(bst_core0 + CORE_KSTACK), %rsp
 
         mov     mb_magic, %edi        /* Multiboot 2 information to the form */
         mov     mb_info, %esi         /* the prelude reads (boot/multiboot.c) */
         call    bst_multiboot_info
         mov     %eax, mb_info
+        call    bst_map_ram           /* RAM above 2 GiB write-back (boot/multiboot.c) */
         call    bst_platform_init
         call    bst_smp_init
         mov     mb_info, %edi

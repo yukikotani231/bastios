@@ -386,7 +386,7 @@ steps = [
     # directory per process with its status, and /proc/self/exe as a link.
     ("cat /proc/mounts", b"rootfs / ramfs rw 0 0\r\nproc /proc proc rw 0 0\r\n", b"\n# "),
     ("ls /proc; stat -c %F /proc/self", [b"meminfo", b"uptime", b"directory"], b"\n# "),
-    ("cat /proc/meminfo; read up idle < /proc/uptime && echo up=${up%.*}", [b"MemTotal: 262144 kB", b"MemFree: ", b"up="], b"\n# "),
+    ("cat /proc/meminfo; read up idle < /proc/uptime && echo up=${up%.*}", [b"MemTotal: ", b" kB\r\nMemFree: ", b"up="], b"\n# "),
     ("cat /proc/$$/status; set -- $(cat /proc/$$/stat); [ $1 = $$ ] && echo stat=$2", [b"Name:\tash", b"PPid:\t", b"stat=(ash)"], b"\n# "),
     ("ls -l /proc/self/exe; echo nope > /proc/mounts; echo w=$?", [b"-> /bin/", b"Permission denied"], b"\n# "),
     # What Linux programs look for besides: processors, the file system
@@ -1848,6 +1848,37 @@ else:
         good = code == 0 and booted and off and booted[-1] == off.group(1)
         print(("ok  " if good else "FAIL"), f"({name}) every page back, and S5 (status {code})")
         fails += not good
+
+# More than 4 GiB of RAM: the page pool takes every run of the memory map
+# (3 GiB below QEMU's PCI hole, 3 GiB above 4 GiB), boot/multiboot.c maps
+# the RAM above 2 GiB write-back, and the kernel writes and reads back the
+# last page of RAM at boot. A processor without 1 GiB pages has nothing
+# mapped above 4 GiB, so there the pool stops at the hole.
+for name, cpu, high in (("6 GiB", "qemu64,+pdpe1gb", True), ("6 GiB, no 1 GiB pages", "qemu64", False)):
+    ok, code = report_boot(["-m", "6G", "-cpu", cpu], name, 0)
+    m = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
+    pages = int(m.group(1)) if m else 0
+    good = ok and pages > (2 << 18) and (pages > (5 << 18)) == high and b"does not read back" not in out
+    print(("ok  " if good else "FAIL"), f"({name}) the pool has {pages} pages ({pages >> 8} MiB)")
+    fails += not good
+    off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+    good = code == 0 and off and int(off.group(1)) == pages
+    print(("ok  " if good else "FAIL"), f"({name}) every page back, and S5 (status {code})")
+    fails += not good
+
+# More processors than the 16 the kernel once had room for: each
+# application processor's block comes out of the memory map
+# (boot/multiboot.c's bst_boot_take), so the pool shrinks by 128 KiB for
+# each one, and every page of it still comes back at power off.
+ok, code = report_boot(["-m", "256M", "-smp", "24"], "24 processors", 0)
+good = ok and b"pages of memory, 24 processors" in out
+print(("ok  " if good else "FAIL"), "(24 processors) all 24 start")
+fails += not good
+m = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
+off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+good = code == 0 and m and off and m.group(1) == off.group(1)
+print(("ok  " if good else "FAIL"), f"(24 processors) every page back, and S5 (status {code})")
+fails += not good
 
 # A disk that is not blank and has no BastiOS file system (an MBR's
 # signature; or only a GPT's backup header at the end) is someone else's:

@@ -1188,8 +1188,11 @@ spec fn nic_ok(c: &Nic) -> bool {
 /// Are pages lo .. lo+k all free?
 fn pages_free(m: &Mem, lo: u64, k: u64) -> bool
   requires mem_ok(m) && lo + k <= NPAGES
-  ensures result ==> (forall i: u64 :: lo <= i && i < lo + k ==> get(m.bm, i) == 1)
+  ensures result ==> lo + k <= len(m.bm) && (forall i: u64 :: lo <= i && i < lo + k ==> get(m.bm, i) == 1)
 {
+  if lo + k > len(m.bm) {
+    return false;              // a pool too small to have them
+  }
   let mut i = 0;
   while i < k
     invariant i <= k && (forall j: u64 :: lo <= j && j < lo + i ==> get(m.bm, j) == 1)
