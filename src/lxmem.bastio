@@ -489,7 +489,8 @@ fn lx_munmap(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
   return 0;
 }
 
-/// mprotect(addr, n, prot): writable with PROT_WRITE, read-only without.
+/// mprotect(addr, n, prot): writable with PROT_WRITE, read-only without;
+/// -EACCES for PROT_WRITE on a shared mapping of a file opened read-only.
 /// Pages of a PROT_NONE mmap that were never mapped (lx_mmap) get fresh
 /// zero pages when prot allows access. -ENOMEM if a page in the range is
 /// not mapped (the others still change, where Linux would change none).
@@ -513,6 +514,8 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
   }
   let from = r / 4294967296;
   let to = r % 4294967296;
+  // As on Linux: a MAP_SHARED mapping of a file opened without write
+  // permission does not become writable (lx_mmap refuses it at mmap).
   if w == 1 && map_no_write(k, pid, from, to) {
     return EACCES;
   }
