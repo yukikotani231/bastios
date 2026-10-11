@@ -28,6 +28,7 @@ import "lxproc.bastio";
 import "lxfd.bastio";
 import "lxdir.bastio";
 import "lxsock.bastio";
+import "lxnetlink.bastio";
 import "lxtcp.bastio";
 import "lxsig.bastio";
 import "lxtime.bastio";

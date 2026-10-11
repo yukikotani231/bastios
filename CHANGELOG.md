@@ -457,6 +457,18 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Network
 
+- Network namespaces for containers: `unshare(CLONE_NEWNET)` gives a
+  process its own interfaces, addresses, routes, sockets and ports,
+  starting with only `lo`. rtnetlink and the interface ioctls are enough
+  for BusyBox's `ip link`, `ip addr` and `ip route`. They make veth pairs
+  and bridges, move a link to another namespace, rename it, set it up or
+  down and give it an address and a default route. Namespace 0 forwards
+  what comes in on a virtual interface and masquerades it out of the
+  card. Raw ICMP sockets make `ping` work. See "Network namespaces" in
+  [docs/architecture.md](docs/architecture.md). The compatibility suite's
+  BusyBox now has `ip`, `unshare` and `ping`. A new case pings from a
+  namespace across a veth pair on a bridge, and fetches a page through
+  the masquerade.
 - TCP buffers are no longer 4 KiB: each connection has a receive and a
   send ring of 256 KiB whose pages are taken as data arrives and given
   back once it is read or acknowledged, so idle connections cost nothing.
