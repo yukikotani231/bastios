@@ -28,6 +28,8 @@ tests=(
   "tcp igb|b|NIC=igb test/tcp_test.sh"
   "ipv6 virtio|c|test/ipv6_test.sh"
   "ipv6 e1000|c|NIC=e1000 test/ipv6_test.sh"
+  "dhcp virtio|c|test/dhcp_test.sh"
+  "dhcp e1000|c|NIC=e1000 test/dhcp_test.sh"
   "iso|c|test/iso_test.sh"
   "nmi|c|test/nmi_test.sh"
   "fuzz|c|test/fuzz_test.sh 1 2 2000"
