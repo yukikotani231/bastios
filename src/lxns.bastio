@@ -757,6 +757,26 @@ fn row_is(t: &Buf, row: u64, s: &Bytes, at: u64, n: u64) -> bool
   return true;
 }
 
+/// Is the logical name of open directory description h the first n bytes
+/// of s?
+fn dname_is(k: &Kernel, h: u64, s: &Bytes, n: u64) -> bool
+  requires kok(k) && h < OFD_N && n <= FNAME_MAX && n <= blen(s)
+{
+  if len(k.dpath) != DPATH_LEN || get(k.dpath, h * CWD_STRIDE) != n {
+    return false;
+  }
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= FNAME_MAX && n <= blen(s) && len(k.dpath) == DPATH_LEN && h < OFD_N
+  {
+    if get(k.dpath, h * CWD_STRIDE + 1 + i) != cast[u64](bget(s, i)) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
 /// pivot_root(new_root, put_old): in a mount namespace other than the
 /// first, the mount at new_root becomes the root of every process of the
 /// namespace whose root was the caller's, and their working directories
@@ -873,6 +893,18 @@ fn lx_pivot_root(k: &mut Kernel, pid: u64, new_root: u64, put_old: u64) -> u64
       }
     }
     q = q + 1;
+  }
+  // A descriptor of the caller on the old root (runc keeps one to unmount
+  // it) names the old root's mount from now on.
+  let mut fd = 0;
+  while fd < LXNFD
+    invariant fd <= LXNFD && kok(k) && pid < NPROC && blen(orl) == MS_ROW && blen(nr) == MS_ROW && rl <= FNAME_MAX && nl <= FNAME_MAX
+  {
+    let h = dir_ofd(k, pid, fd);
+    if h < OFD_N && len(k.dpath) == DPATH_LEN && dname_is(k, h, orl, rl) {
+      name_keep(&mut k.dpath, DPATH_LEN, h, nr, nl);
+    }
+    fd = fd + 1;
   }
   bfree(orl);
   bfree(ophys);

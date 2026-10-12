@@ -203,14 +203,17 @@ fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
   if (h + 1) * LXNFD <= len(k.lxfd) && (p + 1) * LXNFD <= len(k.lxfd) {
     swap_words(&mut k.lxfd, h * LXNFD, p * LXNFD, LXNFD);
   }
-  if (h + 1) * CWD_STRIDE <= len(k.cwd) && (p + 1) * CWD_STRIDE <= len(k.cwd) {      // live processes have rows
-    swap_words(&mut k.cwd, h * CWD_STRIDE, p * CWD_STRIDE, CWD_STRIDE);
+  // The working directory and root are shared (CLONE_FS) unless the threads
+  // are in different mount namespaces, which only setns and unshare make
+  // them: then each keeps its own. Namespaces belong to the thread.
+  if get(k.mns, h) == get(k.mns, p) {
+    if (h + 1) * CWD_STRIDE <= len(k.cwd) && (p + 1) * CWD_STRIDE <= len(k.cwd) {      // live processes have rows
+      swap_words(&mut k.cwd, h * CWD_STRIDE, p * CWD_STRIDE, CWD_STRIDE);
+    }
+    if (h + 1) * CWD_STRIDE <= len(k.croot) && (p + 1) * CWD_STRIDE <= len(k.croot) {
+      swap_words(&mut k.croot, h * CWD_STRIDE, p * CWD_STRIDE, CWD_STRIDE);
+    }
   }
-  if (h + 1) * CWD_STRIDE <= len(k.croot) && (p + 1) * CWD_STRIDE <= len(k.croot) {
-    swap_words(&mut k.croot, h * CWD_STRIDE, p * CWD_STRIDE, CWD_STRIDE);
-  }
-  swap_words(&mut k.mns, h, p, 1);
-  nsk_swap(&mut k.mns, h, p);
   if (h + 1) * SIGACT_ROW <= len(k.sigact) && (p + 1) * SIGACT_ROW <= len(k.sigact) {
     swap_words(&mut k.sigact, h * SIGACT_ROW, p * SIGACT_ROW, SIGACT_ROW);
   }
