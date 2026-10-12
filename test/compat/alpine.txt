@@ -187,3 +187,15 @@ $ bb chroot /disk/a /usr/bin/nvim --headless -u NONE -c 'call setline(1, ["one",
 one
 two
 NVIM v0.11.5
+
+== dropbear: the server starts, in the Alpine guest
+$ mkdir -p ~root/.ssh && cp /disk/ssh_authorized_keys ~root/.ssh/authorized_keys && chmod 700 ~root/.ssh && chmod 600 ~root/.ssh/authorized_keys && (/disk/dropbear -F -r /disk/ssh_host_key -p 22 -P /tmp/ca_db.pid > /tmp/ca_db.log 2>&1 &); sleep 1; echo started
+started
+
+== nvim over ssh: edit and save in a pseudo-terminal
+$ @host TERM=xterm test/compat/ssh_tty.py --wait 5 'ihello over ssh' "$(printf '\033')" ':wq' -- build/compat/dbclient -y -y -t -i build/compat/ssh_id -p SSHPORT root@127.0.0.1 '/disk/busybox chroot /disk/a /usr/bin/nvim -u NONE /root/s.txt' >/dev/null 2>&1; build/compat/dbclient -y -y -i build/compat/ssh_id -p SSHPORT root@127.0.0.1 '/disk/busybox cat /disk/a/root/s.txt' 2>/dev/null
+hello over ssh
+
+== dropbear: the server stops, in the Alpine guest
+$ kill $(cat /tmp/ca_db.pid) && sleep 1; rm -f /tmp/ca_db.pid /tmp/ca_db.log; echo stopped
+stopped
