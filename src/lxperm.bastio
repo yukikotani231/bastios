@@ -514,12 +514,13 @@ fn exec_ids(k: &mut Kernel, pid: u64, file: bool, f: u64)
 {
   let mut euid = id_get(k.procs, pid, F_UID, true);
   let mut egid = id_get(k.procs, pid, F_GID, true);
-  if !file && f == 1 {
+  let nnp = sc_nnp(k, pid);                 // no_new_privs: the set-ID bits give nothing
+  if !file && f == 1 && !nnp {
     euid = 0;                               // su or passwd (bin_suid, src/lxproc.bastio)
   }
   // A file in a loop-mounted image (handles LO0 on) is as if mounted
   // nosuid: whoever made the image chose its owners and modes.
-  if file && f < LO0 {
+  if file && f < LO0 && !nnp {
     let m = vfs_meta(&mut k.fs, f);
     if m.ok && m.mode & S_ISUID != 0 {
       euid = m.own % ID_SPAN;
