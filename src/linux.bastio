@@ -847,6 +847,9 @@ const SIOCGIFCONF: u64 = 0x8912;
 const SIOCGIFFLAGS: u64 = 0x8913;
 const SIOCSIFFLAGS: u64 = 0x8914;
 const SIOCGIFADDR: u64 = 0x8915;
+const SIOCGIFBRDADDR: u64 = 0x8919;
+const SIOCGIFNETMASK: u64 = 0x891B;
+const SIOCGIFHWADDR: u64 = 0x8927;
 const SIOCGIFNAME: u64 = 0x8910;
 const SIOCSIFNAME: u64 = 0x8923;
 const SIOCGIFINDEX: u64 = 0x8933;
@@ -989,7 +992,7 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     return dsp_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxsnd.bastio
   }
   if d.kind == K_SOCK && (req == SIOCATMARK || req == SIOCGIFNAME || (req >= SIOCGIFCONF && req <= SIOCGIFADDR) || req == SIOCSIFNAME || req == SIOCGIFINDEX
-    || req == SIOCGIFMTU || req == SIOCGIFTXQLEN) {
+    || req == SIOCGIFMTU || req == SIOCGIFTXQLEN || req == SIOCGIFBRDADDR || req == SIOCGIFNETMASK || req == SIOCGIFHWADDR) {
     return sock_ioctl(&mut k, pid, fd, req, arg);
   }
   if d.kind != K_CONSOLE {
@@ -1158,6 +1161,31 @@ fn sock_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
       return 18446744073709551517;          // EADDRNOTAVAIL
     }
     ifr_ip(&mut k, 16, a);
+  } else if req == SIOCGIFNETMASK || req == SIOCGIFBRDADDR {
+    let a = nic_if_addr(k.nic, i);
+    if a == 0 {
+      return 18446744073709551517;          // EADDRNOTAVAIL
+    }
+    let span = nic_if_subnet(k.nic, i);
+    if req == SIOCGIFNETMASK {
+      ifr_ip(&mut k, 16, 4294967296 - span);
+    } else {
+      ifr_ip(&mut k, 16, a / span * span + span - 1);
+    }
+  } else if req == SIOCGIFHWADDR {
+    let mac = nic_if_mac(k.nic, i);
+    if nic_if_flags(k.nic, i) / IFF_LOOPBACK % 2 == 1 {
+      bset(&mut k.fs.xfer, 16, 4);          // ARPHRD_LOOPBACK, 772
+      bset(&mut k.fs.xfer, 17, 3);
+    } else {
+      bset(&mut k.fs.xfer, 16, 1);          // ARPHRD_ETHER
+    }
+    bset(&mut k.fs.xfer, 18, cast[u8](mac / 1099511627776 % 256));
+    bset(&mut k.fs.xfer, 19, cast[u8](mac / 4294967296 % 256));
+    bset(&mut k.fs.xfer, 20, cast[u8](mac / 16777216 % 256));
+    bset(&mut k.fs.xfer, 21, cast[u8](mac / 65536 % 256));
+    bset(&mut k.fs.xfer, 22, cast[u8](mac / 256 % 256));
+    bset(&mut k.fs.xfer, 23, cast[u8](mac % 256));
   }
   return lx_put_out(&mut k, pid, arg, IFREQ_SIZE);
 }
