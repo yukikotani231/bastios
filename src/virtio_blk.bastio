@@ -360,7 +360,9 @@ fn virtio_room(v: &Virtio, lba: u64, want: u64) -> u64
 /// Starts reading `n` (from virtio_room) consecutive blocks from sector
 /// `lba` in one request: the first into the data page, the rest into the
 /// extra pages. False if a request is running or a page is missing.
-fn virtio_begin_n(v: &mut Virtio, lba: u64, n: u64) -> bool
+/// With `wr`, the blocks are written instead, from the pages virtio_stage
+/// filled.
+fn virtio_begin_n(v: &mut Virtio, lba: u64, n: u64, wr: bool) -> bool
   requires virtio_ok(v) && n >= 1 && n <= VIO_BATCH
   ensures virtio_ok(v) && v.sectors == old(v.sectors) && (result ==> v.busy)
 {
@@ -368,6 +370,10 @@ fn virtio_begin_n(v: &mut Virtio, lba: u64, n: u64) -> bool
     return false;
   }
   // header (0) -> data (1) -> extra pages (3, 4, ..) -> status (2)
+  let mut flags = DESC_NEXT + DESC_WRITE;      // the device writes what it reads from the disk
+  if wr {
+    flags = DESC_NEXT;
+  }
   let mut j = 1;
   while j < n
     invariant j >= 1 && j <= n && n <= VIO_BATCH && virtio_ok(v) && v.q.n >= 3 + VIO_BATCH && !v.busy
@@ -380,14 +386,18 @@ fn virtio_begin_n(v: &mut Virtio, lba: u64, n: u64) -> bool
     if j + 1 < n {
       next = 3 + j;
     }
-    vq_desc(&mut v.q, 2 + j, a, VIO_BLOCK, DESC_NEXT + DESC_WRITE, next);
+    vq_desc(&mut v.q, 2 + j, a, VIO_BLOCK, flags, next);
     j = j + 1;
   }
-  virtio_header(&mut v, BLK_IN, lba);
+  if wr {
+    virtio_header(&mut v, BLK_OUT, lba);
+  } else {
+    virtio_header(&mut v, BLK_IN, lba);
+  }
   dma_write8(&mut v.req, REQ_STATUS, 255);
   dma_write64(&mut v.q.r0, 16, dma_phys(v.data));
   dma_write32(&mut v.q.r0, 16 + 8, cast[u32](VIO_BLOCK));
-  dma_write16(&mut v.q.r0, 16 + 12, cast[u16](DESC_NEXT + DESC_WRITE));
+  dma_write16(&mut v.q.r0, 16 + 12, cast[u16](flags));
   if n > 1 {
     dma_write16(&mut v.q.r0, 16 + 14, 3);
   } else {
@@ -399,6 +409,34 @@ fn virtio_begin_n(v: &mut Virtio, lba: u64, n: u64) -> bool
   v.flushing = false;
   v.n = n;
   return true;
+}
+
+/// Copies in[at .. at + 4096] into the page block j of a batched write
+/// (virtio_begin_n with wr) takes from. False if a request is running, the
+/// page is missing or the block is not all there.
+fn virtio_stage(v: &mut Virtio, j: u64, src: &Bytes, at: u64) -> bool
+  requires virtio_ok(v)
+  ensures virtio_ok(v) && v.sectors == old(v.sectors) && v.busy == old(v.busy)
+{
+  if v.busy || j >= VIO_BATCH || at > blen(src) || blen(src) - at < VIO_BLOCK {
+    return false;
+  }
+  if j == 0 {
+    bytes_to_dma(&mut v.data, 0, src, at, VIO_BLOCK);
+    return true;
+  }
+  match vec_swap(&mut v.extra, j - 1, Extra::None) {
+    Extra::None => { return false; },
+    Extra::Page(x) => {
+      let mut d = x;
+      bytes_to_dma(&mut d, 0, src, at, VIO_BLOCK);
+      match vec_swap(&mut v.extra, j - 1, Extra::Page(d)) {
+        Extra::None => {},
+        Extra::Page(_y) => { unreachable; },
+      }
+      return true;
+    },
+  }
 }
 
 /// After a read started by virtio_begin_n has finished well: block j of it
