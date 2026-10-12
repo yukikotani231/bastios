@@ -573,6 +573,7 @@ const CGW_CPUP: u64 = 6;              // cpu.max period (0: 100000)
 const CGW_WEIGHT: u64 = 7;            // cpu.weight (0: 100)
 const CGW_NLEN: u64 = 8;              // length of the name, then its bytes one a word
 const CGW_NAME: u64 = 9;
+const CGW_FRZ: u64 = 31;              // cgroup.freeze (the name takes words 9 to 30)
 const CG_NAME_MAX: u64 = 22;
 const OVERFLOW_ID: u64 = 65534;       // what an id with no map in the reader's user namespace shows as
 const UM_BAD: u64 = 0x100000000;      // an id with no map (ID_SPAN)
