@@ -29,6 +29,12 @@ if [ "${1:-}" = --build ]; then
   # bastioc1 is the only compiler with the AArch64 targets: use the one
   # the Makefile builds with stage0 (BASTIOC may name bastioc0 for the x86-64 tests).
   make ARCH=aarch64 BASTIOC=build/bastioc1 -s all || exit 1
+elif ! command -v "$QEMU" >/dev/null; then
+  # The variants in test/all.sh (GIC=, VIRT=, MEM=) reuse the kernel the
+  # --build run made, so they skip the same way.
+  echo "SKIP aarch64: needs $QEMU"
+  [ "${AARCH64_REQUIRED:-}" = 1 ] && exit 1
+  exit 0
 fi
 
 python3 - "$KERNEL" "$QEMU" "$TIMEOUT" <<'PY'
