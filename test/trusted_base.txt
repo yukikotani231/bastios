@@ -11,8 +11,8 @@ boot/limine.conf: 29 lines
 boot/linker.ld: 16 lines
 boot/multiboot.c: 277 lines
 boot/platform.c: 48 lines
-boot/smp.c: 693 lines
+boot/smp.c: 734 lines
 user/start.S: 19 lines
 user/start-aarch64.S: 17 lines
 user/user.ld: 15 lines
-total: 2198 lines
+total: 2239 lines
