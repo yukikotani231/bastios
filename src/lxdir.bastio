@@ -36,8 +36,8 @@ struct Ent { len: u64, dir: bool, end: bool }
 
 /// Entry `i` of directory `dir`, its name copied into the start of the
 /// transfer buffer. len 0 is an unused slot; `end` is past the last.
-fn dir_entry(k: &mut Kernel, dir: u64, i: u64) -> Ent
-  requires kok(k)
+fn dir_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
+  requires kok(k) && pid < NPROC
   ensures kok(k) && result.len <= XFER
 {
   if dir == DIR_ROOT {
@@ -50,7 +50,7 @@ fn dir_entry(k: &mut Kernel, dir: u64, i: u64) -> Ent
     return vfs_entry(&mut k, VDIR_ROOT, i - 2);
   }
   if dir >= DIR_PROC {
-    return proc_entry(&mut k, dir, i);
+    return proc_entry(&mut k, pid, dir, i);
   }
   if dir >= DIR_VFS {
     return vfs_entry(&mut k, dir - DIR_VFS, i);
@@ -193,7 +193,7 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64, legacy: b
       bset(&mut k.fs.xfer, 1, 46);
       e = Ent { len: i + 1, dir: true, end: false };
     } else {
-      e = dir_entry(&mut k, dir, i - 2);
+      e = dir_entry(&mut k, pid, dir, i - 2);
     }
     if e.end {
       more = false;

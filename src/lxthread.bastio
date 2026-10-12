@@ -358,6 +358,9 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   if !cow_break_all(&mut k, pid) {
     return ENOMEM;                          // its copy-on-write pages need copies first (src/lxcow.bastio)
   }
+  if !pn_open_for_new(k, nsk_of(k, NSK_PID, pid)) {
+    return ENOMEM;                          // the init of its PID namespace has ended
+  }
   let c = new_pid(&mut k);
   if c == 0 {
     return EAGAIN;
@@ -412,18 +415,21 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   pset(&mut k.procs, c, F_SIGPEND, 0);
   pset(&mut k.procs, c, F_RESTART, 0);
   pset(&mut k.procs, c, F_TGID, g);
+  k.mns = set(k.mns, c, get(k.mns, pid));   // the group's namespaces (src/lxns.bastio, src/lxnsk.bastio)
+  nsk_fork(&mut k.mns, pid, c);
+  pidns_thread(&mut k, pid, c);
   pset(&mut k.procs, c, F_FUTEX, 0);
   pset(&mut k.procs, c, F_CTID, 0);
   if flags & CLONE_CHILD_CLEARTID != 0 {
     pset(&mut k.procs, c, F_CTID, ctid);
   }
   // The caller holds the shared space now: the ids go in through it.
-  if flags & CLONE_PARENT_SETTID != 0 && !put_user_u32(&mut k, pid, ptid, c) {
+  if flags & CLONE_PARENT_SETTID != 0 && !put_user_u32(&mut k, pid, ptid, vpid_of(k, pid, c)) {
     pset(&mut k.procs, c, F_STATE, READY);
     return c;
   }
   if flags & CLONE_CHILD_SETTID != 0 {
-    let ok = put_user_u32(&mut k, pid, ctid, c);
+    let ok = put_user_u32(&mut k, pid, ctid, vpid_of(k, pid, c));
   }
   pset(&mut k.procs, c, F_STATE, READY);
   return c;
@@ -439,7 +445,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
 fn clone_proc_flags(flags: u64) -> bool {
   let known = 0xff + CLONE_PARENT + CLONE_SYSVSEM + CLONE_SETTLS + CLONE_PARENT_SETTID
     + CLONE_CHILD_CLEARTID + CLONE_DETACHED + CLONE_CHILD_SETTID + CLONE_IO + CLONE_NEWNS
-    + CLONE_NEWUTS + CLONE_NEWIPC;
+    + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID;
   return flags & known == flags;
 }
 
@@ -458,9 +464,17 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
       return EINVAL;                        // init has no parent to share
     }
   }
-  let nsf = flags & (CLONE_NEWNS + CLONE_NEWUTS + CLONE_NEWIPC);
+  let nsf = flags & (CLONE_NEWNS + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID);
   if nsf != 0 && !cap_has(k, pid, CAP_SYS_ADMIN) {
     return EPERM;
+  }
+  if flags & CLONE_NEWPID != 0 {
+    if nsk_of(k, NSK_PID, pid) != 0 || nsk_of(k, NSK_PIDC, pid) != 0 {
+      return ENOSPC;                        // two levels so far (src/lxnsk.bastio)
+    }
+    if !pn_room(&mut k) {
+      return ENOMEM;
+    }
   }
   if flags & CLONE_NEWNS != 0 && !ns_room(&mut k, pid) {
     return ENOMEM;
@@ -475,7 +489,10 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
   if flags & CLONE_NEWNS != 0 {
     let e = ns_unshare(&mut k, c);          // cannot fail: ns_room said so
   }
-  let e2 = nsk_unshare(&mut k, c, flags);   // nor this: uts_room did (src/lxnsk.bastio)
+  let e2 = nsk_unshare(&mut k, c, flags & (CLONE_NEWUTS + CLONE_NEWIPC));   // nor this: uts_room did (src/lxnsk.bastio)
+  if flags & CLONE_NEWPID != 0 {
+    pidns_clone(&mut k, c);                 // the child is the init of a new PID namespace
+  }
   pset(&mut k.procs, c, F_PARENT, par);
   if stack != 0 {
     pset(&mut k.procs, c, F_REGS + R_RSP, stack);
@@ -489,11 +506,11 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
   // The child has its own copy of the space now: CLONE_PARENT_SETTID
   // writes into both, CLONE_CHILD_SETTID into the child's.
   if flags & CLONE_PARENT_SETTID != 0 {
-    let a = put_user_u32(&mut k, pid, ptid, c);
-    let b = put_user_u32(&mut k, c, ptid, c);
+    let a = put_user_u32(&mut k, pid, ptid, vpid_of(k, pid, c));
+    let b = put_user_u32(&mut k, c, ptid, vpid_of(k, c, c));
   }
   if flags & CLONE_CHILD_SETTID != 0 {
-    let d = put_user_u32(&mut k, c, ctid, c);
+    let d = put_user_u32(&mut k, c, ctid, vpid_of(k, c, c));
   }
   return c;
 }
@@ -524,8 +541,8 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
     if ns & CLONE_NEWUSER != ns && !cap_has(k, pid, CAP_SYS_ADMIN) {
       return EPERM;
     }
-    if ns & (CLONE_NEWNS + CLONE_NEWNET + CLONE_NEWUTS + CLONE_NEWIPC) != ns {
-      return EINVAL;                        // only mount, network, UTS and IPC namespaces so far
+    if ns & (CLONE_NEWNS + CLONE_NEWNET + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID) != ns {
+      return EINVAL;                        // not the user and cgroup namespaces yet
     }
   }
   if flags != ns && pget(k.procs, pid, F_TGID) != 0 {
@@ -536,6 +553,14 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
   }
   if ns & CLONE_NEWUTS != 0 && !uts_room(&mut k) {
     return ENOMEM;
+  }
+  if ns & CLONE_NEWPID != 0 {
+    if nsk_of(k, NSK_PID, pid) != 0 || nsk_of(k, NSK_PIDC, pid) != 0 {
+      return ENOSPC;
+    }
+    if !pn_room(&mut k) {
+      return ENOMEM;
+    }
   }
   if ns & CLONE_NEWNET != 0 {
     let e = netns_unshare(&mut k, pid);     // src/lxnetlink.bastio

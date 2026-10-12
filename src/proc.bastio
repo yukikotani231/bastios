@@ -518,16 +518,21 @@ const ME_W: u64 = 5;                  // words per mount
 // each process's UTS, IPC and PID namespace, the next id of each kind, the
 // host and domain names of UTS namespaces other than the first (whose
 // names are in k.sys), and the IPC namespace of each POSIX queue.
-const NSK_N: u64 = 4;                 // kinds: NSK_UTS, NSK_IPC, NSK_PID, and one spare
+const NSK_N: u64 = 5;                 // kinds, per process:
 const NSK_UTS: u64 = 0;
 const NSK_IPC: u64 = 1;
-const NSK_PID: u64 = 2;
+const NSK_PID: u64 = 2;               //   the PID namespace it is in
+const NSK_VPID: u64 = 3;              //   its id in it (0 in the first namespace: its row)
+const NSK_PIDC: u64 = 4;              //   the PID namespace its children are in
+const PN_N: u64 = 16;                 // PID namespaces besides the first
+const PN_W: u64 = 3;                  // id + 1 (0: free), the next id to give, 1 once its init has ended
 const UTS_N: u64 = 8;                 // UTS namespaces besides the first
 const UTS_W: u64 = 132;               // id + 1 (0: free), then the names as k.sys keeps them
 const MNS_KID: u64 = NPROC + 8 + MT_N * ME_W;   // [MNS_KID + kind * NPROC + pid]
 const MNS_KNEXT: u64 = MNS_KID + NSK_N * NPROC;
 const MNS_UTS: u64 = MNS_KNEXT + NSK_N;
-const MNS_PQ: u64 = MNS_UTS + UTS_N * UTS_W;
+const MNS_PN: u64 = MNS_UTS + UTS_N * UTS_W;
+const MNS_PQ: u64 = MNS_PN + PN_N * PN_W;
 const MNS_LEN: u64 = MNS_PQ + PQ_N;
 const MSTR_LEN: u64 = 256 + MT_N * 512;   // the last lookup's logical path, then a key and a source per mount
 const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
@@ -1419,14 +1424,26 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
   netns_exit(&mut k, pid);                 // its network namespace ends with its last process
   pset(&mut k.procs, pid, F_STATE, ZOMBIE);
   pset(&mut k.procs, pid, F_CODE, code);
+  pidns_exit(&mut k, pid);                 // the init of a PID namespace takes the rest with it
+  let np = pidns_init(k, pid);             // orphans in a PID namespace go to its init
   let mut c = 1;
   while c < NPROC
-    invariant 1 <= c && c <= NPROC && ptab_ok(k.procs)
+    invariant 1 <= c && c <= NPROC && kok(k) && np < NPROC
   {
     if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE {
-      pset(&mut k.procs, c, F_PARENT, 0);
-      if state(k.procs, c) == ZOMBIE {
-        pset(&mut k.procs, c, F_STATE, FREE);
+      if np != 0 && np != c {
+        pset(&mut k.procs, c, F_PARENT, np);
+        if state(k.procs, c) == ZOMBIE {
+          if state(k.procs, np) == LXWAITING {
+            pset(&mut k.procs, np, F_STATE, READY);   // its wait4 collects the zombie
+          }
+          child_ended(&mut k, np, c);
+        }
+      } else {
+        pset(&mut k.procs, c, F_PARENT, 0);
+        if state(k.procs, c) == ZOMBIE {
+          pset(&mut k.procs, c, F_STATE, FREE);
+        }
       }
     }
     c = c + 1;

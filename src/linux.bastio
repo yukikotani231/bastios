@@ -226,9 +226,14 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   let was = pget(k.procs, pid, F_RESTART);  // a timed wait keeps its deadline here
   pset(&mut k.procs, pid, F_RESTART, 0);
-  let a = pget(k.procs, pid, F_REGS + R_RDI);
-  let b = pget(k.procs, pid, F_REGS + R_RSI);
+  let mut a = pget(k.procs, pid, F_REGS + R_RDI);
+  let mut b = pget(k.procs, pid, F_REGS + R_RSI);
   let c = pget(k.procs, pid, F_REGS + R_RDX);
+  if nsk_of(k, NSK_PID, pid) != 0 {
+    // A process in a PID namespace names processes by their ids there.
+    b = pidns_arg(k, pid, n, 1, b, a);
+    a = pidns_arg(k, pid, n, 0, a, a);
+  }
   if opath_denied(k, pid, n) {
     ret(&mut k.procs, pid, EBADF);          // an O_PATH handle (src/lxextra.bastio)
     return KEEP;
@@ -509,7 +514,8 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return SWITCH;                          // the parent waits until the child lets go
   }
   if n == LX_CLONE && a & CLONE_THREAD != 0 {
-    ret(&mut k.procs, pid, lx_thread_clone(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8)));
+    let r = lx_thread_clone(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));
+    ret(&mut k.procs, pid, child_id(k, pid, r));
     return KEEP;
   }
   if n == LX_UNSHARE {
@@ -517,11 +523,13 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_CLONE && clone_proc_flags(a) {
-    ret(&mut k.procs, pid, lx_clone_proc(&mut k, mmu, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8)));
+    let r = lx_clone_proc(&mut k, mmu, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));
+    ret(&mut k.procs, pid, child_id(k, pid, r));
     return KEEP;
   }
   if n == LX_FORK || n == LX_VFORK {
-    ret(&mut k.procs, pid, lx_fork(&mut k, mmu, pid));
+    let r = lx_fork(&mut k, mmu, pid);
+    ret(&mut k.procs, pid, child_id(k, pid, r));
     return KEEP;
   }
   if n == LX_EXECVE || n == LX_EXECVEAT {
@@ -560,7 +568,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return lx_wait4(&mut k, pid, a, b, c);
   }
   if n == LX_GETTID {
-    ret(&mut k.procs, pid, pid);            // a thread's id is its row
+    ret(&mut k.procs, pid, vpid_of(k, pid, pid));   // a thread's id is its row (src/lxnsk.bastio for the others)
     return KEEP;
   }
   if n == LX_RT_SIGSUSPEND {
@@ -652,11 +660,11 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     return KEEP;
   }
   if n == LX_GETPID {
-    ret(&mut k.procs, pid, tgid(k.procs, pid));
+    ret(&mut k.procs, pid, vpid_of(k, pid, tgid(k.procs, pid)));
     return KEEP;
   }
   if n == LX_GETPPID {
-    ret(&mut k.procs, pid, pget(k.procs, tgid(k.procs, pid), F_PARENT));
+    ret(&mut k.procs, pid, vpid_of(k, pid, pget(k.procs, tgid(k.procs, pid), F_PARENT)));
     return KEEP;
   }
   if n == LX_IOCTL {
@@ -681,7 +689,7 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   }
   if n == LX_SET_TID_ADDRESS {
     pset(&mut k.procs, pid, F_CTID, a);
-    ret(&mut k.procs, pid, pid);
+    ret(&mut k.procs, pid, vpid_of(k, pid, pid));
     return KEEP;
   }
   if n == LX_SET_ROBUST_LIST {
@@ -942,7 +950,7 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     if req == TIOCGSID {
       g = sid_of(k.procs, pid);
     }
-    xfer_u64(&mut k.fs.xfer, 0, g);
+    xfer_u64(&mut k.fs.xfer, 0, vpid_of(k, pid, g) % 0x100000000);
     return lx_put_out(&mut k, pid, arg, 4);
   }
   if req == TIOCSPGRP {
@@ -1786,7 +1794,10 @@ fn lx_finish(k: &mut Kernel, pid: u64, x: Lex, follow: bool) -> u64
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
-  let o2 = proc_self(&mut k.fs.xfer, x.n, pid);   // "proc/self" is the caller's /proc/PID
+  let mut o2 = x.n;
+  if nsk_of(k, NSK_PID, pid) == 0 {
+    o2 = proc_self(&mut k.fs.xfer, x.n, pid);     // "proc/self" is the caller's /proc/PID
+  }                                               // (in a PID namespace, lx_follow does it with the ids)
   let r = lx_follow(&mut k, pid, o2, follow || x.trail, smaller(x.floor, o2));  // symbolic links (src/lxlink.bastio)
   if r == NO_RESULT || !x.dirend {
     return r;

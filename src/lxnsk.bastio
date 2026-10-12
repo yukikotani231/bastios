@@ -16,7 +16,11 @@
 //        are looked up only among the caller's. When the last process of
 //        a namespace has ended, its objects go the next time one of the
 //        same kind is made.
-//   PID  only the first one so far: every process is in namespace 0.
+//   PID  a process in a new one (clone or unshare with CLONE_NEWPID) has
+//        an id there from a counter of its own, and sees only the processes
+//        of its namespace, by those ids (see the PID section below); the
+//        first namespace is everything made outside one, and sees every
+//        process by its row.
 //
 // /proc/PID/ns/ holds a link per kind (cgroup, ipc, mnt, net, pid,
 // pid_for_children, user, uts) whose target is "KIND:[INODE]", with
@@ -261,9 +265,354 @@ fn nsk_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
     }
   }
   if flags & CLONE_NEWIPC != 0 {
-    return ipc_unshare(&mut k, pid);
+    let e = ipc_unshare(&mut k, pid);
+    if e != 0 {
+      return e;
+    }
+  }
+  if flags & CLONE_NEWPID != 0 {
+    return pidns_unshare(&mut k, pid);
   }
   return 0;
+}
+
+// ---------------------------------------------------------------- PID
+
+// A process in a PID namespace other than the first has an id inside it
+// (NSK_VPID), given from the namespace's counter (slot of PN_W words in
+// k.mns: id + 1, the next id, 1 once its init has ended). The first process
+// there has id 1, is its init, and when it ends so does everything else in
+// the namespace. A process sees, and can signal and wait for, only the
+// processes of its own namespace, by their ids there; one in the first
+// namespace sees every process by its row, as before. A namespace made
+// from inside another is refused (ENOSPC), so there are two levels.
+
+/// The k.mns slot of PID namespace id, or PN_N (the first, or none).
+fn pn_slot(k: &Kernel, id: u64) -> u64
+  requires kok(k) && id < MNS_MAX
+  ensures result <= PN_N
+{
+  if id == 0 {
+    return PN_N;
+  }
+  let mut s = 0;
+  while s < PN_N
+    invariant s <= PN_N && kok(k)
+  {
+    if get(k.mns, MNS_PN + s * PN_W) == id + 1 {
+      return s;
+    }
+    s = s + 1;
+  }
+  return PN_N;
+}
+
+/// Is a process (or its zombie) in PID namespace id, or about to start
+/// children in it?
+fn pn_used(k: &Kernel, id: u64) -> bool
+  requires kok(k)
+{
+  let mut q = 0;
+  while q < NPROC
+    invariant q <= NPROC && kok(k)
+  {
+    if pget(k.procs, q, F_STATE) != FREE
+       && (get(k.mns, nsk_at(NSK_PID, q)) == id || get(k.mns, nsk_at(NSK_PIDC, q)) == id) {
+      return true;
+    }
+    q = q + 1;
+  }
+  return false;
+}
+
+/// Frees the slots of PID namespaces nothing uses; returns a free slot, or
+/// PN_N if there is none.
+fn pn_gc(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k) && result <= PN_N
+{
+  let mut free = PN_N;
+  let mut s = 0;
+  while s < PN_N
+    invariant s <= PN_N && free <= PN_N && kok(k)
+  {
+    let v = get(k.mns, MNS_PN + s * PN_W);
+    if v != 0 && !pn_used(k, v - 1) {
+      k.mns = set(k.mns, MNS_PN + s * PN_W, 0);
+    }
+    if get(k.mns, MNS_PN + s * PN_W) == 0 && free == PN_N {
+      free = s;
+    }
+    s = s + 1;
+  }
+  return free;
+}
+
+/// Opens slot s as the new PID namespace id, whose next id is `next`.
+fn pn_open(k: &mut Kernel, s: u64, id: u64, next: u64)
+  requires kok(k) && s < PN_N && id < MNS_MAX
+  ensures kok(k)
+{
+  k.mns = set(k.mns, MNS_PN + s * PN_W, id + 1);
+  k.mns = set(k.mns, MNS_PN + s * PN_W + 1, next);
+  k.mns = set(k.mns, MNS_PN + s * PN_W + 2, 0);
+}
+
+/// Can a process start in PID namespace id (it has ids left, its init has
+/// not ended)?
+fn pn_open_for_new(k: &Kernel, id: u64) -> bool
+  requires kok(k) && id < MNS_MAX
+{
+  if id == 0 {
+    return true;
+  }
+  let s = pn_slot(k, id);
+  return s < PN_N && get(k.mns, MNS_PN + s * PN_W + 2) == 0 && get(k.mns, MNS_PN + s * PN_W + 1) < 999999;
+}
+
+/// The next id of PID namespace id (taken), or 0 in the first.
+fn pn_alloc(k: &mut Kernel, id: u64) -> u64
+  requires kok(k) && id < MNS_MAX
+  ensures kok(k)
+{
+  let s = pn_slot(k, id);
+  if s >= PN_N {
+    return 0;
+  }
+  let v = smaller(get(k.mns, MNS_PN + s * PN_W + 1), 999999);
+  k.mns = set(k.mns, MNS_PN + s * PN_W + 1, v + 1);
+  return v;
+}
+
+/// unshare(CLONE_NEWPID): pid's children will start in a new PID
+/// namespace. 0, ENOSPC when pid is in one already, or ENOMEM.
+fn pidns_unshare(k: &mut Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if nsk_of(k, NSK_PID, pid) != 0 || nsk_of(k, NSK_PIDC, pid) != 0 {
+    return ENOSPC;
+  }
+  let s = pn_gc(&mut k);
+  if s >= PN_N {
+    return ENOMEM;
+  }
+  let id = nsk_new(&mut k, NSK_PID);
+  if id == 0 {
+    return ENOMEM;
+  }
+  pn_open(&mut k, s, id, 1);
+  nsk_set(&mut k, NSK_PIDC, pid, id);
+  return 0;
+}
+
+/// Is there a slot for a new PID namespace?
+fn pn_room(k: &mut Kernel) -> bool
+  requires kok(k)
+  ensures kok(k)
+{
+  return pn_gc(&mut k) < PN_N;
+}
+
+/// Can pid start a child (or thread) now: the namespace its children
+/// start in still has an init?
+fn pidns_room(k: &Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  return pn_open_for_new(k, nsk_of(k, NSK_PIDC, pid));
+}
+
+/// Child c of pid (nsk_fork has copied the namespaces): it starts in the
+/// namespace pid's children do, with the next id there.
+fn pidns_enter(k: &mut Kernel, pid: u64, c: u64)
+  requires kok(k) && pid < NPROC && c < NPROC
+  ensures kok(k)
+{
+  let n = nsk_of(k, NSK_PIDC, pid);
+  nsk_set(&mut k, NSK_PID, c, n);
+  nsk_set(&mut k, NSK_PIDC, c, n);
+  let v = pn_alloc(&mut k, n);
+  nsk_set(&mut k, NSK_VPID, c, v);
+}
+
+/// clone(CLONE_NEWPID): child c of pid is the init of a new namespace
+/// (pn_room said there was a slot).
+fn pidns_clone(k: &mut Kernel, c: u64)
+  requires kok(k) && c < NPROC
+  ensures kok(k)
+{
+  let s = pn_gc(&mut k);
+  if s >= PN_N {
+    return;
+  }
+  let id = nsk_new(&mut k, NSK_PID);
+  if id == 0 {
+    return;
+  }
+  pn_open(&mut k, s, id, 2);
+  nsk_set(&mut k, NSK_PID, c, id);
+  nsk_set(&mut k, NSK_PIDC, c, id);
+  nsk_set(&mut k, NSK_VPID, c, 1);
+}
+
+/// A new thread c of pid's group: in the same namespace, with an id there.
+fn pidns_thread(k: &mut Kernel, pid: u64, c: u64)
+  requires kok(k) && pid < NPROC && c < NPROC
+  ensures kok(k)
+{
+  let n = nsk_of(k, NSK_PID, pid);
+  nsk_set(&mut k, NSK_PID, c, n);
+  nsk_set(&mut k, NSK_PIDC, c, nsk_of(k, NSK_PIDC, pid));
+  let v = pn_alloc(&mut k, n);
+  nsk_set(&mut k, NSK_VPID, c, v);
+}
+
+/// Process row's id as process obs sees it: its row for a process in the
+/// first namespace, else its id there, or 0 if it is not in obs's.
+fn vpid_of(k: &Kernel, obs: u64, row: u64) -> u64
+  requires kok(k) && obs < NPROC
+{
+  let o = nsk_of(k, NSK_PID, obs);
+  if o == 0 {
+    return row;
+  }
+  if row >= NPROC || nsk_of(k, NSK_PID, row) != o {
+    return 0;
+  }
+  return get(k.mns, nsk_at(NSK_VPID, row));
+}
+
+/// The row of the process id v names for obs, or NPROC if there is none.
+fn kpid_of(k: &Kernel, obs: u64, v: u64) -> u64
+  requires kok(k) && obs < NPROC
+  ensures result <= NPROC
+{
+  let o = nsk_of(k, NSK_PID, obs);
+  if o == 0 {
+    if v < NPROC {
+      return v;
+    }
+    return NPROC;
+  }
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && kok(k)
+  {
+    if pget(k.procs, q, F_STATE) != FREE && nsk_of(k, NSK_PID, q) == o && get(k.mns, nsk_at(NSK_VPID, q)) == v {
+      return q;
+    }
+    q = q + 1;
+  }
+  return NPROC;
+}
+
+/// A process id (a pid_t, or its negative for a group) that process obs
+/// passed in, as the kernel's row number; a pid obs cannot see becomes one
+/// no process has (NPROC). 0 and -1 stay as they are.
+fn pidarg_k(k: &Kernel, obs: u64, v: u64) -> u64
+  requires kok(k) && obs < NPROC
+{
+  let p32 = v % 0x100000000;
+  if nsk_of(k, NSK_PID, obs) == 0 || p32 == 0 || p32 == 0xFFFFFFFF || p32 == 0x80000000 {
+    return v;
+  }
+  if p32 > 0x80000000 {
+    let r = kpid_of(k, obs, 0x100000000 - p32);
+    return wrap_sub(0, r);
+  }
+  return kpid_of(k, obs, p32);
+}
+
+/// Argument idx (0 or 1) of system call n, as obs passed it: the kernel's
+/// row for the process it names, if that argument is a process id. `first`
+/// is argument 0 (getpriority's and waitid's "which" says whether the next
+/// one is an id).
+fn pidns_arg(k: &Kernel, obs: u64, n: u64, idx: u64, v: u64, first: u64) -> u64
+  requires kok(k) && obs < NPROC
+{
+  if idx == 0 {
+    if n == 62 || n == 200 || n == 129 || n == 121 || n == 124 || (n >= 142 && n <= 145)
+       || n == 148 || n == 203 || n == 204 || n == 314 || n == 315 || n == 302
+       || n == 310 || n == 311 || n == 434 || n == 274 || n == 61 || n == 256 || n == 279
+       || n == 234 || n == 297 || n == 109 || n == 312 {
+      return pidarg_k(k, obs, v);           // kill, tkill, ..., wait4, tgkill, setpgid, kcmp
+    }
+    return v;
+  }
+  if n == 234 || n == 297 || n == 109 || n == 312 || n == 101 {
+    return pidarg_k(k, obs, v);             // tgkill's thread, setpgid's group, ptrace's pid
+  }
+  if (n == 140 || n == 141) && first <= 1 {
+    return pidarg_k(k, obs, v);             // get/setpriority of a process or group
+  }
+  if (n == 251 || n == 252) && first >= 1 && first <= 2 {
+    return pidarg_k(k, obs, v);             // ioprio_get/set
+  }
+  if n == 247 && first >= 1 && first <= 2 {
+    return pidarg_k(k, obs, v);             // waitid's P_PID, P_PGID
+  }
+  return v;
+}
+
+/// The result r of a fork or clone by pid, as pid names the child: its id
+/// if r is a child's row, else r (an error).
+fn child_id(k: &Kernel, pid: u64, r: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  if r >= 1 && r < NPROC {
+    return vpid_of(k, pid, r);
+  }
+  return r;
+}
+
+/// The live init of the PID namespace pid is in, other than pid; 0 if
+/// pid is in the first namespace or there is none.
+fn pidns_init(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result < NPROC
+{
+  let o = nsk_of(k, NSK_PID, pid);
+  if o == 0 {
+    return 0;
+  }
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && kok(k)
+  {
+    let s = pget(k.procs, q, F_STATE);
+    if q != pid && s != FREE && s != ZOMBIE && nsk_of(k, NSK_PID, q) == o && get(k.mns, nsk_at(NSK_VPID, q)) == 1 {
+      return q;
+    }
+    q = q + 1;
+  }
+  return 0;
+}
+
+/// Process pid has become a zombie. If it was the init of a PID
+/// namespace, nothing can start there any more and everything in it is
+/// killed.
+fn pidns_exit(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let o = nsk_of(k, NSK_PID, pid);
+  if o == 0 || get(k.mns, nsk_at(NSK_VPID, pid)) != 1 {
+    return;
+  }
+  let s = pn_slot(k, o);
+  if s < PN_N {
+    k.mns = set(k.mns, MNS_PN + s * PN_W + 2, 1);
+  }
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && kok(k)
+  {
+    let st = pget(k.procs, q, F_STATE);
+    if q != pid && st != FREE && st != ZOMBIE && nsk_of(k, NSK_PID, q) == o {
+      post_from(&mut k, q, SIGKILL, 0);
+    }
+    q = q + 1;
+  }
 }
 
 // ---------------------------------------------------------------- /proc/PID/ns
@@ -340,8 +689,11 @@ fn nf_id(k: &Kernel, p: u64, f: u64) -> u64
   if f == NF_IPC {
     return nsk_of(k, NSK_IPC, p);
   }
-  if f == NF_PID || f == NF_PIDC {
+  if f == NF_PID {
     return nsk_of(k, NSK_PID, p);
+  }
+  if f == NF_PIDC {
+    return nsk_of(k, NSK_PIDC, p);
   }
   if f == NF_NET {
     return net_ns(k, p);                    // the network thread's slot, src/lxnetlink.bastio
@@ -497,7 +849,7 @@ fn ns_may_join(k: &Kernel, pid: u64, f: u64, id: u64) -> u64
     return 0;
   }
   if f == NF_UTS {
-    if !nsk_live(k, NSK_UTS, id) || uts_slot(k, id) >= UTS_N {
+    if !nsk_live(k, NSK_UTS, id) || (id != 0 && uts_slot(k, id) >= UTS_N) {
       return EINVAL;
     }
     return 0;

@@ -1,13 +1,18 @@
-/* IPC namespaces and setns, against musl. The parent makes a System V
+/* IPC and PID namespaces and setns, against musl. The parent makes a System V
  * message queue, semaphore set and shared memory segment under fixed keys
  * and a POSIX queue; a child moves to a new IPC namespace (unshare) and
  * must not find them, then makes its own queue under the same key and
  * sends a message to it. The parent cannot see that message until it
  * joins the child's namespace through /proc/PID/ns/ipc (setns), and goes
  * back through a descriptor of its own /proc/self/ns/ipc; then the same
- * through a pidfd. Prints "mns: ok", or what failed. */
+ * through a pidfd. Then PID namespaces: a child made with CLONE_NEWPID is
+ * process 1 of its own and sees only its own children by their ids there;
+ * the same for the first child after unshare(CLONE_NEWPID); and when that
+ * init ends, the rest of its namespace goes with it. Prints "mns: ok", or
+ * what failed. */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <signal.h>
 #include <fcntl.h>
 #include <mqueue.h>
 #include <sched.h>
@@ -66,6 +71,109 @@ static int peek(char *out)
     return 0;
 }
 
+/* The init of a new PID namespace and its children, as they see themselves. */
+static int pidns(void)
+{
+    int up[2], st;
+    if (pipe(up))
+        return fail("pipe");
+    pid_t c = syscall(SYS_clone, CLONE_NEWPID | SIGCHLD, 0, 0, 0, 0);
+    if (c < 0)
+        return fail("clone(CLONE_NEWPID)");
+    if (c == 0) {
+        if (getpid() != 1)
+            _exit(10);
+        if (getppid() != 0)
+            _exit(11);
+        pid_t g = fork();
+        if (g == 0) {                       /* held until the namespace ends */
+            if (getpid() != 2 || getppid() != 1)
+                _exit(12);
+            close(up[0]);
+            for (;;)
+                pause();
+        }
+        if (g != 2)
+            _exit(13);
+        if (kill(2, 0) != 0 || kill(3, 0) != -1 || errno != ESRCH)
+            _exit(14);
+        pid_t h = fork();
+        if (h == 0)
+            _exit(7);
+        if (h != 3 || waitpid(h, &st, 0) != h || WEXITSTATUS(st) != 7)
+            _exit(15);
+        if (waitpid(-1, &st, WNOHANG) != 0)
+            _exit(16);                      /* g still runs */
+        close(up[1]);
+        _exit(0);                           /* g goes with it */
+    }
+    close(up[1]);
+    if (c == 1)
+        return fail("the namespace's init is process 1 outside it too");
+    char b;
+    if (waitpid(c, &st, 0) != c)
+        return fail("waitpid on the init");
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        printf("mns: the init said %d\n", WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+        return 1;
+    }
+    if (read(up[0], &b, 1) != 0)
+        return fail("the init's namespace outlived it");
+    close(up[0]);
+
+    /* unshare: the caller stays where it is; its first child is process 1 */
+    pid_t d = fork();
+    if (d == 0) {
+        pid_t me = getpid();
+        if (unshare(CLONE_NEWPID) != 0)
+            _exit(20);
+        if (getpid() != me)
+            _exit(21);
+        if (unshare(CLONE_NEWPID) != -1)
+            _exit(22);                      /* it has children of a new one already */
+        pid_t e = fork();
+        if (e == 0)
+            _exit(getpid() == 1 ? 0 : 23);
+        if (e == 1 || waitpid(e, &st, 0) != e)
+            _exit(24);
+        _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 25);
+    }
+    if (waitpid(d, &st, 0) != d || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        printf("mns: unshare(CLONE_NEWPID) said %d\n", WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+        return 1;
+    }
+    return 0;
+}
+
+/* A child in a UTS namespace of its own goes back to the first one through
+ * a descriptor opened before (what LTP's setns02 does). */
+static int utsback(void)
+{
+    char before[64], after[64];
+    int fd = open("/proc/self/ns/uts", O_RDONLY);
+    if (fd < 0 || gethostname(before, sizeof before))
+        return fail("the uts link");
+    pid_t c = fork();
+    if (c == 0) {
+        if (unshare(CLONE_NEWUTS) != 0 || sethostname("mns-box", 7) != 0)
+            _exit(30);
+        if (gethostname(after, sizeof after) || strcmp(after, "mns-box"))
+            _exit(31);
+        if (setns(fd, CLONE_NEWUTS) != 0)
+            _exit(32);
+        if (gethostname(after, sizeof after) || strcmp(after, before))
+            _exit(33);
+        _exit(0);
+    }
+    int st;
+    if (waitpid(c, &st, 0) != c || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        printf("mns: setns back to the first UTS namespace said %d\n", WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+        return 1;
+    }
+    close(fd);
+    return 0;
+}
+
 int main(void)
 {
     int q = msgget(KEY, IPC_CREAT | IPC_EXCL | 0600);
@@ -117,6 +225,8 @@ int main(void)
         return 1;
     if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
         return 1;                           /* the child said what */
+    if (utsback() || pidns())
+        return 1;
     puts("mns: ok");
     return 0;
 }

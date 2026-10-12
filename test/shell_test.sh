@@ -341,6 +341,11 @@ steps = [
     ("unshare -u sh -c 'hostname box; hostname; cat /proc/sys/kernel/hostname'; hostname; echo uts1",
      b"\r\nbox\r\nbox\r\nbastios\r\nuts1", b"\n# "),
     ("mns", b"mns: ok", b"\n# "),
+    # PID namespaces (src/lxnsk.bastio): the first process of a new one is 1,
+    # sees itself and only its own children there, and a /proc mounted in
+    # it lists them by those ids; user/mns.c (above) checks the rest.
+    ("unshare -p -f --mount-proc sh -c 'echo $$; kill -0 1 && echo seen; cat /proc/1/stat; ls -d /proc/9'",
+     b"\r\n1\r\nseen\r\n1 (ash) S 0 1 1 ", b"\n# "),
     ("unshare -u sh -c 'hostname inner; sleep 5' & sleep 1; nsenter -t $! -u hostname; readlink /proc/self/ns/uts; readlink /proc/$!/ns/uts; stat -L -c %i /proc/self/ns/mnt; ls /proc/self/ns; hostname; kill $!; echo ns5",
      [b"\r\ninner\r\nuts:[4026531838]\r\nuts:[40265320", b"\r\n4026531841\r\n", b"pid_for_children", b"\r\nbastios\r\n", b"ns5"], b"\n# "),
     # Owners and the umask (src/lxperm.bastio): a new file takes the umask,
