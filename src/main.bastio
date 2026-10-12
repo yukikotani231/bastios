@@ -154,14 +154,14 @@ fn power_button(s: &mut Sys)
 
 // A process taken out to run: its id, its process id (tgid, for a thread),
 // its lease on its address space, and its FPU page.
-struct Task { pid: u64, tgid: u64, vpid: u64, vtgid: u64, lease: Lease, fpu: Frame }
+struct Task { pid: u64, tgid: u64, vpid: u64, vtgid: u64, lease: Lease, fpu: Frame, slow: bool }
 
 enum Job { Stop, Idle, Disk, Run(Task) }   // Disk: idle, but a polled disk command is running
 
 /// The system calls a processor answers without the lock, from what it
 /// knows of the task it runs: the thread and process ids, and a yield while no other process waits
 /// for a processor (`others`, published under the lock by turn and
-/// next_job_p). True if `v` was one of them; the result is in rax and the
+/// next_job_p). True if `v` was one of them (the caller skips this for a task whose calls must all be seen: a seccomp filter, PTRACE_SYSCALL); the result is in rax and the
 /// task runs on. Anything they skip (a signal, a kill, the tick's
 /// accounting) waits for the task's next trap that is not one of them, at
 /// the latest its timer interrupt.
@@ -330,7 +330,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
           }
           cpu_set(&mut cpu, R_FSBASE, pget(s.k.procs, p, F_REGS + R_FSBASE));
           pset(&mut s.k.procs, p, F_STATE, RUNNING);
-          return Job::Run(Task { pid: p, tgid: tgid(s.k.procs, p), vpid: vpid_of(s.k, p, p), vtgid: vpid_of(s.k, p, tgid(s.k.procs, p)), lease: l, fpu: f });
+          return Job::Run(Task { pid: p, tgid: tgid(s.k.procs, p), vpid: vpid_of(s.k, p, p), vtgid: vpid_of(s.k, p, tgid(s.k.procs, p)), lease: l, fpu: f, slow: sc_mode(s.k, p) != 0 || tr2_get(s.k, p) % 2 == 1 });
         },
       }
     },
@@ -742,7 +742,9 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
         // loaded and saved outside the lock.
         cpu_fpu_load(&mut cpu, t.fpu);
         let mut v = cpu_run(&mut cpu, mmu);
-        while fast_call(&mut cpu, v, t.pid, t.vpid, t.vtgid, others) {
+        // A task with a seccomp filter or under PTRACE_SYSCALL has every
+        // call seen by the kernel, the ones answered here included.
+        while !t.slow && fast_call(&mut cpu, v, t.pid, t.vpid, t.vtgid, others) {
           v = cpu_run(&mut cpu, mmu);         // answered without the lock
         }
         mmu_exit(&mut mmu, t.lease);
