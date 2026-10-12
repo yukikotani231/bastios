@@ -220,6 +220,29 @@ int main(void) {
         rmdir("l3_ren");
     }
 
+    {
+        int pp[20][2], got[20] = {0}, added = 0, ok = 1;
+        int efd = epoll_create1(0);
+        for (int i = 0; i < 20; i++) {
+            pp[i][0] = pp[i][1] = -1;
+            if (pipe(pp[i]) == 0 && write(pp[i][1], "x", 1) == 1) {
+                struct epoll_event e = { .events = EPOLLIN, .data.u32 = i };
+                if (epoll_ctl(efd, EPOLL_CTL_ADD, pp[i][0], &e) == 0) added++;
+            }
+        }
+        for (int r = 0; r < 20 && ok; r++) {
+            struct epoll_event out[3];
+            int n = epoll_wait(efd, out, 3, 0);
+            if (n != 3) ok = 0;
+            for (int i = 0; i < n; i++) got[out[i].data.u32]++;
+        }
+        for (int i = 0; i < 20; i++) if (got[i] != 3) ok = 0;
+        EXPECT("an epoll instance watches 20 descriptors", added == 20);
+        EXPECT("epoll_wait with room for 3 reports each of 20 ready descriptors in turn", ok);
+        for (int i = 0; i < 20; i++) { if (pp[i][0] >= 0) close(pp[i][0]); if (pp[i][1] >= 0) close(pp[i][1]); }
+        close(efd);
+    }
+
     unlink("l3_d/f2");
     unlink("l3_link");
     rmdir("l3_d");

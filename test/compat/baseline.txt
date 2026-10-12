@@ -479,6 +479,8 @@ t_ltp3: copy_file_range into an O_APPEND file is EBADF
 t_ltp3: copy_file_range past the largest file is EFBIG
 t_ltp3: and a length that wraps is EOVERFLOW
 t_ltp3: copy_file_range of overlapping ranges in one file is EINVAL
+t_ltp3: an epoll instance watches 20 descriptors
+t_ltp3: epoll_wait with room for 3 reports each of 20 ready descriptors in turn
 t_ltp3: name_to_handle_at with no room is EOVERFLOW and says how much it needs
 t_ltp3: open_by_handle_at opens the same file
 t_ltp3: readlinkat of that descriptor and "" reads the link
