@@ -26,6 +26,7 @@ tests=(
   "aarch64 mem|c|MEM=2500M SMP=2 test/aarch64_test.sh"
   "aarch64 nvme|c|NVME=1 SMP=2 test/aarch64_test.sh"
   "aarch64 e1000|c|NIC=e1000 SMP=2 test/aarch64_test.sh"
+  "aarch64 virtio-pci|c|VIRTIO_PCI=1 SMP=2 test/aarch64_test.sh"
   "aarch64 nvme e1000|c|NVME=1 NIC=e1000 SMP=2 test/aarch64_test.sh"
   "aarch64 uefi|c|UEFI=/usr/share/qemu-efi-aarch64/QEMU_EFI.fd SMP=2 test/aarch64_test.sh"
   "fsck|c|test/fsck_test.py"
