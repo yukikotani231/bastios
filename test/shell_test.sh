@@ -286,6 +286,13 @@ steps = [
     # read -t, a poll on the console that times out, then one that wakes
     # when a line is typed.
     ("mtime", [b"mtime: rang 3, selected, slept ", b"woke in time, events ok"], b"\n# "),
+    # A TCP transfer to this machine's own address, many times longer than a
+    # card's frame: loopback segments are longer than 1500 bytes
+    # (src/net.bastio, NET_BUF), and every byte is checked on arrival. The
+    # rings take their spare pages from the pool on first use (up to 512,
+    # src/tcpbuf.bastio), so the later page counts may be lower than the
+    # first by that much.
+    ("mtcp loop 3000000", b"mtcp: loop 3000000 bytes, 0 wrong", b"\n# "),
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
     # More processes at once than the 32 rows the process table starts with:
     # it grows (new_pid), and /proc lists three-digit pids. (stdin from the
@@ -367,6 +374,14 @@ steps = [
     # and a file she makes is hers outside. Without a map she is 65534.
     ("su alice -c 'unshare -U -r sh -c \"id -u; id -g; ls -ln /etc/shadow; cat /etc/shadow; echo s=\\$?; touch /home/alice/f; ls -ln /home/alice/f; cat /proc/self/uid_map /proc/self/setgroups\"; ls -ln /home/alice/f; unshare -U id -u; unshare -U -r -u sh -c \"hostname box; hostname\"; unshare -U -r unshare -U true; echo n=$?'",
      [b"\r\n0\r\n0\r\n", b"65534    65534", b"Permission denied", b"s=1", b"0        0", b"         0       1000          1\r\ndeny", b"1000     1000", b"\r\n65534\r\nbox\r\n", b"n=1"], b"\n# "),
+    # Control groups (src/lxcgroup.bastio): a group is made with mkdir, a
+    # shell moves into it, and pids.max stops the fork that would pass it;
+    # cgroup.kill empties a group so that rmdir works, and non-root users may
+    # not change anything.
+    ("mkdir /sys/fs/cgroup/t; echo +pids > /sys/fs/cgroup/cgroup.subtree_control; echo 3 > /sys/fs/cgroup/t/pids.max; cat /sys/fs/cgroup/t/pids.max /sys/fs/cgroup/t/cgroup.controllers; ash -c 'echo $$ > /sys/fs/cgroup/t/cgroup.procs; cat /proc/self/cgroup; sleep 30 & sleep 30 & sleep 30 & echo f=$?'",
+     [b"\r\n3\r\npids\r\n", b"0::/t", b"can't fork"], b"\n# "),
+    ("echo 1 > /sys/fs/cgroup/t/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/t; echo r=$?; mkdir /sys/fs/cgroup/u; rmdir /sys/fs/cgroup/u; echo r=$?; su alice -c 'mkdir /sys/fs/cgroup/x; echo pids.max > /dev/null; echo 5 > /sys/fs/cgroup/pids.max; echo w=$?'",
+     [b"r=0", b"r=0", b"Permission denied", b"w=1"], b"\n# "),
     ("echo root:pw | chpasswd; read l < /etc/shadow; case $l in 'root:$6$'*) echo sha512;; esac; su alice -c 'echo no | su -c id root; echo w=$?; echo pw | su -c id root'",
      [b"\r\nsha512\r\n", b"w=1", b"uid=0(root) gid=0(root)"], b"\n# "),
     # (BusyBox keeps the old /etc files as NAME-: gone, so no pages stay.)
@@ -857,7 +872,8 @@ else:
     # Every page the finished processes and removed files used must be
     # back in the pool.
     mem = [l.strip() for l in out.split(b"\n") if l.strip().endswith(b"free pages")]
-    if len(mem) == 3 and mem[0] == mem[1] == mem[2]:
+    free = [int(m.split()[0]) for m in mem]
+    if len(mem) == 3 and free[1] == free[2] and 0 <= free[0] - free[1] <= 512:
         print("ok   no pages leaked:", mem[2].decode())
     else:
         print("FAIL page leak:", mem); fails += 1
@@ -995,6 +1011,14 @@ session("virtio", True, [
     # The user made at the first boot, kept on the disk.
     ("ash", b"built-in shell (ash)", b"\n# "),
     ("id kept; cat /root/kept; stat -c %a /etc/shadow; deluser kept; rm -rf /home/kept /root/kept /etc/*-", [b"uid=1000(kept)", b"\r\nhi\r\n600\r\n"], b"\n# "),
+    # seccomp (src/lxseccomp.bastio): programs that read outside seccomp_data
+    # or jump out of themselves are refused at load; filters answer with an
+    # errno chosen by call number and argument, stack, are inherited, and
+    # TRAP, KILL_PROCESS and strict mode end in SIGSYS or SIGKILL
+    # (user/mseccomp.c). The filter pool comes from the kernel's heap at the
+    # first filter and stays, so this runs in a boot that has not filled
+    # memory (the one with "mkdir full" has no heap to spare).
+    ("mseccomp", b"mseccomp: ok", b"\n# "),
     ("exit", b""),
 ], halt=True, ready=lambda: irq_found("virtio"))
 

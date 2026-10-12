@@ -24,6 +24,9 @@ fn lx_fork(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if lim != 0 {
     return lim;                             // -EAGAIN: RLIMIT_NPROC
   }
+  if !cg_fork_ok(k, pid) {
+    return EAGAIN;                          // a control group's pids.max (src/lxcgroup.bastio)
+  }
   if !pidns_room(k, pid) {
     return ENOMEM;                          // the init of its PID namespace has ended
   }
@@ -64,6 +67,9 @@ fn lx_vfork_vm(k: &mut Kernel, mmu: &Mmu, pid: u64, stack: u64) -> u64
 {
   if !pidns_room(k, pid) {
     return ENOMEM;                          // the init of its PID namespace has ended
+  }
+  if !cg_fork_ok(k, pid) {
+    return EAGAIN;                          // a control group's pids.max (src/lxcgroup.bastio)
   }
   let c = new_pid(&mut k);
   if c == 0 {
@@ -196,6 +202,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   pidns_enter(&mut k, pid, c);              // with an id in the PID namespace children start in
   pset(&mut k.procs, c, F_SIGPEND, 0);
   pset(&mut k.procs, c, F_RESTART, 0);
+  pset(&mut k.procs, c, F_ASLEEP, 0);       // it has not run yet, whatever its parent was doing
   pset(&mut k.procs, c, F_STATE, READY);
   return c;
 }
@@ -333,6 +340,9 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
       put_fpu(&mut k.fpus, pid, Fpu::State(f));
     },
   }
+  if pid >= 1 && tr_tracer(k, pid) != 0 {
+    post_from(&mut k, pid, 5, pid);   // SIGTRAP: a traced process stops after execve (src/lxptrace.bastio)
+  }
   return 0;
 }
 
@@ -376,7 +386,7 @@ fn src_named(k: &mut Kernel, pid: u64, n: u64) -> Src
   }
   let mut pf = 0;
   if n <= XFER {
-    pf = proc_file(k.procs, k.fs.xfer, n);
+    pf = proc_node(k, n);
   }
   if is_exe_file(pf) {
     return exe_src(&mut k, (pf - PROC_DEV) / 16);
@@ -826,10 +836,11 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
   while c < NPROC
     invariant 1 <= c && c <= NPROC && kok(k)
   {
-    if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
+    if (pget(k.procs, c, F_PARENT) == pid || traced_by(k, c, pid)) && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
       found = true;
       // WUNTRACED: stopped (status sig << 8 | 0x7f); WCONTINUED: 0xffff.
-      let jr = jc_report(&mut k, c, options & 2 != 0, options & 8 != 0, false);
+      // A tracer hears of the stops of what it traces without asking.
+      let jr = jc_report(&mut k, c, options & 2 != 0 || traced_by(k, c, pid), options & 8 != 0, false);
       if jr != 0 {
         if status != 0 {
           lx_fill(&mut k, 0, 4);
@@ -862,8 +873,12 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
             return KEEP;
           }
         }
-        tm_reap(&mut k, pid, c);
-        pset(&mut k.procs, c, F_STATE, FREE);
+        if pget(k.procs, c, F_PARENT) == pid {
+          tm_reap(&mut k, pid, c);
+          pset(&mut k.procs, c, F_STATE, FREE);
+        } else {
+          tr_put(&mut k, c, 0);             // its tracer has heard; the parent reaps it
+        }
         ret(&mut k.procs, pid, vpid_of(k, pid, c));
         return KEEP;
       }
@@ -934,9 +949,9 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
   while c < NPROC
     invariant 1 <= c && c <= NPROC && kok(k)
   {
-    if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
+    if (pget(k.procs, c, F_PARENT) == pid || traced_by(k, c, pid)) && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
       found = true;
-      let jr = jc_report(&mut k, c, options & 2 != 0, options & 8 != 0, options & 0x1000000 != 0);
+      let jr = jc_report(&mut k, c, options & 2 != 0 || traced_by(k, c, pid), options & 8 != 0, options & 0x1000000 != 0);
       if jr != 0 {
         if info != 0 {
           lx_fill(&mut k, 0, 128);
@@ -971,8 +986,12 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
           }
         }
         if options & 0x1000000 == 0 {
-          tm_reap(&mut k, pid, c);
-          pset(&mut k.procs, c, F_STATE, FREE);
+          if pget(k.procs, c, F_PARENT) == pid {
+            tm_reap(&mut k, pid, c);
+            pset(&mut k.procs, c, F_STATE, FREE);
+          } else {
+            tr_put(&mut k, c, 0);           // its tracer has heard; the parent reaps it
+          }
         }
         ret(&mut k.procs, pid, 0);
         return KEEP;
@@ -1046,7 +1065,7 @@ fn lx_stat(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, buf: u64, follow: bo
   if n == NO_RESULT {
     return k.perr;
   }
-  let pf = proc_file(k.procs, k.fs.xfer, n);
+  let pf = proc_node(k, n);
   let mut m = path_meta(&mut k, n);
   if !follow && pf != 0 && is_ns_file(pf) {
     m = nsf_link_meta(pf);                  // lstat: the /proc/PID/ns link itself
@@ -1097,12 +1116,15 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
   if dev != DEV_NONE {
     return dev_meta(dev);
   }
-  let pf = proc_file(k.procs, k.fs.xfer, n);
+  let pf = proc_node(k, n);
   if pf != 0 && is_ns_file(pf) {
     return nsf_meta(k, pf);                 // the namespace's nsfs file (src/lxnsk.bastio)
   }
   if pf != 0 && is_um_file(pf) {
     return um_meta(k, pf);                  // src/lxuser.bastio
+  }
+  if pf != 0 && is_cg_file(pf) {
+    return cg_file_meta(pf);                // src/lxcgroup.bastio
   }
   if pf != 0 {
     return proc_meta(pf);
@@ -1131,6 +1153,9 @@ fn dir_meta(k: &mut Kernel, dir: u64) -> Meta
   requires kok(k)
   ensures kok(k)
 {
+  if dir >= DIR_CG {
+    return cg_dir_meta(dir - DIR_CG);
+  }
   if dir >= DIR_PROC {
     return proc_dir_meta(dir);
   }
@@ -1199,6 +1224,8 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
     m = nsf_fd_meta(k, pid, fd, d.x);       // src/lxnsk.bastio
   } else if d.kind == K_DEV && is_um_file(d.x) {
     m = um_meta(k, d.x);
+  } else if d.kind == K_DEV && is_cg_file(d.x) {
+    m = cg_file_meta(d.x);
   } else if d.kind == K_DEV {
     m = dev_meta(d.x);
   } else if d.kind == K_FILE {

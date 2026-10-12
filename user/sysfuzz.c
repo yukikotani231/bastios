@@ -244,7 +244,7 @@ static const unsigned short linux_calls[] = {
     26, 27, 28, 29, 30, 31, 32, 33, 35, 36, 37, 38, 39, 40, 41, 43, 44, 45, 46, 47, 48, 49, 50,
     51, 52, 53, 54, 55, 56, 57, 58, 59, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74,
     75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
-    98, 99, 100, 102, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117,
+    98, 99, 100, 101, 102, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117,
     118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 131, 132, 133, 135, 136, 137,
     138, 139, 140, 141, 142, 143, 144, 145, 146, 148, 149, 150, 151, 152, 155, 157, 158, 159, 160,
     161, 162, 164, 165, 166, 170, 171, 186, 187, 200, 201, 202, 203, 204, 206, 213, 217, 218,
@@ -252,7 +252,7 @@ static const unsigned short linux_calls[] = {
     244, 245, 247, 251, 252, 253, 254, 255, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268,
     269, 270, 271, 272, 273, 274, 275, 276, 277, 278, 280, 281, 282, 283, 284, 285, 286, 287,
     288, 289, 290, 291, 292, 293, 294, 295, 296, 299, 302, 303, 304, 305, 307, 308, 309, 310, 311, 312,
-    314, 315, 316, 318, 319, 322, 324, 325, 326, 327, 328, 332, 334, 424, 425, 434, 435, 437, 438,
+    314, 315, 316, 317, 318, 319, 322, 324, 325, 326, 327, 328, 332, 334, 424, 425, 434, 435, 437, 438,
     439, 441, 452,
 };
 #define NLINUX (sizeof linux_calls / sizeof linux_calls[0])
@@ -337,8 +337,18 @@ static int tame(u64 n, u64 *a) {
     case 310: case 311:                               /* process_vm_readv/writev: ourselves, */
         a[0] = lx(39, 0, 0, 0, 0, 0, 0);              /* and no remote iovecs (zeros in buf), */
         a[3] = (u64)buf; return 1;                    /* so the fuzzer writes nothing of its own */
+    case 101:                                         /* ptrace: not TRACEME (the shell would trace us), */
+        if ((a[0] & 0xFFFFFFFF) == 0) return 0;       /* and ourselves only, which no one else is stopped by */
+        a[1] = lx(39, 0, 0, 0, 0, 0, 0); return 1;
     case 129:                                         /* rt_sigqueueinfo: ourselves, signal 0 */
         a[0] = lx(39, 0, 0, 0, 0, 0, 0); a[1] = 0; return 1;
+    case 317:                                         /* seccomp: never a filter or strict mode, which would */
+        a[0] &= 3;                                    /* bind the fuzzer itself; an unknown flag makes a */
+        if (a[0] != 2) a[1] |= 0x100;                 /* load fail with EINVAL after its other checks */
+        return 1;
+    case 157:                                         /* prctl: PR_SET_SECCOMP would bind the fuzzer too */
+        if ((a[0] & 0xFFFFFFFF) == 22) a[0] = 21;
+        return 1;
     case 38:                                          /* setitimer: only disarm */
         a[1] = (u64)buf; return 1;
     case 223:                                         /* timer_settime: only disarm */

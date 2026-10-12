@@ -36,6 +36,7 @@ TESTS = [
     ("open", "us", 1e-3, True),
     ("stat", "us", 1e-3, True),
     ("create", "us", 1e-3, True),
+    ("filemap", "ns/page", 1, True),
     ("filewrite", "MiB/s", None, True),
     ("fileread", "MiB/s", None, True),
     ("fork", "us", 1e-3, False),

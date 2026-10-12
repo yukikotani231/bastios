@@ -604,14 +604,12 @@ fn lx_sendfile(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, from: u64, off
   return KEEP;
 }
 
-/// System call n of the ones is_more_call names.
-fn lx_more_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+/// The result of system call n among those is_more_call names, other than
+/// sendfile (which lx_more_call handles).
+fn lx_more_result(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
   ensures kok(k) && con_ok(con)
 {
-  if n == LX_SENDFILE {
-    return lx_sendfile(&mut con, &mut k, pid, a, b, c);
-  }
   let r10 = pget(k.procs, pid, F_REGS + R_R10);
   let r8 = pget(k.procs, pid, F_REGS + R_R8);
   let mut r = 0;
@@ -638,9 +636,6 @@ fn lx_more_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_fallocate(&mut k, pid, a, b, c, r10);
   } else if n == LX_FLOCK {
     r = lx_flock(&mut k, pid, a, b);        // src/lxlock.bastio
-    if r == LK_WAIT {
-      return lx_retry(&mut k, pid, n);      // someone else's flock is in the way
-    }
   } else if n == LX_FADVISE64 {
     let d = fd_look(k, pid, a);
     if d.kind == K_BAD {
@@ -659,6 +654,21 @@ fn lx_more_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     }
   } else if n == LX_MEMFD_CREATE {
     r = lx_memfd(&mut k, pid, a, b);
+  }
+  return r;
+}
+
+/// System call n of the ones is_more_call names.
+fn lx_more_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  if n == LX_SENDFILE {
+    return lx_sendfile(&mut con, &mut k, pid, a, b, c);
+  }
+  let r = lx_more_result(&mut con, &mut k, pid, n, a, b, c);
+  if r == LK_WAIT && n == LX_FLOCK {
+    return lx_retry(&mut k, pid, n);        // someone else's flock is in the way
   }
   if r == EAGAIN && n != LX_FLOCK {
     return lx_retry(&mut k, pid, n);         // a full pipe: wait for room

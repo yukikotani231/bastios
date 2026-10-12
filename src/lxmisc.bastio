@@ -57,6 +57,7 @@ const LX_FCHMODAT: u64 = 268;
 const LX_UTIMENSAT: u64 = 280;
 const LX_PRLIMIT64: u64 = 302;
 const LX_GETRANDOM: u64 = 318;
+const LX_SECCOMP: u64 = 317;
 const LX_UNAME: u64 = 63;
 const LX_MINCORE: u64 = 27;
 const LX_PERSONALITY: u64 = 135;
@@ -77,6 +78,7 @@ const PR_SET_NAME: u64 = 15;
 const PR_GET_NAME: u64 = 16;
 const RAMFS_MAGIC: u64 = 0x858458F6;
 const TMPFS_MAGIC: u64 = 0x01021994;
+const CGROUP2_MAGIC: u64 = 0x63677270;
 const BSTDISK_MAGIC: u64 = 0x42535444;  // "BSTD": a BastiOS disk file system (src/diskfs.bastio)
 const STATFS_SIZE: u64 = 120;
 const SYSINFO_SIZE: u64 = 112;
@@ -259,6 +261,9 @@ fn lx_fstatfs(k: &mut Kernel, pid: u64, d: Fd, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if (d.kind == K_DEV && is_cg_file(d.x)) || (d.kind == K_DIR && d.x >= DIR_CG) {
+    return lx_statfs(&mut k, pid, va, CGROUP2_MAGIC);
+  }
   if d.kind == K_FILE && d.x < FD_ROWS {
     if vfs_file_in_mount(&mut k.fs, vfs_row_file(k.fs, d.x)) {
       return lx_statfs(&mut k, pid, va, TMPFS_MAGIC);
@@ -693,7 +698,7 @@ fn is_misc_call(n: u64) -> bool {
     || n == LX_SETRLIMIT || n == LX_SYNC || n == LX_UTIMES
     || n == LX_FUTIMESAT || n == LX_FCHOWNAT || n == LX_FCHMODAT || n == LX_UTIMENSAT
     || n == LX_PRLIMIT64 || n == LX_GETRANDOM || n == LX_UNAME || n == LX_MINCORE
-    || n == LX_PERSONALITY || n == LX_MLOCKALL || n == LX_MUNLOCKALL || n == LX_CAPGET || n == LX_CAPSET;
+    || n == LX_SECCOMP || n == LX_PERSONALITY || n == LX_MLOCKALL || n == LX_MUNLOCKALL || n == LX_CAPGET || n == LX_CAPSET;
 }
 
 fn is_meta_call(n: u64) -> bool {
@@ -761,6 +766,33 @@ fn sync_files(k: &mut Kernel)
   ensures kok(k)
 {
   vfs_sync(&mut k.fs);
+}
+
+/// mlock and munlock of n over [a, a + b).
+fn lx_mlock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut r = 0;
+  r = lock_range(&mut k, pid, a, b);
+  if r == 0 {
+    // The pages the range covers.
+    let bytes = (a % 4096 + smaller(b, USER_SIZE) + 4095) / 4096 * 4096;
+    let from = smaller((a - smaller(a, USER_BASE)) / 4096, WPAGES);
+    let to = smaller(from + bytes / 4096, WPAGES);
+    if a >= USER_BASE && from < to {
+      r = lock_pages(&mut k, pid, from, to, n == LX_MLOCK);
+    } else {
+      r = lock_count(&mut k, pid, bytes, n == LX_MLOCK);
+    }
+    // mlock2 with MLOCK_ONFAULT locks the range without populating it.
+    let onfault = pget(k.procs, pid, F_REGS + R_RAX) == LX_MLOCK2 && pget(k.procs, pid, F_REGS + R_RDX) % 2 == 1;
+    if r == 0 && n == LX_MLOCK && a >= USER_BASE && !onfault {
+      // Locked pages are resident: map those not touched yet (src/lxanon.bastio).
+      anon_reach(&mut k, pid, from, to);
+    }
+  }
+  return r;
 }
 
 /// System call n of process pid, with its first three arguments.
@@ -854,6 +886,8 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
       r = k.perr;
     } else if !path_there(&mut k, pn) {
       r = ENOENT;
+    } else if cg_under(k, pn) {
+      r = lx_statfs(&mut k, pid, b, CGROUP2_MAGIC);
     } else if vfs_in_mount(&mut k.fs, pn, false) {
       r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC);
     } else if on_disk(k.fs, pn) || (pn + 1 == DISK_PREFIX && xfer_is(k.fs.xfer, 0, pn, "disk")) {
@@ -894,27 +928,10 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_capget(&mut k, pid, a, b);
   } else if n == LX_CAPSET {
     r = lx_capset(&mut k, pid, a, b);
-  } else if n == LX_PRCTL {
-    r = lx_prctl(&mut k, pid, a, b);
+  } else if n == LX_PRCTL || n == LX_SECCOMP {
+    r = lx_prctl_seccomp(&mut k, pid, n, a, b, c);
   } else if n == LX_MLOCK || n == LX_MUNLOCK {
-    r = lock_range(&mut k, pid, a, b);
-    if r == 0 {
-      // The pages the range covers.
-      let bytes = (a % 4096 + smaller(b, USER_SIZE) + 4095) / 4096 * 4096;
-      let from = smaller((a - smaller(a, USER_BASE)) / 4096, WPAGES);
-      let to = smaller(from + bytes / 4096, WPAGES);
-      if a >= USER_BASE && from < to {
-        r = lock_pages(&mut k, pid, from, to, n == LX_MLOCK);
-      } else {
-        r = lock_count(&mut k, pid, bytes, n == LX_MLOCK);
-      }
-      // mlock2 with MLOCK_ONFAULT locks the range without populating it.
-      let onfault = pget(k.procs, pid, F_REGS + R_RAX) == LX_MLOCK2 && pget(k.procs, pid, F_REGS + R_RDX) % 2 == 1;
-      if r == 0 && n == LX_MLOCK && a >= USER_BASE && !onfault {
-        // Locked pages are resident: map those not touched yet (src/lxanon.bastio).
-        anon_reach(&mut k, pid, from, to);
-      }
-    }
+    r = lx_mlock_call(&mut k, pid, n, a, b);
   } else if n == LX_MLOCKALL {
     r = lx_mlockall(&mut k, pid, a);
   } else if n == LX_MUNLOCKALL {

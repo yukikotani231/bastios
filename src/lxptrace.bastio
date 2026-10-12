@@ -1,0 +1,404 @@
+// ptrace: a process (the tracer) watches and steers another (the tracee).
+//
+// The tracer is kept in the tracee's word in k.sys from SYS_PT (see
+// src/proc.bastio): TRACEME names the parent, ATTACH and SEIZE the caller.
+// A traced process stops, in a ptrace-stop, instead of acting on each
+// signal it takes (src/lxsig.bastio lx_deliver), and after the SIGTRAP
+// that follows an execve. The stop is the job-control stop (STOPPED, with
+// its report for wait4 and waitid): a tracer hears of it without asking
+// for WUNTRACED. PTRACE_CONT, PTRACE_DETACH and PTRACE_KILL end it; a
+// signal given to CONT or DETACH is delivered in place of the one that
+// stopped the process. While it is stopped the tracer reads and writes its
+// memory and registers.
+//
+// The registers are those of the interrupted program: a stop at a signal
+// is always between two instructions, never inside a system call. The
+// flags, rip, rsp and fs base the kernel puts back are checked on the way
+// to user mode (boot/boot.S), so a tracer cannot hand a process a kernel
+// address or a segment.
+//
+// Not done: PTRACE_SYSCALL, PTRACE_SINGLESTEP and the stops they cause,
+// the events (fork, clone, exec, exit; PTRACE_SETOPTIONS keeps them and
+// only PTRACE_O_EXITKILL acts), the floating point and debug registers,
+// PTRACE_INTERRUPT and PTRACE_LISTEN, PTRACE_GET_SYSCALL_INFO, and a
+// tracee that faults without a handler (it is killed, not stopped). A
+// tracer that is not the parent hears of its tracee's end once, then the
+// parent reaps it. There is no Yama scope: the caller needs root or the
+// target's user and group ids, as for pidfd_getfd.
+
+import "lxpidfd.bastio";
+
+const LX_PTRACE: u64 = 101;
+const PTRACE_TRACEME: u64 = 0;
+const PTRACE_PEEKTEXT: u64 = 1;
+const PTRACE_PEEKDATA: u64 = 2;
+const PTRACE_PEEKUSER: u64 = 3;
+const PTRACE_POKETEXT: u64 = 4;
+const PTRACE_POKEDATA: u64 = 5;
+const PTRACE_POKEUSER: u64 = 6;
+const PTRACE_CONT: u64 = 7;
+const PTRACE_KILL: u64 = 8;
+const PTRACE_GETREGS: u64 = 12;
+const PTRACE_SETREGS: u64 = 13;
+const PTRACE_ATTACH: u64 = 16;
+const PTRACE_DETACH: u64 = 17;
+const PTRACE_SETOPTIONS: u64 = 0x4200;
+const PTRACE_GETEVENTMSG: u64 = 0x4201;
+const PTRACE_GETSIGINFO: u64 = 0x4202;
+const PTRACE_SETSIGINFO: u64 = 0x4203;
+const PTRACE_GETREGSET: u64 = 0x4204;
+const PTRACE_SETREGSET: u64 = 0x4205;
+const PTRACE_SEIZE: u64 = 0x4206;
+const NT_PRSTATUS: u64 = 1;
+const USER_REGS: u64 = 27;               // struct user_regs_struct, in words
+const USER_REGS_SIZE: u64 = 216;
+const USER_DEBUGREG: u64 = 848;          // offsetof(struct user, u_debugreg)
+const PTRACE_O_VALID: u64 = 0x1000FF;    // the options there are (events and EXITKILL)
+
+fn is_ptrace_call(n: u64) -> bool {
+  return n == LX_PTRACE;
+}
+
+/// The saved register that word i of struct user_regs_struct stands for
+/// (r15 .. r8, rax, rcx, rdx, rsi, rdi, orig_rax, rip, cs, eflags, rsp, ss,
+/// fs_base, gs_base, ds, es, fs, gs), or 255 if there is none.
+fn ur_reg(i: u64) -> u64
+  requires i < USER_REGS
+  ensures result < 21 || result == 255
+{
+  if i < 4 {
+    return 14 - i;                          // r15 .. r12
+  }
+  if i == 4 { return 6; }                   // rbp
+  if i == 5 { return 1; }                   // rbx
+  if i < 10 {
+    return 16 - i;                          // r11 .. r8
+  }
+  if i == 10 { return 0; }                  // rax
+  if i == 11 { return 2; }                  // rcx
+  if i == 12 { return 3; }                  // rdx
+  if i == 13 { return 4; }                  // rsi
+  if i == 14 { return 5; }                  // rdi
+  if i == 16 { return 15; }                 // rip
+  if i == 18 { return 17; }                 // eflags
+  if i == 19 { return 16; }                 // rsp
+  if i == 21 { return 20; }                 // fs_base
+  return 255;
+}
+
+/// Word i of the registers of stopped process c.
+fn ur_read(k: &Kernel, c: u64, i: u64) -> u64
+  requires kok(k) && c < NPROC && i < USER_REGS
+{
+  let r = ur_reg(i);
+  if r < 21 {
+    return pget(k.procs, c, F_REGS + r);
+  }
+  if i == 15 {
+    return 0xFFFFFFFFFFFFFFFF;              // orig_rax: not in a system call
+  }
+  if i == 17 {
+    return 0x33;                            // cs
+  }
+  if i == 20 {
+    return 0x2B;                            // ss
+  }
+  return 0;
+}
+
+/// Sets word i of the registers of stopped process c (cs, ss, the other
+/// segments and gs_base cannot be changed).
+fn ur_write(k: &mut Kernel, c: u64, i: u64, v: u64)
+  requires kok(k) && c < NPROC && i < USER_REGS
+  ensures kok(k)
+{
+  let r = ur_reg(i);
+  if r < 21 {
+    pset(&mut k.procs, c, F_REGS + r, v);
+  }
+}
+
+/// Whether process c is stopped for its tracer, process pid.
+fn pt_ready(k: &Kernel, pid: u64, c: u64) -> bool
+  requires kok(k) && pid < NPROC && c < NPROC
+{
+  return state(k.procs, c) == STOPPED && traced_by(k, c, pid) && tr_stopped(tr_get(k, c)) == 1;
+}
+
+/// Lets stopped process c go on, passing signal sig (0: none) in place of
+/// the one that stopped it. With `detach` it is no longer traced.
+fn pt_resume(k: &mut Kernel, c: u64, sig: u64, detach: bool)
+  requires kok(k) && 1 <= c && c < NPROC && sig <= NSIG
+  ensures kok(k)
+{
+  let w = tr_get(k, c);
+  let mut skip = 0;
+  if sig != 0 && !detach {
+    skip = 1;
+  }
+  if detach {
+    tr_put(&mut k, c, 0);
+  } else {
+    tr_put(&mut k, c, tr_make(w % 65536, tr_att(w), 0, skip, 0, tr_opt(w)));
+  }
+  jc_set(&mut k, c, jc_get(k, c) / JC_EXECED % 2 * JC_EXECED);   // the stop is no news any more
+  if sig != 0 {
+    pset(&mut k.procs, c, F_SIGPEND, pget(k.procs, c, F_SIGPEND) | sbit(sig));
+  }
+  if state(k.procs, c) == STOPPED {
+    pset(&mut k.procs, c, F_STATE, READY);
+  }
+}
+
+/// PTRACE_TRACEME: the parent traces the caller.
+fn pt_traceme(k: &mut Kernel, pid: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  let par = pget(k.procs, pid, F_PARENT);
+  if tr_tracer(k, pid) != 0 || par == 0 || par >= NPROC {
+    return EPERM;
+  }
+  tr_put(&mut k, pid, tr_make(par + 1, 0, 0, 0, 0, 0));
+  return 0;
+}
+
+/// PTRACE_ATTACH (stops the target with SIGSTOP) and PTRACE_SEIZE.
+fn pt_attach(k: &mut Kernel, pid: u64, p: u64, seize: bool) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  if p == 0 || p >= NPROC || state(k.procs, p) == FREE || state(k.procs, p) == ZOMBIE {
+    return ESRCH;
+  }
+  if tgid(k.procs, p) == tgid(k.procs, pid) || tr_tracer(k, p) != 0 {
+    return EPERM;                           // itself, a thread of its group, or traced already
+  }
+  if !cred_root(k.procs, pid) && !same_ids(k.procs, pid, p) {
+    return EPERM;
+  }
+  tr_put(&mut k, p, tr_make(pid + 1, 1, 0, 0, 0, 0));
+  if state(k.procs, p) == STOPPED && !seize {
+    // Already stopped by a signal: it is now stopped for its tracer, who
+    // hears of it (its own stop was reported to the parent already).
+    let sig = jc_get(k, p) % 256;
+    tr_put(&mut k, p, tr_make(pid + 1, 1, 1, 0, sig, 0));
+    jc_set(&mut k, p, sig + JC_STOP + jc_get(k, p) / JC_EXECED % 2 * JC_EXECED);
+    tr_tell(&mut k, p);
+  }
+  if !seize {
+    post_from(&mut k, p, SIGSTOP, pid);
+  }
+  return 0;
+}
+
+/// Peeks (a word at addr of the tracee's memory, or of its registers) and
+/// stores the word at `data`, as the raw system call does.
+fn pt_peek(k: &mut Kernel, pid: u64, c: u64, req: u64, addr: u64, data: u64) -> u64
+  requires kok(k) && pid < NPROC && 1 <= c && c < NPROC
+  ensures kok(k)
+{
+  let mut v = 0;
+  if req == PTRACE_PEEKUSER {
+    if addr % 8 != 0 {
+      return EIO;
+    }
+    if addr < USER_REGS_SIZE {
+      v = ur_read(k, c, addr / 8);
+    } else if addr < USER_DEBUGREG || addr >= USER_DEBUGREG + 64 {
+      return EIO;
+    }                                       // the debug registers read as zero
+  } else {
+    let tp = fd_row(&mut k, tgid(k.procs, c));
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, tp, addr, &mut k.fs.xfer, 8) != 8 {
+      return EIO;
+    }
+    v = rd64(k.fs.xfer, 0);
+  }
+  xfer_u64(&mut k.fs.xfer, 0, v);
+  return lx_put_out(&mut k, pid, data, 8);
+}
+
+/// Pokes data into a word of the tracee's memory or registers.
+fn pt_poke(k: &mut Kernel, c: u64, req: u64, addr: u64, data: u64) -> u64
+  requires kok(k) && 1 <= c && c < NPROC
+  ensures kok(k)
+{
+  if req == PTRACE_POKEUSER {
+    if addr % 8 != 0 {
+      return EIO;
+    }
+    if addr < USER_REGS_SIZE {
+      ur_write(&mut k, c, addr / 8, data);
+      return 0;
+    }
+    if addr >= USER_DEBUGREG && addr < USER_DEBUGREG + 64 {
+      // The debug registers are not kept, but an address watch must be one
+      // a user program could touch.
+      if (addr - USER_DEBUGREG) / 8 < 4 && data >= 0x800000000000 {
+        return EINVAL;
+      }
+      return 0;
+    }
+    return EIO;
+  }
+  let tp = fd_row(&mut k, tgid(k.procs, c));
+  xfer_u64(&mut k.fs.xfer, 0, data);
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, tp, addr, k.fs.xfer, 8) != 8 {
+    return EIO;
+  }
+  return 0;
+}
+
+/// The registers of the tracee to `to` (a user_regs_struct), n bytes.
+fn pt_getregs(k: &mut Kernel, pid: u64, c: u64, to: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && 1 <= c && c < NPROC && n <= USER_REGS_SIZE
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < USER_REGS
+    invariant i <= USER_REGS && kok(k)
+  {
+    xfer_u64(&mut k.fs.xfer, i * 8, ur_read(k, c, i));
+    i = i + 1;
+  }
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, to, k.fs.xfer, n) != n {
+    return EFAULT;
+  }
+  return 0;
+}
+
+/// The tracee's registers from `from` (a user_regs_struct), n bytes.
+fn pt_setregs(k: &mut Kernel, pid: u64, c: u64, from: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && 1 <= c && c < NPROC && n <= USER_REGS_SIZE
+  ensures kok(k)
+{
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, from, &mut k.fs.xfer, n) != n {
+    return EFAULT;
+  }
+  let mut i = 0;
+  while i < USER_REGS && i * 8 + 8 <= n
+    invariant i <= USER_REGS && kok(k)
+  {
+    ur_write(&mut k, c, i, rd64(k.fs.xfer, i * 8));
+    i = i + 1;
+  }
+  return 0;
+}
+
+/// PTRACE_GETREGSET and SETREGSET of NT_PRSTATUS: data is an iovec.
+fn pt_regset(k: &mut Kernel, pid: u64, c: u64, set: bool, kind: u64, data: u64) -> u64
+  requires kok(k) && pid < NPROC && 1 <= c && c < NPROC
+  ensures kok(k)
+{
+  if kind != NT_PRSTATUS {
+    return EINVAL;
+  }
+  if data > 0xFFFFFFFFFFFFFFF0 {
+    return EFAULT;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, data, &mut k.fs.xfer, 16) != 16 {
+    return EFAULT;
+  }
+  let base = rd64(k.fs.xfer, 0);
+  let len = smaller(rd64(k.fs.xfer, 8), USER_REGS_SIZE);
+  let mut r = 0;
+  if set {
+    r = pt_setregs(&mut k, pid, c, base, len);
+  } else {
+    r = pt_getregs(&mut k, pid, c, base, len);
+  }
+  if r != 0 {
+    return r;
+  }
+  xfer_u64(&mut k.fs.xfer, 0, len);
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, data + 8, k.fs.xfer, 8) != 8 {
+    return EFAULT;
+  }
+  return 0;
+}
+
+/// ptrace(req, p, addr, data). Peeks give their word through `data`.
+fn lx_ptrace(k: &mut Kernel, pid: u64, req0: u64, p0: u64, addr: u64, data: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  let req = req0 % 0x100000000;
+  let p = p0 % 0x100000000;
+  if req == PTRACE_TRACEME {
+    return pt_traceme(&mut k, pid);
+  }
+  if req == PTRACE_ATTACH || req == PTRACE_SEIZE {
+    return pt_attach(&mut k, pid, p, req == PTRACE_SEIZE);
+  }
+  if p == 0 || p >= NPROC || state(k.procs, p) == FREE || !traced_by(k, p, pid) {
+    return ESRCH;
+  }
+  if req == PTRACE_SETOPTIONS && state(k.procs, p) != ZOMBIE {
+    // Allowed whenever it is traced, as on Linux, but only valid options.
+    if data & !PTRACE_O_VALID != 0 {
+      return EINVAL;
+    }
+    let w = tr_get(k, p);
+    tr_put(&mut k, p, tr_make(w % 65536, tr_att(w), tr_stopped(w), tr_skip(w), tr_sig(w), data % 256 + data / 0x100000 % 2 * 256));
+    return 0;
+  }
+  if !pt_ready(k, pid, p) {
+    return ESRCH;                           // it must be stopped
+  }
+  if req == PTRACE_PEEKTEXT || req == PTRACE_PEEKDATA || req == PTRACE_PEEKUSER {
+    return pt_peek(&mut k, pid, p, req, addr, data);
+  }
+  if req == PTRACE_POKETEXT || req == PTRACE_POKEDATA || req == PTRACE_POKEUSER {
+    return pt_poke(&mut k, p, req, addr, data);
+  }
+  if req == PTRACE_GETREGS {
+    return pt_getregs(&mut k, pid, p, data, USER_REGS_SIZE);
+  }
+  if req == PTRACE_SETREGS {
+    return pt_setregs(&mut k, pid, p, data, USER_REGS_SIZE);
+  }
+  if req == PTRACE_GETREGSET || req == PTRACE_SETREGSET {
+    return pt_regset(&mut k, pid, p, req == PTRACE_SETREGSET, addr, data);
+  }
+  if req == PTRACE_CONT || req == PTRACE_DETACH {
+    if data > NSIG {
+      return EIO;
+    }
+    pt_resume(&mut k, p, data, req == PTRACE_DETACH);
+    return 0;
+  }
+  if req == PTRACE_KILL {
+    post_from(&mut k, p, SIGKILL, pid);
+    return 0;
+  }
+  if req == PTRACE_GETEVENTMSG {
+    xfer_u64(&mut k.fs.xfer, 0, 0);
+    return lx_put_out(&mut k, pid, data, 8);
+  }
+  if req == PTRACE_GETSIGINFO {
+    // The signal that stopped it: from a user process (SI_USER).
+    lx_fill(&mut k, 0, 128);
+    xfer_u64(&mut k.fs.xfer, 0, tr_sig(tr_get(k, p)));
+    return lx_put_out(&mut k, pid, data, 128);
+  }
+  if req == PTRACE_SETSIGINFO {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, data, &mut k.fs.xfer, 128) != 128 {
+      return EFAULT;
+    }
+    return 0;                               // read, and not kept
+  }
+  return EIO;
+}
+
+fn lx_ptrace_call(k: &mut Kernel, pid: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  let r = lx_ptrace(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
+  ret(&mut k.procs, pid, r);
+  if pget(k.procs, pid, F_SIGPEND) & !pget(k.procs, pid, F_SIGMASK) != 0 {
+    return SWITCH;
+  }
+  return KEEP;
+}

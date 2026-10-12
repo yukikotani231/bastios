@@ -153,6 +153,42 @@ fn jc_tell(k: &mut Kernel, p: u64)
   }
 }
 
+/// Process p stopped for its tracer (a ptrace-stop): the tracer hears of
+/// it, as a parent hears of a stop, and wakes from wait4 or waitid.
+fn tr_tell(k: &mut Kernel, p: u64)
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let t = tr_tracer(k, p);
+  if t == 0 || t > NPROC {
+    return;
+  }
+  let tr = t - 1;
+  if tr == 0 || tr == pget(k.procs, p, F_PARENT) || state(k.procs, tr) == FREE || state(k.procs, tr) == ZOMBIE {
+    return;                                 // the parent was told by jc_tell
+  }
+  if state(k.procs, tr) == LXWAITING {
+    pset(&mut k.procs, tr, F_STATE, READY);
+  }
+  if is_linux(k.procs, tr) {
+    post_from(&mut k, tr, SIGCHLD, p);
+  }
+}
+
+/// Process p, traced, takes signal s: it stops until its tracer resumes
+/// it (PTRACE_CONT and the others), which may pass a signal on instead.
+fn tr_stop(k: &mut Kernel, p: u64, s: u64)
+  requires kok(k) && 1 <= p && p < NPROC && s < 256
+  ensures kok(k)
+{
+  pset(&mut k.procs, p, F_STATE, STOPPED);
+  jc_set(&mut k, p, s + JC_STOP + jc_get(k, p) / JC_EXECED % 2 * JC_EXECED);
+  let w = tr_get(k, p);
+  tr_put(&mut k, p, tr_make(w % 65536, tr_att(w), 1, 0, s, tr_opt(w)));
+  jc_tell(&mut k, p);
+  tr_tell(&mut k, p);
+}
+
 /// What wait may report about child c besides its end: 256 + the signal
 /// that stopped it (with `stops`), or 512 + SIGCONT once it continued
 /// (with `conts`); 0 if neither. Unless `keep` (WNOWAIT), the report is
@@ -232,7 +268,7 @@ fn post_sig(k: &mut Kernel, p: u64, s: u64)
   // pending stops; a stop signal drops a pending SIGCONT.
   if s == SIGCONT {
     pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) & !(sbit(SIGSTOP) | sbit(SIGTSTP) | sbit(SIGTTIN) | sbit(SIGTTOU)));
-    if st == STOPPED {
+    if st == STOPPED && tr_stopped(tr_get(k, p)) == 0 {
       pset(&mut k.procs, p, F_STATE, READY);
       jc_set(&mut k, p, JC_CONT + jc_get(k, p) / JC_EXECED % 2 * JC_EXECED);
       jc_tell(&mut k, p);
@@ -245,8 +281,8 @@ fn post_sig(k: &mut Kernel, p: u64, s: u64)
   }
   // A blocked signal is kept even if ignored, as on Linux: a signalfd or
   // sigwait may take it, and delivery drops it if it is still ignored.
-  if sig_ignored(k.sigact, p, s) && !blocked {
-    return;
+  if sig_ignored(k.sigact, p, s) && !blocked && tr_tracer(k, p) == 0 {
+    return;                                 // a traced process stops for it, as on Linux
   }
   pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
   wset(&mut k.sigsave, sender_at(p, s), 0);     // the kernel, unless post_from says
@@ -881,6 +917,9 @@ fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
   if pget(k.procs, p, F_RESTART) != 0 && pget(k.procs, p, F_REGS + R_RAX) == 128 {
     return true;
   }
+  if pget(k.procs, p, F_SIGPEND) == 0 {
+    return true;                            // nothing pending: the common case
+  }
   let mut s = 1;
   while s <= NSIG
     invariant 1 <= s && s <= NSIG + 1 && kok(k)
@@ -889,6 +928,14 @@ fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
     let take = has_sig(pend, s) && (s == SIGKILL || !has_sig(pget(k.procs, p, F_SIGMASK), s));
     if take {
       pset(&mut k.procs, p, F_SIGPEND, pend & !sbit(s));
+      let w = tr_get(k, p);
+      if w % 65536 != 0 && s != SIGKILL {
+        if tr_skip(w) == 0 {
+          tr_stop(&mut k, p, s);            // the tracer decides what becomes of it
+          return false;
+        }
+        tr_put(&mut k, p, tr_make(w % 65536, tr_att(w), tr_stopped(w), 0, tr_sig(w), tr_opt(w)));
+      }
       let h = sa_get(k.sigact, p, s, 0);
       if s != SIGKILL && h == SIG_DFL && dfl_stops(s) {
         jc_stop(&mut k, p, s);
@@ -930,7 +977,10 @@ fn fault_caught(k: &mut Kernel, p: u64, s: u64, addr: u64) -> bool
   ensures kok(k)
 {
   let h = sa_get(k.sigact, p, s, 0);
-  if h == SIG_DFL || h == SIG_IGN || has_sig(pget(k.procs, p, F_SIGMASK), s) {
+  let masked = has_sig(pget(k.procs, p, F_SIGMASK), s);
+  // A traced process stops for the signal, handler or not (src/lxptrace.bastio).
+  let traced = tr_tracer(k, p) != 0 && !masked;
+  if (h == SIG_DFL || h == SIG_IGN || masked) && !traced {
     return false;
   }
   pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));

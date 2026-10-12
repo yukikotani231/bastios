@@ -25,7 +25,8 @@ void bst_platform_init(void) {
     /* Each processor's task state segment is set up by bst_core_init (smp.c). */
 
     /* Interrupt gates: interrupts stay off in the kernel. Only the system
-     * call gate can be raised from ring 3 with `int`. The exceptions that
+     * call gate and the breakpoint gate (vector 3, for `int3`) can be raised
+     * from ring 3 with `int`. The exceptions that
      * can arrive at any instruction whatever IF says (#DB, NMI, #MC), and
      * #DF, switch to the processor's IST1 stack (core.h): the first
      * instructions of bst_syscall_entry run in ring 0 on the user's %rsp,
@@ -35,7 +36,7 @@ void bst_platform_init(void) {
         idt[v].off_lo = a & 0xFFFF;
         idt[v].sel = 0x08;
         idt[v].ist = (v == 1 || v == 2 || v == 8 || v == 18) ? 1 : 0;
-        idt[v].type = v == SYSCALL_VECTOR ? 0xEE : 0x8E;
+        idt[v].type = (v == SYSCALL_VECTOR || v == 3) ? 0xEE : 0x8E;   /* int3 raises #BP, which becomes SIGTRAP, not #GP */
         idt[v].off_mid = (a >> 16) & 0xFFFF;
         idt[v].off_hi = a >> 32;
         idt[v].zero = 0;
