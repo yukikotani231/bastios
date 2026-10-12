@@ -1288,6 +1288,8 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   if nic_live(nic) {
     if nic_e1000(nic) {
       puts(&mut con, "net: e1000, mac ");
+    } else if nic_ena(nic) {
+      puts(&mut con, "net: ena, mac ");
     } else {
       puts(&mut con, "net: virtio, mac ");
     }
@@ -1305,8 +1307,12 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   if blk_sectors(disk.dev) == 0 {
     puts(&mut con, "disk: none found (NVMe, AHCI, ATA, virtio, USB); files are kept in memory only\r\n");
   }
-  if !nic_live(nic) {
-    puts(&mut con, "net: none (drivers: virtio and e1000 only)\r\n");
+  if nic_ena(nic) && !nic_live(nic) {
+    puts(&mut con, "net: ena found but not started (reason ");
+    put_num(&mut con, nic_why(nic));
+    puts(&mut con, ", see docs/cloud.md)\r\n");
+  } else if !nic_live(nic) {
+    puts(&mut con, "net: none (drivers: virtio, e1000 and ena only)\r\n");
   }
   // The hardware report, with the boot option `diag` (src/info.bastio),
   // after a line for each thing the boot log above says nothing about.

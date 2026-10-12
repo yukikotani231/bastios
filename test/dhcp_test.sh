@@ -20,7 +20,7 @@ KERNEL=${KERNEL:-build/bastios.elf}
 NIC=${NIC:-virtio-net-pci}
 
 python3 - "$KERNEL" "$NIC" <<'PY'
-import select, socket, struct, subprocess, sys, time
+import os, select, socket, struct, subprocess, sys, time
 
 kernel, card = sys.argv[1:3]
 GUEST_MAC = bytes.fromhex("525400123456")
@@ -109,9 +109,14 @@ class Wire:
         a = struct.pack("!HHBBH", 1, 0x0800, 6, 4, 1) + SERVER_MAC + SERVER + b"\0" * 6 + addr
         self.send(b"\xff" * 6 + SERVER_MAC + b"\x08\x06" + a)
 
+# The ENA card is not in QEMU: it needs the build of tools/qemu-ena.
+qemu_bin = "qemu-system-x86_64"
+if card == "ena":
+    qemu_bin = os.environ.get("QEMU_ENA", "build/qemu-ena/bin/qemu-system-x86_64")
+
 wire = Wire()
 qemu = subprocess.Popen(
-    ["qemu-system-x86_64", "-kernel", kernel, "-m", "128M", "-smp", "2",
+    [qemu_bin, "-kernel", kernel, "-m", "128M", "-smp", "2",
      "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
      "-serial", "stdio", "-monitor", "none",
      "-netdev", f"dgram,id=n0,local.type=inet,local.host=127.0.0.1,local.port={wire.guest_port},"

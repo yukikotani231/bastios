@@ -9,7 +9,7 @@
 # close its window, by rule or on a seed.
 #
 #   SEED=n     the seed for the random-loss run (default: 1)
-#   NIC=name   the QEMU card (default: virtio-net-pci; e1000, e1000e and igb also work)
+#   NIC=name   the QEMU card (default: virtio-net-pci; e1000, e1000e, igb and ena also work)
 set -u
 cd "$(dirname "$0")/.."
 KERNEL=${KERNEL:-build/bastios.elf}
@@ -17,7 +17,7 @@ SEED=${SEED:-1}
 NIC=${NIC:-virtio-net-pci}
 
 python3 - "$KERNEL" "$SEED" "$NIC" <<'PY'
-import random, select, socket, struct, subprocess, sys, time
+import os, random, select, socket, struct, subprocess, sys, time
 
 kernel, seed, card = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 
@@ -386,10 +386,15 @@ class Net:
 
 # ------------------------------------------------------------------ the guest
 
+# The ENA card is not in QEMU: it needs the build of tools/qemu-ena.
+qemu_bin = "qemu-system-x86_64"
+if card == "ena":
+    qemu_bin = os.environ.get("QEMU_ENA", "build/qemu-ena/bin/qemu-system-x86_64")
+
 link = Link()
 net = Net(link)
 qemu = subprocess.Popen(
-    ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", "2",
+    [qemu_bin, "-kernel", kernel, "-m", "64M", "-smp", "2",
      "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
      "-serial", "stdio", "-monitor", "none",
      "-netdev", f"dgram,id=n0,local.type=inet,local.host=127.0.0.1,local.port={link.guest_port},"
