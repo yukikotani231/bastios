@@ -48,6 +48,9 @@ const MNS_NEXT: u64 = NPROC;
 const MNS_LPLEN: u64 = NPROC + 1;
 const MNS_LRO: u64 = NPROC + 2;
 const MNS_SEQ: u64 = NPROC + 3;
+const MNS_JUMP: u64 = NPROC + 4;          // overlay getdents: the position to go on from (0: the next)
+const MNS_ODIR: u64 = NPROC + 5;          // overlay getdents: the layer's directory of the last entry
+const MNS_OIDX: u64 = NPROC + 6;          // and its index there
 const MNS_ENT: u64 = NPROC + 8;
 const MS_ROW: u64 = 256;                  // FNAME_MAX + 1
 const LPATH: u64 = 256;                   // where the mounts' strings start in k.mstr
@@ -171,6 +174,251 @@ fn ns_find(k: &Kernel, ns: u64, p: &Bytes, c: u64) -> u64
   return best;
 }
 
+// ---------------------------------------------------------------- overlay mounts
+
+// An overlay mount (MK_OVERLAY) merges directories of the file layer. Its
+// source is "UPPER:LOWER:LOWER..." (file layer paths; UPPER is empty for a
+// mount without upperdir, which is read-only). A name is looked up in the
+// layers from the top: the first layer that has it wins, and a whiteout
+// (".wh.NAME" beside where NAME would be) or an opaque directory
+// (".wh..wh..opq" inside it) in a layer hides the layers below.
+
+const MK_OVERLAY: u64 = 9;
+const OVL_DATA: u64 = 1024;               // the most bytes of mount data
+const OVL_NONE: u64 = 1000;               // no layer has the name
+const LSTR: u64 = 0x100000;               // positions one layer takes in a merged directory
+
+/// Where layer li's path starts in an overlay's source at k.mstr[at..],
+/// sl bytes long: layers are separated by ":". sl + 1 if there is no such layer.
+fn ovl_start(k: &Kernel, at: u64, sl: u64, li: u64) -> u64
+  requires kok(k) && sl <= FNAME_MAX && at + MS_ROW <= MSTR_LEN
+  ensures result <= sl + 1
+{
+  let mut s = 0;
+  let mut l = 0;
+  let mut i = 0;
+  while i < sl && l < li
+    invariant i <= sl && s <= i && l <= i && sl <= FNAME_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
+  {
+    if bget(k.mstr, at + i) == 58 {
+      l = l + 1;
+      s = i + 1;
+    }
+    i = i + 1;
+  }
+  if l < li {
+    return sl + 1;
+  }
+  return s;
+}
+
+/// Where the layer that starts at s ends: at the next ":" or at sl.
+fn ovl_end(k: &Kernel, at: u64, sl: u64, s: u64) -> u64
+  requires kok(k) && s <= sl && sl <= FNAME_MAX && at + MS_ROW <= MSTR_LEN
+  ensures s <= result && result <= sl
+{
+  let mut t = s;
+  while t < sl && bget(k.mstr, at + t) != 58
+    invariant s <= t && t <= sl && sl <= FNAME_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
+  {
+    t = t + 1;
+  }
+  return t;
+}
+
+/// How many layers overlay mount e has (an empty upper one counts).
+fn ovl_count(k: &Kernel, e: u64) -> u64
+  requires kok(k) && e < MT_N
+  ensures result <= MS_ROW
+{
+  let sl = me_slen(k, e);
+  let at = me_key(e) + MS_ROW;
+  let mut n = 1;
+  let mut i = 0;
+  while i < sl
+    invariant i <= sl && n <= i + 1 && sl <= FNAME_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
+  {
+    if bget(k.mstr, at + i) == 58 {
+      n = n + 1;
+    }
+    i = i + 1;
+  }
+  return n;
+}
+
+/// Byte i of ".wh..wh..opq": its first four bytes are the whiteout prefix.
+fn wh_byte(i: u64) -> u8 {
+  let m = ".wh..wh..opq";
+  if i < slen(m) {
+    return sget(m, i);
+  }
+  return 0;
+}
+
+/// Writes to the transfer buffer layer li's directory, then (if anything
+/// follows) "/", p[r..a], the first xl bytes of ".wh..wh..opq" (xl is 0, 4
+/// or 12: none, the whiteout prefix, the opaque marker) and p[a..b].
+/// Returns the length, or NO_RESULT if there is no such layer, it is
+/// empty or the name is too long.
+fn ovl_name(k: &mut Kernel, e: u64, li: u64, p: &Bytes, r: u64, a: u64, b: u64, xl: u64) -> u64
+  requires kok(k) && e < MT_N && r <= a && a <= b && b <= FNAME_MAX && b <= blen(p) && xl <= 12
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  let sl = me_slen(k, e);
+  let at = me_key(e) + MS_ROW;
+  let s = ovl_start(k, at, sl, li);
+  if s > sl {
+    return NO_RESULT;
+  }
+  let t = ovl_end(k, at, sl, s);
+  if t == s {
+    return NO_RESULT;
+  }
+  let tail = (a - r) + xl + (b - a);
+  let mut o = t - s;
+  if tail > 0 {
+    o = o + 1 + tail;
+  }
+  if o > FNAME_MAX {
+    return NO_RESULT;
+  }
+  let mut w = 0;
+  while w < t - s
+    invariant w <= t - s && s <= t && t <= sl && sl <= FNAME_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
+  {
+    bset(&mut k.fs.xfer, w, bget(k.mstr, at + s + w));
+    w = w + 1;
+  }
+  if tail > 0 {
+    bset(&mut k.fs.xfer, w, 47);
+    w = w + 1;
+    let mut i = r;
+    while i < a
+      invariant r <= i && i <= a && a <= b && b <= FNAME_MAX && b <= blen(p) && w + (a - i) + xl + (b - a) <= FNAME_MAX && kok(k)
+    {
+      bset(&mut k.fs.xfer, w, bget(p, i));
+      w = w + 1;
+      i = i + 1;
+    }
+    let mut q = 0;
+    while q < xl
+      invariant q <= xl && w + (xl - q) + (b - a) <= FNAME_MAX && a <= b && b <= FNAME_MAX && b <= blen(p) && kok(k)
+    {
+      bset(&mut k.fs.xfer, w, wh_byte(q));
+      w = w + 1;
+      q = q + 1;
+    }
+    i = a;
+    while i < b
+      invariant a <= i && i <= b && b <= FNAME_MAX && b <= blen(p) && w + (b - i) <= FNAME_MAX && kok(k)
+    {
+      bset(&mut k.fs.xfer, w, bget(p, i));
+      w = w + 1;
+      i = i + 1;
+    }
+  }
+  return w;
+}
+
+/// Is there a file or directory at the path in the first n bytes of the
+/// transfer buffer?
+fn ovl_exists(k: &mut Kernel, n: u64) -> bool
+  requires kok(k) && n <= FNAME_MAX
+  ensures kok(k)
+{
+  return vfs_lookup(&mut k.fs, n) != NO_FILE || dir_at(&mut k, n) != NO_FILE;
+}
+
+/// Does layer li of overlay mount e hide, from the layers below it, a
+/// component of p[rr..c]: a whiteout for it, or an opaque directory on the
+/// way?
+fn ovl_hidden(k: &mut Kernel, e: u64, li: u64, p: &Bytes, rr: u64, c: u64) -> bool
+  requires kok(k) && e < MT_N && rr <= c && c <= FNAME_MAX && c <= blen(p)
+  ensures kok(k)
+{
+  let mut a = rr;
+  while a < c
+    invariant rr <= a && a <= c + 1 && c <= FNAME_MAX && c <= blen(p) && kok(k)
+  {
+    let mut b = a;
+    while b < c && bget(p, b) != 47
+      invariant a <= b && b <= c && c <= blen(p)
+    {
+      b = b + 1;
+    }
+    if b > a {
+      let n = ovl_name(&mut k, e, li, p, rr, a, b, 4);
+      if n != NO_RESULT && ovl_exists(&mut k, n) {
+        return true;
+      }
+      if b < c {
+        let m = ovl_name(&mut k, e, li, p, rr, b + 1, b + 1, 12);
+        if m != NO_RESULT && ovl_exists(&mut k, m) {
+          return true;
+        }
+      }
+    }
+    a = b + 1;
+  }
+  return false;
+}
+
+/// The layer of overlay mount e that p[rr..c] is in, or OVL_NONE.
+fn ovl_find(k: &mut Kernel, e: u64, p: &Bytes, rr: u64, c: u64) -> u64
+  requires kok(k) && e < MT_N && rr <= c && c <= FNAME_MAX && c <= blen(p)
+  ensures kok(k)
+{
+  let nl = ovl_count(k, e);
+  let mut li = 0;
+  while li < nl
+    invariant li <= nl && nl <= MS_ROW && rr <= c && c <= FNAME_MAX && c <= blen(p) && e < MT_N && kok(k)
+  {
+    let n = ovl_name(&mut k, e, li, p, rr, rr, c, 0);
+    if n != NO_RESULT && ovl_exists(&mut k, n) {
+      return li;
+    }
+    if ovl_hidden(&mut k, e, li, p, rr, c) {
+      return OVL_NONE;
+    }
+    li = li + 1;
+  }
+  return OVL_NONE;
+}
+
+/// ns_tr for overlay mount e, whose key covers p[0..kl]: the file layer's
+/// path of p[0..c] in the layer that has it, or in the top one (the first
+/// lower without an upper) if none does, where it would be made.
+fn ovl_tr(k: &mut Kernel, e: u64, p: &Bytes, kl: u64, c: u64) -> u64
+  requires kok(k) && e < MT_N && kl <= c && c <= FNAME_MAX && c <= blen(p)
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  let mut rr = kl;
+  if rr < c && bget(p, rr) == 47 {
+    rr = rr + 1;
+  }
+  let li = ovl_find(&mut k, e, p, rr, c);
+  let mut lyr = li;
+  if li >= OVL_NONE {
+    lyr = 0;
+  }
+  let mut n = ovl_name(&mut k, e, lyr, p, rr, rr, c, 0);
+  if n == NO_RESULT && li >= OVL_NONE {
+    n = ovl_name(&mut k, e, 1, p, rr, rr, c, 0);
+  }
+  if n == NO_RESULT {
+    k.perr = ENAMETOOLONG;
+    return NO_RESULT;
+  }
+  if me_get(k, e, ME_FLAGS) & MT_RO != 0 {
+    k.mns = set(k.mns, MNS_LRO, 1);
+  } else {
+    k.mns = set(k.mns, MNS_LRO, 0);
+  }
+  return n;
+}
+
 /// The file layer's path for the logical path p[0..c] in namespace ns,
 /// into the transfer buffer. Returns its length, or NO_RESULT (k.perr is
 /// ENAMETOOLONG) if it is longer than FNAME_MAX. Notes in MNS_LRO
@@ -195,6 +443,9 @@ fn ns_tr(k: &mut Kernel, ns: u64, p: &Bytes, c: u64) -> u64
       i = i + 1;
     }
     return c;
+  }
+  if me_get(k, e, ME_FLAGS) % MT_RO == MK_OVERLAY {
+    return ovl_tr(&mut k, e, p, kl, c);
   }
   let sl = me_slen(k, e);
   let at = me_key(e) + MS_ROW;
@@ -629,6 +880,403 @@ fn kind_source(kind: u64, src: &mut Bytes) -> u64
   return 0;
 }
 
+/// Does the directory p[0..rl] of overlay mount e have an opaque marker in
+/// layer m? Sets p[rl] to "/" if there is a name before the marker.
+fn ovl_opaque(k: &mut Kernel, e: u64, m: u64, p: &mut Bytes, rl: u64) -> bool
+  requires kok(k) && e < MT_N && rl < FNAME_MAX && blen(p) == PATH_OUT
+  ensures kok(k) && blen(p) == PATH_OUT
+{
+  let mut a = rl;
+  if rl > 0 {
+    bset(&mut p, rl, 47);
+    a = rl + 1;
+  }
+  let n = ovl_name(&mut k, e, m, p, 0, a, a, 12);
+  return n != NO_RESULT && ovl_exists(&mut k, n);
+}
+
+/// The directory code of layer m's directory p[0..rl], or NO_FILE.
+fn ovl_layer_dir(k: &mut Kernel, e: u64, p: &Bytes, rl: u64, m: u64) -> u64
+  requires kok(k) && e < MT_N && rl <= FNAME_MAX && rl <= blen(p)
+  ensures kok(k)
+{
+  let n = ovl_name(&mut k, e, m, p, 0, 0, rl, 0);
+  if n == NO_RESULT {
+    return NO_FILE;
+  }
+  return dir_at(&mut k, n);
+}
+
+/// Does layer lyr take part in the directory p[0..rl] of overlay mount e:
+/// it has the directory, and no layer above it hides the directory?
+fn ovl_contrib(k: &mut Kernel, e: u64, p: &mut Bytes, rl: u64, lyr: u64) -> bool
+  requires kok(k) && e < MT_N && rl < FNAME_MAX && blen(p) == PATH_OUT
+  ensures kok(k) && blen(p) == PATH_OUT
+{
+  let mut m = 0;
+  while m <= lyr && m < MS_ROW
+    invariant m <= MS_ROW && rl < FNAME_MAX && blen(p) == PATH_OUT && e < MT_N && kok(k)
+  {
+    let d = ovl_layer_dir(&mut k, e, p, rl, m);
+    if m == lyr {
+      return d != NO_FILE;
+    }
+    if d != NO_FILE && ovl_opaque(&mut k, e, m, &mut p, rl) {
+      return false;
+    }
+    if ovl_hidden(&mut k, e, m, p, 0, rl) {
+      return false;
+    }
+    m = m + 1;
+  }
+  return false;
+}
+
+/// The next layer's start (a skipped entry), or the end after the last.
+fn ovl_next(k: &mut Kernel, lyr: u64, nl: u64) -> Ent
+  requires kok(k) && lyr < nl && nl <= MS_ROW
+  ensures kok(k) && result.len <= XFER
+{
+  if lyr + 1 >= nl {
+    return Ent { len: 0, dir: false, end: true };
+  }
+  k.mns = set(k.mns, MNS_JUMP, 2 + (lyr + 1) * LSTR);
+  return Ent { len: 0, dir: false, end: false };
+}
+
+/// Entry pos of the merged directory p[0..rl] of overlay mount e, name in
+/// the transfer buffer: a position is the layer times LSTR plus an index in
+/// that layer's directory. An entry that a layer above has too, or that
+/// is a whiteout, is a skipped one (len 0); the end of a layer's directory
+/// leaves in MNS_JUMP where the next one starts. The layer's directory and
+/// the index are left in MNS_ODIR and MNS_OIDX.
+fn ovl_dir_entry(k: &mut Kernel, pid: u64, e: u64, p: &mut Bytes, rl: u64, pos: u64) -> Ent
+  requires kok(k) && pid < NPROC && e < MT_N && rl < FNAME_MAX && blen(p) == PATH_OUT
+  ensures kok(k) && blen(p) == PATH_OUT && result.len <= XFER
+{
+  k.mns = set(k.mns, MNS_JUMP, 0);
+  let nl = ovl_count(k, e);
+  let lyr = pos / LSTR;
+  let idx = pos % LSTR;
+  if lyr >= nl {
+    return Ent { len: 0, dir: false, end: true };
+  }
+  let skip = Ent { len: 0, dir: false, end: false };
+  let mut d = NO_FILE;
+  if ovl_contrib(&mut k, e, &mut p, rl, lyr) {
+    d = ovl_layer_dir(&mut k, e, p, rl, lyr);
+  }
+  if d == NO_FILE {
+    return ovl_next(&mut k, lyr, nl);
+  }
+  let ent = dir_entry(&mut k, pid, d, idx);
+  if ent.end {
+    return ovl_next(&mut k, lyr, nl);
+  }
+  if ent.len == 0 || ent.len > FNAME_MAX {
+    return skip;
+  }
+  if ent.len >= 4 && bget(k.fs.xfer, 0) == 46 && bget(k.fs.xfer, 1) == 119 && bget(k.fs.xfer, 2) == 104 && bget(k.fs.xfer, 3) == 46 {
+    return skip;                            // a whiteout, or the opaque marker
+  }
+  let mut nm = balloc(FNAME_MAX);
+  let mut i = 0;
+  while i < ent.len
+    invariant i <= ent.len && ent.len <= FNAME_MAX && blen(nm) == FNAME_MAX && kok(k)
+  {
+    bset(&mut nm, i, bget(k.fs.xfer, i));
+    i = i + 1;
+  }
+  let mut shadowed = false;
+  let nstart = rl + 1;
+  if lyr > 0 && rl == 0 && ent.len <= FNAME_MAX || lyr > 0 && rl > 0 && nstart + ent.len <= FNAME_MAX {
+    let mut q = balloc(PATH_OUT);
+    let mut at = 0;
+    while at < rl
+      invariant at <= rl && rl < FNAME_MAX && blen(q) == PATH_OUT && blen(p) == PATH_OUT && kok(k)
+    {
+      bset(&mut q, at, bget(p, at));
+      at = at + 1;
+    }
+    if rl > 0 {
+      bset(&mut q, rl, 47);
+      at = rl + 1;
+    }
+    i = 0;
+    while i < ent.len
+      invariant i <= ent.len && ent.len <= FNAME_MAX && at + ent.len <= FNAME_MAX && blen(q) == PATH_OUT && blen(nm) == FNAME_MAX && kok(k)
+    {
+      bset(&mut q, at + i, bget(nm, i));
+      i = i + 1;
+    }
+    let total = at + ent.len;
+    let mut m = 0;
+    while m < lyr && !shadowed
+      invariant m <= lyr && at <= total && total <= FNAME_MAX && blen(q) == PATH_OUT && e < MT_N && kok(k)
+    {
+      let n1 = ovl_name(&mut k, e, m, q, 0, 0, total, 0);
+      if n1 != NO_RESULT && ovl_exists(&mut k, n1) {
+        shadowed = true;
+      } else {
+        let n2 = ovl_name(&mut k, e, m, q, 0, at, total, 4);
+        if n2 != NO_RESULT && ovl_exists(&mut k, n2) {
+          shadowed = true;
+        }
+      }
+      m = m + 1;
+    }
+    bfree(q);
+  }
+  i = 0;
+  while i < ent.len
+    invariant i <= ent.len && ent.len <= FNAME_MAX && blen(nm) == FNAME_MAX && kok(k)
+  {
+    bset(&mut k.fs.xfer, i, bget(nm, i));
+    i = i + 1;
+  }
+  bfree(nm);
+  if shadowed {
+    return skip;
+  }
+  k.mns = set(k.mns, MNS_ODIR, d);
+  k.mns = set(k.mns, MNS_OIDX, idx);
+  return ent;
+}
+
+/// If the open directory h is in an overlay mount of process pid's
+/// namespace: its path inside the mount into p, and e * 4096 + the path's
+/// length; else NO_RESULT.
+fn ovl_rest(k: &mut Kernel, pid: u64, h: u64, p: &mut Bytes) -> u64
+  requires kok(k) && pid < NPROC && h < OFD_N && blen(p) == PATH_OUT
+  ensures kok(k) && blen(p) == PATH_OUT
+  ensures result == NO_RESULT || (result / 4096 < MT_N && result % 4096 < FNAME_MAX)
+{
+  let n = smaller(get(k.dpath, h * CWD_STRIDE), FNAME_MAX);
+  let mut lp = balloc(PATH_OUT);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= FNAME_MAX && blen(lp) == PATH_OUT && h < OFD_N && kok(k)
+  {
+    bset(&mut lp, i, cast[u8](get(k.dpath, h * CWD_STRIDE + 1 + i) % 256));
+    i = i + 1;
+  }
+  let e = ns_find(k, ns_of(k, pid), lp, n);
+  if e >= MT_N || me_get(k, e, ME_FLAGS) % MT_RO != MK_OVERLAY {
+    bfree(lp);
+    return NO_RESULT;
+  }
+  let kl = me_klen(k, e);
+  let mut rr = kl;
+  if rr < n && bget(lp, rr) == 47 {
+    rr = rr + 1;
+  }
+  if rr > n {
+    rr = n;
+  }
+  i = rr;
+  while i < n
+    invariant rr <= i && i <= n && n <= FNAME_MAX && blen(lp) == PATH_OUT && blen(p) == PATH_OUT && kok(k)
+  {
+    bset(&mut p, i - rr, bget(lp, i));
+    i = i + 1;
+  }
+  bfree(lp);
+  if n - rr >= FNAME_MAX {
+    return NO_RESULT;                       // too long to merge
+  }
+  return e * 4096 + (n - rr);
+}
+
+/// Where getdents goes on after an entry at position i: the layer jump
+/// ovl_dir_entry left, if it left one.
+fn ovl_after(k: &Kernel, i: u64) -> u64
+  requires kok(k) && i < 0x100000000
+  ensures result > i && result <= 0x100000000
+{
+  let j = get(k.mns, MNS_JUMP);
+  if j > i && j <= 0x100000000 {
+    return j;
+  }
+  return i + 1;
+}
+
+fn ovl_last_dir(k: &Kernel) -> u64
+  requires kok(k)
+{
+  return get(k.mns, MNS_ODIR);
+}
+
+fn ovl_last_idx(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result < 0x100000000
+{
+  return get(k.mns, MNS_OIDX) % 0x100000000;
+}
+
+/// Where the value of the option `key` ("KEY=VALUE", options separated by
+/// ",") in d[0..dl] is: start * 4096 + end, or NO_RESULT.
+fn opt_value(d: &Bytes, dl: u64, key: Str) -> u64
+  requires blen(d) == OVL_DATA + 1 && dl <= OVL_DATA
+  ensures result == NO_RESULT || (result / 4096 <= result % 4096 && result % 4096 <= dl)
+{
+  let kl = slen(key);
+  let mut i = 0;
+  while i <= dl
+    invariant i <= dl + 1 && dl <= OVL_DATA && blen(d) == OVL_DATA + 1
+  {
+    let mut j = i;
+    while j < dl && bget(d, j) != 44
+      invariant i <= j && j <= dl && dl <= OVL_DATA && blen(d) == OVL_DATA + 1
+    {
+      j = j + 1;
+    }
+    if kl <= 16 && j - i > kl && bget(d, i + kl) == 61 {
+      let mut same = true;
+      let mut m = 0;
+      while m < kl
+        invariant m <= kl && kl <= 16 && i + kl < j && j <= dl && dl <= OVL_DATA && blen(d) == OVL_DATA + 1
+      {
+        if bget(d, i + m) != sget(key, m) {
+          same = false;
+        }
+        m = m + 1;
+      }
+      if same {
+        return (i + kl + 1) * 4096 + j;
+      }
+    }
+    i = j + 1;
+  }
+  return NO_RESULT;
+}
+
+/// Appends to src[sl..] the file layer's path of the directory that
+/// d[s..t] names (relative to the caller's working directory, links
+/// followed). Returns the new length, or NO_RESULT with k.perr.
+fn ovl_push(k: &mut Kernel, pid: u64, d: &Bytes, s: u64, t: u64, src: &mut Bytes, sl: u64) -> u64
+  requires kok(k) && pid < NPROC && blen(d) == OVL_DATA + 1 && s <= t && t <= OVL_DATA && blen(src) == MS_ROW && sl <= FNAME_MAX
+  ensures kok(k) && blen(src) == MS_ROW
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  if t == s {
+    k.perr = EINVAL;
+    return NO_RESULT;
+  }
+  let mut i = 0;
+  while i < t - s
+    invariant i <= t - s && s <= t && t <= OVL_DATA && blen(d) == OVL_DATA + 1 && kok(k)
+  {
+    bset(&mut k.fs.xfer, i, bget(d, s + i));
+    i = i + 1;
+  }
+  let n = lx_path_xfer(&mut k, pid, t - s, OFD_N, true);
+  if n == NO_RESULT {
+    return NO_RESULT;
+  }
+  if n == 0 {
+    k.perr = EINVAL;                        // the top directory is no layer
+    return NO_RESULT;
+  }
+  if dir_at(&mut k, n) == NO_FILE {
+    let f = vfs_lookup(&mut k.fs, n);
+    if f == NO_FILE {
+      k.perr = ENOENT;
+      return NO_RESULT;
+    }
+    if !vfs_is_dir(&mut k.fs, f) {
+      k.perr = ENOTDIR;
+      return NO_RESULT;
+    }
+  }
+  if sl + n > FNAME_MAX {
+    k.perr = ENAMETOOLONG;
+    return NO_RESULT;
+  }
+  i = 0;
+  while i < n
+    invariant i <= n && n <= FNAME_MAX && sl + n <= FNAME_MAX && blen(src) == MS_ROW && kok(k)
+  {
+    bset(&mut src, sl + i, bget(k.fs.xfer, i));
+    i = i + 1;
+  }
+  return sl + n;
+}
+
+/// The source of an overlay mount from its data (system call argument
+/// r8): "lowerdir=A:B,upperdir=U,workdir=W". Other options are ignored.
+/// Returns its length, or NO_RESULT with k.perr.
+fn ovl_source(k: &mut Kernel, pid: u64, src: &mut Bytes) -> u64
+  requires kok(k) && pid < NPROC && blen(src) == MS_ROW
+  ensures kok(k) && blen(src) == MS_ROW
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  let va = pget(k.procs, pid, F_REGS + R_R8);
+  if va < USER_BASE || va >= USER_BASE + USER_SIZE {
+    k.perr = EINVAL;
+    return NO_RESULT;
+  }
+  let want = smaller(OVL_DATA, USER_SIZE - (va - USER_BASE));
+  let got = smaller(copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, want), OVL_DATA);
+  if got == NO_RESULT {
+    k.perr = EFAULT;
+    return NO_RESULT;
+  }
+  let mut d = balloc(OVL_DATA + 1);
+  let mut dl = 0;
+  while dl < got && bget(k.fs.xfer, dl) != 0
+    invariant dl <= got && got <= OVL_DATA && blen(d) == OVL_DATA + 1 && kok(k)
+  {
+    bset(&mut d, dl, bget(k.fs.xfer, dl));
+    dl = dl + 1;
+  }
+  if dl >= got {
+    bfree(d);
+    k.perr = EINVAL;                        // no NUL: too long
+    return NO_RESULT;
+  }
+  let mut sl = 0;
+  let up = opt_value(d, dl, "upperdir");
+  if up != NO_RESULT {
+    sl = ovl_push(&mut k, pid, d, up / 4096, up % 4096, &mut src, 0);
+    if sl == NO_RESULT {
+      bfree(d);
+      return NO_RESULT;
+    }
+  }
+  let lo = opt_value(d, dl, "lowerdir");
+  if lo == NO_RESULT {
+    bfree(d);
+    k.perr = EINVAL;
+    return NO_RESULT;
+  }
+  let lt = lo % 4096;
+  let mut a = lo / 4096;
+  while a <= lt
+    invariant a <= lt + 1 && lt <= dl && dl <= OVL_DATA && sl <= FNAME_MAX && blen(d) == OVL_DATA + 1 && blen(src) == MS_ROW && kok(k)
+  {
+    let mut b = a;
+    while b < lt && bget(d, b) != 58
+      invariant a <= b && b <= lt && lt <= dl && dl <= OVL_DATA && blen(d) == OVL_DATA + 1
+    {
+      b = b + 1;
+    }
+    if sl >= FNAME_MAX {
+      bfree(d);
+      k.perr = ENAMETOOLONG;
+      return NO_RESULT;
+    }
+    bset(&mut src, sl, 58);
+    sl = ovl_push(&mut k, pid, d, a, b, &mut src, sl + 1);
+    if sl == NO_RESULT {
+      bfree(d);
+      return NO_RESULT;
+    }
+    a = b + 1;
+  }
+  bfree(d);
+  return sl;
+}
+
 /// mount for a namespace's own mounts: a bind (MS_BIND; MS_REC changes
 /// nothing, the mounts under the source do not come along) or a special
 /// file system of `kind` at the path named at user address target. The source path is at
@@ -662,6 +1310,12 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
       i = i + 1;
     }
     sl = n;
+  } else if kind == MK_OVERLAY {
+    sl = ovl_source(&mut k, pid, &mut src);
+    if sl == NO_RESULT {
+      bfree(src);
+      return k.perr;
+    }
   } else {
     sl = kind_source(kind, &mut src);
   }
@@ -700,6 +1354,9 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
   let mut mf = kind;
   if kind == MK_SYS {
     mf = mf + MT_RO;                        // nothing in it may be changed
+  }
+  if kind == MK_OVERLAY && sl > 0 && bget(src, 0) == 58 {
+    mf = mf + MT_RO;                        // no upperdir
   }
   let ok = ns_add(&mut k, ns, mf, src, sl);
   bfree(src);
@@ -1061,6 +1718,9 @@ fn ns_mounts_text(k: &Kernel, p: u64, o: &mut Bytes, a: u64) -> u64
         } else if kind == MK_CGROUP {
           src = "cgroup2";
           ty = "cgroup2";
+        } else if kind == MK_OVERLAY {
+          src = "overlay";
+          ty = "overlay";
         }
         w = put_s(&mut o, w, src);
         w = put_s(&mut o, w, " /");

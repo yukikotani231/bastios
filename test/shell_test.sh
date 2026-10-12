@@ -343,6 +343,15 @@ steps = [
     ("unshare -m sh -c 'mount --bind /tmp/nr /tmp/nr && mount --bind /bin /tmp/nr/bin && mount --bind /tmp/nd /tmp/nr/vol && mount -t proc proc /tmp/nr/proc && cd /tmp/nr && pivot_root . . && umount -l . && cd / && cat /marker && cat /vol/f && cat /vol/esc/passwd; echo x > /vol/new; mount -o remount,bind,ro /vol && echo y > /vol/y; cat /proc/self/mounts; ls /tmp'; cat /tmp/nd/new; echo ns2",
      [b"\r\ninroot\r\nhostfile\r\n", b"can't open '/vol/esc/passwd'", b"none / none rw 0 0", b"none /vol none ro 0 0", b"proc /proc proc rw 0 0", b"/tmp: No such file", b"Read-only file system", b"\r\nx\r\nns2"], b"\n# "),
     ("pivot_root /tmp/nr /tmp/nr; echo p=$?; rm -r /tmp/nr /tmp/nd; echo ns3", [b"Invalid argument", b"p=1", b"ns3"], b"\n# "),
+    # Overlay mounts (src/lxns.bastio): the layers merged as one directory,
+    # the upper one and then the lower ones in the order given; a name in
+    # the upper layer hides the same name below; ".wh.NAME" in a layer
+    # hides NAME in the layers below it; an overlay without upperdir is
+    # read-only.
+    ("mkdir -p /tmp/ov/a /tmp/ov/b /tmp/ov/u /tmp/ov/w /tmp/ov/m /tmp/ov/r; echo A > /tmp/ov/a/f; echo B > /tmp/ov/b/f; echo G > /tmp/ov/b/g; echo H > /tmp/ov/b/h; mkdir /tmp/ov/b/sub; echo S > /tmp/ov/b/sub/s; touch /tmp/ov/u/.wh.h; echo U > /tmp/ov/u/n; mount -t overlay overlay -o lowerdir=/tmp/ov/a:/tmp/ov/b,upperdir=/tmp/ov/u,workdir=/tmp/ov/w /tmp/ov/m && cat /tmp/ov/m/f /tmp/ov/m/g /tmp/ov/m/n /tmp/ov/m/sub/s; cat /tmp/ov/m/h; for f in /tmp/ov/m/*; do echo $f; done; grep overlay /proc/mounts; echo ov1",
+     [b"\r\nA\r\nG\r\nU\r\nS\r\n", b"can't open '/tmp/ov/m/h'", b"/tmp/ov/m/f\r\n/tmp/ov/m/g\r\n/tmp/ov/m/n\r\n/tmp/ov/m/sub\r\n", b"overlay /tmp/ov/m overlay rw 0 0\r\nov1"], b"\n# "),
+    ("mount -t overlay overlay -o lowerdir=/tmp/ov/b /tmp/ov/r && cat /tmp/ov/r/g; echo x > /tmp/ov/r/new; echo w=$?; mount -t overlay overlay -o lowerdir=/tmp/ov/nope /tmp/ov/r; echo bad=$?; umount /tmp/ov/m; umount /tmp/ov/r; rm -r /tmp/ov; echo ov2",
+     [b"\r\nG\r\n", b"Read-only file system", b"w=1", b"bad=1", b"ov2"], b"\n# "),
     # UTS and IPC namespaces, /proc/PID/ns and setns (src/lxnsk.bastio): a
     # host name set in a new UTS namespace stays there; IPC objects made
     # in one IPC namespace are not seen from another, and setns joins one

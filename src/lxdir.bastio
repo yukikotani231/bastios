@@ -182,6 +182,8 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64, legacy: b
   if dir >= DIR_VFS && dir < DIR_PROC && !vfs_is_dir(&mut k.fs, dir - DIR_VFS) {
     return ENOENT;                          // removed while open
   }
+  let mut ovp = balloc(PATH_OUT);
+  let ov = ovl_rest(&mut k, pid, h, &mut ovp);   // in an overlay mount: its layers merged (src/lxns.bastio)
   let cap = smaller(count, DENT_BUF);
   let mut out = balloc(DENT_BUF);
   let mut used = 0;
@@ -194,17 +196,21 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64, legacy: b
     // Positions 0 and 1 are "." and "..", as on Linux; the directory's
     // own entries follow.
     let mut e = Ent { len: 0, dir: true, end: false };
+    let mut nx = i + 1;                   // where the entry after this one is
     if i < 2 {
       bset(&mut k.fs.xfer, 0, 46);
       bset(&mut k.fs.xfer, 1, 46);
       e = Ent { len: i + 1, dir: true, end: false };
+    } else if ov != NO_RESULT {
+      e = ovl_dir_entry(&mut k, pid, ov / 4096, &mut ovp, ov % 4096, i - 2);
+      nx = ovl_after(k, i);
     } else {
       e = dir_entry(&mut k, pid, dir, i - 2);
     }
     if e.end {
       more = false;
     } else if e.len == 0 {
-      i = i + 1;
+      i = nx;
     } else {
       // The record: header, name, NUL, padded to 8 bytes.
       let reclen = (DENT_HDR + e.len + 1 + 7) / 8 * 8;
@@ -219,7 +225,7 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64, legacy: b
           bset(&mut out, used + z, 0);
           z = z + 1;
         }
-        xfer_u64(&mut out, used + 8, i + 1);          // d_off: the next entry
+        xfer_u64(&mut out, used + 8, nx);             // d_off: the next entry
         bset(&mut out, used + 16, cast[u8](reclen % 256));      // d_reclen
         bset(&mut out, used + 17, cast[u8](reclen / 256 % 256));
         let mut at = used + 18;               // d_type
@@ -238,16 +244,19 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64, legacy: b
         }
         // After the name: ent_dt may use k.fs.xfer. "." and ".." are directories.
         let mut dt = Dt { typ: DT_DIR, ino: sat_add(1, dir) };
-        if i >= 2 {
+        if i >= 2 && ov != NO_RESULT {
+          dt = ent_dt(&mut k, ovl_last_dir(k), ovl_last_idx(k), e);
+        } else if i >= 2 {
           dt = ent_dt(&mut k, dir, i - 2, e);
         }
         xfer_u64(&mut out, used, dt.ino);             // d_ino
         bset(&mut out, at, cast[u8](dt.typ % 256));
         used = used + reclen;
-        i = i + 1;
+        i = nx;
       }
     }
   }
+  bfree(ovp);
   if used == 0 && full {
     bfree(out);
     return EINVAL;                          // not even one entry fits
