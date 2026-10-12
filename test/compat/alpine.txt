@@ -173,3 +173,17 @@ lib gone
 pre-deinstall 2.0-r0
 post-deinstall 2.0-r0
 trigger /usr/share/bt
+
+== apk: install neovim over HTTP
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL neovim 2>/dev/null; echo status $?; bb chroot /disk/a /sbin/apk info -e neovim luajit libuv tree-sitter 2>/dev/null
+status 0
+neovim
+luajit
+libuv
+tree-sitter
+
+== nvim: a script run without a terminal
+$ bb chroot /disk/a /usr/bin/nvim --headless -u NONE -c 'call setline(1, ["one", "two"])' -c 'w! /root/n.txt' -c 'qa!' >/dev/null 2>&1; bb cat /disk/a/root/n.txt; bb chroot /disk/a /usr/bin/nvim --version | bb head -n 1
+one
+two
+NVIM v0.11.5
