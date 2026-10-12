@@ -486,6 +486,20 @@ fn sun_in(k: &mut Kernel, pid: u64, va: u64, alen: u64) -> u64
   return n;
 }
 
+/// Listener slot l as /proc/net/unix reads it: f 0 is its state (UL_*,
+/// UL_FREE when unused), 1 the length of its name, 2 the byte i of it.
+fn ul_row(k: &Kernel, l: u64, f: u64, i: u64) -> u64
+  requires kok(k) && l < UX_LIS && i < UX_PATH
+{
+  if f == 0 {
+    return ul_get(k, l, 0);
+  }
+  if f == 1 {
+    return smaller(ul_get(k, l, 1), UX_PATH);
+  }
+  return cast[u64](bget(k.uxb, UXP0 + l * UX_PATH + i));
+}
+
 /// The slot whose name is the first n transfer bytes, or UX_LIS.
 fn ul_find(k: &Kernel, n: u64) -> u64
   requires kok(k) && n <= UX_PATH
