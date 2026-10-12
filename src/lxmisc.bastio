@@ -677,6 +677,15 @@ fn lx_meta_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, r10: u
   return r;
 }
 
+/// fsync, sync and the like: commits the batch of disk writes, and the
+/// caller waits for it (disk_hold).
+fn sync_files(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  vfs_sync(&mut k.fs);
+}
+
 /// System call n of process pid, with its first three arguments.
 fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
@@ -713,6 +722,7 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_madvise(&mut k, pid, a, b, c);
   } else if n == LX_MSYNC {
     r = lx_msync(&mut k, pid, a, b, c);
+    sync_files(&mut k);
   } else if n == LX_FCHOWN {
     let f = fd_handle(&mut k, pid, a);
     if f != NO_RESULT && handle_ro(&mut k, f) {
@@ -726,6 +736,8 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
       r = EBADF;                            // writes go straight through
     } else if d.kind != K_FILE && d.kind != K_DIR {
       r = EINVAL;                           // a pipe, socket or device has nothing to sync
+    } else {
+      sync_files(&mut k);                  // commits the batch of writes; the caller waits for it
     }
   } else if n == LX_MINCORE {
     r = lx_mincore(&mut k, pid, a, b, c);
@@ -736,6 +748,8 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     }
   } else if n == LX_GETGROUPS {
     r = lx_getgroups(&mut k, pid, a, b);
+  } else if n == LX_SYNC {
+    sync_files(&mut k);
   } else if is_meta_call(n) {
     r = lx_meta_call(&mut k, pid, n, a, b, c, r10);
   } else if n == LX_UMASK {

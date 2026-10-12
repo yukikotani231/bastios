@@ -36,6 +36,7 @@ const CS_FREE: u64 = 0;
 const CS_VALID: u64 = 1;
 const CS_READING: u64 = 2;
 const CS_DIRTY: u64 = 3;
+const CS_HOLD: u64 = 4;               // dirty, but no write is queued yet (dq_hold): pinned until dq_queue_held
 
 const Q_READ: u64 = 0;
 const Q_WRITE: u64 = 1;
@@ -119,14 +120,14 @@ fn dq_kill(q: &mut DiskQ)
 fn dq_find(q: &DiskQ, b: u64) -> u64
   requires dq_ok(q)
   ensures result <= NC
-  ensures result < NC ==> (get(q.st, result) == CS_VALID || get(q.st, result) == CS_DIRTY)
+  ensures result < NC ==> (get(q.st, result) == CS_VALID || get(q.st, result) == CS_DIRTY || get(q.st, result) == CS_HOLD)
 {
   let mut i = 0;
   while i < NC
     invariant i <= NC && dq_ok(q)
   {
     let s = get(q.st, i);
-    if get(q.tag, i) == b && (s == CS_VALID || s == CS_DIRTY) {
+    if get(q.tag, i) == b && (s == CS_VALID || s == CS_DIRTY || s == CS_HOLD) {
       return i;
     }
     i = i + 1;
@@ -249,7 +250,7 @@ fn dq_want(q: &mut DiskQ, b: u64) -> u64
   requires dq_ok(q)
   ensures dq_ok(q)
   ensures result < NC || result == NC || result == DQ_NONE
-  ensures result < NC ==> (get(q.st, result) == CS_VALID || get(q.st, result) == CS_DIRTY)
+  ensures result < NC ==> (get(q.st, result) == CS_VALID || get(q.st, result) == CS_DIRTY || get(q.st, result) == CS_HOLD)
 {
   let f = dq_find(q, b);
   if f < NC {
@@ -322,6 +323,61 @@ fn dq_release(q: &mut DiskQ, b: u64) -> bool
   }
   dq_push(&mut q, Q_FREE, 0, b);
   return true;
+}
+
+/// Puts src[at .. at + 4096] in the cache as block b without queueing a
+/// write: the slot answers lookups of b and is pinned until dq_queue_held.
+/// A slot already held for b is overwritten in place; any other copy of b
+/// is forgotten. False if there is no slot.
+fn dq_hold(q: &mut DiskQ, b: u64, src: &Bytes, at: u64) -> bool
+  requires dq_ok(q) && at + CBLOCK <= blen(src)
+  ensures dq_ok(q)
+{
+  let mut i = 0;
+  while i < NC
+    invariant i <= NC && dq_ok(q)
+  {
+    if get(q.tag, i) == b && get(q.st, i) == CS_HOLD {
+      bcopy(&mut q.cache, i * CBLOCK, src, at, CBLOCK);
+      return true;
+    }
+    i = i + 1;
+  }
+  dq_forget(&mut q, b);
+  let s = dq_slot(&mut q);
+  if s >= NC {
+    return false;
+  }
+  bcopy(&mut q.cache, s * CBLOCK, src, at, CBLOCK);
+  q.tag = set(q.tag, s, b);
+  q.st = set(q.st, s, CS_HOLD);
+  return true;
+}
+
+/// Queues the write of the slot held for block b (dq_hold); it becomes an
+/// ordinary dirty slot. False if no slot is held for b or the queue is full.
+fn dq_queue_held(q: &mut DiskQ, b: u64) -> bool
+  requires dq_ok(q)
+  ensures dq_ok(q)
+{
+  if q.r.n >= NQ {
+    return false;
+  }
+  let mut i = 0;
+  while i < NC
+    invariant i <= NC && dq_ok(q)
+  {
+    if get(q.tag, i) == b && get(q.st, i) == CS_HOLD {
+      if q.r.n >= NQ {
+        return false;
+      }
+      q.st = set(q.st, i, CS_DIRTY);
+      dq_push(&mut q, Q_WRITE, i, b);
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
 }
 
 /// Ends the transaction being queued; returns its number (0 if the queue
