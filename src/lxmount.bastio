@@ -232,6 +232,9 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
   }
   let i = mount_dir(&mut k, n);
   if i >= NFILES {
+    if t == FST_TMPFS && !remount && n != 0 && on_disk(k.fs, n) {
+      return ns_tmpfs(&mut k, pid, n, flags & MS_RDONLY != 0);   // over the disk: src/lxns.bastio
+    }
     return k.perr;
   }
   let s = vfs_mount_slot(k.fs, i);

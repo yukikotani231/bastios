@@ -514,7 +514,7 @@ fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, 
     return lx_tcp_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1);
   }
   if is_unix(k, pid, fd) {
-    return ux_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1, addr, alenp);
+    return ux_recv(&mut k, pid, fd, buf, n, flags / MSG_DONTWAIT % 2 == 1, flags / MSG_PEEK % 2 == 1, flags / 32 % 2 == 1, addr, alenp);
   }
   let q = nl_of(k, pid, fd);
   if q < NLS {

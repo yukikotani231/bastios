@@ -91,6 +91,7 @@ const F_BRK0: u64 = 63;              // Linux: where the program break started (
 // Namespaces: an index per kind, 0 the one the machine boots in. A fork or
 // a thread keeps its parent's (the whole row is copied); a native spawn
 // starts in the first ones. Words 65 .. 71 are for the other kinds.
+const F_START: u64 = 65;             // when it started: centiseconds since boot, plus 1 (/proc/PID/stat)
 const F_NETNS: u64 = 64;             // network (src/netns.bastio, src/lxnetlink.bastio)
 // File permission bits (src/lxperm.bastio).
 const MAY_X: u64 = 1;
@@ -1230,6 +1231,7 @@ fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
   drop_fpu(&mut k.mem, take_fpu(&mut k.fpus, pid));
   put_fpu(&mut k.fpus, pid, Fpu::State(fpu));
   pset(&mut k.procs, pid, F_PARENT, parent);
+  pset(&mut k.procs, pid, F_START, k.ns / 10000000 + 1);
   pset(&mut k.procs, pid, F_STATE, READY);
   return pid;
 }

@@ -567,6 +567,9 @@ fn proc_dir_meta(d: u64) -> Meta {
   if d >= DIR_PROC + NS_DIRS {
     return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 4096 + d % 256, mtime: 0, own: 0 };
   }
+  if d == DIR_PROC {
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1, mtime: 0, own: 0 };   // as Linux: runc checks it
+  }
   return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + d % 256, mtime: 0, own: 0 };
 }
 
@@ -1066,7 +1069,8 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     }
     a = put_c(&mut o, a, 32);
     a = put_n(&mut o, a, group_size(k, p));  // num_threads: Python warns on fork when there are more
-    a = put_s(&mut o, a, " 0 0");
+    a = put_s(&mut o, a, " 0 ");
+    a = put_n(&mut o, a, pget(k.procs, p, F_START));   // starttime: never 0, which runc relies on to tell a process from none
     let mut z = 0;
     while z < 30
       invariant z <= 30 && a <= PROC_OUT && blen(o) == PROC_OUT
@@ -1287,13 +1291,16 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
       }
     }
   }
-  if d.kind == K_DIR {
+  if d.kind == K_DIR || (d.kind == K_DEV && d.x == DEV_PTSDIR) {
     // An open directory: its name as it was opened (runc checks that its
     // descriptor for /sys/fs/cgroup reads back as that).
     let v = fd_get(k.lxfd, p, fd) % FD_CLOEXEC;
     if v >= FD_OFD && v - FD_OFD < OFD_N {
       let h = v - FD_OFD;
       let n = base_len(k, p, h);
+      if n == 0 && d.kind == K_DEV {
+        return put_s(&mut o, 0, "/dev/pts");
+      }
       let mut a = 0;
       if n == 0 || base_byte(k, p, h, 0) != 47 {
         a = put_c(&mut o, 0, 47);
@@ -1309,6 +1316,87 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
     }
   }
   return put_s(&mut o, 0, "anon_inode:[file]");
+}
+
+/// If the file-layer name x[..n] is /proc/PID/fd/N of the caller's own
+/// process (a thread of it) and descriptor N is an open directory or a file
+/// that still has a name, the path it stands for, written to the transfer
+/// buffer: Linux follows these links in a path walk (a mount onto
+/// /proc/self/fd/N, a stat, a chdir). Returns its length, or NO_RESULT.
+fn magic_link(k: &mut Kernel, pid: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  if n > XFER || n < 11 || n > FNAME_MAX || !xfer_is(k.fs.xfer, 0, 5, "proc/") {
+    return NO_RESULT;                       // the common case, quickly
+  }
+  // "self" and a PID namespace's ids are rewritten as at the end of a walk;
+  // the name is put back if it is not a link after all.
+  let mut sv = balloc(FNAME_MAX);
+  let mut j = 0;
+  while j < n
+    invariant j <= n && n <= FNAME_MAX && blen(sv) == FNAME_MAX && kok(k)
+  {
+    bset(&mut sv, j, bget(k.fs.xfer, j));
+    j = j + 1;
+  }
+  let n1 = proc_vpid(&mut k, n, pid);
+  let n2 = proc_self(&mut k.fs.xfer, n1, pid);
+  let r = magic_target(&mut k, pid, n2);
+  if r == NO_RESULT {
+    j = 0;
+    while j < n
+      invariant j <= n && n <= FNAME_MAX && blen(sv) == FNAME_MAX && kok(k)
+    {
+      bset(&mut k.fs.xfer, j, bget(sv, j));
+      j = j + 1;
+    }
+  }
+  bfree(sv);
+  return r;
+}
+
+/// magic_link for the rewritten name x[..n].
+fn magic_target(k: &mut Kernel, pid: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  let pfd = proc_fd(k.procs, k.fs.xfer, n);
+  if pfd == NO_RESULT || tgid(k.procs, pfd / LXNFD) != tgid(k.procs, pid) {
+    return NO_RESULT;
+  }
+  let t = pfd / LXNFD;
+  let fd = pfd % LXNFD;
+  let d = fd_look(k, t, fd);
+  if d.kind != K_DIR && d.kind != K_FILE && !(d.kind == K_DEV && d.x == DEV_PTSDIR) {
+    return NO_RESULT;
+  }
+  if d.kind == K_FILE {
+    // Its name must still be the file's: a file removed while open keeps
+    // the name it had in the table.
+    let f = vfs_row_file(k.fs, d.x);
+    let nm = vfs_dirent(&mut k.fs, f);
+    if f == NO_FILE || nm == NO_FILE || nm > FNAME_MAX || vfs_lookup(&mut k.fs, nm) != f {
+      return NO_RESULT;
+    }
+  }
+  let mut lo = balloc(PROC_OUT);
+  let ln = fd_link(&mut k, t, fd, &mut lo);
+  if ln == NO_RESULT || ln == 0 || ln > FNAME_MAX || bget(lo, 0) != 47 {
+    bfree(lo);
+    return NO_RESULT;                       // not a path ("anon_inode:[file]")
+  }
+  let mut i = 0;
+  while i < ln
+    invariant i <= ln && ln <= FNAME_MAX && blen(lo) == PROC_OUT && kok(k)
+  {
+    bset(&mut k.fs.xfer, i, bget(lo, i));
+    i = i + 1;
+  }
+  bfree(lo);
+  return ln;
 }
 
 /// Whether process pid may read process p's /proc links (exe and fd/N):

@@ -503,9 +503,9 @@ fn ns_room(k: &mut Kernel, pid: u64) -> bool
 // ---------------------------------------------------------------- mount and pivot_root
 
 /// The source a special file system mounted again stands for, by kind: a
-/// path of the file layer, into src. Returns its length. sysfs and mqueue
+/// path of the file layer, into src. Returns its length. mqueue and cgroup2
 /// have nothing behind them here: their mounts show the directory they are
-/// on.
+/// on. sysfs shows the host's /sys, so /sys/fs/cgroup is there to mount on.
 fn kind_source(kind: u64, src: &mut Bytes) -> u64
   requires blen(src) == MS_ROW
   ensures blen(src) == MS_ROW && result <= 8
@@ -516,6 +516,12 @@ fn kind_source(kind: u64, src: &mut Bytes) -> u64
     bset(&mut src, 2, 111);
     bset(&mut src, 3, 99);
     return 4;
+  }
+  if kind == MK_SYS {
+    bset(&mut src, 0, 115);                 // "sys": the host's, which has /sys/fs/cgroup
+    bset(&mut src, 1, 121);
+    bset(&mut src, 2, 115);
+    return 3;
   }
   if kind == MK_DEV || kind == MK_PTS {
     bset(&mut src, 0, 100);                 // "dev"
@@ -590,7 +596,7 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
     }
     return EISDIR;                          // a file onto a directory
   }
-  if kind == MK_SYS || kind == MK_MQUEUE || kind == MK_CGROUP {
+  if kind == MK_MQUEUE || kind == MK_CGROUP {
     // Nothing behind them: the directory itself, as the file layer has it.
     let mut i = 0;
     while i < n
@@ -606,6 +612,86 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
     mf = mf + MT_RO;                        // nothing in it may be changed
   }
   let ok = ns_add(&mut k, ns, mf, src, sl);
+  bfree(src);
+  if !ok {
+    return ENOMEM;
+  }
+  return 0;
+}
+
+/// Writes "tmp/.tmpfs-T" (T a stamp in hex) to the transfer buffer; its length.
+fn tmpfs_name(k: &mut Kernel, t: u64) -> u64
+  requires kok(k)
+  ensures kok(k) && result <= 27
+{
+  let pre = "tmp/.tmpfs-";
+  let mut i = 0;
+  while i < slen(pre) && i < 11
+    invariant i <= 11 && kok(k)
+  {
+    bset(&mut k.fs.xfer, i, sget(pre, i));
+    i = i + 1;
+  }
+  let mut j = 0;
+  while j < 16
+    invariant j <= 16 && kok(k)
+  {
+    let digit = t / (1 << (4 * j)) % 16;
+    let mut ch = 48 + digit;
+    if digit >= 10 {
+      ch = 87 + digit;                      // 'a' ..
+    }
+    bset(&mut k.fs.xfer, 11 + j, cast[u8](ch));
+    j = j + 1;
+  }
+  return 27;
+}
+
+/// A tmpfs on a directory of the disk, which the file layer's own tmpfs
+/// mounts (src/lxmount.bastio) only make over memory: a new directory in
+/// memory, mounted over it for the caller's namespace as a bind. The target
+/// is the name of the last lookup, n bytes in the transfer buffer. This is
+/// how a container's /dev and /run come about on a root file system that
+/// lives on the disk.
+fn ns_tmpfs(k: &mut Kernel, pid: u64, n: u64, ro: bool) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+  ensures kok(k)
+{
+  if dir_at(&mut k, n) == NO_FILE {
+    if vfs_lookup(&mut k.fs, n) != NO_FILE {
+      return ENOTDIR;
+    }
+    return ENOENT;
+  }
+  let mut src = balloc(MS_ROW);
+  let mut tries = 0;
+  let mut sl = 0;
+  let mut made = false;
+  while tries < 8 && !made
+    invariant tries <= 8 && blen(src) == MS_ROW && sl <= 27 && kok(k)
+  {
+    sl = tmpfs_name(&mut k, sat_add(k.ns, tries));
+    if vfs_mkdir(&mut k.fs, sl) {
+      made = true;
+      let mut i = 0;
+      while i < sl
+        invariant i <= sl && sl <= 27 && blen(src) == MS_ROW && kok(k)
+      {
+        bset(&mut src, i, bget(k.fs.xfer, i));
+        i = i + 1;
+      }
+    }
+    tries = tries + 1;
+  }
+  if !made {
+    bfree(src);
+    return ENOMEM;
+  }
+  let mut mf = MK_BIND;
+  if ro {
+    mf = mf + MT_RO;
+  }
+  let ok = ns_add(&mut k, ns_of(k, pid), mf, src, sl);
   bfree(src);
   if !ok {
     return ENOMEM;

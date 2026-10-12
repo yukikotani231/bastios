@@ -693,6 +693,12 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   requires kok(k) && pid < NPROC && n <= FNAME_MAX
   ensures kok(k)
 {
+  if n <= XFER {
+    let pfd = proc_fd(k.procs, k.fs.xfer, n);
+    if pfd != NO_RESULT {
+      return lx_open_fd_link(&mut k, pid, pfd / LXNFD, pfd % LXNFD, flags, mode);
+    }
+  }
   if flags & LO_TMPFILE != 0 {
     return EOPNOTSUPP;                      // so a program falls back to a named file
   }
@@ -738,6 +744,53 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     }
   }
   return lx_open_tail(&mut k, pid, n, flags, mode);
+}
+
+/// open of /proc/PID/fd/N, which Linux follows to the file the descriptor
+/// holds: a new description of the same open directory, or of a file that
+/// still has a name (a file removed while open is not reopened here).
+fn lx_open_fd_link(k: &mut Kernel, pid: u64, t: u64, tfd: u64, flags: u64, mode: u64) -> u64
+  requires kok(k) && pid < NPROC && t < NPROC
+  ensures kok(k)
+{
+  if tgid(k.procs, t) != tgid(k.procs, pid) {
+    return EACCES;
+  }
+  let d = fd_look(k, t, tfd);
+  if d.kind == K_BAD {
+    return ENOENT;
+  }
+  if d.kind == K_DIR {
+    let h = fd_ofd(k, t, tfd);
+    if h >= OFD_N {
+      return ENOENT;
+    }
+    let hd = ofd_new(&mut k, OF_DIR, d.x);
+    if hd >= OFD_N {
+      return ENFILE;
+    }
+    let l = base_len(k, t, h);
+    let mut i = 0;
+    while i < l
+      invariant i <= l && l <= FNAME_MAX && h < OFD_N && kok(k)
+    {
+      bset(&mut k.fs.xfer, i, base_byte(k, t, h, i));
+      i = i + 1;
+    }
+    name_keep(&mut k.dpath, DPATH_LEN, hd, k.fs.xfer, l);
+    return fd_install(&mut k, pid, hd);
+  }
+  if d.kind == K_FILE {
+    let f = vfs_row_file(k.fs, d.x);
+    if f != NO_FILE {
+      let nm = vfs_dirent(&mut k.fs, f);
+      if nm != NO_FILE && nm <= FNAME_MAX && nm <= XFER {
+        return lx_open_n(&mut k, pid, nm, flags, mode);
+      }
+    }
+    return ENOENT;
+  }
+  return ENXIO;
 }
 
 /// lx_open_n, once the permission checks are done: /proc files, devices
@@ -817,6 +870,9 @@ fn lx_open_dev(k: &mut Kernel, pid: u64, dev: u64, flags: u64) -> u64
   let hv = ofd_new(&mut k, OF_DEV, dev);
   if hv >= OFD_N {
     return ENFILE;
+  }
+  if dev == DEV_PTSDIR {
+    name_keep(&mut k.dpath, DPATH_LEN, hv, k.mstr, lpath_len(k));   // the name it was opened by, for /proc/PID/fd
   }
   ofd_access(&mut k, hv, flags);
   return fd_install(&mut k, pid, hv);

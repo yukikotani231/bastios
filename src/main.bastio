@@ -68,6 +68,7 @@ import "lxnsk.bastio";
 import "lxuser.bastio";
 import "lxcgroup.bastio";
 import "lxseccomp.bastio";
+import "lxbpf.bastio";
 import "lxperm.bastio";
 import "lxopen2.bastio";
 import "lxhandle.bastio";

@@ -128,19 +128,26 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
       c = c + 1;
     }
     let mut f = NO_FILE;
+    let mut mt = NO_RESULT;                 // the target of a /proc/PID/fd/N link, in the transfer buffer
     if c < pl || last {
       // Looked up where the mount namespace maps it (src/lxns.bastio).
       let tl = ns_tr(&mut k, ns, p, c);
       if tl == NO_RESULT {
         bad = true;
       } else {
-        f = vfs_lookup(&mut k.fs, tl);
+        mt = magic_link(&mut k, pid, tl);
+        if mt == NO_RESULT {
+          f = vfs_lookup(&mut k.fs, tl);
+        }
       }
     }
     if bad {
       // the name is too long where the mount namespace maps it
-    } else if f != NO_FILE && vfs_is_link(&mut k.fs, f) {
-      let t = vfs_read_at(&mut k.fs, f, 0, FNAME_MAX);
+    } else if mt != NO_RESULT || (f != NO_FILE && vfs_is_link(&mut k.fs, f)) {
+      let mut t = mt;
+      if mt == NO_RESULT {
+        t = vfs_read_at(&mut k.fs, f, 0, FNAME_MAX);
+      }
       if hops >= LINK_HOPS {
         bad = true;
         k.perr = ELOOP;
