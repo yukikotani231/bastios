@@ -47,4 +47,9 @@ workflow artifact and stops there.
 - `busybox-1.36.1-source.tar.gz` and `busybox-vX.Y.Z.config`: the kernel
   image embeds a BusyBox binary, which is GPL-2.0-only, so its complete
   source and the configuration it was built with ship alongside it.
+- `bench-vX.Y.Z.json`: the result file of `make bench` for BastiOS on the
+  release runner (QEMU TCG, no KVM), whose table and change from
+  `bench/baseline.json` are also at the end of the release notes. Read them
+  against the baseline, not as absolute figures; update the baseline when a
+  release's numbers are meant to become the new reference.
 - `SHA256SUMS`.

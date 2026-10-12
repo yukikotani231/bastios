@@ -939,3 +939,9 @@ alpine-tty: nvim: edit a file in a git work tree, then commit it
 alpine-tty: nvim: edit and save a C file
 alpine: apk: install neovim over HTTP
 alpine: nvim: a script run without a terminal
+alpine-tty: nvim: edit a Bastio program, prove and build it, run it
+alpine-tty: nvim: an edit that breaks a proof is rejected
+alpine-tty: nvim: edit a C file, build it with tcc, run it
+alpine-tty: nvim: :make runs make and the build succeeds
+alpine-tty: nvim: a shell escape with :!
+alpine-tty: nvim: u undoes an edit, and the undo file is written

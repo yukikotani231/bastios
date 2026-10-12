@@ -1,7 +1,9 @@
 # Programs driven by keystrokes on the console inside the Alpine root, for
 # the compatibility suite (test/compat). The format is tty.txt's. They run
 # after alpine.txt in the same guest, so the packages its cases installed
-# are there.
+# are there. The Bastio toolchain (bastioc1, Z3, tcc: bastiotools.sh) is on
+# this disk too, outside the Alpine root, because Alpine's gcc is a non-PIE
+# executable linked at 0x400000, which the loader cannot place yet.
 
 == nvim: edit and save a C file
 $ bb chroot /disk/a /usr/bin/nvim -u NONE /root/hello.c
@@ -18,3 +20,54 @@ $ bb chroot /disk/a /bin/sh -c 'cd /root && git init -q --template= p && cd p &&
 $ bb chroot /disk/a /bin/sh -c 'cd /root/p && git add hello.c && git commit -qm edit && git --no-pager log --format=%s && tail -n 1 hello.c'
 edit
 // edited
+
+== nvim: edit a Bastio program, prove and build it, run it
+$ bb chroot /disk/a /usr/bin/nvim -u NONE /root/dev.bastio
+> ifn put_num(con: &Serial, x: u64) {\r  if x >= 10 {\r    put_num(con, x / 10);\r  }\r  serial_write(con, cast[u8](48 + x % 10));\r}\r\rfn main(con: Serial) -> Serial {\r  put_num(con, 6 * 7);\r  serial_write(con, 10);\r  return con;\r}\x1b
+> :wq\r
+$ cd /disk/a/root && CC=/disk/tcc BASTIO_SOLVER=/disk/z3 /disk/bastioc1 -o dev dev.bastio && ./dev; cd /
+bastioc1: dev.bastio: 5 proof obligation(s) discharged
+42
+
+== nvim: an edit that breaks a proof is rejected
+$ bb chroot /disk/a /usr/bin/nvim -u NONE /root/dev.bastio
+> Gofn add(a: u64, b: u64) -> u64 {\r  return a + b;\r}\x1b
+> :wq\r
+$ cd /disk/a/root && rm -f dev && CC=/disk/tcc BASTIO_SOLVER=/disk/z3 /disk/bastioc1 -o dev dev.bastio 2>&1 | bb grep -o 'E-VERIFY-OVERFLOW'; ls dev 2>&1 | bb head -n 1; cd /
+E-VERIFY-OVERFLOW
+ls: dev: No such file or directory
+
+== nvim: edit a C file, build it with tcc, run it
+$ bb chroot /disk/a /usr/bin/nvim -u NONE /root/dev.c
+> i#include <stdio.h>\rint main(void) { printf("built %d\\n", 6 * 7); return 0; }\x1b
+> :wq\r
+$ cd /disk/a/root && /disk/tcc -o devc dev.c && ./devc; cd /
+built 42
+
+== nvim: :make runs make and the build succeeds
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress make 2>/dev/null; bb mkdir -p /disk/a/disk && bb cp -r /disk/c /disk/a/disk/c && bb cp /disk/tcc /disk/a/usr/bin/tcc && printf 'dev: dev.c\n\ttcc -o dev dev.c\n' > /disk/a/root/Makefile && printf '#include <stdio.h>\nint main(void) { puts("made"); return 0; }\n' > /disk/a/root/dev.c && bb chroot /disk/a /bin/sh -c 'cd /root && rm -f dev && nvim -u NONE Makefile'
+> :make\r
+> \r
+> :q\r
+$ bb chroot /disk/a /bin/sh -c 'cd /root && ./dev'
+made
+
+== nvim: a shell escape with :!
+$ bb chroot /disk/a /bin/sh -c 'cd /root && nvim -u NONE dev.c'
+> :!echo escaped > /root/bang.txt\r
+> \r
+> :q\r
+$ bb cat /disk/a/root/bang.txt
+escaped
+
+== nvim: u undoes an edit, and the undo file is written
+$ bb mkdir -p /disk/a/root/u && bb chroot /disk/a /bin/sh -c 'cd /root && nvim -u NONE -c "set undofile undodir=/root/u" notes.txt'
+> iline one\x1b
+> :w\r
+> ofile two\x1b
+> :w\r
+> u
+> :wq\r
+$ bb cat /disk/a/root/notes.txt; bb ls /disk/a/root/u | bb wc -l
+line one
+1

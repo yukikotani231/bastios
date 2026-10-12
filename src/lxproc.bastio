@@ -173,6 +173,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   pset(&mut k.procs, c, F_WAIT, 0);
   pset(&mut k.procs, c, F_CODE, 0);
   pset(&mut k.procs, c, F_TICKS, 0);
+  pset(&mut k.procs, c, F_START, k.ns / 10000000 + 1);
   pset(&mut k.procs, c, F_PARENT, pid);
   pset(&mut k.procs, c, F_REGS + R_RAX, 0);
   pset(&mut k.procs, c, F_TGID, 0);         // a fork of a thread is a new process
@@ -243,7 +244,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
   if !src.file && src.prog >= NPROGS {
     return k.perr;
   }
-  if src.file && file_writing(k, src.f) {
+  if src.file && file_writing(k, src.f) && seal_slot(k, src.f) >= SEAL_N {
     return ETXTBSY;                         // open for writing somewhere
   }
   let mut args = balloc(ARGS_MAX);
@@ -390,6 +391,15 @@ fn src_named(k: &mut Kernel, pid: u64, n: u64) -> Src
   }
   if is_exe_file(pf) {
     return exe_src(&mut k, (pf - PROC_DEV) / 16);
+  }
+  // /proc/PID/fd/N of this process (a thread of it): the file the descriptor
+  // holds, as Linux follows these links; this is how an unlinked file, a
+  // memfd, is run.
+  if n <= XFER {
+    let pfd = proc_fd(k.procs, k.fs.xfer, n);
+    if pfd != NO_RESULT && tgid(k.procs, pfd / LXNFD) == tgid(k.procs, pid) {
+      return fd_src(&mut k, pfd / LXNFD, pfd % LXNFD);
+    }
   }
   if n > 4 && xfer_bin(k.fs.xfer) {
     let mut suid = 0;
@@ -808,6 +818,15 @@ fn wait_match(procs: &Buf, pid: u64, c: u64, want: u64) -> bool
   return c == want;
 }
 
+/// Is c a child of the thread group that pid is in? Children belong to the
+/// group: any of its threads may wait for one another made.
+fn child_of_group(procs: &Buf, c: u64, pid: u64) -> bool
+  requires ptab_ok(procs) && c < NPROC && pid < NPROC
+{
+  let par = pget(procs, c, F_PARENT);
+  return par < NPROC && par != 0 && tgid(procs, par) == tgid(procs, pid);
+}
+
 /// wait4(want, status, options, rusage): collects a child that has ended
 /// (one wait_match names), storing its exit code as the Linux
 /// status at user address `status` if not NULL. With none ended yet, the
@@ -836,7 +855,7 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
   while c < NPROC
     invariant 1 <= c && c <= NPROC && kok(k)
   {
-    if (pget(k.procs, c, F_PARENT) == pid || traced_by(k, c, pid)) && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
+    if (child_of_group(k.procs, c, pid) || traced_by(k, c, pid)) && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
       found = true;
       // WUNTRACED: stopped (status sig << 8 | 0x7f); WCONTINUED: 0xffff.
       // A tracer hears of the stops of what it traces without asking.
@@ -873,7 +892,7 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
             return KEEP;
           }
         }
-        if pget(k.procs, c, F_PARENT) == pid {
+        if child_of_group(k.procs, c, pid) {
           tm_reap(&mut k, pid, c);
           pset(&mut k.procs, c, F_STATE, FREE);
         } else {
@@ -949,7 +968,7 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
   while c < NPROC
     invariant 1 <= c && c <= NPROC && kok(k)
   {
-    if (pget(k.procs, c, F_PARENT) == pid || traced_by(k, c, pid)) && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
+    if (child_of_group(k.procs, c, pid) || traced_by(k, c, pid)) && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
       found = true;
       let jr = jc_report(&mut k, c, options & 2 != 0 || traced_by(k, c, pid), options & 8 != 0, options & 0x1000000 != 0);
       if jr != 0 {
@@ -986,7 +1005,7 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
           }
         }
         if options & 0x1000000 == 0 {
-          if pget(k.procs, c, F_PARENT) == pid {
+          if child_of_group(k.procs, c, pid) {
             tm_reap(&mut k, pid, c);
             pset(&mut k.procs, c, F_STATE, FREE);
           } else {

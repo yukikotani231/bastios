@@ -150,6 +150,16 @@ machine, because they come from algorithms, not from emulation.
    block cache with 8 blocks of read-ahead, a write does not fill the
    cache, and nothing gives cached pages back when memory runs low (the
    cap is what bounds them).
+   Writes are limited by the host, not by the kernel's code: a
+   `bench/prof.py` profile of `filewrite@disk` charges about 40% of the
+   samples to the host kernel's file system and scheduler inside the QEMU
+   process (the image file's writes and the flushes BastiOS sends at each
+   commit) and under 10% to BastiOS's own functions, and raising the batch
+   from 32 to 64 blocks left the rate unchanged (4.7 and 4.0 MiB/s). Linux
+   writes to its page cache and sends no flush during the run, so the
+   comparison measures durability as much as speed; closing it means
+   giving up the commit-on-timer guarantee, which this file system keeps on
+   purpose.
 2. **System call entry and exit (9x; an older table had 30x, before CR3
    parking).** A process's table now stays in CR3 across a call that
    returns to it, so `getppid` takes about 9 us (`bench/baseline.json`)

@@ -35,6 +35,17 @@ const LX_SET_ROBUST_LIST: u64 = 273;
 const LX_GET_ROBUST_LIST: u64 = 274;
 const LX_RSEQ: u64 = 334;
 const LX_CLONE3: u64 = 435;
+const LX_CLOSE_RANGE: u64 = 436;
+const LX_BPF: u64 = 321;               // only the cgroup device filter (src/lxbpf.bastio)
+const LX_ADD_KEY: u64 = 248;           // kernel key retention: container runtimes probe it and do without
+const LX_REQUEST_KEY: u64 = 249;
+const LX_KEYCTL: u64 = 250;
+const LX_OPEN_TREE: u64 = 428;         // the new mount API: callers fall back to mount(2)
+const LX_MOVE_MOUNT: u64 = 429;
+const LX_FSOPEN: u64 = 430;
+const LX_FSCONFIG: u64 = 431;
+const LX_FSMOUNT: u64 = 432;
+const LX_FSPICK: u64 = 433;
 const LX_UNSHARE: u64 = 272;
 const LX_IO_SETUP: u64 = 206;          // Linux AIO: nginx tries it and does without
 const LX_MEMBARRIER: u64 = 324;
@@ -482,6 +493,10 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, lx_unlink(&mut k, pid, dirfd, path));
     return KEEP;
   }
+  if n == LX_CLOSE_RANGE {
+    ret(&mut k.procs, pid, lx_close_range(&mut k, pid, a, b, c));
+    return KEEP;
+  }
   if n == LX_CLOSE {
     if lx_fd_close(&mut k, pid, a) {
       ret(&mut k.procs, pid, 0);
@@ -676,7 +691,7 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     return KEEP;
   }
   if n == LX_GETPPID {
-    ret(&mut k.procs, pid, vpid_of(k, pid, pget(k.procs, tgid(k.procs, pid), F_PARENT)));
+    ret(&mut k.procs, pid, vpid_of(k, pid, tgid(k.procs, smaller(pget(k.procs, tgid(k.procs, pid), F_PARENT), NPROC - 1))));
     return KEEP;
   }
   if n == LX_IOCTL {
@@ -717,7 +732,17 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   // (pthread_create falls back to clone, as on Linux before 5.3); nginx
   // goes on without Linux AIO (io_setup), and libuv and BIND without
   // io_uring. Refused quietly, as known gaps.
-  if n == LX_RSEQ || n == LX_CLONE3 || n == LX_IO_SETUP || n == LX_IO_URING_SETUP {
+  if n == LX_BPF {
+    ret(&mut k.procs, pid, lx_bpf(&mut k, pid, a, b, c));   // src/lxbpf.bastio
+    return KEEP;
+  }
+  // The keyring calls (runc and crun make a session keyring when they
+  // can) and the new mount API (they use it when present) likewise fall
+  // back on ENOSYS.
+  if n == LX_RSEQ || n == LX_CLONE3 || n == LX_IO_SETUP || n == LX_IO_URING_SETUP
+      || n == LX_ADD_KEY || n == LX_REQUEST_KEY || n == LX_KEYCTL
+      || n == LX_OPEN_TREE || n == LX_MOVE_MOUNT || n == LX_FSOPEN
+      || n == LX_FSCONFIG || n == LX_FSMOUNT || n == LX_FSPICK {
     ret(&mut k.procs, pid, ENOSYS);
     return KEEP;
   }

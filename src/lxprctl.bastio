@@ -15,7 +15,15 @@ import "linux.bastio";
 
 const PR_W: u64 = 5;
 const PRW_NAME: u64 = 0;              // two words
-const PRW_DEATH: u64 = 2;
+const PRW_DEATH: u64 = 2;             // the signal in the low 8 bits, then the flags below
+const PRD_KEEPCAPS: u64 = 256;       // PR_SET_KEEPCAPS (cleared by execve)
+const PRD_REAPER: u64 = 512;         // PR_SET_CHILD_SUBREAPER
+const PRD_AMBIENT: u64 = 4096;       // the ambient capability set, times PRD_AMBIENT (41 bits)
+const PR_SET_KEEPCAPS: u64 = 8;
+const PR_GET_KEEPCAPS: u64 = 7;
+const PR_SET_CHILD_SUBREAPER: u64 = 36;
+const PR_GET_CHILD_SUBREAPER: u64 = 37;
+const PR_CAP_AMBIENT: u64 = 47;
 const PRW_SLACK: u64 = 3;
 const PRW_SLACK0: u64 = 4;
 const SLACK_NS: u64 = 50000;
@@ -82,7 +90,7 @@ fn pr_fork(k: &mut Kernel, p: u64, c: u64)
 {
   pr_set(&mut k, c, PRW_NAME, pr_get(k, p, PRW_NAME));
   pr_set(&mut k, c, PRW_NAME + 1, pr_get(k, p, PRW_NAME + 1));
-  pr_set(&mut k, c, PRW_DEATH, 0);
+  pr_set(&mut k, c, PRW_DEATH, pr_get(k, p, PRW_DEATH) / PRD_AMBIENT * PRD_AMBIENT);   // only the ambient set carries over
   pr_set(&mut k, c, PRW_SLACK, pr_get(k, p, PRW_SLACK));
   pr_set(&mut k, c, PRW_SLACK0, pr_get(k, p, PRW_SLACK));
   rl_fork(&mut k, p, c);                  // and the resource limits
@@ -102,6 +110,7 @@ fn pr_exec(k: &mut Kernel, p: u64)
 {
   pr_set(&mut k, p, PRW_NAME, 0);
   pr_set(&mut k, p, PRW_NAME + 1, 0);
+  pr_flag(&mut k, p, PRD_KEEPCAPS, false);   // KEEPCAPS lasts until execve
   rl_exec(&mut k, p);                     // and nothing stays locked
   jc_exec(&mut k, p);                     // and setpgid may no longer move it
   cap_exec(&mut k, p);                    // and the bounding set gives the capabilities
@@ -117,7 +126,7 @@ fn pr_exit(k: &mut Kernel, p: u64)
   while c < NPROC
     invariant 1 <= c && c <= NPROC && kok(k)
   {
-    let s = pr_get(k, c, PRW_DEATH);
+    let s = pr_get(k, c, PRW_DEATH) % 256;
     let st = state(k.procs, c);
     if c != p && s != 0 && s <= NSIG && pget(k.procs, c, F_PARENT) == p && st != FREE && st != ZOMBIE {
       post_from(&mut k, c, s, p);
@@ -204,11 +213,11 @@ fn lx_prctl(k: &mut Kernel, pid: u64, op: u64, a: u64, b: u64) -> u64
     if a > NSIG {
       return EINVAL;
     }
-    pr_set(&mut k, pid, PRW_DEATH, a);
+    pr_set(&mut k, pid, PRW_DEATH, pr_get(k, pid, PRW_DEATH) / 256 * 256 + a);
     return 0;
   }
   if op == PR_GET_PDEATHSIG {
-    if !put_user_u32(&mut k, pid, a, pr_get(k, pid, PRW_DEATH)) {
+    if !put_user_u32(&mut k, pid, a, pr_get(k, pid, PRW_DEATH) % 256) {
       return EFAULT;
     }
     return 0;
@@ -224,6 +233,29 @@ fn lx_prctl(k: &mut Kernel, pid: u64, op: u64, a: u64, b: u64) -> u64
   if op == PR_GET_TIMERSLACK {
     return pr_slack(k, pid);
   }
+  if op == PR_SET_KEEPCAPS {
+    if a > 1 {
+      return EINVAL;
+    }
+    pr_flag(&mut k, pid, PRD_KEEPCAPS, a == 1);
+    return 0;
+  }
+  if op == PR_GET_KEEPCAPS {
+    return pr_get(k, pid, PRW_DEATH) / PRD_KEEPCAPS % 2;
+  }
+  if op == PR_SET_CHILD_SUBREAPER {
+    pr_flag(&mut k, pid, PRD_REAPER, a != 0);
+    return 0;
+  }
+  if op == PR_GET_CHILD_SUBREAPER {
+    if !put_user_u32(&mut k, pid, a, pr_get(k, pid, PRW_DEATH) / PRD_REAPER % 2) {
+      return EFAULT;
+    }
+    return 0;
+  }
+  if op == PR_CAP_AMBIENT {
+    return pr_ambient(&mut k, pid, a, b);
+  }
   if op == PR_GET_DUMPABLE {
     return 1;
   }
@@ -234,6 +266,40 @@ fn lx_prctl(k: &mut Kernel, pid: u64, op: u64, a: u64, b: u64) -> u64
     return 0;
   }
   return EINVAL;
+}
+
+/// Sets or clears the flag bit f (a power of two below PRD_AMBIENT) of process p.
+fn pr_flag(k: &mut Kernel, p: u64, f: u64, on: bool)
+  requires kok(k) && p < NPROC && 0 < f && f < PRD_AMBIENT
+  ensures kok(k)
+{
+  let w = smaller(pr_get(k, p, PRW_DEATH), 0xFFFFFFFFFFFFFFF);
+  let has = w / f % 2 == 1;
+  if on && !has {
+    pr_set(&mut k, p, PRW_DEATH, w + f);
+  }
+  if !on && has {
+    pr_set(&mut k, p, PRW_DEATH, w - f);
+  }
+}
+
+/// The nearest ancestor of p that is a child subreaper, or 0.
+fn pr_reaper(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures result < NPROC
+{
+  let mut q = pget(k.procs, p, F_PARENT);
+  let mut n = 0;
+  while q != 0 && q < NPROC && n < NPROC
+    invariant n <= NPROC && kok(k)
+  {
+    if state(k.procs, q) != FREE && pr_get(k, q, PRW_DEATH) / PRD_REAPER % 2 == 1 {
+      return q;
+    }
+    q = pget(k.procs, q, F_PARENT);
+    n = n + 1;
+  }
+  return 0;
 }
 
 /// Bytes at..at+8 of b as a little-endian word.

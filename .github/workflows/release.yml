@@ -47,6 +47,10 @@ jobs:
       - run: cd bastiolang/stage0 && cargo build --release --locked
       - name: Tests (they also build the kernel and the ISO)
         run: make test BASTIOC=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
+      - name: Benchmarks (BastiOS alone; TCG on a shared runner, so read them against bench/baseline.json, not as absolute figures)
+        run: |
+          make bench BENCH_ARGS="--os bastios --runs 3 --smp 2" BASTIOC=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang | tee build/bench.md
+          bench/compare.py bench/baseline.json build/bench/results.json | tee build/bench-compare.md || true
       - name: Package
         run: |
           make iso usb BASTIOC=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
@@ -64,8 +68,17 @@ jobs:
             echo "Built with bastiolang $(git -C bastiolang rev-parse HEAD) ($BASTIOLANG_REF)."
             echo
             echo "The kernel image includes BusyBox 1.36.1 (GPL-2.0-only), built from the attached source with the attached configuration."
+            echo
+            echo "### Benchmarks"
+            echo
+            cat build/bench.md
+            echo
+            echo "Change from bench/baseline.json:"
+            echo
+            cat build/bench-compare.md
           } > dist/notes.md
-          (cd dist && sha256sum bastios-* busybox-* > SHA256SUMS)
+          cp build/bench/results.json dist/bench-$TAG.json
+          (cd dist && sha256sum bastios-* busybox-* bench-*.json > SHA256SUMS)
       - uses: actions/upload-artifact@v4
         with:
           name: bastios-${{ env.TAG }}
@@ -88,4 +101,4 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft \
             --title "BastiOS $GITHUB_REF_NAME" --notes-file dist/notes.md \
-            dist/bastios-* dist/busybox-* dist/SHA256SUMS
+            dist/bastios-* dist/busybox-* dist/bench-*.json dist/SHA256SUMS
