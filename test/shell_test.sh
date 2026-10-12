@@ -1456,6 +1456,32 @@ qemu.kill(); qemu.wait()
 print("---- keyboard boot transcript ----")
 print(out.decode(errors="replace").replace("\r", "")[-400:])
 
+# Ctrl-Alt-Delete on the PS/2 keyboard restarts the machine, which is how a
+# host (Firecracker's SendCtrlAltDel) asks a guest with no ACPI to stop: with
+# -no-reboot, QEMU exits when the guest resets. The kernel says so first.
+mon_path = os.path.join(disk_dir.name, "mon_cad.sock")
+qemu = boot(1, monitor=mon_path, extra=["-no-reboot"])
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+if ok:
+    mon = socket.socket(socket.AF_UNIX)
+    mon.connect(mon_path)
+    mark = len(out)
+    sendkeys(mon, ["ctrl-alt-delete"])
+    good = read_until(b"ctrl-alt-del: restarting", mark)
+    try:
+        code = qemu.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        code = None
+    good = good and code is not None
+    print(("ok  " if good else "FAIL"), f"(keyboard boot) Ctrl-Alt-Delete restarts the machine (QEMU status {code})")
+    fails += not good
+    mon.close()
+else:
+    print("FAIL (keyboard boot) no prompt before Ctrl-Alt-Delete"); fails += 1
+qemu.kill(); qemu.wait()
+
 # No COM1, as on most PCs of the last decade (src/uart.bastio): its ports
 # read as 0xFF, which used to look like a byte always waiting, so the
 # console read 0xFF forever and the keyboard was never looked at. Now the
