@@ -1207,6 +1207,15 @@ fn vfs_put(v: &mut Vfs, mem: &mut Mem, name: Str, d: &Bytes, m: u64) -> bool
   return w == m;
 }
 
+/// fsync and friends: commits the batch of disk writes, if any, and leaves
+/// in v.disk.txn the transaction the caller waits for.
+fn vfs_sync(v: &mut Vfs)
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  disk_sync(&mut v.disk);
+}
+
 // ---------------------------------------------------------------- directories
 
 /// Is the name in the first n bytes of the transfer buffer fit for a new

@@ -1576,7 +1576,7 @@ deadline = time.time() + timeout
 for line, want, until in [
     ("ash", b"built-in shell (ash)", b"\n# "),
     ("stat -f -c '%b %c' /disk; echo big > /disk/b; cat /disk/b; stat -f -c %f /disk; rm /disk/b", b"10485755 4095\r\nbig\r\n1048", b"\n# "),
-    ("mkdir disk/many; i=0; while [ $i -lt 1100 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l", b"\r\n1100\r\n", b"\n# "),
+    ("mkdir disk/many; i=0; while [ $i -lt 1100 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; sync", b"\r\n1100\r\n", b"\n# "),
 ]:
     mark = len(out)
     if mark == 0 and not read_until(b"bastios> "):

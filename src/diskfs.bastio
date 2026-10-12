@@ -44,8 +44,9 @@
 // to keep consistent.
 //
 // Power cuts. Data is never written over in place. A write builds the
-// blocks it changes in memory and queues them, and new copies of the maps
-// above them, for free blocks; then a flush; then the directory block
+// blocks it changes in memory, and new copies of the maps above them, for
+// free blocks; consecutive writes to one file share them (see "batches of
+// writes" below), and when the batch commits it queues them; then a flush; then the directory block
 // holding the file's entry, now with the new root and size (an entry
 // never straddles a sector, so its sector is written whole or not at all,
 // and the block's other sectors are rewritten unchanged); then a flush.
@@ -57,7 +58,8 @@
 // So after a cut anywhere, the file system
 // mounts as it was after some prefix of the entry writes: each write call
 // has happened entirely or not at all, even one that overwrites bytes in
-// the middle of a file across two blocks. Not atomic: a format cut short
+// the middle of a file across two blocks (a batch counts as one step, so
+// a cut loses the writes since the last commit, whole). Not atomic: a format cut short
 // (the next mount formats again), and work that takes several calls, such
 // as O_TRUNC followed by writes. test/shell_test.sh cuts power during
 // user/crashme.bastio six times and checks this.
@@ -73,6 +75,9 @@ import "core/bitmap.bastio";
 import "core/bytes.bastio";
 
 const DSLOTS: u64 = 4096;             // directory entries, at most (the superblock's block has room for 8192)
+const BATCH_MAX: u64 = 32;               // blocks a batch of writes makes before it commits (disk_write)
+const OB_MAX: u64 = 40;               // blocks it replaces: at most one per block it makes, and room for a write's five
+const BATCH_TICKS: u64 = 10;          // ticks (10 ms each) a batch waits for more writes before disk_pump commits it
 const DENT: u64 = 256;
 const DIR_BYTES: u64 = 1048576;       // DSLOTS * DENT, kept in memory
 const DIR_SECTORS: u64 = 2048;
@@ -122,6 +127,13 @@ struct DiskFs {
   d2: Bytes,            // a second one, for a write that crosses two
   q: DiskQ,             // the block cache and the queue of disk commands (src/diskq.bastio)
   txn: u64,             // the last transaction a write queued, for its caller to wait on
+  pw: u64,              // 1 + the entry whose writes are batched and not committed yet (0: none); see disk_write
+  pb: Buf,              // the blocks the batch made: nothing on the disk names them yet (pn of BATCH_MAX)
+  pn: u64,
+  ob: Buf,              // the blocks the batch replaced: the disk still names them (on of OB_MAX)
+  on: u64,
+  pt: u64,              // the tick the batch began
+  tick: u64,            // the last tick disk_pump was given
   used: Bits,           // a set bit for each block in use, one per block of the disk (at most MAX_BLOCKS)
   blocks: u64,          // blocks on the disk, at most MAX_BLOCKS
   slots: u64,           // the entries the directory's blocks hold now (DPB * blocks); 0 without a disk
@@ -133,6 +145,7 @@ spec fn disk_ok(d: &DiskFs) -> bool {
   blk_ok(d.dev) && blen(d.dir) == DIR_BYTES && blen(d.sb) == BLOCK && blen(d.sec) == SECTOR && blen(d.root) == BLOCK
     && blen(d.la) == BLOCK && blen(d.lb) == BLOCK && blen(d.data) == BLOCK && blen(d.d2) == BLOCK && dq_ok(d.q)
     && bits_ok(d.used) && d.blocks <= d.used.n && d.used.n <= MAX_BLOCKS && d.slots <= DSLOTS
+    && len(d.pb) == BATCH_MAX && len(d.ob) == OB_MAX && d.pn <= BATCH_MAX && d.on <= OB_MAX && d.pw <= DSLOTS
 }
 
 // ---------------------------------------------------------------- bytes
@@ -262,6 +275,12 @@ fn disk_pump(d: &mut DiskFs, now: u64) -> bool
   ensures disk_ok(d)
 {
   let mut moved = false;
+  d.tick = now;
+  if d.pw != 0 && now >= d.pt && now - d.pt >= BATCH_TICKS {
+    let keep = d.txn;
+    disk_commit(&mut d);
+    d.txn = keep;
+  }
   let mut n = 0;
   while n < 2 * NQ + 2
     invariant disk_ok(d)
@@ -286,6 +305,7 @@ fn disk_drain(d: &mut DiskFs)
   requires disk_ok(d)
   ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
 {
+  settle_batch(&mut d);
   let mut spins = 0;
   let blocks0 = d.blocks;
   let slots0 = d.slots;
@@ -513,7 +533,7 @@ fn disk_mount(dev: Blk) -> DiskFs
     n = MAX_BLOCKS;
   }
   let mut d = DiskFs { dev: dev, dir: balloc(DIR_BYTES), sb: balloc(BLOCK), sec: balloc(SECTOR), root: balloc(BLOCK),
-    la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(), txn: 0,
+    la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(), txn: 0, pw: 0, pb: alloc(BATCH_MAX), pn: 0, ob: alloc(OB_MAX), on: 0, pt: 0, tick: 0,
     used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, foreign: false };
   if n < DATA_B0 + 16 || !blk_read(&mut d.dev, 0, &mut d.sec) {
     return d;
@@ -658,6 +678,8 @@ fn disk_unmount_now(d: DiskFs) -> Blk
   bfree(d.la);
   bfree(d.lb);
   bfree(d.data);
+  free(d.pb);
+  free(d.ob);
   bits_free(d.used);
   return d.dev;
 }
@@ -1383,6 +1405,182 @@ fn patch(blk: &mut Bytes, valid: u64, buf: &Bytes, at: u64, wo: u64, wm: u64)
   bcopy(&mut blk, wo, buf, at, wm);
 }
 
+// ---------------------------------------------------------------- batches of writes
+
+// A write used to be a transaction of its own: its blocks, a flush, the
+// directory block, a flush, the release of what it replaced. For a program
+// writing a file in 4 KiB pieces that was four device commands a piece
+// (the data, the two maps, the directory block), each a round trip, and
+// the writer waited for all of them.
+//
+// Now consecutive writes to one file share a transaction, a batch. The
+// blocks a batch makes (pb: new data blocks and new copies of the maps) are
+// named by nothing on the disk, so a later write in the same batch changes
+// them in place instead of making more copies. They sit in the cache,
+// held (src/diskq.bastio), and nothing is queued for them. The blocks the
+// batch replaced (ob) stay in use, as the disk still names them. The entry
+// in memory already has the new root and size, so readers see every write
+// at once. disk_commit then queues what one write used to: the held
+// blocks, a flush, the directory block holding the entry, a flush, the
+// release of ob, and the end of the transaction. So a power cut leaves the
+// file as it was before the batch or with all of it, and the old blocks
+// are reused only after the entry that stopped naming them is on the disk,
+// as before; a write call is still entirely there or not at all.
+//
+// A batch commits when it has BATCH_MAX blocks, when a write to another file
+// begins, when anything else changes the disk (disk_drain), when it is
+// BATCH_TICKS old (disk_pump), and on fsync (disk_sync). A write no longer
+// waits for the disk, so it is on the disk only after one of those.
+
+/// Is block b one the batch made?
+fn in_batch(d: &DiskFs, b: u64) -> bool
+  requires disk_ok(d)
+{
+  let mut j = 0;
+  while j < d.pn
+    invariant j <= d.pn && d.pn <= BATCH_MAX && len(d.pb) == BATCH_MAX
+  {
+    if get(d.pb, j) == b {
+      return true;
+    }
+    j = j + 1;
+  }
+  return false;
+}
+
+/// The block a write puts the new version of a block that is `old` in (0:
+/// a hole): the same block if the batch made it, else a free one (0 if
+/// there is none), which the caller records with batch_made.
+fn batch_pick(d: &mut DiskFs, prev: u64) -> u64
+  requires disk_ok(d)
+  ensures disk_ok(d) && d.pn == old(d.pn) && d.on == old(d.on) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
+  ensures result == 0 || (result >= DATA_B0 && result < MAX_BLOCKS) || result == prev
+{
+  if prev != 0 && in_batch(d, prev) {
+    return prev;
+  }
+  return alloc_block(&mut d);
+}
+
+/// Notes that a write put the new version of a block that was `prev` in
+/// block `now`: if that is a new block, the batch made it, and the block it
+/// replaced (if any) goes when the batch commits. Room: disk_write checked.
+fn batch_made(d: &mut DiskFs, prev: u64, now: u64)
+  requires disk_ok(d) && d.pn < BATCH_MAX && d.on < OB_MAX
+  ensures disk_ok(d) && d.pn <= old(d.pn) + 1 && d.on <= old(d.on) + 1
+{
+  if now == prev {
+    return;
+  }
+  d.pb = set(d.pb, d.pn, now);
+  d.pn = d.pn + 1;
+  if prev != 0 {
+    d.ob = set(d.ob, d.on, prev);
+    d.on = d.on + 1;
+  }
+}
+
+/// Queues the commit of the batch (nothing if there is none). False, with
+/// nothing changed, if the queue has no room for it yet. On true the
+/// transaction's number is in d.txn.
+fn disk_commit(d: &mut DiskFs) -> bool
+  requires disk_ok(d)
+  ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
+{
+  if d.pw == 0 {
+    return true;
+  }
+  if !dq_fits(d.q, 1, d.pn + d.on + 4) {
+    return false;
+  }
+  let ent = d.pw - 1;
+  let n = d.pn;
+  let m = d.on;
+  let mut ok = true;
+  let mut j = 0;
+  while j < n
+    invariant j <= n && n == d.pn && n <= BATCH_MAX && disk_ok(d)
+  {
+    ok = dq_queue_held(&mut d.q, get(d.pb, j)) && ok;
+    j = j + 1;
+  }
+  ok = ok && dq_flush(&mut d.q);
+  let db = ent * DENT / BLOCK;
+  let dbn = dir_block(d, db);
+  ok = ok && dbn != 0 && dq_put(&mut d.q, dbn, d.dir, db * BLOCK, false) && dq_flush(&mut d.q);
+  j = 0;
+  while j < m
+    invariant j <= m && m == d.on && m <= OB_MAX && disk_ok(d)
+  {
+    release(&mut d.q, get(d.ob, j));
+    j = j + 1;
+  }
+  let t = dq_end(&mut d.q);
+  d.pn = 0;
+  d.on = 0;
+  d.pw = 0;
+  if !ok || t == 0 {
+    dq_kill(&mut d.q);                // dq_fits said there was room: not reached
+    return true;
+  }
+  d.txn = t;
+  return true;
+}
+
+/// Commits the batch for the code that waits for the queue to empty,
+/// letting the queue move until there is room for it.
+fn settle_batch(d: &mut DiskFs)
+  requires disk_ok(d)
+  ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
+{
+  if d.pw == 0 {
+    return;
+  }
+  let keep = d.txn;
+  let blocks0 = d.blocks;
+  let slots0 = d.slots;
+  let mut spins = 0;
+  while d.pw != 0 && spins < DQ_SPINS + 2 * NQ + 2
+    invariant disk_ok(d) && d.blocks == blocks0 && d.slots == slots0
+  {
+    if disk_commit(&mut d) {
+      d.txn = keep;
+      return;
+    }
+    let mut now = 0;
+    if spins >= DQ_SPINS && d.q.since < 0x4000000000000000 {
+      now = d.q.since + DQ_TICKS + 1;
+    }
+    let r = dq_pump(&mut d.q, &mut d.dev, now);
+    if r >= DQ_FREED {
+      free_block(&mut d, r - DQ_FREED);
+    }
+    spins = spins + 1;
+  }
+  if d.pw != 0 {
+    dq_kill(&mut d.q);
+    d.pw = 0;
+    d.pn = 0;
+    d.on = 0;
+  }
+  d.txn = keep;
+}
+
+/// For fsync: commits the batch and leaves in d.txn the transaction the
+/// caller waits for, the last one queued if there is no batch. If the
+/// queue has no room for the commit yet, waits for it to have.
+fn disk_sync(d: &mut DiskFs)
+  requires disk_ok(d)
+  ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
+{
+  if d.pw != 0 {
+    settle_batch(&mut d);
+  }
+  if d.q.next > 1 && d.q.done < d.q.next - 1 {
+    d.txn = d.q.next - 1;
+  }
+}
+
 /// Queues the release of block b once the transaction ends (nothing for 0).
 fn release(q: &mut DiskQ, b: u64)
   requires dq_ok(q)
@@ -1398,15 +1596,15 @@ fn release(q: &mut DiskQ, b: u64)
 /// entirely or not at all, even across a power cut (see the top of this
 /// file).
 ///
-/// The disk I/O is queued, not waited for. First every old block the
+/// The disk I/O is queued, not waited for, and the write itself queues
+/// nothing: its blocks are held in the cache for the batch (see "batches of
+/// writes" above). First every old block the
 /// write needs (the maps on its path, and a data block it changes only in
 /// part) must be in the cache; if one is not, its read is queued and this
 /// returns DISK_MISS, having changed nothing, for the caller to try again
-/// once the queue has moved. Then the new blocks go into the cache and the
-/// queue: data and maps, a flush, the directory block holding the entry,
-/// a flush, the release of the old blocks, and the transaction's end,
-/// whose number is left in d.txn for the caller to wait on. Readers see
-/// the new contents at once. Returns the count (short only at the 1 GiB
+/// once the queue has moved. Then the new blocks go into the cache, held for the batch,
+/// and the entry in memory takes the new root and size; disk_commit queues
+/// them later. Readers see the new contents at once. Returns the count (short only at the 1 GiB
 /// limit), 0 if the disk is full or dead, NO_DISK_FILE if there is no
 /// file, or DISK_MISS.
 fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -> u64
@@ -1437,6 +1635,16 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
   let mut m0 = BLOCK - off % BLOCK;
   if m0 > want {
     m0 = want;
+  }
+  // A batch is for one file, and has room for what a write may add.
+  if d.pw != 0 && (d.pw != i + 1 || d.pn + 5 > BATCH_MAX || d.on + 5 > OB_MAX) {
+    if !disk_commit(&mut d) {
+      return DISK_MISS;
+    }
+    d.txn = 0;
+  }
+  if d.pn + 5 > BATCH_MAX || d.on + 5 > OB_MAX {
+    return DISK_MISS;                 // (not reached: a commit empties the batch)
   }
   // Gather the maps as they are, and the old data the write keeps.
   let root0 = dent_root(d, i);
@@ -1478,30 +1686,51 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
   if !g0 || !g1 {
     return DISK_MISS;
   }
-  // Room for six blocks (two data, three maps, the directory block) and
-  // fourteen operations, or wait for the queue to move.
-  if !dq_fits(d.q, 6, 14) {
+  // Room for six held blocks (two data, three maps, the directory block at
+  // commit).
+  if !dq_fits(d.q, 6, 0) {
     return DISK_MISS;
   }
-  let n0 = alloc_block(&mut d);
+  // Each new block is the batch's own copy if the batch made the old one,
+  // else a free block.
+  let n0 = batch_pick(&mut d, old0);
   let mut n1 = 0;
   if b1 != b0 {
-    n1 = alloc_block(&mut d);
+    n1 = batch_pick(&mut d, old1);
   }
-  let na = alloc_block(&mut d);
+  let na = batch_pick(&mut d, la0);
   let mut nb = 0;
   if ib != ia {
-    nb = alloc_block(&mut d);
+    nb = batch_pick(&mut d, lb0);
   }
-  let nr = alloc_block(&mut d);
+  let nr = batch_pick(&mut d, root0);
   if n0 == 0 || (b1 != b0 && n1 == 0) || na == 0 || (ib != ia && nb == 0) || nr == 0 {
-    free_block(&mut d, n0);
-    free_block(&mut d, n1);
-    free_block(&mut d, na);
-    free_block(&mut d, nb);
-    free_block(&mut d, nr);
+    if n0 != old0 {
+      free_block(&mut d, n0);
+    }
+    if n1 != old1 {
+      free_block(&mut d, n1);
+    }
+    if na != la0 {
+      free_block(&mut d, na);
+    }
+    if nb != lb0 {
+      free_block(&mut d, nb);
+    }
+    if nr != root0 {
+      free_block(&mut d, nr);
+    }
     return 0;
   }
+  batch_made(&mut d, old0, n0);
+  if b1 != b0 {
+    batch_made(&mut d, old1, n1);
+  }
+  batch_made(&mut d, la0, na);
+  if ib != ia {
+    batch_made(&mut d, lb0, nb);
+  }
+  batch_made(&mut d, root0, nr);
   // The new blocks.
   let mut k0 = 0;
   if keep0 != 0 {
@@ -1509,7 +1738,7 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
   }
   patch(&mut d.data, k0, buf, 0, off % BLOCK, m0);
   put_u64(&mut d.la, 8 * (b0 % PTRS), n0);
-  let mut ok = dq_put(&mut d.q, n0, d.data, 0, true);
+  let mut ok = dq_hold(&mut d.q, n0, d.data, 0);
   if b1 != b0 {
     let mut k1 = 0;
     if keep1 != 0 {
@@ -1521,33 +1750,27 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
     } else {
       put_u64(&mut d.lb, 8 * (b1 % PTRS), n1);
     }
-    ok = ok && dq_put(&mut d.q, n1, d.d2, 0, true);
+    ok = ok && dq_hold(&mut d.q, n1, d.d2, 0);
   }
   put_u64(&mut d.root, 8 * ia, na);
-  ok = ok && dq_put(&mut d.q, na, d.la, 0, true);
+  ok = ok && dq_hold(&mut d.q, na, d.la, 0);
   if ib != ia {
     put_u64(&mut d.root, 8 * ib, nb);
-    ok = ok && dq_put(&mut d.q, nb, d.lb, 0, true);
+    ok = ok && dq_hold(&mut d.q, nb, d.lb, 0);
   }
-  ok = ok && dq_put(&mut d.q, nr, d.root, 0, true) && dq_flush(&mut d.q);
-  // The switch: the entry, in its directory block, after a flush.
+  ok = ok && dq_hold(&mut d.q, nr, d.root, 0);
+  // The entry in memory: the disk gets it when the batch commits.
   dent_set(&mut d, i, E_SIZE, newsize);
   dent_set(&mut d, i, E_ROOT, nr);
   dent_set(&mut d, i, E_MTIME, now);
-  let db = i * DENT / BLOCK;
-  let dbn = dir_block(d, db);
-  ok = ok && dbn != 0 && dq_put(&mut d.q, dbn, d.dir, db * BLOCK, false) && dq_flush(&mut d.q);
-  release(&mut d.q, old0);
-  release(&mut d.q, old1);
-  release(&mut d.q, la0);
-  release(&mut d.q, lb0);
-  release(&mut d.q, root0);
-  let t = dq_end(&mut d.q);
-  if !ok || t == 0 {
+  if d.pw == 0 {
+    d.pt = d.tick;
+  }
+  d.pw = i + 1;
+  if !ok {
     dq_kill(&mut d.q);                // dq_fits said there was room: not reached
     return 0;
   }
-  d.txn = t;
   return want;
 }
 

@@ -150,6 +150,8 @@ fn lx_extra_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64
       r = EBADF;
     } else if d.kind != K_FILE && d.kind != K_DIR && !(d.kind == K_DEV && is_loop(d.x)) {
       r = ESPIPE;                           // a pipe, socket or character device
+    } else {
+      sync_files(&mut k);
     }
   } else if n == LX_VHANGUP {
     if !cred_root(k.procs, pid) {
