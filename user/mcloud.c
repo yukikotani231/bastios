@@ -7,6 +7,9 @@
  *
  * IMDSv2 first takes a session token with a PUT and then sends it back as a
  * header on each GET. A key the service does not have (404) is skipped.
+ * User data (a script, say) is saved as ~/user-data for root with mode 0700
+ * and is never run here: running what a network service hands out is left
+ * to whoever reads it.
  * Nothing it reads is trusted further than being a host name (letters,
  * digits, '-' and '.') or one line of key text. */
 #include <arpa/inet.h>
@@ -155,6 +158,26 @@ int main(int argc, char **argv)
         printf("mcloud: key installed in %s\n", file);
     } else {
         printf("mcloud: no public key (status %d)\n", st);
+    }
+
+    st = request("GET", "/latest/user-data", hdr, body);
+    if (st == 200 && body[0]) {
+        struct passwd *pw = getpwnam("root");
+        const char *home = pw && pw->pw_dir && pw->pw_dir[0] ? pw->pw_dir : "/root";
+        char file[300];
+        snprintf(file, sizeof file, "%s/user-data", home);
+        mkdir(home, 0755);
+        int fd = open(file, O_WRONLY | O_CREAT | O_TRUNC, 0700);
+        size_t n = strlen(body);
+        if (fd < 0 || write(fd, body, n) != (ssize_t)n) {
+            printf("mcloud: writing %s failed (errno %d)\n", file, errno);
+            return 1;
+        }
+        close(fd);
+        chmod(file, 0700);
+        printf("mcloud: user data saved in %s (%d bytes)\n", file, (int)n);
+    } else {
+        printf("mcloud: no user data (status %d)\n", st);
     }
     return 0;
 }
