@@ -554,6 +554,7 @@ t_misc: /proc/meminfo
 t_misc: /proc/modules opens
 t_misc: /proc/net is a directory
 t_misc: /proc/net/dev lists lo and eth0
+t_misc: /proc/net/tcp lists a listening socket
 t_misc: /proc/self/exe
 t_misc: /proc/stat has cpu lines
 t_misc: SSE floating point
@@ -992,3 +993,4 @@ node: node: make the device nodes
 node: node: read and write files
 node: node: timers and promises run in order
 node: node: version
+t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller

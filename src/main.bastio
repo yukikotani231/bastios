@@ -837,7 +837,10 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
         mmu_exit(&mut mmu, t.lease);
         let mut f = t.fpu;
         cpu_fpu_save(&mut cpu, &mut f);
-        let poll = v != V_SYSCALL && v != V_LINUX;
+        // A processor exception (a page fault, vectors below 32) raises no
+        // device input either: a program touching new memory would poll every
+        // device on each of its faults.
+        let poll = v >= V_TIMER && v != V_SYSCALL && v != V_LINUX;
         // After an interrupt the devices may have input; after any turn
         // there may be output.
         if poll || atomic_load(pend) > 0 {

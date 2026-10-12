@@ -35,7 +35,7 @@
 // the call after all), and NOTIF_ID_VALID says whether the caller still waits.
 // Closing the descriptor ends every wait with ENOSYS.
 //
-// Not done: SECCOMP_IOCTL_NOTIF_ADDFD and NOTIF_SET_FLAGS, SECCOMP_RET_TRACE (no tracer: -ENOSYS, as
+// Not done: SECCOMP_RET_TRACE (no tracer: -ENOSYS, as
 // Linux gives without one), the load-time check that scratch memory is
 // written before it is read (the interpreter starts every run with it
 // zeroed), SECCOMP_RET_LOG (allowed, not logged), and siginfo details for
@@ -70,6 +70,8 @@ const SC_FLAG_LISTENER: u64 = 8;           // SECCOMP_FILTER_FLAG_NEW_LISTENER
 const SC_IOC_RECV: u64 = 0xC0502100;       // SECCOMP_IOCTL_NOTIF_RECV
 const SC_IOC_SEND: u64 = 0xC0182101;       // SECCOMP_IOCTL_NOTIF_SEND
 const SC_IOC_VALID: u64 = 0x40082102;      // SECCOMP_IOCTL_NOTIF_ID_VALID
+const SC_IOC_ADDFD: u64 = 0x40182103;      // SECCOMP_IOCTL_NOTIF_ADDFD
+const SC_IOC_FLAGS: u64 = 0x40082104;      // SECCOMP_IOCTL_NOTIF_SET_FLAGS
 
 // A process's notification, in its words from SP_ST: 0 none, 1 waiting to be
 // received, 2 received, 3 answered; its id; the filter + 1 that issued it;
@@ -809,6 +811,70 @@ fn sc_ioctl(k: &mut Kernel, pid: u64, f: u64, nonblock: bool, req: u64, arg: u64
     }
     if q >= NPROC {
       return ENOENT;
+    }
+    return 0;
+  }
+  if req == SC_IOC_ADDFD {
+    // struct seccomp_notif_addfd { id: u64, flags: u32, srcfd: u32, newfd: u32, newfd_flags: u32 }
+    if arg == 0 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, 24) != 24 {
+      return EFAULT;
+    }
+    let id = get_u64(k.fs.xfer, 0);
+    let fl = get_u64(k.fs.xfer, 8) % 0x100000000;
+    let srcfd = get_u64(k.fs.xfer, 8) / 0x100000000;
+    let newfd = get_u64(k.fs.xfer, 16) % 0x100000000;
+    let nfl = get_u64(k.fs.xfer, 16) / 0x100000000;
+    // SETFD = 1 (install at newfd), SEND = 2 (also answer the call with the new descriptor).
+    if fl > 3 || (nfl != 0 && nfl != 0x80000) || (fl % 2 == 0 && newfd != 0) {
+      return EINVAL;
+    }
+    let mut q = sc_find(k, f, 2, 1);
+    while q < NPROC && sp_get(k, q * SC_PW + SP_ID) != id
+      invariant q <= NPROC && kok(k)
+    {
+      q = sc_find(k, f, 2, q + 1);
+    }
+    if q >= NPROC {
+      return ENOENT;
+    }
+    let v = fd_get(k.lxfd, pid, srcfd) % FD_CLOEXEC;
+    if v == 0 {
+      return EBADF;
+    }
+    let mut fd = newfd;
+    if fl % 2 == 1 {
+      if newfd >= fd_limit(k, q) {
+        return EBADF;
+      }
+      lx_fd_close(&mut k, q, newfd);
+    } else {
+      fd = fd_free(k, q, 0);
+      if fd >= LXNFD {
+        return EMFILE;
+      }
+    }
+    ref_value(&mut k, v);
+    if nfl != 0 {
+      fd_set(&mut k.lxfd, q, fd, v + FD_CLOEXEC);
+    } else {
+      fd_set(&mut k.lxfd, q, fd, v);
+    }
+    if fl / 2 == 1 {
+      sp_put(&mut k, q * SC_PW + SP_VAL, fd);
+      sp_put(&mut k, q * SC_PW + SP_ERR, 0);
+      sp_put(&mut k, q * SC_PW + SP_FL, 0);
+      sp_put(&mut k, q * SC_PW + SP_ST, 3);
+      sleepers_wake(&mut k);
+    }
+    return fd;
+  }
+  if req == SC_IOC_FLAGS {
+    // Only SECCOMP_USER_NOTIF_FD_SYNC_WAKE_UP exists; wake-ups here are never deferred, so it only validates.
+    if arg == 0 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, 8) != 8 {
+      return EFAULT;
+    }
+    if get_u64(k.fs.xfer, 0) > 1 {
+      return EINVAL;
     }
     return 0;
   }
