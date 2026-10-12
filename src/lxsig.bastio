@@ -45,6 +45,7 @@ const SIGWINCH: u64 = 28;
 // processor exception at the address it holds less FAULT_MARK.
 const FAULT_MARK: u64 = 0x8000000000000000;
 const MESGQ_MARK: u64 = 0x4000000000000;   // 2^50: a sender word from a message queue (post_mesgq)
+const TKILL_MARK: u64 = 0x8000000000000;   // 2^51: from tkill or tgkill (si_code SI_TKILL, si_pid the sender's group)
 const SIG_DFL: u64 = 0;
 const SIG_IGN: u64 = 1;
 const SA_RESTART: u64 = 0x10000000;
@@ -344,6 +345,14 @@ fn info_from(b: &mut Bytes, at: u64, word: u64)
     return;
   }
   bset(&mut b, at + 16, cast[u8](word % 256));          // si_pid
+  if word / TKILL_MARK % 2 == 1 {
+    // glibc's SIGSETXID handler (setgid and friends in a threaded program)
+    // ignores a signal that is not SI_TKILL from its own process.
+    bset(&mut b, at + 8, cast[u8](250));
+    bset(&mut b, at + 9, cast[u8](255));
+    bset(&mut b, at + 10, cast[u8](255));
+    bset(&mut b, at + 11, cast[u8](255));
+  }
   if word / 256 % 2 == 1 {
     let mut i = 0;
     while i < 4
@@ -688,7 +697,14 @@ fn lx_tgkill(k: &mut Kernel, pid: u64, tgid: u64, tid: u64, s: u64) -> u64
   if t < NPROC && state(k.procs, t) != FREE && may_signal(k, pid, t, s) && sigpending_full(k, t, s) {
     return EAGAIN;
   }
-  return lx_kill(&mut k, pid, t, s);
+  let r = lx_kill(&mut k, pid, t, s);
+  if r == 0 && s != 0 && t < NPROC && 1 <= t && state(k.procs, t) != FREE && state(k.procs, t) != ZOMBIE {
+    let g = tgid(k.procs, pid);
+    if g < NPROC {
+      wset(&mut k.sigsave, sender_at(t, s), g + TKILL_MARK);
+    }
+  }
+  return r;
 }
 
 fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64

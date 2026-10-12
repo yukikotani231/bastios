@@ -1370,7 +1370,10 @@ fn magic_target(k: &mut Kernel, pid: u64, n: u64) -> u64
   let t = pfd / LXNFD;
   let fd = pfd % LXNFD;
   let d = fd_look(k, t, fd);
-  if d.kind != K_DIR && d.kind != K_FILE && !(d.kind == K_DEV && d.x == DEV_PTSDIR) {
+  // Only a directory (or the pts directory) is followed to a path: a file may
+  // lie outside the process's root (a chroot, a container), where its name
+  // resolves to nothing; open and exec reopen a file through the link.
+  if d.kind != K_DIR && !(d.kind == K_DEV && d.x == DEV_PTSDIR) {
     return NO_RESULT;
   }
   if d.kind == K_FILE {
