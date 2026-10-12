@@ -87,6 +87,11 @@ int main(void) {
         int ok = is >= 0 && ioctl(is, SIOCGIFHWADDR, &hw) == 0 && ioctl(is, SIOCGIFNETMASK, &nm) == 0;
         if (is >= 0) close(is);
         ok && hw.ifr_hwaddr.sa_family == 772 && ((unsigned char *)&nm.ifr_netmask)[4] == 255 && ((unsigned char *)&nm.ifr_netmask)[5] == 0; }));
+    EXPECT("/proc/net/arp has its header", ({
+        char t[4096]; int f = open("/proc/net/arp", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
+        if (f >= 0) close(f);
+        t[n > 0 ? n : 0] = 0;
+        strstr(t, "IP address") && strstr(t, "HW address") && strstr(t, "Device"); }));
     EXPECT("/proc/net/raw lists a raw ICMP socket", ({
         int rs = socket(AF_INET, SOCK_RAW, 1);
         char t[4096]; int f = open("/proc/net/raw", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);

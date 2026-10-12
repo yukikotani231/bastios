@@ -553,6 +553,7 @@ t_misc: /proc/diskstats opens
 t_misc: /proc/meminfo
 t_misc: /proc/modules opens
 t_misc: /proc/net is a directory
+t_misc: /proc/net/arp has its header
 t_misc: /proc/net/dev lists lo and eth0
 t_misc: /proc/net/raw lists a raw ICMP socket
 t_misc: /proc/net/route lists the default route

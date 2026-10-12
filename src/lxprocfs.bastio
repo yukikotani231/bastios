@@ -92,6 +92,7 @@ const SY_NETUDP6: u64 = 24;            // /proc/net/udp6
 const SY_NETUNIX: u64 = 25;            // /proc/net/unix
 const SY_NETRAW: u64 = 26;             // /proc/net/raw
 const SY_NETROUTE: u64 = 27;           // /proc/net/route
+const SY_NETARP: u64 = 28;             // /proc/net/arp
 const SY_LOOP: u64 = 32;               // 32 ..: loop device n's attribute a at n * LOOP_SYS + a
 const SY_NS: u64 = 128;                // 128 ..: /proc/P/ns link f at P * NF_N + f (src/lxnsk.bastio)
 const NF_N: u64 = 8;
@@ -470,6 +471,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   if xfer_is(x, 5, n, "net/udp") {
     return PROC_DEV + PSYS + SY_NETUDP;
   }
+  if xfer_is(x, 5, n, "net/arp") {
+    return PROC_DEV + PSYS + SY_NETARP;
+  }
   if xfer_is(x, 5, n, "net/route") {
     return PROC_DEV + PSYS + SY_NETROUTE;
   }
@@ -734,6 +738,9 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
     if i == 7 {
       return Ent { len: name_out(&mut k.fs.xfer, "route"), dir: false, end: false };
     }
+    if i == 8 {
+      return Ent { len: name_out(&mut k.fs.xfer, "arp"), dir: false, end: false };
+    }
     return end;
   }
   if dir >= DIR_PROC + TASK_DIRS {
@@ -953,6 +960,27 @@ fn put_ifname(k: &Kernel, o: &mut Bytes, at: u64, i: u64) -> u64
   return a;
 }
 
+/// v (below 256) as two lower-case hex digits.
+fn put_hb(o: &mut Bytes, at: u64, v: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let hi = (v >> 4) & 15;
+  let lo = v & 15;
+  let mut a = at;
+  if hi < 10 {
+    a = put_c(&mut o, a, cast[u8](48 + hi));
+  } else {
+    a = put_c(&mut o, a, cast[u8](87 + hi));
+  }
+  if lo < 10 {
+    a = put_c(&mut o, a, cast[u8](48 + lo));
+  } else {
+    a = put_c(&mut o, a, cast[u8](87 + lo));
+  }
+  return a;
+}
+
 fn put_n(o: &mut Bytes, at: u64, v: u64) -> u64
   requires blen(o) == PROC_OUT && at <= PROC_OUT
   ensures blen(o) == PROC_OUT && result <= PROC_OUT
@@ -1099,6 +1127,43 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     }
     if what >= SY_LOOP && what - SY_LOOP < LOOP_N * LOOP_SYS {
       return loop_sys_text(&mut k, what - SY_LOOP, &mut o);
+    }
+    if what == SY_NETARP {
+      // The card's ARP cache; only the namespace the machine boots in
+      // has one. The device is the card.
+      let ns = net_ns(k, pid);
+      let mut a = put_s(&mut o, 0, "IP address       HW type     Flags       HW address            Mask     Device\n");
+      let mut e = 0;
+      while e < ARP_N && ns == 0 && a + 160 < PROC_OUT
+        invariant e <= ARP_N && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+      {
+        let ip = nic_arp(k.nic, e, 0) % 4294967296;
+        let mac = nic_arp(k.nic, e, 1) % 281474976710656;
+        if ip != 0 {
+          a = put_n(&mut o, a, ip / 16777216 % 256);
+          a = put_c(&mut o, a, 46);
+          a = put_n(&mut o, a, ip / 65536 % 256);
+          a = put_c(&mut o, a, 46);
+          a = put_n(&mut o, a, ip / 256 % 256);
+          a = put_c(&mut o, a, 46);
+          a = put_n(&mut o, a, ip % 256);
+          a = put_s(&mut o, a, "     0x1         0x2         ");
+          a = put_hb(&mut o, a, mac / 1099511627776 % 256);
+          a = put_c(&mut o, a, 58);
+          a = put_hb(&mut o, a, mac / 4294967296 % 256);
+          a = put_c(&mut o, a, 58);
+          a = put_hb(&mut o, a, mac / 16777216 % 256);
+          a = put_c(&mut o, a, 58);
+          a = put_hb(&mut o, a, mac / 65536 % 256);
+          a = put_c(&mut o, a, 58);
+          a = put_hb(&mut o, a, mac / 256 % 256);
+          a = put_c(&mut o, a, 58);
+          a = put_hb(&mut o, a, mac % 256);
+          a = put_s(&mut o, a, "     *        eth0\n");
+        }
+        e = e + 1;
+      }
+      return a;
     }
     if what == SY_NETROUTE {
       // The routes of the reader's network namespace: the default one and

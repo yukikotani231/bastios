@@ -374,6 +374,26 @@ fn arp_find(n: &Net, ip: u64) -> u64
   return 0;
 }
 
+/// ARP cache entry e as /proc/net/arp shows it: field 0 is its address (0
+/// if the entry is empty), field 1 its MAC address.
+fn nic_arp(c: &Nic, e: u64, f: u64) -> u64
+  requires nic_ok(c)
+  ensures result < MAC_LIMIT || result <= IP_MAX
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if e >= ARP_N || get(n.arp, 2 * e + 1) >= MAC_LIMIT || get(n.arp, 2 * e) > IP_MAX || get(n.arp, 2 * e + 1) == 0 {
+        return 0;
+      }
+      if f == 0 {
+        return get(n.arp, 2 * e);
+      }
+      return get(n.arp, 2 * e + 1);
+    },
+  }
+}
+
 /// Caches ip -> mac, over the old entry for ip if there is one, else over
 /// the oldest.
 fn arp_learn(n: &mut Net, ip: u64, mac: u64)
