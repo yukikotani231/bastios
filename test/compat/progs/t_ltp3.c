@@ -399,7 +399,7 @@ int main(void) {
         EXPECT("munlock of a page not locked gives back nothing", r5 == 0 && a4 - b == 12);
         EXPECT("munlock of the rest gives back the rest", r6 == 0 && a5 == b);
         long c = vmlck();
-        int r7 = syscall(325, m, 2 * 4096, 1);        /* mlock2(MLOCK_ONFAULT) */
+        int r7 = syscall(SYS_mlock2, m, 2 * 4096, 1);        /* mlock2(MLOCK_ONFAULT) */
         long d = vmlck();
         EXPECT("mlock2 with MLOCK_ONFAULT locks the range", r7 == 0 && d - c == 8);
         munlockall();

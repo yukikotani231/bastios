@@ -38,10 +38,12 @@ The platform is the trusted base besides the compiler's AArch64 preludes ([trust
 | File | What it does |
 | --- | --- |
 | `boot/aarch64/boot.S` | The Linux arm64 Image header; entry at EL1 with the device tree in x0 (also where a started processor enters, `bst_secondary_entry`); the trampoline page (the exception vectors and the TTBR0 switch); enabling the MMU; `bst_cpu_enter` (the `eret` to EL0 and the register save on the way back) |
-| `boot/aarch64/platform.c` | Reading the memory map from the device tree; the kernel's translation table (1 GiB blocks: devices in the first, RAM above); the GICv3 (each processor's redistributor) and the generic timer (100 ticks a second); acknowledging interrupts; `bst_cpu_wait` (`wfi`); starting the other processors with PSCI and parking them |
+| `boot/aarch64/platform.c` | Reading the memory map from the device tree; the kernel's translation table (1 GiB blocks: normal memory where RAM fills the gigabyte, devices in the first 4 GiB where there is none, a table of 2 MiB blocks where the two share one); the GICv3 (each processor's redistributor) or GICv2 (the CPU interface) that the device tree names, and the generic timer (100 ticks a second); acknowledging interrupts; `bst_cpu_wait` (`wfi`); starting the other processors with PSCI and parking them |
 | `boot/aarch64/linker.ld` | The trampoline page's own section, load address (`0x40080000`, where QEMU puts a kernel) and `_end`, where the page pool starts |
 
-The interrupt controller's addresses are QEMU `virt`'s own (`-M virt,gic-version=3`); the walk of the device tree for them comes with real boards.
+The kernel starts at EL1 or EL2 (firmware such as U-Boot and UEFI usually hands over at EL2): `boot.S` drops from EL2 to EL1 with the setup EL2 owes it (AArch64 EL1, the counter and timer open to EL1, no FP trap, the GIC system registers enabled). The PSCI conduit (`hvc` or `smc`) is the one the device tree's `psci` node names. `test/aarch64_test.sh` runs both (`VIRT=,virtualization=on` starts QEMU at EL2).
+
+The interrupt controller and its addresses come from the device tree (`arm,gic-v3`, or `arm,cortex-a15-gic` / `arm,gic-400` for a GICv2), with QEMU `virt`'s GICv3 as the fallback; `test/aarch64_test.sh` runs against both (`GIC=2` for `-M virt,gic-version=2`). The console is the first `arm,pl011` node (`bst_uart_base`), and the virtio-mmio window comes from the tree too.
 
 ## What is not there yet
 

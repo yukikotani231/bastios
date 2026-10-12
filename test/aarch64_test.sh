@@ -29,6 +29,12 @@ if [ "${1:-}" = --build ]; then
   # bastioc1 is the only compiler with the AArch64 targets: use the one
   # the Makefile builds with stage0 (BASTIOC may name bastioc0 for the x86-64 tests).
   make ARCH=aarch64 BASTIOC=build/bastioc1 -s all || exit 1
+elif ! command -v "$QEMU" >/dev/null; then
+  # The variants in test/all.sh (GIC=, VIRT=, MEM=) reuse the kernel the
+  # --build run made, so they skip the same way.
+  echo "SKIP aarch64: needs $QEMU"
+  [ "${AARCH64_REQUIRED:-}" = 1 ] && exit 1
+  exit 0
 fi
 
 python3 - "$KERNEL" "$QEMU" "$TIMEOUT" <<'PY'
@@ -42,7 +48,7 @@ with open(disk, "wb") as f:
 
 kernel, qemu_bin, timeout = sys.argv[1], sys.argv[2], float(sys.argv[3])
 qemu = subprocess.Popen(
-    [qemu_bin, "-M", "virt,gic-version=3", "-cpu", "cortex-a72", "-smp", os.environ.get("SMP", "4"), "-m", "256M", "-nographic",
+    [qemu_bin, "-M", "virt,gic-version=" + os.environ.get("GIC", "3") + os.environ.get("VIRT", ""), "-cpu", os.environ.get("CPU", "cortex-a72"), "-smp", os.environ.get("SMP", "4"), "-m", os.environ.get("MEM", "256M"), "-nographic",
      "-no-reboot", "-kernel", kernel,
      "-drive", f"file={disk},format=raw,if=none,id=vd", "-device", "virtio-blk-device,drive=vd",
      "-netdev", "user,id=n0,net=10.0.2.0/24", "-device", "virtio-net-device,netdev=n0", "-serial", "stdio", "-monitor", "none"],

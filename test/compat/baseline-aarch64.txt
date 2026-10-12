@@ -326,6 +326,7 @@ t_ltp2: SIOCGIFCONF lists lo
 t_ltp2: SO_PEERCRED: the connecting child on the accepted socket, ourselves on a socketpair
 t_ltp2: TCP: bind to port 0 picks one, a second connect is EISCONN, AF_UNSPEC disconnects
 t_ltp2: UDP sendmsg joins its buffers into one datagram; bind errors
+t_ltp2: a CPU-time POSIX timer, and overruns of a timer set in the past
 t_ltp2: a FIFO opened O_RDWR reads what it writes
 t_ltp2: a file reads 8 KiB in one read
 t_ltp2: a page fault runs the SIGSEGV handler
@@ -428,6 +429,7 @@ t_ltp3: mincore says untouched anonymous pages are not resident
 t_ltp3: mlock counts the pages it locks
 t_ltp3: mlock makes the pages resident
 t_ltp3: mlock of pages already locked counts them once
+t_ltp3: mlock2 with MLOCK_ONFAULT locks the range
 t_ltp3: mremap grows a shared file mapping and its tail writes reach the file
 t_ltp3: munlock of a page not locked gives back nothing
 t_ltp3: munlock of one locked page gives back one page
@@ -487,10 +489,12 @@ t_mem: pages come when first touched: 640 MiB of mmap, system calls and fork on 
 t_mem: read(2) sees a store into a MAP_SHARED mapping
 t_mem: writable MAP_SHARED of a read-only file is EACCES
 t_misc: /etc/passwd
+t_misc: /proc/diskstats opens
 t_misc: /proc/meminfo
 t_misc: /proc/modules opens
 t_misc: /proc/net is a directory
 t_misc: /proc/net/dev lists lo and eth0
+t_misc: /proc/net/tcp lists a listening socket
 t_misc: /proc/self/exe
 t_misc: /proc/stat has cpu lines
 t_misc: SSE floating point
@@ -505,6 +509,7 @@ t_misc: seccomp filter denies getpid
 t_misc: statfs
 t_misc: strtod
 t_misc: sync
+t_misc: syslog (klogctl) reports a buffer size and reads nothing; an unknown type is EINVAL
 t_misc: tcgetattr
 t_misc: tcgetpgrp
 t_misc: tcsetattr
@@ -583,6 +588,8 @@ t_newer: getdents into a byte
 t_newer: getdents64 at the end
 t_newer: getdents64 lists . and ..
 t_newer: lseek rewinds a directory
+t_newer: membarrier query
+t_newer: membarrier unknown command
 t_newer: pidfd_getfd takes the child's pipe end
 t_newer: pidfd_open of itself is close-on-exec
 t_newer: pidfd_open with bad flags
@@ -722,6 +729,32 @@ t_proc: uname
 t_proc: wait with no children is ECHILD
 t_proc: waitid
 t_proc: waitpid WNOHANG
+t_ptrace: PTRACE_ATTACH stops the target with SIGSTOP
+t_ptrace: PTRACE_CONT with a signal runs the handler for it
+t_ptrace: PTRACE_CONT without a signal drops the one that stopped it, and the child saw the poke
+t_ptrace: PTRACE_DETACH lets it run on
+t_ptrace: PTRACE_GETREGS gives a user rip and rsp
+t_ptrace: PTRACE_KILL ends the tracee
+t_ptrace: PTRACE_O_TRACEEXEC reports the exec as PTRACE_EVENT_EXEC
+t_ptrace: PTRACE_O_TRACEFORK stops the parent with PTRACE_EVENT_FORK and gives the child's id
+t_ptrace: PTRACE_PEEKDATA reads the tracee's memory
+t_ptrace: PTRACE_POKEDATA writes it
+t_ptrace: PTRACE_SINGLESTEP runs one instruction at a time
+t_ptrace: PTRACE_SYSCALL stops at getpid and gettid
+t_ptrace: PTRACE_SYSCALL stops before and after a call, in turn
+t_ptrace: a process that does not exist is ESRCH
+t_ptrace: a process that is not a tracee is ESRCH
+t_ptrace: a traced child stops for a signal and the tracer hears of it
+t_ptrace: a traced child stops with SIGTRAP after execve
+t_ptrace: a tracee that is running is ESRCH
+t_ptrace: and the tracee runs freely after PTRACE_CONT
+t_ptrace: at the entry stop orig_rax is the call and rax is -ENOSYS
+t_ptrace: at the exit stop rax is the result, and the call ran once
+t_ptrace: attaching to itself is EPERM
+t_ptrace: attaching to what is traced already is EPERM
+t_ptrace: both run on after PTRACE_CONT, the child's end first for its tracer
+t_ptrace: int3 stops the tracee with SIGTRAP
+t_ptrace: the new child is traced already and stops with SIGSTOP
 t_pty: /dev/tty in the child's session is its pty
 t_pty: Ctrl-C sends SIGINT to the foreground group
 t_pty: Ctrl-D on an empty line reads as end of file
@@ -778,6 +811,7 @@ t_sig2: SA_RESTART does not restart nanosleep
 t_sig2: SA_RESTART does not restart poll
 t_sig2: a PROT_NONE MAP_SHARED page is still shared after mprotect
 t_sig2: a PROT_NONE file mapping faults on read
+t_sig2: a PROT_NONE page is EFAULT to a system call
 t_sig2: a forked child keeps a page PROT_NONE
 t_sig2: epoll_pwait blocks its mask while it waits
 t_sig2: mmap of a file with fd -1 is EBADF
@@ -838,6 +872,7 @@ t_sys: adjtimex reads and sets
 t_sys: clock_settime moves CLOCK_REALTIME
 t_sys: memory.max refuses a mapping that would pass it
 t_sys: not root: EPERM
+t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller
 t_sys: seccomp USER_NOTIF: a supervisor answers a call
 t_sys: setdomainname
 t_sys: sethostname, uname, /proc/sys/kernel/hostname

@@ -98,6 +98,8 @@ const F_BRK0: u64 = 63;              // Linux: where the program break started (
 // one `svc` for both, so the process says it).
 const F_ABI: u64 = 66;
 const F_START: u64 = 65;             // when it started: centiseconds since boot, plus 1 (/proc/PID/stat)
+const F_FAULT_RIP: u64 = 67;         // the last page fault found its page mapped already: rip + 1 and address (src/main.bastio)
+const F_FAULT_VA: u64 = 68;
 const F_NETNS: u64 = 64;             // network (src/netns.bastio, src/lxnetlink.bastio)
 // File permission bits (src/lxperm.bastio).
 const MAY_X: u64 = 1;
@@ -740,6 +742,7 @@ const ENOTBLK: u64 = 18446744073709551601;   // 2^64 - 15
 const EBUSY: u64 = 18446744073709551600;     // 2^64 - 16
 const ETXTBSY: u64 = 18446744073709551590;   // 2^64 - 26
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
+const MCLOUD_PROG: u64 = 33;          // first-boot setup from instance metadata (user/mcloud.c); the boot option `mcloud` starts it
 const NAPPLETS: u64 = 39;
 const NSUID_APPLETS: u64 = 2;          // su and passwd (bin_suid, src/lxproc.bastio)
 const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----
