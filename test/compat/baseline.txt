@@ -998,3 +998,7 @@ node: node: read and write files
 node: node: timers and promises run in order
 node: node: version
 t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller
+apps: ripgrep: a search over many files on several threads
+apps: ripgrep: case-insensitive counts and file lists
+apps: ripgrep: replacement, multi-line and standard input
+apps: ripgrep: search with line numbers, honouring .ignore

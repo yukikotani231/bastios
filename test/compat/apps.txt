@@ -227,3 +227,27 @@ $ printf '%s\n' 'import multiprocessing' 'def sq(x): return x * x' 'if __name__ 
 $ printf '%s\n' 'import urllib.request, hashlib' 'print(urllib.request.urlopen("HOSTURL/hello.txt", timeout=30).read().decode(), end="")' 'b = urllib.request.urlopen("HOSTURL/mib.bin", timeout=60).read()' 'print(len(b), hashlib.md5(b).hexdigest())' > ca_py.py && PYTHONHOME=/disk/py /disk/python ca_py.py; rm -f ca_py.py
 hello from the host
 1048576 85bfb9943e6f0cb09f0f52679e9eac2b
+
+== ripgrep: search with line numbers, honouring .ignore
+$ mkdir -p ca_rg/sub ca_rg/skip && echo 'hello world' > ca_rg/a.txt && echo 'Hello again' >> ca_rg/a.txt && echo 'nothing here' > ca_rg/b.txt && printf 'int main(void) { return 0; }\n// hello from C\n' > ca_rg/sub/c.c && echo 'hello hidden' > ca_rg/skip/d.txt && echo 'skip/' > ca_rg/.ignore && /disk/rg -n --color=never hello ca_rg | /disk/busybox sort; rm -rf ca_rg
+ca_rg/a.txt:1:hello world
+ca_rg/sub/c.c:2:// hello from C
+
+== ripgrep: case-insensitive counts and file lists
+$ mkdir -p ca_rg/sub ca_rg/skip && echo 'hello world' > ca_rg/a.txt && echo 'Hello again' >> ca_rg/a.txt && echo 'nothing here' > ca_rg/b.txt && printf 'int main(void) { return 0; }\n// hello from C\n' > ca_rg/sub/c.c && echo 'hello hidden' > ca_rg/skip/d.txt && echo 'skip/' > ca_rg/.ignore && /disk/rg -ic --color=never hello ca_rg | /disk/busybox sort; /disk/rg -il --color=never hello ca_rg -g '*.txt'; /disk/rg --files --color=never -tc ca_rg; rm -rf ca_rg
+ca_rg/a.txt:2
+ca_rg/sub/c.c:1
+ca_rg/a.txt
+ca_rg/sub/c.c
+
+== ripgrep: replacement, multi-line and standard input
+$ echo 'one two' | /disk/rg -o --color=never '(\w+) (\w+)' -r '$2 $1'; printf 'a\nb\nc\n' | /disk/rg -U --color=never --no-line-number 'a\nb'; echo nomatch | /disk/rg x; echo status $?
+two one
+a
+b
+status 1
+
+== ripgrep: a search over many files on several threads
+$ mkdir ca_rg && i=0; while [ $i -lt 300 ]; do echo "line $i needle" > ca_rg/f$i; i=$((i+1)); done; /disk/rg -j4 -c needle ca_rg | wc -l; /disk/rg -j4 --color=never --no-heading --with-filename -N 'line 299 ' ca_rg; rm -rf ca_rg
+300
+ca_rg/f299:line 299 needle
