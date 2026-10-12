@@ -430,6 +430,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
     s.k.fs.now = sat_add(s.k.epoch, s.k.ns) / 1000000000;   // wall-clock seconds, as stat reports them
     let began = s.k.ns;
+    if pt_sys_entry(&mut s.k, p, pget(s.k.procs, p, F_RESTART) != 0) {
+      return (p + 1) % NPROC;               // stopped for its tracer before the call (src/lxptrace.bastio)
+    }
     ino_before(&mut s.k, p);                // src/lxinotify.bastio
     let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
     ino_after(&mut s.k, p);
@@ -445,6 +448,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     sock_wake(&mut s.k);
     if disk_hold(&mut s.k, p, EIO) || what == SWITCH {
       return (p + 1) % NPROC;
+    }
+    if what == KEEP && pt_sys_exit(&mut s.k, p) {
+      return (p + 1) % NPROC;               // stopped for its tracer after the call
     }
     return p;
   }
@@ -476,6 +482,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       sig = SIGILL;
     } else if v == 3 {
       sig = SIGTRAP;
+    } else if v == 1 {
+      sig = SIGTRAP;                        // a single step (src/lxptrace.bastio)
+      pt_stepped(&mut s.k, p);
     }
     let mut addr = pget(s.k.procs, p, F_REGS + R_RIP);
     if v == 14 {

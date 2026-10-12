@@ -790,6 +790,12 @@ t_ptrace: a traced child stops with SIGTRAP after execve
 t_ptrace: a tracee that is running is ESRCH
 t_ptrace: attaching to itself is EPERM
 t_ptrace: attaching to what is traced already is EPERM
+t_ptrace: PTRACE_SYSCALL stops before and after a call, in turn
+t_ptrace: at the entry stop orig_rax is the call and rax is -ENOSYS
+t_ptrace: at the exit stop rax is the result, and the call ran once
+t_ptrace: int3 stops the tracee with SIGTRAP
+t_ptrace: PTRACE_SINGLESTEP runs one instruction at a time
+t_ptrace: and the tracee runs freely after PTRACE_CONT
 t_pty: /dev/tty in the child's session is its pty
 t_pty: Ctrl-C sends SIGINT to the foreground group
 t_pty: Ctrl-D on an empty line reads as end of file
