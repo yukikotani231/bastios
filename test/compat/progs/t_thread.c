@@ -4,6 +4,10 @@
 #include <pthread.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <unistd.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 static int counter;
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -65,6 +69,30 @@ static int timed_wake(clockid_t clock) {
 
 static void *tlsf(void *arg) { tls = 2; return (void *)(long)tls; }
 
+/* Field 20 of /proc/self/stat and the Threads: line of /proc/self/status
+ * (Python reads them to warn about fork with threads running). */
+static long stat_threads(void) {
+    char b[1024]; long n = -1; FILE *f = fopen("/proc/self/stat", "r");
+    if (f && fgets(b, sizeof b, f)) { char *p = strrchr(b, ')'); int i = 2;
+        while (p && i < 20) { p = strchr(p + 1, ' '); i++; } if (p) n = atol(p + 1); }
+    if (f) fclose(f); return n;
+}
+static long status_threads(void) {
+    char b[256]; long n = -1; FILE *f = fopen("/proc/self/status", "r");
+    while (f && fgets(b, sizeof b, f)) if (!strncmp(b, "Threads:", 8)) n = atol(b + 8);
+    if (f) fclose(f); return n;
+}
+static int tp[2];
+static void *blocked(void *a) { char c; (void)a; return (void *)(long)read(tp[0], &c, 1); }
+static int count_threads(void) {
+    pthread_t x;
+    if (pipe(tp) || pthread_create(&x, 0, blocked, 0)) return 0;
+    usleep(20000);
+    long a = stat_threads(), b = status_threads();
+    write(tp[1], "x", 1); pthread_join(x, 0); close(tp[0]); close(tp[1]);
+    return a >= 2 && b >= 2;
+}
+
 /* exit_group from one thread while another is running on a processor of
  * its own: the process must end with the code exit_group was given. */
 static void *spin(void *arg) { for (volatile long *x = arg;; ) (*x)++; return 0; }
@@ -108,6 +136,7 @@ int main(void) {
     EXPECT("gettid differs in a thread", ({ pthread_t x; long other = 0;
            void *g(void *a) { (void)a; return (void *)(long)gettid(); }
            pthread_create(&x, 0, g, 0) == 0 && pthread_join(x, (void **)&other) == 0 && other != gettid(); }));
+    EXPECT("/proc/self/stat and status count the threads", count_threads());
     if (begin("exit_group while another thread runs keeps its code")) {
         int r = group_exit_code();
         if (r == 1) pass(); else if (r == 0) fail("fork or waitpid failed");

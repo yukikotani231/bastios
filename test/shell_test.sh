@@ -5,7 +5,10 @@
 set -u
 cd "$(dirname "$0")/.."
 KERNEL=${KERNEL:-build/bastios.elf}
-TIMEOUT=${TIMEOUT:-60}
+# Seconds each boot's steps may take in all. The longest boot's steps take
+# about 35 s alone; with make test's other lanes running beside it (test/all.sh)
+# they took over 60 s, and its last steps failed for want of time, on main too.
+TIMEOUT=${TIMEOUT:-120}
 SMP=${SMP:-4}
 
 python3 - "$KERNEL" "$TIMEOUT" "$SMP" <<'PY'
@@ -219,7 +222,7 @@ steps = [
     ("fpucheck", b"fpucheck: xmm0 kept"),
     # musl malloc (brk, mmap), stdio on a file, and a line read from the
     # console; the third field is what to wait for instead of the prompt.
-    ("mtest", [b"mtest: malloc heap 75", b"mtest: big memory 4096 1024", b"mtest: direction flag spun", b"mtest: file line 42"], b"type a line"),
+    ("mtest", [b"mtest: malloc heap 75", b"mtest: big memory 4096 1024", b"mtest: wide 4", b"mtest: cow kept", b"mtest: direction flag spun", b"mtest: file line 42"], b"type a line"),
     ("typed for mtest", b"mtest: got typed for mtest"),
     # BusyBox's shell, unmodified, reading commands from the console. The
     # console is a terminal (ioctl TCGETS works), so ash is interactive and
@@ -319,6 +322,27 @@ steps = [
     # and the file still there after an unmount and a second mount.
     ("truncate -s 1M im; mkfs.bstdisk3 im && mkdir mm && mount -t bstdisk3 im mm && echo kept > mm/f && umount mm && mount -t bstdisk3 im mm && cat mm/f; cat /proc/mounts; umount mm; rm im; rmdir mm; echo lo$((1+1))",
      [b"\r\nkept\r\n", b"bstdisk3 /mm bstdisk3 rw", b"\r\nlo2\r\n"], b"\n# "),
+    # Mount namespaces (src/lxns.bastio): a bind mount made in one is seen
+    # there and not by the shell outside; pivot_root into a directory bound
+    # onto itself, with /bin, a volume and proc mounted in it, as OCI
+    # runtimes do it; a relative link in the volume cannot climb out of the
+    # new root; a read-only bind remount; pivot_root in the first namespace
+    # is refused.
+    ("mkdir -p /tmp/nr/bin /tmp/nr/proc /tmp/nr/vol /tmp/nd; echo hostfile > /tmp/nd/f; echo inroot > /tmp/nr/marker; ln -s ../../../../etc /tmp/nd/esc; unshare -m sh -c 'mount --bind /tmp/nd /tmp/nr/vol && cat /tmp/nr/vol/f && cat /proc/self/mounts'; cat /proc/mounts; ls /tmp/nr/vol; echo ns1",
+     [b"\r\nhostfile\r\n", b"none /tmp/nr/vol none rw 0 0", b"disk /disk bstdisk3 rw 0 0\r\nns1"], b"\n# "),
+    ("unshare -m sh -c 'mount --bind /tmp/nr /tmp/nr && mount --bind /bin /tmp/nr/bin && mount --bind /tmp/nd /tmp/nr/vol && mount -t proc proc /tmp/nr/proc && cd /tmp/nr && pivot_root . . && umount -l . && cd / && cat /marker && cat /vol/f && cat /vol/esc/passwd; echo x > /vol/new; mount -o remount,bind,ro /vol && echo y > /vol/y; cat /proc/self/mounts; ls /tmp'; cat /tmp/nd/new; echo ns2",
+     [b"\r\ninroot\r\nhostfile\r\n", b"can't open '/vol/esc/passwd'", b"none / none rw 0 0", b"none /vol none ro 0 0", b"proc /proc proc rw 0 0", b"/tmp: No such file", b"Read-only file system", b"\r\nx\r\nns2"], b"\n# "),
+    ("pivot_root /tmp/nr /tmp/nr; echo p=$?; rm -r /tmp/nr /tmp/nd; echo ns3", [b"Invalid argument", b"p=1", b"ns3"], b"\n# "),
+    # UTS and IPC namespaces, /proc/PID/ns and setns (src/lxnsk.bastio): a
+    # host name set in a new UTS namespace stays there; IPC objects made
+    # in one IPC namespace are not seen from another, and setns joins one
+    # through /proc/PID/ns/ipc or a pidfd (user/mns.c); nsenter joins a
+    # process's UTS namespace through its /proc/PID/ns/uts link.
+    ("unshare -u sh -c 'hostname box; hostname; cat /proc/sys/kernel/hostname'; hostname; echo uts1",
+     b"\r\nbox\r\nbox\r\nbastios\r\nuts1", b"\n# "),
+    ("mns", b"mns: ok", b"\n# "),
+    ("unshare -u sh -c 'hostname inner; sleep 5' & sleep 1; nsenter -t $! -u hostname; readlink /proc/self/ns/uts; readlink /proc/$!/ns/uts; stat -L -c %i /proc/self/ns/mnt; ls /proc/self/ns; hostname; kill $!; echo ns5",
+     [b"\r\ninner\r\nuts:[4026531838]\r\nuts:[40265320", b"\r\n4026531841\r\n", b"pid_for_children", b"\r\nbastios\r\n", b"ns5"], b"\n# "),
     # Owners and the umask (src/lxperm.bastio): a new file takes the umask,
     # chown keeps its owner, on the disk too.
     ("umask 077; echo x > po; chown 65534:100 po; stat -c 'p%a %u %g' po; rm po; umask 022; echo y > /disk/po; chown 7:8 /disk/po; stat -c 'd%a %u %g' /disk/po; rm /disk/po",
@@ -392,9 +416,11 @@ steps = [
     # An unbound loop device's /sys/block entry: no sectors, not read-only.
     ("cat /sys/block/loop0/size /sys/block/loop0/ro", b"0\r\n0\r\n", b"\n# "),
     # The disk's directory grows past its first 64 entries (dir_grow); the
-    # power cuts below check that what it grew survives.
+    # power cuts below check that what it grew survives. (Past 1023
+    # entries: the big-disk boot.)
     ("mkdir disk/many; i=0; while [ $i -lt 150 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; cat disk/many/f149", b"\r\n150\r\n149\r\n", b"\n# "),
     ("rm -r disk/many; ls disk/many; echo gone$((1+1))", [b"No such file", b"gone2"], b"\n# "),
+    ("mkdir full; i=0; while echo x > full/f$i 2>/dev/null; do i=$((i+1)); done; echo x > full/z; rm -r full", b"full/z: No space left on device", b"\n# "),
     # /proc, generated by the kernel: the mount table, memory, uptime, a
     # directory per process with its status, and /proc/self/exe as a link.
     ("cat /proc/mounts", b"rootfs / ramfs rw 0 0\r\nproc /proc proc rw 0 0\r\n", b"\n# "),
@@ -406,6 +432,9 @@ steps = [
     # types, a process's own mount table, and three fixed sysctls.
     ("n=0; while read k r; do [ \"$k\" = processor ] && n=$((n+1)); done < /proc/cpuinfo; echo cpus=$n; cat /proc/filesystems; cat /proc/self/mounts", [f"cpus={smp}\r\n".encode(), b"nodev\tramfs", b"nodev\ttmpfs", b"\tbstdisk3", b"proc /proc proc"], b"\n# "),
     ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n256\r\n", b"mounts"], b"\n# "),
+    # An 8 MiB stack, Linux's default (t_mem in make compat maps 640 MiB
+    # of the 1 GiB window and grows the stack past 6 MiB).
+    ("ulimit -s", b"\r\n8192\r\n", b"\n# "),
     # The kernel's command line, and a process's fixed regions.
     ("cat /proc/cmdline /proc/self/maps", [b"BOOT_IMAGE=", b"[vdso]", b"[stack]"], b"\n# "),
     ("exit 5", b"[exit 5]"),
@@ -1201,7 +1230,7 @@ fails += not good
 # A USB keyboard and a USB mouse on an xHCI controller (src/xhci.bastio),
 # on a machine with no PS/2 controller at all (i8042=off), so the keys and
 # the moves can only come over USB. They are sent through QMP; at power
-# off the controller is reset and its fifteen pages are back.
+# off the controller is reset and its pages are back.
 import json
 qmp_path = os.path.join(disk_dir.name, "qmp.sock")
 def usbmouse(name, qmp_cmd):
@@ -1232,8 +1261,11 @@ def usbmouse(name, qmp_cmd):
     good = b"mmouse: wheel ready\r\nmmouse: wheel -1\r\n" in out[mark:]
     print(("ok  " if good else "FAIL"), f"({name} boot) ImPS/2 mode, and the USB mouse's wheel turned up reads -1")
     fails += not good
-qemu = boot(1, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci", "-device", "usb-kbd",
-                      "-device", "usb-mouse", "-qmp", f"unix:{qmp_path},server,nowait"])
+# A first controller with nothing on it stands for a PC's USB-C one: the
+# keyboard and mouse are on the second, which must be found.
+qemu = boot(1, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci,id=empty", "-device", "qemu-xhci,id=xu",
+                      "-device", "usb-kbd,bus=xu.0", "-device", "usb-mouse,bus=xu.0",
+                      "-qmp", f"unix:{qmp_path},server,nowait"])
 out = b""
 deadline = time.time() + timeout
 ok = read_until(b"bastios> ")
@@ -1529,6 +1561,47 @@ for line, want, until in [
     print(("ok  " if ok else "FAIL"), "(disk-program boot)", repr(line)); ok or print(repr(out[mark:]))
     fails += not ok
 qemu.kill(); qemu.wait()
+# A 40 GiB disk (sparse): the file system takes its size from the
+# device's block count, so statfs under disk/ reports all of it (40 GiB
+# is 10485760 blocks, less the 5 at the start), and the used map, a bit
+# per block, fits the kernel's arena. Its directory grows past the 1023
+# entries the superblock's first sector has room to name, and a second
+# boot finds them.
+big = os.path.join(disk_dir.name, "big.img")
+with open(big, "wb") as f:
+    f.truncate(40 << 30)
+qemu = boot(1, extra=["-drive", f"file={big},format=raw,if=none,id=bg", "-device", "virtio-blk-pci,drive=bg"])
+out = b""
+deadline = time.time() + timeout
+for line, want, until in [
+    ("ash", b"built-in shell (ash)", b"\n# "),
+    ("stat -f -c '%b %c' /disk; echo big > /disk/b; cat /disk/b; stat -f -c %f /disk; rm /disk/b", b"10485755 4095\r\nbig\r\n1048", b"\n# "),
+    ("mkdir disk/many; i=0; while [ $i -lt 1100 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l", b"\r\n1100\r\n", b"\n# "),
+]:
+    mark = len(out)
+    if mark == 0 and not read_until(b"bastios> "):
+        print("FAIL: no prompt after the big-disk boot"); fails += 1
+        break
+    mark = len(out)
+    qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+    ok = read_until(until, mark) and want in out[mark:]
+    print(("ok  " if ok else "FAIL"), "(big-disk boot)", repr(line)); ok or print(repr(out[mark:]))
+    fails += not ok
+qemu.kill(); qemu.wait()
+def send_line_ok(line, until):
+    mark = len(out)
+    qemu.stdin.write(line + b"\r"); qemu.stdin.flush()
+    return read_until(until, mark)
+qemu = boot(1, extra=["-drive", f"file={big},format=raw,if=none,id=bg", "-device", "virtio-blk-pci,drive=bg"])
+out = b""
+deadline = time.time() + timeout
+ok = (read_until(b"bastios> ") and send_line_ok(b"ash", b"\n# ")
+      and send_line_ok(b"ls disk/many | wc -l; cat disk/many/f1099; stat -f -c %c /disk", b"\n# ")
+      and b"\r\n1100\r\n1099\r\n4095\r\n" in out)
+print(("ok  " if ok else "FAIL"), "(big-disk boot) 1100 entries in one directory after a reboot"); ok or print(repr(out[-500:]))
+fails += not ok
+qemu.kill(); qemu.wait()
+os.unlink(big)
 # Two connections opened at once, before the kernel knows the gateway's
 # MAC: both SYN+ACKs wait for one ARP answer (send_via holds up to
 # HELD_N frames). With only one frame held, the first was dropped and its
@@ -1741,6 +1814,9 @@ fails += not good
 ok, code = report_boot(["-machine", "pc", "-m", "64M"], "no report", 0)
 good = ok and b"hardware report" not in out
 print(("ok  " if good else "FAIL"), "(hardware report) only with diag")
+fails += not good
+good = ok and b"disk: none found" in out and b"net: none" in out
+print(("ok  " if good else "FAIL"), "(hardware report) a boot without a disk or network card says so, even without diag")
 fails += not good
 
 # Sound (src/hda.bastio, src/lxsnd.bastio): an HD Audio controller with

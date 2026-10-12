@@ -9,7 +9,7 @@ directories (a/b/c.h), which are made as needed. DEST=DIR stores every file
 under DIR, keeping its path below DIR, under /disk/DEST. The format ("BSTDISK3"),
 in 4096-byte blocks: block 0 the superblock, its first 8 bytes the magic,
 then at byte 8 * db the block holding directory block db for db = 4..63;
-blocks 1..4 directory blocks 0..3. The directory holds up to 1024 entries
+blocks 1..4 directory blocks 0..3. The directory holds up to 4096 entries
 of 256 bytes, 16 to a block, entry 64 unused (byte 0 the kind, 1 a file; byte 1 the name length;
 then little-endian u64s: at 8 the parent, 64 for the top directory, at 16
 the size, at 24 the root map block, at 32 the mode, at 40 the modification
@@ -20,7 +20,7 @@ numbers of data blocks; 0 is a hole.
 import os, struct, sys
 
 BLOCK = 4096
-DSLOTS = 1024
+DSLOTS = 4096
 DENT = 256
 DPB = BLOCK // DENT
 DIR_FIXED = 4
@@ -32,7 +32,7 @@ MODE = 0o755
 DISK_BYTES = 33 << 20             # at least; more when the files need it
 # room left for the guest to write (MKDISK_FREE_MB overrides)
 FREE_BYTES = int(os.environ.get("MKDISK_FREE_MB", "16")) << 20
-MAX_DISK = 65536 * BLOCK          # src/diskfs.bastio's MAX_BLOCKS
+MAX_DISK = (1 << 28) * BLOCK      # src/diskfs.bastio's MAX_BLOCKS
 
 def expand(args):
     """DEST=DIR arguments as one DEST/PATH=FILE argument per file under DIR."""

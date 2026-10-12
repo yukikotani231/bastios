@@ -202,6 +202,11 @@ fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
   if (h + 1) * CWD_STRIDE <= len(k.cwd) && (p + 1) * CWD_STRIDE <= len(k.cwd) {      // live processes have rows
     swap_words(&mut k.cwd, h * CWD_STRIDE, p * CWD_STRIDE, CWD_STRIDE);
   }
+  if (h + 1) * CWD_STRIDE <= len(k.croot) && (p + 1) * CWD_STRIDE <= len(k.croot) {
+    swap_words(&mut k.croot, h * CWD_STRIDE, p * CWD_STRIDE, CWD_STRIDE);
+  }
+  swap_words(&mut k.mns, h, p, 1);
+  nsk_swap(&mut k.mns, h, p);
   if (h + 1) * SIGACT_ROW <= len(k.sigact) && (p + 1) * SIGACT_ROW <= len(k.sigact) {
     swap_words(&mut k.sigact, h * SIGACT_ROW, p * SIGACT_ROW, SIGACT_ROW);
   }
@@ -209,6 +214,7 @@ fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
   swap_words(&mut k.maps, h * MAP_N * MAP_W, p * MAP_N * MAP_W, MAP_N * MAP_W);
   swap_words(&mut k.holes, h * HOLE_N * 2, p * HOLE_N * 2, HOLE_N * 2);
   swap_words(&mut k.lazy, h * LZ_W, p * LZ_W, LZ_W);
+  swap_words(&mut k.anon, h * AN_N * 2, p * AN_N * 2, AN_N * 2);
   swap_words(&mut k.alarms, PT_BASE + h * PT_N * PT_W, PT_BASE + p * PT_N * PT_W, PT_N * PT_W);
   return true;
 }
@@ -323,7 +329,7 @@ fn user_u32(k: &mut Kernel, pid: u64, va: u64) -> Word
   requires kok(k) && pid < NPROC
   ensures kok(k) && result.v < 0x100000000
 {
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 4) != 4 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 4) != 4 {
     return Word { ok: false, v: 0 };
   }
   return Word { ok: true, v: rd32(k.fs.xfer, 0) };
@@ -334,7 +340,7 @@ fn put_user_u32(k: &mut Kernel, pid: u64, va: u64, v: u64) -> bool
   ensures kok(k)
 {
   xfer_u64(&mut k.fs.xfer, 0, v % 0x100000000);
-  return copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, 4) == 4;
+  return copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, 4) == 4;
 }
 
 // ---------------------------------------------------------------- clone
@@ -349,6 +355,9 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   if flags & CLONE_VM == 0 || flags & CLONE_SIGHAND == 0 || flags & CLONE_VFORK != 0 {
     return EINVAL;
   }
+  if !cow_break_all(&mut k, pid) {
+    return ENOMEM;                          // its copy-on-write pages need copies first (src/lxcow.bastio)
+  }
   let c = new_pid(&mut k);
   if c == 0 {
     return EAGAIN;
@@ -358,6 +367,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
     return EAGAIN;                          // a FREE row has no space; check it
   }
   hole_clear(&mut k, c);                    // the group's holes stay with its holder
+  anon_clear(&mut k, c);
   lazy_clear(&mut k, c);
   let fp = find_free(&mut k.mem);
   if fp >= NPAGES {
@@ -422,11 +432,14 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
 /// The clone flags a new process (not a thread, not a vfork) may carry:
 /// the exit signal, CLONE_PARENT, the tid and TLS flags, and the ones
 /// that change nothing here (CLONE_SYSVSEM, CLONE_DETACHED, CLONE_IO).
-/// Sharing files, the cwd, signal handlers or memory with a separate
-/// process, and the namespaces, are not supported.
+/// CLONE_NEWNS, CLONE_NEWUTS and CLONE_NEWIPC give the child a mount, UTS
+/// or IPC namespace of its own. Sharing files, the cwd, signal handlers or
+/// memory with a separate process, and the other namespaces, are not
+/// supported.
 fn clone_proc_flags(flags: u64) -> bool {
   let known = 0xff + CLONE_PARENT + CLONE_SYSVSEM + CLONE_SETTLS + CLONE_PARENT_SETTID
-    + CLONE_CHILD_CLEARTID + CLONE_DETACHED + CLONE_CHILD_SETTID + CLONE_IO;
+    + CLONE_CHILD_CLEARTID + CLONE_DETACHED + CLONE_CHILD_SETTID + CLONE_IO + CLONE_NEWNS
+    + CLONE_NEWUTS + CLONE_NEWIPC;
   return flags & known == flags;
 }
 
@@ -445,10 +458,24 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
       return EINVAL;                        // init has no parent to share
     }
   }
+  let nsf = flags & (CLONE_NEWNS + CLONE_NEWUTS + CLONE_NEWIPC);
+  if nsf != 0 && !cap_has(k, pid, CAP_SYS_ADMIN) {
+    return EPERM;
+  }
+  if flags & CLONE_NEWNS != 0 && !ns_room(&mut k, pid) {
+    return ENOMEM;
+  }
+  if flags & CLONE_NEWUTS != 0 && !uts_room(&mut k) {
+    return ENOMEM;
+  }
   let c = lx_fork(&mut k, mmu, pid);
   if c == 0 || c >= NPROC {
     return c;
   }
+  if flags & CLONE_NEWNS != 0 {
+    let e = ns_unshare(&mut k, c);          // cannot fail: ns_room said so
+  }
+  let e2 = nsk_unshare(&mut k, c, flags);   // nor this: uts_room did (src/lxnsk.bastio)
   pset(&mut k.procs, c, F_PARENT, par);
   if stack != 0 {
     pset(&mut k.procs, c, F_REGS + R_RSP, stack);
@@ -473,16 +500,17 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
 
 const CLONE_FS: u64 = 0x200;
 const CLONE_FILES: u64 = 0x400;
-const CLONE_NEWUSER: u64 = 0x10000000;
 // CLONE_NEWNS, NEWCGROUP, NEWUTS, NEWIPC, NEWUSER, NEWPID, NEWNET and
 // NEWTIME: the namespaces.
 const CLONE_NEWALL: u64 = 0x7e020080;
 
 /// unshare(flags). A process (not a thread group) shares nothing with
 /// another one here, so unsharing its files, cwd, memory, signal handlers
-/// or semaphore undo list changes nothing. Namespaces are not supported:
-/// EINVAL, as on a Linux built without them, or EPERM for one that only
-/// root may make.
+/// or semaphore undo list changes nothing. CLONE_NEWNS, CLONE_NEWUTS and
+/// CLONE_NEWIPC give it a mount, UTS or IPC namespace of its own
+/// (src/lxns.bastio, src/lxnsk.bastio). The other namespaces are not
+/// supported: EINVAL, as on a Linux built without them, or EPERM for one
+/// that only root may make.
 fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC
   ensures kok(k)
@@ -496,12 +524,32 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
     if ns & CLONE_NEWUSER != ns && !cap_has(k, pid, CAP_SYS_ADMIN) {
       return EPERM;
     }
-    return EINVAL;
+    if ns & (CLONE_NEWNS + CLONE_NEWNET + CLONE_NEWUTS + CLONE_NEWIPC) != ns {
+      return EINVAL;                        // only mount, network, UTS and IPC namespaces so far
+    }
   }
-  if flags != 0 && pget(k.procs, pid, F_TGID) != 0 {
+  if flags != ns && pget(k.procs, pid, F_TGID) != 0 {
     return EINVAL;                          // threads that share them: not supported
   }
-  return 0;
+  if ns & CLONE_NEWNS != 0 && ns & (CLONE_NEWNET + CLONE_NEWUTS + CLONE_NEWIPC) != 0 && !ns_room(&mut k, pid) {
+    return ENOMEM;                          // so the others are not made alone
+  }
+  if ns & CLONE_NEWUTS != 0 && !uts_room(&mut k) {
+    return ENOMEM;
+  }
+  if ns & CLONE_NEWNET != 0 {
+    let e = netns_unshare(&mut k, pid);     // src/lxnetlink.bastio
+    if e != 0 {
+      return e;
+    }
+  }
+  if ns & CLONE_NEWNS != 0 {
+    let e = ns_unshare(&mut k, pid);        // src/lxns.bastio
+    if e != 0 {
+      return e;
+    }
+  }
+  return nsk_unshare(&mut k, pid, ns);      // src/lxnsk.bastio
 }
 
 /// exit(code) from thread pid of a group, not its leader: clears and
@@ -573,15 +621,16 @@ fn thread_exec(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
 // ---------------------------------------------------------------- futex
 
 // A waiter is a thread whose futex call runs again later (lx_retry): its
-// F_FUTEX is the address, and it is either FUTEXWAIT (no timeout) or
-// READY polling its deadline (a timeout, src/lxtime.bastio). A wake ends
+// F_FUTEX is the address, and it is either FUTEXWAIT (no timeout), or
+// TIMEWAIT or READY between tries of a wait with a timeout
+// (src/lxtime.bastio's wait_until). A wake ends
 // its call with 0 instead, as if it had returned.
 
 fn futex_waiting(procs: &Buf, q: u64, g: u64, addr: u64) -> bool
   requires ptab_ok(procs) && q < NPROC
 {
   let st = state(procs, q);
-  return (st == FUTEXWAIT || st == READY) && (g == 0 || tgid(procs, q) == g) && pget(procs, q, F_FUTEX) == addr
+  return (st == FUTEXWAIT || st == TIMEWAIT || st == READY) && (g == 0 || tgid(procs, q) == g) && pget(procs, q, F_FUTEX) == addr
     && pget(procs, q, F_RESTART) != 0 && pget(procs, q, F_REGS + R_RAX) == LX_FUTEX;
 }
 
@@ -603,7 +652,7 @@ fn futex_key(k: &mut Kernel, pid: u64, addr: u64, op: u64) -> u64
   ensures kok(k)
 {
   if op & FUTEX_PRIVATE == 0 && addr < FUTEX_PHYS {
-    let pg = user_shared_page(&mut k.spaces, pid, addr);
+    let pg = user_shared_page(&mut k.spaces, k.mem.bm, pid, addr);
     if pg < NPAGES {
       return FUTEX_PHYS + pg * 4096 + addr % 4096;
     }
@@ -850,11 +899,11 @@ fn lx_get_robust_list(k: &mut Kernel, pid: u64, target: u64, hp: u64, lp: u64) -
     return EPERM;
   }
   xfer_u64(&mut k.fs.xfer, 0, get(k.sys, SYS_RB + t));
-  if copy_to_user(&mut k.spaces, pid, hp, k.fs.xfer, 8) != 8 {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, hp, k.fs.xfer, 8) != 8 {
     return EFAULT;
   }
   xfer_u64(&mut k.fs.xfer, 0, ROBUST_HEAD);
-  if copy_to_user(&mut k.spaces, pid, lp, k.fs.xfer, 8) != 8 {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, lp, k.fs.xfer, 8) != 8 {
     return EFAULT;
   }
   return 0;

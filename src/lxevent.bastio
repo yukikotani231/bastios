@@ -135,7 +135,7 @@ fn ev_write(k: &mut Kernel, pid: u64, h: u64, va: u64, n: u64) -> u64
   if n < 8 {
     return EINVAL;
   }
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 8) != 8 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 8) != 8 {
     return EFAULT;
   }
   let v = get_u64(k.fs.xfer, 0);
@@ -162,7 +162,7 @@ fn lx_signalfd(k: &mut Kernel, pid: u64, fd: u64, maskp: u64, size: u64, flags: 
   if size != 8 || flags & !(LO_NONBLOCK | LO_CLOEXEC) != 0 {
     return EINVAL;
   }
-  if maskp > VA_LAST || copy_from_user(&mut k.spaces, pid, maskp, &mut k.fs.xfer, 8) != 8 {
+  if maskp > VA_LAST || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, maskp, &mut k.fs.xfer, 8) != 8 {
     return EFAULT;
   }
   let mask = get_u64(k.fs.xfer, 0) & !(sbit(SIGKILL) | sbit(SIGSTOP));
@@ -212,7 +212,7 @@ fn sfd_one(k: &mut Kernel, pid: u64, s: u64, va: u64) -> bool
       i = i + 1;
     }
   }
-  return va <= VA_LAST && copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, SFD_INFO) == SFD_INFO;
+  return va <= VA_LAST && copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, SFD_INFO) == SFD_INFO;
 }
 
 /// read(2) on signalfd description h: takes the pending signals in its set,
@@ -312,7 +312,7 @@ fn ev_read(k: &mut Kernel, pid: u64, kind: u64, x: u64, va: u64, n: u64) -> u64
       v = 1;                                // EFD_SEMAPHORE: one at a time
     }
     xfer_u64(&mut k.fs.xfer, 0, v);
-    if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, 8) != 8 {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, 8) != 8 {
       return EFAULT;
     }
     of_set(&mut k.ofd, x, 2, c - v);
@@ -331,7 +331,7 @@ fn ev_read(k: &mut Kernel, pid: u64, kind: u64, x: u64, va: u64, n: u64) -> u64
     return EAGAIN;
   }
   xfer_u64(&mut k.fs.xfer, 0, due);
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, 8) != 8 {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, 8) != 8 {
     return EFAULT;
   }
   k.evt = set(k.evt, x * TFD_STRIDE + 2, tfd_next(k, x));
@@ -591,7 +591,7 @@ fn lx_epoll_ctl(k: &mut Kernel, pid: u64, epfd: u64, op: u64, fd: u64, ev: u64) 
   if op == EPOLL_CTL_MOD && !live {
     return ENOENT;
   }
-  if copy_from_user(&mut k.spaces, pid, ev, &mut k.fs.xfer, EPOLL_EVENT) != EPOLL_EVENT {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, ev, &mut k.fs.xfer, EPOLL_EVENT) != EPOLL_EVENT {
     return EFAULT;
   }
   let events = cast[u64](bget(k.fs.xfer, 0)) | cast[u64](bget(k.fs.xfer, 1)) << 8 | cast[u64](bget(k.fs.xfer, 2)) << 16 | cast[u64](bget(k.fs.xfer, 3)) << 24;
@@ -749,12 +749,17 @@ fn ep_nest_check(k: &Kernel, pid: u64, e: u64, t: u64) -> u64
   return 0;
 }
 
-/// Which instances have something ready, as a bit mask.
+/// Which instances have something ready, as a bit mask. One pass over
+/// the entries finds the leaves that are ready and, in byte f of
+/// `wants`, the instances that instance f waits on; the EP_DEPTH rounds
+/// then pass readiness up with bit masks only (it runs on every try of an
+/// epoll_wait, so looking up every entry each round cost most of a try).
 fn ep_ready(k: &Kernel, pid: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures result < 256
 {
   let mut m = 0;
+  let mut wants = 0;
   let mut e = 0;
   while e < EP_N
     invariant e <= EP_N && m < 256
@@ -763,30 +768,30 @@ fn ep_ready(k: &Kernel, pid: u64) -> u64
     while j < EP_FDS
       invariant j <= EP_FDS && e < EP_N && m < 256
     {
-      if ep_entry_bits(k, pid, e, j) != 0 {
-        m = (m | (1 << e)) % 256;
+      if get(k.evt, ep_at(e, j, 0)) != 0 {
+        let t = ep_target(k, pid, e, j);
+        if t < EP_N {
+          if get(k.evt, ep_at(e, j, 2)) & (POLLIN + EP_OFF) == POLLIN {
+            wants = wants | (1 << (8 * e + t));
+          }
+        } else if ep_entry_bits(k, pid, e, j) != 0 {
+          m = (m | (1 << e)) % 256;
+        }
       }
       j = j + 1;
     }
     e = e + 1;
   }
   let mut round = 0;
-  while round < EP_DEPTH
+  while round < EP_DEPTH && wants != 0
     invariant round <= EP_DEPTH && m < 256
   {
     let mut f = 0;
     while f < EP_N
       invariant f <= EP_N && m < 256
     {
-      let mut j = 0;
-      while j < EP_FDS
-        invariant j <= EP_FDS && f < EP_N && m < 256
-      {
-        let t = ep_target(k, pid, f, j);
-        if t < EP_N && (m >> t) % 2 == 1 && get(k.evt, ep_at(f, j, 2)) & (POLLIN + EP_OFF) == POLLIN {
-          m = (m | (1 << f)) % 256;
-        }
-        j = j + 1;
+      if ((wants >> (8 * f)) % 256) & m != 0 {
+        m = (m | (1 << f)) % 256;
       }
       f = f + 1;
     }
@@ -896,7 +901,7 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
     }
   }
   let size = got * EPOLL_EVENT;
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, size) != size {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, size) != size {
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
   }
@@ -982,7 +987,7 @@ fn lx_mknod(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64, dev: u64
   }
   xfer_load(&mut k, t, 0, n);               // path_meta may have used the transfer buffer
   bfree(t);
-  if vfs_ro(&mut k.fs, n) {
+  if path_ro(&mut k, n) {
     return EROFS;
   }
   let e = may_dir(&mut k, pid, n);

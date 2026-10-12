@@ -23,6 +23,11 @@ BASTIOC0 ?= ../bastiolang/stage0/target/release/bastioc0
 BASTIOC  ?= build/bastioc1
 # Where `import "core/..."` finds the Bastio core library.
 BASTIOLIB ?= ../bastiolang
+# Functions bastioc1 has proved are recorded here and not sent to the solver
+# again, so a rebuild proves only what changed (`make clean` empties it;
+# BASTIO_PROOF_CACHE= turns it off). The cache is trusted like the solver:
+# it lives in build/, which only this checkout writes.
+export BASTIO_PROOF_CACHE ?= build/proof-cache
 CC      ?= cc
 QEMU    ?= qemu-system-x86_64
 
@@ -49,7 +54,7 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest crashme diskbench
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs mtone mmouse
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs mtone mmouse mns
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so build/user/vdso.so
 
 build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
@@ -101,9 +106,7 @@ build/user/fpucheck.elf: build/user/elfstart.o build/user/fpucheck.o
 
 # The system call fuzzer (user/sysfuzz.c, test/fuzz_test.sh): freestanding,
 # so nothing between it and the kernel tidies its arguments.
-# Its ELF mode carries three real programs to damage (.incbin), since /bin's
-# programs cannot be opened as files.
-build/user/sysfuzz.o: user/sysfuzz.c build/user/elfexec.elf build/user/elfpie.elf build/user/mdyn.elf | build/user
+build/user/sysfuzz.o: user/sysfuzz.c | build/user
 	$(CC) $(ELFCFLAGS) -c -o $@ $<
 
 # Linked at USER_BASE: its tables of pointers need no relocation.
@@ -123,7 +126,7 @@ build/user/vdso.so: user/vdso.c user/vdso.ld user/vdso.map | build/user
 # A C program against musl libc, static PIE (the musl-tools package).
 MUSLCC ?= musl-gcc
 
-build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf build/user/mkfs.elf build/user/mtone.elf build/user/mmouse.elf: build/user/%.elf: user/%.c | build/user
+build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf build/user/mkfs.elf build/user/mtone.elf build/user/mmouse.elf build/user/mns.elf: build/user/%.elf: user/%.c | build/user
 	$(MUSLCC) -static-pie -O2 -o $@ $<
 
 # A dynamically linked PIE, and musl's dynamic linker (libc.so, which is
@@ -362,8 +365,8 @@ $(COMPAT_BINS): build/compat/%: test/compat/progs/%.c test/compat/progs/compat.h
 build/compat:
 	mkdir -p $@
 
-# The copy waits for build/user/ash.elf: under -j its configure step in
-# build/busybox would otherwise rewrite files while cp reads them.
+# Copy the tree only after build/user/ash.elf has finished configuring and
+# building it in place: under make -j the copy otherwise races that build.
 build/compat/busybox: build/busybox/Makefile test/compat/busybox.config | build/compat build/user/ash.elf
 	rm -rf build/compat/bb && cp -r build/busybox build/compat/bb
 	$(MAKE) -C build/compat/bb -s clean >/dev/null
@@ -371,7 +374,12 @@ build/compat/busybox: build/busybox/Makefile test/compat/busybox.config | build/
 	for o in $$(grep -v '^#' test/compat/busybox.config); do \
 	  sed -i "s/^# $$o is not set/$$o=y/" build/compat/bb/.config; done
 	yes "" | $(MAKE) -C build/compat/bb -s oldconfig >/dev/null
-	$(MAKE) -C build/compat/bb -s CC=$(MUSLCC) EXTRA_CFLAGS=-fPIE CFLAGS_busybox=-static-pie busybox
+	# `ip` needs the kernel's headers (linux/rtnetlink.h), which musl has
+	# not: the host's, as for LTP below.
+	rm -rf build/compat/khdrs && mkdir -p build/compat/khdrs
+	ln -s $(LTP_HDRS)/linux $(LTP_HDRS)/asm-generic build/compat/khdrs/
+	ln -s $$(dirname $$(find $(LTP_HDRS) -path '*/asm/unistd_64.h' | head -1)) build/compat/khdrs/asm
+	$(MAKE) -C build/compat/bb -s CC=$(MUSLCC) EXTRA_CFLAGS="-fPIE -isystem $(CURDIR)/build/compat/khdrs" CFLAGS_busybox=-static-pie busybox
 	cp build/compat/bb/busybox $@
 
 # Real programs, built from their own sources against musl as static PIEs
@@ -621,15 +629,25 @@ ALPINE_CACHE ?= build/compat/alpine
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py | build/compat
 	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE)
 
+# Debian on BastiOS, on a fifth disk (test/compat/debiandisk.py) for
+# test/compat/debian.txt: Debian's root file system, whose programs are
+# linked against glibc, entered with chroot. From the debian:stable-slim
+# image on Docker Hub, pinned by digest, with its layer kept in
+# ALPINE_CACHE like the Alpine images'; the BusyBox is Alpine's.
+DEBIAN_IMAGE ?= library/debian@sha256:eb593cf2c358cacef45ca0a424bbc7d30cfa3466265fc2662b9466a0ca6ba1c5
+
+build/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
+	test/compat/debiandisk.py $@ $(DEBIAN_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+
 build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) test/compat/mkdisk.py
 	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) perllib=build/compat/perllib py=build/compat/py
 
-compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --out build/compat $(COMPAT_PROGS)
+compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --debian-disk build/compat/debian.img --out build/compat $(COMPAT_PROGS)
 
 # Records which checks pass now, so `make compat` catches regressions.
-compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --out build/compat $(COMPAT_PROGS)
+compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --debian-disk build/compat/debian.img --out build/compat $(COMPAT_PROGS)
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)

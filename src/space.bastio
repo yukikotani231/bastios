@@ -1,8 +1,9 @@
 // User address spaces. Each process has a four-level page table whose slot
-// 1 holds its whole user window: one table at each of levels 3 and 2, and
-// up to WIN_L1S level-1 tables under the level-2 one, so the window is the
-// WPAGES pages (64 MiB) from USER_BASE. A level-1 table exists only once a
-// page under it is mapped. The program image starts at page 0 and the
+// 1 holds its whole user window: one level-3 table, up to WIN_L2S level-2
+// tables under it and up to WIN_L1S level-1 tables under each of those,
+// so the window is the WPAGES pages (512 GiB, a whole level-3 table) from
+// USER_BASE. A level-2 or level-1 table exists only once a page under it
+// is mapped. The program image starts at page 0 and the
 // stack takes the top STACK_PAGES pages, of which the top STACK_MAPPED are
 // mapped at first; a Linux program's stack grows down into the rest as it
 // is used (stack_reach, src/linux.bastio). Linux programs map their heap
@@ -23,14 +24,17 @@ const WOP_PROTECT: u64 = 1;             // arg: 2 read-write, 1 read-only, 0 PRO
 const WOP_MOVE: u64 = 2;                // arg: where the first page goes
 const WOP_COUNT: u64 = 3;               // only count the mapped pages
 const WOP_ZERO: u64 = 4;                // fill the private pages with zeros (madvise)
-const WIN_L1S: u64 = 32;              // level-1 tables the window may hold
-const WPAGES: u64 = 16384;            // WIN_L1S * 512
-const USER_SIZE: u64 = 0x4000000;     // WPAGES * 4096
-const STACK_PAGES: u64 = 256;         // 1 MiB
-const STACK_FIRST: u64 = 16128;       // WPAGES - STACK_PAGES
+const WIN_L1S: u64 = 512;             // level-1 tables under one level-2 table
+const L2_PAGES: u64 = 262144;         // pages under one level-2 table: WIN_L1S * 512
+const L2_SIZE: u64 = 0x40000000;      // L2_PAGES * 4096 (1 GiB)
+const WIN_L2S: u64 = 512;             // level-2 tables the window may hold: all of the level-3 table
+const WPAGES: u64 = 134217728;        // WIN_L2S * L2_PAGES
+const USER_SIZE: u64 = 0x8000000000;  // WPAGES * 4096 (512 GiB)
+const STACK_PAGES: u64 = 2048;        // 8 MiB, Linux's default RLIMIT_STACK
+const STACK_FIRST: u64 = 134215680;   // WPAGES - STACK_PAGES
 const STACK_MAPPED: u64 = 16;         // stack pages a new window maps
-const STACK_LOW: u64 = 16368;         // WPAGES - STACK_MAPPED
-const IMAGE_MAX: u64 = 0x3F00000;     // STACK_FIRST * 4096
+const STACK_LOW: u64 = 134217712;     // WPAGES - STACK_MAPPED
+const IMAGE_MAX: u64 = 0x7FFF800000;  // STACK_FIRST * 4096
 const KERNEL_ROOT: u64 = 0x8000000;    // mmu_root while CR3 holds the kernel's own map
 
 // A process's address space (its level-4 table), if it has one.
@@ -138,11 +142,12 @@ fn copy_page(f: &mut Frame, img: Str, from: u64)
 
 // ---------------------------------------------------------------- one page of the window
 // Each of these works on window page `a / 4096` (or page p) through the
-// window's level-2 table `l2`, in place: `pt_borrow` lends the level-1
-// table under it, and `pt_borrow_frame` the page, without unlinking them.
-// So they work on a space other processors are running on (its tables
-// have leases, see main.bastio): such a tree only grows, and nothing is
-// taken out of it.
+// window's level-3 table `l3`, in place: `pt_borrow` lends the level-2 and
+// level-1 tables under it, and `pt_borrow_frame` the page, without
+// unlinking them. So they work on a space other processors are running on
+// (its tables have leases, see main.bastio): such a tree only grows, and
+// nothing is taken out of it. The `l2_` forms do the same for page p of
+// one level-2 table (p < L2_PAGES).
 
 fn l1_has(l1: &mut PageTable, i: u64) -> bool
   requires pt_level(l1) == 1 && i < 512
@@ -156,9 +161,8 @@ fn l1_readonly(l1: &mut PageTable, i: u64) -> bool
   return pt_has(l1, i) && !pt_writable(l1, i);
 }
 
-/// Is window page p mapped read-only?
-fn w_readonly(l2: &mut PageTable, p: u64) -> bool
-  requires pt_level(l2) == 2 && p < WPAGES
+fn l2_readonly(l2: &mut PageTable, p: u64) -> bool
+  requires pt_level(l2) == 2 && p < L2_PAGES
   ensures pt_level(l2) == 2
 {
   let t = p / 512;
@@ -168,9 +172,20 @@ fn w_readonly(l2: &mut PageTable, p: u64) -> bool
   return pt_borrow(&mut l2, t, l1_readonly, p % 512);
 }
 
-/// Is window page p mapped?
-fn w_has(l2: &mut PageTable, p: u64) -> bool
-  requires pt_level(l2) == 2 && p < WPAGES
+/// Is window page p mapped read-only?
+fn w_readonly(l3: &mut PageTable, p: u64) -> bool
+  requires pt_level(l3) == 3 && p < WPAGES
+  ensures pt_level(l3) == 3
+{
+  let t = p / L2_PAGES;
+  if !pt_has(l3, t) {
+    return false;
+  }
+  return pt_borrow(&mut l3, t, l2_readonly, p % L2_PAGES);
+}
+
+fn l2_has(l2: &mut PageTable, p: u64) -> bool
+  requires pt_level(l2) == 2 && p < L2_PAGES
   ensures pt_level(l2) == 2
 {
   let t = p / 512;
@@ -178,6 +193,50 @@ fn w_has(l2: &mut PageTable, p: u64) -> bool
     return false;
   }
   return pt_borrow(&mut l2, t, l1_has, p % 512);
+}
+
+/// Is window page p mapped?
+fn w_has(l3: &mut PageTable, p: u64) -> bool
+  requires pt_level(l3) == 3 && p < WPAGES
+  ensures pt_level(l3) == 3
+{
+  let t = p / L2_PAGES;
+  if !pt_has(l3, t) {
+    return false;
+  }
+  return pt_borrow(&mut l3, t, l2_has, p % L2_PAGES);
+}
+
+/// Where the next mapped page of the window may be, from page p on: p
+/// itself if a level-1 table holds it, or else the first page under the
+/// next level-1 (or level-2) table, if any (WPAGES if none). Loops over
+/// a range of the window step with it, so a 512 GiB window costs only
+/// what is in it.
+fn w_next(l3: &mut PageTable, p: u64) -> u64
+  requires pt_level(l3) == 3 && p < WPAGES
+  ensures pt_level(l3) == 3 && p <= result && result <= WPAGES
+{
+  let mut q = p;
+  while q < WPAGES
+    invariant p <= q && q <= WPAGES && pt_level(l3) == 3
+  {
+    let t = q / L2_PAGES;
+    if !pt_has(l3, t) {
+      q = (t + 1) * L2_PAGES;
+    } else if !pt_borrow(&mut l3, t, l2_l1_has, q % L2_PAGES) {
+      q = (q / 512 + 1) * 512;
+    } else {
+      return q;
+    }
+  }
+  return WPAGES;
+}
+
+fn l2_l1_has(l2: &mut PageTable, p: u64) -> bool
+  requires pt_level(l2) == 2 && p < L2_PAGES
+  ensures pt_level(l2) == 2
+{
+  return pt_has(l2, p / 512);
 }
 
 /// w_map in the level-1 table: a fresh zero page in slot i unless one is
@@ -201,11 +260,8 @@ fn l1_map(l1: &mut PageTable, m: &mut Mem, i: u64, sh: bool) -> bool
   return true;
 }
 
-/// Maps a fresh zero page at window page p unless one is there, making its
-/// level-1 table if need be; a shared page (MAP_SHARED) if sh. False if
-/// memory ran out.
-fn w_map(m: &mut Mem, l2: &mut PageTable, p: u64, sh: bool) -> bool
-  requires mem_ok(m) && pt_level(l2) == 2 && p < WPAGES
+fn l2_map(l2: &mut PageTable, m: &mut Mem, p: u64, sh: bool) -> bool
+  requires mem_ok(m) && pt_level(l2) == 2 && p < L2_PAGES
   ensures mem_ok(m) && pt_level(l2) == 2
 {
   let t = p / 512;
@@ -219,6 +275,55 @@ fn w_map(m: &mut Mem, l2: &mut PageTable, p: u64, sh: bool) -> bool
   return pt_borrow(&mut l2, t, l1_map, &mut m, p % 512, sh);
 }
 
+/// Maps a fresh zero page at window page p unless one is there, making its
+/// level-2 and level-1 tables if need be; a shared page (MAP_SHARED) if
+/// sh. False if memory ran out.
+fn w_map(m: &mut Mem, l3: &mut PageTable, p: u64, sh: bool) -> bool
+  requires mem_ok(m) && pt_level(l3) == 3 && p < WPAGES
+  ensures mem_ok(m) && pt_level(l3) == 3
+{
+  let t = p / L2_PAGES;
+  if !pt_has(l3, t) {
+    let a = find_free(&mut m);
+    if a >= NPAGES {
+      return false;
+    }
+    pt_put(&mut l3, t, pt_new(take_page(&mut m, a), 2));
+  }
+  return pt_borrow(&mut l3, t, l2_map, &mut m, p % L2_PAGES, sh);
+}
+
+fn l2_tables(l2: &mut PageTable, m: &mut Mem, p: u64) -> bool
+  requires mem_ok(m) && pt_level(l2) == 2 && p < L2_PAGES
+  ensures mem_ok(m) && pt_level(l2) == 2
+{
+  if !pt_has(l2, p / 512) {
+    let a = find_free(&mut m);
+    if a >= NPAGES {
+      return false;
+    }
+    pt_put(&mut l2, p / 512, pt_new(take_page(&mut m, a), 1));
+  }
+  return true;
+}
+
+/// Makes the level-2 and level-1 tables window page p needs, if they are
+/// not there. False if memory ran out.
+fn w_tables(m: &mut Mem, l3: &mut PageTable, p: u64) -> bool
+  requires mem_ok(m) && pt_level(l3) == 3 && p < WPAGES
+  ensures mem_ok(m) && pt_level(l3) == 3
+{
+  let t = p / L2_PAGES;
+  if !pt_has(l3, t) {
+    let a = find_free(&mut m);
+    if a >= NPAGES {
+      return false;
+    }
+    pt_put(&mut l3, t, pt_new(take_page(&mut m, a), 2));
+  }
+  return pt_borrow(&mut l3, t, l2_tables, &mut m, p % L2_PAGES);
+}
+
 fn l1_fill(l1: &mut PageTable, i: u64, img: Str, from: u64)
   requires pt_level(l1) == 1 && i < 512 && from <= IMAGE_MAX
 {
@@ -227,15 +332,25 @@ fn l1_fill(l1: &mut PageTable, i: u64, img: Str, from: u64)
   }
 }
 
-/// Copies the bytes of `img` from `from` (up to a page of them) into window
-/// page p, if it is mapped.
-fn w_fill(l2: &mut PageTable, p: u64, img: Str, from: u64)
-  requires pt_level(l2) == 2 && p < WPAGES && from <= IMAGE_MAX
+fn l2_fill(l2: &mut PageTable, p: u64, img: Str, from: u64)
+  requires pt_level(l2) == 2 && p < L2_PAGES && from <= IMAGE_MAX
   ensures pt_level(l2) == 2
 {
   let t = p / 512;
   if pt_has(l2, t) {
     pt_borrow(&mut l2, t, l1_fill, p % 512, img, from);
+  }
+}
+
+/// Copies the bytes of `img` from `from` (up to a page of them) into window
+/// page p, if it is mapped.
+fn w_fill(l3: &mut PageTable, p: u64, img: Str, from: u64)
+  requires pt_level(l3) == 3 && p < WPAGES && from <= IMAGE_MAX
+  ensures pt_level(l3) == 3
+{
+  let t = p / L2_PAGES;
+  if pt_has(l3, t) {
+    pt_borrow(&mut l3, t, l2_fill, p % L2_PAGES, img, from);
   }
 }
 
@@ -258,10 +373,8 @@ fn l1_read(l1: &mut PageTable, i: u64, o: u64, buf: &mut Bytes, k: u64, m: u64) 
   return true;
 }
 
-/// Copies the m bytes at window offset a (all on one page) into buf from
-/// index k. False if the page is not mapped.
-fn w_read(l2: &mut PageTable, a: u64, buf: &mut Bytes, k: u64, m: u64) -> bool
-  requires pt_level(l2) == 2 && a < USER_SIZE && a % 4096 + m <= 4096 && k + m <= blen(buf)
+fn l2_read(l2: &mut PageTable, a: u64, buf: &mut Bytes, k: u64, m: u64) -> bool
+  requires pt_level(l2) == 2 && a < L2_SIZE && a % 4096 + m <= 4096 && k + m <= blen(buf)
   ensures pt_level(l2) == 2 && blen(buf) == old(blen(buf))
 {
   let p = a / 4096;
@@ -270,6 +383,21 @@ fn w_read(l2: &mut PageTable, a: u64, buf: &mut Bytes, k: u64, m: u64) -> bool
     return false;
   }
   return pt_borrow(&mut l2, t, l1_read, p % 512, a % 4096, &mut buf, k, m);
+}
+
+/// Copies the m bytes at window offset a (all on one page) into buf from
+/// index k. False if the page is not mapped.
+fn w_read(l3: &mut PageTable, a: u64, buf: &mut Bytes, k: u64, m: u64) -> bool
+  requires pt_level(l3) == 3 && a < USER_SIZE && a % 4096 + m <= 4096 && k + m <= blen(buf)
+  ensures pt_level(l3) == 3 && blen(buf) == old(blen(buf))
+{
+  let t = a / L2_SIZE;
+  if !pt_has(l3, t) {
+    return false;
+  }
+  let o = a - t * L2_SIZE;
+  assert o < L2_SIZE && o % 4096 == a % 4096;
+  return pt_borrow(&mut l3, t, l2_read, o, &mut buf, k, m);
 }
 
 /// Copies buf[k .. k + m] to offset o of page f.
@@ -289,11 +417,8 @@ fn l1_write(l1: &mut PageTable, i: u64, o: u64, buf: &Bytes, k: u64, m: u64) -> 
   return true;
 }
 
-/// Copies buf[k .. k + m] to window offset a (all on one page). False if
-/// the page is not mapped, or mapped read-only (mprotect): the kernel
-/// writes nothing the program itself could not.
-fn w_write(l2: &mut PageTable, a: u64, buf: &Bytes, k: u64, m: u64) -> bool
-  requires pt_level(l2) == 2 && a < USER_SIZE && a % 4096 + m <= 4096 && k + m <= blen(buf)
+fn l2_write(l2: &mut PageTable, a: u64, buf: &Bytes, k: u64, m: u64) -> bool
+  requires pt_level(l2) == 2 && a < L2_SIZE && a % 4096 + m <= 4096 && k + m <= blen(buf)
   ensures pt_level(l2) == 2
 {
   let p = a / 4096;
@@ -302,6 +427,22 @@ fn w_write(l2: &mut PageTable, a: u64, buf: &Bytes, k: u64, m: u64) -> bool
     return false;
   }
   return pt_borrow(&mut l2, t, l1_write, p % 512, a % 4096, buf, k, m);
+}
+
+/// Copies buf[k .. k + m] to window offset a (all on one page). False if
+/// the page is not mapped, or mapped read-only (mprotect): the kernel
+/// writes nothing the program itself could not.
+fn w_write(l3: &mut PageTable, a: u64, buf: &Bytes, k: u64, m: u64) -> bool
+  requires pt_level(l3) == 3 && a < USER_SIZE && a % 4096 + m <= 4096 && k + m <= blen(buf)
+  ensures pt_level(l3) == 3
+{
+  let t = a / L2_SIZE;
+  if !pt_has(l3, t) {
+    return false;
+  }
+  let o = a - t * L2_SIZE;
+  assert o < L2_SIZE && o % 4096 == a % 4096;
+  return pt_borrow(&mut l3, t, l2_write, o, buf, k, m);
 }
 
 fn frame_byte(f: &mut Frame, o: u64) -> u64
@@ -321,9 +462,8 @@ fn l1_byte(l1: &mut PageTable, i: u64, o: u64) -> u64
   return pt_borrow_frame(&mut l1, i, frame_byte, o);
 }
 
-/// The byte at window offset a, or 256 if its page is not mapped.
-fn w_byte(l2: &mut PageTable, a: u64) -> u64
-  requires pt_level(l2) == 2 && a < USER_SIZE
+fn l2_byte(l2: &mut PageTable, a: u64) -> u64
+  requires pt_level(l2) == 2 && a < L2_SIZE
   ensures pt_level(l2) == 2 && result <= 256
 {
   let p = a / 4096;
@@ -332,6 +472,18 @@ fn w_byte(l2: &mut PageTable, a: u64) -> u64
     return 256;
   }
   return pt_borrow(&mut l2, t, l1_byte, p % 512, a % 4096);
+}
+
+/// The byte at window offset a, or 256 if its page is not mapped.
+fn w_byte(l3: &mut PageTable, a: u64) -> u64
+  requires pt_level(l3) == 3 && a < USER_SIZE
+  ensures pt_level(l3) == 3 && result <= 256
+{
+  let t = a / L2_SIZE;
+  if !pt_has(l3, t) {
+    return 256;
+  }
+  return pt_borrow(&mut l3, t, l2_byte, a % L2_SIZE);
 }
 
 // ---------------------------------------------------------------- whole spaces
@@ -346,66 +498,59 @@ fn new_space(m: &mut Mem, img: Str, size: u64) -> Space
 {
   match new_window(&mut m, img, (size + 4095) / 4096) {
     Space::Empty => { return Space::Empty; },
-    Space::Mapped(l2) => { return space_from_l2(&mut m, l2); },
+    Space::Mapped(l3) => { return space_from_l3(&mut m, l3); },
   }
 }
 
-/// A level-2 window table mapping the first `npages` pages of the window,
+/// A level-3 window table mapping the first `npages` pages of the window,
 /// holding `img`, and the top STACK_MAPPED stack pages; every other page
 /// is zero. Returns
 /// `Space::Empty`, with every page given back, when memory runs out.
 fn new_window(m: &mut Mem, img: Str, npages: u64) -> Space
   requires mem_ok(m) && npages <= STACK_FIRST
   ensures mem_ok(m)
-  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 2
+  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 3
 {
   let a = find_free(&mut m);
   if a >= NPAGES {
     return Space::Empty;
   }
-  let mut l2 = pt_new(take_page(&mut m, a), 2);
+  let mut l3 = pt_new(take_page(&mut m, a), 3);
   let mut p = 0;
   let mut ok = true;
   while ok && p < npages
-    invariant p <= npages && npages <= STACK_FIRST && mem_ok(m) && pt_level(l2) == 2
+    invariant p <= npages && npages <= STACK_FIRST && mem_ok(m) && pt_level(l3) == 3
   {
-    ok = w_map(&mut m, &mut l2, p, false);
+    ok = w_map(&mut m, &mut l3, p, false);
     if ok {
-      w_fill(&mut l2, p, img, p * 4096);
+      w_fill(&mut l3, p, img, p * 4096);
       p = p + 1;
     }
   }
   p = STACK_LOW;
   while ok && p < WPAGES
-    invariant STACK_LOW <= p && p <= WPAGES && mem_ok(m) && pt_level(l2) == 2
+    invariant STACK_LOW <= p && p <= WPAGES && mem_ok(m) && pt_level(l3) == 3
   {
-    ok = w_map(&mut m, &mut l2, p, false);
+    ok = w_map(&mut m, &mut l3, p, false);
     if ok {
       p = p + 1;
     }
   }
   if !ok {
-    free_l2(&mut m, l2);
+    free_l3(&mut m, l3);
     return Space::Empty;
   }
-  return Space::Mapped(l2);
+  return Space::Mapped(l3);
 }
 
-/// Puts the window table `l2` at the bottom of a new address space, so it
+/// Puts the window table `l3` in slot 1 of a new address space, so it
 /// maps the window from USER_BASE. Returns `Space::Empty`, with every page
 /// given back, when memory runs out.
-fn space_from_l2(m: &mut Mem, l2: PageTable) -> Space
-  requires mem_ok(m) && pt_level(l2) == 2
+fn space_from_l3(m: &mut Mem, l3: PageTable) -> Space
+  requires mem_ok(m) && pt_level(l3) == 3
   ensures mem_ok(m)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
-  let d = find_free(&mut m);
-  if d >= NPAGES {
-    free_l2(&mut m, l2);
-    return Space::Empty;
-  }
-  let mut l3 = pt_new(take_page(&mut m, d), 3);
-  pt_put(&mut l3, 0, l2);
   let e = find_free(&mut m);
   if e >= NPAGES {
     free_l3(&mut m, l3);
@@ -428,47 +573,72 @@ fn copy_frame(dst: &mut Frame, src: &Frame) {
 }
 
 /// A copy of address space `root`: new tables and a new copy of every page
-/// its window maps (fork). Returns `Space::Empty`, with every page given
-/// back, when memory runs out.
-fn clone_space(m: &mut Mem, root: &mut PageTable) -> Space
-  requires mem_ok(m) && pt_level(root) == 4
+/// its window maps (fork). With `cow`, a private writable page is not
+/// copied but shared, read-only in both, until one of them writes it
+/// (COW_PAGE, src/lxcow.bastio); that needs no processor running on
+/// `root`. Returns `Space::Empty`, with every page given back, when memory
+/// runs out.
+fn clone_space(m: &mut Mem, root: &mut PageTable, cow: bool) -> Space
+  requires mem_ok(m) && pt_level(root) == 4 && (cow ==> pt_leases(root) == 0)
   ensures mem_ok(m) && pt_level(root) == 4
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
-  match clone_window(&mut m, &mut root) {
+  match clone_window(&mut m, &mut root, cow) {
     Space::Empty => { return Space::Empty; },
-    Space::Mapped(l2) => { return space_from_l2(&mut m, l2); },
+    Space::Mapped(l3) => { return space_from_l3(&mut m, l3); },
   }
 }
 
-/// A level-2 table copying the window of address space `root`. The source
+/// A level-3 table copying the window of address space `root`. The source
 /// is read in place (other threads may be running on it).
-fn clone_window(m: &mut Mem, root: &mut PageTable) -> Space
-  requires mem_ok(m) && pt_level(root) == 4
+fn clone_window(m: &mut Mem, root: &mut PageTable, cow: bool) -> Space
+  requires mem_ok(m) && pt_level(root) == 4 && (cow ==> pt_leases(root) == 0)
   ensures mem_ok(m) && pt_level(root) == 4
-  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 2
+  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 3
 {
   if !pt_has(root, 1) {
     return Space::Empty;
   }
-  return pt_borrow(&mut root, 1, clone_l3, &mut m);
+  return pt_borrow(&mut root, 1, clone_l3, &mut m, cow);
 }
 
-/// clone_window below the top-level table.
-fn clone_l3(l3: &mut PageTable, m: &mut Mem) -> Space
-  requires mem_ok(m) && pt_level(l3) == 3
-  ensures mem_ok(m)
-  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 2
+/// clone_window below the top-level table: each level-2 table in turn.
+fn clone_l3(src: &mut PageTable, m: &mut Mem, cow: bool) -> Space
+  requires mem_ok(m) && pt_level(src) == 3 && (cow ==> pt_leases(src) == 0)
+  ensures mem_ok(m) && pt_level(src) == 3
+  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 3
 {
-  if !pt_has(l3, 0) {
+  let a = find_free(&mut m);
+  if a >= NPAGES {
     return Space::Empty;
   }
-  return pt_borrow(&mut l3, 0, clone_l2, &mut m);
+  let mut l3 = pt_new(take_page(&mut m, a), 3);
+  let mut t = 0;
+  let mut ok = true;
+  while ok && t < WIN_L2S
+    invariant t <= WIN_L2S && mem_ok(m) && pt_level(l3) == 3 && pt_level(src) == 3 && (cow ==> pt_leases(src) == 0)
+    invariant forall j: u64 :: t <= j && j < 512 ==> !pt_used(l3, j)
+  {
+    if pt_has(src, t) {
+      match pt_borrow(&mut src, t, clone_l2, &mut m, cow) {
+        Space::Empty => { ok = false; },
+        Space::Mapped(c2) => { pt_put(&mut l3, t, c2); },
+      }
+    }
+    if ok {
+      t = t + 1;
+    }
+  }
+  if !ok {
+    free_l3(&mut m, l3);
+    return Space::Empty;
+  }
+  return Space::Mapped(l3);
 }
 
-/// clone_window below the level-2 table: each level-1 table in turn.
-fn clone_l2(src: &mut PageTable, m: &mut Mem) -> Space
-  requires mem_ok(m) && pt_level(src) == 2
+/// clone_l3 below a level-2 table: each level-1 table in turn.
+fn clone_l2(src: &mut PageTable, m: &mut Mem, cow: bool) -> Space
+  requires mem_ok(m) && pt_level(src) == 2 && (cow ==> pt_leases(src) == 0)
   ensures mem_ok(m) && pt_level(src) == 2
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 2
 {
@@ -480,11 +650,11 @@ fn clone_l2(src: &mut PageTable, m: &mut Mem) -> Space
   let mut t = 0;
   let mut ok = true;
   while ok && t < WIN_L1S
-    invariant t <= WIN_L1S && mem_ok(m) && pt_level(l2) == 2 && pt_level(src) == 2
+    invariant t <= WIN_L1S && mem_ok(m) && pt_level(l2) == 2 && pt_level(src) == 2 && (cow ==> pt_leases(src) == 0)
     invariant forall j: u64 :: t <= j && j < 512 ==> !pt_used(l2, j)
   {
     if pt_has(src, t) {
-      match pt_borrow(&mut src, t, clone_l1, &mut m) {
+      match pt_borrow(&mut src, t, clone_l1, &mut m, cow) {
         Space::Empty => { ok = false; },
         Space::Mapped(c1) => { pt_put(&mut l2, t, c1); },
       }
@@ -510,8 +680,8 @@ fn copy_to(src: &mut Frame, d: Dirty) -> Frame
 }
 
 /// clone_l2 below a level-1 table.
-fn clone_l1(src: &mut PageTable, m: &mut Mem) -> Space
-  requires mem_ok(m) && pt_level(src) == 1
+fn clone_l1(src: &mut PageTable, m: &mut Mem, cow: bool) -> Space
+  requires mem_ok(m) && pt_level(src) == 1 && (cow ==> pt_leases(src) == 0)
   ensures mem_ok(m) && pt_level(src) == 1
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 1
 {
@@ -523,16 +693,23 @@ fn clone_l1(src: &mut PageTable, m: &mut Mem) -> Space
   let mut p = 0;
   let mut ok = true;
   while ok && p < 512
-    invariant p <= 512 && mem_ok(m) && pt_level(l1) == 1 && pt_level(src) == 1
+    invariant p <= 512 && mem_ok(m) && pt_level(l1) == 1 && pt_level(src) == 1 && (cow ==> pt_leases(src) == 0)
     invariant forall j: u64 :: p <= j && j < 512 ==> !pt_used(l1, j)
   {
     if pt_has(src, p) && pt_shared(src, p) {
-      // A MAP_SHARED page stays one page: the child maps it too.
+      // A MAP_SHARED page stays one page: the child maps it too (and a
+      // copy-on-write page stays read-only in both).
       let w = pt_writable(src, p);
       pt_put_shared(&mut l1, p, pt_dup_shared(src, p), w);
       if !pt_accessible(src, p) {
         pt_set_access(&mut l1, p, 0);      // PROT_NONE in both
       }
+    } else if cow && pt_has(src, p) && pt_writable(src, p) {
+      // Copy-on-write: the page becomes shared, read-only on both sides.
+      let s = shared_new(pt_take_frame(&mut src, p));
+      mark_cow(&mut m, s);
+      pt_put_shared(&mut l1, p, shared_dup(s), false);
+      pt_put_shared(&mut src, p, s, false);
     } else if pt_has(src, p) {
       let b = find_free(&mut m);
       if b >= NPAGES {

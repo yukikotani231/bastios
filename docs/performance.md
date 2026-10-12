@@ -137,6 +137,13 @@ machine, because they come from algorithms, not from emulation.
    What is left is per segment: every 1460 bytes is a frame built, queued,
    copied and taken in again, where Linux's loopback carries 64 KiB
    segments.
-5. **`forkbig` (2.1x).** Fork copies every page. bastios #146 moved the
-   copying off the lock (plain `fork` went from 1270 to 340 us) but does
-   not share pages copy-on-write.
+5. **`forkbig` (2.1x in the table).** Fork used to copy every page. bastios
+   #146 moved the copying off the lock (plain `fork` went from 1270 to
+   340 us). Fork now shares a single-threaded process's pages
+   copy-on-write (src/lxcow.bastio): measured A/B on the same host, two
+   rounds of three runs each, `forkbig` went from 4383-4783 us to
+   561-572 us, about 4x faster than Linux's 2398. Plain `fork` went from
+   351-411 us to 438-489 us: the parent's first write to each page after
+   a fork is now a fault and a copy, even after the child is gone, since
+   a page whose other reference was dropped is still copied (no way yet
+   to take back a sole reference to a shared page as a private one).

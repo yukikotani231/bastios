@@ -464,6 +464,18 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Network
 
+- Network namespaces for containers: `unshare(CLONE_NEWNET)` gives a
+  process its own interfaces, addresses, routes, sockets and ports,
+  starting with only `lo`. rtnetlink and the interface ioctls are enough
+  for BusyBox's `ip link`, `ip addr` and `ip route`. They make veth pairs
+  and bridges, move a link to another namespace, rename it, set it up or
+  down and give it an address and a default route. Namespace 0 forwards
+  what comes in on a virtual interface and masquerades it out of the
+  card. Raw ICMP sockets make `ping` work. See "Network namespaces" in
+  [docs/architecture.md](docs/architecture.md). The compatibility suite's
+  BusyBox now has `ip`, `unshare` and `ping`. A new case pings from a
+  namespace across a veth pair on a bridge, and fetches a page through
+  the masquerade.
 - TCP buffers are no longer 4 KiB: each connection has a receive and a
   send ring of 256 KiB whose pages are taken as data arrives and given
   back once it is read or acknowledged, so idle connections cost nothing.
@@ -559,8 +571,26 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - A USB mouse on the xHCI controller (`src/xhci.bastio`), through the
   same device: HID boot reports become PS/2 packets. A wireless receiver
   that is both keyboard and mouse serves as both. The controller now has a
-  fifth device slot, and fifteen pages. The hardware report says
+  fifth device slot. The hardware report says
   `mouse: USB (xHCI)`.
+
+
+### Real hardware
+
+- xHCI controllers that ask for more than four scratchpad pages, as
+  Intel's do (34 or so), were given up on, so a PC with only USB ports had
+  no keyboard. The driver now takes up to 256 scratchpad pages from the
+  pool. The controller's fixed pages are down to eleven.
+- The xHCI driver powers every root port and waits for devices to
+  connect (at least 300 ms, at most a second) before looking at them: a
+  real controller's devices reconnect after the reset at start, which
+  QEMU's do at once.
+- A boot with no keyboard, no disk or no network card says so on the
+  screen, not only with the boot option `diag`.
+- With several xHCI controllers (recent Intel PCs have one for the USB-C
+  ports ahead of the chipset's; AMD ones two or three), each is tried in
+  turn until one has a keyboard, a mouse or a BastiOS stick on it. Only
+  the first was looked at before.
 
 ### Sound
 

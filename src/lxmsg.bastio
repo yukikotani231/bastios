@@ -102,7 +102,7 @@ fn iov_at(k: &mut Kernel, pid: u64, iov: u64, i: u64) -> bool
   requires kok(k) && pid < NPROC && i < 1024
   ensures kok(k)
 {
-  return iov <= 0xFFFFFFFFFFFF0000 && copy_from_user(&mut k.spaces, pid, iov + 16 * i, &mut k.fs.xfer, 16) == 16;
+  return iov <= 0xFFFFFFFFFFFF0000 && copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, iov + 16 * i, &mut k.fs.xfer, 16) == 16;
 }
 
 /// sendmsg on a UDP socket: the cnt buffers of the list at iov, joined
@@ -133,7 +133,7 @@ fn udp_gather(k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u64, name: u64, 
       return EMSGSIZE;
     }
     if len > 0 {
-      if copy_from_user(&mut k.spaces, pid, base, &mut k.fs.xfer, len) != len {
+      if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, base, &mut k.fs.xfer, len) != len {
         bfree(g);
         return EFAULT;
       }
@@ -166,7 +166,7 @@ fn rights_in(k: &mut Kernel, pid: u64, ctl: u64, clen: u64) -> u64
   if ctl == 0 || clen < 16 {
     return OFD_N;
   }
-  if ctl > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, ctl, &mut k.fs.xfer, 16) != 16 {
+  if ctl > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, ctl, &mut k.fs.xfer, 16) != 16 {
     return EFAULT;
   }
   let len = get_u64(k.fs.xfer, 0);
@@ -181,7 +181,7 @@ fn rights_in(k: &mut Kernel, pid: u64, ctl: u64, clen: u64) -> u64
   if len > CMSG_ONE {
     return ETOOMANYREFS;                    // more than one descriptor
   }
-  if copy_from_user(&mut k.spaces, pid, ctl + 16, &mut k.fs.xfer, 4) != 4 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, ctl + 16, &mut k.fs.xfer, 4) != 4 {
     return EFAULT;
   }
   let fd = get_u64(k.fs.xfer, 0) % 0x100000000;
@@ -203,7 +203,7 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   if d.kind == K_BAD {
     return EBADF;                           // before the header, as on Linux
   }
-  if msg > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, msg, &mut k.fs.xfer, MSGHDR) != MSGHDR {
+  if msg > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, msg, &mut k.fs.xfer, MSGHDR) != MSGHDR {
     return EFAULT;
   }
   let name = get_u64(k.fs.xfer, 0);
@@ -235,7 +235,7 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
     }
   }
   let dgram = !is_tcp(k, pid, fd) && (!unix || ux_dgram(k, pid, fd));
-  if dgram && !unix {
+  if dgram && !unix && !is_nl(k, pid, fd) {
     return udp_gather(&mut k, pid, fd, iov, cnt, name, nlen, flags);
   }
   let mut done = 0;
@@ -294,7 +294,7 @@ fn lx_recvmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   if d.kind == K_BAD {
     return EBADF;                           // before the header, as on Linux
   }
-  if msg > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, msg, &mut k.fs.xfer, MSGHDR) != MSGHDR {
+  if msg > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, msg, &mut k.fs.xfer, MSGHDR) != MSGHDR {
     return EFAULT;
   }
   let name = get_u64(k.fs.xfer, 0);
@@ -420,7 +420,7 @@ fn lx_msg_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     fl = pget(k.procs, pid, F_REGS + R_R10);
     r = lx_mmsg(&mut k, pid, n, a, b, c, fl);
   }
-  if r == SK_WAIT && !is_unix(k, pid, a) {
+  if r == SK_WAIT && !is_unix(k, pid, a) && !is_nl(k, pid, a) {
     return sock_retry(&mut k, pid, n);       // sleep until a frame comes in
   }
   if r == SK_WAIT {

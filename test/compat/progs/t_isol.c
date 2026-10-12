@@ -279,7 +279,9 @@ static int no_proc_links(void) {
     int ok = readlink(p, buf, sizeof buf) == -1 && errno == EACCES;
     snprintf(p, sizeof p, "/proc/%d/fd/0", (int)root);
     ok = ok && readlink(p, buf, sizeof buf) == -1 && errno == EACCES;
-    return ok && readlink("/proc/self/exe", buf, sizeof buf) > 0;
+    snprintf(p, sizeof p, "/proc/%d/ns/uts", (int)root);
+    ok = ok && readlink(p, buf, sizeof buf) == -1 && errno == EACCES;
+    return ok && readlink("/proc/self/exe", buf, sizeof buf) > 0 && readlink("/proc/self/ns/uts", buf, sizeof buf) > 0;
 }
 
 static int no_console(void) {
@@ -350,7 +352,7 @@ int main(int argc, char **argv) {
     EXPECT("loop devices are root's and group disk's", loop_devices());
     EXPECT("ports below 1024 are root's", in_child(low_ports));
     EXPECT("root binds a port below 1024", root_binds_low());
-    EXPECT("another user's /proc exe and fd links are hidden", in_child(no_proc_links));
+    EXPECT("another user's /proc exe, fd and ns links are hidden", in_child(no_proc_links));
     EXPECT("/dev/console is root's", in_child(no_console));
     EXPECT("SysV group bits count supplementary groups", sysv_groups());
     EXPECT("SHM_LOCK needs RLIMIT_MEMLOCK or root", in_child(no_shm_lock));

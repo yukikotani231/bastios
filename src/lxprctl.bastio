@@ -89,6 +89,7 @@ fn pr_fork(k: &mut Kernel, p: u64, c: u64)
   dl_fork(&mut k, p, c);                  // and the deadline parameters
   jc_set(&mut k, c, 0);                   // nothing to report about the child yet
   cap_fork(&mut k, p, c);                 // and the capabilities (src/lxcap.bastio)
+  k.sys = set(k.sys, SYS_IOP + c, get(k.sys, SYS_IOP + p));   // and the I/O priority (src/lxprio.bastio)
 }
 
 /// execve: the name goes back to the program's.
@@ -137,6 +138,7 @@ fn pr_clear(k: &mut Kernel, p: u64)
   }
   rl_clear(&mut k, p);
   cap_clear(&mut k, p);
+  k.sys = set(k.sys, SYS_IOP + p, 0);
 }
 
 /// prctl(op, a, ...) for process pid: the result, or -EINVAL for an
@@ -157,7 +159,7 @@ fn lx_prctl(k: &mut Kernel, pid: u64, op: u64, a: u64) -> u64
     while i < 15 && more
       invariant i <= 15 && blen(nb) == 16 && kok(k)
     {
-      if a > 0xFFFFFFFFFFFFFF00 || copy_from_user(&mut k.spaces, pid, a + i, &mut k.fs.xfer, 1) != 1 {
+      if a > 0xFFFFFFFFFFFFFF00 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, a + i, &mut k.fs.xfer, 1) != 1 {
         bfree(nb);
         return EFAULT;
       }

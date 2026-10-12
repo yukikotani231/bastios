@@ -18,8 +18,13 @@
 // even with MNT_DETACH; and hard links across a tmpfs mount's edge are
 // not refused. A bstdisk3 image's file cannot be written while it is
 // mounted (EBUSY), and reads of it give zeros meanwhile.
+//
+// Bind mounts (MS_BIND), proc, devtmpfs, devpts, sysfs and mqueue mounted
+// somewhere, and pivot_root are a mount namespace's own: src/lxns.bastio.
 
 import "linux.bastio";
+import "lxns.bastio";
+import "lxnsk.bastio";
 
 const LX_MOUNT: u64 = 165;
 const LX_UMOUNT2: u64 = 166;
@@ -31,9 +36,29 @@ const UMOUNT_NOFOLLOW: u64 = 8;
 const FST_NONE: u64 = 0;
 const FST_TMPFS: u64 = 1;
 const FST_BSTDISK: u64 = 2;
+const FST_NS: u64 = 16;                 // FST_NS + MK_*: mounted per namespace (src/lxns.bastio)
+const MS_BIND: u64 = 4096;
+const MS_PROPAGATION: u64 = 0x1E0000;   // MS_UNBINDABLE | MS_PRIVATE | MS_SLAVE | MS_SHARED
+
+/// Is the NUL-terminated string at user address va s?
+fn type_is(k: &mut Kernel, pid: u64, va: u64, s: Str) -> bool
+  requires kok(k) && pid < NPROC && va >= USER_BASE && va < USER_BASE + USER_SIZE - 9
+  ensures kok(k)
+{
+  let l = slen(s);
+  if l > 8 {
+    return false;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, l + 1) != l + 1 {
+    return false;
+  }
+  return xfer_is(k.fs.xfer, 0, l, s) && bget(k.fs.xfer, l) == 0;
+}
 
 /// Which file system type the NUL-terminated string at user address va
-/// names: "tmpfs", "bstdisk3", or neither.
+/// names: "tmpfs", "bstdisk3", one of the special file systems a mount
+/// namespace mounts again ("proc", "devtmpfs", "devpts", "sysfs",
+/// "mqueue"), or none.
 fn fs_type(k: &mut Kernel, pid: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -41,16 +66,25 @@ fn fs_type(k: &mut Kernel, pid: u64, va: u64) -> u64
   if va < USER_BASE || va >= USER_BASE + USER_SIZE - 9 {
     return FST_NONE;
   }
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 6) != 6 {
-    return FST_NONE;
+  if type_is(&mut k, pid, va, "proc") {
+    return FST_NS + MK_PROC;
   }
-  if xfer_is(k.fs.xfer, 0, 5, "tmpfs") && bget(k.fs.xfer, 5) == 0 {
+  if type_is(&mut k, pid, va, "tmpfs") {
     return FST_TMPFS;
   }
-  if copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 9) != 9 {
-    return FST_NONE;
+  if type_is(&mut k, pid, va, "sysfs") {
+    return FST_NS + MK_SYS;
   }
-  if xfer_is(k.fs.xfer, 0, 8, "bstdisk3") && bget(k.fs.xfer, 8) == 0 {
+  if type_is(&mut k, pid, va, "devpts") {
+    return FST_NS + MK_PTS;
+  }
+  if type_is(&mut k, pid, va, "mqueue") {
+    return FST_NS + MK_MQUEUE;
+  }
+  if type_is(&mut k, pid, va, "devtmpfs") {
+    return FST_NS + MK_DEV;
+  }
+  if type_is(&mut k, pid, va, "bstdisk3") {
     return FST_BSTDISK;
   }
   return FST_NONE;
@@ -125,7 +159,7 @@ fn mount_dir(k: &mut Kernel, n: u64) -> u64
     k.perr = EBUSY;                         // "/", or the disk: not a tmpfs directory here
     return NFILES;
   }
-  let i = ram_find(&mut k.fs.ram, k.fs.xfer, n);
+  let i = ram_find(&mut k.fs.ram, k.fs.rhi, k.fs.xfer, n);
   if i < NFILES && ram_is_dir(&mut k.fs.ram, i) {
     return i;
   }
@@ -141,19 +175,44 @@ fn mount_dir(k: &mut Kernel, n: u64) -> u64
   return NFILES;
 }
 
-/// mount(source, target, fstype, flags, data): the source and data are
-/// not used.
+/// mount(source, target, fstype, flags, data): data is not used, and the
+/// source only by a bind and a bstdisk3 mount.
 fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
   let remount = flags & MS_REMOUNT != 0;
+  if !remount && flags & MS_PROPAGATION != 0 {
+    // A change of propagation: there is none between namespaces here, so
+    // only the target is checked.
+    let n = lx_path_at(&mut k, pid, AT_FDCWD, target);
+    if n == NO_RESULT {
+      return k.perr;
+    }
+    return 0;
+  }
+  if remount && flags & MS_BIND != 0 {
+    return ns_remount(&mut k, pid, target, flags & MS_RDONLY != 0);
+  }
+  if flags & MS_BIND != 0 {
+    return ns_mount(&mut k, pid, source, target, MK_BIND, flags);
+  }
+  if remount {
+    // A namespace's own mount first, then the file layer's.
+    let r = ns_remount(&mut k, pid, target, flags & MS_RDONLY != 0);
+    if r != EINVAL {
+      return r;
+    }
+  }
   let mut t = FST_TMPFS;
   if !remount {
     t = fs_type(&mut k, pid, fstype);
   }
   if t == FST_NONE {
     return ENODEV;                          // no other file system type mounts
+  }
+  if t > FST_NS {
+    return ns_mount(&mut k, pid, source, target, t - FST_NS, flags);
   }
   let mut img = NFILES;
   let mut ldev = LO_NODEV;
@@ -223,8 +282,14 @@ fn lx_umount2(k: &mut Kernel, pid: u64, target: u64, flags: u64) -> u64
   if n == NO_RESULT {
     return k.perr;
   }
+  if ns_umount(&mut k, pid) {
+    return 0;                               // the namespace's own mount (src/lxns.bastio)
+  }
   let i = mount_dir(&mut k, n);
   if i >= NFILES {
+    if dir_at(&mut k, n) == NO_FILE && vfs_lookup(&mut k.fs, n) == NO_FILE {
+      return ENOENT;                        // no such name
+    }
     return EINVAL;                          // not a mount
   }
   if i + 1 == k.fs.lo_at {
@@ -250,25 +315,31 @@ fn ro_err(k: &mut Kernel, n: u64) -> u64
   requires kok(k) && n <= FNAME_MAX
   ensures kok(k)
 {
-  if vfs_ro(&mut k.fs, n) {
+  if path_ro(&mut k, n) {
     return EROFS;
   }
   return 0;
 }
 
 fn is_mount_call(n: u64) -> bool {
-  return n == LX_MOUNT || n == LX_UMOUNT2;
+  return n == LX_MOUNT || n == LX_UMOUNT2 || n == LX_PIVOT_ROOT || n == LX_SETNS;
 }
 
 fn lx_mount_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if n == LX_SETNS {
+    return lx_setns(&mut k, pid, a, b);     // src/lxnsk.bastio
+  }
   if !cap_has(k, pid, CAP_SYS_ADMIN) {
     return EPERM;                           // root's alone, while it holds CAP_SYS_ADMIN
   }
   if n == LX_MOUNT {
     return lx_mount(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
+  }
+  if n == LX_PIVOT_ROOT {
+    return lx_pivot_root(&mut k, pid, a, b);  // src/lxns.bastio
   }
   return lx_umount2(&mut k, pid, a, b);
 }

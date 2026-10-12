@@ -41,7 +41,8 @@ fn lx_fork(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       put_fpu(&mut k.fpus, pid, Fpu::State(g));
     },
   }
-  match fork_space(&mut k.mem, &mut k.spaces, pid) {
+  let solo = group_alone(&mut k, pid);
+  match fork_space(&mut k.mem, &mut k.spaces, pid, solo) {
     Space::Empty => {
       give_page(&mut k.mem, fpu);
       return ENOMEM;
@@ -178,11 +179,14 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   lx_fd_fork(&mut k, pid, c);
   map_fork(&mut k, pid, c);
   hole_fork(&mut k, pid, c);
+  anon_fork(&mut k, pid, c);
   lazy_fork(&mut k, pid, c);
   shm_fork(&mut k, pid, c);
   sig_fork(&mut k.sigact, pid, c);
   cwd_fork(&mut k.cwd, pid, c);
   cwd_fork(&mut k.croot, pid, c);
+  k.mns = set(k.mns, c, get(k.mns, pid));   // the same mount namespace (src/lxns.bastio)
+  nsk_fork(&mut k.mns, pid, c);             // and the same others (src/lxnsk.bastio)
   pset(&mut k.procs, c, F_SIGPEND, 0);
   pset(&mut k.procs, c, F_RESTART, 0);
   pset(&mut k.procs, c, F_STATE, READY);
@@ -190,7 +194,9 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
 }
 
 /// A copy of process `pid`'s address space, or `Space::Empty`.
-fn fork_space(m: &mut Mem, spaces: &mut Vec[Space], pid: u64) -> Space
+/// Copy-on-write (`solo`: pid has no other thread, src/lxcow.bastio) if
+/// no processor runs the space now.
+fn fork_space(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, solo: bool) -> Space
   requires mem_ok(m) && spaces_ok(spaces) && pid < NPROC
   ensures mem_ok(m) && spaces_ok(spaces)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
@@ -198,7 +204,8 @@ fn fork_space(m: &mut Mem, spaces: &mut Vec[Space], pid: u64) -> Space
   match take_space(&mut spaces, pid) {
     Space::Empty => { return Space::Empty; },
     Space::Mapped(mut root) => {
-      let c = clone_space(&mut m, &mut root);
+      let cow = solo && pt_lease_count(&mut root) == 0;
+      let c = clone_space(&mut m, &mut root, cow);
       put_space(&mut spaces, pid, Space::Mapped(root));
       return c;
     },
@@ -267,6 +274,9 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
     bfree(args);
     return E2BIG;
   }
+  // A dynamically linked program's interpreter, found as execve finds a
+  // program: from the caller's root (chroot), through symbolic links.
+  let isrc = elf_interp(&mut k, pid, src);
   let from_file = src.file;
   let image = src.f;
   // A hold keeps the file in place while its code is read on demand
@@ -275,7 +285,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
   if src.file {
     hold = vfs_hold(&mut k.fs, src.f);
   }
-  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, args, alen, total, hold < HOLD_N);
+  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, isrc, args, alen, total, hold < HOLD_N);
   bfree(args);
   match sp {
     Space::Empty => {
@@ -293,6 +303,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
     },
   }
   hole_clear(&mut k, pid);                // a new window has no holes
+  anon_clear(&mut k, pid);
   lazy_set(&mut k, pid, src, hold);       // map_drop_all dropped the old record
   shm_drop_all(&mut k, pid);
   lx_fd_close_all(&mut k, pid, true);
@@ -369,6 +380,9 @@ fn src_named(k: &mut Kernel, pid: u64, n: u64) -> Src
       suid = 1;                             // f marks a set-user-ID-root built-in (exec_ids)
     }
     let prog = bin_prog(k.fs.xfer, n);
+    if prog >= NPROGS {
+      k.perr = ENOENT;                      // no such built-in (not the path walk's last word)
+    }
     return Src { file: false, prog: prog, f: suid, size: slen(prog_image(prog)) };
   }
   k.perr = ENOENT;
@@ -560,7 +574,7 @@ fn lx_str(k: &mut Kernel, pid: u64, va: u64, args: &mut Bytes, from: u64) -> u64
       return EFAULT;
     }
     let want = smaller(smaller(ARGS_MAX - alen, XFER), USER_SIZE - (at - USER_BASE));
-    let got = copy_from_user(&mut k.spaces, pid, at, &mut k.fs.xfer, want);
+    let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, at, &mut k.fs.xfer, want);
     if got == NO_RESULT || got == 0 {
       return EFAULT;
     }
@@ -718,6 +732,44 @@ fn bang_src(k: &mut Kernel, pid: u64, line: &Bytes) -> Src
   }
   let n = perm_walk(&mut k, pid, lx_path_xfer(&mut k, pid, e, OFD_N, true));
   return src_named(&mut k, pid, n);
+}
+
+/// The interpreter (PT_INTERP) the ELF program src names, found as execve
+/// finds a program: its path is taken from the caller's root, so a chroot
+/// sees its own /lib64/ld-linux-x86-64.so.2, and symbolic links on the way
+/// are followed. A built-in Src with prog NPROGS when src names none or it
+/// is not found; load_image then looks the path up itself (interp_src),
+/// which knows musl's built-in /lib/ld-musl-x86_64.so.1.
+fn elf_interp(k: &mut Kernel, pid: u64, src: Src) -> Src
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let none = Src { file: false, prog: NPROGS, f: 0, size: 0 };
+  if !src.file {
+    return none;
+  }
+  let e = elf_parse(&mut k.fs, src);
+  if !e.ok || e.ilen < 2 || !src_read(&mut k.fs, src, e.interp, e.ilen) {
+    return none;
+  }
+  let n = e.ilen - 1;                       // less the NUL
+  if bget(k.fs.xfer, n) != 0 {
+    return none;
+  }
+  let mut i = 0;
+  while i < n && bget(k.fs.xfer, i) != 0
+    invariant i <= n && n < INTERP_MAX && kok(k)
+  {
+    i = i + 1;
+  }
+  if i < n || n == 0 {
+    return none;                            // a NUL inside the path
+  }
+  let found = src_named(&mut k, pid, perm_walk(&mut k, pid, lx_path_xfer(&mut k, pid, n, OFD_N, true)));
+  if !found.file {
+    return none;
+  }
+  return found;
 }
 
 // ---------------------------------------------------------------- wait4
@@ -987,7 +1039,11 @@ fn lx_stat(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, buf: u64, follow: bo
   if n == NO_RESULT {
     return k.perr;
   }
-  let m = path_meta(&mut k, n);
+  let pf = proc_file(k.procs, k.fs.xfer, n);
+  let mut m = path_meta(&mut k, n);
+  if !follow && pf != 0 && is_ns_file(pf) {
+    m = nsf_link_meta(pf);                  // lstat: the /proc/PID/ns link itself
+  }
   if !m.ok {
     return ENOENT;
   }
@@ -1035,6 +1091,9 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
     return dev_meta(dev);
   }
   let pf = proc_file(k.procs, k.fs.xfer, n);
+  if pf != 0 && is_ns_file(pf) {
+    return nsf_meta(k, pf);                 // the namespace's nsfs file (src/lxnsk.bastio)
+  }
   if pf != 0 {
     return proc_meta(pf);
   }
@@ -1126,6 +1185,8 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
     m = dir_meta(&mut k, d.x);              // as stat on its path says, so shutil.rmtree trusts it
   } else if d.kind == K_SOCK {
     m = Meta { ok: true, mode: S_IFSOCK, size: 0, ino: 5, mtime: 0, own: 0 };
+  } else if d.kind == K_DEV && is_ns_file(d.x) {
+    m = nsf_fd_meta(k, pid, fd, d.x);       // src/lxnsk.bastio
   } else if d.kind == K_DEV {
     m = dev_meta(d.x);
   } else if d.kind == K_FILE {
@@ -1285,7 +1346,27 @@ fn applet_name(j: u64) -> Str {
   if j == 23 {
     return "chown";
   }
+  if j >= 34 {
+    return ns_applet(j - 34);
+  }
   return suid_name(j - 24);
+}
+
+/// The applets past applet 33: mount namespaces (src/lxns.bastio).
+fn ns_applet(j: u64) -> Str {
+  if j == 0 {
+    return "unshare";
+  }
+  if j == 1 {
+    return "pivot_root";
+  }
+  if j == 2 {
+    return "chroot";
+  }
+  if j == 3 {
+    return "hostname";
+  }
+  return "nsenter";
 }
 
 /// The applets past applet 23, which deal with users: su and passwd first

@@ -329,7 +329,7 @@ fn lx_access(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64, flags: 
   if !m.ok {
     return ENOENT;
   }
-  if mode & MAY_W != 0 && vfs_ro(&mut k.fs, n) && kept_meta(&mut k, n) {
+  if mode & MAY_W != 0 && path_ro(&mut k, n) && kept_meta(&mut k, n) {
     return EROFS;
   }
   let mut uid = pget(k.procs, pid, F_UID) % 0x100000000;
@@ -353,7 +353,7 @@ fn owns(procs: &Buf, pid: u64, own: u64) -> bool
   return uid == 0 || uid == own % 0x100000000;
 }
 
-/// chown and friends on handle f (from meta_target; NO_FILE for a path
+/// chown and friends on handle f (from meta_target; HFILES for a path
 /// that keeps no owner) of mode `mode`, owned by `own`: user id u and group id g,
 /// (u32) -1 leaving one as it is. Root may set anything; the owner may
 /// set the group to its own. A change clears a regular file's
@@ -411,7 +411,7 @@ fn chmod_bits(procs: &Buf, pid: u64, cur: u64, own: u64, mode: u64) -> u64
 }
 
 /// The file layer handle of what Linux fd `fd` names, for changing its
-/// mode, times or owner: a file's, or a directory's; NO_FILE for anything
+/// mode, times or owner: a file's, or a directory's; HFILES for anything
 /// that keeps none (a pipe, a socket, /dev, /proc); NO_RESULT for an fd
 /// that is not open (k.perr = EBADF).
 fn fd_handle(k: &mut Kernel, pid: u64, fd: u64) -> u64
@@ -426,14 +426,27 @@ fn fd_handle(k: &mut Kernel, pid: u64, fd: u64) -> u64
   if d.kind == K_FILE {
     let f = vfs_row_file(k.fs, d.x);
     if f >= HFILES {
-      return NO_FILE;
+      return HFILES;
     }
     return f;
   }
   if d.kind == K_DIR && d.x >= DIR_VFS && d.x < DIR_PROC {
     return d.x - DIR_VFS;
   }
-  return NO_FILE;
+  return HFILES;
+}
+
+/// Does handle f (from fd_handle) lie in a read-only mount? Uses the
+/// transfer buffer.
+fn handle_ro(k: &mut Kernel, f: u64) -> bool
+  requires kok(k)
+  ensures kok(k)
+{
+  if f >= HFILES {
+    return false;
+  }
+  let n = vfs_dirent(&mut k.fs, f);
+  return n != NO_FILE && n != 0 && vfs_ro(&mut k.fs, n);
 }
 
 /// chown on handle f (meta_target or fd_handle): its mode and owner come
@@ -446,7 +459,7 @@ fn chown_handle(k: &mut Kernel, pid: u64, f: u64, u: u64, g: u64) -> u64
     return k.perr;
   }
   if f >= HFILES {
-    return set_owner(&mut k, pid, NO_FILE, 0, 0, u, g);
+    return set_owner(&mut k, pid, HFILES, 0, 0, u, g);
   }
   let m = vfs_meta(&mut k.fs, f);
   if !m.ok {
@@ -479,7 +492,7 @@ fn user_empty(k: &mut Kernel, pid: u64, va: u64) -> bool
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  return copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, 1) == 1 && bget(k.fs.xfer, 0) == 0;
+  return copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 1) == 1 && bget(k.fs.xfer, 0) == 0;
 }
 
 /// The ids of process pid after it execs a program: from a file with the

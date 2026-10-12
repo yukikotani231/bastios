@@ -106,7 +106,7 @@ fn lx_tcp_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   }
   let mut port = sin.port;
   if port == 0 {
-    port = tcp_pick_port(&mut k.nic);
+    port = tcp_pick_port(&mut k.nic, net_ns(k, pid));
     if port == 0 {
       return EADDRINUSE;
     }
@@ -116,13 +116,16 @@ fn lx_tcp_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
 }
 
 /// An ephemeral TCP port no connection or listener uses, or 0.
-fn tcp_pick_port(c: &mut Nic) -> u64
+fn tcp_pick_port(c: &mut Nic, ns: u64) -> u64
   requires nic_ok(c)
   ensures nic_ok(c) && result <= 65535
 {
   match c {
     Nic::None => { c = Nic::None; return 0; },
     Nic::Up(mut n) => {
+      if ns < NNET {
+        n.ns = ns;
+      }
       let p = tcp_eph_port(&mut n);
       c = Nic::Up(n);
       return p;
@@ -145,7 +148,7 @@ fn lx_listen(k: &mut Kernel, pid: u64, fd: u64) -> u64
   if tk.mode != TM_NEW {
     return EINVAL;
   }
-  let t = tcp_listen(&mut k.nic, tk.port);    // port 0: an ephemeral one
+  let t = tcp_listen(&mut k.nic, net_ns(k, pid), tk.port);    // port 0: an ephemeral one
   if t >= TCBS {
     return EADDRINUSE;
   }
@@ -232,7 +235,7 @@ fn lx_tcp_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u6
     if sin.err != 0 {
       return sin.err;
     }
-    t = tcp_connect(&mut k.nic, sin.ip, sin.port);
+    t = tcp_connect(&mut k.nic, net_ns(k, pid), sin.ip, sin.port);
     if t >= TCBS {
       return ENETUNREACH;
     }
@@ -277,7 +280,7 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, more: bool) 
   if n == 0 {
     return 0;
   }
-  let got = copy_from_user(&mut k.spaces, pid, buf, &mut k.fs.xfer, smaller(n, XFER));
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, &mut k.fs.xfer, smaller(n, XFER));
   if got == NO_RESULT || got == 0 {
     return EFAULT;
   }
@@ -291,7 +294,7 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, more: bool) 
   while go && buf < 0x800000000000 && total < n && total <= TCP_RING - XFER
     invariant kok(k) && pid < NPROC && total <= TCP_RING
   {
-    let c = copy_from_user(&mut k.spaces, pid, buf + total, &mut k.fs.xfer, smaller(n - total, XFER));
+    let c = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf + total, &mut k.fs.xfer, smaller(n - total, XFER));
     if c == NO_RESULT || c == 0 {
       go = false;                           // as a short write
     } else {
@@ -368,7 +371,7 @@ fn lx_tcp_recv(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, dontwait: bo
     }
     return SK_WAIT;
   }
-  if copy_to_user(&mut k.spaces, pid, buf, k.fs.xfer, got) != got {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, k.fs.xfer, got) != got {
     return EFAULT;
   }
   // More than one transfer buffer's worth, while more has arrived.
@@ -380,7 +383,7 @@ fn lx_tcp_recv(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, dontwait: bo
     let r = tcp_recv(&mut k.nic, tk.t, &mut k.fs.xfer, smaller(n - total, XFER), false);
     if r == 0 || r > XFER {
       more = false;                         // nothing more yet, the end, or reset: say it next time
-    } else if copy_to_user(&mut k.spaces, pid, buf + total, k.fs.xfer, r) != r {
+    } else if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf + total, k.fs.xfer, r) != r {
       more = false;                         // as a short read
     } else {
       total = total + r;

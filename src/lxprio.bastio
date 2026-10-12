@@ -2,6 +2,9 @@
 // the sched_* calls that set a policy or a CPU mask. The values are kept
 // in each process's row (F_NICE, F_SCHED) and handed back, with Linux's
 // checks and errors; the scheduler itself treats every process alike.
+// ioprio_set and ioprio_get keep an I/O priority per thread (k.sys from
+// SYS_IOP) the same way, with Linux 6.1's checks: the disk queue does not
+// look at it.
 
 const LX_GETPRIORITY: u64 = 140;
 const LX_SETPRIORITY: u64 = 141;
@@ -29,6 +32,12 @@ const SCHED_IDLE: u64 = 5;
 const SCHED_RESET_ON_FORK: u64 = 0x40000000;
 const RESET_KEPT: u64 = 0x10000;         // F_SCHED: SCHED_RESET_ON_FORK is set
 const INT_SPAN: u64 = 0x100000000;          // an int argument's 32 bits
+const LX_IOPRIO_SET: u64 = 251;
+const LX_IOPRIO_GET: u64 = 252;
+const IOPRIO_RT: u64 = 1;                   // classes, in bits 13-15
+const IOPRIO_BE: u64 = 2;
+const IOPRIO_IDLE: u64 = 3;
+const IOPRIO_NORM: u64 = 0x4004;            // best effort, level 4: what "none" counts as
 
 /// Process p's nice value plus 20: 0 (nice -20) to 39 (nice 19).
 fn nice_of(procs: &Buf, p: u64) -> u64
@@ -219,7 +228,7 @@ fn sched_set(k: &mut Kernel, pid: u64, who: u64, policy: u64, param: u64, keep: 
   if t == NPROC || param == 0 {
     return EINVAL;
   }
-  if copy_from_user(&mut k.spaces, pid, param, &mut k.fs.xfer, 4) != 4 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, param, &mut k.fs.xfer, 4) != 4 {
     return EFAULT;
   }
   let prio = get_u64(k.fs.xfer, 0) % INT_SPAN;
@@ -301,7 +310,7 @@ fn sched_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u
   if size == 0 {
     return EINVAL;
   }
-  if copy_from_user(&mut k.spaces, pid, mask, &mut k.fs.xfer, 1) != 1 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, mask, &mut k.fs.xfer, 1) != 1 {
     return EFAULT;
   }
   if t > NPROC {
@@ -413,7 +422,7 @@ fn sched_setattr(k: &mut Kernel, pid: u64, who: u64, attr: u64, flags: u64) -> u
   if t == NPROC || attr == 0 || flags % INT_SPAN != 0 {
     return EINVAL;
   }
-  if copy_from_user(&mut k.spaces, pid, attr, &mut k.fs.xfer, 4) != 4 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, attr, &mut k.fs.xfer, 4) != 4 {
     return EFAULT;
   }
   let mut size = get_u64(k.fs.xfer, 0) % INT_SPAN;
@@ -425,7 +434,7 @@ fn sched_setattr(k: &mut Kernel, pid: u64, who: u64, attr: u64, flags: u64) -> u
     let w = lx_put_out(&mut k, pid, attr, 4);  // tells the caller the size known
     return E2BIG;
   }
-  if copy_from_user(&mut k.spaces, pid, attr, &mut k.fs.xfer, ATTR_VER0) != ATTR_VER0 {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, attr, &mut k.fs.xfer, ATTR_VER0) != ATTR_VER0 {
     return EFAULT;
   }
   if t > NPROC {
@@ -503,8 +512,89 @@ fn sched_getattr(k: &mut Kernel, pid: u64, who: u64, attr: u64, size: u64, flags
   return lx_put_out(&mut k, pid, attr, n);
 }
 
+/// ioprio_set(which, who, ioprio): which 1 a thread, 2 a process group,
+/// 3 a user, as getpriority's plus one. Every match gets the priority.
+fn lx_ioprio_set(k: &mut Kernel, pid: u64, which: u64, who: u64, ioprio: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let v = ioprio % 65536;                   // Linux keeps an unsigned short
+  let class = v / 8192;
+  let data = v % 8192;
+  if class == 0 && data != 0 {
+    return EINVAL;                          // "none" has no level
+  }
+  if class > IOPRIO_IDLE || ((class == IOPRIO_RT || class == IOPRIO_BE) && data >= 8) {
+    return EINVAL;
+  }
+  if class == IOPRIO_RT && !cap_has(k, pid, CAP_SYS_NICE) && !cap_has(k, pid, CAP_SYS_ADMIN) {
+    return EPERM;
+  }
+  let wh = which % INT_SPAN;
+  if wh < 1 || wh > 3 {
+    return EINVAL;
+  }
+  let w = prio_who(k.procs, pid, wh - 1, who);
+  let nice = cap_has(k, pid, CAP_SYS_NICE);
+  let mut r = ESRCH;
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && kok(k)
+  {
+    if prio_match(k.procs, p, wh - 1, w) {
+      let uid = id_get(k.procs, p, F_UID, false);
+      if !nice && uid != id_get(k.procs, pid, F_UID, true) && uid != id_get(k.procs, pid, F_UID, false) {
+        r = EPERM;
+      } else {
+        k.sys = set(k.sys, SYS_IOP + p, v);
+        if r == ESRCH {
+          r = 0;
+        }
+      }
+    }
+    p = p + 1;
+  }
+  return r;
+}
+
+/// ioprio_get(which, who): the priority of the thread, or the highest
+/// among a group's or a user's ("none" counting as best effort, level 4).
+fn lx_ioprio_get(k: &Kernel, pid: u64, which: u64, who: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  let wh = which % INT_SPAN;
+  if wh < 1 || wh > 3 {
+    return EINVAL;
+  }
+  let w = prio_who(k.procs, pid, wh - 1, who);
+  let mut r = ESRCH;
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC
+  {
+    if prio_match(k.procs, p, wh - 1, w) {
+      let v = get(k.sys, SYS_IOP + p) % 65536;
+      if r == ESRCH {
+        r = v;
+      } else {
+        let mut a = r;
+        let mut b = v;
+        if a < 8192 {
+          a = IOPRIO_NORM;
+        }
+        if b < 8192 {
+          b = IOPRIO_NORM;
+        }
+        r = smaller(a, b);
+      }
+    }
+    p = p + 1;
+  }
+  return r;
+}
+
 fn is_prio_call(n: u64) -> bool {
-  return n == LX_GETPRIORITY || n == LX_SETPRIORITY || (LX_SCHED_SETPARAM <= n && n <= LX_SCHED_RR_GET_INTERVAL)
+  return n == LX_IOPRIO_SET || n == LX_IOPRIO_GET || n == LX_GETPRIORITY || n == LX_SETPRIORITY || (LX_SCHED_SETPARAM <= n && n <= LX_SCHED_RR_GET_INTERVAL)
     || n == LX_SCHED_SETAFFINITY || n == LX_SCHED_GETAFFINITY || n == LX_SCHED_SETATTR || n == LX_SCHED_GETATTR;
 }
 
@@ -520,6 +610,12 @@ fn lx_prio_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, d: u64
   }
   if n == LX_GETPRIORITY {
     return lx_getpriority(k, pid, a, b);
+  }
+  if n == LX_IOPRIO_SET {
+    return lx_ioprio_set(&mut k, pid, a, b, c);
+  }
+  if n == LX_IOPRIO_GET {
+    return lx_ioprio_get(k, pid, a, b);
   }
   if n == LX_SETPRIORITY {
     return lx_setpriority(&mut k, pid, a, b, c);

@@ -28,6 +28,7 @@ import "lxproc.bastio";
 import "lxfd.bastio";
 import "lxdir.bastio";
 import "lxsock.bastio";
+import "lxnetlink.bastio";
 import "lxtcp.bastio";
 import "lxsig.bastio";
 import "lxtime.bastio";
@@ -61,9 +62,15 @@ import "lxloop.bastio";
 import "lxpty.bastio";
 import "lxxattr.bastio";
 import "lxmount.bastio";
+import "lxns.bastio";
+import "lxnsk.bastio";
 import "lxperm.bastio";
+import "lxopen2.bastio";
+import "lxhandle.bastio";
 import "lxinotify.bastio";
 import "lazy.bastio";
+import "lxanon.bastio";
+import "lxcow.bastio";
 import "hda.bastio";
 import "lxsnd.bastio";
 import "lxmouse.bastio";
@@ -262,6 +269,10 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
     }
   }
   relogin(&mut s);
+  if s.k.naps {
+    s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
+    sleepers_due(&mut s.k);
+  }
   let p = lx_pick(&mut s.k, from);
   // Only the bootstrap processor takes V_DISK. A process the disk woke
   // that this processor is not about to run would wait for an idle
@@ -334,6 +345,7 @@ fn idled(s: &mut Sys, cpu: &Cpu, v: u64)
     lx_alarms(&mut s.k);
     power_button(&mut s);
   }
+  sleepers_wake(&mut s.k);                    // an interrupt may end a timed wait
 }
 
 /// Under the lock, after process `p` ran on this processor until a trap
@@ -443,8 +455,8 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       }
       return p;
     }
-    if lz != LZ_NO || stack_fault(&mut s.k, p) {
-      return p;                             // code read, or the stack grew: run the instruction again
+    if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) {
+      return p;                             // code read, a page mapped or copied, or the stack grew: run the instruction again
     }
   }
   if v < 32 {
@@ -490,6 +502,18 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
 // What `turn` hands back: the next job, and where the round robin goes on.
 struct Next { job: Job, from: u64 }
 
+/// After finish handled process p's trap: the trap may have ended a timed
+/// wait (sleepers_wake), unless it was a wait that goes on (its restart
+/// word is set, lx_retry), which changed nothing.
+fn after_trap(s: &mut Sys, p: u64)
+  requires sys_ok(s) && p < NPROC
+  ensures sys_ok(s)
+{
+  if pget(s.k.procs, p, F_RESTART) == 0 {
+    sleepers_wake(&mut s.k);
+  }
+}
+
 /// `finish` for task `t`, then `next_job` from where it leaves the round
 /// robin, in one critical section, so a system call costs one round trip
 /// of the lock. Publishes how much console output waits in `pend`.
@@ -501,6 +525,7 @@ fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, p
   ensures !(result.job is Job::Run) ==> mmu_root(mmu) == KERNEL_ROOT
 {
   let c = finish(&mut s, &mut cpu, mmu, p, fpu, v);
+  after_trap(&mut s, p);
   let j = next_job(&mut s, &mut cpu, &mut mmu, c, poll);
   atomic_store(pend, s.con.r.n);
   atomic_store(others, any_ready(s.k.procs));
@@ -540,6 +565,7 @@ fn finish_p(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64, p
   ensures sys_ok(s) && result < NPROC
 {
   let c = finish(&mut s, &mut cpu, mmu, p, fpu, v);
+  after_trap(&mut s, p);
   atomic_store(pend, s.con.r.n);
   return c;
 }
@@ -1162,13 +1188,13 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // PCI's configuration ports are claimed for the drivers that look for
   // their devices there.
   let mut pci = Pci { addr: port_claim(&mut ports, PCI_ADDR, 4), data: port_claim(&mut ports, PCI_DATA, 4) };
-  // The xHCI controller first, if there is one, with fourteen pages from
-  // USB_AT: a USB stick with a BastiOS partition on it becomes the disk,
-  // and a USB keyboard the keyboard.
-  let xdev = pci_find_class(&mut pci, XHCI_CLASS);
-  let usb_lo = usb_bar(&mut pci, xdev);
-  let usb_hi = usb_lo + usb_bar_size(&mut pci, xdev);
-  let mut usb = usb_new(&mut pci, &mut m, &mut win, USB_AT, fb_lo, fb_hi, 0, 0, xdev, usb_lo, usb_hi - usb_lo, msi, V_DISK);
+  // The xHCI controller first, the first of them with anything on it,
+  // with pages from USB_AT: a USB stick with a BastiOS partition on it
+  // becomes the disk, and a USB keyboard and mouse the keyboard and mouse.
+  let xn = usb_count(&mut pci);
+  let mut usb = usb_find(&mut pci, &mut m, &mut win, USB_AT, fb_lo, fb_hi, msi, V_DISK);
+  let usb_lo = usb_base(usb);
+  let usb_hi = usb_top(usb);
   let usb_disk = usb_msd(usb);
   // The disk: that stick, else NVMe, virtio, AHCI or ATA (see blk_new).
   let dev = blk_find(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi, usb_lo, usb_hi, msi, &mut usb, acpi_lo, acpi_hi, boot_word(cpu, "ahci_reset"));
@@ -1206,10 +1232,10 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   term.usb = usb;
   if usb_on {
     puts(&mut con, "keyboard: USB (xHCI)\r\n");
-  } else if xdev < PCI_NONE && usb_lo == 0 {
-    puts(&mut con, "usb: the xHCI controller's registers are outside the device window; not used\r\n");
-  } else if xdev < PCI_NONE {
-    puts(&mut con, "usb: no keyboard on the xHCI controller's root ports\r\n");
+  } else if xn > 0 {
+    puts(&mut con, "usb: no keyboard on the xHCI controllers (");
+    put_num(&mut con, xn);
+    puts(&mut con, ")\r\n");
   }
   // The sound card, if any, with six pages from SND_AT.
   let snd = snd_find(&mut pci, &mut m, &mut win, SND_AT, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi);
@@ -1252,6 +1278,17 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
       puts(&mut con, "net: frames received by interrupt\r\n");
     }
   }
+  // What is missing, on every boot: on a PC, the screen is all there is
+  // to see why nothing can be typed or nothing is kept.
+  if !usb_on && !term.kbd.present {
+    puts(&mut con, "keyboard: none found (no USB keyboard, no PS/2 controller)\r\n");
+  }
+  if blk_sectors(disk.dev) == 0 {
+    puts(&mut con, "disk: none found (NVMe, AHCI, ATA, virtio, USB); files are kept in memory only\r\n");
+  }
+  if !nic_live(nic) {
+    puts(&mut con, "net: none (drivers: virtio and e1000 only)\r\n");
+  }
   // The hardware report, with the boot option `diag` (src/info.bastio),
   // after a line for each thing the boot log above says nothing about.
   if boot_word(cpu, "diag") {
@@ -1260,8 +1297,6 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     }
     if !usb_on && term.kbd.present {
       puts(&mut con, "keyboard: PS/2 (no USB keyboard)\r\n");
-    } else if !usb_on {
-      puts(&mut con, "keyboard: none found (no USB keyboard, no PS/2 controller)\r\n");
     }
     if usb_mouse_on {
       puts(&mut con, "mouse: USB (xHCI)\r\n");
@@ -1272,9 +1307,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     } else {
       puts(&mut con, "mouse: none found\r\n");
     }
-    if blk_sectors(disk.dev) == 0 {
-      puts(&mut con, "disk: none found\r\n");
-    } else if !blk_is_virtio(disk.dev) && !blk_is_nvme(disk.dev) && !blk_is_ahci(disk.dev) && !blk_is_usb(disk.dev) {
+    if blk_sectors(disk.dev) != 0 && !blk_is_virtio(disk.dev) && !blk_is_nvme(disk.dev) && !blk_is_ahci(disk.dev) && !blk_is_usb(disk.dev) {
       puts(&mut con, "disk: ATA (");
       put_num(&mut con, blk_sectors(disk.dev));
       puts(&mut con, " sectors)\r\n");
@@ -1283,9 +1316,6 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
       puts(&mut con, "disk: the BastiOS file system, ");
       put_num(&mut con, disk.blocks);
       puts(&mut con, " blocks of 4 KiB\r\n");
-    }
-    if !nic_live(nic) {
-      puts(&mut con, "net: none (drivers: virtio and e1000 only)\r\n");
     }
     puts(&mut con, "---- hardware report (boot option diag; see docs/real-hardware.md) ----\r\n");
     hw_cpu(&mut con, cpu);
@@ -1318,7 +1348,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   let shm = new_store(&mut m);
   let txt = new_store(&mut m);
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PGROW * STRIDE), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lxfd: alloc(PGROW * LXNFD), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: vec_new[PipeBuf](), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: rng_new(epoch ^ at), cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(PGROW * SIGACT_ROW), cwd: alloc(PGROW * CWD_STRIDE), croot: alloc(PGROW * CWD_STRIDE), dpath: alloc(DPATH_LEN), sigsave: alloc(PGROW * SIGSAVE_ROW), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), holes: alloc(HOLES_LEN), lazy: alloc(LAZY_LEN), inet6: alloc(OFD_N), locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, txt: txt, sys: alloc(SYS_LEN), loops: alloc(LOOP_LEN), ptys: alloc(PTY_LEN), ptyb: balloc(PTYB_LEN), snd: snd, mice: mice_new(term.kbd.aux || usb_mouse_on), pdir: false };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PGROW * STRIDE), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lxfd: alloc(PGROW * LXNFD), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: vec_new[PipeBuf](), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: rng_new(epoch ^ at), cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(PGROW * SIGACT_ROW), cwd: alloc(PGROW * CWD_STRIDE), croot: alloc(PGROW * CWD_STRIDE), dpath: alloc(DPATH_LEN), sigsave: alloc(PGROW * SIGSAVE_ROW), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), holes: alloc(HOLES_LEN), lazy: alloc(LAZY_LEN), anon: alloc(ANON_LEN), inet6: alloc(OFD_N), locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, txt: txt, sys: alloc(SYS_LEN), loops: alloc(LOOP_LEN), ptys: alloc(PTY_LEN), ptyb: balloc(PTYB_LEN), snd: snd, mice: mice_new(term.kbd.aux || usb_mouse_on), pdir: false, mns: alloc(MNS_LEN), mstr: balloc(MSTR_LEN), naps: false };
   install_files(&mut con, &mut k);
   let mut login = 0;
   if boot_word(cpu, "login") {
@@ -1409,6 +1439,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.maps);
   free(sys.k.holes);
   free(sys.k.lazy);
+  free(sys.k.anon);
   free(sys.k.locks);
   free(sys.k.loops);
   free(sys.k.ptys);
@@ -1423,6 +1454,8 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.sigsave);
   free(sys.k.ux);
   bfree(sys.k.uxb);
+  free(sys.k.mns);
+  bfree(sys.k.mstr);
   pool = sys.k.mem.pool;
   // Off, or a restart. QEMU's isa-debug-exit device (tests) exits at once,
   // with status 33; elsewhere the port is unused.

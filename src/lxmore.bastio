@@ -137,7 +137,7 @@ fn out_writable(k: &Kernel, pid: u64, fd: u64) -> bool
 /// offset when inp is 0) to `out` (at *outp, or its own offset). Stops
 /// short when the destination fills; the count, or -errno (EAGAIN,
 /// CON_FULL or DISK_RETRY when nothing was copied yet).
-fn lx_copy(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, outp: u64, inp: u64, from: u64, count: u64) -> u64
+fn lx_copy(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, outp: u64, inp: u64, from: u64, count: u64, cfr: bool) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
   ensures kok(k) && con_ok(con)
 {
@@ -157,7 +157,7 @@ fn lx_copy(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, outp: u64, inp: u6
   let f = vfs_row_file(k.fs, d.x);
   let mut ioff = vfs_offset(k.fs, d.x);
   if inp != 0 {
-    if copy_from_user(&mut k.spaces, pid, inp, &mut k.fs.xfer, 8) != 8 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, inp, &mut k.fs.xfer, 8) != 8 {
       return EFAULT;
     }
     ioff = get_u64(k.fs.xfer, 0);
@@ -167,12 +167,32 @@ fn lx_copy(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, outp: u64, inp: u6
   }
   let mut ooff = 0xFFFFFFFFFFFFFFFF;
   if outp != 0 {
-    if copy_from_user(&mut k.spaces, pid, outp, &mut k.fs.xfer, 8) != 8 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, outp, &mut k.fs.xfer, 8) != 8 {
       return EFAULT;
     }
     ooff = get_u64(k.fs.xfer, 0);
     if ooff >= 0x8000000000000000 {
       return EINVAL;
+    }
+  }
+  if cfr {
+    // copy_file_range's checks on the two ranges (Linux's generic_copy_file_checks).
+    let od = fd_look(k, pid, out);
+    let mut ostart = ooff;
+    if od.kind == K_FILE && od.x < FD_ROWS && outp == 0 {
+      ostart = vfs_offset(k.fs, od.x);
+    }
+    if ostart != 0xFFFFFFFFFFFFFFFF {
+      if count > 0xFFFFFFFFFFFFFFFF - ostart || count > 0xFFFFFFFFFFFFFFFF - ioff {
+        return EOVERFLOW;
+      }
+      if ostart > 0x7FFFFFFFFFFFFFFF || count > 0x7FFFFFFFFFFFFFFF - ostart {
+        return EFBIG;
+      }
+      if od.kind == K_FILE && od.x < FD_ROWS && vfs_row_file(k.fs, od.x) == f
+         && count > 0 && ioff < ostart + smaller(count, COPY_MAX) && ostart < ioff + smaller(count, COPY_MAX) {
+        return EINVAL;                      // the ranges overlap in one file
+      }
     }
   }
   let total = smaller(count, COPY_MAX);
@@ -208,7 +228,7 @@ fn lx_copy(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, outp: u64, inp: u6
   // own offsets.
   if inp != 0 {
     xfer_u64(&mut k.fs.xfer, 0, sat_add(ioff, done));
-    if copy_to_user(&mut k.spaces, pid, inp, k.fs.xfer, 8) != 8 {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, inp, k.fs.xfer, 8) != 8 {
       return EFAULT;
     }
   } else {
@@ -216,7 +236,7 @@ fn lx_copy(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, outp: u64, inp: u6
   }
   if outp != 0 {
     xfer_u64(&mut k.fs.xfer, 0, sat_add(ooff, done));
-    if copy_to_user(&mut k.spaces, pid, outp, k.fs.xfer, 8) != 8 {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, outp, k.fs.xfer, 8) != 8 {
       return EFAULT;
     }
   }
@@ -268,7 +288,7 @@ fn lx_piov(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, iov: u
   while v < cnt
     invariant v <= cnt && cnt <= 1024 && total < 0x8000000000000000 && kok(k)
   {
-    if iov > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, iov + 16 * v, &mut k.fs.xfer, 16) != 16 {
+    if iov > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, iov + 16 * v, &mut k.fs.xfer, 16) != 16 {
       return EFAULT;
     }
     let len = get_u64(k.fs.xfer, 8);
@@ -283,7 +303,7 @@ fn lx_piov(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, iov: u
   while i < cnt
     invariant i <= cnt && cnt <= 1024 && kok(k) && con_ok(con)
   {
-    if iov > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, pid, iov + 16 * i, &mut k.fs.xfer, 16) != 16 {
+    if iov > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, iov + 16 * i, &mut k.fs.xfer, 16) != 16 {
       return EFAULT;
     }
     let base = get_u64(k.fs.xfer, 0);
@@ -332,7 +352,7 @@ fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u6
   if r != 0 {
     return r;
   }
-  if copy_from_user(&mut k.spaces, pid, buf, &mut k.fs.xfer, STAT_SIZE) != STAT_SIZE {
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, &mut k.fs.xfer, STAT_SIZE) != STAT_SIZE {
     return EFAULT;
   }
   let ino = get_u64(k.fs.xfer, 8);
@@ -364,7 +384,7 @@ fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u6
   xfer_u64(&mut k.fs.xfer, 112, mtime);                             // stx_mtime.tv_sec
   // stx_rdev_major and stx_rdev_minor, from Linux's 32-bit encoding
   xfer_u64(&mut k.fs.xfer, 128, rdev % 0x100000 / 256 + (rdev % 256 + rdev / 4096 / 256 * 256) * 0x100000000);
-  if copy_to_user(&mut k.spaces, pid, buf, k.fs.xfer, STATX_SIZE) != STATX_SIZE {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, k.fs.xfer, STATX_SIZE) != STATX_SIZE {
     return EFAULT;
   }
   return 0;
@@ -375,9 +395,10 @@ fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u6
 /// UNSHARE_RANGE, WRITE_ZEROES).
 const FALLOC_KNOWN: u64 = 0xFB;
 
-/// fallocate(fd, mode, off, len): mode 0 only, which grows the file to
-/// off + len if it is shorter; other known modes fail with -EOPNOTSUPP
-/// after the checks Linux makes first.
+/// fallocate(fd, mode, off, len): mode 0, which grows the file to off +
+/// len if it is shorter, and FALLOC_FL_KEEP_SIZE alone, which succeeds
+/// without changing anything (no blocks are reserved ahead); other known
+/// modes fail with -EOPNOTSUPP after the checks Linux makes first.
 fn lx_fallocate(k: &mut Kernel, pid: u64, fd: u64, mode: u64, off: u64, len: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -406,8 +427,11 @@ fn lx_fallocate(k: &mut Kernel, pid: u64, fd: u64, mode: u64, off: u64, len: u64
   if off + len >= 0x8000000000000000 {
     return EFBIG;                           // past the largest file offset
   }
+  if mode == 1 {
+    return 0;                               // FALLOC_FL_KEEP_SIZE: blocks are not reserved ahead here, so nothing to do
+  }
   if mode != 0 {
-    return EOPNOTSUPP;                      // no blocks are reserved, punched or zeroed
+    return EOPNOTSUPP;                      // no blocks are punched or zeroed
   }
   let size = vfs_size(&mut k.fs, vfs_row_file(k.fs, d.x));
   if size == NO_FILE {
@@ -433,7 +457,7 @@ fn memfd_name_ok(k: &mut Kernel, pid: u64, va: u64) -> u64
   while i < 250
     invariant i <= 250 && kok(k)
   {
-    if va >= 0x800000000000 || copy_from_user(&mut k.spaces, pid, va + i, &mut k.fs.xfer, 1) != 1 {
+    if va >= 0x800000000000 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + i, &mut k.fs.xfer, 1) != 1 {
       return EFAULT;
     }
     if bget(k.fs.xfer, 0) == 0 {
@@ -465,6 +489,7 @@ fn lx_memfd(k: &mut Kernel, pid: u64, name: u64, flags: u64) -> u64
     oflags = oflags + LO_CLOEXEC;
   }
   let mut tries = 0;
+  lpath_ro_clear(&mut k);                   // a name made here, in no mount of a namespace
   while tries < 16
     invariant tries <= 16 && kok(k)
   {
@@ -516,6 +541,28 @@ fn memfd_name(k: &mut Kernel, pid: u64, t: u64) -> u64
   return 31;
 }
 
+fn is_dir_fd(k: &Kernel, pid: u64, fd: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let d = fd_look(k, pid, fd);
+  return d.kind == K_DIR;
+}
+
+fn is_bad_fd(k: &Kernel, pid: u64, fd: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let d = fd_look(k, pid, fd);
+  return d.kind == K_BAD;
+}
+
+/// Whether descriptor fd of pid is a file opened with O_APPEND.
+fn is_append_fd(k: &Kernel, pid: u64, fd: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let d = fd_look(k, pid, fd);
+  return d.kind == K_FILE && d.x < FD_ROWS && fget(k.fs.ftab, d.x, FD_MODE) / O_APPEND % 2 == 1;
+}
+
 fn out_is_file(k: &Kernel, pid: u64, fd: u64) -> bool
   requires kok(k) && pid < NPROC
 {
@@ -530,7 +577,7 @@ fn lx_sendfile(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, from: u64, off
   requires con_ok(con) && kok(k) && pid < NPROC
   ensures kok(k) && con_ok(con)
 {
-  let r = lx_copy(&mut con, &mut k, pid, out, 0, offp, from, pget(k.procs, pid, F_REGS + R_R10));
+  let r = lx_copy(&mut con, &mut k, pid, out, 0, offp, from, pget(k.procs, pid, F_REGS + R_R10), false);
   if (r == EAGAIN || r == SK_WAIT) && pipe_nonblock(k, pid, out) {
     ret(&mut k.procs, pid, EAGAIN);
     return KEEP;
@@ -565,10 +612,17 @@ fn lx_more_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   if n == LX_COPY_FILE_RANGE {
     if pget(k.procs, pid, F_REGS + R_R9) != 0 {
       r = EINVAL;                           // no flags are defined
+    } else if is_dir_fd(k, pid, c) {
+      r = EISDIR;
     } else if !out_is_file(k, pid, c) {
-      r = EBADF;
+      r = EINVAL;                           // a pipe, device or socket (the read end too)
+      if is_bad_fd(k, pid, c) {
+        r = EBADF;
+      }
+    } else if is_append_fd(k, pid, c) {
+      r = EBADF;                            // there is no offset to copy to
     } else {
-      r = lx_copy(&mut con, &mut k, pid, c, r10, b, a, r8);
+      r = lx_copy(&mut con, &mut k, pid, c, r10, b, a, r8, true);
     }
   } else if n == LX_PREADV || n == LX_PWRITEV {
     r = lx_piov(&mut con, &mut k, pid, n == LX_PWRITEV, a, b, c, r10);

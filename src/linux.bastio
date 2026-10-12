@@ -37,7 +37,10 @@ const LX_RSEQ: u64 = 334;
 const LX_CLONE3: u64 = 435;
 const LX_UNSHARE: u64 = 272;
 const LX_IO_SETUP: u64 = 206;          // Linux AIO: nginx tries it and does without
+const LX_MEMBARRIER: u64 = 324;
+const LX_IO_URING_SETUP: u64 = 425;    // libuv and BIND try it and do without
 const LX_OPENAT: u64 = 257;
+const LX_CREAT: u64 = 85;
 const LX_STAT: u64 = 4;
 const LX_LSTAT: u64 = 6;
 const LX_ACCESS: u64 = 21;
@@ -89,6 +92,7 @@ const ARCH_GET_CPUID: u64 = 0x1011;
 const ARCH_SET_CPUID: u64 = 0x1012;
 const IOV_MAX: u64 = 1024;
 const EISDIR: u64 = 18446744073709551595;     // 2^64 - 21
+const EOVERFLOW: u64 = 18446744073709551541;  // 2^64 - 75
 const ESRCH: u64 = 18446744073709551613;      // 2^64 - 3
 const ENXIO: u64 = 18446744073709551610;      // 2^64 - 6
 const TOTAL_MAX: u64 = 0x100000000000;      // more than writev can move in the window
@@ -108,6 +112,15 @@ const LX_CLONE: u64 = 56;
 const CLONE_VM: u64 = 0x100;
 const CLONE_VFORK: u64 = 0x4000;
 const CLONE_THREAD: u64 = 0x10000;
+// The namespace flags of clone, unshare and setns (src/lxns.bastio,
+// src/lxnsk.bastio).
+const CLONE_NEWNS: u64 = 0x20000;
+const CLONE_NEWCGROUP: u64 = 0x02000000;
+const CLONE_NEWUTS: u64 = 0x04000000;
+const CLONE_NEWIPC: u64 = 0x08000000;
+const CLONE_NEWUSER: u64 = 0x10000000;
+const CLONE_NEWPID: u64 = 0x20000000;
+const CLONE_NEWNET: u64 = 0x40000000;
 const LX_FORK: u64 = 57;
 const LX_VFORK: u64 = 58;
 const LX_EXECVE: u64 = 59;
@@ -182,28 +195,17 @@ fn read_root(root: &mut PageTable, off: u64) -> Word
 fn read_l3(l3: &mut PageTable, off: u64) -> Word
   requires pt_level(l3) == 3 && off + 8 <= USER_SIZE
 {
-  if !pt_has(l3, 0) {
-    return Word { ok: false, v: 0 };
-  }
-  return pt_borrow(&mut l3, 0, read_l2, off);
-}
-
-/// The 8 bytes at window offset off, most significant first.
-fn read_l2(l2: &mut PageTable, off: u64) -> Word
-  requires pt_level(l2) == 2 && off + 8 <= USER_SIZE
-  ensures pt_level(l2) == 2
-{
   let mut v = 0;
   let mut i = 8;
   while i > 0
-    invariant i <= 8 && pt_level(l2) == 2
+    invariant i <= 8 && pt_level(l3) == 3
     invariant (i == 8 ==> v == 0) && (i == 7 ==> v < 0x100) && (i == 6 ==> v < 0x10000)
     invariant (i == 5 ==> v < 0x1000000) && (i == 4 ==> v < 0x100000000)
     invariant (i == 3 ==> v < 0x10000000000) && (i == 2 ==> v < 0x1000000000000)
     invariant (i == 1 ==> v < 0x100000000000000)
   {
     i = i - 1;
-    let ch = w_byte(&mut l2, off + i);
+    let ch = w_byte(&mut l3, off + i);
     if ch == 256 {
       return Word { ok: false, v: 0 };
     }
@@ -328,7 +330,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       r = dev_read(&mut k, pid, d.x, va, cnt);
     } else if d.kind == K_SOCK {
       r = lx_recvfrom(&mut k, pid, a, va, cnt, 0, 0, 0);
-      if r == SK_WAIT && !is_unix(k, pid, a) {
+      if r == SK_WAIT && !is_unix(k, pid, a) && !is_nl(k, pid, a) {
         return sock_retry(&mut k, pid, n);  // a network socket: sleep until a frame comes in
       }
       if r == SK_WAIT {
@@ -394,6 +396,22 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_ptimer_call(n) {
     return lx_ptimer_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
   }
+  if is_open2_call(n) {
+    let r = lx_openat2(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10));   // src/lxopen2.bastio
+    if r == SK_WAIT {
+      return lx_retry(&mut k, pid, n);      // a FIFO's writer waits for a reader
+    }
+    ret(&mut k.procs, pid, r);
+    return KEEP;
+  }
+  if is_handle_call(n) {
+    let r = lx_handle_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));   // src/lxhandle.bastio
+    if r == SK_WAIT {
+      return lx_retry(&mut k, pid, n);      // a FIFO's writer waits for a reader
+    }
+    ret(&mut k.procs, pid, r);
+    return KEEP;
+  }
   if is_inotify_call(n) {
     return lx_inotify_call(&mut k, pid, n, a, b, c);   // src/lxinotify.bastio
   }
@@ -414,10 +432,12 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, r);
     return KEEP;
   }
-  if n == LX_OPEN || n == LX_OPENAT {
+  if n == LX_OPEN || n == LX_OPENAT || n == LX_CREAT {
     let mut r = 0;
     if n == LX_OPEN {
       r = lx_open(&mut k, pid, AT_FDCWD, a, b, c);
+    } else if n == LX_CREAT {
+      r = lx_open(&mut k, pid, AT_FDCWD, a, 0x241, b);   // O_CREAT | O_WRONLY | O_TRUNC
     } else {
       r = lx_open(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
     }
@@ -433,6 +453,10 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if n == LX_UNLINKAT {
       path = b;
       dirfd = a;
+    }
+    if n == LX_UNLINKAT && (c % 0x100000000) & !AT_REMOVEDIR != 0 {
+      ret(&mut k.procs, pid, EINVAL);      // before the path, as on Linux
+      return KEEP;
     }
     if n == LX_UNLINKAT && c & AT_REMOVEDIR != 0 {
       ret(&mut k.procs, pid, lx_rmdir(&mut k, pid, dirfd, path));
@@ -671,9 +695,21 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   // glibc asks for these and carries on without them: restartable
   // sequences (sched_getcpu falls back to the system call), and clone3
   // (pthread_create falls back to clone, as on Linux before 5.3); nginx
-  // goes on without Linux AIO (io_setup). Refused quietly, as known gaps.
-  if n == LX_RSEQ || n == LX_CLONE3 || n == LX_IO_SETUP {
+  // goes on without Linux AIO (io_setup), and libuv and BIND without
+  // io_uring. Refused quietly, as known gaps.
+  if n == LX_RSEQ || n == LX_CLONE3 || n == LX_IO_SETUP || n == LX_IO_URING_SETUP {
     ret(&mut k.procs, pid, ENOSYS);
+    return KEEP;
+  }
+  // membarrier: MEMBARRIER_CMD_QUERY answers that no command is
+  // supported, so callers (liburcu, which BIND uses) keep to their own
+  // barriers; any other command is EINVAL, as Linux says for one it lacks.
+  if n == LX_MEMBARRIER {
+    if a == 0 && b == 0 {
+      ret(&mut k.procs, pid, 0);
+    } else {
+      ret(&mut k.procs, pid, EINVAL);
+    }
     return KEEP;
   }
   puts(&mut con, "[pid ");
@@ -739,8 +775,13 @@ const SIOCATMARK: u64 = 0x8905;
 const SIOCGIFCONF: u64 = 0x8912;
 const SIOCGIFFLAGS: u64 = 0x8913;
 const SIOCSIFFLAGS: u64 = 0x8914;
+const SIOCGIFADDR: u64 = 0x8915;
+const SIOCGIFNAME: u64 = 0x8910;
+const SIOCSIFNAME: u64 = 0x8923;
+const SIOCGIFINDEX: u64 = 0x8933;
+const SIOCGIFMTU: u64 = 0x8921;
+const SIOCGIFTXQLEN: u64 = 0x8942;
 const IFREQ_SIZE: u64 = 40;
-const IFF_LO: u64 = 0x49;              // IFF_UP | IFF_LOOPBACK | IFF_RUNNING
 const TIOCGPGRP: u64 = 0x540F;
 const TIOCSPGRP: u64 = 0x5410;
 const TIOCGSID: u64 = 0x5429;
@@ -858,14 +899,15 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   if d.kind == K_DEV && d.x == DEV_DSP {
     return dsp_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxsnd.bastio
   }
-  if d.kind == K_SOCK && (req == SIOCATMARK || (req >= SIOCGIFCONF && req <= SIOCSIFFLAGS)) {
+  if d.kind == K_SOCK && (req == SIOCATMARK || req == SIOCGIFNAME || (req >= SIOCGIFCONF && req <= SIOCGIFADDR) || req == SIOCSIFNAME || req == SIOCGIFINDEX
+    || req == SIOCGIFMTU || req == SIOCGIFTXQLEN) {
     return sock_ioctl(&mut k, pid, fd, req, arg);
   }
   if d.kind != K_CONSOLE {
     return ENOTTY;
   }
   if req == TCSETS || (req > TCSETS && req <= TCSETSF) {
-    if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, TERMIOS_SIZE) != TERMIOS_SIZE {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, TERMIOS_SIZE) != TERMIOS_SIZE {
       return EFAULT;
     }
     let mut i = 0;
@@ -916,9 +958,10 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
 }
 
 /// The socket ioctls: SIOCATMARK on TCP (never at urgent data, which is
-/// never kept), and the interface list, which names only the loopback "lo":
-/// SIOCGIFCONF lists it, SIOCGIFFLAGS reports it up, SIOCSIFFLAGS is
-/// accepted and changes nothing.
+/// never kept), and the interfaces of the caller's network namespace
+/// (src/netns.bastio): SIOCGIFCONF lists those with an address,
+/// SIOCGIFFLAGS, SIOCGIFINDEX, SIOCGIFADDR and SIOCGIFNAME read one, and
+/// SIOCSIFFLAGS (up or down) and SIOCSIFNAME change one.
 fn sock_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -930,45 +973,129 @@ fn sock_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     xfer_u64(&mut k.fs.xfer, 0, 0);
     return lx_put_out(&mut k, pid, arg, 4);
   }
+  let ns = net_ns(k, pid);
   if req == SIOCGIFCONF {
-    // struct ifconf: int ifc_len, then the buffer's address.
-    if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, 16) != 16 {
-      return EFAULT;
-    }
-    let room = get_u64(k.fs.xfer, 0) % 4294967296;
-    let buf = get_u64(k.fs.xfer, 8);
-    let mut n = 0;
-    if buf == 0 || room >= IFREQ_SIZE {
-      n = IFREQ_SIZE;                       // with no buffer, the size needed
-    }
-    if buf != 0 && n > 0 {
-      lx_fill(&mut k, 0, IFREQ_SIZE);
-      bset(&mut k.fs.xfer, 0, 108);         // "lo"
-      bset(&mut k.fs.xfer, 1, 111);
-      bset(&mut k.fs.xfer, 16, 2);          // ifr_addr: AF_INET 127.0.0.1
-      bset(&mut k.fs.xfer, 20, 127);
-      bset(&mut k.fs.xfer, 23, 1);
-      let r = lx_put_out(&mut k, pid, buf, IFREQ_SIZE);
-      if r != 0 {
-        return r;
-      }
-    }
-    xfer_u64(&mut k.fs.xfer, 0, n);
-    return lx_put_out(&mut k, pid, arg, 4);
+    return ifconf(&mut k, pid, ns, arg);
   }
-  // SIOCGIFFLAGS, SIOCSIFFLAGS: struct ifreq, the name in its first 16 bytes.
-  if copy_from_user(&mut k.spaces, pid, arg, &mut k.fs.xfer, IFREQ_SIZE) != IFREQ_SIZE {
+  // The rest take a struct ifreq: the name in its first 16 bytes.
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, IFREQ_SIZE) != IFREQ_SIZE {
     return EFAULT;
   }
-  if bget(k.fs.xfer, 0) != 108 || bget(k.fs.xfer, 1) != 111 || bget(k.fs.xfer, 2) != 0 {
+  let mut i = NO_IF;
+  if req == SIOCGIFNAME {
+    i = nic_if_of_index(k.nic, ns, get_u64(k.fs.xfer, 16) % 4294967296);
+  } else {
+    i = nic_if_by_name(k.nic, ns, name_w(k.fs.xfer, 0, 16, 0), name_w(k.fs.xfer, 0, 16, 1));
+  }
+  if i >= IFN {
     return 18446744073709551597;            // ENODEV (src/lxmore.bastio comes later)
   }
-  if req == SIOCSIFFLAGS {
+  if req == SIOCSIFFLAGS || req == SIOCSIFNAME {
+    if !cap_has(k, pid, CAP_NET_ADMIN) {
+      return EPERM;
+    }
+    if req == SIOCSIFNAME {
+      let e = nic_if_rename(&mut k.nic, ns, i, name_w(k.fs.xfer, 16, 16, 0), name_w(k.fs.xfer, 16, 16, 1));
+      if e != 0 {
+        return 18446744073709551615 - (e - 1);   // -e
+      }
+      return 0;
+    }
+    nic_if_set_up(&mut k.nic, i, bget(k.fs.xfer, 16) % 2 == 1);
     return 0;
   }
-  bset(&mut k.fs.xfer, 16, cast[u8](IFF_LO));
-  bset(&mut k.fs.xfer, 17, 0);
+  lx_fill(&mut k, 0, IFREQ_SIZE);
+  ifr_name(&mut k, i);
+  if req == SIOCGIFFLAGS {
+    let f = nic_if_flags(k.nic, i);
+    bset(&mut k.fs.xfer, 16, cast[u8](f % 256));
+    bset(&mut k.fs.xfer, 17, cast[u8](f / 256 % 256));
+  } else if req == SIOCGIFINDEX {
+    bset(&mut k.fs.xfer, 16, cast[u8](nic_if_index(k.nic, i)));
+  } else if req == SIOCGIFMTU || req == SIOCGIFTXQLEN {
+    let mut v = 1000;                       // every queue's length
+    if req == SIOCGIFMTU {
+      v = nic_if_mtu(k.nic, i);
+    }
+    bset(&mut k.fs.xfer, 16, cast[u8](v % 256));
+    bset(&mut k.fs.xfer, 17, cast[u8](v / 256 % 256));
+    bset(&mut k.fs.xfer, 18, cast[u8](v / 65536 % 256));
+  } else if req == SIOCGIFADDR {
+    let a = nic_if_addr(k.nic, i);
+    if a == 0 {
+      return 18446744073709551517;          // EADDRNOTAVAIL
+    }
+    ifr_ip(&mut k, 16, a);
+  }
   return lx_put_out(&mut k, pid, arg, IFREQ_SIZE);
+}
+
+/// Interface i's name into the first 16 transfer bytes.
+fn ifr_name(k: &mut Kernel, i: u64)
+  requires kok(k) && i < IFN
+  ensures kok(k)
+{
+  let w0 = nic_if_name(k.nic, i, 0);
+  let w1 = nic_if_name(k.nic, i, 1);
+  let mut j = 0;
+  while j < 15
+    invariant j <= 15 && kok(k)
+  {
+    bset(&mut k.fs.xfer, j, cast[u8](name_byte(w0, w1, j)));
+    j = j + 1;
+  }
+  bset(&mut k.fs.xfer, 15, 0);
+}
+
+/// A struct sockaddr_in for ip at transfer byte `at`.
+fn ifr_ip(k: &mut Kernel, at: u64, ip: u64)
+  requires kok(k) && at <= 24
+  ensures kok(k)
+{
+  bset(&mut k.fs.xfer, at, 2);              // AF_INET
+  bset(&mut k.fs.xfer, at + 4, cast[u8](ip / 16777216 % 256));
+  bset(&mut k.fs.xfer, at + 5, cast[u8](ip / 65536 % 256));
+  bset(&mut k.fs.xfer, at + 6, cast[u8](ip / 256 % 256));
+  bset(&mut k.fs.xfer, at + 7, cast[u8](ip % 256));
+}
+
+/// SIOCGIFCONF: a struct ifreq (name and address) for each interface of
+/// namespace ns that has an address, as many as fit; with no buffer, the
+/// room they need.
+fn ifconf(k: &mut Kernel, pid: u64, ns: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  // struct ifconf: int ifc_len, then the buffer's address.
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, 16) != 16 {
+    return EFAULT;
+  }
+  let room = get_u64(k.fs.xfer, 0) % 4294967296;
+  let buf = get_u64(k.fs.xfer, 8);
+  if buf > 0xFFFFFFFFFFFF0000 {
+    return EFAULT;
+  }
+  let mut n = 0;
+  let mut i = 0;
+  while i < IFN
+    invariant i <= IFN && n <= i * IFREQ_SIZE && kok(k)
+  {
+    if nic_if_in(k.nic, ns, i) && nic_if_addr(k.nic, i) != 0 && (buf == 0 || n + IFREQ_SIZE <= room) {
+      if buf != 0 {
+        lx_fill(&mut k, 0, IFREQ_SIZE);
+        ifr_name(&mut k, i);
+        ifr_ip(&mut k, 16, nic_if_addr(k.nic, i));
+        let r = lx_put_out(&mut k, pid, buf + n, IFREQ_SIZE);
+        if r != 0 {
+          return r;
+        }
+      }
+      n = n + IFREQ_SIZE;
+    }
+    i = i + 1;
+  }
+  xfer_u64(&mut k.fs.xfer, 0, n);
+  return lx_put_out(&mut k, pid, arg, 4);
 }
 
 /// Sets the first n transfer bytes to v.
@@ -991,7 +1118,7 @@ fn lx_put_out(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && n <= 160
   ensures kok(k)
 {
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, n) != n {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, n) != n {
     return EFAULT;
   }
   return 0;
@@ -1166,7 +1293,7 @@ fn console_read(k: &mut Kernel, pid: u64, va: u64, n: u64, was: u64) -> u64
     bset(&mut k.fs.xfer, i, cast[u8](get(k.line, 2 + i) % 256));
     i = i + 1;
   }
-  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, want);
+  let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, want);
   if put == NO_RESULT || (put == 0 && want > 0) {
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
@@ -1221,7 +1348,7 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
     if va > 0xFFFFFFFFFFFFFFFF - READ_MAX {
       return EFAULT;
     }
-    let put = copy_to_user(&mut k.spaces, pid, va + done, k.fs.xfer, got);
+    let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + done, k.fs.xfer, got);
     if put == NO_RESULT || (put == 0 && got > 0) {
       if done > 0 {
         return done;
@@ -1289,7 +1416,7 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
   if d.kind == K_CONSOLE && 2 * smaller(n, XFER) > room && room < OUTCAP {
     return CON_FULL;                        // the console's ring is too full: wait
   }
-  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, smaller(n, XFER));
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, smaller(n, XFER));
   if got == NO_RESULT || (got == 0 && n > 0) {
     return EFAULT;
   }
@@ -1327,7 +1454,7 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
       if va > 0xFFFFFFFFFFFFFFFF - total {
         return total;
       }
-      piece = copy_from_user(&mut k.spaces, pid, va + total, &mut k.fs.xfer, smaller(n - total, XFER));
+      piece = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + total, &mut k.fs.xfer, smaller(n - total, XFER));
       if piece == NO_RESULT || piece == 0 {
         return total;
       }
@@ -1651,6 +1778,29 @@ fn root_under(k: &Kernel, pid: u64, out: &Bytes, o: u64) -> u64
   return rl;
 }
 
+/// The end of lx_path_from: the lexed path x, "proc/self" made the
+/// caller's /proc/PID, its symbolic links followed (the last one too when
+/// `follow`), and a name ending in "/" or "/." checked to be a directory.
+fn lx_finish(k: &mut Kernel, pid: u64, x: Lex, follow: bool) -> u64
+  requires kok(k) && pid < NPROC && x.n <= FNAME_MAX
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  let o2 = proc_self(&mut k.fs.xfer, x.n, pid);   // "proc/self" is the caller's /proc/PID
+  let r = lx_follow(&mut k, pid, o2, follow || x.trail, smaller(x.floor, o2));  // symbolic links (src/lxlink.bastio)
+  if r == NO_RESULT || !x.dirend {
+    return r;
+  }
+  let m = path_meta(&mut k, r);
+  if !m.ok {
+    k.pdir = true;                          // open(O_CREAT) says EISDIR; mkdir goes ahead
+  } else if m.mode % 65536 / 4096 * 4096 != S_IFMT_DIR {
+    k.perr = ENOTDIR;                       // "file/" and "file/."
+    return NO_RESULT;
+  }
+  return r;
+}
+
 /// lx_path_in from base h (see dir_ofd), following symbolic links (the
 /// last one too when `follow`).
 fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
@@ -1658,15 +1808,37 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
+  let x = lx_path_lex(&mut k, pid, va, h);
+  if x.n == NO_RESULT || x.n > FNAME_MAX {
+    return NO_RESULT;
+  }
+  return lx_finish(&mut k, pid, x, follow);
+}
+
+/// A path as lx_path_lex leaves it: its length n (or NO_RESULT, with
+/// k.perr), where ".." stopped (floor: the root), whether it ended in "/",
+/// started at "/", and whether a ".." climbed out of the directory it
+/// started from (openat2's RESOLVE_BENEATH, src/lxopen2.bastio), and
+/// whether it ended in "/" or "/." (so it must name a directory).
+struct Lex { n: u64, floor: u64, trail: bool, abs: bool, esc: bool, dirend: bool }
+
+/// The path at user address va, from base h (see dir_ofd), made absolute
+/// and normalized in the transfer buffer: "." and ".." taken out, symbolic
+/// links not yet followed.
+fn lx_path_lex(k: &mut Kernel, pid: u64, va: u64, h: u64) -> Lex
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let bad = Lex { n: NO_RESULT, floor: 0, trail: false, abs: false, esc: false, dirend: false };
   k.perr = EFAULT;
   if va < USER_BASE || va >= USER_BASE + USER_SIZE {
-    return NO_RESULT;
+    return bad;
   }
   let n = smaller(PATH_MAX_LX, USER_SIZE - (va - USER_BASE));
   let mut want = smaller(PATH_FIRST, n);
-  let mut got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, want);
+  let mut got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, want);
   if got == NO_RESULT {
-    return NO_RESULT;
+    return bad;
   }
   let mut e = 0;
   while e < got && bget(k.fs.xfer, e) != 0
@@ -1677,9 +1849,9 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
   if e >= got && got == want && want < n {
     // Longer than the first read: read up to PATH_MAX.
     want = n;
-    got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, want);
+    got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, want);
     if got == NO_RESULT {
-      return NO_RESULT;
+      return bad;
     }
     e = 0;
     while e < got && bget(k.fs.xfer, e) != 0
@@ -1692,13 +1864,13 @@ fn lx_path_from(k: &mut Kernel, pid: u64, va: u64, h: u64, follow: bool) -> u64
     if got == want {
       k.perr = ENAMETOOLONG;                // no NUL within PATH_MAX
     }
-    return NO_RESULT;                       // or EFAULT: unmapped before the NUL
+    return bad;                             // or EFAULT: unmapped before the NUL
   }
   if e == 0 {
     k.perr = ENOENT;                        // "" names nothing, as on Linux
-    return NO_RESULT;
+    return bad;
   }
-  return lx_path_xfer(&mut k, pid, e, h, follow);
+  return lx_lex_xfer(&mut k, pid, e, h);
 }
 
 /// lx_path_from for a path already in the transfer buffer, bytes 0..e: an
@@ -1708,6 +1880,19 @@ fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
+  let x = lx_lex_xfer(&mut k, pid, e, h);
+  if x.n == NO_RESULT || x.n > FNAME_MAX {
+    return NO_RESULT;
+  }
+  return lx_finish(&mut k, pid, x, follow);
+}
+
+/// lx_path_lex for a path already in the transfer buffer, bytes 0..e.
+fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
+  requires kok(k) && pid < NPROC && 0 < e && e < XFER
+  ensures kok(k)
+{
+  let bad = Lex { n: NO_RESULT, floor: 0, trail: false, abs: false, esc: false, dirend: false };
   k.perr = ENAMETOOLONG;
   k.pdir = false;
   let trail = bget(k.fs.xfer, e - 1) == 47;  // "link/" names what the link points to, as on Linux
@@ -1720,7 +1905,10 @@ fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
   let mut o = 0;
   let rl = root_len(k, pid);
   let mut floor = 0;
-  if bget(k.fs.xfer, 0) == 47 {
+  let abs = bget(k.fs.xfer, 0) == 47;
+  let mut start = 0;                        // the base's length: ".." below it climbs out
+  let mut esc = false;
+  if abs {
     while o < rl
       invariant o <= rl && rl <= FNAME_MAX && blen(out) == PATH_OUT && kok(k) && pid < NPROC
     {
@@ -1735,7 +1923,7 @@ fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
       if h > OFD_N + 1 {
         k.perr = ENOTDIR;
       }
-      return NO_RESULT;                     // relative to no directory
+      return bad;                           // relative to no directory
     }
     let cl = base_len(k, pid, h);
     while o < cl
@@ -1744,6 +1932,7 @@ fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
       bset(&mut out, o, base_byte(k, pid, h, o));
       o = o + 1;
     }
+    start = o;
     floor = root_under(k, pid, out, o);
   }
   let mut i = 0;
@@ -1765,6 +1954,9 @@ fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
         // "." stays here
       } else if w == 2 && bget(k.fs.xfer, i) == 46 && bget(k.fs.xfer, i + 1) == 46 {
         // "..": drop the last part (the root's parent is the root)
+        if o <= start {
+          esc = true;                       // from the base itself
+        }
         while o > floor && bget(out, o - 1) != 47
           invariant o <= PATH_OUT && blen(out) == PATH_OUT
         {
@@ -1804,11 +1996,11 @@ fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
       c = c + 1;
     }
     bfree(out);
-    if c > 0 && lx_follow(&mut k, c, true, smaller(floor, c)) == NO_RESULT {
-      return NO_RESULT;                     // k.perr says why
+    if c > 0 && lx_follow(&mut k, pid, c, true, smaller(floor, c)) == NO_RESULT {
+      return bad;                           // k.perr says why
     }
     k.perr = ENAMETOOLONG;
-    return NO_RESULT;
+    return bad;
   }
   let mut c = 0;
   while c < o
@@ -1818,19 +2010,7 @@ fn lx_path_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64, follow: bool) -> u64
     c = c + 1;
   }
   bfree(out);
-  let o2 = proc_self(&mut k.fs.xfer, o, pid);   // "proc/self" is the caller's /proc/PID
-  let r = lx_follow(&mut k, o2, follow || trail, smaller(floor, o2));  // symbolic links (src/lxlink.bastio)
-  if r == NO_RESULT || !dirend {
-    return r;
-  }
-  let m = path_meta(&mut k, r);
-  if !m.ok {
-    k.pdir = true;                          // open(O_CREAT) says EISDIR; mkdir goes ahead
-  } else if m.mode % 65536 / 4096 * 4096 != S_IFMT_DIR {
-    k.perr = ENOTDIR;                       // "file/" and "file/."
-    return NO_RESULT;
-  }
-  return r;
+  return Lex { n: o, floor: floor, trail: trail, abs: abs, esc: esc, dirend: dirend };
 }
 
 /// lseek: SEEK_SET (0), SEEK_CUR (1) and SEEK_END (2), with a signed
@@ -1921,22 +2101,12 @@ fn map_l3(l3: &mut PageTable, m: &mut Mem, from: u64, to: u64, sh: bool) -> bool
   requires pt_level(l3) == 3 && mem_ok(m) && to <= WPAGES
   ensures mem_ok(m)
 {
-  if !pt_has(l3, 0) {
-    return false;
-  }
-  return pt_borrow(&mut l3, 0, map_l2, &mut m, from, to, sh);
-}
-
-fn map_l2(l2: &mut PageTable, m: &mut Mem, from: u64, to: u64, sh: bool) -> bool
-  requires pt_level(l2) == 2 && mem_ok(m) && to <= WPAGES
-  ensures mem_ok(m)
-{
   let mut ok = true;
   let mut p = from;
   while ok && p < to
-    invariant mem_ok(m) && pt_level(l2) == 2 && to <= WPAGES
+    invariant mem_ok(m) && pt_level(l3) == 3 && to <= WPAGES
   {
-    ok = w_map(&mut m, &mut l2, p, sh);
+    ok = w_map(&mut m, &mut l3, p, sh);
     p = p + 1;
   }
   return ok;
@@ -1967,14 +2137,14 @@ fn stack_fault(k: &mut Kernel, p: u64) -> bool
   ensures kok(k)
 {
   let va = pget(k.procs, p, F_REGS + 19);   // CR2
-  if va < USER_BASE || user_present(&mut k.spaces, p, va) {
+  if va < USER_BASE || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, va, &mut k.fs.xfer, 1) == 1 || user_present(&mut k.spaces, p, va) {
     return false;                           // mapped (if PROT_NONE): not a stack to grow
   }
   return stack_reach(&mut k.mem, &mut k.spaces, p, va);
 }
 
-/// brk: moves the heap's end to `want`, mapping the pages it grows into
-/// and unmapping the pages it gives back; never below where it started,
+/// brk: moves the heap's end to `want`, adding the pages it grows into
+/// (mapped when first touched) and unmapping the pages it gives back; never below where it started,
 /// and never into mmap's pages. Returns the break, as Linux does on
 /// failure too.
 fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
@@ -1996,12 +2166,17 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
     let from = (new + 4095) / 4096;
     let to = (cur + 4095) / 4096;
     if to <= WPAGES {
+      anon_forget(&mut k, pid, from, to);
       win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, from, to, 0);
     }
     pset(&mut k.procs, pid, F_BRK, new);
     return want;
   }
-  if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, (cur + 4095) / 4096, (new + 4095) / 4096, false) {
+  // The new pages come when first touched (src/lxanon.bastio), unless
+  // every record is in use.
+  let lo = (cur + 4095) / 4096;
+  let hi = (new + 4095) / 4096;
+  if !(lo < hi && anon_add(&mut k, pid, lo, hi)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, lo, hi, false) {
     return USER_BASE + cur;
   }
   pset(&mut k.procs, pid, F_BRK, new);
@@ -2083,6 +2258,10 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   // the cache's page would reach every reader of the file
   // (docs/security.md). Such a copy does not see later writes to the file.
   let cached = sh && !anon && f != NO_FILE && can_write;
+  // Private writable anonymous memory gets its pages when first touched
+  // (src/lxanon.bastio), unless MAP_POPULATE or MAP_LOCKED asks for them
+  // now.
+  let lazy = anon && !sh && prot / 2 % 2 == 1 && flags & 0xA000 == 0;   // MAP_POPULATE, MAP_LOCKED
   let mut at = 0;
   let noreplace = flags & MAP_FIXED_NOREPLACE != 0;
   if flags / MAP_FIXED % 2 == 1 || noreplace {
@@ -2095,22 +2274,31 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     at = addr - USER_BASE;
     // MAP_FIXED_NOREPLACE: any page mapped in the range is EEXIST. (A
     // PROT_NONE reservation maps nothing, so it is not seen.)
-    if noreplace && win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, at / 4096, at / 4096 + pages, 0) != 0 {
+    if noreplace && anon_count(&mut k, pid, at / 4096, at / 4096 + pages) != 0 {
       return EEXIST;
     }
     // What was there goes, read-only pages too: the new mapping is writable.
     map_forget(&mut k, pid, at / 4096, at / 4096 + pages, false);
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
     fixed_taken(&mut k, pid, at / 4096, at / 4096 + pages);
-    if !cached && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
+    if !cached && !(lazy && anon_add(&mut k, pid, at / 4096, at / 4096 + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
       return ENOMEM;
     }
   } else {
     let reserve = (anon && prot == 0 && !sh) || cached;
+    // Where addr asks, if nothing is there (mmap_hint, src/lxmem.bastio).
+    let hp = mmap_hint(&mut k, pid, addr, pages);
+    if hp < STACK_FIRST {
+      if !reserve && !(lazy && anon_add(&mut k, pid, hp, hp + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, hp, hp + pages, sh) {
+        hole_add(&mut k, pid, hp, hp + pages);
+        return ENOMEM;
+      }
+      return lx_mmap_fill(&mut k, pid, hp * 4096, pages, prot, flags, fd, off, anon, cached, f, sh);
+    }
     // A hole munmap left first (src/lxmem.bastio): its pages are unmapped.
     let h = hole_take(&mut k, pid, pages);
     if h < STACK_FIRST {
-      if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, h, h + pages, sh) {
+      if !reserve && !(lazy && anon_add(&mut k, pid, h, h + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, h, h + pages, sh) {
         hole_add(&mut k, pid, h, h + pages);
         return ENOMEM;
       }
@@ -2129,7 +2317,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // mapped when an mprotect makes them usable (lx_mprotect), and touching
     // it before that faults, as on Linux. Shared memory is mapped now and
     // hidden (read_only), so the pages mprotect uncovers are the shared ones.
-    if !reserve && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096, sh) {
+    if !reserve && !(lazy && anon_add(&mut k, pid, at / 4096, at / 4096 + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096, sh) {
       return ENOMEM;
     }
     pset(&mut k.procs, pid, F_MMAP, at);
@@ -2186,7 +2374,7 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
       bset(&mut k.fs.xfer, z, 0);
       z = z + 1;
     }
-    if copy_to_user(&mut k.spaces, pid, USER_BASE + at + done, k.fs.xfer, step) != step {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, USER_BASE + at + done, k.fs.xfer, step) != step {
       return EFAULT;
     }
     done = done + step;

@@ -105,22 +105,12 @@ fn write_l3(l3: &mut PageTable, con: &mut Con, off: u64, n: u64) -> u64
   requires con_ok(con) && pt_level(l3) == 3 && off + n <= USER_SIZE
   ensures con_ok(con)
 {
-  if !pt_has(l3, 0) {
-    return 0;
-  }
-  return pt_borrow(&mut l3, 0, write_l2, &mut con, off, n);
-}
-
-fn write_l2(l2: &mut PageTable, con: &mut Con, off: u64, n: u64) -> u64
-  requires con_ok(con) && pt_level(l2) == 2 && off + n <= USER_SIZE
-  ensures con_ok(con)
-{
   let mut k = 0;
   let mut ok = true;
   while ok && k < n
-    invariant k <= n && pt_level(l2) == 2 && con_ok(con)
+    invariant k <= n && pt_level(l3) == 3 && con_ok(con)
   {
-    let ch = w_byte(&mut l2, off + k);
+    let ch = w_byte(&mut l3, off + k);
     if ch == 256 {
       ok = false;
     } else {
@@ -169,22 +159,12 @@ fn find_l3(l3: &mut PageTable, off: u64, n: u64) -> u64
   requires pt_level(l3) == 3 && off + n <= USER_SIZE
   ensures result <= NPROGS
 {
-  if !pt_has(l3, 0) {
-    return NPROGS;
-  }
-  return pt_borrow(&mut l3, 0, find_l2, off, n);
-}
-
-fn find_l2(l2: &mut PageTable, off: u64, n: u64) -> u64
-  requires pt_level(l2) == 2 && off + n <= USER_SIZE
-  ensures result <= NPROGS
-{
   let mut found = NPROGS;
   let mut i = 0;
   while i < NPROGS
-    invariant i <= NPROGS && found <= NPROGS && pt_level(l2) == 2
+    invariant i <= NPROGS && found <= NPROGS && pt_level(l3) == 3
   {
-    if found == NPROGS && w_matches(&mut l2, off, n, prog_name(i)) {
+    if found == NPROGS && w_matches(&mut l3, off, n, prog_name(i)) {
       found = i;
     }
     i = i + 1;
@@ -192,19 +172,19 @@ fn find_l2(l2: &mut PageTable, off: u64, n: u64) -> u64
   return found;
 }
 
-/// Do the n bytes at offset off of the window `l2` maps spell `name`?
-fn w_matches(l2: &mut PageTable, off: u64, n: u64, name: Str) -> bool
-  requires pt_level(l2) == 2 && off + n <= USER_SIZE
-  ensures pt_level(l2) == 2
+/// Do the n bytes at offset off of the window `l3` maps spell `name`?
+fn w_matches(l3: &mut PageTable, off: u64, n: u64, name: Str) -> bool
+  requires pt_level(l3) == 3 && off + n <= USER_SIZE
+  ensures pt_level(l3) == 3
 {
   if n != slen(name) {
     return false;
   }
   let mut k = 0;
   while k < n
-    invariant k <= n && pt_level(l2) == 2
+    invariant k <= n && pt_level(l3) == 3
   {
-    if w_byte(&mut l2, off + k) != cast[u64](sget(name, k)) {
+    if w_byte(&mut l3, off + k) != cast[u64](sget(name, k)) {
       return false;
     }
     k = k + 1;
@@ -235,7 +215,7 @@ fn name_in(k: &mut Kernel, pid: u64, va: u64, n: u64) -> bool
   if n > FNAME_MAX {
     return false;
   }
-  return copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, n) == n;
+  return copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, n) == n;
 }
 
 fn do_open(k: &mut Kernel, pid: u64, flags: u64, va: u64, n: u64) -> u64
@@ -263,7 +243,7 @@ fn do_fread(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
   if got == VFS_MISS {
     return DISK_RETRY;
   }
-  let put = copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, got);
+  let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, got);
   if put == NO_RESULT {
     return NO_RESULT;
   }
@@ -278,7 +258,7 @@ fn do_fwrite(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
   if fd >= NFD {
     return NO_RESULT;
   }
-  let got = copy_from_user(&mut k.spaces, pid, va, &mut k.fs.xfer, smaller(n, XFER));
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, smaller(n, XFER));
   if got == NO_RESULT {
     return NO_RESULT;
   }
@@ -454,7 +434,7 @@ fn do_dirent(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
   if nl == NO_FILE {
     return NO_RESULT;
   }
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, smaller(nl, n)) == NO_RESULT {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, smaller(nl, n)) == NO_RESULT {
     return NO_RESULT;
   }
   return nl;
@@ -483,7 +463,7 @@ fn do_readdir(k: &mut Kernel, pid: u64, i: u64, nl: u64, va: u64, n: u64) -> u64
   if r == 0 {
     return 0;
   }
-  if copy_to_user(&mut k.spaces, pid, va, k.fs.xfer, smaller(r, n)) == NO_RESULT {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, smaller(r, n)) == NO_RESULT {
     return NO_RESULT;
   }
   if vfs_is_dir(&mut k.fs, vfs_child(d, i)) {
@@ -553,14 +533,14 @@ fn file_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     return do_readdir(&mut k, pid, a / 256, a % 256, b, c);
   }
   if n == SYS_RENAME {
-    if a <= c && c <= XFER && copy_from_user(&mut k.spaces, pid, b, &mut k.fs.xfer, c) == c
+    if a <= c && c <= XFER && copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, b, &mut k.fs.xfer, c) == c
       && vfs_rename(&mut k.fs, a, c - a) {
       return 0;
     }
     return NO_RESULT;
   }
   if n == SYS_LINK {
-    if a <= c && c <= XFER && copy_from_user(&mut k.spaces, pid, b, &mut k.fs.xfer, c) == c
+    if a <= c && c <= XFER && copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, b, &mut k.fs.xfer, c) == c
       && vfs_link(&mut k.fs, a, c - a) == LINKED {
       return 0;
     }
@@ -581,7 +561,7 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   ensures kok(k)
 {
   if n == SYS_SOCKET {
-    return sock_new(&mut k.nic);
+    return sock_new(&mut k.nic, 0);
   }
   if n == SYS_BIND {
     if sock_bind(&mut k.nic, a, b) {
@@ -590,7 +570,7 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     return NO_RESULT;
   }
   if n == SYS_SENDTO {
-    let got = copy_from_user(&mut k.spaces, pid, b, &mut k.fs.xfer, smaller(c, XFER));
+    let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, b, &mut k.fs.xfer, smaller(c, XFER));
     if got == NO_RESULT {
       return NO_RESULT;
     }
@@ -598,7 +578,7 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   }
   if n == SYS_RECVFROM {
     let got = sock_recvfrom(&mut k.nic, a, &mut k.fs.xfer, smaller(c, XFER));
-    if got == NO_SOCK || copy_to_user(&mut k.spaces, pid, b, k.fs.xfer, got) == NO_RESULT {
+    if got == NO_SOCK || copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, b, k.fs.xfer, got) == NO_RESULT {
       return NO_RESULT;
     }
     return got;
@@ -616,16 +596,16 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     if a == 0 {
       return NO_SOCK;                 // a listener nobody could find
     }
-    return tcp_listen(&mut k.nic, a);
+    return tcp_listen(&mut k.nic, 0, a);
   }
   if n == SYS_TCP_ACCEPT {
     return tcp_accept(&mut k.nic, a);
   }
   if n == SYS_TCP_CONNECT {
-    return tcp_connect(&mut k.nic, a / 65536, a % 65536);
+    return tcp_connect(&mut k.nic, 0, a / 65536, a % 65536);
   }
   if n == SYS_TCP_SEND {
-    let got = copy_from_user(&mut k.spaces, pid, b, &mut k.fs.xfer, smaller(c, XFER));
+    let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, b, &mut k.fs.xfer, smaller(c, XFER));
     if got == NO_RESULT {
       return NO_RESULT;
     }
@@ -636,7 +616,7 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     if got == NO_SOCK || got == TCP_AGAIN {
       return got;
     }
-    if copy_to_user(&mut k.spaces, pid, b, k.fs.xfer, got) == NO_RESULT {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, b, k.fs.xfer, got) == NO_RESULT {
       return NO_RESULT;
     }
     return got;
