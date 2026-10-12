@@ -85,6 +85,14 @@ fn pci_next(p: &mut Pci, dev: u64) -> u64
   return dev + 1;
 }
 
+/// Is there no PCI at all (no host bridge answers at 0:0.0)? True on
+/// Firecracker and QEMU's microvm, never on a PC.
+fn pci_absent(p: &mut Pci) -> bool
+  requires pci_ok(p)
+{
+  return pci_read(&mut p, 0, PCI_ID) == 0xFFFFFFFF;
+}
+
 /// The first device with this vendor and device id, or PCI_NONE.
 fn pci_find(p: &mut Pci, vendor: u64, device: u64) -> u64
   requires pci_ok(p) && vendor <= 65535 && device <= 65535

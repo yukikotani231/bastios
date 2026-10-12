@@ -125,49 +125,418 @@ fn ring_r32(q: &mut Vq, off: u64) -> u64
   return cast[u64](dma_read32(&mut q.r2, off - 8192));
 }
 
+// The transport. A virtio device is reached either through the I/O ports of
+// its PCI function (the legacy layout above) or, on machines without PCI
+// (Firecracker, QEMU's microvm), through a 512-byte block of memory-mapped
+// registers (virtio-mmio). Version 1 of the latter is the legacy layout
+// again, with the queue given by page number; version 2 is the modern one:
+// the device must offer VERSION_1, which the driver accepts, and the three
+// parts of a queue are given by address. Drivers go through the functions
+// below and do not see which it is.
+
+const VM_MAGIC: u64 = 0x74726976;      // "virt"
+const VM_LEN: u64 = 0x200;
+const VM_VERSION: u64 = 0x004;
+const VM_DEVICE: u64 = 0x008;
+const VM_FEAT: u64 = 0x010;
+const VM_FEAT_SEL: u64 = 0x014;
+const VM_DRV_FEAT: u64 = 0x020;
+const VM_DRV_FEAT_SEL: u64 = 0x024;
+const VM_PAGE_SIZE: u64 = 0x028;       // version 1
+const VM_QSEL: u64 = 0x030;
+const VM_QMAX: u64 = 0x034;
+const VM_QNUM: u64 = 0x038;
+const VM_QALIGN: u64 = 0x03C;          // version 1
+const VM_QPFN: u64 = 0x040;            // version 1
+const VM_QREADY: u64 = 0x044;          // version 2
+const VM_QNOTIFY: u64 = 0x050;
+const VM_STATUS: u64 = 0x070;
+const VM_QDESC: u64 = 0x080;           // version 2, low then high word
+const VM_QDRV: u64 = 0x090;
+const VM_QDEV: u64 = 0x0A0;
+const VM_CONFIG: u64 = 0x100;
+const VIO_FEATURES_OK: u64 = 8;
+
+/// A device's memory-mapped registers: `v2` is the modern layout.
+struct VMem { regs: Mmio, v2: bool }
+
+enum Vt { Port(PortIo), Mem(VMem) }
+
+spec fn vt_ok(t: &Vt) -> bool {
+  (t is Vt::Port ==> port_count(t.Port) == VIO_PORTS)
+  && (t is Vt::Mem ==> mmio_len(t.Mem.regs) == VM_LEN && mmio_base(t.Mem.regs) % 4 == 0)
+}
+
+/// Does the transport hold I/O port k?
+spec fn vt_holds(t: &Vt, k: u64) -> bool {
+  t is Vt::Port && port_base(t.Port) <= k && k < port_base(t.Port) + VIO_PORTS
+}
+
+/// Does the transport hold device-window address a?
+spec fn vt_claims(t: &Vt, a: u64) -> bool {
+  t is Vt::Mem && mmio_base(t.Mem.regs) <= a && a < mmio_base(t.Mem.regs) + mmio_len(t.Mem.regs)
+}
+
+/// The I/O ports the transport holds, as lo .. hi (0 .. 0 for none).
+fn vt_port_lo(t: &Vt) -> u64
+  ensures t is Vt::Port ==> result == port_base(t.Port)
+  ensures !(t is Vt::Port) ==> result == 0
+{
+  match t {
+    Vt::Port(p) => { return port_base(p); },
+    Vt::Mem(d) => { return 0; },
+  }
+}
+
+fn vt_port_hi(t: &Vt) -> u64
+  ensures t is Vt::Port ==> result == port_base(t.Port) + VIO_PORTS
+  ensures !(t is Vt::Port) ==> result == 0
+{
+  match t {
+    Vt::Port(p) => { return port_base(p) + VIO_PORTS; },
+    Vt::Mem(d) => { return 0; },
+  }
+}
+
+/// The device-window block the transport holds, as lo .. hi (0 .. 0 for none).
+fn vt_mmio_lo(t: &Vt) -> u64
+  ensures t is Vt::Mem ==> result == mmio_base(t.Mem.regs)
+  ensures !(t is Vt::Mem) ==> result == 0
+{
+  match t {
+    Vt::Port(p) => { return 0; },
+    Vt::Mem(d) => { return mmio_base(d.regs); },
+  }
+}
+
+fn vt_mmio_hi(t: &Vt) -> u64
+  ensures t is Vt::Mem ==> result == mmio_base(t.Mem.regs) + mmio_len(t.Mem.regs)
+  ensures !(t is Vt::Mem) ==> result == 0
+{
+  match t {
+    Vt::Port(p) => { return 0; },
+    Vt::Mem(d) => { return mmio_base(d.regs) + mmio_len(d.regs); },
+  }
+}
+
+/// The device's status byte.
+fn vt_status(t: &mut Vt, v: u64)
+  requires vt_ok(t) && v <= 255
+  ensures vt_ok(t)
+  ensures forall k: u64 :: vt_holds(t, k) == old(vt_holds(t, k))
+  ensures forall a: u64 :: vt_claims(t, a) == old(vt_claims(t, a))
+{
+  match t {
+    Vt::Port(mut p) => {
+      pio_out8(&mut p, VIO_STATUS, cast[u8](v));
+      t = Vt::Port(p);
+    },
+    Vt::Mem(mut m) => {
+      mmio_write32(&mut m.regs, VM_STATUS, cast[u32](v));
+      t = Vt::Mem(m);
+    },
+  }
+}
+
+fn vt_get_status(t: &mut Vt) -> u64
+  requires vt_ok(t)
+  ensures vt_ok(t) && result <= 255
+  ensures forall k: u64 :: vt_holds(t, k) == old(vt_holds(t, k))
+  ensures forall a: u64 :: vt_claims(t, a) == old(vt_claims(t, a))
+{
+  match t {
+    Vt::Port(mut p) => {
+      let x = cast[u64](pio_in8(&mut p, VIO_STATUS));
+      t = Vt::Port(p);
+      return x;
+    },
+    Vt::Mem(mut m) => {
+      let x = cast[u64](mmio_read32(&mut m.regs, VM_STATUS)) % 256;
+      t = Vt::Mem(m);
+      return x;
+    },
+  }
+}
+
+/// Tells the device queue `q` has new buffers.
+fn vt_notify(t: &mut Vt, q: u64)
+  requires vt_ok(t) && q <= 65535
+  ensures vt_ok(t)
+  ensures forall k: u64 :: vt_holds(t, k) == old(vt_holds(t, k))
+  ensures forall a: u64 :: vt_claims(t, a) == old(vt_claims(t, a))
+{
+  match t {
+    Vt::Port(mut p) => {
+      pio_out16(&mut p, VIO_QUEUE_NOTIFY, cast[u16](q));
+      t = Vt::Port(p);
+    },
+    Vt::Mem(mut m) => {
+      mmio_write32(&mut m.regs, VM_QNOTIFY, cast[u32](q));
+      t = Vt::Mem(m);
+    },
+  }
+}
+
+/// Byte `off` of the device's own configuration (the MAC address of a
+/// network card), `msix` saying the ports have the two MSI-X registers.
+fn vt_cfg8(t: &mut Vt, off: u64, msix: bool) -> u64
+  requires vt_ok(t) && off < 8
+  ensures vt_ok(t) && result <= 255
+  ensures forall k: u64 :: vt_holds(t, k) == old(vt_holds(t, k))
+  ensures forall a: u64 :: vt_claims(t, a) == old(vt_claims(t, a))
+{
+  match t {
+    Vt::Port(mut p) => {
+      let mut base = VIO_CONFIG;
+      if msix {
+        base = VIO_CONFIG_MSIX;
+      }
+      let x = cast[u64](pio_in8(&mut p, base + off));
+      t = Vt::Port(p);
+      return x;
+    },
+    Vt::Mem(mut m) => {
+      let x = cast[u64](mmio_read8(&mut m.regs, VM_CONFIG + off));
+      t = Vt::Mem(m);
+      return x;
+    },
+  }
+}
+
+/// The 64-bit word at the start of the configuration (a disk's size).
+fn vt_cfg64(t: &mut Vt, msix: bool) -> u64
+  requires vt_ok(t)
+  ensures vt_ok(t)
+  ensures forall k: u64 :: vt_holds(t, k) == old(vt_holds(t, k))
+  ensures forall a: u64 :: vt_claims(t, a) == old(vt_claims(t, a))
+{
+  match t {
+    Vt::Port(mut p) => {
+      let mut base = VIO_CONFIG;
+      if msix {
+        base = VIO_CONFIG_MSIX;
+      }
+      let lo = cast[u64](pio_in32(&mut p, base));
+      let hi = cast[u64](pio_in32(&mut p, base + 4));
+      t = Vt::Port(p);
+      return lo + hi * 4294967296;
+    },
+    Vt::Mem(mut m) => {
+      let lo = cast[u64](mmio_read32(&mut m.regs, VM_CONFIG));
+      let hi = cast[u64](mmio_read32(&mut m.regs, VM_CONFIG + 4));
+      t = Vt::Mem(m);
+      return lo + hi * 4294967296;
+    },
+  }
+}
+
+/// With MSI-X on at a PCI device: sends configuration changes nowhere and
+/// queues 0 .. `queues - 1`, queue 0 last, to message 0 only for queue 0.
+/// True if the device took message 0 for queue 0. Never on memory-mapped
+/// transports, which have no MSI-X (the queues are polled).
+fn vt_msix(t: &mut Vt, queues: u64) -> bool
+  requires vt_ok(t) && queues >= 1 && queues <= 2
+  ensures vt_ok(t)
+  ensures forall k: u64 :: vt_holds(t, k) == old(vt_holds(t, k))
+  ensures forall a: u64 :: vt_claims(t, a) == old(vt_claims(t, a))
+{
+  match t {
+    Vt::Port(mut p) => {
+      pio_out16(&mut p, VIO_MSIX_CONFIG, cast[u16](VIO_NO_VECTOR));
+      if queues == 2 {
+        pio_out16(&mut p, VIO_QUEUE_SEL, 1);
+        pio_out16(&mut p, VIO_MSIX_QUEUE, cast[u16](VIO_NO_VECTOR));
+      }
+      pio_out16(&mut p, VIO_QUEUE_SEL, 0);
+      pio_out16(&mut p, VIO_MSIX_QUEUE, 0);
+      let ok = cast[u64](pio_in16(&mut p, VIO_MSIX_QUEUE)) == 0;
+      t = Vt::Port(p);
+      return ok;
+    },
+    Vt::Mem(mut m) => { t = Vt::Mem(m); return false; },
+  }
+}
+
 /// Starts the handshake: reset, then "I see you" and "I can drive you".
 /// Accepts feature bit `want` (a power of two, or 0 for none) if the device
-/// offers it, and returns false if nothing answers.
-fn virtio_start(io: &mut PortIo, want: u64) -> bool
-  requires port_count(io) == VIO_PORTS && want <= 2147483648
+/// offers it, and returns false if nothing answers (or, on a modern
+/// memory-mapped device, if it does not offer VERSION_1 or will not take
+/// the features).
+fn vt_start(t: &mut Vt, want: u64) -> bool
+  requires vt_ok(t) && want <= 2147483648
+  ensures vt_ok(t)
+  ensures forall k: u64 :: vt_holds(t, k) == old(vt_holds(t, k))
+  ensures forall a: u64 :: vt_claims(t, a) == old(vt_claims(t, a))
 {
-  pio_out8(&mut io, VIO_STATUS, 0);
-  pio_out8(&mut io, VIO_STATUS, cast[u8](VIO_ACK));
-  pio_out8(&mut io, VIO_STATUS, cast[u8](VIO_ACK + VIO_DRIVER));
-  let offered = cast[u64](pio_in32(&mut io, VIO_HOST_FEATURES));
-  if offered == 0xFFFFFFFF {
-    return false;
+  match t {
+    Vt::Port(mut io) => {
+      pio_out8(&mut io, VIO_STATUS, 0);
+      pio_out8(&mut io, VIO_STATUS, cast[u8](VIO_ACK));
+      pio_out8(&mut io, VIO_STATUS, cast[u8](VIO_ACK + VIO_DRIVER));
+      let offered = cast[u64](pio_in32(&mut io, VIO_HOST_FEATURES));
+      if offered == 0xFFFFFFFF {
+        t = Vt::Port(io);
+        return false;
+      }
+      let mut acc = 0;
+      if want > 0 && offered / want % 2 == 1 {
+        acc = want;
+      }
+      pio_out32(&mut io, VIO_GUEST_FEATURES, cast[u32](acc));
+      t = Vt::Port(io);
+      return true;
+    },
+    Vt::Mem(mut d) => {
+      mmio_write32(&mut d.regs, VM_STATUS, 0);
+      mmio_write32(&mut d.regs, VM_STATUS, cast[u32](VIO_ACK));
+      mmio_write32(&mut d.regs, VM_STATUS, cast[u32](VIO_ACK + VIO_DRIVER));
+      mmio_write32(&mut d.regs, VM_FEAT_SEL, 0);
+      let offered = cast[u64](mmio_read32(&mut d.regs, VM_FEAT));
+      let mut acc = 0;
+      if want > 0 && offered / want % 2 == 1 {
+        acc = want;
+      }
+      mmio_write32(&mut d.regs, VM_DRV_FEAT_SEL, 0);
+      mmio_write32(&mut d.regs, VM_DRV_FEAT, cast[u32](acc));
+      let mut ok = true;
+      if d.v2 {
+        mmio_write32(&mut d.regs, VM_FEAT_SEL, 1);
+        let hi = cast[u64](mmio_read32(&mut d.regs, VM_FEAT));
+        mmio_write32(&mut d.regs, VM_DRV_FEAT_SEL, 1);
+        mmio_write32(&mut d.regs, VM_DRV_FEAT, 1);
+        ok = hi % 2 == 1;
+        if ok {
+          mmio_write32(&mut d.regs, VM_STATUS, cast[u32](VIO_ACK + VIO_DRIVER + VIO_FEATURES_OK));
+          ok = (cast[u64](mmio_read32(&mut d.regs, VM_STATUS)) / VIO_FEATURES_OK) % 2 == 1;
+        }
+      } else {
+        mmio_write32(&mut d.regs, VM_PAGE_SIZE, 4096);
+      }
+      t = Vt::Mem(d);
+      return ok;
+    },
   }
-  let mut acc = 0;
-  if want > 0 && offered / want % 2 == 1 {
-    acc = want;
+}
+
+/// Does the transport carry the modern 12-byte network header? (The
+/// legacy layout has 10 bytes.)
+fn vt_modern(t: &mut Vt) -> bool
+  requires vt_ok(t)
+  ensures vt_ok(t)
+  ensures forall k: u64 :: vt_holds(t, k) == old(vt_holds(t, k))
+  ensures forall a: u64 :: vt_claims(t, a) == old(vt_claims(t, a))
+{
+  match t {
+    Vt::Port(mut p) => { t = Vt::Port(p); return false; },
+    Vt::Mem(mut d) => { let v = d.v2; t = Vt::Mem(d); return v; },
   }
-  pio_out32(&mut io, VIO_GUEST_FEATURES, cast[u32](acc));
-  return true;
 }
 
 /// Gives queue `sel` its pages and lays it out for the device's queue size.
 /// False (and the queue unchanged) if the size is unusable or the pages are
 /// not contiguous below 4 GiB.
-fn vq_setup(io: &mut PortIo, q: &mut Vq, sel: u64) -> bool
-  requires port_count(io) == VIO_PORTS && vq_ok(q) && sel <= 65535
-  ensures vq_ok(q)
+fn vq_setup(t: &mut Vt, q: &mut Vq, sel: u64) -> bool
+  requires vt_ok(t) && vq_ok(q) && sel <= 65535
+  ensures vt_ok(t) && vq_ok(q)
+  ensures forall k: u64 :: vt_holds(t, k) == old(vt_holds(t, k))
+  ensures forall a: u64 :: vt_claims(t, a) == old(vt_claims(t, a))
 {
-  pio_out16(&mut io, VIO_QUEUE_SEL, cast[u16](sel));
-  let n = cast[u64](pio_in16(&mut io, VIO_QUEUE_SIZE));
   let a = dma_addr(q.r0);
-  if n < 3 || n > 256 || a % 4096 != 0 || a > ADDR_LIMIT - RING_BYTES
+  if a % 4096 != 0 || a > ADDR_LIMIT - RING_BYTES
     || dma_addr(q.r1) != a + 4096 || dma_addr(q.r2) != a + 8192 {
     return false;
   }
-  q.n = n;
-  q.avail = 16 * n;
-  q.used = (18 * n + 6 + 4095) / 4096 * 4096;
-  q.idx = 0;
-  q.seen = 0;
-  ring_w16(&mut q, q.avail, AVAIL_NO_INTERRUPT);
-  pio_out32(&mut io, VIO_QUEUE_PFN, cast[u32](a / 4096));
-  return true;
+  match t {
+    Vt::Port(mut io) => {
+      pio_out16(&mut io, VIO_QUEUE_SEL, cast[u16](sel));
+      let n = cast[u64](pio_in16(&mut io, VIO_QUEUE_SIZE));
+      if n < 3 || n > 256 {
+        t = Vt::Port(io);
+        return false;
+      }
+      q.n = n;
+      q.avail = 16 * n;
+      q.used = (18 * n + 6 + 4095) / 4096 * 4096;
+      q.idx = 0;
+      q.seen = 0;
+      ring_w16(&mut q, q.avail, AVAIL_NO_INTERRUPT);
+      pio_out32(&mut io, VIO_QUEUE_PFN, cast[u32](a / 4096));
+      t = Vt::Port(io);
+      return true;
+    },
+    Vt::Mem(mut d) => {
+      mmio_write32(&mut d.regs, VM_QSEL, cast[u32](sel));
+      let max = cast[u64](mmio_read32(&mut d.regs, VM_QMAX));
+      // The largest power of two the device allows, up to 256.
+      let mut n = 256;
+      while n > 4 && n > max
+        invariant n >= 2 && n <= 256
+      {
+        n = n / 2;
+      }
+      if n < 4 || n > max {
+        t = Vt::Mem(d);
+        return false;
+      }
+      q.n = n;
+      q.avail = 16 * n;
+      q.used = (18 * n + 6 + 4095) / 4096 * 4096;
+      q.idx = 0;
+      q.seen = 0;
+      ring_w16(&mut q, q.avail, AVAIL_NO_INTERRUPT);
+      mmio_write32(&mut d.regs, VM_QNUM, cast[u32](n));
+      if d.v2 {
+        mmio_write32(&mut d.regs, VM_QDESC, cast[u32](a));
+        mmio_write32(&mut d.regs, VM_QDESC + 4, 0);
+        mmio_write32(&mut d.regs, VM_QDRV, cast[u32](a + q.avail));
+        mmio_write32(&mut d.regs, VM_QDRV + 4, 0);
+        mmio_write32(&mut d.regs, VM_QDEV, cast[u32](a + q.used));
+        mmio_write32(&mut d.regs, VM_QDEV + 4, 0);
+        mmio_write32(&mut d.regs, VM_QREADY, 1);
+      } else {
+        mmio_write32(&mut d.regs, VM_QALIGN, 4096);
+        mmio_write32(&mut d.regs, VM_QPFN, cast[u32](a / 4096));
+      }
+      t = Vt::Mem(d);
+      return true;
+    },
+  }
+}
+
+/// Resets the device, then takes queue `sel` away from it (the device must
+/// not touch the pages afterwards).
+fn vt_stop(t: &mut Vt, sel: u64)
+  requires vt_ok(t) && sel <= 65535
+  ensures vt_ok(t)
+  ensures forall k: u64 :: vt_holds(t, k) == old(vt_holds(t, k))
+  ensures forall a: u64 :: vt_claims(t, a) == old(vt_claims(t, a))
+{
+  match t {
+    Vt::Port(mut io) => {
+      pio_out8(&mut io, VIO_STATUS, 0);
+      pio_out16(&mut io, VIO_QUEUE_SEL, cast[u16](sel));
+      pio_out32(&mut io, VIO_QUEUE_PFN, 0);
+      t = Vt::Port(io);
+    },
+    Vt::Mem(mut d) => {
+      mmio_write32(&mut d.regs, VM_STATUS, 0);
+      mmio_write32(&mut d.regs, VM_QSEL, cast[u32](sel));
+      if d.v2 {
+        mmio_write32(&mut d.regs, VM_QREADY, 0);
+      } else {
+        mmio_write32(&mut d.regs, VM_QPFN, 0);
+      }
+      t = Vt::Mem(d);
+    },
+  }
+}
+
+/// Gives the transport's ports or registers back.
+fn vt_release(ports: &mut Ports, win: &mut MmioSpace, t: Vt) {
+  match t {
+    Vt::Port(p) => { port_release(&mut ports, p); },
+    Vt::Mem(d) => { mmio_release(&mut win, d.regs); },
+  }
 }
 
 /// Asks the device to signal when it hands a chain back (it was told

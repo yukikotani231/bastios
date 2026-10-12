@@ -1252,6 +1252,41 @@ if os.path.exists(ena_bin):
 else:
     print("skip (ena) no QEMU with the ENA model at", ena_bin, "(tools/qemu-ena/build.sh builds it)")
 
+# virtio over MMIO (src/virtio_mmio.bastio), as on QEMU's microvm machine
+# and Firecracker: no PCI at all. Version 1 is the legacy register layout,
+# version 2 the modern one (QEMU offers both). The disk and the network card
+# are found at fixed slots; the disk keeps what the earlier boots wrote.
+def mmio_ready(version):
+    def ready():
+        global fails
+        ok = b"disk: virtio" in out and b"net: virtio, mac 52:54:00:12:34:56" in out
+        print(("ok  " if ok else "FAIL"), f"(virtio-mmio v{version} boot) disk and card found")
+        fails += not ok
+        t0 = time.time()
+        leased = False
+        while not leased and time.time() - t0 < 10:
+            mark = len(out)
+            qemu.stdin.write(b"ifconfig\r"); qemu.stdin.flush()
+            read_until(b"bastios> ", mark)
+            leased = b"(DHCP)" in out[mark:]
+            if not leased:
+                time.sleep(0.5)
+        print(("ok  " if leased else "FAIL"), f"(virtio-mmio v{version} boot) DHCP lease")
+        fails += not leased
+    return ready
+for version, legacy in ((1, "on"), (2, "off")):
+    qemu = boot(1, extra=["-machine", "microvm", "-global", "virtio-mmio.force-legacy=" + legacy,
+                          "-drive", f"file={disk},format=raw,if=none,id=mv",
+                          "-device", "virtio-blk-device,drive=mv",
+                          "-netdev", "user,id=m0", "-device", "virtio-net-device,netdev=m0"])
+    session(f"virtio-mmio v{version}", None, [
+        (f"echo mmio{version} > disk/mm", b""),
+        ("cat disk/mm", f"mmio{version}\r\n".encode()),
+        ("fstest", b"fstest: disk ok"),
+        ("rm disk/mm", b""),
+        ("ping", b"reply from 10.0.2.2"),
+    ], halt=True, ready=mmio_ready(version))
+
 # The PVH entry (boot.S), which Firecracker and QEMU's microvm machine use
 # when the image has no Multiboot header: QEMU prefers Multiboot when both
 # are there, so the header's magic is zeroed in a copy of the kernel.
