@@ -319,6 +319,8 @@ int main(int argc, char **argv)
 
     /* A child whose thread calls _exit while the others wait. */
     pid_t c = fork();
+    if (c < 0)
+        FAIL("fork: errno %d", errno);
     if (c == 0) {
         pthread_create(&t[1], 0, sleeper, 0);
         pthread_create(&t[2], 0, ender, 0);
