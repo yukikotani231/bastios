@@ -137,6 +137,9 @@ static int probes(void)
         return fail("a fresh process has no seccomp or no_new_privs");
     if (prctl(PR_SET_NO_NEW_PRIVS, 0, 0, 0, 0) != -1 || errno != EINVAL)
         return fail("no_new_privs cannot be cleared");
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 1, 0, 0) != -1 || errno != EINVAL
+        || prctl(PR_GET_NO_NEW_PRIVS, 1, 0, 0, 0) != -1 || errno != EINVAL)
+        return fail("unused no_new_privs arguments must be 0");
     return 0;
 }
 
@@ -302,6 +305,8 @@ static int unprivileged(void)
     struct sock_filter allow[] = { RET(SECCOMP_RET_ALLOW) };
     if (load(allow, 1) != -1 || errno != EACCES)
         return 2;                   /* needs no_new_privs or CAP_SYS_ADMIN */
+    if (prctl(PR_SET_SECCOMP, 2, (unsigned long)-4096, 0, 0) != -1 || errno != EFAULT)
+        return 2;                   /* but a bad program pointer is EFAULT first */
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 || load(allow, 1) != 0)
         return 3;
     return 0;

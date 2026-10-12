@@ -851,6 +851,15 @@ fn lx_seccomp(k: &mut Kernel, pid: u64, op: u64, flags: u64, uarg: u64) -> u64
       return EINVAL;
     }
     if !sc_may(k, pid) {
+      // Linux reads the program header first, so a bad pointer is EFAULT
+      // and a bad length EINVAL before the lack of rights is EACCES.
+      if uarg == 0 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, uarg, &mut k.fs.xfer, 16) != 16 {
+        return EFAULT;
+      }
+      let cnt = get_u64(k.fs.xfer, 0) % 0x10000;
+      if cnt == 0 || cnt > SC_MAXI {
+        return EINVAL;
+      }
       return EACCES;
     }
     if sc_flags(k, pid) / 2 == 1 {
@@ -900,13 +909,16 @@ fn sc_prctl(k: &mut Kernel, pid: u64, op: u64, a: u64, b: u64) -> u64
   ensures kok(k)
 {
   if op == SC_PR_SET_NNP {
-    if a != 1 {
+    if a != 1 || b != 0 {
       return EINVAL;
     }
     sp_put(&mut k, pid * SC_PW + 1, sc_flags(k, pid) / 2 * 2 + 1);
     return 0;
   }
   if op == SC_PR_GET_NNP {
+    if a != 0 || b != 0 {
+      return EINVAL;                        // the unused arguments must be 0, as on Linux
+    }
     if sc_nnp(k, pid) {
       return 1;
     }
