@@ -6,8 +6,9 @@
 
 import "pages.bastio";
 
+const EM_NATIVE: u64 = 183;      // the ELF machine of the programs it runs: EM_AARCH64
 const NREGS: u64 = 37;
-const REGS_EXT: u64 = 16;
+const REGS_EXT: u64 = 17;
 
 const R_NUM: u64 = 8;
 const R_RET: u64 = 0;
@@ -21,6 +22,26 @@ const R_FLAGS: u64 = 33;
 const R_TLS: u64 = 36;           // TPIDR_EL0
 const NLOAD: u64 = 34;           // x0-x30, SP_EL0, ELR, SPSR: ESR and FAR are not settable
 const FLAGS_INIT: u64 = 0;       // SPSR of a new process: EL0t, interrupts on
+
+// What the Linux layer calls registers: offsets from F_REGS into a
+// process's row (reg_word's words minus F_REGS). The Linux arm64 call
+// takes its arguments in x0-x5 in the order the x86-64 call takes rdi, rsi,
+// rdx, r10, r8, r9. The call's number is not x8 itself: it is kept in a
+// word of its own past the saved registers (R_LXNR), already turned into
+// the number the Linux layer uses, so that x8 reaches the program unchanged.
+const R_RAX: u64 = 0;
+const R_RDI: u64 = 0;
+const R_RSI: u64 = 1;
+const R_RDX: u64 = 2;
+const R_R10: u64 = 3;
+const R_R8: u64 = 4;
+const R_R9: u64 = 5;
+const R_RSP: u64 = 74;           // reg_word(31) - F_REGS
+const R_RIP: u64 = 75;           // reg_word(32)
+const R_RFLAGS: u64 = 76;        // reg_word(33)
+const R_FSBASE: u64 = 79;        // reg_word(36)
+const R_LXNR: u64 = 80;          // the word after the 37 registers
+const SYSCALL_LEN: u64 = 4;      // `svc #0`
 
 /// The FP/SIMD state a process starts with: all zero, which is FPCR 0 and
 /// zeroed vector registers, so there is nothing to write.

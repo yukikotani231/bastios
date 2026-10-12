@@ -792,7 +792,7 @@ fn lx_mlock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64) -> u64
       r = lock_count(&mut k, pid, bytes, n == LX_MLOCK);
     }
     // mlock2 with MLOCK_ONFAULT locks the range without populating it.
-    let onfault = pget(k.procs, pid, F_REGS + R_RAX) == LX_MLOCK2 && pget(k.procs, pid, F_REGS + R_RDX) % 2 == 1;
+    let onfault = pget(k.procs, pid, F_REGS + R_LXNR) == LX_MLOCK2 && pget(k.procs, pid, F_REGS + R_RDX) % 2 == 1;
     if r == 0 && n == LX_MLOCK && a >= USER_BASE && !onfault {
       // Locked pages are resident: map those not touched yet (src/lxanon.bastio).
       anon_reach(&mut k, pid, from, to);

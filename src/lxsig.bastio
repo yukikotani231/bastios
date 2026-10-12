@@ -937,7 +937,7 @@ fn is_sig_call(n: u64) -> bool {
 /// registers (r8-r15, rdi, rsi, rbp, rbx, rdx, rax, rcx, rsp, rip, eflags).
 fn sc_reg(g: u64) -> u64
   requires g < 18
-  ensures result < 21
+  ensures F_REGS + result < STRIDE
 {
   if g < 8 {
     return 7 + g;                           // r8 .. r15
@@ -964,7 +964,7 @@ fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
   // woke it may be one it waits for, which Linux hands to the call rather
   // than to a handler. If another signal is pending, the call ends with
   // EINTR and the signal is delivered after it (lx_sigtimedwait).
-  if pget(k.procs, p, F_RESTART) != 0 && pget(k.procs, p, F_REGS + R_RAX) == 128 {
+  if pget(k.procs, p, F_RESTART) != 0 && pget(k.procs, p, F_REGS + R_LXNR) == 128 {
     return true;
   }
   if pget(k.procs, p, F_SIGPEND) == 0 {
@@ -1098,7 +1098,7 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   // again. A wait4 that SIGCHLD
   // interrupts always does: on Linux it would already have its child,
   // and here it collects it when it runs again after the handler.
-  let call = pget(k.procs, p, F_REGS + R_RAX);
+  let call = pget(k.procs, p, F_REGS + R_LXNR);
   let waiting = pget(k.procs, p, F_RESTART) != 0;
   // ppoll and pselect6 with a mask swap it as rt_sigsuspend does, and
   // never run again after a handler either.
@@ -1109,11 +1109,11 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   if waiting && (flags & SA_RESTART == 0 || pausing) && !reaping {
     let rip = pget(k.procs, p, F_REGS + R_RIP);
     if rip <= 0xFFFFFFFFFFFFFFF0 {
-      pset(&mut k.procs, p, F_REGS + R_RIP, rip + 2);
+      pset(&mut k.procs, p, F_REGS + R_RIP, rip + SYSCALL_LEN);
       if sleep_left(&mut k, p, call) {
-        pset(&mut k.procs, p, F_REGS + R_RAX, EINTR);
+        pset(&mut k.procs, p, F_REGS + R_RET, EINTR);
       } else {
-        pset(&mut k.procs, p, F_REGS + R_RAX, EFAULT);
+        pset(&mut k.procs, p, F_REGS + R_RET, EFAULT);
       }
     }
   }
@@ -1189,7 +1189,7 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   pset(&mut k.procs, p, F_REGS + R_RDI, s);
   pset(&mut k.procs, p, F_REGS + R_RSI, base + INFO_AT);
   pset(&mut k.procs, p, F_REGS + R_RDX, base + UC_AT);
-  pset(&mut k.procs, p, F_REGS + R_RAX, 0);
+  pset(&mut k.procs, p, F_REGS + R_RET, 0);
   return true;
 }
 

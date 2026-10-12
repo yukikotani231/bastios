@@ -230,7 +230,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k) && con_ok(con)
 {
-  let n = lx_alias(k, pid, pget(k.procs, pid, F_REGS + R_RAX));   // src/lxextra.bastio
+  let n = lx_alias(k, pid, pget(k.procs, pid, F_REGS + R_LXNR));   // src/lxextra.bastio
   let sp = pget(k.procs, pid, F_REGS + R_RSP);
   if sp >= USER_BASE + 128 {
     stack_reach(&mut k.mem, &mut k.spaces, pid, sp - 128);   // the red zone too
@@ -248,7 +248,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if sc_mode(k, pid) != 0 {
     // seccomp (src/lxseccomp.bastio): the filters see the registers as the
     // process made the call, before any translation.
-    let v = sc_decide(&mut k, pid, pget(k.procs, pid, F_REGS + R_RAX));
+    let v = sc_decide(&mut k, pid, pget(k.procs, pid, F_REGS + R_LXNR));
     if !v.run {
       ret(&mut k.procs, pid, v.ret);
       return KEEP;
@@ -1316,7 +1316,7 @@ fn lx_reading(procs: &Buf) -> bool
     if state(procs, p) == LXREADING {
       return true;
     }
-    let n = pget(procs, p, F_REGS + R_RAX);
+    let n = pget(procs, p, F_REGS + R_LXNR);
     if pget(procs, p, F_RESTART) >= 2
       && (n == LX_POLL || n == LX_PPOLL || n == LX_SELECT || n == LX_PSELECT6 || n == LX_EPOLL_WAIT
         || n == LX_EPOLL_PWAIT || n == LX_EPOLL_PWAIT2 || n == LX_READ) {
@@ -1396,12 +1396,12 @@ fn console_read(k: &mut Kernel, pid: u64, va: u64, n: u64, was: u64) -> u64
   }
   if get(k.line, 1) == 0 {
     let rip = pget(k.procs, pid, F_REGS + R_RIP);
-    if rip < 2 {
+    if rip < SYSCALL_LEN {
       ret(&mut k.procs, pid, EFAULT);
       return KEEP;
     }
-    pset(&mut k.procs, pid, F_REGS + R_RIP, rip - 2);
-    pset(&mut k.procs, pid, F_REGS + R_RAX, LX_READ);
+    pset(&mut k.procs, pid, F_REGS + R_RIP, rip - SYSCALL_LEN);
+    pset(&mut k.procs, pid, F_REGS + R_LXNR, LX_READ);
     pset(&mut k.procs, pid, F_STATE, LXREADING);
     pset(&mut k.procs, pid, F_RESTART, 1);
     return SWITCH;

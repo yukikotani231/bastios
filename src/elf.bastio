@@ -26,7 +26,6 @@ const PH_MAX: u64 = 64;               // most program headers we accept
 
 const ET_EXEC: u64 = 2;
 const ET_DYN: u64 = 3;
-const EM_X86_64: u64 = 62;
 const PT_LOAD: u64 = 1;
 const PT_INTERP: u64 = 3;
 
@@ -230,12 +229,12 @@ fn elf_parse_at(v: &mut Vfs, src: Src, place: u64) -> Elf
   if bget(v.xfer, 0) != 0x7F || bget(v.xfer, 1) != 0x45 || bget(v.xfer, 2) != 0x4C || bget(v.xfer, 3) != 0x46 {
     return bad_elf();
   }
-  // 64-bit, little-endian, version 1, x86-64.
+  // 64-bit, little-endian, version 1, this machine.
   if bget(v.xfer, 4) != 2 || bget(v.xfer, 5) != 1 || bget(v.xfer, 6) != 1 {
     return bad_elf();
   }
   let ty = rd16(v.xfer, 16);
-  if rd16(v.xfer, 18) != EM_X86_64 || rd32(v.xfer, 20) != 1 {
+  if rd16(v.xfer, 18) != EM_NATIVE || rd32(v.xfer, 20) != 1 {
     return bad_elf();
   }
   let mut bias = 0;

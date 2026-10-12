@@ -4,6 +4,7 @@
 
 import "pages.bastio";
 
+const EM_NATIVE: u64 = 62;       // the ELF machine of the programs it runs: EM_X86_64
 const NREGS: u64 = 21;           // saved words, in `cpu_get` order
 const REGS_EXT: u64 = 0;         // words a row holds past the usual 72 for registers beyond 21
 
@@ -19,6 +20,23 @@ const R_FLAGS: u64 = 17;
 const R_TLS: u64 = 20;           // FS base
 const NLOAD: u64 = 18;           // words cpu_set takes in order, before R_TLS
 const FLAGS_INIT: u64 = 0x202;   // rflags of a new process: interrupts on
+
+// What the Linux layer calls registers. Each is an offset from F_REGS into
+// a process's row (see reg_word), not a `cpu_get` index: they are the same
+// numbers on x86-64, where all 21 registers sit in the register block.
+const R_RAX: u64 = 0;
+const R_RDX: u64 = 3;            // Linux system call arguments 3, 2, 1, 6, 5, 4
+const R_RSI: u64 = 4;
+const R_RDI: u64 = 5;
+const R_R8: u64 = 7;
+const R_R9: u64 = 8;
+const R_R10: u64 = 9;
+const R_RIP: u64 = 15;
+const R_RSP: u64 = 16;
+const R_RFLAGS: u64 = 17;
+const R_FSBASE: u64 = 20;
+const R_LXNR: u64 = 0;           // the Linux call being made (or run again): rax, which the result then replaces
+const SYSCALL_LEN: u64 = 2;      // bytes of the instruction that traps into the kernel (`syscall`)
 
 /// The x87/SSE state a Linux process starts with: control word 0x37F and
 /// MXCSR 0x1F80 (every exception masked, round to nearest).

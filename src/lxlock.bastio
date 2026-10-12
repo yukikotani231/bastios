@@ -73,7 +73,7 @@ fn lk_waiter(k: &Kernel, g: u64) -> u64
   {
     let st = state(k.procs, p);
     if st != FREE && st != ZOMBIE && tgid(k.procs, p) == g && lk_wait_get(k.locks, p, 0) != 0
-      && pget(k.procs, p, F_RESTART) != 0 && pget(k.procs, p, F_REGS + R_RAX) == LX_FCNTL {
+      && pget(k.procs, p, F_RESTART) != 0 && pget(k.procs, p, F_REGS + R_LXNR) == LX_FCNTL {
       return p;
     }
     p = p + 1;
