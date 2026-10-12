@@ -15,6 +15,7 @@
 // arguments in x0-x2 (bastiolang's user prelude), and gets the result in x0.
 
 import "tsc.bastio";
+import "dt.bastio";
 import "console.bastio";
 import "pages.bastio";
 import "space.bastio";
@@ -339,7 +340,12 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   puts(&mut console, "\r\nBastiOS 0.2 (aarch64): ");
   put_num(&mut console, count_avail(m.bm));
   puts(&mut console, " pages of memory, 1 processor\r\n");
-  let vm_where = vmw_default();
+  let vm_where = dt_slots(cpu);
+  puts(&mut console, "devicetree: ");
+  put_num(&mut console, vm_where.slots);
+  puts(&mut console, " virtio-mmio slots from ");
+  put_hex(&mut console, vm_where.first);
+  puts(&mut console, "\r\n");
   let dev = blk_find(&mut m, &mut win, vm_where);
   let dk_lo = blk_mmio_lo(dev);
   let dk_hi = blk_mmio_hi(dev);
