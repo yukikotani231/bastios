@@ -451,14 +451,14 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
 /// The clone flags a new process (not a thread, not a vfork) may carry:
 /// the exit signal, CLONE_PARENT, the tid and TLS flags, and the ones
 /// that change nothing here (CLONE_SYSVSEM, CLONE_DETACHED, CLONE_IO).
-/// CLONE_NEWNS, CLONE_NEWUTS and CLONE_NEWIPC give the child a mount, UTS
-/// or IPC namespace of its own. Sharing files, the cwd, signal handlers or
+/// CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC and CLONE_NEWCGROUP give the
+/// child a mount, UTS, IPC or cgroup namespace of its own. Sharing files, the cwd, signal handlers or
 /// memory with a separate process, and the other namespaces, are not
 /// supported.
 fn clone_proc_flags(flags: u64) -> bool {
   let known = 0xff + CLONE_PARENT + CLONE_SYSVSEM + CLONE_SETTLS + CLONE_PARENT_SETTID
     + CLONE_CHILD_CLEARTID + CLONE_DETACHED + CLONE_CHILD_SETTID + CLONE_IO + CLONE_NEWNS
-    + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWUSER;
+    + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWUSER + CLONE_NEWCGROUP;
   return flags & known == flags;
 }
 
@@ -477,7 +477,7 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
       return EINVAL;                        // init has no parent to share
     }
   }
-  let nsf = flags & (CLONE_NEWNS + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID);
+  let nsf = flags & (CLONE_NEWNS + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWCGROUP);
   if nsf != 0 && flags & CLONE_NEWUSER == 0 && !ns_cap(k, pid, CAP_SYS_ADMIN) {
     return EPERM;                           // a new user namespace makes the caller privileged in it (src/lxuser.bastio)
   }
@@ -510,7 +510,7 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
   if flags & CLONE_NEWNS != 0 {
     let e = ns_unshare(&mut k, c);          // cannot fail: ns_room said so
   }
-  let e2 = nsk_unshare(&mut k, c, flags & (CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWUSER));   // nor this: uts_room did (src/lxnsk.bastio)
+  let e2 = nsk_unshare(&mut k, c, flags & (CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWUSER + CLONE_NEWCGROUP));   // nor this: uts_room did (src/lxnsk.bastio)
   if flags & CLONE_NEWPID != 0 {
     pidns_clone(&mut k, c);                 // the child is the init of a new PID namespace
   }
@@ -562,8 +562,8 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
     if ns & CLONE_NEWUSER == 0 && !ns_cap(k, pid, CAP_SYS_ADMIN) {
       return EPERM;
     }
-    if ns & (CLONE_NEWNS + CLONE_NEWNET + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWUSER) != ns {
-      return EINVAL;                        // not the cgroup namespace yet
+    if ns & (CLONE_NEWNS + CLONE_NEWNET + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWUSER + CLONE_NEWCGROUP) != ns {
+      return EINVAL;                        // not the time namespace
     }
     if ns & CLONE_NEWUSER != 0 && nsk_of(k, NSK_USER, pid) != 0 {
       return ENOSPC;                        // two levels so far (src/lxuser.bastio)

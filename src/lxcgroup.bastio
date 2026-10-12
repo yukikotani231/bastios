@@ -23,8 +23,14 @@
 // cgroup.freeze reads 0 and takes 0; writing 1 is EOPNOTSUPP, as nothing can be
 // frozen yet.
 //
+// A cgroup namespace (unshare or clone with CLONE_NEWCGROUP) is named by its
+// root, the group the process was in (NSK_CGN). A process in one sees that
+// group as /sys/fs/cgroup (cg_view puts the root's path in front of what
+// the path walk finds), and /proc/PID/cgroup is relative to it. A group that
+// is the root of a namespace some process is in cannot be removed.
+//
 // Not done: memory.max and cpu.max are kept and read back but nothing
-// enforces them yet; the "no internal processes" rule; cgroup namespaces.
+// enforces them yet; the "no internal processes" rule.
 
 import "lxuser.bastio";
 
@@ -623,15 +629,70 @@ fn cg_mem_current(k: &Kernel, s: u64) -> u64
   return 0;
 }
 
-/// Text of /proc/PID/cgroup: "0::/path".
-fn cg_proc_text(k: &Kernel, p: u64, o: &mut Bytes) -> u64
-  requires kok(k) && p < NPROC && blen(o) == PROC_OUT
-  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+/// The root of process pid's cgroup namespace: the group it was in when it
+/// unshared (0 in the first namespace).
+fn cgns_root(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result < CG_N
 {
-  // The path is built from the leaf up, so collect the chain first.
+  let id = nsk_of(k, NSK_CGN, pid);
+  if id == 0 {
+    return 0;
+  }
+  return smaller(id - 1, CG_N - 1);
+}
+
+/// unshare(CLONE_NEWCGROUP) or clone with it: the group the process is in
+/// becomes the root of its cgroup namespace. A namespace is named by its
+/// root, so one made at the root group is the first namespace.
+fn cgns_unshare(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let c = cg_of(k, pid);
+  if c == 0 {
+    nsk_set(&mut k, NSK_CGN, pid, 0);
+  } else {
+    nsk_set(&mut k, NSK_CGN, pid, c + 1);
+  }
+}
+
+/// Does any process (not a zombie) have group s as the root of its cgroup
+/// namespace?
+fn cgns_held(k: &Kernel, s: u64) -> bool
+  requires kok(k) && s < CG_N
+{
+  let mut q = 0;
+  while q < NPROC
+    invariant q <= NPROC && kok(k)
+  {
+    let st = pget(k.procs, q, F_STATE);
+    if st != FREE && st != ZOMBIE && get(k.mns, nsk_at(NSK_CGN, q)) == s + 1 {
+      return true;
+    }
+    q = q + 1;
+  }
+  return false;
+}
+
+/// The path of the file layer for a name under sys/fs/cgroup as process pid
+/// sees it: its cgroup namespace's root is the top of the tree, so the name
+/// is looked up below that group's directory. The name is in the first n
+/// bytes of the transfer buffer. Returns the new length, or NO_RESULT with
+/// k.perr set if it grows too long.
+fn cg_view(k: &mut Kernel, n: u64, pid: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  let root = cgns_root(k, pid);
+  if root == 0 || n < CG_ROOT_LEN || !cg_under(k, n) {
+    return n;
+  }
+  // The groups from the root of the tree down to the namespace's root.
   let mut chain = balloc(CG_N);
   let mut depth = 0;
-  let mut c = cg_of(k, p);
+  let mut c = root;
   while c != 0 && depth < CG_N
     invariant depth <= CG_N && c < CG_N && blen(chain) == CG_N && kok(k)
   {
@@ -639,23 +700,110 @@ fn cg_proc_text(k: &Kernel, p: u64, o: &mut Bytes) -> u64
     depth = depth + 1;
     c = cg_parent(k, c);
   }
-  let mut a = put_s(&mut o, 0, "0::/");
-  let mut i = depth;
+  let mut grow = depth;                     // a "/" before each name
+  let mut i = 0;
+  while i < depth
+    invariant i <= depth && depth <= CG_N && grow <= depth + i * CG_NAME_MAX && blen(chain) == CG_N && kok(k)
+  {
+    let s = smaller(cast[u64](bget(chain, i)), CG_N - 1);
+    grow = grow + smaller(cg_get(k, s, CGW_NLEN), CG_NAME_MAX);
+    i = i + 1;
+  }
+  if n + grow > FNAME_MAX {
+    bfree(chain);
+    k.perr = ENAMETOOLONG;
+    return NO_RESULT;
+  }
+  let mut j = n;
+  while j > CG_ROOT_LEN
+    invariant CG_ROOT_LEN <= j && j <= n && n + grow <= FNAME_MAX && kok(k)
+  {
+    j = j - 1;
+    bset(&mut k.fs.xfer, j + grow, bget(k.fs.xfer, j));
+  }
+  let mut w = CG_ROOT_LEN;
+  i = depth;
   while i > 0
-    invariant i <= depth && depth <= CG_N && blen(chain) == CG_N && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+    invariant i <= depth && depth <= CG_N && w <= CG_ROOT_LEN + grow && n + grow <= FNAME_MAX && blen(chain) == CG_N && kok(k)
   {
     i = i - 1;
     let s = smaller(cast[u64](bget(chain, i)), CG_N - 1);
     let l = smaller(cg_get(k, s, CGW_NLEN), CG_NAME_MAX);
+    if w + 1 + l > CG_ROOT_LEN + grow {
+      bfree(chain);
+      return n;                             // not reached: grow counted every name
+    }
+    bset(&mut k.fs.xfer, w, 47);
+    w = w + 1;
+    let mut m = 0;
+    while m < l
+      invariant m <= l && l <= CG_NAME_MAX && s < CG_N && w + (l - m) <= CG_ROOT_LEN + grow && n + grow <= FNAME_MAX && kok(k)
+    {
+      bset(&mut k.fs.xfer, w, cast[u8](cg_get(k, s, CGW_NAME + m) % 256));
+      w = w + 1;
+      m = m + 1;
+    }
+  }
+  bfree(chain);
+  return n + grow;
+}
+
+/// Text of /proc/PID/cgroup as process reader sees it: "0::/path", the path
+/// from the root of the reader's cgroup namespace, with "/.." for each group
+/// it has to go up to reach a process outside it.
+fn cg_proc_text(k: &Kernel, p: u64, reader: u64, o: &mut Bytes) -> u64
+  requires kok(k) && p < NPROC && reader < NPROC && blen(o) == PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let root = cgns_root(k, reader);
+  // The nearest group at or above the process that is also at or above the
+  // namespace's root: the path goes up from the root to it, then down.
+  let mut anc = cg_of(k, p);
+  let mut guard = 0;
+  while !cg_in(k, root, anc) && guard < CG_N
+    invariant guard <= CG_N && anc < CG_N && root < CG_N && kok(k)
+  {
+    anc = cg_parent(k, anc);
+    guard = guard + 1;
+  }
+  // The names are built from the leaf up, so collect the chain first.
+  let mut chain = balloc(CG_N);
+  let mut depth = 0;
+  let mut c = cg_of(k, p);
+  while c != anc && c != 0 && depth < CG_N
+    invariant depth <= CG_N && c < CG_N && blen(chain) == CG_N && kok(k)
+  {
+    bset(&mut chain, depth, cast[u8](c));
+    depth = depth + 1;
+    c = cg_parent(k, c);
+  }
+  let mut a = put_s(&mut o, 0, "0::");
+  let mut r = root;
+  let mut up = 0;
+  while r != anc && r != 0 && up < CG_N
+    invariant up <= CG_N && r < CG_N && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+  {
+    a = put_s(&mut o, a, "/..");
+    r = cg_parent(k, r);
+    up = up + 1;
+  }
+  if up == 0 && depth == 0 {
+    a = put_c(&mut o, a, 47);
+  }
+  let mut i = depth;
+  while i > 0
+    invariant i <= depth && depth <= CG_N && a <= PROC_OUT && blen(o) == PROC_OUT && blen(chain) == CG_N && kok(k)
+  {
+    i = i - 1;
+    let s = smaller(cast[u64](bget(chain, i)), CG_N - 1);
+    let l = smaller(cg_get(k, s, CGW_NLEN), CG_NAME_MAX);
+    a = put_c(&mut o, a, 47);
     let mut j = 0;
     while j < l
       invariant j <= l && l <= CG_NAME_MAX && s < CG_N && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
     {
       a = put_c(&mut o, a, cast[u8](cg_get(k, s, CGW_NAME + j) % 256));
       j = j + 1;
-    }
-    if i > 0 {
-      a = put_c(&mut o, a, 47);
     }
   }
   bfree(chain);
@@ -1089,7 +1237,7 @@ fn cg_rmdir(k: &mut Kernel, pid: u64, n: u64) -> u64
   if fs_id(k.procs, pid, false) != 0 {
     return EACCES;
   }
-  if cg_children(k, r.slot) > 0 || cg_tasks(k, r.slot) > 0 {
+  if cg_children(k, r.slot) > 0 || cg_tasks(k, r.slot) > 0 || cgns_held(k, r.slot) {
     return EBUSY;
   }
   cg_put(&mut k, r.slot, CGW_USED, 0);
