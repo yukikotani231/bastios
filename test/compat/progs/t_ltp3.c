@@ -345,6 +345,15 @@ int main(void) {
         unlink("l3_pfd");
     }
 
+    /* readlink with a zero-size buffer is EINVAL, whatever the path is (musl
+       hides it by substituting a one-byte buffer, so ask the kernel). */
+    {
+        char b[8];
+        int r1 = (int)syscall(SYS_readlink, "/nonexistent_l3", b, 0), e1 = errno;
+        int r2 = (int)syscall(SYS_readlink, "/proc/self/exe", b, 0), e2 = errno;
+        EXPECT("readlink with a zero-size buffer is EINVAL", r1 == -1 && e1 == EINVAL && r2 == -1 && e2 == EINVAL);
+    }
+
     /* sendfile to a unix socket sends the bytes, and a full
        non-blocking datagram socket is EAGAIN. */
     {
