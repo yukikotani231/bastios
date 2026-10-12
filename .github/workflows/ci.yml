@@ -66,7 +66,7 @@ jobs:
           key: proof-none
           restore-keys: proof-
           path: build/proof-cache
-      - run: make test NATIVE=1 BASTIOC=bastiolang/stage0/target/release/bastioc0 BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
+      - run: make test NATIVE=1 BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
   # The AWS ENA driver against tools/qemu-ena, a model of the device built
   # into QEMU 8.2 (about 20 minutes, so the binary is cached by the hash of
   # the model's sources). The `test` job skips these boots; here they run
