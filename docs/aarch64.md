@@ -1,6 +1,6 @@
 # BastiOS on AArch64
 
-BastiOS builds for AArch64 and boots on QEMU's `virt` machine. This is the first stage of the port tracked in [bastiolang#119](https://github.com/yukikotani231/bastiolang/issues/119) and [#194](https://github.com/yukikotani231/bastios/issues/194): a kernel with the processor and platform parts done, running the native-ABI programs on the same process table, scheduler state, system calls and file system as x86-64. The Linux layer, the network and more than one processor come stage by stage (see "What is not there yet").
+BastiOS builds for AArch64 and boots on QEMU's `virt` machine. This is the first stage of the port tracked in [bastiolang#119](https://github.com/yukikotani231/bastiolang/issues/119) and [#194](https://github.com/yukikotani231/bastios/issues/194): a kernel with the processor and platform parts done, running the native-ABI programs on the same process table, scheduler state, system calls and file system as x86-64. The Linux layer, the network and more than one processor came stage by stage; more than one processor is still to come (see "What is not there yet").
 
 ```sh
 sudo apt-get install z3 qemu-system-arm gcc-aarch64-linux-gnu   # on an x86-64 host
@@ -19,6 +19,10 @@ The build proves `src/aarch64/main.bastio` and the shared kernel modules it impo
 
 The processes are set up as on x86-64: an address space of four-level translation tables (the shared code builds them), the image at `USER_BASE`, the stack at the top of the 512 GiB user window, system calls with `svc #0` (number in x8, arguments in x0-x2), results in x0. Programs are built with `--target user --arch aarch64` and the image header of `user/start-aarch64.S`.
 
+## Linux arm64 programs
+
+An AArch64 ELF executable (`user/lxhello-aarch64.c` is `mhello`, `user/lxtest-aarch64.c` is `mtest`, a static glibc program) runs under the same Linux layer as on x86-64. A process loaded from an ELF file carries the Linux ABI flag (`F_ABI`): its `svc #0` is a Linux call with the number in x8 and the arguments in x0-x5. `src/aarch64/lxnum.bastio` turns the asm-generic numbers into the Linux layer's own (those with the same meaning on x86-64; the rest answer ENOSYS). What differs between the two ABIs is taken from `src/<arch>/arch`: register names and the call-number word (`regs.bastio`), struct stat and statx (`statfmt.bastio`), the signal frame (`sigframe.bastio`; arm64 has no restorer in sigaction, so the return trampoline sits in the vDSO page), the sigaction layout, clone's tls/ctid order, `struct epoll_event` (16 bytes here, packed 12 on x86-64) and uname's machine. `test/aarch64_test.sh` runs both programs. musl-linked programs, BusyBox and the compat suite are not tried yet.
+
 ## The platform
 
 The platform is the trusted base besides the compiler's AArch64 preludes ([trusted-base.md](trusted-base.md)):
@@ -35,7 +39,7 @@ The interrupt controller's addresses are QEMU `virt`'s own (`-M virt,gic-version
 
 Tracked in [#194](https://github.com/yukikotani231/bastios/issues/194) and its siblings:
 
-- the Linux arm64 system-call ABI and AArch64 ELF programs ([#196](https://github.com/yukikotani231/bastios/issues/196));
+- musl, BusyBox and the compat suite on arm64, ptrace register sets ([#196](https://github.com/yukikotani231/bastios/issues/196));
 - the interrupt controller and the UART from the device tree too (the platform still uses QEMU virt's addresses for them), the other drivers, and the clock from the generic timer's counter instead of the tick count;
 - more than one processor (PSCI `CPU_ON`) ([#195](https://github.com/yukikotani231/bastios/issues/195));
 - real hardware ([#197](https://github.com/yukikotani231/bastios/issues/197)).
