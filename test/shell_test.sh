@@ -476,6 +476,8 @@ steps = [
     # entries: the big-disk boot.)
     # Reads fill the page cache, and the next reads of the same file come from it (src/pcache.bastio, pc_fill): they must see appends and rewrites.
     ("i=0; while [ $i -lt 3000 ]; do echo $i; i=$((i+1)); done > /disk/pc; cat /disk/pc | wc -c; cat /disk/pc | wc -c; echo more >> /disk/pc; cat /disk/pc | wc -c; wc -l < /disk/pc; echo X > /disk/pc; cat /disk/pc; rm /disk/pc", b"13890\r\n13890\r\n13895\r\n3001\r\nX\r\n", b"\n# "),
+    # 55 blocks in a row: the disk takes them in batched requests (src/diskq.bastio).
+    ("i=0; while [ $i -lt 600 ]; do echo line$i; i=$((i+1)); done > /tmp/mref; for k in 1 2 3 4 5 6 7 8; do cat /tmp/mref /tmp/mref /tmp/mref /tmp/mref /tmp/mref /tmp/mref; done > /tmp/mall; cp /tmp/mall /disk/multi; sync; cmp /tmp/mall /disk/multi && echo multi=same; wc -c < /disk/multi; rm /disk/multi /tmp/mall /tmp/mref", [b"multi=same", b"\r\n225120\r\n"], b"\n# "),
     ("mkdir disk/many; i=0; while [ $i -lt 150 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; cat disk/many/f149", b"\r\n150\r\n149\r\n", b"\n# "),
     ("rm -r disk/many; ls disk/many; echo gone$((1+1))", [b"No such file", b"gone2"], b"\n# "),
     # The in-memory file system finds names through a hash index (src/ramfs.bastio): creating, removing and renaming hundreds of files
@@ -906,7 +908,7 @@ else:
     imds_log = []
     imds_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBastioTestKey test@example"
     def imds_serve(listener):
-        for _ in range(3):
+        for _ in range(4):
             try:
                 c, _ = listener.accept()
             except OSError:
@@ -933,6 +935,8 @@ else:
                 code, body = "200 OK", "cloudbox-7.internal"
             elif line.startswith("GET /latest/meta-data/public-keys/0/openssh-key "):
                 code, body = "200 OK", imds_key
+            elif line.startswith("GET /latest/user-data "):
+                code, body = "200 OK", "#!/bin/sh\necho first boot ran\n"
             else:
                 code, body = "404 Not Found", ""
             try:
@@ -942,7 +946,7 @@ else:
             c.close()
     imds = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     imds.bind(("127.0.0.1", 0))
-    imds.listen(3)
+    imds.listen(4)
     th = threading.Thread(target=imds_serve, args=(imds,), daemon=True)
     th.start()
     # The kernel's shell passes no arguments to a Linux program, so this runs
@@ -952,12 +956,12 @@ else:
     read_until(b"\n# ", mark)
     mark = len(out)
     qemu.stdin.write(f"mcloud 10.0.2.2:{imds.getsockname()[1]}\r".encode()); qemu.stdin.flush()
-    got = read_until(b"key installed", mark) and read_until(b"\n# ", mark)
+    got = read_until(b"user data saved", mark) and read_until(b"\n# ", mark)
     text = out[mark:]
     th.join(10)
     imds.close()
     want_log = ["PUT /latest/api/token HTTP/1.1", "GET /latest/meta-data/hostname HTTP/1.1",
-                "GET /latest/meta-data/public-keys/0/openssh-key HTTP/1.1"]
+                "GET /latest/meta-data/public-keys/0/openssh-key HTTP/1.1", "GET /latest/user-data HTTP/1.1"]
     if got and b"mcloud: hostname cloudbox-7.internal" in text and imds_log == want_log:
         print("ok   mcloud: token, host name and public key from the metadata service")
     else:
@@ -974,6 +978,12 @@ else:
         print("ok   mcloud: the public key is in root's authorized_keys")
     else:
         print("FAIL mcloud authorized_keys:", repr(out[mark:])); fails += 1
+    mark = len(out)
+    qemu.stdin.write(b"ls -l /root/user-data; /root/user-data\r"); qemu.stdin.flush()
+    if read_until(b"\n# ", mark) and b"rwx------" in out[mark:] and b"first boot ran" in out[mark:]:
+        print("ok   mcloud: user data is saved as an executable only root can read, and runs")
+    else:
+        print("FAIL mcloud user data:", repr(out[mark:])); fails += 1
     # A Linux process killed by a page fault gets a second line saying what
     # the kernel knows of the page (the report for a crash that is hard to
     # reproduce).
