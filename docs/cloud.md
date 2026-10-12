@@ -145,6 +145,8 @@ test/shell_test.sh                          # includes three ENA boots, skipped 
   `.` only) and writes the key to `~root/.ssh/authorized_keys` (modes 700 and
   600), so the SSH server lets that key in. Tested in `test/shell_test.sh`
   against a fake service on the host (QEMU's user network cannot reach the
-  real address). Not yet: growing the root file system to the size of the
-  volume, `user-data` scripts, nothing runs it at boot, and it has not been
-  tried on a real cloud.
+  real address). `user-data` is saved as `~root/user-data` (mode 700) and
+  is not run by `mcloud`: running what a network service hands out is left
+  to whoever reads it. Not yet: growing the root file system to the size of
+  the volume, nothing runs `mcloud` at boot, and it has not been tried on a
+  real cloud.
