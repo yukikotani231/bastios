@@ -929,6 +929,8 @@ else:
                 code, body = "200 OK", "cloudbox-7.internal"
             elif line.startswith("GET /latest/meta-data/public-keys/0/openssh-key "):
                 code, body = "200 OK", imds_key
+            elif line.startswith("GET /latest/user-data "):
+                code, body = "200 OK", "#!/bin/sh\necho first boot ran\n"
             else:
                 code, body = "404 Not Found", ""
             try:
@@ -948,12 +950,12 @@ else:
     read_until(b"\n# ", mark)
     mark = len(out)
     qemu.stdin.write(f"mcloud 10.0.2.2:{imds.getsockname()[1]}\r".encode()); qemu.stdin.flush()
-    got = read_until(b"key installed", mark) and read_until(b"\n# ", mark)
+    got = read_until(b"user data saved", mark) and read_until(b"\n# ", mark)
     text = out[mark:]
     th.join(10)
     imds.close()
     want_log = ["PUT /latest/api/token HTTP/1.1", "GET /latest/meta-data/hostname HTTP/1.1",
-                "GET /latest/meta-data/public-keys/0/openssh-key HTTP/1.1"]
+                "GET /latest/meta-data/public-keys/0/openssh-key HTTP/1.1", "GET /latest/user-data HTTP/1.1"]
     if got and b"mcloud: hostname cloudbox-7.internal" in text and imds_log == want_log:
         print("ok   mcloud: token, host name and public key from the metadata service")
     else:
@@ -970,6 +972,12 @@ else:
         print("ok   mcloud: the public key is in root's authorized_keys")
     else:
         print("FAIL mcloud authorized_keys:", repr(out[mark:])); fails += 1
+    mark = len(out)
+    qemu.stdin.write(b"ls -l /root/user-data; /root/user-data\r"); qemu.stdin.flush()
+    if read_until(b"\n# ", mark) and b"rwx------" in out[mark:] and b"first boot ran" in out[mark:]:
+        print("ok   mcloud: user data is saved as an executable only root can read, and runs")
+    else:
+        print("FAIL mcloud user data:", repr(out[mark:])); fails += 1
     # A Linux process killed by a page fault gets a second line saying what
     # the kernel knows of the page (the report for a crash that is hard to
     # reproduce).
