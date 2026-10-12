@@ -97,6 +97,13 @@ fn put_xfer(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, n: u64, off: u64)
     }
     return w;
   }
+  if d.kind == K_SOCK && is_unix(k, pid, out) {
+    let w = ux_send_xfer(&mut k, pid, out, n);
+    if w == SK_WAIT {
+      return EAGAIN;                        // the channel is full: try again
+    }
+    return w;
+  }
   if d.kind != K_FILE {
     return EINVAL;                          // other sockets and the rest: not done
   }

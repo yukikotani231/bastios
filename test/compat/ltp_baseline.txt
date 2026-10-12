@@ -324,6 +324,7 @@ inotify05
 inotify10
 inotify_init1_01
 inotify_init1_02
+ioctl01
 ioctl05
 ioctl_loop01
 ioctl_loop02
@@ -647,6 +648,8 @@ sendfile05
 sendfile05_64
 sendfile06
 sendfile06_64
+sendfile07
+sendfile07_64
 sendfile08
 sendfile08_64
 sendmmsg01

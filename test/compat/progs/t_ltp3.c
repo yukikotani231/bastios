@@ -7,6 +7,10 @@
  * that keeps no mode; link and rename across a mount (EXDEV). */
 #include "compat.h"
 #include <fcntl.h>
+#include <stdlib.h>
+#include <sys/ioctl.h>
+#include <sys/sendfile.h>
+#include <string.h>
 #include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
@@ -264,6 +268,41 @@ int main(void) {
         EXPECT("utimensat with UTIME_OMIT keeps the modification time", r4 == 0 && st.st_atime == 777 && st.st_mtime == 4242);
         if (fd >= 0) close(fd);
         unlink("l3_ut");
+    }
+
+    /* A terminal answers the older TCGETA, checks the address, and
+       calls a request it does not know ENOTTY. */
+    {
+        int m = posix_openpt(O_RDWR | O_NOCTTY);
+        unsigned char tio[18];
+        int r1 = ioctl(m, 0x5405, tio);
+        int r2 = ioctl(m, 0x5405, (void *)-1), e2 = errno;
+        int r3 = ioctl(m, 9999999, tio), e3 = errno;
+        EXPECT("TCGETA on a terminal succeeds", m >= 0 && r1 == 0);
+        EXPECT("TCGETA with a bad address is EFAULT", r2 == -1 && e2 == EFAULT);
+        EXPECT("an unknown terminal request is ENOTTY", r3 == -1 && e3 == ENOTTY);
+        if (m >= 0) close(m);
+    }
+
+    /* sendfile to a unix socket sends the bytes, and a full
+       non-blocking datagram socket is EAGAIN. */
+    {
+        int sv[2], fd = open("l3_sf", O_CREAT | O_RDWR, 0644);
+        char buf[8] = "";
+        write(fd, "abcdef", 6);
+        lseek(fd, 0, SEEK_SET);
+        socketpair(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK, 0, sv);
+        ssize_t r1 = sendfile(sv[1], fd, NULL, 6);
+        ssize_t r2 = recv(sv[0], buf, sizeof buf, 0);
+        EXPECT("sendfile to a unix socket sends the bytes", r1 == 6 && r2 == 6 && memcmp(buf, "abcdef", 6) == 0);
+        int n = 0;
+        while (n < 1000000 && send(sv[1], "a", 1, 0) == 1) n++;
+        lseek(fd, 0, SEEK_SET);
+        ssize_t r3 = sendfile(sv[1], fd, NULL, 1);
+        int e3 = errno;
+        EXPECT("sendfile to a full non-blocking unix socket is EAGAIN", r3 == -1 && e3 == EAGAIN);
+        close(sv[0]); close(sv[1]); close(fd);
+        unlink("l3_sf");
     }
 
     unlink("l3_d/f2");

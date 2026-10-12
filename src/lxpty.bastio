@@ -644,6 +644,16 @@ fn pty_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u
     }
     return lx_put_out(&mut k, pid, arg, TERMIOS_SIZE);
   }
+  if req == TCGETA {
+    let mut i = 0;
+    while i < TERMIO_SIZE
+      invariant i <= TERMIO_SIZE && kok(k)
+    {
+      bset(&mut k.fs.xfer, i, cast[u8](pt_byte(k.ptys, p, termio_src(i))));
+      i = i + 1;
+    }
+    return lx_put_out(&mut k, pid, arg, TERMIO_SIZE);
+  }
   if req == TCSETS || (req > TCSETS && req <= TCSETSF) {
     if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, TERMIOS_SIZE) != TERMIOS_SIZE {
       return EFAULT;
@@ -754,7 +764,7 @@ fn pty_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u
   if req == TCSBRK || req == TCXONC {
     return 0;                               // tcdrain, tcsendbreak, tcflow: nothing to wait for
   }
-  return EINVAL;
+  return ENOTTY;                            // a request the terminal does not know
 }
 
 /// Throws away terminal p's unread input or unread output.

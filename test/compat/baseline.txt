@@ -492,6 +492,11 @@ t_ltp3: utime sets the access time
 t_ltp3: utime sets the modification time
 t_ltp3: utimensat with UTIME_OMIT keeps the access time
 t_ltp3: utimensat with UTIME_OMIT keeps the modification time
+t_ltp3: TCGETA on a terminal succeeds
+t_ltp3: TCGETA with a bad address is EFAULT
+t_ltp3: an unknown terminal request is ENOTTY
+t_ltp3: sendfile to a unix socket sends the bytes
+t_ltp3: sendfile to a full non-blocking unix socket is EAGAIN
 t_mem: 64 MiB of address space
 t_mem: FUTEX_CMP_REQUEUE moves timed waiters across processes
 t_mem: FUTEX_CMP_REQUEUE with a negative count is EINVAL
