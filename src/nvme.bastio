@@ -206,16 +206,39 @@ fn nvme_reap(n: &mut Nvme) -> u64
   return s;
 }
 
+/// Like `nvme_reap`, but for the command with id `cid`: 65537 if the entry
+/// consumed was another command's, a late completion of one that was given
+/// up on (it is dropped, not taken for this command's).
+fn nvme_reap_for(n: &mut Nvme, cid: u64) -> u64
+  requires nvme_ok(n)
+  ensures nvme_ok(n) && n.sectors == old(n.sectors) && n.busy == old(n.busy) && result <= 65537
+{
+  // One read of the entry's last dword serves the phase check, the status
+  // and the id, so they cannot come from two different moments.
+  let w = cast[u64](dma_read32(&mut n.cq, n.cq_at / 2 * 16 + 12));
+  if (w >> 16) % 2 != n.cq_at % 2 {
+    return 65536;
+  }
+  n.cq_at = cq_next(n.cq_at);
+  ring(&mut n, 3, cast[u32](n.cq_at / 2));
+  if w % 65536 != cid {
+    return 65537;
+  }
+  return (w >> 17) % 32768;
+}
+
 /// Submits a command on the admin queue (`io` false) or the I/O queue and
 /// waits for its completion; true if it succeeded.
 fn nvme_cmd(n: &mut Nvme, io: bool, op: u8, nsid: u32, prp: u64, c10: u32, c11: u32, c12: u32) -> bool
   requires nvme_ok(n)
   ensures nvme_ok(n) && n.sectors == old(n.sectors) && n.busy == old(n.busy)
 {
+  let mut cid = 0;                    // the command id nvme_submit gives: its queue slot
   if io {
     if n.busy {
       return false;                   // its completion belongs to nvme_poll
     }
+    cid = n.sq_at;
     nvme_submit(&mut n, op, prp, c10, c11, c12);
   } else {
     sqe(&mut n.asq, n.asq_at, op, nsid, prp, c10, c11, c12);
@@ -233,7 +256,7 @@ fn nvme_cmd(n: &mut Nvme, io: bool, op: u8, nsid: u32, prp: u64, c10: u32, c11: 
     invariant nvme_ok(n) && n.sectors == sec0 && n.busy == busy0
   {
     if io {
-      let s = nvme_reap(&mut n);
+      let s = nvme_reap_for(&mut n, cid);
       if s < 65536 {
         return s == 0;
       }

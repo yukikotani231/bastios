@@ -3,5 +3,5 @@
 // driver owns them.
 
 const SECTOR: u64 = 512;
-const VIO_BATCH: u64 = 8;                 // blocks one background read takes at most
+const VIO_BATCH: u64 = 32;                // blocks one background read takes at most
 const MOUSE_PKT: u64 = 0x100000000;       // kbd_poll's answer for a mouse packet: MOUSE_PKT + b0 * 2^24 + x * 65536 + y * 256 + wheel

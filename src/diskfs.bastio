@@ -1387,7 +1387,7 @@ fn disk_read(d: &mut DiskFs, i: u64, off: u64, buf: &mut Bytes, n: u64) -> u64
   return want;
 }
 
-const READ_AHEAD: u64 = 8;            // blocks queued past one a read missed
+const READ_AHEAD: u64 = 32;           // blocks queued past one a read missed
 
 /// Queues reads of the file's blocks from block b on (up to READ_AHEAD,
 /// within `size` bytes), whose maps are cached already.
