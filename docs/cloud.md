@@ -147,6 +147,12 @@ test/shell_test.sh                          # includes three ENA boots, skipped 
   against a fake service on the host (QEMU's user network cannot reach the
   real address). `user-data` is saved as `~root/user-data` (mode 700) and
   is not run by `mcloud`: running what a network service hands out is left
-  to whoever reads it. Not yet: growing the root file system to the size of
-  the volume, nothing runs `mcloud` at boot, and it has not been tried on a
-  real cloud.
+  to whoever reads it. Not yet: nothing runs `mcloud` at boot, and it has
+  not been tried on a real cloud.
+- **A bigger volume needs no resize step.** The file system takes its size
+  from the disk at every mount, so a volume enlarged while the machine was
+  off (an EBS volume resize, `truncate` on a raw image) shows its new size
+  with all files in place after the next boot. Tested in
+  `test/shell_test.sh`: a 64 MiB image written to, enlarged to 128 MiB and
+  booted again. Shrinking is not supported. The kernel does not look at
+  partition tables, so this is about a whole-disk volume, as the image is.

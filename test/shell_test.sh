@@ -476,6 +476,8 @@ steps = [
     # entries: the big-disk boot.)
     # Reads fill the page cache, and the next reads of the same file come from it (src/pcache.bastio, pc_fill): they must see appends and rewrites.
     ("i=0; while [ $i -lt 3000 ]; do echo $i; i=$((i+1)); done > /disk/pc; cat /disk/pc | wc -c; cat /disk/pc | wc -c; echo more >> /disk/pc; cat /disk/pc | wc -c; wc -l < /disk/pc; echo X > /disk/pc; cat /disk/pc; rm /disk/pc", b"13890\r\n13890\r\n13895\r\n3001\r\nX\r\n", b"\n# "),
+    # 55 blocks in a row: the disk takes them in batched requests (src/diskq.bastio).
+    ("i=0; while [ $i -lt 600 ]; do echo line$i; i=$((i+1)); done > /tmp/mref; for k in 1 2 3 4 5 6 7 8; do cat /tmp/mref /tmp/mref /tmp/mref /tmp/mref /tmp/mref /tmp/mref; done > /tmp/mall; cp /tmp/mall /disk/multi; sync; cmp /tmp/mall /disk/multi && echo multi=same; wc -c < /disk/multi; rm /disk/multi /tmp/mall /tmp/mref", [b"multi=same", b"\r\n225120\r\n"], b"\n# "),
     ("mkdir disk/many; i=0; while [ $i -lt 150 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; cat disk/many/f149", b"\r\n150\r\n149\r\n", b"\n# "),
     ("rm -r disk/many; ls disk/many; echo gone$((1+1))", [b"No such file", b"gone2"], b"\n# "),
     # The in-memory file system finds names through a hash index (src/ramfs.bastio): creating, removing and renaming hundreds of files
@@ -1897,6 +1899,47 @@ for line, want, until in [
     print(("ok  " if ok else "FAIL"), "(big-disk boot)", repr(line)); ok or print(repr(out[mark:]))
     fails += not ok
 qemu.kill(); qemu.wait()
+# A volume that was made larger since the last boot (a cloud volume resized
+# while the machine was off): the file system takes the new size at mount, with
+# its files in place.
+grow = os.path.join(disk_dir.name, "grow.img")
+with open(grow, "wb") as f:
+    f.truncate(64 << 20)
+sizes = []
+deadline = time.time() + timeout
+for size, line, want in [
+    (64 << 20, "ash", b"built-in shell (ash)"),
+    (None, "echo kept > /disk/g; stat -f -c %b /disk; sleep 1", b"\r\n"),
+    (128 << 20, "ash", b"built-in shell (ash)"),
+    (None, "cat /disk/g; stat -f -c %b /disk", b"kept\r\n"),
+]:
+    if size is not None:
+        if size != 64 << 20:
+            with open(grow, "r+b") as f:
+                f.truncate(size)
+        qemu = boot(1, extra=["-drive", f"file={grow},format=raw,if=none,id=gr", "-device", "virtio-blk-pci,drive=gr"])
+        out = b""
+        if not read_until(b"bastios> "):
+            print("FAIL: no prompt after the grown-disk boot"); fails += 1
+            break
+    mark = len(out)
+    qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+    ok = read_until(b"\n# " if line != "ash" else want, mark) and want in out[mark:]
+    if line == "ash":
+        read_until(b"\n# ", mark)
+    else:
+        sizes.append([int(w) for w in out[mark:].split() if w.isdigit()][-1:])
+    fails += not ok
+    if not ok:
+        print("FAIL (grown disk)", repr(line), repr(out[mark:]))
+    if line.startswith("cat") or (line.startswith("echo") and False):
+        qemu.kill(); qemu.wait()
+    elif line.startswith("echo"):
+        qemu.kill(); qemu.wait()
+if len(sizes) == 2 and sizes[0] and sizes[1] and sizes[1][0] > sizes[0][0]:
+    print(f"ok   a disk made larger since the last boot: {sizes[0][0]} blocks became {sizes[1][0]}, with its file")
+else:
+    print("FAIL a grown disk:", sizes); fails += 1
 def send_line_ok(line, until):
     mark = len(out)
     qemu.stdin.write(line + b"\r"); qemu.stdin.flush()

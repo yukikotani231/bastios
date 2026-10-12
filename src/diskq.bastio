@@ -58,7 +58,7 @@ struct DiskQ {
   r: Ring,              // the queue's head (the oldest operation) and count
                         // (operations queued, the one running included)
   running: bool,        // the head operation is on the device
-  batch: u64,           // and with it the next batch - 1 reads, of the blocks after its (blk_begin_n)
+  batch: u64,           // and with it the next batch - 1 reads or writes, of the blocks after its (blk_begin_n)
   since: u64,           // the tick it started
   hand: u64,            // the eviction clock's hand
   next: u64,            // the number the next transaction gets
@@ -465,7 +465,8 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
     }
     if q.batch > 1 {
       // A batched read (blk_begin_n): its blocks go to the slots of the
-      // reads it took, which are the head and the operations after it.
+      // reads it took, which are the head and the operations after it. A
+      // batched write only settles the slots it took.
       let n = q.batch;
       let mut j = 0;
       while j < n && q.r.n > 0
@@ -473,7 +474,9 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
       {
         let a2 = q.r.h * QW;
         let s2 = get(q.q, a2 + 1);
-        if s2 < NC && get(q.q, a2) == Q_READ {
+        if s2 < NC && get(q.q, a2) == Q_WRITE {
+          dq_settle(&mut q, s2);
+        } else if s2 < NC && get(q.q, a2) == Q_READ {
           if r == BIO_OK {
             blk_fetch_n(&mut dev, j, &mut q.cache, s2 * CBLOCK);
             dq_settle(&mut q, s2);
@@ -547,11 +550,49 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
       }
     }
     let n = blk_room(dev, b * 8, want);
-    if n > 1 && blk_begin_n(&mut dev, b * 8, n) {
+    if n > 1 && blk_begin_n(&mut dev, b * 8, n, false) {
       q.running = true;
       q.batch = n;
       q.since = now;
       return DQ_MOVED;
+    }
+  }
+  if kind == Q_WRITE {
+    // Likewise the writes queued after it of the blocks that follow b: one
+    // request takes them (each wait for the host costs a trip through its
+    // I/O thread, so a file written in a row is written in few). No
+    // barrier lies between them, so their order does not matter.
+    let mut want = 1;
+    let mut more = true;
+    while more && want < VIO_BATCH && want < q.r.n
+      invariant want >= 1 && want <= VIO_BATCH && dq_ok(q)
+    {
+      let a2 = ((q.r.h + want) % NQ) * QW;
+      if get(q.q, a2) == Q_WRITE && get(q.q, a2 + 1) < NC && get(q.q, a2 + 2) == b + want {
+        want = want + 1;
+      } else {
+        more = false;
+      }
+    }
+    let n = blk_room(dev, b * 8, want);
+    if n > 1 {
+      let mut staged = true;
+      let mut j = 0;
+      while j < n && staged
+        invariant j <= n && n <= VIO_BATCH && dq_ok(q) && blk_ok(dev)
+      {
+        let sj = get(q.q, ((q.r.h + j) % NQ) * QW + 1);
+        if sj >= NC || !blk_stage(&mut dev, j, q.cache, sj * CBLOCK) {
+          staged = false;
+        }
+        j = j + 1;
+      }
+      if staged && blk_begin_n(&mut dev, b * 8, n, true) {
+        q.running = true;
+        q.batch = n;
+        q.since = now;
+        return DQ_MOVED;
+      }
     }
   }
   if !blk_begin(&mut dev, op, b * 8, &mut q.cache, s * CBLOCK) {

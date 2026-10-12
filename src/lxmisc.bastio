@@ -61,6 +61,8 @@ const LX_SECCOMP: u64 = 317;
 const LX_UNAME: u64 = 63;
 const LX_MINCORE: u64 = 27;
 const LX_PERSONALITY: u64 = 135;
+const LX_SYSLOG: u64 = 103;             // klogctl
+const KLOG_SIZE: u64 = 16384;           // what SYSLOG_ACTION_SIZE_BUFFER says; nothing is ever in it
 const LX_MLOCKALL: u64 = 151;
 const LX_MUNLOCKALL: u64 = 152;
 const INT_SIGN: u64 = 0x80000000;     // a negative int argument
@@ -692,6 +694,30 @@ fn lx_setpgid(k: &mut Kernel, pid: u64, target: u64, g: u64) -> u64
   return 0;
 }
 
+/// syslog(type, buf, len), which dmesg calls: the kernel keeps no log, so
+/// every read returns 0 bytes and the buffer is said to hold 16 KiB of
+/// nothing. As on Linux, READ_ALL and SIZE_BUFFER are open to everyone and
+/// the rest need root; a type above 10 is EINVAL, and so is a negative
+/// length for the reads.
+fn lx_syslog(k: &mut Kernel, pid: u64, t: u64, len: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if t > 10 {
+    return EINVAL;
+  }
+  if t != 3 && t != 10 && !cred_root(k.procs, pid) {
+    return EPERM;
+  }
+  if (t == 2 || t == 3 || t == 4) && len >= 2147483648 {
+    return EINVAL;
+  }
+  if t == 10 {
+    return KLOG_SIZE;
+  }
+  return 0;
+}
+
 fn is_misc_call(n: u64) -> bool {
   return n == LX_TRUNCATE || n == LX_FTRUNCATE || n == LX_PREAD64 || n == LX_PWRITE64 || n == LX_SCHED_YIELD || n == LX_MREMAP || n == LX_MUNMAP || n == LX_MPROTECT || n == LX_MSYNC
     || n == LX_MADVISE || n == LX_FSYNC || n == LX_FDATASYNC || n == LX_CHMOD || n == LX_FCHMOD
@@ -704,7 +730,7 @@ fn is_misc_call(n: u64) -> bool {
     || n == LX_SETRLIMIT || n == LX_SYNC || n == LX_UTIMES
     || n == LX_FUTIMESAT || n == LX_FCHOWNAT || n == LX_FCHMODAT || n == LX_UTIMENSAT
     || n == LX_PRLIMIT64 || n == LX_GETRANDOM || n == LX_UNAME || n == LX_MINCORE
-    || n == LX_SECCOMP || n == LX_PERSONALITY || n == LX_MLOCKALL || n == LX_MUNLOCKALL || n == LX_CAPGET || n == LX_CAPSET;
+    || n == LX_SECCOMP || n == LX_PERSONALITY || n == LX_SYSLOG || n == LX_MLOCKALL || n == LX_MUNLOCKALL || n == LX_CAPGET || n == LX_CAPSET;
 }
 
 fn is_meta_call(n: u64) -> bool {
@@ -856,6 +882,8 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     }
   } else if n == LX_MINCORE {
     r = lx_mincore(&mut k, pid, a, b, c);
+  } else if n == LX_SYSLOG {
+    r = lx_syslog(&mut k, pid, a % 4294967296, c % 4294967296);
   } else if n == LX_PERSONALITY {
     r = pget(k.procs, pid, F_PERSONA);
     if a != 0xFFFFFFFF {
