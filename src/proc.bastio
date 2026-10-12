@@ -740,6 +740,7 @@ const ENOTBLK: u64 = 18446744073709551601;   // 2^64 - 15
 const EBUSY: u64 = 18446744073709551600;     // 2^64 - 16
 const ETXTBSY: u64 = 18446744073709551590;   // 2^64 - 26
 const ASH_PROG: u64 = 13;             // BusyBox, which also answers to NAPPLETS names
+const MCLOUD_PROG: u64 = 33;          // first-boot setup from instance metadata (user/mcloud.c); the boot option `mcloud` starts it
 const NAPPLETS: u64 = 39;
 const NSUID_APPLETS: u64 = 2;          // su and passwd (bin_suid, src/lxproc.bastio)
 const S_IFCHR: u64 = 0x2190;           // a character device, rw--w----
