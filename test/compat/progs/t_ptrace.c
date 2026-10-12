@@ -162,6 +162,32 @@ int main(int argc, char **argv) {
         EXPECT("at the exit stop rax is the result, and the call ran once", result_after && WIFEXITED(st) && WEXITSTATUS(st) == 0);
     }
 
+    /* getpid and gettid stop too, like every other call. */
+    {
+        pid_t c = fork();
+        if (c == 0) {
+            ptrace(PTRACE_TRACEME, 0, 0, 0);
+            raise(SIGSTOP);
+            long a = syscall(SYS_getpid), b = syscall(SYS_gettid);
+            _exit(a == getpid() && b == a ? 0 : 1);
+        }
+        int sig = 0, st = 0, bad = 0, pid_seen = 0, tid_seen = 0, n = 0;
+        int ok = wait_stop(c, &sig) && sig == SIGSTOP;
+        while (ok) {
+            if (ptrace(PTRACE_SYSCALL, c, 0, 0) != 0) { bad = 1; break; }
+            if (waitpid(c, &st, 0) != c) { bad = 1; break; }
+            if (!WIFSTOPPED(st)) break;
+            if (WSTOPSIG(st) != SIGTRAP) continue;
+            struct user_regs_struct r;
+            if (ptrace(PTRACE_GETREGS, c, 0, &r) != 0) { bad = 1; break; }
+            if ((n++ & 1) == 0) {                   /* an entry stop */
+                if (r.orig_rax == SYS_getpid) pid_seen = 1;
+                if (r.orig_rax == SYS_gettid) tid_seen = 1;
+            }
+        }
+        EXPECT("PTRACE_SYSCALL stops at getpid and gettid", !bad && pid_seen && tid_seen && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
+
     /* PTRACE_SINGLESTEP runs one instruction; int3 is SIGTRAP. */
     {
         pid_t c = fork();
