@@ -145,3 +145,44 @@ clean:
 
 .PRECIOUS: $(B)/user/%.c $(B)/user/%.o $(B)/user/%.elf
 .PHONY: all run test clean
+
+# The Linux compatibility suite (test/compat) on AArch64: the t_*.c programs
+# as static glibc executables at 0x400000, and a BusyBox with the suite's
+# broad applet list, run from a disk image under ash.
+#   make -f arch/aarch64/Makefile compat            writes build/aarch64/compat/report.md
+#   make -f arch/aarch64/Makefile compat-baseline   records which checks pass now
+# It fails only if a check in test/compat/baseline-aarch64.txt stops passing.
+# These call x86-64-only system calls or registers (arch_prctl, readlink,
+# getdents, PTRACE_GETREGS) and do not build for AArch64 yet.
+COMPAT_X86ONLY := t_ltp2 t_ltp3 t_newer t_ptrace
+COMPAT_PROGS := $(filter-out $(COMPAT_X86ONLY),$(patsubst test/compat/progs/%.c,%,$(wildcard test/compat/progs/t_*.c)))
+COMPAT_BINS := $(COMPAT_PROGS:%=$(B)/compat/%)
+ULFLAGS := -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x400000 -Wl,--build-id=none
+
+$(B)/compat:
+	mkdir -p $@
+
+$(COMPAT_BINS): $(B)/compat/%: test/compat/progs/%.c test/compat/progs/compat.h | $(B)/compat
+	$(ACC) -static -no-pie -O2 -D_GNU_SOURCE -Wall -Wno-unused-result $(ULFLAGS) -o $@ $<
+
+$(B)/compat/busybox: $(B)/busybox/Makefile test/compat/busybox.config | $(B)/compat $(B)/user/ash.elf
+	rm -rf $(B)/compat/bb && cp -r $(B)/busybox $(B)/compat/bb
+	$(MAKE) -C $(B)/compat/bb -s clean >/dev/null
+	$(MAKE) -C $(B)/compat/bb -s allnoconfig >/dev/null
+	for o in $$(grep -v '^#' test/compat/busybox.config); do \
+	  sed -i "s/^# $$o is not set/$$o=y/" $(B)/compat/bb/.config; done
+	yes "" | $(MAKE) -C $(B)/compat/bb -s oldconfig >/dev/null
+	$(MAKE) -C $(B)/compat/bb -s CROSS_COMPILE=$(CROSS) CFLAGS_busybox="-static $(ULFLAGS)" busybox
+	cp $(B)/compat/bb/busybox $@
+
+$(B)/compat/disk.img: $(COMPAT_BINS) $(B)/compat/busybox test/compat/mkdisk.py
+	test/compat/mkdisk.py $@ $(COMPAT_BINS) $(B)/compat/busybox
+
+COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox --kernel $(B)/bastios.bin \
+              --disk $(B)/compat/disk.img --out $(B)/compat
+
+compat: $(B)/bastios.bin $(B)/compat/disk.img
+	$(COMPAT_RUN) $(COMPAT_PROGS)
+
+compat-baseline: $(B)/bastios.bin $(B)/compat/disk.img
+	$(COMPAT_RUN) --update-baseline $(COMPAT_PROGS)
