@@ -24,6 +24,7 @@
 
 import "linux.bastio";
 import "lxns.bastio";
+import "lxnsk.bastio";
 
 const LX_MOUNT: u64 = 165;
 const LX_UMOUNT2: u64 = 166;
@@ -318,13 +319,16 @@ fn ro_err(k: &mut Kernel, n: u64) -> u64
 }
 
 fn is_mount_call(n: u64) -> bool {
-  return n == LX_MOUNT || n == LX_UMOUNT2 || n == LX_PIVOT_ROOT;
+  return n == LX_MOUNT || n == LX_UMOUNT2 || n == LX_PIVOT_ROOT || n == LX_SETNS;
 }
 
 fn lx_mount_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if n == LX_SETNS {
+    return lx_setns(&mut k, pid, a, b);     // src/lxnsk.bastio
+  }
   if !cap_has(k, pid, CAP_SYS_ADMIN) {
     return EPERM;                           // root's alone, while it holds CAP_SYS_ADMIN
   }

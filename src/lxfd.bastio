@@ -713,6 +713,9 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     if hp >= OFD_N {
       return ENFILE;
     }
+    if is_ns_file(pf) {
+      nsf_open(&mut k, hp, pf);             // it keeps the namespace (src/lxnsk.bastio)
+    }
     ofd_access(&mut k, hp, flags);
     return fd_install(&mut k, pid, hp);
   }
