@@ -1,0 +1,7 @@
+// Sizes the network stack (src/net.bastio) and the card drivers share, so
+// that the stack builds without any one driver.
+
+const NET_HDR: u64 = 10;              // virtio-net's header, legacy; 12 once VERSION_1 is negotiated
+const RX_BUF: u64 = 2048;             // a receive buffer
+const FRAME_MAX: u64 = 1514;          // Ethernet header + 1500 bytes
+const RX_BUFS: u64 = 4;              // receive buffers a card holds

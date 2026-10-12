@@ -257,8 +257,8 @@ enum Vblk { Nothing, Some(Blk) }
 
 /// A virtio block device on the memory-mapped transport, if the machine
 /// has one clear of lo .. hi and lo2 .. hi2 (see `vm_find`).
-fn virtio_blk_mmio(m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64) -> Vblk
-  requires mem_ok(m)
+fn virtio_blk_mmio(m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, vm: VmWhere) -> Vblk
+  requires mem_ok(m) && vmw_ok(vm)
   requires get(m.bm, 0) == 1 && get(m.bm, 1) == 1 && get(m.bm, 2) == 1 && get(m.bm, 3) == 1 && get(m.bm, VIRTIO_DATA_AT) == 1
   requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) ==> mmio_free(win, a)
   ensures mem_ok(m) && (result is Vblk::Some ==> blk_ok(result.Some) && result.Some is Blk::Virtio)
@@ -266,7 +266,7 @@ fn virtio_blk_mmio(m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64,
     && !(result is Vblk::Some && blk_claims(result.Some, a)) ==> mmio_free(win, a)
   ensures forall k: u64 :: !(result is Vblk::Some && blk_holds(result.Some, k))
 {
-  match vm_find(&mut win, VM_ID_BLK, VM_SLOT0, VM_SLOTS, lo, hi, lo2, hi2, 0, 0, 0, 0) {
+  match vm_find(&mut win, VM_ID_BLK, vm, lo, hi, lo2, hi2, 0, 0, 0, 0) {
     VmFound::Found(d) => {
       return Vblk::Some(virtio_blk_start(&mut m, Vt::Mem(d), false));
     },
@@ -280,7 +280,8 @@ fn virtio_blk_mmio(m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64,
 /// request and page 31 for block data, else a SATA disk on AHCI (see `ahci_find`), or else the ATA
 /// drive. `msi` is where a device's interrupt messages go (0 for none).
 fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64,
-  plo: u64, phi: u64, reset: bool) -> Blk
+  plo: u64, phi: u64, reset: bool, vm: VmWhere) -> Blk
+  requires vmw_ok(vm)
   requires pci_ok(pci) && mem_ok(m) && msi <= 4294967295
   requires forall k: u64 :: ATA_IO <= k && k < ATA_IO + 8 ==> port_free(ports, k)
   requires port_free(ports, ATA_CTL)
@@ -309,7 +310,7 @@ fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, l
   }
   if pci_absent(&mut pci) && get(m.bm, 0) == 1 && get(m.bm, 1) == 1 && get(m.bm, 2) == 1 && get(m.bm, 3) == 1
     && get(m.bm, VIRTIO_DATA_AT) == 1 {
-    match virtio_blk_mmio(&mut m, &mut win, lo, hi, lo2, hi2) {
+    match virtio_blk_mmio(&mut m, &mut win, lo, hi, lo2, hi2, vm) {
       Vblk::Some(b) => { return b; },
       Vblk::Nothing => {},
     }
@@ -329,7 +330,8 @@ fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, l
 /// A stick booted from is the one the user chose, so it goes before the
 /// machine's own disks, which are then left untouched.
 fn blk_find(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64, u: &mut Usb,
-  plo: u64, phi: u64, reset: bool) -> Blk
+  plo: u64, phi: u64, reset: bool, vm: VmWhere) -> Blk
+  requires vmw_ok(vm)
   requires pci_ok(pci) && mem_ok(m) && msi <= 4294967295 && usb_ok(u)
   requires forall k: u64 :: ATA_IO <= k && k < ATA_IO + 8 ==> port_free(ports, k)
   requires port_free(ports, ATA_CTL)
@@ -349,7 +351,7 @@ fn blk_find(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, 
     },
     Usb::None => { u = Usb::None; },
   }
-  return blk_new(&mut ports, &mut pci, &mut m, &mut win, lo, hi, lo2, hi2, msi, plo, phi, reset);
+  return blk_new(&mut ports, &mut pci, &mut m, &mut win, lo, hi, lo2, hi2, msi, plo, phi, reset, vm);
 }
 
 /// Does the disk raise V_DISK when a command started by blk_begin ends?
@@ -373,7 +375,7 @@ fn blk_free(ports: &mut Ports, win: &mut MmioSpace, b: Blk, m: &mut Mem)
 {
   match b {
     Blk::Ata(a) => { ata_free(&mut ports, a); },
-    Blk::Virtio(v) => { virtio_free(&mut ports, &mut win, v, &mut m); },
+    Blk::Virtio(v) => { vt_release(&mut ports, &mut win, virtio_free(v, &mut m)); },
     Blk::Nvme(n) => { mmio_release(&mut win, nvme_free(n, &mut m)); },
     Blk::Ahci(h) => { mmio_release(&mut win, ahci_free(h, &mut m)); },
     Blk::Usb(x) => { mmio_release(&mut win, xhci_free(x, &mut m)); },
@@ -845,5 +847,27 @@ fn blk_fetch(b: &mut Blk, buf: &mut Bytes, at: u64)
       b = Blk::Usb(x);
     },
     Blk::Loop(l) => { b = Blk::Loop(l); },   // loopdev_begin read it already
+  }
+}
+
+/// What lo_swap (src/fs.bastio) gets back: the driver now mounted, the pages
+/// it is to hand back and whether `size` was installed.
+struct LoSwap { dev: Blk, pages: Vec[Slot], swapped: bool }
+
+/// Puts a loop driver over `pages` in the place of `prev` when `prev` is one,
+/// and returns the old driver's pages; any other driver stays and `pages` come back.
+fn blk_loop_swap(prev: Blk, pages: Vec[Slot], size: u64) -> LoSwap
+  requires blk_ok(prev)
+  ensures blk_ok(result.dev)
+{
+  match prev {
+    Blk::Loop(l) => {
+      return LoSwap { dev: Blk::Loop(loopdev_new(pages, size)), pages: l.pages, swapped: true };
+    },
+    Blk::Ata(x) => { return LoSwap { dev: Blk::Ata(x), pages: pages, swapped: false }; },
+    Blk::Virtio(x) => { return LoSwap { dev: Blk::Virtio(x), pages: pages, swapped: false }; },
+    Blk::Nvme(x) => { return LoSwap { dev: Blk::Nvme(x), pages: pages, swapped: false }; },
+    Blk::Ahci(x) => { return LoSwap { dev: Blk::Ahci(x), pages: pages, swapped: false }; },
+    Blk::Usb(x) => { return LoSwap { dev: Blk::Usb(x), pages: pages, swapped: false }; },
   }
 }

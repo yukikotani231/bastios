@@ -2275,7 +2275,7 @@ fn stack_fault(k: &mut Kernel, p: u64) -> bool
   requires kok(k) && p < NPROC
   ensures kok(k)
 {
-  let va = pget(k.procs, p, F_REGS + 19);   // CR2
+  let va = pget(k.procs, p, reg_word(R_FAULT));
   if va < USER_BASE || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, va, &mut k.fs.xfer, 1) == 1 || user_present(&mut k.spaces, p, va) {
     return false;                           // mapped (if PROT_NONE): not a stack to grow
   }
@@ -2315,6 +2315,9 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
   // every record is in use.
   let lo = (cur + 4095) / 4096;
   let hi = (new + 4095) / 4096;
+  if lo < hi && !cg_mem_ok(&mut k, pid, hi - lo) {
+    return USER_BASE + cur;                 // a control group's memory.max (src/lxcgroup.bastio)
+  }
   if !(lo < hi && anon_add(&mut k, pid, lo, hi)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, lo, hi, false) {
     return USER_BASE + cur;
   }
@@ -2390,6 +2393,9 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   }
   let can_write = mode / O_WRITE % 2 == 1;
   let pages = (n + 4095) / 4096;
+  if prot != 0 && !cg_mem_ok(&mut k, pid, pages) {
+    return ENOMEM;                          // a control group's memory.max (src/lxcgroup.bastio)
+  }
   // A shared file mapping maps the page cache's pages (src/pcache.bastio)
   // instead of fresh ones, if the file was opened for writing. From a
   // descriptor that may only read, it gets a copy, as a private mapping

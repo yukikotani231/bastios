@@ -104,8 +104,10 @@ test/shell_test.sh                          # includes three ENA boots, skipped 
   PCI host bridge, at QEMU microvm's slots (24 blocks of 512 bytes from
   `0xFEB00000`); the interrupt line is not used, the queues are polled.
   Firecracker puts its devices elsewhere and names them on the kernel
-  command line (`virtio_mmio.device=4K@0xd0000000:5`); reading that is not
-  done yet. Tested in `test/shell_test.sh` on `-machine microvm` (disk, DHCP,
+  command line (`virtio_mmio.device=4K@0xd0000000:5`, one word per device):
+  when the command line has such words, the devices are looked for only at
+  those addresses (a run of equal blocks that follow each other from the
+  first one; the interrupt number is ignored). Tested in `test/shell_test.sh` on `-machine microvm` (disk, DHCP,
   ping) for both versions.
 - **Firecracker itself.** The PVH entry (an ELF note naming a 32-bit entry
   point; `boot/boot.S` tags the `hvm_start_info` the loader passes and
@@ -122,3 +124,12 @@ test/shell_test.sh                          # includes three ENA boots, skipped 
   `-m 24M` and below fail the same way. **`-m 16M` prints nothing** because
   the image is linked at 16 MiB (`boot/linker.ld`), which is the end of 16 MiB
   of RAM: the loader has nowhere to put it and QEMU does not complain.
+- **Power off without ACPI.** QEMU's `microvm` (and Firecracker) publish no
+  ACPI tables, so `halt` has no S5 register to write: it stops the processors
+  and the host sees a guest that is still running. A reset through the
+  keyboard controller (`0xFE` to port `0x64`) is how Firecracker guests
+  leave, since it ends the VM there, but on QEMU the same write restarts the
+  guest, so the kernel does not use it as a power off. `reboot` works on both.
+  Telling the two apart needs a way to know the monitor (for example a
+  Firecracker-specific signature in the PVH start info); none is known, so
+  this is left open.

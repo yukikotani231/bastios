@@ -70,6 +70,7 @@
 
 import "blk.bastio";
 import "diskq.bastio";
+import "smaller.bastio";
 import "core/endian.bastio";
 import "core/bitmap.bastio";
 import "core/bytes.bastio";

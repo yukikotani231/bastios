@@ -313,7 +313,7 @@ fn lazy_fault(k: &mut Kernel, p: u64) -> u64
   ensures kok(k)
   ensures result <= LZ_WAIT
 {
-  let va = pget(k.procs, p, F_REGS + 19);   // CR2
+  let va = pget(k.procs, p, reg_word(R_FAULT));
   if va < USER_BASE {
     return LZ_NO;
   }
