@@ -248,6 +248,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     // seccomp (src/lxseccomp.bastio): the filters see the registers as the
     // process made the call, before any translation.
     let v = sc_decide(&mut k, pid, pget(k.procs, pid, F_REGS + R_LXNR));
+    if v.wait {
+      return wait_until(&mut k, pid, n, SC_FOREVER);   // a notification the supervisor has not answered
+    }
     if !v.run {
       ret(&mut k.procs, pid, v.ret);
       return KEEP;
@@ -712,7 +715,11 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     return KEEP;
   }
   if n == LX_IOCTL {
-    ret(&mut k.procs, pid, lx_ioctl(&mut k, pid, a, b, c));
+    let r = lx_ioctl(&mut k, pid, a, b, c);
+    if r == SC_WAIT {
+      return wait_until(&mut k, pid, n, SC_FOREVER);   // a notifier with nothing to receive yet
+    }
+    ret(&mut k.procs, pid, r);
     return KEEP;
   }
   if n == LX_ARCH_PRCTL {
@@ -954,6 +961,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     }
     let r = lx_fcntl(&mut k, pid, fd, F_SETFL, nf);
     return r;
+  }
+  if d.kind == K_SECCOMP && d.x < SC_N {
+    return sc_ioctl(&mut k, pid, d.x, pipe_nonblock(k, pid, fd), req % 0x100000000, arg);   // src/lxseccomp.bastio
   }
   if req == FIOCLEX || req == FIONCLEX {
     let mut on = 0;

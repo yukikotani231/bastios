@@ -916,6 +916,7 @@ t_sys: adjtimex reads and sets
 t_sys: clock_settime moves CLOCK_REALTIME
 t_sys: memory.max refuses a mapping that would pass it
 t_sys: not root: EPERM
+t_sys: seccomp USER_NOTIF: a supervisor answers a call
 t_sys: setdomainname
 t_sys: sethostname, uname, /proc/sys/kernel/hostname
 t_sys: settimeofday
@@ -934,6 +935,7 @@ t_sysv: shmat, a second view, fork, IPC_RMID
 t_sysv: shmget and shmat errors
 t_thread: /proc/self/stat and status count the threads
 t_thread: /proc/self/task lists the threads, and /proc/self/task/TID has their files
+t_thread: /proc/self/task/TID/fd/N and ns/ are the process's
 t_thread: 4 threads, mutex
 t_thread: condition variable
 t_thread: exit_group while another thread runs keeps its code

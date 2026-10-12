@@ -16,11 +16,42 @@
 #define GICR 0x080A0000ull
 #define TICK_HZ 100
 #define TIMER_INTID 30          /* the EL1 physical timer, a private interrupt */
+#define V_TIMER 32              /* the boot processor's tick, which counts the kernel's time */
+#define V_LTIMER 48             /* any other processor's tick */
+#define MAX_CPUS 16
+#define CPU_STACK 65536
+
+/* One of these per processor, found through TPIDR_EL1 (boot.S): the saved
+ * user context (37 words used), the words the compiler's prelude may keep
+ * per processor (bst_platform_mmu_state, unused so far), the interrupt that
+ * ended bst_cpu_wait, and the processor's place in the table. The offsets
+ * are boot.S's PCPU_* constants. */
+struct pcpu {
+    uint64_t ctx[40];
+    uint64_t mmu[3];
+    uint64_t irq;
+    uint64_t id;
+    uint64_t mpidr;
+    uint64_t pad[2];
+};
+_Static_assert(__builtin_offsetof(struct pcpu, irq) == 344, "boot.S PCPU_IRQ");
+_Static_assert(__builtin_offsetof(struct pcpu, id) == 352, "boot.S PCPU_ID");
+_Static_assert(sizeof(struct pcpu) == 384, "boot.S PCPU_SIZE");
+struct pcpu bst_pcpus[MAX_CPUS];
+uint8_t bst_cpu_stacks[MAX_CPUS][CPU_STACK] __attribute__((aligned(16)));
+static inline struct pcpu *this_cpu(void) {
+    struct pcpu *p;
+    __asm__ volatile ("mrs %0, tpidr_el1" : "=r"(p));
+    return p;
+}
 
 /* The memory map bst_kmain gets: a count, then base and length of each run. */
 #define MAX_RUNS 8
 uint64_t bst_memmap[1 + 2 * MAX_RUNS];
-uint64_t bst_el1_irq;           /* the interrupt bst_cpu_wait waits for, see boot.S */
+/* The processors the device tree lists (their MPIDR_EL1 affinities, the
+ * boot processor first), filled in by bst_early. */
+static uint64_t cpu_mpidr[MAX_CPUS];
+static uint64_t ncpu_dt;
 
 /* The device tree itself, copied before the page pool can reuse the RAM it
  * sits in (QEMU puts it in RAM): the kernel reads it byte by byte with
@@ -61,8 +92,8 @@ static void read_memory(const uint8_t *dtb) {
     if (dtb && be32(dtb) == 0xd00dfeed) {
         const uint8_t *st = dtb + be32(dtb + 8);
         const uint8_t *strs = dtb + be32(dtb + 12);
-        uint32_t ac = 2, sc = 1;
-        int depth = 0, in_mem = 0;
+        uint32_t ac = 2, sc = 1, cac = 1;
+        int depth = 0, in_mem = 0, in_cpus = 0, in_cpu = 0;
         for (;;) {
             uint32_t tok = be32(st);
             st += 4;
@@ -73,9 +104,13 @@ static void read_memory(const uint8_t *dtb) {
                 st += (l + 1 + 3) & ~(size_t)3;
                 depth++;
                 in_mem = depth == 2 && starts_with(name, "memory");
+                if (depth == 2 && same(name, "cpus")) in_cpus = 1;
+                in_cpu = in_cpus && depth == 3 && starts_with(name, "cpu@");
             } else if (tok == 2) {
+                if (depth == 2) in_cpus = 0;
                 depth--;
                 in_mem = 0;
+                in_cpu = 0;
             } else if (tok == 3) {
                 uint32_t len = be32(st), off = be32(st + 4);
                 const uint8_t *data = st + 8;
@@ -83,6 +118,9 @@ static void read_memory(const uint8_t *dtb) {
                 st += 8 + ((len + 3) & ~3u);
                 if (depth == 1 && same(pname, "#address-cells")) ac = be32(data);
                 else if (depth == 1 && same(pname, "#size-cells")) sc = be32(data);
+                else if (in_cpus && depth == 2 && same(pname, "#address-cells")) cac = be32(data);
+                else if (in_cpu && same(pname, "reg") && cac >= 1 && cac <= 2 && len >= cac * 4 && ncpu_dt < MAX_CPUS)
+                    cpu_mpidr[ncpu_dt++] = cells(data, cac);
                 else if (in_mem && same(pname, "reg") && ac <= 2 && sc <= 2) {
                     uint32_t stride = (ac + sc) * 4;
                     for (uint32_t o = 0; stride && o + stride <= len && n < MAX_RUNS; o += stride) {
@@ -140,12 +178,28 @@ static inline uint32_t r32(uint64_t a) { return *(volatile uint32_t *)a; }
 
 static uint64_t tick_cycles;
 
-/* GICv3 for one processor: the distributor on, this processor's
- * redistributor awake, the timer's interrupt enabled, and the CPU interface
- * opened to every priority. Then the timer, ticking TICK_HZ times a second. */
-void bst_gic_init(void) {
-    w32(GICD + 0x0000, (1u << 4) | (1u << 1) | 1u);          /* ARE, group 1 non-secure */
+static inline uint64_t r64(uint64_t a) { return *(volatile uint64_t *)a; }
+
+/* The redistributor frame of this processor: GICR_TYPER carries the
+ * affinity (bits 32-63) the frame belongs to; frames follow one another
+ * until one is marked last. */
+static uint64_t redistributor(uint64_t mpidr) {
+    uint64_t aff = (mpidr & 0xFFFFFFull) | ((mpidr >> 8) & 0xFF000000ull);
     uint64_t rd = GICR;
+    for (int i = 0; i < MAX_CPUS; i++, rd += 0x20000) {
+        uint64_t typer = r64(rd + 0x0008);
+        if ((typer >> 32) == aff) return rd;
+        if (typer & 0x10) break;
+    }
+    return GICR;
+}
+
+/* GICv3 for the calling processor: its redistributor awake, the timer's
+ * interrupt enabled, and the CPU interface opened to every priority. */
+static void gic_cpu_init(void) {
+    uint64_t mpidr;
+    __asm__ volatile ("mrs %0, mpidr_el1" : "=r"(mpidr));
+    uint64_t rd = redistributor(mpidr);
     w32(rd + 0x0014, r32(rd + 0x0014) & ~2u);                /* GICR_WAKER.ProcessorSleep = 0 */
     while (r32(rd + 0x0014) & 4u) { }                        /* ChildrenAsleep */
     uint64_t sgi = rd + 0x10000;
@@ -157,14 +211,30 @@ void bst_gic_init(void) {
     __asm__ volatile ("msr icc_sre_el1, %0; isb" : : "r"(sre | 1));
     __asm__ volatile ("msr icc_pmr_el1, %0" : : "r"(0xFFull));
     __asm__ volatile ("msr icc_igrpen1_el1, %0; isb" : : "r"(1ull));
+}
+
+/* The calling processor's timer, ticking TICK_HZ times a second, or off. */
+static void timer_start(void) {
     uint64_t f;
     __asm__ volatile ("mrs %0, cntfrq_el0" : "=r"(f));
     tick_cycles = f / TICK_HZ;
     __asm__ volatile ("msr cntp_tval_el0, %0; msr cntp_ctl_el0, %1; isb" : : "r"(tick_cycles), "r"(1ull));
 }
+static void timer_stop(void) {
+    __asm__ volatile ("msr cntp_ctl_el0, %0; isb" : : "r"(0ull));
+}
+
+/* The boot processor: the distributor on, then its own interface and
+ * timer. */
+void bst_gic_init(void) {
+    w32(GICD + 0x0000, (1u << 4) | (1u << 1) | 1u);          /* ARE, group 1 non-secure */
+    gic_cpu_init();
+    timer_start();
+}
 
 /* An interrupt was taken: acknowledge it, rearm the timer if it was that,
- * and return the kernel's vector for it: 32 for the tick, 0 if it was
+ * and return the kernel's vector for it: 32 for the boot processor's tick
+ * (it counts the kernel's time), 48 for another processor's, 0 if it was
  * spurious. */
 uint64_t bst_irq_ack(void) {
     uint64_t id;
@@ -174,21 +244,93 @@ uint64_t bst_irq_ack(void) {
     uint64_t v = 6;
     if (id == TIMER_INTID) {
         __asm__ volatile ("msr cntp_tval_el0, %0; isb" : : "r"(tick_cycles));
-        v = 32;
+        v = this_cpu()->id == 0 ? V_TIMER : V_LTIMER;
     }
     __asm__ volatile ("msr icc_eoir1_el1, %0; isb" : : "r"(id));
     return v;
 }
 
 uint64_t bst_cpu_wait(void) {
-    bst_el1_irq = 0;
+    struct pcpu *c = this_cpu();
+    c->irq = 0;
     __asm__ volatile ("msr daifclr, #2; wfi; isb; msr daifset, #2" : : : "memory");
-    return bst_el1_irq;
+    return c->irq;
 }
 
-uint64_t bst_platform_cpus(void) { return 1; }
-void bst_platform_smp_start(void (*fn)(void *), void *arg) { (void)fn; (void)arg; }
-void bst_platform_smp_join(void) { }
+/* ---- more than one processor: PSCI CPU_ON, then a table of work. A
+ * processor started here parks (wfe, interrupts masked, its timer off)
+ * until bst_platform_smp_start gives it a function to run; it runs that
+ * with its timer on, then parks again. */
+extern void bst_secondary_entry(void);
+
+static volatile uint64_t cpus_online;       /* processors parked or working, the boot one not counted */
+static void (*volatile work_fn)(void *);
+static void *volatile work_arg;
+static volatile uint64_t work_gen, work_done;
+
+static int64_t psci_cpu_on(uint64_t mpidr, uint64_t entry, uint64_t ctx) {
+    register uint64_t x0 __asm__("x0") = 0xC4000003ull;     /* CPU_ON, 64-bit */
+    register uint64_t x1 __asm__("x1") = mpidr;
+    register uint64_t x2 __asm__("x2") = entry;
+    register uint64_t x3 __asm__("x3") = ctx;
+    __asm__ volatile ("hvc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3) : "memory");
+    return (int64_t)x0;
+}
+
+/* Called by boot.S on the boot processor once the MMU and the interrupt
+ * controller are up: starts every other processor the device tree lists,
+ * one at a time (each checks in before the next is started). */
+void bst_smp_boot(void) {
+    uint64_t me;
+    __asm__ volatile ("mrs %0, mpidr_el1" : "=r"(me));
+    bst_pcpus[0].id = 0;
+    bst_pcpus[0].mpidr = me;
+    uint64_t n = 1;
+    for (uint64_t i = 0; i < ncpu_dt && n < MAX_CPUS; i++) {
+        uint64_t want = cpu_mpidr[i];
+        if (((want ^ me) & 0xFF00FFFFFFull) == 0) continue;   /* this one */
+        bst_pcpus[n].id = n;
+        bst_pcpus[n].mpidr = want;
+        if (psci_cpu_on(want, (uint64_t)bst_secondary_entry, n) != 0) continue;
+        for (uint64_t spin = 0; spin < 100000000ull && cpus_online < n; spin++) { }
+        if (cpus_online < n) break;                            /* it never came: no more */
+        n++;
+    }
+}
+
+/* Called by bst_secondary_entry on a new processor, with the MMU on. */
+void bst_secondary_main(void) {
+    gic_cpu_init();
+    __atomic_fetch_add(&cpus_online, 1, __ATOMIC_SEQ_CST);
+    __asm__ volatile ("sev");
+    uint64_t seen = 0;
+    for (;;) {
+        uint64_t g = __atomic_load_n(&work_gen, __ATOMIC_ACQUIRE);
+        if (g != seen) {
+            seen = g;
+            timer_start();
+            work_fn(work_arg);
+            timer_stop();
+            __atomic_fetch_add(&work_done, 1, __ATOMIC_RELEASE);
+            __asm__ volatile ("dsb ish; sev");
+            continue;
+        }
+        __asm__ volatile ("wfe");
+    }
+}
+
+uint64_t bst_platform_cpus(void) { return 1 + __atomic_load_n(&cpus_online, __ATOMIC_ACQUIRE); }
+void bst_platform_smp_start(void (*fn)(void *), void *arg) {
+    work_fn = fn;
+    work_arg = arg;
+    work_done = 0;
+    __atomic_fetch_add(&work_gen, 1, __ATOMIC_RELEASE);
+    __asm__ volatile ("dsb ish; sev");
+}
+void bst_platform_smp_join(void) {
+    while (__atomic_load_n(&work_done, __ATOMIC_ACQUIRE) < __atomic_load_n(&cpus_online, __ATOMIC_ACQUIRE))
+        __asm__ volatile ("wfe");
+}
 uint64_t bst_platform_acpi(uint64_t sig, uint64_t off) { (void)sig; (void)off; return 256; }
 /* boot_info: query 10 is the device tree, byte i of it, 256 past its end
  * (or when there is none); every other query is 0. */

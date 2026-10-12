@@ -24,8 +24,9 @@ const KST_FULL: u64 = 1;              // a byte is waiting
 const KST_AUX: u64 = 32;              // ... and it is from the mouse
 const KST_BUSY: u64 = 2;              // the controller has not taken the last byte written
 const AUX_SPINS: u64 = 100000;
+const KBD_CAD: u64 = 255;             // kbd_poll's answer for Ctrl-Alt-Delete (no key gives a byte of 128 or more)
 
-struct Kbd { data: PortIo, status: PortIo, shift: bool, ctrl: bool, ext: bool, present: bool,
+struct Kbd { data: PortIo, status: PortIo, shift: bool, ctrl: bool, alt: bool, ext: bool, present: bool,
   aux: bool,          // a PS/2 mouse answered and reports
   wheel: bool,        // ... with a wheel: 4-byte packets
   mb: u64,            // the bytes of the mouse packet so far, first in the high byte
@@ -192,7 +193,7 @@ fn mouse_byte(k: &mut Kbd, b: u64) -> u64
   return p;
 }
 
-/// The next character typed, or a mouse packet (MOUSE_PKT plus its bytes),
+/// The next character typed (KBD_CAD for Ctrl-Alt-Delete), or a mouse packet (MOUSE_PKT plus its bytes),
 /// or 256 if there is neither.
 fn kbd_poll(k: &mut Kbd) -> u64
   requires kbd_ok(k)
@@ -229,6 +230,10 @@ fn kbd_poll(k: &mut Kbd) -> u64
         k.shift = !up;
       } else if code == 0x1D {
         k.ctrl = !up;                 // either Ctrl (the right one is extended)
+      } else if code == 0x38 {
+        k.alt = !up;                  // either Alt
+      } else if code == 0x53 && !up && k.ctrl && k.alt {
+        return KBD_CAD;               // Delete, with the keypad's or the editing block's
       } else if !up && !ext {
         if code == 0x01 {
           return 27;                  // Esc

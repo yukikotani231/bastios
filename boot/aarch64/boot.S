@@ -9,13 +9,33 @@
  * and the kernel's map in bst_kernel_root; bst_cpu_enter runs the saved
  * user context at EL0 and returns the kind of the next exception.
  */
+        /* Per processor (struct pcpu in platform.c): TPIDR_EL1 points at it. */
+        .equ    PCPU_CTX, 0             /* the saved user context, 37 words */
+        .equ    PCPU_IRQ, 344           /* the interrupt that ended bst_cpu_wait */
+        .equ    PCPU_SIZE, 384
+        .equ    CPU_STACK, 65536
+
+        /* The Linux arm64 "Image" header (Documentation/arm64/booting.rst):
+         * QEMU, U-Boot and UEFI loaders that see it pass the device tree's
+         * address in x0 and load the image at its text offset. (QEMU gives
+         * an ELF kernel no tree.) The image is bastios.bin, bastios.elf
+         * with its headers taken off. */
         .section .text.boot
         .global _start
 _start:
+        b       start                   /* code0 */
+        .long   0                       /* code1 */
+        .quad   0x80000                 /* text_offset */
+        .quad   __image_size            /* image_size, with the zeroed data */
+        .quad   0                       /* flags: little-endian, 4 KiB pages */
+        .quad   0, 0, 0                 /* reserved */
+        .long   0x644d5241              /* magic "ARM\x64" */
+        .long   0                       /* reserved */
+start:
         mov     x19, x0                 /* the device tree */
         mrs     x1, mpidr_el1
         and     x1, x1, #0xff
-        cbnz    x1, park                /* one processor so far */
+        cbnz    x1, park                /* the others are started by PSCI (bst_secondary_entry) */
         ldr     x1, =stack_top
         mov     sp, x1
         ldr     x1, =__bss_start
@@ -25,6 +45,8 @@ _start:
         str     xzr, [x1], #8
         b       1b
 2:
+        ldr     x1, =bst_pcpus          /* this is processor 0 */
+        msr     tpidr_el1, x1
         /* FP/SIMD usable at EL0 (the kernel itself is built without it). */
         mov     x1, #(3 << 20)
         msr     cpacr_el1, x1
@@ -56,12 +78,55 @@ _start:
         isb
 
         bl      bst_gic_init            /* interrupt controller and timer */
+        bl      bst_smp_boot            /* the other processors, parked */
         ldr     x0, =bst_memmap
         bl      bst_kmain
         /* Power off through PSCI SYSTEM_OFF (QEMU answers HVC at EL1). */
         ldr     w0, =0x84000008
         hvc     #0
 park:   wfe
+        b       park
+
+/*
+ * PSCI CPU_ON enters here at EL1 with the MMU off and x0 = the processor's
+ * number (the context id bst_smp_boot passed): the same setup as _start,
+ * then bst_secondary_main on this processor's own stack.
+ */
+        .global bst_secondary_entry
+bst_secondary_entry:
+        mov     x19, x0
+        ldr     x1, =bst_pcpus
+        mov     x2, #PCPU_SIZE
+        madd    x1, x19, x2, x1
+        msr     tpidr_el1, x1
+        ldr     x1, =bst_cpu_stacks
+        mov     x2, #CPU_STACK
+        add     x3, x19, #1
+        madd    x1, x3, x2, x1
+        mov     sp, x1
+        mov     x1, #(3 << 20)
+        msr     cpacr_el1, x1
+        ldr     x1, =vectors
+        msr     vbar_el1, x1
+        mov     x1, #0xff
+        msr     mair_el1, x1
+        ldr     x1, =TCR
+        msr     tcr_el1, x1
+        ldr     x1, =bst_kernel_root
+        msr     ttbr0_el1, x1
+        isb
+        tlbi    vmalle1
+        dsb     nsh
+        isb
+        mrs     x1, sctlr_el1
+        orr     x1, x1, #1
+        orr     x1, x1, #(1 << 2)
+        orr     x1, x1, #(1 << 12)
+        bic     x1, x1, #(1 << 19)
+        bic     x1, x1, #(1 << 1)
+        msr     sctlr_el1, x1
+        isb
+        bl      bst_secondary_main
         b       park
 
         /* 48-bit addresses from TTBR0 (T0SZ 16), 4 KiB granule, write-back
@@ -83,7 +148,7 @@ bst_cpu_enter:
         stp     x23, x24, [sp, #48]
         stp     x25, x26, [sp, #64]
         stp     x27, x28, [sp, #80]
-        ldr     x30, =user_ctx
+        mrs     x30, tpidr_el1          /* PCPU_CTX is 0 */
         ldr     x1, [x30, #248]
         msr     sp_el0, x1
         ldr     x1, [x30, #256]
@@ -115,7 +180,7 @@ bst_cpu_enter:
  * in x0. SP_EL1 is still where bst_cpu_enter left it. */
 .macro  user_trap next
         stp     x0, x1, [sp, #-16]!
-        ldr     x0, =user_ctx
+        mrs     x0, tpidr_el1
         stp     x2, x3, [x0, #16]
         stp     x4, x5, [x0, #32]
         stp     x6, x7, [x0, #48]
@@ -192,8 +257,8 @@ el1_irq:
         stp     x16, x17, [sp, #128]
         stp     x18, x30, [sp, #144]
         bl      bst_irq_ack
-        ldr     x1, =bst_el1_irq
-        str     x0, [x1]
+        mrs     x1, tpidr_el1
+        str     x0, [x1, #PCPU_IRQ]
         ldp     x18, x30, [sp, #144]
         ldp     x16, x17, [sp, #128]
         ldp     x14, x15, [sp, #112]
@@ -254,7 +319,7 @@ vectors:
 
         .global bst_platform_ctx
 bst_platform_ctx:
-        ldr     x0, =user_ctx
+        mrs     x0, tpidr_el1
         ret
 
         .bss
@@ -263,4 +328,4 @@ bst_platform_ctx:
 bst_kernel_root: .skip 4096
         .global kernel_l1
 kernel_l1:      .skip 4096
-user_ctx:       .skip 37 * 8
+

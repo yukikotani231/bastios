@@ -15,7 +15,7 @@
 #                                        makes that a failure, as in CI)
 set -u
 cd "$(dirname "$0")/.."
-KERNEL=${KERNEL:-build/aarch64/bastios.elf}
+KERNEL=${KERNEL:-build/aarch64/bastios.bin}
 QEMU=${QEMU:-qemu-system-aarch64}
 TIMEOUT=${TIMEOUT:-60}
 if [ "${1:-}" = --build ]; then
@@ -42,7 +42,7 @@ with open(disk, "wb") as f:
 
 kernel, qemu_bin, timeout = sys.argv[1], sys.argv[2], float(sys.argv[3])
 qemu = subprocess.Popen(
-    [qemu_bin, "-M", "virt,gic-version=3", "-cpu", "cortex-a72", "-m", "256M", "-nographic",
+    [qemu_bin, "-M", "virt,gic-version=3", "-cpu", "cortex-a72", "-smp", os.environ.get("SMP", "4"), "-m", "256M", "-nographic",
      "-no-reboot", "-kernel", kernel,
      "-drive", f"file={disk},format=raw,if=none,id=vd", "-device", "virtio-blk-device,drive=vd",
      "-netdev", "user,id=n0,net=10.0.2.0/24", "-device", "virtio-net-device,netdev=n0", "-serial", "stdio", "-monitor", "none"],
@@ -71,8 +71,10 @@ def check(name, good):
     print(("ok   " if good else "FAIL ") + name)
     fails += not good
 
-check("boots to the shell on one processor",
-      read_until(b"bastios> ") and b"(aarch64): " in out and b" pages of memory, 1 processor\r\n" in out)
+ncpu = int(os.environ.get("SMP", "4"))
+check(f"boots to the shell on {ncpu} processor(s)",
+      read_until(b"bastios> ") and b"(aarch64): " in out
+      and (b" pages of memory, %d processor%s\r\n" % (ncpu, b"" if ncpu == 1 else b"s")) in out)
 m = re.search(rb"\(aarch64\): (\d+) pages of memory", out)
 pages = int(m.group(1)) if m else -1
 
@@ -95,7 +97,7 @@ run("mul 3 7", b"21")
 run("mul 4294967296 4294967296", b"overflow")
 run("frobnicate", b"unknown command: frobnicate")
 run("mem", b"free pages")
-run("cpus", b"processors running: 1")
+run("cpus", b"processors running: %d" % ncpu)
 run("hello", b"hello from user mode, pid 2")
 run("true", b"")
 # A Linux arm64 program (an ELF executable with no libc; svc numbers from
@@ -123,6 +125,15 @@ run("echo still here", b"still here")
 run("ps", b"spin")
 run("kill 2", b"")
 run("kill 2", b"no such process")
+if ncpu >= 3:
+    # Programs that never stop run at once on different processors: two of
+    # three spins are RUNNING in the same `ps`.
+    for _ in range(3):
+        run("spin &", b"[")
+    reply = run("ps", b"spin")
+    check("spins run on several processors at once", reply.count(b" running ") >= 2)
+    for pid in re.findall(rb"^\s*(\d+)\s+1 \w+\s+\d+ spin", reply, re.M):
+        run("kill " + pid.decode(), b"")
 run("echo survived", b"survived")
 # The file system (src/fs.bastio, shared with x86-64): files in memory.
 run("echo hi there > f1", b"")

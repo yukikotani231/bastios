@@ -461,6 +461,10 @@ steps = [
     # boot below).
     ("mkfifo pp; ls -l pp; echo hi > pp & cat pp; wait; mv pp pq; rm pq; ls pq; mkfifo disk/pf; stat -c %F disk/pf", [b"prw", b"\r\nhi\r\n", b"pq: No such file", b"fifo"], b"\n# "),
     ("echo dh > disk/hk1; ln disk/hk1 disk/hk2; ln disk/hk1 h3; mkdir hd; ln hd hd2; rmdir hd; stat -c %h disk/hk2", [b"Cross-device link", b"not permitted", b"\r\n2\r\n"], b"\n# "),
+    # A file removed while its last writes are still in a batch that was
+    # never queued (the disk never sees them), and one removed after a
+    # second batch over blocks the disk has: both give every block back.
+    ("sync; stat -f -c %f /disk > fr0; i=0; while [ $i -lt 20 ]; do echo data$i > disk/tmpdrop; rm disk/tmpdrop; i=$((i+1)); done; echo old > disk/keepdrop; sync; echo more >> disk/keepdrop; cat disk/keepdrop; rm disk/keepdrop; sync; stat -f -c %f /disk > fr1; cmp fr0 fr1 && echo dropfree=same; ls disk/tmpdrop disk/keepdrop", [b"\r\nold\r\nmore\r\n", b"dropfree=same", b"tmpdrop: No such file"], b"\n# "),
     # Loop devices (src/lxloop.bastio): /dev/loopN are block devices and
     # /dev/loop-control a character device; test/compat/progs/t_dev.c
     # binds one to a file and reads and writes through it.
@@ -970,6 +974,15 @@ else:
         print("ok   mcloud: the public key is in root's authorized_keys")
     else:
         print("FAIL mcloud authorized_keys:", repr(out[mark:])); fails += 1
+    # A Linux process killed by a page fault gets a second line saying what
+    # the kernel knows of the page (the report for a crash that is hard to
+    # reproduce).
+    mark = len(out)
+    qemu.stdin.write(b"mtest crash\r"); qemu.stdin.flush()
+    if read_until(b"\n# ", mark) and re.search(rb"page fault at rip 0x[0-9a-f]+, address 0x[0-9a-f]+; killed\]\r\n\[fault diag: page 0x[0-9a-f]+ not mapped, not owned, brk 0x[0-9a-f]+, mmap 0x[0-9a-f]+, parent \d+, \w+ thread\w*, age \d+\]", out[mark:]):
+        print("ok   a killed Linux process gets a fault diagnostic line")
+    else:
+        print("FAIL fault diagnostic:", repr(out[mark:])); fails += 1
     mark = len(out)
     qemu.stdin.write(b"mcloud 10.0.2.2:9\r"); qemu.stdin.flush()
     if read_until(b"\n# ", mark) and b"mcloud: no metadata service" in out[mark:]:
@@ -1447,6 +1460,32 @@ qemu.kill(); qemu.wait()
 print("---- keyboard boot transcript ----")
 print(out.decode(errors="replace").replace("\r", "")[-400:])
 
+# Ctrl-Alt-Delete on the PS/2 keyboard restarts the machine, which is how a
+# host (Firecracker's SendCtrlAltDel) asks a guest with no ACPI to stop: with
+# -no-reboot, QEMU exits when the guest resets. The kernel says so first.
+mon_path = os.path.join(disk_dir.name, "mon_cad.sock")
+qemu = boot(1, monitor=mon_path, extra=["-no-reboot"])
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+if ok:
+    mon = socket.socket(socket.AF_UNIX)
+    mon.connect(mon_path)
+    mark = len(out)
+    sendkeys(mon, ["ctrl-alt-delete"])
+    good = read_until(b"ctrl-alt-del: restarting", mark)
+    try:
+        code = qemu.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        code = None
+    good = good and code is not None
+    print(("ok  " if good else "FAIL"), f"(keyboard boot) Ctrl-Alt-Delete restarts the machine (QEMU status {code})")
+    fails += not good
+    mon.close()
+else:
+    print("FAIL (keyboard boot) no prompt before Ctrl-Alt-Delete"); fails += 1
+qemu.kill(); qemu.wait()
+
 # No COM1, as on most PCs of the last decade (src/uart.bastio): its ports
 # read as 0xFF, which used to look like a byte always waiting, so the
 # console read 0xFF forever and the keyboard was never looked at. Now the
@@ -1832,10 +1871,13 @@ with open(big, "wb") as f:
 qemu = boot(1, extra=["-drive", f"file={big},format=raw,if=none,id=bg", "-device", "virtio-blk-pci,drive=bg"])
 out = b""
 deadline = time.time() + timeout
+# The last write waits in a batch for up to 0.1 s before it is committed
+# (src/diskfs.bastio), and the image has no `sync` applet, so the line ends
+# with a sleep before QEMU is killed.
 for line, want, until in [
     ("ash", b"built-in shell (ash)", b"\n# "),
     ("stat -f -c '%b %c' /disk; echo big > /disk/b; cat /disk/b; stat -f -c %f /disk; rm /disk/b", b"10485755 5119\r\nbig\r\n1048", b"\n# "),
-    ("mkdir disk/many; i=0; while [ $i -lt 1100 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; sync", b"\r\n1100\r\n", b"\n# "),
+    ("mkdir disk/many; i=0; while [ $i -lt 1100 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; sleep 1", b"\r\n1100\r\n", b"\n# "),
 ]:
     mark = len(out)
     if mark == 0 and not read_until(b"bastios> "):
