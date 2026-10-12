@@ -2190,6 +2190,33 @@ fn sock_port(c: &Nic, s: u64) -> u64
   }
 }
 
+/// What /proc/net/udp shows of socket s in network namespace ns: field 0 is
+/// 1 if it is shown (open, not a raw socket, in ns), 0 if not; field 1 is
+/// its local port and field 2 the datagrams queued to read.
+fn sock_row(c: &Nic, s: u64, ns: u64, f: u64) -> u64
+  requires nic_ok(c)
+  ensures result <= 4294967295
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if s >= SOCKS || !udp_is_open(n, s) || sk_get(n, s, S_NS) != ns || sk_get(n, s, S_PORT) == RAW_ICMP {
+        return 0;
+      }
+      if f == 0 {
+        return 1;
+      }
+      if f == 1 && sk_get(n, s, S_PORT) <= 65535 {
+        return sk_get(n, s, S_PORT);
+      }
+      if f == 2 && sk_get(n, s, S_COUNT) <= 4294967295 {
+        return sk_get(n, s, S_COUNT);
+      }
+      return 0;
+    },
+  }
+}
+
 /// Closes s, dropping any queued datagram. False if it was not open.
 fn sock_close(c: &mut Nic, s: u64) -> bool
   requires nic_ok(c)
