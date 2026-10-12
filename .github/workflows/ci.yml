@@ -29,7 +29,20 @@ jobs:
           qemu-system-x86_64 --version | head -1
           python3 --version
       - run: cd bastiolang/stage0 && cargo build --release --locked
+      - name: Restore the proof cache
+        uses: actions/cache/restore@v4
+        with:
+          key: proof-none
+          restore-keys: proof-
+          path: build/proof-cache
       - run: make test BASTIOC=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
+      - name: Save the proof cache
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          key: proof-${{ hashFiles('build/proof-cache/**') }}
+          path: build/proof-cache
+        continue-on-error: true
   # The Linux compatibility suite (test/compat). Most of its time on a fresh
   # runner goes to building third-party programs from source (Z3, CPython,
   # Perl, git, ...) and to fetching Alpine's images from Docker Hub, so both
@@ -99,6 +112,12 @@ jobs:
           path: |
             build/compat/alpine/*.tar.gz
             build/compat/alpine/*.json
+      - name: Restore the proof cache
+        uses: actions/cache/restore@v4
+        with:
+          key: proof-none
+          restore-keys: proof-
+          path: build/proof-cache
       - name: Build the disks
         run: make -j4 build/bastios.elf
           build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img
@@ -184,6 +203,12 @@ jobs:
           key: ltp-times-${{ github.run_id }}
           restore-keys: ltp-times-
           path: build/compat/ltp/results.json
+      - name: Restore the proof cache
+        uses: actions/cache/restore@v4
+        with:
+          key: proof-none
+          restore-keys: proof-
+          path: build/proof-cache
       - run: make -j4 build/bastios.elf build/ltp/.built
       - name: Save LTP
         if: steps.ltp.outputs.cache-hit != 'true'

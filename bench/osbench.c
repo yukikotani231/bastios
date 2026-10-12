@@ -356,6 +356,36 @@ static int t_fileread(long n) {
   return 0;
 }
 
+// Pages of a file mapped read-only and touched once each: the cost of
+// resolving a file-backed fault (the page is already in the file system's
+// cache, so this is the mapping code, not the disk). OPS counts pages.
+static int t_filemap(long n) {
+  char p[300];
+  size_t sz = 4 << 20, chunk = 64 << 10;
+  char *buf = malloc(chunk);
+  snprintf(p, sizeof p, "%s/osbench.map", dir);
+  memset(buf, 4, chunk);
+  int fd = open(p, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+  if (fd < 0) return skip("filemap", "create");
+  for (size_t i = 0; i < sz / chunk; i++)
+    if (write_all(fd, buf, chunk)) return skip("filemap", "write");
+  close(fd);
+  fd = open(p, O_RDONLY);
+  if (fd < 0) return skip("filemap", "open");
+  begin("filemap");
+  volatile char sink = 0;
+  for (long i = 0; i < n; i++) {
+    char *m = mmap(0, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (m == MAP_FAILED) return skip("filemap", "mmap");
+    for (size_t j = 0; j < sz; j += 4096) sink += m[j];
+    munmap(m, sz);
+  }
+  end(n * (long)(sz / 4096));
+  close(fd);
+  unlink(p);
+  return 0;
+}
+
 // Create, write 1 KiB to, close and remove a file N times.
 static int t_create(long n) {
   char p[300], buf[1024];
@@ -453,7 +483,7 @@ static const struct test tests[] = {
     {"fork", t_fork, 300},      {"forkbig", t_forkbig, 50},  {"exec", t_exec, 200},
     {"spawn", t_spawn, 200},    {"fault", t_fault, 32},      {"pipelat", t_pipelat, 5000},
     {"pipebw", t_pipebw, 2000}, {"filewrite", t_filewrite, 8}, {"fileread", t_fileread, 8},
-    {"create", t_create, 2000}, {"tcplat", t_tcplat, 2000},  {"tcpbw", t_tcpbw, 500},
+    {"create", t_create, 2000}, {"filemap", t_filemap, 4}, {"tcplat", t_tcplat, 2000},  {"tcpbw", t_tcpbw, 500},
     {"sleep", t_sleep, 500},    {"epwait", t_epwait, 500},
     {"idle", t_idle, 3000},
 };

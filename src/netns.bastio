@@ -547,7 +547,7 @@ fn l4_resum(n: &mut Net, proto: u64, total: u64)
 /// (ICMP echo request or reply: id * 65536), from b; NAT_NONE if it has
 /// none we can masquerade.
 fn flow_ports(b: &Bytes, total: u64, back: bool) -> u64
-  requires blen(b) == RX_BUF && 28 <= total && total <= FRAME_MAX - 14
+  requires blen(b) >= RX_BUF && 28 <= total && total <= FRAME_MAX - 14
   ensures result == NAT_NONE || result < 4294967296
 {
   let proto = cast[u64](bget(b, 23));

@@ -917,6 +917,9 @@ fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
   if pget(k.procs, p, F_RESTART) != 0 && pget(k.procs, p, F_REGS + R_RAX) == 128 {
     return true;
   }
+  if pget(k.procs, p, F_SIGPEND) == 0 {
+    return true;                            // nothing pending: the common case
+  }
   let mut s = 1;
   while s <= NSIG
     invariant 1 <= s && s <= NSIG + 1 && kok(k)

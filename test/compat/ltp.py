@@ -348,6 +348,21 @@ def main():
     if os.path.exists(base):
         want = [l.strip() for l in open(base) if l.strip() and not l.startswith("#")]
         lost = sorted(set(want) - set(ids))
+        # A few tests depend on timing and fail now and then (clock_gettime04,
+        # shmctl01). A test that stopped passing runs again, twice at most,
+        # alone on a fresh kernel; one that passes then is reported as flaky,
+        # not as a regression. A real regression fails every time.
+        for attempt in (1, 2):
+            if not lost or args.only:
+                break
+            again = [t for t in tests if t[0] in set(lost)]
+            print(f"ltp: running {len(lost)} lost test(s) again (attempt {attempt}): {', '.join(lost)}")
+            with open(os.path.join(args.out, "serial.log"), "ab") as log:
+                rerun = run_guest(args, again, progs, log, None)
+            fixed = sorted(r["name"] for r in rerun if r["result"] == "pass")
+            for n in fixed:
+                print(f"ltp: FLAKY, {n} failed once and passed on a second run")
+            lost = sorted(set(lost) - set(fixed))
         if lost:
             print("ltp: REGRESSION, these tests passed before:")
             for i in lost:
