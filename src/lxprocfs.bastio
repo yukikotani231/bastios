@@ -8,6 +8,7 @@
 //   /proc/cpuinfo           one block per running processor
 //   /proc/stat              cpu and cpuN times, btime, processes, procs_running
 //   /proc/modules           empty: there are no loadable modules
+//   /proc/diskstats         empty: the disks keep no I/O counts
 //   /proc/net/dev           the interfaces of the reader's network namespace
 //   /proc/filesystems       the file system types mount names
 //   /proc/version           the release uname gives, as a Linux banner
@@ -72,6 +73,7 @@ const PF_LOADAVG: u64 = 13;           // with pid 0
 const PF_VERSION: u64 = 14;           // with pid 0
 const PF_CGROUP: u64 = 15;            // /proc/PID/cgroup
 const PF_MODULES: u64 = 6;            // with pid 0 (status has 6 for a process): /proc/modules
+const PF_DISKSTATS: u64 = 11;         // with pid 0: /proc/diskstats (comm has 11 for a process)
 const PF_NETDEV: u64 = 10;            // with pid 0: /proc/net/dev (maps has 10 for a process)
 const PSYS: u64 = 16 * NPROC;         // PROC_DEV + PSYS + SY_*: a /proc/sys file
 const SY_TAINTED: u64 = 1;
@@ -196,6 +198,55 @@ fn proc_self(x: &mut Bytes, n: u64, pid: u64) -> u64
     i = i + 1;
   }
   return n - 4 + d;
+}
+
+/// "proc/N/task/M/fd..." and "proc/N/task/M/ns..." in x[..n], for a thread M
+/// of N's group, become "proc/M/fd..." and "proc/M/ns...": the descriptors and
+/// namespaces of a thread are its process's. (runc and Go reach their own
+/// descriptors as /proc/self/task/TID/fd/N when /proc/thread-self is absent.)
+/// The other files under task/M are found by proc_file. Returns the new length.
+fn proc_task(k: &mut Kernel, n: u64) -> u64
+  requires kok(k) && n <= FNAME_MAX
+  ensures kok(k) && result <= n
+{
+  if n < 14 || !xfer_is(k.fs.xfer, 0, 5, "proc/") {
+    return n;
+  }
+  let e = comp_end(k.fs.xfer, 5, n);
+  if e + 6 >= n || !xfer_is(k.fs.xfer, e, e + 6, "/task/") {
+    return n;
+  }
+  let te = comp_end(k.fs.xfer, e + 6, n);
+  if te + 3 > n || te - e - 6 > 3 {
+    return n;
+  }
+  let fd = xfer_is(k.fs.xfer, te, te + 3, "/fd");
+  let ns = xfer_is(k.fs.xfer, te, te + 3, "/ns");
+  if (!fd && !ns) || (te + 3 < n && bget(k.fs.xfer, te + 3) != 47) {
+    return n;
+  }
+  let q = proc_pid(k.procs, k.fs.xfer, 5, e);
+  let t = proc_pid(k.procs, k.fs.xfer, e + 6, te);
+  if q >= NPROC || t >= NPROC || (t != q && tgid(k.procs, t) != q) {
+    return n;
+  }
+  // Move the thread's digits to x[5..], then the rest after them.
+  let l = te - e - 6;
+  let mut i = 0;
+  while i < l
+    invariant i <= l && l <= 3 && e + 6 + l == te && te <= n && n <= FNAME_MAX && blen(k.fs.xfer) == XFER && kok(k)
+  {
+    bset(&mut k.fs.xfer, 5 + i, bget(k.fs.xfer, e + 6 + i));
+    i = i + 1;
+  }
+  let mut j = te;
+  while j < n
+    invariant te <= j && j <= n && n <= FNAME_MAX && l <= 3 && e + 6 + l == te && blen(k.fs.xfer) == XFER && kok(k)
+  {
+    bset(&mut k.fs.xfer, 5 + l + (j - te), bget(k.fs.xfer, j));
+    j = j + 1;
+  }
+  return 5 + l + (n - te);
 }
 
 /// For a caller in a PID namespace other than the first, "proc/N..." in
@@ -394,6 +445,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
     }
     if xfer_is(x, 5, n, "modules") {
       return PROC_DEV + PF_MODULES;
+    }
+    if xfer_is(x, 5, n, "diskstats") {
+      return PROC_DEV + PF_DISKSTATS;
     }
     if xfer_is(x, 5, n, "cmdline") {
       return PROC_DEV + PF_CMDLINE;         // pid 0: the kernel's command line
@@ -742,7 +796,10 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
   if i == 11 {
     return Ent { len: name_out(&mut k.fs.xfer, "net"), dir: true, end: false };
   }
-  let p = i - 11;
+  if i == 12 {
+    return Ent { len: name_out(&mut k.fs.xfer, "diskstats"), dir: false, end: false };
+  }
+  let p = i - 12;
   if p >= NPROC {
     return end;
   }
@@ -1147,6 +1204,9 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, run);
     return put_s(&mut o, a, "\nprocs_blocked 0\n");
   }
+  if what == PF_DISKSTATS && p == 0 {
+    return 0;                               // the disks keep no I/O counts
+  }
   if what == PF_MODULES && p == 0 {
     return 0;                               // no loadable modules
   }
@@ -1539,7 +1599,7 @@ fn magic_link(k: &mut Kernel, pid: u64, n: u64) -> u64
     j = j + 1;
   }
   let n1 = proc_vpid(&mut k, n, pid);
-  let n2 = proc_self(&mut k.fs.xfer, n1, pid);
+  let n2 = proc_task(&mut k, proc_self(&mut k.fs.xfer, n1, pid));
   let r = magic_target(&mut k, pid, n2);
   if r == NO_RESULT {
     j = 0;

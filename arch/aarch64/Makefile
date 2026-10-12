@@ -1,6 +1,6 @@
 # BastiOS for AArch64 (QEMU virt), driven by `make ARCH=aarch64 <goal>` in
 # the top-level Makefile.
-#   make ARCH=aarch64          build build/aarch64/bastios.elf
+#   make ARCH=aarch64          build build/aarch64/bastios.bin (and the .elf it comes from)
 #   make ARCH=aarch64 run      boot it in QEMU on this terminal (Ctrl-A X to quit)
 #   make ARCH=aarch64 test     boot it and drive the shell (test/aarch64_test.sh)
 #
@@ -33,7 +33,7 @@ TCFLAGS := $(BASE_CFLAGS) -Wall -Wextra -Werror
 # temporaries it may not use.
 GCFLAGS := $(BASE_CFLAGS) -w
 
-all: $(B)/bastios.elf
+all: $(B)/bastios.elf $(B)/bastios.bin
 
 build $(B) $(B)/user:
 	mkdir -p $@
@@ -106,12 +106,17 @@ $(B)/bastios.elf: $(B)/boot.o $(B)/platform.o $(B)/kernel.o $(B)/libc.o boot/aar
 	$(ALD) -nostdlib -static --no-warn-rwx-segments -T boot/aarch64/linker.ld -o $@ \
 	  $(B)/boot.o $(B)/kernel.o $(B)/platform.o $(B)/libc.o
 
+# QEMU hands a device tree only to an Image, which is the ELF's contents with
+# the arm64 header boot.S begins with.
+$(B)/bastios.bin: $(B)/bastios.elf
+	$(AOBJCOPY) -O binary $< $@
+
 QEMU_ARGS := -M virt,gic-version=3 -cpu cortex-a72 -m 256M -nographic -no-reboot
 
-run: $(B)/bastios.elf
+run: $(B)/bastios.bin
 	$(QEMU) $(QEMU_ARGS) -kernel $< -serial mon:stdio
 
-test: $(B)/bastios.elf
+test: $(B)/bastios.bin
 	KERNEL=$< QEMU="$(QEMU)" test/aarch64_test.sh
 
 clean:
