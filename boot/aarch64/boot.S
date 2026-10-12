@@ -170,8 +170,14 @@ bst_cpu_enter:
         ldr     x1, [x30, #256]
         msr     elr_el1, x1
         ldr     x1, [x30, #264]
-        and     x1, x1, #0xf0000000
+        mov     x2, #0xf0000000         /* NZCV and PSTATE.SS: the single-step request of a ptrace */
+        orr     x2, x2, #0x200000
+        and     x1, x1, x2
         msr     spsr_el1, x1
+        ubfx    x2, x1, #21, #1
+        mrs     x3, mdscr_el1           /* the step exception is armed only while PSTATE.SS asks for one */
+        bfi     x3, x2, #0, #1
+        msr     mdscr_el1, x3
         ldr     x1, [x30, #288]
         msr     tpidr_el0, x1
         ldp     x0, x1, [x30, #0]

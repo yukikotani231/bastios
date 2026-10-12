@@ -1,0 +1,56 @@
+// The registers a tracer sees on x86-64: struct user_regs_struct (27 words).
+// PTRACE_PEEKUSER, POKEUSER, GETREGS and SETREGS all work on it.
+const USER_REGS: u64 = 27;
+const USER_REGS_SIZE: u64 = 216;
+const UR_NREG: u64 = 21;                 // saved registers there are words for
+const UR_ORIG: u64 = 15;                 // orig_rax: the call a system call stop is at
+const PT_USER_API: u64 = 1;          // PEEKUSER, POKEUSER, GETREGS and SETREGS exist
+const PT_ENTRY_RET: u64 = 1;         // rax reads -ENOSYS at the stop before a call
+const TRAP_FLAG: u64 = 256;              // rflags.TF
+
+/// The saved register that word i of struct user_regs_struct stands for
+/// (r15 .. r8, rax, rcx, rdx, rsi, rdi, orig_rax, rip, cs, eflags, rsp, ss,
+/// fs_base, gs_base, ds, es, fs, gs), or 255 if there is none.
+fn ur_reg(i: u64) -> u64
+  requires i < USER_REGS
+  ensures result < UR_NREG || result == 255
+{
+  if i < 4 {
+    return 14 - i;                          // r15 .. r12
+  }
+  if i == 4 { return 6; }                   // rbp
+  if i == 5 { return 1; }                   // rbx
+  if i < 10 {
+    return 16 - i;                          // r11 .. r8
+  }
+  if i == 10 { return 0; }                  // rax
+  if i == 11 { return 2; }                  // rcx
+  if i == 12 { return 3; }                  // rdx
+  if i == 13 { return 4; }                  // rsi
+  if i == 14 { return 5; }                  // rdi
+  if i == 16 { return 15; }                 // rip
+  if i == 18 { return 17; }                 // eflags
+  if i == 19 { return 16; }                 // rsp
+  if i == 21 { return 20; }                 // fs_base
+  return 255;
+}
+
+/// The words with no saved register behind them (cs, ss), as a process sees them.
+fn ur_const(i: u64) -> u64 {
+  if i == 17 {
+    return 0x33;                            // cs
+  }
+  if i == 20 {
+    return 0x2B;                            // ss
+  }
+  return 0;
+}
+
+/// The flags word with single-stepping switched on or off.
+fn step_flags(fl: u64, on: bool) -> u64 {
+  let base = fl % 65536 / (2 * TRAP_FLAG) * (2 * TRAP_FLAG) + fl % TRAP_FLAG;
+  if on {
+    return base + TRAP_FLAG;
+  }
+  return base;
+}

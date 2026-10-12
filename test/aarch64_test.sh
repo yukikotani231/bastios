@@ -109,7 +109,8 @@ reply = run("mtest", b"mtest done")
 check("mtest: no check failed", b"FAIL" not in reply)
 for want in [b"malloc ok 1", b"file abc", b"child exit 5", b"signal 10", b"thread 7",
              b"ok   epoll_wait", b"ok   socket read", b"machine aarch64",
-             b"ok   undefined instruction is SIGILL", b"ok   brk is SIGTRAP"]:
+             b"ok   undefined instruction is SIGILL", b"ok   brk is SIGTRAP", b"ok   ptrace: five single steps", b"ok   ptrace: SETREGSET",
+             b"ok   ptrace: stops before and after getpid", b"ok   ptrace: child runs on to exit 7"]:
     check("mtest: " + want.decode(), want in reply)
 # BusyBox's ash, built as a static glibc executable at 0x400000 (a non-PIE
 # program, which loads where it was linked): arithmetic, a pipe between two

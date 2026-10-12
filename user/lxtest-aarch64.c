@@ -15,6 +15,8 @@
 #include <sys/eventfd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/ptrace.h>
+#include <sys/uio.h>
 #include <sys/random.h>
 #include <sys/resource.h>
 #include <sys/select.h>
@@ -149,10 +151,66 @@ static void faults(void) {
     CHECK("brk is SIGTRAP", fsig == SIGTRAP);
 }
 
+// ptrace: a child stops itself with a signal; the parent reads its registers
+// (NT_PRSTATUS: x0-x30, sp, pc, pstate), single-steps it, stops it at the
+// system calls it makes (x8 is the call, x0 the result at the exit stop)
+// and lets it go on.
+static int getregs(pid_t c, unsigned long long *r) {
+    struct iovec iov = { r, 34 * 8 };
+    return ptrace(PTRACE_GETREGSET, c, (void *)1, &iov);
+}
+static void tracing(void) {
+    pid_t c = fork();
+    if (c == 0) {
+        ptrace(PTRACE_TRACEME, 0, 0, 0);
+        raise(SIGUSR1);
+        __asm__ volatile("nop; nop; nop; nop");
+        getpid();
+        _exit(7);
+    }
+    int st = 0;
+    unsigned long long r[34], r2[34];
+    CHECK("ptrace: child stops with SIGUSR1", waitpid(c, &st, 0) == c && WIFSTOPPED(st) && WSTOPSIG(st) == SIGUSR1);
+    int gr = getregs(c, r);
+    CHECK("ptrace: GETREGSET", gr == 0 && r[32] != 0 && r[31] != 0);
+    int steps = 0, same = 0;
+    for (int i = 0; i < 5; i++) {
+        unsigned long long before = r[32];
+        ptrace(PTRACE_SINGLESTEP, c, 0, 0);
+        if (waitpid(c, &st, 0) != c || !WIFSTOPPED(st) || WSTOPSIG(st) != SIGTRAP)
+            break;
+        steps++;
+        getregs(c, r);
+        same += r[32] == before;
+    }
+    CHECK("ptrace: five single steps stop with SIGTRAP and the pc moves", steps == 5 && same == 0);
+    memcpy(r2, r, sizeof r);
+    r2[19] = 0x1234;
+    struct iovec iov = { r2, 34 * 8 };
+    CHECK("ptrace: SETREGSET", ptrace(PTRACE_SETREGSET, c, (void *)1, &iov) == 0 && getregs(c, r) == 0 && r[19] == 0x1234);
+    int entry = 0, exit_ok = 0;
+    for (int i = 0; i < 20 && !exit_ok; i++) {
+        ptrace(PTRACE_SYSCALL, c, 0, 0);
+        if (waitpid(c, &st, 0) != c || !WIFSTOPPED(st))
+            break;
+        getregs(c, r);
+        if (entry && r[8] == 172) {
+            exit_ok = r[0] == (unsigned long long)c;
+            break;
+        }
+        if (!entry && r[8] == 172)
+            entry = 1;
+    }
+    CHECK("ptrace: stops before and after getpid, x0 is the pid at the exit", entry && exit_ok);
+    ptrace(PTRACE_CONT, c, 0, 0);
+    CHECK("ptrace: child runs on to exit 7", waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 7);
+}
+
 int main(void) {
     part1();
     part2();
     faults();
+    tracing();
     printf("mtest done\n");
     return 0;
 }
