@@ -1378,7 +1378,8 @@ fn map_covers(k: &Kernel, pid: u64, p: u64) -> bool
 /// that needs what this kernel lacks (KSM, huge pages, memory-failure
 /// handling, hole punching for MADV_REMOVE, MADV_WIPEONFORK), and for
 /// MADV_FREE on a shared mapping. -ENOMEM if a page in the range is not
-/// mapped.
+/// mapped, below the mmap area (in it, an unmapped page is a PROT_NONE
+/// reservation).
 fn lx_madvise(k: &mut Kernel, pid: u64, addr: u64, n: u64, advice: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -1400,7 +1401,9 @@ fn lx_madvise(k: &mut Kernel, pid: u64, addr: u64, n: u64, advice: u64) -> u64
   }
   let from = (addr - USER_BASE) / 4096;
   let to = smaller((addr - USER_BASE + n + 4095) / 4096, WPAGES);
-  if from > to || anon_count(&mut k, pid, from, to) != to - from {
+  // A PROT_NONE mmap maps no pages (lx_mmap): in the mmap area, pages not
+  // mapped are reservations, as lx_mprotect takes them.
+  if from > to || (from < pget(k.procs, pid, F_MMAP) / 4096 && anon_count(&mut k, pid, from, to) != to - from) {
     return ENOMEM;
   }
   if advice == MADV_REMOVE || advice == MADV_WIPEONFORK {
