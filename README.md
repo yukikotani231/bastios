@@ -118,7 +118,7 @@ v0.2, pre-release: the system call ABI, the disk format and the build can change
 - one lock for the whole kernel state; system calls from different processors wait for each other;
 - user pages are always executable: `mprotect` sets only whether a page is writable;
 - a user window of 512 GiB per process, with an 8 MiB stack (anonymous memory and the heap are mapped on first touch, and `fork` shares a single-threaded process's pages copy-on-write), at most 255 processes;
-- 1024 files and directories in memory and 4095 under `disk/` (a disk of up to 1 TiB), paths up to 255 bytes, files up to 64 MiB in memory and 1 GiB on disk, 256 open files per process; one disk, one command at a time; a write call returns once the disk has it, but work spread over several calls can be cut between them by a power cut;
+- 1024 files and directories in memory and 5119 under `disk/` (a disk of up to 1 TiB), paths up to 255 bytes, files up to 64 MiB in memory and 1 GiB on disk, 256 open files per process; one disk, one command at a time; a write call returns once the disk has it, but work spread over several calls can be cut between them by a power cut;
 - running out of memory when starting a program fails the spawn cleanly, but the kernel's own arena (for `Buf`) still halts the machine when it runs out;
 - it has only been run in QEMU; [Getting started](docs/getting-started.md#5-boot-from-a-usb-stick) lists what real hardware it supports.
 

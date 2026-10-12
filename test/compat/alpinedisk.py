@@ -448,8 +448,9 @@ def main():
     args = [os.path.join(work, "busybox"), os.path.join(work, "root.tar")]
     for r in (repo, repo2):
         args += [f"a/{os.path.basename(r)}/x86_64/{f}={os.path.join(r, f)}" for f in sorted(os.listdir(r))]
-    # Room for the unpacked root and what apk installs.
-    env = dict(os.environ, MKDISK_FREE_MB="160")
+    # Room for the unpacked root and what apk installs (neovim, gcc and git
+    # together are about 350 MB).
+    env = dict(os.environ, MKDISK_FREE_MB="480")
     subprocess.run([os.path.join(HERE, "mkdisk.py"), out] + args, check=True, env=env)
 
 if __name__ == "__main__":

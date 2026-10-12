@@ -1,0 +1,20 @@
+# Programs driven by keystrokes on the console inside the Alpine root, for
+# the compatibility suite (test/compat). The format is tty.txt's. They run
+# after alpine.txt in the same guest, so the packages its cases installed
+# are there.
+
+== nvim: edit and save a C file
+$ bb chroot /disk/a /usr/bin/nvim -u NONE /root/hello.c
+> i#include <stdio.h>\rint main(void) { return 0; }\x1b
+> :wq\r
+$ bb cat /disk/a/root/hello.c
+#include <stdio.h>
+int main(void) { return 0; }
+
+== nvim: edit a file in a git work tree, then commit it
+$ bb chroot /disk/a /bin/sh -c 'cd /root && git init -q --template= p && cd p && git config user.name a && git config user.email a@b && cp ../hello.c . && nvim -u NONE hello.c'
+> Go// edited\x1b
+> :wq\r
+$ bb chroot /disk/a /bin/sh -c 'cd /root/p && git add hello.c && git commit -qm edit && git --no-pager log --format=%s && tail -n 1 hello.c'
+edit
+// edited
