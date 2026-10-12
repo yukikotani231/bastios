@@ -14,6 +14,16 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 What will be 0.3.0. It needs bastiolang 0.2.0.
 
+### Network
+
+- A driver for the AWS Elastic Network Adapter (`src/ena.bastio`, PCI
+  `1d0f:ec20` and relatives), polled, one queue pair in host memory. It has
+  been run only against a model of the device for QEMU
+  (`tools/qemu-ena`), which the DHCP, TCP and IPv6 tests and three boots of
+  the shell test use (`NIC=ena`); see `docs/cloud.md` for what that leaves open.
+- A network card's registers may now lie anywhere in the 32-bit device
+  window (they had to be above 3 GiB).
+
 ### Disk
 
 - The disk file system holds 5119 files and directories (was 4095): the

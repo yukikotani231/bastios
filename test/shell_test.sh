@@ -40,7 +40,7 @@ _s.bind(("127.0.0.1", 0))
 tcp_port = _s.getsockname()[1]
 _s.close()
 
-def boot(cpus, with_disk=False, virtio=False, nvme=False, nvme4k=False, ahci=False, net=False, subnet=None, card="virtio-net-pci", monitor=None, extra=()):
+def boot(cpus, with_disk=False, virtio=False, nvme=False, nvme4k=False, ahci=False, net=False, subnet=None, card="virtio-net-pci", monitor=None, extra=(), qemu_bin="qemu-system-x86_64"):
     drive = ["-drive", f"file={disk},format=raw,if=ide,index=0"] if with_disk else []
     if virtio:
         # The same disk as a virtio block device (src/virtio.bastio): sectors
@@ -79,7 +79,7 @@ def boot(cpus, with_disk=False, virtio=False, nvme=False, nvme4k=False, ahci=Fal
     # the two directory tables (the disk's and the loop mount's) take 2.5 MiB
     # of it, which leaves too little for the 120 processes one case forks.
     return subprocess.Popen(
-        ["qemu-system-x86_64", "-kernel", kernel, "-m", "256M", "-smp", str(cpus),
+        [qemu_bin, "-kernel", kernel, "-m", "256M", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
          "-serial", "stdio", "-monitor", f"unix:{monitor},server,nowait" if monitor else "none"] + drive + nic + list(extra),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -1199,6 +1199,40 @@ for card in ("e1000e", "igb"):
     session(card, None, [
         ("ping", b"reply from 10.0.2.2"),
     ], halt=True, ready=family_ready(card))
+
+# An AWS ENA instead (src/ena.bastio). QEMU has no such card: the model in
+# tools/qemu-ena stands for it, in the QEMU build that script makes (QEMU_ENA
+# names it). The three variants of the model are the two ways registers
+# are read (the PCI revision says which) and a device that only has the
+# older maximum-queues feature. Each must get a DHCP lease, answer a ping,
+# and give every page back at power off.
+ena_bin = os.environ.get("QEMU_ENA", "build/qemu-ena/bin/qemu-system-x86_64")
+def ena_ready(variant):
+    def ready():
+        global fails
+        ok = b"net: ena, mac 52:54:00:12:34:56" in out
+        print(("ok  " if ok else "FAIL"), f"(ena{variant} boot) card found")
+        fails += not ok
+        t0 = time.time()
+        leased = False
+        while not leased and time.time() - t0 < 10:
+            mark = len(out)
+            qemu.stdin.write(b"ifconfig\r"); qemu.stdin.flush()
+            read_until(b"bastios> ", mark)
+            leased = b"(DHCP)" in out[mark:]
+            if not leased:
+                time.sleep(0.5)
+        print(("ok  " if leased else "FAIL"), f"(ena{variant} boot) DHCP lease")
+        fails += not leased
+    return ready
+if os.path.exists(ena_bin):
+    for variant in ("", ",readless=off", ",queues-ext=off"):
+        qemu = boot(1, net=True, card="ena" + variant, qemu_bin=ena_bin)
+        session("ena" + variant, None, [
+            ("ping", b"reply from 10.0.2.2"),
+        ], halt=True, ready=ena_ready(variant))
+else:
+    print("skip (ena) no QEMU with the ENA model at", ena_bin, "(tools/qemu-ena/build.sh builds it)")
 
 # The PS/2 keyboard (src/kbd.bastio): keys pressed through QEMU's monitor
 # reach the shell as serial input would, Shift and Backspace included.

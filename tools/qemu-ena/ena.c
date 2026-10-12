@@ -14,7 +14,9 @@
  * one transmit and one receive queue pair, no interrupts, no asynchronous
  * events. The device property `readless` (default on) selects PCI revision 0
  * (register reads go through the response buffer, direct reads return
- * 0xFFFFFFFF) or revision 1 (direct reads work).
+ * 0xFFFFFFFF) or revision 1 (direct reads work). The property `queues-ext`
+ * (default on) offers the extended maximum-queues feature, else only the
+ * older one.
  *
  * Build: tools/qemu-ena/build.sh. SPDX-License-Identifier: Apache-2.0 OR MIT
  * (the model; QEMU itself is GPL-2.0-or-later and the patched build is
@@ -86,6 +88,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(EnaState, ENA)
 #define ST_ILLEGAL      5
 
 #define F_DEVICE_ATTRIBUTES 1
+#define F_MAX_QUEUES    2
 #define F_MAX_QUEUES_EXT 7
 #define F_MTU           14
 #define F_AENQ_CONFIG   26
@@ -113,6 +116,7 @@ struct EnaState {
     NICState *nic;
     NICConf conf;
     bool readless;
+    bool queues_ext;     /* the extended maximum-queues feature; else only the older one */
 
     uint32_t dev_ctl, dev_sts;
     uint64_t aq_base, acq_base, aenq_base, mmio_resp;
@@ -230,7 +234,7 @@ static void admin_cmd(EnaState *s, const uint8_t *cmd, uint8_t *resp, uint8_t *s
         case F_DEVICE_ATTRIBUTES:
             put_u32(resp, 8, 0x10);                         /* impl_id */
             put_u32(resp, 12, 0x0200);                      /* device_version */
-            put_u32(resp, 16, (1u << F_MAX_QUEUES_EXT) | (1u << F_MTU) | (1u << F_AENQ_CONFIG));
+            put_u32(resp, 16, (s->queues_ext ? (1u << F_MAX_QUEUES_EXT) : (1u << F_MAX_QUEUES)) | (1u << F_MTU) | (1u << F_AENQ_CONFIG));
             put_u32(resp, 20, 0);                           /* capabilities */
             put_u32(resp, 24, 48);                          /* phys_addr_width */
             put_u32(resp, 28, 48);
@@ -238,6 +242,10 @@ static void admin_cmd(EnaState *s, const uint8_t *cmd, uint8_t *resp, uint8_t *s
             put_u32(resp, 40, 9216);                        /* max_mtu */
             break;
         case F_MAX_QUEUES_EXT:
+            if (!s->queues_ext) {
+                *status = ST_UNSUPPORTED;
+                break;
+            }
             if (cmd[18] != 1) {
                 GE("admin: max queues ext feature version %u", cmd[18]);
             }
@@ -253,6 +261,19 @@ static void admin_cmd(EnaState *s, const uint8_t *cmd, uint8_t *resp, uint8_t *s
             put_u32(resp, 44, 96);                          /* max_tx_header_size */
             put_u16(resp, 48, 16);                          /* max_per_packet_tx_descs */
             put_u16(resp, 50, 16);
+            break;
+        case F_MAX_QUEUES:
+            if (s->queues_ext) {
+                *status = ST_UNSUPPORTED;
+                break;
+            }
+            put_u32(resp, 8, ENA_NQ);                       /* max_sq_num */
+            put_u32(resp, 12, 1024);                        /* max_sq_depth */
+            put_u32(resp, 16, ENA_NQ);
+            put_u32(resp, 20, 1024);
+            put_u32(resp, 32, 96);                          /* max_header_size */
+            put_u16(resp, 36, 16);
+            put_u16(resp, 38, 16);
             break;
         case F_AENQ_CONFIG:
             put_u32(resp, 8, 0x1f);                         /* supported_groups */
@@ -701,6 +722,7 @@ static void ena_qdev_reset(DeviceState *dev)
 static Property ena_properties[] = {
     DEFINE_NIC_PROPERTIES(EnaState, conf),
     DEFINE_PROP_BOOL("readless", EnaState, readless, true),
+    DEFINE_PROP_BOOL("queues-ext", EnaState, queues_ext, true),
     DEFINE_PROP_END_OF_LIST(),
 };
 
