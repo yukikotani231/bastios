@@ -568,6 +568,7 @@ t_misc: seccomp filter denies getpid
 t_misc: statfs
 t_misc: strtod
 t_misc: sync
+t_misc: syslog (klogctl) reports a buffer size and reads nothing; an unknown type is EINVAL
 t_misc: tcgetattr
 t_misc: tcgetpgrp
 t_misc: tcsetattr
@@ -983,3 +984,4 @@ alpine: dropbear: the server starts, in the Alpine guest
 alpine: nvim over ssh: edit and save in a pseudo-terminal
 alpine: dropbear: the server stops, in the Alpine guest
 alpine-tty: nvim: it reads the terminal's size, and has colours
+t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller
