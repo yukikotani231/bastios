@@ -104,8 +104,10 @@ test/shell_test.sh                          # includes three ENA boots, skipped 
   PCI host bridge, at QEMU microvm's slots (24 blocks of 512 bytes from
   `0xFEB00000`); the interrupt line is not used, the queues are polled.
   Firecracker puts its devices elsewhere and names them on the kernel
-  command line (`virtio_mmio.device=4K@0xd0000000:5`); reading that is not
-  done yet. Tested in `test/shell_test.sh` on `-machine microvm` (disk, DHCP,
+  command line (`virtio_mmio.device=4K@0xd0000000:5`, one word per device):
+  when the command line has such words, the devices are looked for only at
+  those addresses (a run of equal blocks that follow each other from the
+  first one; the interrupt number is ignored). Tested in `test/shell_test.sh` on `-machine microvm` (disk, DHCP,
   ping) for both versions.
 - **Firecracker itself.** The PVH entry (an ELF note naming a 32-bit entry
   point; `boot/boot.S` tags the `hvm_start_info` the loader passes and
