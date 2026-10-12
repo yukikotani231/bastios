@@ -33,6 +33,7 @@ import "lxsock.bastio";
 import "lxnetlink.bastio";
 import "lxtcp.bastio";
 import "lxsig.bastio";
+import "sigframe.bastio";
 import "lxtime.bastio";
 import "lxunix.bastio";
 import "lxmem.bastio";

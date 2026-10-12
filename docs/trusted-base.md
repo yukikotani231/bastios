@@ -21,7 +21,7 @@ BastiOS also trusts everything bastiolang trusts: Z3, the Bastio compiler, the C
 | `boot/ap.S` | The real-mode trampoline that takes each application processor to long mode on the kernel's tables | 16- and 32-bit code |
 | `boot/smp.c` | Finding the ACPI tables (the RSDP from the copy Multiboot 2 passed, or the BIOS areas), wherever the kernel's page tables map them (a walk of the tables before each read): the processors in the MADT, and any table a byte at a time for the kernel's `boot_acpi` (`bst_platform_acpi`, which must answer 256 past a table's end); answering the kernel's `boot_info` (`bst_platform_info`: the command line and memory map from `multiboot.c`, CPUID, what processor startup saw, the ACPI tables' list), of which the kernel assumes nothing; the local APIC (its mode: xAPIC, or x2APIC when the firmware locked that mode or a processor has an id of 255 or more, with registers then reached as MSRs; end of interrupt, timer calibration against the HPET, else the ACPI PM timer, else PIT channel 2, else PIT channel 0, else the RTC, startup IPIs; an idle application processor's timer made one-shot around `hlt` in `bst_cpu_wait`), each processor's task state segment and `KERNEL_GS_BASE`, and handing parked processors work for `smp_run` | Firmware tables lie anywhere in the first 1 GiB, outside the device window that `Mmio` covers, and Bastio cannot read memory it was not given as a capability. The local APIC is in the device window, so part of it could move to `Mmio` (see "How it shrinks") |
 | `boot/multiboot.c` | Copying the Multiboot 2 information, or the PVH `hvm_start_info` (command line, memory map, RSDP), the kernel uses (memory map, framebuffer, ACPI RSDP, command line) into the kernel image in the Multiboot 1 form, every read checked against the structure's size and the identity map | The prelude reads Multiboot 1 and runs after it; a Bastio parser would need the read-only firmware memory capability below |
-| `boot/platform.c` | The interrupt table and the `syscall` MSRs | `lidt` and `wrmsr` have no capability |
+| `boot/platform.c` | The interrupt table and the `syscall` MSRs; the entry area's page tables (the stubs' code, the GDT and IDT, each processor's block) | `lidt`, `lgdt` and `wrmsr` have no capability, and the area is what user mode's traps and `iretq` touch |
 | `boot/core.h` | The per-processor block layout shared by the three files above | |
 | `boot/libc.c` | `memset`, `memcpy`, `memmove` and `memcmp`, which the C compiler may emit calls to | Also linked into each user program |
 | `boot/linker.ld` | Load address, and `_end`, where the page pool starts | |
@@ -61,7 +61,7 @@ Bastio proves memory safety but not stack depth, so nothing stops kernel code fr
 | File | What it does |
 | --- | --- |
 | `user/start.S` | The image header (magic, size, entry) and `_start`, which calls the program and exits with its result |
-| `user/user.ld` | Links each program at USER_BASE behind its header |
+| `user/user.ld` | Links each program at USER_BASE (address 0) behind its header |
 
 | `user/vdso.c`, `user/vdso.ld`, `user/vdso.map` | The vDSO: `__vdso_clock_gettime` in user mode, with the kernel's clock arithmetic (`src/tsc.bastio`) written again in C. The kernel copies it, with the clock's parameters, onto a read-only page of every Linux process (`src/elf.bastio`) | It runs in user mode as part of each process, like libc, so it is not trusted by the kernel: a bug in it gives that process a wrong time and nothing more. It is listed here because every Linux program relies on it for the time |
 

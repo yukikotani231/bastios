@@ -45,6 +45,28 @@ jobs:
           key: proof-${{ hashFiles('build/proof-cache/**') }}
           path: build/proof-cache
         continue-on-error: true
+  # The same suite with the kernel and the Bastio user programs built by the
+  # native x86-64 backend, so no C compiler sees any proved code (the C
+  # compiler still builds boot/, the C library and the musl test programs).
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: yukikotani231/bastiolang
+          ref: main
+          path: bastiolang
+      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86 musl-tools
+      - run: cd bastiolang/stage0 && cargo build --release --locked
+      - name: Restore the proof cache
+        uses: actions/cache/restore@v4
+        with:
+          key: proof-none
+          restore-keys: proof-
+          path: build/proof-cache
+      - run: make test NATIVE=1 BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
   # The AWS ENA driver against tools/qemu-ena, a model of the device built
   # into QEMU 8.2 (about 20 minutes, so the binary is cached by the hash of
   # the model's sources). The `test` job skips these boots; here they run

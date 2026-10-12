@@ -1569,12 +1569,12 @@ fn lx_retry(k: &mut Kernel, pid: u64, n: u64) -> u64
   ensures kok(k)
 {
   let rip = pget(k.procs, pid, F_REGS + R_RIP);
-  if rip < 2 {
+  if rip < SYSCALL_LEN {
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
   }
-  pset(&mut k.procs, pid, F_REGS + R_RIP, rip - 2);
-  pset(&mut k.procs, pid, F_REGS + R_RAX, n);
+  pset(&mut k.procs, pid, F_REGS + R_RIP, rip - SYSCALL_LEN);
+  pset(&mut k.procs, pid, F_REGS + R_LXNR, n);
   pset(&mut k.procs, pid, F_RESTART, 1);
   return SWITCH;
 }

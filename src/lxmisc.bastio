@@ -126,7 +126,7 @@ fn lx_uname(k: &mut Kernel, pid: u64, va: u64) -> u64
   uts_put(&mut k, 1, "bastios");
   uts_put(&mut k, 2, "6.1.0-bastios");
   uts_put(&mut k, 3, "BastiOS 0.2");
-  uts_put(&mut k, 4, "x86_64");
+  uts_put(&mut k, 4, uname_machine());
   uts_put(&mut k, 5, "(none)");
   uts_names(&mut k, pid);                        // what sethostname and setdomainname set
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, UTS_SIZE) != UTS_SIZE {
@@ -792,7 +792,7 @@ fn lx_mlock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64) -> u64
       r = lock_count(&mut k, pid, bytes, n == LX_MLOCK);
     }
     // mlock2 with MLOCK_ONFAULT locks the range without populating it.
-    let onfault = pget(k.procs, pid, F_REGS + R_RAX) == LX_MLOCK2 && pget(k.procs, pid, F_REGS + R_RDX) % 2 == 1;
+    let onfault = pget(k.procs, pid, F_REGS + R_LXNR) == LX_MLOCK2 && pget(k.procs, pid, F_REGS + R_RDX) % 2 == 1;
     if r == 0 && n == LX_MLOCK && a >= USER_BASE && !onfault {
       // Locked pages are resident: map those not touched yet (src/lxanon.bastio).
       anon_reach(&mut k, pid, from, to);

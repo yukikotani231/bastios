@@ -93,6 +93,10 @@ const F_BRK0: u64 = 63;              // Linux: where the program break started (
 // Namespaces: an index per kind, 0 the one the machine boots in. A fork or
 // a thread keeps its parent's (the whole row is copied); a native spawn
 // starts in the first ones. Words 65 .. 71 are for the other kinds.
+// Nonzero for a process that came from an ELF file or image: it makes
+// system calls the Linux way (on x86-64 the instruction says so; AArch64 has
+// one `svc` for both, so the process says it).
+const F_ABI: u64 = 66;
 const F_START: u64 = 65;             // when it started: centiseconds since boot, plus 1 (/proc/PID/stat)
 const F_NETNS: u64 = 64;             // network (src/netns.bastio, src/lxnetlink.bastio)
 // File permission bits (src/lxperm.bastio).
@@ -113,19 +117,6 @@ fn shown_code(code: u64) -> u64 {
   }
   return code;
 }
-
-// Saved register numbers. The rest (R_NUM, R_PC, ...) and NREGS are per architecture (src/regs.bastio).
-const R_RAX: u64 = 0;
-const R_RDX: u64 = 3;
-const R_RSI: u64 = 4;
-const R_RDI: u64 = 5;
-const R_R8: u64 = 7;
-const R_R9: u64 = 8;
-const R_R10: u64 = 9;
-const R_RIP: u64 = 15;
-const R_RSP: u64 = 16;
-const R_RFLAGS: u64 = 17;
-const R_FSBASE: u64 = 20;
 
 // States.
 const FREE: u64 = 0;
@@ -1387,7 +1378,7 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
       if !isrc.file && isrc.prog >= NPROGS {
         return Space::Empty;
       }
-      let probe = elf_parse(&mut v, isrc);
+      let probe = elf_parse_at(&mut v, isrc, 0);
       let low = (e.end + 4095) / 4096 * 4096;
       if !probe.ok || probe.bias != USER_BASE || probe.ilen != 0 || low > VDSO_PAGE * 4096 || probe.end > VDSO_PAGE * 4096 - low {
         return Space::Empty;
@@ -1439,7 +1430,9 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
   pset(&mut procs, pid, F_BRK, 0);
   pset(&mut procs, pid, F_BRK0, 0);
   pset(&mut procs, pid, F_MMAP, 0);
+  pset(&mut procs, pid, F_ABI, 0);
   if elf {
+    pset(&mut procs, pid, F_ABI, 1);
     // The heap starts on the page after the image; mmap takes pages
     // downward from the stack. Both stay in the window below the stack.
     pset(&mut procs, pid, F_BRK, (e.end + 4095) / 4096 * 4096);
