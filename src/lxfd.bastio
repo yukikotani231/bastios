@@ -702,6 +702,15 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
       return e;
     }
   }
+  return lx_open_tail(&mut k, pid, n, flags, mode);
+}
+
+/// lx_open_n, once the permission checks are done: /proc files, devices
+/// and nodes.
+fn lx_open_tail(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+  ensures kok(k)
+{
   let pf = proc_file(k.procs, k.fs.xfer, n);
   if pf != 0 {
     // /proc is read-only but for a sysctl root may write (rw-r--r--);
@@ -759,6 +768,7 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   }
   return lx_open_node(&mut k, pid, n, flags, mode);
 }
+
 
 /// open(2) of character device `dev` with these flags: a descriptor, or
 /// an error.

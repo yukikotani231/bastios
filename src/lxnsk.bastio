@@ -16,7 +16,11 @@
 //        are looked up only among the caller's. When the last process of
 //        a namespace has ended, its objects go the next time one of the
 //        same kind is made.
-//   PID  only the first one so far: every process is in namespace 0.
+//   PID  a process in a new one (clone or unshare with CLONE_NEWPID) has
+//        an id there from a counter of its own, and sees only the processes
+//        of its namespace, by those ids (see the PID section below); the
+//        first namespace is everything made outside one, and sees every
+//        process by its row.
 //
 // /proc/PID/ns/ holds a link per kind (cgroup, ipc, mnt, net, pid,
 // pid_for_children, user, uts) whose target is "KIND:[INODE]", with

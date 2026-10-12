@@ -1794,8 +1794,10 @@ fn lx_finish(k: &mut Kernel, pid: u64, x: Lex, follow: bool) -> u64
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
-  let o1 = proc_vpid(&mut k, x.n, pid);           // a PID namespace's ids are rows below
-  let o2 = proc_self(&mut k.fs.xfer, o1, pid);    // "proc/self" is the caller's /proc/PID
+  let mut o2 = x.n;
+  if nsk_of(k, NSK_PID, pid) == 0 {
+    o2 = proc_self(&mut k.fs.xfer, x.n, pid);     // "proc/self" is the caller's /proc/PID
+  }                                               // (in a PID namespace, lx_follow does it with the ids)
   let r = lx_follow(&mut k, pid, o2, follow || x.trail, smaller(x.floor, o2));  // symbolic links (src/lxlink.bastio)
   if r == NO_RESULT || !x.dirend {
     return r;
