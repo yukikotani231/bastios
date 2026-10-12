@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -26,6 +27,22 @@
 #ifndef PR_CAP_AMBIENT
 #define PR_CAP_AMBIENT 47
 #endif
+
+static volatile int ns_stop, ns_bad;
+static void *ns_worker(void *a) {
+	while (!ns_stop) {
+		int fd = open("/tmp/mcont.file", O_RDONLY);
+		if (fd < 0) ns_bad++; else close(fd);
+		usleep(500);
+	}
+	return 0;
+}
+static void *ns_chroot(void *a) {
+	/* what runc's helper thread does: its own mount namespace and root */
+	if (unshare(CLONE_FS) != 0 || unshare(CLONE_NEWNS) != 0 || chroot("/tmp/mcont.rr") != 0) ns_bad += 1000;
+	usleep(60000);
+	return 0;
+}
 
 static int fail(const char *what) { printf("mcont: %s\n", what); return 1; }
 
@@ -121,6 +138,24 @@ int main(void) {
 	/* bpf: only the cgroup device filter, accepted and attached to nothing. */
 	long bpf_r = syscall(321, 99, "", 0);
 	if (bpf_r != -1 || errno != EINVAL) return fail("bpf bad command");
+
+	/* A thread that makes its own mount namespace and root, and ends, leaves the others' view
+	 * alone: the row of a thread that ended is not handed to the next thread. */
+	close(open("/tmp/mcont.file", O_CREAT | O_WRONLY, 0644));
+	mkdir("/tmp/mcont.rr", 0755);
+	pthread_t nw[2], nt;
+	for (int i = 0; i < 2; i++) pthread_create(&nw[i], 0, ns_worker, 0);
+	usleep(30000);
+	for (int round = 0; round < 3; round++) {
+		pthread_create(&nt, 0, ns_chroot, 0);
+		pthread_join(nt, 0);
+		usleep(30000);
+	}
+	ns_stop = 1;
+	for (int i = 0; i < 2; i++) pthread_join(nw[i], 0);
+	unlink("/tmp/mcont.file");
+	rmdir("/tmp/mcont.rr");
+	if (ns_bad) return fail("a thread's own root leaked to its group");
 
 	/* A subreaper adopts its descendants' orphans: the grandchild's parent becomes this process. */
 	int fds[2];

@@ -426,6 +426,8 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   pset(&mut k.procs, c, F_SIGPEND, 0);
   pset(&mut k.procs, c, F_RESTART, 0);
   pset(&mut k.procs, c, F_TGID, g);
+  cwd_fork(&mut k.cwd, pid, c);             // starts where the creator is: a row of a thread that ended holds its old root
+  cwd_fork(&mut k.croot, pid, c);
   k.mns = set(k.mns, c, get(k.mns, pid));   // the group's namespaces (src/lxns.bastio, src/lxnsk.bastio)
   nsk_fork(&mut k.mns, pid, c);
   pidns_thread(&mut k, pid, c);
