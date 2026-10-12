@@ -361,8 +361,12 @@ t_ipc: socketpair both ways, EOF after close
 t_ipc: timerfd
 t_ipc: ttyname(0)
 t_isol: a loop-mounted image is nosuid
+t_isol: /dev/console is root's
+t_isol: SHM_LOCK needs RLIMIT_MEMLOCK or root
+t_isol: SysV group bits count supplementary groups
 t_isol: a shared mapping of a read-only file stays read-only
 t_isol: a unix socket's file says who may connect
+t_isol: another user's /proc exe, fd and ns links are hidden
 t_isol: loop devices are root's and group disk's
 t_isol: mount and umount2 are root's
 t_isol: native system calls are root's
@@ -786,6 +790,14 @@ t_sig2: read into an untouched stack buffer
 t_sig2: rt_sigprocmask with a wrong sigset size is EINVAL
 t_sig2: sigaltstack smaller than MINSIGSTKSZ is ENOMEM
 t_sig2: the stack grows to 512 KiB
+t_sig2: mprotect PROT_NONE makes a page fault on read
+t_sig2: read() into a PROT_NONE buffer is EFAULT
+t_sig2: write() from a PROT_NONE buffer is EFAULT
+t_sig2: a PROT_NONE file mapping faults on read
+t_sig2: a PROT_NONE MAP_SHARED page is still shared after mprotect
+t_sig2: a forked child keeps a page PROT_NONE
+t_sig2: mmap of a file with fd -1 is EBADF
+t_sig2: mmap of length 0 with fd -1 is EBADF
 t_signal: SA_SIGINFO
 t_signal: SIGCHLD on child exit
 t_signal: SIG_IGN
@@ -851,6 +863,7 @@ t_sysv: shmget and shmat errors
 t_thread: /proc/self/stat and status count the threads
 t_thread: 4 threads, mutex
 t_thread: condition variable
+t_thread: exit_group while another thread runs keeps its code
 t_thread: gettid differs in a thread
 t_thread: pthread_create + join
 t_thread: pthread_detach

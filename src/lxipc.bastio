@@ -25,6 +25,7 @@
 
 import "lxcred.bastio";
 import "lxtime.bastio";
+import "lxrlimit.bastio";             // rl_cur, for SHM_LOCK
 
 const LX_SEMGET: u64 = 64;
 const LX_SEMOP: u64 = 65;
@@ -230,7 +231,9 @@ fn ipc_id(k: &Kernel, kind: u64, slot: u64) -> u64
 }
 
 /// Whether pid may have `want` (4 read, 2 write/alter, 6 both) on the set:
-/// Linux's ipcperms. Effective uid 0 may do anything.
+/// Linux's ipcperms. Effective uid 0 may do anything. The group bits
+/// apply when the owner's or creator's group is the process's
+/// file-system group or one of its supplementary groups (in_group_p).
 fn ipc_may(k: &Kernel, pid: u64, kind: u64, slot: u64, want: u64) -> bool
   requires kok(k) && pid < NPROC && slot < IPC_SETS
 {
@@ -238,13 +241,12 @@ fn ipc_may(k: &Kernel, pid: u64, kind: u64, slot: u64, want: u64) -> bool
   if euid == 0 {
     return true;
   }
-  let egid = id_get(k.procs, pid, F_GID, true);
   let own = hget(k, kind, slot, H_OWN);
   let cre = hget(k, kind, slot, H_CRE);
   let mut g = hget(k, kind, slot, H_MODE) % 512;
   if euid == own % ID_SPAN || euid == cre % ID_SPAN {
     g = g / 64;
-  } else if egid == own / ID_SPAN % ID_SPAN || egid == cre / ID_SPAN % ID_SPAN {
+  } else if has_group(k.procs, pid, own / ID_SPAN % ID_SPAN, true) || has_group(k.procs, pid, cre / ID_SPAN % ID_SPAN, true) {
     g = g / 8;
   }
   return (want & 7) & (g & 7) == (want & 7);
@@ -1785,6 +1787,9 @@ fn lx_shmctl(k: &mut Kernel, pid: u64, id: u64, cmd0: u64, va: u64) -> u64
   }
   if !ipc_owner(k, pid, KM, slot) {
     return EPERM;
+  }
+  if cmd == SHM_LOCK && !cap_has(k, pid, CAP_IPC_LOCK) && rl_cur(k, pid, RLIMIT_MEMLOCK) == 0 {
+    return EPERM;                           // as Linux: an owner locks only under a nonzero RLIMIT_MEMLOCK
   }
   let mode = hget(k, KM, slot, H_MODE);
   if cmd == SHM_LOCK {

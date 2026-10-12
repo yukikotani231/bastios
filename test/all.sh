@@ -33,6 +33,7 @@ tests=(
   "dhcp e1000|c|NIC=e1000 test/dhcp_test.sh"
   "iso|c|test/iso_test.sh"
   "nmi|c|test/nmi_test.sh"
+  "stackguard|c|test/stackguard_test.sh"
   "fuzz|c|test/fuzz_test.sh 1 2 2000"
 )
 tmp=$(mktemp -d)

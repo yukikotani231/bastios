@@ -37,6 +37,7 @@ extern const char bst_ap_trampoline[], bst_ap_trampoline_end[];
 uint8_t bst_core0[CORE_BLOCK] __attribute__((aligned(CORE_BLOCK)));
 static uint8_t *cores[MAX_CPUS] = { bst_core0 };
 extern uint64_t bst_boot_take(uint64_t size, uint64_t align);    /* multiboot.c */
+static void guard_block(uint8_t *core);
 
 volatile uint64_t bst_ap_stack;     /* read by ap.S; one AP starts at a time */
 static uint64_t cpus_online = 1;    /* the BSP; updated atomically */
@@ -558,6 +559,7 @@ static void send_ipi(uint32_t apic_id, uint32_t low) {
 static int start_ap(uint32_t apic_id, uint64_t n) {
     uint64_t before = bst_platform_cpus();
     for (uint64_t b = 0; b < CORE_BLOCK; b += 8) *(uint64_t *)(cores[n] + b) = 0;
+    guard_block(cores[n]);
     *(uint64_t *)(cores[n] + CORE_INDEX) = n;
     bst_ap_stack = (uint64_t)(cores[n] + CORE_KSTACK);
     send_ipi(apic_id, 0x4500);                          /* INIT */
@@ -580,7 +582,42 @@ static int64_t madt_cpu(uint64_t e) {
     return -1;
 }
 
+/* The guard page under each kernel stack (core.h). boot.S maps the first
+ * GiB with 2 MiB pages. A block is 128 KiB aligned, so it lies inside one
+ * of them; guard_block splits that page into 4 KiB pages with the same
+ * rights (once per 2 MiB page) and takes the block's guard out. The
+ * blocks (bst_core0 and the ones bst_boot_take hands out, all below
+ * IDENT_LIMIT) fill at most 32 MiB plus bst_core0's page, hence 20
+ * tables; a block past them keeps no guard. It runs on the bootstrap
+ * processor after it clears the block and before the block's processor
+ * starts. A running AP may still hold the old 2 MiB entry for a page it
+ * shares with a new block; that entry maps the same memory, so at worst
+ * it misses the new guard until its next cr3 load. User address spaces
+ * share these tables through pml4 entry 0. */
+static uint64_t guard_pt[20][512] __attribute__((aligned(4096)));
+static uint64_t guard_used;
+
+static void guard_block(uint8_t *core) {
+    const uint64_t frame = 0x000FFFFFFFFFF000ull, huge = 1ull << 21;
+    uint64_t g = (uint64_t)(core + CORE_GUARD);
+    if (g + 4096 > IDENT_LIMIT) return;
+    uint64_t *pdpt = (uint64_t *)(bst_kernel_pml4[0] & frame);
+    uint64_t *pde = &((uint64_t *)(pdpt[0] & frame))[g / huge];
+    if (*pde & 0x80) {                                  /* still a 2 MiB page */
+        if (guard_used == sizeof guard_pt / sizeof guard_pt[0]) return;
+        uint64_t *pt = guard_pt[guard_used++], r = g & ~(huge - 1);
+        for (uint64_t i = 0; i < 512; i++)
+            pt[i] = (r + 4096 * i) | (*pde & 0x1F);     /* present, writable, PWT, PCD as before */
+        *pde = (uint64_t)pt | (*pde & 0x1F);
+        uint64_t cr3;
+        __asm__ volatile ("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) : : "memory");
+    }
+    ((uint64_t *)(*pde & frame))[(g / 4096) % 512] = 0;
+    __asm__ volatile ("invlpg (%0)" : : "r"(g) : "memory");
+}
+
 void bst_smp_init(void) {
+    guard_block(bst_core0);
     core_init(0);
     uint64_t len = 0, madt = find_madt(&len);
     for (uint64_t i = 44; madt && i + 2 <= len; ) {

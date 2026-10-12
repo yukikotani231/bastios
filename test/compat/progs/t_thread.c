@@ -2,6 +2,8 @@
  * condition variables (futex), thread-local storage. */
 #include "compat.h"
 #include <pthread.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
@@ -91,6 +93,26 @@ static int count_threads(void) {
     return a >= 2 && b >= 2;
 }
 
+/* exit_group from one thread while another is running on a processor of
+ * its own: the process must end with the code exit_group was given. */
+static void *spin(void *arg) { for (volatile long *x = arg;; ) (*x)++; return 0; }
+static int group_exit_code(void) {
+    for (int round = 0; round < 10; round++) {
+        pid_t c = fork();
+        if (c == 0) {
+            static volatile long n;
+            pthread_t s;
+            if (pthread_create(&s, 0, spin, (void *)&n) != 0) _exit(1);
+            while (n < 1000) {}               /* the spinner is running */
+            syscall(SYS_exit_group, 42);
+        }
+        int st = 0;
+        if (c < 0 || waitpid(c, &st, 0) != c) return 0;
+        if (!WIFEXITED(st) || WEXITSTATUS(st) != 42) { fail("round %d: status %#x", round, st); return -1; }
+    }
+    return 1;
+}
+
 int main(void) {
     setup();
     pthread_t t[4];
@@ -115,5 +137,9 @@ int main(void) {
            void *g(void *a) { (void)a; return (void *)(long)gettid(); }
            pthread_create(&x, 0, g, 0) == 0 && pthread_join(x, (void **)&other) == 0 && other != gettid(); }));
     EXPECT("/proc/self/stat and status count the threads", count_threads());
+    if (begin("exit_group while another thread runs keeps its code")) {
+        int r = group_exit_code();
+        if (r == 1) pass(); else if (r == 0) fail("fork or waitpid failed");
+    }
     return done();
 }
