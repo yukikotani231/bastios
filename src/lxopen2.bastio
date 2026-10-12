@@ -160,7 +160,8 @@ fn open2_check(k: &mut Kernel, pid: u64, h: u64, path: u64, flags: u64, res: u64
   if res & RES_BENEATH != 0 && (x.abs || x.esc) {
     return EXDEV;
   }
-  let ln = proc_self(&mut k.fs.xfer, x.n, pid);
+  let l1 = proc_vpid(&mut k, x.n, pid);
+  let ln = proc_self(&mut k.fs.xfer, l1, pid);
   let last = flags & LO_NOFOLLOW == 0 || x.trail;
   let no_magic = res & (RES_NO_MAGICLINKS | RES_NO_SYMLINKS) != 0;
   if no_magic && is_magic(k.fs.xfer, ln, last) {

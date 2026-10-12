@@ -782,9 +782,12 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
       r = lx_statfs(&mut k, pid, b, RAMFS_MAGIC);
     }
   } else if n == LX_GETPGRP {
-    r = pgid_of(k.procs, pid);
+    r = vpid_of(k, pid, pgid_of(k.procs, pid));
   } else if n == LX_SETSID {
     r = lx_setsid(&mut k, pid);
+    if r == pid {
+      r = vpid_of(k, pid, pid);
+    }
   } else if n == LX_SETPGID {
     r = lx_setpgid(&mut k, pid, a, b);
   } else if n == LX_GETPGID || n == LX_GETSID {
@@ -795,9 +798,9 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = ESRCH;
     if p < NPROC && state(k.procs, p) != FREE {
       if n == LX_GETPGID {
-        r = pgid_of(k.procs, p);
+        r = vpid_of(k, pid, pgid_of(k.procs, p));
       } else {
-        r = sid_of(k.procs, p);
+        r = vpid_of(k, pid, sid_of(k.procs, p));
       }
     }
   } else if n == LX_CAPGET {

@@ -149,7 +149,7 @@ fn power_button(s: &mut Sys)
 
 // A process taken out to run: its id, its process id (tgid, for a thread),
 // its lease on its address space, and its FPU page.
-struct Task { pid: u64, tgid: u64, lease: Lease, fpu: Frame }
+struct Task { pid: u64, tgid: u64, vpid: u64, vtgid: u64, lease: Lease, fpu: Frame }
 
 enum Job { Stop, Idle, Disk, Run(Task) }   // Disk: idle, but a polled disk command is running
 
@@ -160,15 +160,15 @@ enum Job { Stop, Idle, Disk, Run(Task) }   // Disk: idle, but a polled disk comm
 /// task runs on. Anything they skip (a signal, a kill, the tick's
 /// accounting) waits for the task's next trap that is not one of them, at
 /// the latest its timer interrupt.
-fn fast_call(cpu: &mut Cpu, v: u64, pid: u64, tg: u64, others: &Atomic[bool]) -> bool {
+fn fast_call(cpu: &mut Cpu, v: u64, pid: u64, vpid: u64, vtg: u64, others: &Atomic[bool]) -> bool {
   let n = cpu_get(cpu, R_RAX);
   if v == V_LINUX {
     if n == LX_GETTID {
-      cpu_set(&mut cpu, R_RAX, pid);
+      cpu_set(&mut cpu, R_RAX, vpid);
       return true;
     }
     if n == LX_GETPID {
-      cpu_set(&mut cpu, R_RAX, tg);
+      cpu_set(&mut cpu, R_RAX, vtg);
       return true;
     }
     if n == LX_SCHED_YIELD && !atomic_load(others) {
@@ -324,7 +324,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
           }
           cpu_set(&mut cpu, R_FSBASE, pget(s.k.procs, p, F_REGS + R_FSBASE));
           pset(&mut s.k.procs, p, F_STATE, RUNNING);
-          return Job::Run(Task { pid: p, tgid: tgid(s.k.procs, p), lease: l, fpu: f });
+          return Job::Run(Task { pid: p, tgid: tgid(s.k.procs, p), vpid: vpid_of(s.k, p, p), vtgid: vpid_of(s.k, p, tgid(s.k.procs, p)), lease: l, fpu: f });
         },
       }
     },
@@ -727,7 +727,7 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
         // loaded and saved outside the lock.
         cpu_fpu_load(&mut cpu, t.fpu);
         let mut v = cpu_run(&mut cpu, mmu);
-        while fast_call(&mut cpu, v, t.pid, t.tgid, others) {
+        while fast_call(&mut cpu, v, t.pid, t.vpid, t.vtgid, others) {
           v = cpu_run(&mut cpu, mmu);         // answered without the lock
         }
         mmu_exit(&mut mmu, t.lease);

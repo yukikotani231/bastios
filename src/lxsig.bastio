@@ -675,7 +675,8 @@ fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
       invariant 1 <= p && p <= NPROC && kok(k)
     {
       let live = state(k.procs, p) != FREE && state(k.procs, p) != ZOMBIE && is_linux(k.procs, p);
-      if live && ((all && p != pid) || (!all && pgid_of(k.procs, p) == g)) {
+      let seen = nsk_of(k, NSK_PID, pid) == 0 || nsk_of(k, NSK_PID, p) == nsk_of(k, NSK_PID, pid);
+      if live && seen && ((all && p != pid) || (!all && pgid_of(k.procs, p) == g)) {
         hit = true;
         if may_signal(k, pid, p, s) {
           sent = true;
@@ -1052,6 +1053,9 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   // The siginfo: signo, errno, code (SI_USER).
   bset(&mut fr, INFO_AT, cast[u8](s));
   info_from(&mut fr, INFO_AT, wget(k.sigsave, sender_at(p, s)));   // si_pid, si_value
+  if wget(k.sigsave, sender_at(p, s)) < FAULT_MARK && nsk_of(k, NSK_PID, p) != 0 {
+    xfer_u64(&mut fr, INFO_AT + 16, vpid_of(k, p, wget(k.sigsave, sender_at(p, s)) % 256));   // as p's PID namespace names the sender
+  }
   // The FPU state, as fxsave left it.
   match take_fpu(&mut k.fpus, p) {
     Fpu::None => {},

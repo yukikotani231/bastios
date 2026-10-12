@@ -722,7 +722,7 @@ fn pty_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u
       g = pgid_of(k.procs, pid);
     }
     lx_fill(&mut k, 0, 4);
-    xfer_u64(&mut k.fs.xfer, 0, g % 0x100000000);
+    xfer_u64(&mut k.fs.xfer, 0, vpid_of(k, pid, g) % 0x100000000);
     return lx_put_out(&mut k, pid, arg, 4);
   }
   if req == TIOCSPGRP {
@@ -730,7 +730,7 @@ fn pty_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u
     if g == NO_RESULT {
       return EFAULT;
     }
-    pt_set(&mut k.ptys, p, PT_W_FG, g);
+    pt_set(&mut k.ptys, p, PT_W_FG, pidarg_k(k, pid, g) % 0x100000000);
     return 0;
   }
   if req == FIONREAD {

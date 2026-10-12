@@ -24,6 +24,9 @@ fn lx_fork(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if lim != 0 {
     return lim;                             // -EAGAIN: RLIMIT_NPROC
   }
+  if !pidns_room(k, pid) {
+    return ENOMEM;                          // the init of its PID namespace has ended
+  }
   let c = new_pid(&mut k);
   if c == 0 {
     return EAGAIN;
@@ -59,6 +62,9 @@ fn lx_vfork_vm(k: &mut Kernel, mmu: &Mmu, pid: u64, stack: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
+  if !pidns_room(k, pid) {
+    return ENOMEM;                          // the init of its PID namespace has ended
+  }
   let c = new_pid(&mut k);
   if c == 0 {
     return EAGAIN;
@@ -99,7 +105,7 @@ fn lx_vfork_vm(k: &mut Kernel, mmu: &Mmu, pid: u64, stack: u64) -> u64
   if stack != 0 {
     pset(&mut k.procs, c, F_REGS + R_RSP, stack);
   }
-  ret(&mut k.procs, pid, c);
+  ret(&mut k.procs, pid, vpid_of(k, pid, c));
   pset(&mut k.procs, pid, F_WAIT, c);
   pset(&mut k.procs, pid, F_STATE, LXVFORK);
   return c;
@@ -187,6 +193,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   cwd_fork(&mut k.croot, pid, c);
   k.mns = set(k.mns, c, get(k.mns, pid));   // the same mount namespace (src/lxns.bastio)
   nsk_fork(&mut k.mns, pid, c);             // and the same others (src/lxnsk.bastio)
+  pidns_enter(&mut k, pid, c);              // with an id in the PID namespace children start in
   pset(&mut k.procs, c, F_SIGPEND, 0);
   pset(&mut k.procs, c, F_RESTART, 0);
   pset(&mut k.procs, c, F_STATE, READY);
@@ -838,7 +845,7 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
             return KEEP;
           }
         }
-        ret(&mut k.procs, pid, c);
+        ret(&mut k.procs, pid, vpid_of(k, pid, c));
         return KEEP;
       }
       if state(k.procs, c) == ZOMBIE {
@@ -857,7 +864,7 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
         }
         tm_reap(&mut k, pid, c);
         pset(&mut k.procs, c, F_STATE, FREE);
-        ret(&mut k.procs, pid, c);
+        ret(&mut k.procs, pid, vpid_of(k, pid, c));
         return KEEP;
       }
     }
@@ -935,7 +942,7 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
           lx_fill(&mut k, 0, 128);
           bset(&mut k.fs.xfer, 0, 17);              // si_signo: SIGCHLD
           bset(&mut k.fs.xfer, 8, cast[u8](4 + jr / 256));   // CLD_STOPPED (5), CLD_CONTINUED (6)
-          bset(&mut k.fs.xfer, 16, cast[u8](c));    // si_pid
+          xfer_u64(&mut k.fs.xfer, 16, vpid_of(k, pid, c));   // si_pid (and a zero si_uid)
           bset(&mut k.fs.xfer, 24, cast[u8](jr % 256));      // si_status: the signal
           if lx_put_out(&mut k, pid, info, 128) != 0 {
             ret(&mut k.procs, pid, EFAULT);
@@ -950,7 +957,7 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
           lx_fill(&mut k, 0, 128);
           let code = pget(k.procs, c, F_CODE);
           bset(&mut k.fs.xfer, 0, 17);              // si_signo: SIGCHLD
-          bset(&mut k.fs.xfer, 16, cast[u8](c));    // si_pid
+          xfer_u64(&mut k.fs.xfer, 16, vpid_of(k, pid, c));   // si_pid (and a zero si_uid)
           if code >= SIG_DEATH {
             bset(&mut k.fs.xfer, 8, 2);             // si_code: CLD_KILLED
             bset(&mut k.fs.xfer, 24, cast[u8](code % 128));

@@ -77,16 +77,16 @@ fn lx_owner(k: &mut Kernel, pid: u64, h: u64, cmd: u64, arg: u64) -> u64
   }
   if cmd == F_GETOWN {
     if ty == F_OWNER_PGRP + 1 && id != 0 {
-      return 0xFFFFFFFFFFFFFFFF - id + 1;   // -id
+      return wrap_sub(0, vpid_of(k, pid, id));   // -id
     }
-    return id;
+    return vpid_of(k, pid, id);
   }
   if cmd == F_GETOWN_EX {
     let mut t = F_OWNER_TID;                // never set: type 0, as on Linux
     if ty >= 1 && ty <= F_OWNER_PGRP + 1 {
       t = ty - 1;
     }
-    xfer_u64(&mut k.fs.xfer, 0, t + id * OWN_TYPE);   // struct f_owner_ex { int type; int pid; }
+    xfer_u64(&mut k.fs.xfer, 0, t + (vpid_of(k, pid, id) % OWN_TYPE) * OWN_TYPE);   // struct f_owner_ex { int type; int pid; }
     return lx_put_out(&mut k, pid, arg, 8);
   }
   if cmd == F_SETOWN {
@@ -95,9 +95,9 @@ fn lx_owner(k: &mut Kernel, pid: u64, h: u64, cmd: u64, arg: u64) -> u64
       return EINVAL;                        // INT_MIN has no negation
     }
     if a > 0x80000000 {
-      return own_set(&mut k, pid, h, F_OWNER_PGRP, OWN_TYPE - a);
+      return own_set(&mut k, pid, h, F_OWNER_PGRP, own_row(k, pid, OWN_TYPE - a));
     }
-    return own_set(&mut k, pid, h, F_OWNER_PID, a);
+    return own_set(&mut k, pid, h, F_OWNER_PID, own_row(k, pid, a));
   }
   // F_SETOWN_EX
   if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, 8) != 8 {
@@ -112,7 +112,18 @@ fn lx_owner(k: &mut Kernel, pid: u64, h: u64, cmd: u64, arg: u64) -> u64
   if p >= 0x80000000 {
     return ESRCH;                           // no thread, process or group has a negative id
   }
-  return own_set(&mut k, pid, h, t, p);
+  return own_set(&mut k, pid, h, t, own_row(k, pid, p));
+}
+
+/// The row an owner id v that pid gave names (NPROC if none), as pid sees ids.
+fn own_row(k: &Kernel, pid: u64, v: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result < 0x100000000
+{
+  if nsk_of(k, NSK_PID, pid) == 0 {
+    return smaller(v, 0xFFFFFFFF);
+  }
+  return kpid_of(k, pid, v);
 }
 
 /// Sets or clears O_ASYNC on description h; on a pipe's read end, marks

@@ -132,6 +132,37 @@ fn dec_out(x: &mut Bytes, at: u64, p: u64) -> u64
   return 1;
 }
 
+/// Writes v (below 10 million) in decimal at x[at..]; how many digits.
+fn dec_big(x: &mut Bytes, at: u64, v: u64) -> u64
+  requires v < 10000000 && at + 7 <= blen(x)
+  ensures blen(x) == old(blen(x)) && 1 <= result && result <= 7
+{
+  let mut d = 1;
+  if v >= 1000000 {
+    d = 7;
+  } else if v >= 100000 {
+    d = 6;
+  } else if v >= 10000 {
+    d = 5;
+  } else if v >= 1000 {
+    d = 4;
+  } else if v >= 100 {
+    d = 3;
+  } else if v >= 10 {
+    d = 2;
+  }
+  let mut i = d;
+  let mut r = v;
+  while i > 0
+    invariant i <= d && d <= 7 && at + 7 <= blen(x) && blen(x) == old(blen(x))
+  {
+    bset(&mut x, at + i - 1, cast[u8](48 + r % 10));
+    r = r / 10;
+    i = i - 1;
+  }
+  return d;
+}
+
 /// Rewrites a leading "proc/self" in x[..n] to "proc/PID" for the caller.
 /// Returns the new length, never more than n.
 fn proc_self(x: &mut Bytes, n: u64, pid: u64) -> u64
@@ -152,6 +183,74 @@ fn proc_self(x: &mut Bytes, n: u64, pid: u64) -> u64
     i = i + 1;
   }
   return n - 4 + d;
+}
+
+/// For a caller in a PID namespace other than the first, "proc/N..." in
+/// x[..n] names the process with id N there: N becomes the kernel's row
+/// number for it (0, which names none, if there is no such process), so
+/// the lookups below see rows. Returns the new length.
+fn proc_vpid(k: &mut Kernel, n: u64, pid: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+  ensures kok(k) && result <= FNAME_MAX
+{
+  if nsk_of(k, NSK_PID, pid) == 0 || n < 6 || !xfer_is(k.fs.xfer, 0, 5, "proc/") {
+    return n;
+  }
+  let e = comp_end(k.fs.xfer, 5, n);
+  if e == 5 || e - 5 > 7 || bget(k.fs.xfer, 5) == 48 {
+    return n;
+  }
+  let mut v = 0;
+  let mut i = 5;
+  while i < e
+    invariant 5 <= i && i <= e && e <= n && n <= FNAME_MAX && v < 10000000 && kok(k)
+  {
+    let c = cast[u64](bget(k.fs.xfer, i));
+    if c < 48 || c > 57 {
+      return n;                             // not an id: "self", "mounts", ...
+    }
+    if v >= 1000000 {
+      return n;                             // ids stay below a million (src/lxnsk.bastio)
+    }
+    v = v * 10 + (c - 48);
+    i = i + 1;
+  }
+  let r = kpid_of(k, pid, v);
+  let mut row = 0;
+  if r < NPROC {
+    row = r;
+  }
+  let l = e - 5;
+  let mut d = 1;
+  if row >= 100 {
+    d = 3;
+  } else if row >= 10 {
+    d = 2;
+  }
+  if d > l && n + (d - l) > FNAME_MAX {
+    row = 0;
+    d = 1;                                  // no room for the longer name: none
+  }
+  if d <= l {
+    let mut j = e;
+    while j < n
+      invariant e <= j && j <= n && n <= FNAME_MAX && 1 <= d && d <= l && l == e - 5 && 6 <= e && blen(k.fs.xfer) == XFER && kok(k)
+    {
+      bset(&mut k.fs.xfer, j - l + d, bget(k.fs.xfer, j));
+      j = j + 1;
+    }
+    let w = dec_out(&mut k.fs.xfer, 5, row);
+    return n - l + d;
+  }
+  let mut j = n;
+  while j > e
+    invariant e <= j && j <= n && n + d - l <= FNAME_MAX && l < d && d <= 3 && l == e - 5 && 6 <= e && blen(k.fs.xfer) == XFER && kok(k)
+  {
+    bset(&mut k.fs.xfer, j - 1 + d - l, bget(k.fs.xfer, j - 1));
+    j = j - 1;
+  }
+  let w = dec_out(&mut k.fs.xfer, 5, row);
+  return n + d - l;
 }
 
 /// The process x[from..to] names, as decimal digits: a live one (zombies
@@ -450,8 +549,8 @@ fn proc_dir_meta(d: u64) -> Meta {
 
 /// Entry i of /proc directory `dir` (getdents64), its name in the
 /// transfer buffer.
-fn proc_entry(k: &mut Kernel, dir: u64, i: u64) -> Ent
-  requires kok(k) && dir >= DIR_PROC
+fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
+  requires kok(k) && pid < NPROC && dir >= DIR_PROC
   ensures kok(k) && result.len <= XFER
 {
   let end = Ent { len: 0, dir: false, end: true };
@@ -510,7 +609,11 @@ fn proc_entry(k: &mut Kernel, dir: u64, i: u64) -> Ent
   if state(k.procs, p) == FREE {
     return Ent { len: 0, dir: false, end: false };
   }
-  return Ent { len: dec_out(&mut k.fs.xfer, 0, p), dir: true, end: false };
+  let v = vpid_of(k, pid, p);
+  if v == 0 {
+    return Ent { len: 0, dir: false, end: false };   // in another PID namespace
+  }
+  return Ent { len: dec_big(&mut k.fs.xfer, 0, smaller(v, 9999999)), dir: true, end: false };
 }
 
 // ---------------------------------------------------------------- text
@@ -874,17 +977,17 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     // pid (comm) state ppid pgrp session tty_nr tpgid flags minflt cminflt
     // majflt cmajflt utime stime cutime cstime priority nice num_threads
     // itrealvalue starttime, then 30 more fields of zeros.
-    let mut a = put_n(&mut o, 0, p);
+    let mut a = put_n(&mut o, 0, vpid_of(k, pid, p));
     a = put_s(&mut o, a, " (");
     a = put_comm(&mut k, p, &mut o, a);
     a = put_s(&mut o, a, ") ");
     a = put_c(&mut o, a, state_letter(s, pget(k.procs, p, F_ASLEEP) != 0));
     a = put_c(&mut o, a, 32);
-    a = put_n(&mut o, a, parent);
+    a = put_n(&mut o, a, vpid_of(k, pid, parent));
     a = put_c(&mut o, a, 32);
-    a = put_n(&mut o, a, p);
+    a = put_n(&mut o, a, vpid_of(k, pid, p));
     a = put_c(&mut o, a, 32);
-    a = put_n(&mut o, a, p);
+    a = put_n(&mut o, a, vpid_of(k, pid, p));
     a = put_s(&mut o, a, " 0 -1 0 0 0 0 0 ");
     a = put_n(&mut o, a, pget(k.procs, p, F_TICKS));
     let ni = nice_of(k.procs, p);
@@ -915,11 +1018,17 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     a = put_s(&mut o, a, "\nState:\t");
     a = put_c(&mut o, a, state_letter(s, pget(k.procs, p, F_ASLEEP) != 0));
     a = put_s(&mut o, a, "\nTgid:\t");
-    a = put_n(&mut o, a, p);
+    a = put_n(&mut o, a, vpid_of(k, pid, p));
     a = put_s(&mut o, a, "\nPid:\t");
-    a = put_n(&mut o, a, p);
+    a = put_n(&mut o, a, vpid_of(k, pid, p));
     a = put_s(&mut o, a, "\nPPid:\t");
-    a = put_n(&mut o, a, parent);
+    a = put_n(&mut o, a, vpid_of(k, pid, parent));
+    if nsk_of(k, NSK_PID, p) != 0 && nsk_of(k, NSK_PID, pid) == 0 {
+      a = put_s(&mut o, a, "\nNSpid:\t");     // its id here, then in its own namespace
+      a = put_n(&mut o, a, p);
+      a = put_c(&mut o, a, 9);
+      a = put_n(&mut o, a, get(k.mns, nsk_at(NSK_VPID, p)));
+    }
     a = put_s(&mut o, a, "\nUid:");
     a = put_ids(&mut o, a, k.procs, p, F_UID, F_SUID);
     a = put_s(&mut o, a, "\nGid:");

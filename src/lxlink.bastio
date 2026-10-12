@@ -211,7 +211,8 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
   if tl == NO_RESULT {
     return NO_RESULT;
   }
-  return proc_self(&mut k.fs.xfer, tl, pid);   // "proc/self" in a mounted proc too
+  let t1 = proc_vpid(&mut k, tl, pid);
+  return proc_self(&mut k.fs.xfer, t1, pid);   // "proc/self" in a mounted proc too
 }
 
 /// readlink of the link with handle f: its target into user memory at va,
