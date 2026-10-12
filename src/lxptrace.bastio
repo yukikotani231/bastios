@@ -28,8 +28,15 @@
 // PTRACE_SINGLESTEP sets the trap flag in the saved flags; the debug trap
 // (vector 1) is SIGTRAP, which stops the process as any signal does.
 //
-// Not done: the events (fork, clone, exec, exit; PTRACE_SETOPTIONS keeps
-// them and only PTRACE_O_EXITKILL acts), the floating point and debug
+// The events PTRACE_O_TRACEFORK, TRACEVFORK, TRACECLONE and TRACEEXEC ask
+// for are reported: the tracer's tracee stops with SIGTRAP and the event in
+// the status (status >> 16), PTRACE_GETEVENTMSG gives the new child's id
+// (or the old thread's, for exec), and the new child starts attached to the
+// same tracer, stopped by SIGSTOP. A vfork parent hears of its event only
+// when it runs again.
+//
+// Not done: the exit event and PTRACE_O_TRACEVFORKDONE (PTRACE_SETOPTIONS
+// keeps them and only PTRACE_O_EXITKILL acts), the floating point and debug
 // registers, PTRACE_INTERRUPT and PTRACE_LISTEN, and
 // PTRACE_GET_SYSCALL_INFO. A tracer that is not the parent hears of its
 // tracee's end once, then the parent reaps it. There is no Yama scope: the
@@ -248,6 +255,47 @@ fn pt_sys_exit(k: &mut Kernel, p: u64) -> bool
   tr2_put(&mut k, p, t % TS_NR + t / TS_NR % 1024 * TS_NR + TS_EXIT);
   tr_stop(&mut k, p, 5 + 128 * (tr_opt(tr_get(k, p)) % 2));
   return true;
+}
+
+/// Process p has made process c (kind 1: fork, 2: vfork, 3: clone). If its
+/// tracer asked for that event (PTRACE_O_TRACEFORK, TRACEVFORK or
+/// TRACECLONE) the child starts traced by the same tracer, stopped by
+/// SIGSTOP, and p stops with SIGTRAP and the event once it runs again.
+fn pt_fork_event(k: &mut Kernel, p: u64, c: u64, kind: u64)
+  requires kok(k) && 1 <= p && p < NPROC && c < NPROC && 1 <= kind && kind <= 3
+  ensures kok(k)
+{
+  let w = tr_get(k, p);
+  if w % 65536 == 0 || c == 0 || c == p {
+    return;
+  }
+  let opt = tr_opt(w);
+  let mut bit = 8;
+  if kind == 1 {
+    bit = 2;
+  } else if kind == 2 {
+    bit = 4;
+  }
+  if opt / bit % 2 == 0 {
+    return;
+  }
+  tr_put(&mut k, c, tr_make(w % 65536, 1, 0, 0, 0, opt));
+  tr2_put(&mut k, c, 0);
+  tr_stop(&mut k, c, 19);                   // SIGSTOP: where the new child waits for its tracer
+  tr2_put(&mut k, p, tr2_get(k, p) % TS_EV + kind * TS_EV + vpid_of(k, p, c) % 65536 * TS_MSG);
+  post_from(&mut k, p, 5, p);               // SIGTRAP, which the stop reports with the event
+}
+
+/// Process p has made a new program (execve). With PTRACE_O_TRACEEXEC its
+/// tracer is told with the event instead of a plain SIGTRAP.
+fn pt_exec_event(k: &mut Kernel, p: u64)
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let w = tr_get(k, p);
+  if w % 65536 != 0 && tr_opt(w) / 16 % 2 == 1 {
+    tr2_put(&mut k, p, tr2_get(k, p) % TS_EV + 4 * TS_EV + vpid_of(k, p, p) % 65536 * TS_MSG);
+  }
 }
 
 /// PTRACE_TRACEME: the parent traces the caller.
@@ -473,7 +521,7 @@ fn lx_ptrace(k: &mut Kernel, pid: u64, req0: u64, p0: u64, addr: u64, data: u64)
     return 0;
   }
   if req == PTRACE_GETEVENTMSG {
-    xfer_u64(&mut k.fs.xfer, 0, 0);
+    xfer_u64(&mut k.fs.xfer, 0, tr2_get(k, p) / TS_MSG % 65536);
     return lx_put_out(&mut k, pid, data, 8);
   }
   if req == PTRACE_GETSIGINFO {

@@ -538,11 +538,15 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       ret(&mut k.procs, pid, r);            // -errno: no child
       return KEEP;
     }
+    pt_fork_event(&mut k, pid, r, 2);
     return SWITCH;                          // the parent waits until the child lets go
   }
   if n == LX_CLONE && a & CLONE_THREAD != 0 {
     let r = lx_thread_clone(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));
     ret(&mut k.procs, pid, child_id(k, pid, r));
+    if r < NPROC {
+      pt_fork_event(&mut k, pid, r, 3);
+    }
     return KEEP;
   }
   if n == LX_UNSHARE {
@@ -552,11 +556,25 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if n == LX_CLONE && clone_proc_flags(a) {
     let r = lx_clone_proc(&mut k, mmu, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));
     ret(&mut k.procs, pid, child_id(k, pid, r));
+    if r < NPROC {
+      let mut kind = 3;
+      if a % 256 == 17 {
+        kind = 1;                           // SIGCHLD as the exit signal: a fork
+      }
+      pt_fork_event(&mut k, pid, r, kind);
+    }
     return KEEP;
   }
   if n == LX_FORK || n == LX_VFORK {
     let r = lx_fork(&mut k, mmu, pid);
     ret(&mut k.procs, pid, child_id(k, pid, r));
+    if r < NPROC {
+      let mut kind = 1;
+      if n == LX_VFORK {
+        kind = 2;
+      }
+      pt_fork_event(&mut k, pid, r, kind);
+    }
     return KEEP;
   }
   if n == LX_EXECVE || n == LX_EXECVEAT {
