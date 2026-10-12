@@ -41,7 +41,6 @@ const TIMER_ABSTIME: u64 = 1;
 const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
 const CLOCK_THREAD_CPUTIME_ID: u64 = 3;
 const CLOCK_BOOTTIME: u64 = 7;
-const LX_SELECT: u64 = 23;
 const FD_SETSIZE: u64 = 1024;
 const SET_BYTES: u64 = 128;             // FD_SETSIZE / 8
 const SEL_IN: u64 = 1024;              // where in xfer select keeps the three sets it was given

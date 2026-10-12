@@ -14,6 +14,12 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 What will be 0.3.0. It needs bastiolang 0.2.0.
 
+### Terminal
+
+- Keys typed at the console reach a program that waits in `epoll_wait`,
+  `select` or `pselect6` (libuv, and so Neovim); before, they stayed queued
+  for the native shell unless the program was in `poll`, `ppoll` or `read`.
+
 ### Processors
 
 - `nanosleep` and `clock_nanosleep` sleep until the next tick between

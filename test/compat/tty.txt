@@ -44,6 +44,13 @@ zero one
 hree
 four
 
+== epoll: keys reach a program waiting in epoll_wait on /dev/tty
+$ /disk/ttyepoll /tmp/ct_e
+> ab
+> cq
+$ cat /tmp/ct_e; echo; rm /tmp/ct_e
+abcq
+
 == kilo: edit and save a file
 $ echo abc > /tmp/ct_k; /disk/kilo /tmp/ct_k
 > X\x1b[C\x1b[CY\rline2

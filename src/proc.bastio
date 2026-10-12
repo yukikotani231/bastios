@@ -690,6 +690,10 @@ const S_IFSOCK: u64 = 0xC1B6;          // a socket, rw-rw-rw-
 const LX_POLL: u64 = 7;
 const LX_PPOLL: u64 = 271;
 const LX_PSELECT6: u64 = 270;
+const LX_SELECT: u64 = 23;
+const LX_EPOLL_WAIT: u64 = 232;
+const LX_EPOLL_PWAIT: u64 = 281;
+const LX_EPOLL_PWAIT2: u64 = 441;
 // In k.sigsave's word for a process: its mask was swapped by ppoll or
 // pselect6 (bit 8 is SIGKILL's, which no saved mask holds).
 const MASK_SWAPPED: u64 = 256;

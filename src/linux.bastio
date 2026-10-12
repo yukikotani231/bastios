@@ -1262,8 +1262,10 @@ fn lx_reading(procs: &Buf) -> bool
       return true;
     }
     let n = pget(procs, p, F_REGS + R_RAX);
-    if pget(procs, p, F_RESTART) >= 2 && (n == LX_POLL || n == LX_PPOLL || n == LX_READ) {
-      return true;                          // a timed read is one of the console's (console_read)
+    if pget(procs, p, F_RESTART) >= 2
+      && (n == LX_POLL || n == LX_PPOLL || n == LX_SELECT || n == LX_PSELECT6 || n == LX_EPOLL_WAIT
+        || n == LX_EPOLL_PWAIT || n == LX_EPOLL_PWAIT2 || n == LX_READ) {
+      return true;                          // a timed read is one of the console's (console_read); the waits may be for it
     }
     p = p + 1;
   }
