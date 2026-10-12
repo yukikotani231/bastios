@@ -5,6 +5,11 @@
  *
  *     mcloud [ADDRESS[:PORT]]      default 169.254.169.254:80
  *
+ * Started by the kernel under the boot option `mcloud` (as `mcloud-boot`,
+ * the only way to run a program at boot without arguments), it waits up to
+ * a minute for the service to answer, since the network address comes from
+ * DHCP some seconds after boot. Started by hand it asks once.
+ *
  * IMDSv2 first takes a session token with a PUT and then sends it back as a
  * header on each GET. A key the service does not have (404) is skipped.
  * User data (a script, say) is saved as ~/user-data for root with mode 0700
@@ -109,6 +114,10 @@ int main(int argc, char **argv)
 
     static char token[BODY_MAX], body[BODY_MAX];
     int st = request("PUT", "/latest/api/token", "X-aws-ec2-metadata-token-ttl-seconds: 60\r\n", token);
+    for (int tries = 0; st < 0 && argc > 0 && strstr(argv[0], "mcloud-boot") && tries < 60; tries++) {
+        sleep(1);
+        st = request("PUT", "/latest/api/token", "X-aws-ec2-metadata-token-ttl-seconds: 60\r\n", token);
+    }
     if (st < 0) {
         printf("mcloud: no metadata service at %s\n", addr);
         return 1;

@@ -319,15 +319,19 @@ int main(int argc, char **argv)
 
     /* A child whose thread calls _exit while the others wait. */
     pid_t c = fork();
+    if (c < 0)
+        FAIL("fork: errno %d", errno);
     if (c == 0) {
         pthread_create(&t[1], 0, sleeper, 0);
         pthread_create(&t[2], 0, ender, 0);
         pthread_join(t[1], 0);
         return 1;
     }
-    int st;
-    if (waitpid(c, &st, 0) != c || !WIFEXITED(st) || WEXITSTATUS(st) != 7)
-        FAIL("exit_group from a thread: status %x", st);
+    int st = -1;
+    pid_t w = waitpid(c, &st, 0);
+    int werr = errno;
+    if (w != c || !WIFEXITED(st) || WEXITSTATUS(st) != 7)
+        FAIL("exit_group from a thread: waitpid %d (errno %d) status %x", w, werr, st);
     printf("mthread: ok, %d increments\n", counter);
     return 0;
 }

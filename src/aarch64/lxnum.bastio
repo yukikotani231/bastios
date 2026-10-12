@@ -122,6 +122,7 @@ fn lx_number(n: u64) -> u64
   if n == 112 { return LX_CLOCK_SETTIME; }
   if n == 114 { return LX_CLOCK_GETRES; }
   if n == 115 { return LX_CLOCK_NANOSLEEP; }
+  if n == 116 { return LX_SYSLOG; }
   if n == 117 { return LX_PTRACE; }
   if n == 118 { return LX_SCHED_SETPARAM; }
   if n == 119 { return LX_SCHED_SETSCHEDULER; }
