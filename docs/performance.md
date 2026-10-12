@@ -139,9 +139,17 @@ machine, because they come from algorithms, not from emulation.
    file, any other change to the disk, 32 blocks, or 0.1 s. `filewrite@disk`
    went from 1.9 to 6.6 MiB/s (median of 3, TCG, same host). The cost is
    that a write is on the disk only after one of those, not when the call
-   returns. Reads of a file larger than the block cache reach the disk
-   again; a page cache is the fix. bastios #146 added a 1 MiB block cache,
-   which an 8 MiB file does not fit in.
+   returns. A `read` of a disk file now leaves the pages it read in the page
+   cache (`pc_fill`, `src/pcache.bastio`), up to an eighth of memory and
+   at most 16 MiB, and the next read of those pages is answered from
+   there without the disk (`pc_have` in `vfs_read`, `src/fs.bastio`);
+   writes, truncation and removal keep them current as for mapped pages.
+   `fileread@disk` went from 47 to 157 MiB/s (median of 3, TCG, same
+   host; the first of the benchmark's eight passes over the 8 MiB file
+   still reads the disk). What is left: a miss reads through the 1 MiB
+   block cache with 8 blocks of read-ahead, a write does not fill the
+   cache, and nothing gives cached pages back when memory runs low (the
+   cap is what bounds them).
 2. **System call entry and exit (9x; an older table had 30x, before CR3
    parking).** A process's table now stays in CR3 across a call that
    returns to it, so `getppid` takes about 9 us (`bench/baseline.json`)
