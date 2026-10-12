@@ -147,8 +147,12 @@ test/shell_test.sh                          # includes three ENA boots, skipped 
   against a fake service on the host (QEMU's user network cannot reach the
   real address). `user-data` is saved as `~root/user-data` (mode 700) and
   is not run by `mcloud`: running what a network service hands out is left
-  to whoever reads it. Not yet: nothing runs `mcloud` at boot, and it has
-  not been tried on a real cloud.
+  to whoever reads it. With the boot option `mcloud` on the kernel command
+  line, the kernel starts it at boot (as `mcloud-boot`, since the kernel
+  passes no arguments), and it waits up to a minute for the service, which
+  is out of reach until DHCP has given the machine an address. Tested with
+  QEMU's guest forward standing in for the service. It has not been tried
+  on a real cloud.
 - **A bigger volume needs no resize step.** The file system takes its size
   from the disk at every mount, so a volume enlarged while the machine was
   off (an EBS volume resize, `truncate` on a raw image) shows its new size

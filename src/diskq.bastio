@@ -26,6 +26,7 @@ import "core/ring.bastio";
 
 const CBLOCK: u64 = 4096;            // a block
 const NC: u64 = 256;                  // cache slots (1 MiB: more than BusyBox, re-read on each exec at 256 KiB)
+const NH: u64 = 256;                  // hash buckets over the block numbers the slots hold
 const NQ: u64 = 128;                  // queued operations
 const QW: u64 = 3;                    // words per operation: kind, slot, block
 const DQ_NONE: u64 = 18446744073709551615;
@@ -54,6 +55,9 @@ struct DiskQ {
   cache: Bytes,         // NC blocks
   tag: Buf,             // per slot: the block it holds, or NOTAG
   st: Buf,              // per slot: CS_*
+  hh: Buf,              // per bucket: the first slot of its chain + 1, or 0
+  hn: Buf,              // per slot: the next slot of its chain + 1, or 0
+  hk: Buf,              // per slot: the bucket whose chain holds it, or NH
   q: Buf,               // NQ operations, a ring
   r: Ring,              // the queue's head (the oldest operation) and count
                         // (operations queued, the one running included)
@@ -70,19 +74,21 @@ struct DiskQ {
 
 spec fn dq_ok(q: &DiskQ) -> bool {
   blen(q.cache) == NC * CBLOCK && len(q.tag) == NC && len(q.st) == NC && len(q.q) == NQ * QW
+  && len(q.hh) == NH && len(q.hn) == NC && len(q.hk) == NC
   && ring_ok(q.r) && q.r.cap == NQ && q.hand < NC && q.batch >= 1 && q.batch <= VIO_BATCH
 }
 
 fn dq_new() -> DiskQ
   ensures dq_ok(result)
 {
-  let mut q = DiskQ { cache: balloc(NC * CBLOCK), tag: alloc(NC), st: alloc(NC), q: alloc(NQ * QW),
+  let mut q = DiskQ { cache: balloc(NC * CBLOCK), tag: alloc(NC), st: alloc(NC), hh: alloc(NH), hn: alloc(NC), hk: alloc(NC), q: alloc(NQ * QW),
     r: ring_new(NQ), running: false, batch: 1, since: 0, hand: 0, next: 1, done: 0, moved: 0, dead: false, good: 0 };
   let mut i = 0;
   while i < NC
     invariant i <= NC && dq_ok(q)
   {
     q.tag = set(q.tag, i, NOTAG);
+    q.hk = set(q.hk, i, NH);
     i = i + 1;
   }
   return q;
@@ -94,6 +100,9 @@ fn dq_free(q: DiskQ)
   bfree(q.cache);
   free(q.tag);
   free(q.st);
+  free(q.hh);
+  free(q.hn);
+  free(q.hk);
   free(q.q);
 }
 
@@ -117,64 +126,118 @@ fn dq_kill(q: &mut DiskQ)
   }
 }
 
+/// The bucket of block b's chain.
+fn dq_bucket(b: u64) -> u64
+  ensures result < NH
+{
+  return (b ^ (b / NH)) % NH;
+}
+
+/// Takes slot s out of the chain it is in (none if it is in none).
+fn dq_unlink(q: &mut DiskQ, s: u64)
+  requires dq_ok(q) && s < NC
+  ensures dq_ok(q) && q.r.n == old(q.r.n)
+  ensures forall i: u64 :: get(q.st, i) == old(get(q.st, i))
+  ensures forall i: u64 :: get(q.tag, i) == old(get(q.tag, i))
+{
+  let h = get(q.hk, s);
+  if h >= NH {
+    return;
+  }
+  q.hk = set(q.hk, s, NH);
+  let nx = get(q.hn, s);
+  q.hn = set(q.hn, s, 0);
+  if get(q.hh, h) == s + 1 {
+    q.hh = set(q.hh, h, nx);
+    return;
+  }
+  let mut c = get(q.hh, h);
+  let mut n = 0;
+  while c != 0 && c <= NC && n < NC
+    invariant dq_ok(q) && n <= NC
+  {
+    let t = c - 1;
+    if get(q.hn, t) == s + 1 {
+      q.hn = set(q.hn, t, nx);
+      return;
+    }
+    c = get(q.hn, t);
+    n = n + 1;
+  }
+}
+
+/// Puts slot s, which holds block b, in b's chain (out of any other).
+fn dq_link(q: &mut DiskQ, s: u64, b: u64)
+  requires dq_ok(q) && s < NC
+  ensures dq_ok(q) && q.r.n == old(q.r.n)
+  ensures forall i: u64 :: get(q.st, i) == old(get(q.st, i))
+  ensures forall i: u64 :: get(q.tag, i) == old(get(q.tag, i))
+{
+  dq_unlink(&mut q, s);
+  let h = dq_bucket(b);
+  q.hn = set(q.hn, s, get(q.hh, h));
+  q.hh = set(q.hh, h, s + 1);
+  q.hk = set(q.hk, s, h);
+}
+
+/// The first slot of block b's chain tagged b and in one of the states
+/// `s1`, `s2` or `s3`, or NC. A slot tagged b is in b's chain (dq_link runs
+/// wherever a slot gets a tag).
+fn dq_chain(q: &DiskQ, b: u64, s1: u64, s2: u64, s3: u64) -> u64
+  requires dq_ok(q)
+  ensures result <= NC
+  ensures result < NC ==> (get(q.st, result) == s1 || get(q.st, result) == s2 || get(q.st, result) == s3)
+{
+  let mut c = get(q.hh, dq_bucket(b));
+  let mut n = 0;
+  while c != 0 && c <= NC && n < NC
+    invariant dq_ok(q) && n <= NC
+  {
+    let t = c - 1;
+    let st = get(q.st, t);
+    if get(q.tag, t) == b && (st == s1 || st == s2 || st == s3) {
+      return t;
+    }
+    c = get(q.hn, t);
+    n = n + 1;
+  }
+  return NC;
+}
+
 /// The slot holding block b's data (valid or dirty), or NC.
 fn dq_find(q: &DiskQ, b: u64) -> u64
   requires dq_ok(q)
   ensures result <= NC
   ensures result < NC ==> (get(q.st, result) == CS_VALID || get(q.st, result) == CS_DIRTY || get(q.st, result) == CS_HOLD)
 {
-  let mut i = 0;
-  while i < NC
-    invariant i <= NC && dq_ok(q)
-  {
-    let s = get(q.st, i);
-    if get(q.tag, i) == b && (s == CS_VALID || s == CS_DIRTY || s == CS_HOLD) {
-      return i;
-    }
-    i = i + 1;
-  }
-  return NC;
+  return dq_chain(q, b, CS_VALID, CS_DIRTY, CS_HOLD);
 }
 
 /// Is a read of block b queued or running?
 fn dq_reading(q: &DiskQ, b: u64) -> bool
   requires dq_ok(q)
 {
-  let mut i = 0;
-  while i < NC
-    invariant i <= NC && dq_ok(q)
-  {
-    if get(q.tag, i) == b && get(q.st, i) == CS_READING {
-      return true;
-    }
-    i = i + 1;
-  }
-  return false;
+  return dq_chain(q, b, CS_READING, CS_READING, CS_READING) < NC;
 }
 
-/// A slot to fill: a free one, else a valid one the clock passes over
-/// (it is forgotten); NC if every slot is pinned.
+/// A slot to fill: the first free or valid one the clock hand reaches (a
+/// valid one is forgotten); NC if every slot is pinned.
 fn dq_slot(q: &mut DiskQ) -> u64
   requires dq_ok(q)
-  ensures dq_ok(q) && result <= NC
+  ensures dq_ok(q) && q.r.n == old(q.r.n) && result <= NC
   ensures result < NC ==> get(q.st, result) == CS_FREE
 {
-  let mut i = 0;
-  while i < NC
-    invariant i <= NC && dq_ok(q)
-  {
-    if get(q.st, i) == CS_FREE {
-      return i;
-    }
-    i = i + 1;
-  }
   let mut n = 0;
   while n < NC
-    invariant n <= NC && dq_ok(q)
+    invariant n <= NC && dq_ok(q) && q.r.n == old(q.r.n)
   {
     let h = q.hand;
     q.hand = (q.hand + 1) % NC;
-    if get(q.st, h) == CS_VALID {
+    let st = get(q.st, h);
+    if st == CS_FREE {
+      return h;
+    }
+    if st == CS_VALID {
       q.st = set(q.st, h, CS_FREE);
       q.tag = set(q.tag, h, NOTAG);
       return h;
@@ -184,14 +247,13 @@ fn dq_slot(q: &mut DiskQ) -> u64
   return NC;
 }
 
-/// How many slots could be filled now without waiting.
-fn dq_room(q: &DiskQ) -> u64
+/// Could `slots` slots be filled now without waiting?
+fn dq_has_room(q: &DiskQ, slots: u64) -> bool
   requires dq_ok(q)
-  ensures result <= NC
 {
   let mut i = 0;
   let mut n = 0;
-  while i < NC
+  while i < NC && n < slots
     invariant i <= NC && n <= i && dq_ok(q)
   {
     let s = get(q.st, i);
@@ -200,14 +262,14 @@ fn dq_room(q: &DiskQ) -> u64
     }
     i = i + 1;
   }
-  return n;
+  return n >= slots;
 }
 
 /// Room for `slots` more slots and `ops` more operations?
 fn dq_fits(q: &DiskQ, slots: u64, ops: u64) -> bool
   requires dq_ok(q)
 {
-  return ops <= NQ - q.r.n && slots <= dq_room(q);
+  return ops <= NQ - q.r.n && dq_has_room(q, slots);
 }
 
 /// Forgets any copy of block b (it was freed and is being reused): a
@@ -216,18 +278,21 @@ fn dq_forget(q: &mut DiskQ, b: u64)
   requires dq_ok(q)
   ensures dq_ok(q) && q.r.n == old(q.r.n)
 {
-  let mut i = 0;
+  let mut c = get(q.hh, dq_bucket(b));
+  let mut n = 0;
   let c0 = q.r.n;
-  while i < NC
-    invariant i <= NC && dq_ok(q) && q.r.n == c0
+  while c != 0 && c <= NC && n < NC
+    invariant dq_ok(q) && n <= NC && q.r.n == c0
   {
-    if get(q.tag, i) == b {
-      if get(q.st, i) == CS_VALID {
-        q.st = set(q.st, i, CS_FREE);
+    let t = c - 1;
+    if get(q.tag, t) == b {
+      if get(q.st, t) == CS_VALID {
+        q.st = set(q.st, t, CS_FREE);
       }
-      q.tag = set(q.tag, i, NOTAG);
+      q.tag = set(q.tag, t, NOTAG);
     }
-    i = i + 1;
+    c = get(q.hn, t);
+    n = n + 1;
   }
 }
 
@@ -268,6 +333,7 @@ fn dq_want(q: &mut DiskQ, b: u64) -> u64
     return DQ_NONE;
   }
   q.tag = set(q.tag, s, b);
+  dq_link(&mut q, s, b);
   q.st = set(q.st, s, CS_READING);
   dq_push(&mut q, Q_READ, s, b);
   return NC;
@@ -294,6 +360,7 @@ fn dq_put(q: &mut DiskQ, b: u64, src: &Bytes, at: u64, look: bool) -> bool
   bcopy(&mut q.cache, s * CBLOCK, src, at, CBLOCK);
   if look {
     q.tag = set(q.tag, s, b);
+    dq_link(&mut q, s, b);
   } else {
     q.tag = set(q.tag, s, NOTAG);
   }
@@ -334,15 +401,10 @@ fn dq_hold(q: &mut DiskQ, b: u64, src: &Bytes, at: u64) -> bool
   requires dq_ok(q) && at + CBLOCK <= blen(src)
   ensures dq_ok(q)
 {
-  let mut i = 0;
-  while i < NC
-    invariant i <= NC && dq_ok(q)
-  {
-    if get(q.tag, i) == b && get(q.st, i) == CS_HOLD {
-      bcopy(&mut q.cache, i * CBLOCK, src, at, CBLOCK);
-      return true;
-    }
-    i = i + 1;
+  let held = dq_chain(q, b, CS_HOLD, CS_HOLD, CS_HOLD);
+  if held < NC {
+    bcopy(&mut q.cache, held * CBLOCK, src, at, CBLOCK);
+    return true;
   }
   dq_forget(&mut q, b);
   let s = dq_slot(&mut q);
@@ -351,6 +413,7 @@ fn dq_hold(q: &mut DiskQ, b: u64, src: &Bytes, at: u64) -> bool
   }
   bcopy(&mut q.cache, s * CBLOCK, src, at, CBLOCK);
   q.tag = set(q.tag, s, b);
+  dq_link(&mut q, s, b);
   q.st = set(q.st, s, CS_HOLD);
   return true;
 }
@@ -364,19 +427,11 @@ fn dq_queue_held(q: &mut DiskQ, b: u64) -> bool
   if q.r.n >= NQ {
     return false;
   }
-  let mut i = 0;
-  while i < NC
-    invariant i <= NC && dq_ok(q)
-  {
-    if get(q.tag, i) == b && get(q.st, i) == CS_HOLD {
-      if q.r.n >= NQ {
-        return false;
-      }
-      q.st = set(q.st, i, CS_DIRTY);
-      dq_push(&mut q, Q_WRITE, i, b);
-      return true;
-    }
-    i = i + 1;
+  let i = dq_chain(q, b, CS_HOLD, CS_HOLD, CS_HOLD);
+  if i < NC {
+    q.st = set(q.st, i, CS_DIRTY);
+    dq_push(&mut q, Q_WRITE, i, b);
+    return true;
   }
   return false;
 }
@@ -387,16 +442,10 @@ fn dq_unhold(q: &mut DiskQ, b: u64)
   requires dq_ok(q)
   ensures dq_ok(q) && q.r.n == old(q.r.n)
 {
-  let mut i = 0;
-  let c0 = q.r.n;
-  while i < NC
-    invariant i <= NC && dq_ok(q) && q.r.n == c0
-  {
-    if get(q.tag, i) == b && get(q.st, i) == CS_HOLD {
-      q.st = set(q.st, i, CS_FREE);
-      q.tag = set(q.tag, i, NOTAG);
-    }
-    i = i + 1;
+  let i = dq_chain(q, b, CS_HOLD, CS_HOLD, CS_HOLD);
+  if i < NC {
+    q.st = set(q.st, i, CS_FREE);
+    q.tag = set(q.tag, i, NOTAG);
   }
 }
 
