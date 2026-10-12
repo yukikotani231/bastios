@@ -1,13 +1,15 @@
 // The network card under the IPv4 stack: virtio on the memory-mapped
-// transport. The stack sees only these calls.
+// transport, or an Intel e1000 family card on PCI Express. The stack sees
+// only these calls.
 
 import "virtio_net.bastio";
 import "virtio_mmio.bastio";
+import "e1000.bastio";
 
-enum Card { Virtio(VNet) }
+enum Card { Virtio(VNet), E1000(E1k) }
 
 spec fn card_ok(d: &Card) -> bool {
-  (d is Card::Virtio ==> vnet_ok(d.Virtio))
+  (d is Card::Virtio ==> vnet_ok(d.Virtio)) && (d is Card::E1000 ==> e1k_ok(d.E1000))
 }
 
 fn card_mac(d: &Card) -> u64
@@ -15,17 +17,19 @@ fn card_mac(d: &Card) -> u64
 {
   match d {
     Card::Virtio(v) => { return v.mac % 281474976710656; },
+    Card::E1000(e) => { return e.mac % 281474976710656; },
   }
 }
 
 fn card_live(d: &Card) -> bool {
   match d {
     Card::Virtio(v) => { return v.live; },
+    Card::E1000(e) => { return e.live; },
   }
 }
 
 fn card_is_e1000(d: &Card) -> bool {
-  return false;
+  return d is Card::E1000;
 }
 
 fn card_is_ena(d: &Card) -> bool {
@@ -36,6 +40,7 @@ fn card_is_ena(d: &Card) -> bool {
 fn card_why(d: &Card) -> u64 {
   match d {
     Card::Virtio(v) => { return 0; },
+    Card::E1000(e) => { return 0; },
   }
 }
 
@@ -43,16 +48,19 @@ fn card_why(d: &Card) -> u64 {
 fn card_irq(d: &Card) -> bool {
   match d {
     Card::Virtio(v) => { return v.irq; },
+    Card::E1000(e) => { return e.irq; },
   }
 }
 
-/// An e1000's line is unmasked at the 8259 (see `e1k_irq_on`).
+/// Nothing to do: PCI interrupts are not routed on AArch64, so an e1000
+/// stays polled (its `irq` stays false).
 fn card_irq_on(d: &mut Card)
   requires card_ok(d)
   ensures card_ok(d)
 {
   match d {
     Card::Virtio(v) => { d = Card::Virtio(v); },
+    Card::E1000(e) => { d = Card::E1000(e); },
   }
 }
 
@@ -66,6 +74,10 @@ fn card_irq_set(d: &mut Card, on: bool)
       vnet_irq(&mut v, on);
       d = Card::Virtio(v);
     },
+    Card::E1000(mut e) => {
+      e1k_irq(&mut e, on);
+      d = Card::E1000(e);
+    },
   }
 }
 
@@ -76,6 +88,10 @@ fn card_ack(d: &mut Card)
 {
   match d {
     Card::Virtio(v) => { d = Card::Virtio(v); },
+    Card::E1000(mut e) => {
+      e1k_ack(&mut e);
+      d = Card::E1000(e);
+    },
   }
 }
 
@@ -87,6 +103,11 @@ fn card_recv(d: &mut Card, pkt: &mut Bytes) -> u64
     Card::Virtio(mut v) => {
       let n = vnet_recv(&mut v, &mut pkt);
       d = Card::Virtio(v);
+      return n;
+    },
+    Card::E1000(mut e) => {
+      let n = e1k_recv(&mut e, &mut pkt);
+      d = Card::E1000(e);
       return n;
     },
   }
@@ -102,6 +123,7 @@ fn card_rx_flush(d: &mut Card)
       vnet_rx_flush(&mut v);
       d = Card::Virtio(v);
     },
+    Card::E1000(e) => { d = Card::E1000(e); },
   }
 }
 
@@ -115,6 +137,11 @@ fn card_send(d: &mut Card, pkt: &Bytes, n: u64) -> bool
       d = Card::Virtio(v);
       return ok;
     },
+    Card::E1000(mut e) => {
+      let ok = e1k_send(&mut e, pkt, n);
+      d = Card::E1000(e);
+      return ok;
+    },
   }
 }
 
@@ -126,5 +153,6 @@ fn card_free(win: &mut MmioSpace, d: Card, m: &mut Mem)
 {
   match d {
     Card::Virtio(v) => { vt_release(&mut win, vnet_free(v, &mut m)); },
+    Card::E1000(e) => { mmio_release(&mut win, e1k_free(e, &mut m)); },
   }
 }
