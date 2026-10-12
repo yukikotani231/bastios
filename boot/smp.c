@@ -38,6 +38,8 @@ uint8_t bst_core0[CORE_BLOCK] __attribute__((aligned(CORE_BLOCK)));
 static uint8_t *cores[MAX_CPUS] = { bst_core0 };
 extern uint64_t bst_boot_take(uint64_t size, uint64_t align);    /* multiboot.c */
 static void guard_block(uint8_t *core);
+extern void bst_alias_map_block(uint64_t i, uint8_t *core);      /* platform.c */
+extern void bst_alias_load_gdt(void);
 
 volatile uint64_t bst_ap_stack;     /* read by ap.S; one AP starts at a time */
 static uint64_t cpus_online = 1;    /* the BSP; updated atomically */
@@ -333,20 +335,22 @@ uint64_t bst_cpu_wait(void) {
  * KERNEL_GS_BASE at the block for the `syscall` entry. */
 static void core_init(uint64_t i) {
     uint8_t *core = cores[i];
-    uint64_t top = (uint64_t)(core + CORE_BLOCK);
+    uint64_t alias = ALIAS_CORES + i * CORE_BLOCK;  /* the block, as user mode's traps see it */
+    uint64_t top = alias + CORE_BLOCK;
+    *(uint64_t *)(core + CORE_ALIAS) = alias;
     *(uint64_t *)(core + CORE_TRAP_TOP) = top;
     uint8_t *tss = core + CORE_TSS;
     for (int b = 0; b < 104; b++) tss[b] = 0;
     *(uint64_t *)(tss + 4) = top;                   /* rsp0 */
-    *(uint64_t *)(tss + 36) = (uint64_t)(core + CORE_IST_TOP);   /* ist1 */
+    *(uint64_t *)(tss + 36) = alias + CORE_IST_TOP; /* ist1 */
     *(uint16_t *)(tss + 102) = 104;                 /* iomap_base: none */
-    uint64_t base = (uint64_t)tss, limit = 103;
+    uint64_t base = alias + CORE_TSS, limit = 103;
     bst_gdt[5 + 2 * i] = (limit & 0xFFFF) | ((base & 0xFFFFFF) << 16) | (0x89ull << 40)
                        | (((limit >> 16) & 0xF) << 48) | (((base >> 24) & 0xFF) << 56);
     bst_gdt[6 + 2 * i] = base >> 32;
     __asm__ volatile ("ltr %w0" : : "r"((uint16_t)TSS_SEL(i)));
     wrmsr(0xC0000101, 0);                           /* GS_BASE: the user's, zero */
-    wrmsr(0xC0000102, (uint64_t)core);              /* KERNEL_GS_BASE */
+    wrmsr(0xC0000102, alias);                       /* KERNEL_GS_BASE */
 }
 
 /* Called by ap.S on each AP, on the kernel stack of its block, with
@@ -375,6 +379,7 @@ void bst_platform_smp_join(void) {
 }
 
 void bst_ap_main(void) {
+    bst_alias_load_gdt();
     __asm__ volatile ("lidt %0" : : "m"(ap_idtr));
     for (int m = 0; m < 3; m++) wrmsr(0xC0000081 + m + (m == 2), syscall_msrs[m]);
     core_init(*(uint64_t *)(this_core() + CORE_INDEX));
@@ -558,6 +563,7 @@ static void send_ipi(uint32_t apic_id, uint32_t low) {
  * second for it to check in. Returns whether it did. */
 static int start_ap(uint32_t apic_id, uint64_t n) {
     uint64_t before = bst_platform_cpus();
+    bst_alias_map_block(n, cores[n]);
     for (uint64_t b = 0; b < CORE_BLOCK; b += 8) *(uint64_t *)(cores[n] + b) = 0;
     guard_block(cores[n]);
     *(uint64_t *)(cores[n] + CORE_INDEX) = n;
@@ -618,6 +624,7 @@ static void guard_block(uint8_t *core) {
 
 void bst_smp_init(void) {
     guard_block(bst_core0);
+    bst_alias_map_block(0, bst_core0);
     core_init(0);
     uint64_t len = 0, madt = find_madt(&len);
     for (uint64_t i = 44; madt && i + 2 <= len; ) {

@@ -28,10 +28,39 @@
 #define CORE_IDLE      184                      /* vector that ended bst_cpu_halt, or a parked AP's hlt */
 #define CORE_TRAP_TOP  192                      /* end of the block, for `syscall` */
 #define CORE_INDEX     200                      /* the processor's number: 0 for the bootstrap one */
-#define CORE_MMU       208                      /* 3 words: the prelude's lazy CR3 state */
+#define CORE_MMU       208                      /* 4 words: the prelude's CR3 state */
+#define CORE_UROOT     232                      /* the fourth: the user table the next bst_cpu_enter loads into CR3 */
 #define CORE_TSS       256                      /* 104-byte task state segment */
+#define CORE_ALIAS     368                      /* where the block is mapped in every table (ALIAS_CORES + 128 KiB * index) */
+#define CORE_UMODE     376                      /* nonzero while CR3 holds the shadow table: the next trap switches back */
+#define CORE_CR3       384                      /* the shadow table bst_cpu_enter built, for its last instructions */
 #define CORE_IST_TOP   0x2000                   /* top of the 4 KiB IST1 stack, the block's second page */
 #define CORE_GUARD     0x2000                   /* the unmapped page below the kernel stack */
 
 #define TSS_SEL(i)     (0x28 + 16 * (i))        /* GDT selector of processor i's TSS */
 #define LAPIC_TIMER_VECTOR 48                   /* preemption on application processors */
+
+/*
+ * The entry area. User code runs on a table of its own: the process's window
+ * at virtual address 0 (a program linked at 0x400000 finds itself there), the
+ * kernel's memory not mapped at all, so the identity map, the kernel image and
+ * the page pool never collide with what a program asks for. A processor in
+ * user mode can still reach the few things the hardware touches by itself at
+ * a trap, and the code that switches back, because every table (the kernel's
+ * and each processor's shadow table) maps the same entry area in the last
+ * top-level slot, at ALIAS_BASE:
+ *
+ *   ALIAS_BASE            the trap stubs and the code around them (.tramp.text)
+ *   ALIAS_GDT, ALIAS_IDT  the GDT (two pages) and the IDT, the same memory as
+ *                         the kernel's own copies
+ *   ALIAS_CORES + 128 KiB * i   processor i's block, minus its guard page:
+ *                         trap stack, IST1 stack, TSS and saved context
+ *
+ * The processor's TSS, IST1 and trap-stack pointers, KERNEL_GS_BASE, the GDT
+ * and IDT registers hold these addresses. The kernel stack is not mapped
+ * here: a trap switches to the kernel's table before it leaves the area.
+ */
+#define ALIAS_BASE     0xFFFFFF8000000000
+#define ALIAS_GDT      (ALIAS_BASE + 0x100000)
+#define ALIAS_IDT      (ALIAS_BASE + 0x102000)
+#define ALIAS_CORES    (ALIAS_BASE + 0x200000)
