@@ -60,6 +60,14 @@ int main(void) {
         strstr(t, "Receive") && strstr(t, "lo:") && strstr(t, "eth0:"); }));
     EXPECT("/proc/net is a directory", ({ struct stat st; stat("/proc/net", &st) == 0 && S_ISDIR(st.st_mode); }));
     EXPECT("/proc/modules opens", open("/proc/modules", O_RDONLY) >= 0);
+    EXPECT("/proc/net/udp lists a bound socket", ({
+        int us = socket(AF_INET, SOCK_DGRAM, 0); struct sockaddr_in ua = {.sin_family = AF_INET, .sin_port = htons(40124)};
+        int ok = us >= 0 && bind(us, (struct sockaddr *)&ua, sizeof ua) == 0;
+        char t[4096]; int f = open("/proc/net/udp", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
+        if (f >= 0) close(f);
+        t[n > 0 ? n : 0] = 0;
+        if (us >= 0) close(us);
+        ok && strstr(t, "local_address") && strstr(t, "00000000:9CBC 00000000:0000 07 "); }));
     EXPECT("/proc/net/tcp lists a listening socket", ({
         int ls = socket(AF_INET, SOCK_STREAM, 0); struct sockaddr_in sa = {.sin_family = AF_INET, .sin_port = htons(40123)};
         int ok = ls >= 0 && bind(ls, (struct sockaddr *)&sa, sizeof sa) == 0 && listen(ls, 1) == 0;
