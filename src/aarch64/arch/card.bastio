@@ -1,0 +1,130 @@
+// The network card under the IPv4 stack: virtio on the memory-mapped
+// transport. The stack sees only these calls.
+
+import "virtio_net.bastio";
+import "virtio_mmio.bastio";
+
+enum Card { Virtio(VNet) }
+
+spec fn card_ok(d: &Card) -> bool {
+  (d is Card::Virtio ==> vnet_ok(d.Virtio))
+}
+
+fn card_mac(d: &Card) -> u64
+  ensures result < 281474976710656
+{
+  match d {
+    Card::Virtio(v) => { return v.mac % 281474976710656; },
+  }
+}
+
+fn card_live(d: &Card) -> bool {
+  match d {
+    Card::Virtio(v) => { return v.live; },
+  }
+}
+
+fn card_is_e1000(d: &Card) -> bool {
+  return false;
+}
+
+fn card_is_ena(d: &Card) -> bool {
+  return false;
+}
+
+/// Why an ENA that could not be started was given up on (ENA_ERR_*), else 0.
+fn card_why(d: &Card) -> u64 {
+  match d {
+    Card::Virtio(v) => { return 0; },
+  }
+}
+
+/// True if received frames raise an interrupt rather than wait for a poll.
+fn card_irq(d: &Card) -> bool {
+  match d {
+    Card::Virtio(v) => { return v.irq; },
+  }
+}
+
+/// An e1000's line is unmasked at the 8259 (see `e1k_irq_on`).
+fn card_irq_on(d: &mut Card)
+  requires card_ok(d)
+  ensures card_ok(d)
+{
+  match d {
+    Card::Virtio(v) => { d = Card::Virtio(v); },
+  }
+}
+
+/// Whether received frames raise the card's interrupt (when it has one).
+fn card_irq_set(d: &mut Card, on: bool)
+  requires card_ok(d)
+  ensures card_ok(d)
+{
+  match d {
+    Card::Virtio(mut v) => {
+      vnet_irq(&mut v, on);
+      d = Card::Virtio(v);
+    },
+  }
+}
+
+/// Before a poll: lets an e1000 lower its interrupt line.
+fn card_ack(d: &mut Card)
+  requires card_ok(d)
+  ensures card_ok(d)
+{
+  match d {
+    Card::Virtio(v) => { d = Card::Virtio(v); },
+  }
+}
+
+fn card_recv(d: &mut Card, pkt: &mut Bytes) -> u64
+  requires card_ok(d) && blen(pkt) >= RX_BUF
+  ensures card_ok(d) && blen(pkt) == old(blen(pkt)) && result <= RX_BUF - NET_HDR
+{
+  match d {
+    Card::Virtio(mut v) => {
+      let n = vnet_recv(&mut v, &mut pkt);
+      d = Card::Virtio(v);
+      return n;
+    },
+  }
+}
+
+/// After a run of card_recv: the card learns of the buffers it got back.
+fn card_rx_flush(d: &mut Card)
+  requires card_ok(d)
+  ensures card_ok(d)
+{
+  match d {
+    Card::Virtio(mut v) => {
+      vnet_rx_flush(&mut v);
+      d = Card::Virtio(v);
+    },
+  }
+}
+
+fn card_send(d: &mut Card, pkt: &Bytes, n: u64) -> bool
+  requires card_ok(d) && n <= FRAME_MAX && n <= blen(pkt)
+  ensures card_ok(d)
+{
+  match d {
+    Card::Virtio(mut v) => {
+      let ok = vnet_send(&mut v, pkt, n);
+      d = Card::Virtio(v);
+      return ok;
+    },
+  }
+}
+
+/// Stops the card and takes its pages back; its ports and registers go
+/// back to their owners (at power off).
+fn card_free(win: &mut MmioSpace, d: Card, m: &mut Mem)
+  requires card_ok(d) && mem_ok(m)
+  ensures mem_ok(m)
+{
+  match d {
+    Card::Virtio(v) => { vt_release(&mut win, vnet_free(v, &mut m)); },
+  }
+}

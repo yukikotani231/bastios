@@ -1,0 +1,5 @@
+// Starting and stopping the network card is architecture specific:
+// src/<arch>/arch/nicdrv.bastio, found through the --lib directory the build
+// passes for that architecture.
+
+import "arch/nicdrv.bastio";

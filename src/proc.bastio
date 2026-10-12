@@ -3,6 +3,8 @@
 // address space is element `pid` of a vector of spaces.
 
 import "console.bastio";
+import "regs.bastio";
+import "progs.bastio";
 import "pages.bastio";
 import "space.bastio";
 import "elf.bastio";
@@ -11,14 +13,14 @@ import "net.bastio";
 import "tcp.bastio";
 import "netns.bastio";
 import "rtnl.bastio";
-import "hda.bastio";
+import "snd.bastio";
 
 // The most processes; the tables grow to it (new_pid). Raising it: the
 // literals FD_ROWS (src/fs.bastio), IPC_LEN, SYS_LEN and the SYS_* offsets,
 // ALARMS_LEN and HOLES_LEN follow it, and a
 // signal's sender word keeps the pid in 8 bits (post_from, src/lxsig.bastio).
 const NPROC: u64 = 256;
-const STRIDE: u64 = 72;
+const STRIDE: u64 = 72 + REGS_EXT;
 const PTAB_LEN: u64 = NPROC * STRIDE;   // the most the table grows to
 const PGROW: u64 = 32;               // rows the process table starts with (it doubles from there)
 
@@ -112,7 +114,7 @@ fn shown_code(code: u64) -> u64 {
   return code;
 }
 
-// Saved register numbers.
+// Saved register numbers. The rest (R_NUM, R_PC, ...) and NREGS are per architecture (src/regs.bastio).
 const R_RAX: u64 = 0;
 const R_RDX: u64 = 3;
 const R_RSI: u64 = 4;
@@ -191,6 +193,18 @@ fn pset(procs: &mut Buf, pid: u64, f: u64, v: u64)
   if i < len(procs) {
     procs = set(procs, i, v);
   }
+}
+
+/// The row word that holds saved register r: the register block, or past the
+/// row's usual 72 words for the registers beyond the first 21.
+fn reg_word(r: u64) -> u64
+  requires r < NREGS
+  ensures result < STRIDE
+{
+  if r < 21 {
+    return F_REGS + r;
+  }
+  return 72 + (r - 21);
 }
 
 fn state(procs: &Buf, pid: u64) -> u64
@@ -330,15 +344,6 @@ fn drop_fpu(m: &mut Mem, x: Fpu)
   }
 }
 
-/// The x87/SSE state a Linux process starts with: control word 0x37F and
-/// MXCSR 0x1F80 (every exception masked, round to nearest).
-fn fpu_init(f: &mut Frame) {
-  frame_write8(&mut f, 0, 0x7F);
-  frame_write8(&mut f, 1, 0x03);
-  frame_write8(&mut f, 24, 0x80);
-  frame_write8(&mut f, 25, 0x1F);
-}
-
 // ---------------------------------------------------------------- input queue
 
 // Bytes typed on the console, waiting for a READ: a core Queue of
@@ -399,7 +404,7 @@ fn wake_readers(procs: &mut Buf, q: &mut Queue, line: &Buf)
     invariant 1 <= p && p <= NPROC && ptab_ok(procs) && qok(q)
   {
     if state(procs, p) == READING && q.r.n > 0 {
-      pset(&mut procs, p, F_REGS + R_RAX, q_pop(&mut q));
+      pset(&mut procs, p, reg_word(R_RET), q_pop(&mut q));
       pset(&mut procs, p, F_STATE, READY);
     }
     // A Linux read restarts its system call, which takes the line itself.
@@ -552,7 +557,7 @@ const ME_W: u64 = 5;                  // words per mount
 // each process's UTS, IPC and PID namespace, the next id of each kind, the
 // host and domain names of UTS namespaces other than the first (whose
 // names are in k.sys), and the IPC namespace of each POSIX queue.
-const NSK_N: u64 = 7;                 // kinds, per process:
+const NSK_N: u64 = 8;                 // kinds, per process:
 const NSK_UTS: u64 = 0;
 const NSK_IPC: u64 = 1;
 const NSK_PID: u64 = 2;               //   the PID namespace it is in
@@ -560,6 +565,7 @@ const NSK_VPID: u64 = 3;              //   its id in it (0 in the first namespac
 const NSK_PIDC: u64 = 4;              //   the PID namespace its children are in
 const NSK_USER: u64 = 5;              //   the user namespace it is in
 const NSK_CG: u64 = 6;                //   the cgroup it belongs to (src/lxcgroup.bastio)
+const NSK_CGN: u64 = 7;               //   the root of its cgroup namespace: slot + 1 (0: the first namespace)
 const CG_N: u64 = 32;                 // cgroups in all (slot 0 is the root, always there)
 const CG_W: u64 = 32;                 // words per cgroup: see CGW_*
 const CGW_USED: u64 = 0;
@@ -572,6 +578,7 @@ const CGW_CPUP: u64 = 6;              // cpu.max period (0: 100000)
 const CGW_WEIGHT: u64 = 7;            // cpu.weight (0: 100)
 const CGW_NLEN: u64 = 8;              // length of the name, then its bytes one a word
 const CGW_NAME: u64 = 9;
+const CGW_FRZ: u64 = 31;              // cgroup.freeze (the name takes words 9 to 30)
 const CG_NAME_MAX: u64 = 22;
 const OVERFLOW_ID: u64 = 65534;       // what an id with no map in the reader's user namespace shows as
 const UM_BAD: u64 = 0x100000000;      // an id with no map (ID_SPAN)
@@ -1063,105 +1070,6 @@ fn prog_name(i: u64) -> Str {
   return "(file)";                    // a program loaded from a file
 }
 
-fn prog_image(i: u64) -> Str {
-  if i == 0 {
-    return include_bytes("../build/user/sh.bin");
-  }
-  if i == 1 {
-    return include_bytes("../build/user/hello.bin");
-  }
-  if i == 2 {
-    return include_bytes("../build/user/spin.bin");
-  }
-  if i == 3 {
-    return include_bytes("../build/user/true.bin");
-  }
-  if i == 4 {
-    return include_bytes("../build/user/bench.bin");
-  }
-  if i == 5 {
-    return include_bytes("../build/user/straddle.bin");
-  }
-  if i == 6 {
-    return include_bytes("../build/user/elfexec.elf");
-  }
-  if i == 7 {
-    return include_bytes("../build/user/elfpie.elf");
-  }
-  if i == 8 {
-    return include_bytes("../build/user/elfbad.elf");
-  }
-  if i == 9 {
-    return include_bytes("../build/user/fstest.bin");
-  }
-  if i == 10 {
-    return include_bytes("../build/user/mhello.elf");
-  }
-  if i == 11 {
-    return include_bytes("../build/user/fpucheck.elf");
-  }
-  if i == 12 {
-    return include_bytes("../build/user/mtest.elf");
-  }
-  if i == 13 {
-    return include_bytes("../build/user/ash.elf");
-  }
-  if i == 15 {
-    return include_bytes("../build/user/mudp.elf");
-  }
-  if i == 16 {
-    return include_bytes("../build/user/mtcp.elf");
-  }
-  if i == 17 {
-    return include_bytes("../build/user/mtime.elf");
-  }
-  if i == 18 {
-    return include_bytes("../build/user/crashme.bin");
-  }
-  if i == 19 {
-    return include_bytes("../build/user/mdir.elf");
-  }
-  if i == 20 {
-    return include_bytes("../build/user/mmisc.elf");
-  }
-  if i == 21 {
-    return include_bytes("../build/user/mspawn.elf");
-  }
-  if i == 22 {
-    return include_bytes("../build/user/sysfuzz.elf");
-  }
-  if i == 23 {
-    return include_bytes("../build/user/mthread.elf");
-  }
-  if i == 24 {
-    return include_bytes("../build/user/mdyn.elf");
-  }
-  if i == 25 {
-    return include_bytes("../build/user/ld-musl.so");
-  }
-  if i == 26 {
-    return include_bytes("../build/user/diskbench.bin");
-  }
-  if i == 27 {
-    return include_bytes("../build/user/mkfs.elf");
-  }
-  if i == 28 {
-    return include_bytes("../build/user/mtone.elf");
-  }
-  if i == 29 {
-    return include_bytes("../build/user/mmouse.elf");
-  }
-  if i == 30 {
-    return include_bytes("../build/user/mns.elf");
-  }
-  if i == 31 {
-    return include_bytes("../build/user/mseccomp.elf");
-  }
-  if i == 32 {
-    return include_bytes("../build/user/mcont.elf");
-  }
-  return include_bytes("../build/user/fault.bin");
-}
 
 /// The little-endian u64 at `at` in `s`.
 fn read_u64(s: Str, at: u64) -> u64
@@ -1262,20 +1170,32 @@ fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
   return pid;
 }
 
-/// A FREE process id the table has a row for, or 0 if there is none.
-fn free_pid(procs: &Buf) -> u64
+/// A FREE process id the table has a row for, searching from `from` on and
+/// then from 1, or 0 if there is none.
+fn free_pid(procs: &Buf, from: u64) -> u64
   requires ptab_ok(procs)
   ensures result < NPROC
 {
   let cap = len(procs) / STRIDE;
-  let mut pid = 1;
+  let mut pid = from;
+  if pid < 1 || pid >= cap {
+    pid = 1;
+  }
   while pid < cap && state(procs, pid) != FREE
     invariant 1 <= pid && cap <= NPROC
   {
     pid = pid + 1;
   }
   if pid >= cap {
-    return 0;
+    pid = 1;
+    while pid < from && pid < cap && state(procs, pid) != FREE
+      invariant 1 <= pid && cap <= NPROC
+    {
+      pid = pid + 1;
+    }
+    if pid >= from || pid >= cap {
+      return 0;
+    }
   }
   return pid;
 }
@@ -1316,8 +1236,33 @@ fn new_pid(k: &mut Kernel) -> u64
   requires kok(k)
   ensures kok(k) && result < NPROC
 {
-  let pid = free_pid(k.procs);
+  return new_pid_from(&mut k, false);
+}
+
+/// new_pid for a thread: it searches on from the id handed out to a thread
+/// last, so a thread that just ended does not share its id with the next
+/// one (Linux numbers ids round and round; processes keep the lowest free
+/// id, which the shell and the docs show).
+fn new_tid(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k) && result < NPROC
+{
+  return new_pid_from(&mut k, true);
+}
+
+fn new_pid_from(k: &mut Kernel, round: bool) -> u64
+  requires kok(k)
+  ensures kok(k) && result < NPROC
+{
+  let mut from = 1;
+  if round {
+    from = sat_add(pget(k.procs, 0, F_START), 1);
+  }
+  let pid = free_pid(k.procs, from);
   if pid != 0 {
+    if round {
+      pset(&mut k.procs, 0, F_START, pid);     // row 0 is no process: it keeps the last id handed to a thread
+    }
     return pid;
   }
   let cap = len(k.procs) / STRIDE;
@@ -1337,7 +1282,11 @@ fn new_pid(k: &mut Kernel) -> u64
      || !zgrow(&mut k.fs.ftab, n * NFD * FD_STRIDE) || !zgrow(&mut k.sigsave, n * SIGSAVE_ROW) || !zgrow(&mut k.procs, n * STRIDE) {
     return 0;
   }
-  return free_pid(k.procs);
+  let grown = free_pid(k.procs, cap);
+  if grown != 0 && round {
+    pset(&mut k.procs, 0, F_START, grown);
+  }
+  return grown;
 }
 
 /// Writes `name` (at most ARGV0_MAX bytes of it) and a NUL into `args`:
@@ -1464,10 +1413,10 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
     return sp;
   }
   let mut r = 0;
-  while r < 21
-    invariant r <= 21 && ptab_ok(procs)
+  while r < NREGS
+    invariant r <= NREGS && ptab_ok(procs)
   {
-    pset(&mut procs, pid, F_REGS + r, 0);
+    pset(&mut procs, pid, reg_word(r), 0);
     r = r + 1;
   }
   pset(&mut procs, pid, F_PROG, NPROGS);       // a file: NPROGS + 1 + its handle, for /proc/PID/exe
@@ -1477,9 +1426,9 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
   if !src.file {
     pset(&mut procs, pid, F_PROG, src.prog);
   }
-  pset(&mut procs, pid, F_REGS + R_RIP, entry);
-  pset(&mut procs, pid, F_REGS + R_RSP, rsp);
-  pset(&mut procs, pid, F_REGS + R_RFLAGS, 0x202);
+  pset(&mut procs, pid, reg_word(R_PC), entry);
+  pset(&mut procs, pid, reg_word(R_SP), rsp);
+  pset(&mut procs, pid, reg_word(R_FLAGS), FLAGS_INIT);
   pset(&mut procs, pid, F_BRK, 0);
   pset(&mut procs, pid, F_BRK0, 0);
   pset(&mut procs, pid, F_MMAP, 0);
@@ -1653,7 +1602,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
   if par == 0 || par >= NPROC {
     pset(&mut k.procs, pid, F_STATE, FREE);       // nobody will collect it
   } else if state(k.procs, par) == WAITING && pget(k.procs, par, F_WAIT) == pid {
-    pset(&mut k.procs, par, F_REGS + R_RAX, shown_code(code));
+    pset(&mut k.procs, par, reg_word(R_RET), shown_code(code));
     pset(&mut k.procs, par, F_STATE, READY);
     pset(&mut k.procs, pid, F_STATE, FREE);
   } else if state(k.procs, par) == LXWAITING {

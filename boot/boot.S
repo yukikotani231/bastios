@@ -1,7 +1,7 @@
 /*
  * BastiOS boot and trap entry.
  *
- * Multiboot 1 or 2 entry in 32-bit protected mode, switch to 64-bit long mode,
+ * Multiboot 1 or 2, or PVH, entry in 32-bit protected mode, switch to 64-bit long mode,
  * set up the descriptor tables (platform.c), call the Bastio kernel
  * (`bst_kmain`), then power off. Also the only code that crosses between
  * user mode and the kernel: `bst_cpu_enter`, the trap stubs, `bst_cpu_halt`.
@@ -49,6 +49,21 @@ mb2_header:
 .long 8
 mb2_end:
 
+/* The PVH entry (Xen's HVM direct boot, which Firecracker, Cloud Hypervisor
+ * and QEMU's microvm machine use): an ELF note names a 32-bit entry point.
+ * The loader enters in 32-bit protected mode with paging off and %ebx
+ * pointing to an hvm_start_info; pvh_start tags it with a magic of our own
+ * in %eax and joins the Multiboot path, where boot/multiboot.c converts
+ * the information. */
+.set PVH_TAG, 0x31485650              /* "PVH1" */
+.section .note.pvh, "a", @note
+.align 4
+.long 4                               /* name size: "Xen\0" */
+.long 4                               /* descriptor size: one 32-bit address */
+.long 18                              /* XEN_ELFNOTE_PHYS32_ENTRY */
+.asciz "Xen"
+.long pvh_start
+
 .section .bss
 .align 4096
 .global bst_kernel_pml4
@@ -91,6 +106,10 @@ bst_gdt_ptr:
 
 .section .text
 .code32
+pvh_start:
+        mov     $PVH_TAG, %eax
+        jmp     _start
+
 .global _start
 _start:
         cli

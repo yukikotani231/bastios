@@ -1,0 +1,10 @@
+// The smaller of two numbers, shared by the file system and the system calls.
+
+fn smaller(a: u64, b: u64) -> u64
+  ensures result <= a && result <= b
+{
+  if a < b {
+    return a;
+  }
+  return b;
+}

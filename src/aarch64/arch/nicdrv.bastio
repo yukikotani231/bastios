@@ -1,0 +1,54 @@
+// Finding and starting the network card on AArch64 (virtio on the
+// memory-mapped transport), and releasing it at power off.
+
+import "card.bastio";
+import "netconst.bastio";
+
+/// A virtio network card over the transport `io`, given the nine pages
+/// from page `at` on.
+fn virtio_nic_start(m: &mut Mem, at: u64, io: Vt) -> Nic
+  requires mem_ok(m) && vt_ok(io) && at + NET_PAGES <= NPAGES && at + NET_PAGES <= len(m.bm)
+  requires forall i: u64 :: at <= i && i < at + NET_PAGES ==> get(m.bm, i) == 1
+  ensures nic_ok(result) && mem_ok(m)
+{
+  let q0 = take_low_page(&mut m, at);
+  let q1 = take_low_page(&mut m, at + 1);
+  let q2 = take_low_page(&mut m, at + 2);
+  let t0 = take_low_page(&mut m, at + 3);
+  let t1 = take_low_page(&mut m, at + 4);
+  let t2 = take_low_page(&mut m, at + 5);
+  let b0 = take_low_page(&mut m, at + 6);
+  let b1 = take_low_page(&mut m, at + 7);
+  let b2 = take_low_page(&mut m, at + 8);
+  return net_up(Card::Virtio(vnet_new(io, q0, q1, q2, t0, t1, t2, b0, b1, b2, false)));
+}
+
+/// Starts the network card: the first virtio network device in the slots
+/// `vm`, clear of `dk_lo .. dk_hi` (the disk's registers), with nine pages
+/// from page `at` on; none if there is no such device.
+fn nic_find(m: &mut Mem, win: &mut MmioSpace, at: u64, dk_lo: u64, dk_hi: u64, vm: VmWhere) -> Nic
+  requires mem_ok(m) && vmw_ok(vm) && at + NET_PAGES <= NPAGES
+  requires forall a: u64 :: bar_space(a) && !(dk_lo <= a && a < dk_hi) ==> mmio_free(win, a)
+  ensures nic_ok(result) && mem_ok(m)
+{
+  if !pages_free(m, at, NET_PAGES) {
+    return Nic::None;
+  }
+  match vm_find(&mut win, VM_ID_NET, vm, dk_lo, dk_hi, 0, 0, 0, 0, 0, 0) {
+    VmFound::Found(d) => { return virtio_nic_start(&mut m, at, Vt::Mem(d)); },
+    VmFound::None => { return Nic::None; },
+  }
+}
+
+/// Resets the card and takes its pages back (at power off).
+fn nic_free(win: &mut MmioSpace, c: Nic, m: &mut Mem)
+  requires nic_ok(c) && mem_ok(m)
+  ensures mem_ok(m)
+{
+  match c {
+    Nic::None => {},
+    Nic::Up(n) => {
+      card_free(&mut win, net_dismantle(n, &mut m), &mut m);
+    },
+  }
+}

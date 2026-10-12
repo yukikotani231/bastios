@@ -10,18 +10,16 @@
 // with the 10-byte legacy virtio-net header, then the Ethernet frame.
 
 import "virtq.bastio";
+import "vt.bastio";
+import "netconst.bastio";
 
 const VIRTIO_NET: u64 = 0x1000;       // legacy (transitional) network device id
 const NET_F_MAC: u64 = 32;            // feature bit 5: the card has a MAC address
-const NET_HDR: u64 = 10;
-const RX_BUFS: u64 = 4;
-const RX_BUF: u64 = 2048;
 const TX_BUF: u64 = 2048;             // the transmit page holds two
-const FRAME_MAX: u64 = 1514;          // Ethernet header + 1500 bytes
 const NET_PAGES: u64 = 9;
 
 struct VNet {
-  io: PortIo,
+  io: Vt,
   rx: Vq,
   tx: Vq,
   rb0: Dma,           // receive buffers 0 and 1
@@ -30,13 +28,14 @@ struct VNet {
   tx_busy0: bool,     // the card has not handed transmit buffer 0 back yet
   tx_busy1: bool,
   rx_kick: bool,      // buffers were offered again since the card was told
+  hdr: u64,           // the header before each frame: 10 bytes (legacy) or 12 (modern)
   mac: u64,           // 48 bits, first byte most significant
   live: bool,
   irq: bool,          // a received frame can raise MSI-X message 0 (see vnet_irq)
 }
 
 spec fn vnet_ok(v: &VNet) -> bool {
-  port_count(v.io) == VIO_PORTS && vq_ok(v.rx) && vq_ok(v.tx) && v.mac < 281474976710656
+  vt_ok(v.io) && vq_ok(v.rx) && vq_ok(v.tx) && v.mac < 281474976710656 && (v.hdr == NET_HDR || v.hdr == NET_HDR + 2)
 }
 
 /// Copies n bytes of receive buffer `b`, from offset `off`, into pkt.
@@ -55,65 +54,70 @@ fn rxbuf_copy(v: &mut VNet, b: u64, off: u64, pkt: &mut Bytes, n: u64)
 fn rx_give(v: &mut VNet, b: u64)
   requires vnet_ok(v) && b < RX_BUFS
   ensures vnet_ok(v)
+  ensures forall k: u64 :: vt_holds(v.io, k) == old(vt_holds(v.io, k))
+  ensures forall a: u64 :: vt_claims(v.io, a) == old(vt_claims(v.io, a))
 {
   vq_push(&mut v.rx, b);
-  pio_out16(&mut v.io, VIO_QUEUE_NOTIFY, 0);
+  vt_notify(&mut v.io, 0);
 }
 
-/// Claims the card's ports, lends it nine pages, posts the receive buffers
-/// and reads its MAC address. A card that cannot be started is left with
-/// `live` false: it sends nothing and receives nothing. `msix`: MSI-X is
-/// on at the card, entry 0 aimed at V_NET; the receive queue is then given
-/// message 0, still quiet until `vnet_irq` (sent frames are collected
-/// when the next one is sent, so they raise nothing).
-fn vnet_new(ports: &mut Ports, base: u64, q0: Frame, q1: Frame, q2: Frame, t0: Frame, t1: Frame, t2: Frame, b0: Frame, b1: Frame, b2: Frame, msix: bool) -> VNet
-  requires base + VIO_PORTS <= 65536
-  requires forall k: u64 :: base <= k && k < base + VIO_PORTS ==> port_free(ports, k)
+/// Lends the card nine pages, posts the receive buffers and reads its MAC
+/// address, over the transport `io` (its ports or registers, claimed by
+/// the caller). A card that cannot be started is left with `live` false:
+/// it sends nothing and receives nothing. `msix`: MSI-X is on at the card,
+/// entry 0 aimed at V_NET; the receive queue is then given message 0,
+/// still quiet until `vnet_irq` (sent frames are collected when the next
+/// one is sent, so they raise nothing).
+fn vnet_new(io: Vt, q0: Frame, q1: Frame, q2: Frame, t0: Frame, t1: Frame, t2: Frame, b0: Frame, b1: Frame, b2: Frame, msix: bool) -> VNet
+  requires vt_ok(io)
   ensures vnet_ok(result)
+  ensures forall k: u64 :: vt_holds(result.io, k) == old(vt_holds(io, k))
+  ensures forall a: u64 :: vt_claims(result.io, a) == old(vt_claims(io, a))
 {
   let mut v = VNet {
-    io: port_claim(&mut ports, base, VIO_PORTS), rx: vq_new(q0, q1, q2), tx: vq_new(t0, t1, t2),
-    rb0: dma_lend(b0), rb1: dma_lend(b1), tb: dma_lend(b2), tx_busy0: false, tx_busy1: false, rx_kick: false, mac: 0, live: false, irq: false,
+    io: io, rx: vq_new(q0, q1, q2), tx: vq_new(t0, t1, t2),
+    rb0: dma_lend(b0), rb1: dma_lend(b1), tb: dma_lend(b2), tx_busy0: false, tx_busy1: false, rx_kick: false, hdr: NET_HDR, mac: 0, live: false, irq: false,
   };
   let a0 = dma_addr(v.rb0);
   let a1 = dma_addr(v.rb1);
   let at = dma_addr(v.tb);
-  if a0 > ADDR_LIMIT || a1 > ADDR_LIMIT || at > ADDR_LIMIT || !virtio_start(&mut v.io, NET_F_MAC)
+  if a0 > ADDR_LIMIT || a1 > ADDR_LIMIT || at > ADDR_LIMIT || !vt_start(&mut v.io, NET_F_MAC)
     || !vq_setup(&mut v.io, &mut v.rx, 0) || !vq_setup(&mut v.io, &mut v.tx, 1) {
-    pio_out8(&mut v.io, VIO_STATUS, 0);
+    vt_status(&mut v.io, 0);
     return v;
   }
   if v.rx.n < RX_BUFS {
-    pio_out8(&mut v.io, VIO_STATUS, 0);
+    vt_status(&mut v.io, 0);
     return v;
   }
   vq_desc(&mut v.rx, 0, a0, RX_BUF, DESC_WRITE, 0);
   vq_desc(&mut v.rx, 1, a0 + RX_BUF, RX_BUF, DESC_WRITE, 0);
   vq_desc(&mut v.rx, 2, a1, RX_BUF, DESC_WRITE, 0);
   vq_desc(&mut v.rx, 3, a1 + RX_BUF, RX_BUF, DESC_WRITE, 0);
-  let mut cfg = VIO_CONFIG;
   if msix {
     // The device answers VIO_NO_VECTOR if it cannot take the message.
-    cfg = VIO_CONFIG_MSIX;
-    pio_out16(&mut v.io, VIO_MSIX_CONFIG, cast[u16](VIO_NO_VECTOR));
-    pio_out16(&mut v.io, VIO_QUEUE_SEL, 1);
-    pio_out16(&mut v.io, VIO_MSIX_QUEUE, cast[u16](VIO_NO_VECTOR));
-    pio_out16(&mut v.io, VIO_QUEUE_SEL, 0);
-    pio_out16(&mut v.io, VIO_MSIX_QUEUE, 0);
-    v.irq = cast[u64](pio_in16(&mut v.io, VIO_MSIX_QUEUE)) == 0;
+    v.irq = vt_msix(&mut v.io, 2);
   }
-  let m0 = cast[u64](pio_in8(&mut v.io, cfg));
-  let m1 = cast[u64](pio_in8(&mut v.io, cfg + 1));
-  let m2 = cast[u64](pio_in8(&mut v.io, cfg + 2));
-  let m3 = cast[u64](pio_in8(&mut v.io, cfg + 3));
-  let m4 = cast[u64](pio_in8(&mut v.io, cfg + 4));
-  let m5 = cast[u64](pio_in8(&mut v.io, cfg + 5));
+  let m0 = vt_cfg8(&mut v.io, 0, msix);
+  let m1 = vt_cfg8(&mut v.io, 1, msix);
+  let m2 = vt_cfg8(&mut v.io, 2, msix);
+  let m3 = vt_cfg8(&mut v.io, 3, msix);
+  let m4 = vt_cfg8(&mut v.io, 4, msix);
+  let m5 = vt_cfg8(&mut v.io, 5, msix);
   v.mac = ((((m0 * 256 + m1) * 256 + m2) * 256 + m3) * 256 + m4) * 256 + m5;
-  pio_out8(&mut v.io, VIO_STATUS, cast[u8](VIO_ACK + VIO_DRIVER + VIO_DRIVER_OK));
+  let ok = VIO_ACK + VIO_DRIVER + VIO_DRIVER_OK;
+  if vt_modern(&mut v.io) {
+    v.hdr = NET_HDR + 2;
+    vt_status(&mut v.io, ok + VIO_FEATURES_OK);
+  } else {
+    vt_status(&mut v.io, ok);
+  }
   v.live = true;
   let mut b = 0;
   while b < RX_BUFS
     invariant b <= RX_BUFS && vnet_ok(v)
+    invariant forall k: u64 :: vt_holds(v.io, k) == old(vt_holds(io, k))
+    invariant forall a: u64 :: vt_claims(v.io, a) == old(vt_claims(io, a))
   {
     rx_give(&mut v, b);
     b = b + 1;
@@ -134,23 +138,20 @@ fn vnet_irq(v: &mut VNet, on: bool)
 }
 
 /// Resets the card, so it stops using the pages, takes them back and gives
-/// the ports back (at power off).
-fn vnet_free(ports: &mut Ports, v: VNet, m: &mut Mem)
+/// the ports or registers back (at power off).
+fn vnet_free(v: VNet, m: &mut Mem) -> Vt
   requires vnet_ok(v) && mem_ok(m)
   ensures mem_ok(m)
 {
   let mut d = v;
-  pio_out8(&mut d.io, VIO_STATUS, 0);
-  pio_out16(&mut d.io, VIO_QUEUE_SEL, 0);
-  pio_out32(&mut d.io, VIO_QUEUE_PFN, 0);
-  pio_out16(&mut d.io, VIO_QUEUE_SEL, 1);
-  pio_out32(&mut d.io, VIO_QUEUE_PFN, 0);
+  vt_stop(&mut d.io, 0);
+  vt_stop(&mut d.io, 1);
   vq_free(d.rx, &mut m);
   vq_free(d.tx, &mut m);
   give_page(&mut m, dma_take(d.rb0));
   give_page(&mut m, dma_take(d.rb1));
   give_page(&mut m, dma_take(d.tb));
-  port_release(&mut ports, d.io);
+  return d.io;
 }
 
 /// Copies the next received frame into `pkt` and returns its length, or 0
@@ -171,10 +172,10 @@ fn vnet_recv(v: &mut VNet, pkt: &mut Bytes) -> u64
     return 0;                         // not one of ours: the card is confused
   }
   let mut n = 0;
-  if got > NET_HDR && got <= RX_BUF {
-    n = got - NET_HDR;
+  if got > v.hdr && got <= RX_BUF {
+    n = got - v.hdr;
   }
-  rxbuf_copy(&mut v, b, NET_HDR, &mut pkt, n);
+  rxbuf_copy(&mut v, b, v.hdr, &mut pkt, n);
   vq_push(&mut v.rx, b);
   v.rx_kick = true;
   return n;
@@ -186,7 +187,7 @@ fn vnet_rx_flush(v: &mut VNet)
   ensures vnet_ok(v)
 {
   if v.rx_kick {
-    pio_out16(&mut v.io, VIO_QUEUE_NOTIFY, 0);
+    vt_notify(&mut v.io, 0);
     v.rx_kick = false;
   }
 }
@@ -240,24 +241,25 @@ fn vnet_send(v: &mut VNet, pkt: &Bytes, n: u64) -> bool
   }
   let at = b * TX_BUF;
   let mut i = 0;
-  while i < NET_HDR
-    invariant i <= NET_HDR && at <= TX_BUF
+  let hdr = v.hdr;
+  while i < hdr
+    invariant i <= hdr && at <= TX_BUF && hdr <= NET_HDR + 2
   {
     dma_write8(&mut v.tb, at + i, 0);  // no checksum offload, no segmentation
     i = i + 1;
   }
-  bytes_to_dma(&mut v.tb, at + NET_HDR, pkt, 0, n);
+  bytes_to_dma(&mut v.tb, at + hdr, pkt, 0, n);
   let a = dma_addr(v.tb);
   if a > ADDR_LIMIT {
     return false;                     // vnet_new checked it: never
   }
-  vq_desc(&mut v.tx, b, a + at, NET_HDR + n, 0, 0);
+  vq_desc(&mut v.tx, b, a + at, hdr + n, 0, 0);
   if b == 0 {
     v.tx_busy0 = true;
   } else {
     v.tx_busy1 = true;
   }
   vq_push(&mut v.tx, b);
-  pio_out16(&mut v.io, VIO_QUEUE_NOTIFY, 1);
+  vt_notify(&mut v.io, 1);
   return true;
 }

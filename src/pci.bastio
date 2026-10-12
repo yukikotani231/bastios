@@ -8,6 +8,8 @@
 // PC sits behind a PCIe root port, on bus 1 or later), skipping empty
 // slots and the other functions of single-function devices.
 
+import "mmiowin.bastio";
+
 const PCI_ADDR: u64 = 0xCF8;
 const PCI_DATA: u64 = 0xCFC;
 const PCI_ENABLE: u64 = 0x80000000;   // bit 31 of the address: a config cycle
@@ -23,18 +25,6 @@ const PCI_BAR0: u64 = 0x10;
 const PCI_CMD_IO: u64 = 1;            // respond to its I/O ports
 const PCI_CMD_MEM: u64 = 2;           // respond to its memory-mapped registers
 const PCI_CMD_MASTER: u64 = 4;        // may start DMA
-
-// Where memory BARs may lie: the device window (2 GiB up to 2^46, mapped
-// uncached at boot) minus the I/O APIC, HPET and local APIC at the top of
-// the first 4 GiB. 64-bit BARs may sit anywhere in the upper part.
-const WIN_LO: u64 = 0x80000000;
-const WIN_LOW_TOP: u64 = 0xFEC00000;
-const WIN_HIGH: u64 = 0x100000000;
-const WIN_TOP: u64 = 0x400000000000;
-
-spec fn bar_space(a: u64) -> bool {
-  (WIN_LO <= a && a < WIN_LOW_TOP) || (WIN_HIGH <= a && a < WIN_TOP)
-}
 
 struct Pci { addr: PortIo, data: PortIo }
 
@@ -83,6 +73,14 @@ fn pci_next(p: &mut Pci, dev: u64) -> u64
     return dev + 8;
   }
   return dev + 1;
+}
+
+/// Is there no PCI at all (no host bridge answers at 0:0.0)? True on
+/// Firecracker and QEMU's microvm, never on a PC.
+fn pci_absent(p: &mut Pci) -> bool
+  requires pci_ok(p)
+{
+  return pci_read(&mut p, 0, PCI_ID) == 0xFFFFFFFF;
 }
 
 /// The first device with this vendor and device id, or PCI_NONE.

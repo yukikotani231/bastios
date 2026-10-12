@@ -1,0 +1,15 @@
+// Where memory BARs may lie: the device window (2 GiB up to 2^46, mapped
+// uncached at boot) minus the I/O APIC, HPET and local APIC at the top of
+// the first 4 GiB. 64-bit BARs may sit anywhere in the upper part.
+const WIN_LO: u64 = 0x80000000;
+const WIN_LOW_TOP: u64 = 0xFEC00000;
+const WIN_HIGH: u64 = 0x100000000;
+const WIN_TOP: u64 = 0x400000000000;
+
+spec fn bar_space(a: u64) -> bool {
+  (WIN_LO <= a && a < WIN_LOW_TOP) || (WIN_HIGH <= a && a < WIN_TOP)
+}
+
+// Where the virtio-mmio slots are by default (QEMU microvm: 24 devices from here, 0x200 apart).
+const VM_SLOT0: u64 = 0xFEB00000;
+const VM_SLOTS: u64 = 24;

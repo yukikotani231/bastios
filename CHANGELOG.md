@@ -14,6 +14,12 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 What will be 0.3.0. It needs bastiolang 0.2.0.
 
+### Boot
+
+- virtio devices over MMIO (QEMU `microvm`, Firecracker's transport): the block and network drivers go through a transport that is either I/O ports (PCI) or a block of memory-mapped registers, version 1 or 2. Found at QEMU microvm's slots on a machine with no PCI. The 12-byte modern network header is handled. The devices named by `virtio_mmio.device=SIZE@ADDRESS:IRQ` words on the command line (Firecracker) are looked for instead of microvm's slots.
+- A PVH entry (Xen's direct boot protocol, used by Firecracker, Cloud Hypervisor and QEMU's `microvm`): `boot/boot.S` carries the ELF note, `boot/multiboot.c` converts the `hvm_start_info`. Tested on QEMU by booting a copy without the Multiboot header.
+- The local APIC timer is calibrated against PIT channel 0 when the speaker channel (2) is missing, as in QEMU's `microvm`, before falling back to two seconds of the RTC. A `microvm` boots in 0.3 s instead of 2.1 s under TCG. Trusted: about 30 more lines of C in `boot/smp.c`.
+
 ### AArch64
 
 - BastiOS builds for AArch64 and boots to the shell on QEMU's `virt` machine

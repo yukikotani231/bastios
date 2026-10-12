@@ -13,7 +13,10 @@
 // through its I/O thread, so a run of blocks read ahead costs one trip.
 
 import "virtq.bastio";
+import "vt.bastio";
 import "bio.bastio";
+import "blkconst.bastio";
+import "core/endian.bastio";
 
 const VIRTIO_BLK: u64 = 0x1001;       // legacy (transitional) block device id
 const VIO_CAPACITY: u64 = 0x14;       // 64 bits: the size in 512-byte sectors
@@ -26,7 +29,6 @@ const REQ_STATUS: u64 = 16;
 const REQ_DATA: u64 = 512;
 const VIO_SECTOR: u64 = 512;
 const VIO_BLOCK: u64 = 4096;
-const VIO_BATCH: u64 = 8;             // blocks one read request takes at most
 
 /// A data page for the blocks after the first of a batched read.
 enum Extra {
@@ -35,7 +37,7 @@ enum Extra {
 }
 
 struct Virtio {
-  io: PortIo,
+  io: Vt,
   q: Vq,
   req: Dma,
   data: Dma,
@@ -49,60 +51,58 @@ struct Virtio {
 }
 
 spec fn virtio_ok(v: &Virtio) -> bool {
-  port_count(v.io) == VIO_PORTS && vq_ok(v.q) && vlen(v.extra) == VIO_BATCH - 1 && v.pages < VIO_BATCH && v.n >= 1 && v.n <= VIO_BATCH
+  vt_ok(v.io) && vq_ok(v.q) && vlen(v.extra) == VIO_BATCH - 1 && v.pages < VIO_BATCH && v.n >= 1 && v.n <= VIO_BATCH
 }
 
-/// Claims the device's ports, lends it five pages and starts it. A device
-/// that cannot be started (bad queue size, pages out of its reach) is left
-/// with `sectors` 0, and every later operation on it fails. `msix`: MSI-X
-/// is on (with message 0 set up), so the queue is bound to message 0.
-fn virtio_new(ports: &mut Ports, base: u64, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, extra: Vec[Extra], pages: u64, msix: bool) -> Virtio
-  requires vlen(extra) == VIO_BATCH - 1 && pages < VIO_BATCH
-  requires base + VIO_PORTS <= 65536
-  requires forall k: u64 :: base <= k && k < base + VIO_PORTS ==> port_free(ports, k)
-  ensures virtio_ok(result) && port_base(result.io) == base
-  ensures forall k: u64 :: (k < base || base + VIO_PORTS <= k) ==> port_free(ports, k) == old(port_free(ports, k))
+/// Lends the device five pages and starts it, over the transport `io`
+/// (its ports or registers, claimed by the caller). A device that cannot be
+/// started (bad queue size, pages out of its reach) is left with `sectors`
+/// 0, and every later operation on it fails. `msix`: MSI-X is on (with
+/// message 0 set up), so the queue is bound to message 0.
+fn virtio_new(io: Vt, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, extra: Vec[Extra], pages: u64, msix: bool) -> Virtio
+  requires vlen(extra) == VIO_BATCH - 1 && pages < VIO_BATCH && vt_ok(io)
+  ensures virtio_ok(result)
+  ensures forall k: u64 :: vt_holds(result.io, k) == old(vt_holds(io, k))
+  ensures forall a: u64 :: vt_claims(result.io, a) == old(vt_claims(io, a))
 {
-  let mut v = Virtio { io: port_claim(&mut ports, base, VIO_PORTS), q: vq_new(f0, f1, f2), req: dma_lend(f3),
+  let mut v = Virtio { io: io, q: vq_new(f0, f1, f2), req: dma_lend(f3),
     data: dma_lend(f4), sectors: 0, busy: false, flushing: false, irq: false, extra: extra, pages: pages, n: 1 };
   let r = dma_addr(v.req);
-  if !virtio_start(&mut v.io, 0) || r > ADDR_LIMIT - 4096 || dma_addr(v.data) > ADDR_LIMIT - 4096
+  if !vt_start(&mut v.io, 0) || r > ADDR_LIMIT - 4096 || dma_addr(v.data) > ADDR_LIMIT - 4096
     || !vq_setup(&mut v.io, &mut v.q, 0) {
-    pio_out8(&mut v.io, VIO_STATUS, 0);
+    vt_status(&mut v.io, 0);
     return v;
   }
   // Every request is the same chain: header -> data -> status.
   vq_desc(&mut v.q, 0, r, 16, DESC_NEXT, 1);
   vq_desc(&mut v.q, 1, r + REQ_DATA, VIO_SECTOR, DESC_NEXT, 2);
   vq_desc(&mut v.q, 2, r + REQ_STATUS, 1, DESC_WRITE, 0);
-  let mut cap = VIO_CAPACITY;
   if msix {
-    // Queue 0 is still selected (vq_setup). The device answers
-    // VIO_NO_VECTOR if it cannot take the message.
-    cap = VIO_CAPACITY_MSIX;
-    pio_out16(&mut v.io, VIO_MSIX_CONFIG, cast[u16](VIO_NO_VECTOR));
-    pio_out16(&mut v.io, VIO_MSIX_QUEUE, 0);
-    if cast[u64](pio_in16(&mut v.io, VIO_MSIX_QUEUE)) == 0 {
+    // Queue 0 is bound to message 0 if the device can take it.
+    if vt_msix(&mut v.io, 1) {
       vq_interrupts(&mut v.q);
       v.irq = true;
     }
   }
-  pio_out8(&mut v.io, VIO_STATUS, cast[u8](VIO_ACK + VIO_DRIVER + VIO_DRIVER_OK));
-  let lo = cast[u64](pio_in32(&mut v.io, cap));
-  let hi = cast[u64](pio_in32(&mut v.io, cap + 4));
-  v.sectors = lo + hi * 4294967296;
+  // The modern transport wants FEATURES_OK in the final status as well.
+  let ok = VIO_ACK + VIO_DRIVER + VIO_DRIVER_OK;
+  if vt_modern(&mut v.io) {
+    vt_status(&mut v.io, ok + VIO_FEATURES_OK);
+  } else {
+    vt_status(&mut v.io, ok);
+  }
+  v.sectors = vt_cfg64(&mut v.io, msix);
   return v;
 }
 
 /// Resets the device, so it stops using the pages, takes them back into
-/// the allocator and gives the ports back (at power off).
-fn virtio_free(ports: &mut Ports, v: Virtio, m: &mut Mem)
+/// the allocator and gives the ports or registers back (at power off).
+fn virtio_free(v: Virtio, m: &mut Mem) -> Vt
   requires virtio_ok(v) && mem_ok(m)
   ensures mem_ok(m)
 {
   let mut d = v;
-  pio_out8(&mut d.io, VIO_STATUS, 0);
-  pio_out32(&mut d.io, VIO_QUEUE_PFN, 0);
+  vt_stop(&mut d.io, 0);
   vq_free(d.q, &mut m);
   give_page(&mut m, dma_take(d.req));
   give_page(&mut m, dma_take(d.data));
@@ -115,7 +115,7 @@ fn virtio_free(ports: &mut Ports, v: Virtio, m: &mut Mem)
     }
   }
   vec_free(d.extra);
-  port_release(&mut ports, d.io);
+  return d.io;
 }
 
 /// Lends page f to the device as extra data page `i`, or gives it back
@@ -162,7 +162,7 @@ fn virtio_send(v: &mut Virtio, data_flags: u64, block: bool)
   dma_write8(&mut v.req, REQ_STATUS, 255);
   dma_write16(&mut v.q.r0, 16 + 12, cast[u16](data_flags));          // descriptor 1's flags
   vq_push(&mut v.q, 0);                                    // the chain starts at 0
-  pio_out16(&mut v.io, VIO_QUEUE_NOTIFY, 0);
+  vt_notify(&mut v.io, 0);
 }
 
 /// Writes the request header for sector `lba`.
@@ -223,7 +223,7 @@ fn virtio_read_block(v: &mut Virtio, lba: u64, out: &mut Bytes, at: u64) -> bool
   while i < VIO_BLOCK
     invariant i <= VIO_BLOCK && i % 8 == 0 && virtio_ok(v) && v.sectors == sz && blen(out) == l && at + VIO_BLOCK <= l
   {
-    put_u64(&mut out, at + i, dma_read64(&mut v.data, i));
+    store_le64(&mut out, at + i, dma_read64(&mut v.data, i));
     i = i + 8;
   }
   return true;
@@ -242,7 +242,7 @@ fn virtio_write_block(v: &mut Virtio, lba: u64, src: &Bytes, at: u64) -> bool
   while i < VIO_BLOCK
     invariant i <= VIO_BLOCK && i % 8 == 0 && virtio_ok(v) && v.sectors == sz
   {
-    dma_write64(&mut v.data, i, get_u64(src, at + i));
+    dma_write64(&mut v.data, i, load_le64(src, at + i));
     i = i + 8;
   }
   virtio_header(&mut v, BLK_OUT, lba);
@@ -394,7 +394,7 @@ fn virtio_begin_n(v: &mut Virtio, lba: u64, n: u64) -> bool
     dma_write16(&mut v.q.r0, 16 + 14, 2);
   }
   vq_push(&mut v.q, 0);
-  pio_out16(&mut v.io, VIO_QUEUE_NOTIFY, 0);
+  vt_notify(&mut v.io, 0);
   v.busy = true;
   v.flushing = false;
   v.n = n;

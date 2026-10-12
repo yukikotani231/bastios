@@ -485,6 +485,36 @@ static int rtc_tick(void) {
     return 1;
 }
 
+/* Count the local APIC timer (and the time-stamp counter) against about
+ * 10 ms of PIT channel 0, which counts down from 0xFFFF in mode 2 at
+ * 1193182 Hz (set up by pit_counts). Used when the speaker channel the
+ * calibration prefers is not there, as in a microVM, where the alternative
+ * is two seconds of the RTC. Whether it worked; the results go to n10 (the
+ * local APIC timer's count for 10 ms) and hz (the time-stamp counter's
+ * rate). */
+static int lapic_vs_pit0(uint32_t *n10, uint64_t *hz) {
+    if (!pit_counts()) return 0;
+    outb(0x43, 0x00);
+    uint32_t c0 = inb(0x40);
+    c0 |= (uint32_t)inb(0x40) << 8;
+    lw(0x380, 0xFFFFFFFF);
+    uint64_t t0 = rdtsc(), t1 = t0;
+    uint32_t d = 0;
+    while (d < 11932 && t1 - t0 < (1ull << 30)) {
+        outb(0x43, 0x00);
+        uint32_t c = inb(0x40);
+        c |= (uint32_t)inb(0x40) << 8;
+        d = (c0 - c) & 0xFFFF;                      /* counts elapsed, modulo the reload */
+        t1 = rdtsc();
+    }
+    uint32_t n = 0xFFFFFFFF - lr(0x390);
+    lw(0x380, 0);
+    if (d < 11932 || d > 0x8000 || !n) return 0;    /* it stopped, or was missed for most of a period */
+    *n10 = (uint32_t)((uint64_t)n * 11932 / d);
+    *hz = (t1 - t0) * 1193182 / d;
+    return 1;
+}
+
 /* Count the local APIC timer against 10 ms of the HPET, else of the ACPI PM
  * timer, else of PIT channel 2 (the speaker channel, which the kernel never
  * uses; newer PCs may gate it off), else against one second of the RTC, on
@@ -528,6 +558,18 @@ static void calibrate_lapic_timer(void) {
         lapic_ticks_10ms = n;
         tsc_hz = (t1 - t0) * 100;
         return;
+    }
+    /* No speaker channel. Channel 0 may still count (a microVM has no port
+     * 0x61): try it before the RTC, which takes two seconds. */
+    {
+        uint32_t n10;
+        uint64_t hz;
+        if (lapic_vs_pit0(&n10, &hz)) {
+            timer_from = 3;
+            lapic_ticks_10ms = n10;
+            tsc_hz = hz;
+            return;
+        }
     }
     /* No PIT either (gated, as on many recent PCs). The RTC is slow to
      * count against, but every PC has one: one second, between two of

@@ -40,7 +40,7 @@ _s.bind(("127.0.0.1", 0))
 tcp_port = _s.getsockname()[1]
 _s.close()
 
-def boot(cpus, with_disk=False, virtio=False, nvme=False, nvme4k=False, ahci=False, net=False, subnet=None, card="virtio-net-pci", monitor=None, extra=(), qemu_bin="qemu-system-x86_64"):
+def boot(cpus, with_disk=False, virtio=False, nvme=False, nvme4k=False, ahci=False, net=False, subnet=None, card="virtio-net-pci", monitor=None, extra=(), qemu_bin="qemu-system-x86_64", kernel_path=None):
     drive = ["-drive", f"file={disk},format=raw,if=ide,index=0"] if with_disk else []
     if virtio:
         # The same disk as a virtio block device (src/virtio.bastio): sectors
@@ -79,7 +79,7 @@ def boot(cpus, with_disk=False, virtio=False, nvme=False, nvme4k=False, ahci=Fal
     # the two directory tables (the disk's and the loop mount's) take 2.5 MiB
     # of it, which leaves too little for the 120 processes one case forks.
     return subprocess.Popen(
-        [qemu_bin, "-kernel", kernel, "-m", "256M", "-smp", str(cpus),
+        [qemu_bin, "-kernel", kernel_path or kernel, "-m", "256M", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
          "-serial", "stdio", "-monitor", f"unix:{monitor},server,nowait" if monitor else "none"] + drive + nic + list(extra),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -400,6 +400,12 @@ steps = [
      [b"\r\n3\r\npids\r\n", b"0::/t", b"can't fork"], b"\n# "),
     ("echo 1 > /sys/fs/cgroup/t/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/t; echo r=$?; mkdir /sys/fs/cgroup/u; rmdir /sys/fs/cgroup/u; echo r=$?; su alice -c 'mkdir /sys/fs/cgroup/x; echo pids.max > /dev/null; echo 5 > /sys/fs/cgroup/pids.max; echo w=$?'",
      [b"r=0", b"r=0", b"Permission denied", b"w=1"], b"\n# "),
+    # cgroup.freeze stops a group's processes from being scheduled until it is
+    # thawed; SIGKILL still ends a frozen process.
+    ("mkdir /sys/fs/cgroup/fz; ash -c 'echo $$ > /sys/fs/cgroup/fz/cgroup.procs; i=0; while :; do i=$((i+1)); echo $i > /tmp/fzc; done' & sleep 1; echo 1 > /sys/fs/cgroup/fz/cgroup.freeze; cat /sys/fs/cgroup/fz/cgroup.freeze /sys/fs/cgroup/fz/cgroup.events; read a < /tmp/fzc; sleep 2; read b < /tmp/fzc; [ \"$a\" = \"$b\" ] && echo held; echo 0 > /sys/fs/cgroup/fz/cgroup.freeze; sleep 2; read c < /tmp/fzc; [ \"$c\" -gt \"$b\" ] && echo thawed",
+     [b"\r\n1\r\npopulated 1\r\nfrozen 1\r\n", b"held", b"thawed"], b"\n# "),
+    ("mkdir /sys/fs/cgroup/fk; ash -c 'echo $$ > /sys/fs/cgroup/fk/cgroup.procs; sleep 100' & sleep 1; echo 1 > /sys/fs/cgroup/fk/cgroup.freeze; echo 1 > /sys/fs/cgroup/fk/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/fk; echo r=$?; echo 1 > /sys/fs/cgroup/fz/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/fz; echo z=$?",
+     [b"r=0", b"z=0"], b"\n# "),
     ("echo root:pw | chpasswd; read l < /etc/shadow; case $l in 'root:$6$'*) echo sha512;; esac; su alice -c 'echo no | su -c id root; echo w=$?; echo pw | su -c id root'",
      [b"\r\nsha512\r\n", b"w=1", b"uid=0(root) gid=0(root)"], b"\n# "),
     # (BusyBox keeps the old /etc files as NAME-: gone, so no pages stay.)
@@ -1252,6 +1258,74 @@ if os.path.exists(ena_bin):
 else:
     print("skip (ena) no QEMU with the ENA model at", ena_bin, "(tools/qemu-ena/build.sh builds it)")
 
+# virtio over MMIO (src/virtio_mmio.bastio), as on QEMU's microvm machine
+# and Firecracker: no PCI at all. Version 1 is the legacy register layout,
+# version 2 the modern one (QEMU offers both). The disk and the network card
+# are found at fixed slots; the disk keeps what the earlier boots wrote.
+def mmio_ready(version):
+    def ready():
+        global fails
+        ok = b"disk: virtio" in out and b"net: virtio, mac 52:54:00:12:34:56" in out
+        print(("ok  " if ok else "FAIL"), f"(virtio-mmio v{version} boot) disk and card found")
+        fails += not ok
+        t0 = time.time()
+        leased = False
+        while not leased and time.time() - t0 < 10:
+            mark = len(out)
+            qemu.stdin.write(b"ifconfig\r"); qemu.stdin.flush()
+            read_until(b"bastios> ", mark)
+            leased = b"(DHCP)" in out[mark:]
+            if not leased:
+                time.sleep(0.5)
+        print(("ok  " if leased else "FAIL"), f"(virtio-mmio v{version} boot) DHCP lease")
+        fails += not leased
+    return ready
+for version, legacy in ((1, "on"), (2, "off")):
+    qemu = boot(1, extra=["-machine", "microvm", "-global", "virtio-mmio.force-legacy=" + legacy,
+                          "-drive", f"file={disk},format=raw,if=none,id=mv",
+                          "-device", "virtio-blk-device,drive=mv",
+                          "-netdev", "user,id=m0", "-device", "virtio-net-device,netdev=m0"])
+    session(f"virtio-mmio v{version}", None, [
+        (f"echo mmio{version} > disk/mm", b""),
+        ("cat disk/mm", f"mmio{version}\r\n".encode()),
+        ("fstest", b"fstest: disk ok"),
+        ("rm disk/mm", b""),
+        ("ping", b"reply from 10.0.2.2"),
+    ], halt=True, ready=mmio_ready(version))
+
+# The same device named on the command line, as Firecracker does
+# (virtio_mmio.device=SIZE@ADDRESS:IRQ): only the named blocks are looked at.
+# QEMU's microvm puts a device added alone in the slot at 0xfeb02e00.
+for where, want in (("4K@0xfeb02e00:5", True), ("512@0xfeb00000:5", False)):
+    qemu = boot(1, extra=["-machine", "microvm", "-append", "quiet virtio_mmio.device=" + where,
+                          "-drive", f"file={disk},format=raw,if=none,id=mv",
+                          "-device", "virtio-blk-device,drive=mv"])
+    def named(want=want, where=where):
+        global fails
+        ok = (b"disk: virtio" in out) == want
+        print(("ok  " if ok else "FAIL"), f"(virtio-mmio {where}) disk {'found' if want else 'not looked for'}")
+        fails += not ok
+    session("virtio-mmio " + where, None, [("echo named", b"named")], halt=True, ready=named)
+
+# The PVH entry (boot.S), which Firecracker and QEMU's microvm machine use
+# when the image has no Multiboot header: QEMU prefers Multiboot when both
+# are there, so the header's magic is zeroed in a copy of the kernel.
+pvh_kernel = os.path.join(disk_dir.name, "pvh.elf")
+with open(kernel, "rb") as f:
+    image = bytearray(f.read())
+at = image.find(bytes([0x02, 0xB0, 0xAD, 0x1B]), 0, 8192)
+for machine in ("pc", "microvm"):
+    if at < 0:
+        print("FAIL: (pvh) no Multiboot header in", kernel); fails += 1
+        break
+    image[at:at + 4] = bytes(4)
+    with open(pvh_kernel, "wb") as f:
+        f.write(image)
+    qemu = boot(1, extra=["-machine", machine], kernel_path=pvh_kernel)
+    session("PVH " + machine, None, [
+        ("echo pvh_" + "ok", b"pvh_ok"),
+    ], halt=True)
+
 # The PS/2 keyboard (src/kbd.bastio): keys pressed through QEMU's monitor
 # reach the shell as serial input would, Shift and Backspace included.
 # Booted with -kernel there is no framebuffer, so the console stays on the
@@ -2036,6 +2110,9 @@ for machine, name, extra, status, wants in (
             ("tick: the PIT\n", "the PIT ticks"),
             ("clock: the time-stamp counter at", "the clock is the TSC"),
             ("kHz, as measured against the PIT", "its rate measured against the PIT"))),
+        # No ACPI: halting only stops the processor, so QEMU is killed (status None).
+        ("microvm", "microvm", [], None, (
+            ("timer: the local APIC timer, counted against the PIT", "the timer is counted against the PIT, not the RTC"),)),
         ("pc,acpi=off,hpet=off,pit=off", "no HPET, PM timer or PIT", exit_dev, 33, (
             ("timer: the local APIC timer, counted against the RTC", "the timer is counted against the RTC"),
             ("tick: the local APIC timer (the PIT does not count)", "the local APIC timer ticks"),

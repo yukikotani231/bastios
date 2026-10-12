@@ -229,17 +229,6 @@ spec fn xhci_ok(x: &Xhci) -> bool {
   && blen(x.keys) == 6 && blen(x.q) == 16 && x.qn <= 16 && vlen(x.sps) <= XHCI_SP_MAX
 }
 
-/// A lent page's physical address (always below 2^48: the pool is low).
-fn dma_phys(d: &Dma) -> u64
-  ensures result < 0x1000000000000
-{
-  let a = dma_addr(d);
-  if a >= 0x1000000000000 {
-    return 0;
-  }
-  return a;
-}
-
 fn xr(x: &mut Xhci, off: u64) -> u32
   requires xhci_ok(x) && off % 4 == 0 && off + 4 <= mmio_len(x.regs)
   ensures xhci_ok(x)
