@@ -7,6 +7,7 @@ import "linux.bastio";
 import "lxdev.bastio";
 import "core/endian.bastio";
 import "core/bytes.bastio";
+import "statfmt.bastio";
 
 const BANG_MAX: u64 = 256;               // the bytes of a "#!" line looked at, as Linux
 
@@ -1282,12 +1283,9 @@ fn put_stat(k: &mut Kernel, pid: u64, buf: u64, mo: Meta) -> u64
   }
   lx_fill(&mut k, 0, STAT_SIZE);
   xfer_u64(&mut k.fs.xfer, 8, m.ino);         // st_ino
-  xfer_u64(&mut k.fs.xfer, 16, nlink);        // st_nlink
   let uid = id_out(k, pid, 0, m.own % 0x100000000);   // as the reader's user namespace sees them (src/lxuser.bastio)
   let gid = id_out(k, pid, 1, m.own / 0x100000000 % 0x100000000);
-  xfer_u64(&mut k.fs.xfer, 24, m.mode % 0x100000000 + uid % 0x100000000 * 0x100000000);   // st_mode, st_uid
-  xfer_u64(&mut k.fs.xfer, 32, gid);                 // st_gid
-  xfer_u64(&mut k.fs.xfer, 40, rdev);         // st_rdev
+  st_put_ids(&mut k.fs.xfer, nlink, m.mode, uid, gid, rdev);   // st_nlink, st_mode, st_uid, st_gid, st_rdev: where the architecture puts them
   xfer_u64(&mut k.fs.xfer, 48, m.size);       // st_size
   xfer_u64(&mut k.fs.xfer, 56, 4096);         // st_blksize
   let mut blocks = m.size / 512;

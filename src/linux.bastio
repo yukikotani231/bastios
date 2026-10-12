@@ -156,7 +156,6 @@ const ENOEXEC: u64 = 18446744073709551608;  // 2^64 - 8
 const ECHILD: u64 = 18446744073709551606;   // 2^64 - 10
 const EAGAIN: u64 = 18446744073709551605;   // 2^64 - 11
 
-const STAT_SIZE: u64 = 144;                 // struct stat on x86-64
 const S_IFDIR: u64 = 0x41ED;                // a directory, rwxr-xr-x
 const S_IFREG_X: u64 = 0x81ED;              // a regular file, rwxr-xr-x
 const S_IFREG: u64 = 0x81A4;                // a regular file, rw-r--r--

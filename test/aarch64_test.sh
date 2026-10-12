@@ -100,7 +100,7 @@ run("hello", b"hello from user mode, pid 2")
 run("true", b"")
 # A Linux arm64 program (an ELF executable with no libc; svc numbers from
 # the asm-generic table, turned into the Linux layer's own numbers).
-run("mhello", [b"hello from linux arm64, pid ", b"[exit 3]"])
+run("mhello", [b"hello from linux arm64, pid ", b"stdout mode 0x2", b"read 9: 127.0.0.1", b"[exit 3]"])
 # The timer interrupt: ticks count up, 100 a second.
 reply = run("uptime", b"ticks")
 time.sleep(1.0)
