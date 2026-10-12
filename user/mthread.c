@@ -325,9 +325,11 @@ int main(int argc, char **argv)
         pthread_join(t[1], 0);
         return 1;
     }
-    int st;
-    if (waitpid(c, &st, 0) != c || !WIFEXITED(st) || WEXITSTATUS(st) != 7)
-        FAIL("exit_group from a thread: status %x", st);
+    int st = -1;
+    pid_t w = waitpid(c, &st, 0);
+    int werr = errno;
+    if (w != c || !WIFEXITED(st) || WEXITSTATUS(st) != 7)
+        FAIL("exit_group from a thread: waitpid %d (errno %d) status %x", w, werr, st);
     printf("mthread: ok, %d increments\n", counter);
     return 0;
 }
