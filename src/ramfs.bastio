@@ -121,14 +121,7 @@ fn read_chunk(f: &mut RamFile, p: u64, from: u64, buf: &mut Bytes, at: u64, m: u
   match vec_swap(&mut f.pages, p, Slot::Hole) {
     Slot::Hole => { zero_fill(&mut buf, at, m); },
     Slot::Page(fr) => {
-      let l = blen(buf);
-      let mut j = 0;
-      while j < m
-        invariant j <= m && blen(buf) == l
-      {
-        bset(&mut buf, at + j, frame_read8(fr, from + j));
-        j = j + 1;
-      }
+      frame_to_bytes(&mut buf, at, fr, from, m);
       match vec_swap(&mut f.pages, p, Slot::Page(fr)) {
         Slot::Hole => {},
         Slot::Page(_x) => { unreachable; },
@@ -180,13 +173,7 @@ fn file_read(f: &mut RamFile, off: u64, buf: &mut Bytes, n: u64) -> u64
 fn frame_fill(fr: &mut Frame, from: u64, buf: &Bytes, at: u64, m: u64)
   requires from + m <= 4096 && at + m <= blen(buf)
 {
-  let mut j = 0;
-  while j < m
-    invariant j <= m
-  {
-    frame_write8(&mut fr, from + j, bget(buf, at + j));
-    j = j + 1;
-  }
+  bytes_to_frame(&mut fr, from, buf, at, m);
 }
 
 /// Puts a frame back as page p, whose slot is a hole.

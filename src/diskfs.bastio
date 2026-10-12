@@ -74,14 +74,14 @@ import "core/endian.bastio";
 import "core/bitmap.bastio";
 import "core/bytes.bastio";
 
-const DSLOTS: u64 = 4096;             // directory entries, at most (the superblock's block has room for 8192)
+const DSLOTS: u64 = 5120;             // directory entries, at most (the superblock's block has room for 8192)
 const BATCH_MAX: u64 = 32;               // blocks a batch of writes makes before it commits (disk_write)
 const OB_MAX: u64 = 40;               // blocks it replaces: at most one per block it makes, and room for a write's five
 const BATCH_TICKS: u64 = 10;          // ticks (10 ms each) a batch waits for more writes before disk_pump commits it
 const DENT: u64 = 256;
-const DIR_BYTES: u64 = 1048576;       // DSLOTS * DENT, kept in memory
-const DIR_SECTORS: u64 = 2048;
-const DIR_BLOCKS: u64 = 256;
+const DIR_BYTES: u64 = 1310720;       // DSLOTS * DENT, kept in memory
+const DIR_SECTORS: u64 = 2560;
+const DIR_BLOCKS: u64 = 320;
 const DIR_FIXED: u64 = 4;             // directory blocks 0..3 are disk blocks 1..4
 const DPB: u64 = 16;                  // directory entries per block
 const DIR_LBA: u64 = 8;               // block 1

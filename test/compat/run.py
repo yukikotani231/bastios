@@ -534,6 +534,7 @@ def main():
     alpine = load_applets(os.path.join(HERE, "alpine.txt"))
     debian = load_applets(os.path.join(HERE, "debian.txt"))
     tty = load_tty(os.path.join(HERE, "tty.txt"))
+    alpine_tty = load_tty(os.path.join(HERE, "alpine_tty.txt"))
     os.makedirs(args.out, exist_ok=True)
     log = open(os.path.join(args.out, "serial.log"), "wb")
     web = WebServer()
@@ -616,7 +617,9 @@ def main():
         if args.alpine_repo:
             os.makedirs(os.path.join(web.dir, "alpine"), exist_ok=True)
             os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", "x86_64"))
-        lanes.append((disk, [("alpine", "Alpine Linux (apk)", applets_lane(alpine, 300))]))
+        lanes.append((disk, [("alpine", "Alpine Linux (apk)", applets_lane(alpine, 300)),
+                             ("alpine-tty", "programs on the terminal in Alpine",
+                              lambda e: [run_tty(e, n, p, k, c, x, 60, bb) for n, p, k, c, x in alpine_tty])]))
     if args.debian_disk:
         # Debian's root, glibc's programs: unpacked on a copy, as above.
         disk = os.path.join(args.out, "debian-run.img")
@@ -633,7 +636,7 @@ def main():
         log.close()
         web.shutdown()
         shutil.rmtree(scratch, ignore_errors=True)
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "debian"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]

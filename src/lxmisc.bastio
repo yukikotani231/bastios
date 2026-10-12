@@ -257,6 +257,29 @@ fn lx_statfs_disk(k: &mut Kernel, pid: u64, va: u64) -> u64
   return 0;
 }
 
+/// fstatfs on descriptor d (not a bad one): tmpfs, the disk or ramfs.
+fn lx_fstatfs(k: &mut Kernel, pid: u64, d: Fd, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if (d.kind == K_DEV && is_cg_file(d.x)) || (d.kind == K_DIR && d.x >= DIR_CG) {
+    return lx_statfs(&mut k, pid, va, CGROUP2_MAGIC);
+  }
+  if d.kind == K_DIR && d.x >= DIR_PROC && d.x < DIR_CG {
+    return lx_statfs(&mut k, pid, va, PROC_MAGIC);
+  }
+  if d.kind == K_FILE && d.x < FD_ROWS {
+    if vfs_file_in_mount(&mut k.fs, vfs_row_file(k.fs, d.x)) {
+      return lx_statfs(&mut k, pid, va, TMPFS_MAGIC);
+    }
+    let h = vfs_row_file(k.fs, d.x);
+    if h >= NFILES && h < NFILES + DSLOTS {
+      return lx_statfs_disk(&mut k, pid, va);
+    }
+  }
+  return lx_statfs(&mut k, pid, va, RAMFS_MAGIC);
+}
+
 /// getrandom(buf, n, flags): the bytes /dev/urandom gives, from the kernel's
 /// ChaCha20 generator (rng_next, src/lxdev.bastio). It never blocks: the
 /// pool is seeded from the clocks at boot.
@@ -882,16 +905,8 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     let d = fd_look(k, pid, a);
     if d.kind == K_BAD {
       r = EBADF;
-    } else if (d.kind == K_DEV && is_cg_file(d.x)) || (d.kind == K_DIR && d.x >= DIR_CG) {
-      r = lx_statfs(&mut k, pid, b, CGROUP2_MAGIC);
-    } else if d.kind == K_DIR && d.x >= DIR_PROC && d.x < DIR_CG {
-      r = lx_statfs(&mut k, pid, b, PROC_MAGIC);
-    } else if d.kind == K_FILE && vfs_file_in_mount(&mut k.fs, vfs_row_file(k.fs, d.x)) {
-      r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC);
-    } else if d.kind == K_FILE && vfs_row_file(k.fs, d.x) >= NFILES && vfs_row_file(k.fs, d.x) < NFILES + DSLOTS {
-      r = lx_statfs_disk(&mut k, pid, b);
     } else {
-      r = lx_statfs(&mut k, pid, b, RAMFS_MAGIC);
+      r = lx_fstatfs(&mut k, pid, d, b);
     }
   } else if n == LX_GETPGRP {
     r = vpid_of(k, pid, pgid_of(k.procs, pid));

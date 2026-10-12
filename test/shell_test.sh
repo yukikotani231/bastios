@@ -75,8 +75,11 @@ def boot(cpus, with_disk=False, virtio=False, nvme=False, nvme4k=False, ahci=Fal
         # address the kernel ends up with can only have come from DHCP.
         nic = ["-netdev", f"user,id=n0,net={subnet}",
                "-device", "virtio-net-pci,netdev=n0"]
+    # 256M: the kernel's arena is a fraction of RAM (4 MiB up to 128 MiB), and
+    # the two directory tables (the disk's and the loop mount's) take 2.5 MiB
+    # of it, which leaves too little for the 120 processes one case forks.
     return subprocess.Popen(
-        ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", str(cpus),
+        ["qemu-system-x86_64", "-kernel", kernel, "-m", "256M", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
          "-serial", "stdio", "-monitor", f"unix:{monitor},server,nowait" if monitor else "none"] + drive + nic + list(extra),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -283,6 +286,13 @@ steps = [
     # read -t, a poll on the console that times out, then one that wakes
     # when a line is typed.
     ("mtime", [b"mtime: rang 3, selected, slept ", b"woke in time, events ok"], b"\n# "),
+    # A TCP transfer to this machine's own address, many times longer than a
+    # card's frame: loopback segments are longer than 1500 bytes
+    # (src/net.bastio, NET_BUF), and every byte is checked on arrival. The
+    # rings take their spare pages from the pool on first use (up to 512,
+    # src/tcpbuf.bastio), so the later page counts may be lower than the
+    # first by that much.
+    ("mtcp loop 3000000", b"mtcp: loop 3000000 bytes, 0 wrong", b"\n# "),
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
     # More processes at once than the 32 rows the process table starts with:
     # it grows (new_pid), and /proc lists three-digit pids. (stdin from the
@@ -436,6 +446,8 @@ steps = [
     # The disk's directory grows past its first 64 entries (dir_grow); the
     # power cuts below check that what it grew survives. (Past 1023
     # entries: the big-disk boot.)
+    # Reads fill the page cache, and the next reads of the same file come from it (src/pcache.bastio, pc_fill): they must see appends and rewrites.
+    ("i=0; while [ $i -lt 3000 ]; do echo $i; i=$((i+1)); done > /disk/pc; cat /disk/pc | wc -c; cat /disk/pc | wc -c; echo more >> /disk/pc; cat /disk/pc | wc -c; wc -l < /disk/pc; echo X > /disk/pc; cat /disk/pc; rm /disk/pc", b"13890\r\n13890\r\n13895\r\n3001\r\nX\r\n", b"\n# "),
     ("mkdir disk/many; i=0; while [ $i -lt 150 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; cat disk/many/f149", b"\r\n150\r\n149\r\n", b"\n# "),
     ("rm -r disk/many; ls disk/many; echo gone$((1+1))", [b"No such file", b"gone2"], b"\n# "),
     ("mkdir full; i=0; while echo x > full/f$i 2>/dev/null; do i=$((i+1)); done; echo x > full/z; rm -r full", b"full/z: No space left on device", b"\n# "),
@@ -862,7 +874,8 @@ else:
     # Every page the finished processes and removed files used must be
     # back in the pool.
     mem = [l.strip() for l in out.split(b"\n") if l.strip().endswith(b"free pages")]
-    if len(mem) == 3 and mem[0] == mem[1] == mem[2]:
+    free = [int(m.split()[0]) for m in mem]
+    if len(mem) == 3 and free[1] == free[2] and 0 <= free[0] - free[1] <= 512:
         print("ok   no pages leaked:", mem[2].decode())
     else:
         print("FAIL page leak:", mem); fails += 1
@@ -1605,7 +1618,7 @@ out = b""
 deadline = time.time() + timeout
 for line, want, until in [
     ("ash", b"built-in shell (ash)", b"\n# "),
-    ("stat -f -c '%b %c' /disk; echo big > /disk/b; cat /disk/b; stat -f -c %f /disk; rm /disk/b", b"10485755 4095\r\nbig\r\n1048", b"\n# "),
+    ("stat -f -c '%b %c' /disk; echo big > /disk/b; cat /disk/b; stat -f -c %f /disk; rm /disk/b", b"10485755 5119\r\nbig\r\n1048", b"\n# "),
     ("mkdir disk/many; i=0; while [ $i -lt 1100 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; sync", b"\r\n1100\r\n", b"\n# "),
 ]:
     mark = len(out)
@@ -1627,7 +1640,7 @@ out = b""
 deadline = time.time() + timeout
 ok = (read_until(b"bastios> ") and send_line_ok(b"ash", b"\n# ")
       and send_line_ok(b"ls disk/many | wc -l; cat disk/many/f1099; stat -f -c %c /disk", b"\n# ")
-      and b"\r\n1100\r\n1099\r\n4095\r\n" in out)
+      and b"\r\n1100\r\n1099\r\n5119\r\n" in out)
 print(("ok  " if ok else "FAIL"), "(big-disk boot) 1100 entries in one directory after a reboot"); ok or print(repr(out[-500:]))
 fails += not ok
 qemu.kill(); qemu.wait()

@@ -203,6 +203,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   pidns_enter(&mut k, pid, c);              // with an id in the PID namespace children start in
   pset(&mut k.procs, c, F_SIGPEND, 0);
   pset(&mut k.procs, c, F_RESTART, 0);
+  pset(&mut k.procs, c, F_ASLEEP, 0);       // it has not run yet, whatever its parent was doing
   pset(&mut k.procs, c, F_STATE, READY);
   return c;
 }

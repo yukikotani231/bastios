@@ -1441,7 +1441,7 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
   while done < want
     invariant done <= want && want <= READ_MAX && kok(k)
   {
-    let got = vfs_read(&mut k.fs, row, smaller(want - done, XFER));
+    let got = vfs_read(&mut k.fs, &mut k.mem, row, smaller(want - done, XFER));
     if got == NO_FD {
       return EBADF;
     }
