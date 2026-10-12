@@ -5,15 +5,14 @@
  * timer, and gives the kernel the few answers it asks for. It decides
  * nothing: the kernel's policy is in Bastio.
  *
- * The addresses of the interrupt controller are QEMU virt's own
- * (-M virt,gic-version=3); a device-tree walk for them comes with real
- * boards.
+ * The interrupt controller is the one the device tree describes: a GICv3
+ * (distributor and redistributors) or a GICv2 (distributor and CPU
+ * interface, as on a GIC-400); QEMU virt's GICv3 addresses are the fallback
+ * without a tree.
  */
 #include <stdint.h>
 #include <stddef.h>
 
-#define GICD 0x08000000ull
-#define GICR 0x080A0000ull
 #define TICK_HZ 100
 #define TIMER_INTID 30          /* the EL1 physical timer, a private interrupt */
 #define V_TIMER 32              /* the boot processor's tick, which counts the kernel's time */
@@ -58,6 +57,12 @@ uint64_t bst_memmap[1 + 2 * MAX_RUNS];
  * boot processor first), filled in by bst_early. */
 static uint64_t cpu_mpidr[MAX_CPUS];
 static uint64_t ncpu_dt;
+/* The interrupt controller: its version (3 or 2) and the two frames the
+ * tree lists (GICv3: distributor, redistributors; GICv2: distributor, CPU
+ * interface). QEMU virt's GICv3 is the default. */
+static unsigned gic_ver = 3;
+static uint64_t GICD = 0x08000000ull;
+static uint64_t GICR = 0x080A0000ull;       /* GICv2: the CPU interface (GICC) */
 
 /* The device tree itself, copied before the page pool can reuse the RAM it
  * sits in (QEMU puts it in RAM): the kernel reads it byte by byte with
@@ -113,6 +118,9 @@ static void read_memory(const uint8_t *dtb) {
         const uint8_t *strs = dtb + be32(dtb + 12);
         uint32_t ac = 2, sc = 1, cac = 1;
         int depth = 0, in_mem = 0, in_cpus = 0, in_cpu = 0;
+        unsigned node_gic = 0;                       /* this node's compatible: 3, 2 or 0 */
+        uint64_t node_reg[2] = { 0, 0 };
+        int node_regs = 0;
         for (;;) {
             uint32_t tok = be32(st);
             st += 4;
@@ -125,8 +133,16 @@ static void read_memory(const uint8_t *dtb) {
                 in_mem = depth == 2 && starts_with(name, "memory");
                 if (depth == 2 && same(name, "cpus")) in_cpus = 1;
                 in_cpu = in_cpus && depth == 3 && starts_with(name, "cpu@");
+                if (depth == 2) { node_gic = 0; node_regs = 0; }
             } else if (tok == 2) {
-                if (depth == 2) in_cpus = 0;
+                if (depth == 2) {
+                    in_cpus = 0;
+                    if (node_gic && node_regs >= 2) {
+                        gic_ver = node_gic;
+                        GICD = node_reg[0];
+                        GICR = node_reg[1];
+                    }
+                }
                 depth--;
                 in_mem = 0;
                 in_cpu = 0;
@@ -137,6 +153,20 @@ static void read_memory(const uint8_t *dtb) {
                 st += 8 + ((len + 3) & ~3u);
                 if (depth == 1 && same(pname, "#address-cells")) ac = be32(data);
                 else if (depth == 1 && same(pname, "#size-cells")) sc = be32(data);
+                else if (depth == 2 && same(pname, "compatible")) {
+                    for (uint32_t o = 0; o < len; ) {
+                        const char *c = (const char *)data + o;
+                        if (same(c, "arm,gic-v3")) node_gic = 3;
+                        else if (same(c, "arm,cortex-a15-gic") || same(c, "arm,gic-400") || same(c, "arm,cortex-a9-gic")) node_gic = 2;
+                        while (o < len && data[o]) o++;
+                        o++;
+                    }
+                }
+                else if (depth == 2 && !in_mem && same(pname, "reg") && ac <= 2 && sc <= 2 && len >= (ac + sc) * 8) {
+                    node_reg[0] = cells(data, ac);
+                    node_reg[1] = cells(data + (ac + sc) * 4, ac);
+                    node_regs = 2;
+                }
                 else if (in_cpus && depth == 2 && same(pname, "#address-cells")) cac = be32(data);
                 else if (in_cpu && same(pname, "reg") && cac >= 1 && cac <= 2 && len >= cac * 4 && ncpu_dt < MAX_CPUS)
                     cpu_mpidr[ncpu_dt++] = cells(data, cac);
@@ -208,6 +238,7 @@ void bst_early(const uint8_t *dtb) {
 
 static inline void w32(uint64_t a, uint32_t v) { *(volatile uint32_t *)a = v; }
 static inline uint32_t r32(uint64_t a) { return *(volatile uint32_t *)a; }
+static inline void w8(uint64_t a, uint8_t v) { *(volatile uint8_t *)a = v; }
 
 static uint64_t tick_cycles;
 
@@ -227,9 +258,18 @@ static uint64_t redistributor(uint64_t mpidr) {
     return GICR;
 }
 
-/* GICv3 for the calling processor: its redistributor awake, the timer's
- * interrupt enabled, and the CPU interface opened to every priority. */
+/* The interrupt controller for the calling processor: GICv3 with its
+ * redistributor awake, or GICv2 with its CPU interface on; the timer's
+ * interrupt enabled and every priority let through. */
 static void gic_cpu_init(void) {
+    if (gic_ver == 2) {
+        w32(GICD + 0x0080, 0);                              /* GICD_IGROUPR0: group 0, signalled as IRQ while GICC_CTLR.FIQEn is 0 */
+        w8(GICD + 0x0400 + TIMER_INTID, 0x80);               /* priority (a byte register: banked per processor) */
+        w32(GICD + 0x0100, 1u << TIMER_INTID);               /* GICD_ISENABLER0 */
+        w32(GICR + 0x0004, 0xFF);                            /* GICC_PMR */
+        w32(GICR + 0x0000, 1);                               /* GICC_CTLR: enable */
+        return;
+    }
     uint64_t mpidr;
     __asm__ volatile ("mrs %0, mpidr_el1" : "=r"(mpidr));
     uint64_t rd = redistributor(mpidr);
@@ -237,7 +277,7 @@ static void gic_cpu_init(void) {
     while (r32(rd + 0x0014) & 4u) { }                        /* ChildrenAsleep */
     uint64_t sgi = rd + 0x10000;
     w32(sgi + 0x0080, 0xFFFFFFFFu);                          /* group 1 */
-    w32(sgi + 0x0400 + TIMER_INTID, 0x80);                   /* priority */
+    w8(sgi + 0x0400 + TIMER_INTID, 0x80);                    /* priority */
     w32(sgi + 0x0100, 1u << TIMER_INTID);                    /* enable */
     uint64_t sre;
     __asm__ volatile ("mrs %0, icc_sre_el1" : "=r"(sre));
@@ -260,7 +300,7 @@ static void timer_stop(void) {
 /* The boot processor: the distributor on, then its own interface and
  * timer. */
 void bst_gic_init(void) {
-    w32(GICD + 0x0000, (1u << 4) | (1u << 1) | 1u);          /* ARE, group 1 non-secure */
+    w32(GICD + 0x0000, gic_ver == 2 ? 1u : (1u << 4) | (1u << 1) | 1u);   /* v3: ARE, group 1 non-secure; v2: enable */
     gic_cpu_init();
     timer_start();
 }
@@ -271,7 +311,8 @@ void bst_gic_init(void) {
  * spurious. */
 uint64_t bst_irq_ack(void) {
     uint64_t id;
-    __asm__ volatile ("mrs %0, icc_iar1_el1" : "=r"(id));
+    if (gic_ver == 2) id = r32(GICR + 0x000C);               /* GICC_IAR */
+    else __asm__ volatile ("mrs %0, icc_iar1_el1" : "=r"(id));
     id &= 0xFFFFFF;
     if (id >= 1020) return 0;
     uint64_t v = 6;
@@ -279,7 +320,8 @@ uint64_t bst_irq_ack(void) {
         __asm__ volatile ("msr cntp_tval_el0, %0; isb" : : "r"(tick_cycles));
         v = this_cpu()->id == 0 ? V_TIMER : V_LTIMER;
     }
-    __asm__ volatile ("msr icc_eoir1_el1, %0; isb" : : "r"(id));
+    if (gic_ver == 2) w32(GICR + 0x0010, (uint32_t)id);      /* GICC_EOIR */
+    else __asm__ volatile ("msr icc_eoir1_el1, %0; isb" : : "r"(id));
     return v;
 }
 

@@ -21,6 +21,7 @@ tests=(
   "trusted_base|c|test/trusted_base.sh"
   "sysfuzz_calls|c|test/sysfuzz_calls.sh"
   "aarch64|c|test/aarch64_test.sh --build"
+  "aarch64 gicv2|c|GIC=2 SMP=2 test/aarch64_test.sh"
   "fsck|c|test/fsck_test.py"
   "crashsim|c|test/crashsim.py --runs 1 --boots 8 --every 8"
   "shell|a|test/shell_test.sh"

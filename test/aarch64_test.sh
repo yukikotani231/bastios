@@ -42,7 +42,7 @@ with open(disk, "wb") as f:
 
 kernel, qemu_bin, timeout = sys.argv[1], sys.argv[2], float(sys.argv[3])
 qemu = subprocess.Popen(
-    [qemu_bin, "-M", "virt,gic-version=3", "-cpu", "cortex-a72", "-smp", os.environ.get("SMP", "4"), "-m", "256M", "-nographic",
+    [qemu_bin, "-M", "virt,gic-version=" + os.environ.get("GIC", "3"), "-cpu", "cortex-a72", "-smp", os.environ.get("SMP", "4"), "-m", "256M", "-nographic",
      "-no-reboot", "-kernel", kernel,
      "-drive", f"file={disk},format=raw,if=none,id=vd", "-device", "virtio-blk-device,drive=vd",
      "-netdev", "user,id=n0,net=10.0.2.0/24", "-device", "virtio-net-device,netdev=n0", "-serial", "stdio", "-monitor", "none"],
