@@ -982,3 +982,4 @@ alpine: dropbear: the server starts, in the Alpine guest
 alpine: nvim over ssh: edit and save in a pseudo-terminal
 alpine: dropbear: the server stops, in the Alpine guest
 alpine-tty: nvim: it reads the terminal's size, and has colours
+t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller

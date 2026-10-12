@@ -200,6 +200,9 @@ struct sc_resp { unsigned long long id; long long val; int error; unsigned int f
 #define SC_SEND 0xC0182101UL
 #define SC_VALID 0x40082102UL
 #define SC_CONTINUE 1
+#define SC_ADDFD 0x40182103UL
+#define SC_SETFLAGS 0x40082104UL
+struct sc_addfd { unsigned long long id; unsigned int flags, srcfd, newfd, newfd_flags; };
 
 /* A seccomp filter whose action for getppid is USER_NOTIF, with a notifier
  * the parent keeps while its children make the call. */
@@ -271,6 +274,60 @@ static int notifier(void) {
     return out[0] == -1 && out[1] == ENOSYS;
 }
 
+/* NOTIF_ADDFD: the supervisor hands the waiting process one of its own
+ * descriptors, at the lowest number and at a chosen one. */
+static int notif_addfd(void) {
+    struct bpf_insn prog[] = {
+        BPF(0x20, 0, 0, 0),
+        BPF(0x15, 0, 1, SYS_getppid),
+        BPF(0x06, 0, 0, 0x7fc00000),
+        BPF(0x06, 0, 0, 0x7fff0000),
+    };
+    struct bpf_prog fp = { 4, prog };
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) return 0;
+    int lfd = (int)syscall(SYS_seccomp, 1, 8, &fp);
+    if (lfd < 0) return 0;
+    unsigned long long flags = 1;
+    if (ioctl(lfd, SC_SETFLAGS, &flags) != 0) return 0;
+    flags = 2;
+    if (ioctl(lfd, SC_SETFLAGS, &flags) != -1 || errno != EINVAL) return 0;
+    for (int round = 0; round < 2; round++) {
+        int data[2], res[2];
+        if (pipe(data) || pipe(res)) return 0;
+        pid_t c = fork();
+        if (c == 0) {
+            close(lfd);
+            long fd = syscall(SYS_getppid);
+            if (fd >= 0) write((int)fd, "x", 1);
+            write(res[1], &fd, sizeof fd);
+            _exit(0);
+        }
+        struct sc_notif req;
+        memset(&req, 0, sizeof req);
+        if (ioctl(lfd, SC_RECV, &req) != 0) return 0;
+        struct sc_addfd af;
+        memset(&af, 0, sizeof af);
+        af.id = req.id;
+        af.srcfd = data[1];
+        af.flags = 2 | (round == 1 ? 1 : 0);   /* SEND, then SETFD too */
+        af.newfd = round == 1 ? 40 : 0;
+        int got = ioctl(lfd, SC_ADDFD, &af);
+        if (got < 0 || (round == 1 && got != 40)) return 0;
+        long fd;
+        if (read(res[0], &fd, sizeof fd) != (ssize_t)sizeof fd || fd != got) return 0;
+        waitpid(c, 0, 0);
+        char b = 0;
+        close(data[1]);
+        if (read(data[0], &b, 1) != 1 || b != 'x') return 0;
+        /* A second add for an answered call finds nothing waiting. */
+        if (ioctl(lfd, SC_ADDFD, &af) != -1 || errno != ENOENT) return 0;
+        close(data[0]);
+        close(res[0]);
+        close(res[1]);
+    }
+    return 1;
+}
+
 int main(void) {
     setup();
     EXPECT("sethostname, uname, /proc/sys/kernel/hostname", hostname());
@@ -282,5 +339,6 @@ int main(void) {
     EXPECT("a cgroup namespace roots the tree", cgroup_ns());
     EXPECT("memory.max refuses a mapping that would pass it", cgroup_mem());
     EXPECT("seccomp USER_NOTIF: a supervisor answers a call", notifier());
+    EXPECT("seccomp NOTIF_ADDFD installs a descriptor in the caller", notif_addfd());
     return done();
 }
