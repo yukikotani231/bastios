@@ -38,7 +38,7 @@ elif ! command -v "$QEMU" >/dev/null; then
 fi
 
 python3 - "$KERNEL" "$QEMU" "$TIMEOUT" <<'PY'
-import os, re, select, subprocess, sys, tempfile, time
+import os, re, select, shutil, subprocess, sys, tempfile, time
 
 # A blank disk (sparse): BastiOS formats it on first use.
 disk_dir = tempfile.TemporaryDirectory()
@@ -47,9 +47,26 @@ with open(disk, "wb") as f:
     f.truncate(32 * 1024 * 1024)
 
 kernel, qemu_bin, timeout = sys.argv[1], sys.argv[2], float(sys.argv[3])
+# UEFI=<firmware image> boots the kernel as an EFI application from a FAT
+# directory (BOOTAA64.EFI), through the firmware, instead of with -kernel.
+# The firmware gets the device tree only when ACPI is off. The FAT drive
+# comes first: the kernel takes the virtio-mmio slot QEMU gives the last
+# device added.
+uefi = os.environ.get("UEFI", "")
+if uefi and not os.path.exists(uefi):
+    print("SKIP aarch64 uefi: no firmware at " + uefi + " (Debian/Ubuntu: qemu-efi-aarch64)")
+    sys.exit(1 if os.environ.get("AARCH64_REQUIRED") == "1" else 0)
+if uefi:
+    esp = os.path.join(disk_dir.name, "esp", "EFI", "BOOT")
+    os.makedirs(esp)
+    shutil.copy(kernel, os.path.join(esp, "BOOTAA64.EFI"))
+    boot = ["-bios", uefi, "-drive", "file=fat:rw:" + os.path.join(disk_dir.name, "esp") + ",format=raw,if=none,id=esp",
+            "-device", "virtio-blk-device,drive=esp"]
+else:
+    boot = ["-kernel", kernel]
 qemu = subprocess.Popen(
-    [qemu_bin, "-M", "virt,gic-version=" + os.environ.get("GIC", "3") + os.environ.get("VIRT", ""), "-cpu", os.environ.get("CPU", "cortex-a72"), "-smp", os.environ.get("SMP", "4"), "-m", os.environ.get("MEM", "256M"), "-nographic",
-     "-no-reboot", "-kernel", kernel,
+    [qemu_bin, "-M", "virt,gic-version=" + os.environ.get("GIC", "3") + os.environ.get("VIRT", "") + (",acpi=off" if uefi else ""), "-cpu", os.environ.get("CPU", "cortex-a72"), "-smp", os.environ.get("SMP", "4"), "-m", os.environ.get("MEM", "256M"), "-nographic",
+     "-no-reboot"] + boot + [
      "-drive", f"file={disk},format=raw,if=none,id=vd", "-device", "virtio-blk-device,drive=vd",
      "-netdev", "user,id=n0,net=10.0.2.0/24", "-device", "virtio-net-device,netdev=n0", "-serial", "stdio", "-monitor", "none"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

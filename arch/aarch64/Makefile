@@ -117,15 +117,18 @@ $(B)/kernel.o: $(B)/kernel.c
 $(B)/platform.o: boot/aarch64/platform.c | $(B)
 	$(ACC) $(TCFLAGS) -mstrict-align -c -o $@ $<
 
+$(B)/efi.o: boot/aarch64/efi.c | $(B)
+	$(ACC) $(TCFLAGS) -mstrict-align -c -o $@ $<
+
 $(B)/boot.o: boot/aarch64/boot.S | $(B)
 	$(ACC) -c -o $@ $<
 
 $(B)/libc.o: boot/libc.c | $(B)
 	$(ACC) $(TCFLAGS) -mstrict-align -c -o $@ $<
 
-$(B)/bastios.elf: $(B)/boot.o $(B)/platform.o $(B)/kernel.o $(B)/libc.o boot/aarch64/linker.ld
+$(B)/bastios.elf: $(B)/boot.o $(B)/efi.o $(B)/platform.o $(B)/kernel.o $(B)/libc.o boot/aarch64/linker.ld
 	$(ALD) -nostdlib -static --no-warn-rwx-segments -T boot/aarch64/linker.ld -o $@ \
-	  $(B)/boot.o $(B)/kernel.o $(B)/platform.o $(B)/libc.o
+	  $(B)/boot.o $(B)/efi.o $(B)/kernel.o $(B)/platform.o $(B)/libc.o
 
 # QEMU hands a device tree only to an Image, which is the ELF's contents with
 # the arm64 header boot.S begins with.
