@@ -1,0 +1,83 @@
+// The network card on AArch64: none yet, so a Card has no device. A
+// virtio-mmio card (the transport src/virtq.bastio already speaks on x86-64
+// microvm) joins it when the AArch64 kernel finds devices in the device tree.
+
+import "netconst.bastio";
+import "pages.bastio";
+
+enum Card { Absent }
+
+spec fn card_ok(d: &Card) -> bool {
+  true
+}
+
+fn card_mac(d: &Card) -> u64
+  ensures result < 281474976710656
+{
+  return 0;
+}
+
+fn card_live(d: &Card) -> bool {
+  return false;
+}
+
+fn card_is_e1000(d: &Card) -> bool {
+  return false;
+}
+
+fn card_is_ena(d: &Card) -> bool {
+  return false;
+}
+
+fn card_why(d: &Card) -> u64 {
+  return 0;
+}
+
+fn card_irq(d: &Card) -> bool {
+  return false;
+}
+
+fn card_irq_on(d: &mut Card)
+  requires card_ok(d)
+  ensures card_ok(d)
+{
+}
+
+fn card_irq_set(d: &mut Card, on: bool)
+  requires card_ok(d)
+  ensures card_ok(d)
+{
+}
+
+fn card_ack(d: &mut Card)
+  requires card_ok(d)
+  ensures card_ok(d)
+{
+}
+
+fn card_recv(d: &mut Card, pkt: &mut Bytes) -> u64
+  requires card_ok(d) && blen(pkt) >= RX_BUF
+  ensures card_ok(d) && blen(pkt) == old(blen(pkt)) && result <= RX_BUF - NET_HDR
+{
+  return 0;
+}
+
+fn card_rx_flush(d: &mut Card)
+  requires card_ok(d)
+  ensures card_ok(d)
+{
+}
+
+fn card_send(d: &mut Card, pkt: &Bytes, n: u64) -> bool
+  requires card_ok(d) && n <= FRAME_MAX && n <= blen(pkt)
+  ensures card_ok(d)
+{
+  return false;
+}
+
+/// Stops the card and takes its pages back (at power off).
+fn card_free(win: &mut MmioSpace, d: Card, m: &mut Mem)
+  requires card_ok(d) && mem_ok(m)
+  ensures mem_ok(m)
+{
+}

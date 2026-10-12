@@ -16,6 +16,8 @@
 // later (see nic_ping_start / nic_ping_check).
 
 import "card.bastio";
+import "netconst.bastio";
+import "nicdrv.bastio";
 import "tcpbuf.bastio";
 import "core/endian.bastio";
 import "core/csum.bastio";
@@ -1618,135 +1620,6 @@ fn pages_free(m: &Mem, lo: u64, k: u64) -> bool
   return true;
 }
 
-/// An ENA, if there is one on the bus whose BAR 0 lies in the 32-bit part
-/// of the device window clear of the other drivers' registers (fb, usb, dk
-/// and sn), with eleven pages from page `at` on.
-fn ena_start(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, fb_lo: u64, fb_hi: u64, usb_lo: u64, usb_hi: u64,
-  dk_lo: u64, dk_hi: u64, sn_lo: u64, sn_hi: u64) -> Nic
-  requires pci_ok(pci) && mem_ok(m) && at + ENA_PAGES <= NPAGES
-  requires forall a: u64 :: bar_space(a) && !(fb_lo <= a && a < fb_hi) && !(usb_lo <= a && a < usb_hi)
-    && !(dk_lo <= a && a < dk_hi) && !(sn_lo <= a && a < sn_hi) ==> mmio_free(win, a)
-  ensures nic_ok(result) && mem_ok(m)
-{
-  let d = ena_find(&mut pci);
-  if d == PCI_NONE {
-    return Nic::None;
-  }
-  let bar = pci_mem_bar(&mut pci, d);
-  let size = pci_bar_size(&mut pci, d);
-  if bar < WIN_LO || size < ENA_MIN_LEN || size > 1048576 || bar + size > WIN_LOW_TOP || bar % 4096 != 0
-    || !pages_free(m, at, ENA_PAGES)
-    || !(bar + size <= fb_lo || bar >= fb_hi) || !(bar + size <= usb_lo || bar >= usb_hi)
-    || !(bar + size <= dk_lo || bar >= dk_hi) || !(bar + size <= sn_lo || bar >= sn_hi) {
-    return Nic::None;
-  }
-  pci_enable(&mut pci, d);
-  let f0 = take_low_page(&mut m, at);
-  let f1 = take_low_page(&mut m, at + 1);
-  let f2 = take_low_page(&mut m, at + 2);
-  let f3 = take_low_page(&mut m, at + 3);
-  let f4 = take_low_page(&mut m, at + 4);
-  let f5 = take_low_page(&mut m, at + 5);
-  let f6 = take_low_page(&mut m, at + 6);
-  let f7 = take_low_page(&mut m, at + 7);
-  let f8 = take_low_page(&mut m, at + 8);
-  let f9 = take_low_page(&mut m, at + 9);
-  let f10 = take_low_page(&mut m, at + 10);
-  let regs = mmio_claim(&mut win, bar, size);
-  // Revision bit 0 set: registers can be read directly; clear: only
-  // through the response buffer.
-  let rev = pci_read(&mut pci, d, PCI_CLASS) % 256;
-  return net_up(Card::Ena(ena_new(regs, rev % 2 == 0, f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10)));
-}
-
-/// A virtio network card over the transport `io`, given the nine pages
-/// from page `at` on.
-fn virtio_nic_start(m: &mut Mem, at: u64, io: Vt, msix: bool) -> Nic
-  requires mem_ok(m) && vt_ok(io) && at + NET_PAGES <= NPAGES && at + NET_PAGES <= len(m.bm)
-  requires forall i: u64 :: at <= i && i < at + NET_PAGES ==> get(m.bm, i) == 1
-  ensures nic_ok(result) && mem_ok(m)
-{
-  let q0 = take_low_page(&mut m, at);
-  let q1 = take_low_page(&mut m, at + 1);
-  let q2 = take_low_page(&mut m, at + 2);
-  let t0 = take_low_page(&mut m, at + 3);
-  let t1 = take_low_page(&mut m, at + 4);
-  let t2 = take_low_page(&mut m, at + 5);
-  let b0 = take_low_page(&mut m, at + 6);
-  let b1 = take_low_page(&mut m, at + 7);
-  let b2 = take_low_page(&mut m, at + 8);
-  return net_up(Card::Virtio(vnet_new(io, q0, q1, q2, t0, t1, t2, b0, b1, b2, msix)));
-}
-
-/// Starts the network card: the first virtio card on PCI if its
-/// ports do not overlap avoid_lo .. avoid_hi or plo .. phi (another
-/// driver's, and the ACPI registers), else the
-/// first e1000 whose registers lie in the part of the device window below
-/// E1K_TOP, with pages from page `at` on.
-fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, avoid_lo: u64, avoid_hi: u64,
-  plo: u64, phi: u64, fb_lo: u64, fb_hi: u64, usb_lo: u64, usb_hi: u64, dk_lo: u64, dk_hi: u64, sn_lo: u64, sn_hi: u64, msi: u64) -> Nic
-  requires pci_ok(pci) && mem_ok(m) && at + NET_PAGES <= NPAGES && E1K_PAGES <= NET_PAGES && at + ENA_PAGES <= NPAGES && msi <= 4294967295
-  requires forall k: u64 :: 0x1000 <= k && k < 65536 && !(avoid_lo <= k && k < avoid_hi) && !(plo <= k && k < phi) ==> port_free(ports, k)
-  requires forall a: u64 :: bar_space(a) && !(fb_lo <= a && a < fb_hi) && !(usb_lo <= a && a < usb_hi)
-    && !(dk_lo <= a && a < dk_hi) && !(sn_lo <= a && a < sn_hi) ==> mmio_free(win, a)
-  ensures nic_ok(result) && mem_ok(m)
-{
-  let dev = pci_find(&mut pci, VIRTIO_VENDOR, VIRTIO_NET);
-  if dev < PCI_NONE {
-    let base = pci_io_bar(&mut pci, dev);
-    if base < 0x1000 || base + VIO_PORTS > 65536 || !(base + VIO_PORTS <= avoid_lo || base >= avoid_hi)
-      || !(base + VIO_PORTS <= plo || base >= phi) || !pages_free(m, at, NET_PAGES) {
-      return Nic::None;
-    }
-    pci_enable(&mut pci, dev);
-    // MSI-X goes on before the card is started: the card takes a queue's
-    // vector only while it is on. The table entry is claimed only while
-    // it is written.
-    let mut msix = false;
-    let cap = pci_cap(&mut pci, dev, CAP_MSIX);
-    if msi > 0 && cap > 0 && cap < 252 {
-      let e = pci_msix_at(&mut pci, dev, cap);
-      if e >= 0xC0000000 && e + 16 <= E1K_TOP && (e + 16 <= fb_lo || e >= fb_hi)
-        && (e + 16 <= usb_lo || e >= usb_hi) && (e + 16 <= dk_lo || e >= dk_hi)
-        && (e + 16 <= sn_lo || e >= sn_hi) {
-        pci_intx_off(&mut pci, dev);
-        pci_msix_on(&mut pci, dev, cap);
-        let mut r = mmio_claim(&mut win, e, 16);
-        pci_msix_entry(&mut r, msi, V_NET);
-        mmio_release(&mut win, r);
-        msix = true;
-      }
-    }
-    return virtio_nic_start(&mut m, at, Vt::Port(port_claim(&mut ports, base, VIO_PORTS)), msix);
-  }
-  if pci_absent(&mut pci) && pages_free(m, at, NET_PAGES) {
-    match vm_find(&mut win, VM_ID_NET, VM_SLOT0, VM_SLOTS, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi, sn_lo, sn_hi) {
-      VmFound::Found(d) => { return virtio_nic_start(&mut m, at, Vt::Mem(d), false); },
-      VmFound::None => {},
-    }
-  }
-  let e = e1k_find(&mut pci);
-  if e == PCI_NONE {
-    return ena_start(&mut pci, &mut m, &mut win, at, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi, sn_lo, sn_hi);
-  }
-  let bar = pci_mem_bar(&mut pci, e);
-  if bar < 0xC0000000 || bar + E1K_LEN > E1K_TOP || bar % 4096 != 0 || !pages_free(m, at, E1K_PAGES)
-    || !(bar + E1K_LEN <= fb_lo || bar >= fb_hi) || !(bar + E1K_LEN <= usb_lo || bar >= usb_hi)
-    || !(bar + E1K_LEN <= dk_lo || bar >= dk_hi) || !(bar + E1K_LEN <= sn_lo || bar >= sn_hi) {
-    return Nic::None;
-  }
-  pci_enable(&mut pci, e);
-  let r = take_low_page(&mut m, at);
-  let b0 = take_low_page(&mut m, at + 1);
-  let b1 = take_low_page(&mut m, at + 2);
-  let b2 = take_low_page(&mut m, at + 3);
-  let b3 = take_low_page(&mut m, at + 4);
-  let t = take_low_page(&mut m, at + 5);
-  let regs = mmio_claim(&mut win, bar, E1K_LEN);
-  let id = pci_read(&mut pci, e, PCI_ID);
-  return net_up(Card::E1000(e1k_new(regs, e1k_model(id % 65536, id / 65536 % 65536), r, b0, b1, b2, b3, t)));
-}
-
 /// The stack on a started card, seeking its address by DHCP (or with the
 /// static one if the card is dead).
 fn net_up(d: Card) -> Nic
@@ -2070,38 +1943,35 @@ fn nic_live(c: &Nic) -> bool {
   }
 }
 
-/// Resets the card and takes its pages back (at power off).
-fn nic_free(ports: &mut Ports, win: &mut MmioSpace, c: Nic, m: &mut Mem)
-  requires nic_ok(c) && mem_ok(m)
-  ensures mem_ok(m)
+/// Takes the stack's own buffers back and hands the card over, to be reset
+/// and have its pages and registers released by the architecture's driver
+/// (`nic_free`, src/<arch>/arch/nicdrv.bastio).
+fn net_dismantle(n: Net, m: &mut Mem) -> Card
+  requires net_ok(n) && mem_ok(m)
+  ensures mem_ok(m) && card_ok(result)
 {
-  match c {
-    Nic::None => {},
-    Nic::Up(n) => {
-      bfree(n.pkt);
-      bfree(n.out);
-      bfree(n.held);
-      free(n.held_len);
-      free(n.held_hop);
-      free(n.tcbs);
-      rings_free(n.rb, &mut m);
-      bfree(n.cork);
-      free(n.arp);
-      free(n.socks);
-      bfree(n.dq);
-      bfree(n.lo);
-      free(n.lo_len);
-      free(n.lo_at);
-      free(n.ifs);
-      free(n.nss);
-      free(n.lo_if);
-      bfree(n.nlq);
-      free(n.nls);
-      free(n.nat);
-      free(n.v6);
-      card_free(&mut ports, &mut win, n.dev, &mut m);
-    },
-  }
+  bfree(n.pkt);
+  bfree(n.out);
+  bfree(n.held);
+  free(n.held_len);
+  free(n.held_hop);
+  free(n.tcbs);
+  rings_free(n.rb, &mut m);
+  bfree(n.cork);
+  free(n.arp);
+  free(n.socks);
+  bfree(n.dq);
+  bfree(n.lo);
+  free(n.lo_len);
+  free(n.lo_at);
+  free(n.ifs);
+  free(n.nss);
+  free(n.lo_if);
+  bfree(n.nlq);
+  free(n.nls);
+  free(n.nat);
+  free(n.v6);
+  return n.dev;
 }
 
 // ---------------------------------------------------------------- sockets, for system calls

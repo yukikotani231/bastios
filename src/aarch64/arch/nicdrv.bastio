@@ -1,0 +1,18 @@
+// Starting and stopping the network card on AArch64: no card is started yet
+// (see arch/card.bastio), so there is only the stop at power off.
+
+import "card.bastio";
+import "netconst.bastio";
+
+/// Resets the card and takes its pages back (at power off).
+fn nic_free(win: &mut MmioSpace, c: Nic, m: &mut Mem)
+  requires nic_ok(c) && mem_ok(m)
+  ensures mem_ok(m)
+{
+  match c {
+    Nic::None => {},
+    Nic::Up(n) => {
+      card_free(&mut win, net_dismantle(n, &mut m), &mut m);
+    },
+  }
+}
