@@ -87,6 +87,13 @@ int main(void) {
         int ok = is >= 0 && ioctl(is, SIOCGIFHWADDR, &hw) == 0 && ioctl(is, SIOCGIFNETMASK, &nm) == 0;
         if (is >= 0) close(is);
         ok && hw.ifr_hwaddr.sa_family == 772 && ((unsigned char *)&nm.ifr_netmask)[4] == 255 && ((unsigned char *)&nm.ifr_netmask)[5] == 0; }));
+    EXPECT("/proc/net/raw lists a raw ICMP socket", ({
+        int rs = socket(AF_INET, SOCK_RAW, 1);
+        char t[4096]; int f = open("/proc/net/raw", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
+        if (f >= 0) close(f);
+        t[n > 0 ? n : 0] = 0;
+        if (rs >= 0) close(rs);
+        rs >= 0 && strstr(t, "local_address") && strstr(t, "00000000:0001 00000000:0000 07 "); }));
     EXPECT("/proc/net/tcp lists a listening socket", ({
         int ls = socket(AF_INET, SOCK_STREAM, 0); struct sockaddr_in sa = {.sin_family = AF_INET, .sin_port = htons(40123)};
         int ok = ls >= 0 && bind(ls, (struct sockaddr *)&sa, sizeof sa) == 0 && listen(ls, 1) == 0;
