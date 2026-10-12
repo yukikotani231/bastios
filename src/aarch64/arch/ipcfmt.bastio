@@ -1,0 +1,5 @@
+// struct semid64_ds on AArch64 (the asm-generic layout, 88 bytes): sem_otime,
+// sem_ctime and sem_nsems follow one another.
+const SEMID_DS: u64 = 88;
+const SEM_CTIME_AT: u64 = 56;
+const SEM_NSEMS_AT: u64 = 64;

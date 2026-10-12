@@ -201,11 +201,15 @@ static int loop_devices(void) {
 }
 
 /* BastiOS's own system calls (src/syscall.bastio), raised with int 0x80. */
+#ifdef __x86_64__
 static long native(long n, long a, long b, long c) {
     long r;
     __asm__ volatile("int $0x80" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c) : "memory");
     return r;
 }
+#else
+static long native(long n, long a, long b, long c) { (void)n; (void)a; (void)b; (void)c; return -1; }   /* AArch64 has no such door */
+#endif
 
 static int no_native(void) {
     pid_t root = getppid();

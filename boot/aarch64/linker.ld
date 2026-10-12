@@ -6,6 +6,7 @@ ENTRY(_start)
 SECTIONS {
     . = 0x40080000;
     .text : { *(.text.boot) *(.text*) }
+    .tramp : ALIGN(4096) { *(.tramp) . = ALIGN(4096); }
     .rodata : { *(.rodata*) }
     .data : { *(.data*) }
     .bss (NOLOAD) : ALIGN(4096) {
