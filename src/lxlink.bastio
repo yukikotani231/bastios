@@ -218,7 +218,11 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
   if tl == NO_RESULT {
     return NO_RESULT;
   }
-  let t1 = proc_vpid(&mut k, tl, pid);
+  let tv = cg_view(&mut k, tl, pid);        // the cgroup tree from the namespace's root (src/lxcgroup.bastio)
+  if tv == NO_RESULT {
+    return NO_RESULT;
+  }
+  let t1 = proc_vpid(&mut k, tv, pid);
   return proc_self(&mut k.fs.xfer, t1, pid);   // "proc/self" in a mounted proc too
 }
 

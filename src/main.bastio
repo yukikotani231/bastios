@@ -1217,8 +1217,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let usb_lo = usb_base(usb);
   let usb_hi = usb_top(usb);
   let usb_disk = usb_msd(usb);
+  let vm_where = boot_vmmio(cpu);
   // The disk: that stick, else NVMe, virtio, AHCI or ATA (see blk_new).
-  let dev = blk_find(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi, usb_lo, usb_hi, msi, &mut usb, acpi_lo, acpi_hi, boot_word(cpu, "ahci_reset"));
+  let dev = blk_find(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi, usb_lo, usb_hi, msi, &mut usb, acpi_lo, acpi_hi, boot_word(cpu, "ahci_reset"), vm_where);
   let dev_lo = blk_ports_lo(dev);
   let dev_hi = blk_ports_hi(dev);
   let dk_lo = blk_mmio_lo(dev);
@@ -1273,7 +1274,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   // The network card, if any: nine pages after the disk's four (an e1000
   // takes six of them).
-  let mut nic = nic_new(&mut ports, &mut pci, &mut m, &mut win, 4, dev_lo, dev_hi, acpi_lo, acpi_hi, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi, snd_l, snd_h, msi);
+  let mut nic = nic_new(&mut ports, &mut pci, &mut m, &mut win, 4, dev_lo, dev_hi, acpi_lo, acpi_hi, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi, snd_l, snd_h, msi, vm_where);
   // An e1000 has no MSI: its line goes through the 8259 (vectors 32-47,
   // acknowledged like the timer's), unless it shares the timer's, the
   // keyboard's, the cascade or COM1's.

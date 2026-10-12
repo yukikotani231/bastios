@@ -17,6 +17,21 @@ const VM_ID_NET: u64 = 1;
 
 enum VmFound { None, Found(VMem) }
 
+/// Where the slots are: `slots` blocks, `step` bytes apart, from `first`.
+struct VmWhere { first: u64, step: u64, slots: u64 }
+
+spec fn vmw_ok(w: &VmWhere) -> bool {
+  w.first % 4 == 0 && w.step % 4 == 0 && w.first >= WIN_LO && w.step >= VM_LEN && w.step <= 65536 && w.slots <= 64
+  && w.first + w.slots * w.step <= WIN_LOW_TOP
+}
+
+/// QEMU's microvm.
+fn vmw_default() -> VmWhere
+  ensures vmw_ok(result)
+{
+  return VmWhere { first: VM_SLOT0, step: VM_LEN, slots: VM_SLOTS };
+}
+
 /// Is the block of registers a virtio device with this id, and which
 /// version of the layout? 0 if it is not.
 fn vm_probe(regs: &mut Mmio, dev: u64) -> u64
@@ -33,24 +48,23 @@ fn vm_probe(regs: &mut Mmio, dev: u64) -> u64
   return v;
 }
 
-/// The first virtio device with id `dev` among `slots` blocks of VM_LEN
-/// bytes from `first` on (QEMU's microvm: VM_SLOT0, VM_SLOTS),
+/// The first virtio device with id `dev` among the slots of `w`,
 /// clear of four ranges of the device window (other drivers'; an empty one
 /// is 0 .. 0).
-fn vm_find(win: &mut MmioSpace, dev: u64, first: u64, slots: u64, l1: u64, h1: u64, l2: u64, h2: u64, l3: u64, h3: u64, l4: u64, h4: u64) -> VmFound
-  requires first % 4 == 0 && slots <= 64 && first >= WIN_LO && first + slots * VM_LEN <= WIN_LOW_TOP
+fn vm_find(win: &mut MmioSpace, dev: u64, w: VmWhere, l1: u64, h1: u64, l2: u64, h2: u64, l3: u64, h3: u64, l4: u64, h4: u64) -> VmFound
+  requires vmw_ok(w)
   requires forall a: u64 :: bar_space(a) && !(l1 <= a && a < h1) && !(l2 <= a && a < h2) && !(l3 <= a && a < h3) && !(l4 <= a && a < h4) ==> mmio_free(win, a)
   ensures forall a: u64 :: bar_space(a) && !(l1 <= a && a < h1) && !(l2 <= a && a < h2) && !(l3 <= a && a < h3) && !(l4 <= a && a < h4)
     && !(result is VmFound::Found && mmio_base(result.Found.regs) <= a && a < mmio_base(result.Found.regs) + mmio_len(result.Found.regs)) ==> mmio_free(win, a)
   ensures result is VmFound::Found ==> mmio_len(result.Found.regs) == VM_LEN && mmio_base(result.Found.regs) % 4 == 0
 {
   let mut i = 0;
-  while i < slots
-    invariant i <= slots
+  while i < w.slots
+    invariant i <= w.slots
     invariant forall a: u64 :: bar_space(a) && !(l1 <= a && a < h1) && !(l2 <= a && a < h2) && !(l3 <= a && a < h3) && !(l4 <= a && a < h4) ==> mmio_free(win, a)
   {
-    let at = first + i * VM_LEN;
-    if (at + VM_LEN <= l1 || at >= h1) && (at + VM_LEN <= l2 || at >= h2)
+    let at = w.first + i * w.step;
+    if at % 4 == 0 && (at + VM_LEN <= l1 || at >= h1) && (at + VM_LEN <= l2 || at >= h2)
       && (at + VM_LEN <= l3 || at >= h3) && (at + VM_LEN <= l4 || at >= h4) {
       let mut r = mmio_claim(&mut win, at, VM_LEN);
       let v = vm_probe(&mut r, dev);
