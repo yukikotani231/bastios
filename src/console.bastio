@@ -7,7 +7,6 @@
 // serial line holds up only the processor pumping it. Below, output helpers
 // for the kernel's own messages.
 
-import "term.bastio";
 import "core/ring.bastio";
 
 const OUTCAP: u64 = 65536;
@@ -61,33 +60,6 @@ fn con_take(c: &mut Con, buf: &mut Bytes) -> u64
     k = k + 1;
   }
   return k;
-}
-
-/// Writes everything waiting to the devices. For when one processor owns
-/// both, at boot and at power off.
-fn con_flush(t: &mut Term, c: &mut Con)
-  requires term_ok(t) && con_ok(c)
-  ensures term_ok(t) && con_ok(c)
-{
-  while !ring_empty(c.r)
-    invariant term_ok(t) && con_ok(c)
-  {
-    term_write(&mut t, bget(c.out, ring_pop(&mut c.r)));
-  }
-}
-
-/// Writes the first n bytes of buf to the devices.
-fn term_send(t: &mut Term, buf: &Bytes, n: u64)
-  requires term_ok(t)
-  ensures term_ok(t)
-{
-  let mut i = 0;
-  while i < n && i < blen(buf)
-    invariant term_ok(t)
-  {
-    term_write(&mut t, bget(buf, i));
-    i = i + 1;
-  }
 }
 
 fn puts(con: &mut Con, s: Str)

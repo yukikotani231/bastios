@@ -23,7 +23,7 @@ fn blk_irq(b: &Blk) -> bool {
 
 /// Gives the disk's ports or registers back and, for virtio and NVMe,
 /// stops the device and takes its pages back (at power off).
-fn blk_free(ports: &mut Ports, win: &mut MmioSpace, b: Blk, m: &mut Mem)
+fn blk_free(b: Blk, m: &mut Mem)
   requires blk_ok(b) && mem_ok(m)
   ensures mem_ok(m)
 {

@@ -2275,7 +2275,7 @@ fn stack_fault(k: &mut Kernel, p: u64) -> bool
   requires kok(k) && p < NPROC
   ensures kok(k)
 {
-  let va = pget(k.procs, p, F_REGS + 19);   // CR2
+  let va = pget(k.procs, p, reg_word(R_FAULT));
   if va < USER_BASE || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, va, &mut k.fs.xfer, 1) == 1 || user_present(&mut k.spaces, p, va) {
     return false;                           // mapped (if PROT_NONE): not a stack to grow
   }

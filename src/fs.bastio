@@ -139,12 +139,17 @@ fn vfs_kbd_poll(v: &mut Vfs) -> u64
   return blk_kbd_poll(&mut v.disk.dev);
 }
 
+/// The disk drivers a file system hands back at power off: the disk's and
+/// the loop mount's. Their ports and registers are the architecture's to
+/// release (`blk_free`).
+struct VfsDevs { disk: Blk, lo: Blk }
+
 /// Frees everything (at power off): every in-memory file's pages go back
-/// (a loop mount's too), and the disk driver is handed back so its ports
+/// (a loop mount's too), and the disk drivers are handed back so their ports
 /// can be released.
-fn vfs_free(v: Vfs, mem: &mut Mem, ports: &mut Ports, win: &mut MmioSpace) -> Blk
+fn vfs_free(v: Vfs, mem: &mut Mem) -> VfsDevs
   requires vfs_ok(v) && mem_ok(mem)
-  ensures mem_ok(mem) && blk_ok(result)
+  ensures mem_ok(mem) && blk_ok(result.disk) && blk_ok(result.lo)
 {
   ram_free(v.ram, &mut mem);
   free(v.ftab);
@@ -154,9 +159,8 @@ fn vfs_free(v: Vfs, mem: &mut Mem, ports: &mut Ports, win: &mut MmioSpace) -> Bl
   bfree(v.name);
   bfree(v.lname);
   free(v.mnt);
-  blk_free(&mut ports, &mut win, disk_unmount(v.lo), &mut mem);
   pc_free(v.pc, &mut mem);
-  return disk_unmount(v.disk);
+  return VfsDevs { disk: disk_unmount(v.disk), lo: disk_unmount(v.lo) };
 }
 
 /// Puts a loop driver over `pages` (an image of size bytes) in as the

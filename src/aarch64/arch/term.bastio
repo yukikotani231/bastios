@@ -1,25 +1,3 @@
-// The AArch64 console device: the PL011 UART the platform provides as the
-// kernel's Serial capability. There is no screen or keyboard driver yet.
-
-import "blkconst.bastio";
-
-struct Term { ser: Serial }
-
-spec fn term_ok(t: &Term) -> bool {
-  true
-}
-
-fn term_write(t: &mut Term, b: u8)
-  requires term_ok(t)
-  ensures term_ok(t)
-{
-  serial_write(t.ser, b);
-}
-
-/// The next byte typed on the serial line, or 256.
-fn term_poll(t: &mut Term) -> u64
-  requires term_ok(t)
-  ensures term_ok(t) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT))
-{
-  return serial_poll(t.ser);
-}
+// The AArch64 console has no device type of its own: the serial line is the
+// kernel entry point's `Serial` capability, which main uses directly
+// (a capability passed by reference cannot be kept in a struct).

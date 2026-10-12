@@ -344,15 +344,6 @@ fn drop_fpu(m: &mut Mem, x: Fpu)
   }
 }
 
-/// The x87/SSE state a Linux process starts with: control word 0x37F and
-/// MXCSR 0x1F80 (every exception masked, round to nearest).
-fn fpu_init(f: &mut Frame) {
-  frame_write8(&mut f, 0, 0x7F);
-  frame_write8(&mut f, 1, 0x03);
-  frame_write8(&mut f, 24, 0x80);
-  frame_write8(&mut f, 25, 0x1F);
-}
-
 // ---------------------------------------------------------------- input queue
 
 // Bytes typed on the console, waiting for a READ: a core Queue of

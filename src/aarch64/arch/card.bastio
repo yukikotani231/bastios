@@ -76,7 +76,7 @@ fn card_send(d: &mut Card, pkt: &Bytes, n: u64) -> bool
 }
 
 /// Stops the card and takes its pages back (at power off).
-fn card_free(win: &mut MmioSpace, d: Card, m: &mut Mem)
+fn card_free(d: Card, m: &mut Mem)
   requires card_ok(d) && mem_ok(m)
   ensures mem_ok(m)
 {

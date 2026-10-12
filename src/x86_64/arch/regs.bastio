@@ -2,6 +2,8 @@
 // `cpu_get` order (see R_* in src/proc.bastio) and the native system-call ABI
 // passes the number in rax and arguments in rdi, rsi, rdx.
 
+import "pages.bastio";
+
 const NREGS: u64 = 21;           // saved words, in `cpu_get` order
 const REGS_EXT: u64 = 0;         // words a row holds past the usual 72 for registers beyond 21
 
@@ -12,5 +14,17 @@ const R_ARG1: u64 = 4;
 const R_ARG2: u64 = 3;
 const R_PC: u64 = 15;
 const R_SP: u64 = 16;
+const R_FAULT: u64 = 19;          // the faulting address (CR2; FAR_EL1)
 const R_FLAGS: u64 = 17;
+const R_TLS: u64 = 20;           // FS base
+const NLOAD: u64 = 18;           // words cpu_set takes in order, before R_TLS
 const FLAGS_INIT: u64 = 0x202;   // rflags of a new process: interrupts on
+
+/// The x87/SSE state a Linux process starts with: control word 0x37F and
+/// MXCSR 0x1F80 (every exception masked, round to nearest).
+fn fpu_init(f: &mut Frame) {
+  frame_write8(&mut f, 0, 0x7F);
+  frame_write8(&mut f, 1, 0x03);
+  frame_write8(&mut f, 24, 0x80);
+  frame_write8(&mut f, 25, 0x1F);
+}
