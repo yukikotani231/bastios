@@ -8,6 +8,7 @@
 //   /proc/cpuinfo           one block per running processor
 //   /proc/stat              cpu and cpuN times, btime, processes, procs_running
 //   /proc/modules           empty: there are no loadable modules
+//   /proc/diskstats         empty: the disks keep no I/O counts
 //   /proc/net/dev           the interfaces of the reader's network namespace
 //   /proc/filesystems       the file system types mount names
 //   /proc/version           the release uname gives, as a Linux banner
@@ -72,6 +73,7 @@ const PF_LOADAVG: u64 = 13;           // with pid 0
 const PF_VERSION: u64 = 14;           // with pid 0
 const PF_CGROUP: u64 = 15;            // /proc/PID/cgroup
 const PF_MODULES: u64 = 6;            // with pid 0 (status has 6 for a process): /proc/modules
+const PF_DISKSTATS: u64 = 11;         // with pid 0: /proc/diskstats (comm has 11 for a process)
 const PF_NETDEV: u64 = 10;            // with pid 0: /proc/net/dev (maps has 10 for a process)
 const PSYS: u64 = 16 * NPROC;         // PROC_DEV + PSYS + SY_*: a /proc/sys file
 const SY_TAINTED: u64 = 1;
@@ -444,6 +446,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
     if xfer_is(x, 5, n, "modules") {
       return PROC_DEV + PF_MODULES;
     }
+    if xfer_is(x, 5, n, "diskstats") {
+      return PROC_DEV + PF_DISKSTATS;
+    }
     if xfer_is(x, 5, n, "cmdline") {
       return PROC_DEV + PF_CMDLINE;         // pid 0: the kernel's command line
     }
@@ -791,7 +796,10 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
   if i == 11 {
     return Ent { len: name_out(&mut k.fs.xfer, "net"), dir: true, end: false };
   }
-  let p = i - 11;
+  if i == 12 {
+    return Ent { len: name_out(&mut k.fs.xfer, "diskstats"), dir: false, end: false };
+  }
+  let p = i - 12;
   if p >= NPROC {
     return end;
   }
@@ -1195,6 +1203,9 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     a = put_s(&mut o, a, "\nprocs_running ");
     a = put_n(&mut o, a, run);
     return put_s(&mut o, a, "\nprocs_blocked 0\n");
+  }
+  if what == PF_DISKSTATS && p == 0 {
+    return 0;                               // the disks keep no I/O counts
   }
   if what == PF_MODULES && p == 0 {
     return 0;                               // no loadable modules
