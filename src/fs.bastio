@@ -603,14 +603,40 @@ fn vfs_close_all(v: &mut Vfs, mem: &mut Mem, base: u64)
 /// move: the caller advances it by what reached the user (vfs_advance).
 /// On the disk, VFS_MISS if what it needs is not in the cache yet: reads
 /// are queued, and the caller sleeps and tries again (disk_read).
-fn vfs_read(v: &mut Vfs, row: u64, n: u64) -> u64
-  requires vfs_ok(v) && row < FD_ROWS && n <= XFER
-  ensures vfs_ok(v)
+fn vfs_read(v: &mut Vfs, mem: &mut Mem, row: u64, n: u64) -> u64
+  requires vfs_ok(v) && mem_ok(mem) && row < FD_ROWS && n <= XFER
+  ensures vfs_ok(v) && mem_ok(mem)
   ensures result <= n || result == NO_FD || result == VFS_MISS
 {
+  let off = fget(v.ftab, row, FD_OFF);
+  let node = fget(v.ftab, row, FD_NODE);
+  let mut on_disk = false;
+  if fget(v.ftab, row, FD_FS) == FS_DISK && node < DSLOTS && fget(v.ftab, row, FD_MODE) / O_READ % 2 == 1 {
+    on_disk = true;
+    if pc_on(v.pc) {
+      // Pages cached by earlier reads (pc_fill) or mappings answer without
+      // the disk.
+      let size = disk_size(v.disk, node);
+      if size != NO_DISK_FILE && off < size {
+        let mut want = size - off;
+        if want > n {
+          want = n;
+        }
+        let f = vfs_row_file(v, row);
+        if pc_have(&mut v.pc, f, off, want) {
+          pc_overlay(&mut v.pc, f, off, &mut v.xfer, want);
+          return want;
+        }
+      }
+    }
+  }
   let r = read_row(&mut v, row, n);
   if r <= n {
-    pc_overlay(&mut v.pc, vfs_row_file(v, row), fget(v.ftab, row, FD_OFF), &mut v.xfer, r);
+    let f = vfs_row_file(v, row);
+    pc_overlay(&mut v.pc, f, off, &mut v.xfer, r);
+    if on_disk {
+      pc_fill(&mut v.pc, &mut mem, f, off, v.xfer, r, r < n);
+    }
   }
   return r;
 }

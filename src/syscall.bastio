@@ -236,7 +236,7 @@ fn do_fread(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
     return NO_RESULT;
   }
   let row = pid * NFD + fd;
-  let got = vfs_read(&mut k.fs, row, smaller(n, XFER));
+  let got = vfs_read(&mut k.fs, &mut k.mem, row, smaller(n, XFER));
   if got == NO_FD {
     return NO_RESULT;
   }

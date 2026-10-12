@@ -531,6 +531,59 @@ fn pc_overlay(c: &mut PCache, h: u64, off: u64, buf: &mut Bytes, n: u64)
   }
 }
 
+/// Are all the pages file h's bytes off .. off + n fall on cached? Marks
+/// them used, so the clock keeps them.
+fn pc_have(c: &mut PCache, h: u64, off: u64, n: u64) -> bool
+  requires pc_ok(c)
+  ensures pc_ok(c)
+{
+  if n == 0 || off > PC_NONE - n || !pc_on(c) {
+    return false;
+  }
+  let end = off + n;
+  let mut pg = off / 4096;
+  while pg <= (end - 1) / 4096
+    invariant pc_ok(c)
+  {
+    if pc_get(&mut c, h, pg) >= PC_N {
+      return false;
+    }
+    pg = pg + 1;
+  }
+  return true;
+}
+
+/// buf[0 .. n] was just read from file offset off of file h (with the
+/// cached pages' bytes over it): caches the pages it holds whole, and the
+/// last, partial one if `eof` says the file ends in it, so the next read
+/// of them does not go to the disk. They are cached as program text is
+/// (TXT_PAGE): they stay after the file's last close, and `mem` counts
+/// them as available.
+fn pc_fill(c: &mut PCache, m: &mut Mem, h: u64, off: u64, buf: &Bytes, n: u64, eof: bool)
+  requires pc_ok(c) && mem_ok(m) && n <= blen(buf)
+  ensures pc_ok(c) && mem_ok(m)
+{
+  if n == 0 || off >= 0x1000000000000 || n >= 0x1000000000000 || h >= PC_NONE - 1 || pc_cap(m) == 0 {
+    return;
+  }
+  let end = off + n;
+  let mut pg = (off + 4095) / 4096;
+  let mut added = false;
+  while pg * 4096 < end && ((pg + 1) * 4096 <= end || eof)
+    invariant pc_ok(c) && mem_ok(m) && n <= blen(buf) && end == off + n && end < 0x2000000000000 && pg <= end / 4096 + 1
+  {
+    if pc_find(c, h, pg) >= PC_N {
+      if pc_add(&mut c, &mut m, h, pg, buf, 0, true) < PC_N {
+        added = true;
+      }
+    }
+    pg = pg + 1;
+  }
+  if added {
+    pc_wrote(&mut c, h, off, buf, n);
+  }
+}
+
 fn zero_from(f: &mut Frame, o: u64)
   requires o <= 4096
 {
