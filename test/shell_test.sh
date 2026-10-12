@@ -902,7 +902,7 @@ else:
     imds_log = []
     imds_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBastioTestKey test@example"
     def imds_serve(listener):
-        for _ in range(3):
+        for _ in range(4):
             try:
                 c, _ = listener.accept()
             except OSError:
@@ -940,7 +940,7 @@ else:
             c.close()
     imds = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     imds.bind(("127.0.0.1", 0))
-    imds.listen(3)
+    imds.listen(4)
     th = threading.Thread(target=imds_serve, args=(imds,), daemon=True)
     th.start()
     # The kernel's shell passes no arguments to a Linux program, so this runs
