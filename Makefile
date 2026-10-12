@@ -184,12 +184,12 @@ build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := $(wildcard src/*.bastio) src/font8x8.bin
+KSRCS := $(wildcard src/*.bastio src/x86_64/arch/*.bastio) src/font8x8.bin
 KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
 build/kernel.c: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
-	$(BASTIOC) --lib $(BASTIOLIB) --target kernel -o $@ src/main.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64 --lib src --target kernel -o $@ src/main.bastio
 
 build/bastioc1.c: $(BASTIOC0) $(wildcard $(BASTIOLIB)/stage1/*.bastio) | build
 	$(BASTIOC0) --emit-c -o $@ $(BASTIOLIB)/stage1/bastioc1.bastio
@@ -198,7 +198,7 @@ build/bastioc1: build/bastioc1.c
 	cc -O2 -o $@ $<
 
 build/kernel.s: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
-	$(BASTIOC) --lib $(BASTIOLIB) --target kernel --backend native --emit-asm -o $@ src/main.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64 --lib src --target kernel --backend native --emit-asm -o $@ src/main.bastio
 
 # Which backend built build/kernel.o, rewritten only when it changes, so
 # that switching NATIVE rebuilds the kernel.
