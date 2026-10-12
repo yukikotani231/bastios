@@ -307,6 +307,15 @@ fn disk_drain(d: &mut DiskFs)
   ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
 {
   settle_batch(&mut d);
+  disk_wait(&mut d);
+}
+
+/// Waits until every queued command has finished, leaving a batch of
+/// writes that is not queued yet as it is.
+fn disk_wait(d: &mut DiskFs)
+  requires disk_ok(d)
+  ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
+{
   let mut spins = 0;
   let blocks0 = d.blocks;
   let slots0 = d.slots;
@@ -1142,17 +1151,63 @@ fn disk_remove(d: &mut DiskFs, i: u64) -> bool
   requires disk_ok(d) && i < DSLOTS
   ensures disk_ok(d)
 {
-  disk_drain(&mut d);                 // queued writes reach the disk first
+  // A file whose last writes are still in a batch that was never queued
+  // goes without them reaching the disk. The entry on the disk still names
+  // the blocks of before the batch, so those (not the batch's, which are
+  // only in memory) are what the removal frees.
+  let mut dropped = false;
+  let mut oldroot = 0;
+  if d.pw == i + 1 && bget(d.dir, i * DENT + E_KIND) == 1 {
+    disk_wait(&mut d);
+    if d.pw == i + 1 {
+      let s = i / 2;
+      let b = dir_block(d, s / BSECT);
+      if b != 0 && blk_read(&mut d.dev, b * BSECT + s % BSECT, &mut d.sec) {
+        oldroot = ptr_in(d, d.sec, i % 2 * DENT + E_ROOT);
+        dropped = true;
+      }
+    }
+  }
+  if !dropped {
+    disk_drain(&mut d);               // queued writes reach the disk first
+  }
   let r = dent_root(d, i);
   let file = bget(d.dir, i * DENT + E_KIND) == 1 || cast[u64](bget(d.dir, i * DENT + E_KIND)) == K_ORPHAN;
   bset(&mut d.dir, i * DENT + E_KIND, 0);
   if !ent_flush(&mut d, i) {
     return false;
   }
-  if file && r != 0 {
+  if dropped {
+    if oldroot != 0 {
+      walk(&mut d, oldroot, 0);
+    }
+    batch_drop(&mut d);
+  } else if file && r != 0 {
     walk(&mut d, r, 0);
   }
   return true;
+}
+
+/// Forgets the batch of writes without queueing it: the blocks it made
+/// (only in the cache, held) are free again. The blocks it replaced belong
+/// to the file as the disk has it, which the caller frees.
+fn batch_drop(d: &mut DiskFs)
+  requires disk_ok(d)
+  ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
+{
+  let n = d.pn;
+  let mut j = 0;
+  while j < n
+    invariant j <= n && n == d.pn && n <= BATCH_MAX && disk_ok(d)
+  {
+    let b = get(d.pb, j);
+    dq_unhold(&mut d.q, b);
+    free_block(&mut d, b);
+    j = j + 1;
+  }
+  d.pn = 0;
+  d.on = 0;
+  d.pw = 0;
 }
 
 /// Copies the last component of entry i's name into buf from `at`.
@@ -1975,7 +2030,11 @@ fn disk_set_owner(d: &mut DiskFs, i: u64, uid: u64, gid: u64) -> bool
   if !dent_used(d, i) {
     return false;
   }
-  dent_set(&mut d, i, E_MODE, dent_get(d, i, E_MODE) % 65536 + (uid + gid * OWN_ID_MAX) * 65536);
+  let w = dent_get(d, i, E_MODE) % 65536 + (uid + gid * OWN_ID_MAX) * 65536;
+  if w == dent_get(d, i, E_MODE) {
+    return true;                      // as it is already: nothing to write
+  }
+  dent_set(&mut d, i, E_MODE, w);
   return ent_flush(&mut d, i);
 }
 
@@ -1996,11 +2055,20 @@ fn disk_set_meta(d: &mut DiskFs, i: u64, mode: u64, mtime: u64) -> bool
   if !dent_used(d, i) {
     return false;
   }
+  let m0 = dent_get(d, i, E_MODE);
+  let t0 = dent_get(d, i, E_MTIME);
+  let mut m1 = m0;
+  let mut t1 = t0;
   if mode < 65536 {
-    dent_set(&mut d, i, E_MODE, dent_get(d, i, E_MODE) / 65536 * 65536 + mode);
+    m1 = m0 / 65536 * 65536 + mode;
   }
   if mtime != NO_DISK_FILE {
-    dent_set(&mut d, i, E_MTIME, mtime);
+    t1 = mtime;
   }
+  if m1 == m0 && t1 == t0 {
+    return true;                      // as they are already: nothing to write
+  }
+  dent_set(&mut d, i, E_MODE, m1);
+  dent_set(&mut d, i, E_MTIME, t1);
   return ent_flush(&mut d, i);
 }

@@ -381,6 +381,25 @@ fn dq_queue_held(q: &mut DiskQ, b: u64) -> bool
   return false;
 }
 
+/// Drops the slot held for block b (dq_hold) without writing it: the block
+/// is being given up before it ever reached the disk.
+fn dq_unhold(q: &mut DiskQ, b: u64)
+  requires dq_ok(q)
+  ensures dq_ok(q) && q.r.n == old(q.r.n)
+{
+  let mut i = 0;
+  let c0 = q.r.n;
+  while i < NC
+    invariant i <= NC && dq_ok(q) && q.r.n == c0
+  {
+    if get(q.tag, i) == b && get(q.st, i) == CS_HOLD {
+      q.st = set(q.st, i, CS_FREE);
+      q.tag = set(q.tag, i, NOTAG);
+    }
+    i = i + 1;
+  }
+}
+
 /// Ends the transaction being queued; returns its number (0 if the queue
 /// is full, which callers avoid by checking dq_fits first).
 fn dq_end(q: &mut DiskQ) -> u64
