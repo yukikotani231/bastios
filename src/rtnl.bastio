@@ -1471,6 +1471,38 @@ fn nic_frames(c: &Nic, rx: bool) -> u64
   }
 }
 
+/// Slot i's hardware address as a number (first byte highest); 0 for lo.
+fn nic_if_mac(c: &Nic, i: u64) -> u64
+  requires nic_ok(c) && i < IFN
+  ensures result < MAC_LIMIT
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if iw(n, i, IF_KIND) == IFK_LO {
+        return 0;
+      }
+      return iw(n, i, IF_MAC) % MAC_LIMIT;
+    },
+  }
+}
+
+/// The number of addresses in slot i's subnet (lo's is a /8).
+fn nic_if_subnet(c: &Nic, i: u64) -> u64
+  requires nic_ok(c) && i < IFN
+  ensures 1 <= result && result <= 4294967296
+{
+  match c {
+    Nic::None => { return 16777216; },
+    Nic::Up(n) => {
+      if iw(n, i, IF_KIND) == IFK_LO {
+        return 16777216;
+      }
+      return if_span(n, i);
+    },
+  }
+}
+
 /// Slot i's MTU.
 fn nic_if_mtu(c: &Nic, i: u64) -> u64
   requires nic_ok(c) && i < IFN
