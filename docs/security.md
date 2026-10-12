@@ -76,11 +76,12 @@ whoever its mode admits.
 | Set-ID programs | `execve` of a file with the set-user-ID (set-group-ID) bit runs it with its owner's user (group) id, except in a loop-mounted image, which is `nosuid`: its maker chose its owners and modes. | `exec_ids`, `src/lxperm.bastio` |
 | Signals | `kill`, `tkill`, `tgkill` and `rt_sigqueueinfo` need root, or the sender's real or effective user id to match the target's real or saved one; `SIGCONT` reaches any process in the sender's session. | `may_signal`, `src/lxsig.bastio` |
 | Waiting | `wait4` and `waitid` reach only the caller's own children. | `src/lxproc.bastio` |
-| SysV IPC | message queues, semaphores and shared memory check their mode bits; `IPC_SET` and `IPC_RMID` are for the owner, the creator or root. | `ipc_may`, `ipc_owner`, `src/lxipc.bastio` |
+| Other processes | `prlimit64` and `setpriority` change another user's process only as root; `setpgid` moves only a child in the caller's session that has not run `execve`; `readlink` of `/proc/PID/exe` and `/proc/PID/fd/N` needs root or the same real, effective and saved user and group ids (`EACCES`). | `lx_prlimit`, `src/lxrlimit.bastio`; `lx_setpriority`, `src/lxprio.bastio`; `lx_setpgid`, `src/lxmisc.bastio`; `proc_peek`, `src/lxprocfs.bastio` |
+| SysV IPC | message queues, semaphores and shared memory check their mode bits, the group bits for a process whose file-system group or a supplementary group is the set's; `IPC_SET` and `IPC_RMID` are for the owner, the creator or root; `SHM_LOCK` is root's, or the owner's under a nonzero `RLIMIT_MEMLOCK`. | `ipc_may`, `ipc_owner`, `src/lxipc.bastio` |
 | The system | `reboot`, `mount`, `umount2`, `sethostname`, `setdomainname`, `settimeofday`, `clock_settime`, `adjtimex` and `clock_adjtime` (when they change something) are root's; device nodes cannot be made at all. | `src/linux.bastio`, `src/lxmount.bastio`, `src/lxsys.bastio`, `src/lxevent.bastio` |
 | Shared file mappings | `mmap` refuses a writable `MAP_SHARED` mapping of a file opened without write permission, and `mprotect` refuses to make one writable later (`EACCES`). Only a file opened for writing is mapped through the page cache's own pages; from a read-only descriptor, a shared mapping is a copy, so even a mapping `mprotect` cannot see (past the `MAP_N` recorded per process) changes no one else's view of the file. The cost: such a mapping does not see later writes to the file. | `lx_mmap`, `src/linux.bastio`; `map_no_write`, `src/lxmem.bastio` |
 | Unix sockets | `bind` to a path makes a socket file there, with the checks for making any file (write and search permission on the directory) and the umask; `connect` needs write permission on that file, so its mode, owner and group say who may connect. `connect` finds the socket by the file itself, so a renamed socket file or another hard link to it still leads there. | `ux_mkfile`, `ux_may_connect`, `src/lxunix.bastio` |
-| Devices | `/dev/loop0`..`7` and `/dev/loop-control` are `rw-rw----` for root and group disk (6), and open checks it: a loop device reads and writes whatever file it is bound to. `/dev/null`, `zero`, `random`, `urandom` and `tty` are open to everyone; there are no raw disk or memory devices. | `lx_open`, `src/lxfd.bastio`; `dev_meta`, `src/lxdev.bastio` |
+| Devices | `/dev/loop0`..`7` and `/dev/loop-control` are `rw-rw----` for root and group disk (6), and open checks it: a loop device reads and writes whatever file it is bound to. `/dev/console` is `rw--w----` for root, and open checks it. `/dev/null`, `zero`, `random`, `urandom` and `tty` are open to everyone; there are no raw disk or memory devices. | `lx_open`, `src/lxfd.bastio`; `dev_meta`, `src/lxdev.bastio` |
 | Ports | binding a UDP or TCP port below 1024 is root's (`EACCES`). | `may_bind`, `src/lxsock.bastio` |
 | Native calls | Any program can raise `int 0x80`, the native ABI (`src/syscall.bastio`), a Linux program included. Its file, network, power and reboot calls check no permissions, so a process that is not root may make only the calls that touch nothing of anyone else's: console I/O, starting and waiting for its own children (which keep its ids), yielding, its pid, `SYS_INFO`'s counters, the process list, and `SYS_KILL` of a process `may_signal` allows. Everything else gives `NO_RESULT`. | `native_allowed`, `src/syscall.bastio`; `spawn`, `src/proc.bastio` |
 
@@ -103,13 +104,11 @@ Known gaps, most serious first.
    because a process that is not root cannot gain anything by it (the
    child keeps its ids). Native sockets are global indices with no owner,
    so root processes can reach one another's.
-3. Smaller ones: `prlimit64` and `setpriority` ignore their target pid
-   (neither changes anything); `setpgid` does not check that the child is
-   in the caller's session or has not run `execve`; SysV IPC checks only a
-   process's effective group, not its supplementary groups; `SHM_LOCK`
-   needs only ownership; `/proc/PID/exe` of anyone's process can be read;
-   `/dev/console` is open to all; names of unix sockets in the abstract
-   namespace (a leading 0 byte) have no permissions, as on Linux.
+3. Smaller ones: `/dev/tty` in a process with no pty for a terminal
+   opens the console, as the console has no session of its own yet (on
+   Linux it is `ENXIO` without a controlling terminal); names of unix
+   sockets in the abstract namespace (a leading 0 byte) have no
+   permissions, as on Linux.
 4. Not implemented, so not a hole: `ptrace`, `/proc/PID/mem`, `environ`
    and `maps`, `chroot`, `iopl` and `ioperm`, `syslog`, `swapon` and
    `pivot_root` all fail (`ENOSYS` or missing). `process_vm_readv`,

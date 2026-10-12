@@ -109,13 +109,17 @@ machine, because they come from algorithms, not from emulation.
 
 ## The gaps, largest first
 
-1. **Disk file writes (58x) and reads (41x).** Each `write` of up to
-   4 KiB is its own copy-on-write transaction: new data, map and root
-   blocks, two flushes, then the directory block (`disk_write` in
-   `src/diskfs.bastio`). Reads of a file larger than the block cache
-   reach the disk again. Group commit and a page cache are the fixes. The
-   file-system thread owns the page cache. bastios #146 added a 1 MiB
-   block cache, which an 8 MiB file does not fit in.
+1. **Disk file reads (41x) and writes (about 17x).** Consecutive writes to
+   one file used to be a copy-on-write transaction each: new data, map and
+   root blocks, two flushes, then the directory block. They now share a
+   transaction (a batch, `src/diskfs.bastio`): the blocks stay in the cache
+   until the batch commits, on `fsync`, `sync`, `msync`, a write to another
+   file, any other change to the disk, 32 blocks, or 0.1 s. `filewrite@disk`
+   went from 1.9 to 6.6 MiB/s (median of 3, TCG, same host). The cost is
+   that a write is on the disk only after one of those, not when the call
+   returns. Reads of a file larger than the block cache reach the disk
+   again; a page cache is the fix. bastios #146 added a 1 MiB block cache,
+   which an 8 MiB file does not fit in.
 2. **System call entry and exit (30x).** Mostly the three CR3 loads above.
    The fix is to keep a process's table loaded across a call that returns
    to it, and to reload only when a table changed. That is a change to the

@@ -20,7 +20,7 @@ import "pages.bastio";
 const USER_BASE: u64 = 0x8000000000;
 // What win_op (src/lxmem.bastio) does to a range of window pages.
 const WOP_UNMAP: u64 = 0;
-const WOP_PROTECT: u64 = 1;             // arg: 1 writable, 0 read-only
+const WOP_PROTECT: u64 = 1;             // arg: 2 read-write, 1 read-only, 0 PROT_NONE
 const WOP_MOVE: u64 = 2;                // arg: where the first page goes
 const WOP_COUNT: u64 = 3;               // only count the mapped pages
 const WOP_ZERO: u64 = 4;                // fill the private pages with zeros (madvise)
@@ -366,8 +366,8 @@ fn l1_read(l1: &mut PageTable, i: u64, o: u64, buf: &mut Bytes, k: u64, m: u64) 
   requires pt_level(l1) == 1 && i < 512 && o + m <= 4096 && k + m <= blen(buf)
   ensures blen(buf) == old(blen(buf))
 {
-  if !pt_has(l1, i) {
-    return false;
+  if !pt_has(l1, i) || !pt_accessible(l1, i) {
+    return false;                           // not mapped, or PROT_NONE
   }
   pt_borrow_frame(&mut l1, i, frame_to_buf, o, &mut buf, k, m);
   return true;
@@ -456,7 +456,7 @@ fn l1_byte(l1: &mut PageTable, i: u64, o: u64) -> u64
   requires pt_level(l1) == 1 && i < 512 && o < 4096
   ensures result <= 256
 {
-  if !pt_has(l1, i) {
+  if !pt_has(l1, i) || !pt_accessible(l1, i) {
     return 256;
   }
   return pt_borrow_frame(&mut l1, i, frame_byte, o);
@@ -701,6 +701,9 @@ fn clone_l1(src: &mut PageTable, m: &mut Mem, cow: bool) -> Space
       // copy-on-write page stays read-only in both).
       let w = pt_writable(src, p);
       pt_put_shared(&mut l1, p, pt_dup_shared(src, p), w);
+      if !pt_accessible(src, p) {
+        pt_set_access(&mut l1, p, 0);      // PROT_NONE in both
+      }
     } else if cow && pt_has(src, p) && pt_writable(src, p) {
       // Copy-on-write: the page becomes shared, read-only on both sides.
       let s = shared_new(pt_take_frame(&mut src, p));
@@ -715,6 +718,9 @@ fn clone_l1(src: &mut PageTable, m: &mut Mem, cow: bool) -> Space
         let w = pt_writable(src, p);      // a read-only page stays read-only in both
         let f = pt_borrow_frame(&mut src, p, copy_to, take_dirty(&mut m, b));
         pt_put_frame(&mut l1, p, f, w);
+        if !pt_accessible(src, p) {
+          pt_set_access(&mut l1, p, 0);
+        }
       }
     }
     if ok {

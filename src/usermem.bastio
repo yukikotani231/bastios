@@ -459,3 +459,52 @@ fn cow_l1(l1: &mut PageTable, m: &mut Mem, i: u64) -> u64
   pt_put_frame(&mut l1, i, f, true);
   return COW_DONE;
 }
+
+/// Whether the page of va is mapped in pid's window, even PROT_NONE
+/// (which copy_from_user cannot read).
+fn user_present(spaces: &mut Vec[Space], pid: u64, va: u64) -> bool
+  requires spaces_ok(spaces) && pid < NPROC
+  ensures spaces_ok(spaces)
+{
+  if !user_range(va, 1) {
+    return false;
+  }
+  let off = va - USER_BASE;
+  match take_space(&mut spaces, pid) {
+    Space::Empty => { return false; },
+    Space::Mapped(mut root) => {
+      let mut r = false;
+      if pt_has(root, 1) {
+        r = pt_borrow(&mut root, 1, l3_present, off);
+      }
+      put_space(&mut spaces, pid, Space::Mapped(root));
+      return r;
+    },
+  }
+}
+
+fn l3_present(l3: &mut PageTable, off: u64) -> bool
+  requires pt_level(l3) == 3 && off < USER_SIZE
+{
+  let t = off / L2_SIZE;
+  if !pt_has(l3, t) {
+    return false;
+  }
+  return pt_borrow(&mut l3, t, l2_present, off % L2_SIZE);
+}
+
+fn l2_present(l2: &mut PageTable, a: u64) -> bool
+  requires pt_level(l2) == 2 && a < L2_SIZE
+{
+  let p = a / 4096;
+  if !pt_has(l2, p / 512) {
+    return false;
+  }
+  return pt_borrow(&mut l2, p / 512, l1_present, p % 512);
+}
+
+fn l1_present(l1: &mut PageTable, i: u64) -> bool
+  requires pt_level(l1) == 1 && i < 512
+{
+  return pt_has(l1, i);
+}

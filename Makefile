@@ -23,6 +23,11 @@ BASTIOC0 ?= ../bastiolang/stage0/target/release/bastioc0
 BASTIOC  ?= build/bastioc1
 # Where `import "core/..."` finds the Bastio core library.
 BASTIOLIB ?= ../bastiolang
+# Functions bastioc1 has proved are recorded here and not sent to the solver
+# again, so a rebuild proves only what changed (`make clean` empties it;
+# BASTIO_PROOF_CACHE= turns it off). The cache is trusted like the solver:
+# it lives in build/, which only this checkout writes.
+export BASTIO_PROOF_CACHE ?= build/proof-cache
 CC      ?= cc
 QEMU    ?= qemu-system-x86_64
 
@@ -101,7 +106,9 @@ build/user/fpucheck.elf: build/user/elfstart.o build/user/fpucheck.o
 
 # The system call fuzzer (user/sysfuzz.c, test/fuzz_test.sh): freestanding,
 # so nothing between it and the kernel tidies its arguments.
-build/user/sysfuzz.o: user/sysfuzz.c | build/user
+# Its ELF mode carries three real programs to damage (.incbin), since /bin's
+# programs cannot be opened as files.
+build/user/sysfuzz.o: user/sysfuzz.c build/user/elfexec.elf build/user/elfpie.elf build/user/mdyn.elf | build/user
 	$(CC) $(ELFCFLAGS) -c -o $@ $<
 
 # Linked at USER_BASE: its tables of pointers need no relocation.

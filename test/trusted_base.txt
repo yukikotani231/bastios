@@ -2,13 +2,13 @@
 # `test/trusted_base.sh --update` and review the diff.
 boot/ap.S: 84 lines
 boot/boot.S: 474 lines
-boot/core.h: 29 lines
+boot/core.h: 35 lines
 boot/libc.c: 35 lines
 boot/limine.conf: 29 lines
 boot/linker.ld: 15 lines
-boot/multiboot.c: 238 lines
+boot/multiboot.c: 240 lines
 boot/platform.c: 47 lines
-boot/smp.c: 658 lines
+boot/smp.c: 693 lines
 user/start.S: 19 lines
 user/user.ld: 15 lines
-total: 1643 lines
+total: 1686 lines

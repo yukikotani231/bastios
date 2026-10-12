@@ -721,6 +721,9 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   }
   let dev = dev_at(k.fs.xfer, n);
   if dev == DEV_TTY {
+    if xfer_is(k.fs.xfer, 0, n, "dev/console") && !console_may(k.procs, pid, flags) {
+      return EACCES;                        // the console is root's (rw--w----), as stat says
+    }
     let ct = pty_ctty(k, pid);
     if ct < PTY_N && xfer_is(k.fs.xfer, 0, n, "dev/tty") {
       return pty_open_slave(&mut k, pid, ct, flags);   // the session's terminal is a pty
@@ -772,6 +775,24 @@ fn lx_open_dev(k: &mut Kernel, pid: u64, dev: u64, flags: u64) -> u64
   }
   ofd_access(&mut k, hv, flags);
   return fd_install(&mut k, pid, hv);
+}
+
+/// Whether pid may open /dev/console with these open flags: its mode,
+/// S_IFCHR (rw--w---- for root), allows what they ask; O_PATH asks nothing.
+fn console_may(procs: &Buf, pid: u64, flags: u64) -> bool
+  requires ptab_ok(procs) && pid < NPROC
+{
+  if flags & LO_PATH != 0 {
+    return true;
+  }
+  let mut want = 0;
+  if flags % 4 != LO_WRONLY {
+    want = MAY_R;
+  }
+  if flags % 4 != 0 {
+    want = want + MAY_W;
+  }
+  return may_meta(procs, pid, S_IFCHR, 0, want);
 }
 
 /// lx_open_n for a path that names no /proc file and no device path:

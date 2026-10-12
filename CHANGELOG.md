@@ -292,6 +292,13 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   socket, or take its name first. `open` of a socket file is `ENXIO`.
 - The loop devices are `rw-rw----` for root and the new group disk (6),
   and open checks it.
+- `readlink` of another user's `/proc/PID/exe` or `/proc/PID/fd/N` is
+  `EACCES`, as Linux's ptrace read check gives; before, anyone could see
+  which program and which files any process had open. `/dev/console` is
+  root's, as its `rw--w----` mode already said: before, any user could
+  open the console and read what was typed on it. SysV IPC's group bits
+  count supplementary groups, and `SHM_LOCK` by an owner who is not root
+  needs a nonzero `RLIMIT_MEMLOCK`, both as on Linux.
 - Users and passwords: `/etc/shadow` (`0600`), `/root` and `/home`, and
   BusyBox's `adduser`, `addgroup`, `deluser`, `delgroup`, `passwd`,
   `chpasswd`, `su`, `login`, `id` and `whoami` as `/bin/NAME`. `/bin/su`
@@ -680,6 +687,11 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   and it reaps its children as it goes, so forks keep succeeding.
   `test/sysfuzz_calls.sh` (in `make test`) fails when the kernel
   dispatches a call the fuzzer does not aim at.
+- The system call fuzzer damages executables too (`sysfuzz e SEED RUNS`,
+  `ELFRUNS=` in `test/fuzz_test.sh`, 100 in `make test`): it breaks the
+  headers of three real programs (fixed-address, PIE, and one with an
+  interpreter), points the interpreter at other programs, itself or
+  nothing, cuts the file short, and has a child exec each one.
 - `make test` counts the trusted base (`test/trusted_base.sh`), and
   warnings in `boot/`'s C are errors.
 
@@ -710,6 +722,22 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Fixed
 
+- The copy of the Multiboot 1 boot information keeps only the flags whose
+  fields point into the copy (memory size, memory map, framebuffer), and
+  the memory map walks no longer stall on an entry size that wraps 32
+  bits. QEMU's loader triggers neither.
+- `mprotect(PROT_NONE)` and a `PROT_NONE` file or `MAP_SHARED` mapping made
+  the pages read-only, not inaccessible: the program and the system calls it
+  made could still read them. Such a page is now kept mapped but hidden
+  (bastiolang's `pt_set_access`), so any touch faults, a system call given
+  it fails with `EFAULT`, `fork` keeps it hidden, and a hidden `MAP_SHARED`
+  page stays shared when `mprotect` uncovers it.
+- A kernel stack that overflowed wrote over its processor's IST1 stack,
+  task state segment and saved user context, with no fault. Each kernel
+  stack now has an unmapped guard page under it: an overflow becomes a
+  double fault that halts the processor (`test/stackguard_test.sh`). The
+  kernel stack grew from 91 to 92 KiB; the trap stack, which holds one
+  trap frame, shrank from 32 to 24 KiB.
 - A TCP listener could not start on a port while a connection on it that
   its program had already closed was still finishing (waiting in
   `LAST_ACK` for the peer's last ACK, say): `listen` failed with

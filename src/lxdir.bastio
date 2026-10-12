@@ -762,6 +762,21 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
     bfree(t);
     return 0;                               // a name renamed to itself, or to another name of its file
   }
+  if d != NO_FILE && m > n && bget(t, n + n) == 47 {
+    // A directory into itself: the new name starts with the old one and a "/".
+    let mut inside = true;
+    let mut j = 0;
+    while j < n && inside
+      invariant j <= n && n < m && m <= FNAME_MAX && blen(t) == 2 * FNAME_MAX
+    {
+      inside = bget(t, j) == bget(t, n + j);
+      j = j + 1;
+    }
+    if inside {
+      bfree(t);
+      return EINVAL;
+    }
+  }
   if vfs_dev_of(&mut k.fs, m) != src_disk {
     bfree(t);
     return EXDEV;
