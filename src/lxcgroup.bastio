@@ -1,0 +1,1078 @@
+// Control groups (cgroup v2): a tree of groups of processes with limits,
+// under /sys/fs/cgroup.
+//
+// The tree is not in the file layer. A path under sys/fs/cgroup is
+// resolved by cg_walk to a group (a directory) or one of its control files;
+// the groups are slots of CG_W words in k.mns (MNS_CG: parent, limits, name),
+// 32 at most, and the root is slot 0 and always there. `mkdir` and `rmdir`
+// there make and remove groups, so `cgroup.procs` of the new one is a file at
+// once, and `mount -t cgroup2` shows the same tree where it is mounted. Every
+// process belongs to one group (NSK_CG), and a child starts in its parent's.
+//
+// Control files (cgf_name): cgroup.procs and cgroup.threads (read: the
+// members; write a process id: move it with its threads), cgroup.controllers
+// (the controllers the parent hands down), cgroup.subtree_control (+cpu
+// +memory +pids and - to hand them down), cgroup.events (populated),
+// cgroup.kill (write 1: SIGKILL every process in the group and below),
+// cgroup.type, cgroup.stat, cgroup.max.descendants, pids.max and
+// pids.current, memory.max, memory.current and memory.events, cpu.max and
+// cpu.weight. Only root writes. pids.max is enforced: fork, vfork and clone
+// (threads too) fail with EAGAIN once the group or one above it holds that
+// many tasks, and so does moving a process in.
+//
+// Not done: memory.max and cpu.max are kept and read back but nothing
+// enforces them yet; the "no internal processes" rule; cgroup namespaces.
+
+import "lxuser.bastio";
+
+const CG_ROOT_LEN: u64 = 13;               // "sys/fs/cgroup"
+const CG_ALL: u64 = 7;                     // controllers: cpu 1, memory 2, pids 4
+const CG_BIG: u64 = 0x0100000000000000;    // limits read from a write stay below it
+
+/// Word w of cgroup slot s in k.mns.
+fn cg_at(s: u64, w: u64) -> u64
+  requires s < CG_N && w < CG_W
+  ensures result < MNS_LEN
+{
+  return MNS_CG + s * CG_W + w;
+}
+
+fn cg_get(k: &Kernel, s: u64, w: u64) -> u64
+  requires kok(k) && s < CG_N && w < CG_W
+{
+  return get(k.mns, cg_at(s, w));
+}
+
+fn cg_put(k: &mut Kernel, s: u64, w: u64, v: u64)
+  requires kok(k) && s < CG_N && w < CG_W
+  ensures kok(k)
+{
+  k.mns = set(k.mns, cg_at(s, w), v);
+}
+
+/// Is slot s a cgroup? The root always is.
+fn cg_used(k: &Kernel, s: u64) -> bool
+  requires kok(k) && s < CG_N
+{
+  return s == 0 || cg_get(k, s, CGW_USED) == 1;
+}
+
+/// The parent of slot s (the root's is itself).
+fn cg_parent(k: &Kernel, s: u64) -> u64
+  requires kok(k) && s < CG_N
+  ensures result < CG_N
+{
+  if s == 0 {
+    return 0;
+  }
+  return smaller(cg_get(k, s, CGW_PARENT), CG_N - 1);
+}
+
+/// The cgroup process pid is in.
+fn cg_of(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result < CG_N
+{
+  return smaller(get(k.mns, nsk_at(NSK_CG, pid)), CG_N - 1);
+}
+
+/// Is cgroup s anc or below it?
+fn cg_in(k: &Kernel, s: u64, anc: u64) -> bool
+  requires kok(k) && s < CG_N && anc < CG_N
+{
+  let mut c = s;
+  let mut i = 0;
+  while i < CG_N
+    invariant i <= CG_N && c < CG_N && kok(k)
+  {
+    if c == anc {
+      return true;
+    }
+    if c == 0 {
+      return false;
+    }
+    c = cg_parent(k, c);
+    i = i + 1;
+  }
+  return false;
+}
+
+/// Is row q a task (not free, not a zombie)?
+fn cg_live(k: &Kernel, q: u64) -> bool
+  requires kok(k) && q < NPROC
+{
+  let s = pget(k.procs, q, F_STATE);
+  return s != FREE && s != ZOMBIE;
+}
+
+/// How many tasks (threads count) are in cgroup anc or below it.
+fn cg_tasks(k: &Kernel, anc: u64) -> u64
+  requires kok(k) && anc < CG_N
+  ensures result <= NPROC
+{
+  let mut n = 0;
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && n < q && kok(k)
+  {
+    if cg_live(k, q) && cg_in(k, cg_of(k, q), anc) {
+      n = n + 1;
+    }
+    q = q + 1;
+  }
+  return n;
+}
+
+/// Number of child cgroups of s.
+fn cg_children(k: &Kernel, s: u64) -> u64
+  requires kok(k) && s < CG_N
+  ensures result <= CG_N
+{
+  let mut n = 0;
+  let mut c = 1;
+  while c < CG_N
+    invariant 1 <= c && c <= CG_N && n < c && kok(k)
+  {
+    if cg_used(k, c) && cg_parent(k, c) == s {
+      n = n + 1;
+    }
+    c = c + 1;
+  }
+  return n;
+}
+
+/// Number of cgroups below s, at any depth.
+fn cg_descendants(k: &Kernel, s: u64) -> u64
+  requires kok(k) && s < CG_N
+  ensures result <= CG_N
+{
+  let mut n = 0;
+  let mut c = 1;
+  while c < CG_N
+    invariant 1 <= c && c <= CG_N && n < c && kok(k)
+  {
+    if cg_used(k, c) && c != s && cg_in(k, c, s) {
+      n = n + 1;
+    }
+    c = c + 1;
+  }
+  return n;
+}
+
+/// Whether process pid may make one more task: no cgroup from its own up
+/// to the root is at its pids.max.
+fn cg_fork_ok(k: &Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let mut c = cg_of(k, pid);
+  let mut i = 0;
+  while i < CG_N
+    invariant i <= CG_N && c < CG_N && kok(k)
+  {
+    let lim = cg_get(k, c, CGW_PIDS);
+    if lim != 0 && cg_tasks(k, c) + 1 > lim - 1 {
+      return false;
+    }
+    if c == 0 {
+      return true;
+    }
+    c = cg_parent(k, c);
+    i = i + 1;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------- names
+
+/// The name of control file f.
+fn cgf_name(f: u64) -> Str {
+  if f == 0 {
+    return "cgroup.procs";
+  }
+  if f == 1 {
+    return "cgroup.controllers";
+  }
+  if f == 2 {
+    return "cgroup.subtree_control";
+  }
+  if f == 3 {
+    return "cgroup.events";
+  }
+  if f == 4 {
+    return "cgroup.kill";
+  }
+  if f == 5 {
+    return "cgroup.type";
+  }
+  if f == 6 {
+    return "cgroup.threads";
+  }
+  if f == 7 {
+    return "cgroup.stat";
+  }
+  if f == 8 {
+    return "pids.max";
+  }
+  if f == 9 {
+    return "pids.current";
+  }
+  if f == 10 {
+    return "memory.max";
+  }
+  if f == 11 {
+    return "memory.current";
+  }
+  if f == 12 {
+    return "memory.events";
+  }
+  if f == 13 {
+    return "cpu.max";
+  }
+  if f == 14 {
+    return "cpu.weight";
+  }
+  return "cgroup.max.descendants";
+}
+
+/// Which control file x[a..b] names, or CGF_N.
+fn cgf_at(x: &Bytes, a: u64, b: u64) -> u64
+  requires a <= b && b <= blen(x)
+  ensures result <= CGF_N
+{
+  let mut f = 0;
+  while f < CGF_N
+    invariant f <= CGF_N
+  {
+    if xfer_is(x, a, b, cgf_name(f)) {
+      return f;
+    }
+    f = f + 1;
+  }
+  return CGF_N;
+}
+
+/// Whether root may write control file f.
+fn cgf_writable(f: u64) -> bool {
+  return f == 0 || f == 2 || f == 4 || f == 6 || f == 8 || f == 10 || f == 13 || f == 14;
+}
+
+/// Does cgroup s have the name x[a..b]?
+fn cg_name_is(k: &Kernel, s: u64, x: &Bytes, a: u64, b: u64) -> bool
+  requires kok(k) && s < CG_N && a <= b && b <= blen(x)
+{
+  let l = cg_get(k, s, CGW_NLEN);
+  if l != b - a || l > CG_NAME_MAX {
+    return false;
+  }
+  let mut i = 0;
+  while i < l
+    invariant i <= l && l <= CG_NAME_MAX && a + l == b && b <= blen(x) && s < CG_N && kok(k)
+  {
+    if cg_get(k, s, CGW_NAME + i) != cast[u64](bget(x, a + i)) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+/// The child of cgroup par called x[a..b], or CG_N.
+fn cg_child(k: &Kernel, par: u64, x: &Bytes, a: u64, b: u64) -> u64
+  requires kok(k) && par < CG_N && a <= b && b <= blen(x)
+  ensures result <= CG_N
+{
+  let mut c = 1;
+  while c < CG_N
+    invariant 1 <= c && c <= CG_N && kok(k)
+  {
+    if cg_used(k, c) && cg_parent(k, c) == par && cg_name_is(k, c, x, a, b) {
+      return c;
+    }
+    c = c + 1;
+  }
+  return CG_N;
+}
+
+// What a path under sys/fs/cgroup names.
+struct CgRef { kind: u64, slot: u64, f: u64 }   // kind: 0 nothing, 1 a cgroup, 2 a control file
+
+const CGK_NONE: u64 = 0;
+const CGK_DIR: u64 = 1;
+const CGK_FILE: u64 = 2;
+
+/// Is the name in the first n bytes of the transfer buffer sys/fs/cgroup or
+/// something under it?
+fn cg_under(k: &Kernel, n: u64) -> bool
+  requires kok(k) && n <= FNAME_MAX
+{
+  if n < CG_ROOT_LEN || !xfer_is(k.fs.xfer, 0, CG_ROOT_LEN, "sys/fs/cgroup") {
+    return false;
+  }
+  return n == CG_ROOT_LEN || bget(k.fs.xfer, CG_ROOT_LEN) == 47;
+}
+
+/// What the first n bytes of the transfer buffer name.
+fn cg_walk(k: &Kernel, n: u64) -> CgRef
+  requires kok(k) && n <= FNAME_MAX
+  ensures result.slot < CG_N && result.f < CGF_N
+{
+  let none = CgRef { kind: CGK_NONE, slot: 0, f: 0 };
+  if n < CG_ROOT_LEN || !cg_under(k, n) {
+    return none;
+  }
+  let mut cur = 0;
+  let mut at = CG_ROOT_LEN + 1;
+  let mut i = 0;
+  while at < n && i < CG_N
+    invariant CG_ROOT_LEN < at && at <= n + 1 && n <= FNAME_MAX && cur < CG_N && i <= CG_N && kok(k)
+  {
+    let e = comp_end(k.fs.xfer, at, n);
+    if e == at {
+      return none;                          // "//"
+    }
+    let ch = cg_child(k, cur, k.fs.xfer, at, e);
+    if ch < CG_N {
+      cur = ch;
+      at = e + 1;
+      i = i + 1;
+    } else {
+      let f = cgf_at(k.fs.xfer, at, e);
+      if f < CGF_N && e == n {
+        return CgRef { kind: CGK_FILE, slot: cur, f: f };
+      }
+      return none;
+    }
+  }
+  return CgRef { kind: CGK_DIR, slot: cur, f: 0 };
+}
+
+/// The directory description for the name in the transfer buffer if it is
+/// a cgroup, else NO_FILE.
+fn cg_dir(k: &Kernel, n: u64) -> u64
+  requires kok(k) && n <= FNAME_MAX
+{
+  let r = cg_walk(k, n);
+  if r.kind == CGK_DIR {
+    return DIR_CG + r.slot;
+  }
+  return NO_FILE;
+}
+
+/// The /proc-style device of the control file the name in the transfer
+/// buffer names, or 0.
+fn cg_file(k: &Kernel, n: u64) -> u64
+  requires kok(k) && n <= FNAME_MAX
+{
+  let r = cg_walk(k, n);
+  if r.kind == CGK_FILE && r.slot < CG_N && r.f < CGF_N {
+    return PROC_DEV + PSYS + SY_CG + r.slot * CGF_N + r.f;
+  }
+  return 0;
+}
+
+/// The /proc file or control file the name in the transfer buffer is, or 0.
+fn proc_node(k: &Kernel, n: u64) -> u64
+  requires kok(k) && n <= FNAME_MAX
+{
+  let p = proc_file(k.procs, k.fs.xfer, n);
+  if p != 0 {
+    return p;
+  }
+  return cg_file(k, n);
+}
+
+/// Is /proc device d a control file?
+fn is_cg_file(d: u64) -> bool
+  ensures result == (d >= PROC_DEV + PSYS + SY_CG && d < PROC_DEV + PSYS + SY_CG + CG_N * CGF_N)
+{
+  return d >= PROC_DEV + PSYS + SY_CG && d < PROC_DEV + PSYS + SY_CG + CG_N * CGF_N;
+}
+
+/// The cgroup of control file d.
+fn cgd_slot(d: u64) -> u64
+  requires d >= PROC_DEV + PSYS + SY_CG && d < PROC_DEV + PSYS + SY_CG + CG_N * CGF_N
+  ensures result < CG_N
+{
+  return (d - PROC_DEV - PSYS - SY_CG) / CGF_N;
+}
+
+/// Which control file d is.
+fn cgd_f(d: u64) -> u64
+  ensures result < CGF_N
+{
+  if d < PROC_DEV + PSYS + SY_CG {
+    return 0;
+  }
+  return (d - PROC_DEV - PSYS - SY_CG) % CGF_N;
+}
+
+/// What stat says about cgroup directory d.
+fn cg_dir_meta(d: u64) -> Meta {
+  return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 8192 + d % 64, mtime: 0, own: 0 };
+}
+
+/// What stat says about control file d: rw-r--r-- if root writes it.
+fn cg_file_meta(d: u64) -> Meta {
+  let mut mode = S_IFREG_RO;
+  if cgf_writable(cgd_f(d)) {
+    mode = 0x81A4;
+  }
+  return Meta { ok: true, mode: mode, size: 0, ino: INO_PROC + 8192 + 64 + d % 4096, mtime: 0, own: 0 };
+}
+
+/// Entry i of cgroup s's directory: its control files, then its children.
+fn cg_entry(k: &mut Kernel, s: u64, i: u64) -> Ent
+  requires kok(k) && s < CG_N
+  ensures kok(k) && result.len <= XFER
+{
+  if i < CGF_N {
+    return Ent { len: name_out(&mut k.fs.xfer, cgf_name(i)), dir: false, end: false };
+  }
+  let mut want = i - CGF_N;
+  let mut c = 1;
+  while c < CG_N
+    invariant 1 <= c && c <= CG_N && kok(k)
+  {
+    if cg_used(k, c) && cg_parent(k, c) == s {
+      if want == 0 {
+        let l = smaller(cg_get(k, c, CGW_NLEN), CG_NAME_MAX);
+        let mut j = 0;
+        while j < l
+          invariant j <= l && l <= CG_NAME_MAX && c < CG_N && kok(k)
+        {
+          bset(&mut k.fs.xfer, j, cast[u8](cg_get(k, c, CGW_NAME + j) % 256));
+          j = j + 1;
+        }
+        return Ent { len: l, dir: true, end: false };
+      }
+      want = want - 1;
+    }
+    c = c + 1;
+  }
+  return Ent { len: 0, dir: false, end: true };
+}
+
+// ---------------------------------------------------------------- text
+
+/// The controllers cgroup s has: what its parent hands down.
+fn cg_avail(k: &Kernel, s: u64) -> u64
+  requires kok(k) && s < CG_N
+  ensures result <= CG_ALL
+{
+  if s == 0 {
+    return CG_ALL;
+  }
+  return cg_get(k, cg_parent(k, s), CGW_SUB) % (CG_ALL + 1);
+}
+
+/// "cpu memory pids" for the controllers in bits.
+fn put_ctrls(o: &mut Bytes, at: u64, bits: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = at;
+  let mut first = true;
+  if bits & 1 != 0 {
+    a = put_s(&mut o, a, "cpu");
+    first = false;
+  }
+  if bits & 2 != 0 {
+    if !first {
+      a = put_c(&mut o, a, 32);
+    }
+    a = put_s(&mut o, a, "memory");
+    first = false;
+  }
+  if bits & 4 != 0 {
+    if !first {
+      a = put_c(&mut o, a, 32);
+    }
+    a = put_s(&mut o, a, "pids");
+  }
+  return put_c(&mut o, a, 10);
+}
+
+/// The members of cgroup s, one id a line, as process obs sees them;
+/// only thread group leaders unless threads.
+fn cg_members(k: &Kernel, obs: u64, s: u64, threads: bool, o: &mut Bytes) -> u64
+  requires kok(k) && obs < NPROC && s < CG_N && blen(o) == PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = 0;
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+  {
+    if cg_live(k, q) && cg_of(k, q) == s && (threads || tgid(k.procs, q) == q) {
+      let v = vpid_of(k, obs, q);
+      if v != 0 {
+        a = put_n(&mut o, a, v);
+        a = put_c(&mut o, a, 10);
+      }
+    }
+    q = q + 1;
+  }
+  return a;
+}
+
+/// A limit stored +1 (0: max).
+fn put_lim(o: &mut Bytes, at: u64, w: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  if w == 0 {
+    return put_s(&mut o, at, "max\n");
+  }
+  let a = put_n(&mut o, at, w - 1);
+  return put_c(&mut o, a, 10);
+}
+
+/// Text of control file d, read by process pid.
+fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
+  requires kok(k) && pid < NPROC && d >= PROC_DEV + PSYS + SY_CG && d < PROC_DEV + PSYS + SY_CG + CG_N * CGF_N && blen(o) == PROC_OUT
+  ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let s = cgd_slot(d);
+  let f = cgd_f(d);
+  if !cg_used(k, s) {
+    return 0;
+  }
+  if f == 0 || f == 6 {
+    return cg_members(k, pid, s, f == 6, &mut o);
+  }
+  if f == 1 {
+    return put_ctrls(&mut o, 0, cg_avail(k, s));
+  }
+  if f == 2 {
+    return put_ctrls(&mut o, 0, cg_get(k, s, CGW_SUB) % (CG_ALL + 1));
+  }
+  if f == 3 {
+    if cg_tasks(k, s) > 0 {
+      return put_s(&mut o, 0, "populated 1\nfrozen 0\n");
+    }
+    return put_s(&mut o, 0, "populated 0\nfrozen 0\n");
+  }
+  if f == 5 {
+    return put_s(&mut o, 0, "domain\n");
+  }
+  if f == 7 {
+    let mut a = put_s(&mut o, 0, "nr_descendants ");
+    a = put_n(&mut o, a, cg_descendants(k, s));
+    return put_s(&mut o, a, "\nnr_dying_descendants 0\n");
+  }
+  if f == 8 {
+    return put_lim(&mut o, 0, cg_get(k, s, CGW_PIDS));
+  }
+  if f == 9 {
+    let a = put_n(&mut o, 0, cg_tasks(k, s));
+    return put_c(&mut o, a, 10);
+  }
+  if f == 10 {
+    return put_lim(&mut o, 0, cg_get(k, s, CGW_MEM));
+  }
+  if f == 11 {
+    let a = put_n(&mut o, 0, cg_mem_current(k, s));
+    return put_c(&mut o, a, 10);
+  }
+  if f == 12 {
+    return put_s(&mut o, 0, "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n");
+  }
+  if f == 13 {
+    let q = cg_get(k, s, CGW_CPUQ);
+    let mut p = cg_get(k, s, CGW_CPUP);
+    if p == 0 {
+      p = 100000;
+    }
+    let mut a = 0;
+    if q == 0 {
+      a = put_s(&mut o, 0, "max ");
+    } else {
+      a = put_n(&mut o, 0, q - 1);
+      a = put_c(&mut o, a, 32);
+    }
+    a = put_n(&mut o, a, p);
+    return put_c(&mut o, a, 10);
+  }
+  if f == 14 {
+    let mut w = cg_get(k, s, CGW_WEIGHT);
+    if w == 0 {
+      w = 100;
+    }
+    let a = put_n(&mut o, 0, w);
+    return put_c(&mut o, a, 10);
+  }
+  if f == 15 {
+    return put_s(&mut o, 0, "max\n");
+  }
+  return 0;                                 // cgroup.kill is write-only
+}
+
+/// memory.current of cgroup s: nothing is accounted yet.
+fn cg_mem_current(k: &Kernel, s: u64) -> u64
+  requires kok(k) && s < CG_N
+{
+  return 0;
+}
+
+/// Text of /proc/PID/cgroup: "0::/path".
+fn cg_proc_text(k: &Kernel, p: u64, o: &mut Bytes) -> u64
+  requires kok(k) && p < NPROC && blen(o) == PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  // The path is built from the leaf up, so collect the chain first.
+  let mut chain = balloc(CG_N);
+  let mut depth = 0;
+  let mut c = cg_of(k, p);
+  while c != 0 && depth < CG_N
+    invariant depth <= CG_N && c < CG_N && blen(chain) == CG_N && kok(k)
+  {
+    bset(&mut chain, depth, cast[u8](c));
+    depth = depth + 1;
+    c = cg_parent(k, c);
+  }
+  let mut a = put_s(&mut o, 0, "0::/");
+  let mut i = depth;
+  while i > 0
+    invariant i <= depth && depth <= CG_N && blen(chain) == CG_N && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+  {
+    i = i - 1;
+    let s = smaller(cast[u64](bget(chain, i)), CG_N - 1);
+    let l = smaller(cg_get(k, s, CGW_NLEN), CG_NAME_MAX);
+    let mut j = 0;
+    while j < l
+      invariant j <= l && l <= CG_NAME_MAX && s < CG_N && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+    {
+      a = put_c(&mut o, a, cast[u8](cg_get(k, s, CGW_NAME + j) % 256));
+      j = j + 1;
+    }
+    if i > 0 {
+      a = put_c(&mut o, a, 47);
+    }
+  }
+  bfree(chain);
+  return put_c(&mut o, a, 10);
+}
+
+// ---------------------------------------------------------------- writing
+
+/// A number from x[at..n] (blanks around, then digits): below CG_BIG, or
+/// CG_BIG for none or too many. The text "max" is CG_BIG - 1.
+struct Big { v: u64, ok: bool }
+
+fn big_at(x: &Bytes, at: u64, n: u64) -> Big
+  requires n <= blen(x) && at <= n
+{
+  let mut i = at;
+  while i < n && (bget(x, i) == 32 || bget(x, i) == 9)
+    invariant at <= i && i <= n && n <= blen(x)
+  {
+    i = i + 1;
+  }
+  if i + 3 <= n && xfer_is(x, i, i + 3, "max") {
+    return Big { v: CG_BIG - 1, ok: true };
+  }
+  let from = i;
+  let mut v = 0;
+  while i < n && bget(x, i) >= 48 && bget(x, i) <= 57 && v < CG_BIG
+    invariant from <= i && i <= n && n <= blen(x) && v <= CG_BIG * 10
+  {
+    v = v * 10 + cast[u64](bget(x, i)) - 48;
+    i = i + 1;
+  }
+  if i == from || v >= CG_BIG {
+    return Big { v: CG_BIG, ok: false };
+  }
+  return Big { v: v, ok: true };
+}
+
+/// Whether x[at..n] is only blanks and newlines.
+fn only_blank(x: &Bytes, at: u64, n: u64) -> bool
+  requires n <= blen(x) && at <= n
+{
+  let mut i = at;
+  while i < n
+    invariant at <= i && i <= n && n <= blen(x)
+  {
+    let c = bget(x, i);
+    if c != 32 && c != 9 && c != 10 {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+/// Where the number big_at read from at ends.
+fn big_end(x: &Bytes, at: u64, n: u64) -> u64
+  requires n <= blen(x) && at <= n
+  ensures at <= result && result <= n
+{
+  let mut i = at;
+  while i < n && (bget(x, i) == 32 || bget(x, i) == 9)
+    invariant at <= i && i <= n && n <= blen(x)
+  {
+    i = i + 1;
+  }
+  if i + 3 <= n && xfer_is(x, i, i + 3, "max") {
+    return i + 3;
+  }
+  while i < n && bget(x, i) >= 48 && bget(x, i) <= 57
+    invariant at <= i && i <= n && n <= blen(x)
+  {
+    i = i + 1;
+  }
+  return i;
+}
+
+/// Moves the task group of row q into cgroup dest.
+fn cg_move(k: &mut Kernel, q: u64, dest: u64)
+  requires kok(k) && q < NPROC && dest < CG_N
+  ensures kok(k)
+{
+  let g = tgid(k.procs, q);
+  let mut r = 1;
+  while r < NPROC
+    invariant 1 <= r && r <= NPROC && kok(k)
+  {
+    if cg_live(k, r) && (r == q || in_group(k.procs, r, g)) {
+      k.mns = set(k.mns, nsk_at(NSK_CG, r), dest);
+    }
+    r = r + 1;
+  }
+}
+
+/// Tasks in the group of row q.
+fn cg_group_tasks(k: &Kernel, q: u64) -> u64
+  requires kok(k) && q < NPROC
+  ensures result <= NPROC
+{
+  let g = tgid(k.procs, q);
+  let mut n = 0;
+  let mut r = 1;
+  while r < NPROC
+    invariant 1 <= r && r <= NPROC && n < r && kok(k)
+  {
+    if cg_live(k, r) && (r == q || in_group(k.procs, r, g)) {
+      n = n + 1;
+    }
+    r = r + 1;
+  }
+  return n;
+}
+
+/// Write of a process id to cgroup.procs or cgroup.threads of cgroup s by
+/// pid: the process moves, with its threads.
+fn cg_write_procs(k: &mut Kernel, pid: u64, s: u64, v: u64) -> u64
+  requires kok(k) && pid < NPROC && s < CG_N
+  ensures kok(k)
+{
+  let mut q = pid;
+  if v != 0 {
+    q = kpid_of(k, pid, v);
+  }
+  if q >= NPROC || q == 0 || !cg_live(k, q) {
+    return ESRCH;
+  }
+  let from = cg_of(k, q);
+  if from == s {
+    return 0;
+  }
+  // Each cgroup on the way up from the destination, that the process is
+  // not already below, must have room for its tasks.
+  let add = cg_group_tasks(k, q);
+  let mut c = s;
+  let mut i = 0;
+  while i < CG_N
+    invariant i <= CG_N && c < CG_N && kok(k)
+  {
+    let lim = cg_get(k, c, CGW_PIDS);
+    if lim != 0 && !cg_in(k, from, c) && cg_tasks(k, c) + add > lim - 1 {
+      return EAGAIN;
+    }
+    if c == 0 {
+      i = CG_N;
+    } else {
+      c = cg_parent(k, c);
+      i = i + 1;
+    }
+  }
+  cg_move(&mut k, q, s);
+  return 0;
+}
+
+/// SIGKILL to every task in cgroup s and below.
+fn cg_kill(k: &mut Kernel, s: u64)
+  requires kok(k) && s < CG_N
+  ensures kok(k)
+{
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && kok(k)
+  {
+    if cg_live(k, q) && cg_in(k, cg_of(k, q), s) {
+      post_sig(&mut k, q, 9);
+    }
+    q = q + 1;
+  }
+}
+
+/// Write of "+cpu -memory ..." to cgroup.subtree_control of s.
+fn cg_write_sub(k: &mut Kernel, s: u64, n: u64) -> u64
+  requires kok(k) && s < CG_N && n <= 64
+  ensures kok(k)
+{
+  let mut bits = cg_get(k, s, CGW_SUB) % (CG_ALL + 1);
+  let avail = cg_avail(k, s);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= 64 && kok(k)
+  {
+    let c = bget(k.fs.xfer, i);
+    if c == 32 || c == 9 || c == 10 {
+      i = i + 1;
+    } else {
+      if (c != 43 && c != 45) || i + 1 >= n {
+        return EINVAL;
+      }
+      let e = comp_end_ws(k.fs.xfer, i + 1, n);
+      let mut b = 0;
+      if xfer_is(k.fs.xfer, i + 1, e, "cpu") {
+        b = 1;
+      } else if xfer_is(k.fs.xfer, i + 1, e, "memory") {
+        b = 2;
+      } else if xfer_is(k.fs.xfer, i + 1, e, "pids") {
+        b = 4;
+      }
+      if b == 0 {
+        return EINVAL;                      // io and the rest: not here
+      }
+      if c == 43 {
+        if avail & b == 0 {
+          return ENOENT;                    // the parent does not hand it down
+        }
+        bits = bits | b;
+      } else {
+        // Not while a child below uses it.
+        let mut ch = 1;
+        while ch < CG_N
+          invariant 1 <= ch && ch <= CG_N && kok(k)
+        {
+          if cg_used(k, ch) && cg_parent(k, ch) == s && cg_get(k, ch, CGW_SUB) & b != 0 {
+            return EBUSY;
+          }
+          ch = ch + 1;
+        }
+        bits = bits & !b;
+      }
+      i = e;
+    }
+  }
+  cg_put(&mut k, s, CGW_SUB, bits);
+  return 0;
+}
+
+/// Where the word starting at a ends (the next blank or newline, or n).
+fn comp_end_ws(x: &Bytes, a: u64, n: u64) -> u64
+  requires a <= n && n <= blen(x)
+  ensures a <= result && result <= n
+{
+  let mut e = a;
+  while e < n && bget(x, e) != 32 && bget(x, e) != 9 && bget(x, e) != 10
+    invariant a <= e && e <= n && n <= blen(x)
+  {
+    e = e + 1;
+  }
+  return e;
+}
+
+/// write(2) to control file d by process pid: n bytes at va. Returns n or
+/// -errno.
+fn cg_write(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && d >= PROC_DEV + PSYS + SY_CG && d < PROC_DEV + PSYS + SY_CG + CG_N * CGF_N
+  ensures kok(k)
+{
+  let s = cgd_slot(d);
+  let f = cgd_f(d);
+  if !cgf_writable(f) || !cg_used(k, s) {
+    return EINVAL;
+  }
+  if n == 0 || n > 64 {
+    return EINVAL;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, n) != n {
+    return EFAULT;
+  }
+  if f == 2 {
+    let e = cg_write_sub(&mut k, s, n);
+    if e != 0 {
+      return e;
+    }
+    return n;
+  }
+  let b = big_at(k.fs.xfer, 0, n);
+  let be = big_end(k.fs.xfer, 0, n);
+  if !b.ok {
+    return EINVAL;
+  }
+  if f == 13 {
+    // "max" or a quota, then an optional period.
+    let mut period = cg_get(k, s, CGW_CPUP);
+    if !only_blank(k.fs.xfer, be, n) {
+      let p = big_at(k.fs.xfer, be, n);
+      let pe = big_end(k.fs.xfer, be, n);
+      if !p.ok || p.v < 1000 || p.v > 1000000 || !only_blank(k.fs.xfer, pe, n) {
+        return EINVAL;
+      }
+      period = p.v;
+    }
+    if b.v != CG_BIG - 1 && (b.v < 1000 || b.v >= 0x100000000) {
+      return EINVAL;
+    }
+    if b.v == CG_BIG - 1 {
+      cg_put(&mut k, s, CGW_CPUQ, 0);
+    } else {
+      cg_put(&mut k, s, CGW_CPUQ, b.v + 1);
+    }
+    cg_put(&mut k, s, CGW_CPUP, period);
+    return n;
+  }
+  if !only_blank(k.fs.xfer, be, n) {
+    return EINVAL;
+  }
+  if f == 0 || f == 6 {
+    if b.v == CG_BIG - 1 || b.v >= 0x100000000 {
+      return EINVAL;
+    }
+    let e = cg_write_procs(&mut k, pid, s, b.v);
+    if e != 0 {
+      return e;
+    }
+    return n;
+  }
+  if f == 4 {
+    if b.v != 1 {
+      return EINVAL;
+    }
+    cg_kill(&mut k, s);
+    return n;
+  }
+  if f == 8 || f == 10 {
+    let mut w = CGW_PIDS;
+    if f == 10 {
+      w = CGW_MEM;
+    }
+    if b.v != CG_BIG - 1 && b.v >= 0x4000000000000000 {
+      return EINVAL;
+    }
+    if b.v == CG_BIG - 1 {
+      cg_put(&mut k, s, w, 0);
+    } else {
+      cg_put(&mut k, s, w, b.v + 1);
+    }
+    return n;
+  }
+  if f == 14 {
+    if b.v < 1 || b.v > 10000 {
+      return EINVAL;
+    }
+    cg_put(&mut k, s, CGW_WEIGHT, b.v);
+    return n;
+  }
+  return EINVAL;
+}
+
+// ---------------------------------------------------------------- mkdir, rmdir
+
+/// mkdir of the cgroup whose name is in the first n bytes of the transfer
+/// buffer (cg_under): 0 or -errno. Only root.
+fn cg_mkdir(k: &mut Kernel, pid: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+  ensures kok(k)
+{
+  if n <= CG_ROOT_LEN {
+    return EEXIST;
+  }
+  let mut a = n;                            // where the last name starts
+  while a > CG_ROOT_LEN + 1 && bget(k.fs.xfer, a - 1) != 47
+    invariant CG_ROOT_LEN + 1 <= a && a <= n && n <= FNAME_MAX && kok(k)
+  {
+    a = a - 1;
+  }
+  if a <= CG_ROOT_LEN {
+    return EEXIST;
+  }
+  let r = cg_walk(k, n);
+  if r.kind != CGK_NONE {
+    return EEXIST;
+  }
+  // The parent is everything before the last "/".
+  let par = cg_walk(k, a - 1);
+  if par.kind != CGK_DIR {
+    return ENOENT;
+  }
+  if fs_id(k.procs, pid, false) != 0 {
+    return EACCES;
+  }
+  let l = n - a;
+  if l == 0 || l > CG_NAME_MAX {
+    return ENAMETOOLONG;
+  }
+  if cgf_at(k.fs.xfer, a, n) < CGF_N {
+    return EEXIST;                          // a control file's name
+  }
+  let mut free = CG_N;
+  let mut c = 1;
+  while c < CG_N
+    invariant 1 <= c && c <= CG_N && free <= CG_N && kok(k)
+  {
+    if free == CG_N && !cg_used(k, c) {
+      free = c;
+    }
+    c = c + 1;
+  }
+  if free >= CG_N {
+    return ENOSPC;
+  }
+  let mut j = 0;
+  while j < l
+    invariant j <= l && l <= CG_NAME_MAX && a + l == n && n <= FNAME_MAX && free < CG_N && kok(k)
+  {
+    cg_put(&mut k, free, CGW_NAME + j, cast[u64](bget(k.fs.xfer, a + j)));
+    j = j + 1;
+  }
+  cg_put(&mut k, free, CGW_NLEN, l);
+  cg_put(&mut k, free, CGW_PARENT, par.slot);
+  cg_put(&mut k, free, CGW_PIDS, 0);
+  cg_put(&mut k, free, CGW_MEM, 0);
+  cg_put(&mut k, free, CGW_SUB, 0);
+  cg_put(&mut k, free, CGW_CPUQ, 0);
+  cg_put(&mut k, free, CGW_CPUP, 0);
+  cg_put(&mut k, free, CGW_WEIGHT, 0);
+  cg_put(&mut k, free, CGW_USED, 1);
+  return 0;
+}
+
+/// rmdir of the cgroup in the first n bytes of the transfer buffer.
+fn cg_rmdir(k: &mut Kernel, pid: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+  ensures kok(k)
+{
+  let r = cg_walk(k, n);
+  if r.kind == CGK_FILE {
+    return ENOTDIR;
+  }
+  if r.kind != CGK_DIR {
+    return ENOENT;
+  }
+  if r.slot == 0 {
+    return EBUSY;
+  }
+  if fs_id(k.procs, pid, false) != 0 {
+    return EACCES;
+  }
+  if cg_children(k, r.slot) > 0 || cg_tasks(k, r.slot) > 0 {
+    return EBUSY;
+  }
+  cg_put(&mut k, r.slot, CGW_USED, 0);
+  return 0;
+}

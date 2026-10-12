@@ -84,6 +84,9 @@ fn fs_type(k: &mut Kernel, pid: u64, va: u64) -> u64
   if type_is(&mut k, pid, va, "devtmpfs") {
     return FST_NS + MK_DEV;
   }
+  if type_is(&mut k, pid, va, "cgroup2") {
+    return FST_NS + MK_CGROUP;
+  }
   if type_is(&mut k, pid, va, "bstdisk3") {
     return FST_BSTDISK;
   }

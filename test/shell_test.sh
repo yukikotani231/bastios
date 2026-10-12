@@ -364,6 +364,14 @@ steps = [
     # and a file she makes is hers outside. Without a map she is 65534.
     ("su alice -c 'unshare -U -r sh -c \"id -u; id -g; ls -ln /etc/shadow; cat /etc/shadow; echo s=\\$?; touch /home/alice/f; ls -ln /home/alice/f; cat /proc/self/uid_map /proc/self/setgroups\"; ls -ln /home/alice/f; unshare -U id -u; unshare -U -r -u sh -c \"hostname box; hostname\"; unshare -U -r unshare -U true; echo n=$?'",
      [b"\r\n0\r\n0\r\n", b"65534    65534", b"Permission denied", b"s=1", b"0        0", b"         0       1000          1\r\ndeny", b"1000     1000", b"\r\n65534\r\nbox\r\n", b"n=1"], b"\n# "),
+    # Control groups (src/lxcgroup.bastio): a group is made with mkdir, a
+    # shell moves into it, and pids.max stops the fork that would pass it;
+    # cgroup.kill empties a group so that rmdir works, and non-root users may
+    # not change anything.
+    ("mkdir /sys/fs/cgroup/t; echo +pids > /sys/fs/cgroup/cgroup.subtree_control; echo 3 > /sys/fs/cgroup/t/pids.max; cat /sys/fs/cgroup/t/pids.max /sys/fs/cgroup/t/cgroup.controllers; ash -c 'echo $$ > /sys/fs/cgroup/t/cgroup.procs; cat /proc/self/cgroup; sleep 30 & sleep 30 & sleep 30 & echo f=$?'",
+     [b"\r\n3\r\npids\r\n", b"0::/t", b"can't fork"], b"\n# "),
+    ("echo 1 > /sys/fs/cgroup/t/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/t; echo r=$?; mkdir /sys/fs/cgroup/u; rmdir /sys/fs/cgroup/u; echo r=$?; su alice -c 'mkdir /sys/fs/cgroup/x; echo pids.max > /dev/null; echo 5 > /sys/fs/cgroup/pids.max; echo w=$?'",
+     [b"r=0", b"r=0", b"Permission denied", b"w=1"], b"\n# "),
     ("echo root:pw | chpasswd; read l < /etc/shadow; case $l in 'root:$6$'*) echo sha512;; esac; su alice -c 'echo no | su -c id root; echo w=$?; echo pw | su -c id root'",
      [b"\r\nsha512\r\n", b"w=1", b"uid=0(root) gid=0(root)"], b"\n# "),
     # (BusyBox keeps the old /etc files as NAME-: gone, so no pages stay.)

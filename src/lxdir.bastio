@@ -49,6 +49,12 @@ fn dir_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
     }
     return vfs_entry(&mut k, VDIR_ROOT, i - 2);
   }
+  if dir >= DIR_CG {
+    if dir - DIR_CG >= CG_N {
+      return Ent { len: 0, dir: false, end: true };
+    }
+    return cg_entry(&mut k, dir - DIR_CG, i);
+  }
   if dir >= DIR_PROC {
     return proc_entry(&mut k, pid, dir, i);
   }
@@ -306,6 +312,10 @@ fn dir_at(k: &mut Kernel, n: u64) -> u64
   if pd != NO_FILE {
     return pd;
   }
+  let cd = cg_dir(k, n);
+  if cd != NO_FILE {
+    return cd;
+  }
   let d = vfs_dir_lookup(&mut k.fs, n);
   if d == NO_FILE {
     return NO_FILE;
@@ -509,6 +519,9 @@ fn lx_mkdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64) -> u64
   if n == 0 || is_bin(k.fs.xfer, n) || vfs_lookup(&mut k.fs, n) != NO_FILE || vfs_dir_lookup(&mut k.fs, n) != NO_FILE {
     return EEXIST;
   }
+  if cg_under(k, n) {
+    return cg_mkdir(&mut k, pid, n);        // a control group (src/lxcgroup.bastio)
+  }
   let em = meta_keep(&mut k, n, n);
   if em.ok {
     return EEXIST;                          // /dev, /proc and the like
@@ -578,6 +591,9 @@ fn lx_rmdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
       return ENOTDIR;
     }
     return ENOENT;
+  }
+  if d >= DIR_CG {
+    return cg_rmdir(&mut k, pid, n);        // a control group (src/lxcgroup.bastio)
   }
   if d < DIR_VFS || d >= DIR_PROC || d - DIR_VFS == VDIR_ROOT || d - DIR_VFS == VDIR_DISK || d - DIR_VFS == VDIR_LO {
     return EBUSY;                           // "/", "/bin" and "/disk" stay

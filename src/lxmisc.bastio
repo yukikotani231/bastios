@@ -76,6 +76,7 @@ const PR_SET_NAME: u64 = 15;
 const PR_GET_NAME: u64 = 16;
 const RAMFS_MAGIC: u64 = 0x858458F6;
 const TMPFS_MAGIC: u64 = 0x01021994;
+const CGROUP2_MAGIC: u64 = 0x63677270;
 const BSTDISK_MAGIC: u64 = 0x42535444;  // "BSTD": a BastiOS disk file system (src/diskfs.bastio)
 const STATFS_SIZE: u64 = 120;
 const SYSINFO_SIZE: u64 = 112;
@@ -777,6 +778,8 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
       r = k.perr;
     } else if !path_there(&mut k, pn) {
       r = ENOENT;
+    } else if cg_under(k, pn) {
+      r = lx_statfs(&mut k, pid, b, CGROUP2_MAGIC);
     } else if vfs_in_mount(&mut k.fs, pn, false) {
       r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC);
     } else if on_disk(k.fs, pn) || (pn + 1 == DISK_PREFIX && xfer_is(k.fs.xfer, 0, pn, "disk")) {
@@ -788,6 +791,8 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     let d = fd_look(k, pid, a);
     if d.kind == K_BAD {
       r = EBADF;
+    } else if (d.kind == K_DEV && is_cg_file(d.x)) || (d.kind == K_DIR && d.x >= DIR_CG) {
+      r = lx_statfs(&mut k, pid, b, CGROUP2_MAGIC);
     } else if d.kind == K_FILE && vfs_file_in_mount(&mut k.fs, vfs_row_file(k.fs, d.x)) {
       r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC);
     } else if d.kind == K_FILE && vfs_row_file(k.fs, d.x) >= NFILES && vfs_row_file(k.fs, d.x) < NFILES + DSLOTS {

@@ -24,6 +24,9 @@ fn lx_fork(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if lim != 0 {
     return lim;                             // -EAGAIN: RLIMIT_NPROC
   }
+  if !cg_fork_ok(k, pid) {
+    return EAGAIN;                          // a control group's pids.max (src/lxcgroup.bastio)
+  }
   if !pidns_room(k, pid) {
     return ENOMEM;                          // the init of its PID namespace has ended
   }
@@ -64,6 +67,9 @@ fn lx_vfork_vm(k: &mut Kernel, mmu: &Mmu, pid: u64, stack: u64) -> u64
 {
   if !pidns_room(k, pid) {
     return ENOMEM;                          // the init of its PID namespace has ended
+  }
+  if !cg_fork_ok(k, pid) {
+    return EAGAIN;                          // a control group's pids.max (src/lxcgroup.bastio)
   }
   let c = new_pid(&mut k);
   if c == 0 {
@@ -376,7 +382,7 @@ fn src_named(k: &mut Kernel, pid: u64, n: u64) -> Src
   }
   let mut pf = 0;
   if n <= XFER {
-    pf = proc_file(k.procs, k.fs.xfer, n);
+    pf = proc_node(k, n);
   }
   if is_exe_file(pf) {
     return exe_src(&mut k, (pf - PROC_DEV) / 16);
@@ -1046,7 +1052,7 @@ fn lx_stat(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, buf: u64, follow: bo
   if n == NO_RESULT {
     return k.perr;
   }
-  let pf = proc_file(k.procs, k.fs.xfer, n);
+  let pf = proc_node(k, n);
   let mut m = path_meta(&mut k, n);
   if !follow && pf != 0 && is_ns_file(pf) {
     m = nsf_link_meta(pf);                  // lstat: the /proc/PID/ns link itself
@@ -1097,12 +1103,15 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
   if dev != DEV_NONE {
     return dev_meta(dev);
   }
-  let pf = proc_file(k.procs, k.fs.xfer, n);
+  let pf = proc_node(k, n);
   if pf != 0 && is_ns_file(pf) {
     return nsf_meta(k, pf);                 // the namespace's nsfs file (src/lxnsk.bastio)
   }
   if pf != 0 && is_um_file(pf) {
     return um_meta(k, pf);                  // src/lxuser.bastio
+  }
+  if pf != 0 && is_cg_file(pf) {
+    return cg_file_meta(pf);                // src/lxcgroup.bastio
   }
   if pf != 0 {
     return proc_meta(pf);
@@ -1131,6 +1140,9 @@ fn dir_meta(k: &mut Kernel, dir: u64) -> Meta
   requires kok(k)
   ensures kok(k)
 {
+  if dir >= DIR_CG {
+    return cg_dir_meta(dir - DIR_CG);
+  }
   if dir >= DIR_PROC {
     return proc_dir_meta(dir);
   }
@@ -1199,6 +1211,8 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
     m = nsf_fd_meta(k, pid, fd, d.x);       // src/lxnsk.bastio
   } else if d.kind == K_DEV && is_um_file(d.x) {
     m = um_meta(k, d.x);
+  } else if d.kind == K_DEV && is_cg_file(d.x) {
+    m = cg_file_meta(d.x);
   } else if d.kind == K_DEV {
     m = dev_meta(d.x);
   } else if d.kind == K_FILE {
