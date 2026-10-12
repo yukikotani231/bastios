@@ -25,8 +25,17 @@
 // seccomp_data, the scratch words and the program; a program that tries
 // anyway is killed at that instruction. Jumps only go forward, so a run ends.
 //
-// Not done: SECCOMP_RET_USER_NOTIF and SECCOMP_FILTER_FLAG_NEW_LISTENER (a
-// notifier file descriptor), SECCOMP_RET_TRACE (no tracer: -ENOSYS, as
+// SECCOMP_RET_USER_NOTIF: a filter loaded with SECCOMP_FILTER_FLAG_NEW_LISTENER
+// has a notifier descriptor (kind OF_SECCOMP, x the filter). When that
+// filter's action wins, the calling process records a notification in its
+// own words (SP_ST..SP_FL) and sleeps, its call restarting on each wake. The
+// supervisor's SECCOMP_IOCTL_NOTIF_RECV hands out the oldest notification
+// that has not been received (it sleeps for one unless the descriptor is
+// nonblocking), NOTIF_SEND answers it (an errno, a value, or CONTINUE to run
+// the call after all), and NOTIF_ID_VALID says whether the caller still waits.
+// Closing the descriptor ends every wait with ENOSYS.
+//
+// Not done: SECCOMP_IOCTL_NOTIF_ADDFD and NOTIF_SET_FLAGS, SECCOMP_RET_TRACE (no tracer: -ENOSYS, as
 // Linux gives without one), the load-time check that scratch memory is
 // written before it is read (the interpreter starts every run with it
 // zeroed), SECCOMP_RET_LOG (allowed, not logged), and siginfo details for
@@ -44,7 +53,7 @@ const SC_SET_STRICT: u64 = 0;
 const SC_SET_FILTER: u64 = 1;
 const SC_GET_ACTION: u64 = 2;
 const SC_FLAG_TSYNC: u64 = 1;
-const SC_FLAG_OK: u64 = 7;                 // TSYNC, LOG, SPEC_ALLOW
+const SC_FLAG_OK: u64 = 15;                // TSYNC, LOG, SPEC_ALLOW, NEW_LISTENER
 
 const SC_ARCH: u64 = 0xC000003E;           // AUDIT_ARCH_X86_64
 
@@ -56,6 +65,21 @@ const SCA_USER_NOTIF: u64 = 0x7fc00000;
 const SCA_TRACE: u64 = 0x7ff00000;
 const SCA_LOG: u64 = 0x7ffc0000;
 const SCA_ALLOW: u64 = 0x7fff0000;
+
+const SC_FLAG_LISTENER: u64 = 8;           // SECCOMP_FILTER_FLAG_NEW_LISTENER
+const SC_IOC_RECV: u64 = 0xC0502100;       // SECCOMP_IOCTL_NOTIF_RECV
+const SC_IOC_SEND: u64 = 0xC0182101;       // SECCOMP_IOCTL_NOTIF_SEND
+const SC_IOC_VALID: u64 = 0x40082102;      // SECCOMP_IOCTL_NOTIF_ID_VALID
+
+// A process's notification, in its words from SP_ST: 0 none, 1 waiting to be
+// received, 2 received, 3 answered; its id; the filter + 1 that issued it;
+// then the answer (value, error, flags).
+const SP_ST: u64 = 2;
+const SP_ID: u64 = 3;
+const SP_F: u64 = 4;
+const SP_VAL: u64 = 5;
+const SP_ERR: u64 = 6;
+const SP_FL: u64 = 7;
 
 const SCP_NNP: u64 = 1;                    // flags word: no_new_privs
 const SCP_STRICT: u64 = 2;                 // flags word: SECCOMP_MODE_STRICT
@@ -242,6 +266,7 @@ fn sc_alloc(k: &mut Kernel, n: u64) -> u64
   sch_put(&mut k, free, 2, n);
   sch_put(&mut k, free, 3, 1);
   sch_put(&mut k, free, 4, best);
+  sch_put(&mut k, free, 5, 0);
   return free;
 }
 
@@ -287,6 +312,7 @@ fn sc_fork(k: &mut Kernel, p: u64, c: u64)
   let t = sc_top(k, p);
   sp_put(&mut k, c * SC_PW, t);
   sp_put(&mut k, c * SC_PW + 1, sc_flags(k, p));
+  sp_put(&mut k, c * SC_PW + SP_ST, 0);
   sc_hold(&mut k, t);
 }
 
@@ -298,6 +324,7 @@ fn sc_clear(k: &mut Kernel, p: u64)
   let t = sc_top(k, p);
   sp_put(&mut k, p * SC_PW, 0);
   sp_put(&mut k, p * SC_PW + 1, 0);
+  sp_put(&mut k, p * SC_PW + SP_ST, 0);
   sc_drop(&mut k, t);
 }
 
@@ -567,6 +594,7 @@ fn sc_action(k: &mut Kernel, pid: u64, nr: u64) -> u64
     let r = sc_run(&mut k, cur - 1);
     if sc_key(r) < sc_key(best) {
       best = r;
+      sp_put(&mut k, pid * SC_PW + SP_F, cur);   // for a notification: the filter that decided
     }
     cur = smaller(sch_get(k, cur - 1, 1), SC_N);
     i = i + 1;
@@ -578,18 +606,21 @@ fn sc_action(k: &mut Kernel, pid: u64, nr: u64) -> u64
 /// ahead, or the result to give instead (an errno, or ENOSYS after a
 /// signal), with `kill` set when the process dies of SIGSYS (or SIGKILL,
 /// in strict mode).
-struct ScVerdict { run: bool, ret: u64 }
+struct ScVerdict { run: bool, ret: u64, wait: bool }
 
 fn sc_decide(k: &mut Kernel, pid: u64, nr: u64) -> ScVerdict
   requires kok(k) && 1 <= pid && pid < NPROC
   ensures kok(k)
 {
-  let go = ScVerdict { run: true, ret: 0 };
+  let go = ScVerdict { run: true, ret: 0, wait: false };
+  if sp_get(k, pid * SC_PW + SP_ST) != 0 {
+    return sc_pending(&mut k, pid);
+  }
   if sc_top(k, pid) == 0 {
     // Strict mode: read, write, exit and rt_sigreturn only.
     if sc_flags(k, pid) / 2 == 1 && nr != 0 && nr != 1 && nr != 60 && nr != 15 {
       sc_force(&mut k, pid, 9);
-      return ScVerdict { run: false, ret: ENOSYS };
+      return ScVerdict { run: false, ret: ENOSYS, wait: false };
     }
     return go;
   }
@@ -599,17 +630,189 @@ fn sc_decide(k: &mut Kernel, pid: u64, nr: u64) -> ScVerdict
     return go;
   }
   if hi == SCA_ERRNO / 0x10000 {
-    return ScVerdict { run: false, ret: wrap_sub(0, smaller(act % 0x10000, 4095)) };
+    return ScVerdict { run: false, ret: wrap_sub(0, smaller(act % 0x10000, 4095)), wait: false };
   }
   if hi == SCA_TRAP / 0x10000 {
     post_sig(&mut k, pid, 31);
-    return ScVerdict { run: false, ret: ENOSYS };
+    return ScVerdict { run: false, ret: ENOSYS, wait: false };
   }
-  if hi == SCA_TRACE / 0x10000 || hi == SCA_USER_NOTIF / 0x10000 {
-    return ScVerdict { run: false, ret: ENOSYS };   // no tracer, no notifier
+  if hi == SCA_USER_NOTIF / 0x10000 {
+    let f1 = smaller(sp_get(k, pid * SC_PW + SP_F), SC_N);
+    if f1 == 0 || sch_get(k, f1 - 1, 5) != 1 {
+      return ScVerdict { run: false, ret: ENOSYS, wait: false };   // no supervisor
+    }
+    sp_put(&mut k, pid * SC_PW + SP_ID, (k.ns % 0x3FFFFFFFFFFFFF) * 256 + pid);
+    sp_put(&mut k, pid * SC_PW + SP_ST, 1);
+    sleepers_wake(&mut k);                    // a supervisor waiting in NOTIF_RECV
+    return ScVerdict { run: false, ret: 0, wait: true };
+  }
+  if hi == SCA_TRACE / 0x10000 {
+    return ScVerdict { run: false, ret: ENOSYS, wait: false };   // no tracer
   }
   sc_force(&mut k, pid, 31);                         // kill, whatever the action's thread or process
-  return ScVerdict { run: false, ret: ENOSYS };
+  return ScVerdict { run: false, ret: ENOSYS, wait: false };
+}
+
+/// A process that has a notification pending (state 1 or 2) tries its call
+/// again: still waiting, or answered, or its supervisor is gone.
+fn sc_pending(k: &mut Kernel, pid: u64) -> ScVerdict
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  let at = pid * SC_PW;
+  let st = sp_get(k, at + SP_ST);
+  let f1 = smaller(sp_get(k, at + SP_F), SC_N);
+  if f1 == 0 || sch_get(k, f1 - 1, 5) != 1 {
+    sp_put(&mut k, at + SP_ST, 0);
+    return ScVerdict { run: false, ret: ENOSYS, wait: false };
+  }
+  if st != 3 {
+    return ScVerdict { run: false, ret: 0, wait: true };
+  }
+  sp_put(&mut k, at + SP_ST, 0);
+  if sp_get(k, at + SP_FL) % 2 == 1 {
+    // CONTINUE: the call runs, and is not filtered again.
+    return ScVerdict { run: true, ret: 0, wait: false };
+  }
+  let e = sp_get(k, at + SP_ERR) % 0x100000000;
+  if e != 0 {
+    if e >= 0x80000000 {
+      return ScVerdict { run: false, ret: wrap_sub(0, 0x100000000 - e), wait: false };
+    }
+    return ScVerdict { run: false, ret: wrap_sub(0, e), wait: false };
+  }
+  return ScVerdict { run: false, ret: sp_get(k, at + SP_VAL), wait: false };
+}
+
+/// The process (not yet freed) whose notification in state st was issued by
+/// filter f, starting the search at process from: NPROC if none.
+fn sc_find(k: &Kernel, f: u64, st: u64, from: u64) -> u64
+  requires kok(k) && f < SC_N && from <= NPROC
+  ensures result <= NPROC
+{
+  let mut q = from;
+  while q < NPROC
+    invariant q <= NPROC && kok(k)
+  {
+    if q >= 1 && state(k.procs, q) != FREE && state(k.procs, q) != ZOMBIE && sp_get(k, q * SC_PW + SP_ST) == st && sp_get(k, q * SC_PW + SP_F) == f + 1 {
+      return q;
+    }
+    q = q + 1;
+  }
+  return NPROC;
+}
+
+/// The notifier of filter f is closed: whoever waits on it gets ENOSYS.
+fn sc_listener_closed(k: &mut Kernel, f: u64)
+  requires kok(k) && f < SC_N
+  ensures kok(k)
+{
+  sch_put(&mut k, f, 5, 0);
+  sc_drop(&mut k, f + 1);
+  sleepers_wake(&mut k);
+}
+
+/// poll bits of the notifier of filter f: POLLIN while a notification waits
+/// to be received, POLLOUT while one has been received and not answered.
+fn sc_bits(k: &Kernel, f: u64) -> u64
+  requires kok(k) && f < SC_N
+{
+  let mut r = 0;
+  if sc_find(k, f, 1, 0) < NPROC {
+    r = POLLIN;
+  }
+  if sc_find(k, f, 2, 0) < NPROC {
+    r = r + POLLOUT;
+  }
+  return r;
+}
+
+/// ioctl on a notifier: NOTIF_RECV, NOTIF_SEND and NOTIF_ID_VALID.
+fn sc_ioctl(k: &mut Kernel, pid: u64, f: u64, nonblock: bool, req: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC && f < SC_N
+  ensures kok(k)
+{
+  if req == SC_IOC_RECV {
+    // The buffer must be zero, as Linux requires.
+    if arg == 0 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, 80) != 80 {
+      return EFAULT;
+    }
+    let mut j = 0;
+    while j < 10
+      invariant j <= 10 && kok(k)
+    {
+      if get_u64(k.fs.xfer, j * 8) != 0 {
+        return EINVAL;
+      }
+      j = j + 1;
+    }
+    let q = sc_find(k, f, 1, 1);
+    if q >= NPROC {
+      if nonblock {
+        return EAGAIN;
+      }
+      return SC_WAIT;
+    }
+    xfer_u64(&mut k.fs.xfer, 0, sp_get(k, q * SC_PW + SP_ID));
+    xfer_u64(&mut k.fs.xfer, 8, vpid_of(k, pid, q) % 0x100000000);   // pid, then flags 0
+    xfer_u64(&mut k.fs.xfer, 16, pget(k.procs, q, F_REGS + R_LXNR) % 0x100000000 + SC_ARCH * 0x100000000);
+    xfer_u64(&mut k.fs.xfer, 24, wrap_add(pget(k.procs, q, F_REGS + R_RIP), SYSCALL_LEN));   // the call restarts: rip is back on the syscall
+    xfer_u64(&mut k.fs.xfer, 32, pget(k.procs, q, F_REGS + R_RDI));
+    xfer_u64(&mut k.fs.xfer, 40, pget(k.procs, q, F_REGS + R_RSI));
+    xfer_u64(&mut k.fs.xfer, 48, pget(k.procs, q, F_REGS + R_RDX));
+    xfer_u64(&mut k.fs.xfer, 56, pget(k.procs, q, F_REGS + R_R10));
+    xfer_u64(&mut k.fs.xfer, 64, pget(k.procs, q, F_REGS + R_R8));
+    xfer_u64(&mut k.fs.xfer, 72, pget(k.procs, q, F_REGS + R_R9));
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, k.fs.xfer, 80) != 80 {
+      return EFAULT;
+    }
+    sp_put(&mut k, q * SC_PW + SP_ST, 2);
+    return 0;
+  }
+  if req == SC_IOC_SEND {
+    if arg == 0 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, 24) != 24 {
+      return EFAULT;
+    }
+    let id = get_u64(k.fs.xfer, 0);
+    let val = get_u64(k.fs.xfer, 8);
+    let err = get_u64(k.fs.xfer, 16) % 0x100000000;
+    let fl = get_u64(k.fs.xfer, 16) / 0x100000000;
+    if fl > 1 || (fl == 1 && (val != 0 || err != 0)) || (err != 0 && val != 0) {
+      return EINVAL;
+    }
+    let mut q = sc_find(k, f, 2, 1);
+    while q < NPROC && sp_get(k, q * SC_PW + SP_ID) != id
+      invariant q <= NPROC && kok(k)
+    {
+      q = sc_find(k, f, 2, q + 1);
+    }
+    if q >= NPROC {
+      return ENOENT;
+    }
+    sp_put(&mut k, q * SC_PW + SP_VAL, val);
+    sp_put(&mut k, q * SC_PW + SP_ERR, err);
+    sp_put(&mut k, q * SC_PW + SP_FL, fl);
+    sp_put(&mut k, q * SC_PW + SP_ST, 3);
+    sleepers_wake(&mut k);
+    return 0;
+  }
+  if req == SC_IOC_VALID {
+    if arg == 0 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, 8) != 8 {
+      return EFAULT;
+    }
+    let id = get_u64(k.fs.xfer, 0);
+    let mut q = sc_find(k, f, 2, 1);
+    while q < NPROC && sp_get(k, q * SC_PW + SP_ID) != id
+      invariant q <= NPROC && kok(k)
+    {
+      q = sc_find(k, f, 2, q + 1);
+    }
+    if q >= NPROC {
+      return ENOENT;
+    }
+    return 0;
+  }
+  return ENOTTY;
 }
 
 /// Makes signal s fatal to process p: its handler goes back to the default
@@ -805,10 +1008,37 @@ fn sc_load(k: &mut Kernel, pid: u64, uprog: u64, flags: u64) -> u64
     return EINVAL;
   }
   sch_put(&mut k, f, 0, 1);
+  let mut lfd = 0;
+  if flags & SC_FLAG_LISTENER != 0 {
+    if flags & SC_FLAG_TSYNC != 0 {
+      sc_drop(&mut k, f + 1);
+      return EINVAL;
+    }
+    // One notifier on a stack of filters: none of the older ones has one.
+    let mut cur = sc_top(k, pid);
+    let mut i = 0;
+    while cur != 0 && i < SC_N
+      invariant cur <= SC_N && i <= SC_N && f < SC_N && kok(k)
+    {
+      if sch_get(k, cur - 1, 5) == 1 {
+        sc_drop(&mut k, f + 1);
+        return EBUSY;
+      }
+      cur = smaller(sch_get(k, cur - 1, 1), SC_N);
+      i = i + 1;
+    }
+    lfd = ev_install(&mut k, pid, OF_SECCOMP, f, 0, true);
+    if lfd >= LXNFD {
+      sc_drop(&mut k, f + 1);
+      return lfd;
+    }
+    sch_put(&mut k, f, 5, 1);
+    sc_hold(&mut k, f + 1);                 // the descriptor keeps the filter
+  }
   if flags & SC_FLAG_TSYNC == 0 {
     sch_put(&mut k, f, 1, sc_top(k, pid));
     sp_put(&mut k, pid * SC_PW, f + 1);
-    return 0;
+    return lfd;
   }
   // TSYNC: every thread of the group takes the new filter, when each one's
   // own are among the caller's; else the first that is not is the result.

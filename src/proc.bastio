@@ -596,11 +596,13 @@ const MNS_SC: u64 = MNS_PQ + PQ_N;          // the seccomp pool (src/lxseccomp.b
 // Seccomp (src/lxseccomp.bastio). Each process has SC_PW words in k.mns from
 // MNS_SC (top filter + 1, flags). The filters live in k.scf, which is empty
 // until the first one is loaded: SC_HW words for each of SC_N filters
-// (holders, parent + 1, instruction count, in use, first instruction), the
+// (holders, parent + 1, instruction count, in use, first instruction, listener open), the
 // scratch words a run uses, then SC_POOL instructions for all of them.
-const SC_PW: u64 = 2;
+const SC_PW: u64 = 8;
 const SC_N: u64 = 8;
-const SC_HW: u64 = 5;
+const SC_WAIT: u64 = 18446744073709546616;   // 2^64 - 5000: not a result, not an errno: sleep, then run the call again
+const SC_FOREVER: u64 = 18446744073709551613;   // FOREVER (src/lxtime.bastio): a wait with no deadline
+const SC_HW: u64 = 6;
 const SC_MAXI: u64 = 4096;
 const SC_SCR: u64 = SC_N * SC_HW;
 const SC_SCRN: u64 = 24;
@@ -669,6 +671,7 @@ const OF_PTY: u64 = 14;               // a pseudo-terminal end: x DEV_PTM + N or
 const OF_PQ: u64 = 13;                // a POSIX message queue: x the queue; word 3: nonblocking + 2 * access mode (src/lxmq.bastio)
 const OF_SIGFD: u64 = 12;             // a signalfd: word 2 the signals it takes; word 3: nonblocking (src/lxevent.bastio)
 const OF_INOTIFY: u64 = 16;           // an inotify instance: x the instance; word 3: nonblocking (src/lxinotify.bastio)
+const OF_SECCOMP: u64 = 18;           // a seccomp notifier: x the filter; word 3: nonblocking (src/lxseccomp.bastio)
 const OF_NETLINK: u64 = 17;           // a netlink socket: x its slot; word 3: nonblocking (src/lxnetlink.bastio)
 const OF_PIDFD: u64 = 15;             // a pidfd: x the process, NPROC once its slot was reused; word 3: nonblocking (src/lxpidfd.bastio)
 const DIR_ROOT: u64 = 0;
@@ -815,6 +818,7 @@ const K_EVENT: u64 = 8;               // x: the description (src/lxevent.bastio)
 const K_TIMER: u64 = 9;               // x: the timer
 const K_EPOLL: u64 = 10;              // x: the epoll instance
 const K_SIGFD: u64 = 11;              // x: the description (src/lxevent.bastio)
+const K_SECCOMP: u64 = 18;            // x: the filter (src/lxseccomp.bastio)
 const K_INOTIFY: u64 = 16;            // x: the instance (src/lxinotify.bastio)
 const K_PIDFD: u64 = 15;              // x: the process, NPROC if it is gone (src/lxpidfd.bastio)
 
