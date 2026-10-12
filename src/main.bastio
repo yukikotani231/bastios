@@ -192,9 +192,10 @@ fn fast_call(cpu: &mut Cpu, v: u64, pid: u64, vpid: u64, vtg: u64, others: &Atom
 fn any_ready(procs: &Buf) -> bool
   requires ptab_ok(procs)
 {
+  let cap = len(procs) / STRIDE;     // past it, every process is FREE
   let mut p = 1;
-  while p < NPROC
-    invariant 1 <= p && p <= NPROC
+  while p < cap
+    invariant 1 <= p && cap <= NPROC
   {
     if state(procs, p) == READY {
       return true;

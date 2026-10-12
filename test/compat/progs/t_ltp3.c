@@ -7,6 +7,11 @@
  * that keeps no mode; link and rename across a mount (EXDEV). */
 #include "compat.h"
 #include <fcntl.h>
+#include <stdlib.h>
+#include <sys/ioctl.h>
+#include <dirent.h>
+#include <sys/sendfile.h>
+#include <string.h>
 #include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
@@ -14,7 +19,9 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/utsname.h>
 #include <sys/wait.h>
+#include <utime.h>
 
 struct fh { unsigned int bytes; int type; unsigned char h[128]; };
 
@@ -35,6 +42,18 @@ static int fchdir_nosearch(void) { return fchdir(nosearch_fd) == -1 && errno == 
 static int chmod_devnull(void) { return chmod("/dev/null", 0666) == -1 && errno == EPERM ? 0 : 1; }
 static int ro_fd = -1;
 static int fchmod_ro(void) { return fchmod(ro_fd, 0600) == -1 && errno == EROFS ? 0 : 1; }
+
+static long vmlck(void)
+{
+    char line[128];
+    long kb = -1;
+    FILE *f = fopen("/proc/self/status", "r");
+    if (!f) return -1;
+    while (fgets(line, sizeof line, f))
+        if (sscanf(line, "VmLck: %ld", &kb) == 1) break;
+    fclose(f);
+    return kb;
+}
 
 int main(void) {
     setup();
@@ -218,6 +237,180 @@ int main(void) {
         unlink("l3_cfr2");
         rmdir("l3_ren/sub");
         rmdir("l3_ren");
+    }
+
+    {
+        int pp[20][2], got[20] = {0}, added = 0, ok = 1;
+        int efd = epoll_create1(0);
+        for (int i = 0; i < 20; i++) {
+            pp[i][0] = pp[i][1] = -1;
+            if (pipe(pp[i]) == 0 && write(pp[i][1], "x", 1) == 1) {
+                struct epoll_event e = { .events = EPOLLIN, .data.u32 = i };
+                if (epoll_ctl(efd, EPOLL_CTL_ADD, pp[i][0], &e) == 0) added++;
+            }
+        }
+        for (int r = 0; r < 20 && ok; r++) {
+            struct epoll_event out[3];
+            int n = epoll_wait(efd, out, 3, 0);
+            if (n != 3) ok = 0;
+            for (int i = 0; i < n; i++) got[out[i].data.u32]++;
+        }
+        for (int i = 0; i < 20; i++) if (got[i] != 3) ok = 0;
+        EXPECT("an epoll instance watches 20 descriptors", added == 20);
+        EXPECT("epoll_wait with room for 3 reports each of 20 ready descriptors in turn", ok);
+        for (int i = 0; i < 20; i++) { if (pp[i][0] >= 0) close(pp[i][0]); if (pp[i][1] >= 0) close(pp[i][1]); }
+        close(efd);
+    }
+
+    /* utime sets the access time apart from the modification time;
+       utimensat can leave either alone. */
+    {
+        int fd = open("l3_ut", O_CREAT | O_WRONLY, 0644);
+        struct stat st;
+        struct utimbuf ub = { .actime = 12345, .modtime = 67890 };
+        int r1 = utime("l3_ut", &ub);
+        int r2 = stat("l3_ut", &st);
+        EXPECT("utime sets the access time", r1 == 0 && r2 == 0 && st.st_atime == 12345);
+        EXPECT("utime sets the modification time", st.st_mtime == 67890);
+        struct timespec ts[2] = { { 0, UTIME_OMIT }, { 4242, 0 } };
+        int r3 = utimensat(AT_FDCWD, "l3_ut", ts, 0);
+        stat("l3_ut", &st);
+        EXPECT("utimensat with UTIME_OMIT keeps the access time", r3 == 0 && st.st_atime == 12345 && st.st_mtime == 4242);
+        struct timespec ts2[2] = { { 777, 0 }, { 0, UTIME_OMIT } };
+        int r4 = utimensat(AT_FDCWD, "l3_ut", ts2, 0);
+        stat("l3_ut", &st);
+        EXPECT("utimensat with UTIME_OMIT keeps the modification time", r4 == 0 && st.st_atime == 777 && st.st_mtime == 4242);
+        if (fd >= 0) close(fd);
+        unlink("l3_ut");
+    }
+
+    /* A terminal answers the older TCGETA, checks the address, and
+       calls a request it does not know ENOTTY. */
+    {
+        int m = posix_openpt(O_RDWR | O_NOCTTY);
+        unsigned char tio[18];
+        int r1 = ioctl(m, 0x5405, tio);
+        int r2 = ioctl(m, 0x5405, (void *)-1), e2 = errno;
+        int r3 = ioctl(m, 9999999, tio), e3 = errno;
+        EXPECT("TCGETA on a terminal succeeds", m >= 0 && r1 == 0);
+        EXPECT("TCGETA with a bad address is EFAULT", r2 == -1 && e2 == EFAULT);
+        EXPECT("an unknown terminal request is ENOTTY", r3 == -1 && e3 == ENOTTY);
+        if (m >= 0) close(m);
+    }
+
+    /* TCSETA writes the termio back, the window size carries its pixel
+       fields, and the line discipline is N_TTY. */
+    {
+        int m = posix_openpt(O_RDWR | O_NOCTTY);
+        unsigned char tio[18], back[18];
+        struct winsize ws = { 24, 80, 640, 480 }, got = { 0, 0, 0, 0 };
+        int ld = -1, r1 = -1, r2 = -1, same = 0, r3 = -1, r4 = -1, r5 = -1;
+        if (m >= 0) {
+            r1 = ioctl(m, 0x5405, tio);
+            tio[8] ^= 1;                 /* c_cc[0] is the first control character */
+            r2 = ioctl(m, 0x5406, tio);
+            ioctl(m, 0x5405, back);
+            same = memcmp(tio, back, 18) == 0;
+            r3 = ioctl(m, TIOCSWINSZ, &ws);
+            r4 = ioctl(m, TIOCGWINSZ, &got);
+            r5 = ioctl(m, 0x5424, &ld);
+        }
+        EXPECT("TCSETA is read back by TCGETA", r1 == 0 && r2 == 0 && same);
+        EXPECT("the window size keeps its pixel fields", r3 == 0 && r4 == 0 && got.ws_xpixel == 640 && got.ws_ypixel == 480);
+        EXPECT("TIOCGETD reports N_TTY", r5 == 0 && ld == 0);
+        if (m >= 0) close(m);
+    }
+
+    /* /proc/self/fd lists the open descriptors. */
+    {
+        DIR *dp = opendir("/proc/self/fd");
+        int seen0 = 0, seenfd = 0, other = 0;
+        int fd = open("l3_pfd", O_CREAT | O_RDWR, 0644);
+        struct dirent *de;
+        char link[64] = "", want[16];
+        ssize_t ln;
+        (void)dp;
+        if (dp) closedir(dp);
+        dp = opendir("/proc/self/fd");
+        snprintf(want, sizeof want, "%d", fd);
+        while (dp && (de = readdir(dp)) != NULL) {
+            if (!strcmp(de->d_name, "0")) seen0 = 1;
+            else if (!strcmp(de->d_name, want)) seenfd = 1;
+            else if (strcmp(de->d_name, ".") && strcmp(de->d_name, "..") && atoi(de->d_name) > 1000) other++;
+        }
+        if (dp) closedir(dp);
+        ln = readlink("/proc/self/fd/0", link, sizeof link - 1);
+        EXPECT("/proc/self/fd lists the open descriptors", dp && seen0 && seenfd && !other && ln >= 0);
+        if (fd >= 0) close(fd);
+        unlink("l3_pfd");
+    }
+
+    /* sendfile to a unix socket sends the bytes, and a full
+       non-blocking datagram socket is EAGAIN. */
+    {
+        int sv[2], fd = open("l3_sf", O_CREAT | O_RDWR, 0644);
+        char buf[8] = "";
+        write(fd, "abcdef", 6);
+        lseek(fd, 0, SEEK_SET);
+        socketpair(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK, 0, sv);
+        ssize_t r1 = sendfile(sv[1], fd, NULL, 6);
+        ssize_t r2 = recv(sv[0], buf, sizeof buf, 0);
+        EXPECT("sendfile to a unix socket sends the bytes", r1 == 6 && r2 == 6 && memcmp(buf, "abcdef", 6) == 0);
+        int n = 0;
+        while (n < 1000000 && send(sv[1], "a", 1, 0) == 1) n++;
+        lseek(fd, 0, SEEK_SET);
+        ssize_t r3 = sendfile(sv[1], fd, NULL, 1);
+        int e3 = errno;
+        EXPECT("sendfile to a full non-blocking unix socket is EAGAIN", r3 == -1 && e3 == EAGAIN);
+        close(sv[0]); close(sv[1]); close(fd);
+        unlink("l3_sf");
+    }
+
+    /* Locking a page that is locked adds nothing; munlock gives back only
+       what was locked. */
+    {
+        char *m = mmap(NULL, 4 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        long b = vmlck();
+        int r1 = mlock(m, 4 * 4096);
+        long a1 = vmlck();
+        int r2 = mlock(m + 4096, 4096);
+        int r3 = mlock(m, 4 * 4096);
+        long a2 = vmlck();
+        int r4 = munlock(m + 4096, 4096);
+        long a3 = vmlck();
+        int r5 = munlock(m + 4096, 4096);
+        long a4 = vmlck();
+        int r6 = munlock(m, 4 * 4096);
+        long a5 = vmlck();
+        EXPECT("mlock counts the pages it locks", r1 == 0 && a1 - b == 16);
+        EXPECT("mlock of pages already locked counts them once", r2 == 0 && r3 == 0 && a2 - b == 16);
+        EXPECT("munlock of one locked page gives back one page", r4 == 0 && a3 - b == 12);
+        EXPECT("munlock of a page not locked gives back nothing", r5 == 0 && a4 - b == 12);
+        EXPECT("munlock of the rest gives back the rest", r6 == 0 && a5 == b);
+        long c = vmlck();
+        int r7 = syscall(325, m, 2 * 4096, 1);        /* mlock2(MLOCK_ONFAULT) */
+        long d = vmlck();
+        EXPECT("mlock2 with MLOCK_ONFAULT locks the range", r7 == 0 && d - c == 8);
+        munlockall();
+        munmap(m, 4 * 4096);
+    }
+
+    /* A write that cannot store a byte is an error, not a write of
+       nothing: BastiOS keeps no file past 1 GiB (Linux's sparse files
+       reach further). */
+    {
+        struct utsname u;
+        int ours = uname(&u) == 0 && strstr(u.release, "bastios") != NULL;
+        int fd = open("l3_big", O_CREAT | O_RDWR, 0644);
+        ssize_t w = -2;
+        int e = 0;
+        if (ours && fd >= 0 && lseek(fd, 2LL << 30, SEEK_SET) >= 0) {
+            w = write(fd, "x", 1);
+            e = errno;
+        }
+        EXPECT("a write past the largest file is EFBIG, not 0", !ours || (w == -1 && e == EFBIG));
+        if (fd >= 0) close(fd);
+        unlink("l3_big");
     }
 
     unlink("l3_d/f2");

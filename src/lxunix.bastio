@@ -1013,6 +1013,29 @@ fn ux_send(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, a
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  return ux_send_from(&mut k, pid, fd, va, n, dontwait, addr, alen, false);
+}
+
+/// ux_send of the first n bytes of the transfer buffer (sendfile and
+/// copy_file_range hand it over there) rather than of user memory.
+fn ux_send_xfer(k: &mut Kernel, pid: u64, fd: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= XFER
+  ensures kok(k)
+  ensures result <= n || result > XFER
+{
+  let r = ux_send_from(&mut k, pid, fd, 0, n, false, 0, 0, true);
+  if r <= n || r > XFER {
+    return r;
+  }
+  return EINVAL;                            // (never: the count sent is at most n)
+}
+
+/// ux_send, the bytes coming from user address va or, with xf, from the
+/// transfer buffer.
+fn ux_send_from(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, addr: u64, alen: u64, xf: bool) -> u64
+  requires kok(k) && pid < NPROC && (!xf || n <= XFER)
+  ensures kok(k)
+{
   let u = ux_look(k, pid, fd);
   if u.err != 0 {
     return u.err;
@@ -1059,9 +1082,13 @@ fn ux_send(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, a
   }
   let mut got = 0;
   if n > 0 {
-    got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, smaller(n, UX_CAP - count - lead));
-    if got == NO_RESULT || got == 0 {
-      return EFAULT;
+    if xf {
+      got = smaller(n, UX_CAP - count - lead);
+    } else {
+      got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, smaller(n, UX_CAP - count - lead));
+      if got == NO_RESULT || got == 0 {
+        return EFAULT;
+      }
     }
   }
   if u.dg {
