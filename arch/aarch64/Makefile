@@ -152,9 +152,9 @@ clean:
 #   make -f arch/aarch64/Makefile compat            writes build/aarch64/compat/report.md
 #   make -f arch/aarch64/Makefile compat-baseline   records which checks pass now
 # It fails only if a check in test/compat/baseline-aarch64.txt stops passing.
-# These call x86-64-only system calls or registers (arch_prctl, readlink,
-# getdents, PTRACE_GETREGS) and do not build for AArch64 yet.
-COMPAT_X86ONLY := t_ltp2 t_ltp3 t_newer t_ptrace
+# t_ptrace reads x86-64 registers (PTRACE_GETREGS, rip) and has no AArch64
+# version yet.
+COMPAT_X86ONLY := t_ptrace
 COMPAT_PROGS := $(filter-out $(COMPAT_X86ONLY),$(patsubst test/compat/progs/%.c,%,$(wildcard test/compat/progs/t_*.c)))
 COMPAT_BINS := $(COMPAT_PROGS:%=$(B)/compat/%)
 ULFLAGS := -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x400000 -Wl,--build-id=none
