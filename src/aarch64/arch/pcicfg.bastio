@@ -1,0 +1,38 @@
+// PCI configuration space on AArch64: the enhanced configuration access
+// mechanism (ECAM), a window of 4 KiB per function that the host bridge
+// maps in memory (the device tree's pci-host-ecam-generic node). The window
+// here covers the first 16 buses, which is where a virtual machine's devices
+// are. (src/pci.bastio is the rest of PCI, over these.)
+//
+// A device (strictly, a function of one) is named by its index bus * 256 +
+// device * 8 + function, as on x86-64, but below PCI_NONE = 4096: the
+// first 16 buses. Its registers are at ECAM base + index * 4096.
+
+const PCI_NONE: u64 = 4096;
+const ECAM_LEN: u64 = 16777216;       // 16 buses * 32 devices * 8 functions * 4096
+
+struct Pci { cfg: Mmio }
+
+spec fn pci_ok(p: &Pci) -> bool {
+  mmio_len(p.cfg) == ECAM_LEN && mmio_base(p.cfg) % 4096 == 0
+}
+
+fn pci_free(win: &mut MmioSpace, p: Pci)
+  requires pci_ok(p)
+  ensures forall a: u64 :: (mmio_base(p.cfg) <= a && a < mmio_base(p.cfg) + mmio_len(p.cfg)) || old(mmio_free(win, a)) ==> mmio_free(win, a)
+{
+  mmio_release(&mut win, p.cfg);
+}
+
+fn pci_read(p: &mut Pci, dev: u64, off: u64) -> u64
+  requires pci_ok(p) && dev < PCI_NONE && off < 256 && off % 4 == 0
+  ensures result <= 4294967295
+{
+  return cast[u64](mmio_read32(&mut p.cfg, dev * 4096 + off));
+}
+
+fn pci_write(p: &mut Pci, dev: u64, off: u64, v: u64)
+  requires pci_ok(p) && dev < PCI_NONE && off < 256 && off % 4 == 0 && v <= 4294967295
+{
+  mmio_write32(&mut p.cfg, dev * 4096 + off, cast[u32](v));
+}

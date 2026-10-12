@@ -52,6 +52,8 @@ kernel, qemu_bin, timeout = sys.argv[1], sys.argv[2], float(sys.argv[3])
 # The firmware gets the device tree only when ACPI is off. The FAT drive
 # comes first: the kernel takes the virtio-mmio slot QEMU gives the last
 # device added.
+# NVME=1 puts the disk on the PCI Express bus as an NVMe drive.
+nvme = os.environ.get("NVME", "") == "1"
 uefi = os.environ.get("UEFI", "")
 if uefi and not os.path.exists(uefi):
     print("SKIP aarch64 uefi: no firmware at " + uefi + " (Debian/Ubuntu: qemu-efi-aarch64)")
@@ -67,7 +69,8 @@ else:
 qemu = subprocess.Popen(
     [qemu_bin, "-M", "virt,gic-version=" + os.environ.get("GIC", "3") + os.environ.get("VIRT", "") + (",acpi=off" if uefi else ""), "-cpu", os.environ.get("CPU", "cortex-a72"), "-smp", os.environ.get("SMP", "4"), "-m", os.environ.get("MEM", "256M"), "-nographic",
      "-no-reboot"] + boot + [
-     "-drive", f"file={disk},format=raw,if=none,id=vd", "-device", "virtio-blk-device,drive=vd",
+     "-drive", f"file={disk},format=raw,if=none,id=vd",
+     "-device", ("nvme,drive=vd,serial=bastio" if nvme else "virtio-blk-device,drive=vd"),
      "-netdev", "user,id=n0,net=10.0.2.0/24", "-device", "virtio-net-device,netdev=n0", "-serial", "stdio", "-monitor", "none"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 deadline = time.time() + timeout
@@ -185,7 +188,10 @@ run("cat d/f2", b"no such file")
 # The virtio-mmio disk and network card (src/virtio_blk.bastio and
 # src/virtio_net.bastio over src/virtio_mmio.bastio, shared with x86-64).
 check("the device tree lists QEMU virt's 32 virtio-mmio slots", b"devicetree: 32 virtio-mmio slots from 0x000000000a000000\r\n" in out)
-check("the virtio disk is found", b"disk: virtio\r\n" in out)
+if nvme:
+    check("the NVMe disk is found", b"disk: NVMe\r\n" in out)
+else:
+    check("the virtio disk is found", b"disk: virtio\r\n" in out)
 run("echo on disk > disk/a", b"")
 run("cat disk/a", b"on disk")
 run("ls disk", b"a")

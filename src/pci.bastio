@@ -1,6 +1,7 @@
-// PCI configuration space, through the two legacy I/O ports: write an
-// address to 0xCF8, then read or write the 32-bit register at 0xCFC. The
-// kernel uses it only to find devices and to let them do DMA.
+// PCI: finding devices, sizing and reading their BARs, and turning on their
+// MSI and MSI-X. How configuration space is reached (the legacy I/O ports on
+// x86-64, a memory-mapped window on AArch64) is src/pcicfg.bastio; the kernel
+// uses it only to find devices and to let them do DMA.
 //
 // A device (strictly, a function of one) is named by its index bus * 256 +
 // device * 8 + function, below PCI_NONE, which stands for "none". The
@@ -9,11 +10,7 @@
 // slots and the other functions of single-function devices.
 
 import "mmiowin.bastio";
-
-const PCI_ADDR: u64 = 0xCF8;
-const PCI_DATA: u64 = 0xCFC;
-const PCI_ENABLE: u64 = 0x80000000;   // bit 31 of the address: a config cycle
-const PCI_NONE: u64 = 65536;
+import "pcicfg.bastio";
 
 // Register offsets in a device's configuration header.
 const PCI_ID: u64 = 0x00;             // vendor (low 16 bits), device (high)
@@ -25,41 +22,6 @@ const PCI_BAR0: u64 = 0x10;
 const PCI_CMD_IO: u64 = 1;            // respond to its I/O ports
 const PCI_CMD_MEM: u64 = 2;           // respond to its memory-mapped registers
 const PCI_CMD_MASTER: u64 = 4;        // may start DMA
-
-struct Pci { addr: PortIo, data: PortIo }
-
-spec fn pci_ok(p: &Pci) -> bool {
-  port_count(p.addr) == 4 && port_count(p.data) == 4
-}
-
-fn pci_free(ports: &mut Ports, p: Pci)
-  requires pci_ok(p)
-{
-  port_release(&mut ports, p.addr);
-  port_release(&mut ports, p.data);
-}
-
-/// Selects register `off` (a multiple of 4) of device `dev`.
-fn pci_select(p: &mut Pci, dev: u64, off: u64)
-  requires pci_ok(p) && dev < PCI_NONE && off < 256 && off % 4 == 0
-{
-  pio_out32(&mut p.addr, 0, cast[u32](PCI_ENABLE + dev * 256 + off));
-}
-
-fn pci_read(p: &mut Pci, dev: u64, off: u64) -> u64
-  requires pci_ok(p) && dev < PCI_NONE && off < 256 && off % 4 == 0
-  ensures result <= 4294967295
-{
-  pci_select(&mut p, dev, off);
-  return cast[u64](pio_in32(&mut p.data, 0));
-}
-
-fn pci_write(p: &mut Pci, dev: u64, off: u64, v: u64)
-  requires pci_ok(p) && dev < PCI_NONE && off < 256 && off % 4 == 0 && v <= 4294967295
-{
-  pci_select(&mut p, dev, off);
-  pio_out32(&mut p.data, 0, cast[u32](v));
-}
 
 /// The device to look at after `dev`: the next function, or the next
 /// slot if `dev` is function 0 of an empty slot or of a single-function
@@ -366,4 +328,59 @@ fn pci_msix_at(p: &mut Pci, dev: u64, cap: u64) -> u64
     return 0;
   }
   return e;
+}
+
+// Assigning BARs. A PC's firmware gives every device its addresses before
+// the kernel starts; a machine started with -kernel, as QEMU's virt is
+// here, leaves them zero.
+
+/// The memory BARs of the endpoints on bus 0 that are zero or lie outside
+/// the device window (an endpoint's six slots; 64-bit BARs take two; a
+/// firmware that placed a 64-bit BAR above the window is the usual case),
+/// each given an address at or above `next` and below `hi` that is a
+/// multiple of its size, in the order they are found. Returns the first
+/// address not used. A BAR that does not fit stays as it was (and its driver
+/// finds no device). Nothing is enabled: that is the driver's to do.
+fn pci_assign(p: &mut Pci, next: u64, hi: u64) -> u64
+  requires pci_ok(p) && next <= hi && hi <= 4294967296
+  ensures next <= result && result <= hi
+{
+  let mut at = next;
+  let mut d = 0;
+  while d < PCI_NONE
+    invariant d <= PCI_NONE && next <= at && at <= hi
+  {
+    if d < 256 && pci_read(&mut p, d, PCI_ID) != 0xFFFFFFFF && (pci_read(&mut p, d, PCI_HEADER) >> 16) % 128 == 0 {
+      let mut reg = PCI_BAR0;
+      while reg <= 0x24
+        invariant PCI_BAR0 <= reg && reg <= 0x28 && reg % 4 == 0 && next <= at && at <= hi
+      {
+        let b = pci_read(&mut p, d, reg);
+        let mut wide = false;
+        if b % 2 == 0 && b / 2 % 4 == 2 && reg < 0x24 {
+          wide = true;
+        }
+        if b % 2 == 0 && pci_mem_bar_at(&mut p, d, reg) == 0 {
+          let size = pci_bar_size_at(&mut p, d, reg);
+          if size >= 16 {
+            let a = (at + size - 1) / size * size;
+            if a >= at && a + size <= hi {
+              pci_write(&mut p, d, reg, a);
+              if wide {
+                pci_write(&mut p, d, reg + 4, 0);
+              }
+              at = a + size;
+            }
+          }
+        }
+        if wide {
+          reg = reg + 8;
+        } else {
+          reg = reg + 4;
+        }
+      }
+    }
+    d = pci_next(&mut p, d);
+  }
+  return at;
 }

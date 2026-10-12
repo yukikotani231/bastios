@@ -76,6 +76,10 @@ static uint8_t dtb_copy[DTB_MAX];
 static uint64_t dtb_len;
 
 /* Tables of 2 MiB blocks for 1 GiB regions that hold RAM and something else. */
+/* The PCI Express host bridge's configuration window (the device tree's
+ * pci-host-ecam-generic node), 0 if there is none. */
+static uint64_t pci_ecam;
+
 #define MAX_L2 8
 static uint64_t kernel_l2[MAX_L2][512] __attribute__((aligned(4096)));
 
@@ -139,7 +143,7 @@ static void read_memory(const uint8_t *dtb) {
         uint32_t ac = 2, sc = 1, cac = 1;
         int depth = 0, in_mem = 0, in_cpus = 0, in_cpu = 0;
         unsigned node_gic = 0;                       /* this node's compatible: 3, 2 or 0 */
-        int node_uart = 0, have_uart = 0;
+        int node_uart = 0, have_uart = 0, node_pci = 0;
         int in_psci = 0;
         uint64_t node_reg[2] = { 0, 0 };
         int node_regs = 0;
@@ -155,7 +159,7 @@ static void read_memory(const uint8_t *dtb) {
                 in_mem = depth == 2 && starts_with(name, "memory");
                 if (depth == 2 && same(name, "cpus")) in_cpus = 1;
                 in_cpu = in_cpus && depth == 3 && starts_with(name, "cpu@");
-                if (depth == 2) { node_gic = 0; node_regs = 0; node_uart = 0; }
+                if (depth == 2) { node_gic = 0; node_regs = 0; node_uart = 0; node_pci = 0; }
                 in_psci = depth == 2 && same(name, "psci");
             } else if (tok == 2) {
                 if (depth == 2) {
@@ -165,6 +169,7 @@ static void read_memory(const uint8_t *dtb) {
                         GICD = node_reg[0];
                         GICR = node_reg[1];
                     }
+                    if (node_pci && node_regs >= 1 && !pci_ecam) pci_ecam = node_reg[0];
                     if (node_uart && node_regs >= 1 && !have_uart) {
                         bst_uart_base = node_reg[0];
                         have_uart = 1;
@@ -186,6 +191,7 @@ static void read_memory(const uint8_t *dtb) {
                     for (uint32_t o = 0; o < len; ) {
                         const char *c = (const char *)data + o;
                         if (same(c, "arm,pl011")) node_uart = 1;
+                        if (same(c, "pci-host-ecam-generic")) node_pci = 1;
                         if (same(c, "arm,gic-v3")) node_gic = 3;
                         else if (same(c, "arm,cortex-a15-gic") || same(c, "arm,gic-400") || same(c, "arm,cortex-a9-gic")) node_gic = 2;
                         while (o < len && data[o]) o++;
@@ -280,6 +286,14 @@ void bst_early(const uint8_t *dtb) {
             }
             kernel_l1[g] = (uint64_t)l2 | 3;
         }
+    }
+    /* The gigabyte holding the PCI Express configuration window, when the
+     * machine puts it above the first 4 GiB (QEMU's virt does, unless
+     * highmem is off) and no RAM shares it. */
+    if (pci_ecam) {
+        uint64_t g = pci_ecam >> 30;
+        if (g >= 4 && g < 512 && ram_overlap(g << 30, (g + 1) << 30) == 0)
+            kernel_l1[g] = BLOCK_DEVICE | (g << 30);
     }
     bst_kernel_root[0] = (uint64_t)kernel_l1 | 3;
     bst_ttbr1_tables[0][0] = (uint64_t)bst_ttbr1_tables[1] | 3;
