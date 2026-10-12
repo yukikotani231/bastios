@@ -215,18 +215,35 @@ fn blk_room(b: &Blk, lba: u64, want: u64) -> u64
 }
 
 /// Starts reading n consecutive blocks from sector `lba` (n from
-/// blk_room); blk_fetch_n then takes each. Only virtio takes n > 1.
-fn blk_begin_n(b: &mut Blk, lba: u64, n: u64) -> bool
+/// blk_room); blk_fetch_n then takes each. With `wr`, writes the blocks
+/// blk_stage put in place instead. Only virtio takes n > 1.
+fn blk_begin_n(b: &mut Blk, lba: u64, n: u64, wr: bool) -> bool
   requires blk_ok(b) && n >= 1 && n <= VIO_BATCH
   ensures blk_ok(b)
 {
   match b {
     Blk::Loop(l) => { b = Blk::Loop(l); return false; },
     Blk::Virtio(mut v) => {
-      let ok = virtio_begin_n(&mut v, lba, n);
+      let ok = virtio_begin_n(&mut v, lba, n, wr);
       b = Blk::Virtio(v);
       return ok;
     },
+  }
+}
+
+/// Puts buf[at ..] where block j of the next blk_begin_n write is taken
+/// from. False where the device cannot take n > 1 (blk_room gives 1).
+fn blk_stage(b: &mut Blk, j: u64, buf: &Bytes, at: u64) -> bool
+  requires blk_ok(b)
+  ensures blk_ok(b)
+{
+  match b {
+    Blk::Virtio(mut v) => {
+      let ok = virtio_stage(&mut v, j, buf, at);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+    Blk::Loop(l) => { b = Blk::Loop(l); return false; },
   }
 }
 
