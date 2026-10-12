@@ -285,8 +285,11 @@ steps = [
     ("mtime", [b"mtime: rang 3, selected, slept ", b"woke in time, events ok"], b"\n# "),
     # A TCP transfer to this machine's own address, many times longer than a
     # card's frame: loopback segments are longer than 1500 bytes
-    # (src/net.bastio, NET_BUF), and every byte is checked on arrival.
-    ("mtcp loop 3000000; sleep 3", b"mtcp: loop 3000000 bytes, 0 wrong", b"\n# "),
+    # (src/net.bastio, NET_BUF), and every byte is checked on arrival. The
+    # rings take their spare pages from the pool on first use (up to 512,
+    # src/tcpbuf.bastio), so the later page counts may be lower than the
+    # first by that much.
+    ("mtcp loop 3000000", b"mtcp: loop 3000000 bytes, 0 wrong", b"\n# "),
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
     # More processes at once than the 32 rows the process table starts with:
     # it grows (new_pid), and /proc lists three-digit pids. (stdin from the
@@ -866,7 +869,8 @@ else:
     # Every page the finished processes and removed files used must be
     # back in the pool.
     mem = [l.strip() for l in out.split(b"\n") if l.strip().endswith(b"free pages")]
-    if len(mem) == 3 and mem[0] == mem[1] == mem[2]:
+    free = [int(m.split()[0]) for m in mem]
+    if len(mem) == 3 and free[1] == free[2] and 0 <= free[0] - free[1] <= 512:
         print("ok   no pages leaked:", mem[2].decode())
     else:
         print("FAIL page leak:", mem); fails += 1
