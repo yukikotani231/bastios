@@ -890,6 +890,7 @@ t_sock2: signalfd carries a sigqueue value
 t_sock2: signalfd sees a blocked SIGCHLD
 t_sock2: sigqueue carries a value
 t_sock2: write after SHUT_WR is EPIPE
+t_sys: a cgroup namespace roots the tree
 t_sys: adjtimex reads and sets
 t_sys: clock_settime moves CLOCK_REALTIME
 t_sys: not root: EPERM
@@ -918,6 +919,7 @@ t_thread: gettid differs in a thread
 t_thread: pthread_create + join
 t_thread: pthread_detach
 t_thread: thread-local storage
+t_thread: threads that ended and began one after another have different ids
 t_thread: timed condition wait, signalled early (monotonic)
 t_thread: timed condition wait, signalled early (realtime)
 t_time: clock_getres
