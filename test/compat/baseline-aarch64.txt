@@ -383,6 +383,7 @@ t_ltp2: setsid is EPERM while a process group with the caller's id has members
 t_ltp2: shutdown(SHUT_RD) on a unix socket: reads end, the peer's sends are EPIPE, poll reports POLLRDHUP
 t_ltp2: the CPU-time clocks of this thread and this process can be read by id
 t_ltp2: timerfd_settime takes TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET, and other flags are EINVAL
+t_ltp2: times: system calls count as system time; a waited-for child's times reach tms_cutime/cstime
 t_ltp2: tkill and tgkill reject a zero or negative id
 t_ltp2: unshare: files and cwd succeed, bad flags EINVAL
 t_ltp2: utimensat with no path and AT_FDCWD is EFAULT; epoll_ctl on /dev/zero is EPERM

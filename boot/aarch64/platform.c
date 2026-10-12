@@ -366,8 +366,14 @@ void bst_platform_smp_join(void) {
 }
 uint64_t bst_platform_acpi(uint64_t sig, uint64_t off) { (void)sig; (void)off; return 256; }
 /* boot_info: query 10 is the device tree, byte i of it, 256 past its end
- * (or when there is none); every other query is 0. */
+ * (or when there is none); query 11 is the generic timer's rate in Hz
+ * (CNTFRQ_EL0); every other query is 0. */
 uint64_t bst_platform_info(uint64_t what, uint64_t i) {
+    if (what == 11) {
+        uint64_t f;
+        __asm__ volatile ("mrs %0, cntfrq_el0" : "=r"(f));
+        return f;
+    }
     if (what != 10) return 0;
     return i < dtb_len ? dtb_copy[i] : 256;
 }

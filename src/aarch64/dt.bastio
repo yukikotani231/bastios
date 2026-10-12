@@ -10,6 +10,7 @@
 import "virtio_mmio.bastio";
 
 const INFO_DTB: u64 = 10;
+const INFO_CNTFRQ: u64 = 11;      // the generic timer's rate in Hz (CNTFRQ_EL0)
 const DTB_MAX: u64 = 65536;       // the platform copies no more than this
 const DT_MAX_VIRTIO: u64 = 64;
 
