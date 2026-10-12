@@ -1,7 +1,9 @@
 # Programs driven by keystrokes on the console inside the Alpine root, for
 # the compatibility suite (test/compat). The format is tty.txt's. They run
 # after alpine.txt in the same guest, so the packages its cases installed
-# are there.
+# are there. The Bastio toolchain (bastioc1, Z3, tcc: bastiotools.sh) is on
+# this disk too, outside the Alpine root, because Alpine's gcc is a non-PIE
+# executable linked at 0x400000, which the loader cannot place yet.
 
 == nvim: edit and save a C file
 $ bb chroot /disk/a /usr/bin/nvim -u NONE /root/hello.c
@@ -18,3 +20,26 @@ $ bb chroot /disk/a /bin/sh -c 'cd /root && git init -q --template= p && cd p &&
 $ bb chroot /disk/a /bin/sh -c 'cd /root/p && git add hello.c && git commit -qm edit && git --no-pager log --format=%s && tail -n 1 hello.c'
 edit
 // edited
+
+== nvim: edit a Bastio program, prove and build it, run it
+$ bb chroot /disk/a /usr/bin/nvim -u NONE /root/dev.bastio
+> ifn put_num(con: &Serial, x: u64) {\r  if x >= 10 {\r    put_num(con, x / 10);\r  }\r  serial_write(con, cast[u8](48 + x % 10));\r}\r\rfn main(con: Serial) -> Serial {\r  put_num(con, 6 * 7);\r  serial_write(con, 10);\r  return con;\r}\x1b
+> :wq\r
+$ cd /disk/a/root && CC=/disk/tcc BASTIO_SOLVER=/disk/z3 /disk/bastioc1 -o dev dev.bastio && ./dev; cd /
+bastioc1: dev.bastio: 5 proof obligation(s) discharged
+42
+
+== nvim: an edit that breaks a proof is rejected
+$ bb chroot /disk/a /usr/bin/nvim -u NONE /root/dev.bastio
+> Gofn add(a: u64, b: u64) -> u64 {\r  return a + b;\r}\x1b
+> :wq\r
+$ cd /disk/a/root && rm -f dev && CC=/disk/tcc BASTIO_SOLVER=/disk/z3 /disk/bastioc1 -o dev dev.bastio 2>&1 | bb grep -o 'E-VERIFY-OVERFLOW'; ls dev 2>&1 | bb head -n 1; cd /
+E-VERIFY-OVERFLOW
+ls: dev: No such file or directory
+
+== nvim: edit a C file, build it with tcc, run it
+$ bb chroot /disk/a /usr/bin/nvim -u NONE /root/dev.c
+> i#include <stdio.h>\rint main(void) { printf("built %d\\n", 6 * 7); return 0; }\x1b
+> :wq\r
+$ cd /disk/a/root && /disk/tcc -o devc dev.c && ./devc; cd /
+built 42

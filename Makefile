@@ -633,8 +633,13 @@ ALPINE_DISK_PKGS ?= git,curl,less,openssh-keygen,bash,make,jq,rsync,openssl,file
 # Hub rate-limits anonymous pulls, and only what is missing is fetched.
 ALPINE_CACHE ?= build/compat/alpine
 
-build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py | build/compat
-	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE)
+# The Bastio toolchain goes on this disk too (outside the Alpine root, like
+# the bastio disk's), for the cases that edit a program in Alpine's neovim
+# and build it with bastioc1 and tcc.
+build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh \
+    build/compat/bastioc1 build/compat/z3 build/compat/tcc | build/compat
+	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) \
+	  --extra "$$(test/compat/bastiotools.sh build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB))"
 
 # Debian on BastiOS, on a fifth disk (test/compat/debiandisk.py) for
 # test/compat/debian.txt: Debian's root file system, whose programs are

@@ -411,6 +411,10 @@ def main():
     if "--cache" in args:
         cache = args[args.index("--cache") + 1]
         del args[args.index("--cache"):args.index("--cache") + 2]
+    extra = []
+    if "--extra" in args:
+        extra = args[args.index("--extra") + 1].split()
+        del args[args.index("--extra"):args.index("--extra") + 2]
     out, top, base, images = args[0], args[1], args[2], args[3:]
     cache = cache or top
     os.makedirs(cache, exist_ok=True)
@@ -445,7 +449,7 @@ def main():
         shutil.copyfile(os.path.join(http, f), os.path.join(repo, f))
     print(f"alpinedisk: {len(pkgs)} packages and {len(SYNTH)} test packages on the disk, {n} over HTTP",
           file=sys.stderr)
-    args = [os.path.join(work, "busybox"), os.path.join(work, "root.tar")]
+    args = [os.path.join(work, "busybox"), os.path.join(work, "root.tar")] + extra
     for r in (repo, repo2):
         args += [f"a/{os.path.basename(r)}/x86_64/{f}={os.path.join(r, f)}" for f in sorted(os.listdir(r))]
     # Room for the unpacked root and what apk installs (neovim, gcc and git
