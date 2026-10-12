@@ -24,6 +24,7 @@ const LOCK_SH: u64 = 1;
 const LOCK_EX: u64 = 2;
 const LOCK_UN: u64 = 8;
 const MFD_CLOEXEC: u64 = 1;
+const F_SEAL_ALL: u64 = 63;            // SEAL, SHRINK, GROW, WRITE, FUTURE_WRITE, EXEC
 const COPY_MAX: u64 = 0x7FFFF000;         // the most one sendfile moves, as on Linux
 const ENODEV: u64 = 18446744073709551597;     // 2^64 - 19
 
@@ -502,6 +503,7 @@ fn lx_memfd(k: &mut Kernel, pid: u64, name: u64, flags: u64) -> u64
     let n = memfd_name(&mut k, pid, sat_add(k.ns, tries));
     let fd = lx_open_n(&mut k, pid, n, oflags, 384);   // 0600
     if fd < LXNFD {
+      seal_new(&mut k, pid, fd, flags / 2 % 2 == 1);
       let n2 = memfd_name(&mut k, pid, sat_add(k.ns, tries));
       vfs_unlink(&mut k.fs, &mut k.mem, n2);
       return fd;
@@ -512,6 +514,90 @@ fn lx_memfd(k: &mut Kernel, pid: u64, name: u64, flags: u64) -> u64
     tries = tries + 1;
   }
   return EEXIST;
+}
+
+/// The slot of the sealing table for file f, or SEAL_N if it has none.
+fn seal_slot(k: &Kernel, f: u64) -> u64
+  requires kok(k) && f < 0xFFFFFFFFFFFFFFFF
+  ensures result <= SEAL_N
+{
+  let mut e = 0;
+  while e < SEAL_N
+    invariant e <= SEAL_N && kok(k)
+  {
+    if get(k.sys, SYS_SEAL + 2 * e) == f + 1 {
+      return e;
+    }
+    e = e + 1;
+  }
+  return SEAL_N;
+}
+
+/// A new memfd on descriptor fd: its seals start empty, or sealed against
+/// sealing (F_SEAL_SEAL) without MFD_ALLOW_SEALING. The table is a ring of
+/// SEAL_N entries (the oldest is overwritten).
+fn seal_new(k: &mut Kernel, pid: u64, fd: u64, allow: bool)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let d = fd_look(k, pid, fd);
+  if d.kind != K_FILE {
+    return;
+  }
+  let f = vfs_row_file(k.fs, d.x);
+  if f == NO_FILE || f >= 0xFFFFFFFFFFFFFFFF {
+    return;
+  }
+  let mut e = seal_slot(k, f);
+  if e >= SEAL_N {
+    e = k.ns / 1000 % SEAL_N;
+    let mut i = 0;
+    while i < SEAL_N && get(k.sys, SYS_SEAL + 2 * e) != 0
+      invariant i <= SEAL_N && e < SEAL_N && kok(k)
+    {
+      e = (e + 1) % SEAL_N;
+      i = i + 1;
+    }
+  }
+  k.sys = set(k.sys, SYS_SEAL + 2 * e, f + 1);
+  if allow {
+    k.sys = set(k.sys, SYS_SEAL + 2 * e + 1, 0);
+  } else {
+    k.sys = set(k.sys, SYS_SEAL + 2 * e + 1, 1);
+  }
+}
+
+/// fcntl F_ADD_SEALS and F_GET_SEALS. The seals are recorded and reported
+/// but not enforced: writes and truncation still work on a sealed memfd.
+/// A file that is not a memfd made here has none (EINVAL), as on Linux.
+fn lx_seals(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let d = fd_look(k, pid, fd);
+  if d.kind != K_FILE {
+    return EINVAL;
+  }
+  let f = vfs_row_file(k.fs, d.x);
+  if f == NO_FILE || f >= 0xFFFFFFFFFFFFFFFF {
+    return EINVAL;
+  }
+  let e = seal_slot(k, f);
+  if e >= SEAL_N {
+    return EINVAL;
+  }
+  let cur = get(k.sys, SYS_SEAL + 2 * e + 1) % 64;
+  if cmd == F_GET_SEALS {
+    return cur;
+  }
+  if arg > F_SEAL_ALL {
+    return EINVAL;
+  }
+  if cur % 2 == 1 {
+    return EPERM;                           // sealed against sealing
+  }
+  k.sys = set(k.sys, SYS_SEAL + 2 * e + 1, cur | arg);
+  return 0;
 }
 
 /// Writes "tmp/.memfd-P-T" (P the pid, T a stamp in hex) to the transfer

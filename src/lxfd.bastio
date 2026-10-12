@@ -1104,6 +1104,9 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     }
     return 0;
   }
+  if cmd == F_ADD_SEALS || cmd == F_GET_SEALS {
+    return lx_seals(&mut k, pid, fd, cmd, arg);   // src/lxmore.bastio
+  }
   if cmd == F_GETPIPE_SZ || cmd == F_SETPIPE_SZ {
     let pd = fd_look(k, pid, fd);
     if pd.kind != K_PIPE_R && pd.kind != K_PIPE_W {

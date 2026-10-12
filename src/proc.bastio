@@ -457,7 +457,7 @@ const LK_WW: u64 = 4;
 const LK_LEN: u64 = LK_WAITS + NPROC * LK_WW;
 const IPC_LEN: u64 = 9984;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
 const RNG_LEN: u64 = 19;              // the random generator's words (src/lxdev.bastio)
-const SYS_LEN: u64 = 15968;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio)
+const SYS_LEN: u64 = 16000;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio)
 const SYS_PQ: u64 = 160;
 const SYS_PR: u64 = 256;               // SYS_PQ + PQ_N * 12; NPROC * PR_W words
 const SYS_RL: u64 = 1536;               // SYS_PR + NPROC * PR_W; NPROC * RL_W words (src/lxrlimit.bastio)
@@ -474,6 +474,8 @@ const LR_N: u64 = 4;
 // ptrace (src/lxptrace.bastio): process p's word in k.sys from SYS_PT holds
 // its tracer + 1 in the low 16 bits (0: not traced) and the flags below.
 const SYS_PT: u64 = 15712;             // SYS_LR + NPROC * LR_N * 2; a word per process
+const SYS_SEAL: u64 = 15968;           // SYS_PT + NPROC; SEAL_N memfds of 2 words: file + 1 (0: free), seals
+const SEAL_N: u64 = 16;
 const PT_ATTACHED: u64 = 65536;        // PTRACE_ATTACH or SEIZE rather than TRACEME
 const PT_STOPPED: u64 = 131072;        // in a ptrace-stop: the tracer may read and change it
 const PT_SKIP: u64 = 262144;           // the signal about to be delivered was injected: it does not stop again
@@ -756,6 +758,8 @@ const F_SETFD: u64 = 2;
 const F_GETFL: u64 = 3;
 const F_SETFL: u64 = 4;
 const F_DUPFD_CLOEXEC: u64 = 1030;
+const F_ADD_SEALS: u64 = 1033;
+const F_GET_SEALS: u64 = 1034;
 const F_SETPIPE_SZ: u64 = 1031;
 const F_GETPIPE_SZ: u64 = 1032;
 const F_GETLK: u64 = 5;
