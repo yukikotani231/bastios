@@ -2,7 +2,7 @@
 # `test/trusted_base.sh --update` and review the diff.
 boot/aarch64/boot.S: 444 lines
 boot/aarch64/linker.ld: 23 lines
-boot/aarch64/platform.c: 406 lines
+boot/aarch64/platform.c: 439 lines
 boot/ap.S: 84 lines
 boot/boot.S: 555 lines
 boot/core.h: 63 lines
@@ -15,4 +15,4 @@ boot/smp.c: 741 lines
 user/start.S: 19 lines
 user/start-aarch64.S: 17 lines
 user/user.ld: 15 lines
-total: 2819 lines
+total: 2852 lines

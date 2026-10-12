@@ -72,6 +72,22 @@ static uint64_t GICR = 0x080A0000ull;       /* GICv2: the CPU interface (GICC) *
 static uint8_t dtb_copy[DTB_MAX];
 static uint64_t dtb_len;
 
+/* Tables of 2 MiB blocks for 1 GiB regions that hold RAM and something else. */
+#define MAX_L2 8
+static uint64_t kernel_l2[MAX_L2][512] __attribute__((aligned(4096)));
+
+/* The bytes of [lo, hi) that the memory map covers. */
+static uint64_t ram_overlap(uint64_t lo, uint64_t hi) {
+    uint64_t n = 0;
+    for (uint64_t i = 0; i < bst_memmap[0]; i++) {
+        uint64_t b = bst_memmap[1 + 2 * i], e = b + bst_memmap[2 + 2 * i];
+        if (b < lo) b = lo;
+        if (e > hi) e = hi;
+        if (e > b) n += e - b;
+    }
+    return n;
+}
+
 extern uint64_t bst_kernel_root[512];
 extern uint64_t kernel_l1[512];
 
@@ -205,7 +221,7 @@ static void read_memory(const uint8_t *dtb) {
 
 /* Called by boot.S with the MMU off (so, compiled with -mstrict-align): the
  * memory map, and the kernel's map in top-level slot 0 (every user table
- * copies it): 1 GiB blocks, EL1 only, never executable at EL0. Block 0
+ * copies it): 1 GiB blocks (2 MiB blocks where RAM shares a GiB with devices), EL1 only, never executable at EL0. RAM is normal memory (MAIR index 0); the first 4 GiB without RAM are devices (MAIR index 1, not executable). Block 0
  * holds the devices (MAIR index 1, not executable); the blocks that hold
  * RAM are normal memory (MAIR index 0). */
 void bst_early(const uint8_t *dtb) {
@@ -231,9 +247,28 @@ void bst_early(const uint8_t *dtb) {
     }
     if (top > (512ull << 30)) top = 512ull << 30;
     for (int i = 0; i < 512; i++) kernel_l1[i] = 0;
-    kernel_l1[0] = BLOCK_DEVICE;
-    for (uint64_t g = 1; g < ((top + (1ull << 30) - 1) >> 30); g++)
-        kernel_l1[g] = BLOCK_NORMAL | (g << 30);
+    /* Every 1 GiB of the address space the kernel can reach is one of: all
+     * RAM (a normal-memory block), no RAM and in the first 4 GiB (a device
+     * block: where the peripherals of every board lie), or mixed (a table of
+     * 2 MiB blocks, each normal if RAM touches it, device otherwise: a
+     * board with RAM from address 0 and peripherals near 4 GiB). */
+    unsigned l2used = 0;
+    for (uint64_t g = 0; g < 512 && ((g << 30) < top || g < 4); g++) {
+        uint64_t lo = g << 30, hi = lo + (1ull << 30);
+        uint64_t cov = ram_overlap(lo, hi);
+        if (cov == 0) {
+            if (g < 4) kernel_l1[g] = BLOCK_DEVICE | lo;
+        } else if (cov == (1ull << 30) || l2used == MAX_L2) {
+            kernel_l1[g] = BLOCK_NORMAL | lo;
+        } else {
+            uint64_t *l2 = kernel_l2[l2used++];
+            for (uint64_t i = 0; i < 512; i++) {
+                uint64_t a = lo + (i << 21);
+                l2[i] = (ram_overlap(a, a + (2ull << 20)) ? BLOCK_NORMAL : BLOCK_DEVICE) | a;
+            }
+            kernel_l1[g] = (uint64_t)l2 | 3;
+        }
+    }
     bst_kernel_root[0] = (uint64_t)kernel_l1 | 3;
     bst_ttbr1_tables[0][0] = (uint64_t)bst_ttbr1_tables[1] | 3;
     bst_ttbr1_tables[1][0] = (uint64_t)bst_ttbr1_tables[2] | 3;
