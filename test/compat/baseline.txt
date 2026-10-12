@@ -895,6 +895,7 @@ t_sys: adjtimex reads and sets
 t_sys: clock_settime moves CLOCK_REALTIME
 t_sys: memory.max refuses a mapping that would pass it
 t_sys: not root: EPERM
+t_sys: seccomp USER_NOTIF: a supervisor answers a call
 t_sys: setdomainname
 t_sys: sethostname, uname, /proc/sys/kernel/hostname
 t_sys: settimeofday
