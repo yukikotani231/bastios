@@ -78,6 +78,21 @@ Linux's for the same work, so a figure above 1 means BastiOS is slower.
 | tcplat | us | 167 | 290 | 0.58x |
 | tcpbw | MiB/s | 24.1 | 328.5 | 13.62x |
 
+## Tracking it
+
+`bench/baseline.json` is the result file of one `make bench --os bastios`
+run (see its `date`), kept in the repository so a change can be compared
+with what came before. `make bench BENCH_ARGS="--os bastios"` followed by
+`make bench-compare` prints the change in every test against it, marks any
+that is more than 10% slower or faster, and exits 1 if one got slower.
+`bench/compare.py OLD.json NEW.json` compares any two files. Update the
+baseline in the commit that changes the numbers on purpose, and put the
+table (and its change from the previous baseline) in the notes of every
+release. TCG timing is noisy, and a baseline from another host proves
+nothing: rerun both on the same host back to back before trusting a small
+difference. The numbers are not hardware timing; once BastiOS runs on a
+physical machine, record that table next to Linux's on the same machine.
+
 ## Reading the numbers
 
 TCG is not a processor. It inflates some costs and hides others, and it

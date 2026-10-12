@@ -705,6 +705,13 @@ compat-ltp-baseline: build/bastios.elf build/ltp/.built
 bench: build/bastios.elf
 	bench/run.py $(BENCH_ARGS)
 
+# Not part of `make test`: the change in each benchmark from bench/baseline.json
+# (or COMPARE_TO=other.json) to the last `make bench` (build/bench/results.json).
+# Exits 1 if a test got more than 10% slower; see bench/compare.py.
+COMPARE_TO ?= bench/baseline.json
+bench-compare:
+	bench/compare.py $(COMPARE_TO) build/bench/results.json
+
 # Not part of `make test`: prints timings, checks nothing (see the script).
 smpbench: build/bastios.elf
 	test/smpbench.sh
@@ -734,4 +741,4 @@ clean:
 .PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
 FORCE:
 
-.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-compare smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
