@@ -51,7 +51,12 @@ const MNS_SEQ: u64 = NPROC + 3;
 const MNS_JUMP: u64 = NPROC + 4;          // overlay getdents: the position to go on from (0: the next)
 const MNS_ODIR: u64 = NPROC + 5;          // overlay getdents: the layer's directory of the last entry
 const MNS_OIDX: u64 = NPROC + 6;          // and its index there
-const MNS_ENT: u64 = NPROC + 8;
+const MNS_INTENT: u64 = NPROC + 7;        // overlay: what the next lookup is for (OI_*)
+const MNS_OE: u64 = NPROC + 8;            // overlay: the mount the last lookup went through + 1 (0: none)
+const MNS_OLYR: u64 = NPROC + 9;          // and the layer that had the name (OVL_NONE: none)
+const MNS_FINAL: u64 = NPROC + 10;        // 1 while lx_follow looks up the whole path
+const MNS_IPID: u64 = NPROC + 11;         // overlay: the process whose call the intent is for
+const MNS_ENT: u64 = NPROC + 16;
 const MS_ROW: u64 = 256;                  // FNAME_MAX + 1
 const LPATH: u64 = 256;                   // where the mounts' strings start in k.mstr
 
@@ -186,6 +191,9 @@ fn ns_find(k: &Kernel, ns: u64, p: &Bytes, c: u64) -> u64
 const MK_OVERLAY: u64 = 9;
 const OVL_DATA: u64 = 1024;               // the most bytes of mount data
 const OVL_NONE: u64 = 1000;               // no layer has the name
+const OI_NONE: u64 = 0;                   // MNS_INTENT: the lookup only reads
+const OI_WRITE: u64 = 1;                  // it makes or changes the file: copy it up, make its directories
+const OI_REMOVE: u64 = 2;                 // it removes the file: see where it is (ovl_pending)
 const LSTR: u64 = 0x100000;               // positions one layer takes in a merged directory
 
 /// Where layer li's path starts in an overlay's source at k.mstr[at..],
@@ -386,6 +394,183 @@ fn ovl_find(k: &mut Kernel, e: u64, p: &Bytes, rr: u64, c: u64) -> u64
   return OVL_NONE;
 }
 
+/// Is there an upper layer in overlay mount e?
+fn ovl_has_upper(k: &Kernel, e: u64) -> bool
+  requires kok(k) && e < MT_N
+{
+  let sl = me_slen(k, e);
+  let at = me_key(e) + MS_ROW;
+  let s = ovl_start(k, at, sl, 0);
+  if s > sl {
+    return false;
+  }
+  return ovl_end(k, at, sl, s) > s;
+}
+
+/// Copies p[rr..c] from layer li of overlay mount e to the upper layer,
+/// with its mode, owner and time: a directory (empty), a symbolic link or
+/// a regular file with its contents. False with k.perr if it cannot be
+/// (a device, FIFO or socket node is not copied; no room).
+fn ovl_make_up(k: &mut Kernel, pid: u64, e: u64, p: &Bytes, rr: u64, c: u64, li: u64) -> bool
+  requires kok(k) && pid < NPROC && e < MT_N && rr <= c && c <= FNAME_MAX && c <= blen(p)
+  ensures kok(k)
+{
+  let sn = ovl_name(&mut k, e, li, p, rr, rr, c, 0);
+  if sn == NO_RESULT {
+    k.perr = ENOENT;
+    return false;
+  }
+  let f = vfs_lookup(&mut k.fs, sn);
+  let mut perm = 0x41ED;                    // a directory the file layer does not hold: rwxr-xr-x
+  let mut own = 0;
+  let mut mtime = NO_FILE;
+  let mut isdir = true;
+  let mut islink = false;
+  let mut size = 0;
+  if f != NO_FILE {
+    let fm = vfs_meta(&mut k.fs, f);
+    if !fm.ok {
+      k.perr = ENOENT;
+      return false;
+    }
+    perm = fm.mode % 65536;
+    own = fm.own;
+    mtime = fm.mtime;
+    isdir = vfs_is_dir(&mut k.fs, f);
+    islink = vfs_is_link(&mut k.fs, f);
+    let t = perm / 4096 * 4096;
+    if t == T_FIFO || t == T_CHR || t == T_BLK || t == T_SOCK {
+      k.perr = EOPNOTSUPP;
+      return false;
+    }
+    size = vfs_size(&mut k.fs, f);
+  } else if dir_at(&mut k, sn) == NO_FILE {
+    k.perr = ENOENT;
+    return false;
+  }
+  let mut tb = balloc(FNAME_MAX);
+  let mut tl = 0;
+  if islink {
+    tl = vfs_read_at(&mut k.fs, f, 0, FNAME_MAX);
+    if tl == NO_FD || tl == 0 || tl > FNAME_MAX {
+      bfree(tb);
+      k.perr = ENOENT;
+      return false;
+    }
+    let mut i = 0;
+    while i < tl
+      invariant i <= tl && tl <= FNAME_MAX && blen(tb) == FNAME_MAX && kok(k)
+    {
+      bset(&mut tb, i, bget(k.fs.xfer, i));
+      i = i + 1;
+    }
+  }
+  let un = ovl_name(&mut k, e, 0, p, rr, rr, c, 0);
+  if un == NO_RESULT || un == 0 {
+    bfree(tb);
+    k.perr = EROFS;
+    return false;
+  }
+  let mut ok = false;
+  if isdir {
+    ok = vfs_mkdir(&mut k.fs, un);
+  } else if islink {
+    let mut i = 0;
+    while i < tl && un + tl <= XFER
+      invariant i <= tl && tl <= FNAME_MAX && un <= FNAME_MAX && un + FNAME_MAX <= XFER && blen(tb) == FNAME_MAX && kok(k)
+    {
+      bset(&mut k.fs.xfer, un + i, bget(tb, i));
+      i = i + 1;
+    }
+    ok = vfs_symlink(&mut k.fs, &mut k.mem, un, tl);
+  } else {
+    ok = vfs_mknode(&mut k.fs, &mut k.mem, un, perm);
+    if ok && size > 0 {
+      let nfd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, O_WRITE, un);
+      if nfd == NO_FD || nfd >= NFD {
+        ok = false;
+      } else {
+        let row = pid * NFD + nfd;
+        let mut off = 0;
+        while ok && off < size
+          invariant off <= size && row < FD_ROWS && kok(k)
+        {
+          let r = vfs_read_at(&mut k.fs, f, off, XFER);
+          if r == NO_FD || r == 0 || r > XFER {
+            ok = false;
+          } else {
+            let w = vfs_write(&mut k.fs, &mut k.mem, row, r);
+            if w != r {
+              ok = false;
+            }
+            if r >= size - off {
+              off = size;
+            } else {
+              off = off + r;
+            }
+          }
+        }
+        vfs_close(&mut k.fs, &mut k.mem, row);
+      }
+    }
+  }
+  bfree(tb);
+  if !ok {
+    k.perr = ENOSPC;
+    return false;
+  }
+  // The copy keeps the original's mode, owner and time.
+  let nn = ovl_name(&mut k, e, 0, p, rr, rr, c, 0);
+  if nn != NO_RESULT {
+    let nf = vfs_lookup(&mut k.fs, nn);
+    if nf != NO_FILE {
+      vfs_set_meta(&mut k.fs, nf, perm % 4096, mtime);
+      if own != 0 {
+        vfs_set_owner(&mut k.fs, nf, own % 0x100000000, own / 0x100000000);
+      }
+    }
+  }
+  return true;
+}
+
+/// Makes the directories above p[rr..c] in the upper layer of overlay
+/// mount e, from the layers that have them.
+fn ovl_parents(k: &mut Kernel, pid: u64, e: u64, p: &Bytes, rr: u64, c: u64) -> bool
+  requires kok(k) && pid < NPROC && e < MT_N && rr <= c && c <= FNAME_MAX && c <= blen(p)
+  ensures kok(k)
+{
+  let mut b = rr;
+  while b < c
+    invariant rr <= b && b <= c + 1 && c <= FNAME_MAX && c <= blen(p) && e < MT_N && pid < NPROC && kok(k)
+  {
+    let mut m = b;
+    while m < c && bget(p, m) != 47
+      invariant b <= m && m <= c && c <= blen(p)
+    {
+      m = m + 1;
+    }
+    if m < c && m > b {
+      let n = ovl_name(&mut k, e, 0, p, rr, rr, m, 0);
+      if n == NO_RESULT {
+        k.perr = EROFS;
+        return false;
+      }
+      if !ovl_exists(&mut k, n) {
+        let l2 = ovl_find(&mut k, e, p, rr, m);
+        if l2 >= OVL_NONE || l2 == 0 {
+          k.perr = ENOENT;
+          return false;
+        }
+        if !ovl_make_up(&mut k, pid, e, p, rr, m, l2) {
+          return false;
+        }
+      }
+    }
+    b = m + 1;
+  }
+  return true;
+}
+
 /// ns_tr for overlay mount e, whose key covers p[0..kl]: the file layer's
 /// path of p[0..c] in the layer that has it, or in the top one (the first
 /// lower without an upper) if none does, where it would be made.
@@ -398,7 +583,25 @@ fn ovl_tr(k: &mut Kernel, e: u64, p: &Bytes, kl: u64, c: u64) -> u64
   if rr < c && bget(p, rr) == 47 {
     rr = rr + 1;
   }
-  let li = ovl_find(&mut k, e, p, rr, c);
+  let mut li = ovl_find(&mut k, e, p, rr, c);
+  let it = get(k.mns, MNS_INTENT);
+  if it != OI_NONE && get(k.mns, MNS_FINAL) != 0 {
+    k.mns = set(k.mns, MNS_OE, e + 1);
+    k.mns = set(k.mns, MNS_OLYR, li);
+    if it == OI_WRITE && ovl_has_upper(k, e) {
+      // Made or changed: it lives in the upper layer from now on.
+      let pid = smaller(get(k.mns, MNS_IPID), NPROC - 1);
+      if !ovl_parents(&mut k, pid, e, p, rr, c) {
+        return NO_RESULT;
+      }
+      if li > 0 && li < OVL_NONE {
+        if !ovl_make_up(&mut k, pid, e, p, rr, c, li) {
+          return NO_RESULT;
+        }
+      }
+      li = 0;
+    }
+  }
   let mut lyr = li;
   if li >= OVL_NONE {
     lyr = 0;
@@ -492,6 +695,81 @@ fn ns_tr(k: &mut Kernel, ns: u64, p: &Bytes, c: u64) -> u64
     k.mns = set(k.mns, MNS_LRO, 0);
   }
   return w;
+}
+
+/// Says that the next lookup of process pid is for what: OI_WRITE if it
+/// makes or changes the file, OI_REMOVE if it removes it. Forgets what the
+/// last one found.
+fn ovl_intent(k: &mut Kernel, pid: u64, what: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  k.mns = set(k.mns, MNS_INTENT, what);
+  k.mns = set(k.mns, MNS_IPID, pid);
+  k.mns = set(k.mns, MNS_OE, 0);
+  k.mns = set(k.mns, MNS_OLYR, OVL_NONE);
+}
+
+fn ovl_intent_write(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  ovl_intent(&mut k, pid, OI_WRITE);
+}
+
+/// The lookups that follow only read.
+fn ovl_intent_end(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  k.mns = set(k.mns, MNS_INTENT, OI_NONE);
+}
+
+/// ns_tr for the whole path: what lx_follow returns to its caller.
+fn ns_tr_final(k: &mut Kernel, ns: u64, p: &Bytes, c: u64) -> u64
+  requires kok(k) && c <= FNAME_MAX && c <= blen(p)
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  k.mns = set(k.mns, MNS_FINAL, 1);
+  let r = ns_tr(&mut k, ns, p, c);
+  k.mns = set(k.mns, MNS_FINAL, 0);
+  return r;
+}
+
+/// lx_path_at, lx_path_at_nf and lx_path_in for a call that makes or
+/// changes the file (see ovl_intent).
+fn lx_path_at_w(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  ovl_intent(&mut k, pid, OI_WRITE);
+  let n = lx_path_at(&mut k, pid, dirfd, va);
+  ovl_intent_end(&mut k);
+  return n;
+}
+
+fn lx_path_at_nf_w(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  ovl_intent(&mut k, pid, OI_WRITE);
+  let n = lx_path_at_nf(&mut k, pid, dirfd, va);
+  ovl_intent_end(&mut k);
+  return n;
+}
+
+fn lx_path_in_w(k: &mut Kernel, pid: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  ovl_intent(&mut k, pid, OI_WRITE);
+  let n = lx_path_in(&mut k, pid, va);
+  ovl_intent_end(&mut k);
+  return n;
 }
 
 /// Keeps p[0..c] as the logical path of the last lookup.

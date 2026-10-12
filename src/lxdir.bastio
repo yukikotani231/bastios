@@ -521,7 +521,7 @@ fn lx_mkdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let n = lx_path_at_nf(&mut k, pid, dirfd, path);
+  let n = lx_path_at_nf_w(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return k.perr;
   }
