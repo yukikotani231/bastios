@@ -58,6 +58,7 @@ int main(void) {
         strstr(t, "Receive") && strstr(t, "lo:") && strstr(t, "eth0:"); }));
     EXPECT("/proc/net is a directory", ({ struct stat st; stat("/proc/net", &st) == 0 && S_ISDIR(st.st_mode); }));
     EXPECT("/proc/modules opens", open("/proc/modules", O_RDONLY) >= 0);
+    EXPECT("/proc/diskstats opens", open("/proc/diskstats", O_RDONLY) >= 0);
     EXPECT("/etc/passwd", open("/etc/passwd", O_RDONLY) >= 0);
     EXPECT("getlogin or getpwuid", getpwuid(getuid()) != NULL);
     EXPECT("sched_getaffinity", ({ cpu_set_t c; sched_getaffinity(0, sizeof c, &c) == 0; }));
