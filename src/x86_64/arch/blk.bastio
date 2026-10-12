@@ -1,0 +1,805 @@
+// The disk under the file system: the BastiOS partition of a USB stick on
+// the xHCI controller when there is one (see src/xhci.bastio and
+// blk_find), else an NVMe drive when the machine has one, else a virtio
+// block device, else a SATA disk on an AHCI controller (all four move
+// sectors by DMA), otherwise the ATA drive on the legacy IDE ports
+// (programmed I/O). All of them read and write one 512-byte sector,
+// or one 4 KiB block of eight sectors with a single command, into a byte
+// buffer.
+
+import "pages.bastio";
+import "ata.bastio";
+import "pci.bastio";
+import "virtio_blk.bastio";
+import "nvme.bastio";
+import "ahci.bastio";
+import "lapic.bastio";
+import "xhci.bastio";
+import "loopblk.bastio";
+
+const VIRTIO_PORTS_LO: u64 = 0x1000;  // PCI I/O BARs sit above the legacy ports
+const NVME_AT: u64 = 24;              // the NVMe drive's five pages: 24 .. 28
+const AHCI_AT: u64 = 29;              // the AHCI controller's two pages: 29, 30
+const VIRTIO_DATA_AT: u64 = 31;       // virtio's block data page (its others are 0 .. 3)
+
+enum Blk { Ata(Ata), Virtio(Virtio), Nvme(Nvme), Ahci(Ahci), Usb(Xhci), Loop(LoopDev) }
+enum Drive { None, Nvme(Nvme), Ahci(Ahci) }
+
+/// Does the disk driver hold I/O port k in the PCI range?
+spec fn blk_holds(b: &Blk, k: u64) -> bool {
+  b is Blk::Virtio && port_base(b.Virtio.io) <= k && k < port_base(b.Virtio.io) + VIO_PORTS
+}
+
+spec fn blk_ok(b: &Blk) -> bool {
+  (b is Blk::Ata ==> ata_ok(b.Ata)) && (b is Blk::Virtio ==> virtio_ok(b.Virtio))
+  && (b is Blk::Nvme ==> nvme_ok(b.Nvme)) && (b is Blk::Ahci ==> ahci_ok(b.Ahci))
+  && (b is Blk::Usb ==> xhci_ok(b.Usb))
+  && (b is Blk::Loop ==> loopdev_ok(b.Loop))
+}
+
+/// Does the disk driver hold device-window address a?
+spec fn blk_claims(b: &Blk, a: u64) -> bool {
+  (b is Blk::Nvme && mmio_base(b.Nvme.regs) <= a && a < mmio_base(b.Nvme.regs) + mmio_len(b.Nvme.regs))
+  || (b is Blk::Ahci && mmio_base(b.Ahci.regs) <= a && a < mmio_base(b.Ahci.regs) + mmio_len(b.Ahci.regs))
+}
+
+spec fn drive_claims(d: &Drive, a: u64) -> bool {
+  (d is Drive::Nvme && mmio_base(d.Nvme.regs) <= a && a < mmio_base(d.Nvme.regs) + mmio_len(d.Nvme.regs))
+  || (d is Drive::Ahci && mmio_base(d.Ahci.regs) <= a && a < mmio_base(d.Ahci.regs) + mmio_len(d.Ahci.regs))
+}
+
+/// `take_page`, also saying that every other page's entry is unchanged, so
+/// several pages can be taken in a row.
+fn take_low_page(m: &mut Mem, i: u64) -> Frame
+  requires mem_ok(m) && i < len(m.bm) && get(m.bm, i) == 1
+  ensures mem_ok(m) && frame_id(result) == i
+  ensures forall j: u64 :: j != i ==> get(m.bm, j) == old(get(m.bm, j))
+{
+  m.bm = set(m.bm, i, 0);
+  return pool_take(&mut m.pool, i);
+}
+
+/// The NVMe controller `dev` on PCI, if its registers lie in the
+/// device window clear of the framebuffer at lo .. hi, five pages from
+/// NVME_AT are free, and namespace 1 has 512-byte blocks; else none (and
+/// everything it claimed or took is back). Unless `msi` is 0, and if the
+/// controller has MSI-X with its table in the claimed registers, its
+/// completions raise V_DISK by a message to address `msi`.
+fn nvme_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64) -> Drive
+  requires pci_ok(pci) && mem_ok(m) && msi <= 4294967295
+  requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) ==> mmio_free(win, a)
+  ensures mem_ok(m) && (result is Drive::Nvme ==> nvme_ok(result.Nvme)) && !(result is Drive::Ahci)
+  ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) && !drive_claims(result, a) ==> mmio_free(win, a)
+{
+  let dev = pci_find_class(&mut pci, NVME_CLASS);
+  if dev >= PCI_NONE {
+    return Drive::None;
+  }
+  let bar = pci_mem_bar64(&mut pci, dev);
+  let mut size = pci_bar_size(&mut pci, dev);
+  if size > NVME_MAX_LEN {
+    size = NVME_MAX_LEN;
+  }
+  if bar % 4096 != 0 || size < 0x2000 || !(bar + size <= lo || bar >= hi) || !(bar + size <= lo2 || bar >= hi2)
+    || !((bar >= WIN_LO && bar + size <= WIN_LOW_TOP) || (bar >= WIN_HIGH && bar + size <= WIN_TOP))
+    || !pages_free(m, NVME_AT, NVME_PAGES) {
+    return Drive::None;
+  }
+  pci_enable(&mut pci, dev);
+  let f0 = take_low_page(&mut m, NVME_AT);
+  let f1 = take_low_page(&mut m, NVME_AT + 1);
+  let f2 = take_low_page(&mut m, NVME_AT + 2);
+  let f3 = take_low_page(&mut m, NVME_AT + 3);
+  let f4 = take_low_page(&mut m, NVME_AT + 4);
+  let mut cap = 0;
+  let mut table = 0;
+  if msi != 0 {
+    cap = pci_cap(&mut pci, dev, CAP_MSIX);
+  }
+  if cap != 0 && cap < 252 {
+    table = pci_msix_table(&mut pci, dev, cap);
+    if table >= 4294967296 {
+      cap = 0;                        // the table is in another BAR
+    }
+  } else {
+    cap = 0;
+  }
+  // MSI-X goes on before the controller makes its queues: a device may
+  // (QEMU's does) only bind a queue to a message while MSI-X is on. Its
+  // table entries start masked, so nothing is sent until nvme_msix.
+  if cap != 0 {
+    pci_intx_off(&mut pci, dev);
+    pci_msix_on(&mut pci, dev, cap);
+  }
+  let mut n = nvme_new(mmio_claim(&mut win, bar, size), f0, f1, f2, f3, f4, cap != 0);
+  if n.sectors == 0 {
+    mmio_release(&mut win, nvme_free(n, &mut m));
+    return Drive::None;
+  }
+  if cap != 0 {
+    let on = nvme_msix(&mut n, table, msi, V_DISK);
+  }
+  return Drive::Nvme(n);
+}
+
+/// The first AHCI controller on PCI, if its registers (BAR 5) lie in
+/// the device window clear of the framebuffer at lo .. hi, two pages from
+/// AHCI_AT are free, and one of its ports has a SATA disk; else none (and
+/// everything it claimed or took is back). `reset`: every port with a
+/// device gets a COMRESET (boot option ahci_reset). Unless `msi` is 0, and if the
+/// controller has MSI, its completions raise V_DISK by a message to `msi`.
+fn ahci_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64, reset: bool) -> Drive
+  requires pci_ok(pci) && mem_ok(m) && msi <= 4294967295
+  requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) ==> mmio_free(win, a)
+  ensures mem_ok(m) && (result is Drive::Ahci ==> ahci_ok(result.Ahci)) && !(result is Drive::Nvme)
+  ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) && !drive_claims(result, a) ==> mmio_free(win, a)
+{
+  let dev = pci_find_class(&mut pci, AHCI_CLASS);
+  if dev >= PCI_NONE {
+    return Drive::None;
+  }
+  let bar = pci_mem_bar_at(&mut pci, dev, PCI_BAR5);
+  let mut size = pci_bar_size_at(&mut pci, dev, PCI_BAR5);
+  if size > AHCI_MAX_LEN {
+    size = AHCI_MAX_LEN;
+  }
+  if bar % 1024 != 0 || size < 0x180 || !(bar + size <= lo || bar >= hi) || !(bar + size <= lo2 || bar >= hi2)
+    || !((bar >= WIN_LO && bar + size <= WIN_LOW_TOP) || (bar >= WIN_HIGH && bar + size <= WIN_TOP))
+    || !pages_free(m, AHCI_AT, AHCI_PAGES) {
+    return Drive::None;
+  }
+  pci_enable(&mut pci, dev);
+  let f0 = take_low_page(&mut m, AHCI_AT);
+  let f1 = take_low_page(&mut m, AHCI_AT + 1);
+  let mut h = ahci_new(mmio_claim(&mut win, bar, size), f0, f1, reset);
+  if h.sectors == 0 {
+    mmio_release(&mut win, ahci_free(h, &mut m));
+    return Drive::None;
+  }
+  let mut cap = 0;
+  if msi != 0 {
+    cap = pci_cap(&mut pci, dev, CAP_MSI);
+  }
+  if cap != 0 && cap < 240 {
+    pci_intx_off(&mut pci, dev);
+    pci_msi_on(&mut pci, dev, cap, msi, V_DISK);
+    ahci_irq_on(&mut h);
+  }
+  return Drive::Ahci(h);
+}
+
+/// Turns MSI-X on for virtio device `dev` (enabled) with message 0 going
+/// to `msi` as V_DISK, if `msi` is not 0 and its table is in a memory BAR
+/// in the device window clear of the framebuffer at lo .. hi. The table
+/// entry is claimed only while it is written. True if it is on.
+fn virtio_msix(pci: &mut Pci, win: &mut MmioSpace, dev: u64, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64) -> bool
+  requires pci_ok(pci) && dev < PCI_NONE && msi <= 4294967295
+  requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) ==> mmio_free(win, a)
+  ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) ==> mmio_free(win, a)
+{
+  if msi == 0 {
+    return false;
+  }
+  let cap = pci_cap(&mut pci, dev, CAP_MSIX);
+  if cap == 0 || cap >= 252 {
+    return false;
+  }
+  let e = pci_msix_at(&mut pci, dev, cap);
+  if e == 0 || !(e + 16 <= lo || e >= hi) || !(e + 16 <= lo2 || e >= hi2)
+    || !((e >= WIN_LO && e + 16 <= WIN_LOW_TOP) || (e >= WIN_HIGH && e + 16 <= WIN_TOP)) {
+    return false;
+  }
+  pci_intx_off(&mut pci, dev);
+  pci_msix_on(&mut pci, dev, cap);
+  let mut r = mmio_claim(&mut win, e, 16);
+  pci_msix_entry(&mut r, msi, V_DISK);
+  mmio_release(&mut win, r);
+  return true;
+}
+
+/// Picks the disk, from devices clear of lo .. hi and lo2 .. hi2 in the
+/// device window: an NVMe drive (see `nvme_find`), else the first virtio
+/// block device on PCI, given the four lowest pages for its queue and
+/// request and page 31 for block data, else a SATA disk on AHCI (see `ahci_find`), or else the ATA
+/// drive. `msi` is where a device's interrupt messages go (0 for none).
+fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64,
+  plo: u64, phi: u64, reset: bool) -> Blk
+  requires pci_ok(pci) && mem_ok(m) && msi <= 4294967295
+  requires forall k: u64 :: ATA_IO <= k && k < ATA_IO + 8 ==> port_free(ports, k)
+  requires port_free(ports, ATA_CTL)
+  requires forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 && !(plo <= k && k < phi) ==> port_free(ports, k)
+  requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) ==> mmio_free(win, a)
+  ensures blk_ok(result) && mem_ok(m)
+  ensures forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 && !(plo <= k && k < phi) && !blk_holds(result, k) ==> port_free(ports, k)
+  ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) && !blk_claims(result, a) ==> mmio_free(win, a)
+{
+  let nv = nvme_find(&mut pci, &mut m, &mut win, lo, hi, lo2, hi2, msi);
+  match nv {
+    Drive::Nvme(n) => { return Blk::Nvme(n); },
+    Drive::Ahci(h) => { unreachable; },
+    Drive::None => {},
+  }
+  let dev = pci_find(&mut pci, VIRTIO_VENDOR, VIRTIO_BLK);
+  if dev < PCI_NONE {
+    let base = pci_io_bar(&mut pci, dev);
+    if base >= VIRTIO_PORTS_LO && base + VIO_PORTS <= 65536 && (base + VIO_PORTS <= plo || base >= phi)
+      && get(m.bm, 0) == 1 && get(m.bm, 1) == 1 && get(m.bm, 2) == 1 && get(m.bm, 3) == 1
+      && get(m.bm, VIRTIO_DATA_AT) == 1 {
+      pci_enable(&mut pci, dev);
+      let msix = virtio_msix(&mut pci, &mut win, dev, lo, hi, lo2, hi2, msi);
+      let f0 = take_low_page(&mut m, 0);
+      let f1 = take_low_page(&mut m, 1);
+      let f2 = take_low_page(&mut m, 2);
+      let f3 = take_low_page(&mut m, 3);
+      let f4 = take_low_page(&mut m, VIRTIO_DATA_AT);
+      // The data pages of batched reads (virtio_begin_n): free pages from
+      // the top of the pool down, so the low pages other drivers take by
+      // number (the NIC's, after this) stay free. Pages the device cannot
+      // reach, or none, only make the batches shorter.
+      let mut extra = vec_new[Extra]();
+      let mut pages = 0;
+      let mut more = true;
+      let mut top = len(m.bm);
+      while vec_len(extra) < VIO_BATCH - 1
+        invariant mem_ok(m) && vlen(extra) < VIO_BATCH && pages <= vlen(extra) && top <= len(m.bm)
+      {
+        let mut a = NPAGES;
+        while top > 0 && a == NPAGES
+          invariant mem_ok(m) && top <= len(m.bm) && (a == NPAGES || (a < len(m.bm) && get(m.bm, a) == 1))
+        {
+          top = top - 1;
+          if get(m.bm, top) == 1 {
+            a = top;
+          }
+        }
+        if more && a < NPAGES {
+          let x = virtio_extra(&mut m, take_low_page(&mut m, a));
+          match x {
+            Extra::None => {
+              more = false;
+              vec_push(&mut extra, Extra::None);
+            },
+            Extra::Page(d) => {
+              vec_push(&mut extra, Extra::Page(d));
+              pages = pages + 1;
+            },
+          }
+        } else {
+          more = false;
+          vec_push(&mut extra, Extra::None);
+        }
+      }
+      return Blk::Virtio(virtio_new(&mut ports, base, f0, f1, f2, f3, f4, extra, pages, msix));
+    }
+  }
+  let sd = ahci_find(&mut pci, &mut m, &mut win, lo, hi, lo2, hi2, msi, reset);
+  match sd {
+    Drive::Ahci(h) => { return Blk::Ahci(h); },
+    Drive::Nvme(n) => { unreachable; },
+    Drive::None => {},
+  }
+  return Blk::Ata(ata_new(&mut ports));
+}
+
+/// The disk: a USB stick or disk with a BastiOS partition if the xHCI
+/// controller `u` found one (the controller then moves to the disk, with
+/// its keyboard if it has one, and `u` is left empty), else as blk_new.
+/// A stick booted from is the one the user chose, so it goes before the
+/// machine's own disks, which are then left untouched.
+fn blk_find(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64, u: &mut Usb,
+  plo: u64, phi: u64, reset: bool) -> Blk
+  requires pci_ok(pci) && mem_ok(m) && msi <= 4294967295 && usb_ok(u)
+  requires forall k: u64 :: ATA_IO <= k && k < ATA_IO + 8 ==> port_free(ports, k)
+  requires port_free(ports, ATA_CTL)
+  requires forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 && !(plo <= k && k < phi) ==> port_free(ports, k)
+  requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) ==> mmio_free(win, a)
+  ensures blk_ok(result) && mem_ok(m) && usb_ok(u)
+  ensures forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 && !(plo <= k && k < phi) && !blk_holds(result, k) ==> port_free(ports, k)
+  ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) && !blk_claims(result, a) ==> mmio_free(win, a)
+{
+  match u {
+    Usb::Xhci(x) => {
+      if x.msd == MSD_ON {
+        u = Usb::None;
+        return Blk::Usb(x);
+      }
+      u = Usb::Xhci(x);
+    },
+    Usb::None => { u = Usb::None; },
+  }
+  return blk_new(&mut ports, &mut pci, &mut m, &mut win, lo, hi, lo2, hi2, msi, plo, phi, reset);
+}
+
+/// Does the disk raise V_DISK when a command started by blk_begin ends?
+/// If not, it has to be polled.
+fn blk_irq(b: &Blk) -> bool {
+  match b {
+    Blk::Nvme(n) => { return n.irq; },
+    Blk::Ahci(h) => { return h.irq; },
+    Blk::Ata(a) => { return false; },
+    Blk::Virtio(v) => { return v.irq; },
+    Blk::Usb(x) => { return x.irq; },
+    Blk::Loop(l) => { return false; },
+  }
+}
+
+/// Gives the disk's ports or registers back and, for virtio and NVMe,
+/// stops the device and takes its pages back (at power off).
+fn blk_free(ports: &mut Ports, win: &mut MmioSpace, b: Blk, m: &mut Mem)
+  requires blk_ok(b) && mem_ok(m)
+  ensures mem_ok(m)
+{
+  match b {
+    Blk::Ata(a) => { ata_free(&mut ports, a); },
+    Blk::Virtio(v) => { virtio_free(&mut ports, v, &mut m); },
+    Blk::Nvme(n) => { mmio_release(&mut win, nvme_free(n, &mut m)); },
+    Blk::Ahci(h) => { mmio_release(&mut win, ahci_free(h, &mut m)); },
+    Blk::Usb(x) => { mmio_release(&mut win, xhci_free(x, &mut m)); },
+    Blk::Loop(l) => { loopdev_free(l, &mut m); },
+  }
+}
+
+/// The device-window block the disk driver holds, as lo .. hi (empty
+/// unless it is NVMe or AHCI).
+fn blk_mmio_lo(b: &Blk) -> u64
+  ensures b is Blk::Nvme ==> result == mmio_base(b.Nvme.regs)
+  ensures b is Blk::Ahci ==> result == mmio_base(b.Ahci.regs)
+{
+  match b {
+    Blk::Nvme(n) => { return mmio_base(n.regs); },
+    Blk::Ahci(h) => { return mmio_base(h.regs); },
+    Blk::Ata(a) => { return 0; },
+    Blk::Virtio(v) => { return 0; },
+    Blk::Usb(x) => { return 0; },
+    Blk::Loop(l) => { return 0; },
+  }
+}
+
+fn blk_mmio_hi(b: &Blk) -> u64
+  ensures b is Blk::Nvme ==> result == mmio_base(b.Nvme.regs) + mmio_len(b.Nvme.regs)
+  ensures b is Blk::Ahci ==> result == mmio_base(b.Ahci.regs) + mmio_len(b.Ahci.regs)
+  ensures !(b is Blk::Nvme) && !(b is Blk::Ahci) ==> result == 0
+{
+  match b {
+    Blk::Nvme(n) => { return mmio_base(n.regs) + mmio_len(n.regs); },
+    Blk::Ahci(h) => { return mmio_base(h.regs) + mmio_len(h.regs); },
+    Blk::Ata(a) => { return 0; },
+    Blk::Virtio(v) => { return 0; },
+    Blk::Usb(x) => { return 0; },
+    Blk::Loop(l) => { return 0; },
+  }
+}
+
+/// The PCI-range ports the disk driver holds, as lo .. hi (empty for ATA).
+fn blk_ports_lo(b: &Blk) -> u64
+  ensures b is Blk::Virtio ==> result == port_base(b.Virtio.io)
+  ensures !(b is Blk::Virtio) ==> result == 0
+{
+  match b {
+    Blk::Ata(a) => { return 0; },
+    Blk::Virtio(v) => { return port_base(v.io); },
+    Blk::Nvme(n) => { return 0; },
+    Blk::Ahci(h) => { return 0; },
+    Blk::Usb(x) => { return 0; },
+    Blk::Loop(l) => { return 0; },
+  }
+}
+
+fn blk_ports_hi(b: &Blk) -> u64
+  ensures b is Blk::Virtio ==> result == port_base(b.Virtio.io) + VIO_PORTS
+  ensures !(b is Blk::Virtio) ==> result == 0
+{
+  match b {
+    Blk::Ata(a) => { return 0; },
+    Blk::Virtio(v) => { return port_base(v.io) + VIO_PORTS; },
+    Blk::Nvme(n) => { return 0; },
+    Blk::Ahci(h) => { return 0; },
+    Blk::Usb(x) => { return 0; },
+    Blk::Loop(l) => { return 0; },
+  }
+}
+
+fn blk_is_virtio(b: &Blk) -> bool {
+  return b is Blk::Virtio;
+}
+
+fn blk_is_nvme(b: &Blk) -> bool {
+  return b is Blk::Nvme;
+}
+
+fn blk_is_ahci(b: &Blk) -> bool {
+  return b is Blk::Ahci;
+}
+
+fn blk_is_usb(b: &Blk) -> bool {
+  return b is Blk::Usb;
+}
+
+/// The next byte typed on a USB keyboard on the disk's controller (when
+/// the disk is a USB one, the keyboard is polled through it), a packet
+/// from a USB mouse there (MOUSE_PKT plus its bytes), or 256.
+fn blk_kbd_poll(b: &mut Blk) -> u64
+  requires blk_ok(b)
+  ensures blk_ok(b) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT))
+{
+  match b {
+    Blk::Usb(mut x) => {
+      let c = xhci_poll(&mut x);
+      b = Blk::Usb(x);
+      return c;
+    },
+    Blk::Ata(a) => { b = Blk::Ata(a); return 256; },
+    Blk::Virtio(v) => { b = Blk::Virtio(v); return 256; },
+    Blk::Nvme(n) => { b = Blk::Nvme(n); return 256; },
+    Blk::Ahci(h) => { b = Blk::Ahci(h); return 256; },
+    Blk::Loop(l) => { b = Blk::Loop(l); return 256; },
+  }
+}
+
+/// Is there a USB keyboard on the disk's controller?
+fn blk_kbd(b: &Blk) -> bool {
+  match b {
+    Blk::Usb(x) => { return x.live; },
+    Blk::Ata(a) => { return false; },
+    Blk::Virtio(v) => { return false; },
+    Blk::Nvme(n) => { return false; },
+    Blk::Ahci(h) => { return false; },
+    Blk::Loop(l) => { return false; },
+  }
+}
+
+/// Is there a USB mouse on the disk's controller?
+fn blk_mouse(b: &Blk) -> bool {
+  match b {
+    Blk::Usb(x) => { return x.mlive; },
+    Blk::Ata(a) => { return false; },
+    Blk::Virtio(v) => { return false; },
+    Blk::Nvme(n) => { return false; },
+    Blk::Ahci(h) => { return false; },
+    Blk::Loop(l) => { return false; },
+  }
+}
+
+/// The disk's size in sectors (0 if there is none).
+fn blk_sectors(b: &Blk) -> u64 {
+  match b {
+    Blk::Ata(a) => { return a.sectors; },
+    Blk::Virtio(v) => { return v.sectors; },
+    Blk::Nvme(n) => { return n.sectors; },
+    Blk::Ahci(h) => { return h.sectors; },
+    Blk::Usb(x) => { return x.sectors; },
+    Blk::Loop(l) => { return l.sectors; },
+  }
+}
+
+/// Reads sector `lba` into buf[0..512]; false if the disk fails or the
+/// sector is past its end.
+fn blk_read(b: &mut Blk, lba: u64, buf: &mut Bytes) -> bool
+  requires blk_ok(b) && blen(buf) >= SECTOR
+  ensures blk_ok(b) && blen(buf) == old(blen(buf))
+{
+  match b {
+    Blk::Ata(mut a) => {
+      let ok = ata_read(&mut a, lba, &mut buf);
+      b = Blk::Ata(a);
+      return ok;
+    },
+    Blk::Virtio(mut v) => {
+      let ok = virtio_read(&mut v, lba, &mut buf);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+    Blk::Nvme(mut n) => {
+      let ok = nvme_read(&mut n, lba, &mut buf);
+      b = Blk::Nvme(n);
+      return ok;
+    },
+    Blk::Ahci(mut h) => {
+      let ok = ahci_read(&mut h, lba, &mut buf);
+      b = Blk::Ahci(h);
+      return ok;
+    },
+    Blk::Usb(mut x) => {
+      let ok = usbd_read(&mut x, lba, &mut buf);
+      b = Blk::Usb(x);
+      return ok;
+    },
+    Blk::Loop(mut l) => {
+      let ok = loopdev_read(&mut l, lba, &mut buf);
+      b = Blk::Loop(l);
+      return ok;
+    },
+  }
+}
+
+/// Writes buf[0..512] to sector `lba`; false if the disk fails or the
+/// sector is past its end.
+fn blk_write(b: &mut Blk, lba: u64, buf: &Bytes) -> bool
+  requires blk_ok(b) && blen(buf) >= SECTOR
+  ensures blk_ok(b)
+{
+  match b {
+    Blk::Ata(mut a) => {
+      let ok = ata_write(&mut a, lba, buf);
+      b = Blk::Ata(a);
+      return ok;
+    },
+    Blk::Virtio(mut v) => {
+      let ok = virtio_write(&mut v, lba, buf);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+    Blk::Nvme(mut n) => {
+      let ok = nvme_write(&mut n, lba, buf);
+      b = Blk::Nvme(n);
+      return ok;
+    },
+    Blk::Ahci(mut h) => {
+      let ok = ahci_write(&mut h, lba, buf);
+      b = Blk::Ahci(h);
+      return ok;
+    },
+    Blk::Usb(mut x) => {
+      let ok = usbd_write(&mut x, lba, buf);
+      b = Blk::Usb(x);
+      return ok;
+    },
+    Blk::Loop(mut l) => {
+      let ok = loopdev_write(&mut l, lba, buf);
+      b = Blk::Loop(l);
+      return ok;
+    },
+  }
+}
+
+/// Reads the 4 KiB block of eight sectors from `lba` (a multiple of 8) into
+/// out[at .. at + 4096] with one command; false if the disk fails or the
+/// block is not whole on the disk.
+fn blk_read_block(b: &mut Blk, lba: u64, out: &mut Bytes, at: u64) -> bool
+  requires blk_ok(b) && at + 4096 <= blen(out)
+  ensures blk_ok(b) && blen(out) == old(blen(out))
+{
+  match b {
+    Blk::Ata(mut a) => {
+      let ok = ata_read_block(&mut a, lba, &mut out, at);
+      b = Blk::Ata(a);
+      return ok;
+    },
+    Blk::Virtio(mut v) => {
+      let ok = virtio_read_block(&mut v, lba, &mut out, at);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+    Blk::Nvme(mut n) => {
+      let ok = nvme_read_block(&mut n, lba, &mut out, at);
+      b = Blk::Nvme(n);
+      return ok;
+    },
+    Blk::Ahci(mut h) => {
+      let ok = ahci_read_block(&mut h, lba, &mut out, at);
+      b = Blk::Ahci(h);
+      return ok;
+    },
+    Blk::Usb(mut x) => {
+      let ok = usbd_read_block(&mut x, lba, &mut out, at);
+      b = Blk::Usb(x);
+      return ok;
+    },
+    Blk::Loop(mut l) => {
+      let ok = loopdev_read_block(&mut l, lba, &mut out, at);
+      b = Blk::Loop(l);
+      return ok;
+    },
+  }
+}
+
+/// Writes src[at .. at + 4096] to the eight sectors from `lba` (a multiple
+/// of 8) with one command, and flushes the drive's cache once; false if the
+/// disk fails or the block is not whole on the disk.
+fn blk_write_block(b: &mut Blk, lba: u64, src: &Bytes, at: u64) -> bool
+  requires blk_ok(b) && at + 4096 <= blen(src)
+  ensures blk_ok(b)
+{
+  match b {
+    Blk::Ata(mut a) => {
+      let ok = ata_write_block(&mut a, lba, src, at);
+      b = Blk::Ata(a);
+      return ok;
+    },
+    Blk::Virtio(mut v) => {
+      let ok = virtio_write_block(&mut v, lba, src, at);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+    Blk::Nvme(mut n) => {
+      let ok = nvme_write_block(&mut n, lba, src, at);
+      b = Blk::Nvme(n);
+      return ok;
+    },
+    Blk::Ahci(mut h) => {
+      let ok = ahci_write_block(&mut h, lba, src, at);
+      b = Blk::Ahci(h);
+      return ok;
+    },
+    Blk::Usb(mut x) => {
+      let ok = usbd_write_block(&mut x, lba, src, at);
+      b = Blk::Usb(x);
+      return ok;
+    },
+    Blk::Loop(mut l) => {
+      let ok = loopdev_write_block(&mut l, lba, src, at);
+      b = Blk::Loop(l);
+      return ok;
+    },
+  }
+}
+
+// Commands that run while the kernel does something else (see
+// src/bio.bastio): blk_begin starts one, blk_poll says when it is done,
+// and blk_fetch copies a finished read into the buffer it was started
+// with. One at a time. While one runs, the waiting calls above fail.
+
+/// Starts BIO_READ into buf[at .. at + 4096] or BIO_WRITE from it, of the
+/// 4 KiB block at sector `lba` (a multiple of 8), or BIO_FLUSH. A read's
+/// data is in buf only after blk_fetch(b, buf, at) (ATA has it at once).
+/// False if a command is running or the block is not whole on the disk.
+fn blk_begin(b: &mut Blk, op: u64, lba: u64, buf: &mut Bytes, at: u64) -> bool
+  requires blk_ok(b) && op <= BIO_FLUSH && at + 4096 <= blen(buf)
+  ensures blk_ok(b) && blen(buf) == old(blen(buf))
+{
+  match b {
+    Blk::Ata(mut a) => {
+      let ok = ata_begin(&mut a, op, lba, &mut buf, at);
+      b = Blk::Ata(a);
+      return ok;
+    },
+    Blk::Virtio(mut v) => {
+      let ok = virtio_begin(&mut v, op, lba, buf, at);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+    Blk::Nvme(mut n) => {
+      let ok = nvme_begin(&mut n, op, lba, buf, at);
+      b = Blk::Nvme(n);
+      return ok;
+    },
+    Blk::Ahci(mut h) => {
+      let ok = ahci_begin(&mut h, op, lba, buf, at);
+      b = Blk::Ahci(h);
+      return ok;
+    },
+    Blk::Usb(mut x) => {
+      let ok = usbd_begin(&mut x, op, lba, buf, at);
+      b = Blk::Usb(x);
+      return ok;
+    },
+    Blk::Loop(mut l) => {
+      let ok = loopdev_begin(&mut l, op, lba, &mut buf, at);
+      b = Blk::Loop(l);
+      return ok;
+    },
+  }
+}
+
+/// How many consecutive blocks from sector `lba` one read can take (up to
+/// `want`): more than one only on virtio, which reads them in one request
+/// (virtio_begin_n).
+fn blk_room(b: &Blk, lba: u64, want: u64) -> u64
+  requires blk_ok(b)
+  ensures result >= 1 && result <= VIO_BATCH
+{
+  match b {
+    Blk::Virtio(v) => { return virtio_room(v, lba, want); },
+    Blk::Ata(a) => { return 1; },
+    Blk::Nvme(n) => { return 1; },
+    Blk::Ahci(h) => { return 1; },
+    Blk::Usb(x) => { return 1; },
+    Blk::Loop(l) => { return 1; },
+  }
+}
+
+/// Starts reading n consecutive blocks from sector `lba` (n from
+/// blk_room); blk_fetch_n then takes each. Only virtio takes n > 1.
+fn blk_begin_n(b: &mut Blk, lba: u64, n: u64) -> bool
+  requires blk_ok(b) && n >= 1 && n <= VIO_BATCH
+  ensures blk_ok(b)
+{
+  match b {
+    Blk::Virtio(mut v) => {
+      let ok = virtio_begin_n(&mut v, lba, n);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+    Blk::Ata(a) => { b = Blk::Ata(a); return false; },
+    Blk::Nvme(x) => { b = Blk::Nvme(x); return false; },
+    Blk::Ahci(h) => { b = Blk::Ahci(h); return false; },
+    Blk::Usb(x) => { b = Blk::Usb(x); return false; },
+    Blk::Loop(l) => { b = Blk::Loop(l); return false; },
+  }
+}
+
+/// After a blk_begin_n read finished well: its block j into buf[at ..].
+fn blk_fetch_n(b: &mut Blk, j: u64, buf: &mut Bytes, at: u64)
+  requires blk_ok(b) && at + 4096 <= blen(buf)
+  ensures blk_ok(b) && blen(buf) == old(blen(buf))
+{
+  match b {
+    Blk::Virtio(mut v) => {
+      virtio_fetch_n(&mut v, j, &mut buf, at);
+      b = Blk::Virtio(v);
+    },
+    Blk::Ata(a) => { b = Blk::Ata(a); },
+    Blk::Nvme(x) => { b = Blk::Nvme(x); },
+    Blk::Ahci(h) => { b = Blk::Ahci(h); },
+    Blk::Usb(x) => { b = Blk::Usb(x); },
+    Blk::Loop(l) => { b = Blk::Loop(l); },
+  }
+}
+
+/// BIO_RUNNING while the started command runs, then once BIO_OK or
+/// BIO_FAILED; BIO_IDLE if none was started.
+fn blk_poll(b: &mut Blk) -> u64
+  requires blk_ok(b)
+  ensures blk_ok(b) && result <= BIO_IDLE
+{
+  match b {
+    Blk::Ata(mut a) => {
+      let r = ata_poll(&mut a);
+      b = Blk::Ata(a);
+      return r;
+    },
+    Blk::Virtio(mut v) => {
+      let r = virtio_poll(&mut v);
+      b = Blk::Virtio(v);
+      return r;
+    },
+    Blk::Nvme(mut n) => {
+      let r = nvme_poll(&mut n);
+      b = Blk::Nvme(n);
+      return r;
+    },
+    Blk::Ahci(mut h) => {
+      let r = ahci_poll(&mut h);
+      b = Blk::Ahci(h);
+      return r;
+    },
+    Blk::Usb(mut x) => {
+      let r = usbd_poll(&mut x);
+      b = Blk::Usb(x);
+      return r;
+    },
+    Blk::Loop(mut l) => {
+      let r = loopdev_poll(&mut l);
+      b = Blk::Loop(l);
+      return r;
+    },
+  }
+}
+
+/// After blk_poll said BIO_OK for a BIO_READ started with (buf, at):
+/// puts the block in buf[at .. at + 4096].
+fn blk_fetch(b: &mut Blk, buf: &mut Bytes, at: u64)
+  requires blk_ok(b) && at + 4096 <= blen(buf)
+  ensures blk_ok(b) && blen(buf) == old(blen(buf))
+{
+  match b {
+    Blk::Ata(a) => { b = Blk::Ata(a); },     // ata_begin read it already
+    Blk::Virtio(mut v) => {
+      virtio_fetch(&mut v, &mut buf, at);
+      b = Blk::Virtio(v);
+    },
+    Blk::Nvme(mut n) => {
+      nvme_fetch(&mut n, &mut buf, at);
+      b = Blk::Nvme(n);
+    },
+    Blk::Ahci(mut h) => {
+      ahci_fetch(&mut h, &mut buf, at);
+      b = Blk::Ahci(h);
+    },
+    Blk::Usb(mut x) => {
+      usbd_fetch(&mut x, &mut buf, at);
+      b = Blk::Usb(x);
+    },
+    Blk::Loop(l) => { b = Blk::Loop(l); },   // loopdev_begin read it already
+  }
+}
