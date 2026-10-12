@@ -47,36 +47,43 @@ kernel function through QEMU's `-perfmap`, or to QEMU itself.
 
 ## Results
 
-BastiOS main (b3aa0d4), with the `disk_links` fix from this change.
+BastiOS main (f71b0a8), after the loopback TCP ring and the COW fork work.
+This host ran slower than the one behind earlier tables (`cpu` 2.9 ns
+against 1.4), so compare the ratios, not the absolute figures.
 QEMU 8.2 TCG, `-smp 2`, `-m 512M`, median of 3 runs, on a 4-processor
 cloud container with no KVM. The ratio column is BastiOS's time divided by
 Linux's for the same work, so a figure above 1 means BastiOS is slower.
 
 | Test | Unit | BastiOS | Linux | BastiOS / Linux |
 |---|---|---:|---:|---:|
-| cpu | ns/iter | 1.39 | 1.84 | 0.75x |
-| memcpy | us/MiB | 77.8 | 75.0 | 1.04x |
-| syscall | ns | 19604 | 644 | 30.43x |
-| clock | ns | 135 | 1349 | 0.10x |
-| open@tmp | us | 91.7 | 8.81 | 10.40x |
-| open@disk | us | 80.2 | 9.58 | 8.37x |
-| stat@tmp | us | 47.4 | 5.48 | 8.64x |
-| stat@disk | us | 67.4 | 6.87 | 9.80x |
-| create@tmp | us | 233 | 171 | 1.36x |
-| create@disk | us | 4299 | 593 | 7.25x |
-| filewrite@tmp | MiB/s | 252.8 | 290.7 | 1.15x |
-| filewrite@disk | MiB/s | 2.2 | 128.4 | 57.92x |
-| fileread@tmp | MiB/s | 205.5 | 1758.9 | 8.56x |
-| fileread@disk | MiB/s | 27.3 | 1113.9 | 40.87x |
-| fork | us | 340 | 1680 | 0.20x |
-| forkbig | us | 4996 | 2398 | 2.08x |
-| exec | us | 1268 | 5399 | 0.23x |
-| spawn | us | 1171 | 4524 | 0.26x |
-| fault | ns/page | 1993 | 10594 | 0.19x |
-| pipelat | us | 95.6 | 121 | 0.79x |
-| pipebw | MiB/s | 306.9 | 376.0 | 1.23x |
-| tcplat | us | 167 | 290 | 0.58x |
-| tcpbw | MiB/s | 24.1 | 328.5 | 13.62x |
+| cpu | ns/iter | 2.89 | 3.00 | 0.96x |
+| memcpy | us/MiB | 110 | 112 | 0.99x |
+| syscall | ns | 9364 | 1026 | 9.13x |
+| clock | ns | 145 | 2623 | 0.06x |
+| open@tmp | us | 43.4 | 15.2 | 2.86x |
+| open@disk | us | 54.8 | 18.8 | 2.91x |
+| stat@tmp | us | 26.2 | 9.09 | 2.88x |
+| stat@disk | us | 64.3 | 8.08 | 7.95x |
+| create@tmp | us | 203 | 252 | 0.81x |
+| create@disk | us | 5638 | 734 | 7.68x |
+| filemap@tmp | ns/page | 7080 | 3927 | 1.80x |
+| filemap@disk | ns/page | 62277 | 4213 | 14.78x |
+| filewrite@tmp | MiB/s | 560.8 | 180.0 | 0.32x |
+| filewrite@disk | MiB/s | 5.6 | 126.9 | 22.75x |
+| fileread@tmp | MiB/s | 663.4 | 1147.4 | 1.73x |
+| fileread@disk | MiB/s | 47.2 | 1322.5 | 28.05x |
+| fork | us | 768 | 2313 | 0.33x |
+| forkbig | us | 1236 | 3722 | 0.33x |
+| exec | us | 1896 | 8446 | 0.22x |
+| spawn | us | 1555 | 7092 | 0.22x |
+| fault | ns/page | 66480 | 22687 | 2.93x |
+| pipelat | us | 165 | 250 | 0.66x |
+| pipebw | MiB/s | 281.4 | 167.8 | 0.60x |
+| tcplat | us | 278 | 482 | 0.58x |
+| tcpbw | MiB/s | 105.8 | 194.0 | 1.83x |
+| sleep | us | 1024 | 1329 | 0.77x |
+| epwait | us | 1054 | 1307 | 0.81x |
+| idle | % host CPU | 15.0 | 2.00 | 7.51x |
 
 ## Tracking it
 
@@ -124,7 +131,7 @@ machine, because they come from algorithms, not from emulation.
 
 ## The gaps, largest first
 
-1. **Disk file reads (41x) and writes (about 17x).** Consecutive writes to
+1. **Disk file reads (28x) and writes (23x).** Consecutive writes to
    one file used to be a copy-on-write transaction each: new data, map and
    root blocks, two flushes, then the directory block. They now share a
    transaction (a batch, `src/diskfs.bastio`): the blocks stay in the cache
@@ -132,10 +139,18 @@ machine, because they come from algorithms, not from emulation.
    file, any other change to the disk, 32 blocks, or 0.1 s. `filewrite@disk`
    went from 1.9 to 6.6 MiB/s (median of 3, TCG, same host). The cost is
    that a write is on the disk only after one of those, not when the call
-   returns. Reads of a file larger than the block cache reach the disk
-   again; a page cache is the fix. bastios #146 added a 1 MiB block cache,
-   which an 8 MiB file does not fit in.
-2. **System call entry and exit (about 14x; the table's 30x predates CR3
+   returns. A `read` of a disk file now leaves the pages it read in the page
+   cache (`pc_fill`, `src/pcache.bastio`), up to an eighth of memory and
+   at most 16 MiB, and the next read of those pages is answered from
+   there without the disk (`pc_have` in `vfs_read`, `src/fs.bastio`);
+   writes, truncation and removal keep them current as for mapped pages.
+   `fileread@disk` went from 47 to 157 MiB/s (median of 3, TCG, same
+   host; the first of the benchmark's eight passes over the 8 MiB file
+   still reads the disk). What is left: a miss reads through the 1 MiB
+   block cache with 8 blocks of read-ahead, a write does not fill the
+   cache, and nothing gives cached pages back when memory runs low (the
+   cap is what bounds them).
+2. **System call entry and exit (9x; an older table had 30x, before CR3
    parking).** A process's table now stays in CR3 across a call that
    returns to it, so `getppid` takes about 9 us (`bench/baseline.json`)
    against Linux's 0.64 us, where the table above measured 19.6 us. A
@@ -153,12 +168,12 @@ machine, because they come from algorithms, not from emulation.
    not available handler) would remove the first part, and a ready queue
    the second; neither is done, and neither is worth doing before the
    numbers can be taken under KVM or on hardware.
-3. **`stat`, `open` (8 to 10x).** Partly (2). `stat` also counted hard
+3. **`stat`, `open` (3 to 8x).** Partly (2). `stat` also counted hard
    links by scanning all 1024 directory slots of the disk. It now scans
    only the slots the directory holds, which made `stat@disk` 4.9 times
    faster (351 to 72 us, measured on e7b211b). On tmpfs, `ram_links` still scans all 128
    nodes.
-4. **TCP bulk (14x before).** Each connection had 4 KiB buffers and no
+4. **TCP bulk (1.8x now, 14x before).** Each connection had 4 KiB buffers and no
    window scaling, loopback held eight frames, and a `read` or `write`
    moved at most 4 KiB. Connections now have 256 KiB rings of pages taken
    as data arrives, window scaling, a 64-frame loopback queue that TCP
@@ -166,11 +181,13 @@ machine, because they come from algorithms, not from emulation.
    move up to the ring's size (`src/tcpbuf.bastio`). `tcpbw` went from
    14.7 to 73.8 MiB/s on one host under TCG (`-smp 2`, median of 5,
    main and this change run back to back); `tcplat` did not change
-   beyond the noise (276-336 us before, 313-338 after).
+   beyond the noise (276-336 us before, 313-338 after). A later change
+   (frames of up to 15000 bytes on loopback, a 96 KiB variable-length queue)
+   took the table's `tcpbw` to 105.8 MiB/s, 1.8x Linux's 194 on the same run.
    What is left is per segment: every 1460 bytes is a frame built, queued,
    copied and taken in again, where Linux's loopback carries 64 KiB
    segments.
-5. **`forkbig` (2.1x in the table).** Fork used to copy every page. bastios
+5. **`forkbig` (0.33x in the table; it was 2.1x).** Fork used to copy every page. bastios
    #146 moved the copying off the lock (plain `fork` went from 1270 to
    340 us). Fork now shares a single-threaded process's pages
    copy-on-write (src/lxcow.bastio): measured A/B on the same host, two
