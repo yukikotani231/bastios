@@ -1293,6 +1293,20 @@ for version, legacy in ((1, "on"), (2, "off")):
         ("ping", b"reply from 10.0.2.2"),
     ], halt=True, ready=mmio_ready(version))
 
+# The same device named on the command line, as Firecracker does
+# (virtio_mmio.device=SIZE@ADDRESS:IRQ): only the named blocks are looked at.
+# QEMU's microvm puts a device added alone in the slot at 0xfeb02e00.
+for where, want in (("4K@0xfeb02e00:5", True), ("512@0xfeb00000:5", False)):
+    qemu = boot(1, extra=["-machine", "microvm", "-append", "quiet virtio_mmio.device=" + where,
+                          "-drive", f"file={disk},format=raw,if=none,id=mv",
+                          "-device", "virtio-blk-device,drive=mv"])
+    def named(want=want, where=where):
+        global fails
+        ok = (b"disk: virtio" in out) == want
+        print(("ok  " if ok else "FAIL"), f"(virtio-mmio {where}) disk {'found' if want else 'not looked for'}")
+        fails += not ok
+    session("virtio-mmio " + where, None, [("echo named", b"named")], halt=True, ready=named)
+
 # The PVH entry (boot.S), which Firecracker and QEMU's microvm machine use
 # when the image has no Multiboot header: QEMU prefers Multiboot when both
 # are there, so the header's magic is zeroed in a copy of the kernel.
@@ -2096,6 +2110,9 @@ for machine, name, extra, status, wants in (
             ("tick: the PIT\n", "the PIT ticks"),
             ("clock: the time-stamp counter at", "the clock is the TSC"),
             ("kHz, as measured against the PIT", "its rate measured against the PIT"))),
+        # No ACPI: halting only stops the processor, so QEMU is killed (status None).
+        ("microvm", "microvm", [], None, (
+            ("timer: the local APIC timer, counted against the PIT", "the timer is counted against the PIT, not the RTC"),)),
         ("pc,acpi=off,hpet=off,pit=off", "no HPET, PM timer or PIT", exit_dev, 33, (
             ("timer: the local APIC timer, counted against the RTC", "the timer is counted against the RTC"),
             ("tick: the local APIC timer (the PIT does not count)", "the local APIC timer ticks"),
