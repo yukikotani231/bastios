@@ -808,6 +808,10 @@ t_ptrace: at the exit stop rax is the result, and the call ran once
 t_ptrace: int3 stops the tracee with SIGTRAP
 t_ptrace: PTRACE_SINGLESTEP runs one instruction at a time
 t_ptrace: and the tracee runs freely after PTRACE_CONT
+t_ptrace: PTRACE_O_TRACEFORK stops the parent with PTRACE_EVENT_FORK and gives the child's id
+t_ptrace: the new child is traced already and stops with SIGSTOP
+t_ptrace: both run on after PTRACE_CONT, the child's end first for its tracer
+t_ptrace: PTRACE_O_TRACEEXEC reports the exec as PTRACE_EVENT_EXEC
 t_pty: /dev/tty in the child's session is its pty
 t_pty: Ctrl-C sends SIGINT to the foreground group
 t_pty: Ctrl-D on an empty line reads as end of file
@@ -918,6 +922,7 @@ t_sysv: semop, SETALL, GETALL, GETPID, errors
 t_sysv: shmat, a second view, fork, IPC_RMID
 t_sysv: shmget and shmat errors
 t_thread: /proc/self/stat and status count the threads
+t_thread: /proc/self/task lists the threads, and /proc/self/task/TID has their files
 t_thread: 4 threads, mutex
 t_thread: condition variable
 t_thread: exit_group while another thread runs keeps its code

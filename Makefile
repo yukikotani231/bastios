@@ -19,6 +19,18 @@
 # the machine code (only the assembler). Opt-in while its code is about ten
 # times the size of gcc's.
 
+# ARCH=aarch64 builds the AArch64 port (arch/aarch64/Makefile): QEMU's virt
+# machine, with its own platform in boot/aarch64 and kernel in
+# src/aarch64. Every goal is handed to that makefile. (ARCH is x86_64 unless
+# given.)
+ifeq ($(ARCH),aarch64)
+
+.DEFAULT_GOAL := all
+%:
+	@$(MAKE) -f arch/aarch64/Makefile $@
+
+else
+
 BASTIOC0 ?= ../bastiolang/stage0/target/release/bastioc0
 BASTIOC  ?= build/bastioc1
 # Where `import "core/..."` finds the Bastio core library.
@@ -342,7 +354,7 @@ run-uefi: build/bastios.iso $(DISK)
 
 # The tests are listed in test/all.sh, which runs JOBS of them at a time.
 test: build/bastios.elf
-	BASTIOC=$(BASTIOC) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/all.sh
+	BASTIOC=$(BASTIOC) BASTIOC0=$(BASTIOC0) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/all.sh
 
 # The system call fuzzer at length: SEEDS runs of CALLS calls from seed
 # SEED (see test/fuzz_test.sh; `make test` runs a short one).
@@ -761,3 +773,5 @@ clean:
 FORCE:
 
 .PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-compare smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+
+endif

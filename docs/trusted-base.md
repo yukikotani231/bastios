@@ -27,6 +27,19 @@ BastiOS also trusts everything bastiolang trusts: Z3, the Bastio compiler, the C
 | `boot/linker.ld` | Load address, and `_end`, where the page pool starts | |
 | `boot/limine.conf` | The Limine menu for the ISO and the USB image only, loading the kernel with Multiboot 2 (`make run` and most tests use QEMU's Multiboot 1 loader) | |
 
+### AArch64
+
+The AArch64 port ([aarch64.md](aarch64.md)) has its own platform, listed by `test/trusted_base.sh` like the rest:
+
+| File | What it does | Why it is not Bastio |
+| --- | --- | --- |
+| `boot/aarch64/boot.S` | Entry at EL1; the exception vectors; turning the MMU on; entering EL0 (`bst_cpu_enter`) and saving the user context on an exception; interrupts taken while the kernel waits | System registers, `eret` and saving registers are below any language |
+| `boot/aarch64/platform.c` | The memory map from the device tree; the kernel's translation table; the GICv3 and the generic timer; acknowledging interrupts | The device tree and the table are read and written before Bastio runs, and the controller registers are in the device window the kernel maps with 1 GiB blocks |
+| `boot/aarch64/linker.ld` | Load address, and `_end`, where the page pool starts | |
+| `user/start-aarch64.S` | The image header and `_start` of an AArch64 user program, as `user/start.S` | |
+
+As on x86-64, entering user mode cannot raise privilege: of the saved processor state only the condition flags are kept, and the processor enters EL0t with interrupts unmasked. A fault in kernel mode halts the machine with a report (`bst_kernel_fault`). The kernel's map is the same 1 GiB blocks in top-level slot 0 of every address space, EL1 only and never executable at EL0.
+
 What the kernel trusts these to do, beyond the obvious:
 - **Entering user mode cannot raise privilege.** `bst_cpu_enter` takes only rip, rsp, the FS base, the general registers and the arithmetic flags from the context Bastio code saved. The code and stack segments, IOPL 0 and the interrupt flag are forced, and a rip, rsp or FS base outside the lower half of the address space is replaced by 0. So nothing the kernel stores in a `Cpu` context can give user code I/O ports, kernel segments or interrupts off.
 - **Only one interrupt gate is open to ring 3** (`int 0x80`). The `syscall` entry uses vector 0x81, whose gate has DPL 0, so user code cannot fake it.

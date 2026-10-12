@@ -1,6 +1,6 @@
 # BastiOS
 
-A small x86-64 kernel written in [Bastio](https://github.com/yukikotani231/bastiolang), a language whose memory safety is proved at compile time. It runs its own programs and unmodified Linux ones (BusyBox, Lua, sqlite, a C compiler), on several processors, with files on a USB stick or an NVMe, virtio, SATA or ATA disk and a TCP/IP stack on a virtio or e1000 network card. It boots under QEMU, or from a Limine image on a USB stick under BIOS or UEFI.
+A small x86-64 kernel written in [Bastio](https://github.com/yukikotani231/bastiolang), a language whose memory safety is proved at compile time. It runs its own programs and unmodified Linux ones (BusyBox, Lua, sqlite, a C compiler), on several processors, with files on a USB stick or an NVMe, virtio, SATA or ATA disk and a TCP/IP stack on a virtio, e1000 or AWS ENA network card. It boots under QEMU, or from a Limine image on a USB stick under BIOS or UEFI.
 
 > **Status: experimental.** Everything here has been tried in QEMU only; no real PC has booted it yet. The system call ABI and the disk format can still change.
 >
@@ -57,7 +57,7 @@ The first build proves every source file and fetches BusyBox, so it takes a whil
 - **Processors.** Every processor runs the scheduler. The kernel's state is under one lock (`Lock[Sys]`) and the console's devices under another, while user code runs in parallel, including the threads of one process, which share its address space.
 - **Programs.** BastiOS's own programs use its system call ABI (`int 0x80`). Linux x86-64 ELF executables use the Linux ABI (`syscall`): static or dynamic, against musl, or static against glibc. Much of the Linux system call interface is implemented: files, pipes, signals, threads and futexes, `poll` and `epoll`, timers, and sockets; [docs/linux.md](docs/linux.md) lists them. `make compat` runs a compatibility suite (`test/compat`).
 - **Files.** An in-memory file system, and one on the disk under `disk/` that keeps every write whole across a power cut (copy-on-write). The disk is a partition on a USB stick (the one it booted from, with `make usb`), an NVMe drive, a virtio disk, a SATA disk on an AHCI controller or a legacy ATA disk; commands are queued behind a block cache and, except on ATA, finish by interrupt (MSI-X or MSI), so a process waiting for the disk sleeps.
-- **Network.** A virtio card or an Intel card of the e1000 families (8254x, 82574L, 82576 and the igb chips after it); DHCP, ARP, IPv4, ICMP, UDP and TCP (retransmission, out-of-order data, zero windows), IPv6 (neighbor discovery, an address from the router's prefix, UDP and TCP), a name server for the C library's resolver, loopback, and Unix sockets.
+- **Network.** A virtio card, an Intel card of the e1000 families (8254x, 82574L, 82576 and the igb chips after it) or an AWS ENA (tested against a model only: [docs/cloud.md](docs/cloud.md)); DHCP, ARP, IPv4, ICMP, UDP and TCP (retransmission, out-of-order data, zero windows), IPv6 (neighbor discovery, an address from the router's prefix, UDP and TCP), a name server for the C library's resolver, loopback, and Unix sockets.
 - **Console.** The first serial port, and from the ISO or USB image the screen (the framebuffer the boot loader sets up) with a PS/2 or USB keyboard (and mouse, for Linux programs).
 
 How the pieces fit together, and what is proved where, is in [docs/architecture.md](docs/architecture.md).
@@ -133,7 +133,7 @@ The direction is in bastiolang's [ROADMAP.md](https://github.com/yukikotani231/b
 | `src/linux.bastio`, `src/lx*.bastio` | The Linux system calls ([docs/linux.md](docs/linux.md)) |
 | `src/fs.bastio`, `ramfs.bastio`, `diskfs.bastio`, `diskq.bastio`, `bio.bastio` | Open files, the in-memory and disk file systems, the disk queue and block cache |
 | `src/blk.bastio`, `nvme.bastio`, `virtio_blk.bastio`, `ahci.bastio`, `ata.bastio` | Disk drivers (USB sticks: `xhci.bastio`) |
-| `src/net.bastio`, `tcp.bastio`, `card.bastio`, `virtio_net.bastio`, `e1000.bastio` | The network stack and card drivers |
+| `src/net.bastio`, `tcp.bastio`, `card.bastio`, `virtio_net.bastio`, `e1000.bastio`, `ena.bastio` | The network stack and card drivers |
 | `src/console.bastio`, `uart.bastio`, `fb.bastio`, `kbd.bastio`, `xhci.bastio` | The console: serial port, screen, PS/2 and USB keyboards and mice; `xhci.bastio` also drives USB sticks |
 | `src/pic.bastio`, `pit.bastio`, `lapic.bastio`, `hpet.bastio`, `rtc.bastio`, `pci.bastio`, `virtq.bastio` | Interrupt controllers, clocks, PCI, virtqueues |
 | `src/acpi.bastio` | ACPI: power off (S5), restart, the power button, the PM timer clock; the FADT and the DSDT's `\_S5` parsed in Bastio |

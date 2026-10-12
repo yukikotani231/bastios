@@ -316,9 +316,11 @@ fn meta_target_at(k: &mut Kernel, pid: u64, dirfd: u64, va: u64, follow: bool) -
 {
   let mut n = NO_RESULT;
   if follow {
+    ovl_intent_write(&mut k, pid);      // changed: in an overlay mount, copied up
     n = lx_path_at(&mut k, pid, dirfd, va);
+    ovl_intent_end(&mut k);
   } else {
-    n = lx_path_at_nf(&mut k, pid, dirfd, va);
+    n = lx_path_at_nf_w(&mut k, pid, dirfd, va);
   }
   if n == NO_RESULT {
     return NO_RESULT;
@@ -585,7 +587,7 @@ fn lx_truncate(k: &mut Kernel, pid: u64, path: u64, size: u64) -> u64
   if size >= 0x8000000000000000 {
     return EINVAL;
   }
-  let n = lx_path_in(&mut k, pid, path);
+  let n = lx_path_in_w(&mut k, pid, path);
   if n == NO_RESULT {
     return k.perr;
   }
@@ -951,6 +953,7 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     }
   }
   // Everything else (madvise, sync) succeeds doing nothing.
+  assert kok(k) && con_ok(con);
   if r == DISK_RETRY {
     return disk_retry(&mut k, pid, n);       // pread/pwrite: blocks not cached yet
   }

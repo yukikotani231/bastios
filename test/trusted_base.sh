@@ -10,15 +10,15 @@
 set -eu
 cd "$(dirname "$0")/.."
 
-# Everything under boot/ is trusted by the kernel. user/start.S and
-# user/user.ld are trusted only by the proofs of the user programs written in
+# Everything under boot/ (boot/aarch64 for the AArch64 port) is trusted by
+# the kernel. user/start.S, user/start-aarch64.S and user/user.ld are trusted only by the proofs of the user programs written in
 # Bastio: the kernel trusts no user code. The other files under user/ are
 # test programs that run as untrusted user processes.
 list() {
   echo "# The trusted base of BastiOS: non-blank lines per file. Regenerate with"
   echo "# \`test/trusted_base.sh --update\` and review the diff."
   total=0
-  for f in boot/* user/start.S user/user.ld; do
+  for f in $(find boot -type f | sort) user/start.S user/start-aarch64.S user/user.ld; do
     n=$(grep -c . "$f" || true)
     total=$((total + n))
     echo "$f: $n lines"

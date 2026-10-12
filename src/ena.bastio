@@ -1,0 +1,704 @@
+// An AWS Elastic Network Adapter (ENA), the network card of EC2's Nitro
+// instances (PCI 1d0f:ec20 and relatives). It is driven the way Linux's
+// drivers/net/ethernet/amazon/ena (GPL-2.0 OR Linux-OpenIB, whose headers
+// give the layouts used here) drives it, cut down to what the stack needs:
+// one transmit and one receive queue, polled, in host memory (no low
+// latency queue), no interrupts and no asynchronous events, no offloads
+// (the stack computes its own checksums), no jumbo frames.
+//
+// Registers: BAR 0, claimed whole as an `Mmio`. The device is reset, then
+// told where its admin queue lives; everything else is an admin command
+// (features, then the four IO queues) answered in the admin completion
+// queue. The admin queue and the queues are rings of descriptors that carry
+// a phase bit instead of head and tail pointers: the device (or the
+// driver) flips the bit it writes on every pass over the ring, so an entry
+// is new exactly when its phase is the one expected on this pass. The
+// first pass is phase 1, so every ring starts zeroed.
+//
+// Memory, eleven pages, all `Dma` lent at start and taken back after a
+// reset at power off:
+//   adm    admin submission queue (32 entries of 64 bytes) at 0, admin
+//          completion queue (32 of 64) at 2048
+//   aux    asynchronous event queue (16 of 64) at 0, the response buffer of
+//          the readless register read at 1024
+//   txsq   256 transmit descriptors of 16 bytes    txcq   256 completions of 8
+//   rxsq   256 receive descriptors of 16 bytes     rxcq   256 completions of 16
+//   rb0-3  eight receive buffers of 2 KiB          tb     two transmit buffers
+//
+// This driver was written from the interface definition and tested against
+// a model of the device (tools/qemu-ena), not against an ENA: see
+// docs/cloud.md for what that leaves open.
+
+import "virtio_net.bastio";
+
+const ENA_VENDOR: u64 = 0x1D0F;
+const ENA_PAGES: u64 = 11;
+const ENA_ADMIN_N: u64 = 32;          // admin queue depth
+const ENA_AENQ_N: u64 = 16;
+const ENA_N: u64 = 256;               // depth of each IO queue: the smallest Linux uses
+const ENA_RX_BUFS: u64 = 8;
+const ENA_SPINS: u64 = 5000000;       // looks at a register before giving up on the device
+const ENA_RESP_AT: u64 = 1024;        // the readless response, in `aux`
+const ENA_ACQ_AT: u64 = 2048;         // the admin completion queue, in `adm`
+const ENA_MIN_LEN: u64 = 4096;        // registers, doorbells and everything else lie in BAR 0
+
+// Registers.
+const ENA_AQ_BASE_LO: u64 = 0x10;
+const ENA_AQ_BASE_HI: u64 = 0x14;
+const ENA_AQ_CAPS: u64 = 0x18;
+const ENA_ACQ_BASE_LO: u64 = 0x20;
+const ENA_ACQ_BASE_HI: u64 = 0x24;
+const ENA_ACQ_CAPS: u64 = 0x28;
+const ENA_AQ_DB: u64 = 0x2C;
+const ENA_AENQ_CAPS: u64 = 0x34;
+const ENA_AENQ_BASE_LO: u64 = 0x38;
+const ENA_AENQ_BASE_HI: u64 = 0x3C;
+const ENA_AENQ_HEAD_DB: u64 = 0x40;
+const ENA_DEV_CTL: u64 = 0x54;
+const ENA_DEV_STS: u64 = 0x58;
+const ENA_MMIO_READ: u64 = 0x5C;
+const ENA_MMIO_RESP_LO: u64 = 0x60;
+const ENA_MMIO_RESP_HI: u64 = 0x64;
+const ENA_CAPS: u64 = 0x08;
+const ENA_REGS_END: u64 = 0x68;       // registers below this offset are the fixed ones
+
+// Admin opcodes and features.
+const ENA_OP_CREATE_SQ: u64 = 1;
+const ENA_OP_CREATE_CQ: u64 = 3;
+const ENA_OP_GET_FEATURE: u64 = 8;
+const ENA_OP_SET_FEATURE: u64 = 9;
+const ENA_F_DEVICE_ATTR: u64 = 1;
+const ENA_F_MAX_QUEUES: u64 = 2;
+const ENA_F_MAX_QUEUES_EXT: u64 = 7;
+const ENA_F_MTU: u64 = 14;
+const ENA_F_AENQ: u64 = 26;
+const ENA_NO_VECTOR: u64 = 0xFFFFFFFF;
+
+// Why a card that is not live was given up on (`why`).
+const ENA_OK: u64 = 0;
+const ENA_ERR_MEMORY: u64 = 1;        // a page above 4 GiB, or no usable BAR
+const ENA_ERR_RESET: u64 = 2;         // the device would not come out of reset
+const ENA_ERR_ADMIN: u64 = 3;         // an admin command failed or timed out
+const ENA_ERR_QUEUES: u64 = 4;        // the device cannot give the queues this driver needs
+const ENA_ERR_CREATE: u64 = 5;        // creating an IO queue failed (a low latency queue only device?)
+
+struct Ena {
+  regs: Mmio,
+  adm: Dma,
+  aux: Dma,
+  txsq: Dma,
+  txcq: Dma,
+  rxsq: Dma,
+  rxcq: Dma,
+  rb0: Dma,           // receive buffers 0 and 1
+  rb1: Dma,           // 2 and 3
+  rb2: Dma,           // 4 and 5
+  rb3: Dma,           // 6 and 7
+  tb: Dma,            // the two transmit buffers
+  readless: bool,     // registers are read through the response buffer
+  seq: u16,           // the last readless request's number
+  aq_tail: u16,       // admin commands submitted, modulo 65536
+  acq_head: u16,      // admin completions taken
+  cmd_id: u16,
+  tx_db: u32,         // the doorbells' offsets in BAR 0, as the device named them
+  rx_db: u32,
+  tx_tail: u16,       // descriptors written to each ring, modulo 65536 (its doorbell value)
+  rx_tail: u16,
+  tx_head: u16,       // completions taken from each completion queue
+  rx_head: u16,
+  tx_busy0: bool,     // the device has not completed transmit buffer 0 yet
+  tx_busy1: bool,
+  rx_kick: bool,      // buffers were posted again since the doorbell was rung
+  rx_drop: bool,      // the rest of a frame in several buffers is being thrown away
+  mac: u64,
+  why: u64,
+  live: bool,
+}
+
+spec fn ena_ok(e: &Ena) -> bool {
+  mmio_len(e.regs) >= ENA_MIN_LEN && mmio_base(e.regs) % 4096 == 0
+}
+
+/// n + 1, modulo 65536.
+fn ena_inc(n: u16) -> u16 {
+  return cast[u16]((cast[u64](n) + 1) % 65536);
+}
+
+/// Whether PCI id `vendor:device` is an ENA: the virtual function (EC20,
+/// the common one) and its LLQ twin (EC21), the physical function and its
+/// LLQ twin (0EC2, 1EC2), and the reserved id 0051.
+fn ena_model(vendor: u64, device: u64) -> bool {
+  return vendor == ENA_VENDOR && (device == 0xEC20 || device == 0xEC21 || device == 0x0EC2 || device == 0x1EC2 || device == 0x0051);
+}
+
+/// The first ENA on the PCI bus, or PCI_NONE.
+fn ena_find(p: &mut Pci) -> u64
+  requires pci_ok(p)
+  ensures pci_ok(p) && result <= PCI_NONE
+{
+  let mut d = 0;
+  while d < PCI_NONE
+    invariant d <= PCI_NONE && pci_ok(p)
+  {
+    let id = pci_read(&mut p, d, PCI_ID);
+    if ena_model(id % 65536, id / 65536 % 65536) {
+      return d;
+    }
+    d = pci_next(&mut p, d);
+  }
+  return PCI_NONE;
+}
+
+fn ena_wr(e: &mut Ena, r: u64, v: u64)
+  requires ena_ok(e) && r % 4 == 0 && r + 4 <= ENA_REGS_END && v <= 4294967295
+  ensures ena_ok(e)
+{
+  mmio_write32(&mut e.regs, r, cast[u32](v));
+}
+
+/// Writes the doorbell at `off` (one the device named, so checked here).
+fn ena_ring(e: &mut Ena, off: u64, v: u64)
+  requires ena_ok(e) && off < 4294967296 && v < 65536
+  ensures ena_ok(e)
+{
+  if off % 4 == 0 && off + 4 <= mmio_len(e.regs) {
+    mmio_write32(&mut e.regs, off, cast[u32](v));
+  }
+}
+
+/// Tells the device where to put readless register reads.
+fn ena_resp_addr(e: &mut Ena)
+  requires ena_ok(e)
+  ensures ena_ok(e)
+{
+  let a = dma_addr(e.aux);
+  if a <= ADDR_LIMIT - 4096 {
+    ena_wr(&mut e, ENA_MMIO_RESP_LO, a + ENA_RESP_AT);
+    ena_wr(&mut e, ENA_MMIO_RESP_HI, 0);
+  }
+}
+
+/// Reads register `r` (below ENA_REGS_END): directly, or by asking the
+/// device to write its value into the response buffer, as it does on
+/// revisions that cannot be read from. 0xFFFFFFFF if it never answers.
+fn ena_rd(e: &mut Ena, r: u64) -> u64
+  requires ena_ok(e) && r % 4 == 0 && r + 4 <= ENA_REGS_END
+  ensures ena_ok(e) && result <= 4294967295
+{
+  if !e.readless {
+    return cast[u64](mmio_read32(&mut e.regs, r));
+  }
+  e.seq = ena_inc(e.seq);
+  let q = cast[u64](e.seq);
+  // A sentinel the answer will replace.
+  dma_write16(&mut e.aux, ENA_RESP_AT, cast[u16]((q + 0xDEAD) % 65536));
+  mmio_write32(&mut e.regs, ENA_MMIO_READ, cast[u32](r * 65536 + q));
+  let mut spins = 0;
+  while spins < ENA_SPINS
+    invariant ena_ok(e)
+  {
+    if cast[u64](dma_read16(&mut e.aux, ENA_RESP_AT)) == q {
+      if cast[u64](dma_read16(&mut e.aux, ENA_RESP_AT + 2)) != r {
+        return 4294967295;
+      }
+      return cast[u64](dma_read32(&mut e.aux, ENA_RESP_AT + 4));
+    }
+    spins = spins + 1;
+  }
+  return 4294967295;
+}
+
+/// Zeroes bytes from .. to of the page (multiples of 8).
+fn ena_zero(d: &mut Dma, from: u64, to: u64)
+  requires from % 8 == 0 && to % 8 == 0 && from <= to && to <= 4096
+{
+  let mut o = from;
+  while o < to
+    invariant o % 8 == 0 && o <= to + 8 && to <= 4096 && from % 8 == 0
+  {
+    dma_write64(&mut d, o, 0);
+    o = o + 8;
+  }
+}
+
+/// Resets the device and waits for it to finish, which it shows by
+/// DEV_STS bit 3 (reset in progress) going up and, once the control
+/// register is cleared, down again.
+fn ena_reset(e: &mut Ena) -> bool
+  requires ena_ok(e)
+  ensures ena_ok(e)
+{
+  ena_resp_addr(&mut e);
+  let sts = ena_rd(&mut e, ENA_DEV_STS);
+  let caps = ena_rd(&mut e, ENA_CAPS);
+  if sts == 4294967295 || sts % 2 == 0 || caps == 4294967295 || caps / 2 % 32 == 0 {
+    return false;
+  }
+  ena_wr(&mut e, ENA_DEV_CTL, 1);
+  ena_resp_addr(&mut e);                // a reset forgets it
+  let mut spins = 0;
+  let mut up = false;
+  while spins < ENA_SPINS && !up
+    invariant ena_ok(e)
+  {
+    let s = ena_rd(&mut e, ENA_DEV_STS);
+    if s != 4294967295 && s / 8 % 2 == 1 {
+      up = true;
+    }
+    spins = spins + 1;
+  }
+  if !up {
+    return false;
+  }
+  ena_wr(&mut e, ENA_DEV_CTL, 0);
+  spins = 0;
+  while spins < ENA_SPINS
+    invariant ena_ok(e)
+  {
+    let s = ena_rd(&mut e, ENA_DEV_STS);
+    if s != 4294967295 && s / 8 % 2 == 0 {
+      return true;
+    }
+    spins = spins + 1;
+  }
+  return false;
+}
+
+/// Runs one admin command and returns its status (0 is success), or 256
+/// if the device never completed it. `op` is the opcode; w1 .. w6 are the
+/// command's words 1 to 6 (bytes 4 to 27; the rest of its 64 bytes are
+/// zero). The completion stays for the caller to read with `ena_resp`.
+fn ena_admin(e: &mut Ena, op: u64, w1: u64, w2: u64, w3: u64, w4: u64, w5: u64, w6: u64) -> u64
+  requires ena_ok(e) && op < 256 && w1 <= 4294967295 && w2 <= 4294967295 && w3 <= 4294967295
+  requires w4 <= 4294967295 && w5 <= 4294967295 && w6 <= 4294967295
+  ensures ena_ok(e) && result <= 256
+{
+  let tail = cast[u64](e.aq_tail);
+  let slot = tail % ENA_ADMIN_N;
+  let phase = (((tail / ENA_ADMIN_N) % 2) ^ 1);
+  let at = slot * 64;
+  let id = cast[u64](e.cmd_id) % 4096;
+  let mut w = 0;
+  while w < 16
+    invariant w <= 16 && at + 64 <= 2048 && at % 64 == 0
+  {
+    dma_write32(&mut e.adm, at + w * 4, 0);
+    w = w + 1;
+  }
+  dma_write32(&mut e.adm, at + 4, cast[u32](w1));
+  dma_write32(&mut e.adm, at + 8, cast[u32](w2));
+  dma_write32(&mut e.adm, at + 12, cast[u32](w3));
+  dma_write32(&mut e.adm, at + 16, cast[u32](w4));
+  dma_write32(&mut e.adm, at + 20, cast[u32](w5));
+  dma_write32(&mut e.adm, at + 24, cast[u32](w6));
+  dma_write32(&mut e.adm, at, cast[u32](id + op * 65536 + phase * 16777216));
+  e.cmd_id = ena_inc(e.cmd_id);
+  e.aq_tail = ena_inc(e.aq_tail);
+  ena_wr(&mut e, ENA_AQ_DB, cast[u64](e.aq_tail));
+  let head = cast[u64](e.acq_head);
+  let cs = head % ENA_ADMIN_N;
+  let want = (((head / ENA_ADMIN_N) % 2) ^ 1);
+  let ca = ENA_ACQ_AT + cs * 64;
+  let mut spins = 0;
+  while spins < VIO_SPINS
+    invariant ena_ok(e) && ca % 64 == 0 && ENA_ACQ_AT <= ca && ca + 64 <= 4096
+  {
+    if cast[u64](dma_read8(&mut e.adm, ca + 3)) % 2 == want {
+      let st = cast[u64](dma_read8(&mut e.adm, ca + 2));
+      let cid = cast[u64](dma_read16(&mut e.adm, ca)) % 4096;
+      e.acq_head = ena_inc(e.acq_head);
+      if cid != id {
+        return 256;                     // not the answer to this command: the device is confused
+      }
+      return st;
+    }
+    spins = spins + 1;
+  }
+  return 256;
+}
+
+/// Word `k` (0 to 15) of the last admin completion.
+fn ena_resp(e: &mut Ena, k: u64) -> u64
+  requires ena_ok(e) && k < 16
+  ensures ena_ok(e) && result <= 4294967295
+{
+  let slot = (cast[u64](e.acq_head) + ENA_ADMIN_N - 1) % ENA_ADMIN_N;     // the last one taken
+  return cast[u64](dma_read32(&mut e.adm, ENA_ACQ_AT + slot * 64 + k * 4));
+}
+
+/// The address of receive buffer b (0 to 7).
+fn ena_rxbuf_addr(e: &Ena, b: u64) -> u64
+  requires b < ENA_RX_BUFS
+{
+  let mut a = dma_addr(e.rb3);
+  if b < 2 {
+    a = dma_addr(e.rb0);
+  } else if b < 4 {
+    a = dma_addr(e.rb1);
+  } else if b < 6 {
+    a = dma_addr(e.rb2);
+  }
+  if a > ADDR_LIMIT {
+    return 0;                         // never: the pool is below 256 MiB
+  }
+  return a + b % 2 * RX_BUF;
+}
+
+/// Offers receive buffer `b` to the device: one descriptor at the ring's
+/// tail (request id = the buffer's number). The doorbell is rung later.
+fn ena_rx_post(e: &mut Ena, b: u64)
+  requires ena_ok(e) && b < ENA_RX_BUFS
+  ensures ena_ok(e)
+{
+  let tail = cast[u64](e.rx_tail);
+  let at = tail % ENA_N * 16;
+  let phase = (((tail / ENA_N) % 2) ^ 1);
+  let a = ena_rxbuf_addr(e, b);
+  if a > 4294967295 {
+    return;
+  }
+  // length 2 KiB, then control: first, last, completion requested, phase.
+  dma_write32(&mut e.rxsq, at, cast[u32](RX_BUF + (phase + 4 + 8 + 16) * 16777216));
+  dma_write32(&mut e.rxsq, at + 4, cast[u32](b));
+  dma_write32(&mut e.rxsq, at + 8, cast[u32](a));
+  dma_write32(&mut e.rxsq, at + 12, 0);
+  e.rx_tail = ena_inc(e.rx_tail);
+  e.rx_kick = true;
+}
+
+/// Copies n bytes of receive buffer `b`, from `off`, into pkt.
+fn ena_rxbuf_copy(e: &mut Ena, b: u64, off: u64, pkt: &mut Bytes, n: u64)
+  requires ena_ok(e) && b < ENA_RX_BUFS && off + n <= RX_BUF && n <= blen(pkt)
+  ensures ena_ok(e) && blen(pkt) == old(blen(pkt)) && e.live == old(e.live)
+{
+  let at = b % 2 * RX_BUF + off;
+  if b < 2 {
+    dma_to_bytes(&mut pkt, 0, &mut e.rb0, at, n);
+  } else if b < 4 {
+    dma_to_bytes(&mut pkt, 0, &mut e.rb1, at, n);
+  } else if b < 6 {
+    dma_to_bytes(&mut pkt, 0, &mut e.rb2, at, n);
+  } else {
+    dma_to_bytes(&mut pkt, 0, &mut e.rb3, at, n);
+  }
+}
+
+/// Creates a completion queue of ENA_N entries of `words` 32-bit words at
+/// `ba`; returns its index, or 65536 if the device refused.
+fn ena_make_cq(e: &mut Ena, words: u64, ba: u64) -> u64
+  requires ena_ok(e) && words < 16 && ba <= 4294967295
+  ensures ena_ok(e) && result <= 65536
+{
+  // Interrupt mode with no vector: the queue is polled and the device is
+  // never asked to raise a message for it (as DPDK's driver does).
+  let st = ena_admin(&mut e, ENA_OP_CREATE_CQ, 32 + words * 256 + ENA_N * 65536, ENA_NO_VECTOR, ba, 0, 0, 0);
+  if st != 0 {
+    return 65536;
+  }
+  return ena_resp(&mut e, 2) % 65536;
+}
+
+/// Creates a submission queue of ENA_N entries at `ba` (direction 1 for
+/// transmit, 2 for receive) completing into queue `cq`; returns its index
+/// and sets the doorbell. False if the device refused.
+fn ena_make_sq(e: &mut Ena, dir: u64, cq: u64, ba: u64) -> bool
+  requires ena_ok(e) && (dir == 1 || dir == 2) && cq < 65536 && ba <= 4294967295
+  ensures ena_ok(e)
+{
+  // Direction in bits 5-7 of byte 0; placement policy "host" (1) and the
+  // completion policy "an entry per descriptor" (0) in byte 2; byte 3 says
+  // the ring is physically contiguous.
+  let st = ena_admin(&mut e, ENA_OP_CREATE_SQ, dir * 32 + 1 * 65536 + 1 * 16777216, cq + ENA_N * 65536, ba, 0, 0, 0);
+  if st != 0 {
+    return false;
+  }
+  let db = ena_resp(&mut e, 3);
+  if db % 4 != 0 || db + 4 > mmio_len(e.regs) {
+    return false;
+  }
+  if dir == 1 {
+    e.tx_db = cast[u32](db);
+  } else {
+    e.rx_db = cast[u32](db);
+  }
+  return true;
+}
+
+/// Takes the card's BAR 0 and eleven pages, resets it, reads its address
+/// and queue limits from it, creates the queues and offers the receive
+/// buffers. A card that cannot be started is left with `live` false (and
+/// `why` saying where it went wrong): it sends nothing and receives
+/// nothing. `readless`: the PCI revision says registers must be read
+/// through the response buffer.
+fn ena_new(regs: Mmio, readless: bool, a: Frame, x: Frame, t0: Frame, t1: Frame, r0: Frame, r1: Frame,
+  b0: Frame, b1: Frame, b2: Frame, b3: Frame, tb: Frame) -> Ena
+  requires mmio_len(regs) >= ENA_MIN_LEN && mmio_len(regs) <= 1048576 && mmio_base(regs) % 4096 == 0
+  ensures ena_ok(result)
+{
+  let mut e = Ena { regs: regs, adm: dma_lend(a), aux: dma_lend(x), txsq: dma_lend(t0), txcq: dma_lend(t1),
+    rxsq: dma_lend(r0), rxcq: dma_lend(r1), rb0: dma_lend(b0), rb1: dma_lend(b1), rb2: dma_lend(b2), rb3: dma_lend(b3),
+    tb: dma_lend(tb), readless: readless, seq: 0, aq_tail: 0, acq_head: 0, cmd_id: 0,
+    tx_db: 0, rx_db: 0, tx_tail: 0, rx_tail: 0, tx_head: 0, rx_head: 0, tx_busy0: false, tx_busy1: false,
+    rx_kick: false, rx_drop: false, mac: 0, why: ENA_ERR_MEMORY, live: false };
+  let aa = dma_addr(e.adm);
+  let xa = dma_addr(e.aux);
+  let ts = dma_addr(e.txsq);
+  let tc = dma_addr(e.txcq);
+  let rs = dma_addr(e.rxsq);
+  let rc = dma_addr(e.rxcq);
+  if aa > ADDR_LIMIT - 4096 || xa > ADDR_LIMIT - 4096 || ts > ADDR_LIMIT - 4096 || tc > ADDR_LIMIT - 4096
+    || rs > ADDR_LIMIT - 4096 || rc > ADDR_LIMIT - 4096 || dma_addr(e.tb) > ADDR_LIMIT - 4096 {
+    return e;
+  }
+  e.why = ENA_ERR_RESET;
+  if !ena_reset(&mut e) {
+    return e;
+  }
+  // The device must address 32 bits at least.
+  let caps = ena_rd(&mut e, ENA_CAPS);
+  if caps == 4294967295 || caps / 256 % 256 < 32 {
+    return e;
+  }
+  // Every ring starts out zero, so no entry looks new.
+  ena_zero(&mut e.adm, 0, 4096);
+  ena_zero(&mut e.aux, 0, 4096);
+  ena_zero(&mut e.txsq, 0, 4096);
+  ena_zero(&mut e.txcq, 0, 4096);
+  ena_zero(&mut e.rxsq, 0, 4096);
+  ena_zero(&mut e.rxcq, 0, 4096);
+  // The admin queue pair and the event queue.
+  e.why = ENA_ERR_ADMIN;
+  ena_wr(&mut e, ENA_AQ_BASE_LO, aa);
+  ena_wr(&mut e, ENA_AQ_BASE_HI, 0);
+  ena_wr(&mut e, ENA_ACQ_BASE_LO, aa + ENA_ACQ_AT);
+  ena_wr(&mut e, ENA_ACQ_BASE_HI, 0);
+  ena_wr(&mut e, ENA_AENQ_BASE_LO, xa);
+  ena_wr(&mut e, ENA_AENQ_BASE_HI, 0);
+  ena_wr(&mut e, ENA_AQ_CAPS, ENA_ADMIN_N + 64 * 65536);
+  ena_wr(&mut e, ENA_ACQ_CAPS, ENA_ADMIN_N + 64 * 65536);
+  ena_wr(&mut e, ENA_AENQ_CAPS, ENA_AENQ_N + 64 * 65536);
+  // The device attributes: the MAC address (bytes 32 to 37 of the answer),
+  // and which features it has.
+  if ena_admin(&mut e, ENA_OP_GET_FEATURE, 0, 0, 0, ENA_F_DEVICE_ATTR * 256, 0, 0) != 0 {
+    return e;
+  }
+  let feats = ena_resp(&mut e, 4);
+  let w8 = ena_resp(&mut e, 8);
+  let w9 = ena_resp(&mut e, 9);
+  e.mac = (((((w8 % 256) * 256 + w8 / 256 % 256) * 256 + w8 / 65536 % 256) * 256 + w8 / 16777216) * 256 + w9 % 256) * 256 + w9 / 256 % 256;
+  // The queues: ENA_N entries of each kind, in host memory.
+  e.why = ENA_ERR_QUEUES;
+  let mut depth_ok = false;
+  if feats / 128 % 2 == 1 {
+    // Maximum queues, extended: number of queues at 12 .. 24, depths at 28 .. 40.
+    if ena_admin(&mut e, ENA_OP_GET_FEATURE, 0, 0, 0, ENA_F_MAX_QUEUES_EXT * 256 + 65536, 0, 0) != 0 {
+      return e;
+    }
+    depth_ok = ena_resp(&mut e, 3) >= 1 && ena_resp(&mut e, 4) >= 1 && ena_resp(&mut e, 5) >= 1 && ena_resp(&mut e, 6) >= 1
+      && ena_resp(&mut e, 7) >= ENA_N && ena_resp(&mut e, 8) >= ENA_N && ena_resp(&mut e, 9) >= ENA_N && ena_resp(&mut e, 10) >= ENA_N;
+  } else if feats / 4 % 2 == 1 {
+    if ena_admin(&mut e, ENA_OP_GET_FEATURE, 0, 0, 0, ENA_F_MAX_QUEUES * 256, 0, 0) != 0 {
+      return e;
+    }
+    depth_ok = ena_resp(&mut e, 2) >= 1 && ena_resp(&mut e, 3) >= ENA_N && ena_resp(&mut e, 4) >= 1 && ena_resp(&mut e, 5) >= ENA_N;
+  }
+  if !depth_ok {
+    return e;
+  }
+  // No asynchronous events wanted; the standard MTU, so no frame outgrows
+  // a receive buffer.
+  e.why = ENA_ERR_ADMIN;
+  if feats / 67108864 % 2 == 1 && ena_admin(&mut e, ENA_OP_SET_FEATURE, 0, 0, 0, ENA_F_AENQ * 256, 0, 0) != 0 {
+    return e;
+  }
+  ena_wr(&mut e, ENA_AENQ_HEAD_DB, ENA_AENQ_N);
+  if feats / 16384 % 2 == 1 && ena_admin(&mut e, ENA_OP_SET_FEATURE, 0, 0, 0, ENA_F_MTU * 256, 1500, 0) != 0 {
+    return e;
+  }
+  // The IO queues: each completion queue first, then its submission queue.
+  e.why = ENA_ERR_CREATE;
+  let tcq = ena_make_cq(&mut e, 2, tc);
+  if tcq >= 65536 || !ena_make_sq(&mut e, 1, tcq, ts) {
+    return e;
+  }
+  let rcq = ena_make_cq(&mut e, 4, rc);
+  if rcq >= 65536 || !ena_make_sq(&mut e, 2, rcq, rs) {
+    return e;
+  }
+  let mut b = 0;
+  while b < ENA_RX_BUFS
+    invariant b <= ENA_RX_BUFS && ena_ok(e)
+  {
+    ena_rx_post(&mut e, b);
+    b = b + 1;
+  }
+  let rt = cast[u64](e.rx_tail);
+  let rdb = cast[u64](e.rx_db);
+  ena_ring(&mut e, rdb, rt);
+  e.rx_kick = false;
+  e.why = ENA_OK;
+  e.live = true;
+  return e;
+}
+
+/// Resets the card, so it stops using the pages, and takes them back (at
+/// power off). The registers go back to the caller.
+fn ena_free(e: Ena, m: &mut Mem) -> Mmio
+  requires ena_ok(e) && mem_ok(m)
+  ensures mem_ok(m)
+{
+  let mut d = e;
+  ena_reset(&mut d);
+  give_page(&mut m, dma_take(d.adm));
+  give_page(&mut m, dma_take(d.aux));
+  give_page(&mut m, dma_take(d.txsq));
+  give_page(&mut m, dma_take(d.txcq));
+  give_page(&mut m, dma_take(d.rxsq));
+  give_page(&mut m, dma_take(d.rxcq));
+  give_page(&mut m, dma_take(d.rb0));
+  give_page(&mut m, dma_take(d.rb1));
+  give_page(&mut m, dma_take(d.rb2));
+  give_page(&mut m, dma_take(d.rb3));
+  give_page(&mut m, dma_take(d.tb));
+  return d.regs;
+}
+
+/// Tells the device about the receive buffers ena_recv offered again.
+fn ena_rx_flush(e: &mut Ena)
+  requires ena_ok(e)
+  ensures ena_ok(e)
+{
+  if e.rx_kick && e.live {
+    let t = cast[u64](e.rx_tail);
+    let db = cast[u64](e.rx_db);
+    ena_ring(&mut e, db, t);
+    e.rx_kick = false;
+  }
+}
+
+/// Copies the next received frame into `pkt` and returns its length, or 0
+/// if none has arrived. Frames that do not fit one buffer are dropped, and
+/// every buffer goes back to the device (told at the next flush).
+fn ena_recv(e: &mut Ena, pkt: &mut Bytes) -> u64
+  requires ena_ok(e) && blen(pkt) >= RX_BUF
+  ensures ena_ok(e) && blen(pkt) == old(blen(pkt)) && result <= RX_BUF - NET_HDR
+{
+  if !e.live {
+    return 0;
+  }
+  let mut tries = 0;
+  while tries < ENA_RX_BUFS
+    invariant ena_ok(e) && blen(pkt) == old(blen(pkt))
+  {
+    let head = cast[u64](e.rx_head);
+    let at = head % ENA_N * 16;
+    let want = (((head / ENA_N) % 2) ^ 1);
+    let st = cast[u64](dma_read32(&mut e.rxcq, at));
+    if (st >> 24) % 2 != want {
+      return 0;
+    }
+    let len = cast[u64](dma_read16(&mut e.rxcq, at + 4));
+    let rid = cast[u64](dma_read16(&mut e.rxcq, at + 6));
+    let off = cast[u64](dma_read8(&mut e.rxcq, at + 14));
+    e.rx_head = ena_inc(e.rx_head);
+    if rid >= ENA_RX_BUFS {
+      return 0;                       // not one of ours: the device is confused
+    }
+    let first = (st >> 26) % 2;
+    let last = (st >> 27) % 2;
+    let whole = first == 1 && last == 1;
+    let dropit = e.rx_drop || !whole;
+    if first == 1 {
+      e.rx_drop = last == 0;
+    } else if last == 1 {
+      e.rx_drop = false;
+    }
+    let mut n = 0;
+    if !dropit && off + len <= RX_BUF && len <= RX_BUF - NET_HDR {
+      n = len;
+      ena_rxbuf_copy(&mut e, rid, off, &mut pkt, n);
+    }
+    ena_rx_post(&mut e, rid);
+    if n > 0 {
+      return n;
+    }
+    tries = tries + 1;
+  }
+  return 0;
+}
+
+/// Takes back the transmit buffers the device has completed.
+fn ena_tx_collect(e: &mut Ena)
+  requires ena_ok(e)
+  ensures ena_ok(e) && e.live == old(e.live)
+{
+  let mut k = 0;
+  while k < 2
+    invariant ena_ok(e) && e.live == old(e.live)
+  {
+    let head = cast[u64](e.tx_head);
+    let at = head % ENA_N * 8;
+    let want = (((head / ENA_N) % 2) ^ 1);
+    if cast[u64](dma_read8(&mut e.txcq, at + 3)) % 2 != want {
+      return;
+    }
+    let rid = cast[u64](dma_read16(&mut e.txcq, at));
+    e.tx_head = ena_inc(e.tx_head);
+    if rid == 0 {
+      e.tx_busy0 = false;
+    } else if rid == 1 {
+      e.tx_busy1 = false;
+    }
+    k = k + 1;
+  }
+}
+
+/// Sends the first `n` bytes of `pkt` as one frame. It does not wait for
+/// the device to take it, only, if both transmit buffers are still out,
+/// for one to come back; false if none does.
+fn ena_send(e: &mut Ena, pkt: &Bytes, n: u64) -> bool
+  requires ena_ok(e) && n <= FRAME_MAX && n <= blen(pkt)
+  ensures ena_ok(e)
+{
+  if !e.live || n == 0 {
+    return false;
+  }
+  ena_tx_collect(&mut e);
+  let mut spins = 0;
+  while e.tx_busy0 && e.tx_busy1 && spins < VIO_SPINS
+    invariant ena_ok(e) && e.live
+  {
+    ena_tx_collect(&mut e);
+    spins = spins + 1;
+  }
+  if e.tx_busy0 && e.tx_busy1 {
+    return false;
+  }
+  let mut b = 0;
+  if e.tx_busy0 {
+    b = 1;
+  }
+  let a = dma_addr(e.tb);
+  if a > ADDR_LIMIT - 4096 {
+    return false;                     // ena_new checked it: never
+  }
+  bytes_to_dma(&mut e.tb, b * TX_BUF, pkt, 0, n);
+  let tail = cast[u64](e.tx_tail);
+  let at = tail % ENA_N * 16;
+  let phase = (((tail / ENA_N) % 2) ^ 1);
+  // Length, then the phase and: first, last, completion requested.
+  dma_write32(&mut e.txsq, at, cast[u32](n + (phase + 4 + 8 + 16) * 16777216));
+  dma_write32(&mut e.txsq, at + 4, cast[u32](b * 4194304));      // the request id: the buffer's number, from bit 22
+  dma_write32(&mut e.txsq, at + 8, cast[u32](a + b * TX_BUF));
+  dma_write32(&mut e.txsq, at + 12, 0);
+  if b == 0 {
+    e.tx_busy0 = true;
+  } else {
+    e.tx_busy1 = true;
+  }
+  e.tx_tail = ena_inc(e.tx_tail);
+  let t = cast[u64](e.tx_tail);
+  let db = cast[u64](e.tx_db);
+  ena_ring(&mut e, db, t);
+  return true;
+}

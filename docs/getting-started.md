@@ -194,7 +194,7 @@ BastiOS has been run only in QEMU so far. To try it on a real machine and tell u
 - **Processor.** It needs 1 GiB pages, which every x86-64 CPU of the last decade has. Other processors are found in the ACPI tables, wherever below 4 GiB the firmware put them (above 4 GiB too, with 1 GiB pages). Local APICs in x2APIC mode work too (processors with ids of 255 and up included), though without MSI.
 - **Power.** `halt` powers off and `reboot` restarts through ACPI (S5, and the FADT's reset register, a port or a memory register, else the keyboard controller or 0xCF9), and the power button powers off. The clock is the HPET, or the ACPI PM timer without one.
 - **Disk.** The BastiOS partition of a USB stick or disk on an xHCI controller, as for the keyboard (`make usb`; bulk-only transport, 512-byte sectors), else an NVMe drive (namespace 1, 512-byte or 4 KiB sectors), a virtio disk, a SATA disk on an AHCI controller (the first port with a disk, 512-byte sectors), or a legacy ATA disk. A blank disk is formatted on the first boot; a disk with a partition table or other data on it (the first and last 34 sectors not all zeros) is left alone, and the boot log says so.
-- **Network.** A virtio card, or an Intel card of the e1000 families: 8254x, 82574L, 82576, I350, I210 and I211 (the last three untested). Other cards are ignored.
+- **Network.** A virtio card, an Intel card of the e1000 families (8254x, 82574L, 82576, I350, I210 and I211, the last three untested), or an AWS ENA (untested on real hardware: [cloud.md](cloud.md)). Other cards are ignored.
 - **Devices** are found on any PCI bus the firmware numbered, through the legacy configuration ports, not PCIe's ECAM.
 
 ## Next

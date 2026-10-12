@@ -342,6 +342,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
     },
   }
   if pid >= 1 && tr_tracer(k, pid) != 0 {
+    pt_exec_event(&mut k, pid);
     post_from(&mut k, pid, 5, pid);   // SIGTRAP: a traced process stops after execve (src/lxptrace.bastio)
   }
   return 0;
@@ -866,6 +867,9 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
           if jr < 512 {
             bset(&mut k.fs.xfer, 0, 0x7f);
             bset(&mut k.fs.xfer, 1, cast[u8](jr % 256));
+            if traced_by(k, c, pid) {
+              bset(&mut k.fs.xfer, 2, cast[u8](tr2_get(k, c) / TS_EV % 16));   // the event, if it is one (src/lxptrace.bastio)
+            }
           } else {
             bset(&mut k.fs.xfer, 0, 0xff);
             bset(&mut k.fs.xfer, 1, 0xff);

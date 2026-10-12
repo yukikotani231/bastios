@@ -40,7 +40,7 @@ _s.bind(("127.0.0.1", 0))
 tcp_port = _s.getsockname()[1]
 _s.close()
 
-def boot(cpus, with_disk=False, virtio=False, nvme=False, nvme4k=False, ahci=False, net=False, subnet=None, card="virtio-net-pci", monitor=None, extra=()):
+def boot(cpus, with_disk=False, virtio=False, nvme=False, nvme4k=False, ahci=False, net=False, subnet=None, card="virtio-net-pci", monitor=None, extra=(), qemu_bin="qemu-system-x86_64"):
     drive = ["-drive", f"file={disk},format=raw,if=ide,index=0"] if with_disk else []
     if virtio:
         # The same disk as a virtio block device (src/virtio.bastio): sectors
@@ -79,7 +79,7 @@ def boot(cpus, with_disk=False, virtio=False, nvme=False, nvme4k=False, ahci=Fal
     # the two directory tables (the disk's and the loop mount's) take 2.5 MiB
     # of it, which leaves too little for the 120 processes one case forks.
     return subprocess.Popen(
-        ["qemu-system-x86_64", "-kernel", kernel, "-m", "256M", "-smp", str(cpus),
+        [qemu_bin, "-kernel", kernel, "-m", "256M", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
          "-serial", "stdio", "-monitor", f"unix:{monitor},server,nowait" if monitor else "none"] + drive + nic + list(extra),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -343,6 +343,24 @@ steps = [
     ("unshare -m sh -c 'mount --bind /tmp/nr /tmp/nr && mount --bind /bin /tmp/nr/bin && mount --bind /tmp/nd /tmp/nr/vol && mount -t proc proc /tmp/nr/proc && cd /tmp/nr && pivot_root . . && umount -l . && cd / && cat /marker && cat /vol/f && cat /vol/esc/passwd; echo x > /vol/new; mount -o remount,bind,ro /vol && echo y > /vol/y; cat /proc/self/mounts; ls /tmp'; cat /tmp/nd/new; echo ns2",
      [b"\r\ninroot\r\nhostfile\r\n", b"can't open '/vol/esc/passwd'", b"none / none rw 0 0", b"none /vol none ro 0 0", b"proc /proc proc rw 0 0", b"/tmp: No such file", b"Read-only file system", b"\r\nx\r\nns2"], b"\n# "),
     ("pivot_root /tmp/nr /tmp/nr; echo p=$?; rm -r /tmp/nr /tmp/nd; echo ns3", [b"Invalid argument", b"p=1", b"ns3"], b"\n# "),
+    # Overlay mounts (src/lxns.bastio): the layers merged as one directory,
+    # the upper one and then the lower ones in the order given; a name in
+    # the upper layer hides the same name below; ".wh.NAME" in a layer
+    # hides NAME in the layers below it; an overlay without upperdir is
+    # read-only.
+    ("mkdir -p /tmp/ov/a /tmp/ov/b /tmp/ov/u /tmp/ov/w /tmp/ov/m /tmp/ov/r; echo A > /tmp/ov/a/f; echo B > /tmp/ov/b/f; echo G > /tmp/ov/b/g; echo H > /tmp/ov/b/h; mkdir /tmp/ov/b/sub; echo S > /tmp/ov/b/sub/s; touch /tmp/ov/u/.wh.h; echo U > /tmp/ov/u/n; mount -t overlay overlay -o lowerdir=/tmp/ov/a:/tmp/ov/b,upperdir=/tmp/ov/u,workdir=/tmp/ov/w /tmp/ov/m && cat /tmp/ov/m/f /tmp/ov/m/g /tmp/ov/m/n /tmp/ov/m/sub/s; cat /tmp/ov/m/h; for f in /tmp/ov/m/*; do echo $f; done; cat /proc/mounts; echo ov1",
+     [b"\r\nA\r\nG\r\nU\r\nS\r\n", b"can't open '/tmp/ov/m/h'", b"/tmp/ov/m/f\r\n/tmp/ov/m/g\r\n/tmp/ov/m/n\r\n/tmp/ov/m/sub\r\n", b"\r\noverlay /tmp/ov/m overlay rw 0 0\r\n", b"\r\nov1"], b"\n# "),
+    # Writing through an overlay: a file changed is copied up first (the
+    # lower one stays as it was), new names and the directories above
+    # them are made in the upper layer, a name removed or renamed away is
+    # hidden by a whiteout, and a directory made again over one removed
+    # starts empty.
+    ("cd /tmp/ov/m && echo more >> f && cat f && cat /tmp/ov/a/f && mkdir -p nd/deep && echo d > nd/deep/n && chmod 600 g && echo up >> g && cat g; for x in /tmp/ov/u/*; do echo $x; done; ls -l g; cd /; echo ov3",
+     [b"\r\nA\r\nmore\r\nA\r\n", b"G\r\nup\r\n", b"/tmp/ov/u/f\r\n/tmp/ov/u/g\r\n/tmp/ov/u/n\r\n/tmp/ov/u/nd\r\n", b"-rw-------", b"\r\nov3"], b"\n# "),
+    ("cd /tmp/ov/m && rm g && cat g; mv nd nd2; echo mv=$?; rmdir nd2/deep; echo rd=$?; rm nd2/deep/n; rmdir nd2/deep nd2; echo rd2=$?; mkdir nd; [ -z \"$(ls nd)\" ] && echo ndempty; mv f f2 && cat f2; cat f; echo *; cd /; echo ov4",
+     [b"can't open 'g'", b"mv=0", b"rd=1", b"rd2=0", b"ndempty", b"\r\nA\r\nmore\r\n", b"can't open 'f'", b"\r\nf2 n nd sub\r\n", b"\r\nov4"], b"\n# "),
+    ("mount -t overlay overlay -o lowerdir=/tmp/ov/b /tmp/ov/r && cat /tmp/ov/r/g; echo x > /tmp/ov/r/new; echo w=$?; mount -t overlay overlay -o lowerdir=/tmp/ov/nope /tmp/ov/r; echo bad; umount /tmp/ov/m; umount /tmp/ov/r; rm -r /tmp/ov; echo ov2",
+     [b"\r\nG\r\n", b"Read-only file system", b"w=1", b"failed: No such file", b"\r\nbad\r\n", b"\r\nov2"], b"\n# "),
     # UTS and IPC namespaces, /proc/PID/ns and setns (src/lxnsk.bastio): a
     # host name set in a new UTS namespace stays there; IPC objects made
     # in one IPC namespace are not seen from another, and setns joins one
@@ -1199,6 +1217,40 @@ for card in ("e1000e", "igb"):
     session(card, None, [
         ("ping", b"reply from 10.0.2.2"),
     ], halt=True, ready=family_ready(card))
+
+# An AWS ENA instead (src/ena.bastio). QEMU has no such card: the model in
+# tools/qemu-ena stands for it, in the QEMU build that script makes (QEMU_ENA
+# names it). The three variants of the model are the two ways registers
+# are read (the PCI revision says which) and a device that only has the
+# older maximum-queues feature. Each must get a DHCP lease, answer a ping,
+# and give every page back at power off.
+ena_bin = os.environ.get("QEMU_ENA", "build/qemu-ena/bin/qemu-system-x86_64")
+def ena_ready(variant):
+    def ready():
+        global fails
+        ok = b"net: ena, mac 52:54:00:12:34:56" in out
+        print(("ok  " if ok else "FAIL"), f"(ena{variant} boot) card found")
+        fails += not ok
+        t0 = time.time()
+        leased = False
+        while not leased and time.time() - t0 < 10:
+            mark = len(out)
+            qemu.stdin.write(b"ifconfig\r"); qemu.stdin.flush()
+            read_until(b"bastios> ", mark)
+            leased = b"(DHCP)" in out[mark:]
+            if not leased:
+                time.sleep(0.5)
+        print(("ok  " if leased else "FAIL"), f"(ena{variant} boot) DHCP lease")
+        fails += not leased
+    return ready
+if os.path.exists(ena_bin):
+    for variant in ("", ",readless=off", ",queues-ext=off"):
+        qemu = boot(1, net=True, card="ena" + variant, qemu_bin=ena_bin)
+        session("ena" + variant, None, [
+            ("ping", b"reply from 10.0.2.2"),
+        ], halt=True, ready=ena_ready(variant))
+else:
+    print("skip (ena) no QEMU with the ENA model at", ena_bin, "(tools/qemu-ena/build.sh builds it)")
 
 # The PS/2 keyboard (src/kbd.bastio): keys pressed through QEMU's monitor
 # reach the shell as serial input would, Shift and Backspace included.

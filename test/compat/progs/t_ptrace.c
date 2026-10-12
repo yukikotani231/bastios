@@ -187,6 +187,67 @@ int main(int argc, char **argv) {
         EXPECT("and the tracee runs freely after PTRACE_CONT", w == c && WIFEXITED(st) && WEXITSTATUS(st) == 0);
     }
 
+    /* PTRACE_O_TRACEFORK: the parent stops with the event, the child starts
+     * attached and stopped by SIGSTOP. */
+    {
+        pid_t c = fork();
+        if (c == 0) {
+            ptrace(PTRACE_TRACEME, 0, 0, 0);
+            raise(SIGSTOP);
+            pid_t g = fork();
+            if (g == 0) _exit(21);
+            int gst = 0;
+            waitpid(g, &gst, 0);
+            _exit(WIFEXITED(gst) && WEXITSTATUS(gst) == 21 ? 0 : 1);
+        }
+        int sig = 0, st = 0;
+        int ok = wait_stop(c, &sig) && sig == SIGSTOP;
+        int r1 = (int)ptrace(PTRACE_SETOPTIONS, c, 0, (void *)(long)PTRACE_O_TRACEFORK);
+        ptrace(PTRACE_CONT, c, 0, 0);
+        int w = waitpid(c, &st, 0);
+        int ev = w == c && WIFSTOPPED(st) && WSTOPSIG(st) == SIGTRAP && (st >> 16) == PTRACE_EVENT_FORK;
+        unsigned long msg = 0;
+        int r2 = (int)ptrace(PTRACE_GETEVENTMSG, c, 0, &msg);
+        pid_t g = (pid_t)msg;
+        EXPECT("PTRACE_O_TRACEFORK stops the parent with PTRACE_EVENT_FORK and gives the child's id",
+               ok && r1 == 0 && ev && r2 == 0 && g > 0 && g != c);
+        int st2 = 0;
+        int gs = waitpid(g, &st2, 0) == g && WIFSTOPPED(st2) && WSTOPSIG(st2) == SIGSTOP;
+        EXPECT("the new child is traced already and stops with SIGSTOP", gs);
+        ptrace(PTRACE_CONT, g, 0, 0);
+        ptrace(PTRACE_CONT, c, 0, 0);
+        int gw = waitpid(g, &st2, 0) == g && WIFEXITED(st2) && WEXITSTATUS(st2) == 21;
+        int cw = 0;
+        for (int i = 0; i < 4; i++) {       /* the parent hears SIGCHLD as a signal stop */
+            if (waitpid(c, &st, 0) != c) break;
+            if (WIFEXITED(st)) { cw = WEXITSTATUS(st) == 0; break; }
+            ptrace(PTRACE_CONT, c, 0, 0);
+        }
+        EXPECT("both run on after PTRACE_CONT, the child's end first for its tracer", gw && cw);
+    }
+
+    /* PTRACE_O_TRACEEXEC: the stop after execve carries the event. */
+    {
+        pid_t c = fork();
+        if (c == 0) {
+            ptrace(PTRACE_TRACEME, 0, 0, 0);
+            raise(SIGSTOP);
+            execl("/proc/self/exe", "t_ptrace", "exec-child", (char *)0);
+            execl(argv[0], "t_ptrace", "exec-child", (char *)0);
+            _exit(99);
+        }
+        int sig = 0, st = 0;
+        int ok = wait_stop(c, &sig) && sig == SIGSTOP;
+        ptrace(PTRACE_SETOPTIONS, c, 0, (void *)(long)PTRACE_O_TRACEEXEC);
+        ptrace(PTRACE_CONT, c, 0, 0);
+        int w = waitpid(c, &st, 0);
+        int ev = w == c && WIFSTOPPED(st) && WSTOPSIG(st) == SIGTRAP && (st >> 16) == PTRACE_EVENT_EXEC;
+        ptrace(PTRACE_CONT, c, 0, 0);
+        w = waitpid(c, &st, 0);
+        EXPECT("PTRACE_O_TRACEEXEC reports the exec as PTRACE_EVENT_EXEC",
+               ok && ev && w == c && WIFEXITED(st) && WEXITSTATUS(st) == 7);
+    }
+
     /* PTRACE_KILL and what a tracer may not do. */
     {
         pid_t c = fork();

@@ -8,6 +8,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
 static int counter;
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -93,6 +95,35 @@ static int count_threads(void) {
     return a >= 2 && b >= 2;
 }
 
+/* /proc/self/task lists a number for each thread, and /proc/self/task/TID
+ * holds that thread's files. */
+static long other_tid;
+static void *tid_thread(void *a) { char c; (void)a; other_tid = gettid(); return (void *)(long)read(tp[0], &c, 1); }
+static int task_dir(void) {
+    pthread_t x;
+    other_tid = 0;
+    if (pipe(tp) || pthread_create(&x, 0, tid_thread, 0)) return 0;
+    usleep(20000);
+    int n = 0, me = 0, other = 0, ok = 1;
+    DIR *d = opendir("/proc/self/task");
+    if (!d) ok = 0;
+    for (struct dirent *e; d && (e = readdir(d)); ) {
+        long v = atol(e->d_name);
+        if (v <= 0) continue;
+        n++; if (v == gettid()) me = 1; if (v == other_tid) other = 1;
+    }
+    if (d) closedir(d);
+    char path[64], b[64]; struct stat st;
+    snprintf(path, sizeof path, "/proc/self/task/%ld", other_tid);
+    int isdir = stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+    snprintf(path, sizeof path, "/proc/self/task/%ld/comm", other_tid);
+    FILE *f = fopen(path, "r"); int comm = f && fgets(b, sizeof b, f); if (f) fclose(f);
+    snprintf(path, sizeof path, "/proc/self/task/%ld/stat", other_tid);
+    f = fopen(path, "r"); int sw = f && fgets(b, sizeof b, f) && atol(b) == other_tid; if (f) fclose(f);
+    write(tp[1], "x", 1); pthread_join(x, 0); close(tp[0]); close(tp[1]);
+    return ok && n == 2 && me && other && isdir && comm && sw;
+}
+
 /* exit_group from one thread while another is running on a processor of
  * its own: the process must end with the code exit_group was given. */
 static void *spin(void *arg) { for (volatile long *x = arg;; ) (*x)++; return 0; }
@@ -137,6 +168,7 @@ int main(void) {
            void *g(void *a) { (void)a; return (void *)(long)gettid(); }
            pthread_create(&x, 0, g, 0) == 0 && pthread_join(x, (void **)&other) == 0 && other != gettid(); }));
     EXPECT("/proc/self/stat and status count the threads", count_threads());
+    EXPECT("/proc/self/task lists the threads, and /proc/self/task/TID has their files", task_dir());
     if (begin("exit_group while another thread runs keeps its code")) {
         int r = group_exit_code();
         if (r == 1) pass(); else if (r == 0) fail("fork or waitpid failed");
