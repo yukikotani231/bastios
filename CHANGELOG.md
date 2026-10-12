@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Boot
 
+- virtio devices over MMIO (QEMU `microvm`, Firecracker's transport): the block and network drivers go through a transport that is either I/O ports (PCI) or a block of memory-mapped registers, version 1 or 2. Found at QEMU microvm's slots on a machine with no PCI. The 12-byte modern network header is handled.
 - A PVH entry (Xen's direct boot protocol, used by Firecracker, Cloud Hypervisor and QEMU's `microvm`): `boot/boot.S` carries the ELF note, `boot/multiboot.c` converts the `hvm_start_info`. Tested on QEMU by booting a copy without the Multiboot header.
 
 ### AArch64
