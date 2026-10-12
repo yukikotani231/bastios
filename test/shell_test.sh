@@ -75,8 +75,11 @@ def boot(cpus, with_disk=False, virtio=False, nvme=False, nvme4k=False, ahci=Fal
         # address the kernel ends up with can only have come from DHCP.
         nic = ["-netdev", f"user,id=n0,net={subnet}",
                "-device", "virtio-net-pci,netdev=n0"]
+    # 256M: the kernel's arena is a fraction of RAM (4 MiB up to 128 MiB), and
+    # the two directory tables (the disk's and the loop mount's) take 2.5 MiB
+    # of it, which leaves too little for the 120 processes one case forks.
     return subprocess.Popen(
-        ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-smp", str(cpus),
+        ["qemu-system-x86_64", "-kernel", kernel, "-m", "256M", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
          "-serial", "stdio", "-monitor", f"unix:{monitor},server,nowait" if monitor else "none"] + drive + nic + list(extra),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -1585,7 +1588,7 @@ out = b""
 deadline = time.time() + timeout
 for line, want, until in [
     ("ash", b"built-in shell (ash)", b"\n# "),
-    ("stat -f -c '%b %c' /disk; echo big > /disk/b; cat /disk/b; stat -f -c %f /disk; rm /disk/b", b"10485755 4095\r\nbig\r\n1048", b"\n# "),
+    ("stat -f -c '%b %c' /disk; echo big > /disk/b; cat /disk/b; stat -f -c %f /disk; rm /disk/b", b"10485755 5119\r\nbig\r\n1048", b"\n# "),
     ("mkdir disk/many; i=0; while [ $i -lt 1100 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; sync", b"\r\n1100\r\n", b"\n# "),
 ]:
     mark = len(out)
@@ -1607,7 +1610,7 @@ out = b""
 deadline = time.time() + timeout
 ok = (read_until(b"bastios> ") and send_line_ok(b"ash", b"\n# ")
       and send_line_ok(b"ls disk/many | wc -l; cat disk/many/f1099; stat -f -c %c /disk", b"\n# ")
-      and b"\r\n1100\r\n1099\r\n4095\r\n" in out)
+      and b"\r\n1100\r\n1099\r\n5119\r\n" in out)
 print(("ok  " if ok else "FAIL"), "(big-disk boot) 1100 entries in one directory after a reboot"); ok or print(repr(out[-500:]))
 fails += not ok
 qemu.kill(); qemu.wait()

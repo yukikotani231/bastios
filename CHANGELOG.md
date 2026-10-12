@@ -14,6 +14,16 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 What will be 0.3.0. It needs bastiolang 0.2.0.
 
+### Disk
+
+- The disk file system holds 5119 files and directories (was 4095): the
+  directory has up to 320 blocks, all named by the superblock's block, so
+  existing disks mount unchanged. The two directory tables (the disk's and
+  the loop mount's) now take 2.5 MiB of the kernel's arena, which is 4 MiB
+  up to 128 MiB of RAM; `test/shell_test.sh` boots with 256 MiB for that
+  reason. Neovim, git, gcc and musl together are
+  about 4300 files.
+
 ### Terminal
 
 - Keys typed at the console reach a program that waits in `epoll_wait`,

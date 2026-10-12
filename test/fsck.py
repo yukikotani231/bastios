@@ -32,7 +32,7 @@ import struct, sys
 
 BLOCK = 4096
 DIR_AT = BLOCK
-DSLOTS = 4096
+DSLOTS = 5120
 DENT = 256
 DPB = BLOCK // DENT
 DIR_FIXED = 4

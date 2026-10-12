@@ -912,3 +912,7 @@ tty: python: the REPL, and Ctrl-C is KeyboardInterrupt
 tty: stty: the terminal is in canonical mode again after an editor
 tty: vi: edit and save a file
 tty: epoll: keys reach a program waiting in epoll_wait on /dev/tty
+alpine-tty: nvim: edit a file in a git work tree, then commit it
+alpine-tty: nvim: edit and save a C file
+alpine: apk: install neovim over HTTP
+alpine: nvim: a script run without a terminal
