@@ -458,8 +458,14 @@ fn chown_handle(k: &mut Kernel, pid: u64, f: u64, u: u64, g: u64) -> u64
   if f == NO_RESULT {
     return k.perr;
   }
+  // The ids are the caller's namespace's; the file keeps host ids.
+  let hu = id_in(k, pid, 0, u);
+  let hg = id_in(k, pid, 1, g);
+  if hu == UM_BAD || hg == UM_BAD {
+    return EINVAL;                          // an id the namespace has no map for (src/lxuser.bastio)
+  }
   if f >= HFILES {
-    return set_owner(&mut k, pid, HFILES, 0, 0, u, g);
+    return set_owner(&mut k, pid, HFILES, 0, 0, hu, hg);
   }
   let m = vfs_meta(&mut k.fs, f);
   if !m.ok {
@@ -469,7 +475,7 @@ fn chown_handle(k: &mut Kernel, pid: u64, f: u64, u: u64, g: u64) -> u64
   if vfs_is_dir(&mut k.fs, f) {
     kind = 4;
   }
-  return set_owner(&mut k, pid, f, kind * 4096 + m.mode % 4096, m.own, u, g);
+  return set_owner(&mut k, pid, f, kind * 4096 + m.mode % 4096, m.own, hu, hg);
 }
 
 /// chown, lchown and fchownat (with AT_SYMLINK_NOFOLLOW, or AT_EMPTY_PATH

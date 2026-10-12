@@ -174,6 +174,56 @@ static int utsback(void)
     return 0;
 }
 
+/* Writes str to a /proc/self file: the write's result. */
+static int proc_put(const char *name, const char *str)
+{
+    int fd = open(name, O_WRONLY);
+    if (fd < 0)
+        return -1;
+    int r = write(fd, str, strlen(str));
+    close(fd);
+    return r;
+}
+
+/* A user namespace as root makes it: maps are checked and written once,
+ * ids go through them, and an id with no map is refused. */
+static int userns(void)
+{
+    pid_t c = fork();
+    if (c == 0) {
+        if (unshare(CLONE_NEWUSER) != 0)
+            _exit(40);
+        if (getuid() != 65534)
+            _exit(41);                      /* no map yet */
+        if (proc_put("/proc/self/uid_map", "0 0 0\n") != -1 || errno != EINVAL)
+            _exit(42);                      /* a count of 0 */
+        if (proc_put("/proc/self/uid_map", "0 0 1\n0 5 1\n") != -1 || errno != EINVAL)
+            _exit(43);                      /* overlapping */
+        if (proc_put("/proc/self/uid_map", "0 0 1\n10 5000 5\n") < 0)
+            _exit(44);
+        if (proc_put("/proc/self/uid_map", "1 1 1\n") != -1 || errno != EPERM)
+            _exit(45);                      /* once */
+        if (getuid() != 0 || setuid(12) != 0 || getuid() != 12 || geteuid() != 12)
+            _exit(46);
+        if (setuid(7) != -1 || errno != EINVAL || getuid() != 12)
+            _exit(47);                      /* 7 has no map */
+        struct stat st;
+        if (stat("/proc/self/uid_map", &st) || st.st_uid != 12)
+            _exit(48);                      /* owned by its process: 5002 outside, 12 inside */
+        if (proc_put("/proc/self/setgroups", "deny\n") < 0 || proc_put("/proc/self/setgroups", "allow\n") != -1)
+            _exit(49);
+        if (unshare(CLONE_NEWUSER) != -1 || errno != ENOSPC)
+            _exit(50);                      /* two levels */
+        _exit(0);
+    }
+    int st;
+    if (waitpid(c, &st, 0) != c || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        printf("mns: user namespace said %d\n", WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+        return 1;
+    }
+    return 0;
+}
+
 int main(void)
 {
     int q = msgget(KEY, IPC_CREAT | IPC_EXCL | 0600);
@@ -225,7 +275,7 @@ int main(void)
         return 1;
     if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
         return 1;                           /* the child said what */
-    if (utsback() || pidns())
+    if (utsback() || pidns() || userns())
         return 1;
     puts("mns: ok");
     return 0;

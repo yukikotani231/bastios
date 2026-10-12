@@ -715,7 +715,7 @@ fn lx_open_tail(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if pf != 0 {
     // /proc is read-only but for a sysctl root may write (rw-r--r--);
     // exe is only a link.
-    if (flags % 4 != 0 && (!proc_writable(pf) || fs_id(k.procs, pid, false) != 0)) || is_exe_file(pf) {
+    if (flags % 4 != 0 && (!proc_writable(pf) || (fs_id(k.procs, pid, false) != 0 && !um_owner(k, pid, pf)))) || is_exe_file(pf) {
       return EACCES;
     }
     let hp = ofd_new(&mut k, OF_DEV, pf);

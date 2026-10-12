@@ -258,6 +258,12 @@ fn nsk_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if flags & CLONE_NEWUSER != 0 {
+    let e = userns_unshare(&mut k, pid);    // first: the rest are made as a member of it (src/lxuser.bastio)
+    if e != 0 {
+      return e;
+    }
+  }
   if flags & CLONE_NEWUTS != 0 {
     let e = uts_unshare(&mut k, pid);
     if e != 0 {
@@ -697,6 +703,9 @@ fn nf_id(k: &Kernel, p: u64, f: u64) -> u64
   }
   if f == NF_NET {
     return net_ns(k, p);                    // the network thread's slot, src/lxnetlink.bastio
+  }
+  if f == NF_USER {
+    return nsk_of(k, NSK_USER, p);
   }
   return 0;
 }

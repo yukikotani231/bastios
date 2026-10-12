@@ -141,8 +141,8 @@ fn lx_setname(k: &mut Kernel, pid: u64, base: u64, bit: u64, va: u64, n: u64) ->
   requires kok(k) && pid < NPROC && (base == NM_HOST || base == NM_DOM) && (bit == 1 || bit == 2)
   ensures kok(k)
 {
-  if !cap_has(k, pid, CAP_SYS_ADMIN) {
-    return EPERM;
+  if !cap_has(k, pid, CAP_SYS_ADMIN) && !(nsk_of(k, NSK_UTS, pid) != 0 && ns_cap(k, pid, CAP_SYS_ADMIN)) {
+    return EPERM;                           // the first namespace's names are root's; a made one's, its user namespace's mapped root's
   }
   if n > NAME_MAX {
     return EINVAL;                          // a negative int is huge here too

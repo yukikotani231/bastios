@@ -445,7 +445,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
 fn clone_proc_flags(flags: u64) -> bool {
   let known = 0xff + CLONE_PARENT + CLONE_SYSVSEM + CLONE_SETTLS + CLONE_PARENT_SETTID
     + CLONE_CHILD_CLEARTID + CLONE_DETACHED + CLONE_CHILD_SETTID + CLONE_IO + CLONE_NEWNS
-    + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID;
+    + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWUSER;
   return flags & known == flags;
 }
 
@@ -465,8 +465,16 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
     }
   }
   let nsf = flags & (CLONE_NEWNS + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID);
-  if nsf != 0 && !cap_has(k, pid, CAP_SYS_ADMIN) {
-    return EPERM;
+  if nsf != 0 && flags & CLONE_NEWUSER == 0 && !ns_cap(k, pid, CAP_SYS_ADMIN) {
+    return EPERM;                           // a new user namespace makes the caller privileged in it (src/lxuser.bastio)
+  }
+  if flags & CLONE_NEWUSER != 0 {
+    if nsk_of(k, NSK_USER, pid) != 0 {
+      return ENOSPC;                        // two levels so far
+    }
+    if !userns_room(&mut k) {
+      return ENOMEM;
+    }
   }
   if flags & CLONE_NEWPID != 0 {
     if nsk_of(k, NSK_PID, pid) != 0 || nsk_of(k, NSK_PIDC, pid) != 0 {
@@ -489,7 +497,7 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
   if flags & CLONE_NEWNS != 0 {
     let e = ns_unshare(&mut k, c);          // cannot fail: ns_room said so
   }
-  let e2 = nsk_unshare(&mut k, c, flags & (CLONE_NEWUTS + CLONE_NEWIPC));   // nor this: uts_room did (src/lxnsk.bastio)
+  let e2 = nsk_unshare(&mut k, c, flags & (CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWUSER));   // nor this: uts_room did (src/lxnsk.bastio)
   if flags & CLONE_NEWPID != 0 {
     pidns_clone(&mut k, c);                 // the child is the init of a new PID namespace
   }
@@ -538,11 +546,17 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
   }
   let ns = flags & CLONE_NEWALL;
   if ns != 0 {
-    if ns & CLONE_NEWUSER != ns && !cap_has(k, pid, CAP_SYS_ADMIN) {
+    if ns & CLONE_NEWUSER == 0 && !ns_cap(k, pid, CAP_SYS_ADMIN) {
       return EPERM;
     }
-    if ns & (CLONE_NEWNS + CLONE_NEWNET + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID) != ns {
-      return EINVAL;                        // not the user and cgroup namespaces yet
+    if ns & (CLONE_NEWNS + CLONE_NEWNET + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWUSER) != ns {
+      return EINVAL;                        // not the cgroup namespace yet
+    }
+    if ns & CLONE_NEWUSER != 0 && nsk_of(k, NSK_USER, pid) != 0 {
+      return ENOSPC;                        // two levels so far (src/lxuser.bastio)
+    }
+    if ns & CLONE_NEWUSER != 0 && !userns_room(&mut k) {
+      return ENOMEM;
     }
   }
   if flags != ns && pget(k.procs, pid, F_TGID) != 0 {

@@ -1101,6 +1101,9 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
   if pf != 0 && is_ns_file(pf) {
     return nsf_meta(k, pf);                 // the namespace's nsfs file (src/lxnsk.bastio)
   }
+  if pf != 0 && is_um_file(pf) {
+    return um_meta(k, pf);                  // src/lxuser.bastio
+  }
   if pf != 0 {
     return proc_meta(pf);
   }
@@ -1194,6 +1197,8 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
     m = Meta { ok: true, mode: S_IFSOCK, size: 0, ino: 5, mtime: 0, own: 0 };
   } else if d.kind == K_DEV && is_ns_file(d.x) {
     m = nsf_fd_meta(k, pid, fd, d.x);       // src/lxnsk.bastio
+  } else if d.kind == K_DEV && is_um_file(d.x) {
+    m = um_meta(k, d.x);
   } else if d.kind == K_DEV {
     m = dev_meta(d.x);
   } else if d.kind == K_FILE {
@@ -1225,8 +1230,10 @@ fn put_stat(k: &mut Kernel, pid: u64, buf: u64, mo: Meta) -> u64
   lx_fill(&mut k, 0, STAT_SIZE);
   xfer_u64(&mut k.fs.xfer, 8, m.ino);         // st_ino
   xfer_u64(&mut k.fs.xfer, 16, nlink);        // st_nlink
-  xfer_u64(&mut k.fs.xfer, 24, m.mode % 0x100000000 + m.own % 0x100000000 * 0x100000000);   // st_mode, st_uid
-  xfer_u64(&mut k.fs.xfer, 32, m.own / 0x100000000);                 // st_gid
+  let uid = id_out(k, pid, 0, m.own % 0x100000000);   // as the reader's user namespace sees them (src/lxuser.bastio)
+  let gid = id_out(k, pid, 1, m.own / 0x100000000 % 0x100000000);
+  xfer_u64(&mut k.fs.xfer, 24, m.mode % 0x100000000 + uid % 0x100000000 * 0x100000000);   // st_mode, st_uid
+  xfer_u64(&mut k.fs.xfer, 32, gid);                 // st_gid
   xfer_u64(&mut k.fs.xfer, 40, rdev);         // st_rdev
   xfer_u64(&mut k.fs.xfer, 48, m.size);       // st_size
   xfer_u64(&mut k.fs.xfer, 56, 4096);         // st_blksize
