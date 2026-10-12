@@ -65,6 +65,7 @@ import "lxmount.bastio";
 import "lxns.bastio";
 import "lxnsk.bastio";
 import "lxuser.bastio";
+import "lxcgroup.bastio";
 import "lxperm.bastio";
 import "lxopen2.bastio";
 import "lxhandle.bastio";
@@ -1006,6 +1007,10 @@ fn install_files(con: &mut Con, k: &mut Kernel)
   // (src/lxdev.bastio): their paths are matched before the file system.
   if !make_dir(&mut k.fs, "dev") || !make_dir(&mut k.fs, "dev/shm") {
     puts(&mut con, "cannot make /dev/shm\r\n");
+  }
+  // /sys/fs/cgroup is virtual (src/lxcgroup.bastio); its parents are files.
+  if !make_dir(&mut k.fs, "sys") || !make_dir(&mut k.fs, "sys/fs") {
+    puts(&mut con, "cannot make /sys/fs\r\n");
   }
   let mut i = 0;
   while i < NINIT
