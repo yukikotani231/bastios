@@ -476,6 +476,8 @@ steps = [
     # entries: the big-disk boot.)
     # Reads fill the page cache, and the next reads of the same file come from it (src/pcache.bastio, pc_fill): they must see appends and rewrites.
     ("i=0; while [ $i -lt 3000 ]; do echo $i; i=$((i+1)); done > /disk/pc; cat /disk/pc | wc -c; cat /disk/pc | wc -c; echo more >> /disk/pc; cat /disk/pc | wc -c; wc -l < /disk/pc; echo X > /disk/pc; cat /disk/pc; rm /disk/pc", b"13890\r\n13890\r\n13895\r\n3001\r\nX\r\n", b"\n# "),
+    # 55 blocks in a row: the disk takes them in batched requests (src/diskq.bastio).
+    ("i=0; while [ $i -lt 600 ]; do echo line$i; i=$((i+1)); done > /tmp/mref; for k in 1 2 3 4 5 6 7 8; do cat /tmp/mref /tmp/mref /tmp/mref /tmp/mref /tmp/mref /tmp/mref; done > /tmp/mall; cp /tmp/mall /disk/multi; sync; cmp /tmp/mall /disk/multi && echo multi=same; wc -c < /disk/multi; rm /disk/multi /tmp/mall /tmp/mref", [b"multi=same", b"\r\n225120\r\n"], b"\n# "),
     ("mkdir disk/many; i=0; while [ $i -lt 150 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; cat disk/many/f149", b"\r\n150\r\n149\r\n", b"\n# "),
     ("rm -r disk/many; ls disk/many; echo gone$((1+1))", [b"No such file", b"gone2"], b"\n# "),
     # The in-memory file system finds names through a hash index (src/ramfs.bastio): creating, removing and renaming hundreds of files
