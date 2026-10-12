@@ -400,6 +400,10 @@ steps = [
      [b"\r\n3\r\npids\r\n", b"0::/t", b"can't fork"], b"\n# "),
     ("echo 1 > /sys/fs/cgroup/t/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/t; echo r=$?; mkdir /sys/fs/cgroup/u; rmdir /sys/fs/cgroup/u; echo r=$?; su alice -c 'mkdir /sys/fs/cgroup/x; echo pids.max > /dev/null; echo 5 > /sys/fs/cgroup/pids.max; echo w=$?'",
      [b"r=0", b"r=0", b"Permission denied", b"w=1"], b"\n# "),
+    # /proc/P/task/T is /proc/T for a thread T of P's group (runc opens its
+    # files through /proc/self/task/TID).
+    ("ash -c 'read x < /proc/$$/task/$$/stat; [ \"${x%% *}\" = $$ ] && echo tid-ok; read y < /proc/self/task/$$/stat; echo other=${y%% *}; cat /proc/$$/task/9999/stat'",
+     [b"tid-ok", b"No such file"], b"\n# "),
     ("echo root:pw | chpasswd; read l < /etc/shadow; case $l in 'root:$6$'*) echo sha512;; esac; su alice -c 'echo no | su -c id root; echo w=$?; echo pw | su -c id root'",
      [b"\r\nsha512\r\n", b"w=1", b"uid=0(root) gid=0(root)"], b"\n# "),
     # (BusyBox keeps the old /etc files as NAME-: gone, so no pages stay.)

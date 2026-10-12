@@ -191,6 +191,44 @@ fn proc_self(x: &mut Bytes, n: u64, pid: u64) -> u64
   return n - 4 + d;
 }
 
+/// Rewrites a leading "proc/P/task/T" in x[..n], T a thread of P's group,
+/// to "proc/T": a thread has a row of its own, so its directory is the one
+/// /proc/T already shows. Returns the new length, never more than n.
+fn proc_task(procs: &Buf, x: &mut Bytes, n: u64) -> u64
+  requires ptab_ok(procs) && n <= blen(x)
+  ensures blen(x) == old(blen(x)) && result <= n
+{
+  if n < 14 || !xfer_is(x, 0, 5, "proc/") {
+    return n;
+  }
+  let e = comp_end(x, 5, n);
+  if e + 7 > n || !xfer_is(x, e, e + 6, "/task/") {
+    return n;
+  }
+  let p = proc_pid(procs, x, 5, e);
+  let te = comp_end(x, e + 6, n);
+  let t = proc_pid(procs, x, e + 6, te);
+  if p >= NPROC || t >= NPROC || tgid(procs, t) != tgid(procs, p) {
+    return n;
+  }
+  let tl = te - (e + 6);
+  let mut i = 0;
+  while i < tl
+    invariant i <= tl && tl == te - (e + 6) && e + 6 <= te && te <= n && n <= blen(x) && blen(x) == old(blen(x))
+  {
+    bset(&mut x, 5 + i, bget(x, e + 6 + i));
+    i = i + 1;
+  }
+  let mut j = te;
+  while j < n
+    invariant te <= j && j <= n && tl == te - (e + 6) && e + 6 <= te && n <= blen(x) && blen(x) == old(blen(x))
+  {
+    bset(&mut x, 5 + tl + (j - te), bget(x, j));
+    j = j + 1;
+  }
+  return 5 + tl + (n - te);
+}
+
 /// For a caller in a PID namespace other than the first, "proc/N..." in
 /// x[..n] names the process with id N there: N becomes the kernel's row
 /// number for it (0, which names none, if there is no such process), so
