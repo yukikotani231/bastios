@@ -1,6 +1,7 @@
-/* BastiOS for AArch64: QEMU's virt machine loads the image at the start of
- * RAM plus the usual 512 KiB and enters _start at EL1 with the MMU off and
- * the device tree's address in x0. */
+/* BastiOS for AArch64: QEMU's virt machine loads the image (bastios.bin, with
+ * the Linux arm64 Image header boot.S starts with) at the start of RAM plus
+ * 512 KiB and enters _start at EL1 with the MMU off and the device tree's
+ * address in x0. */
 ENTRY(_start)
 SECTIONS {
     . = 0x40080000;
@@ -16,5 +17,6 @@ SECTIONS {
     . += 0x10000;
     stack_top = .;
     _end = .;
+    __image_size = _end - 0x40080000;
     /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) }
 }
