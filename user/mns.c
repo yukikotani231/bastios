@@ -145,6 +145,35 @@ static int pidns(void)
     return 0;
 }
 
+/* A child in a UTS namespace of its own goes back to the first one through
+ * a descriptor opened before (what LTP's setns02 does). */
+static int utsback(void)
+{
+    char before[64], after[64];
+    int fd = open("/proc/self/ns/uts", O_RDONLY);
+    if (fd < 0 || gethostname(before, sizeof before))
+        return fail("the uts link");
+    pid_t c = fork();
+    if (c == 0) {
+        if (unshare(CLONE_NEWUTS) != 0 || sethostname("mns-box", 7) != 0)
+            _exit(30);
+        if (gethostname(after, sizeof after) || strcmp(after, "mns-box"))
+            _exit(31);
+        if (setns(fd, CLONE_NEWUTS) != 0)
+            _exit(32);
+        if (gethostname(after, sizeof after) || strcmp(after, before))
+            _exit(33);
+        _exit(0);
+    }
+    int st;
+    if (waitpid(c, &st, 0) != c || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        printf("mns: setns back to the first UTS namespace said %d\n", WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+        return 1;
+    }
+    close(fd);
+    return 0;
+}
+
 int main(void)
 {
     int q = msgget(KEY, IPC_CREAT | IPC_EXCL | 0600);
@@ -196,7 +225,7 @@ int main(void)
         return 1;
     if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
         return 1;                           /* the child said what */
-    if (pidns())
+    if (utsback() || pidns())
         return 1;
     puts("mns: ok");
     return 0;
