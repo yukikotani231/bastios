@@ -244,7 +244,7 @@ long_mode:
  * the next trap, then return its vector with the context saved back.
  * Whatever Bastio put in the context, the CPU enters ring 3 with the user
  * segments, interrupts on and IOPL 0: only rip, rsp, the general registers
- * and the arithmetic flags are taken from it.
+ * and the arithmetic flags (and the trap flag) are taken from it.
  */
 .global bst_cpu_enter
 bst_cpu_enter:
@@ -266,8 +266,8 @@ bst_cpu_enter:
         jbe     1f
         xor     %eax, %eax
 1:      push    %rax
-        mov     17*8(%rsi), %rax        /* rflags: CF PF AF ZF SF DF OF only, plus IF */
-        and     $0xCD5, %rax
+        mov     17*8(%rsi), %rax        /* rflags: CF PF AF ZF SF DF OF and TF only, plus IF */
+        and     $0xDD5, %rax
         or      $0x202, %rax
         push    %rax
         push    $UCODE                  /* cs */

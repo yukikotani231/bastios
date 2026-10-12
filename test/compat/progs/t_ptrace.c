@@ -10,6 +10,8 @@
 #include <sys/wait.h>
 #include <sys/uio.h>
 #include <stddef.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
 
 static volatile long cell = 0x1111;
 static volatile int handled;
@@ -119,6 +121,70 @@ int main(int argc, char **argv) {
         write(p[1], "x", 1);
         int w = waitpid(c, &st, 0);
         EXPECT("PTRACE_DETACH lets it run on", r3 == 0 && w == c && WIFEXITED(st) && WEXITSTATUS(st) == 8);
+    }
+
+    /* PTRACE_SYSCALL stops before and after each system call, with the
+     * number in orig_rax, -ENOSYS in rax before and the result after. */
+    {
+        pid_t c = fork();
+        if (c == 0) {
+            ptrace(PTRACE_TRACEME, 0, 0, 0);
+            raise(SIGSTOP);
+            umask(0077);
+            long old = syscall(SYS_umask, 0022);          /* returns 0077 */
+            _exit(old == 0077 ? 0 : 1);
+        }
+        int sig = 0, st = 0;
+        int ok = wait_stop(c, &sig) && sig == SIGSTOP;
+        int entries = 0, exits = 0, enosys_before = 0, result_after = 0, on_umask = 0, bad = 0;
+        long want = SYS_umask;
+        while (ok) {
+            if (ptrace(PTRACE_SYSCALL, c, 0, 0) != 0) { bad = 1; break; }
+            if (waitpid(c, &st, 0) != c) { bad = 1; break; }
+            if (!WIFSTOPPED(st)) break;
+            if (WSTOPSIG(st) != SIGTRAP) continue;
+            struct user_regs_struct r;
+            if (ptrace(PTRACE_GETREGS, c, 0, &r) != 0) { bad = 1; break; }
+            /* Entry and exit alternate, starting with an entry. */
+            if (((entries + exits) & 1) == 0) {
+                entries++;
+                if (r.orig_rax == (unsigned long)want) {
+                    on_umask = 1;
+                    enosys_before = (long)r.rax == -ENOSYS && r.rdi == 0022;
+                }
+            } else {
+                exits++;
+                if (on_umask == 1 && r.orig_rax == (unsigned long)want) { result_after = r.rax == 0077; on_umask = 2; }
+            }
+        }
+        EXPECT("PTRACE_SYSCALL stops before and after a call, in turn", !bad && entries >= 2 && (entries == exits || entries == exits + 1));
+        EXPECT("at the entry stop orig_rax is the call and rax is -ENOSYS", enosys_before);
+        EXPECT("at the exit stop rax is the result, and the call ran once", result_after && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
+
+    /* PTRACE_SINGLESTEP runs one instruction; int3 is SIGTRAP. */
+    {
+        pid_t c = fork();
+        if (c == 0) {
+            ptrace(PTRACE_TRACEME, 0, 0, 0);
+            asm volatile("int3\n\tnop\n\tnop\n\tnop\n\tnop\n" ::: "memory");
+            _exit(0);
+        }
+        int sig = 0, st = 0;
+        int ok = wait_stop(c, &sig) && sig == SIGTRAP;     /* int3 */
+        struct user_regs_struct r0, r;
+        int g = ok && ptrace(PTRACE_GETREGS, c, 0, &r0) == 0;
+        int steps = 0, exact = 1;
+        for (int i = 1; i <= 4 && g; i++) {
+            if (ptrace(PTRACE_SINGLESTEP, c, 0, 0) != 0 || !wait_stop(c, &sig) || sig != SIGTRAP) { exact = 0; break; }
+            if (ptrace(PTRACE_GETREGS, c, 0, &r) != 0 || r.rip != r0.rip + i) exact = 0;
+            steps++;
+        }
+        ptrace(PTRACE_CONT, c, 0, 0);
+        int w = waitpid(c, &st, 0);
+        EXPECT("int3 stops the tracee with SIGTRAP", ok && g);
+        EXPECT("PTRACE_SINGLESTEP runs one instruction at a time", steps == 4 && exact);
+        EXPECT("and the tracee runs freely after PTRACE_CONT", w == c && WIFEXITED(st) && WEXITSTATUS(st) == 0);
     }
 
     /* PTRACE_KILL and what a tracer may not do. */

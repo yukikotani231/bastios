@@ -12,19 +12,29 @@
 // memory and registers.
 //
 // The registers are those of the interrupted program: a stop at a signal
-// is always between two instructions, never inside a system call. The
+// is between two instructions, and one at a system call (below) is just
+// before or after it. The
 // flags, rip, rsp and fs base the kernel puts back are checked on the way
 // to user mode (boot/boot.S), so a tracer cannot hand a process a kernel
 // address or a segment.
 //
-// Not done: PTRACE_SYSCALL, PTRACE_SINGLESTEP and the stops they cause,
-// the events (fork, clone, exec, exit; PTRACE_SETOPTIONS keeps them and
-// only PTRACE_O_EXITKILL acts), the floating point and debug registers,
-// PTRACE_INTERRUPT and PTRACE_LISTEN, PTRACE_GET_SYSCALL_INFO, and a
-// tracee that faults without a handler (it is killed, not stopped). A
-// tracer that is not the parent hears of its tracee's end once, then the
-// parent reaps it. There is no Yama scope: the caller needs root or the
-// target's user and group ids, as for pidfd_getfd.
+// PTRACE_SYSCALL stops a process before and after each system call (a
+// second word per process, from SYS_PT2, tells which: pt_sys_entry and
+// pt_sys_exit, called from the trap handler in src/main.bastio). The stop
+// before a call leaves rax at -ENOSYS and orig_rax at the call; when the
+// tracer resumes it the call starts again, as a waiting call does, with
+// whatever number the tracer left in orig_rax. getpid and gettid, which a
+// processor answers without the kernel lock, are not seen.
+// PTRACE_SINGLESTEP sets the trap flag in the saved flags; the debug trap
+// (vector 1) is SIGTRAP, which stops the process as any signal does.
+//
+// Not done: the events (fork, clone, exec, exit; PTRACE_SETOPTIONS keeps
+// them and only PTRACE_O_EXITKILL acts), the floating point and debug
+// registers, PTRACE_INTERRUPT and PTRACE_LISTEN, and
+// PTRACE_GET_SYSCALL_INFO. A tracer that is not the parent hears of its
+// tracee's end once, then the parent reaps it. There is no Yama scope: the
+// caller needs root or the target's user and group ids, as for
+// pidfd_getfd.
 
 import "lxpidfd.bastio";
 
@@ -37,6 +47,9 @@ const PTRACE_POKETEXT: u64 = 4;
 const PTRACE_POKEDATA: u64 = 5;
 const PTRACE_POKEUSER: u64 = 6;
 const PTRACE_CONT: u64 = 7;
+const PTRACE_SINGLESTEP: u64 = 9;
+const TRAP_FLAG: u64 = 256;              // rflags.TF
+const PTRACE_SYSCALL: u64 = 24;
 const PTRACE_KILL: u64 = 8;
 const PTRACE_GETREGS: u64 = 12;
 const PTRACE_SETREGS: u64 = 13;
@@ -95,7 +108,11 @@ fn ur_read(k: &Kernel, c: u64, i: u64) -> u64
     return pget(k.procs, c, F_REGS + r);
   }
   if i == 15 {
-    return 0xFFFFFFFFFFFFFFFF;              // orig_rax: not in a system call
+    let t = tr2_get(k, c);
+    if t / TS_ENTRY % 2 == 1 || t / TS_EXIT % 2 == 1 {
+      return t / TS_NR % 1024;              // orig_rax: the call it stopped at
+    }
+    return 0xFFFFFFFFFFFFFFFF;              // not in a system call
   }
   if i == 17 {
     return 0x33;                            // cs
@@ -116,6 +133,12 @@ fn ur_write(k: &mut Kernel, c: u64, i: u64, v: u64)
   if r < 21 {
     pset(&mut k.procs, c, F_REGS + r, v);
   }
+  if i == 15 {
+    // orig_rax at a system call stop: the call to run (anything else, -1
+    // included, makes it fail with ENOSYS).
+    let t = tr2_get(k, c);
+    tr2_put(&mut k, c, t % TS_NR + smaller(v, 1023) * TS_NR);
+  }
 }
 
 /// Whether process c is stopped for its tracer, process pid.
@@ -126,12 +149,15 @@ fn pt_ready(k: &Kernel, pid: u64, c: u64) -> bool
 }
 
 /// Lets stopped process c go on, passing signal sig (0: none) in place of
-/// the one that stopped it. With `detach` it is no longer traced.
-fn pt_resume(k: &mut Kernel, c: u64, sig: u64, detach: bool)
+/// the one that stopped it. With `detach` it is no longer traced; with
+/// `sys` it stops at its next system call, before and after it; with `step`
+/// after its next instruction.
+fn pt_resume(k: &mut Kernel, c: u64, sig: u64, detach: bool, sys: bool, step: bool)
   requires kok(k) && 1 <= c && c < NPROC && sig <= NSIG
   ensures kok(k)
 {
   let w = tr_get(k, c);
+  let t = tr2_get(k, c);
   let mut skip = 0;
   if sig != 0 && !detach {
     skip = 1;
@@ -141,6 +167,27 @@ fn pt_resume(k: &mut Kernel, c: u64, sig: u64, detach: bool)
   } else {
     tr_put(&mut k, c, tr_make(w % 65536, tr_att(w), 0, skip, 0, tr_opt(w)));
   }
+  let mut next = t / TS_NR % 1024 * TS_NR;   // the call's number stays
+  if sys && !detach {
+    next = next + TS_SYS;
+  }
+  if step && !detach {
+    next = next + TS_STEP;
+    let fl = pget(k.procs, c, F_REGS + R_RFLAGS);
+    pset(&mut k.procs, c, F_REGS + R_RFLAGS, fl % 65536 / (2 * TRAP_FLAG) * (2 * TRAP_FLAG) + fl % TRAP_FLAG + TRAP_FLAG);
+  }
+  if t / TS_ENTRY % 2 == 1 {
+    // Stopped before a system call: it runs now, as the tracer left it.
+    let rip = pget(k.procs, c, F_REGS + R_RIP);
+    if rip >= 2 {
+      pset(&mut k.procs, c, F_REGS + R_RIP, rip - 2);
+    }
+    pset(&mut k.procs, c, F_REGS + R_RAX, t / TS_NR % 1024);
+    if sys && !detach {
+      next = next + TS_NOENT;               // the stop before it is done; the one after it is not
+    }
+  }
+  tr2_put(&mut k, c, next);
   jc_set(&mut k, c, jc_get(k, c) / JC_EXECED % 2 * JC_EXECED);   // the stop is no news any more
   if sig != 0 {
     pset(&mut k.procs, c, F_SIGPEND, pget(k.procs, c, F_SIGPEND) | sbit(sig));
@@ -148,6 +195,59 @@ fn pt_resume(k: &mut Kernel, c: u64, sig: u64, detach: bool)
   if state(k.procs, c) == STOPPED {
     pset(&mut k.procs, c, F_STATE, READY);
   }
+}
+
+/// Process p took a debug trap (vector 1): a single step its tracer asked
+/// for ends, and the trap flag goes.
+fn pt_stepped(k: &mut Kernel, p: u64)
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let t = tr2_get(k, p);
+  if t / TS_STEP % 2 == 1 {
+    let fl = pget(k.procs, p, F_REGS + R_RFLAGS);
+    pset(&mut k.procs, p, F_REGS + R_RFLAGS, fl % 65536 / (2 * TRAP_FLAG) * (2 * TRAP_FLAG) + fl % TRAP_FLAG);
+    tr2_put(&mut k, p, t % TS_STEP + t / (2 * TS_STEP) * (2 * TS_STEP));
+  }
+}
+
+/// Process p is about to make a system call (it has been charged for none
+/// yet). If its tracer asked to see calls it stops before the call, which
+/// starts again when the tracer resumes it: true. The call's number is kept
+/// for the stop after it. A call that waits and starts again is not seen again.
+fn pt_sys_entry(k: &mut Kernel, p: u64, restarted: bool) -> bool
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let t = tr2_get(k, p);
+  if tr_tracer(k, p) == 0 || t % 2 == 0 || restarted {
+    return false;
+  }
+  let nr = smaller(pget(k.procs, p, F_REGS + R_RAX), 1023);
+  if t / TS_NOENT % 2 == 1 {
+    tr2_put(&mut k, p, TS_SYS + nr * TS_NR);
+    return false;
+  }
+  tr2_put(&mut k, p, TS_SYS + TS_ENTRY + nr * TS_NR);
+  pset(&mut k.procs, p, F_REGS + R_RAX, ENOSYS);   // what a tracer reads in rax before the call
+  tr_stop(&mut k, p, 5 + 128 * (tr_opt(tr_get(k, p)) % 2));   // SIGTRAP, with 0x80 for PTRACE_O_TRACESYSGOOD
+  return true;
+}
+
+/// Process p has made its system call. If its tracer asked to see calls it
+/// stops now, with the result in rax: true. Not if the call waits.
+fn pt_sys_exit(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let t = tr2_get(k, p);
+  let st = state(k.procs, p);
+  if tr_tracer(k, p) == 0 || t % 2 == 0 || pget(k.procs, p, F_RESTART) != 0 || (st != READY && st != RUNNING) {
+    return false;
+  }
+  tr2_put(&mut k, p, t % TS_NR + t / TS_NR % 1024 * TS_NR + TS_EXIT);
+  tr_stop(&mut k, p, 5 + 128 * (tr_opt(tr_get(k, p)) % 2));
+  return true;
 }
 
 /// PTRACE_TRACEME: the parent traces the caller.
@@ -361,11 +461,11 @@ fn lx_ptrace(k: &mut Kernel, pid: u64, req0: u64, p0: u64, addr: u64, data: u64)
   if req == PTRACE_GETREGSET || req == PTRACE_SETREGSET {
     return pt_regset(&mut k, pid, p, req == PTRACE_SETREGSET, addr, data);
   }
-  if req == PTRACE_CONT || req == PTRACE_DETACH {
+  if req == PTRACE_CONT || req == PTRACE_DETACH || req == PTRACE_SYSCALL || req == PTRACE_SINGLESTEP {
     if data > NSIG {
       return EIO;
     }
-    pt_resume(&mut k, p, data, req == PTRACE_DETACH);
+    pt_resume(&mut k, p, data, req == PTRACE_DETACH, req == PTRACE_SYSCALL, req == PTRACE_SINGLESTEP);
     return 0;
   }
   if req == PTRACE_KILL {

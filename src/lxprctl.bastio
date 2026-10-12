@@ -89,6 +89,7 @@ fn pr_fork(k: &mut Kernel, p: u64, c: u64)
   dl_fork(&mut k, p, c);                  // and the deadline parameters
   jc_set(&mut k, c, 0);                   // nothing to report about the child yet
   tr_put(&mut k, c, 0);                   // and nobody traces it (src/lxptrace.bastio)
+  tr2_put(&mut k, c, 0);
   cap_fork(&mut k, p, c);                 // and the capabilities (src/lxcap.bastio)
   k.sys = set(k.sys, SYS_IOP + c, get(k.sys, SYS_IOP + p));   // and the I/O priority (src/lxprio.bastio)
 }

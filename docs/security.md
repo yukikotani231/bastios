@@ -122,5 +122,6 @@ Known gaps, most serious first.
    top of that, and no `CAP_SYS_PTRACE` or dumpable flag. A tracer cannot
    give a tracee a kernel address, a segment or the trap flag: the entry to
    user mode (`boot/boot.S`) takes only the general registers, rip, rsp,
-   the arithmetic flags and the fs base from the saved context, and checks
-   rip, rsp and the fs base are user addresses.
+   the arithmetic flags, the trap flag (which a user program may set itself)
+   and the fs base from the saved context, and checks rip, rsp and the fs
+   base are user addresses.
