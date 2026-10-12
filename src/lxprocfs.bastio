@@ -90,6 +90,7 @@ const SY_INO: u64 = 20;                // 20 .. 22: /proc/sys/fs/inotify (src/lx
 const SY_NETUDP: u64 = 23;             // /proc/net/udp
 const SY_NETUDP6: u64 = 24;            // /proc/net/udp6
 const SY_NETUNIX: u64 = 25;            // /proc/net/unix
+const SY_NETRAW: u64 = 26;             // /proc/net/raw
 const SY_LOOP: u64 = 32;               // 32 ..: loop device n's attribute a at n * LOOP_SYS + a
 const SY_NS: u64 = 128;                // 128 ..: /proc/P/ns link f at P * NF_N + f (src/lxnsk.bastio)
 const NF_N: u64 = 8;
@@ -468,6 +469,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   if xfer_is(x, 5, n, "net/udp") {
     return PROC_DEV + PSYS + SY_NETUDP;
   }
+  if xfer_is(x, 5, n, "net/raw") {
+    return PROC_DEV + PSYS + SY_NETRAW;
+  }
   if xfer_is(x, 5, n, "net/unix") {
     return PROC_DEV + PSYS + SY_NETUNIX;
   }
@@ -719,6 +723,9 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
     }
     if i == 5 {
       return Ent { len: name_out(&mut k.fs.xfer, "unix"), dir: false, end: false };
+    }
+    if i == 6 {
+      return Ent { len: name_out(&mut k.fs.xfer, "raw"), dir: false, end: false };
     }
     return end;
   }
@@ -1067,6 +1074,29 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     }
     if what >= SY_LOOP && what - SY_LOOP < LOOP_N * LOOP_SYS {
       return loop_sys_text(&mut k, what - SY_LOOP, &mut o);
+    }
+    if what == SY_NETRAW {
+      // One line per raw ICMP socket of the reader's network namespace;
+      // the "port" is the protocol number, 1. The owner and inode are not
+      // kept.
+      let ns = net_ns(k, pid);
+      let mut a = put_s(&mut o, 0, "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n");
+      let mut t = 0;
+      let mut row = 0;
+      while t < SOCKS && a + 160 < PROC_OUT
+        invariant t <= SOCKS && row <= t && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+      {
+        if raw_row(k.nic, t, ns, 0) == 1 {
+          a = put_s(&mut o, a, "  ");
+          a = put_n(&mut o, a, row);
+          a = put_s(&mut o, a, ": 00000000:0001 00000000:0000 07 00000000:");
+          a = put_hx(&mut o, a, raw_row(k.nic, t, ns, 1), 8);
+          a = put_s(&mut o, a, " 00:00000000 00000000     0        0 0 2 0000000000000000 0\n");
+          row = row + 1;
+        }
+        t = t + 1;
+      }
+      return a;
     }
     if what == SY_NETUNIX {
       // One line per bound or listening unix socket (the sockets of a
