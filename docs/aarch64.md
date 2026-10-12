@@ -41,6 +41,8 @@ The platform is the trusted base besides the compiler's AArch64 preludes ([trust
 | `boot/aarch64/platform.c` | Reading the memory map from the device tree; the kernel's translation table (1 GiB blocks: devices in the first, RAM above); the GICv3 (each processor's redistributor) or GICv2 (the CPU interface) that the device tree names, and the generic timer (100 ticks a second); acknowledging interrupts; `bst_cpu_wait` (`wfi`); starting the other processors with PSCI and parking them |
 | `boot/aarch64/linker.ld` | The trampoline page's own section, load address (`0x40080000`, where QEMU puts a kernel) and `_end`, where the page pool starts |
 
+The kernel starts at EL1 or EL2 (firmware such as U-Boot and UEFI usually hands over at EL2): `boot.S` drops from EL2 to EL1 with the setup EL2 owes it (AArch64 EL1, the counter and timer open to EL1, no FP trap, the GIC system registers enabled). The PSCI conduit (`hvc` or `smc`) is the one the device tree's `psci` node names. `test/aarch64_test.sh` runs both (`VIRT=,virtualization=on` starts QEMU at EL2).
+
 The interrupt controller and its addresses come from the device tree (`arm,gic-v3`, or `arm,cortex-a15-gic` / `arm,gic-400` for a GICv2), with QEMU `virt`'s GICv3 as the fallback; `test/aarch64_test.sh` runs against both (`GIC=2` for `-M virt,gic-version=2`). The UART and the virtio window are still QEMU `virt`'s own.
 
 ## What is not there yet

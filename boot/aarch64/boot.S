@@ -18,6 +18,39 @@
         .equ    PCPU_SIZE, 384
         .equ    CPU_STACK, 65536
 
+        /* Firmware often hands over at EL2 (U-Boot, UEFI, QEMU with
+         * virtualization=on): drop to EL1 with the setup EL2 owes it, and
+         * carry on there. A no-op at EL1. */
+        .macro  el2_to_el1
+        mrs     x1, CurrentEL
+        cmp     x1, #8                  /* EL2 */
+        b.ne    .Lel1_\@
+        mov     x1, #(1 << 31)          /* HCR_EL2.RW: EL1 is AArch64 */
+        msr     hcr_el2, x1
+        mov     x1, #3                  /* CNTHCTL_EL2: EL1 may read the counter and use the timer */
+        msr     cnthctl_el2, x1
+        msr     cntvoff_el2, xzr
+        mov     x1, #0x33ff             /* CPTR_EL2: FP and SIMD do not trap */
+        msr     cptr_el2, x1
+        msr     hstr_el2, xzr
+        mrs     x1, id_aa64pfr0_el1
+        ubfx    x1, x1, #24, #4         /* the GIC system register interface? */
+        cbz     x1, .Lsre_\@
+        mrs     x1, icc_sre_el2
+        orr     x1, x1, #0xf            /* SRE, DFB, DIB, Enable: EL1 may use ICC_SRE_EL1 */
+        msr     icc_sre_el2, x1
+        isb
+.Lsre_\@:
+        ldr     x1, =0x30d00800         /* SCTLR_EL1: its RES1 bits, MMU and caches off */
+        msr     sctlr_el1, x1
+        mov     x1, #0x3c5              /* SPSR_EL2: EL1h, DAIF masked */
+        msr     spsr_el2, x1
+        adr     x1, .Lel1_\@
+        msr     elr_el2, x1
+        eret
+.Lel1_\@:
+        .endm
+
         /* The Linux arm64 "Image" header (Documentation/arm64/booting.rst):
          * QEMU, U-Boot and UEFI loaders that see it pass the device tree's
          * address in x0 and load the image at its text offset. (QEMU gives
@@ -36,6 +69,7 @@ _start:
         .long   0                       /* reserved */
 start:
         mov     x19, x0                 /* the device tree */
+        el2_to_el1
         mrs     x1, mpidr_el1
         and     x1, x1, #0xff
         cbnz    x1, park                /* the others are started by PSCI (bst_secondary_entry) */
@@ -86,9 +120,8 @@ start:
         bl      bst_smp_boot            /* the other processors, parked */
         ldr     x0, =bst_memmap
         bl      bst_kmain
-        /* Power off through PSCI SYSTEM_OFF (QEMU answers HVC at EL1). */
-        ldr     w0, =0x84000008
-        hvc     #0
+        /* Power off through PSCI SYSTEM_OFF. */
+        bl      bst_psci_system_off
 park:   wfe
         b       park
 
@@ -100,6 +133,7 @@ park:   wfe
         .global bst_secondary_entry
 bst_secondary_entry:
         mov     x19, x0
+        el2_to_el1
         ldr     x1, =bst_pcpus
         mov     x2, #PCPU_SIZE
         madd    x1, x19, x2, x1

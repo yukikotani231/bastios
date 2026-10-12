@@ -61,6 +61,7 @@ static uint64_t ncpu_dt;
  * tree lists (GICv3: distributor, redistributors; GICv2: distributor, CPU
  * interface). QEMU virt's GICv3 is the default. */
 static unsigned gic_ver = 3;
+static unsigned psci_smc;                   /* the device tree's psci method: smc (1) or hvc (0, QEMU virt's) */
 static uint64_t GICD = 0x08000000ull;
 static uint64_t GICR = 0x080A0000ull;       /* GICv2: the CPU interface (GICC) */
 
@@ -119,6 +120,7 @@ static void read_memory(const uint8_t *dtb) {
         uint32_t ac = 2, sc = 1, cac = 1;
         int depth = 0, in_mem = 0, in_cpus = 0, in_cpu = 0;
         unsigned node_gic = 0;                       /* this node's compatible: 3, 2 or 0 */
+        int in_psci = 0;
         uint64_t node_reg[2] = { 0, 0 };
         int node_regs = 0;
         for (;;) {
@@ -134,6 +136,7 @@ static void read_memory(const uint8_t *dtb) {
                 if (depth == 2 && same(name, "cpus")) in_cpus = 1;
                 in_cpu = in_cpus && depth == 3 && starts_with(name, "cpu@");
                 if (depth == 2) { node_gic = 0; node_regs = 0; }
+                in_psci = depth == 2 && same(name, "psci");
             } else if (tok == 2) {
                 if (depth == 2) {
                     in_cpus = 0;
@@ -146,6 +149,7 @@ static void read_memory(const uint8_t *dtb) {
                 depth--;
                 in_mem = 0;
                 in_cpu = 0;
+                in_psci = 0;
             } else if (tok == 3) {
                 uint32_t len = be32(st), off = be32(st + 4);
                 const uint8_t *data = st + 8;
@@ -153,6 +157,7 @@ static void read_memory(const uint8_t *dtb) {
                 st += 8 + ((len + 3) & ~3u);
                 if (depth == 1 && same(pname, "#address-cells")) ac = be32(data);
                 else if (depth == 1 && same(pname, "#size-cells")) sc = be32(data);
+                else if (in_psci && same(pname, "method")) psci_smc = same((const char *)data, "smc");
                 else if (depth == 2 && same(pname, "compatible")) {
                     for (uint32_t o = 0; o < len; ) {
                         const char *c = (const char *)data + o;
@@ -343,13 +348,22 @@ static void (*volatile work_fn)(void *);
 static void *volatile work_arg;
 static volatile uint64_t work_gen, work_done;
 
-static int64_t psci_cpu_on(uint64_t mpidr, uint64_t entry, uint64_t ctx) {
-    register uint64_t x0 __asm__("x0") = 0xC4000003ull;     /* CPU_ON, 64-bit */
-    register uint64_t x1 __asm__("x1") = mpidr;
-    register uint64_t x2 __asm__("x2") = entry;
-    register uint64_t x3 __asm__("x3") = ctx;
-    __asm__ volatile ("hvc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3) : "memory");
+/* A PSCI call through the conduit the device tree names (hvc on QEMU virt
+ * booted at EL1, smc when the machine has EL2 or EL3 firmware). */
+static int64_t psci_call(uint64_t fn, uint64_t a, uint64_t b, uint64_t c) {
+    register uint64_t x0 __asm__("x0") = fn;
+    register uint64_t x1 __asm__("x1") = a;
+    register uint64_t x2 __asm__("x2") = b;
+    register uint64_t x3 __asm__("x3") = c;
+    if (psci_smc) __asm__ volatile ("smc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3) : "memory");
+    else __asm__ volatile ("hvc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3) : "memory");
     return (int64_t)x0;
+}
+static int64_t psci_cpu_on(uint64_t mpidr, uint64_t entry, uint64_t ctx) {
+    return psci_call(0xC4000003ull, mpidr, entry, ctx);          /* CPU_ON, 64-bit */
+}
+void bst_psci_system_off(void) {
+    psci_call(0x84000008ull, 0, 0, 0);                           /* SYSTEM_OFF */
 }
 
 /* Called by boot.S on the boot processor once the MMU and the interrupt
