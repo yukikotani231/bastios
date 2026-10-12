@@ -92,6 +92,7 @@ const ARCH_GET_CPUID: u64 = 0x1011;
 const ARCH_SET_CPUID: u64 = 0x1012;
 const IOV_MAX: u64 = 1024;
 const EISDIR: u64 = 18446744073709551595;     // 2^64 - 21
+const EOVERFLOW: u64 = 18446744073709551541;  // 2^64 - 75
 const ESRCH: u64 = 18446744073709551613;      // 2^64 - 3
 const ENXIO: u64 = 18446744073709551610;      // 2^64 - 6
 const TOTAL_MAX: u64 = 0x100000000000;      // more than writev can move in the window

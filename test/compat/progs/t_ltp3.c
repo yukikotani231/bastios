@@ -186,6 +186,40 @@ int main(void) {
         if (a != MAP_FAILED) munmap(a, 3 * 4096);
     }
 
+    {
+        mkdir("l3_ren", 0755);
+        mkdir("l3_ren/sub", 0755);
+        EXPECT("rename of a directory into itself is EINVAL",
+               rename("l3_ren", "l3_ren/sub/in") == -1 && errno == EINVAL);
+        EXPECT("umount of a name that does not exist is ENOENT",
+               umount("l3_nonexistent") == -1 && errno == ENOENT);
+        int cs = open("l3_cfr", O_CREAT | O_RDWR | O_TRUNC, 0644);
+        int cd = open("l3_ren", O_RDONLY | O_DIRECTORY);
+        int ca = open("l3_cfr2", O_CREAT | O_WRONLY | O_APPEND | O_TRUNC, 0644);
+        off_t off = 0;
+        if (cs >= 0 && write(cs, "0123456789abcdef", 16) == 16) lseek(cs, 0, SEEK_SET);
+        EXPECT("copy_file_range into a directory is EISDIR",
+               cs >= 0 && copy_file_range(cs, NULL, cd, &off, 16, 0) == -1 && errno == EISDIR);
+        EXPECT("copy_file_range into an O_APPEND file is EBADF",
+               ca >= 0 && copy_file_range(cs, NULL, ca, &off, 16, 0) == -1 && errno == EBADF);
+        off = 0x7fffffffffffffffLL;
+        EXPECT("copy_file_range past the largest file is EFBIG",
+               copy_file_range(cs, NULL, cs, &off, 8, 0) == -1 && errno == EFBIG);
+        off = 0x7fffffffffffffffLL;
+        EXPECT("and a length that wraps is EOVERFLOW",
+               copy_file_range(cs, NULL, cs, &off, ~0ULL, 0) == -1 && errno == EOVERFLOW);
+        off = 4;
+        EXPECT("copy_file_range of overlapping ranges in one file is EINVAL",
+               copy_file_range(cs, NULL, cs, &off, 8, 0) == -1 && errno == EINVAL);
+        if (cs >= 0) close(cs);
+        if (cd >= 0) close(cd);
+        if (ca >= 0) close(ca);
+        unlink("l3_cfr");
+        unlink("l3_cfr2");
+        rmdir("l3_ren/sub");
+        rmdir("l3_ren");
+    }
+
     unlink("l3_d/f2");
     unlink("l3_link");
     rmdir("l3_d");
