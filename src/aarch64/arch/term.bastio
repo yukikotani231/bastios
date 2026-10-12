@@ -1,0 +1,3 @@
+// The AArch64 console has no device type of its own: the serial line is the
+// kernel entry point's `Serial` capability, which main uses directly
+// (a capability passed by reference cannot be kept in a struct).

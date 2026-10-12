@@ -17,12 +17,12 @@
 // /dev/input/mice (src/lxmouse.bastio). A byte that cannot start a packet
 // (bit 3 clear) is dropped, so a lost byte costs a packet, not the stream.
 
+import "blkconst.bastio";
 const KBD_DATA: u64 = 0x60;
 const KBD_STATUS: u64 = 0x64;
 const KST_FULL: u64 = 1;              // a byte is waiting
 const KST_AUX: u64 = 32;              // ... and it is from the mouse
 const KST_BUSY: u64 = 2;              // the controller has not taken the last byte written
-const MOUSE_PKT: u64 = 0x100000000;   // kbd_poll's answer for a mouse packet: MOUSE_PKT + b0 * 2^24 + x * 65536 + y * 256 + wheel
 const AUX_SPINS: u64 = 100000;
 
 struct Kbd { data: PortIo, status: PortIo, shift: bool, ctrl: bool, ext: bool, present: bool,

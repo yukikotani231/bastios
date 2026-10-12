@@ -13,7 +13,10 @@
 // through its I/O thread, so a run of blocks read ahead costs one trip.
 
 import "virtq.bastio";
+import "vt.bastio";
 import "bio.bastio";
+import "blkconst.bastio";
+import "core/endian.bastio";
 
 const VIRTIO_BLK: u64 = 0x1001;       // legacy (transitional) block device id
 const VIO_CAPACITY: u64 = 0x14;       // 64 bits: the size in 512-byte sectors
@@ -26,7 +29,6 @@ const REQ_STATUS: u64 = 16;
 const REQ_DATA: u64 = 512;
 const VIO_SECTOR: u64 = 512;
 const VIO_BLOCK: u64 = 4096;
-const VIO_BATCH: u64 = 8;             // blocks one read request takes at most
 
 /// A data page for the blocks after the first of a batched read.
 enum Extra {
@@ -95,7 +97,7 @@ fn virtio_new(io: Vt, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, ext
 
 /// Resets the device, so it stops using the pages, takes them back into
 /// the allocator and gives the ports or registers back (at power off).
-fn virtio_free(ports: &mut Ports, win: &mut MmioSpace, v: Virtio, m: &mut Mem)
+fn virtio_free(v: Virtio, m: &mut Mem) -> Vt
   requires virtio_ok(v) && mem_ok(m)
   ensures mem_ok(m)
 {
@@ -113,7 +115,7 @@ fn virtio_free(ports: &mut Ports, win: &mut MmioSpace, v: Virtio, m: &mut Mem)
     }
   }
   vec_free(d.extra);
-  vt_release(&mut ports, &mut win, d.io);
+  return d.io;
 }
 
 /// Lends page f to the device as extra data page `i`, or gives it back
@@ -221,7 +223,7 @@ fn virtio_read_block(v: &mut Virtio, lba: u64, out: &mut Bytes, at: u64) -> bool
   while i < VIO_BLOCK
     invariant i <= VIO_BLOCK && i % 8 == 0 && virtio_ok(v) && v.sectors == sz && blen(out) == l && at + VIO_BLOCK <= l
   {
-    put_u64(&mut out, at + i, dma_read64(&mut v.data, i));
+    store_le64(&mut out, at + i, dma_read64(&mut v.data, i));
     i = i + 8;
   }
   return true;
@@ -240,7 +242,7 @@ fn virtio_write_block(v: &mut Virtio, lba: u64, src: &Bytes, at: u64) -> bool
   while i < VIO_BLOCK
     invariant i <= VIO_BLOCK && i % 8 == 0 && virtio_ok(v) && v.sectors == sz
   {
-    dma_write64(&mut v.data, i, get_u64(src, at + i));
+    dma_write64(&mut v.data, i, load_le64(src, at + i));
     i = i + 8;
   }
   virtio_header(&mut v, BLK_OUT, lba);

@@ -1,0 +1,16 @@
+// Where devices may lie on AArch64. The device window starts at 0 here and
+// the kernel image and the page pool's RAM are excluded by the platform
+// (docs/language.md, MmioSpace). QEMU's virt machine puts its devices in
+// the first GiB, below RAM at 0x40000000; nothing is claimed above that.
+const WIN_LO: u64 = 0;
+const WIN_LOW_TOP: u64 = 0x40000000;
+const WIN_HIGH: u64 = 0x40000000;
+const WIN_TOP: u64 = 0x40000000;
+
+spec fn bar_space(a: u64) -> bool {
+  WIN_LO <= a && a < WIN_LOW_TOP
+}
+
+// Where the virtio-mmio slots are by default (QEMU virt: 32 devices from here, 0x200 apart).
+const VM_SLOT0: u64 = 0x0a000000;
+const VM_SLOTS: u64 = 32;

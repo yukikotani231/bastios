@@ -7,6 +7,7 @@ import "space.bastio";
 import "proc.bastio";
 import "fs.bastio";
 import "usermem.bastio";
+import "smaller.bastio";
 
 const SYS_EXIT: u64 = 0;
 const SYS_WRITE: u64 = 1;
@@ -197,15 +198,6 @@ fn w_matches(l3: &mut PageTable, off: u64, n: u64, name: Str) -> bool
 // Each of these returns NO_RESULT on failure. A transfer moves at most XFER
 // bytes per call, through the kernel buffer k.fs.xfer.
 
-fn smaller(a: u64, b: u64) -> u64
-  ensures result <= a && result <= b
-{
-  if a < b {
-    return a;
-  }
-  return b;
-}
-
 /// Copies the name at user address va (n bytes) into the transfer buffer.
 fn name_in(k: &mut Kernel, pid: u64, va: u64, n: u64) -> bool
   requires kok(k) && pid < NPROC
@@ -297,7 +289,7 @@ fn disk_wake(k: &mut Kernel) -> bool
       if dead || (w >= RETRY_BIT && w - RETRY_BIT != moved) || (w < RETRY_BIT && done >= w) {
         if dead && w < RETRY_BIT && w > good {
           // Its write never reached the disk: it fails after all.
-          pset(&mut k.procs, p, F_REGS + R_RAX, pget(k.procs, p, F_CODE));
+          pset(&mut k.procs, p, reg_word(R_RET), pget(k.procs, p, F_CODE));
         }
         pset(&mut k.procs, p, F_STATE, READY);
         woke = true;
@@ -728,7 +720,7 @@ fn ret(procs: &mut Buf, pid: u64, v: u64)
   requires ptab_ok(procs) && pid < NPROC
   ensures ptab_ok(procs)
 {
-  pset(&mut procs, pid, F_REGS + R_RAX, v);
+  pset(&mut procs, pid, reg_word(R_RET), v);
 }
 
 fn do_wait(procs: &mut Buf, pid: u64, c: u64) -> u64
@@ -770,10 +762,10 @@ fn syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k) && con_ok(con)
 {
-  let n = pget(k.procs, pid, F_REGS + R_RAX);
-  let a = pget(k.procs, pid, F_REGS + R_RDI);
-  let b = pget(k.procs, pid, F_REGS + R_RSI);
-  let c = pget(k.procs, pid, F_REGS + R_RDX);
+  let n = pget(k.procs, pid, reg_word(R_NUM));
+  let a = pget(k.procs, pid, reg_word(R_ARG0));
+  let b = pget(k.procs, pid, reg_word(R_ARG1));
+  let c = pget(k.procs, pid, reg_word(R_ARG2));
   if n == SYS_EXIT {
     terminate(&mut k, mmu, pid, a);
     return SWITCH;
