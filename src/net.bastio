@@ -1659,6 +1659,25 @@ fn ena_start(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, fb_lo: u6
   return net_up(Card::Ena(ena_new(regs, rev % 2 == 0, f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10)));
 }
 
+/// A virtio network card over the transport `io`, given the nine pages
+/// from page `at` on.
+fn virtio_nic_start(m: &mut Mem, at: u64, io: Vt, msix: bool) -> Nic
+  requires mem_ok(m) && vt_ok(io) && at + NET_PAGES <= NPAGES && at + NET_PAGES <= len(m.bm)
+  requires forall i: u64 :: at <= i && i < at + NET_PAGES ==> get(m.bm, i) == 1
+  ensures nic_ok(result) && mem_ok(m)
+{
+  let q0 = take_low_page(&mut m, at);
+  let q1 = take_low_page(&mut m, at + 1);
+  let q2 = take_low_page(&mut m, at + 2);
+  let t0 = take_low_page(&mut m, at + 3);
+  let t1 = take_low_page(&mut m, at + 4);
+  let t2 = take_low_page(&mut m, at + 5);
+  let b0 = take_low_page(&mut m, at + 6);
+  let b1 = take_low_page(&mut m, at + 7);
+  let b2 = take_low_page(&mut m, at + 8);
+  return net_up(Card::Virtio(vnet_new(io, q0, q1, q2, t0, t1, t2, b0, b1, b2, msix)));
+}
+
 /// Starts the network card: the first virtio card on PCI if its
 /// ports do not overlap avoid_lo .. avoid_hi or plo .. phi (another
 /// driver's, and the ACPI registers), else the
@@ -1698,16 +1717,13 @@ fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, a
         msix = true;
       }
     }
-    let q0 = take_low_page(&mut m, at);
-    let q1 = take_low_page(&mut m, at + 1);
-    let q2 = take_low_page(&mut m, at + 2);
-    let t0 = take_low_page(&mut m, at + 3);
-    let t1 = take_low_page(&mut m, at + 4);
-    let t2 = take_low_page(&mut m, at + 5);
-    let b0 = take_low_page(&mut m, at + 6);
-    let b1 = take_low_page(&mut m, at + 7);
-    let b2 = take_low_page(&mut m, at + 8);
-    return net_up(Card::Virtio(vnet_new(&mut ports, base, q0, q1, q2, t0, t1, t2, b0, b1, b2, msix)));
+    return virtio_nic_start(&mut m, at, Vt::Port(port_claim(&mut ports, base, VIO_PORTS)), msix);
+  }
+  if pci_absent(&mut pci) && pages_free(m, at, NET_PAGES) {
+    match vm_find(&mut win, VM_ID_NET, VM_SLOT0, VM_SLOTS, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi, sn_lo, sn_hi) {
+      VmFound::Found(d) => { return virtio_nic_start(&mut m, at, Vt::Mem(d), false); },
+      VmFound::None => {},
+    }
   }
   let e = e1k_find(&mut pci);
   if e == PCI_NONE {

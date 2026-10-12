@@ -11,6 +11,7 @@ import "pages.bastio";
 import "ata.bastio";
 import "pci.bastio";
 import "virtio_blk.bastio";
+import "virtio_mmio.bastio";
 import "nvme.bastio";
 import "ahci.bastio";
 import "lapic.bastio";
@@ -27,7 +28,7 @@ enum Drive { None, Nvme(Nvme), Ahci(Ahci) }
 
 /// Does the disk driver hold I/O port k in the PCI range?
 spec fn blk_holds(b: &Blk, k: u64) -> bool {
-  b is Blk::Virtio && port_base(b.Virtio.io) <= k && k < port_base(b.Virtio.io) + VIO_PORTS
+  b is Blk::Virtio && vt_holds(b.Virtio.io, k)
 }
 
 spec fn blk_ok(b: &Blk) -> bool {
@@ -39,7 +40,8 @@ spec fn blk_ok(b: &Blk) -> bool {
 
 /// Does the disk driver hold device-window address a?
 spec fn blk_claims(b: &Blk, a: u64) -> bool {
-  (b is Blk::Nvme && mmio_base(b.Nvme.regs) <= a && a < mmio_base(b.Nvme.regs) + mmio_len(b.Nvme.regs))
+  (b is Blk::Virtio && vt_claims(b.Virtio.io, a))
+  || (b is Blk::Nvme && mmio_base(b.Nvme.regs) <= a && a < mmio_base(b.Nvme.regs) + mmio_len(b.Nvme.regs))
   || (b is Blk::Ahci && mmio_base(b.Ahci.regs) <= a && a < mmio_base(b.Ahci.regs) + mmio_len(b.Ahci.regs))
 }
 
@@ -197,6 +199,81 @@ fn virtio_msix(pci: &mut Pci, win: &mut MmioSpace, dev: u64, lo: u64, hi: u64, l
   return true;
 }
 
+/// A virtio block device over the transport `io`, given the four lowest
+/// pages for its queue and request and page 31 for block data, and the
+/// extra data pages of batched reads (virtio_begin_n): free pages from the
+/// top of the pool down, so the low pages other drivers take by number
+/// (the NIC's, after this) stay free. Pages the device cannot reach, or
+/// none, only make the batches shorter.
+fn virtio_blk_start(m: &mut Mem, io: Vt, msix: bool) -> Blk
+  requires mem_ok(m) && vt_ok(io)
+  requires get(m.bm, 0) == 1 && get(m.bm, 1) == 1 && get(m.bm, 2) == 1 && get(m.bm, 3) == 1 && get(m.bm, VIRTIO_DATA_AT) == 1
+  ensures mem_ok(m) && result is Blk::Virtio && blk_ok(result)
+  ensures forall k: u64 :: blk_holds(result, k) == old(vt_holds(io, k))
+  ensures forall a: u64 :: blk_claims(result, a) == old(vt_claims(io, a))
+{
+  let f0 = take_low_page(&mut m, 0);
+  let f1 = take_low_page(&mut m, 1);
+  let f2 = take_low_page(&mut m, 2);
+  let f3 = take_low_page(&mut m, 3);
+  let f4 = take_low_page(&mut m, VIRTIO_DATA_AT);
+  let mut extra = vec_new[Extra]();
+  let mut pages = 0;
+  let mut more = true;
+  let mut top = len(m.bm);
+  while vec_len(extra) < VIO_BATCH - 1
+    invariant mem_ok(m) && vlen(extra) < VIO_BATCH && pages <= vlen(extra) && top <= len(m.bm)
+  {
+    let mut a = NPAGES;
+    while top > 0 && a == NPAGES
+      invariant mem_ok(m) && top <= len(m.bm) && (a == NPAGES || (a < len(m.bm) && get(m.bm, a) == 1))
+    {
+      top = top - 1;
+      if get(m.bm, top) == 1 {
+        a = top;
+      }
+    }
+    if more && a < NPAGES {
+      let x = virtio_extra(&mut m, take_low_page(&mut m, a));
+      match x {
+        Extra::None => {
+          more = false;
+          vec_push(&mut extra, Extra::None);
+        },
+        Extra::Page(d) => {
+          vec_push(&mut extra, Extra::Page(d));
+          pages = pages + 1;
+        },
+      }
+    } else {
+      more = false;
+      vec_push(&mut extra, Extra::None);
+    }
+  }
+  return Blk::Virtio(virtio_new(io, f0, f1, f2, f3, f4, extra, pages, msix));
+}
+
+enum Vblk { Nothing, Some(Blk) }
+
+/// A virtio block device on the memory-mapped transport, if the machine
+/// has one clear of lo .. hi and lo2 .. hi2 (see `vm_find`).
+fn virtio_blk_mmio(m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64) -> Vblk
+  requires mem_ok(m)
+  requires get(m.bm, 0) == 1 && get(m.bm, 1) == 1 && get(m.bm, 2) == 1 && get(m.bm, 3) == 1 && get(m.bm, VIRTIO_DATA_AT) == 1
+  requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) ==> mmio_free(win, a)
+  ensures mem_ok(m) && (result is Vblk::Some ==> blk_ok(result.Some) && result.Some is Blk::Virtio)
+  ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2)
+    && !(result is Vblk::Some && blk_claims(result.Some, a)) ==> mmio_free(win, a)
+  ensures forall k: u64 :: !(result is Vblk::Some && blk_holds(result.Some, k))
+{
+  match vm_find(&mut win, VM_ID_BLK, VM_SLOT0, VM_SLOTS, lo, hi, lo2, hi2, 0, 0, 0, 0) {
+    VmFound::Found(d) => {
+      return Vblk::Some(virtio_blk_start(&mut m, Vt::Mem(d), false));
+    },
+    VmFound::None => { return Vblk::Nothing; },
+  }
+}
+
 /// Picks the disk, from devices clear of lo .. hi and lo2 .. hi2 in the
 /// device window: an NVMe drive (see `nvme_find`), else the first virtio
 /// block device on PCI, given the four lowest pages for its queue and
@@ -227,49 +304,14 @@ fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, l
       && get(m.bm, VIRTIO_DATA_AT) == 1 {
       pci_enable(&mut pci, dev);
       let msix = virtio_msix(&mut pci, &mut win, dev, lo, hi, lo2, hi2, msi);
-      let f0 = take_low_page(&mut m, 0);
-      let f1 = take_low_page(&mut m, 1);
-      let f2 = take_low_page(&mut m, 2);
-      let f3 = take_low_page(&mut m, 3);
-      let f4 = take_low_page(&mut m, VIRTIO_DATA_AT);
-      // The data pages of batched reads (virtio_begin_n): free pages from
-      // the top of the pool down, so the low pages other drivers take by
-      // number (the NIC's, after this) stay free. Pages the device cannot
-      // reach, or none, only make the batches shorter.
-      let mut extra = vec_new[Extra]();
-      let mut pages = 0;
-      let mut more = true;
-      let mut top = len(m.bm);
-      while vec_len(extra) < VIO_BATCH - 1
-        invariant mem_ok(m) && vlen(extra) < VIO_BATCH && pages <= vlen(extra) && top <= len(m.bm)
-      {
-        let mut a = NPAGES;
-        while top > 0 && a == NPAGES
-          invariant mem_ok(m) && top <= len(m.bm) && (a == NPAGES || (a < len(m.bm) && get(m.bm, a) == 1))
-        {
-          top = top - 1;
-          if get(m.bm, top) == 1 {
-            a = top;
-          }
-        }
-        if more && a < NPAGES {
-          let x = virtio_extra(&mut m, take_low_page(&mut m, a));
-          match x {
-            Extra::None => {
-              more = false;
-              vec_push(&mut extra, Extra::None);
-            },
-            Extra::Page(d) => {
-              vec_push(&mut extra, Extra::Page(d));
-              pages = pages + 1;
-            },
-          }
-        } else {
-          more = false;
-          vec_push(&mut extra, Extra::None);
-        }
-      }
-      return Blk::Virtio(virtio_new(&mut ports, base, f0, f1, f2, f3, f4, extra, pages, msix));
+      return virtio_blk_start(&mut m, Vt::Port(port_claim(&mut ports, base, VIO_PORTS)), msix);
+    }
+  }
+  if pci_absent(&mut pci) && get(m.bm, 0) == 1 && get(m.bm, 1) == 1 && get(m.bm, 2) == 1 && get(m.bm, 3) == 1
+    && get(m.bm, VIRTIO_DATA_AT) == 1 {
+    match virtio_blk_mmio(&mut m, &mut win, lo, hi, lo2, hi2) {
+      Vblk::Some(b) => { return b; },
+      Vblk::Nothing => {},
     }
   }
   let sd = ahci_find(&mut pci, &mut m, &mut win, lo, hi, lo2, hi2, msi, reset);
@@ -331,7 +373,7 @@ fn blk_free(ports: &mut Ports, win: &mut MmioSpace, b: Blk, m: &mut Mem)
 {
   match b {
     Blk::Ata(a) => { ata_free(&mut ports, a); },
-    Blk::Virtio(v) => { virtio_free(&mut ports, v, &mut m); },
+    Blk::Virtio(v) => { virtio_free(&mut ports, &mut win, v, &mut m); },
     Blk::Nvme(n) => { mmio_release(&mut win, nvme_free(n, &mut m)); },
     Blk::Ahci(h) => { mmio_release(&mut win, ahci_free(h, &mut m)); },
     Blk::Usb(x) => { mmio_release(&mut win, xhci_free(x, &mut m)); },
@@ -344,12 +386,13 @@ fn blk_free(ports: &mut Ports, win: &mut MmioSpace, b: Blk, m: &mut Mem)
 fn blk_mmio_lo(b: &Blk) -> u64
   ensures b is Blk::Nvme ==> result == mmio_base(b.Nvme.regs)
   ensures b is Blk::Ahci ==> result == mmio_base(b.Ahci.regs)
+  ensures b is Blk::Virtio && b.Virtio.io is Vt::Mem ==> result == mmio_base(b.Virtio.io.Mem.regs)
 {
   match b {
     Blk::Nvme(n) => { return mmio_base(n.regs); },
     Blk::Ahci(h) => { return mmio_base(h.regs); },
     Blk::Ata(a) => { return 0; },
-    Blk::Virtio(v) => { return 0; },
+    Blk::Virtio(v) => { return vt_mmio_lo(v.io); },
     Blk::Usb(x) => { return 0; },
     Blk::Loop(l) => { return 0; },
   }
@@ -358,13 +401,14 @@ fn blk_mmio_lo(b: &Blk) -> u64
 fn blk_mmio_hi(b: &Blk) -> u64
   ensures b is Blk::Nvme ==> result == mmio_base(b.Nvme.regs) + mmio_len(b.Nvme.regs)
   ensures b is Blk::Ahci ==> result == mmio_base(b.Ahci.regs) + mmio_len(b.Ahci.regs)
-  ensures !(b is Blk::Nvme) && !(b is Blk::Ahci) ==> result == 0
+  ensures b is Blk::Virtio && b.Virtio.io is Vt::Mem ==> result == mmio_base(b.Virtio.io.Mem.regs) + mmio_len(b.Virtio.io.Mem.regs)
+  ensures !(b is Blk::Nvme) && !(b is Blk::Ahci) && !(b is Blk::Virtio && b.Virtio.io is Vt::Mem) ==> result == 0
 {
   match b {
     Blk::Nvme(n) => { return mmio_base(n.regs) + mmio_len(n.regs); },
     Blk::Ahci(h) => { return mmio_base(h.regs) + mmio_len(h.regs); },
     Blk::Ata(a) => { return 0; },
-    Blk::Virtio(v) => { return 0; },
+    Blk::Virtio(v) => { return vt_mmio_hi(v.io); },
     Blk::Usb(x) => { return 0; },
     Blk::Loop(l) => { return 0; },
   }
@@ -372,12 +416,12 @@ fn blk_mmio_hi(b: &Blk) -> u64
 
 /// The PCI-range ports the disk driver holds, as lo .. hi (empty for ATA).
 fn blk_ports_lo(b: &Blk) -> u64
-  ensures b is Blk::Virtio ==> result == port_base(b.Virtio.io)
-  ensures !(b is Blk::Virtio) ==> result == 0
+  ensures b is Blk::Virtio && b.Virtio.io is Vt::Port ==> result == port_base(b.Virtio.io.Port)
+  ensures !(b is Blk::Virtio && b.Virtio.io is Vt::Port) ==> result == 0
 {
   match b {
     Blk::Ata(a) => { return 0; },
-    Blk::Virtio(v) => { return port_base(v.io); },
+    Blk::Virtio(v) => { return vt_port_lo(v.io); },
     Blk::Nvme(n) => { return 0; },
     Blk::Ahci(h) => { return 0; },
     Blk::Usb(x) => { return 0; },
@@ -386,12 +430,12 @@ fn blk_ports_lo(b: &Blk) -> u64
 }
 
 fn blk_ports_hi(b: &Blk) -> u64
-  ensures b is Blk::Virtio ==> result == port_base(b.Virtio.io) + VIO_PORTS
-  ensures !(b is Blk::Virtio) ==> result == 0
+  ensures b is Blk::Virtio && b.Virtio.io is Vt::Port ==> result == port_base(b.Virtio.io.Port) + VIO_PORTS
+  ensures !(b is Blk::Virtio && b.Virtio.io is Vt::Port) ==> result == 0
 {
   match b {
     Blk::Ata(a) => { return 0; },
-    Blk::Virtio(v) => { return port_base(v.io) + VIO_PORTS; },
+    Blk::Virtio(v) => { return vt_port_hi(v.io); },
     Blk::Nvme(n) => { return 0; },
     Blk::Ahci(h) => { return 0; },
     Blk::Usb(x) => { return 0; },
