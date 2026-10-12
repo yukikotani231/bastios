@@ -20,7 +20,8 @@ import "net.bastio";
 // TCBS and TCB_W are in net.bastio, which sizes the table; the buffers
 // (TCP_RING bytes each way) are rings of pages, in src/tcpbuf.bastio.
 
-const TCP_MSS: u64 = 1460;            // the largest segment we send or ask for
+const TCP_MSS: u64 = 1460;            // the largest segment we send to or ask of another machine
+const TCP_MSS_LO: u64 = 14946;        // ... and to an address of this one: a frame of NET_BUF bytes
 const TCP_WS: u64 = 4;                // our window scale (RFC 7323): TCP_RING fits in 16 bits after it
 const TCP_BURST: u64 = 16;            // segments one tcp_output sends at most
 const TCP_RTO: u64 = 100;             // ticks before the first resend (1 s); doubles on each
@@ -157,6 +158,18 @@ fn tnxt(n: &mut Net, t: u64, v: u64)
 
 // ---------------------------------------------------------------- segments out
 
+/// The largest segment to send to `ip`, and the MSS to tell it: a card's
+/// frames, or the loopback buffer's if `ip` is an address of this machine.
+fn mss_for(n: &Net, ip: u64) -> u64
+  requires net_ok(n)
+  ensures result == TCP_MSS || result == TCP_MSS_LO
+{
+  if is_local(n, ip) {
+    return TCP_MSS_LO;
+  }
+  return TCP_MSS;
+}
+
 /// Sends a segment on connection t: flags, sequence number `seq`, and `dl`
 /// bytes of the send ring from `off` bytes past W_UNA. A SYN carries our
 /// MSS, and our window scale and SACK-permitted when we open or the peer
@@ -164,7 +177,7 @@ fn tnxt(n: &mut Net, t: u64, v: u64)
 /// past a gap, if the peer takes them and there is room.
 fn tcp_emit(n: &mut Net, t: u64, flags: u64, seq: u64, off: u64, dl: u64)
   requires net_ok(n) && t < TCBS && flags <= 255 && seq < SEQ_MOD
-  requires off + dl <= TCP_RING && dl <= TCP_MSS
+  requires off + dl <= TCP_RING && dl <= TCP_MSS_LO
   ensures net_ok(n)
 {
   let rip = tw(n, t, W_RIP);
@@ -195,7 +208,7 @@ fn tcp_emit(n: &mut Net, t: u64, flags: u64, seq: u64, off: u64, dl: u64)
     hl = 32;
   }
   let tlen = hl + dl;
-  if 20 + tlen > FRAME_MAX - 14 {
+  if 20 + tlen > NET_BUF - 14 || (20 + tlen > FRAME_MAX - 14 && !is_local(n, rip)) {
     return;                           // a SYN never carries data
   }
   // The window: unscaled in a SYN (RFC 7323), scaled once both sides do.
@@ -219,7 +232,7 @@ fn tcp_emit(n: &mut Net, t: u64, flags: u64, seq: u64, off: u64, dl: u64)
   if syn {
     bset(&mut n.out, 54, 2);          // MSS
     bset(&mut n.out, 55, 4);
-    put16(&mut n.out, 56, TCP_MSS);
+    put16(&mut n.out, 56, mss_for(n, rip));
     let mut o = 58;
     if o_ws {
       put32(&mut n.out, o, 0x01030300 + TCP_WS);           // NOP, window scale
@@ -294,8 +307,8 @@ fn tcp_output(n: &mut Net, t: u64, want_ack: bool)
     off = txlen;                      // our FIN is out: no more data
   }
   let mut mss = tw(n, t, W_MSS);
-  if mss == 0 || mss > TCP_MSS {
-    mss = TCP_MSS;
+  if mss == 0 || mss > mss_for(n, rip) {
+    mss = mss_for(n, rip);
   }
   let mut sent = false;
   let mut segs = 0;
@@ -343,7 +356,7 @@ fn tcp_output(n: &mut Net, t: u64, want_ack: bool)
 /// Answers a segment no connection wants with a reset, straight back to
 /// the MAC it came from (`dlen`: its data length, `flags`: its flags).
 fn tcp_refuse(n: &mut Net, flags: u64, dlen: u64)
-  requires net_ok(n) && dlen <= FRAME_MAX
+  requires net_ok(n) && dlen <= NET_BUF
   ensures net_ok(n)
 {
   if flags % 8 >= TF_RST {
@@ -604,7 +617,7 @@ fn tcp_opt(n: &Net, hl: u64, kind: u64, len: u64) -> u64
 /// of its TCP header.
 fn tcp_mss_opt(n: &Net, hl: u64) -> u64
   requires net_ok(n) && 20 <= hl && 34 + hl <= FRAME_MAX
-  ensures 64 <= result && result <= TCP_MSS
+  ensures 64 <= result && result <= TCP_MSS_LO
 {
   let o = tcp_opt(n, hl, 2, 4);
   if o == 0 {
@@ -614,8 +627,8 @@ fn tcp_mss_opt(n: &Net, hl: u64) -> u64
   if mss < 64 {
     return 64;
   }
-  if mss > TCP_MSS {
-    return TCP_MSS;
+  if mss > TCP_MSS_LO {
+    return TCP_MSS_LO;
   }
   return mss;
 }
@@ -678,7 +691,7 @@ fn tcp_accept_syn(n: &mut Net, lis: u64, seq: u64, hl: u64)
 
 /// A TCP segment for us (total: the IP length, checked against the frame).
 fn tcp_in(n: &mut Net, total: u64)
-  requires net_ok(n) && 28 <= total && total <= FRAME_MAX - 14
+  requires net_ok(n) && 28 <= total && total <= NET_BUF - 14
   ensures net_ok(n)
 {
   if total < 40 {
@@ -830,7 +843,7 @@ fn tcp_in(n: &mut Net, total: u64)
 /// the stretch already held (or none is). Anything else is dropped, and
 /// the peer sends it again.
 fn tcp_hold(n: &mut Net, t: u64, ahead: u64, doff: u64, dl: u64)
-  requires net_ok(n) && t < TCBS && doff + dl <= FRAME_MAX
+  requires net_ok(n) && t < TCBS && doff + dl <= NET_BUF
   ensures net_ok(n)
 {
   let rxlen = twb(n, t, W_RXLEN, TCP_RING + 1);

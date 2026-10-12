@@ -6,6 +6,10 @@
  *   mtcp get A.B.C.D PORT TEXT
  *                          connect, send TEXT and a newline, print what
  *                          comes back until the peer closes
+ *   mtcp loop BYTES        send BYTES of a counting pattern to ourselves over
+ *                          127.0.0.1 (a forked child writes, we read and
+ *                          check every byte): loopback segments are longer
+ *                          than a card's frames
  *   mtcp                   serve 7001; the line read names a port on
  *                          10.0.2.2 (QEMU's host) to get from next. The
  *                          BastiOS shell passes no arguments, so the test
@@ -117,8 +121,62 @@ static int get(const char *ip, int port, const char *text)
     return 0;
 }
 
+/* The pattern's byte at offset i. */
+static unsigned char pat(unsigned long i)
+{
+    return (unsigned char)(i * 7 + (i >> 8));
+}
+
+static int loop(unsigned long total)
+{
+    int l = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(9100) };
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (l < 0 || bind(l, (struct sockaddr *)&a, sizeof a) != 0 || listen(l, 1) != 0)
+        return fail("listen");
+    if (fork() == 0) {
+        int c = socket(AF_INET, SOCK_STREAM, 0);
+        if (c < 0 || connect(c, (struct sockaddr *)&a, sizeof a) != 0)
+            _exit(1);
+        static unsigned char buf[65536];
+        unsigned long at = 0;
+        while (at < total) {
+            size_t n = sizeof buf < total - at ? sizeof buf : total - at;
+            for (size_t i = 0; i < n; i++)
+                buf[i] = pat(at + i);
+            for (size_t off = 0; off < n;) {
+                ssize_t w = write(c, buf + off, n - off);
+                if (w <= 0)
+                    _exit(2);
+                off += w;
+            }
+            at += n;
+        }
+        _exit(0);
+    }
+    int s = accept(l, 0, 0);
+    if (s < 0)
+        return fail("accept");
+    static unsigned char in[65536];
+    unsigned long got = 0, bad = 0;
+    size_t longest = 0;
+    ssize_t r;
+    while ((r = read(s, in, sizeof in)) > 0) {
+        if ((size_t)r > longest)
+            longest = r;
+        for (ssize_t i = 0; i < r; i++)
+            if (in[i] != pat(got + i))
+                bad++;
+        got += r;
+    }
+    printf("mtcp: loop %lu bytes, %lu wrong\n", got, bad);
+    return got == total && bad == 0 ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 3 && strcmp(argv[1], "loop") == 0)
+        return loop(strtoul(argv[2], 0, 10));
     if (argc == 3 && strcmp(argv[1], "echo") == 0)
         return echo(atoi(argv[2]));
     if (argc == 3 && strcmp(argv[1], "serve") == 0)
@@ -130,6 +188,6 @@ int main(int argc, char **argv)
     }
     if (argc == 5 && strcmp(argv[1], "get") == 0)
         return get(argv[2], atoi(argv[3]), argv[4]);
-    printf("usage: mtcp serve PORT | mtcp echo PORT | mtcp get A.B.C.D PORT TEXT\n");
+    printf("usage: mtcp serve PORT | mtcp echo PORT | mtcp loop BYTES | mtcp get A.B.C.D PORT TEXT\n");
     return 2;
 }
