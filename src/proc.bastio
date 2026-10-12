@@ -585,7 +585,7 @@ const PN_N: u64 = 16;                 // PID namespaces besides the first
 const PN_W: u64 = 3;                  // id + 1 (0: free), the next id to give, 1 once its init has ended
 const UTS_N: u64 = 8;                 // UTS namespaces besides the first
 const UTS_W: u64 = 132;               // id + 1 (0: free), then the names as k.sys keeps them
-const MNS_KID: u64 = NPROC + 8 + MT_N * ME_W;   // [MNS_KID + kind * NPROC + pid]
+const MNS_KID: u64 = NPROC + 16 + MT_N * ME_W;   // [MNS_KID + kind * NPROC + pid]
 const MNS_KNEXT: u64 = MNS_KID + NSK_N * NPROC;
 const MNS_UTS: u64 = MNS_KNEXT + NSK_N;
 const MNS_PN: u64 = MNS_UTS + UTS_N * UTS_W;
@@ -609,7 +609,7 @@ const SC_INS: u64 = SC_SCR + SC_SCRN;
 const SC_POOL: u64 = 8192;               // instructions shared by all filters
 const SCF_LEN: u64 = SC_INS + SC_POOL + 1;   // and one word that always reads 0
 const MNS_LEN: u64 = MNS_SC + NPROC * SC_PW;
-const MSTR_LEN: u64 = 256 + MT_N * 512;   // the last lookup's logical path, then a key and a source per mount
+const MSTR_LEN: u64 = 256 + MT_N * 512 + 256;   // the last lookup's logical path, then a key and a source per mount, then a path kept by ovl_stash
 const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
 
 // Linux signal actions: per process, 64 signals of 4 words each (handler,
