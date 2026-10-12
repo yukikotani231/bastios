@@ -42,6 +42,7 @@
 // SIGSYS (si_syscall and si_arch).
 
 import "lxsig.bastio";
+import "scfmt.bastio";
 import "lxuser.bastio";
 
 const SC_PR_SET_SECCOMP: u64 = 22;
@@ -55,7 +56,6 @@ const SC_GET_ACTION: u64 = 2;
 const SC_FLAG_TSYNC: u64 = 1;
 const SC_FLAG_OK: u64 = 15;                // TSYNC, LOG, SPEC_ALLOW, NEW_LISTENER
 
-const SC_ARCH: u64 = 0xC000003E;           // AUDIT_ARCH_X86_64
 
 const SCA_KILL_PROCESS: u64 = 0x80000000;
 const SCA_KILL_THREAD: u64 = 0;
@@ -577,7 +577,7 @@ fn sc_action(k: &mut Kernel, pid: u64, nr: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k) && result <= 0xFFFFFFFF
 {
-  scr_put(&mut k, 0, (nr % 0x100000000) + SC_ARCH * 0x100000000);
+  scr_put(&mut k, 0, sc_number(k, pid, nr) + SC_ARCH * 0x100000000);
   scr_put(&mut k, 1, pget(k.procs, pid, F_REGS + R_RIP));
   scr_put(&mut k, 2, pget(k.procs, pid, F_REGS + R_RDI));
   scr_put(&mut k, 3, pget(k.procs, pid, F_REGS + R_RSI));
@@ -755,7 +755,7 @@ fn sc_ioctl(k: &mut Kernel, pid: u64, f: u64, nonblock: bool, req: u64, arg: u64
     }
     xfer_u64(&mut k.fs.xfer, 0, sp_get(k, q * SC_PW + SP_ID));
     xfer_u64(&mut k.fs.xfer, 8, vpid_of(k, pid, q) % 0x100000000);   // pid, then flags 0
-    xfer_u64(&mut k.fs.xfer, 16, pget(k.procs, q, F_REGS + R_LXNR) % 0x100000000 + SC_ARCH * 0x100000000);
+    xfer_u64(&mut k.fs.xfer, 16, sc_number(k, q, pget(k.procs, q, F_REGS + R_LXNR) % 0x100000000) + SC_ARCH * 0x100000000);
     xfer_u64(&mut k.fs.xfer, 24, wrap_add(pget(k.procs, q, F_REGS + R_RIP), SYSCALL_LEN));   // the call restarts: rip is back on the syscall
     xfer_u64(&mut k.fs.xfer, 32, pget(k.procs, q, F_REGS + R_RDI));
     xfer_u64(&mut k.fs.xfer, 40, pget(k.procs, q, F_REGS + R_RSI));

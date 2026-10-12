@@ -26,6 +26,7 @@
 import "lxcred.bastio";
 import "lxtime.bastio";
 import "lxrlimit.bastio";             // rl_cur, for SHM_LOCK
+import "ipcfmt.bastio";
 
 const LX_SEMGET: u64 = 64;
 const LX_SEMOP: u64 = 65;
@@ -123,7 +124,6 @@ const MQ_MSGS: u64 = 64;
 const MSG_HDR: u64 = 16;
 const MQ_CAP: u64 = 17408;             // MSGMNB + MQ_MSGS * MSG_HDR
 const MSQID_DS: u64 = 120;             // struct msqid64_ds
-const SEMID_DS: u64 = 104;             // struct semid64_ds
 
 // ---------------------------------------------------------------- headers
 
@@ -1118,13 +1118,16 @@ fn semid_out(k: &mut Kernel, pid: u64, slot: u64, va: u64) -> u64
   ensures kok(k)
 {
   perm_out(&mut k, KS, slot);
+  let mut at = 56;
+  while at + 8 <= SEMID_DS
+    invariant 56 <= at && at <= SEMID_DS + 8 && kok(k)
+  {
+    xput(&mut k, at, 0, 8);                 // the unused words
+    at = at + 8;
+  }
   xput(&mut k, 48, hget(k, KS, slot, H_STIME), 8);
-  xput(&mut k, 56, 0, 8);
-  xput(&mut k, 64, hget(k, KS, slot, H_CTIME), 8);
-  xput(&mut k, 72, 0, 8);
-  xput(&mut k, 80, sem_nsems(k, slot), 8);
-  xput(&mut k, 88, 0, 8);
-  xput(&mut k, 96, 0, 8);
+  xput(&mut k, SEM_CTIME_AT, hget(k, KS, slot, H_CTIME), 8);
+  xput(&mut k, SEM_NSEMS_AT, sem_nsems(k, slot), 8);
   return lx_put_out(&mut k, pid, va, SEMID_DS);
 }
 
