@@ -6,6 +6,9 @@
 //   /proc/meminfo           total and free memory, as sysinfo counts them
 //   /proc/uptime            seconds since boot
 //   /proc/cpuinfo           one block per running processor
+//   /proc/stat              cpu and cpuN times, btime, processes, procs_running
+//   /proc/modules           empty: there are no loadable modules
+//   /proc/net/dev           the interfaces of the reader's network namespace
 //   /proc/filesystems       the file system types mount names
 //   /proc/version           the release uname gives, as a Linux banner
 //   /proc/sys/kernel/tainted, pid_max, printk, and the System V IPC
@@ -68,6 +71,8 @@ const PF_SLACK: u64 = 12;
 const PF_LOADAVG: u64 = 13;           // with pid 0
 const PF_VERSION: u64 = 14;           // with pid 0
 const PF_CGROUP: u64 = 15;            // /proc/PID/cgroup
+const PF_MODULES: u64 = 6;            // with pid 0 (status has 6 for a process): /proc/modules
+const PF_NETDEV: u64 = 10;            // with pid 0: /proc/net/dev (maps has 10 for a process)
 const PSYS: u64 = 16 * NPROC;         // PROC_DEV + PSYS + SY_*: a /proc/sys file
 const SY_TAINTED: u64 = 1;
 const SY_PID_MAX: u64 = 2;
@@ -88,6 +93,7 @@ const CGF_N: u64 = 17;
 const NS_DIRS: u64 = 0x100;            // DIR_PROC + NS_DIRS + pid: /proc/PID/ns
 const FD_DIRS: u64 = 0x200;            // DIR_PROC + FD_DIRS + pid: /proc/PID/fd
 const TASK_DIRS: u64 = 0x300;          // DIR_PROC + TASK_DIRS + pid: /proc/PID/task
+const NET_DIR: u64 = 0x400;            // DIR_PROC + NET_DIR: /proc/net
 const LOOP_SYS: u64 = 8;               // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
@@ -350,6 +356,9 @@ fn proc_dir(procs: &Buf, x: &Bytes, n: u64) -> u64
   if n < 6 || !xfer_is(x, 0, 5, "proc/") {
     return NO_FILE;
   }
+  if n == 8 && xfer_is(x, 5, n, "net") {
+    return DIR_PROC + NET_DIR;
+  }
   let e = comp_end(x, 5, n);
   if e + 3 == n && xfer_is(x, e, n, "/ns") {
     let q = proc_pid(procs, x, 5, e);
@@ -429,10 +438,19 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
     if xfer_is(x, 5, n, "filesystems") {
       return PROC_DEV + PF_FILESYSTEMS;
     }
+    if xfer_is(x, 5, n, "stat") {
+      return PROC_DEV + PF_STAT;            // pid 0: the system's own
+    }
+    if xfer_is(x, 5, n, "modules") {
+      return PROC_DEV + PF_MODULES;
+    }
     if xfer_is(x, 5, n, "cmdline") {
       return PROC_DEV + PF_CMDLINE;         // pid 0: the kernel's command line
     }
     return 0;
+  }
+  if xfer_is(x, 5, n, "net/dev") {
+    return PROC_DEV + PF_NETDEV;
   }
   if xfer_is(x, 5, n, "sys/kernel/tainted") {
     return PROC_DEV + PSYS + SY_TAINTED;
@@ -633,6 +651,9 @@ fn proc_meta(f: u64) -> Meta {
 
 /// What stat says about /proc directory d (a proc_dir description).
 fn proc_dir_meta(d: u64) -> Meta {
+  if d == DIR_PROC + NET_DIR {
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 16384, mtime: 0, own: 0 };
+  }
   if d >= DIR_PROC + TASK_DIRS {
     return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 12288 + d % 256, mtime: 0, own: 0 };
   }
@@ -655,6 +676,12 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
   ensures kok(k) && result.len <= XFER
 {
   let end = Ent { len: 0, dir: false, end: true };
+  if dir == DIR_PROC + NET_DIR {
+    if i == 0 {
+      return Ent { len: name_out(&mut k.fs.xfer, "dev"), dir: false, end: false };
+    }
+    return end;
+  }
   if dir >= DIR_PROC + TASK_DIRS {
     // /proc/PID/task: one entry per thread of the group, a hole for the others
     let q = dir - DIR_PROC - TASK_DIRS;
@@ -749,7 +776,22 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
   if i == 6 {
     return Ent { len: name_out(&mut k.fs.xfer, "cmdline"), dir: false, end: false };
   }
-  let p = i - 6;
+  if i == 7 {
+    return Ent { len: name_out(&mut k.fs.xfer, "stat"), dir: false, end: false };
+  }
+  if i == 8 {
+    return Ent { len: name_out(&mut k.fs.xfer, "loadavg"), dir: false, end: false };
+  }
+  if i == 9 {
+    return Ent { len: name_out(&mut k.fs.xfer, "version"), dir: false, end: false };
+  }
+  if i == 10 {
+    return Ent { len: name_out(&mut k.fs.xfer, "modules"), dir: false, end: false };
+  }
+  if i == 11 {
+    return Ent { len: name_out(&mut k.fs.xfer, "net"), dir: true, end: false };
+  }
+  let p = i - 11;
   if p >= NPROC {
     return end;
   }
@@ -1097,6 +1139,113 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
   }
   if what == PF_VERSION && p == 0 {
     return put_s(&mut o, 0, "Linux version 6.1.0-bastios (root@bastios) #1 SMP\n");   // the release uname gives
+  }
+  if what == PF_STAT && p == 0 {
+    // CPU times in clock ticks (USER_HZ 100), summed over the processors.
+    // The kernel keeps no split of user and system time, nor iowait: the
+    // ticks some process was running are all "user", the rest of the
+    // processors' time "idle". Each processor's own line is its share.
+    let wall = k.ns / 10000000;
+    let cpus = smaller(k.cpus, 64);
+    let mut busy = get(k.sys, SYS_BUSY);
+    if cpus != 0 && busy > wall * cpus {
+      busy = wall * cpus;
+    }
+    let mut idle = 0;
+    if cpus != 0 {
+      idle = wall * cpus - busy;
+    }
+    let mut a = put_s(&mut o, 0, "cpu  ");
+    a = put_n(&mut o, a, busy);
+    a = put_s(&mut o, a, " 0 0 ");
+    a = put_n(&mut o, a, idle);
+    a = put_s(&mut o, a, " 0 0 0 0 0 0\n");
+    let mut c = 0;
+    while c < cpus
+      invariant c <= cpus && cpus <= 64 && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+    {
+      a = put_s(&mut o, a, "cpu");
+      a = put_n(&mut o, a, c);
+      a = put_c(&mut o, a, 32);
+      a = put_n(&mut o, a, busy / cpus);
+      a = put_s(&mut o, a, " 0 0 ");
+      a = put_n(&mut o, a, idle / cpus);
+      a = put_s(&mut o, a, " 0 0 0 0 0 0\n");
+      c = c + 1;
+    }
+    a = put_s(&mut o, a, "intr 0\nctxt 0\nbtime ");
+    a = put_n(&mut o, a, k.epoch / NS_PER_S);
+    a = put_s(&mut o, a, "\nprocesses ");
+    let mut live = 0;
+    let mut run = 0;
+    let mut q = 1;
+    while q < NPROC
+      invariant 1 <= q && q <= NPROC && live < q && run <= live && kok(k)
+    {
+      let st = state(k.procs, q);
+      if st != FREE && st != ZOMBIE {
+        live = live + 1;
+        if st == READY || st == RUNNING {
+          run = run + 1;
+        }
+      }
+      q = q + 1;
+    }
+    a = put_n(&mut o, a, live);
+    a = put_s(&mut o, a, "\nprocs_running ");
+    a = put_n(&mut o, a, run);
+    return put_s(&mut o, a, "\nprocs_blocked 0\n");
+  }
+  if what == PF_MODULES && p == 0 {
+    return 0;                               // no loadable modules
+  }
+  if what == PF_NETDEV && p == 0 {
+    // One line per interface of the reader's network namespace. Only the
+    // card's frames are counted, not per interface and not in bytes.
+    let ns = net_ns(k, pid);
+    let mut a = put_s(&mut o, 0, "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n");
+    let mut i = 0;
+    while i < IFN
+      invariant i <= IFN && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+    {
+      if nic_if_in(k.nic, ns, i) {
+        let w0 = nic_if_name(k.nic, i, 0);
+        let w1 = nic_if_name(k.nic, i, 1);
+        let mut l = 0;
+        while l < 16 && name_byte(w0, w1, l) != 0
+          invariant l <= 16 && a <= PROC_OUT && blen(o) == PROC_OUT
+        {
+          l = l + 1;
+        }
+        let mut pad = 0;
+        while pad + l < 6
+          invariant pad <= 6 && a <= PROC_OUT && blen(o) == PROC_OUT
+        {
+          a = put_c(&mut o, a, 32);
+          pad = pad + 1;
+        }
+        let mut j = 0;
+        while j < l
+          invariant j <= l && l <= 16 && a <= PROC_OUT && blen(o) == PROC_OUT
+        {
+          a = put_c(&mut o, a, cast[u8](name_byte(w0, w1, j)));
+          j = j + 1;
+        }
+        a = put_s(&mut o, a, ": 0 ");
+        let mut rx = 0;
+        let mut tx = 0;
+        if i == IF_ETH && ns == 0 {
+          rx = nic_frames(k.nic, true);
+          tx = nic_frames(k.nic, false);
+        }
+        a = put_n(&mut o, a, rx);
+        a = put_s(&mut o, a, " 0 0 0 0 0 0 0 ");
+        a = put_n(&mut o, a, tx);
+        a = put_s(&mut o, a, " 0 0 0 0 0 0\n");
+      }
+      i = i + 1;
+    }
+    return a;
   }
   if what == PF_LOADAVG && p == 0 {
     // No load average is kept (sysinfo's loads are 0 too): then the

@@ -550,7 +550,11 @@ t_mem: read(2) sees a store into a MAP_SHARED mapping
 t_mem: writable MAP_SHARED of a read-only file is EACCES
 t_misc: /etc/passwd
 t_misc: /proc/meminfo
+t_misc: /proc/modules opens
+t_misc: /proc/net is a directory
+t_misc: /proc/net/dev lists lo and eth0
 t_misc: /proc/self/exe
+t_misc: /proc/stat has cpu lines
 t_misc: SSE floating point
 t_misc: TIOCGWINSZ
 t_misc: getlogin or getpwuid

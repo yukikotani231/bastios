@@ -454,7 +454,7 @@ const LK_WW: u64 = 4;
 const LK_LEN: u64 = LK_WAITS + NPROC * LK_WW;
 const IPC_LEN: u64 = 9984;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
 const RNG_LEN: u64 = 19;              // the random generator's words (src/lxdev.bastio)
-const SYS_LEN: u64 = 16256;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio)
+const SYS_LEN: u64 = 16257;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio), then SYS_BUSY, the timer ticks all processes have run (/proc/stat)
 const SYS_PQ: u64 = 160;
 const SYS_PR: u64 = 256;               // SYS_PQ + PQ_N * 12; NPROC * PR_W words
 const SYS_RL: u64 = 1536;               // SYS_PR + NPROC * PR_W; NPROC * RL_W words (src/lxrlimit.bastio)
@@ -477,6 +477,7 @@ const SEAL_N: u64 = 16;
 // each system call (PTRACE_SYSCALL), TS_ENTRY while stopped before one,
 // TS_NOENT to let the next one start, TS_EXIT while stopped after one, and
 // the call's number times TS_NR.
+const SYS_BUSY: u64 = 16256;           // SYS_PT2 + NPROC; one word: ticks some process was running at
 const SYS_PT2: u64 = 16000;            // SYS_SEAL + SEAL_N * 2; a word per process
 const TS_SYS: u64 = 1;
 const TS_ENTRY: u64 = 2;

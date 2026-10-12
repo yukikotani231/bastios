@@ -405,6 +405,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     // code, so it is not charged CPU time (a sleep would count otherwise).
     if pget(s.k.procs, p, F_RESTART) == 0 {
       pset(&mut s.k.procs, p, F_TICKS, tick(pget(s.k.procs, p, F_TICKS)));
+      s.k.sys = set(s.k.sys, SYS_BUSY, tick(get(s.k.sys, SYS_BUSY)));
       cpu_timers_tick(&mut s.k, p);
     }
     s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
