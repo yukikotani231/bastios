@@ -89,6 +89,7 @@ const SY_PIPE_MAX: u64 = 19;
 const SY_INO: u64 = 20;                // 20 .. 22: /proc/sys/fs/inotify (src/lxinotify.bastio)
 const SY_NETUDP: u64 = 23;             // /proc/net/udp
 const SY_NETUDP6: u64 = 24;            // /proc/net/udp6
+const SY_NETUNIX: u64 = 25;            // /proc/net/unix
 const SY_LOOP: u64 = 32;               // 32 ..: loop device n's attribute a at n * LOOP_SYS + a
 const SY_NS: u64 = 128;                // 128 ..: /proc/P/ns link f at P * NF_N + f (src/lxnsk.bastio)
 const NF_N: u64 = 8;
@@ -467,6 +468,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   if xfer_is(x, 5, n, "net/udp") {
     return PROC_DEV + PSYS + SY_NETUDP;
   }
+  if xfer_is(x, 5, n, "net/unix") {
+    return PROC_DEV + PSYS + SY_NETUNIX;
+  }
   if xfer_is(x, 5, n, "net/udp6") {
     return PROC_DEV + PSYS + SY_NETUDP6;
   }
@@ -712,6 +716,9 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
     }
     if i == 4 {
       return Ent { len: name_out(&mut k.fs.xfer, "udp6"), dir: false, end: false };
+    }
+    if i == 5 {
+      return Ent { len: name_out(&mut k.fs.xfer, "unix"), dir: false, end: false };
     }
     return end;
   }
@@ -1060,6 +1067,53 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     }
     if what >= SY_LOOP && what - SY_LOOP < LOOP_N * LOOP_SYS {
       return loop_sys_text(&mut k, what - SY_LOOP, &mut o);
+    }
+    if what == SY_NETUNIX {
+      // One line per bound or listening unix socket (the sockets of a
+      // connected pair have no name and are not listed): its type, the
+      // listening flag and its path, an abstract name with a leading @.
+      // The address, reference count and inode are not kept.
+      let mut a = put_s(&mut o, 0, "Num       RefCount Protocol Flags    Type St Inode Path\n");
+      let mut l = 0;
+      while l < UX_LIS && a + 160 < PROC_OUT
+        invariant l <= UX_LIS && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+      {
+        let st = ul_row(k, l, 0, 0);
+        if st != UL_FREE {
+          a = put_s(&mut o, a, "0000000000000000: 00000002 00000000 ");
+          if st == UL_LISTEN {
+            a = put_s(&mut o, a, "00010000 ");
+          } else {
+            a = put_s(&mut o, a, "00000000 ");
+          }
+          if st == UL_DGRAM {
+            a = put_s(&mut o, a, "0002 01 0");
+          } else {
+            a = put_s(&mut o, a, "0001 01 0");
+          }
+          let n = smaller(ul_row(k, l, 1, 0), UX_PATH);
+          if n > 0 {
+            a = put_c(&mut o, a, 32);
+            if ul_row(k, l, 2, 0) != 0 {
+              a = put_c(&mut o, a, 47);     // a path is kept without its leading "/"
+            }
+            let mut i = 0;
+            while i < n && a + 2 < PROC_OUT
+              invariant i <= n && n <= UX_PATH && a <= PROC_OUT && blen(o) == PROC_OUT && l < UX_LIS && kok(k)
+            {
+              let mut b = ul_row(k, l, 2, i);
+              if b == 0 {
+                b = 64;                     // the abstract namespace's NUL, as @
+              }
+              a = put_c(&mut o, a, cast[u8](b % 256));
+              i = i + 1;
+            }
+          }
+          a = put_c(&mut o, a, 10);
+        }
+        l = l + 1;
+      }
+      return a;
     }
     if what == SY_NETUDP6 {
       // IPv6 datagram sockets run over the IPv4 stack, so /proc/net/udp

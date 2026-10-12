@@ -31,6 +31,9 @@ int main(void) {
     EXPECT("mremap grow", (q = mremap(p, 1 << 20, 2 << 20, MREMAP_MAYMOVE)) != MAP_FAILED && q[0] == 1);
     if (q != MAP_FAILED) p = q;
     EXPECT("madvise", madvise(p, 4096, MADV_DONTNEED) == 0);
+    EXPECT("madvise on a PROT_NONE reservation (V8 discards pages inside one)", (q = mmap(0, 1 << 20, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0)) != MAP_FAILED &&
+           madvise(q + 65536, 65536, MADV_DONTNEED) == 0 && mprotect(q + 65536, 65536, PROT_READ | PROT_WRITE) == 0 &&
+           (q[65536] = 5, madvise(q, 1 << 20, MADV_DONTNEED) == 0) && q[65536] == 0 && munmap(q, 1 << 20) == 0);
     EXPECT("mprotect read-only faults on write", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&
            mprotect(q, 4096, PROT_READ) == 0 && ({ pid_t c = fork(); c == 0 ? (q[0] = 1, _exit(0), 0) :
            c > 0 && waitpid(c, &st, 0) == c && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV; }));

@@ -167,9 +167,9 @@ def with_bb(cmd, bb):
 # ---------------------------------------------------------------- the guest
 
 class Guest:
-    def __init__(self, kernel, disk, log, web=None, idle=False, arch="x86_64"):
+    def __init__(self, kernel, disk, log, web=None, idle=False, arch="x86_64", mem="256M"):
         # idle: QEMU runs under SCHED_IDLE, on CPU time no other process wants.
-        self.kernel, self.disk, self.log, self.idle, self.arch = kernel, disk, log, idle, arch
+        self.kernel, self.disk, self.log, self.idle, self.arch, self.mem = kernel, disk, log, idle, arch, mem
         self.q = None
         self.hosturl = f"http://10.0.2.2:{web.port}" if web else ""
         self.hostaddr = f"10.0.2.2 {web.port}" if web else ""
@@ -186,11 +186,11 @@ class Guest:
         if self.arch == "aarch64":
             # The kernel powers off through PSCI (no debug-exit device).
             cmd = ["qemu-system-aarch64", "-M", "virt,gic-version=3", "-cpu", "cortex-a72", "-kernel", self.kernel,
-                   "-m", "256M", "-smp", "2", "-nographic", "-no-reboot", "-serial", "stdio", "-monitor", "none",
+                   "-m", self.mem, "-smp", "2", "-nographic", "-no-reboot", "-serial", "stdio", "-monitor", "none",
                    "-drive", f"file={self.disk},format=raw,if=none,id=vd", "-device", "virtio-blk-device,drive=vd",
                    "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{self.sshport}-:22", "-device", "virtio-net-device,netdev=n0"]
         else:
-            cmd = ["qemu-system-x86_64", "-kernel", self.kernel, "-m", "256M", "-smp", "2",
+            cmd = ["qemu-system-x86_64", "-kernel", self.kernel, "-m", self.mem, "-smp", "2",
                    "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
                    "-serial", "stdio", "-monitor", "none",
                    "-drive", f"file={self.disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd",
@@ -527,6 +527,7 @@ def main():
     ap.add_argument("--alpine-disk", help="the Alpine disk (root file system, apk repository) for alpine.txt")
     ap.add_argument("--alpine-repo", help="the same repository's directory, served at ALPINEURL")
     ap.add_argument("--debian-disk", help="the Debian disk (a glibc root file system) for debian.txt")
+    ap.add_argument("--node-disk", help="the Node disk (the root of the node:alpine image) for node.txt")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--arch", default="x86_64", choices=["x86_64", "aarch64"],
@@ -544,6 +545,7 @@ def main():
     bastio = load_applets(os.path.join(HERE, "bastio.txt"))
     alpine = load_applets(os.path.join(HERE, "alpine.txt"))
     debian = load_applets(os.path.join(HERE, "debian.txt"))
+    node = load_applets(os.path.join(HERE, "node.txt"))
     tty = load_tty(os.path.join(HERE, "tty.txt"))
     alpine_tty = load_tty(os.path.join(HERE, "alpine_tty.txt"))
     os.makedirs(args.out, exist_ok=True)
@@ -568,11 +570,11 @@ def main():
             g = [x for x in g if x[0] in keep or (x[0] in args.programs and "progs" in keep)]
         return g
 
-    def lane(disk, groups):
+    def lane(disk, groups, mem="256M"):
         """Boots a guest from disk and runs groups on it, one after another.
         Returns their results and the guest's serial output."""
         out = io.BytesIO()
-        g = Guest(args.kernel, disk, out, web, arch=args.arch)
+        g = Guest(args.kernel, disk, out, web, arch=args.arch, mem=mem)
         try:
             g.boot()
             res = {}
@@ -639,6 +641,12 @@ def main():
         disk = os.path.join(args.out, "debian-run.img")
         shutil.copyfile(args.debian_disk, disk)
         lanes.append((disk, [("debian", "Debian (glibc)", applets_lane(debian, 300))]))
+    if args.node_disk:
+        # V8 reserves a large range of address space and wants more memory
+        # than the other lanes; the cases write the disk, so on a copy.
+        disk = os.path.join(args.out, "node-run.img")
+        shutil.copyfile(args.node_disk, disk)
+        lanes.append((disk, [("node", "Node.js (V8)", applets_lane(node, 300))], "1G"))
     lanes = [l for l in lanes if l[1]]
     try:
         with concurrent.futures.ThreadPoolExecutor(len(lanes) if jobs > 1 else 1) as pool:
@@ -650,7 +658,7 @@ def main():
         log.close()
         web.shutdown()
         shutil.rmtree(scratch, ignore_errors=True)
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]

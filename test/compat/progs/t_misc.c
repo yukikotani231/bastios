@@ -6,6 +6,7 @@
 #include <sys/prctl.h>
 #include <sys/random.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
@@ -68,6 +69,16 @@ int main(void) {
         t[n > 0 ? n : 0] = 0;
         if (us >= 0) close(us);
         ok && strstr(t, "local_address") && strstr(t, "00000000:9CBC 00000000:0000 07 "); }));
+    EXPECT("/proc/net/unix lists a bound socket", ({
+        int xs = socket(AF_UNIX, SOCK_STREAM, 0); struct sockaddr_un xa = {.sun_family = AF_UNIX, .sun_path = "/pnu_sock"};
+        unlink(xa.sun_path);
+        int ok = xs >= 0 && bind(xs, (struct sockaddr *)&xa, sizeof xa) == 0 && listen(xs, 1) == 0;
+        char t[4096]; int f = open("/proc/net/unix", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
+        if (f >= 0) close(f);
+        t[n > 0 ? n : 0] = 0;
+        if (xs >= 0) close(xs);
+        unlink(xa.sun_path);
+        ok && strstr(t, "RefCount") && strstr(t, " 00010000 0001 01 ") && strstr(t, " /pnu_sock\n"); }));
     EXPECT("/proc/net/tcp lists a listening socket", ({
         int ls = socket(AF_INET, SOCK_STREAM, 0); struct sockaddr_in sa = {.sin_family = AF_INET, .sin_port = htons(40123)};
         int ok = ls >= 0 && bind(ls, (struct sockaddr *)&sa, sizeof sa) == 0 && listen(ls, 1) == 0;

@@ -526,7 +526,22 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       return p;
     }
     if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) {
+      pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
       return p;                             // code read, a page mapped or copied, or the stack grew: run the instruction again
+    }
+    // Another thread, on another processor, may have mapped a page of
+    // code (src/lazy.bastio) or anonymous memory (src/lxanon.bastio) between
+    // this fault and its handling: the handler above then finds it mapped
+    // and declines. Run the instruction once more; a second fault at the
+    // same place is a protection fault.
+    let fva = pget(s.k.procs, p, reg_word(R_FAULT));
+    let frip = pget(s.k.procs, p, F_REGS + R_RIP) % 4611686018427387904 + 1;
+    if fva >= USER_BASE && fva - USER_BASE < USER_SIZE
+       && (anon_covers(s.k.anon, p, (fva - USER_BASE) / 4096) || lazy_covers(s.k, p, (fva - USER_BASE) / 4096))
+       && (pget(s.k.procs, p, F_FAULT_RIP) != frip || pget(s.k.procs, p, F_FAULT_VA) != fva) {
+      pset(&mut s.k.procs, p, F_FAULT_RIP, frip);
+      pset(&mut s.k.procs, p, F_FAULT_VA, fva);
+      return p;
     }
   }
   if v < 32 {

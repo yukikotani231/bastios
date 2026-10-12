@@ -86,6 +86,12 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   perl and dpkg-query run. The expected output is what the same commands
   print in a chroot on Linux. The cases change the disk, so `run.py` runs
   them on a copy.
+- `node.txt`: Node.js, from a sixth disk (`nodedisk.py`): the `node` binary of
+  the official `node:22-alpine` image (`NODE_IMAGE`) and the libraries it
+  needs, entered with `chroot`. V8 reserves a large range of address space,
+  starts threads and writes machine code at run time, so this lane boots the
+  guest with 1 GiB of memory, and the cases change the disk, so `run.py` runs
+  them on a copy.
 
 `mkdisk.py` puts the programs and that BusyBox on a disk image in BastiOS's
 own disk format, so they appear as `/disk/NAME`. `run.py` boots the kernel
