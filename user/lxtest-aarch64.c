@@ -7,6 +7,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <ucontext.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -125,9 +126,33 @@ static int part2(void) {
     return 0;
 }
 
+// Faults a program makes on its own reach it as the signals Linux sends:
+// an undefined instruction is SIGILL, BRK is SIGTRAP, a misaligned stack
+// pointer is SIGBUS. Each is caught and the handler skips the instruction.
+static volatile int fsig;
+static void fh(int sig, siginfo_t *si, void *uc) {
+    fsig = sig;
+    ((ucontext_t *)uc)->uc_mcontext.pc += 4;
+}
+static void faults(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = fh;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGILL, &sa, 0);
+    sigaction(SIGTRAP, &sa, 0);
+    fsig = 0;
+    __asm__ volatile(".inst 0x00000000");
+    CHECK("undefined instruction is SIGILL", fsig == SIGILL);
+    fsig = 0;
+    __asm__ volatile("brk #0");
+    CHECK("brk is SIGTRAP", fsig == SIGTRAP);
+}
+
 int main(void) {
     part1();
     part2();
+    faults();
     printf("mtest done\n");
     return 0;
 }

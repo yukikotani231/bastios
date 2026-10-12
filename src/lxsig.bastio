@@ -30,6 +30,7 @@ const NSIG: u64 = 64;
 const SIGINT: u64 = 2;
 const SIGTRAP: u64 = 5;
 const SIGILL: u64 = 4;
+const SIGBUS: u64 = 7;
 const SIGFPE: u64 = 8;
 const SIGKILL: u64 = 9;
 const SIGSEGV: u64 = 11;

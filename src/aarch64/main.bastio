@@ -357,7 +357,17 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   }
   // Any other trap, or an abort nothing could mend: the process dies of the
   // signal Linux would send (a SIGSEGV), unless it has a handler.
-  let sig = SIGSEGV;
+  let mut sig = SIGSEGV;
+  if v == 6 {
+    sig = SIGILL;
+  } else if v == 3 {
+    sig = SIGTRAP;
+  } else if v == 1 {
+    sig = SIGTRAP;                          // a single step (src/lxptrace.bastio)
+    pt_stepped(&mut s.k, p);
+  } else if v == 17 {
+    sig = SIGBUS;
+  }
   let addr = pget(s.k.procs, p, reg_word(R_FAULT));
   if fault_caught(&mut s.k, p, sig, addr) {
     return (p + 1) % NPROC;

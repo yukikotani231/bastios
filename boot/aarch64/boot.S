@@ -244,7 +244,18 @@ user_sync_kind:
         b.eq    user_return
         cmp     x1, #0x24               /* data abort from EL0 */
         b.eq    user_return
-        mov     x0, #6
+        mov     x0, #3
+        cmp     x1, #0x3c               /* BRK: SIGTRAP */
+        b.eq    user_return
+        mov     x0, #1
+        cmp     x1, #0x32               /* software step from EL0: SIGTRAP, a single step */
+        b.eq    user_return
+        mov     x0, #17
+        cmp     x1, #0x22               /* PC alignment fault: SIGBUS */
+        b.eq    user_return
+        cmp     x1, #0x26               /* SP alignment fault */
+        b.eq    user_return
+        mov     x0, #6                  /* anything else (unknown instruction, ...): SIGILL */
         b       user_return
 user_irq_kind:
         bl      bst_irq_ack             /* the kernel's vector for it */
