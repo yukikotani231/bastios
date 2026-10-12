@@ -20,6 +20,8 @@
 #define IDENT_LIMIT  (1ull << 30)   /* boot.S identity-maps the first 1 GiB */
 #define MB1_MAGIC    0x2BADB002u    /* in %eax from a Multiboot 1 loader */
 #define MB2_MAGIC    0x36D76289u    /* ... and from a Multiboot 2 loader */
+#define PVH_TAG      0x31485650u    /* boot.S's pvh_start: %ebx is an hvm_start_info */
+#define PVH_MAGIC    0x336EC578u    /* the first word of hvm_start_info */
 #define MAX_REGIONS  128
 
 static uint32_t mb1[30];                         /* 120 bytes: up to the colour info */
@@ -71,6 +73,41 @@ uint32_t bst_multiboot_info(uint32_t magic, uint32_t info) {
             }
             put32(out + 44, 24 * n);
             put32(out + 48, (uint32_t)(uint64_t)mmap1);
+        }
+        put32(out, flags);
+        info_mb1 = (uint64_t)mb1;
+        return (uint32_t)(uint64_t)mb1;
+    }
+    if (magic == PVH_TAG) {
+        /* hvm_start_info: magic, version, flags, nr_modules (4 bytes
+         * each), modlist_paddr, cmdline_paddr, rsdp_paddr, memmap_paddr (8
+         * each, the last from version 1), memmap_entries, a reserved word.
+         * A memory map entry is an address, a size, a type (E820's numbers)
+         * and a reserved word: 24 bytes, so it is copied as it is. */
+        if (info == 0 || info % 4 != 0 || info > IDENT_LIMIT - 56 || rd32(info) != PVH_MAGIC) return 0;
+        uint8_t *out = (uint8_t *)mb1;
+        uint32_t flags = 0;
+        uint64_t cmd = rd64(info + 24), rsdp = rd64(info + 32);
+        if (cmd != 0 && cmd < IDENT_LIMIT) keep_cmdline(cmd, IDENT_LIMIT);
+        if (rsdp != 0 && rsdp < IDENT_LIMIT - sizeof bst_boot_rsdp) {
+            for (uint32_t i = 0; i < sizeof bst_boot_rsdp; i++) bst_boot_rsdp[i] = (uint8_t)rd8(rsdp + i);
+            bst_boot_rsdp_len = sizeof bst_boot_rsdp;
+        }
+        if (rd32(info + 4) >= 1) {
+            uint64_t at = rd64(info + 40), n = rd32(info + 48);
+            if (at != 0 && at < IDENT_LIMIT && n <= (IDENT_LIMIT - at) / 24) {
+                if (n > MAX_REGIONS) n = MAX_REGIONS;
+                for (uint64_t i = 0; i < n; i++) {
+                    uint8_t *m = mmap1 + 24 * i;
+                    put32(m, 20);
+                    put64(m + 4, rd64(at + 24 * i));
+                    put64(m + 12, rd64(at + 24 * i + 8));
+                    put32(m + 20, rd32(at + 24 * i + 16));
+                }
+                put32(out + 44, 24 * n);
+                put32(out + 48, (uint32_t)(uint64_t)mmap1);
+                flags |= 1u << 6;
+            }
         }
         put32(out, flags);
         info_mb1 = (uint64_t)mb1;

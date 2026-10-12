@@ -20,12 +20,25 @@ BastiOS also trusts everything bastiolang trusts: Z3, the Bastio compiler, the C
 | `boot/boot.S` | Multiboot 1 and 2 headers (with their request for a 1024x768x32 framebuffer) and entry; identity map of the first 2 GiB (the second only for reading the ACPI tables) and the uncached device window (2 GiB to 2^46, with 1 GiB pages above 4 GiB when the CPU has them); long mode, SSE, `syscall` enabled; the GDT; entering user mode (`bst_cpu_enter`) and halting (`bst_cpu_halt`); the trap stubs, `trap_common` and the `syscall` entry | Mode switches, descriptor tables, `iretq` and saving registers are below any language |
 | `boot/ap.S` | The real-mode trampoline that takes each application processor to long mode on the kernel's tables | 16- and 32-bit code |
 | `boot/smp.c` | Finding the ACPI tables (the RSDP from the copy Multiboot 2 passed, or the BIOS areas), wherever the kernel's page tables map them (a walk of the tables before each read): the processors in the MADT, and any table a byte at a time for the kernel's `boot_acpi` (`bst_platform_acpi`, which must answer 256 past a table's end); answering the kernel's `boot_info` (`bst_platform_info`: the command line and memory map from `multiboot.c`, CPUID, what processor startup saw, the ACPI tables' list), of which the kernel assumes nothing; the local APIC (its mode: xAPIC, or x2APIC when the firmware locked that mode or a processor has an id of 255 or more, with registers then reached as MSRs; end of interrupt, timer calibration against the HPET, else the ACPI PM timer, else the PIT, startup IPIs; an idle application processor's timer made one-shot around `hlt` in `bst_cpu_wait`), each processor's task state segment and `KERNEL_GS_BASE`, and handing parked processors work for `smp_run` | Firmware tables lie anywhere in the first 1 GiB, outside the device window that `Mmio` covers, and Bastio cannot read memory it was not given as a capability. The local APIC is in the device window, so part of it could move to `Mmio` (see "How it shrinks") |
-| `boot/multiboot.c` | Copying the Multiboot 2 information the kernel uses (memory map, framebuffer, ACPI RSDP, command line) into the kernel image in the Multiboot 1 form, every read checked against the structure's size and the identity map | The prelude reads Multiboot 1 and runs after it; a Bastio parser would need the read-only firmware memory capability below |
+| `boot/multiboot.c` | Copying the Multiboot 2 information, or the PVH `hvm_start_info` (command line, memory map, RSDP), the kernel uses (memory map, framebuffer, ACPI RSDP, command line) into the kernel image in the Multiboot 1 form, every read checked against the structure's size and the identity map | The prelude reads Multiboot 1 and runs after it; a Bastio parser would need the read-only firmware memory capability below |
 | `boot/platform.c` | The interrupt table and the `syscall` MSRs | `lidt` and `wrmsr` have no capability |
 | `boot/core.h` | The per-processor block layout shared by the three files above | |
 | `boot/libc.c` | `memset`, `memcpy`, `memmove` and `memcmp`, which the C compiler may emit calls to | Also linked into each user program |
 | `boot/linker.ld` | Load address, and `_end`, where the page pool starts | |
 | `boot/limine.conf` | The Limine menu for the ISO and the USB image only, loading the kernel with Multiboot 2 (`make run` and most tests use QEMU's Multiboot 1 loader) | |
+
+### AArch64
+
+The AArch64 port ([aarch64.md](aarch64.md)) has its own platform, listed by `test/trusted_base.sh` like the rest:
+
+| File | What it does | Why it is not Bastio |
+| --- | --- | --- |
+| `boot/aarch64/boot.S` | Entry at EL1; the exception vectors; turning the MMU on; entering EL0 (`bst_cpu_enter`) and saving the user context on an exception; interrupts taken while the kernel waits | System registers, `eret` and saving registers are below any language |
+| `boot/aarch64/platform.c` | The memory map from the device tree; the kernel's translation table; the GICv3 and the generic timer; acknowledging interrupts | The device tree and the table are read and written before Bastio runs, and the controller registers are in the device window the kernel maps with 1 GiB blocks |
+| `boot/aarch64/linker.ld` | Load address, and `_end`, where the page pool starts | |
+| `user/start-aarch64.S` | The image header and `_start` of an AArch64 user program, as `user/start.S` | |
+
+As on x86-64, entering user mode cannot raise privilege: of the saved processor state only the condition flags are kept, and the processor enters EL0t with interrupts unmasked. A fault in kernel mode halts the machine with a report (`bst_kernel_fault`). The kernel's map is the same 1 GiB blocks in top-level slot 0 of every address space, EL1 only and never executable at EL0.
 
 What the kernel trusts these to do, beyond the obvious:
 - **Entering user mode cannot raise privilege.** `bst_cpu_enter` takes only rip, rsp, the FS base, the general registers and the arithmetic flags from the context Bastio code saved. The code and stack segments, IOPL 0 and the interrupt flag are forced, and a rip, rsp or FS base outside the lower half of the address space is replaced by 0. So nothing the kernel stores in a `Cpu` context can give user code I/O ports, kernel segments or interrupts off.

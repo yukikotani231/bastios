@@ -19,6 +19,18 @@
 # the machine code (only the assembler). Opt-in while its code is about ten
 # times the size of gcc's.
 
+# ARCH=aarch64 builds the AArch64 port (arch/aarch64/Makefile): QEMU's virt
+# machine, with its own platform in boot/aarch64 and kernel in
+# src/aarch64. Every goal is handed to that makefile. (ARCH is x86_64 unless
+# given.)
+ifeq ($(ARCH),aarch64)
+
+.DEFAULT_GOAL := all
+%:
+	@$(MAKE) -f arch/aarch64/Makefile $@
+
+else
+
 BASTIOC0 ?= ../bastiolang/stage0/target/release/bastioc0
 BASTIOC  ?= build/bastioc1
 # Where `import "core/..."` finds the Bastio core library.
@@ -172,12 +184,12 @@ build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := $(wildcard src/*.bastio) src/font8x8.bin
+KSRCS := $(wildcard src/*.bastio src/x86_64/arch/*.bastio) src/font8x8.bin
 KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
 build/kernel.c: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
-	$(BASTIOC) --lib $(BASTIOLIB) --target kernel -o $@ src/main.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64 --lib src --target kernel -o $@ src/main.bastio
 
 build/bastioc1.c: $(BASTIOC0) $(wildcard $(BASTIOLIB)/stage1/*.bastio) | build
 	$(BASTIOC0) --emit-c -o $@ $(BASTIOLIB)/stage1/bastioc1.bastio
@@ -186,7 +198,7 @@ build/bastioc1: build/bastioc1.c
 	cc -O2 -o $@ $<
 
 build/kernel.s: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
-	$(BASTIOC) --lib $(BASTIOLIB) --target kernel --backend native --emit-asm -o $@ src/main.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64 --lib src --target kernel --backend native --emit-asm -o $@ src/main.bastio
 
 # Which backend built build/kernel.o, rewritten only when it changes, so
 # that switching NATIVE rebuilds the kernel.
@@ -342,7 +354,7 @@ run-uefi: build/bastios.iso $(DISK)
 
 # The tests are listed in test/all.sh, which runs JOBS of them at a time.
 test: build/bastios.elf
-	BASTIOC=$(BASTIOC) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/all.sh
+	BASTIOC=$(BASTIOC) BASTIOC0=$(BASTIOC0) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/all.sh
 
 # The system call fuzzer at length: SEEDS runs of CALLS calls from seed
 # SEED (see test/fuzz_test.sh; `make test` runs a short one).
@@ -757,3 +769,5 @@ clean:
 FORCE:
 
 .PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-compare smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+
+endif
