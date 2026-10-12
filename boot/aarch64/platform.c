@@ -175,9 +175,19 @@ static void read_memory(const uint8_t *dtb) {
  * RAM are normal memory (MAIR index 0). */
 void bst_early(const uint8_t *dtb) {
     read_memory(dtb);
-    if (dtb && be32(dtb) == 0xd00dfeed && be32(dtb + 4) <= DTB_MAX) {
-        dtb_len = be32(dtb + 4);
-        for (uint64_t i = 0; i < dtb_len; i++) dtb_copy[i] = dtb[i];
+    /* QEMU pads the tree to 1 MiB (totalsize says so) though the blocks it
+     * holds take a few KiB: what matters is that both blocks lie inside the
+     * part kept, and the copy's totalsize says how much that is. */
+    if (dtb && be32(dtb) == 0xd00dfeed) {
+        uint64_t total = be32(dtb + 4);
+        uint64_t st = (uint64_t)be32(dtb + 8) + be32(dtb + 36);      /* structure block's end */
+        uint64_t strs = (uint64_t)be32(dtb + 12) + be32(dtb + 32);   /* strings block's end */
+        if (total > DTB_MAX && st <= DTB_MAX && strs <= DTB_MAX) total = DTB_MAX;
+        if (total <= DTB_MAX) {
+            dtb_len = total;
+            for (uint64_t i = 0; i < dtb_len; i++) dtb_copy[i] = dtb[i];
+            for (int i = 0; i < 4; i++) dtb_copy[4 + i] = (uint8_t)(total >> (24 - 8 * i));
+        }
     }
     uint64_t top = 0;
     for (uint64_t i = 0; i < bst_memmap[0]; i++) {

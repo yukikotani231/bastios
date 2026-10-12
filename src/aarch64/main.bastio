@@ -479,6 +479,24 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], ser: &Serial)
   }
 }
 
+/// The time now in seconds since 1970-01-01 UTC, from the PL031 real-time
+/// clock the device tree lists (QEMU's virt machine has one; its data
+/// register counts seconds), 0 without one.
+fn rtc_seconds(win: &mut MmioSpace, cpu: &Cpu) -> u64
+  requires forall a: u64 :: bar_space(a) ==> mmio_free(win, a)
+  ensures forall a: u64 :: bar_space(a) ==> mmio_free(win, a)
+  ensures result < 4294967296
+{
+  let at = dt_first(cpu, "arm,pl031");
+  if at == 0 || at % 4 != 0 || at >= WIN_LOW_TOP || at + 4096 > WIN_LOW_TOP {
+    return 0;
+  }
+  let mut r = mmio_claim(&mut win, at, 4096);
+  let v = cast[u64](mmio_read32(&mut r, 0));
+  mmio_release(&mut win, r);
+  return v;
+}
+
 fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 {
   let mut m = mem_new(pool);
   let mut console = con_new();
@@ -491,6 +509,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   } else {
     puts(&mut console, " processors\r\n");
   }
+  let wall = rtc_seconds(&mut win, cpu);        // CLOCK_REALTIME = this + the clock, which starts at 0
   let vm_where = dt_slots(cpu);
   puts(&mut console, "devicetree: ");
   put_num(&mut console, vm_where.slots);
@@ -511,7 +530,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
     puts(&mut console, " blocks of 4 KiB\r\n");
   }
   let nic = nic_find(&mut m, &mut win, 4, dk_lo, dk_hi, vm_where);
-  let mut k = kernel_new(m, disk, nic, Snd::None, mice_new(false), tsc, 0, 0, cpu_count(cpu));
+  let mut k = kernel_new(m, disk, nic, Snd::None, mice_new(false), tsc, 0, wall * 1000000000, cpu_count(cpu));
   install_files(&mut console, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut console, "cannot start the shell\r\n");

@@ -65,9 +65,11 @@ fn dt_cells(cpu: &Cpu, at: u64, cells: u64) -> u64
   return dt_be32(cpu, at) * 4294967296 + dt_be32(cpu, at + 4);
 }
 
-/// The addresses of the virtio-mmio devices the tree lists, at most
-/// DT_MAX_VIRTIO of them (none for a missing or malformed tree).
-fn dt_virtio(cpu: &Cpu) -> Vec[u64]
+/// The addresses of the devices whose `compatible` is `want` (at the top
+/// level of the tree), at most DT_MAX_VIRTIO of them (none for a missing
+/// or malformed tree).
+fn dt_devices(cpu: &Cpu, want: Str) -> Vec[u64]
+  requires slen(want) < 64
   ensures vlen(result) <= DT_MAX_VIRTIO
 {
   let mut found = vec_new[u64]();
@@ -145,7 +147,7 @@ fn dt_virtio(cpu: &Cpu) -> Vec[u64]
               sc = v;
             }
           } else if depth == 2 && dt_same(cpu, name, "compatible") {
-            virtio = dt_same(cpu, data, "virtio,mmio");
+            virtio = dt_same(cpu, data, want);
           } else if depth == 2 && dt_same(cpu, name, "reg") && len >= (ac + sc) * 4 {
             base = dt_cells(cpu, data, ac);
             has_reg = true;
@@ -160,6 +162,27 @@ fn dt_virtio(cpu: &Cpu) -> Vec[u64]
     }
   }
   return found;
+}
+
+/// The addresses of the virtio-mmio devices the tree lists.
+fn dt_virtio(cpu: &Cpu) -> Vec[u64]
+  ensures vlen(result) <= DT_MAX_VIRTIO
+{
+  return dt_devices(cpu, "virtio,mmio");
+}
+
+/// The first address of a device the tree lists with compatible string
+/// `want` (0 if there is none, or the tree is missing or malformed).
+fn dt_first(cpu: &Cpu, want: Str) -> u64
+  requires slen(want) < 64
+{
+  let found = dt_devices(cpu, want);
+  let mut a = 0;
+  if vec_len(found) > 0 {
+    a = vec_get(found, 0);
+  }
+  vec_free(found);
+  return a;
 }
 
 /// Is `a` one of the addresses in `v`?

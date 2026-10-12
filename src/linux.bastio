@@ -11,6 +11,7 @@ import "proc.bastio";
 import "console.bastio";
 import "space.bastio";
 import "syscall.bastio";
+import "oflags.bastio";
 
 const V_LINUX: u64 = 0x81;
 
@@ -465,11 +466,11 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if n == LX_OPEN || n == LX_OPENAT || n == LX_CREAT {
     let mut r = 0;
     if n == LX_OPEN {
-      r = lx_open(&mut k, pid, AT_FDCWD, a, b, c);
+      r = lx_open(&mut k, pid, AT_FDCWD, a, oflags_in(b), c);
     } else if n == LX_CREAT {
       r = lx_open(&mut k, pid, AT_FDCWD, a, 0x241, b);   // O_CREAT | O_WRONLY | O_TRUNC
     } else {
-      r = lx_open(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
+      r = lx_open(&mut k, pid, a, b, oflags_in(c), pget(k.procs, pid, F_REGS + R_R10));
     }
     if r == SK_WAIT {
       return lx_retry(&mut k, pid, n);      // a FIFO's writer waits for a reader
