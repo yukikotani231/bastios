@@ -43,3 +43,31 @@ $ bb chroot /disk/a /usr/bin/nvim -u NONE /root/dev.c
 > :wq\r
 $ cd /disk/a/root && /disk/tcc -o devc dev.c && ./devc; cd /
 built 42
+
+== nvim: :make runs make and the build succeeds
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress make 2>/dev/null; bb mkdir -p /disk/a/disk && bb cp -r /disk/c /disk/a/disk/c && bb cp /disk/tcc /disk/a/usr/bin/tcc && printf 'dev: dev.c\n\ttcc -o dev dev.c\n' > /disk/a/root/Makefile && printf '#include <stdio.h>\nint main(void) { puts("made"); return 0; }\n' > /disk/a/root/dev.c && bb chroot /disk/a /bin/sh -c 'cd /root && rm -f dev && nvim -u NONE Makefile'
+> :make\r
+> \r
+> :q\r
+$ bb chroot /disk/a /bin/sh -c 'cd /root && ./dev'
+made
+
+== nvim: a shell escape with :!
+$ bb chroot /disk/a /bin/sh -c 'cd /root && nvim -u NONE dev.c'
+> :!echo escaped > /root/bang.txt\r
+> \r
+> :q\r
+$ bb cat /disk/a/root/bang.txt
+escaped
+
+== nvim: u undoes an edit, and the undo file is written
+$ bb mkdir -p /disk/a/root/u && bb chroot /disk/a /bin/sh -c 'cd /root && nvim -u NONE -c "set undofile undodir=/root/u" notes.txt'
+> iline one\x1b
+> :w\r
+> ofile two\x1b
+> :w\r
+> u
+> :wq\r
+$ bb cat /disk/a/root/notes.txt; bb ls /disk/a/root/u | bb wc -l
+line one
+1
