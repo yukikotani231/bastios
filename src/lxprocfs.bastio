@@ -1283,6 +1283,9 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if size == 0 || size > 0x7FFFFFFF {
+    return EINVAL;                          // checked before the path, as on Linux
+  }
   if dirfd % 0x100000000 != AT_FDCWD && user_empty(&mut k, pid, path) {
     // readlinkat(fd, "") on an O_PATH | O_NOFOLLOW handle on a link
     // reads that link, as on Linux; on anything else "" names nothing.
