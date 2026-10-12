@@ -1,0 +1,4 @@
+// The device window is architecture specific: src/<arch>/arch/mmiowin.bastio, found
+// through the --lib directory the build passes for that architecture.
+
+import "arch/mmiowin.bastio";

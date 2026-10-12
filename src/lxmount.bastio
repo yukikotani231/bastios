@@ -165,7 +165,7 @@ fn mount_dir(k: &mut Kernel, n: u64) -> u64
     k.perr = EBUSY;                         // "/", or the disk: not a tmpfs directory here
     return NFILES;
   }
-  let i = ram_find(&mut k.fs.ram, k.fs.rhi, k.fs.xfer, n);
+  let i = ram_find(&mut k.fs.ram, k.fs.rix, k.fs.rhi, k.fs.xfer, n);
   if i < NFILES && ram_is_dir(&mut k.fs.ram, i) {
     return i;
   }

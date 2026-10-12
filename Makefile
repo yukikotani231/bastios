@@ -14,10 +14,10 @@
 # build/bastioc1. BASTIOC names another compiler (bastioc0 still works);
 # BASTIOC0 names stage0.
 #
-# NATIVE=1 builds the kernel with bastioc1's own x86-64 backend instead of
-# translating it to C for $(CC): no C compiler between the proved code and
-# the machine code (only the assembler). Opt-in while its code is about ten
-# times the size of gcc's.
+# NATIVE=1 builds the kernel and the Bastio user programs with bastioc1's own
+# x86-64 backend instead of translating them to C for $(CC): no C compiler
+# between the proved code and the machine code (only the assembler). Opt-in
+# while its code is about ten times the size of gcc's.
 
 # ARCH=aarch64 builds the AArch64 port (arch/aarch64/Makefile): QEMU's virt
 # machine, with its own platform in boot/aarch64 and kernel in
@@ -69,11 +69,32 @@ UASM    := fault straddle
 ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs mtone mmouse mns mseccomp mcont mcloud
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so build/user/vdso.so
 
+# Which backend built the kernel and the user programs, rewritten only when it
+# changes, so that switching NATIVE rebuilds them.
+KBACKEND := $(if $(filter 1,$(NATIVE)),native,c)
+build/kernel.backend: FORCE | build
+	@echo $(KBACKEND) | cmp -s - $@ || echo $(KBACKEND) > $@
+
+# The programs written in Bastio (user/NAME.bastio) follow the backend; any
+# other name (test/guide_test.py writes its own C) is compiled from its .c.
+BASTIO_USER := $(patsubst user/%.bastio,%,$(wildcard user/*.bastio))
+
 build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
 	$(BASTIOC) --lib $(BASTIOLIB) --target user -o $@ $<
 
+build/user/%.s: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
+	$(BASTIOC) --lib $(BASTIOLIB) --target user --backend native --emit-asm -o $@ $<
+
 build/user/%.o: build/user/%.c
 	$(CC) $(UCFLAGS) -c -o $@ $<
+
+ifeq ($(KBACKEND),native)
+$(BASTIO_USER:%=build/user/%.o): build/user/%.o: build/user/%.s build/kernel.backend
+	$(CC) -c -o $@ $<
+else
+$(BASTIO_USER:%=build/user/%.o): build/user/%.o: build/user/%.c build/kernel.backend
+	$(CC) $(UCFLAGS) -c -o $@ $<
+endif
 
 build/user/start.o: user/start.S | build/user
 	$(CC) -c -o $@ $<
@@ -184,7 +205,7 @@ build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := $(wildcard src/*.bastio src/x86_64/arch/*.bastio) src/font8x8.bin
+KSRCS := $(wildcard src/*.bastio src/x86_64/arch/*.bastio) src/font8x8.bin 
 KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
@@ -200,11 +221,8 @@ build/bastioc1: build/bastioc1.c
 build/kernel.s: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
 	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64 --lib src --target kernel --backend native --emit-asm -o $@ src/main.bastio
 
-# Which backend built build/kernel.o, rewritten only when it changes, so
-# that switching NATIVE rebuilds the kernel.
-KBACKEND := $(if $(filter 1,$(NATIVE)),native,c)
-build/kernel.backend: FORCE | build
-	@echo $(KBACKEND) | cmp -s - $@ || echo $(KBACKEND) > $@
+# build/kernel.backend is defined with the user programs' rules (the kernel and
+# the user programs are built the same way).
 
 ifeq ($(KBACKEND),native)
 build/kernel.o: build/kernel.s build/kernel.backend
@@ -765,7 +783,7 @@ netbench: build/bastios.elf
 clean:
 	rm -rf build
 
-.PRECIOUS: build/user/%.c build/user/%.o build/user/%.elf
+.PRECIOUS: build/user/%.c build/user/%.s build/user/%.o build/user/%.elf
 FORCE:
 
 .PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-compare smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
