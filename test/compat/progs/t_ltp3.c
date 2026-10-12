@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
+#include <dirent.h>
 #include <sys/sendfile.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -318,6 +319,30 @@ int main(void) {
         EXPECT("the window size keeps its pixel fields", r3 == 0 && r4 == 0 && got.ws_xpixel == 640 && got.ws_ypixel == 480);
         EXPECT("TIOCGETD reports N_TTY", r5 == 0 && ld == 0);
         if (m >= 0) close(m);
+    }
+
+    /* /proc/self/fd lists the open descriptors. */
+    {
+        DIR *dp = opendir("/proc/self/fd");
+        int seen0 = 0, seenfd = 0, other = 0;
+        int fd = open("l3_pfd", O_CREAT | O_RDWR, 0644);
+        struct dirent *de;
+        char link[64] = "", want[16];
+        ssize_t ln;
+        (void)dp;
+        if (dp) closedir(dp);
+        dp = opendir("/proc/self/fd");
+        snprintf(want, sizeof want, "%d", fd);
+        while (dp && (de = readdir(dp)) != NULL) {
+            if (!strcmp(de->d_name, "0")) seen0 = 1;
+            else if (!strcmp(de->d_name, want)) seenfd = 1;
+            else if (strcmp(de->d_name, ".") && strcmp(de->d_name, "..") && atoi(de->d_name) > 1000) other++;
+        }
+        if (dp) closedir(dp);
+        ln = readlink("/proc/self/fd/0", link, sizeof link - 1);
+        EXPECT("/proc/self/fd lists the open descriptors", dp && seen0 && seenfd && !other && ln >= 0);
+        if (fd >= 0) close(fd);
+        unlink("l3_pfd");
     }
 
     /* sendfile to a unix socket sends the bytes, and a full

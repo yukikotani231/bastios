@@ -83,6 +83,7 @@ const NF_N: u64 = 8;
 const SY_UM: u64 = SY_NS + NPROC * NF_N;   // /proc/P/uid_map, gid_map, setgroups at P * 3 + 0, 1, 2 (src/lxuser.bastio)
 const UMF_N: u64 = 3;
 const NS_DIRS: u64 = 0x100;            // DIR_PROC + NS_DIRS + pid: /proc/PID/ns
+const FD_DIRS: u64 = 0x200;            // DIR_PROC + FD_DIRS + pid: /proc/PID/fd
 const LOOP_SYS: u64 = 8;               // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
@@ -303,6 +304,13 @@ fn proc_dir(procs: &Buf, x: &Bytes, n: u64) -> u64
       return NO_FILE;
     }
     return DIR_PROC + NS_DIRS + q;          // /proc/PID/ns
+  }
+  if e + 3 == n && xfer_is(x, e, n, "/fd") {
+    let q = proc_pid(procs, x, 5, e);
+    if q >= NPROC {
+      return NO_FILE;
+    }
+    return DIR_PROC + FD_DIRS + q;          // /proc/PID/fd
   }
   if e != n {
     return NO_FILE;
@@ -547,6 +555,9 @@ fn proc_meta(f: u64) -> Meta {
 
 /// What stat says about /proc directory d (a proc_dir description).
 fn proc_dir_meta(d: u64) -> Meta {
+  if d >= DIR_PROC + FD_DIRS {
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 8192 + d % 256, mtime: 0, own: 0 };
+  }
   if d >= DIR_PROC + NS_DIRS {
     return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 4096 + d % 256, mtime: 0, own: 0 };
   }
@@ -560,6 +571,21 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
   ensures kok(k) && result.len <= XFER
 {
   let end = Ent { len: 0, dir: false, end: true };
+  if dir >= DIR_PROC + FD_DIRS {
+    // /proc/PID/fd: one entry per open descriptor, a hole for each closed one
+    if i >= LXNFD {
+      return end;
+    }
+    let q = dir - DIR_PROC - FD_DIRS;
+    if q >= NPROC {
+      return end;
+    }
+    let d = fd_look(k, q, i);
+    if d.kind == K_BAD {
+      return Ent { len: 0, dir: false, end: false };
+    }
+    return Ent { len: dec_big(&mut k.fs.xfer, 0, i), dir: false, end: false };
+  }
   if dir >= DIR_PROC + NS_DIRS {
     return nsf_entry(&mut k, i);            // /proc/PID/ns (src/lxnsk.bastio)
   }
@@ -587,6 +613,9 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
     }
     if i >= 7 && i < 7 + UMF_N {
       return Ent { len: name_out(&mut k.fs.xfer, um_name(i - 7)), dir: false, end: false };
+    }
+    if i == 7 + UMF_N {
+      return Ent { len: name_out(&mut k.fs.xfer, "fd"), dir: true, end: false };
     }
     return end;
   }

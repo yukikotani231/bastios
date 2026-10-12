@@ -507,6 +507,7 @@ t_ltp3: a write past the largest file is EFBIG, not 0
 t_ltp3: TCSETA is read back by TCGETA
 t_ltp3: the window size keeps its pixel fields
 t_ltp3: TIOCGETD reports N_TTY
+t_ltp3: /proc/self/fd lists the open descriptors
 t_mem: 64 MiB of address space
 t_mem: FUTEX_CMP_REQUEUE moves timed waiters across processes
 t_mem: FUTEX_CMP_REQUEUE with a negative count is EINVAL
