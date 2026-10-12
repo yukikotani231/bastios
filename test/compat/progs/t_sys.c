@@ -2,6 +2,9 @@
  * the NTP clock discipline, and a cgroup namespace; a user who is not root gets EPERM for each. */
 #include "compat.h"
 #include <fcntl.h>
+#include <sys/ioctl.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
 #include <sched.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -186,6 +189,88 @@ static int cgroup_mem(void) {
     return ok;
 }
 
+/* musl has no linux/seccomp.h: the parts of it the check uses. */
+struct bpf_insn { unsigned short code; unsigned char jt, jf; unsigned int k; };
+struct bpf_prog { unsigned short len; struct bpf_insn *filter; };
+#define BPF(c, t, f, kk) ((struct bpf_insn){ c, t, f, kk })
+struct sc_data { int nr; unsigned int arch; unsigned long long ip; unsigned long long args[6]; };
+struct sc_notif { unsigned long long id; unsigned int pid, flags; struct sc_data data; };
+struct sc_resp { unsigned long long id; long long val; int error; unsigned int flags; };
+#define SC_RECV 0xC0502100UL
+#define SC_SEND 0xC0182101UL
+#define SC_VALID 0x40082102UL
+#define SC_CONTINUE 1
+
+/* A seccomp filter whose action for getppid is USER_NOTIF, with a notifier
+ * the parent keeps while its children make the call. */
+static int notifier(void) {
+    struct bpf_insn prog[] = {
+        BPF(0x20, 0, 0, 0),                   /* ld [nr] */
+        BPF(0x15, 0, 1, SYS_getppid),         /* jeq getppid */
+        BPF(0x06, 0, 0, 0x7fc00000),          /* ret USER_NOTIF */
+        BPF(0x06, 0, 0, 0x7fff0000),          /* ret ALLOW */
+    };
+    struct bpf_prog fp = { 4, prog };
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) return 0;
+    int lfd = (int)syscall(SYS_seccomp, 1, 8, &fp);
+    if (lfd < 0) return 0;
+    /* Each child makes the call and reports what it got. The supervisor
+     * answers a value, an error, and CONTINUE (the real parent). */
+    for (int round = 0; round < 3; round++) {
+        int pp[2];
+        if (pipe(pp)) return 0;
+        pid_t c = fork();
+        if (c == 0) {
+            errno = 0;
+            long r = syscall(SYS_getppid);
+            long out[2] = { r, errno };
+            write(pp[1], out, sizeof out);
+            _exit(0);
+        }
+        struct sc_notif req;
+        memset(&req, 0, sizeof req);
+        if (ioctl(lfd, SC_RECV, &req) != 0) return 0;
+        if (req.data.nr != SYS_getppid || req.data.arch == 0 || (pid_t)req.pid != c) return 0;
+        if (ioctl(lfd, SC_VALID, &req.id) != 0) return 0;
+        struct sc_resp rsp;
+        memset(&rsp, 0, sizeof rsp);
+        rsp.id = req.id;
+        if (round == 0) rsp.val = 4242;
+        if (round == 1) rsp.error = -EPERM;
+        if (round == 2) rsp.flags = SC_CONTINUE;
+        if (ioctl(lfd, SC_SEND, &rsp) != 0) return 0;
+        if (ioctl(lfd, SC_SEND, &rsp) != -1 || errno != ENOENT) return 0;
+        long out[2];
+        if (read(pp[0], out, sizeof out) != (ssize_t)sizeof out) return 0;
+        waitpid(c, 0, 0);
+        close(pp[0]);
+        close(pp[1]);
+        if (round == 0 && out[0] != 4242) return 0;
+        if (round == 1 && (out[0] != -1 || out[1] != EPERM)) return 0;
+        if (round == 2 && out[0] != (long)getpid()) return 0;
+    }
+    /* A notifier that is closed gives its waiters ENOSYS. */
+    int pp[2];
+    if (pipe(pp)) return 0;
+    pid_t c = fork();
+    if (c == 0) {
+        close(lfd);                           /* or the notifier would outlive the parent's close */
+        errno = 0;
+        long r = syscall(SYS_getppid);
+        long out[2] = { r, errno };
+        write(pp[1], out, sizeof out);
+        _exit(0);
+    }
+    struct sc_notif req;
+    memset(&req, 0, sizeof req);
+    if (ioctl(lfd, SC_RECV, &req) != 0) return 0;
+    close(lfd);
+    long out[2];
+    if (read(pp[0], out, sizeof out) != (ssize_t)sizeof out) return 0;
+    waitpid(c, 0, 0);
+    return out[0] == -1 && out[1] == ENOSYS;
+}
+
 int main(void) {
     setup();
     EXPECT("sethostname, uname, /proc/sys/kernel/hostname", hostname());
@@ -196,5 +281,6 @@ int main(void) {
     EXPECT("not root: EPERM", not_root());
     EXPECT("a cgroup namespace roots the tree", cgroup_ns());
     EXPECT("memory.max refuses a mapping that would pass it", cgroup_mem());
+    EXPECT("seccomp USER_NOTIF: a supervisor answers a call", notifier());
     return done();
 }
