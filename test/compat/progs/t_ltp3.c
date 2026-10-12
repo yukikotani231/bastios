@@ -41,6 +41,18 @@ static int chmod_devnull(void) { return chmod("/dev/null", 0666) == -1 && errno 
 static int ro_fd = -1;
 static int fchmod_ro(void) { return fchmod(ro_fd, 0600) == -1 && errno == EROFS ? 0 : 1; }
 
+static long vmlck(void)
+{
+    char line[128];
+    long kb = -1;
+    FILE *f = fopen("/proc/self/status", "r");
+    if (!f) return -1;
+    while (fgets(line, sizeof line, f))
+        if (sscanf(line, "VmLck: %ld", &kb) == 1) break;
+    fclose(f);
+    return kb;
+}
+
 int main(void) {
     setup();
     mkdir("l3_d", 0755);
@@ -303,6 +315,35 @@ int main(void) {
         EXPECT("sendfile to a full non-blocking unix socket is EAGAIN", r3 == -1 && e3 == EAGAIN);
         close(sv[0]); close(sv[1]); close(fd);
         unlink("l3_sf");
+    }
+
+    /* Locking a page that is locked adds nothing; munlock gives back only
+       what was locked. */
+    {
+        char *m = mmap(NULL, 4 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        long b = vmlck();
+        int r1 = mlock(m, 4 * 4096);
+        long a1 = vmlck();
+        int r2 = mlock(m + 4096, 4096);
+        int r3 = mlock(m, 4 * 4096);
+        long a2 = vmlck();
+        int r4 = munlock(m + 4096, 4096);
+        long a3 = vmlck();
+        int r5 = munlock(m + 4096, 4096);
+        long a4 = vmlck();
+        int r6 = munlock(m, 4 * 4096);
+        long a5 = vmlck();
+        EXPECT("mlock counts the pages it locks", r1 == 0 && a1 - b == 16);
+        EXPECT("mlock of pages already locked counts them once", r2 == 0 && r3 == 0 && a2 - b == 16);
+        EXPECT("munlock of one locked page gives back one page", r4 == 0 && a3 - b == 12);
+        EXPECT("munlock of a page not locked gives back nothing", r5 == 0 && a4 - b == 12);
+        EXPECT("munlock of the rest gives back the rest", r6 == 0 && a5 == b);
+        long c = vmlck();
+        int r7 = syscall(325, m, 2 * 4096, 1);        /* mlock2(MLOCK_ONFAULT) */
+        long d = vmlck();
+        EXPECT("mlock2 with MLOCK_ONFAULT locks the range", r7 == 0 && d - c == 8);
+        munlockall();
+        munmap(m, 4 * 4096);
     }
 
     unlink("l3_d/f2");
