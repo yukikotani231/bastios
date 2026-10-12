@@ -446,6 +446,8 @@ steps = [
     # The disk's directory grows past its first 64 entries (dir_grow); the
     # power cuts below check that what it grew survives. (Past 1023
     # entries: the big-disk boot.)
+    # Reads fill the page cache, and the next reads of the same file come from it (src/pcache.bastio, pc_fill): they must see appends and rewrites.
+    ("i=0; while [ $i -lt 3000 ]; do echo $i; i=$((i+1)); done > /disk/pc; cat /disk/pc | wc -c; cat /disk/pc | wc -c; echo more >> /disk/pc; cat /disk/pc | wc -c; wc -l < /disk/pc; echo X > /disk/pc; cat /disk/pc; rm /disk/pc", b"13890\r\n13890\r\n13895\r\n3001\r\nX\r\n", b"\n# "),
     ("mkdir disk/many; i=0; while [ $i -lt 150 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; cat disk/many/f149", b"\r\n150\r\n149\r\n", b"\n# "),
     ("rm -r disk/many; ls disk/many; echo gone$((1+1))", [b"No such file", b"gone2"], b"\n# "),
     ("mkdir full; i=0; while echo x > full/f$i 2>/dev/null; do i=$((i+1)); done; echo x > full/z; rm -r full", b"full/z: No space left on device", b"\n# "),
