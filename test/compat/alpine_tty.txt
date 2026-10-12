@@ -71,3 +71,10 @@ $ bb mkdir -p /disk/a/root/u && bb chroot /disk/a /bin/sh -c 'cd /root && nvim -
 $ bb cat /disk/a/root/notes.txt; bb ls /disk/a/root/u | bb wc -l
 line one
 1
+
+== nvim: it reads the terminal's size, and has colours
+$ bb chroot /disk/a /bin/sh -c 'cd /root && nvim -u NONE size.txt'
+> :call setline(1, &columns . "x" . &lines . " " . (&t_Co > 7 ? "colour" : "mono"))\r
+> :wq\r
+$ bb cat /disk/a/root/size.txt
+80x24 colour
