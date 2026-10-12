@@ -1,5 +1,5 @@
 // The program images built into the AArch64 kernel (build/aarch64/user) and
-// the vDSO page. Only the first four programs of the table and the Linux arm64 mhello and mtest exist so far; the
+// the vDSO page. Only the first four programs of the table and the Linux arm64 mhello, mtest and ash exist so far; the
 // others read as empty images, which the loader refuses.
 
 import "pages.bastio";
@@ -21,6 +21,9 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 10 {
     return include_bytes("../../../build/aarch64/user/mhello.elf");
+  }
+  if i == 13 {
+    return include_bytes("../../../build/aarch64/user/ash.elf");
   }
   if i == 12 {
     return include_bytes("../../../build/aarch64/user/mtest.elf");

@@ -239,6 +239,39 @@ jobs:
             build/compat/results.json
             build/compat/serial.log
           if-no-files-found: ignore
+  # The Linux compatibility suite on AArch64 (arch/aarch64/Makefile): the
+  # suite's C programs and a BusyBox against glibc, on QEMU's virt machine.
+  compat-aarch64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BASTIOC0: bastiolang/stage0/target/release/bastioc0
+      BASTIOLIB: bastiolang
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: yukikotani231/bastiolang
+          ref: main
+          path: bastiolang
+      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-arm gcc-aarch64-linux-gnu
+      - run: cd bastiolang/stage0 && cargo build --release --locked
+      - name: Restore the proof cache
+        uses: actions/cache/restore@v4
+        with:
+          key: proof-none
+          restore-keys: proof-
+          path: build/proof-cache
+      - run: make ARCH=aarch64 compat
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compat-aarch64-report
+          path: |
+            build/aarch64/compat/report.md
+            build/aarch64/compat/results.json
+            build/aarch64/compat/serial.log
+          if-no-files-found: ignore
   # The Linux Test Project's system call tests (test/compat/ltp.py), with
   # LTP built once per LTP_TAG and kept in the cache. The previous run's
   # results.json is kept too: ltp.py uses its timings to put the tests that

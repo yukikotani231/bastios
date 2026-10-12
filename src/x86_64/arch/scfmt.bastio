@@ -1,0 +1,14 @@
+// What a seccomp filter sees of a system call on x86-64: the architecture
+// AUDIT_ARCH_X86_64 and the call number the layer already uses.
+
+import "proc.bastio";
+
+const SC_ARCH: u64 = 0xC000003E;
+
+/// The number of the call process pid is making that a filter is shown;
+/// lx is the layer's own number for it.
+fn sc_number(k: &Kernel, pid: u64, lx: u64) -> u64
+  ensures result < 0x100000000
+{
+  return lx % 0x100000000;
+}

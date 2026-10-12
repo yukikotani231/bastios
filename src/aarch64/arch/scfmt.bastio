@@ -1,0 +1,16 @@
+// What a seccomp filter sees of a system call on AArch64: the architecture
+// AUDIT_ARCH_AARCH64 and the arm64 call number, which the program put in x8
+// (the layer's own number is x86-64's).
+
+import "proc.bastio";
+
+const SC_ARCH: u64 = 0xC00000B7;
+
+/// The number of the call process pid is making that a filter is shown;
+/// lx is the layer's own number for it.
+fn sc_number(k: &Kernel, pid: u64, lx: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result < 0x100000000
+{
+  return pget(k.procs, pid, F_REGS + R_NUM) % 0x100000000;
+}

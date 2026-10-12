@@ -1,0 +1,36 @@
+// The registers a tracer sees on AArch64: struct user_pt_regs (x0-x30, sp,
+// pc, pstate: 34 words), which are the first 34 words of the saved context.
+// Only PTRACE_GETREGSET and SETREGSET of NT_PRSTATUS read and write them, as
+// on Linux (PEEKUSER, POKEUSER, GETREGS and SETREGS do not exist there).
+const USER_REGS: u64 = 34;
+const USER_REGS_SIZE: u64 = 272;
+const UR_NREG: u64 = 77;                 // offsets from F_REGS of the 34 words: 0-20, then 64-76 (src/aarch64/arch/regs.bastio)
+const UR_ORIG: u64 = 255;                // no orig_x0 word
+const PT_USER_API: u64 = 0;
+const PT_ENTRY_RET: u64 = 0;        // x0 is the first argument, which the call still needs
+const SS_BIT: u64 = 2097152;             // PSTATE.SS, bit 21
+
+fn ur_reg(i: u64) -> u64
+  requires i < USER_REGS
+  ensures result < UR_NREG || result == 255
+{
+  if i < 21 {
+    return i;
+  }
+  return 43 + i;                            // x21-x30, sp, pc, pstate: 64-76
+}
+
+fn ur_const(i: u64) -> u64 {
+  return 0;
+}
+
+/// The pstate word with single-stepping switched on or off: with PSTATE.SS
+/// set (and MDSCR_EL1.SS, which the kernel sets on the way back to EL0 for
+/// exactly those processes) one instruction runs, then a step exception.
+fn step_flags(fl: u64, on: bool) -> u64 {
+  let base = fl - fl / SS_BIT % 2 * SS_BIT;
+  if on {
+    return base + SS_BIT;
+  }
+  return base;
+}
