@@ -1103,7 +1103,7 @@ fn sem_waiters(k: &Kernel, c: u64) -> u64
   while p < NPROC
     invariant 1 <= p && p <= NPROC && cnt <= p
   {
-    let call = pget(k.procs, p, F_REGS + R_RAX);
+    let call = pget(k.procs, p, F_REGS + R_LXNR);
     if state(k.procs, p) != FREE && pget(k.procs, p, F_RESTART) != 0 && (call == LX_SEMOP || call == LX_SEMTIMEDOP) && pget(k.procs, p, F_IPCW) == c {
       cnt = cnt + 1;
     }

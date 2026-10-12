@@ -98,6 +98,16 @@ run("mem", b"free pages")
 run("cpus", b"processors running: 1")
 run("hello", b"hello from user mode, pid 2")
 run("true", b"")
+# A Linux arm64 program (an ELF executable with no libc; svc numbers from
+# the asm-generic table, turned into the Linux layer's own numbers).
+run("mhello", [b"hello from linux arm64, pid ", b"stdout mode 0x2", b"read 9: 127.0.0.1", b"[exit 3]"])
+# A static glibc program: malloc, files, fork, signals, threads, pipes,
+# epoll, sockets (every line must read "ok" and none "FAIL").
+reply = run("mtest", b"mtest done")
+check("mtest: no check failed", b"FAIL" not in reply)
+for want in [b"malloc ok 1", b"file abc", b"child exit 5", b"signal 10", b"thread 7",
+             b"ok   epoll_wait", b"ok   socket read", b"machine aarch64"]:
+    check("mtest: " + want.decode(), want in reply)
 # The timer interrupt: ticks count up, 100 a second.
 reply = run("uptime", b"ticks")
 time.sleep(1.0)

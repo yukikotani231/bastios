@@ -1,0 +1,4 @@
+// struct stat is architecture specific: src/<arch>/arch/statfmt.bastio, found
+// through the --lib directory the build passes for that architecture.
+
+import "arch/statfmt.bastio";

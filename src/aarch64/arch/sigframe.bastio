@@ -1,0 +1,160 @@
+// The signal frame on AArch64, and sigreturn: what src/lxsig.bastio builds
+// on the stack when it enters a handler, in the layout the C library's
+// ucontext expects (Linux's struct rt_sigframe): the siginfo (128 bytes),
+// then the ucontext, whose mcontext holds the fault address, x0-x30, sp, pc
+// and pstate, and a reserved area that begins with the FP/SIMD record; then
+// a frame record for unwinders. The handler runs with the signal in x0, the
+// siginfo in x1 and the ucontext in x2, and returns through x30, which is
+// the action's restorer if it has one, else the vDSO page's trampoline
+// (`mov x8, #139; svc #0`, written by vdso_fill).
+
+import "linux.bastio";
+
+const INFO_AT: u64 = 0;
+const UC_AT: u64 = 128;
+const UC_STACK: u64 = 144;            // UC_AT + 16: ss_sp, ss_flags, ss_size
+const UC_MASK: u64 = 168;             // UC_AT + 40: uc_sigmask (the first of 16 words)
+const UC_FAULT: u64 = 304;            // UC_AT + 176: the mcontext
+const UC_REGS: u64 = 312;             // x0-x30
+const UC_SP: u64 = 560;
+const UC_PC: u64 = 568;
+const UC_PSTATE: u64 = 576;
+const UC_RESERVED: u64 = 592;         // UC_AT + 464
+const FP_REC: u64 = 592;              // the FP/SIMD record: magic and size, fpsr and fpcr, q0-q31
+const FP_MAGIC: u64 = 0x46508001;
+const FP_RSIZE: u64 = 0x210;
+const FR_AT: u64 = 4688;              // the frame record: x29, pc
+const FRAME_SIZE: u64 = 4704;
+const UC_BYTES: u64 = 1136;           // what sigreturn reads: up to the end of the FP record
+const PSTATE_USER: u64 = 0xF0000000;  // N Z C V: the rest of pstate is the kernel's
+
+/// Is there room for a frame below `rsp`?
+spec fn sig_room(rsp: u64) -> bool {
+  rsp >= USER_BASE + RED_ZONE + FRAME_SIZE + 16
+}
+
+fn sig_fits(rsp: u64) -> bool
+  ensures result == sig_room(rsp)
+{
+  return rsp >= USER_BASE + RED_ZONE + FRAME_SIZE + 16;
+}
+
+/// Builds the frame for signal s on process p's stack (below rsp, which is
+/// the alternate stack's top when `red` is 0), and points p's stack pointer,
+/// argument registers, link register and result at it. `ss_flags`, `alt_sp`
+/// and `alt_size` are the alternate stack as sigaltstack reports it, `was`
+/// the mask the handler's return goes back to. False if the stack has no
+/// room.
+fn sig_frame(k: &mut Kernel, p: u64, s: u64, rsp: u64, red: u64, restorer: u64, ss_flags: u64, alt_sp: u64, alt_size: u64, was: u64) -> bool
+  requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG && sig_room(rsp) && red <= RED_ZONE && rsp <= USER_BASE + USER_SIZE
+  ensures kok(k)
+{
+  let base = (rsp - red - FRAME_SIZE) / 16 * 16;   // sp the handler sees
+  let mut fr = balloc(FRAME_SIZE);
+  // The siginfo: signo, errno, code (SI_USER), sender.
+  bset(&mut fr, INFO_AT, cast[u8](s));
+  info_from(&mut fr, INFO_AT, wget(k.sigsave, sender_at(p, s)));   // si_pid, si_value
+  if wget(k.sigsave, sender_at(p, s)) < FAULT_MARK && nsk_of(k, NSK_PID, p) != 0 {
+    xfer_u64(&mut fr, INFO_AT + 16, vpid_of(k, p, wget(k.sigsave, sender_at(p, s)) % 256));   // as p's PID namespace names the sender
+  }
+  // The ucontext: no flags or link; the alternate stack; the mask to go back to.
+  xfer_u64(&mut fr, UC_STACK, alt_sp);
+  xfer_u64(&mut fr, UC_STACK + 8, ss_flags);
+  xfer_u64(&mut fr, UC_STACK + 16, alt_size);
+  xfer_u64(&mut fr, UC_MASK, was);
+  // The registers.
+  xfer_u64(&mut fr, UC_FAULT, pget(k.procs, p, reg_word(R_FAULT)));
+  let mut g = 0;
+  while g < 31
+    invariant g <= 31 && blen(fr) == FRAME_SIZE && kok(k)
+  {
+    xfer_u64(&mut fr, UC_REGS + 8 * g, pget(k.procs, p, reg_word(g)));
+    g = g + 1;
+  }
+  xfer_u64(&mut fr, UC_SP, pget(k.procs, p, reg_word(R_SP)));
+  xfer_u64(&mut fr, UC_PC, pget(k.procs, p, reg_word(R_PC)));
+  xfer_u64(&mut fr, UC_PSTATE, pget(k.procs, p, reg_word(R_FLAGS)));
+  // The frame record: the interrupted frame pointer and pc.
+  xfer_u64(&mut fr, FR_AT, pget(k.procs, p, reg_word(29)));
+  xfer_u64(&mut fr, FR_AT + 8, pget(k.procs, p, reg_word(R_PC)));
+  // The FP/SIMD state: q0-q31, then fpsr and fpcr, as cpu_fpu_save left it.
+  match take_fpu(&mut k.fpus, p) {
+    Fpu::None => {},
+    Fpu::State(f) => {
+      xfer_u64(&mut fr, FP_REC, FP_MAGIC + FP_RSIZE * 0x100000000);
+      xfer_u64(&mut fr, FP_REC + 8, frame_read(f, 64) % 0x100000000 + frame_read(f, 65) % 0x100000000 * 0x100000000);
+      let mut w = 0;
+      while w < 64
+        invariant w <= 64 && blen(fr) == FRAME_SIZE
+      {
+        xfer_u64(&mut fr, FP_REC + 16 + 8 * w, frame_read(f, w));
+        w = w + 1;
+      }
+      put_fpu(&mut k.fpus, p, Fpu::State(f));
+    },
+  }
+  stack_reach(&mut k.mem, &mut k.spaces, p, base);
+  let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, p, base, fr, FRAME_SIZE);
+  bfree(fr);
+  if put != FRAME_SIZE {
+    return false;
+  }
+  pset(&mut k.procs, p, reg_word(R_SP), base);
+  pset(&mut k.procs, p, reg_word(0), s);
+  pset(&mut k.procs, p, reg_word(1), base + INFO_AT);
+  pset(&mut k.procs, p, reg_word(2), base + UC_AT);
+  pset(&mut k.procs, p, reg_word(29), base + FR_AT);
+  if restorer == 0 {
+    pset(&mut k.procs, p, reg_word(30), USER_BASE + VDSO_PAGE * 4096 + SIGTRAMP_AT);   // the vDSO's rt_sigreturn trampoline
+  } else {
+    pset(&mut k.procs, p, reg_word(30), restorer);
+  }
+  return true;
+}
+
+/// rt_sigreturn: the handler's frame starts at sp. Restores the registers,
+/// the mask and the FP/SIMD state, and returns the restored x0, so the
+/// interrupted code sees it unchanged.
+fn lx_sigreturn(k: &mut Kernel, pid: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  let sp = pget(k.procs, pid, reg_word(R_SP));
+  let mut fr = balloc(FRAME_SIZE);
+  if sp % 16 != 0 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, sp, &mut fr, FP_REC + 16 + 512) != FP_REC + 16 + 512 {
+    bfree(fr);
+    return EFAULT;
+  }
+  if rd64(fr, FP_REC) == FP_MAGIC + FP_RSIZE * 0x100000000 {
+    match take_fpu(&mut k.fpus, pid) {
+      Fpu::None => {},
+      Fpu::State(mut f) => {
+        let sc = rd64(fr, FP_REC + 8);
+        frame_write(&mut f, 64, sc % 0x100000000);
+        frame_write(&mut f, 65, sc / 0x100000000);
+        let mut w = 0;
+        while w < 64
+          invariant w <= 64 && blen(fr) == FRAME_SIZE
+        {
+          frame_write(&mut f, w, rd64(fr, FP_REC + 16 + 8 * w));
+          w = w + 1;
+        }
+        put_fpu(&mut k.fpus, pid, Fpu::State(f));
+      },
+    }
+  }
+  let mut g = 0;
+  while g < 31
+    invariant g <= 31 && blen(fr) == FRAME_SIZE && kok(k)
+  {
+    pset(&mut k.procs, pid, reg_word(g), rd64(fr, UC_REGS + 8 * g));
+    g = g + 1;
+  }
+  pset(&mut k.procs, pid, reg_word(R_SP), rd64(fr, UC_SP));
+  pset(&mut k.procs, pid, reg_word(R_PC), rd64(fr, UC_PC));
+  pset(&mut k.procs, pid, reg_word(R_FLAGS), rd64(fr, UC_PSTATE) & PSTATE_USER);
+  pset(&mut k.procs, pid, F_SIGMASK, blockable(rd64(fr, UC_MASK)));
+  let x0 = rd64(fr, UC_REGS);
+  bfree(fr);
+  return x0;
+}

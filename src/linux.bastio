@@ -156,7 +156,6 @@ const ENOEXEC: u64 = 18446744073709551608;  // 2^64 - 8
 const ECHILD: u64 = 18446744073709551606;   // 2^64 - 10
 const EAGAIN: u64 = 18446744073709551605;   // 2^64 - 11
 
-const STAT_SIZE: u64 = 144;                 // struct stat on x86-64
 const S_IFDIR: u64 = 0x41ED;                // a directory, rwxr-xr-x
 const S_IFREG_X: u64 = 0x81ED;              // a regular file, rwxr-xr-x
 const S_IFREG: u64 = 0x81A4;                // a regular file, rw-r--r--
@@ -230,7 +229,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k) && con_ok(con)
 {
-  let n = lx_alias(k, pid, pget(k.procs, pid, F_REGS + R_RAX));   // src/lxextra.bastio
+  let n = lx_alias(k, pid, pget(k.procs, pid, F_REGS + R_LXNR));   // src/lxextra.bastio
   let sp = pget(k.procs, pid, F_REGS + R_RSP);
   if sp >= USER_BASE + 128 {
     stack_reach(&mut k.mem, &mut k.spaces, pid, sp - 128);   // the red zone too
@@ -248,7 +247,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if sc_mode(k, pid) != 0 {
     // seccomp (src/lxseccomp.bastio): the filters see the registers as the
     // process made the call, before any translation.
-    let v = sc_decide(&mut k, pid, pget(k.procs, pid, F_REGS + R_RAX));
+    let v = sc_decide(&mut k, pid, pget(k.procs, pid, F_REGS + R_LXNR));
     if !v.run {
       ret(&mut k.procs, pid, v.ret);
       return KEEP;
@@ -542,7 +541,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return SWITCH;                          // the parent waits until the child lets go
   }
   if n == LX_CLONE && a & CLONE_THREAD != 0 {
-    let r = lx_thread_clone(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));
+    let r = lx_thread_clone(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_CLONE_CTID), pget(k.procs, pid, F_REGS + R_CLONE_TLS));
     ret(&mut k.procs, pid, child_id(k, pid, r));
     if r < NPROC {
       pt_fork_event(&mut k, pid, r, 3);
@@ -554,7 +553,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_CLONE && clone_proc_flags(a) {
-    let r = lx_clone_proc(&mut k, mmu, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));
+    let r = lx_clone_proc(&mut k, mmu, pid, a, b, c, pget(k.procs, pid, F_REGS + R_CLONE_CTID), pget(k.procs, pid, F_REGS + R_CLONE_TLS));
     ret(&mut k.procs, pid, child_id(k, pid, r));
     if r < NPROC {
       let mut kind = 3;
@@ -1316,7 +1315,7 @@ fn lx_reading(procs: &Buf) -> bool
     if state(procs, p) == LXREADING {
       return true;
     }
-    let n = pget(procs, p, F_REGS + R_RAX);
+    let n = pget(procs, p, F_REGS + R_LXNR);
     if pget(procs, p, F_RESTART) >= 2
       && (n == LX_POLL || n == LX_PPOLL || n == LX_SELECT || n == LX_PSELECT6 || n == LX_EPOLL_WAIT
         || n == LX_EPOLL_PWAIT || n == LX_EPOLL_PWAIT2 || n == LX_READ) {
@@ -1396,12 +1395,12 @@ fn console_read(k: &mut Kernel, pid: u64, va: u64, n: u64, was: u64) -> u64
   }
   if get(k.line, 1) == 0 {
     let rip = pget(k.procs, pid, F_REGS + R_RIP);
-    if rip < 2 {
+    if rip < SYSCALL_LEN {
       ret(&mut k.procs, pid, EFAULT);
       return KEEP;
     }
-    pset(&mut k.procs, pid, F_REGS + R_RIP, rip - 2);
-    pset(&mut k.procs, pid, F_REGS + R_RAX, LX_READ);
+    pset(&mut k.procs, pid, F_REGS + R_RIP, rip - SYSCALL_LEN);
+    pset(&mut k.procs, pid, F_REGS + R_LXNR, LX_READ);
     pset(&mut k.procs, pid, F_STATE, LXREADING);
     pset(&mut k.procs, pid, F_RESTART, 1);
     return SWITCH;
