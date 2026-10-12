@@ -970,6 +970,15 @@ else:
         print("ok   mcloud: the public key is in root's authorized_keys")
     else:
         print("FAIL mcloud authorized_keys:", repr(out[mark:])); fails += 1
+    # A Linux process killed by a page fault gets a second line saying what
+    # the kernel knows of the page (the report for a crash that is hard to
+    # reproduce).
+    mark = len(out)
+    qemu.stdin.write(b"mtest crash\r"); qemu.stdin.flush()
+    if read_until(b"\n# ", mark) and re.search(rb"page fault at rip 0x[0-9a-f]+, address 0x[0-9a-f]+; killed\]\r\n\[fault diag: page 0x[0-9a-f]+ not mapped, not owned, brk 0x[0-9a-f]+, mmap 0x[0-9a-f]+, parent \d+, \w+ thread\w*, age \d+\]", out[mark:]):
+        print("ok   a killed Linux process gets a fault diagnostic line")
+    else:
+        print("FAIL fault diagnostic:", repr(out[mark:])); fails += 1
     mark = len(out)
     qemu.stdin.write(b"mcloud 10.0.2.2:9\r"); qemu.stdin.flush()
     if read_until(b"\n# ", mark) and b"mcloud: no metadata service" in out[mark:]:
@@ -1832,10 +1841,13 @@ with open(big, "wb") as f:
 qemu = boot(1, extra=["-drive", f"file={big},format=raw,if=none,id=bg", "-device", "virtio-blk-pci,drive=bg"])
 out = b""
 deadline = time.time() + timeout
+# The last write waits in a batch for up to 0.1 s before it is committed
+# (src/diskfs.bastio), and the image has no `sync` applet, so the line ends
+# with a sleep before QEMU is killed.
 for line, want, until in [
     ("ash", b"built-in shell (ash)", b"\n# "),
     ("stat -f -c '%b %c' /disk; echo big > /disk/b; cat /disk/b; stat -f -c %f /disk; rm /disk/b", b"10485755 5119\r\nbig\r\n1048", b"\n# "),
-    ("mkdir disk/many; i=0; while [ $i -lt 1100 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; sync", b"\r\n1100\r\n", b"\n# "),
+    ("mkdir disk/many; i=0; while [ $i -lt 1100 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; sleep 1", b"\r\n1100\r\n", b"\n# "),
 ]:
     mark = len(out)
     if mark == 0 and not read_until(b"bastios> "):

@@ -104,6 +104,58 @@ fn fault_name(con: &mut Con, v: u64)
   }
 }
 
+/// For a Linux process killed by a page fault: what the kernel knows about
+/// the address, one line, so a crash that is hard to reproduce can be
+/// told from its log. Whether the page is mapped, how many pages around it
+/// the process owns (mapped or recorded), where its heap and mmap area
+/// are, its parent, whether it is the only thread of its group, and how
+/// long it had run (hundredths of a second).
+fn fault_diag(s: &mut Sys, p: u64)
+  requires sys_ok(s) && p < NPROC
+  ensures sys_ok(s)
+{
+  let va = pget(s.k.procs, p, F_REGS + 19);
+  if pget(s.k.procs, p, F_BRK) > USER_SIZE || va < USER_BASE || va - USER_BASE >= USER_SIZE {
+    return;
+  }
+  let page = (va - USER_BASE) / 4096;
+  let mapped = user_present(&mut s.k.spaces, p, va);
+  let owned = anon_count(&mut s.k, p, page, page + 1);
+  let alone = group_alone(&mut s.k, p);
+  puts(&mut s.con, "[fault diag: page ");
+  put_hex(&mut s.con, page);
+  if mapped {
+    puts(&mut s.con, " mapped");
+  } else {
+    puts(&mut s.con, " not mapped");
+  }
+  if owned > 0 {
+    puts(&mut s.con, ", owned");
+  } else {
+    puts(&mut s.con, ", not owned");
+  }
+  puts(&mut s.con, ", brk ");
+  put_hex(&mut s.con, pget(s.k.procs, p, F_BRK));
+  puts(&mut s.con, ", mmap ");
+  put_hex(&mut s.con, pget(s.k.procs, p, F_MMAP));
+  puts(&mut s.con, ", parent ");
+  put_num(&mut s.con, pget(s.k.procs, p, F_PARENT));
+  if alone {
+    puts(&mut s.con, ", one thread");
+  } else {
+    puts(&mut s.con, ", threads");
+  }
+  puts(&mut s.con, ", age ");
+  let born = pget(s.k.procs, p, F_START);
+  let now = s.k.ns / 10000000;
+  if born <= now {
+    put_num(&mut s.con, now - born);
+  } else {
+    put_num(&mut s.con, 0);
+  }
+  puts(&mut s.con, "]\r\n");
+}
+
 // ---------------------------------------------------------------- scheduling
 
 // Every processor runs `sched` (below): it takes the lock on the kernel's
@@ -510,6 +562,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       put_hex(&mut s.con, pget(s.k.procs, p, F_REGS + 19));
     }
     puts(&mut s.con, "; killed]\r\n");
+    if v == 14 {
+      fault_diag(&mut s, p);
+    }
     terminate(&mut s.k, mmu, p, SIG_DEATH + sig);
     return (p + 1) % NPROC;
   }
