@@ -133,3 +133,15 @@ test/shell_test.sh                          # includes three ENA boots, skipped 
   Telling the two apart needs a way to know the monitor (for example a
   Firecracker-specific signature in the PVH start info); none is known, so
   this is left open.
+- **First boot from instance metadata.** `mcloud [ADDRESS[:PORT]]` (a Linux
+  program, `user/mcloud.c`; run it from `ash`, since the kernel's own shell
+  passes no arguments to Linux programs) asks the metadata service at
+  169.254.169.254 for a session token (IMDSv2: `PUT /latest/api/token`),
+  then for `meta-data/hostname` and `meta-data/public-keys/0/openssh-key`
+  with the token as a header. It sets the host name (letters, digits, `-` and
+  `.` only) and writes the key to `~root/.ssh/authorized_keys` (modes 700 and
+  600), so the SSH server lets that key in. Tested in `test/shell_test.sh`
+  against a fake service on the host (QEMU's user network cannot reach the
+  real address). Not yet: growing the root file system to the size of the
+  volume, `user-data` scripts, nothing runs it at boot, and it has not been
+  tried on a real cloud.
