@@ -36,3 +36,10 @@ $ bb chroot /disk/a /usr/bin/nvim -u NONE /root/dev.bastio
 $ cd /disk/a/root && rm -f dev && CC=/disk/tcc BASTIO_SOLVER=/disk/z3 /disk/bastioc1 -o dev dev.bastio 2>&1 | bb grep -o 'E-VERIFY-OVERFLOW'; ls dev 2>&1 | bb head -n 1; cd /
 E-VERIFY-OVERFLOW
 ls: dev: No such file or directory
+
+== nvim: edit a C file, build it with tcc, run it
+$ bb chroot /disk/a /usr/bin/nvim -u NONE /root/dev.c
+> i#include <stdio.h>\rint main(void) { printf("built %d\\n", 6 * 7); return 0; }\x1b
+> :wq\r
+$ cd /disk/a/root && /disk/tcc -o devc dev.c && ./devc; cd /
+built 42
