@@ -564,8 +564,6 @@ t_misc: prctl PR_SET_NAME
 t_misc: printf %f
 t_misc: qsort
 t_misc: sched_getaffinity
-t_misc: sched_getaffinity counts the processors /proc/cpuinfo lists
-t_misc: sched_setaffinity to a processor that does not run is EINVAL
 t_misc: seccomp filter denies getpid
 t_misc: statfs
 t_misc: strtod
