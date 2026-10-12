@@ -566,7 +566,9 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
       return ENOMEM;
     }
   }
-  if flags != ns && pget(k.procs, pid, F_TGID) != 0 {
+  // A thread keeps its own working directory and root even when cloned with
+  // CLONE_FS, so unsharing those has nothing left to do.
+  if flags != ns && flags != ns + CLONE_FS && pget(k.procs, pid, F_TGID) != 0 {
     return EINVAL;                          // threads that share them: not supported
   }
   if ns & CLONE_NEWNS != 0 && ns & (CLONE_NEWNET + CLONE_NEWUTS + CLONE_NEWIPC) != 0 && !ns_room(&mut k, pid) {

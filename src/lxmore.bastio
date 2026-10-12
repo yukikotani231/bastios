@@ -518,14 +518,15 @@ fn lx_memfd(k: &mut Kernel, pid: u64, name: u64, flags: u64) -> u64
 
 /// The slot of the sealing table for file f, or SEAL_N if it has none.
 fn seal_slot(k: &Kernel, f: u64) -> u64
-  requires kok(k) && f < 0xFFFFFFFFFFFFFFFF
+  requires kok(k)
   ensures result <= SEAL_N
 {
   let mut e = 0;
   while e < SEAL_N
     invariant e <= SEAL_N && kok(k)
   {
-    if get(k.sys, SYS_SEAL + 2 * e) == f + 1 {
+    let w = get(k.sys, SYS_SEAL + 2 * e);
+    if w != 0 && w - 1 == f {
       return e;
     }
     e = e + 1;
@@ -546,7 +547,7 @@ fn seal_new(k: &mut Kernel, pid: u64, fd: u64, allow: bool)
   }
   let f = vfs_row_file(k.fs, d.x);
   if f == NO_FILE || f >= 0xFFFFFFFFFFFFFFFF {
-    return;
+    return;                                 // the table holds f + 1
   }
   let mut e = seal_slot(k, f);
   if e >= SEAL_N {

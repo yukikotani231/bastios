@@ -242,7 +242,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
   if !src.file && src.prog >= NPROGS {
     return k.perr;
   }
-  if src.file && file_writing(k, src.f) {
+  if src.file && file_writing(k, src.f) && seal_slot(k, src.f) >= SEAL_N {
     return ETXTBSY;                         // open for writing somewhere
   }
   let mut args = balloc(ARGS_MAX);
@@ -389,6 +389,15 @@ fn src_named(k: &mut Kernel, pid: u64, n: u64) -> Src
   }
   if is_exe_file(pf) {
     return exe_src(&mut k, (pf - PROC_DEV) / 16);
+  }
+  // /proc/PID/fd/N of this process (a thread of it): the file the descriptor
+  // holds, as Linux follows these links; this is how an unlinked file, a
+  // memfd, is run.
+  if n <= XFER {
+    let pfd = proc_fd(k.procs, k.fs.xfer, n);
+    if pfd != NO_RESULT && tgid(k.procs, pfd / LXNFD) == tgid(k.procs, pid) {
+      return fd_src(&mut k, pfd / LXNFD, pfd % LXNFD);
+    }
   }
   if n > 4 && xfer_bin(k.fs.xfer) {
     let mut suid = 0;
