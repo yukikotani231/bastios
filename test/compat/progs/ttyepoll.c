@@ -13,8 +13,9 @@
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
     int fd = open("/dev/tty", O_RDWR | O_CLOEXEC);
-    struct termios t;
-    if (fd < 0 || tcgetattr(fd, &t)) return 3;
+    struct termios t, saved;
+    if (fd < 0 || tcgetattr(fd, &saved)) return 3;
+    t = saved;
     cfmakeraw(&t);
     if (tcsetattr(fd, TCSADRAIN, &t)) return 3;
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
@@ -32,6 +33,7 @@ int main(int argc, char **argv) {
             fputc(c, out);
             if (c == 'q') {
                 fclose(out);
+                tcsetattr(fd, TCSADRAIN, &saved);
                 return 0;
             }
         }
