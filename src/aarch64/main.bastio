@@ -83,6 +83,7 @@ import "initfiles.bastio";
 import "lxnum.bastio";
 
 const V_TIMER: u64 = 32;
+const V_LTIMER: u64 = 48;     // the tick of a processor other than the boot one
 const V_SYSCALL: u64 = 128;
 const V_ABORT: u64 = 14;
 
@@ -276,7 +277,10 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     terminate(&mut s.k, mmu, p, 137);
     return (p + 1) % NPROC;
   }
-  if v == V_TIMER {
+  if v == V_TIMER || v == V_LTIMER {
+    // A process waiting in a system call is READY with its pc on the
+    // call and F_RESTART set; a tick that finds it there has run none of
+    // its own code, so it is not charged CPU time.
     if pget(s.k.procs, p, F_RESTART) == 0 {
       pset(&mut s.k.procs, p, F_TICKS, tick(pget(s.k.procs, p, F_TICKS)));
       cpu_timers_tick(&mut s.k, p);
@@ -363,12 +367,130 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   return (p + 1) % NPROC;
 }
 
+// What a trap's handling can leave behind: see after_trap in src/main.bastio.
+fn after_trap(s: &mut Sys, p: u64)
+  requires sys_ok(s) && p < NPROC
+  ensures sys_ok(s)
+{
+  if pget(s.k.procs, p, F_RESTART) == 0 {
+    sleepers_wake(&mut s.k);
+  }
+}
+
+/// Under the lock, after an idle wait ended with vector `v`. Only the boot
+/// processor's tick (V_TIMER) counts the kernel's time and moves the console.
+fn idled(s: &mut Sys, v: u64, ser: &Serial)
+  requires sys_ok(s)
+  ensures sys_ok(s)
+{
+  if v == V_TIMER {
+    s.k.ticks = tick(s.k.ticks);
+    set_clock(&mut s);
+    lx_alarms(&mut s.k);
+    sleepers_wake(&mut s.k);
+    pump(ser, &mut s);
+  } else {
+    sleepers_wake(&mut s.k);
+  }
+}
+
+// What `turn` hands back: the next job, and where the round robin goes on.
+struct Next { job: Job, from: u64 }
+
+/// `finish` for task `t`, then `next_job` from where it leaves the round
+/// robin, in one critical section. The boot processor's tick also moves the
+/// console.
+fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, ser: &Serial) -> Next
+  requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
+  requires 1 <= p && p < NPROC
+  ensures sys_ok(s) && result.from < NPROC
+  ensures result.job is Job::Run ==> (1 <= result.job.Run.pid && result.job.Run.pid < NPROC)
+  ensures !(result.job is Job::Run) ==> mmu_root(mmu) == KERNEL_ROOT
+{
+  let c = finish(&mut s, &mut cpu, mmu, p, fpu, v);
+  after_trap(&mut s, p);
+  if v == V_TIMER {
+    pump(ser, &mut s);
+  }
+  let j = next_job(&mut s, &mut cpu, &mut mmu, c);
+  return Next { job: j, from: c };
+}
+
+/// `finish` for a task the loop below still holds when the kernel stops.
+fn finish_end(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> u64
+  requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
+  requires 1 <= p && p < NPROC
+  ensures sys_ok(s) && result < NPROC
+{
+  let c = finish(&mut s, &mut cpu, mmu, p, fpu, v);
+  after_trap(&mut s, p);
+  return c;
+}
+
+/// The scheduler loop every processor runs, with its own `cpu` and `mmu`,
+/// until the kernel stops (no process left, or a power off). The kernel's
+/// state is taken under `s` for each job and each trap; a process runs in
+/// user mode without it, on the lease its processor holds on its address
+/// space (see the top of the scheduling section of src/main.bastio, which
+/// this follows).
+fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], ser: &Serial)
+  requires mmu_root(mmu) == KERNEL_ROOT
+  ensures mmu_root(mmu) == KERNEL_ROOT
+{
+  let mut cur = 1;
+  let mut going = true;
+  let mut j = locked(s, next_job, &mut cpu, &mut mmu, cur);
+  while going
+    invariant cur < NPROC
+    invariant !(j is Job::Run) ==> mmu_root(mmu) == KERNEL_ROOT
+    invariant j is Job::Run ==> (1 <= j.Run.pid && j.Run.pid < NPROC)
+  {
+    match j {
+      Job::Stop => {
+        going = false;
+        j = Job::Stop;
+      },
+      Job::Idle => {
+        // Nothing to run: sleep until the next interrupt (the timer ticks).
+        let v = cpu_idle(&mut cpu);
+        locked(s, idled, v, ser);
+        j = locked(s, next_job, &mut cpu, &mut mmu, cur);
+      },
+      Job::Run(t) => {
+        cpu_fpu_load(&mut cpu, t.fpu);
+        let v = cpu_run(&mut cpu, mmu);
+        mmu_exit(&mut mmu, t.lease);
+        let mut f = t.fpu;
+        cpu_fpu_save(&mut cpu, &mut f);
+        let next = locked(s, turn, &mut cpu, &mut mmu, t.pid, f, v, ser);
+        cur = next.from;
+        j = next.job;
+      },
+    }
+  }
+  // Only Stop ends the loop; a task here would be put back as after a tick.
+  match j {
+    Job::Run(t) => {
+      mmu_exit(&mut mmu, t.lease);
+      let c = locked(s, finish_end, &mut cpu, mmu, t.pid, t.fpu, V_TIMER);
+    },
+    Job::Idle => {},
+    Job::Stop => {},
+  }
+}
+
 fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 {
   let mut m = mem_new(pool);
   let mut console = con_new();
   puts(&mut console, "\r\nBastiOS 0.2 (aarch64): ");
   put_num(&mut console, count_avail(m.bm));
-  puts(&mut console, " pages of memory, 1 processor\r\n");
+  puts(&mut console, " pages of memory, ");
+  put_num(&mut console, cpu_count(cpu));
+  if cpu_count(cpu) == 1 {
+    puts(&mut console, " processor\r\n");
+  } else {
+    puts(&mut console, " processors\r\n");
+  }
   let vm_where = dt_slots(cpu);
   puts(&mut console, "devicetree: ");
   put_num(&mut console, vm_where.slots);
@@ -389,60 +511,18 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
     puts(&mut console, " blocks of 4 KiB\r\n");
   }
   let nic = nic_find(&mut m, &mut win, 4, dk_lo, dk_hi, vm_where);
-  let mut k = kernel_new(m, disk, nic, Snd::None, mice_new(false), tsc, 0, 0, 1);
+  let mut k = kernel_new(m, disk, nic, Snd::None, mice_new(false), tsc, 0, 0, cpu_count(cpu));
   install_files(&mut console, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut console, "cannot start the shell\r\n");
   }
-  let mut s = Sys { k: k, con: console, stop: false };
-  pump(con, &mut s);
-  let mut cur = 1;
-  let mut job = next_job(&mut s, &mut cpu, &mut mmu, cur);
-  let mut going = true;
-  while going
-    invariant sys_ok(s) && cur < NPROC
-    invariant !(job is Job::Run) ==> mmu_root(mmu) == KERNEL_ROOT
-    invariant job is Job::Run ==> (1 <= job.Run.pid && job.Run.pid < NPROC)
-  {
-    match job {
-      Job::Stop => {
-        going = false;
-        job = Job::Stop;
-      },
-      Job::Idle => {
-        // Nothing to run: sleep until the next interrupt (the timer ticks).
-        let v = cpu_idle(&mut cpu);
-        if v == V_TIMER {
-          s.k.ticks = tick(s.k.ticks);
-          set_clock(&mut s);
-          lx_alarms(&mut s.k);
-        }
-        sleepers_wake(&mut s.k);
-        pump(con, &mut s);
-        job = next_job(&mut s, &mut cpu, &mut mmu, cur);
-      },
-      Job::Run(t) => {
-        cpu_fpu_load(&mut cpu, t.fpu);
-        let v = cpu_run(&mut cpu, mmu);
-        mmu_exit(&mut mmu, t.lease);
-        let mut f = t.fpu;
-        cpu_fpu_save(&mut cpu, &mut f);
-        cur = finish(&mut s, &mut cpu, mmu, t.pid, f, v);
-        if v == V_TIMER {
-          pump(con, &mut s);
-        }
-        job = next_job(&mut s, &mut cpu, &mut mmu, cur);
-      },
-    }
-  }
-  match job {
-    Job::Run(t) => {
-      mmu_exit(&mut mmu, t.lease);
-      let c = finish(&mut s, &mut cpu, mmu, t.pid, t.fpu, V_TIMER);
-    },
-    Job::Idle => {},
-    Job::Stop => {},
-  }
+  let mut s0 = Sys { k: k, con: console, stop: false };
+  pump(con, &mut s0);
+  // Every processor runs the scheduler until the kernel stops; then they
+  // are all parked again and the state is this one's.
+  let sl = lock_new(s0);
+  smp_run(sched, &mut cpu, &mut mmu, sl, con);
+  let mut s = lock_end(sl);
   // Power off: tear down whatever is left, so every page goes back.
   kernel_drop_spaces(&mut s.k, mmu);
   match s.k.shm {

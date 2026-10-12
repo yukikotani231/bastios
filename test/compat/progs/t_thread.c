@@ -1,6 +1,7 @@
 /* Threads: pthread_create (clone with CLONE_VM), joining, mutexes and
  * condition variables (futex), thread-local storage. */
 #include "compat.h"
+#include <fcntl.h>
 #include <pthread.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -124,6 +125,24 @@ static int task_dir(void) {
     return ok && n == 2 && me && other && isdir && comm && sw;
 }
 
+/* A thread's descriptors and namespaces are its process's: Go reaches them as
+ * /proc/self/task/TID/fd/N when there is no /proc/thread-self. */
+static int task_fd(void) {
+    int fd = open("/", O_RDONLY);
+    if (fd < 0) return 0;
+    char path[96], b[64];
+    snprintf(path, sizeof path, "/proc/self/task/%ld/fd/%d", (long)gettid(), fd);
+    ssize_t n = readlink(path, b, sizeof b - 1);
+    int ok = n == 1 && b[0] == '/';
+    snprintf(path, sizeof path, "/proc/self/task/%ld/ns/mnt", (long)gettid());
+    n = readlink(path, b, sizeof b - 1);
+    ok = ok && n > 5 && strncmp(b, "mnt:[", 5) == 0;
+    snprintf(path, sizeof path, "/proc/%d/task/%ld/fd/%d", getpid(), (long)gettid(), fd);
+    n = readlink(path, b, sizeof b - 1);
+    close(fd);
+    return ok && n == 1;
+}
+
 /* A thread that has ended does not hand its id to the next one at once. */
 static void *tid_of(void *a) { (void)a; return (void *)(long)gettid(); }
 static int tids_differ(void) {
@@ -182,6 +201,7 @@ int main(void) {
            pthread_create(&x, 0, g, 0) == 0 && pthread_join(x, (void **)&other) == 0 && other != gettid(); }));
     EXPECT("/proc/self/stat and status count the threads", count_threads());
     EXPECT("/proc/self/task lists the threads, and /proc/self/task/TID has their files", task_dir());
+    EXPECT("/proc/self/task/TID/fd/N and ns/ are the process's", task_fd());
     EXPECT("threads that ended and began one after another have different ids", tids_differ());
     if (begin("exit_group while another thread runs keeps its code")) {
         int r = group_exit_code();

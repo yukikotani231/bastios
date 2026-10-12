@@ -130,6 +130,9 @@ test/shell_test.sh                          # includes three ENA boots, skipped 
   keyboard controller (`0xFE` to port `0x64`) is how Firecracker guests
   leave, since it ends the VM there, but on QEMU the same write restarts the
   guest, so the kernel does not use it as a power off. `reboot` works on both.
+  Ctrl-Alt-Delete on the PS/2 keyboard (Firecracker's `SendCtrlAltDel`)
+  restarts the machine the same way, which ends a Firecracker VM from the
+  outside.
   Telling the two apart needs a way to know the monitor (for example a
   Firecracker-specific signature in the PVH start info); none is known, so
   this is left open.

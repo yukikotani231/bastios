@@ -456,7 +456,7 @@ const LK_WW: u64 = 4;
 const LK_LEN: u64 = LK_WAITS + NPROC * LK_WW;
 const IPC_LEN: u64 = 9984;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
 const RNG_LEN: u64 = 19;              // the random generator's words (src/lxdev.bastio)
-const SYS_LEN: u64 = 16256;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio)
+const SYS_LEN: u64 = 16257;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio), then SYS_BUSY, the timer ticks all processes have run (/proc/stat)
 const SYS_PQ: u64 = 160;
 const SYS_PR: u64 = 256;               // SYS_PQ + PQ_N * 12; NPROC * PR_W words
 const SYS_RL: u64 = 1536;               // SYS_PR + NPROC * PR_W; NPROC * RL_W words (src/lxrlimit.bastio)
@@ -479,6 +479,7 @@ const SEAL_N: u64 = 16;
 // each system call (PTRACE_SYSCALL), TS_ENTRY while stopped before one,
 // TS_NOENT to let the next one start, TS_EXIT while stopped after one, and
 // the call's number times TS_NR.
+const SYS_BUSY: u64 = 16256;           // SYS_PT2 + NPROC; one word: ticks some process was running at
 const SYS_PT2: u64 = 16000;            // SYS_SEAL + SEAL_N * 2; a word per process
 const TS_SYS: u64 = 1;
 const TS_ENTRY: u64 = 2;
@@ -597,11 +598,13 @@ const MNS_SC: u64 = MNS_PQ + PQ_N;          // the seccomp pool (src/lxseccomp.b
 // Seccomp (src/lxseccomp.bastio). Each process has SC_PW words in k.mns from
 // MNS_SC (top filter + 1, flags). The filters live in k.scf, which is empty
 // until the first one is loaded: SC_HW words for each of SC_N filters
-// (holders, parent + 1, instruction count, in use, first instruction), the
+// (holders, parent + 1, instruction count, in use, first instruction, listener open), the
 // scratch words a run uses, then SC_POOL instructions for all of them.
-const SC_PW: u64 = 2;
+const SC_PW: u64 = 8;
 const SC_N: u64 = 8;
-const SC_HW: u64 = 5;
+const SC_WAIT: u64 = 18446744073709546616;   // 2^64 - 5000: not a result, not an errno: sleep, then run the call again
+const SC_FOREVER: u64 = 18446744073709551613;   // FOREVER (src/lxtime.bastio): a wait with no deadline
+const SC_HW: u64 = 6;
 const SC_MAXI: u64 = 4096;
 const SC_SCR: u64 = SC_N * SC_HW;
 const SC_SCRN: u64 = 24;
@@ -670,6 +673,7 @@ const OF_PTY: u64 = 14;               // a pseudo-terminal end: x DEV_PTM + N or
 const OF_PQ: u64 = 13;                // a POSIX message queue: x the queue; word 3: nonblocking + 2 * access mode (src/lxmq.bastio)
 const OF_SIGFD: u64 = 12;             // a signalfd: word 2 the signals it takes; word 3: nonblocking (src/lxevent.bastio)
 const OF_INOTIFY: u64 = 16;           // an inotify instance: x the instance; word 3: nonblocking (src/lxinotify.bastio)
+const OF_SECCOMP: u64 = 18;           // a seccomp notifier: x the filter; word 3: nonblocking (src/lxseccomp.bastio)
 const OF_NETLINK: u64 = 17;           // a netlink socket: x its slot; word 3: nonblocking (src/lxnetlink.bastio)
 const OF_PIDFD: u64 = 15;             // a pidfd: x the process, NPROC once its slot was reused; word 3: nonblocking (src/lxpidfd.bastio)
 const DIR_ROOT: u64 = 0;
@@ -816,6 +820,7 @@ const K_EVENT: u64 = 8;               // x: the description (src/lxevent.bastio)
 const K_TIMER: u64 = 9;               // x: the timer
 const K_EPOLL: u64 = 10;              // x: the epoll instance
 const K_SIGFD: u64 = 11;              // x: the description (src/lxevent.bastio)
+const K_SECCOMP: u64 = 18;            // x: the filter (src/lxseccomp.bastio)
 const K_INOTIFY: u64 = 16;            // x: the instance (src/lxinotify.bastio)
 const K_PIDFD: u64 = 15;              // x: the process, NPROC if it is gone (src/lxpidfd.bastio)
 

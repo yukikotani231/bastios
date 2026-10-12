@@ -1455,6 +1455,22 @@ fn nic_if_rename(c: &mut Nic, ns: u64, i: u64, w0: u64, w1: u64) -> u64
   }
 }
 
+/// The frames the card has received (rx) or sent: all the counts there
+/// are, kept for the card and not per interface.
+fn nic_frames(c: &Nic, rx: bool) -> u64
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if rx {
+        return n.rx;
+      }
+      return n.tx;
+    },
+  }
+}
+
 /// Slot i's MTU.
 fn nic_if_mtu(c: &Nic, i: u64) -> u64
   requires nic_ok(c) && i < IFN

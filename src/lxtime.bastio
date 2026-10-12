@@ -380,6 +380,9 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   if f.kind == K_DEV && f.x == DEV_MICE {
     return mice_bits(k);                    // src/lxmouse.bastio
   }
+  if f.kind == K_SECCOMP && f.x < SC_N {
+    return sc_bits(k, f.x);                 // src/lxseccomp.bastio
+  }
   if f.kind == K_INOTIFY {
     return ino_bits(k, f.x);                // src/lxinotify.bastio
   }

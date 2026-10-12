@@ -105,6 +105,58 @@ fn fault_name(con: &mut Con, v: u64)
   }
 }
 
+/// For a Linux process killed by a page fault: what the kernel knows about
+/// the address, one line, so a crash that is hard to reproduce can be
+/// told from its log. Native programs (no heap) print nothing. Whether the page is mapped, how many pages around it
+/// the process owns (mapped or recorded), where its heap and mmap area
+/// are, its parent, whether it is the only thread of its group, and how
+/// long it had run (hundredths of a second).
+fn fault_diag(s: &mut Sys, p: u64)
+  requires sys_ok(s) && p < NPROC
+  ensures sys_ok(s)
+{
+  let va = pget(s.k.procs, p, F_REGS + 19);
+  if pget(s.k.procs, p, F_BRK) == 0 || pget(s.k.procs, p, F_BRK) > USER_SIZE || va < USER_BASE || va - USER_BASE >= USER_SIZE {
+    return;
+  }
+  let page = (va - USER_BASE) / 4096;
+  let mapped = user_present(&mut s.k.spaces, p, va);
+  let owned = anon_count(&mut s.k, p, page, page + 1);
+  let alone = group_alone(&mut s.k, p);
+  puts(&mut s.con, "[fault diag: page ");
+  put_hex(&mut s.con, page);
+  if mapped {
+    puts(&mut s.con, " mapped");
+  } else {
+    puts(&mut s.con, " not mapped");
+  }
+  if owned > 0 {
+    puts(&mut s.con, ", owned");
+  } else {
+    puts(&mut s.con, ", not owned");
+  }
+  puts(&mut s.con, ", brk ");
+  put_hex(&mut s.con, pget(s.k.procs, p, F_BRK));
+  puts(&mut s.con, ", mmap ");
+  put_hex(&mut s.con, pget(s.k.procs, p, F_MMAP));
+  puts(&mut s.con, ", parent ");
+  put_num(&mut s.con, pget(s.k.procs, p, F_PARENT));
+  if alone {
+    puts(&mut s.con, ", one thread");
+  } else {
+    puts(&mut s.con, ", threads");
+  }
+  puts(&mut s.con, ", age ");
+  let born = pget(s.k.procs, p, F_START);
+  let now = s.k.ns / 10000000;
+  if born <= now {
+    put_num(&mut s.con, now - born);
+  } else {
+    put_num(&mut s.con, 0);
+  }
+  puts(&mut s.con, "]\r\n");
+}
+
 // ---------------------------------------------------------------- scheduling
 
 // Every processor runs `sched` (below): it takes the lock on the kernel's
@@ -405,6 +457,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     // code, so it is not charged CPU time (a sleep would count otherwise).
     if pget(s.k.procs, p, F_RESTART) == 0 {
       pset(&mut s.k.procs, p, F_TICKS, tick(pget(s.k.procs, p, F_TICKS)));
+      s.k.sys = set(s.k.sys, SYS_BUSY, tick(get(s.k.sys, SYS_BUSY)));
       cpu_timers_tick(&mut s.k, p);
     }
     s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
@@ -525,6 +578,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       put_hex(&mut s.con, pget(s.k.procs, p, F_REGS + 19));
     }
     puts(&mut s.con, "; killed]\r\n");
+    if v == 14 {
+      fault_diag(&mut s, p);
+    }
     terminate(&mut s.k, mmu, p, SIG_DEATH + sig);
     return (p + 1) % NPROC;
   }
@@ -610,10 +666,18 @@ const CHUNK: u64 = 256;
 /// Under the kernel lock, for `pump`: queues the rn bytes received in rx as
 /// typed input, and moves the next chunk of output into tx. Returns how
 /// many bytes of tx to send.
-fn exchange(s: &mut Sys, tx: &mut Bytes, rx: &Bytes, rn: u64, mx: &Bytes, mn: u64, pend: &Atomic[u64]) -> u64
+fn exchange(s: &mut Sys, tx: &mut Bytes, rx: &Bytes, rn: u64, mx: &Bytes, mn: u64, cad: bool, pend: &Atomic[u64]) -> u64
   requires sys_ok(s)
   ensures sys_ok(s)
 {
+  if cad {
+    // Ctrl-Alt-Delete restarts the machine, as on Linux, so a host that
+    // sends it (Firecracker's SendCtrlAltDel) can stop or restart a guest
+    // that has no ACPI.
+    puts(&mut s.con, "\r\nctrl-alt-del: restarting\r\n");
+    s.stop = true;
+    s.reboot = true;
+  }
   mice_push(&mut s.k, mx, mn);              // mouse packets (src/lxmouse.bastio)
   let mut typed = rn > 0;
   let mut i = 0;
@@ -675,12 +739,15 @@ fn pump(t: &mut Term, s: &Lock[Sys], pend: &Atomic[u64])
   {
     let mut rn = 0;
     let mut mn = 0;
+    let mut cad = false;
     let mut c = 0;
     while c != 256 && rn < CHUNK && mn + 4 <= CHUNK
       invariant term_ok(t) && rn <= CHUNK && mn <= CHUNK && blen(rx) == CHUNK && blen(mx) == CHUNK
     {
       c = term_poll(&mut t);
-      if c < 256 {
+      if c == KBD_CAD {
+        cad = true;
+      } else if c < 256 {
         bset(&mut rx, rn, cast[u8](c));
         rn = rn + 1;
       } else if c > 256 {
@@ -692,7 +759,7 @@ fn pump(t: &mut Term, s: &Lock[Sys], pend: &Atomic[u64])
         mn = mn + 4;
       }
     }
-    let tn = locked(s, exchange, &mut tx, rx, rn, mx, mn, pend);
+    let tn = locked(s, exchange, &mut tx, rx, rn, mx, mn, cad, pend);
     term_send(&mut t, tx, tn);
     more = tn == CHUNK || rn == CHUNK || mn + 4 > CHUNK;
     rounds = rounds + 1;
@@ -871,7 +938,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut debug_exit = port_claim(&mut ports, DEBUG_EXIT, 1);
   let mut uart = Uart { io: port_claim(&mut ports, COM1, 8), present: true };
   let mut kbd = Kbd { data: port_claim(&mut ports, KBD_DATA, 1), status: port_claim(&mut ports, KBD_STATUS, 1),
-    shift: false, ctrl: false, ext: false, present: true, aux: false, wheel: false, mb: 0, mn: 0 };
+    shift: false, ctrl: false, alt: false, ext: false, present: true, aux: false, wheel: false, mb: 0, mn: 0 };
   let mut pic = Pic { master: port_claim(&mut ports, PIC1, 2), slave: port_claim(&mut ports, PIC2, 2) };
   let mut pit = Pit { io: port_claim(&mut ports, PIT, 4) };
   let mut rtc = Rtc { io: port_claim(&mut ports, RTC, 2) };
