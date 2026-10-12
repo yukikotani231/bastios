@@ -74,6 +74,8 @@ const PF_VERSION: u64 = 14;           // with pid 0
 const PF_CGROUP: u64 = 15;            // /proc/PID/cgroup
 const PF_MODULES: u64 = 6;            // with pid 0 (status has 6 for a process): /proc/modules
 const PF_DISKSTATS: u64 = 11;         // with pid 0: /proc/diskstats (comm has 11 for a process)
+const PF_NETTCP: u64 = 12;            // with pid 0: /proc/net/tcp (slack has 12 for a process)
+const PF_NETTCP6: u64 = 15;           // with pid 0: /proc/net/tcp6 (cgroup has 15 for a process)
 const PF_NETDEV: u64 = 10;            // with pid 0: /proc/net/dev (maps has 10 for a process)
 const PSYS: u64 = 16 * NPROC;         // PROC_DEV + PSYS + SY_*: a /proc/sys file
 const SY_TAINTED: u64 = 1;
@@ -457,6 +459,12 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   if xfer_is(x, 5, n, "net/dev") {
     return PROC_DEV + PF_NETDEV;
   }
+  if xfer_is(x, 5, n, "net/tcp") {
+    return PROC_DEV + PF_NETTCP;
+  }
+  if xfer_is(x, 5, n, "net/tcp6") {
+    return PROC_DEV + PF_NETTCP6;
+  }
   if xfer_is(x, 5, n, "sys/kernel/tainted") {
     return PROC_DEV + PSYS + SY_TAINTED;
   }
@@ -685,6 +693,12 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
     if i == 0 {
       return Ent { len: name_out(&mut k.fs.xfer, "dev"), dir: false, end: false };
     }
+    if i == 1 {
+      return Ent { len: name_out(&mut k.fs.xfer, "tcp"), dir: false, end: false };
+    }
+    if i == 2 {
+      return Ent { len: name_out(&mut k.fs.xfer, "tcp6"), dir: false, end: false };
+    }
     return end;
   }
   if dir >= DIR_PROC + TASK_DIRS {
@@ -855,6 +869,37 @@ fn put_x(o: &mut Bytes, at: u64, v: u64) -> u64
 }
 
 /// Appends v in decimal.
+/// v as exactly `digits` upper-case hex digits (the low ones if it is wider).
+fn put_hx(o: &mut Bytes, at: u64, v: u64, digits: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT && digits <= 8
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = at;
+  let mut sh = digits;
+  while sh > 0
+    invariant sh <= 8 && blen(o) == PROC_OUT && a <= PROC_OUT
+  {
+    sh = sh - 1;
+    let d = (v >> (4 * sh)) & 15;
+    if d < 10 {
+      a = put_c(&mut o, a, cast[u8](48 + d));
+    } else {
+      a = put_c(&mut o, a, cast[u8](55 + d));
+    }
+  }
+  return a;
+}
+
+/// An address as /proc/net/tcp prints it: the four bytes as one
+/// little-endian number, so 10.0.2.15 is 0F02000A.
+fn put_ip_hex(o: &mut Bytes, at: u64, ip: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let sw = ((ip & 255) << 24) | (((ip >> 8) & 255) << 16) | (((ip >> 16) & 255) << 8) | ((ip >> 24) & 255);
+  return put_hx(&mut o, at, sw, 8);
+}
+
 fn put_n(o: &mut Bytes, at: u64, v: u64) -> u64
   requires blen(o) == PROC_OUT && at <= PROC_OUT
   ensures blen(o) == PROC_OUT && result <= PROC_OUT
@@ -1209,6 +1254,42 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
   }
   if what == PF_MODULES && p == 0 {
     return 0;                               // no loadable modules
+  }
+  if what == PF_NETTCP6 && p == 0 {
+    // IPv6 sockets run over the IPv4 stack (src/net6.bastio), so they are
+    // listed in /proc/net/tcp; this table only has its header.
+    return put_s(&mut o, 0, "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n");
+  }
+  if what == PF_NETTCP && p == 0 {
+    // One line per connection of the reader's network namespace; the
+    // queues, timers, owner and inode are not kept per connection.
+    let ns = net_ns(k, pid);
+    let mut a = put_s(&mut o, 0, "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n");
+    let mut t = 0;
+    let mut row = 0;
+    while t < TCBS && a + 160 < PROC_OUT
+      invariant t <= TCBS && row <= t && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+    {
+      let st = tcp_row(k.nic, t, ns, 0);
+      if st != 0 {
+        a = put_s(&mut o, a, "  ");
+        a = put_n(&mut o, a, row);
+        a = put_s(&mut o, a, ": ");
+        a = put_ip_hex(&mut o, a, tcp_row(k.nic, t, ns, 4));
+        a = put_c(&mut o, a, 58);
+        a = put_hx(&mut o, a, tcp_row(k.nic, t, ns, 1), 4);
+        a = put_c(&mut o, a, 32);
+        a = put_ip_hex(&mut o, a, tcp_row(k.nic, t, ns, 2));
+        a = put_c(&mut o, a, 58);
+        a = put_hx(&mut o, a, tcp_row(k.nic, t, ns, 3), 4);
+        a = put_c(&mut o, a, 32);
+        a = put_hx(&mut o, a, st, 2);
+        a = put_s(&mut o, a, " 00000000:00000000 00:00000000 00000000     0        0 0 1 0000000000000000 100 0 0 10 0\n");
+        row = row + 1;
+      }
+      t = t + 1;
+    }
+    return a;
   }
   if what == PF_NETDEV && p == 0 {
     // One line per interface of the reader's network namespace. Only the
