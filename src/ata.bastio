@@ -9,6 +9,7 @@
 // operation fail instead of hanging the kernel.
 
 import "bio.bastio";
+import "blkconst.bastio";
 
 const ATA_IO: u64 = 0x1F0;
 const ATA_CTL: u64 = 0x3F6;
@@ -32,7 +33,6 @@ const ATA_WRITE: u64 = 0x30;
 const ATA_FLUSH: u64 = 0xE7;
 const ATA_IDENTIFY: u64 = 0xEC;
 
-const SECTOR: u64 = 512;
 const LBA28_MAX: u64 = 0x10000000;
 const ATA_SPINS: u64 = 500000000;     // polls before giving up (a FLUSH CACHE waits
                                       // on the host's fsync, which can take a while)

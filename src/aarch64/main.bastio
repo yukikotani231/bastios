@@ -1,816 +1,98 @@
 // BastiOS on AArch64: the kernel for QEMU's virt machine (make ARCH=aarch64).
 //
 // Platform: boot/aarch64 (entry, exception vectors, GICv3, the generic
-// timer). Everything else is here, in Bastio, under the same proofs as the
-// x86-64 kernel: the page allocator and the address spaces (src/pages.bastio
-// and src/space.bastio, shared with it), the process table, the scheduler
-// and the native system calls.
+// timer). Everything else is the kernel src/main.bastio runs on x86-64,
+// proved under the same rules: the page allocator and address spaces, the
+// process table and scheduler state, the file system, the system calls.
+// What differs per architecture lives in src/aarch64/arch (the console
+// device, registers, program images, the disk and the files the file system
+// starts with).
 //
-// Not yet ported from src/main.bastio: the file system, the network, the
-// Linux system-call layer and more than one processor. The user programs run
-// are the ones that need only the native calls (user/*.bastio built with
-// `--target user --arch aarch64`): a program makes a call with `svc #0`, the
-// number in x8 and the arguments in x0-x2 (bastiolang's user prelude), and
-// gets the result in x0.
+// Not yet here: the Linux system-call layer (an arm64 ABI), the network and
+// more than one processor. The user programs are the ones that need only
+// the native calls (user/*.bastio built with `--target user --arch
+// aarch64`): a program makes a call with `svc #0`, the number in x8 and the
+// arguments in x0-x2 (bastiolang's user prelude), and gets the result in x0.
 
-import "core/print.bastio";
-import "../pages.bastio";
-import "../space.bastio";
+import "tsc.bastio";
+import "dt.bastio";
+import "console.bastio";
+import "pages.bastio";
+import "space.bastio";
+import "proc.bastio";
+import "fs.bastio";
+import "net.bastio";
+import "net6.bastio";
+import "syscall.bastio";
+import "linux.bastio";
+import "lxproc.bastio";
+import "lxfd.bastio";
+import "lxdir.bastio";
+import "lxsock.bastio";
+import "lxnetlink.bastio";
+import "lxtcp.bastio";
+import "lxsig.bastio";
+import "lxtime.bastio";
+import "lxunix.bastio";
+import "lxmem.bastio";
+import "lxmisc.bastio";
+import "lxthread.bastio";
+import "lxdev.bastio";
+import "lxevent.bastio";
+import "lxptimer.bastio";
+import "lxmore.bastio";
+import "lxextra.bastio";
+import "lxpidfd.bastio";
+import "lxptrace.bastio";
+import "lxsplice.bastio";
+import "lxmsg.bastio";
+import "lxcred.bastio";
+import "lxprio.bastio";
+import "lxipc.bastio";
+import "lxmq.bastio";
+import "lxsys.bastio";
+import "lxlock.bastio";
+import "lxowner.bastio";
+import "lxprocfs.bastio";
+import "lxprctl.bastio";
+import "lxrlimit.bastio";
+import "lxcap.bastio";
+import "lxlink.bastio";
+import "lxloop.bastio";
+import "lxpty.bastio";
+import "lxxattr.bastio";
+import "lxmount.bastio";
+import "lxns.bastio";
+import "lxnsk.bastio";
+import "lxuser.bastio";
+import "lxcgroup.bastio";
+import "lxseccomp.bastio";
+import "lxbpf.bastio";
+import "lxperm.bastio";
+import "lxopen2.bastio";
+import "lxhandle.bastio";
+import "lxinotify.bastio";
+import "lazy.bastio";
+import "lxanon.bastio";
+import "lxcow.bastio";
+import "lxsnd.bastio";
+import "lxmouse.bastio";
+import "kernel.bastio";
+import "initfiles.bastio";
 
-const NP: u64 = 32;                  // processes, slot 0 unused
-const PW: u64 = 40;                  // words in a process's row
-const F_STATE: u64 = 0;
-const F_CODE: u64 = 1;               // exit code of a ZOMBIE
-const F_PARENT: u64 = 2;
-const F_WAIT: u64 = 3;               // the child a WAITING process waits for
-const F_TICKS: u64 = 4;              // timer ticks spent running
-const F_PROG: u64 = 5;               // index into the program table
-const F_REGS: u64 = 6;               // saved x0-x30 (0-30), sp (31), pc (32), flags (33)
-const NREGS: u64 = 34;
+const V_TIMER: u64 = 32;
+const V_SYSCALL: u64 = 128;
+const V_ABORT: u64 = 14;
 
-const FREE: u64 = 0;
-const READY: u64 = 1;
-const READING: u64 = 2;              // blocked in a read of the console
-const WAITING: u64 = 3;              // blocked waiting for a child
-const ZOMBIE: u64 = 4;               // ended; its parent has not waited for it yet
-
-const NONE: u64 = 18446744073709551615;
-const MAGIC: u64 = 0x0A52455355545342;   // "BSTUSER\n"
-
-// System calls (the numbers of src/syscall.bastio).
-const SYS_EXIT: u64 = 0;
-const SYS_WRITE: u64 = 1;
-const SYS_READ: u64 = 2;
-const SYS_SPAWN: u64 = 3;
-const SYS_WAIT: u64 = 4;
-const SYS_YIELD: u64 = 5;
-const SYS_GETPID: u64 = 6;
-const SYS_INFO: u64 = 7;
-const SYS_PS: u64 = 8;
-const SYS_KILL: u64 = 9;
-const SYS_POWEROFF: u64 = 10;
-
-// What the scheduler does after a system call.
-const KEEP: u64 = 0;
-const SWITCH: u64 = 1;
-const POWEROFF: u64 = 2;
-
-const WCHUNK: u64 = 512;             // the most bytes one write call copies
-
-// ---------------------------------------------------------------- programs
-
-const NPROGS: u64 = 4;
-
-fn prog_name(i: u64) -> Str {
-  if i == 0 {
-    return "sh";
-  }
-  if i == 1 {
-    return "hello";
-  }
-  if i == 2 {
-    return "spin";
-  }
-  return "true";
-}
-
-fn prog_image(i: u64) -> Str {
-  if i == 0 {
-    return include_bytes("../../build/aarch64/user/sh.bin");
-  }
-  if i == 1 {
-    return include_bytes("../../build/aarch64/user/hello.bin");
-  }
-  if i == 2 {
-    return include_bytes("../../build/aarch64/user/spin.bin");
-  }
-  return include_bytes("../../build/aarch64/user/true.bin");
-}
-
-/// Little-endian 64-bit word at `at` of a string.
-fn read_u64(s: Str, at: u64) -> u64
-  requires at <= 64 && at + 8 <= slen(s)
+fn fault_name(con: &mut Con, v: u64)
+  requires con_ok(con)
+  ensures con_ok(con)
 {
-  return cast[u64](sget(s, at)) + 0x100 * cast[u64](sget(s, at + 1)) + 0x10000 * cast[u64](sget(s, at + 2))
-    + 0x1000000 * cast[u64](sget(s, at + 3)) + 0x100000000 * cast[u64](sget(s, at + 4))
-    + 0x10000000000 * cast[u64](sget(s, at + 5)) + 0x1000000000000 * cast[u64](sget(s, at + 6))
-    + 0x100000000000000 * cast[u64](sget(s, at + 7));
-}
-
-// ---------------------------------------------------------------- tables
-
-enum Fp { None, State(Frame) }       // a process's FP/SIMD registers, in a page of their own
-
-spec fn sp_ok(s: &Vec[Space]) -> bool {
-  vlen(s) == NP && forall i: u64 :: i < NP ==> (vget(s, i) is Space::Mapped ==> pt_level(vget(s, i).Mapped) == 4)
-}
-
-spec fn fp_ok(s: &Vec[Fp]) -> bool {
-  vlen(s) == NP
-}
-
-struct Kern { mem: Mem, spaces: Vec[Space], fps: Vec[Fp], procs: Buf, ticks: u64, stop: bool }
-
-spec fn kok(k: &Kern) -> bool {
-  mem_ok(k.mem) && sp_ok(k.spaces) && fp_ok(k.fps) && len(k.procs) == NP * PW
-}
-
-fn pget(procs: &Buf, pid: u64, f: u64) -> u64
-  requires len(procs) == NP * PW && pid < NP && f < PW
-{
-  return get(procs, pid * PW + f);
-}
-
-fn pset(procs: &mut Buf, pid: u64, f: u64, v: u64)
-  requires len(procs) == NP * PW && pid < NP && f < PW
-  ensures len(procs) == old(len(procs))
-{
-  procs = set(procs, pid * PW + f, v);
-}
-
-fn state(procs: &Buf, pid: u64) -> u64
-  requires len(procs) == NP * PW && pid < NP
-{
-  return pget(procs, pid, F_STATE);
-}
-
-fn take_space(s: &mut Vec[Space], pid: u64) -> Space
-  requires sp_ok(s) && pid < NP
-  ensures sp_ok(s) && vget(s, pid) is Space::Empty
-  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
-{
-  return vec_swap(&mut s, pid, Space::Empty);
-}
-
-fn put_space(s: &mut Vec[Space], pid: u64, x: Space)
-  requires sp_ok(s) && pid < NP && vget(s, pid) is Space::Empty
-  requires x is Space::Mapped ==> pt_level(x.Mapped) == 4
-  ensures sp_ok(s)
-{
-  match vec_swap(&mut s, pid, x) {
-    Space::Empty => {},
-    Space::Mapped(_t) => { unreachable; },     // the slot was empty
-  }
-}
-
-fn take_fp(s: &mut Vec[Fp], pid: u64) -> Fp
-  requires fp_ok(s) && pid < NP
-  ensures fp_ok(s) && vget(s, pid) is Fp::None
-{
-  return vec_swap(&mut s, pid, Fp::None);
-}
-
-fn put_fp(s: &mut Vec[Fp], pid: u64, x: Fp)
-  requires fp_ok(s) && pid < NP && vget(s, pid) is Fp::None
-  ensures fp_ok(s)
-{
-  match vec_swap(&mut s, pid, x) {
-    Fp::None => {},
-    Fp::State(_f) => { unreachable; },
-  }
-}
-
-fn drop_fp(m: &mut Mem, x: Fp)
-  requires mem_ok(m)
-  ensures mem_ok(m)
-{
-  match x {
-    Fp::None => {},
-    Fp::State(f) => { give_page(&mut m, f); },
-  }
-}
-
-/// The next READY process at or after `from` (round robin), or 0 if none.
-fn pick(procs: &Buf, from: u64) -> u64
-  requires len(procs) == NP * PW
-  ensures result < NP
-{
-  let mut k = 0;
-  while k < NP
-    invariant k <= NP
-  {
-    let p = (from % NP + k) % NP;
-    if p != 0 && state(procs, p) == READY {
-      return p;
-    }
-    k = k + 1;
-  }
-  return 0;
-}
-
-/// Processes that are not FREE or ZOMBIE.
-fn live_count(procs: &Buf) -> u64
-  requires len(procs) == NP * PW
-{
-  let mut n = 0;
-  let mut p = 1;
-  while p < NP
-    invariant 1 <= p && p <= NP && n <= p
-  {
-    let s = state(procs, p);
-    if s != FREE && s != ZOMBIE {
-      n = n + 1;
-    }
-    p = p + 1;
-  }
-  return n;
-}
-
-// ---------------------------------------------------------------- user memory
-
-// The kernel reads user memory the way src/usermem.bastio does: it takes
-// the tables of the process's window out of their parents, takes each page
-// out of the last table, copies the bytes it wants, and puts everything
-// back. (That file belongs to the x86-64 kernel's process table; this is
-// the part of it that needs only the address space.)
-
-/// Is [va, va + n) inside the user window?
-fn user_range(va: u64, n: u64) -> bool
-  ensures result ==> va >= USER_BASE && va - USER_BASE + n <= USER_SIZE
-{
-  if va < USER_BASE || va - USER_BASE > USER_SIZE {
-    return false;
-  }
-  return n <= USER_SIZE - (va - USER_BASE);
-}
-
-/// How many of the `left` bytes wanted from window offset `a` lie on a's page.
-fn chunk(a: u64, left: u64) -> u64
-  ensures result <= left && a % 4096 + result <= 4096
-  ensures left > 0 ==> result > 0
-{
-  let room = 4096 - a % 4096;
-  if room < left {
-    return room;
-  }
-  return left;
-}
-
-/// Copies n bytes at window offset off into buf from index k0, below the
-/// top-level table. Returns the new count, short at an unmapped page.
-fn l3_read(l3: &mut PageTable, off: u64, buf: &mut Bytes, k0: u64, n: u64) -> u64
-  requires pt_level(l3) == 3 && off + n <= USER_SIZE && k0 <= n && n <= blen(buf)
-  ensures blen(buf) == old(blen(buf))
-  ensures k0 <= result && result <= n
-{
-  let l = blen(buf);
-  let mut k = k0;
-  let mut ok = true;
-  while ok && k < n
-    invariant k0 <= k && k <= n && n <= blen(buf) && blen(buf) == l && pt_level(l3) == 3
-  {
-    let a = off + k;
-    let m = chunk(a, n - k);
-    if w_read(&mut l3, a, &mut buf, k, m) {
-      k = k + m;
-    } else {
-      ok = false;
-    }
-  }
-  return k;
-}
-
-/// Copies n bytes from user address va of process pid into the start of
-/// buf. Returns the count, short at an unmapped page, or NONE if the range
-/// is not inside the user window.
-fn user_read(spaces: &mut Vec[Space], pid: u64, va: u64, buf: &mut Bytes, n: u64) -> u64
-  requires sp_ok(spaces) && pid < NP && n <= blen(buf)
-  ensures sp_ok(spaces) && blen(buf) == old(blen(buf))
-  ensures result <= n || result == NONE
-{
-  if !user_range(va, n) {
-    return NONE;
-  }
-  let off = va - USER_BASE;
-  match take_space(&mut spaces, pid) {
-    Space::Empty => { return NONE; },
-    Space::Mapped(mut root) => {
-      let mut k = 0;
-      if pt_has(root, 1) {
-        k = pt_borrow(&mut root, 1, l3_read, off, &mut buf, 0, n);
-      }
-      put_space(&mut spaces, pid, Space::Mapped(root));
-      return k;
-    },
-  }
-}
-
-/// Writes the n bytes at user address va to the console, at most WCHUNK of
-/// them. Returns the count written, which stops short at an unmapped page,
-/// or NONE.
-fn do_write(con: &Serial, spaces: &mut Vec[Space], scratch: &mut Bytes, pid: u64, va: u64, n: u64) -> u64
-  requires sp_ok(spaces) && pid < NP && blen(scratch) == WCHUNK
-  ensures sp_ok(spaces) && blen(scratch) == WCHUNK
-{
-  let mut want = n;
-  if want > WCHUNK {
-    want = WCHUNK;
-  }
-  let got = user_read(&mut spaces, pid, va, &mut scratch, want);
-  if got == NONE {
-    return NONE;
-  }
-  print_span(con, scratch, 0, got);
-  return got;
-}
-
-/// Is the string of n bytes at user address va the name of program i?
-fn user_name_is(spaces: &mut Vec[Space], scratch: &mut Bytes, pid: u64, va: u64, n: u64, i: u64) -> bool
-  requires sp_ok(spaces) && pid < NP && blen(scratch) == WCHUNK
-  ensures sp_ok(spaces) && blen(scratch) == WCHUNK
-{
-  let name = prog_name(i);
-  if n != slen(name) || n > WCHUNK {
-    return false;
-  }
-  let got = user_read(&mut spaces, pid, va, &mut scratch, n);
-  if got != n {
-    return false;
-  }
-  let mut j = 0;
-  while j < n
-    invariant j <= n && n == slen(name) && n <= WCHUNK && blen(scratch) == WCHUNK
-  {
-    if cast[u64](bget(scratch, j)) != cast[u64](sget(name, j)) {
-      return false;
-    }
-    j = j + 1;
-  }
-  return true;
-}
-
-/// The program whose name is the n bytes at user address va, or NPROGS.
-fn lookup(spaces: &mut Vec[Space], scratch: &mut Bytes, pid: u64, va: u64, n: u64) -> u64
-  requires sp_ok(spaces) && pid < NP && blen(scratch) == WCHUNK
-  ensures sp_ok(spaces) && blen(scratch) == WCHUNK
-  ensures result <= NPROGS
-{
-  let mut i = 0;
-  while i < NPROGS
-    invariant i <= NPROGS && sp_ok(spaces) && blen(scratch) == WCHUNK
-  {
-    if user_name_is(&mut spaces, &mut scratch, pid, va, n, i) {
-      return i;
-    }
-    i = i + 1;
-  }
-  return NPROGS;
-}
-
-// ---------------------------------------------------------------- life cycle
-
-/// Starts program `prog` as a child of `parent`. Returns its pid, or 0 if
-/// there is no free slot, memory or valid image.
-fn spawn(k: &mut Kern, prog: u64, parent: u64) -> u64
-  requires kok(k) && prog < NPROGS && parent < NP
-  ensures kok(k)
-  ensures result < NP
-{
-  let mut pid = 0;
-  let mut p = 1;
-  while pid == 0 && p < NP
-    invariant 1 <= p && p <= NP && pid < NP && kok(k)
-  {
-    if state(k.procs, p) == FREE {
-      pid = p;
-    }
-    p = p + 1;
-  }
-  if pid == 0 {
-    return 0;
-  }
-  // A FREE process has no address space or FP page; check rather than assume.
-  match take_space(&mut k.spaces, pid) {
-    Space::Empty => {},
-    Space::Mapped(t) => {
-      put_space(&mut k.spaces, pid, Space::Mapped(t));
-      return 0;
-    },
-  }
-  match take_fp(&mut k.fps, pid) {
-    Fp::None => {},
-    Fp::State(f) => {
-      put_fp(&mut k.fps, pid, Fp::State(f));
-      return 0;
-    },
-  }
-  // The BastiOS image header: magic, bytes of memory the image needs, entry point.
-  let img = prog_image(prog);
-  if slen(img) < 24 || slen(img) > IMAGE_MAX {
-    return 0;
-  }
-  let size = read_u64(img, 8);
-  let entry = read_u64(img, 16);
-  if read_u64(img, 0) != MAGIC || size < slen(img) || size > IMAGE_MAX {
-    return 0;
-  }
-  if entry < USER_BASE + 24 || entry >= USER_BASE + slen(img) {
-    return 0;
-  }
-  let fi = find_free(&mut k.mem);
-  if fi >= NPAGES {
-    return 0;
-  }
-  let fpage = take_page(&mut k.mem, fi);
-  match new_space(&mut k.mem, img, size) {
-    Space::Empty => {
-      give_page(&mut k.mem, fpage);
-      return 0;
-    },
-    Space::Mapped(t) => { put_space(&mut k.spaces, pid, Space::Mapped(t)); },
-  }
-  put_fp(&mut k.fps, pid, Fp::State(fpage));
-  let mut f = 0;
-  while f < PW
-    invariant f <= PW && len(k.procs) == NP * PW
-  {
-    pset(&mut k.procs, pid, f, 0);
-    f = f + 1;
-  }
-  pset(&mut k.procs, pid, F_REGS + 31, USER_BASE + USER_SIZE);
-  pset(&mut k.procs, pid, F_REGS + 32, entry);
-  pset(&mut k.procs, pid, F_PARENT, parent);
-  pset(&mut k.procs, pid, F_PROG, prog);
-  pset(&mut k.procs, pid, F_STATE, READY);
-  return pid;
-}
-
-/// Ends process `pid` with exit `code`: frees its memory, orphans its
-/// children, and hands the code to its parent if that is waiting for it.
-fn terminate(k: &mut Kern, mmu: &Mmu, pid: u64, code: u64)
-  requires kok(k) && 1 <= pid && pid < NP && mmu_root(mmu) == KERNEL_ROOT
-  ensures kok(k)
-{
-  match take_space(&mut k.spaces, pid) {
-    Space::Empty => {},
-    Space::Mapped(t) => { free_space(&mut k.mem, mmu, t); },
-  }
-  drop_fp(&mut k.mem, take_fp(&mut k.fps, pid));
-  let mut c = 1;
-  while c < NP
-    invariant 1 <= c && c <= NP && len(k.procs) == NP * PW
-  {
-    if state(k.procs, c) != FREE && pget(k.procs, c, F_PARENT) == pid {
-      pset(&mut k.procs, c, F_PARENT, 0);
-      if state(k.procs, c) == ZOMBIE {
-        pset(&mut k.procs, c, F_STATE, FREE);
-      }
-    }
-    c = c + 1;
-  }
-  let parent = pget(k.procs, pid, F_PARENT);
-  if parent != 0 && parent < NP && state(k.procs, parent) == WAITING && pget(k.procs, parent, F_WAIT) == pid {
-    pset(&mut k.procs, parent, F_REGS, code);
-    pset(&mut k.procs, parent, F_STATE, READY);
-    pset(&mut k.procs, pid, F_STATE, FREE);
-  } else if parent != 0 && parent < NP {
-    pset(&mut k.procs, pid, F_CODE, code);
-    pset(&mut k.procs, pid, F_STATE, ZOMBIE);
+  if v == V_ABORT {
+    puts(&mut con, "abort");
   } else {
-    pset(&mut k.procs, pid, F_STATE, FREE);
+    puts(&mut con, "exception");
   }
-}
-
-/// wait(c): the exit code of child c, now or when it ends.
-fn do_wait(procs: &mut Buf, pid: u64, c: u64) -> u64
-  requires len(procs) == NP * PW && 1 <= pid && pid < NP
-  ensures len(procs) == NP * PW
-{
-  if c == 0 || c >= NP || state(procs, c) == FREE || pget(procs, c, F_PARENT) != pid {
-    pset(&mut procs, pid, F_REGS, NONE);
-    return KEEP;
-  }
-  if state(procs, c) == ZOMBIE {
-    pset(&mut procs, pid, F_REGS, pget(procs, c, F_CODE));
-    pset(&mut procs, c, F_STATE, FREE);
-    return KEEP;
-  }
-  pset(&mut procs, pid, F_WAIT, c);
-  pset(&mut procs, pid, F_STATE, WAITING);
-  return SWITCH;
-}
-
-fn put_state(con: &Serial, s: u64) {
-  if s == READY {
-    print_str(con, "ready  ");
-  } else if s == READING {
-    print_str(con, "reading");
-  } else if s == WAITING {
-    print_str(con, "waiting");
-  } else {
-    print_str(con, "zombie ");
-  }
-}
-
-fn print_ps(con: &Serial, procs: &Buf)
-  requires len(procs) == NP * PW
-{
-  print_str(con, "  PID  PPID STATE    TICKS NAME\r\n");
-  let mut p = 1;
-  while p < NP
-    invariant 1 <= p && p <= NP
-  {
-    if state(procs, p) != FREE {
-      print_u64_pad(con, p, 5);
-      print_u64_pad(con, pget(procs, p, F_PARENT), 6);
-      print_str(con, " ");
-      put_state(con, state(procs, p));
-      print_u64_pad(con, pget(procs, p, F_TICKS), 6);
-      print_str(con, " ");
-      let prog = pget(procs, p, F_PROG);
-      if prog < NPROGS {
-        print_str(con, prog_name(prog));
-      }
-      print_str(con, "\r\n");
-    }
-    p = p + 1;
-  }
-}
-
-/// Handles the system call process `pid` just made (its registers are in
-/// the table). Returns what the scheduler does next.
-fn syscall(con: &Serial, k: &mut Kern, scratch: &mut Bytes, mmu: &Mmu, pid: u64) -> u64
-  requires kok(k) && 1 <= pid && pid < NP && mmu_root(mmu) == KERNEL_ROOT && blen(scratch) == WCHUNK
-  ensures kok(k) && blen(scratch) == WCHUNK
-{
-  let n = pget(k.procs, pid, F_REGS + 8);
-  let a = pget(k.procs, pid, F_REGS);
-  let b = pget(k.procs, pid, F_REGS + 1);
-  if n == SYS_EXIT {
-    terminate(&mut k, mmu, pid, a);
-    return SWITCH;
-  }
-  if n == SYS_WRITE {
-    pset(&mut k.procs, pid, F_REGS, do_write(con, &mut k.spaces, &mut scratch, pid, a, b));
-    return KEEP;
-  }
-  if n == SYS_READ {
-    let ch = serial_poll(con);
-    if ch < 256 {
-      pset(&mut k.procs, pid, F_REGS, ch);
-      return KEEP;
-    }
-    pset(&mut k.procs, pid, F_STATE, READING);
-    return SWITCH;
-  }
-  if n == SYS_SPAWN {
-    let prog = lookup(&mut k.spaces, &mut scratch, pid, a, b);
-    let mut child = 0;
-    if prog < NPROGS {
-      child = spawn(&mut k, prog, pid);
-    }
-    pset(&mut k.procs, pid, F_REGS, child);
-    return KEEP;
-  }
-  if n == SYS_WAIT {
-    return do_wait(&mut k.procs, pid, a);
-  }
-  if n == SYS_YIELD {
-    return SWITCH;
-  }
-  if n == SYS_GETPID {
-    pset(&mut k.procs, pid, F_REGS, pid);
-    return KEEP;
-  }
-  if n == SYS_INFO {
-    if a == 0 {
-      pset(&mut k.procs, pid, F_REGS, count_avail(k.mem.bm));
-    } else if a == 1 {
-      pset(&mut k.procs, pid, F_REGS, k.ticks);
-    } else if a == 2 {
-      pset(&mut k.procs, pid, F_REGS, 1);
-    } else if a == 3 {
-      pset(&mut k.procs, pid, F_REGS, wrap_mul(k.ticks, 10000000));
-    } else {
-      pset(&mut k.procs, pid, F_REGS, NONE);
-    }
-    return KEEP;
-  }
-  if n == SYS_PS {
-    print_ps(con, k.procs);
-    return KEEP;
-  }
-  if n == SYS_KILL {
-    if a == 0 || a >= NP || state(k.procs, a) == FREE || state(k.procs, a) == ZOMBIE {
-      pset(&mut k.procs, pid, F_REGS, 1);
-      return KEEP;
-    }
-    pset(&mut k.procs, pid, F_REGS, 0);
-    terminate(&mut k, mmu, a, 137);
-    if a == pid {
-      return SWITCH;
-    }
-    return KEEP;
-  }
-  if n == SYS_POWEROFF {
-    return POWEROFF;
-  }
-  pset(&mut k.procs, pid, F_REGS, NONE);       // a call this kernel does not have yet
-  return KEEP;
-}
-
-// ---------------------------------------------------------------- scheduling
-
-/// Gives byte `ch` to the first process reading the console, if any.
-fn wake_reader(procs: &mut Buf, ch: u64)
-  requires len(procs) == NP * PW
-  ensures len(procs) == NP * PW
-{
-  let mut p = 1;
-  let mut done = false;
-  while !done && p < NP
-    invariant 1 <= p && p <= NP && len(procs) == NP * PW
-  {
-    if state(procs, p) == READING {
-      pset(&mut procs, p, F_REGS, ch);
-      pset(&mut procs, p, F_STATE, READY);
-      done = true;
-    }
-    p = p + 1;
-  }
-}
-
-fn any_reading(procs: &Buf) -> bool
-  requires len(procs) == NP * PW
-{
-  let mut p = 1;
-  while p < NP
-    invariant 1 <= p && p <= NP
-  {
-    if state(procs, p) == READING {
-      return true;
-    }
-    p = p + 1;
-  }
-  return false;
-}
-
-/// Loads process pid's saved registers into the processor's user context.
-fn load_regs(cpu: &mut Cpu, procs: &Buf, pid: u64)
-  requires len(procs) == NP * PW && pid < NP
-{
-  let mut r = 0;
-  while r < NREGS
-    invariant r <= NREGS
-  {
-    cpu_set(&mut cpu, r, pget(procs, pid, F_REGS + r));
-    r = r + 1;
-  }
-}
-
-fn save_regs(cpu: &Cpu, procs: &mut Buf, pid: u64)
-  requires len(procs) == NP * PW && pid < NP
-  ensures len(procs) == NP * PW
-{
-  let mut r = 0;
-  while r < NREGS
-    invariant r <= NREGS && len(procs) == NP * PW
-  {
-    pset(&mut procs, pid, F_REGS + r, cpu_get(cpu, r));
-    r = r + 1;
-  }
-}
-
-fn fault_name(v: u64) -> Str {
-  if v == 14 {
-    return "abort";
-  }
-  return "exception";
-}
-
-/// Power off: gives every page back, so the pool is whole again.
-fn teardown(k: &mut Kern, mmu: &Mmu)
-  requires kok(k) && mmu_root(mmu) == KERNEL_ROOT
-  ensures mem_ok(k.mem) && vlen(k.spaces) == 0 && vlen(k.fps) == 0
-{
-  while vec_len(k.spaces) > 0
-    invariant mem_ok(k.mem) && mmu_root(mmu) == KERNEL_ROOT
-    invariant forall j: u64 :: j < vlen(k.spaces) ==> (vget(k.spaces, j) is Space::Mapped ==> pt_level(vget(k.spaces, j).Mapped) == 4)
-  {
-    match vec_pop(&mut k.spaces) {
-      Space::Empty => {},
-      Space::Mapped(t) => { free_space(&mut k.mem, mmu, t); },
-    }
-  }
-  while vec_len(k.fps) > 0
-    invariant mem_ok(k.mem)
-  {
-    drop_fp(&mut k.mem, vec_pop(&mut k.fps));
-  }
-}
-
-fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 {
-  let m = mem_new(pool);
-  let mut spaces = vec_new[Space]();
-  let mut fps = vec_new[Fp]();
-  let mut i = 0;
-  while i < NP
-    invariant i <= NP && vlen(spaces) == i && vlen(fps) == i
-    invariant forall j: u64 :: j < i ==> vget(spaces, j) is Space::Empty
-  {
-    vec_push(&mut spaces, Space::Empty);
-    vec_push(&mut fps, Fp::None);
-    i = i + 1;
-  }
-  let mut k = Kern { mem: m, spaces: spaces, fps: fps, procs: alloc(NP * PW), ticks: 0, stop: false };
-  let mut scratch = balloc(WCHUNK);
-  print_str(con, "\r\nBastiOS 0.2 (aarch64): ");
-  print_u64(con, count_avail(k.mem.bm));
-  print_str(con, " pages of memory, 1 processor\r\n");
-  let first = spawn(&mut k, 0, 0);
-  if first == 0 {
-    print_str(con, "cannot start the shell\r\n");
-    teardown(&mut k, mmu);
-    vec_free(k.spaces);
-    vec_free(k.fps);
-    free(k.mem.bm);
-    free(k.procs);
-    bfree(scratch);
-    pool = k.mem.pool;
-    return 1;
-  }
-  let mut cur = first;
-  while !k.stop && live_count(k.procs) > 0
-    invariant kok(k) && cur < NP && blen(scratch) == WCHUNK && mmu_root(mmu) == KERNEL_ROOT
-  {
-    if any_reading(k.procs) {
-      let ch = serial_poll(con);
-      if ch < 256 {
-        wake_reader(&mut k.procs, ch);
-      }
-    }
-    let p = pick(k.procs, cur);
-    if p == 0 {
-      // Nothing to run: sleep until the next interrupt (the timer ticks).
-      let v = cpu_idle(&mut cpu);
-      if v == 32 {
-        k.ticks = tick(k.ticks);
-      }
-    } else {
-      match take_space(&mut k.spaces, p) {
-        Space::Empty => {
-          terminate(&mut k, mmu, p, 139);
-        },
-        Space::Mapped(root) => {
-          match take_fp(&mut k.fps, p) {
-            Fp::None => {
-              put_space(&mut k.spaces, p, Space::Mapped(root));
-              terminate(&mut k, mmu, p, 139);
-            },
-            Fp::State(fpage) => {
-              let mut sp = root;
-              let lease = mmu_enter(&mut mmu, &mut sp);
-              put_space(&mut k.spaces, p, Space::Mapped(sp));
-              load_regs(&mut cpu, k.procs, p);
-              cpu_fpu_load(&mut cpu, fpage);
-              let v = cpu_run(&mut cpu, mmu);
-              mmu_exit(&mut mmu, lease);
-              let mut fpage2 = fpage;
-              cpu_fpu_save(&mut cpu, &mut fpage2);
-              put_fp(&mut k.fps, p, Fp::State(fpage2));
-              save_regs(cpu, &mut k.procs, p);
-              cur = p;
-              if v == 128 {
-                let act = syscall(con, &mut k, &mut scratch, mmu, p);
-                if act == POWEROFF {
-                  k.stop = true;
-                } else if act == SWITCH {
-                  cur = (p + 1) % NP;
-                }
-              } else if v == 32 {
-                k.ticks = tick(k.ticks);
-                pset(&mut k.procs, p, F_TICKS, tick(pget(k.procs, p, F_TICKS)));
-                cur = (p + 1) % NP;                  // the time slice is over
-              } else {
-                print_str(con, "pid ");
-                print_u64(con, p);
-                print_str(con, ": ");
-                print_str(con, fault_name(v));
-                print_str(con, " at ");
-                print_hex(con, cpu_get(cpu, 35));
-                print_str(con, " pc ");
-                print_hex(con, cpu_get(cpu, 32));
-                print_str(con, "\r\n");
-                terminate(&mut k, mmu, p, 139);
-                cur = (p + 1) % NP;
-              }
-            },
-          }
-        },
-      }
-    }
-  }
-  teardown(&mut k, mmu);
-  vec_free(k.spaces);
-  vec_free(k.fps);
-  print_str(con, "\r\nBastiOS: ");
-  print_u64(con, count_avail(k.mem.bm));
-  print_str(con, " pages free at power off\r\n");
-  free(k.mem.bm);
-  free(k.procs);
-  bfree(scratch);
-  pool = k.mem.pool;
-  return 0;
 }
 
 fn tick(t: u64) -> u64 {
@@ -818,4 +100,382 @@ fn tick(t: u64) -> u64 {
     return t + 1;
   }
   return t;
+}
+
+// The kernel's state and the console devices, which one processor owns.
+struct Sys { k: Kernel, con: Con, stop: bool }
+  invariant kok(k) && con_ok(con);
+
+spec fn sys_ok(s: &Sys) -> bool {
+  kok(s.k) && con_ok(s.con)
+}
+
+// A process taken out to run: its id, its lease on its address space and
+// its FP/SIMD page.
+struct Task { pid: u64, lease: Lease, fpu: Frame }
+
+enum Job { Stop, Idle, Run(Task) }
+
+/// Writes the kernel's waiting output to the serial line.
+fn drain(ser: &Serial, c: &mut Con)
+  requires con_ok(c)
+  ensures con_ok(c)
+{
+  let mut out = true;
+  while out
+    invariant con_ok(c)
+  {
+    let mut b = balloc(256);
+    let got = con_take(&mut c, &mut b);
+    let mut i = 0;
+    while i < got && i < blen(b)
+      invariant con_ok(c)
+    {
+      serial_write(ser, bget(b, i));
+      i = i + 1;
+    }
+    bfree(b);
+    out = got == 256;
+  }
+}
+
+/// Moves typed bytes from the serial line into the kernel and its output to
+/// the line.
+fn pump(ser: &Serial, s: &mut Sys)
+  requires sys_ok(s)
+  ensures sys_ok(s)
+{
+  let mut typed = false;
+  let mut c = serial_poll(ser);
+  let mut n = 0;
+  while c < 256 && n < 4096
+    invariant sys_ok(s)
+  {
+    q_push(&mut s.k.q, c);
+    typed = true;
+    n = n + 1;
+    c = serial_poll(ser);
+  }
+  if typed {
+    tty_intr(&mut s.con, &mut s.k);
+    tty_cook(&mut s.con, &mut s.k);
+    wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
+  }
+  drain(ser, &mut s.con);
+  wake_writers(&mut s.k.procs);
+}
+
+/// The clock, from the timer ticks (10 ms each): CLOCK_MONOTONIC and the
+/// wall clock the file system stamps files with.
+fn set_clock(s: &mut Sys)
+  requires sys_ok(s)
+  ensures sys_ok(s)
+{
+  s.k.ns = (s.k.ticks % 1000000000000) * NS_PER_TICK;
+  s.k.fs.now = sat_add(s.k.epoch, s.k.ns) / 1000000000;
+}
+
+/// What the processor does next. Starting at `from` (round robin), takes
+/// the next READY process out, with its registers loaded into `cpu`, and
+/// marks it RUNNING.
+fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64) -> Job
+  requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
+  ensures sys_ok(s)
+  ensures result is Job::Run ==> (1 <= result.Run.pid && result.Run.pid < NPROC)
+  ensures !(result is Job::Run) ==> mmu_root(mmu) == KERNEL_ROOT
+{
+  if s.stop {
+    return Job::Stop;
+  }
+  rng_stir(&mut s.k, cpu);
+  nic_feed(&mut s.k.nic, &mut s.k.mem);
+  nic_poll(&mut s.k.nic);
+  net_wake(&mut s.k);
+  disk_wake(&mut s.k);
+  sock_wake(&mut s.k);
+  if s.k.naps {
+    sleepers_due(&mut s.k);
+  }
+  let p = lx_pick(&mut s.k, from);
+  if p == 0 {
+    if live_count(s.k.procs) == 0 {
+      s.stop = true;
+      return Job::Stop;
+    }
+    return Job::Idle;
+  }
+  group_take(&mut s.k, mmu, p);                 // a thread gets its group's space
+  if !lx_deliver(&mut s.k, mmu, p) {
+    return Job::Idle;                       // a signal ended it
+  }
+  match take_space(&mut s.k.spaces, p) {
+    Space::Empty => {
+      // A READY process always has a space; end it rather than spin on it.
+      terminate(&mut s.k, mmu, p, 139);
+      return Job::Idle;
+    },
+    Space::Mapped(root) => {
+      match take_fpu(&mut s.k.fpus, p) {
+        Fpu::None => {
+          put_space(&mut s.k.spaces, p, Space::Mapped(root));
+          terminate(&mut s.k, mmu, p, 139);
+          return Job::Idle;
+        },
+        Fpu::State(f) => {
+          let mut sp = root;
+          let l = mmu_enter(&mut mmu, &mut sp);
+          put_space(&mut s.k.spaces, p, Space::Mapped(sp));
+          let mut r = 0;
+          while r < NLOAD
+            invariant r <= NLOAD && ptab_ok(s.k.procs)
+          {
+            cpu_set(&mut cpu, r, pget(s.k.procs, p, reg_word(r)));
+            r = r + 1;
+          }
+          cpu_set(&mut cpu, R_TLS, pget(s.k.procs, p, reg_word(R_TLS)));
+          pset(&mut s.k.procs, p, F_STATE, RUNNING);
+          return Job::Run(Task { pid: p, lease: l, fpu: f });
+        },
+      }
+    },
+  }
+}
+
+/// After process `p` ran until a trap with vector `v` (its lease given
+/// back): puts its FP/SIMD page `fpu` and registers back and handles the
+/// trap. Returns where the round robin goes on.
+fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> u64
+  requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
+  requires 1 <= p && p < NPROC
+  ensures sys_ok(s) && result < NPROC
+{
+  restore_fpu(&mut s.k.mem, &mut s.k.fpus, p, Fpu::State(fpu));
+  let mut r = 0;
+  while r < NREGS
+    invariant r <= NREGS && ptab_ok(s.k.procs)
+  {
+    pset(&mut s.k.procs, p, reg_word(r), cpu_get(cpu, r));
+    r = r + 1;
+  }
+  if v == V_TIMER {
+    s.k.ticks = tick(s.k.ticks);
+    set_clock(&mut s);
+  }
+  if state(s.k.procs, p) == EXITING {
+    thread_free(&mut s.k, mmu, p, tgid(s.k.procs, p));
+    return (p + 1) % NPROC;
+  }
+  group_take(&mut s.k, mmu, p);
+  let killed = state(s.k.procs, p) == KILLED;
+  if state(s.k.procs, p) == RUNNING || killed {
+    pset(&mut s.k.procs, p, F_STATE, READY);
+  }
+  if killed {
+    terminate(&mut s.k, mmu, p, 137);
+    return (p + 1) % NPROC;
+  }
+  if v == V_TIMER {
+    if pget(s.k.procs, p, F_RESTART) == 0 {
+      pset(&mut s.k.procs, p, F_TICKS, tick(pget(s.k.procs, p, F_TICKS)));
+      cpu_timers_tick(&mut s.k, p);
+    }
+    lx_alarms(&mut s.k);
+    return (p + 1) % NPROC;
+  }
+  if v == V_SYSCALL {
+    set_clock(&mut s);
+    let what = syscall(&mut s.con, &mut s.k, mmu, p);
+    if what == POWEROFF || what == REBOOT {
+      s.stop = true;
+    }
+    sock_wake(&mut s.k);
+    if disk_hold(&mut s.k, p, NO_RESULT) {
+      return (p + 1) % NPROC;
+    }
+    if what == KEEP {
+      return p;
+    }
+    return (p + 1) % NPROC;
+  }
+  if v == V_ABORT {
+    let lz = lazy_fault(&mut s.k, p);
+    if lz == LZ_WAIT && state(s.k.procs, p) == READY {
+      pset(&mut s.k.procs, p, F_STATE, DISKWAIT);
+      pset(&mut s.k.procs, p, F_WAIT, RETRY_BIT + s.k.fs.disk.q.moved % RETRY_BIT);
+      disk_wake(&mut s.k);
+      if state(s.k.procs, p) == DISKWAIT {
+        return (p + 1) % NPROC;
+      }
+      return p;
+    }
+    if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) {
+      return p;                             // code read, a page mapped or copied, or the stack grew: run the instruction again
+    }
+  }
+  // Any other trap, or an abort nothing could mend: the process dies of the
+  // signal Linux would send (a SIGSEGV), unless it has a handler.
+  let sig = SIGSEGV;
+  let addr = pget(s.k.procs, p, reg_word(R_FAULT));
+  if fault_caught(&mut s.k, p, sig, addr) {
+    return (p + 1) % NPROC;
+  }
+  puts(&mut s.con, "\r\n[pid ");
+  put_num(&mut s.con, p);
+  puts(&mut s.con, " (");
+  puts(&mut s.con, prog_name(pget(s.k.procs, p, F_PROG)));
+  puts(&mut s.con, "): ");
+  fault_name(&mut s.con, v);
+  puts(&mut s.con, " at pc ");
+  put_hex(&mut s.con, pget(s.k.procs, p, reg_word(R_PC)));
+  puts(&mut s.con, ", address ");
+  put_hex(&mut s.con, addr);
+  puts(&mut s.con, "; killed]\r\n");
+  terminate(&mut s.k, mmu, p, SIG_DEATH + sig);
+  return (p + 1) % NPROC;
+}
+
+fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 {
+  let mut m = mem_new(pool);
+  let mut console = con_new();
+  puts(&mut console, "\r\nBastiOS 0.2 (aarch64): ");
+  put_num(&mut console, count_avail(m.bm));
+  puts(&mut console, " pages of memory, 1 processor\r\n");
+  let vm_where = dt_slots(cpu);
+  puts(&mut console, "devicetree: ");
+  put_num(&mut console, vm_where.slots);
+  puts(&mut console, " virtio-mmio slots from ");
+  put_hex(&mut console, vm_where.first);
+  puts(&mut console, "\r\n");
+  let dev = blk_find(&mut m, &mut win, vm_where);
+  let dk_lo = blk_mmio_lo(dev);
+  let dk_hi = blk_mmio_hi(dev);
+  let disk = disk_mount(dev);
+  let tsc = Tsc { base: 0, mult: 0, at: 0 };      // the clock follows the timer ticks (set_clock)
+  if blk_is_virtio(disk.dev) {
+    puts(&mut console, "disk: virtio\r\n");
+  }
+  if disk.blocks > 0 {
+    puts(&mut console, "disk: the BastiOS file system, ");
+    put_num(&mut console, disk.blocks);
+    puts(&mut console, " blocks of 4 KiB\r\n");
+  }
+  let nic = nic_find(&mut m, &mut win, 4, dk_lo, dk_hi, vm_where);
+  let mut k = kernel_new(m, disk, nic, Snd::None, mice_new(false), tsc, 0, 0, 1);
+  install_files(&mut console, &mut k);
+  if spawn(&mut k, 0, 0) == 0 {
+    puts(&mut console, "cannot start the shell\r\n");
+  }
+  let mut s = Sys { k: k, con: console, stop: false };
+  pump(con, &mut s);
+  let mut cur = 1;
+  let mut job = next_job(&mut s, &mut cpu, &mut mmu, cur);
+  let mut going = true;
+  while going
+    invariant sys_ok(s) && cur < NPROC
+    invariant !(job is Job::Run) ==> mmu_root(mmu) == KERNEL_ROOT
+    invariant job is Job::Run ==> (1 <= job.Run.pid && job.Run.pid < NPROC)
+  {
+    match job {
+      Job::Stop => {
+        going = false;
+        job = Job::Stop;
+      },
+      Job::Idle => {
+        // Nothing to run: sleep until the next interrupt (the timer ticks).
+        let v = cpu_idle(&mut cpu);
+        if v == V_TIMER {
+          s.k.ticks = tick(s.k.ticks);
+          set_clock(&mut s);
+          lx_alarms(&mut s.k);
+        }
+        sleepers_wake(&mut s.k);
+        pump(con, &mut s);
+        job = next_job(&mut s, &mut cpu, &mut mmu, cur);
+      },
+      Job::Run(t) => {
+        cpu_fpu_load(&mut cpu, t.fpu);
+        let v = cpu_run(&mut cpu, mmu);
+        mmu_exit(&mut mmu, t.lease);
+        let mut f = t.fpu;
+        cpu_fpu_save(&mut cpu, &mut f);
+        cur = finish(&mut s, &mut cpu, mmu, t.pid, f, v);
+        if v == V_TIMER {
+          pump(con, &mut s);
+        }
+        job = next_job(&mut s, &mut cpu, &mut mmu, cur);
+      },
+    }
+  }
+  match job {
+    Job::Run(t) => {
+      mmu_exit(&mut mmu, t.lease);
+      let c = finish(&mut s, &mut cpu, mmu, t.pid, t.fpu, V_TIMER);
+    },
+    Job::Idle => {},
+    Job::Stop => {},
+  }
+  // Power off: tear down whatever is left, so every page goes back.
+  kernel_drop_spaces(&mut s.k, mmu);
+  match s.k.shm {
+    Store::None => {},
+    Store::Table(t) => { free_l2(&mut s.k.mem, t); },
+  }
+  match s.k.txt {
+    Store::None => {},
+    Store::Table(t) => { free_l2(&mut s.k.mem, t); },
+  }
+  let devs = vfs_free(s.k.fs, &mut s.k.mem);
+  blk_free(&mut win, devs.lo, &mut s.k.mem);
+  blk_free(&mut win, devs.disk, &mut s.k.mem);
+  nic_free(&mut win, s.k.nic, &mut s.k.mem);
+  snd_free(s.k.snd, &mut s.k.mem);
+  puts(&mut s.con, "\r\nBastiOS: ");
+  put_num(&mut s.con, count_free(s.k.mem.bm));
+  puts(&mut s.con, " pages free at power off\r\n");
+  drain(con, &mut s.con);
+  con_free(s.con);
+  vec_free(s.k.spaces);
+  vec_free(s.k.fpus);
+  free(s.k.mem.bm);
+  free(s.k.procs);
+  queue_free(s.k.q);
+  free(s.k.line);
+  free(s.k.lxfd);
+  free(s.k.ofd);
+  free(s.k.pipes);
+  while vec_len(s.k.pipebuf) > 0 {
+    match vec_pop(&mut s.k.pipebuf) {
+      PipeBuf::None => {},
+      PipeBuf::Ring(b) => { bfree(b); },
+    }
+  }
+  vec_free(s.k.pipebuf);
+  free(s.k.sigact);
+  free(s.k.cwd);
+  free(s.k.croot);
+  free(s.k.dpath);
+  free(s.k.alarms);
+  free(s.k.maps);
+  free(s.k.holes);
+  free(s.k.lazy);
+  free(s.k.anon);
+  free(s.k.locks);
+  free(s.k.loops);
+  free(s.k.ptys);
+  bfree(s.k.ptyb);
+  bfree(s.k.mice);
+  free(s.k.ipc);
+  bfree(s.k.ipcb);
+  free(s.k.sys);
+  free(s.k.inet6);
+  free(s.k.rng);
+  free(s.k.evt);
+  free(s.k.sigsave);
+  free(s.k.ux);
+  bfree(s.k.uxb);
+  free(s.k.mns);
+  free(s.k.scf);
+  bfree(s.k.mstr);
+  pool = s.k.mem.pool;
+  return 0;
 }

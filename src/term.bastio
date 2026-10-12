@@ -1,0 +1,4 @@
+// The console's devices are architecture specific: src/<arch>/arch/term.bastio,
+// found through the --lib directory the build passes for that architecture.
+
+import "arch/term.bastio";

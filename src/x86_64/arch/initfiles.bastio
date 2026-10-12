@@ -1,0 +1,72 @@
+// The files the file system starts with, built into the kernel image.
+// elfdemo is a Linux program (the elfpie test) that execve runs as a file.
+// /etc/passwd and /etc/group name root and a few unprivileged users (nobody,
+// bin, daemon) for Linux programs, and /etc/shadow keeps their passwords
+// (root has none until `passwd` sets one; the others cannot log in)
+// (whoami, ls -l, getpwuid). /etc/hosts names localhost (getaddrinfo).
+// /etc/shells lists the login shells (getusershell; an SSH server refuses
+// a user whose shell is not there).
+const NINIT: u64 = 8;
+
+fn init_name(i: u64) -> Str
+  ensures slen(result) <= 16
+{
+  if i == 0 {
+    return "motd";
+  }
+  if i == 1 {
+    return "about";
+  }
+  if i == 2 {
+    return "etc/passwd";
+  }
+  if i == 3 {
+    return "etc/group";
+  }
+  if i == 4 {
+    return "etc/hosts";
+  }
+  if i == 5 {
+    return "etc/shadow";
+  }
+  if i == 6 {
+    return "etc/shells";
+  }
+  return "elfdemo";
+}
+
+fn init_data(i: u64) -> Str {
+  if i == 0 {
+    return include_bytes("../../../files/motd");
+  }
+  if i == 1 {
+    return include_bytes("../../../files/about");
+  }
+  if i == 2 {
+    return include_bytes("../../../files/passwd");
+  }
+  if i == 3 {
+    return include_bytes("../../../files/group");
+  }
+  if i == 4 {
+    return include_bytes("../../../files/hosts");
+  }
+  if i == 5 {
+    return include_bytes("../../../files/shadow");
+  }
+  if i == 6 {
+    return include_bytes("../../../files/shells");
+  }
+  return include_bytes("../../../build/user/elfpie.elf");
+}
+
+/// The permission bits of init file i.
+fn init_mode(i: u64) -> u64 {
+  if i == 5 {
+    return 384;                           // 0600: password hashes are root's (docs/security.md)
+  }
+  if i == NINIT - 1 {
+    return 493;                           // 0755: elfdemo, a program
+  }
+  return 420;                             // 0644
+}

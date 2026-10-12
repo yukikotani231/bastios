@@ -1,0 +1,210 @@
+// The device tree QEMU's virt machine (and real boards) pass to the kernel,
+// read from boot_info(INFO_DTB): byte i of a copy the platform took at boot,
+// 256 past its end (or when there is none). The walk is plain Bastio over
+// those bytes, with every offset checked against the blob's own size, so
+// a malformed tree makes the answer the default, never a read out of range.
+//
+// So far it finds the virtio-mmio devices: the nodes whose `compatible` is
+// "virtio,mmio", at the addresses their `reg` properties give.
+
+import "virtio_mmio.bastio";
+
+const INFO_DTB: u64 = 10;
+const DTB_MAX: u64 = 65536;       // the platform copies no more than this
+const DT_MAX_VIRTIO: u64 = 64;
+
+const FDT_BEGIN: u64 = 1;
+const FDT_END_NODE: u64 = 2;
+const FDT_PROP: u64 = 3;
+const FDT_NOP: u64 = 4;
+
+fn dt_byte(cpu: &Cpu, i: u64) -> u64
+  ensures result <= 256
+{
+  let b = boot_info(cpu, INFO_DTB, i);
+  if b > 256 {
+    return 256;
+  }
+  return b;
+}
+
+/// The big-endian word at `off`; a byte past the end counts as 0 (callers
+/// check the offset against the tree's size first).
+fn dt_be32(cpu: &Cpu, off: u64) -> u64
+  requires off < 1099511627776
+  ensures result <= 4294967295
+{
+  return (dt_byte(cpu, off) % 256) * 16777216 + (dt_byte(cpu, off + 1) % 256) * 65536
+    + (dt_byte(cpu, off + 2) % 256) * 256 + (dt_byte(cpu, off + 3) % 256);
+}
+
+/// Is the NUL-terminated string at `at` exactly `w`?
+fn dt_same(cpu: &Cpu, at: u64, w: Str) -> bool
+  requires slen(w) < 64 && at < 1099511627776
+{
+  let n = slen(w);
+  let mut k = 0;
+  while k < n
+    invariant k <= n
+  {
+    if dt_byte(cpu, at + k) != cast[u64](sget(w, k)) {
+      return false;
+    }
+    k = k + 1;
+  }
+  return dt_byte(cpu, at + n) == 0;
+}
+
+/// `cells` (1 or 2) big-endian words at `at`, as one number.
+fn dt_cells(cpu: &Cpu, at: u64, cells: u64) -> u64
+  requires at + 8 < 1099511627776 && (cells == 1 || cells == 2)
+{
+  if cells == 1 {
+    return dt_be32(cpu, at);
+  }
+  return dt_be32(cpu, at) * 4294967296 + dt_be32(cpu, at + 4);
+}
+
+/// The addresses of the virtio-mmio devices the tree lists, at most
+/// DT_MAX_VIRTIO of them (none for a missing or malformed tree).
+fn dt_virtio(cpu: &Cpu) -> Vec[u64]
+  ensures vlen(result) <= DT_MAX_VIRTIO
+{
+  let mut found = vec_new[u64]();
+  if dt_be32(cpu, 0) != 0xd00dfeed {
+    return found;
+  }
+  let total = dt_be32(cpu, 4);
+  let st = dt_be32(cpu, 8);
+  let strs = dt_be32(cpu, 12);
+  let size = dt_be32(cpu, 36);
+  if total > DTB_MAX || st > total || size > total - st || strs > total || st % 4 != 0 {
+    return found;
+  }
+  let end = st + size;
+  let mut p = st;
+  let mut depth = 0;
+  let mut ac = 2;
+  let mut sc = 1;
+  let mut virtio = false;
+  let mut base = 0;
+  let mut has_reg = false;
+  let mut live = true;
+  while live && p + 4 <= end
+    invariant p <= end && end <= DTB_MAX && vlen(found) <= DT_MAX_VIRTIO && depth < 4294967296
+    invariant 1 <= ac && ac <= 2 && 1 <= sc && sc <= 2
+  {
+    let tok = dt_be32(cpu, p);
+    if tok == FDT_BEGIN {
+      // The name, NUL-terminated and padded to a word.
+      let mut l = 0;
+      while l < 256 && p + 4 + l < end && dt_byte(cpu, p + 4 + l) != 0
+        invariant l <= 256 && p + 4 + l <= end
+      {
+        l = l + 1;
+      }
+      if l == 256 || p + 4 + l >= end || depth >= 1000 || p + 4 + (l + 4) / 4 * 4 > end {
+        live = false;
+      } else {
+        depth = depth + 1;
+        virtio = false;
+        has_reg = false;
+        base = 0;
+        p = p + 4 + (l + 4) / 4 * 4;
+      }
+    } else if tok == FDT_END_NODE {
+      if depth == 2 && virtio && has_reg && vec_len(found) < DT_MAX_VIRTIO {
+        vec_push(&mut found, base);
+      }
+      virtio = false;
+      has_reg = false;
+      if depth == 0 {
+        live = false;
+      } else {
+        depth = depth - 1;
+        p = p + 4;
+      }
+    } else if tok == FDT_PROP {
+      if p + 12 > end {
+        live = false;
+      } else {
+        let len = dt_be32(cpu, p + 4);
+        let name = strs + dt_be32(cpu, p + 8);
+        if len > end - p - 12 || p + 12 + (len + 3) / 4 * 4 > end {
+          live = false;
+        } else {
+          let data = p + 12;
+          if depth == 1 && dt_same(cpu, name, "#address-cells") && len >= 4 {
+            let v = dt_be32(cpu, data);
+            if v == 1 || v == 2 {
+              ac = v;
+            }
+          } else if depth == 1 && dt_same(cpu, name, "#size-cells") && len >= 4 {
+            let v = dt_be32(cpu, data);
+            if v == 1 || v == 2 {
+              sc = v;
+            }
+          } else if depth == 2 && dt_same(cpu, name, "compatible") {
+            virtio = dt_same(cpu, data, "virtio,mmio");
+          } else if depth == 2 && dt_same(cpu, name, "reg") && len >= (ac + sc) * 4 {
+            base = dt_cells(cpu, data, ac);
+            has_reg = true;
+          }
+          p = data + (len + 3) / 4 * 4;
+        }
+      }
+    } else if tok == FDT_NOP {
+      p = p + 4;
+    } else {
+      live = false;       // FDT_END or garbage
+    }
+  }
+  return found;
+}
+
+/// Is `a` one of the addresses in `v`?
+fn dt_has(v: &Vec[u64], a: u64) -> bool {
+  let mut i = 0;
+  while i < vec_len(v)
+    invariant i <= vlen(v)
+  {
+    if vec_get(v, i) == a {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+/// The row of virtio-mmio slots the tree lists: from its lowest address,
+/// VM_LEN apart, as far as every slot is listed. QEMU's default row if the
+/// tree lists none (or one the window cannot hold).
+fn dt_slots(cpu: &Cpu) -> VmWhere
+  ensures vmw_ok(result)
+{
+  let found = dt_virtio(cpu);
+  let mut lo = 0;
+  let mut have = false;
+  let mut i = 0;
+  while i < vec_len(found)
+    invariant i <= vlen(found) && lo <= WIN_LOW_TOP
+  {
+    let a = vec_get(found, i);
+    if a < WIN_LOW_TOP && (!have || a < lo) {
+      lo = a;
+      have = true;
+    }
+    i = i + 1;
+  }
+  let mut n = 0;
+  while have && n < DT_MAX_VIRTIO && dt_has(found, lo + n * VM_LEN)
+    invariant n <= DT_MAX_VIRTIO && lo <= WIN_LOW_TOP
+  {
+    n = n + 1;
+  }
+  vec_free(found);
+  if !have || n == 0 || lo > WIN_LOW_TOP || lo % 4 != 0 || lo + n * VM_LEN > WIN_LOW_TOP {
+    return vmw_default();
+  }
+  return VmWhere { first: lo, step: VM_LEN, slots: n };
+}

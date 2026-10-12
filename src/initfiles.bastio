@@ -1,0 +1,5 @@
+// The files the file system starts with are architecture specific
+// (src/<arch>/arch/initfiles.bastio), found through the --lib directory the
+// build passes for that architecture.
+
+import "arch/initfiles.bastio";
