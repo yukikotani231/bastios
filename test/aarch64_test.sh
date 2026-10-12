@@ -129,6 +129,7 @@ run("ls d", b"")
 run("cat d/f2", b"no such file")
 # The virtio-mmio disk and network card (src/virtio_blk.bastio and
 # src/virtio_net.bastio over src/virtio_mmio.bastio, shared with x86-64).
+check("the device tree lists QEMU virt's 32 virtio-mmio slots", b"devicetree: 32 virtio-mmio slots from 0x000000000a000000\r\n" in out)
 check("the virtio disk is found", b"disk: virtio\r\n" in out)
 run("echo on disk > disk/a", b"")
 run("cat disk/a", b"on disk")
