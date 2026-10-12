@@ -1,0 +1,11 @@
+// The open flags a Linux program passes, in the numbering the kernel uses
+// inside (x86-64's). AArch64 uses the asm-generic values, which differ in
+// four bits: O_DIRECTORY 040000 (x86-64: 0200000), O_NOFOLLOW 0100000
+// (0400000), O_DIRECT 0200000 (040000) and O_LARGEFILE 0400000 (0100000).
+// Every other flag has the same value.
+
+/// The flags of an open, openat or openat2 call as the kernel numbers them.
+fn oflags_in(f: u64) -> u64 {
+  let rest = f - f % 0x40000 + f % 0x4000;
+  return rest + (f / 0x4000 % 2) * 0x10000 + (f / 0x8000 % 2) * 0x20000 + (f / 0x10000 % 2) * 0x4000 + (f / 0x20000 % 2) * 0x8000;
+}

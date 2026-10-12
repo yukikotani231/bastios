@@ -70,7 +70,7 @@ fn lx_openat2(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, how: u64, size: u
     }
     i = i + 1;
   }
-  let flags = get_u64(k.fs.xfer, 0);
+  let flags = oflags_in(get_u64(k.fs.xfer, 0));
   let mode = get_u64(k.fs.xfer, 8);
   let res = get_u64(k.fs.xfer, 16);
   if flags & OPEN_VALID != flags {
@@ -437,5 +437,5 @@ fn how_flags(k: &mut Kernel, pid: u64, how: u64) -> u64
   if !w.ok {
     return 0;
   }
-  return w.v;
+  return oflags_in(w.v);
 }

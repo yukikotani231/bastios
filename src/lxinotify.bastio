@@ -82,6 +82,7 @@ const P1: u64 = 4;
 const P2: u64 = 42;
 const P3: u64 = 80;                            // P1 + 2 * P_LEN; INO_GLEN is P3 + P_LEN
 const P_LEN: u64 = 38;
+const G_A0: u64 = 118;                         // the call's first argument (the result may overwrite its register)
 const P_F: u64 = 0;                            // the handle the path names, or NO_FILE
 const P_PAR: u64 = 1;                          // its directory's handle, or NO_FILE
 const P_DIR: u64 = 2;                          // 1 if it is a directory
@@ -793,6 +794,7 @@ fn ino_before(k: &mut Kernel, pid: u64)
     return;
   }
   iput(&mut k, INO_G + G_CALL, n + 1);
+  iput(&mut k, INO_G + G_A0, a);
   if n == LX_UNLINK || n == LX_RMDIR {
     keep_arg(&mut k, pid, P1, AT_FDCWD, a, false);
   } else if n == LX_UNLINKAT {
@@ -831,7 +833,7 @@ fn ino_after(k: &mut Kernel, pid: u64)
   if r >= 0x8000000000000000 {
     return;                                 // it failed
   }
-  let a = pget(k.procs, pid, F_REGS + R_RDI);
+  let a = iget(k, INO_G + G_A0);          // as the call got it: the result may have overwritten the register
   let b = pget(k.procs, pid, F_REGS + R_RSI);
   let c = pget(k.procs, pid, F_REGS + R_RDX);
   let r10 = pget(k.procs, pid, F_REGS + R_R10);
