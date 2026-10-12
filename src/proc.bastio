@@ -596,7 +596,7 @@ const SC_INS: u64 = SC_SCR + SC_SCRN;
 const SC_POOL: u64 = 8192;               // instructions shared by all filters
 const SCF_LEN: u64 = SC_INS + SC_POOL + 1;   // and one word that always reads 0
 const MNS_LEN: u64 = MNS_SC + NPROC * SC_PW;
-const MSTR_LEN: u64 = 256 + MT_N * 512;   // the last lookup's logical path, then a key and a source per mount
+const MSTR_LEN: u64 = 256 + MT_N * 512 + 256;   // the last lookup's logical path, then a key and a source per mount, then a path kept by ovl_stash
 const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
 
 // Linux signal actions: per process, 64 signals of 4 words each (handler,

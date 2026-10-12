@@ -56,6 +56,10 @@ const MNS_OE: u64 = NPROC + 8;            // overlay: the mount the last lookup 
 const MNS_OLYR: u64 = NPROC + 9;          // and the layer that had the name (OVL_NONE: none)
 const MNS_FINAL: u64 = NPROC + 10;        // 1 while lx_follow looks up the whole path
 const MNS_IPID: u64 = NPROC + 11;         // overlay: the process whose call the intent is for
+const MNS_SVALID: u64 = NPROC + 12;       // overlay: ovl_stash kept a path (1)
+const MNS_SLEN: u64 = NPROC + 13;         // its length, in k.mstr from STASH
+const MNS_SE: u64 = NPROC + 14;           // the overlay mount it is in
+const MNS_SLOW: u64 = NPROC + 15;         // whether a lower layer has the name
 const MNS_ENT: u64 = NPROC + 16;
 const MS_ROW: u64 = 256;                  // FNAME_MAX + 1
 const LPATH: u64 = 256;                   // where the mounts' strings start in k.mstr
@@ -194,6 +198,8 @@ const OVL_NONE: u64 = 1000;               // no layer has the name
 const OI_NONE: u64 = 0;                   // MNS_INTENT: the lookup only reads
 const OI_WRITE: u64 = 1;                  // it makes or changes the file: copy it up, make its directories
 const OI_REMOVE: u64 = 2;                 // it removes the file: see where it is (ovl_pending)
+const OI_RENAME: u64 = 3;                 // it is the source of a rename: copied up, unless it is a directory
+const STASH: u64 = 256 + MT_N * 512;      // where k.mstr keeps the path ovl_stash kept
 const LSTR: u64 = 0x100000;               // positions one layer takes in a merged directory
 
 /// Where layer li's path starts in an overlay's source at k.mstr[at..],
@@ -600,6 +606,21 @@ fn ovl_tr(k: &mut Kernel, e: u64, p: &Bytes, kl: u64, c: u64) -> u64
         }
       }
       li = 0;
+    } else if it == OI_RENAME && ovl_has_upper(k, e) && li > 0 && li < OVL_NONE {
+      // The source of a rename: a file is copied up and moved there; a
+      // directory of a lower layer is left (the caller says EXDEV).
+      let ln = ovl_name(&mut k, e, li, p, rr, rr, c, 0);
+      if ln != NO_RESULT && dir_at(&mut k, ln) == NO_FILE {
+        let pid = smaller(get(k.mns, MNS_IPID), NPROC - 1);
+        if !ovl_parents(&mut k, pid, e, p, rr, c) {
+          return NO_RESULT;
+        }
+        if !ovl_make_up(&mut k, pid, e, p, rr, c, li) {
+          return NO_RESULT;
+        }
+        li = 0;
+        k.mns = set(k.mns, MNS_OLYR, 0);
+      }
     }
   }
   let mut lyr = li;
@@ -761,6 +782,28 @@ fn lx_path_at_nf_w(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
   return n;
 }
 
+fn lx_path_at_nf_rm(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  ovl_intent(&mut k, pid, OI_REMOVE);
+  let n = lx_path_at_nf(&mut k, pid, dirfd, va);
+  ovl_intent_end(&mut k);
+  return n;
+}
+
+fn lx_path_at_nf_rn(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  ovl_intent(&mut k, pid, OI_RENAME);
+  let n = lx_path_at_nf(&mut k, pid, dirfd, va);
+  ovl_intent_end(&mut k);
+  return n;
+}
+
 fn lx_path_in_w(k: &mut Kernel, pid: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -770,6 +813,289 @@ fn lx_path_in_w(k: &mut Kernel, pid: u64, va: u64) -> u64
   let n = lx_path_in(&mut k, pid, va);
   ovl_intent_end(&mut k);
   return n;
+}
+
+/// Where in p[0..n] the part inside overlay mount e starts.
+fn ovl_rest_at(k: &Kernel, e: u64, p: &Bytes, n: u64) -> u64
+  requires kok(k) && e < MT_N && n <= blen(p)
+  ensures result <= n
+{
+  let kl = me_klen(k, e);
+  let mut rr = kl;
+  if rr < n && bget(p, rr) == 47 {
+    rr = rr + 1;
+  }
+  if rr > n {
+    rr = n;
+  }
+  return rr;
+}
+
+/// The path ovl_stash kept, into a new buffer; its length in *n (at most FNAME_MAX).
+fn ovl_stash_path(k: &Kernel) -> Bytes
+  requires kok(k)
+  ensures blen(result) == PATH_OUT
+{
+  let mut p = balloc(PATH_OUT);
+  let n = smaller(get(k.mns, MNS_SLEN), FNAME_MAX);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= FNAME_MAX && blen(p) == PATH_OUT && STASH + FNAME_MAX <= MSTR_LEN && kok(k)
+  {
+    bset(&mut p, i, bget(k.mstr, STASH + i));
+    i = i + 1;
+  }
+  return p;
+}
+
+fn ovl_stash_len(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= FNAME_MAX
+{
+  return smaller(get(k.mns, MNS_SLEN), FNAME_MAX);
+}
+
+fn ovl_stash_mount(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result < MT_N
+{
+  return smaller(get(k.mns, MNS_SE), MT_N - 1);
+}
+
+/// After a lookup made for a removal or a rename (see ovl_intent): 0 if
+/// the name is not in an overlay mount that has an upper layer, or no layer
+/// has it: the call goes on as usual. 1 if the name is in the upper layer
+/// (a file moved there by a rename is): the call goes on, and ovl_commit
+/// follows. 2 if only a lower layer has it: the call must leave it alone,
+/// and ovl_commit makes the whiteout instead. Keeps the logical path. The
+/// name in the first n0 bytes of the transfer buffer stays there.
+fn ovl_stash(k: &mut Kernel, n0: u64) -> u64
+  requires kok(k) && n0 <= FNAME_MAX
+  ensures kok(k) && result <= 2
+{
+  k.mns = set(k.mns, MNS_SVALID, 0);
+  let oe = get(k.mns, MNS_OE);
+  if oe == 0 || oe > MT_N {
+    return 0;
+  }
+  let e = oe - 1;
+  let li = get(k.mns, MNS_OLYR);
+  if li >= OVL_NONE || !ovl_has_upper(k, e) {
+    return 0;
+  }
+  let n = lpath_len(k);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= FNAME_MAX && STASH + FNAME_MAX <= MSTR_LEN && kok(k)
+  {
+    bset(&mut k.mstr, STASH + i, bget(k.mstr, i));
+    i = i + 1;
+  }
+  k.mns = set(k.mns, MNS_SLEN, n);
+  k.mns = set(k.mns, MNS_SE, e);
+  k.mns = set(k.mns, MNS_SVALID, 1);
+  // Does a layer below the upper one have the name?
+  let mut sv = balloc(FNAME_MAX);
+  let mut q = 0;
+  while q < n0
+    invariant q <= n0 && n0 <= FNAME_MAX && blen(sv) == FNAME_MAX && kok(k)
+  {
+    bset(&mut sv, q, bget(k.fs.xfer, q));
+    q = q + 1;
+  }
+  let p = ovl_stash_path(k);
+  let rr = ovl_rest_at(k, e, p, n);
+  let nl = ovl_count(k, e);
+  let mut low = 0;
+  let mut m = 1;
+  while m < nl && low == 0
+    invariant m <= MS_ROW && nl <= MS_ROW && rr <= n && n <= FNAME_MAX && blen(p) == PATH_OUT && e < MT_N && kok(k)
+  {
+    let x = ovl_name(&mut k, e, m, p, rr, rr, n, 0);
+    if x != NO_RESULT && ovl_exists(&mut k, x) {
+      low = 1;
+    }
+    m = m + 1;
+  }
+  bfree(p);
+  q = 0;
+  while q < n0
+    invariant q <= n0 && n0 <= FNAME_MAX && blen(sv) == FNAME_MAX && kok(k)
+  {
+    bset(&mut k.fs.xfer, q, bget(sv, q));
+    q = q + 1;
+  }
+  bfree(sv);
+  k.mns = set(k.mns, MNS_SLOW, low);
+  if li == 0 {
+    return 1;
+  }
+  return 2;
+}
+
+/// Does a lower layer have the name ovl_stash kept?
+fn ovl_stash_low(k: &Kernel) -> bool
+  requires kok(k)
+{
+  return get(k.mns, MNS_SVALID) == 1 && get(k.mns, MNS_SLOW) == 1;
+}
+
+/// Finishes a removal or rename ovl_stash saw: if a lower layer has the
+/// name, a whiteout (an empty file ".wh.NAME") hides it in the upper layer.
+/// 0 or -errno.
+fn ovl_commit(k: &mut Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if get(k.mns, MNS_SVALID) != 1 {
+    return 0;
+  }
+  k.mns = set(k.mns, MNS_SVALID, 0);
+  if get(k.mns, MNS_SLOW) != 1 {
+    return 0;
+  }
+  let e = ovl_stash_mount(k);
+  let n = ovl_stash_len(k);
+  let p = ovl_stash_path(k);
+  let rr = ovl_rest_at(k, e, p, n);
+  let mut a = n;
+  while a > rr && bget(p, a - 1) != 47
+    invariant rr <= a && a <= n && n <= FNAME_MAX && blen(p) == PATH_OUT
+  {
+    a = a - 1;
+  }
+  let w = ovl_name(&mut k, e, 0, p, rr, a, n, 4);
+  if w == NO_RESULT {
+    bfree(p);
+    return ENAMETOOLONG;
+  }
+  if ovl_exists(&mut k, w) {
+    bfree(p);
+    return 0;                               // there is one already
+  }
+  if !ovl_parents(&mut k, pid, e, p, rr, n) {
+    bfree(p);
+    return k.perr;
+  }
+  let w2 = ovl_name(&mut k, e, 0, p, rr, a, n, 4);
+  bfree(p);
+  if w2 == NO_RESULT || !vfs_mknode(&mut k.fs, &mut k.mem, w2, 0) {
+    return ENOSPC;
+  }
+  return 0;
+}
+
+/// Is the directory ovl_stash kept empty in the merge of the layers?
+fn ovl_dir_empty(k: &mut Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if get(k.mns, MNS_SVALID) != 1 {
+    return true;
+  }
+  let e = ovl_stash_mount(k);
+  let n = ovl_stash_len(k);
+  let sp = ovl_stash_path(k);
+  let rr = ovl_rest_at(k, e, sp, n);
+  let mut p = balloc(PATH_OUT);
+  let mut i = rr;
+  while i < n
+    invariant rr <= i && i <= n && n <= FNAME_MAX && blen(sp) == PATH_OUT && blen(p) == PATH_OUT
+  {
+    bset(&mut p, i - rr, bget(sp, i));
+    i = i + 1;
+  }
+  bfree(sp);
+  let rl = n - rr;
+  if rl >= FNAME_MAX {
+    bfree(p);
+    return false;
+  }
+  let mut pos = 0;
+  let mut steps = 0;
+  let mut empty = true;
+  while steps < 200000 && empty
+    invariant steps <= 200000 && pos <= 0x80000000 && blen(p) == PATH_OUT && e < MT_N && rl < FNAME_MAX && kok(k)
+  {
+    let ent = ovl_dir_entry(&mut k, pid, e, &mut p, rl, pos);
+    if ent.end {
+      steps = 200000;
+    } else if ent.len > 0 {
+      empty = false;
+    } else {
+      pos = smaller(ovl_after(k, pos + 2) - 2, 0x80000000);
+      steps = steps + 1;
+    }
+  }
+  bfree(p);
+  return empty;
+}
+
+/// Before the upper layer's directory that ovl_stash kept is removed:
+/// removes the whiteouts in it (the merge sees it as empty), then puts its
+/// name back in the transfer buffer. False if one cannot go.
+fn ovl_clear_wh(k: &mut Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if get(k.mns, MNS_SVALID) != 1 {
+    return true;
+  }
+  let e = ovl_stash_mount(k);
+  let n = ovl_stash_len(k);
+  let p = ovl_stash_path(k);
+  let rr = ovl_rest_at(k, e, p, n);
+  let un = ovl_name(&mut k, e, 0, p, rr, rr, n, 0);
+  if un == NO_RESULT {
+    bfree(p);
+    return false;
+  }
+  let d = dir_at(&mut k, un);
+  if d == NO_FILE {
+    bfree(p);
+    return true;
+  }
+  let mut ok = true;
+  let mut idx = 0;
+  let mut more = true;
+  while more && ok && idx < 200000
+    invariant idx <= 200000 && rr <= n && n <= FNAME_MAX && blen(p) == PATH_OUT && e < MT_N && kok(k)
+  {
+    let ent = dir_entry(&mut k, pid, d, idx);
+    if ent.end {
+      more = false;
+    } else if ent.len >= 4 && ent.len <= FNAME_MAX && bget(k.fs.xfer, 0) == 46 && bget(k.fs.xfer, 1) == 119 && bget(k.fs.xfer, 2) == 104 && bget(k.fs.xfer, 3) == 46 {
+      let mut nm = balloc(FNAME_MAX);
+      let mut j = 0;
+      while j < ent.len
+        invariant j <= ent.len && ent.len <= FNAME_MAX && blen(nm) == FNAME_MAX && kok(k)
+      {
+        bset(&mut nm, j, bget(k.fs.xfer, j));
+        j = j + 1;
+      }
+      let u2 = ovl_name(&mut k, e, 0, p, rr, rr, n, 0);
+      if u2 == NO_RESULT || u2 + 1 + ent.len > FNAME_MAX {
+        ok = false;
+      } else {
+        bset(&mut k.fs.xfer, u2, 47);
+        j = 0;
+        while j < ent.len
+          invariant j <= ent.len && ent.len <= FNAME_MAX && u2 + 1 + ent.len <= FNAME_MAX && blen(nm) == FNAME_MAX && kok(k)
+        {
+          bset(&mut k.fs.xfer, u2 + 1 + j, bget(nm, j));
+          j = j + 1;
+        }
+        if !vfs_unlink(&mut k.fs, &mut k.mem, u2 + 1 + ent.len) {
+          ok = false;
+        }
+      }
+      bfree(nm);
+    }
+    idx = idx + 1;
+  }
+  let back = ovl_name(&mut k, e, 0, p, rr, rr, n, 0);
+  bfree(p);
+  return ok && back != NO_RESULT;
 }
 
 /// Keeps p[0..c] as the logical path of the last lookup.

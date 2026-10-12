@@ -348,10 +348,19 @@ steps = [
     # the upper layer hides the same name below; ".wh.NAME" in a layer
     # hides NAME in the layers below it; an overlay without upperdir is
     # read-only.
-    ("mkdir -p /tmp/ov/a /tmp/ov/b /tmp/ov/u /tmp/ov/w /tmp/ov/m /tmp/ov/r; echo A > /tmp/ov/a/f; echo B > /tmp/ov/b/f; echo G > /tmp/ov/b/g; echo H > /tmp/ov/b/h; mkdir /tmp/ov/b/sub; echo S > /tmp/ov/b/sub/s; touch /tmp/ov/u/.wh.h; echo U > /tmp/ov/u/n; mount -t overlay overlay -o lowerdir=/tmp/ov/a:/tmp/ov/b,upperdir=/tmp/ov/u,workdir=/tmp/ov/w /tmp/ov/m && cat /tmp/ov/m/f /tmp/ov/m/g /tmp/ov/m/n /tmp/ov/m/sub/s; cat /tmp/ov/m/h; for f in /tmp/ov/m/*; do echo $f; done; grep overlay /proc/mounts; echo ov1",
-     [b"\r\nA\r\nG\r\nU\r\nS\r\n", b"can't open '/tmp/ov/m/h'", b"/tmp/ov/m/f\r\n/tmp/ov/m/g\r\n/tmp/ov/m/n\r\n/tmp/ov/m/sub\r\n", b"overlay /tmp/ov/m overlay rw 0 0\r\nov1"], b"\n# "),
-    ("mount -t overlay overlay -o lowerdir=/tmp/ov/b /tmp/ov/r && cat /tmp/ov/r/g; echo x > /tmp/ov/r/new; echo w=$?; mount -t overlay overlay -o lowerdir=/tmp/ov/nope /tmp/ov/r; echo bad=$?; umount /tmp/ov/m; umount /tmp/ov/r; rm -r /tmp/ov; echo ov2",
-     [b"\r\nG\r\n", b"Read-only file system", b"w=1", b"bad=1", b"ov2"], b"\n# "),
+    ("mkdir -p /tmp/ov/a /tmp/ov/b /tmp/ov/u /tmp/ov/w /tmp/ov/m /tmp/ov/r; echo A > /tmp/ov/a/f; echo B > /tmp/ov/b/f; echo G > /tmp/ov/b/g; echo H > /tmp/ov/b/h; mkdir /tmp/ov/b/sub; echo S > /tmp/ov/b/sub/s; touch /tmp/ov/u/.wh.h; echo U > /tmp/ov/u/n; mount -t overlay overlay -o lowerdir=/tmp/ov/a:/tmp/ov/b,upperdir=/tmp/ov/u,workdir=/tmp/ov/w /tmp/ov/m && cat /tmp/ov/m/f /tmp/ov/m/g /tmp/ov/m/n /tmp/ov/m/sub/s; cat /tmp/ov/m/h; for f in /tmp/ov/m/*; do echo $f; done; cat /proc/mounts; echo ov1",
+     [b"\r\nA\r\nG\r\nU\r\nS\r\n", b"can't open '/tmp/ov/m/h'", b"/tmp/ov/m/f\r\n/tmp/ov/m/g\r\n/tmp/ov/m/n\r\n/tmp/ov/m/sub\r\n", b"\r\noverlay /tmp/ov/m overlay rw 0 0\r\n", b"\r\nov1"], b"\n# "),
+    # Writing through an overlay: a file changed is copied up first (the
+    # lower one stays as it was), new names and the directories above
+    # them are made in the upper layer, a name removed or renamed away is
+    # hidden by a whiteout, and a directory made again over one removed
+    # starts empty.
+    ("cd /tmp/ov/m && echo more >> f && cat f && cat /tmp/ov/a/f && mkdir -p nd/deep && echo d > nd/deep/n && chmod 600 g && echo up >> g && cat g; for x in /tmp/ov/u/*; do echo $x; done; ls -l g; cd /; echo ov3",
+     [b"\r\nA\r\nmore\r\nA\r\n", b"G\r\nup\r\n", b"/tmp/ov/u/f\r\n/tmp/ov/u/g\r\n/tmp/ov/u/n\r\n/tmp/ov/u/nd\r\n", b"-rw-------", b"\r\nov3"], b"\n# "),
+    ("cd /tmp/ov/m && rm g && cat g; mv nd nd2; echo mv=$?; rmdir nd2/deep; echo rd=$?; rm nd2/deep/n; rmdir nd2/deep nd2; echo rd2=$?; mkdir nd; [ -z \"$(ls nd)\" ] && echo ndempty; mv f f2 && cat f2; cat f; echo *; cd /; echo ov4",
+     [b"can't open 'g'", b"mv=0", b"rd=1", b"rd2=0", b"ndempty", b"\r\nA\r\nmore\r\n", b"can't open 'f'", b"\r\nf2 n nd sub\r\n", b"\r\nov4"], b"\n# "),
+    ("mount -t overlay overlay -o lowerdir=/tmp/ov/b /tmp/ov/r && cat /tmp/ov/r/g; echo x > /tmp/ov/r/new; echo w=$?; mount -t overlay overlay -o lowerdir=/tmp/ov/nope /tmp/ov/r; echo bad; umount /tmp/ov/m; umount /tmp/ov/r; rm -r /tmp/ov; echo ov2",
+     [b"\r\nG\r\n", b"Read-only file system", b"w=1", b"failed: No such file", b"\r\nbad\r\n", b"\r\nov2"], b"\n# "),
     # UTS and IPC namespaces, /proc/PID/ns and setns (src/lxnsk.bastio): a
     # host name set in a new UTS namespace stays there; IPC objects made
     # in one IPC namespace are not seen from another, and setns joins one
