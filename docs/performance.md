@@ -85,6 +85,23 @@ Linux's for the same work, so a figure above 1 means BastiOS is slower.
 | epwait | us | 1054 | 1307 | 0.81x |
 | idle | % host CPU | 15.0 | 2.00 | 7.51x |
 
+## Boot time and memory
+
+Boot to the `bastios>` prompt, QEMU 8.2 TCG, one CPU, `-kernel`, on the same
+no-KVM container (so these are emulator figures; the kernel's share of a
+KVM boot has not been measured, and neither has a comparison with a minimal
+Linux guest):
+
+| Machine | Boot | Note |
+|---|---:|---|
+| `microvm` | 2.1 s | before the PIT channel 0 calibration: the local APIC timer was counted against two seconds of the RTC |
+| `microvm` | 0.29 s | after it |
+| `pc` | 0.2 to 0.4 s | includes QEMU's start-up |
+
+The smallest RAM that boots is 36 MiB (1863 free 4 KiB pages at the prompt).
+`-m 16M` prints nothing because the image is linked at 16 MiB. Details and
+the failure modes of the other sizes are in [cloud.md](cloud.md).
+
 ## Tracking it
 
 `bench/baseline.json` is the result file of one `make bench --os bastios`

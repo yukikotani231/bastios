@@ -154,7 +154,7 @@ fn lx_pick(k: &mut Kernel, from: u64) -> u64
     invariant i <= cap && 0 < cap && cap <= NPROC && kok(k)
   {
     let p = (from % cap + i) % cap;
-    if p != 0 && state(k.procs, p) == READY && group_free(&mut k, p) {
+    if p != 0 && state(k.procs, p) == READY && !cg_held(k, p) && group_free(&mut k, p) {
       return p;
     }
     i = i + 1;
