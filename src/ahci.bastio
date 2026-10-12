@@ -248,6 +248,16 @@ fn ahci_issue(h: &mut Ahci) -> bool
     }
     i = i + 1;
   }
+  // Timed out. The command may still be running, and would then write to
+  // our data page when it ends, in the middle of the next command. Stopping
+  // the command engine ends it (PxCI is cleared); then it is started again,
+  // so that the next command has an engine to run on.
+  if port_stop(&mut h) {
+    let c1 = pr(&mut h, PX_CMD);
+    pw(&mut h, PX_CMD, bit_set(c1, CMD_FRE));
+    let c2 = pr(&mut h, PX_CMD);
+    pw(&mut h, PX_CMD, bit_set(c2, CMD_ST));
+  }
   return false;
 }
 

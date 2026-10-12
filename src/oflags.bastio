@@ -1,0 +1,5 @@
+// The open flags of a Linux program are architecture specific:
+// src/<arch>/arch/oflags.bastio, found through the --lib directory the
+// build passes for that architecture.
+
+import "arch/oflags.bastio";
