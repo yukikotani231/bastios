@@ -47,6 +47,7 @@ const PT_W_ROWS: u64 = 12;             // the window size (TIOCSWINSZ), rows and
 const PT_W_COLS: u64 = 13;
 const PT_W_SET: u64 = 14;              // 1 once its termios was set
 const PT_W_OPENED: u64 = 15;           // 1 once a slave was opened
+const PT_W_PX: u64 = 52;              // the window's size in pixels: x, then y << 16
 const PT_W_TT: u64 = 16;               // the termios, a byte a word (TERMIOS_SIZE)
 
 const SIGHUP: u64 = 1;
@@ -103,10 +104,21 @@ fn pt_set(t: &mut Buf, p: u64, f: u64, v: u64)
 fn pts_at(x: &Bytes, n: u64) -> u64
   requires blen(x) == XFER && n <= FNAME_MAX
 {
-  if n == 9 && xfer_is(x, 0, 8, "dev/pts/") {
+  if (n == 9 || n == 10) && xfer_is(x, 0, 8, "dev/pts/") {
     let c = cast[u64](bget(x, 8));
-    if c >= 48 && c < 48 + PTY_N {
-      return DEV_PTS + c - 48;
+    if c < 48 || c > 57 {
+      return DEV_NONE;
+    }
+    let mut v = c - 48;
+    if n == 10 {
+      let c2 = cast[u64](bget(x, 9));
+      if c2 < 48 || c2 > 57 || v == 0 {
+        return DEV_NONE;                    // no leading zero
+      }
+      v = v * 10 + c2 - 48;
+    }
+    if v < PTY_N {
+      return DEV_PTS + v;
     }
   }
   return DEV_NONE;
@@ -676,7 +688,7 @@ fn pty_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u
   }
   if req == TIOCGWINSZ {
     lx_fill(&mut k, 0, WINSIZE_SIZE);
-    xfer_u64(&mut k.fs.xfer, 0, pt_get(k.ptys, p, PT_W_ROWS) % 65536 + pt_get(k.ptys, p, PT_W_COLS) % 65536 * 65536);
+    xfer_u64(&mut k.fs.xfer, 0, pt_get(k.ptys, p, PT_W_ROWS) % 65536 + pt_get(k.ptys, p, PT_W_COLS) % 65536 * 65536 + pt_get(k.ptys, p, PT_W_PX) % 0x100000000 * 0x100000000);
     return lx_put_out(&mut k, pid, arg, WINSIZE_SIZE);
   }
   if req == TIOCSWINSZ {
@@ -685,6 +697,8 @@ fn pty_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u
     }
     let rows = cast[u64](bget(k.fs.xfer, 0)) | cast[u64](bget(k.fs.xfer, 1)) << 8;
     let cols = cast[u64](bget(k.fs.xfer, 2)) | cast[u64](bget(k.fs.xfer, 3)) << 8;
+    let px = cast[u64](bget(k.fs.xfer, 4)) | cast[u64](bget(k.fs.xfer, 5)) << 8 | cast[u64](bget(k.fs.xfer, 6)) << 16 | cast[u64](bget(k.fs.xfer, 7)) << 24;
+    pt_set(&mut k.ptys, p, PT_W_PX, px);
     if rows != pt_get(k.ptys, p, PT_W_ROWS) || cols != pt_get(k.ptys, p, PT_W_COLS) {
       pt_set(&mut k.ptys, p, PT_W_ROWS, rows);
       pt_set(&mut k.ptys, p, PT_W_COLS, cols);
@@ -751,6 +765,40 @@ fn pty_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u
     lx_fill(&mut k, 0, 4);
     xfer_u64(&mut k.fs.xfer, 0, c);
     return lx_put_out(&mut k, pid, arg, 4);
+  }
+  if req >= TCSETA && req <= TCSETAF {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, TERMIO_SIZE) != TERMIO_SIZE {
+      return EFAULT;
+    }
+    let mut i = 0;
+    while i < TERMIO_SIZE
+      invariant i <= TERMIO_SIZE && kok(k)
+    {
+      pt_set(&mut k.ptys, p, PT_W_TT + termio_src(i), cast[u64](bget(k.fs.xfer, i)));
+      i = i + 1;
+    }
+    pt_set(&mut k.ptys, p, PT_W_SET, 1);
+    if req == TCSETAF {
+      pty_flush(&mut k, p, false);
+    }
+    if pt_flags(k.ptys, p, 12) & ICANON == 0 {
+      pt_set(&mut k.ptys, p, PT_W_READY, pty_count(k.ptys, p, false));
+    }
+    return 0;
+  }
+  if req == TIOCGETD {
+    lx_fill(&mut k, 0, 4);
+    return lx_put_out(&mut k, pid, arg, 4);
+  }
+  if req == TIOCSETD {
+    let v = pty_int_in(&mut k, pid, arg);
+    if v == NO_RESULT {
+      return EFAULT;
+    }
+    if v != 0 {
+      return EINVAL;
+    }
+    return 0;
   }
   if req == TCFLSH {
     if arg == 0 || arg == 2 {

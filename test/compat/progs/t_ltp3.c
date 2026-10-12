@@ -297,6 +297,29 @@ int main(void) {
         if (m >= 0) close(m);
     }
 
+    /* TCSETA writes the termio back, the window size carries its pixel
+       fields, and the line discipline is N_TTY. */
+    {
+        int m = posix_openpt(O_RDWR | O_NOCTTY);
+        unsigned char tio[18], back[18];
+        struct winsize ws = { 24, 80, 640, 480 }, got = { 0, 0, 0, 0 };
+        int ld = -1, r1 = -1, r2 = -1, same = 0, r3 = -1, r4 = -1, r5 = -1;
+        if (m >= 0) {
+            r1 = ioctl(m, 0x5405, tio);
+            tio[8] ^= 1;                 /* c_cc[0] is the first control character */
+            r2 = ioctl(m, 0x5406, tio);
+            ioctl(m, 0x5405, back);
+            same = memcmp(tio, back, 18) == 0;
+            r3 = ioctl(m, TIOCSWINSZ, &ws);
+            r4 = ioctl(m, TIOCGWINSZ, &got);
+            r5 = ioctl(m, 0x5424, &ld);
+        }
+        EXPECT("TCSETA is read back by TCGETA", r1 == 0 && r2 == 0 && same);
+        EXPECT("the window size keeps its pixel fields", r3 == 0 && r4 == 0 && got.ws_xpixel == 640 && got.ws_ypixel == 480);
+        EXPECT("TIOCGETD reports N_TTY", r5 == 0 && ld == 0);
+        if (m >= 0) close(m);
+    }
+
     /* sendfile to a unix socket sends the bytes, and a full
        non-blocking datagram socket is EAGAIN. */
     {

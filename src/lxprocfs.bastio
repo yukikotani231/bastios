@@ -761,6 +761,16 @@ fn put_prog(k: &mut Kernel, p: u64, o: &mut Bytes, at: u64, base: bool) -> u64
   return a;
 }
 
+/// Whether process p waits in a system call that runs again until what it
+/// waits for comes, with no signal pending that it takes: Linux wakes a
+/// sleeper when it posts such a signal, so by then the process is running
+/// even though it has not got a processor yet.
+fn is_waiting(k: &Kernel, p: u64) -> bool
+  requires kok(k) && p < NPROC
+{
+  return pget(k.procs, p, F_ASLEEP) != 0 && pget(k.procs, p, F_SIGPEND) & !pget(k.procs, p, F_SIGMASK) == 0;
+}
+
 /// The one-letter state of a process in state s, as ps shows it. A
 /// process that runs its system call again until what it waits for comes
 /// (`waiting`, F_ASLEEP) is waiting, though it is READY or RUNNING: Linux
@@ -994,7 +1004,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     a = put_s(&mut o, a, " (");
     a = put_comm(&mut k, p, &mut o, a);
     a = put_s(&mut o, a, ") ");
-    a = put_c(&mut o, a, state_letter(s, pget(k.procs, p, F_ASLEEP) != 0));
+    a = put_c(&mut o, a, state_letter(s, is_waiting(k, p)));
     a = put_c(&mut o, a, 32);
     a = put_n(&mut o, a, vpid_of(k, pid, parent));
     a = put_c(&mut o, a, 32);
@@ -1029,7 +1039,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     let mut a = put_s(&mut o, 0, "Name:\t");
     a = put_comm(&mut k, p, &mut o, a);
     a = put_s(&mut o, a, "\nState:\t");
-    a = put_c(&mut o, a, state_letter(s, pget(k.procs, p, F_ASLEEP) != 0));
+    a = put_c(&mut o, a, state_letter(s, is_waiting(k, p)));
     a = put_s(&mut o, a, "\nTgid:\t");
     a = put_n(&mut o, a, vpid_of(k, pid, p));
     a = put_s(&mut o, a, "\nPid:\t");

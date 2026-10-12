@@ -969,6 +969,39 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     }
     return lx_put_out(&mut k, pid, arg, TERMIO_SIZE);
   }
+  if req >= TCSETA && req <= TCSETAF {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, TERMIO_SIZE) != TERMIO_SIZE {
+      return EFAULT;
+    }
+    let mut i = 0;
+    while i < TERMIO_SIZE
+      invariant i <= TERMIO_SIZE && kok(k)
+    {
+      k.line = set(k.line, TT0 + termio_src(i), cast[u64](bget(k.fs.xfer, i)));
+      i = i + 1;
+    }
+    k.line = set(k.line, TT_SET, 1);
+    if req == TCSETAF {
+      ring_clear(&mut k.q.r);
+      k.line = set(k.line, 0, 0);
+      k.line = set(k.line, 1, 0);
+    }
+    return 0;
+  }
+  if req == TIOCGETD {
+    lx_fill(&mut k, 0, 4);
+    return lx_put_out(&mut k, pid, arg, 4);   // N_TTY, the only line discipline
+  }
+  if req == TIOCSETD {
+    let v = pty_int_in(&mut k, pid, arg);
+    if v == NO_RESULT {
+      return EFAULT;
+    }
+    if v != 0 {
+      return EINVAL;                        // no other line discipline
+    }
+    return 0;
+  }
   if req == TIOCGPGRP || req == TIOCGSID {
     // The console's foreground group is whatever group asks: there is no
     // job control to put one in the background.
