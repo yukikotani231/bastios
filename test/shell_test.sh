@@ -889,6 +889,92 @@ else:
         print("ok   Linux TCP: connect, write, read until the peer closes")
     else:
         print("FAIL Linux TCP get:", line); fails += 1
+    # First boot on a cloud machine (user/mcloud.c): the instance metadata
+    # protocol of AWS (IMDSv2: a token from a PUT, sent back as a header),
+    # served here by a fake service on this host. The address is an
+    # argument; the real one, 169.254.169.254, is not reachable from QEMU's
+    # user network.
+    import threading
+    imds_log = []
+    imds_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBastioTestKey test@example"
+    def imds_serve(listener):
+        for _ in range(3):
+            try:
+                c, _ = listener.accept()
+            except OSError:
+                return
+            c.settimeout(10)
+            req = b""
+            try:
+                while b"\r\n\r\n" not in req:
+                    d = c.recv(1024)
+                    if not d:
+                        break
+                    req += d
+            except OSError:
+                pass
+            head = req.decode(errors="replace")
+            line = head.split("\r\n")[0]
+            imds_log.append(line)
+            authed = "X-aws-ec2-metadata-token: TOK123\r\n" in head
+            if line.startswith("PUT /latest/api/token ") and "X-aws-ec2-metadata-token-ttl-seconds: 60" in head:
+                code, body = "200 OK", "TOK123"
+            elif not authed:
+                code, body = "401 Unauthorized", ""
+            elif line.startswith("GET /latest/meta-data/hostname "):
+                code, body = "200 OK", "cloudbox-7.internal"
+            elif line.startswith("GET /latest/meta-data/public-keys/0/openssh-key "):
+                code, body = "200 OK", imds_key
+            else:
+                code, body = "404 Not Found", ""
+            try:
+                c.sendall(f"HTTP/1.1 {code}\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n{body}".encode())
+            except OSError:
+                pass
+            c.close()
+    imds = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    imds.bind(("127.0.0.1", 0))
+    imds.listen(3)
+    th = threading.Thread(target=imds_serve, args=(imds,), daemon=True)
+    th.start()
+    # The kernel's shell passes no arguments to a Linux program, so this runs
+    # under BusyBox's ash.
+    mark = len(out)
+    qemu.stdin.write(b"ash\r"); qemu.stdin.flush()
+    read_until(b"\n# ", mark)
+    mark = len(out)
+    qemu.stdin.write(f"mcloud 10.0.2.2:{imds.getsockname()[1]}\r".encode()); qemu.stdin.flush()
+    got = read_until(b"key installed", mark) and read_until(b"\n# ", mark)
+    text = out[mark:]
+    th.join(10)
+    imds.close()
+    want_log = ["PUT /latest/api/token HTTP/1.1", "GET /latest/meta-data/hostname HTTP/1.1",
+                "GET /latest/meta-data/public-keys/0/openssh-key HTTP/1.1"]
+    if got and b"mcloud: hostname cloudbox-7.internal" in text and imds_log == want_log:
+        print("ok   mcloud: token, host name and public key from the metadata service")
+    else:
+        print("FAIL mcloud:", repr(text), imds_log); fails += 1
+    mark = len(out)
+    qemu.stdin.write(b"hostname\r"); qemu.stdin.flush()
+    if read_until(b"\n# ", mark) and b"cloudbox-7.internal" in out[mark:]:
+        print("ok   mcloud: the host name is set")
+    else:
+        print("FAIL mcloud host name:", repr(out[mark:])); fails += 1
+    mark = len(out)
+    qemu.stdin.write(b"cat /root/.ssh/authorized_keys\r"); qemu.stdin.flush()
+    if read_until(b"\n# ", mark) and imds_key.encode() in out[mark:]:
+        print("ok   mcloud: the public key is in root's authorized_keys")
+    else:
+        print("FAIL mcloud authorized_keys:", repr(out[mark:])); fails += 1
+    mark = len(out)
+    qemu.stdin.write(b"mcloud 10.0.2.2:9\r"); qemu.stdin.flush()
+    if read_until(b"\n# ", mark) and b"mcloud: no metadata service" in out[mark:]:
+        print("ok   mcloud: no service is reported, not hung on")
+    else:
+        print("FAIL mcloud without a service:", repr(out[mark:])); fails += 1
+    mark = len(out)
+    qemu.stdin.write(b"exit\r"); qemu.stdin.flush()
+    read_until(b"bastios> ", mark)
     mark = len(out)
     qemu.stdin.write(b"udpsend 10.0.2.2 0 x\r"); qemu.stdin.flush()
     if read_until(b"bastios> ", mark) and b"usage: udpsend" in out[mark:]:
