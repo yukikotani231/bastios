@@ -10,6 +10,7 @@
 // with the 10-byte legacy virtio-net header, then the Ethernet frame.
 
 import "virtq.bastio";
+import "vt.bastio";
 import "netconst.bastio";
 
 const VIRTIO_NET: u64 = 0x1000;       // legacy (transitional) network device id
@@ -138,7 +139,7 @@ fn vnet_irq(v: &mut VNet, on: bool)
 
 /// Resets the card, so it stops using the pages, takes them back and gives
 /// the ports or registers back (at power off).
-fn vnet_free(ports: &mut Ports, win: &mut MmioSpace, v: VNet, m: &mut Mem)
+fn vnet_free(v: VNet, m: &mut Mem) -> Vt
   requires vnet_ok(v) && mem_ok(m)
   ensures mem_ok(m)
 {
@@ -150,7 +151,7 @@ fn vnet_free(ports: &mut Ports, win: &mut MmioSpace, v: VNet, m: &mut Mem)
   give_page(&mut m, dma_take(d.rb0));
   give_page(&mut m, dma_take(d.rb1));
   give_page(&mut m, dma_take(d.tb));
-  vt_release(&mut ports, &mut win, d.io);
+  return d.io;
 }
 
 /// Copies the next received frame into `pkt` and returns its length, or 0

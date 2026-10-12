@@ -375,7 +375,7 @@ fn blk_free(ports: &mut Ports, win: &mut MmioSpace, b: Blk, m: &mut Mem)
 {
   match b {
     Blk::Ata(a) => { ata_free(&mut ports, a); },
-    Blk::Virtio(v) => { virtio_free(&mut ports, &mut win, v, &mut m); },
+    Blk::Virtio(v) => { vt_release(&mut ports, &mut win, virtio_free(v, &mut m)); },
     Blk::Nvme(n) => { mmio_release(&mut win, nvme_free(n, &mut m)); },
     Blk::Ahci(h) => { mmio_release(&mut win, ahci_free(h, &mut m)); },
     Blk::Usb(x) => { mmio_release(&mut win, xhci_free(x, &mut m)); },

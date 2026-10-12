@@ -174,7 +174,7 @@ fn card_free(ports: &mut Ports, win: &mut MmioSpace, d: Card, m: &mut Mem)
   ensures mem_ok(m)
 {
   match d {
-    Card::Virtio(v) => { vnet_free(&mut ports, &mut win, v, &mut m); },
+    Card::Virtio(v) => { vt_release(&mut ports, &mut win, vnet_free(v, &mut m)); },
     Card::E1000(e) => { mmio_release(&mut win, e1k_free(e, &mut m)); },
     Card::Ena(a) => { mmio_release(&mut win, ena_free(a, &mut m)); },
   }

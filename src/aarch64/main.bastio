@@ -333,15 +333,28 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   return (p + 1) % NPROC;
 }
 
-fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 {
-  let m = mem_new(pool);
-  let disk = disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0)));
-  let tsc = Tsc { base: 0, mult: 0, at: 0 };      // the clock follows the timer ticks (set_clock)
+fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 {
+  let mut m = mem_new(pool);
   let mut console = con_new();
   puts(&mut console, "\r\nBastiOS 0.2 (aarch64): ");
   put_num(&mut console, count_avail(m.bm));
   puts(&mut console, " pages of memory, 1 processor\r\n");
-  let mut k = kernel_new(m, disk, Nic::None, Snd::None, mice_new(false), tsc, 0, 0, 1);
+  let vm_where = vmw_default();
+  let dev = blk_find(&mut m, &mut win, vm_where);
+  let dk_lo = blk_mmio_lo(dev);
+  let dk_hi = blk_mmio_hi(dev);
+  let disk = disk_mount(dev);
+  let tsc = Tsc { base: 0, mult: 0, at: 0 };      // the clock follows the timer ticks (set_clock)
+  if blk_is_virtio(disk.dev) {
+    puts(&mut console, "disk: virtio\r\n");
+  }
+  if disk.blocks > 0 {
+    puts(&mut console, "disk: the BastiOS file system, ");
+    put_num(&mut console, disk.blocks);
+    puts(&mut console, " blocks of 4 KiB\r\n");
+  }
+  let nic = nic_find(&mut m, &mut win, 4, dk_lo, dk_hi, vm_where);
+  let mut k = kernel_new(m, disk, nic, Snd::None, mice_new(false), tsc, 0, 0, 1);
   install_files(&mut console, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut console, "cannot start the shell\r\n");
@@ -406,9 +419,9 @@ fn main(con: &mut Serial, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 
     Store::Table(t) => { free_l2(&mut s.k.mem, t); },
   }
   let devs = vfs_free(s.k.fs, &mut s.k.mem);
-  blk_free(devs.lo, &mut s.k.mem);
-  blk_free(devs.disk, &mut s.k.mem);
-  nic_free(s.k.nic, &mut s.k.mem);
+  blk_free(&mut win, devs.lo, &mut s.k.mem);
+  blk_free(&mut win, devs.disk, &mut s.k.mem);
+  nic_free(&mut win, s.k.nic, &mut s.k.mem);
   snd_free(s.k.snd, &mut s.k.mem);
   puts(&mut s.con, "\r\nBastiOS: ");
   put_num(&mut s.con, count_free(s.k.mem.bm));
