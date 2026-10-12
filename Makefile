@@ -410,7 +410,7 @@ CPYTHON_TAG   ?= v3.12.7
 DROPBEAR_GIT  ?= https://github.com/mkj/dropbear
 DROPBEAR_TAG  ?= DROPBEAR_2024.86
 COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo \
-                 build/compat/git build/compat/perl build/compat/python \
+                 build/compat/git build/compat/perl build/compat/python build/compat/ttyepoll \
                  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys
 APP_CFLAGS    := -static-pie -fPIE -O2 -w -s
 
@@ -467,6 +467,10 @@ build/compat/micropython: | build/compat/src
 	$(MAKE) -C build/compat/src/micropython/ports/unix -s CC=$(MUSLCC) CFLAGS_EXTRA=-fPIE LDFLAGS_EXTRA=-static-pie \
 	  MICROPY_PY_FFI=0 MICROPY_PY_BTREE=0 MICROPY_PY_SSL=0 MICROPY_SSL_AXTLS=0 >/dev/null
 	cp build/compat/src/micropython/ports/unix/build-standard/micropython $@
+
+# A program that waits for keys in epoll_wait, as libuv does (test/compat/tty.txt).
+build/compat/ttyepoll: test/compat/progs/ttyepoll.c | build/compat
+	$(MUSLCC) $(APP_CFLAGS) -o $@ $<
 
 # kilo, a small editor that puts the terminal in raw mode (test/compat/tty.txt).
 build/compat/kilo: | build/compat/src

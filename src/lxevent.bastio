@@ -46,16 +46,13 @@
 import "linux.bastio";
 
 const LX_EPOLL_CREATE: u64 = 213;
-const LX_EPOLL_WAIT: u64 = 232;
 const LX_EPOLL_CTL: u64 = 233;
-const LX_EPOLL_PWAIT: u64 = 281;
 const LX_TIMERFD_CREATE: u64 = 283;
 const LX_EVENTFD: u64 = 284;
 const LX_TIMERFD_SETTIME: u64 = 286;
 const LX_TIMERFD_GETTIME: u64 = 287;
 const LX_EVENTFD2: u64 = 290;
 const LX_EPOLL_CREATE1: u64 = 291;
-const LX_EPOLL_PWAIT2: u64 = 441;
 const LX_SIGNALFD: u64 = 282;
 const LX_SIGNALFD4: u64 = 289;
 const SFD_INFO: u64 = 128;                   // struct signalfd_siginfo
