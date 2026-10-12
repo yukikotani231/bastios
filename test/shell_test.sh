@@ -286,7 +286,7 @@ steps = [
     # A TCP transfer to this machine's own address, many times longer than a
     # card's frame: loopback segments are longer than 1500 bytes
     # (src/net.bastio, NET_BUF), and every byte is checked on arrival.
-    ("mtcp loop 3000000", b"mtcp: loop 3000000 bytes, 0 wrong", b"\n# "),
+    ("mtcp loop 3000000; sleep 3", b"mtcp: loop 3000000 bytes, 0 wrong", b"\n# "),
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
     # More processes at once than the 32 rows the process table starts with:
     # it grows (new_pid), and /proc lists three-digit pids. (stdin from the
