@@ -62,6 +62,13 @@ int main(void) {
     EXPECT("/etc/passwd", open("/etc/passwd", O_RDONLY) >= 0);
     EXPECT("getlogin or getpwuid", getpwuid(getuid()) != NULL);
     EXPECT("sched_getaffinity", ({ cpu_set_t c; sched_getaffinity(0, sizeof c, &c) == 0; }));
+    EXPECT("sched_getaffinity counts the processors /proc/cpuinfo lists", ({
+        char t[4096]; int f = open("/proc/cpuinfo", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
+        if (f >= 0) close(f);
+        t[n > 0 ? n : 0] = 0;
+        int lines = 0; for (char *q = t; (q = strstr(q, "processor\t:")); q++) lines++;
+        cpu_set_t c; lines > 0 && sched_getaffinity(0, sizeof c, &c) == 0 && CPU_COUNT(&c) == lines; }));
+    EXPECT("sched_setaffinity to a processor that does not run is EINVAL", ({ cpu_set_t s; CPU_ZERO(&s); CPU_SET(40, &s); sched_setaffinity(0, sizeof s, &s) == -1 && errno == EINVAL; }));
     EXPECT("SSE floating point", ({ volatile double x = 2.0; x * x / 3.0 > 1.33; }));
     EXPECT("printf %f", (snprintf(b, sizeof b, "%.3f", 3.14159), strcmp(b, "3.142") == 0));
     EXPECT("strtod", strtod("2.5e3", 0) == 2500.0);

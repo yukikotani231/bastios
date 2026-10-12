@@ -297,8 +297,26 @@ fn sched_interval(k: &mut Kernel, pid: u64, who: u64, ts: u64) -> u64
   return lx_put_out(&mut k, pid, ts, 16);
 }
 
-/// sched_setaffinity: any mask that names the one processor Linux
-/// programs are told about (sched_getaffinity) is accepted.
+/// The mask of the processors that are running, as /proc/cpuinfo lists
+/// them: bit c for processor c, at most 31.
+fn cpu_mask(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result < 4294967296
+{
+  let mut pw = 1;                           // 2 to the power of c
+  let mut c = 0;
+  while c < k.cpus && pw < 2147483648
+    invariant pw >= 1 && pw <= 4294967296
+  {
+    pw = pw * 2;
+    c = c + 1;
+  }
+  return pw - 1;
+}
+
+/// sched_setaffinity: any mask that names a processor that is running
+/// (sched_getaffinity) is accepted; it is not kept, so threads still go
+/// to whichever processor is free.
 fn sched_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -316,7 +334,7 @@ fn sched_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u
   if t > NPROC {
     return ESRCH;
   }
-  if get_u64(k.fs.xfer, 0) % 2 == 0 {
+  if get_u64(k.fs.xfer, 0) & cpu_mask(k) == 0 {
     return EINVAL;                          // no processor it may run on
   }
   if !may_sched(k.procs, pid, t) {
@@ -325,8 +343,8 @@ fn sched_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u
   return 0;
 }
 
-/// sched_getaffinity: the one processor Linux programs are told about;
-/// the size must be a whole number of 8-byte words.
+/// sched_getaffinity: every processor that is running; the size must be
+/// a whole number of 8-byte words.
 fn get_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -338,7 +356,7 @@ fn get_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u64
   if t > NPROC {
     return ESRCH;
   }
-  xfer_u64(&mut k.fs.xfer, 0, 1);
+  xfer_u64(&mut k.fs.xfer, 0, cpu_mask(k));
   let r = lx_put_out(&mut k, pid, mask, 8);
   if r != 0 {
     return r;
