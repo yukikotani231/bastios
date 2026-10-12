@@ -145,11 +145,15 @@ fn lx_pick(k: &mut Kernel, from: u64) -> u64
   requires kok(k)
   ensures kok(k) && result < NPROC
 {
+  let cap = len(k.procs) / STRIDE;   // past it, every process is FREE
+  if cap == 0 {
+    return 0;
+  }
   let mut i = 0;
-  while i < NPROC
-    invariant i <= NPROC && kok(k)
+  while i < cap
+    invariant i <= cap && 0 < cap && cap <= NPROC && kok(k)
   {
-    let p = (from % NPROC + i) % NPROC;
+    let p = (from % cap + i) % cap;
     if p != 0 && state(k.procs, p) == READY && group_free(&mut k, p) {
       return p;
     }
