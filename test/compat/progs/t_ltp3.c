@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <utime.h>
 
 struct fh { unsigned int bytes; int type; unsigned char h[128]; };
 
@@ -241,6 +242,28 @@ int main(void) {
         EXPECT("epoll_wait with room for 3 reports each of 20 ready descriptors in turn", ok);
         for (int i = 0; i < 20; i++) { if (pp[i][0] >= 0) close(pp[i][0]); if (pp[i][1] >= 0) close(pp[i][1]); }
         close(efd);
+    }
+
+    /* utime sets the access time apart from the modification time;
+       utimensat can leave either alone. */
+    {
+        int fd = open("l3_ut", O_CREAT | O_WRONLY, 0644);
+        struct stat st;
+        struct utimbuf ub = { .actime = 12345, .modtime = 67890 };
+        int r1 = utime("l3_ut", &ub);
+        int r2 = stat("l3_ut", &st);
+        EXPECT("utime sets the access time", r1 == 0 && r2 == 0 && st.st_atime == 12345);
+        EXPECT("utime sets the modification time", st.st_mtime == 67890);
+        struct timespec ts[2] = { { 0, UTIME_OMIT }, { 4242, 0 } };
+        int r3 = utimensat(AT_FDCWD, "l3_ut", ts, 0);
+        stat("l3_ut", &st);
+        EXPECT("utimensat with UTIME_OMIT keeps the access time", r3 == 0 && st.st_atime == 12345 && st.st_mtime == 4242);
+        struct timespec ts2[2] = { { 777, 0 }, { 0, UTIME_OMIT } };
+        int r4 = utimensat(AT_FDCWD, "l3_ut", ts2, 0);
+        stat("l3_ut", &st);
+        EXPECT("utimensat with UTIME_OMIT keeps the modification time", r4 == 0 && st.st_atime == 777 && st.st_mtime == 4242);
+        if (fd >= 0) close(fd);
+        unlink("l3_ut");
     }
 
     unlink("l3_d/f2");

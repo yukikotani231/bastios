@@ -835,8 +835,14 @@ unlinkat01
 unshare02
 ustat01
 ustat02
+utime01
+utime02
+utime03
+utime04
+utime05
 utime06
 utime07
+utimensat01
 vfork01
 vfork02
 vhangup01

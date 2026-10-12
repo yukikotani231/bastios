@@ -488,6 +488,10 @@ t_ltp3: rename out of a mount is EXDEV
 t_ltp3: unlinkat with AT_REMOVEDIR of a file is ENOTDIR
 t_ltp3: unlinkat with an unknown flag is EINVAL, before the path
 t_ltp3: with that room it gives the handle and a mount id
+t_ltp3: utime sets the access time
+t_ltp3: utime sets the modification time
+t_ltp3: utimensat with UTIME_OMIT keeps the access time
+t_ltp3: utimensat with UTIME_OMIT keeps the modification time
 t_mem: 64 MiB of address space
 t_mem: FUTEX_CMP_REQUEUE moves timed waiters across processes
 t_mem: FUTEX_CMP_REQUEUE with a negative count is EINVAL
