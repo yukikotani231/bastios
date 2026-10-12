@@ -204,11 +204,11 @@ fn open2_check(k: &mut Kernel, pid: u64, h: u64, path: u64, flags: u64, res: u64
   let mut e = 0;
   if fl == NO_RESULT || fl > FNAME_MAX {
     e = k.perr;
-  } else if res & RES_NO_SYMLINKS != 0 && !same_span(lp, ln, k.fs.xfer, fl) {
+  } else if res & RES_NO_SYMLINKS != 0 && link_on_way(&mut k, pid, lp, ln, fl) {
     e = ELOOP;                              // a symbolic link on the way
   } else if no_magic && is_magic(k.fs.xfer, fl, last) {
     e = ELOOP;
-  } else if res & RES_BENEATH != 0 && !is_under(k.fs.xfer, fl, sp, sl) {
+  } else if res & RES_BENEATH != 0 && !is_under(k.mstr, lpath_len(k), sp, sl) {   // the logical name: mounts move the file layer's
     e = EXDEV;                              // a link led out
   } else if res & RES_NO_XDEV != 0 {
     let mut fp = balloc(CWD_STRIDE);
@@ -235,6 +235,41 @@ fn open2_check(k: &mut Kernel, pid: u64, h: u64, path: u64, flags: u64, res: u64
   bfree(lp);
   bfree(sp);
   return e;
+}
+
+/// Did the walk of the lexical path lp[..ln], which ended at the name
+/// fl bytes long in the transfer buffer, go through a symbolic link? Mounts
+/// of the namespace and "proc/self" change a name without one, so the
+/// path is mapped the same way before the two are compared. The transfer
+/// buffer holds fl again afterwards.
+fn link_on_way(k: &mut Kernel, pid: u64, lp: &Bytes, ln: u64, fl: u64) -> bool
+  requires kok(k) && pid < NPROC && ln <= FNAME_MAX && ln <= blen(lp) && fl <= FNAME_MAX
+  ensures kok(k)
+{
+  let mut sv = balloc(FNAME_MAX);
+  let mut i = 0;
+  while i < fl
+    invariant i <= fl && fl <= FNAME_MAX && blen(sv) == FNAME_MAX && kok(k)
+  {
+    bset(&mut sv, i, bget(k.fs.xfer, i));
+    i = i + 1;
+  }
+  let mut same = false;
+  let tl = ns_tr(&mut k, ns_of(k, pid), lp, ln);
+  if tl != NO_RESULT {
+    let t1 = proc_vpid(&mut k, tl, pid);
+    let t2 = proc_self(&mut k.fs.xfer, t1, pid);
+    same = same_span(sv, fl, k.fs.xfer, t2);
+  }
+  i = 0;
+  while i < fl
+    invariant i <= fl && fl <= FNAME_MAX && blen(sv) == FNAME_MAX && kok(k)
+  {
+    bset(&mut k.fs.xfer, i, bget(sv, i));
+    i = i + 1;
+  }
+  bfree(sv);
+  return !same;
 }
 
 /// Do a[..an] and b[..bn] hold the same bytes?

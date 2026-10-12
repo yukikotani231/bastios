@@ -947,11 +947,15 @@ fn lx_setns(k: &mut Kernel, pid: u64, fd: u64, nstype: u64) -> u64
   if !cap_has(k, pid, CAP_SYS_ADMIN) {
     return EPERM;
   }
-  if pget(k.procs, pid, F_TGID) != 0 {
-    return EINVAL;                          // a thread that shares them: not supported
-  }
+  // A thread joins the namespaces of its own row, as on Linux (its working
+  // directory is its own here), except a user namespace, which needs a
+  // single-threaded caller.
+  let thread = pget(k.procs, pid, F_TGID) != 0;
   if d.kind == K_DEV && is_ns_file(d.x) {
     let f = nsf_kind(d.x);
+    if thread && nf_flag(f) == CLONE_NEWUSER {
+      return EINVAL;
+    }
     if nstype != 0 && nstype != nf_flag(f) {
       return EINVAL;
     }
@@ -970,7 +974,7 @@ fn lx_setns(k: &mut Kernel, pid: u64, fd: u64, nstype: u64) -> u64
   if d.kind != K_PIDFD {
     return EINVAL;
   }
-  if nstype == 0 || nstype & all != nstype {
+  if nstype == 0 || nstype & all != nstype || (thread && nstype & CLONE_NEWUSER != 0) {
     return EINVAL;
   }
   let p = smaller(d.x, NPROC);

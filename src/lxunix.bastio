@@ -1110,7 +1110,7 @@ fn ux_send_from(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bo
 /// with peek), 0 once the other end is closed and they are all read,
 /// SK_WAIT (or -EAGAIN) while none are. A datagram socket takes one
 /// message; the part past n is dropped, as on Linux.
-fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, peek: bool, addr: u64, lenp: u64) -> u64
+fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, peek: bool, trunc: bool, addr: u64, lenp: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
@@ -1148,6 +1148,7 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
   let mut lead = 0;
   let mut avail = count;                    // the bytes this call may take
   let mut from = 0;
+  let mut whole = 0;                        // a datagram's own length: what MSG_TRUNC returns
   if u.dg {
     if count < 3 {
       return EAGAIN;                        // never: datagrams go in whole
@@ -1156,6 +1157,7 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
     let len = cast[u64](bget(k.uxb, c * UX_CAP + ring_slot(r, 0))) + 256 * cast[u64](bget(k.uxb, c * UX_CAP + ring_slot(r, 1)));
     from = cast[u64](bget(k.uxb, c * UX_CAP + ring_slot(r, 2)));
     avail = smaller(len, count - 3);
+    whole = avail;
   } else if n == 0 {
     return 0;
   }
@@ -1192,6 +1194,9 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
     if e != 0 {
       return e;
     }
+  }
+  if trunc && u.dg {
+    return whole;                           // MSG_TRUNC: the real length, however little was taken (runc asks with none)
   }
   return put;
 }

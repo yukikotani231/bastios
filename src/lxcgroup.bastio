@@ -20,6 +20,9 @@
 // (threads too) fail with EAGAIN once the group or one above it holds that
 // many tasks, and so does moving a process in.
 //
+// cgroup.freeze reads 0 and takes 0; writing 1 is EOPNOTSUPP, as nothing can be
+// frozen yet.
+//
 // Not done: memory.max and cpu.max are kept and read back but nothing
 // enforces them yet; the "no internal processes" rule; cgroup namespaces.
 
@@ -231,7 +234,10 @@ fn cgf_name(f: u64) -> Str {
   if f == 14 {
     return "cpu.weight";
   }
-  return "cgroup.max.descendants";
+  if f == 15 {
+    return "cgroup.max.descendants";
+  }
+  return "cgroup.freeze";
 }
 
 /// Which control file x[a..b] names, or CGF_N.
@@ -253,7 +259,7 @@ fn cgf_at(x: &Bytes, a: u64, b: u64) -> u64
 
 /// Whether root may write control file f.
 fn cgf_writable(f: u64) -> bool {
-  return f == 0 || f == 2 || f == 4 || f == 6 || f == 8 || f == 10 || f == 13 || f == 14;
+  return f == 0 || f == 2 || f == 4 || f == 6 || f == 8 || f == 10 || f == 13 || f == 14 || f == 16;
 }
 
 /// Does cgroup s have the name x[a..b]?
@@ -603,6 +609,9 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
   }
   if f == 15 {
     return put_s(&mut o, 0, "max\n");
+  }
+  if f == 16 {
+    return put_s(&mut o, 0, "0\n");          // freezing is not done: always thawed
   }
   return 0;                                 // cgroup.kill is write-only
 }
@@ -970,6 +979,16 @@ fn cg_write(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
       cg_put(&mut k, s, w, b.v + 1);
     }
     return n;
+  }
+  if f == 16 {
+    // Nothing can be frozen yet: 0 is what it already is, 1 is refused.
+    if b.v == 0 {
+      return n;
+    }
+    if b.v == 1 {
+      return EOPNOTSUPP;
+    }
+    return EINVAL;
   }
   if f == 14 {
     if b.v < 1 || b.v > 10000 {

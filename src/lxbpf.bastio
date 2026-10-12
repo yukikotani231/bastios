@@ -1,0 +1,109 @@
+// bpf(2), only as far as a container runtime asks for it: the device
+// filter of a cgroup. runc and crun load a BPF_PROG_TYPE_CGROUP_DEVICE
+// program, attach it to the container's cgroup and ask first what is
+// attached.
+//
+// The programs are accepted and kept nowhere: nothing runs one, so the
+// device rules of a cgroup are not enforced (a container's /dev holds only
+// the nodes its runtime made there, and mknod is root's). Queries find no
+// program attached. Every other command, and any other program type, is
+// -EINVAL. A program, and an attachment by link, is a descriptor on
+// /dev/null: it closes like any other.
+
+import "linux.bastio";
+import "lxfd.bastio";
+
+const BPF_PROG_LOAD: u64 = 5;
+const BPF_PROG_ATTACH: u64 = 8;
+const BPF_PROG_DETACH: u64 = 9;
+const BPF_PROG_QUERY: u64 = 16;
+const BPF_LINK_CREATE: u64 = 28;
+const BPF_PROG_TYPE_CGROUP_DEVICE: u64 = 15;
+const BPF_CGROUP_DEVICE: u64 = 6;
+const BPF_MAX_INSNS: u64 = 4096;
+const BPF_ATTR_MAX: u64 = 4096;
+
+/// Is descriptor fd of pid an open cgroup directory?
+fn bpf_cgroup_fd(k: &Kernel, pid: u64, fd: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let d = fd_look(k, pid, fd);
+  return d.kind == K_DIR && d.x >= DIR_CG;
+}
+
+/// A new descriptor that stands for a program or a link.
+fn bpf_object(k: &mut Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let h = ofd_new(&mut k, OF_DEV, DEV_NULL);
+  if h >= OFD_N {
+    return ENFILE;
+  }
+  return fd_install(&mut k, pid, h);
+}
+
+/// bpf(cmd, attr, size) for process pid.
+fn lx_bpf(k: &mut Kernel, pid: u64, cmd: u64, attr: u64, size: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if size < 16 || size > BPF_ATTR_MAX || attr < USER_BASE || attr >= USER_BASE + USER_SIZE {
+    return EINVAL;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, attr, &mut k.fs.xfer, 16) != 16 {
+    return EFAULT;
+  }
+  let w0 = get_u64(k.fs.xfer, 0);
+  let w1 = get_u64(k.fs.xfer, 8);
+  if cmd == BPF_PROG_LOAD {
+    // prog_type, insn_cnt, insns, license
+    let insns = w0 / 0x100000000;
+    if w0 % 0x100000000 != BPF_PROG_TYPE_CGROUP_DEVICE || insns == 0 || insns > BPF_MAX_INSNS || w1 < USER_BASE {
+      return EINVAL;
+    }
+    return bpf_object(&mut k, pid);
+  }
+  if cmd == BPF_PROG_ATTACH || cmd == BPF_PROG_DETACH {
+    // target_fd, attach_bpf_fd, attach_type, attach_flags
+    if w1 % 0x100000000 != BPF_CGROUP_DEVICE {
+      return EINVAL;
+    }
+    if !bpf_cgroup_fd(k, pid, w0 % 0x100000000) {
+      return EBADF;
+    }
+    return 0;
+  }
+  if cmd == BPF_LINK_CREATE {
+    // prog_fd, target_fd, attach_type, flags
+    if w1 % 0x100000000 != BPF_CGROUP_DEVICE {
+      return EINVAL;
+    }
+    if !bpf_cgroup_fd(k, pid, w0 / 0x100000000) {
+      return EBADF;
+    }
+    return bpf_object(&mut k, pid);
+  }
+  if cmd == BPF_PROG_QUERY {
+    // target_fd, attach_type, query_flags, attach_flags, prog_ids, prog_cnt:
+    // nothing is attached.
+    if size < 28 {
+      return EINVAL;
+    }
+    if w0 / 0x100000000 != BPF_CGROUP_DEVICE {
+      return EINVAL;
+    }
+    if !bpf_cgroup_fd(k, pid, w0 % 0x100000000) {
+      return EBADF;
+    }
+    xfer_u64(&mut k.fs.xfer, 0, 0);
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, attr + 12, k.fs.xfer, 4) != 4 {
+      return EFAULT;                        // attach_flags
+    }
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, attr + 24, k.fs.xfer, 4) != 4 {
+      return EFAULT;                        // prog_cnt
+    }
+    return 0;
+  }
+  return EINVAL;
+}
