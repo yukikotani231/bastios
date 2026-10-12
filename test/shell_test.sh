@@ -2104,6 +2104,9 @@ for machine, name, extra, status, wants in (
             ("tick: the PIT\n", "the PIT ticks"),
             ("clock: the time-stamp counter at", "the clock is the TSC"),
             ("kHz, as measured against the PIT", "its rate measured against the PIT"))),
+        # No ACPI: halting only stops the processor, so QEMU is killed (status None).
+        ("microvm", "microvm", [], None, (
+            ("timer: the local APIC timer, counted against the PIT", "the timer is counted against the PIT, not the RTC"),)),
         ("pc,acpi=off,hpet=off,pit=off", "no HPET, PM timer or PIT", exit_dev, 33, (
             ("timer: the local APIC timer, counted against the RTC", "the timer is counted against the RTC"),
             ("tick: the local APIC timer (the PIT does not count)", "the local APIC timer ticks"),
