@@ -59,7 +59,8 @@ const ME_KLEN: u64 = 2;
 const ME_SLEN: u64 = 3;
 const ME_SEQ: u64 = 4;
 
-const MT_RO: u64 = 16;                    // flags: read-only; the rest is the kind
+const MT_RO: u64 = 16;                    // flags: read-only
+const MT_OWN: u64 = 32;                   // flags: the source is an in-memory directory made for the mount
 const MK_BIND: u64 = 1;
 const MK_PROC: u64 = 2;
 const MK_DEV: u64 = 3;
@@ -313,6 +314,20 @@ fn mnt_ns_live(k: &Kernel, ns: u64) -> bool
   return false;
 }
 
+/// Lets go of mount e: a mount that owns its source stays in the table,
+/// belonging to no namespace (ME_NS is MNS_MAX), until ns_reap has removed
+/// the source; any other is free at once.
+fn me_release(k: &mut Kernel, e: u64)
+  requires kok(k) && e < MT_N
+  ensures kok(k)
+{
+  if me_get(k, e, ME_FLAGS) >= MT_OWN {
+    me_set(&mut k, e, ME_NS, MNS_MAX);
+  } else {
+    me_set(&mut k, e, ME_NS, 0);
+  }
+}
+
 /// Frees the mounts of namespaces no process is in any more.
 fn ns_gc(k: &mut Kernel)
   requires kok(k)
@@ -323,8 +338,83 @@ fn ns_gc(k: &mut Kernel)
     invariant e <= MT_N && kok(k)
   {
     let v = me_get(k, e, ME_NS);
-    if v != 0 && !mnt_ns_live(k, v - 1) {
-      me_set(&mut k, e, ME_NS, 0);
+    if v != 0 && v != MNS_MAX && !mnt_ns_live(k, v - 1) {
+      me_release(&mut k, e);
+    }
+    e = e + 1;
+  }
+}
+
+/// Do mounts a and b have the same source?
+fn me_same_src(k: &Kernel, a: u64, b: u64) -> bool
+  requires kok(k) && a < MT_N && b < MT_N
+{
+  let n = me_slen(k, a);
+  if n != me_slen(k, b) {
+    return false;
+  }
+  let pa = me_key(a) + MS_ROW;
+  let pb = me_key(b) + MS_ROW;
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= FNAME_MAX && pa + MS_ROW <= MSTR_LEN && pb + MS_ROW <= MSTR_LEN && kok(k)
+  {
+    if bget(k.mstr, pa + i) != bget(k.mstr, pb + i) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+/// Does a namespace still have a mount with the source of owning mount e
+/// (a copy made by unshare)?
+fn me_copy_live(k: &Kernel, e: u64) -> bool
+  requires kok(k) && e < MT_N
+{
+  let mut d = 0;
+  while d < MT_N
+    invariant d <= MT_N && kok(k)
+  {
+    let v = me_get(k, d, ME_NS);
+    if d != e && v != 0 && v != MNS_MAX && me_get(k, d, ME_FLAGS) >= MT_OWN && me_same_src(k, d, e) {
+      return true;
+    }
+    d = d + 1;
+  }
+  return false;
+}
+
+/// Removes the in-memory directories that mounts of ended namespaces
+/// owned, unless a copy of the mount lives on in another namespace or a
+/// file in the directory is open (it is tried again next time). Run where
+/// the transfer buffer is free.
+fn ns_reap(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  ns_gc(&mut k);
+  let mut e = 0;
+  while e < MT_N
+    invariant e <= MT_N && kok(k)
+  {
+    if me_get(k, e, ME_NS) == MNS_MAX {
+      if me_copy_live(k, e) {
+        me_set(&mut k, e, ME_NS, 0);        // the copy owns the directory now
+      } else {
+        let sl = me_slen(k, e);
+        let at = me_key(e) + MS_ROW;
+        let mut i = 0;
+        while i < sl
+          invariant i <= sl && sl <= FNAME_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
+        {
+          bset(&mut k.fs.xfer, i, bget(k.mstr, at + i));
+          i = i + 1;
+        }
+        if vfs_drop_tree(&mut k.fs, &mut k.mem, sl) {
+          me_set(&mut k, e, ME_NS, 0);
+        }
+      }
     }
     e = e + 1;
   }
@@ -452,7 +542,7 @@ fn ns_unshare(k: &mut Kernel, pid: u64) -> u64
   ensures kok(k)
 {
   let was = ns_of(k, pid);
-  ns_gc(&mut k);
+  ns_reap(&mut k);
   if ns_free(k) < ns_count(k, was) {
     return ENOMEM;
   }
@@ -687,7 +777,7 @@ fn ns_tmpfs(k: &mut Kernel, pid: u64, n: u64, ro: bool) -> u64
     bfree(src);
     return ENOMEM;
   }
-  let mut mf = MK_BIND;
+  let mut mf = MK_BIND + MT_OWN;
   if ro {
     mf = mf + MT_RO;
   }
@@ -713,7 +803,8 @@ fn ns_remount(k: &mut Kernel, pid: u64, target: u64, ro: bool) -> u64
   if e >= MT_N {
     return EINVAL;                          // not a mount
   }
-  let f = me_get(k, e, ME_FLAGS) % MT_RO;
+  let fl = me_get(k, e, ME_FLAGS);
+  let f = fl % MT_RO + fl / MT_OWN * MT_OWN;
   if ro {
     me_set(&mut k, e, ME_FLAGS, f + MT_RO);
   } else {
@@ -733,7 +824,7 @@ fn ns_umount(k: &mut Kernel, pid: u64) -> bool
   if e >= MT_N {
     return false;
   }
-  me_set(&mut k, e, ME_NS, 0);
+  me_release(&mut k, e);
   return true;
 }
 

@@ -184,6 +184,7 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  ns_reap(&mut k);
   let remount = flags & MS_REMOUNT != 0;
   if !remount && flags & MS_PROPAGATION != 0 {
     // A change of propagation: there is none between namespaces here, so
@@ -279,6 +280,7 @@ fn lx_umount2(k: &mut Kernel, pid: u64, target: u64, flags: u64) -> u64
   if flags & UMOUNT_OK_FLAGS != flags {
     return EINVAL;
   }
+  ns_reap(&mut k);
   let mut n = NO_RESULT;
   if flags & UMOUNT_NOFOLLOW != 0 {
     n = lx_path_at_nf(&mut k, pid, AT_FDCWD, target);

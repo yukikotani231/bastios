@@ -2394,6 +2394,58 @@ fn vfs_umount(v: &mut Vfs, mem: &mut Mem, s: u64) -> bool
   return true;
 }
 
+/// Removes the in-memory directory named by the first n bytes of the
+/// transfer buffer and every node under it. True if it was removed or was
+/// not there; false, changing nothing, if a file under it is open.
+fn vfs_drop_tree(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem) && n <= XFER
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  if on_disk(v, n) {
+    return false;
+  }
+  let d = ram_find(&mut v.ram, v.rhi, v.xfer, n);
+  if d >= NFILES {
+    return true;
+  }
+  let l = ram_name(&mut v.ram, d, &mut v.name);
+  if l == NO_FILE {
+    return false;
+  }
+  let mut j = 0;
+  while j < NFILES
+    invariant j <= NFILES && vfs_ok(v) && mem_ok(mem) && l <= NAMEBUF
+  {
+    if ram_under(&mut v.ram, j, v.name, l) && (node_open(v.nopen, FS_RAM, j) || j == v.lo_file || j + 1 == v.lo_at) {
+      return false;
+    }
+    j = j + 1;
+  }
+  // Mounts on directories under it go with it.
+  let mut s = 0;
+  while s < MNT_N
+    invariant s <= MNT_N && vfs_ok(v) && mem_ok(mem) && l <= NAMEBUF
+  {
+    let mj = vfs_mount_node(v, s);
+    if mj < NFILES && ram_under(&mut v.ram, mj, v.name, l) {
+      v.mnt = set(v.mnt, 2 * s, 0);
+      v.mnt = set(v.mnt, 2 * s + 1, 0);
+    }
+    s = s + 1;
+  }
+  j = 0;
+  while j < NFILES
+    invariant j <= NFILES && vfs_ok(v) && mem_ok(mem) && l <= NAMEBUF
+  {
+    if ram_under(&mut v.ram, j, v.name, l) {
+      ram_remove(&mut v.ram, &mut mem, j);
+    }
+    j = j + 1;
+  }
+  ram_remove(&mut v.ram, &mut mem, d);
+  return true;
+}
+
 // ---------------------------------------------------------------- the loop mount
 
 // A disk image in an in-memory file, attached to a loop device, mounted
