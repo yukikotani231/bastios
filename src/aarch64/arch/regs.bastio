@@ -40,10 +40,25 @@ const R_RSP: u64 = 74;           // reg_word(31) - F_REGS
 const R_RIP: u64 = 75;           // reg_word(32)
 const R_RFLAGS: u64 = 76;        // reg_word(33)
 const R_FSBASE: u64 = 79;        // reg_word(36)
+const R_CLONE_CTID: u64 = 4;     // clone(flags, stack, ptid, tls, ctid) on AArch64: x3 and x4
+const R_CLONE_TLS: u64 = 3;
 const R_LXNR: u64 = 80;          // the word after the 37 registers
+const RED_ZONE: u64 = 0;         // AArch64 has none
+const SIGACT_SIZE: u64 = 24;     // the kernel's struct sigaction: handler, flags, mask
+const SA_MASK_AT: u64 = 16;
+const SA_RESTORER_AT: u64 = 0;   // no restorer field: handlers return through the vDSO's trampoline
+const RESTORER_REQUIRED: u64 = 0;
+const SIGTRAMP_AT: u64 = 3840;   // the trampoline's offset in the vDSO page
+const EPOLL_EVENT: u64 = 16;     // struct epoll_event: u32 events, 4 bytes of padding, u64 data
+const EPOLL_DATA_AT: u64 = 8;
 const SYSCALL_LEN: u64 = 4;      // `svc #0`
 
 /// The FP/SIMD state a process starts with: all zero, which is FPCR 0 and
 /// zeroed vector registers, so there is nothing to write.
 fn fpu_init(f: &mut Frame) {
+}
+
+/// What uname reports as the machine.
+fn uname_machine() -> Str {
+  return "aarch64";
 }

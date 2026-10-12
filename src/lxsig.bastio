@@ -58,20 +58,6 @@ const SIG_SETMASK: u64 = 2;
 
 const EINTR: u64 = 18446744073709551612;   // 2^64 - 4
 
-// The frame, from the address the handler sees in rsp: the return address
-// (8 bytes), the ucontext (UC_SIZE), the siginfo (128), the FPU state (512).
-const UC_AT: u64 = 8;
-const UC_SIZE: u64 = 304;
-const UC_REGS: u64 = 40;              // uc_mcontext: 23 registers, then fpstate
-const UC_FPPTR: u64 = 224;            // UC_REGS + 23 * 8
-const UC_MASK: u64 = 296;             // uc_sigmask
-const INFO_AT: u64 = 312;
-const FP_AT: u64 = 440;               // 16-byte aligned when rsp is 8 past a multiple of 16
-const FRAME_SIZE: u64 = 952;
-const RED_ZONE: u64 = 128;
-const FLAGS_USER: u64 = 0xCD5;        // CF PF AF ZF SF DF OF
-const MXCSR_OK: u64 = 0xFFBF;
-
 /// The bit for signal s (1 to 64) in a signal set.
 fn sbit(s: u64) -> u64
   requires 1 <= s && s <= NSIG
@@ -600,7 +586,7 @@ fn sig_reset(t: &mut Buf, pid: u64, keep_ign: bool)
 // ---------------------------------------------------------------- system calls
 
 /// rt_sigaction(sig, act, oact): struct sigaction is handler, flags,
-/// restorer and mask, 8 bytes each.
+/// restorer and mask, 8 bytes each (the restorer is absent on AArch64).
 fn lx_sigaction(k: &mut Kernel, pid: u64, s: u64, act: u64, oact: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -616,20 +602,24 @@ fn lx_sigaction(k: &mut Kernel, pid: u64, s: u64, act: u64, oact: u64) -> u64
     if s == SIGKILL || s == SIGSTOP {
       return EINVAL;
     }
-    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, act, &mut k.fs.xfer, 32) != 32 {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, act, &mut k.fs.xfer, SIGACT_SIZE) != SIGACT_SIZE {
       return EFAULT;
     }
     nh = rd64(k.fs.xfer, 0);
     nf = rd64(k.fs.xfer, 8);
-    nr = rd64(k.fs.xfer, 16);
-    nm = rd64(k.fs.xfer, 24);
+    if SA_RESTORER_AT != 0 {
+      nr = rd64(k.fs.xfer, SA_RESTORER_AT);
+    }
+    nm = rd64(k.fs.xfer, SA_MASK_AT);
   }
   if oact != 0 {
     xfer_u64(&mut k.fs.xfer, 0, sa_get(k.sigact, pid, s, 0));
     xfer_u64(&mut k.fs.xfer, 8, sa_get(k.sigact, pid, s, 1));
-    xfer_u64(&mut k.fs.xfer, 16, sa_get(k.sigact, pid, s, 2));
-    xfer_u64(&mut k.fs.xfer, 24, sa_get(k.sigact, pid, s, 3));
-    if lx_put_out(&mut k, pid, oact, 32) != 0 {
+    if SA_RESTORER_AT != 0 {
+      xfer_u64(&mut k.fs.xfer, SA_RESTORER_AT, sa_get(k.sigact, pid, s, 2));
+    }
+    xfer_u64(&mut k.fs.xfer, SA_MASK_AT, sa_get(k.sigact, pid, s, 3));
+    if lx_put_out(&mut k, pid, oact, SIGACT_SIZE) != 0 {
       return EFAULT;
     }
   }
@@ -933,27 +923,6 @@ fn is_sig_call(n: u64) -> bool {
 
 // ---------------------------------------------------------------- delivery
 
-/// Our register number for entry g of struct sigcontext's general
-/// registers (r8-r15, rdi, rsi, rbp, rbx, rdx, rax, rcx, rsp, rip, eflags).
-fn sc_reg(g: u64) -> u64
-  requires g < 18
-  ensures F_REGS + result < STRIDE
-{
-  if g < 8 {
-    return 7 + g;                           // r8 .. r15
-  }
-  if g == 8 { return R_RDI; }
-  if g == 9 { return R_RSI; }
-  if g == 10 { return 6; }                  // rbp
-  if g == 11 { return 1; }                  // rbx
-  if g == 12 { return R_RDX; }
-  if g == 13 { return R_RAX; }
-  if g == 14 { return 2; }                  // rcx
-  if g == 15 { return R_RSP; }
-  if g == 16 { return R_RIP; }
-  return R_RFLAGS;
-}
-
 /// Before process p runs: acts on its pending, unblocked signals. Returns
 /// false if one ended it.
 fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
@@ -1089,7 +1058,7 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
     rsp = alt_sp + alt_size;
     red = 0;
   }
-  if restorer == 0 || rsp < USER_BASE + RED_ZONE + FRAME_SIZE + 16 || rsp > USER_BASE + USER_SIZE {
+  if (restorer == 0 && RESTORER_REQUIRED == 1) || !sig_fits(rsp) || rsp > USER_BASE + USER_SIZE {
     return false;
   }
   // A system call that was waiting: without SA_RESTART it fails with
@@ -1119,61 +1088,20 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   }
   pset(&mut k.procs, p, F_RESTART, 0);
   pset(&mut k.procs, p, F_ASLEEP, 0);       // the handler runs
-  let base = (rsp - red - FRAME_SIZE) / 16 * 16 - 8;   // rsp the handler sees
-  let mut fr = balloc(FRAME_SIZE);
-  xfer_u64(&mut fr, 0, restorer);
-  // The ucontext: no flags or link; the alternate stack as sigaltstack
-  // would report it; the registers; the mask to go back to.
-  let mut ss_flags = SS_DISABLE;
-  if was_on {
-    ss_flags = SS_ONSTACK;
-  } else if alt_size != 0 {
-    ss_flags = 0;
-  }
-  xfer_u64(&mut fr, UC_AT + 16, alt_sp);
-  xfer_u64(&mut fr, UC_AT + 24, ss_flags);
-  xfer_u64(&mut fr, UC_AT + 32, alt_size);
-  let mut g = 0;
-  while g < 18
-    invariant g <= 18 && blen(fr) == FRAME_SIZE && kok(k)
-  {
-    xfer_u64(&mut fr, UC_AT + UC_REGS + 8 * g, pget(k.procs, p, F_REGS + sc_reg(g)));
-    g = g + 1;
-  }
-  xfer_u64(&mut fr, UC_AT + UC_REGS + 8 * 18, 0x33);        // cs
   // The mask to go back to: rt_sigsuspend's caller gets its own back.
   let mut was = pget(k.procs, p, F_SIGMASK);
   if suspended {
     was = wget(k.sigsave, p * SIGSAVE_ROW) & !MASK_SWAPPED;
     wset(&mut k.sigsave, p * SIGSAVE_ROW, was);     // the call is over: nothing left to put back
   }
-  xfer_u64(&mut fr, UC_AT + UC_REGS + 8 * 21, was);         // oldmask
-  xfer_u64(&mut fr, UC_AT + UC_FPPTR, base + FP_AT);
-  xfer_u64(&mut fr, UC_AT + UC_MASK, was);
-  // The siginfo: signo, errno, code (SI_USER).
-  bset(&mut fr, INFO_AT, cast[u8](s));
-  info_from(&mut fr, INFO_AT, wget(k.sigsave, sender_at(p, s)));   // si_pid, si_value
-  if wget(k.sigsave, sender_at(p, s)) < FAULT_MARK && nsk_of(k, NSK_PID, p) != 0 {
-    xfer_u64(&mut fr, INFO_AT + 16, vpid_of(k, p, wget(k.sigsave, sender_at(p, s)) % 256));   // as p's PID namespace names the sender
+  // The alternate stack as sigaltstack would report it.
+  let mut ss_flags = SS_DISABLE;
+  if was_on {
+    ss_flags = SS_ONSTACK;
+  } else if alt_size != 0 {
+    ss_flags = 0;
   }
-  // The FPU state, as fxsave left it.
-  match take_fpu(&mut k.fpus, p) {
-    Fpu::None => {},
-    Fpu::State(f) => {
-      let mut w = 0;
-      while w < 64
-        invariant w <= 64 && blen(fr) == FRAME_SIZE
-      {
-        xfer_u64(&mut fr, FP_AT + 8 * w, frame_read(f, w));
-        w = w + 1;
-      }
-      put_fpu(&mut k.fpus, p, Fpu::State(f));
-    },
-  }
-  stack_reach(&mut k.mem, &mut k.spaces, p, base);
-  let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, p, base, fr, FRAME_SIZE);
-  bfree(fr);
-  if put != FRAME_SIZE {
+  if !sig_frame(&mut k, p, s, rsp, red, restorer, ss_flags, alt_sp, alt_size, was) {
     return false;
   }
   let mut mask = pget(k.procs, p, F_SIGMASK);
@@ -1185,63 +1113,6 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   if flags & SA_RESETHAND != 0 {
     sa_set(&mut k.sigact, p, s, 0, SIG_DFL);   // after the handler is read
   }
-  pset(&mut k.procs, p, F_REGS + R_RSP, base);
-  pset(&mut k.procs, p, F_REGS + R_RDI, s);
-  pset(&mut k.procs, p, F_REGS + R_RSI, base + INFO_AT);
-  pset(&mut k.procs, p, F_REGS + R_RDX, base + UC_AT);
-  pset(&mut k.procs, p, F_REGS + R_RET, 0);
   return true;
 }
 
-/// rt_sigreturn: the handler's frame starts 8 bytes below rsp (its return
-/// address was popped). Restores the registers, the mask and the FPU
-/// state, and returns the restored rax, so the interrupted code sees it
-/// unchanged.
-fn lx_sigreturn(k: &mut Kernel, pid: u64) -> u64
-  requires kok(k) && 1 <= pid && pid < NPROC
-  ensures kok(k)
-{
-  let uc = pget(k.procs, pid, F_REGS + R_RSP);
-  let mut fr = balloc(FRAME_SIZE);
-  if uc < 8 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, uc, &mut fr, UC_SIZE) != UC_SIZE {
-    bfree(fr);
-    return EFAULT;
-  }
-  let fp = rd64(fr, UC_FPPTR);
-  if fp != 0 {
-    let mut fx = balloc(512);
-    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, fp, &mut fx, 512) == 512 {
-      match take_fpu(&mut k.fpus, pid) {
-        Fpu::None => {},
-        Fpu::State(mut f) => {
-          let mut w = 0;
-          while w < 64
-            invariant w <= 64 && blen(fx) == 512
-          {
-            let mut v = rd64(fx, 8 * w);
-            if w == 3 {
-              v = v & MXCSR_OK;               // MXCSR: no reserved bits for fxrstor
-            }
-            frame_write(&mut f, w, v);
-            w = w + 1;
-          }
-          put_fpu(&mut k.fpus, pid, Fpu::State(f));
-        },
-      }
-    }
-    bfree(fx);
-  }
-  let mut g = 0;
-  while g < 17
-    invariant g <= 17 && blen(fr) == FRAME_SIZE && kok(k)
-  {
-    pset(&mut k.procs, pid, F_REGS + sc_reg(g), rd64(fr, UC_REGS + 8 * g));
-    g = g + 1;
-  }
-  let fl = rd64(fr, UC_REGS + 8 * 17);
-  pset(&mut k.procs, pid, F_REGS + R_RFLAGS, (fl & FLAGS_USER) | 0x202);
-  pset(&mut k.procs, pid, F_SIGMASK, blockable(rd64(fr, UC_MASK)));
-  let rax = rd64(fr, UC_REGS + 8 * 13);
-  bfree(fr);
-  return rax;
-}

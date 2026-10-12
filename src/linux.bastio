@@ -541,7 +541,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return SWITCH;                          // the parent waits until the child lets go
   }
   if n == LX_CLONE && a & CLONE_THREAD != 0 {
-    let r = lx_thread_clone(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));
+    let r = lx_thread_clone(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_CLONE_CTID), pget(k.procs, pid, F_REGS + R_CLONE_TLS));
     ret(&mut k.procs, pid, child_id(k, pid, r));
     if r < NPROC {
       pt_fork_event(&mut k, pid, r, 3);
@@ -553,7 +553,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_CLONE && clone_proc_flags(a) {
-    let r = lx_clone_proc(&mut k, mmu, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));
+    let r = lx_clone_proc(&mut k, mmu, pid, a, b, c, pget(k.procs, pid, F_REGS + R_CLONE_CTID), pget(k.procs, pid, F_REGS + R_CLONE_TLS));
     ret(&mut k.procs, pid, child_id(k, pid, r));
     if r < NPROC {
       let mut kind = 3;

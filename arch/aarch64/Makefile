@@ -71,12 +71,17 @@ $(B)/user/%.bin: $(B)/user/%.elf
 
 # Linux arm64 programs: ordinary ELF executables, linked at the start of the
 # user window with no libc (mhello is the table's name for the first).
-LXELFS := $(B)/user/mhello.elf
+LXELFS := $(B)/user/mhello.elf $(B)/user/mtest.elf
 
 $(B)/user/mhello.elf: user/lxhello-aarch64.c | $(B)/user
 	$(ACC) -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -no-pie -nostdlib -static \
 	  -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x8000000000 -Wl,--build-id=none -Wl,--no-warn-rwx-segments \
 	  -o $@ $<
+
+# mtest is an ordinary glibc program, linked statically at the same address.
+$(B)/user/mtest.elf: user/lxtest-aarch64.c | $(B)/user
+	$(ACC) -O1 -fno-pic -no-pie -static -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x8000000000 \
+	  -Wl,--build-id=none -Wl,--no-warn-rwx-segments -o $@ $<
 
 # 2. Prove the kernel and translate it to freestanding C.
 KSRCS := $(wildcard src/*.bastio) $(wildcard src/aarch64/*.bastio src/aarch64/arch/*.bastio) $(wildcard files/*)

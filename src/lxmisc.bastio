@@ -126,7 +126,7 @@ fn lx_uname(k: &mut Kernel, pid: u64, va: u64) -> u64
   uts_put(&mut k, 1, "bastios");
   uts_put(&mut k, 2, "6.1.0-bastios");
   uts_put(&mut k, 3, "BastiOS 0.2");
-  uts_put(&mut k, 4, "x86_64");
+  uts_put(&mut k, 4, uname_machine());
   uts_put(&mut k, 5, "(none)");
   uts_names(&mut k, pid);                        // what sethostname and setdomainname set
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, UTS_SIZE) != UTS_SIZE {
