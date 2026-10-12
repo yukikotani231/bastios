@@ -1,0 +1,704 @@
+# Checks that pass on BastiOS (make compat-baseline rewrites this).
+# make compat fails if one of them stops passing.
+busybox: awk
+busybox: base64
+busybox: basename/dirname
+busybox: cat a file
+busybox: chmod
+busybox: cmp
+busybox: cp
+busybox: cut
+busybox: date
+busybox: date -d
+busybox: dd
+busybox: dd large blocks
+busybox: df
+busybox: diff
+busybox: du
+busybox: echo
+busybox: env
+busybox: expr
+busybox: find
+busybox: free
+busybox: grep
+busybox: gzip round trip
+busybox: head/tail
+busybox: hexdump
+busybox: hostname
+busybox: id -u
+busybox: kill -0
+busybox: ln -s
+busybox: ls -l
+busybox: md5sum
+busybox: mkdir -p
+busybox: mkdir/rmdir
+busybox: mktemp
+busybox: mv
+busybox: nice
+busybox: nproc
+busybox: od
+busybox: printenv
+busybox: printf
+busybox: ps
+busybox: readlink/realpath
+busybox: sed
+busybox: seq
+busybox: sh -c
+busybox: sh pipeline and subshell
+busybox: sha256sum
+busybox: sleep
+busybox: sort -n
+busybox: stat
+busybox: sync
+busybox: tar round trip
+busybox: tee
+busybox: test
+busybox: time
+busybox: timeout
+busybox: touch/ls
+busybox: tr
+busybox: true/false
+busybox: uname
+busybox: uniq -c
+busybox: uptime
+busybox: usleep
+busybox: wc
+busybox: which
+busybox: whoami
+busybox: xargs
+busybox: yes | head
+t_cred: a child inherits ids; /proc/self/status shows them
+t_cred: an unprivileged process keeps to the ids it holds
+t_cred: getgrnam finds users
+t_cred: getpwnam finds nobody
+t_cred: kill needs a matching uid
+t_cred: root starts as uid and gid 0
+t_cred: setreuid and setfsuid follow Linux's rules
+t_cred: the parent is still root
+t_dev: /dev/loop-control
+t_dev: /sys/block loop/backing_file
+t_dev: /sys/block loop/offset
+t_dev: /sys/block ro
+t_dev: /sys/block size in sectors
+t_dev: BLKGETSIZE64
+t_dev: BLKSSZGET
+t_dev: LOOP_CLR_FD
+t_dev: LOOP_CTL_GET_FREE
+t_dev: LOOP_CTL_GET_FREE skips it
+t_dev: LOOP_GET_STATUS (old struct)
+t_dev: LOOP_GET_STATUS64
+t_dev: LOOP_SET_FD
+t_dev: LOOP_SET_STATUS64
+t_dev: bound twice is EBUSY
+t_dev: cleared twice is ENXIO
+t_dev: file stays bound after close
+t_dev: lands past the offset
+t_dev: loop device is a block device
+t_dev: lseek SEEK_END is the device size
+t_dev: one write of 6000 bytes
+t_dev: open loop device
+t_dev: read through the device
+t_dev: unbound reads nothing
+t_dev: unbound: LOOP_GET_STATUS64 is ENXIO
+t_dev: write at the end is ENOSPC
+t_dev: write through the device
+t_dir: chdir
+t_dir: chdir ..
+t_dir: create file in directory
+t_dir: fchdir
+t_dir: fchmod on a closed descriptor is EBADF
+t_dir: getcwd
+t_dir: getcwd after chdir
+t_dir: mkdir
+t_dir: mkdir existing is EEXIST
+t_dir: mkdir nested missing parent is ENOENT
+t_dir: openat relative to a directory fd
+t_dir: opendir/readdir /
+t_dir: read of a directory is EISDIR
+t_dir: readdir subdirectory
+t_dir: readdir: d_type and d_ino as lstat sees each entry
+t_dir: relative open after chdir
+t_dir: rmdir
+t_dir: rmdir non-empty is ENOTEMPTY
+t_dir: stat / is a directory
+t_dir: stat /dev
+t_dir: stat /proc/self
+t_dir: stat /tmp
+t_dir: stat file in directory
+t_dir: stat new directory
+t_dir: statvfs
+t_dir: unlink file in directory
+t_dns: connect to a looked-up name
+t_dns: getaddrinfo AF_INET
+t_dns: getaddrinfo AF_INET6 v4-mapped
+t_dns: getaddrinfo AF_UNSPEC (A and AAAA)
+t_dns: getaddrinfo second name
+t_dns: getaddrinfo: no such name
+t_dns: gethostbyname
+t_dns: getnameinfo reverse lookup
+t_dns: name server binds UDP port 53
+t_dns: point resolv.conf at it
+t_dns: resolv.conf names a server
+t_dns: resolv.conf put back
+t_fdlock: 200 descriptors, dup2 to 200 and F_DUPFD from 100
+t_fdlock: F_GETLK reports the conflicting lock that starts first
+t_fdlock: F_SETLEASE and F_GETLEASE
+t_fdlock: F_SETOWN, F_SETOWN_EX and F_SETSIG set a description's owner
+t_fdlock: O_ASYNC on a pipe signals its owner when input arrives
+t_fdlock: a lock needs the matching access mode; bad requests are EINVAL
+t_file: /dev/null write
+t_file: /dev/urandom read
+t_file: /dev/zero read
+t_file: 12 open descriptors
+t_file: O_APPEND
+t_file: O_EXCL on existing
+t_file: O_RDONLY refuses write
+t_file: access F_OK
+t_file: access missing
+t_file: chmod
+t_file: chown to self
+t_file: close
+t_file: close twice is EBADF
+t_file: faccessat
+t_file: fchmod
+t_file: fdatasync
+t_file: fgetxattr unsupported
+t_file: fstat size
+t_file: fsync
+t_file: ftruncate grow
+t_file: ftruncate shrink
+t_file: link
+t_file: listxattr empty
+t_file: lseek SEEK_CUR
+t_file: lseek SEEK_END
+t_file: lseek SEEK_SET
+t_file: lstat sees the link
+t_file: open O_CREAT|O_TRUNC
+t_file: open missing is ENOENT
+t_file: pread
+t_file: pread keeps offset
+t_file: pwrite
+t_file: read back
+t_file: readlink
+t_file: readv
+t_file: removexattr of a missing file
+t_file: rename
+t_file: rename over existing
+t_file: setxattr unsupported
+t_file: stat
+t_file: stdio fprintf/fscanf
+t_file: symlink
+t_file: tmpfile
+t_file: truncate
+t_file: unlink
+t_file: unlink an open file, then read it
+t_file: utime
+t_file: write
+t_file: writev
+t_inotify: /proc/sys/fs/inotify/max_queued_events
+t_inotify: /proc/sys/fs/inotify/max_user_instances
+t_inotify: /proc/sys/fs/inotify/max_user_watches
+t_inotify: IN_MASK_CREATE on a watched file is EEXIST
+t_inotify: IN_ONESHOT: one event, then the watch goes
+t_inotify: IN_ONLYDIR on a file is ENOTDIR
+t_inotify: a blocking read waits for the event
+t_inotify: a buffer too small for an event is EINVAL
+t_inotify: a child's event: to the directory, then to the child
+t_inotify: a directory's events name the entry
+t_inotify: a file's events: attrib, open, access, close, open, modify, close-write
+t_inotify: a full queue ends with IN_Q_OVERFLOW (wd -1)
+t_inotify: a rename's two events share a cookie
+t_inotify: a watch on a closed fd is EBADF
+t_inotify: a watch on a missing file is ENOENT
+t_inotify: a watch on a non-inotify fd is EINVAL
+t_inotify: a watch with no events is EINVAL
+t_inotify: adding it again gives the same wd
+t_inotify: an empty queue reads EAGAIN
+t_inotify: closing the descriptor
+t_inotify: epoll sees it readable too
+t_inotify: inotify_add_watch on a directory
+t_inotify: inotify_add_watch on a file
+t_inotify: inotify_init1 rejects unknown flags
+t_inotify: inotify_init1 with NONBLOCK and CLOEXEC
+t_inotify: inotify_rm_watch
+t_inotify: poll says POLLIN once an event is queued
+t_inotify: removing a watch reports IN_IGNORED
+t_inotify: removing it twice is EINVAL
+t_inotify: rmdir: delete-self, ignored, then delete in the directory
+t_inotify: two equal events in a row coalesce
+t_inotify: unlink: attrib, ignored, then delete in the directory
+t_ioprio: a child inherits it
+t_ioprio: a failed set changes nothing
+t_ioprio: an unknown class is EINVAL
+t_ioprio: an unknown which is EINVAL
+t_ioprio: best effort, level 3
+t_ioprio: idle
+t_ioprio: ioprio_get of a new process is in range
+t_ioprio: no such process is ESRCH
+t_ioprio: none
+t_ioprio: none with a level is EINVAL
+t_ioprio: real time as root
+t_ioprio: the process group
+t_ioprio: the user
+t_ipc: AF_UNIX bind/listen
+t_ipc: AF_UNIX connect through a hard link of the socket file
+t_ipc: AF_UNIX connect through a renamed socket file
+t_ipc: AF_UNIX connect to no listener fails
+t_ipc: AF_UNIX connect/accept
+t_ipc: AF_UNIX the old name of a renamed socket file is gone
+t_ipc: EOF once writers close
+t_ipc: F_SETPIPE_SZ limits a pipe
+t_ipc: O_NONBLOCK read of an empty pipe is EAGAIN
+t_ipc: dup2 onto stdout and back
+t_ipc: epoll
+t_ipc: eventfd
+t_ipc: fcntl F_DUPFD
+t_ipc: fcntl F_GETFD sees FD_CLOEXEC
+t_ipc: fcntl F_GETFL sees O_NONBLOCK
+t_ipc: fcntl F_SETFL
+t_ipc: fstat on an open FIFO shows the file lstat shows
+t_ipc: isatty(0)
+t_ipc: mkfifo
+t_ipc: pipe
+t_ipc: pipe across fork
+t_ipc: pipe holds 64 KiB, then EAGAIN
+t_ipc: pipe2
+t_ipc: poll a readable pipe
+t_ipc: poll times out
+t_ipc: pselect timeout
+t_ipc: readv/writev check every iovec; 0 vectors is 0
+t_ipc: select
+t_ipc: socketpair AF_UNIX
+t_ipc: socketpair both ways, EOF after close
+t_ipc: timerfd
+t_ipc: ttyname(0)
+t_isol: /dev/console is root's
+t_isol: SHM_LOCK needs RLIMIT_MEMLOCK or root
+t_isol: SysV group bits count supplementary groups
+t_isol: a shared mapping of a read-only file stays read-only
+t_isol: a unix socket's file says who may connect
+t_isol: another user's /proc exe, fd and ns links are hidden
+t_isol: loop devices are root's and group disk's
+t_isol: mount and umount2 are root's
+t_isol: ports below 1024 are root's
+t_isol: reboot is root's
+t_isol: root binds a port below 1024
+t_isol: rt_sigqueueinfo follows kill's rule
+t_lock: F_GETLK names the holder
+t_lock: F_GETLK sees no lock of ours
+t_lock: F_SETLK bad type is EINVAL
+t_lock: F_SETLK write lock
+t_lock: F_SETLKW deadlock is EDEADLK
+t_lock: F_SETLKW waits until it is free
+t_lock: F_UNLCK frees the rest
+t_lock: OFD F_GETLK says l_pid -1
+t_lock: OFD and record locks meet
+t_lock: OFD lock
+t_lock: a forked child is kept out too
+t_lock: a lock to the end of the file
+t_lock: another description is kept out
+t_lock: another process is kept out
+t_lock: bytes beside it are free
+t_lock: closing any descriptor drops the locks
+t_lock: closing the description drops it
+t_lock: flock LOCK_EX
+t_lock: flock LOCK_NB is EWOULDBLOCK
+t_lock: flock LOCK_SH is shared
+t_lock: flock LOCK_UN
+t_lock: flock and fcntl locks do not meet
+t_lock: lock file
+t_lock: read locks are shared
+t_lock: the owner relocks freely
+t_lock: unlocking a middle part splits it
+t_mem: 64 MiB of address space
+t_mem: FUTEX_CMP_REQUEUE moves timed waiters across processes
+t_mem: FUTEX_CMP_REQUEUE with a negative count is EINVAL
+t_mem: FUTEX_WAKE on an unmapped word is EFAULT
+t_mem: MAP_SHARED anonymous across fork
+t_mem: MAP_SHARED file mapped by two processes
+t_mem: MAP_SHARED file mapping across fork
+t_mem: MAP_SHARED write-back at exit, after close
+t_mem: MAP_SHARED write-back at munmap
+t_mem: a MAP_SHARED mapping sees write(2)
+t_mem: a big window: 1.2 GiB of PROT_NONE reservations as the Go runtime makes, then 4 GiB of mmap touched at both ends
+t_mem: an 8 MiB stack: 6 MiB of locals in a function
+t_mem: file for mapping
+t_mem: fork: parent and child each see only their own writes (copy-on-write), read(2) into a shared page, a second thread, mprotect and MADV_DONTNEED
+t_mem: futex across fork on a MAP_SHARED page
+t_mem: large malloc and free, many times
+t_mem: madvise
+t_mem: malloc churn
+t_mem: mlock
+t_mem: mmap MAP_FIXED
+t_mem: mmap a file MAP_PRIVATE
+t_mem: mmap a file MAP_SHARED writes back
+t_mem: mmap anonymous
+t_mem: mmap is zeroed
+t_mem: mmap of a closed descriptor is EBADF
+t_mem: mmap of a file opened write-only is EACCES
+t_mem: mmap takes a free address hint and grows from it, as the Go runtime's heap arenas do
+t_mem: more than the old 64 MiB window: a 96 MiB mmap, then a 100 MiB malloc
+t_mem: mprotect read-only faults on write
+t_mem: mremap grow
+t_mem: mremap growth reuses address space
+t_mem: munmap
+t_mem: munmap faults on touch
+t_mem: munmap gives address space back
+t_mem: pages come when first touched: 640 MiB of mmap, system calls and fork on pages never touched
+t_mem: read(2) sees a store into a MAP_SHARED mapping
+t_mem: writable MAP_SHARED of a read-only file is EACCES
+t_misc: /etc/passwd
+t_misc: /proc/meminfo
+t_misc: /proc/modules opens
+t_misc: /proc/net is a directory
+t_misc: /proc/net/dev lists lo and eth0
+t_misc: /proc/self/exe
+t_misc: /proc/stat has cpu lines
+t_misc: SSE floating point
+t_misc: TIOCGWINSZ
+t_misc: getlogin or getpwuid
+t_misc: getrandom
+t_misc: prctl PR_SET_NAME
+t_misc: printf %f
+t_misc: qsort
+t_misc: sched_getaffinity
+t_misc: seccomp filter denies getpid
+t_misc: statfs
+t_misc: strtod
+t_misc: sync
+t_misc: tcgetattr
+t_misc: tcgetpgrp
+t_misc: tcsetattr
+t_more: FIONREAD on a pipe
+t_more: O_NONBLOCK by fcntl on a listening socket
+t_more: a full nonblocking pipe is EAGAIN
+t_more: bind to port 0 names a port before listen
+t_more: copy_file_range
+t_more: dup3 O_CLOEXEC
+t_more: fallocate grows a file
+t_more: fchmodat
+t_more: fcntl F_SETLK and F_GETLK
+t_more: flock exclusive
+t_more: fstat on a directory agrees with stat
+t_more: fstatat AT_EMPTY_PATH
+t_more: fstatat with AT_SYMLINK_NOFOLLOW
+t_more: fstatfs
+t_more: futimens
+t_more: getrusage children
+t_more: ioctl FIOCLEX and FIONCLEX
+t_more: ioctl FIONBIO makes a read EAGAIN
+t_more: memfd_create
+t_more: mkdirat and unlinkat AT_REMOVEDIR
+t_more: open O_CLOEXEC
+t_more: posix_fadvise
+t_more: posix_spawn
+t_more: preadv
+t_more: prlimit
+t_more: pwritev
+t_more: readdir counts the files
+t_more: renameat2 RENAME_NOREPLACE
+t_more: sched_getcpu
+t_more: sem_open in /dev/shm
+t_more: sendfile file to file
+t_more: sendfile needs a readable source
+t_more: sendfile to a pipe
+t_more: signalfd
+t_more: source file
+t_more: splice a file into a pipe
+t_more: splice a pipe into a file
+t_more: splice rejects two files and a pipe offset
+t_more: statx
+t_more: utimensat
+t_more: utimensat and llistxattr act on a dangling link itself
+t_more: vfork + _exit
+t_more: vmsplice into a pipe, EAGAIN on an empty tee
+t_net: AF_INET6 TCP over ::1
+t_net: AF_INET6 UDP over ::1
+t_net: AF_INET6 socket
+t_net: SO_REUSEADDR
+t_net: TCP bind/listen
+t_net: TCP loopback connect/accept
+t_net: TCP socket
+t_net: TCP_NODELAY
+t_net: UDP bind port 0
+t_net: UDP loopback
+t_net: UDP socket
+t_net: getaddrinfo localhost
+t_net: getaddrinfo numeric
+t_net: getsockopt SO_TYPE
+t_net: inet_pton
+t_nopie: a child sees the same addresses (fork)
+t_nopie: a null pointer faults
+t_nopie: absolute pointers in the data work
+t_nopie: malloc and free work
+t_nopie: mmap lands outside the image
+t_nopie: so does an address in the kernel's old identity map
+t_nopie: the bss covers what the kernel image would
+t_nopie: the data follows it
+t_nopie: the text is where it was linked
+t_nopie: the whole bss is usable
+t_openat2: /proc/self/exe opens the program
+t_openat2: BENEATH inside opens
+t_openat2: BENEATH through a link inside opens
+t_openat2: BENEATH through a link out is EXDEV
+t_openat2: BENEATH with .. out and back is EXDEV
+t_openat2: BENEATH with .. out is EXDEV
+t_openat2: BENEATH with IN_ROOT is EINVAL
+t_openat2: BENEATH with an absolute path is EXDEV
+t_openat2: CACHED alone opens
+t_openat2: CACHED with O_CREAT is EAGAIN
+t_openat2: IN_ROOT leaves the process's root alone
+t_openat2: IN_ROOT: .. stops at it
+t_openat2: IN_ROOT: / is the directory
+t_openat2: IN_ROOT: /proc/version is not there
+t_openat2: IN_ROOT: an absolute link starts at it
+t_openat2: NO_MAGICLINKS on /proc/self/exe is ELOOP
+t_openat2: NO_MAGICLINKS on /proc/version opens
+t_openat2: NO_SYMLINKS on /proc/self/exe is ELOOP
+t_openat2: NO_SYMLINKS on a plain name opens
+t_openat2: NO_SYMLINKS through a link is ELOOP
+t_openat2: NO_SYMLINKS with O_PATH|O_NOFOLLOW opens the link
+t_openat2: NO_XDEV inside one file system opens
+t_openat2: NO_XDEV into /proc is EXDEV
+t_openat2: O_CREAT with a mode makes the file
+t_openat2: O_PATH with O_RDWR is EINVAL
+t_openat2: a NULL path is EFAULT
+t_openat2: a bad dirfd is EBADF
+t_openat2: a larger struct with a nonzero tail is E2BIG
+t_openat2: a larger struct with zeros past it opens
+t_openat2: a link opens without it
+t_openat2: a mode above 07777 is EINVAL
+t_openat2: a mode without O_CREAT is EINVAL
+t_openat2: a size above a page is E2BIG
+t_openat2: a size below 24 is EINVAL
+t_openat2: an unmapped struct is EFAULT
+t_openat2: open of /proc/self/exe with O_NOFOLLOW is ELOOP
+t_openat2: openat2 opens a file
+t_openat2: unknown flags are EINVAL
+t_openat2: unknown resolve flags are EINVAL
+t_path: O_NOFOLLOW, O_NOATIME, EISDIR, rmdir of . and mkdir over a name
+t_path: a loop of links through a long path is ELOOP
+t_path: a name ending in / or /. must be a directory
+t_path: a path in unmapped memory is EFAULT
+t_path: a set-group-ID bit at create is kept only for a member of the group
+t_path: an empty path is ENOENT, except with AT_EMPTY_PATH
+t_path: chroot keeps absolute paths, links and .. inside the new root
+t_path: execve of a missing /bin program is ENOENT
+t_path: fstat of a directory gives its mode
+t_path: mknod makes device and socket nodes; a device node opens its device
+t_path: paths are read up to PATH_MAX
+t_path: pread and pwrite take no negative offset
+t_path: sendfile checks its descriptors and offset; statx its flags
+t_perm: a new file belongs to its maker
+t_perm: a path needs search permission on its directories
+t_perm: a set-group-ID directory passes on its group
+t_perm: a sticky directory keeps others' names
+t_perm: a supplementary group gives the group's bits
+t_perm: access checks the real ids
+t_perm: chmod, chown and utime are for the owner
+t_perm: chown, fchown, lchown and fchownat keep the owner
+t_perm: exec honours set-user-ID and set-group-ID bits
+t_perm: exec needs an execute bit
+t_perm: names in a directory need write permission on it
+t_perm: open checks the mode bits
+t_perm: setgroups and getgroups keep supplementary groups
+t_perm: the disk keeps owners
+t_perm: umask applies to new files and directories
+t_perm: without the group, the group's bits do not apply
+t_proc: #! naming a missing interpreter is ENOENT
+t_proc: #! naming no interpreter is ENOEXEC
+t_proc: /proc/PID/stat of an ended process is ESRCH
+t_proc: child's getppid is the parent
+t_proc: environment
+t_proc: execve
+t_proc: execve missing is ENOENT
+t_proc: execve of a #! script
+t_proc: fork + exit status
+t_proc: fork copies memory
+t_proc: getgroups
+t_proc: gethostname
+t_proc: getpgrp
+t_proc: getpid
+t_proc: getppid
+t_proc: getpriority
+t_proc: getrlimit
+t_proc: getrusage
+t_proc: getsid
+t_proc: killed child's status
+t_proc: nice
+t_proc: popen
+t_proc: sched_yield
+t_proc: setpgid
+t_proc: setrlimit
+t_proc: setsid in a child
+t_proc: setuid to self
+t_proc: sysconf(_SC_NPROCESSORS_ONLN)
+t_proc: sysinfo
+t_proc: system()
+t_proc: times
+t_proc: uid/gid
+t_proc: umask
+t_proc: uname
+t_proc: wait with no children is ECHILD
+t_proc: waitid
+t_proc: waitpid WNOHANG
+t_pty: /dev/tty in the child's session is its pty
+t_pty: Ctrl-C sends SIGINT to the foreground group
+t_pty: Ctrl-D on an empty line reads as end of file
+t_pty: TIOCGPTN on the master
+t_pty: TIOCSCTTY made the child's group the foreground
+t_pty: TIOCSWINSZ on the master: SIGWINCH and the size on the slave
+t_pty: a locked slave does not open
+t_pty: a slave read after the master closes is end of file
+t_pty: an unfinished line is not readable yet
+t_pty: and a slave write fails with EIO
+t_pty: and the slave readable after a master line
+t_pty: both ends are terminals
+t_pty: epoll reports the master readable after a slave write
+t_pty: epoll_ctl accepts both ends of a pair
+t_pty: erase takes back a byte
+t_pty: its slave is /dev/pts/N
+t_pty: openpty
+t_pty: output LF goes out as CR LF
+t_pty: poll on the master says the slave hung up
+t_pty: raw mode: LF goes out alone
+t_pty: raw mode: no echo, bytes readable at once
+t_pty: stat of the slave's path matches fstat
+t_pty: the master sees the settings the slave made
+t_pty: the slave reads the finished line
+t_pty: then a master read fails with EIO
+t_pty: ttyname of the slave
+t_pty: typing echoes back, CR read as LF
+t_pty: unlockpt lets it open
+t_pty: with both ends closed its /dev/pts entry is gone
+t_server: FIOASYNC is accepted
+t_server: FIOCLEX and FIONCLEX set and clear close-on-exec
+t_server: FIONBIO on an AF_UNIX socketpair
+t_server: F_SETFL O_NONBLOCK on a TCP socket shows in F_GETFL
+t_server: PR_SET_DUMPABLE and PR_GET_DUMPABLE
+t_server: a TCP connection over the loopback
+t_server: a file to serve
+t_server: a nonblocking send fills the connection, then is EAGAIN
+t_server: and makes an empty read EAGAIN
+t_server: epoll_wait for room times out while the peer does not read
+t_server: epoll_wait wakes for a pipe another process writes
+t_server: epoll_wait with nothing ready ends at its timeout
+t_server: ioctl FIONBIO 0 turns it off
+t_server: ioctl FIONBIO 1 turns it on
+t_server: poll with nothing ready ends at its timeout
+t_server: reading the other end makes room: EPOLLOUT
+t_server: sendfile to a TCP connection moves the whole file, in order
+t_server: sendfile to a full nonblocking connection is EAGAIN after what fits
+t_server: sigsuspend ends when another process signals
+t_sig2: 24 processes at once
+t_sig2: SA_ONSTACK runs on the alternate stack
+t_sig2: SA_RESETHAND runs the handler once
+t_sig2: SA_RESTART does not restart epoll_wait
+t_sig2: SA_RESTART does not restart nanosleep
+t_sig2: SA_RESTART does not restart poll
+t_sig2: a PROT_NONE MAP_SHARED page is still shared after mprotect
+t_sig2: a PROT_NONE file mapping faults on read
+t_sig2: a forked child keeps a page PROT_NONE
+t_sig2: epoll_pwait blocks its mask while it waits
+t_sig2: mmap of a file with fd -1 is EBADF
+t_sig2: mmap of length 0 with fd -1 is EBADF
+t_sig2: mprotect PROT_NONE makes a page fault on read
+t_sig2: mprotect makes a PROT_NONE mapping usable
+t_sig2: read into an untouched stack buffer
+t_sig2: read() into a PROT_NONE buffer is EFAULT
+t_sig2: rt_sigprocmask with a wrong sigset size is EINVAL
+t_sig2: sigaltstack smaller than MINSIGSTKSZ is ENOMEM
+t_sig2: the stack grows to 512 KiB
+t_sig2: write() from a PROT_NONE buffer is EFAULT
+t_signal: SA_SIGINFO
+t_signal: SIGCHLD on child exit
+t_signal: SIG_IGN
+t_signal: alarm
+t_signal: getitimer
+t_signal: kill missing pid is ESRCH
+t_signal: kill self
+t_signal: kill(0) to own group
+t_signal: ppoll applies its signal mask
+t_signal: ppoll without a signal times out
+t_signal: pselect applies its signal mask
+t_signal: raise runs the handler
+t_signal: setitimer
+t_signal: sigaction
+t_signal: sigaltstack
+t_signal: signal to a child
+t_signal: sigpending
+t_signal: sigprocmask blocks
+t_signal: sigsuspend
+t_signal: sigwait
+t_signal: timer_create
+t_signal: unblock delivers
+t_sock2: AF_UNIX SOCK_DGRAM socketpair
+t_sock2: MSG_DONTWAIT on an empty socket is EAGAIN
+t_sock2: MSG_PEEK leaves the bytes
+t_sock2: SA_RESTART restarts a read
+t_sock2: SCM_RIGHTS passes a descriptor
+t_sock2: SO_ERROR is 0
+t_sock2: SO_KEEPALIVE
+t_sock2: SO_RCVBUF and SO_SNDBUF
+t_sock2: a read without SA_RESTART is EINTR
+t_sock2: connect to a closed port is ECONNREFUSED
+t_sock2: getpeername
+t_sock2: listener
+t_sock2: nonblocking connect
+t_sock2: poll a listener for a connection
+t_sock2: poll sees a peer close
+t_sock2: sendmsg/recvmsg with two iovecs
+t_sock2: shutdown SHUT_WR gives the peer EOF
+t_sock2: signalfd carries a sigqueue value
+t_sock2: signalfd sees a blocked SIGCHLD
+t_sock2: sigqueue carries a value
+t_sock2: write after SHUT_WR is EPIPE
+t_sys: a cgroup namespace roots the tree
+t_sys: adjtimex reads and sets
+t_sys: clock_settime moves CLOCK_REALTIME
+t_sys: memory.max refuses a mapping that would pass it
+t_sys: not root: EPERM
+t_sys: seccomp USER_NOTIF: a supervisor answers a call
+t_sys: setdomainname
+t_sys: sethostname, uname, /proc/sys/kernel/hostname
+t_sys: settimeofday
+t_sysv: /proc/sysvipc and /proc/sys/kernel limits
+t_sysv: GETNCNT counts a waiting process
+t_sysv: IPC_RMID ends a wait with EIDRM
+t_sysv: SEM_UNDO is undone at exit
+t_sysv: a signal ends semop; semtimedop times out
+t_sysv: msgget keys: IPC_EXCL, ENOENT
+t_sysv: msgrcv picks by type
+t_sysv: msgrcv waits for a message
+t_sysv: msgsnd, msgrcv and IPC_STAT
+t_sysv: queue permissions follow the ids
+t_sysv: semop, SETALL, GETALL, GETPID, errors
+t_sysv: shmat, a second view, fork, IPC_RMID
+t_sysv: shmget and shmat errors
+t_thread: /proc/self/stat and status count the threads
+t_thread: /proc/self/task lists the threads, and /proc/self/task/TID has their files
+t_thread: /proc/self/task/TID/fd/N and ns/ are the process's
+t_thread: 4 threads, mutex
+t_thread: condition variable
+t_thread: exit_group while another thread runs keeps its code
+t_thread: gettid differs in a thread
+t_thread: pthread_create + join
+t_thread: pthread_detach
+t_thread: thread-local storage
+t_thread: threads that ended and began one after another have different ids
+t_thread: timed condition wait, signalled early (monotonic)
+t_thread: timed condition wait, signalled early (realtime)
+t_time: a sleep uses no CPU time
+t_time: clock_getres
+t_time: clock_gettime BOOTTIME
+t_time: clock_gettime MONOTONIC
+t_time: clock_gettime PROCESS_CPUTIME
+t_time: clock_gettime REALTIME after 2020
+t_time: clock_nanosleep TIMER_ABSTIME
+t_time: gettimeofday
+t_time: gmtime_r
+t_time: monotonic does not go back
+t_time: nanosleep 100 ms
+t_time: sleep(1)
+t_time: strftime + localtime
+t_time: time
