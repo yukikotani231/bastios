@@ -13,6 +13,7 @@ import "pic.bastio";
 import "pit.bastio";
 import "hpet.bastio";
 import "tsc.bastio";
+import "tsccal.bastio";
 import "lapic.bastio";
 import "rtc.bastio";
 import "console.bastio";

@@ -1,0 +1,49 @@
+// The sound card on AArch64: none yet, so the kernel's Snd has no device
+// and every call says so.
+
+import "pages.bastio";
+
+enum Snd { None }
+
+spec fn snd_ok(s: &Snd) -> bool {
+  true
+}
+
+fn snd_live(s: &Snd) -> bool {
+  return false;
+}
+
+fn snd_poll(s: &mut Snd)
+  requires snd_ok(s)
+  ensures snd_ok(s)
+{
+}
+
+/// Queues up to n bytes of src; how many were taken.
+fn snd_put(s: &mut Snd, src: &Bytes, n: u64) -> u64
+  requires snd_ok(s) && n <= blen(src)
+  ensures snd_ok(s) && result <= n
+{
+  return 0;
+}
+
+fn snd_free(win: &mut MmioSpace, s: Snd, m: &mut Mem)
+  requires snd_ok(s) && mem_ok(m)
+  ensures mem_ok(m)
+{
+}
+
+/// Bytes a write could queue now.
+fn snd_room(s: &Snd) -> u64
+  requires snd_ok(s)
+  ensures result <= 16384
+{
+  return 0;
+}
+
+/// The most bytes the queue holds.
+fn snd_size(s: &Snd) -> u64
+  ensures result <= 16384
+{
+  return 0;
+}

@@ -11,7 +11,7 @@ import "net.bastio";
 import "tcp.bastio";
 import "netns.bastio";
 import "rtnl.bastio";
-import "hda.bastio";
+import "snd.bastio";
 
 // The most processes; the tables grow to it (new_pid). Raising it: the
 // literals FD_ROWS (src/fs.bastio), IPC_LEN, SYS_LEN and the SYS_* offsets,
