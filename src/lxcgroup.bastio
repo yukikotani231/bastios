@@ -625,7 +625,7 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
     return put_lim(&mut o, 0, cg_get(k, s, CGW_MEM));
   }
   if f == 11 {
-    let a = put_n(&mut o, 0, cg_mem_current(k, s));
+    let a = put_n(&mut o, 0, cg_mem_current(&mut k, s));
     return put_c(&mut o, a, 10);
   }
   if f == 12 {
@@ -667,11 +667,67 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
   return 0;                                 // cgroup.kill is write-only
 }
 
-/// memory.current of cgroup s: nothing is accounted yet.
-fn cg_mem_current(k: &Kernel, s: u64) -> u64
+/// memory.current of cgroup s: the bytes of memory the processes in it and
+/// below it have, counting each address space once and every page it has
+/// mapped or recorded as anonymous (anon_count), not the page cache or the
+/// kernel's own memory.
+fn cg_mem_current(k: &mut Kernel, s: u64) -> u64
   requires kok(k) && s < CG_N
+  ensures kok(k) && result <= 0x100000000000000
 {
-  return 0;
+  let mut pages = 0;
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && pages <= (q - 1) * WPAGES && kok(k)
+  {
+    if cg_live(k, q) && tgid(k.procs, q) == q && cg_in(k, cg_of(k, q), s) && has_space(&mut k.spaces, q) {
+      let c = anon_count(&mut k, q, 0, WPAGES);
+      if c <= WPAGES {
+        pages = pages + c;
+      }
+    }
+    q = q + 1;
+  }
+  return pages * 4096;
+}
+
+/// Could process pid have `extra` more pages (a mapping, a growing break, a
+/// forked copy) without a memory.max, its own group's or one above it,
+/// being passed? Nothing is counted for a group with no limit.
+fn cg_mem_ok(k: &mut Kernel, pid: u64, extra: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if extra > WPAGES {
+    return false;
+  }
+  let mut c = cg_of(k, pid);
+  let mut i = 0;
+  while i < CG_N
+    invariant i <= CG_N && c < CG_N && kok(k)
+  {
+    let lim = cg_get(k, c, CGW_MEM);
+    if lim != 0 && lim <= 0x100000000000000 {
+      if cg_mem_current(&mut k, c) + extra * 4096 > lim - 1 {
+        return false;
+      }
+    }
+    if c == 0 {
+      return true;
+    }
+    c = cg_parent(k, c);
+    i = i + 1;
+  }
+  return true;
+}
+
+/// Could process pid fork: its address space copied into the same group?
+fn cg_fork_mem_ok(k: &mut Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let own = anon_count(&mut k, pid, 0, WPAGES);
+  return cg_mem_ok(&mut k, pid, own);
 }
 
 /// The root of process pid's cgroup namespace: the group it was in when it
