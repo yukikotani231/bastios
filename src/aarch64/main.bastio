@@ -546,13 +546,16 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   puts(&mut console, " virtio-mmio slots from ");
   put_hex(&mut console, vm_where.first);
   puts(&mut console, "\r\n");
-  let dev = blk_find(&mut m, &mut win, vm_where);
+  let dev = blk_find(&mut m, &mut win, vm_where, dt_first(cpu, "pci-host-ecam-generic"));
   let dk_lo = blk_mmio_lo(dev);
   let dk_hi = blk_mmio_hi(dev);
   let disk = disk_mount(dev);
   let tsc = tsc_from_hz(cpu, boot_info(cpu, INFO_CNTFRQ, 0));   // 0 Hz: the clock follows the timer ticks (set_clock)
   if blk_is_virtio(disk.dev) {
     puts(&mut console, "disk: virtio\r\n");
+  }
+  if blk_is_nvme(disk.dev) {
+    puts(&mut console, "disk: NVMe\r\n");
   }
   if disk.blocks > 0 {
     puts(&mut console, "disk: the BastiOS file system, ");

@@ -1,0 +1,47 @@
+// PCI configuration space on x86-64, through the two legacy I/O ports:
+// write an address to 0xCF8, then read or write the 32-bit register at
+// 0xCFC. (src/pci.bastio is the rest of PCI, over these.)
+//
+// A device (strictly, a function of one) is named by its index bus * 256 +
+// device * 8 + function, below PCI_NONE, which stands for "none".
+
+const PCI_ADDR: u64 = 0xCF8;
+const PCI_DATA: u64 = 0xCFC;
+const PCI_ENABLE: u64 = 0x80000000;   // bit 31 of the address: a config cycle
+const PCI_NONE: u64 = 65536;
+
+struct Pci { addr: PortIo, data: PortIo }
+
+spec fn pci_ok(p: &Pci) -> bool {
+  port_count(p.addr) == 4 && port_count(p.data) == 4
+}
+
+fn pci_free(ports: &mut Ports, p: Pci)
+  requires pci_ok(p)
+{
+  port_release(&mut ports, p.addr);
+  port_release(&mut ports, p.data);
+}
+
+/// Selects register `off` (a multiple of 4) of device `dev`.
+fn pci_select(p: &mut Pci, dev: u64, off: u64)
+  requires pci_ok(p) && dev < PCI_NONE && off < 256 && off % 4 == 0
+{
+  pio_out32(&mut p.addr, 0, cast[u32](PCI_ENABLE + dev * 256 + off));
+}
+
+fn pci_read(p: &mut Pci, dev: u64, off: u64) -> u64
+  requires pci_ok(p) && dev < PCI_NONE && off < 256 && off % 4 == 0
+  ensures result <= 4294967295
+{
+  pci_select(&mut p, dev, off);
+  return cast[u64](pio_in32(&mut p.data, 0));
+}
+
+fn pci_write(p: &mut Pci, dev: u64, off: u64, v: u64)
+  requires pci_ok(p) && dev < PCI_NONE && off < 256 && off % 4 == 0 && v <= 4294967295
+{
+  pci_select(&mut p, dev, off);
+  pio_out32(&mut p.data, 0, cast[u32](v));
+}
+

@@ -230,6 +230,11 @@ jobs:
             build/compat/alpine/*.json
         continue-on-error: true
       - run: make compat
+      - name: What failed
+        if: failure()
+        run: |
+          grep -E '^\| (alpine|alpine-tty) ' build/compat/report.md | grep -v '| pass |' | head -20 || true
+          tail -n 120 build/compat/serial.log || true
       - if: always()
         uses: actions/upload-artifact@v4
         with:
