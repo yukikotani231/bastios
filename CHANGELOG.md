@@ -18,6 +18,15 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 - A PVH entry (Xen's direct boot protocol, used by Firecracker, Cloud Hypervisor and QEMU's `microvm`): `boot/boot.S` carries the ELF note, `boot/multiboot.c` converts the `hvm_start_info`. Tested on QEMU by booting a copy without the Multiboot header.
 
+### AArch64
+
+- BastiOS builds for AArch64 and boots to the shell on QEMU's `virt` machine
+  (`make ARCH=aarch64 run`; [docs/aarch64.md](docs/aarch64.md)): exception
+  vectors, MMU, GICv3, the generic timer as the scheduler tick, the PL011
+  console and PSCI power off, with the native-ABI programs (`sh`, `hello`,
+  `spin`, `true`) running at EL0. `test/aarch64_test.sh` is part of `make test`.
+  The Linux layer, the file system and the network are still x86-64 only.
+
 ### Network
 
 - A driver for the AWS Elastic Network Adapter (`src/ena.bastio`, PCI
