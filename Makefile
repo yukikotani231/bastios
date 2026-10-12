@@ -441,15 +441,25 @@ PERL_GIT      ?= https://github.com/Perl/perl5
 PERL_TAG      ?= v5.40.0
 CPYTHON_GIT   ?= https://github.com/python/cpython
 CPYTHON_TAG   ?= v3.12.7
+RIPGREP_VER   ?= 14.1.1
 DROPBEAR_GIT  ?= https://github.com/mkj/dropbear
 DROPBEAR_TAG  ?= DROPBEAR_2024.86
 COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo \
                  build/compat/git build/compat/perl build/compat/python build/compat/ttyepoll \
-                 build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys
+                 build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/rg
 APP_CFLAGS    := -static-pie -fPIE -O2 -w -s
 
 build/compat/src:
 	mkdir -p $@
+
+# ripgrep (what Neovim's pickers and :grep use), a static musl build from
+# crates.io, pinned by version and Cargo.lock (--locked). Needs cargo, the
+# musl target (rustup adds it) and musl-gcc.
+build/compat/rg: | build/compat/src
+	command -v rustup >/dev/null && rustup target add x86_64-unknown-linux-musl >/dev/null 2>&1 || true
+	CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=$(MUSLCC) cargo install ripgrep --version $(RIPGREP_VER) --locked \
+	  --target x86_64-unknown-linux-musl --root build/compat/src/rg-root --quiet
+	strip -o $@ build/compat/src/rg-root/bin/rg
 
 # Dropbear, the SSH server (and its client and key tool, which also run on
 # the host: ssh.txt logs in from here). The keys are made for the test:

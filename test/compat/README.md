@@ -26,7 +26,8 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   nothing else; it finds its subcommands in `/disk`), Perl 5.40 (its XS
   modules linked in; the pure-Perl modules the cases use, and what they
   load, go on the disk as `/disk/perllib`) and BusyBox's `wget`, `httpd`
-  and `nc`. The Makefile clones each at a pinned tag or commit and builds
+  and `nc`, and ripgrep 14.1 (built by cargo from crates.io, `RIPGREP_VER`,
+  as a static musl binary: it searches on several threads). The Makefile clones each at a pinned tag or commit and builds
   it against musl as a static PIE (`LUA_TAG`, `QUICKJS_REV`, `SQLITE_TAG`,
   `MPY_TAG`, `GIT_TAG`, `PERL_TAG` pick the versions).
 - `tty.txt`: programs driven by keystrokes on the console: MicroPython's

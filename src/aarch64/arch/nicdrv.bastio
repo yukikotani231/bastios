@@ -5,7 +5,10 @@ import "card.bastio";
 import "netconst.bastio";
 import "e1000.bastio";
 import "pci.bastio";
+<<<<<<< HEAD
 import "vpci.bastio";
+=======
+>>>>>>> origin/main
 
 /// A virtio network card over the transport `io`, given the nine pages
 /// from page `at` on.
@@ -26,6 +29,7 @@ fn virtio_nic_start(m: &mut Mem, at: u64, io: Vt) -> Nic
   return net_up(Card::Virtio(vnet_new(io, q0, q1, q2, t0, t1, t2, b0, b1, b2, false)));
 }
 
+<<<<<<< HEAD
 /// A card on the PCI Express bus whose configuration window starts at
 /// `ecam` (0: the machine has none): a modern virtio network function (nine
 /// pages from page `at` on), else an Intel e1000 family card (six), if its
@@ -34,15 +38,29 @@ fn virtio_nic_start(m: &mut Mem, at: u64, io: Vt) -> Nic
 /// already placed). Polled: no interrupt is routed.
 fn pci_nic_start(m: &mut Mem, win: &mut MmioSpace, at: u64, dk_lo: u64, dk_hi: u64, ecam: u64) -> Nic
   requires mem_ok(m) && at + NET_PAGES <= NPAGES && E1K_PAGES <= NET_PAGES && at + NET_PAGES <= len(m.bm)
+=======
+/// An Intel e1000 family card on the PCI Express bus whose configuration
+/// window starts at `ecam` (0: the machine has none), if its registers lie
+/// in the device window clear of `dk_lo .. dk_hi` and six pages from page
+/// `at` on are free; none otherwise. BARs are assigned first (a no-op for
+/// those the disk probe already placed). Polled: no interrupt is routed.
+fn e1k_start(m: &mut Mem, win: &mut MmioSpace, at: u64, dk_lo: u64, dk_hi: u64, ecam: u64) -> Nic
+  requires mem_ok(m) && at + E1K_PAGES <= NPAGES
+>>>>>>> origin/main
   requires forall a: u64 :: bar_space(a) && !(dk_lo <= a && a < dk_hi) ==> mmio_free(win, a)
   ensures nic_ok(result) && mem_ok(m)
 {
   if ecam >= WIN_TOP || ecam % 4096 != 0 || !((ecam >= WIN_LO && ecam + ECAM_LEN <= WIN_LOW_TOP) || (ecam >= WIN_HIGH && ecam + ECAM_LEN <= WIN_TOP))
+<<<<<<< HEAD
     || !(ecam + ECAM_LEN <= dk_lo || ecam >= dk_hi) || !pages_free(m, at, NET_PAGES) {
+=======
+    || !(ecam + ECAM_LEN <= dk_lo || ecam >= dk_hi) || !pages_free(m, at, E1K_PAGES) {
+>>>>>>> origin/main
     return Nic::None;
   }
   let mut pci = Pci { cfg: mmio_claim(&mut win, ecam, ECAM_LEN) };
   pci_assign(&mut pci, PCI_WIN_LO, PCI_WIN_HI);
+<<<<<<< HEAD
   match vpci_locate(&mut pci, VM_ID_NET) {
     VpFound::At(a) => {
       if a.bar < WIN_LO || !(a.bar + a.end <= dk_lo || a.bar >= dk_hi) || !(a.bar + a.end <= ecam || a.bar >= ecam + ECAM_LEN) {
@@ -55,6 +73,8 @@ fn pci_nic_start(m: &mut Mem, win: &mut MmioSpace, at: u64, dk_lo: u64, dk_hi: u
     },
     VpFound::None => {},
   }
+=======
+>>>>>>> origin/main
   let e = e1k_find(&mut pci);
   if e >= PCI_NONE {
     pci_free(&mut win, pci);
@@ -81,8 +101,13 @@ fn pci_nic_start(m: &mut Mem, win: &mut MmioSpace, at: u64, dk_lo: u64, dk_hi: u
 
 /// Starts the network card: the first virtio network device in the slots
 /// `vm`, clear of `dk_lo .. dk_hi` (the disk's registers), with nine pages
+<<<<<<< HEAD
 /// from page `at` on; else a virtio or e1000 family card on the PCI Express bus at
 /// `ecam` (see `pci_nic_start`); none if there is no such device.
+=======
+/// from page `at` on; else an e1000 family card on the PCI Express bus at
+/// `ecam` (see `e1k_start`); none if there is no such device.
+>>>>>>> origin/main
 fn nic_find(m: &mut Mem, win: &mut MmioSpace, at: u64, dk_lo: u64, dk_hi: u64, vm: VmWhere, ecam: u64) -> Nic
   requires mem_ok(m) && vmw_ok(vm) && at + NET_PAGES <= NPAGES && E1K_PAGES <= NET_PAGES
   requires forall a: u64 :: bar_space(a) && !(dk_lo <= a && a < dk_hi) ==> mmio_free(win, a)
@@ -93,7 +118,11 @@ fn nic_find(m: &mut Mem, win: &mut MmioSpace, at: u64, dk_lo: u64, dk_hi: u64, v
   }
   match vm_find(&mut win, VM_ID_NET, vm, dk_lo, dk_hi, 0, 0, 0, 0, 0, 0) {
     VmFound::Found(d) => { return virtio_nic_start(&mut m, at, Vt::Mem(d)); },
+<<<<<<< HEAD
     VmFound::None => { return pci_nic_start(&mut m, &mut win, at, dk_lo, dk_hi, ecam); },
+=======
+    VmFound::None => { return e1k_start(&mut m, &mut win, at, dk_lo, dk_hi, ecam); },
+>>>>>>> origin/main
   }
 }
 

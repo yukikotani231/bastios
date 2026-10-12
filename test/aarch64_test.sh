@@ -53,12 +53,18 @@ kernel, qemu_bin, timeout = sys.argv[1], sys.argv[2], float(sys.argv[3])
 # comes first: the kernel takes the virtio-mmio slot QEMU gives the last
 # device added.
 # NVME=1 puts the disk on the PCI Express bus as an NVMe drive.
+<<<<<<< HEAD
 # VIRTIO_PCI=1 puts the disk (unless NVME=1) and the network card (unless NIC=)
 # on the PCI Express bus as modern virtio functions.
 # NIC=<model> puts the network card on the PCI Express bus (e1000, e1000e, igb).
 nvme = os.environ.get("NVME", "") == "1"
 nic = os.environ.get("NIC", "")
 vpci = os.environ.get("VIRTIO_PCI", "") == "1"
+=======
+# NIC=<model> puts the network card on the PCI Express bus (e1000, e1000e, igb).
+nvme = os.environ.get("NVME", "") == "1"
+nic = os.environ.get("NIC", "")
+>>>>>>> origin/main
 uefi = os.environ.get("UEFI", "")
 if uefi and not os.path.exists(uefi):
     print("SKIP aarch64 uefi: no firmware at " + uefi + " (Debian/Ubuntu: qemu-efi-aarch64)")
@@ -75,8 +81,13 @@ qemu = subprocess.Popen(
     [qemu_bin, "-M", "virt,gic-version=" + os.environ.get("GIC", "3") + os.environ.get("VIRT", "") + (",acpi=off" if uefi else ""), "-cpu", os.environ.get("CPU", "cortex-a72"), "-smp", os.environ.get("SMP", "4"), "-m", os.environ.get("MEM", "256M"), "-nographic",
      "-no-reboot"] + boot + [
      "-drive", f"file={disk},format=raw,if=none,id=vd",
+<<<<<<< HEAD
      "-device", ("nvme,drive=vd,serial=bastio" if nvme else "virtio-blk-pci,disable-legacy=on,drive=vd" if vpci else "virtio-blk-device,drive=vd"),
      "-netdev", "user,id=n0,net=10.0.2.0/24", "-device", (nic + ",netdev=n0" if nic else "virtio-net-pci,disable-legacy=on,netdev=n0" if vpci else "virtio-net-device,netdev=n0"), "-serial", "stdio", "-monitor", "none"],
+=======
+     "-device", ("nvme,drive=vd,serial=bastio" if nvme else "virtio-blk-device,drive=vd"),
+     "-netdev", "user,id=n0,net=10.0.2.0/24", "-device", (nic + ",netdev=n0" if nic else "virtio-net-device,netdev=n0"), "-serial", "stdio", "-monitor", "none"],
+>>>>>>> origin/main
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 deadline = time.time() + timeout
 out = b""
