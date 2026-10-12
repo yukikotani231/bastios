@@ -91,6 +91,7 @@ const SY_NETUDP: u64 = 23;             // /proc/net/udp
 const SY_NETUDP6: u64 = 24;            // /proc/net/udp6
 const SY_NETUNIX: u64 = 25;            // /proc/net/unix
 const SY_NETRAW: u64 = 26;             // /proc/net/raw
+const SY_NETROUTE: u64 = 27;           // /proc/net/route
 const SY_LOOP: u64 = 32;               // 32 ..: loop device n's attribute a at n * LOOP_SYS + a
 const SY_NS: u64 = 128;                // 128 ..: /proc/P/ns link f at P * NF_N + f (src/lxnsk.bastio)
 const NF_N: u64 = 8;
@@ -469,6 +470,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   if xfer_is(x, 5, n, "net/udp") {
     return PROC_DEV + PSYS + SY_NETUDP;
   }
+  if xfer_is(x, 5, n, "net/route") {
+    return PROC_DEV + PSYS + SY_NETROUTE;
+  }
   if xfer_is(x, 5, n, "net/raw") {
     return PROC_DEV + PSYS + SY_NETRAW;
   }
@@ -727,6 +731,9 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
     if i == 6 {
       return Ent { len: name_out(&mut k.fs.xfer, "raw"), dir: false, end: false };
     }
+    if i == 7 {
+      return Ent { len: name_out(&mut k.fs.xfer, "route"), dir: false, end: false };
+    }
     return end;
   }
   if dir >= DIR_PROC + TASK_DIRS {
@@ -928,6 +935,24 @@ fn put_ip_hex(o: &mut Bytes, at: u64, ip: u64) -> u64
   return put_hx(&mut o, at, sw, 8);
 }
 
+/// Interface slot i's name at o[at..]. Returns the new end.
+fn put_ifname(k: &Kernel, o: &mut Bytes, at: u64, i: u64) -> u64
+  requires kok(k) && blen(o) == PROC_OUT && at <= PROC_OUT && i < IFN
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let w0 = nic_if_name(k.nic, i, 0);
+  let w1 = nic_if_name(k.nic, i, 1);
+  let mut a = at;
+  let mut j = 0;
+  while j < 16 && name_byte(w0, w1, j) != 0 && a < PROC_OUT
+    invariant j <= 16 && a <= PROC_OUT && blen(o) == PROC_OUT
+  {
+    a = put_c(&mut o, a, cast[u8](name_byte(w0, w1, j)));
+    j = j + 1;
+  }
+  return a;
+}
+
 fn put_n(o: &mut Bytes, at: u64, v: u64) -> u64
   requires blen(o) == PROC_OUT && at <= PROC_OUT
   ensures blen(o) == PROC_OUT && result <= PROC_OUT
@@ -1074,6 +1099,37 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     }
     if what >= SY_LOOP && what - SY_LOOP < LOOP_N * LOOP_SYS {
       return loop_sys_text(&mut k, what - SY_LOOP, &mut o);
+    }
+    if what == SY_NETROUTE {
+      // The routes of the reader's network namespace: the default one and
+      // the subnet of each interface that is up. The reference count, use,
+      // metric, MTU, window and RTT read 0.
+      let ns = net_ns(k, pid);
+      let mut a = put_s(&mut o, 0, "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n");
+      let mut r = 0;
+      while r < IFN && a + 160 < PROC_OUT
+        invariant r <= IFN && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+      {
+        if nic_route(k.nic, ns, r, 0) == 1 {
+          let sl = nic_route(k.nic, ns, r, 1);
+          if sl < IFN {
+            a = put_ifname(k, &mut o, a, sl);
+            a = put_c(&mut o, a, 9);
+            a = put_ip_hex(&mut o, a, nic_route(k.nic, ns, r, 2) % 4294967296);
+            a = put_c(&mut o, a, 9);
+            a = put_ip_hex(&mut o, a, nic_route(k.nic, ns, r, 3) % 4294967296);
+            if r == 0 {
+              a = put_s(&mut o, a, "\t0003\t0\t0\t0\t");
+            } else {
+              a = put_s(&mut o, a, "\t0001\t0\t0\t0\t");
+            }
+            a = put_ip_hex(&mut o, a, nic_route(k.nic, ns, r, 4) % 4294967296);
+            a = put_s(&mut o, a, "\t0\t0\t0\n");
+          }
+        }
+        r = r + 1;
+      }
+      return a;
     }
     if what == SY_NETRAW {
       // One line per raw ICMP socket of the reader's network namespace;
