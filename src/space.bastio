@@ -17,10 +17,9 @@
 
 import "pages.bastio";
 
-const USER_BASE: u64 = 0;
-// Where a PIE goes: nothing is mapped below it, so a null pointer (and a
-// small offset from one) faults.
-const PIE_AT: u64 = 0x400000;
+// USER_BASE and PIE_AT are per architecture (src/<arch>/arch/userbase.bastio,
+// found through the --lib directory).
+import "arch/userbase.bastio";
 // What win_op (src/lxmem.bastio) does to a range of window pages.
 const WOP_UNMAP: u64 = 0;
 const WOP_PROTECT: u64 = 1;             // arg: 2 read-write, 1 read-only, 0 PROT_NONE
