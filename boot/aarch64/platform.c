@@ -28,16 +28,22 @@
  * are boot.S's PCPU_* constants. */
 struct pcpu {
     uint64_t ctx[40];
-    uint64_t mmu[3];
+    uint64_t mmu[4];            /* bst_platform_mmu_state; word 3 is the user table */
     uint64_t irq;
     uint64_t id;
     uint64_t mpidr;
-    uint64_t pad[2];
+    uint64_t shadow;            /* the table user code runs on (bst_shadow_root[id]) */
 };
-_Static_assert(__builtin_offsetof(struct pcpu, irq) == 344, "boot.S PCPU_IRQ");
-_Static_assert(__builtin_offsetof(struct pcpu, id) == 352, "boot.S PCPU_ID");
+_Static_assert(__builtin_offsetof(struct pcpu, mmu[3]) == 344, "boot.S PCPU_MMU3");
+_Static_assert(__builtin_offsetof(struct pcpu, irq) == 352, "boot.S PCPU_IRQ");
+_Static_assert(__builtin_offsetof(struct pcpu, id) == 360, "boot.S PCPU_ID");
+_Static_assert(__builtin_offsetof(struct pcpu, shadow) == 376, "boot.S PCPU_SHADOW");
 _Static_assert(sizeof(struct pcpu) == 384, "boot.S PCPU_SIZE");
 struct pcpu bst_pcpus[MAX_CPUS];
+/* Each processor's own top-level table while it runs user code: slot 0 is
+ * the process's window (the level-3 table in slot 1 of the process's table),
+ * so the window is seen from address 0 and nothing else is in it. */
+uint8_t bst_shadow_root[MAX_CPUS][4096] __attribute__((aligned(4096)));
 uint8_t bst_cpu_stacks[MAX_CPUS][CPU_STACK] __attribute__((aligned(16)));
 static inline struct pcpu *this_cpu(void) {
     struct pcpu *p;
@@ -62,6 +68,19 @@ static uint64_t dtb_len;
 
 extern uint64_t bst_kernel_root[512];
 extern uint64_t kernel_l1[512];
+
+/* Tells the compiled kernel (the prelude's BST_DEFERRED) that user code runs
+ * on a table of its own, which bst_cpu_enter loads into TTBR0 from word 3 of
+ * bst_platform_mmu_state: the kernel's tables stay in TTBR0 in Bastio code. */
+const char bst_platform_deferred_ttbr0 = 1;
+uint64_t *bst_platform_mmu_state(void) { return this_cpu()->mmu; }
+
+/* TTBR1 maps one page, the trampoline (boot.S), at TRAMP_VA: the exception
+ * vectors and the code that switches TTBR0, which must be reachable while
+ * TTBR0 holds a user table. One table per level, all index 0. */
+extern char tramp_page[];
+uint64_t bst_ttbr1_tables[4][512] __attribute__((aligned(4096)));
+#define TRAMP_PTE ((uint64_t)tramp_page | 3 | (1ull << 10) | (3ull << 8) | (1ull << 7) | (1ull << 54))
 
 static uint32_t be32(const uint8_t *p) {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
@@ -156,9 +175,19 @@ static void read_memory(const uint8_t *dtb) {
  * RAM are normal memory (MAIR index 0). */
 void bst_early(const uint8_t *dtb) {
     read_memory(dtb);
-    if (dtb && be32(dtb) == 0xd00dfeed && be32(dtb + 4) <= DTB_MAX) {
-        dtb_len = be32(dtb + 4);
-        for (uint64_t i = 0; i < dtb_len; i++) dtb_copy[i] = dtb[i];
+    /* QEMU pads the tree to 1 MiB (totalsize says so) though the blocks it
+     * holds take a few KiB: what matters is that both blocks lie inside the
+     * part kept, and the copy's totalsize says how much that is. */
+    if (dtb && be32(dtb) == 0xd00dfeed) {
+        uint64_t total = be32(dtb + 4);
+        uint64_t st = (uint64_t)be32(dtb + 8) + be32(dtb + 36);      /* structure block's end */
+        uint64_t strs = (uint64_t)be32(dtb + 12) + be32(dtb + 32);   /* strings block's end */
+        if (total > DTB_MAX && st <= DTB_MAX && strs <= DTB_MAX) total = DTB_MAX;
+        if (total <= DTB_MAX) {
+            dtb_len = total;
+            for (uint64_t i = 0; i < dtb_len; i++) dtb_copy[i] = dtb[i];
+            for (int i = 0; i < 4; i++) dtb_copy[4 + i] = (uint8_t)(total >> (24 - 8 * i));
+        }
     }
     uint64_t top = 0;
     for (uint64_t i = 0; i < bst_memmap[0]; i++) {
@@ -171,6 +200,10 @@ void bst_early(const uint8_t *dtb) {
     for (uint64_t g = 1; g < ((top + (1ull << 30) - 1) >> 30); g++)
         kernel_l1[g] = BLOCK_NORMAL | (g << 30);
     bst_kernel_root[0] = (uint64_t)kernel_l1 | 3;
+    bst_ttbr1_tables[0][0] = (uint64_t)bst_ttbr1_tables[1] | 3;
+    bst_ttbr1_tables[1][0] = (uint64_t)bst_ttbr1_tables[2] | 3;
+    bst_ttbr1_tables[2][0] = (uint64_t)bst_ttbr1_tables[3] | 3;
+    bst_ttbr1_tables[3][0] = TRAMP_PTE;       /* EL1 read-only, never executable at EL0 */
 }
 
 static inline void w32(uint64_t a, uint32_t v) { *(volatile uint32_t *)a = v; }
@@ -333,8 +366,14 @@ void bst_platform_smp_join(void) {
 }
 uint64_t bst_platform_acpi(uint64_t sig, uint64_t off) { (void)sig; (void)off; return 256; }
 /* boot_info: query 10 is the device tree, byte i of it, 256 past its end
- * (or when there is none); every other query is 0. */
+ * (or when there is none); query 11 is the generic timer's rate in Hz
+ * (CNTFRQ_EL0); every other query is 0. */
 uint64_t bst_platform_info(uint64_t what, uint64_t i) {
+    if (what == 11) {
+        uint64_t f;
+        __asm__ volatile ("mrs %0, cntfrq_el0" : "=r"(f));
+        return f;
+    }
     if (what != 10) return 0;
     return i < dtb_len ? dtb_copy[i] : 256;
 }

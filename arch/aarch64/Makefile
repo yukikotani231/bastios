@@ -71,16 +71,37 @@ $(B)/user/%.bin: $(B)/user/%.elf
 
 # Linux arm64 programs: ordinary ELF executables, linked at the start of the
 # user window with no libc (mhello is the table's name for the first).
-LXELFS := $(B)/user/mhello.elf $(B)/user/mtest.elf
+LXELFS := $(B)/user/mhello.elf $(B)/user/mtest.elf $(B)/user/ash.elf
+
+# BusyBox's ash (the same source and applets as x86-64's, user/busybox.config)
+# as an ordinary static glibc executable at 0x400000, where Linux links one.
+BUSYBOX_GIT ?= https://github.com/mirror/busybox
+BUSYBOX_TAG ?= 1_36_1
+
+$(B)/busybox/Makefile: | $(B)
+	rm -rf $(B)/busybox
+	git clone -q --depth 1 --branch $(BUSYBOX_TAG) $(BUSYBOX_GIT) $(B)/busybox
+
+$(B)/user/ash.elf: $(B)/busybox/Makefile user/busybox.config | $(B)/user
+	$(MAKE) -C $(B)/busybox -s allnoconfig >/dev/null
+	for o in $$(grep -v '^#' user/busybox.config); do \
+	  sed -i "s/^# $$o is not set/$$o=y/" $(B)/busybox/.config; done
+	yes "" | $(MAKE) -C $(B)/busybox -s oldconfig >/dev/null
+	sed -i -e 's/^CONFIG_FEATURE_DEFAULT_PASSWD_ALGO=.*/CONFIG_FEATURE_DEFAULT_PASSWD_ALGO="sha512"/' \
+	  -e 's/^CONFIG_LAST_ID=.*/CONFIG_LAST_ID=60000/' -e 's/^CONFIG_FIRST_SYSTEM_ID=.*/CONFIG_FIRST_SYSTEM_ID=100/' \
+	  -e 's/^CONFIG_LAST_SYSTEM_ID=.*/CONFIG_LAST_SYSTEM_ID=999/' $(B)/busybox/.config
+	$(MAKE) -C $(B)/busybox -s CROSS_COMPILE=$(CROSS) \
+	  CFLAGS_busybox="-static -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x400000 -Wl,--build-id=none" busybox
+	cp $(B)/busybox/busybox $@
 
 $(B)/user/mhello.elf: user/lxhello-aarch64.c | $(B)/user
 	$(ACC) -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -no-pie -nostdlib -static \
-	  -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x8000000000 -Wl,--build-id=none -Wl,--no-warn-rwx-segments \
+	  -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x400000 -Wl,--build-id=none -Wl,--no-warn-rwx-segments \
 	  -o $@ $<
 
 # mtest is an ordinary glibc program, linked statically at the same address.
 $(B)/user/mtest.elf: user/lxtest-aarch64.c | $(B)/user
-	$(ACC) -O1 -fno-pic -no-pie -static -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x8000000000 \
+	$(ACC) -O1 -fno-pic -no-pie -static -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x400000 \
 	  -Wl,--build-id=none -Wl,--no-warn-rwx-segments -o $@ $<
 
 # 2. Prove the kernel and translate it to freestanding C.
@@ -124,3 +145,44 @@ clean:
 
 .PRECIOUS: $(B)/user/%.c $(B)/user/%.o $(B)/user/%.elf
 .PHONY: all run test clean
+
+# The Linux compatibility suite (test/compat) on AArch64: the t_*.c programs
+# as static glibc executables at 0x400000, and a BusyBox with the suite's
+# broad applet list, run from a disk image under ash.
+#   make -f arch/aarch64/Makefile compat            writes build/aarch64/compat/report.md
+#   make -f arch/aarch64/Makefile compat-baseline   records which checks pass now
+# It fails only if a check in test/compat/baseline-aarch64.txt stops passing.
+# t_ptrace reads x86-64 registers (PTRACE_GETREGS, rip) and has no AArch64
+# version yet.
+COMPAT_X86ONLY := t_ptrace
+COMPAT_PROGS := $(filter-out $(COMPAT_X86ONLY),$(patsubst test/compat/progs/%.c,%,$(wildcard test/compat/progs/t_*.c)))
+COMPAT_BINS := $(COMPAT_PROGS:%=$(B)/compat/%)
+ULFLAGS := -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x400000 -Wl,--build-id=none
+
+$(B)/compat:
+	mkdir -p $@
+
+$(COMPAT_BINS): $(B)/compat/%: test/compat/progs/%.c test/compat/progs/compat.h | $(B)/compat
+	$(ACC) -static -no-pie -O2 -D_GNU_SOURCE -Wall -Wno-unused-result $(ULFLAGS) -o $@ $<
+
+$(B)/compat/busybox: $(B)/busybox/Makefile test/compat/busybox.config | $(B)/compat $(B)/user/ash.elf
+	rm -rf $(B)/compat/bb && cp -r $(B)/busybox $(B)/compat/bb
+	$(MAKE) -C $(B)/compat/bb -s clean >/dev/null
+	$(MAKE) -C $(B)/compat/bb -s allnoconfig >/dev/null
+	for o in $$(grep -v '^#' test/compat/busybox.config); do \
+	  sed -i "s/^# $$o is not set/$$o=y/" $(B)/compat/bb/.config; done
+	yes "" | $(MAKE) -C $(B)/compat/bb -s oldconfig >/dev/null
+	$(MAKE) -C $(B)/compat/bb -s CROSS_COMPILE=$(CROSS) CFLAGS_busybox="-static $(ULFLAGS)" busybox
+	cp $(B)/compat/bb/busybox $@
+
+$(B)/compat/disk.img: $(COMPAT_BINS) $(B)/compat/busybox test/compat/mkdisk.py
+	test/compat/mkdisk.py $@ $(COMPAT_BINS) $(B)/compat/busybox
+
+COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox --kernel $(B)/bastios.bin \
+              --disk $(B)/compat/disk.img --out $(B)/compat
+
+compat: $(B)/bastios.bin $(B)/compat/disk.img
+	$(COMPAT_RUN) $(COMPAT_PROGS)
+
+compat-baseline: $(B)/bastios.bin $(B)/compat/disk.img
+	$(COMPAT_RUN) --update-baseline $(COMPAT_PROGS)
