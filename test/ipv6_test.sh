@@ -20,7 +20,7 @@ $MUSLCC -O2 -fPIE -static-pie -o build/ipv6/ipv6probe test/ipv6probe.c || exit 1
 test/compat/mkdisk.py build/ipv6/disk.img build/ipv6/ipv6probe >/dev/null || exit 1
 
 python3 - "$KERNEL" "$NIC" build/ipv6/disk.img <<'PY'
-import ipaddress, select, socket, struct, subprocess, sys, time
+import ipaddress, os, select, socket, struct, subprocess, sys, time
 
 kernel, card, disk = sys.argv[1:4]
 GUEST_MAC = bytes.fromhex("525400123456")
@@ -159,9 +159,14 @@ class Wire:
             c["snd"] += 3001
             self.got.append(("tcp-served", sport))
 
+# The ENA card is not in QEMU: it needs the build of tools/qemu-ena.
+qemu_bin = "qemu-system-x86_64"
+if card == "ena":
+    qemu_bin = os.environ.get("QEMU_ENA", "build/qemu-ena/bin/qemu-system-x86_64")
+
 wire = Wire()
 qemu = subprocess.Popen(
-    ["qemu-system-x86_64", "-kernel", kernel, "-m", "128M", "-smp", "2",
+    [qemu_bin, "-kernel", kernel, "-m", "128M", "-smp", "2",
      "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
      "-serial", "stdio", "-monitor", "none",
      "-drive", f"file={disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd",
