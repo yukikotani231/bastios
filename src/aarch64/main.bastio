@@ -79,6 +79,7 @@ import "lxsnd.bastio";
 import "lxmouse.bastio";
 import "kernel.bastio";
 import "initfiles.bastio";
+import "lxnum.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
@@ -281,6 +282,33 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     }
     lx_alarms(&mut s.k);
     return (p + 1) % NPROC;
+  }
+  if v == V_SYSCALL && pget(s.k.procs, p, F_ABI) != 0 {
+    // A Linux arm64 program: the call number is in x8, turned into the
+    // number the Linux layer uses and kept apart (R_LXNR), so that x8 comes
+    // back to the program unchanged. A call that runs again keeps its number.
+    set_clock(&mut s);
+    if pget(s.k.procs, p, F_RESTART) == 0 {
+      pset(&mut s.k.procs, p, F_REGS + R_LXNR, lx_number(pget(s.k.procs, p, reg_word(R_NUM))));
+    }
+    if pt_sys_entry(&mut s.k, p, pget(s.k.procs, p, F_RESTART) != 0) {
+      return (p + 1) % NPROC;               // stopped for its tracer before the call (src/lxptrace.bastio)
+    }
+    ino_before(&mut s.k, p);                // src/lxinotify.bastio
+    let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
+    ino_after(&mut s.k, p);
+    call_done(&mut s.k, p);
+    if what == POWEROFF || what == REBOOT {
+      s.stop = true;
+    }
+    sock_wake(&mut s.k);
+    if disk_hold(&mut s.k, p, EIO) || what == SWITCH {
+      return (p + 1) % NPROC;
+    }
+    if what == KEEP && pt_sys_exit(&mut s.k, p) {
+      return (p + 1) % NPROC;               // stopped for its tracer after the call
+    }
+    return p;
   }
   if v == V_SYSCALL {
     set_clock(&mut s);
