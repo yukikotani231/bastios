@@ -23,8 +23,9 @@
 // pt_sys_exit, called from the trap handler in src/main.bastio). The stop
 // before a call leaves rax at -ENOSYS and orig_rax at the call; when the
 // tracer resumes it the call starts again, as a waiting call does, with
-// whatever number the tracer left in orig_rax. getpid and gettid, which a
-// processor answers without the kernel lock, are not seen.
+// whatever number the tracer left in orig_rax. A traced task is marked
+// slow (Task.slow), so getpid and gettid, which a processor otherwise
+// answers without the kernel lock, are seen too.
 // PTRACE_SINGLESTEP sets the trap flag in the saved flags; the debug trap
 // (vector 1) is SIGTRAP, which stops the process as any signal does.
 //

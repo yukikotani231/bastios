@@ -46,6 +46,18 @@ int main(void) {
     EXPECT("sync", (sync(), 1));
     EXPECT("/proc/self/exe", readlink("/proc/self/exe", b, sizeof b) > 0);
     EXPECT("/proc/meminfo", open("/proc/meminfo", O_RDONLY) >= 0);
+    EXPECT("/proc/stat has cpu lines", ({
+        char t[2048]; int f = open("/proc/stat", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
+        if (f >= 0) close(f);
+        t[n > 0 ? n : 0] = 0;
+        strncmp(t, "cpu ", 4) == 0 && strstr(t, "\ncpu0 ") && strstr(t, "\nbtime ") && strstr(t, "\nprocesses "); }));
+    EXPECT("/proc/net/dev lists lo and eth0", ({
+        char t[2048]; int f = open("/proc/net/dev", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
+        if (f >= 0) close(f);
+        t[n > 0 ? n : 0] = 0;
+        strstr(t, "Receive") && strstr(t, "lo:") && strstr(t, "eth0:"); }));
+    EXPECT("/proc/net is a directory", ({ struct stat st; stat("/proc/net", &st) == 0 && S_ISDIR(st.st_mode); }));
+    EXPECT("/proc/modules opens", open("/proc/modules", O_RDONLY) >= 0);
     EXPECT("/etc/passwd", open("/etc/passwd", O_RDONLY) >= 0);
     EXPECT("getlogin or getpwuid", getpwuid(getuid()) != NULL);
     EXPECT("sched_getaffinity", ({ cpu_set_t c; sched_getaffinity(0, sizeof c, &c) == 0; }));
