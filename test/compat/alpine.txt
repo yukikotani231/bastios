@@ -199,3 +199,13 @@ hello over ssh
 == dropbear: the server stops, in the Alpine guest
 $ kill $(cat /tmp/ca_db.pid) && sleep 1; rm -f /tmp/ca_db.pid /tmp/ca_db.log; echo stopped
 stopped
+
+== apk: install gcc and the C library's headers over HTTP
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL gcc musl-dev 2>/dev/null; echo status $?; bb chroot /disk/a /sbin/apk info -e gcc musl-dev 2>/dev/null
+status 0
+gcc
+musl-dev
+
+== gcc: compile and run a C program (gcc, cc1, as and ld are fixed-address executables)
+$ bb printf '#include <stdio.h>\nint main(void) { printf("gcc says %%d\\n", 6 * 7); return 0; }\n' > /disk/a/root/g.c && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -O1 -o g g.c && ./g'
+gcc says 42

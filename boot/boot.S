@@ -74,6 +74,8 @@ hipdpt: .skip 63 * 4096               /* 512 GiB - 2^46, right after pdpt */
 pd:     .skip 4096
 fwpd:   .skip 4096                    /* 1-2 GiB */
 devpd:  .skip 8192                    /* 2-3 GiB, then 3-4 GiB */
+.global bst_shadow_pml4
+bst_shadow_pml4: .skip 4096 * MAX_CPUS /* each processor's table while it runs user code */
 .align 16
 stack_bottom:
         .skip 4096
@@ -85,7 +87,7 @@ mb_info:        .skip 8
 mb_magic:       .skip 8
 
 .section .data
-.align 16
+.align 4096                           /* mapped on its own in the entry area (core.h) */
 .global bst_gdt
 bst_gdt:
         .quad 0                       /* null */
@@ -95,6 +97,7 @@ bst_gdt:
         .quad 0x00AFFA000000FFFF      /* 0x20: 64-bit code, ring 3 */
         .fill 2 * MAX_CPUS, 8, 0      /* 0x28 + 16 i: processor i's TSS (smp.c) */
 bst_gdt_end:
+.align 4096
 
 .global bst_gdt_ptr
 bst_gdt_ptr:
@@ -264,6 +267,14 @@ long_mode:
  * Whatever Bastio put in the context, the CPU enters ring 3 with the user
  * segments, interrupts on and IOPL 0: only rip, rsp, the general registers
  * and the arithmetic flags (and the trap flag) are taken from it.
+ *
+ * The process's top-level table (the prelude left it in CORE_UROOT) is not
+ * what the CPU loads: this processor's shadow table has the process's window
+ * (slot 1 of its table) in slot 0, at virtual address 0, and the entry area
+ * (core.h) in the last slot, and nothing else. The kernel's memory stays out
+ * of the user's address space. The frame for `iretq` goes on the trap stack
+ * at its entry-area address, and the last instructions run in the entry area
+ * too (bst_enter_tail): they load CR3 and leave.
  */
 .global bst_cpu_enter
 bst_cpu_enter:
@@ -276,9 +287,23 @@ bst_cpu_enter:
         mov     %rsp, %rsi
         and     $-CORE_BLOCK, %rsi              /* this processor's block */
         mov     %rsp, CORE_KRSP(%rsi)
-        lea     CORE_BLOCK(%rsi), %rsp          /* its trap stack, empty */
+
+        /* The shadow table: slot 0 is the window's level-3 table. */
+        mov     CORE_UROOT(%rsi), %rax
+        mov     CORE_INDEX(%rsi), %rdx
+        shl     $12, %rdx
+        movabs  $bst_shadow_pml4, %rcx
+        add     %rcx, %rdx
+        mov     %rdx, CORE_CR3(%rsi)
+        mov     8(%rax), %rax                   /* slot 1 of the process's table */
+        mov     %rax, (%rdx)
+        movq    $1, CORE_UMODE(%rsi)
+
+        mov     CORE_ALIAS(%rsi), %rax
+        lea     CORE_BLOCK(%rax), %rsp          /* its trap stack, empty, as the entry area sees it */
         mov     $0x00007FFFFFFFFFFF, %rcx /* non-canonical addresses would fault in ring 0 */
 
+        push    0*8(%rsi)               /* the user's rax, for bst_enter_tail */
         push    $UDATA                  /* ss */
         mov     16*8(%rsi), %rax        /* rsp */
         cmp     %rcx, %rax
@@ -309,7 +334,6 @@ bst_cpu_enter:
         mov     $UDATA, %ax
         mov     %ax, %ds
         mov     %ax, %es
-        mov     0*8(%rsi), %rax
         mov     1*8(%rsi), %rbx
         mov     2*8(%rsi), %rcx
         mov     3*8(%rsi), %rdx
@@ -324,7 +348,7 @@ bst_cpu_enter:
         mov     13*8(%rsi), %r14
         mov     14*8(%rsi), %r15
         mov     4*8(%rsi), %rsi
-        iretq
+        jmp     *enter_tail_ptr(%rip)           /* the rest runs in the entry area */
 
 /* uint64_t bst_cpu_halt(void): sleep until an interrupt; return its vector.
  * The kernel's cpu_idle reaches it through bst_cpu_wait (smp.c). */
@@ -340,17 +364,38 @@ bst_cpu_halt:
         ret
 
 /*
+ * The entry area's code (core.h): everything that runs while a user table is
+ * in CR3. Position independent, mapped at ALIAS_BASE by smp.c.
+ */
+.section .tramp.text, "ax"
+.balign 4096
+.global bst_tramp_start
+bst_tramp_start:
+
+/* The end of bst_cpu_enter: CR3 takes the shadow table, and `iretq` takes
+ * the frame bst_cpu_enter built. All registers but rax are the user's; the
+ * user's rax is on the stack above the frame. */
+bst_enter_tail:
+        mov     %rsp, %rax
+        and     $-CORE_BLOCK, %rax
+        mov     CORE_CR3(%rax), %rax
+        mov     %rax, %cr3
+        mov     5*8(%rsp), %rax
+        iretq
+
+/*
  * Entry for the `syscall` instruction (Linux system calls). The CPU leaves
  * the user rip in rcx and rflags in r11, masks IF, DF, TF and AC (see
  * bst_platform_init) and does not switch stacks, so this moves to the trap
  * stack (empty while user code runs), builds the frame an interrupt from
- * ring 3 would have pushed, and joins trap_common as vector 0x81. No `int`
+ * ring 3 would have pushed, and joins trap_alias as vector 0x81. No `int`
  * can raise 0x81 from ring 3 (its gate has DPL 0), so the vector means
  * `syscall`. The stack is this processor's trap stack, found through
- * KERNEL_GS_BASE: `swapgs` makes %gs point at its block for the few
- * instructions that need it, and the second `swapgs` gives the user's
- * %gs base back before anything can trap. The return to user mode is the usual
- * iretq in bst_cpu_enter, which sanitizes everything it restores.
+ * KERNEL_GS_BASE (the block's address in the entry area): `swapgs` makes %gs
+ * point at it for the few instructions that need it, and the second `swapgs`
+ * gives the user's %gs base back before anything can trap. The return to user
+ * mode is the usual iretq in bst_enter_tail, which sanitizes everything it
+ * restores.
  */
 .global bst_syscall_entry
 bst_syscall_entry:
@@ -365,11 +410,30 @@ bst_syscall_entry:
         push    %rcx                    /* rip */
         push    $0                      /* error code */
         push    $0x81                   /* vector */
-        jmp     trap_common
+        jmp     trap_alias
+
+/*
+ * Every trap joins here, in the entry area, with the CPU's frame, the error
+ * code and the vector on the stack. If the trap came from user mode, CR3
+ * holds a shadow table: the kernel's replaces it before anything else runs
+ * (CORE_UMODE says so, and a trap from the kernel finds it clear), and
+ * trap_common, in the kernel's own memory, takes over with rax saved.
+ */
+trap_alias:
+        push    %rax
+        mov     %rsp, %rax
+        and     $-CORE_BLOCK, %rax
+        cmpq    $0, CORE_UMODE(%rax)
+        je      1f
+        movq    $0, CORE_UMODE(%rax)
+        movabs  $bst_kernel_pml4, %rax
+        mov     %rax, %cr3
+1:      movabs  $trap_common, %rax
+        jmp     *%rax
 
 /*
  * Trap stubs. Each pushes a dummy error code where the CPU pushes none, then
- * its vector, and joins trap_common.
+ * its vector, and joins trap_alias.
  */
 .macro stub n
         .align 16
@@ -379,7 +443,7 @@ stub_\n:
         push    $0
         .endif
         push    $\n
-        jmp     trap_common
+        jmp     trap_alias
 .endm
 
 .altmacro
@@ -389,10 +453,17 @@ stub_\n:
         .set i, i + 1
 .endr
 
+.balign 4096
+.global bst_tramp_end
+bst_tramp_end:
+
 .macro stubaddr n
         .quad stub_\n
 .endm
 .section .rodata
+.align 8
+enter_tail_ptr:
+        .quad ALIAS_BASE + (bst_enter_tail - bst_tramp_start)
 .align 8
 .global bst_trap_stubs
 bst_trap_stubs:
@@ -405,13 +476,12 @@ bst_trap_stubs:
 
 .section .text
 /*
- * Stack at trap_common, from %rsp after the pushes below:
+ * Stack at trap_common (rax was pushed by trap_alias), from %rsp after the pushes below:
  *   0 r15, 8 r14, 16 r13, 24 r12, 32 r11, 40 r10, 48 r9, 56 r8, 64 rbp,
  *   72 rdi, 80 rsi, 88 rdx, 96 rcx, 104 rbx, 112 rax, 120 vector, 128 error,
  *   136 rip, 144 cs, 152 rflags, 160 rsp, 168 ss
  */
 trap_common:
-        push    %rax
         push    %rbx
         push    %rcx
         push    %rdx

@@ -1,0 +1,6 @@
+// Where the user window starts, and where a PIE goes in it (x86-64). The
+// CPU runs user code on a table of its own (boot/boot.S), so the window
+// starts at address 0 and nothing of the kernel is in it. Nothing is mapped
+// below PIE_AT, so a null pointer (and a small offset from one) faults.
+const USER_BASE: u64 = 0;
+const PIE_AT: u64 = 0x400000;
