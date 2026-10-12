@@ -67,6 +67,7 @@ confstr01
 connect01
 connect02
 copy_file_range01
+copy_file_range02
 copy_file_range03
 creat01
 creat03
@@ -352,6 +353,7 @@ link02
 link04
 link08
 linkat01
+linkat02
 listen01
 llseek01
 llseek02
@@ -565,6 +567,7 @@ rename01
 rename03
 rename04
 rename05
+rename06
 rename07
 rename08
 rename09
@@ -817,6 +820,7 @@ truncate02_64
 ulimit01
 umask01
 umount01
+umount02
 umount03
 uname01
 uname02

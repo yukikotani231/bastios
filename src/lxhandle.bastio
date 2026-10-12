@@ -15,7 +15,6 @@
 
 const LX_NAME_TO_HANDLE_AT: u64 = 303;
 const LX_OPEN_BY_HANDLE_AT: u64 = 304;
-const EOVERFLOW: u64 = 18446744073709551541;  // 2^64 - 75
 const ESTALE: u64 = 18446744073709551500;     // 2^64 - 116
 const MAX_HANDLE_SZ: u64 = 128;
 const FH_BYTES: u64 = 8;                      // what a handle here needs

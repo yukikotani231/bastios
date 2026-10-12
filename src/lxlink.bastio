@@ -325,7 +325,12 @@ fn lx_hardlink(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
     return k.perr;
   }
   if dir_at(&mut k, n) != NO_FILE {
-    return EPERM;                           // directories have one name
+    // Directories have one name; a read-only destination is reported first.
+    let m0 = lx_path_at_nf(&mut k, pid, ndir, npath);
+    if m0 != NO_RESULT && path_ro(&mut k, m0) {
+      return EROFS;
+    }
+    return EPERM;
   }
   if vfs_lookup(&mut k.fs, n) == NO_FILE {
     let there = path_meta(&mut k, n);

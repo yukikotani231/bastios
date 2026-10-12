@@ -468,6 +468,13 @@ t_ltp3: mincore says untouched anonymous pages are not resident
 t_ltp3: and a touched one is
 t_ltp3: pipe on a full descriptor table is EMFILE
 t_ltp3: mlock makes the pages resident
+t_ltp3: rename of a directory into itself is EINVAL
+t_ltp3: umount of a name that does not exist is ENOENT
+t_ltp3: copy_file_range into a directory is EISDIR
+t_ltp3: copy_file_range into an O_APPEND file is EBADF
+t_ltp3: copy_file_range past the largest file is EFBIG
+t_ltp3: and a length that wraps is EOVERFLOW
+t_ltp3: copy_file_range of overlapping ranges in one file is EINVAL
 t_ltp3: name_to_handle_at with no room is EOVERFLOW and says how much it needs
 t_ltp3: open_by_handle_at opens the same file
 t_ltp3: readlinkat of that descriptor and "" reads the link
