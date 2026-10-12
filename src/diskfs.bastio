@@ -139,7 +139,6 @@ struct DiskFs {
   slots: u64,           // the entries the directory's blocks hold now (DPB * blocks); 0 without a disk
   hint: u64,            // where the next allocation starts looking
   foreign: bool,        // the disk holds something else, and is left alone
-  links: bool,          // a hard link entry may exist: false lets disk_links skip counting them
 }
 
 spec fn disk_ok(d: &DiskFs) -> bool {
@@ -535,7 +534,7 @@ fn disk_mount(dev: Blk) -> DiskFs
   }
   let mut d = DiskFs { dev: dev, dir: balloc(DIR_BYTES), sb: balloc(BLOCK), sec: balloc(SECTOR), root: balloc(BLOCK),
     la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(), txn: 0, pw: 0, pb: alloc(BATCH_MAX), pn: 0, ob: alloc(OB_MAX), on: 0, pt: 0, tick: 0,
-    used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, foreign: false, links: true };
+    used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, foreign: false };
   if n < DATA_B0 + 16 || !blk_read(&mut d.dev, 0, &mut d.sec) {
     return d;
   }
@@ -618,14 +617,10 @@ fn disk_mount(dev: Blk) -> DiskFs
   zero(&mut d.dir, DTOP * DENT, DTOP * DENT + DENT);   // entry 64 is never used
   let slots = d.slots;
   d.slots = 0;                                         // until the checks below are done
-  let mut seen = false;                                // a link entry in the directory
   let mut i = 0;
   while i < slots
     invariant i <= slots && slots <= DSLOTS && disk_ok(d)
   {
-    if cast[u64](bget(d.dir, i * DENT + E_KIND)) == K_LINK {
-      seen = true;
-    }
     if bget(d.dir, i * DENT + E_KIND) == 1 {
       let r = ptr_in(d, d.dir, i * DENT + E_ROOT);
       if r != 0 {
@@ -656,7 +651,6 @@ fn disk_mount(dev: Blk) -> DiskFs
     i = i + 1;
   }
   d.slots = slots;
-  d.links = seen;
   return d;
 }
 
@@ -923,9 +917,6 @@ fn disk_links(d: &DiskFs, t: u64) -> u64
   requires disk_ok(d)
   ensures result <= DSLOTS
 {
-  if !d.links {
-    return 0;
-  }
   let mut c = 0;
   let mut i = 0;
   while i < d.slots
@@ -1045,7 +1036,6 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
       } else if link < DSLOTS {
         bset(&mut d.dir, i * DENT + E_KIND, cast[u8](K_LINK));
         dent_set(&mut d, i, E_LINK, link);
-        d.links = true;
       } else {
         bset(&mut d.dir, i * DENT + E_KIND, 1);
         dent_set(&mut d, i, E_MODE, MODE_FILE);
