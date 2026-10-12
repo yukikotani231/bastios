@@ -771,6 +771,7 @@ fn lx_write_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64
 }
 
 const TCGETS: u64 = 0x5401;
+const TCGETA: u64 = 0x5405;           // struct termio: the first four flag words as 16 bits, the line, 8 control characters
 const TCSETS: u64 = 0x5402;
 const TCSETSF: u64 = 0x5404;              // TCSETSW (0x5403) lies between
 const TIOCGWINSZ: u64 = 0x5413;
@@ -845,6 +846,21 @@ fn tt_canon(l: &Buf) -> bool
   requires lineok(l)
 {
   return tt_flags(l, 12) & ICANON != 0;
+}
+
+const TERMIO_SIZE: u64 = 18;
+
+/// Which byte of struct termios byte i of the older struct termio is: the
+/// four flag words keep their low 16 bits, then the line and control
+/// characters follow at the same offsets as in termios after its gap.
+fn termio_src(i: u64) -> u64
+  requires i < TERMIO_SIZE
+  ensures result < TERMIOS_SIZE
+{
+  if i < 8 {
+    return i / 2 * 4 + i % 2;
+  }
+  return i + 8;
 }
 
 /// ioctl(fd, req, arg). Descriptors 0-2 are the console, a terminal with
@@ -943,6 +959,49 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     }
     return lx_put_out(&mut k, pid, arg, TERMIOS_SIZE);
   }
+  if req == TCGETA {
+    let mut i = 0;
+    while i < TERMIO_SIZE
+      invariant i <= TERMIO_SIZE && kok(k)
+    {
+      bset(&mut k.fs.xfer, i, cast[u8](tt_byte(k.line, termio_src(i))));
+      i = i + 1;
+    }
+    return lx_put_out(&mut k, pid, arg, TERMIO_SIZE);
+  }
+  if req >= TCSETA && req <= TCSETAF {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, TERMIO_SIZE) != TERMIO_SIZE {
+      return EFAULT;
+    }
+    let mut i = 0;
+    while i < TERMIO_SIZE
+      invariant i <= TERMIO_SIZE && kok(k)
+    {
+      k.line = set(k.line, TT0 + termio_src(i), cast[u64](bget(k.fs.xfer, i)));
+      i = i + 1;
+    }
+    k.line = set(k.line, TT_SET, 1);
+    if req == TCSETAF {
+      ring_clear(&mut k.q.r);
+      k.line = set(k.line, 0, 0);
+      k.line = set(k.line, 1, 0);
+    }
+    return 0;
+  }
+  if req == TIOCGETD {
+    lx_fill(&mut k, 0, 4);
+    return lx_put_out(&mut k, pid, arg, 4);   // N_TTY, the only line discipline
+  }
+  if req == TIOCSETD {
+    let v = pty_int_in(&mut k, pid, arg);
+    if v == NO_RESULT {
+      return EFAULT;
+    }
+    if v != 0 {
+      return EINVAL;                        // no other line discipline
+    }
+    return 0;
+  }
   if req == TIOCGPGRP || req == TIOCGSID {
     // The console's foreground group is whatever group asks: there is no
     // job control to put one in the background.
@@ -962,7 +1021,7 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     bset(&mut k.fs.xfer, 2, 80);            // ws_col
     return lx_put_out(&mut k, pid, arg, WINSIZE_SIZE);
   }
-  return EINVAL;
+  return ENOTTY;                            // a request the terminal does not know
 }
 
 /// The socket ioctls: SIOCATMARK on TCP (never at urgent data, which is
@@ -1482,6 +1541,18 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
     }
     total = total + w;
     more = w == piece && w > 0;
+  }
+  if total == 0 && n > 0 && d.x < FD_ROWS {
+    // Not a byte could be written: past the largest file this file system
+    // keeps (EFBIG), or out of room (ENOSPC), not a write of nothing.
+    let mut limit = DFILE_MAX;
+    if fget(k.fs.ftab, d.x, FD_FS) == FS_RAM {
+      limit = FILE_MAX;
+    }
+    if vfs_offset(k.fs, d.x) >= limit {
+      return EFBIG;
+    }
+    return ENOSPC;
   }
   return total;
 }

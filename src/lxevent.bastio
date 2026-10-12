@@ -11,7 +11,7 @@
 // no timer tick has to visit them.
 //
 // An epoll instance names one of EP_N sets in k.evt, at EP_AT + e *
-// EP_STRIDE: in use, then EP_FDS entries of EP_ENTRY words: fd + 1 (0:
+// EP_STRIDE: in use (1 + the entry the next epoll_wait looks at first), then EP_FDS entries of EP_ENTRY words: fd + 1 (0:
 // empty), the description that fd named when it was added, the events
 // asked for, and the data handed back. An entry whose fd has since been
 // closed or now names another description is dropped when it is next
@@ -872,16 +872,29 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
   let e = ep.x;
   let ready = ep_ready(k, pid);
   let most = smaller(maxevents, EP_FDS);
+  // Scanning starts where the last call stopped, so a few events per call
+  // still reach every ready entry in turn, as Linux's ready list does.
+  let cur = get(k.evt, EP_AT + e * EP_STRIDE);
+  let mut start = 0;
+  if cur > 0 && cur <= EP_FDS {
+    start = cur - 1;
+  }
   let mut got = 0;
-  let mut j = 0;
-  while j < EP_FDS && got < most
-    invariant j <= EP_FDS && got <= j && got <= most && most <= EP_FDS && e < EP_N && kok(k)
+  let mut t = 0;
+  let mut last = EP_FDS;
+  while t < EP_FDS && got < most
+    invariant t <= EP_FDS && got <= t && got <= most && most <= EP_FDS && e < EP_N && start < EP_FDS && last <= EP_FDS && kok(k)
   {
-    let w = get(k.evt, ep_at(e, j, 0));
+    let j = (start + t) % EP_FDS;
+    let mut w = get(k.evt, ep_at(e, j, 0));
     if w != 0 && (w > LXNFD || fd_ofd(k, pid, w - 1) != get(k.evt, ep_at(e, j, 1))) {
       k.evt = set(k.evt, ep_at(e, j, 0), 0);  // its descriptor was closed
+      w = 0;
     }
-    let bits = ep_entry_ready(k, pid, e, j, ready);
+    let mut bits = 0;
+    if w != 0 {
+      bits = ep_entry_ready(k, pid, e, j, ready);
+    }
     if bits != 0 {
       let at = got * EPOLL_EVENT;
       bset(&mut k.fs.xfer, at, cast[u8](bits % 256));
@@ -894,8 +907,12 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
         k.evt = set(k.evt, ep_at(e, j, 2), events | EP_OFF);   // until EPOLL_CTL_MOD
       }
       got = got + 1;
+      last = j;
     }
-    j = j + 1;
+    t = t + 1;
+  }
+  if got > 0 && last < EP_FDS {
+    k.evt = set(k.evt, EP_AT + e * EP_STRIDE, (last + 1) % EP_FDS + 1);
   }
   if got == 0 {
     let dl = deadline(k, was, wait);

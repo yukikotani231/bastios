@@ -1256,7 +1256,11 @@ fn put_stat(k: &mut Kernel, pid: u64, buf: u64, mo: Meta) -> u64
     blocks = blocks + 1;
   }
   xfer_u64(&mut k.fs.xfer, 64, blocks);       // st_blocks
-  xfer_u64(&mut k.fs.xfer, 72, m.mtime);      // st_atime: not kept apart
+  let mut atime = m.mtime;
+  if m.ino >= INO_FILES && m.ino < INO_FILES + HFILES {
+    atime = atime_of(&mut k, m.ino - INO_FILES, m.mtime);   // set by utime, else the modification time
+  }
+  xfer_u64(&mut k.fs.xfer, 72, atime);        // st_atime
   xfer_u64(&mut k.fs.xfer, 88, m.mtime);      // st_mtime
   xfer_u64(&mut k.fs.xfer, 104, m.mtime);     // st_ctime
   return lx_put_out(&mut k, pid, buf, STAT_SIZE);

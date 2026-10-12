@@ -94,6 +94,7 @@ fn rl_fork(k: &mut Kernel, p: u64, c: u64)
   }
   rl_put(&mut k, c, RLW_LOCKED, 0);
   rl_put(&mut k, c, RLW_MCL, 0);
+  lr_clear(&mut k, c);
   tm_clear(&mut k, c);
   k.sys = set(k.sys, SYS_RB + c, 0);      // no robust list (src/lxthread.bastio)
 }
@@ -105,6 +106,7 @@ fn rl_exec(k: &mut Kernel, p: u64)
 {
   rl_put(&mut k, p, RLW_LOCKED, 0);
   rl_put(&mut k, p, RLW_MCL, 0);
+  lr_clear(&mut k, p);
   k.sys = set(k.sys, SYS_RB + p, 0);
 }
 
@@ -120,6 +122,7 @@ fn rl_clear(k: &mut Kernel, p: u64)
     rl_put(&mut k, p, w, 0);
     w = w + 1;
   }
+  lr_clear(&mut k, p);
 }
 
 /// The descriptors process pid may have: 0 .. this - 1.
@@ -301,6 +304,165 @@ fn lock_count(k: &mut Kernel, pid: u64, bytes: u64, lock: bool) -> u64
   return 0;
 }
 
+// The pages mlock locked are kept as up to LR_N ranges per process (two
+// words each in k.sys from SYS_LR: the first page + 1, 0 for a free slot,
+// and the end page), so locking a page again counts it once and munlock
+// gives back only what was locked. A range that cannot be kept (all slots
+// used by ranges apart from it) still counts, as it did before, but a
+// second mlock of it counts again.
+
+fn lr_at(p: u64, i: u64, f: u64) -> u64
+  requires p < NPROC && i < LR_N && f < 2
+  ensures result < SYS_LEN
+{
+  return SYS_LR + (p * LR_N + i) * 2 + f;
+}
+
+/// How many pages of from .. to are in the ranges process p keeps.
+fn lr_covered(k: &Kernel, p: u64, from: u64, to: u64) -> u64
+  requires kok(k) && p < NPROC && from <= to && to <= WPAGES
+  ensures result <= to - from
+{
+  let mut n = 0;
+  let mut i = 0;
+  while i < LR_N
+    invariant i <= LR_N && n <= (to - from) && kok(k)
+  {
+    let s1 = get(k.sys, lr_at(p, i, 0));
+    let e = get(k.sys, lr_at(p, i, 1));
+    if s1 != 0 && s1 <= WPAGES + 1 && e <= WPAGES {
+      let s = s1 - 1;
+      let lo = larger(s, from);
+      let hi = smaller(e, to);
+      if lo < hi && n + (hi - lo) <= to - from {
+        n = n + (hi - lo);
+      }
+    }
+    i = i + 1;
+  }
+  return n;
+}
+
+/// Keeps from .. to as locked: ranges that touch it join it.
+fn lr_add(k: &mut Kernel, p: u64, from0: u64, to0: u64)
+  requires kok(k) && p < NPROC && from0 < to0 && to0 <= WPAGES
+  ensures kok(k)
+{
+  let mut from = from0;
+  let mut to = to0;
+  let mut pass = 0;
+  while pass < LR_N
+    invariant pass <= LR_N && from <= from0 && to >= to0 && from < to && to <= WPAGES && kok(k)
+  {
+    let mut i = 0;
+    while i < LR_N
+      invariant i <= LR_N && from <= from0 && to >= to0 && from < to && to <= WPAGES && kok(k)
+    {
+      let s1 = get(k.sys, lr_at(p, i, 0));
+      let e = get(k.sys, lr_at(p, i, 1));
+      if s1 != 0 && s1 <= WPAGES + 1 && e <= WPAGES && s1 - 1 <= to && from <= e {
+        from = smaller(from, s1 - 1);
+        to = larger(to, e);
+        k.sys = set(k.sys, lr_at(p, i, 0), 0);
+      }
+      i = i + 1;
+    }
+    pass = pass + 1;
+  }
+  let mut i = 0;
+  while i < LR_N && get(k.sys, lr_at(p, i, 0)) != 0
+    invariant i <= LR_N && kok(k)
+  {
+    i = i + 1;
+  }
+  if i < LR_N {
+    k.sys = set(k.sys, lr_at(p, i, 0), from + 1);
+    k.sys = set(k.sys, lr_at(p, i, 1), to);
+  }
+}
+
+/// Forgets from .. to as locked; the pages that were.
+fn lr_sub(k: &mut Kernel, p: u64, from: u64, to: u64) -> u64
+  requires kok(k) && p < NPROC && from <= to && to <= WPAGES
+  ensures kok(k) && result <= to - from
+{
+  let mut n = 0;
+  let mut i = 0;
+  while i < LR_N
+    invariant i <= LR_N && n <= (to - from) && kok(k)
+  {
+    let s1 = get(k.sys, lr_at(p, i, 0));
+    let e = get(k.sys, lr_at(p, i, 1));
+    if s1 != 0 && s1 <= WPAGES + 1 && e <= WPAGES {
+      let s = s1 - 1;
+      let lo = larger(s, from);
+      let hi = smaller(e, to);
+      if lo < hi && n + (hi - lo) <= to - from {
+        n = n + (hi - lo);
+        if s < lo && hi < e {
+          // The middle goes: the head stays here, the tail takes a free slot if there is one.
+          k.sys = set(k.sys, lr_at(p, i, 1), lo);
+          let mut j = 0;
+          while j < LR_N && get(k.sys, lr_at(p, j, 0)) != 0
+            invariant j <= LR_N && kok(k)
+          {
+            j = j + 1;
+          }
+          if j < LR_N {
+            k.sys = set(k.sys, lr_at(p, j, 0), hi + 1);
+            k.sys = set(k.sys, lr_at(p, j, 1), e);
+          }
+        } else if s < lo {
+          k.sys = set(k.sys, lr_at(p, i, 1), lo);
+        } else if hi < e {
+          k.sys = set(k.sys, lr_at(p, i, 0), hi + 1);
+        } else {
+          k.sys = set(k.sys, lr_at(p, i, 0), 0);
+        }
+      }
+    }
+    i = i + 1;
+  }
+  return n;
+}
+
+/// Process p has nothing locked.
+fn lr_clear(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < LR_N
+    invariant i <= LR_N && kok(k)
+  {
+    k.sys = set(k.sys, lr_at(p, i, 0), 0);
+    i = i + 1;
+  }
+}
+
+/// mlock (lock) or munlock of window pages from .. to (from < to <= WPAGES)
+/// that the checks passed: only pages not locked yet count, and the limit
+/// is checked against those.
+fn lock_pages(k: &mut Kernel, pid: u64, from: u64, to: u64, lock: bool) -> u64
+  requires kok(k) && pid < NPROC && from < to && to <= WPAGES
+  ensures kok(k)
+{
+  let held = smaller(rl_word(k, pid, RLW_LOCKED), USER_SIZE);
+  if lock {
+    let added = (to - from) - lr_covered(k, pid, from, to);
+    let e = lock_check(k, pid, held, added * 4096);
+    if e != 0 {
+      return e;
+    }
+    rl_put(&mut k, pid, RLW_LOCKED, held + added * 4096);
+    lr_add(&mut k, pid, from, to);
+  } else {
+    let gone = lr_sub(&mut k, pid, from, to);
+    rl_put(&mut k, pid, RLW_LOCKED, held - smaller(held, gone * 4096));
+  }
+  return 0;
+}
+
 /// A MAP_LOCKED mapping of n bytes: counted as locked.
 fn lock_mapped(k: &mut Kernel, pid: u64, n: u64)
   requires kok(k) && pid < NPROC
@@ -328,6 +490,10 @@ fn lx_mlockall(k: &mut Kernel, pid: u64, flags: u64) -> u64
   }
   rl_put(&mut k, pid, RLW_LOCKED, bytes);
   rl_put(&mut k, pid, RLW_MCL, flags);
+  if flags & MCL_CURRENT != 0 {
+    lr_clear(&mut k, pid);
+    lr_add(&mut k, pid, 0, WPAGES);         // every page counts: locking one again adds nothing
+  }
   return 0;
 }
 
@@ -338,6 +504,7 @@ fn lx_munlockall(k: &mut Kernel, pid: u64) -> u64
 {
   rl_put(&mut k, pid, RLW_LOCKED, 0);
   rl_put(&mut k, pid, RLW_MCL, 0);
+  lr_clear(&mut k, pid);
   return 0;
 }
 
