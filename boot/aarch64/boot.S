@@ -11,7 +11,10 @@
  */
         /* Per processor (struct pcpu in platform.c): TPIDR_EL1 points at it. */
         .equ    PCPU_CTX, 0             /* the saved user context, 37 words */
-        .equ    PCPU_IRQ, 344           /* the interrupt that ended bst_cpu_wait */
+        .equ    PCPU_MMU3, 344          /* the user table bst_cpu_enter loads (word 3 of bst_platform_mmu_state) */
+        .equ    PCPU_IRQ, 352           /* the interrupt that ended bst_cpu_wait */
+        .equ    PCPU_ID, 360
+        .equ    PCPU_SHADOW, 376        /* the table user code runs on */
         .equ    PCPU_SIZE, 384
         .equ    CPU_STACK, 65536
 
@@ -50,7 +53,7 @@ start:
         /* FP/SIMD usable at EL0 (the kernel itself is built without it). */
         mov     x1, #(3 << 20)
         msr     cpacr_el1, x1
-        ldr     x1, =vectors
+        ldr     x1, =VECTORS_VA
         msr     vbar_el1, x1
 
         /* The memory map and the kernel's translation table (platform.c),
@@ -64,6 +67,8 @@ start:
         msr     tcr_el1, x1
         ldr     x1, =bst_kernel_root
         msr     ttbr0_el1, x1
+        ldr     x1, =bst_ttbr1_tables
+        msr     ttbr1_el1, x1
         isb
         tlbi    vmalle1
         dsb     nsh
@@ -106,7 +111,7 @@ bst_secondary_entry:
         mov     sp, x1
         mov     x1, #(3 << 20)
         msr     cpacr_el1, x1
-        ldr     x1, =vectors
+        ldr     x1, =VECTORS_VA
         msr     vbar_el1, x1
         mov     x1, #0xff
         msr     mair_el1, x1
@@ -114,6 +119,8 @@ bst_secondary_entry:
         msr     tcr_el1, x1
         ldr     x1, =bst_kernel_root
         msr     ttbr0_el1, x1
+        ldr     x1, =bst_ttbr1_tables
+        msr     ttbr1_el1, x1
         isb
         tlbi    vmalle1
         dsb     nsh
@@ -129,9 +136,9 @@ bst_secondary_entry:
         bl      bst_secondary_main
         b       park
 
-        /* 48-bit addresses from TTBR0 (T0SZ 16), 4 KiB granule, write-back
-         * inner shareable walks, no TTBR1 walks (EPD1), 40-bit physical. */
-        .equ    TCR, 16 | (1 << 8) | (1 << 10) | (3 << 12) | (1 << 23) | (2 << 32)
+        /* 48-bit addresses from both TTBR0 and TTBR1 (T0SZ, T1SZ 16), 4 KiB
+         * granules, write-back inner shareable walks, 40-bit physical. */
+        .equ    TCR, 16 | (1 << 8) | (1 << 10) | (3 << 12) | (16 << 16) | (1 << 24) | (1 << 26) | (3 << 28) | (2 << 30) | (2 << 32)
 
 /*
  * uint64_t bst_cpu_enter(void): run the saved user context at EL0 until the
@@ -149,16 +156,32 @@ bst_cpu_enter:
         stp     x25, x26, [sp, #64]
         stp     x27, x28, [sp, #80]
         mrs     x30, tpidr_el1          /* PCPU_CTX is 0 */
+        /* The processor's shadow table: slot 0 is the window's level-3 table,
+         * slot 1 of the process's own. */
+        ldr     x2, [x30, #PCPU_MMU3]
+        ldr     x2, [x2, #8]
+        ldr     x3, =bst_shadow_root
+        ldr     x4, [x30, #PCPU_ID]
+        add     x3, x3, x4, lsl #12
+        str     x2, [x3]
+        str     x3, [x30, #PCPU_SHADOW]
         ldr     x1, [x30, #248]
         msr     sp_el0, x1
         ldr     x1, [x30, #256]
         msr     elr_el1, x1
         ldr     x1, [x30, #264]
-        and     x1, x1, #0xf0000000
+        mov     x2, #0xf0000000         /* NZCV and PSTATE.SS: the single-step request of a ptrace */
+        orr     x2, x2, #0x200000
+        and     x1, x1, x2
         msr     spsr_el1, x1
+        ubfx    x2, x1, #21, #1
+        mrs     x3, mdscr_el1           /* the step exception is armed only while PSTATE.SS asks for one */
+        bfi     x3, x2, #0, #1
+        msr     mdscr_el1, x3
         ldr     x1, [x30, #288]
         msr     tpidr_el0, x1
         ldp     x0, x1, [x30, #0]
+        msr     tpidrro_el0, x0         /* x0 waits there while the trampoline needs it */
         ldp     x2, x3, [x30, #16]
         ldp     x4, x5, [x30, #32]
         ldp     x6, x7, [x30, #48]
@@ -174,11 +197,13 @@ bst_cpu_enter:
         ldp     x26, x27, [x30, #208]
         ldp     x28, x29, [x30, #224]
         ldr     x30, [x30, #240]
-        eret
+        ldr     x0, =TRAMP_ENTER_VA
+        br      x0                      /* the trampoline loads the user's table and erets */
 
 /* From EL0: save the context, then return from bst_cpu_enter with the kind
  * in x0. SP_EL1 is still where bst_cpu_enter left it. */
 .macro  user_trap next
+        mrs     x0, tpidrro_el0         /* the trampoline stashed the user's x0 there */
         stp     x0, x1, [sp, #-16]!
         mrs     x0, tpidr_el1
         stp     x2, x3, [x0, #16]
@@ -225,7 +250,18 @@ user_sync_kind:
         b.eq    user_return
         cmp     x1, #0x24               /* data abort from EL0 */
         b.eq    user_return
-        mov     x0, #6
+        mov     x0, #3
+        cmp     x1, #0x3c               /* BRK: SIGTRAP */
+        b.eq    user_return
+        mov     x0, #1
+        cmp     x1, #0x32               /* software step from EL0: SIGTRAP, a single step */
+        b.eq    user_return
+        mov     x0, #17
+        cmp     x1, #0x22               /* PC alignment fault: SIGBUS */
+        b.eq    user_return
+        cmp     x1, #0x26               /* SP alignment fault */
+        b.eq    user_return
+        mov     x0, #6                  /* anything else (unknown instruction, ...): SIGILL */
         b       user_return
 user_irq_kind:
         bl      bst_irq_ack             /* the kernel's vector for it */
@@ -238,10 +274,16 @@ user_return:
         ldp     x29, x30, [sp], #96
         ret
 
-el0_sync:
+el0_sync_k:
         user_trap user_sync_kind
-el0_irq:
+el0_irq_k:
         user_trap user_irq_kind
+
+/* The kernel's table is in TTBR0 again by the time these run (the vectors
+ * below are in the trampoline page): from EL1, x0 is in TPIDRRO_EL0. */
+el1_irq_k:
+        mrs     x0, tpidrro_el0
+        b       el1_irq
 
 /* An interrupt taken at EL1 while the kernel waits in bst_cpu_wait: note
  * which one and go back to the instruction after the wfi. */
@@ -272,50 +314,107 @@ el1_irq:
         eret
 
 /* Any other exception from EL1 itself: a bug in the trusted base or the
- * compiler. */
-.macro  kernel_trap vec
-        mov     x0, #\vec
+ * compiler. x0 is the vector's number. */
+ktrap_k:
         mrs     x1, elr_el1
         mrs     x2, far_el1
         mrs     x3, esr_el1
         bl      bst_kernel_fault
         b       park
-.endm
 
+/*
+ * The trampoline page: the exception vectors and the code that moves between
+ * the kernel's table and the user's. User code runs on a table of its own
+ * (TTBR0) with none of the kernel's memory in it, so the one page both
+ * must see is mapped in TTBR1 (platform.c, at TRAMP_VA). It is
+ * position-independent: its only absolute addresses are the literals at the
+ * end. TPIDRRO_EL0 holds the one general register it needs while it runs.
+ */
+        .equ    TRAMP_VA, 0xffff000000000000
+        .equ    VECTORS_VA, TRAMP_VA
+        .equ    TRAMP_ENTER_VA, TRAMP_VA + (tramp_enter - tramp_page)
+        .section .tramp, "ax"
+        .balign 4096
+        .global tramp_page
+tramp_page:
+.macro  from_el0 lit
+        msr     tpidrro_el0, x0
+        ldr     x0, lit_kernel_root
+        msr     ttbr0_el1, x0
+        isb
+        tlbi    vmalle1
+        dsb     nsh
+        isb
+        ldr     x0, \lit
+        br      x0
+.endm
+.macro  from_el1 lit
+        msr     tpidrro_el0, x0
+        ldr     x0, \lit
+        br      x0
+.endm
+.macro  ktrap vec
+        mov     x0, #\vec
+        ldr     x1, lit_ktrap
+        br      x1
+.endm
         .balign 2048
 vectors:
         .balign 128
-        kernel_trap 0
+        ktrap 0
         .balign 128
-        kernel_trap 1
+        ktrap 1
         .balign 128
-        kernel_trap 2
+        ktrap 2
         .balign 128
-        kernel_trap 3
+        ktrap 3
         .balign 128
-        kernel_trap 4
+        ktrap 4
         .balign 128
-        b       el1_irq
+        from_el1 lit_el1_irq
         .balign 128
-        kernel_trap 6
+        ktrap 6
         .balign 128
-        kernel_trap 7
+        ktrap 7
         .balign 128
-        b       el0_sync
+        from_el0 lit_el0_sync
         .balign 128
-        b       el0_irq
+        from_el0 lit_el0_irq
         .balign 128
-        kernel_trap 10
+        ktrap 10
         .balign 128
-        kernel_trap 11
+        ktrap 11
         .balign 128
-        kernel_trap 12
+        ktrap 12
         .balign 128
-        kernel_trap 13
+        ktrap 13
         .balign 128
-        kernel_trap 14
+        ktrap 14
         .balign 128
-        kernel_trap 15
+        ktrap 15
+
+/* Enter user mode: the kernel's table is still loaded and the user's
+ * context is in the registers, but x0 (in TPIDRRO_EL0) and a scratch. */
+        .balign 16
+tramp_enter:
+        mrs     x0, tpidr_el1
+        ldr     x0, [x0, #PCPU_SHADOW]
+        dsb     ish                     /* the table's entries are visible to the walker */
+        msr     ttbr0_el1, x0
+        isb
+        tlbi    vmalle1
+        dsb     nsh
+        isb
+        mrs     x0, tpidrro_el0
+        eret
+
+        .balign 8
+lit_kernel_root: .quad bst_kernel_root
+lit_el0_sync:   .quad el0_sync_k
+lit_el0_irq:    .quad el0_irq_k
+lit_el1_irq:    .quad el1_irq_k
+lit_ktrap:      .quad ktrap_k
+        .text
 
         .global bst_platform_ctx
 bst_platform_ctx:

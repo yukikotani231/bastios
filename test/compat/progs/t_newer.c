@@ -92,9 +92,11 @@ int main(int argc, char **argv) {
            has_name(buf, n, 0, "..", &t) && t == DT_DIR);
     EXPECT("getdents64 at the end", syscall(SYS_getdents64, fd, buf, sizeof buf) == 0);
     EXPECT("lseek rewinds a directory", lseek(fd, 0, SEEK_SET) == 0);
+#ifdef SYS_getdents
     n = syscall(SYS_getdents, fd, buf, sizeof buf);
     EXPECT("getdents (the old one)", n > 0 && has_name(buf, n, 1, "one", &t) && t == DT_REG &&
            has_name(buf, n, 1, "sub", &t) && t == DT_DIR && has_name(buf, n, 1, "..", &t));
+#endif
     EXPECT("getdents into a byte", lseek(fd, 0, SEEK_SET) == 0 && syscall(SYS_getdents64, fd, buf, 1) == -1 && errno == EINVAL);
     close(fd);
     {
@@ -119,6 +121,7 @@ int main(int argc, char **argv) {
         if (d) closedir(d);
     }
 
+#ifdef SYS_sysfs
     EXPECT("sysfs counts file system types", syscall(SYS_sysfs, 3) >= 3);
     {
         long i = syscall(SYS_sysfs, 1, "tmpfs");
@@ -130,6 +133,7 @@ int main(int argc, char **argv) {
         char u[32];
         EXPECT("ustat for /'s device", stat("/", &st) == 0 && syscall(SYS_ustat, (unsigned)st.st_dev, u) == 0);
     }
+#endif
 
     symlink("nw_f", "nw_l");
     EXPECT("fchmodat2 follows a link", syscall(SYS_fchmodat2, AT_FDCWD, "nw_l", 0600, 0) == 0 &&

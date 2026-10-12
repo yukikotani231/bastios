@@ -44,6 +44,7 @@
 // caller needs root or the target's user and group ids, as for
 // pidfd_getfd.
 
+import "ptfmt.bastio";
 import "lxpidfd.bastio";
 
 const LX_PTRACE: u64 = 101;
@@ -56,7 +57,6 @@ const PTRACE_POKEDATA: u64 = 5;
 const PTRACE_POKEUSER: u64 = 6;
 const PTRACE_CONT: u64 = 7;
 const PTRACE_SINGLESTEP: u64 = 9;
-const TRAP_FLAG: u64 = 256;              // rflags.TF
 const PTRACE_SYSCALL: u64 = 24;
 const PTRACE_KILL: u64 = 8;
 const PTRACE_GETREGS: u64 = 12;
@@ -71,8 +71,6 @@ const PTRACE_GETREGSET: u64 = 0x4204;
 const PTRACE_SETREGSET: u64 = 0x4205;
 const PTRACE_SEIZE: u64 = 0x4206;
 const NT_PRSTATUS: u64 = 1;
-const USER_REGS: u64 = 27;               // struct user_regs_struct, in words
-const USER_REGS_SIZE: u64 = 216;
 const USER_DEBUGREG: u64 = 848;          // offsetof(struct user, u_debugreg)
 const PTRACE_O_VALID: u64 = 0x1000FF;    // the options there are (events and EXITKILL)
 
@@ -80,55 +78,22 @@ fn is_ptrace_call(n: u64) -> bool {
   return n == LX_PTRACE;
 }
 
-/// The saved register that word i of struct user_regs_struct stands for
-/// (r15 .. r8, rax, rcx, rdx, rsi, rdi, orig_rax, rip, cs, eflags, rsp, ss,
-/// fs_base, gs_base, ds, es, fs, gs), or 255 if there is none.
-fn ur_reg(i: u64) -> u64
-  requires i < USER_REGS
-  ensures result < 21 || result == 255
-{
-  if i < 4 {
-    return 14 - i;                          // r15 .. r12
-  }
-  if i == 4 { return 6; }                   // rbp
-  if i == 5 { return 1; }                   // rbx
-  if i < 10 {
-    return 16 - i;                          // r11 .. r8
-  }
-  if i == 10 { return 0; }                  // rax
-  if i == 11 { return 2; }                  // rcx
-  if i == 12 { return 3; }                  // rdx
-  if i == 13 { return 4; }                  // rsi
-  if i == 14 { return 5; }                  // rdi
-  if i == 16 { return 15; }                 // rip
-  if i == 18 { return 17; }                 // eflags
-  if i == 19 { return 16; }                 // rsp
-  if i == 21 { return 20; }                 // fs_base
-  return 255;
-}
-
 /// Word i of the registers of stopped process c.
 fn ur_read(k: &Kernel, c: u64, i: u64) -> u64
   requires kok(k) && c < NPROC && i < USER_REGS
 {
   let r = ur_reg(i);
-  if r < 21 {
+  if r < UR_NREG {
     return pget(k.procs, c, F_REGS + r);
   }
-  if i == 15 {
+  if i == UR_ORIG {
     let t = tr2_get(k, c);
     if t / TS_ENTRY % 2 == 1 || t / TS_EXIT % 2 == 1 {
       return t / TS_NR % 1024;              // orig_rax: the call it stopped at
     }
     return 0xFFFFFFFFFFFFFFFF;              // not in a system call
   }
-  if i == 17 {
-    return 0x33;                            // cs
-  }
-  if i == 20 {
-    return 0x2B;                            // ss
-  }
-  return 0;
+  return ur_const(i);
 }
 
 /// Sets word i of the registers of stopped process c (cs, ss, the other
@@ -138,10 +103,10 @@ fn ur_write(k: &mut Kernel, c: u64, i: u64, v: u64)
   ensures kok(k)
 {
   let r = ur_reg(i);
-  if r < 21 {
+  if r < UR_NREG {
     pset(&mut k.procs, c, F_REGS + r, v);
   }
-  if i == 15 {
+  if i == UR_ORIG {
     // orig_rax at a system call stop: the call to run (anything else, -1
     // included, makes it fail with ENOSYS).
     let t = tr2_get(k, c);
@@ -182,7 +147,7 @@ fn pt_resume(k: &mut Kernel, c: u64, sig: u64, detach: bool, sys: bool, step: bo
   if step && !detach {
     next = next + TS_STEP;
     let fl = pget(k.procs, c, F_REGS + R_RFLAGS);
-    pset(&mut k.procs, c, F_REGS + R_RFLAGS, fl % 65536 / (2 * TRAP_FLAG) * (2 * TRAP_FLAG) + fl % TRAP_FLAG + TRAP_FLAG);
+    pset(&mut k.procs, c, F_REGS + R_RFLAGS, step_flags(fl, true));
   }
   if t / TS_ENTRY % 2 == 1 {
     // Stopped before a system call: it runs now, as the tracer left it.
@@ -214,7 +179,7 @@ fn pt_stepped(k: &mut Kernel, p: u64)
   let t = tr2_get(k, p);
   if t / TS_STEP % 2 == 1 {
     let fl = pget(k.procs, p, F_REGS + R_RFLAGS);
-    pset(&mut k.procs, p, F_REGS + R_RFLAGS, fl % 65536 / (2 * TRAP_FLAG) * (2 * TRAP_FLAG) + fl % TRAP_FLAG);
+    pset(&mut k.procs, p, F_REGS + R_RFLAGS, step_flags(fl, false));
     tr2_put(&mut k, p, t % TS_STEP + t / (2 * TS_STEP) * (2 * TS_STEP));
   }
 }
@@ -237,7 +202,9 @@ fn pt_sys_entry(k: &mut Kernel, p: u64, restarted: bool) -> bool
     return false;
   }
   tr2_put(&mut k, p, TS_SYS + TS_ENTRY + nr * TS_NR);
-  pset(&mut k.procs, p, F_REGS + R_RET, ENOSYS);   // what a tracer reads in rax before the call
+  if PT_ENTRY_RET == 1 {
+    pset(&mut k.procs, p, F_REGS + R_RET, ENOSYS);   // what a tracer reads in rax before the call
+  }
   tr_stop(&mut k, p, 5 + 128 * (tr_opt(tr_get(k, p)) % 2));   // SIGTRAP, with 0x80 for PTRACE_O_TRACESYSGOOD
   return true;
 }
@@ -349,7 +316,7 @@ fn pt_peek(k: &mut Kernel, pid: u64, c: u64, req: u64, addr: u64, data: u64) -> 
 {
   let mut v = 0;
   if req == PTRACE_PEEKUSER {
-    if addr % 8 != 0 {
+    if PT_USER_API == 0 || addr % 8 != 0 {
       return EIO;
     }
     if addr < USER_REGS_SIZE {
@@ -374,7 +341,7 @@ fn pt_poke(k: &mut Kernel, c: u64, req: u64, addr: u64, data: u64) -> u64
   ensures kok(k)
 {
   if req == PTRACE_POKEUSER {
-    if addr % 8 != 0 {
+    if PT_USER_API == 0 || addr % 8 != 0 {
       return EIO;
     }
     if addr < USER_REGS_SIZE {
@@ -501,10 +468,10 @@ fn lx_ptrace(k: &mut Kernel, pid: u64, req0: u64, p0: u64, addr: u64, data: u64)
   if req == PTRACE_POKETEXT || req == PTRACE_POKEDATA || req == PTRACE_POKEUSER {
     return pt_poke(&mut k, p, req, addr, data);
   }
-  if req == PTRACE_GETREGS {
+  if PT_USER_API == 1 && req == PTRACE_GETREGS {
     return pt_getregs(&mut k, pid, p, data, USER_REGS_SIZE);
   }
-  if req == PTRACE_SETREGS {
+  if PT_USER_API == 1 && req == PTRACE_SETREGS {
     return pt_setregs(&mut k, pid, p, data, USER_REGS_SIZE);
   }
   if req == PTRACE_GETREGSET || req == PTRACE_SETREGSET {

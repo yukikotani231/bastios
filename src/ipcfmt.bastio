@@ -1,0 +1,5 @@
+// The layout of struct semid64_ds is architecture specific:
+// src/<arch>/arch/ipcfmt.bastio, found through the --lib directory the
+// build passes for that architecture.
+
+import "arch/ipcfmt.bastio";

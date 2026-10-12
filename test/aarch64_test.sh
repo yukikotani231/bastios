@@ -108,8 +108,19 @@ run("mhello", [b"hello from linux arm64, pid ", b"stdout mode 0x2", b"read 9: 12
 reply = run("mtest", b"mtest done")
 check("mtest: no check failed", b"FAIL" not in reply)
 for want in [b"malloc ok 1", b"file abc", b"child exit 5", b"signal 10", b"thread 7",
-             b"ok   epoll_wait", b"ok   socket read", b"machine aarch64"]:
+             b"ok   epoll_wait", b"ok   socket read", b"machine aarch64",
+             b"ok   undefined instruction is SIGILL", b"ok   brk is SIGTRAP", b"ok   ptrace: five single steps", b"ok   ptrace: SETREGSET",
+             b"ok   ptrace: stops before and after getpid", b"ok   ptrace: child runs on to exit 7"]:
     check("mtest: " + want.decode(), want in reply)
+# BusyBox's ash, built as a static glibc executable at 0x400000 (a non-PIE
+# program, which loads where it was linked): arithmetic, a pipe between two
+# forked applets, a file written and read back.
+run("ash", b"BusyBox", wait=b"# ")
+run("echo ash $((6*7))", b"ash 42", wait=b"# ")
+run("echo abc | wc -c", b"4", wait=b"# ")
+run("echo $((1 << 40))", b"1099511627776", wait=b"# ")
+run("echo data > /tmp/f; cat /tmp/f; wc -c < /tmp/f", [b"data", b"5"], wait=b"# ")
+run("exit", b"")
 # The timer interrupt: ticks count up, 100 a second.
 reply = run("uptime", b"ticks")
 time.sleep(1.0)

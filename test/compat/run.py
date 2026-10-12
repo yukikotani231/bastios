@@ -167,9 +167,9 @@ def with_bb(cmd, bb):
 # ---------------------------------------------------------------- the guest
 
 class Guest:
-    def __init__(self, kernel, disk, log, web=None, idle=False, mem="256M"):
+    def __init__(self, kernel, disk, log, web=None, idle=False, arch="x86_64", mem="256M"):
         # idle: QEMU runs under SCHED_IDLE, on CPU time no other process wants.
-        self.kernel, self.disk, self.log, self.idle, self.mem = kernel, disk, log, idle, mem
+        self.kernel, self.disk, self.log, self.idle, self.arch, self.mem = kernel, disk, log, idle, arch, mem
         self.q = None
         self.hosturl = f"http://10.0.2.2:{web.port}" if web else ""
         self.hostaddr = f"10.0.2.2 {web.port}" if web else ""
@@ -183,12 +183,20 @@ class Guest:
     def boot(self):
         self.stop()
         self.out = b""
+        if self.arch == "aarch64":
+            # The kernel powers off through PSCI (no debug-exit device).
+            cmd = ["qemu-system-aarch64", "-M", "virt,gic-version=3", "-cpu", "cortex-a72", "-kernel", self.kernel,
+                   "-m", self.mem, "-smp", "2", "-nographic", "-no-reboot", "-serial", "stdio", "-monitor", "none",
+                   "-drive", f"file={self.disk},format=raw,if=none,id=vd", "-device", "virtio-blk-device,drive=vd",
+                   "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{self.sshport}-:22", "-device", "virtio-net-device,netdev=n0"]
+        else:
+            cmd = ["qemu-system-x86_64", "-kernel", self.kernel, "-m", self.mem, "-smp", "2",
+                   "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+                   "-serial", "stdio", "-monitor", "none",
+                   "-drive", f"file={self.disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd",
+                   "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{self.sshport}-:22", "-device", "virtio-net-pci,netdev=n0"]
         self.q = subprocess.Popen(
-            ["qemu-system-x86_64", "-kernel", self.kernel, "-m", self.mem, "-smp", "2",
-             "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-             "-serial", "stdio", "-monitor", "none",
-             "-drive", f"file={self.disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd",
-             "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{self.sshport}-:22", "-device", "virtio-net-pci,netdev=n0"],
+            cmd,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             preexec_fn=(lambda: os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))) if self.idle else None)
         if not self.read_until(b"bastios> ", 0, 60):
@@ -522,6 +530,9 @@ def main():
     ap.add_argument("--node-disk", help="the Node disk (the root of the node:alpine image) for node.txt")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
+    ap.add_argument("--arch", default="x86_64", choices=["x86_64", "aarch64"],
+                    help="the guest's processor; aarch64 runs the groups named by --groups, against baseline-aarch64.txt")
+    ap.add_argument("--groups", help="comma-separated groups of the first disk to run (programs and busybox, by default all)")
     ap.add_argument("--update-baseline", action="store_true")
     ap.add_argument("programs", nargs="*")
     args = ap.parse_args()
@@ -554,13 +565,16 @@ def main():
         if not args.host:
             g.append(("ssh", "logging in over SSH", lambda e: [run_applet(e, n, c, x, 60, bb) for n, c, x in sshc]))
         g.append(("tty", "programs on the terminal", lambda e: [run_tty(e, n, p, k, c, x, 30, bb) for n, p, k, c, x in tty]))
+        if args.groups:
+            keep = args.groups.split(",")
+            g = [x for x in g if x[0] in keep or (x[0] in args.programs and "progs" in keep)]
         return g
 
     def lane(disk, groups, mem="256M"):
         """Boots a guest from disk and runs groups on it, one after another.
         Returns their results and the guest's serial output."""
         out = io.BytesIO()
-        g = Guest(args.kernel, disk, out, web, mem=mem)
+        g = Guest(args.kernel, disk, out, web, arch=args.arch, mem=mem)
         try:
             g.boot()
             res = {}
@@ -648,7 +662,7 @@ def main():
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]
-    base = os.path.join(HERE, "baseline.txt")
+    base = os.path.join(HERE, "baseline.txt" if args.arch == "x86_64" else f"baseline-{args.arch}.txt")
     if args.host:
         return 0
     if args.update_baseline:
