@@ -42,8 +42,13 @@ static int direction_flag(void) {
     return 1;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     int bad = 0;
+
+    /* `mtest crash` touches a page above the heap that is not the process's,
+     * to show the kernel's report of a killed process (test/shell_test.sh). */
+    if (argc > 1 && strcmp(argv[1], "crash") == 0)
+        return *(volatile char *)((char *)sbrk(0) + (8 << 20));
 
     /* Small blocks come from brk, a big one from mmap. */
     char *small = malloc(100);
