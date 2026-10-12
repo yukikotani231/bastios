@@ -80,6 +80,8 @@ const SY_INO: u64 = 20;                // 20 .. 22: /proc/sys/fs/inotify (src/lx
 const SY_LOOP: u64 = 32;               // 32 ..: loop device n's attribute a at n * LOOP_SYS + a
 const SY_NS: u64 = 128;                // 128 ..: /proc/P/ns link f at P * NF_N + f (src/lxnsk.bastio)
 const NF_N: u64 = 8;
+const SY_UM: u64 = SY_NS + NPROC * NF_N;   // /proc/P/uid_map, gid_map, setgroups at P * 3 + 0, 1, 2 (src/lxuser.bastio)
+const UMF_N: u64 = 3;
 const NS_DIRS: u64 = 0x100;            // DIR_PROC + NS_DIRS + pid: /proc/PID/ns
 const LOOP_SYS: u64 = 8;               // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
@@ -419,6 +421,10 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   if xfer_is(x, e + 1, n, "timerslack_ns") {
     return base + PF_SLACK;
   }
+  let um = um_at(x, e + 1, n, p);
+  if um != 0 {
+    return um;                              // uid_map, gid_map or setgroups (src/lxuser.bastio)
+  }
   if e + 4 < n && xfer_is(x, e + 1, e + 4, "ns/") {
     return nsf_at(x, e + 4, n, p);          // a namespace link (src/lxnsk.bastio)
   }
@@ -525,7 +531,7 @@ fn loop_sys_text(k: &mut Kernel, s: u64, o: &mut Bytes) -> u64
 /// Whether /proc file f may be opened for writing (by root: it is
 /// rw-r--r--): /proc/sys/fs/pipe-max-size, the one writable sysctl.
 fn proc_writable(f: u64) -> bool {
-  return f == PROC_DEV + PSYS + SY_PIPE_MAX;
+  return f == PROC_DEV + PSYS + SY_PIPE_MAX || is_um_file(f);
 }
 
 /// What stat says about /proc file f (a proc_file device).
@@ -578,6 +584,9 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
     }
     if i == 6 {
       return Ent { len: name_out(&mut k.fs.xfer, "ns"), dir: true, end: false };
+    }
+    if i >= 7 && i < 7 + UMF_N {
+      return Ent { len: name_out(&mut k.fs.xfer, um_name(i - 7)), dir: false, end: false };
     }
     return end;
   }
@@ -666,19 +675,20 @@ fn put_n(o: &mut Bytes, at: u64, v: u64) -> u64
 }
 
 /// A status line's four ids (real, effective, saved, file system) from
-/// row words w and s, each after a tab.
-fn put_ids(o: &mut Bytes, at: u64, procs: &Buf, p: u64, w: u64, s: u64) -> u64
-  requires blen(o) == PROC_OUT && at <= PROC_OUT && ptab_ok(procs) && p < NPROC && w < STRIDE && s < STRIDE
+/// row words w and s, each after a tab, as process obs sees them (g 0
+/// users, 1 groups).
+fn put_ids(o: &mut Bytes, at: u64, k: &Kernel, obs: u64, p: u64, g: u64, w: u64, s: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT && kok(k) && obs < NPROC && p < NPROC && g < 2 && w < STRIDE && s < STRIDE
   ensures blen(o) == PROC_OUT && result <= PROC_OUT
 {
   let mut a = put_c(&mut o, at, 9);
-  a = put_n(&mut o, a, id_get(procs, p, w, false));
+  a = put_n(&mut o, a, id_out(k, obs, g, id_get(k.procs, p, w, false)));
   a = put_c(&mut o, a, 9);
-  a = put_n(&mut o, a, id_get(procs, p, w, true));
+  a = put_n(&mut o, a, id_out(k, obs, g, id_get(k.procs, p, w, true)));
   a = put_c(&mut o, a, 9);
-  a = put_n(&mut o, a, id_get(procs, p, s, false));
+  a = put_n(&mut o, a, id_out(k, obs, g, id_get(k.procs, p, s, false)));
   a = put_c(&mut o, a, 9);
-  return put_n(&mut o, a, id_get(procs, p, s, true));
+  return put_n(&mut o, a, id_out(k, obs, g, id_get(k.procs, p, s, true)));
 }
 
 /// Appends v as two digits (v below 100).
@@ -784,6 +794,9 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     let what = f - PROC_DEV - PSYS;
     if is_ns_file(f) {
       return nsf_text(k, f, &mut o);        // a namespace link (src/lxnsk.bastio)
+    }
+    if is_um_file(f) {
+      return um_text(k, f, &mut o);         // uid_map, gid_map, setgroups (src/lxuser.bastio)
     }
     if what >= SY_LOOP && what - SY_LOOP < LOOP_N * LOOP_SYS {
       return loop_sys_text(&mut k, what - SY_LOOP, &mut o);
@@ -1030,16 +1043,16 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       a = put_n(&mut o, a, get(k.mns, nsk_at(NSK_VPID, p)));
     }
     a = put_s(&mut o, a, "\nUid:");
-    a = put_ids(&mut o, a, k.procs, p, F_UID, F_SUID);
+    a = put_ids(&mut o, a, k, pid, p, 0, F_UID, F_SUID);
     a = put_s(&mut o, a, "\nGid:");
-    a = put_ids(&mut o, a, k.procs, p, F_GID, F_SGID);
+    a = put_ids(&mut o, a, k, pid, p, 1, F_GID, F_SGID);
     a = put_s(&mut o, a, "\nGroups:\t");
     let ng = ngroups(k.procs, p);
     let mut i = 0;
     while i < ng
       invariant i <= ng && ng <= NGROUPS_KEPT && blen(o) == PROC_OUT && a <= PROC_OUT && kok(k)
     {
-      a = put_n(&mut o, a, group_at(k.procs, p, i));
+      a = put_n(&mut o, a, id_out(k, pid, 1, group_at(k.procs, p, i)));
       a = put_c(&mut o, a, 32);
       i = i + 1;
     }
@@ -1339,6 +1352,9 @@ fn proc_write(k: &mut Kernel, pid: u64, f: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if is_um_file(f) {
+    return um_write(&mut k, pid, f, va, n);   // src/lxuser.bastio
+  }
   if !proc_writable(f) || n == 0 || n > 32 {
     return EINVAL;
   }

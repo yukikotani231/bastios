@@ -359,6 +359,11 @@ steps = [
      [b"uid=1000(alice) gid=1000(alice)", b"\r\n4755 root\r\n755 root\r\n600 root\r\n700 root\r\n"], b"\n# "),
     ("su alice -c 'id -u; whoami; cd; pwd; cat /etc/shadow; echo s=$?; ls /root; echo r=$?'",
      [b"\r\n1000\r\nalice\r\n/home/alice\r\n", b"Permission denied", b"s=1", b"r=1"], b"\n# "),
+    # User namespaces (src/lxuser.bastio): alice is root inside `unshare -U -r`
+    # but has no more rights: root's files show as 65534 and stay unreadable,
+    # and a file she makes is hers outside. Without a map she is 65534.
+    ("su alice -c 'unshare -U -r sh -c \"id -u; id -g; ls -ln /etc/shadow; cat /etc/shadow; echo s=\\$?; touch /home/alice/f; ls -ln /home/alice/f; cat /proc/self/uid_map /proc/self/setgroups\"; ls -ln /home/alice/f; unshare -U id -u; unshare -U -r -u sh -c \"hostname box; hostname\"; unshare -U -r unshare -U true; echo n=$?'",
+     [b"\r\n0\r\n0\r\n", b"65534    65534", b"Permission denied", b"s=1", b"0        0", b"         0       1000          1\r\ndeny", b"1000     1000", b"\r\n65534\r\nbox\r\n", b"n=1"], b"\n# "),
     ("echo root:pw | chpasswd; read l < /etc/shadow; case $l in 'root:$6$'*) echo sha512;; esac; su alice -c 'echo no | su -c id root; echo w=$?; echo pw | su -c id root'",
      [b"\r\nsha512\r\n", b"w=1", b"uid=0(root) gid=0(root)"], b"\n# "),
     # (BusyBox keeps the old /etc files as NAME-: gone, so no pages stay.)

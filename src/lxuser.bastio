@@ -1,0 +1,571 @@
+// User namespaces: a process in one sees user and group ids through maps,
+// and its capabilities in it are those of its mapped root.
+//
+// The kernel keeps every id as the host (first namespace) id, in the
+// process's row and on files, and permission checks use those. A user
+// namespace changes only what a process sees and says: the ids system calls
+// return (getuid ... getgroups), the ids it passes in (setuid ... setgroups,
+// chown), st_uid and st_gid of stat, and the Uid and Gid lines of
+// /proc/PID/status are translated through the maps of the namespace the
+// process is in. An id with no map shows as the overflow id 65534, and one
+// that is passed in without a map is -EINVAL. A user namespace's slot in
+// k.mns holds its owner (the creator's effective ids), whether setgroups is
+// denied, and the uid and gid maps of up to UM_N extents (inside id, outside
+// id, count). Outside ids are host ids: a namespace made inside another is
+// refused (ENOSPC), so there are two levels.
+//
+// /proc/PID/uid_map, gid_map and setgroups read and write as on Linux: a map
+// is written once; root may write any, anyone else only the one id they
+// have, and for gid_map only after setgroups was set to "deny". Privilege
+// in a namespace (ns_cap) is a process whose effective user is mapped to 0
+// there: it may make namespaces (the user namespace itself needs nothing),
+// change ids and groups to mapped ones, and set the names of a UTS
+// namespace it made. Mounting, device access and the rest stay root's.
+//
+// Not done: a namespace inside a namespace, setns into one, the map in
+// SO_PEERCRED, si_uid and System V IPC owners, and capabilities that apply
+// to the namespace's own objects (mounts, network): only root has those.
+
+import "lxnsk.bastio";
+import "lxcred.bastio";
+
+/// The k.mns word w of user namespace slot s.
+fn usr_at(s: u64, w: u64) -> u64
+  requires s < USR_N && w < USR_W
+  ensures result < MNS_LEN
+{
+  return MNS_USR + s * USR_W + w;
+}
+
+fn usr_get(k: &Kernel, s: u64, w: u64) -> u64
+  requires kok(k) && s < USR_N && w < USR_W
+{
+  return get(k.mns, usr_at(s, w));
+}
+
+fn usr_put(k: &mut Kernel, s: u64, w: u64, v: u64)
+  requires kok(k) && s < USR_N && w < USR_W
+  ensures kok(k)
+{
+  k.mns = set(k.mns, usr_at(s, w), v);
+}
+
+/// The word of field f (0 inside id, 1 outside id, 2 count) of extent i of
+/// map g (0 uid, 1 gid).
+fn um_w(g: u64, i: u64, f: u64) -> u64
+  requires g < 2 && i < UM_N && f < 3
+  ensures result < USR_W
+{
+  return UMW_EXT + g * 3 * UM_N + i * 3 + f;
+}
+
+/// The slot of user namespace id, or USR_N (the first, or none).
+fn usr_slot(k: &Kernel, id: u64) -> u64
+  requires kok(k) && id < MNS_MAX
+  ensures result <= USR_N
+{
+  if id == 0 {
+    return USR_N;
+  }
+  let mut s = 0;
+  while s < USR_N
+    invariant s <= USR_N && kok(k)
+  {
+    if usr_get(k, s, 0) == id + 1 {
+      return s;
+    }
+    s = s + 1;
+  }
+  return USR_N;
+}
+
+/// The slot of pid's user namespace, or USR_N for the first.
+fn usr_slot_of(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= USR_N
+{
+  return usr_slot(k, nsk_of(k, NSK_USER, pid));
+}
+
+/// Frees the slots of user namespaces no process is in; returns a free
+/// slot, or USR_N if there is none.
+fn usr_gc(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k) && result <= USR_N
+{
+  let mut free = USR_N;
+  let mut s = 0;
+  while s < USR_N
+    invariant s <= USR_N && free <= USR_N && kok(k)
+  {
+    let v = usr_get(k, s, 0);
+    if v != 0 && !nsk_live(k, NSK_USER, v - 1) {
+      usr_put(&mut k, s, 0, 0);
+    }
+    if usr_get(k, s, 0) == 0 && free == USR_N {
+      free = s;
+    }
+    s = s + 1;
+  }
+  return free;
+}
+
+/// Is there a slot for a new user namespace?
+fn userns_room(k: &mut Kernel) -> bool
+  requires kok(k)
+  ensures kok(k)
+{
+  return usr_gc(&mut k) < USR_N;
+}
+
+/// Process pid moves to a new user namespace with no maps, owned by its
+/// effective ids. 0, -ENOSPC if it is in one already, or -ENOMEM.
+fn userns_unshare(k: &mut Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if nsk_of(k, NSK_USER, pid) != 0 {
+    return ENOSPC;
+  }
+  let s = usr_gc(&mut k);
+  if s >= USR_N {
+    return ENOMEM;
+  }
+  let id = nsk_new(&mut k, NSK_USER);
+  if id == 0 {
+    return ENOMEM;
+  }
+  usr_put(&mut k, s, 1, id_get(k.procs, pid, F_UID, true));
+  usr_put(&mut k, s, 2, id_get(k.procs, pid, F_GID, true));
+  usr_put(&mut k, s, UMW_DENY, 0);
+  usr_put(&mut k, s, UMW_CNT, 0);
+  usr_put(&mut k, s, UMW_CNT + 1, 0);
+  usr_put(&mut k, s, 0, id + 1);
+  nsk_set(&mut k, NSK_USER, pid, id);
+  return 0;
+}
+
+// ---------------------------------------------------------------- maps
+
+/// Host id h of map g of slot s as the namespace calls it: OVERFLOW_ID if
+/// no extent holds it.
+fn um_in(k: &Kernel, s: u64, g: u64, h: u64) -> u64
+  requires kok(k) && s < USR_N && g < 2
+  ensures result < UM_BAD
+{
+  let n = smaller(usr_get(k, s, UMW_CNT + g), UM_N);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= UM_N && s < USR_N && g < 2 && kok(k)
+  {
+    let inside = usr_get(k, s, um_w(g, i, 0)) % UM_BAD;
+    let outside = usr_get(k, s, um_w(g, i, 1)) % UM_BAD;
+    let count = usr_get(k, s, um_w(g, i, 2)) % UM_BAD;
+    if h >= outside && h - outside < count {
+      return smaller(inside + (h - outside), UM_BAD - 1);
+    }
+    i = i + 1;
+  }
+  return OVERFLOW_ID;
+}
+
+/// The host id of id x of map g of slot s, or UM_BAD if it has none.
+fn um_out(k: &Kernel, s: u64, g: u64, x: u64) -> u64
+  requires kok(k) && s < USR_N && g < 2
+  ensures result <= UM_BAD
+{
+  let n = smaller(usr_get(k, s, UMW_CNT + g), UM_N);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= UM_N && s < USR_N && g < 2 && kok(k)
+  {
+    let inside = usr_get(k, s, um_w(g, i, 0)) % UM_BAD;
+    let outside = usr_get(k, s, um_w(g, i, 1)) % UM_BAD;
+    let count = usr_get(k, s, um_w(g, i, 2)) % UM_BAD;
+    if x >= inside && x - inside < count {
+      return smaller(outside + (x - inside), UM_BAD - 1);
+    }
+    i = i + 1;
+  }
+  return UM_BAD;
+}
+
+/// The user (g 0) or group (g 1) id h as process pid sees it.
+fn id_out(k: &Kernel, pid: u64, g: u64, h: u64) -> u64
+  requires kok(k) && pid < NPROC && g < 2
+{
+  let s = usr_slot_of(k, pid);
+  if s >= USR_N {
+    return h;
+  }
+  return um_in(k, s, g, h);
+}
+
+/// The host id for the id x (a register) that process pid passes in, NO_ID
+/// as it is, or UM_BAD if it has no map.
+fn id_in(k: &Kernel, pid: u64, g: u64, x: u64) -> u64
+  requires kok(k) && pid < NPROC && g < 2
+  ensures result <= UM_BAD
+{
+  let v = x % UM_BAD;
+  if v == NO_ID {
+    return NO_ID;
+  }
+  let s = usr_slot_of(k, pid);
+  if s >= USR_N {
+    return v;
+  }
+  return um_out(k, s, g, v);
+}
+
+/// Whether process pid holds capability c in its user namespace: it has it
+/// outright (root), or it is in a namespace where its effective user is
+/// mapped to 0 and has not dropped it.
+fn ns_cap(k: &Kernel, pid: u64, c: u64) -> bool
+  requires kok(k) && pid < NPROC && c <= CAP_LAST
+{
+  if cap_has(k, pid, c) {
+    return true;
+  }
+  let s = usr_slot_of(k, pid);
+  if s >= USR_N || um_in(k, s, 0, id_get(k.procs, pid, F_UID, true)) != 0 {
+    return false;
+  }
+  let held = CAP_FULL & !cap_word(k, pid, CAPW_EFF) & !cap_word(k, pid, CAPW_PERM);
+  return (held >> c) % 2 == 1;
+}
+
+// ---------------------------------------------------------------- /proc
+
+/// Is /proc device d one of the /proc/PID/uid_map, gid_map and setgroups?
+fn is_um_file(d: u64) -> bool
+  ensures result == (d >= PROC_DEV + PSYS + SY_UM && d < PROC_DEV + PSYS + SY_UM + NPROC * UMF_N)
+{
+  return d >= PROC_DEV + PSYS + SY_UM && d < PROC_DEV + PSYS + SY_UM + NPROC * UMF_N;
+}
+
+/// The process of user namespace file d.
+fn um_proc(d: u64) -> u64
+  requires d >= PROC_DEV + PSYS + SY_UM && d < PROC_DEV + PSYS + SY_UM + NPROC * UMF_N
+  ensures result < NPROC
+{
+  return (d - PROC_DEV - PSYS - SY_UM) / UMF_N;
+}
+
+/// Which file d is: 0 uid_map, 1 gid_map, 2 setgroups.
+fn um_which(d: u64) -> u64
+  ensures result < UMF_N
+{
+  return d % UMF_N;
+}
+
+/// The device of /proc/P/name (x[from..to]), or 0.
+fn um_at(x: &Bytes, from: u64, to: u64, p: u64) -> u64
+  requires from <= to && to <= blen(x) && p < NPROC
+{
+  if xfer_is(x, from, to, "uid_map") {
+    return PROC_DEV + PSYS + SY_UM + p * UMF_N;
+  }
+  if xfer_is(x, from, to, "gid_map") {
+    return PROC_DEV + PSYS + SY_UM + p * UMF_N + 1;
+  }
+  if xfer_is(x, from, to, "setgroups") {
+    return PROC_DEV + PSYS + SY_UM + p * UMF_N + 2;
+  }
+  return 0;
+}
+
+/// The name of file w for a listing.
+fn um_name(w: u64) -> Str {
+  if w == 0 {
+    return "uid_map";
+  }
+  if w == 1 {
+    return "gid_map";
+  }
+  return "setgroups";
+}
+
+/// What stat says about file d: rw-r--r--, owned by its process.
+fn um_meta(k: &Kernel, d: u64) -> Meta
+  requires kok(k) && d >= PROC_DEV + PSYS + SY_UM && d < PROC_DEV + PSYS + SY_UM + NPROC * UMF_N
+{
+  let p = um_proc(d);
+  let own = id_get(k.procs, p, F_UID, true) + id_get(k.procs, p, F_GID, true) * ID_SPAN;
+  return Meta { ok: true, mode: 0x81A4, size: 0, ino: INO_PROC + d % 4096, mtime: 0, own: own };
+}
+
+/// Whether process pid, opening file d for writing, owns the process it
+/// belongs to (others need root).
+fn um_owner(k: &Kernel, pid: u64, d: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  if !is_um_file(d) {
+    return false;
+  }
+  return fs_id(k.procs, pid, false) == id_get(k.procs, um_proc(d), F_UID, true);
+}
+
+/// Appends v in decimal right-aligned in ten columns.
+fn put_n10(o: &mut Bytes, at: u64, v: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut dg = 1;
+  if v >= 1000000000 {
+    dg = 10;
+  } else if v >= 100000000 {
+    dg = 9;
+  } else if v >= 10000000 {
+    dg = 8;
+  } else if v >= 1000000 {
+    dg = 7;
+  } else if v >= 100000 {
+    dg = 6;
+  } else if v >= 10000 {
+    dg = 5;
+  } else if v >= 1000 {
+    dg = 4;
+  } else if v >= 100 {
+    dg = 3;
+  } else if v >= 10 {
+    dg = 2;
+  }
+  let mut a = at;
+  let mut i = dg;
+  while i < 10
+    invariant dg <= i && i <= 10 && a <= PROC_OUT && blen(o) == PROC_OUT
+  {
+    a = put_c(&mut o, a, 32);
+    i = i + 1;
+  }
+  return put_n(&mut o, a, v);
+}
+
+/// The text of file d into o.
+fn um_text(k: &Kernel, d: u64, o: &mut Bytes) -> u64
+  requires kok(k) && d >= PROC_DEV + PSYS + SY_UM && d < PROC_DEV + PSYS + SY_UM + NPROC * UMF_N && blen(o) == PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let s = usr_slot_of(k, um_proc(d));
+  let w = um_which(d);
+  if w == 2 {
+    if s < USR_N && usr_get(k, s, UMW_DENY) == 1 {
+      return put_s(&mut o, 0, "deny\n");
+    }
+    return put_s(&mut o, 0, "allow\n");
+  }
+  if s >= USR_N {
+    return put_s(&mut o, 0, "         0          0 4294967295\n");
+  }
+  let n = smaller(usr_get(k, s, UMW_CNT + w), UM_N);
+  let mut a = 0;
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= UM_N && s < USR_N && w < 2 && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+  {
+    a = put_n10(&mut o, a, usr_get(k, s, um_w(w, i, 0)) % UM_BAD);
+    a = put_c(&mut o, a, 32);
+    a = put_n10(&mut o, a, usr_get(k, s, um_w(w, i, 1)) % UM_BAD);
+    a = put_c(&mut o, a, 32);
+    a = put_n10(&mut o, a, usr_get(k, s, um_w(w, i, 2)) % UM_BAD);
+    a = put_c(&mut o, a, 10);
+    i = i + 1;
+  }
+  return a;
+}
+
+// ---------------------------------------------------------------- writing
+
+// A number parsed from text: its value, where it ends, and whether there
+// was one that fits an id.
+struct Num { v: u64, at: u64, ok: bool }
+
+/// The number at x[at..n] after blanks.
+fn num_at(x: &Bytes, at: u64, n: u64) -> Num
+  requires n <= blen(x) && at <= n
+  ensures result.at <= n && at <= result.at && result.v <= UM_BAD
+{
+  let mut i = at;
+  while i < n && (bget(x, i) == 32 || bget(x, i) == 9)
+    invariant at <= i && i <= n && n <= blen(x)
+  {
+    i = i + 1;
+  }
+  let from = i;
+  let mut v = 0;
+  while i < n && bget(x, i) >= 48 && bget(x, i) <= 57 && v < UM_BAD
+    invariant from <= i && i <= n && n <= blen(x) && v <= UM_BAD * 10
+  {
+    v = v * 10 + cast[u64](bget(x, i)) - 48;
+    i = i + 1;
+  }
+  if i == from || (i < n && bget(x, i) >= 48 && bget(x, i) <= 57) {
+    return Num { v: UM_BAD, at: from, ok: false };
+  }
+  if v >= UM_BAD {
+    return Num { v: UM_BAD, at: i, ok: false };
+  }
+  return Num { v: v, at: i, ok: true };
+}
+
+/// Whether extent i of map g of slot s, being written, overlaps one before it.
+fn um_overlaps(k: &Kernel, s: u64, g: u64, i: u64) -> bool
+  requires kok(k) && s < USR_N && g < 2 && i < UM_N
+{
+  let mut j = 0;
+  while j < i
+    invariant j <= i && i < UM_N && s < USR_N && g < 2 && kok(k)
+  {
+    let a0 = usr_get(k, s, um_w(g, i, 0)) % UM_BAD;
+    let a1 = a0 + usr_get(k, s, um_w(g, i, 2)) % UM_BAD;
+    let b0 = usr_get(k, s, um_w(g, j, 0)) % UM_BAD;
+    let b1 = b0 + usr_get(k, s, um_w(g, j, 2)) % UM_BAD;
+    if a0 < b1 && b0 < a1 {
+      return true;
+    }
+    let c0 = usr_get(k, s, um_w(g, i, 1)) % UM_BAD;
+    let c1 = c0 + usr_get(k, s, um_w(g, i, 2)) % UM_BAD;
+    let d0 = usr_get(k, s, um_w(g, j, 1)) % UM_BAD;
+    let d1 = d0 + usr_get(k, s, um_w(g, j, 2)) % UM_BAD;
+    if c0 < d1 && d0 < c1 {
+      return true;
+    }
+    j = j + 1;
+  }
+  return false;
+}
+
+/// Writes map g of the namespace of process t, from n bytes at user address
+/// va of process pid: lines "inside outside count". Returns n or -errno.
+fn um_map_write(k: &mut Kernel, pid: u64, t: u64, g: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && t < NPROC && g < 2
+  ensures kok(k)
+{
+  let s = usr_slot_of(k, t);
+  if s >= USR_N || usr_get(k, s, UMW_CNT + g) != 0 {
+    return EPERM;                           // the first namespace's map is fixed, and a map is written once
+  }
+  let wn = nsk_of(k, NSK_USER, pid);
+  if wn != 0 && wn != nsk_of(k, NSK_USER, t) {
+    return EPERM;
+  }
+  if n == 0 || n > 512 {
+    return EINVAL;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, n) != n {
+    return EFAULT;
+  }
+  let mut at = 0;
+  let mut cnt = 0;
+  let mut single = true;                    // one extent of one id: what anyone may write
+  while at < n && cnt < UM_N
+    invariant at <= n && n <= 512 && cnt <= UM_N && s < USR_N && g < 2 && kok(k)
+  {
+    let a = num_at(k.fs.xfer, at, n);
+    if !a.ok {
+      return EINVAL;
+    }
+    let b = num_at(k.fs.xfer, a.at, n);
+    if !b.ok {
+      return EINVAL;
+    }
+    let c = num_at(k.fs.xfer, b.at, n);
+    if !c.ok || c.v == 0 || a.v + c.v >= UM_BAD || b.v + c.v >= UM_BAD {
+      return EINVAL;
+    }
+    let mut e = c.at;
+    while e < n && (bget(k.fs.xfer, e) == 32 || bget(k.fs.xfer, e) == 9)
+      invariant c.at <= e && e <= n && n <= 512
+    {
+      e = e + 1;
+    }
+    if e < n && bget(k.fs.xfer, e) != 10 {
+      return EINVAL;
+    }
+    if e < n {
+      e = e + 1;
+    }
+    usr_put(&mut k, s, um_w(g, cnt, 0), a.v);
+    usr_put(&mut k, s, um_w(g, cnt, 1), b.v);
+    usr_put(&mut k, s, um_w(g, cnt, 2), c.v);
+    if um_overlaps(k, s, g, cnt) {
+      return EINVAL;
+    }
+    if c.v != 1 {
+      single = false;
+    }
+    cnt = cnt + 1;
+    at = e;
+  }
+  if cnt == 0 || at < n {
+    return EINVAL;                          // nothing, or more extents than UM_N
+  }
+  if !cred_root(k.procs, pid) {
+    // Anyone else maps only the one id they have: their effective user to
+    // anything, their group only once setgroups is off.
+    let mut own = id_get(k.procs, pid, F_UID, true);
+    if g == 1 {
+      own = id_get(k.procs, pid, F_GID, true);
+    }
+    if cnt != 1 || !single || usr_get(k, s, um_w(g, 0, 1)) != own || usr_get(k, s, 1 + g) != own {
+      return EPERM;
+    }
+    if g == 1 && usr_get(k, s, UMW_DENY) != 1 {
+      return EPERM;
+    }
+  }
+  usr_put(&mut k, s, UMW_CNT + g, cnt);
+  return n;
+}
+
+/// Writes /proc/PID/setgroups: "allow" or "deny" (and a newline).
+fn um_setgroups_write(k: &mut Kernel, pid: u64, t: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && t < NPROC
+  ensures kok(k)
+{
+  let s = usr_slot_of(k, t);
+  if s >= USR_N {
+    return EPERM;
+  }
+  let wn = nsk_of(k, NSK_USER, pid);
+  if wn != 0 && wn != nsk_of(k, NSK_USER, t) {
+    return EPERM;
+  }
+  if n == 0 || n > 16 {
+    return EINVAL;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, n) != n {
+    return EFAULT;
+  }
+  let mut m = n;
+  if bget(k.fs.xfer, m - 1) == 10 {
+    m = m - 1;
+  }
+  if xfer_is(k.fs.xfer, 0, m, "deny") {
+    if usr_get(k, s, UMW_CNT + 1) != 0 {
+      return EPERM;                         // too late: the gid map is in
+    }
+    usr_put(&mut k, s, UMW_DENY, 1);
+    return n;
+  }
+  if xfer_is(k.fs.xfer, 0, m, "allow") {
+    if usr_get(k, s, UMW_DENY) == 1 {
+      return EPERM;                         // once denied it stays so
+    }
+    return n;
+  }
+  return EINVAL;
+}
+
+/// write(2) to user namespace file d.
+fn um_write(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && d >= PROC_DEV + PSYS + SY_UM && d < PROC_DEV + PSYS + SY_UM + NPROC * UMF_N
+  ensures kok(k)
+{
+  let w = um_which(d);
+  if w == 2 {
+    return um_setgroups_write(&mut k, pid, um_proc(d), va, n);
+  }
+  return um_map_write(&mut k, pid, um_proc(d), w, va, n);
+}

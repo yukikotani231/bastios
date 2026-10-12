@@ -54,7 +54,7 @@ fn cred_root(procs: &Buf, pid: u64) -> bool
 }
 
 /// setuid (w F_UID, s F_SUID) or setgid (F_GID, F_SGID) to id a.
-fn set_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64) -> u64
+fn set_id(procs: &mut Buf, pid: u64, root: bool, w: u64, s: u64, a: u64) -> u64
   requires ptab_ok(procs) && pid < NPROC && w < STRIDE && s < STRIDE
   ensures ptab_ok(procs)
 {
@@ -64,7 +64,7 @@ fn set_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64) -> u64
   }
   let r0 = id_get(procs, pid, w, false);
   let s0 = id_get(procs, pid, s, false);
-  if cred_root(procs, pid) {
+  if root {
     id_put(&mut procs, pid, w, u, u);
     id_put(&mut procs, pid, s, u, u);
     return 0;
@@ -78,7 +78,7 @@ fn set_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64) -> u64
 }
 
 /// setreuid or setregid: real a and effective b, NO_ID leaving one alone.
-fn set_re_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64, b: u64) -> u64
+fn set_re_id(procs: &mut Buf, pid: u64, root: bool, w: u64, s: u64, a: u64, b: u64) -> u64
   requires ptab_ok(procs) && pid < NPROC && w < STRIDE && s < STRIDE
   ensures ptab_ok(procs)
 {
@@ -87,7 +87,6 @@ fn set_re_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64, b: u64) -> u64
   let r0 = id_get(procs, pid, w, false);
   let e0 = id_get(procs, pid, w, true);
   let s0 = id_get(procs, pid, s, false);
-  let root = cred_root(procs, pid);
   let mut nr = r0;
   let mut ne = e0;
   let mut ns = s0;
@@ -117,7 +116,7 @@ fn holds(x: u64, r0: u64, e0: u64, s0: u64) -> bool {
 }
 
 /// setresuid or setresgid.
-fn set_res_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64, b: u64, c: u64) -> u64
+fn set_res_id(procs: &mut Buf, pid: u64, root: bool, w: u64, s: u64, a: u64, b: u64, c: u64) -> u64
   requires ptab_ok(procs) && pid < NPROC && w < STRIDE && s < STRIDE
   ensures ptab_ok(procs)
 {
@@ -127,7 +126,7 @@ fn set_res_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64, b: u64, c: u64)
   let r0 = id_get(procs, pid, w, false);
   let e0 = id_get(procs, pid, w, true);
   let s0 = id_get(procs, pid, s, false);
-  if !cred_root(procs, pid) && !(holds(r, r0, e0, s0) && holds(e, r0, e0, s0) && holds(sv, r0, e0, s0)) {
+  if !root && !(holds(r, r0, e0, s0) && holds(e, r0, e0, s0) && holds(sv, r0, e0, s0)) {
     return EPERM;
   }
   let mut nr = r0;
@@ -148,7 +147,7 @@ fn set_res_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64, b: u64, c: u64)
 }
 
 /// setfsuid or setfsgid: always the old file-system id back.
-fn set_fs_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64) -> u64
+fn set_fs_id(procs: &mut Buf, pid: u64, root: bool, w: u64, s: u64, a: u64) -> u64
   requires ptab_ok(procs) && pid < NPROC && w < STRIDE && s < STRIDE
   ensures ptab_ok(procs)
 {
@@ -157,25 +156,25 @@ fn set_fs_id(procs: &mut Buf, pid: u64, w: u64, s: u64, a: u64) -> u64
   let e0 = id_get(procs, pid, w, true);
   let s0 = id_get(procs, pid, s, false);
   let f0 = id_get(procs, pid, s, true);
-  if f != NO_ID && (cred_root(procs, pid) || holds(f, r0, e0, s0) || f == f0) {
+  if f != NO_ID && (root || holds(f, r0, e0, s0) || f == f0) {
     id_put(&mut procs, pid, s, s0, f);
   }
   return f0;
 }
 
 /// getresuid or getresgid: real, effective and saved to a, b and c.
-fn get_res_id(k: &mut Kernel, pid: u64, w: u64, s: u64, a: u64, b: u64, c: u64) -> u64
-  requires kok(k) && pid < NPROC && w < STRIDE && s < STRIDE
+fn get_res_id(k: &mut Kernel, pid: u64, g: u64, w: u64, s: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && pid < NPROC && g < 2 && w < STRIDE && s < STRIDE
   ensures kok(k)
 {
-  xfer_u64(&mut k.fs.xfer, 0, id_get(k.procs, pid, w, false));
+  xfer_u64(&mut k.fs.xfer, 0, id_out(k, pid, g, id_get(k.procs, pid, w, false)));
   let mut r = lx_put_out(&mut k, pid, a, 4);
   if r == 0 {
-    xfer_u64(&mut k.fs.xfer, 0, id_get(k.procs, pid, w, true));
+    xfer_u64(&mut k.fs.xfer, 0, id_out(k, pid, g, id_get(k.procs, pid, w, true)));
     r = lx_put_out(&mut k, pid, b, 4);
   }
   if r == 0 {
-    xfer_u64(&mut k.fs.xfer, 0, id_get(k.procs, pid, s, false));
+    xfer_u64(&mut k.fs.xfer, 0, id_out(k, pid, g, id_get(k.procs, pid, s, false)));
     r = lx_put_out(&mut k, pid, c, 4);
   }
   return r;
@@ -238,7 +237,7 @@ fn lx_getgroups(k: &mut Kernel, pid: u64, size: u64, list: u64) -> u64
   while i < n
     invariant i <= n && n <= NGROUPS_KEPT && kok(k)
   {
-    xfer_u64(&mut k.fs.xfer, 4 * i, group_at(k.procs, pid, i));
+    xfer_u64(&mut k.fs.xfer, 4 * i, id_out(k, pid, 1, group_at(k.procs, pid, i)));
     i = i + 1;
   }
   let r = lx_put_out(&mut k, pid, list, 4 * n);
@@ -254,8 +253,12 @@ fn lx_setgroups(k: &mut Kernel, pid: u64, size: u64, list: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if !cred_root(k.procs, pid) {
+  if !cred_root(k.procs, pid) && !ns_cap(k, pid, CAP_SETGID) {
     return EPERM;
+  }
+  let us = usr_slot_of(k, pid);
+  if us < USR_N && usr_get(k, us, UMW_DENY) == 1 {
+    return EPERM;                           // /proc/PID/setgroups says deny (src/lxuser.bastio)
   }
   let n = size % ID_SPAN;
   if n > 65536 {
@@ -277,7 +280,10 @@ fn lx_setgroups(k: &mut Kernel, pid: u64, size: u64, list: u64) -> u64
   while i < n
     invariant i <= n && n <= NGROUPS_KEPT && kok(k)
   {
-    let g = get_u64(k.fs.xfer, 4 * i) % ID_SPAN;
+    let g = id_in(k, pid, 1, get_u64(k.fs.xfer, 4 * i));
+    if g >= ID_SPAN {
+      return EINVAL;                        // a group the namespace has no map for
+    }
     let w = F_GROUPS + i / 2;
     if i % 2 == 0 {
       id_put(&mut k.procs, pid, w, g, id_get(k.procs, pid, w, true));
@@ -297,42 +303,78 @@ fn is_cred_call(n: u64) -> bool {
     || n == LX_SETFSUID || n == LX_SETFSGID || n == LX_SETGROUPS;
 }
 
-/// System call n of process pid, with its first three arguments.
-fn lx_cred_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+/// The host id for id a that process pid passes to a call on users (g 0)
+/// or groups (g 1), or UM_BAD if its namespace has no map for it.
+fn cred_in(k: &Kernel, pid: u64, g: u64, a: u64) -> u64
+  requires kok(k) && pid < NPROC && g < 2
+  ensures result <= UM_BAD
+{
+  return id_in(k, pid, g, a);
+}
+
+/// System call n of process pid, with its first three arguments. In a user
+/// namespace the ids go through its maps (src/lxuser.bastio), and its
+/// mapped root may change them to mapped ones.
+fn lx_cred_call(k: &mut Kernel, pid: u64, n: u64, a0: u64, b0: u64, c0: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
   let mut r = 0;
+  let mut g = 0;                            // users or groups
+  if n == LX_GETGID || n == LX_GETEGID || n == LX_SETGID || n == LX_SETREGID || n == LX_SETRESGID
+      || n == LX_GETRESGID || n == LX_SETFSGID {
+    g = 1;
+  }
+  let mut root = cred_root(k.procs, pid);
+  if !root && g == 0 {
+    root = ns_cap(k, pid, CAP_SETUID);
+  } else if !root {
+    root = ns_cap(k, pid, CAP_SETGID);
+  }
+  let a = cred_in(k, pid, g, a0);
+  let b = cred_in(k, pid, g, b0);
+  let c = cred_in(k, pid, g, c0);
+  let setter = n == LX_SETUID || n == LX_SETGID || n == LX_SETREUID || n == LX_SETREGID
+    || n == LX_SETRESUID || n == LX_SETRESGID;
   if n == LX_GETUID {
-    r = id_get(k.procs, pid, F_UID, false);
+    r = id_out(k, pid, 0, id_get(k.procs, pid, F_UID, false));
   } else if n == LX_GETEUID {
-    r = id_get(k.procs, pid, F_UID, true);
+    r = id_out(k, pid, 0, id_get(k.procs, pid, F_UID, true));
   } else if n == LX_GETGID {
-    r = id_get(k.procs, pid, F_GID, false);
+    r = id_out(k, pid, 1, id_get(k.procs, pid, F_GID, false));
   } else if n == LX_GETEGID {
-    r = id_get(k.procs, pid, F_GID, true);
+    r = id_out(k, pid, 1, id_get(k.procs, pid, F_GID, true));
+  } else if setter && (a == UM_BAD || b == UM_BAD || c == UM_BAD) {
+    r = EINVAL;                             // an id the namespace does not map
   } else if n == LX_SETUID {
-    r = set_id(&mut k.procs, pid, F_UID, F_SUID, a);
+    r = set_id(&mut k.procs, pid, root, F_UID, F_SUID, a);
   } else if n == LX_SETGID {
-    r = set_id(&mut k.procs, pid, F_GID, F_SGID, a);
+    r = set_id(&mut k.procs, pid, root, F_GID, F_SGID, a);
   } else if n == LX_SETREUID {
-    r = set_re_id(&mut k.procs, pid, F_UID, F_SUID, a, b);
+    r = set_re_id(&mut k.procs, pid, root, F_UID, F_SUID, a, b);
   } else if n == LX_SETREGID {
-    r = set_re_id(&mut k.procs, pid, F_GID, F_SGID, a, b);
+    r = set_re_id(&mut k.procs, pid, root, F_GID, F_SGID, a, b);
   } else if n == LX_SETRESUID {
-    r = set_res_id(&mut k.procs, pid, F_UID, F_SUID, a, b, c);
+    r = set_res_id(&mut k.procs, pid, root, F_UID, F_SUID, a, b, c);
   } else if n == LX_SETRESGID {
-    r = set_res_id(&mut k.procs, pid, F_GID, F_SGID, a, b, c);
-  } else if n == LX_SETFSUID {
-    r = set_fs_id(&mut k.procs, pid, F_UID, F_SUID, a);
-  } else if n == LX_SETFSGID {
-    r = set_fs_id(&mut k.procs, pid, F_GID, F_SGID, a);
+    r = set_res_id(&mut k.procs, pid, root, F_GID, F_SGID, a, b, c);
+  } else if n == LX_SETFSUID || n == LX_SETFSGID {
+    let mut f = a;
+    if a == UM_BAD {
+      f = NO_ID;                            // refused without a word, as Linux does
+    }
+    if n == LX_SETFSUID {
+      r = set_fs_id(&mut k.procs, pid, root, F_UID, F_SUID, f);
+    } else {
+      r = set_fs_id(&mut k.procs, pid, root, F_GID, F_SGID, f);
+    }
+    r = id_out(k, pid, g, r % ID_SPAN);
   } else if n == LX_GETRESUID {
-    r = get_res_id(&mut k, pid, F_UID, F_SUID, a, b, c);
+    r = get_res_id(&mut k, pid, 0, F_UID, F_SUID, a0, b0, c0);
   } else if n == LX_GETRESGID {
-    r = get_res_id(&mut k, pid, F_GID, F_SGID, a, b, c);
+    r = get_res_id(&mut k, pid, 1, F_GID, F_SGID, a0, b0, c0);
   } else if n == LX_SETGROUPS {
-    r = lx_setgroups(&mut k, pid, a, b);
+    r = lx_setgroups(&mut k, pid, a0, b0);
   }
   ret(&mut k.procs, pid, r);
   return KEEP;
