@@ -44,24 +44,27 @@ def is_elf(path):
         return f.read(4) == b"\x7fELF"
 
 
-def load_tests(ltp, only, skip):
+def load_tests(ltp, only, skip, suites=()):
     """The entries of runtest/syscalls whose program was built: (tag, argv,
     files), files being the programs it needs on the disk: its own, and the
     helper programs next to it that are not tests themselves (execve_child
     and the like, which LTP copies from the directory a test starts in)."""
     progs, dirs = {}, {}
-    for root, _, files in os.walk(os.path.join(ltp, "testcases", "kernel", "syscalls")):
-        for f in files:
-            p = os.path.join(root, f)
-            if os.access(p, os.X_OK) and "." not in f and is_elf(p) and f not in progs:
-                progs[f] = p
-                dirs.setdefault(root, []).append(f)
+    names = ["syscalls", *suites]
+    for suite in names:
+        for root, _, files in os.walk(os.path.join(ltp, "testcases", "kernel", suite)):
+            for f in sorted(files):
+                p = os.path.join(root, f)
+                if os.access(p, os.X_OK) and "." not in f and is_elf(p) and f not in progs:
+                    progs[f] = p
+                    dirs.setdefault(root, []).append(f)
     entries = []
-    for line in open(os.path.join(ltp, "runtest", "syscalls")):
-        line = line.strip()
-        if line and not line.startswith("#"):
-            tag, cmd = line.split(None, 1)
-            entries.append((tag, shlex.split(cmd)))
+    for suite in names:
+        for line in open(os.path.join(ltp, "runtest", suite)):
+            line = line.strip()
+            if line and not line.startswith("#"):
+                tag, cmd = line.split(None, 1)
+                entries.append((tag, shlex.split(cmd)))
     tested = {argv[0] for _, argv in entries}
     tests, missing = [], []
     for tag, argv in entries:
@@ -316,6 +319,8 @@ def main():
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2),
                     help="machines run at once (each has two processors)")
     ap.add_argument("--update-baseline", action="store_true")
+    ap.add_argument("--suite", action="append", default=[],
+                    help="also run runtest/NAME with the programs in testcases/kernel/NAME (pty, sched, ...)")
     args = ap.parse_args()
 
     base = os.path.join(HERE, "ltp_baseline.txt")
@@ -323,7 +328,7 @@ def main():
     if os.path.exists(base) and not args.update_baseline:
         gated = {l.strip() for l in open(base) if l.strip() and not l.startswith("#")}
     skip = load_skip()
-    tests, progs, missing = load_tests(args.ltp, args.only, skip)
+    tests, progs, missing = load_tests(args.ltp, args.only, skip, args.suite)
     os.makedirs(args.out, exist_ok=True)
     t0 = time.time()
     with open(os.path.join(args.out, "serial.log"), "wb") as log:

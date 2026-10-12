@@ -19,7 +19,6 @@ const LX_SYSFS: u64 = 139;
 const LX_VHANGUP: u64 = 153;
 const LX_READAHEAD: u64 = 187;
 const LX_SYNC_FILE_RANGE: u64 = 277;
-const LX_MLOCK2: u64 = 325;
 const LX_PREADV2: u64 = 327;
 const LX_PWRITEV2: u64 = 328;
 const LX_FCHMODAT2: u64 = 452;
@@ -72,6 +71,9 @@ fn lx_alias(k: &Kernel, pid: u64, n: u64) -> u64
       }
       return LX_WRITEV;
     }
+  }
+  if n == LX_MLOCK2 && pget(k.procs, pid, F_REGS + R_RDX) & !MLOCK_ONFAULT == 0 {
+    return LX_MLOCK;                        // mlock, the flag read where it counts (lx_misc_call)
   }
   return n;
 }

@@ -479,6 +479,8 @@ t_ltp3: copy_file_range into an O_APPEND file is EBADF
 t_ltp3: copy_file_range past the largest file is EFBIG
 t_ltp3: and a length that wraps is EOVERFLOW
 t_ltp3: copy_file_range of overlapping ranges in one file is EINVAL
+t_ltp3: an epoll instance watches 20 descriptors
+t_ltp3: epoll_wait with room for 3 reports each of 20 ready descriptors in turn
 t_ltp3: name_to_handle_at with no room is EOVERFLOW and says how much it needs
 t_ltp3: open_by_handle_at opens the same file
 t_ltp3: readlinkat of that descriptor and "" reads the link
@@ -486,6 +488,26 @@ t_ltp3: rename out of a mount is EXDEV
 t_ltp3: unlinkat with AT_REMOVEDIR of a file is ENOTDIR
 t_ltp3: unlinkat with an unknown flag is EINVAL, before the path
 t_ltp3: with that room it gives the handle and a mount id
+t_ltp3: utime sets the access time
+t_ltp3: utime sets the modification time
+t_ltp3: utimensat with UTIME_OMIT keeps the access time
+t_ltp3: utimensat with UTIME_OMIT keeps the modification time
+t_ltp3: TCGETA on a terminal succeeds
+t_ltp3: TCGETA with a bad address is EFAULT
+t_ltp3: an unknown terminal request is ENOTTY
+t_ltp3: sendfile to a unix socket sends the bytes
+t_ltp3: sendfile to a full non-blocking unix socket is EAGAIN
+t_ltp3: mlock counts the pages it locks
+t_ltp3: mlock of pages already locked counts them once
+t_ltp3: munlock of one locked page gives back one page
+t_ltp3: munlock of a page not locked gives back nothing
+t_ltp3: munlock of the rest gives back the rest
+t_ltp3: mlock2 with MLOCK_ONFAULT locks the range
+t_ltp3: a write past the largest file is EFBIG, not 0
+t_ltp3: TCSETA is read back by TCGETA
+t_ltp3: the window size keeps its pixel fields
+t_ltp3: TIOCGETD reports N_TTY
+t_ltp3: /proc/self/fd lists the open descriptors
 t_mem: 64 MiB of address space
 t_mem: FUTEX_CMP_REQUEUE moves timed waiters across processes
 t_mem: FUTEX_CMP_REQUEUE with a negative count is EINVAL

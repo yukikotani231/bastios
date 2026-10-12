@@ -25,7 +25,6 @@ const LOCK_EX: u64 = 2;
 const LOCK_UN: u64 = 8;
 const MFD_CLOEXEC: u64 = 1;
 const COPY_MAX: u64 = 0x7FFFF000;         // the most one sendfile moves, as on Linux
-const EFBIG: u64 = 18446744073709551589;      // 2^64 - 27
 const ENODEV: u64 = 18446744073709551597;     // 2^64 - 19
 
 fn is_more_call(n: u64) -> bool {
@@ -94,6 +93,13 @@ fn put_xfer(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, n: u64, off: u64)
     let w = tcp_send_xfer(&mut k, pid, out, n, false);  // src/lxtcp.bastio
     if w > n && w <= XFER {
       return n;                             // (tcp_send never takes more than it is given)
+    }
+    return w;
+  }
+  if d.kind == K_SOCK && is_unix(k, pid, out) {
+    let w = ux_send_xfer(&mut k, pid, out, n);
+    if w == SK_WAIT {
+      return EAGAIN;                        // the channel is full: try again
     }
     return w;
   }

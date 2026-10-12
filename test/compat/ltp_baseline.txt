@@ -117,6 +117,8 @@ epoll_wait08
 epoll_wait09
 epoll_wait11
 epoll_wait12
+epoll_wait13
+epoll_wait14
 epoll_wait15
 eventfd01
 eventfd02
@@ -322,6 +324,7 @@ inotify05
 inotify10
 inotify_init1_01
 inotify_init1_02
+ioctl01
 ioctl05
 ioctl_loop01
 ioctl_loop02
@@ -391,6 +394,8 @@ mlock01
 mlock02
 mlock03
 mlock04
+mlock202
+mlock203
 mlockall01
 mlockall02
 mlockall03
@@ -645,6 +650,8 @@ sendfile05
 sendfile05_64
 sendfile06
 sendfile06_64
+sendfile07
+sendfile07_64
 sendfile08
 sendfile08_64
 sendmmsg01
@@ -833,8 +840,14 @@ unlinkat01
 unshare02
 ustat01
 ustat02
+utime01
+utime02
+utime03
+utime04
+utime05
 utime06
 utime07
+utimensat01
 vfork01
 vfork02
 vhangup01

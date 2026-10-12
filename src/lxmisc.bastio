@@ -43,6 +43,7 @@ const LX_UTIME: u64 = 132;
 const LX_STATFS: u64 = 137;
 const LX_FSTATFS: u64 = 138;
 const LX_MLOCK: u64 = 149;
+const LX_MLOCK2: u64 = 325;
 const LX_MUNLOCK: u64 = 150;
 const LX_PRCTL: u64 = 157;
 const LX_CAPGET: u64 = 125;
@@ -372,8 +373,58 @@ fn fd_set_meta(k: &mut Kernel, pid: u64, fd: u64, mode: u64, mtime: u64) -> u64
   return set_meta(&mut k, pid, f, mode, mtime, false);
 }
 
-/// Sets f's modification time from the times at user address va (0:
-/// now), laid out as `kind` says. Returns 0 or -errno.
+/// The access time of file handle f whose modification time is mtime.
+/// Only utime and its relatives set one, and it is not saved to disk: an
+/// entry of k.sys holds it against the modification time it was set with,
+/// and a file written since (or a slot another file took) reads as
+/// accessed at its modification time.
+fn atime_of(k: &mut Kernel, f: u64, mtime: u64) -> u64
+  requires kok(k) && f < HFILES
+  ensures kok(k)
+{
+  let at = SYS_AT + (f % AT_N) * 3;
+  if get(k.sys, at) == f + 1 && get(k.sys, at + 2) == mtime {
+    return get(k.sys, at + 1);
+  }
+  return mtime;
+}
+
+/// Records atime for file handle f, whose modification time is now mtime.
+fn atime_put(k: &mut Kernel, f: u64, atime: u64, mtime: u64)
+  requires kok(k) && f < HFILES
+  ensures kok(k)
+{
+  let at = SYS_AT + (f % AT_N) * 3;
+  k.sys = set(k.sys, at, f + 1);
+  k.sys = set(k.sys, at + 1, atime);
+  k.sys = set(k.sys, at + 2, mtime);
+}
+
+/// One time of utime, utimes or utimensat: the seconds (the field at
+/// xfer offset off) and, for TIMES_TIMESPEC, the nanoseconds after them
+/// choose now (UTIME_NOW), keep (UTIME_OMIT, NO_FILE) or the time given.
+fn time_field(k: &mut Kernel, off: u64, kind: u64) -> u64
+  requires kok(k) && off <= 16
+  ensures kok(k)
+{
+  let mut t = get_u64(k.fs.xfer, off);
+  if kind == TIMES_TIMESPEC {
+    let ns = get_u64(k.fs.xfer, off + 8);
+    if ns == UTIME_OMIT {
+      return NO_FILE;
+    }
+    if ns == UTIME_NOW {
+      return k.fs.now;
+    }
+  }
+  if t == NO_FILE {
+    t = NO_FILE - 1;                        // NO_FILE would mean "leave it"
+  }
+  return t;
+}
+
+/// Sets f's access and modification times from the times at user address
+/// va (0: now), laid out as `kind` says. Returns 0 or -errno.
 fn set_times(k: &mut Kernel, pid: u64, f: u64, va: u64, kind: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -381,6 +432,7 @@ fn set_times(k: &mut Kernel, pid: u64, f: u64, va: u64, kind: u64) -> u64
   if f == NO_RESULT {
     return k.perr;
   }
+  let mut a = k.fs.now;
   let mut t = k.fs.now;
   let mut now = va == 0;
   if va != 0 {
@@ -388,25 +440,33 @@ fn set_times(k: &mut Kernel, pid: u64, f: u64, va: u64, kind: u64) -> u64
       return EFAULT;
     }
     if kind == TIMES_UTIMBUF {
-      t = get_u64(k.fs.xfer, 8);
+      a = time_field(&mut k, 0, kind);
+      t = time_field(&mut k, 8, kind);
     } else {
-      t = get_u64(k.fs.xfer, 16);
+      a = time_field(&mut k, 0, kind);
+      t = time_field(&mut k, 16, kind);
       if kind == TIMES_TIMESPEC {
-        let ns = get_u64(k.fs.xfer, 24);
-        if ns == UTIME_OMIT {
-          return 0;
-        }
-        if ns == UTIME_NOW {
-          t = k.fs.now;
-          now = true;
-        }
+        // Only "now" and "keep" need no more than write permission.
+        now = (a == NO_FILE || get_u64(k.fs.xfer, 8) == UTIME_NOW) && (t == NO_FILE || get_u64(k.fs.xfer, 24) == UTIME_NOW);
       }
     }
   }
-  if t == NO_FILE {
-    t = NO_FILE - 1;                        // NO_FILE would mean "leave it"
+  let mut was = 0;
+  if f < HFILES {
+    let m = vfs_meta(&mut k.fs, f);
+    was = atime_of(&mut k, f, m.mtime);
   }
-  return set_meta(&mut k, pid, f, 65536, t, now);
+  let r = set_meta(&mut k, pid, f, 65536, t, now);
+  if r == 0 && f < HFILES {
+    let m = vfs_meta(&mut k.fs, f);
+    if m.ok {
+      if a == NO_FILE {
+        a = was;
+      }
+      atime_put(&mut k, f, a, m.mtime);
+    }
+  }
+  return r;
 }
 
 fn path_exists(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
@@ -828,11 +888,18 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     if r == 0 {
       // The pages the range covers.
       let bytes = (a % 4096 + smaller(b, USER_SIZE) + 4095) / 4096 * 4096;
-      r = lock_count(&mut k, pid, bytes, n == LX_MLOCK);
-      if r == 0 && n == LX_MLOCK && a >= USER_BASE {
+      let from = smaller((a - smaller(a, USER_BASE)) / 4096, WPAGES);
+      let to = smaller(from + bytes / 4096, WPAGES);
+      if a >= USER_BASE && from < to {
+        r = lock_pages(&mut k, pid, from, to, n == LX_MLOCK);
+      } else {
+        r = lock_count(&mut k, pid, bytes, n == LX_MLOCK);
+      }
+      // mlock2 with MLOCK_ONFAULT locks the range without populating it.
+      let onfault = pget(k.procs, pid, F_REGS + R_RAX) == LX_MLOCK2 && pget(k.procs, pid, F_REGS + R_RDX) % 2 == 1;
+      if r == 0 && n == LX_MLOCK && a >= USER_BASE && !onfault {
         // Locked pages are resident: map those not touched yet (src/lxanon.bastio).
-        let from = (a - USER_BASE) / 4096;
-        anon_reach(&mut k, pid, from, smaller(from + bytes / 4096, WPAGES));
+        anon_reach(&mut k, pid, from, to);
       }
     }
   } else if n == LX_MLOCKALL {
