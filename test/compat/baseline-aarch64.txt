@@ -326,6 +326,7 @@ t_ltp2: SIOCGIFCONF lists lo
 t_ltp2: SO_PEERCRED: the connecting child on the accepted socket, ourselves on a socketpair
 t_ltp2: TCP: bind to port 0 picks one, a second connect is EISCONN, AF_UNSPEC disconnects
 t_ltp2: UDP sendmsg joins its buffers into one datagram; bind errors
+t_ltp2: a CPU-time POSIX timer, and overruns of a timer set in the past
 t_ltp2: a FIFO opened O_RDWR reads what it writes
 t_ltp2: a file reads 8 KiB in one read
 t_ltp2: a page fault runs the SIGSEGV handler
@@ -428,6 +429,7 @@ t_ltp3: mincore says untouched anonymous pages are not resident
 t_ltp3: mlock counts the pages it locks
 t_ltp3: mlock makes the pages resident
 t_ltp3: mlock of pages already locked counts them once
+t_ltp3: mlock2 with MLOCK_ONFAULT locks the range
 t_ltp3: mremap grows a shared file mapping and its tail writes reach the file
 t_ltp3: munlock of a page not locked gives back nothing
 t_ltp3: munlock of one locked page gives back one page
@@ -585,6 +587,8 @@ t_newer: getdents into a byte
 t_newer: getdents64 at the end
 t_newer: getdents64 lists . and ..
 t_newer: lseek rewinds a directory
+t_newer: membarrier query
+t_newer: membarrier unknown command
 t_newer: pidfd_getfd takes the child's pipe end
 t_newer: pidfd_open of itself is close-on-exec
 t_newer: pidfd_open with bad flags
