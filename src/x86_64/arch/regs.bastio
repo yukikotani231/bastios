@@ -1,0 +1,16 @@
+// The saved user registers of a process on x86-64: a row holds 21 words in
+// `cpu_get` order (see R_* in src/proc.bastio) and the native system-call ABI
+// passes the number in rax and arguments in rdi, rsi, rdx.
+
+const NREGS: u64 = 21;           // saved words, in `cpu_get` order
+const REGS_EXT: u64 = 0;         // words a row holds past the usual 72 for registers beyond 21
+
+const R_NUM: u64 = 0;            // the native system call number
+const R_RET: u64 = 0;            // its result
+const R_ARG0: u64 = 5;
+const R_ARG1: u64 = 4;
+const R_ARG2: u64 = 3;
+const R_PC: u64 = 15;
+const R_SP: u64 = 16;
+const R_FLAGS: u64 = 17;
+const FLAGS_INIT: u64 = 0x202;   // rflags of a new process: interrupts on

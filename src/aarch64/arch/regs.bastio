@@ -1,0 +1,18 @@
+// The saved user registers of a process on AArch64: x0-x30, SP_EL0, ELR,
+// SPSR, ESR, FAR and TPIDR_EL0 (37 words, the `cpu_get` order). The first 21 sit
+// in the row's register block; the others in REGS_EXT words past the row's
+// usual 72. The native system-call ABI: number in x8, arguments in x0-x2,
+// result in x0.
+
+const NREGS: u64 = 37;
+const REGS_EXT: u64 = 16;
+
+const R_NUM: u64 = 8;
+const R_RET: u64 = 0;
+const R_ARG0: u64 = 0;
+const R_ARG1: u64 = 1;
+const R_ARG2: u64 = 2;
+const R_PC: u64 = 32;
+const R_SP: u64 = 31;
+const R_FLAGS: u64 = 33;
+const FLAGS_INIT: u64 = 0;       // SPSR of a new process: EL0t, interrupts on

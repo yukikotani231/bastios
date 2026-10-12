@@ -3,6 +3,7 @@
 // address space is element `pid` of a vector of spaces.
 
 import "console.bastio";
+import "regs.bastio";
 import "pages.bastio";
 import "space.bastio";
 import "elf.bastio";
@@ -18,7 +19,7 @@ import "snd.bastio";
 // ALARMS_LEN and HOLES_LEN follow it, and a
 // signal's sender word keeps the pid in 8 bits (post_from, src/lxsig.bastio).
 const NPROC: u64 = 256;
-const STRIDE: u64 = 72;
+const STRIDE: u64 = 72 + REGS_EXT;
 const PTAB_LEN: u64 = NPROC * STRIDE;   // the most the table grows to
 const PGROW: u64 = 32;               // rows the process table starts with (it doubles from there)
 
@@ -112,7 +113,7 @@ fn shown_code(code: u64) -> u64 {
   return code;
 }
 
-// Saved register numbers.
+// Saved register numbers. The rest (R_NUM, R_PC, ...) and NREGS are per architecture (src/regs.bastio).
 const R_RAX: u64 = 0;
 const R_RDX: u64 = 3;
 const R_RSI: u64 = 4;
@@ -191,6 +192,18 @@ fn pset(procs: &mut Buf, pid: u64, f: u64, v: u64)
   if i < len(procs) {
     procs = set(procs, i, v);
   }
+}
+
+/// The row word that holds saved register r: the register block, or past the
+/// row's usual 72 words for the registers beyond the first 21.
+fn reg_word(r: u64) -> u64
+  requires r < NREGS
+  ensures result < STRIDE
+{
+  if r < 21 {
+    return F_REGS + r;
+  }
+  return 72 + (r - 21);
 }
 
 fn state(procs: &Buf, pid: u64) -> u64
@@ -399,7 +412,7 @@ fn wake_readers(procs: &mut Buf, q: &mut Queue, line: &Buf)
     invariant 1 <= p && p <= NPROC && ptab_ok(procs) && qok(q)
   {
     if state(procs, p) == READING && q.r.n > 0 {
-      pset(&mut procs, p, F_REGS + R_RAX, q_pop(&mut q));
+      pset(&mut procs, p, reg_word(R_RET), q_pop(&mut q));
       pset(&mut procs, p, F_STATE, READY);
     }
     // A Linux read restarts its system call, which takes the line itself.
@@ -1464,10 +1477,10 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
     return sp;
   }
   let mut r = 0;
-  while r < 21
-    invariant r <= 21 && ptab_ok(procs)
+  while r < NREGS
+    invariant r <= NREGS && ptab_ok(procs)
   {
-    pset(&mut procs, pid, F_REGS + r, 0);
+    pset(&mut procs, pid, reg_word(r), 0);
     r = r + 1;
   }
   pset(&mut procs, pid, F_PROG, NPROGS);       // a file: NPROGS + 1 + its handle, for /proc/PID/exe
@@ -1477,9 +1490,9 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
   if !src.file {
     pset(&mut procs, pid, F_PROG, src.prog);
   }
-  pset(&mut procs, pid, F_REGS + R_RIP, entry);
-  pset(&mut procs, pid, F_REGS + R_RSP, rsp);
-  pset(&mut procs, pid, F_REGS + R_RFLAGS, 0x202);
+  pset(&mut procs, pid, reg_word(R_PC), entry);
+  pset(&mut procs, pid, reg_word(R_SP), rsp);
+  pset(&mut procs, pid, reg_word(R_FLAGS), FLAGS_INIT);
   pset(&mut procs, pid, F_BRK, 0);
   pset(&mut procs, pid, F_BRK0, 0);
   pset(&mut procs, pid, F_MMAP, 0);
@@ -1653,7 +1666,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
   if par == 0 || par >= NPROC {
     pset(&mut k.procs, pid, F_STATE, FREE);       // nobody will collect it
   } else if state(k.procs, par) == WAITING && pget(k.procs, par, F_WAIT) == pid {
-    pset(&mut k.procs, par, F_REGS + R_RAX, shown_code(code));
+    pset(&mut k.procs, par, reg_word(R_RET), shown_code(code));
     pset(&mut k.procs, par, F_STATE, READY);
     pset(&mut k.procs, pid, F_STATE, FREE);
   } else if state(k.procs, par) == LXWAITING {
