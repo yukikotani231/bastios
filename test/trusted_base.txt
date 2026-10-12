@@ -7,8 +7,8 @@ boot/libc.c: 35 lines
 boot/limine.conf: 29 lines
 boot/linker.ld: 15 lines
 boot/multiboot.c: 240 lines
-boot/platform.c: 47 lines
+boot/platform.c: 48 lines
 boot/smp.c: 693 lines
 user/start.S: 19 lines
 user/user.ld: 15 lines
-total: 1686 lines
+total: 1687 lines

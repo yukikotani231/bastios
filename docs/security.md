@@ -109,11 +109,18 @@ Known gaps, most serious first.
    Linux it is `ENXIO` without a controlling terminal); names of unix
    sockets in the abstract namespace (a leading 0 byte) have no
    permissions, as on Linux.
-4. Not implemented, so not a hole: `ptrace`, `/proc/PID/mem`, `environ`
+4. Not implemented, so not a hole: `/proc/PID/mem`, `environ`
    and `maps`, `chroot`, `iopl` and `ioperm`, `syslog`, `swapon` and
    `pivot_root` all fail (`ENOSYS` or missing). `process_vm_readv`,
-   `process_vm_writev`, `pidfd_getfd` and `kcmp` reach another process only
+   `process_vm_writev`, `pidfd_getfd`, `kcmp` and `ptrace` (`PTRACE_ATTACH`
+   and `PTRACE_SEIZE`; `PTRACE_TRACEME` lets a process's parent trace it,
+   as on Linux) reach another process only
    with the same user and group ids (real, effective, saved and
    file-system), or as root
-   (`src/lxpidfd.bastio`), as Linux's `PTRACE_MODE_ATTACH_REALCREDS` asks;
-   there is no Yama ptrace scope on top of that.
+   (`src/lxpidfd.bastio`, `src/lxptrace.bastio`), as Linux's
+   `PTRACE_MODE_ATTACH_REALCREDS` asks; there is no Yama ptrace scope on
+   top of that, and no `CAP_SYS_PTRACE` or dumpable flag. A tracer cannot
+   give a tracee a kernel address, a segment or the trap flag: the entry to
+   user mode (`boot/boot.S`) takes only the general registers, rip, rsp,
+   the arithmetic flags and the fs base from the saved context, and checks
+   rip, rsp and the fs base are user addresses.

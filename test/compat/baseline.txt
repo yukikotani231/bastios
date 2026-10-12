@@ -774,6 +774,22 @@ t_proc: uname
 t_proc: wait with no children is ECHILD
 t_proc: waitid
 t_proc: waitpid WNOHANG
+t_ptrace: PTRACE_ATTACH stops the target with SIGSTOP
+t_ptrace: PTRACE_CONT with a signal runs the handler for it
+t_ptrace: PTRACE_CONT without a signal drops the one that stopped it, and the child saw the poke
+t_ptrace: PTRACE_DETACH lets it run on
+t_ptrace: PTRACE_GETREGS gives a user rip and rsp
+t_ptrace: PTRACE_KILL ends the tracee
+t_ptrace: PTRACE_PEEKDATA reads the tracee's memory
+t_ptrace: PTRACE_PEEKUSER reads a register
+t_ptrace: PTRACE_POKEDATA writes it
+t_ptrace: a process that does not exist is ESRCH
+t_ptrace: a process that is not a tracee is ESRCH
+t_ptrace: a traced child stops for a signal and the tracer hears of it
+t_ptrace: a traced child stops with SIGTRAP after execve
+t_ptrace: a tracee that is running is ESRCH
+t_ptrace: attaching to itself is EPERM
+t_ptrace: attaching to what is traced already is EPERM
 t_pty: /dev/tty in the child's session is its pty
 t_pty: Ctrl-C sends SIGINT to the foreground group
 t_pty: Ctrl-D on an empty line reads as end of file

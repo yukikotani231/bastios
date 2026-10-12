@@ -339,6 +339,9 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
       put_fpu(&mut k.fpus, pid, Fpu::State(f));
     },
   }
+  if pid >= 1 && tr_tracer(k, pid) != 0 {
+    post_from(&mut k, pid, 5, pid);   // SIGTRAP: a traced process stops after execve (src/lxptrace.bastio)
+  }
   return 0;
 }
 
@@ -832,10 +835,11 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
   while c < NPROC
     invariant 1 <= c && c <= NPROC && kok(k)
   {
-    if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
+    if (pget(k.procs, c, F_PARENT) == pid || traced_by(k, c, pid)) && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
       found = true;
       // WUNTRACED: stopped (status sig << 8 | 0x7f); WCONTINUED: 0xffff.
-      let jr = jc_report(&mut k, c, options & 2 != 0, options & 8 != 0, false);
+      // A tracer hears of the stops of what it traces without asking.
+      let jr = jc_report(&mut k, c, options & 2 != 0 || traced_by(k, c, pid), options & 8 != 0, false);
       if jr != 0 {
         if status != 0 {
           lx_fill(&mut k, 0, 4);
@@ -868,8 +872,12 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
             return KEEP;
           }
         }
-        tm_reap(&mut k, pid, c);
-        pset(&mut k.procs, c, F_STATE, FREE);
+        if pget(k.procs, c, F_PARENT) == pid {
+          tm_reap(&mut k, pid, c);
+          pset(&mut k.procs, c, F_STATE, FREE);
+        } else {
+          tr_put(&mut k, c, 0);             // its tracer has heard; the parent reaps it
+        }
         ret(&mut k.procs, pid, vpid_of(k, pid, c));
         return KEEP;
       }
@@ -940,9 +948,9 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
   while c < NPROC
     invariant 1 <= c && c <= NPROC && kok(k)
   {
-    if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
+    if (pget(k.procs, c, F_PARENT) == pid || traced_by(k, c, pid)) && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
       found = true;
-      let jr = jc_report(&mut k, c, options & 2 != 0, options & 8 != 0, options & 0x1000000 != 0);
+      let jr = jc_report(&mut k, c, options & 2 != 0 || traced_by(k, c, pid), options & 8 != 0, options & 0x1000000 != 0);
       if jr != 0 {
         if info != 0 {
           lx_fill(&mut k, 0, 128);
@@ -977,8 +985,12 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
           }
         }
         if options & 0x1000000 == 0 {
-          tm_reap(&mut k, pid, c);
-          pset(&mut k.procs, c, F_STATE, FREE);
+          if pget(k.procs, c, F_PARENT) == pid {
+            tm_reap(&mut k, pid, c);
+            pset(&mut k.procs, c, F_STATE, FREE);
+          } else {
+            tr_put(&mut k, c, 0);           // its tracer has heard; the parent reaps it
+          }
         }
         ret(&mut k.procs, pid, 0);
         return KEEP;

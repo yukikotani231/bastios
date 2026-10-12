@@ -42,6 +42,7 @@ import "lxptimer.bastio";
 import "lxmore.bastio";
 import "lxextra.bastio";
 import "lxpidfd.bastio";
+import "lxptrace.bastio";
 import "lxsplice.bastio";
 import "lxmsg.bastio";
 import "acpi.bastio";

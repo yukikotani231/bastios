@@ -88,6 +88,7 @@ fn pr_fork(k: &mut Kernel, p: u64, c: u64)
   rl_fork(&mut k, p, c);                  // and the resource limits
   dl_fork(&mut k, p, c);                  // and the deadline parameters
   jc_set(&mut k, c, 0);                   // nothing to report about the child yet
+  tr_put(&mut k, c, 0);                   // and nobody traces it (src/lxptrace.bastio)
   cap_fork(&mut k, p, c);                 // and the capabilities (src/lxcap.bastio)
   k.sys = set(k.sys, SYS_IOP + c, get(k.sys, SYS_IOP + p));   // and the I/O priority (src/lxprio.bastio)
 }
@@ -118,6 +119,18 @@ fn pr_exit(k: &mut Kernel, p: u64)
     let st = state(k.procs, c);
     if c != p && s != 0 && s <= NSIG && pget(k.procs, c, F_PARENT) == p && st != FREE && st != ZOMBIE {
       post_from(&mut k, c, s, p);
+    }
+    if c != p && st != FREE && traced_by(k, c, p) {
+      // The tracer is gone: what it traced runs free (or dies, with PTRACE_O_EXITKILL).
+      let w = tr_get(k, c);
+      tr_put(&mut k, c, 0);
+      if st == STOPPED && tr_stopped(w) == 1 {
+        pset(&mut k.procs, c, F_STATE, READY);
+        jc_set(&mut k, c, jc_get(k, c) / JC_EXECED % 2 * JC_EXECED);
+      }
+      if tr_opt(w) / 256 == 1 && st != ZOMBIE {
+        post_from(&mut k, c, SIGKILL, p);
+      }
     }
     c = c + 1;
   }
