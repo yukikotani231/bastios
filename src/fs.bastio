@@ -855,10 +855,7 @@ fn vfs_unlink(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
   if i >= NFILES || ram_is_dir(&mut v.ram, i) {
     return false;
   }
-  let mut l = NFILES;
-  if v.rlinked {
-    l = ram_link_to(&mut v.ram, i);    // a walk of the whole table: only once a link was made
-  }
+  let l = ram_link_to(&mut v.ram, i);
   if l < NFILES {
     // The file keeps its node (descriptors and other links name it) and
     // takes the link's name instead.
