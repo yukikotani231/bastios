@@ -634,8 +634,9 @@ fn hole_within(k: &Kernel, pid: u64, first: u64, end: u64) -> bool
 /// lies above it is taken, so a hint is taken in two cases: below the
 /// mmap area (and above the program break), where F_MMAP moves down to it
 /// and the space between becomes a hole, so the mapping can grow up into
-/// it with the next hint (the Go runtime's heap arenas start at
-/// 0xc000000000 and grow so); or inside one hole. A PROT_NONE mapping
+/// it with the next hint (the Go runtime's heap arenas grow so; its first
+/// hint, 0xc000000000, lies beyond the 512 GiB window, which is not taken,
+/// and Go tries the next hint or takes any address); or inside one hole. A PROT_NONE mapping
 /// made with MAP_FIXED below the mmap area leaves no record, so a hint
 /// may still land on one (not Linux's behaviour).
 fn mmap_hint(k: &mut Kernel, pid: u64, addr: u64, pages: u64) -> u64

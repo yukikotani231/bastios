@@ -1,8 +1,8 @@
-/* User programs live at USER_BASE (slot 1 of the top-level page table). */
+/* User programs live at USER_BASE: address 0, the start of the window. */
 ENTRY(_start)
 SECTIONS
 {
-    . = 0x8000000000;
+    . = 0;
     __image_start = .;
     .header : { KEEP(*(.header)) }
     .text   : { *(.text .text.*) }

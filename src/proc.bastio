@@ -1384,7 +1384,7 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
       if !isrc.file && isrc.prog >= NPROGS {
         return Space::Empty;
       }
-      let probe = elf_parse(&mut v, isrc);
+      let probe = elf_parse_at(&mut v, isrc, 0);
       let low = (e.end + 4095) / 4096 * 4096;
       if !probe.ok || probe.bias != USER_BASE || probe.ilen != 0 || low > VDSO_PAGE * 4096 || probe.end > VDSO_PAGE * 4096 - low {
         return Space::Empty;

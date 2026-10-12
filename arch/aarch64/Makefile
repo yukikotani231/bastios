@@ -62,8 +62,8 @@ $(B)/user/start.o: user/start-aarch64.S | $(B)/user
 $(B)/user/libc.o: boot/libc.c | $(B)/user
 	$(ACC) $(TCFLAGS) -fpie -c -o $@ $<
 
-$(B)/user/%.elf: $(B)/user/start.o $(B)/user/%.o $(B)/user/libc.o user/user.ld
-	$(ALD) -nostdlib -static -z max-page-size=0x1000 -T user/user.ld --build-id=none --no-warn-rwx-segments \
+$(B)/user/%.elf: $(B)/user/start.o $(B)/user/%.o $(B)/user/libc.o user/user-aarch64.ld
+	$(ALD) -nostdlib -static -z max-page-size=0x1000 -T user/user-aarch64.ld --build-id=none --no-warn-rwx-segments \
 	  -o $@ $(B)/user/start.o $(B)/user/$*.o $(B)/user/libc.o
 
 $(B)/user/%.bin: $(B)/user/%.elf

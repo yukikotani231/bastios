@@ -268,8 +268,8 @@ int main(void) {
            }
            for (int i = 0; i < 6; i++) if (res[i] != MAP_FAILED) munmap(res[i], sz[i]);
            ok; }));
-    EXPECT("mmap takes a free address hint and grows from it, as the Go runtime's heap at 0xc000000000 does", ({
-           char *want = (char *)0xc000000000ul;
+    EXPECT("mmap takes a free address hint and grows from it, as the Go runtime's heap arenas do", ({
+           char *want = (char *)0x4000000000ul;      /* 256 GiB: the user address space is 512 GiB from 0 */
            char *a = mmap(want, 64 << 20, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
            char *b = mmap(want + (64 << 20), 64 << 20, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
            int ok = a == want && b == want + (64 << 20);
