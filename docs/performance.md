@@ -114,7 +114,7 @@ machine, because they come from algorithms, not from emulation.
    root blocks, two flushes, then the directory block. They now share a
    transaction (a batch, `src/diskfs.bastio`): the blocks stay in the cache
    until the batch commits, on `fsync`, `sync`, `msync`, a write to another
-   file, any other change to the disk, 32 blocks, or 0.5 s. `filewrite@disk`
+   file, any other change to the disk, 32 blocks, or 0.1 s. `filewrite@disk`
    went from 1.9 to 6.6 MiB/s (median of 3, TCG, same host). The cost is
    that a write is on the disk only after one of those, not when the call
    returns. Reads of a file larger than the block cache reach the disk
