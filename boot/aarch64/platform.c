@@ -61,6 +61,9 @@ static uint64_t ncpu_dt;
  * tree lists (GICv3: distributor, redistributors; GICv2: distributor, CPU
  * interface). QEMU virt's GICv3 is the default. */
 static unsigned gic_ver = 3;
+/* The console: the first PL011 the tree lists (the prelude's bst_uart reads
+ * this; QEMU virt's address is the default). */
+uint64_t bst_uart_base = 0x09000000ull;
 static unsigned psci_smc;                   /* the device tree's psci method: smc (1) or hvc (0, QEMU virt's) */
 static uint64_t GICD = 0x08000000ull;
 static uint64_t GICR = 0x080A0000ull;       /* GICv2: the CPU interface (GICC) */
@@ -136,6 +139,7 @@ static void read_memory(const uint8_t *dtb) {
         uint32_t ac = 2, sc = 1, cac = 1;
         int depth = 0, in_mem = 0, in_cpus = 0, in_cpu = 0;
         unsigned node_gic = 0;                       /* this node's compatible: 3, 2 or 0 */
+        int node_uart = 0, have_uart = 0;
         int in_psci = 0;
         uint64_t node_reg[2] = { 0, 0 };
         int node_regs = 0;
@@ -151,7 +155,7 @@ static void read_memory(const uint8_t *dtb) {
                 in_mem = depth == 2 && starts_with(name, "memory");
                 if (depth == 2 && same(name, "cpus")) in_cpus = 1;
                 in_cpu = in_cpus && depth == 3 && starts_with(name, "cpu@");
-                if (depth == 2) { node_gic = 0; node_regs = 0; }
+                if (depth == 2) { node_gic = 0; node_regs = 0; node_uart = 0; }
                 in_psci = depth == 2 && same(name, "psci");
             } else if (tok == 2) {
                 if (depth == 2) {
@@ -160,6 +164,10 @@ static void read_memory(const uint8_t *dtb) {
                         gic_ver = node_gic;
                         GICD = node_reg[0];
                         GICR = node_reg[1];
+                    }
+                    if (node_uart && node_regs >= 1 && !have_uart) {
+                        bst_uart_base = node_reg[0];
+                        have_uart = 1;
                     }
                 }
                 depth--;
@@ -177,6 +185,7 @@ static void read_memory(const uint8_t *dtb) {
                 else if (depth == 2 && same(pname, "compatible")) {
                     for (uint32_t o = 0; o < len; ) {
                         const char *c = (const char *)data + o;
+                        if (same(c, "arm,pl011")) node_uart = 1;
                         if (same(c, "arm,gic-v3")) node_gic = 3;
                         else if (same(c, "arm,cortex-a15-gic") || same(c, "arm,gic-400") || same(c, "arm,cortex-a9-gic")) node_gic = 2;
                         while (o < len && data[o]) o++;
@@ -187,6 +196,9 @@ static void read_memory(const uint8_t *dtb) {
                     node_reg[0] = cells(data, ac);
                     node_reg[1] = cells(data + (ac + sc) * 4, ac);
                     node_regs = 2;
+                } else if (depth == 2 && !in_mem && same(pname, "reg") && ac <= 2 && len >= ac * 4) {
+                    node_reg[0] = cells(data, ac);          /* a node with one frame: the UART */
+                    node_regs = 1;
                 }
                 else if (in_cpus && depth == 2 && same(pname, "#address-cells")) cac = be32(data);
                 else if (in_cpu && same(pname, "reg") && cac >= 1 && cac <= 2 && len >= cac * 4 && ncpu_dt < MAX_CPUS)
