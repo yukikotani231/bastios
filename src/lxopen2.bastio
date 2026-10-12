@@ -258,7 +258,7 @@ fn link_on_way(k: &mut Kernel, pid: u64, lp: &Bytes, ln: u64, fl: u64) -> bool
   let tl = ns_tr(&mut k, ns_of(k, pid), lp, ln);
   if tl != NO_RESULT {
     let t1 = proc_vpid(&mut k, tl, pid);
-    let t2 = proc_self(&mut k.fs.xfer, t1, pid);
+    let t2 = proc_task(&mut k, proc_self(&mut k.fs.xfer, t1, pid));
     same = same_span(sv, fl, k.fs.xfer, t2);
   }
   i = 0;

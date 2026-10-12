@@ -916,6 +916,7 @@ t_sysv: shmat, a second view, fork, IPC_RMID
 t_sysv: shmget and shmat errors
 t_thread: /proc/self/stat and status count the threads
 t_thread: /proc/self/task lists the threads, and /proc/self/task/TID has their files
+t_thread: /proc/self/task/TID/fd/N and ns/ are the process's
 t_thread: 4 threads, mutex
 t_thread: condition variable
 t_thread: exit_group while another thread runs keeps its code
