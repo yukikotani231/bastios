@@ -71,7 +71,28 @@ $(B)/user/%.bin: $(B)/user/%.elf
 
 # Linux arm64 programs: ordinary ELF executables, linked at the start of the
 # user window with no libc (mhello is the table's name for the first).
-LXELFS := $(B)/user/mhello.elf $(B)/user/mtest.elf
+LXELFS := $(B)/user/mhello.elf $(B)/user/mtest.elf $(B)/user/ash.elf
+
+# BusyBox's ash (the same source and applets as x86-64's, user/busybox.config)
+# as an ordinary static glibc executable at 0x400000, where Linux links one.
+BUSYBOX_GIT ?= https://github.com/mirror/busybox
+BUSYBOX_TAG ?= 1_36_1
+
+$(B)/busybox/Makefile: | $(B)
+	rm -rf $(B)/busybox
+	git clone -q --depth 1 --branch $(BUSYBOX_TAG) $(BUSYBOX_GIT) $(B)/busybox
+
+$(B)/user/ash.elf: $(B)/busybox/Makefile user/busybox.config | $(B)/user
+	$(MAKE) -C $(B)/busybox -s allnoconfig >/dev/null
+	for o in $$(grep -v '^#' user/busybox.config); do \
+	  sed -i "s/^# $$o is not set/$$o=y/" $(B)/busybox/.config; done
+	yes "" | $(MAKE) -C $(B)/busybox -s oldconfig >/dev/null
+	sed -i -e 's/^CONFIG_FEATURE_DEFAULT_PASSWD_ALGO=.*/CONFIG_FEATURE_DEFAULT_PASSWD_ALGO="sha512"/' \
+	  -e 's/^CONFIG_LAST_ID=.*/CONFIG_LAST_ID=60000/' -e 's/^CONFIG_FIRST_SYSTEM_ID=.*/CONFIG_FIRST_SYSTEM_ID=100/' \
+	  -e 's/^CONFIG_LAST_SYSTEM_ID=.*/CONFIG_LAST_SYSTEM_ID=999/' $(B)/busybox/.config
+	$(MAKE) -C $(B)/busybox -s CROSS_COMPILE=$(CROSS) \
+	  CFLAGS_busybox="-static -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x400000 -Wl,--build-id=none" busybox
+	cp $(B)/busybox/busybox $@
 
 $(B)/user/mhello.elf: user/lxhello-aarch64.c | $(B)/user
 	$(ACC) -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -no-pie -nostdlib -static \
