@@ -461,6 +461,10 @@ steps = [
     # boot below).
     ("mkfifo pp; ls -l pp; echo hi > pp & cat pp; wait; mv pp pq; rm pq; ls pq; mkfifo disk/pf; stat -c %F disk/pf", [b"prw", b"\r\nhi\r\n", b"pq: No such file", b"fifo"], b"\n# "),
     ("echo dh > disk/hk1; ln disk/hk1 disk/hk2; ln disk/hk1 h3; mkdir hd; ln hd hd2; rmdir hd; stat -c %h disk/hk2", [b"Cross-device link", b"not permitted", b"\r\n2\r\n"], b"\n# "),
+    # A file removed while its last writes are still in a batch that was
+    # never queued (the disk never sees them), and one removed after a
+    # second batch over blocks the disk has: both give every block back.
+    ("sync; stat -f -c %f /disk > fr0; i=0; while [ $i -lt 20 ]; do echo data$i > disk/tmpdrop; rm disk/tmpdrop; i=$((i+1)); done; echo old > disk/keepdrop; sync; echo more >> disk/keepdrop; cat disk/keepdrop; rm disk/keepdrop; sync; stat -f -c %f /disk > fr1; cmp fr0 fr1 && echo dropfree=same; ls disk/tmpdrop disk/keepdrop", [b"\r\nold\r\nmore\r\n", b"dropfree=same", b"tmpdrop: No such file"], b"\n# "),
     # Loop devices (src/lxloop.bastio): /dev/loopN are block devices and
     # /dev/loop-control a character device; test/compat/progs/t_dev.c
     # binds one to a file and reads and writes through it.
