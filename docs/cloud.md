@@ -124,3 +124,12 @@ test/shell_test.sh                          # includes three ENA boots, skipped 
   `-m 24M` and below fail the same way. **`-m 16M` prints nothing** because
   the image is linked at 16 MiB (`boot/linker.ld`), which is the end of 16 MiB
   of RAM: the loader has nowhere to put it and QEMU does not complain.
+- **Power off without ACPI.** QEMU's `microvm` (and Firecracker) publish no
+  ACPI tables, so `halt` has no S5 register to write: it stops the processors
+  and the host sees a guest that is still running. A reset through the
+  keyboard controller (`0xFE` to port `0x64`) is how Firecracker guests
+  leave, since it ends the VM there, but on QEMU the same write restarts the
+  guest, so the kernel does not use it as a power off. `reboot` works on both.
+  Telling the two apart needs a way to know the monitor (for example a
+  Firecracker-specific signature in the PVH start info); none is known, so
+  this is left open.

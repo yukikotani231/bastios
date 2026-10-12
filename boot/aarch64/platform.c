@@ -22,6 +22,13 @@
 uint64_t bst_memmap[1 + 2 * MAX_RUNS];
 uint64_t bst_el1_irq;           /* the interrupt bst_cpu_wait waits for, see boot.S */
 
+/* The device tree itself, copied before the page pool can reuse the RAM it
+ * sits in (QEMU puts it in RAM): the kernel reads it byte by byte with
+ * boot_info (INFO_DTB) and parses it in Bastio. */
+#define DTB_MAX 65536
+static uint8_t dtb_copy[DTB_MAX];
+static uint64_t dtb_len;
+
 extern uint64_t bst_kernel_root[512];
 extern uint64_t kernel_l1[512];
 
@@ -111,6 +118,10 @@ static void read_memory(const uint8_t *dtb) {
  * RAM are normal memory (MAIR index 0). */
 void bst_early(const uint8_t *dtb) {
     read_memory(dtb);
+    if (dtb && be32(dtb) == 0xd00dfeed && be32(dtb + 4) <= DTB_MAX) {
+        dtb_len = be32(dtb + 4);
+        for (uint64_t i = 0; i < dtb_len; i++) dtb_copy[i] = dtb[i];
+    }
     uint64_t top = 0;
     for (uint64_t i = 0; i < bst_memmap[0]; i++) {
         uint64_t end = bst_memmap[1 + 2 * i] + bst_memmap[2 + 2 * i];
@@ -179,4 +190,9 @@ uint64_t bst_platform_cpus(void) { return 1; }
 void bst_platform_smp_start(void (*fn)(void *), void *arg) { (void)fn; (void)arg; }
 void bst_platform_smp_join(void) { }
 uint64_t bst_platform_acpi(uint64_t sig, uint64_t off) { (void)sig; (void)off; return 256; }
-uint64_t bst_platform_info(uint64_t what, uint64_t i) { (void)what; (void)i; return 0; }
+/* boot_info: query 10 is the device tree, byte i of it, 256 past its end
+ * (or when there is none); every other query is 0. */
+uint64_t bst_platform_info(uint64_t what, uint64_t i) {
+    if (what != 10) return 0;
+    return i < dtb_len ? dtb_copy[i] : 256;
+}

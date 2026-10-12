@@ -1,0 +1,4 @@
+// The sound card is architecture specific: src/<arch>/arch/snd.bastio, found
+// through the --lib directory the build passes for that architecture.
+
+import "arch/snd.bastio";

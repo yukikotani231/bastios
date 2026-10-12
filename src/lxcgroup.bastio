@@ -20,8 +20,10 @@
 // (threads too) fail with EAGAIN once the group or one above it holds that
 // many tasks, and so does moving a process in.
 //
-// cgroup.freeze reads 0 and takes 0; writing 1 is EOPNOTSUPP, as nothing can be
-// frozen yet.
+// cgroup.freeze: writing 1 stops the group's processes (and those below it,
+// and any that move in or are made there) from being scheduled until 0 is
+// written; cgroup.events shows "frozen 1". A process with a pending SIGKILL
+// still runs, so that it can end.
 //
 // A cgroup namespace (unshare or clone with CLONE_NEWCGROUP) is named by its
 // root, the group the process was in (NSK_CGN). A process in one sees that
@@ -104,6 +106,38 @@ fn cg_in(k: &Kernel, s: u64, anc: u64) -> bool
     i = i + 1;
   }
   return false;
+}
+
+/// Is cgroup s frozen, or is one above it?
+fn cg_frozen(k: &Kernel, s: u64) -> bool
+  requires kok(k) && s < CG_N
+{
+  let mut c = s;
+  let mut i = 0;
+  while i < CG_N
+    invariant i <= CG_N && c < CG_N && kok(k)
+  {
+    if cg_get(k, c, CGW_FRZ) == 1 {
+      return true;
+    }
+    if c == 0 {
+      return false;
+    }
+    c = cg_parent(k, c);
+    i = i + 1;
+  }
+  return false;
+}
+
+/// Is process q kept from running by its cgroup's freeze? A pending SIGKILL
+/// lets it run, so that it can end.
+fn cg_held(k: &Kernel, q: u64) -> bool
+  requires kok(k) && q < NPROC
+{
+  if pget(k.procs, q, F_SIGPEND) & sbit(9) != 0 {
+    return false;
+  }
+  return cg_frozen(k, cg_of(k, q));
 }
 
 /// Is row q a task (not free, not a zombie)?
@@ -559,10 +593,18 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
     return put_ctrls(&mut o, 0, cg_get(k, s, CGW_SUB) % (CG_ALL + 1));
   }
   if f == 3 {
+    let mut a = 0;
     if cg_tasks(k, s) > 0 {
-      return put_s(&mut o, 0, "populated 1\nfrozen 0\n");
+      a = put_s(&mut o, 0, "populated 1\nfrozen ");
+    } else {
+      a = put_s(&mut o, 0, "populated 0\nfrozen ");
     }
-    return put_s(&mut o, 0, "populated 0\nfrozen 0\n");
+    if cg_frozen(k, s) {
+      a = put_c(&mut o, a, 49);
+    } else {
+      a = put_c(&mut o, a, 48);
+    }
+    return put_c(&mut o, a, 10);
   }
   if f == 5 {
     return put_s(&mut o, 0, "domain\n");
@@ -583,7 +625,7 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
     return put_lim(&mut o, 0, cg_get(k, s, CGW_MEM));
   }
   if f == 11 {
-    let a = put_n(&mut o, 0, cg_mem_current(k, s));
+    let a = put_n(&mut o, 0, cg_mem_current(&mut k, s));
     return put_c(&mut o, a, 10);
   }
   if f == 12 {
@@ -617,16 +659,75 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
     return put_s(&mut o, 0, "max\n");
   }
   if f == 16 {
-    return put_s(&mut o, 0, "0\n");          // freezing is not done: always thawed
+    if cg_get(k, s, CGW_FRZ) == 1 {
+      return put_s(&mut o, 0, "1\n");
+    }
+    return put_s(&mut o, 0, "0\n");
   }
   return 0;                                 // cgroup.kill is write-only
 }
 
-/// memory.current of cgroup s: nothing is accounted yet.
-fn cg_mem_current(k: &Kernel, s: u64) -> u64
+/// memory.current of cgroup s: the bytes of memory the processes in it and
+/// below it have, counting each address space once and every page it has
+/// mapped or recorded as anonymous (anon_count), not the page cache or the
+/// kernel's own memory.
+fn cg_mem_current(k: &mut Kernel, s: u64) -> u64
   requires kok(k) && s < CG_N
+  ensures kok(k) && result <= 0x100000000000000
 {
-  return 0;
+  let mut pages = 0;
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && pages <= (q - 1) * WPAGES && kok(k)
+  {
+    if cg_live(k, q) && tgid(k.procs, q) == q && cg_in(k, cg_of(k, q), s) && has_space(&mut k.spaces, q) {
+      let c = anon_count(&mut k, q, 0, WPAGES);
+      if c <= WPAGES {
+        pages = pages + c;
+      }
+    }
+    q = q + 1;
+  }
+  return pages * 4096;
+}
+
+/// Could process pid have `extra` more pages (a mapping, a growing break, a
+/// forked copy) without a memory.max, its own group's or one above it,
+/// being passed? Nothing is counted for a group with no limit.
+fn cg_mem_ok(k: &mut Kernel, pid: u64, extra: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if extra > WPAGES {
+    return false;
+  }
+  let mut c = cg_of(k, pid);
+  let mut i = 0;
+  while i < CG_N
+    invariant i <= CG_N && c < CG_N && kok(k)
+  {
+    let lim = cg_get(k, c, CGW_MEM);
+    if lim != 0 && lim <= 0x100000000000000 {
+      if cg_mem_current(&mut k, c) + extra * 4096 > lim - 1 {
+        return false;
+      }
+    }
+    if c == 0 {
+      return true;
+    }
+    c = cg_parent(k, c);
+    i = i + 1;
+  }
+  return true;
+}
+
+/// Could process pid fork: its address space copied into the same group?
+fn cg_fork_mem_ok(k: &mut Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let own = anon_count(&mut k, pid, 0, WPAGES);
+  return cg_mem_ok(&mut k, pid, own);
 }
 
 /// The root of process pid's cgroup namespace: the group it was in when it
@@ -1129,12 +1230,9 @@ fn cg_write(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
     return n;
   }
   if f == 16 {
-    // Nothing can be frozen yet: 0 is what it already is, 1 is refused.
-    if b.v == 0 {
+    if b.v == 0 || b.v == 1 {
+      cg_put(&mut k, s, CGW_FRZ, b.v);
       return n;
-    }
-    if b.v == 1 {
-      return EOPNOTSUPP;
     }
     return EINVAL;
   }
@@ -1211,6 +1309,7 @@ fn cg_mkdir(k: &mut Kernel, pid: u64, n: u64) -> u64
   cg_put(&mut k, free, CGW_PARENT, par.slot);
   cg_put(&mut k, free, CGW_PIDS, 0);
   cg_put(&mut k, free, CGW_MEM, 0);
+  cg_put(&mut k, free, CGW_FRZ, 0);
   cg_put(&mut k, free, CGW_SUB, 0);
   cg_put(&mut k, free, CGW_CPUQ, 0);
   cg_put(&mut k, free, CGW_CPUP, 0);

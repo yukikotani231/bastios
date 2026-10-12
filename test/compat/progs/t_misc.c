@@ -10,6 +10,22 @@
 #include <termios.h>
 #include <pwd.h>
 #include <sched.h>
+#include <errno.h>
+#include <stddef.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+
+/* The classic BPF and seccomp definitions musl does not ship. */
+struct sock_filter { unsigned short code; unsigned char jt, jf; unsigned int k; };
+struct sock_fprog { unsigned short len; struct sock_filter *filter; };
+#define BPF_STMT(c, k) { (c), 0, 0, (k) }
+#define BPF_JUMP(c, k, jt, jf) { (c), (jt), (jf), (k) }
+#define BPF_LD_W_ABS 0x20
+#define BPF_JEQ_K 0x15
+#define BPF_RET_K 0x06
+#define SECCOMP_MODE_FILTER 2
+#define SECCOMP_RET_ALLOW 0x7fff0000u
+#define SECCOMP_RET_ERRNO 0x00050000u
 
 int main(void) {
     setup();
@@ -38,5 +54,26 @@ int main(void) {
     EXPECT("strtod", strtod("2.5e3", 0) == 2500.0);
     EXPECT("qsort", ({ int v[5] = {5, 1, 4, 2, 3}; int cmp(const void *x, const void *y) { return *(int *)x - *(int *)y; }
            qsort(v, 5, sizeof *v, cmp); v[0] == 1 && v[4] == 5; }));
+    /* A seccomp filter sees getpid and gettid too, which the kernel
+     * would otherwise answer without looking at them. */
+    if (begin("seccomp filter denies getpid")) {
+        pid_t c = fork();
+        if (c == 0) {
+            struct sock_filter f[] = {
+                BPF_STMT(BPF_LD_W_ABS, 0),
+                BPF_JUMP(BPF_JEQ_K, SYS_getpid, 0, 1),
+                BPF_STMT(BPF_RET_K, SECCOMP_RET_ERRNO | EPERM),
+                BPF_STMT(BPF_RET_K, SECCOMP_RET_ALLOW),
+            };
+            struct sock_fprog prog = { sizeof f / sizeof f[0], f };
+            if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) _exit(10);
+            if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) _exit(11);
+            long r = syscall(SYS_getpid);
+            _exit(r == -1 && errno == EPERM && syscall(SYS_gettid) > 0 ? 0 : 12);
+        }
+        int st = 0;
+        if (c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0) pass();
+        else fail("status %#x", st);
+    }
     return done();
 }

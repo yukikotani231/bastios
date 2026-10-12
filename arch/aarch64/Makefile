@@ -70,10 +70,10 @@ $(B)/user/%.bin: $(B)/user/%.elf
 	$(AOBJCOPY) -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := $(wildcard src/*.bastio) $(wildcard src/aarch64/*.bastio)
+KSRCS := $(wildcard src/*.bastio) $(wildcard src/aarch64/*.bastio src/aarch64/arch/*.bastio) $(wildcard files/*)
 
 $(B)/kernel.c: $(KSRCS) $(UBINS) $(BASTIOC) | $(B)
-	$(BASTIOC) --lib $(BASTIOLIB) --target kernel --arch aarch64 -o $@ src/aarch64/main.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --lib src/aarch64 --lib src --target kernel --arch aarch64 -o $@ src/aarch64/main.bastio
 
 $(B)/kernel.o: $(B)/kernel.c
 	$(ACC) $(GCFLAGS) -c -o $@ $<

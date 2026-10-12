@@ -557,6 +557,7 @@ t_misc: prctl PR_SET_NAME
 t_misc: printf %f
 t_misc: qsort
 t_misc: sched_getaffinity
+t_misc: seccomp filter denies getpid
 t_misc: statfs
 t_misc: strtod
 t_misc: sync
@@ -790,6 +791,7 @@ t_ptrace: a traced child stops with SIGTRAP after execve
 t_ptrace: a tracee that is running is ESRCH
 t_ptrace: attaching to itself is EPERM
 t_ptrace: attaching to what is traced already is EPERM
+t_ptrace: PTRACE_SYSCALL stops at getpid and gettid
 t_ptrace: PTRACE_SYSCALL stops before and after a call, in turn
 t_ptrace: at the entry stop orig_rax is the call and rax is -ENOSYS
 t_ptrace: at the exit stop rax is the result, and the call ran once
@@ -893,6 +895,7 @@ t_sock2: write after SHUT_WR is EPIPE
 t_sys: a cgroup namespace roots the tree
 t_sys: adjtimex reads and sets
 t_sys: clock_settime moves CLOCK_REALTIME
+t_sys: memory.max refuses a mapping that would pass it
 t_sys: not root: EPERM
 t_sys: setdomainname
 t_sys: sethostname, uname, /proc/sys/kernel/hostname

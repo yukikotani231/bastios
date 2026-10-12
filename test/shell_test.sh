@@ -400,6 +400,12 @@ steps = [
      [b"\r\n3\r\npids\r\n", b"0::/t", b"can't fork"], b"\n# "),
     ("echo 1 > /sys/fs/cgroup/t/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/t; echo r=$?; mkdir /sys/fs/cgroup/u; rmdir /sys/fs/cgroup/u; echo r=$?; su alice -c 'mkdir /sys/fs/cgroup/x; echo pids.max > /dev/null; echo 5 > /sys/fs/cgroup/pids.max; echo w=$?'",
      [b"r=0", b"r=0", b"Permission denied", b"w=1"], b"\n# "),
+    # cgroup.freeze stops a group's processes from being scheduled until it is
+    # thawed; SIGKILL still ends a frozen process.
+    ("mkdir /sys/fs/cgroup/fz; ash -c 'echo $$ > /sys/fs/cgroup/fz/cgroup.procs; i=0; while :; do i=$((i+1)); echo $i > /tmp/fzc; done' & sleep 1; echo 1 > /sys/fs/cgroup/fz/cgroup.freeze; cat /sys/fs/cgroup/fz/cgroup.freeze /sys/fs/cgroup/fz/cgroup.events; read a < /tmp/fzc; sleep 2; read b < /tmp/fzc; [ \"$a\" = \"$b\" ] && echo held; echo 0 > /sys/fs/cgroup/fz/cgroup.freeze; sleep 2; read c < /tmp/fzc; [ \"$c\" -gt \"$b\" ] && echo thawed",
+     [b"\r\n1\r\npopulated 1\r\nfrozen 1\r\n", b"held", b"thawed"], b"\n# "),
+    ("mkdir /sys/fs/cgroup/fk; ash -c 'echo $$ > /sys/fs/cgroup/fk/cgroup.procs; sleep 100' & sleep 1; echo 1 > /sys/fs/cgroup/fk/cgroup.freeze; echo 1 > /sys/fs/cgroup/fk/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/fk; echo r=$?; echo 1 > /sys/fs/cgroup/fz/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/fz; echo z=$?",
+     [b"r=0", b"z=0"], b"\n# "),
     ("echo root:pw | chpasswd; read l < /etc/shadow; case $l in 'root:$6$'*) echo sha512;; esac; su alice -c 'echo no | su -c id root; echo w=$?; echo pw | su -c id root'",
      [b"\r\nsha512\r\n", b"w=1", b"uid=0(root) gid=0(root)"], b"\n# "),
     # (BusyBox keeps the old /etc files as NAME-: gone, so no pages stay.)
@@ -2108,6 +2114,9 @@ for machine, name, extra, status, wants in (
             ("tick: the PIT\n", "the PIT ticks"),
             ("clock: the time-stamp counter at", "the clock is the TSC"),
             ("kHz, as measured against the PIT", "its rate measured against the PIT"))),
+        # No ACPI: halting only stops the processor, so QEMU is killed (status None).
+        ("microvm", "microvm", [], None, (
+            ("timer: the local APIC timer, counted against the PIT", "the timer is counted against the PIT, not the RTC"),)),
         ("pc,acpi=off,hpet=off,pit=off", "no HPET, PM timer or PIT", exit_dev, 33, (
             ("timer: the local APIC timer, counted against the RTC", "the timer is counted against the RTC"),
             ("tick: the local APIC timer (the PIT does not count)", "the local APIC timer ticks"),

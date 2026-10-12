@@ -9,9 +9,9 @@
 // them blindly is not harmless.
 
 import "virtq.bastio";
+import "vt.bastio";
+import "mmiowin.bastio";
 
-const VM_SLOT0: u64 = 0xFEB00000;     // QEMU microvm: 24 devices from here, 0x200 apart
-const VM_SLOTS: u64 = 24;
 const VM_ID_BLK: u64 = 2;             // virtio device ids
 const VM_ID_NET: u64 = 1;
 
