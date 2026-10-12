@@ -568,6 +568,7 @@ t_misc: seccomp filter denies getpid
 t_misc: statfs
 t_misc: strtod
 t_misc: sync
+t_misc: syslog (klogctl) reports a buffer size and reads nothing; an unknown type is EINVAL
 t_misc: tcgetattr
 t_misc: tcgetpgrp
 t_misc: tcsetattr
