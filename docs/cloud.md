@@ -12,8 +12,8 @@ fits today, and what is not done.
 |---|---|---|
 | Boot | Multiboot (`-kernel`), PVH (Firecracker, Cloud Hypervisor, QEMU `microvm`), or Limine from an ISO or a USB/disk image, under BIOS or UEFI | works; PVH is tested on QEMU only, not on Firecracker; the Linux boot protocol (bzImage) is not done |
 | Console | COM1 (115200 baud) | works; EC2's serial console and most clouds' "serial output" are this |
-| Disk | virtio-blk (PCI), NVMe, AHCI, ATA | works; virtio over MMIO (microVMs) is not done |
-| Network | virtio-net (PCI), Intel e1000 families, **AWS ENA** | works; ENA only against a model, see below |
+| Disk | virtio-blk (PCI), NVMe, AHCI, ATA | works; virtio over MMIO (microVMs) is found at QEMU microvm's slots only, see below |
+| Network | virtio-net (PCI), Intel e1000 families, **AWS ENA** | works; ENA only against a model, see below; virtio-net over MMIO as for disks |
 | Power | ACPI S5 power off, reset through the FADT | works |
 | Clock | HPET, else the ACPI PM timer; TSC calibrated against it | works |
 
@@ -95,15 +95,30 @@ test/shell_test.sh                          # includes three ENA boots, skipped 
 
 ## Other gaps in a cloud guest (issue #228)
 
-- **virtio over MMIO**: what Firecracker and QEMU's `microvm` machine expose.
-  The virtio drivers probe PCI only.
+- **virtio over MMIO** (`src/virtio_mmio.bastio`, and the `Vt` transport in
+  `src/virtq.bastio` that the block and network drivers go through): what
+  Firecracker and QEMU's `microvm` machine expose. Both layouts work:
+  version 1 (legacy registers, the queue given by page number) and version 2
+  (modern: VERSION_1 negotiated, the queue given by three addresses, a
+  12-byte network header). Devices are looked for only on a machine with no
+  PCI host bridge, at QEMU microvm's slots (24 blocks of 512 bytes from
+  `0xFEB00000`); the interrupt line is not used, the queues are polled.
+  Firecracker puts its devices elsewhere and names them on the kernel
+  command line (`virtio_mmio.device=4K@0xd0000000:5`); reading that is not
+  done yet. Tested in `test/shell_test.sh` on `-machine microvm` (disk, DHCP,
+  ping) for both versions.
 - **Firecracker itself.** The PVH entry (an ELF note naming a 32-bit entry
   point; `boot/boot.S` tags the `hvm_start_info` the loader passes and
   `boot/multiboot.c` converts its command line, memory map and RSDP into the
   Multiboot 1 form) is tested by booting the image with its Multiboot header
   blanked on QEMU's `pc` and `microvm` machines, since QEMU prefers
   Multiboot when both are present. Firecracker has not been run.
-- **Boot time and memory under KVM** have not been measured. A first TCG
-  measurement (QEMU 8, no KVM, one CPU, `-kernel`): the 2.5 MB image reaches the
-  `bastios>` prompt in 0.2 to 0.4 s including QEMU's start-up, boots with
-  `-m 32M` and `-m 64M`, and printed nothing with `-m 16M`.
+- **Boot time and memory under KVM** have not been measured: the machine
+  these numbers were taken on has no `/dev/kvm`. Under TCG (QEMU 8, one CPU,
+  `-kernel`) the 2.9 MB image reaches the `bastios>` prompt in 0.2 to 0.4 s
+  including QEMU's start-up. The smallest memory that boots is 36 MiB
+  (`-m 36M`: 1863 pages of 4 KiB free at the prompt); `-m 33M` and `-m 34M`
+  print `bastio: out of memory` (the kernel's own heap does not fit), and
+  `-m 24M` and below fail the same way. **`-m 16M` prints nothing** because
+  the image is linked at 16 MiB (`boot/linker.ld`), which is the end of 16 MiB
+  of RAM: the loader has nowhere to put it and QEMU does not complain.
