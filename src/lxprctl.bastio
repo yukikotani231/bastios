@@ -92,6 +92,7 @@ fn pr_fork(k: &mut Kernel, p: u64, c: u64)
   tr2_put(&mut k, c, 0);
   cap_fork(&mut k, p, c);                 // and the capabilities (src/lxcap.bastio)
   k.sys = set(k.sys, SYS_IOP + c, get(k.sys, SYS_IOP + p));   // and the I/O priority (src/lxprio.bastio)
+  sc_fork(&mut k, p, c);                  // and the seccomp filters (src/lxseccomp.bastio)
 }
 
 /// execve: the name goes back to the program's.
@@ -152,15 +153,20 @@ fn pr_clear(k: &mut Kernel, p: u64)
   }
   rl_clear(&mut k, p);
   cap_clear(&mut k, p);
+  sc_clear(&mut k, p);
   k.sys = set(k.sys, SYS_IOP + p, 0);
 }
 
 /// prctl(op, a, ...) for process pid: the result, or -EINVAL for an
 /// operation not handled here.
-fn lx_prctl(k: &mut Kernel, pid: u64, op: u64, a: u64) -> u64
+fn lx_prctl(k: &mut Kernel, pid: u64, op: u64, a: u64, b: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  let sp = sc_prctl(&mut k, pid, op, a, b);   // no_new_privs and seccomp (src/lxseccomp.bastio)
+  if sp != NO_RESULT {
+    return sp;
+  }
   if op == 23 || op == 24 || op == 27 || op == 28 {
     return cap_prctl(&mut k, pid, op, a);   // capabilities (src/lxcap.bastio)
   }
@@ -177,11 +183,11 @@ fn lx_prctl(k: &mut Kernel, pid: u64, op: u64, a: u64) -> u64
         bfree(nb);
         return EFAULT;
       }
-      let b = bget(k.fs.xfer, 0);
-      if b == 0 {
+      let ch = bget(k.fs.xfer, 0);
+      if ch == 0 {
         more = false;
       } else {
-        bset(&mut nb, i, b);
+        bset(&mut nb, i, ch);
         i = i + 1;
       }
     }

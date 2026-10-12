@@ -1000,6 +1000,14 @@ session("virtio", True, [
     # The user made at the first boot, kept on the disk.
     ("ash", b"built-in shell (ash)", b"\n# "),
     ("id kept; cat /root/kept; stat -c %a /etc/shadow; deluser kept; rm -rf /home/kept /root/kept /etc/*-", [b"uid=1000(kept)", b"\r\nhi\r\n600\r\n"], b"\n# "),
+    # seccomp (src/lxseccomp.bastio): programs that read outside seccomp_data
+    # or jump out of themselves are refused at load; filters answer with an
+    # errno chosen by call number and argument, stack, are inherited, and
+    # TRAP, KILL_PROCESS and strict mode end in SIGSYS or SIGKILL
+    # (user/mseccomp.c). The filter pool comes from the kernel's heap at the
+    # first filter and stays, so this runs in a boot that has not filled
+    # memory (the one with "mkdir full" has no heap to spare).
+    ("mseccomp", b"mseccomp: ok", b"\n# "),
     ("exit", b""),
 ], halt=True, ready=lambda: irq_found("virtio"))
 
