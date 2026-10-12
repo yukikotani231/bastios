@@ -375,7 +375,7 @@ fn blk_free(ports: &mut Ports, win: &mut MmioSpace, b: Blk, m: &mut Mem)
 {
   match b {
     Blk::Ata(a) => { ata_free(&mut ports, a); },
-    Blk::Virtio(v) => { virtio_free(&mut ports, &mut win, v, &mut m); },
+    Blk::Virtio(v) => { vt_release(&mut ports, &mut win, virtio_free(v, &mut m)); },
     Blk::Nvme(n) => { mmio_release(&mut win, nvme_free(n, &mut m)); },
     Blk::Ahci(h) => { mmio_release(&mut win, ahci_free(h, &mut m)); },
     Blk::Usb(x) => { mmio_release(&mut win, xhci_free(x, &mut m)); },
@@ -847,5 +847,27 @@ fn blk_fetch(b: &mut Blk, buf: &mut Bytes, at: u64)
       b = Blk::Usb(x);
     },
     Blk::Loop(l) => { b = Blk::Loop(l); },   // loopdev_begin read it already
+  }
+}
+
+/// What lo_swap (src/fs.bastio) gets back: the driver now mounted, the pages
+/// it is to hand back and whether `size` was installed.
+struct LoSwap { dev: Blk, pages: Vec[Slot], swapped: bool }
+
+/// Puts a loop driver over `pages` in the place of `prev` when `prev` is one,
+/// and returns the old driver's pages; any other driver stays and `pages` come back.
+fn blk_loop_swap(prev: Blk, pages: Vec[Slot], size: u64) -> LoSwap
+  requires blk_ok(prev)
+  ensures blk_ok(result.dev)
+{
+  match prev {
+    Blk::Loop(l) => {
+      return LoSwap { dev: Blk::Loop(loopdev_new(pages, size)), pages: l.pages, swapped: true };
+    },
+    Blk::Ata(x) => { return LoSwap { dev: Blk::Ata(x), pages: pages, swapped: false }; },
+    Blk::Virtio(x) => { return LoSwap { dev: Blk::Virtio(x), pages: pages, swapped: false }; },
+    Blk::Nvme(x) => { return LoSwap { dev: Blk::Nvme(x), pages: pages, swapped: false }; },
+    Blk::Ahci(x) => { return LoSwap { dev: Blk::Ahci(x), pages: pages, swapped: false }; },
+    Blk::Usb(x) => { return LoSwap { dev: Blk::Usb(x), pages: pages, swapped: false }; },
   }
 }

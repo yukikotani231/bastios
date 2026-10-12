@@ -267,3 +267,14 @@ fn count_avail(bm: &Buf) -> u64
   }
   return n;
 }
+
+/// A lent page's physical address (always below 2^48: the pool is low).
+fn dma_phys(d: &Dma) -> u64
+  ensures result < 0x1000000000000
+{
+  let a = dma_addr(d);
+  if a >= 0x1000000000000 {
+    return 0;
+  }
+  return a;
+}

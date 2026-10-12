@@ -1,0 +1,415 @@
+// The disk under the file system on AArch64: a virtio block device on the
+// memory-mapped transport when the machine has one (QEMU's virt machine has
+// 32 slots; blk_find), else the in-memory loop device (src/loopblk.bastio).
+// The interface is the one src/x86_64/arch/blk.bastio gives the file
+// systems.
+
+import "pages.bastio";
+import "blkconst.bastio";
+import "loopblk.bastio";
+import "virtio_blk.bastio";
+import "virtio_mmio.bastio";
+
+const VIRTIO_DATA_AT: u64 = 31;       // virtio's block data page (its others are 0 .. 3)
+
+enum Blk { Virtio(Virtio), Loop(LoopDev) }
+
+spec fn blk_ok(b: &Blk) -> bool {
+  (b is Blk::Virtio ==> virtio_ok(b.Virtio)) && (b is Blk::Loop ==> loopdev_ok(b.Loop))
+}
+
+/// Does the disk driver hold device-window address a?
+spec fn blk_claims(b: &Blk, a: u64) -> bool {
+  b is Blk::Virtio && vt_claims(b.Virtio.io, a)
+}
+
+/// `take_page`, also saying that every other page's entry is unchanged, so
+/// several pages can be taken in a row.
+fn take_low_page(m: &mut Mem, i: u64) -> Frame
+  requires mem_ok(m) && i < len(m.bm) && get(m.bm, i) == 1
+  ensures mem_ok(m) && frame_id(result) == i
+  ensures forall j: u64 :: j != i ==> get(m.bm, j) == old(get(m.bm, j))
+{
+  m.bm = set(m.bm, i, 0);
+  return pool_take(&mut m.pool, i);
+}
+
+/// Does the disk raise V_DISK when a command started by blk_begin ends?
+/// If not, it has to be polled.
+fn blk_irq(b: &Blk) -> bool {
+  match b {
+    Blk::Loop(l) => { return false; },
+    Blk::Virtio(v) => { return v.irq; },
+  }
+}
+
+/// Gives the disk's ports or registers back and, for virtio and NVMe,
+/// stops the device and takes its pages back (at power off).
+fn blk_free(win: &mut MmioSpace, b: Blk, m: &mut Mem)
+  requires blk_ok(b) && mem_ok(m)
+  ensures mem_ok(m)
+{
+  match b {
+    Blk::Loop(l) => { loopdev_free(l, &mut m); },
+    Blk::Virtio(v) => { vt_release(&mut win, virtio_free(v, &mut m)); },
+  }
+}
+
+/// The next byte typed on a USB keyboard on the disk's controller (when
+/// the disk is a USB one, the keyboard is polled through it), a packet
+/// from a USB mouse there (MOUSE_PKT plus its bytes), or 256.
+fn blk_kbd_poll(b: &mut Blk) -> u64
+  requires blk_ok(b)
+  ensures blk_ok(b) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT))
+{
+  match b {
+    Blk::Loop(l) => { b = Blk::Loop(l); return 256; },
+    Blk::Virtio(v) => { b = Blk::Virtio(v); return 256; },
+  }
+}
+
+/// Is there a USB keyboard on the disk's controller?
+fn blk_kbd(b: &Blk) -> bool {
+  match b {
+    Blk::Loop(l) => { return false; },
+    Blk::Virtio(v) => { return false; },
+  }
+}
+
+/// Is there a USB mouse on the disk's controller?
+fn blk_mouse(b: &Blk) -> bool {
+  match b {
+    Blk::Loop(l) => { return false; },
+    Blk::Virtio(v) => { return false; },
+  }
+}
+
+/// The disk's size in sectors (0 if there is none).
+fn blk_sectors(b: &Blk) -> u64 {
+  match b {
+    Blk::Loop(l) => { return l.sectors; },
+    Blk::Virtio(v) => { return v.sectors; },
+  }
+}
+
+/// Reads sector `lba` into buf[0..512]; false if the disk fails or the
+/// sector is past its end.
+fn blk_read(b: &mut Blk, lba: u64, buf: &mut Bytes) -> bool
+  requires blk_ok(b) && blen(buf) >= SECTOR
+  ensures blk_ok(b) && blen(buf) == old(blen(buf))
+{
+  match b {
+    Blk::Loop(mut l) => {
+      let ok = loopdev_read(&mut l, lba, &mut buf);
+      b = Blk::Loop(l);
+      return ok;
+    },
+    Blk::Virtio(mut v) => {
+      let ok = virtio_read(&mut v, lba, &mut buf);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+  }
+}
+
+/// Writes buf[0..512] to sector `lba`; false if the disk fails or the
+/// sector is past its end.
+fn blk_write(b: &mut Blk, lba: u64, buf: &Bytes) -> bool
+  requires blk_ok(b) && blen(buf) >= SECTOR
+  ensures blk_ok(b)
+{
+  match b {
+    Blk::Loop(mut l) => {
+      let ok = loopdev_write(&mut l, lba, buf);
+      b = Blk::Loop(l);
+      return ok;
+    },
+    Blk::Virtio(mut v) => {
+      let ok = virtio_write(&mut v, lba, buf);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+  }
+}
+
+/// Reads the 4 KiB block of eight sectors from `lba` (a multiple of 8) into
+/// out[at .. at + 4096] with one command; false if the disk fails or the
+/// block is not whole on the disk.
+fn blk_read_block(b: &mut Blk, lba: u64, out: &mut Bytes, at: u64) -> bool
+  requires blk_ok(b) && at + 4096 <= blen(out)
+  ensures blk_ok(b) && blen(out) == old(blen(out))
+{
+  match b {
+    Blk::Loop(mut l) => {
+      let ok = loopdev_read_block(&mut l, lba, &mut out, at);
+      b = Blk::Loop(l);
+      return ok;
+    },
+    Blk::Virtio(mut v) => {
+      let ok = virtio_read_block(&mut v, lba, &mut out, at);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+  }
+}
+
+/// Writes src[at .. at + 4096] to the eight sectors from `lba` (a multiple
+/// of 8) with one command, and flushes the drive's cache once; false if the
+/// disk fails or the block is not whole on the disk.
+fn blk_write_block(b: &mut Blk, lba: u64, src: &Bytes, at: u64) -> bool
+  requires blk_ok(b) && at + 4096 <= blen(src)
+  ensures blk_ok(b)
+{
+  match b {
+    Blk::Loop(mut l) => {
+      let ok = loopdev_write_block(&mut l, lba, src, at);
+      b = Blk::Loop(l);
+      return ok;
+    },
+    Blk::Virtio(mut v) => {
+      let ok = virtio_write_block(&mut v, lba, src, at);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+  }
+}
+
+// Commands that run while the kernel does something else (see
+// src/bio.bastio): blk_begin starts one, blk_poll says when it is done,
+// and blk_fetch copies a finished read into the buffer it was started
+// with. One at a time. While one runs, the waiting calls above fail.
+
+/// Starts BIO_READ into buf[at .. at + 4096] or BIO_WRITE from it, of the
+/// 4 KiB block at sector `lba` (a multiple of 8), or BIO_FLUSH. A read's
+/// data is in buf only after blk_fetch(b, buf, at) (ATA has it at once).
+/// False if a command is running or the block is not whole on the disk.
+fn blk_begin(b: &mut Blk, op: u64, lba: u64, buf: &mut Bytes, at: u64) -> bool
+  requires blk_ok(b) && op <= BIO_FLUSH && at + 4096 <= blen(buf)
+  ensures blk_ok(b) && blen(buf) == old(blen(buf))
+{
+  match b {
+    Blk::Loop(mut l) => {
+      let ok = loopdev_begin(&mut l, op, lba, &mut buf, at);
+      b = Blk::Loop(l);
+      return ok;
+    },
+    Blk::Virtio(mut v) => {
+      let ok = virtio_begin(&mut v, op, lba, buf, at);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+  }
+}
+
+/// How many consecutive blocks from sector `lba` one read can take (up to
+/// `want`): more than one only on virtio, which reads them in one request
+/// (virtio_begin_n).
+fn blk_room(b: &Blk, lba: u64, want: u64) -> u64
+  requires blk_ok(b)
+  ensures result >= 1 && result <= VIO_BATCH
+{
+  match b {
+    Blk::Loop(l) => { return 1; },
+    Blk::Virtio(v) => { return virtio_room(v, lba, want); },
+  }
+}
+
+/// Starts reading n consecutive blocks from sector `lba` (n from
+/// blk_room); blk_fetch_n then takes each. Only virtio takes n > 1.
+fn blk_begin_n(b: &mut Blk, lba: u64, n: u64) -> bool
+  requires blk_ok(b) && n >= 1 && n <= VIO_BATCH
+  ensures blk_ok(b)
+{
+  match b {
+    Blk::Loop(l) => { b = Blk::Loop(l); return false; },
+    Blk::Virtio(mut v) => {
+      let ok = virtio_begin_n(&mut v, lba, n);
+      b = Blk::Virtio(v);
+      return ok;
+    },
+  }
+}
+
+/// After a blk_begin_n read finished well: its block j into buf[at ..].
+fn blk_fetch_n(b: &mut Blk, j: u64, buf: &mut Bytes, at: u64)
+  requires blk_ok(b) && at + 4096 <= blen(buf)
+  ensures blk_ok(b) && blen(buf) == old(blen(buf))
+{
+  match b {
+    Blk::Loop(l) => { b = Blk::Loop(l); },
+    Blk::Virtio(mut v) => {
+      virtio_fetch_n(&mut v, j, &mut buf, at);
+      b = Blk::Virtio(v);
+    },
+  }
+}
+
+/// BIO_RUNNING while the started command runs, then once BIO_OK or
+/// BIO_FAILED; BIO_IDLE if none was started.
+fn blk_poll(b: &mut Blk) -> u64
+  requires blk_ok(b)
+  ensures blk_ok(b) && result <= BIO_IDLE
+{
+  match b {
+    Blk::Loop(mut l) => {
+      let r = loopdev_poll(&mut l);
+      b = Blk::Loop(l);
+      return r;
+    },
+    Blk::Virtio(mut v) => {
+      let r = virtio_poll(&mut v);
+      b = Blk::Virtio(v);
+      return r;
+    },
+  }
+}
+
+/// After blk_poll said BIO_OK for a BIO_READ started with (buf, at):
+/// puts the block in buf[at .. at + 4096].
+fn blk_fetch(b: &mut Blk, buf: &mut Bytes, at: u64)
+  requires blk_ok(b) && at + 4096 <= blen(buf)
+  ensures blk_ok(b) && blen(buf) == old(blen(buf))
+{
+  match b {
+    Blk::Loop(l) => { b = Blk::Loop(l); },   // loopdev_begin read it already
+    Blk::Virtio(mut v) => {
+      virtio_fetch(&mut v, &mut buf, at);
+      b = Blk::Virtio(v);
+    },
+  }
+}
+
+/// What lo_swap (src/fs.bastio) gets back: the driver now mounted, the pages
+/// it is to hand back and whether `size` was installed.
+struct LoSwap { dev: Blk, pages: Vec[Slot], swapped: bool }
+
+/// Puts a loop driver over `pages` in the place of `prev` when `prev` is one,
+/// and returns the old driver's pages; any other driver stays and `pages` come back.
+fn blk_loop_swap(prev: Blk, pages: Vec[Slot], size: u64) -> LoSwap
+  requires blk_ok(prev)
+  ensures blk_ok(result.dev)
+{
+  match prev {
+    Blk::Virtio(x) => { return LoSwap { dev: Blk::Virtio(x), pages: pages, swapped: false }; },
+    Blk::Loop(l) => {
+      return LoSwap { dev: Blk::Loop(loopdev_new(pages, size)), pages: l.pages, swapped: true };
+    },
+  }
+}
+
+/// A virtio block device over the transport `io`, given the four lowest
+/// pages for its queue and request and page 31 for block data, and the
+/// extra data pages of batched reads (virtio_begin_n): free pages from the
+/// top of the pool down, so the low pages other drivers take by number
+/// (the NIC's, after this) stay free. Pages the device cannot reach, or
+/// none, only make the batches shorter.
+fn virtio_blk_start(m: &mut Mem, io: Vt, msix: bool) -> Blk
+  requires mem_ok(m) && vt_ok(io)
+  requires get(m.bm, 0) == 1 && get(m.bm, 1) == 1 && get(m.bm, 2) == 1 && get(m.bm, 3) == 1 && get(m.bm, VIRTIO_DATA_AT) == 1
+  ensures mem_ok(m) && result is Blk::Virtio && blk_ok(result)
+  ensures forall a: u64 :: blk_claims(result, a) == old(vt_claims(io, a))
+{
+  let f0 = take_low_page(&mut m, 0);
+  let f1 = take_low_page(&mut m, 1);
+  let f2 = take_low_page(&mut m, 2);
+  let f3 = take_low_page(&mut m, 3);
+  let f4 = take_low_page(&mut m, VIRTIO_DATA_AT);
+  let mut extra = vec_new[Extra]();
+  let mut pages = 0;
+  let mut more = true;
+  let mut top = len(m.bm);
+  while vec_len(extra) < VIO_BATCH - 1
+    invariant mem_ok(m) && vlen(extra) < VIO_BATCH && pages <= vlen(extra) && top <= len(m.bm)
+  {
+    let mut a = NPAGES;
+    while top > 0 && a == NPAGES
+      invariant mem_ok(m) && top <= len(m.bm) && (a == NPAGES || (a < len(m.bm) && get(m.bm, a) == 1))
+    {
+      top = top - 1;
+      if get(m.bm, top) == 1 {
+        a = top;
+      }
+    }
+    if more && a < NPAGES {
+      let x = virtio_extra(&mut m, take_low_page(&mut m, a));
+      match x {
+        Extra::None => {
+          more = false;
+          vec_push(&mut extra, Extra::None);
+        },
+        Extra::Page(d) => {
+          vec_push(&mut extra, Extra::Page(d));
+          pages = pages + 1;
+        },
+      }
+    } else {
+      more = false;
+      vec_push(&mut extra, Extra::None);
+    }
+  }
+  return Blk::Virtio(virtio_new(io, f0, f1, f2, f3, f4, extra, pages, msix));
+}
+
+enum Vblk { Nothing, Some(Blk) }
+
+/// A virtio block device on the memory-mapped transport, if the machine
+/// has one clear of lo .. hi and lo2 .. hi2 (see `vm_find`).
+fn virtio_blk_mmio(m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, vm: VmWhere) -> Vblk
+  requires mem_ok(m) && vmw_ok(vm)
+  requires get(m.bm, 0) == 1 && get(m.bm, 1) == 1 && get(m.bm, 2) == 1 && get(m.bm, 3) == 1 && get(m.bm, VIRTIO_DATA_AT) == 1
+  requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) ==> mmio_free(win, a)
+  ensures mem_ok(m) && (result is Vblk::Some ==> blk_ok(result.Some) && result.Some is Blk::Virtio)
+  ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2)
+    && !(result is Vblk::Some && blk_claims(result.Some, a)) ==> mmio_free(win, a)
+{
+  match vm_find(&mut win, VM_ID_BLK, vm, lo, hi, lo2, hi2, 0, 0, 0, 0) {
+    VmFound::Found(d) => {
+      return Vblk::Some(virtio_blk_start(&mut m, Vt::Mem(d), false));
+    },
+    VmFound::None => { return Vblk::Nothing; },
+  }
+}
+
+/// The disk: a virtio block device on the memory-mapped transport if the
+/// machine has one in the slots `vm`, else an empty loop device (which
+/// lo_swap and the shell's loop commands fill).
+fn blk_find(m: &mut Mem, win: &mut MmioSpace, vm: VmWhere) -> Blk
+  requires mem_ok(m) && vmw_ok(vm)
+  requires forall a: u64 :: bar_space(a) ==> mmio_free(win, a)
+  ensures mem_ok(m) && blk_ok(result)
+  ensures forall a: u64 :: bar_space(a) && !blk_claims(result, a) ==> mmio_free(win, a)
+{
+  if len(m.bm) > VIRTIO_DATA_AT && get(m.bm, 0) == 1 && get(m.bm, 1) == 1 && get(m.bm, 2) == 1 && get(m.bm, 3) == 1
+    && get(m.bm, VIRTIO_DATA_AT) == 1 {
+    match virtio_blk_mmio(&mut m, &mut win, 0, 0, 0, 0, vm) {
+      Vblk::Some(b) => { return b; },
+      Vblk::Nothing => {},
+    }
+  }
+  return Blk::Loop(loopdev_new(vec_new[Slot](), 0));
+}
+
+/// The device-window block the disk driver holds, as lo .. hi (empty
+/// unless it is a virtio device).
+fn blk_mmio_lo(b: &Blk) -> u64
+  ensures b is Blk::Virtio && b.Virtio.io is Vt::Mem ==> result == mmio_base(b.Virtio.io.Mem.regs)
+{
+  match b {
+    Blk::Virtio(v) => { return vt_mmio_lo(v.io); },
+    Blk::Loop(l) => { return 0; },
+  }
+}
+
+fn blk_mmio_hi(b: &Blk) -> u64
+  ensures b is Blk::Virtio && b.Virtio.io is Vt::Mem ==> result == mmio_base(b.Virtio.io.Mem.regs) + mmio_len(b.Virtio.io.Mem.regs)
+  ensures !(b is Blk::Virtio && b.Virtio.io is Vt::Mem) ==> result == 0
+{
+  match b {
+    Blk::Virtio(v) => { return vt_mmio_hi(v.io); },
+    Blk::Loop(l) => { return 0; },
+  }
+}
+
+fn blk_is_virtio(b: &Blk) -> bool {
+  return b is Blk::Virtio;
+}

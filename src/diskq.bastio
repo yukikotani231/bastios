@@ -21,6 +21,7 @@
 // its disk I/O synchronously.
 
 import "blk.bastio";
+import "blkconst.bastio";
 import "core/ring.bastio";
 
 const CBLOCK: u64 = 4096;            // a block

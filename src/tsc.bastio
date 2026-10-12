@@ -10,7 +10,6 @@
 // agree, is trusted to the hardware (an invariant TSC; under QEMU's TCG
 // every processor reads the host's). k.ns is kept from going back.
 
-import "hpet.bastio";
 
 const NS_CALIBRATE: u64 = 10000000;    // 10 ms of clock_ns time to measure the rate over
 const CALIBRATE_SPINS: u64 = 100000000; // clock reads before giving up on it
@@ -76,61 +75,6 @@ fn tsc_ns(t: Tsc, now: u64) -> u64 {
     return NS_MAX;
   }
   return t.at + d;
-}
-
-/// Measures the counter's rate over NS_CALIBRATE of clock_ns time (the HPET,
-/// else the ACPI PM timer). With neither, main passes the rate `hz`
-/// boot/smp.c measured against the PIT or the RTC, which is taken instead
-/// (0: none either, and the clock stays at 0).
-fn tsc_calibrate(cpu: &Cpu, h: &mut Hpet, a: &mut Acpi, hz: u64) -> Tsc
-  requires hpet_ok(h) && acpi_ok(a)
-  ensures hpet_ok(h) && acpi_ok(a)
-{
-  let none = Tsc { base: 0, mult: 0, at: 0 };
-  if hz > 0 {
-    if hz < TSC_MIN_HZ || hz > TSC_MAX_HZ {
-      return none;
-    }
-    return Tsc { base: cpu_tsc(cpu), mult: 1000000000 * TWO32 / hz, at: 0 };
-  }
-  // The measurement starts when the clock next moves: under QEMU the
-  // first read of an HPET just switched on comes back about 12 ms behind
-  // the second, which made the rate 100 to 200 times too high.
-  let first = clock_ns(&mut h, &mut a);
-  let mut h0 = first;
-  let mut m = 0;
-  while h0 == first && m < CALIBRATE_SPINS
-    invariant m <= CALIBRATE_SPINS && hpet_ok(h) && acpi_ok(a)
-  {
-    h0 = clock_ns(&mut h, &mut a);
-    m = m + 1;
-  }
-  let t0 = cpu_tsc(cpu);
-  if h0 >= NS_MAX - NS_CALIBRATE {
-    return none;
-  }
-  let mut h1 = h0;
-  let mut n = 0;
-  while h1 < h0 + NS_CALIBRATE && n < CALIBRATE_SPINS
-    invariant n <= CALIBRATE_SPINS && hpet_ok(h) && acpi_ok(a)
-  {
-    h1 = clock_ns(&mut h, &mut a);
-    n = n + 1;
-  }
-  let t1 = cpu_tsc(cpu);
-  if h1 < h0 + NS_CALIBRATE || t1 <= t0 {
-    return none;                            // no clock, or a counter that did not move
-  }
-  let dns = h1 - h0;
-  let dt = t1 - t0;
-  if dns >= TWO32 {
-    return none;                            // the clock jumped
-  }
-  let mult = dns * TWO32 / dt;
-  if mult == 0 || mult >= MULT_MAX {
-    return none;
-  }
-  return Tsc { base: t1, mult: mult, at: h1 };
 }
 
 /// The clock now, read on this processor, but never before `was` (the

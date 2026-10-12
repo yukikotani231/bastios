@@ -184,7 +184,7 @@ build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := $(wildcard src/*.bastio src/x86_64/arch/*.bastio) src/font8x8.bin
+KSRCS := $(wildcard src/*.bastio src/x86_64/arch/*.bastio) src/font8x8.bin 
 KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
