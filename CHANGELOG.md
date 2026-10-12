@@ -14,6 +14,10 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 What will be 0.3.0. It needs bastiolang 0.2.0.
 
+### Boot
+
+- A PVH entry (Xen's direct boot protocol, used by Firecracker, Cloud Hypervisor and QEMU's `microvm`): `boot/boot.S` carries the ELF note, `boot/multiboot.c` converts the `hvm_start_info`. Tested on QEMU by booting a copy without the Multiboot header.
+
 ### Network
 
 - A driver for the AWS Elastic Network Adapter (`src/ena.bastio`, PCI

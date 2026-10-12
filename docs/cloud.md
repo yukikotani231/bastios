@@ -10,7 +10,7 @@ fits today, and what is not done.
 
 | Need | Driver | Status |
 |---|---|---|
-| Boot | Multiboot (`-kernel`), or Limine from an ISO or a USB/disk image, under BIOS or UEFI | works; a PVH or Linux boot protocol entry (Firecracker) is not done |
+| Boot | Multiboot (`-kernel`), PVH (Firecracker, Cloud Hypervisor, QEMU `microvm`), or Limine from an ISO or a USB/disk image, under BIOS or UEFI | works; PVH is tested on QEMU only, not on Firecracker; the Linux boot protocol (bzImage) is not done |
 | Console | COM1 (115200 baud) | works; EC2's serial console and most clouds' "serial output" are this |
 | Disk | virtio-blk (PCI), NVMe, AHCI, ATA | works; virtio over MMIO (microVMs) is not done |
 | Network | virtio-net (PCI), Intel e1000 families, **AWS ENA** | works; ENA only against a model, see below |
@@ -97,8 +97,12 @@ test/shell_test.sh                          # includes three ENA boots, skipped 
 
 - **virtio over MMIO**: what Firecracker and QEMU's `microvm` machine expose.
   The virtio drivers probe PCI only.
-- **A boot protocol for Firecracker** (PVH or the Linux boot protocol); the
-  Multiboot entry is what `-kernel` uses under QEMU.
+- **Firecracker itself.** The PVH entry (an ELF note naming a 32-bit entry
+  point; `boot/boot.S` tags the `hvm_start_info` the loader passes and
+  `boot/multiboot.c` converts its command line, memory map and RSDP into the
+  Multiboot 1 form) is tested by booting the image with its Multiboot header
+  blanked on QEMU's `pc` and `microvm` machines, since QEMU prefers
+  Multiboot when both are present. Firecracker has not been run.
 - **Boot time and memory under KVM** have not been measured. A first TCG
   measurement (QEMU 8, no KVM, one CPU, `-kernel`): the 2.5 MB image reaches the
   `bastios>` prompt in 0.2 to 0.4 s including QEMU's start-up, boots with
