@@ -75,12 +75,12 @@ LXELFS := $(B)/user/mhello.elf $(B)/user/mtest.elf
 
 $(B)/user/mhello.elf: user/lxhello-aarch64.c | $(B)/user
 	$(ACC) -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -no-pie -nostdlib -static \
-	  -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x8000000000 -Wl,--build-id=none -Wl,--no-warn-rwx-segments \
+	  -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x400000 -Wl,--build-id=none -Wl,--no-warn-rwx-segments \
 	  -o $@ $<
 
 # mtest is an ordinary glibc program, linked statically at the same address.
 $(B)/user/mtest.elf: user/lxtest-aarch64.c | $(B)/user
-	$(ACC) -O1 -fno-pic -no-pie -static -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x8000000000 \
+	$(ACC) -O1 -fno-pic -no-pie -static -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x400000 \
 	  -Wl,--build-id=none -Wl,--no-warn-rwx-segments -o $@ $<
 
 # 2. Prove the kernel and translate it to freestanding C.

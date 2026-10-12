@@ -13,6 +13,8 @@
         .equ    PCPU_CTX, 0             /* the saved user context, 37 words */
         .equ    PCPU_MMU3, 344          /* the user table bst_cpu_enter loads (word 3 of bst_platform_mmu_state) */
         .equ    PCPU_IRQ, 352           /* the interrupt that ended bst_cpu_wait */
+        .equ    PCPU_ID, 360
+        .equ    PCPU_SHADOW, 376        /* the table user code runs on */
         .equ    PCPU_SIZE, 384
         .equ    CPU_STACK, 65536
 
@@ -154,6 +156,15 @@ bst_cpu_enter:
         stp     x25, x26, [sp, #64]
         stp     x27, x28, [sp, #80]
         mrs     x30, tpidr_el1          /* PCPU_CTX is 0 */
+        /* The processor's shadow table: slot 0 is the window's level-3 table,
+         * slot 1 of the process's own. */
+        ldr     x2, [x30, #PCPU_MMU3]
+        ldr     x2, [x2, #8]
+        ldr     x3, =bst_shadow_root
+        ldr     x4, [x30, #PCPU_ID]
+        add     x3, x3, x4, lsl #12
+        str     x2, [x3]
+        str     x3, [x30, #PCPU_SHADOW]
         ldr     x1, [x30, #248]
         msr     sp_el0, x1
         ldr     x1, [x30, #256]
@@ -370,7 +381,7 @@ vectors:
         .balign 16
 tramp_enter:
         mrs     x0, tpidr_el1
-        ldr     x0, [x0, #PCPU_MMU3]
+        ldr     x0, [x0, #PCPU_SHADOW]
         dsb     ish                     /* the table's entries are visible to the walker */
         msr     ttbr0_el1, x0
         isb

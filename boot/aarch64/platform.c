@@ -32,12 +32,18 @@ struct pcpu {
     uint64_t irq;
     uint64_t id;
     uint64_t mpidr;
-    uint64_t pad[1];
+    uint64_t shadow;            /* the table user code runs on (bst_shadow_root[id]) */
 };
 _Static_assert(__builtin_offsetof(struct pcpu, mmu[3]) == 344, "boot.S PCPU_MMU3");
 _Static_assert(__builtin_offsetof(struct pcpu, irq) == 352, "boot.S PCPU_IRQ");
+_Static_assert(__builtin_offsetof(struct pcpu, id) == 360, "boot.S PCPU_ID");
+_Static_assert(__builtin_offsetof(struct pcpu, shadow) == 376, "boot.S PCPU_SHADOW");
 _Static_assert(sizeof(struct pcpu) == 384, "boot.S PCPU_SIZE");
 struct pcpu bst_pcpus[MAX_CPUS];
+/* Each processor's own top-level table while it runs user code: slot 0 is
+ * the process's window (the level-3 table in slot 1 of the process's table),
+ * so the window is seen from address 0 and nothing else is in it. */
+uint8_t bst_shadow_root[MAX_CPUS][4096] __attribute__((aligned(4096)));
 uint8_t bst_cpu_stacks[MAX_CPUS][CPU_STACK] __attribute__((aligned(16)));
 static inline struct pcpu *this_cpu(void) {
     struct pcpu *p;
