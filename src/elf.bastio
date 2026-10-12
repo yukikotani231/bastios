@@ -88,6 +88,7 @@ struct Elf {
   ok: bool,
   bias: u64,      // added to every p_vaddr: 0, or USER_BASE for a static PIE
   entry: u64,     // user address of the entry point
+  lo: u64,        // window offset where the lowest segment starts (nothing is mapped below its page)
   end: u64,       // window offset where the highest segment ends
   phoff: u64,     // file offset of the program headers
   phnum: u64,
@@ -206,16 +207,16 @@ fn seg(v: &mut Vfs, src: Src, phoff: u64, i: u64, bias: u64) -> Seg
 fn bad_elf() -> Elf
   ensures !result.ok
 {
-  return Elf { ok: false, bias: 0, entry: 0, end: 0, phoff: 0, phnum: 0, phdr: 0, interp: 0, ilen: 0 };
+  return Elf { ok: false, bias: 0, entry: 0, lo: 0, end: 0, phoff: 0, phnum: 0, phdr: 0, interp: 0, ilen: 0 };
 }
 
 /// Checks the file header and every program header of `src`, placing a
-/// PIE at USER_BASE.
+/// PIE at PIE_AT.
 fn elf_parse(v: &mut Vfs, src: Src) -> Elf
   requires vfs_ok(v)
   ensures vfs_ok(v) && elf_fits(src.size, result)
 {
-  return elf_parse_at(&mut v, src, 0);
+  return elf_parse_at(&mut v, src, PIE_AT);
 }
 
 /// elf_parse, placing a PIE at window offset `place` instead.
@@ -254,6 +255,7 @@ fn elf_parse_at(v: &mut Vfs, src: Src, place: u64) -> Elf
     return bad_elf();
   }
   let mut end = 0;
+  let mut lo = IMAGE_MAX;
   let mut phdr = 0;
   let mut loads = 0;
   let mut interp = 0;
@@ -276,6 +278,9 @@ fn elf_parse_at(v: &mut Vfs, src: Src, place: u64) -> Elf
       if s.off + s.memsz > end {
         end = s.off + s.memsz;
       }
+      if s.off < lo {
+        lo = s.off;
+      }
       // The program headers, if this segment carries them (for AT_PHDR).
       if s.from <= phoff && phoff + phnum * PH_SIZE <= s.from + s.filesz {
         phdr = USER_BASE + s.off + (phoff - s.from);
@@ -289,7 +294,7 @@ fn elf_parse_at(v: &mut Vfs, src: Src, place: u64) -> Elf
   if entry > USER_BASE + IMAGE_MAX || entry + bias < USER_BASE || entry + bias >= USER_BASE + end {
     return bad_elf();
   }
-  return Elf { ok: true, bias: bias, entry: entry + bias, end: end, phoff: phoff, phnum: phnum, phdr: phdr, interp: interp, ilen: ilen };
+  return Elf { ok: true, bias: bias, entry: entry + bias, lo: lo, end: end, phoff: phoff, phnum: phnum, phdr: phdr, interp: interp, ilen: ilen };
 }
 
 /// How many of the `left` bytes wanted from window offset `a` lie on a's page.
@@ -719,7 +724,7 @@ fn elf_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, e: Elf, isrc: 
       if ok && ie.ok {
         ok = share_text_in(&mut m, &mut txt, &mut l3, &mut v, isrc, ie);
       }
-      let mut q = 0;
+      let mut q = e.lo / 4096;
       while ok && q < (e.end + 4095) / 4096
         invariant pt_level(l3) == 3 && mem_ok(m) && e.end <= IMAGE_MAX
       {

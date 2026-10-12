@@ -6,6 +6,7 @@ alpine: apk: a dependency nothing provides stops the install
 alpine: apk: a new trigger runs on the directory it watches
 alpine: apk: install bash, make, jq, rsync, openssl, file and xmllint
 alpine: apk: install from a repository over HTTP, then remove it
+alpine: apk: install gcc and the C library's headers over HTTP
 alpine: apk: install git, curl and less, with what they depend on
 alpine: apk: remove a package and its files
 alpine: apk: remove a package: its scripts run, its dependency goes too
@@ -17,6 +18,7 @@ alpine: bash: arrays, brace expansion, here-strings
 alpine: curl: 1 MiB from the host
 alpine: curl: a file from the host
 alpine: file: what a file is (libmagic)
+alpine: gcc: compile and run a C program (gcc, cc1, as and ld are fixed-address executables)
 alpine: git: commit, log and diff
 alpine: jq: query JSON
 alpine: less: copies a pipe through
@@ -535,7 +537,7 @@ t_mem: mmap anonymous
 t_mem: mmap is zeroed
 t_mem: mmap of a closed descriptor is EBADF
 t_mem: mmap of a file opened write-only is EACCES
-t_mem: mmap takes a free address hint and grows from it, as the Go runtime's heap at 0xc000000000 does
+t_mem: mmap takes a free address hint and grows from it, as the Go runtime's heap arenas do
 t_mem: more than the old 64 MiB window: a 96 MiB mmap, then a 100 MiB malloc
 t_mem: mprotect read-only faults on write
 t_mem: mremap grow
@@ -669,6 +671,16 @@ t_newer: sysfs with an unknown name
 t_newer: telldir and seekdir
 t_newer: ustat for /'s device
 t_newer: waitid P_PIDFD
+t_nopie: a child sees the same addresses (fork)
+t_nopie: a null pointer faults
+t_nopie: absolute pointers in the data work
+t_nopie: malloc and free work
+t_nopie: mmap lands outside the image
+t_nopie: so does an address in the kernel's old identity map
+t_nopie: the bss covers what the kernel image would
+t_nopie: the data follows it
+t_nopie: the text is where it was linked
+t_nopie: the whole bss is usable
 t_openat2: /proc/self/exe opens the program
 t_openat2: BENEATH inside opens
 t_openat2: BENEATH through a link inside opens
@@ -935,6 +947,8 @@ tty: python: the REPL, and Ctrl-C is KeyboardInterrupt
 tty: stty: the terminal is in canonical mode again after an editor
 tty: vi: edit and save a file
 tty: epoll: keys reach a program waiting in epoll_wait on /dev/tty
+alpine-tty: nvim: :make runs gcc through make
+alpine-tty: nvim: edit a C file, build it with gcc, run it
 alpine-tty: nvim: edit a file in a git work tree, then commit it
 alpine-tty: nvim: edit and save a C file
 alpine: apk: install neovim over HTTP

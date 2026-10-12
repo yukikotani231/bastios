@@ -278,7 +278,6 @@ bst_cpu_enter:
         mov     %rdx, CORE_CR3(%rsi)
         mov     8(%rax), %rax                   /* slot 1 of the process's table */
         mov     %rax, (%rdx)
-        mov     %rax, 8(%rdx)                   /* TEMP: also where the window still is for now */
         movq    $1, CORE_UMODE(%rsi)
 
         mov     CORE_ALIAS(%rsi), %rax

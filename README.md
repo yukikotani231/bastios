@@ -16,7 +16,7 @@ bastios> hello
 hello from user mode, pid 2
 bastios> fault
 
-[pid 2 (fault): page fault at rip 0x0000008000000018, address 0x0000000000100000; killed]
+[pid 2 (fault): page fault at rip 0x0000000000000018, address 0x0000000000100000; killed]
 [exit 139]
 bastios> ash
 ...

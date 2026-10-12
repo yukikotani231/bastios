@@ -81,7 +81,7 @@ $(UASM:%=build/user/%.elf): build/user/%.elf: build/user/%.o user/user.ld
 	$(CC) $(ULDFLAGS) -o $@ $<
 
 # Static Linux ELF executables, embedded as they are (not flattened): the
-# kernel's ELF loader maps their segments. elfexec is linked at USER_BASE
+# kernel's ELF loader maps their segments. elfexec is linked at 0x400000, where a non-PIE executable lives
 # (ET_EXEC), elfpie as a static PIE (ET_DYN), and elfbad is elfexec cut
 # short, so its segments run past the end of the file and it must be refused.
 ELFCFLAGS := $(UCFLAGS) -fno-asynchronous-unwind-tables
@@ -93,7 +93,7 @@ build/user/elfstart.o: user/elfstart.S | build/user
 	$(CC) -c -o $@ $<
 
 build/user/elfexec.elf: build/user/elfstart.o build/user/elfcheck.o
-	$(CC) -nostdlib -static -no-pie -Wl,-Ttext-segment=0x8000000000 -Wl,--build-id=none -o $@ $^
+	$(CC) -nostdlib -static -no-pie -Wl,-Ttext-segment=0x400000 -Wl,--build-id=none -o $@ $^
 
 build/user/elfpie.elf: build/user/elfstart.o build/user/elfcheck.o
 	$(CC) -nostdlib -static-pie -Wl,--build-id=none -o $@ $^
@@ -111,9 +111,9 @@ build/user/fpucheck.elf: build/user/elfstart.o build/user/fpucheck.o
 build/user/sysfuzz.o: user/sysfuzz.c build/user/elfexec.elf build/user/elfpie.elf build/user/mdyn.elf | build/user
 	$(CC) $(ELFCFLAGS) -c -o $@ $<
 
-# Linked at USER_BASE: its tables of pointers need no relocation.
+# Linked at a fixed address: its tables of pointers need no relocation.
 build/user/sysfuzz.elf: build/user/elfstart.o build/user/sysfuzz.o
-	$(CC) -nostdlib -static -no-pie -Wl,-Ttext-segment=0x8000000000 -Wl,--build-id=none -o $@ $^
+	$(CC) -nostdlib -static -no-pie -Wl,-Ttext-segment=0x400000 -Wl,--build-id=none -o $@ $^
 
 # The vDSO (user/vdso.c): a tiny shared object the kernel copies onto one
 # page of every Linux process, with the clock from byte 0xF80 of it. The
@@ -361,8 +361,12 @@ fuzz: build/bastios.elf
 COMPAT_PROGS := $(patsubst test/compat/progs/%.c,%,$(wildcard test/compat/progs/t_*.c))
 COMPAT_BINS  := $(COMPAT_PROGS:%=build/compat/%)
 
-$(COMPAT_BINS): build/compat/%: test/compat/progs/%.c test/compat/progs/compat.h | build/compat
+$(filter-out build/compat/t_nopie,$(COMPAT_BINS)): build/compat/%: test/compat/progs/%.c test/compat/progs/compat.h | build/compat
 	$(MUSLCC) -static-pie -O2 -Wall -Wno-unused-result -o $@ $<
+
+# Linked at a fixed address (musl's default for -static -no-pie is 0x400000).
+build/compat/t_nopie: test/compat/progs/t_nopie.c test/compat/progs/compat.h | build/compat
+	$(MUSLCC) -static -no-pie -O2 -Wall -Wno-unused-result -o $@ $<
 
 build/compat:
 	mkdir -p $@

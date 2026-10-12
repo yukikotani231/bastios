@@ -23,7 +23,7 @@
 typedef unsigned long u64;
 typedef long i64;
 
-#define USER_BASE 0x8000000000ul
+#define USER_BASE 0ul
 #define USER_SIZE (1ul << 39)
 
 static u64 lx(u64 n, u64 a, u64 b, u64 c, u64 d, u64 e, u64 f) {
@@ -191,7 +191,7 @@ static u64 any_pointer(void) {
     case 1: return 1 + pick(4096);
     case 2: return 0x100000 + pick(0x400000);                  /* the kernel image */
     case 3: return 0xFEE00000;                                 /* the local APIC */
-    case 4: return USER_BASE - 1 - pick(8);                    /* just below the user window */
+    case 4: return 0x1000 + pick(8) - 4;                       /* around the first page */
     case 5: return USER_BASE + USER_SIZE - pick(16);           /* its last bytes */
     case 6: return USER_BASE + USER_SIZE + pick(4096);         /* just past it */
     case 7: return 0x0000800000000000ul - pick(16);            /* the end of canonical */
