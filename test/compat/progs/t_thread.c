@@ -124,6 +124,19 @@ static int task_dir(void) {
     return ok && n == 2 && me && other && isdir && comm && sw;
 }
 
+/* A thread that has ended does not hand its id to the next one at once. */
+static void *tid_of(void *a) { (void)a; return (void *)(long)gettid(); }
+static int tids_differ(void) {
+    long id[8];
+    for (int i = 0; i < 8; i++) {
+        pthread_t x; void *r;
+        if (pthread_create(&x, 0, tid_of, 0) || pthread_join(x, &r)) return 0;
+        id[i] = (long)r;
+        for (int j = 0; j < i; j++) if (id[j] == id[i]) return 0;
+    }
+    return 1;
+}
+
 /* exit_group from one thread while another is running on a processor of
  * its own: the process must end with the code exit_group was given. */
 static void *spin(void *arg) { for (volatile long *x = arg;; ) (*x)++; return 0; }
@@ -169,6 +182,7 @@ int main(void) {
            pthread_create(&x, 0, g, 0) == 0 && pthread_join(x, (void **)&other) == 0 && other != gettid(); }));
     EXPECT("/proc/self/stat and status count the threads", count_threads());
     EXPECT("/proc/self/task lists the threads, and /proc/self/task/TID has their files", task_dir());
+    EXPECT("threads that ended and began one after another have different ids", tids_differ());
     if (begin("exit_group while another thread runs keeps its code")) {
         int r = group_exit_code();
         if (r == 1) pass(); else if (r == 0) fail("fork or waitpid failed");
