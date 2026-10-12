@@ -1008,6 +1008,10 @@ session("virtio", True, [
     # first filter and stays, so this runs in a boot that has not filled
     # memory (the one with "mkdir full" has no heap to spare).
     ("mseccomp", b"mseccomp: ok", b"\n# "),
+    # What container runtimes ask for beyond namespaces (user/mcont.c):
+    # close_range, the subreaper and keep-capabilities flags, the ambient
+    # set, and quiet ENOSYS for the keyring and the new mount API.
+    ("mcont", b"mcont: ok", b"\n# "),
     ("exit", b""),
 ], halt=True, ready=lambda: irq_found("virtio"))
 

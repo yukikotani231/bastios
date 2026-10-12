@@ -926,7 +926,7 @@ spec fn kok(k: &Kernel) -> bool {
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 32;
+const NPROGS: u64 = 33;
 const LDSO_PROG: u64 = 25;            // musl's dynamic linker, the interpreter of musl programs
 
 fn prog_name(i: u64) -> Str {
@@ -1026,6 +1026,9 @@ fn prog_name(i: u64) -> Str {
   if i == 31 {
     return "mseccomp";
   }
+  if i == 32 {
+    return "mcont";
+  }
   return "(file)";                    // a program loaded from a file
 }
 
@@ -1122,6 +1125,9 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 31 {
     return include_bytes("../build/user/mseccomp.elf");
+  }
+  if i == 32 {
+    return include_bytes("../build/user/mcont.elf");
   }
   return include_bytes("../build/user/fault.bin");
 }
@@ -1561,7 +1567,10 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
   pset(&mut k.procs, pid, F_STATE, ZOMBIE);
   pset(&mut k.procs, pid, F_CODE, code);
   pidns_exit(&mut k, pid);                 // the init of a PID namespace takes the rest with it
-  let np = pidns_init(k, pid);             // orphans in a PID namespace go to its init
+  let mut np = pidns_init(k, pid);         // orphans in a PID namespace go to its init
+  if np == 0 {
+    np = pr_reaper(k, pid);                // else to the nearest child subreaper (src/lxprctl.bastio)
+  }
   let mut c = 1;
   while c < NPROC
     invariant 1 <= c && c <= NPROC && kok(k) && np < NPROC
