@@ -1,0 +1,53 @@
+// struct stat on x86-64 (144 bytes): the words that differ from other
+// architectures' layouts are nlink at 16, mode and uid at 24, gid at 32 and
+// rdev at 40. The caller has zeroed the buffer; size, blocks and times are
+// where every layout agrees (48 .. 112).
+
+import "core/endian.bastio";
+import "core/bytes.bastio";
+
+const STAT_SIZE: u64 = 144;
+
+fn st_put_ids(x: &mut Bytes, nlink: u64, mode: u64, uid: u64, gid: u64, rdev: u64)
+  requires blen(x) >= 48
+  ensures blen(x) == old(blen(x))
+{
+  store_le64(&mut x, 16, nlink);
+  store_le64(&mut x, 24, mode % 0x100000000 + uid % 0x100000000 * 0x100000000);
+  store_le64(&mut x, 32, gid);
+  store_le64(&mut x, 40, rdev);
+}
+
+fn st_nlink(x: &Bytes) -> u64
+  requires blen(x) >= 48
+{
+  return load_le64(x, 16);
+}
+
+fn st_mode(x: &Bytes) -> u64
+  requires blen(x) >= 48
+  ensures result <= 4294967295
+{
+  return load_le64(x, 24) % 0x100000000;
+}
+
+fn st_uid(x: &Bytes) -> u64
+  requires blen(x) >= 48
+  ensures result <= 4294967295
+{
+  return load_le64(x, 24) / 0x100000000;
+}
+
+fn st_gid(x: &Bytes) -> u64
+  requires blen(x) >= 48
+  ensures result <= 4294967295
+{
+  return load_le64(x, 32) % 0x100000000;
+}
+
+fn st_rdev(x: &Bytes) -> u64
+  requires blen(x) >= 48
+  ensures result <= 4294967295
+{
+  return load_le64(x, 40) % 0x100000000;
+}

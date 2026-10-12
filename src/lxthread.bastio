@@ -106,7 +106,7 @@ fn quieting(procs: &Buf, q: u64) -> bool
   requires ptab_ok(procs) && q < NPROC
 {
   let st = state(procs, q);
-  let n = pget(procs, q, F_REGS + R_RAX);       // the call it will run again (lx_retry)
+  let n = pget(procs, q, F_REGS + R_LXNR);       // the call it will run again (lx_retry)
   let remap = n == LX_MUNMAP || n == LX_MPROTECT || n == LX_MREMAP || n == LX_MMAP;
   return pget(procs, q, F_QUIET) != 0 && pget(procs, q, F_RESTART) != 0 && remap && (st == READY || st == RUNNING);
 }
@@ -416,7 +416,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   pset(&mut k.procs, c, F_PTIMER, 0);
   pset(&mut k.procs, c, F_QUIET, 0);
   group_fork(&mut k.procs, pid, c);
-  pset(&mut k.procs, c, F_REGS + R_RAX, 0);
+  pset(&mut k.procs, c, F_REGS + R_RET, 0);
   if stack != 0 {
     pset(&mut k.procs, c, F_REGS + R_RSP, stack);
   }
@@ -685,7 +685,7 @@ fn futex_waiting(procs: &Buf, q: u64, g: u64, addr: u64) -> bool
 {
   let st = state(procs, q);
   return (st == FUTEXWAIT || st == TIMEWAIT || st == READY) && (g == 0 || tgid(procs, q) == g) && pget(procs, q, F_FUTEX) == addr
-    && pget(procs, q, F_RESTART) != 0 && pget(procs, q, F_REGS + R_RAX) == LX_FUTEX;
+    && pget(procs, q, F_RESTART) != 0 && pget(procs, q, F_REGS + R_LXNR) == LX_FUTEX;
 }
 
 /// Whether q is in a timed wait on addr in group g but on a processor right
@@ -695,7 +695,7 @@ fn futex_polling(procs: &Buf, q: u64, g: u64, addr: u64) -> bool
   requires ptab_ok(procs) && q < NPROC
 {
   return state(procs, q) == RUNNING && (g == 0 || tgid(procs, q) == g) && pget(procs, q, F_FUTEX) == addr
-    && pget(procs, q, F_RESTART) >= 2 && pget(procs, q, F_REGS + R_RAX) == LX_FUTEX;
+    && pget(procs, q, F_RESTART) >= 2 && pget(procs, q, F_REGS + R_LXNR) == LX_FUTEX;
 }
 
 /// The key futex word addr of pid is known by (F_FUTEX of its waiters):
@@ -744,9 +744,9 @@ fn futex_wake(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
     } else if q != pid && futex_waiting(k.procs, q, g, addr) {
       let rip = pget(k.procs, q, F_REGS + R_RIP);
       if rip <= 0xFFFFFFFFFFFFFFF0 {
-        pset(&mut k.procs, q, F_REGS + R_RIP, rip + 2);
+        pset(&mut k.procs, q, F_REGS + R_RIP, rip + SYSCALL_LEN);
       }
-      pset(&mut k.procs, q, F_REGS + R_RAX, 0);
+      pset(&mut k.procs, q, F_REGS + R_RET, 0);
       pset(&mut k.procs, q, F_RESTART, 0);
       pset(&mut k.procs, q, F_FUTEX, 0);
       pset(&mut k.procs, q, F_STATE, READY);

@@ -1,0 +1,4 @@
+// The signal frame is architecture specific: src/<arch>/arch/sigframe.bastio, found
+// through the --lib directory the build passes for that architecture.
+
+import "arch/sigframe.bastio";

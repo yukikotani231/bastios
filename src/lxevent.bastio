@@ -71,7 +71,6 @@ const EPOLL_CTL_DEL: u64 = 2;
 const EPOLL_CTL_MOD: u64 = 3;
 const EPOLLONESHOT: u64 = 0x40000000;
 const EP_OFF: u64 = 0x4000000000000000;      // a one-shot entry that has fired
-const EPOLL_EVENT: u64 = 12;                 // struct epoll_event, packed: u32 events, u64 data
 const INT_NEG: u64 = 0x80000000;             // an int argument this large is negative
 const VA_LAST: u64 = 0xFFFFFFFFFFFF0000;     // an address past this cannot hold two timespecs
 
@@ -595,7 +594,7 @@ fn lx_epoll_ctl(k: &mut Kernel, pid: u64, epfd: u64, op: u64, fd: u64, ev: u64) 
     return EFAULT;
   }
   let events = cast[u64](bget(k.fs.xfer, 0)) | cast[u64](bget(k.fs.xfer, 1)) << 8 | cast[u64](bget(k.fs.xfer, 2)) << 16 | cast[u64](bget(k.fs.xfer, 3)) << 24;
-  let data = get_u64(k.fs.xfer, 4);
+  let data = get_u64(k.fs.xfer, EPOLL_DATA_AT);
   if j >= EP_FDS {
     j = ep_find(k, e, 0);                   // an empty entry
     if j >= EP_FDS {
@@ -894,11 +893,8 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
     }
     if bits != 0 {
       let at = got * EPOLL_EVENT;
-      bset(&mut k.fs.xfer, at, cast[u8](bits % 256));
-      bset(&mut k.fs.xfer, at + 1, cast[u8](bits / 256 % 256));
-      bset(&mut k.fs.xfer, at + 2, 0);
-      bset(&mut k.fs.xfer, at + 3, 0);
-      xfer_u64(&mut k.fs.xfer, at + 4, get(k.evt, ep_at(e, j, 3)));
+      xfer_u64(&mut k.fs.xfer, at, bits % 65536);                     // events, and the padding if the structure has some
+      xfer_u64(&mut k.fs.xfer, at + EPOLL_DATA_AT, get(k.evt, ep_at(e, j, 3)));
       let events = get(k.evt, ep_at(e, j, 2));
       if events & EPOLLONESHOT != 0 {
         k.evt = set(k.evt, ep_at(e, j, 2), events | EP_OFF);   // until EPOLL_CTL_MOD

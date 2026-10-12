@@ -23,8 +23,9 @@
 // pt_sys_exit, called from the trap handler in src/main.bastio). The stop
 // before a call leaves rax at -ENOSYS and orig_rax at the call; when the
 // tracer resumes it the call starts again, as a waiting call does, with
-// whatever number the tracer left in orig_rax. getpid and gettid, which a
-// processor answers without the kernel lock, are not seen.
+// whatever number the tracer left in orig_rax. A traced task is marked
+// slow (Task.slow), so getpid and gettid, which a processor otherwise
+// answers without the kernel lock, are seen too.
 // PTRACE_SINGLESTEP sets the trap flag in the saved flags; the debug trap
 // (vector 1) is SIGTRAP, which stops the process as any signal does.
 //
@@ -186,10 +187,10 @@ fn pt_resume(k: &mut Kernel, c: u64, sig: u64, detach: bool, sys: bool, step: bo
   if t / TS_ENTRY % 2 == 1 {
     // Stopped before a system call: it runs now, as the tracer left it.
     let rip = pget(k.procs, c, F_REGS + R_RIP);
-    if rip >= 2 {
-      pset(&mut k.procs, c, F_REGS + R_RIP, rip - 2);
+    if rip >= SYSCALL_LEN {
+      pset(&mut k.procs, c, F_REGS + R_RIP, rip - SYSCALL_LEN);
     }
-    pset(&mut k.procs, c, F_REGS + R_RAX, t / TS_NR % 1024);
+    pset(&mut k.procs, c, F_REGS + R_LXNR, t / TS_NR % 1024);
     if sys && !detach {
       next = next + TS_NOENT;               // the stop before it is done; the one after it is not
     }
@@ -230,13 +231,13 @@ fn pt_sys_entry(k: &mut Kernel, p: u64, restarted: bool) -> bool
   if tr_tracer(k, p) == 0 || t % 2 == 0 || restarted {
     return false;
   }
-  let nr = smaller(pget(k.procs, p, F_REGS + R_RAX), 1023);
+  let nr = smaller(pget(k.procs, p, F_REGS + R_LXNR), 1023);
   if t / TS_NOENT % 2 == 1 {
     tr2_put(&mut k, p, TS_SYS + nr * TS_NR);
     return false;
   }
   tr2_put(&mut k, p, TS_SYS + TS_ENTRY + nr * TS_NR);
-  pset(&mut k.procs, p, F_REGS + R_RAX, ENOSYS);   // what a tracer reads in rax before the call
+  pset(&mut k.procs, p, F_REGS + R_RET, ENOSYS);   // what a tracer reads in rax before the call
   tr_stop(&mut k, p, 5 + 128 * (tr_opt(tr_get(k, p)) % 2));   // SIGTRAP, with 0x80 for PTRACE_O_TRACESYSGOOD
   return true;
 }
