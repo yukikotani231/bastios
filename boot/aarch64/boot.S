@@ -55,18 +55,64 @@
          * QEMU, U-Boot and UEFI loaders that see it pass the device tree's
          * address in x0 and load the image at its text offset. (QEMU gives
          * an ELF kernel no tree.) The image is bastios.bin, bastios.elf
-         * with its headers taken off. */
+         * with its headers taken off.
+         *
+         * It is also a PE/COFF file, as Linux's is: code0 spells "MZ", the
+         * word at 0x3c points to the PE header below, and a UEFI firmware
+         * loads the image anywhere it likes and enters efi_entry (efi.c),
+         * which moves it to its link address and starts it as a loader
+         * would. The linker script defines the sizes. */
         .section .text.boot
         .global _start
 _start:
-        b       start                   /* code0 */
-        .long   0                       /* code1 */
+        add     x13, x18, #0x16         /* code0: "MZ", and harmless to run */
+        b       start                   /* code1 */
         .quad   0x80000                 /* text_offset */
         .quad   __image_size            /* image_size, with the zeroed data */
         .quad   0                       /* flags: little-endian, 4 KiB pages */
         .quad   0, 0, 0                 /* reserved */
         .long   0x644d5241              /* magic "ARM\x64" */
-        .long   0                       /* reserved */
+        .long   .Lpe_header - _start    /* offset of the PE header */
+
+.Lpe_header:
+        .ascii  "PE\0\0"
+        .short  0xaa64                  /* Machine: ARM64 */
+        .short  1                       /* NumberOfSections */
+        .long   0, 0, 0                 /* time stamp, no symbols */
+        .short  .Lsection - .Loptional  /* SizeOfOptionalHeader */
+        .short  0x0206                  /* executable, no line numbers, no debug info */
+.Loptional:
+        .short  0x20b                   /* PE32+ */
+        .byte   0, 0                    /* linker version */
+        .long   __file_size - 0x200     /* SizeOfCode */
+        .long   0, 0                    /* SizeOfInitializedData, SizeOfUninitializedData */
+        .long   __efi_entry_rva         /* AddressOfEntryPoint */
+        .long   0x200                   /* BaseOfCode */
+        .quad   0                       /* ImageBase: nothing to relocate */
+        .long   0x1000                  /* SectionAlignment */
+        .long   0x200                   /* FileAlignment */
+        .short  0, 0, 0, 0              /* operating system and image versions */
+        .short  0, 0                    /* subsystem version */
+        .long   0                       /* Win32VersionValue */
+        .long   __image_size            /* SizeOfImage */
+        .long   0x200                   /* SizeOfHeaders */
+        .long   0                       /* CheckSum */
+        .short  10                      /* Subsystem: EFI application */
+        .short  0                       /* DllCharacteristics */
+        .quad   0, 0, 0, 0              /* stack and heap sizes */
+        .long   0                       /* LoaderFlags */
+        .long   16                      /* NumberOfRvaAndSizes */
+        .fill   16 * 8, 1, 0            /* the data directories: none */
+.Lsection:
+        .ascii  ".text\0\0\0"
+        .long   __image_size - 0x200    /* VirtualSize */
+        .long   0x200                   /* VirtualAddress */
+        .long   __file_size - 0x200     /* SizeOfRawData */
+        .long   0x200                   /* PointerToRawData */
+        .long   0, 0                    /* no relocations or line numbers */
+        .short  0, 0
+        .long   0xe0000020              /* code, executable, readable, writable */
+        .balign 0x200
 start:
         mov     x19, x0                 /* the device tree */
         el2_to_el1

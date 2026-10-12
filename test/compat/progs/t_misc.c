@@ -7,6 +7,7 @@
 #include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <net/if.h>
 #include <netinet/in.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
@@ -79,6 +80,13 @@ int main(void) {
         if (xs >= 0) close(xs);
         unlink(xa.sun_path);
         ok && strstr(t, "RefCount") && strstr(t, " 00010000 0001 01 ") && strstr(t, " /pnu_sock\n"); }));
+    EXPECT("SIOCGIFHWADDR and SIOCGIFNETMASK on lo", ({
+        int is = socket(AF_INET, SOCK_DGRAM, 0); struct ifreq hw, nm;
+        memset(&hw, 0, sizeof hw); memset(&nm, 0, sizeof nm);
+        strcpy(hw.ifr_name, "lo"); strcpy(nm.ifr_name, "lo");
+        int ok = is >= 0 && ioctl(is, SIOCGIFHWADDR, &hw) == 0 && ioctl(is, SIOCGIFNETMASK, &nm) == 0;
+        if (is >= 0) close(is);
+        ok && hw.ifr_hwaddr.sa_family == 772 && ((unsigned char *)&nm.ifr_netmask)[4] == 255 && ((unsigned char *)&nm.ifr_netmask)[5] == 0; }));
     EXPECT("/proc/net/tcp lists a listening socket", ({
         int ls = socket(AF_INET, SOCK_STREAM, 0); struct sockaddr_in sa = {.sin_family = AF_INET, .sin_port = htons(40123)};
         int ok = ls >= 0 && bind(ls, (struct sockaddr *)&sa, sizeof sa) == 0 && listen(ls, 1) == 0;
