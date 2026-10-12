@@ -964,7 +964,7 @@ spec fn kok(k: &Kernel) -> bool {
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 33;
+const NPROGS: u64 = 34;
 const LDSO_PROG: u64 = 25;            // musl's dynamic linker, the interpreter of musl programs
 
 fn prog_name(i: u64) -> Str {
@@ -1066,6 +1066,9 @@ fn prog_name(i: u64) -> Str {
   }
   if i == 32 {
     return "mcont";
+  }
+  if i == 33 {
+    return "mcloud";
   }
   return "(file)";                    // a program loaded from a file
 }
