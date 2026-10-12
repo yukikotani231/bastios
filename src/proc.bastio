@@ -1531,6 +1531,24 @@ fn build_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, img: Str, el
 /// Ends process `pid` with exit `code`: frees its address space, closes its
 /// files, hands the code to a parent waiting for it, and orphans its
 /// children.
+/// A child of the thread group led by g has ended: wakes each of its threads
+/// in a wait4 or waitid, which tries again (a child belongs to the group,
+/// not to the thread that made it).
+fn wake_waiters(k: &mut Kernel, g: u64)
+  requires kok(k) && g < NPROC
+  ensures kok(k)
+{
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && kok(k)
+  {
+    if state(k.procs, q) == LXWAITING && (q == g || pget(k.procs, q, F_TGID) == g) {
+      pset(&mut k.procs, q, F_STATE, READY);
+    }
+    q = q + 1;
+  }
+}
+
 fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
   requires kok(k) && 1 <= who && who < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
@@ -1585,9 +1603,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
       if np != 0 && np != c {
         pset(&mut k.procs, c, F_PARENT, np);
         if state(k.procs, c) == ZOMBIE {
-          if state(k.procs, np) == LXWAITING {
-            pset(&mut k.procs, np, F_STATE, READY);   // its wait4 collects the zombie
-          }
+          wake_waiters(&mut k, np);           // its wait4 collects the zombie
           child_ended(&mut k, np, c);
         }
       } else {
@@ -1600,6 +1616,14 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
     c = c + 1;
   }
   let par = pget(k.procs, pid, F_PARENT);
+  if 1 <= par && par < NPROC {
+    let pg = pget(k.procs, par, F_TGID);
+    if pg != 0 && pg < NPROC {
+      wake_waiters(&mut k, pg);
+    } else {
+      wake_waiters(&mut k, par);
+    }
+  }
   if par == 0 || par >= NPROC {
     pset(&mut k.procs, pid, F_STATE, FREE);       // nobody will collect it
   } else if state(k.procs, par) == WAITING && pget(k.procs, par, F_WAIT) == pid {
@@ -1608,7 +1632,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
     pset(&mut k.procs, pid, F_STATE, FREE);
   } else if state(k.procs, par) == LXWAITING {
     // wait4 restarts its system call, which collects the zombie itself.
-    pset(&mut k.procs, par, F_STATE, READY);
+    wake_waiters(&mut k, par);
   } else if state(k.procs, par) == FREE || state(k.procs, par) == ZOMBIE {
     pset(&mut k.procs, pid, F_STATE, FREE);
   }

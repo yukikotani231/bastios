@@ -1039,7 +1039,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     return 0;                               // it ended after the file was opened
   }
   let s = state(k.procs, p);
-  let parent = pget(k.procs, p, F_PARENT);
+  let parent = tgid(k.procs, smaller(pget(k.procs, p, F_PARENT), NPROC - 1));   // the thread group that made it
   if what == PF_STAT {
     // pid (comm) state ppid pgrp session tty_nr tpgid flags minflt cminflt
     // majflt cmajflt utime stime cutime cstime priority nice num_threads

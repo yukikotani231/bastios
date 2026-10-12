@@ -254,6 +254,33 @@ fn sig_ignored(t: &Buf, pid: u64, s: u64) -> bool
   return h == SIG_IGN || (h == SIG_DFL && dfl_ignores(s));
 }
 
+/// The row of k.sigact that holds p's signal actions now: the actions of a
+/// thread group move with its address space (src/lxthread.bastio
+/// group_move), so a thread that is not running has the group's actions only
+/// if nobody else in the group has the space.
+fn sig_row(k: &mut Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures kok(k) && result < NPROC
+{
+  let mut g = pget(k.procs, p, F_TGID);
+  if g == 0 || g >= NPROC {
+    g = p;
+  }
+  if has_space(&mut k.spaces, p) {
+    return p;
+  }
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && kok(k)
+  {
+    if (q == g || pget(k.procs, q, F_TGID) == g) && state(k.procs, q) != FREE && has_space(&mut k.spaces, q) {
+      return q;
+    }
+    q = q + 1;
+  }
+  return p;
+}
+
 /// Makes signal s pending for process p, and wakes p from a wait it may be
 /// in (a console read or wait4), so the signal is acted on.
 fn post_sig(k: &mut Kernel, p: u64, s: u64)
@@ -282,7 +309,8 @@ fn post_sig(k: &mut Kernel, p: u64, s: u64)
   }
   // A blocked signal is kept even if ignored, as on Linux: a signalfd or
   // sigwait may take it, and delivery drops it if it is still ignored.
-  if sig_ignored(k.sigact, p, s) && !blocked && tr_tracer(k, p) == 0 {
+  let sr = sig_row(&mut k, p);
+  if sig_ignored(k.sigact, sr, s) && !blocked && tr_tracer(k, p) == 0 {
     return;                                 // a traced process stops for it, as on Linux
   }
   pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
@@ -423,8 +451,14 @@ fn child_ended(k: &mut Kernel, p: u64, child: u64)
   requires kok(k) && 1 <= p && p < NPROC
   ensures kok(k)
 {
-  if is_linux(k.procs, p) {
-    post_from(&mut k, p, SIGCHLD, child);
+  // The group's leader gets it, whichever thread made the child.
+  let g = pget(k.procs, p, F_TGID);
+  let mut t = p;
+  if g != 0 && g < NPROC && state(k.procs, g) != FREE && state(k.procs, g) != ZOMBIE {
+    t = g;
+  }
+  if is_linux(k.procs, t) {
+    post_from(&mut k, t, SIGCHLD, child);
   }
 }
 

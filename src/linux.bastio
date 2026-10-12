@@ -691,7 +691,7 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     return KEEP;
   }
   if n == LX_GETPPID {
-    ret(&mut k.procs, pid, vpid_of(k, pid, pget(k.procs, tgid(k.procs, pid), F_PARENT)));
+    ret(&mut k.procs, pid, vpid_of(k, pid, tgid(k.procs, smaller(pget(k.procs, tgid(k.procs, pid), F_PARENT), NPROC - 1))));
     return KEEP;
   }
   if n == LX_IOCTL {

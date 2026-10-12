@@ -817,6 +817,15 @@ fn wait_match(procs: &Buf, pid: u64, c: u64, want: u64) -> bool
   return c == want;
 }
 
+/// Is c a child of the thread group that pid is in? Children belong to the
+/// group: any of its threads may wait for one another made.
+fn child_of_group(procs: &Buf, c: u64, pid: u64) -> bool
+  requires ptab_ok(procs) && c < NPROC && pid < NPROC
+{
+  let par = pget(procs, c, F_PARENT);
+  return par < NPROC && par != 0 && tgid(procs, par) == tgid(procs, pid);
+}
+
 /// wait4(want, status, options, rusage): collects a child that has ended
 /// (one wait_match names), storing its exit code as the Linux
 /// status at user address `status` if not NULL. With none ended yet, the
@@ -845,7 +854,7 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
   while c < NPROC
     invariant 1 <= c && c <= NPROC && kok(k)
   {
-    if (pget(k.procs, c, F_PARENT) == pid || traced_by(k, c, pid)) && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
+    if (child_of_group(k.procs, c, pid) || traced_by(k, c, pid)) && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
       found = true;
       // WUNTRACED: stopped (status sig << 8 | 0x7f); WCONTINUED: 0xffff.
       // A tracer hears of the stops of what it traces without asking.
@@ -882,7 +891,7 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
             return KEEP;
           }
         }
-        if pget(k.procs, c, F_PARENT) == pid {
+        if child_of_group(k.procs, c, pid) {
           tm_reap(&mut k, pid, c);
           pset(&mut k.procs, c, F_STATE, FREE);
         } else {
@@ -958,7 +967,7 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
   while c < NPROC
     invariant 1 <= c && c <= NPROC && kok(k)
   {
-    if (pget(k.procs, c, F_PARENT) == pid || traced_by(k, c, pid)) && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
+    if (child_of_group(k.procs, c, pid) || traced_by(k, c, pid)) && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
       found = true;
       let jr = jc_report(&mut k, c, options & 2 != 0 || traced_by(k, c, pid), options & 8 != 0, options & 0x1000000 != 0);
       if jr != 0 {
@@ -995,7 +1004,7 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
           }
         }
         if options & 0x1000000 == 0 {
-          if pget(k.procs, c, F_PARENT) == pid {
+          if child_of_group(k.procs, c, pid) {
             tm_reap(&mut k, pid, c);
             pset(&mut k.procs, c, F_STATE, FREE);
           } else {
