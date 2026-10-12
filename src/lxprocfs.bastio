@@ -1132,7 +1132,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     return put_c(&mut o, a, 10);
   }
   if what == PF_CGROUP {
-    return cg_proc_text(k, p, &mut o);      // src/lxcgroup.bastio
+    return cg_proc_text(k, p, pid, &mut o);      // src/lxcgroup.bastio
   }
   if what == PF_SLACK {
     let a = put_n(&mut o, 0, pr_slack(k, p));

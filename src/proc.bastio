@@ -552,7 +552,7 @@ const ME_W: u64 = 5;                  // words per mount
 // each process's UTS, IPC and PID namespace, the next id of each kind, the
 // host and domain names of UTS namespaces other than the first (whose
 // names are in k.sys), and the IPC namespace of each POSIX queue.
-const NSK_N: u64 = 7;                 // kinds, per process:
+const NSK_N: u64 = 8;                 // kinds, per process:
 const NSK_UTS: u64 = 0;
 const NSK_IPC: u64 = 1;
 const NSK_PID: u64 = 2;               //   the PID namespace it is in
@@ -560,6 +560,7 @@ const NSK_VPID: u64 = 3;              //   its id in it (0 in the first namespac
 const NSK_PIDC: u64 = 4;              //   the PID namespace its children are in
 const NSK_USER: u64 = 5;              //   the user namespace it is in
 const NSK_CG: u64 = 6;                //   the cgroup it belongs to (src/lxcgroup.bastio)
+const NSK_CGN: u64 = 7;               //   the root of its cgroup namespace: slot + 1 (0: the first namespace)
 const CG_N: u64 = 32;                 // cgroups in all (slot 0 is the root, always there)
 const CG_W: u64 = 32;                 // words per cgroup: see CGW_*
 const CGW_USED: u64 = 0;

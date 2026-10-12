@@ -276,6 +276,9 @@ fn nsk_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
       return e;
     }
   }
+  if flags & CLONE_NEWCGROUP != 0 {
+    cgns_unshare(&mut k, pid);              // src/lxcgroup.bastio
+  }
   if flags & CLONE_NEWPID != 0 {
     return pidns_unshare(&mut k, pid);
   }
@@ -707,7 +710,7 @@ fn nf_id(k: &Kernel, p: u64, f: u64) -> u64
   if f == NF_USER {
     return nsk_of(k, NSK_USER, p);
   }
-  return 0;
+  return nsk_of(k, NSK_CGN, p);
 }
 
 /// Is /proc device d one of the /proc/PID/ns links?
@@ -869,6 +872,12 @@ fn ns_may_join(k: &Kernel, pid: u64, f: u64, id: u64) -> u64
     }
     return 0;
   }
+  if f == NF_CGROUP {
+    if id != 0 && !cg_used(k, smaller(id - 1, CG_N - 1)) {
+      return EINVAL;                        // its root is gone
+    }
+    return 0;
+  }
   return EINVAL;                            // a PID namespace not yet; the rest are all the first
 }
 
@@ -929,6 +938,8 @@ fn ns_join(k: &mut Kernel, pid: u64, f: u64, id: u64, p: u64)
     nsk_set(&mut k, NSK_UTS, pid, id);
   } else if f == NF_IPC {
     nsk_set(&mut k, NSK_IPC, pid, id);
+  } else if f == NF_CGROUP {
+    nsk_set(&mut k, NSK_CGN, pid, id);
   }
 }
 
