@@ -35,7 +35,7 @@ jobs:
           key: proof-none
           restore-keys: proof-
           path: build/proof-cache
-      - run: make test BASTIOC=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
+      - run: make test BASTIOC=bastiolang/stage0/target/release/bastioc0 BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
         env:
           AARCH64_REQUIRED: 1
       - name: Save the proof cache
