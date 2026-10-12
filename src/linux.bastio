@@ -1509,6 +1509,18 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
     total = total + w;
     more = w == piece && w > 0;
   }
+  if total == 0 && n > 0 && d.x < FD_ROWS {
+    // Not a byte could be written: past the largest file this file system
+    // keeps (EFBIG), or out of room (ENOSPC), not a write of nothing.
+    let mut limit = DFILE_MAX;
+    if fget(k.fs.ftab, d.x, FD_FS) == FS_RAM {
+      limit = FILE_MAX;
+    }
+    if vfs_offset(k.fs, d.x) >= limit {
+      return EFBIG;
+    }
+    return ENOSPC;
+  }
   return total;
 }
 

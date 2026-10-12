@@ -503,6 +503,7 @@ t_ltp3: munlock of one locked page gives back one page
 t_ltp3: munlock of a page not locked gives back nothing
 t_ltp3: munlock of the rest gives back the rest
 t_ltp3: mlock2 with MLOCK_ONFAULT locks the range
+t_ltp3: a write past the largest file is EFBIG, not 0
 t_mem: 64 MiB of address space
 t_mem: FUTEX_CMP_REQUEUE moves timed waiters across processes
 t_mem: FUTEX_CMP_REQUEUE with a negative count is EINVAL

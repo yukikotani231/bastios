@@ -25,7 +25,6 @@ const LOCK_EX: u64 = 2;
 const LOCK_UN: u64 = 8;
 const MFD_CLOEXEC: u64 = 1;
 const COPY_MAX: u64 = 0x7FFFF000;         // the most one sendfile moves, as on Linux
-const EFBIG: u64 = 18446744073709551589;      // 2^64 - 27
 const ENODEV: u64 = 18446744073709551597;     // 2^64 - 19
 
 fn is_more_call(n: u64) -> bool {

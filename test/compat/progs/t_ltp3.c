@@ -18,6 +18,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/utsname.h>
 #include <sys/wait.h>
 #include <utime.h>
 
@@ -344,6 +345,24 @@ int main(void) {
         EXPECT("mlock2 with MLOCK_ONFAULT locks the range", r7 == 0 && d - c == 8);
         munlockall();
         munmap(m, 4 * 4096);
+    }
+
+    /* A write that cannot store a byte is an error, not a write of
+       nothing: BastiOS keeps no file past 1 GiB (Linux's sparse files
+       reach further). */
+    {
+        struct utsname u;
+        int ours = uname(&u) == 0 && strstr(u.release, "bastios") != NULL;
+        int fd = open("l3_big", O_CREAT | O_RDWR, 0644);
+        ssize_t w = -2;
+        int e = 0;
+        if (ours && fd >= 0 && lseek(fd, 2LL << 30, SEEK_SET) >= 0) {
+            w = write(fd, "x", 1);
+            e = errno;
+        }
+        EXPECT("a write past the largest file is EFBIG, not 0", !ours || (w == -1 && e == EFBIG));
+        if (fd >= 0) close(fd);
+        unlink("l3_big");
     }
 
     unlink("l3_d/f2");
