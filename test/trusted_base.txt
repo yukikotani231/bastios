@@ -1,8 +1,8 @@
 # The trusted base of BastiOS: non-blank lines per file. Regenerate with
 # `test/trusted_base.sh --update` and review the diff.
-boot/aarch64/boot.S: 315 lines
-boot/aarch64/linker.ld: 22 lines
-boot/aarch64/platform.c: 313 lines
+boot/aarch64/boot.S: 394 lines
+boot/aarch64/linker.ld: 23 lines
+boot/aarch64/platform.c: 334 lines
 boot/ap.S: 84 lines
 boot/boot.S: 555 lines
 boot/core.h: 63 lines
@@ -15,4 +15,4 @@ boot/smp.c: 741 lines
 user/start.S: 19 lines
 user/start-aarch64.S: 17 lines
 user/user.ld: 15 lines
-total: 2596 lines
+total: 2697 lines
