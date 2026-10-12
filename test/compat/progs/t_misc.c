@@ -58,6 +58,9 @@ int main(void) {
         strstr(t, "Receive") && strstr(t, "lo:") && strstr(t, "eth0:"); }));
     EXPECT("/proc/net is a directory", ({ struct stat st; stat("/proc/net", &st) == 0 && S_ISDIR(st.st_mode); }));
     EXPECT("/proc/modules opens", open("/proc/modules", O_RDONLY) >= 0);
+    EXPECT("syslog (klogctl) reports a buffer size and reads nothing; an unknown type is EINVAL", ({ char kb[64];
+        long sz = syscall(SYS_syslog, 10, 0, 0), rd = syscall(SYS_syslog, 3, kb, sizeof kb);
+        sz > 0 && rd == 0 && syscall(SYS_syslog, 99, 0, 0) == -1 && errno == EINVAL; }));
     EXPECT("/proc/diskstats opens", open("/proc/diskstats", O_RDONLY) >= 0);
     EXPECT("/etc/passwd", open("/etc/passwd", O_RDONLY) >= 0);
     EXPECT("getlogin or getpwuid", getpwuid(getuid()) != NULL);
