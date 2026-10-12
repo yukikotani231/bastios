@@ -509,6 +509,7 @@ t_misc: seccomp filter denies getpid
 t_misc: statfs
 t_misc: strtod
 t_misc: sync
+t_misc: syslog (klogctl) reports a buffer size and reads nothing; an unknown type is EINVAL
 t_misc: tcgetattr
 t_misc: tcgetpgrp
 t_misc: tcsetattr
@@ -810,6 +811,7 @@ t_sig2: SA_RESTART does not restart nanosleep
 t_sig2: SA_RESTART does not restart poll
 t_sig2: a PROT_NONE MAP_SHARED page is still shared after mprotect
 t_sig2: a PROT_NONE file mapping faults on read
+t_sig2: a PROT_NONE page is EFAULT to a system call
 t_sig2: a forked child keeps a page PROT_NONE
 t_sig2: epoll_pwait blocks its mask while it waits
 t_sig2: mmap of a file with fd -1 is EBADF
