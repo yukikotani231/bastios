@@ -80,6 +80,7 @@ import "lxcow.bastio";
 import "hda.bastio";
 import "lxsnd.bastio";
 import "lxmouse.bastio";
+import "kernel.bastio";
 
 const V_TIMER: u64 = 32;
 const V_SYSCALL: u64 = 128;
@@ -1355,26 +1356,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     puts(&mut con, "---- end of the hardware report ----\r\n");
     diag_pause(&mut term, &mut con, &mut clock, &mut acpi);
   }
-  let mut spaces = vec_new[Space]();
-  let mut i = 0;
-  while i < NPROC
-    invariant i <= NPROC && vlen(spaces) == i
-    invariant forall j: u64 :: j < i ==> vget(spaces, j) is Space::Empty
-  {
-    vec_push(&mut spaces, Space::Empty);
-    i = i + 1;
-  }
-  let mut fpus = vec_new[Fpu]();
-  let mut q = 0;
-  while q < NPROC
-    invariant q <= NPROC && vlen(fpus) == q
-  {
-    vec_push(&mut fpus, Fpu::None);
-    q = q + 1;
-  }
-  let shm = new_store(&mut m);
-  let txt = new_store(&mut m);
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PGROW * STRIDE), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lxfd: alloc(PGROW * LXNFD), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: vec_new[PipeBuf](), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: rng_new(epoch ^ at), cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(PGROW * SIGACT_ROW), cwd: alloc(PGROW * CWD_STRIDE), croot: alloc(PGROW * CWD_STRIDE), dpath: alloc(DPATH_LEN), sigsave: alloc(PGROW * SIGSAVE_ROW), alarms: alloc(ALARMS_LEN), evt: alloc(EVT_LEN), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), maps: alloc(MAPS_LEN), holes: alloc(HOLES_LEN), lazy: alloc(LAZY_LEN), anon: alloc(ANON_LEN), inet6: alloc(OFD_N), locks: alloc(LK_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, txt: txt, sys: alloc(SYS_LEN), loops: alloc(LOOP_LEN), ptys: alloc(PTY_LEN), ptyb: balloc(PTYB_LEN), snd: snd, mice: mice_new(term.kbd.aux || usb_mouse_on), pdir: false, mns: alloc(MNS_LEN), scf: alloc(0), mstr: balloc(MSTR_LEN), naps: false };
+  let mut k = kernel_new(m, disk, nic, snd, mice_new(term.kbd.aux || usb_mouse_on), tsc, at, epoch, cpus);
   install_files(&mut con, &mut k);
   let mut login = 0;
   if boot_word(cpu, "login") {
@@ -1400,16 +1382,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   atomic_end(pend);
   atomic_end(others);
   // Power off: tear down whatever is left, so every page goes back.
-  while vec_len(sys.k.spaces) > 0
-    invariant mem_ok(sys.k.mem) && mmu_root(mmu) == KERNEL_ROOT
-    invariant forall j: u64 :: j < vlen(sys.k.spaces) ==> (vget(sys.k.spaces, j) is Space::Mapped ==> pt_level(vget(sys.k.spaces, j).Mapped) == 4)
-  {
-    match vec_pop(&mut sys.k.spaces) {
-      Space::Empty => {},
-      Space::Mapped(t) => { free_space(&mut sys.k.mem, mmu, t); },
-    }
-  }
-  vec_free(sys.k.spaces);
+  kernel_drop_spaces(&mut sys.k, mmu);
   match sys.k.shm {
     Store::None => {},
     Store::Table(t) => { free_l2(&mut sys.k.mem, t); },
@@ -1418,12 +1391,6 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     Store::None => {},
     Store::Table(t) => { free_l2(&mut sys.k.mem, t); },
   }
-  while vec_len(sys.k.fpus) > 0
-    invariant mem_ok(sys.k.mem)
-  {
-    drop_fpu(&mut sys.k.mem, vec_pop(&mut sys.k.fpus));
-  }
-  vec_free(sys.k.fpus);
   let dk = vfs_free(sys.k.fs, &mut sys.k.mem, &mut ports, &mut win);
   blk_free(&mut ports, &mut win, dk, &mut sys.k.mem);
   nic_free(&mut ports, &mut win, sys.k.nic, &mut sys.k.mem);
@@ -1443,6 +1410,8 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     Usb::None => {},
     Usb::Xhci(x) => { mmio_release(&mut win, xhci_free(x, &mut sys.k.mem)); },
   }
+  vec_free(sys.k.spaces);
+  vec_free(sys.k.fpus);
   free(sys.k.mem.bm);
   free(sys.k.procs);
   queue_free(sys.k.q);
