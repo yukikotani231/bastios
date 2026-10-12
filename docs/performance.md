@@ -135,10 +135,24 @@ machine, because they come from algorithms, not from emulation.
    returns. Reads of a file larger than the block cache reach the disk
    again; a page cache is the fix. bastios #146 added a 1 MiB block cache,
    which an 8 MiB file does not fit in.
-2. **System call entry and exit (30x).** Mostly the three CR3 loads above.
-   The fix is to keep a process's table loaded across a call that returns
-   to it, and to reload only when a table changed. That is a change to the
-   C prelude of bastiolang (`mmu_enter`, `mmu_exit`, `cpu_run`).
+2. **System call entry and exit (about 14x; the table's 30x predates CR3
+   parking).** A process's table now stays in CR3 across a call that
+   returns to it, so `getppid` takes about 9 us (`bench/baseline.json`)
+   against Linux's 0.64 us, where the table above measured 19.6 us. A
+   `bench/prof.py` profile of the `syscall` test now charges the time
+   mostly to emulation of the x87/SSE state, not to the kernel's own work:
+   leaving out `fxrstor` and `fxsave` around every run (an experiment, not
+   merged, since the registers would be lost) took `getppid` from about
+   9.5 to 5.9 us, and `fxrstor` alone is 2.2 us of that. QEMU's TCG
+   implements both with helper calls over 16 vector and 8 x87 registers,
+   where hardware takes tens of cycles, so this part should shrink a lot on
+   KVM or a real processor. The rest is the kernel's own: `rdtsc` six times
+   per turn (about 1.4 us under TCG, measured by leaving them out), the scan for a ready process over all
+   256 slots (`lx_pick`, about 1.5 us; `NPROC=32` saves that much) and
+   copying 39 registers in and out. A lazy FPU switch (CR0.TS and a device
+   not available handler) would remove the first part, and a ready queue
+   the second; neither is done, and neither is worth doing before the
+   numbers can be taken under KVM or on hardware.
 3. **`stat`, `open` (8 to 10x).** Partly (2). `stat` also counted hard
    links by scanning all 1024 directory slots of the disk. It now scans
    only the slots the directory holds, which made `stat@disk` 4.9 times
