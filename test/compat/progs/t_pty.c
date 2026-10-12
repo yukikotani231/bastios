@@ -3,12 +3,13 @@
  * ttyname, the line discipline between the two ends (echo, canonical
  * lines, erase, ICRNL and ONLCR, end of file, raw mode), Ctrl-C reaching
  * the foreground group as SIGINT, the window size and SIGWINCH, poll and
- * O_NONBLOCK, and what each end sees when the other closes. */
+ * O_NONBLOCK, epoll, and what each end sees when the other closes. */
 #include "compat.h"
 #include <fcntl.h>
 #include <poll.h>
 #include <pty.h>
 #include <signal.h>
+#include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -165,6 +166,29 @@ int main(void) {
         ioctl(mx, TIOCSPTLCK, &one);
         close(b);
         close(mx);
+    }
+    {
+        /* An event loop watching a terminal, as libuv does for Neovim over SSH. */
+        int m3 = -1, s3 = -1;
+        int ok = openpty(&m3, &s3, 0, 0, 0) == 0;
+        int ep = epoll_create1(0);
+        struct epoll_event ev = {.events = EPOLLIN, .data.fd = m3}, out[2];
+        int a = ok && ep >= 0 && epoll_ctl(ep, EPOLL_CTL_ADD, m3, &ev) == 0;
+        ev.data.fd = s3;
+        int b = ok && epoll_ctl(ep, EPOLL_CTL_ADD, s3, &ev) == 0;
+        EXPECT("epoll_ctl accepts both ends of a pair", a && b);
+        int n = ok && write(s3, "hi", 2) == 2 ? epoll_wait(ep, out, 2, 1000) : -1;
+        EXPECT("epoll reports the master readable after a slave write", n == 1 && out[0].data.fd == m3 && (out[0].events & EPOLLIN));
+        char junk[16];
+        ok = ok && read(m3, junk, sizeof junk) == 2;
+        n = ok && write(m3, "z\n", 2) == 2 ? epoll_wait(ep, out, 2, 1000) : -1;
+        int slave = 0;
+        for (int i = 0; i < n; i++)
+            if (out[i].data.fd == s3 && (out[i].events & EPOLLIN)) slave = 1;
+        EXPECT("and the slave readable after a master line", slave);
+        close(ep);
+        close(m3);
+        close(s3);
     }
     return done();
 }
