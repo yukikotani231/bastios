@@ -87,6 +87,7 @@ const SY_CG: u64 = SY_UM + NPROC * UMF_N;   // a cgroup's control file f at slot
 const CGF_N: u64 = 17;
 const NS_DIRS: u64 = 0x100;            // DIR_PROC + NS_DIRS + pid: /proc/PID/ns
 const FD_DIRS: u64 = 0x200;            // DIR_PROC + FD_DIRS + pid: /proc/PID/fd
+const TASK_DIRS: u64 = 0x300;          // DIR_PROC + TASK_DIRS + pid: /proc/PID/task
 const LOOP_SYS: u64 = 8;               // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
@@ -315,6 +316,26 @@ fn proc_dir(procs: &Buf, x: &Bytes, n: u64) -> u64
     }
     return DIR_PROC + FD_DIRS + q;          // /proc/PID/fd
   }
+  if e + 5 == n && xfer_is(x, e, n, "/task") {
+    let q = proc_pid(procs, x, 5, e);
+    if q >= NPROC {
+      return NO_FILE;
+    }
+    return DIR_PROC + TASK_DIRS + q;        // /proc/PID/task
+  }
+  if e + 6 < n && xfer_is(x, e, e + 6, "/task/") {
+    // /proc/PID/task/TID: the thread's own directory, for a thread of the group
+    let q = proc_pid(procs, x, 5, e);
+    let te = comp_end(x, e + 6, n);
+    if q >= NPROC || te != n {
+      return NO_FILE;
+    }
+    let t = proc_pid(procs, x, e + 6, te);
+    if t < NPROC && (t == q || tgid(procs, t) == q) {
+      return DIR_PROC + t;
+    }
+    return NO_FILE;
+  }
   if e != n {
     return NO_FILE;
   }
@@ -336,7 +357,7 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   if n < 6 || !xfer_is(x, 0, 5, "proc/") {
     return 0;
   }
-  let e = comp_end(x, 5, n);
+  let mut e = comp_end(x, 5, n);
   if e == n {
     if xfer_is(x, 5, n, "mounts") {
       return PROC_DEV + PF_MOUNTS;
@@ -403,9 +424,19 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
     }
     j = j + 1;
   }
-  let p = proc_pid(procs, x, 5, e);
+  let mut p = proc_pid(procs, x, 5, e);
   if p >= NPROC {
     return 0;
+  }
+  if e + 6 < n && xfer_is(x, e + 1, e + 6, "task/") {
+    // /proc/PID/task/TID/FILE is /proc/TID/FILE, for a thread of the group
+    let te = comp_end(x, e + 6, n);
+    let t = proc_pid(procs, x, e + 6, te);
+    if t >= NPROC || te >= n || (t != p && tgid(procs, t) != p) {
+      return 0;
+    }
+    p = t;
+    e = te;
   }
   let base = PROC_DEV + 16 * p;
   if xfer_is(x, e + 1, n, "stat") {
@@ -441,14 +472,6 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   }
   if e + 4 < n && xfer_is(x, e + 1, e + 4, "ns/") {
     return nsf_at(x, e + 4, n, p);          // a namespace link (src/lxnsk.bastio)
-  }
-  // task/TID/comm, for a thread of the group (or the group itself).
-  if e + 6 < n && xfer_is(x, e + 1, e + 6, "task/") {
-    let te = comp_end(x, e + 6, n);
-    let t = proc_pid(procs, x, e + 6, te);
-    if t < NPROC && (t == p || tgid(procs, t) == p) && te < n && xfer_is(x, te + 1, n, "comm") {
-      return PROC_DEV + 16 * t + PF_COMM;
-    }
   }
   return 0;
 }
@@ -561,6 +584,9 @@ fn proc_meta(f: u64) -> Meta {
 
 /// What stat says about /proc directory d (a proc_dir description).
 fn proc_dir_meta(d: u64) -> Meta {
+  if d >= DIR_PROC + TASK_DIRS {
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 12288 + d % 256, mtime: 0, own: 0 };
+  }
   if d >= DIR_PROC + FD_DIRS {
     return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 8192 + d % 256, mtime: 0, own: 0 };
   }
@@ -580,6 +606,25 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
   ensures kok(k) && result.len <= XFER
 {
   let end = Ent { len: 0, dir: false, end: true };
+  if dir >= DIR_PROC + TASK_DIRS {
+    // /proc/PID/task: one entry per thread of the group, a hole for the others
+    let q = dir - DIR_PROC - TASK_DIRS;
+    if q >= NPROC || i >= NPROC {
+      return end;
+    }
+    let row = i + 1;
+    if row >= NPROC {
+      return end;
+    }
+    if state(k.procs, row) == FREE || (row != q && tgid(k.procs, row) != q) {
+      return Ent { len: 0, dir: false, end: false };
+    }
+    let v = vpid_of(k, pid, row);
+    if v == 0 {
+      return Ent { len: 0, dir: false, end: false };
+    }
+    return Ent { len: dec_big(&mut k.fs.xfer, 0, smaller(v, 9999999)), dir: true, end: false };
+  }
   if dir >= DIR_PROC + FD_DIRS {
     // /proc/PID/fd: one entry per open descriptor, a hole for each closed one
     if i >= LXNFD {
@@ -628,6 +673,9 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
     }
     if i == 8 + UMF_N {
       return Ent { len: name_out(&mut k.fs.xfer, "cgroup"), dir: false, end: false };
+    }
+    if i == 9 + UMF_N {
+      return Ent { len: name_out(&mut k.fs.xfer, "task"), dir: true, end: false };
     }
     return end;
   }
