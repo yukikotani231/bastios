@@ -144,8 +144,8 @@ fn dev_meta(d: u64) -> Meta {
 // refill folds the pool into the key, makes one block, and keeps half of
 // it as the next key ("fast key erasure"), so earlier output cannot be
 // recomputed from a later state. The counter's jitter is an estimate of
-// entropy, not a measured one; there is no hardware source (RDRAND or
-// virtio-rng) yet.
+// entropy, not a measured one. A virtio-rng, if the machine has one, adds
+// 64 bytes at boot (src/virtio_rng.bastio); there is no RDRAND source yet.
 //
 // k.rng holds RNG_LEN words:
 const RNG_KEY: u64 = 0;             // 8 key words of 32 bits
@@ -192,6 +192,15 @@ fn rng_stir(k: &mut Kernel, cpu: &Cpu)
   ensures kok(k)
 {
   rng_add(&mut k.rng, cpu_tsc(cpu));
+}
+
+/// Adds the 64-bit word x, from a source outside the kernel (a virtio-rng at
+/// boot), to the pool.
+fn rng_feed(k: &mut Kernel, x: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  rng_add(&mut k.rng, x);
 }
 
 /// x rotated left by n bits, as a 32-bit word.
