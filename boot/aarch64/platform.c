@@ -28,14 +28,14 @@
  * are boot.S's PCPU_* constants. */
 struct pcpu {
     uint64_t ctx[40];
-    uint64_t mmu[3];
+    uint64_t mmu[4];            /* bst_platform_mmu_state; word 3 is the user table */
     uint64_t irq;
     uint64_t id;
     uint64_t mpidr;
-    uint64_t pad[2];
+    uint64_t pad[1];
 };
-_Static_assert(__builtin_offsetof(struct pcpu, irq) == 344, "boot.S PCPU_IRQ");
-_Static_assert(__builtin_offsetof(struct pcpu, id) == 352, "boot.S PCPU_ID");
+_Static_assert(__builtin_offsetof(struct pcpu, mmu[3]) == 344, "boot.S PCPU_MMU3");
+_Static_assert(__builtin_offsetof(struct pcpu, irq) == 352, "boot.S PCPU_IRQ");
 _Static_assert(sizeof(struct pcpu) == 384, "boot.S PCPU_SIZE");
 struct pcpu bst_pcpus[MAX_CPUS];
 uint8_t bst_cpu_stacks[MAX_CPUS][CPU_STACK] __attribute__((aligned(16)));
@@ -62,6 +62,19 @@ static uint64_t dtb_len;
 
 extern uint64_t bst_kernel_root[512];
 extern uint64_t kernel_l1[512];
+
+/* Tells the compiled kernel (the prelude's BST_DEFERRED) that user code runs
+ * on a table of its own, which bst_cpu_enter loads into TTBR0 from word 3 of
+ * bst_platform_mmu_state: the kernel's tables stay in TTBR0 in Bastio code. */
+const char bst_platform_deferred_ttbr0 = 1;
+uint64_t *bst_platform_mmu_state(void) { return this_cpu()->mmu; }
+
+/* TTBR1 maps one page, the trampoline (boot.S), at TRAMP_VA: the exception
+ * vectors and the code that switches TTBR0, which must be reachable while
+ * TTBR0 holds a user table. One table per level, all index 0. */
+extern char tramp_page[];
+uint64_t bst_ttbr1_tables[4][512] __attribute__((aligned(4096)));
+#define TRAMP_PTE ((uint64_t)tramp_page | 3 | (1ull << 10) | (3ull << 8) | (1ull << 7) | (1ull << 54))
 
 static uint32_t be32(const uint8_t *p) {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
@@ -171,6 +184,10 @@ void bst_early(const uint8_t *dtb) {
     for (uint64_t g = 1; g < ((top + (1ull << 30) - 1) >> 30); g++)
         kernel_l1[g] = BLOCK_NORMAL | (g << 30);
     bst_kernel_root[0] = (uint64_t)kernel_l1 | 3;
+    bst_ttbr1_tables[0][0] = (uint64_t)bst_ttbr1_tables[1] | 3;
+    bst_ttbr1_tables[1][0] = (uint64_t)bst_ttbr1_tables[2] | 3;
+    bst_ttbr1_tables[2][0] = (uint64_t)bst_ttbr1_tables[3] | 3;
+    bst_ttbr1_tables[3][0] = TRAMP_PTE;       /* EL1 read-only, never executable at EL0 */
 }
 
 static inline void w32(uint64_t a, uint32_t v) { *(volatile uint32_t *)a = v; }
