@@ -635,11 +635,14 @@ ALPINE_CACHE ?= build/compat/alpine
 
 # The Bastio toolchain goes on this disk too (outside the Alpine root, like
 # the bastio disk's), for the cases that edit a program in Alpine's neovim
-# and build it with bastioc1 and tcc.
+# and build it with bastioc1 and tcc, and Dropbear, to log in and run it
+# over SSH.
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh \
-    build/compat/bastioc1 build/compat/z3 build/compat/tcc | build/compat
+    build/compat/bastioc1 build/compat/z3 build/compat/tcc \
+    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys | build/compat
 	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) \
-	  --extra "$$(test/compat/bastiotools.sh build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB))"
+	  --extra "$$(test/compat/bastiotools.sh build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)) \
+	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys"
 
 # Debian on BastiOS, on a fifth disk (test/compat/debiandisk.py) for
 # test/compat/debian.txt: Debian's root file system, whose programs are
