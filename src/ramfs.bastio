@@ -399,17 +399,18 @@ fn ram_put_pages(v: &mut Vec[Node], mem: &mut Mem, i: u64, pages: Vec[Slot])
 // ---------------------------------------------------------------- the table
 
 /// The node holding the file named by the first n bytes of `name`, or
-/// NFILES if there is none.
-fn ram_find(v: &mut Vec[Node], name: &Bytes, n: u64) -> u64
-  requires nodes_ok(v) && n <= blen(name)
+/// NFILES if there is none. Only nodes below `hi` are looked at: the
+/// caller's high-water mark of the nodes ever created (Vfs.rhi).
+fn ram_find(v: &mut Vec[Node], hi: u64, name: &Bytes, n: u64) -> u64
+  requires nodes_ok(v) && hi <= NFILES && n <= blen(name)
   ensures nodes_ok(v) && result <= NFILES
 {
   if n == 0 {
     return NFILES;              // no file is named "" (orphans are, see ram_orphan)
   }
   let mut i = 0;
-  while i < NFILES
-    invariant i <= NFILES && nodes_ok(v)
+  while i < hi
+    invariant i <= hi && hi <= NFILES && nodes_ok(v)
   {
     let mut hit = false;
     match take_node(&mut v, i) {
