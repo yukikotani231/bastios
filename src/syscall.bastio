@@ -7,6 +7,7 @@ import "space.bastio";
 import "proc.bastio";
 import "fs.bastio";
 import "usermem.bastio";
+import "smaller.bastio";
 
 const SYS_EXIT: u64 = 0;
 const SYS_WRITE: u64 = 1;
@@ -196,15 +197,6 @@ fn w_matches(l3: &mut PageTable, off: u64, n: u64, name: Str) -> bool
 
 // Each of these returns NO_RESULT on failure. A transfer moves at most XFER
 // bytes per call, through the kernel buffer k.fs.xfer.
-
-fn smaller(a: u64, b: u64) -> u64
-  ensures result <= a && result <= b
-{
-  if a < b {
-    return a;
-  }
-  return b;
-}
 
 /// Copies the name at user address va (n bytes) into the transfer buffer.
 fn name_in(k: &mut Kernel, pid: u64, va: u64, n: u64) -> bool

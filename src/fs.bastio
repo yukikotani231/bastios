@@ -168,19 +168,12 @@ fn lo_swap(v: &mut Vfs, pages: Vec[Slot], size: u64) -> Vec[Slot]
   requires vfs_ok(v)
   ensures vfs_ok(v)
 {
-  match disk_unmount(v.lo) {
-    Blk::Loop(l) => {
-      v.lo = disk_mount(Blk::Loop(loopdev_new(pages, size)));
-      v.lo_size = size;
-      return l.pages;
-    },
-    Blk::Ata(a) => { v.lo = disk_mount(Blk::Ata(a)); },
-    Blk::Virtio(x) => { v.lo = disk_mount(Blk::Virtio(x)); },
-    Blk::Nvme(x) => { v.lo = disk_mount(Blk::Nvme(x)); },
-    Blk::Ahci(x) => { v.lo = disk_mount(Blk::Ahci(x)); },
-    Blk::Usb(x) => { v.lo = disk_mount(Blk::Usb(x)); },
+  let s = blk_loop_swap(disk_unmount(v.lo), pages, size);
+  v.lo = disk_mount(s.dev);
+  if s.swapped {
+    v.lo_size = size;
   }
-  return pages;
+  return s.pages;
 }
 
 /// Is the name in the first n bytes of the transfer buffer on the disk

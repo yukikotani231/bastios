@@ -1,0 +1,226 @@
+// The disk under the file system on AArch64. The only driver so far is the
+// in-memory loop device (src/loopblk.bastio); the virtio-mmio block driver
+// joins it when the cloud/virtio-mmio work lands. The interface is the one
+// src/x86_64/arch/blk.bastio gives the file systems.
+
+import "pages.bastio";
+import "blkconst.bastio";
+import "loopblk.bastio";
+
+enum Blk { Loop(LoopDev) }
+
+spec fn blk_ok(b: &Blk) -> bool {
+  (b is Blk::Loop ==> loopdev_ok(b.Loop))
+}
+
+/// Does the disk raise V_DISK when a command started by blk_begin ends?
+/// If not, it has to be polled.
+fn blk_irq(b: &Blk) -> bool {
+  match b {
+    Blk::Loop(l) => { return false; },
+  }
+}
+
+/// Gives the disk's ports or registers back and, for virtio and NVMe,
+/// stops the device and takes its pages back (at power off).
+fn blk_free(ports: &mut Ports, win: &mut MmioSpace, b: Blk, m: &mut Mem)
+  requires blk_ok(b) && mem_ok(m)
+  ensures mem_ok(m)
+{
+  match b {
+    Blk::Loop(l) => { loopdev_free(l, &mut m); },
+  }
+}
+
+/// The next byte typed on a USB keyboard on the disk's controller (when
+/// the disk is a USB one, the keyboard is polled through it), a packet
+/// from a USB mouse there (MOUSE_PKT plus its bytes), or 256.
+fn blk_kbd_poll(b: &mut Blk) -> u64
+  requires blk_ok(b)
+  ensures blk_ok(b) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT))
+{
+  match b {
+    Blk::Loop(l) => { b = Blk::Loop(l); return 256; },
+  }
+}
+
+/// Is there a USB keyboard on the disk's controller?
+fn blk_kbd(b: &Blk) -> bool {
+  match b {
+    Blk::Loop(l) => { return false; },
+  }
+}
+
+/// Is there a USB mouse on the disk's controller?
+fn blk_mouse(b: &Blk) -> bool {
+  match b {
+    Blk::Loop(l) => { return false; },
+  }
+}
+
+/// The disk's size in sectors (0 if there is none).
+fn blk_sectors(b: &Blk) -> u64 {
+  match b {
+    Blk::Loop(l) => { return l.sectors; },
+  }
+}
+
+/// Reads sector `lba` into buf[0..512]; false if the disk fails or the
+/// sector is past its end.
+fn blk_read(b: &mut Blk, lba: u64, buf: &mut Bytes) -> bool
+  requires blk_ok(b) && blen(buf) >= SECTOR
+  ensures blk_ok(b) && blen(buf) == old(blen(buf))
+{
+  match b {
+    Blk::Loop(mut l) => {
+      let ok = loopdev_read(&mut l, lba, &mut buf);
+      b = Blk::Loop(l);
+      return ok;
+    },
+  }
+}
+
+/// Writes buf[0..512] to sector `lba`; false if the disk fails or the
+/// sector is past its end.
+fn blk_write(b: &mut Blk, lba: u64, buf: &Bytes) -> bool
+  requires blk_ok(b) && blen(buf) >= SECTOR
+  ensures blk_ok(b)
+{
+  match b {
+    Blk::Loop(mut l) => {
+      let ok = loopdev_write(&mut l, lba, buf);
+      b = Blk::Loop(l);
+      return ok;
+    },
+  }
+}
+
+/// Reads the 4 KiB block of eight sectors from `lba` (a multiple of 8) into
+/// out[at .. at + 4096] with one command; false if the disk fails or the
+/// block is not whole on the disk.
+fn blk_read_block(b: &mut Blk, lba: u64, out: &mut Bytes, at: u64) -> bool
+  requires blk_ok(b) && at + 4096 <= blen(out)
+  ensures blk_ok(b) && blen(out) == old(blen(out))
+{
+  match b {
+    Blk::Loop(mut l) => {
+      let ok = loopdev_read_block(&mut l, lba, &mut out, at);
+      b = Blk::Loop(l);
+      return ok;
+    },
+  }
+}
+
+/// Writes src[at .. at + 4096] to the eight sectors from `lba` (a multiple
+/// of 8) with one command, and flushes the drive's cache once; false if the
+/// disk fails or the block is not whole on the disk.
+fn blk_write_block(b: &mut Blk, lba: u64, src: &Bytes, at: u64) -> bool
+  requires blk_ok(b) && at + 4096 <= blen(src)
+  ensures blk_ok(b)
+{
+  match b {
+    Blk::Loop(mut l) => {
+      let ok = loopdev_write_block(&mut l, lba, src, at);
+      b = Blk::Loop(l);
+      return ok;
+    },
+  }
+}
+
+// Commands that run while the kernel does something else (see
+// src/bio.bastio): blk_begin starts one, blk_poll says when it is done,
+// and blk_fetch copies a finished read into the buffer it was started
+// with. One at a time. While one runs, the waiting calls above fail.
+
+/// Starts BIO_READ into buf[at .. at + 4096] or BIO_WRITE from it, of the
+/// 4 KiB block at sector `lba` (a multiple of 8), or BIO_FLUSH. A read's
+/// data is in buf only after blk_fetch(b, buf, at) (ATA has it at once).
+/// False if a command is running or the block is not whole on the disk.
+fn blk_begin(b: &mut Blk, op: u64, lba: u64, buf: &mut Bytes, at: u64) -> bool
+  requires blk_ok(b) && op <= BIO_FLUSH && at + 4096 <= blen(buf)
+  ensures blk_ok(b) && blen(buf) == old(blen(buf))
+{
+  match b {
+    Blk::Loop(mut l) => {
+      let ok = loopdev_begin(&mut l, op, lba, &mut buf, at);
+      b = Blk::Loop(l);
+      return ok;
+    },
+  }
+}
+
+/// How many consecutive blocks from sector `lba` one read can take (up to
+/// `want`): more than one only on virtio, which reads them in one request
+/// (virtio_begin_n).
+fn blk_room(b: &Blk, lba: u64, want: u64) -> u64
+  requires blk_ok(b)
+  ensures result >= 1 && result <= VIO_BATCH
+{
+  match b {
+    Blk::Loop(l) => { return 1; },
+  }
+}
+
+/// Starts reading n consecutive blocks from sector `lba` (n from
+/// blk_room); blk_fetch_n then takes each. Only virtio takes n > 1.
+fn blk_begin_n(b: &mut Blk, lba: u64, n: u64) -> bool
+  requires blk_ok(b) && n >= 1 && n <= VIO_BATCH
+  ensures blk_ok(b)
+{
+  match b {
+    Blk::Loop(l) => { b = Blk::Loop(l); return false; },
+  }
+}
+
+/// After a blk_begin_n read finished well: its block j into buf[at ..].
+fn blk_fetch_n(b: &mut Blk, j: u64, buf: &mut Bytes, at: u64)
+  requires blk_ok(b) && at + 4096 <= blen(buf)
+  ensures blk_ok(b) && blen(buf) == old(blen(buf))
+{
+  match b {
+    Blk::Loop(l) => { b = Blk::Loop(l); },
+  }
+}
+
+/// BIO_RUNNING while the started command runs, then once BIO_OK or
+/// BIO_FAILED; BIO_IDLE if none was started.
+fn blk_poll(b: &mut Blk) -> u64
+  requires blk_ok(b)
+  ensures blk_ok(b) && result <= BIO_IDLE
+{
+  match b {
+    Blk::Loop(mut l) => {
+      let r = loopdev_poll(&mut l);
+      b = Blk::Loop(l);
+      return r;
+    },
+  }
+}
+
+/// After blk_poll said BIO_OK for a BIO_READ started with (buf, at):
+/// puts the block in buf[at .. at + 4096].
+fn blk_fetch(b: &mut Blk, buf: &mut Bytes, at: u64)
+  requires blk_ok(b) && at + 4096 <= blen(buf)
+  ensures blk_ok(b) && blen(buf) == old(blen(buf))
+{
+  match b {
+    Blk::Loop(l) => { b = Blk::Loop(l); },   // loopdev_begin read it already
+  }
+}
+
+/// What lo_swap (src/fs.bastio) gets back: the driver now mounted, the pages
+/// it is to hand back and whether `size` was installed.
+struct LoSwap { dev: Blk, pages: Vec[Slot], swapped: bool }
+
+/// Puts a loop driver over `pages` in the place of `prev` when `prev` is one,
+/// and returns the old driver's pages; any other driver stays and `pages` come back.
+fn blk_loop_swap(prev: Blk, pages: Vec[Slot], size: u64) -> LoSwap
+  requires blk_ok(prev)
+  ensures blk_ok(result.dev)
+{
+  match prev {
+    Blk::Loop(l) => {
+      return LoSwap { dev: Blk::Loop(loopdev_new(pages, size)), pages: l.pages, swapped: true };
+    },
+  }
+}

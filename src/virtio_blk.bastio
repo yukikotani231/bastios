@@ -14,6 +14,7 @@
 
 import "virtq.bastio";
 import "bio.bastio";
+import "blkconst.bastio";
 
 const VIRTIO_BLK: u64 = 0x1001;       // legacy (transitional) block device id
 const VIO_CAPACITY: u64 = 0x14;       // 64 bits: the size in 512-byte sectors
@@ -26,7 +27,6 @@ const REQ_STATUS: u64 = 16;
 const REQ_DATA: u64 = 512;
 const VIO_SECTOR: u64 = 512;
 const VIO_BLOCK: u64 = 4096;
-const VIO_BATCH: u64 = 8;             // blocks one read request takes at most
 
 /// A data page for the blocks after the first of a batched read.
 enum Extra {
