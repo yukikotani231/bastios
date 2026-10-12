@@ -1111,6 +1111,16 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, rl_locked(k, p) / 1024);
     a = put_s(&mut o, a, " kB\nThreads:\t");
     a = put_n(&mut o, a, group_size(k, p));
+    a = put_s(&mut o, a, "\nNoNewPrivs:\t");
+    if sc_nnp(k, p) {
+      a = put_n(&mut o, a, 1);
+    } else {
+      a = put_n(&mut o, a, 0);
+    }
+    a = put_s(&mut o, a, "\nSeccomp:\t");
+    a = put_n(&mut o, a, sc_mode(k, p));
+    a = put_s(&mut o, a, "\nSeccomp_filters:\t");
+    a = put_n(&mut o, a, sc_depth(k, p));
     return put_c(&mut o, a, 10);
   }
   if what == PF_COMM {

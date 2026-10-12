@@ -57,6 +57,7 @@ const LX_FCHMODAT: u64 = 268;
 const LX_UTIMENSAT: u64 = 280;
 const LX_PRLIMIT64: u64 = 302;
 const LX_GETRANDOM: u64 = 318;
+const LX_SECCOMP: u64 = 317;
 const LX_UNAME: u64 = 63;
 const LX_MINCORE: u64 = 27;
 const LX_PERSONALITY: u64 = 135;
@@ -677,7 +678,7 @@ fn is_misc_call(n: u64) -> bool {
     || n == LX_SETRLIMIT || n == LX_SYNC || n == LX_UTIMES
     || n == LX_FUTIMESAT || n == LX_FCHOWNAT || n == LX_FCHMODAT || n == LX_UTIMENSAT
     || n == LX_PRLIMIT64 || n == LX_GETRANDOM || n == LX_UNAME || n == LX_MINCORE
-    || n == LX_PERSONALITY || n == LX_MLOCKALL || n == LX_MUNLOCKALL || n == LX_CAPGET || n == LX_CAPSET;
+    || n == LX_SECCOMP || n == LX_PERSONALITY || n == LX_MLOCKALL || n == LX_MUNLOCKALL || n == LX_CAPGET || n == LX_CAPSET;
 }
 
 fn is_meta_call(n: u64) -> bool {
@@ -886,8 +887,8 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_capget(&mut k, pid, a, b);
   } else if n == LX_CAPSET {
     r = lx_capset(&mut k, pid, a, b);
-  } else if n == LX_PRCTL {
-    r = lx_prctl(&mut k, pid, a, b);
+  } else if n == LX_PRCTL || n == LX_SECCOMP {
+    r = lx_prctl_seccomp(&mut k, pid, n, a, b, c);
   } else if n == LX_MLOCK || n == LX_MUNLOCK {
     r = lock_range(&mut k, pid, a, b);
     if r == 0 {

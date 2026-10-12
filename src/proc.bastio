@@ -568,7 +568,23 @@ const MNS_PN: u64 = MNS_UTS + UTS_N * UTS_W;
 const MNS_USR: u64 = MNS_PN + PN_N * PN_W;
 const MNS_CG: u64 = MNS_USR + USR_N * USR_W;
 const MNS_PQ: u64 = MNS_CG + CG_N * CG_W;
-const MNS_LEN: u64 = MNS_PQ + PQ_N;
+const MNS_SC: u64 = MNS_PQ + PQ_N;          // the seccomp pool (src/lxseccomp.bastio)
+
+// Seccomp (src/lxseccomp.bastio). Each process has SC_PW words in k.mns from
+// MNS_SC (top filter + 1, flags). The filters live in k.scf, which is empty
+// until the first one is loaded: SC_HW words for each of SC_N filters
+// (holders, parent + 1, instruction count, in use, first instruction), the
+// scratch words a run uses, then SC_POOL instructions for all of them.
+const SC_PW: u64 = 2;
+const SC_N: u64 = 8;
+const SC_HW: u64 = 5;
+const SC_MAXI: u64 = 4096;
+const SC_SCR: u64 = SC_N * SC_HW;
+const SC_SCRN: u64 = 24;
+const SC_INS: u64 = SC_SCR + SC_SCRN;
+const SC_POOL: u64 = 8192;               // instructions shared by all filters
+const SCF_LEN: u64 = SC_INS + SC_POOL + 1;   // and one word that always reads 0
+const MNS_LEN: u64 = MNS_SC + NPROC * SC_PW;
 const MSTR_LEN: u64 = 256 + MT_N * 512;   // the last lookup's logical path, then a key and a source per mount
 const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
 
@@ -825,6 +841,7 @@ struct Kernel {
   snd: Snd,             // the sound card, if any (src/hda.bastio)
   mice: Bytes,          // mouse packets for /dev/input/mice (src/lxmouse.bastio)
   mns: Buf,             // mount namespaces: each process's, and their mounts (src/lxns.bastio)
+  scf: Buf,             // seccomp filters, empty until one is loaded (src/lxseccomp.bastio)
   mstr: Bytes,          // the mounts' paths, and the logical path of the last lookup
   naps: bool,           // a process may be in TIMEWAIT: false lets sleepers_wake skip its scan
 }
@@ -837,7 +854,7 @@ spec fn kok(k: &Kernel) -> bool {
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 31;
+const NPROGS: u64 = 32;
 const LDSO_PROG: u64 = 25;            // musl's dynamic linker, the interpreter of musl programs
 
 fn prog_name(i: u64) -> Str {
@@ -934,6 +951,9 @@ fn prog_name(i: u64) -> Str {
   if i == 30 {
     return "mns";
   }
+  if i == 31 {
+    return "mseccomp";
+  }
   return "(file)";                    // a program loaded from a file
 }
 
@@ -1027,6 +1047,9 @@ fn prog_image(i: u64) -> Str {
   }
   if i == 30 {
     return include_bytes("../build/user/mns.elf");
+  }
+  if i == 31 {
+    return include_bytes("../build/user/mseccomp.elf");
   }
   return include_bytes("../build/user/fault.bin");
 }
