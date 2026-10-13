@@ -7,6 +7,9 @@ alpine-tty: nvim: edit a file in a git work tree, then commit it
 alpine-tty: nvim: edit and save a C file
 alpine-tty: nvim: it reads the terminal's size, and has colours
 alpine-tty: nvim: u undoes an edit, and the undo file is written
+alpine-tty: nvim: edit a Bastio program, prove and build it, run it
+alpine-tty: nvim: an edit that breaks a proof is rejected
+alpine-tty: nvim: edit a C file, build it with tcc, run it
 alpine: alpine: unpack the root, chroot into it
 alpine: apk: a dependency comes along; install scripts run
 alpine: apk: a dependency nothing provides stops the install
