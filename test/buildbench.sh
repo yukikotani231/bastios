@@ -1,29 +1,30 @@
 #!/usr/bin/env bash
 # An end-to-end number: how long `make` takes to build a small C project on
-# BastiOS with tcc, one job at a time and two at a time. Boots the kernel on
-# -smp 2 with the development disk (tcc and GNU make; `make build/compat/dev.img`
+# BastiOS with tcc, one job at a time and SMP at a time. Boots the kernel on
+# -smp SMP (default 2) with the development disk (tcc and GNU make; `make build/compat/dev.img`
 # is test/compat/devdisk.sh), generates FILES small sources, and times each
 # `make` from the host, RUNS times, as a fresh copy of the project each time.
 # Not part of `make test` and not a pass/fail test: it prints the median time
 # of each and the speed-up of -j2 over -j1, and is only comparable between
 # runs on the same host (see test/smpbench.sh).
-#   KERNEL=build/bastios.elf DEV=build/compat/dev.img FILES=24 RUNS=3 test/buildbench.sh
+#   KERNEL=build/bastios.elf DEV=build/compat/dev.img FILES=100 RUNS=3 SMP=2 test/buildbench.sh
 set -u
 cd "$(dirname "$0")/.."
 KERNEL=${KERNEL:-build/bastios.elf}
 DEV=${DEV:-build/compat/dev.img}
-FILES=${FILES:-24}
+FILES=${FILES:-100}
+SMP=${SMP:-2}
 RUNS=${RUNS:-3}
 
-python3 - "$KERNEL" "$DEV" "$FILES" "$RUNS" <<'PY'
+python3 - "$KERNEL" "$DEV" "$FILES" "$RUNS" "$SMP" <<'PY'
 import os, select, shutil, statistics, subprocess, sys, tempfile, time
 
-kernel, dev, files, runs = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+kernel, dev, files, runs, smp = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
 tmp = tempfile.TemporaryDirectory()
 disk = os.path.join(tmp.name, "dev.img")
 shutil.copyfile(dev, disk)
 q = subprocess.Popen(
-    ["qemu-system-x86_64", "-kernel", kernel, "-m", "512M", "-smp", "2", "-display", "none", "-no-reboot",
+    ["qemu-system-x86_64", "-kernel", kernel, "-m", "512M", "-smp", smp, "-display", "none", "-no-reboot",
      "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-nic", "none", "-serial", "stdio", "-monitor", "none",
      "-drive", f"file={disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -78,7 +79,7 @@ for line in setup:
         sys.exit("buildbench: could not set up the project:\n" + text[-600:])
 
 res = {}
-for jobs in (1, 2):
+for jobs in sorted({1, int(smp)}):
     ts = []
     for _ in range(runs):
         sh("/disk/make clean >/dev/null")
@@ -88,6 +89,6 @@ for jobs in (1, 2):
         ts.append(t)
     res[jobs] = statistics.median(ts)
     print("make -j%d: %.2f s (runs: %s)" % (jobs, res[jobs], " ".join("%.2f" % x for x in ts)))
-print("%d sources; -j2 is %.2fx as fast as -j1" % (files + 1, res[1] / res[2]))
+print("%d sources; -j%s is %.2fx as fast as -j1" % (files + 1, smp, res[1] / res[int(smp)]))
 q.kill()
 PY

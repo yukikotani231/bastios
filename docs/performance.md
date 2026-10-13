@@ -118,13 +118,17 @@ difference. The numbers are not hardware timing; once BastiOS runs on a
 physical machine, record that table next to Linux's on the same machine.
 
 `make buildbench` (`test/buildbench.sh`) is an end-to-end number the table
-does not have: `make -j1` and `make -j2` of 100 small C files with tcc, on the
-development disk, on `-smp 2`. It prints the median seconds of each and the
-speed-up of `-j2`. Measured on one shared 4-core host under QEMU TCG: 1.8 s
-and 1.4 s (1.3 times as fast). It is not part of `make bench`, which runs the
-same program on Linux; this one is BastiOS alone. The low speed-up is the
-kernel's one lock (`Lock[Sys]`, see "How it scales" in docs/architecture.md):
-every system call of both compilers takes it.
+does not have: `make -j1` and `make -jN` of 100 small C files with tcc, on the
+development disk, on `-smp N` (`SMP=`, default 2). It prints the median seconds
+of each and the speed-up. Measured on one shared 4-core host under QEMU TCG:
+`-j1` 1.8 s (the same on one processor and on two), `-j2` 1.4 s (1.3 times as
+fast), `-j4` on `-smp 4` 1.2 s (1.5 times). Those fit a fixed 1.0 s that does
+not shrink plus 0.8 s that divides by the job count, so about half of a build
+is serial. Most of that is probably system call time: every call of every
+processor takes the kernel's one lock (`Lock[Sys]`, see "How it scales" in
+docs/architecture.md), and a compile is mostly `exec`, file creation and
+reads. That is a guess from the fit, not a profile. It is not part of
+`make bench`, which runs the same program on Linux; this one is BastiOS alone.
 
 ## Reading the numbers
 
