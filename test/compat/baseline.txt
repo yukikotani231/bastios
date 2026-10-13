@@ -933,6 +933,7 @@ t_sys: seccomp USER_NOTIF: a supervisor answers a call
 t_sys: setdomainname
 t_sys: the names are written through /proc/sys/kernel/hostname and domainname
 t_sys: sethostname, uname, /proc/sys/kernel/hostname
+t_sys: splice reads a /proc file into a pipe
 t_sys: settimeofday
 t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message
