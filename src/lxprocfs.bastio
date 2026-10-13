@@ -716,7 +716,7 @@ fn is_nextid_file(f: u64) -> bool {
 }
 
 fn proc_writable(f: u64) -> bool {
-  return is_nextid_file(f) || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
+  return is_nextid_file(f) || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
 }
 
 /// What stat says about /proc file f (a proc_file device).
@@ -2470,6 +2470,9 @@ fn proc_write(k: &mut Kernel, pid: u64, f: u64, va: u64, n: u64) -> u64
   }
   if is_um_file(f) {
     return um_write(&mut k, pid, f, va, n);   // src/lxuser.bastio
+  }
+  if f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 {
+    return uts_proc_write(&mut k, pid, f - (PROC_DEV + PSYS + SY_UTS), va, n);   // src/lxsys.bastio
   }
   if !proc_writable(f) || n == 0 || n > 32 {
     return EINVAL;
