@@ -1004,6 +1004,7 @@ apps: ripgrep: a search over many files on several threads
 apps: ripgrep: case-insensitive counts and file lists
 apps: ripgrep: replacement, multi-line and standard input
 apps: ripgrep: search with line numbers, honouring .ignore
+alpine: git: clone over HTTP and over HTTPS (git's dumb protocol, curl's TLS)
 alpine: nvim: tree-sitter parses help text with the vimdoc parser
 alpine: nvim: LuaJIT loads a shared object that gcc built
 alpine: nvim: vim.system runs a process and collects its output and status
