@@ -687,6 +687,7 @@ const OF_PQ: u64 = 13;                // a POSIX message queue: x the queue; wor
 const OF_SIGFD: u64 = 12;             // a signalfd: word 2 the signals it takes; word 3: nonblocking (src/lxevent.bastio)
 const OF_INOTIFY: u64 = 16;           // an inotify instance: x the instance; word 3: nonblocking (src/lxinotify.bastio)
 const OF_SECCOMP: u64 = 18;           // a seccomp notifier: x the filter; word 3: nonblocking (src/lxseccomp.bastio)
+const OF_CONSOLE: u64 = 19;             // the console, in flight over an AF_UNIX socket (src/lxmsg.bastio): the receiver gets the console again, and this description is freed
 const OF_NETLINK: u64 = 17;           // a netlink socket: x its slot; word 3: nonblocking (src/lxnetlink.bastio)
 const OF_PIDFD: u64 = 15;             // a pidfd: x the process, NPROC once its slot was reused; word 3: nonblocking (src/lxpidfd.bastio)
 const DIR_ROOT: u64 = 0;
