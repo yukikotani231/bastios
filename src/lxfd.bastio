@@ -440,7 +440,9 @@ fn lx_fd_fork(k: &mut Kernel, parent: u64, child: u64)
   {
     let v = fd_get(k.lxfd, parent, fd);
     fd_set(&mut k.lxfd, child, fd, v);
-    ref_value(&mut k, v);
+    if v != 0 {
+      ref_value(&mut k, v);
+    }
     fd = fd + 1;
   }
 }
@@ -512,7 +514,9 @@ fn lx_fd_close_all(k: &mut Kernel, pid: u64, only_cloexec: bool)
   while fd < LXNFD
     invariant fd <= LXNFD && kok(k)
   {
-    if !only_cloexec || fd_get(k.lxfd, pid, fd) >= FD_CLOEXEC {
+    let v = fd_get(k.lxfd, pid, fd);
+    // Most slots are empty: look before paying for the call.
+    if v != 0 && (!only_cloexec || v >= FD_CLOEXEC) {
       lx_fd_close(&mut k, pid, fd);
     }
     fd = fd + 1;

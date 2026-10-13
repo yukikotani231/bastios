@@ -94,6 +94,10 @@ const DIR_BLOCKS: u64 = 2048;
 const DIR_SB: u64 = 512;              // directory blocks below this are named by the superblock, the rest by extension blocks
 const EXT_PTRS: u64 = 511;            // directory blocks one extension block names (its word 0 names the next extension block)
 const EXT_MAX: u64 = 4;               // extension blocks: DIR_SB + EXT_MAX * EXT_PTRS >= DIR_BLOCKS
+const IX_CELLS: u64 = 65536;          // cells of the name index (a power of two, at least twice DSLOTS)
+const IX_BYTES: u64 = 262144;         // 4 bytes a cell: 0 empty, else entry + 1
+const IX_MIN: u64 = 1024;             // a directory with more entries than this has the index
+const IX_MAX: u64 = 49152;            // cells in use (stale ones too) before the index is rebuilt
 const DIR_START: u64 = 8;             // the blocks of memory the directory starts with (it doubles from there)
 const DIR_FIXED: u64 = 4;             // directory blocks 0..3 are disk blocks 1..4
 const DPB: u64 = 16;                  // directory entries per block
@@ -155,6 +159,9 @@ struct DiskFs {
   blocks: u64,          // blocks on the disk, at most MAX_BLOCKS
   slots: u64,           // the entries the directory's blocks hold now (DPB * blocks); 0 without a disk
   hint: u64,            // where the next allocation starts looking
+  ix: Bytes,            // the index of names (below), IX_BYTES once built, else empty
+  ixn: u64,             // its cells in use
+  free0: u64,           // every directory entry below this is in use (disk_entry starts its search for a free one here); 0 after one is freed
   foreign: bool,        // the disk holds something else, and is left alone
   links: bool,          // a hard link entry may exist: false lets disk_links skip counting them
 }
@@ -163,7 +170,8 @@ spec fn disk_ok(d: &DiskFs) -> bool {
   blk_ok(d.dev) && d.dcap >= DIR_START && d.dcap <= DIR_BLOCKS && blen(d.dir) == d.dcap * BLOCK && d.slots <= d.dcap * DPB && blen(d.sb) == BLOCK && blen(d.ext) == EXT_MAX * BLOCK && d.next <= EXT_MAX && blen(d.sec) == SECTOR && blen(d.root) == BLOCK
     && blen(d.la) == BLOCK && blen(d.lb) == BLOCK && blen(d.data) == BLOCK && blen(d.d2) == BLOCK && dq_ok(d.q)
     && bits_ok(d.used) && d.blocks <= d.used.n && d.used.n <= MAX_BLOCKS && d.slots <= DSLOTS
-    && len(d.pb) == BATCH_MAX && len(d.ob) == OB_MAX && d.pn <= BATCH_MAX && d.on <= OB_MAX && d.pw <= DSLOTS
+    && len(d.pb) == BATCH_MAX && len(d.ob) == OB_MAX && d.pn <= BATCH_MAX && d.on <= OB_MAX && d.pw <= DSLOTS && d.free0 <= DSLOTS
+    && (blen(d.ix) == 0 || blen(d.ix) == IX_BYTES) && d.ixn <= IX_CELLS
 }
 
 // ---------------------------------------------------------------- bytes
@@ -589,6 +597,7 @@ fn dir_grow(d: &mut DiskFs) -> bool
       return false;
     }
     d.slots = DPB * (db + 1);
+    ix_rebuild(&mut d);
     return true;
   }
   put_u64(&mut d.sb, 8 * db, b);
@@ -599,6 +608,7 @@ fn dir_grow(d: &mut DiskFs) -> bool
     return false;
   }
   d.slots = DPB * (db + 1);
+  ix_rebuild(&mut d);
   return true;
 }
 
@@ -731,7 +741,7 @@ fn disk_mount(dev: Blk) -> DiskFs
   }
   let mut d = DiskFs { dev: dev, dir: balloc(DIR_START * BLOCK), dcap: DIR_START, sb: balloc(BLOCK), ext: balloc(EXT_MAX * BLOCK), next: 0, sec: balloc(SECTOR), root: balloc(BLOCK),
     la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(nc), txn: 0, pw: 0, pb: alloc(BATCH_MAX), pn: 0, ob: alloc(OB_MAX), on: 0, pt: 0, tick: 0,
-    used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, foreign: false, links: true };
+    used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, ix: balloc(0), ixn: 0, free0: 0, foreign: false, links: true };
   if n < DATA_B0 + 16 || !blk_read(&mut d.dev, 0, &mut d.sec) {
     return d;
   }
@@ -873,6 +883,7 @@ fn disk_mount(dev: Blk) -> DiskFs
   }
   d.slots = slots;
   d.links = seen;
+  ix_rebuild(&mut d);
   return d;
 }
 
@@ -896,6 +907,7 @@ fn disk_unmount_now(d: DiskFs) -> Blk
   bfree(d.dir);
   bfree(d.sb);
   bfree(d.ext);
+  bfree(d.ix);
   bfree(d.sec);
   bfree(d.root);
   bfree(d.la);
@@ -1022,11 +1034,148 @@ fn dent_named(d: &DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
   return bytes_span_eq(d.dir, i * DENT + E_NAME, name, from, n);
 }
 
+// The index of names. A directory with more than IX_MIN entries has a hash
+// table from (parent, name) to the entry, so a lookup (and so a create,
+// which first looks for the name) does not read every entry. Each cell holds
+// an entry number + 1. It is memory only, built from the directory at mount
+// (and again when its cells run out) and never written. A cell is added for
+// an entry when it gets its name (create, move, take_name) and is never
+// removed: a lookup checks the entry's parent and name, so a cell left by an
+// entry that was removed or renamed is skipped. When memory for the table
+// cannot be had, lookups read every entry, as they did before it.
+
+fn ix_cell(d: &DiskFs, c: u64) -> u64
+  requires disk_ok(d) && blen(d.ix) == IX_BYTES && c < IX_CELLS
+{
+  return cast[u64](bget(d.ix, 4 * c)) + cast[u64](bget(d.ix, 4 * c + 1)) * 256
+    + cast[u64](bget(d.ix, 4 * c + 2)) * 65536 + cast[u64](bget(d.ix, 4 * c + 3)) * 16777216;
+}
+
+fn ix_put(d: &mut DiskFs, c: u64, v: u64)
+  requires disk_ok(d) && blen(d.ix) == IX_BYTES && c < IX_CELLS && v <= DSLOTS
+  ensures disk_ok(d)
+{
+  bset(&mut d.ix, 4 * c, cast[u8](v % 256));
+  bset(&mut d.ix, 4 * c + 1, cast[u8](v / 256 % 256));
+  bset(&mut d.ix, 4 * c + 2, cast[u8](v / 65536 % 256));
+  bset(&mut d.ix, 4 * c + 3, cast[u8](v / 16777216 % 256));
+}
+
+/// The first cell to look at for the name m[from..from + n] in directory p.
+fn ix_hash(p: u64, m: &Bytes, from: u64, n: u64) -> u64
+  requires from + n <= blen(m)
+  ensures result < IX_CELLS
+{
+  let mut h = wrap_mul(wrap_add(p, 1), 0x9E3779B97F4A7C15);
+  let mut j = 0;
+  while j < n
+    invariant j <= n && from + n <= blen(m)
+  {
+    h = wrap_mul(h ^ cast[u64](bget(m, from + j)), 0x100000001B3);
+    j = j + 1;
+  }
+  return (h ^ (h >> 32)) % IX_CELLS;
+}
+
+/// Gives live entry i (i < d.slots) a cell.
+fn ix_add(d: &mut DiskFs, i: u64)
+  requires disk_ok(d) && i < DSLOTS
+  ensures disk_ok(d)
+{
+  if blen(d.ix) != IX_BYTES || i >= d.slots {
+    return;
+  }
+  if d.ixn >= IX_MAX {
+    ix_rebuild(&mut d);
+    return;
+  }
+  let n = cast[u64](dent_byte(d, i, E_NLEN));
+  if n > DNAME_MAX {
+    return;
+  }
+  let mut c = ix_hash(dent_parent(d, i), d.dir, i * DENT + E_NAME, n);
+  let mut t = 0;
+  while t < IX_CELLS && ix_cell(d, c) != 0
+    invariant t <= IX_CELLS && c < IX_CELLS && blen(d.ix) == IX_BYTES && disk_ok(d)
+  {
+    c = (c + 1) % IX_CELLS;
+    t = t + 1;
+  }
+  if t < IX_CELLS {
+    ix_put(&mut d, c, i + 1);
+    d.ixn = d.ixn + 1;
+  }
+}
+
+/// Builds the index from the directory (or does nothing when it is small or
+/// memory is short: lookups then read every entry).
+fn ix_rebuild(d: &mut DiskFs)
+  requires disk_ok(d)
+  ensures disk_ok(d)
+{
+  if d.slots <= IX_MIN {
+    return;
+  }
+  if blen(d.ix) != IX_BYTES {
+    let nb = try_balloc(IX_BYTES);
+    if blen(nb) != IX_BYTES {
+      bfree(nb);
+      return;
+    }
+    let prev = d.ix;
+    d.ix = nb;
+    bfree(prev);
+  }
+  zero(&mut d.ix, 0, IX_BYTES);
+  d.ixn = 0;
+  let mut i = 0;
+  while i < d.slots
+    invariant i <= d.slots && d.slots <= DSLOTS && blen(d.ix) == IX_BYTES && d.ixn < IX_MAX && disk_ok(d)
+  {
+    if dent_live(d, i) && d.ixn < IX_MAX - 1 {
+      let n = cast[u64](dent_byte(d, i, E_NLEN));
+      if n <= DNAME_MAX {
+        let mut c = ix_hash(dent_parent(d, i), d.dir, i * DENT + E_NAME, n);
+        let mut t = 0;
+        while t < IX_CELLS && ix_cell(d, c) != 0
+          invariant t <= IX_CELLS && c < IX_CELLS && blen(d.ix) == IX_BYTES && disk_ok(d)
+        {
+          c = (c + 1) % IX_CELLS;
+          t = t + 1;
+        }
+        if t < IX_CELLS {
+          ix_put(&mut d, c, i + 1);
+          d.ixn = d.ixn + 1;
+        }
+      }
+    }
+    i = i + 1;
+  }
+}
+
 /// The entry in directory p named name[from..from + n], or DSLOTS.
 fn disk_child(d: &DiskFs, p: u64, name: &Bytes, from: u64, n: u64) -> u64
   requires disk_ok(d) && from + n <= blen(name)
   ensures result <= DSLOTS
 {
+  if blen(d.ix) == IX_BYTES && d.slots > IX_MIN {
+    let mut c = ix_hash(p, name, from, n);
+    let mut t = 0;
+    while t < IX_CELLS
+      invariant t <= IX_CELLS && c < IX_CELLS && blen(d.ix) == IX_BYTES && disk_ok(d)
+    {
+      let v = ix_cell(d, c);
+      if v == 0 {
+        return DSLOTS;
+      }
+      if v <= DSLOTS && dent_named(d, v - 1, name, from, n) && dent_parent(d, v - 1) == p {
+        return v - 1;
+      }
+      c = (c + 1) % IX_CELLS;
+      t = t + 1;
+    }
+    return DSLOTS;
+  }
   let mut i = 0;
   while i < d.slots
     invariant i <= d.slots && d.slots <= DSLOTS
@@ -1209,6 +1358,7 @@ fn disk_take_name(d: &mut DiskFs, i: u64, l: u64) -> bool
     j = j + 1;
   }
   let shared = i / 2 == l / 2;       // two entries to a sector
+  d.free0 = 0;
   if shared {
     dent_setb(&mut d, l, E_KIND, 0);
   }
@@ -1231,6 +1381,7 @@ fn disk_take_name(d: &mut DiskFs, i: u64, l: u64) -> bool
     dent_setb(&mut d, l, E_KIND, 0);
     ent_flush(&mut d, l);               // if this fails, the next mount drops l
   }
+  ix_add(&mut d, i);
   return true;
 }
 
@@ -1258,7 +1409,7 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
   if l == 0 || l > DNAME_MAX || disk_child(d, p, name, k, l) < DSLOTS {
     return DSLOTS;
   }
-  let mut i = 0;
+  let mut i = d.free0;
   while i < DSLOTS
     invariant i <= DSLOTS && disk_ok(d)
   {
@@ -1292,6 +1443,8 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
         dent_setb(&mut d, i, E_KIND, 0);
         return DSLOTS;
       }
+      d.free0 = i;
+      ix_add(&mut d, i);
       return i;
     }
     i = i + 1;
@@ -1371,6 +1524,9 @@ fn disk_move(d: &mut DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
     }
   }
   bfree(save);
+  if ok {
+    ix_add(&mut d, i);
+  }
   return ok;
 }
 
@@ -1402,6 +1558,7 @@ fn disk_remove(d: &mut DiskFs, i: u64) -> bool
   let r = dent_root(d, i);
   let file = dent_byte(d, i, E_KIND) == 1 || cast[u64](dent_byte(d, i, E_KIND)) == K_ORPHAN;
   dent_setb(&mut d, i, E_KIND, 0);
+  d.free0 = 0;
   if !ent_flush(&mut d, i) {
     return false;
   }

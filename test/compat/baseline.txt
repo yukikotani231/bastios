@@ -681,6 +681,7 @@ t_newer: process_vm_readv of a reaped child
 t_newer: process_vm_readv of itself
 t_newer: process_vm_readv with flags
 t_newer: process_vm_writev to a child and back
+t_newer: process_vm_writev to a child just forked, repeatedly
 t_newer: pwritev2 at -1 appends at the offset
 t_newer: pwritev2 at an offset
 t_newer: rewinddir
@@ -883,6 +884,7 @@ t_signal: SA_SIGINFO
 t_signal: SIGCHLD on child exit
 t_signal: SIG_IGN
 t_signal: alarm
+t_signal: alarm reaches a thread that does not block it
 t_signal: getitimer
 t_signal: kill missing pid is ESRCH
 t_signal: kill self
@@ -1038,3 +1040,8 @@ alpine: container: rootless: runc runs Alpine as an unprivileged user in a user 
 alpine: container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle
 alpine: container: the image's command, environment and working directory run rootless from the bundle
 alpine: nvim: a headless server on a unix socket answers another nvim (--listen, sockconnect, RPC)
+alpine: apk: install tmux, cmake and lua-language-server over HTTP
+alpine: tmux: a detached session runs a shell on a pseudo-terminal, takes keys and shows its screen
+alpine: cmake: configure, build and run a C project
+alpine: nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
+alpine: proc: /proc/self/exe is named from the reader's root (chroot), as on Linux

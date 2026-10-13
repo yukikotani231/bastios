@@ -673,7 +673,7 @@ build/compat/bastio.img: build/compat/bastioc1 build/compat/z3 build/compat/tcc 
 # on, also go on the disk, so the checks that use them need no network.
 # The images: git and curl; Alpine's own CI image (alpine-sdk: gcc, g++,
 # make, binutils, musl-dev); python3 (the ansible image); jq and libxml2's
-# tools; neovim (serh/nvim: Alpine 3.23's neovim 0.11 with git, gcc and make); and vim from edge (its runtime is about 2100 files: it waits for a
+# tools; neovim (serh/nvim: Alpine 3.23's neovim 0.11 with git, gcc and make); tmux; cmake and ninja; lua-language-server, a real language server for neovim's LSP client; and vim from edge (its runtime is about 2100 files: it waits for a
 # disk directory bigger than 1024 entries, as gcc and python3 do).
 # (The pinned images are in test/compat/images.mk.)
 # Where the images' layers are kept, checked against their digests on each
@@ -690,7 +690,7 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh \
     build/compat/bastioc1 build/compat/z3 build/compat/tcc \
     build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc tools/ocipull.sh | build/compat
-	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) \
+	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) $(ALPINE_X86_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) \
 	  --extra "$$(test/compat/bastiotools.sh build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)) \
 	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc tools/ocipull.sh"
 

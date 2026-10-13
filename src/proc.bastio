@@ -392,9 +392,10 @@ fn wake_readers(procs: &mut Buf, q: &mut Queue, line: &Buf)
   requires ptab_ok(procs) && qok(q) && lineok(line)
   ensures ptab_ok(procs) && qok(q)
 {
+  let cap = len(procs) / STRIDE;     // past it, every process is FREE
   let mut p = 1;
-  while p < NPROC
-    invariant 1 <= p && p <= NPROC && ptab_ok(procs) && qok(q)
+  while p < cap
+    invariant 1 <= p && cap <= NPROC && ptab_ok(procs) && qok(q)
   {
     if state(procs, p) == READING && q.r.n > 0 {
       pset(&mut procs, p, reg_word(R_RET), q_pop(&mut q));
@@ -510,7 +511,7 @@ const CAP_SETUID: u64 = 7;
 const CAP_SYS_BOOT: u64 = 22;
 const CAP_SETPCAP: u64 = 8;
 const PQ_N: u64 = 8;                   // POSIX message queues (SYS_PQ + PQ_N * 12 words = SYS_LEN)
-const IPCB_LEN: u64 = 411648;         // its message bytes, IPC_SETS * MQ_CAP; then the POSIX queues' names and messages, PQ_N * (256 + 16384)
+const IPCB_LEN: u64 = 411904;         // its message bytes, IPC_SETS * MQ_CAP; then the POSIX queues' names and messages, PQ_N * (256 + 16384), then their SIGEV_THREAD cookies, PQ_N * 32
 const LK_EOF: u64 = 18446744073709551615;   // a range to the end of the file; no file
 const LK_DESC: u64 = 4294967296;      // 2^32: lock owners from here are descriptions
 const LKC_FCNTL: u64 = 0;             // record and OFD locks
@@ -1593,9 +1594,10 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
   if np == 0 {
     np = pr_reaper(k, pid);                // else to the nearest child subreaper (src/lxprctl.bastio)
   }
+  let cap = len(k.procs) / STRIDE;     // past it, every process is FREE
   let mut c = 1;
-  while c < NPROC
-    invariant 1 <= c && c <= NPROC && kok(k) && np < NPROC
+  while c < cap
+    invariant 1 <= c && cap <= NPROC && kok(k) && np < NPROC
   {
     if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE {
       if np != 0 && np != c {

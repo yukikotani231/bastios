@@ -1,6 +1,7 @@
 /* Signals: handlers, masks, raise and kill, alarms and timers, waiting. */
 #include "compat.h"
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/select.h>
 #include <sys/time.h>
@@ -10,6 +11,12 @@
 static volatile sig_atomic_t got, info_ok;
 static void h(int s) { got = s; }
 static void hi(int s, siginfo_t *si, void *uc) { (void)uc; info_ok = s == SIGUSR2 && si->si_signo == SIGUSR2 && si->si_pid == getpid(); }
+
+static void *blocked_helper(void *a)
+{
+    (void)a;
+    for (;;) pause();
+}
 
 int main(void) {
     setup();
@@ -95,6 +102,16 @@ int main(void) {
         EXPECT("timer_create", (got = 0, timer_create(CLOCK_MONOTONIC, &ev, &t) == 0 && timer_settime(t, 0, &its, 0) == 0 &&
                (pause(), got == SIGALRM)));
     }
+    /* A helper thread that blocks every signal must not swallow the
+     * process's alarm: it goes to a thread that can take it. */
+    EXPECT("alarm reaches a thread that does not block it", (p = fork()) >= 0 && (p == 0 ? ({
+           sigset_t all, old; pthread_t th; struct timespec rq = {3, 0};
+           sigfillset(&all); pthread_sigmask(SIG_BLOCK, &all, &old);
+           int ok = pthread_create(&th, 0, blocked_helper, 0) == 0;
+           pthread_sigmask(SIG_SETMASK, &old, 0);
+           got = 0; signal(SIGALRM, h); alarm(1);
+           _exit(ok && nanosleep(&rq, 0) == -1 && errno == EINTR && got == SIGALRM ? 0 : 1); 0; }) :
+           waitpid(p, &st, 0) == p && WIFEXITED(st) && WEXITSTATUS(st) == 0));
     /* In a child that leads a process group of its own, so the signal
      * reaches nobody else (without setpgid it would reach the shell). */
     EXPECT("kill(0) to own group", (p = fork()) >= 0 && (p == 0 ? (setpgid(0, 0) != 0 || getpgrp() != getpid() ? _exit(2) :
