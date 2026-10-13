@@ -367,7 +367,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       }
       return p;
     }
-    if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) {
+    if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) || write_raced(&mut s.k, p) {
       return p;                             // code read, a page mapped or copied, or the stack grew: run the instruction again
     }
   }
@@ -401,6 +401,24 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   puts(&mut s.con, "; killed]\r\n");
   terminate(&mut s.k, mmu, p, SIG_DEATH + sig);
   return (p + 1) % NPROC;
+}
+
+/// A write that faulted on a read-only mapping, found writable by the time
+/// the abort is handled: another processor broke the copy-on-write page, or
+/// a kernel write for this process did (process_vm_writev on a child that
+/// has not run yet). The ESR says a data abort (class 0x24) on a write
+/// (WnR, bit 6) with a permission fault (status 0x0d to 0x0f); the
+/// instruction runs again and now succeeds.
+fn write_raced(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let esr = pget(k.procs, p, reg_word(34));
+  let st = esr % 64;
+  if (esr >> 26) != 0x24 || ((esr >> 6) % 2) != 1 || st < 0x0d || st > 0x0f {
+    return false;
+  }
+  return user_page_writable(&mut k.spaces, p, pget(k.procs, p, reg_word(R_FAULT)));
 }
 
 // What a trap's handling can leave behind: see after_trap in src/main.bastio.
