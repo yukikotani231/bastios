@@ -2014,9 +2014,10 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
 
 // ---------------------------------------------------------------- calls
 
-/// read(2) on /proc file f, open in descriptor fd: the bytes of the file
-/// as generated now, from the description's offset.
-fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
+/// The next up to n bytes (at most XFER) of /proc file f, open as fd, left in
+/// the transfer buffer, and their count: 0 at the end, or an error. The offset
+/// does not move.
+fn proc_fill(k: &mut Kernel, pid: u64, fd: u64, f: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
@@ -2056,11 +2057,28 @@ fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
     i = i + 1;
   }
   bfree(out);
+  return m;
+}
+
+/// read(2) on /proc file f, open in descriptor fd: the bytes of the file
+/// as generated now, from the description's offset.
+fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let m = proc_fill(&mut k, pid, fd, f, n);
+  if m == 0 || m > XFER {
+    return m;
+  }
   let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, m);
   if put == NO_RESULT || put == 0 {
     return EFAULT;
   }
-  of_set(&mut k.ofd, h, 3, off + put);
+  let h = fd_ofd(k, pid, fd);
+  if h >= OFD_N {
+    return EBADF;
+  }
+  of_set(&mut k.ofd, h, 3, sat_add(of_get(k.ofd, h, 3), put));
   return put;
 }
 
@@ -2422,6 +2440,7 @@ fn lx_procfs_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u
 fn next_id_write(k: &mut Kernel, f: u64, n: u64, start: u64) -> u64
   requires kok(k) && n <= 32 && start <= n && f >= PROC_DEV + PSYS + SY_NEXTID && f < PROC_DEV + PSYS + SY_NEXTID + 3
   ensures kok(k)
+  ensures result <= n || result > XFER
 {
   let mut i = start;
   let mut neg = false;
@@ -2480,6 +2499,37 @@ fn proc_write(k: &mut Kernel, pid: u64, f: u64, va: u64, n: u64) -> u64
   if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, n) != n {
     return EFAULT;
   }
+  return proc_write_xfer(&mut k, f, n);
+}
+
+/// Whether /proc file f is /proc/sys/kernel/hostname or domainname, and which
+/// of the two (0 or 1).
+fn is_uts_file(f: u64) -> bool {
+  return f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1;
+}
+
+fn uts_file_index(f: u64) -> u64
+  ensures result < 2
+{
+  if f == PROC_DEV + PSYS + SY_UTS + 1 {
+    return 1;
+  }
+  return 0;
+}
+
+/// Whether a write of the transfer buffer can set /proc file f: the number
+/// files, which need no user memory beyond that buffer.
+fn proc_xfer_writable(f: u64) -> bool {
+  return proc_writable(f) && !is_cg_file(f) && !is_um_file(f) && f != PROC_DEV + PSYS + SY_UTS && f != PROC_DEV + PSYS + SY_UTS + 1;
+}
+
+/// The part of proc_write after the bytes are in the transfer buffer: n of
+/// them (1 to 32) for the number file f, which proc_xfer_writable accepted.
+fn proc_write_xfer(k: &mut Kernel, f: u64, n: u64) -> u64
+  requires kok(k) && n <= 32
+  ensures kok(k)
+  ensures result <= n || result > XFER
+{
   if f == PROC_DEV + PSYS + SY_DROP {
     // 1, 2 or 3 drop the caches; there is nothing to drop that anyone could
     // tell, so the write is accepted and forgotten.

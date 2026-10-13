@@ -351,11 +351,30 @@ static int notif_addfd(void) {
     return 1;
 }
 
+/* splice of a /proc file into a pipe: the bytes, and the offset moves on. */
+static int splice_proc(void) {
+    int fd = open("/proc/sys/kernel/hostname", O_RDONLY), p[2];
+    char want[80], buf[80];
+    struct utsname u;
+    if (fd < 0 || pipe(p) < 0) return 0;
+    uname(&u);
+    int n = snprintf(want, sizeof want, "%s\n", u.nodename);
+    long a = splice(fd, NULL, p[1], NULL, 64, 0);
+    long b = splice(fd, NULL, p[1], NULL, 64, 0);
+    long c = read(p[0], buf, sizeof buf);
+    int ok = a == n && b == 0 && c == n && memcmp(buf, want, n) == 0;
+    off_t off = 1;
+    ok = ok && splice(fd, &off, p[1], NULL, 8, 0) < 0;
+    close(fd); close(p[0]); close(p[1]);
+    return ok;
+}
+
 int main(void) {
     setup();
     EXPECT("sethostname, uname, /proc/sys/kernel/hostname", hostname());
     EXPECT("setdomainname", domainname());
     EXPECT("the names are written through /proc/sys/kernel/hostname and domainname", proc_names());
+    EXPECT("splice reads a /proc file into a pipe", splice_proc());
     EXPECT("clock_settime moves CLOCK_REALTIME", set_clock());
     EXPECT("settimeofday", timeofday());
     EXPECT("adjtimex reads and sets", adjust());
