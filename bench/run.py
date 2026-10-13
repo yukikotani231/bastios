@@ -53,6 +53,7 @@ TESTS = [
     ("idle", "% host CPU", 1, False),
 ]
 EXTRA_QEMU = []                     # bench/prof.py adds its gdb stub here
+ICOUNT = False                      # --icount: time by instructions executed
 DIRS = {"bastios": {"tmp": "/tmp", "disk": "/disk"}, "linux": {"tmp": "/tmp", "disk": "/disk"}}
 
 
@@ -198,6 +199,8 @@ def boot(osname, args, osbench, tmp):
               # a card on no network: BastiOS has loopback only with one
               "-netdev", "user,id=n0,restrict=on", "-device", "virtio-net-pci,netdev=n0"]
     common += EXTRA_QEMU
+    if ICOUNT:
+        common += ["-icount", "shift=0"]
     log = os.path.join(B, f"{osname}.log")
     if osname == "bastios":
         disk = os.path.join(tmp, "bastios-disk.img")
@@ -261,7 +264,7 @@ def measure(g, test, d):
         return {"host": 100 * (qemu_cpu(g) - cpu0) * 1e9 / guest, "guest": guest, "ops": ops}
     # Lines that came in one read have one host time; a run that short is
     # timed by the guest.
-    if host < 50e6:
+    if host < 50e6 or ICOUNT:
         host = guest
     return {"host": host / ops, "guest": guest / ops, "ops": ops}
 
@@ -277,8 +280,14 @@ def main():
     ap.add_argument("--linux", default=os.environ.get("LINUX_KERNEL", ""))
     ap.add_argument("--accel", default=accel())
     ap.add_argument("--cpu", default="")
+    ap.add_argument("--icount", action="store_true",
+                    help="TCG with -icount shift=0: the guest clock counts instructions (one per ns), so a figure does not depend on the host's load")
     ap.add_argument("--out", default=os.path.join(B, "results.json"))
     args = ap.parse_args()
+    global ICOUNT
+    ICOUNT = args.icount
+    if ICOUNT and args.accel != "tcg":
+        sys.exit("--icount needs TCG (--accel tcg)")
     want = set(args.tests.split(",")) if args.tests else None
     osbench = build_osbench()
     results = {"accel": args.accel, "smp": args.smp, "mem": args.mem, "runs": args.runs,
@@ -320,7 +329,7 @@ def fmt(v, unit, scale):
 def table(results):
     oses = list(results["os"])
     lines = [f"QEMU {results['accel'].upper()}, -smp {results['smp']}, -m {results['mem']}, "
-             f"median of {results['runs']} runs, host time ({results['date']}, {results['host_cpus']} host CPUs).", "",
+             f"median of {results['runs']} runs, {'instruction count (--icount)' if ICOUNT else 'host time'} ({results['date']}, {results['host_cpus']} host CPUs).", "",
              "| Test | Unit | " + " | ".join(oses) + (" | BastiOS / Linux |" if len(oses) == 2 else " |"),
              "|---|---|" + "---:|" * len(oses) + ("---:|" if len(oses) == 2 else "")]
     for test, unit, scale, isfile in TESTS:
