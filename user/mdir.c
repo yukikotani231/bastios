@@ -300,6 +300,8 @@ int main(void)
     }
     if (made == 20000 || errno != ENOSPC)
         return fail("filling the in-memory table");
+    if (made < 4000) /* the table held 1024 once; it holds thousands now */
+        return fail("the in-memory table holds thousands of names");
     while (made > 0) {
         snprintf(nm, sizeof nm, "n%d", --made);
         if (rmdir(nm) != 0)

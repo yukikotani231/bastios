@@ -414,7 +414,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 ### Files and disks
 
 - The system holds 4096 open file descriptions at once (1024 before), and 2048 pipes (512). Eight processes with about 230 each are tested (`user/mfd.c`). The table of open directories' names (`dpath`) took 2 MiB at boot whatever happened; it starts empty and grows as directories are opened, so a small machine has that memory back. Proved: unchanged (the same table bounds, now larger; a directory whose name could not be stored for lack of memory reads as having an empty name). The per-process limit is still 256 descriptors.
-- The in-memory file system holds 8192 files and directories (1024 before): a build tree or an unpacked package no longer fills `/tmp`. The name index doubles with it; `ls` in the console shell walks the larger table. Tested with 3000 empty files; `mdir` fills the table up to 20000 names. What is proved is unchanged (the table has a fixed size and every page is owned by one file); each node still costs kernel memory whether used or not.
+- The in-memory file system holds 8192 files and directories (1024 before): a build tree or an unpacked package no longer fills `/tmp`. The name index doubles with it; `ls` in the console shell walks the larger table. Tested by `mdir`, which makes directories until the table is full (thousands); `mdir` fills the table up to 20000 names. What is proved is unchanged (the table has a fixed size and every page is owned by one file); each node still costs kernel memory whether used or not.
 - A disk that is not blank and has no BastiOS file system (a partition
   table, another system's data) is left alone. It used to be formatted on
   the first boot, which on a real machine would have destroyed the disk
