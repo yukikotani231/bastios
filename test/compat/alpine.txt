@@ -209,3 +209,11 @@ musl-dev
 == gcc: compile and run a C program (gcc, cc1, as and ld are fixed-address executables)
 $ bb printf '#include <stdio.h>\nint main(void) { printf("gcc says %%d\\n", 6 * 7); return 0; }\n' > /disk/a/root/g.c && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -O1 -o g g.c && ./g'
 gcc says 42
+
+== nvim: tree-sitter parses help text with the vimdoc parser
+$ bb printf 'local t = vim.treesitter.get_string_parser("*tag*\\tsome text\\n", "vimdoc"):parse()[1]:root()\nio.open("/root/ts.txt", "w"):write(t:type(), " ", t:child_count(), " ", t:sexpr():len() > 20 and "tree" or "none", "\\n")\n' > /disk/a/root/ts.lua && bb chroot /disk/a /usr/bin/nvim -l /root/ts.lua >/dev/null 2>&1; bb cat /disk/a/root/ts.txt
+help_file 1 tree
+
+== nvim: LuaJIT loads a shared object that gcc built
+$ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf 'local ffi = require("ffi")\nffi.cdef[[int answer(void);]]\nio.open("/root/so.txt", "w"):write(ffi.load("/root/libso.so").answer(), "\\n")\n' > /disk/a/root/so.lua && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -shared -fPIC -o libso.so so.c && nvim -l so.lua >/dev/null 2>&1'; bb cat /disk/a/root/so.txt
+42

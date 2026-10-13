@@ -49,7 +49,8 @@ with open(disk, "wb") as f:
 kernel, qemu_bin, timeout = sys.argv[1], sys.argv[2], float(sys.argv[3])
 # UEFI=<firmware image> boots the kernel as an EFI application from a FAT
 # directory (BOOTAA64.EFI), through the firmware, instead of with -kernel.
-# The firmware gets the device tree only when ACPI is off. The FAT drive
+# The firmware gets the device tree only when ACPI is off; ACPI=1 leaves it on,
+# so the image writes the tree itself from the ACPI tables (boot/aarch64/efi.c). The FAT drive
 # comes first: the kernel takes the virtio-mmio slot QEMU gives the last
 # device added.
 # NVME=1 puts the disk on the PCI Express bus as an NVMe drive.
@@ -72,7 +73,7 @@ if uefi:
 else:
     boot = ["-kernel", kernel]
 qemu = subprocess.Popen(
-    [qemu_bin, "-M", "virt,gic-version=" + os.environ.get("GIC", "3") + os.environ.get("VIRT", "") + (",acpi=off" if uefi else ""), "-cpu", os.environ.get("CPU", "cortex-a72"), "-smp", os.environ.get("SMP", "4"), "-m", os.environ.get("MEM", "256M"), "-nographic",
+    [qemu_bin, "-M", "virt,gic-version=" + os.environ.get("GIC", "3") + os.environ.get("VIRT", "") + (",acpi=off" if uefi and os.environ.get("ACPI", "") != "1" else ""), "-cpu", os.environ.get("CPU", "cortex-a72"), "-smp", os.environ.get("SMP", "4"), "-m", os.environ.get("MEM", "256M"), "-nographic",
      "-no-reboot"] + boot + [
      "-drive", f"file={disk},format=raw,if=none,id=vd",
      "-device", ("nvme,drive=vd,serial=bastio" if nvme else "virtio-blk-pci,disable-legacy=on,drive=vd" if vpci else "virtio-blk-device,drive=vd"),
