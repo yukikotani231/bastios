@@ -239,6 +239,8 @@ jobs:
         if: failure()
         run: |
           df -h /
+          ls -la build/compat/alpine/disk build/compat/*.img build/compat/alpine-run.img || true
+          tar -tf build/compat/alpine/disk/root.tar | head -3 || true
           grep -E '^\| (alpine|alpine-tty) ' build/compat/report.md | grep -v '| pass |' | head -20 || true
           tail -n 120 build/compat/serial.log || true
       - if: always()
