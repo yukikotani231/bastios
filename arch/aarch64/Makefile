@@ -313,7 +313,10 @@ $(B)/compat/musl/lib/libc.a: | $(B)/compat
 	$(MAKE) -C $(B)/compat/src/musl -s install >/dev/null
 
 # tcc runs on the guest, so it is built with the AArch64 compiler; the one
-# tool its build runs (c2str) is built for this machine first.
+# tool its build runs (c2str) is built for this machine first. ARCH is set
+# on its makes because `make ARCH=aarch64` would otherwise reach them (a
+# command-line variable beats config.mak) and tcc would build with no code
+# generator.
 $(B)/compat/tcc: test/compat/patches/tcc-auto-type.patch test/compat/patches/tcc-aarch64.patch | $(B)/compat
 	rm -rf $(TCC_SRC) && mkdir -p $(TCC_SRC)
 	git -C $(TCC_SRC) init -q
@@ -323,9 +326,9 @@ $(B)/compat/tcc: test/compat/patches/tcc-auto-type.patch test/compat/patches/tcc
 	cd $(TCC_SRC) && ./configure --cc="$(ACC)" --cpu=arm64 --config-musl --extra-cflags="-O2 -DCONFIG_TCC_STATIC_DEFAULT" \
 	  --extra-ldflags="-static -s $(ULFLAGS)" --sysincludepaths=/disk/c/include --libpaths=/disk/c/lib \
 	  --crtprefix=/disk/c/lib --tccdir=/disk/c/lib --elfinterp=/lib/ld-musl-aarch64.so.1 >/dev/null
-	$(MAKE) -C $(TCC_SRC) -s CC=gcc c2str.exe tccdefs_.h
-	$(MAKE) -C $(TCC_SRC) -s tcc
-	$(MAKE) -C $(TCC_SRC) -s libtcc1.a arm64-libtcc1-usegcc=yes AR=$(CROSS)ar
+	$(MAKE) -C $(TCC_SRC) -s ARCH=arm64 CC=gcc c2str.exe tccdefs_.h
+	$(MAKE) -C $(TCC_SRC) -s ARCH=arm64 tcc
+	$(MAKE) -C $(TCC_SRC) -s ARCH=arm64 libtcc1.a arm64-libtcc1-usegcc=yes AR=$(CROSS)ar
 	cp $(TCC_SRC)/tcc $@
 
 # Z3 as a static glibc program, cross-built (single-threaded, as the x86-64 suite's).
