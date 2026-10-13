@@ -470,9 +470,11 @@ fn fd_src(k: &mut Kernel, pid: u64, fd: u64) -> Src
 fn file_writing(k: &Kernel, f: u64) -> bool
   requires kok(k)
 {
+  // The table grows with the process table; a row past its end is closed.
+  let rows = smaller(len(k.fs.ftab) / FD_STRIDE, FD_ROWS);
   let mut row = 0;
-  while row < FD_ROWS
-    invariant row <= FD_ROWS && kok(k)
+  while row < rows
+    invariant row <= rows && rows <= FD_ROWS && kok(k)
   {
     if fget(k.fs.ftab, row, FD_MODE) / O_WRITE % 2 == 1 && row_file(k.fs, row) == f {
       return true;

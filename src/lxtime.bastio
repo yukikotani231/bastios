@@ -143,9 +143,10 @@ fn sleepers_wake(k: &mut Kernel)
   if !k.naps {
     return;
   }
+  let cap = len(k.procs) / STRIDE;     // past it, every process is FREE
   let mut p = 1;
-  while p < NPROC
-    invariant 1 <= p && p <= NPROC && kok(k)
+  while p < cap
+    invariant 1 <= p && cap <= NPROC && kok(k)
   {
     if state(k.procs, p) == TIMEWAIT {
       pset(&mut k.procs, p, F_STATE, READY);
