@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <net/if.h>
+#include <sys/resource.h>
 #include <netinet/in.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
@@ -87,6 +88,14 @@ int main(void) {
         int ok = is >= 0 && ioctl(is, SIOCGIFHWADDR, &hw) == 0 && ioctl(is, SIOCGIFNETMASK, &nm) == 0;
         if (is >= 0) close(is);
         ok && hw.ifr_hwaddr.sa_family == 772 && ((unsigned char *)&nm.ifr_netmask)[4] == 255 && ((unsigned char *)&nm.ifr_netmask)[5] == 0; }));
+    EXPECT("/proc/self/limits shows the open-files limit", ({
+        struct rlimit rl; getrlimit(RLIMIT_NOFILE, &rl); rl.rlim_cur = rl.rlim_cur < 100 ? rl.rlim_cur : 100;
+        setrlimit(RLIMIT_NOFILE, &rl);
+        char t[2048]; int f = open("/proc/self/limits", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
+        if (f >= 0) close(f);
+        t[n > 0 ? n : 0] = 0;
+        char want[64]; snprintf(want, sizeof want, "Max open files            %lu ", (unsigned long)rl.rlim_cur);
+        strstr(t, "Soft Limit") && strstr(t, "Max address space") && strstr(t, want); }));
     EXPECT("/proc/net/arp has its header", ({
         char t[4096]; int f = open("/proc/net/arp", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
         if (f >= 0) close(f);

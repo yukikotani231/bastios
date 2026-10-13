@@ -72,6 +72,7 @@ const PF_SLACK: u64 = 12;
 const PF_LOADAVG: u64 = 13;           // with pid 0
 const PF_VERSION: u64 = 14;           // with pid 0
 const PF_CGROUP: u64 = 15;            // /proc/PID/cgroup
+const PF_LIMITS: u64 = 14;            // /proc/PID/limits (14 is free for a process)
 const PF_MODULES: u64 = 6;            // with pid 0 (status has 6 for a process): /proc/modules
 const PF_DISKSTATS: u64 = 11;         // with pid 0: /proc/diskstats (comm has 11 for a process)
 const PF_NETTCP: u64 = 12;            // with pid 0: /proc/net/tcp (slack has 12 for a process)
@@ -570,6 +571,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   if xfer_is(x, e + 1, n, "cgroup") {
     return base + PF_CGROUP;
   }
+  if xfer_is(x, e + 1, n, "limits") {
+    return base + PF_LIMITS;
+  }
   let um = um_at(x, e + 1, n, p);
   if um != 0 {
     return um;                              // uid_map, gid_map or setgroups (src/lxuser.bastio)
@@ -814,6 +818,9 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
     if i == 9 + UMF_N {
       return Ent { len: name_out(&mut k.fs.xfer, "task"), dir: true, end: false };
     }
+    if i == 10 + UMF_N {
+      return Ent { len: name_out(&mut k.fs.xfer, "limits"), dir: false, end: false };
+    }
     return end;
   }
   if i == 0 {
@@ -979,6 +986,71 @@ fn put_hb(o: &mut Bytes, at: u64, v: u64) -> u64
     a = put_c(&mut o, a, cast[u8](87 + lo));
   }
   return a;
+}
+
+/// Appends spaces until the line has w columns since `start`.
+fn pad_col(o: &mut Bytes, at: u64, start: u64, w: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT && start <= PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = at;
+  while a < PROC_OUT && a >= start && a - start < w
+    invariant a <= PROC_OUT && blen(o) == PROC_OUT
+  {
+    a = put_c(&mut o, a, 32);
+  }
+  return a;
+}
+
+/// A limit as /proc/PID/limits shows it, padded to a 21-column field.
+fn put_rlim(o: &mut Bytes, at: u64, v: u64, start: u64, w: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT && start <= PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = at;
+  if v == RLIM_INFINITY {
+    a = put_s(&mut o, a, "unlimited");
+  } else {
+    a = put_n(&mut o, a, v);
+  }
+  return pad_col(&mut o, a, start, w);
+}
+
+/// One row of /proc/PID/limits: resource r of process p.
+fn limit_row(k: &Kernel, p: u64, r: u64, name: Str, units: Str, o: &mut Bytes, at: u64) -> u64
+  requires kok(k) && p < NPROC && r < RLIM_NLIMITS && blen(o) == PROC_OUT && at <= PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = put_s(&mut o, at, name);
+  a = pad_col(&mut o, a, at, 26);
+  a = put_rlim(&mut o, a, rl_cur(k, p, r), a, 21);
+  a = put_rlim(&mut o, a, rl_max(k, p, r), a, 21);
+  a = put_s(&mut o, a, units);
+  return put_c(&mut o, a, 10);
+}
+
+/// /proc/PID/limits: the table of process p's resource limits.
+fn limits_text(k: &Kernel, p: u64, o: &mut Bytes) -> u64
+  requires kok(k) && p < NPROC && blen(o) == PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = put_s(&mut o, 0, "Limit                     Soft Limit           Hard Limit           Units     \n");
+  a = limit_row(k, p, 0, "Max cpu time", "seconds   ", &mut o, a);
+  a = limit_row(k, p, 1, "Max file size", "bytes     ", &mut o, a);
+  a = limit_row(k, p, 2, "Max data size", "bytes     ", &mut o, a);
+  a = limit_row(k, p, 3, "Max stack size", "bytes     ", &mut o, a);
+  a = limit_row(k, p, 4, "Max core file size", "bytes     ", &mut o, a);
+  a = limit_row(k, p, 5, "Max resident set", "bytes     ", &mut o, a);
+  a = limit_row(k, p, 6, "Max processes", "processes ", &mut o, a);
+  a = limit_row(k, p, 7, "Max open files", "files     ", &mut o, a);
+  a = limit_row(k, p, 8, "Max locked memory", "bytes     ", &mut o, a);
+  a = limit_row(k, p, 9, "Max address space", "bytes     ", &mut o, a);
+  a = limit_row(k, p, 10, "Max file locks", "locks     ", &mut o, a);
+  a = limit_row(k, p, 11, "Max pending signals", "signals   ", &mut o, a);
+  a = limit_row(k, p, 12, "Max msgqueue size", "bytes     ", &mut o, a);
+  a = limit_row(k, p, 13, "Max nice priority", "          ", &mut o, a);
+  a = limit_row(k, p, 14, "Max realtime priority", "          ", &mut o, a);
+  return limit_row(k, p, 15, "Max realtime timeout", "us        ", &mut o, a);
 }
 
 fn put_n(o: &mut Bytes, at: u64, v: u64) -> u64
@@ -1721,6 +1793,9 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
   }
   if what == PF_CGROUP {
     return cg_proc_text(k, p, pid, &mut o);      // src/lxcgroup.bastio
+  }
+  if what == PF_LIMITS {
+    return limits_text(k, p, &mut o);
   }
   if what == PF_SLACK {
     let a = put_n(&mut o, 0, pr_slack(k, p));

@@ -561,6 +561,7 @@ t_misc: /proc/net/tcp lists a listening socket
 t_misc: /proc/net/udp lists a bound socket
 t_misc: /proc/net/unix lists a bound socket
 t_misc: /proc/self/exe
+t_misc: /proc/self/limits shows the open-files limit
 t_misc: /proc/stat has cpu lines
 t_misc: SIOCGIFHWADDR and SIOCGIFNETMASK on lo
 t_misc: SSE floating point
