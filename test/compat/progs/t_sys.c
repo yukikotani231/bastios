@@ -181,6 +181,7 @@ static int cgroup_mem(void) {
     int st = 0;
     waitpid(p, &st, 0);
     int ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    if (!ok) errno = WIFEXITED(st) ? 1000 + WEXITSTATUS(st) : 2000 + WTERMSIG(st);   /* the report shows which step */
     ok = rmdir("/sys/fs/cgroup/cgm") == 0 && ok;
     return ok;
 }
