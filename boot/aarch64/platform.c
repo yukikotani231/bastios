@@ -32,12 +32,19 @@ struct pcpu {
     uint64_t id;
     uint64_t mpidr;
     uint64_t shadow;            /* the table user code runs on (bst_shadow_root[id]) */
+    uint64_t ttbr;              /* what bst_cpu_enter's trampoline loads into TTBR0: shadow | ASID << 48 */
+    uint64_t asid_table;        /* the user table whose ASID this processor loaded last (0: none) */
+    uint64_t asid;              /* its ASID */
+    uint64_t asid_ver;          /* asid_ver as of then */
+    uint64_t seen_gen;          /* entries taken out of tables as of this processor's last TLB flush */
+    uint64_t pad;
 };
 _Static_assert(__builtin_offsetof(struct pcpu, mmu[3]) == 344, "boot.S PCPU_MMU3");
 _Static_assert(__builtin_offsetof(struct pcpu, irq) == 352, "boot.S PCPU_IRQ");
 _Static_assert(__builtin_offsetof(struct pcpu, id) == 360, "boot.S PCPU_ID");
 _Static_assert(__builtin_offsetof(struct pcpu, shadow) == 376, "boot.S PCPU_SHADOW");
-_Static_assert(sizeof(struct pcpu) == 384, "boot.S PCPU_SIZE");
+_Static_assert(__builtin_offsetof(struct pcpu, ttbr) == 384, "boot.S PCPU_TTBR");
+_Static_assert(sizeof(struct pcpu) == 432, "boot.S PCPU_SIZE");
 struct pcpu bst_pcpus[MAX_CPUS];
 /* Each processor's own top-level table while it runs user code: slot 0 is
  * the process's window (the level-3 table in slot 1 of the process's table),
@@ -234,8 +241,11 @@ static void read_memory(const uint8_t *dtb) {
     bst_memmap[0] = n;
 }
 
-#define BLOCK_DEVICE (1ull | (1ull << 2) | (1ull << 10) | (1ull << 53) | (1ull << 54))
-#define BLOCK_NORMAL (1ull | (3ull << 8) | (1ull << 10) | (1ull << 54))
+/* The kernel's blocks are not global (nG, bit 11): its translations carry
+ * ASID 0, which no user table has, so entering and leaving user mode needs
+ * no TLB invalidation (see bst_user_ttbr). */
+#define BLOCK_DEVICE (1ull | (1ull << 2) | (1ull << 10) | (1ull << 11) | (1ull << 53) | (1ull << 54))
+#define BLOCK_NORMAL (1ull | (3ull << 8) | (1ull << 10) | (1ull << 11) | (1ull << 54))
 
 /* Called by boot.S with the MMU off (so, compiled with -mstrict-align): the
  * memory map, and the kernel's map in top-level slot 0 (every user table
@@ -300,6 +310,134 @@ void bst_early(const uint8_t *dtb) {
     bst_ttbr1_tables[1][0] = (uint64_t)bst_ttbr1_tables[2] | 3;
     bst_ttbr1_tables[2][0] = (uint64_t)bst_ttbr1_tables[3] | 3;
     bst_ttbr1_tables[3][0] = TRAMP_PTE;       /* EL1 read-only, never executable at EL0 */
+}
+
+/*
+ * Address-space numbers. User tables are tagged with an 8-bit ASID (the
+ * kernel's is 0) so that entering and leaving user mode, and running another
+ * process, invalidates nothing. What does need invalidating is the processor's
+ * TLB after an entry was taken out of some table (the compiled kernel counts
+ * them: word 1 of bst_platform_mmu_state): bst_user_ttbr does it, on the way
+ * to user mode, when the count moved since this processor's last flush.
+ *
+ * A table gets a number the first time it is entered after a rollover (all
+ * 255 numbers used): asid_map is an open-addressed table from the table's
+ * address to its number, valid for the current generation only. A number is
+ * not handed out again until a rollover, which flushes every processor's
+ * TLB (broadcast) and keeps the numbers processors are using now with the
+ * tables that own them, so no two tables run under one number. A table's
+ * own entry goes (bst_platform_table_free) when its page is given back, for
+ * whoever gets the page next must not inherit its number; asid_ver, which
+ * every processor checks, tells them to look their table's number up again.
+ */
+#define NASID 256
+#define ASID_SLOTS 1024
+static struct { uint64_t table, gen; } asid_map[ASID_SLOTS];     /* gen != asid_gen: empty; table 0: removed */
+static uint64_t asid_gen = 1;
+static uint64_t asid_ver = 1;
+static unsigned asid_next = 1;
+static uint8_t asid_taken[NASID];                                /* map-wide: the ASID's number belongs to a table */
+static uint8_t asid_of[ASID_SLOTS];
+static volatile uint32_t asid_lock;
+static unsigned asid_online = 1;                                 /* processors that may have loaded a user table */
+
+static void asid_acquire(void) {
+    while (__atomic_exchange_n(&asid_lock, 1, __ATOMIC_ACQUIRE))
+        while (__atomic_load_n(&asid_lock, __ATOMIC_RELAXED)) { }
+}
+static void asid_release(void) { __atomic_store_n(&asid_lock, 0, __ATOMIC_RELEASE); }
+
+static unsigned asid_hash(uint64_t table) { return (unsigned)(((table >> 12) * 0x9E3779B97F4A7C15ull) >> 54) & (ASID_SLOTS - 1); }
+
+/* The slot holding `table` (or the one to put it in), under the lock. */
+static unsigned asid_slot(uint64_t table, int *found) {
+    unsigned i = asid_hash(table), spare = ASID_SLOTS;
+    for (unsigned n = 0; n < ASID_SLOTS; n++, i = (i + 1) & (ASID_SLOTS - 1)) {
+        if (asid_map[i].gen != asid_gen) {
+            *found = 0;
+            return spare < ASID_SLOTS ? spare : i;
+        }
+        if (asid_map[i].table == table) {
+            *found = 1;
+            return i;
+        }
+        if (asid_map[i].table == 0 && spare == ASID_SLOTS) spare = i;
+    }
+    *found = 0;
+    return spare;                    /* never reached: at most NASID - 1 slots are used per generation */
+}
+
+/* Starts a new generation: every number is free again except the ones now
+ * loaded on some processor, which stay with their tables. */
+static void asid_rollover(void) {
+    asid_gen++;
+    asid_ver++;
+    for (unsigned a = 0; a < NASID; a++) asid_taken[a] = 0;
+    asid_next = 1;
+    for (unsigned c = 0; c < asid_online && c < MAX_CPUS; c++) {
+        struct pcpu *p = &bst_pcpus[c];
+        if (p->asid_table && p->asid) {
+            int found;
+            unsigned i = asid_slot(p->asid_table, &found);
+            asid_map[i].table = p->asid_table;
+            asid_map[i].gen = asid_gen;
+            asid_of[i] = (uint8_t)p->asid;
+            asid_taken[p->asid] = 1;
+        }
+    }
+    __asm__ volatile ("dsb ishst\n\ttlbi vmalle1is\n\tdsb ish\n\tisb" : : : "memory");
+}
+
+/* Called by bst_cpu_enter (boot.S) with the user table and this processor's
+ * shadow table: leaves in this processor's pcpu what the trampoline loads
+ * into TTBR0, and flushes the TLB if entries were taken out of tables since
+ * the last flush. */
+void bst_user_ttbr(uint64_t table, uint64_t shadow) {
+    struct pcpu *p = this_cpu();
+    uint64_t gen = p->mmu[1];
+    if (p->seen_gen != gen) {
+        p->seen_gen = gen;
+        __asm__ volatile ("tlbi vmalle1\n\tdsb nsh\n\tisb" : : : "memory");
+    }
+    if (!(p->asid_table == table && p->asid_ver == __atomic_load_n(&asid_ver, __ATOMIC_ACQUIRE))) {
+        int found;
+        asid_acquire();
+        if (p->id >= asid_online) asid_online = p->id + 1;
+        unsigned i = asid_slot(table, &found);
+        unsigned a;
+        if (found) {
+            a = asid_of[i];
+        } else {
+            while (asid_next < NASID && asid_taken[asid_next]) asid_next++;
+            if (asid_next >= NASID) {
+                asid_rollover();
+                i = asid_slot(table, &found);
+                while (asid_next < NASID && asid_taken[asid_next]) asid_next++;
+            }
+            a = asid_next++;
+            asid_taken[a] = 1;
+            asid_map[i].table = table;
+            asid_map[i].gen = asid_gen;
+            asid_of[i] = (uint8_t)a;
+        }
+        p->asid_table = table;
+        p->asid = a;
+        p->asid_ver = asid_ver;
+        asid_release();
+    }
+    p->ttbr = shadow | (p->asid << 48);
+}
+
+/* The compiled kernel calls this when it gives a user table's page back. */
+void bst_platform_table_free(uint64_t table) {
+    int found;
+    asid_acquire();
+    unsigned i = asid_slot(table, &found);
+    if (found) asid_map[i].table = 0;
+    for (unsigned c = 0; c < asid_online && c < MAX_CPUS; c++)
+        if (bst_pcpus[c].asid_table == table) bst_pcpus[c].asid_table = 0;
+    __atomic_fetch_add(&asid_ver, 1, __ATOMIC_RELEASE);
+    asid_release();
 }
 
 static inline void w32(uint64_t a, uint32_t v) { *(volatile uint32_t *)a = v; }

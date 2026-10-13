@@ -15,7 +15,8 @@
         .equ    PCPU_IRQ, 352           /* the interrupt that ended bst_cpu_wait */
         .equ    PCPU_ID, 360
         .equ    PCPU_SHADOW, 376        /* the table user code runs on */
-        .equ    PCPU_SIZE, 384
+        .equ    PCPU_TTBR, 384          /* shadow table | ASID << 48 (bst_user_ttbr) */
+        .equ    PCPU_SIZE, 432
         .equ    CPU_STACK, 65536
 
         /* Firmware often hands over at EL2 (U-Boot, UEFI, QEMU with
@@ -245,6 +246,10 @@ bst_cpu_enter:
         add     x3, x3, x4, lsl #12
         str     x2, [x3]
         str     x3, [x30, #PCPU_SHADOW]
+        ldr     x0, [x30, #PCPU_MMU3]
+        mov     x1, x3
+        bl      bst_user_ttbr           /* the table's ASID, and a TLB flush if entries went away */
+        mrs     x30, tpidr_el1
         ldr     x1, [x30, #248]
         msr     sp_el0, x1
         ldr     x1, [x30, #256]
@@ -420,10 +425,7 @@ tramp_page:
 .macro  from_el0 lit
         msr     tpidrro_el0, x0
         ldr     x0, lit_kernel_root
-        msr     ttbr0_el1, x0
-        isb
-        tlbi    vmalle1
-        dsb     nsh
+        msr     ttbr0_el1, x0           /* ASID 0: the kernel's translations are tagged, the user's are not hit */
         isb
         ldr     x0, \lit
         br      x0
@@ -478,12 +480,9 @@ vectors:
         .balign 16
 tramp_enter:
         mrs     x0, tpidr_el1
-        ldr     x0, [x0, #PCPU_SHADOW]
+        ldr     x0, [x0, #PCPU_TTBR]
         dsb     ish                     /* the table's entries are visible to the walker */
-        msr     ttbr0_el1, x0
-        isb
-        tlbi    vmalle1
-        dsb     nsh
+        msr     ttbr0_el1, x0           /* the user's ASID: nothing to invalidate */
         isb
         mrs     x0, tpidrro_el0
         eret
