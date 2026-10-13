@@ -275,6 +275,19 @@ touch=1
 0
 status 3
 
+== container: cgroup limits: the container sees the memory, pids and cpu limits runc set
+$ cd /disk/b && bb sed -i -e 's#"devices"#"memory": {"limit": 83886080}, "pids": {"limit": 20}, "cpu": {"shares": 512, "quota": 80000, "period": 100000}, "devices"#' -e 's#"touch /x 2>\&1; echo touch=$?; id -u; exit 3"#"cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpu.weight; exit 4"#' config.json; /disk/runc --root /run/runc run c3 < /dev/null; echo status $?
+83886080
+20
+80000 100000
+20
+status 4
+
+== container: memory.max kills a process of a container that outgrows it
+$ cd /disk/b && bb sed -i -e 's#"quota": 80000#"quota": 1000000#' -e 's#cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpu.weight; exit 4#dd if=/dev/zero of=/dev/null bs=120M count=1 iflag=fullblock; exit 4#' config.json; /disk/runc --root /run/runc run c4 < /dev/null 2>&1 | bb cat; echo status $?
+Killed
+status 0
+
 == container: rootless: runc runs Alpine as an unprivileged user in a user namespace of its own
 $ bb mkdir -p /disk/ur /disk/u /run/ru && bb chown 65534:65534 /disk/ur /disk/u /run/ru && bb su -s /bin/ash nobody -c 'cd /disk/ur && /disk/busybox tar -xf /disk/root.tar && cd /disk/u && /disk/runc spec --rootless && /disk/busybox sed -i -e "s#\"path\": \"rootfs\"#\"path\": \"/disk/ur\"#" -e "s#\"terminal\": true#\"terminal\": false#" -e "s#\"sh\"#\"/bin/sh\", \"-c\", \"id -u; hostname; echo pid=\$\$; cat /proc/self/uid_map; touch /x 2>\&1; echo touch=\$?\"#" config.json && /disk/runc --root /run/ru run c3 < /dev/null; echo status $?'
 0
