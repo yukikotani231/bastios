@@ -191,10 +191,31 @@ fn uts_proc_write(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
   if n == 0 {
     return 0;
   }
-  let mut m = smaller(n, NAME_MAX + 1);
+  let m = smaller(n, NAME_MAX + 1);
   if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, m) != m {
     return EFAULT;
   }
+  let r = uts_xfer_write(&mut k, pid, i, m);
+  if r == m {
+    return n;                               // the bytes past NAME_MAX + 1 were not looked at
+  }
+  return r;
+}
+
+/// The part of uts_proc_write after the bytes are in the transfer buffer: n
+/// of them were written, of which the first NAME_MAX + 1 are there.
+fn uts_xfer_write(k: &mut Kernel, pid: u64, i: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && i < 2 && n <= XFER
+  ensures kok(k)
+  ensures result <= n || result > XFER
+{
+  if !uts_may_set(k, pid) {
+    return EACCES;
+  }
+  if n == 0 {
+    return 0;
+  }
+  let m = smaller(n, NAME_MAX + 1);
   let mut len = 0;
   while len < m && bget(k.fs.xfer, len) != 10 && bget(k.fs.xfer, len) != 0
     invariant len <= m && m <= NAME_MAX + 1 && kok(k)
