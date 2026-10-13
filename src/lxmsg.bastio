@@ -8,7 +8,9 @@
 // rest of the list stays empty). SCM_RIGHTS passes one descriptor per message, at most
 // one in flight per direction (a second waits until the first is
 // received), and it goes with the next bytes read rather than with the
-// bytes it was sent beside. A socket sent over itself and then closed
+// bytes it was sent beside. The console has no description: sending it
+// makes one of its own kind (OF_CONSOLE), and the receiver gets the console
+// again. A socket sent over itself and then closed
 // is never freed (Linux has a collector for these cycles).
 //
 // sendmmsg and recvmmsg are sendmsg and recvmsg in a loop. Only the first
@@ -156,9 +158,13 @@ fn udp_gather(k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u64, name: u64, 
   return r;
 }
 
+/// What rights_in returns for the console: not a description number, not
+/// OFD_N (no descriptor), and not an error.
+const RIGHTS_CONSOLE: u64 = OFD_N + 1;
+
 /// The description an SCM_RIGHTS message at user address ctl (clen bytes
 /// of control data) passes: its number, OFD_N if there is no such
-/// message, or an error.
+/// message, RIGHTS_CONSOLE for the console, or an error.
 fn rights_in(k: &mut Kernel, pid: u64, ctl: u64, clen: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -186,8 +192,11 @@ fn rights_in(k: &mut Kernel, pid: u64, ctl: u64, clen: u64) -> u64
   }
   let fd = get_u64(k.fs.xfer, 0) % 0x100000000;
   let v = fd_get(k.lxfd, pid, fd) % FD_CLOEXEC;
+  if v == FD_CONSOLE {
+    return RIGHTS_CONSOLE;                  // the console has no description: one is made when it is sent
+  }
   if v < FD_OFD || v - FD_OFD >= OFD_N {
-    return EBADF;                           // also the console: no description
+    return EBADF;
   }
   return v - FD_OFD;
 }
@@ -216,12 +225,12 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
     return EMSGSIZE;
   }
   let pass = rights_in(&mut k, pid, ctl, clen);
-  if pass > OFD_N {
+  if pass > RIGHTS_CONSOLE {
     return pass;
   }
   let unix = is_unix(k, pid, fd);
   let mut tx = UX_N;                        // the channel a description goes over
-  if pass < OFD_N {
+  if pass < OFD_N || pass == RIGHTS_CONSOLE {
     let u = ux_look(k, pid, fd);
     if !unix || u.err != 0 || u.mode != UM_CONN {
       return EINVAL;
@@ -277,6 +286,14 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   if pass < OFD_N && tx < UX_N && sent && of_get(k.ofd, pass, 0) != OF_FREE && refs < 0xFFFFFFFF {
     of_set(&mut k.ofd, pass, 1, refs + 1);  // the message's reference
     uc_set_fly(&mut k, tx, pass + 1);
+  }
+  if pass == RIGHTS_CONSOLE && tx < UX_N && sent {
+    // The console goes over as a description of its own kind; the receiver
+    // gets the console again (lx_recvmsg).
+    let h = ofd_new(&mut k, OF_CONSOLE, 0);
+    if h < OFD_N {
+      uc_set_fly(&mut k, tx, h + 1);
+    }
   }
   return done;
 }
@@ -373,10 +390,19 @@ fn lx_recvmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   let mut mflags = 0;
   if fly > 0 && fly <= OFD_N {
     if ctl != 0 && clen >= CMSG_ONE {
-      let nfd = fd_install(&mut k, pid, fly - 1);
+      let console = of_get(k.ofd, fly - 1, 0) == OF_CONSOLE;
+      let mut nfd = LXNFD;
+      let mut v = FD_OFD + fly - 1;
+      if console {
+        nfd = fd_install_console(&mut k, pid);
+        unref_value(&mut k, FD_OFD + fly - 1);   // the stand-in is not kept
+        v = FD_CONSOLE;
+      } else {
+        nfd = fd_install(&mut k, pid, fly - 1);
+      }
       if nfd < LXNFD {
         if flags / MSG_CMSG_CLOEXEC % 2 == 1 {
-          fd_set(&mut k.lxfd, pid, nfd, FD_OFD + fly - 1 + FD_CLOEXEC);
+          fd_set(&mut k.lxfd, pid, nfd, v + FD_CLOEXEC);
         }
         lx_fill(&mut k, 0, CMSG_ROOM);
         xfer_u64(&mut k.fs.xfer, 0, CMSG_ONE);
