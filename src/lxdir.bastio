@@ -449,6 +449,41 @@ fn name_keep(t: &mut Buf, tlen: u64, row: u64, x: &Bytes, n: u64)
   t = set(t, row * CWD_STRIDE, n);
 }
 
+/// Row `h` of k.dpath, grown to hold it (doubling, so a run of directories
+/// does not copy the table each time). False, with the table as it was,
+/// when memory runs out.
+fn dpath_room(t: &mut Buf, h: u64) -> bool
+  requires h < OFD_N && len(t) <= DPATH_LEN
+  ensures len(t) <= DPATH_LEN && (result ==> (h + 1) * CWD_STRIDE <= len(t))
+{
+  if (h + 1) * CWD_STRIDE <= len(t) {
+    return true;
+  }
+  let mut rows = len(t) / CWD_STRIDE * 2;
+  if rows < 8 {
+    rows = 8;
+  }
+  if rows < h + 1 {
+    rows = h + 1;
+  }
+  if rows > OFD_N {
+    rows = OFD_N;
+  }
+  let ok = zgrow(&mut t, rows * CWD_STRIDE);
+  return ok && (h + 1) * CWD_STRIDE <= len(t);
+}
+
+/// Keeps x[0..n] as the name of open directory description h. When there
+/// is no memory for its row the name is not kept: it reads as empty.
+fn dpath_keep(t: &mut Buf, h: u64, x: &Bytes, n: u64)
+  requires h < OFD_N && len(t) <= DPATH_LEN && n <= FNAME_MAX && n <= blen(x)
+  ensures len(t) <= DPATH_LEN
+{
+  if dpath_room(&mut t, h) {
+    name_keep(&mut t, len(t), h, x, n);
+  }
+}
+
 /// fchdir(fd): the open directory becomes the working directory.
 fn lx_fchdir(k: &mut Kernel, pid: u64, fd: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -478,7 +513,7 @@ fn lx_fchdir(k: &mut Kernel, pid: u64, fd: u64) -> u64
   while i < CWD_STRIDE
     invariant i <= CWD_STRIDE && kok(k) && pid < NPROC && h < OFD_N
   {
-    wset(&mut k.cwd, pid * CWD_STRIDE + i, get(k.dpath, h * CWD_STRIDE + i));
+    wset(&mut k.cwd, pid * CWD_STRIDE + i, wget(k.dpath, h * CWD_STRIDE + i));
     i = i + 1;
   }
   return 0;

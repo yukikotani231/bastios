@@ -105,6 +105,9 @@ fn prog_image(i: u64) -> Str {
   if i == 33 {
     return include_bytes("../../../build/user/mcloud.elf");
   }
+  if i == 34 {
+    return include_bytes("../../../build/user/mfd.elf");
+  }
   return include_bytes("../../../build/user/fault.bin");
 }
 
