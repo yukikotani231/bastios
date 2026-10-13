@@ -949,6 +949,7 @@ t_sysv: queue permissions follow the ids
 t_sysv: semop, SETALL, GETALL, GETPID, errors
 t_sysv: shmat, a second view, fork, IPC_RMID
 t_sysv: shmget and shmat errors
+t_sysv: shmmax is written; a segment past it, or with SHM_HUGETLB, is EINVAL
 t_thread: /proc/self/stat and status count the threads
 t_thread: /proc/self/task lists the threads, and /proc/self/task/TID has their files
 t_thread: /proc/self/task/TID/fd/N and ns/ are the process's
@@ -1046,6 +1047,8 @@ alpine: container: rootless: runc runs Alpine as an unprivileged user in a user 
 alpine: container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle
 alpine: container: the image's command, environment and working directory run rootless from the bundle
 alpine: container: runc joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
+alpine: container: runc runs on an overlay of the image root: writes and deletions stay in the upper layer
+alpine: container: runc loads a seccomp filter from the config: mkdir answers EPERM, the rest runs
 alpine: nvim: a headless server on a unix socket answers another nvim (--listen, sockconnect, RPC)
 alpine: apk: install tmux, cmake and lua-language-server over HTTP
 alpine: tmux: a client on the console passes it to the server (SCM_RIGHTS of the console)
