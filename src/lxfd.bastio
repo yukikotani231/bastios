@@ -290,19 +290,18 @@ fn can_block(kind: u64) -> bool {
     || kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX || kind == OF_PIDFD || kind == OF_INOTIFY || kind == OF_NETLINK || kind == OF_SECCOMP;
 }
 
-/// Whether process pid has a file layer row free: an open file holds
-/// one, and each process has NFD of them.
+/// Whether the pool has a file layer row free: an open file holds one.
 fn row_free(k: &Kernel, pid: u64) -> bool
   requires kok(k) && pid < NPROC
 {
-  if (pid + 1) * NFD * FD_STRIDE > len(k.fs.ftab) {
+  if FD_POOL * FD_STRIDE > len(k.fs.ftab) {
     return false;
   }
   let mut i = 0;
-  while i < NFD
-    invariant i <= NFD
+  while i < FD_POOL
+    invariant i <= FD_POOL
   {
-    if fget(k.fs.ftab, pid * NFD + i, FD_FS) == 0 {
+    if fget(k.fs.ftab, i, FD_FS) == 0 {
       return true;
     }
     i = i + 1;
@@ -530,7 +529,7 @@ fn close_unshared(k: &mut Kernel, pid: u64)
   while f < NFD
     invariant f <= NFD && kok(k)
   {
-    let row = pid * NFD + f;
+    let row = nbase(pid) + f;
     // Only open rows: row_shared looks through every description.
     if fget(k.fs.ftab, row, FD_FS) != 0 && !row_shared(k.ofd, row) {
       vfs_close(&mut k.fs, &mut k.mem, row);
@@ -1019,14 +1018,14 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if fresh {
     own = new_owner(&mut k, pid, n);
   }
-  let nfd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, f, n);
-  if nfd == NO_FD || nfd >= NFD {
+  let nfd = vfs_open(&mut k.fs, &mut k.mem, 0, FD_POOL, f, n);
+  if nfd == NO_FD || nfd >= FD_POOL {
     if fresh && path_ok(k.fs, n) && parent_ok(&mut k.fs, n) {
       return ENOSPC;                        // no free node for it
     }
     return ENOENT;
   }
-  let row = pid * NFD + nfd;
+  let row = nfd;
   if fresh {
     let made = vfs_row_file(k.fs, row);
     if made != NO_FILE {

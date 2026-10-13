@@ -617,8 +617,12 @@ fn disk_mount(dev: Blk) -> DiskFs
   if n > MAX_BLOCKS {
     n = MAX_BLOCKS;
   }
+  let mut nc = NC;
+  if n < DATA_B0 + 16 {
+    nc = NC_MIN;      // no file system to cache: a loop mount that no file backs
+  }
   let mut d = DiskFs { dev: dev, dir: balloc(DIR_START * BLOCK), dcap: DIR_START, sb: balloc(BLOCK), sec: balloc(SECTOR), root: balloc(BLOCK),
-    la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(), txn: 0, pw: 0, pb: alloc(BATCH_MAX), pn: 0, ob: alloc(OB_MAX), on: 0, pt: 0, tick: 0,
+    la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(nc), txn: 0, pw: 0, pb: alloc(BATCH_MAX), pn: 0, ob: alloc(OB_MAX), on: 0, pt: 0, tick: 0,
     used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, foreign: false, links: true };
   if n < DATA_B0 + 16 || !blk_read(&mut d.dev, 0, &mut d.sec) {
     return d;
@@ -1400,7 +1404,7 @@ fn data_ptr(d: &mut DiskFs, root: u64, b: u64) -> u64
     return 0;
   }
   let s = dq_want(&mut d.q, root);
-  if s >= NC {
+  if s >= d.q.nc {
     return DISK_MISS;
   }
   let l = ptr_in(d, d.q.cache, s * BLOCK + 8 * (b / PTRS));
@@ -1408,7 +1412,7 @@ fn data_ptr(d: &mut DiskFs, root: u64, b: u64) -> u64
     return 0;
   }
   let t = dq_want(&mut d.q, l);
-  if t >= NC {
+  if t >= d.q.nc {
     return DISK_MISS;
   }
   return ptr_in(d, d.q.cache, t * BLOCK + 8 * (b % PTRS));
@@ -1457,7 +1461,7 @@ fn disk_read(d: &mut DiskFs, i: u64, off: u64, buf: &mut Bytes, n: u64) -> u64
       zero(&mut buf, k, k + m);
     } else {
       let s = dq_want(&mut d.q, p);
-      if s >= NC {
+      if s >= d.q.nc {
         missing = true;
         read_ahead(&mut d, root, a / BLOCK + 1, size);
       } else {
@@ -1539,7 +1543,7 @@ fn gather(q: &mut DiskQ, b: u64, out: &mut Bytes) -> bool
     return true;
   }
   let s = dq_want(&mut q, b);
-  if s >= NC {
+  if s >= q.nc {
     return false;
   }
   bcopy(&mut out, 0, q.cache, s * BLOCK, BLOCK);
