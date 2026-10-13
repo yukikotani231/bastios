@@ -915,6 +915,7 @@ t_signal: SA_SIGINFO
 t_signal: SIGCHLD on child exit
 t_signal: SIG_IGN
 t_signal: alarm
+t_signal: alarm reaches a thread that does not block it
 t_signal: getitimer
 t_signal: kill missing pid is ESRCH
 t_signal: kill self

@@ -1109,6 +1109,7 @@ fn nl_open(n: &mut Net, ns: u64, port: u64) -> u64
     if get(n.nls, q * NL_W + NL_USED) == 0 {
       n.nls = set(n.nls, q * NL_W + NL_USED, 1);
       n.nls = set(n.nls, q * NL_W + NL_LEN, 0);
+      n.nls = set(n.nls, q * NL_W + NL_RAW, 0);
       n.nls = set(n.nls, q * NL_W + NL_PORT, port);
       n.nls = set(n.nls, q * NL_W + NL_NS, ns);
       return q;
@@ -1158,6 +1159,18 @@ fn nl_take(n: &mut Net, q: u64, out: &mut Bytes, max: u64, peek: bool) -> u64
   }
   let base = q * NLQ;
   let room = smaller(max, blen(out));
+  if get(n.nls, q * NL_W + NL_RAW) == 1 {
+    // An mq_notify cookie: one datagram of its own, whose first bytes are
+    // the program's (glibc's helper thread keeps a function pointer there),
+    // so it has no length to find.
+    let c = smaller(room, have);
+    bcopy(&mut out, 0, n.nlq, base, c);
+    if !peek {
+      n.nls = set(n.nls, q * NL_W + NL_LEN, 0);
+      n.nls = set(n.nls, q * NL_W + NL_RAW, 0);
+    }
+    return c;
+  }
   // Whole messages: each starts with its length.
   let mut take = 0;
   let mut go = true;
@@ -1236,6 +1249,7 @@ fn nic_nl_close(c: &mut Nic, q: u64)
       if q < NLS {
         n.nls = set(n.nls, q * NL_W + NL_USED, 0);
         n.nls = set(n.nls, q * NL_W + NL_LEN, 0);
+        n.nls = set(n.nls, q * NL_W + NL_RAW, 0);
       }
       c = Nic::Up(n);
     },
@@ -1292,28 +1306,32 @@ fn nic_nl_request(c: &mut Nic, q: u64, b: &Bytes, len: u64, tgt: u64, admin: boo
   }
 }
 
-/// Queues musl's mq_notify wake-up on socket q: 32 bytes, the last one 1
-/// (the kernel's NOTIFY_WOKENUP), or 0 when the registration was removed. The first four bytes hold the length, so
-/// the message reads as one to nl_take; musl looks only at the last byte.
-fn nic_nl_wake(c: &mut Nic, q: u64, last: u64)
-  requires nic_ok(c)
+/// Queues an mq_notify wake-up on socket q, as the kernel does for
+/// SIGEV_THREAD: the 32 bytes the program gave as the registration's
+/// cookie (at `at` in b), the last one replaced by 1 (NOTIFY_WOKENUP), or by
+/// 0 when the registration was removed. glibc's helper thread finds the
+/// function to call in the cookie; musl's looks only at the last byte. The
+/// socket holds one cookie at a time: a second wake-up before the first is
+/// read is dropped.
+fn nic_nl_wake(c: &mut Nic, q: u64, b: &Bytes, at: u64, last: u64)
+  requires nic_ok(c) && at + 32 <= blen(b)
   ensures nic_ok(c)
 {
   match c {
     Nic::None => { c = Nic::None; },
     Nic::Up(mut n) => {
-      if q < NLS && nl_queued(n, q) + 32 <= NLQ {
+      if q < NLS && nl_queued(n, q) == 0 {
         nlw_open(&mut n, q);
-        nl_b(&mut n, 32);
-        let mut i = 1;
+        let mut i = 0;
         while i < 31
-          invariant i <= 31 && net_ok(n)
+          invariant i <= 31 && net_ok(n) && at + 32 <= blen(b)
         {
-          nl_b(&mut n, 0);
+          nl_b(&mut n, cast[u64](bget(b, at + i)));
           i = i + 1;
         }
         nl_b(&mut n, last);
         nlw_close(&mut n, q);
+        n.nls = set(n.nls, q * NL_W + NL_RAW, 1);
       }
       c = Nic::Up(n);
     },
