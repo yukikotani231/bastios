@@ -1,0 +1,5 @@
+// What a tracer sees of a stopped process is architecture specific:
+// src/<arch>/arch/ptfmt.bastio, found through the --lib directory the build
+// passes for that architecture.
+
+import "arch/ptfmt.bastio";

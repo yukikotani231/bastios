@@ -5,15 +5,14 @@
  * timer, and gives the kernel the few answers it asks for. It decides
  * nothing: the kernel's policy is in Bastio.
  *
- * The addresses of the interrupt controller are QEMU virt's own
- * (-M virt,gic-version=3); a device-tree walk for them comes with real
- * boards.
+ * The interrupt controller is the one the device tree describes: a GICv3
+ * (distributor and redistributors) or a GICv2 (distributor and CPU
+ * interface, as on a GIC-400); QEMU virt's GICv3 addresses are the fallback
+ * without a tree.
  */
 #include <stdint.h>
 #include <stddef.h>
 
-#define GICD 0x08000000ull
-#define GICR 0x080A0000ull
 #define TICK_HZ 100
 #define TIMER_INTID 30          /* the EL1 physical timer, a private interrupt */
 #define V_TIMER 32              /* the boot processor's tick, which counts the kernel's time */
@@ -28,16 +27,29 @@
  * are boot.S's PCPU_* constants. */
 struct pcpu {
     uint64_t ctx[40];
-    uint64_t mmu[3];
+    uint64_t mmu[4];            /* bst_platform_mmu_state; word 3 is the user table */
     uint64_t irq;
     uint64_t id;
     uint64_t mpidr;
-    uint64_t pad[2];
+    uint64_t shadow;            /* the table user code runs on (bst_shadow_root[id]) */
+    uint64_t ttbr;              /* what bst_cpu_enter's trampoline loads into TTBR0: shadow | ASID << 48 */
+    uint64_t asid_table;        /* the user table whose ASID this processor loaded last (0: none) */
+    uint64_t asid;              /* its ASID */
+    uint64_t asid_ver;          /* asid_ver as of then */
+    uint64_t seen_gen;          /* entries taken out of tables as of this processor's last TLB flush */
+    uint64_t pad;
 };
-_Static_assert(__builtin_offsetof(struct pcpu, irq) == 344, "boot.S PCPU_IRQ");
-_Static_assert(__builtin_offsetof(struct pcpu, id) == 352, "boot.S PCPU_ID");
-_Static_assert(sizeof(struct pcpu) == 384, "boot.S PCPU_SIZE");
+_Static_assert(__builtin_offsetof(struct pcpu, mmu[3]) == 344, "boot.S PCPU_MMU3");
+_Static_assert(__builtin_offsetof(struct pcpu, irq) == 352, "boot.S PCPU_IRQ");
+_Static_assert(__builtin_offsetof(struct pcpu, id) == 360, "boot.S PCPU_ID");
+_Static_assert(__builtin_offsetof(struct pcpu, shadow) == 376, "boot.S PCPU_SHADOW");
+_Static_assert(__builtin_offsetof(struct pcpu, ttbr) == 384, "boot.S PCPU_TTBR");
+_Static_assert(sizeof(struct pcpu) == 432, "boot.S PCPU_SIZE");
 struct pcpu bst_pcpus[MAX_CPUS];
+/* Each processor's own top-level table while it runs user code: slot 0 is
+ * the process's window (the level-3 table in slot 1 of the process's table),
+ * so the window is seen from address 0 and nothing else is in it. */
+uint8_t bst_shadow_root[MAX_CPUS][4096] __attribute__((aligned(4096)));
 uint8_t bst_cpu_stacks[MAX_CPUS][CPU_STACK] __attribute__((aligned(16)));
 static inline struct pcpu *this_cpu(void) {
     struct pcpu *p;
@@ -52,6 +64,16 @@ uint64_t bst_memmap[1 + 2 * MAX_RUNS];
  * boot processor first), filled in by bst_early. */
 static uint64_t cpu_mpidr[MAX_CPUS];
 static uint64_t ncpu_dt;
+/* The interrupt controller: its version (3 or 2) and the two frames the
+ * tree lists (GICv3: distributor, redistributors; GICv2: distributor, CPU
+ * interface). QEMU virt's GICv3 is the default. */
+static unsigned gic_ver = 3;
+/* The console: the first PL011 the tree lists (the prelude's bst_uart reads
+ * this; QEMU virt's address is the default). */
+uint64_t bst_uart_base = 0x09000000ull;
+static unsigned psci_smc;                   /* the device tree's psci method: smc (1) or hvc (0, QEMU virt's) */
+static uint64_t GICD = 0x08000000ull;
+static uint64_t GICR = 0x080A0000ull;       /* GICv2: the CPU interface (GICC) */
 
 /* The device tree itself, copied before the page pool can reuse the RAM it
  * sits in (QEMU puts it in RAM): the kernel reads it byte by byte with
@@ -60,8 +82,41 @@ static uint64_t ncpu_dt;
 static uint8_t dtb_copy[DTB_MAX];
 static uint64_t dtb_len;
 
+/* Tables of 2 MiB blocks for 1 GiB regions that hold RAM and something else. */
+/* The PCI Express host bridge's configuration window (the device tree's
+ * pci-host-ecam-generic node), 0 if there is none. */
+static uint64_t pci_ecam;
+
+#define MAX_L2 8
+static uint64_t kernel_l2[MAX_L2][512] __attribute__((aligned(4096)));
+
+/* The bytes of [lo, hi) that the memory map covers. */
+static uint64_t ram_overlap(uint64_t lo, uint64_t hi) {
+    uint64_t n = 0;
+    for (uint64_t i = 0; i < bst_memmap[0]; i++) {
+        uint64_t b = bst_memmap[1 + 2 * i], e = b + bst_memmap[2 + 2 * i];
+        if (b < lo) b = lo;
+        if (e > hi) e = hi;
+        if (e > b) n += e - b;
+    }
+    return n;
+}
+
 extern uint64_t bst_kernel_root[512];
 extern uint64_t kernel_l1[512];
+
+/* Tells the compiled kernel (the prelude's BST_DEFERRED) that user code runs
+ * on a table of its own, which bst_cpu_enter loads into TTBR0 from word 3 of
+ * bst_platform_mmu_state: the kernel's tables stay in TTBR0 in Bastio code. */
+const char bst_platform_deferred_ttbr0 = 1;
+uint64_t *bst_platform_mmu_state(void) { return this_cpu()->mmu; }
+
+/* TTBR1 maps one page, the trampoline (boot.S), at TRAMP_VA: the exception
+ * vectors and the code that switches TTBR0, which must be reachable while
+ * TTBR0 holds a user table. One table per level, all index 0. */
+extern char tramp_page[];
+uint64_t bst_ttbr1_tables[4][512] __attribute__((aligned(4096)));
+#define TRAMP_PTE ((uint64_t)tramp_page | 3 | (1ull << 10) | (3ull << 8) | (1ull << 7) | (1ull << 54))
 
 static uint32_t be32(const uint8_t *p) {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
@@ -94,6 +149,11 @@ static void read_memory(const uint8_t *dtb) {
         const uint8_t *strs = dtb + be32(dtb + 12);
         uint32_t ac = 2, sc = 1, cac = 1;
         int depth = 0, in_mem = 0, in_cpus = 0, in_cpu = 0;
+        unsigned node_gic = 0;                       /* this node's compatible: 3, 2 or 0 */
+        int node_uart = 0, have_uart = 0, node_pci = 0;
+        int in_psci = 0;
+        uint64_t node_reg[2] = { 0, 0 };
+        int node_regs = 0;
         for (;;) {
             uint32_t tok = be32(st);
             st += 4;
@@ -106,11 +166,26 @@ static void read_memory(const uint8_t *dtb) {
                 in_mem = depth == 2 && starts_with(name, "memory");
                 if (depth == 2 && same(name, "cpus")) in_cpus = 1;
                 in_cpu = in_cpus && depth == 3 && starts_with(name, "cpu@");
+                if (depth == 2) { node_gic = 0; node_regs = 0; node_uart = 0; node_pci = 0; }
+                in_psci = depth == 2 && same(name, "psci");
             } else if (tok == 2) {
-                if (depth == 2) in_cpus = 0;
+                if (depth == 2) {
+                    in_cpus = 0;
+                    if (node_gic && node_regs >= 2) {
+                        gic_ver = node_gic;
+                        GICD = node_reg[0];
+                        GICR = node_reg[1];
+                    }
+                    if (node_pci && node_regs >= 1 && !pci_ecam) pci_ecam = node_reg[0];
+                    if (node_uart && node_regs >= 1 && !have_uart) {
+                        bst_uart_base = node_reg[0];
+                        have_uart = 1;
+                    }
+                }
                 depth--;
                 in_mem = 0;
                 in_cpu = 0;
+                in_psci = 0;
             } else if (tok == 3) {
                 uint32_t len = be32(st), off = be32(st + 4);
                 const uint8_t *data = st + 8;
@@ -118,6 +193,26 @@ static void read_memory(const uint8_t *dtb) {
                 st += 8 + ((len + 3) & ~3u);
                 if (depth == 1 && same(pname, "#address-cells")) ac = be32(data);
                 else if (depth == 1 && same(pname, "#size-cells")) sc = be32(data);
+                else if (in_psci && same(pname, "method")) psci_smc = same((const char *)data, "smc");
+                else if (depth == 2 && same(pname, "compatible")) {
+                    for (uint32_t o = 0; o < len; ) {
+                        const char *c = (const char *)data + o;
+                        if (same(c, "arm,pl011")) node_uart = 1;
+                        if (same(c, "pci-host-ecam-generic")) node_pci = 1;
+                        if (same(c, "arm,gic-v3")) node_gic = 3;
+                        else if (same(c, "arm,cortex-a15-gic") || same(c, "arm,gic-400") || same(c, "arm,cortex-a9-gic")) node_gic = 2;
+                        while (o < len && data[o]) o++;
+                        o++;
+                    }
+                }
+                else if (depth == 2 && !in_mem && same(pname, "reg") && ac <= 2 && sc <= 2 && len >= (ac + sc) * 8) {
+                    node_reg[0] = cells(data, ac);
+                    node_reg[1] = cells(data + (ac + sc) * 4, ac);
+                    node_regs = 2;
+                } else if (depth == 2 && !in_mem && same(pname, "reg") && ac <= 2 && len >= ac * 4) {
+                    node_reg[0] = cells(data, ac);          /* a node with one frame: the UART */
+                    node_regs = 1;
+                }
                 else if (in_cpus && depth == 2 && same(pname, "#address-cells")) cac = be32(data);
                 else if (in_cpu && same(pname, "reg") && cac >= 1 && cac <= 2 && len >= cac * 4 && ncpu_dt < MAX_CPUS)
                     cpu_mpidr[ncpu_dt++] = cells(data, cac);
@@ -146,19 +241,32 @@ static void read_memory(const uint8_t *dtb) {
     bst_memmap[0] = n;
 }
 
-#define BLOCK_DEVICE (1ull | (1ull << 2) | (1ull << 10) | (1ull << 53) | (1ull << 54))
-#define BLOCK_NORMAL (1ull | (3ull << 8) | (1ull << 10) | (1ull << 54))
+/* The kernel's blocks are not global (nG, bit 11): its translations carry
+ * ASID 0, which no user table has, so entering and leaving user mode needs
+ * no TLB invalidation (see bst_user_ttbr). */
+#define BLOCK_DEVICE (1ull | (1ull << 2) | (1ull << 10) | (1ull << 11) | (1ull << 53) | (1ull << 54))
+#define BLOCK_NORMAL (1ull | (3ull << 8) | (1ull << 10) | (1ull << 11) | (1ull << 54))
 
 /* Called by boot.S with the MMU off (so, compiled with -mstrict-align): the
  * memory map, and the kernel's map in top-level slot 0 (every user table
- * copies it): 1 GiB blocks, EL1 only, never executable at EL0. Block 0
+ * copies it): 1 GiB blocks (2 MiB blocks where RAM shares a GiB with devices), EL1 only, never executable at EL0. RAM is normal memory (MAIR index 0); the first 4 GiB without RAM are devices (MAIR index 1, not executable). Block 0
  * holds the devices (MAIR index 1, not executable); the blocks that hold
  * RAM are normal memory (MAIR index 0). */
 void bst_early(const uint8_t *dtb) {
     read_memory(dtb);
-    if (dtb && be32(dtb) == 0xd00dfeed && be32(dtb + 4) <= DTB_MAX) {
-        dtb_len = be32(dtb + 4);
-        for (uint64_t i = 0; i < dtb_len; i++) dtb_copy[i] = dtb[i];
+    /* QEMU pads the tree to 1 MiB (totalsize says so) though the blocks it
+     * holds take a few KiB: what matters is that both blocks lie inside the
+     * part kept, and the copy's totalsize says how much that is. */
+    if (dtb && be32(dtb) == 0xd00dfeed) {
+        uint64_t total = be32(dtb + 4);
+        uint64_t st = (uint64_t)be32(dtb + 8) + be32(dtb + 36);      /* structure block's end */
+        uint64_t strs = (uint64_t)be32(dtb + 12) + be32(dtb + 32);   /* strings block's end */
+        if (total > DTB_MAX && st <= DTB_MAX && strs <= DTB_MAX) total = DTB_MAX;
+        if (total <= DTB_MAX) {
+            dtb_len = total;
+            for (uint64_t i = 0; i < dtb_len; i++) dtb_copy[i] = dtb[i];
+            for (int i = 0; i < 4; i++) dtb_copy[4 + i] = (uint8_t)(total >> (24 - 8 * i));
+        }
     }
     uint64_t top = 0;
     for (uint64_t i = 0; i < bst_memmap[0]; i++) {
@@ -167,14 +275,174 @@ void bst_early(const uint8_t *dtb) {
     }
     if (top > (512ull << 30)) top = 512ull << 30;
     for (int i = 0; i < 512; i++) kernel_l1[i] = 0;
-    kernel_l1[0] = BLOCK_DEVICE;
-    for (uint64_t g = 1; g < ((top + (1ull << 30) - 1) >> 30); g++)
-        kernel_l1[g] = BLOCK_NORMAL | (g << 30);
+    /* Every 1 GiB of the address space the kernel can reach is one of: all
+     * RAM (a normal-memory block), no RAM and in the first 4 GiB (a device
+     * block: where the peripherals of every board lie), or mixed (a table of
+     * 2 MiB blocks, each normal if RAM touches it, device otherwise: a
+     * board with RAM from address 0 and peripherals near 4 GiB). */
+    unsigned l2used = 0;
+    for (uint64_t g = 0; g < 512 && ((g << 30) < top || g < 4); g++) {
+        uint64_t lo = g << 30, hi = lo + (1ull << 30);
+        uint64_t cov = ram_overlap(lo, hi);
+        if (cov == 0) {
+            if (g < 4) kernel_l1[g] = BLOCK_DEVICE | lo;
+        } else if (cov == (1ull << 30) || l2used == MAX_L2) {
+            kernel_l1[g] = BLOCK_NORMAL | lo;
+        } else {
+            uint64_t *l2 = kernel_l2[l2used++];
+            for (uint64_t i = 0; i < 512; i++) {
+                uint64_t a = lo + (i << 21);
+                l2[i] = (ram_overlap(a, a + (2ull << 20)) ? BLOCK_NORMAL : BLOCK_DEVICE) | a;
+            }
+            kernel_l1[g] = (uint64_t)l2 | 3;
+        }
+    }
+    /* The gigabyte holding the PCI Express configuration window, when the
+     * machine puts it above the first 4 GiB (QEMU's virt does, unless
+     * highmem is off) and no RAM shares it. */
+    if (pci_ecam) {
+        uint64_t g = pci_ecam >> 30;
+        if (g >= 4 && g < 512 && ram_overlap(g << 30, (g + 1) << 30) == 0)
+            kernel_l1[g] = BLOCK_DEVICE | (g << 30);
+    }
     bst_kernel_root[0] = (uint64_t)kernel_l1 | 3;
+    bst_ttbr1_tables[0][0] = (uint64_t)bst_ttbr1_tables[1] | 3;
+    bst_ttbr1_tables[1][0] = (uint64_t)bst_ttbr1_tables[2] | 3;
+    bst_ttbr1_tables[2][0] = (uint64_t)bst_ttbr1_tables[3] | 3;
+    bst_ttbr1_tables[3][0] = TRAMP_PTE;       /* EL1 read-only, never executable at EL0 */
+}
+
+/*
+ * Address-space numbers. User tables are tagged with an 8-bit ASID (the
+ * kernel's is 0) so that entering and leaving user mode, and running another
+ * process, invalidates nothing. What does need invalidating is the processor's
+ * TLB after an entry was taken out of some table (the compiled kernel counts
+ * them: word 1 of bst_platform_mmu_state): bst_user_ttbr does it, on the way
+ * to user mode, when the count moved since this processor's last flush.
+ *
+ * A table gets a number the first time it is entered after a rollover (all
+ * 255 numbers used): asid_map is an open-addressed table from the table's
+ * address to its number, valid for the current generation only. A number is
+ * not handed out again until a rollover, which flushes every processor's
+ * TLB (broadcast) and keeps the numbers processors are using now with the
+ * tables that own them, so no two tables run under one number. A table's
+ * own entry goes (bst_platform_table_free) when its page is given back, for
+ * whoever gets the page next must not inherit its number; asid_ver, which
+ * every processor checks, tells them to look their table's number up again.
+ */
+#define NASID 256
+#define ASID_SLOTS 1024
+static struct { uint64_t table, gen; } asid_map[ASID_SLOTS];     /* gen != asid_gen: empty; table 0: removed */
+static uint64_t asid_gen = 1;
+static uint64_t asid_ver = 1;
+static unsigned asid_next = 1;
+static uint8_t asid_taken[NASID];                                /* map-wide: the ASID's number belongs to a table */
+static uint8_t asid_of[ASID_SLOTS];
+static volatile uint32_t asid_lock;
+static unsigned asid_online = 1;                                 /* processors that may have loaded a user table */
+
+static void asid_acquire(void) {
+    while (__atomic_exchange_n(&asid_lock, 1, __ATOMIC_ACQUIRE))
+        while (__atomic_load_n(&asid_lock, __ATOMIC_RELAXED)) { }
+}
+static void asid_release(void) { __atomic_store_n(&asid_lock, 0, __ATOMIC_RELEASE); }
+
+static unsigned asid_hash(uint64_t table) { return (unsigned)(((table >> 12) * 0x9E3779B97F4A7C15ull) >> 54) & (ASID_SLOTS - 1); }
+
+/* The slot holding `table` (or the one to put it in), under the lock. */
+static unsigned asid_slot(uint64_t table, int *found) {
+    unsigned i = asid_hash(table), spare = ASID_SLOTS;
+    for (unsigned n = 0; n < ASID_SLOTS; n++, i = (i + 1) & (ASID_SLOTS - 1)) {
+        if (asid_map[i].gen != asid_gen) {
+            *found = 0;
+            return spare < ASID_SLOTS ? spare : i;
+        }
+        if (asid_map[i].table == table) {
+            *found = 1;
+            return i;
+        }
+        if (asid_map[i].table == 0 && spare == ASID_SLOTS) spare = i;
+    }
+    *found = 0;
+    return spare;                    /* never reached: at most NASID - 1 slots are used per generation */
+}
+
+/* Starts a new generation: every number is free again except the ones now
+ * loaded on some processor, which stay with their tables. */
+static void asid_rollover(void) {
+    asid_gen++;
+    asid_ver++;
+    for (unsigned a = 0; a < NASID; a++) asid_taken[a] = 0;
+    asid_next = 1;
+    for (unsigned c = 0; c < asid_online && c < MAX_CPUS; c++) {
+        struct pcpu *p = &bst_pcpus[c];
+        if (p->asid_table && p->asid) {
+            int found;
+            unsigned i = asid_slot(p->asid_table, &found);
+            asid_map[i].table = p->asid_table;
+            asid_map[i].gen = asid_gen;
+            asid_of[i] = (uint8_t)p->asid;
+            asid_taken[p->asid] = 1;
+        }
+    }
+    __asm__ volatile ("dsb ishst\n\ttlbi vmalle1is\n\tdsb ish\n\tisb" : : : "memory");
+}
+
+/* Called by bst_cpu_enter (boot.S) with the user table and this processor's
+ * shadow table: leaves in this processor's pcpu what the trampoline loads
+ * into TTBR0, and flushes the TLB if entries were taken out of tables since
+ * the last flush. */
+void bst_user_ttbr(uint64_t table, uint64_t shadow) {
+    struct pcpu *p = this_cpu();
+    uint64_t gen = p->mmu[1];
+    if (p->seen_gen != gen) {
+        p->seen_gen = gen;
+        __asm__ volatile ("tlbi vmalle1\n\tdsb nsh\n\tisb" : : : "memory");
+    }
+    if (!(p->asid_table == table && p->asid_ver == __atomic_load_n(&asid_ver, __ATOMIC_ACQUIRE))) {
+        int found;
+        asid_acquire();
+        if (p->id >= asid_online) asid_online = p->id + 1;
+        unsigned i = asid_slot(table, &found);
+        unsigned a;
+        if (found) {
+            a = asid_of[i];
+        } else {
+            while (asid_next < NASID && asid_taken[asid_next]) asid_next++;
+            if (asid_next >= NASID) {
+                asid_rollover();
+                i = asid_slot(table, &found);
+                while (asid_next < NASID && asid_taken[asid_next]) asid_next++;
+            }
+            a = asid_next++;
+            asid_taken[a] = 1;
+            asid_map[i].table = table;
+            asid_map[i].gen = asid_gen;
+            asid_of[i] = (uint8_t)a;
+        }
+        p->asid_table = table;
+        p->asid = a;
+        p->asid_ver = asid_ver;
+        asid_release();
+    }
+    p->ttbr = shadow | (p->asid << 48);
+}
+
+/* The compiled kernel calls this when it gives a user table's page back. */
+void bst_platform_table_free(uint64_t table) {
+    int found;
+    asid_acquire();
+    unsigned i = asid_slot(table, &found);
+    if (found) asid_map[i].table = 0;
+    for (unsigned c = 0; c < asid_online && c < MAX_CPUS; c++)
+        if (bst_pcpus[c].asid_table == table) bst_pcpus[c].asid_table = 0;
+    __atomic_fetch_add(&asid_ver, 1, __ATOMIC_RELEASE);
+    asid_release();
 }
 
 static inline void w32(uint64_t a, uint32_t v) { *(volatile uint32_t *)a = v; }
 static inline uint32_t r32(uint64_t a) { return *(volatile uint32_t *)a; }
+static inline void w8(uint64_t a, uint8_t v) { *(volatile uint8_t *)a = v; }
 
 static uint64_t tick_cycles;
 
@@ -194,9 +462,18 @@ static uint64_t redistributor(uint64_t mpidr) {
     return GICR;
 }
 
-/* GICv3 for the calling processor: its redistributor awake, the timer's
- * interrupt enabled, and the CPU interface opened to every priority. */
+/* The interrupt controller for the calling processor: GICv3 with its
+ * redistributor awake, or GICv2 with its CPU interface on; the timer's
+ * interrupt enabled and every priority let through. */
 static void gic_cpu_init(void) {
+    if (gic_ver == 2) {
+        w32(GICD + 0x0080, 0);                              /* GICD_IGROUPR0: group 0, signalled as IRQ while GICC_CTLR.FIQEn is 0 */
+        w8(GICD + 0x0400 + TIMER_INTID, 0x80);               /* priority (a byte register: banked per processor) */
+        w32(GICD + 0x0100, 1u << TIMER_INTID);               /* GICD_ISENABLER0 */
+        w32(GICR + 0x0004, 0xFF);                            /* GICC_PMR */
+        w32(GICR + 0x0000, 1);                               /* GICC_CTLR: enable */
+        return;
+    }
     uint64_t mpidr;
     __asm__ volatile ("mrs %0, mpidr_el1" : "=r"(mpidr));
     uint64_t rd = redistributor(mpidr);
@@ -204,7 +481,7 @@ static void gic_cpu_init(void) {
     while (r32(rd + 0x0014) & 4u) { }                        /* ChildrenAsleep */
     uint64_t sgi = rd + 0x10000;
     w32(sgi + 0x0080, 0xFFFFFFFFu);                          /* group 1 */
-    w32(sgi + 0x0400 + TIMER_INTID, 0x80);                   /* priority */
+    w8(sgi + 0x0400 + TIMER_INTID, 0x80);                    /* priority */
     w32(sgi + 0x0100, 1u << TIMER_INTID);                    /* enable */
     uint64_t sre;
     __asm__ volatile ("mrs %0, icc_sre_el1" : "=r"(sre));
@@ -227,7 +504,7 @@ static void timer_stop(void) {
 /* The boot processor: the distributor on, then its own interface and
  * timer. */
 void bst_gic_init(void) {
-    w32(GICD + 0x0000, (1u << 4) | (1u << 1) | 1u);          /* ARE, group 1 non-secure */
+    w32(GICD + 0x0000, gic_ver == 2 ? 1u : (1u << 4) | (1u << 1) | 1u);   /* v3: ARE, group 1 non-secure; v2: enable */
     gic_cpu_init();
     timer_start();
 }
@@ -238,7 +515,8 @@ void bst_gic_init(void) {
  * spurious. */
 uint64_t bst_irq_ack(void) {
     uint64_t id;
-    __asm__ volatile ("mrs %0, icc_iar1_el1" : "=r"(id));
+    if (gic_ver == 2) id = r32(GICR + 0x000C);               /* GICC_IAR */
+    else __asm__ volatile ("mrs %0, icc_iar1_el1" : "=r"(id));
     id &= 0xFFFFFF;
     if (id >= 1020) return 0;
     uint64_t v = 6;
@@ -246,7 +524,8 @@ uint64_t bst_irq_ack(void) {
         __asm__ volatile ("msr cntp_tval_el0, %0; isb" : : "r"(tick_cycles));
         v = this_cpu()->id == 0 ? V_TIMER : V_LTIMER;
     }
-    __asm__ volatile ("msr icc_eoir1_el1, %0; isb" : : "r"(id));
+    if (gic_ver == 2) w32(GICR + 0x0010, (uint32_t)id);      /* GICC_EOIR */
+    else __asm__ volatile ("msr icc_eoir1_el1, %0; isb" : : "r"(id));
     return v;
 }
 
@@ -268,13 +547,22 @@ static void (*volatile work_fn)(void *);
 static void *volatile work_arg;
 static volatile uint64_t work_gen, work_done;
 
-static int64_t psci_cpu_on(uint64_t mpidr, uint64_t entry, uint64_t ctx) {
-    register uint64_t x0 __asm__("x0") = 0xC4000003ull;     /* CPU_ON, 64-bit */
-    register uint64_t x1 __asm__("x1") = mpidr;
-    register uint64_t x2 __asm__("x2") = entry;
-    register uint64_t x3 __asm__("x3") = ctx;
-    __asm__ volatile ("hvc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3) : "memory");
+/* A PSCI call through the conduit the device tree names (hvc on QEMU virt
+ * booted at EL1, smc when the machine has EL2 or EL3 firmware). */
+static int64_t psci_call(uint64_t fn, uint64_t a, uint64_t b, uint64_t c) {
+    register uint64_t x0 __asm__("x0") = fn;
+    register uint64_t x1 __asm__("x1") = a;
+    register uint64_t x2 __asm__("x2") = b;
+    register uint64_t x3 __asm__("x3") = c;
+    if (psci_smc) __asm__ volatile ("smc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3) : "memory");
+    else __asm__ volatile ("hvc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3) : "memory");
     return (int64_t)x0;
+}
+static int64_t psci_cpu_on(uint64_t mpidr, uint64_t entry, uint64_t ctx) {
+    return psci_call(0xC4000003ull, mpidr, entry, ctx);          /* CPU_ON, 64-bit */
+}
+void bst_psci_system_off(void) {
+    psci_call(0x84000008ull, 0, 0, 0);                           /* SYSTEM_OFF */
 }
 
 /* Called by boot.S on the boot processor once the MMU and the interrupt
@@ -333,8 +621,14 @@ void bst_platform_smp_join(void) {
 }
 uint64_t bst_platform_acpi(uint64_t sig, uint64_t off) { (void)sig; (void)off; return 256; }
 /* boot_info: query 10 is the device tree, byte i of it, 256 past its end
- * (or when there is none); every other query is 0. */
+ * (or when there is none); query 11 is the generic timer's rate in Hz
+ * (CNTFRQ_EL0); every other query is 0. */
 uint64_t bst_platform_info(uint64_t what, uint64_t i) {
+    if (what == 11) {
+        uint64_t f;
+        __asm__ volatile ("mrs %0, cntfrq_el0" : "=r"(f));
+        return f;
+    }
     if (what != 10) return 0;
     return i < dtb_len ? dtb_copy[i] : 256;
 }

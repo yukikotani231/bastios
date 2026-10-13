@@ -235,10 +235,11 @@ int main(void) {
            pid_t c = fork(); if (c == 0) _exit(0); usleep(200000);
            int k = kill(c, SIGTERM); int st; waitpid(c, &st, 0);
            r == -1 && e == EINTR && rm.tv_sec >= 2 && rm.tv_sec <= 4 && k == 0; }));
-    EXPECT("a CPU-time POSIX timer, and overruns of a timer set in the past", ({ timer_t t, u; struct sigevent se = {.sigev_notify = SIGEV_NONE};
+    EXPECT("a CPU-time POSIX timer, and overruns of a timer set in the past", ({ timer_t u; struct sigevent se = {.sigev_notify = SIGEV_NONE}; int t = -1;
            struct itimerspec v = {{0, 0}, {0, 500000000}}, g; struct timespec now;
-           int ok = timer_create(CLOCK_PROCESS_CPUTIME_ID, &se, &t) == 0 && timer_settime(t, 0, &v, 0) == 0 &&
-               timer_gettime(t, &g) == 0 && g.it_value.tv_sec == 0 && g.it_value.tv_nsec > 0; timer_delete(t);
+           /* the system calls themselves: glibc's timer_create refuses the CPU-time clocks */
+           int ok = syscall(SYS_timer_create, CLOCK_PROCESS_CPUTIME_ID, &se, &t) == 0 && syscall(SYS_timer_settime, t, 0, &v, 0) == 0 &&
+               syscall(SYS_timer_gettime, t, &g) == 0 && g.it_value.tv_sec == 0 && g.it_value.tv_nsec > 0; syscall(SYS_timer_delete, t);
            sigset_t m; sigemptyset(&m); sigaddset(&m, SIGUSR1); sigprocmask(SIG_BLOCK, &m, 0);
            struct sigevent su = {.sigev_notify = SIGEV_SIGNAL, .sigev_signo = SIGUSR1}; timer_create(CLOCK_MONOTONIC, &su, &u);
            clock_gettime(CLOCK_MONOTONIC, &now); struct itimerspec w = {{0, 1000000}, {now.tv_sec - 1, now.tv_nsec}};
@@ -468,9 +469,11 @@ int main(void) {
            int a = pthread_getcpuclockid(pthread_self(), &tc); int b = clock_getcpuclockid(0, &pc);
            a == 0 && b == 0 && clock_gettime(tc, &t1) == 0 && clock_gettime(pc, &t2) == 0
              && clock_gettime((clockid_t)((~0u << 3) | 3), &t1) == -1 && errno == EINVAL; }));
+#ifdef SYS_arch_prctl
     EXPECT("arch_prctl: ARCH_GET_FS gives what ARCH_SET_FS set, ARCH_GET_CPUID is 1", ({
            unsigned long fs = 0; int r = syscall(SYS_arch_prctl, 0x1003, &fs);
            r == 0 && fs != 0 && syscall(SYS_arch_prctl, 0x1011, 0) == 1; }));
+#endif
     EXPECT("memfd_create: a NULL name is EFAULT, a name over 249 bytes EINVAL", ({
            char nm[300]; memset(nm, 'a', sizeof nm); nm[299] = 0;
            int a = syscall(SYS_memfd_create, 0, 0); int ae = errno;

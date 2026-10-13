@@ -946,6 +946,33 @@ fn tcp_tick(n: &mut Net, now: u64)
   n.ns = was;
 }
 
+/// Does the stack have no timer that needs the tick to be on time: no
+/// connection with a retransmission, TIME_WAIT or cork timer pending, and
+/// a settled address (leased and not being renewed, or static)? Without a
+/// card, always.
+fn nic_timers_idle(c: &Nic) -> bool
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return true; },
+    Nic::Up(n) => {
+      if !(n.dhcp_state == DHCP_BOUND || (n.dhcp_state == DHCP_OFF && n.ip != 0)) {
+        return false;
+      }
+      let mut t = 0;
+      while t < TCBS
+        invariant t <= TCBS && net_ok(n)
+      {
+        if tw(n, t, W_TIMER) != 0 || tw(n, t, W_CORK) != 0 {
+          return false;
+        }
+        t = t + 1;
+      }
+      return true;
+    },
+  }
+}
+
 // ---------------------------------------------------------------- calls
 
 /// Makes connection t's namespace the one being handled.
@@ -1299,6 +1326,70 @@ fn tcp_status(c: &Nic, t: u64) -> u64
   match c {
     Nic::None => { return 2; },
     Nic::Up(n) => { return tcp_status_of(n, t); },
+  }
+}
+
+/// What /proc/net/tcp shows of connection t in network namespace ns: field
+/// 0 is Linux's state code (0: not shown, as for a closed slot or one of
+/// another namespace), 1 our port, 2 the peer's address, 3 its port, 4 our
+/// address (0 for a listener, which is bound to every address).
+fn tcp_row(c: &Nic, t: u64, ns: u64, f: u64) -> u64
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if t >= TCBS {
+        return 0;
+      }
+      let st = tw(n, t, W_STATE);
+      if st == T_CLOSED || tw(n, t, W_NS) != ns {
+        return 0;
+      }
+      if f == 1 {
+        return tw(n, t, W_LPORT);
+      }
+      if f == 2 {
+        return tw(n, t, W_RIP);
+      }
+      if f == 3 {
+        return tw(n, t, W_RPORT);
+      }
+      if f == 4 {
+        if st == T_LISTEN {
+          return 0;
+        }
+        return n.ip;
+      }
+      if st == T_ESTABLISHED {
+        return 1;
+      }
+      if st == T_SYN_SENT {
+        return 2;
+      }
+      if st == T_SYN_RCVD {
+        return 3;
+      }
+      if st == T_FIN_WAIT_1 {
+        return 4;
+      }
+      if st == T_FIN_WAIT_2 {
+        return 5;
+      }
+      if st == T_TIME_WAIT {
+        return 6;
+      }
+      if st == T_CLOSE_WAIT {
+        return 8;
+      }
+      if st == T_LAST_ACK {
+        return 9;
+      }
+      if st == T_LISTEN {
+        return 10;
+      }
+      return 11;                            // CLOSING
+    },
   }
 }
 

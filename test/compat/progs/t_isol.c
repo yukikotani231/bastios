@@ -201,11 +201,15 @@ static int loop_devices(void) {
 }
 
 /* BastiOS's own system calls (src/syscall.bastio), raised with int 0x80. */
+#ifdef __x86_64__
 static long native(long n, long a, long b, long c) {
     long r;
     __asm__ volatile("int $0x80" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c) : "memory");
     return r;
 }
+#else
+static long native(long n, long a, long b, long c) { (void)n; (void)a; (void)b; (void)c; return -1; }   /* AArch64 has no such door */
+#endif
 
 static int no_native(void) {
     pid_t root = getppid();
@@ -356,10 +360,13 @@ int main(int argc, char **argv) {
     EXPECT("/dev/console is root's", in_child(no_console));
     EXPECT("SysV group bits count supplementary groups", sysv_groups());
     EXPECT("SHM_LOCK needs RLIMIT_MEMLOCK or root", in_child(no_shm_lock));
+#ifdef __x86_64__
+    /* The AArch64 lane has neither the int 0x80 door nor mkfs.bstdisk3. */
     if (bastios())
         EXPECT("native system calls are root's", in_child(no_native));
     if (bastios())
         EXPECT("a loop-mounted image is nosuid", loop_nosuid());
+#endif
 
     unlink("i_secret");
     unlink("i_public");

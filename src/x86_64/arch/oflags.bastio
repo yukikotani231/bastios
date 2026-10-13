@@ -1,0 +1,7 @@
+// The open flags a Linux program passes, in the numbering the kernel uses
+// inside (x86-64's): the same on this architecture.
+
+/// The flags of an open, openat or openat2 call as the kernel numbers them.
+fn oflags_in(f: u64) -> u64 {
+  return f;
+}

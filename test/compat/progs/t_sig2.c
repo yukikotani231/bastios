@@ -77,7 +77,7 @@ int main(void) {
     EXPECT("read into an untouched stack buffer", ({ int p[2]; pipe(p); write(p[1], "abc", 3); close(p[1]);
            int ok = deep_read(p[0]); close(p[0]); ok; }));
     EXPECT("a PROT_NONE page is EFAULT to a system call", ({ void *a = mmap(0, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-           int r = sigprocmask(SIG_BLOCK, a, 0); int e = errno; r == -1 && e == EFAULT && munmap(a, 4096) == 0; }));
+           int r = (int)syscall(SYS_rt_sigprocmask, SIG_BLOCK, a, 0, 8); int e = errno;   /* the call itself: glibc's sigprocmask reads the set first */ r == -1 && e == EFAULT && munmap(a, 4096) == 0; }));
     EXPECT("mprotect makes a PROT_NONE mapping usable", ({ char *a = mmap(0, 8192, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
            mprotect(a + 4096, 4096, PROT_READ | PROT_WRITE) == 0 && (a[4096] = 7, a[4096] == 7) && munmap(a, 8192) == 0; }));
     EXPECT("mprotect PROT_NONE makes a page fault on read", ({ char *a = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

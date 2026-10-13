@@ -374,6 +374,26 @@ fn arp_find(n: &Net, ip: u64) -> u64
   return 0;
 }
 
+/// ARP cache entry e as /proc/net/arp shows it: field 0 is its address (0
+/// if the entry is empty), field 1 its MAC address.
+fn nic_arp(c: &Nic, e: u64, f: u64) -> u64
+  requires nic_ok(c)
+  ensures result < MAC_LIMIT || result <= IP_MAX
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if e >= ARP_N || get(n.arp, 2 * e + 1) >= MAC_LIMIT || get(n.arp, 2 * e) > IP_MAX || get(n.arp, 2 * e + 1) == 0 {
+        return 0;
+      }
+      if f == 0 {
+        return get(n.arp, 2 * e);
+      }
+      return get(n.arp, 2 * e + 1);
+    },
+  }
+}
+
 /// Caches ip -> mac, over the old entry for ip if there is one, else over
 /// the oldest.
 fn arp_learn(n: &mut Net, ip: u64, mac: u64)
@@ -1832,6 +1852,24 @@ fn nic_tick(c: &mut Nic, now: u64)
   }
 }
 
+/// How many ticks from `now` until the lease needs the timer (the renewal
+/// at T1, or its end), or a very long time: static addresses and no card.
+fn nic_dhcp_due(c: &Nic, now: u64) -> u64 {
+  match c {
+    Nic::None => { return 1099511627776; },
+    Nic::Up(n) => {
+      if n.dhcp_state != DHCP_BOUND {
+        return 1099511627776;
+      }
+      let due = smaller(n.dhcp_t1, n.dhcp_end);
+      if due <= now {
+        return 0;
+      }
+      return due - now;
+    },
+  }
+}
+
 /// What the stack is configured with: 0 our address, 1 the gateway, 2 the
 /// netmask, 3 how (0 not yet, 1 DHCP, 2 static), 4 the name server. 0
 /// without a card.
@@ -2184,6 +2222,57 @@ fn sock_port(c: &Nic, s: u64) -> u64
     Nic::Up(n) => {
       if udp_is_open(n, s) && sk_get(n, s, S_PORT) <= 65535 {
         return sk_get(n, s, S_PORT);
+      }
+      return 0;
+    },
+  }
+}
+
+/// What /proc/net/udp shows of socket s in network namespace ns: field 0 is
+/// 1 if it is shown (open, not a raw socket, in ns), 0 if not; field 1 is
+/// its local port and field 2 the datagrams queued to read.
+fn sock_row(c: &Nic, s: u64, ns: u64, f: u64) -> u64
+  requires nic_ok(c)
+  ensures result <= 4294967295
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if s >= SOCKS || !udp_is_open(n, s) || sk_get(n, s, S_NS) != ns || sk_get(n, s, S_PORT) == RAW_ICMP {
+        return 0;
+      }
+      if f == 0 {
+        return 1;
+      }
+      if f == 1 && sk_get(n, s, S_PORT) <= 65535 {
+        return sk_get(n, s, S_PORT);
+      }
+      if f == 2 && sk_get(n, s, S_COUNT) <= 4294967295 {
+        return sk_get(n, s, S_COUNT);
+      }
+      return 0;
+    },
+  }
+}
+
+/// What /proc/net/raw shows of socket s in network namespace ns: field 0
+/// is 1 if it is a raw ICMP socket of ns, field 1 the datagrams queued to
+/// read.
+fn raw_row(c: &Nic, s: u64, ns: u64, f: u64) -> u64
+  requires nic_ok(c)
+  ensures result <= 4294967295
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if s >= SOCKS || !udp_is_open(n, s) || sk_get(n, s, S_NS) != ns || sk_get(n, s, S_PORT) != RAW_ICMP {
+        return 0;
+      }
+      if f == 0 {
+        return 1;
+      }
+      if f == 1 && sk_get(n, s, S_COUNT) <= 4294967295 {
+        return sk_get(n, s, S_COUNT);
       }
       return 0;
     },

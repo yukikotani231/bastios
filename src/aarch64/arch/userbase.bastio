@@ -1,6 +1,8 @@
 // Where the user window starts, and where a PIE goes in it (AArch64). The
-// kernel and the user window share one top-level table here: slot 0 maps
-// the kernel and slot 1 the window, which starts at 512 GiB. A program
-// image starts at the window's first page (PIE_AT is an offset into it).
-const USER_BASE: u64 = 0x8000000000;
-const PIE_AT: u64 = 0;
+// CPU runs user code on a table of its own (boot/aarch64/boot.S), so the
+// window starts at address 0 and nothing of the kernel is in it. Nothing is
+// mapped below PIE_AT, so a null pointer (and a small offset from one) faults,
+// and a non-PIE executable linked at 0x400000, where Linux puts one, loads
+// where it was linked.
+const USER_BASE: u64 = 0;
+const PIE_AT: u64 = 0x400000;

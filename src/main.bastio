@@ -82,6 +82,7 @@ import "lxcow.bastio";
 import "hda.bastio";
 import "lxsnd.bastio";
 import "lxmouse.bastio";
+import "arch/rnghw.bastio";
 import "kernel.bastio";
 import "initfiles.bastio";
 
@@ -190,7 +191,7 @@ const MAX_IDLE: u64 = 1024;           // more than there are processors
 // (an idle application processor sleeps through its own; see `next_job`).
 // `acpi` holds the clock's PM timer (without an HPET) and the power
 // button; `reboot` says the stop is a restart.
-struct Sys { k: Kernel, con: Con, pic: Pic, apic: Lapic, clock: Hpet, acpi: Acpi, stop: bool, reboot: bool, idle: u64, ticked: bool, login: u64 }
+struct Sys { k: Kernel, con: Con, pic: Pic, apic: Lapic, clock: Hpet, acpi: Acpi, stop: bool, reboot: bool, idle: u64, ticked: bool, login: u64, slept: u64, polled: bool }
   invariant kok(k) && con_ok(con) && pic_ok(pic) && lapic_ok(apic) && hpet_ok(clock) && acpi_ok(acpi);
 
 spec fn sys_ok(s: &Sys) -> bool {
@@ -394,12 +395,163 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
   }
 }
 
+// An idle bootstrap processor stretches the timer tick. The kernel's tick
+// is the PIT's, every 10 ms, and under QEMU's TCG an interrupt costs the
+// host enough that an idle guest took 15% of a host processor. When
+// nothing can happen before a known time, the PIT is masked and this
+// processor's local APIC timer is set to that time instead (up to a
+// second, as an idle application processor's is): any other interrupt
+// ends the stretch early. The tick count catches up on the time that
+// passed. Everything that runs off the tick must be quiet for that
+// (stretch_p says what is checked); a stretched tick is never used while
+// a process runs, waits for the disk, the network or the console, or has a
+// timer the tick would check.
+const STRETCH_MAX: u64 = 1000000000;
+const STRETCH_MIN_TICKS: u64 = 3;
+
+/// How long, at most, the tick may be stretched from now (k.ns), in ns; 0
+/// if some process or timer needs it. Only waits that end by an interrupt,
+/// another process's trap, or a deadline TIMEWAIT keeps are allowed.
+fn idle_horizon(k: &Kernel) -> u64
+  requires kok(k)
+{
+  let mut h = STRETCH_MAX;
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && kok(k)
+  {
+    let st = state(k.procs, p);
+    if st == TIMEWAIT {
+      let w = pget(k.procs, p, F_RESTART);
+      if w < 2 || w - 2 <= k.ns || w - 2 - k.ns <= NEAR {
+        return 0;                           // sleepers_due makes it ready now
+      }
+      h = smaller(h, w - 2 - k.ns - NEAR);
+    } else if st != FREE && st != ZOMBIE && st != READING && st != WAITING && st != LXREADING
+       && st != LXWAITING && st != LXVFORK && st != FUTEXWAIT && st != SOCKWAIT && st != STOPPED {
+      return 0;
+    }
+    p = p + 1;
+  }
+  let mut i = 0;
+  while i < len(k.alarms)
+    invariant i <= len(k.alarms) && kok(k)
+  {
+    if get(k.alarms, i) != 0 {
+      return 0;                             // alarm, setitimer or a POSIX timer
+    }
+    i = i + 1;
+  }
+  let mut t = 0;
+  while t < TFD_N
+    invariant t <= TFD_N && kok(k)
+  {
+    if get(k.evt, t * TFD_STRIDE + 2) != 0 {
+      return 0;                             // a timerfd is armed
+    }
+    t = t + 1;
+  }
+  return h;
+}
+
+/// Under the lock, on the bootstrap processor with nothing to run: stretches
+/// the tick if nothing needs it (see above).
+fn stretch_p(s: &mut Sys, cpu: &Cpu)
+  requires sys_ok(s)
+  ensures sys_ok(s)
+{
+  if s.slept != 0 || s.stop || !s.apic.on {
+    return;
+  }
+  // The platform: a local APIC timer that can be set to a count (xAPIC,
+  // calibrated), and the PIT as the tick.
+  let c10 = boot_info(cpu, INFO_TIMER, 1);
+  if boot_info(cpu, INFO_TIMER, 4) != 1 || boot_info(cpu, INFO_TIMER, 2) != 0 || c10 == 0 || c10 > 42949672 {
+    return;
+  }
+  if lapic_self(&mut s.apic) != s.apic.id {
+    return;                                 // not the bootstrap processor
+  }
+  // What else the tick drives: a polled keyboard or mouse (USB, or a PS/2
+  // mouse), sound, a card that
+  // raises no interrupt, the network stack's timers, the disk's batch.
+  if s.polled || snd_queued(s.k.snd) != 0
+     || (nic_up(s.k.nic) && !nic_irq(s.k.nic)) || !nic_timers_idle(s.k.nic)
+     || !dq_idle(s.k.fs.disk.q) || s.k.fs.disk.pw != 0 {
+    return;
+  }
+  s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
+  let n = smaller(smaller(idle_horizon(s.k) / NS_PER_TICK, 100), nic_dhcp_due(s.k.nic, s.k.ticks));
+  if n < STRETCH_MIN_TICKS || s.k.ns >= FOREVER {
+    return;
+  }
+  nic_listen(&mut s.k.nic);                 // a frame ends the stretch
+  pic_mask_timer(&mut s.pic);
+  lapic_arm(&mut s.apic, c10 * n, V_LTIMER);
+  s.slept = s.k.ns + 1;
+}
+
+/// Does some process sleep until a frame comes in?
+fn frame_waiters(k: &Kernel) -> bool
+  requires kok(k)
+{
+  let mut p = 1;
+  while p < NPROC
+    invariant 1 <= p && p <= NPROC && kok(k)
+  {
+    if state(k.procs, p) == SOCKWAIT && pget(k.procs, p, F_WAIT) != NO_RESULT {
+      return true;
+    }
+    p = p + 1;
+  }
+  return false;
+}
+
+/// Under the lock, when the processor wakes from a stretched tick (by its
+/// timer or any other interrupt): puts the PIT back, catches the tick
+/// count up (one tick less than the time that passed: the PIT's edge
+/// latched while it was masked is delivered as one), and does what a tick
+/// does.
+fn stretch_end(s: &mut Sys, cpu: &Cpu)
+  requires sys_ok(s) && s.slept != 0
+  ensures sys_ok(s)
+{
+  lapic_disarm(&mut s.apic);
+  pic_unmask_timer(&mut s.pic);
+  let t0 = s.slept - 1;
+  s.slept = 0;
+  s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
+  if s.k.ns > t0 {
+    let due = sat_add(s.k.ns - t0, NS_PER_TICK / 2) / NS_PER_TICK;
+    if due >= 1 {
+      s.k.ticks = sat_add(s.k.ticks, due - 1);
+    }
+  }
+  s.ticked = true;
+  lx_alarms(&mut s.k);
+  power_button(&mut s);
+  if !frame_waiters(s.k) {
+    nic_quiet(&mut s.k.nic);
+  }
+}
+
+/// `stretch_p`, for `locked`.
+fn stretch_lp(s: &mut Sys, cpu: &Cpu)
+  requires sys_ok(s)
+  ensures sys_ok(s)
+{
+  stretch_p(&mut s, cpu);
+}
+
 /// Under the lock, after an idle wait ended with vector `v`.
 fn idled(s: &mut Sys, cpu: &Cpu, v: u64)
   requires sys_ok(s)
   ensures sys_ok(s)
 {
   ack(&mut s.pic, &mut s.apic, v);
+  if s.slept != 0 {
+    stretch_end(&mut s, cpu);
+  }
   if v == V_TIMER {
     s.k.ticks = tick(s.k.ticks);
     s.ticked = true;
@@ -542,7 +694,22 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       return p;
     }
     if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) {
+      pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
       return p;                             // code read, a page mapped or copied, or the stack grew: run the instruction again
+    }
+    // Another thread, on another processor, may have mapped a page of
+    // code (src/lazy.bastio) or anonymous memory (src/lxanon.bastio) between
+    // this fault and its handling: the handler above then finds it mapped
+    // and declines. Run the instruction once more; a second fault at the
+    // same place is a protection fault.
+    let fva = pget(s.k.procs, p, reg_word(R_FAULT));
+    let frip = pget(s.k.procs, p, F_REGS + R_RIP) % 4611686018427387904 + 1;
+    if fva >= USER_BASE && fva - USER_BASE < USER_SIZE
+       && (anon_covers(s.k.anon, p, (fva - USER_BASE) / 4096) || lazy_covers(s.k, p, (fva - USER_BASE) / 4096))
+       && (pget(s.k.procs, p, F_FAULT_RIP) != frip || pget(s.k.procs, p, F_FAULT_VA) != fva) {
+      pset(&mut s.k.procs, p, F_FAULT_RIP, frip);
+      pset(&mut s.k.procs, p, F_FAULT_VA, fva);
+      return p;
     }
   }
   if v < 32 {
@@ -809,6 +976,7 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
         // Nothing to run: pump the console if it has output and no other
         // processor is at it, else sleep until an interrupt.
         if atomic_load(pend) == 0 || atomic_load(pumping) {
+          locked(s, stretch_lp, cpu);
           let v = cpu_idle(&mut cpu);
           locked(s, idled_p, cpu, v, pend);
         }
@@ -838,7 +1006,10 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
         mmu_exit(&mut mmu, t.lease);
         let mut f = t.fpu;
         cpu_fpu_save(&mut cpu, &mut f);
-        let poll = v != V_SYSCALL && v != V_LINUX;
+        // A processor exception (a page fault, vectors below 32) raises no
+        // device input either: a program touching new memory would poll every
+        // device on each of its faults.
+        let poll = v >= V_TIMER && v != V_SYSCALL && v != V_LINUX;
         // After an interrupt the devices may have input; after any turn
         // there may be output.
         if poll || atomic_load(pend) > 0 {
@@ -1039,6 +1210,16 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let usb_hi = usb_top(usb);
   let usb_disk = usb_msd(usb);
   let vm_where = boot_vmmio(cpu);
+  // Entropy from the host, if it offers some (a virtio-rng): read and the
+  // device given back before any other driver looks for its device. It
+  // joins the generator's pool once the kernel exists.
+  let mut hw = alloc(VRNG_WORDS);
+  let hw_n = rng_hw(&mut ports, &mut pci, &mut m, &mut win, acpi_lo, acpi_hi, fb_lo, fb_hi, usb_lo, usb_hi, vm_where, &mut hw);
+  if hw_n > 0 {
+    puts(&mut con, "rng: virtio-rng, ");
+    put_num(&mut con, hw_n * 8);
+    puts(&mut con, " bytes of entropy\r\n");
+  }
   // The disk: that stick, else NVMe, virtio, AHCI or ATA (see blk_new).
   let dev = blk_find(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi, usb_lo, usb_hi, msi, &mut usb, acpi_lo, acpi_hi, boot_word(cpu, "ahci_reset"), vm_where);
   let dev_lo = blk_ports_lo(dev);
@@ -1179,6 +1360,14 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     diag_pause(&mut term, &mut con, &mut clock, &mut acpi);
   }
   let mut k = kernel_new(m, disk, nic, snd, mice_new(term.kbd.aux || usb_mouse_on), tsc, at, epoch, cpus);
+  let mut hi = 0;
+  while hi < hw_n
+    invariant hi <= hw_n && hw_n <= VRNG_WORDS && len(hw) == VRNG_WORDS && kok(k)
+  {
+    rng_feed(&mut k, get(hw, hi));
+    hi = hi + 1;
+  }
+  free(hw);
   install_files(&mut con, &mut k);
   let mut login = 0;
   if boot_word(cpu, "login") {
@@ -1189,10 +1378,16 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   } else if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
   }
+  // With the boot option `mcloud`, first-boot setup from the instance
+  // metadata service runs beside the console (user/mcloud.c, named
+  // `mcloud-boot` so that it waits for the network).
+  if boot_word(cpu, "mcloud") && spawn_as(&mut k, MCLOUD_PROG, 0, "mcloud-boot") == 0 {
+    puts(&mut con, "cannot start mcloud\r\n");
+  }
   // Every processor runs the scheduler until the kernel stops; then they
   // are all back in their park loops and the state is this one's again.
   con_flush(&mut term, &mut con);
-  let sl = lock_new(Sys { k: k, con: con, pic: pic, apic: apic, clock: clock, acpi: acpi, stop: false, reboot: false, idle: 0, ticked: false, login: login });
+  let sl = lock_new(Sys { k: k, con: con, pic: pic, apic: apic, clock: clock, acpi: acpi, stop: false, reboot: false, idle: 0, ticked: false, login: login, slept: 0, polled: usb_on || usb_mouse_on || term.kbd.aux });
   let tl = lock_new(term);
   let pumping = atomic_new(false);
   let pend = atomic_new(0);

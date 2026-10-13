@@ -345,6 +345,7 @@ int main(void) {
         unlink("l3_pfd");
     }
 
+#ifdef SYS_readlink
     /* readlink with a zero-size buffer is EINVAL, whatever the path is (musl
        hides it by substituting a one-byte buffer, so ask the kernel). */
     {
@@ -353,6 +354,7 @@ int main(void) {
         int r2 = (int)syscall(SYS_readlink, "/proc/self/exe", b, 0), e2 = errno;
         EXPECT("readlink with a zero-size buffer is EINVAL", r1 == -1 && e1 == EINVAL && r2 == -1 && e2 == EINVAL);
     }
+#endif
 
     /* sendfile to a unix socket sends the bytes, and a full
        non-blocking datagram socket is EAGAIN. */
@@ -397,7 +399,7 @@ int main(void) {
         EXPECT("munlock of a page not locked gives back nothing", r5 == 0 && a4 - b == 12);
         EXPECT("munlock of the rest gives back the rest", r6 == 0 && a5 == b);
         long c = vmlck();
-        int r7 = syscall(325, m, 2 * 4096, 1);        /* mlock2(MLOCK_ONFAULT) */
+        int r7 = syscall(SYS_mlock2, m, 2 * 4096, 1);        /* mlock2(MLOCK_ONFAULT) */
         long d = vmlck();
         EXPECT("mlock2 with MLOCK_ONFAULT locks the range", r7 == 0 && d - c == 8);
         munlockall();

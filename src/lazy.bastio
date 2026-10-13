@@ -131,6 +131,14 @@ fn lazy_forget(k: &mut Kernel, pid: u64, from: u64, to: u64)
   }
 }
 
+/// Whether window page q is one of the pages process pid's record covers.
+fn lazy_covers(k: &Kernel, pid: u64, q: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let first1 = get(k.lazy, lz_at(pid, 0));
+  return first1 != 0 && q >= first1 - 1 && q - (first1 - 1) < get(k.lazy, lz_at(pid, 1));
+}
+
 // What lazy_read reports.
 const LZ_NO: u64 = 0;                  // not a page the record covers (or no memory)
 const LZ_OK: u64 = 1;                  // mapped: run the instruction again

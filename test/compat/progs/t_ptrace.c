@@ -13,6 +13,39 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 
+#ifdef __aarch64__
+/* AArch64 has no PTRACE_GETREGS: the registers come as NT_PRSTATUS. */
+struct regs { unsigned long long x[31], sp, pc, pstate; };
+static int get_regs(pid_t c, struct regs *r) {
+    struct iovec iov = { r, sizeof *r };
+    return (int)ptrace(PTRACE_GETREGSET, c, (void *)1, &iov);
+}
+static int set_regs(pid_t c, struct regs *r) {
+    struct iovec iov = { r, sizeof *r };
+    return (int)ptrace(PTRACE_SETREGSET, c, (void *)1, &iov);
+}
+#define REG_PC(r) ((r).pc)
+#define REG_SP(r) ((r).sp)
+#define REG_NR(r) ((r).x[8])
+#define REG_RET(r) ((r).x[0])
+#define REG_ARG0(r) ((r).x[0])
+#define ENTRY_RET_IS_ENOSYS 0
+#define BREAK_LEN 4
+#define BREAK_INSN "brk #0\n\tnop\n\tnop\n\tnop\n\tnop\n"
+#else
+struct regs { struct user_regs_struct u; };
+static int get_regs(pid_t c, struct regs *r) { return (int)ptrace(PTRACE_GETREGS, c, 0, &r->u); }
+static int set_regs(pid_t c, struct regs *r) { return (int)ptrace(PTRACE_SETREGS, c, 0, &r->u); }
+#define REG_PC(r) ((r).u.rip)
+#define REG_SP(r) ((r).u.rsp)
+#define REG_NR(r) ((r).u.orig_rax)
+#define REG_RET(r) ((r).u.rax)
+#define REG_ARG0(r) ((r).u.rdi)
+#define ENTRY_RET_IS_ENOSYS 1
+#define BREAK_LEN 0
+#define BREAK_INSN "int3\n\tnop\n\tnop\n\tnop\n\tnop\n"
+#endif
+
 static volatile long cell = 0x1111;
 static volatile int handled;
 static void on_usr1(int s) { (void)s; handled = 1; }
@@ -47,14 +80,16 @@ int main(int argc, char **argv) {
         errno = 0;
         long v2 = ptrace(PTRACE_PEEKDATA, c, (void *)&cell, 0);
         EXPECT("PTRACE_POKEDATA writes it", r2 == 0 && v2 == 0x2222 && cell == 0x1111);
-        struct user_regs_struct regs;
-        int r3 = (int)ptrace(PTRACE_GETREGS, c, 0, &regs);
-        EXPECT("PTRACE_GETREGS gives a user rip and rsp", r3 == 0 && regs.rip != 0 && regs.rsp != 0 && regs.cs != 0);
+        struct regs regs;
+        int r3 = get_regs(c, &regs);
+        EXPECT("PTRACE_GETREGS gives a user rip and rsp", r3 == 0 && REG_PC(regs) != 0 && REG_SP(regs) != 0);
+#ifndef __aarch64__
         errno = 0;
         long ru = ptrace(PTRACE_PEEKUSER, c, (void *)(offsetof(struct user, regs.rip)), 0);
         int e4 = errno;
-        EXPECT("PTRACE_PEEKUSER reads a register", ru == (long)regs.rip && e4 == 0);
-        int r4 = (int)ptrace(PTRACE_SETREGS, c, 0, &regs);
+        EXPECT("PTRACE_PEEKUSER reads a register", ru == (long)regs.u.rip && e4 == 0);
+#endif
+        int r4 = set_regs(c, &regs);
         int r5 = (int)ptrace(PTRACE_CONT, c, 0, 0);       /* SIGUSR2 is dropped */
         int w = waitpid(c, &st, 0);
         EXPECT("PTRACE_CONT without a signal drops the one that stopped it, and the child saw the poke",
@@ -143,18 +178,18 @@ int main(int argc, char **argv) {
             if (waitpid(c, &st, 0) != c) { bad = 1; break; }
             if (!WIFSTOPPED(st)) break;
             if (WSTOPSIG(st) != SIGTRAP) continue;
-            struct user_regs_struct r;
-            if (ptrace(PTRACE_GETREGS, c, 0, &r) != 0) { bad = 1; break; }
+            struct regs r;
+            if (get_regs(c, &r) != 0) { bad = 1; break; }
             /* Entry and exit alternate, starting with an entry. */
             if (((entries + exits) & 1) == 0) {
                 entries++;
-                if (r.orig_rax == (unsigned long)want) {
+                if (REG_NR(r) == (unsigned long)want) {
                     on_umask = 1;
-                    enosys_before = (long)r.rax == -ENOSYS && r.rdi == 0022;
+                    enosys_before = (!ENTRY_RET_IS_ENOSYS || (long)REG_RET(r) == -ENOSYS) && REG_ARG0(r) == 0022;
                 }
             } else {
                 exits++;
-                if (on_umask == 1 && r.orig_rax == (unsigned long)want) { result_after = r.rax == 0077; on_umask = 2; }
+                if (on_umask == 1 && REG_NR(r) == (unsigned long)want) { result_after = REG_RET(r) == 0077; on_umask = 2; }
             }
         }
         EXPECT("PTRACE_SYSCALL stops before and after a call, in turn", !bad && entries >= 2 && (entries == exits || entries == exits + 1));
@@ -178,11 +213,11 @@ int main(int argc, char **argv) {
             if (waitpid(c, &st, 0) != c) { bad = 1; break; }
             if (!WIFSTOPPED(st)) break;
             if (WSTOPSIG(st) != SIGTRAP) continue;
-            struct user_regs_struct r;
-            if (ptrace(PTRACE_GETREGS, c, 0, &r) != 0) { bad = 1; break; }
+            struct regs r;
+            if (get_regs(c, &r) != 0) { bad = 1; break; }
             if ((n++ & 1) == 0) {                   /* an entry stop */
-                if (r.orig_rax == SYS_getpid) pid_seen = 1;
-                if (r.orig_rax == SYS_gettid) tid_seen = 1;
+                if (REG_NR(r) == SYS_getpid) pid_seen = 1;
+                if (REG_NR(r) == SYS_gettid) tid_seen = 1;
             }
         }
         EXPECT("PTRACE_SYSCALL stops at getpid and gettid", !bad && pid_seen && tid_seen && WIFEXITED(st) && WEXITSTATUS(st) == 0);
@@ -193,17 +228,21 @@ int main(int argc, char **argv) {
         pid_t c = fork();
         if (c == 0) {
             ptrace(PTRACE_TRACEME, 0, 0, 0);
-            asm volatile("int3\n\tnop\n\tnop\n\tnop\n\tnop\n" ::: "memory");
+            asm volatile(BREAK_INSN ::: "memory");
             _exit(0);
         }
         int sig = 0, st = 0;
         int ok = wait_stop(c, &sig) && sig == SIGTRAP;     /* int3 */
-        struct user_regs_struct r0, r;
-        int g = ok && ptrace(PTRACE_GETREGS, c, 0, &r0) == 0;
+        struct regs r0, r;
+        int g = ok && get_regs(c, &r0) == 0;
+        if (g && BREAK_LEN) {                    /* a breakpoint instruction stops at itself: step over it */
+            REG_PC(r0) += BREAK_LEN;
+            g = set_regs(c, &r0) == 0;
+        }
         int steps = 0, exact = 1;
         for (int i = 1; i <= 4 && g; i++) {
             if (ptrace(PTRACE_SINGLESTEP, c, 0, 0) != 0 || !wait_stop(c, &sig) || sig != SIGTRAP) { exact = 0; break; }
-            if (ptrace(PTRACE_GETREGS, c, 0, &r) != 0 || r.rip != r0.rip + i) exact = 0;
+            if (get_regs(c, &r) != 0 || REG_PC(r) != REG_PC(r0) + (BREAK_LEN ? 4 : 1) * i) exact = 0;
             steps++;
         }
         ptrace(PTRACE_CONT, c, 0, 0);

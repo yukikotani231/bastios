@@ -553,9 +553,16 @@ t_misc: /proc/diskstats opens
 t_misc: /proc/meminfo
 t_misc: /proc/modules opens
 t_misc: /proc/net is a directory
+t_misc: /proc/net/arp has its header
 t_misc: /proc/net/dev lists lo and eth0
+t_misc: /proc/net/raw lists a raw ICMP socket
+t_misc: /proc/net/route lists the default route
+t_misc: /proc/net/tcp lists a listening socket
+t_misc: /proc/net/udp lists a bound socket
+t_misc: /proc/net/unix lists a bound socket
 t_misc: /proc/self/exe
 t_misc: /proc/stat has cpu lines
+t_misc: SIOCGIFHWADDR and SIOCGIFNETMASK on lo
 t_misc: SSE floating point
 t_misc: TIOCGWINSZ
 t_misc: getlogin or getpwuid
@@ -984,5 +991,24 @@ alpine: dropbear: the server starts, in the Alpine guest
 alpine: nvim over ssh: edit and save in a pseudo-terminal
 alpine: dropbear: the server stops, in the Alpine guest
 alpine-tty: nvim: it reads the terminal's size, and has colours
+node: node: a hot loop is compiled and gives the right sum
+node: node: a script with arrays and JSON
+node: node: an expression
+node: node: exit status and uncaught exceptions
+node: node: make the device nodes
+node: node: read and write files
+node: node: timers and promises run in order
+node: node: version
 t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller
 t_thread: a thread keeps its descriptors while another spawns a child
+apps: ripgrep: a search over many files on several threads
+apps: ripgrep: case-insensitive counts and file lists
+apps: ripgrep: replacement, multi-line and standard input
+apps: ripgrep: search with line numbers, honouring .ignore
+alpine: git: clone over HTTP and over HTTPS (git's dumb protocol, curl's TLS)
+alpine: nvim: tree-sitter parses help text with the vimdoc parser
+alpine: nvim: LuaJIT loads a shared object that gcc built
+alpine: nvim: vim.system runs a process and collects its output and status
+alpine: nvim: a job on a pseudo-terminal (what :terminal runs on, with /dev and /dev/pts bound into the chroot)
+alpine: nvim: a file watcher and a timer from libuv
+alpine: nvim: :grep and :vimgrep fill the quickfix list

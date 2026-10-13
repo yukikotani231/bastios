@@ -19,7 +19,7 @@ jobs:
           repository: yukikotani231/bastiolang
           ref: main
           path: bastiolang
-      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86 qemu-system-arm gcc-aarch64-linux-gnu musl-tools
+      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86 qemu-system-arm qemu-efi-aarch64 gcc-aarch64-linux-gnu musl-tools
       - name: Tool versions
         run: |
           echo "bastiolang $(git -C bastiolang rev-parse HEAD)"
@@ -190,6 +190,11 @@ jobs:
           key: proof-none
           restore-keys: proof-
           path: build/proof-cache
+      - name: Make room
+        run: |
+          # The third-party programs, Alpine's layers and the disk images together fill much of the runner's disk.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - name: Build the disks
         run: make -j4 build/bastios.elf
           build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img
@@ -230,6 +235,12 @@ jobs:
             build/compat/alpine/*.json
         continue-on-error: true
       - run: make compat
+      - name: What failed
+        if: failure()
+        run: |
+          df -h /
+          grep -E '^\| (alpine|alpine-tty) ' build/compat/report.md | grep -v '| pass |' | head -20 || true
+          tail -n 120 build/compat/serial.log || true
       - if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -238,6 +249,39 @@ jobs:
             build/compat/report.md
             build/compat/results.json
             build/compat/serial.log
+          if-no-files-found: ignore
+  # The Linux compatibility suite on AArch64 (arch/aarch64/Makefile): the
+  # suite's C programs and a BusyBox against glibc, on QEMU's virt machine.
+  compat-aarch64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BASTIOC0: bastiolang/stage0/target/release/bastioc0
+      BASTIOLIB: bastiolang
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: yukikotani231/bastiolang
+          ref: main
+          path: bastiolang
+      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-arm gcc-aarch64-linux-gnu
+      - run: cd bastiolang/stage0 && cargo build --release --locked
+      - name: Restore the proof cache
+        uses: actions/cache/restore@v4
+        with:
+          key: proof-none
+          restore-keys: proof-
+          path: build/proof-cache
+      - run: make ARCH=aarch64 compat
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compat-aarch64-report
+          path: |
+            build/aarch64/compat/report.md
+            build/aarch64/compat/results.json
+            build/aarch64/compat/serial.log
           if-no-files-found: ignore
   # The Linux Test Project's system call tests (test/compat/ltp.py), with
   # LTP built once per LTP_TAG and kept in the cache. The previous run's

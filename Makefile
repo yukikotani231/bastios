@@ -441,15 +441,25 @@ PERL_GIT      ?= https://github.com/Perl/perl5
 PERL_TAG      ?= v5.40.0
 CPYTHON_GIT   ?= https://github.com/python/cpython
 CPYTHON_TAG   ?= v3.12.7
+RIPGREP_VER   ?= 14.1.1
 DROPBEAR_GIT  ?= https://github.com/mkj/dropbear
 DROPBEAR_TAG  ?= DROPBEAR_2024.86
 COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo \
                  build/compat/git build/compat/perl build/compat/python build/compat/ttyepoll \
-                 build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys
+                 build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/rg
 APP_CFLAGS    := -static-pie -fPIE -O2 -w -s
 
 build/compat/src:
 	mkdir -p $@
+
+# ripgrep (what Neovim's pickers and :grep use), a static musl build from
+# crates.io, pinned by version and Cargo.lock (--locked). Needs cargo, the
+# musl target (rustup adds it) and musl-gcc.
+build/compat/rg: | build/compat/src
+	command -v rustup >/dev/null && rustup target add x86_64-unknown-linux-musl >/dev/null 2>&1 || true
+	CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=$(MUSLCC) cargo install ripgrep --version $(RIPGREP_VER) --locked \
+	  --target x86_64-unknown-linux-musl --root build/compat/src/rg-root --quiet
+	strip -o $@ build/compat/src/rg-root/bin/rg
 
 # Dropbear, the SSH server (and its client and key tool, which also run on
 # the host: ssh.txt logs in from here). The keys are made for the test:
@@ -691,12 +701,21 @@ build/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py tes
 build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) test/compat/mkdisk.py
 	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) perllib=build/compat/perllib py=build/compat/py
 
-compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --debian-disk build/compat/debian.img --out build/compat $(COMPAT_PROGS)
+# Node.js, on a sixth disk (test/compat/nodedisk.py) for test/compat/node.txt:
+# the node binary of the official node:22-alpine image and the libraries it
+# links against, entered with chroot. Pinned by digest, its layers kept in
+# ALPINE_CACHE like the others'.
+NODE_IMAGE ?= library/node@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+
+build/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
+	test/compat/nodedisk.py $@ $(NODE_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+
+compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --debian-disk build/compat/debian.img --node-disk build/compat/node.img --out build/compat $(COMPAT_PROGS)
 
 # Records which checks pass now, so `make compat` catches regressions.
-compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --debian-disk build/compat/debian.img --out build/compat $(COMPAT_PROGS)
+compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --debian-disk build/compat/debian.img --node-disk build/compat/node.img --out build/compat $(COMPAT_PROGS)
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)

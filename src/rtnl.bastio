@@ -1471,6 +1471,108 @@ fn nic_frames(c: &Nic, rx: bool) -> u64
   }
 }
 
+/// Slot i's hardware address as a number (first byte highest); 0 for lo.
+fn nic_if_mac(c: &Nic, i: u64) -> u64
+  requires nic_ok(c) && i < IFN
+  ensures result < MAC_LIMIT
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if iw(n, i, IF_KIND) == IFK_LO {
+        return 0;
+      }
+      return iw(n, i, IF_MAC) % MAC_LIMIT;
+    },
+  }
+}
+
+/// The number of addresses in slot i's subnet (lo's is a /8).
+fn nic_if_subnet(c: &Nic, i: u64) -> u64
+  requires nic_ok(c) && i < IFN
+  ensures 1 <= result && result <= 4294967296
+{
+  match c {
+    Nic::None => { return 16777216; },
+    Nic::Up(n) => {
+      if iw(n, i, IF_KIND) == IFK_LO {
+        return 16777216;
+      }
+      return if_span(n, i);
+    },
+  }
+}
+
+/// Route r of namespace ns as /proc/net/route shows it. Route 0 is the
+/// default one; route r > 0 is the subnet of interface slot r. Field 0 is
+/// 1 if the route exists, 1 the interface slot, 2 the destination, 3 the
+/// gateway and 4 the mask.
+fn nic_route(c: &Nic, ns: u64, r: u64, f: u64) -> u64
+  requires nic_ok(c)
+  ensures result <= 4294967296
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if ns >= NNET || r >= IFN {
+        return 0;
+      }
+      if r == 0 {
+        let mut g = n.gw;
+        let mut o = IF_ETH;
+        if ns != 0 {
+          g = nsw(n, ns, NS_GW);
+          o = NO_IF;
+          let mut i = 2;
+          while i < IFN
+            invariant i <= IFN
+          {
+            let kd = iw(n, i, IF_KIND);
+            if o == NO_IF && (kd == IFK_VETH || kd == IFK_BRIDGE) && iw(n, i, IF_NS) == ns && if_up(n, i) && if_ip(n, i) != 0 && g != 0 && g <= IP_MAX {
+              let sp = if_span(n, i);
+              if g / sp == if_ip(n, i) / sp {
+                o = i;
+              }
+            }
+            i = i + 1;
+          }
+        }
+        if g == 0 || g > IP_MAX || o >= IFN || (ns == 0 && n.ip == 0) {
+          return 0;
+        }
+        if f == 0 {
+          return 1;
+        }
+        if f == 1 {
+          return o;
+        }
+        if f == 3 {
+          return g;
+        }
+        return 0;
+      }
+      let ip = if_ip(n, r);
+      if iw(n, r, IF_KIND) == IFK_LO || iw(n, r, IF_KIND) == IFK_FREE || iw(n, r, IF_NS) != ns || !if_up(n, r) || ip == 0 {
+        return 0;
+      }
+      let sp = if_span(n, r);
+      if f == 0 {
+        return 1;
+      }
+      if f == 1 {
+        return r;
+      }
+      if f == 2 {
+        return ip / sp * sp;
+      }
+      if f == 4 {
+        return 4294967296 - sp;
+      }
+      return 0;
+    },
+  }
+}
+
 /// Slot i's MTU.
 fn nic_if_mtu(c: &Nic, i: u64) -> u64
   requires nic_ok(c) && i < IFN

@@ -19,6 +19,8 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - virtio devices over MMIO (QEMU `microvm`, Firecracker's transport): the block and network drivers go through a transport that is either I/O ports (PCI) or a block of memory-mapped registers, version 1 or 2. Found at QEMU microvm's slots on a machine with no PCI. The 12-byte modern network header is handled. The devices named by `virtio_mmio.device=SIZE@ADDRESS:IRQ` words on the command line (Firecracker) are looked for instead of microvm's slots.
 - A PVH entry (Xen's direct boot protocol, used by Firecracker, Cloud Hypervisor and QEMU's `microvm`): `boot/boot.S` carries the ELF note, `boot/multiboot.c` converts the `hvm_start_info`. Tested on QEMU by booting a copy without the Multiboot header.
 - `mcloud` (`user/mcloud.c`, a Linux program): first-boot setup from an instance metadata service speaking AWS's IMDSv2 protocol (a token from a PUT, then GETs with it): it sets the host name and installs the first public key in root's `.ssh/authorized_keys`. The address is an argument (default 169.254.169.254). Tested against a fake service on the host, from BusyBox's `ash`; not run on a real cloud. `mcloud` also saves `user-data` as `~root/user-data` (mode 700) without running it.
+- Boot option `mcloud`: runs the first-boot setup at boot (waiting for the network), beside the console shell.
+- A virtio entropy source (virtio-rng, on PCI or virtio-mmio) is read at boot, before any other driver looks for a device: 64 bytes go into the pool behind `/dev/urandom` and `getrandom`, then the device is reset and everything it held is given back. `rng: virtio-rng, 64 bytes of entropy` is printed when there is one. A guest's first host key no longer depends on the time-stamp counter alone. Trusted: that the host's bytes are random (they are only mixed in). x86-64 only so far.
 - Tested: a disk made larger since the last boot keeps its files and offers the new space (no resize step is needed on a cloud volume that was enlarged).
 - A Linux process killed by a page fault gets a second console line saying what the kernel knows of the page (mapped or not, owned or not, heap and mmap limits, parent, thread count, age), so a crash that is hard to reproduce can be read from its log. The line is printed only for Linux processes; the native `fault` demo is unchanged.
 - Ctrl-Alt-Delete on the PS/2 keyboard restarts the machine (what Firecracker's `SendCtrlAltDel` sends), so a guest without ACPI has a way to end. The console prints `ctrl-alt-del: restarting` and the machine goes through the same path as `reboot`.
@@ -411,6 +413,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Files and disks
 
+- The in-memory file system holds 8192 files and directories (1024 before): a build tree or an unpacked package no longer fills `/tmp`. The name index doubles with it; `ls` in the console shell walks the larger table. Tested with 3000 empty files; `mdir` fills the table up to 20000 names. What is proved is unchanged (the table has a fixed size and every page is owned by one file); each node still costs kernel memory whether used or not.
 - A disk that is not blank and has no BastiOS file system (a partition
   table, another system's data) is left alone. It used to be formatted on
   the first boot, which on a real machine would have destroyed the disk

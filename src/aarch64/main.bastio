@@ -168,13 +168,18 @@ fn pump(ser: &Serial, s: &mut Sys)
   wake_writers(&mut s.k.procs);
 }
 
-/// The clock, from the timer ticks (10 ms each): CLOCK_MONOTONIC and the
-/// wall clock the file system stamps files with.
-fn set_clock(s: &mut Sys)
+/// The clock: the generic timer's counter scaled to nanoseconds (src/tsc.bastio),
+/// or the timer ticks (10 ms each) if the platform reports no counter rate.
+/// CLOCK_MONOTONIC and the wall clock the file system stamps files with.
+fn set_clock(s: &mut Sys, cpu: &Cpu)
   requires sys_ok(s)
   ensures sys_ok(s)
 {
-  s.k.ns = (s.k.ticks % 1000000000000) * NS_PER_TICK;
+  if s.k.tsc.mult == 0 {
+    s.k.ns = (s.k.ticks % 1000000000000) * NS_PER_TICK;
+  } else {
+    s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
+  }
   s.k.fs.now = sat_add(s.k.epoch, s.k.ns) / 1000000000;
 }
 
@@ -262,7 +267,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   }
   if v == V_TIMER {
     s.k.ticks = tick(s.k.ticks);
-    set_clock(&mut s);
+    set_clock(&mut s, cpu);
   }
   if state(s.k.procs, p) == EXITING {
     thread_free(&mut s.k, mmu, p, tgid(s.k.procs, p));
@@ -292,7 +297,8 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     // A Linux arm64 program: the call number is in x8, turned into the
     // number the Linux layer uses and kept apart (R_LXNR), so that x8 comes
     // back to the program unchanged. A call that runs again keeps its number.
-    set_clock(&mut s);
+    set_clock(&mut s, cpu);
+    let began = s.k.ns;
     if pget(s.k.procs, p, F_RESTART) == 0 {
       pset(&mut s.k.procs, p, F_REGS + R_LXNR, lx_number(pget(s.k.procs, p, reg_word(R_NUM))));
     }
@@ -302,6 +308,10 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     ino_before(&mut s.k, p);                // src/lxinotify.bastio
     let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
     ino_after(&mut s.k, p);
+    set_clock(&mut s, cpu);
+    if s.k.ns > began {
+      tm_sys_add(&mut s.k, p, s.k.ns - began);   // system time (src/lxrlimit.bastio)
+    }
     call_done(&mut s.k, p);
     if what == POWEROFF || what == REBOOT {
       s.stop = true;
@@ -316,7 +326,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     return p;
   }
   if v == V_SYSCALL {
-    set_clock(&mut s);
+    set_clock(&mut s, cpu);
     let what = syscall(&mut s.con, &mut s.k, mmu, p);
     if what == POWEROFF || what == REBOOT {
       s.stop = true;
@@ -347,7 +357,17 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   }
   // Any other trap, or an abort nothing could mend: the process dies of the
   // signal Linux would send (a SIGSEGV), unless it has a handler.
-  let sig = SIGSEGV;
+  let mut sig = SIGSEGV;
+  if v == 6 {
+    sig = SIGILL;
+  } else if v == 3 {
+    sig = SIGTRAP;
+  } else if v == 1 {
+    sig = SIGTRAP;                          // a single step (src/lxptrace.bastio)
+    pt_stepped(&mut s.k, p);
+  } else if v == 17 {
+    sig = SIGBUS;
+  }
   let addr = pget(s.k.procs, p, reg_word(R_FAULT));
   if fault_caught(&mut s.k, p, sig, addr) {
     return (p + 1) % NPROC;
@@ -379,13 +399,13 @@ fn after_trap(s: &mut Sys, p: u64)
 
 /// Under the lock, after an idle wait ended with vector `v`. Only the boot
 /// processor's tick (V_TIMER) counts the kernel's time and moves the console.
-fn idled(s: &mut Sys, v: u64, ser: &Serial)
+fn idled(s: &mut Sys, cpu: &Cpu, v: u64, ser: &Serial)
   requires sys_ok(s)
   ensures sys_ok(s)
 {
   if v == V_TIMER {
     s.k.ticks = tick(s.k.ticks);
-    set_clock(&mut s);
+    set_clock(&mut s, cpu);
     lx_alarms(&mut s.k);
     sleepers_wake(&mut s.k);
     pump(ser, &mut s);
@@ -453,7 +473,7 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], ser: &Serial)
       Job::Idle => {
         // Nothing to run: sleep until the next interrupt (the timer ticks).
         let v = cpu_idle(&mut cpu);
-        locked(s, idled, v, ser);
+        locked(s, idled, cpu, v, ser);
         j = locked(s, next_job, &mut cpu, &mut mmu, cur);
       },
       Job::Run(t) => {
@@ -479,6 +499,34 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], ser: &Serial)
   }
 }
 
+/// The time now in seconds since 1970-01-01 UTC, from the PL031 real-time
+/// clock the device tree lists (QEMU's virt machine has one; its data
+/// register counts seconds), 0 without one.
+/// The clock for a generic timer counting at `hz` (CNTFRQ_EL0), as the
+/// platform reports it; no clock (the ticks keep the time) if that is 0 or
+/// outside the range src/tsc.bastio accepts.
+fn tsc_from_hz(cpu: &Cpu, hz: u64) -> Tsc {
+  if hz < TSC_MIN_HZ || hz > TSC_MAX_HZ {
+    return Tsc { base: 0, mult: 0, at: 0 };
+  }
+  return Tsc { base: cpu_tsc(cpu), mult: 1000000000 * TWO32 / hz, at: 0 };
+}
+
+fn rtc_seconds(win: &mut MmioSpace, cpu: &Cpu) -> u64
+  requires forall a: u64 :: bar_space(a) ==> mmio_free(win, a)
+  ensures forall a: u64 :: bar_space(a) ==> mmio_free(win, a)
+  ensures result < 4294967296
+{
+  let at = dt_first(cpu, "arm,pl031");
+  if at == 0 || at % 4 != 0 || at >= WIN_LOW_TOP || at + 4096 > WIN_LOW_TOP {
+    return 0;
+  }
+  let mut r = mmio_claim(&mut win, at, 4096);
+  let v = cast[u64](mmio_read32(&mut r, 0));
+  mmio_release(&mut win, r);
+  return v;
+}
+
 fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 {
   let mut m = mem_new(pool);
   let mut console = con_new();
@@ -491,27 +539,40 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   } else {
     puts(&mut console, " processors\r\n");
   }
+  let wall = rtc_seconds(&mut win, cpu);        // CLOCK_REALTIME = this + the clock, which starts at 0
   let vm_where = dt_slots(cpu);
   puts(&mut console, "devicetree: ");
   put_num(&mut console, vm_where.slots);
   puts(&mut console, " virtio-mmio slots from ");
   put_hex(&mut console, vm_where.first);
   puts(&mut console, "\r\n");
-  let dev = blk_find(&mut m, &mut win, vm_where);
+  let ecam = dt_first(cpu, "pci-host-ecam-generic");
+  let dev = blk_find(&mut m, &mut win, vm_where, ecam);
   let dk_lo = blk_mmio_lo(dev);
   let dk_hi = blk_mmio_hi(dev);
   let disk = disk_mount(dev);
-  let tsc = Tsc { base: 0, mult: 0, at: 0 };      // the clock follows the timer ticks (set_clock)
+  let tsc = tsc_from_hz(cpu, boot_info(cpu, INFO_CNTFRQ, 0));   // 0 Hz: the clock follows the timer ticks (set_clock)
   if blk_is_virtio(disk.dev) {
     puts(&mut console, "disk: virtio\r\n");
+  }
+  if blk_is_nvme(disk.dev) {
+    puts(&mut console, "disk: NVMe\r\n");
+  }
+  if blk_is_usb(disk.dev) {
+    puts(&mut console, "disk: USB, the BastiOS partition (");
+    put_num(&mut console, blk_sectors(disk.dev));
+    puts(&mut console, " sectors)\r\n");
   }
   if disk.blocks > 0 {
     puts(&mut console, "disk: the BastiOS file system, ");
     put_num(&mut console, disk.blocks);
     puts(&mut console, " blocks of 4 KiB\r\n");
   }
-  let nic = nic_find(&mut m, &mut win, 4, dk_lo, dk_hi, vm_where);
-  let mut k = kernel_new(m, disk, nic, Snd::None, mice_new(false), tsc, 0, 0, cpu_count(cpu));
+  let nic = nic_find(&mut m, &mut win, 4, dk_lo, dk_hi, vm_where, ecam);
+  if nic_e1000(nic) {
+    puts(&mut console, "net: e1000\r\n");
+  }
+  let mut k = kernel_new(m, disk, nic, Snd::None, mice_new(false), tsc, 0, wall * 1000000000, cpu_count(cpu));
   install_files(&mut console, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut console, "cannot start the shell\r\n");
