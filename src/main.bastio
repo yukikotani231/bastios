@@ -602,6 +602,22 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     terminate(&mut s.k, mmu, p, 137);
     return (p + 1) % NPROC;
   }
+  if v != V_TIMER && v != V_LTIMER && v != V_WAKE && pget(s.k.procs, p, F_TGID) != 0 && !has_space(&mut s.k.spaces, p) {
+    // A thread whose group has lent its address space to a vfork child
+    // (lx_vfork_vm) trapped on another processor, and group_take found
+    // nothing to bring: its descriptors, working directory and signal
+    // actions are with the vforking thread, and the call or fault would
+    // see empty ones (a read of an open descriptor failing with EBADF).
+    // It runs the instruction again once the space is back, which the
+    // scheduler waits for (group_free).
+    let rip = pget(s.k.procs, p, F_REGS + R_RIP);
+    if (v == V_LINUX || v == V_SYSCALL) && rip >= SYSCALL_LEN {
+      pset(&mut s.k.procs, p, F_REGS + R_RIP, rip - SYSCALL_LEN);
+    }
+    if v == V_LINUX || v == V_SYSCALL || v == 14 {
+      return (p + 1) % NPROC;
+    }
+  }
   if v == V_TIMER || v == V_LTIMER {
     // A process waiting in a system call is READY with its rip on the
     // syscall instruction and F_RESTART set, and retries the call each
