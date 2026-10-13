@@ -966,6 +966,7 @@ t_thread: timed condition wait, signalled early (realtime)
 t_time: clock_getres
 t_time: clock_gettime BOOTTIME
 t_time: clock_gettime MONOTONIC
+t_time: clock_gettime MONOTONIC agrees with the system call
 t_time: clock_gettime PROCESS_CPUTIME
 t_time: clock_gettime REALTIME after 2020
 t_time: clock_nanosleep TIMER_ABSTIME

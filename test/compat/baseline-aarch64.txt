@@ -1008,6 +1008,8 @@ t_time: a sleep uses no CPU time
 t_time: clock_getres
 t_time: clock_gettime BOOTTIME
 t_time: clock_gettime MONOTONIC
+t_time: clock_gettime MONOTONIC agrees with the system call
+t_time: clock_gettime MONOTONIC is read without a system call
 t_time: clock_gettime PROCESS_CPUTIME
 t_time: clock_gettime REALTIME after 2020
 t_time: clock_nanosleep TIMER_ABSTIME
