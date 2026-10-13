@@ -809,6 +809,7 @@ sysfs04
 sysfs05
 sysinfo01
 sysinfo02
+syslog12
 tee01
 tee02
 tgkill01

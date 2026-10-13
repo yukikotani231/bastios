@@ -699,7 +699,7 @@ fn lx_setpgid(k: &mut Kernel, pid: u64, target: u64, g: u64) -> u64
 /// nothing. As on Linux, READ_ALL and SIZE_BUFFER are open to everyone and
 /// the rest need root; a type above 10 is EINVAL, and so is a negative
 /// length for the reads.
-fn lx_syslog(k: &mut Kernel, pid: u64, t: u64, len: u64) -> u64
+fn lx_syslog(k: &mut Kernel, pid: u64, t: u64, buf: u64, len: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
@@ -709,8 +709,11 @@ fn lx_syslog(k: &mut Kernel, pid: u64, t: u64, len: u64) -> u64
   if t != 3 && t != 10 && !cred_root(k.procs, pid) {
     return EPERM;
   }
-  if (t == 2 || t == 3 || t == 4) && len >= 2147483648 {
+  if (t == 2 || t == 3 || t == 4) && (len >= 2147483648 || buf == 0) {
     return EINVAL;
+  }
+  if t == 8 && (len < 1 || len > 8) {
+    return EINVAL;                          // the console level is 1 to 8
   }
   if t == 10 {
     return KLOG_SIZE;
@@ -883,7 +886,7 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   } else if n == LX_MINCORE {
     r = lx_mincore(&mut k, pid, a, b, c);
   } else if n == LX_SYSLOG {
-    r = lx_syslog(&mut k, pid, a % 4294967296, c % 4294967296);
+    r = lx_syslog(&mut k, pid, a % 4294967296, b, c % 4294967296);
   } else if n == LX_PERSONALITY {
     r = pget(k.procs, pid, F_PERSONA);
     if a != 0xFFFFFFFF {
