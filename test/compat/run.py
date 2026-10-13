@@ -781,6 +781,11 @@ def main():
         shutil.copyfile(args.node_disk, disk)
         lanes.append((disk, [("node", "Node.js (V8)", applets_lane(node, 300))], "1G"))
     lanes = [l for l in lanes if l[1]]
+    # Write out the copies just made before any guest reads a disk: a host
+    # still flushing hundreds of MiB can hold up a virtio request for longer
+    # than the kernel waits (DQ_TICKS), which it takes for a dead disk, and
+    # tar then stops at the first block that did not come.
+    os.sync()
     try:
         with concurrent.futures.ThreadPoolExecutor(len(lanes) if jobs > 1 else 1) as pool:
             done = list(pool.map(lambda l: lane(*l), lanes))
