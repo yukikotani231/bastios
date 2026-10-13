@@ -1,0 +1,30 @@
+diff --git a/include/tccdefs.h b/include/tccdefs.h
+index 2655c1d..119ba0e 100644
+--- a/include/tccdefs.h
++++ b/include/tccdefs.h
+@@ -61,7 +61,11 @@
+     #define __WCHAR_TYPE__ unsigned short
+     #define __WINT_TYPE__ unsigned short
+ #elif defined __linux__
++#if defined __aarch64__
++    #define __WCHAR_TYPE__ unsigned int
++#else
+     #define __WCHAR_TYPE__ int
++#endif
+     #define __WINT_TYPE__ unsigned int
+ #else
+     #define __WCHAR_TYPE__ int
+diff --git a/libtcc.c b/libtcc.c
+index 44ea25f..516e5dc 100644
+--- a/libtcc.c
++++ b/libtcc.c
+@@ -879,6 +879,9 @@ LIBTCCAPI TCCState *tcc_new(void)
+     s->gnu_ext = 1;
+     s->tcc_ext = 1;
+     s->nocommon = 1;
++#ifdef CONFIG_TCC_STATIC_DEFAULT
++    s->static_link = 1;
++#endif
+     s->dollars_in_identifiers = 1; /*on by default like in gcc/clang*/
+     s->cversion = 199901; /* default unless -std=c11 is supplied */
+     s->warn_implicit_function_declaration = 1;

@@ -1,6 +1,8 @@
 /* Time: clocks, sleeping, the date. */
 #include "compat.h"
+#include <sys/syscall.h>
 #include <sys/time.h>
+#include <unistd.h>
 #include <time.h>
 
 int main(void) {
@@ -9,6 +11,30 @@ int main(void) {
     struct timeval tv;
 
     EXPECT("clock_gettime MONOTONIC", clock_gettime(CLOCK_MONOTONIC, &a) == 0);
+    if (begin("clock_gettime MONOTONIC agrees with the system call")) {
+        struct timespec s1, v, s2;
+        int ok = syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &s1) == 0 && clock_gettime(CLOCK_MONOTONIC, &v) == 0 &&
+                 syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &s2) == 0;
+        long long n1 = s1.tv_sec * 1000000000LL + s1.tv_nsec, nv = v.tv_sec * 1000000000LL + v.tv_nsec,
+                  n2 = s2.tv_sec * 1000000000LL + s2.tv_nsec;
+        if (ok && n1 <= nv && nv <= n2) pass(); else fail("%lld <= %lld <= %lld", n1, nv, n2);
+    }
+#ifdef __aarch64__
+    /* The vDSO reads the counter in user mode: 20000 reads cost less than
+     * 20000 system calls. */
+    if (begin("clock_gettime MONOTONIC is read without a system call")) {
+        struct timespec x, y, z;
+        clock_gettime(CLOCK_MONOTONIC, &x);
+        for (int i = 0; i < 20000; i++) clock_gettime(CLOCK_MONOTONIC, &z);
+        clock_gettime(CLOCK_MONOTONIC, &y);
+        long long fast = (y.tv_sec - x.tv_sec) * 1000000000LL + (y.tv_nsec - x.tv_nsec);
+        clock_gettime(CLOCK_MONOTONIC, &x);
+        for (int i = 0; i < 20000; i++) syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &z);
+        clock_gettime(CLOCK_MONOTONIC, &y);
+        long long slow = (y.tv_sec - x.tv_sec) * 1000000000LL + (y.tv_nsec - x.tv_nsec);
+        if (fast * 2 < slow) pass(); else fail("vdso %lld ns, syscall %lld ns", fast, slow);
+    }
+#endif
     EXPECT("clock_gettime REALTIME after 2020", clock_gettime(CLOCK_REALTIME, &b) == 0 && b.tv_sec > 1577836800);
     EXPECT("clock_gettime PROCESS_CPUTIME", clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &b) == 0);
     EXPECT("clock_gettime BOOTTIME", clock_gettime(CLOCK_BOOTTIME, &b) == 0);

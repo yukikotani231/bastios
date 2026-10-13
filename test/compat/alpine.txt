@@ -336,6 +336,23 @@ tmux
 cmake
 lua-language-server
 
+== apk: install ripgrep and fzf over HTTP
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL ripgrep fzf 2>/dev/null; echo status $?; bb chroot /disk/a /sbin/apk info -e ripgrep fzf 2>/dev/null
+status 0
+ripgrep
+fzf
+
+== rg and fzf: search a tree, filter a list
+$ bb mkdir -p /disk/a/root/rgp/sub && bb printf 'alpha\nneedle one\n' > /disk/a/root/rgp/a.txt && bb printf 'needle two\nbeta\n' > /disk/a/root/rgp/sub/b.txt && bb chroot /disk/a /bin/sh -c 'cd /root/rgp && rg -c needle | sort; rg --files | wc -l; printf "apple\nbanana\ncherry\n" | fzf --filter=ban'
+a.txt:1
+sub/b.txt:1
+2
+banana
+
+== nvim: :grep with ripgrep fills the quickfix list
+$ bb chroot /disk/a /usr/bin/nvim --headless -u NONE -c 'set grepprg=rg\ --vimgrep' -c 'silent grep needle /root/rgp' -c 'call writefile([len(getqflist()) . " " . join(sort(map(getqflist(), "fnamemodify(bufname(v:val.bufnr), \":t\")")), ",")], "/root/rg.txt")' -c 'qa!' >/dev/null 2>&1; bb cat /disk/a/root/rg.txt
+2 a.txt,b.txt
+
 == tmux: a detached session runs a shell on a pseudo-terminal, takes keys and shows its screen
 $ bb rm -f /disk/a/root/tm.res; test -x /disk/a/usr/bin/tmux && bb mount --bind /dev /disk/a/dev && bb mount --bind /dev/pts /disk/a/dev/pts && bb chroot /disk/a /bin/sh -c 'exec </dev/null >/root/tm.out 2>&1; export TERM=xterm; tmux -f /dev/null new-session -d -s t -x 80 -y 24 sh && sleep 1 && tmux send-keys -t t "echo sum=$((40+2))" Enter && sleep 1 && tmux capture-pane -p -t t >/root/tm.cap && grep -c "^sum=42" /root/tm.cap >/root/tm.res; tmux kill-server'; bb umount /disk/a/dev/pts 2>/dev/null; bb umount /disk/a/dev 2>/dev/null; bb cat /disk/a/root/tm.res
 1
