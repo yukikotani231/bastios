@@ -257,12 +257,12 @@ int main(void) {
                syscall(SYS_timer_gettime, t, &g) == 0 && g.it_value.tv_sec == 0 && g.it_value.tv_nsec > 0; syscall(SYS_timer_delete, t);
            sigset_t m; sigemptyset(&m); sigaddset(&m, SIGUSR1); sigprocmask(SIG_BLOCK, &m, 0);
            struct sigevent su = {.sigev_notify = SIGEV_SIGNAL, .sigev_signo = SIGUSR1}; timer_create(CLOCK_MONOTONIC, &su, &u);
-           clock_gettime(CLOCK_MONOTONIC, &now); struct itimerspec w = {{0, 1000000}, {now.tv_sec - 1, now.tv_nsec}};
+           clock_gettime(CLOCK_MONOTONIC, &now); struct itimerspec w = {{0, 400000000}, {now.tv_sec - 1, now.tv_nsec}};   /* 2 rounds late; the next expiry is 0.4 s away, so a slow runner cannot reset the count before it is read */
            timer_settime(u, TIMER_ABSTIME, &w, 0); usleep(50000); int sig = 0; sigwait(&m, &sig);
            int o = timer_getoverrun(u); timer_delete(u);
            struct timespec z = {0, 0}; while (sigtimedwait(&m, 0, &z) == SIGUSR1) {}   /* an expiry after sigwait, before the delete */
            sigprocmask(SIG_UNBLOCK, &m, 0);
-           ok && sig == SIGUSR1 && o >= 1000; }));
+           ok && sig == SIGUSR1 && o >= 2; }));
     EXPECT("brk shrinks and grows back, never below its start", ({ char *b0 = (char *)syscall(SYS_brk, 0);
            char *up = (char *)syscall(SYS_brk, b0 + 8191); b0[8000] = 1;
            char *down = (char *)syscall(SYS_brk, b0 + 10); char *low = (char *)syscall(SYS_brk, 4096);
