@@ -4,6 +4,26 @@
 # are there (gcc among them). The Bastio toolchain (bastioc1, Z3, tcc:
 # bastiotools.sh) is on this disk too, outside the Alpine root.
 
+== tmux: attach on the console, run a command in the session, detach and find it still there
+$ test -x /disk/a/usr/bin/tmux && bb mount --bind /dev /disk/a/dev && bb mount --bind /dev/pts /disk/a/dev/pts; bb chroot /disk/a /bin/sh -c 'export TERM=xterm; tmux -f /dev/null new-session -s t sh'
+> echo $((40 + 2)) > /root/tt.txt\r
+> \x02d
+$ bb chroot /disk/a /bin/sh -c 'export TERM=xterm; tmux ls | cut -c1-12; cat /root/tt.txt; tmux kill-server >/dev/null 2>&1'; bb umount /disk/a/dev/pts; bb umount /disk/a/dev
+t: 1 windows
+42
+
+== tmux: Neovim in a pane takes keys through tmux and saves the file
+$ test -x /disk/a/usr/bin/tmux && bb mount --bind /dev /disk/a/dev && bb mount --bind /dev/pts /disk/a/dev/pts; bb printf 'set -s escape-time 0%c' 10 > /disk/a/root/tm.conf; bb chroot /disk/a /bin/sh -c 'export TERM=xterm; tmux -f /root/tm.conf new-session -s n sh'
+> nvim -u NONE /root/tn.txt\r
+> \x0c
+> \x0c
+> \x0c
+> ihello from nvim\x1b
+> :wq\r
+> \x02d
+$ i=0; while [ $i -lt 20 ] && [ ! -s /disk/a/root/tn.txt ]; do bb sleep 1; i=$((i+1)); done; bb chroot /disk/a /bin/sh -c 'tmux kill-server >/dev/null 2>&1'; bb umount /disk/a/dev/pts; bb umount /disk/a/dev; bb cat /disk/a/root/tn.txt
+hello from nvim
+
 == nvim: edit and save a C file
 $ bb chroot /disk/a /usr/bin/nvim -u NONE /root/hello.c
 > i#include <stdio.h>\rint main(void) { return 0; }\x1b
