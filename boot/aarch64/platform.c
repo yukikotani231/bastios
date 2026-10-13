@@ -17,7 +17,7 @@
 #define TIMER_INTID 30          /* the EL1 physical timer, a private interrupt */
 #define V_TIMER 32              /* the boot processor's tick, which counts the kernel's time */
 #define V_LTIMER 48             /* any other processor's tick */
-#define MAX_CPUS 16
+#define MAX_CPUS 64                     /* the redistributor walk below reads one GICv3 region (QEMU virt: 123 frames); more needs the second one */
 #define CPU_STACK 65536
 
 /* One of these per processor, found through TPIDR_EL1 (boot.S): the saved
