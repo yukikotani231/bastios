@@ -392,9 +392,10 @@ fn wake_readers(procs: &mut Buf, q: &mut Queue, line: &Buf)
   requires ptab_ok(procs) && qok(q) && lineok(line)
   ensures ptab_ok(procs) && qok(q)
 {
+  let cap = len(procs) / STRIDE;     // past it, every process is FREE
   let mut p = 1;
-  while p < NPROC
-    invariant 1 <= p && p <= NPROC && ptab_ok(procs) && qok(q)
+  while p < cap
+    invariant 1 <= p && cap <= NPROC && ptab_ok(procs) && qok(q)
   {
     if state(procs, p) == READING && q.r.n > 0 {
       pset(&mut procs, p, reg_word(R_RET), q_pop(&mut q));
@@ -691,7 +692,7 @@ const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
 const DIR_VFS: u64 = 2;               // DIR_VFS + a file layer directory handle
 const DIR_CG: u64 = 0x4000000;        // DIR_CG + n: cgroup n's directory (src/lxcgroup.bastio)
-const DIR_PROC: u64 = 0x10000;        // /proc; DIR_PROC + pid: /proc/PID (src/lxprocfs.bastio)
+const DIR_PROC: u64 = 0x100000;       // /proc; DIR_PROC + pid: /proc/PID (src/lxprocfs.bastio)
 const PROC_DEV: u64 = 256;            // an OF_DEV device from here up is a /proc file: PROC_DEV + 16 * pid + PF_*
 const PF_EXE: u64 = 7;                // /proc/PID/exe, a link
 const EACCES: u64 = 18446744073709551603;   // 2^64 - 13
@@ -1594,9 +1595,10 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
   if np == 0 {
     np = pr_reaper(k, pid);                // else to the nearest child subreaper (src/lxprctl.bastio)
   }
+  let cap = len(k.procs) / STRIDE;     // past it, every process is FREE
   let mut c = 1;
-  while c < NPROC
-    invariant 1 <= c && c <= NPROC && kok(k) && np < NPROC
+  while c < cap
+    invariant 1 <= c && cap <= NPROC && kok(k) && np < NPROC
   {
     if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE {
       if np != 0 && np != c {

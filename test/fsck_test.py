@@ -92,6 +92,43 @@ def dtop_used(img):
     img[e + 56] = ord("q")
 
 
+def with_ext(img, ndb=515):
+    """BSTDISK4: ndb directory blocks (empty), those from 512 on named by
+    one extension block, all appended to the image."""
+    nb = len(img) // BLOCK
+    img.extend(bytes(BLOCK * (ndb - 4 + 1)))
+    ext = nb + ndb - 4
+    img[0:8] = b"BSTDISK4"
+    put(img, 8, ext)
+    for db in range(4, ndb):
+        b = nb + db - 4
+        if db < 512:
+            put(img, 8 * db, b)
+        else:
+            put(img, ext * BLOCK + 8 * (db - 512 + 1), b)
+    return ext
+
+
+def ext_loop(img):
+    ext = with_ext(img)
+    put(img, ext * BLOCK, ext)              # the chain names itself
+
+
+def ext_off_disk(img):
+    with_ext(img)
+    put(img, 8, 1 << 40)
+
+
+def ext_gap(img):
+    ext = with_ext(img)
+    put(img, ext * BLOCK + 8 * 2, 0)        # directory block 513 gone, 514 still named
+
+
+def ext_shared(img):
+    ext = with_ext(img)
+    put(img, get(img, get(img, entry(img, 0) + 24) * BLOCK) * BLOCK, ext)
+
+
 # On an image with 100 more files, so the directory has grown past its
 # fixed blocks.
 GROWN = [
@@ -115,6 +152,11 @@ CASES = [
     ("a block off the disk", off_disk, "error"),
     ("an unknown kind", lambda img: img.__setitem__(entry(img, 0), 9), "error"),
     ("a slash in a name", lambda img: add_link(img, 5, b"x/y", 0), "error"),
+    ("an extension block", with_ext, "clean"),
+    ("an extension chain that loops", ext_loop, "error"),
+    ("an extension block off the disk", ext_off_disk, "error"),
+    ("a gap in an extension block", ext_gap, "error"),
+    ("an extension block a file also uses", ext_shared, "error"),
 ]
 
 

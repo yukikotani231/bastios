@@ -27,7 +27,7 @@ test/fsck.py checks every one of those images. A sample of them (BOOTS,
 with the reordered and torn ones first) is then booted in QEMU on virtio,
 and crashme checks what it finds there: the records, the in-place
 rewrites, the renames and links (see the top of user/crashme.bastio).
-Images with no BSTDISK3 magic are not errors: the cut came before the
+Images with no BSTDISK magic are not errors: the cut came before the
 format finished, and the next mount formats the disk again.
 
 Prints one line per finding and a summary; exits 1 if any image failed.
@@ -173,7 +173,7 @@ def files(img):
     """{path: bytes} of every file the mount would show, by name from the
     disk's top ("log", "g/000", ...). A hard link reads as its file; the
     links the mount drops (fsck's two notes) and orphans are not there."""
-    _, ents, _ = fsck.entries(img)
+    _, ents, _, _ = fsck.entries(img)
     B = fsck.BLOCK
 
     def data(e):
@@ -285,7 +285,7 @@ def check_range(args):
             if key not in seen:
                 seen.add(key)
                 states += 1
-                if bytes(img[0:8]) in (b"BSTDISK2", b"BSTDISK3"):
+                if bytes(img[0:8]) in (b"BSTDISK2", b"BSTDISK3", b"BSTDISK4"):
                     errors, _, _ = fsck.check(img)
                     if not errors:
                         bad = crashme_check(img)
