@@ -927,13 +927,16 @@ t_sock2: write after SHUT_WR is EPIPE
 t_sys: a cgroup namespace roots the tree
 t_sys: adjtimex reads and sets
 t_sys: clock_settime moves CLOCK_REALTIME
-t_sys: memory.max refuses a mapping that would pass it
+t_sys: memory.max kills the biggest process of a group that passes it
 t_sys: not root: EPERM
 t_sys: seccomp USER_NOTIF: a supervisor answers a call
 t_sys: setdomainname
+t_sys: the names are written through /proc/sys/kernel/hostname and domainname
 t_sys: sethostname, uname, /proc/sys/kernel/hostname
+t_sys: splice reads a /proc file into a pipe
 t_sys: settimeofday
 t_sysv: /proc/sysvipc and /proc/sys/kernel limits
+t_sysv: msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message
 t_sysv: GETNCNT counts a waiting process
 t_sysv: IPC_RMID ends a wait with EIDRM
 t_sysv: SEM_UNDO is undone at exit
@@ -962,6 +965,7 @@ t_thread: timed condition wait, signalled early (realtime)
 t_time: clock_getres
 t_time: clock_gettime BOOTTIME
 t_time: clock_gettime MONOTONIC
+t_time: clock_gettime MONOTONIC agrees with the system call
 t_time: clock_gettime PROCESS_CPUTIME
 t_time: clock_gettime REALTIME after 2020
 t_time: clock_nanosleep TIMER_ABSTIME
@@ -1007,6 +1011,8 @@ alpine: dropbear: the server starts, in the Alpine guest
 alpine: nvim over ssh: edit and save in a pseudo-terminal
 alpine: dropbear: the server stops, in the Alpine guest
 alpine-tty: nvim: it reads the terminal's size, and has colours
+alpine-tty: tmux: attach on the console, run a command in the session, detach and find it still there
+alpine-tty: tmux: Neovim in a pane takes keys through tmux and saves the file
 node: node: a hot loop is compiled and gives the right sum
 node: node: a script with arrays and JSON
 node: node: an expression
@@ -1041,7 +1047,12 @@ alpine: container: ocipull.sh pulls an image from a registry (with a token) and 
 alpine: container: the image's command, environment and working directory run rootless from the bundle
 alpine: nvim: a headless server on a unix socket answers another nvim (--listen, sockconnect, RPC)
 alpine: apk: install tmux, cmake and lua-language-server over HTTP
+alpine: tmux: a client on the console passes it to the server (SCM_RIGHTS of the console)
 alpine: tmux: a detached session runs a shell on a pseudo-terminal, takes keys and shows its screen
 alpine: cmake: configure, build and run a C project
 alpine: nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
 alpine: proc: /proc/self/exe is named from the reader's root (chroot), as on Linux
+t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
+t_gai: AF_INET6 UDP connect to :: reads back ::1
+t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1
+t_gai: getaddrinfo(NULL, port, AI_PASSIVE) with AF_UNSPEC

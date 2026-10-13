@@ -104,10 +104,19 @@ $(B)/user/mtest.elf: user/lxtest-aarch64.c | $(B)/user
 	$(ACC) -O1 -fno-pic -no-pie -static -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x400000 \
 	  -Wl,--build-id=none -Wl,--no-warn-rwx-segments -o $@ $<
 
+# The vDSO (user/vdso-aarch64.c): a tiny shared object the kernel copies onto
+# one page of every Linux process, with the clock from byte 0xF80 of it. The
+# whole file must fit below the signal return trampoline at 0xF00.
+$(B)/user/vdso.so: user/vdso-aarch64.c user/vdso-aarch64.ld user/vdso-aarch64.map | $(B)/user
+	$(ACC) -O2 -fPIC -ffreestanding -fno-stack-protector -fno-asynchronous-unwind-tables \
+	  -Wall -Wextra -Werror -nostdlib -shared -Wl,-T,user/vdso-aarch64.ld -Wl,--version-script=user/vdso-aarch64.map \
+	  -Wl,--hash-style=both -Wl,-soname=linux-vdso.so.1 -Wl,--build-id=none -Wl,-z,max-page-size=0x1000 -o $@ user/vdso-aarch64.c
+	@test $$(stat -c %s $@) -le 3840 || { echo "$@ does not fit below the signal trampoline"; rm -f $@; exit 1; }
+
 # 2. Prove the kernel and translate it to freestanding C.
 KSRCS := $(wildcard src/*.bastio) $(wildcard src/aarch64/*.bastio src/aarch64/arch/*.bastio) $(wildcard files/*)
 
-$(B)/kernel.c: $(KSRCS) $(UBINS) $(LXELFS) $(BASTIOC) | $(B)
+$(B)/kernel.c: $(KSRCS) $(UBINS) $(LXELFS) $(B)/user/vdso.so $(BASTIOC) | $(B)
 	$(BASTIOC) --lib $(BASTIOLIB) --lib src/aarch64 --lib src --target kernel --arch aarch64 -o $@ src/aarch64/main.bastio
 
 $(B)/kernel.o: $(B)/kernel.c
@@ -169,7 +178,7 @@ $(COMPAT_BINS): $(B)/compat/%: test/compat/progs/%.c test/compat/progs/compat.h 
 
 # Applets the Alpine, Debian and Node cases run from /disk/busybox (the x86-64
 # suite uses Alpine's own BusyBox for them).
-COMPAT_BB_MORE := CONFIG_CHROOT CONFIG_MKNOD CONFIG_MOUNT CONFIG_UMOUNT
+COMPAT_BB_MORE := CONFIG_CHROOT CONFIG_MKNOD CONFIG_MOUNT CONFIG_UMOUNT CONFIG_CHOWN CONFIG_SU CONFIG_USE_BB_CRYPT
 
 $(B)/compat/busybox: $(B)/busybox/Makefile test/compat/busybox.config | $(B)/compat $(B)/user/ash.elf
 	rm -rf $(B)/compat/bb && cp -r $(B)/busybox $(B)/compat/bb
@@ -224,13 +233,57 @@ $(B)/compat/disk.img: $(COMPAT_BINS) $(COMPAT_APPS) $(B)/compat/busybox test/com
 # so the checks that use them fail and stay out of the baseline.
 include test/compat/images.mk
 ALPINE_CACHE ?= $(B)/compat/alpine
+ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 
 # The shell commands of these disks run the suite's static BusyBox: the
 # AArch64 kernel has no built-in musl dynamic linker, so Alpine's own
 # (dynamic) BusyBox starts only inside the unpacked root.
-$(B)/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox | $(B)/compat
+$(B)/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox $(B)/compat/runc tools/ocipull.sh \
+    $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys | $(B)/compat
 	COMPAT_ARCH=aarch64 test/compat/alpinedisk.py $@ $(B)/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) \
-	  --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) --busybox $(B)/compat/busybox
+	  --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) --busybox $(B)/compat/busybox \
+	  --extra "$(B)/compat/runc tools/ocipull.sh $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys"
+
+# runc for the container cases: the static arm64 binary of the upstream
+# release, checked against a pinned SHA-256 (the x86-64 suite's is the
+# amd64 one, RUNC_VER in the top-level Makefile). It runs on BastiOS only.
+RUNC_VER          ?= 1.2.6
+RUNC_ARM64_SHA256 ?= 12c612e2ebe6ca198de676ce75ed557e79fe6109032209bb8e25166c967fe170
+$(B)/compat/runc: | $(B)/compat
+	curl -fsSL -o $@.part https://github.com/opencontainers/runc/releases/download/v$(RUNC_VER)/runc.arm64
+	echo "$(RUNC_ARM64_SHA256)  $@.part" | sha256sum -c - >/dev/null
+	chmod +x $@.part && mv $@.part $@
+
+# Dropbear, the SSH server of the "nvim over ssh" case, built from the same
+# source as the x86-64 suite's (DROPBEAR_GIT, DROPBEAR_TAG) as a static glibc
+# program at 0x400000. The client, the key tool and the keys the case uses
+# run on this machine: they are built natively into build/compat, where the
+# case looks for them (the x86-64 suite's rule makes the same files).
+DROPBEAR_GIT ?= https://github.com/mkj/dropbear
+DROPBEAR_TAG ?= DROPBEAR_2024.86
+DROPBEAR_CONF := --disable-zlib --disable-lastlog --disable-utmp --disable-utmpx --disable-wtmp --disable-wtmpx \
+                 --disable-pututline --disable-pututxline --disable-syslog
+
+$(B)/compat/dropbear: | $(B)/compat
+	rm -rf $(B)/compat/src/dropbear && mkdir -p $(B)/compat/src
+	git clone -q --depth 1 --branch $(DROPBEAR_TAG) $(DROPBEAR_GIT) $(B)/compat/src/dropbear
+	cd $(B)/compat/src/dropbear && CC="$(ACC)" CFLAGS="-O2" LDFLAGS="-static -no-pie $(ULFLAGS) -s" ./configure -q \
+	  --host=aarch64-linux-gnu --disable-harden $(DROPBEAR_CONF) >/dev/null
+	echo '#define DROPBEAR_SVR_PASSWORD_AUTH 0' > $(B)/compat/src/dropbear/localoptions.h   # no static crypt() here; the case logs in by key
+	$(MAKE) -C $(B)/compat/src/dropbear -s STATIC=1 PROGRAMS=dropbear >/dev/null
+	cp $(B)/compat/src/dropbear/dropbear $@
+
+build/compat/dbclient build/compat/dropbearkey &: | $(B)/compat
+	rm -rf $(B)/compat/src/dropbear-host && mkdir -p $(B)/compat/src build/compat
+	git clone -q --depth 1 --branch $(DROPBEAR_TAG) $(DROPBEAR_GIT) $(B)/compat/src/dropbear-host
+	cd $(B)/compat/src/dropbear-host && ./configure -q $(DROPBEAR_CONF) >/dev/null
+	$(MAKE) -C $(B)/compat/src/dropbear-host -s PROGRAMS="dbclient dropbearkey" >/dev/null
+	cp $(B)/compat/src/dropbear-host/dbclient $(B)/compat/src/dropbear-host/dropbearkey build/compat/
+
+build/compat/ssh_host_key build/compat/ssh_authorized_keys &: build/compat/dropbearkey
+	rm -f build/compat/ssh_host_key build/compat/ssh_id
+	build/compat/dropbearkey -t ed25519 -f build/compat/ssh_host_key >/dev/null
+	build/compat/dropbearkey -t ed25519 -f build/compat/ssh_id | grep '^ssh-' > build/compat/ssh_authorized_keys
 
 # Debian (glibc) and Node (musl, V8) the same way, from the arm64 layers.
 $(B)/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox
@@ -242,7 +295,8 @@ $(B)/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/com
 COMPAT_DISKS := $(B)/compat/disk.img $(B)/compat/alpine.img $(B)/compat/debian.img $(B)/compat/node.img
 COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox,apps --kernel $(B)/bastios.bin \
               --disk $(B)/compat/disk.img --alpine-disk $(B)/compat/alpine.img \
-              --alpine-repo $(B)/compat/alpine/disk/http --debian-disk $(B)/compat/debian.img \
+              --alpine-repo $(B)/compat/alpine/disk/http \
+              --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST)-arm64.json --debian-disk $(B)/compat/debian.img \
               --node-disk $(B)/compat/node.img --out $(B)/compat
 
 compat: $(B)/bastios.bin $(COMPAT_DISKS)

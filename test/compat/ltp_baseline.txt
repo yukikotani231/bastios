@@ -491,8 +491,11 @@ msgctl06
 msgctl12
 msgget01
 msgget02
+msgget04
+msgget05
 msgrcv01
 msgrcv02
+msgrcv03
 msgrcv05
 msgrcv06
 msgrcv07
@@ -821,6 +824,8 @@ shmdt01
 shmdt02
 shmget03
 shmget04
+shmget05
+shmget06
 shutdown01
 shutdown02
 sigaction01
@@ -852,6 +857,7 @@ splice01
 splice02
 splice03
 splice04
+splice06
 stat01
 stat01_64
 stat02

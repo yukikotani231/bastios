@@ -1360,9 +1360,9 @@ fn ns_room(k: &mut Kernel, pid: u64) -> bool
 // ---------------------------------------------------------------- mount and pivot_root
 
 /// The source a special file system mounted again stands for, by kind: a
-/// path of the file layer, into src. Returns its length. mqueue and cgroup2
-/// have nothing behind them here: their mounts show the directory they are
-/// on. sysfs shows the host's /sys, so /sys/fs/cgroup is there to mount on.
+/// path of the file layer, into src. Returns its length. mqueue has nothing
+/// behind it here: its mount shows the directory it is on, and a cgroup2
+/// mount shows the host's tree (see lx_mount). sysfs shows the host's /sys, so /sys/fs/cgroup is there to mount on.
 fn kind_source(kind: u64, src: &mut Bytes) -> u64
   requires blen(src) == MS_ROW
   ensures blen(src) == MS_ROW && result <= 8
@@ -1856,7 +1856,19 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
     }
     return EISDIR;                          // a file onto a directory
   }
-  if kind == MK_MQUEUE || kind == MK_CGROUP {
+  if kind == MK_CGROUP && !xfer_is(k.fs.xfer, 0, n, "sys/fs/cgroup") {
+    // The host's tree, which a process in a cgroup namespace sees from the
+    // root of that namespace (src/lxcgroup.bastio): a container's cgroupfs.
+    let cgp = "sys/fs/cgroup";
+    let mut i = 0;
+    while i < 13 && i < slen(cgp)
+      invariant i <= 13 && blen(src) == MS_ROW && kok(k)
+    {
+      bset(&mut src, i, sget(cgp, i));
+      i = i + 1;
+    }
+    sl = 13;
+  } else if kind == MK_MQUEUE || kind == MK_CGROUP {
     // Nothing behind them: the directory itself, as the file layer has it.
     let mut i = 0;
     while i < n

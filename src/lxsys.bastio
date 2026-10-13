@@ -136,20 +136,19 @@ fn name_set(k: &Kernel, pid: u64, bit: u64) -> bool
   return uts_rd(k, pid, NM_SET) / bit % 2 == 1;
 }
 
-/// sethostname / setdomainname(name, len), in the caller's UTS namespace.
-fn lx_setname(k: &mut Kernel, pid: u64, base: u64, bit: u64, va: u64, n: u64) -> u64
-  requires kok(k) && pid < NPROC && (base == NM_HOST || base == NM_DOM) && (bit == 1 || bit == 2)
+/// True if pid may set its UTS namespace's names.
+fn uts_may_set(k: &Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  return cap_has(k, pid, CAP_SYS_ADMIN) || (nsk_of(k, NSK_UTS, pid) != 0 && ns_cap(k, pid, CAP_SYS_ADMIN));
+}
+
+/// Make the first n bytes of the transfer buffer the name `base` (bit as
+/// name_set) of pid's UTS namespace.
+fn uts_store(k: &mut Kernel, pid: u64, base: u64, bit: u64, n: u64)
+  requires kok(k) && pid < NPROC && (base == NM_HOST || base == NM_DOM) && (bit == 1 || bit == 2) && n <= NAME_MAX
   ensures kok(k)
 {
-  if !cap_has(k, pid, CAP_SYS_ADMIN) && !(nsk_of(k, NSK_UTS, pid) != 0 && ns_cap(k, pid, CAP_SYS_ADMIN)) {
-    return EPERM;                           // the first namespace's names are root's; a made one's, its user namespace's mapped root's
-  }
-  if n > NAME_MAX {
-    return EINVAL;                          // a negative int is huge here too
-  }
-  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, n) != n {
-    return EFAULT;
-  }
   let mut i = 0;
   while i < n
     invariant i <= n && n <= NAME_MAX && pid < NPROC && (base == NM_HOST || base == NM_DOM) && kok(k)
@@ -159,7 +158,81 @@ fn lx_setname(k: &mut Kernel, pid: u64, base: u64, bit: u64, va: u64, n: u64) ->
   }
   uts_wr(&mut k, pid, base, n);
   uts_wr(&mut k, pid, NM_SET, uts_rd(k, pid, NM_SET) | bit);
+}
+
+/// sethostname / setdomainname(name, len), in the caller's UTS namespace.
+fn lx_setname(k: &mut Kernel, pid: u64, base: u64, bit: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && (base == NM_HOST || base == NM_DOM) && (bit == 1 || bit == 2)
+  ensures kok(k)
+{
+  if !uts_may_set(k, pid) {
+    return EPERM;                           // the first namespace's names are root's; a made one's, its user namespace's mapped root's
+  }
+  if n > NAME_MAX {
+    return EINVAL;                          // a negative int is huge here too
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, n) != n {
+    return EFAULT;
+  }
+  uts_store(&mut k, pid, base, bit, n);
   return 0;
+}
+
+/// A write to /proc/sys/kernel/hostname (i == 0) or domainname (i == 1):
+/// the name is what comes before the first newline or NUL, as for Linux's
+/// string sysctls. The caller needs what sethostname needs.
+fn uts_proc_write(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && i < 2
+  ensures kok(k)
+{
+  if !uts_may_set(k, pid) {
+    return EACCES;
+  }
+  if n == 0 {
+    return 0;
+  }
+  let m = smaller(n, NAME_MAX + 1);
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, m) != m {
+    return EFAULT;
+  }
+  let r = uts_xfer_write(&mut k, pid, i, m);
+  if r == m {
+    return n;                               // the bytes past NAME_MAX + 1 were not looked at
+  }
+  return r;
+}
+
+/// The part of uts_proc_write after the bytes are in the transfer buffer: n
+/// of them were written, of which the first NAME_MAX + 1 are there.
+fn uts_xfer_write(k: &mut Kernel, pid: u64, i: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && i < 2 && n <= XFER
+  ensures kok(k)
+  ensures result <= n || result > XFER
+{
+  if !uts_may_set(k, pid) {
+    return EACCES;
+  }
+  if n == 0 {
+    return 0;
+  }
+  let m = smaller(n, NAME_MAX + 1);
+  let mut len = 0;
+  while len < m && bget(k.fs.xfer, len) != 10 && bget(k.fs.xfer, len) != 0
+    invariant len <= m && m <= NAME_MAX + 1 && kok(k)
+  {
+    len = len + 1;
+  }
+  if len > NAME_MAX {
+    return EINVAL;
+  }
+  let mut base = NM_HOST;
+  let mut bit = 1;
+  if i == 1 {
+    base = NM_DOM;
+    bit = 2;
+  }
+  uts_store(&mut k, pid, base, bit, len);
+  return n;
 }
 
 /// The /proc/sys/kernel files about the system's names, as uname gives them.

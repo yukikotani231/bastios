@@ -20,8 +20,8 @@
 // Limits are small and fixed: 16 queues and 16 semaphore sets, SEMMSL 64 semaphores
 // a set, MQ_MSGS messages a queue whatever msg_qbytes says, and IPC_SET
 // may not raise msg_qbytes past MSGMNB even for root. A wait runs the
-// call again and again rather than sleeping until a change. MSG_COPY is
-// ENOSYS, as on a Linux without CONFIG_CHECKPOINT_RESTORE.
+// call again and again rather than sleeping until a change. MSG_COPY
+// (CONFIG_CHECKPOINT_RESTORE) reads the message at an index and leaves it.
 
 import "lxcred.bastio";
 import "lxtime.bastio";
@@ -85,7 +85,7 @@ const LONG_NEG: u64 = 0x8000000000000000;  // a negative long argument
 const IPC_SETS: u64 = 16;              // queues, and semaphore sets
 const IPC_SPAN: u64 = 32768;           // id = seq * IPC_SPAN + slot, as Linux's IPCMNI
 const HW: u64 = 16;                    // header words
-const H_SEQ: u64 = 0;                  // 0: free; else the id's seq
+const H_SEQ: u64 = 0;                  // 0: free; else the id's seq + 1 (an id may have seq 0, see ipc_get)
 const H_KEY: u64 = 1;
 const H_OWN: u64 = 2;                  // uid, then gid << 32
 const H_CRE: u64 = 3;                  // creator's uid and gid, the same way
@@ -167,8 +167,8 @@ fn ipc_find(k: &Kernel, kind: u64, id: u64) -> u64
   if slot >= IPC_SETS {
     return IPC_SETS;
   }
-  let seq = hget(k, kind, slot, H_SEQ);
-  if seq == 0 || seq != id / IPC_SPAN {
+  let seq = hget(k, kind, slot, H_SEQ);        // the id's seq + 1: 0 is a free slot, and id seq 0 is allowed
+  if seq == 0 || seq != id / IPC_SPAN + 1 {
     return IPC_SETS;
   }
   return slot;
@@ -224,10 +224,10 @@ fn ipc_id(k: &Kernel, kind: u64, slot: u64) -> u64
   requires kok(k) && slot < IPC_SETS
 {
   let seq = hget(k, kind, slot, H_SEQ);
-  if seq >= 65536 {
+  if seq == 0 || seq > 65536 {
     return slot;
   }
-  return seq * IPC_SPAN + slot;
+  return (seq - 1) * IPC_SPAN + slot;
 }
 
 /// Whether pid may have `want` (4 read, 2 write/alter, 6 both) on the set:
@@ -265,7 +265,7 @@ fn ipc_owner(k: &Kernel, pid: u64, kind: u64, slot: u64) -> bool
 struct Got { r: u64, slot: u64, fresh: bool }
 
 fn ipc_get(k: &mut Kernel, pid: u64, kind: u64, key: u64, flg: u64) -> Got
-  requires kok(k) && pid < NPROC
+  requires kok(k) && pid < NPROC && kind <= KM
   ensures kok(k) && result.slot <= IPC_SETS && (result.fresh ==> result.slot < IPC_SETS)
 {
   let none = Got { r: 0, slot: IPC_SETS, fresh: false };
@@ -291,16 +291,30 @@ fn ipc_get(k: &mut Kernel, pid: u64, kind: u64, key: u64, flg: u64) -> Got
     }
   }
   ipc_reclaim(&mut k, kind);
-  let mut f = 0;
-  while f < IPC_SETS && hget(k, kind, f, H_SEQ) != 0
-    invariant f <= IPC_SETS && kok(k)
-  {
-    f = f + 1;
+  // The id /proc/sys/kernel/*_next_id asked for is used if its slot is free;
+  // the request is spent either way, as on Linux.
+  let want = get(k.sys, SYS_NEXTID + kind);
+  let mut f = IPC_SETS;
+  let mut seq = 0;
+  if want != 0 {
+    k.sys = set(k.sys, SYS_NEXTID + kind, 0);
+    if (want - 1) % IPC_SPAN < IPC_SETS && hget(k, kind, (want - 1) % IPC_SPAN, H_SEQ) == 0 && (want - 1) / IPC_SPAN < 65536 {
+      f = (want - 1) % IPC_SPAN;
+      seq = (want - 1) / IPC_SPAN;
+    }
   }
   if f >= IPC_SETS {
-    return Got { r: ENOSPC, slot: IPC_SETS, fresh: false };
+    f = 0;
+    while f < IPC_SETS && hget(k, kind, f, H_SEQ) != 0
+      invariant f <= IPC_SETS && kok(k)
+    {
+      f = f + 1;
+    }
+    if f >= IPC_SETS {
+      return Got { r: ENOSPC, slot: IPC_SETS, fresh: false };
+    }
+    seq = hget(k, kind, f, H_LAST) % 65535 + 1;
   }
-  let seq = hget(k, kind, f, H_LAST) % 65535 + 1;
   let mut w = 0;
   while w < HW
     invariant w <= HW && kok(k)
@@ -309,7 +323,7 @@ fn ipc_get(k: &mut Kernel, pid: u64, kind: u64, key: u64, flg: u64) -> Got
     w = w + 1;
   }
   let ids = id_get(k.procs, pid, F_UID, true) + id_get(k.procs, pid, F_GID, true) * ID_SPAN;
-  hset(&mut k, kind, f, H_SEQ, seq);
+  hset(&mut k, kind, f, H_SEQ, seq + 1);
   hset(&mut k, kind, f, H_LAST, seq);
   hset(&mut k, kind, f, H_KEY, key32);
   hset(&mut k, kind, f, H_OWN, ids);
@@ -351,7 +365,11 @@ fn perm_out(k: &mut Kernel, kind: u64, slot: u64)
   xput(&mut k, 12, cre % ID_SPAN, 4);
   xput(&mut k, 16, cre / ID_SPAN, 4);
   xput(&mut k, 20, hget(k, kind, slot, H_MODE), 4);
-  xput(&mut k, 24, hget(k, kind, slot, H_SEQ), 4);
+  let mut sq = hget(k, kind, slot, H_SEQ);
+  if sq > 0 {
+    sq = sq - 1;
+  }
+  xput(&mut k, 24, sq, 4);
   xput(&mut k, 28, 0, 4);
   xput(&mut k, 32, 0, 8);
   xput(&mut k, 40, 0, 8);
@@ -435,6 +453,33 @@ fn lx_msgget(k: &mut Kernel, pid: u64, key: u64, flg: u64) -> u64
 
 /// The offset in the queue's region of the message msgrcv takes for
 /// type t and flags flg, or MQ_CAP if none fits.
+/// The offset of message number idx (from 0) of a queue, or MQ_CAP if
+/// there are not that many.
+fn msg_nth(k: &Kernel, slot: u64, idx: u64) -> u64
+  requires kok(k) && slot < IPC_SETS
+  ensures result <= MQ_CAP
+{
+  let base = mq_base(slot);
+  let used = smaller(hget(k, KQ, slot, H_USED), MQ_CAP);
+  let mut left = idx;
+  let mut o = 0;
+  while o + MSG_HDR <= used
+    invariant o <= MQ_CAP && used <= MQ_CAP
+  {
+    if left == 0 {
+      return o;
+    }
+    left = left - 1;
+    let n = smaller(get_u64(k.ipcb, base + o + 8), MSGMAX);
+    let rm = msg_room(n);
+    if rm > MQ_CAP - o {
+      return MQ_CAP;
+    }
+    o = o + rm;
+  }
+  return MQ_CAP;
+}
+
 fn msg_pick(k: &Kernel, slot: u64, t: u64, flg: u64) -> u64
   requires kok(k) && slot < IPC_SETS
   ensures result <= MQ_CAP
@@ -544,12 +589,9 @@ fn lx_msgrcv(k: &mut Kernel, pid: u64, was: u64, id: u64, va: u64, sz: u64, t: u
     ret(&mut k.procs, pid, EINVAL);
     return KEEP;
   }
-  if flg & MSG_COPY != 0 {
-    if flg & MSG_EXCEPT != 0 || flg & IPC_NOWAIT == 0 {
-      ret(&mut k.procs, pid, EINVAL);
-    } else {
-      ret(&mut k.procs, pid, ENOSYS);
-    }
+  let copy = flg & MSG_COPY != 0;
+  if copy && (flg & MSG_EXCEPT != 0 || flg & IPC_NOWAIT == 0 || t >= LONG_NEG) {
+    ret(&mut k.procs, pid, EINVAL);         // a copy is of message number t, and never waits
     return KEEP;
   }
   let slot = ipc_look(k, pid, KQ, id);
@@ -565,7 +607,12 @@ fn lx_msgrcv(k: &mut Kernel, pid: u64, was: u64, id: u64, va: u64, sz: u64, t: u
     ret(&mut k.procs, pid, EACCES);
     return KEEP;
   }
-  let o = msg_pick(k, slot, t, flg);
+  let mut o = MQ_CAP;
+  if copy {
+    o = msg_nth(k, slot, t);
+  } else {
+    o = msg_pick(k, slot, t, flg);
+  }
   let base = mq_base(slot);
   let used = hget(k, KQ, slot, H_USED);
   if o + MSG_HDR > MQ_CAP || used > MQ_CAP || o + MSG_HDR > used {
@@ -593,6 +640,10 @@ fn lx_msgrcv(k: &mut Kernel, pid: u64, was: u64, id: u64, va: u64, sz: u64, t: u
   bfree(out);
   if put != 8 + n {
     ret(&mut k.procs, pid, EFAULT);
+    return KEEP;
+  }
+  if copy {
+    ret(&mut k.procs, pid, n);              // the message stays queued, and nobody has received it
     return KEEP;
   }
   // The rest of the queue moves down over it.

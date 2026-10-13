@@ -28,9 +28,6 @@ fn lx_fork(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if !cg_fork_ok(k, pid) {
     return EAGAIN;                          // a control group's pids.max (src/lxcgroup.bastio)
   }
-  if !cg_fork_mem_ok(&mut k, pid) {
-    return ENOMEM;                          // its memory.max: the copy would pass it
-  }
   if !pidns_room(k, pid) {
     return ENOMEM;                          // the init of its PID namespace has ended
   }

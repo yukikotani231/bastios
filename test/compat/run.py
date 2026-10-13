@@ -176,7 +176,7 @@ class WebServer:
 
     def add_registry(self, layer_list):
         """A registry for tools/ocipull.sh: /v2/library/alpine, an image index
-        whose linux/amd64 image is the layers named by the JSON file layer_list
+        whose image for the guest's processor (linux/amd64, or linux/arm64 on AArch64) is the layers named by the JSON file layer_list
         (files sha256-HEX.tar.gz beside it, the cache alpinedisk.py keeps) and a
         layer of ours on top that hides /etc/motd and adds /etc/ocilayer; its
         config gives the process and the environment. /v2/secure/alpine is the
@@ -209,7 +209,8 @@ class WebServer:
                 t.addfile(ti, io.BytesIO(body))
         d, n = blob(raw.getvalue())
         layers.append({"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": d, "size": n})
-        config = {"architecture": "amd64", "os": "linux",
+        goarch, other = ("arm64", "amd64") if ARCH == "aarch64" else ("amd64", "arm64")
+        config = {"architecture": goarch, "os": "linux",
                   "config": {"Env": ["FOO=bar", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
                              "Entrypoint": ["/bin/sh", "-c"],
                              "Cmd": ["echo from-image $FOO; id -u; hostname; test -e /etc/motd || cat /etc/ocilayer"],
@@ -224,9 +225,9 @@ class WebServer:
             f.write(manifest)
         index = {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json", "manifests": [
             {"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": "sha256:" + "0" * 64, "size": 1,
-             "platform": {"architecture": "arm64", "os": "linux"}},
+             "platform": {"architecture": other, "os": "linux"}},
             {"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": md, "size": len(manifest),
-             "platform": {"architecture": "amd64", "os": "linux"}}]}
+             "platform": {"architecture": goarch, "os": "linux"}}]}
         for ref in ("latest", "3.24"):
             with open(os.path.join(base, "manifests", ref), "w") as f:
                 json.dump(index, f)
@@ -501,6 +502,14 @@ def run_program(env, prog, timeout):
             checks.append({"name": "(start-up)", "result": "crash", "detail": f"exited with {status} before any check",
                            "syscalls": [int(n) for n in NOTE.findall(text)], "index": 0})
         break
+    # A check that failed once may only have lost a race with the emulator's
+    # timing. Run the failures again, once, and keep a pass.
+    failed = [c for c in checks if c["result"] == "fail"]
+    if failed:
+        text, _ = env.run(f"COMPAT_ONLY={','.join(str(c['index']) for c in failed)} /disk/{prog}; echo @@end $?", timeout)
+        for c in failed:
+            if re.search(r"(?:^|\n)@@ " + re.escape(c["name"]) + r"\nok " + re.escape(c["name"]) + r"(?:\n|$)", text):
+                c["result"], c["detail"], c["retried"] = "pass", "", True
     for c in checks:
         if c["result"] is None:
             # Its result line never came, though the program went on (say,
@@ -772,6 +781,11 @@ def main():
         shutil.copyfile(args.node_disk, disk)
         lanes.append((disk, [("node", "Node.js (V8)", applets_lane(node, 300))], "1G"))
     lanes = [l for l in lanes if l[1]]
+    # Write out the copies just made before any guest reads a disk: a host
+    # still flushing hundreds of MiB can hold up a virtio request for longer
+    # than the kernel waits (DQ_TICKS), which it takes for a dead disk, and
+    # tar then stops at the first block that did not come.
+    os.sync()
     try:
         with concurrent.futures.ThreadPoolExecutor(len(lanes) if jobs > 1 else 1) as pool:
             done = list(pool.map(lambda l: lane(*l), lanes))

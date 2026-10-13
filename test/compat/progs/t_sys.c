@@ -43,6 +43,29 @@ static int domainname(void) {
     return ok;
 }
 
+/* The same names through their /proc/sys/kernel files: a write ends at its newline. */
+static int proc_names(void) {
+    struct utsname u, was;
+    uname(&was);
+    int ok = 1;
+    int fd = open("/proc/sys/kernel/domainname", O_WRONLY);
+    ok = ok && fd >= 0 && write(fd, "proc.example\nignored", 20) == 20;
+    if (fd >= 0) close(fd);
+    ok = ok && uname(&u) == 0 && strcmp(u.domainname, "proc.example") == 0;
+    fd = open("/proc/sys/kernel/hostname", O_WRONLY);
+    ok = ok && fd >= 0 && write(fd, "procbox", 7) == 7;
+    if (fd >= 0) close(fd);
+    ok = ok && uname(&u) == 0 && strcmp(u.nodename, "procbox") == 0;
+    char big[80];
+    memset(big, 'a', sizeof big);
+    fd = open("/proc/sys/kernel/hostname", O_WRONLY);
+    ok = ok && fd >= 0 && write(fd, big, sizeof big) == -1 && errno == EINVAL;
+    if (fd >= 0) close(fd);
+    setdomainname(was.domainname, strlen(was.domainname));
+    sethostname(was.nodename, strlen(was.nodename));
+    return ok;
+}
+
 static int set_clock(void) {
     struct timespec a, b;
     clock_gettime(CLOCK_REALTIME, &a);
@@ -145,14 +168,15 @@ static int cgroup_ns(void) {
     return ok;
 }
 
-/* memory.max: memory.current counts the memory of the group's processes,
- * and a mapping or a fork that would pass the limit fails with ENOMEM
- * (a PROT_NONE reservation is not counted). */
+/* memory.max: memory.current counts the pages the group's processes have
+ * touched, a mapping nobody uses costs nothing, and the process with the most
+ * pages in a group that passes the limit is killed (memory.events counts
+ * it). */
 static int cgroup_mem(void) {
     if (mkdir("/sys/fs/cgroup/cgm", 0755) != 0) return 0;
     pid_t p = fork();
     if (p == 0) {
-        char me[32], buf[64];
+        char me[32], buf[256];
         snprintf(me, sizeof me, "%d", (int)getpid());
         if (!put("/sys/fs/cgroup/cgm/cgroup.procs", me)) _exit(1);
         if (!put("/sys/fs/cgroup/cgm/memory.max", "16777216")) _exit(2);
@@ -160,31 +184,27 @@ static int cgroup_mem(void) {
         if (a == MAP_FAILED) _exit(3);
         memset(a, 1, 4 << 20);
         if (!slurp("/sys/fs/cgroup/cgm/memory.current", buf, sizeof buf) || atol(buf) < (4 << 20)) _exit(4);
-        void *big = mmap(0, 64 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (big != MAP_FAILED || errno != ENOMEM) _exit(5);
-        void *res = mmap(0, 64 << 20, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-        if (res == MAP_FAILED) _exit(6);
-        char *m = mmap(0, 4 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (m == MAP_FAILED) _exit(7);
-        memset(m, 1, 4 << 20);
-        char *third = mmap(0, 4 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (third == MAP_FAILED) _exit(8);
-        memset(third, 1, 4 << 20);
-        /* 12 MiB in use of 16: another 6 MiB does not fit, nor does a copy of it all */
-        if (mmap(0, 6 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) != MAP_FAILED || errno != ENOMEM) _exit(9);
-        if (fork() != -1 || errno != ENOMEM) _exit(10);
-        if (!put("/sys/fs/cgroup/cgm/memory.max", "max")) _exit(11);
-        pid_t c = fork();
-        if (c == 0) _exit(0);
-        if (c < 0) _exit(12);
-        int cst;
-        waitpid(c, &cst, 0);
-        if (!put("/sys/fs/cgroup/cgroup.procs", me)) _exit(13);
+        char *big = mmap(0, 64 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (big == MAP_FAILED) _exit(5);         /* mapping is not what the limit is about */
+        if (!slurp("/sys/fs/cgroup/cgm/memory.current", buf, sizeof buf) || atol(buf) >= (16 << 20)) _exit(6);
+        pid_t hog = fork();
+        if (hog == 0) {
+            memset(big, 1, 64 << 20);              /* passes 16 MiB: killed */
+            _exit(0);
+        }
+        if (hog < 0) _exit(7);
+        int hst = 0;
+        if (waitpid(hog, &hst, 0) != hog || !WIFSIGNALED(hst) || WTERMSIG(hst) != SIGKILL) _exit(8);
+        if (!slurp("/sys/fs/cgroup/cgm/memory.events", buf, sizeof buf) || !strstr(buf, "oom_kill 1")) _exit(9);
+        a[0] = 2;                                  /* this process, with fewer pages, was left alone */
+        if (!put("/sys/fs/cgroup/cgm/memory.max", "max")) _exit(10);
+        if (!put("/sys/fs/cgroup/cgroup.procs", me)) _exit(11);
         _exit(0);
     }
     int st = 0;
     waitpid(p, &st, 0);
     int ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    if (!ok) errno = WIFEXITED(st) ? 1000 + WEXITSTATUS(st) : 2000 + WTERMSIG(st);   /* the report shows which step */
     ok = rmdir("/sys/fs/cgroup/cgm") == 0 && ok;
     return ok;
 }
@@ -328,16 +348,36 @@ static int notif_addfd(void) {
     return 1;
 }
 
+/* splice of a /proc file into a pipe: the bytes, and the offset moves on. */
+static int splice_proc(void) {
+    int fd = open("/proc/sys/kernel/hostname", O_RDONLY), p[2];
+    char want[80], buf[80];
+    struct utsname u;
+    if (fd < 0 || pipe(p) < 0) return 0;
+    uname(&u);
+    int n = snprintf(want, sizeof want, "%s\n", u.nodename);
+    long a = splice(fd, NULL, p[1], NULL, 64, 0);
+    long b = splice(fd, NULL, p[1], NULL, 64, 0);
+    long c = read(p[0], buf, sizeof buf);
+    int ok = a == n && b == 0 && c == n && memcmp(buf, want, n) == 0;
+    off_t off = 1;
+    ok = ok && splice(fd, &off, p[1], NULL, 8, 0) < 0;
+    close(fd); close(p[0]); close(p[1]);
+    return ok;
+}
+
 int main(void) {
     setup();
     EXPECT("sethostname, uname, /proc/sys/kernel/hostname", hostname());
     EXPECT("setdomainname", domainname());
+    EXPECT("the names are written through /proc/sys/kernel/hostname and domainname", proc_names());
+    EXPECT("splice reads a /proc file into a pipe", splice_proc());
     EXPECT("clock_settime moves CLOCK_REALTIME", set_clock());
     EXPECT("settimeofday", timeofday());
     EXPECT("adjtimex reads and sets", adjust());
     EXPECT("not root: EPERM", not_root());
     EXPECT("a cgroup namespace roots the tree", cgroup_ns());
-    EXPECT("memory.max refuses a mapping that would pass it", cgroup_mem());
+    EXPECT("memory.max kills the biggest process of a group that passes it", cgroup_mem());
     EXPECT("seccomp USER_NOTIF: a supervisor answers a call", notifier());
     EXPECT("seccomp NOTIF_ADDFD installs a descriptor in the caller", notif_addfd());
     return done();

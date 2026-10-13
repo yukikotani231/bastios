@@ -2,6 +2,7 @@
  * permissions, IPC_STAT/IPC_SET/IPC_RMID, blocking waits that a signal or
  * a removal ends, and SEM_UNDO at exit. */
 #include "compat.h"
+#include <fcntl.h>
 #include <signal.h>
 #include <sys/ipc.h>
 #include <sys/msg.h>
@@ -13,6 +14,9 @@
 #include <string.h>
 #include <time.h>
 
+#ifndef MSG_COPY
+#define MSG_COPY 040000
+#endif
 struct m { long type; char text[64]; };
 union semun { int val; struct semid_ds *buf; unsigned short *array; };
 static void nop(int s) { (void)s; }
@@ -207,6 +211,45 @@ static int proc_files(void) {
     return ok;
 }
 
+/* Writes str to a /proc/sys file; returns 0 on success. */
+static int sysctl_put(const char *path, const char *str) {
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return -1;
+    int r = write(fd, str, strlen(str)) == (ssize_t)strlen(str) ? 0 : -1;
+    close(fd);
+    return r;
+}
+
+/* msg_next_id and shm_next_id name the id of the next new queue or
+ * segment, once; MSG_COPY reads the message at an index and leaves it. */
+static int next_ids_and_copy(void) {
+    char b[64];
+    struct m mm = {.type = 3};
+    int ok = slurp("/proc/sys/kernel/msg_next_id", b, sizeof b) && strncmp(b, "-1", 2) == 0;
+    ok = ok && sysctl_put("/proc/sys/kernel/msg_next_id", "7") == 0;
+    int q = msgget(IPC_PRIVATE, IPC_CREAT | 0600);
+    ok = ok && q == 7 && slurp("/proc/sys/kernel/msg_next_id", b, sizeof b) && strncmp(b, "-1", 2) == 0;
+    /* A slot in use: the request is spent and another id comes. */
+    ok = ok && sysctl_put("/proc/sys/kernel/msg_next_id", "7") == 0;
+    int q2 = msgget(IPC_PRIVATE, IPC_CREAT | 0600);
+    ok = ok && q2 >= 0 && q2 != 7;
+    strcpy(mm.text, "one"); ok = ok && msgsnd(q, &mm, 4, 0) == 0;
+    mm.type = 5; strcpy(mm.text, "two"); ok = ok && msgsnd(q, &mm, 4, 0) == 0;
+    struct m r = {0};
+    ok = ok && msgrcv(q, &r, sizeof r.text, 1, MSG_COPY | IPC_NOWAIT) == 4 && r.type == 5 && !strcmp(r.text, "two");
+    ok = ok && msgrcv(q, &r, sizeof r.text, 2, MSG_COPY | IPC_NOWAIT) == -1 && errno == ENOMSG;
+    ok = ok && msgrcv(q, &r, sizeof r.text, 0, MSG_COPY) == -1 && errno == EINVAL;
+    struct msqid_ds ds;
+    ok = ok && msgctl(q, IPC_STAT, &ds) == 0 && ds.msg_qnum == 2;   /* the copies left both queued */
+    ok = ok && msgrcv(q, &r, sizeof r.text, 0, IPC_NOWAIT) == 4 && r.type == 3;
+    ok = ok && sysctl_put("/proc/sys/kernel/shm_next_id", "9") == 0;
+    int sm = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0600);
+    ok = ok && sm == 9;
+    ok = ok && sysctl_put("/proc/sys/kernel/msg_next_id", "-2") == -1 && sysctl_put("/proc/sys/kernel/msg_next_id", "x") == -1;
+    msgctl(q, IPC_RMID, 0); msgctl(q2, IPC_RMID, 0); shmctl(sm, IPC_RMID, 0);
+    return ok;
+}
+
 int main(void) {
     setup();
     EXPECT("msgsnd, msgrcv and IPC_STAT", queue_basics());
@@ -222,5 +265,6 @@ int main(void) {
     EXPECT("shmat, a second view, fork, IPC_RMID", shm_basics());
     EXPECT("shmget and shmat errors", shm_errors());
     EXPECT("/proc/sysvipc and /proc/sys/kernel limits", proc_files());
+    EXPECT("msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message", next_ids_and_copy());
     return done();
 }
