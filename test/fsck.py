@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Checks a BastiOS disk image (src/diskfs.bastio's BSTDISK3 format, or
-the older BSTDISK2, which is the same with only the fixed directory blocks).
+"""Checks a BastiOS disk image (src/diskfs.bastio's BSTDISK4 format, which is BSTDISK3 plus
+extension blocks for a directory past 512 blocks; BSTDISK3 itself; or the
+older BSTDISK2, which is the same with only the fixed directory blocks).
 
     fsck.py DISK.img
 
@@ -32,11 +33,14 @@ import struct, sys
 
 BLOCK = 4096
 DIR_AT = BLOCK
-DSLOTS = 8192
+DSLOTS = 32768
 DENT = 256
 DPB = BLOCK // DENT
 DIR_FIXED = 4
 DIR_BLOCKS = DSLOTS // DPB
+DIR_SB = 512
+EXT_PTRS = 511
+EXT_MAX = 4
 DATA_B0 = 5
 PTRS = 512
 MAX_BLOCKS = 1 << 28
@@ -66,16 +70,29 @@ def entries(img):
     blocks = min(len(img) // BLOCK, MAX_BLOCKS)
     # Where each directory block is: the fixed ones, then the superblock's.
     dblocks = [1 + db for db in range(DIR_FIXED)]
-    if img[0:8] == b"BSTDISK3":
+    seen = []
+    if img[0:8] in (b"BSTDISK3", b"BSTDISK4"):
+        ptrs = [u64(img, 8 * db) for db in range(DIR_FIXED, DIR_SB)]
+        if img[0:8] == b"BSTDISK4":
+            # The extension chain: word 0 names the next block, the others
+            # directory blocks DIR_SB + EXT_PTRS * e + (w - 1).
+            eb, seen = u64(img, 8), []
+            while eb and len(seen) < EXT_MAX:
+                if not DATA_B0 <= eb < blocks or eb in seen:
+                    errors.append(f"superblock: extension block {len(seen)} ({eb}) is off the disk or repeated")
+                    break
+                seen.append(eb)
+                ptrs.extend(u64(img, eb * BLOCK + 8 * w) for w in range(1, EXT_PTRS + 1))
+                eb = u64(img, eb * BLOCK)
         ended = False
-        for db in range(DIR_FIXED, DIR_BLOCKS):
-            b = u64(img, 8 * db)
+        for n, b in enumerate(ptrs[:DIR_BLOCKS - DIR_FIXED]):
+            db = DIR_FIXED + n
             if b == 0:
                 ended = True
             elif ended:
-                errors.append(f"superblock: directory block {db} ({b}) is named past a gap")
+                errors.append(f"directory block {db} ({b}) is named past a gap")
             elif not DATA_B0 <= b < blocks:
-                errors.append(f"superblock: directory block {db} ({b}) is off the disk")
+                errors.append(f"directory block {db} ({b}) is off the disk")
                 ended = True
             else:
                 dblocks.append(b)
@@ -88,7 +105,7 @@ def entries(img):
     # (nothing changes an entry), so a small disk costs no more to check
     # than its directory.
     ents.extend([_EMPTY] * (DSLOTS - len(ents)))
-    return dblocks, ents, errors
+    return dblocks, ents, errors, seen
 
 
 def _entry(e):
@@ -104,10 +121,10 @@ _EMPTY = _entry(bytes(DENT))
 
 def check(img):
     notes = []
-    if img[0:8] not in (b"BSTDISK2", b"BSTDISK3"):
-        return ["no BSTDISK3 or BSTDISK2 magic (a blank disk is formatted at mount)"], notes, {}
+    if img[0:8] not in (b"BSTDISK2", b"BSTDISK3", b"BSTDISK4"):
+        return ["no BSTDISK4, BSTDISK3 or BSTDISK2 magic (a blank disk is formatted at mount)"], notes, {}
     blocks = min(len(img) // BLOCK, MAX_BLOCKS)
-    dblocks, ents, errors = entries(img)
+    dblocks, ents, errors, exts = entries(img)
 
     def where(i):
         return f"entry {i} ({ents[i]['name'].decode(errors='replace')!r})"
@@ -172,6 +189,9 @@ def check(img):
     owner = {}
     for db, b in enumerate(dblocks[DIR_FIXED:], DIR_FIXED):
         owner[b] = f"directory block {db}"
+        stats["blocks"] += 1
+    for e, b in enumerate(exts):
+        owner[b] = f"extension block {e}"
         stats["blocks"] += 1
 
     def claim(b, i, what):

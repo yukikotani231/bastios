@@ -108,15 +108,15 @@ const SY_UM: u64 = SY_NS + NPROC * NF_N;   // /proc/P/uid_map, gid_map, setgroup
 const UMF_N: u64 = 3;
 const SY_CG: u64 = SY_UM + NPROC * UMF_N;   // a cgroup's control file f at slot * CGF_N + f (src/lxcgroup.bastio)
 const CGF_N: u64 = 18;
-const NS_DIRS: u64 = 0x100;            // DIR_PROC + NS_DIRS + pid: /proc/PID/ns
-const FD_DIRS: u64 = 0x200;            // DIR_PROC + FD_DIRS + pid: /proc/PID/fd
-const TASK_DIRS: u64 = 0x300;          // DIR_PROC + TASK_DIRS + pid: /proc/PID/task
-const NET_DIR: u64 = 0x400;            // DIR_PROC + NET_DIR: /proc/net
+const NS_DIRS: u64 = 0x400;            // DIR_PROC + NS_DIRS + pid: /proc/PID/ns
+const FD_DIRS: u64 = 0x800;            // DIR_PROC + FD_DIRS + pid: /proc/PID/fd
+const TASK_DIRS: u64 = 0xC00;          // DIR_PROC + TASK_DIRS + pid: /proc/PID/task
+const NET_DIR: u64 = 0x1000;            // DIR_PROC + NET_DIR: /proc/net
 const LOOP_SYS: u64 = 8;               // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
 const S_IFREG_RO: u64 = 0x8124;       // a regular file, r--r--r--
-const INO_PROC: u64 = 8192;           // /proc inode numbers start here (past INO_FILES + HFILES)
+const INO_PROC: u64 = INO_FILES + HFILES;  // /proc inode numbers start here (past every file's: INO_FILES + the handle)
 const LX_READLINK: u64 = 89;
 const LX_READLINKAT: u64 = 267;
 
@@ -721,18 +721,18 @@ fn proc_dir_meta(d: u64) -> Meta {
     return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 16384, mtime: 0, own: 0 };
   }
   if d >= DIR_PROC + TASK_DIRS {
-    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 12288 + d % 256, mtime: 0, own: 0 };
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 12288 + d % 1024, mtime: 0, own: 0 };
   }
   if d >= DIR_PROC + FD_DIRS {
-    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 8192 + d % 256, mtime: 0, own: 0 };
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 8192 + d % 1024, mtime: 0, own: 0 };
   }
   if d >= DIR_PROC + NS_DIRS {
-    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 4096 + d % 256, mtime: 0, own: 0 };
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 4096 + d % 1024, mtime: 0, own: 0 };
   }
   if d == DIR_PROC {
     return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1, mtime: 0, own: 0 };   // as Linux: runc checks it
   }
-  return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + d % 256, mtime: 0, own: 0 };
+  return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + d % 1024, mtime: 0, own: 0 };
 }
 
 /// Entry i of /proc directory `dir` (getdents64), its name in the
@@ -2336,12 +2336,34 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
     return EACCES;
   }
   let mut out = balloc(PROC_OUT);
-  let l = smaller(proc_text(&mut k, pid, f, &mut out), smaller(size, XFER));
+  let full = proc_text(&mut k, pid, f, &mut out);
+  // The program's name is from the top of the file system; the reader sees
+  // it from its own root (chroot), as on Linux. A program outside the
+  // root keeps its full name.
+  let mut cut = 0;
+  let rl = root_len(k, pid);
+  if is_exe_file(f) && rl > 0 && full > rl + 1 {
+    // out is "/" and the name; the root is kept without the "/".
+    let mut same = true;
+    let mut j = 0;
+    while same && j < rl
+      invariant j <= rl && rl + 1 < full && full <= PROC_OUT && rl <= FNAME_MAX && blen(out) == PROC_OUT && kok(k) && pid < NPROC
+    {
+      if cast[u64](bget(out, j + 1)) != wget(k.croot, pid * CWD_STRIDE + 1 + j) % 256 {
+        same = false;
+      }
+      j = j + 1;
+    }
+    if same && bget(out, rl + 1) == 47 {
+      cut = rl + 1;
+    }
+  }
+  let l = smaller(full - cut, smaller(size, XFER));
   let mut i = 0;
   while i < l
-    invariant i <= l && l <= PROC_OUT && l <= XFER && blen(out) == PROC_OUT && kok(k)
+    invariant i <= l && cut <= full && l <= full - cut && full <= PROC_OUT && l <= XFER && blen(out) == PROC_OUT && kok(k)
   {
-    bset(&mut k.fs.xfer, i, bget(out, i));
+    bset(&mut k.fs.xfer, i, bget(out, cut + i));
     i = i + 1;
   }
   bfree(out);

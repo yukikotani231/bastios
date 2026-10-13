@@ -19,7 +19,7 @@ import "snd.bastio";
 // literals FD_ROWS (src/fs.bastio), IPC_LEN, SYS_LEN and the SYS_* offsets,
 // ALARMS_LEN and HOLES_LEN follow it, and a
 // signal's sender word keeps the pid in 8 bits (post_from, src/lxsig.bastio).
-const NPROC: u64 = 256;
+const NPROC: u64 = 512;
 const STRIDE: u64 = 72 + REGS_EXT;
 const PTAB_LEN: u64 = NPROC * STRIDE;   // the most the table grows to
 const PGROW: u64 = 32;               // rows the process table starts with (it doubles from there)
@@ -392,9 +392,10 @@ fn wake_readers(procs: &mut Buf, q: &mut Queue, line: &Buf)
   requires ptab_ok(procs) && qok(q) && lineok(line)
   ensures ptab_ok(procs) && qok(q)
 {
+  let cap = len(procs) / STRIDE;     // past it, every process is FREE
   let mut p = 1;
-  while p < NPROC
-    invariant 1 <= p && p <= NPROC && ptab_ok(procs) && qok(q)
+  while p < cap
+    invariant 1 <= p && cap <= NPROC && ptab_ok(procs) && qok(q)
   {
     if state(procs, p) == READING && q.r.n > 0 {
       pset(&mut procs, p, reg_word(R_RET), q_pop(&mut q));
@@ -413,7 +414,7 @@ fn wake_readers(procs: &mut Buf, q: &mut Queue, line: &Buf)
 // Everything the kernel owns, in one place. `mmu` and `cpu` stay with
 // `main`, which lends them where they are needed.
 // Linux file descriptors (src/lxfd.bastio).
-const LXNFD: u64 = 512;
+const LXNFD: u64 = 1024;
 const LXFD_LEN: u64 = NPROC * LXNFD;
 const FD_CONSOLE: u64 = 1;
 const FD_OFD: u64 = 2;
@@ -455,33 +456,36 @@ const LK_W: u64 = 6;
 const LK_WAITS: u64 = 768;            // LK_N * LK_W
 const LK_WW: u64 = 4;
 const LK_LEN: u64 = LK_WAITS + NPROC * LK_WW;
-const IPC_LEN: u64 = 9984;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
+const IPC_LEN: u64 = 3840 + NPROC * 24;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
 const RNG_LEN: u64 = 19;              // the random generator's words (src/lxdev.bastio)
-const SYS_LEN: u64 = 16257;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio), then SYS_BUSY, the timer ticks all processes have run (/proc/stat)
 const SYS_PQ: u64 = 160;
-const SYS_PR: u64 = 256;               // SYS_PQ + PQ_N * 12; NPROC * PR_W words
-const SYS_RL: u64 = 1536;               // SYS_PR + NPROC * PR_W; NPROC * RL_W words (src/lxrlimit.bastio)
-const SYS_DL: u64 = 10240;              // SYS_RL + NPROC * RL_W; NPROC * 3 words
-const SYS_JC: u64 = 11008;              // SYS_DL + NPROC * 3; a word per process (job control, src/lxsig.bastio)
-const SYS_TM: u64 = 11264;              // SYS_JC + NPROC; NPROC * 3 words (system and children's times, src/lxrlimit.bastio)
-const SYS_RB: u64 = 12032;              // SYS_TM + NPROC * 3; a word per thread (robust futex list head, src/lxthread.bastio)
-const SYS_CAP: u64 = 12288;             // SYS_RB + NPROC; NPROC * CAP_W words (capabilities, src/lxcap.bastio)
+// k.sys is laid out as the chain below: each part starts where the one before it ends, and the parts that
+// hold a word or more for every process grow with NPROC.
+const SYS_PR: u64 = SYS_PQ + 96;               // SYS_PQ + PQ_N * 12; NPROC * PR_W words
+const SYS_RL: u64 = SYS_PR + NPROC * 5;               // SYS_PR + NPROC * PR_W; NPROC * RL_W words (src/lxrlimit.bastio)
+const SYS_DL: u64 = SYS_RL + NPROC * 34;              // SYS_RL + NPROC * RL_W; NPROC * 3 words
+const SYS_JC: u64 = SYS_DL + NPROC * 3;              // SYS_DL + NPROC * 3; a word per process (job control, src/lxsig.bastio)
+const SYS_TM: u64 = SYS_JC + NPROC;              // SYS_JC + NPROC; NPROC * 3 words (system and children's times, src/lxrlimit.bastio)
+const SYS_RB: u64 = SYS_TM + NPROC * 3;              // SYS_TM + NPROC * 3; a word per thread (robust futex list head, src/lxthread.bastio)
+const SYS_CAP: u64 = SYS_RB + NPROC;             // SYS_RB + NPROC; NPROC * CAP_W words (capabilities, src/lxcap.bastio)
+const SYS_IOP: u64 = SYS_CAP + NPROC * 4;            // SYS_CAP + NPROC * CAP_W; a word per thread (ioprio_set, src/lxprio.bastio)
+const SYS_AT: u64 = SYS_IOP + NPROC;             // SYS_IOP + NPROC; AT_N entries of 3 words: handle + 1, access time, the modification time it was set against
+const SYS_LR: u64 = SYS_AT + 96;             // SYS_AT + AT_N * 3; NPROC * LR_N ranges of 2 words
+const SYS_PT: u64 = SYS_LR + NPROC * 8;             // SYS_LR + NPROC * LR_N * 2; a word per process
+const SYS_SEAL: u64 = SYS_PT + NPROC;           // SYS_PT + NPROC; SEAL_N memfds of 2 words: file + 1 (0: free), seals
+const SYS_PT2: u64 = SYS_SEAL + 32;            // SYS_SEAL + SEAL_N * 2; a word per process
+const SYS_BUSY: u64 = SYS_PT2 + NPROC;           // SYS_PT2 + NPROC; one word: ticks some process was running at
+const SYS_LEN: u64 = SYS_BUSY + 1;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio), then SYS_BUSY, the timer ticks all processes have run (/proc/stat)
 const SYS_PIPEMAX: u64 = 150;          // /proc/sys/fs/pipe-max-size (0: PIPE_CAP), past the adjtimex words (src/lxsys.bastio)
-const SYS_AT: u64 = 13568;             // SYS_IOP + NPROC; AT_N entries of 3 words: handle + 1, access time, the modification time it was set against
 const AT_N: u64 = 32;
-const SYS_LR: u64 = 13664;             // SYS_AT + AT_N * 3; NPROC * LR_N ranges of 2 words
 const LR_N: u64 = 4;
 // ptrace (src/lxptrace.bastio): process p's word in k.sys from SYS_PT holds
 // its tracer + 1 in the low 16 bits (0: not traced) and the flags below.
-const SYS_PT: u64 = 15712;             // SYS_LR + NPROC * LR_N * 2; a word per process
-const SYS_SEAL: u64 = 15968;           // SYS_PT + NPROC; SEAL_N memfds of 2 words: file + 1 (0: free), seals
 const SEAL_N: u64 = 16;
 // Its second word, from SYS_PT2, is for system call stops: TS_SYS to stop at
 // each system call (PTRACE_SYSCALL), TS_ENTRY while stopped before one,
 // TS_NOENT to let the next one start, TS_EXIT while stopped after one, and
 // the call's number times TS_NR.
-const SYS_BUSY: u64 = 16256;           // SYS_PT2 + NPROC; one word: ticks some process was running at
-const SYS_PT2: u64 = 16000;            // SYS_SEAL + SEAL_N * 2; a word per process
 const TS_SYS: u64 = 1;
 const TS_ENTRY: u64 = 2;
 const TS_NOENT: u64 = 4;
@@ -495,7 +499,6 @@ const PT_STOPPED: u64 = 131072;        // in a ptrace-stop: the tracer may read 
 const PT_SKIP: u64 = 262144;           // the signal about to be delivered was injected: it does not stop again
 const PT_SIG: u64 = 16777216;          // the signal that stopped it, times PT_SIG
 const PT_OPT: u64 = 4294967296;        // PTRACE_SETOPTIONS: the low 8 bits, then bit 8 for PTRACE_O_EXITKILL, times PT_OPT
-const SYS_IOP: u64 = 13312;            // SYS_CAP + NPROC * CAP_W; a word per thread (ioprio_set, src/lxprio.bastio)
 // Capabilities the kernel checks (src/lxcap.bastio).
 const CAP_SYS_TIME: u64 = 25;
 const CAP_SYS_RESOURCE: u64 = 24;
@@ -508,7 +511,7 @@ const CAP_SETUID: u64 = 7;
 const CAP_SYS_BOOT: u64 = 22;
 const CAP_SETPCAP: u64 = 8;
 const PQ_N: u64 = 8;                   // POSIX message queues (SYS_PQ + PQ_N * 12 words = SYS_LEN)
-const IPCB_LEN: u64 = 411648;         // its message bytes, IPC_SETS * MQ_CAP; then the POSIX queues' names and messages, PQ_N * (256 + 16384)
+const IPCB_LEN: u64 = 411904;         // its message bytes, IPC_SETS * MQ_CAP; then the POSIX queues' names and messages, PQ_N * (256 + 16384), then their SIGEV_THREAD cookies, PQ_N * 32
 const LK_EOF: u64 = 18446744073709551615;   // a range to the end of the file; no file
 const LK_DESC: u64 = 4294967296;      // 2^32: lock owners from here are descriptions
 const LKC_FCNTL: u64 = 0;             // record and OFD locks
@@ -633,7 +636,7 @@ const SIGACT_ROW: u64 = 256;          // per process: four words per signal
 const SIGACT_LEN: u64 = NPROC * SIGACT_ROW;
 const SIGSAVE_ROW: u64 = 65;          // per process: the saved mask, then a sender per signal (1 + NSIG)
 const SIGSAVE_LEN: u64 = NPROC * SIGSAVE_ROW;
-const ALARMS_LEN: u64 = 4608;        // NPROC * 2, then PT_N POSIX timers of PT_W words per process
+const ALARMS_LEN: u64 = NPROC * 2 + NPROC * 16;        // NPROC * 2, then PT_N POSIX timers of PT_W words per process
 const PT_BASE: u64 = NPROC * 2;             // where the POSIX timers start in k.alarms (src/lxptimer.bastio)
 const PT_N: u64 = 4;                 // POSIX timers per process
 const PT_W: u64 = 4;                 // words per timer: deadline, interval, state, overruns
@@ -641,7 +644,7 @@ const MAP_N: u64 = 4;                // MAP_SHARED file mappings per process
 const MAP_W: u64 = 4;                // words per mapping: first page + 1, pages, description, offset
 const MAPS_LEN: u64 = NPROC * MAP_N * MAP_W;
 const HOLE_N: u64 = 16;              // address space holes munmap left, per process
-const HOLES_LEN: u64 = 8192;         // NPROC * HOLE_N * 2
+const HOLES_LEN: u64 = NPROC * 32;         // NPROC * HOLE_N * 2
 const LZ_W: u64 = 4;                  // lazy code: first page + 1 (0: none), pages, file hold, file offset
 const LAZY_LEN: u64 = NPROC * LZ_W;
 const AN_N: u64 = 16;                  // anonymous memory not touched yet: records per process (src/lxanon.bastio)
@@ -692,7 +695,7 @@ const DIR_ROOT: u64 = 0;
 const DIR_BIN: u64 = 1;
 const DIR_VFS: u64 = 2;               // DIR_VFS + a file layer directory handle
 const DIR_CG: u64 = 0x4000000;        // DIR_CG + n: cgroup n's directory (src/lxcgroup.bastio)
-const DIR_PROC: u64 = 0x10000;        // /proc; DIR_PROC + pid: /proc/PID (src/lxprocfs.bastio)
+const DIR_PROC: u64 = 0x100000;       // /proc; DIR_PROC + pid: /proc/PID (src/lxprocfs.bastio)
 const PROC_DEV: u64 = 256;            // an OF_DEV device from here up is a /proc file: PROC_DEV + 16 * pid + PF_*
 const PF_EXE: u64 = 7;                // /proc/PID/exe, a link
 const EACCES: u64 = 18446744073709551603;   // 2^64 - 13
@@ -888,6 +891,9 @@ struct Kernel {
   scf: Buf,             // seccomp filters, empty until one is loaded (src/lxseccomp.bastio)
   mstr: Bytes,          // the mounts' paths, and the logical path of the last lookup
   naps: bool,           // a process may be in TIMEWAIT: false lets sleepers_wake skip its scan
+  mt_hi: u64,           // one past the highest mount entry ever given to a namespace (me_set): no later one is in use
+  ofd_hi: u64,          // one past the highest open file description ever made: no later one is in use (scans stop there)
+  socks: bool,          // a process may be in SOCKWAIT (nap sets it, sock_wake clears it): false lets sock_wake return at once
 }
 
 /// Process p's ptrace word (see SYS_PT).
@@ -975,7 +981,7 @@ spec fn kok(k: &Kernel) -> bool {
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 35;
+const NPROGS: u64 = 36;
 const LDSO_PROG: u64 = 25;            // musl's dynamic linker, the interpreter of musl programs
 
 fn prog_name(i: u64) -> Str {
@@ -1083,6 +1089,9 @@ fn prog_name(i: u64) -> Str {
   }
   if i == 34 {
     return "mfd";
+  }
+  if i == 35 {
+    return "mproc";
   }
   return "(file)";                    // a program loaded from a file
 }
@@ -1296,7 +1305,7 @@ fn new_pid_from(k: &mut Kernel, round: bool) -> u64
   // The process table last: its length is how many rows every table has.
   if !zgrow(&mut k.sigact, n * SIGACT_ROW) || !zgrow(&mut k.cwd, n * CWD_STRIDE)
      || !zgrow(&mut k.croot, n * CWD_STRIDE) || !zgrow(&mut k.lxfd, n * LXNFD)
-     || !zgrow(&mut k.fs.ftab, n * NFD * FD_STRIDE) || !zgrow(&mut k.sigsave, n * SIGSAVE_ROW) || !zgrow(&mut k.procs, n * STRIDE) {
+     || !zgrow(&mut k.fs.ftab, (FD_POOL + n * NFD) * FD_STRIDE) || !zgrow(&mut k.sigsave, n * SIGSAVE_ROW) || !zgrow(&mut k.procs, n * STRIDE) {
     return 0;
   }
   let grown = free_pid(k.procs, cap);
@@ -1589,9 +1598,10 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
   if np == 0 {
     np = pr_reaper(k, pid);                // else to the nearest child subreaper (src/lxprctl.bastio)
   }
+  let cap = len(k.procs) / STRIDE;     // past it, every process is FREE
   let mut c = 1;
-  while c < NPROC
-    invariant 1 <= c && c <= NPROC && kok(k) && np < NPROC
+  while c < cap
+    invariant 1 <= c && cap <= NPROC && kok(k) && np < NPROC
   {
     if pget(k.procs, c, F_PARENT) == pid && state(k.procs, c) != FREE {
       if np != 0 && np != c {

@@ -87,7 +87,7 @@ line one
 1
 
 == nvim: it reads the terminal's size, and has colours
-$ bb chroot /disk/a /bin/sh -c 'cd /root && nvim -u NONE size.txt'
+$ bb chroot /disk/a /bin/sh -c 'cd /root && TERM=xterm nvim -u NONE size.txt'
 > :call setline(1, &columns . "x" . &lines . " " . (&t_Co > 7 ? "colour" : "mono"))\r
 > :wq\r
 $ bb cat /disk/a/root/size.txt

@@ -177,7 +177,8 @@ fn lx_sysinfo(k: &mut Kernel, pid: u64, va: u64) -> u64
   xfer_u64(&mut k.fs.xfer, 0, k.ns / NS_PER_S);   // uptime
   xfer_u64(&mut k.fs.xfer, 32, pool_size(k.mem.pool) * 4096);    // totalram: the RAM the pool holds
   xfer_u64(&mut k.fs.xfer, 40, nfree * 4096);     // freeram
-  bset(&mut k.fs.xfer, 80, cast[u8](procs));      // procs (u16)
+  bset(&mut k.fs.xfer, 80, cast[u8](procs % 256));      // procs (u16)
+  bset(&mut k.fs.xfer, 81, cast[u8](procs / 256 % 256));
   bset(&mut k.fs.xfer, 104, 1);                   // mem_unit
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, SYSINFO_SIZE) != SYSINFO_SIZE {
     return EFAULT;
@@ -610,11 +611,11 @@ fn lx_truncate(k: &mut Kernel, pid: u64, path: u64, size: u64) -> u64
   if big != 0 {
     return big;
   }
-  let nfd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, O_WRITE, n);
+  let nfd = vfs_open(&mut k.fs, &mut k.mem, nbase(pid), NFD, O_WRITE, n);
   if nfd == NO_FD || nfd >= NFD {
     return ENOENT;
   }
-  let row = pid * NFD + nfd;
+  let row = nbase(pid) + nfd;
   let ok = vfs_truncate(&mut k.fs, &mut k.mem, row, size);
   vfs_close(&mut k.fs, &mut k.mem, row);
   if !ok {

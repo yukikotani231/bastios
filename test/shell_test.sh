@@ -77,11 +77,11 @@ def boot(cpus, with_disk=False, virtio=False, nvme=False, nvme4k=False, ahci=Fal
         # address the kernel ends up with can only have come from DHCP.
         nic = ["-netdev", f"user,id=n0,net={subnet}",
                "-device", "virtio-net-pci,netdev=n0"]
-    # 256M: the kernel's arena is a fraction of RAM (4 MiB up to 128 MiB), and
-    # the two directory tables (the disk's and the loop mount's) take 2.5 MiB
-    # of it, which leaves too little for the 120 processes one case forks.
+    # 1G: the kernel's arena is a fraction of RAM (4 MiB up to 128 MiB, 32 MiB
+    # here). The per-process tables take 24 KiB a process and double with the
+    # process table, so the 300 processes of mproc need several MiB of it.
     return subprocess.Popen(
-        [qemu_bin, "-kernel", kernel_path or kernel, "-m", "256M", "-smp", str(cpus),
+        [qemu_bin, "-kernel", kernel_path or kernel, "-m", "1G", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
          "-serial", "stdio", "-monitor", f"unix:{monitor},server,nowait" if monitor else "none"] + drive + nic + list(extra),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -510,7 +510,7 @@ steps = [
     # What Linux programs look for besides: processors, the file system
     # types, a process's own mount table, and three fixed sysctls.
     ("n=0; while read k r; do [ \"$k\" = processor ] && n=$((n+1)); done < /proc/cpuinfo; echo cpus=$n; cat /proc/filesystems; cat /proc/self/mounts", [f"cpus={smp}\r\n".encode(), b"nodev\tramfs", b"nodev\ttmpfs", b"\tbstdisk3", b"proc /proc proc"], b"\n# "),
-    ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n256\r\n", b"mounts"], b"\n# "),
+    ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n512\r\n", b"mounts"], b"\n# "),
     # An 8 MiB stack, Linux's default (t_mem in make compat maps 640 MiB
     # of the 1 GiB window and grows the stack past 6 MiB).
     ("ulimit -s", b"\r\n8192\r\n", b"\n# "),
@@ -1186,6 +1186,8 @@ session("virtio", True, [
     ("mcont", b"mcont: ok", b"\n# "),
     # Far more open file descriptions than the 1024 the table once held, from several processes (user/mfd.c).
     ("mfd", b"mfd: ok, 8 processes held 1856 descriptions", b"\n# "),
+    # More processes at once than the 256 the process table once held (user/mproc.c).
+    ("mproc", b"mproc: ok, 300 processes at once", b"\n# "),
     ("exit", b""),
 ], halt=True, ready=lambda: irq_found("virtio"))
 
@@ -1934,24 +1936,30 @@ deadline = time.time() + timeout
 # with a sleep before QEMU is killed.
 for line, want, until in [
     ("ash", b"built-in shell (ash)", b"\n# "),
-    ("stat -f -c '%b %c' /disk; echo big > /disk/b; cat /disk/b; stat -f -c %f /disk; rm /disk/b", b"10485755 8191\r\nbig\r\n1048", b"\n# "),
+    ("stat -f -c '%b %c' /disk; echo big > /disk/b; cat /disk/b; stat -f -c %f /disk; rm /disk/b", b"10485755 32767\r\nbig\r\n1048", b"\n# "),
     ("mkdir disk/many; i=0; while [ $i -lt 1100 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; sleep 1", b"\r\n1100\r\n", b"\n# "),
     # The directory table of the disk (DSLOTS entries) fills up: the create
     # that finds no free entry fails with ENOSPC, and removing the files
     # frees their entries again.
-    ("mkdir disk/full; i=0; while echo x > disk/full/f$i 2>/dev/null; do i=$((i+1)); done; echo x > disk/full/z; echo n$((i > 6500))", b"disk/full/z: No space left on device\r\nn1\r\n", b"\n# "),
-    ("rm -r disk/full; echo x > disk/after; cat disk/after; rm disk/after; sleep 1", b"\r\nx\r\n", b"\n# "),
+    ("mkdir disk/full; i=0; while echo x > disk/full/f$i 2>/dev/null; do i=$((i+1)); done; echo x > disk/full/z; echo n$((i > 30000))", b"disk/full/z: No space left on device\r\nn1\r\n", b"\n# "),
 ]:
     mark = len(out)
     if mark == 0 and not read_until(b"bastios> "):
         print("FAIL: no prompt after the big-disk boot"); fails += 1
         break
     mark = len(out)
+    if "disk/full" in line:
+        deadline = time.time() + timeout      # 32767 creates, each a disk write: a minute or two
     qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
     ok = read_until(until, mark) and want in out[mark:]
     print(("ok  " if ok else "FAIL"), "(big-disk boot)", repr(line)); ok or print(repr(out[mark:]))
     fails += not ok
 qemu.kill(); qemu.wait()
+# The full directory (left for the reboot below) takes more than 512
+# directory blocks, which the superblock cannot name: the disk is BSTDISK4.
+with open(big, "rb") as f:
+    ok = f.read(8) == b"BSTDISK4"
+print(("ok  " if ok else "FAIL"), "(big-disk boot) a directory past 512 blocks makes the disk BSTDISK4"); fails += not ok
 # A volume that was made larger since the last boot (a cloud volume resized
 # while the machine was off): the file system takes the new size at mount, with
 # its files in place.
@@ -2044,6 +2052,10 @@ if smp >= 4:   # (the fake service above is set up on the four-processor run)
         print("FAIL boot option mcloud state:", repr(out[mark:])); fails += 1
     qemu.kill(); qemu.wait()
 
+def reset_deadline():
+    global deadline
+    deadline = time.time() + timeout
+
 def send_line_ok(line, until):
     mark = len(out)
     qemu.stdin.write(line + b"\r"); qemu.stdin.flush()
@@ -2053,7 +2065,10 @@ out = b""
 deadline = time.time() + timeout
 ok = (read_until(b"bastios> ") and send_line_ok(b"ash", b"\n# ")
       and send_line_ok(b"ls disk/many | wc -l; cat disk/many/f1099; stat -f -c %c /disk", b"\n# ")
-      and b"\r\n1100\r\n1099\r\n8191\r\n" in out)
+      and b"\r\n1100\r\n1099\r\n32767\r\n" in out
+      and (reset_deadline() or True)
+      and send_line_ok(b"n=$(ls disk/full | wc -l); echo c$((n > 30000)); cat disk/full/f30000; rm -r disk/full; echo x > disk/after; cat disk/after; rm disk/after; sleep 1", b"\n# ")
+      and b"\r\nc1\r\nx\r\nx\r\n" in out)
 print(("ok  " if ok else "FAIL"), "(big-disk boot) 1100 entries in one directory after a reboot"); ok or print(repr(out[-500:]))
 fails += not ok
 qemu.kill(); qemu.wait()
