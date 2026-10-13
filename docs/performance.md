@@ -139,7 +139,12 @@ profile), and `fork` + `exit` + `wait` 160600, down from 202200; a fork of
 a group with no `memory.max` also stopped counting the parent's pages. What
 is left in a fork is table walking: `clone_l1`, `free_l1` and their kin read
 all 512 entries of every page table the process has, about 3000 instructions
-a table, whatever it holds.
+a table, whatever it holds. The other fixed scan is the 1024-slot descriptor
+table, walked on every process exit and fork: `lx_fd_close_all` called
+`lx_fd_close` for each slot (5700 instructions) and `lx_fd_fork` took a
+reference for each; both now look at the slot first (the exit walk is 1500).
+By `bench/run.py --icount` that is `fork` 196 to 168 us and `exec` 655 to
+629 us.
 
 `make buildbench` (`test/buildbench.sh`) is an end-to-end number the table
 does not have: `make -j1` and `make -jN` of 100 small C files with tcc, on the
