@@ -187,10 +187,10 @@ fn uc_xcount(k: &Kernel, c: u64) -> u64
   return n;
 }
 
-/// Nobody will receive channel c's other descriptions: closes them, or,
-/// with keep, only gives up the message's reference to each (a last one
-/// stays allocated, as for the first: see the listener close).
-fn uc_drop_xtra(k: &mut Kernel, c: u64, keep: bool)
+/// Nobody will receive channel c's other descriptions, and the message's
+/// reference to each is given up (a last one stays allocated, as for the
+/// first: see the listener close).
+fn uc_keep_xtra(k: &mut Kernel, c: u64)
   requires kok(k) && c < UX_N
   ensures kok(k)
 {
@@ -200,18 +200,55 @@ fn uc_drop_xtra(k: &mut Kernel, c: u64, keep: bool)
   {
     let f = uc_xtra(k, c, i);
     if f > 0 && f <= OFD_N {
-      if keep {
-        let refs = of_get(k.ofd, f - 1, 1);
-        if refs > 1 {
-          of_set(&mut k.ofd, f - 1, 1, refs - 1);
-        }
-      } else {
-        unref_value(&mut k, FD_OFD + f - 1);
+      let refs = of_get(k.ofd, f - 1, 1);
+      if refs > 1 {
+        of_set(&mut k.ofd, f - 1, 1, refs - 1);
       }
     }
     uc_set_xtra(&mut k, c, i, 0);
     i = i + 1;
   }
+}
+
+/// Takes the last of channel c's other descriptions out of it and returns
+/// its descriptor value (0 when there is none); the caller drops it.
+fn uc_take_xtra(k: &mut Kernel, c: u64) -> u64
+  requires kok(k) && c < UX_N
+  ensures kok(k)
+{
+  let n = uc_xcount(k, c);
+  if n == 0 {
+    return 0;
+  }
+  let f = uc_xtra(k, c, n - 1);
+  uc_set_xtra(&mut k, c, n - 1, 0);
+  if f > 0 && f <= OFD_N {
+    return FD_OFD + f - 1;
+  }
+  return 0;
+}
+
+/// A channel nobody reads any more may still hold descriptions that were
+/// in flight to it (see ux_close): hands one to unref_value, which drops
+/// them one after another, as it does for the first. Not a call of
+/// unref_one, so the kernel stays free of recursion.
+fn ux_reap(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut c = 0;
+  while c < UX_N
+    invariant c <= UX_N && kok(k)
+  {
+    if uc_get(k, c, 2) == 0 {
+      let v = uc_take_xtra(&mut k, c);
+      if v != 0 {
+        return v;
+      }
+    }
+    c = c + 1;
+  }
+  return 0;
 }
 
 /// Process pid's credentials as SO_PEERCRED reports them: effective uid
@@ -317,7 +354,7 @@ fn uc_new(k: &mut Kernel) -> u64
   uc_set(&mut k, c, 2, 1);
   uc_set(&mut k, c, 3, 1);
   uc_set_fly(&mut k, c, 0);
-  uc_drop_xtra(&mut k, c, true);
+  uc_keep_xtra(&mut k, c);
   return c;
 }
 
@@ -390,7 +427,6 @@ fn ux_close(k: &mut Kernel, x: u64, w: u64) -> u64
     uc_set(&mut k, x / UX_N, 3, 0);       // nobody writes what goes out
     let f = uc_fly(k, rx);
     uc_set_fly(&mut k, rx, 0);
-    uc_drop_xtra(&mut k, rx, false);
     if f > 0 && f <= OFD_N {
       return FD_OFD + f - 1;              // nobody will receive it now
     }
@@ -421,7 +457,7 @@ fn ux_close(k: &mut Kernel, x: u64, w: u64) -> u64
             }
           }
           uc_set_fly(&mut k, cx % UX_N, 0);
-          uc_drop_xtra(&mut k, cx % UX_N, true);
+          uc_keep_xtra(&mut k, cx % UX_N);
         }
         of_set(&mut k.ofd, h, 0, OF_FREE);
         of_set(&mut k.ofd, h, 1, 0);
@@ -1252,7 +1288,14 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
       if f <= OFD_N {
         unref_value(&mut k, FD_OFD + f - 1);
       }
-      uc_drop_xtra(&mut k, c, false);
+      let mut q = 0;
+      while q < UX_XTRA
+        invariant q <= UX_XTRA && kok(k)
+      {
+        let xv = uc_take_xtra(&mut k, c);
+        unref_value(&mut k, xv);
+        q = q + 1;
+      }
     }
     let mut used = put;
     if u.dg {

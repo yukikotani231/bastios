@@ -359,6 +359,9 @@ fn unref_value(k: &mut Kernel, v: u64)
   {
     next = unref_one(&mut k, next);
     i = i + 1;
+    if next == 0 {
+      next = ux_reap(&mut k);               // in flight to a channel just closed
+    }
   }
 }
 
