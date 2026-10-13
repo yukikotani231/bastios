@@ -104,10 +104,19 @@ $(B)/user/mtest.elf: user/lxtest-aarch64.c | $(B)/user
 	$(ACC) -O1 -fno-pic -no-pie -static -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x400000 \
 	  -Wl,--build-id=none -Wl,--no-warn-rwx-segments -o $@ $<
 
+# The vDSO (user/vdso-aarch64.c): a tiny shared object the kernel copies onto
+# one page of every Linux process, with the clock from byte 0xF80 of it. The
+# whole file must fit below the signal return trampoline at 0xF00.
+$(B)/user/vdso.so: user/vdso-aarch64.c user/vdso-aarch64.ld user/vdso-aarch64.map | $(B)/user
+	$(ACC) -O2 -fPIC -ffreestanding -fno-stack-protector -fno-asynchronous-unwind-tables \
+	  -Wall -Wextra -Werror -nostdlib -shared -Wl,-T,user/vdso-aarch64.ld -Wl,--version-script=user/vdso-aarch64.map \
+	  -Wl,--hash-style=both -Wl,-soname=linux-vdso.so.1 -Wl,--build-id=none -Wl,-z,max-page-size=0x1000 -o $@ user/vdso-aarch64.c
+	@test $$(stat -c %s $@) -le 3840 || { echo "$@ does not fit below the signal trampoline"; rm -f $@; exit 1; }
+
 # 2. Prove the kernel and translate it to freestanding C.
 KSRCS := $(wildcard src/*.bastio) $(wildcard src/aarch64/*.bastio src/aarch64/arch/*.bastio) $(wildcard files/*)
 
-$(B)/kernel.c: $(KSRCS) $(UBINS) $(LXELFS) $(BASTIOC) | $(B)
+$(B)/kernel.c: $(KSRCS) $(UBINS) $(LXELFS) $(B)/user/vdso.so $(BASTIOC) | $(B)
 	$(BASTIOC) --lib $(BASTIOLIB) --lib src/aarch64 --lib src --target kernel --arch aarch64 -o $@ src/aarch64/main.bastio
 
 $(B)/kernel.o: $(B)/kernel.c

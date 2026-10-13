@@ -141,6 +141,7 @@ debian: debian: find, xargs and du
 debian: debian: perl
 debian: debian: tar and gzip (GNU tar makes its archive with creat)
 debian: debian: unpack the root, chroot into it
+debian: debian: the dynamic linker through its links, by hand
 debian: debian: users and the machine
 node: node: a hot loop is compiled and gives the right sum
 node: node: a script with arrays and JSON
