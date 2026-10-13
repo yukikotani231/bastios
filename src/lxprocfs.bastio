@@ -2217,7 +2217,7 @@ fn magic_target(k: &mut Kernel, pid: u64, n: u64) -> u64
   // file only for a process that has not changed its root: a file may lie
   // outside the root (a chroot, a container), where its name resolves to
   // nothing; open and exec reopen a file through the link.
-  if d.kind != K_DIR && !(d.kind == K_DEV && d.x == DEV_PTSDIR) && !(d.kind == K_FILE && root_len(k, pid) == 0) {
+  if d.kind != K_DIR && !(d.kind == K_DEV && d.x == DEV_PTSDIR) && !(d.kind == K_FILE && root_len(k, pid) == 0 && !ofd_lacks(k, fd_ofd(k, t, fd), ACC_LINK)) {
     return NO_RESULT;
   }
   if d.kind == K_FILE {
