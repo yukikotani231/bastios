@@ -1292,6 +1292,34 @@ fn nic_nl_request(c: &mut Nic, q: u64, b: &Bytes, len: u64, tgt: u64, admin: boo
   }
 }
 
+/// Queues musl's mq_notify wake-up on socket q: 32 bytes, the last one 1
+/// (the kernel's NOTIFY_WOKENUP). The first four bytes hold the length, so
+/// the message reads as one to nl_take; musl looks only at the last byte.
+fn nic_nl_wake(c: &mut Nic, q: u64)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if q < NLS && nl_queued(n, q) + 32 <= NLQ {
+        nlw_open(&mut n, q);
+        nl_b(&mut n, 32);
+        let mut i = 1;
+        while i < 31
+          invariant i <= 31 && net_ok(n)
+        {
+          nl_b(&mut n, 0);
+          i = i + 1;
+        }
+        nl_b(&mut n, 1);
+        nlw_close(&mut n, q);
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
 fn nic_nl_take(c: &mut Nic, q: u64, out: &mut Bytes, max: u64, peek: bool) -> u64
   requires nic_ok(c)
   ensures nic_ok(c) && blen(out) == old(blen(out))

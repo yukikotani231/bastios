@@ -469,7 +469,9 @@ mprotect02
 mprotect03
 mprotect04
 mprotect05
+mq_notify01
 mq_notify02
+mq_notify03
 mq_timedreceive01
 mq_timedsend01
 mq_unlink01
