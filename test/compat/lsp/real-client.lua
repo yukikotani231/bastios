@@ -16,18 +16,22 @@ vim.wait(60000, function()
 end, 100)
 local c = vim.lsp.get_client_by_id(id)
 out[#out + 1] = (c and c.initialized) and "initialized" or "no-init"
-local reply
--- `local answer = 42`: the cursor is on `answer`; the server loads its
--- workspace first, so it is asked again until it has an answer.
-vim.wait(60000, function()
+local text = "no-reply"
+-- `local answer = 42`: the cursor is on `answer`. The server answers with a
+-- progress message ("Workspace loading") until it has read the workspace,
+-- so the hover is asked again until it names the variable.
+vim.wait(90000, function()
+  local reply
   c:request("textDocument/hover", { textDocument = { uri = vim.uri_from_bufnr(buf) }, position = { line = 0, character = 8 } },
     function(_, r) reply = r end, buf)
-  vim.wait(2000, function() return reply ~= nil end, 50)
-  return reply ~= nil
-end, 100)
-local text = reply and reply.contents and (reply.contents.value or vim.inspect(reply.contents)) or "no-reply"
+  vim.wait(3000, function() return reply ~= nil end, 50)
+  if reply and reply.contents then
+    text = reply.contents.value or vim.inspect(reply.contents)
+  end
+  return text:find("answer: integer = 42", 1, true) ~= nil
+end, 200)
 out[#out + 1] = text:find("answer: integer = 42", 1, true) and "hover-integer" or text
-c:stop()
+c:stop(true)
 vim.wait(20000, function() return vim.lsp.get_client_by_id(id) == nil end, 50)
 out[#out + 1] = vim.lsp.get_client_by_id(id) == nil and "stopped" or "running"
 io.open("/root/lsreal.txt", "w"):write(table.concat(out, ","), "\n")
