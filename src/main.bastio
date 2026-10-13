@@ -328,6 +328,9 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
     tty_cook(&mut s.con, &mut s.k);
     wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
     woke = disk_wake(&mut s.k);
+    if woke && s.k.fs.disk.q.dead {
+      puts(&mut s.con, "[disk: a request timed out, the disk is treated as dead]\r\n");
+    }
     if sock_wake(&mut s.k) {
       woke = true;
     }
