@@ -8,7 +8,9 @@ KERNEL=${KERNEL:-build/bastios.elf}
 # Seconds each boot's steps may take in all. The longest boot's steps take
 # about 35 s alone; with make test's other lanes running beside it (test/all.sh)
 # they took over 60 s, and its last steps failed for want of time, on main too.
-TIMEOUT=${TIMEOUT:-120}
+# The native job (NATIVE=1) on a loaded runner took over 110 s, so the limit
+# is only there to end a hang, not to tell slow from broken.
+TIMEOUT=${TIMEOUT:-240}
 SMP=${SMP:-4}
 
 python3 - "$KERNEL" "$TIMEOUT" "$SMP" <<'PY'
