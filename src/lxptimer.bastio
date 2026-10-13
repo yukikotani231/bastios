@@ -87,7 +87,7 @@ fn ptimer_tick(k: &mut Kernel)
         } else {
           k.alarms = set(k.alarms, pt_at(p, t, 3), over);
           if 1 <= s && s <= NSIG {
-            post_sig(&mut k, p, s);
+            post_proc(&mut k, p, s);
           }
         }
       }
