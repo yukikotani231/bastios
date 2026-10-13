@@ -80,6 +80,28 @@ fn cap_has(k: &Kernel, p: u64, c: u64) -> bool
 }
 
 
+/// The effective set capget shows and capset starts from: as cap_eff, and
+/// for the root of a user namespace what it has not dropped (it holds it in
+/// that namespace only, src/lxuser.bastio).
+fn cap_eff_v(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+{
+  if !cred_root(k.procs, p) && ns_root(k, p) {
+    return CAP_FULL & !cap_word(k, p, CAPW_EFF) & !cap_word(k, p, CAPW_PERM);
+  }
+  return cap_eff(k, p);
+}
+
+/// The permitted set, the same way.
+fn cap_perm_v(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+{
+  if !cred_root(k.procs, p) && ns_root(k, p) {
+    return CAP_FULL & !cap_word(k, p, CAPW_PERM);
+  }
+  return cap_perm(k, p);
+}
+
 /// A new process or thread c of p: the sets carry over.
 fn cap_fork(k: &mut Kernel, p: u64, c: u64)
   requires kok(k) && p < NPROC && c < NPROC
@@ -166,8 +188,8 @@ fn lx_capget(k: &mut Kernel, pid: u64, hdr: u64, data: u64) -> u64
   if t >= NPROC || state(k.procs, t) == FREE {
     return ESRCH;
   }
-  let e = cap_eff(k, t);
-  let p = cap_perm(k, t);
+  let e = cap_eff_v(k, t);
+  let p = cap_perm_v(k, t);
   let i = cap_word(k, t, CAPW_INH);
   xfer_u64(&mut k.fs.xfer, 0, e % 0x100000000 + 0x100000000 * (p % 0x100000000));
   xfer_u64(&mut k.fs.xfer, 8, i % 0x100000000 + 0x100000000 * (e / 0x100000000));
@@ -209,7 +231,7 @@ fn lx_capset(k: &mut Kernel, pid: u64, hdr: u64, data: u64) -> u64
   let e = (w0 % 0x100000000 + 0x100000000 * (w1 / 0x100000000 % 0x200)) & CAP_FULL;
   let p = (w0 / 0x100000000 + 0x100000000 * (w2 % 0x200)) & CAP_FULL;
   let i = (w1 % 0x100000000 + 0x100000000 * (w2 / 0x100000000 % 0x200)) & CAP_FULL;
-  let op = cap_perm(k, pid);
+  let op = cap_perm_v(k, pid);
   let oi = cap_word(k, pid, CAPW_INH);
   if p & !op != 0 || e & !p != 0 || i & !(oi | op) != 0 {
     return EPERM;
@@ -228,7 +250,7 @@ fn cap_prctl(k: &mut Kernel, pid: u64, op: u64, a: u64) -> u64
   ensures kok(k)
 {
   if op == 23 || op == 24 {
-    if op == 24 && !cap_has(k, pid, CAP_SETPCAP) {
+    if op == 24 && !ns_cap(k, pid, CAP_SETPCAP) {
       return EPERM;
     }
     if a > CAP_LAST {
@@ -245,7 +267,7 @@ fn cap_prctl(k: &mut Kernel, pid: u64, op: u64, a: u64) -> u64
     return 0;
   }
   if op == 28 {
-    if !cap_has(k, pid, CAP_SETPCAP) {
+    if !ns_cap(k, pid, CAP_SETPCAP) {
       return EPERM;
     }
     if a != 0 {

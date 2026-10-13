@@ -45,7 +45,7 @@ measurement, so failing checks are expected, but it must not go backwards.
 --host runs the same programs and cases on this machine instead (from a
 scratch directory), to check that the expectations are right for Linux.
 """
-import argparse, codecs, concurrent.futures, fcntl, functools, http.server, io, json, os, pty, re, select, shutil, signal, socket, ssl, struct, subprocess, sys, tempfile, termios, threading, time
+import argparse, codecs, concurrent.futures, fcntl, functools, hashlib, http.server, io, json, os, pty, re, select, shutil, signal, socket, ssl, struct, subprocess, sys, tarfile, tempfile, termios, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROMPT = b"\n# "
@@ -174,6 +174,63 @@ class WebServer:
             self.sport = self.https.server_address[1]
             threading.Thread(target=self.https.serve_forever, daemon=True).start()
 
+    def add_registry(self, layer_list):
+        """A registry for tools/ocipull.sh: /v2/library/alpine, an image index
+        whose linux/amd64 image is the layers named by the JSON file layer_list
+        (files sha256-HEX.tar.gz beside it, the cache alpinedisk.py keeps) and a
+        layer of ours on top that hides /etc/motd and adds /etc/ocilayer; its
+        config gives the process and the environment. /v2/secure/alpine is the
+        same behind a token (/token)."""
+        cache = os.path.dirname(os.path.abspath(layer_list))
+        base = os.path.join(self.dir, "v2", "library", "alpine")
+        os.makedirs(os.path.join(base, "blobs"))
+        os.makedirs(os.path.join(base, "manifests"))
+
+        def blob(data=None, link=None):
+            if link:
+                d = link.split("sha256-")[1].split(".")[0]
+                os.symlink(os.path.join(cache, link), os.path.join(base, "blobs", "sha256:" + d))
+                return "sha256:" + d, os.path.getsize(os.path.join(cache, link))
+            d = hashlib.sha256(data).hexdigest()
+            with open(os.path.join(base, "blobs", "sha256:" + d), "wb") as f:
+                f.write(data)
+            return "sha256:" + d, len(data)
+
+        layers = []
+        for name in json.load(open(layer_list)):
+            d, n = blob(link=name)
+            layers.append({"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": d, "size": n})
+        raw = io.BytesIO()
+        with tarfile.open(fileobj=raw, mode="w:gz") as t:
+            for name, body in (("etc/.wh.motd", b""), ("etc/ocilayer", b"two\n")):
+                ti = tarfile.TarInfo(name)
+                ti.size = len(body)
+                ti.mode = 0o644
+                t.addfile(ti, io.BytesIO(body))
+        d, n = blob(raw.getvalue())
+        layers.append({"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": d, "size": n})
+        config = {"architecture": "amd64", "os": "linux",
+                  "config": {"Env": ["FOO=bar", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
+                             "Entrypoint": ["/bin/sh", "-c"],
+                             "Cmd": ["echo from-image $FOO; id -u; hostname; test -e /etc/motd || cat /etc/ocilayer"],
+                             "WorkingDir": "/etc"},
+                  "rootfs": {"type": "layers", "diff_ids": []}}
+        cd, cn = blob(json.dumps(config).encode())
+        manifest = json.dumps({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                               "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": cd, "size": cn},
+                               "layers": layers}).encode()
+        md = "sha256:" + hashlib.sha256(manifest).hexdigest()
+        with open(os.path.join(base, "manifests", md), "wb") as f:
+            f.write(manifest)
+        index = {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json", "manifests": [
+            {"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": "sha256:" + "0" * 64, "size": 1,
+             "platform": {"architecture": "arm64", "os": "linux"}},
+            {"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": md, "size": len(manifest),
+             "platform": {"architecture": "amd64", "os": "linux"}}]}
+        for ref in ("latest", "3.24"):
+            with open(os.path.join(base, "manifests", ref), "w") as f:
+                json.dump(index, f)
+
     def shutdown(self):
         self.httpd.shutdown()
         if self.https:
@@ -184,6 +241,25 @@ class WebServer:
 class Quiet(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args):
         pass
+
+    def do_GET(self):
+        # The registry's token (WebServer.add_registry): /v2/secure/ wants one.
+        if self.path.startswith("/token"):
+            body = b'{"token":"compat-token"}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith("/v2/secure/"):
+            if self.headers.get("Authorization") != "Bearer compat-token":
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", f'Bearer realm="http://{self.headers["Host"]}/token",service="compat"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.path = "/v2/library/" + self.path[len("/v2/secure/"):]
+        super().do_GET()
 
 
 def with_bb(cmd, bb):
@@ -564,6 +640,7 @@ def main():
     ap.add_argument("--bastio-disk", help="the Bastio disk (bastioc1, z3, tcc) for bastio.txt")
     ap.add_argument("--alpine-disk", help="the Alpine disk (root file system, apk repository) for alpine.txt")
     ap.add_argument("--alpine-repo", help="the same repository's directory, served at ALPINEURL")
+    ap.add_argument("--registry-image", help="the layer list (JSON) of an image in the cache, which the web server serves as a registry for ocipull.sh")
     ap.add_argument("--debian-disk", help="the Debian disk (a glibc root file system) for debian.txt")
     ap.add_argument("--node-disk", help="the Node disk (the root of the node:alpine image) for node.txt")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
@@ -591,6 +668,8 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     log = open(os.path.join(args.out, "serial.log"), "wb")
     web = WebServer()
+    if args.registry_image:
+        web.add_registry(args.registry_image)
     env = Host(os.path.abspath(args.host), web) if args.host else None
     bb = os.path.join(os.path.abspath(args.host), "busybox") if args.host else BB
     t0 = time.time()
