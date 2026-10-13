@@ -246,6 +246,23 @@ int main(void) {
     waitpid(child, NULL, 0);
     close(in);
 
+    /* Many watches on one instance (a file watcher over a source tree). */
+    in = inotify_init();
+    int watched = 0;
+    for (int i = 0; i < 60; i++) {
+        char nm[16];
+        snprintf(nm, sizeof nm, "in_w%d", i);
+        close(open(nm, O_CREAT | O_WRONLY, 0644));
+        watched += inotify_add_watch(in, nm, IN_MODIFY) >= 0;
+    }
+    EXPECT("sixty watches on one instance", watched == 60);
+    close(in);
+    for (int i = 0; i < 60; i++) {
+        char nm[16];
+        snprintf(nm, sizeof nm, "in_w%d", i);
+        unlink(nm);
+    }
+
     unlink("in_late");
     unlink("in_f");
     rmdir("in_d");
