@@ -88,6 +88,18 @@ fn put_xfer(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, n: u64, off: u64)
     }
     return fits;
   }
+  if d.kind == K_DEV && d.x >= PROC_DEV {
+    if is_uts_file(d.x) {
+      return uts_xfer_write(&mut k, pid, uts_file_index(d.x), n);   // src/lxsys.bastio
+    }
+    if !proc_xfer_writable(d.x) {
+      return EINVAL;
+    }
+    if n > 32 {
+      return EINVAL;
+    }
+    return proc_write_xfer(&mut k, d.x, n);   // a sysctl written through splice
+  }
   if d.kind == K_DEV {
     return n;
   }

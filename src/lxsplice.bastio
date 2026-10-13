@@ -219,6 +219,30 @@ fn splice_to_pipe(k: &mut Kernel, pid: u64, row: u64, inp: u64, p: u64, len: u64
   return done;
 }
 
+/// splice from /proc file f, open as fd, into pipe p: up to XFER bytes from
+/// the description's offset, which moves on.
+fn splice_proc_to_pipe(k: &mut Kernel, pid: u64, fd: u64, f: u64, p: u64, len: u64, nb: bool) -> u64
+  requires kok(k) && pid < NPROC && p < NPIPES
+  ensures kok(k)
+{
+  let m = proc_fill(&mut k, pid, fd, f, smaller(len, XFER));
+  if m == 0 || m > XFER {
+    return m;
+  }
+  let w = pipe_put_xfer(&mut k, p, m);
+  if w == EAGAIN && !nb {
+    return SP_WAIT;
+  }
+  if w > XFER || w == 0 {
+    return w;
+  }
+  let h = fd_ofd(k, pid, fd);
+  if h < OFD_N {
+    of_set(&mut k.ofd, h, 3, sat_add(of_get(k.ofd, h, 3), w));
+  }
+  return w;
+}
+
 /// splice(in, inp, out, outp, len, flags).
 fn lx_splice(con: &mut Con, k: &mut Kernel, pid: u64, fin: u64, inp: u64, out: u64, outp: u64, len: u64, flags: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
@@ -253,8 +277,14 @@ fn lx_splice(con: &mut Con, k: &mut Kernel, pid: u64, fin: u64, inp: u64, out: u
     }
     return splice_from_pipe(&mut con, &mut k, pid, di.x, out, outp, len, nb);
   }
+  if di.kind == K_DEV && di.x >= PROC_DEV {
+    if inp != 0 {
+      return EINVAL;
+    }
+    return splice_proc_to_pipe(&mut k, pid, fin, di.x, dout.x, len, nb || pipe_nonblock(k, pid, out));
+  }
   if di.kind != K_FILE {
-    return EINVAL;                          // only a file feeds a pipe here
+    return EINVAL;                          // only a file or a /proc file feeds a pipe here
   }
   return splice_to_pipe(&mut k, pid, di.x, inp, dout.x, len, nb || pipe_nonblock(k, pid, out));
 }
