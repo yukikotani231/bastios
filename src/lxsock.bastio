@@ -137,9 +137,33 @@ fn sin_in(k: &mut Kernel, pid: u64, va: u64, alen: u64) -> Sin
   return Sin { err: 0, ip: ip, port: port };
 }
 
+/// Whether open file description h is an AF_INET6 socket that was
+/// connected to a ::ffff:a.b.c.d address.
+fn ofd_mapped(k: &Kernel, h: u64) -> bool {
+  return h < len(k.inet6) && get(k.inet6, h) == 2;
+}
+
+/// Whether the (already validated) address at va is a ::ffff:a.b.c.d
+/// struct sockaddr_in6 or a struct sockaddr_in.
+fn sin_mapped(k: &mut Kernel, pid: u64, va: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 2) != 2 {
+    return false;
+  }
+  if bget(k.fs.xfer, 0) == 2 && bget(k.fs.xfer, 1) == 0 {
+    return true;                            // a struct sockaddr_in on an AF_INET6 socket
+  }
+  if va > 0xFFFFFFFFFFFFFF00 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + 8, &mut k.fs.xfer, 16) != 16 {
+    return false;
+  }
+  return get_u64(k.fs.xfer, 0) == 0 && get_u64(k.fs.xfer, 8) % 0x100000000 == 0xFFFF0000;
+}
+
 /// Whether open file description h is an AF_INET6 socket.
 fn ofd_v6(k: &Kernel, h: u64) -> bool {
-  return h < len(k.inet6) && get(k.inet6, h) == 1;
+  return h < len(k.inet6) && get(k.inet6, h) != 0;
 }
 
 /// Whether descriptor fd of process pid is an AF_INET6 socket.
@@ -158,6 +182,15 @@ fn sin_out(k: &mut Kernel, pid: u64, va: u64, lenp: u64, ip: u64, port: u64, v6:
   requires kok(k) && pid < NPROC && ip <= 4294967295 && port <= 65535
   ensures kok(k)
 {
+  return sin_out_m(&mut k, pid, va, lenp, ip, port, v6, false);
+}
+
+/// sin_out where, with `mapped`, 127.0.0.1 reads as ::ffff:127.0.0.1
+/// instead of ::1 (a socket that was connected to a mapped address).
+fn sin_out_m(k: &mut Kernel, pid: u64, va: u64, lenp: u64, ip: u64, port: u64, v6: bool, mapped: bool) -> u64
+  requires kok(k) && pid < NPROC && ip <= 4294967295 && port <= 65535
+  ensures kok(k)
+{
   if va == 0 {
     return 0;
   }
@@ -172,7 +205,7 @@ fn sin_out(k: &mut Kernel, pid: u64, va: u64, lenp: u64, ip: u64, port: u64, v6:
   if v6 {
     len = SIN6_LEN;
     bset(&mut k.fs.xfer, 0, cast[u8](AF_INET6));
-    if ip == 0x7F000001 {
+    if ip == 0x7F000001 && !mapped {
       bset(&mut k.fs.xfer, 23, 1);          // ::1
     } else if is_v6tok(ip) {
       put64(&mut k.fs.xfer, 8, nic_v6_addr(k.nic, ip, 0));   // an IPv6 peer
@@ -353,6 +386,9 @@ fn lx_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if is_unspec(&mut k, pid, addr, alen) {
     let nb0 = of_get(k.ofd, sk.h, 3) % 2;
     of_set(&mut k.ofd, sk.h, 3, nb0);       // AF_UNSPEC: no peer any more
+    if ofd_v6(k, sk.h) {
+      k.inet6 = set(k.inet6, sk.h, 1);
+    }
     return 0;
   }
   let sin = sin_in(&mut k, pid, addr, alen);
@@ -364,6 +400,13 @@ fn lx_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   }
   let nb = of_get(k.ofd, sk.h, 3) % 2;
   of_set(&mut k.ofd, sk.h, 3, 2 * (65536 * to_local(sin.ip) + sin.port) + nb);
+  if ofd_v6(k, sk.h) {
+    let mut mark = 1;
+    if sin_mapped(&mut k, pid, addr) {
+      mark = 2;
+    }
+    k.inet6 = set(k.inet6, sk.h, mark);
+  }
   return 0;
 }
 
@@ -600,10 +643,16 @@ fn sockname_of(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
   if sk.err != 0 {
     return sk.err;
   }
-  if !peer {
-    return sin_out(&mut k, pid, addr, lenp, 0, sock_port(k.nic, sk.s), ofd_v6(k, sk.h));
-  }
   let p = of_get(k.ofd, sk.h, 3) / 2;
+  if !peer {
+    // A connected socket has the source address its route picked, which
+    // C libraries read back (getaddrinfo sorts by it).
+    let mut me = 0;
+    if p / 65536 != 0 && p / 65536 <= 4294967295 {
+      me = local_for(k.nic, p / 65536);
+    }
+    return sin_out_m(&mut k, pid, addr, lenp, me, sock_port(k.nic, sk.s), ofd_v6(k, sk.h), ofd_mapped(k, sk.h));
+  }
   if p == 0 {
     return ENOTCONN;
   }
@@ -611,7 +660,29 @@ fn sockname_of(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
   if ip > 4294967295 {
     return ENOTCONN;
   }
-  return sin_out(&mut k, pid, addr, lenp, ip, p % 65536, ofd_v6(k, sk.h));
+  return sin_out_m(&mut k, pid, addr, lenp, ip, p % 65536, ofd_v6(k, sk.h), ofd_mapped(k, sk.h));
+}
+
+/// The address this machine sends from to dst (src_ip), or 0.
+fn local_for(c: &Nic, dst: u64) -> u64
+  requires nic_ok(c) && dst <= 4294967295
+  ensures result <= 4294967295
+{
+  match c {
+    Nic::None => {
+      if dst / 16777216 == LO_NET {
+        return dst;
+      }
+      return 0;
+    },
+    Nic::Up(n) => {
+      let r = src_ip(n, dst);
+      if r <= 4294967295 {
+        return r;
+      }
+      return 0;
+    },
+  }
 }
 
 /// setsockopt(fd, level, name, val, len): checked, then ignored
