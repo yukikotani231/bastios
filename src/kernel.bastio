@@ -125,10 +125,11 @@ fn seed_file(v: &mut Vfs, mem: &mut Mem, name: Str, data: Str, mode: u64) -> boo
   if vfs_lookup(&mut v, n) != NO_FILE {
     return true;                          // kept from an earlier boot
   }
-  let fd = vfs_open(&mut v, &mut mem, 0, O_WRITE + O_CREATE, n);
-  if fd >= NFD {
+  let nf = vfs_open(&mut v, &mut mem, nbase(0), NFD, O_WRITE + O_CREATE, n);
+  if nf >= NFD {
     return false;
   }
+  let fd = nbase(0) + nf;
   let mut ok = true;
   let mut at = 0;
   while ok && at < slen(data)

@@ -217,7 +217,7 @@ fn do_open(k: &mut Kernel, pid: u64, flags: u64, va: u64, n: u64) -> u64
   if !name_in(&mut k, pid, va, n) {
     return NO_RESULT;
   }
-  return vfs_open(&mut k.fs, &mut k.mem, pid * NFD, flags, n);
+  return vfs_open(&mut k.fs, &mut k.mem, nbase(pid), NFD, flags, n);
 }
 
 fn do_fread(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
@@ -227,7 +227,7 @@ fn do_fread(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
   if fd >= NFD {
     return NO_RESULT;
   }
-  let row = pid * NFD + fd;
+  let row = nbase(pid) + fd;
   let got = vfs_read(&mut k.fs, &mut k.mem, row, smaller(n, XFER));
   if got == NO_FD {
     return NO_RESULT;
@@ -254,7 +254,7 @@ fn do_fwrite(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
   if got == NO_RESULT {
     return NO_RESULT;
   }
-  let w = vfs_write(&mut k.fs, &mut k.mem, pid * NFD + fd, got);
+  let w = vfs_write(&mut k.fs, &mut k.mem, nbase(pid) + fd, got);
   if w == VFS_MISS {
     return DISK_RETRY;
   }
@@ -473,7 +473,7 @@ fn file_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     return do_open(&mut k, pid, a, b, c);
   }
   if n == SYS_CLOSE {
-    if a < NFD && vfs_close(&mut k.fs, &mut k.mem, pid * NFD + a) {
+    if a < NFD && vfs_close(&mut k.fs, &mut k.mem, nbase(pid) + a) {
       return 0;
     }
     return NO_RESULT;
@@ -494,7 +494,7 @@ fn file_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     return do_dirent(&mut k, pid, a, b, c);
   }
   if n == SYS_SEEK {
-    if a < NFD && vfs_seek(&mut k.fs, pid * NFD + a, b) {
+    if a < NFD && vfs_seek(&mut k.fs, nbase(pid) + a, b) {
       return 0;
     }
     return NO_RESULT;
@@ -539,7 +539,7 @@ fn file_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     return NO_RESULT;
   }
   if n == SYS_FTRUNCATE {
-    if a < NFD && vfs_truncate(&mut k.fs, &mut k.mem, pid * NFD + a, b) {
+    if a < NFD && vfs_truncate(&mut k.fs, &mut k.mem, nbase(pid) + a, b) {
       return 0;
     }
     return NO_RESULT;
