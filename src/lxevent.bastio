@@ -632,6 +632,7 @@ fn ep_entry_bits(k: &Kernel, pid: u64, e: u64, j: u64) -> u64
 // epoll_ctl keeps the nesting at most EP_DEPTH instances deep and free
 // of loops, as Linux does.
 
+const EP_MASK: u64 = 65536;                  // 2 ^ EP_N: a set of instances is a bit mask below this
 const EP_DEPTH: u64 = 5;                      // instances in the longest chain (Linux's EP_MAX_NESTS + 1)
 
 /// The epoll instance entry j of instance e watches, or EP_N if it
@@ -654,34 +655,34 @@ fn ep_target(k: &Kernel, pid: u64, e: u64, j: u64) -> u64
 /// The instances instance e watches, as a bit mask.
 fn ep_adj(k: &Kernel, pid: u64, e: u64) -> u64
   requires kok(k) && pid < NPROC && e < EP_N
-  ensures result < 256
+  ensures result < EP_MASK
 {
   let mut m = 0;
   let mut j = 0;
   while j < EP_FDS
-    invariant j <= EP_FDS && m < 256 && e < EP_N
+    invariant j <= EP_FDS && m < EP_MASK && e < EP_N
   {
     let t = ep_target(k, pid, e, j);
     if t < EP_N {
-      m = (m | (1 << t)) % 256;
+      m = (m | (1 << t)) % EP_MASK;
     }
     j = j + 1;
   }
-  return m % 256;
+  return m % EP_MASK;
 }
 
 /// The instances some instance in mask m watches.
 fn ep_below(k: &Kernel, pid: u64, m: u64) -> u64
   requires kok(k) && pid < NPROC
-  ensures result < 256
+  ensures result < EP_MASK
 {
   let mut r = 0;
   let mut i = 0;
   while i < EP_N
-    invariant i <= EP_N && r < 256
+    invariant i <= EP_N && r < EP_MASK
   {
     if (m >> i) % 2 == 1 {
-      r = (r | ep_adj(k, pid, i)) % 256;
+      r = (r | ep_adj(k, pid, i)) % EP_MASK;
     }
     i = i + 1;
   }
@@ -691,15 +692,15 @@ fn ep_below(k: &Kernel, pid: u64, m: u64) -> u64
 /// The instances that watch some instance in mask m.
 fn ep_above(k: &Kernel, pid: u64, m: u64) -> u64
   requires kok(k) && pid < NPROC
-  ensures result < 256
+  ensures result < EP_MASK
 {
   let mut r = 0;
   let mut i = 0;
   while i < EP_N
-    invariant i <= EP_N && r < 256
+    invariant i <= EP_N && r < EP_MASK
   {
     if ep_adj(k, pid, i) & m != 0 {
-      r = (r | (1 << i)) % 256;
+      r = (r | (1 << i)) % EP_MASK;
     }
     i = i + 1;
   }
@@ -712,7 +713,7 @@ fn ep_levels(k: &Kernel, pid: u64, m: u64, down: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures result <= EP_N + 1
 {
-  let mut cur = m % 256;
+  let mut cur = m % EP_MASK;
   let mut n = 0;
   while cur != 0 && n <= EP_N
     invariant n <= EP_N + 1
@@ -732,50 +733,52 @@ fn ep_levels(k: &Kernel, pid: u64, m: u64, down: bool) -> u64
 fn ep_nest_check(k: &Kernel, pid: u64, e: u64, t: u64) -> u64
   requires kok(k) && pid < NPROC && e < EP_N && t < EP_N
 {
-  let mut reach = (1 << t) % 256;
+  let mut reach = (1 << t) % EP_MASK;
   let mut n = 0;
   while n < EP_N
-    invariant n <= EP_N && reach < 256
+    invariant n <= EP_N && reach < EP_MASK
   {
-    reach = (reach | ep_below(k, pid, reach)) % 256;
+    reach = (reach | ep_below(k, pid, reach)) % EP_MASK;
     n = n + 1;
   }
   if (reach >> e) % 2 == 1 {
     return ELOOP;
   }
-  if ep_levels(k, pid, (1 << e) % 256, false) + ep_levels(k, pid, (1 << t) % 256, true) > EP_DEPTH {
+  if ep_levels(k, pid, (1 << e) % EP_MASK, false) + ep_levels(k, pid, (1 << t) % EP_MASK, true) > EP_DEPTH {
     return EINVAL;
   }
   return 0;
 }
 
 /// Which instances have something ready, as a bit mask. One pass over
-/// the entries finds the leaves that are ready and, in byte f of
+/// the entries finds the leaves that are ready and, in word f of
 /// `wants`, the instances that instance f waits on; the EP_DEPTH rounds
 /// then pass readiness up with bit masks only (it runs on every try of an
 /// epoll_wait, so looking up every entry each round cost most of a try).
 fn ep_ready(k: &Kernel, pid: u64) -> u64
   requires kok(k) && pid < NPROC
-  ensures result < 256
+  ensures result < EP_MASK
 {
   let mut m = 0;
-  let mut wants = 0;
+  let mut wants = alloc(EP_N);
+  let mut any = false;
   let mut e = 0;
   while e < EP_N
-    invariant e <= EP_N && m < 256
+    invariant e <= EP_N && m < EP_MASK && len(wants) == EP_N
   {
     let mut j = 0;
     while j < EP_FDS
-      invariant j <= EP_FDS && e < EP_N && m < 256
+      invariant j <= EP_FDS && e < EP_N && m < EP_MASK && len(wants) == EP_N
     {
       if get(k.evt, ep_at(e, j, 0)) != 0 {
         let t = ep_target(k, pid, e, j);
         if t < EP_N {
           if get(k.evt, ep_at(e, j, 2)) & (POLLIN + EP_OFF) == POLLIN {
-            wants = wants | (1 << (8 * e + t));
+            wants = set(wants, e, (get(wants, e) | (1 << t)) % EP_MASK);
+            any = true;
           }
         } else if ep_entry_bits(k, pid, e, j) != 0 {
-          m = (m | (1 << e)) % 256;
+          m = (m | (1 << e)) % EP_MASK;
         }
       }
       j = j + 1;
@@ -783,20 +786,21 @@ fn ep_ready(k: &Kernel, pid: u64) -> u64
     e = e + 1;
   }
   let mut round = 0;
-  while round < EP_DEPTH && wants != 0
-    invariant round <= EP_DEPTH && m < 256
+  while round < EP_DEPTH && any
+    invariant round <= EP_DEPTH && m < EP_MASK && len(wants) == EP_N
   {
     let mut f = 0;
     while f < EP_N
-      invariant f <= EP_N && m < 256
+      invariant f <= EP_N && m < EP_MASK && len(wants) == EP_N
     {
-      if ((wants >> (8 * f)) % 256) & m != 0 {
-        m = (m | (1 << f)) % 256;
+      if get(wants, f) & m != 0 {
+        m = (m | (1 << f)) % EP_MASK;
       }
       f = f + 1;
     }
     round = round + 1;
   }
+  free(wants);
   return m;
 }
 
