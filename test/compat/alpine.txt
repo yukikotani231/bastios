@@ -343,3 +343,29 @@ built by cmake
 == nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
 $ test -x /disk/a/usr/bin/lua-language-server && bb mkdir -p /disk/a/root/luaproj /disk/a/proc && bb mount -t proc proc /disk/a/proc && bb printf 'local answer = 42\nprint(answer)\n' > /disk/a/root/luaproj/main.lua && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-real-client.lua -o /root/lsp-real-client.lua && timeout 200 nvim -l /root/lsp-real-client.lua >/root/lsreal.log 2>&1'; bb umount /disk/a/proc 2>/dev/null; bb cat /disk/a/root/lsreal.txt
 initialized,hover-integer,stopped
+
+== apk: free the disk, then install python3 over HTTP
+$ bb chroot /disk/a /sbin/apk del -q --no-progress cmake lua-language-server neovim gcc tmux 2>/dev/null; bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL python3 2>&1 | bb tail -n 3 | bb cut -c1-180; echo status $?
+status 0
+
+== python3: asyncio talks over a socketpair
+$ bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import asyncio,socket\nasync def m():\n a,b=socket.socketpair()\n r,w=await asyncio.open_connection(sock=a)\n r2,w2=await asyncio.open_connection(sock=b)\n w.write(b\"ping\")\n await w.drain()\n print(await r2.read(4))\nasyncio.run(m())')" 2>&1 | bb tail -n 3; echo status $?
+b'ping'
+status 0
+
+== python3: asyncio runs a subprocess
+$ bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import asyncio\nasync def m():\n p=await asyncio.create_subprocess_exec(\"echo\",\"sub\",stdout=asyncio.subprocess.PIPE)\n o,_=await p.communicate()\n print(o)\nasyncio.run(m())')" 2>&1 | bb tail -n 3; echo status $?
+b'sub\n'
+status 0
+
+== python3: sqlite3, zlib and hashlib
+$ bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import sqlite3,zlib,hashlib\nc=sqlite3.connect(\"/tmp/t.db\")\nc.execute(\"create table t(a)\")\nc.execute(\"insert into t values(41)\")\nc.commit()\nprint(c.execute(\"select a+1 from t\").fetchone()[0])\nprint(hashlib.sha256(b\"a\").hexdigest()[:8], zlib.crc32(b\"a\"))')" 2>&1 | bb tail -n 3; echo status $?
+42
+ca978112 3904355907
+status 0
+
+== python3: a multiprocessing Pool (the forkserver gets several descriptors in one message)
+$ bb mkdir -p /disk/a/dev/shm; bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import multiprocessing as mp\nwith mp.get_context(\"forkserver\").Pool(1) as p: print(p.map(abs,[-1,-2]))')" 2>&1 | bb tail -n 3; echo status $?
+[1, 2]
+status 0
+

@@ -29,6 +29,7 @@ const MSGHDR: u64 = 56;                   // struct msghdr
 const SCM_RIGHTS: u64 = 1;
 const CMSG_ONE: u64 = 20;                 // CMSG_LEN(sizeof(int))
 const CMSG_ROOM: u64 = 24;                // CMSG_SPACE(sizeof(int))
+const SCM_MAX: u64 = 8;                   // descriptors one message passes: 1 + UX_XTRA
 const MSG_CTRUNC: u64 = 8;
 const MSG_CMSG_CLOEXEC: u64 = 0x40000000;
 const ETOOMANYREFS: u64 = 18446744073709551507;   // 2^64 - 109
@@ -184,8 +185,28 @@ fn rights_in(k: &mut Kernel, pid: u64, ctl: u64, clen: u64) -> u64
   if len < CMSG_ONE || len > clen {
     return EINVAL;
   }
-  if len > CMSG_ONE {
-    return ETOOMANYREFS;                    // more than one descriptor
+  if len > CMSG_ONE + 4 * (SCM_MAX - 1) {
+    return ETOOMANYREFS;                    // more than SCM_MAX descriptors
+  }
+  if (len - 16) % 4 != 0 {
+    return EINVAL;
+  }
+  let cnt = (len - 16) / 4;
+  let mut j = 1;
+  while j < cnt
+    invariant j >= 1 && j <= cnt && cnt <= SCM_MAX && kok(k)
+  {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, ctl + 16 + 4 * j, &mut k.fs.xfer, 4) != 4 {
+      return EFAULT;
+    }
+    let w = fd_get(k.lxfd, pid, get_u64(k.fs.xfer, 0) % 0x100000000) % FD_CLOEXEC;
+    if w == FD_CONSOLE {
+      return EINVAL;                        // only a message of its own carries the console
+    }
+    if w < FD_OFD || w - FD_OFD >= OFD_N {
+      return EBADF;
+    }
+    j = j + 1;
   }
   if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, ctl + 16, &mut k.fs.xfer, 4) != 4 {
     return EFAULT;
@@ -199,6 +220,42 @@ fn rights_in(k: &mut Kernel, pid: u64, ctl: u64, clen: u64) -> u64
     return EBADF;
   }
   return v - FD_OFD;
+}
+
+/// After the bytes of a message went over channel tx with the first
+/// description, the others of its SCM_RIGHTS message (at user address
+/// ctl, as rights_in checked it) go in flight with it, each with a
+/// reference of the message.
+fn rights_more(k: &mut Kernel, pid: u64, ctl: u64, tx: u64)
+  requires kok(k) && pid < NPROC && tx < UX_N
+  ensures kok(k)
+{
+  if ctl > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, ctl, &mut k.fs.xfer, 8) != 8 {
+    return;
+  }
+  let len = get_u64(k.fs.xfer, 0);
+  if len <= CMSG_ONE || len > CMSG_ONE + 4 * (SCM_MAX - 1) {
+    return;
+  }
+  let cnt = (len - 16) / 4;
+  let mut j = 1;
+  while j < cnt
+    invariant j >= 1 && j <= cnt && cnt <= SCM_MAX && kok(k)
+  {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, ctl + 16 + 4 * j, &mut k.fs.xfer, 4) != 4 {
+      return;
+    }
+    let w = fd_get(k.lxfd, pid, get_u64(k.fs.xfer, 0) % 0x100000000) % FD_CLOEXEC;
+    if w >= FD_OFD && w - FD_OFD < OFD_N {
+      let h = w - FD_OFD;
+      let refs = of_get(k.ofd, h, 1);
+      if of_get(k.ofd, h, 0) != OF_FREE && refs < 0xFFFFFFFF {
+        of_set(&mut k.ofd, h, 1, refs + 1);
+        uc_set_xtra(&mut k, tx, j - 1, h + 1);
+      }
+    }
+    j = j + 1;
+  }
 }
 
 /// sendmsg(fd, msg, flags): each buffer in turn, as send would, to
@@ -286,6 +343,7 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   if pass < OFD_N && tx < UX_N && sent && of_get(k.ofd, pass, 0) != OF_FREE && refs < 0xFFFFFFFF {
     of_set(&mut k.ofd, pass, 1, refs + 1);  // the message's reference
     uc_set_fly(&mut k, tx, pass + 1);
+    rights_more(&mut k, pid, ctl, tx);
   }
   if pass == RIGHTS_CONSOLE && tx < UX_N && sent {
     // The console goes over as a description of its own kind; the receiver
@@ -388,7 +446,72 @@ fn lx_recvmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   // The control data: the description, if it fits; else MSG_CTRUNC.
   let mut cused = 0;
   let mut mflags = 0;
-  if fly > 0 && fly <= OFD_N {
+  let mut nx = 0;
+  if fly > 0 && fly <= OFD_N && rx < UX_N {
+    nx = uc_xcount(k, rx);
+  }
+  if nx > 0 {
+    // Several descriptions: as many as the buffer holds are installed, the
+    // rest closed.
+    let mut room = 0;
+    if ctl != 0 && ctl <= 0xFFFFFFFFFFFF0000 && clen >= CMSG_ONE {
+      room = smaller(nx + 1, (clen - 16) / 4);
+    }
+    let mut inst = 0;
+    let mut q = 0;
+    while q <= nx
+      invariant q <= nx + 1 && nx <= UX_XTRA && inst <= q && inst <= SCM_MAX && kok(k) && rx < UX_N
+    {
+      let mut ds = fly;
+      if q > 0 {
+        ds = uc_xtra(k, rx, q - 1);
+      }
+      if ds > 0 && ds <= OFD_N {
+        if q < room {
+          let nf = fd_install(&mut k, pid, ds - 1);
+          if nf < LXNFD {
+            if flags / MSG_CMSG_CLOEXEC % 2 == 1 {
+              fd_set(&mut k.lxfd, pid, nf, FD_OFD + ds - 1 + FD_CLOEXEC);
+            }
+            xfer_u64(&mut k.fs.xfer, 0, nf);
+            if lx_put_out(&mut k, pid, ctl + 16 + 4 * inst, 4) != 0 {
+              return EFAULT;
+            }
+            inst = inst + 1;
+          } else {
+            mflags = MSG_CTRUNC;            // fd_install dropped it
+          }
+        } else {
+          mflags = MSG_CTRUNC;
+          unref_value(&mut k, FD_OFD + ds - 1);
+        }
+      }
+      q = q + 1;
+    }
+    let mut z = 0;
+    while z < UX_XTRA
+      invariant z <= UX_XTRA && kok(k) && rx < UX_N
+    {
+      uc_set_xtra(&mut k, rx, z, 0);
+      z = z + 1;
+    }
+    if inst > 0 {
+      let span = 16 + 4 * inst;
+      lx_fill(&mut k, 0, 16);
+      xfer_u64(&mut k.fs.xfer, 0, span);
+      xfer_u64(&mut k.fs.xfer, 8, SOL_SOCKET + 0x100000000 * SCM_RIGHTS);
+      if lx_put_out(&mut k, pid, ctl, 16) != 0 {
+        return EFAULT;
+      }
+      cused = smaller(clen, span + span % 8);
+      if span % 8 != 0 && cused == span + 4 && ctl <= 0xFFFFFFFFFFFF0000 {
+        lx_fill(&mut k, 0, 4);
+        if lx_put_out(&mut k, pid, ctl + span, 4) != 0 {
+          return EFAULT;
+        }
+      }
+    }
+  } else if fly > 0 && fly <= OFD_N {
     if ctl != 0 && clen >= CMSG_ONE {
       let console = of_get(k.ofd, fly - 1, 0) == OF_CONSOLE;
       let mut nfd = LXNFD;

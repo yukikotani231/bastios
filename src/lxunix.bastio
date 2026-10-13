@@ -70,6 +70,7 @@ const UXF0: u64 = 96;                  // UXL0 + UX_LIS * UXL_W: the in-flight w
 const UXC0: u64 = 112;                 // UXF0 + UX_N: the channels' credentials
 const UXLC0: u64 = 144;                // UXC0 + 2 * UX_N: the listeners' credentials
 const UXH0: u64 = 152;                 // UXLC0 + 2 * UX_LIS: the listeners' socket files
+const UXE0: u64 = 156;                 // UXH0 + UX_LIS: the other descriptions in flight, UX_XTRA per channel
 const SO_PEERCRED: u64 = 17;
 const UX_DG: u64 = 16;                 // word 3: a datagram socket
 const SUN_LEN: u64 = 110;              // sizeof(struct sockaddr_un)
@@ -155,6 +156,62 @@ fn uc_set_fly(k: &mut Kernel, c: u64, v: u64)
   ensures kok(k)
 {
   k.ux = set(k.ux, UXF0 + c, v);
+}
+
+/// The other descriptions (number + 1, or 0) a message in flight on
+/// channel c passes with the first.
+fn uc_xtra(k: &Kernel, c: u64, i: u64) -> u64
+  requires kok(k) && c < UX_N && i < UX_XTRA
+{
+  return get(k.ux, UXE0 + c * UX_XTRA + i);
+}
+
+fn uc_set_xtra(k: &mut Kernel, c: u64, i: u64, v: u64)
+  requires kok(k) && c < UX_N && i < UX_XTRA
+  ensures kok(k)
+{
+  k.ux = set(k.ux, UXE0 + c * UX_XTRA + i, v);
+}
+
+/// How many of the other descriptions channel c has in flight.
+fn uc_xcount(k: &Kernel, c: u64) -> u64
+  requires kok(k) && c < UX_N
+  ensures result <= UX_XTRA
+{
+  let mut n = 0;
+  while n < UX_XTRA && uc_xtra(k, c, n) != 0
+    invariant n <= UX_XTRA && kok(k)
+  {
+    n = n + 1;
+  }
+  return n;
+}
+
+/// Nobody will receive channel c's other descriptions: closes them, or,
+/// with keep, only gives up the message's reference to each (a last one
+/// stays allocated, as for the first: see the listener close).
+fn uc_drop_xtra(k: &mut Kernel, c: u64, keep: bool)
+  requires kok(k) && c < UX_N
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < UX_XTRA
+    invariant i <= UX_XTRA && kok(k)
+  {
+    let f = uc_xtra(k, c, i);
+    if f > 0 && f <= OFD_N {
+      if keep {
+        let refs = of_get(k.ofd, f - 1, 1);
+        if refs > 1 {
+          of_set(&mut k.ofd, f - 1, 1, refs - 1);
+        }
+      } else {
+        unref_value(&mut k, FD_OFD + f - 1);
+      }
+    }
+    uc_set_xtra(&mut k, c, i, 0);
+    i = i + 1;
+  }
 }
 
 /// Process pid's credentials as SO_PEERCRED reports them: effective uid
@@ -260,6 +317,7 @@ fn uc_new(k: &mut Kernel) -> u64
   uc_set(&mut k, c, 2, 1);
   uc_set(&mut k, c, 3, 1);
   uc_set_fly(&mut k, c, 0);
+  uc_drop_xtra(&mut k, c, true);
   return c;
 }
 
@@ -332,6 +390,7 @@ fn ux_close(k: &mut Kernel, x: u64, w: u64) -> u64
     uc_set(&mut k, x / UX_N, 3, 0);       // nobody writes what goes out
     let f = uc_fly(k, rx);
     uc_set_fly(&mut k, rx, 0);
+    uc_drop_xtra(&mut k, rx, false);
     if f > 0 && f <= OFD_N {
       return FD_OFD + f - 1;              // nobody will receive it now
     }
@@ -362,6 +421,7 @@ fn ux_close(k: &mut Kernel, x: u64, w: u64) -> u64
             }
           }
           uc_set_fly(&mut k, cx % UX_N, 0);
+          uc_drop_xtra(&mut k, cx % UX_N, true);
         }
         of_set(&mut k.ofd, h, 0, OF_FREE);
         of_set(&mut k.ofd, h, 1, 0);
@@ -1192,6 +1252,7 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
       if f <= OFD_N {
         unref_value(&mut k, FD_OFD + f - 1);
       }
+      uc_drop_xtra(&mut k, c, false);
     }
     let mut used = put;
     if u.dg {

@@ -908,6 +908,10 @@ t_sock2: MSG_DONTWAIT on an empty socket is EAGAIN
 t_sock2: MSG_PEEK leaves the bytes
 t_sock2: SA_RESTART restarts a read
 t_sock2: SCM_RIGHTS passes a descriptor
+t_sock2: SCM_RIGHTS passes several descriptors in one message
+t_sock2: SCM_RIGHTS with a short buffer closes the rest and says MSG_CTRUNC
+t_sock2: SCM_RIGHTS with a bad descriptor among several is EBADF
+t_sock2: SCM_RIGHTS from two clients that sent and closed before the accept, and a child that closes the listener
 t_sock2: SO_ERROR is 0
 t_sock2: SO_KEEPALIVE
 t_sock2: SO_RCVBUF and SO_SNDBUF
@@ -1051,6 +1055,11 @@ alpine: tmux: a detached session runs a shell on a pseudo-terminal, takes keys a
 alpine: cmake: configure, build and run a C project
 alpine: nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
 alpine: proc: /proc/self/exe is named from the reader's root (chroot), as on Linux
+alpine: apk: free the disk, then install python3 over HTTP
+alpine: python3: asyncio talks over a socketpair
+alpine: python3: asyncio runs a subprocess
+alpine: python3: sqlite3, zlib and hashlib
+alpine: python3: a multiprocessing Pool (the forkserver gets several descriptors in one message)
 t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
 t_gai: AF_INET6 UDP connect to :: reads back ::1
 t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1
