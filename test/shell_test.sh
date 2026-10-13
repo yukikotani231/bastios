@@ -653,6 +653,13 @@ else:
         print(f"ok   timer: {t1 - t0} ticks in {w1 - w0:.1f} s")
     else:
         print("FAIL timer ticks:", t0, t1); fails += 1
+    # The shell sat idle for those two seconds, so the bootstrap processor
+    # stretched its tick (src/main.bastio, stretch_p): the tick count must
+    # still agree with the clock, whatever the stretches were.
+    if t0 is not None and t1 is not None and c0 and c1 and 0.9 * (c1 - c0) <= (t1 - t0) * 1e7 <= 1.1 * (c1 - c0) + 3e7:
+        print(f"ok   timer: {t1 - t0} ticks agree with the clock's {(c1 - c0) / 1e9:.2f} s (idle, tick stretched)")
+    else:
+        print("FAIL timer ticks against the clock:", t0, t1, c0, c1); fails += 1
     # UDP echo: a datagram from this machine reaches the guest through
     # QEMU's port forward (ARP, IPv4, UDP on the way in) and comes back.
     if b"net: virtio, mac 52:54:00:12:34:56" in out:

@@ -66,3 +66,24 @@ fn pic_unmask(p: &mut Pic, irq: u64)
     pio_out8(&mut p.master, 1, cast[u8](m - 4));
   }
 }
+
+/// Masks the timer (IRQ 0): the PIT's edge stays latched and is delivered
+/// when it is unmasked again.
+fn pic_mask_timer(p: &mut Pic)
+  requires pic_ok(p)
+{
+  let m = cast[u64](pio_in8(&mut p.master, 1));
+  if m % 2 == 0 {
+    pio_out8(&mut p.master, 1, cast[u8](m + 1));
+  }
+}
+
+/// Unmasks the timer (IRQ 0).
+fn pic_unmask_timer(p: &mut Pic)
+  requires pic_ok(p)
+{
+  let m = cast[u64](pio_in8(&mut p.master, 1));
+  if m % 2 == 1 {
+    pio_out8(&mut p.master, 1, cast[u8](m - 1));
+  }
+}

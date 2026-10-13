@@ -558,6 +558,11 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   if blk_is_nvme(disk.dev) {
     puts(&mut console, "disk: NVMe\r\n");
   }
+  if blk_is_usb(disk.dev) {
+    puts(&mut console, "disk: USB, the BastiOS partition (");
+    put_num(&mut console, blk_sectors(disk.dev));
+    puts(&mut console, " sectors)\r\n");
+  }
   if disk.blocks > 0 {
     puts(&mut console, "disk: the BastiOS file system, ");
     put_num(&mut console, disk.blocks);

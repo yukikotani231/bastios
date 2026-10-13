@@ -49,16 +49,23 @@ with open(disk, "wb") as f:
 kernel, qemu_bin, timeout = sys.argv[1], sys.argv[2], float(sys.argv[3])
 # UEFI=<firmware image> boots the kernel as an EFI application from a FAT
 # directory (BOOTAA64.EFI), through the firmware, instead of with -kernel.
-# The firmware gets the device tree only when ACPI is off. The FAT drive
+# The firmware gets the device tree only when ACPI is off; ACPI=1 leaves it on,
+# so the image writes the tree itself from the ACPI tables (boot/aarch64/efi.c). The FAT drive
 # comes first: the kernel takes the virtio-mmio slot QEMU gives the last
 # device added.
 # NVME=1 puts the disk on the PCI Express bus as an NVMe drive.
 # VIRTIO_PCI=1 puts the disk (unless NVME=1) and the network card (unless NIC=)
 # on the PCI Express bus as modern virtio functions.
+# USB=1 adds an xHCI controller with a USB stick that has a BastiOS partition
+# (tools/mkusb.py --blank): the stick is the disk, ahead of the virtio one.
 # NIC=<model> puts the network card on the PCI Express bus (e1000, e1000e, igb).
 nvme = os.environ.get("NVME", "") == "1"
 nic = os.environ.get("NIC", "")
 vpci = os.environ.get("VIRTIO_PCI", "") == "1"
+usb = os.environ.get("USB", "") == "1"
+if usb:
+    stick = os.path.join(disk_dir.name, "stick.img")
+    subprocess.run(["tools/mkusb.py", stick, "--blank", "--mib", "33"], check=True, stdout=subprocess.DEVNULL)
 uefi = os.environ.get("UEFI", "")
 if uefi and not os.path.exists(uefi):
     print("SKIP aarch64 uefi: no firmware at " + uefi + " (Debian/Ubuntu: qemu-efi-aarch64)")
@@ -72,10 +79,11 @@ if uefi:
 else:
     boot = ["-kernel", kernel]
 qemu = subprocess.Popen(
-    [qemu_bin, "-M", "virt,gic-version=" + os.environ.get("GIC", "3") + os.environ.get("VIRT", "") + (",acpi=off" if uefi else ""), "-cpu", os.environ.get("CPU", "cortex-a72"), "-smp", os.environ.get("SMP", "4"), "-m", os.environ.get("MEM", "256M"), "-nographic",
+    [qemu_bin, "-M", "virt,gic-version=" + os.environ.get("GIC", "3") + os.environ.get("VIRT", "") + (",acpi=off" if uefi and os.environ.get("ACPI", "") != "1" else ""), "-cpu", os.environ.get("CPU", "cortex-a72"), "-smp", os.environ.get("SMP", "4"), "-m", os.environ.get("MEM", "256M"), "-nographic",
      "-no-reboot"] + boot + [
      "-drive", f"file={disk},format=raw,if=none,id=vd",
      "-device", ("nvme,drive=vd,serial=bastio" if nvme else "virtio-blk-pci,disable-legacy=on,drive=vd" if vpci else "virtio-blk-device,drive=vd"),
+     ] + (["-device", "qemu-xhci,id=xh", "-drive", f"file={stick},format=raw,if=none,id=st", "-device", "usb-storage,bus=xh.0,drive=st"] if usb else []) + [
      "-netdev", "user,id=n0,net=10.0.2.0/24", "-device", (nic + ",netdev=n0" if nic else "virtio-net-pci,disable-legacy=on,netdev=n0" if vpci else "virtio-net-device,netdev=n0"), "-serial", "stdio", "-monitor", "none"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 deadline = time.time() + timeout
@@ -151,6 +159,9 @@ run("echo ash $((6*7))", b"ash 42", wait=b"# ")
 run("echo abc | wc -c", b"4", wait=b"# ")
 run("echo $((1 << 40))", b"1099511627776", wait=b"# ")
 run("echo data > /tmp/f; cat /tmp/f; wc -c < /tmp/f", [b"data", b"5"], wait=b"# ")
+# More address spaces than the 255 ASIDs (a pipeline of two forked applets is
+# two): the numbers roll over and every result stays right.
+run("i=0; n=0; while [ $i -lt 300 ]; do n=$((n + $(echo $i | wc -c))); i=$((i + 1)); done; echo sum $n", b"sum 1090", wait=b"# ")
 run("exit", b"")
 # The timer interrupt: ticks count up, 100 a second.
 reply = run("uptime", b"ticks")
@@ -193,7 +204,9 @@ run("cat d/f2", b"no such file")
 # The virtio-mmio disk and network card (src/virtio_blk.bastio and
 # src/virtio_net.bastio over src/virtio_mmio.bastio, shared with x86-64).
 check("the device tree lists QEMU virt's 32 virtio-mmio slots", b"devicetree: 32 virtio-mmio slots from 0x000000000a000000\r\n" in out)
-if nvme:
+if usb:
+    check("the disk is the USB stick's BastiOS partition", b"disk: USB, the BastiOS partition (67584 sectors)\r\n" in out)
+elif nvme:
     check("the NVMe disk is found", b"disk: NVMe\r\n" in out)
 else:
     check("the virtio disk is found", b"disk: virtio\r\n" in out)

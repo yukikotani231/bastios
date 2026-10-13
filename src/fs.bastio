@@ -689,7 +689,14 @@ fn vfs_write(v: &mut Vfs, mem: &mut Mem, row: u64, n: u64) -> u64
   let w = write_row(&mut v, &mut mem, row, n);
   let end = fget(v.ftab, row, FD_OFF);
   if w <= n && w <= end {
-    pc_wrote(&mut v.pc, vfs_row_file(v, row), end - w, v.xfer, w);
+    let f = vfs_row_file(v, row);
+    pc_wrote(&mut v.pc, f, end - w, v.xfer, w);
+    if fget(v.ftab, row, FD_FS) == FS_DISK {
+      // The pages this write filled whole are what a reader of the file, or
+      // a mapping of it, wants next: cache them (as a read does) instead of
+      // reading them back from the disk.
+      pc_fill(&mut v.pc, &mut mem, f, end - w, v.xfer, w, false);
+    }
   }
   return w;
 }
@@ -1013,6 +1020,23 @@ fn vfs_read_at(v: &mut Vfs, f0: u64, off: u64, n: u64) -> u64
   ensures vfs_ok(v)
   ensures result <= n || result == NO_FD
 {
+  if pc_on(v.pc) {
+    // Pages cached by earlier reads and writes answer without the disk.
+    let f = vfs_target(&mut v, f0);
+    if f >= NFILES && f - NFILES < DSLOTS {
+      let size = disk_size(v.disk, f - NFILES);
+      if size != NO_DISK_FILE && off < size {
+        let mut want = size - off;
+        if want > n {
+          want = n;
+        }
+        if pc_have(&mut v.pc, f, off, want) {
+          pc_overlay(&mut v.pc, f, off, &mut v.xfer, want);
+          return want;
+        }
+      }
+    }
+  }
   let r = read_at(&mut v, f0, off, n);
   if r <= n && pc_on(v.pc) {
     let f = vfs_target(&mut v, f0);
