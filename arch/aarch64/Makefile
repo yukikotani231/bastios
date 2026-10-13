@@ -238,11 +238,12 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # The shell commands of these disks run the suite's static BusyBox: the
 # AArch64 kernel has no built-in musl dynamic linker, so Alpine's own
 # (dynamic) BusyBox starts only inside the unpacked root.
-$(B)/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox $(B)/compat/runc tools/ocipull.sh \
-    $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys | $(B)/compat
+$(B)/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh $(B)/compat/busybox $(B)/compat/runc tools/ocipull.sh \
+    $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys \
+    $(B)/compat/bastioc1 $(B)/compat/z3 $(B)/compat/tcc $(B)/compat/musl/lib/libc.a | $(B)/compat
 	COMPAT_ARCH=aarch64 test/compat/alpinedisk.py $@ $(B)/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) \
 	  --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) --busybox $(B)/compat/busybox \
-	  --extra "$(B)/compat/runc tools/ocipull.sh $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys"
+	  --extra "$(BASTIO_TOOLS) $(B)/compat/runc tools/ocipull.sh $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys"
 
 # runc for the container cases: the static arm64 binary of the upstream
 # release, checked against a pinned SHA-256 (the x86-64 suite's is the
@@ -285,6 +286,68 @@ build/compat/ssh_host_key build/compat/ssh_authorized_keys &: build/compat/dropb
 	build/compat/dropbearkey -t ed25519 -f build/compat/ssh_host_key >/dev/null
 	build/compat/dropbearkey -t ed25519 -f build/compat/ssh_id | grep '^ssh-' > build/compat/ssh_authorized_keys
 
+# The Bastio toolchain, for the alpine-tty cases that edit a program in
+# neovim and build it: bastioc1 (bastiolang's stage1, as C from bastioc0),
+# Z3 to discharge its proofs, and tcc to build the C it writes, as static
+# programs on the Alpine disk (outside the Alpine root, like the x86-64
+# suite's). tcc makes static executables by default here (the kernel has no
+# built-in musl dynamic linker) against musl's libc.a, which is built below
+# from a pinned revision; its headers and C runtime go under /disk/c.
+TCC_GIT       ?= https://github.com/TinyCC/tinycc
+TCC_REV       ?= 43c7708b85681a2fd4451c8a541af4494a8919b2
+Z3_GIT        ?= https://github.com/Z3Prover/z3
+Z3_TAG        ?= z3-4.8.12
+Z3_JOBS       ?= 4
+MUSL_GIT      ?= https://github.com/kraj/musl
+MUSL_REV      ?= 0784374d561435f7c787a555aeab8ede699ed298
+TCC_SRC       := $(B)/compat/src/tcc
+MUSL_ROOT     := $(CURDIR)/$(B)/compat/musl
+
+$(B)/compat/musl/lib/libc.a: | $(B)/compat
+	rm -rf $(B)/compat/src/musl $(B)/compat/musl && mkdir -p $(B)/compat/src/musl
+	git -C $(B)/compat/src/musl init -q
+	git -C $(B)/compat/src/musl fetch -q --depth 1 $(MUSL_GIT) $(MUSL_REV)
+	git -C $(B)/compat/src/musl checkout -q FETCH_HEAD
+	cd $(B)/compat/src/musl && CC="$(ACC)" ./configure --target=aarch64-linux-gnu --prefix=$(MUSL_ROOT) --disable-shared >/dev/null
+	$(MAKE) -C $(B)/compat/src/musl -s -j4 >/dev/null
+	$(MAKE) -C $(B)/compat/src/musl -s install >/dev/null
+
+# tcc runs on the guest, so it is built with the AArch64 compiler; the one
+# tool its build runs (c2str) is built for this machine first.
+$(B)/compat/tcc: test/compat/patches/tcc-auto-type.patch test/compat/patches/tcc-aarch64.patch | $(B)/compat
+	rm -rf $(TCC_SRC) && mkdir -p $(TCC_SRC)
+	git -C $(TCC_SRC) init -q
+	git -C $(TCC_SRC) fetch -q --depth 1 $(TCC_GIT) $(TCC_REV)
+	git -C $(TCC_SRC) checkout -q FETCH_HEAD
+	git -C $(TCC_SRC) apply $(CURDIR)/test/compat/patches/tcc-auto-type.patch $(CURDIR)/test/compat/patches/tcc-aarch64.patch
+	cd $(TCC_SRC) && ./configure --cc="$(ACC)" --cpu=arm64 --config-musl --extra-cflags="-O2 -DCONFIG_TCC_STATIC_DEFAULT" \
+	  --extra-ldflags="-static -s $(ULFLAGS)" --sysincludepaths=/disk/c/include --libpaths=/disk/c/lib \
+	  --crtprefix=/disk/c/lib --tccdir=/disk/c/lib --elfinterp=/lib/ld-musl-aarch64.so.1 >/dev/null
+	$(MAKE) -C $(TCC_SRC) -s CC=gcc c2str.exe tccdefs_.h
+	$(MAKE) -C $(TCC_SRC) -s tcc
+	$(MAKE) -C $(TCC_SRC) -s libtcc1.a arm64-libtcc1-usegcc=yes AR=$(CROSS)ar
+	cp $(TCC_SRC)/tcc $@
+
+# Z3 as a static glibc program, cross-built (single-threaded, as the x86-64 suite's).
+$(B)/compat/z3: | $(B)/compat
+	rm -rf $(B)/compat/src/z3 && mkdir -p $(B)/compat/src
+	git clone -q --depth 1 --branch $(Z3_TAG) $(Z3_GIT) $(B)/compat/src/z3
+	cd $(B)/compat/src/z3 && CXX="$(CROSS)g++" CC="$(ACC)" CXXFLAGS="-O2" LDFLAGS="-static -no-pie $(ULFLAGS)" \
+	  python3 scripts/mk_make.py --single-threaded >/dev/null
+	$(MAKE) -C $(B)/compat/src/z3/build -s -j$(Z3_JOBS) z3 >/dev/null
+	$(CROSS)strip -o $@ $(B)/compat/src/z3/build/z3
+
+$(B)/compat/bastioc1.c: $(BASTIOC0) $(wildcard $(BASTIOLIB)/stage1/*.bastio) | $(B)/compat
+	$(BASTIOC0) --emit-c -o $@ $(BASTIOLIB)/stage1/bastioc1.bastio
+
+$(B)/compat/bastioc1: $(B)/compat/bastioc1.c
+	$(ACC) -O2 -w -static -no-pie -s $(ULFLAGS) -o $@ $<
+
+# The mkdisk.py arguments for the toolchain: the headers are listed by this
+# machine's compiler (tcc cannot run here), the C runtime is musl's static one.
+BASTIO_TOOLS = $(shell BASTIO_DEPCC=gcc BASTIO_DEPMODE=-E BASTIO_CLIBS="crt1.o crti.o crtn.o libc.a" test/compat/bastiotools.sh \
+  $(B)/compat/bastioc1 $(B)/compat/bastioc1.c $(B)/compat/z3 $(B)/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_ROOT)/include $(MUSL_ROOT)/lib)
+
 # Debian (glibc) and Node (musl, V8) the same way, from the arm64 layers.
 $(B)/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox
 	COMPAT_ARCH=aarch64 test/compat/debiandisk.py $@ $(DEBIAN_IMAGE) $(B)/compat/busybox --cache $(ALPINE_CACHE)
@@ -298,6 +361,8 @@ COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox,apps --ke
               --alpine-repo $(B)/compat/alpine/disk/http \
               --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST)-arm64.json --debian-disk $(B)/compat/debian.img \
               --node-disk $(B)/compat/node.img --out $(B)/compat
+
+compat-disks: $(B)/bastios.bin $(COMPAT_DISKS)
 
 compat: $(B)/bastios.bin $(COMPAT_DISKS)
 	$(COMPAT_RUN) $(COMPAT_PROGS)
