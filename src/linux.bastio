@@ -265,6 +265,18 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   let mut clear = false;                  // CLONE_CLEAR_SIGHAND (clone3)
   if n == LX_CLONE3 {
+    let fw = user_u64(&mut k.spaces, pid, a);
+    if fw.ok && fw.v / 0x200000000 % 2 == 1 {
+      // CLONE_INTO_CGROUP (bit 33): src/lxcgroup.bastio takes the call whole.
+      let cg = lx_clone3_cg(&mut k, mmu, pid, a, b);
+      ret(&mut k.procs, pid, cg.r);
+      if cg.wait {
+        return SWITCH;                      // the parent waits until the child lets go
+      }
+      return KEEP;
+    }
+  }
+  if n == LX_CLONE3 {
     // clone3(struct clone_args *, size) runs the clone paths below with the
     // arguments taken from the structure (the registers stay as the program
     // left them, so a retried call reads the structure again). Without
@@ -2383,9 +2395,6 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
   // every record is in use.
   let lo = (cur + 4095) / 4096;
   let hi = (new + 4095) / 4096;
-  if lo < hi && !cg_mem_ok(&mut k, pid, hi - lo) {
-    return USER_BASE + cur;                 // a control group's memory.max (src/lxcgroup.bastio)
-  }
   if !(lo < hi && anon_add(&mut k, pid, lo, hi)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, lo, hi, false) {
     return USER_BASE + cur;
   }
@@ -2461,9 +2470,6 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   }
   let can_write = mode / O_WRITE % 2 == 1;
   let pages = (n + 4095) / 4096;
-  if prot != 0 && !cg_mem_ok(&mut k, pid, pages) {
-    return ENOMEM;                          // a control group's memory.max (src/lxcgroup.bastio)
-  }
   // A shared file mapping maps the page cache's pages (src/pcache.bastio)
   // instead of fresh ones, if the file was opened for writing. From a
   // descriptor that may only read, it gets a copy, as a private mapping
