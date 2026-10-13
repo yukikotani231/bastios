@@ -87,6 +87,9 @@ static int serve_three(void) {
     return good == 3;
 }
 
+static volatile int ltp2_mq_hit;
+static void ltp2_mq_fn(union sigval v) { ltp2_mq_hit = v.sival_int; }
+
 int main(void) {
     setup();
     signal(SIGPIPE, SIG_IGN);
@@ -223,6 +226,18 @@ int main(void) {
                syscall(SYS_mq_notify, q, &se) == -1 && errno == EINVAL &&
                mq_open("/ltp2q", O_RDWR | O_CREAT | O_EXCL, 0600, &at) == (mqd_t)-1 && errno == EEXIST;
            mq_close(q); ok && mq_unlink("/ltp2q") == 0 && mq_unlink("/ltp2q") == -1 && errno == ENOENT; }));
+    EXPECT("mqueue: mq_notify SIGEV_THREAD runs its function once, a second registration is EBUSY", ({
+           struct mq_attr at = {.mq_maxmsg = 4, .mq_msgsize = 16};
+           mq_unlink("/ltp2n"); mqd_t q = mq_open("/ltp2n", O_RDWR | O_CREAT | O_EXCL, 0600, &at);
+           struct sigevent se = {.sigev_notify = SIGEV_THREAD, .sigev_notify_function = ltp2_mq_fn};
+           se.sigev_value.sival_int = 77;
+           int ok = q != (mqd_t)-1 && mq_notify(q, &se) == 0 && mq_notify(q, &se) == -1 && errno == EBUSY &&
+               mq_send(q, "x", 1, 0) == 0;
+           for (int i = 0; ok && i < 200 && !ltp2_mq_hit; i++) usleep(10000);
+           ok = ok && ltp2_mq_hit == 77;
+           /* The registration is spent: another message does not call again, a new one can be made and dropped. */
+           ok = ok && mq_send(q, "y", 1, 0) == 0 && mq_notify(q, &se) == 0 && mq_notify(q, NULL) == 0;
+           mq_close(q); mq_unlink("/ltp2n"); ok; }));
     EXPECT("prctl: a name shows in /proc/self/comm; death signal and timer slack read back", ({ char b[16] = {0}, c[32] = {0}; int d = 0;
            prctl(PR_SET_NAME, "abcdefghijklmnopq"); prctl(PR_GET_NAME, b);
            int fd = open("/proc/self/comm", O_RDONLY); int n = fd >= 0 ? read(fd, c, sizeof c) : -1; if (fd >= 0) close(fd);
