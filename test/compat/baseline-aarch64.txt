@@ -694,6 +694,7 @@ t_newer: process_vm_readv of a reaped child
 t_newer: process_vm_readv of itself
 t_newer: process_vm_readv with flags
 t_newer: process_vm_writev to a child and back
+t_newer: process_vm_writev to a child just forked, repeatedly
 t_newer: pwritev2 at -1 appends at the offset
 t_newer: pwritev2 at an offset
 t_newer: rewinddir
