@@ -180,11 +180,24 @@ $(B)/compat/busybox: $(B)/busybox/Makefile test/compat/busybox.config | $(B)/com
 $(B)/compat/disk.img: $(COMPAT_BINS) $(B)/compat/busybox test/compat/mkdisk.py
 	test/compat/mkdisk.py $@ $(COMPAT_BINS) $(B)/compat/busybox
 
-COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox --kernel $(B)/bastios.bin \
-              --disk $(B)/compat/disk.img --out $(B)/compat
+# Alpine Linux for AArch64 (test/compat/alpine.txt), from the same pinned
+# Docker Hub images as the x86-64 suite's, their arm64 layers: the minirootfs
+# entered with chroot and apk installing packages from a local repository.
+# Without the Bastio toolchain and Dropbear, which are built for x86-64 only,
+# so the checks that use them fail and stay out of the baseline.
+include test/compat/images.mk
+ALPINE_CACHE ?= $(B)/compat/alpine
 
-compat: $(B)/bastios.bin $(B)/compat/disk.img
+$(B)/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py | $(B)/compat
+	COMPAT_ARCH=aarch64 test/compat/alpinedisk.py $@ $(B)/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) \
+	  --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE)
+
+COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox --kernel $(B)/bastios.bin \
+              --disk $(B)/compat/disk.img --alpine-disk $(B)/compat/alpine.img \
+              --alpine-repo $(B)/compat/alpine/disk/http --out $(B)/compat
+
+compat: $(B)/bastios.bin $(B)/compat/disk.img $(B)/compat/alpine.img
 	$(COMPAT_RUN) $(COMPAT_PROGS)
 
-compat-baseline: $(B)/bastios.bin $(B)/compat/disk.img
+compat-baseline: $(B)/bastios.bin $(B)/compat/disk.img $(B)/compat/alpine.img
 	$(COMPAT_RUN) --update-baseline $(COMPAT_PROGS)

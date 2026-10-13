@@ -251,10 +251,11 @@ jobs:
             build/compat/serial.log
           if-no-files-found: ignore
   # The Linux compatibility suite on AArch64 (arch/aarch64/Makefile): the
-  # suite's C programs and a BusyBox against glibc, on QEMU's virt machine.
+  # suite's C programs and a BusyBox against glibc, and Alpine, on QEMU's virt
+  # machine.
   compat-aarch64:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       BASTIOC0: bastiolang/stage0/target/release/bastioc0
       BASTIOLIB: bastiolang
@@ -273,7 +274,24 @@ jobs:
           key: proof-none
           restore-keys: proof-
           path: build/proof-cache
+      - name: Restore Alpine's images
+        id: al
+        uses: actions/cache/restore@v4
+        with:
+          key: compat-alpine-arm64-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
+          path: |
+            build/aarch64/compat/alpine/*.tar.gz
+            build/aarch64/compat/alpine/*.json
       - run: make ARCH=aarch64 compat
+      - name: Save Alpine's images
+        if: always() && steps.al.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          key: compat-alpine-arm64-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
+          path: |
+            build/aarch64/compat/alpine/*.tar.gz
+            build/aarch64/compat/alpine/*.json
+        continue-on-error: true
       - if: always()
         uses: actions/upload-artifact@v4
         with:
