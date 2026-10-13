@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <dirent.h>
+#include <spawn.h>
 #include <sys/stat.h>
 
 static int counter;
@@ -176,6 +177,38 @@ static int group_exit_code(void) {
     return 1;
 }
 
+/* A thread keeps using its descriptors while another thread of the process
+ * spawns children (posix_spawn lends the address space to the child with
+ * CLONE_VM | CLONE_VFORK): the descriptor must stay open for it. */
+extern char **environ;
+static volatile int spawning;
+static volatile int bad_fd;
+static void *fd_user(void *arg) {
+    int fd = *(int *)arg;
+    while (spawning) {
+        if (fcntl(fd, F_GETFD) < 0) bad_fd++;
+    }
+    return arg;
+}
+
+static int spawn_keeps_fds(void) {
+    int p[2];
+    if (pipe(p)) return 0;
+    spawning = 1;
+    bad_fd = 0;
+    pthread_t t;
+    if (pthread_create(&t, 0, fd_user, &p[0])) return 0;
+    for (int i = 0; i < 60; i++) {
+        pid_t c;
+        char *argv[] = { "/bin/true", 0 };
+        if (posix_spawn(&c, "/bin/true", 0, 0, argv, environ)) { spawning = 0; return 0; }
+        waitpid(c, 0, 0);
+    }
+    spawning = 0;
+    pthread_join(t, 0);
+    return bad_fd == 0;
+}
+
 int main(void) {
     setup();
     pthread_t t[4];
@@ -203,6 +236,7 @@ int main(void) {
     EXPECT("/proc/self/task lists the threads, and /proc/self/task/TID has their files", task_dir());
     EXPECT("/proc/self/task/TID/fd/N and ns/ are the process's", task_fd());
     EXPECT("threads that ended and began one after another have different ids", tids_differ());
+    EXPECT("a thread keeps its descriptors while another spawns a child", spawn_keeps_fds());
     if (begin("exit_group while another thread runs keeps its code")) {
         int r = group_exit_code();
         if (r == 1) pass(); else if (r == 0) fail("fork or waitpid failed");
