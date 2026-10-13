@@ -39,6 +39,16 @@ alpine: openssl: a digest and random bytes
 alpine: rsync: copy a tree
 alpine: ssh-keygen: an ed25519 key
 alpine: xmllint: an XPath query
+apps: lua: arithmetic and strings
+apps: lua: coroutines and tables
+apps: lua: files
+apps: qjs: files and exec
+apps: qjs: language
+apps: qjs: promises and timers
+apps: sqlite3: 20000 rows, an index and a query
+apps: sqlite3: WAL
+apps: sqlite3: a database file
+apps: sqlite3: in memory
 busybox: awk
 busybox: base64
 busybox: basename/dirname

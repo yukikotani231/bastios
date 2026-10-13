@@ -192,6 +192,10 @@ def with_bb(cmd, bb):
 
 # ---------------------------------------------------------------- the guest
 
+# The programs of apps.txt the AArch64 suite builds (arch/aarch64/Makefile).
+AARCH64_APPS = ("lua", "qjs", "sqlite3")
+
+
 class Guest:
     def __init__(self, kernel, disk, log, web=None, idle=False, arch="x86_64", mem="256M"):
         # idle: QEMU runs under SCHED_IDLE, on CPU time no other process wants.
@@ -601,7 +605,8 @@ def main():
         taking a guest."""
         g = [(prog, prog, lambda e, p=prog: run_program(e, p, args.timeout)) for prog in args.programs]
         g.append(("busybox", "busybox applets", lambda e: [run_applet(e, n, c, x, 30, bb) for n, c, x in applets]))
-        g.append(("apps", "real programs", lambda e: [run_applet(e, n, c, x, 60, bb) for n, c, x in apps]))
+        g.append(("apps", "real programs", lambda e: [run_applet(e, n, c, x, 60, bb) for n, c, x in apps
+                                                       if ARCH == "x86_64" or n.split(":")[0] in AARCH64_APPS]))
         if not args.host:
             g.append(("ssh", "logging in over SSH", lambda e: [run_applet(e, n, c, x, 60, bb) for n, c, x in sshc]))
         g.append(("tty", "programs on the terminal", lambda e: [run_tty(e, n, p, k, c, x, 30, bb) for n, p, k, c, x in tty]))
