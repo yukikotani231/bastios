@@ -197,7 +197,7 @@ static void *fd_user(void *arg) {
 struct c3args { uint64_t flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls, set_tid, set_tid_size, cgroup; };
 static void c3_handler(int s) { (void)s; }
 
-/* A vfork-style child with CLONE_CLEAR_SIGHAND sees default handlers (an
+/* A forked child with CLONE_CLEAR_SIGHAND sees default handlers (an
  * ignored signal stays ignored), the parent keeps its own, and a set_tid
  * request or a structure too short for the first version is refused. */
 static int clone3_clear_sighand(void) {
@@ -205,7 +205,7 @@ static int clone3_clear_sighand(void) {
     memset(&a, 0, sizeof a);
     signal(SIGUSR1, c3_handler);
     signal(SIGUSR2, SIG_IGN);
-    a.flags = 0x100 | 0x4000 | (1ULL << 32);        /* CLONE_VM | CLONE_VFORK | CLONE_CLEAR_SIGHAND */
+    a.flags = 1ULL << 32;                           /* CLONE_CLEAR_SIGHAND */
     a.exit_signal = SIGCHLD;
     long r = syscall(435, &a, sizeof a);
     if (r == 0) {
