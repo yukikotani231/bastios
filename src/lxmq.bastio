@@ -431,7 +431,7 @@ fn pq_notify_fire(k: &mut Kernel, pid: u64, q: u64)
   pq_set(&mut k, q, PW_NPID, 0);
   if np != 0 && s >= PQ_THREAD && s < PQ_THREAD + NLS {
     // SIGEV_THREAD: musl's helper thread waits on a netlink socket.
-    nic_nl_wake(&mut k.nic, s - PQ_THREAD);
+    nic_nl_wake(&mut k.nic, s - PQ_THREAD, 1);
     return;
   }
   if np < 2 || np > NPROC || s == 0 || s > NSIG || state(k.procs, np - 1) == FREE {
@@ -619,6 +619,10 @@ fn lx_mq_notify(k: &mut Kernel, pid: u64, fd: u64, sev: u64) -> u64
   let np = pq_get(k, q, PW_NPID);
   if sev == 0 {
     if np == me {
+      let s = pq_get(k, q, PW_NSIG);
+      if s >= PQ_THREAD && s < PQ_THREAD + NLS {
+        nic_nl_wake(&mut k.nic, s - PQ_THREAD, 0);   // lets musl's helper thread end
+      }
       pq_set(&mut k, q, PW_NPID, 0);
     }
     return 0;
