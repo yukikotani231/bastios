@@ -122,7 +122,9 @@ does not have: `make -j1` and `make -j2` of 100 small C files with tcc, on the
 development disk, on `-smp 2`. It prints the median seconds of each and the
 speed-up of `-j2`. Measured on one shared 4-core host under QEMU TCG: 1.8 s
 and 1.4 s (1.3 times as fast). It is not part of `make bench`, which runs the
-same program on Linux; this one is BastiOS alone.
+same program on Linux; this one is BastiOS alone. The low speed-up is the
+kernel's one lock (`Lock[Sys]`, see "How it scales" in docs/architecture.md):
+every system call of both compilers takes it.
 
 ## Reading the numbers
 
