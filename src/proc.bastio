@@ -413,7 +413,7 @@ fn wake_readers(procs: &mut Buf, q: &mut Queue, line: &Buf)
 // Everything the kernel owns, in one place. `mmu` and `cpu` stay with
 // `main`, which lends them where they are needed.
 // Linux file descriptors (src/lxfd.bastio).
-const LXNFD: u64 = 512;
+const LXNFD: u64 = 1024;
 const LXFD_LEN: u64 = NPROC * LXNFD;
 const FD_CONSOLE: u64 = 1;
 const FD_OFD: u64 = 2;
