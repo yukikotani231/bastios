@@ -1,17 +1,61 @@
-// The virtio transport layer on AArch64: memory-mapped registers only
-// (virtio-mmio), as there are no I/O ports. See src/virtq.bastio for the ring
-// code and the layouts, and src/x86_64/arch/vt.bastio for the x86-64 version
-// that also reaches a PCI function through its ports.
+// The virtio transport layer on AArch64: memory-mapped registers (virtio-mmio)
+// or the modern layout of a virtio PCI function (VERSION_1: common
+// configuration, notification and device-specific configuration in the
+// function's memory BAR), as there are no I/O ports. See src/virtq.bastio for
+// the ring code and the layouts, and src/x86_64/arch/vt.bastio for the x86-64
+// version that also reaches a legacy PCI function through its ports.
 
 import "virtq.bastio";
 
-/// A device's memory-mapped registers: `v2` is the modern layout.
-struct VMem { regs: Mmio, v2: bool }
+/// A device's memory-mapped registers: `v2` is the modern layout of
+/// virtio-mmio. With `pci` they are instead a modern PCI function's block of
+/// its memory BAR: `common` is the common configuration (VP_COMMON_LEN
+/// bytes), `device` the device-specific configuration (8 bytes read),
+/// `notify` the notification area, whose address for a queue is `notify +
+/// queue_notify_off * mult` (n0 and n1 are those for queues 0 and 1, found
+/// when the queue is set up). (One variant, so a driver's proof about which
+/// registers it holds does not branch on the kind of transport.)
+struct VMem { regs: Mmio, v2: bool, pci: bool, common: u64, device: u64, notify: u64, mult: u64, n0: u64, n1: u64 }
 
 enum Vt { Mem(VMem) }
 
+const VP_COMMON_LEN: u64 = 0x38;
+const VP_MAX_LEN: u64 = 1048576;      // the most of a BAR claimed
+// Offsets in the common configuration.
+const VP_DEV_FEAT_SEL: u64 = 0x00;
+const VP_DEV_FEAT: u64 = 0x04;
+const VP_DRV_FEAT_SEL: u64 = 0x08;
+const VP_DRV_FEAT: u64 = 0x0C;
+const VP_STATUS: u64 = 0x14;
+const VP_Q_SEL: u64 = 0x16;
+const VP_Q_SIZE: u64 = 0x18;
+const VP_Q_ENABLE: u64 = 0x1C;
+const VP_Q_NOTIFY_OFF: u64 = 0x1E;
+const VP_Q_DESC: u64 = 0x20;
+const VP_Q_DRV: u64 = 0x28;
+const VP_Q_DEV: u64 = 0x30;
+
+/// A virtio-mmio device's registers (see src/virtio_mmio.bastio).
+fn vmem_new(regs: Mmio, v2: bool) -> VMem
+  ensures mmio_base(result.regs) == mmio_base(regs) && mmio_len(result.regs) == mmio_len(regs) && !result.pci
+{
+  return VMem { regs: regs, v2: v2, pci: false, common: 0, device: 0, notify: 0, mult: 0, n0: 0, n1: 0 };
+}
+
+spec fn vmem_ok(d: &VMem) -> bool {
+  (!d.pci ==> mmio_len(d.regs) == VM_LEN && mmio_base(d.regs) % 4 == 0)
+  && (d.pci ==> mmio_base(d.regs) % 4096 == 0
+    && d.common % 4 == 0 && d.common + VP_COMMON_LEN <= mmio_len(d.regs)
+    && d.device % 4 == 0 && d.device + 8 <= mmio_len(d.regs))
+}
+
+/// Are these the registers of a virtio-mmio device, of the right size and alignment?
+spec fn vmem_mmio_ok(d: &VMem) -> bool {
+  !d.pci && mmio_len(d.regs) == VM_LEN && mmio_base(d.regs) % 4 == 0
+}
+
 spec fn vt_ok(t: &Vt) -> bool {
-  mmio_len(t.Mem.regs) == VM_LEN && mmio_base(t.Mem.regs) % 4 == 0
+  vmem_ok(t.Mem)
 }
 
 /// Does the transport hold I/O port k?
@@ -69,7 +113,11 @@ fn vt_status(t: &mut Vt, v: u64)
 {
   match t {
     Vt::Mem(mut m) => {
-      mmio_write32(&mut m.regs, VM_STATUS, cast[u32](v));
+      if m.pci {
+        mmio_write8(&mut m.regs, m.common + VP_STATUS, cast[u8](v));
+      } else {
+        mmio_write32(&mut m.regs, VM_STATUS, cast[u32](v));
+      }
       t = Vt::Mem(m);
     },
   }
@@ -83,7 +131,12 @@ fn vt_get_status(t: &mut Vt) -> u64
 {
   match t {
     Vt::Mem(mut m) => {
-      let x = cast[u64](mmio_read32(&mut m.regs, VM_STATUS)) % 256;
+      let mut x = 0;
+      if m.pci {
+        x = cast[u64](mmio_read8(&mut m.regs, m.common + VP_STATUS));
+      } else {
+        x = cast[u64](mmio_read32(&mut m.regs, VM_STATUS)) % 256;
+      }
       t = Vt::Mem(m);
       return x;
     },
@@ -99,7 +152,14 @@ fn vt_notify(t: &mut Vt, q: u64)
 {
   match t {
     Vt::Mem(mut m) => {
-      mmio_write32(&mut m.regs, VM_QNOTIFY, cast[u32](q));
+      if !m.pci {
+        mmio_write32(&mut m.regs, VM_QNOTIFY, cast[u32](q));
+      } else if q == 0 && m.n0 < VP_MAX_LEN && m.n0 % 2 == 0 && m.n0 + 2 <= mmio_len(m.regs) {
+        // Only queues 0 and 1 are used (a network card's receive and transmit).
+        mmio_write16(&mut m.regs, m.n0, 0);
+      } else if q == 1 && m.n1 < VP_MAX_LEN && m.n1 % 2 == 0 && m.n1 + 2 <= mmio_len(m.regs) {
+        mmio_write16(&mut m.regs, m.n1, 1);
+      }
       t = Vt::Mem(m);
     },
   }
@@ -115,7 +175,12 @@ fn vt_cfg8(t: &mut Vt, off: u64, msix: bool) -> u64
 {
   match t {
     Vt::Mem(mut m) => {
-      let x = cast[u64](mmio_read8(&mut m.regs, VM_CONFIG + off));
+      let mut x = 0;
+      if m.pci {
+        x = cast[u64](mmio_read8(&mut m.regs, m.device + off));
+      } else {
+        x = cast[u64](mmio_read8(&mut m.regs, VM_CONFIG + off));
+      }
       t = Vt::Mem(m);
       return x;
     },
@@ -131,8 +196,12 @@ fn vt_cfg64(t: &mut Vt, msix: bool) -> u64
 {
   match t {
     Vt::Mem(mut m) => {
-      let lo = cast[u64](mmio_read32(&mut m.regs, VM_CONFIG));
-      let hi = cast[u64](mmio_read32(&mut m.regs, VM_CONFIG + 4));
+      let mut at = VM_CONFIG;
+      if m.pci {
+        at = m.device;
+      }
+      let lo = cast[u64](mmio_read32(&mut m.regs, at));
+      let hi = cast[u64](mmio_read32(&mut m.regs, at + 4));
       t = Vt::Mem(m);
       return lo + hi * 4294967296;
     },
@@ -154,6 +223,37 @@ fn vt_msix(t: &mut Vt, queues: u64) -> bool
   }
 }
 
+/// `vt_start` for a modern PCI function: the same handshake, through the
+/// common configuration.
+fn vp_start(d: &mut VMem, want: u64) -> bool
+  requires d.pci && vmem_ok(d) && want <= 2147483648
+  ensures d.pci == old(d.pci) && vmem_ok(d)
+  ensures mmio_base(d.regs) == old(mmio_base(d.regs)) && mmio_len(d.regs) == old(mmio_len(d.regs))
+{
+  let c = d.common;
+  mmio_write8(&mut d.regs, c + VP_STATUS, 0);
+  mmio_write8(&mut d.regs, c + VP_STATUS, cast[u8](VIO_ACK));
+  mmio_write8(&mut d.regs, c + VP_STATUS, cast[u8](VIO_ACK + VIO_DRIVER));
+  mmio_write32(&mut d.regs, c + VP_DEV_FEAT_SEL, 0);
+  let offered = cast[u64](mmio_read32(&mut d.regs, c + VP_DEV_FEAT));
+  let mut acc = 0;
+  if want > 0 && offered / want % 2 == 1 {
+    acc = want;
+  }
+  mmio_write32(&mut d.regs, c + VP_DRV_FEAT_SEL, 0);
+  mmio_write32(&mut d.regs, c + VP_DRV_FEAT, cast[u32](acc));
+  mmio_write32(&mut d.regs, c + VP_DEV_FEAT_SEL, 1);
+  let hi = cast[u64](mmio_read32(&mut d.regs, c + VP_DEV_FEAT));
+  mmio_write32(&mut d.regs, c + VP_DRV_FEAT_SEL, 1);
+  mmio_write32(&mut d.regs, c + VP_DRV_FEAT, 1);
+  let mut ok = hi % 2 == 1;
+  if ok {
+    mmio_write8(&mut d.regs, c + VP_STATUS, cast[u8](VIO_ACK + VIO_DRIVER + VIO_FEATURES_OK));
+    ok = (cast[u64](mmio_read8(&mut d.regs, c + VP_STATUS)) / VIO_FEATURES_OK) % 2 == 1;
+  }
+  return ok;
+}
+
 /// Starts the handshake: reset, then "I see you" and "I can drive you".
 /// Accepts feature bit `want` (a power of two, or 0 for none) if the device
 /// offers it, and returns false if nothing answers (or, on a modern
@@ -167,6 +267,11 @@ fn vt_start(t: &mut Vt, want: u64) -> bool
 {
   match t {
     Vt::Mem(mut d) => {
+      if d.pci {
+        let ok = vp_start(&mut d, want);
+        t = Vt::Mem(d);
+        return ok;
+      }
       mmio_write32(&mut d.regs, VM_STATUS, 0);
       mmio_write32(&mut d.regs, VM_STATUS, cast[u32](VIO_ACK));
       mmio_write32(&mut d.regs, VM_STATUS, cast[u32](VIO_ACK + VIO_DRIVER));
@@ -207,8 +312,54 @@ fn vt_modern(t: &mut Vt) -> bool
   ensures forall a: u64 :: vt_claims(t, a) == old(vt_claims(t, a))
 {
   match t {
-    Vt::Mem(mut d) => { let v = d.v2; t = Vt::Mem(d); return v; },
+    Vt::Mem(mut d) => { let v = d.v2 || d.pci; t = Vt::Mem(d); return v; },
   }
+}
+
+/// `vq_setup` for a modern PCI function; `a` is the queue's address.
+fn vp_setup(d: &mut VMem, q: &mut Vq, sel: u64, a: u64) -> bool
+  requires d.pci && vmem_ok(d) && vq_ok(q) && sel <= 65535 && a % 4096 == 0 && a <= ADDR_LIMIT - RING_BYTES
+  ensures d.pci == old(d.pci) && vmem_ok(d) && vq_ok(q)
+  ensures mmio_base(d.regs) == old(mmio_base(d.regs)) && mmio_len(d.regs) == old(mmio_len(d.regs))
+{
+  let c = d.common;
+  mmio_write16(&mut d.regs, c + VP_Q_SEL, cast[u16](sel));
+  let max = cast[u64](mmio_read16(&mut d.regs, c + VP_Q_SIZE));
+  let mut n = 256;
+  while n > 4 && n > max
+    invariant n >= 2 && n <= 256
+  {
+    n = n / 2;
+  }
+  // Where this queue is notified: only queues 0 and 1 are used.
+  let qn = cast[u64](mmio_read16(&mut d.regs, c + VP_Q_NOTIFY_OFF));
+  if d.notify >= VP_MAX_LEN || d.mult > 65536 {
+    return false;
+  }
+  let at = d.notify + qn * d.mult;
+  if n < 4 || n > max || sel > 1 || at % 2 != 0 || at + 2 > mmio_len(d.regs) {
+    return false;
+  }
+  if sel == 0 {
+    d.n0 = at;
+  } else {
+    d.n1 = at;
+  }
+  q.n = n;
+  q.avail = 16 * n;
+  q.used = (18 * n + 6 + 4095) / 4096 * 4096;
+  q.idx = 0;
+  q.seen = 0;
+  ring_w16(&mut q, q.avail, AVAIL_NO_INTERRUPT);
+  mmio_write16(&mut d.regs, c + VP_Q_SIZE, cast[u16](n));
+  mmio_write32(&mut d.regs, c + VP_Q_DESC, cast[u32](a));
+  mmio_write32(&mut d.regs, c + VP_Q_DESC + 4, 0);
+  mmio_write32(&mut d.regs, c + VP_Q_DRV, cast[u32](a + q.avail));
+  mmio_write32(&mut d.regs, c + VP_Q_DRV + 4, 0);
+  mmio_write32(&mut d.regs, c + VP_Q_DEV, cast[u32](a + q.used));
+  mmio_write32(&mut d.regs, c + VP_Q_DEV + 4, 0);
+  mmio_write16(&mut d.regs, c + VP_Q_ENABLE, 1);
+  return true;
 }
 
 /// Gives queue `sel` its pages and lays it out for the device's queue size.
@@ -227,6 +378,11 @@ fn vq_setup(t: &mut Vt, q: &mut Vq, sel: u64) -> bool
   }
   match t {
     Vt::Mem(mut d) => {
+      if d.pci {
+        let ok = vp_setup(&mut d, &mut q, sel, a);
+        t = Vt::Mem(d);
+        return ok;
+      }
       mmio_write32(&mut d.regs, VM_QSEL, cast[u32](sel));
       let max = cast[u64](mmio_read32(&mut d.regs, VM_QMAX));
       // The largest power of two the device allows, up to 256.
@@ -275,6 +431,13 @@ fn vt_stop(t: &mut Vt, sel: u64)
 {
   match t {
     Vt::Mem(mut d) => {
+      if d.pci {
+        mmio_write8(&mut d.regs, d.common + VP_STATUS, 0);
+        mmio_write16(&mut d.regs, d.common + VP_Q_SEL, cast[u16](sel));
+        mmio_write16(&mut d.regs, d.common + VP_Q_ENABLE, 0);
+        t = Vt::Mem(d);
+        return;
+      }
       mmio_write32(&mut d.regs, VM_STATUS, 0);
       mmio_write32(&mut d.regs, VM_QSEL, cast[u32](sel));
       if d.v2 {
