@@ -44,6 +44,8 @@ const PQ_ERRS: u64 = 0xFFFFFFFFFFFFF000; // above this, a result is -errno
 const PQ_NAMES: u64 = 278528;          // IPC_SETS * MQ_CAP: where k.ipcb's System V part ends
 const PQ_NAME_ROOM: u64 = 256;
 const PQ_REGIONS: u64 = 280576;        // PQ_NAMES + PQ_N * PQ_NAME_ROOM
+const PQ_COOKIES: u64 = 411648;        // PQ_REGIONS + PQ_N * PQ_REGION: 32 bytes a queue, the cookie of a SIGEV_THREAD registration
+const PQ_COOKIE_LEN: u64 = 32;         // NOTIFY_COOKIE_LEN
 const PQ_REGION: u64 = 16384;
 const PQ_LEN: u64 = 32768;             // MQ_PRIO_MAX: a message word is prio + PQ_LEN * len
 const PQ_HARD_MAX: u64 = 65536;        // HARD_MSGMAX
@@ -430,8 +432,8 @@ fn pq_notify_fire(k: &mut Kernel, pid: u64, q: u64)
   let s = pq_get(k, q, PW_NSIG);
   pq_set(&mut k, q, PW_NPID, 0);
   if np != 0 && s >= PQ_THREAD && s < PQ_THREAD + NLS {
-    // SIGEV_THREAD: musl's helper thread waits on a netlink socket.
-    nic_nl_wake(&mut k.nic, s - PQ_THREAD, 1);
+    // SIGEV_THREAD: the C library's helper thread waits on a netlink socket.
+    nic_nl_wake(&mut k.nic, s - PQ_THREAD, k.ipcb, PQ_COOKIES + q * PQ_COOKIE_LEN, 1);
     return;
   }
   if np < 2 || np > NPROC || s == 0 || s > NSIG || state(k.procs, np - 1) == FREE {
@@ -597,11 +599,16 @@ fn lx_mq_notify(k: &mut Kernel, pid: u64, fd: u64, sev: u64) -> u64
       return EINVAL;
     }
     if how == SIGEV_THREAD {
-      // musl passes the netlink socket's descriptor in the signo field.
+      // The C library passes the netlink socket's descriptor in the signo
+      // field, and in the value a pointer to the 32 bytes the wake-up will
+      // carry back (the cookie).
       if nl_of(k, pid, sig) >= NLS {
         return EBADF;
       }
       sig = PQ_THREAD + nl_of(k, pid, sig);
+      if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, val, &mut k.fs.xfer, PQ_COOKIE_LEN) != PQ_COOKIE_LEN {
+        return EFAULT;
+      }
     }
     if how == SIGEV_SIGNAL && (sig == 0 || sig > NSIG) {
       return EINVAL;
@@ -621,7 +628,7 @@ fn lx_mq_notify(k: &mut Kernel, pid: u64, fd: u64, sev: u64) -> u64
     if np == me {
       let s = pq_get(k, q, PW_NSIG);
       if s >= PQ_THREAD && s < PQ_THREAD + NLS {
-        nic_nl_wake(&mut k.nic, s - PQ_THREAD, 0);   // lets musl's helper thread end
+        nic_nl_wake(&mut k.nic, s - PQ_THREAD, k.ipcb, PQ_COOKIES + q * PQ_COOKIE_LEN, 0);   // lets musl's helper thread end
       }
       pq_set(&mut k, q, PW_NPID, 0);
     }
@@ -631,6 +638,9 @@ fn lx_mq_notify(k: &mut Kernel, pid: u64, fd: u64, sev: u64) -> u64
     return EBUSY;                           // one registration at a time, the owner's own included
   }
   pq_set(&mut k, q, PW_NPID, me);
+  if how == SIGEV_THREAD && copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, val, &mut k.fs.xfer, PQ_COOKIE_LEN) == PQ_COOKIE_LEN {
+    bcopy(&mut k.ipcb, PQ_COOKIES + q * PQ_COOKIE_LEN, k.fs.xfer, 0, PQ_COOKIE_LEN);
+  }
   if how == SIGEV_NONE {
     pq_set(&mut k, q, PW_NSIG, 0);
   } else {

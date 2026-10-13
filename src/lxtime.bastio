@@ -641,6 +641,43 @@ fn tv_in(k: &mut Kernel, pid: u64, va: u64) -> Ts
 
 // ---------------------------------------------------------------- alarms
 
+/// Signal s for the process that row p belongs to (a timer's, which is not
+/// aimed at a thread): row p if it does not block s, else another thread of
+/// the group that does not, as on Linux; if all block it, the group's
+/// leader, where a sigwait in the main thread finds it. A timer's
+/// state moves between the rows of a group (src/lxthread.bastio), so it may
+/// be kept by a thread that blocks every signal, like glibc's helper threads.
+fn post_proc(k: &mut Kernel, p: u64, s: u64)
+  requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
+  let mut at = p;
+  if has_sig(pget(k.procs, p, F_SIGMASK), s) {
+    let g = tgid(k.procs, p);
+    let mut q = 1;
+    let mut found = false;
+    while q < NPROC && !found
+      invariant 1 <= q && q <= NPROC && 1 <= at && at < NPROC && kok(k)
+    {
+      let st = state(k.procs, q);
+      if st != FREE && st != ZOMBIE && tgid(k.procs, q) == g && !has_sig(pget(k.procs, q, F_SIGMASK), s) {
+        at = q;
+        found = true;
+      }
+      q = q + 1;
+    }
+  }
+  if at == p && has_sig(pget(k.procs, p, F_SIGMASK), s) {
+    // Every thread blocks it: it waits for whichever calls sigwait, and the
+    // thread that holds the timer is a helper more often than the main one.
+    let l = tgid(k.procs, p);
+    if l >= 1 && state(k.procs, l) != FREE && state(k.procs, l) != ZOMBIE {
+      at = l;
+    }
+  }
+  post_sig(&mut k, at, s);
+}
+
 /// On a timer tick, with k.ns just read: sends SIGALRM to each process
 /// whose real-time timer has run out, and sets the timer going again if it
 /// has an interval; then the same for the POSIX timers.
@@ -654,7 +691,7 @@ fn lx_alarms(k: &mut Kernel)
   {
     let dl = get(k.alarms, 2 * p);
     if dl != 0 && k.ns >= dl {
-      post_sig(&mut k, p, SIGALRM);
+      post_proc(&mut k, p, SIGALRM);
       let iv = get(k.alarms, 2 * p + 1);
       let mut next = 0;
       if iv != 0 {
