@@ -64,8 +64,11 @@ for line in open(path):
 # entry of the file that /proc/PID/fd/N names; a path of the in-memory file
 # system is not a /proc path, so one level is expected: four are allowed,
 # which is an assumption and not a proved bound.
-BOUNDED = [({"f_dev_attach", "f_hub_setup"}, 3), ({"f_post_sig"}, 2),
-           ({"f_lx_deliver"}, 2), ({"f_lx_open_n"}, 4)]
+# A cycle counts as bounded when all its functions are in the set: a backend
+# that does not inline a small helper of the cycle (post_from, lx_open_fd_link)
+# shows a longer cycle than one that does, with the same bound.
+BOUNDED = [({"f_dev_attach", "f_hub_setup"}, 3), ({"f_post_sig", "f_jc_tell", "f_post_from"}, 2),
+           ({"f_lx_deliver"}, 2), ({"f_lx_open_n", "f_lx_open_fd_link"}, 4)]
 
 sys.setrecursionlimit(100000)
 done, onpath, cycles = {}, [], []
@@ -82,7 +85,7 @@ def deepest(f):
         if c in onpath:
             cyc = onpath[onpath.index(c):]
             for members, times in BOUNDED:
-                if set(cyc) == members:
+                if set(cyc) <= members:
                     extra = (times - 1) * sum(frame[g] for g in cyc)
                     if extra > best[0]:
                         best = (extra, ["(%s x%d)" % ("+".join(cyc), times)])

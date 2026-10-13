@@ -303,3 +303,26 @@ status 0
 $ bb printf 'local c = vim.fn.sockconnect("pipe", "/root/n.sock", {rpc = true})\nio.open("/root/rpc.txt", "w"):write(vim.fn.rpcrequest(c, "nvim_eval", "g:x"), "\\n")\npcall(vim.fn.rpcnotify, c, "nvim_command", "qa!")\n' > /disk/a/root/rpc.lua && bb chroot /disk/a /bin/sh -c 'rm -f /root/n.sock /root/rpc.txt; nvim --headless -u NONE --listen /root/n.sock -c "let g:x=42" >/root/srv.log 2>&1 & i=0; while [ ! -S /root/n.sock ] && [ $i -lt 15 ]; do sleep 1; i=$((i+1)); done; timeout 20 nvim --headless -u NONE -l /root/rpc.lua >/root/cli.log 2>&1; sleep 1; kill %1 2>/dev/null'; bb cat /disk/a/root/rpc.txt /disk/a/root/cli.log
 42
 
+
+== proc: /proc/self/exe is named from the reader's root (chroot), as on Linux
+$ bb mkdir -p /disk/a/proc && bb mount -t proc proc /disk/a/proc && bb chroot /disk/a /bin/sh -c 'readlink /proc/self/exe'; bb umount /disk/a/proc
+/bin/busybox
+
+== apk: install tmux, cmake and lua-language-server over HTTP
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL tmux cmake lua-language-server make gcc musl-dev 2>/dev/null; echo status $?; bb chroot /disk/a /sbin/apk info -e tmux cmake lua-language-server 2>/dev/null
+status 0
+tmux
+cmake
+lua-language-server
+
+== tmux: a detached session runs a shell on a pseudo-terminal, takes keys and shows its screen
+$ bb rm -f /disk/a/root/tm.res; test -x /disk/a/usr/bin/tmux && bb mount --bind /dev /disk/a/dev && bb mount --bind /dev/pts /disk/a/dev/pts && bb chroot /disk/a /bin/sh -c 'exec </dev/null >/root/tm.out 2>&1; export TERM=xterm; tmux -f /dev/null new-session -d -s t -x 80 -y 24 sh && sleep 1 && tmux send-keys -t t "echo sum=$((40+2))" Enter && sleep 1 && tmux capture-pane -p -t t >/root/tm.cap && grep -c "^sum=42" /root/tm.cap >/root/tm.res; tmux kill-server'; bb umount /disk/a/dev/pts 2>/dev/null; bb umount /disk/a/dev 2>/dev/null; bb cat /disk/a/root/tm.res
+1
+
+== cmake: configure, build and run a C project
+$ bb mkdir -p /disk/a/root/cm && bb printf 'cmake_minimum_required(VERSION 3.10)\nproject(hello C)\nadd_executable(hello main.c)\n' > /disk/a/root/cm/CMakeLists.txt && bb printf '#include <stdio.h>\nint main(void) { puts("built by cmake"); return 0; }\n' > /disk/a/root/cm/main.c && bb chroot /disk/a /bin/sh -c 'cd /root/cm && cmake -S . -B build >/root/cm/cfg.log 2>&1 && cmake --build build >/root/cm/build.log 2>&1 && ./build/hello'
+built by cmake
+
+== nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
+$ test -x /disk/a/usr/bin/lua-language-server && bb mkdir -p /disk/a/root/luaproj /disk/a/proc && bb mount -t proc proc /disk/a/proc && bb printf 'local answer = 42\nprint(answer)\n' > /disk/a/root/luaproj/main.lua && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-real-client.lua -o /root/lsp-real-client.lua && timeout 200 nvim -l /root/lsp-real-client.lua >/root/lsreal.log 2>&1'; bb umount /disk/a/proc 2>/dev/null; bb cat /disk/a/root/lsreal.txt
+initialized,hover-integer,stopped
