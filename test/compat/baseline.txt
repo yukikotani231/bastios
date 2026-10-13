@@ -1009,3 +1009,7 @@ apps: ripgrep: search with line numbers, honouring .ignore
 alpine: git: clone over HTTP and over HTTPS (git's dumb protocol, curl's TLS)
 alpine: nvim: tree-sitter parses help text with the vimdoc parser
 alpine: nvim: LuaJIT loads a shared object that gcc built
+alpine: nvim: vim.system runs a process and collects its output and status
+alpine: nvim: a job on a pseudo-terminal (what :terminal runs on, with /dev and /dev/pts bound into the chroot)
+alpine: nvim: a file watcher and a timer from libuv
+alpine: nvim: :grep and :vimgrep fill the quickfix list
