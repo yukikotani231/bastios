@@ -201,6 +201,9 @@ fn lk_put(t: &mut Buf, file: u64, class: u64, owner: u64, ty: u64, s: u64, e: u6
     lk_set(&mut t, i, 3, s);
     lk_set(&mut t, i, 4, e);
     lk_set(&mut t, i, 5, class);
+    if i >= get(t, LK_HI) {
+      t = set(t, LK_HI, i + 1);
+    }
   }
 }
 
@@ -263,9 +266,10 @@ fn lock_drop(t: &mut Buf, owner: u64, file: u64, class: u64)
   requires len(t) == LK_LEN
   ensures len(t) == LK_LEN
 {
+  let hi = smaller(get(t, LK_HI), LK_N);      // entries from there on are free
   let mut i = 0;
-  while i < LK_N
-    invariant i <= LK_N && len(t) == LK_LEN
+  while i < hi
+    invariant i <= hi && hi <= LK_N && len(t) == LK_LEN
   {
     let f = lk_get(t, i, 0);
     if f != 0 && lk_get(t, i, 1) == owner && (file == LK_EOF || f - 1 == file)
