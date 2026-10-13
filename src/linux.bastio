@@ -1917,7 +1917,7 @@ fn base_len(k: &Kernel, pid: u64, h: u64) -> u64
   if h == OFD_N {
     return smaller(wget(k.cwd, pid * CWD_STRIDE), FNAME_MAX);
   }
-  return smaller(get(k.dpath, h * CWD_STRIDE), FNAME_MAX);
+  return smaller(wget(k.dpath, h * CWD_STRIDE), FNAME_MAX);
 }
 
 fn base_byte(k: &Kernel, pid: u64, h: u64, i: u64) -> u8
@@ -1926,7 +1926,7 @@ fn base_byte(k: &Kernel, pid: u64, h: u64, i: u64) -> u8
   if h == OFD_N {
     return cast[u8](wget(k.cwd, pid * CWD_STRIDE + 1 + i) % 256);
   }
-  return cast[u8](get(k.dpath, h * CWD_STRIDE + 1 + i) % 256);
+  return cast[u8](wget(k.dpath, h * CWD_STRIDE + 1 + i) % 256);
 }
 
 /// The length of process pid's root if the name out[0..o] is inside it,

@@ -45,6 +45,7 @@ tests=(
   "iso|c|test/iso_test.sh"
   "nmi|c|test/nmi_test.sh"
   "stackguard|c|test/stackguard_test.sh"
+  "stackdepth|c|test/stackdepth.py"
   "fuzz|c|test/fuzz_test.sh 1 2 2000"
 )
 tmp=$(mktemp -d)

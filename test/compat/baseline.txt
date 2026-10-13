@@ -432,6 +432,7 @@ t_ltp2: mincore errors
 t_ltp2: mincore marks mapped pages
 t_ltp2: mlockall and munlockall succeed
 t_ltp2: mqueue: priorities order messages, getattr counts, unlink, bad sigevent EINVAL
+t_ltp2: mqueue: mq_notify SIGEV_THREAD runs its function once, a second registration is EBUSY
 t_ltp2: nested epoll: readiness passes up, a loop is ELOOP
 t_ltp2: nice: root lowers and raises it, a child inherits it, nobody may not lower it
 t_ltp2: personality is kept
@@ -564,6 +565,7 @@ t_misc: /proc/self/exe
 t_misc: /proc/self/limits shows the open-files limit
 t_misc: /proc/self/mountinfo lists the root and /proc
 t_misc: /proc/self/statm counts the pages and io has its counters
+t_misc: core_pattern and nr_open read, drop_caches takes 3 and refuses 9
 t_misc: /proc/stat has cpu lines
 t_misc: SIOCGIFHWADDR and SIOCGIFNETMASK on lo
 t_misc: SSE floating point
@@ -1020,13 +1022,17 @@ apps: ripgrep: search with line numbers, honouring .ignore
 alpine: git: clone over HTTP and over HTTPS (git's dumb protocol, curl's TLS)
 alpine: nvim: tree-sitter parses help text with the vimdoc parser
 alpine: nvim: LuaJIT loads a shared object that gcc built
+alpine: nvim: a plugin cloned over HTTP is on the packpath and runs at startup
 alpine: nvim: vim.system runs a process and collects its output and status
 alpine: nvim: a job on a pseudo-terminal (what :terminal runs on, with /dev and /dev/pts bound into the chroot)
 alpine: nvim: a file watcher and a timer from libuv
 alpine: nvim: :grep and :vimgrep fill the quickfix list
+alpine: nvim: the LSP client starts a language server, asks it for a hover and stops it
+alpine: nvim: shada and a session file survive a restart (atomic writes, rename)
 alpine: container: runc runs Alpine in new namespaces (own hostname, PID 1)
 alpine: container: the host keeps its hostname and no container is left behind
 alpine: container: the root file system is read-only, and the exit status comes back
 alpine: container: rootless: runc runs Alpine as an unprivileged user in a user namespace of its own
 alpine: container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle
 alpine: container: the image's command, environment and working directory run rootless from the bundle
+alpine: nvim: a headless server on a unix socket answers another nvim (--listen, sockconnect, RPC)

@@ -220,11 +220,24 @@ int main(void)
     if (!fixed_kept())
         return fail("keeping a MAP_FIXED mapping from mmap and brk");
     /* Opening until nothing is left ends in EMFILE, not ENOENT. */
-    int many[300], got = 0;
-    while (got < 300 && (many[got] = open("f", O_RDONLY)) >= 0)
+    int many[600], got = 0;
+    while (got < 600 && (many[got] = open("f", O_RDONLY)) >= 0)
         got++;
-    if (got == 300 || errno != EMFILE)
+    if (got == 600 || errno != EMFILE)
         return fail("running out of descriptors");
+    /* The table is full, so the last descriptors are far past 255: a pipe
+     * made from two of them reports their numbers whole and carries data. */
+    int hi[2];
+    close(many[got - 1]);
+    close(many[got - 2]);
+    if (pipe(hi) != 0 || hi[0] < 256 || hi[1] < 256 || write(hi[1], "k", 1) != 1)
+        return fail("a pipe among descriptors past 255");
+    char hb;
+    if (read(hi[0], &hb, 1) != 1 || hb != 'k')
+        return fail("reading through descriptors past 255");
+    close(hi[0]);
+    close(hi[1]);
+    got -= 2;
     while (got > 0)
         close(many[--got]);
     close(f);
@@ -300,6 +313,8 @@ int main(void)
     }
     if (made == 20000 || errno != ENOSPC)
         return fail("filling the in-memory table");
+    if (made < 4000) /* the table held 1024 once; it holds thousands now */
+        return fail("the in-memory table holds thousands of names");
     while (made > 0) {
         snprintf(nm, sizeof nm, "n%d", --made);
         if (rmdir(nm) != 0)

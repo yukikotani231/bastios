@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Writes the Alpine disk for the compat suite (test/compat/alpine.txt):
 Alpine Linux's root file system as a tar file (/disk/root.tar) and a local
-package repository (/disk/a/repo/x86_64: .apk files and an APKINDEX; and
-/disk/a/repo2/x86_64), next to Alpine's own BusyBox at /disk/busybox. The checks unpack the root under
+package repository (/disk/a/repo/ARCH: .apk files and an APKINDEX; and
+/disk/a/repo2/ARCH, ARCH being x86_64, or aarch64 with COMPAT_ARCH=aarch64), next to Alpine's own BusyBox at /disk/busybox. The checks unpack the root under
 /disk/a, chroot into it and run apk there.
 
-    alpinedisk.py OUT.img WORK_DIR BASE_IMAGE PKG_IMAGE... --disk NAME,... [--cache DIR]
+    alpinedisk.py OUT.img WORK_DIR BASE_IMAGE PKG_IMAGE... --disk NAME,... [--cache DIR] [--busybox FILE]
+
+--busybox FILE is the BusyBox put at /disk/busybox in place of Alpine's own:
+Alpine's is dynamically linked, and a kernel without the built-in musl
+dynamic linker (AArch64) cannot start it outside the root.
 
 Every package the PKG_IMAGEs hold goes in a repository WORK_DIR/disk/http,
 which run.py serves over HTTP (alpine.txt's ALPINEURL): it is larger than
@@ -33,6 +37,10 @@ on fresh checkouts; a 429 from it is waited out and retried.
 import base64, gzip, hashlib, http.client, io, json, os, re, shutil, subprocess, sys, tarfile, time, urllib.error, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# The guest's processor (COMPAT_ARCH, as run.py's --arch): apk's name for it
+# and Docker Hub's.
+ARCH = os.environ.get("COMPAT_ARCH", "x86_64")
+DOCKER_ARCH = {"x86_64": "amd64", "aarch64": "arm64"}[ARCH]
 REGISTRY = "https://registry-1.docker.io/v2"
 ACCEPT = ", ".join([
     "application/vnd.oci.image.index.v1+json",
@@ -97,13 +105,13 @@ def sound(path, digest):
     return "sha256:" + h.hexdigest() == digest
 
 def layers(image, cache):
-    """The layers of an amd64 image NAME@sha256:DIGEST, as paths of gzip
+    """The layers of an image NAME@sha256:DIGEST for ARCH, as paths of gzip
     tar files in the cache, base first. Each blob is checked against its
     digest, when it is fetched and each time it comes from the cache."""
     name, digest = image.split("@")
     # Docker Hub limits how many manifests one address may fetch, so the
     # layer list is kept too, by the image's digest: the layers' digests.
-    listed = os.path.join(cache, digest.replace(":", "-") + ".json")
+    listed = os.path.join(cache, digest.replace(":", "-") + ("" if ARCH == "x86_64" else "-" + DOCKER_ARCH) + ".json")
     if os.path.exists(listed):
         # Older lists hold paths; a layer's file name is its digest either way.
         ds = [os.path.basename(p)[:-len(".tar.gz")].replace("-", ":", 1) for p in json.load(open(listed))]
@@ -114,7 +122,7 @@ def layers(image, cache):
         "https://auth.docker.io/token?service=registry.docker.io&scope=repository:" + name + ":pull"))["token"]
     m = json.loads(fetch(f"{REGISTRY}/{name}/manifests/{digest}", token, ACCEPT))
     if "manifests" in m:
-        d = [x for x in m["manifests"] if x.get("platform", {}).get("architecture") == "amd64"
+        d = [x for x in m["manifests"] if x.get("platform", {}).get("architecture") == DOCKER_ARCH
              and x.get("platform", {}).get("os") == "linux"][0]["digest"]
         m = json.loads(fetch(f"{REGISTRY}/{name}/manifests/{d}", token, ACCEPT))
     out = []
@@ -304,7 +312,7 @@ def synthetic(pkgs):
     package()."""
     out = []
     for name, ver, dep, body, kinds, trig in pkgs:
-        files, p = {}, {"P": name, "V": ver, "T": "BastiOS compat test package", "A": "x86_64",
+        files, p = {}, {"P": name, "V": ver, "T": "BastiOS compat test package", "A": ARCH,
                         "t": "1760140800", "L": "MIT", "U": "https://github.com/yukikotani231/bastios",
                         "o": name, "m": "BastiOS", "I": str(sum(len(b) for b in body.values())),
                         "D": dep, "C": name + ver, "dirs": [], "files": []}
@@ -411,6 +419,10 @@ def main():
     if "--cache" in args:
         cache = args[args.index("--cache") + 1]
         del args[args.index("--cache"):args.index("--cache") + 2]
+    busybox = None
+    if "--busybox" in args:
+        busybox = args[args.index("--busybox") + 1]
+        del args[args.index("--busybox"):args.index("--busybox") + 2]
     extra = []
     if "--extra" in args:
         extra = args[args.index("--extra") + 1].split()
@@ -429,7 +441,7 @@ def main():
         o.write(f.read())
     rootfs = merged(root)
     with open(os.path.join(work, "busybox"), "wb") as f:
-        f.write(rootfs["bin/busybox"][1])
+        f.write(open(busybox, "rb").read() if busybox else rootfs["bin/busybox"][1])
     http = os.path.join(work, "http")
     n = repository(images, cache, http)
     have = set()
@@ -451,7 +463,7 @@ def main():
           file=sys.stderr)
     args = [os.path.join(work, "busybox"), os.path.join(work, "root.tar")] + extra
     for r in (repo, repo2):
-        args += [f"a/{os.path.basename(r)}/x86_64/{f}={os.path.join(r, f)}" for f in sorted(os.listdir(r))]
+        args += [f"a/{os.path.basename(r)}/{ARCH}/{f}={os.path.join(r, f)}" for f in sorted(os.listdir(r))]
     # Room for the unpacked root and what apk installs (neovim, gcc and git
     # together are about 350 MB).
     env = dict(os.environ, MKDISK_FREE_MB="480")

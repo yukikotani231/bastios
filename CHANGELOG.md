@@ -411,9 +411,15 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   add` of 300 files ran out); and the in-memory file system held 128
   files, and a create past that failed with `ENOENT` instead of `ENOSPC`.
 
+### Build and test
+
+- `test/stackdepth.py` checks that the deepest chain of kernel calls in a native kernel fits the kernel stack (it fails above 64 KiB of the 92 KiB; today 41 KiB). It was written after a native kernel built with an older compiler overflowed its stack in the UDP path under a loaded test run: its functions had frames up to 19 KiB where the current compiler's are under 4.5 KiB (the boot function aside).
+
 ### Files and disks
 
-- The in-memory file system holds 8192 files and directories (1024 before): a build tree or an unpacked package no longer fills `/tmp`. The name index doubles with it; `ls` in the console shell walks the larger table. Tested with 3000 empty files; `mdir` fills the table up to 20000 names. What is proved is unchanged (the table has a fixed size and every page is owned by one file); each node still costs kernel memory whether used or not.
+- The system holds 4096 open file descriptions at once (1024 before), and 2048 pipes (512). Eight processes with about 230 each are tested (`user/mfd.c`). The table of open directories' names (`dpath`) took 2 MiB at boot whatever happened; it starts empty and grows as directories are opened, so a small machine has that memory back. Proved: unchanged (the same table bounds, now larger; a directory whose name could not be stored for lack of memory reads as having an empty name).
+- A process may hold 512 open files (256 before): a server with a few hundred connections, or a build that opens many files at once, no longer meets `EMFILE`. The tables of descriptors grow with the process table as before. `pipe2` and `socketpair` wrote a descriptor number into one byte of the result, which only worked below 256; they now write all four bytes. Tested in `user/mdir.c` (a pipe made from the last two of 512 descriptors) and `user/fstest.bastio` (exactly 512, then none). Proved: the bounds hold at the larger sizes; the arithmetic on a descriptor number written to a byte had to be split into two bytes for the proof to go through.
+- The in-memory file system holds 8192 files and directories (1024 before): a build tree or an unpacked package no longer fills `/tmp`. The name index doubles with it; `ls` in the console shell walks the larger table. Tested by `mdir`, which makes directories until the table is full (thousands); `mdir` fills the table up to 20000 names. What is proved is unchanged (the table has a fixed size and every page is owned by one file); each node still costs kernel memory whether used or not.
 - A disk that is not blank and has no BastiOS file system (a partition
   table, another system's data) is left alone. It used to be formatted on
   the first boot, which on a real machine would have destroyed the disk

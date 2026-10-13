@@ -413,13 +413,13 @@ fn wake_readers(procs: &mut Buf, q: &mut Queue, line: &Buf)
 // Everything the kernel owns, in one place. `mmu` and `cpu` stay with
 // `main`, which lends them where they are needed.
 // Linux file descriptors (src/lxfd.bastio).
-const LXNFD: u64 = 256;
+const LXNFD: u64 = 512;
 const LXFD_LEN: u64 = NPROC * LXNFD;
 const FD_CONSOLE: u64 = 1;
 const FD_OFD: u64 = 2;
-const FD_CLOEXEC: u64 = 1024;
+const FD_CLOEXEC: u64 = 8192;
 
-const OFD_N: u64 = 1024;
+const OFD_N: u64 = 4096;
 // Loop devices (src/lxloop.bastio): LOOP_N devices of LOOP_W words.
 const LOOP_N: u64 = 8;
 const LOOP_W: u64 = 13;
@@ -518,7 +518,7 @@ const F_SETLEASE: u64 = 1024;
 const F_GETLEASE: u64 = 1025;
 const LK_WAIT: u64 = 18446744073709551000;   // not an errno: wait and run the call again
 const OFD_STRIDE: u64 = 9;
-const OFD_LEN: u64 = 9216;            // OFD_N * OFD_STRIDE
+const OFD_LEN: u64 = 36864;           // OFD_N * OFD_STRIDE
 const OF_OWNER: u64 = 4;              // who gets the I/O signal: 0, or (type + 1) * OWN_TYPE + id
 const OF_SIG: u64 = 5;                // F_SETSIG's signal (0: SIGIO)
 const OF_CRED: u64 = 6;               // the owner setter's real uid * ID_SPAN + effective uid
@@ -545,7 +545,7 @@ const DISK_RETRY: u64 = 0x8000000000000002;
 // (without the leading "/", at most FNAME_MAX) and one byte a word after.
 const CWD_STRIDE: u64 = 256;           // FNAME_MAX + 1
 const CWD_LEN: u64 = NPROC * CWD_STRIDE;
-const DPATH_LEN: u64 = 262144;        // OFD_N * CWD_STRIDE
+const DPATH_LEN: u64 = 1048576;       // OFD_N * CWD_STRIDE: the most it grows to (dpath_room)
 const MT_N: u64 = 64;                 // mounts of mount namespaces, in all (src/lxns.bastio)
 const ME_W: u64 = 5;                  // words per mount
 // After the mounts, k.mns keeps the other namespaces (src/lxns.bastio):
@@ -707,12 +707,12 @@ const UX_PATH: u64 = 108;             // the longest name
 const UX_LEN: u64 = 156;              // UX_N * UX_W + UX_LIS * UXL_W + UX_N, then 2 * (UX_N + UX_LIS) credential words, then UX_LIS socket files
 const UXB_LEN: u64 = 65968;           // UX_N * UX_CAP + UX_LIS * UX_PATH
 
-const NPIPES: u64 = 512;              // OFD_N / 2: each pipe has two descriptions
+const NPIPES: u64 = 2048;             // OFD_N / 2: each pipe has two descriptions
 const PIPE_CAP: u64 = 65536;          // bytes a pipe holds, as on Linux
 const PIPE_PAGE: u64 = 4096;          // the least F_SETPIPE_SZ gives a pipe
 const PIPE_ATOM: u64 = 4096;          // PIPE_BUF: writes this small go in whole
 const PIPE_STRIDE: u64 = 8;           // head, count, readers, writers, FIFO + 1 (0: none), a writer came, capacity, O_ASYNC reader
-const PIPES_LEN: u64 = 4096;          // NPIPES * PIPE_STRIDE
+const PIPES_LEN: u64 = 16384;         // NPIPES * PIPE_STRIDE
 
 // Pipe p's ring: PIPE_PAGE bytes it takes when it is opened, growing up
 // to PIPE_CAP as it fills, and gives back when both ends are closed. Slot p of k.pipebuf, which grows by one as
@@ -849,7 +849,7 @@ struct Kernel {
   sigact: Buf,          // Linux signal actions (src/lxsig.bastio)
   cwd: Buf,             // Linux working directories (src/lxdir.bastio)
   croot: Buf,           // each process's root (chroot), laid out like cwd; length 0 is the top
-  dpath: Buf,           // the path of each open directory description, laid out like cwd
+  dpath: Buf,           // the path of each open directory description, laid out like cwd; grows as directories are opened (dpath_room), a row past the end reads 0
   sigsave: Buf,         // per process, the mask rt_sigsuspend replaced; then each pending signal's sender (src/lxsig.bastio)
   alarms: Buf,          // Linux ITIMER_REAL per process: deadline (0: off) and interval (src/lxtime.bastio)
   evt: Buf,             // timerfds and epoll instances (src/lxevent.bastio)
@@ -957,14 +957,14 @@ fn traced_by(k: &Kernel, p: u64, t: u64) -> bool
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) == DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN && len(k.mns) == MNS_LEN && blen(k.mstr) == MSTR_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) <= DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN && len(k.mns) == MNS_LEN && blen(k.mstr) == MSTR_LEN
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
     && (k.txt is Store::Table ==> (pt_level(k.txt.Table) == 2 && pt_leases(k.txt.Table) == 0))
 }
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 34;
+const NPROGS: u64 = 35;
 const LDSO_PROG: u64 = 25;            // musl's dynamic linker, the interpreter of musl programs
 
 fn prog_name(i: u64) -> Str {
@@ -1069,6 +1069,9 @@ fn prog_name(i: u64) -> Str {
   }
   if i == 33 {
     return "mcloud";
+  }
+  if i == 34 {
+    return "mfd";
   }
   return "(file)";                    // a program loaded from a file
 }

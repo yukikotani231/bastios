@@ -3,7 +3,8 @@
 Debian's root file system as a tar file (/disk/root.tar), next to a
 BusyBox at /disk/busybox. The checks unpack the root under /disk/d,
 chroot into it and run Debian's programs, which are linked against glibc
-and started by its dynamic linker, /lib64/ld-linux-x86-64.so.2.
+and started by its dynamic linker, /lib64/ld-linux-x86-64.so.2 (on AArch64, with
+COMPAT_ARCH=aarch64, /lib/ld-linux-aarch64.so.1).
 
     debiandisk.py OUT.img IMAGE BUSYBOX --cache DIR
 
@@ -24,8 +25,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import alpinedisk
 
-LEFT_OUT = ("usr/share/", "var/lib/dpkg/info/", "usr/lib/x86_64-linux-gnu/gconv/",
-            "usr/lib/x86_64-linux-gnu/perl")
+LEFT_OUT = ("usr/share/", "var/lib/dpkg/info/", f"usr/lib/{alpinedisk.ARCH}-linux-gnu/gconv/",
+            f"usr/lib/{alpinedisk.ARCH}-linux-gnu/perl")
 
 def kept(name):
     n = name[2:] if name.startswith("./") else name
