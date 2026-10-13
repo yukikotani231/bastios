@@ -20,7 +20,7 @@ static void h(int s) { char here; got = s; where = &here; }
 static pid_t poke(void) {
     pid_t parent = getpid(), c = fork();
     if (c == 0) {
-        usleep(50000);
+        usleep(200000);
         kill(parent, SIGUSR1);
         _exit(0);
     }
