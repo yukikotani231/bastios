@@ -305,6 +305,10 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     if pget(s.k.procs, p, F_RESTART) == 0 {
       pset(&mut s.k.procs, p, F_TICKS, tick(pget(s.k.procs, p, F_TICKS)));
       cpu_timers_tick(&mut s.k, p);
+      cg_cpu_tick(&mut s.k, p);             // cpu.max and cpu.weight (src/lxcgroup.bastio)
+      if pget(s.k.procs, p, F_TICKS) % 16 == 0 {
+        cg_oom_tick(&mut s.k, p);           // memory.max, as src/main.bastio does
+      }
     }
     lx_alarms(&mut s.k);
     return (p + 1) % NPROC;
@@ -473,6 +477,7 @@ fn idled(s: &mut Sys, cpu: &Cpu, v: u64, ser: &Serial)
   if v == V_TIMER {
     s.k.ticks = tick(s.k.ticks);
     set_clock(&mut s, cpu);
+    cg_cpu_tick(&mut s.k, 0);
     lx_alarms(&mut s.k);
     sleepers_wake(&mut s.k);
     pump(ser, &mut s);
