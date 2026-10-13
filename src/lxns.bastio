@@ -1655,13 +1655,13 @@ fn ovl_rest(k: &mut Kernel, pid: u64, h: u64, p: &mut Bytes) -> u64
   ensures kok(k) && blen(p) == PATH_OUT
   ensures result == NO_RESULT || (result / 4096 < MT_N && result % 4096 < FNAME_MAX)
 {
-  let n = smaller(get(k.dpath, h * CWD_STRIDE), FNAME_MAX);
+  let n = smaller(wget(k.dpath, h * CWD_STRIDE), FNAME_MAX);
   let mut lp = balloc(PATH_OUT);
   let mut i = 0;
   while i < n
     invariant i <= n && n <= FNAME_MAX && blen(lp) == PATH_OUT && h < OFD_N && kok(k)
   {
-    bset(&mut lp, i, cast[u8](get(k.dpath, h * CWD_STRIDE + 1 + i) % 256));
+    bset(&mut lp, i, cast[u8](wget(k.dpath, h * CWD_STRIDE + 1 + i) % 256));
     i = i + 1;
   }
   let e = ns_find(k, ns_of(k, pid), lp, n);
@@ -2114,14 +2114,14 @@ fn row_is(t: &Buf, row: u64, s: &Bytes, at: u64, n: u64) -> bool
 fn dname_is(k: &Kernel, h: u64, s: &Bytes, n: u64) -> bool
   requires kok(k) && h < OFD_N && n <= FNAME_MAX && n <= blen(s)
 {
-  if len(k.dpath) != DPATH_LEN || get(k.dpath, h * CWD_STRIDE) != n {
+  if wget(k.dpath, h * CWD_STRIDE) != n {
     return false;
   }
   let mut i = 0;
   while i < n
-    invariant i <= n && n <= FNAME_MAX && n <= blen(s) && len(k.dpath) == DPATH_LEN && h < OFD_N
+    invariant i <= n && n <= FNAME_MAX && n <= blen(s) && h < OFD_N
   {
-    if get(k.dpath, h * CWD_STRIDE + 1 + i) != cast[u64](bget(s, i)) {
+    if wget(k.dpath, h * CWD_STRIDE + 1 + i) != cast[u64](bget(s, i)) {
       return false;
     }
     i = i + 1;
@@ -2253,8 +2253,8 @@ fn lx_pivot_root(k: &mut Kernel, pid: u64, new_root: u64, put_old: u64) -> u64
     invariant fd <= LXNFD && kok(k) && pid < NPROC && blen(orl) == MS_ROW && blen(nr) == MS_ROW && rl <= FNAME_MAX && nl <= FNAME_MAX
   {
     let h = dir_ofd(k, pid, fd);
-    if h < OFD_N && len(k.dpath) == DPATH_LEN && dname_is(k, h, orl, rl) {
-      name_keep(&mut k.dpath, DPATH_LEN, h, nr, nl);
+    if h < OFD_N && dname_is(k, h, orl, rl) {
+      dpath_keep(&mut k.dpath, h, nr, nl);
     }
     fd = fd + 1;
   }
