@@ -12,25 +12,28 @@ import "virtio_mmio.bastio";
 import "nvme.bastio";
 import "pci.bastio";
 import "vpci.bastio";
+import "xhci.bastio";
 
 const NVME_AT: u64 = 24;              // the NVMe drive's five pages: 24 .. 28
 const VIRTIO_DATA_AT: u64 = 31;       // virtio's block data page (its others are 0 .. 3)
 
-enum Blk { Virtio(Virtio), Nvme(Nvme), Loop(LoopDev) }
-enum Drive { None, Nvme(Nvme) }
+enum Blk { Virtio(Virtio), Nvme(Nvme), Usb(Xhci), Loop(LoopDev) }
+enum Drive { None, Nvme(Nvme), Usb(Xhci) }
 
 spec fn blk_ok(b: &Blk) -> bool {
-  (b is Blk::Virtio ==> virtio_ok(b.Virtio)) && (b is Blk::Nvme ==> nvme_ok(b.Nvme)) && (b is Blk::Loop ==> loopdev_ok(b.Loop))
+  (b is Blk::Virtio ==> virtio_ok(b.Virtio)) && (b is Blk::Nvme ==> nvme_ok(b.Nvme)) && (b is Blk::Usb ==> xhci_ok(b.Usb)) && (b is Blk::Loop ==> loopdev_ok(b.Loop))
 }
 
 /// Does the disk driver hold device-window address a?
 spec fn blk_claims(b: &Blk, a: u64) -> bool {
   (b is Blk::Virtio && vt_claims(b.Virtio.io, a))
   || (b is Blk::Nvme && mmio_base(b.Nvme.regs) <= a && a < mmio_base(b.Nvme.regs) + mmio_len(b.Nvme.regs))
+  || (b is Blk::Usb && mmio_base(b.Usb.regs) <= a && a < mmio_base(b.Usb.regs) + mmio_len(b.Usb.regs))
 }
 
 spec fn drive_claims(d: &Drive, a: u64) -> bool {
-  d is Drive::Nvme && mmio_base(d.Nvme.regs) <= a && a < mmio_base(d.Nvme.regs) + mmio_len(d.Nvme.regs)
+  (d is Drive::Nvme && mmio_base(d.Nvme.regs) <= a && a < mmio_base(d.Nvme.regs) + mmio_len(d.Nvme.regs))
+  || (d is Drive::Usb && mmio_base(d.Usb.regs) <= a && a < mmio_base(d.Usb.regs) + mmio_len(d.Usb.regs))
 }
 
 /// `take_page`, also saying that every other page's entry is unchanged, so
@@ -51,6 +54,7 @@ fn blk_irq(b: &Blk) -> bool {
     Blk::Loop(l) => { return false; },
     Blk::Virtio(v) => { return v.irq; },
     Blk::Nvme(n) => { return n.irq; },
+    Blk::Usb(x) => { return x.irq; },
   }
 }
 
@@ -64,6 +68,7 @@ fn blk_free(win: &mut MmioSpace, b: Blk, m: &mut Mem)
     Blk::Loop(l) => { loopdev_free(l, &mut m); },
     Blk::Virtio(v) => { vt_release(&mut win, virtio_free(v, &mut m)); },
     Blk::Nvme(n) => { mmio_release(&mut win, nvme_free(n, &mut m)); },
+    Blk::Usb(x) => { mmio_release(&mut win, xhci_free(x, &mut m)); },
   }
 }
 
@@ -78,6 +83,7 @@ fn blk_kbd_poll(b: &mut Blk) -> u64
     Blk::Loop(l) => { b = Blk::Loop(l); return 256; },
     Blk::Virtio(v) => { b = Blk::Virtio(v); return 256; },
     Blk::Nvme(n) => { b = Blk::Nvme(n); return 256; },
+    Blk::Usb(x) => { b = Blk::Usb(x); return 256; },
   }
 }
 
@@ -87,6 +93,7 @@ fn blk_kbd(b: &Blk) -> bool {
     Blk::Loop(l) => { return false; },
     Blk::Virtio(v) => { return false; },
     Blk::Nvme(n) => { return false; },
+    Blk::Usb(x) => { return false; },
   }
 }
 
@@ -96,6 +103,7 @@ fn blk_mouse(b: &Blk) -> bool {
     Blk::Loop(l) => { return false; },
     Blk::Virtio(v) => { return false; },
     Blk::Nvme(n) => { return false; },
+    Blk::Usb(x) => { return false; },
   }
 }
 
@@ -105,6 +113,7 @@ fn blk_sectors(b: &Blk) -> u64 {
     Blk::Loop(l) => { return l.sectors; },
     Blk::Virtio(v) => { return v.sectors; },
     Blk::Nvme(n) => { return n.sectors; },
+    Blk::Usb(x) => { return x.sectors; },
   }
 }
 
@@ -130,6 +139,11 @@ fn blk_read(b: &mut Blk, lba: u64, buf: &mut Bytes) -> bool
       b = Blk::Nvme(n);
       return ok;
     },
+    Blk::Usb(mut x) => {
+      let ok = usbd_read(&mut x, lba, &mut buf);
+      b = Blk::Usb(x);
+      return ok;
+    },
   }
 }
 
@@ -153,6 +167,11 @@ fn blk_write(b: &mut Blk, lba: u64, buf: &Bytes) -> bool
     Blk::Nvme(mut n) => {
       let ok = nvme_write(&mut n, lba, buf);
       b = Blk::Nvme(n);
+      return ok;
+    },
+    Blk::Usb(mut x) => {
+      let ok = usbd_write(&mut x, lba, buf);
+      b = Blk::Usb(x);
       return ok;
     },
   }
@@ -181,6 +200,11 @@ fn blk_read_block(b: &mut Blk, lba: u64, out: &mut Bytes, at: u64) -> bool
       b = Blk::Nvme(n);
       return ok;
     },
+    Blk::Usb(mut x) => {
+      let ok = usbd_read_block(&mut x, lba, &mut out, at);
+      b = Blk::Usb(x);
+      return ok;
+    },
   }
 }
 
@@ -205,6 +229,11 @@ fn blk_write_block(b: &mut Blk, lba: u64, src: &Bytes, at: u64) -> bool
     Blk::Nvme(mut n) => {
       let ok = nvme_write_block(&mut n, lba, src, at);
       b = Blk::Nvme(n);
+      return ok;
+    },
+    Blk::Usb(mut x) => {
+      let ok = usbd_write_block(&mut x, lba, src, at);
+      b = Blk::Usb(x);
       return ok;
     },
   }
@@ -239,6 +268,11 @@ fn blk_begin(b: &mut Blk, op: u64, lba: u64, buf: &mut Bytes, at: u64) -> bool
       b = Blk::Nvme(n);
       return ok;
     },
+    Blk::Usb(mut x) => {
+      let ok = usbd_begin(&mut x, op, lba, buf, at);
+      b = Blk::Usb(x);
+      return ok;
+    },
   }
 }
 
@@ -253,6 +287,7 @@ fn blk_room(b: &Blk, lba: u64, want: u64) -> u64
     Blk::Loop(l) => { return 1; },
     Blk::Virtio(v) => { return virtio_room(v, lba, want); },
     Blk::Nvme(n) => { return 1; },
+    Blk::Usb(x) => { return 1; },
   }
 }
 
@@ -266,6 +301,7 @@ fn blk_begin_n(b: &mut Blk, lba: u64, n: u64, wr: bool) -> bool
   match b {
     Blk::Loop(l) => { b = Blk::Loop(l); return false; },
     Blk::Nvme(x) => { b = Blk::Nvme(x); return false; },
+    Blk::Usb(x) => { b = Blk::Usb(x); return false; },
     Blk::Virtio(mut v) => {
       let ok = virtio_begin_n(&mut v, lba, n, wr);
       b = Blk::Virtio(v);
@@ -282,6 +318,7 @@ fn blk_stage(b: &mut Blk, j: u64, buf: &Bytes, at: u64) -> bool
 {
   match b {
     Blk::Nvme(x) => { b = Blk::Nvme(x); return false; },
+    Blk::Usb(x) => { b = Blk::Usb(x); return false; },
     Blk::Virtio(mut v) => {
       let ok = virtio_stage(&mut v, j, buf, at);
       b = Blk::Virtio(v);
@@ -299,6 +336,7 @@ fn blk_fetch_n(b: &mut Blk, j: u64, buf: &mut Bytes, at: u64)
   match b {
     Blk::Loop(l) => { b = Blk::Loop(l); },
     Blk::Nvme(x) => { b = Blk::Nvme(x); },
+    Blk::Usb(x) => { b = Blk::Usb(x); },
     Blk::Virtio(mut v) => {
       virtio_fetch_n(&mut v, j, &mut buf, at);
       b = Blk::Virtio(v);
@@ -328,6 +366,11 @@ fn blk_poll(b: &mut Blk) -> u64
       b = Blk::Nvme(n);
       return r;
     },
+    Blk::Usb(mut x) => {
+      let r = usbd_poll(&mut x);
+      b = Blk::Usb(x);
+      return r;
+    },
   }
 }
 
@@ -347,6 +390,10 @@ fn blk_fetch(b: &mut Blk, buf: &mut Bytes, at: u64)
       nvme_fetch(&mut n, &mut buf, at);
       b = Blk::Nvme(n);
     },
+    Blk::Usb(mut x) => {
+      usbd_fetch(&mut x, &mut buf, at);
+      b = Blk::Usb(x);
+    },
   }
 }
 
@@ -363,6 +410,7 @@ fn blk_loop_swap(prev: Blk, pages: Vec[Slot], size: u64) -> LoSwap
   match prev {
     Blk::Virtio(x) => { return LoSwap { dev: Blk::Virtio(x), pages: pages, swapped: false }; },
     Blk::Nvme(x) => { return LoSwap { dev: Blk::Nvme(x), pages: pages, swapped: false }; },
+    Blk::Usb(x) => { return LoSwap { dev: Blk::Usb(x), pages: pages, swapped: false }; },
     Blk::Loop(l) => {
       return LoSwap { dev: Blk::Loop(loopdev_new(pages, size)), pages: l.pages, swapped: true };
     },
@@ -454,7 +502,7 @@ spec fn pci_claims(p: &Pci, a: u64) -> bool {
 fn nvme_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace) -> Drive
   requires pci_ok(pci) && mem_ok(m)
   requires forall a: u64 :: bar_space(a) && !pci_claims(pci, a) ==> mmio_free(win, a)
-  ensures mem_ok(m) && pci_ok(pci) && (result is Drive::Nvme ==> nvme_ok(result.Nvme))
+  ensures mem_ok(m) && pci_ok(pci) && !(result is Drive::Usb) && (result is Drive::Nvme ==> nvme_ok(result.Nvme))
   ensures forall a: u64 :: bar_space(a) && !pci_claims(pci, a) && !drive_claims(result, a) ==> mmio_free(win, a)
 {
   let dev = pci_find_class(&mut pci, NVME_CLASS);
@@ -485,6 +533,30 @@ fn nvme_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace) -> Drive
     return Drive::None;
   }
   return Drive::Nvme(n);
+}
+
+/// The USB disk behind an xHCI controller on the PCI Express bus (`pci`
+/// has its configuration window claimed and its BARs assigned): a stick
+/// with a BastiOS partition, its commands polled. A controller without
+/// one is stopped and given back.
+fn usb_drive(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace) -> Drive
+  requires pci_ok(pci) && mem_ok(m)
+  requires forall a: u64 :: bar_space(a) && !pci_claims(pci, a) ==> mmio_free(win, a)
+  ensures mem_ok(m) && pci_ok(pci) && !(result is Drive::Nvme) && (result is Drive::Usb ==> xhci_ok(result.Usb))
+  ensures forall a: u64 :: bar_space(a) && !pci_claims(pci, a) && !drive_claims(result, a) ==> mmio_free(win, a)
+{
+  let lo = mmio_base(pci.cfg);
+  let hi = lo + mmio_len(pci.cfg);
+  match usb_find(&mut pci, &mut m, &mut win, USB_AT, lo, hi, 0, 0) {
+    Usb::None => { return Drive::None; },
+    Usb::Xhci(x) => {
+      if x.msd == MSD_ON {
+        return Drive::Usb(x);
+      }
+      mmio_release(&mut win, xhci_free(x, &mut m));
+      return Drive::None;
+    },
+  }
 }
 
 /// A modern virtio block function on the PCI Express bus whose configuration
@@ -533,7 +605,7 @@ fn virtio_blk_pci(m: &mut Mem, win: &mut MmioSpace, ecam: u64) -> Vblk
 fn nvme_probe(m: &mut Mem, win: &mut MmioSpace, ecam: u64) -> Drive
   requires mem_ok(m)
   requires forall a: u64 :: bar_space(a) ==> mmio_free(win, a)
-  ensures mem_ok(m) && (result is Drive::Nvme ==> nvme_ok(result.Nvme))
+  ensures mem_ok(m) && (result is Drive::Nvme ==> nvme_ok(result.Nvme)) && (result is Drive::Usb ==> xhci_ok(result.Usb))
   ensures forall a: u64 :: bar_space(a) && !drive_claims(result, a) ==> mmio_free(win, a)
 {
   if ecam >= WIN_TOP || ecam % 4096 != 0 || !((ecam >= WIN_LO && ecam + ECAM_LEN <= WIN_LOW_TOP) || (ecam >= WIN_HIGH && ecam + ECAM_LEN <= WIN_TOP)) {
@@ -541,9 +613,21 @@ fn nvme_probe(m: &mut Mem, win: &mut MmioSpace, ecam: u64) -> Drive
   }
   let mut pci = Pci { cfg: mmio_claim(&mut win, ecam, ECAM_LEN) };
   pci_assign(&mut pci, PCI_WIN_LO, PCI_WIN_HI);
-  let d = nvme_find(&mut pci, &mut m, &mut win);
-  pci_free(&mut win, pci);
-  return d;
+  match nvme_find(&mut pci, &mut m, &mut win) {
+    Drive::None => {
+      let d = usb_drive(&mut pci, &mut m, &mut win);
+      pci_free(&mut win, pci);
+      return d;
+    },
+    Drive::Nvme(n) => {
+      pci_free(&mut win, pci);
+      return Drive::Nvme(n);
+    },
+    Drive::Usb(x) => {
+      pci_free(&mut win, pci);
+      return Drive::Usb(x);
+    },
+  }
 }
 
 /// The disk: an NVMe drive on the PCI Express bus if the machine has one
@@ -558,6 +642,7 @@ fn blk_find(m: &mut Mem, win: &mut MmioSpace, vm: VmWhere, ecam: u64) -> Blk
 {
   match nvme_probe(&mut m, &mut win, ecam) {
     Drive::Nvme(n) => { return Blk::Nvme(n); },
+    Drive::Usb(x) => { return Blk::Usb(x); },
     Drive::None => {},
   }
   if len(m.bm) > VIRTIO_DATA_AT && get(m.bm, 0) == 1 && get(m.bm, 1) == 1 && get(m.bm, 2) == 1 && get(m.bm, 3) == 1
@@ -578,23 +663,27 @@ fn blk_find(m: &mut Mem, win: &mut MmioSpace, vm: VmWhere, ecam: u64) -> Blk
 /// unless it is a virtio device).
 fn blk_mmio_lo(b: &Blk) -> u64
   ensures b is Blk::Nvme ==> result == mmio_base(b.Nvme.regs)
+  ensures b is Blk::Usb ==> result == mmio_base(b.Usb.regs)
   ensures b is Blk::Virtio && b.Virtio.io is Vt::Mem ==> result == mmio_base(b.Virtio.io.Mem.regs)
 {
   match b {
     Blk::Virtio(v) => { return vt_mmio_lo(v.io); },
     Blk::Nvme(n) => { return mmio_base(n.regs); },
+    Blk::Usb(x) => { return mmio_base(x.regs); },
     Blk::Loop(l) => { return 0; },
   }
 }
 
 fn blk_mmio_hi(b: &Blk) -> u64
   ensures b is Blk::Nvme ==> result == mmio_base(b.Nvme.regs) + mmio_len(b.Nvme.regs)
+  ensures b is Blk::Usb ==> result == mmio_base(b.Usb.regs) + mmio_len(b.Usb.regs)
   ensures b is Blk::Virtio && b.Virtio.io is Vt::Mem ==> result == mmio_base(b.Virtio.io.Mem.regs) + mmio_len(b.Virtio.io.Mem.regs)
-  ensures !(b is Blk::Nvme) && !(b is Blk::Virtio && b.Virtio.io is Vt::Mem) ==> result == 0
+  ensures !(b is Blk::Nvme) && !(b is Blk::Usb) && !(b is Blk::Virtio && b.Virtio.io is Vt::Mem) ==> result == 0
 {
   match b {
     Blk::Virtio(v) => { return vt_mmio_hi(v.io); },
     Blk::Nvme(n) => { return mmio_base(n.regs) + mmio_len(n.regs); },
+    Blk::Usb(x) => { return mmio_base(x.regs) + mmio_len(x.regs); },
     Blk::Loop(l) => { return 0; },
   }
 }
@@ -605,4 +694,8 @@ fn blk_is_virtio(b: &Blk) -> bool {
 
 fn blk_is_nvme(b: &Blk) -> bool {
   return b is Blk::Nvme;
+}
+
+fn blk_is_usb(b: &Blk) -> bool {
+  return b is Blk::Usb;
 }
