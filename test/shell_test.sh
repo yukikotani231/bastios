@@ -411,6 +411,11 @@ steps = [
     # thawed; SIGKILL still ends a frozen process.
     ("mkdir /sys/fs/cgroup/fz; ash -c 'echo $$ > /sys/fs/cgroup/fz/cgroup.procs; i=0; while :; do i=$((i+1)); echo $i > /tmp/fzc; done' & sleep 1; echo 1 > /sys/fs/cgroup/fz/cgroup.freeze; cat /sys/fs/cgroup/fz/cgroup.freeze /sys/fs/cgroup/fz/cgroup.events; read a < /tmp/fzc; sleep 2; read b < /tmp/fzc; [ \"$a\" = \"$b\" ] && echo held; echo 0 > /sys/fs/cgroup/fz/cgroup.freeze; sleep 2; read c < /tmp/fzc; [ \"$c\" -gt \"$b\" ] && echo thawed",
      [b"\r\n1\r\npopulated 1\r\nfrozen 1\r\n", b"held", b"thawed"], b"\n# "),
+    # cpu.max: a group that may use 20 ms of every 100 ms is not scheduled for
+    # the rest of each period; cpu.stat counts what it used and the periods it
+    # ran out of quota in.
+    ("mkdir /sys/fs/cgroup/cq; echo +cpu > /sys/fs/cgroup/cgroup.subtree_control; echo '20000 100000' > /sys/fs/cgroup/cq/cpu.max; cat /sys/fs/cgroup/cq/cpu.max; ash -c 'echo $$ > /sys/fs/cgroup/cq/cgroup.procs; while :; do :; done' & sleep 3; while read k v; do case $k in usage_usec) u=$v;; nr_throttled) t=$v;; esac; done < /sys/fs/cgroup/cq/cpu.stat; [ \"$u\" -gt 100000 ] && [ \"$u\" -lt 1000000 ] && [ \"$t\" -gt 5 ] && echo throttled; echo 1 > /sys/fs/cgroup/cq/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/cq; echo r=$?",
+     [b"\r\n20000 100000\r\n", b"throttled", b"r=0"], b"\n# "),
     ("mkdir /sys/fs/cgroup/fk; ash -c 'echo $$ > /sys/fs/cgroup/fk/cgroup.procs; sleep 100' & sleep 1; echo 1 > /sys/fs/cgroup/fk/cgroup.freeze; echo 1 > /sys/fs/cgroup/fk/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/fk; echo r=$?; echo 1 > /sys/fs/cgroup/fz/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/fz; echo z=$?",
      [b"r=0", b"z=0"], b"\n# "),
     ("echo root:pw | chpasswd; read l < /etc/shadow; case $l in 'root:$6$'*) echo sha512;; esac; su alice -c 'echo no | su -c id root; echo w=$?; echo pw | su -c id root'",
