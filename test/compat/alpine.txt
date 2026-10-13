@@ -236,3 +236,8 @@ $ bb printf 'local out = {}\nlocal id = vim.fn.jobstart({"sh", "-c", "test -t 0 
 == nvim: a file watcher and a timer from libuv
 $ bb mkdir -p /disk/a/root/w && bb printf 'local uv = vim.uv\nlocal got\nlocal h = uv.new_fs_event()\nh:start("/root/w", {}, function(err, f) got = f end)\nlocal t = uv.new_timer()\nt:start(100, 0, function() io.open("/root/w/new", "w"):close() end)\nvim.wait(3000, function() return got ~= nil end)\nio.open("/root/fsw.txt", "w"):write(tostring(got), "\\n")\n' > /disk/a/root/fsw.lua && bb chroot /disk/a /usr/bin/nvim -l /root/fsw.lua >/dev/null 2>&1; bb cat /disk/a/root/fsw.txt; bb rm -r /disk/a/root/w
 new
+
+== nvim: :grep and :vimgrep fill the quickfix list
+$ bb mkdir -p /disk/a/root/src && bb printf 'one\nneedle two\nthree\n' > /disk/a/root/src/a.txt && bb printf 'needle\n' > /disk/a/root/src/b.txt && bb printf 'vim.cmd("silent grep -rn needle /root/src")\nlocal g = #vim.fn.getqflist()\nvim.cmd("vimgrep /needle/j /root/src/*.txt")\nio.open("/root/grep.txt", "w"):write(g, " ", #vim.fn.getqflist(), "\\n")\n' > /disk/a/root/grep.lua && bb chroot /disk/a /usr/bin/nvim -l /root/grep.lua >/dev/null 2>&1; bb cat /disk/a/root/grep.txt
+2 2
+
