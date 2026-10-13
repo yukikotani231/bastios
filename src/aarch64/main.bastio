@@ -546,7 +546,8 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   puts(&mut console, " virtio-mmio slots from ");
   put_hex(&mut console, vm_where.first);
   puts(&mut console, "\r\n");
-  let dev = blk_find(&mut m, &mut win, vm_where, dt_first(cpu, "pci-host-ecam-generic"));
+  let ecam = dt_first(cpu, "pci-host-ecam-generic");
+  let dev = blk_find(&mut m, &mut win, vm_where, ecam);
   let dk_lo = blk_mmio_lo(dev);
   let dk_hi = blk_mmio_hi(dev);
   let disk = disk_mount(dev);
@@ -562,7 +563,10 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
     put_num(&mut console, disk.blocks);
     puts(&mut console, " blocks of 4 KiB\r\n");
   }
-  let nic = nic_find(&mut m, &mut win, 4, dk_lo, dk_hi, vm_where);
+  let nic = nic_find(&mut m, &mut win, 4, dk_lo, dk_hi, vm_where, ecam);
+  if nic_e1000(nic) {
+    puts(&mut console, "net: e1000\r\n");
+  }
   let mut k = kernel_new(m, disk, nic, Snd::None, mice_new(false), tsc, 0, wall * 1000000000, cpu_count(cpu));
   install_files(&mut console, &mut k);
   if spawn(&mut k, 0, 0) == 0 {

@@ -56,7 +56,7 @@ fn vm_find(win: &mut MmioSpace, dev: u64, w: VmWhere, l1: u64, h1: u64, l2: u64,
   requires forall a: u64 :: bar_space(a) && !(l1 <= a && a < h1) && !(l2 <= a && a < h2) && !(l3 <= a && a < h3) && !(l4 <= a && a < h4) ==> mmio_free(win, a)
   ensures forall a: u64 :: bar_space(a) && !(l1 <= a && a < h1) && !(l2 <= a && a < h2) && !(l3 <= a && a < h3) && !(l4 <= a && a < h4)
     && !(result is VmFound::Found && mmio_base(result.Found.regs) <= a && a < mmio_base(result.Found.regs) + mmio_len(result.Found.regs)) ==> mmio_free(win, a)
-  ensures result is VmFound::Found ==> mmio_len(result.Found.regs) == VM_LEN && mmio_base(result.Found.regs) % 4 == 0
+  ensures result is VmFound::Found ==> vmem_mmio_ok(result.Found) && mmio_len(result.Found.regs) == VM_LEN && mmio_base(result.Found.regs) % 4 == 0
 {
   let mut i = 0;
   while i < w.slots
@@ -69,7 +69,7 @@ fn vm_find(win: &mut MmioSpace, dev: u64, w: VmWhere, l1: u64, h1: u64, l2: u64,
       let mut r = mmio_claim(&mut win, at, VM_LEN);
       let v = vm_probe(&mut r, dev);
       if v != 0 {
-        return VmFound::Found(VMem { regs: r, v2: v == 2 });
+        return VmFound::Found(vmem_new(r, v == 2));
       }
       mmio_release(&mut win, r);
     }
