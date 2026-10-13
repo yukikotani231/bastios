@@ -1053,3 +1053,7 @@ alpine: tmux: a detached session runs a shell on a pseudo-terminal, takes keys a
 alpine: cmake: configure, build and run a C project
 alpine: nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
 alpine: proc: /proc/self/exe is named from the reader's root (chroot), as on Linux
+t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
+t_gai: AF_INET6 UDP connect to :: reads back ::1
+t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1
+t_gai: getaddrinfo(NULL, port, AI_PASSIVE) with AF_UNSPEC
