@@ -43,6 +43,29 @@ static int domainname(void) {
     return ok;
 }
 
+/* The same names through their /proc/sys/kernel files: a write ends at its newline. */
+static int proc_names(void) {
+    struct utsname u, was;
+    uname(&was);
+    int ok = 1;
+    int fd = open("/proc/sys/kernel/domainname", O_WRONLY);
+    ok = ok && fd >= 0 && write(fd, "proc.example\nignored", 20) == 20;
+    if (fd >= 0) close(fd);
+    ok = ok && uname(&u) == 0 && strcmp(u.domainname, "proc.example") == 0;
+    fd = open("/proc/sys/kernel/hostname", O_WRONLY);
+    ok = ok && fd >= 0 && write(fd, "procbox", 7) == 7;
+    if (fd >= 0) close(fd);
+    ok = ok && uname(&u) == 0 && strcmp(u.nodename, "procbox") == 0;
+    char big[80];
+    memset(big, 'a', sizeof big);
+    fd = open("/proc/sys/kernel/hostname", O_WRONLY);
+    ok = ok && fd >= 0 && write(fd, big, sizeof big) == -1 && errno == EINVAL;
+    if (fd >= 0) close(fd);
+    setdomainname(was.domainname, strlen(was.domainname));
+    sethostname(was.nodename, strlen(was.nodename));
+    return ok;
+}
+
 static int set_clock(void) {
     struct timespec a, b;
     clock_gettime(CLOCK_REALTIME, &a);
@@ -329,6 +352,7 @@ int main(void) {
     setup();
     EXPECT("sethostname, uname, /proc/sys/kernel/hostname", hostname());
     EXPECT("setdomainname", domainname());
+    EXPECT("the names are written through /proc/sys/kernel/hostname and domainname", proc_names());
     EXPECT("clock_settime moves CLOCK_REALTIME", set_clock());
     EXPECT("settimeofday", timeofday());
     EXPECT("adjtimex reads and sets", adjust());

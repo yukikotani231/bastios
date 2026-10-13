@@ -460,6 +460,7 @@ const LK_LEN: u64 = LK_HI + 1;
 const IPC_LEN: u64 = 3840 + NPROC * 24;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
 const RNG_LEN: u64 = 19;              // the random generator's words (src/lxdev.bastio)
 const SYS_PQ: u64 = 160;
+const SYS_NEXTID: u64 = 151;           // 151 .. 153: the id /proc/sys/kernel/{msg,sem,shm}_next_id asks the next new queue, set or segment to get, + 1 (0: none; src/lxipc.bastio)
 // k.sys is laid out as the chain below: each part starts where the one before it ends, and the parts that
 // hold a word or more for every process grow with NPROC.
 const SYS_PR: u64 = SYS_PQ + 96;               // SYS_PQ + PQ_N * 12; NPROC * PR_W words
