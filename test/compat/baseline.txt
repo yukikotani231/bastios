@@ -1014,3 +1014,4 @@ alpine: nvim: vim.system runs a process and collects its output and status
 alpine: nvim: a job on a pseudo-terminal (what :terminal runs on, with /dev and /dev/pts bound into the chroot)
 alpine: nvim: a file watcher and a timer from libuv
 alpine: nvim: :grep and :vimgrep fill the quickfix list
+alpine: nvim: the LSP client starts a language server, asks it for a hover and stops it

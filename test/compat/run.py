@@ -122,7 +122,8 @@ def load_tty(path):
 class WebServer:
     """A web server on the host, for HOSTURL: /hello.txt, a line,
     /mib.bin, 1 MiB whose md5 is 85bfb9943e6f0cb09f0f52679e9eac2b, and
-    /repo.git, a git repository for the dumb HTTP protocol."""
+    /repo.git, a git repository for the dumb HTTP protocol, and
+    /lsp-server.lua and /lsp-client.lua, the files of the Neovim LSP case."""
 
     def __init__(self):
         self.dir = tempfile.mkdtemp(prefix="compat-www-")
@@ -147,6 +148,9 @@ class WebServer:
             subprocess.run(git + ["clone", "-q", "--bare", work, bare], capture_output=True)
             subprocess.run(git + ["update-server-info"], cwd=bare, capture_output=True)
             shutil.rmtree(work)
+        for name in ("server.lua", "client.lua"):
+            shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)), "lsp", name),
+                        os.path.join(self.dir, "lsp-" + name))
         handler = functools.partial(Quiet, directory=self.dir)
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.port = self.httpd.server_address[1]

@@ -241,3 +241,7 @@ new
 $ bb mkdir -p /disk/a/root/src && bb printf 'one\nneedle two\nthree\n' > /disk/a/root/src/a.txt && bb printf 'needle\n' > /disk/a/root/src/b.txt && bb printf 'vim.cmd("silent grep -rn needle /root/src")\nlocal g = #vim.fn.getqflist()\nvim.cmd("vimgrep /needle/j /root/src/*.txt")\nio.open("/root/grep.txt", "w"):write(g, " ", #vim.fn.getqflist(), "\\n")\n' > /disk/a/root/grep.lua && bb chroot /disk/a /usr/bin/nvim -l /root/grep.lua >/dev/null 2>&1; bb cat /disk/a/root/grep.txt
 2 2
 
+== nvim: the LSP client starts a language server, asks it for a hover and stops it
+$ bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-server.lua -o /root/lsp-server.lua && curl -s HOSTURL/lsp-client.lua -o /root/lsp-client.lua && nvim -l /root/lsp-client.lua >/dev/null 2>&1'; bb cat /disk/a/root/lsp.txt
+initialized,hover from the stub,stopped
+
