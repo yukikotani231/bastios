@@ -784,7 +784,7 @@ fn lx_open_fd_link(k: &mut Kernel, pid: u64, t: u64, tfd: u64, flags: u64, mode:
       bset(&mut k.fs.xfer, i, base_byte(k, t, h, i));
       i = i + 1;
     }
-    name_keep(&mut k.dpath, DPATH_LEN, hd, k.fs.xfer, l);
+    dpath_keep(&mut k.dpath, hd, k.fs.xfer, l);
     return fd_install(&mut k, pid, hd);
   }
   if d.kind == K_FILE {
@@ -879,7 +879,7 @@ fn lx_open_dev(k: &mut Kernel, pid: u64, dev: u64, flags: u64) -> u64
     return ENFILE;
   }
   if dev == DEV_PTSDIR {
-    name_keep(&mut k.dpath, DPATH_LEN, hv, k.mstr, lpath_len(k));   // the name it was opened by, for /proc/PID/fd
+    dpath_keep(&mut k.dpath, hv, k.mstr, lpath_len(k));   // the name it was opened by, for /proc/PID/fd
   }
   ofd_access(&mut k, hv, flags);
   return fd_install(&mut k, pid, hv);
@@ -973,7 +973,7 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     if hd >= OFD_N {
       return ENFILE;
     }
-    name_keep(&mut k.dpath, DPATH_LEN, hd, k.mstr, lpath_len(k));   // for *at calls and fchdir: the logical name
+    dpath_keep(&mut k.dpath, hd, k.mstr, lpath_len(k));   // for *at calls and fchdir: the logical name
     return fd_install(&mut k, pid, hd);
   }
   let acc = flags % 4;
@@ -1224,8 +1224,10 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
     return EMFILE;
   }
   lx_fill(&mut k, 0, 8);
-  bset(&mut k.fs.xfer, 0, cast[u8](r));
-  bset(&mut k.fs.xfer, 4, cast[u8](w));
+  bset(&mut k.fs.xfer, 0, cast[u8](r % 256));
+  bset(&mut k.fs.xfer, 1, cast[u8](r / 256));
+  bset(&mut k.fs.xfer, 4, cast[u8](w % 256));
+  bset(&mut k.fs.xfer, 5, cast[u8](w / 256));
   if lx_put_out(&mut k, pid, fds, 8) != 0 {
     return EFAULT;
   }

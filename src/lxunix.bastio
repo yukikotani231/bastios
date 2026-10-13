@@ -424,8 +424,10 @@ fn ux_socketpair(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64, s
     return EMFILE;
   }
   lx_fill(&mut k, 0, 8);
-  bset(&mut k.fs.xfer, 0, cast[u8](a));
-  bset(&mut k.fs.xfer, 4, cast[u8](b));
+  bset(&mut k.fs.xfer, 0, cast[u8](a % 256));
+  bset(&mut k.fs.xfer, 1, cast[u8](a / 256));
+  bset(&mut k.fs.xfer, 4, cast[u8](b % 256));
+  bset(&mut k.fs.xfer, 5, cast[u8](b / 256));
   if lx_put_out(&mut k, pid, sv, 8) != 0 {
     return EFAULT;
   }

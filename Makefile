@@ -66,7 +66,7 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest crashme diskbench
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs mtone mmouse mns mseccomp mcont mcloud
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs mtone mmouse mns mseccomp mcont mcloud mfd
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so build/user/vdso.so
 
 # Which backend built the kernel and the user programs, rewritten only when it
@@ -161,7 +161,7 @@ build/user/vdso.so: user/vdso.c user/vdso.ld user/vdso.map | build/user
 # A C program against musl libc, static PIE (the musl-tools package).
 MUSLCC ?= musl-gcc
 
-build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf build/user/mkfs.elf build/user/mtone.elf build/user/mmouse.elf build/user/mns.elf build/user/mseccomp.elf build/user/mcont.elf build/user/mcloud.elf: build/user/%.elf: user/%.c | build/user
+build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf build/user/mkfs.elf build/user/mtone.elf build/user/mmouse.elf build/user/mns.elf build/user/mseccomp.elf build/user/mcont.elf build/user/mcloud.elf build/user/mfd.elf: build/user/%.elf: user/%.c | build/user
 	$(MUSLCC) -static-pie -O2 -o $@ $<
 
 # A dynamically linked PIE, and musl's dynamic linker (libc.so, which is
@@ -442,6 +442,8 @@ PERL_TAG      ?= v5.40.0
 CPYTHON_GIT   ?= https://github.com/python/cpython
 CPYTHON_TAG   ?= v3.12.7
 RIPGREP_VER   ?= 14.1.1
+RUNC_VER      ?= 1.2.6
+RUNC_SHA256   ?= 0774f49d1b1eebb5849e644db5e4dc6f2b06cee05f13b3d17d5d6ba62d6f2ebc
 DROPBEAR_GIT  ?= https://github.com/mkj/dropbear
 DROPBEAR_TAG  ?= DROPBEAR_2024.86
 COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo \
@@ -460,6 +462,14 @@ build/compat/rg: | build/compat/src
 	CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=$(MUSLCC) cargo install ripgrep --version $(RIPGREP_VER) --locked \
 	  --target x86_64-unknown-linux-musl --root build/compat/src/rg-root --quiet
 	strip -o $@ build/compat/src/rg-root/bin/rg
+
+# runc, the OCI container runtime, for the container cases in alpine.txt:
+# the static amd64 binary of the upstream release, checked against a pinned
+# SHA-256. It runs on BastiOS only; nothing here links against it.
+build/compat/runc: | build/compat/src
+	curl -fsSL -o $@.part https://github.com/opencontainers/runc/releases/download/v$(RUNC_VER)/runc.amd64
+	echo "$(RUNC_SHA256)  $@.part" | sha256sum -c - >/dev/null
+	chmod +x $@.part && mv $@.part $@
 
 # Dropbear, the SSH server (and its client and key tool, which also run on
 # the host: ssh.txt logs in from here). The keys are made for the test:
@@ -683,10 +693,10 @@ ALPINE_CACHE ?= build/compat/alpine
 # over SSH.
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh \
     build/compat/bastioc1 build/compat/z3 build/compat/tcc \
-    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys | build/compat
+    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc | build/compat
 	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) \
 	  --extra "$$(test/compat/bastiotools.sh build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)) \
-	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys"
+	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc"
 
 # Debian on BastiOS, on a fifth disk (test/compat/debiandisk.py) for
 # test/compat/debian.txt: Debian's root file system, whose programs are
