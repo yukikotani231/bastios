@@ -48,6 +48,10 @@ alpine: openssl: a digest and random bytes
 alpine: rsync: copy a tree
 alpine: ssh-keygen: an ed25519 key
 alpine: xmllint: an XPath query
+alpine: container: runc runs Alpine in new namespaces (own hostname, PID 1)
+alpine: container: the host keeps its hostname and no container is left behind
+alpine: container: the root file system is read-only, and the exit status comes back
+alpine: container: rootless: runc runs Alpine as an unprivileged user in a user namespace of its own
 apps: lua: arithmetic and strings
 apps: lua: coroutines and tables
 apps: lua: files
@@ -434,6 +438,7 @@ t_ltp2: mlockall and munlockall succeed
 t_ltp2: mmap: MAP_FIXED_NOREPLACE over a mapping is EEXIST, an unknown MAP_SHARED_VALIDATE flag EOPNOTSUPP, no type EINVAL
 t_ltp2: mprotect: a shared mapping of /dev/zero opened read-only cannot become writable (EACCES)
 t_ltp2: mqueue: priorities order messages, getattr counts, unlink, bad sigevent EINVAL
+t_ltp2: mqueue: mq_notify SIGEV_THREAD runs its function once, a second registration is EBUSY
 t_ltp2: mremap MREMAP_FIXED moves pages to the address asked for; an unmapped address is EFAULT
 t_ltp2: msync: bad flags are EINVAL, an unmapped range ENOMEM
 t_ltp2: nested epoll: readiness passes up, a loop is ELOOP
@@ -599,6 +604,7 @@ t_misc: syslog (klogctl) reports a buffer size and reads nothing; an unknown typ
 t_misc: tcgetattr
 t_misc: tcgetpgrp
 t_misc: tcsetattr
+t_misc: an EL0 read of ID_AA64ISAR0_EL1 is emulated
 t_more: FIONREAD on a pipe
 t_more: O_NONBLOCK by fcntl on a listening socket
 t_more: a full nonblocking pipe is EAGAIN

@@ -169,7 +169,7 @@ $(COMPAT_BINS): $(B)/compat/%: test/compat/progs/%.c test/compat/progs/compat.h 
 
 # Applets the Alpine, Debian and Node cases run from /disk/busybox (the x86-64
 # suite uses Alpine's own BusyBox for them).
-COMPAT_BB_MORE := CONFIG_CHROOT CONFIG_MKNOD CONFIG_MOUNT CONFIG_UMOUNT
+COMPAT_BB_MORE := CONFIG_CHROOT CONFIG_MKNOD CONFIG_MOUNT CONFIG_UMOUNT CONFIG_CHOWN CONFIG_SU CONFIG_USE_BB_CRYPT
 
 $(B)/compat/busybox: $(B)/busybox/Makefile test/compat/busybox.config | $(B)/compat $(B)/user/ash.elf
 	rm -rf $(B)/compat/bb && cp -r $(B)/busybox $(B)/compat/bb
@@ -224,13 +224,25 @@ $(B)/compat/disk.img: $(COMPAT_BINS) $(COMPAT_APPS) $(B)/compat/busybox test/com
 # so the checks that use them fail and stay out of the baseline.
 include test/compat/images.mk
 ALPINE_CACHE ?= $(B)/compat/alpine
+ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 
 # The shell commands of these disks run the suite's static BusyBox: the
 # AArch64 kernel has no built-in musl dynamic linker, so Alpine's own
 # (dynamic) BusyBox starts only inside the unpacked root.
-$(B)/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox | $(B)/compat
+$(B)/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox $(B)/compat/runc tools/ocipull.sh | $(B)/compat
 	COMPAT_ARCH=aarch64 test/compat/alpinedisk.py $@ $(B)/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) \
-	  --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) --busybox $(B)/compat/busybox
+	  --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) --busybox $(B)/compat/busybox \
+	  --extra "$(B)/compat/runc tools/ocipull.sh"
+
+# runc for the container cases: the static arm64 binary of the upstream
+# release, checked against a pinned SHA-256 (the x86-64 suite's is the
+# amd64 one, RUNC_VER in the top-level Makefile). It runs on BastiOS only.
+RUNC_VER          ?= 1.2.6
+RUNC_ARM64_SHA256 ?= 12c612e2ebe6ca198de676ce75ed557e79fe6109032209bb8e25166c967fe170
+$(B)/compat/runc: | $(B)/compat
+	curl -fsSL -o $@.part https://github.com/opencontainers/runc/releases/download/v$(RUNC_VER)/runc.arm64
+	echo "$(RUNC_ARM64_SHA256)  $@.part" | sha256sum -c - >/dev/null
+	chmod +x $@.part && mv $@.part $@
 
 # Debian (glibc) and Node (musl, V8) the same way, from the arm64 layers.
 $(B)/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox
@@ -242,7 +254,8 @@ $(B)/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/com
 COMPAT_DISKS := $(B)/compat/disk.img $(B)/compat/alpine.img $(B)/compat/debian.img $(B)/compat/node.img
 COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox,apps --kernel $(B)/bastios.bin \
               --disk $(B)/compat/disk.img --alpine-disk $(B)/compat/alpine.img \
-              --alpine-repo $(B)/compat/alpine/disk/http --debian-disk $(B)/compat/debian.img \
+              --alpine-repo $(B)/compat/alpine/disk/http \
+              --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk $(B)/compat/debian.img \
               --node-disk $(B)/compat/node.img --out $(B)/compat
 
 compat: $(B)/bastios.bin $(COMPAT_DISKS)
