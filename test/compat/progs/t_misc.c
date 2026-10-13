@@ -96,6 +96,11 @@ int main(void) {
         t[n > 0 ? n : 0] = 0;
         char want[64]; snprintf(want, sizeof want, "Max open files            %lu ", (unsigned long)rl.rlim_cur);
         strstr(t, "Soft Limit") && strstr(t, "Max address space") && strstr(t, want); }));
+    EXPECT("/proc/self/mountinfo lists the root and /proc", ({
+        char t[2048]; int f = open("/proc/self/mountinfo", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
+        if (f >= 0) close(f);
+        t[n > 0 ? n : 0] = 0;
+        strstr(t, " / / rw") && strstr(t, " / /proc rw") && strstr(t, " - proc proc rw\n"); }));
     EXPECT("/proc/net/arp has its header", ({
         char t[4096]; int f = open("/proc/net/arp", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
         if (f >= 0) close(f);
