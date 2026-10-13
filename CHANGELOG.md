@@ -413,6 +413,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Files and disks
 
+- The in-memory file system holds 8192 files and directories (1024 before): a build tree or an unpacked package no longer fills `/tmp`. The name index doubles with it; `ls` in the console shell walks the larger table. Tested with 3000 empty files; `mdir` fills the table up to 20000 names. What is proved is unchanged (the table has a fixed size and every page is owned by one file); each node still costs kernel memory whether used or not.
 - A disk that is not blank and has no BastiOS file system (a partition
   table, another system's data) is left alone. It used to be formatted on
   the first boot, which on a real machine would have destroyed the disk
