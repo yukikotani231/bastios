@@ -468,10 +468,21 @@ fn file_writing(k: &Kernel, f: u64) -> bool
   requires kok(k)
 {
   // The table grows with the process table; a row past its end is closed.
-  let rows = smaller(len(k.fs.ftab) / FD_STRIDE, FD_ROWS);
-  let mut row = 0;
-  while row < rows
-    invariant row <= rows && rows <= FD_ROWS && kok(k)
+  let have = smaller(len(k.fs.ftab) / FD_STRIDE, FD_ROWS);
+  if rows_writing(k, f, 0, smaller(k.fs.pool_hi, have)) {
+    return true;
+  }
+  // Rows past the pool (a native process's) are scanned only if any was opened.
+  return k.fs.nat_rows && rows_writing(k, f, FD_POOL, have);
+}
+
+/// Whether a row from `lo` to below `hi` is open for writing on file f.
+fn rows_writing(k: &Kernel, f: u64, lo: u64, hi: u64) -> bool
+  requires kok(k) && hi <= FD_ROWS
+{
+  let mut row = lo;
+  while row < hi
+    invariant hi <= FD_ROWS && kok(k)
   {
     if fget(k.fs.ftab, row, FD_MODE) / O_WRITE % 2 == 1 && row_file(k.fs, row) == f {
       return true;
