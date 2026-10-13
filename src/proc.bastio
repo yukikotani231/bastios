@@ -441,6 +441,7 @@ const TIOCGETD: u64 = 0x5424;
 const DEV_PTMX: u64 = 7;               // OF_DEV path /dev/ptmx (opening it makes a pair)
 const DEV_PTSDIR: u64 = 8;             // /dev/pts, a directory to stat
 const DEV_DSP: u64 = 9;                // OF_DEV device /dev/dsp, the sound card (src/lxsnd.bastio)
+const DEV_FULL: u64 = 11;               // OF_DEV device /dev/full: zeros to read, ENOSPC to write (src/lxdev.bastio)
 const DEV_MICE: u64 = 10;               // OF_DEV device /dev/input/mice and /dev/psaux (src/lxmouse.bastio)
 const MICE_LEN: u64 = 824;              // its packets: a 56-byte header and 192 packets of 4 bytes
 const DEV_PTM: u64 = 32;               // an OF_PTY master is DEV_PTM + N

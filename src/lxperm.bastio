@@ -374,6 +374,15 @@ fn set_owner(k: &mut Kernel, pid: u64, f: u64, mode: u64, own: u64, u: u64, g: u
   if g % 0x100000000 != NO_ID {
     ng = g % 0x100000000;
   }
+  if f >= HFILES && uid != 0 {
+    // A pipe or a socket keeps no owner; it is its creator's, so a process
+    // that is not root may chown it to itself (runc does that to the pipes
+    // it makes for a rootless container).
+    if (u % 0x100000000 == NO_ID || nu == uid) && (g % 0x100000000 == NO_ID || ng == fs_id(k.procs, pid, true)) {
+      return 0;
+    }
+    return EPERM;
+  }
   if uid != 0 && (uid != own % 0x100000000 || nu != own % 0x100000000 || (ng != own / 0x100000000 % 0x100000000 && !has_group(k.procs, pid, ng, true))) {
     return EPERM;
   }
