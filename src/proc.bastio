@@ -886,6 +886,7 @@ struct Kernel {
   scf: Buf,             // seccomp filters, empty until one is loaded (src/lxseccomp.bastio)
   mstr: Bytes,          // the mounts' paths, and the logical path of the last lookup
   naps: bool,           // a process may be in TIMEWAIT: false lets sleepers_wake skip its scan
+  mt_hi: u64,           // one past the highest mount entry ever given to a namespace (me_set): no later one is in use
   ofd_hi: u64,          // one past the highest open file description ever made: no later one is in use (scans stop there)
   socks: bool,          // a process may be in SOCKWAIT (nap sets it, sock_wake clears it): false lets sock_wake return at once
 }

@@ -54,6 +54,9 @@ fn me_set(k: &mut Kernel, e: u64, f: u64, v: u64)
   requires kok(k) && e < MT_N && f < ME_W
   ensures kok(k)
 {
+  if f == ME_NS && v != 0 && e >= k.mt_hi {
+    k.mt_hi = e + 1;
+  }
   k.mns = set(k.mns, MNS_ENT + e * ME_W + f, v);
 }
 

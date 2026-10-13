@@ -131,6 +131,15 @@ runtime is about 600 of them, the 21 registers' save and 18 restores about
 500, `sched`, `finish` and `next_job` the rest), and a `stat` of a tmpfs file
 12500: the 2600 of any call plus path lookup (`ns_find` 1400, `ram_find` 1200,
 `take_node` and `put_node` 1800, `put_stat` 850, an allocation 800).
+Two scans that cost the same on every call were cut with a high-water mark
+(`Kernel.ofd_hi`, `Kernel.mt_hi`): `ns_find` looked at all 64 mount slots, and
+`pidfd_reuse` at all 4096 open file descriptions on each fork. After them a
+`stat` of a tmpfs file is 11200 instructions (`ns_find` is out of the
+profile), and `fork` + `exit` + `wait` 160600, down from 202200; a fork of
+a group with no `memory.max` also stopped counting the parent's pages. What
+is left in a fork is table walking: `clone_l1`, `free_l1` and their kin read
+all 512 entries of every page table the process has, about 3000 instructions
+a table, whatever it holds.
 
 `make buildbench` (`test/buildbench.sh`) is an end-to-end number the table
 does not have: `make -j1` and `make -jN` of 100 small C files with tcc, on the
