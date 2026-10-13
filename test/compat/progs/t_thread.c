@@ -223,7 +223,12 @@ static int clone3_clear_sighand(void) {
     a.set_tid_size = 1;
     if (syscall(435, &a, sizeof a) != -1 || errno != E2BIG) return 0;
     a.set_tid_size = 0;
-    return syscall(435, &a, 40) == -1 && errno == EINVAL;
+    if (syscall(435, &a, 40) != -1 || errno != EINVAL) return 0;
+    a.flags = 0x800;                                /* CLONE_SIGHAND without CLONE_VM */
+    if (syscall(435, &a, sizeof a) != -1 || errno != EINVAL) return 0;
+    a.flags = 0;
+    a.exit_signal = 256;
+    return syscall(435, &a, sizeof a) == -1 && errno == EINVAL;
 }
 
 /* A clone3 fork child runs on its own copy and its exit status arrives. */

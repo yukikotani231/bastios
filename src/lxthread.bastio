@@ -1059,18 +1059,33 @@ fn lx_clone3_read(k: &mut Kernel, pid: u64, va: u64, size: u64) -> Clone3
     return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
   }
   let flags = user_u64(&mut k.spaces, pid, va);
+  let pidfd = user_u64(&mut k.spaces, pid, va + 8);
   let child_tid = user_u64(&mut k.spaces, pid, va + 16);
   let parent_tid = user_u64(&mut k.spaces, pid, va + 24);
   let exit_signal = user_u64(&mut k.spaces, pid, va + 32);
   let stack = user_u64(&mut k.spaces, pid, va + 40);
   let stack_size = user_u64(&mut k.spaces, pid, va + 48);
   let tls = user_u64(&mut k.spaces, pid, va + 56);
-  if !flags.ok || !child_tid.ok || !parent_tid.ok || !exit_signal.ok || !stack.ok || !stack_size.ok || !tls.ok {
+  if !flags.ok || !pidfd.ok || !child_tid.ok || !parent_tid.ok || !exit_signal.ok || !stack.ok || !stack_size.ok || !tls.ok {
     return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
   }
   let low = flags.v % 0x100000000;
   let clear = flags.v / 0x100000000;
   if clear >= 2 || low % 256 != 0 || exit_signal.v >= 256 || (clear == 1 && low & CLONE_SIGHAND != 0) {
+    return none;
+  }
+  // As Linux checks: CLONE_SIGHAND needs CLONE_VM, CLONE_THREAD needs
+  // CLONE_SIGHAND, CLONE_FS excludes CLONE_NEWNS.
+  if (low & CLONE_SIGHAND != 0 && low & 0x100 == 0) || (low & 0x10000 != 0 && low & CLONE_SIGHAND == 0) || (low & 0x200 != 0 && low & CLONE_NEWNS != 0) {
+    return none;
+  }
+  if low & 0x1000 != 0 {
+    // CLONE_PIDFD: the descriptor is not made (no pidfd for a new process
+    // here); a bad pointer is still EFAULT.
+    let pf = user_u64(&mut k.spaces, pid, pidfd.v);
+    if !pf.ok {
+      return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
+    }
     return none;
   }
   if (stack.v == 0) != (stack_size.v == 0) || stack.v >= 0x8000000000000000 || stack_size.v >= 0x8000000000000000 {
@@ -1081,7 +1096,10 @@ fn lx_clone3_read(k: &mut Kernel, pid: u64, va: u64, size: u64) -> Clone3
     invariant j <= 4096 + 8 && kok(k) && pid < NPROC
   {
     let w = user_u64(&mut k.spaces, pid, va + j);
-    if w.ok && w.v != 0 {
+    if !w.ok {
+      return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
+    }
+    if w.v != 0 {
       return Clone3 { err: E2BIG, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
     }
     j = j + 8;
