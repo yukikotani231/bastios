@@ -208,6 +208,30 @@ int main(int argc, char **argv) {
         waitpid(c, NULL, 0);
         EXPECT("process_vm_readv of a reaped child", syscall(SYS_process_vm_readv, c, &l2, 1, &r, 1, 0) == -1 && errno == ESRCH);
     }
+    /* A child that has just been forked may still be running on another
+     * processor when the parent writes into one of its copy-on-write pages:
+     * the write waits for the page to be copied, and the child never takes
+     * a fault for the page the kernel has already copied. */
+    {
+        static char target[64] = "before";
+        int good = 0;
+        for (int i = 0; i < 120; i++) {
+            pid_t c = fork();
+            if (c == 0) {
+                pause();
+                _exit(0);
+            }
+            struct iovec w = {"after", 6}, r = {target, 6};
+            int st = 0;
+            long n = syscall(SYS_process_vm_writev, c, &w, 1, &r, 1, 0);
+            int alive = waitpid(c, &st, WNOHANG) == 0;
+            kill(c, SIGKILL);
+            waitpid(c, NULL, 0);
+            if (n == 6 && alive && strcmp(target, "before") == 0)
+                good++;
+        }
+        EXPECT("process_vm_writev to a child just forked, repeatedly", good == 120);
+    }
     {
         int status = -1;
         pid_t p = fork();

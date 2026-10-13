@@ -78,9 +78,10 @@ fn ns_find(k: &Kernel, ns: u64, p: &Bytes, c: u64) -> u64
   ensures result <= MT_N
 {
   let mut best = MT_N;
+  let hi = smaller(k.mt_hi, MT_N);
   let mut e = 0;
-  while e < MT_N
-    invariant e <= MT_N && best <= MT_N && kok(k) && c <= blen(p)
+  while e < hi
+    invariant e <= hi && hi <= MT_N && best <= MT_N && kok(k) && c <= blen(p)
   {
     if me_in(k, e, ns) && me_covers(k, e, p, c) {
       if best == MT_N {
@@ -403,11 +404,11 @@ fn ovl_make_up(k: &mut Kernel, pid: u64, e: u64, p: &Bytes, rr: u64, c: u64, li:
   } else {
     ok = vfs_mknode(&mut k.fs, &mut k.mem, un, perm);
     if ok && size > 0 {
-      let nfd = vfs_open(&mut k.fs, &mut k.mem, pid * NFD, O_WRITE, un);
+      let nfd = vfs_open(&mut k.fs, &mut k.mem, nbase(pid), NFD, O_WRITE, un);
       if nfd == NO_FD || nfd >= NFD {
         ok = false;
       } else {
-        let row = pid * NFD + nfd;
+        let row = nbase(pid) + nfd;
         let mut off = 0;
         while ok && off < size
           invariant off <= size && row < FD_ROWS && kok(k)

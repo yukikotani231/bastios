@@ -108,10 +108,10 @@ const SY_UM: u64 = SY_NS + NPROC * NF_N;   // /proc/P/uid_map, gid_map, setgroup
 const UMF_N: u64 = 3;
 const SY_CG: u64 = SY_UM + NPROC * UMF_N;   // a cgroup's control file f at slot * CGF_N + f (src/lxcgroup.bastio)
 const CGF_N: u64 = 18;
-const NS_DIRS: u64 = 0x100;            // DIR_PROC + NS_DIRS + pid: /proc/PID/ns
-const FD_DIRS: u64 = 0x200;            // DIR_PROC + FD_DIRS + pid: /proc/PID/fd
-const TASK_DIRS: u64 = 0x300;          // DIR_PROC + TASK_DIRS + pid: /proc/PID/task
-const NET_DIR: u64 = 0x400;            // DIR_PROC + NET_DIR: /proc/net
+const NS_DIRS: u64 = 0x400;            // DIR_PROC + NS_DIRS + pid: /proc/PID/ns
+const FD_DIRS: u64 = 0x800;            // DIR_PROC + FD_DIRS + pid: /proc/PID/fd
+const TASK_DIRS: u64 = 0xC00;          // DIR_PROC + TASK_DIRS + pid: /proc/PID/task
+const NET_DIR: u64 = 0x1000;            // DIR_PROC + NET_DIR: /proc/net
 const LOOP_SYS: u64 = 8;               // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
@@ -721,18 +721,18 @@ fn proc_dir_meta(d: u64) -> Meta {
     return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 16384, mtime: 0, own: 0 };
   }
   if d >= DIR_PROC + TASK_DIRS {
-    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 12288 + d % 256, mtime: 0, own: 0 };
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 12288 + d % 1024, mtime: 0, own: 0 };
   }
   if d >= DIR_PROC + FD_DIRS {
-    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 8192 + d % 256, mtime: 0, own: 0 };
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 8192 + d % 1024, mtime: 0, own: 0 };
   }
   if d >= DIR_PROC + NS_DIRS {
-    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 4096 + d % 256, mtime: 0, own: 0 };
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 4096 + d % 1024, mtime: 0, own: 0 };
   }
   if d == DIR_PROC {
     return Meta { ok: true, mode: S_IFDIR, size: 0, ino: 1, mtime: 0, own: 0 };   // as Linux: runc checks it
   }
-  return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + d % 256, mtime: 0, own: 0 };
+  return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + d % 1024, mtime: 0, own: 0 };
 }
 
 /// Entry i of /proc directory `dir` (getdents64), its name in the

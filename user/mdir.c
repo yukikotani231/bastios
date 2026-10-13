@@ -220,10 +220,10 @@ int main(void)
     if (!fixed_kept())
         return fail("keeping a MAP_FIXED mapping from mmap and brk");
     /* Opening until nothing is left ends in EMFILE, not ENOENT. */
-    int many[600], got = 0;
-    while (got < 600 && (many[got] = open("f", O_RDONLY)) >= 0)
+    int many[1100], got = 0;
+    while (got < 1100 && (many[got] = open("f", O_RDONLY)) >= 0)
         got++;
-    if (got == 600 || errno != EMFILE)
+    if (got == 1100 || errno != EMFILE)
         return fail("running out of descriptors");
     /* The table is full, so the last descriptors are far past 255: a pipe
      * made from two of them reports their numbers whole and carries data. */
