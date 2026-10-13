@@ -1944,6 +1944,8 @@ for line, want, until in [
         print("FAIL: no prompt after the big-disk boot"); fails += 1
         break
     mark = len(out)
+    if "disk/full" in line:
+        deadline = time.time() + timeout      # 32767 creates, each a disk write: a minute or two
     qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
     ok = read_until(until, mark) and want in out[mark:]
     print(("ok  " if ok else "FAIL"), "(big-disk boot)", repr(line)); ok or print(repr(out[mark:]))
@@ -2046,6 +2048,10 @@ if smp >= 4:   # (the fake service above is set up on the four-processor run)
         print("FAIL boot option mcloud state:", repr(out[mark:])); fails += 1
     qemu.kill(); qemu.wait()
 
+def reset_deadline():
+    global deadline
+    deadline = time.time() + timeout
+
 def send_line_ok(line, until):
     mark = len(out)
     qemu.stdin.write(line + b"\r"); qemu.stdin.flush()
@@ -2056,6 +2062,7 @@ deadline = time.time() + timeout
 ok = (read_until(b"bastios> ") and send_line_ok(b"ash", b"\n# ")
       and send_line_ok(b"ls disk/many | wc -l; cat disk/many/f1099; stat -f -c %c /disk", b"\n# ")
       and b"\r\n1100\r\n1099\r\n32767\r\n" in out
+      and (reset_deadline() or True)
       and send_line_ok(b"n=$(ls disk/full | wc -l); echo c$((n > 30000)); cat disk/full/f30000; rm -r disk/full; echo x > disk/after; cat disk/after; rm disk/after; sleep 1", b"\n# ")
       and b"\r\nc1\r\nx\r\nx\r\n" in out)
 print(("ok  " if ok else "FAIL"), "(big-disk boot) 1100 entries in one directory after a reboot"); ok or print(repr(out[-500:]))
