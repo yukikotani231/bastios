@@ -630,7 +630,8 @@ fn share_text(m: &mut Mem, st: &mut PageTable, l3: &mut PageTable, v: &mut Vfs, 
 /// The pages of program file `src` (headers `e`) to leave for the first
 /// touch: the whole pages of its largest executable, read-only segment's
 /// file bytes, if they sit at a whole-page file offset and no writable
-/// segment shares a page with them. Programs touch a small part of their
+/// segment shares a page with them, and a read-only segment (the strings
+/// and tables the kernel reads for the program) follows them. Programs touch a small part of their
 /// code (Z3, 24 MiB of it, answers a query from a few hundred pages), so
 /// exec reads and maps only the rest. None for a built-in program, whose
 /// code is shared already.
@@ -644,6 +645,7 @@ fn lazy_plan(v: &mut Vfs, src: Src, e: Elf) -> Lz
   let mut lo = WPAGES;
   let mut hi = 0;
   let mut best = lz_none();
+  let mut ro_hi = 0;
   let mut i = 0;
   while i < e.phnum
     invariant i <= e.phnum && e.phnum <= PH_MAX && vfs_ok(v) && best.first + best.pages <= WPAGES
@@ -665,11 +667,16 @@ fn lazy_plan(v: &mut Vfs, src: Src, e: Elf) -> Lz
       if a1 > a0 && a1 <= WPAGES && (s.from + (a0 * 4096 - s.off)) % 4096 == 0 && a1 - a0 > best.pages {
         best = Lz { first: a0, pages: a1 - a0, off: s.from + (a0 * 4096 - s.off) };
       }
+    } else if s.kind == SEG_LOAD && s.off > ro_hi {
+      ro_hi = s.off;                        // read-only data, apart from the code
     }
     i = i + 1;
   }
   if best.pages > 0 && best.first < hi && lo < best.first + best.pages {
     return lz_none();                       // a writable page among them
+  }
+  if best.pages > 0 && ro_hi < best.first * 4096 + best.pages * 4096 {
+    return lz_none();                       // no read-only segment after the code: the strings are among it
   }
   return best;
 }

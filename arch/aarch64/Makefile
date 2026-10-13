@@ -181,8 +181,41 @@ $(B)/compat/busybox: $(B)/busybox/Makefile test/compat/busybox.config | $(B)/com
 	$(MAKE) -C $(B)/compat/bb -s CROSS_COMPILE=$(CROSS) CFLAGS_busybox="-static $(ULFLAGS)" busybox
 	cp $(B)/compat/bb/busybox $@
 
-$(B)/compat/disk.img: $(COMPAT_BINS) $(B)/compat/busybox test/compat/mkdisk.py
-	test/compat/mkdisk.py $@ $(COMPAT_BINS) $(B)/compat/busybox
+# Real programs (test/compat/apps.txt), built from the sources the x86-64 suite
+# uses (the Makefile's *_GIT and *_TAG), as static glibc programs at 0x400000.
+# The cases of the others are left out on AArch64 (run.py, AARCH64_APPS).
+LUA_GIT       ?= https://github.com/lua/lua
+LUA_TAG       ?= v5.4.7
+QUICKJS_GIT   ?= https://github.com/bellard/quickjs
+QUICKJS_REV   ?= 535a7c250ff4a577ec36c3e103daab6dadeea650
+SQLITE_GIT    ?= https://github.com/sqlite/sqlite
+SQLITE_TAG    ?= version-3.52.0
+APPCC := $(ACC) -static -no-pie -O2 -w $(ULFLAGS)
+COMPAT_APPS := $(B)/compat/lua $(B)/compat/qjs $(B)/compat/sqlite3
+
+$(B)/compat/lua: | $(B)/compat
+	rm -rf $(B)/compat/src/lua && mkdir -p $(B)/compat/src
+	git clone -q --depth 1 --branch $(LUA_TAG) $(LUA_GIT) $(B)/compat/src/lua
+	$(APPCC) -DLUA_USE_LINUX -DMAKE_LUA -o $@ $(B)/compat/src/lua/onelua.c -lm
+
+$(B)/compat/qjs: | $(B)/compat
+	rm -rf $(B)/compat/src/quickjs && mkdir -p $(B)/compat/src/quickjs
+	git -C $(B)/compat/src/quickjs init -q
+	git -C $(B)/compat/src/quickjs fetch -q --depth 1 $(QUICKJS_GIT) $(QUICKJS_REV)
+	git -C $(B)/compat/src/quickjs checkout -q FETCH_HEAD
+	$(MAKE) -C $(B)/compat/src/quickjs -s CROSS_PREFIX=aarch64-linux-gnu- CONFIG_LTO= qjs >/dev/null
+	cd $(B)/compat/src/quickjs && $(APPCC) -s -o $(CURDIR)/$@ .obj/qjs.o .obj/repl.o .obj/quickjs.o \
+	  .obj/dtoa.o .obj/libregexp.o .obj/libunicode.o .obj/cutils.o .obj/quickjs-libc.o -lm -lpthread
+
+$(B)/compat/sqlite3: | $(B)/compat
+	rm -rf $(B)/compat/src/sqlite && mkdir -p $(B)/compat/src
+	git clone -q --depth 1 --branch $(SQLITE_TAG) $(SQLITE_GIT) $(B)/compat/src/sqlite
+	cd $(B)/compat/src/sqlite && ./configure --disable-tcl >/dev/null && $(MAKE) -s sqlite3.c shell.c >/dev/null
+	$(APPCC) -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION -o $@ \
+	  $(B)/compat/src/sqlite/shell.c $(B)/compat/src/sqlite/sqlite3.c -lm
+
+$(B)/compat/disk.img: $(COMPAT_BINS) $(COMPAT_APPS) $(B)/compat/busybox test/compat/mkdisk.py
+	test/compat/mkdisk.py $@ $(COMPAT_BINS) $(COMPAT_APPS) $(B)/compat/busybox
 
 # Alpine Linux for AArch64 (test/compat/alpine.txt), from the same pinned
 # Docker Hub images as the x86-64 suite's, their arm64 layers: the minirootfs
@@ -207,7 +240,7 @@ $(B)/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/com
 	COMPAT_ARCH=aarch64 test/compat/nodedisk.py $@ $(NODE_IMAGE) $(B)/compat/busybox --cache $(ALPINE_CACHE)
 
 COMPAT_DISKS := $(B)/compat/disk.img $(B)/compat/alpine.img $(B)/compat/debian.img $(B)/compat/node.img
-COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox --kernel $(B)/bastios.bin \
+COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox,apps --kernel $(B)/bastios.bin \
               --disk $(B)/compat/disk.img --alpine-disk $(B)/compat/alpine.img \
               --alpine-repo $(B)/compat/alpine/disk/http --debian-disk $(B)/compat/debian.img \
               --node-disk $(B)/compat/node.img --out $(B)/compat

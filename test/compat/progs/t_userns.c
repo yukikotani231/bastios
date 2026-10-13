@@ -1,0 +1,160 @@
+/* What an unprivileged user needs for a rootless container (runc, crun):
+ * a user namespace the user maps itself into, the mounts and capabilities
+ * its root has there, and a few smaller things that runc leans on:
+ * chown of its own pipes, a hard descriptor limit above the table's size,
+ * /dev/full, and /proc/self/fd/N of a file in a tmpfs it mounted. */
+#define _GNU_SOURCE
+#include "compat.h"
+#include <fcntl.h>
+#include <sched.h>
+#include <signal.h>
+#include <sys/mount.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/sysmacros.h>
+#include <sys/wait.h>
+
+#define NOBODY 65534
+#define MNT "/tmp/userns_t"
+
+static int in_child(int (*f)(void)) {
+    pid_t c = fork();
+    if (c == 0) _exit(f() ? 0 : 1);
+    int st; return waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
+static int as_nobody(void) {
+    return setresgid(NOBODY, NOBODY, NOBODY) == 0 && setresuid(NOBODY, NOBODY, NOBODY) == 0;
+}
+
+static int write_str(const char *path, const char *s, size_t n) {
+    int f = open(path, O_WRONLY);
+    if (f < 0) return -1;
+    int r = write(f, s, n);
+    close(f);
+    return r;
+}
+
+/* Runs f as nobody in a child that has its own user namespace, mapped the
+ * way runc maps a rootless container: this process (the parent, in the
+ * first namespace) writes "0 65534 1" to the child's uid_map and gid_map
+ * after "deny" to setgroups, counting a NUL at the end of the text. The
+ * child then becomes root there, with f as what it does next. */
+static int in_userns(int (*f)(void), int mntns) {
+    int up[2], down[2];
+    if (pipe(up) || pipe(down)) return 0;
+    pid_t c = fork();
+    if (c == 0) {
+        char b;
+        if (!as_nobody() || unshare(CLONE_NEWUSER) != 0) _exit(10);
+        if (write(up[1], "x", 1) != 1 || read(down[0], &b, 1) != 1) _exit(11);
+        if (setresuid(0, 0, 0) != 0 || setresgid(0, 0, 0) != 0) _exit(12);
+        if (mntns && unshare(CLONE_NEWNS) != 0) _exit(13);
+        _exit(f() ? 0 : 1);
+    }
+    char b, path[64], map[32];
+    if (read(up[0], &b, 1) != 1) return 0;
+    snprintf(path, sizeof path, "/proc/%d/setgroups", c);
+    int ok = write_str(path, "deny", 4) == 4;
+    int n = snprintf(map, sizeof map, "0 %d 1\n", NOBODY) + 1;      /* the NUL counts, as runc's length does */
+    snprintf(path, sizeof path, "/proc/%d/uid_map", c);
+    ok = ok && write_str(path, map, n) == n;
+    snprintf(path, sizeof path, "/proc/%d/gid_map", c);
+    ok = ok && write_str(path, map, n) == n;
+    ok = ok && write(down[1], "y", 1) == 1;
+    int st;
+    return waitpid(c, &st, 0) == c && ok && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
+static int own_pipe(void) {
+    int p[2];
+    if (!as_nobody() || pipe(p)) return 0;
+    if (fchown(p[0], NOBODY, NOBODY) != 0) return 0;                /* to itself: nothing to change */
+    if (fchown(p[0], -1, -1) != 0) return 0;
+    return fchown(p[0], 0, 0) == -1 && errno == EPERM;              /* to anyone else is root's */
+}
+
+static int hard_nofile(void) {
+    struct rlimit r = {1024, 1024}, got;
+    if (!as_nobody() || setrlimit(RLIMIT_NOFILE, &r) != 0) return 0;
+    return getrlimit(RLIMIT_NOFILE, &got) == 0 && got.rlim_max == 1024;
+}
+
+static int dev_full(void) {
+    char b[4] = {1, 1, 1, 1};
+    struct stat st;
+    int f = open("/dev/full", O_RDWR);
+    if (f < 0 || fstat(f, &st) != 0 || major(st.st_rdev) != 1 || minor(st.st_rdev) != 7) return 0;
+    return read(f, b, 4) == 4 && !b[0] && !b[3] && write(f, "x", 1) == -1 && errno == ENOSPC;
+}
+
+/* The ids a call that takes one argument leaves in the other registers
+ * must not matter. */
+static int ids_with_junk(void) {
+    long junk1 = 0x123456789L, junk2 = 0xabcdefL;
+    return syscall(SYS_setgid, 0L, junk1, junk2) == 0 && syscall(SYS_setuid, 0L, junk1, junk2) == 0
+        && getuid() == 0 && getgid() == 0;
+}
+
+static int map_text(void) {
+    char buf[64];
+    int f = open("/proc/self/uid_map", O_RDONLY);
+    int n = f < 0 ? -1 : read(f, buf, sizeof buf - 1);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    long a, b, c;
+    return sscanf(buf, "%ld %ld %ld", &a, &b, &c) == 3 && a == 0 && b == NOBODY && c == 1 && getuid() == 0;
+}
+
+static int mounts_in_own_ns(void) {
+    char link[128], want[] = MNT "/f";
+    if (mount("t", MNT, "tmpfs", 0, 0) != 0) return 0;
+    int f = open(want, O_CREAT | O_RDWR, 0600);
+    if (f < 0 || write(f, "in", 2) != 2) return 0;
+    struct stat st;
+    if (fstat(f, &st) != 0 || st.st_uid != 0) return 0;              /* its own: root there */
+    char p[32];
+    snprintf(p, sizeof p, "/proc/self/fd/%d", f);
+    int n = readlink(p, link, sizeof link - 1);
+    if (n != (int)strlen(want)) return 0;
+    link[n] = 0;
+    if (strcmp(link, want) != 0) return 0;                           /* the name it has in the namespace */
+    if (mount(MNT, MNT, 0, MS_BIND, 0) != 0) return 0;
+    return umount2(MNT, 0) == 0;
+}
+
+static int no_mounts_without_ns(void) {
+    return mount("t", MNT, "tmpfs", 0, 0) == -1 && errno == EPERM;
+}
+
+static int caps_there(void) {
+    struct { unsigned v; int pid; } h = {0x20080522, 0};
+    struct { unsigned e, p, i; } d[2];
+    memset(d, 0, sizeof d);
+    if (syscall(SYS_capget, &h, d) != 0 || !d[0].e) return 0;        /* it holds capabilities in its namespace */
+    if (prctl(PR_CAPBSET_DROP, 21 /* CAP_SYS_ADMIN */, 0, 0, 0) != 0) return 0;
+    memset(d, 0, sizeof d);
+    d[0].e = d[0].p = 1u << 7;                                       /* CAP_SETUID only */
+    return syscall(SYS_capset, &h, d) == 0 && prctl(PR_CAPBSET_READ, 21, 0, 0, 0) == 0;
+}
+
+static int caps_not_outside(void) {
+    return as_nobody() && mount("t", MNT, "tmpfs", 0, 0) == -1 && errno == EPERM;
+}
+
+int main(void) {
+    setup();
+    mkdir(MNT, 0755);
+    EXPECT("a process may chown its own pipe to itself, not to others", in_child(own_pipe));
+    EXPECT("an unprivileged process may raise its hard descriptor limit", in_child(hard_nofile));
+    EXPECT("/dev/full reads zeros and writes ENOSPC", dev_full());
+    EXPECT("the first ids of a user namespace are set from one register", in_userns(ids_with_junk, 0));
+    EXPECT("uid_map takes text that ends in a NUL", in_userns(map_text, 0));
+    EXPECT("the root of a user namespace mounts in a mount namespace of its own", in_userns(mounts_in_own_ns, 1));
+    EXPECT("and not without one", in_userns(no_mounts_without_ns, 0));
+    EXPECT("the root of a user namespace gives up capabilities", in_userns(caps_there, 0));
+    EXPECT("an unprivileged user mounts nothing", in_child(caps_not_outside));
+    return done();
+}

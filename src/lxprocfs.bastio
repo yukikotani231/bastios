@@ -54,6 +54,7 @@
 
 import "linux.bastio";
 import "core/num.bastio";
+import "lxnsbase.bastio";
 
 // PROC_DEV, DIR_PROC, PF_EXE and EACCES are in src/proc.bastio, which the
 // files that hook in here are compiled after.
@@ -2131,6 +2132,21 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
       if n != NO_FILE && n <= XFER {
         let mut a = put_c(&mut o, 0, 47);
         let mut j = 0;
+        // A file below a mount the process's namespace made (a tmpfs, say)
+        // reads under the mount's name, not the file layer's.
+        let mut lg = balloc(FNAME_MAX);
+        let ln = ns_back(k, ns_of(k, p), smaller(n, FNAME_MAX), &mut lg);
+        if ln != NO_RESULT && ln < PROC_OUT {
+          while j < ln
+            invariant j <= ln && ln < PROC_OUT && a <= PROC_OUT && blen(o) == PROC_OUT && FNAME_MAX <= blen(lg) && kok(k)
+          {
+            a = put_c(&mut o, a, bget(lg, j));
+            j = j + 1;
+          }
+          bfree(lg);
+          return a;
+        }
+        bfree(lg);
         while j < n
           invariant j <= n && n <= XFER && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
         {
@@ -2220,10 +2236,11 @@ fn magic_target(k: &mut Kernel, pid: u64, n: u64) -> u64
   let t = pfd / LXNFD;
   let fd = pfd % LXNFD;
   let d = fd_look(k, t, fd);
-  // Only a directory (or the pts directory) is followed to a path: a file may
-  // lie outside the process's root (a chroot, a container), where its name
-  // resolves to nothing; open and exec reopen a file through the link.
-  if d.kind != K_DIR && !(d.kind == K_DEV && d.x == DEV_PTSDIR) {
+  // Only a directory (or the pts directory) is followed to a path, and a
+  // file only for a process that has not changed its root: a file may lie
+  // outside the root (a chroot, a container), where its name resolves to
+  // nothing; open and exec reopen a file through the link.
+  if d.kind != K_DIR && !(d.kind == K_DEV && d.x == DEV_PTSDIR) && !(d.kind == K_FILE && root_len(k, pid) == 0 && !ofd_lacks(k, fd_ofd(k, t, fd), ACC_LINK)) {
     return NO_RESULT;
   }
   if d.kind == K_FILE {

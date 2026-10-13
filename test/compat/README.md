@@ -36,6 +36,9 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   starts the program, waits for it to draw, types the keys, then checks
   what it wrote with a shell command. On the host (`--host`) the program
   gets a pseudo-terminal.
+- On AArch64 (`make ARCH=aarch64 compat`) the `apps` group runs only Lua,
+  QuickJS and the sqlite3 shell, built by `arch/aarch64/Makefile` as static
+  glibc programs (`AARCH64_APPS` in `run.py`).
 - `HOSTURL` and `HOSTADDR` in a command name a web server `run.py` runs on
   the host, which the guest reaches through QEMU's user network; the
   `wget` and `nc` cases in `apps.txt` fetch from it.

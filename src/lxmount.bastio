@@ -183,7 +183,7 @@ fn mount_dir(k: &mut Kernel, n: u64) -> u64
 
 /// mount(source, target, fstype, flags, data): data is not used, and the
 /// source only by a bind and a bstdisk3 mount.
-fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, flags: u64) -> u64
+fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, flags: u64, full: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
@@ -210,6 +210,9 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
     if r != EINVAL {
       return r;
     }
+    if !full {
+      return EPERM;                         // the file layer's mounts are the machine's
+    }
   }
   let mut t = FST_TMPFS;
   if !remount {
@@ -220,6 +223,9 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
   }
   if t > FST_NS {
     return ns_mount(&mut k, pid, source, target, t - FST_NS, flags);
+  }
+  if !full && t != FST_TMPFS {
+    return EPERM;                           // a disk image mounts for the machine, not for a user namespace
   }
   let mut img = NFILES;
   let mut ldev = LO_NODEV;
@@ -234,12 +240,18 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
   if n == NO_RESULT {
     return k.perr;
   }
+  if !full && t == FST_TMPFS && !remount && n != 0 {
+    return ns_tmpfs(&mut k, pid, n, flags & MS_RDONLY != 0);   // a user namespace's own mount
+  }
   let i = mount_dir(&mut k, n);
   if i >= NFILES {
     if t == FST_TMPFS && !remount && n != 0 && on_disk(k.fs, n) {
       return ns_tmpfs(&mut k, pid, n, flags & MS_RDONLY != 0);   // over the disk: src/lxns.bastio
     }
     return k.perr;
+  }
+  if !full {
+    return EPERM;                           // a tmpfs on a global mount point is the machine's
   }
   let s = vfs_mount_slot(k.fs, i);
   if remount {
@@ -276,7 +288,7 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
 }
 
 /// umount2(target, flags).
-fn lx_umount2(k: &mut Kernel, pid: u64, target: u64, flags: u64) -> u64
+fn lx_umount2(k: &mut Kernel, pid: u64, target: u64, flags: u64, full: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
@@ -295,6 +307,9 @@ fn lx_umount2(k: &mut Kernel, pid: u64, target: u64, flags: u64) -> u64
   }
   if ns_umount(&mut k, pid) {
     return 0;                               // the namespace's own mount (src/lxns.bastio)
+  }
+  if !full {
+    return EINVAL;
   }
   let i = mount_dir(&mut k, n);
   if i >= NFILES {
@@ -343,14 +358,18 @@ fn lx_mount_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u6
   if n == LX_SETNS {
     return lx_setns(&mut k, pid, a, b);     // src/lxnsk.bastio
   }
-  if !cap_has(k, pid, CAP_SYS_ADMIN) {
-    return EPERM;                           // root's alone, while it holds CAP_SYS_ADMIN
+  // Root's, while it holds CAP_SYS_ADMIN; and the mapped root of a user
+  // namespace in a mount namespace of its own, which has only that
+  // namespace's mounts to change (not the file layer's).
+  let full = cap_has(k, pid, CAP_SYS_ADMIN);
+  if !full && !(ns_of(k, pid) != 0 && ns_cap(k, pid, CAP_SYS_ADMIN)) {
+    return EPERM;
   }
   if n == LX_MOUNT {
-    return lx_mount(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
+    return lx_mount(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), full);
   }
   if n == LX_PIVOT_ROOT {
     return lx_pivot_root(&mut k, pid, a, b);  // src/lxns.bastio
   }
-  return lx_umount2(&mut k, pid, a, b);
+  return lx_umount2(&mut k, pid, a, b, full);
 }
