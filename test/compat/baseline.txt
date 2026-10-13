@@ -992,24 +992,26 @@ tty: stty: the terminal is in canonical mode again after an editor
 tty: vi: edit and save a file
 tty: epoll: keys reach a program waiting in epoll_wait on /dev/tty
 alpine-tty: nvim: :make runs gcc through make
-alpine-tty: nvim: edit a C file, build it with gcc, run it
-alpine-tty: nvim: edit a file in a git work tree, then commit it
-alpine-tty: nvim: edit and save a C file
-alpine: apk: install neovim over HTTP
-alpine: nvim: a script run without a terminal
-alpine-tty: nvim: edit a Bastio program, prove and build it, run it
-alpine-tty: nvim: an edit that breaks a proof is rejected
-alpine-tty: nvim: edit a C file, build it with tcc, run it
 alpine-tty: nvim: :make runs make and the build succeeds
 alpine-tty: nvim: a shell escape with :!
-alpine-tty: nvim: u undoes an edit, and the undo file is written
-t_pty: epoll_ctl accepts both ends of a pair
-t_pty: epoll reports the master readable after a slave write
-t_pty: and the slave readable after a master line
-alpine: dropbear: the server starts, in the Alpine guest
-alpine: nvim over ssh: edit and save in a pseudo-terminal
-alpine: dropbear: the server stops, in the Alpine guest
+alpine-tty: nvim: an edit that breaks a proof is rejected
+alpine-tty: nvim: edit a Bastio program, prove and build it, run it
+alpine-tty: nvim: edit a C file, build it with gcc, run it
+alpine-tty: nvim: edit a C file, build it with tcc, run it
+alpine-tty: nvim: edit a file in a git work tree, then commit it
+alpine-tty: nvim: edit and save a C file
 alpine-tty: nvim: it reads the terminal's size, and has colours
+alpine-tty: nvim: u undoes an edit, and the undo file is written
+alpine-tty: tmux: Neovim in a pane takes keys through tmux and saves the file
+alpine-tty: tmux: attach on the console, run a command in the session, detach and find it still there
+alpine: apk: install neovim over HTTP
+alpine: dropbear: the server starts, in the Alpine guest
+alpine: dropbear: the server stops, in the Alpine guest
+alpine: nvim over ssh: edit and save in a pseudo-terminal
+alpine: nvim: a script run without a terminal
+t_pty: and the slave readable after a master line
+t_pty: epoll reports the master readable after a slave write
+t_pty: epoll_ctl accepts both ends of a pair
 node: node: a hot loop is compiled and gives the right sum
 node: node: a script with arrays and JSON
 node: node: an expression
