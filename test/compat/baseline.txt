@@ -1003,6 +1003,7 @@ node: node: read and write files
 node: node: timers and promises run in order
 node: node: version
 t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller
+t_thread: a thread keeps its descriptors while another spawns a child
 apps: ripgrep: a search over many files on several threads
 apps: ripgrep: case-insensitive counts and file lists
 apps: ripgrep: replacement, multi-line and standard input
@@ -1017,3 +1018,6 @@ alpine: nvim: a file watcher and a timer from libuv
 alpine: nvim: :grep and :vimgrep fill the quickfix list
 alpine: nvim: the LSP client starts a language server, asks it for a hover and stops it
 alpine: nvim: shada and a session file survive a restart (atomic writes, rename)
+alpine: container: runc runs Alpine in new namespaces (own hostname, PID 1)
+alpine: container: the host keeps its hostname and no container is left behind
+alpine: container: the root file system is read-only, and the exit status comes back

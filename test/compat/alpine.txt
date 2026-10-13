@@ -253,3 +253,24 @@ initialized,hover from the stub,stopped
 $ bb printf 'vim.fn.setreg("a", "kept")\nvim.cmd("edit /root/sh1.txt | call setline(1, \\"one\\") | write")\nvim.cmd("mksession! /root/s.vim")\n' > /disk/a/root/sh1.lua && bb printf 'vim.cmd("source /root/s.vim")\nio.open("/root/sh2.txt", "w"):write(vim.fn.getreg("a"), " ", vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":t"), "\\n")\n' > /disk/a/root/sh2.lua && bb chroot /disk/a /bin/sh -c 'cd /root && for f in sh1 sh2; do nvim --headless -u NONE -i /root/s.shada --cmd "set shada=!,<50,s10" -c "luafile /root/$f.lua" -c qa >/dev/null 2>&1; done'; bb cat /disk/a/root/sh2.txt
 kept sh1.txt
 
+
+== container: runc runs Alpine in new namespaces (own hostname, PID 1)
+$ mkdir -p /disk/b /run/runc && cd /disk/b && /disk/runc spec && bb sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"sh"#"/bin/sh", "-c", "hostname; echo pid=$$; cat /proc/self/cgroup; exec ps"#' config.json && /disk/runc --root /run/runc run c1 < /dev/null; echo status $?
+runc
+pid=1
+0::/
+PID   USER     TIME  COMMAND
+    1 root      0:00 busybox
+status 0
+
+== container: the host keeps its hostname and no container is left behind
+$ bb hostname; /disk/runc --root /run/runc list | bb wc -l
+bastios
+1
+
+== container: the root file system is read-only, and the exit status comes back
+$ cd /disk/b && bb sed -i -e 's#"hostname; echo pid=$$; cat /proc/self/cgroup; exec ps"#"touch /x 2>\&1; echo touch=$?; id -u; exit 3"#' config.json; /disk/runc --root /run/runc run c2 < /dev/null; echo status $?
+touch: /x: Read-only file system
+touch=1
+0
+status 3
