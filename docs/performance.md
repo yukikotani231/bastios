@@ -150,6 +150,10 @@ By `bench/run.py --icount` that is `fork` 196 to 168 us and `exec` 655 to
 the table's end, and `terminate`, `wake_readers`, `disk_wake`,
 `sleepers_due` and the thread-group check stop at the process table's end
 too. `exec` goes from 625 to 439 us and `spawn` from 567 to 380 us.
+Closing a file dropped the process's record locks by walking all 128 lock
+entries; the table now keeps a high-water mark (`LK_HI`, one word after the
+wait slots), which takes `open` + `close` from 16.8 to 14.9 us and `create`
+on tmpfs from 35.3 to 33.4 us.
 
 `make buildbench` (`test/buildbench.sh`) is an end-to-end number the table
 does not have: `make -j1` and `make -jN` of 100 small C files with tcc, on the
