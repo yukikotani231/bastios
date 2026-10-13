@@ -345,7 +345,7 @@ $ test -x /disk/a/usr/bin/lua-language-server && bb mkdir -p /disk/a/root/luapro
 initialized,hover-integer,stopped
 
 == apk: free the disk, then install python3 over HTTP
-$ bb chroot /disk/a /sbin/apk del -q --no-progress cmake lua-language-server neovim gcc tmux 2>/dev/null; bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL python3 2>&1 | bb tail -n 3 | bb cut -c1-180; echo status $?
+$ bb chroot /disk/a /sbin/apk del -q --no-progress cmake lua-language-server 2>/dev/null; bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL python3 2>&1 | bb tail -n 3 | bb cut -c1-180; echo status $?
 status 0
 
 == python3: asyncio talks over a socketpair
@@ -368,4 +368,3 @@ status 0
 $ bb mkdir -p /disk/a/dev/shm; bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import multiprocessing as mp\nwith mp.get_context(\"forkserver\").Pool(1) as p: print(p.map(abs,[-1,-2]))')" 2>&1 | bb tail -n 3; echo status $?
 [1, 2]
 status 0
-
