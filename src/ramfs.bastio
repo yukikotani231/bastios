@@ -16,7 +16,7 @@
 import "pages.bastio";
 import "core/bytes.bastio";
 
-const NFILES: u64 = 1024;           // enough for every descriptor of a process to be its own file
+const NFILES: u64 = 8192;           // more than every descriptor of a process, or a build tree
 const FNAME_MAX: u64 = 255;
 const FILE_PAGES: u64 = 16384;
 const FILE_MAX: u64 = 67108864;       // FILE_PAGES * 4096 (64 MiB)
@@ -52,7 +52,7 @@ spec fn nodes_ok(v: &Vec[Node]) -> bool {
 // only functions that change a node's name; ram_find still compares the
 // name of whatever the index offers, so a stale entry costs a wrong
 // answer only if one of those four forgets to update it.
-const RIX: u64 = 2048;                 // twice NFILES: never more than half full
+const RIX: u64 = 16384;                // twice NFILES: never more than half full
 const TOMB: u64 = 18446744073709551615;
 
 spec fn rix_ok(r: &Buf) -> bool {
