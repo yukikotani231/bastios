@@ -230,7 +230,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k) && con_ok(con)
 {
-  let n = lx_alias(k, pid, pget(k.procs, pid, F_REGS + R_LXNR));   // src/lxextra.bastio
+  let mut n = lx_alias(k, pid, pget(k.procs, pid, F_REGS + R_LXNR));   // src/lxextra.bastio
   let sp = pget(k.procs, pid, F_REGS + R_RSP);
   if sp >= USER_BASE + 128 {
     stack_reach(&mut k.mem, &mut k.spaces, pid, sp - 128);   // the red zone too
@@ -239,7 +239,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   pset(&mut k.procs, pid, F_RESTART, 0);
   let mut a = pget(k.procs, pid, F_REGS + R_RDI);
   let mut b = pget(k.procs, pid, F_REGS + R_RSI);
-  let c = pget(k.procs, pid, F_REGS + R_RDX);
+  let mut c = pget(k.procs, pid, F_REGS + R_RDX);
+  let mut ctid = pget(k.procs, pid, F_REGS + R_CLONE_CTID);
+  let mut tls = pget(k.procs, pid, F_REGS + R_CLONE_TLS);
   if nsk_of(k, NSK_PID, pid) != 0 {
     // A process in a PID namespace names processes by their ids there.
     b = pidns_arg(k, pid, n, 1, b, a);
@@ -260,6 +262,26 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if opath_denied(k, pid, n) {
     ret(&mut k.procs, pid, EBADF);          // an O_PATH handle (src/lxextra.bastio)
     return KEEP;
+  }
+  let mut clear = false;                  // CLONE_CLEAR_SIGHAND (clone3)
+  if n == LX_CLONE3 {
+    // clone3(struct clone_args *, size) runs the clone paths below with the
+    // arguments taken from the structure (the registers stay as the program
+    // left them, so a retried call reads the structure again). Without
+    // CLONE_INTO_CGROUP, set_tid and the flags above bit 31, which glibc
+    // does not use.
+    let c3 = lx_clone3_read(&mut k, pid, a, b);
+    if c3.err != 0 {
+      ret(&mut k.procs, pid, c3.err);
+      return KEEP;
+    }
+    n = LX_CLONE;
+    a = c3.flags;
+    clear = c3.clear;
+    b = c3.sp;
+    c = c3.ptid;
+    ctid = c3.ctid;
+    tls = c3.tls;
   }
   if n == LX_EXIT && thread_only(k.procs, pid) {
     lx_thread_exit(&mut k, mmu, pid);
@@ -541,11 +563,14 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       ret(&mut k.procs, pid, r);            // -errno: no child
       return KEEP;
     }
+    if clear {
+      sig_reset(&mut k.sigact, r, true);
+    }
     pt_fork_event(&mut k, pid, r, 2);
     return SWITCH;                          // the parent waits until the child lets go
   }
   if n == LX_CLONE && a & CLONE_THREAD != 0 {
-    let r = lx_thread_clone(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_CLONE_CTID), pget(k.procs, pid, F_REGS + R_CLONE_TLS));
+    let r = lx_thread_clone(&mut k, pid, a, b, c, ctid, tls);
     ret(&mut k.procs, pid, child_id(k, pid, r));
     if r < NPROC {
       pt_fork_event(&mut k, pid, r, 3);
@@ -557,8 +582,11 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_CLONE && clone_proc_flags(a) {
-    let r = lx_clone_proc(&mut k, mmu, pid, a, b, c, pget(k.procs, pid, F_REGS + R_CLONE_CTID), pget(k.procs, pid, F_REGS + R_CLONE_TLS));
+    let r = lx_clone_proc(&mut k, mmu, pid, a, b, c, ctid, tls);
     ret(&mut k.procs, pid, child_id(k, pid, r));
+    if r < NPROC && clear {
+      sig_reset(&mut k.sigact, r, true);
+    }
     if r < NPROC {
       let mut kind = 3;
       if a % 256 == 17 {
@@ -753,8 +781,7 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     return KEEP;
   }
   // glibc asks for these and carries on without them: restartable
-  // sequences (sched_getcpu falls back to the system call), and clone3
-  // (pthread_create falls back to clone, as on Linux before 5.3); nginx
+  // sequences (sched_getcpu falls back to the system call); nginx
   // goes on without Linux AIO (io_setup), and libuv and BIND without
   // io_uring. Refused quietly, as known gaps.
   if n == LX_BPF {
@@ -764,7 +791,7 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   // The keyring calls (runc and crun make a session keyring when they
   // can) and the new mount API (they use it when present) likewise fall
   // back on ENOSYS.
-  if n == LX_RSEQ || n == LX_CLONE3 || n == LX_IO_SETUP || n == LX_IO_URING_SETUP
+  if n == LX_RSEQ || n == LX_IO_SETUP || n == LX_IO_URING_SETUP
       || n == LX_ADD_KEY || n == LX_REQUEST_KEY || n == LX_KEYCTL
       || n == LX_OPEN_TREE || n == LX_MOVE_MOUNT || n == LX_FSOPEN
       || n == LX_FSCONFIG || n == LX_FSMOUNT || n == LX_FSPICK {
@@ -1560,6 +1587,9 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
   }
   if d.kind == K_DEV && d.x >= PROC_DEV {
     return proc_write(&mut k, pid, d.x, va, n);   // a sysctl open for writing (src/lxprocfs.bastio)
+  }
+  if d.kind == K_DEV && d.x == DEV_FULL {
+    return ENOSPC;                          // /dev/full has no room, whatever is written
   }
   if d.kind == K_DEV {
     return n;                               // a device swallows what it is given

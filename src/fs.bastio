@@ -17,22 +17,33 @@
 // file system it is on (FD_FS), and the few functions below dispatch on it;
 // nothing above this file knows there are two.
 //
-// The table has NFD rows per process; a process names its files by row
-// number (its file descriptor), so one process can never reach another's.
+// The table starts with FD_POOL rows that any Linux process takes a file's
+// from (a description names its row), then NFD rows per process for the
+// native calls: a process names those by row number, so one process can
+// never reach another's.
 
 import "pages.bastio";
 import "ramfs.bastio";
 import "diskfs.bastio";
 import "pcache.bastio";
 
-const NFD: u64 = 512;                 // open files per process
-const FD_ROWS: u64 = 131072;          // NPROC * NFD
+const NFD: u64 = 64;                  // rows a process's native calls and the kernel's own opens use
+const FD_POOL: u64 = 4096;            // rows first in the table, for the files Linux descriptors name: any process may take any (OFD_N)
+const FD_ROWS: u64 = 20480;           // FD_POOL + NPROC * NFD
 const FD_STRIDE: u64 = 4;
 const HOLD_N: u64 = 128;              // holds (vfs_hold), in their own table
 const HOLD_LEN: u64 = 512;            // HOLD_N * FD_STRIDE
 const FTAB_LEN: u64 = FD_ROWS * FD_STRIDE;   // the most the table grows to (new_pid, src/proc.bastio)
-const FTAB_START: u64 = 65536;        // what it starts with: 32 processes' rows (PGROW * NFD * FD_STRIDE)
+const FTAB_START: u64 = 24576;        // what it starts with: the pool and 32 processes' rows ((FD_POOL + PGROW * NFD) * FD_STRIDE)
 const XFER: u64 = 4096;               // the most bytes one call moves
+
+/// The first row of process pid's native block.
+fn nbase(pid: u64) -> u64
+  requires pid < 256                  // NPROC (src/proc.bastio)
+  ensures result + NFD <= FD_ROWS && result == FD_POOL + pid * NFD
+{
+  return FD_POOL + pid * NFD;
+}
 
 // Row fields.
 const FD_FS: u64 = 0;                 // 0: row unused; otherwise the file system
@@ -306,50 +317,57 @@ fn node_open(n: &Buf, fs: u64, i: u64) -> bool
   return get(n, nslot(fs, i)) > 0;
 }
 
-/// Opens the file named by the first n bytes of the transfer buffer for
-/// process row block `base` (pid * NFD). Returns the descriptor (0 to
-/// NFD - 1) or NO_FD: no such file without O_CREATE, no room, or a name
+/// Opens the file named by the first n bytes of the transfer buffer in a
+/// free row of base to base + rows - 1: a process's block (nbase) or the
+/// pool (FD_POOL rows from 0). Returns the row less `base` (0 to
+/// rows - 1) or NO_FD: no such file without O_CREATE, no room, or a name
 /// that is empty or too long.
-fn vfs_open(v: &mut Vfs, mem: &mut Mem, base: u64, flags: u64, n: u64) -> u64
-  requires vfs_ok(v) && mem_ok(mem) && base + NFD <= FD_ROWS && n <= XFER
+fn vfs_open(v: &mut Vfs, mem: &mut Mem, base: u64, rows: u64, flags: u64, n: u64) -> u64
+  requires vfs_ok(v) && mem_ok(mem) && base + rows <= FD_ROWS && n <= XFER
   ensures vfs_ok(v) && mem_ok(mem)
-  ensures result < NFD || result == NO_FD
+  ensures result < rows || result == NO_FD
 {
-  let fd = open_row(&mut v, &mut mem, base, flags, n);
-  if fd < NFD && flags / O_TRUNC % 2 == 1 && flags / O_WRITE % 2 == 1 {
+  let fd = open_row(&mut v, &mut mem, base, rows, flags, n);
+  if fd < rows && flags / O_TRUNC % 2 == 1 && flags / O_WRITE % 2 == 1 {
     pc_resize(&mut v.pc, &mut mem, vfs_row_file(v, base + fd), 0);
   }
   return fd;
 }
 
 /// vfs_open without the page cache's upkeep.
-fn open_row(v: &mut Vfs, mem: &mut Mem, base: u64, flags: u64, n: u64) -> u64
-  requires vfs_ok(v) && mem_ok(mem) && base + NFD <= FD_ROWS && n <= XFER
+fn open_row(v: &mut Vfs, mem: &mut Mem, base: u64, rows: u64, flags: u64, n: u64) -> u64
+  requires vfs_ok(v) && mem_ok(mem) && base + rows <= FD_ROWS && n <= XFER
   ensures vfs_ok(v) && mem_ok(mem)
-  ensures result < NFD || result == NO_FD
+  ensures result < rows || result == NO_FD
 {
-  if (base + NFD) * FD_STRIDE > len(v.ftab) {
+  if (base + rows) * FD_STRIDE > len(v.ftab) {
     return NO_FD;                           // the table has not grown to this process
   }
   let mut fd = 0;
-  while fd < NFD && fget(v.ftab, base + fd, FD_FS) != 0
-    invariant fd <= NFD
+  while fd < rows && fget(v.ftab, base + fd, FD_FS) != 0
+    invariant fd <= rows
   {
     fd = fd + 1;
   }
-  if fd >= NFD {
+  if fd >= rows {
     return NO_FD;
   }
   if on_disk(v, n) {
     let mk = path_ok(v, n) && parent_ok(&mut v, n);
-    return dk_open(&mut v.disk, &mut v.ftab, &mut v.nopen, &mut v.pc, &mut mem, v.xfer, base + fd, flags, DISK_PREFIX, n, FS_DISK, mk, v.now);
+    if !dk_open(&mut v.disk, &mut v.ftab, &mut v.nopen, &mut v.pc, &mut mem, v.xfer, base + fd, flags, DISK_PREFIX, n, FS_DISK, mk, v.now) {
+      return NO_FD;
+    }
+    return fd;
   }
   let lp = lo_pfx(&mut v, n);
   if lp != 0 {
     let mk = path_ok(v, n) && parent_ok(&mut v, n);
     let r = dk_open(&mut v.lo, &mut v.ftab, &mut v.nopen, &mut v.pc, &mut mem, v.xfer, base + fd, flags, lp, n, FS_LO, mk && !v.lo_ro, v.now);
     lo_settle(&mut v);
-    return r;
+    if !r {
+      return NO_FD;
+    }
+    return fd;
   }
   let mut i = ram_find(&mut v.ram, v.rix, v.rhi, v.xfer, n);
   if i < NFILES && ram_link_of(&mut v.ram, i) < NFILES {
@@ -392,10 +410,10 @@ fn open_row(v: &mut Vfs, mem: &mut Mem, base: u64, flags: u64, n: u64) -> u64
 /// vfs_open for a name on disk file system d (file system fs in the
 /// table), whose names start p bytes in, into the free row `row`. It may
 /// create the file only if `mk` (a good name whose directory exists).
-fn dk_open(d: &mut DiskFs, ftab: &mut Buf, nopen: &mut Buf, pc: &mut PCache, mem: &mut Mem, x: &Bytes, row: u64, flags: u64, p: u64, n: u64, fs: u64, mk: bool, now: u64) -> u64
+/// False if it cannot be opened.
+fn dk_open(d: &mut DiskFs, ftab: &mut Buf, nopen: &mut Buf, pc: &mut PCache, mem: &mut Mem, x: &Bytes, row: u64, flags: u64, p: u64, n: u64, fs: u64, mk: bool, now: u64) -> bool
   requires disk_ok(d) && len(ftab) <= FTAB_LEN && len(nopen) == NOPEN + 1 && row < FD_ROWS && p < n && n <= blen(x) && pc_ok(pc) && mem_ok(mem)
   ensures disk_ok(d) && len(ftab) <= FTAB_LEN && len(nopen) == NOPEN + 1 && pc_ok(pc) && mem_ok(mem)
-  ensures result < NFD || result == NO_FD
 {
   let mut i = disk_find(d, x, p, n - p);
   if i < DSLOTS && disk_link_of(d, i) < DSLOTS {
@@ -403,19 +421,19 @@ fn dk_open(d: &mut DiskFs, ftab: &mut Buf, nopen: &mut Buf, pc: &mut PCache, mem
   }
   if i >= DSLOTS {
     if flags / O_CREATE % 2 == 0 || !mk {
-      return NO_FD;
+      return false;
     }
     i = disk_create(&mut d, x, p, n - p, false, now);
     if i >= DSLOTS {
-      return NO_FD;
+      return false;
     }
     pc_forget(&mut pc, &mut mem, fs_handle(fs, i));
   } else if dent_dir(d, i) {
-    return NO_FD;
+    return false;
   }
   if flags / O_TRUNC % 2 == 1 && flags / O_WRITE % 2 == 1 {
     if !disk_truncate(&mut d, i, now) {
-      return NO_FD;
+      return false;
     }
   }
   nopen_add(&mut nopen, fs, i);
@@ -423,7 +441,7 @@ fn dk_open(d: &mut DiskFs, ftab: &mut Buf, nopen: &mut Buf, pc: &mut PCache, mem
   fset(&mut ftab, row, FD_NODE, i);
   fset(&mut ftab, row, FD_OFF, 0);
   fset(&mut ftab, row, FD_MODE, flags % (2 * O_APPEND));
-  return row % NFD;
+  return true;
 }
 
 /// Closes a row. Returns false if it was not open.
@@ -1242,10 +1260,11 @@ fn vfs_put(v: &mut Vfs, mem: &mut Mem, name: Str, d: &Bytes, m: u64) -> bool
     bset(&mut v.xfer, i, sget(name, i));
     i = i + 1;
   }
-  let fd = vfs_open(&mut v, &mut mem, 0, O_WRITE + O_CREATE + O_TRUNC, slen(name));
-  if fd >= NFD {
+  let nf = vfs_open(&mut v, &mut mem, nbase(0), NFD, O_WRITE + O_CREATE + O_TRUNC, slen(name));
+  if nf >= NFD {
     return false;
   }
+  let fd = nbase(0) + nf;
   let mut j = 0;
   while j < m
     invariant j <= m && m <= blen(d) && m <= XFER && vfs_ok(v)

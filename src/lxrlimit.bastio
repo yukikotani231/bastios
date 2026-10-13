@@ -26,6 +26,7 @@ const RLIMIT_FSIZE: u64 = 1;
 const RLIMIT_NPROC: u64 = 6;
 const RLIMIT_MEMLOCK: u64 = 8;
 const RLIMIT_SIGPENDING: u64 = 11;
+const NOFILE_HARD: u64 = 4096;         // the hard limit on descriptors until set: a program may raise its soft limit past the table's size, as it may on Linux
 const MLOCK_DEFAULT: u64 = 8388608;    // 8 MiB, as Linux
 const MCL_CURRENT: u64 = 1;
 const MCL_FUTURE: u64 = 2;
@@ -77,6 +78,9 @@ fn rl_cur(k: &Kernel, p: u64, r: u64) -> u64
 fn rl_max(k: &Kernel, p: u64, r: u64) -> u64
   requires kok(k) && p < NPROC && r < RLIM_NLIMITS
 {
+  if r == RLIMIT_NOFILE && rl_word(k, p, 2 * r + 1) == 0 {
+    return NOFILE_HARD;                     // as Linux's usual hard limit; the descriptor table itself holds LXNFD (fd_limit)
+  }
   return rl_dec(rl_word(k, p, 2 * r + 1), r);
 }
 

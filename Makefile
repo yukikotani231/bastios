@@ -680,6 +680,8 @@ build/compat/bastio.img: build/compat/bastioc1 build/compat/z3 build/compat/tcc 
 # use. Point it outside build/ to keep them across fresh checkouts: Docker
 # Hub rate-limits anonymous pulls, and only what is missing is fetched.
 ALPINE_CACHE ?= build/compat/alpine
+# The base image's layer list in the cache: the web server serves it as a registry (tools/ocipull.sh).
+ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 
 # The Bastio toolchain goes on this disk too (outside the Alpine root, like
 # the bastio disk's), for the cases that edit a program in Alpine's neovim
@@ -687,10 +689,10 @@ ALPINE_CACHE ?= build/compat/alpine
 # over SSH.
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh \
     build/compat/bastioc1 build/compat/z3 build/compat/tcc \
-    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc | build/compat
+    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc tools/ocipull.sh | build/compat
 	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) \
 	  --extra "$$(test/compat/bastiotools.sh build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)) \
-	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc"
+	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc tools/ocipull.sh"
 
 # Debian on BastiOS, on a fifth disk (test/compat/debiandisk.py) for
 # test/compat/debian.txt: Debian's root file system, whose programs are
@@ -713,11 +715,11 @@ build/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/co
 	test/compat/nodedisk.py $@ $(NODE_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
 
 compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --debian-disk build/compat/debian.img --node-disk build/compat/node.img --out build/compat $(COMPAT_PROGS)
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --out build/compat $(COMPAT_PROGS)
 
 # Records which checks pass now, so `make compat` catches regressions.
 compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --debian-disk build/compat/debian.img --node-disk build/compat/node.img --out build/compat $(COMPAT_PROGS)
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --out build/compat $(COMPAT_PROGS)
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
@@ -786,6 +788,11 @@ bench-compare:
 smpbench: build/bastios.elf
 	test/smpbench.sh
 
+# Not part of `make test` either: an end-to-end number, `make -j1` and `make -j2`
+# of a project of small C files built with tcc on the development disk.
+buildbench: build/bastios.elf build/compat/dev.img
+	test/buildbench.sh
+
 # Not part of `make test` either: do one process's threads run in parallel?
 threadbench: build/bastios.elf
 	test/threadbench.sh
@@ -811,6 +818,6 @@ clean:
 .PRECIOUS: build/user/%.c build/user/%.s build/user/%.o build/user/%.elf
 FORCE:
 
-.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-compare smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-compare smpbench buildbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
 
 endif

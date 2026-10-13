@@ -394,6 +394,11 @@ steps = [
     # and a file she makes is hers outside. Without a map she is 65534.
     ("su alice -c 'unshare -U -r sh -c \"id -u; id -g; ls -ln /etc/shadow; cat /etc/shadow; echo s=\\$?; touch /home/alice/f; ls -ln /home/alice/f; cat /proc/self/uid_map /proc/self/setgroups\"; ls -ln /home/alice/f; unshare -U id -u; unshare -U -r -u sh -c \"hostname box; hostname\"; unshare -U -r unshare -U true; echo n=$?'",
      [b"\r\n0\r\n0\r\n", b"65534    65534", b"Permission denied", b"s=1", b"0        0", b"         0       1000          1\r\ndeny", b"1000     1000", b"\r\n65534\r\nbox\r\n", b"n=1"], b"\n# "),
+    # The root of a user namespace mounts in a mount namespace of its own,
+    # and only there: a tmpfs it mounts is gone with the namespace, and a
+    # user without a mount namespace of its own (or without any) mounts nothing.
+    ("su alice -c 'mkdir -p /tmp/ur; unshare -U -r -m sh -c \"mount -t tmpfs t /tmp/ur && echo own > /tmp/ur/f && cat /tmp/ur/f; ls -ln /tmp/ur/f\"; ls -A /tmp/ur | wc -l; unshare -U -r sh -c \"mount -t tmpfs t /tmp/ur || echo nons\"; mount -t tmpfs t /tmp/ur || echo plain; rmdir /tmp/ur'",
+     [b"\r\nown\r\n", b"0        0", b"\r\n0\r\n", b"nons", b"plain"], b"\n# "),
     # Control groups (src/lxcgroup.bastio): a group is made with mkdir, a
     # shell moves into it, and pids.max stops the fork that would pass it;
     # cgroup.kill empties a group so that rmdir works, and non-root users may
@@ -406,6 +411,11 @@ steps = [
     # thawed; SIGKILL still ends a frozen process.
     ("mkdir /sys/fs/cgroup/fz; ash -c 'echo $$ > /sys/fs/cgroup/fz/cgroup.procs; i=0; while :; do i=$((i+1)); echo $i > /tmp/fzc; done' & sleep 1; echo 1 > /sys/fs/cgroup/fz/cgroup.freeze; cat /sys/fs/cgroup/fz/cgroup.freeze /sys/fs/cgroup/fz/cgroup.events; read a < /tmp/fzc; sleep 2; read b < /tmp/fzc; [ \"$a\" = \"$b\" ] && echo held; echo 0 > /sys/fs/cgroup/fz/cgroup.freeze; sleep 2; read c < /tmp/fzc; [ \"$c\" -gt \"$b\" ] && echo thawed",
      [b"\r\n1\r\npopulated 1\r\nfrozen 1\r\n", b"held", b"thawed"], b"\n# "),
+    # cpu.max: a group that may use 20 ms of every 100 ms is not scheduled for
+    # the rest of each period; cpu.stat counts what it used and the periods it
+    # ran out of quota in.
+    ("mkdir /sys/fs/cgroup/cq; echo +cpu > /sys/fs/cgroup/cgroup.subtree_control; echo '20000 100000' > /sys/fs/cgroup/cq/cpu.max; cat /sys/fs/cgroup/cq/cpu.max; ash -c 'echo $$ > /sys/fs/cgroup/cq/cgroup.procs; while :; do :; done' & sleep 3; while read k v; do case $k in usage_usec) u=$v;; nr_throttled) t=$v;; esac; done < /sys/fs/cgroup/cq/cpu.stat; [ \"$u\" -gt 100000 ] && [ \"$u\" -lt 1000000 ] && [ \"$t\" -gt 5 ] && echo throttled; echo 1 > /sys/fs/cgroup/cq/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/cq; echo r=$?",
+     [b"\r\n20000 100000\r\n", b"throttled", b"r=0"], b"\n# "),
     ("mkdir /sys/fs/cgroup/fk; ash -c 'echo $$ > /sys/fs/cgroup/fk/cgroup.procs; sleep 100' & sleep 1; echo 1 > /sys/fs/cgroup/fk/cgroup.freeze; echo 1 > /sys/fs/cgroup/fk/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/fk; echo r=$?; echo 1 > /sys/fs/cgroup/fz/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/fz; echo z=$?",
      [b"r=0", b"z=0"], b"\n# "),
     ("echo root:pw | chpasswd; read l < /etc/shadow; case $l in 'root:$6$'*) echo sha512;; esac; su alice -c 'echo no | su -c id root; echo w=$?; echo pw | su -c id root'",
@@ -1920,12 +1930,12 @@ deadline = time.time() + timeout
 # with a sleep before QEMU is killed.
 for line, want, until in [
     ("ash", b"built-in shell (ash)", b"\n# "),
-    ("stat -f -c '%b %c' /disk; echo big > /disk/b; cat /disk/b; stat -f -c %f /disk; rm /disk/b", b"10485755 5119\r\nbig\r\n1048", b"\n# "),
+    ("stat -f -c '%b %c' /disk; echo big > /disk/b; cat /disk/b; stat -f -c %f /disk; rm /disk/b", b"10485755 8191\r\nbig\r\n1048", b"\n# "),
     ("mkdir disk/many; i=0; while [ $i -lt 1100 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; sleep 1", b"\r\n1100\r\n", b"\n# "),
     # The directory table of the disk (DSLOTS entries) fills up: the create
     # that finds no free entry fails with ENOSPC, and removing the files
     # frees their entries again.
-    ("mkdir disk/full; i=0; while echo x > disk/full/f$i 2>/dev/null; do i=$((i+1)); done; echo x > disk/full/z; echo n$((i > 3500))", b"disk/full/z: No space left on device\r\nn1\r\n", b"\n# "),
+    ("mkdir disk/full; i=0; while echo x > disk/full/f$i 2>/dev/null; do i=$((i+1)); done; echo x > disk/full/z; echo n$((i > 6500))", b"disk/full/z: No space left on device\r\nn1\r\n", b"\n# "),
     ("rm -r disk/full; echo x > disk/after; cat disk/after; rm disk/after; sleep 1", b"\r\nx\r\n", b"\n# "),
 ]:
     mark = len(out)
@@ -2039,7 +2049,7 @@ out = b""
 deadline = time.time() + timeout
 ok = (read_until(b"bastios> ") and send_line_ok(b"ash", b"\n# ")
       and send_line_ok(b"ls disk/many | wc -l; cat disk/many/f1099; stat -f -c %c /disk", b"\n# ")
-      and b"\r\n1100\r\n1099\r\n5119\r\n" in out)
+      and b"\r\n1100\r\n1099\r\n8191\r\n" in out)
 print(("ok  " if ok else "FAIL"), "(big-disk boot) 1100 entries in one directory after a reboot"); ok or print(repr(out[-500:]))
 fails += not ok
 qemu.kill(); qemu.wait()

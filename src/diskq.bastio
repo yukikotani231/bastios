@@ -26,6 +26,7 @@ import "core/ring.bastio";
 
 const CBLOCK: u64 = 4096;            // a block
 const NC: u64 = 256;                  // cache slots (1 MiB: more than BusyBox, re-read on each exec at 256 KiB)
+const NC_MIN: u64 = 16;               // slots of a disk with no file system (an unused loop mount)
 const NH: u64 = 256;                  // hash buckets over the block numbers the slots hold
 const NQ: u64 = 128;                  // queued operations
 const QW: u64 = 3;                    // words per operation: kind, slot, block
@@ -52,7 +53,8 @@ const DQ_MOVED: u64 = 1;              // something happened; call again
 const DQ_FREED: u64 = 2;              // DQ_FREED + b: block b is free now
 
 struct DiskQ {
-  cache: Bytes,         // NC blocks
+  nc: u64,              // cache slots: NC, or NC_MIN for a disk with no file system
+  cache: Bytes,         // nc blocks
   tag: Buf,             // per slot: the block it holds, or NOTAG
   st: Buf,              // per slot: CS_*
   hh: Buf,              // per bucket: the first slot of its chain + 1, or 0
@@ -73,19 +75,21 @@ struct DiskQ {
 }
 
 spec fn dq_ok(q: &DiskQ) -> bool {
-  blen(q.cache) == NC * CBLOCK && len(q.tag) == NC && len(q.st) == NC && len(q.q) == NQ * QW
-  && len(q.hh) == NH && len(q.hn) == NC && len(q.hk) == NC
-  && ring_ok(q.r) && q.r.cap == NQ && q.hand < NC && q.batch >= 1 && q.batch <= VIO_BATCH
+  q.nc >= NC_MIN && q.nc <= NC
+  && blen(q.cache) == q.nc * CBLOCK && len(q.tag) == q.nc && len(q.st) == q.nc && len(q.q) == NQ * QW
+  && len(q.hh) == NH && len(q.hn) == q.nc && len(q.hk) == q.nc
+  && ring_ok(q.r) && q.r.cap == NQ && q.hand < q.nc && q.batch >= 1 && q.batch <= VIO_BATCH
 }
 
-fn dq_new() -> DiskQ
+fn dq_new(nc: u64) -> DiskQ
+  requires nc >= NC_MIN && nc <= NC
   ensures dq_ok(result)
 {
-  let mut q = DiskQ { cache: balloc(NC * CBLOCK), tag: alloc(NC), st: alloc(NC), hh: alloc(NH), hn: alloc(NC), hk: alloc(NC), q: alloc(NQ * QW),
+  let mut q = DiskQ { nc: nc, cache: balloc(nc * CBLOCK), tag: alloc(nc), st: alloc(nc), hh: alloc(NH), hn: alloc(nc), hk: alloc(nc), q: alloc(NQ * QW),
     r: ring_new(NQ), running: false, batch: 1, since: 0, hand: 0, next: 1, done: 0, moved: 0, dead: false, good: 0 };
   let mut i = 0;
-  while i < NC
-    invariant i <= NC && dq_ok(q)
+  while i < nc
+    invariant i <= nc && dq_ok(q)
   {
     q.tag = set(q.tag, i, NOTAG);
     q.hk = set(q.hk, i, NH);
@@ -135,7 +139,7 @@ fn dq_bucket(b: u64) -> u64
 
 /// Takes slot s out of the chain it is in (none if it is in none).
 fn dq_unlink(q: &mut DiskQ, s: u64)
-  requires dq_ok(q) && s < NC
+  requires dq_ok(q) && s < q.nc
   ensures dq_ok(q) && q.r.n == old(q.r.n)
   ensures forall i: u64 :: get(q.st, i) == old(get(q.st, i))
   ensures forall i: u64 :: get(q.tag, i) == old(get(q.tag, i))
@@ -153,8 +157,8 @@ fn dq_unlink(q: &mut DiskQ, s: u64)
   }
   let mut c = get(q.hh, h);
   let mut n = 0;
-  while c != 0 && c <= NC && n < NC
-    invariant dq_ok(q) && n <= NC
+  while c != 0 && c <= q.nc && n < q.nc
+    invariant dq_ok(q) && n <= q.nc
   {
     let t = c - 1;
     if get(q.hn, t) == s + 1 {
@@ -168,7 +172,7 @@ fn dq_unlink(q: &mut DiskQ, s: u64)
 
 /// Puts slot s, which holds block b, in b's chain (out of any other).
 fn dq_link(q: &mut DiskQ, s: u64, b: u64)
-  requires dq_ok(q) && s < NC
+  requires dq_ok(q) && s < q.nc
   ensures dq_ok(q) && q.r.n == old(q.r.n)
   ensures forall i: u64 :: get(q.st, i) == old(get(q.st, i))
   ensures forall i: u64 :: get(q.tag, i) == old(get(q.tag, i))
@@ -185,13 +189,13 @@ fn dq_link(q: &mut DiskQ, s: u64, b: u64)
 /// wherever a slot gets a tag).
 fn dq_chain(q: &DiskQ, b: u64, s1: u64, s2: u64, s3: u64) -> u64
   requires dq_ok(q)
-  ensures result <= NC
-  ensures result < NC ==> (get(q.st, result) == s1 || get(q.st, result) == s2 || get(q.st, result) == s3)
+  ensures result <= q.nc
+  ensures result < q.nc ==> (get(q.st, result) == s1 || get(q.st, result) == s2 || get(q.st, result) == s3)
 {
   let mut c = get(q.hh, dq_bucket(b));
   let mut n = 0;
-  while c != 0 && c <= NC && n < NC
-    invariant dq_ok(q) && n <= NC
+  while c != 0 && c <= q.nc && n < q.nc
+    invariant dq_ok(q) && n <= q.nc
   {
     let t = c - 1;
     let st = get(q.st, t);
@@ -201,14 +205,14 @@ fn dq_chain(q: &DiskQ, b: u64, s1: u64, s2: u64, s3: u64) -> u64
     c = get(q.hn, t);
     n = n + 1;
   }
-  return NC;
+  return q.nc;
 }
 
 /// The slot holding block b's data (valid or dirty), or NC.
 fn dq_find(q: &DiskQ, b: u64) -> u64
   requires dq_ok(q)
-  ensures result <= NC
-  ensures result < NC ==> (get(q.st, result) == CS_VALID || get(q.st, result) == CS_DIRTY || get(q.st, result) == CS_HOLD)
+  ensures result <= q.nc
+  ensures result < q.nc ==> (get(q.st, result) == CS_VALID || get(q.st, result) == CS_DIRTY || get(q.st, result) == CS_HOLD)
 {
   return dq_chain(q, b, CS_VALID, CS_DIRTY, CS_HOLD);
 }
@@ -217,22 +221,22 @@ fn dq_find(q: &DiskQ, b: u64) -> u64
 fn dq_reading(q: &DiskQ, b: u64) -> bool
   requires dq_ok(q)
 {
-  return dq_chain(q, b, CS_READING, CS_READING, CS_READING) < NC;
+  return dq_chain(q, b, CS_READING, CS_READING, CS_READING) < q.nc;
 }
 
 /// A slot to fill: the first free or valid one the clock hand reaches (a
 /// valid one is forgotten); NC if every slot is pinned.
 fn dq_slot(q: &mut DiskQ) -> u64
   requires dq_ok(q)
-  ensures dq_ok(q) && q.r.n == old(q.r.n) && result <= NC
-  ensures result < NC ==> get(q.st, result) == CS_FREE
+  ensures dq_ok(q) && q.r.n == old(q.r.n) && result <= q.nc
+  ensures result < q.nc ==> get(q.st, result) == CS_FREE
 {
   let mut n = 0;
-  while n < NC
-    invariant n <= NC && dq_ok(q) && q.r.n == old(q.r.n)
+  while n < q.nc
+    invariant n <= q.nc && dq_ok(q) && q.r.n == old(q.r.n)
   {
     let h = q.hand;
-    q.hand = (q.hand + 1) % NC;
+    q.hand = (q.hand + 1) % q.nc;
     let st = get(q.st, h);
     if st == CS_FREE {
       return h;
@@ -244,7 +248,7 @@ fn dq_slot(q: &mut DiskQ) -> u64
     }
     n = n + 1;
   }
-  return NC;
+  return q.nc;
 }
 
 /// Could `slots` slots be filled now without waiting?
@@ -253,8 +257,8 @@ fn dq_has_room(q: &DiskQ, slots: u64) -> bool
 {
   let mut i = 0;
   let mut n = 0;
-  while i < NC && n < slots
-    invariant i <= NC && n <= i && dq_ok(q)
+  while i < q.nc && n < slots
+    invariant i <= q.nc && n <= i && dq_ok(q)
   {
     let s = get(q.st, i);
     if s == CS_FREE || s == CS_VALID {
@@ -281,8 +285,8 @@ fn dq_forget(q: &mut DiskQ, b: u64)
   let mut c = get(q.hh, dq_bucket(b));
   let mut n = 0;
   let c0 = q.r.n;
-  while c != 0 && c <= NC && n < NC
-    invariant dq_ok(q) && n <= NC && q.r.n == c0
+  while c != 0 && c <= q.nc && n < q.nc
+    invariant dq_ok(q) && n <= q.nc && q.r.n == c0
   {
     let t = c - 1;
     if get(q.tag, t) == b {
@@ -315,28 +319,28 @@ fn dq_push(q: &mut DiskQ, kind: u64, slot: u64, b: u64)
 fn dq_want(q: &mut DiskQ, b: u64) -> u64
   requires dq_ok(q)
   ensures dq_ok(q)
-  ensures result < NC || result == NC || result == DQ_NONE
-  ensures result < NC ==> (get(q.st, result) == CS_VALID || get(q.st, result) == CS_DIRTY || get(q.st, result) == CS_HOLD)
+  ensures result < q.nc || result == q.nc || result == DQ_NONE
+  ensures result < q.nc ==> (get(q.st, result) == CS_VALID || get(q.st, result) == CS_DIRTY || get(q.st, result) == CS_HOLD)
 {
   let f = dq_find(q, b);
-  if f < NC {
+  if f < q.nc {
     return f;
   }
   if dq_reading(q, b) {
-    return NC;
+    return q.nc;
   }
   if q.r.n >= NQ {
     return DQ_NONE;
   }
   let s = dq_slot(&mut q);
-  if s >= NC {
+  if s >= q.nc {
     return DQ_NONE;
   }
   q.tag = set(q.tag, s, b);
   dq_link(&mut q, s, b);
   q.st = set(q.st, s, CS_READING);
   dq_push(&mut q, Q_READ, s, b);
-  return NC;
+  return q.nc;
 }
 
 /// Queues writing src[at .. at + 4096] to block b: copies it into a slot,
@@ -354,7 +358,7 @@ fn dq_put(q: &mut DiskQ, b: u64, src: &Bytes, at: u64, look: bool) -> bool
     dq_forget(&mut q, b);
   }
   let s = dq_slot(&mut q);
-  if s >= NC {
+  if s >= q.nc {
     return false;
   }
   bcopy(&mut q.cache, s * CBLOCK, src, at, CBLOCK);
@@ -402,13 +406,13 @@ fn dq_hold(q: &mut DiskQ, b: u64, src: &Bytes, at: u64) -> bool
   ensures dq_ok(q)
 {
   let held = dq_chain(q, b, CS_HOLD, CS_HOLD, CS_HOLD);
-  if held < NC {
+  if held < q.nc {
     bcopy(&mut q.cache, held * CBLOCK, src, at, CBLOCK);
     return true;
   }
   dq_forget(&mut q, b);
   let s = dq_slot(&mut q);
-  if s >= NC {
+  if s >= q.nc {
     return false;
   }
   bcopy(&mut q.cache, s * CBLOCK, src, at, CBLOCK);
@@ -428,7 +432,7 @@ fn dq_queue_held(q: &mut DiskQ, b: u64) -> bool
     return false;
   }
   let i = dq_chain(q, b, CS_HOLD, CS_HOLD, CS_HOLD);
-  if i < NC {
+  if i < q.nc {
     q.st = set(q.st, i, CS_DIRTY);
     dq_push(&mut q, Q_WRITE, i, b);
     return true;
@@ -443,7 +447,7 @@ fn dq_unhold(q: &mut DiskQ, b: u64)
   ensures dq_ok(q) && q.r.n == old(q.r.n)
 {
   let i = dq_chain(q, b, CS_HOLD, CS_HOLD, CS_HOLD);
-  if i < NC {
+  if i < q.nc {
     q.st = set(q.st, i, CS_FREE);
     q.tag = set(q.tag, i, NOTAG);
   }
@@ -477,7 +481,7 @@ fn dq_pop(q: &mut DiskQ)
 
 /// What a finished slot becomes: valid if a lookup can find it, else free.
 fn dq_settle(q: &mut DiskQ, s: u64)
-  requires dq_ok(q) && s < NC
+  requires dq_ok(q) && s < q.nc
   ensures dq_ok(q)
 {
   if get(q.tag, s) == NOTAG {
@@ -523,9 +527,9 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
       {
         let a2 = q.r.h * QW;
         let s2 = get(q.q, a2 + 1);
-        if s2 < NC && get(q.q, a2) == Q_WRITE {
+        if s2 < q.nc && get(q.q, a2) == Q_WRITE {
           dq_settle(&mut q, s2);
-        } else if s2 < NC && get(q.q, a2) == Q_READ {
+        } else if s2 < q.nc && get(q.q, a2) == Q_READ {
           if r == BIO_OK {
             blk_fetch_n(&mut dev, j, &mut q.cache, s2 * CBLOCK);
             dq_settle(&mut q, s2);
@@ -539,7 +543,7 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
       }
       return DQ_MOVED;
     }
-    if s < NC {
+    if s < q.nc {
       if kind == Q_READ && r == BIO_OK {
         blk_fetch(&mut dev, &mut q.cache, s * CBLOCK);
         dq_settle(&mut q, s);
@@ -566,11 +570,11 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
     return DQ_MOVED;
   }
   // A device command. On a dead disk it is dropped (a read's slot freed).
-  if q.dead || s >= NC || b >= 0x100000000000 {
-    if s < NC && kind == Q_READ {
+  if q.dead || s >= q.nc || b >= 0x100000000000 {
+    if s < q.nc && kind == Q_READ {
       q.st = set(q.st, s, CS_FREE);
       q.tag = set(q.tag, s, NOTAG);
-    } else if s < NC && kind == Q_WRITE {
+    } else if s < q.nc && kind == Q_WRITE {
       dq_settle(&mut q, s);
     }
     dq_kill(&mut q);
@@ -592,7 +596,7 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
       invariant want >= 1 && want <= VIO_BATCH && dq_ok(q)
     {
       let a2 = ((q.r.h + want) % NQ) * QW;
-      if get(q.q, a2) == Q_READ && get(q.q, a2 + 1) < NC && get(q.q, a2 + 2) == b + want {
+      if get(q.q, a2) == Q_READ && get(q.q, a2 + 1) < q.nc && get(q.q, a2 + 2) == b + want {
         want = want + 1;
       } else {
         more = false;
@@ -617,7 +621,7 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
       invariant want >= 1 && want <= VIO_BATCH && dq_ok(q)
     {
       let a2 = ((q.r.h + want) % NQ) * QW;
-      if get(q.q, a2) == Q_WRITE && get(q.q, a2 + 1) < NC && get(q.q, a2 + 2) == b + want {
+      if get(q.q, a2) == Q_WRITE && get(q.q, a2 + 1) < q.nc && get(q.q, a2 + 2) == b + want {
         want = want + 1;
       } else {
         more = false;
@@ -631,7 +635,7 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
         invariant j <= n && n <= VIO_BATCH && dq_ok(q) && blk_ok(dev)
       {
         let sj = get(q.q, ((q.r.h + j) % NQ) * QW + 1);
-        if sj >= NC || !blk_stage(&mut dev, j, q.cache, sj * CBLOCK) {
+        if sj >= q.nc || !blk_stage(&mut dev, j, q.cache, sj * CBLOCK) {
           staged = false;
         }
         j = j + 1;
