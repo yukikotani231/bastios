@@ -110,6 +110,17 @@ int main(void) {
         if (f >= 0) close(f);
         u[n > 0 ? n : 0] = 0;
         sz > 0 && res > 0 && sh == 0 && strstr(u, "rchar: ") && strstr(u, "write_bytes: "); }));
+    EXPECT("core_pattern and nr_open read, drop_caches takes 3 and refuses 9", ({
+        char t[64], u[64]; int f = open("/proc/sys/kernel/core_pattern", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
+        if (f >= 0) close(f);
+        t[n > 0 ? n : 0] = 0;
+        f = open("/proc/sys/fs/nr_open", O_RDONLY); n = f < 0 ? 0 : read(f, u, sizeof u - 1);
+        if (f >= 0) close(f);
+        u[n > 0 ? n : 0] = 0;
+        f = open("/proc/sys/vm/drop_caches", O_WRONLY); int ok = f >= 0 && write(f, "3", 1) == 1;
+        errno = 0; int bad = f >= 0 && write(f, "9", 1) < 0 && errno == EINVAL;
+        if (f >= 0) close(f);
+        strcmp(t, "core\n") == 0 && atol(u) == 1048576 && ok && bad; }));
     EXPECT("/proc/net/arp has its header", ({
         char t[4096]; int f = open("/proc/net/arp", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
         if (f >= 0) close(f);

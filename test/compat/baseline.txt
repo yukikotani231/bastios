@@ -432,6 +432,7 @@ t_ltp2: mincore errors
 t_ltp2: mincore marks mapped pages
 t_ltp2: mlockall and munlockall succeed
 t_ltp2: mqueue: priorities order messages, getattr counts, unlink, bad sigevent EINVAL
+t_ltp2: mqueue: mq_notify SIGEV_THREAD runs its function once, a second registration is EBUSY
 t_ltp2: nested epoll: readiness passes up, a loop is ELOOP
 t_ltp2: nice: root lowers and raises it, a child inherits it, nobody may not lower it
 t_ltp2: personality is kept
@@ -564,6 +565,7 @@ t_misc: /proc/self/exe
 t_misc: /proc/self/limits shows the open-files limit
 t_misc: /proc/self/mountinfo lists the root and /proc
 t_misc: /proc/self/statm counts the pages and io has its counters
+t_misc: core_pattern and nr_open read, drop_caches takes 3 and refuses 9
 t_misc: /proc/stat has cpu lines
 t_misc: SIOCGIFHWADDR and SIOCGIFNETMASK on lo
 t_misc: SSE floating point

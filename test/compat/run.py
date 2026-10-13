@@ -432,7 +432,19 @@ def run_program(env, prog, timeout):
     return checks
 
 
+# What differs between the guests' processors in the cases (debian.txt's).
+ARCH_WORDS = {"x86_64": {"GLIBCLD": "/lib64/ld-linux-x86-64.so.2", "MULTIARCH": "x86_64-linux-gnu", "MACHINE": "x86_64"},
+              "aarch64": {"GLIBCLD": "/lib/ld-linux-aarch64.so.1", "MULTIARCH": "aarch64-linux-gnu", "MACHINE": "aarch64"}}
+ARCH = "x86_64"
+
+def arch_words(text):
+    for k, v in ARCH_WORDS[ARCH].items():
+        text = text.replace("%" + k + "%", v)
+    return text
+
 def run_applet(env, name, cmd, expected, timeout, bb):
+    cmd = arch_words(cmd)
+    expected = [arch_words(l) for l in expected]
     cmd = cmd.replace("ALPINEURL", env.hosturl + "/alpine")
     cmd = (cmd.replace("HOSTSURL", env.hostsurl).replace("HOSTURL", env.hosturl)
            .replace("HOSTADDR", env.hostaddr).replace("HOSTPORT", env.hostport)
@@ -563,6 +575,8 @@ def main():
     ap.add_argument("programs", nargs="*")
     args = ap.parse_args()
 
+    global ARCH
+    ARCH = args.arch
     names = syscall_names()
     applets = load_applets(os.path.join(HERE, "applets.txt"))
     apps = load_applets(os.path.join(HERE, "apps.txt"))
@@ -658,7 +672,7 @@ def main():
         shutil.copyfile(args.alpine_disk, disk)
         if args.alpine_repo:
             os.makedirs(os.path.join(web.dir, "alpine"), exist_ok=True)
-            os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", "x86_64"))
+            os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", args.arch))
         lanes.append((disk, [("alpine", "Alpine Linux (apk)", applets_lane(alpine, 300)),
                              ("alpine-tty", "programs on the terminal in Alpine",
                               lambda e: [run_tty(e, n, p, k, c, x, 60, bb) for n, p, k, c, x in alpine_tty])]))
