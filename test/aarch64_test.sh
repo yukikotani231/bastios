@@ -137,6 +137,20 @@ run("mul 4294967296 4294967296", b"overflow")
 run("frobnicate", b"unknown command: frobnicate")
 run("mem", b"free pages")
 run("cpus", b"processors running: %d" % ncpu)
+if os.environ.get("BOOT_ONLY") == "1":
+    # Many processors (SMP=64) on a few host cores run too slowly for the
+    # timing checks below: only the boot, the processor count and the
+    # power off are checked.
+    run("halt", b"pages free at power off", wait=b"power off\r\n")
+    try:
+        qemu.wait(timeout=60)
+        check("QEMU exits on halt (PSCI SYSTEM_OFF)", True)
+    except subprocess.TimeoutExpired:
+        qemu.kill()
+        check("QEMU exits on halt (PSCI SYSTEM_OFF)", False)
+    m = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+    check(f"every page is back in the pool at power off ({pages} at boot)", bool(m) and int(m.group(1)) == pages)
+    sys.exit(1 if fails else 0)
 run("hello", b"hello from user mode, pid 2")
 run("true", b"")
 # A Linux arm64 program (an ELF executable with no libc; svc numbers from

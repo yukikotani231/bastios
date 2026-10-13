@@ -21,6 +21,7 @@ tests=(
   "trusted_base|c|test/trusted_base.sh"
   "sysfuzz_calls|c|test/sysfuzz_calls.sh"
   "aarch64|c|test/aarch64_test.sh --build"
+  "aarch64 64 cpus|c|BOOT_ONLY=1 SMP=64 TIMEOUT=240 test/aarch64_test.sh"
   "aarch64 gicv2|c|GIC=2 SMP=2 test/aarch64_test.sh"
   "aarch64 el2|c|VIRT=,virtualization=on SMP=2 test/aarch64_test.sh"
   "aarch64 mem|c|MEM=2500M SMP=2 test/aarch64_test.sh"
