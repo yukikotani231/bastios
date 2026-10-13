@@ -8,7 +8,9 @@
 #include <poll.h>
 #include <sys/epoll.h>
 #include <sys/inotify.h>
+#include <sys/eventfd.h>
 #include <sys/stat.h>
+#include <sys/timerfd.h>
 #include <sys/wait.h>
 
 struct ev {
@@ -260,6 +262,57 @@ int main(void) {
     for (int i = 0; i < 60; i++) {
         char nm[16];
         snprintf(nm, sizeof nm, "in_w%d", i);
+        unlink(nm);
+    }
+
+    /* epoll: sixteen instances, and two hundred descriptors on one. */
+    int eps[16], nep = 0;
+    for (int i = 0; i < 16; i++) {
+        eps[i] = epoll_create1(0);
+        nep += eps[i] >= 0;
+    }
+    EXPECT("sixteen epoll instances", nep == 16);
+    int efd[200], nadd = 0;
+    for (int i = 0; i < 200; i++) {
+        struct epoll_event ev = { .events = EPOLLIN, .data.u32 = i };
+        efd[i] = eventfd(0, 0);
+        nadd += efd[i] >= 0 && eps[0] >= 0 && epoll_ctl(eps[0], EPOLL_CTL_ADD, efd[i], &ev) == 0;
+    }
+    EXPECT("two hundred descriptors on one epoll instance", nadd == 200);
+    uint64_t one = 1;
+    struct epoll_event got[8];
+    int ready = efd[199] >= 0 && write(efd[199], &one, 8) == 8 ? epoll_wait(eps[0], got, 8, 0) : -1;
+    EXPECT("the last one is the one reported", ready == 1 && got[0].data.u32 == 199);
+    for (int i = 0; i < 200; i++)
+        close(efd[i]);
+    for (int i = 0; i < 16; i++)
+        close(eps[i]);
+
+    /* timerfd: thirty at once. */
+    int tfd[30], ntf = 0;
+    for (int i = 0; i < 30; i++) {
+        tfd[i] = timerfd_create(CLOCK_MONOTONIC, 0);
+        ntf += tfd[i] >= 0;
+    }
+    EXPECT("thirty timerfds at once", ntf == 30);
+    for (int i = 0; i < 30; i++)
+        close(tfd[i]);
+
+    /* named pipes: twelve open at once. */
+    int ff[12], nff = 0;
+    for (int i = 0; i < 12; i++) {
+        char nm[16];
+        snprintf(nm, sizeof nm, "in_fifo%d", i);
+        unlink(nm);
+        ff[i] = mkfifo(nm, 0600) == 0 ? open(nm, O_RDONLY | O_NONBLOCK) : -1;
+        nff += ff[i] >= 0;
+    }
+    EXPECT("twelve named pipes open at once", nff == 12);
+    for (int i = 0; i < 12; i++) {
+        char nm[16];
+        snprintf(nm, sizeof nm, "in_fifo%d", i);
+        if (ff[i] >= 0)
+            close(ff[i]);
         unlink(nm);
     }
 
