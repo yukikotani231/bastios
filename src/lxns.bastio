@@ -78,9 +78,10 @@ fn ns_find(k: &Kernel, ns: u64, p: &Bytes, c: u64) -> u64
   ensures result <= MT_N
 {
   let mut best = MT_N;
+  let hi = smaller(k.mt_hi, MT_N);
   let mut e = 0;
-  while e < MT_N
-    invariant e <= MT_N && best <= MT_N && kok(k) && c <= blen(p)
+  while e < hi
+    invariant e <= hi && hi <= MT_N && best <= MT_N && kok(k) && c <= blen(p)
   {
     if me_in(k, e, ns) && me_covers(k, e, p, c) {
       if best == MT_N {
