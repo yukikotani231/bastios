@@ -931,9 +931,11 @@ t_sys: memory.max refuses a mapping that would pass it
 t_sys: not root: EPERM
 t_sys: seccomp USER_NOTIF: a supervisor answers a call
 t_sys: setdomainname
+t_sys: the names are written through /proc/sys/kernel/hostname and domainname
 t_sys: sethostname, uname, /proc/sys/kernel/hostname
 t_sys: settimeofday
 t_sysv: /proc/sysvipc and /proc/sys/kernel limits
+t_sysv: msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message
 t_sysv: GETNCNT counts a waiting process
 t_sysv: IPC_RMID ends a wait with EIDRM
 t_sysv: SEM_UNDO is undone at exit
