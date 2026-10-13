@@ -29,8 +29,10 @@
 // the namespace (word 3 of its open file description, + 1); stat and
 // fstat on it show the inode, as on nsfs, and setns joins it. setns also
 // takes a pidfd and a mask of CLONE_NEW* flags, joining the process's
-// namespaces of those kinds. The network, user and cgroup links show the
-// first namespace; setns to them is accepted when it changes nothing.
+// namespaces of those kinds. The user link shows the first namespace;
+// setns to it is accepted when it changes nothing. A network namespace is joined by its slot number (the
+// stack reuses a slot once its namespace has ended, so a descriptor kept
+// across that could name another namespace).
 
 import "lxns.bastio";
 
@@ -878,7 +880,13 @@ fn ns_may_join(k: &Kernel, pid: u64, f: u64, id: u64) -> u64
     }
     return 0;
   }
-  return EINVAL;                            // a PID namespace not yet; the rest are all the first
+  if f == NF_NET {
+    if id >= NNET || !nic_ns_live(k.nic, id) {
+      return EINVAL;                        // it ended (its number may since be another's)
+    }
+    return 0;
+  }
+  return EINVAL;                            // a PID namespace not yet; the user namespace is the first
 }
 
 /// pid joins mount namespace id: its root and working directory become
@@ -940,6 +948,9 @@ fn ns_join(k: &mut Kernel, pid: u64, f: u64, id: u64, p: u64)
     nsk_set(&mut k, NSK_IPC, pid, id);
   } else if f == NF_CGROUP {
     nsk_set(&mut k, NSK_CGN, pid, id);
+  } else if f == NF_NET {
+    netns_exit(&mut k, pid);                // the namespace it leaves ends if it was the last one in
+    pset(&mut k.procs, pid, F_NETNS, id);
   }
 }
 
