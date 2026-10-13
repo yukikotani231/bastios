@@ -1832,6 +1832,24 @@ fn nic_tick(c: &mut Nic, now: u64)
   }
 }
 
+/// How many ticks from `now` until the lease needs the timer (the renewal
+/// at T1, or its end), or a very long time: static addresses and no card.
+fn nic_dhcp_due(c: &Nic, now: u64) -> u64 {
+  match c {
+    Nic::None => { return 1099511627776; },
+    Nic::Up(n) => {
+      if n.dhcp_state != DHCP_BOUND {
+        return 1099511627776;
+      }
+      let due = smaller(n.dhcp_t1, n.dhcp_end);
+      if due <= now {
+        return 0;
+      }
+      return due - now;
+    },
+  }
+}
+
 /// What the stack is configured with: 0 our address, 1 the gateway, 2 the
 /// netmask, 3 how (0 not yet, 1 DHCP, 2 static), 4 the name server. 0
 /// without a card.
