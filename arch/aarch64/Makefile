@@ -238,10 +238,11 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # The shell commands of these disks run the suite's static BusyBox: the
 # AArch64 kernel has no built-in musl dynamic linker, so Alpine's own
 # (dynamic) BusyBox starts only inside the unpacked root.
-$(B)/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox $(B)/compat/runc tools/ocipull.sh | $(B)/compat
+$(B)/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox $(B)/compat/runc tools/ocipull.sh \
+    $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys | $(B)/compat
 	COMPAT_ARCH=aarch64 test/compat/alpinedisk.py $@ $(B)/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) \
 	  --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) --busybox $(B)/compat/busybox \
-	  --extra "$(B)/compat/runc tools/ocipull.sh"
+	  --extra "$(B)/compat/runc tools/ocipull.sh $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys"
 
 # runc for the container cases: the static arm64 binary of the upstream
 # release, checked against a pinned SHA-256 (the x86-64 suite's is the
@@ -252,6 +253,37 @@ $(B)/compat/runc: | $(B)/compat
 	curl -fsSL -o $@.part https://github.com/opencontainers/runc/releases/download/v$(RUNC_VER)/runc.arm64
 	echo "$(RUNC_ARM64_SHA256)  $@.part" | sha256sum -c - >/dev/null
 	chmod +x $@.part && mv $@.part $@
+
+# Dropbear, the SSH server of the "nvim over ssh" case, built from the same
+# source as the x86-64 suite's (DROPBEAR_GIT, DROPBEAR_TAG) as a static glibc
+# program at 0x400000. The client, the key tool and the keys the case uses
+# run on this machine: they are built natively into build/compat, where the
+# case looks for them (the x86-64 suite's rule makes the same files).
+DROPBEAR_GIT ?= https://github.com/mkj/dropbear
+DROPBEAR_TAG ?= DROPBEAR_2024.86
+DROPBEAR_CONF := --disable-zlib --disable-lastlog --disable-utmp --disable-utmpx --disable-wtmp --disable-wtmpx \
+                 --disable-pututline --disable-pututxline --disable-syslog
+
+$(B)/compat/dropbear: | $(B)/compat
+	rm -rf $(B)/compat/src/dropbear && mkdir -p $(B)/compat/src
+	git clone -q --depth 1 --branch $(DROPBEAR_TAG) $(DROPBEAR_GIT) $(B)/compat/src/dropbear
+	cd $(B)/compat/src/dropbear && CC="$(ACC)" CFLAGS="-O2" LDFLAGS="-static -no-pie $(ULFLAGS) -s" ./configure -q \
+	  --host=aarch64-linux-gnu --disable-harden $(DROPBEAR_CONF) >/dev/null
+	echo '#define DROPBEAR_SVR_PASSWORD_AUTH 0' > $(B)/compat/src/dropbear/localoptions.h   # no static crypt() here; the case logs in by key
+	$(MAKE) -C $(B)/compat/src/dropbear -s STATIC=1 PROGRAMS=dropbear >/dev/null
+	cp $(B)/compat/src/dropbear/dropbear $@
+
+build/compat/dbclient build/compat/dropbearkey &: | $(B)/compat
+	rm -rf $(B)/compat/src/dropbear-host && mkdir -p $(B)/compat/src build/compat
+	git clone -q --depth 1 --branch $(DROPBEAR_TAG) $(DROPBEAR_GIT) $(B)/compat/src/dropbear-host
+	cd $(B)/compat/src/dropbear-host && ./configure -q $(DROPBEAR_CONF) >/dev/null
+	$(MAKE) -C $(B)/compat/src/dropbear-host -s PROGRAMS="dbclient dropbearkey" >/dev/null
+	cp $(B)/compat/src/dropbear-host/dbclient $(B)/compat/src/dropbear-host/dropbearkey build/compat/
+
+build/compat/ssh_host_key build/compat/ssh_authorized_keys &: build/compat/dropbearkey
+	rm -f build/compat/ssh_host_key build/compat/ssh_id
+	build/compat/dropbearkey -t ed25519 -f build/compat/ssh_host_key >/dev/null
+	build/compat/dropbearkey -t ed25519 -f build/compat/ssh_id | grep '^ssh-' > build/compat/ssh_authorized_keys
 
 # Debian (glibc) and Node (musl, V8) the same way, from the arm64 layers.
 $(B)/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox
