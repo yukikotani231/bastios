@@ -430,11 +430,11 @@ const DEV_LOOP: u64 = 16;              // OF_DEV device /dev/loopN is DEV_LOOP +
 const S_IFBLK: u64 = 0x61B0;           // a block device, rw-rw----
 // Pseudo-terminals (src/lxpty.bastio): PTY_N pairs of PTY_W words, and two
 // rings of PTY_CAP bytes each.
-const PTY_N: u64 = 4;
+const PTY_N: u64 = 16;
 const PTY_W: u64 = 53;                 // 16 + TERMIOS_SIZE, then the window's size in pixels
-const PTY_LEN: u64 = 212;              // PTY_N * PTY_W
+const PTY_LEN: u64 = 848;              // PTY_N * PTY_W
 const PTY_CAP: u64 = 4096;
-const PTYB_LEN: u64 = 32768;          // 2 * PTY_N * PTY_CAP
+const PTYB_LEN: u64 = 131072;         // 2 * PTY_N * PTY_CAP
 const TCSETA: u64 = 0x5406;           // TCSETAW and TCSETAF follow
 const TCSETAF: u64 = 0x5408;
 const TIOCSETD: u64 = 0x5423;
