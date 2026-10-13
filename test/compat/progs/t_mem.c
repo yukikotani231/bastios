@@ -286,5 +286,24 @@ int main(void) {
            if (a != MAP_FAILED) munmap(a, 64 << 20);
            if (b != MAP_FAILED) munmap(b, 64 << 20);
            ok; }));
+    /* Twelve MAP_SHARED mappings of one file at once: each is written back. */
+    EXPECT("twelve shared file mappings are all written back", ({
+           int sf = open("mem_shared", O_RDWR | O_CREAT | O_TRUNC, 0600);
+           int ok = sf >= 0 && ftruncate(sf, 12 * 4096) == 0;
+           char *mp[12];
+           for (int i = 0; ok && i < 12; i++) {
+               mp[i] = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, sf, i * 4096);
+               ok = mp[i] != MAP_FAILED;
+               if (ok) mp[i][0] = 'a' + i;
+           }
+           for (int i = 0; ok && i < 12; i++) ok = msync(mp[i], 4096, MS_SYNC) == 0;
+           for (int i = 0; i < 12; i++) if (ok) munmap(mp[i], 4096);
+           for (int i = 0; ok && i < 12; i++) {
+               char c = 0;
+               ok = pread(sf, &c, 1, i * 4096) == 1 && c == 'a' + i;
+           }
+           if (sf >= 0) close(sf);
+           unlink("mem_shared");
+           ok; }));
     return done();
 }
