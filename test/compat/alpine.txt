@@ -275,6 +275,19 @@ touch=1
 0
 status 3
 
+== container: cgroup limits: the container sees the memory, pids and cpu limits runc set
+$ cd /disk/b && bb sed -i -e 's#"devices"#"memory": {"limit": 83886080}, "pids": {"limit": 20}, "cpu": {"shares": 512, "quota": 80000, "period": 100000}, "devices"#' -e 's#"touch /x 2>\&1; echo touch=$?; id -u; exit 3"#"cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpu.weight; exit 4"#' config.json; /disk/runc --root /run/runc run c3 < /dev/null; echo status $?
+83886080
+20
+80000 100000
+20
+status 4
+
+== container: memory.max kills a process of a container that outgrows it
+$ cd /disk/b && bb sed -i -e 's#"quota": 80000#"quota": 1000000#' -e 's#cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpu.weight; exit 4#dd if=/dev/zero of=/dev/null bs=120M count=1 iflag=fullblock; exit 4#' config.json; /disk/runc --root /run/runc run c4 < /dev/null 2>&1 | bb cat; echo status $?
+Killed
+status 0
+
 == container: rootless: runc runs Alpine as an unprivileged user in a user namespace of its own
 $ bb mkdir -p /disk/ur /disk/u /run/ru && bb chown 65534:65534 /disk/ur /disk/u /run/ru && bb su -s /bin/ash nobody -c 'cd /disk/ur && /disk/busybox tar -xf /disk/root.tar && cd /disk/u && /disk/runc spec --rootless && /disk/busybox sed -i -e "s#\"path\": \"rootfs\"#\"path\": \"/disk/ur\"#" -e "s#\"terminal\": true#\"terminal\": false#" -e "s#\"sh\"#\"/bin/sh\", \"-c\", \"id -u; hostname; echo pid=\$\$; cat /proc/self/uid_map; touch /x 2>\&1; echo touch=\$?\"#" config.json && /disk/runc --root /run/ru run c3 < /dev/null; echo status $?'
 0
@@ -318,6 +331,10 @@ lua-language-server
 == tmux: a detached session runs a shell on a pseudo-terminal, takes keys and shows its screen
 $ bb rm -f /disk/a/root/tm.res; test -x /disk/a/usr/bin/tmux && bb mount --bind /dev /disk/a/dev && bb mount --bind /dev/pts /disk/a/dev/pts && bb chroot /disk/a /bin/sh -c 'exec </dev/null >/root/tm.out 2>&1; export TERM=xterm; tmux -f /dev/null new-session -d -s t -x 80 -y 24 sh && sleep 1 && tmux send-keys -t t "echo sum=$((40+2))" Enter && sleep 1 && tmux capture-pane -p -t t >/root/tm.cap && grep -c "^sum=42" /root/tm.cap >/root/tm.res; tmux kill-server'; bb umount /disk/a/dev/pts 2>/dev/null; bb umount /disk/a/dev 2>/dev/null; bb cat /disk/a/root/tm.res
 1
+
+== tmux: a client on the console passes it to the server (SCM_RIGHTS of the console)
+$ test -x /disk/a/usr/bin/tmux && bb mount --bind /dev /disk/a/dev && bb mount --bind /dev/pts /disk/a/dev/pts && bb chroot /disk/a /bin/sh -c 'export TERM=xterm; tmux -f /dev/null new-session -d -s k sh; tmux ls | cut -c1-12; tmux kill-server >/dev/null 2>&1'; bb umount /disk/a/dev/pts 2>/dev/null; bb umount /disk/a/dev 2>/dev/null
+k: 1 windows
 
 == cmake: configure, build and run a C project
 $ bb mkdir -p /disk/a/root/cm && bb printf 'cmake_minimum_required(VERSION 3.10)\nproject(hello C)\nadd_executable(hello main.c)\n' > /disk/a/root/cm/CMakeLists.txt && bb printf '#include <stdio.h>\nint main(void) { puts("built by cmake"); return 0; }\n' > /disk/a/root/cm/main.c && bb chroot /disk/a /bin/sh -c 'cd /root/cm && cmake -S . -B build >/root/cm/cfg.log 2>&1 && cmake --build build >/root/cm/build.log 2>&1 && ./build/hello'
