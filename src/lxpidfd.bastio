@@ -178,9 +178,10 @@ fn pidfd_reuse(k: &mut Kernel, c: u64)
   requires kok(k) && c < NPROC
   ensures kok(k)
 {
+  let hi = smaller(k.ofd_hi, OFD_N);
   let mut h = 0;
-  while h < OFD_N
-    invariant h <= OFD_N && kok(k)
+  while h < hi
+    invariant h <= hi && hi <= OFD_N && kok(k)
   {
     if of_get(k.ofd, h, 0) == OF_PIDFD && of_get(k.ofd, h, 2) == c {
       of_set(&mut k.ofd, h, 2, NPROC);

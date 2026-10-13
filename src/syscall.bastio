@@ -325,6 +325,7 @@ fn nap(k: &mut Kernel, pid: u64, frames: bool)
   ensures kok(k)
 {
   pset(&mut k.procs, pid, F_STATE, SOCKWAIT);
+  k.socks = true;
   pset(&mut k.procs, pid, F_CODE, k.ticks);
   pset(&mut k.procs, pid, F_WAIT, NO_RESULT);
   if frames {
@@ -342,6 +343,12 @@ fn sock_wake(k: &mut Kernel) -> bool
   requires kok(k)
   ensures kok(k)
 {
+  // Nothing asleep in SOCKWAIT (nap is the only way in): nothing to wake,
+  // and the card's marks are not needed. Most calls find this, and the
+  // card's state is several hundred bytes that checking it would copy.
+  if !k.socks {
+    return false;
+  }
   // Without a card nothing moves but the clock: every call looks.
   if !nic_moved(&mut k.nic, k.ticks) && nic_up(k.nic) {
     return false;
@@ -349,6 +356,7 @@ fn sock_wake(k: &mut Kernel) -> bool
   let rx = nic_rx(k.nic);
   let mut woke = false;
   let mut left = false;
+  let mut asleep = false;
   let mut p = 1;
   while p < NPROC
     invariant 1 <= p && p <= NPROC && kok(k)
@@ -358,12 +366,16 @@ fn sock_wake(k: &mut Kernel) -> bool
       if (w != NO_RESULT && w != rx) || pget(k.procs, p, F_CODE) != k.ticks {
         pset(&mut k.procs, p, F_STATE, READY);
         woke = true;
-      } else if w != NO_RESULT {
-        left = true;                        // still waiting on a frame
+      } else {
+        asleep = true;
+        if w != NO_RESULT {
+          left = true;                      // still waiting on a frame
+        }
       }
     }
     p = p + 1;
   }
+  k.socks = asleep;
   if !left {
     nic_quiet(&mut k.nic);
   }
