@@ -35,7 +35,12 @@
 // process running charges 10 ms to its group and those above it, and a group
 // that has used its quota in the current period is not scheduled until the
 // period ends; cpu.stat counts usage_usec, nr_periods and nr_throttled.
-// cpu.weight is kept and read back only.
+// cpu.weight shares the processors between sibling groups that have processes
+// to run, in proportion to their weights (cg_weigh): each tick charges the
+// running process's group (and those above it) CG_TICK_US scaled by
+// 100 / weight, and a group whose charge is more than CG_LAG_US ahead of the
+// least charged runnable sibling is not scheduled until the others catch up;
+// a group that was not runnable starts level with the least charged one.
 //
 // memory.max is enforced in the same tick (cg_oom_tick): memory.current is the
 // pages mapped in the group's address spaces, and a group over its limit loses
@@ -147,7 +152,7 @@ fn cg_held(k: &Kernel, q: u64) -> bool
   if pget(k.procs, q, F_SIGPEND) & sbit(9) != 0 {
     return false;
   }
-  return cg_frozen(k, cg_of(k, q)) || cg_throttled(k, cg_of(k, q));
+  return cg_frozen(k, cg_of(k, q)) || cg_throttled(k, cg_of(k, q)) || cg_wheld(k, cg_of(k, q));
 }
 
 /// Is cgroup s, or one above it, out of its cpu.max quota for the period?
@@ -173,6 +178,161 @@ fn cg_throttled(k: &Kernel, s: u64) -> bool
 
 const CG_TICK_US: u64 = 10000;             // one timer tick, in microseconds
 
+const CG_LAG_US: u64 = 20000;              // how far ahead (in weighted microseconds) a group may run
+
+/// cpu.weight of cgroup c (100 if it was never set).
+fn cg_weight(k: &Kernel, c: u64) -> u64
+  requires kok(k) && c < CG_N
+  ensures 1 <= result && result <= 10000
+{
+  let w = cg_get(k, c, CGW_WEIGHT);
+  if w < 1 || w > 10000 {
+    return 100;
+  }
+  return w;
+}
+
+/// Is cgroup s, or one above it, held back by cpu.weight for now?
+fn cg_wheld(k: &Kernel, s: u64) -> bool
+  requires kok(k) && s < CG_N
+{
+  let mut c = s;
+  let mut i = 0;
+  while i < CG_N
+    invariant i <= CG_N && c < CG_N && kok(k)
+  {
+    if cg_get(k, c, CGW_WST) % 2 == 1 {
+      return true;
+    }
+    if c == 0 {
+      return false;
+    }
+    c = cg_parent(k, c);
+    i = i + 1;
+  }
+  return false;
+}
+
+/// Weighs the sibling groups against each other (see the comment at the top
+/// of the file): marks the groups that have a process to run, and holds back
+/// each one that has had more than its share. Nothing is held while every
+/// group has the default weight.
+fn cg_weigh(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut on = false;
+  let mut c = 1;
+  while c < CG_N
+    invariant 1 <= c && c <= CG_N && kok(k)
+  {
+    let w = cg_get(k, c, CGW_WEIGHT);
+    if cg_used(k, c) && w != 0 && w != 100 {
+      on = true;
+    }
+    c = c + 1;
+  }
+  if !on {
+    c = 0;
+    while c < CG_N
+      invariant c <= CG_N && kok(k)
+    {
+      cg_put(&mut k, c, CGW_WST, 0);
+      c = c + 1;
+    }
+    return;
+  }
+  // Which groups have a process that could run: not asleep in a system
+  // call, not frozen or out of cpu.max quota.
+  c = 0;
+  while c < CG_N
+    invariant c <= CG_N && kok(k)
+  {
+    cg_put(&mut k, c, CGW_WST, cg_get(k, c, CGW_WST) % 4);
+    c = c + 1;
+  }
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && kok(k)
+  {
+    if (state(k.procs, q) == READY || state(k.procs, q) == RUNNING) && pget(k.procs, q, F_RESTART) == 0 {
+      let g = cg_of(k, q);
+      if !cg_frozen(k, g) && !cg_throttled(k, g) {
+        let mut a = g;
+        let mut i = 0;
+        while i < CG_N
+          invariant i <= CG_N && a < CG_N && kok(k)
+        {
+          let st = cg_get(k, a, CGW_WST);
+          if st / 4 % 2 == 0 {
+            cg_put(&mut k, a, CGW_WST, st + 4);
+          }
+          if a == 0 {
+            i = CG_N;
+          } else {
+            a = cg_parent(k, a);
+            i = i + 1;
+          }
+        }
+      }
+    }
+    q = q + 1;
+  }
+  // A group that has just become runnable starts level with the least
+  // charged runnable sibling, so that it cannot hold the others back for
+  // the time it slept.
+  c = 1;
+  while c < CG_N
+    invariant 1 <= c && c <= CG_N && kok(k)
+  {
+    let st = cg_get(k, c, CGW_WST);
+    if cg_used(k, c) && st / 4 % 2 == 1 && st / 2 % 2 == 0 {
+      let mut m = CG_BIG;
+      let mut b = 1;
+      while b < CG_N
+        invariant 1 <= b && b <= CG_N && m <= CG_BIG && kok(k)
+      {
+        if b != c && cg_used(k, b) && cg_parent(k, b) == cg_parent(k, c) && cg_get(k, b, CGW_WST) / 2 % 2 == 1 {
+          m = smaller(m, cg_get(k, b, CGW_VRUN));
+        }
+        b = b + 1;
+      }
+      if m < CG_BIG && cg_get(k, c, CGW_VRUN) < m {
+        cg_put(&mut k, c, CGW_VRUN, m);
+      }
+    }
+    c = c + 1;
+  }
+  c = 1;
+  while c < CG_N
+    invariant 1 <= c && c <= CG_N && kok(k)
+  {
+    let st = cg_get(k, c, CGW_WST);
+    let run = st / 4 % 2;
+    let mut held = 0;
+    if cg_used(k, c) && run == 1 {
+      let mut m = CG_BIG;
+      let mut b = 1;
+      while b < CG_N
+        invariant 1 <= b && b <= CG_N && m <= CG_BIG && kok(k)
+      {
+        if cg_used(k, b) && cg_parent(k, b) == cg_parent(k, c) && cg_get(k, b, CGW_WST) / 4 % 2 == 1 {
+          m = smaller(m, cg_get(k, b, CGW_VRUN));
+        }
+        b = b + 1;
+      }
+      let mine = cg_get(k, c, CGW_VRUN);
+      if m < CG_BIG && mine > m {
+        if mine - m > CG_LAG_US {
+          held = 1;
+        }
+      }
+    }
+    cg_put(&mut k, c, CGW_WST, held + run * 6);
+    c = c + 1;
+  }
+}
+
 /// A timer tick found process p running: every group with a cpu.max whose
 /// period has ended starts a new one (counting it, and whether it ran out
 /// of quota), and the tick is charged to p's group and those above it; a
@@ -182,6 +342,7 @@ fn cg_cpu_tick(k: &mut Kernel, p: u64)
   requires kok(k) && p < NPROC
   ensures kok(k)
 {
+  cg_weigh(&mut k);
   let now = k.ns;
   let mut c = 0;
   while c < CG_N
@@ -215,6 +376,7 @@ fn cg_cpu_tick(k: &mut Kernel, p: u64)
     invariant i <= CG_N && g < CG_N && kok(k)
   {
     cg_put(&mut k, g, CGW_USEC, sat_add(cg_get(k, g, CGW_USEC), CG_TICK_US));
+    cg_put(&mut k, g, CGW_VRUN, sat_add(cg_get(k, g, CGW_VRUN), CG_TICK_US * 100 / cg_weight(k, g)));
     let q = cg_get(k, g, CGW_CPUQ);
     if q != 0 {
       let u = sat_add(cg_get(k, g, CGW_CPUU), CG_TICK_US);
@@ -1506,6 +1668,8 @@ fn cg_mkdir(k: &mut Kernel, pid: u64, n: u64) -> u64
   cg_put(&mut k, free, CGW_NTHR, 0);
   cg_put(&mut k, free, CGW_THR, 0);
   cg_put(&mut k, free, CGW_MAXE, 0);
+  cg_put(&mut k, free, CGW_VRUN, 0);
+  cg_put(&mut k, free, CGW_WST, 0);
   cg_put(&mut k, free, CGW_OOMK, 0);
   cg_put(&mut k, free, CGW_USED, 1);
   return 0;
