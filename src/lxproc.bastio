@@ -492,9 +492,10 @@ fn file_running(k: &Kernel, f: u64) -> bool
   if f >= NO_FILE - NPROGS - 1 {
     return false;
   }
+  let cap = len(k.procs) / STRIDE;     // past it, every process is FREE
   let mut p = 1;
-  while p < NPROC
-    invariant p <= NPROC && kok(k)
+  while p < cap
+    invariant p <= cap + 1 && cap <= NPROC && kok(k)
   {
     if state(k.procs, p) != FREE && state(k.procs, p) != ZOMBIE && pget(k.procs, p, F_PROG) == NPROGS + 1 + f {
       return true;
@@ -858,9 +859,10 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
     want = 0xFFFFFFFF00000000 + p32;        // negative: sign-extend
   }
   let mut found = false;
+  let cap = len(k.procs) / STRIDE;     // past it, every process is FREE
   let mut c = 1;
-  while c < NPROC
-    invariant 1 <= c && c <= NPROC && kok(k)
+  while c < cap
+    invariant 1 <= c && cap <= NPROC && kok(k)
   {
     if (child_of_group(k.procs, c, pid) || traced_by(k, c, pid)) && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
       found = true;
@@ -974,9 +976,10 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
     }
   }
   let mut found = false;
+  let cap = len(k.procs) / STRIDE;     // past it, every process is FREE
   let mut c = 1;
-  while c < NPROC
-    invariant 1 <= c && c <= NPROC && kok(k)
+  while c < cap
+    invariant 1 <= c && cap <= NPROC && kok(k)
   {
     if (child_of_group(k.procs, c, pid) || traced_by(k, c, pid)) && state(k.procs, c) != FREE && wait_match(k.procs, pid, c, want) {
       found = true;
