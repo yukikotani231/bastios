@@ -262,3 +262,27 @@ touch: /x: Read-only file system
 touch=1
 0
 status 3
+
+== container: rootless: runc runs Alpine as an unprivileged user in a user namespace of its own
+$ bb mkdir -p /disk/ur /disk/u /run/ru && bb chown 65534:65534 /disk/ur /disk/u /run/ru && bb su -s /bin/ash nobody -c 'cd /disk/ur && /disk/busybox tar -xf /disk/root.tar && cd /disk/u && /disk/runc spec --rootless && /disk/busybox sed -i -e "s#\"path\": \"rootfs\"#\"path\": \"/disk/ur\"#" -e "s#\"terminal\": true#\"terminal\": false#" -e "s#\"sh\"#\"/bin/sh\", \"-c\", \"id -u; hostname; echo pid=\$\$; cat /proc/self/uid_map; touch /x 2>\&1; echo touch=\$?\"#" config.json && /disk/runc --root /run/ru run c3 < /dev/null; echo status $?'
+0
+runc
+pid=1
+         0      65534          1
+touch: /x: Read-only file system
+touch=1
+status 0
+
+== container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress jq 2>/dev/null; bb cp /disk/runc /disk/a/usr/bin/runc && bb cp /disk/ocipull.sh /disk/a/ocipull.sh && bb mkdir -p /disk/a/pull && bb chown 65534:65534 /disk/a/pull && bb chroot /disk/a /bin/su -s /bin/sh nobody -c 'OCI_HTTP=1 sh /ocipull.sh -r 10.0.2.2:HOSTPORT/secure/alpine:latest /pull/b' 2>/dev/null | bb sed 's#10.0.2.2:[0-9]*#REGISTRY#'; bb ls /disk/a/pull/b/rootfs/etc/ocilayer /disk/a/pull/b/rootfs/etc/motd 2>&1 | bb sed 's#.*pull/b/rootfs#rootfs#'
+REGISTRY/secure/alpine:latest: 2 layers in /pull/b
+rootfs/etc/motd: No such file or directory
+rootfs/etc/ocilayer
+
+== container: the image's command, environment and working directory run rootless from the bundle
+$ bb mkdir -p /run/ru && bb chown -R 65534:65534 /run/ru /disk/a/pull && bb su -s /bin/ash nobody -c 'cd /disk/a/pull/b && /disk/runc --root /run/ru run c4 < /dev/null; echo status $?'; bb chroot /disk/a /sbin/apk del -q --no-progress jq oniguruma 2>/dev/null; bb rm -rf /disk/a/pull /disk/a/usr/bin/runc /disk/a/ocipull.sh
+from-image bar
+0
+runc
+two
+status 0
