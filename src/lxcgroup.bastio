@@ -35,7 +35,17 @@
 // process running charges 10 ms to its group and those above it, and a group
 // that has used its quota in the current period is not scheduled until the
 // period ends; cpu.stat counts usage_usec, nr_periods and nr_throttled.
-// cpu.weight is kept and read back only.
+// cpu.weight shares the processors between sibling groups that have processes
+// to run, in proportion to their weights (cg_weigh): each tick charges the
+// running process's group (and those above it) CG_TICK_US scaled by
+// 100 / weight, and a group whose charge is more than CG_LAG_US ahead of the
+// least charged runnable sibling is not scheduled until the others catch up;
+// a group that was not runnable starts level with the least charged one.
+//
+// memory.max is enforced in the same tick (cg_oom_tick): memory.current is the
+// pages mapped in the group's address spaces, and a group over its limit loses
+// the process with the most of them to SIGKILL (cg_oom); memory.events counts
+// it. Mapping and forking are not refused for the limit.
 //
 // Not done: the "no internal processes" rule.
 
@@ -142,7 +152,7 @@ fn cg_held(k: &Kernel, q: u64) -> bool
   if pget(k.procs, q, F_SIGPEND) & sbit(9) != 0 {
     return false;
   }
-  return cg_frozen(k, cg_of(k, q)) || cg_throttled(k, cg_of(k, q));
+  return cg_frozen(k, cg_of(k, q)) || cg_throttled(k, cg_of(k, q)) || cg_wheld(k, cg_of(k, q));
 }
 
 /// Is cgroup s, or one above it, out of its cpu.max quota for the period?
@@ -168,6 +178,161 @@ fn cg_throttled(k: &Kernel, s: u64) -> bool
 
 const CG_TICK_US: u64 = 10000;             // one timer tick, in microseconds
 
+const CG_LAG_US: u64 = 20000;              // how far ahead (in weighted microseconds) a group may run
+
+/// cpu.weight of cgroup c (100 if it was never set).
+fn cg_weight(k: &Kernel, c: u64) -> u64
+  requires kok(k) && c < CG_N
+  ensures 1 <= result && result <= 10000
+{
+  let w = cg_get(k, c, CGW_WEIGHT);
+  if w < 1 || w > 10000 {
+    return 100;
+  }
+  return w;
+}
+
+/// Is cgroup s, or one above it, held back by cpu.weight for now?
+fn cg_wheld(k: &Kernel, s: u64) -> bool
+  requires kok(k) && s < CG_N
+{
+  let mut c = s;
+  let mut i = 0;
+  while i < CG_N
+    invariant i <= CG_N && c < CG_N && kok(k)
+  {
+    if cg_get(k, c, CGW_WST) % 2 == 1 {
+      return true;
+    }
+    if c == 0 {
+      return false;
+    }
+    c = cg_parent(k, c);
+    i = i + 1;
+  }
+  return false;
+}
+
+/// Weighs the sibling groups against each other (see the comment at the top
+/// of the file): marks the groups that have a process to run, and holds back
+/// each one that has had more than its share. Nothing is held while every
+/// group has the default weight.
+fn cg_weigh(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut on = false;
+  let mut c = 1;
+  while c < CG_N
+    invariant 1 <= c && c <= CG_N && kok(k)
+  {
+    let w = cg_get(k, c, CGW_WEIGHT);
+    if cg_used(k, c) && w != 0 && w != 100 {
+      on = true;
+    }
+    c = c + 1;
+  }
+  if !on {
+    c = 0;
+    while c < CG_N
+      invariant c <= CG_N && kok(k)
+    {
+      cg_put(&mut k, c, CGW_WST, 0);
+      c = c + 1;
+    }
+    return;
+  }
+  // Which groups have a process that could run: not asleep in a system
+  // call, not frozen or out of cpu.max quota.
+  c = 0;
+  while c < CG_N
+    invariant c <= CG_N && kok(k)
+  {
+    cg_put(&mut k, c, CGW_WST, cg_get(k, c, CGW_WST) % 4);
+    c = c + 1;
+  }
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && kok(k)
+  {
+    if (state(k.procs, q) == READY || state(k.procs, q) == RUNNING) && pget(k.procs, q, F_RESTART) == 0 {
+      let g = cg_of(k, q);
+      if !cg_frozen(k, g) && !cg_throttled(k, g) {
+        let mut a = g;
+        let mut i = 0;
+        while i < CG_N
+          invariant i <= CG_N && a < CG_N && kok(k)
+        {
+          let st = cg_get(k, a, CGW_WST);
+          if st / 4 % 2 == 0 {
+            cg_put(&mut k, a, CGW_WST, st + 4);
+          }
+          if a == 0 {
+            i = CG_N;
+          } else {
+            a = cg_parent(k, a);
+            i = i + 1;
+          }
+        }
+      }
+    }
+    q = q + 1;
+  }
+  // A group that has just become runnable starts level with the least
+  // charged runnable sibling, so that it cannot hold the others back for
+  // the time it slept.
+  c = 1;
+  while c < CG_N
+    invariant 1 <= c && c <= CG_N && kok(k)
+  {
+    let st = cg_get(k, c, CGW_WST);
+    if cg_used(k, c) && st / 4 % 2 == 1 && st / 2 % 2 == 0 {
+      let mut m = CG_BIG;
+      let mut b = 1;
+      while b < CG_N
+        invariant 1 <= b && b <= CG_N && m <= CG_BIG && kok(k)
+      {
+        if b != c && cg_used(k, b) && cg_parent(k, b) == cg_parent(k, c) && cg_get(k, b, CGW_WST) / 2 % 2 == 1 {
+          m = smaller(m, cg_get(k, b, CGW_VRUN));
+        }
+        b = b + 1;
+      }
+      if m < CG_BIG && cg_get(k, c, CGW_VRUN) < m {
+        cg_put(&mut k, c, CGW_VRUN, m);
+      }
+    }
+    c = c + 1;
+  }
+  c = 1;
+  while c < CG_N
+    invariant 1 <= c && c <= CG_N && kok(k)
+  {
+    let st = cg_get(k, c, CGW_WST);
+    let run = st / 4 % 2;
+    let mut held = 0;
+    if cg_used(k, c) && run == 1 {
+      let mut m = CG_BIG;
+      let mut b = 1;
+      while b < CG_N
+        invariant 1 <= b && b <= CG_N && m <= CG_BIG && kok(k)
+      {
+        if cg_used(k, b) && cg_parent(k, b) == cg_parent(k, c) && cg_get(k, b, CGW_WST) / 4 % 2 == 1 {
+          m = smaller(m, cg_get(k, b, CGW_VRUN));
+        }
+        b = b + 1;
+      }
+      let mine = cg_get(k, c, CGW_VRUN);
+      if m < CG_BIG && mine > m {
+        if mine - m > CG_LAG_US {
+          held = 1;
+        }
+      }
+    }
+    cg_put(&mut k, c, CGW_WST, held + run * 6);
+    c = c + 1;
+  }
+}
+
 /// A timer tick found process p running: every group with a cpu.max whose
 /// period has ended starts a new one (counting it, and whether it ran out
 /// of quota), and the tick is charged to p's group and those above it; a
@@ -177,6 +342,7 @@ fn cg_cpu_tick(k: &mut Kernel, p: u64)
   requires kok(k) && p < NPROC
   ensures kok(k)
 {
+  cg_weigh(&mut k);
   let now = k.ns;
   let mut c = 0;
   while c < CG_N
@@ -210,6 +376,7 @@ fn cg_cpu_tick(k: &mut Kernel, p: u64)
     invariant i <= CG_N && g < CG_N && kok(k)
   {
     cg_put(&mut k, g, CGW_USEC, sat_add(cg_get(k, g, CGW_USEC), CG_TICK_US));
+    cg_put(&mut k, g, CGW_VRUN, sat_add(cg_get(k, g, CGW_VRUN), CG_TICK_US * 100 / cg_weight(k, g)));
     let q = cg_get(k, g, CGW_CPUQ);
     if q != 0 {
       let u = sat_add(cg_get(k, g, CGW_CPUU), CG_TICK_US);
@@ -293,7 +460,15 @@ fn cg_descendants(k: &Kernel, s: u64) -> u64
 fn cg_fork_ok(k: &Kernel, pid: u64) -> bool
   requires kok(k) && pid < NPROC
 {
-  let mut c = cg_of(k, pid);
+  return cg_room(k, cg_of(k, pid));
+}
+
+/// Whether cgroup s could take one more task: neither it nor a group
+/// above it is at its pids.max.
+fn cg_room(k: &Kernel, s: u64) -> bool
+  requires kok(k) && s < CG_N
+{
+  let mut c = s;
   let mut i = 0;
   while i < CG_N
     invariant i <= CG_N && c < CG_N && kok(k)
@@ -718,7 +893,13 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
     return put_c(&mut o, a, 10);
   }
   if f == 12 {
-    return put_s(&mut o, 0, "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n");
+    let mut a = put_s(&mut o, 0, "low 0\nhigh 0\nmax ");
+    a = put_n(&mut o, a, cg_get(k, s, CGW_MAXE));
+    a = put_s(&mut o, a, "\noom ");
+    a = put_n(&mut o, a, cg_get(k, s, CGW_MAXE));
+    a = put_s(&mut o, a, "\noom_kill ");
+    a = put_n(&mut o, a, cg_get(k, s, CGW_OOMK));
+    return put_c(&mut o, a, 10);
   }
   if f == 13 {
     let q = cg_get(k, s, CGW_CPUQ);
@@ -768,10 +949,26 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
   return 0;                                 // cgroup.kill is write-only
 }
 
+/// The pages mapped in the address space of row q, or 0 when they cannot
+/// be counted now (another processor runs the space).
+fn cg_resident(k: &mut Kernel, q: u64) -> u64
+  requires kok(k) && q < NPROC
+  ensures kok(k) && result <= WPAGES
+{
+  if !has_space(&mut k.spaces, q) {
+    return 0;
+  }
+  let c = win_op(&mut k.mem, &mut k.spaces, q, WOP_COUNT, 0, WPAGES, 0);
+  if c > WPAGES {
+    return 0;
+  }
+  return c;
+}
+
 /// memory.current of cgroup s: the bytes of memory the processes in it and
 /// below it have, counting each address space once and every page it has
-/// mapped or recorded as anonymous (anon_count), not the page cache or the
-/// kernel's own memory.
+/// mapped (what is resident: a mapping nobody has touched is not counted),
+/// not the page cache or the kernel's own memory.
 fn cg_mem_current(k: &mut Kernel, s: u64) -> u64
   requires kok(k) && s < CG_N
   ensures kok(k) && result <= 0x100000000000000
@@ -781,84 +978,100 @@ fn cg_mem_current(k: &mut Kernel, s: u64) -> u64
   while q < NPROC
     invariant 1 <= q && q <= NPROC && pages <= (q - 1) * WPAGES && kok(k)
   {
-    if cg_live(k, q) && tgid(k.procs, q) == q && cg_in(k, cg_of(k, q), s) && has_space(&mut k.spaces, q) {
-      let c = anon_count(&mut k, q, 0, WPAGES);
-      if c <= WPAGES {
-        pages = pages + c;
-      }
+    if cg_live(k, q) && tgid(k.procs, q) == q && cg_in(k, cg_of(k, q), s) {
+      pages = pages + cg_resident(&mut k, q);
     }
     q = q + 1;
   }
   return pages * 4096;
 }
 
-/// Could process pid have `extra` more pages (a mapping, a growing break, a
-/// forked copy) without a memory.max, its own group's or one above it,
-/// being passed? Nothing is counted for a group with no limit, and `extra`
-/// is not looked at either: a fork's page count (anon_count) is WPAGES + 1
-/// while another processor holds a lease on the space, and that must not
-/// fail a fork in a group nobody limited.
-fn cg_mem_ok(k: &mut Kernel, pid: u64, extra: u64) -> bool
-  requires kok(k) && pid < NPROC
-  ensures kok(k)
+/// Has a task of cgroup s or below a SIGKILL it has not yet died of?
+fn cg_dying(k: &Kernel, s: u64) -> bool
+  requires kok(k) && s < CG_N
 {
-  let mut c = cg_of(k, pid);
-  let mut i = 0;
-  while i < CG_N
-    invariant i <= CG_N && c < CG_N && kok(k)
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && kok(k)
   {
-    let lim = cg_get(k, c, CGW_MEM);
-    if lim != 0 && lim <= 0x100000000000000 {
-      if extra > WPAGES {
-        return false;
-      }
-      if cg_mem_current(&mut k, c) + extra * 4096 > lim - 1 {
-        return false;
-      }
-    }
-    if c == 0 {
+    if cg_live(k, q) && cg_in(k, cg_of(k, q), s) && pget(k.procs, q, F_SIGPEND) & sbit(SIGKILL) != 0 {
       return true;
     }
-    c = cg_parent(k, c);
-    i = i + 1;
-  }
-  return true;
-}
-
-/// Is there a memory.max on pid's group or one above it?
-fn cg_mem_limited(k: &Kernel, pid: u64) -> bool
-  requires kok(k) && pid < NPROC
-{
-  let mut c = cg_of(k, pid);
-  let mut i = 0;
-  while i < CG_N
-    invariant i <= CG_N && c < CG_N && kok(k)
-  {
-    let lim = cg_get(k, c, CGW_MEM);
-    if lim != 0 && lim <= 0x100000000000000 {
-      return true;
-    }
-    if c == 0 {
-      return false;
-    }
-    c = cg_parent(k, c);
-    i = i + 1;
+    q = q + 1;
   }
   return false;
 }
 
-/// Could process pid fork: its address space copied into the same group?
-fn cg_fork_mem_ok(k: &mut Kernel, pid: u64) -> bool
-  requires kok(k) && pid < NPROC
+/// cgroup s, or one below it, has passed its memory.max: the process with
+/// the most pages in it is killed with all its threads (SIGKILL), as the
+/// out-of-memory killer does after reclaim finds nothing to free. There is
+/// no reclaim here. memory.events counts the event and the kill.
+fn cg_oom(k: &mut Kernel, s: u64)
+  requires kok(k) && s < CG_N
   ensures kok(k)
 {
-  // Counting the parent's pages walks its whole window: do it only when a
-  // memory.max could be passed (most forks are in a group nobody limited).
-  if !cg_mem_limited(k, pid) {
-    return true;
+  if cg_dying(k, s) {
+    return;                                 // the memory of the last victim is not back yet
   }
-  let own = anon_count(&mut k, pid, 0, WPAGES);
-  return cg_mem_ok(&mut k, pid, own);
+  let mut v = 0;
+  let mut best = 0;
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && v < NPROC && kok(k)
+  {
+    if cg_live(k, q) && tgid(k.procs, q) == q && cg_in(k, cg_of(k, q), s) {
+      let r = cg_resident(&mut k, q);
+      if r > best {
+        best = r;
+        v = q;
+      }
+    }
+    q = q + 1;
+  }
+  if v == 0 {
+    return;
+  }
+  cg_put(&mut k, s, CGW_MAXE, sat_add(cg_get(k, s, CGW_MAXE), 1));
+  cg_put(&mut k, s, CGW_OOMK, sat_add(cg_get(k, s, CGW_OOMK), 1));
+  let mut r = 1;
+  while r < NPROC
+    invariant 1 <= r && r <= NPROC && kok(k)
+  {
+    if cg_live(k, r) && (r == v || in_group(k.procs, r, v)) {
+      post_sig(&mut k, r, 9);
+    }
+    r = r + 1;
+  }
+}
+
+/// A timer tick found process p running: if its group or one above it has
+/// more memory than its memory.max, the out-of-memory killer runs there.
+/// This is where memory.max is enforced: memory is counted when it is
+/// resident, so a program that maps more than it uses is not touched, and
+/// one that goes on touching what it mapped is killed within a few ticks.
+fn cg_oom_tick(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  if p == 0 {
+    return;
+  }
+  let mut c = cg_of(k, p);
+  let mut i = 0;
+  while i < CG_N
+    invariant i <= CG_N && c < CG_N && kok(k)
+  {
+    let lim = cg_get(k, c, CGW_MEM);
+    if lim != 0 && lim <= 0x100000000000000 && cg_mem_current(&mut k, c) > lim - 1 {
+      cg_oom(&mut k, c);
+      return;
+    }
+    if c == 0 {
+      return;
+    }
+    c = cg_parent(k, c);
+    i = i + 1;
+  }
 }
 
 /// The root of process pid's cgroup namespace: the group it was in when it
@@ -1454,6 +1667,10 @@ fn cg_mkdir(k: &mut Kernel, pid: u64, n: u64) -> u64
   cg_put(&mut k, free, CGW_NPER, 0);
   cg_put(&mut k, free, CGW_NTHR, 0);
   cg_put(&mut k, free, CGW_THR, 0);
+  cg_put(&mut k, free, CGW_MAXE, 0);
+  cg_put(&mut k, free, CGW_VRUN, 0);
+  cg_put(&mut k, free, CGW_WST, 0);
+  cg_put(&mut k, free, CGW_OOMK, 0);
   cg_put(&mut k, free, CGW_USED, 1);
   return 0;
 }
@@ -1481,4 +1698,169 @@ fn cg_rmdir(k: &mut Kernel, pid: u64, n: u64) -> u64
   }
   cg_put(&mut k, r.slot, CGW_USED, 0);
   return 0;
+}
+
+// ---------------------------------------------------------------- clone3
+
+const CLONE_INTO_CGROUP: u64 = 0x200000000;   // clone3 only
+const CLONE_PIDFD_FLAG: u64 = 0x1000;
+const CLONE_ARGS_V0: u64 = 64;                // struct clone_args up to child_tid..tls
+const CLONE_ARGS_V2: u64 = 88;                // ... through cgroup
+
+/// What lx_clone3_cg did: r is the child's id or -errno, wait is true if the
+/// caller must give way until a vfork child lets go.
+struct Clone3Cg { r: u64, wait: bool }
+
+/// The u64 at byte off of the clone_args at user address va, 0 beyond size.
+fn c3_field(k: &mut Kernel, pid: u64, va: u64, size: u64, off: u64) -> Word
+  requires kok(k) && pid < NPROC && off <= CLONE_ARGS_V2 && va < 0x800000000000
+  ensures kok(k)
+{
+  if off + 8 > size {
+    return Word { ok: true, v: 0 };
+  }
+  return user_u64(&mut k.spaces, pid, va + off);
+}
+
+/// clone3(args, size) with CLONE_INTO_CGROUP (the other clone3 calls go through
+/// lx_clone3_read in src/lxthread.bastio): clone with the arguments in a struct. The
+/// flags are the ones clone takes (the exit signal is a field of its own),
+/// the stack is given as its lowest address and size, and CLONE_INTO_CGROUP
+/// puts the child in the cgroup that descriptor `cgroup` is a directory of,
+/// as if it had been written to that group's cgroup.procs, but with the
+/// group's pids.max checked first, so nothing is made that cannot stay.
+/// CLONE_PIDFD and set_tid are not supported (EINVAL).
+fn lx_clone3_cg(k: &mut Kernel, mmu: &Mmu, pid: u64, va: u64, size: u64) -> Clone3Cg
+  requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k)
+{
+  if size < CLONE_ARGS_V0 || size > 4096 {
+    return Clone3Cg { r: EINVAL, wait: false };
+  }
+  if va >= 0x800000000000 {
+    return Clone3Cg { r: EFAULT, wait: false };
+  }
+  if size > CLONE_ARGS_V2 {
+    // A structure from a newer kernel: its extra words must be readable and zero.
+    let tail = user_u64(&mut k.spaces, pid, va + size - 8);
+    if !tail.ok {
+      return Clone3Cg { r: EFAULT, wait: false };
+    }
+    if tail.v != 0 {
+      return Clone3Cg { r: E2BIG, wait: false };
+    }
+  }
+  let fl = c3_field(&mut k, pid, va, size, 0);
+  let ctid = c3_field(&mut k, pid, va, size, 16);
+  let ptid = c3_field(&mut k, pid, va, size, 24);
+  let sig = c3_field(&mut k, pid, va, size, 32);
+  let stack = c3_field(&mut k, pid, va, size, 40);
+  let ssz = c3_field(&mut k, pid, va, size, 48);
+  let tls = c3_field(&mut k, pid, va, size, 56);
+  let tidn = c3_field(&mut k, pid, va, size, 72);
+  let cgfd = c3_field(&mut k, pid, va, size, 80);
+  if !fl.ok || !ctid.ok || !ptid.ok || !sig.ok || !stack.ok || !ssz.ok || !tls.ok || !tidn.ok || !cgfd.ok {
+    return Clone3Cg { r: EFAULT, wait: false };
+  }
+  let into = fl.v & CLONE_INTO_CGROUP != 0;
+  let flags = fl.v % 0x100000000;
+  if fl.v >= 0x400000000 || fl.v / 0x100000000 % 2 == 1 || flags & 0xff != 0 || flags & CLONE_DETACHED != 0 {
+    return Clone3Cg { r: EINVAL, wait: false };
+  }
+  if flags & CLONE_PIDFD_FLAG != 0 {
+    // Not supported; a bad address for the descriptor is still told first.
+    let pf = c3_field(&mut k, pid, va, size, 8);
+    if !pf.ok {
+      return Clone3Cg { r: EFAULT, wait: false };
+    }
+    if pf.v != 0 {
+      let pw = user_u64(&mut k.spaces, pid, pf.v);
+      if !pw.ok {
+        return Clone3Cg { r: EFAULT, wait: false };
+      }
+    }
+    return Clone3Cg { r: EINVAL, wait: false };
+  }
+  if (flags & CLONE_SIGHAND != 0 && flags & CLONE_VM == 0) || (flags & CLONE_THREAD != 0 && flags & CLONE_SIGHAND == 0)
+     || (flags & CLONE_FS != 0 && flags & (CLONE_NEWNS + CLONE_NEWUSER) != 0) {
+    return Clone3Cg { r: EINVAL, wait: false };
+  }
+  if sig.v > 64 || tidn.v != 0 || stack.v >= 0x800000000000 || ssz.v >= 0x800000000000 {
+    return Clone3Cg { r: EINVAL, wait: false };
+  }
+  if (stack.v == 0) != (ssz.v == 0) {
+    return Clone3Cg { r: EINVAL, wait: false };
+  }
+  let thread = flags & CLONE_THREAD != 0;
+  if thread && (sig.v != 0 || into) {
+    return Clone3Cg { r: EINVAL, wait: false };
+  }
+  if flags & CLONE_VFORK != 0 && flags & CLONE_VM == 0 {
+    return Clone3Cg { r: EINVAL, wait: false };
+  }
+  if !into && cgfd.v != 0 {
+    return Clone3Cg { r: EINVAL, wait: false };
+  }
+  // The target group.
+  let mut dest = 0;
+  if into {
+    if cgfd.v >= 0x80000000 {
+      return Clone3Cg { r: EINVAL, wait: false };
+    }
+    let d = fd_look(k, pid, cgfd.v);
+    if d.kind == K_BAD {
+      return Clone3Cg { r: EBADF, wait: false };
+    }
+    if d.kind != K_DIR || d.x < DIR_CG || d.x - DIR_CG >= CG_N {
+      return Clone3Cg { r: EBADF, wait: false };
+    }
+    dest = d.x - DIR_CG;
+    if !cg_used(k, dest) || !cg_in(k, dest, cgns_root(k, pid)) {
+      return Clone3Cg { r: ENOENT, wait: false };    // gone, or outside the caller's cgroup namespace
+    }
+    if fs_id(k.procs, pid, false) != 0 {
+      return Clone3Cg { r: EACCES, wait: false };
+    }
+    if !cg_room(k, dest) {
+      return Clone3Cg { r: EAGAIN, wait: false };
+    }
+  }
+  let mut sp = 0;
+  if stack.v != 0 {
+    sp = stack.v + ssz.v;
+  }
+  let cflags = flags + sig.v;
+  if thread {
+    let r = lx_thread_clone(&mut k, pid, cflags, sp, ptid.v, ctid.v, tls.v);
+    if r < NPROC {
+      pt_fork_event(&mut k, pid, r, 3);
+    }
+    return Clone3Cg { r: child_id(k, pid, r), wait: false };
+  }
+  if flags & CLONE_VM != 0 && flags & CLONE_VFORK != 0 {
+    let r = lx_vfork_vm(&mut k, mmu, pid, sp);
+    if r >= NPROC {
+      return Clone3Cg { r: r, wait: false };
+    }
+    if into {
+      cg_move(&mut k, r, dest);
+    }
+    pt_fork_event(&mut k, pid, r, 2);
+    return Clone3Cg { r: r, wait: true };
+  }
+  if !clone_proc_flags(cflags) {
+    return Clone3Cg { r: EINVAL, wait: false };
+  }
+  let r = lx_clone_proc(&mut k, mmu, pid, cflags, sp, ptid.v, ctid.v, tls.v);
+  if r < NPROC {
+    if into {
+      cg_move(&mut k, r, dest);
+    }
+    let mut kind = 3;
+    if sig.v == 17 && flags == 0 {
+      kind = 1;
+    }
+    pt_fork_event(&mut k, pid, r, kind);
+  }
+  return Clone3Cg { r: child_id(k, pid, r), wait: false };
 }
