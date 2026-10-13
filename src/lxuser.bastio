@@ -218,6 +218,15 @@ fn id_in(k: &Kernel, pid: u64, g: u64, x: u64) -> u64
   return um_out(k, s, g, v);
 }
 
+/// Whether process pid is the root of a user namespace other than the first:
+/// its effective user is mapped to 0 there.
+fn ns_root(k: &Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let s = usr_slot_of(k, pid);
+  return s < USR_N && um_in(k, s, 0, id_get(k.procs, pid, F_UID, true)) == 0;
+}
+
 /// Whether process pid holds capability c in its user namespace: it has it
 /// outright (root), or it is in a namespace where its effective user is
 /// mapped to 0 and has not dropped it.
@@ -456,34 +465,43 @@ fn um_map_write(k: &mut Kernel, pid: u64, t: u64, g: u64, va: u64, n: u64) -> u6
   if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, n) != n {
     return EFAULT;
   }
+  let mut m = n;
+  while m > 0 && bget(k.fs.xfer, m - 1) == 0
+    invariant m <= n && n <= 512
+  {
+    m = m - 1;                              // as on Linux, the text ends at a NUL (runc's length counts one)
+  }
+  if m == 0 {
+    return EINVAL;
+  }
   let mut at = 0;
   let mut cnt = 0;
   let mut single = true;                    // one extent of one id: what anyone may write
-  while at < n && cnt < UM_N
-    invariant at <= n && n <= 512 && cnt <= UM_N && s < USR_N && g < 2 && kok(k)
+  while at < m && cnt < UM_N
+    invariant at <= m && m <= 512 && cnt <= UM_N && s < USR_N && g < 2 && kok(k)
   {
-    let a = num_at(k.fs.xfer, at, n);
+    let a = num_at(k.fs.xfer, at, m);
     if !a.ok {
       return EINVAL;
     }
-    let b = num_at(k.fs.xfer, a.at, n);
+    let b = num_at(k.fs.xfer, a.at, m);
     if !b.ok {
       return EINVAL;
     }
-    let c = num_at(k.fs.xfer, b.at, n);
+    let c = num_at(k.fs.xfer, b.at, m);
     if !c.ok || c.v == 0 || a.v + c.v >= UM_BAD || b.v + c.v >= UM_BAD {
       return EINVAL;
     }
     let mut e = c.at;
-    while e < n && (bget(k.fs.xfer, e) == 32 || bget(k.fs.xfer, e) == 9)
-      invariant c.at <= e && e <= n && n <= 512
+    while e < m && (bget(k.fs.xfer, e) == 32 || bget(k.fs.xfer, e) == 9)
+      invariant c.at <= e && e <= m && m <= 512
     {
       e = e + 1;
     }
-    if e < n && bget(k.fs.xfer, e) != 10 {
+    if e < m && bget(k.fs.xfer, e) != 10 {
       return EINVAL;
     }
-    if e < n {
+    if e < m {
       e = e + 1;
     }
     usr_put(&mut k, s, um_w(g, cnt, 0), a.v);
@@ -498,7 +516,7 @@ fn um_map_write(k: &mut Kernel, pid: u64, t: u64, g: u64, va: u64, n: u64) -> u6
     cnt = cnt + 1;
     at = e;
   }
-  if cnt == 0 || at < n {
+  if cnt == 0 || at < m {
     return EINVAL;                          // nothing, or more extents than UM_N
   }
   if !cred_root(k.procs, pid) {

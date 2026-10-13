@@ -394,6 +394,11 @@ steps = [
     # and a file she makes is hers outside. Without a map she is 65534.
     ("su alice -c 'unshare -U -r sh -c \"id -u; id -g; ls -ln /etc/shadow; cat /etc/shadow; echo s=\\$?; touch /home/alice/f; ls -ln /home/alice/f; cat /proc/self/uid_map /proc/self/setgroups\"; ls -ln /home/alice/f; unshare -U id -u; unshare -U -r -u sh -c \"hostname box; hostname\"; unshare -U -r unshare -U true; echo n=$?'",
      [b"\r\n0\r\n0\r\n", b"65534    65534", b"Permission denied", b"s=1", b"0        0", b"         0       1000          1\r\ndeny", b"1000     1000", b"\r\n65534\r\nbox\r\n", b"n=1"], b"\n# "),
+    # The root of a user namespace mounts in a mount namespace of its own,
+    # and only there: a tmpfs it mounts is gone with the namespace, and a
+    # user without a mount namespace of its own (or without any) mounts nothing.
+    ("su alice -c 'mkdir -p /tmp/ur; unshare -U -r -m sh -c \"mount -t tmpfs t /tmp/ur && echo own > /tmp/ur/f && cat /tmp/ur/f; ls -ln /tmp/ur/f\"; ls -A /tmp/ur | wc -l; unshare -U -r sh -c \"mount -t tmpfs t /tmp/ur || echo nons\"; mount -t tmpfs t /tmp/ur || echo plain; rmdir /tmp/ur'",
+     [b"\r\nown\r\n", b"0        0", b"\r\n0\r\n", b"nons", b"plain"], b"\n# "),
     # Control groups (src/lxcgroup.bastio): a group is made with mkdir, a
     # shell moves into it, and pids.max stops the fork that would pass it;
     # cgroup.kill empties a group so that rmdir works, and non-root users may
@@ -406,6 +411,11 @@ steps = [
     # thawed; SIGKILL still ends a frozen process.
     ("mkdir /sys/fs/cgroup/fz; ash -c 'echo $$ > /sys/fs/cgroup/fz/cgroup.procs; i=0; while :; do i=$((i+1)); echo $i > /tmp/fzc; done' & sleep 1; echo 1 > /sys/fs/cgroup/fz/cgroup.freeze; cat /sys/fs/cgroup/fz/cgroup.freeze /sys/fs/cgroup/fz/cgroup.events; read a < /tmp/fzc; sleep 2; read b < /tmp/fzc; [ \"$a\" = \"$b\" ] && echo held; echo 0 > /sys/fs/cgroup/fz/cgroup.freeze; sleep 2; read c < /tmp/fzc; [ \"$c\" -gt \"$b\" ] && echo thawed",
      [b"\r\n1\r\npopulated 1\r\nfrozen 1\r\n", b"held", b"thawed"], b"\n# "),
+    # cpu.max: a group that may use 20 ms of every 100 ms is not scheduled for
+    # the rest of each period; cpu.stat counts what it used and the periods it
+    # ran out of quota in.
+    ("mkdir /sys/fs/cgroup/cq; echo +cpu > /sys/fs/cgroup/cgroup.subtree_control; echo '20000 100000' > /sys/fs/cgroup/cq/cpu.max; cat /sys/fs/cgroup/cq/cpu.max; ash -c 'echo $$ > /sys/fs/cgroup/cq/cgroup.procs; while :; do :; done' & sleep 3; while read k v; do case $k in usage_usec) u=$v;; nr_throttled) t=$v;; esac; done < /sys/fs/cgroup/cq/cpu.stat; [ \"$u\" -gt 100000 ] && [ \"$u\" -lt 1000000 ] && [ \"$t\" -gt 5 ] && echo throttled; echo 1 > /sys/fs/cgroup/cq/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/cq; echo r=$?",
+     [b"\r\n20000 100000\r\n", b"throttled", b"r=0"], b"\n# "),
     ("mkdir /sys/fs/cgroup/fk; ash -c 'echo $$ > /sys/fs/cgroup/fk/cgroup.procs; sleep 100' & sleep 1; echo 1 > /sys/fs/cgroup/fk/cgroup.freeze; echo 1 > /sys/fs/cgroup/fk/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/fk; echo r=$?; echo 1 > /sys/fs/cgroup/fz/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/fz; echo z=$?",
      [b"r=0", b"z=0"], b"\n# "),
     ("echo root:pw | chpasswd; read l < /etc/shadow; case $l in 'root:$6$'*) echo sha512;; esac; su alice -c 'echo no | su -c id root; echo w=$?; echo pw | su -c id root'",
