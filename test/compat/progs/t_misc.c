@@ -180,5 +180,14 @@ int main(void) {
         if (c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0) pass();
         else fail("status %#x", st);
     }
+#ifdef __aarch64__
+    /* The Go runtime reads ID_AA64ISAR0_EL1 when it starts; Linux emulates
+     * the read (HWCAP_CPUID) instead of killing the program. */
+    EXPECT("an EL0 read of ID_AA64ISAR0_EL1 is emulated", ({
+        unsigned long v = 123;
+        __asm__ volatile("mrs %0, ID_AA64ISAR0_EL1" : "=r"(v));
+        v == 0;
+    }));
+#endif
     return done();
 }

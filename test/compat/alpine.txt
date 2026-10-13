@@ -255,7 +255,7 @@ kept sh1.txt
 
 
 == container: runc runs Alpine in new namespaces (own hostname, PID 1)
-$ mkdir -p /disk/b /run/runc && cd /disk/b && /disk/runc spec && bb sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"sh"#"/bin/sh", "-c", "hostname; echo pid=$$; cat /proc/self/cgroup; exec ps"#' config.json && /disk/runc --root /run/runc run c1 < /dev/null; echo status $?
+$ mkdir -p /disk/b /run/runc && cd /disk/b && /disk/runc spec && bb sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"sh"#"/bin/sh", "-c", "hostname; echo pid=$$; cat /proc/self/cgroup; exec ps"#' config.json && ( /disk/runc --root /run/runc run c1 < /dev/null; echo status $? ) | bb sed 's/ 0:0[0-9] / 0:00 /'
 runc
 pid=1
 0::/

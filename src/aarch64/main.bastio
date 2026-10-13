@@ -371,6 +371,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       return p;                             // code read, a page mapped or copied, or the stack grew: run the instruction again
     }
   }
+  if v == 6 && emulate_idreg(&mut s.k, p) {
+    return p;
+  }
   // Any other trap, or an abort nothing could mend: the process dies of the
   // signal Linux would send (a SIGSEGV), unless it has a handler.
   let mut sig = SIGSEGV;
@@ -419,6 +422,36 @@ fn write_raced(k: &mut Kernel, p: u64) -> bool
     return false;
   }
   return user_page_writable(&mut k.spaces, p, pget(k.procs, p, reg_word(R_FAULT)));
+}
+
+/// An EL0 read of an identification register (MIDR_EL1, ID_AA64ISAR0_EL1,
+/// ...: op0 3, op1 0, CRn 0, CRm 0 to 7), which the processor reports as an
+/// unknown instruction. Linux emulates these (HWCAP_CPUID), and the Go
+/// runtime reads ID_AA64ISAR0_EL1 when it starts. Every register reads as
+/// zero here, which says no optional feature exists, so a program falls
+/// back to the baseline instructions. Returns true if the instruction at the
+/// program counter was one, and has been stepped over.
+fn emulate_idreg(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  if (pget(k.procs, p, reg_word(34)) >> 26) != 0 {
+    return false;                           // only the unknown-reason class
+  }
+  let pc = pget(k.procs, p, reg_word(R_PC));
+  if pc % 4 != 0 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, pc, &mut k.fs.xfer, 4) != 4 {
+    return false;
+  }
+  let w = get_u64(k.fs.xfer, 0) % 0x100000000;
+  if (w >> 12) != 0xd5380 || ((w >> 8) % 16) > 7 {
+    return false;
+  }
+  let rt = w % 32;
+  if rt < 31 {
+    pset(&mut k.procs, p, reg_word(rt), 0);
+  }
+  pset(&mut k.procs, p, reg_word(R_PC), wrap_add(pc, 4));
+  return true;
 }
 
 // What a trap's handling can leave behind: see after_trap in src/main.bastio.
