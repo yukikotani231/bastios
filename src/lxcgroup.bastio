@@ -1048,7 +1048,7 @@ fn cg_oom(k: &mut Kernel, s: u64)
 /// more memory than its memory.max, the out-of-memory killer runs there.
 /// This is where memory.max is enforced: memory is counted when it is
 /// resident, so a program that maps more than it uses is not touched, and
-/// one that goes on touching what it mapped is killed within a tick.
+/// one that goes on touching what it mapped is killed within a few ticks.
 fn cg_oom_tick(k: &mut Kernel, p: u64)
   requires kok(k) && p < NPROC
   ensures kok(k)

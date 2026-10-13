@@ -629,7 +629,10 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       s.k.sys = set(s.k.sys, SYS_BUSY, tick(get(s.k.sys, SYS_BUSY)));
       cpu_timers_tick(&mut s.k, p);
       cg_cpu_tick(&mut s.k, p);
-      cg_oom_tick(&mut s.k, p);
+      // Counting resident pages walks a space, so it is done every 16th tick.
+      if s.k.ticks % 16 == 0 {
+        cg_oom_tick(&mut s.k, p);
+      }
     }
     s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
     lx_alarms(&mut s.k);
