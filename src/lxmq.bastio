@@ -52,6 +52,7 @@ const PQ_DEF_MAX: u64 = 10;            // msg_default, and msg_max for all but r
 const PQ_DEF_SIZE: u64 = 8192;         // msgsize_default and msgsize_max
 const PQ_ATTR: u64 = 64;               // struct mq_attr: flags, maxmsg, msgsize, curmsgs, 4 reserved
 const SIGEV_THREAD: u64 = 2;
+const PQ_THREAD: u64 = 4096;           // PW_NSIG of a SIGEV_THREAD registration: this + the socket's slot
 
 fn pq_at(q: u64, w: u64) -> u64
   requires q < PQ_N && w < PQ_W
@@ -428,6 +429,11 @@ fn pq_notify_fire(k: &mut Kernel, pid: u64, q: u64)
   let np = pq_get(k, q, PW_NPID);
   let s = pq_get(k, q, PW_NSIG);
   pq_set(&mut k, q, PW_NPID, 0);
+  if np != 0 && s >= PQ_THREAD && s < PQ_THREAD + NLS {
+    // SIGEV_THREAD: musl's helper thread waits on a netlink socket.
+    nic_nl_wake(&mut k.nic, s - PQ_THREAD, 1);
+    return;
+  }
   if np < 2 || np > NPROC || s == 0 || s > NSIG || state(k.procs, np - 1) == FREE {
     return;
   }
@@ -567,8 +573,9 @@ fn lx_mq_receive(k: &mut Kernel, pid: u64, was: u64, fd: u64, va: u64, len: u64,
 
 /// mq_notify(fd, sevp): registers pid for a signal when a message comes
 /// to the empty queue (one process at a time), or with sevp null drops
-/// its registration. SIGEV_THREAD is musl's business: it needs a netlink
-/// socket, which there is not, so it never gets here.
+/// its registration. SIGEV_THREAD is musl's: its helper thread waits on a
+/// netlink socket, and the wake-up is 32 bytes queued there (the cookie's
+/// contents are not kept).
 fn lx_mq_notify(k: &mut Kernel, pid: u64, fd: u64, sev: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -586,8 +593,15 @@ fn lx_mq_notify(k: &mut Kernel, pid: u64, fd: u64, sev: u64) -> u64
     let w = get_u64(k.fs.xfer, 8);
     sig = w % 0x100000000;
     how = w / 0x100000000;
-    if how != SIGEV_NONE && how != SIGEV_SIGNAL {
-      return EINVAL;                        // SIGEV_THREAD needs netlink
+    if how != SIGEV_NONE && how != SIGEV_SIGNAL && how != SIGEV_THREAD {
+      return EINVAL;
+    }
+    if how == SIGEV_THREAD {
+      // musl passes the netlink socket's descriptor in the signo field.
+      if nl_of(k, pid, sig) >= NLS {
+        return EBADF;
+      }
+      sig = PQ_THREAD + nl_of(k, pid, sig);
     }
     if how == SIGEV_SIGNAL && (sig == 0 || sig > NSIG) {
       return EINVAL;
@@ -605,12 +619,16 @@ fn lx_mq_notify(k: &mut Kernel, pid: u64, fd: u64, sev: u64) -> u64
   let np = pq_get(k, q, PW_NPID);
   if sev == 0 {
     if np == me {
+      let s = pq_get(k, q, PW_NSIG);
+      if s >= PQ_THREAD && s < PQ_THREAD + NLS {
+        nic_nl_wake(&mut k.nic, s - PQ_THREAD, 0);   // lets musl's helper thread end
+      }
       pq_set(&mut k, q, PW_NPID, 0);
     }
     return 0;
   }
-  if np != 0 && np != me {
-    return EBUSY;
+  if np != 0 && np <= NPROC && state(k.procs, np - 1) != FREE {
+    return EBUSY;                           // one registration at a time, the owner's own included
   }
   pq_set(&mut k, q, PW_NPID, me);
   if how == SIGEV_NONE {
