@@ -1004,3 +1004,5 @@ apps: ripgrep: a search over many files on several threads
 apps: ripgrep: case-insensitive counts and file lists
 apps: ripgrep: replacement, multi-line and standard input
 apps: ripgrep: search with line numbers, honouring .ignore
+alpine: nvim: tree-sitter parses help text with the vimdoc parser
+alpine: nvim: LuaJIT loads a shared object that gcc built
