@@ -217,3 +217,15 @@ help_file 1 tree
 == nvim: LuaJIT loads a shared object that gcc built
 $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf 'local ffi = require("ffi")\nffi.cdef[[int answer(void);]]\nio.open("/root/so.txt", "w"):write(ffi.load("/root/libso.so").answer(), "\\n")\n' > /disk/a/root/so.lua && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -shared -fPIC -o libso.so so.c && nvim -l so.lua >/dev/null 2>&1'; bb cat /disk/a/root/so.txt
 42
+
+== nvim: vim.system runs a process and collects its output and status
+$ bb printf 'local r = vim.system({"sh", "-c", "echo out; echo err >&2; exit 3"}, {text = true}):wait()\nio.open("/root/sys.txt", "w"):write(r.code, " ", vim.trim(r.stdout), " ", vim.trim(r.stderr), "\\n")\n' > /disk/a/root/sys.lua && bb chroot /disk/a /usr/bin/nvim -l /root/sys.lua >/dev/null 2>&1; bb cat /disk/a/root/sys.txt
+3 out err
+
+== nvim: a job on a pseudo-terminal (what :terminal runs on, with /dev and /dev/pts bound into the chroot)
+$ bb printf 'local out = {}\nlocal id = vim.fn.jobstart({"sh", "-c", "test -t 0 && test -t 1 && echo onatty"}, {pty = true, on_stdout = function(_, d) for _, l in ipairs(d) do out[#out + 1] = l end end})\nlocal st = vim.fn.jobwait({id}, 5000)[1]\nvim.wait(300)\nio.open("/root/pty.txt", "w"):write(st, " ", table.concat(out):find("onatty") and "onatty" or "silent", "\\n")\n' > /disk/a/root/pty.lua && bb mount --bind /dev /disk/a/dev && bb mount --bind /dev/pts /disk/a/dev/pts; bb chroot /disk/a /usr/bin/nvim -l /root/pty.lua >/dev/null 2>&1; bb cat /disk/a/root/pty.txt; bb umount /disk/a/dev/pts; bb umount /disk/a/dev
+0 onatty
+
+== nvim: a file watcher and a timer from libuv
+$ bb mkdir -p /disk/a/root/w && bb printf 'local uv = vim.uv\nlocal got\nlocal h = uv.new_fs_event()\nh:start("/root/w", {}, function(err, f) got = f end)\nlocal t = uv.new_timer()\nt:start(100, 0, function() io.open("/root/w/new", "w"):close() end)\nvim.wait(3000, function() return got ~= nil end)\nio.open("/root/fsw.txt", "w"):write(tostring(got), "\\n")\n' > /disk/a/root/fsw.lua && bb chroot /disk/a /usr/bin/nvim -l /root/fsw.lua >/dev/null 2>&1; bb cat /disk/a/root/fsw.txt; bb rm -r /disk/a/root/w
+new
