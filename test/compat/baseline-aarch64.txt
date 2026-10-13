@@ -25,6 +25,8 @@ alpine: apk: upgrade, with a version constraint on the dependency
 alpine: bash: arrays, brace expansion, here-strings
 alpine: curl: 1 MiB from the host
 alpine: curl: a file from the host
+alpine: dropbear: the server starts, in the Alpine guest
+alpine: dropbear: the server stops, in the Alpine guest
 alpine: file: what a file is (libmagic)
 alpine: gcc: compile and run a C program (gcc, cc1, as and ld are fixed-address executables)
 alpine: git: clone over HTTP and over HTTPS (git's dumb protocol, curl's TLS)
@@ -33,6 +35,7 @@ alpine: git: commit, log and diff
 alpine: jq: query JSON
 alpine: less: copies a pipe through
 alpine: make: rebuild only what is out of date
+alpine: nvim over ssh: edit and save in a pseudo-terminal
 alpine: nvim: :grep and :vimgrep fill the quickfix list
 alpine: nvim: LuaJIT loads a shared object that gcc built
 alpine: nvim: a file watcher and a timer from libuv
@@ -1015,3 +1018,7 @@ t_time: nanosleep 100 ms
 t_time: sleep(1)
 t_time: strftime + localtime
 t_time: time
+t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
+t_gai: AF_INET6 UDP connect to :: reads back ::1
+t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1
+t_gai: getaddrinfo(NULL, port, AI_PASSIVE) with AF_UNSPEC
