@@ -117,6 +117,21 @@ nothing: rerun both on the same host back to back before trusting a small
 difference. The numbers are not hardware timing; once BastiOS runs on a
 physical machine, record that table next to Linux's on the same machine.
 
+`bench/run.py --icount` times by instructions executed instead of host time
+(TCG with `-icount shift=0`: the guest clock advances one nanosecond per
+instruction). Three runs of one test agree to 0.02%, where wall time moves by
+20% with the host's load, so it is the way to see a change of a few percent.
+It counts instructions, not cycles: a TLB flush or a cache miss costs nothing
+in it, so compare two kernels with it, and do not read it against Linux's
+times. `bench/insnprof.py -- COMMAND` says where the instructions go: it
+single-steps the guest from gdb and charges each to a kernel function, per
+call. On 2026-10-13 a `getppid` call took 2640 instructions (after the
+`sock_wake` fix; the FPU page's copy in and out by loops in the compiler's
+runtime is about 600 of them, the 21 registers' save and 18 restores about
+500, `sched`, `finish` and `next_job` the rest), and a `stat` of a tmpfs file
+12500: the 2600 of any call plus path lookup (`ns_find` 1400, `ram_find` 1200,
+`take_node` and `put_node` 1800, `put_stat` 850, an allocation 800).
+
 `make buildbench` (`test/buildbench.sh`) is an end-to-end number the table
 does not have: `make -j1` and `make -jN` of 100 small C files with tcc, on the
 development disk, on `-smp N` (`SMP=`, default 2). It prints the median seconds
