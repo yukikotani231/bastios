@@ -145,6 +145,11 @@ table, walked on every process exit and fork: `lx_fd_close_all` called
 reference for each; both now look at the slot first (the exit walk is 1500).
 By `bench/run.py --icount` that is `fork` 196 to 168 us and `exec` 655 to
 629 us.
+`execve` of a file asked `file_writing` about all 36864 descriptor rows
+(ETXTBSY) although the table grows with the process table; it now stops at
+the table's end, and `terminate`, `wake_readers`, `disk_wake`,
+`sleepers_due` and the thread-group check stop at the process table's end
+too. `exec` goes from 625 to 439 us and `spawn` from 567 to 380 us.
 
 `make buildbench` (`test/buildbench.sh`) is an end-to-end number the table
 does not have: `make -j1` and `make -jN` of 100 small C files with tcc, on the
