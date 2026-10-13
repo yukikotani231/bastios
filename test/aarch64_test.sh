@@ -159,6 +159,9 @@ run("echo ash $((6*7))", b"ash 42", wait=b"# ")
 run("echo abc | wc -c", b"4", wait=b"# ")
 run("echo $((1 << 40))", b"1099511627776", wait=b"# ")
 run("echo data > /tmp/f; cat /tmp/f; wc -c < /tmp/f", [b"data", b"5"], wait=b"# ")
+# More address spaces than the 255 ASIDs (a pipeline of two forked applets is
+# two): the numbers roll over and every result stays right.
+run("i=0; n=0; while [ $i -lt 300 ]; do n=$((n + $(echo $i | wc -c))); i=$((i + 1)); done; echo sum $n", b"sum 1090", wait=b"# ")
 run("exit", b"")
 # The timer interrupt: ticks count up, 100 a second.
 reply = run("uptime", b"ticks")
