@@ -190,5 +190,21 @@ int main(void) {
         close(m3);
         close(s3);
     }
+    {
+        /* Sixteen pairs at once (a server with many logins). */
+        int ms[16], ss[16], made = 0, echoed = 0;
+        for (int i = 0; i < 16; i++)
+            made += openpty(&ms[i], &ss[i], NULL, NULL, NULL) == 0;
+        EXPECT("sixteen pseudo-terminal pairs at once", made == 16);
+        for (int i = 0; i < made; i++) {
+            char c = 'a' + i, got = 0;
+            echoed += write(ss[i], &c, 1) == 1 && read(ms[i], &got, 1) == 1 && got == c;
+        }
+        EXPECT("each pair carries its own bytes", echoed == made);
+        for (int i = 0; i < made; i++) {
+            close(ms[i]);
+            close(ss[i]);
+        }
+    }
     return done();
 }
