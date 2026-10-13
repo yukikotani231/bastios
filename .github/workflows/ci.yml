@@ -285,6 +285,9 @@ jobs:
             build/aarch64/compat/alpine/*.tar.gz
             build/aarch64/compat/alpine/*.json
       - run: make ARCH=aarch64 compat
+      - name: Checks that did not pass
+        if: always()
+        run: grep -E '^\| ' build/aarch64/compat/report.md | grep -v -E '\| pass \||\| ---' | head -80 || true
       - name: Save Alpine's images
         if: always() && steps.al.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
