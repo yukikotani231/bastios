@@ -250,6 +250,31 @@ static int next_ids_and_copy(void) {
     return ok;
 }
 
+/* shmmax is writable: a segment larger than it is EINVAL, and the file reads back what was written. */
+static int shmmax_written(void) {
+    char was[32] = "", now[32] = "";
+    FILE *f = fopen("/proc/sys/kernel/shmmax", "r");
+    if (!f || !fgets(was, sizeof was, f)) return 0;
+    fclose(f);
+    f = fopen("/proc/sys/kernel/shmmax", "w");
+    if (!f || fputs("8192\n", f) < 0) return 0;
+    fclose(f);
+    f = fopen("/proc/sys/kernel/shmmax", "r");
+    if (!f || !fgets(now, sizeof now, f)) return 0;
+    fclose(f);
+    int big = shmget(IPC_PRIVATE, 8193, IPC_CREAT | 0600);
+    int e = errno;
+    int small = shmget(IPC_PRIVATE, 8192, IPC_CREAT | 0600);
+    int huge = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 04000 | 0600);
+    int e2 = errno;
+    if (small >= 0) shmctl(small, IPC_RMID, 0);
+    if (huge >= 0) shmctl(huge, IPC_RMID, 0);
+    f = fopen("/proc/sys/kernel/shmmax", "w");
+    int back = f && fputs(was, f) >= 0;
+    if (f) fclose(f);
+    return atol(now) == 8192 && big < 0 && e == EINVAL && small >= 0 && huge < 0 && e2 == EINVAL && back;
+}
+
 int main(void) {
     setup();
     EXPECT("msgsnd, msgrcv and IPC_STAT", queue_basics());
@@ -265,6 +290,7 @@ int main(void) {
     EXPECT("shmat, a second view, fork, IPC_RMID", shm_basics());
     EXPECT("shmget and shmat errors", shm_errors());
     EXPECT("/proc/sysvipc and /proc/sys/kernel limits", proc_files());
+    EXPECT("shmmax is written; a segment past it, or with SHM_HUGETLB, is EINVAL", shmmax_written());
     EXPECT("msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message", next_ids_and_copy());
     return done();
 }
