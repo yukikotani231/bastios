@@ -164,7 +164,7 @@ const S_IFMT_DIR: u64 = 0x4000;             // the type bits of a directory
 const S_IFMT_REG: u64 = 0x8000;             // and of a regular file
 // Inode numbers: directories 1 + their DIR_* number (at most 1 + DIR_VFS +
 // VDIR_LO), then the built-in programs, then files (past both), then
-// /proc (INO_PROC, 8192 up).
+// /proc (INO_PROC, past every file's).
 const INO_PROGS: u64 = 2304;                // the built-in programs: this + the program
 const INO_FILES: u64 = 2560;                // files: this + the handle (below INO_PROC)
 

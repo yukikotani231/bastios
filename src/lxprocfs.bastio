@@ -116,7 +116,7 @@ const LOOP_SYS: u64 = 8;               // size, ro, backing_file, offset, sizeli
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
 const S_IFREG_RO: u64 = 0x8124;       // a regular file, r--r--r--
-const INO_PROC: u64 = 8192;           // /proc inode numbers start here (past INO_FILES + HFILES)
+const INO_PROC: u64 = INO_FILES + HFILES;  // /proc inode numbers start here (past every file's: INO_FILES + the handle)
 const LX_READLINK: u64 = 89;
 const LX_READLINKAT: u64 = 267;
 
