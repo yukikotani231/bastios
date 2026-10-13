@@ -255,7 +255,7 @@ COMPAT_DISKS := $(B)/compat/disk.img $(B)/compat/alpine.img $(B)/compat/debian.i
 COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox,apps --kernel $(B)/bastios.bin \
               --disk $(B)/compat/disk.img --alpine-disk $(B)/compat/alpine.img \
               --alpine-repo $(B)/compat/alpine/disk/http \
-              --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk $(B)/compat/debian.img \
+              --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST)-arm64.json --debian-disk $(B)/compat/debian.img \
               --node-disk $(B)/compat/node.img --out $(B)/compat
 
 compat: $(B)/bastios.bin $(COMPAT_DISKS)
