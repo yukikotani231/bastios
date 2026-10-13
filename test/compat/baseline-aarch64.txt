@@ -1,5 +1,44 @@
 # Checks that pass on BastiOS (make compat-baseline rewrites this).
 # make compat fails if one of them stops passing.
+alpine-tty: nvim: :make runs gcc through make
+alpine-tty: nvim: edit a C file, build it with gcc, run it
+alpine-tty: nvim: edit and save a C file
+alpine-tty: nvim: it reads the terminal's size, and has colours
+alpine-tty: nvim: u undoes an edit, and the undo file is written
+alpine: alpine: unpack the root, chroot into it
+alpine: apk: a dependency comes along; install scripts run
+alpine: apk: a dependency nothing provides stops the install
+alpine: apk: a new trigger runs on the directory it watches
+alpine: apk: install bash, make, jq, rsync, openssl, file and xmllint
+alpine: apk: install from a repository over HTTP, then remove it
+alpine: apk: install gcc and the C library's headers over HTTP
+alpine: apk: install git, curl and less, with what they depend on
+alpine: apk: install neovim over HTTP
+alpine: apk: remove a package and its files
+alpine: apk: remove a package: its scripts run, its dependency goes too
+alpine: apk: remove them, and what only they needed
+alpine: apk: the packages the root came with
+alpine: apk: they are in its database
+alpine: apk: upgrade, with a version constraint on the dependency
+alpine: bash: arrays, brace expansion, here-strings
+alpine: curl: 1 MiB from the host
+alpine: curl: a file from the host
+alpine: file: what a file is (libmagic)
+alpine: gcc: compile and run a C program (gcc, cc1, as and ld are fixed-address executables)
+alpine: jq: query JSON
+alpine: less: copies a pipe through
+alpine: make: rebuild only what is out of date
+alpine: nvim: :grep and :vimgrep fill the quickfix list
+alpine: nvim: LuaJIT loads a shared object that gcc built
+alpine: nvim: a file watcher and a timer from libuv
+alpine: nvim: a job on a pseudo-terminal (what :terminal runs on, with /dev and /dev/pts bound into the chroot)
+alpine: nvim: a script run without a terminal
+alpine: nvim: tree-sitter parses help text with the vimdoc parser
+alpine: nvim: vim.system runs a process and collects its output and status
+alpine: openssl: a digest and random bytes
+alpine: rsync: copy a tree
+alpine: ssh-keygen: an ed25519 key
+alpine: xmllint: an XPath query
 busybox: awk
 busybox: base64
 busybox: basename/dirname
@@ -67,6 +106,21 @@ busybox: which
 busybox: whoami
 busybox: xargs
 busybox: yes | head
+debian: debian: bash
+debian: debian: coreutils make, copy, move, link and look at files
+debian: debian: coreutils, sed, grep and awk in a pipeline
+debian: debian: dpkg knows the packages
+debian: debian: find, xargs and du
+debian: debian: perl
+debian: debian: tar and gzip (GNU tar makes its archive with creat)
+debian: debian: unpack the root, chroot into it
+debian: debian: users and the machine
+node: node: a hot loop is compiled and gives the right sum
+node: node: a script with arrays and JSON
+node: node: an expression
+node: node: read and write files
+node: node: timers and promises run in order
+node: node: version
 t_cred: a child inherits ids; /proc/self/status shows them
 t_cred: an unprivileged process keeps to the ids it holds
 t_cred: getgrnam finds users
@@ -468,6 +522,7 @@ t_mem: fork: parent and child each see only their own writes (copy-on-write), re
 t_mem: futex across fork on a MAP_SHARED page
 t_mem: large malloc and free, many times
 t_mem: madvise
+t_mem: madvise on a PROT_NONE reservation (V8 discards pages inside one)
 t_mem: malloc churn
 t_mem: mlock
 t_mem: mmap MAP_FIXED
@@ -493,10 +548,19 @@ t_misc: /proc/diskstats opens
 t_misc: /proc/meminfo
 t_misc: /proc/modules opens
 t_misc: /proc/net is a directory
+t_misc: /proc/net/arp has its header
 t_misc: /proc/net/dev lists lo and eth0
+t_misc: /proc/net/raw lists a raw ICMP socket
+t_misc: /proc/net/route lists the default route
 t_misc: /proc/net/tcp lists a listening socket
+t_misc: /proc/net/udp lists a bound socket
+t_misc: /proc/net/unix lists a bound socket
 t_misc: /proc/self/exe
+t_misc: /proc/self/limits shows the open-files limit
+t_misc: /proc/self/mountinfo lists the root and /proc
+t_misc: /proc/self/statm counts the pages and io has its counters
 t_misc: /proc/stat has cpu lines
+t_misc: SIOCGIFHWADDR and SIOCGIFNETMASK on lo
 t_misc: SSE floating point
 t_misc: TIOCGWINSZ
 t_misc: getlogin or getpwuid

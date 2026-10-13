@@ -149,7 +149,7 @@ jobs:
       - name: Cache keys
         id: keys
         run: |
-          echo "pins=$(grep -E '^[A-Z0-9_]+ *\?=' Makefile | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "pins=$(grep -E '^[A-Z0-9_]+ *\?=' Makefile test/compat/images.mk | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
       - name: Restore the third-party programs
         id: tp
         uses: actions/cache/restore@v4
@@ -239,6 +239,8 @@ jobs:
         if: failure()
         run: |
           df -h /
+          ls -la build/compat/alpine/disk build/compat/*.img build/compat/alpine-run.img || true
+          tar -tf build/compat/alpine/disk/root.tar | head -3 || true
           grep -E '^\| (alpine|alpine-tty) ' build/compat/report.md | grep -v '| pass |' | head -20 || true
           tail -n 120 build/compat/serial.log || true
       - if: always()
@@ -251,10 +253,11 @@ jobs:
             build/compat/serial.log
           if-no-files-found: ignore
   # The Linux compatibility suite on AArch64 (arch/aarch64/Makefile): the
-  # suite's C programs and a BusyBox against glibc, on QEMU's virt machine.
+  # suite's C programs and a BusyBox against glibc, and Alpine, on QEMU's virt
+  # machine.
   compat-aarch64:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       BASTIOC0: bastiolang/stage0/target/release/bastioc0
       BASTIOLIB: bastiolang
@@ -273,7 +276,24 @@ jobs:
           key: proof-none
           restore-keys: proof-
           path: build/proof-cache
+      - name: Restore Alpine's images
+        id: al
+        uses: actions/cache/restore@v4
+        with:
+          key: compat-alpine-arm64-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
+          path: |
+            build/aarch64/compat/alpine/*.tar.gz
+            build/aarch64/compat/alpine/*.json
       - run: make ARCH=aarch64 compat
+      - name: Save Alpine's images
+        if: always() && steps.al.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          key: compat-alpine-arm64-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
+          path: |
+            build/aarch64/compat/alpine/*.tar.gz
+            build/aarch64/compat/alpine/*.json
+        continue-on-error: true
       - if: always()
         uses: actions/upload-artifact@v4
         with:

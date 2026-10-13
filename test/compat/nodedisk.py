@@ -21,9 +21,10 @@ sys.path.insert(0, HERE)
 import alpinedisk
 
 # What the image holds that Node needs, and where it goes: (path in the image, path in the root).
+A = alpinedisk.ARCH
 FILES = [("usr/local/bin/node", "usr/local/bin/node"),
-         ("lib/ld-musl-x86_64.so.1", "lib/ld-musl-x86_64.so.1"),
-         ("lib/ld-musl-x86_64.so.1", "lib/libc.musl-x86_64.so.1"),
+         (f"lib/ld-musl-{A}.so.1", f"lib/ld-musl-{A}.so.1"),
+         (f"lib/ld-musl-{A}.so.1", f"lib/libc.musl-{A}.so.1"),
          ("usr/lib/libgcc_s.so.1", "usr/lib/libgcc_s.so.1"),
          ("usr/lib/libstdc++.so.6.0.34", "usr/lib/libstdc++.so.6")]
 
