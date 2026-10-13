@@ -784,6 +784,11 @@ bench-compare:
 smpbench: build/bastios.elf
 	test/smpbench.sh
 
+# Not part of `make test` either: an end-to-end number, `make -j1` and `make -j2`
+# of a project of small C files built with tcc on the development disk.
+buildbench: build/bastios.elf build/compat/dev.img
+	test/buildbench.sh
+
 # Not part of `make test` either: do one process's threads run in parallel?
 threadbench: build/bastios.elf
 	test/threadbench.sh
@@ -809,6 +814,6 @@ clean:
 .PRECIOUS: build/user/%.c build/user/%.s build/user/%.o build/user/%.elf
 FORCE:
 
-.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-compare smpbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-compare smpbench buildbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
 
 endif

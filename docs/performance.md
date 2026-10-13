@@ -117,6 +117,13 @@ nothing: rerun both on the same host back to back before trusting a small
 difference. The numbers are not hardware timing; once BastiOS runs on a
 physical machine, record that table next to Linux's on the same machine.
 
+`make buildbench` (`test/buildbench.sh`) is an end-to-end number the table
+does not have: `make -j1` and `make -j2` of 100 small C files with tcc, on the
+development disk, on `-smp 2`. It prints the median seconds of each and the
+speed-up of `-j2`. Measured on one shared 4-core host under QEMU TCG: 1.8 s
+and 1.4 s (1.3 times as fast). It is not part of `make bench`, which runs the
+same program on Linux; this one is BastiOS alone.
+
 ## Reading the numbers
 
 TCG is not a processor. It inflates some costs and hides others, and it
