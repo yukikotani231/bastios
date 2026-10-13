@@ -701,6 +701,10 @@ t_nopie: the bss covers what the kernel image would
 t_nopie: the data follows it
 t_nopie: the text is where it was linked
 t_nopie: the whole bss is usable
+t_nsmany: 24 IPC namespaces at once
+t_nsmany: 24 PID namespaces at once
+t_nsmany: 24 UTS namespaces at once, each with its own name
+t_nsmany: and 24 more once those are gone
 t_openat2: /proc/self/exe opens the program
 t_openat2: BENEATH inside opens
 t_openat2: BENEATH through a link inside opens
@@ -1046,6 +1050,9 @@ alpine: container: the root file system is read-only, and the exit status comes 
 alpine: container: rootless: runc runs Alpine as an unprivileged user in a user namespace of its own
 alpine: container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle
 alpine: container: the image's command, environment and working directory run rootless from the bundle
+alpine: container: runc joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
+alpine: container: runc runs on an overlay of the image root: writes and deletions stay in the upper layer
+alpine: container: runc loads a seccomp filter from the config: mkdir answers EPERM, the rest runs
 alpine: nvim: a headless server on a unix socket answers another nvim (--listen, sockconnect, RPC)
 alpine: apk: install tmux, cmake and lua-language-server over HTTP
 alpine: tmux: a client on the console passes it to the server (SCM_RIGHTS of the console)
