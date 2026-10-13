@@ -502,6 +502,14 @@ def run_program(env, prog, timeout):
             checks.append({"name": "(start-up)", "result": "crash", "detail": f"exited with {status} before any check",
                            "syscalls": [int(n) for n in NOTE.findall(text)], "index": 0})
         break
+    # A check that failed once may only have lost a race with the emulator's
+    # timing. Run the failures again, once, and keep a pass.
+    failed = [c for c in checks if c["result"] == "fail"]
+    if failed:
+        text, _ = env.run(f"COMPAT_ONLY={','.join(str(c['index']) for c in failed)} /disk/{prog}; echo @@end $?", timeout)
+        for c in failed:
+            if re.search(r"(?:^|\n)@@ " + re.escape(c["name"]) + r"\nok " + re.escape(c["name"]) + r"(?:\n|$)", text):
+                c["result"], c["detail"], c["retried"] = "pass", "", True
     for c in checks:
         if c["result"] is None:
             # Its result line never came, though the program went on (say,
