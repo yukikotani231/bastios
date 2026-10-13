@@ -37,6 +37,11 @@
 // period ends; cpu.stat counts usage_usec, nr_periods and nr_throttled.
 // cpu.weight is kept and read back only.
 //
+// memory.max is enforced in the same tick (cg_oom_tick): memory.current is the
+// pages mapped in the group's address spaces, and a group over its limit loses
+// the process with the most of them to SIGKILL (cg_oom); memory.events counts
+// it. Mapping and forking are not refused for the limit.
+//
 // Not done: the "no internal processes" rule.
 
 import "lxuser.bastio";
@@ -726,7 +731,13 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
     return put_c(&mut o, a, 10);
   }
   if f == 12 {
-    return put_s(&mut o, 0, "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n");
+    let mut a = put_s(&mut o, 0, "low 0\nhigh 0\nmax ");
+    a = put_n(&mut o, a, cg_get(k, s, CGW_MAXE));
+    a = put_s(&mut o, a, "\noom ");
+    a = put_n(&mut o, a, cg_get(k, s, CGW_MAXE));
+    a = put_s(&mut o, a, "\noom_kill ");
+    a = put_n(&mut o, a, cg_get(k, s, CGW_OOMK));
+    return put_c(&mut o, a, 10);
   }
   if f == 13 {
     let q = cg_get(k, s, CGW_CPUQ);
@@ -776,10 +787,26 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
   return 0;                                 // cgroup.kill is write-only
 }
 
+/// The pages mapped in the address space of row q, or 0 when they cannot
+/// be counted now (another processor runs the space).
+fn cg_resident(k: &mut Kernel, q: u64) -> u64
+  requires kok(k) && q < NPROC
+  ensures kok(k) && result <= WPAGES
+{
+  if !has_space(&mut k.spaces, q) {
+    return 0;
+  }
+  let c = win_op(&mut k.mem, &mut k.spaces, q, WOP_COUNT, 0, WPAGES, 0);
+  if c > WPAGES {
+    return 0;
+  }
+  return c;
+}
+
 /// memory.current of cgroup s: the bytes of memory the processes in it and
 /// below it have, counting each address space once and every page it has
-/// mapped or recorded as anonymous (anon_count), not the page cache or the
-/// kernel's own memory.
+/// mapped (what is resident: a mapping nobody has touched is not counted),
+/// not the page cache or the kernel's own memory.
 fn cg_mem_current(k: &mut Kernel, s: u64) -> u64
   requires kok(k) && s < CG_N
   ensures kok(k) && result <= 0x100000000000000
@@ -789,57 +816,100 @@ fn cg_mem_current(k: &mut Kernel, s: u64) -> u64
   while q < NPROC
     invariant 1 <= q && q <= NPROC && pages <= (q - 1) * WPAGES && kok(k)
   {
-    if cg_live(k, q) && tgid(k.procs, q) == q && cg_in(k, cg_of(k, q), s) && has_space(&mut k.spaces, q) {
-      let c = anon_count(&mut k, q, 0, WPAGES);
-      if c <= WPAGES {
-        pages = pages + c;
-      }
+    if cg_live(k, q) && tgid(k.procs, q) == q && cg_in(k, cg_of(k, q), s) {
+      pages = pages + cg_resident(&mut k, q);
     }
     q = q + 1;
   }
   return pages * 4096;
 }
 
-/// Could process pid have `extra` more pages (a mapping, a growing break, a
-/// forked copy) without a memory.max, its own group's or one above it,
-/// being passed? Nothing is counted for a group with no limit, and `extra`
-/// is not looked at either: a fork's page count (anon_count) is WPAGES + 1
-/// while another processor holds a lease on the space, and that must not
-/// fail a fork in a group nobody limited.
-fn cg_mem_ok(k: &mut Kernel, pid: u64, extra: u64) -> bool
-  requires kok(k) && pid < NPROC
+/// Has a task of cgroup s or below a SIGKILL it has not yet died of?
+fn cg_dying(k: &Kernel, s: u64) -> bool
+  requires kok(k) && s < CG_N
+{
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && kok(k)
+  {
+    if cg_live(k, q) && cg_in(k, cg_of(k, q), s) && pget(k.procs, q, F_SIGPEND) & sbit(SIGKILL) != 0 {
+      return true;
+    }
+    q = q + 1;
+  }
+  return false;
+}
+
+/// cgroup s, or one below it, has passed its memory.max: the process with
+/// the most pages in it is killed with all its threads (SIGKILL), as the
+/// out-of-memory killer does after reclaim finds nothing to free. There is
+/// no reclaim here. memory.events counts the event and the kill.
+fn cg_oom(k: &mut Kernel, s: u64)
+  requires kok(k) && s < CG_N
   ensures kok(k)
 {
-  let mut c = cg_of(k, pid);
+  if cg_dying(k, s) {
+    return;                                 // the memory of the last victim is not back yet
+  }
+  let mut v = 0;
+  let mut best = 0;
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && v < NPROC && kok(k)
+  {
+    if cg_live(k, q) && tgid(k.procs, q) == q && cg_in(k, cg_of(k, q), s) {
+      let r = cg_resident(&mut k, q);
+      if r > best {
+        best = r;
+        v = q;
+      }
+    }
+    q = q + 1;
+  }
+  if v == 0 {
+    return;
+  }
+  cg_put(&mut k, s, CGW_MAXE, sat_add(cg_get(k, s, CGW_MAXE), 1));
+  cg_put(&mut k, s, CGW_OOMK, sat_add(cg_get(k, s, CGW_OOMK), 1));
+  let mut r = 1;
+  while r < NPROC
+    invariant 1 <= r && r <= NPROC && kok(k)
+  {
+    if cg_live(k, r) && (r == v || in_group(k.procs, r, v)) {
+      post_sig(&mut k, r, 9);
+    }
+    r = r + 1;
+  }
+}
+
+/// A timer tick found process p running: if its group or one above it has
+/// more memory than its memory.max, the out-of-memory killer runs there.
+/// This is where memory.max is enforced: memory is counted when it is
+/// resident, so a program that maps more than it uses is not touched, and
+/// one that goes on touching what it mapped is killed within a tick.
+fn cg_oom_tick(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  if p == 0 {
+    return;
+  }
+  let mut c = cg_of(k, p);
   let mut i = 0;
   while i < CG_N
     invariant i <= CG_N && c < CG_N && kok(k)
   {
     let lim = cg_get(k, c, CGW_MEM);
-    if lim != 0 && lim <= 0x100000000000000 {
-      if extra > WPAGES {
-        return false;
-      }
-      if cg_mem_current(&mut k, c) + extra * 4096 > lim - 1 {
-        return false;
-      }
+    if lim != 0 && lim <= 0x100000000000000 && cg_mem_current(&mut k, c) > lim - 1 {
+      cg_oom(&mut k, c);
+      return;
     }
     if c == 0 {
-      return true;
+      return;
     }
     c = cg_parent(k, c);
     i = i + 1;
   }
-  return true;
-}
-
-/// Could process pid fork: its address space copied into the same group?
-fn cg_fork_mem_ok(k: &mut Kernel, pid: u64) -> bool
-  requires kok(k) && pid < NPROC
-  ensures kok(k)
-{
-  let own = anon_count(&mut k, pid, 0, WPAGES);
-  return cg_mem_ok(&mut k, pid, own);
 }
 
 /// The root of process pid's cgroup namespace: the group it was in when it
@@ -1435,6 +1505,8 @@ fn cg_mkdir(k: &mut Kernel, pid: u64, n: u64) -> u64
   cg_put(&mut k, free, CGW_NPER, 0);
   cg_put(&mut k, free, CGW_NTHR, 0);
   cg_put(&mut k, free, CGW_THR, 0);
+  cg_put(&mut k, free, CGW_MAXE, 0);
+  cg_put(&mut k, free, CGW_OOMK, 0);
   cg_put(&mut k, free, CGW_USED, 1);
   return 0;
 }
