@@ -192,12 +192,21 @@ $(B)/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py | $(B)/c
 	COMPAT_ARCH=aarch64 test/compat/alpinedisk.py $@ $(B)/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) \
 	  --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE)
 
+# Debian (glibc) and Node (musl, V8) the same way, from the arm64 layers.
+$(B)/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/alpine.img
+	COMPAT_ARCH=aarch64 test/compat/debiandisk.py $@ $(DEBIAN_IMAGE) $(B)/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+
+$(B)/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/alpine.img
+	COMPAT_ARCH=aarch64 test/compat/nodedisk.py $@ $(NODE_IMAGE) $(B)/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+
+COMPAT_DISKS := $(B)/compat/disk.img $(B)/compat/alpine.img $(B)/compat/debian.img $(B)/compat/node.img
 COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox --kernel $(B)/bastios.bin \
               --disk $(B)/compat/disk.img --alpine-disk $(B)/compat/alpine.img \
-              --alpine-repo $(B)/compat/alpine/disk/http --out $(B)/compat
+              --alpine-repo $(B)/compat/alpine/disk/http --debian-disk $(B)/compat/debian.img \
+              --node-disk $(B)/compat/node.img --out $(B)/compat
 
-compat: $(B)/bastios.bin $(B)/compat/disk.img $(B)/compat/alpine.img
+compat: $(B)/bastios.bin $(COMPAT_DISKS)
 	$(COMPAT_RUN) $(COMPAT_PROGS)
 
-compat-baseline: $(B)/bastios.bin $(B)/compat/disk.img $(B)/compat/alpine.img
+compat-baseline: $(B)/bastios.bin $(COMPAT_DISKS)
 	$(COMPAT_RUN) --update-baseline $(COMPAT_PROGS)
