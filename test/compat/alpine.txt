@@ -276,15 +276,15 @@ touch=1
 status 3
 
 == container: cgroup limits: the container sees the memory, pids and cpu limits runc set
-$ cd /disk/b && bb sed -i -e 's#"devices"#"memory": {"limit": 83886080}, "pids": {"limit": 20}, "cpu": {"shares": 512, "quota": 20000, "period": 100000}, "devices"#' -e 's#"touch /x 2>\&1; echo touch=$?; id -u; exit 3"#"cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpu.weight; exit 4"#' config.json; /disk/runc --root /run/runc run c3 < /dev/null; echo status $?
+$ cd /disk/b && bb sed -i -e 's#"devices"#"memory": {"limit": 83886080}, "pids": {"limit": 20}, "cpu": {"shares": 512, "quota": 80000, "period": 100000}, "devices"#' -e 's#"touch /x 2>\&1; echo touch=$?; id -u; exit 3"#"cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpu.weight; exit 4"#' config.json; /disk/runc --root /run/runc run c3 < /dev/null; echo status $?
 83886080
 20
-20000 100000
+80000 100000
 20
 status 4
 
 == container: memory.max kills a process of a container that outgrows it
-$ cd /disk/b && bb sed -i -e 's#"quota": 20000#"quota": 1000000#' -e 's#cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpu.weight; exit 4#dd if=/dev/zero of=/dev/null bs=120M count=1 iflag=fullblock; exit 4#' config.json; /disk/runc --root /run/runc run c4 < /dev/null 2>&1 | bb cat; echo status $?
+$ cd /disk/b && bb sed -i -e 's#"quota": 80000#"quota": 1000000#' -e 's#cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpu.weight; exit 4#dd if=/dev/zero of=/dev/null bs=120M count=1 iflag=fullblock; exit 4#' config.json; /disk/runc --root /run/runc run c4 < /dev/null 2>&1 | bb cat; echo status $?
 Killed
 status 0
 
