@@ -8,7 +8,8 @@ SECTIONS {
     .text : { *(.text.boot) *(.text*) }
     .tramp : ALIGN(4096) { *(.tramp) . = ALIGN(4096); }
     .rodata : { *(.rodata*) }
-    .data : { *(.data*) }
+    .data : { *(.data*) *(.got) *(.got.plt) *(.igot*) . = ALIGN(4096); }
+    __file_end = .;
     .bss (NOLOAD) : ALIGN(4096) {
         __bss_start = .;
         *(.bss*) *(COMMON)
@@ -19,5 +20,7 @@ SECTIONS {
     stack_top = .;
     _end = .;
     __image_size = _end - 0x40080000;
+    __file_size = __file_end - 0x40080000;
+    __efi_entry_rva = efi_entry - 0x40080000;
     /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) }
 }

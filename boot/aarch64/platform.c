@@ -5,15 +5,14 @@
  * timer, and gives the kernel the few answers it asks for. It decides
  * nothing: the kernel's policy is in Bastio.
  *
- * The addresses of the interrupt controller are QEMU virt's own
- * (-M virt,gic-version=3); a device-tree walk for them comes with real
- * boards.
+ * The interrupt controller is the one the device tree describes: a GICv3
+ * (distributor and redistributors) or a GICv2 (distributor and CPU
+ * interface, as on a GIC-400); QEMU virt's GICv3 addresses are the fallback
+ * without a tree.
  */
 #include <stdint.h>
 #include <stddef.h>
 
-#define GICD 0x08000000ull
-#define GICR 0x080A0000ull
 #define TICK_HZ 100
 #define TIMER_INTID 30          /* the EL1 physical timer, a private interrupt */
 #define V_TIMER 32              /* the boot processor's tick, which counts the kernel's time */
@@ -58,6 +57,16 @@ uint64_t bst_memmap[1 + 2 * MAX_RUNS];
  * boot processor first), filled in by bst_early. */
 static uint64_t cpu_mpidr[MAX_CPUS];
 static uint64_t ncpu_dt;
+/* The interrupt controller: its version (3 or 2) and the two frames the
+ * tree lists (GICv3: distributor, redistributors; GICv2: distributor, CPU
+ * interface). QEMU virt's GICv3 is the default. */
+static unsigned gic_ver = 3;
+/* The console: the first PL011 the tree lists (the prelude's bst_uart reads
+ * this; QEMU virt's address is the default). */
+uint64_t bst_uart_base = 0x09000000ull;
+static unsigned psci_smc;                   /* the device tree's psci method: smc (1) or hvc (0, QEMU virt's) */
+static uint64_t GICD = 0x08000000ull;
+static uint64_t GICR = 0x080A0000ull;       /* GICv2: the CPU interface (GICC) */
 
 /* The device tree itself, copied before the page pool can reuse the RAM it
  * sits in (QEMU puts it in RAM): the kernel reads it byte by byte with
@@ -65,6 +74,26 @@ static uint64_t ncpu_dt;
 #define DTB_MAX 65536
 static uint8_t dtb_copy[DTB_MAX];
 static uint64_t dtb_len;
+
+/* Tables of 2 MiB blocks for 1 GiB regions that hold RAM and something else. */
+/* The PCI Express host bridge's configuration window (the device tree's
+ * pci-host-ecam-generic node), 0 if there is none. */
+static uint64_t pci_ecam;
+
+#define MAX_L2 8
+static uint64_t kernel_l2[MAX_L2][512] __attribute__((aligned(4096)));
+
+/* The bytes of [lo, hi) that the memory map covers. */
+static uint64_t ram_overlap(uint64_t lo, uint64_t hi) {
+    uint64_t n = 0;
+    for (uint64_t i = 0; i < bst_memmap[0]; i++) {
+        uint64_t b = bst_memmap[1 + 2 * i], e = b + bst_memmap[2 + 2 * i];
+        if (b < lo) b = lo;
+        if (e > hi) e = hi;
+        if (e > b) n += e - b;
+    }
+    return n;
+}
 
 extern uint64_t bst_kernel_root[512];
 extern uint64_t kernel_l1[512];
@@ -113,6 +142,11 @@ static void read_memory(const uint8_t *dtb) {
         const uint8_t *strs = dtb + be32(dtb + 12);
         uint32_t ac = 2, sc = 1, cac = 1;
         int depth = 0, in_mem = 0, in_cpus = 0, in_cpu = 0;
+        unsigned node_gic = 0;                       /* this node's compatible: 3, 2 or 0 */
+        int node_uart = 0, have_uart = 0, node_pci = 0;
+        int in_psci = 0;
+        uint64_t node_reg[2] = { 0, 0 };
+        int node_regs = 0;
         for (;;) {
             uint32_t tok = be32(st);
             st += 4;
@@ -125,11 +159,26 @@ static void read_memory(const uint8_t *dtb) {
                 in_mem = depth == 2 && starts_with(name, "memory");
                 if (depth == 2 && same(name, "cpus")) in_cpus = 1;
                 in_cpu = in_cpus && depth == 3 && starts_with(name, "cpu@");
+                if (depth == 2) { node_gic = 0; node_regs = 0; node_uart = 0; node_pci = 0; }
+                in_psci = depth == 2 && same(name, "psci");
             } else if (tok == 2) {
-                if (depth == 2) in_cpus = 0;
+                if (depth == 2) {
+                    in_cpus = 0;
+                    if (node_gic && node_regs >= 2) {
+                        gic_ver = node_gic;
+                        GICD = node_reg[0];
+                        GICR = node_reg[1];
+                    }
+                    if (node_pci && node_regs >= 1 && !pci_ecam) pci_ecam = node_reg[0];
+                    if (node_uart && node_regs >= 1 && !have_uart) {
+                        bst_uart_base = node_reg[0];
+                        have_uart = 1;
+                    }
+                }
                 depth--;
                 in_mem = 0;
                 in_cpu = 0;
+                in_psci = 0;
             } else if (tok == 3) {
                 uint32_t len = be32(st), off = be32(st + 4);
                 const uint8_t *data = st + 8;
@@ -137,6 +186,26 @@ static void read_memory(const uint8_t *dtb) {
                 st += 8 + ((len + 3) & ~3u);
                 if (depth == 1 && same(pname, "#address-cells")) ac = be32(data);
                 else if (depth == 1 && same(pname, "#size-cells")) sc = be32(data);
+                else if (in_psci && same(pname, "method")) psci_smc = same((const char *)data, "smc");
+                else if (depth == 2 && same(pname, "compatible")) {
+                    for (uint32_t o = 0; o < len; ) {
+                        const char *c = (const char *)data + o;
+                        if (same(c, "arm,pl011")) node_uart = 1;
+                        if (same(c, "pci-host-ecam-generic")) node_pci = 1;
+                        if (same(c, "arm,gic-v3")) node_gic = 3;
+                        else if (same(c, "arm,cortex-a15-gic") || same(c, "arm,gic-400") || same(c, "arm,cortex-a9-gic")) node_gic = 2;
+                        while (o < len && data[o]) o++;
+                        o++;
+                    }
+                }
+                else if (depth == 2 && !in_mem && same(pname, "reg") && ac <= 2 && sc <= 2 && len >= (ac + sc) * 8) {
+                    node_reg[0] = cells(data, ac);
+                    node_reg[1] = cells(data + (ac + sc) * 4, ac);
+                    node_regs = 2;
+                } else if (depth == 2 && !in_mem && same(pname, "reg") && ac <= 2 && len >= ac * 4) {
+                    node_reg[0] = cells(data, ac);          /* a node with one frame: the UART */
+                    node_regs = 1;
+                }
                 else if (in_cpus && depth == 2 && same(pname, "#address-cells")) cac = be32(data);
                 else if (in_cpu && same(pname, "reg") && cac >= 1 && cac <= 2 && len >= cac * 4 && ncpu_dt < MAX_CPUS)
                     cpu_mpidr[ncpu_dt++] = cells(data, cac);
@@ -170,7 +239,7 @@ static void read_memory(const uint8_t *dtb) {
 
 /* Called by boot.S with the MMU off (so, compiled with -mstrict-align): the
  * memory map, and the kernel's map in top-level slot 0 (every user table
- * copies it): 1 GiB blocks, EL1 only, never executable at EL0. Block 0
+ * copies it): 1 GiB blocks (2 MiB blocks where RAM shares a GiB with devices), EL1 only, never executable at EL0. RAM is normal memory (MAIR index 0); the first 4 GiB without RAM are devices (MAIR index 1, not executable). Block 0
  * holds the devices (MAIR index 1, not executable); the blocks that hold
  * RAM are normal memory (MAIR index 0). */
 void bst_early(const uint8_t *dtb) {
@@ -196,9 +265,36 @@ void bst_early(const uint8_t *dtb) {
     }
     if (top > (512ull << 30)) top = 512ull << 30;
     for (int i = 0; i < 512; i++) kernel_l1[i] = 0;
-    kernel_l1[0] = BLOCK_DEVICE;
-    for (uint64_t g = 1; g < ((top + (1ull << 30) - 1) >> 30); g++)
-        kernel_l1[g] = BLOCK_NORMAL | (g << 30);
+    /* Every 1 GiB of the address space the kernel can reach is one of: all
+     * RAM (a normal-memory block), no RAM and in the first 4 GiB (a device
+     * block: where the peripherals of every board lie), or mixed (a table of
+     * 2 MiB blocks, each normal if RAM touches it, device otherwise: a
+     * board with RAM from address 0 and peripherals near 4 GiB). */
+    unsigned l2used = 0;
+    for (uint64_t g = 0; g < 512 && ((g << 30) < top || g < 4); g++) {
+        uint64_t lo = g << 30, hi = lo + (1ull << 30);
+        uint64_t cov = ram_overlap(lo, hi);
+        if (cov == 0) {
+            if (g < 4) kernel_l1[g] = BLOCK_DEVICE | lo;
+        } else if (cov == (1ull << 30) || l2used == MAX_L2) {
+            kernel_l1[g] = BLOCK_NORMAL | lo;
+        } else {
+            uint64_t *l2 = kernel_l2[l2used++];
+            for (uint64_t i = 0; i < 512; i++) {
+                uint64_t a = lo + (i << 21);
+                l2[i] = (ram_overlap(a, a + (2ull << 20)) ? BLOCK_NORMAL : BLOCK_DEVICE) | a;
+            }
+            kernel_l1[g] = (uint64_t)l2 | 3;
+        }
+    }
+    /* The gigabyte holding the PCI Express configuration window, when the
+     * machine puts it above the first 4 GiB (QEMU's virt does, unless
+     * highmem is off) and no RAM shares it. */
+    if (pci_ecam) {
+        uint64_t g = pci_ecam >> 30;
+        if (g >= 4 && g < 512 && ram_overlap(g << 30, (g + 1) << 30) == 0)
+            kernel_l1[g] = BLOCK_DEVICE | (g << 30);
+    }
     bst_kernel_root[0] = (uint64_t)kernel_l1 | 3;
     bst_ttbr1_tables[0][0] = (uint64_t)bst_ttbr1_tables[1] | 3;
     bst_ttbr1_tables[1][0] = (uint64_t)bst_ttbr1_tables[2] | 3;
@@ -208,6 +304,7 @@ void bst_early(const uint8_t *dtb) {
 
 static inline void w32(uint64_t a, uint32_t v) { *(volatile uint32_t *)a = v; }
 static inline uint32_t r32(uint64_t a) { return *(volatile uint32_t *)a; }
+static inline void w8(uint64_t a, uint8_t v) { *(volatile uint8_t *)a = v; }
 
 static uint64_t tick_cycles;
 
@@ -227,9 +324,18 @@ static uint64_t redistributor(uint64_t mpidr) {
     return GICR;
 }
 
-/* GICv3 for the calling processor: its redistributor awake, the timer's
- * interrupt enabled, and the CPU interface opened to every priority. */
+/* The interrupt controller for the calling processor: GICv3 with its
+ * redistributor awake, or GICv2 with its CPU interface on; the timer's
+ * interrupt enabled and every priority let through. */
 static void gic_cpu_init(void) {
+    if (gic_ver == 2) {
+        w32(GICD + 0x0080, 0);                              /* GICD_IGROUPR0: group 0, signalled as IRQ while GICC_CTLR.FIQEn is 0 */
+        w8(GICD + 0x0400 + TIMER_INTID, 0x80);               /* priority (a byte register: banked per processor) */
+        w32(GICD + 0x0100, 1u << TIMER_INTID);               /* GICD_ISENABLER0 */
+        w32(GICR + 0x0004, 0xFF);                            /* GICC_PMR */
+        w32(GICR + 0x0000, 1);                               /* GICC_CTLR: enable */
+        return;
+    }
     uint64_t mpidr;
     __asm__ volatile ("mrs %0, mpidr_el1" : "=r"(mpidr));
     uint64_t rd = redistributor(mpidr);
@@ -237,7 +343,7 @@ static void gic_cpu_init(void) {
     while (r32(rd + 0x0014) & 4u) { }                        /* ChildrenAsleep */
     uint64_t sgi = rd + 0x10000;
     w32(sgi + 0x0080, 0xFFFFFFFFu);                          /* group 1 */
-    w32(sgi + 0x0400 + TIMER_INTID, 0x80);                   /* priority */
+    w8(sgi + 0x0400 + TIMER_INTID, 0x80);                    /* priority */
     w32(sgi + 0x0100, 1u << TIMER_INTID);                    /* enable */
     uint64_t sre;
     __asm__ volatile ("mrs %0, icc_sre_el1" : "=r"(sre));
@@ -260,7 +366,7 @@ static void timer_stop(void) {
 /* The boot processor: the distributor on, then its own interface and
  * timer. */
 void bst_gic_init(void) {
-    w32(GICD + 0x0000, (1u << 4) | (1u << 1) | 1u);          /* ARE, group 1 non-secure */
+    w32(GICD + 0x0000, gic_ver == 2 ? 1u : (1u << 4) | (1u << 1) | 1u);   /* v3: ARE, group 1 non-secure; v2: enable */
     gic_cpu_init();
     timer_start();
 }
@@ -271,7 +377,8 @@ void bst_gic_init(void) {
  * spurious. */
 uint64_t bst_irq_ack(void) {
     uint64_t id;
-    __asm__ volatile ("mrs %0, icc_iar1_el1" : "=r"(id));
+    if (gic_ver == 2) id = r32(GICR + 0x000C);               /* GICC_IAR */
+    else __asm__ volatile ("mrs %0, icc_iar1_el1" : "=r"(id));
     id &= 0xFFFFFF;
     if (id >= 1020) return 0;
     uint64_t v = 6;
@@ -279,7 +386,8 @@ uint64_t bst_irq_ack(void) {
         __asm__ volatile ("msr cntp_tval_el0, %0; isb" : : "r"(tick_cycles));
         v = this_cpu()->id == 0 ? V_TIMER : V_LTIMER;
     }
-    __asm__ volatile ("msr icc_eoir1_el1, %0; isb" : : "r"(id));
+    if (gic_ver == 2) w32(GICR + 0x0010, (uint32_t)id);      /* GICC_EOIR */
+    else __asm__ volatile ("msr icc_eoir1_el1, %0; isb" : : "r"(id));
     return v;
 }
 
@@ -301,13 +409,22 @@ static void (*volatile work_fn)(void *);
 static void *volatile work_arg;
 static volatile uint64_t work_gen, work_done;
 
-static int64_t psci_cpu_on(uint64_t mpidr, uint64_t entry, uint64_t ctx) {
-    register uint64_t x0 __asm__("x0") = 0xC4000003ull;     /* CPU_ON, 64-bit */
-    register uint64_t x1 __asm__("x1") = mpidr;
-    register uint64_t x2 __asm__("x2") = entry;
-    register uint64_t x3 __asm__("x3") = ctx;
-    __asm__ volatile ("hvc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3) : "memory");
+/* A PSCI call through the conduit the device tree names (hvc on QEMU virt
+ * booted at EL1, smc when the machine has EL2 or EL3 firmware). */
+static int64_t psci_call(uint64_t fn, uint64_t a, uint64_t b, uint64_t c) {
+    register uint64_t x0 __asm__("x0") = fn;
+    register uint64_t x1 __asm__("x1") = a;
+    register uint64_t x2 __asm__("x2") = b;
+    register uint64_t x3 __asm__("x3") = c;
+    if (psci_smc) __asm__ volatile ("smc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3) : "memory");
+    else __asm__ volatile ("hvc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3) : "memory");
     return (int64_t)x0;
+}
+static int64_t psci_cpu_on(uint64_t mpidr, uint64_t entry, uint64_t ctx) {
+    return psci_call(0xC4000003ull, mpidr, entry, ctx);          /* CPU_ON, 64-bit */
+}
+void bst_psci_system_off(void) {
+    psci_call(0x84000008ull, 0, 0, 0);                           /* SYSTEM_OFF */
 }
 
 /* Called by boot.S on the boot processor once the MMU and the interrupt

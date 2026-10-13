@@ -1895,6 +1895,11 @@ for line, want, until in [
     ("ash", b"built-in shell (ash)", b"\n# "),
     ("stat -f -c '%b %c' /disk; echo big > /disk/b; cat /disk/b; stat -f -c %f /disk; rm /disk/b", b"10485755 5119\r\nbig\r\n1048", b"\n# "),
     ("mkdir disk/many; i=0; while [ $i -lt 1100 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; sleep 1", b"\r\n1100\r\n", b"\n# "),
+    # The directory table of the disk (DSLOTS entries) fills up: the create
+    # that finds no free entry fails with ENOSPC, and removing the files
+    # frees their entries again.
+    ("mkdir disk/full; i=0; while echo x > disk/full/f$i 2>/dev/null; do i=$((i+1)); done; echo x > disk/full/z; echo n$((i > 3500))", b"disk/full/z: No space left on device\r\nn1\r\n", b"\n# "),
+    ("rm -r disk/full; echo x > disk/after; cat disk/after; rm disk/after; sleep 1", b"\r\nx\r\n", b"\n# "),
 ]:
     mark = len(out)
     if mark == 0 and not read_until(b"bastios> "):
@@ -1947,6 +1952,57 @@ if len(sizes) == 2 and sizes[0] and sizes[1] and sizes[1][0] > sizes[0][0]:
     print(f"ok   a disk made larger since the last boot: {sizes[0][0]} blocks became {sizes[1][0]}, with its file")
 else:
     print("FAIL a grown disk:", sizes); fails += 1
+if smp >= 4:   # (the fake service above is set up on the four-processor run)
+    # The boot option `mcloud` runs the same setup at boot, with no
+    # argument: against QEMU's address for the metadata service, which a
+    # guest forward points at the fake server (the real address is
+    # 169.254.169.254:80; QEMU takes a forward only inside its network, so
+    # that is made 169.254.0.0/16). It must wait for DHCP, then do its work
+    # beside the shell.
+    bridge = os.path.join(disk_dir.name, "bridge.py")
+    with open(bridge, "w") as f:
+        f.write("import os, socket, sys, threading, time\n"
+                "s = socket.create_connection(('127.0.0.1', int(sys.argv[1])))\n"
+                "def up():\n"
+                "    while True:\n"
+                "        d = os.read(0, 4096)\n"
+                "        if not d: break\n"
+                "        s.sendall(d)\n"
+                "threading.Thread(target=up, daemon=True).start()\n"
+                "while True:\n"
+                "    d = s.recv(4096)\n"
+                "    if not d: break\n"
+                "    os.write(1, d)\n"
+                "time.sleep(0.2)\n"
+                "os._exit(0)\n")
+    imds_log.clear()
+    imds = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    imds.bind(("127.0.0.1", 0))
+    imds.listen(4)
+    th = threading.Thread(target=imds_serve, args=(imds,), daemon=True)
+    th.start()
+    qemu = boot(1, extra=["-netdev", f"user,id=n1,net=169.254.0.0/16,guestfwd=tcp:169.254.169.254:80-cmd:{sys.executable} {bridge} {imds.getsockname()[1]}",
+                          "-device", "virtio-net-pci,netdev=n1", "-append", "mcloud"])
+    out = b""
+    deadline = time.time() + timeout
+    ok = read_until(b"mcloud: user data saved", 0)
+    th.join(10)
+    imds.close()
+    if ok and imds_log == want_log:
+        print("ok   boot option mcloud: setup ran at boot, once the network was up")
+    else:
+        print("FAIL boot option mcloud:", repr(out[-600:]), imds_log); fails += 1
+    mark = len(out)
+    qemu.stdin.write(b"ash\r"); qemu.stdin.flush()
+    read_until(b"\n# ", mark)
+    mark = len(out)
+    qemu.stdin.write(b"hostname; cat /root/.ssh/authorized_keys\r"); qemu.stdin.flush()
+    if read_until(b"\n# ", mark) and b"cloudbox-7.internal" in out[mark:] and imds_key.encode() in out[mark:]:
+        print("ok   boot option mcloud: the host name and key are in place")
+    else:
+        print("FAIL boot option mcloud state:", repr(out[mark:])); fails += 1
+    qemu.kill(); qemu.wait()
+
 def send_line_ok(line, until):
     mark = len(out)
     qemu.stdin.write(line + b"\r"); qemu.stdin.flush()

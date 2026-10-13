@@ -117,15 +117,18 @@ $(B)/kernel.o: $(B)/kernel.c
 $(B)/platform.o: boot/aarch64/platform.c | $(B)
 	$(ACC) $(TCFLAGS) -mstrict-align -c -o $@ $<
 
+$(B)/efi.o: boot/aarch64/efi.c | $(B)
+	$(ACC) $(TCFLAGS) -mstrict-align -c -o $@ $<
+
 $(B)/boot.o: boot/aarch64/boot.S | $(B)
 	$(ACC) -c -o $@ $<
 
 $(B)/libc.o: boot/libc.c | $(B)
 	$(ACC) $(TCFLAGS) -mstrict-align -c -o $@ $<
 
-$(B)/bastios.elf: $(B)/boot.o $(B)/platform.o $(B)/kernel.o $(B)/libc.o boot/aarch64/linker.ld
+$(B)/bastios.elf: $(B)/boot.o $(B)/efi.o $(B)/platform.o $(B)/kernel.o $(B)/libc.o boot/aarch64/linker.ld
 	$(ALD) -nostdlib -static --no-warn-rwx-segments -T boot/aarch64/linker.ld -o $@ \
-	  $(B)/boot.o $(B)/kernel.o $(B)/platform.o $(B)/libc.o
+	  $(B)/boot.o $(B)/efi.o $(B)/kernel.o $(B)/platform.o $(B)/libc.o
 
 # QEMU hands a device tree only to an Image, which is the ELF's contents with
 # the arm64 header boot.S begins with.
@@ -152,9 +155,8 @@ clean:
 #   make -f arch/aarch64/Makefile compat            writes build/aarch64/compat/report.md
 #   make -f arch/aarch64/Makefile compat-baseline   records which checks pass now
 # It fails only if a check in test/compat/baseline-aarch64.txt stops passing.
-# t_ptrace reads x86-64 registers (PTRACE_GETREGS, rip) and has no AArch64
-# version yet.
-COMPAT_X86ONLY := t_ptrace
+# Programs that exist only for x86-64 (none now).
+COMPAT_X86ONLY :=
 COMPAT_PROGS := $(filter-out $(COMPAT_X86ONLY),$(patsubst test/compat/progs/%.c,%,$(wildcard test/compat/progs/t_*.c)))
 COMPAT_BINS := $(COMPAT_PROGS:%=$(B)/compat/%)
 ULFLAGS := -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x400000 -Wl,--build-id=none

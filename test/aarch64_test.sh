@@ -29,10 +29,16 @@ if [ "${1:-}" = --build ]; then
   # bastioc1 is the only compiler with the AArch64 targets: use the one
   # the Makefile builds with stage0 (BASTIOC may name bastioc0 for the x86-64 tests).
   make ARCH=aarch64 BASTIOC=build/bastioc1 -s all || exit 1
+elif ! command -v "$QEMU" >/dev/null; then
+  # The variants in test/all.sh (GIC=, VIRT=, MEM=) reuse the kernel the
+  # --build run made, so they skip the same way.
+  echo "SKIP aarch64: needs $QEMU"
+  [ "${AARCH64_REQUIRED:-}" = 1 ] && exit 1
+  exit 0
 fi
 
 python3 - "$KERNEL" "$QEMU" "$TIMEOUT" <<'PY'
-import os, re, select, subprocess, sys, tempfile, time
+import os, re, select, shutil, subprocess, sys, tempfile, time
 
 # A blank disk (sparse): BastiOS formats it on first use.
 disk_dir = tempfile.TemporaryDirectory()
@@ -41,11 +47,36 @@ with open(disk, "wb") as f:
     f.truncate(32 * 1024 * 1024)
 
 kernel, qemu_bin, timeout = sys.argv[1], sys.argv[2], float(sys.argv[3])
+# UEFI=<firmware image> boots the kernel as an EFI application from a FAT
+# directory (BOOTAA64.EFI), through the firmware, instead of with -kernel.
+# The firmware gets the device tree only when ACPI is off. The FAT drive
+# comes first: the kernel takes the virtio-mmio slot QEMU gives the last
+# device added.
+# NVME=1 puts the disk on the PCI Express bus as an NVMe drive.
+# VIRTIO_PCI=1 puts the disk (unless NVME=1) and the network card (unless NIC=)
+# on the PCI Express bus as modern virtio functions.
+# NIC=<model> puts the network card on the PCI Express bus (e1000, e1000e, igb).
+nvme = os.environ.get("NVME", "") == "1"
+nic = os.environ.get("NIC", "")
+vpci = os.environ.get("VIRTIO_PCI", "") == "1"
+uefi = os.environ.get("UEFI", "")
+if uefi and not os.path.exists(uefi):
+    print("SKIP aarch64 uefi: no firmware at " + uefi + " (Debian/Ubuntu: qemu-efi-aarch64)")
+    sys.exit(1 if os.environ.get("AARCH64_REQUIRED") == "1" else 0)
+if uefi:
+    esp = os.path.join(disk_dir.name, "esp", "EFI", "BOOT")
+    os.makedirs(esp)
+    shutil.copy(kernel, os.path.join(esp, "BOOTAA64.EFI"))
+    boot = ["-bios", uefi, "-drive", "file=fat:rw:" + os.path.join(disk_dir.name, "esp") + ",format=raw,if=none,id=esp",
+            "-device", "virtio-blk-device,drive=esp"]
+else:
+    boot = ["-kernel", kernel]
 qemu = subprocess.Popen(
-    [qemu_bin, "-M", "virt,gic-version=3", "-cpu", "cortex-a72", "-smp", os.environ.get("SMP", "4"), "-m", "256M", "-nographic",
-     "-no-reboot", "-kernel", kernel,
-     "-drive", f"file={disk},format=raw,if=none,id=vd", "-device", "virtio-blk-device,drive=vd",
-     "-netdev", "user,id=n0,net=10.0.2.0/24", "-device", "virtio-net-device,netdev=n0", "-serial", "stdio", "-monitor", "none"],
+    [qemu_bin, "-M", "virt,gic-version=" + os.environ.get("GIC", "3") + os.environ.get("VIRT", "") + (",acpi=off" if uefi else ""), "-cpu", os.environ.get("CPU", "cortex-a72"), "-smp", os.environ.get("SMP", "4"), "-m", os.environ.get("MEM", "256M"), "-nographic",
+     "-no-reboot"] + boot + [
+     "-drive", f"file={disk},format=raw,if=none,id=vd",
+     "-device", ("nvme,drive=vd,serial=bastio" if nvme else "virtio-blk-pci,disable-legacy=on,drive=vd" if vpci else "virtio-blk-device,drive=vd"),
+     "-netdev", "user,id=n0,net=10.0.2.0/24", "-device", (nic + ",netdev=n0" if nic else "virtio-net-pci,disable-legacy=on,netdev=n0" if vpci else "virtio-net-device,netdev=n0"), "-serial", "stdio", "-monitor", "none"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 deadline = time.time() + timeout
 out = b""
@@ -162,7 +193,12 @@ run("cat d/f2", b"no such file")
 # The virtio-mmio disk and network card (src/virtio_blk.bastio and
 # src/virtio_net.bastio over src/virtio_mmio.bastio, shared with x86-64).
 check("the device tree lists QEMU virt's 32 virtio-mmio slots", b"devicetree: 32 virtio-mmio slots from 0x000000000a000000\r\n" in out)
-check("the virtio disk is found", b"disk: virtio\r\n" in out)
+if nvme:
+    check("the NVMe disk is found", b"disk: NVMe\r\n" in out)
+else:
+    check("the virtio disk is found", b"disk: virtio\r\n" in out)
+if nic:
+    check("the PCI network card is found", b"net: e1000\r\n" in out)
 run("echo on disk > disk/a", b"")
 run("cat disk/a", b"on disk")
 run("ls disk", b"a")

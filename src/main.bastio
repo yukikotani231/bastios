@@ -1343,6 +1343,12 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   } else if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
   }
+  // With the boot option `mcloud`, first-boot setup from the instance
+  // metadata service runs beside the console (user/mcloud.c, named
+  // `mcloud-boot` so that it waits for the network).
+  if boot_word(cpu, "mcloud") && spawn_as(&mut k, MCLOUD_PROG, 0, "mcloud-boot") == 0 {
+    puts(&mut con, "cannot start mcloud\r\n");
+  }
   // Every processor runs the scheduler until the kernel stops; then they
   // are all back in their park loops and the state is this one's again.
   con_flush(&mut term, &mut con);

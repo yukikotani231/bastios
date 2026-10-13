@@ -1,0 +1,6 @@
+// How PCI configuration space is reached is architecture specific:
+// src/<arch>/arch/pcicfg.bastio, found through the --lib directory the build
+// passes for that architecture. It defines struct Pci, pci_ok, pci_read and
+// pci_write, and PCI_NONE, the number of device indexes plus one.
+
+import "arch/pcicfg.bastio";

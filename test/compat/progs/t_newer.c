@@ -234,8 +234,8 @@ int main(int argc, char **argv) {
     }
     /* membarrier: a query answers with the commands there are (none here,
      * a mask on Linux); an unknown command is EINVAL. */
-    EXPECT("membarrier query", syscall(324, 0, 0) >= 0);
-    EXPECT("membarrier unknown command", syscall(324, 1 << 30, 0) == -1 && errno == EINVAL);
+    EXPECT("membarrier query", syscall(SYS_membarrier, 0, 0) >= 0);
+    EXPECT("membarrier unknown command", syscall(SYS_membarrier, 1 << 30, 0) == -1 && errno == EINVAL);
     unlink("nw_x");
     unlink("nw_l");
     unlink("nw_f");
