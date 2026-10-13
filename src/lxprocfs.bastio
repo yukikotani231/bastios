@@ -101,6 +101,7 @@ const SY_NETARP: u64 = 28;             // /proc/net/arp
 const SY_CORE: u64 = 29;               // /proc/sys/kernel/core_pattern (nothing dumps core)
 const SY_NROPEN: u64 = 30;             // /proc/sys/fs/nr_open
 const SY_DROP: u64 = 31;               // /proc/sys/vm/drop_caches: written, kept for nothing
+const SY_NEXTID: u64 = 96;             // 96 .. 98: /proc/sys/kernel/{msg,sem,shm}_next_id, by IPC kind (src/lxipc.bastio)
 const SY_LOOP: u64 = 32;               // 32 ..: loop device n's attribute a at n * LOOP_SYS + a
 const SY_NS: u64 = 128;                // 128 ..: /proc/P/ns link f at P * NF_N + f (src/lxnsk.bastio)
 const NF_N: u64 = 8;
@@ -512,6 +513,15 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   if xfer_is(x, 5, n, "sys/fs/nr_open") {
     return PROC_DEV + PSYS + SY_NROPEN;
   }
+  if xfer_is(x, 5, n, "sys/kernel/msg_next_id") {
+    return PROC_DEV + PSYS + SY_NEXTID + KQ;
+  }
+  if xfer_is(x, 5, n, "sys/kernel/sem_next_id") {
+    return PROC_DEV + PSYS + SY_NEXTID + KS;
+  }
+  if xfer_is(x, 5, n, "sys/kernel/shm_next_id") {
+    return PROC_DEV + PSYS + SY_NEXTID + KM;
+  }
   if xfer_is(x, 5, n, "sys/vm/drop_caches") {
     return PROC_DEV + PSYS + SY_DROP;
   }
@@ -700,8 +710,13 @@ fn loop_sys_text(k: &mut Kernel, s: u64, o: &mut Bytes) -> u64
 
 /// Whether /proc file f may be opened for writing (by root: it is
 /// rw-r--r--): /proc/sys/fs/pipe-max-size, the one writable sysctl.
+/// Is f one of the *_next_id files? Its IPC kind is f - PROC_DEV - PSYS - SY_NEXTID.
+fn is_nextid_file(f: u64) -> bool {
+  return f >= PROC_DEV + PSYS + SY_NEXTID && f < PROC_DEV + PSYS + SY_NEXTID + 3;
+}
+
 fn proc_writable(f: u64) -> bool {
-  return f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
+  return is_nextid_file(f) || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
 }
 
 /// What stat says about /proc file f (a proc_file device).
@@ -1591,6 +1606,14 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     if what == SY_DROP {
       return put_s(&mut o, 0, "0\n");
     }
+    if what >= SY_NEXTID && what < SY_NEXTID + 3 {
+      let want = get(k.sys, SYS_NEXTID + (what - SY_NEXTID));
+      if want == 0 {
+        return put_s(&mut o, 0, "-1\n");
+      }
+      let a = put_n(&mut o, 0, want - 1);
+      return put_c(&mut o, a, 10);
+    }
     if what == SY_PIPE_MAX {
       let a = put_n(&mut o, 0, pipe_max(k));
       return put_c(&mut o, a, 10);
@@ -2393,6 +2416,51 @@ fn lx_procfs_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u
 /// does (round_pipe_size), at least a page and at most 2^31. Returns n,
 /// or -EINVAL for anything else. Past PIPE_CAP it is kept and read back,
 /// but a pipe still holds no more than PIPE_CAP (F_SETPIPE_SZ: ENOMEM).
+/// A write of n bytes in k.fs.xfer, starting at i after the blanks, to a
+/// *_next_id file: -1 (none) or an id up to INT_MAX for the next new
+/// object of that IPC kind.
+fn next_id_write(k: &mut Kernel, f: u64, n: u64, start: u64) -> u64
+  requires kok(k) && n <= 32 && start <= n && f >= PROC_DEV + PSYS + SY_NEXTID && f < PROC_DEV + PSYS + SY_NEXTID + 3
+  ensures kok(k)
+{
+  let mut i = start;
+  let mut neg = false;
+  if i < n && bget(k.fs.xfer, i) == 45 {
+    neg = true;
+    i = i + 1;
+  }
+  let mut v = 0;
+  let mut any = false;
+  while i < n && bget(k.fs.xfer, i) >= 48 && bget(k.fs.xfer, i) <= 57 && v <= 0x80000000
+    invariant i <= n && n <= 32 && v <= 0x80000009 * 10 && kok(k)
+  {
+    v = v * 10 + cast[u64](bget(k.fs.xfer, i)) - 48;
+    any = true;
+    i = i + 1;
+  }
+  while i < n && (bget(k.fs.xfer, i) == 10 || bget(k.fs.xfer, i) == 32 || bget(k.fs.xfer, i) == 9)
+    invariant i <= n && n <= 32 && kok(k)
+  {
+    i = i + 1;
+  }
+  if !any || i < n {
+    return EINVAL;
+  }
+  let kind = f - PROC_DEV - PSYS - SY_NEXTID;
+  if neg {
+    if v != 1 {
+      return EINVAL;                        // only -1 is below zero
+    }
+    k.sys = set(k.sys, SYS_NEXTID + kind, 0);
+    return n;
+  }
+  if v > 0x7FFFFFFF {
+    return EINVAL;
+  }
+  k.sys = set(k.sys, SYS_NEXTID + kind, v + 1);
+  return n;
+}
+
 fn proc_write(k: &mut Kernel, pid: u64, f: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -2402,6 +2470,9 @@ fn proc_write(k: &mut Kernel, pid: u64, f: u64, va: u64, n: u64) -> u64
   }
   if is_um_file(f) {
     return um_write(&mut k, pid, f, va, n);   // src/lxuser.bastio
+  }
+  if f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 {
+    return uts_proc_write(&mut k, pid, f - (PROC_DEV + PSYS + SY_UTS), va, n);   // src/lxsys.bastio
   }
   if !proc_writable(f) || n == 0 || n > 32 {
     return EINVAL;
@@ -2423,6 +2494,9 @@ fn proc_write(k: &mut Kernel, pid: u64, f: u64, va: u64, n: u64) -> u64
     invariant i <= n && n <= 32 && kok(k)
   {
     i = i + 1;
+  }
+  if f >= PROC_DEV + PSYS + SY_NEXTID && f < PROC_DEV + PSYS + SY_NEXTID + 3 {
+    return next_id_write(&mut k, f, n, i);
   }
   let mut v = 0;
   let mut any = false;
