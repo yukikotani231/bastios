@@ -196,11 +196,12 @@ fn sfd_one(k: &mut Kernel, pid: u64, s: u64, va: u64) -> bool
   bset(&mut k.fs.xfer, 0, cast[u8](s));                 // ssi_signo
   let word = wget(k.sigsave, sender_at(pid, s));
   bset(&mut k.fs.xfer, 12, cast[u8](word % 256));       // ssi_pid
+  bset(&mut k.fs.xfer, 13, cast[u8](word / 256 % 4));
   if nsk_of(k, NSK_PID, pid) != 0 {
-    xfer_u64(&mut k.fs.xfer, 12, vpid_of(k, pid, word % 256) % 0x100000000);   // and ssi_uid (below) is set after
+    xfer_u64(&mut k.fs.xfer, 12, vpid_of(k, pid, word % SW_PID) % 0x100000000);   // and ssi_uid (below) is set after
   }
-  if word / 256 % 2 == 1 {
-    let v = word / 512;
+  if word / SW_QUEUE % 2 == 1 {
+    let v = word / SW_VAL;
     let mut i = 0;
     while i < 4
       invariant i <= 4 && kok(k)

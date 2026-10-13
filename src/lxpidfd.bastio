@@ -31,6 +31,7 @@ const LX_KCMP: u64 = 312;
 const LX_PIDFD_SEND_SIGNAL: u64 = 424;
 const LX_PIDFD_OPEN: u64 = 434;
 const LX_PIDFD_GETFD: u64 = 438;
+const PVM_WAIT: u64 = 4611686018427387904;           // process_vm's answer: not yet (no byte count is this large)
 const KCMP_FILE: u64 = 0;
 const KCMP_EPOLL_TFD: u64 = 7;
 
@@ -53,6 +54,9 @@ fn lx_pidfd_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u6
   } else if n == LX_PROCESS_VM_READV || n == LX_PROCESS_VM_WRITEV {
     r = process_vm(&mut k, pid, n == LX_PROCESS_VM_WRITEV, a, b, c, pget(k.procs, pid, F_REGS + R_R10),
       pget(k.procs, pid, F_REGS + R_R8), pget(k.procs, pid, F_REGS + R_R9));
+    if r == PVM_WAIT {
+      return lx_retry(&mut k, pid, n);      // the target runs on another processor: try again once it has left its space
+    }
   } else if n == LX_KCMP {
     r = lx_kcmp(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));
   }
@@ -178,9 +182,10 @@ fn pidfd_reuse(k: &mut Kernel, c: u64)
   requires kok(k) && c < NPROC
   ensures kok(k)
 {
+  let hi = smaller(k.ofd_hi, OFD_N);
   let mut h = 0;
-  while h < OFD_N
-    invariant h <= OFD_N && kok(k)
+  while h < hi
+    invariant h <= hi && hi <= OFD_N && kok(k)
   {
     if of_get(k.ofd, h, 0) == OF_PIDFD && of_get(k.ofd, h, 2) == c {
       of_set(&mut k.ofd, h, 2, NPROC);
@@ -260,7 +265,8 @@ fn iov_entry(k: &mut Kernel, pid: u64, arr: u64, i: u64) -> Iov
 /// process_vm_readv (or, when `write`, process_vm_writev)(p, local,
 /// lcnt, remote, rcnt, flags): copies from process p's remote iovecs into
 /// the caller's local ones (or the other way). Returns the bytes copied,
-/// short where a page is missing, or -errno if none were.
+/// short where a page is missing, or -errno if none were; PVM_WAIT if the
+/// first page to write is copy-on-write and could not be copied yet.
 fn process_vm(k: &mut Kernel, pid: u64, write: bool, p: u64, local: u64, lcnt: u64, remote: u64, rcnt: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -334,6 +340,15 @@ fn process_vm(k: &mut Kernel, pid: u64, write: bool, p: u64, local: u64, lcnt: u
   }
   bfree(buf);
   if done == 0 && more == false && li < lcnt && ri < rcnt {
+    // A write to a copy-on-write page that could not be copied because the
+    // process is running on another processor: the page is private memory
+    // the kernel may not copy yet, not a bad address. The call runs again.
+    if write {
+      let r = iov_entry(&mut k, pid, remote, ri);
+      if r.err == 0 && user_cow_page(&mut k.spaces, k.mem.bm, tp, sat_add(r.base, ro)) {
+        return PVM_WAIT;
+      }
+    }
     return EFAULT;
   }
   return done;

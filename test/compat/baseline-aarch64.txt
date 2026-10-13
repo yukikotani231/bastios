@@ -694,6 +694,7 @@ t_newer: process_vm_readv of a reaped child
 t_newer: process_vm_readv of itself
 t_newer: process_vm_readv with flags
 t_newer: process_vm_writev to a child and back
+t_newer: process_vm_writev to a child just forked, repeatedly
 t_newer: pwritev2 at -1 appends at the offset
 t_newer: pwritev2 at an offset
 t_newer: rewinddir
@@ -980,6 +981,8 @@ t_thread: /proc/self/task lists the threads, and /proc/self/task/TID has their f
 t_thread: /proc/self/task/TID/fd/N and ns/ are the process's
 t_thread: 4 threads, mutex
 t_thread: a thread keeps its descriptors while another spawns a child
+t_thread: clone3: CLONE_CLEAR_SIGHAND, and what it refuses
+t_thread: clone3: a fork child
 t_thread: condition variable
 t_thread: exit_group while another thread runs keeps its code
 t_thread: gettid differs in a thread

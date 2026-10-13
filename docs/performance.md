@@ -117,6 +117,48 @@ nothing: rerun both on the same host back to back before trusting a small
 difference. The numbers are not hardware timing; once BastiOS runs on a
 physical machine, record that table next to Linux's on the same machine.
 
+`bench/run.py --icount` times by instructions executed instead of host time
+(TCG with `-icount shift=0`: the guest clock advances one nanosecond per
+instruction). Three runs of one test agree to 0.02%, where wall time moves by
+20% with the host's load, so it is the way to see a change of a few percent.
+It counts instructions, not cycles: a TLB flush or a cache miss costs nothing
+in it, so compare two kernels with it, and do not read it against Linux's
+times. `bench/insnprof.py -- COMMAND` says where the instructions go: it
+single-steps the guest from gdb and charges each to a kernel function, per
+call. On 2026-10-13 a `getppid` call took 2640 instructions (after the
+`sock_wake` fix; the FPU page's copy in and out by loops in the compiler's
+runtime is about 600 of them, the 21 registers' save and 18 restores about
+500, `sched`, `finish` and `next_job` the rest), and a `stat` of a tmpfs file
+12500: the 2600 of any call plus path lookup (`ns_find` 1400, `ram_find` 1200,
+`take_node` and `put_node` 1800, `put_stat` 850, an allocation 800).
+Two scans that cost the same on every call were cut with a high-water mark
+(`Kernel.ofd_hi`, `Kernel.mt_hi`): `ns_find` looked at all 64 mount slots, and
+`pidfd_reuse` at all 4096 open file descriptions on each fork. After them a
+`stat` of a tmpfs file is 11200 instructions (`ns_find` is out of the
+profile), and `fork` + `exit` + `wait` 160600, down from 202200; a fork of
+a group with no `memory.max` also stopped counting the parent's pages. What
+is left in a fork is table walking: `clone_l1`, `free_l1` and their kin read
+all 512 entries of every page table the process has, about 3000 instructions
+a table, whatever it holds. The other fixed scan is the 1024-slot descriptor
+table, walked on every process exit and fork: `lx_fd_close_all` called
+`lx_fd_close` for each slot (5700 instructions) and `lx_fd_fork` took a
+reference for each; both now look at the slot first (the exit walk is 1500).
+By `bench/run.py --icount` that is `fork` 196 to 168 us and `exec` 655 to
+629 us.
+
+`make buildbench` (`test/buildbench.sh`) is an end-to-end number the table
+does not have: `make -j1` and `make -jN` of 100 small C files with tcc, on the
+development disk, on `-smp N` (`SMP=`, default 2). It prints the median seconds
+of each and the speed-up. Measured on one shared 4-core host under QEMU TCG:
+`-j1` 1.8 s (the same on one processor and on two), `-j2` 1.4 s (1.3 times as
+fast), `-j4` on `-smp 4` 1.2 s (1.5 times). Those fit a fixed 1.0 s that does
+not shrink plus 0.8 s that divides by the job count, so about half of a build
+is serial. Most of that is probably system call time: every call of every
+processor takes the kernel's one lock (`Lock[Sys]`, see "How it scales" in
+docs/architecture.md), and a compile is mostly `exec`, file creation and
+reads. That is a guess from the fit, not a profile. It is not part of
+`make bench`, which runs the same program on Linux; this one is BastiOS alone.
+
 ## Reading the numbers
 
 TCG is not a processor. It inflates some costs and hides others, and it

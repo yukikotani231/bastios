@@ -217,6 +217,33 @@ fn user_shared_page(spaces: &mut Vec[Space], bm: &Buf, pid: u64, va: u64) -> u64
   }
 }
 
+/// Whether the page at user address va of process pid is a copy-on-write
+/// page (`bm` marks it COW_PAGE). The kernel cannot give such a page its
+/// own copy while a processor runs user code on the space (cow_touch
+/// refuses, see src/lxcow.bastio), so a kernel write for the process that
+/// fails there has to wait and try again: the lease may be gone by the time
+/// the caller looks, so this does not ask about it.
+fn user_cow_page(spaces: &mut Vec[Space], bm: &Buf, pid: u64, va: u64) -> bool
+  requires spaces_ok(spaces) && pid < NPROC
+  ensures spaces_ok(spaces)
+{
+  if !user_range(va, 1) {
+    return false;
+  }
+  let off = va - USER_BASE;
+  match take_space(&mut spaces, pid) {
+    Space::Empty => { return false; },
+    Space::Mapped(mut root) => {
+      let mut r = NO_RESULT;
+      if pt_has(root, 1) {
+        r = pt_borrow(&mut root, 1, l3_shared, off);
+      }
+      put_space(&mut spaces, pid, Space::Mapped(root));
+      return r < len(bm) && get(bm, r) == COW_PAGE;
+    },
+  }
+}
+
 /// Is the page at user address va of process pid mapped writable?
 fn user_page_writable(spaces: &mut Vec[Space], pid: u64, va: u64) -> bool
   requires spaces_ok(spaces) && pid < NPROC
