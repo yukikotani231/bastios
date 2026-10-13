@@ -1018,6 +1018,7 @@ alpine: dropbear: the server stops, in the Alpine guest
 alpine-tty: nvim: it reads the terminal's size, and has colours
 alpine-tty: tmux: attach on the console, run a command in the session, detach and find it still there
 alpine-tty: tmux: Neovim in a pane takes keys through tmux and saves the file
+alpine-tty: nvim: :terminal runs a shell in a window, takes typed keys, and the shell's exit closes it
 node: node: a hot loop is compiled and gives the right sum
 node: node: a script with arrays and JSON
 node: node: an expression
