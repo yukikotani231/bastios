@@ -298,6 +298,23 @@ touch: /x: Read-only file system
 touch=1
 status 0
 
+== container: runc runs on an overlay of the image root: writes and deletions stay in the upper layer
+$ bb mkdir -p /disk/ou /disk/ow /disk/om /disk/o /run/runc && bb mount -t overlay overlay -o lowerdir=/disk/a,upperdir=/disk/ou,workdir=/disk/ow /disk/om && cd /disk/o && /disk/runc spec && bb sed -i -e 's#"path": "rootfs"#"path": "/disk/om"#' -e 's#"terminal": true#"terminal": false#' -e 's#"readonly": true#"readonly": false#' -e 's#"sh"#"/bin/sh", "-c", "echo hi > /ov.txt; rm /etc/motd; cat /ov.txt; ls /etc/motd 2>\&1; echo done"#' config.json && /disk/runc --root /run/runc run co < /dev/null; echo status $?; bb cat /disk/ou/ov.txt; test -e /disk/a/ov.txt || echo lower-clean; test -e /disk/a/etc/motd && echo lower-kept; bb umount /disk/om
+hi
+ls: /etc/motd: No such file or directory
+done
+status 0
+hi
+lower-clean
+lower-kept
+
+== container: runc loads a seccomp filter from the config: mkdir answers EPERM, the rest runs
+$ bb mkdir -p /disk/sc /run/runc && cd /disk/sc && /disk/runc spec && bb sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"linux": {#"linux": {"seccomp": {"defaultAction": "SCMP_ACT_ALLOW", "architectures": ["SCMP_ARCH_X86_64"], "syscalls": [{"names": ["mkdir", "mkdirat"], "action": "SCMP_ACT_ERRNO", "errnoRet": 1}]},#' -e 's#"sh"#"/bin/sh", "-c", "mkdir /m 2>\&1; echo mkdir=$?; hostname"#' config.json && /disk/runc --root /run/runc run cs < /dev/null; echo status $?
+mkdir: can't create directory '/m': Operation not permitted
+mkdir=1
+runc
+status 0
+
 == container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle
 $ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress jq 2>/dev/null; bb cp /disk/runc /disk/a/usr/bin/runc && bb cp /disk/ocipull.sh /disk/a/ocipull.sh && bb mkdir -p /disk/a/pull && bb chown 65534:65534 /disk/a/pull && bb chroot /disk/a /bin/su -s /bin/sh nobody -c 'OCI_HTTP=1 sh /ocipull.sh -r 10.0.2.2:HOSTPORT/secure/alpine:latest /pull/b' 2>/disk/a/pull.err | bb sed 's#10.0.2.2:[0-9]*#REGISTRY#'; bb grep -v -i warn /disk/a/pull.err; bb rm -f /disk/a/pull.err; bb ls /disk/a/pull/b/rootfs/etc/ocilayer /disk/a/pull/b/rootfs/etc/motd 2>&1 | bb sed 's#.*pull/b/rootfs#rootfs#'
 REGISTRY/secure/alpine:latest: 2 layers in /pull/b
