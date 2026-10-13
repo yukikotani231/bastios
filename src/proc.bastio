@@ -465,6 +465,7 @@ const SYS_JC: u64 = 11008;              // SYS_DL + NPROC * 3; a word per proces
 const SYS_TM: u64 = 11264;              // SYS_JC + NPROC; NPROC * 3 words (system and children's times, src/lxrlimit.bastio)
 const SYS_RB: u64 = 12032;              // SYS_TM + NPROC * 3; a word per thread (robust futex list head, src/lxthread.bastio)
 const SYS_CAP: u64 = 12288;             // SYS_RB + NPROC; NPROC * CAP_W words (capabilities, src/lxcap.bastio)
+const SYS_NEXTID: u64 = 151;           // 151 .. 153: the id /proc/sys/kernel/{msg,sem,shm}_next_id asks the next new queue, set or segment to get, + 1 (0: none; src/lxipc.bastio)
 const SYS_PIPEMAX: u64 = 150;          // /proc/sys/fs/pipe-max-size (0: PIPE_CAP), past the adjtimex words (src/lxsys.bastio)
 const SYS_AT: u64 = 13568;             // SYS_IOP + NPROC; AT_N entries of 3 words: handle + 1, access time, the modification time it was set against
 const AT_N: u64 = 32;
