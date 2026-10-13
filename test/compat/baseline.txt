@@ -1015,6 +1015,8 @@ node: node: timers and promises run in order
 node: node: version
 t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller
 t_thread: a thread keeps its descriptors while another spawns a child
+t_thread: clone3: CLONE_CLEAR_SIGHAND, and what it refuses
+t_thread: clone3: a fork child
 apps: ripgrep: a search over many files on several threads
 apps: ripgrep: case-insensitive counts and file lists
 apps: ripgrep: replacement, multi-line and standard input

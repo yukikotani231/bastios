@@ -12,6 +12,8 @@
 #include <dirent.h>
 #include <spawn.h>
 #include <sys/stat.h>
+#include <signal.h>
+#include <stdint.h>
 
 static int counter;
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -191,6 +193,50 @@ static void *fd_user(void *arg) {
     return arg;
 }
 
+/* clone3 (glibc's pthread_create and posix_spawn use it first). */
+struct c3args { uint64_t flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls, set_tid, set_tid_size, cgroup; };
+static void c3_handler(int s) { (void)s; }
+
+/* A vfork-style child with CLONE_CLEAR_SIGHAND sees default handlers (an
+ * ignored signal stays ignored), the parent keeps its own, and a set_tid
+ * request or a structure too short for the first version is refused. */
+static int clone3_clear_sighand(void) {
+    struct c3args a;
+    memset(&a, 0, sizeof a);
+    signal(SIGUSR1, c3_handler);
+    signal(SIGUSR2, SIG_IGN);
+    a.flags = 0x100 | 0x4000 | (1ULL << 32);        /* CLONE_VM | CLONE_VFORK | CLONE_CLEAR_SIGHAND */
+    a.exit_signal = SIGCHLD;
+    long r = syscall(435, &a, sizeof a);
+    if (r == 0) {
+        struct sigaction o;
+        sigaction(SIGUSR1, 0, &o);
+        int dfl = o.sa_handler == SIG_DFL;
+        sigaction(SIGUSR2, 0, &o);
+        _exit(dfl * 2 + (o.sa_handler == SIG_IGN));
+    }
+    int st = 0;
+    if (r < 0 || waitpid(r, &st, 0) != r || !WIFEXITED(st) || WEXITSTATUS(st) != 3) return 0;
+    struct sigaction o;
+    sigaction(SIGUSR1, 0, &o);
+    if (o.sa_handler != c3_handler) return 0;
+    a.set_tid_size = 1;
+    if (syscall(435, &a, sizeof a) != -1 || errno != E2BIG) return 0;
+    a.set_tid_size = 0;
+    return syscall(435, &a, 40) == -1 && errno == EINVAL;
+}
+
+/* A clone3 fork child runs on its own copy and its exit status arrives. */
+static int clone3_fork(void) {
+    struct c3args a;
+    memset(&a, 0, sizeof a);
+    a.exit_signal = SIGCHLD;
+    long r = syscall(435, &a, 64);
+    if (r == 0) _exit(5);
+    int st = 0;
+    return r > 0 && waitpid(r, &st, 0) == r && WIFEXITED(st) && WEXITSTATUS(st) == 5;
+}
+
 static int spawn_keeps_fds(void) {
     int p[2];
     if (pipe(p)) return 0;
@@ -237,6 +283,8 @@ int main(void) {
     EXPECT("/proc/self/task/TID/fd/N and ns/ are the process's", task_fd());
     EXPECT("threads that ended and began one after another have different ids", tids_differ());
     EXPECT("a thread keeps its descriptors while another spawns a child", spawn_keeps_fds());
+    EXPECT("clone3: CLONE_CLEAR_SIGHAND, and what it refuses", clone3_clear_sighand());
+    EXPECT("clone3: a fork child", clone3_fork());
     if (begin("exit_group while another thread runs keeps its code")) {
         int r = group_exit_code();
         if (r == 1) pass(); else if (r == 0) fail("fork or waitpid failed");
