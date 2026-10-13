@@ -413,7 +413,7 @@ fn wake_readers(procs: &mut Buf, q: &mut Queue, line: &Buf)
 // Everything the kernel owns, in one place. `mmu` and `cpu` stay with
 // `main`, which lends them where they are needed.
 // Linux file descriptors (src/lxfd.bastio).
-const LXNFD: u64 = 512;
+const LXNFD: u64 = 1024;
 const LXFD_LEN: u64 = NPROC * LXNFD;
 const FD_CONSOLE: u64 = 1;
 const FD_OFD: u64 = 2;
@@ -1295,7 +1295,7 @@ fn new_pid_from(k: &mut Kernel, round: bool) -> u64
   // The process table last: its length is how many rows every table has.
   if !zgrow(&mut k.sigact, n * SIGACT_ROW) || !zgrow(&mut k.cwd, n * CWD_STRIDE)
      || !zgrow(&mut k.croot, n * CWD_STRIDE) || !zgrow(&mut k.lxfd, n * LXNFD)
-     || !zgrow(&mut k.fs.ftab, n * NFD * FD_STRIDE) || !zgrow(&mut k.sigsave, n * SIGSAVE_ROW) || !zgrow(&mut k.procs, n * STRIDE) {
+     || !zgrow(&mut k.fs.ftab, (FD_POOL + n * NFD) * FD_STRIDE) || !zgrow(&mut k.sigsave, n * SIGSAVE_ROW) || !zgrow(&mut k.procs, n * STRIDE) {
     return 0;
   }
   let grown = free_pid(k.procs, cap);
