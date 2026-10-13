@@ -1046,6 +1046,8 @@ alpine: container: the root file system is read-only, and the exit status comes 
 alpine: container: rootless: runc runs Alpine as an unprivileged user in a user namespace of its own
 alpine: container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle
 alpine: container: the image's command, environment and working directory run rootless from the bundle
+alpine: container: runc runs on an overlay of the image root: writes and deletions stay in the upper layer
+alpine: container: runc loads a seccomp filter from the config: mkdir answers EPERM, the rest runs
 alpine: nvim: a headless server on a unix socket answers another nvim (--listen, sockconnect, RPC)
 alpine: apk: install tmux, cmake and lua-language-server over HTTP
 alpine: tmux: a client on the console passes it to the server (SCM_RIGHTS of the console)
