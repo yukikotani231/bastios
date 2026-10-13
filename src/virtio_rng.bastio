@@ -1,0 +1,110 @@
+// A virtio entropy source (virtio-rng), read once at boot. A cloud guest has
+// no keyboard to type on and no disk seek to time: the time-stamp counter
+// is nearly all the kernel's generator (src/lxdev.bastio) would have to go
+// on when the first program asks for a host key. The host does have
+// entropy, and a hypervisor offers it as this device (Firecracker's
+// entropy device, QEMU's virtio-rng, KVM clouds' default).
+//
+// The driver asks for VRNG_BYTES bytes in one request, waits for them,
+// resets the device and gives every page and register back, so it is gone
+// before any other driver looks for its device. The bytes go to the pool
+// as words (rng_hw in the transport's architecture directory). Proved: the
+// queue and the buffer stay inside the pages lent to the device, the wait
+// ends, and the pages are taken back only after the device was reset.
+// Trusted: that the bytes are random. A host that gives bad bytes adds
+// nothing, but does not take away what the counter and the clock gave,
+// because the pool only mixes them in.
+
+import "virtq.bastio";
+import "vt.bastio";
+
+const VIRTIO_RNG: u64 = 0x1005;       // legacy (transitional) entropy source id
+const VM_ID_RNG: u64 = 4;             // the same device's id on virtio-mmio
+const VRNG_PAGES: u64 = 4;            // three for the queue and one for the bytes
+const VRNG_WORDS: u64 = 8;            // 64-bit words asked for
+const VRNG_BYTES: u64 = 64;
+// Looks at the used ring this often before giving up: fewer than VIO_SPINS,
+// since the device is an extra and a boot waits for it (about a second under
+// TCG, a fraction of one under KVM).
+const VRNG_SPINS: u64 = 200000000;
+
+struct VRng {
+  io: Vt,
+  q: Vq,
+  buf: Dma,
+}
+
+spec fn vrng_ok(v: &VRng) -> bool {
+  vt_ok(v.io) && vq_ok(v.q)
+}
+
+/// Asks the device for VRNG_BYTES bytes and puts the whole words it gave in
+/// out[0..], returning how many (0 if the device did not answer).
+fn vrng_get(v: &mut VRng, out: &mut Buf) -> u64
+  requires vrng_ok(v) && len(out) == VRNG_WORDS
+  ensures vrng_ok(v) && len(out) == VRNG_WORDS && result <= VRNG_WORDS
+  ensures forall k: u64 :: vt_holds(v.io, k) == old(vt_holds(v.io, k))
+  ensures forall a: u64 :: vt_claims(v.io, a) == old(vt_claims(v.io, a))
+{
+  vq_push(&mut v.q, 0);
+  vt_notify(&mut v.io, 0);
+  let mut spins = 0;
+  while spins < VRNG_SPINS && !vq_has_used(&mut v.q)
+    invariant vrng_ok(v) && spins <= VRNG_SPINS
+    invariant forall k: u64 :: vt_holds(v.io, k) == old(vt_holds(v.io, k))
+    invariant forall a: u64 :: vt_claims(v.io, a) == old(vt_claims(v.io, a))
+  {
+    spins = spins + 1;
+  }
+  if spins == VRNG_SPINS {
+    return 0;
+  }
+  let got = vq_used_len(&mut v.q) / 8;
+  vq_next(&mut v.q);
+  let mut n = got;
+  if n > VRNG_WORDS {
+    n = VRNG_WORDS;
+  }
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= VRNG_WORDS && vrng_ok(v) && len(out) == VRNG_WORDS
+    invariant forall k: u64 :: vt_holds(v.io, k) == old(vt_holds(v.io, k))
+    invariant forall a: u64 :: vt_claims(v.io, a) == old(vt_claims(v.io, a))
+  {
+    out = set(out, i, dma_read64(&mut v.buf, i * 8));
+    i = i + 1;
+  }
+  return n;
+}
+
+struct VRngRun { io: Vt, n: u64 }
+
+/// Reads entropy over the transport `io`, given four pages: starts the
+/// device (a device that cannot be started, or that never answers, gives
+/// no words), asks for VRNG_BYTES bytes, resets the device and takes the
+/// pages back. Puts the whole words it got in out[0..] and returns how
+/// many with the transport.
+fn vrng_read(m: &mut Mem, io: Vt, f0: Frame, f1: Frame, f2: Frame, f3: Frame, out: &mut Buf) -> VRngRun
+  requires mem_ok(m) && vt_ok(io) && len(out) == VRNG_WORDS
+  ensures mem_ok(m) && len(out) == VRNG_WORDS && result.n <= VRNG_WORDS && vt_ok(result.io)
+  ensures forall k: u64 :: vt_holds(result.io, k) == old(vt_holds(io, k))
+  ensures forall a: u64 :: vt_claims(result.io, a) == old(vt_claims(io, a))
+{
+  let mut v = VRng { io: io, q: vq_new(f0, f1, f2), buf: dma_lend(f3) };
+  let mut n = 0;
+  if vt_start(&mut v.io, 0) && dma_addr(v.buf) <= ADDR_LIMIT - 4096 && vq_setup(&mut v.io, &mut v.q, 0) {
+    vq_desc(&mut v.q, 0, dma_phys(v.buf), VRNG_BYTES, DESC_WRITE, 0);
+    let ok = VIO_ACK + VIO_DRIVER + VIO_DRIVER_OK;
+    if vt_modern(&mut v.io) {
+      vt_status(&mut v.io, ok + VIO_FEATURES_OK);
+    } else {
+      vt_status(&mut v.io, ok);
+    }
+    n = vrng_get(&mut v, &mut out);
+  }
+  // The device is reset before it loses the pages, answer or not.
+  vt_stop(&mut v.io, 0);
+  vq_free(v.q, &mut m);
+  give_page(&mut m, dma_take(v.buf));
+  return VRngRun { io: v.io, n: n };
+}

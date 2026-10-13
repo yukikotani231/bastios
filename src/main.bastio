@@ -82,6 +82,7 @@ import "lxcow.bastio";
 import "hda.bastio";
 import "lxsnd.bastio";
 import "lxmouse.bastio";
+import "arch/rnghw.bastio";
 import "kernel.bastio";
 import "initfiles.bastio";
 
@@ -1193,6 +1194,16 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let usb_hi = usb_top(usb);
   let usb_disk = usb_msd(usb);
   let vm_where = boot_vmmio(cpu);
+  // Entropy from the host, if it offers some (a virtio-rng): read and the
+  // device given back before any other driver looks for its device. It
+  // joins the generator's pool once the kernel exists.
+  let mut hw = alloc(VRNG_WORDS);
+  let hw_n = rng_hw(&mut ports, &mut pci, &mut m, &mut win, acpi_lo, acpi_hi, fb_lo, fb_hi, usb_lo, usb_hi, vm_where, &mut hw);
+  if hw_n > 0 {
+    puts(&mut con, "rng: virtio-rng, ");
+    put_num(&mut con, hw_n * 8);
+    puts(&mut con, " bytes of entropy\r\n");
+  }
   // The disk: that stick, else NVMe, virtio, AHCI or ATA (see blk_new).
   let dev = blk_find(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi, usb_lo, usb_hi, msi, &mut usb, acpi_lo, acpi_hi, boot_word(cpu, "ahci_reset"), vm_where);
   let dev_lo = blk_ports_lo(dev);
@@ -1333,6 +1344,14 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     diag_pause(&mut term, &mut con, &mut clock, &mut acpi);
   }
   let mut k = kernel_new(m, disk, nic, snd, mice_new(term.kbd.aux || usb_mouse_on), tsc, at, epoch, cpus);
+  let mut hi = 0;
+  while hi < hw_n
+    invariant hi <= hw_n && hw_n <= VRNG_WORDS && len(hw) == VRNG_WORDS && kok(k)
+  {
+    rng_feed(&mut k, get(hw, hi));
+    hi = hi + 1;
+  }
+  free(hw);
   install_files(&mut con, &mut k);
   let mut login = 0;
   if boot_word(cpu, "login") {

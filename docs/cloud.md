@@ -153,6 +153,23 @@ test/shell_test.sh                          # includes three ENA boots, skipped 
   is out of reach until DHCP has given the machine an address. Tested with
   QEMU's guest forward standing in for the service. It has not been tried
   on a real cloud.
+- **Entropy from the host (virtio-rng).** A guest on a hypervisor has no
+  keyboard to time and little else that varies, so the time-stamp counter
+  alone would make the first SSH host key (Dropbear's `-R`) guessable. When
+  the machine has a virtio entropy source (QEMU `-device virtio-rng-pci` or
+  `virtio-rng-device`, Firecracker's entropy device, most KVM clouds'
+  default), the kernel reads 64 bytes from it before any other driver looks
+  for a device, mixes them into the generator behind `/dev/urandom` and
+  `getrandom` (`src/virtio_rng.bastio`, found by `src/x86_64/arch/rnghw.bastio`),
+  resets the device and gives its ports, registers and four pages back, and
+  prints `rng: virtio-rng, 64 bytes of entropy`. Proved: the queue and buffer
+  stay inside the pages lent to the device, the wait ends, and every port,
+  register and page is as before afterwards. Trusted: that the host's bytes
+  are random; the pool only mixes them in, so bad ones add nothing and take
+  nothing away. A source that never answers costs about a second under
+  TCG. Tested on PCI and on virtio-mmio, answering and silent. Not done:
+  AArch64 (its virtio-mmio finder is separate), RDRAND/RDSEED (needs a
+  compiler primitive), reading again later or on a timer.
 - **A bigger volume needs no resize step.** The file system takes its size
   from the disk at every mount, so a volume enlarged while the machine was
   off (an EBS volume resize, `truncate` on a raw image) shows its new size

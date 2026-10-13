@@ -1388,6 +1388,11 @@ def mmio_ready(version):
         ok = b"disk: virtio" in out and b"net: virtio, mac 52:54:00:12:34:56" in out
         print(("ok  " if ok else "FAIL"), f"(virtio-mmio v{version} boot) disk and card found")
         fails += not ok
+        # The entropy source is read first and given back, so the disk and
+        # the card above still find their slots.
+        ok = b"rng: virtio-rng, 64 bytes of entropy" in out
+        print(("ok  " if ok else "FAIL"), f"(virtio-mmio v{version} boot) virtio-rng read")
+        fails += not ok
         t0 = time.time()
         leased = False
         while not leased and time.time() - t0 < 10:
@@ -1404,7 +1409,8 @@ for version, legacy in ((1, "on"), (2, "off")):
     qemu = boot(1, extra=["-machine", "microvm", "-global", "virtio-mmio.force-legacy=" + legacy,
                           "-drive", f"file={disk},format=raw,if=none,id=mv",
                           "-device", "virtio-blk-device,drive=mv",
-                          "-netdev", "user,id=m0", "-device", "virtio-net-device,netdev=m0"])
+                          "-netdev", "user,id=m0", "-device", "virtio-net-device,netdev=m0",
+                          "-object", "rng-random,filename=/dev/urandom,id=r0", "-device", "virtio-rng-device,rng=r0"])
     session(f"virtio-mmio v{version}", None, [
         (f"echo mmio{version} > disk/mm", b""),
         ("cat disk/mm", f"mmio{version}\r\n".encode()),
@@ -1412,6 +1418,24 @@ for version, legacy in ((1, "on"), (2, "off")):
         ("rm disk/mm", b""),
         ("ping", b"reply from 10.0.2.2"),
     ], halt=True, ready=mmio_ready(version))
+
+# A virtio entropy source on PCI beside a virtio disk and card: the kernel
+# reads 64 bytes of it before any other driver starts, resets it and gives
+# its ports and pages back, so the disk and the card come up as without it.
+# A source that never answers only costs the wait for it.
+silent = os.path.join(disk_dir.name, "silent")
+os.mkfifo(silent)
+silent_fd = os.open(silent, os.O_RDWR)    # a writer that writes nothing
+for name, source, want in (("answering", "/dev/urandom", True), ("silent", silent, False)):
+    qemu = boot(1, virtio=True, net=True, extra=["-object", f"rng-random,filename={source},id=r0",
+                                                 "-device", "virtio-rng-pci,rng=r0"])
+    def rng_pci(name=name, want=want):
+        global fails
+        ok = (b"rng: virtio-rng, 64 bytes of entropy" in out) == want and b"disk: virtio" in out and b"net: virtio, mac" in out
+        print(("ok  " if ok else "FAIL"), f"(virtio-rng on PCI, {name}) entropy {'read' if want else 'not read'}, disk and card found")
+        fails += not ok
+    session("virtio-rng " + name, None, [("echo rng_" + "ok", b"rng_ok")], halt=True, ready=rng_pci)
+os.close(silent_fd)
 
 # The same device named on the command line, as Firecracker does
 # (virtio_mmio.device=SIZE@ADDRESS:IRQ): only the named blocks are looked at.
