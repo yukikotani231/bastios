@@ -1,0 +1,120 @@
+// Finding a modern virtio function on the PCI Express bus (VERSION_1: the
+// device ids 0x1040 + the virtio id, vendor 0x1AF4) and turning it into a
+// transport (`Vt::Pci`, src/aarch64/arch/vt.bastio). Its registers are
+// described by vendor capabilities (id 9) of the function's configuration
+// space, each naming a BAR, an offset and a length; the three the driver
+// needs (common configuration, notifications, device-specific
+// configuration) must all lie in one memory BAR, as they do on QEMU, which
+// is checked. The BAR's address is the one pci_assign or the firmware gave.
+
+import "pci.bastio";
+import "vt.bastio";
+
+const VP_VENDOR: u64 = 0x1AF4;
+const VP_ID_BASE: u64 = 0x1040;       // device id of a modern virtio function: this + virtio id
+const CAP_VENDOR: u64 = 9;
+const VCAP_COMMON: u64 = 1;
+const VCAP_NOTIFY: u64 = 2;
+const VCAP_DEVICE: u64 = 4;
+
+/// Where one function's registers are: the BAR (`bar`, `end` bytes of it
+/// are claimed) and the parts inside it.
+struct VpAt { dev: u64, bar: u64, end: u64, common: u64, device: u64, notify: u64, mult: u64 }
+
+enum VpFound { None, At(VpAt) }
+
+spec fn vpat_ok(a: &VpAt) -> bool {
+  a.bar % 4096 == 0 && a.end <= VP_MAX_LEN && a.bar <= WIN_LOW_TOP && a.bar + a.end <= WIN_LOW_TOP
+  && a.common % 4 == 0 && a.common + VP_COMMON_LEN <= a.end
+  && a.device % 4 == 0 && a.device + 8 <= a.end
+  && a.notify + 2 <= a.end && a.mult <= 65536
+}
+
+/// The function for virtio id `id` (1 network, 2 block), if it has the
+/// capabilities, in one memory BAR below the device window's top that
+/// holds at most VP_MAX_LEN bytes of them, and a notification area it can
+/// use. Nothing is changed in the device.
+fn vpci_locate(p: &mut Pci, id: u64) -> VpFound
+  requires pci_ok(p) && id < 100
+  ensures pci_ok(p) && (result is VpFound::At ==> vpat_ok(result.At) && result.At.dev < PCI_NONE)
+{
+  let dev = pci_find(&mut p, VP_VENDOR, VP_ID_BASE + id);
+  if dev >= PCI_NONE || (pci_read(&mut p, dev, PCI_COMMAND) >> 20) % 2 == 0 {
+    return VpFound::None;
+  }
+  let mut at = pci_read(&mut p, dev, PCI_CAPS) % 256;
+  let mut n = 0;
+  // cfg_type of each found capability's BAR number (6: none yet) and its offset and length.
+  let mut bc = 6;
+  let mut oc = 0;
+  let mut lc = 0;
+  let mut bn = 6;
+  let mut on = 0;
+  let mut ln = 0;
+  let mut mult = 0;
+  let mut bd = 6;
+  let mut od = 0;
+  let mut ld = 0;
+  while n < 48 && at >= 64 && at % 4 == 0 && at <= 236
+    invariant at < 256 && n <= 48 && bc <= 6 && bn <= 6 && bd <= 6
+  {
+    let w = pci_read(&mut p, dev, at);
+    if w % 256 == CAP_VENDOR {
+      let ty = (w >> 24) % 256;
+      let b = pci_read(&mut p, dev, at + 4) % 256;
+      let off = pci_read(&mut p, dev, at + 8);
+      let ln_ = pci_read(&mut p, dev, at + 12);
+      if ty == VCAP_COMMON && bc == 6 && b < 6 {
+        bc = b;
+        oc = off;
+        lc = ln_;
+      }
+      if ty == VCAP_NOTIFY && bn == 6 && b < 6 {
+        bn = b;
+        on = off;
+        ln = ln_;
+        mult = pci_read(&mut p, dev, at + 16);
+      }
+      if ty == VCAP_DEVICE && bd == 6 && b < 6 {
+        bd = b;
+        od = off;
+        ld = ln_;
+      }
+    }
+    at = (w >> 8) % 256;
+    n = n + 1;
+  }
+  if bc >= 6 || bc != bn || bc != bd || lc < VP_COMMON_LEN || ld < 8 || ln < 2 || mult > 65536 || mult % 2 != 0
+    || oc % 4 != 0 || od % 4 != 0 || on % 2 != 0 || oc > VP_MAX_LEN || od > VP_MAX_LEN || on > VP_MAX_LEN
+    || lc > VP_MAX_LEN || ld > VP_MAX_LEN || ln > VP_MAX_LEN {
+    return VpFound::None;
+  }
+  let reg = PCI_BAR0 + 4 * bc;
+  let bar = pci_mem_bar_at(&mut p, dev, reg);
+  let size = pci_bar_size_at(&mut p, dev, reg);
+  let mut end = oc + lc;
+  if od + ld > end {
+    end = od + ld;
+  }
+  if on + ln > end {
+    end = on + ln;
+  }
+  if bar == 0 || bar % 4096 != 0 || end > size || end > VP_MAX_LEN || oc + VP_COMMON_LEN > end || od + 8 > end
+    || on + 2 > end || bar + end > WIN_LOW_TOP {
+    return VpFound::None;
+  }
+  return VpFound::At(VpAt { dev: dev, bar: bar, end: end, common: oc, device: od, notify: on, mult: mult });
+}
+
+/// The transport over the BAR block of `a`, claimed from the device window
+/// (the caller has checked it free).
+fn vpci_open(win: &mut MmioSpace, a: VpAt) -> Vt
+  requires vpat_ok(a)
+  requires forall x: u64 :: a.bar <= x && x < a.bar + a.end ==> mmio_free(win, x)
+  ensures vt_ok(result)
+  ensures forall x: u64 :: vt_claims(result, x) == (a.bar <= x && x < a.bar + a.end)
+  ensures forall x: u64 :: !(a.bar <= x && x < a.bar + a.end) && old(mmio_free(win, x)) ==> mmio_free(win, x)
+{
+  let regs = mmio_claim(&mut win, a.bar, a.end);
+  return Vt::Mem(VMem { regs: regs, v2: true, pci: true, common: a.common, device: a.device, notify: a.notify, mult: a.mult, n0: 0, n1: 0 });
+}
