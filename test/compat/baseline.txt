@@ -563,6 +563,7 @@ t_misc: /proc/net/unix lists a bound socket
 t_misc: /proc/self/exe
 t_misc: /proc/self/limits shows the open-files limit
 t_misc: /proc/self/mountinfo lists the root and /proc
+t_misc: /proc/self/statm counts the pages and io has its counters
 t_misc: /proc/stat has cpu lines
 t_misc: SIOCGIFHWADDR and SIOCGIFNETMASK on lo
 t_misc: SSE floating point

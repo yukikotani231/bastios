@@ -73,6 +73,8 @@ const PF_LOADAVG: u64 = 13;           // with pid 0
 const PF_VERSION: u64 = 14;           // with pid 0
 const PF_CGROUP: u64 = 15;            // /proc/PID/cgroup
 const PF_MOUNTINFO: u64 = 13;         // /proc/PID/mountinfo (13 is pid 0's loadavg)
+const PF_STATM: u64 = 8;              // /proc/PID/statm (8 is pid 0's cpuinfo)
+const PF_IO: u64 = 9;                 // /proc/PID/io (9 is pid 0's filesystems)
 const PF_LIMITS: u64 = 14;            // /proc/PID/limits (14 is free for a process)
 const PF_MODULES: u64 = 6;            // with pid 0 (status has 6 for a process): /proc/modules
 const PF_DISKSTATS: u64 = 11;         // with pid 0: /proc/diskstats (comm has 11 for a process)
@@ -578,6 +580,12 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   if xfer_is(x, e + 1, n, "mountinfo") {
     return base + PF_MOUNTINFO;
   }
+  if xfer_is(x, e + 1, n, "statm") {
+    return base + PF_STATM;
+  }
+  if xfer_is(x, e + 1, n, "io") {
+    return base + PF_IO;
+  }
   let um = um_at(x, e + 1, n, p);
   if um != 0 {
     return um;                              // uid_map, gid_map or setgroups (src/lxuser.bastio)
@@ -827,6 +835,12 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
     }
     if i == 11 + UMF_N {
       return Ent { len: name_out(&mut k.fs.xfer, "mountinfo"), dir: false, end: false };
+    }
+    if i == 12 + UMF_N {
+      return Ent { len: name_out(&mut k.fs.xfer, "statm"), dir: false, end: false };
+    }
+    if i == 13 + UMF_N {
+      return Ent { len: name_out(&mut k.fs.xfer, "io"), dir: false, end: false };
     }
     return end;
   }
@@ -1910,6 +1924,21 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
   }
   if what == PF_LIMITS {
     return limits_text(k, p, &mut o);
+  }
+  if what == PF_STATM {
+    // size resident shared text lib data dt, in pages: every page the process
+    // has is counted as resident and as data; nothing is shared or text.
+    let c = smaller(anon_count(&mut k, p, 0, WPAGES), WPAGES);
+    let mut a = put_n(&mut o, 0, c);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, c);
+    a = put_s(&mut o, a, " 0 0 0 ");
+    a = put_n(&mut o, a, c);
+    return put_s(&mut o, a, " 0\n");
+  }
+  if what == PF_IO {
+    // Nothing counts bytes read or written yet.
+    return put_s(&mut o, 0, "rchar: 0\nwchar: 0\nsyscr: 0\nsyscw: 0\nread_bytes: 0\nwrite_bytes: 0\ncancelled_write_bytes: 0\n");
   }
   if what == PF_SLACK {
     let a = put_n(&mut o, 0, pr_slack(k, p));

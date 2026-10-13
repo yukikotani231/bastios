@@ -101,6 +101,15 @@ int main(void) {
         if (f >= 0) close(f);
         t[n > 0 ? n : 0] = 0;
         strstr(t, " / / rw") && strstr(t, " / /proc rw") && strstr(t, " - proc proc rw\n"); }));
+    EXPECT("/proc/self/statm counts the pages and io has its counters", ({
+        char t[256]; int f = open("/proc/self/statm", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
+        if (f >= 0) close(f);
+        t[n > 0 ? n : 0] = 0;
+        unsigned long sz = 0, res = 0, sh = 1; sscanf(t, "%lu %lu %lu", &sz, &res, &sh);
+        char u[256]; f = open("/proc/self/io", O_RDONLY); n = f < 0 ? 0 : read(f, u, sizeof u - 1);
+        if (f >= 0) close(f);
+        u[n > 0 ? n : 0] = 0;
+        sz > 0 && res > 0 && sh == 0 && strstr(u, "rchar: ") && strstr(u, "write_bytes: "); }));
     EXPECT("/proc/net/arp has its header", ({
         char t[4096]; int f = open("/proc/net/arp", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
         if (f >= 0) close(f);
