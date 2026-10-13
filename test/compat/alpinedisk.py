@@ -231,6 +231,15 @@ def scripts(files):
                 trig[c] = paths
     return kept, trig
 
+# Documentation and data the checks never read, left out of the packages: a
+# disk holds a bounded number of directory entries (src/diskfs.bastio's
+# DSLOTS), and these are 2100 of cmake's 3400 files and 700 of
+# lua-language-server's 1300.
+PRUNE = ("usr/share/cmake/Help", "usr/lib/lua-language-server/meta/3rd")
+
+def pruned(path):
+    return any(path == x or path.startswith(x + "/") for x in PRUNE)
+
 def package(files, p, kept=({}, {})):
     """The .apk for package p: a gzip stream of its .PKGINFO and install
     scripts (from kept, as scripts() gives them), then one of its files.
@@ -238,11 +247,15 @@ def package(files, p, kept=({}, {})):
     when = int(p.get("t", 0))
     data = []
     for d, acl in p["dirs"]:
+        if pruned(d):
+            continue
         ti = owned(tarfile.TarInfo(d), acl, 0o755)
         ti.type, ti.mtime = tarfile.DIRTYPE, when
         data.append((ti, None))
     for d, name, acl in p["files"]:
         path = f"{d}/{name}" if d else name
+        if pruned(path):
+            continue
         if path not in files:
             sys.exit(f"alpinedisk: {p['P']}: {path} is not in the image")
         src, body = files[path]
@@ -453,8 +466,8 @@ def main():
     for r in (repo, repo2):
         args += [f"a/{os.path.basename(r)}/x86_64/{f}={os.path.join(r, f)}" for f in sorted(os.listdir(r))]
     # Room for the unpacked root and what apk installs (neovim, gcc and git
-    # together are about 350 MB).
-    env = dict(os.environ, MKDISK_FREE_MB="480")
+    # together are about 350 MB; cmake, tmux and lua-language-server add about 60 MB).
+    env = dict(os.environ, MKDISK_FREE_MB="700")
     subprocess.run([os.path.join(HERE, "mkdisk.py"), out] + args, check=True, env=env)
 
 if __name__ == "__main__":

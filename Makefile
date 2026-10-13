@@ -671,7 +671,7 @@ build/compat/bastio.img: build/compat/bastioc1 build/compat/z3 build/compat/tcc 
 # on, also go on the disk, so the checks that use them need no network.
 # The images: git and curl; Alpine's own CI image (alpine-sdk: gcc, g++,
 # make, binutils, musl-dev); python3 (the ansible image); jq and libxml2's
-# tools; neovim (serh/nvim: Alpine 3.23's neovim 0.11 with git, gcc and make); and vim from edge (its runtime is about 2100 files: it waits for a
+# tools; neovim (serh/nvim: Alpine 3.23's neovim 0.11 with git, gcc and make); tmux; cmake and ninja; lua-language-server, a real language server for neovim's LSP client; and vim from edge (its runtime is about 2100 files: it waits for a
 # disk directory bigger than 1024 entries, as gcc and python3 do).
 ALPINE_BASE ?= library/alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 ALPINE_PKGS ?= alpine/git@sha256:a4bb51f1a3553df194ce679fc1db721d8bfba2046fa1a88fe9d4ac551ffbce25 \
@@ -680,7 +680,10 @@ ALPINE_PKGS ?= alpine/git@sha256:a4bb51f1a3553df194ce679fc1db721d8bfba2046fa1a88
                alpine/ansible@sha256:72ed4cb27b533dc2bc608a657b9ed630c2ee53a86ba9111d0b710c5424de0fe2 \
                alpine/xml@sha256:836f531a7e38bbdaab8f1c1ce76bf868412f253671625ebf54cf14fa28544de6 \
                heywoodlh/vim@sha256:c8c4f0de47f20de92af6d3b0544898e857f6c2eecd7ab397a1e7daf0b5fc6292 \
-               serh/nvim@sha256:e62acc0ba679451c43a0197088af546bd8ab0e23a1ce27c010748a347aa3a837
+               serh/nvim@sha256:e62acc0ba679451c43a0197088af546bd8ab0e23a1ce27c010748a347aa3a837 \
+               odovzhan/tmux@sha256:b439b1fc9a4391884ef4c1266980639a10ac629f684f4551bfbe3a77ca005cd6 \
+               dxloc/alpine-cmake@sha256:fe609ae835a3b195c302adb966464b378d57b2882c0d915008f8781634dab485 \
+               lspcontainers/lua-language-server@sha256:5edb5674fb555bec3df35e77a45cd2a98f829fd3602ea3fa68394c80f186f072
 ALPINE_DISK_PKGS ?= git,curl,less,openssh-keygen,bash,make,jq,rsync,openssl,file,libxml2-utils
 # Where the images' layers are kept, checked against their digests on each
 # use. Point it outside build/ to keep them across fresh checkouts: Docker
