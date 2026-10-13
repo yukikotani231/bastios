@@ -120,8 +120,9 @@ def load_tty(path):
 
 
 class WebServer:
-    """A web server on the host, for HOSTURL: /hello.txt, a line, and
-    /mib.bin, 1 MiB whose md5 is 85bfb9943e6f0cb09f0f52679e9eac2b."""
+    """A web server on the host, for HOSTURL: /hello.txt, a line,
+    /mib.bin, 1 MiB whose md5 is 85bfb9943e6f0cb09f0f52679e9eac2b, and
+    /repo.git, a git repository for the dumb HTTP protocol."""
 
     def __init__(self):
         self.dir = tempfile.mkdtemp(prefix="compat-www-")
@@ -129,6 +130,23 @@ class WebServer:
             f.write("hello from the host\n")
         with open(os.path.join(self.dir, "mib.bin"), "wb") as f:
             f.write(bytes((i * 7 + i // 256) % 256 for i in range(1 << 20)))
+        # A repository for git's dumb HTTP protocol: /repo.git, two commits
+        # on main, "two" and "one" in `git log`.
+        if shutil.which("git"):
+            work = os.path.join(self.dir, "work")
+            git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"]
+            os.makedirs(work)
+            for n, msg in (("one", "one"), ("two", "two")):
+                with open(os.path.join(work, "f"), "w") as f:
+                    f.write(n + "\n")
+                if n == "one":
+                    subprocess.run(git + ["init", "-q"], cwd=work, capture_output=True)
+                subprocess.run(git + ["add", "f"], cwd=work, capture_output=True)
+                subprocess.run(git + ["commit", "-q", "-m", msg], cwd=work, capture_output=True)
+            bare = os.path.join(self.dir, "repo.git")
+            subprocess.run(git + ["clone", "-q", "--bare", work, bare], capture_output=True)
+            subprocess.run(git + ["update-server-info"], cwd=bare, capture_output=True)
+            shutil.rmtree(work)
         handler = functools.partial(Quiet, directory=self.dir)
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.port = self.httpd.server_address[1]
