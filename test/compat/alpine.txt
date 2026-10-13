@@ -274,3 +274,8 @@ touch: /x: Read-only file system
 touch=1
 0
 status 3
+
+== nvim: a headless server on a unix socket answers another nvim (--listen, sockconnect, RPC)
+$ bb printf 'local c = vim.fn.sockconnect("pipe", "/root/n.sock", {rpc = true})\nio.open("/root/rpc.txt", "w"):write(vim.fn.rpcrequest(c, "nvim_eval", "g:x"), "\\n")\npcall(vim.fn.rpcnotify, c, "nvim_command", "qa!")\n' > /disk/a/root/rpc.lua && bb chroot /disk/a /bin/sh -c 'rm -f /root/n.sock /root/rpc.txt; nvim --headless -u NONE --listen /root/n.sock -c "let g:x=42" >/root/srv.log 2>&1 & i=0; while [ ! -S /root/n.sock ] && [ $i -lt 15 ]; do sleep 1; i=$((i+1)); done; timeout 20 nvim --headless -u NONE -l /root/rpc.lua >/root/cli.log 2>&1; sleep 1; kill %1 2>/dev/null'; bb cat /disk/a/root/rpc.txt /disk/a/root/cli.log
+42
+

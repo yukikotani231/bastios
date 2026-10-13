@@ -1021,3 +1021,4 @@ alpine: nvim: shada and a session file survive a restart (atomic writes, rename)
 alpine: container: runc runs Alpine in new namespaces (own hostname, PID 1)
 alpine: container: the host keeps its hostname and no container is left behind
 alpine: container: the root file system is read-only, and the exit status comes back
+alpine: nvim: a headless server on a unix socket answers another nvim (--listen, sockconnect, RPC)
