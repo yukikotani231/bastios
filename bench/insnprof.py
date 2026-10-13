@@ -13,10 +13,8 @@ instructions, unlike bench/prof.py's samples of host time, and is the same
 every run. Code outside the kernel's symbols is "[user]"; the syscall
 trampoline, which has its own alias address, is "[tramp]".
 
-Needs gdb. Divide a function's count by the number of loop iterations in the
-window (the line `iterations` is the number of times the first function of the
-user loop was seen entering the kernel, if any) or compare two kernels over
-the same window.
+Needs gdb. The second column is instructions per return from the kernel to the
+program (one per system call for a loop of calls): compare two kernels by it.
 """
 import argparse, bisect, json, os, subprocess, sys, tempfile, time
 from collections import Counter
@@ -51,6 +49,7 @@ def main():
     ap.add_argument("--steps", type=int, default=20000)
     ap.add_argument("--warm", type=float, default=3.0, help="seconds of host time before gdb attaches")
     ap.add_argument("--top", type=int, default=30)
+    ap.add_argument("--save", default="", help="also write the executed addresses to this JSON file")
     ap.add_argument("cmd", nargs="+")
     args = ap.parse_args()
     addrs, names = symbols(args.elf)
@@ -73,7 +72,22 @@ def main():
         if not os.path.exists(out):
             raise SystemExit("insnprof: gdb did not write the trace")
         pcs = json.load(open(out))
+        if args.save:
+            json.dump(pcs, open(args.save, "w"))
     hits = Counter()
+    # Only whole round trips are counted: from the first return to the program
+    # to the last one, so the partial calls at the ends of the window do not
+    # skew the per-call figures.
+    entry_at = []                           # steps at which the guest went from the kernel to its program
+    was_user = True
+    for i, pc in enumerate(pcs):
+        user = not (addrs and addrs[0] <= pc < addrs[-1] + 0x10000) and pc < 0x7F0000000000
+        if user and not was_user:
+            entry_at.append(i)
+        was_user = user
+    if len(entry_at) >= 2:
+        pcs = pcs[entry_at[0]:entry_at[-1]]
+    entries = max(len(entry_at) - 1, 0)
     for pc in pcs:
         if addrs and addrs[0] <= pc < addrs[-1] + 0x10000:
             hits[names[bisect.bisect_right(addrs, pc) - 1]] += 1
@@ -82,9 +96,11 @@ def main():
         else:
             hits["[user]"] += 1
     n = len(pcs)
-    print(f"{n} instructions of `{line}`")
+    per = max(entries, 1)
+    print(f"{n} instructions of `{line}` over {entries} whole round trips")
+    print(f"per return: {n / per:.0f} instructions")
     for name, c in hits.most_common(args.top):
-        print(f"{100 * c / n:6.2f}%  {c:7d}  {name}")
+        print(f"{100 * c / n:6.2f}%  {c / per:8.1f}  {name}")
 
 
 if __name__ == "__main__":
