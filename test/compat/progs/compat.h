@@ -17,16 +17,31 @@
 
 static const char *cur;
 static int nfail, nth, skip = -1;
+static const char *only;
 
 /* Starts check NAME and says whether to run it. The harness reruns a
- * program that hung with COMPAT_SKIP=K, which skips its first K checks. */
+ * program that hung with COMPAT_SKIP=K, which skips its first K checks, and
+ * one whose checks failed with COMPAT_ONLY=I,J,..., which runs just the
+ * checks at those places in the list. */
 static int begin(const char *name) {
     if (skip < 0) {
         const char *s = getenv("COMPAT_SKIP");
         skip = s ? atoi(s) : 0;
+        only = getenv("COMPAT_ONLY");
     }
     cur = name;
-    if (nth++ < skip) return 0;
+    int at = nth++;
+    if (only) {
+        char want[16];
+        snprintf(want, sizeof want, ",%d,", at);
+        char *list = malloc(strlen(only) + 3);
+        sprintf(list, ",%s,", only);
+        int hit = strstr(list, want) != NULL;
+        free(list);
+        if (!hit) return 0;
+    } else if (at < skip) {
+        return 0;
+    }
     printf("@@ %s\n", name);
     return 1;
 }
