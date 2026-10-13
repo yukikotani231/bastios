@@ -463,7 +463,7 @@ fn init_stack(m: &mut Mem, l3: &mut PageTable, e: Elf, base: u64, vdso: bool, ar
   aux(&mut vec, v + 22, 17, 100);                  // AT_CLKTCK: the timer runs at 100 Hz
   aux(&mut vec, v + 24, 23, 0);                    // AT_SECURE
   aux(&mut vec, v + 26, 25, USER_BASE + RANDOM_AT); // AT_RANDOM
-  if vdso {
+  if vdso && vdso_is_elf() {
     aux(&mut vec, v + 28, AT_SYSINFO_EHDR, USER_BASE + VDSO_PAGE * 4096);
   } else {
     aux(&mut vec, v + 28, AT_IGNORE, 0);

@@ -105,7 +105,15 @@ fn prog_image(i: u64) -> Str {
   if i == 33 {
     return include_bytes("../../../build/user/mcloud.elf");
   }
+  if i == 34 {
+    return include_bytes("../../../build/user/mfd.elf");
+  }
   return include_bytes("../../../build/user/fault.bin");
+}
+
+/// Whether the vDSO page holds an ELF image for AT_SYSINFO_EHDR to point at.
+fn vdso_is_elf() -> bool {
+  return true;
 }
 
 /// Fills the vDSO page: the image, then the clock it reads.

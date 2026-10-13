@@ -225,6 +225,10 @@ help_file 1 tree
 $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf 'local ffi = require("ffi")\nffi.cdef[[int answer(void);]]\nio.open("/root/so.txt", "w"):write(ffi.load("/root/libso.so").answer(), "\\n")\n' > /disk/a/root/so.lua && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -shared -fPIC -o libso.so so.c && nvim -l so.lua >/dev/null 2>&1'; bb cat /disk/a/root/so.txt
 42
 
+== nvim: a plugin cloned over HTTP is on the packpath and runs at startup
+$ bb printf 'io.open("/root/plug.txt", "w"):write(vim.g.hello_plugin or "none", "\\n")\n' > /disk/a/root/plug.lua && bb chroot /disk/a /bin/sh -lc 'd=/root/pk/pack/p/start; mkdir -p $d && git clone -q HOSTURL/repo.git $d/hello && nvim --headless --cmd "set pp^=/root/pk" -c "luafile /root/plug.lua" -c qa >/dev/null 2>&1'; bb cat /disk/a/root/plug.txt
+two
+
 == nvim: vim.system runs a process and collects its output and status
 $ bb printf 'local r = vim.system({"sh", "-c", "echo out; echo err >&2; exit 3"}, {text = true}):wait()\nio.open("/root/sys.txt", "w"):write(r.code, " ", vim.trim(r.stdout), " ", vim.trim(r.stderr), "\\n")\n' > /disk/a/root/sys.lua && bb chroot /disk/a /usr/bin/nvim -l /root/sys.lua >/dev/null 2>&1; bb cat /disk/a/root/sys.txt
 3 out err
@@ -240,6 +244,14 @@ new
 == nvim: :grep and :vimgrep fill the quickfix list
 $ bb mkdir -p /disk/a/root/src && bb printf 'one\nneedle two\nthree\n' > /disk/a/root/src/a.txt && bb printf 'needle\n' > /disk/a/root/src/b.txt && bb printf 'vim.cmd("silent grep -rn needle /root/src")\nlocal g = #vim.fn.getqflist()\nvim.cmd("vimgrep /needle/j /root/src/*.txt")\nio.open("/root/grep.txt", "w"):write(g, " ", #vim.fn.getqflist(), "\\n")\n' > /disk/a/root/grep.lua && bb chroot /disk/a /usr/bin/nvim -l /root/grep.lua >/dev/null 2>&1; bb cat /disk/a/root/grep.txt
 2 2
+
+== nvim: the LSP client starts a language server, asks it for a hover and stops it
+$ bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-server.lua -o /root/lsp-server.lua && curl -s HOSTURL/lsp-client.lua -o /root/lsp-client.lua && nvim -l /root/lsp-client.lua >/dev/null 2>&1'; bb cat /disk/a/root/lsp.txt
+initialized,hover from the stub,stopped
+
+== nvim: shada and a session file survive a restart (atomic writes, rename)
+$ bb printf 'vim.fn.setreg("a", "kept")\nvim.cmd("edit /root/sh1.txt | call setline(1, \\"one\\") | write")\nvim.cmd("mksession! /root/s.vim")\n' > /disk/a/root/sh1.lua && bb printf 'vim.cmd("source /root/s.vim")\nio.open("/root/sh2.txt", "w"):write(vim.fn.getreg("a"), " ", vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":t"), "\\n")\n' > /disk/a/root/sh2.lua && bb chroot /disk/a /bin/sh -c 'cd /root && for f in sh1 sh2; do nvim --headless -u NONE -i /root/s.shada --cmd "set shada=!,<50,s10" -c "luafile /root/$f.lua" -c qa >/dev/null 2>&1; done'; bb cat /disk/a/root/sh2.txt
+kept sh1.txt
 
 
 == container: runc runs Alpine in new namespaces (own hostname, PID 1)
@@ -262,3 +274,8 @@ touch: /x: Read-only file system
 touch=1
 0
 status 3
+
+== nvim: a headless server on a unix socket answers another nvim (--listen, sockconnect, RPC)
+$ bb printf 'local c = vim.fn.sockconnect("pipe", "/root/n.sock", {rpc = true})\nio.open("/root/rpc.txt", "w"):write(vim.fn.rpcrequest(c, "nvim_eval", "g:x"), "\\n")\npcall(vim.fn.rpcnotify, c, "nvim_command", "qa!")\n' > /disk/a/root/rpc.lua && bb chroot /disk/a /bin/sh -c 'rm -f /root/n.sock /root/rpc.txt; nvim --headless -u NONE --listen /root/n.sock -c "let g:x=42" >/root/srv.log 2>&1 & i=0; while [ ! -S /root/n.sock ] && [ $i -lt 15 ]; do sleep 1; i=$((i+1)); done; timeout 20 nvim --headless -u NONE -l /root/rpc.lua >/root/cli.log 2>&1; sleep 1; kill %1 2>/dev/null'; bb cat /disk/a/root/rpc.txt /disk/a/root/cli.log
+42
+
