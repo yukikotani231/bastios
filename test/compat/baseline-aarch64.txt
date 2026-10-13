@@ -1028,3 +1028,8 @@ t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
 t_gai: AF_INET6 UDP connect to :: reads back ::1
 t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1
 t_gai: getaddrinfo(NULL, port, AI_PASSIVE) with AF_UNSPEC
+bastio: z3: a query
+bastio: bastioc1: prove a program
+bastio: bastioc1: prove, build with tcc, run
+bastio: bastioc1: a failed proof builds nothing
+bastio: bastioc1: a type error
