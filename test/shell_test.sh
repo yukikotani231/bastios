@@ -1171,6 +1171,8 @@ session("virtio", True, [
     # close_range, the subreaper and keep-capabilities flags, the ambient
     # set, and quiet ENOSYS for the keyring and the new mount API.
     ("mcont", b"mcont: ok", b"\n# "),
+    # Far more open file descriptions than the 1024 the table once held, from several processes (user/mfd.c).
+    ("mfd", b"mfd: ok, 8 processes held 1856 descriptions", b"\n# "),
     ("exit", b""),
 ], halt=True, ready=lambda: irq_found("virtio"))
 
