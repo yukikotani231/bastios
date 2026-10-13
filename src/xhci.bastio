@@ -62,7 +62,7 @@
 import "pci.bastio";
 import "pages.bastio";
 import "bio.bastio";
-import "kbd.bastio";
+import "blkconst.bastio";
 
 const XHCI_CLASS: u64 = 0x0C0330;      // serial bus controller, USB, xHCI
 const XHCI_PAGES: u64 = 11;
