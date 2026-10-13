@@ -946,6 +946,33 @@ fn tcp_tick(n: &mut Net, now: u64)
   n.ns = was;
 }
 
+/// Does the stack have no timer that needs the tick to be on time: no
+/// connection with a retransmission, TIME_WAIT or cork timer pending, and
+/// a settled address (leased and not being renewed, or static)? Without a
+/// card, always.
+fn nic_timers_idle(c: &Nic) -> bool
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return true; },
+    Nic::Up(n) => {
+      if !(n.dhcp_state == DHCP_BOUND || (n.dhcp_state == DHCP_OFF && n.ip != 0)) {
+        return false;
+      }
+      let mut t = 0;
+      while t < TCBS
+        invariant t <= TCBS && net_ok(n)
+      {
+        if tw(n, t, W_TIMER) != 0 || tw(n, t, W_CORK) != 0 {
+          return false;
+        }
+        t = t + 1;
+      }
+      return true;
+    },
+  }
+}
+
 // ---------------------------------------------------------------- calls
 
 /// Makes connection t's namespace the one being handled.

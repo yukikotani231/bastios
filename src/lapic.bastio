@@ -27,6 +27,9 @@ const LA_ICR_LO: u64 = 0x300;    // interrupt command: writing it sends
 const LA_ICR_HI: u64 = 0x310;
 const LA_LINT0: u64 = 0x350;
 const LA_LINT1: u64 = 0x360;
+const LA_LVT_TIMER: u64 = 0x320;
+const LA_TIMER_COUNT: u64 = 0x380;
+const LA_TIMER_DIV: u64 = 0x3E0;
 
 const ICR_PENDING: u64 = 0x1000;           // bit 12: the last one is not sent yet
 const ICR_OTHERS: u64 = 0xC4000;           // to all but this processor, asserted, fixed
@@ -101,4 +104,43 @@ fn lapic_wake(a: &mut Lapic)
   }
   mmio_write32(&mut a.regs, LA_ICR_HI, 0);
   mmio_write32(&mut a.regs, LA_ICR_LO, cast[u32](ICR_OTHERS + V_WAKE));
+}
+
+/// The id of the processor making the call (every processor sees its own
+/// local APIC at LAPIC).
+fn lapic_self(a: &mut Lapic) -> u64
+  requires lapic_ok(a)
+  ensures lapic_ok(a) && a.on == old(a.on) && a.id == old(a.id)
+{
+  if !a.on {
+    return 256;
+  }
+  return (cast[u64](mmio_read32(&mut a.regs, LA_ID)) >> 24) % 256;
+}
+
+/// Starts this processor's local APIC timer as a one-shot that raises
+/// vector `v` after `count` bus ticks (boot/smp.c divides them by 16, as
+/// its calibration did).
+fn lapic_arm(a: &mut Lapic, count: u64, v: u64)
+  requires lapic_ok(a) && count <= 4294967295 && v < 256
+  ensures lapic_ok(a) && a.on == old(a.on) && a.id == old(a.id)
+{
+  if !a.on {
+    return;
+  }
+  mmio_write32(&mut a.regs, LA_TIMER_DIV, 3);
+  mmio_write32(&mut a.regs, LA_LVT_TIMER, cast[u32](v));
+  mmio_write32(&mut a.regs, LA_TIMER_COUNT, cast[u32](count));
+}
+
+/// Stops this processor's local APIC timer (masked, count 0).
+fn lapic_disarm(a: &mut Lapic)
+  requires lapic_ok(a)
+  ensures lapic_ok(a) && a.on == old(a.on) && a.id == old(a.id)
+{
+  if !a.on {
+    return;
+  }
+  mmio_write32(&mut a.regs, LA_LVT_TIMER, 0x10000);
+  mmio_write32(&mut a.regs, LA_TIMER_COUNT, 0);
 }
