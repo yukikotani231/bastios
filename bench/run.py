@@ -329,7 +329,7 @@ def fmt(v, unit, scale):
 def table(results):
     oses = list(results["os"])
     lines = [f"QEMU {results['accel'].upper()}, -smp {results['smp']}, -m {results['mem']}, "
-             f"median of {results['runs']} runs, host time ({results['date']}, {results['host_cpus']} host CPUs).", "",
+             f"median of {results['runs']} runs, {'instruction count (--icount)' if ICOUNT else 'host time'} ({results['date']}, {results['host_cpus']} host CPUs).", "",
              "| Test | Unit | " + " | ".join(oses) + (" | BastiOS / Linux |" if len(oses) == 2 else " |"),
              "|---|---|" + "---:|" * len(oses) + ("---:|" if len(oses) == 2 else "")]
     for test, unit, scale, isfile in TESTS:
