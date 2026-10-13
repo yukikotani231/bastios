@@ -25,13 +25,13 @@ import "ramfs.bastio";
 import "diskfs.bastio";
 import "pcache.bastio";
 
-const NFD: u64 = 256;                 // open files per process
-const FD_ROWS: u64 = 65536;           // NPROC * NFD
+const NFD: u64 = 512;                 // open files per process
+const FD_ROWS: u64 = 131072;          // NPROC * NFD
 const FD_STRIDE: u64 = 4;
 const HOLD_N: u64 = 128;              // holds (vfs_hold), in their own table
 const HOLD_LEN: u64 = 512;            // HOLD_N * FD_STRIDE
 const FTAB_LEN: u64 = FD_ROWS * FD_STRIDE;   // the most the table grows to (new_pid, src/proc.bastio)
-const FTAB_START: u64 = 32768;        // what it starts with: 32 processes' rows (PGROW * NFD * FD_STRIDE)
+const FTAB_START: u64 = 65536;        // what it starts with: 32 processes' rows (PGROW * NFD * FD_STRIDE)
 const XFER: u64 = 4096;               // the most bytes one call moves
 
 // Row fields.

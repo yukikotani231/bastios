@@ -1224,8 +1224,10 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
     return EMFILE;
   }
   lx_fill(&mut k, 0, 8);
-  bset(&mut k.fs.xfer, 0, cast[u8](r));
-  bset(&mut k.fs.xfer, 4, cast[u8](w));
+  bset(&mut k.fs.xfer, 0, cast[u8](r % 256));
+  bset(&mut k.fs.xfer, 1, cast[u8](r / 256));
+  bset(&mut k.fs.xfer, 4, cast[u8](w % 256));
+  bset(&mut k.fs.xfer, 5, cast[u8](w / 256));
   if lx_put_out(&mut k, pid, fds, 8) != 0 {
     return EFAULT;
   }
