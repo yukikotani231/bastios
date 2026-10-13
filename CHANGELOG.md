@@ -411,6 +411,10 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   add` of 300 files ran out); and the in-memory file system held 128
   files, and a create past that failed with `ENOENT` instead of `ENOSPC`.
 
+### Build and test
+
+- `test/stackdepth.py` checks that the deepest chain of kernel calls in a native kernel fits the kernel stack (it fails above 64 KiB of the 92 KiB; today 41 KiB). It was written after a native kernel built with an older compiler overflowed its stack in the UDP path under a loaded test run: its functions had frames up to 19 KiB where the current compiler's are under 4.5 KiB (the boot function aside).
+
 ### Files and disks
 
 - The system holds 4096 open file descriptions at once (1024 before), and 2048 pipes (512). Eight processes with about 230 each are tested (`user/mfd.c`). The table of open directories' names (`dpath`) took 2 MiB at boot whatever happened; it starts empty and grows as directories are opened, so a small machine has that memory back. Proved: unchanged (the same table bounds, now larger; a directory whose name could not be stored for lack of memory reads as having an empty name).
