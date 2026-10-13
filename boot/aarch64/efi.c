@@ -98,7 +98,7 @@ static void copy(volatile u64 *to, const volatile u64 *from, u64 n) {
  * interrupt controller, the PSCI conduit, the first PL011 (the console) and
  * the PCI Express configuration window. Everything else (virtio-mmio
  * slots, the clock) it finds by default or does without. */
-#define MAX_CPUS 16
+#define MAX_CPUS 64
 #define MAX_RUNS 8
 #define MAX_PRE_RUNS 64
 #define MPIDR_AFF 0xFF00FFFFFFull
