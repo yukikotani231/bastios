@@ -241,3 +241,24 @@ new
 $ bb mkdir -p /disk/a/root/src && bb printf 'one\nneedle two\nthree\n' > /disk/a/root/src/a.txt && bb printf 'needle\n' > /disk/a/root/src/b.txt && bb printf 'vim.cmd("silent grep -rn needle /root/src")\nlocal g = #vim.fn.getqflist()\nvim.cmd("vimgrep /needle/j /root/src/*.txt")\nio.open("/root/grep.txt", "w"):write(g, " ", #vim.fn.getqflist(), "\\n")\n' > /disk/a/root/grep.lua && bb chroot /disk/a /usr/bin/nvim -l /root/grep.lua >/dev/null 2>&1; bb cat /disk/a/root/grep.txt
 2 2
 
+
+== container: runc runs Alpine in new namespaces (own hostname, PID 1)
+$ mkdir -p /disk/b /run/runc && cd /disk/b && /disk/runc spec && bb sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"sh"#"/bin/sh", "-c", "hostname; echo pid=$$; cat /proc/self/cgroup; exec ps"#' config.json && /disk/runc --root /run/runc run c1 < /dev/null; echo status $?
+runc
+pid=1
+0::/
+PID   USER     TIME  COMMAND
+    1 root      0:00 busybox
+status 0
+
+== container: the host keeps its hostname and no container is left behind
+$ bb hostname; /disk/runc --root /run/runc list | bb wc -l
+bastios
+1
+
+== container: the root file system is read-only, and the exit status comes back
+$ cd /disk/b && bb sed -i -e 's#"hostname; echo pid=$$; cat /proc/self/cgroup; exec ps"#"touch /x 2>\&1; echo touch=$?; id -u; exit 3"#' config.json; /disk/runc --root /run/runc run c2 < /dev/null; echo status $?
+touch: /x: Read-only file system
+touch=1
+0
+status 3
