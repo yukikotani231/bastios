@@ -692,7 +692,17 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, mode: u6
       return ENOENT;
     }
   }
-  return lx_open_n(&mut k, pid, n, flags, mode);
+  let link = flags & LO_PATH != 0 && flags & LO_NOFOLLOW != 0 && n <= XFER && proc_fd(k.procs, k.fs.xfer, n) != NO_RESULT;
+  let r = lx_open_n(&mut k, pid, n, flags, mode);
+  if link && r < LXNFD {
+    // Linux hands back the link itself; this follows it, and the description
+    // remembers that it is no more than a handle (magic_target).
+    let h = fd_ofd(k, pid, r);
+    if h < OFD_N {
+      of_set(&mut k.ofd, h, OF_ACC, of_get(k.ofd, h, OF_ACC) | ACC_LINK);
+    }
+  }
+  return r;
 }
 
 /// open of the path in the first n bytes of the transfer buffer.

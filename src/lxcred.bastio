@@ -344,8 +344,9 @@ fn lx_cred_call(k: &mut Kernel, pid: u64, n: u64, a0: u64, b0: u64, c0: u64) -> 
     r = id_out(k, pid, 1, id_get(k.procs, pid, F_GID, false));
   } else if n == LX_GETEGID {
     r = id_out(k, pid, 1, id_get(k.procs, pid, F_GID, true));
-  } else if setter && (a == UM_BAD || b == UM_BAD || c == UM_BAD) {
-    r = EINVAL;                             // an id the namespace does not map
+  } else if setter && (a == UM_BAD || (b == UM_BAD && n != LX_SETUID && n != LX_SETGID)
+      || (c == UM_BAD && (n == LX_SETRESUID || n == LX_SETRESGID))) {
+    r = EINVAL;                             // an id the namespace does not map (only the arguments the call takes: the other registers hold anything)
   } else if n == LX_SETUID {
     r = set_id(&mut k.procs, pid, root, F_UID, F_SUID, a);
   } else if n == LX_SETGID {

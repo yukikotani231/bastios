@@ -1,0 +1,178 @@
+// The tables of the mount namespaces (see src/lxns.bastio) that need no
+// more than reading: where each mount's key and source are, and the name
+// of a file of the file layer as a process in a namespace sees it. Here so
+// that /proc (src/lxprocfs.bastio), which src/lxns.bastio imports, can use
+// them.
+
+import "linux.bastio";
+
+const MNS_NEXT: u64 = NPROC;
+const MNS_LPLEN: u64 = NPROC + 1;
+const MNS_LRO: u64 = NPROC + 2;
+const MNS_SEQ: u64 = NPROC + 3;
+const MNS_JUMP: u64 = NPROC + 4;          // overlay getdents: the position to go on from (0: the next)
+const MNS_ODIR: u64 = NPROC + 5;          // overlay getdents: the layer's directory of the last entry
+const MNS_OIDX: u64 = NPROC + 6;          // and its index there
+const MNS_INTENT: u64 = NPROC + 7;        // overlay: what the next lookup is for (OI_*)
+const MNS_OE: u64 = NPROC + 8;            // overlay: the mount the last lookup went through + 1 (0: none)
+const MNS_OLYR: u64 = NPROC + 9;          // and the layer that had the name (OVL_NONE: none)
+const MNS_FINAL: u64 = NPROC + 10;        // 1 while lx_follow looks up the whole path
+const MNS_IPID: u64 = NPROC + 11;         // overlay: the process whose call the intent is for
+const MNS_SVALID: u64 = NPROC + 12;       // overlay: ovl_stash kept a path (1)
+const MNS_SLEN: u64 = NPROC + 13;         // its length, in k.mstr from STASH
+const MNS_SE: u64 = NPROC + 14;           // the overlay mount it is in
+const MNS_SLOW: u64 = NPROC + 15;         // whether a lower layer has the name
+const MNS_ENT: u64 = NPROC + 16;
+const MS_ROW: u64 = 256;                  // FNAME_MAX + 1
+const LPATH: u64 = 256;                   // where the mounts' strings start in k.mstr
+
+const MNS_MAX: u64 = 0x10000000000;       // namespace ids and sequence numbers stay below it
+const ME_NS: u64 = 0;
+const ME_FLAGS: u64 = 1;
+const ME_KLEN: u64 = 2;
+const ME_SLEN: u64 = 3;
+const ME_SEQ: u64 = 4;
+
+const MT_RO: u64 = 16;                    // flags: read-only
+const MT_OWN: u64 = 32;                   // flags: the source is an in-memory directory made for the mount
+const MK_BIND: u64 = 1;
+const MK_PROC: u64 = 2;
+const MK_DEV: u64 = 3;
+const MK_PTS: u64 = 4;
+const MK_SYS: u64 = 5;
+const MK_MQUEUE: u64 = 6;
+const MK_OLDROOT: u64 = 7;
+const MK_CGROUP: u64 = 8;                 // cgroup2 (src/lxcgroup.bastio)
+
+fn me_get(k: &Kernel, e: u64, f: u64) -> u64
+  requires kok(k) && e < MT_N && f < ME_W
+{
+  return get(k.mns, MNS_ENT + e * ME_W + f);
+}
+
+fn me_set(k: &mut Kernel, e: u64, f: u64, v: u64)
+  requires kok(k) && e < MT_N && f < ME_W
+  ensures kok(k)
+{
+  k.mns = set(k.mns, MNS_ENT + e * ME_W + f, v);
+}
+
+/// The mount namespace of process pid.
+fn ns_of(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result < MNS_MAX
+{
+  return smaller(get(k.mns, pid), MNS_MAX - 1);
+}
+
+/// Is mount e one of namespace ns's?
+fn me_in(k: &Kernel, e: u64, ns: u64) -> bool
+  requires kok(k) && e < MT_N
+{
+  let v = me_get(k, e, ME_NS);
+  return v != 0 && v - 1 == ns;
+}
+
+/// Where mount e's key starts in k.mstr (its source is MS_ROW later).
+fn me_key(e: u64) -> u64
+  requires e < MT_N
+  ensures result + 2 * MS_ROW <= MSTR_LEN
+{
+  return LPATH + e * 2 * MS_ROW;
+}
+
+/// The key length of mount e, at most FNAME_MAX.
+fn me_klen(k: &Kernel, e: u64) -> u64
+  requires kok(k) && e < MT_N
+  ensures result <= FNAME_MAX
+{
+  return smaller(me_get(k, e, ME_KLEN), FNAME_MAX);
+}
+
+fn me_slen(k: &Kernel, e: u64) -> u64
+  requires kok(k) && e < MT_N
+  ensures result <= FNAME_MAX
+{
+  return smaller(me_get(k, e, ME_SLEN), FNAME_MAX);
+}
+
+/// The logical name of the file-layer path in the first n bytes of the
+/// transfer buffer, as a process in namespace ns sees it: below a bind
+/// mount's source (the in-memory directory of a tmpfs mounted in the
+/// namespace, say) it is the mount's key and the rest. Written to
+/// o[0..], with no leading "/"; returns its length, or NO_RESULT if no
+/// mount of ns has the name below its source (or the result does not fit).
+fn ns_back(k: &Kernel, ns: u64, n: u64, o: &mut Bytes) -> u64
+  requires kok(k) && n <= FNAME_MAX && FNAME_MAX <= blen(o)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  let mut best = MT_N;
+  let mut e = 0;
+  while e < MT_N
+    invariant e <= MT_N && best <= MT_N && n <= FNAME_MAX && kok(k)
+  {
+    if me_in(k, e, ns) && me_get(k, e, ME_FLAGS) % MT_RO == MK_BIND && ns_src_covers(k, e, n) {
+      if best == MT_N || me_slen(k, e) > me_slen(k, best) {
+        best = e;
+      }
+    }
+    e = e + 1;
+  }
+  if best >= MT_N {
+    return NO_RESULT;
+  }
+  let kl = me_klen(k, best);
+  let sl = me_slen(k, best);
+  let at = me_key(best);
+  let mut w = 0;
+  while w < kl
+    invariant w <= kl && kl <= FNAME_MAX && FNAME_MAX <= blen(o) && at + 2 * MS_ROW <= MSTR_LEN && kok(k)
+  {
+    bset(&mut o, w, bget(k.mstr, at + w));
+    w = w + 1;
+  }
+  if sl > n {
+    return NO_RESULT;
+  }
+  let mut r = sl;                           // the rest of the name, xfer[r..n]
+  if kl == 0 && r < n && bget(k.fs.xfer, r) == 47 {
+    r = r + 1;                              // a mount on "/": no "/" before the rest
+  }
+  if w + (n - r) > FNAME_MAX {
+    return NO_RESULT;
+  }
+  while r < n
+    invariant r <= n && n <= FNAME_MAX && w + (n - r) <= FNAME_MAX && FNAME_MAX <= blen(o) && kok(k)
+  {
+    bset(&mut o, w, bget(k.fs.xfer, r));
+    w = w + 1;
+    r = r + 1;
+  }
+  return w;
+}
+
+/// Is mount e's source a prefix of the transfer buffer's first n bytes that
+/// ends at a "/" or at n (and not empty)?
+fn ns_src_covers(k: &Kernel, e: u64, n: u64) -> bool
+  requires kok(k) && e < MT_N && n <= FNAME_MAX
+{
+  let sl = me_slen(k, e);
+  if sl == 0 || sl > n {
+    return false;
+  }
+  if sl < n && bget(k.fs.xfer, sl) != 47 {
+    return false;
+  }
+  let at = me_key(e) + MS_ROW;
+  let mut i = 0;
+  while i < sl
+    invariant i <= sl && sl <= n && n <= FNAME_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
+  {
+    if bget(k.mstr, at + i) != bget(k.fs.xfer, i) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
