@@ -78,6 +78,10 @@ the real programs, and `script` (util-linux, only for `compat-host`).
     packages and the index are unsigned, so apk runs with
     `--allow-untrusted`.
   - The cases change the disk, so `run.py` runs them on a copy.
+  - `make ARCH=aarch64 compat` runs this group, `debian.txt` and `node.txt` on
+    the AArch64 kernel from the images' arm64 layers (`COMPAT_ARCH=aarch64`;
+    the pins are in `images.mk`). The Bastio toolchain and Dropbear are built
+    for x86-64 only, so the checks that use them do not pass there.
 - `debian.txt`: Debian 13, from a fifth disk (`debiandisk.py`). The first
   case unpacks Debian's root file system (the `debian:stable-slim` image,
   `DEBIAN_IMAGE`, without `/usr/share`, dpkg's file lists, gconv and Perl's

@@ -31,6 +31,13 @@ fn prog_image(i: u64) -> Str {
   return "";
 }
 
+/// Whether the vDSO page holds an ELF image for AT_SYSINFO_EHDR to point at.
+/// It does not yet on AArch64, and musl's dynamic linker reads whatever
+/// that address holds as an ELF header.
+fn vdso_is_elf() -> bool {
+  return false;
+}
+
 /// Fills the vDSO page: AArch64 has no vDSO image yet, only the clock words
 /// and the signal return trampoline (`mov x8, #139; svc #0`).
 fn vdso_fill(f: &mut Frame, t: Tsc, epoch: u64) {

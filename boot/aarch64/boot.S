@@ -159,6 +159,8 @@ start:
         orr     x1, x1, #(1 << 2)       /* C: data cache */
         orr     x1, x1, #(1 << 12)      /* I: instruction cache */
         bic     x1, x1, #(1 << 19)      /* WXN off: a writable page may hold code */
+        orr     x1, x1, #(1 << 15)      /* UCT: EL0 reads CTR_EL0 (a JIT sizes its cache flushes) */
+        orr     x1, x1, #(1 << 26)      /* UCI: EL0 cleans and invalidates caches by address (DC CVAU, IC IVAU) */
         bic     x1, x1, #(1 << 1)       /* A off: unaligned accesses are fine */
         msr     sctlr_el1, x1
         isb
@@ -211,6 +213,8 @@ bst_secondary_entry:
         orr     x1, x1, #(1 << 2)
         orr     x1, x1, #(1 << 12)
         bic     x1, x1, #(1 << 19)
+        orr     x1, x1, #(1 << 15)      /* UCT, UCI: as above */
+        orr     x1, x1, #(1 << 26)
         bic     x1, x1, #(1 << 1)
         msr     sctlr_el1, x1
         isb
