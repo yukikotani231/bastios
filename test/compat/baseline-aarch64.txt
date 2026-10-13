@@ -1,7 +1,9 @@
 # Checks that pass on BastiOS (make compat-baseline rewrites this).
 # make compat fails if one of them stops passing.
 alpine-tty: nvim: :make runs gcc through make
+alpine-tty: nvim: a shell escape with :!
 alpine-tty: nvim: edit a C file, build it with gcc, run it
+alpine-tty: nvim: edit a file in a git work tree, then commit it
 alpine-tty: nvim: edit and save a C file
 alpine-tty: nvim: it reads the terminal's size, and has colours
 alpine-tty: nvim: u undoes an edit, and the undo file is written
@@ -25,20 +27,37 @@ alpine: curl: 1 MiB from the host
 alpine: curl: a file from the host
 alpine: file: what a file is (libmagic)
 alpine: gcc: compile and run a C program (gcc, cc1, as and ld are fixed-address executables)
+alpine: git: clone over HTTP and over HTTPS (git's dumb protocol, curl's TLS)
+alpine: git: clone, gc and fsck
+alpine: git: commit, log and diff
 alpine: jq: query JSON
 alpine: less: copies a pipe through
 alpine: make: rebuild only what is out of date
 alpine: nvim: :grep and :vimgrep fill the quickfix list
 alpine: nvim: LuaJIT loads a shared object that gcc built
 alpine: nvim: a file watcher and a timer from libuv
+alpine: nvim: a headless server on a unix socket answers another nvim (--listen, sockconnect, RPC)
 alpine: nvim: a job on a pseudo-terminal (what :terminal runs on, with /dev and /dev/pts bound into the chroot)
+alpine: nvim: a plugin cloned over HTTP is on the packpath and runs at startup
 alpine: nvim: a script run without a terminal
+alpine: nvim: shada and a session file survive a restart (atomic writes, rename)
+alpine: nvim: the LSP client starts a language server, asks it for a hover and stops it
 alpine: nvim: tree-sitter parses help text with the vimdoc parser
 alpine: nvim: vim.system runs a process and collects its output and status
 alpine: openssl: a digest and random bytes
 alpine: rsync: copy a tree
 alpine: ssh-keygen: an ed25519 key
 alpine: xmllint: an XPath query
+apps: lua: arithmetic and strings
+apps: lua: coroutines and tables
+apps: lua: files
+apps: qjs: files and exec
+apps: qjs: language
+apps: qjs: promises and timers
+apps: sqlite3: 20000 rows, an index and a query
+apps: sqlite3: WAL
+apps: sqlite3: a database file
+apps: sqlite3: in memory
 busybox: awk
 busybox: base64
 busybox: basename/dirname
@@ -118,6 +137,8 @@ debian: debian: users and the machine
 node: node: a hot loop is compiled and gives the right sum
 node: node: a script with arrays and JSON
 node: node: an expression
+node: node: exit status and uncaught exceptions
+node: node: make the device nodes
 node: node: read and write files
 node: node: timers and promises run in order
 node: node: version
