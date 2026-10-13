@@ -268,6 +268,15 @@ $ bb hostname; /disk/runc --root /run/runc list | bb wc -l
 bastios
 1
 
+== container: crun runs the same container (own hostname, PID 1)
+$ mkdir -p /disk/cr /run/crun && cd /disk/cr && /disk/crun spec && bb sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"sh"#"/bin/sh", "-c", "hostname; echo pid=$$; cat /proc/self/cgroup; exec ps"#' config.json && ( /disk/crun --root /run/crun run k1 < /dev/null; echo status $? ) | bb sed 's/ 0:0[0-9] / 0:00 /'
+runc
+pid=1
+0::/
+PID   USER     TIME  COMMAND
+    1 root      0:00 busybox
+status 0
+
 == container: the root file system is read-only, and the exit status comes back
 $ cd /disk/b && bb sed -i -e 's#"hostname; echo pid=$$; cat /proc/self/cgroup; exec ps"#"touch /x 2>\&1; echo touch=$?; id -u; exit 3"#' config.json; /disk/runc --root /run/runc run c2 < /dev/null; echo status $?
 touch: /x: Read-only file system
