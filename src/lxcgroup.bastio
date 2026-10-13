@@ -1736,11 +1736,18 @@ fn lx_clone3(k: &mut Kernel, mmu: &Mmu, pid: u64, va: u64, size: u64) -> Clone3
   if size < CLONE_ARGS_V0 || size > 4096 {
     return Clone3 { r: EINVAL, wait: false };
   }
-  if size > CLONE_ARGS_V2 {
-    return Clone3 { r: E2BIG, wait: false };
-  }
   if va >= 0x800000000000 {
     return Clone3 { r: EFAULT, wait: false };
+  }
+  if size > CLONE_ARGS_V2 {
+    // A structure from a newer kernel: its extra words must be readable and zero.
+    let tail = user_u64(&mut k.spaces, pid, va + size - 8);
+    if !tail.ok {
+      return Clone3 { r: EFAULT, wait: false };
+    }
+    if tail.v != 0 {
+      return Clone3 { r: E2BIG, wait: false };
+    }
   }
   let fl = c3_field(&mut k, pid, va, size, 0);
   let ctid = c3_field(&mut k, pid, va, size, 16);
@@ -1756,13 +1763,31 @@ fn lx_clone3(k: &mut Kernel, mmu: &Mmu, pid: u64, va: u64, size: u64) -> Clone3
   }
   let into = fl.v & CLONE_INTO_CGROUP != 0;
   let flags = fl.v % 0x100000000;
-  if fl.v >= 0x400000000 || flags & 0xff != 0 || flags & CLONE_PIDFD_FLAG != 0 || flags & CLONE_DETACHED != 0 {
+  if fl.v >= 0x400000000 || flags & 0xff != 0 || flags & CLONE_DETACHED != 0 {
+    return Clone3 { r: EINVAL, wait: false };
+  }
+  if flags & CLONE_PIDFD_FLAG != 0 {
+    // Not supported; a bad address for the descriptor is still told first.
+    let pf = c3_field(&mut k, pid, va, size, 8);
+    if !pf.ok {
+      return Clone3 { r: EFAULT, wait: false };
+    }
+    if pf.v != 0 {
+      let pw = user_u64(&mut k.spaces, pid, pf.v);
+      if !pw.ok {
+        return Clone3 { r: EFAULT, wait: false };
+      }
+    }
+    return Clone3 { r: EINVAL, wait: false };
+  }
+  if (flags & CLONE_SIGHAND != 0 && flags & CLONE_VM == 0) || (flags & CLONE_THREAD != 0 && flags & CLONE_SIGHAND == 0)
+     || (flags & CLONE_FS != 0 && flags & (CLONE_NEWNS + CLONE_NEWUSER) != 0) {
     return Clone3 { r: EINVAL, wait: false };
   }
   if sig.v > 64 || tidn.v != 0 || stack.v >= 0x800000000000 || ssz.v >= 0x800000000000 {
     return Clone3 { r: EINVAL, wait: false };
   }
-  if stack.v == 0 && ssz.v != 0 {
+  if (stack.v == 0) != (ssz.v == 0) {
     return Clone3 { r: EINVAL, wait: false };
   }
   let thread = flags & CLONE_THREAD != 0;
