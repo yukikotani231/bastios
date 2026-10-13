@@ -693,14 +693,14 @@ fn cg_mem_current(k: &mut Kernel, s: u64) -> u64
 
 /// Could process pid have `extra` more pages (a mapping, a growing break, a
 /// forked copy) without a memory.max, its own group's or one above it,
-/// being passed? Nothing is counted for a group with no limit.
+/// being passed? Nothing is counted for a group with no limit, and `extra`
+/// is not looked at either: a fork's page count (anon_count) is WPAGES + 1
+/// while another processor holds a lease on the space, and that must not
+/// fail a fork in a group nobody limited.
 fn cg_mem_ok(k: &mut Kernel, pid: u64, extra: u64) -> bool
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if extra > WPAGES {
-    return false;
-  }
   let mut c = cg_of(k, pid);
   let mut i = 0;
   while i < CG_N
@@ -708,6 +708,9 @@ fn cg_mem_ok(k: &mut Kernel, pid: u64, extra: u64) -> bool
   {
     let lim = cg_get(k, c, CGW_MEM);
     if lim != 0 && lim <= 0x100000000000000 {
+      if extra > WPAGES {
+        return false;
+      }
       if cg_mem_current(&mut k, c) + extra * 4096 > lim - 1 {
         return false;
       }
