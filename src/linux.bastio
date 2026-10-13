@@ -552,6 +552,14 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     }
     return KEEP;
   }
+  if n == LX_CLONE3 {
+    let c3 = lx_clone3(&mut k, mmu, pid, a, b);   // src/lxcgroup.bastio
+    ret(&mut k.procs, pid, c3.r);
+    if c3.wait {
+      return SWITCH;                          // the parent waits until the child lets go
+    }
+    return KEEP;
+  }
   if n == LX_UNSHARE {
     ret(&mut k.procs, pid, lx_unshare(&mut k, pid, a));
     return KEEP;
@@ -753,8 +761,7 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     return KEEP;
   }
   // glibc asks for these and carries on without them: restartable
-  // sequences (sched_getcpu falls back to the system call), and clone3
-  // (pthread_create falls back to clone, as on Linux before 5.3); nginx
+  // sequences (sched_getcpu falls back to the system call); nginx
   // goes on without Linux AIO (io_setup), and libuv and BIND without
   // io_uring. Refused quietly, as known gaps.
   if n == LX_BPF {
@@ -764,7 +771,7 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   // The keyring calls (runc and crun make a session keyring when they
   // can) and the new mount API (they use it when present) likewise fall
   // back on ENOSYS.
-  if n == LX_RSEQ || n == LX_CLONE3 || n == LX_IO_SETUP || n == LX_IO_URING_SETUP
+  if n == LX_RSEQ || n == LX_IO_SETUP || n == LX_IO_URING_SETUP
       || n == LX_ADD_KEY || n == LX_REQUEST_KEY || n == LX_KEYCTL
       || n == LX_OPEN_TREE || n == LX_MOVE_MOUNT || n == LX_FSOPEN
       || n == LX_FSCONFIG || n == LX_FSMOUNT || n == LX_FSPICK {

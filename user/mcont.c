@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/prctl.h>
+#include <stdint.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -27,6 +28,14 @@
 #ifndef PR_CAP_AMBIENT
 #define PR_CAP_AMBIENT 47
 #endif
+
+#ifndef SYS_clone3
+#define SYS_clone3 435
+#endif
+#define C3_INTO_CGROUP 0x200000000ULL
+struct c3args {
+	uint64_t flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls, set_tid, set_tid_size, cgroup;
+};
 
 static volatile int ns_stop, ns_bad;
 static void *ns_worker(void *a) {
@@ -156,6 +165,61 @@ int main(void) {
 	unlink("/tmp/mcont.file");
 	rmdir("/tmp/mcont.rr");
 	if (ns_bad) return fail("a thread's own root leaked to its group");
+
+	/* clone3: a plain fork, then CLONE_INTO_CGROUP puts the child in the group the descriptor names. */
+	struct c3args ca;
+	memset(&ca, 0, sizeof ca);
+	ca.exit_signal = SIGCHLD;
+	long c3 = syscall(SYS_clone3, &ca, sizeof ca);
+	if (c3 == 0) _exit(7);
+	if (c3 < 0) return fail("clone3 fork");
+	int st3;
+	if (waitpid(c3, &st3, 0) != c3 || !WIFEXITED(st3) || WEXITSTATUS(st3) != 7) return fail("clone3 child");
+	if (syscall(SYS_clone3, &ca, 8) != -1 || errno != EINVAL) return fail("clone3 short size");
+	if (syscall(SYS_clone3, (void *)8, sizeof ca) != -1 || errno != EFAULT) return fail("clone3 bad pointer");
+	ca.exit_signal = 0x100;
+	if (syscall(SYS_clone3, &ca, sizeof ca) != -1 || errno != EINVAL) return fail("clone3 bad signal");
+	if (mkdir("/sys/fs/cgroup/c3", 0755) != 0) return fail("mkdir cgroup");
+	int cgd = open("/sys/fs/cgroup/c3", O_RDONLY | O_DIRECTORY);
+	if (cgd < 0) return fail("open cgroup");
+	memset(&ca, 0, sizeof ca);
+	ca.flags = C3_INTO_CGROUP;
+	ca.exit_signal = SIGCHLD;
+	int nul = open("/dev/null", O_RDONLY);
+	ca.cgroup = nul;                                 /* /dev/null is not a cgroup */
+	if (syscall(SYS_clone3, &ca, sizeof ca) != -1 || errno != EBADF) return fail("clone3 non-cgroup fd");
+	close(nul);
+	ca.cgroup = cgd;
+	c3 = syscall(SYS_clone3, &ca, sizeof ca);
+	if (c3 == 0) {
+		char cg[64] = {0};
+		int f = open("/proc/self/cgroup", O_RDONLY);
+		int n = f < 0 ? -1 : read(f, cg, sizeof cg - 1);
+		_exit(n >= 6 && strncmp(cg, "0::/c3", 6) == 0 ? 0 : 1);
+	}
+	if (c3 < 0) return fail("clone3 into cgroup");
+	if (waitpid(c3, &st3, 0) != c3 || !WIFEXITED(st3) || WEXITSTATUS(st3) != 0) return fail("child not in the cgroup");
+	/* A group at its pids.max takes no child: the limit is checked before it is made. */
+	int sc = open("/sys/fs/cgroup/cgroup.subtree_control", O_WRONLY);
+	if (sc < 0 || write(sc, "+pids", 5) != 5) return fail("enable pids");
+	close(sc);
+	int pm = open("/sys/fs/cgroup/c3/pids.max", O_WRONLY);
+	if (pm < 0 || write(pm, "0", 1) != 1) return fail("pids.max");
+	close(pm);
+	c3 = syscall(SYS_clone3, &ca, sizeof ca);
+	if (c3 == 0) _exit(0);
+	if (c3 != -1 || errno != EAGAIN) {
+		if (c3 > 0) waitpid(c3, &st3, 0);
+		return fail("clone3 past pids.max");
+	}
+	/* A thread through clone3 shares the address space; INTO_CGROUP is refused for it. */
+	ca.flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | C3_INTO_CGROUP;
+	ca.exit_signal = 0;
+	if (syscall(SYS_clone3, &ca, sizeof ca) != -1 || errno != EINVAL) return fail("clone3 thread into cgroup");
+	close(cgd);
+	if (rmdir("/sys/fs/cgroup/c3") != 0) return fail("rmdir cgroup");
+	pm = open("/sys/fs/cgroup/cgroup.subtree_control", O_WRONLY);
+	if (pm >= 0) { write(pm, "-pids", 5); close(pm); }
 
 	/* A subreaper adopts its descendants' orphans: the grandchild's parent becomes this process. */
 	int fds[2];

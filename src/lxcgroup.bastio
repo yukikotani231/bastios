@@ -293,7 +293,15 @@ fn cg_descendants(k: &Kernel, s: u64) -> u64
 fn cg_fork_ok(k: &Kernel, pid: u64) -> bool
   requires kok(k) && pid < NPROC
 {
-  let mut c = cg_of(k, pid);
+  return cg_room(k, cg_of(k, pid));
+}
+
+/// Whether cgroup s could take one more task: neither it nor a group
+/// above it is at its pids.max.
+fn cg_room(k: &Kernel, s: u64) -> bool
+  requires kok(k) && s < CG_N
+{
+  let mut c = s;
   let mut i = 0;
   while i < CG_N
     invariant i <= CG_N && c < CG_N && kok(k)
@@ -1454,4 +1462,143 @@ fn cg_rmdir(k: &mut Kernel, pid: u64, n: u64) -> u64
   }
   cg_put(&mut k, r.slot, CGW_USED, 0);
   return 0;
+}
+
+// ---------------------------------------------------------------- clone3
+
+const CLONE_INTO_CGROUP: u64 = 0x200000000;   // clone3 only
+const CLONE_PIDFD_FLAG: u64 = 0x1000;
+const CLONE_ARGS_V0: u64 = 64;                // struct clone_args up to child_tid..tls
+const CLONE_ARGS_V2: u64 = 88;                // ... through cgroup
+
+/// What lx_clone3 did: r is the child's id or -errno, wait is true if the
+/// caller must give way until a vfork child lets go.
+struct Clone3 { r: u64, wait: bool }
+
+/// The u64 at byte off of the clone_args at user address va, 0 beyond size.
+fn c3_field(k: &mut Kernel, pid: u64, va: u64, size: u64, off: u64) -> Word
+  requires kok(k) && pid < NPROC && off <= CLONE_ARGS_V2 && va < 0x800000000000
+  ensures kok(k)
+{
+  if off + 8 > size {
+    return Word { ok: true, v: 0 };
+  }
+  return user_u64(&mut k.spaces, pid, va + off);
+}
+
+/// clone3(args, size): clone with the arguments in a struct. The
+/// flags are the ones clone takes (the exit signal is a field of its own),
+/// the stack is given as its lowest address and size, and CLONE_INTO_CGROUP
+/// puts the child in the cgroup that descriptor `cgroup` is a directory of,
+/// as if it had been written to that group's cgroup.procs, but with the
+/// group's pids.max checked first, so nothing is made that cannot stay.
+/// CLONE_PIDFD and set_tid are not supported (EINVAL).
+fn lx_clone3(k: &mut Kernel, mmu: &Mmu, pid: u64, va: u64, size: u64) -> Clone3
+  requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k)
+{
+  if size < CLONE_ARGS_V0 || size > 4096 {
+    return Clone3 { r: EINVAL, wait: false };
+  }
+  if size > CLONE_ARGS_V2 {
+    return Clone3 { r: E2BIG, wait: false };
+  }
+  if va >= 0x800000000000 {
+    return Clone3 { r: EFAULT, wait: false };
+  }
+  let fl = c3_field(&mut k, pid, va, size, 0);
+  let ctid = c3_field(&mut k, pid, va, size, 16);
+  let ptid = c3_field(&mut k, pid, va, size, 24);
+  let sig = c3_field(&mut k, pid, va, size, 32);
+  let stack = c3_field(&mut k, pid, va, size, 40);
+  let ssz = c3_field(&mut k, pid, va, size, 48);
+  let tls = c3_field(&mut k, pid, va, size, 56);
+  let tidn = c3_field(&mut k, pid, va, size, 72);
+  let cgfd = c3_field(&mut k, pid, va, size, 80);
+  if !fl.ok || !ctid.ok || !ptid.ok || !sig.ok || !stack.ok || !ssz.ok || !tls.ok || !tidn.ok || !cgfd.ok {
+    return Clone3 { r: EFAULT, wait: false };
+  }
+  let into = fl.v & CLONE_INTO_CGROUP != 0;
+  let flags = fl.v % 0x100000000;
+  if fl.v >= 0x400000000 || flags & 0xff != 0 || flags & CLONE_PIDFD_FLAG != 0 || flags & CLONE_DETACHED != 0 {
+    return Clone3 { r: EINVAL, wait: false };
+  }
+  if sig.v > 64 || tidn.v != 0 || stack.v >= 0x800000000000 || ssz.v >= 0x800000000000 {
+    return Clone3 { r: EINVAL, wait: false };
+  }
+  if stack.v == 0 && ssz.v != 0 {
+    return Clone3 { r: EINVAL, wait: false };
+  }
+  let thread = flags & CLONE_THREAD != 0;
+  if thread && (sig.v != 0 || into) {
+    return Clone3 { r: EINVAL, wait: false };
+  }
+  if flags & CLONE_VFORK != 0 && flags & CLONE_VM == 0 {
+    return Clone3 { r: EINVAL, wait: false };
+  }
+  if !into && cgfd.v != 0 {
+    return Clone3 { r: EINVAL, wait: false };
+  }
+  // The target group.
+  let mut dest = 0;
+  if into {
+    if cgfd.v >= 0x80000000 {
+      return Clone3 { r: EINVAL, wait: false };
+    }
+    let d = fd_look(k, pid, cgfd.v);
+    if d.kind == K_BAD {
+      return Clone3 { r: EBADF, wait: false };
+    }
+    if d.kind != K_DIR || d.x < DIR_CG || d.x - DIR_CG >= CG_N {
+      return Clone3 { r: EBADF, wait: false };
+    }
+    dest = d.x - DIR_CG;
+    if !cg_used(k, dest) || !cg_in(k, dest, cgns_root(k, pid)) {
+      return Clone3 { r: ENOENT, wait: false };    // gone, or outside the caller's cgroup namespace
+    }
+    if fs_id(k.procs, pid, false) != 0 {
+      return Clone3 { r: EACCES, wait: false };
+    }
+    if !cg_room(k, dest) {
+      return Clone3 { r: EAGAIN, wait: false };
+    }
+  }
+  let mut sp = 0;
+  if stack.v != 0 {
+    sp = stack.v + ssz.v;
+  }
+  let cflags = flags + sig.v;
+  if thread {
+    let r = lx_thread_clone(&mut k, pid, cflags, sp, ptid.v, ctid.v, tls.v);
+    if r < NPROC {
+      pt_fork_event(&mut k, pid, r, 3);
+    }
+    return Clone3 { r: child_id(k, pid, r), wait: false };
+  }
+  if flags & CLONE_VM != 0 && flags & CLONE_VFORK != 0 {
+    let r = lx_vfork_vm(&mut k, mmu, pid, sp);
+    if r >= NPROC {
+      return Clone3 { r: r, wait: false };
+    }
+    if into {
+      cg_move(&mut k, r, dest);
+    }
+    pt_fork_event(&mut k, pid, r, 2);
+    return Clone3 { r: r, wait: true };
+  }
+  if !clone_proc_flags(cflags) {
+    return Clone3 { r: EINVAL, wait: false };
+  }
+  let r = lx_clone_proc(&mut k, mmu, pid, cflags, sp, ptid.v, ctid.v, tls.v);
+  if r < NPROC {
+    if into {
+      cg_move(&mut k, r, dest);
+    }
+    let mut kind = 3;
+    if sig.v == 17 && flags == 0 {
+      kind = 1;
+    }
+    pt_fork_event(&mut k, pid, r, kind);
+  }
+  return Clone3 { r: child_id(k, pid, r), wait: false };
 }
