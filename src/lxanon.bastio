@@ -185,7 +185,13 @@ fn anon_fault(k: &mut Kernel, p: u64) -> bool
   if !anon_covers(k.anon, p, q) || raw_from_user(&mut k.spaces, p, q * 4096, &mut k.fs.xfer, 0, 1) != 0 {
     return false;                           // not such memory, or mapped (a fault for another reason)
   }
-  return anon_touch(&mut k.mem, &mut k.spaces, k.anon, p, q);
+  let ok = anon_touch(&mut k.mem, &mut k.spaces, k.anon, p, q);
+  if ok && q % 256 == 0 {
+    // A program that touches memory fast can finish before a timer tick
+    // looks at its group, so every 256th page it faults in is a check too.
+    cg_oom_tick(&mut k, p);
+  }
+  return ok;
 }
 
 /// fork: the child's window is a copy of the parent's, pages not touched

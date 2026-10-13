@@ -927,12 +927,13 @@ t_sock2: write after SHUT_WR is EPIPE
 t_sys: a cgroup namespace roots the tree
 t_sys: adjtimex reads and sets
 t_sys: clock_settime moves CLOCK_REALTIME
-t_sys: memory.max refuses a mapping that would pass it
+t_sys: memory.max kills the biggest process of a group that passes it
 t_sys: not root: EPERM
 t_sys: seccomp USER_NOTIF: a supervisor answers a call
 t_sys: setdomainname
 t_sys: the names are written through /proc/sys/kernel/hostname and domainname
 t_sys: sethostname, uname, /proc/sys/kernel/hostname
+t_sys: splice reads a /proc file into a pipe
 t_sys: settimeofday
 t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message
@@ -1044,6 +1045,7 @@ alpine: container: ocipull.sh pulls an image from a registry (with a token) and 
 alpine: container: the image's command, environment and working directory run rootless from the bundle
 alpine: nvim: a headless server on a unix socket answers another nvim (--listen, sockconnect, RPC)
 alpine: apk: install tmux, cmake and lua-language-server over HTTP
+alpine: tmux: a client on the console passes it to the server (SCM_RIGHTS of the console)
 alpine: tmux: a detached session runs a shell on a pseudo-terminal, takes keys and shows its screen
 alpine: cmake: configure, build and run a C project
 alpine: nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
