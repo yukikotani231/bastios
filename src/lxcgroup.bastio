@@ -724,11 +724,38 @@ fn cg_mem_ok(k: &mut Kernel, pid: u64, extra: u64) -> bool
   return true;
 }
 
+/// Is there a memory.max on pid's group or one above it?
+fn cg_mem_limited(k: &Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let mut c = cg_of(k, pid);
+  let mut i = 0;
+  while i < CG_N
+    invariant i <= CG_N && c < CG_N && kok(k)
+  {
+    let lim = cg_get(k, c, CGW_MEM);
+    if lim != 0 && lim <= 0x100000000000000 {
+      return true;
+    }
+    if c == 0 {
+      return false;
+    }
+    c = cg_parent(k, c);
+    i = i + 1;
+  }
+  return false;
+}
+
 /// Could process pid fork: its address space copied into the same group?
 fn cg_fork_mem_ok(k: &mut Kernel, pid: u64) -> bool
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  // Counting the parent's pages walks its whole window: do it only when a
+  // memory.max could be passed (most forks are in a group nobody limited).
+  if !cg_mem_limited(k, pid) {
+    return true;
+  }
   let own = anon_count(&mut k, pid, 0, WPAGES);
   return cg_mem_ok(&mut k, pid, own);
 }
