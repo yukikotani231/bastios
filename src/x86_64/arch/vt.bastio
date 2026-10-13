@@ -7,6 +7,18 @@ import "virtq.bastio";
 /// A device's memory-mapped registers: `v2` is the modern layout.
 struct VMem { regs: Mmio, v2: bool }
 
+/// A virtio-mmio device's registers (see src/virtio_mmio.bastio).
+fn vmem_new(regs: Mmio, v2: bool) -> VMem
+  ensures mmio_base(result.regs) == mmio_base(regs) && mmio_len(result.regs) == mmio_len(regs)
+{
+  return VMem { regs: regs, v2: v2 };
+}
+
+/// Are these the registers of a virtio-mmio device, of the right size and alignment?
+spec fn vmem_mmio_ok(d: &VMem) -> bool {
+  mmio_len(d.regs) == VM_LEN && mmio_base(d.regs) % 4 == 0
+}
+
 enum Vt { Port(PortIo), Mem(VMem) }
 
 spec fn vt_ok(t: &Vt) -> bool {
