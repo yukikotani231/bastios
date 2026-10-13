@@ -114,7 +114,8 @@ int main(void) {
         ok && strstr(t, "local_address") && strstr(t, "00000000:9CBB 00000000:0000 0A "); }));
     EXPECT("syslog (klogctl) reports a buffer size and reads nothing; an unknown type is EINVAL", ({ char kb[64];
         long sz = syscall(SYS_syslog, 10, 0, 0), rd = syscall(SYS_syslog, 3, kb, sizeof kb);
-        sz > 0 && rd == 0 && syscall(SYS_syslog, 99, 0, 0) == -1 && errno == EINVAL; }));
+        sz > 0 && rd == 0 && syscall(SYS_syslog, 99, 0, 0) == -1 && errno == EINVAL
+        && syscall(SYS_syslog, 2, 0, 8) == -1 && errno == EINVAL && syscall(SYS_syslog, 8, kb, 9) == -1 && errno == EINVAL; }));
     EXPECT("/proc/diskstats opens", open("/proc/diskstats", O_RDONLY) >= 0);
     EXPECT("/etc/passwd", open("/etc/passwd", O_RDONLY) >= 0);
     EXPECT("getlogin or getpwuid", getpwuid(getuid()) != NULL);
