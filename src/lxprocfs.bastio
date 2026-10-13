@@ -2359,12 +2359,34 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
     return EACCES;
   }
   let mut out = balloc(PROC_OUT);
-  let l = smaller(proc_text(&mut k, pid, f, &mut out), smaller(size, XFER));
+  let full = proc_text(&mut k, pid, f, &mut out);
+  // The program's name is from the top of the file system; the reader sees
+  // it from its own root (chroot), as on Linux. A program outside the
+  // root keeps its full name.
+  let mut cut = 0;
+  let rl = root_len(k, pid);
+  if is_exe_file(f) && rl > 0 && full > rl + 1 {
+    // out is "/" and the name; the root is kept without the "/".
+    let mut same = true;
+    let mut j = 0;
+    while same && j < rl
+      invariant j <= rl && rl + 1 < full && full <= PROC_OUT && rl <= FNAME_MAX && blen(out) == PROC_OUT && kok(k) && pid < NPROC
+    {
+      if cast[u64](bget(out, j + 1)) != wget(k.croot, pid * CWD_STRIDE + 1 + j) % 256 {
+        same = false;
+      }
+      j = j + 1;
+    }
+    if same && bget(out, rl + 1) == 47 {
+      cut = rl + 1;
+    }
+  }
+  let l = smaller(full - cut, smaller(size, XFER));
   let mut i = 0;
   while i < l
-    invariant i <= l && l <= PROC_OUT && l <= XFER && blen(out) == PROC_OUT && kok(k)
+    invariant i <= l && cut <= full && l <= full - cut && full <= PROC_OUT && l <= XFER && blen(out) == PROC_OUT && kok(k)
   {
-    bset(&mut k.fs.xfer, i, bget(out, i));
+    bset(&mut k.fs.xfer, i, bget(out, cut + i));
     i = i + 1;
   }
   bfree(out);

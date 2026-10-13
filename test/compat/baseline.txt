@@ -1041,3 +1041,8 @@ alpine: container: rootless: runc runs Alpine as an unprivileged user in a user 
 alpine: container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle
 alpine: container: the image's command, environment and working directory run rootless from the bundle
 alpine: nvim: a headless server on a unix socket answers another nvim (--listen, sockconnect, RPC)
+alpine: apk: install tmux, cmake and lua-language-server over HTTP
+alpine: tmux: a detached session runs a shell on a pseudo-terminal, takes keys and shows its screen
+alpine: cmake: configure, build and run a C project
+alpine: nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
+alpine: proc: /proc/self/exe is named from the reader's root (chroot), as on Linux
