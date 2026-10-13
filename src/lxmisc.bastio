@@ -869,7 +869,10 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     sync_files(&mut k);
   } else if n == LX_FCHOWN {
     let f = fd_handle(&mut k, pid, a);
-    if f != NO_RESULT && handle_ro(&mut k, f) {
+    let d = fd_look(k, pid, a);
+    if d.kind == K_PIPE_R || d.kind == K_PIPE_W || d.kind == K_SOCK {
+      r = chown_own_fd(&mut k, pid, b, c);
+    } else if f != NO_RESULT && handle_ro(&mut k, f) {
       r = EROFS;
     } else {
       r = chown_handle(&mut k, pid, f, b, c);
