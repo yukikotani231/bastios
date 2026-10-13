@@ -31,8 +31,13 @@
 // the path walk finds), and /proc/PID/cgroup is relative to it. A group that
 // is the root of a namespace some process is in cannot be removed.
 //
-// Not done: memory.max and cpu.max are kept and read back but nothing
-// enforces them yet; the "no internal processes" rule.
+// cpu.max is enforced in timer ticks (cg_cpu_tick): a tick that finds a
+// process running charges 10 ms to its group and those above it, and a group
+// that has used its quota in the current period is not scheduled until the
+// period ends; cpu.stat counts usage_usec, nr_periods and nr_throttled.
+// cpu.weight is kept and read back only.
+//
+// Not done: the "no internal processes" rule.
 
 import "lxuser.bastio";
 
@@ -137,7 +142,88 @@ fn cg_held(k: &Kernel, q: u64) -> bool
   if pget(k.procs, q, F_SIGPEND) & sbit(9) != 0 {
     return false;
   }
-  return cg_frozen(k, cg_of(k, q));
+  return cg_frozen(k, cg_of(k, q)) || cg_throttled(k, cg_of(k, q));
+}
+
+/// Is cgroup s, or one above it, out of its cpu.max quota for the period?
+fn cg_throttled(k: &Kernel, s: u64) -> bool
+  requires kok(k) && s < CG_N
+{
+  let mut c = s;
+  let mut i = 0;
+  while i < CG_N
+    invariant i <= CG_N && c < CG_N && kok(k)
+  {
+    if cg_get(k, c, CGW_THR) == 1 {
+      return true;
+    }
+    if c == 0 {
+      return false;
+    }
+    c = cg_parent(k, c);
+    i = i + 1;
+  }
+  return false;
+}
+
+const CG_TICK_US: u64 = 10000;             // one timer tick, in microseconds
+
+/// A timer tick found process p running: every group with a cpu.max whose
+/// period has ended starts a new one (counting it, and whether it ran out
+/// of quota), and the tick is charged to p's group and those above it; a
+/// group that has used its quota is throttled until its period ends
+/// (cg_held keeps its processes from being scheduled).
+fn cg_cpu_tick(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let now = k.ns;
+  let mut c = 0;
+  while c < CG_N
+    invariant c <= CG_N && kok(k)
+  {
+    let q = cg_get(k, c, CGW_CPUQ);
+    if cg_used(k, c) && q != 0 {
+      let mut per = cg_get(k, c, CGW_CPUP);
+      if per == 0 {
+        per = 100000;
+      }
+      let st = cg_get(k, c, CGW_CPUS);
+      if st > now || now - st >= smaller(per, 1000000) * 1000 {
+        cg_put(&mut k, c, CGW_NPER, sat_add(cg_get(k, c, CGW_NPER), 1));
+        if cg_get(k, c, CGW_THR) == 1 {
+          cg_put(&mut k, c, CGW_NTHR, sat_add(cg_get(k, c, CGW_NTHR), 1));
+        }
+        cg_put(&mut k, c, CGW_THR, 0);
+        cg_put(&mut k, c, CGW_CPUU, 0);
+        cg_put(&mut k, c, CGW_CPUS, now);
+      }
+    }
+    c = c + 1;
+  }
+  if p == 0 {
+    return;
+  }
+  let mut g = cg_of(k, p);
+  let mut i = 0;
+  while i < CG_N
+    invariant i <= CG_N && g < CG_N && kok(k)
+  {
+    cg_put(&mut k, g, CGW_USEC, sat_add(cg_get(k, g, CGW_USEC), CG_TICK_US));
+    let q = cg_get(k, g, CGW_CPUQ);
+    if q != 0 {
+      let u = sat_add(cg_get(k, g, CGW_CPUU), CG_TICK_US);
+      cg_put(&mut k, g, CGW_CPUU, u);
+      if u >= q - 1 {
+        cg_put(&mut k, g, CGW_THR, 1);
+      }
+    }
+    if g == 0 {
+      return;
+    }
+    g = cg_parent(k, g);
+    i = i + 1;
+  }
 }
 
 /// Is row q a task (not free, not a zombie)?
@@ -277,7 +363,10 @@ fn cgf_name(f: u64) -> Str {
   if f == 15 {
     return "cgroup.max.descendants";
   }
-  return "cgroup.freeze";
+  if f == 16 {
+    return "cgroup.freeze";
+  }
+  return "cpu.stat";
 }
 
 /// Which control file x[a..b] names, or CGF_N.
@@ -663,6 +752,18 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
       return put_s(&mut o, 0, "1\n");
     }
     return put_s(&mut o, 0, "0\n");
+  }
+  if f == 17 {
+    let u = cg_get(k, s, CGW_USEC);
+    let mut a = put_s(&mut o, 0, "usage_usec ");
+    a = put_n(&mut o, a, u);
+    a = put_s(&mut o, a, "\nuser_usec ");
+    a = put_n(&mut o, a, u);
+    a = put_s(&mut o, a, "\nsystem_usec 0\nnr_periods ");
+    a = put_n(&mut o, a, cg_get(k, s, CGW_NPER));
+    a = put_s(&mut o, a, "\nnr_throttled ");
+    a = put_n(&mut o, a, cg_get(k, s, CGW_NTHR));
+    return put_c(&mut o, a, 10);
   }
   return 0;                                 // cgroup.kill is write-only
 }
@@ -1195,6 +1296,9 @@ fn cg_write(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
       cg_put(&mut k, s, CGW_CPUQ, b.v + 1);
     }
     cg_put(&mut k, s, CGW_CPUP, period);
+    cg_put(&mut k, s, CGW_CPUU, 0);
+    cg_put(&mut k, s, CGW_CPUS, 0);
+    cg_put(&mut k, s, CGW_THR, 0);
     return n;
   }
   if !only_blank(k.fs.xfer, be, n) {
@@ -1317,6 +1421,12 @@ fn cg_mkdir(k: &mut Kernel, pid: u64, n: u64) -> u64
   cg_put(&mut k, free, CGW_CPUQ, 0);
   cg_put(&mut k, free, CGW_CPUP, 0);
   cg_put(&mut k, free, CGW_WEIGHT, 0);
+  cg_put(&mut k, free, CGW_CPUU, 0);
+  cg_put(&mut k, free, CGW_CPUS, 0);
+  cg_put(&mut k, free, CGW_USEC, 0);
+  cg_put(&mut k, free, CGW_NPER, 0);
+  cg_put(&mut k, free, CGW_NTHR, 0);
+  cg_put(&mut k, free, CGW_THR, 0);
   cg_put(&mut k, free, CGW_USED, 1);
   return 0;
 }
