@@ -5,7 +5,11 @@ package repository (/disk/a/repo/ARCH: .apk files and an APKINDEX; and
 /disk/a/repo2/ARCH, ARCH being x86_64, or aarch64 with COMPAT_ARCH=aarch64), next to Alpine's own BusyBox at /disk/busybox. The checks unpack the root under
 /disk/a, chroot into it and run apk there.
 
-    alpinedisk.py OUT.img WORK_DIR BASE_IMAGE PKG_IMAGE... --disk NAME,... [--cache DIR]
+    alpinedisk.py OUT.img WORK_DIR BASE_IMAGE PKG_IMAGE... --disk NAME,... [--cache DIR] [--busybox FILE]
+
+--busybox FILE is the BusyBox put at /disk/busybox in place of Alpine's own:
+Alpine's is dynamically linked, and a kernel without the built-in musl
+dynamic linker (AArch64) cannot start it outside the root.
 
 Every package the PKG_IMAGEs hold goes in a repository WORK_DIR/disk/http,
 which run.py serves over HTTP (alpine.txt's ALPINEURL): it is larger than
@@ -415,6 +419,10 @@ def main():
     if "--cache" in args:
         cache = args[args.index("--cache") + 1]
         del args[args.index("--cache"):args.index("--cache") + 2]
+    busybox = None
+    if "--busybox" in args:
+        busybox = args[args.index("--busybox") + 1]
+        del args[args.index("--busybox"):args.index("--busybox") + 2]
     extra = []
     if "--extra" in args:
         extra = args[args.index("--extra") + 1].split()
@@ -433,7 +441,7 @@ def main():
         o.write(f.read())
     rootfs = merged(root)
     with open(os.path.join(work, "busybox"), "wb") as f:
-        f.write(rootfs["bin/busybox"][1])
+        f.write(open(busybox, "rb").read() if busybox else rootfs["bin/busybox"][1])
     http = os.path.join(work, "http")
     n = repository(images, cache, http)
     have = set()

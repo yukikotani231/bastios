@@ -167,11 +167,15 @@ $(B)/compat:
 $(COMPAT_BINS): $(B)/compat/%: test/compat/progs/%.c test/compat/progs/compat.h | $(B)/compat
 	$(ACC) -static -no-pie -O2 -D_GNU_SOURCE -Wall -Wno-unused-result $(ULFLAGS) -o $@ $<
 
+# Applets the Alpine, Debian and Node cases run from /disk/busybox (the x86-64
+# suite uses Alpine's own BusyBox for them).
+COMPAT_BB_MORE := CONFIG_CHROOT CONFIG_MKNOD CONFIG_MOUNT CONFIG_UMOUNT
+
 $(B)/compat/busybox: $(B)/busybox/Makefile test/compat/busybox.config | $(B)/compat $(B)/user/ash.elf
 	rm -rf $(B)/compat/bb && cp -r $(B)/busybox $(B)/compat/bb
 	$(MAKE) -C $(B)/compat/bb -s clean >/dev/null
 	$(MAKE) -C $(B)/compat/bb -s allnoconfig >/dev/null
-	for o in $$(grep -v '^#' test/compat/busybox.config); do \
+	for o in $$(grep -v '^#' test/compat/busybox.config) $(COMPAT_BB_MORE); do \
 	  sed -i "s/^# $$o is not set/$$o=y/" $(B)/compat/bb/.config; done
 	yes "" | $(MAKE) -C $(B)/compat/bb -s oldconfig >/dev/null
 	$(MAKE) -C $(B)/compat/bb -s CROSS_COMPILE=$(CROSS) CFLAGS_busybox="-static $(ULFLAGS)" busybox
@@ -188,16 +192,19 @@ $(B)/compat/disk.img: $(COMPAT_BINS) $(B)/compat/busybox test/compat/mkdisk.py
 include test/compat/images.mk
 ALPINE_CACHE ?= $(B)/compat/alpine
 
-$(B)/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py | $(B)/compat
+# The shell commands of these disks run the suite's static BusyBox: the
+# AArch64 kernel has no built-in musl dynamic linker, so Alpine's own
+# (dynamic) BusyBox starts only inside the unpacked root.
+$(B)/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox | $(B)/compat
 	COMPAT_ARCH=aarch64 test/compat/alpinedisk.py $@ $(B)/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) \
-	  --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE)
+	  --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) --busybox $(B)/compat/busybox
 
 # Debian (glibc) and Node (musl, V8) the same way, from the arm64 layers.
-$(B)/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/alpine.img
-	COMPAT_ARCH=aarch64 test/compat/debiandisk.py $@ $(DEBIAN_IMAGE) $(B)/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+$(B)/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox
+	COMPAT_ARCH=aarch64 test/compat/debiandisk.py $@ $(DEBIAN_IMAGE) $(B)/compat/busybox --cache $(ALPINE_CACHE)
 
-$(B)/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/alpine.img
-	COMPAT_ARCH=aarch64 test/compat/nodedisk.py $@ $(NODE_IMAGE) $(B)/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+$(B)/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox
+	COMPAT_ARCH=aarch64 test/compat/nodedisk.py $@ $(NODE_IMAGE) $(B)/compat/busybox --cache $(ALPINE_CACHE)
 
 COMPAT_DISKS := $(B)/compat/disk.img $(B)/compat/alpine.img $(B)/compat/debian.img $(B)/compat/node.img
 COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox --kernel $(B)/bastios.bin \
