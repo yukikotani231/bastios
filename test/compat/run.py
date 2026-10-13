@@ -131,7 +131,8 @@ class WebServer:
         with open(os.path.join(self.dir, "mib.bin"), "wb") as f:
             f.write(bytes((i * 7 + i // 256) % 256 for i in range(1 << 20)))
         # A repository for git's dumb HTTP protocol: /repo.git, two commits
-        # on main, "two" and "one" in `git log`.
+        # on main, "two" and "one" in `git log`; it is also a Neovim plugin
+        # (plugin/hello.lua sets vim.g.hello_plugin to the file's content).
         if shutil.which("git"):
             work = os.path.join(self.dir, "work")
             git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"]
@@ -141,7 +142,10 @@ class WebServer:
                     f.write(n + "\n")
                 if n == "one":
                     subprocess.run(git + ["init", "-q"], cwd=work, capture_output=True)
-                subprocess.run(git + ["add", "f"], cwd=work, capture_output=True)
+                os.makedirs(os.path.join(work, "plugin"), exist_ok=True)
+                with open(os.path.join(work, "plugin", "hello.lua"), "w") as f:
+                    f.write('vim.g.hello_plugin = "%s"\n' % n)
+                subprocess.run(git + ["add", "f", "plugin"], cwd=work, capture_output=True)
                 subprocess.run(git + ["commit", "-q", "-m", msg], cwd=work, capture_output=True)
             bare = os.path.join(self.dir, "repo.git")
             subprocess.run(git + ["clone", "-q", "--bare", work, bare], capture_output=True)

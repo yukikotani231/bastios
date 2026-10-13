@@ -1007,3 +1007,4 @@ apps: ripgrep: search with line numbers, honouring .ignore
 alpine: git: clone over HTTP and over HTTPS (git's dumb protocol, curl's TLS)
 alpine: nvim: tree-sitter parses help text with the vimdoc parser
 alpine: nvim: LuaJIT loads a shared object that gcc built
+alpine: nvim: a plugin cloned over HTTP is on the packpath and runs at startup
