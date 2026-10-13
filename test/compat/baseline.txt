@@ -1015,3 +1015,6 @@ alpine: nvim: vim.system runs a process and collects its output and status
 alpine: nvim: a job on a pseudo-terminal (what :terminal runs on, with /dev and /dev/pts bound into the chroot)
 alpine: nvim: a file watcher and a timer from libuv
 alpine: nvim: :grep and :vimgrep fill the quickfix list
+alpine: container: runc runs Alpine in new namespaces (own hostname, PID 1)
+alpine: container: the host keeps its hostname and no container is left behind
+alpine: container: the root file system is read-only, and the exit status comes back
