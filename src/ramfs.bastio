@@ -649,7 +649,7 @@ fn ram_find(v: &mut Vec[Node], r: &Buf, hi: u64, name: &Bytes, n: u64) -> u64
     }
     if e != TOMB && e - 1 < hi {
       let i = e - 1;
-      if vec_with(v, i, node_named, name, n) {
+      if i < vec_len(v) && vec_with(v, i, node_named, name, n) {
         return i;
       }
     }
@@ -712,6 +712,9 @@ fn ram_size(v: &mut Vec[Node], i: u64) -> u64
   requires nodes_ok(v) && i < NFILES
   ensures nodes_ok(v)
 {
+  if i >= vec_len(v) {
+    return NO_FILE;
+  }
   return vec_with(v, i, node_size);
 }
 
@@ -720,6 +723,9 @@ fn ram_is_dir(v: &mut Vec[Node], i: u64) -> bool
   requires nodes_ok(v) && i < NFILES
   ensures nodes_ok(v)
 {
+  if i >= vec_len(v) {
+    return false;
+  }
   return vec_with(v, i, node_is_dir);
 }
 
@@ -729,6 +735,9 @@ fn ram_under(v: &mut Vec[Node], i: u64, name: &Bytes, n: u64) -> bool
   requires nodes_ok(v) && i < NFILES && n <= blen(name)
   ensures nodes_ok(v)
 {
+  if i >= vec_len(v) {
+    return false;
+  }
   return vec_with(v, i, node_under, name, n);
 }
 
@@ -739,6 +748,9 @@ fn ram_name(v: &mut Vec[Node], i: u64, buf: &mut Bytes) -> u64
   ensures nodes_ok(v) && blen(buf) == old(blen(buf))
   ensures result <= blen(buf) || result == NO_FILE
 {
+  if i >= vec_len(v) {
+    return NO_FILE;
+  }
   return vec_with(v, i, node_name_into, &mut buf);
 }
 
@@ -747,6 +759,9 @@ fn ram_len(v: &mut Vec[Node], i: u64) -> u64
   requires nodes_ok(v) && i < NFILES
   ensures nodes_ok(v)
 {
+  if i >= vec_len(v) {
+    return NO_FILE;
+  }
   return vec_with(v, i, node_len);
 }
 
@@ -805,6 +820,9 @@ fn ram_meta(v: &mut Vec[Node], i: u64) -> FMeta
   requires nodes_ok(v) && i < NFILES
   ensures nodes_ok(v)
 {
+  if i >= vec_len(v) {
+    return FMeta { ok: false, mode: 0, mtime: 0, own: 0 };
+  }
   return vec_with(v, i, node_meta);
 }
 
@@ -925,6 +943,9 @@ fn ram_link_of(v: &mut Vec[Node], i: u64) -> u64
   requires nodes_ok(v) && i < NFILES
   ensures nodes_ok(v) && result <= NFILES
 {
+  if i >= vec_len(v) {
+    return NFILES;
+  }
   return vec_with(v, i, node_link_of);
 }
 
