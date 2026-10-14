@@ -7,8 +7,8 @@
 
 import "proc.bastio";
 
-const SCT_NUM: u64 = 35;
-const SCT_N: u64 = 39;
+const SCT_NUM: u64 = 36;
+const SCT_N: u64 = 40;
 
 fn sct_name(i: u64) -> Str {
   if i == 0 {
@@ -117,15 +117,18 @@ fn sct_name(i: u64) -> Str {
     return "sys/net/ipv6/conf/all/disable_ipv6";
   }
   if i == 35 {
-    return "sys/net/ipv4/ip_local_port_range";
+    return "sys/fs/aio-max-nr";
   }
   if i == 36 {
-    return "sys/fs/file-nr";
+    return "sys/net/ipv4/ip_local_port_range";
   }
   if i == 37 {
-    return "sys/kernel/random/entropy_avail";
+    return "sys/fs/file-nr";
   }
   if i == 38 {
+    return "sys/kernel/random/entropy_avail";
+  }
+  if i == 39 {
     return "sys/kernel/random/poolsize";
   }
   return "sys/kernel/tainted";
@@ -238,21 +241,24 @@ fn sct_default(i: u64) -> u64 {
   if i == 34 {
     return 0;
   }
+  if i == 35 {
+    return 65536;                       // fs/aio-max-nr
+  }
   return 0;
 }
 
 /// The text of entry i, for the entries after the numbers.
 fn sct_text(i: u64) -> Str {
-  if i == 35 {
+  if i == 36 {
     return "32768\t60999\n";
   }
-  if i == 36 {
+  if i == 37 {
     return "0\t0\t1048576\n";
   }
-  if i == 37 {
+  if i == 38 {
     return "256\n";
   }
-  if i == 38 {
+  if i == 39 {
     return "256\n";
   }
   return "\n";
@@ -310,7 +316,7 @@ fn sysd_count(j: u64) -> u64 {
     return 4;
   }
   if j == 1 {
-    return 8;
+    return 9;
   }
   if j == 2 {
     return 3;
@@ -381,6 +387,9 @@ fn sysd_child(j: u64, i: u64) -> Str {
   }
   if j == 1 && i == 7 {
     return "suid_dumpable";
+  }
+  if j == 1 && i == 8 {
+    return "aio-max-nr";
   }
   if j == 2 && i == 0 {
     return "max_queued_events";
