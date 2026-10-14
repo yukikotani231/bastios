@@ -53,6 +53,10 @@ fn lx_number(n: u64) -> u64
   if n == 23 { return LX_DUP; }
   if n == 198 { return LX_SOCKET; }
   if n == 0 { return LX_IO_SETUP; }
+  if n == 1 { return LX_IO_DESTROY; }
+  if n == 2 { return LX_IO_SUBMIT; }
+  if n == 3 { return LX_IO_CANCEL; }
+  if n == 4 { return LX_IO_GETEVENTS; }
   if n >= 5 && n <= 16 { return LX_SETXATTR + (n - 5); }   // set, get, list, remove, each by path, link and fd
   if n == 19 { return LX_EVENTFD2; }
   if n == 20 { return LX_EPOLL_CREATE1; }

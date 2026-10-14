@@ -38,6 +38,7 @@ import "lxunix.bastio";
 import "lxmem.bastio";
 import "lxmisc.bastio";
 import "lxkeys.bastio";
+import "lxaio.bastio";
 import "lxthread.bastio";
 import "lxdev.bastio";
 import "lxevent.bastio";

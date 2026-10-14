@@ -1,0 +1,366 @@
+// Linux AIO: io_setup, io_destroy, io_submit, io_getevents and io_cancel.
+//
+// A context is a queue of finished requests. io_submit does each request at
+// once (a read or write of a file at an offset, of a pipe without waiting,
+// an fsync or a no-op) and queues its io_event; io_getevents takes events
+// from the queue. So a request never waits: a read of an empty pipe is
+// finished with -EAGAIN, a request on a file takes as long as the same
+// pread or pwrite, and io_cancel finds nothing in flight (EINVAL).
+//
+// AIO_N contexts, each holding up to AIO_EV events (io_setup's nr_events is
+// kept up to that). A context belongs to the thread group that made it and
+// is found by an id that is never reused. There is no clean-up when a
+// process exits: a context whose owner is gone is taken over by the next
+// io_setup that finds the table full.
+//
+// Not done: the vectored requests (PREADV, PWRITEV), requests on sockets and
+// devices, an eventfd to tell (IOCB_FLAG_RESFD), io_pgetevents and io_uring.
+
+import "lxkeys.bastio";
+
+fn aiow(c: u64, f: u64) -> u64
+  requires c < AIO_N && f < AIO_W
+  ensures result < SYS_LEN
+{
+  return SYS_AIO + c * AIO_W + f;
+}
+
+/// fs/aio-max-nr: the most events one io_setup may ask for.
+fn aio_max(k: &Kernel) -> u64
+  requires kok(k)
+{
+  let w = get(k.sys, SYS_SCT + 35);
+  if w != 0 {
+    return w - 1;
+  }
+  return 65536;
+}
+
+/// The context with id `id` that pid's thread group owns, or AIO_N.
+fn aio_find(k: &Kernel, pid: u64, id: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= AIO_N
+{
+  if id == 0 {
+    return AIO_N;
+  }
+  let g = ktg(k, pid);
+  let mut c = 0;
+  while c < AIO_N
+    invariant c <= AIO_N && kok(k)
+  {
+    if get(k.sys, aiow(c, 0)) == id && get(k.sys, aiow(c, 1)) == g + 1 {
+      return c;
+    }
+    c = c + 1;
+  }
+  return AIO_N;
+}
+
+/// A slot for a new context: a free one, or one whose owner has gone; AIO_N if none.
+fn aio_slot(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= AIO_N
+{
+  let mut c = 0;
+  while c < AIO_N
+    invariant c <= AIO_N && kok(k)
+  {
+    if get(k.sys, aiow(c, 0)) == 0 {
+      return c;
+    }
+    c = c + 1;
+  }
+  c = 0;
+  while c < AIO_N
+    invariant c <= AIO_N && kok(k)
+  {
+    let o = get(k.sys, aiow(c, 1));
+    if o == 0 || o > NPROC {
+      return c;
+    }
+    let st = pget(k.procs, o - 1, F_STATE);
+    if st == FREE || st == ZOMBIE {
+      return c;
+    }
+    c = c + 1;
+  }
+  return AIO_N;
+}
+
+/// io_setup(nr_events, ctxp).
+fn aio_setup(k: &mut Kernel, pid: u64, nr: u64, ctxp: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let w = user_u64(&mut k.spaces, pid, ctxp);
+  if !w.ok {
+    return EFAULT;
+  }
+  if w.v != 0 {
+    return EINVAL;
+  }
+  let n = nr % 4294967296;
+  if n == 0 || n > 8388608 {
+    return EINVAL;
+  }
+  if n > aio_max(k) {
+    return EAGAIN;
+  }
+  let c = aio_slot(k);
+  if c >= AIO_N {
+    return EAGAIN;
+  }
+  let ser = get(k.sys, SYS_AIOSER) % 1048576;
+  let id = 139637976727552 + (ser + 1) * 4096;       // 0x7f0000000000 + a page for each context made
+  xfer_u64(&mut k.fs.xfer, 0, id);
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, ctxp, k.fs.xfer, 8) != 8 {
+    return EFAULT;
+  }
+  k.sys = set(k.sys, SYS_AIOSER, ser + 1);
+  k.sys = set(k.sys, aiow(c, 0), id);
+  k.sys = set(k.sys, aiow(c, 1), ktg(k, pid) + 1);
+  k.sys = set(k.sys, aiow(c, 2), smaller(n, AIO_EV));
+  k.sys = set(k.sys, aiow(c, 3), 0);
+  k.sys = set(k.sys, aiow(c, 4), 0);
+  return 0;
+}
+
+/// io_destroy(ctx).
+fn aio_destroy(k: &mut Kernel, pid: u64, id: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let c = aio_find(k, pid, id);
+  if c >= AIO_N {
+    return EINVAL;
+  }
+  k.sys = set(k.sys, aiow(c, 0), 0);
+  k.sys = set(k.sys, aiow(c, 1), 0);
+  k.sys = set(k.sys, aiow(c, 4), 0);
+  return 0;
+}
+
+/// io_getevents(ctx, min_nr, nr, events, timeout): up to nr finished events.
+/// Nothing is ever in flight, so what is queued is all there will be.
+fn aio_getevents(k: &mut Kernel, pid: u64, id: u64, minnr: u64, nr: u64, ev: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let c = aio_find(k, pid, id);
+  if c >= AIO_N {
+    return EINVAL;
+  }
+  if minnr >= 0x8000000000000000 || nr >= 0x8000000000000000 || minnr > nr {
+    return EINVAL;
+  }
+  let have = smaller(get(k.sys, aiow(c, 4)), AIO_EV);
+  let want = smaller(nr, have);
+  if want == 0 {
+    return 0;
+  }
+  if ev >= 0x800000000000 {
+    return EFAULT;
+  }
+  let mut i = 0;
+  let mut left = have;
+  while i < want
+    invariant i <= want && want <= have && have <= AIO_EV && left + i == have && c < AIO_N && ev < 0x800000000000 && kok(k)
+  {
+    let head = get(k.sys, aiow(c, 3)) % AIO_EV;
+    let at = 5 + head * 4;
+    xfer_u64(&mut k.fs.xfer, 0, get(k.sys, aiow(c, at)));
+    xfer_u64(&mut k.fs.xfer, 8, get(k.sys, aiow(c, at + 1)));
+    xfer_u64(&mut k.fs.xfer, 16, get(k.sys, aiow(c, at + 2)));
+    xfer_u64(&mut k.fs.xfer, 24, get(k.sys, aiow(c, at + 3)));
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, ev + i * 32, k.fs.xfer, 32) != 32 {
+      if i == 0 {
+        return EFAULT;
+      }
+      return i;
+    }
+    k.sys = set(k.sys, aiow(c, 3), (head + 1) % AIO_EV);
+    left = left - 1;
+    k.sys = set(k.sys, aiow(c, 4), left);
+    i = i + 1;
+  }
+  return want;
+}
+
+/// io_cancel(ctx, iocb, result): no request is ever in flight.
+fn aio_cancel(k: &mut Kernel, pid: u64, id: u64, iocb: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let w = user_u64(&mut k.spaces, pid, sat_add(iocb, 8));
+  if !w.ok {
+    return EFAULT;
+  }
+  let c = aio_find(k, pid, id);
+  if c >= AIO_N {
+    return EINVAL;
+  }
+  return EINVAL;
+}
+
+/// Queues the finished request: data and obj as the iocb gave them, result r.
+fn aio_push(k: &mut Kernel, c: u64, data: u64, obj: u64, r: u64)
+  requires kok(k) && c < AIO_N
+  ensures kok(k)
+{
+  let have = smaller(get(k.sys, aiow(c, 4)), AIO_EV);
+  let at = 5 + ((get(k.sys, aiow(c, 3)) % AIO_EV + have) % AIO_EV) * 4;
+  k.sys = set(k.sys, aiow(c, at), data);
+  k.sys = set(k.sys, aiow(c, at + 1), obj);
+  k.sys = set(k.sys, aiow(c, at + 2), r);
+  k.sys = set(k.sys, aiow(c, at + 3), 0);
+  k.sys = set(k.sys, aiow(c, 4), have + 1);
+}
+
+/// The request whose iocb is at `ptr`: done at once, its event queued in
+/// context c. 0, or the -errno io_submit answers for it.
+fn aio_one(con: &mut Con, k: &mut Kernel, pid: u64, c: u64, ptr: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC && c < AIO_N
+  ensures kok(k) && con_ok(con)
+{
+  let w0 = user_u64(&mut k.spaces, pid, ptr);
+  let w1 = user_u64(&mut k.spaces, pid, sat_add(ptr, 8));
+  let w2 = user_u64(&mut k.spaces, pid, sat_add(ptr, 16));
+  let w3 = user_u64(&mut k.spaces, pid, sat_add(ptr, 24));
+  let w4 = user_u64(&mut k.spaces, pid, sat_add(ptr, 32));
+  let w5 = user_u64(&mut k.spaces, pid, sat_add(ptr, 40));
+  let w6 = user_u64(&mut k.spaces, pid, sat_add(ptr, 48));
+  let w7 = user_u64(&mut k.spaces, pid, sat_add(ptr, 56));
+  if !w0.ok || !w1.ok || !w2.ok || !w3.ok || !w4.ok || !w5.ok || !w6.ok || !w7.ok {
+    return EFAULT;
+  }
+  if w6.v != 0 || w7.v % 4294967296 != 0 {
+    return EINVAL;                        // the reserved word, and the flags (RESFD, IOPRIO) are not done
+  }
+  let rwf = w1.v / 4294967296;
+  if rwf >= 32 {
+    return EOPNOTSUPP;
+  }
+  let op = w2.v % 65536;
+  let fd = w2.v / 4294967296;
+  if fd >= 2147483648 {
+    return EBADF;
+  }
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
+    return EBADF;
+  }
+  if op == 6 {
+    if smaller(get(k.sys, aiow(c, 4)), AIO_EV) >= get(k.sys, aiow(c, 2)) {
+      return EAGAIN;
+    }
+    aio_push(&mut k, c, w0.v, ptr, 0);
+    return 0;
+  }
+  if op == 2 || op == 3 {
+    if smaller(get(k.sys, aiow(c, 4)), AIO_EV) >= get(k.sys, aiow(c, 2)) {
+      return EAGAIN;
+    }
+    aio_push(&mut k, c, w0.v, ptr, 0);
+    return 0;
+  }
+  if op != 0 && op != 1 {
+    return EINVAL;
+  }
+  let write = op == 1;
+  if w4.v >= 0x8000000000000000 {
+    return EINVAL;
+  }
+  if d.kind == K_FILE {
+    let mode = fget(k.fs.ftab, d.x, FD_MODE);
+    if (write && mode / O_WRITE % 2 == 0) || (!write && mode / O_READ % 2 == 0) {
+      return EBADF;
+    }
+  } else if d.kind == K_PIPE_R {
+    if write {
+      return EBADF;
+    }
+  } else if d.kind == K_PIPE_W {
+    if !write {
+      return EBADF;
+    }
+  } else {
+    return EINVAL;
+  }
+  if w5.v >= 0x8000000000000000 && d.kind == K_FILE {
+    return EINVAL;
+  }
+  if smaller(get(k.sys, aiow(c, 4)), AIO_EV) >= get(k.sys, aiow(c, 2)) {
+    return EAGAIN;
+  }
+  let mut r = 0;
+  if d.kind == K_FILE {
+    r = lx_pio(&mut con, &mut k, pid, write, fd, w3.v, w4.v, w5.v);
+  } else if d.kind == K_PIPE_R {
+    r = pipe_read(&mut k, pid, d.x, w3.v, w4.v);
+  } else {
+    r = pipe_write(&mut k, pid, d.x, w3.v, w4.v);
+  }
+  aio_push(&mut k, c, w0.v, ptr, r);
+  return 0;
+}
+
+/// io_submit(ctx, nr, iocbpp): how many requests it took.
+fn aio_submit(con: &mut Con, k: &mut Kernel, pid: u64, id: u64, nr: u64, pp: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  if nr >= 0x8000000000000000 {
+    return EINVAL;
+  }
+  let c = aio_find(k, pid, id);
+  if c >= AIO_N {
+    return EINVAL;
+  }
+  if nr == 0 {
+    return 0;
+  }
+  if pp >= 0x800000000000 {
+    return EFAULT;
+  }
+  let n = smaller(smaller(nr, get(k.sys, aiow(c, 2))), AIO_EV);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= AIO_EV && c < AIO_N && pp < 0x800000000000 && con_ok(con) && kok(k)
+  {
+    let p = user_u64(&mut k.spaces, pid, pp + i * 8);
+    let mut r = EFAULT;
+    if p.ok {
+      r = aio_one(&mut con, &mut k, pid, c, p.v);
+    }
+    if r != 0 {
+      if i == 0 {
+        return r;
+      }
+      return i;
+    }
+    i = i + 1;
+  }
+  return n;
+}
+
+/// System call n (206 .. 210) of process pid, a..e the arguments.
+fn lx_aio_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, d: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  let mut r = ENOSYS;
+  if n == LX_IO_SETUP {
+    r = aio_setup(&mut k, pid, a, b);
+  } else if n == LX_IO_DESTROY {
+    r = aio_destroy(&mut k, pid, a);
+  } else if n == LX_IO_SUBMIT {
+    r = aio_submit(&mut con, &mut k, pid, a, b, c);
+  } else if n == LX_IO_CANCEL {
+    r = aio_cancel(&mut k, pid, a, b);
+  } else {
+    r = aio_getevents(&mut k, pid, a, b, c, d);
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}
