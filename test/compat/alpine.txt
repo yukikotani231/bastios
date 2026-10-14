@@ -323,6 +323,21 @@ mkdir=1
 crun
 status 0
 
+== container: crun and runc: a profile that denies mount, module, ptrace and bpf calls leaves the container's own work alone
+$ bb mkdir -p /disk/cdn /run/runc && cd /disk/cdn && /disk/crun spec && bb sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"linux": {#"linux": {"seccomp": {"defaultAction": "SCMP_ACT_ALLOW", "architectures": ["SCMP_ARCH_X86_64"], "syscalls": [{"names": ["mount", "umount2", "kexec_load", "swapon", "swapoff", "init_module", "finit_module", "delete_module", "ptrace", "bpf", "pivot_root"], "action": "SCMP_ACT_ERRNO", "errnoRet": 1}]},#' -e 's#"sh"#"/bin/sh", "-c", "mount -t tmpfs x /mnt 2>\&1; echo mount=$?; id -u; ps | wc -l; hostname"#' config.json && /disk/crun --root /run/crun run dn < /dev/null; echo crun $?; /disk/runc --root /run/runc run dr < /dev/null; echo runc $?
+mount: permission denied (are you root?)
+mount=1
+0
+4
+crun
+crun 0
+mount: permission denied (are you root?)
+mount=1
+0
+4
+crun
+runc 0
+
 == container: crun: the root file system is read-only, and the exit status comes back
 $ bb mkdir -p /disk/cro && cd /disk/cro && /disk/crun spec && bb sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"sh"#"/bin/sh", "-c", "touch /x 2>\&1; echo touch=$?; id -u; exit 3"#' config.json && /disk/crun --root /run/crun run d5 < /dev/null; echo status $?
 touch: /x: Read-only file system
