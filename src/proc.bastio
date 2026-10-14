@@ -459,8 +459,10 @@ const FD_CLOEXEC: u64 = 8192;
 const OFD_N: u64 = 4096;
 // Loop devices (src/lxloop.bastio): LOOP_N devices of LOOP_W words.
 const LOOP_N: u64 = 32;
-const LOOP_W: u64 = 13;
-const LOOP_LEN: u64 = 416;             // LOOP_N * LOOP_W
+const LOOP_W: u64 = 14;
+const LOOP_LEN: u64 = 448;             // LOOP_N * LOOP_W
+const DEV_RANDOM: u64 = 3;             // /dev/random and /dev/urandom (src/lxdev.bastio)
+const RNDGETENTCNT: u64 = 0x80045200;  // ioctl on /dev/random: the entropy count, an int
 const DEV_LOOPCTL: u64 = 6;            // OF_DEV device /dev/loop-control
 const DEV_LOOP: u64 = 64;              // OF_DEV device /dev/loopN is DEV_LOOP + N
 const S_IFBLK: u64 = 0x61B0;           // a block device, rw-rw----

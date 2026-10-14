@@ -1033,6 +1033,10 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     xfer_u64(&mut k.fs.xfer, 0, smaller(pi_get(k.pipes, d.x, 1), PIPE_CAP));
     return lx_put_out(&mut k, pid, arg, 4);
   }
+  if d.kind == K_DEV && d.x == DEV_RANDOM && req % 0x100000000 == RNDGETENTCNT {
+    xfer_u64(&mut k.fs.xfer, 0, 256);       // the pool is always full: /proc/sys/kernel/random/entropy_avail
+    return lx_put_out(&mut k, pid, arg, 4);
+  }
   if d.kind == K_DEV && (is_loop(d.x) || d.x == DEV_LOOPCTL) {
     return loop_ioctl(&mut k, pid, d.x, req % 0x100000000, arg);   // the request is an unsigned int
   }

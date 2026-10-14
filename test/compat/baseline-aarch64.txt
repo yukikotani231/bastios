@@ -183,6 +183,9 @@ t_dev: /sys/block ro
 t_dev: /sys/block size in sectors
 t_dev: BLKGETSIZE64
 t_dev: BLKSSZGET
+t_dev: BLKRAGET: the default read-ahead is 256 sectors
+t_dev: BLKRASET is read back
+t_dev: RNDGETENTCNT matches entropy_avail
 t_dev: LOOP_CLR_FD
 t_dev: LOOP_CTL_GET_FREE
 t_dev: LOOP_CTL_GET_FREE skips it

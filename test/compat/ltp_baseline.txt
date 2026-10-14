@@ -401,6 +401,8 @@ inotify_init1_01
 inotify_init1_02
 ioctl01
 ioctl05
+ioctl06
+ioctl07
 ioctl_loop01
 ioctl_loop02
 ioctl_loop03
