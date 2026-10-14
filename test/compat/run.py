@@ -339,6 +339,17 @@ class Guest:
             self.out += chunk
         return True
 
+    def settle(self, quiet, limit):
+        """Waits until the console has been silent for `quiet` seconds (at most
+        `limit`), so that a program busy with one line of keys (a :make, a
+        slow start on an emulated processor) has finished before the next."""
+        end = time.time() + limit
+        seen, since = len(self.out), time.time()
+        while time.time() < end and time.time() - since < quiet:
+            self.read_until(b"\x00never", len(self.out), 0.1)
+            if len(self.out) != seen:
+                seen, since = len(self.out), time.time()
+
     def keys(self, prog, keys, timeout):
         """Starts prog and types keys at it once it has drawn something.
         Returns whether it got back to the shell prompt."""
@@ -356,10 +367,12 @@ class Guest:
         while len(self.out) == echoed and time.time() < deadline:
             self.read_until(b"\x00never", echoed, 0.2)
         time.sleep(0.5)
+        typed = len(self.out)
         for k in keys:
             self.send(k)
+            typed = len(self.out)
             time.sleep(0.4)
-        typed = len(self.out)
+            self.settle(1.0, 15)
         # Back at the shell: the marker and a prompt, or a prompt on a line
         # of its own if a Ctrl-C the program took also cut the shell's list
         # short (as ash does on Linux).
