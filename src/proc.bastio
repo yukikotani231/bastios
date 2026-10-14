@@ -895,6 +895,7 @@ struct Kernel {
   mstr: Bytes,          // the mounts' paths, and the logical path of the last lookup
   naps: bool,           // a process may be in TIMEWAIT: false lets sleepers_wake skip its scan
   mt_hi: u64,           // one past the highest mount entry ever given to a namespace (me_set): no later one is in use
+  fd_hi: u64,           // one past the highest descriptor number ever open: every non-zero word of lxfd is below it (rows are scanned only that far)
   ofd_hi: u64,          // one past the highest open file description ever made: no later one is in use (scans stop there)
   socks: bool,          // a process may be in SOCKWAIT (nap sets it, sock_wake clears it): false lets sock_wake return at once
 }
@@ -1171,7 +1172,10 @@ fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
       f = f + 1;
     }
   }
-  lx_fd_reset(&mut k.lxfd, pid);
+  lx_fd_reset(&mut k.lxfd, pid, smaller(k.fd_hi, LXNFD));
+  if k.fd_hi < 3 {
+    k.fd_hi = 3;                            // 0 to 2 are on the console
+  }
   sig_reset(&mut k.sigact, pid, false);
   wset(&mut k.cwd, pid * CWD_STRIDE, 0);   // starts at "/"
   wset(&mut k.croot, pid * CWD_STRIDE, 0);

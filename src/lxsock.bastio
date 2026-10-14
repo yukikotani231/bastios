@@ -307,7 +307,7 @@ fn lx_inet_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   of_set(&mut k.ofd, h, 3, kind / SOCK_NONBLOCK % 2);
   let fd = fd_install(&mut k, pid, h);
   if fd < LXNFD && kind / SOCK_CLOEXEC % 2 == 1 {
-    fd_set(&mut k.lxfd, pid, fd, FD_OFD + h + FD_CLOEXEC);
+    fd_set_k(&mut k, pid, fd, FD_OFD + h + FD_CLOEXEC);
   }
   return fd;
 }

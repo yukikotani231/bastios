@@ -241,6 +241,11 @@ steps = [
     # /bin/NAME (stat), with their arguments and exit status, and a
     # nested ash whose exit status the outer one sees.
     ("(echo in subshell; exit 4); echo sub=$?", [b"in subshell", b"sub=4"], b"\n# "),
+    # a descriptor far above the ones used so far survives fork, is closed
+    # by exit and is not there after execve (the kernel scans descriptor
+    # rows only up to the highest number ever open)
+    ("exec 200>/tmp/hifd; (echo from-child >&200); exec 200>&-; cat /tmp/hifd", [b"from-child"], b"\n# "),
+    ("exec 201>/tmp/hifd2; sh -c 'echo x >&201' 2>/dev/null; echo kept=$?; exec 201>&-", [b"kept="], b"\n# "),
     ("mhello a b; echo st=$?", [b"hello from musl: mhello, argc 3, 6", b"st=3"], b"\n# "),
     ("hello", b"hello from user mode, pid ", b"\n# "),
     ("nothere", b"nothere: not found", b"\n# "),
