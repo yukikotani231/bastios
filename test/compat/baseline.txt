@@ -946,6 +946,9 @@ t_sock2: signalfd carries a sigqueue value
 t_sock2: signalfd sees a blocked SIGCHLD
 t_sock2: sigqueue carries a value
 t_sock2: write after SHUT_WR is EPIPE
+t_sock2: 56 or more AF_UNIX socketpairs at once, each with its own byte; the 65th fails
+t_sock2: at least 28 AF_UNIX listeners, each accepting a connection; the 33rd is refused
+t_sock2: 24 bound AF_UNIX datagram sockets send around a ring and name their senders
 t_sys: a cgroup namespace roots the tree
 t_sys: adjtimex reads and sets
 t_sys: clock_settime moves CLOCK_REALTIME
@@ -1058,6 +1061,8 @@ apps: ripgrep: replacement, multi-line and standard input
 apps: ripgrep: search with line numbers, honouring .ignore
 alpine: git: clone over HTTP and over HTTPS (git's dumb protocol, curl's TLS)
 alpine: nvim: tree-sitter parses help text with the vimdoc parser
+alpine: nvim: tree-sitter parses C with a parser built from the grammar, and a query finds the function names
+alpine: nvim: tree-sitter highlights C: the keyword, the type and the comment get their captures
 alpine: nvim: :diffthis marks the line that differs, and vim.diff finds the hunk
 alpine: nvim: LuaJIT loads a shared object that gcc built
 alpine: nvim: a plugin cloned over HTTP is on the packpath and runs at startup
@@ -1084,6 +1089,7 @@ alpine: tmux: a detached session runs a shell on a pseudo-terminal, takes keys a
 alpine: apk: install ripgrep and fzf over HTTP
 alpine: rg and fzf: search a tree, filter a list
 alpine: nvim: :make reads gcc's error into the quickfix list and :cc jumps to its line
+alpine: nvim: the edit-build-run loop on a C project: :make with make and gcc reports the error, the fix is saved, :make succeeds and the program runs
 alpine: nvim: :grep with ripgrep fills the quickfix list
 alpine: cmake: configure, build and run a C project
 alpine: nvim: the LSP client talks to lua-language-server, a real server, and gets a hover

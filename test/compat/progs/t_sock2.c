@@ -13,9 +13,84 @@
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 
 static volatile int got, val;
 static void h(int s, siginfo_t *i, void *c) { (void)c; got = s; val = i->si_value.sival_int; }
+
+/* Stream socketpairs until one fails (64 fit), each carrying its own byte. */
+static int many_pairs(void) {
+    int sv[65][2], n = 0, ok = 1;
+    for (int i = 0; i < 65; i++) {
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv[i]) != 0) break;
+        n++;
+    }
+    ok = n >= 56 && n < 65;
+    for (int i = 0; ok && i < n; i++) ok = write(sv[i][0], &(char){'a' + i % 26}, 1) == 1;
+    for (int i = 0; ok && i < n; i++) { char ch = 0; ok = read(sv[i][1], &ch, 1) == 1 && ch == 'a' + i % 26; }
+    for (int i = 0; i < n; i++) { close(sv[i][0]); close(sv[i][1]); }
+    return ok;
+}
+
+/* Listening sockets until a bind fails (32 fit), each with a connection through it. */
+static int many_listeners(void) {
+    int ls[33], cs[32], as[32], n = 0, ok = 1;
+    char path[40];
+    struct sockaddr_un u = {.sun_family = AF_UNIX};
+    for (int i = 0; i < 33; i++) {
+        ls[i] = socket(AF_UNIX, SOCK_STREAM, 0);
+        snprintf(u.sun_path, sizeof u.sun_path, "/tmp/ml%d", i);
+        unlink(u.sun_path);
+        if (ls[i] < 0 || bind(ls[i], (void *)&u, sizeof u) != 0 || listen(ls[i], 2) != 0) break;
+        n++;
+    }
+    ok = n >= 28 && n < 33;
+    for (int i = 0; ok && i < n; i++) {
+        snprintf(u.sun_path, sizeof u.sun_path, "/tmp/ml%d", i);
+        cs[i] = socket(AF_UNIX, SOCK_STREAM, 0);
+        ok = cs[i] >= 0 && connect(cs[i], (void *)&u, sizeof u) == 0 && (as[i] = accept(ls[i], 0, 0)) >= 0 &&
+             write(cs[i], &(char){'A' + i % 26}, 1) == 1;
+    }
+    for (int i = 0; ok && i < n; i++) { char ch = 0; ok = read(as[i], &ch, 1) == 1 && ch == 'A' + i % 26; }
+    for (int i = 0; i < 33; i++) {
+        if (ls[i] >= 0) close(ls[i]);
+        snprintf(path, sizeof path, "/tmp/ml%d", i);
+        unlink(path);
+    }
+    return ok;
+}
+
+/* 24 bound datagram sockets send around a ring and see who sent each. */
+static int many_datagrams(void) {
+    int d[24], ok = 1;
+    struct sockaddr_un u[24];
+    for (int i = 0; i < 24; i++) {
+        memset(&u[i], 0, sizeof u[i]);
+        u[i].sun_family = AF_UNIX;
+        snprintf(u[i].sun_path, sizeof u[i].sun_path, "/tmp/md%d", i);
+        unlink(u[i].sun_path);
+        d[i] = socket(AF_UNIX, SOCK_DGRAM, 0);
+        ok = ok && d[i] >= 0 && bind(d[i], (void *)&u[i], sizeof u[i]) == 0;
+    }
+    for (int i = 0; ok && i < 24; i++) {
+        char ch = 'a' + i;
+        ok = sendto(d[i], &ch, 1, 0, (void *)&u[(i + 1) % 24], sizeof u[0]) == 1;
+    }
+    for (int i = 0; ok && i < 24; i++) {
+        char ch = 0;
+        struct sockaddr_un from;
+        socklen_t fl = sizeof from;
+        int from_i = (i + 23) % 24;
+        ok = recvfrom(d[i], &ch, 1, 0, (void *)&from, &fl) == 1 && ch == 'a' + from_i && strcmp(from.sun_path, u[from_i].sun_path) == 0;
+    }
+    for (int i = 0; i < 24; i++) {
+        if (d[i] >= 0) close(d[i]);
+        unlink(u[i].sun_path);
+    }
+    return ok;
+}
 
 int main(void) {
     setup();
@@ -166,5 +241,8 @@ int main(void) {
                read(f, &i, sizeof i) == sizeof i && i.ssi_signo == SIGUSR1 && i.ssi_code == SI_QUEUE && i.ssi_int == 7);
         close(f);
     }
+    EXPECT("56 or more AF_UNIX socketpairs at once, each with its own byte; the 65th fails", many_pairs());
+    EXPECT("at least 28 AF_UNIX listeners, each accepting a connection; the 33rd is refused", many_listeners());
+    EXPECT("24 bound AF_UNIX datagram sockets send around a ring and name their senders", many_datagrams());
     return done();
 }
