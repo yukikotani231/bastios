@@ -870,6 +870,17 @@ t_proc: /proc/sys/net/core is a directory
 t_proc: a directory under /proc/sys that is not there is ENOENT
 t_proc: every file listed under /proc/sys opens
 t_proc: /proc/sys/vm lists swappiness
+t_proc: oom_score reads 0
+t_proc: oom_score_adj starts at 0
+t_proc: loginuid is unset
+t_proc: coredump_filter reads its default
+t_proc: cpuset is the root
+t_proc: oom_score_adj reads back a negative value
+t_proc: a child inherits oom_score_adj
+t_proc: oom_score_adj above 1000 is EINVAL
+t_proc: oom_score_adj rejects text
+t_proc: oom_score_adj can be set back to 0
+t_proc: /proc/self lists oom_score_adj
 t_ptrace: PTRACE_ATTACH stops the target with SIGSTOP
 t_ptrace: PTRACE_CONT with a signal runs the handler for it
 t_ptrace: PTRACE_CONT without a signal drops the one that stopped it, and the child saw the poke
@@ -1024,7 +1035,7 @@ t_sys: settimeofday
 t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message
 t_sysv: 32 queues, semaphore sets and segments at once, the 33rd of each is ENOSPC
-t_sysv: 16 attachments in one process, the 17th is EMFILE
+t_sysv: 32 attachments in one process, the 33rd is EMFILE
 t_sysv: GETNCNT counts a waiting process
 t_sysv: IPC_RMID ends a wait with EIDRM
 t_sysv: SEM_UNDO is undone at exit

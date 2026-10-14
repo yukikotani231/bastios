@@ -100,6 +100,7 @@ fn pr_fork(k: &mut Kernel, p: u64, c: u64)
   tr2_put(&mut k, c, 0);
   cap_fork(&mut k, p, c);                 // and the capabilities (src/lxcap.bastio)
   k.sys = set(k.sys, SYS_IOP + c, get(k.sys, SYS_IOP + p));   // and the I/O priority (src/lxprio.bastio)
+  k.sys = set(k.sys, SYS_OOM + c, get(k.sys, SYS_OOM + p));   // and oom_score_adj (src/lxprocfs.bastio)
   sc_fork(&mut k, p, c);                  // and the seccomp filters (src/lxseccomp.bastio)
 }
 
@@ -164,6 +165,7 @@ fn pr_clear(k: &mut Kernel, p: u64)
   cap_clear(&mut k, p);
   sc_clear(&mut k, p);
   k.sys = set(k.sys, SYS_IOP + p, 0);
+  k.sys = set(k.sys, SYS_OOM + p, 0);
 }
 
 /// prctl(op, a, ...) for process pid: the result, or -EINVAL for an

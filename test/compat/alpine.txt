@@ -384,7 +384,7 @@ $ bb mkdir -p /disk/a/proc && bb mount -t proc proc /disk/a/proc && bb chroot /d
 /bin/busybox
 
 == apk: install tmux, cmake and lua-language-server over HTTP
-$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL tmux cmake lua-language-server make gcc musl-dev 2>/dev/null; echo status $?; bb chroot /disk/a /sbin/apk info -e tmux cmake lua-language-server 2>/dev/null
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL tmux lua-language-server make gcc musl-dev 2>/dev/null; bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL cmake 2>/dev/null; echo status $?; bb chroot /disk/a /sbin/apk info -e tmux cmake lua-language-server 2>/dev/null
 status 0
 tmux
 cmake
