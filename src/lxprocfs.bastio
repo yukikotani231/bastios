@@ -62,6 +62,7 @@ import "lxnsbase.bastio";
 const PF_MOUNTS: u64 = 1;
 const PF_AUXV: u64 = 2;               // /proc/PID/auxv (2 is pid 0's meminfo)
 const PF_MEMINFO: u64 = 2;
+const PF_MEM: u64 = 3;                // /proc/PID/mem (3 is pid 0's uptime)
 const PF_UPTIME: u64 = 3;
 const PF_STAT: u64 = 4;
 const PF_CMDLINE: u64 = 5;
@@ -610,6 +611,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   if xfer_is(x, e + 1, n, "auxv") {
     return base + PF_AUXV;
   }
+  if xfer_is(x, e + 1, n, "mem") {
+    return base + PF_MEM;
+  }
   if xfer_is(x, e + 1, n, "status") {
     return base + PF_STATUS;
   }
@@ -802,7 +806,7 @@ fn is_px_adj(f: u64) -> bool {
 }
 
 fn proc_writable(f: u64) -> bool {
-  return is_px_adj(f) || is_sct_file(f) || is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
+  return is_mem_file(f) || is_px_adj(f) || is_sct_file(f) || is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
 }
 
 /// What stat says about /proc file f (a proc_file device).
@@ -2465,8 +2469,8 @@ fn proc_fill(k: &mut Kernel, pid: u64, fd: u64, f: u64, n: u64) -> u64
       return ESRCH;
     }
   }
-  if is_ns_file(f) {
-    return EINVAL;                          // as reading an nsfs file is
+  if is_ns_file(f) || is_mem_file(f) {
+    return EINVAL;                          // as reading an nsfs file is; memory is read by mem_io
   }
   let off = of_get(k.ofd, h, 3);
   let mut out = balloc(PROC_OUT);
@@ -2497,6 +2501,9 @@ fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if is_mem_file(f) {
+    return mem_io(&mut k, pid, fd, f, va, n, false);
+  }
   let m = proc_fill(&mut k, pid, fd, f, n);
   if m == 0 || m > XFER {
     return m;
@@ -2549,6 +2556,112 @@ fn proc_seek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
   }
   of_set(&mut k.ofd, h, 3, to);
   return to;
+}
+
+/// Is f some process's /proc/PID/mem?
+fn is_mem_file(f: u64) -> bool {
+  return f >= PROC_DEV + 16 && f < PROC_DEV + PSYS && (f - PROC_DEV) % 16 == PF_MEM;
+}
+
+/// read(2) or write(2) on /proc/PID/mem, open in descriptor fd: the memory of
+/// process PID, at the description's offset (an address), as ptrace's peek and
+/// poke reach it: a write goes into read-only code too (a breakpoint) and a
+/// read finds the code pages the program has not run yet. A page that is not
+/// mapped ends the transfer: the bytes before it are moved, and it is EIO
+/// only if none was.
+fn mem_io(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64, write: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if f < PROC_DEV + 16 {
+    return EBADF;
+  }
+  if va >= 0x800000000000 {
+    return EFAULT;
+  }
+  let p = (f - PROC_DEV) / 16;
+  if p == 0 || p >= NPROC || state(k.procs, p) == FREE {
+    return ESRCH;
+  }
+  if state(k.procs, p) == ZOMBIE {
+    return 0;
+  }
+  if tgid(k.procs, p) != tgid(k.procs, pid) && !cred_root(k.procs, pid) && !same_ids(k.procs, pid, p) {
+    return EPERM;                           // as for ptrace
+  }
+  let h = fd_ofd(k, pid, fd);
+  if h >= OFD_N {
+    return EBADF;
+  }
+  let off = of_get(k.ofd, h, 3);
+  if off >= 0x800000000000 {
+    if n == 0 {
+      return 0;
+    }
+    return EIO;                             // not an address a program can have
+  }
+  let g = tgid(k.procs, p);
+  let tp = fd_row(&mut k, g);
+  let mut done = 0;
+  let mut go = true;
+  while go && done < n && done < 0x100000
+    invariant done <= n && done <= 0x101000 && kok(k) && pid < NPROC && tp < NPROC && g < NPROC && 1 <= p && p < NPROC
+  {
+    let at = off + done;
+    if at >= 0x800000000000 {
+      go = false;
+    } else {
+      let mut c = 4096 - at % 4096;
+      if c > n - done {
+        c = n - done;
+      }
+      if c > XFER {
+        c = XFER;
+      }
+      if write {
+        if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + done, &mut k.fs.xfer, c) != c {
+          go = false;
+          if done == 0 {
+            return EFAULT;
+          }
+        } else {
+          pt_fill(&mut k, p, at);
+          own_touch(&mut k.mem, &mut k.spaces, g, (at - USER_BASE) / 4096, true);
+          if at >= USER_BASE && copy_to_user(&mut k.spaces, &mut k.mem, k.anon, tp, at, k.fs.xfer, c) != c && force_to_user(&mut k.spaces, tp, at, k.fs.xfer, c) != c {
+            go = false;
+          } else if at < USER_BASE {
+            go = false;
+          } else {
+            done = done + c;
+          }
+        }
+      } else {
+        pt_fill(&mut k, p, at);
+        let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, tp, at, &mut k.fs.xfer, c);
+        if got == NO_RESULT || got == 0 {
+          go = false;
+        } else {
+          let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + done, k.fs.xfer, got);
+          if put == NO_RESULT || put == 0 {
+            go = false;
+            if done == 0 {
+              return EFAULT;
+            }
+          } else {
+            done = done + put;
+            if put < c {
+              go = false;
+            }
+          }
+        }
+      }
+    }
+  }
+  if done == 0 && n != 0 {
+    return EIO;
+  }
+  of_set(&mut k.ofd, h, 3, off + done);
+  return done;
 }
 
 /// If x[..n] is /proc/PID/fd/N: PID * LXNFD + N, else NO_RESULT. Only
@@ -3045,7 +3158,7 @@ fn uts_file_index(f: u64) -> u64
 /// Whether a write of the transfer buffer can set /proc file f: the number
 /// files, which need no user memory beyond that buffer.
 fn proc_xfer_writable(f: u64) -> bool {
-  return proc_writable(f) && !is_cg_file(f) && !is_um_file(f) && f != PROC_DEV + PSYS + SY_UTS && f != PROC_DEV + PSYS + SY_UTS + 1;
+  return proc_writable(f) && !is_mem_file(f) && !is_cg_file(f) && !is_um_file(f) && f != PROC_DEV + PSYS + SY_UTS && f != PROC_DEV + PSYS + SY_UTS + 1;
 }
 
 /// The part of proc_write after the bytes are in the transfer buffer: n of
