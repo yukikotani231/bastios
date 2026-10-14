@@ -25,6 +25,7 @@
 import "linux.bastio";
 import "lxns.bastio";
 import "lxnsk.bastio";
+import "lxxattr.bastio";
 
 const LX_MOUNT: u64 = 165;
 const LX_UMOUNT2: u64 = 166;
@@ -371,5 +372,6 @@ fn lx_mount_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u6
   if n == LX_PIVOT_ROOT {
     return lx_pivot_root(&mut k, pid, a, b);  // src/lxns.bastio
   }
+  xa_clear(&mut k);                        // what the unmounted file system held (src/lxxattr.bastio)
   return lx_umount2(&mut k, pid, a, b, full);
 }

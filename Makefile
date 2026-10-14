@@ -446,6 +446,8 @@ CPYTHON_TAG   ?= v3.12.7
 RIPGREP_VER   ?= 14.1.1
 RUNC_VER      ?= 1.2.6
 RUNC_SHA256   ?= 0774f49d1b1eebb5849e644db5e4dc6f2b06cee05f13b3d17d5d6ba62d6f2ebc
+CRUN_VER      ?= 1.19.1
+CRUN_SHA256   ?= eaa2408dee92432d142d58317127b5974d39a8ad48689ba8b2eff8f74614f4b8
 DROPBEAR_GIT  ?= https://github.com/mkj/dropbear
 DROPBEAR_TAG  ?= DROPBEAR_2024.86
 COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo \
@@ -473,12 +475,20 @@ build/compat/runc: | build/compat/src
 	echo "$(RUNC_SHA256)  $@.part" | sha256sum -c - >/dev/null
 	chmod +x $@.part && mv $@.part $@
 
+# crun, the other common OCI runtime (written in C), for the cases that run
+# the same containers with it: the static amd64 build of the upstream
+# release, checked against a pinned SHA-256. Like runc it runs on BastiOS
+# only.
+build/compat/crun: | build/compat/src
+	curl -fsSL -o $@.part https://github.com/containers/crun/releases/download/$(CRUN_VER)/crun-$(CRUN_VER)-linux-amd64
+	echo "$(CRUN_SHA256)  $@.part" | sha256sum -c - >/dev/null
+	chmod +x $@.part && mv $@.part $@
+
 # The tree-sitter C parser for Neovim: Alpine's neovim package ships only the
 # vimdoc parser, so the grammar's generated parser.c, from the npm package at a
 # pinned version and SHA-256, is built into a shared object (nvim loads
 # parser/c.so; the C queries come with neovim). It runs on BastiOS only.
-TREESITTER_C_VER    := 0.24.1
-TREESITTER_C_SHA256 := 8e9ecd7687665d2fa1b3c07fbd1f4380b7d285850d6954629e2156e1b757451e
+# (The version is in test/compat/images.mk, which arch/aarch64/Makefile shares.)
 build/compat/tree-sitter-c.so: | build/compat/src
 	curl -fsSL -o build/compat/src/tree-sitter-c.tgz https://registry.npmjs.org/tree-sitter-c/-/tree-sitter-c-$(TREESITTER_C_VER).tgz
 	echo "$(TREESITTER_C_SHA256)  build/compat/src/tree-sitter-c.tgz" | sha256sum -c - >/dev/null
@@ -716,10 +726,10 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # over SSH.
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh \
     build/compat/bastioc1 build/compat/z3 build/compat/tcc \
-    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/tree-sitter-c.so build/compat/strace tools/ocipull.sh | build/compat
+    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace tools/ocipull.sh | build/compat
 	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) $(ALPINE_X86_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) \
 	  --extra "$$(test/compat/bastiotools.sh build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)) \
-	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/tree-sitter-c.so build/compat/strace tools/ocipull.sh"
+	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace tools/ocipull.sh"
 
 # Debian on BastiOS, on a fifth disk (test/compat/debiandisk.py) for
 # test/compat/debian.txt: Debian's root file system, whose programs are

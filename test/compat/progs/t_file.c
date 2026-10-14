@@ -112,14 +112,45 @@ int main(void) {
         EXPECT("tmpfile", f && fputs("t", f) >= 0 && fclose(f) == 0);
     }
     {
-        /* No extended attributes: EOPNOTSUPP on a file that exists (as on
-         * a Linux file system without them), ENOENT on one that does not. */
-        char v[16];
+        /* Extended attributes are kept in memory, by file: they follow a
+         * rename and a hard link, and go with the file's last name. */
+        char v[300], l[300];
         int x = open("cx_f", O_RDWR | O_CREAT, 0644);
-        EXPECT("setxattr unsupported", setxattr("cx_f", "user.a", "1", 1, 0) == -1 && errno == EOPNOTSUPP);
-        EXPECT("fgetxattr unsupported", fgetxattr(x, "user.a", v, sizeof v) == -1 && errno == EOPNOTSUPP);
-        EXPECT("listxattr empty", listxattr("cx_f", v, sizeof v) == 0);
-        EXPECT("removexattr of a missing file", removexattr("cx_none", "user.a") == -1 && errno == ENOENT);
+        EXPECT("listxattr of a fresh file is empty", listxattr("cx_f", l, sizeof l) == 0);
+        EXPECT("getxattr of what is not there is ENODATA", getxattr("cx_f", "user.a", v, sizeof v) == -1 && errno == ENODATA);
+        EXPECT("setxattr stores a value", setxattr("cx_f", "user.a", "one", 3, 0) == 0);
+        EXPECT("getxattr reads it back", getxattr("cx_f", "user.a", v, sizeof v) == 3 && memcmp(v, "one", 3) == 0);
+        EXPECT("fgetxattr reads it by descriptor", fgetxattr(x, "user.a", v, sizeof v) == 3 && memcmp(v, "one", 3) == 0);
+        EXPECT("getxattr with size 0 gives the length", getxattr("cx_f", "user.a", NULL, 0) == 3);
+        EXPECT("getxattr into too small a buffer is ERANGE", getxattr("cx_f", "user.a", v, 2) == -1 && errno == ERANGE);
+        EXPECT("XATTR_CREATE of an existing name is EEXIST", setxattr("cx_f", "user.a", "x", 1, XATTR_CREATE) == -1 && errno == EEXIST);
+        EXPECT("XATTR_REPLACE of a missing name is ENODATA", setxattr("cx_f", "user.b", "x", 1, XATTR_REPLACE) == -1 && errno == ENODATA);
+        EXPECT("XATTR_REPLACE changes the value", setxattr("cx_f", "user.a", "three", 5, XATTR_REPLACE) == 0 && getxattr("cx_f", "user.a", v, sizeof v) == 5 && memcmp(v, "three", 5) == 0);
+        EXPECT("fsetxattr adds a second name", fsetxattr(x, "user.b", "", 0, XATTR_CREATE) == 0 && getxattr("cx_f", "user.b", v, sizeof v) == 0);
+        EXPECT("listxattr lists both, NUL separated", listxattr("cx_f", l, sizeof l) == 14 && memcmp(l, "user.a\0user.b\0", 14) == 0);
+        EXPECT("listxattr with size 0 gives the length", flistxattr(x, NULL, 0) == 14);
+        EXPECT("listxattr into too small a buffer is ERANGE", listxattr("cx_f", l, 5) == -1 && errno == ERANGE);
+        EXPECT("a name outside every namespace is EOPNOTSUPP", setxattr("cx_f", "bogus.a", "1", 1, 0) == -1 && errno == EOPNOTSUPP);
+        EXPECT("they follow a rename", rename("cx_f", "cx_g") == 0 && getxattr("cx_g", "user.a", v, sizeof v) == 5 && getxattr("cx_f", "user.a", v, sizeof v) == -1 && errno == ENOENT);
+        EXPECT("they are shared by a hard link", link("cx_g", "cx_h") == 0 && getxattr("cx_h", "user.a", v, sizeof v) == 5);
+        EXPECT("they stay while a name is left", unlink("cx_g") == 0 && getxattr("cx_h", "user.a", v, sizeof v) == 5);
+        EXPECT("removexattr removes one", removexattr("cx_h", "user.a") == 0 && getxattr("cx_h", "user.a", v, sizeof v) == -1 && errno == ENODATA);
+        EXPECT("removexattr of a missing name is ENODATA", removexattr("cx_h", "user.a") == -1 && errno == ENODATA);
+        EXPECT("fremovexattr removes by descriptor", fremovexattr(x, "user.b") == 0 && listxattr("cx_h", l, sizeof l) == 0);
+        EXPECT("a directory keeps them too", mkdir("cx_d", 0755) == 0 && setxattr("cx_d", "user.d", "dir", 3, 0) == 0 && getxattr("cx_d", "user.d", v, sizeof v) == 3);
+        EXPECT("a symbolic link: l- forms act on the link, others on the target", symlink("cx_d", "cx_s") == 0 && getxattr("cx_s", "user.d", v, sizeof v) == 3 && lgetxattr("cx_s", "user.d", v, sizeof v) == -1);
+        EXPECT("an fd opened through a symbolic link holds the target's attributes", ({ int f1 = open("cx_t", O_RDWR | O_CREAT, 0644), f2, f3, r;
+               symlink("cx_t", "cx_u"); f2 = open("cx_u", O_RDONLY); f3 = open("cx_f2", O_RDWR | O_CREAT, 0644);
+               r = f1 >= 0 && f2 >= 0 && f3 >= 0 && fsetxattr(f3, "user.k", "v", 1, XATTR_CREATE) == 0 && fsetxattr(f2, "user.k", "w", 1, XATTR_CREATE) == 0
+                   && fgetxattr(f1, "user.k", v, sizeof v) == 1 && v[0] == 'w' && fgetxattr(f3, "user.k", v, sizeof v) == 1 && v[0] == 'v';
+               close(f1); close(f2); close(f3); unlink("cx_u"); unlink("cx_t"); unlink("cx_f2"); r; }));
+        EXPECT("a missing file is ENOENT", removexattr("cx_none", "user.a") == -1 && errno == ENOENT);
+        EXPECT("a bad descriptor is EBADF", fgetxattr(-1, "user.a", v, sizeof v) == -1 && errno == EBADF);
+        EXPECT("a bad name pointer is EFAULT", getxattr("cx_h", (const char *)1, v, sizeof v) == -1 && errno == EFAULT);
+        EXPECT("the attributes of a removed file do not come back", setxattr("cx_h", "user.z", "z", 1, 0) == 0 && unlink("cx_h") == 0 && open("cx_h", O_RDWR | O_CREAT, 0644) >= 0 && listxattr("cx_h", l, sizeof l) == 0);
+        unlink("cx_h");
+        unlink("cx_s");
+        rmdir("cx_d");
         if (x >= 0) close(x);
         unlink("cx_f");
     }

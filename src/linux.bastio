@@ -450,7 +450,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return lx_more_call(&mut con, &mut k, pid, n, a, b, c);
   }
   if is_xattr_call(n) {
-    return lx_xattr_call(&mut k, pid, n, a);  // src/lxxattr.bastio
+    return lx_xattr_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));  // src/lxxattr.bastio
   }
   if is_splice_call(n) {
     return lx_splice_call(&mut con, &mut k, pid, n, a, b, c);
@@ -839,6 +839,10 @@ fn lx_write_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64
   let early = rw_early(&mut k, pid, n, a, b, c);
   if early != NO_RESULT {
     ret(&mut k.procs, pid, early);
+    return KEEP;
+  }
+  if seal_no_write(&mut k, pid, a) {
+    ret(&mut k.procs, pid, EPERM);          // F_SEAL_WRITE (src/lxmore.bastio)
     return KEEP;
   }
   let mut w = 0;
@@ -2460,6 +2464,9 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   // a writable MAP_SHARED mapping only if for writing (and not O_APPEND).
   if !anon && (mode / O_READ % 2 == 0 || (sh && prot / 2 % 2 == 1 && (mode / O_WRITE % 2 == 0 || mode / O_APPEND % 2 == 1))) {
     return EACCES;
+  }
+  if !anon && sh && prot / 2 % 2 == 1 && seal_no_write(&mut k, pid, fd) {
+    return EPERM;                           // F_SEAL_WRITE: no new writable shared mapping
   }
   // The same for /dev/zero, whose description notes the access it lacks
   // (ofd_access). A read-only shared mapping of it is recorded, so

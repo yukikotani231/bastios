@@ -113,10 +113,12 @@ const SY_LOOP: u64 = SY_CG + CG_N * CGF_N;   // after the cgroups: loop device n
 const NS_DIRS: u64 = 0x400;            // DIR_PROC + NS_DIRS + pid: /proc/PID/ns
 const FD_DIRS: u64 = 0x800;            // DIR_PROC + FD_DIRS + pid: /proc/PID/fd
 const TASK_DIRS: u64 = 0xC00;          // DIR_PROC + TASK_DIRS + pid: /proc/PID/task
+const FDI_DIRS: u64 = 0x1800;           // DIR_PROC + FDI_DIRS + pid: /proc/PID/fdinfo
 const SYSD: u64 = 0x1400;              // DIR_PROC + SYSD + j: /proc/sys and its directories (src/lxsysctl.bastio)
 const NET_DIR: u64 = 0x1000;            // DIR_PROC + NET_DIR: /proc/net
 const LOOP_SYS: u64 = 8;               // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio
 const SY_PX: u64 = SY_LOOP + LOOP_N * LOOP_SYS;   // after the loop devices: /proc/P/ file w at P * PXF_N + w (src/lxsysctl.bastio)
+const SY_FI: u64 = SY_PX + NPROC * PXF_N;   // after those: /proc/P/fdinfo/FD at P * LXNFD + FD
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
 const S_IFREG_RO: u64 = 0x8124;       // a regular file, r--r--r--
@@ -405,6 +407,13 @@ fn proc_dir(procs: &Buf, x: &Bytes, n: u64) -> u64
     }
     return DIR_PROC + FD_DIRS + q;          // /proc/PID/fd
   }
+  if e + 7 == n && xfer_is(x, e, n, "/fdinfo") {
+    let q = proc_pid(procs, x, 5, e);
+    if q >= NPROC {
+      return NO_FILE;
+    }
+    return DIR_PROC + FDI_DIRS + q;         // /proc/PID/fdinfo
+  }
   if e + 5 == n && xfer_is(x, e, n, "/task") {
     let q = proc_pid(procs, x, 5, e);
     if q >= NPROC {
@@ -639,6 +648,24 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
     }
     pw = pw + 1;
   }
+  if e + 8 < n && n <= e + 12 && xfer_is(x, e + 1, e + 8, "fdinfo/") {
+    let mut fd = 0;
+    let mut fi = e + 8;
+    while fi < n
+      invariant e + 8 <= fi && fi <= n && n <= e + 12 && fd < 10000
+    {
+      let c = cast[u64](bget(x, fi));
+      if c < 48 || c > 57 || fd >= 1000 {
+        return 0;
+      }
+      fd = fd * 10 + (c - 48);
+      fi = fi + 1;
+    }
+    if fd >= LXNFD {
+      return 0;
+    }
+    return PROC_DEV + PSYS + SY_FI + p * LXNFD + fd;     // /proc/PID/fdinfo/FD
+  }
   let um = um_at(x, e + 1, n, p);
   if um != 0 {
     return um;                              // uid_map, gid_map or setgroups (src/lxuser.bastio)
@@ -793,6 +820,9 @@ fn proc_dir_meta(d: u64) -> Meta {
   if d == DIR_PROC + NET_DIR {
     return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 16384, mtime: 0, own: 0 };
   }
+  if d >= DIR_PROC + FDI_DIRS && d < DIR_PROC + FDI_DIRS + NPROC {
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 24576 + d % 1024, mtime: 0, own: 0 };
+  }
   if d >= DIR_PROC + TASK_DIRS {
     return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 12288 + d % 1024, mtime: 0, own: 0 };
   }
@@ -851,6 +881,17 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
       return Ent { len: name_out(&mut k.fs.xfer, "arp"), dir: false, end: false };
     }
     return end;
+  }
+  if dir >= DIR_PROC + FDI_DIRS && dir < DIR_PROC + FDI_DIRS + NPROC {
+    // /proc/PID/fdinfo: the same entries as /proc/PID/fd
+    if i >= LXNFD {
+      return end;
+    }
+    let d = fd_look(k, dir - DIR_PROC - FDI_DIRS, i);
+    if d.kind == K_BAD {
+      return Ent { len: 0, dir: false, end: false };
+    }
+    return Ent { len: dec_big(&mut k.fs.xfer, 0, i), dir: false, end: false };
   }
   if dir >= DIR_PROC + TASK_DIRS {
     // /proc/PID/task: one entry per thread of the group, a hole for the others
@@ -938,6 +979,9 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
     if i >= 14 + UMF_N && i < 14 + UMF_N + PXF_N {
       return Ent { len: name_out(&mut k.fs.xfer, px_name(i - 14 - UMF_N)), dir: false, end: false };
     }
+    if i == 14 + UMF_N + PXF_N {
+      return Ent { len: name_out(&mut k.fs.xfer, "fdinfo"), dir: true, end: false };
+    }
     return end;
   }
   if i == 0 {
@@ -1014,6 +1058,140 @@ fn put_c(o: &mut Bytes, at: u64, c: u8) -> u64
   return bytes_put_byte(&mut o, at, c);
 }
 
+/// One line of /proc/PID/maps: window pages from .. to with the permissions
+/// bits says (see user_page_bits), and the name of class cls (0 none,
+/// 1 [heap], 2 [stack], 3 [vdso]). PROT_EXEC is not tracked, so a readable
+/// page that cannot be written reads as executable.
+fn maps_line(o: &mut Bytes, at: u64, from: u64, to: u64, bits: u64, cls: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT && from <= WPAGES && to <= WPAGES && bits < 16 && cls < 4
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = put_x(&mut o, at, USER_BASE + from * 4096);
+  a = put_c(&mut o, a, 45);
+  a = put_x(&mut o, a, USER_BASE + to * 4096);
+  a = put_c(&mut o, a, 32);
+  let r = bits / 2 % 2;
+  let w = bits / 4 % 2;
+  if r == 1 {
+    a = put_c(&mut o, a, 114);
+  } else {
+    a = put_c(&mut o, a, 45);
+  }
+  if w == 1 {
+    a = put_c(&mut o, a, 119);
+  } else {
+    a = put_c(&mut o, a, 45);
+  }
+  if r == 1 && w == 0 {
+    a = put_c(&mut o, a, 120);
+  } else {
+    a = put_c(&mut o, a, 45);
+  }
+  if bits / 8 == 1 {
+    a = put_c(&mut o, a, 115);
+  } else {
+    a = put_c(&mut o, a, 112);
+  }
+  a = put_s(&mut o, a, " 00000000 00:00 0");
+  if cls != 0 {
+    // The name starts in column 74, as on Linux.
+    let mut c = 0;
+    if a >= at {
+      c = smaller(a - at, 73);
+    }
+    while c < 73 && a < PROC_OUT
+      invariant c <= 73 && a <= PROC_OUT && blen(o) == PROC_OUT
+    {
+      a = put_c(&mut o, a, 32);
+      c = c + 1;
+    }
+    if cls == 1 {
+      a = put_s(&mut o, a, "[heap]");
+    } else if cls == 2 {
+      a = put_s(&mut o, a, "[stack]");
+    } else {
+      a = put_s(&mut o, a, "[vdso]");
+    }
+  }
+  return put_c(&mut o, a, 10);
+}
+
+/// /proc/PID/maps of process p, from its page tables and its records of
+/// anonymous memory not touched yet (those read as private read-write): runs
+/// of pages with the same permissions, the heap apart, then the vDSO and the
+/// stack, whose place is fixed. The names of mapped files are not given
+/// (only shared maps are recorded), nor PROT_EXEC, and a read-only shared
+/// map shows as private (the program's own pages share frames too); a PROT_NONE anonymous
+/// map that maps no pages is not listed. The walk is capped, so a window with
+/// very many touched pages lists only its lower part.
+fn maps_text(k: &mut Kernel, p: u64, o: &mut Bytes) -> u64
+  requires kok(k) && p < NPROC && blen(o) == PROC_OUT
+  ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let w0 = pget(k.procs, p, F_BRK0);
+  let w1 = pget(k.procs, p, F_BRK);
+  let b0 = smaller(w0 / 4096, WPAGES);
+  let b1 = larger(b0, smaller(w1 / 4096 + smaller(w1 % 4096, 1), WPAGES));
+  let mut a = 0;
+  let mut q = 0;
+  let mut steps = 0;
+  let mut open = false;
+  let mut rs = 0;
+  let mut re = 0;
+  let mut rb = 0;
+  let mut rc = 0;
+  while q < VDSO_PAGE && steps < 262144 && a + 160 <= PROC_OUT
+    invariant q <= VDSO_PAGE && a <= PROC_OUT && steps <= 262144 && rs <= WPAGES && re <= WPAGES
+      && rb < 16 && rc < 4 && b0 <= b1 && b1 <= WPAGES && blen(o) == PROC_OUT && kok(k) && p < NPROC
+  {
+    steps = steps + 1;
+    let mut bits = user_page_bits(&mut k.spaces, p, q);
+    let mut nq = q + 1;
+    if anon_covers(k.anon, p, q) {
+      bits = 7;
+      nq = anon_end(k.anon, p, q);
+    } else if bits == 0 {
+      nq = smaller(user_next_mapped(&mut k.spaces, p, q + 1), anon_after(k.anon, p, q));
+    } else if bits >= 8 && user_cow_page(&mut k.spaces, k.mem.bm, p, USER_BASE + q * 4096) {
+      bits = 7;                               // a private page shared with a relative until a write
+    }
+    if bits >= 8 && bits / 4 % 2 == 0 {
+      bits = bits - 8;                        // read-only shared frames (program text) are private maps
+    }
+    nq = smaller(larger(nq, q + 1), VDSO_PAGE);
+    let mut cls = 0;
+    if q < b0 {
+      nq = smaller(nq, b0);
+    } else if q < b1 {
+      cls = 1;
+      nq = smaller(nq, b1);
+    }
+    if bits == 0 {
+      if open {
+        a = maps_line(&mut o, a, rs, re, rb, rc);
+        open = false;
+      }
+    } else if open && rb == bits && rc == cls {
+      re = nq;
+    } else {
+      if open {
+        a = maps_line(&mut o, a, rs, re, rb, rc);
+      }
+      open = true;
+      rs = q;
+      re = nq;
+      rb = bits;
+      rc = cls;
+    }
+    q = nq;
+  }
+  if open {
+    a = maps_line(&mut o, a, rs, re, rb, rc);
+  }
+  a = maps_line(&mut o, a, VDSO_PAGE, VDSO_PAGE + 1, 3, 3);
+  return maps_line(&mut o, a, STACK_FIRST, WPAGES, 7, 2);
+}
+
 /// Appends v in hex, at least 8 digits, as Linux's %08lx.
 fn put_x(o: &mut Bytes, at: u64, v: u64) -> u64
   requires blen(o) == PROC_OUT && at <= PROC_OUT
@@ -1032,6 +1210,106 @@ fn put_x(o: &mut Bytes, at: u64, v: u64) -> u64
       } else {
         a = put_c(&mut o, a, cast[u8](87 + d));
       }
+    }
+  }
+  return a;
+}
+
+/// Appends v in octal with a leading 0, as fdinfo's flags.
+fn put_oct(o: &mut Bytes, at: u64, v: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = put_c(&mut o, at, 48);
+  let mut sh = 21;
+  while sh > 0
+    invariant sh <= 21 && blen(o) == PROC_OUT && a <= PROC_OUT
+  {
+    sh = sh - 1;
+    if v >> (3 * sh) != 0 {
+      a = put_c(&mut o, a, cast[u8](48 + ((v >> (3 * sh)) & 7)));
+    }
+  }
+  return a;
+}
+
+/// /proc/P/fdinfo/FD: the position, flags, mount and inode every
+/// description has, then what its kind adds (an eventfd's count, an inotify
+/// instance's watches). Empty for a descriptor that is not open.
+fn fdinfo_out(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
+  requires kok(k) && p < NPROC && fd < LXNFD && blen(o) == PROC_OUT
+  ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let d = fd_look(k, p, fd);
+  if d.kind == K_BAD {
+    return 0;
+  }
+  let mut pos = 0;
+  let mut ino = 0;
+  if d.kind == K_FILE && d.x < FD_ROWS {
+    pos = fget(k.fs.ftab, d.x, FD_OFF);
+    let f = vfs_row_file(k.fs, d.x);
+    if f < HFILES {
+      ino = INO_FILES + f;
+    }
+  }
+  let mut fl = lx_fcntl(&mut k, p, fd, F_GETFL, 0);
+  if fl > 0xFFFFFFFF {
+    fl = 0;
+  }
+  if fd_get(k.lxfd, p, fd) / FD_CLOEXEC % 2 == 1 {
+    fl = fl | LO_CLOEXEC;
+  }
+  let mut a = put_s(&mut o, 0, "pos:\t");
+  a = put_n(&mut o, a, pos);
+  a = put_s(&mut o, a, "\nflags:\t");
+  a = put_oct(&mut o, a, fl);
+  a = put_s(&mut o, a, "\nmnt_id:\t1\nino:\t");
+  a = put_n(&mut o, a, ino);
+  a = put_c(&mut o, a, 10);
+  if d.kind == K_EVENT && d.x < OFD_N {
+    a = put_s(&mut o, a, "eventfd-count: ");
+    let c = of_get(k.ofd, d.x, 2);
+    a = put_hx(&mut o, a, c >> 32, 8);
+    a = put_hx(&mut o, a, c & 0xFFFFFFFF, 8);
+    a = put_c(&mut o, a, 10);
+  }
+  if d.kind == K_PIDFD {
+    let mut v = 0;
+    if d.x < NPROC && state(k.procs, d.x) != FREE {
+      v = vpid_of(k, p, d.x);
+    }
+    a = put_s(&mut o, a, "Pid:\t");
+    if v == 0 {
+      a = put_s(&mut o, a, "-1");
+    } else {
+      a = put_n(&mut o, a, v);
+    }
+    a = put_s(&mut o, a, "\nNSpid:\t");
+    if v == 0 {
+      a = put_s(&mut o, a, "-1");
+    } else {
+      a = put_n(&mut o, a, v);
+    }
+    a = put_c(&mut o, a, 10);
+  }
+  if d.kind == K_INOTIFY && d.x < INO_N {
+    let mut w = 0;
+    while w < INO_W
+      invariant w <= INO_W && a <= PROC_OUT && blen(o) == PROC_OUT && d.x < INO_N && kok(k)
+    {
+      let at = INO_AT + d.x * INO_STRIDE + INO_HEAD + w * INO_WAT;
+      let hv = get(k.evt, at);
+      if hv != 0 && hv < 0x100000000 && a + 120 <= PROC_OUT {
+        a = put_s(&mut o, a, "inotify wd:");
+        a = put_n(&mut o, a, get(k.evt, at + 2));
+        a = put_s(&mut o, a, " ino:");
+        a = put_x(&mut o, a, hv);                  // the handle: what stat calls the inode is this plus INO_FILES
+        a = put_s(&mut o, a, " sdev:00000001 mask:");
+        a = put_x(&mut o, a, get(k.evt, at + 1));
+        a = put_s(&mut o, a, " ignored_mask:0\n");
+      }
+      w = w + 1;
     }
   }
   return a;
@@ -1652,6 +1930,9 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       }
       return a;
     }
+    if what >= SY_FI && what < SY_FI + NPROC * LXNFD {
+      return fdinfo_out(&mut k, (what - SY_FI) / LXNFD, (what - SY_FI) % LXNFD, &mut o);
+    }
     if what >= SY_PX && what < SY_PX + NPROC * PXF_N {
       let w = (what - SY_PX) % PXF_N;
       if w == 1 {
@@ -2090,19 +2371,24 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     return put_c(&mut o, a, 10);
   }
   if what == PF_MAPS {
-    // Only the regions whose place is fixed: the stack (mapped on demand
-    // over its whole reach) and the vDSO. The program, its heap and its
-    // mmaps are not listed: no list of them is kept, only page tables.
-    let mut a = put_x(&mut o, 0, USER_BASE + VDSO_PAGE * 4096);
-    a = put_c(&mut o, a, 45);
-    a = put_x(&mut o, a, USER_BASE + (VDSO_PAGE + 1) * 4096);
-    a = put_s(&mut o, a, " r-xp 00000000 00:00 0                          [vdso]\n");
-    a = put_x(&mut o, a, USER_BASE + STACK_FIRST * 4096);
-    a = put_c(&mut o, a, 45);
-    a = put_x(&mut o, a, USER_BASE + USER_SIZE);
-    return put_s(&mut o, a, " rw-p 00000000 00:00 0                          [stack]\n");
+    return maps_text(&mut k, p, &mut o);
   }
   if what == PF_CMDLINE {
+    let w = pget(k.procs, p, F_ARGS);
+    let n = w / 1099511627776;
+    if n != 0 && n < PROC_OUT {
+      let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, USER_BASE + w % 1099511627776, &mut k.fs.xfer, n);
+      if got == n {
+        let mut i = 0;
+        while i < n
+          invariant i <= n && n < PROC_OUT && blen(o) == PROC_OUT && blen(k.fs.xfer) == XFER
+        {
+          bset(&mut o, i, bget(k.fs.xfer, i));
+          i = i + 1;
+        }
+        return n;
+      }
+    }
     let a = put_prog(&mut k, p, &mut o, 0, true);
     return put_c(&mut o, a, 0);
   }
@@ -2290,6 +2576,33 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
         a = put_c(&mut o, 0, 47);
       }
       let mut j = 0;
+      // A directory opened before a chroot or pivot_root reads relative to
+      // the process's root now (the root directory itself as "/"), when it
+      // is inside it.
+      let rl = root_len(k, p);
+      if rl > 0 && d.kind == K_DIR {
+        let mut s0 = 0;
+        if n > 0 && base_byte(k, p, h, 0) == 47 {
+          s0 = 1;
+        }
+        let mut inside = n >= s0 + rl && (n == s0 + rl || base_byte(k, p, h, s0 + rl) == 47);
+        let mut i = 0;
+        while inside && i < rl
+          invariant i <= rl && rl <= FNAME_MAX && s0 <= 1 && (!inside || s0 + rl <= n) && n <= FNAME_MAX && kok(k) && p < NPROC
+        {
+          if cast[u8](wget(k.croot, p * CWD_STRIDE + 1 + i) % 256) != base_byte(k, p, h, s0 + i) {
+            inside = false;
+          }
+          i = i + 1;
+        }
+        if inside {
+          j = s0 + rl;
+          if j < n {
+            j = j + 1;                      // the slash after the root's name
+          }
+          a = put_c(&mut o, 0, 47);
+        }
+      }
       while j < n && a < PROC_OUT
         invariant j <= n && n <= FNAME_MAX && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
       {

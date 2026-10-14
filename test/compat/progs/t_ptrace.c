@@ -5,6 +5,7 @@
  * detaches. The checks stay on what Linux gives every tracer on x86-64. */
 #include "compat.h"
 #include <signal.h>
+#include <time.h>
 #include <sys/ptrace.h>
 #include <sys/user.h>
 #include <sys/wait.h>
@@ -385,6 +386,33 @@ int main(int argc, char **argv) {
         write(p[1], "x", 1);
         w = waitpid(c, &st, 0);
         EXPECT("a seized tracee resumed with PTRACE_CONT runs to its end", rc == 0 && w == c && WIFEXITED(st) && WEXITSTATUS(st) == 7);
+    }
+
+    /* PTRACE_SEIZE and PTRACE_INTERRUPT on a tracee that sleeps in a system call. */
+    {
+        pid_t c = fork();
+        if (c == 0) {
+            struct timespec ts = {30, 0};
+            nanosleep(&ts, 0);
+            _exit(0);
+        }
+        usleep(100000);
+        long r = ptrace(PTRACE_SEIZE, c, 0, PTRACE_O_TRACESYSGOOD);
+        long ri = ptrace(PTRACE_INTERRUPT, c, 0, 0);
+        int st = 0;
+        int w = waitpid(c, &st, 0);
+        EXPECT("a sleeping seized tracee is stopped by PTRACE_INTERRUPT",
+               r == 0 && ri == 0 && w == c && WIFSTOPPED(st) && WSTOPSIG(st) == SIGTRAP && (st >> 16) == 128);
+        long rs = ptrace(PTRACE_SYSCALL, c, 0, 0);
+        kill(c, SIGKILL);
+        w = waitpid(c, &st, 0);
+        int ok = 0;
+        while (w == c && WIFSTOPPED(st)) {
+            ptrace(PTRACE_SYSCALL, c, 0, 0);
+            w = waitpid(c, &st, 0);
+        }
+        ok = w == c && WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL;
+        EXPECT("it can be resumed and then killed", rs == 0 && ok);
     }
     return done();
 }
