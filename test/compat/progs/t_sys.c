@@ -459,7 +459,6 @@ static int keys_negative(void) {
     return kctl(11, id, (long)b, sizeof b, 0) == -1 && errno == ENOKEY_;
 }
 
-<<<<<<< HEAD
 /* clone's exit_signal: the parent gets it, not SIGCHLD, when the child ends. */
 static volatile int exit_sig_seen;
 static void on_exit_sig(int sig) { exit_sig_seen = sig; }
@@ -476,7 +475,8 @@ static int exit_signal(void) {
     int st;
     if (waitpid((pid_t)c, &st, __WALL) != (pid_t)c) return 0;
     return exit_sig_seen == SIGUSR2;
-=======
+}
+
 /* Linux AIO: requests are done at submit; events come back from io_getevents. */
 struct aio_cb { uint64_t data; uint32_t key, rwf; uint16_t op, prio; uint32_t fd; uint64_t buf, nbytes; int64_t off; uint64_t res2; uint32_t flags, resfd; };
 struct aio_ev { uint64_t data, obj; int64_t res, res2; };
@@ -557,7 +557,6 @@ done:
     syscall(AIO_DESTROY, ctx);
     if (!ok) errno = aio_line;
     return ok;
->>>>>>> origin/main
 }
 
 int main(void) {
@@ -578,11 +577,8 @@ int main(void) {
     EXPECT("keys: unknown type, bad payload, expiry, revocation, no such key", keys_errors());
     EXPECT("keys: a child shares the session keyring but not the process keyring", keys_inherit());
     EXPECT("keys: request_key with a callout leaves a negative key", keys_negative());
-<<<<<<< HEAD
     EXPECT("clone: the exit signal is what the parent gets", exit_signal());
-=======
     EXPECT("aio: io_submit does the requests, io_getevents returns them in order", aio_basic());
     EXPECT("aio: bad context, bad descriptor, bad pointer, and an empty pipe finishes with EAGAIN", aio_errors());
->>>>>>> origin/main
     return done();
 }
