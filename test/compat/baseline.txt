@@ -1002,6 +1002,7 @@ tty: epoll: keys reach a program waiting in epoll_wait on /dev/tty
 alpine-tty: nvim: :make runs gcc through make
 alpine-tty: nvim: edit a C file, build it with gcc, run it
 alpine-tty: nvim: edit a file in a git work tree, then commit it
+alpine-tty: nvim: git commit opens Neovim as the editor, and the message typed there is the commit's
 alpine-tty: nvim: edit and save a C file
 alpine: apk: install neovim over HTTP
 alpine: nvim: a script run without a terminal
