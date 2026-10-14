@@ -488,8 +488,7 @@ build/compat/crun: | build/compat/src
 # vimdoc parser, so the grammar's generated parser.c, from the npm package at a
 # pinned version and SHA-256, is built into a shared object (nvim loads
 # parser/c.so; the C queries come with neovim). It runs on BastiOS only.
-TREESITTER_C_VER    := 0.24.1
-TREESITTER_C_SHA256 := 8e9ecd7687665d2fa1b3c07fbd1f4380b7d285850d6954629e2156e1b757451e
+# (The version is in test/compat/images.mk, which arch/aarch64/Makefile shares.)
 build/compat/tree-sitter-c.so: | build/compat/src
 	curl -fsSL -o build/compat/src/tree-sitter-c.tgz https://registry.npmjs.org/tree-sitter-c/-/tree-sitter-c-$(TREESITTER_C_VER).tgz
 	echo "$(TREESITTER_C_SHA256)  build/compat/src/tree-sitter-c.tgz" | sha256sum -c - >/dev/null
