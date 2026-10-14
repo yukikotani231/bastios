@@ -434,7 +434,15 @@ rootfs/etc/motd: No such file or directory
 rootfs/etc/ocilayer
 
 == container: the image's command, environment and working directory run rootless from the bundle
-$ bb mkdir -p /run/ru && bb chown -R 65534:65534 /run/ru /disk/a/pull && bb su -s /bin/ash nobody -c 'cd /disk/a/pull/b && /disk/runc --root /run/ru run c4 < /dev/null; echo status $?'; bb chroot /disk/a /sbin/apk del -q --no-progress jq oniguruma 2>/dev/null; bb rm -rf /disk/a/pull /disk/a/usr/bin/runc /disk/a/ocipull.sh
+$ bb mkdir -p /run/ru && bb chown -R 65534:65534 /run/ru /disk/a/pull && bb su -s /bin/ash nobody -c 'cd /disk/a/pull/b && /disk/runc --root /run/ru run c4 < /dev/null; echo status $?'; bb chroot /disk/a /sbin/apk del -q --no-progress jq oniguruma 2>/dev/null
+from-image bar
+0
+runc
+two
+status 0
+
+== container: crun runs the same pulled bundle rootless, with the image's command, environment and working directory
+$ bb mkdir -p /run/cru2 && bb chown -R 65534:65534 /run/cru2 /disk/a/pull && bb su -s /bin/ash nobody -c 'cd /disk/a/pull/b && /disk/crun --root /run/cru2 run c5 < /dev/null; echo status $?'; bb rm -rf /disk/a/pull /disk/a/usr/bin/runc /disk/a/ocipull.sh
 from-image bar
 0
 runc
