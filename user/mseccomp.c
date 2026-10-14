@@ -245,7 +245,7 @@ static int answers(void)
 
     /* a stack deeper than the pool is ENOMEM, not a crash */
     int got = 0;
-    for (int i = 0; i < 20 && got == 0; i++)
+    for (int i = 0; i < 200 && got == 0; i++)
         got = load(allow, 1);
     if (got != -1 || errno != ENOMEM)
         return fail("a full pool is not ENOMEM");
