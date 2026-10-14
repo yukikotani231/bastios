@@ -18,8 +18,8 @@ import "core/bytes.bastio";
 
 const NFILES: u64 = 8192;           // more than every descriptor of a process, or a build tree
 const FNAME_MAX: u64 = 255;
-const FILE_PAGES: u64 = 16384;
-const FILE_MAX: u64 = 67108864;       // FILE_PAGES * 4096 (64 MiB)
+const FILE_PAGES: u64 = 262144;
+const FILE_MAX: u64 = 1073741824;     // FILE_PAGES * 4096 (1 GiB)
 
 enum Slot { Hole, Page(Frame) }
 

@@ -306,6 +306,9 @@ steps = [
     # terminal: ash gives each background job its own /dev/null otherwise,
     # and open files system-wide run out first.)
     ("i=0; while [ $i -lt 120 ]; do sleep 10 </dev/tty & i=$((i+1)); done; n=0; for d in /proc/[0-9]*; do n=$((n+1)); done; [ $n -gt 120 ] && [ -d /proc/120 ] && echo many$((1+1)); wait", b"\r\nmany2\r\n", b"\n# "),
+    # /proc/PID/auxv: the vector exec built (AT_PHDR first, at least a dozen entries).
+    # lseek on /proc/PID/auxv is tested by the gdb case of the compat suite.
+    ("a=$(cat /proc/self/auxv | wc -c); [ $a -ge 192 ] && [ $a -le 288 ] && echo auxv$((1+1))", b"\r\nauxv2\r\n", b"\n# "),
     ("read -t 1 x; echo rt=$?", b"rt=1", b"\n# "),
     ("read -t 9 x; echo rt=$? x=$x", b"rt=0 x=late", b"\n# ", b"late\r"),
     # Directories: mkdir, a working directory (chdir, getcwd through
@@ -339,6 +342,10 @@ steps = [
     # and the file still there after an unmount and a second mount.
     ("truncate -s 1M im; mkfs.bstdisk3 im && mkdir mm && mount -t bstdisk3 im mm && echo kept > mm/f && umount mm && mount -t bstdisk3 im mm && cat mm/f; cat /proc/mounts; umount mm; rm im; rmdir mm; echo lo$((1+1))",
      [b"\r\nkept\r\n", b"bstdisk3 /mm bstdisk3 rw", b"\r\nlo2\r\n"], b"\n# "),
+    # A file in memory past the 64 MiB it was once limited to: grown to
+    # 300 MiB (holes cost no pages), then written at its end.
+    ("truncate -s 300M bigram; stat -c %s bigram; echo z >> bigram; stat -c %s bigram; rm bigram; echo bg$((1+1))",
+     [b"\r\n314572800\r\n", b"\r\n314572802\r\n", b"\r\nbg2\r\n"], b"\n# "),
     # Mount namespaces (src/lxns.bastio): a bind mount made in one is seen
     # there and not by the shell outside; pivot_root into a directory bound
     # onto itself, with /bin, a volume and proc mounted in it, as OCI
