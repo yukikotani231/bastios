@@ -209,16 +209,23 @@ fn pq_create(k: &mut Kernel, pid: u64, n: u64, mode: u64, attr: u64) -> u64
 {
   // The names in IPC namespaces no process is in any more go: their
   // queues are unlinked, and freed once nothing has them open.
+  // (taking a queue's file away uses the transfer buffer, which holds the
+  // new name: keep it aside meanwhile.)
+  let mut keep = balloc(PQ_NAME_ROOM);
+  bcopy(&mut keep, 0, k.fs.xfer, 0, n);
   let mut d = 0;
   while d < PQ_N
-    invariant d <= PQ_N && kok(k)
+    invariant d <= PQ_N && kok(k) && blen(keep) == PQ_NAME_ROOM
   {
     if pq_get(k, d, PW_LIVE) == 1 && pq_ns(k, d) != 0 && !nsk_live(k, NSK_IPC, pq_ns(k, d)) {
+      mq_fs_del(&mut k, d);
       pq_set(&mut k, d, PW_LIVE, 2);
       pq_reap(&mut k, d);
     }
     d = d + 1;
   }
+  bcopy(&mut k.fs.xfer, 0, keep, 0, n);
+  bfree(keep);
   // Keep the name before xfer is used for the attributes.
   let mut q = 0;
   while q < PQ_N && pq_get(k, q, PW_LIVE) != 0
@@ -263,6 +270,166 @@ fn pq_create(k: &mut Kernel, pid: u64, n: u64, mode: u64, attr: u64) -> u64
   return q;
 }
 
+// ------------------------------------------------------- the file system
+//
+// A mount of mqueue shows the queues of the IPC namespace it was made in
+// (not the caller's: a parent sees a child's queues through a mount the
+// child made). Each namespace that mounts it gets a directory of the file
+// layer, dev/mqueue/N, with one empty file per queue: mq_open and mq_unlink
+// keep the files, and a file made in the directory makes a queue.
+
+/// Puts "dev/mqueue/N" (N the IPC namespace's id) in the transfer buffer:
+/// its length, or NO_RESULT for a namespace id too large to write.
+fn mq_dir_name(k: &mut Kernel, ns: u64) -> u64
+  requires kok(k)
+  ensures kok(k) && (result == NO_RESULT || result <= 18)
+{
+  if ns >= 10000000 {
+    return NO_RESULT;
+  }
+  let pre = "dev/mqueue/";
+  let mut i = 0;
+  while i < 11 && i < slen(pre)
+    invariant i <= 11 && kok(k)
+  {
+    bset(&mut k.fs.xfer, i, sget(pre, i));
+    i = i + 1;
+  }
+  return 11 + dec_big(&mut k.fs.xfer, 11, ns);
+}
+
+/// Puts "dev/mqueue/N/NAME" for queue q in the transfer buffer: its length,
+/// or NO_RESULT.
+fn mq_file_name(k: &mut Kernel, q: u64) -> u64
+  requires kok(k) && q < PQ_N
+  ensures kok(k) && (result == NO_RESULT || result <= FNAME_MAX)
+{
+  let d = mq_dir_name(&mut k, pq_ns(k, q));
+  let nl = pq_get(k, q, PW_NLEN);
+  if d == NO_RESULT || nl == 0 || nl > PQ_NAME_MAX || d + 1 + nl > FNAME_MAX {
+    return NO_RESULT;
+  }
+  bset(&mut k.fs.xfer, d, 47);
+  bcopy(&mut k.fs.xfer, d + 1, k.ipcb, PQ_NAMES + q * PQ_NAME_ROOM, nl);
+  return d + 1 + nl;
+}
+
+/// Queue q was made: its file, if its namespace has mounted mqueue.
+fn mq_fs_add(k: &mut Kernel, q: u64)
+  requires kok(k) && q < PQ_N
+  ensures kok(k)
+{
+  let d = mq_dir_name(&mut k, pq_ns(k, q));
+  if d == NO_RESULT || dir_at(&mut k, d) == NO_FILE {
+    return;
+  }
+  let n = mq_file_name(&mut k, q);
+  if n == NO_RESULT {
+    return;
+  }
+  let fd = vfs_open(&mut k.fs, &mut k.mem, 0, FD_POOL, O_WRITE + O_CREATE, n);
+  if fd < FD_POOL {
+    vfs_close(&mut k.fs, &mut k.mem, fd);
+  }
+}
+
+/// Queue q is going: its file goes.
+fn mq_fs_del(k: &mut Kernel, q: u64)
+  requires kok(k) && q < PQ_N
+  ensures kok(k)
+{
+  let n = mq_file_name(&mut k, q);
+  if n != NO_RESULT {
+    vfs_unlink(&mut k.fs, &mut k.mem, n);
+  }
+}
+
+/// A mount of mqueue by process pid: the directory of its IPC namespace,
+/// made and filled with its queues' files the first time, left in the
+/// transfer buffer. Its length, or NO_RESULT.
+fn mq_fs_mount(k: &mut Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k) && (result == NO_RESULT || result <= 18)
+{
+  let ns = nsk_of(k, NSK_IPC, pid);
+  let d = mq_dir_name(&mut k, ns);
+  if d == NO_RESULT {
+    return NO_RESULT;
+  }
+  if dir_at(&mut k, d) == NO_FILE {
+    make_dir(&mut k.fs, "dev/mqueue");
+    let d2 = mq_dir_name(&mut k, ns);
+    if d2 == NO_RESULT || !vfs_mkdir(&mut k.fs, d2) {
+      return NO_RESULT;
+    }
+    let mut q = 0;
+    while q < PQ_N
+      invariant q <= PQ_N && kok(k)
+    {
+      if pq_get(k, q, PW_LIVE) == 1 && pq_ns(k, q) == ns {
+        mq_fs_add(&mut k, q);
+      }
+      q = q + 1;
+    }
+  }
+  return mq_dir_name(&mut k, ns);
+}
+
+/// open(O_CREAT) of the file-layer path in the first n bytes of the
+/// transfer buffer: in a queue directory, a new name makes a queue (only
+/// for a process of the directory's IPC namespace: EACCES for any other).
+/// 0 to go on (the path is back in the buffer), or -errno.
+fn mq_fs_creat(k: &mut Kernel, pid: u64, n: u64, mode: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+  ensures kok(k)
+{
+  if n < 13 || !xfer_is(k.fs.xfer, 0, 11, "dev/mqueue/") {
+    return 0;
+  }
+  let e = comp_end(k.fs.xfer, 11, n);
+  if e >= n || e == 11 || e - 11 > 8 || e + 1 >= n {
+    return 0;
+  }
+  let mut ns = 0;
+  let mut i = 11;
+  while i < e
+    invariant 11 <= i && i <= e && e <= n && n <= FNAME_MAX && ns < 100000000 && kok(k)
+  {
+    let c = cast[u64](bget(k.fs.xfer, i));
+    if c < 48 || c > 57 || ns >= 10000000 {
+      return 0;
+    }
+    ns = ns * 10 + (c - 48);
+    i = i + 1;
+  }
+  if ns != nsk_of(k, NSK_IPC, pid) {
+    return EACCES;
+  }
+  let nl = n - e - 1;
+  if nl > PQ_NAME_MAX {
+    return ENAMETOOLONG;
+  }
+  if comp_end(k.fs.xfer, e + 1, n) != n {
+    return EACCES;                          // a queue directory has no subdirectories
+  }
+  if vfs_lookup(&mut k.fs, n) != NO_FILE {
+    return 0;
+  }
+  let mut j = 0;
+  while j < nl
+    invariant j <= nl && e + 1 + nl == n && n <= FNAME_MAX && kok(k)
+  {
+    bset(&mut k.fs.xfer, j, bget(k.fs.xfer, e + 1 + j));
+    j = j + 1;
+  }
+  let q = pq_create(&mut k, pid, nl, mode, 0);
+  if q >= PQ_N {
+    return q;
+  }
+  mq_file_name(&mut k, q);
+  return 0;
+}
+
 /// mq_open(name, oflag, mode, attr).
 fn lx_mq_open(k: &mut Kernel, pid: u64, va: u64, oflag: u64, mode: u64, attr: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -291,6 +458,7 @@ fn lx_mq_open(k: &mut Kernel, pid: u64, va: u64, oflag: u64, mode: u64, attr: u6
     if q >= PQ_N {
       return q;
     }
+    mq_fs_add(&mut k, q);
   } else {
     let mut want = 4;
     if acc == 1 {
@@ -328,6 +496,7 @@ fn lx_mq_unlink(k: &mut Kernel, pid: u64, va: u64) -> u64
   if !cred_root(k.procs, pid) && id_get(k.procs, pid, F_UID, true) != pq_get(k, q, PW_OWN) % 0x100000000 {
     return EACCES;
   }
+  mq_fs_del(&mut k, q);
   pq_set(&mut k, q, PW_LIVE, 2);
   pq_reap(&mut k, q);
   return 0;
