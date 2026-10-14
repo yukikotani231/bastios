@@ -240,10 +240,22 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # (dynamic) BusyBox starts only inside the unpacked root.
 $(B)/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh $(B)/compat/busybox $(B)/compat/runc tools/ocipull.sh \
     $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys \
-    $(B)/compat/bastioc1 $(B)/compat/z3 $(B)/compat/tcc $(B)/compat/musl/lib/libc.a | $(B)/compat
+    $(B)/compat/bastioc1 $(B)/compat/z3 $(B)/compat/tcc $(B)/compat/musl/lib/libc.a $(B)/compat/tree-sitter-c.so | $(B)/compat
 	COMPAT_ARCH=aarch64 test/compat/alpinedisk.py $@ $(B)/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) \
 	  --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) --busybox $(B)/compat/busybox \
-	  --extra "$(BASTIO_TOOLS) $(B)/compat/runc tools/ocipull.sh $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys"
+	  --extra "$(BASTIO_TOOLS) $(B)/compat/runc tools/ocipull.sh $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys $(B)/compat/tree-sitter-c.so"
+
+# The tree-sitter C parser for Neovim, as the x86-64 suite builds it (the
+# top-level Makefile): the generated parser.c of the pinned npm package in a
+# shared object. It links to no C library: nvim in the Alpine root (musl)
+# resolves the few libc calls it makes when it loads it.
+$(B)/compat/tree-sitter-c.so: | $(B)/compat
+	rm -rf $(B)/compat/src/tree-sitter-c && mkdir -p $(B)/compat/src/tree-sitter-c
+	curl -fsSL -o $(B)/compat/src/tree-sitter-c.tgz https://registry.npmjs.org/tree-sitter-c/-/tree-sitter-c-$(TREESITTER_C_VER).tgz
+	echo "$(TREESITTER_C_SHA256)  $(B)/compat/src/tree-sitter-c.tgz" | sha256sum -c - >/dev/null
+	tar xzf $(B)/compat/src/tree-sitter-c.tgz -C $(B)/compat/src/tree-sitter-c --strip-components=1 package/src
+	$(CROSS)gcc -shared -fPIC -O2 -nostdlib -fno-stack-protector -Wl,-s -I $(B)/compat/src/tree-sitter-c/src -o $@.part $(B)/compat/src/tree-sitter-c/src/parser.c
+	mv $@.part $@
 
 # runc for the container cases: the static arm64 binary of the upstream
 # release, checked against a pinned SHA-256 (the x86-64 suite's is the

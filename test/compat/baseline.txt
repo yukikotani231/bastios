@@ -165,6 +165,18 @@ ssh: ssh: an interactive login, the shell's exit status
 ssh: ssh: an unknown key is refused
 ssh: ssh: run a command
 ssh: ssh: standard input and the exit status
+t_cloned: /proc/self/exe opens and is not sealed
+t_cloned: /proc/sys/kernel/cap_last_cap is readable and numeric
+t_cloned: F_ADD_SEALS seals it
+t_cloned: a private mapping of it is fine
+t_cloned: a writable shared mapping of the sealed memfd is EPERM
+t_cloned: a write to the sealed memfd is EPERM
+t_cloned: fexecve of the sealed memfd runs it, and its /proc/self/exe is the sealed memfd
+t_cloned: fstat of /proc/self/exe has the size
+t_cloned: ftruncate of the sealed memfd is EPERM
+t_cloned: memfd_create with sealing
+t_cloned: pwrite to the sealed memfd is EPERM
+t_cloned: sendfile copies the binary into the memfd
 t_cred: a child inherits ids; /proc/self/status shows them
 t_cred: an unprivileged process keeps to the ids it holds
 t_cred: getgrnam finds users
@@ -194,6 +206,22 @@ t_dev: unbound reads nothing
 t_dev: unbound: LOOP_GET_STATUS64 is ENXIO
 t_dev: write at the end is ENOSPC
 t_dev: write through the device
+t_devnode: a host device bound over a tmpfs file
+t_devnode: chmod by path works
+t_devnode: chmod of the bound node by path works
+t_devnode: chmod of the bound node by the directory's descriptor works
+t_devnode: chmod through /proc/self/fd of an O_PATH device node
+t_devnode: chmod through /proc/self/fd of an O_PATH regular file
+t_devnode: chown through /proc/self/fd of an O_PATH device node
+t_devnode: fchmodat by the directory's descriptor works
+t_devnode: fchownat by the directory's descriptor works
+t_devnode: mknodat makes a character device in it
+t_devnode: mount a tmpfs
+t_devnode: open the directory
+t_devnode: the bound node stats as the device
+t_devnode: the node opens and writes like /dev/null
+t_devnode: the node stats as a character device
+t_devnode: unshare a mount namespace
 t_dir: chdir
 t_dir: chdir ..
 t_dir: create file in directory
@@ -243,8 +271,18 @@ t_file: 12 open descriptors
 t_file: O_APPEND
 t_file: O_EXCL on existing
 t_file: O_RDONLY refuses write
+t_file: XATTR_CREATE of an existing name is EEXIST
+t_file: XATTR_REPLACE changes the value
+t_file: XATTR_REPLACE of a missing name is ENODATA
+t_file: a bad descriptor is EBADF
+t_file: a bad name pointer is EFAULT
+t_file: a directory keeps them too
+t_file: a missing file is ENOENT
+t_file: a name outside every namespace is EOPNOTSUPP
+t_file: a symbolic link: l- forms act on the link, others on the target
 t_file: access F_OK
 t_file: access missing
+t_file: an fd opened through a symbolic link holds the target's attributes
 t_file: chmod
 t_file: chown to self
 t_file: close
@@ -252,13 +290,22 @@ t_file: close twice is EBADF
 t_file: faccessat
 t_file: fchmod
 t_file: fdatasync
-t_file: fgetxattr unsupported
+t_file: fgetxattr reads it by descriptor
+t_file: fremovexattr removes by descriptor
+t_file: fsetxattr adds a second name
 t_file: fstat size
 t_file: fsync
 t_file: ftruncate grow
 t_file: ftruncate shrink
+t_file: getxattr into too small a buffer is ERANGE
+t_file: getxattr of what is not there is ENODATA
+t_file: getxattr reads it back
+t_file: getxattr with size 0 gives the length
 t_file: link
-t_file: listxattr empty
+t_file: listxattr into too small a buffer is ERANGE
+t_file: listxattr lists both, NUL separated
+t_file: listxattr of a fresh file is empty
+t_file: listxattr with size 0 gives the length
 t_file: lseek SEEK_CUR
 t_file: lseek SEEK_END
 t_file: lseek SEEK_SET
@@ -271,13 +318,18 @@ t_file: pwrite
 t_file: read back
 t_file: readlink
 t_file: readv
-t_file: removexattr of a missing file
+t_file: removexattr of a missing name is ENODATA
+t_file: removexattr removes one
 t_file: rename
 t_file: rename over existing
-t_file: setxattr unsupported
+t_file: setxattr stores a value
 t_file: stat
 t_file: stdio fprintf/fscanf
 t_file: symlink
+t_file: the attributes of a removed file do not come back
+t_file: they are shared by a hard link
+t_file: they follow a rename
+t_file: they stay while a name is left
 t_file: tmpfile
 t_file: truncate
 t_file: unlink
@@ -751,6 +803,16 @@ t_openat2: open of /proc/self/exe with O_NOFOLLOW is ELOOP
 t_openat2: openat2 opens a file
 t_openat2: unknown flags are EINVAL
 t_openat2: unknown resolve flags are EINVAL
+t_ovpivot: a program and a link to it in the lower layer
+t_ovpivot: unshare a mount namespace
+t_ovpivot: mount the overlay
+t_ovpivot: access finds the program before the pivot
+t_ovpivot: bind the overlay onto itself
+t_ovpivot: access still finds it
+t_ovpivot: pivot_root into it
+t_ovpivot: eaccess finds /bin/sh in the new root
+t_ovpivot: stat finds /bin/sh as a regular file
+t_ovpivot: lstat sees the link
 t_path: O_NOFOLLOW, O_NOATIME, EISDIR, rmdir of . and mkdir over a name
 t_path: a loop of links through a long path is ELOOP
 t_path: a name ending in / or /. must be a directory
@@ -843,6 +905,15 @@ t_proc: oom_score_adj above 1000 is EINVAL
 t_proc: oom_score_adj rejects text
 t_proc: oom_score_adj can be set back to 0
 t_proc: /proc/self lists oom_score_adj
+t_proc: fdinfo of a file starts at position 0
+t_proc: fdinfo follows the position
+t_proc: fdinfo flags carry O_CLOEXEC
+t_proc: fdinfo has mnt_id and ino
+t_proc: an eventfd shows its count
+t_proc: an inotify instance lists its watches
+t_proc: a pidfd shows the process
+t_proc: fdinfo lists the open descriptors
+t_proc: /proc/self lists fdinfo
 t_ptrace: PTRACE_ATTACH stops the target with SIGSTOP
 t_ptrace: PTRACE_CONT with a signal runs the handler for it
 t_ptrace: PTRACE_CONT without a signal drops the one that stopped it, and the child saw the poke
@@ -857,6 +928,11 @@ t_ptrace: a process that is not a tracee is ESRCH
 t_ptrace: a traced child stops for a signal and the tracer hears of it
 t_ptrace: a traced child stops with SIGTRAP after execve
 t_ptrace: a tracee that is running is ESRCH
+t_ptrace: PTRACE_SEIZE attaches without stopping the tracee
+t_ptrace: PTRACE_INTERRUPT stops it with PTRACE_EVENT_STOP and SIGTRAP
+t_ptrace: a seized tracee resumed with PTRACE_CONT runs to its end
+t_ptrace: a sleeping seized tracee is stopped by PTRACE_INTERRUPT
+t_ptrace: it can be resumed and then killed
 t_ptrace: attaching to itself is EPERM
 t_ptrace: attaching to what is traced already is EPERM
 t_ptrace: PTRACE_SYSCALL stops at getpid and gettid
@@ -896,6 +972,19 @@ t_pty: ttyname of the slave
 t_pty: typing echoes back, CR read as LF
 t_pty: unlockpt lets it open
 t_pty: with both ends closed its /dev/pts entry is gone
+t_ropivot: unshare a mount namespace
+t_ropivot: bind the root directory onto itself
+t_ropivot: before the pivot, remount the descriptor's path read-only
+t_ropivot: then creating a file below it is EROFS
+t_ropivot: and writable again
+t_ropivot: open the root directory O_PATH
+t_ropivot: mount /proc in it
+t_ropivot: pivot_root into it
+t_ropivot: the root directory's descriptor reads as "/"
+t_ropivot: stat of the descriptor's path is the root directory
+t_ropivot: before the remount a file can be created
+t_ropivot: remount the descriptor's path read-only
+t_ropivot: after it, creating a file is EROFS
 t_sig2: 24 processes at once
 t_sig2: SA_ONSTACK runs on the alternate stack
 t_sig2: SA_RESETHAND runs the handler once
@@ -985,6 +1074,7 @@ t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message
 t_sysv: 32 queues, semaphore sets and segments at once, the 33rd of each is ENOSPC
 t_sysv: 32 attachments in one process, the 33rd is EMFILE
+t_sysv: 512 SEM_UNDO adjustments in one process, all undone at exit
 t_sysv: GETNCNT counts a waiting process
 t_sysv: IPC_RMID ends a wait with EIDRM
 t_sysv: SEM_UNDO is undone at exit
@@ -1088,6 +1178,8 @@ alpine: nvim: tree-sitter parses help text with the vimdoc parser
 alpine: nvim: tree-sitter parses C with a parser built from the grammar, and a query finds the function names
 alpine: nvim: tree-sitter highlights C: the keyword, the type and the comment get their captures
 alpine: nvim: :diffthis marks the line that differs, and vim.diff finds the hunk
+alpine: strace: traces a program's system calls with ptrace, following the child it starts
+alpine: strace: attaches to a running process, and hears of its death when its parent is elsewhere
 alpine: nvim: LuaJIT loads a shared object that gcc built
 alpine: nvim: a plugin cloned over HTTP is on the packpath and runs at startup
 alpine: nvim: a small plugin manager in Lua clones a plugin, loads it, then updates it with git pull
@@ -1098,6 +1190,10 @@ alpine: nvim: :grep and :vimgrep fill the quickfix list
 alpine: nvim: the LSP client starts a language server, asks it for a hover and stops it
 alpine: nvim: shada and a session file survive a restart (atomic writes, rename)
 alpine: container: runc runs Alpine in new namespaces (own hostname, PID 1)
+alpine: container: crun runs the same container (own hostname, PID 1)
+alpine: container: crun: cgroup limits: the container sees the memory, pids and cpu limits crun set
+alpine: container: crun: memory.max kills a process of a container that outgrows it
+alpine: container: crun loads a seccomp filter from the config: mkdir answers EPERM, the rest runs
 alpine: container: the host keeps its hostname and no container is left behind
 alpine: container: the root file system is read-only, and the exit status comes back
 alpine: container: rootless: runc runs Alpine as an unprivileged user in a user namespace of its own

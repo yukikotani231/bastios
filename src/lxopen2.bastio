@@ -427,6 +427,28 @@ fn exe_name(k: &mut Kernel, f: u64) -> u64
   return l - 1;
 }
 
+/// The RAM file node that the program of the process behind /proc/PID/exe
+/// (pf) runs, if that file has no name any more (a memfd, or a file
+/// unlinked while it runs): NO_FILE otherwise.
+fn exe_orphan(k: &mut Kernel, pf: u64) -> u64
+  requires kok(k)
+  ensures kok(k)
+  ensures result < NFILES || result == NO_FILE
+{
+  if pf < PROC_DEV || (pf - PROC_DEV) / 16 >= NPROC {
+    return NO_FILE;
+  }
+  let prog = pget(k.procs, (pf - PROC_DEV) / 16, F_PROG);
+  if prog <= NPROGS || prog - NPROGS - 1 >= NFILES {
+    return NO_FILE;
+  }
+  let node = prog - NPROGS - 1;
+  if vfs_dirent(&mut k.fs, node) != 0 {
+    return NO_FILE;
+  }
+  return node;
+}
+
 /// The flags of the struct open_how at user address how (0 if it is not
 /// there), for inotify's IN_OPEN and IN_CREATE (src/lxinotify.bastio).
 fn how_flags(k: &mut Kernel, pid: u64, how: u64) -> u64

@@ -18,3 +18,6 @@ ALPINE_X86_PKGS ?= dxloc/alpine-cmake@sha256:fe609ae835a3b195c302adb966464b378d5
 ALPINE_DISK_PKGS ?= git,curl,less,openssh-keygen,bash,make,jq,rsync,openssl,file,libxml2-utils
 DEBIAN_IMAGE ?= library/debian@sha256:eb593cf2c358cacef45ca0a424bbc7d30cfa3466265fc2662b9466a0ca6ba1c5
 NODE_IMAGE ?= library/node@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+# The tree-sitter C parser for Neovim (npm package, pinned by version and SHA-256).
+TREESITTER_C_VER    := 0.24.1
+TREESITTER_C_SHA256 := 8e9ecd7687665d2fa1b3c07fbd1f4380b7d285850d6954629e2156e1b757451e
