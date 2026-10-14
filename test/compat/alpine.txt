@@ -233,6 +233,11 @@ add,main
 $ bb cp /disk/tree-sitter-c.so /disk/a/usr/share/nvim/runtime/parser/c.so && bb printf 'vim.cmd("enew")\nvim.api.nvim_buf_set_lines(0, 0, -1, false, {"int main(void) { return 0; } // done"})\nvim.treesitter.start(0, "c")\nvim.treesitter.get_parser(0, "c"):parse()\nlocal function cap(col) local c = vim.treesitter.get_captures_at_pos(0, 0, col) return c[1] and c[1].capture or "none" end\nio.open("/root/tsh.txt", "w"):write(cap(0), " ", cap(17), " ", cap(31), "\\n")\n' > /disk/a/root/tsh.lua && bb chroot /disk/a /usr/bin/nvim -l /root/tsh.lua >/disk/a/root/e.txt 2>&1; bb cat /disk/a/root/e.txt | bb head -n 3; bb cat /disk/a/root/tsh.txt
 type.builtin keyword.return comment
 
+== strace: traces a program's system calls with ptrace, following the child it starts
+$ bb cp /disk/strace /disk/a/usr/bin/strace && bb chroot /disk/a /bin/sh -c 'strace -f -o /root/st.txt /bin/sh -c "/bin/true; echo traced" >/dev/null 2>&1; grep -c "execve(" /root/st.txt; grep -c "write(1" /root/st.txt'
+2
+1
+
 == nvim: LuaJIT loads a shared object that gcc built
 $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf 'local ffi = require("ffi")\nffi.cdef[[int answer(void);]]\nio.open("/root/so.txt", "w"):write(ffi.load("/root/libso.so").answer(), "\\n")\n' > /disk/a/root/so.lua && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -shared -fPIC -o libso.so so.c && nvim -l so.lua >/dev/null 2>&1'; bb cat /disk/a/root/so.txt
 42

@@ -857,6 +857,9 @@ t_ptrace: a process that is not a tracee is ESRCH
 t_ptrace: a traced child stops for a signal and the tracer hears of it
 t_ptrace: a traced child stops with SIGTRAP after execve
 t_ptrace: a tracee that is running is ESRCH
+t_ptrace: PTRACE_SEIZE attaches without stopping the tracee
+t_ptrace: PTRACE_INTERRUPT stops it with PTRACE_EVENT_STOP and SIGTRAP
+t_ptrace: a seized tracee resumed with PTRACE_CONT runs to its end
 t_ptrace: attaching to itself is EPERM
 t_ptrace: attaching to what is traced already is EPERM
 t_ptrace: PTRACE_SYSCALL stops at getpid and gettid
@@ -1089,6 +1092,7 @@ alpine: nvim: tree-sitter parses help text with the vimdoc parser
 alpine: nvim: tree-sitter parses C with a parser built from the grammar, and a query finds the function names
 alpine: nvim: tree-sitter highlights C: the keyword, the type and the comment get their captures
 alpine: nvim: :diffthis marks the line that differs, and vim.diff finds the hunk
+alpine: strace: traces a program's system calls with ptrace, following the child it starts
 alpine: nvim: LuaJIT loads a shared object that gcc built
 alpine: nvim: a plugin cloned over HTTP is on the packpath and runs at startup
 alpine: nvim: a small plugin manager in Lua clones a plugin, loads it, then updates it with git pull

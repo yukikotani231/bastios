@@ -487,6 +487,19 @@ build/compat/tree-sitter-c.so: | build/compat/src
 	$(MUSLCC) -shared -fPIC -O2 -Wl,-s -I build/compat/src/tree-sitter-c/src -o $@.part build/compat/src/tree-sitter-c/src/parser.c
 	mv $@.part $@
 
+# strace, for the cases that trace a program on the Alpine disk (ptrace). Alpine's
+# package is not on the disk's repository, so this is the layer of the stagex/strace
+# image on Docker Hub (musl, linked to Alpine's libc), pinned by the layer's SHA-256.
+STRACE_LAYER := sha256:1380bf046ab307e9340c2273fdcd2b1f224d019544a8db326d5776eeac5c5525
+build/compat/strace: | build/compat/src
+	tok=$$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:stagex/strace:pull" | jq -r .token) && \
+	  curl -fsSL -H "Authorization: Bearer $$tok" -o build/compat/src/strace.tgz https://registry-1.docker.io/v2/stagex/strace/blobs/$(STRACE_LAYER)
+	echo "$(patsubst sha256:%,%,$(STRACE_LAYER))  build/compat/src/strace.tgz" | sha256sum -c - >/dev/null
+	rm -rf build/compat/src/strace && mkdir build/compat/src/strace
+	tar xzf build/compat/src/strace.tgz -C build/compat/src/strace usr/bin/strace
+	strip -o $@.part build/compat/src/strace/usr/bin/strace
+	mv $@.part $@
+
 # Dropbear, the SSH server (and its client and key tool, which also run on
 # the host: ssh.txt logs in from here). The keys are made for the test:
 # the server's host key and a client key whose public half goes in
@@ -703,10 +716,10 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # over SSH.
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh \
     build/compat/bastioc1 build/compat/z3 build/compat/tcc \
-    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/tree-sitter-c.so tools/ocipull.sh | build/compat
+    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/tree-sitter-c.so build/compat/strace tools/ocipull.sh | build/compat
 	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) $(ALPINE_X86_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) \
 	  --extra "$$(test/compat/bastiotools.sh build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)) \
-	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/tree-sitter-c.so tools/ocipull.sh"
+	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/tree-sitter-c.so build/compat/strace tools/ocipull.sh"
 
 # Debian on BastiOS, on a fifth disk (test/compat/debiandisk.py) for
 # test/compat/debian.txt: Debian's root file system, whose programs are
