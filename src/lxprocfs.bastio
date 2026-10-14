@@ -2513,7 +2513,7 @@ fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
   return put;
 }
 
-/// lseek(2) on /proc file f, open in descriptor fd: the description's offset
+/// lseek(2) on a /proc/PID/auxv file, open in descriptor fd: the description's offset
 /// moves, so a reader that seeks (a debugger reading /proc/PID/auxv in
 /// pieces) gets the part it asked for. The size is 0, as on Linux, so
 /// SEEK_END counts from the start.
