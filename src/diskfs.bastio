@@ -83,21 +83,21 @@ import "core/endian.bastio";
 import "core/bitmap.bastio";
 import "core/bytes.bastio";
 
-const DSLOTS: u64 = 32768;            // directory entries, at most (2048 directory blocks: 512 named by the superblock, the rest by extension blocks)
+const DSLOTS: u64 = 262144;           // directory entries, at most (16384 directory blocks: 512 named by the superblock, the rest by extension blocks)
 const BATCH_MAX: u64 = 32;               // blocks a batch of writes makes before it commits (disk_write)
 const OB_MAX: u64 = 40;               // blocks it replaces: at most one per block it makes, and room for a write's five
 const BATCH_TICKS: u64 = 10;          // ticks (10 ms each) a batch waits for more writes before disk_pump commits it
 const DENT: u64 = 256;
-const DIR_BYTES: u64 = 8388608;       // DSLOTS * DENT: the most the directory takes in memory
-const DIR_SECTORS: u64 = 16384;
-const DIR_BLOCKS: u64 = 2048;
+const DIR_BYTES: u64 = 67108864;      // DSLOTS * DENT: the most the directory takes in memory
+const DIR_SECTORS: u64 = 131072;
+const DIR_BLOCKS: u64 = 16384;
 const DIR_SB: u64 = 512;              // directory blocks below this are named by the superblock, the rest by extension blocks
 const EXT_PTRS: u64 = 511;            // directory blocks one extension block names (its word 0 names the next extension block)
-const EXT_MAX: u64 = 4;               // extension blocks: DIR_SB + EXT_MAX * EXT_PTRS >= DIR_BLOCKS
-const IX_CELLS: u64 = 65536;          // cells of the name index (a power of two, at least twice DSLOTS)
-const IX_BYTES: u64 = 262144;         // 4 bytes a cell: 0 empty, else entry + 1
+const EXT_MAX: u64 = 32;              // extension blocks: DIR_SB + EXT_MAX * EXT_PTRS >= DIR_BLOCKS
+const IX_CELLS: u64 = 524288;          // cells of the name index (a power of two, at least twice DSLOTS)
+const IX_BYTES: u64 = 2097152;         // 4 bytes a cell: 0 empty, else entry + 1
 const IX_MIN: u64 = 1024;             // a directory with more entries than this has the index
-const IX_MAX: u64 = 49152;            // cells in use (stale ones too) before the index is rebuilt
+const IX_MAX: u64 = 393216;           // cells in use (stale ones too) before the index is rebuilt
 const DIR_START: u64 = 8;             // the blocks of memory the directory starts with (it doubles from there)
 const DIR_FIXED: u64 = 4;             // directory blocks 0..3 are disk blocks 1..4
 const DPB: u64 = 16;                  // directory entries per block
