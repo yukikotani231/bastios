@@ -914,6 +914,13 @@ t_proc: an inotify instance lists its watches
 t_proc: a pidfd shows the process
 t_proc: fdinfo lists the open descriptors
 t_proc: /proc/self lists fdinfo
+t_proc: maps lists an anonymous mapping
+t_proc: maps lists a shared mapping with s
+t_proc: maps drops a mapping when it is unmapped
+t_proc: maps shows a PROT_NONE page with no permissions
+t_proc: maps has a [heap] after brk grows
+t_proc: maps has [stack] and [vdso]
+t_proc: maps lines end at column 74 for names
 t_ptrace: PTRACE_ATTACH stops the target with SIGSTOP
 t_ptrace: PTRACE_CONT with a signal runs the handler for it
 t_ptrace: PTRACE_CONT without a signal drops the one that stopped it, and the child saw the poke
