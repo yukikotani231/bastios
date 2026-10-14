@@ -353,6 +353,11 @@ bst_cpu_enter:
 /* uint64_t *bst_platform_ctx(void): this processor's saved user context, the
  * start of its block. It touches only %rax, so the native backend's cpu_get and
  * cpu_set (a call each, for every word of a context switch) need no frame. */
+.if CORE_CTX != 0
+.error "bst_platform_ctx_mask needs the saved context at the start of the block"
+.endif
+.global bst_platform_ctx_mask
+.set bst_platform_ctx_mask, -CORE_BLOCK     /* the native backend's inline cpu_get and cpu_set: %rsp & mask is the context */
 .global bst_platform_ctx
 bst_platform_ctx:
         mov     %rsp, %rax
