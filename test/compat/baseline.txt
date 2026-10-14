@@ -271,8 +271,18 @@ t_file: 12 open descriptors
 t_file: O_APPEND
 t_file: O_EXCL on existing
 t_file: O_RDONLY refuses write
+t_file: XATTR_CREATE of an existing name is EEXIST
+t_file: XATTR_REPLACE changes the value
+t_file: XATTR_REPLACE of a missing name is ENODATA
+t_file: a bad descriptor is EBADF
+t_file: a bad name pointer is EFAULT
+t_file: a directory keeps them too
+t_file: a missing file is ENOENT
+t_file: a name outside every namespace is EOPNOTSUPP
+t_file: a symbolic link: l- forms act on the link, others on the target
 t_file: access F_OK
 t_file: access missing
+t_file: an fd opened through a symbolic link holds the target's attributes
 t_file: chmod
 t_file: chown to self
 t_file: close
@@ -280,13 +290,22 @@ t_file: close twice is EBADF
 t_file: faccessat
 t_file: fchmod
 t_file: fdatasync
-t_file: fgetxattr unsupported
+t_file: fgetxattr reads it by descriptor
+t_file: fremovexattr removes by descriptor
+t_file: fsetxattr adds a second name
 t_file: fstat size
 t_file: fsync
 t_file: ftruncate grow
 t_file: ftruncate shrink
+t_file: getxattr into too small a buffer is ERANGE
+t_file: getxattr of what is not there is ENODATA
+t_file: getxattr reads it back
+t_file: getxattr with size 0 gives the length
 t_file: link
-t_file: listxattr empty
+t_file: listxattr into too small a buffer is ERANGE
+t_file: listxattr lists both, NUL separated
+t_file: listxattr of a fresh file is empty
+t_file: listxattr with size 0 gives the length
 t_file: lseek SEEK_CUR
 t_file: lseek SEEK_END
 t_file: lseek SEEK_SET
@@ -299,13 +318,18 @@ t_file: pwrite
 t_file: read back
 t_file: readlink
 t_file: readv
-t_file: removexattr of a missing file
+t_file: removexattr of a missing name is ENODATA
+t_file: removexattr removes one
 t_file: rename
 t_file: rename over existing
-t_file: setxattr unsupported
+t_file: setxattr stores a value
 t_file: stat
 t_file: stdio fprintf/fscanf
 t_file: symlink
+t_file: the attributes of a removed file do not come back
+t_file: they are shared by a hard link
+t_file: they follow a rename
+t_file: they stay while a name is left
 t_file: tmpfile
 t_file: truncate
 t_file: unlink
@@ -881,6 +905,15 @@ t_proc: oom_score_adj above 1000 is EINVAL
 t_proc: oom_score_adj rejects text
 t_proc: oom_score_adj can be set back to 0
 t_proc: /proc/self lists oom_score_adj
+t_proc: fdinfo of a file starts at position 0
+t_proc: fdinfo follows the position
+t_proc: fdinfo flags carry O_CLOEXEC
+t_proc: fdinfo has mnt_id and ino
+t_proc: an eventfd shows its count
+t_proc: an inotify instance lists its watches
+t_proc: a pidfd shows the process
+t_proc: fdinfo lists the open descriptors
+t_proc: /proc/self lists fdinfo
 t_ptrace: PTRACE_ATTACH stops the target with SIGSTOP
 t_ptrace: PTRACE_CONT with a signal runs the handler for it
 t_ptrace: PTRACE_CONT without a signal drops the one that stopped it, and the child saw the poke
@@ -898,6 +931,8 @@ t_ptrace: a tracee that is running is ESRCH
 t_ptrace: PTRACE_SEIZE attaches without stopping the tracee
 t_ptrace: PTRACE_INTERRUPT stops it with PTRACE_EVENT_STOP and SIGTRAP
 t_ptrace: a seized tracee resumed with PTRACE_CONT runs to its end
+t_ptrace: a sleeping seized tracee is stopped by PTRACE_INTERRUPT
+t_ptrace: it can be resumed and then killed
 t_ptrace: attaching to itself is EPERM
 t_ptrace: attaching to what is traced already is EPERM
 t_ptrace: PTRACE_SYSCALL stops at getpid and gettid
