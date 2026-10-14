@@ -13,6 +13,7 @@
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <stdint.h>
 #define ENOKEY_ 126
 #define EKEYEXPIRED_ 127
 #define EKEYREVOKED_ 128
