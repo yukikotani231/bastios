@@ -229,6 +229,10 @@ $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf
 $ bb printf 'io.open("/root/plug.txt", "w"):write(vim.g.hello_plugin or "none", "\\n")\n' > /disk/a/root/plug.lua && bb chroot /disk/a /bin/sh -lc 'd=/root/pk/pack/p/start; mkdir -p $d && git clone -q HOSTURL/repo.git $d/hello && nvim --headless --cmd "set pp^=/root/pk" -c "luafile /root/plug.lua" -c qa >/dev/null 2>&1'; bb cat /disk/a/root/plug.txt
 two
 
+== nvim: a small plugin manager in Lua clones a plugin, loads it, then updates it with git pull
+$ bb printf 'local url, dir = arg[1], "/root/pm/hello"\nlocal function git(...) return vim.system(vim.list_extend({"git"}, {...}), {text = true}):wait().code end\nlocal out = {}\nout[#out + 1] = git("clone", "-q", url, dir) == 0 and "cloned" or "clonefail"\ngit("-C", dir, "reset", "-q", "--hard", "HEAD~1")\nout[#out + 1] = vim.g.hello_plugin or "none"\nvim.opt.rtp:append(dir)\nvim.cmd("runtime plugin/hello.lua")\nout[#out + 1] = vim.g.hello_plugin or "none"\nout[#out + 1] = git("-C", dir, "pull", "-q", "--ff-only") == 0 and "pulled" or "pullfail"\nvim.cmd("runtime plugin/hello.lua")\nout[#out + 1] = vim.g.hello_plugin or "none"\nio.open("/root/pm.txt", "w"):write(table.concat(out, " "), "\\n")\n' > /disk/a/root/pm.lua && bb chroot /disk/a /bin/sh -lc 'nvim -l /root/pm.lua HOSTURL/repo.git >/dev/null 2>&1'; bb cat /disk/a/root/pm.txt
+cloned none one pulled two
+
 == nvim: vim.system runs a process and collects its output and status
 $ bb printf 'local r = vim.system({"sh", "-c", "echo out; echo err >&2; exit 3"}, {text = true}):wait()\nio.open("/root/sys.txt", "w"):write(r.code, " ", vim.trim(r.stdout), " ", vim.trim(r.stderr), "\\n")\n' > /disk/a/root/sys.lua && bb chroot /disk/a /usr/bin/nvim -l /root/sys.lua >/dev/null 2>&1; bb cat /disk/a/root/sys.txt
 3 out err
