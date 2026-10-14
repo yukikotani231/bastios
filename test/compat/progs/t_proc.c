@@ -7,6 +7,7 @@
 #include <sys/times.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <sched.h>
 
@@ -18,6 +19,34 @@ static int slurp(const char *path, char *b, int n) {
     close(fd);
     if (r >= 0) b[r] = 0;
     return r;
+}
+
+/* Walks the directory at path: every entry must stat, and the files
+ * must open for reading. Returns the number of files, or -1. */
+static int walk(const char *path, int depth) {
+    DIR *d = opendir(path);
+    struct dirent *e;
+    int n = 0;
+    if (!d || depth > 8) return -1;
+    while ((e = readdir(d))) {
+        char sub[600];
+        struct stat sb;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        snprintf(sub, sizeof sub, "%s/%s", path, e->d_name);
+        if (stat(sub, &sb) != 0) { n = -1; break; }
+        if (S_ISDIR(sb.st_mode)) {
+            int m = walk(sub, depth + 1);
+            if (m < 0) { n = -1; break; }
+            n += m;
+        } else {
+            int fd = open(sub, O_RDONLY);
+            if (fd < 0) { n = -1; break; }
+            close(fd);
+            n++;
+        }
+    }
+    closedir(d);
+    return n;
 }
 
 /* Writes s to a new file at path. */
@@ -142,6 +171,42 @@ int main(int argc, char **argv) {
         EXPECT("a sysctl number rejects text", ({ int fd = open("/proc/sys/vm/swappiness", O_WRONLY); int r = fd < 0 ? 0 : (write(fd, "x\n", 2) == -1 && errno == EINVAL); if (fd >= 0) close(fd); r; }));
         EXPECT("a read-only sysctl is not opened for writing", open("/proc/sys/fs/file-nr", O_WRONLY) == -1);
         EXPECT("a sysctl file is a regular file", ({ struct stat sb; stat("/proc/sys/vm/swappiness", &sb) == 0 && S_ISREG(sb.st_mode) && (sb.st_mode & 0777) == 0644; }));
+    }
+    {
+        /* /proc/sys lists, and everything it lists opens. */
+        struct stat sb;
+        DIR *d = opendir("/proc");
+        struct dirent *e;
+        int seen = 0;
+        while (d && (e = readdir(d))) if (!strcmp(e->d_name, "sys")) seen = 1;
+        if (d) closedir(d);
+        EXPECT("/proc lists sys", seen);
+        EXPECT("/proc/sys is a directory", stat("/proc/sys", &sb) == 0 && S_ISDIR(sb.st_mode));
+        EXPECT("/proc/sys/net/core is a directory", stat("/proc/sys/net/core", &sb) == 0 && S_ISDIR(sb.st_mode));
+        EXPECT("a directory under /proc/sys that is not there is ENOENT", stat("/proc/sys/nosuch", &sb) == -1 && errno == ENOENT);
+        EXPECT("every file listed under /proc/sys opens", walk("/proc/sys", 0) >= 60);
+        d = opendir("/proc/sys/vm");
+        seen = 0;
+        while (d && (e = readdir(d))) if (!strcmp(e->d_name, "swappiness")) seen = 1;
+        if (d) closedir(d);
+        EXPECT("/proc/sys/vm lists swappiness", seen);
+    }
+    {
+        /* The /proc/PID files with fixed answers, and oom_score_adj, which
+         * is kept per process and inherited. */
+        char b[64];
+        EXPECT("oom_score reads 0", slurp("/proc/self/oom_score", b, sizeof b) > 0 && strcmp(b, "0\n") == 0);
+        EXPECT("oom_score_adj starts at 0", slurp("/proc/self/oom_score_adj", b, sizeof b) > 0 && strcmp(b, "0\n") == 0);
+        EXPECT("loginuid is unset", slurp("/proc/self/loginuid", b, sizeof b) > 0 && strcmp(b, "4294967295\n") == 0);
+        EXPECT("coredump_filter reads its default", slurp("/proc/self/coredump_filter", b, sizeof b) > 0 && strcmp(b, "00000033\n") == 0);
+        EXPECT("cpuset is the root", slurp("/proc/self/cpuset", b, sizeof b) > 0 && strcmp(b, "/\n") == 0);
+        EXPECT("oom_score_adj reads back a negative value", put("/proc/self/oom_score_adj", "-500\n") && slurp("/proc/self/oom_score_adj", b, sizeof b) > 0 && strcmp(b, "-500\n") == 0);
+        EXPECT("a child inherits oom_score_adj", (p = fork()) >= 0 && (p == 0 ? (_exit(slurp("/proc/self/oom_score_adj", b, sizeof b) > 0 && strcmp(b, "-500\n") == 0 ? 0 : 1), 0) :
+            waitpid(p, &st, 0) == p && WIFEXITED(st) && WEXITSTATUS(st) == 0));
+        EXPECT("oom_score_adj above 1000 is EINVAL", ({ int fd = open("/proc/self/oom_score_adj", O_WRONLY); int r = fd < 0 ? 0 : (write(fd, "1001\n", 5) == -1 && errno == EINVAL); if (fd >= 0) close(fd); r; }));
+        EXPECT("oom_score_adj rejects text", ({ int fd = open("/proc/self/oom_score_adj", O_WRONLY); int r = fd < 0 ? 0 : (write(fd, "x\n", 2) == -1 && errno == EINVAL); if (fd >= 0) close(fd); r; }));
+        EXPECT("oom_score_adj can be set back to 0", put("/proc/self/oom_score_adj", "0\n") && slurp("/proc/self/oom_score_adj", b, sizeof b) > 0 && strcmp(b, "0\n") == 0);
+        EXPECT("/proc/self lists oom_score_adj", ({ DIR *d = opendir("/proc/self"); struct dirent *e; int seen = 0; while (d && (e = readdir(d))) if (!strcmp(e->d_name, "oom_score_adj")) seen = 1; if (d) closedir(d); seen; }));
     }
     return done();
 }
