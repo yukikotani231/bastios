@@ -307,6 +307,10 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   let mut done = 0;
   let mut sent = false;
   let mut stop = false;
+  let mut before = 0;                       // the bytes queued ahead of this message
+  if tx < UX_N {
+    before = smaller(uc_get(k, tx, 1), UX_CAP);
+  }
   let mut i = 0;
   while i < cnt && !stop
     invariant i <= cnt && cnt <= 1024 && kok(k)
@@ -343,6 +347,7 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   if pass < OFD_N && tx < UX_N && sent && of_get(k.ofd, pass, 0) != OF_FREE && refs < 0xFFFFFFFF {
     of_set(&mut k.ofd, pass, 1, refs + 1);  // the message's reference
     uc_set_fly(&mut k, tx, pass + 1);
+    uc_set_off(&mut k, tx, before);
     rights_more(&mut k, pid, ctl, tx);
   }
   if pass == RIGHTS_CONSOLE && tx < UX_N && sent {
@@ -351,6 +356,7 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
     let h = ofd_new(&mut k, OF_CONSOLE, 0);
     if h < OFD_N {
       uc_set_fly(&mut k, tx, h + 1);
+      uc_set_off(&mut k, tx, before);
     }
   }
   return done;
@@ -387,12 +393,17 @@ fn lx_recvmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   // drop it; it goes back if no bytes come.
   let mut rx = UX_N;
   let mut fly = 0;
+  let mut held = false;                     // bytes sent before the descriptions come first
   if unix && !peek {
     let u = ux_look(k, pid, fd);
     if u.err == 0 && u.mode == UM_CONN {
       rx = u.x % UX_N;
-      fly = uc_fly(k, rx);
-      uc_set_fly(&mut k, rx, 0);
+      if uc_fly(k, rx) != 0 && uc_off(k, rx) > 0 {
+        held = true;
+      } else {
+        fly = uc_fly(k, rx);
+        uc_set_fly(&mut k, rx, 0);
+      }
     }
   }
   let mut namep = 0;
@@ -428,7 +439,7 @@ fn lx_recvmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
         } else {
           got = true;
           done = sat_add(done, smaller(r, len));
-          stop = r < len || dgram || peek || r == 0;
+          stop = r < len || dgram || peek || r == 0 || held;
         }
       }
       i = i + 1;
