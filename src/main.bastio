@@ -57,6 +57,7 @@ import "lxmq.bastio";
 import "lxsys.bastio";
 import "lxlock.bastio";
 import "lxowner.bastio";
+import "lxsysctl.bastio";
 import "lxprocfs.bastio";
 import "lxprctl.bastio";
 import "lxrlimit.bastio";
