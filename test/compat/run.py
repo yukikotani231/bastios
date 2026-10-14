@@ -367,11 +367,12 @@ class Guest:
         while len(self.out) == echoed and time.time() < deadline:
             self.read_until(b"\x00never", echoed, 0.2)
         time.sleep(0.5)
+        typed = len(self.out)
         for k in keys:
             self.send(k)
+            typed = len(self.out)
             time.sleep(0.4)
             self.settle(1.0, 15)
-        typed = len(self.out)
         # Back at the shell: the marker and a prompt, or a prompt on a line
         # of its own if a Ctrl-C the program took also cut the shell's list
         # short (as ash does on Linux).
