@@ -362,6 +362,10 @@ sub/b.txt:1
 2
 banana
 
+== nvim: :make reads gcc's error into the quickfix list and :cc jumps to its line
+$ bb printf 'int main(void) {\n  return undefined_var;\n}\n' > /disk/a/root/bad.c && bb printf 'vim.o.makeprg = "gcc -c /root/bad.c -o /dev/null"\nvim.cmd("silent make")\nlocal at, e\nfor i, x in ipairs(vim.fn.getqflist()) do if x.valid == 1 then at, e = i, x break end end\nvim.cmd("cc " .. at)\nio.open("/root/qf.txt", "w"):write(e.lnum, " ", vim.fn.line("."), " ", vim.fn.fnamemodify(vim.fn.bufname(vim.fn.bufnr()), ":t"), "\\n")\n' > /disk/a/root/qf.lua && bb chroot /disk/a /bin/sh -c 'cd /root && nvim -l /root/qf.lua >/dev/null 2>&1'; bb cat /disk/a/root/qf.txt
+2 2 bad.c
+
 == nvim: :grep with ripgrep fills the quickfix list
 $ bb chroot /disk/a /usr/bin/nvim --headless -u NONE -c 'set grepprg=rg\ --vimgrep' -c 'silent grep needle /root/rgp' -c 'call writefile([len(getqflist()) . " " . join(sort(map(getqflist(), "fnamemodify(bufname(v:val.bufnr), \":t\")")), ",")], "/root/rg.txt")' -c 'qa!' >/dev/null 2>&1; bb cat /disk/a/root/rg.txt
 2 a.txt,b.txt
