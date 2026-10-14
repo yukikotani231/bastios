@@ -1236,7 +1236,7 @@ alpine: nvim: tree-sitter highlights C: the keyword, the type and the comment ge
 alpine: nvim: :diffthis marks the line that differs, and vim.diff finds the hunk
 alpine: strace: traces a program's system calls with ptrace, following the child it starts
 alpine: strace: attaches to a running process, and hears of its death when its parent is elsewhere
-alpine: gdb: a breakpoint in a program stops it, shows its arguments and backtrace, and finish gives the return value
+alpine: gdb: a breakpoint in a PIE program stops it, shows its arguments and backtrace, and finish gives the return value
 alpine: nvim: LuaJIT loads a shared object that gcc built
 alpine: nvim: a plugin cloned over HTTP is on the packpath and runs at startup
 alpine: nvim: a small plugin manager in Lua clones a plugin, loads it, then updates it with git pull
