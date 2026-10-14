@@ -548,6 +548,7 @@ const TS_STEP: u64 = 16;               // PTRACE_SINGLESTEP: the trap flag is se
 const TS_CUT: u64 = 64;                // stopped after a call that waited and a signal cut short: the stop for that signal follows
 const TS_TRAP: u64 = 262144;           // the SIGTRAP of this stop is a single step's (PTRACE_GETSIGINFO says TRAP_TRACE, not a breakpoint)
 const TS_BRK: u64 = 524288;            // the SIGTRAP of this stop is a breakpoint instruction's (SI_KERNEL)
+const TS_SECC: u64 = 128;              // the stop before a call is a seccomp event (SECCOMP_RET_TRACE), reported as one
 const TS_OWE: u64 = 32;                // an event stop came before the stop after a system call: the tracer is owed that one
 const TS_NR: u64 = 256;                // times a number below 1024
 const TS_EV: u64 = 1048576;            // times the event of the stop (PTRACE_EVENT_*, below 16)
