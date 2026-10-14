@@ -938,6 +938,10 @@ t_ptrace: a tracee that is running is ESRCH
 t_ptrace: PTRACE_SEIZE attaches without stopping the tracee
 t_ptrace: PTRACE_INTERRUPT stops it with PTRACE_EVENT_STOP and SIGTRAP
 t_ptrace: a seized tracee resumed with PTRACE_CONT runs to its end
+t_ptrace: SECCOMP_RET_TRACE stops the tracee with PTRACE_EVENT_SECCOMP and the filter's data
+t_ptrace: the call runs once the tracer goes on, and the filter is not asked again
+t_ptrace: SECCOMP_RET_TRACE with a tracer that did not ask for it is ENOSYS
+t_ptrace: and without a tracer
 t_ptrace: a sleeping seized tracee is stopped by PTRACE_INTERRUPT
 t_ptrace: it can be resumed and then killed
 t_ptrace: attaching to itself is EPERM
