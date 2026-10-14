@@ -1,14 +1,30 @@
-// Extended attributes: no file system here keeps them. setxattr,
-// getxattr and removexattr (and their l- and f- forms) find the file and
-// then fail with -EOPNOTSUPP, as Linux does on a file system without
-// extended attributes; listxattr finds none. Programs and test suites
-// (LTP) take EOPNOTSUPP to mean "not supported here" and skip.
+// Extended attributes, kept in memory. No file system here stores them, so
+// they live in a small table keyed by the file layer handle of the file
+// (the handle names the file, not the path: a hard link or a rename does
+// not lose them). XA_N attributes in all, each a name of at most
+// XA_NAME - 1 bytes and a value of at most XA_VAL bytes; the table is
+// emptied by a reboot like the files are not, so it is a stand-in, not
+// persistence. A handle's attributes go with its last name (xa_gone, called
+// from ino_gone in src/lxinotify.bastio).
+//
+// setxattr, getxattr, listxattr and removexattr and their l- and f- forms.
+// Names must begin with user., trusted., security. or system. (anything
+// else: EOPNOTSUPP, as on Linux); trusted. needs root; changing an
+// attribute needs the owner or root. A file that keeps no metadata ("/",
+// /bin, the built-in programs) cannot hold any: EOPNOTSUPP to set,
+// ENODATA to read.
 
 import "lxmisc.bastio";
 
 const LX_SETXATTR: u64 = 188;            // 188 .. 199: set, get, list,
 const LX_FREMOVEXATTR: u64 = 199;        // remove, each as path, l-path, fd
 const EOPNOTSUPP_X: u64 = 18446744073709551521;  // 2^64 - 95
+const ENODATA_X: u64 = 18446744073709551555;     // 2^64 - 61
+const XA_N: u64 = 32;                    // attributes in the table (SYS_XA, XAB in src/proc.bastio)
+const XA_ROW: u64 = 320;                 // bytes per attribute in k.mstr from XAB: name, then value
+const XA_NAME: u64 = 64;                 // name bytes (with a NUL, for listxattr)
+const XA_VAL: u64 = 256;                 // the most value bytes
+const XA_VOFF: u64 = 64;                 // where the value starts in a row
 
 fn is_xattr_call(n: u64) -> bool
   ensures result == (n >= LX_SETXATTR && n <= LX_FREMOVEXATTR)
@@ -16,24 +32,388 @@ fn is_xattr_call(n: u64) -> bool
   return n >= LX_SETXATTR && n <= LX_FREMOVEXATTR;
 }
 
-/// System call n (188 .. 199) of process pid; a is the path or the fd.
-fn lx_xattr_call(k: &mut Kernel, pid: u64, n: u64, a: u64) -> u64
+/// Handle h's attribute called nm (nl bytes), or XA_N.
+fn xa_find(k: &Kernel, h: u64, nm: &Bytes, nl: u64) -> u64
+  requires kok(k) && h < HFILES && nl < XA_NAME && nl <= blen(nm)
+  ensures result <= XA_N
+{
+  let mut e = 0;
+  while e < XA_N
+    invariant e <= XA_N && kok(k)
+  {
+    if get(k.sys, SYS_XA + 3 * e) == h + 1 && get(k.sys, SYS_XA + 3 * e + 1) == nl {
+      let mut same = true;
+      let mut i = 0;
+      while i < nl
+        invariant i <= nl && nl < XA_NAME && e < XA_N && nl <= blen(nm) && kok(k)
+      {
+        if bget(k.mstr, XAB + e * XA_ROW + i) != bget(nm, i) {
+          same = false;
+        }
+        i = i + 1;
+      }
+      if same {
+        return e;
+      }
+    }
+    e = e + 1;
+  }
+  return XA_N;
+}
+
+const XA_COUNT: u64 = SYS_XA + 3 * XA_N;   // the word that counts the entries in use
+
+/// Is any attribute kept? While one is, src/lxinotify.bastio follows the
+/// calls that remove names even with no inotify watch, so that xa_gone
+/// hears of every file that goes (a new file may reuse its handle).
+fn xa_any(k: &Kernel) -> bool
+  requires kok(k)
+{
+  return get(k.sys, XA_COUNT) != 0;
+}
+
+/// Entry e is free.
+fn xa_free(k: &mut Kernel, e: u64)
+  requires kok(k) && e < XA_N
+  ensures kok(k)
+{
+  if get(k.sys, SYS_XA + 3 * e) != 0 {
+    k.sys = set(k.sys, SYS_XA + 3 * e, 0);
+    let c = get(k.sys, XA_COUNT);
+    if c > 0 {
+      k.sys = set(k.sys, XA_COUNT, c - 1);
+    }
+  }
+}
+
+/// Every attribute goes: a file system was unmounted, and its files went
+/// without a word.
+fn xa_clear(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut e = 0;
+  while e < XA_N
+    invariant e <= XA_N && kok(k)
+  {
+    xa_free(&mut k, e);
+    e = e + 1;
+  }
+}
+
+/// Handle h is gone: its attributes go.
+fn xa_gone(k: &mut Kernel, h: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if h >= HFILES {
+    return;
+  }
+  let mut e = 0;
+  while e < XA_N
+    invariant e <= XA_N && kok(k)
+  {
+    if get(k.sys, SYS_XA + 3 * e) == h + 1 {
+      xa_free(&mut k, e);
+    }
+    e = e + 1;
+  }
+}
+
+/// The name at user address va into a new buffer, its length in k.perr-free
+/// form: returns the length (below XA_NAME), or NO_RESULT for a bad address,
+/// or ERANGE when the name is too long. One byte at a time, so a name that
+/// ends just before an unmapped page reads.
+fn xa_name_in(k: &mut Kernel, pid: u64, va: u64, nm: &mut Bytes) -> u64
+  requires kok(k) && pid < NPROC && blen(nm) >= XA_NAME
+  ensures kok(k)
+  ensures result < XA_NAME || result == NO_RESULT || result == ERANGE
+{
+  if va >= 0x800000000000 {
+    return NO_RESULT;                    // not a user address
+  }
+  let mut i = 0;
+  while i < XA_NAME
+    invariant i <= XA_NAME && blen(nm) >= XA_NAME && va < 0x800000000000 && kok(k)
+  {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + i, &mut k.fs.xfer, 1) != 1 {
+      return NO_RESULT;
+    }
+    let c = bget(k.fs.xfer, 0);
+    if c == 0 {
+      return i;
+    }
+    bset(&mut nm, i, c);
+    i = i + 1;
+  }
+  return ERANGE;
+}
+
+/// Is nm (nl bytes) in a namespace we know? 1 user., 2 trusted.,
+/// 3 security., 4 system.; 0 none.
+fn xa_space(nm: &Bytes, nl: u64) -> u64
+  requires nl < XA_NAME && nl <= blen(nm)
+  ensures result <= 4
+{
+  if nl >= 5 && bget(nm, 0) == 117 && bget(nm, 1) == 115 && bget(nm, 2) == 101 && bget(nm, 3) == 114 && bget(nm, 4) == 46 {
+    return 1;
+  }
+  if nl >= 8 && bget(nm, 0) == 116 && bget(nm, 1) == 114 && bget(nm, 2) == 117 && bget(nm, 3) == 115 && bget(nm, 4) == 116 && bget(nm, 5) == 101 && bget(nm, 6) == 100 && bget(nm, 7) == 46 {
+    return 2;
+  }
+  if nl >= 9 && bget(nm, 0) == 115 && bget(nm, 1) == 101 && bget(nm, 2) == 99 && bget(nm, 3) == 117 && bget(nm, 4) == 114 && bget(nm, 5) == 105 && bget(nm, 6) == 116 && bget(nm, 7) == 121 && bget(nm, 8) == 46 {
+    return 3;
+  }
+  if nl >= 7 && bget(nm, 0) == 115 && bget(nm, 1) == 121 && bget(nm, 2) == 115 && bget(nm, 3) == 116 && bget(nm, 4) == 101 && bget(nm, 5) == 109 && bget(nm, 6) == 46 {
+    return 4;
+  }
+  return 0;
+}
+
+/// The handle form `form` (0 path, 1 path without following links, 2 fd)
+/// names: a file layer handle, HFILES, or NO_RESULT (k.perr says why).
+fn xa_target(k: &mut Kernel, pid: u64, form: u64, a: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if form == 2 {
+    return fd_handle(&mut k, pid, a);
+  }
+  return meta_target_at(&mut k, pid, AT_FDCWD, a, form == 0);
+}
+
+/// setxattr: handle h (from xa_target), name nm of nl bytes, vl value bytes
+/// at user address va, flags (XATTR_CREATE 1, XATTR_REPLACE 2).
+fn xa_set(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64, va: u64, vl: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC && nl < XA_NAME && nl <= blen(nm)
+  ensures kok(k)
+{
+  if flags > 3 || flags == 3 {
+    return EINVAL;
+  }
+  let sp = xa_space(nm, nl);
+  if sp == 0 {
+    return EOPNOTSUPP_X;
+  }
+  if h >= HFILES {
+    return EOPNOTSUPP_X;
+  }
+  if vl > 65536 {
+    return E2BIG;                         // XATTR_SIZE_MAX
+  }
+  if vl > XA_VAL {
+    return ENOSPC;                        // more than the table holds
+  }
+  let uid = fs_id(k.procs, pid, false);
+  if sp == 2 && uid != 0 {
+    return EPERM;
+  }
+  let m = vfs_meta(&mut k.fs, h);
+  if !owns(k.procs, pid, m.own) {
+    return EPERM;
+  }
+  let t = m.mode % 65536 / 4096 * 4096;
+  if sp == 1 && (t == T_LINK || t == T_FIFO || t == T_CHR || t == T_BLK || t == T_SOCK) {
+    return EPERM;                         // user. attributes are for files and directories only
+  }
+  let mut e = xa_find(k, h, nm, nl);
+  if e < XA_N && flags == 1 {
+    return EEXIST;
+  }
+  if e == XA_N && flags == 2 {
+    return ENODATA_X;
+  }
+  if vl > 0 && copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, vl) != vl {
+    return EFAULT;
+  }
+  if e == XA_N {
+    let mut f = 0;
+    while f < XA_N && e == XA_N
+      invariant f <= XA_N && kok(k)
+    {
+      if get(k.sys, SYS_XA + 3 * f) == 0 {
+        e = f;
+      }
+      f = f + 1;
+    }
+    if e == XA_N {
+      return ENOSPC;
+    }
+  }
+  if e < XA_N {
+    let mut i = 0;
+    while i < nl
+      invariant i <= nl && nl < XA_NAME && e < XA_N && nl <= blen(nm) && kok(k)
+    {
+      bset(&mut k.mstr, XAB + e * XA_ROW + i, bget(nm, i));
+      i = i + 1;
+    }
+    let mut j = 0;
+    while j < vl
+      invariant j <= vl && vl <= XA_VAL && e < XA_N && kok(k)
+    {
+      bset(&mut k.mstr, XAB + e * XA_ROW + XA_VOFF + j, bget(k.fs.xfer, j));
+      j = j + 1;
+    }
+    if get(k.sys, SYS_XA + 3 * e) == 0 && get(k.sys, XA_COUNT) < XA_N {
+      k.sys = set(k.sys, XA_COUNT, get(k.sys, XA_COUNT) + 1);
+    }
+    k.sys = set(k.sys, SYS_XA + 3 * e, h + 1);
+    k.sys = set(k.sys, SYS_XA + 3 * e + 1, nl);
+    k.sys = set(k.sys, SYS_XA + 3 * e + 2, vl);
+  }
+  return 0;
+}
+
+/// getxattr: the value of nm on h into user address va (size bytes), or
+/// its length if size is 0.
+fn xa_get(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64, va: u64, size: u64) -> u64
+  requires kok(k) && pid < NPROC && nl < XA_NAME && nl <= blen(nm)
+  ensures kok(k)
+{
+  if xa_space(nm, nl) == 0 {
+    return EOPNOTSUPP_X;
+  }
+  if h >= HFILES {
+    return ENODATA_X;
+  }
+  let e = xa_find(k, h, nm, nl);
+  if e >= XA_N {
+    return ENODATA_X;
+  }
+  let vl = get(k.sys, SYS_XA + 3 * e + 2);
+  if vl > XA_VAL {
+    return ENODATA_X;
+  }
+  if size == 0 {
+    return vl;
+  }
+  if size < vl {
+    return ERANGE;
+  }
+  let mut j = 0;
+  while j < vl
+    invariant j <= vl && vl <= XA_VAL && e < XA_N && kok(k)
+  {
+    bset(&mut k.fs.xfer, j, bget(k.mstr, XAB + e * XA_ROW + XA_VOFF + j));
+    j = j + 1;
+  }
+  if vl > 0 && copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, vl) != vl {
+    return EFAULT;
+  }
+  return vl;
+}
+
+/// listxattr: h's names, each followed by a NUL, to user address va (size
+/// bytes), or their total length if size is 0.
+fn xa_list(k: &mut Kernel, pid: u64, h: u64, va: u64, size: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if h >= HFILES {
+    return 0;
+  }
+  let mut total = 0;
+  let mut e = 0;
+  while e < XA_N
+    invariant e <= XA_N && total <= e * XA_NAME && kok(k)
+  {
+    if get(k.sys, SYS_XA + 3 * e) == h + 1 {
+      let nl = get(k.sys, SYS_XA + 3 * e + 1);
+      if nl < XA_NAME {
+        let mut i = 0;
+        while i < nl
+          invariant i <= nl && nl < XA_NAME && total + nl < XFER && e < XA_N && kok(k)
+        {
+          bset(&mut k.fs.xfer, total + i, bget(k.mstr, XAB + e * XA_ROW + i));
+          i = i + 1;
+        }
+        bset(&mut k.fs.xfer, total + nl, 0);
+        total = total + nl + 1;
+      }
+    }
+    e = e + 1;
+  }
+  if size == 0 {
+    return total;
+  }
+  if size < total {
+    return ERANGE;
+  }
+  if total > 0 && copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, total) != total {
+    return EFAULT;
+  }
+  return total;
+}
+
+/// removexattr.
+fn xa_remove(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64) -> u64
+  requires kok(k) && pid < NPROC && nl < XA_NAME && nl <= blen(nm)
+  ensures kok(k)
+{
+  let sp = xa_space(nm, nl);
+  if sp == 0 {
+    return EOPNOTSUPP_X;
+  }
+  if h >= HFILES {
+    return EOPNOTSUPP_X;
+  }
+  if sp == 2 && fs_id(k.procs, pid, false) != 0 {
+    return EPERM;
+  }
+  let m = vfs_meta(&mut k.fs, h);
+  if !owns(k.procs, pid, m.own) {
+    return EPERM;
+  }
+  let e = xa_find(k, h, nm, nl);
+  if e >= XA_N {
+    return ENODATA_X;
+  }
+  xa_free(&mut k, e);
+  return 0;
+}
+
+/// System call n (188 .. 199) of process pid: a is the path or the fd, b..e
+/// the next arguments (rsi, rdx, r10, r8).
+fn lx_xattr_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64
   requires kok(k) && pid < NPROC && n >= LX_SETXATTR
   ensures kok(k)
 {
   let form = (n - LX_SETXATTR) % 3;       // 0 path, 1 path without following links, 2 fd
   let call = (n - LX_SETXATTR) / 3;       // 0 set, 1 get, 2 list, 3 remove
   let mut r = 0;
-  if form == 2 {
-    let d = fd_look(k, pid, a);
-    if d.kind == K_BAD {
-      r = EBADF;
+  let h = xa_target(&mut k, pid, form, a);
+  if h == NO_RESULT {
+    r = k.perr;
+    // Reading in a read-only mount finds what is there: here, nothing.
+    if r == EROFS && call == 2 {
+      r = 0;
+    } else if r == EROFS && call == 1 {
+      r = ENODATA_X;
     }
+  } else if call == 2 {
+    r = xa_list(&mut k, pid, h, b, c);
+  } else if call == 0 && form == 2 && handle_ro(&mut k, h) {
+    r = EROFS;
+  } else if call == 3 && form == 2 && handle_ro(&mut k, h) {
+    r = EROFS;
   } else {
-    r = lx_stat(&mut k, pid, AT_FDCWD, a, 0, form == 0);   // the l- forms: the link itself
-  }
-  if r == 0 && call != 2 {
-    r = EOPNOTSUPP_X;
+    let mut nm = balloc(XA_NAME);
+    let nl = xa_name_in(&mut k, pid, b, &mut nm);
+    if nl == NO_RESULT {
+      r = EFAULT;
+    } else if nl == ERANGE {
+      r = ERANGE;
+    } else if nl == 0 {
+      r = ERANGE;                          // an empty name
+    } else if call == 0 {
+      r = xa_set(&mut k, pid, h, nm, nl, c, d, e);
+    } else if call == 1 {
+      r = xa_get(&mut k, pid, h, nm, nl, c, d);
+    } else {
+      r = xa_remove(&mut k, pid, h, nm, nl);
+    }
+    bfree(nm);
   }
   ret(&mut k.procs, pid, r);
   return KEEP;
