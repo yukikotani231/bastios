@@ -8,7 +8,7 @@
 import "ramfs.bastio";
 import "bio.bastio";
 
-const LOOP_SECTORS_MAX: u64 = 131072;    // FILE_MAX / 512
+const LOOP_SECTORS_MAX: u64 = 2097152;   // FILE_MAX / 512
 
 struct LoopDev {
   pages: Vec[Slot],     // the file's pages, none a hole
