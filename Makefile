@@ -511,19 +511,31 @@ build/compat/strace: | build/compat/src
 	mv $@.part $@
 
 # gdb, for the cases that debug a program on the Alpine disk (ptrace, breakpoints).
-# Alpine's package is not on the disk's repository, so this is the layer of the
-# sdemos/gdb image on Docker Hub (gdb 8, musl), pinned by the layer's SHA-256. It
-# comes with the libraries Alpine's root has other versions of (readline 7), so
-# they ship beside it in one tar, /disk/gdb.tar, to unpack under the root's /opt.
-GDB_LAYER := sha256:f647f910b52b912d3903996992f8b0ad5a9b0c3a6fcca693d85174451ffe706c
+# Alpine's package is not on the disk's repository, so this is the two layers of
+# the bellsoft/alpaquita-linux-gdb:16.3-musl image on Docker Hub (musl, amd64),
+# pinned by SHA-256. gdb links against more libraries than the disk's root has
+# (Python 3.14 among them) and Alpaquita's musl, which runs the ifunc relocations
+# some of them use (Alpine's does not), so everything it needs goes in one tar,
+# /disk/gdb.tar, to unpack under the root's /opt: gdb/bin/gdb, gdb/lib (the
+# libraries, Alpaquita's loader, and Python's standard library) and gdb/share/gdb.
+# gdb runs through that loader.
+GDB_REPO := bellsoft/alpaquita-linux-gdb
+GDB_LAYERS := sha256:0b9b7727f90001f8d1eaeff1db88899575254b37875d1ab6fd10af2703ef09cb sha256:a0a525c37b15c2d2ed38a49cdcfb5732d0f58624520f6175518770db3dbecdb8
+GDB_LIBS := libexpat.so.1 liblzma.so.5 libreadline.so.8 libz.so.1 libzstd.so.1 libncursesw.so.6 libpython3.14.so.1.0 libmpfr.so.6 libgmp.so.10 libdebuginfod.so.1 libstdc++.so.6 libgcc_s.so.1 libcurl.so.4 libelf.so.1 libfts.so.0 libjson-c.so.5 libbrotlicommon.so.1 libbrotlidec.so.1 libcares.so.2 libidn2.so.0 libnghttp2.so.14 libpsl.so.5 libssl.so.3 libcrypto.so.3 libunistring.so.5
 build/compat/gdb.tar: | build/compat/src
-	tok=$$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:sdemos/gdb:pull" | jq -r .token) && \
-	  curl -fsSL -H "Authorization: Bearer $$tok" -o build/compat/src/gdb.tgz https://registry-1.docker.io/v2/sdemos/gdb/blobs/$(GDB_LAYER)
-	echo "$(patsubst sha256:%,%,$(GDB_LAYER))  build/compat/src/gdb.tgz" | sha256sum -c - >/dev/null
-	rm -rf build/compat/src/gdb && mkdir -p build/compat/src/gdb/gdb/bin build/compat/src/gdb/gdb/lib
-	tar xzf build/compat/src/gdb.tgz -C build/compat/src/gdb usr/bin/gdb usr/lib/libreadline.so.7.0 usr/lib/libncursesw.so.6.0 usr/lib/libexpat.so.1.6.7
-	strip -o build/compat/src/gdb/gdb/bin/gdb build/compat/src/gdb/usr/bin/gdb
-	cd build/compat/src/gdb/usr/lib && cp libreadline.so.7.0 ../../gdb/lib/libreadline.so.7 && cp libncursesw.so.6.0 ../../gdb/lib/libncursesw.so.6 && cp libexpat.so.1.6.7 ../../gdb/lib/libexpat.so.1
+	rm -rf build/compat/src/gdb && mkdir -p build/compat/src/gdb/all build/compat/src/gdb/gdb/bin build/compat/src/gdb/gdb/lib
+	tok=$$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:$(GDB_REPO):pull" | jq -r .token) && \
+	for d in $(GDB_LAYERS); do \
+	  curl -fsSL -H "Authorization: Bearer $$tok" -o build/compat/src/gdb/layer.tgz https://registry-1.docker.io/v2/$(GDB_REPO)/blobs/$$d && \
+	  echo "$${d#sha256:}  build/compat/src/gdb/layer.tgz" | sha256sum -c - >/dev/null && \
+	  tar xzf build/compat/src/gdb/layer.tgz -C build/compat/src/gdb/all --exclude='dev/*' --no-same-owner || exit 1; \
+	done
+	cd build/compat/src/gdb && cp all/usr/bin/gdb gdb/bin/gdb && cp all/lib/ld-musl-x86_64.so.1 gdb/lib/ld-musl-x86_64.so.1 && ln -s ld-musl-x86_64.so.1 gdb/lib/libc.musl-x86_64.so.1 && \
+	  for l in $(GDB_LIBS); do cp -L all/usr/lib/$$l gdb/lib/$$l || exit 1; done && \
+	  cp -r all/usr/lib/python3.14 gdb/lib/python3.14 && cp -r all/usr/share/gdb gdb/share_gdb && mkdir gdb/share && mv gdb/share_gdb gdb/share/gdb && \
+	  rm -rf gdb/lib/python3.14/test gdb/lib/python3.14/idlelib gdb/lib/python3.14/tkinter gdb/lib/python3.14/turtledemo gdb/lib/python3.14/ensurepip gdb/lib/python3.14/pydoc_data gdb/lib/python3.14/lib2to3 && \
+	  find gdb/lib/python3.14 -name __pycache__ -prune -exec rm -rf {} + && \
+	  strip gdb/bin/gdb gdb/lib/*.so* 2>/dev/null; true
 	tar cf $@.part -C build/compat/src/gdb gdb
 	mv $@.part $@
 
