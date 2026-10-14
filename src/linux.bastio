@@ -258,6 +258,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if v.wait {
       return wait_until(&mut k, pid, n, SC_FOREVER);   // a notification the supervisor has not answered
     }
+    if v.stop {
+      return KEEP;                          // stopped for its tracer (SECCOMP_RET_TRACE): the call starts again when it goes on
+    }
     if !v.run {
       ret(&mut k.procs, pid, v.ret);
       return KEEP;

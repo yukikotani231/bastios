@@ -50,6 +50,7 @@ const LX_CAPGET: u64 = 125;
 const LX_CAPSET: u64 = 126;
 const LX_SETRLIMIT: u64 = 160;
 const LX_SYNC: u64 = 162;
+const LX_SYNCFS: u64 = 306;
 const LX_UTIMES: u64 = 235;
 const LX_FUTIMESAT: u64 = 261;
 const LX_FCHOWNAT: u64 = 260;
@@ -737,7 +738,7 @@ fn is_misc_call(n: u64) -> bool {
     || n == LX_GETGROUPS || n == LX_GETPGID || n == LX_GETSID
     || n == LX_UTIME || n == LX_STATFS || n == LX_FSTATFS
     || n == LX_MLOCK || n == LX_MUNLOCK || n == LX_PRCTL
-    || n == LX_SETRLIMIT || n == LX_SYNC || n == LX_UTIMES
+    || n == LX_SETRLIMIT || n == LX_SYNC || n == LX_SYNCFS || n == LX_UTIMES
     || n == LX_FUTIMESAT || n == LX_FCHOWNAT || n == LX_FCHMODAT || n == LX_UTIMENSAT
     || n == LX_PRLIMIT64 || n == LX_GETRANDOM || n == LX_UNAME || n == LX_MINCORE
     || n == LX_SECCOMP || n == LX_PERSONALITY || n == LX_SYSLOG || n == LX_MLOCKALL || n == LX_MUNLOCKALL || n == LX_CAPGET || n == LX_CAPSET;
@@ -906,6 +907,14 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_getgroups(&mut k, pid, a, b);
   } else if n == LX_SYNC {
     sync_files(&mut k);
+  } else if n == LX_SYNCFS {
+    // One file system's worth of sync is everything's: the descriptor only has to be open.
+    let sd = fd_look(k, pid, a);
+    if sd.kind == K_BAD {
+      r = EBADF;
+    } else {
+      sync_files(&mut k);
+    }
   } else if is_meta_call(n) {
     r = lx_meta_call(&mut k, pid, n, a, b, c, r10);
   } else if n == LX_UMASK {
