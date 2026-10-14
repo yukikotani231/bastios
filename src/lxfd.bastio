@@ -48,6 +48,18 @@ fn fd_set(t: &mut Buf, pid: u64, fd: u64, v: u64)
   }
 }
 
+/// fd_set in the kernel's table, noting the highest descriptor ever open:
+/// every non-zero word of k.lxfd is below fd_hi, so loops over a row stop there.
+fn fd_set_k(k: &mut Kernel, pid: u64, fd: u64, v: u64)
+  requires kok(k) && pid < NPROC && fd < LXNFD
+  ensures kok(k)
+{
+  if v != 0 && fd >= k.fd_hi {
+    k.fd_hi = fd + 1;
+  }
+  fd_set(&mut k.lxfd, pid, fd, v);
+}
+
 fn of_get(t: &Buf, h: u64, f: u64) -> u64
   requires len(t) == OFD_LEN && h < OFD_N && f < OFD_STRIDE
 {
@@ -310,14 +322,14 @@ fn row_free(k: &Kernel, pid: u64) -> bool
 }
 
 /// Process `pid`'s descriptors as a new program starts: 0 to 2 on the
-/// console, the rest closed. They must hold no references.
-fn lx_fd_reset(t: &mut Buf, pid: u64)
-  requires len(t) <= LXFD_LEN && pid < NPROC
+/// console, the rest closed (only those below `hi`, the kernel's fd_hi, can be open). They must hold no references.
+fn lx_fd_reset(t: &mut Buf, pid: u64, hi: u64)
+  requires len(t) <= LXFD_LEN && pid < NPROC && hi <= LXNFD
   ensures len(t) == old(len(t))
 {
   let n = len(t);
   let mut fd = 0;
-  while fd < LXNFD
+  while fd < hi || fd < 3
     invariant fd <= LXNFD && len(t) == n && n <= LXFD_LEN
   {
     if fd < 3 {
@@ -437,12 +449,13 @@ fn lx_fd_fork(k: &mut Kernel, parent: u64, child: u64)
   requires kok(k) && parent < NPROC && child < NPROC
   ensures kok(k)
 {
+  let hi = smaller(k.fd_hi, LXNFD);         // past it every descriptor is closed
   let mut fd = 0;
-  while fd < LXNFD
-    invariant fd <= LXNFD && kok(k)
+  while fd < hi
+    invariant fd <= hi && hi <= LXNFD && kok(k)
   {
     let v = fd_get(k.lxfd, parent, fd);
-    fd_set(&mut k.lxfd, child, fd, v);
+    fd_set_k(&mut k, child, fd, v);
     if v != 0 {
       ref_value(&mut k, v);
     }
@@ -468,7 +481,7 @@ fn lx_fd_close(k: &mut Kernel, pid: u64, fd: u64) -> bool
       lock_drop(&mut k.locks, tgid(k.procs, pid), f, LKC_FCNTL);
     }
   }
-  fd_set(&mut k.lxfd, pid, fd, 0);
+  fd_set_k(&mut k, pid, fd, 0);
   unref_value(&mut k, v);
   return true;
 }
@@ -498,7 +511,7 @@ fn lx_close_range(k: &mut Kernel, pid: u64, first: u64, last: u64, flags: u64) -
     if flags / 4 % 2 == 1 {
       let v = fd_get(k.lxfd, pid, fd);
       if v != 0 && v < FD_CLOEXEC {
-        fd_set(&mut k.lxfd, pid, fd, v + FD_CLOEXEC);
+        fd_set_k(&mut k, pid, fd, v + FD_CLOEXEC);
       }
     } else {
       lx_fd_close(&mut k, pid, fd);
@@ -513,9 +526,10 @@ fn lx_fd_close_all(k: &mut Kernel, pid: u64, only_cloexec: bool)
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  let hi = smaller(k.fd_hi, LXNFD);         // past it every descriptor is closed
   let mut fd = 0;
-  while fd < LXNFD
-    invariant fd <= LXNFD && kok(k)
+  while fd < hi
+    invariant fd <= hi && hi <= LXNFD && kok(k)
   {
     let v = fd_get(k.lxfd, pid, fd);
     // Most slots are empty: look before paying for the call.
@@ -643,7 +657,7 @@ fn fd_install(k: &mut Kernel, pid: u64, h: u64) -> u64
     unref_value(&mut k, FD_OFD + h);
     return EMFILE;
   }
-  fd_set(&mut k.lxfd, pid, fd, FD_OFD + h);
+  fd_set_k(&mut k, pid, fd, FD_OFD + h);
   return fd;
 }
 
@@ -657,7 +671,7 @@ fn fd_install_console(k: &mut Kernel, pid: u64) -> u64
   if fd >= LXNFD {
     return EMFILE;
   }
-  fd_set(&mut k.lxfd, pid, fd, FD_CONSOLE);
+  fd_set_k(&mut k, pid, fd, FD_CONSOLE);
   return fd;
 }
 
@@ -1047,7 +1061,7 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   of_set(&mut k.ofd, h, 3, flags / LO_NONBLOCK % 2);   // kept for F_GETFL only
   let fd = fd_install(&mut k, pid, h);
   if fd < LXNFD && flags / LO_CLOEXEC % 2 == 1 {
-    fd_set(&mut k.lxfd, pid, fd, FD_OFD + h + FD_CLOEXEC);
+    fd_set_k(&mut k, pid, fd, FD_OFD + h + FD_CLOEXEC);
   }
   return fd;
 }
@@ -1067,9 +1081,9 @@ fn lx_dup2(k: &mut Kernel, pid: u64, src: u64, new: u64, cloexec: bool) -> u64
   lx_fd_close(&mut k, pid, new);
   ref_value(&mut k, v);
   if cloexec {
-    fd_set(&mut k.lxfd, pid, new, v + FD_CLOEXEC);
+    fd_set_k(&mut k, pid, new, v + FD_CLOEXEC);
   } else {
-    fd_set(&mut k.lxfd, pid, new, v);
+    fd_set_k(&mut k, pid, new, v);
   }
   return new;
 }
@@ -1108,7 +1122,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     return v / FD_CLOEXEC;
   }
   if cmd == F_SETFD {
-    fd_set(&mut k.lxfd, pid, fd, v % FD_CLOEXEC + FD_CLOEXEC * (arg % 2));
+    fd_set_k(&mut k, pid, fd, v % FD_CLOEXEC + FD_CLOEXEC * (arg % 2));
     return 0;
   }
   let h = fd_ofd(k, pid, fd);
@@ -1273,8 +1287,8 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
   if flags / LO_CLOEXEC % 2 == 1 {
     ce = FD_CLOEXEC;
   }
-  fd_set(&mut k.lxfd, pid, r, FD_OFD + hr + ce);
-  fd_set(&mut k.lxfd, pid, w, FD_OFD + hw + ce);
+  fd_set_k(&mut k, pid, r, FD_OFD + hr + ce);
+  fd_set_k(&mut k, pid, w, FD_OFD + hw + ce);
   return 0;
 }
 

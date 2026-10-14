@@ -24,6 +24,19 @@ $ test -x /disk/a/usr/bin/tmux && bb mount --bind /dev /disk/a/dev && bb mount -
 $ i=0; while [ $i -lt 20 ] && [ ! -s /disk/a/root/tn.txt ]; do bb sleep 1; i=$((i+1)); done; bb chroot /disk/a /bin/sh -c 'tmux kill-server >/dev/null 2>&1'; bb umount /disk/a/dev/pts; bb umount /disk/a/dev; bb cat /disk/a/root/tn.txt
 hello from nvim
 
+== nvim: :terminal runs a shell in a window, takes typed keys, and the shell's exit closes it
+$ test -x /disk/a/usr/bin/nvim && bb mount --bind /dev /disk/a/dev && bb mount --bind /dev/pts /disk/a/dev/pts; bb chroot /disk/a /usr/bin/nvim -u NONE /root/term.out
+> :terminal\r
+> \x0c
+> \x0c
+> \x0c
+> ia=$((6 * 7)); echo $a > /root/term.txt; exit\r
+> \x0c
+> \x0c
+> :qa!\r
+$ bb umount /disk/a/dev/pts; bb umount /disk/a/dev; bb cat /disk/a/root/term.txt
+42
+
 == nvim: edit and save a C file
 $ bb chroot /disk/a /usr/bin/nvim -u NONE /root/hello.c
 > i#include <stdio.h>\rint main(void) { return 0; }\x1b

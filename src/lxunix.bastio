@@ -489,7 +489,7 @@ fn ux_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   of_set(&mut k.ofd, h, 3, kind / SOCK_NONBLOCK % 2 + w);
   let fd = fd_install(&mut k, pid, h);
   if fd < LXNFD && kind / SOCK_CLOEXEC % 2 == 1 {
-    fd_set(&mut k.lxfd, pid, fd, FD_OFD + h + FD_CLOEXEC);
+    fd_set_k(&mut k, pid, fd, FD_OFD + h + FD_CLOEXEC);
   }
   return fd;
 }
@@ -535,8 +535,8 @@ fn ux_socketpair(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64, s
   if kind / SOCK_CLOEXEC % 2 == 1 {
     ce = FD_CLOEXEC;
   }
-  fd_set(&mut k.lxfd, pid, a, FD_OFD + p % 4294967296 + ce);
-  fd_set(&mut k.lxfd, pid, b, FD_OFD + p / 4294967296 + ce);
+  fd_set_k(&mut k, pid, a, FD_OFD + p % 4294967296 + ce);
+  fd_set_k(&mut k, pid, b, FD_OFD + p / 4294967296 + ce);
   let x = of_get(k.ofd, p % 4294967296, 2);
   uc_set_cred(&mut k, x % UX_N, pid, ux_ids(k, pid));
   uc_set_cred(&mut k, x / UX_N % UX_N, pid, ux_ids(k, pid));
@@ -1080,7 +1080,7 @@ fn ux_accept(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, flags: u64
     return nfd;                             // -EMFILE; the description is gone
   }
   if flags / SOCK_CLOEXEC % 2 == 1 {
-    fd_set(&mut k.lxfd, pid, nfd, FD_OFD + h + FD_CLOEXEC);
+    fd_set_k(&mut k, pid, nfd, FD_OFD + h + FD_CLOEXEC);
   }
   let r = sun_out(&mut k, pid, addr, lenp);
   if r != 0 {

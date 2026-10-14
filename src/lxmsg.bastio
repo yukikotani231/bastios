@@ -525,7 +525,7 @@ fn lx_recvmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
       }
       if nfd < LXNFD {
         if flags / MSG_CMSG_CLOEXEC % 2 == 1 {
-          fd_set(&mut k.lxfd, pid, nfd, v + FD_CLOEXEC);
+          fd_set_k(&mut k, pid, nfd, v + FD_CLOEXEC);
         }
         lx_fill(&mut k, 0, CMSG_ROOM);
         xfer_u64(&mut k.fs.xfer, 0, CMSG_ONE);
