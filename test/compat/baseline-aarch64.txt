@@ -1035,3 +1035,10 @@ bastio: bastioc1: prove a program
 bastio: bastioc1: prove, build with tcc, run
 bastio: bastioc1: a failed proof builds nothing
 bastio: bastioc1: a type error
+alpine: proc: /proc/self/exe is named from the reader's root (chroot), as on Linux
+alpine: apk: install ripgrep and fzf over HTTP
+alpine: rg and fzf: search a tree, filter a list
+alpine: nvim: :grep with ripgrep fills the quickfix list
+alpine: tmux: a detached session runs a shell on a pseudo-terminal, takes keys and shows its screen
+alpine: tmux: a client on the console passes it to the server (SCM_RIGHTS of the console)
+alpine-tty: tmux: attach on the console, run a command in the session, detach and find it still there
