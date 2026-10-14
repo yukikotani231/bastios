@@ -1952,6 +1952,10 @@ deadline = time.time() + timeout
 for line, want, until in [
     ("ash", b"built-in shell (ash)", b"\n# "),
     ("stat -f -c '%b %c' /disk; echo big > /disk/b; cat /disk/b; stat -f -c %f /disk; rm /disk/b", b"10485755 262143\r\nbig\r\n1048", b"\n# "),
+    # Files past the 1 GiB a root map reaches: pieces at offsets up to 40 GiB
+    # (a super map of root maps, one per GiB), a write across a GiB boundary,
+    # cuts and regrowth, and every block freed at the end (user/mbig.c).
+    ("mbig /disk", b"mbig: ok, files past 1 GiB in /disk", b"\n# "),
     ("mkdir disk/many; i=0; while [ $i -lt 1100 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; sleep 1", b"\r\n1100\r\n", b"\n# "),
     # One directory takes more entries than the 32767 a disk held before the
     # directory table grew (it holds 262143 now): the creates past that
@@ -1971,10 +1975,12 @@ for line, want, until in [
     fails += not ok
 qemu.kill(); qemu.wait()
 # The full directory (left for the reboot below) takes more than 512
-# directory blocks, which the superblock cannot name: the disk is BSTDISK4.
+# directory blocks, which the superblock cannot name: the disk is BSTDISK4,
+# or BSTDISK5 here, where mbig made a file with a super map first (the
+# extension blocks keep the newer magic).
 with open(big, "rb") as f:
-    ok = f.read(8) == b"BSTDISK4"
-print(("ok  " if ok else "FAIL"), "(big-disk boot) a directory past 512 blocks makes the disk BSTDISK4"); fails += not ok
+    ok = f.read(8) == b"BSTDISK5"
+print(("ok  " if ok else "FAIL"), "(big-disk boot) a directory past 512 blocks and a file past 1 GiB make the disk BSTDISK5"); fails += not ok
 # A volume that was made larger since the last boot (a cloud volume resized
 # while the machine was off): the file system takes the new size at mount, with
 # its files in place.

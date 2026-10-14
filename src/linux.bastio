@@ -1682,7 +1682,7 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
       return total;                         // cannot happen: w <= piece <= n - total
     }
     total = total + w;
-    more = w == piece && w > 0;
+    more = w > 0;                           // (a write stops short at a 1 GiB boundary of a disk file)
   }
   if total == 0 && n > 0 && d.x < FD_ROWS {
     // Not a byte could be written: past the largest file this file system
