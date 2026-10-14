@@ -535,6 +535,9 @@ fn lx_pio(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, va: u64
     }
     return r;
   }
+  if write && d.kind == K_FILE && seal_no_write(&mut k, pid, fd) {
+    return EPERM;                           // F_SEAL_WRITE
+  }
   if d.kind == K_DIR && !write {
     return EISDIR;
   }
@@ -574,6 +577,9 @@ fn lx_ftruncate(k: &mut Kernel, pid: u64, fd: u64, size: u64) -> u64
   let big = fsize_trunc(&mut k, pid, size);
   if big != 0 {
     return big;
+  }
+  if seal_no_resize(&mut k, pid, fd, size) {
+    return EPERM;                           // F_SEAL_SHRINK or F_SEAL_GROW
   }
   if !vfs_truncate(&mut k.fs, &mut k.mem, d.x, size) {
     return EINVAL;                          // not open for writing, too long, or the disk failed

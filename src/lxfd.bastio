@@ -712,6 +712,10 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, mode: u6
     // /proc/PID/exe is a link to the program: open that (src/lxopen2.bastio).
     n = exe_name(&mut k, pf);
     if n == NO_RESULT {
+      let of = exe_orphan(&mut k, pf);
+      if of < NFILES {
+        return lx_open_orphan(&mut k, pid, of, flags);   // a program run from a memfd: no name, only the file
+      }
       return ENOENT;
     }
   }
@@ -824,6 +828,9 @@ fn lx_open_fd_link(k: &mut Kernel, pid: u64, t: u64, tfd: u64, flags: u64, mode:
     let f = vfs_row_file(k.fs, d.x);
     if f != NO_FILE {
       let nm = vfs_dirent(&mut k.fs, f);
+      if nm == 0 && f < NFILES {
+        return lx_open_orphan(&mut k, pid, f, flags);   // unlinked while open: no name to open, only the file
+      }
       if nm != NO_FILE && nm <= FNAME_MAX && nm <= XFER {
         return lx_open_n(&mut k, pid, nm, flags, mode);
       }
@@ -831,6 +838,49 @@ fn lx_open_fd_link(k: &mut Kernel, pid: u64, t: u64, tfd: u64, flags: u64, mode:
     return ENOENT;
   }
   return ENXIO;
+}
+
+/// open of RAM file node f by itself, for a file that has no name left (a
+/// memfd, or any file unlinked while open) reached through /proc/PID/fd/N or
+/// /proc/PID/exe: read and write access and O_CLOEXEC from flags.
+fn lx_open_orphan(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC && f < NFILES
+  ensures kok(k)
+{
+  let acc = flags % 4;
+  let mut fl = O_READ;
+  if acc == LO_WRONLY {
+    fl = O_WRITE;
+  } else if acc == LO_RDWR {
+    fl = O_READ + O_WRITE;
+  }
+  if flags / LO_APPEND % 2 == 1 {
+    fl = fl + O_APPEND;
+  }
+  if flags & LO_PATH != 0 {
+    fl = 0;
+  }
+  if fd_free(k, pid, 0) >= LXNFD || !row_free(k, pid) {
+    return EMFILE;
+  }
+  if fl / O_WRITE % 2 == 1 && file_running(k, f) {
+    return ETXTBSY;                         // a program a process runs
+  }
+  let row = vfs_open_node(&mut k.fs, 0, FD_POOL, fl, f);
+  if row == NO_FD || row >= FD_POOL {
+    return ENOENT;
+  }
+  let h = ofd_new(&mut k, OF_FILE, row);
+  if h >= OFD_N {
+    vfs_close(&mut k.fs, &mut k.mem, row);
+    return ENFILE;
+  }
+  of_set(&mut k.ofd, h, 3, flags / LO_NONBLOCK % 2);
+  let fd = fd_install(&mut k, pid, h);
+  if fd < LXNFD && flags / LO_CLOEXEC % 2 == 1 {
+    fd_set_k(&mut k, pid, fd, FD_OFD + h + FD_CLOEXEC);
+  }
+  return fd;
 }
 
 /// lx_open_n, once the permission checks are done: /proc files, devices
@@ -961,7 +1011,9 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     return fifo_open(&mut k, pid, ff, flags);
   }
   let nt = vfs_node_type(&mut k.fs, fh);
-  if fh != NO_FILE && (nt == T_CHR || nt == T_BLK || nt == T_SOCK) {
+  if fh != NO_FILE && (nt == T_CHR || nt == T_BLK || nt == T_SOCK) && flags & LO_PATH == 0 {
+    // (O_PATH holds the node itself, not its device: crun changes a node
+    // it made through /proc/self/fd/N.)
     // A device node (src/lxevent.bastio lx_mknod) opens the device its
     // number names; a socket node, or a device BastiOS lacks, is ENXIO.
     if flags & LO_CREAT != 0 && flags & LO_EXCL != 0 {

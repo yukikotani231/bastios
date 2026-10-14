@@ -101,6 +101,7 @@ const SY_NETARP: u64 = 28;             // /proc/net/arp
 const SY_CORE: u64 = 29;               // /proc/sys/kernel/core_pattern (nothing dumps core)
 const SY_NROPEN: u64 = 30;             // /proc/sys/fs/nr_open
 const SY_DROP: u64 = 31;               // /proc/sys/vm/drop_caches: written, kept for nothing
+const SY_CAPLAST: u64 = 32;            // /proc/sys/kernel/cap_last_cap (container runtimes read it)
 const SY_NEXTID: u64 = 96;             // 96 .. 98: /proc/sys/kernel/{msg,sem,shm}_next_id, by IPC kind (src/lxipc.bastio)
 const SY_NS: u64 = 128;                // 128 ..: /proc/P/ns link f at P * NF_N + f (src/lxnsk.bastio)
 const NF_N: u64 = 8;
@@ -509,6 +510,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   }
   if xfer_is(x, 5, n, "sys/kernel/core_pattern") {
     return PROC_DEV + PSYS + SY_CORE;
+  }
+  if xfer_is(x, 5, n, "sys/kernel/cap_last_cap") {
+    return PROC_DEV + PSYS + SY_CAPLAST;
   }
   if xfer_is(x, 5, n, "sys/fs/nr_open") {
     return PROC_DEV + PSYS + SY_NROPEN;
@@ -1617,6 +1621,10 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     if what == SY_NROPEN {
       return put_s(&mut o, 0, "1048576\n");
     }
+    if what == SY_CAPLAST {
+      let a = put_n(&mut o, 0, 40);   // CAP_LAST (src/lxcap.bastio)
+      return put_c(&mut o, a, 10);
+    }
     if what == SY_DROP {
       return put_s(&mut o, 0, "0\n");
     }
@@ -2017,6 +2025,21 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     return put_s(&mut o, a, " rw-p 00000000 00:00 0                          [stack]\n");
   }
   if what == PF_CMDLINE {
+    let w = pget(k.procs, p, F_ARGS);
+    let n = w / 1099511627776;
+    if n != 0 && n < PROC_OUT {
+      let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, USER_BASE + w % 1099511627776, &mut k.fs.xfer, n);
+      if got == n {
+        let mut i = 0;
+        while i < n
+          invariant i <= n && n < PROC_OUT && blen(o) == PROC_OUT && blen(k.fs.xfer) == XFER
+        {
+          bset(&mut o, i, bget(k.fs.xfer, i));
+          i = i + 1;
+        }
+        return n;
+      }
+    }
     let a = put_prog(&mut k, p, &mut o, 0, true);
     return put_c(&mut o, a, 0);
   }

@@ -298,6 +298,9 @@ fn lx_piov(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, iov: u
   if early != NO_RESULT {
     return early;
   }
+  if write && seal_no_write(&mut k, pid, fd) {
+    return EPERM;                           // F_SEAL_WRITE
+  }
   if cnt > 1024 || off >= 0x8000000000000000 {
     return EINVAL;
   }
@@ -450,6 +453,9 @@ fn lx_fallocate(k: &mut Kernel, pid: u64, fd: u64, mode: u64, off: u64, len: u64
   if mode == 1 {
     return 0;                               // FALLOC_FL_KEEP_SIZE: blocks are not reserved ahead here, so nothing to do
   }
+  if seal_no_resize(&mut k, pid, fd, off + len) && off + len > vfs_size(&mut k.fs, vfs_row_file(k.fs, d.x)) {
+    return EPERM;                           // F_SEAL_GROW
+  }
   if mode != 0 {
     return EOPNOTSUPP;                      // no blocks are punched or zeroed
   }
@@ -514,7 +520,7 @@ fn lx_memfd(k: &mut Kernel, pid: u64, name: u64, flags: u64) -> u64
     invariant tries <= 16 && kok(k)
   {
     let n = memfd_name(&mut k, pid, sat_add(k.ns, tries));
-    let fd = lx_open_n(&mut k, pid, n, oflags, 384);   // 0600
+    let fd = lx_open_n(&mut k, pid, n, oflags, 511);   // 0777, as Linux: a memfd may be executed
     if fd < LXNFD {
       seal_new(&mut k, pid, fd, flags / 2 % 2 == 1);
       let n2 = memfd_name(&mut k, pid, sat_add(k.ns, tries));
@@ -581,8 +587,65 @@ fn seal_new(k: &mut Kernel, pid: u64, fd: u64, allow: bool)
   }
 }
 
-/// fcntl F_ADD_SEALS and F_GET_SEALS. The seals are recorded and reported
-/// but not enforced: writes and truncation still work on a sealed memfd.
+const SEAL_SHRINK: u64 = 2;
+const SEAL_GROW: u64 = 4;
+const SEAL_WRITE: u64 = 8;
+const SEAL_FUTURE_WRITE: u64 = 16;
+
+/// The seals of the file open on descriptor fd: 0 for one that is not a
+/// memfd made here.
+fn seals_of(k: &mut Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let d = fd_look(k, pid, fd);
+  if d.kind != K_FILE {
+    return 0;
+  }
+  let f = vfs_row_file(k.fs, d.x);
+  if f == NO_FILE || f >= 0xFFFFFFFFFFFFFFFF {
+    return 0;
+  }
+  let e = seal_slot(k, f);
+  if e >= SEAL_N {
+    return 0;
+  }
+  return get(k.sys, SYS_SEAL + 2 * e + 1) % 64;
+}
+
+/// Whether the seals of descriptor fd forbid writing to it (write, pwrite,
+/// a new writable shared mapping): F_SEAL_WRITE and F_SEAL_FUTURE_WRITE.
+fn seal_no_write(k: &mut Kernel, pid: u64, fd: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  return seals_of(&mut k, pid, fd) / SEAL_WRITE % 4 != 0;
+}
+
+/// Whether the seals of descriptor fd forbid giving its file the size
+/// `size` (ftruncate, fallocate): F_SEAL_SHRINK below the current size,
+/// F_SEAL_GROW above it.
+fn seal_no_resize(k: &mut Kernel, pid: u64, fd: u64, size: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let sl = seals_of(&mut k, pid, fd);
+  if sl / SEAL_SHRINK % 4 == 0 {
+    return false;
+  }
+  let d = fd_look(k, pid, fd);
+  if d.kind != K_FILE {
+    return false;
+  }
+  let cur = vfs_size(&mut k.fs, vfs_row_file(k.fs, d.x));
+  if cur == NO_FILE {
+    return false;
+  }
+  return (size < cur && sl / SEAL_SHRINK % 2 == 1) || (size > cur && sl / SEAL_GROW % 2 == 1);
+}
+
+/// fcntl F_ADD_SEALS and F_GET_SEALS. Writes, truncation and new writable
+/// shared mappings obey the seals (seal_no_write, seal_no_resize).
 /// A file that is not a memfd made here has none (EINVAL), as on Linux.
 fn lx_seals(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
   requires kok(k) && pid < NPROC

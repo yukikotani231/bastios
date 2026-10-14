@@ -154,6 +154,18 @@ node: node: make the device nodes
 node: node: read and write files
 node: node: timers and promises run in order
 node: node: version
+t_cloned: /proc/self/exe opens and is not sealed
+t_cloned: /proc/sys/kernel/cap_last_cap is readable and numeric
+t_cloned: F_ADD_SEALS seals it
+t_cloned: a private mapping of it is fine
+t_cloned: a writable shared mapping of the sealed memfd is EPERM
+t_cloned: a write to the sealed memfd is EPERM
+t_cloned: fexecve of the sealed memfd runs it, and its /proc/self/exe is the sealed memfd
+t_cloned: fstat of /proc/self/exe has the size
+t_cloned: ftruncate of the sealed memfd is EPERM
+t_cloned: memfd_create with sealing
+t_cloned: pwrite to the sealed memfd is EPERM
+t_cloned: sendfile copies the binary into the memfd
 t_cred: a child inherits ids; /proc/self/status shows them
 t_cred: an unprivileged process keeps to the ids it holds
 t_cred: getgrnam finds users
@@ -189,6 +201,22 @@ t_dev: unbound reads nothing
 t_dev: unbound: LOOP_GET_STATUS64 is ENXIO
 t_dev: write at the end is ENOSPC
 t_dev: write through the device
+t_devnode: a host device bound over a tmpfs file
+t_devnode: chmod by path works
+t_devnode: chmod of the bound node by path works
+t_devnode: chmod of the bound node by the directory's descriptor works
+t_devnode: chmod through /proc/self/fd of an O_PATH device node
+t_devnode: chmod through /proc/self/fd of an O_PATH regular file
+t_devnode: chown through /proc/self/fd of an O_PATH device node
+t_devnode: fchmodat by the directory's descriptor works
+t_devnode: fchownat by the directory's descriptor works
+t_devnode: mknodat makes a character device in it
+t_devnode: mount a tmpfs
+t_devnode: open the directory
+t_devnode: the bound node stats as the device
+t_devnode: the node opens and writes like /dev/null
+t_devnode: the node stats as a character device
+t_devnode: unshare a mount namespace
 t_dir: chdir
 t_dir: chdir ..
 t_dir: create file in directory

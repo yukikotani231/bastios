@@ -43,6 +43,17 @@ int main(int argc, char **argv) {
     EXPECT("sendfile copies the binary into the memfd", st_ok && sent == st.st_size);
     EXPECT("F_ADD_SEALS seals it", fd >= 0 && fcntl(fd, F_ADD_SEALS, SEALS) == 0 && fcntl(fd, F_GET_SEALS) == SEALS);
     EXPECT("a write to the sealed memfd is EPERM", fd >= 0 && write(fd, "x", 1) == -1 && errno == EPERM);
+    EXPECT("pwrite to the sealed memfd is EPERM", fd >= 0 && pwrite(fd, "x", 1, 0) == -1 && errno == EPERM);
+    EXPECT("ftruncate of the sealed memfd is EPERM", fd >= 0 && ftruncate(fd, 1) == -1 && errno == EPERM);
+    EXPECT("a writable shared mapping of the sealed memfd is EPERM",
+           fd >= 0 && mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) == MAP_FAILED && errno == EPERM);
+    EXPECT("a private mapping of it is fine",
+           fd >= 0 && mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 0) != MAP_FAILED);
+    {
+        char buf[16] = {0};
+        int cf = open("/proc/sys/kernel/cap_last_cap", O_RDONLY);
+        EXPECT("/proc/sys/kernel/cap_last_cap is readable and numeric", cf >= 0 && read(cf, buf, 15) > 1 && buf[0] >= '1' && buf[0] <= '9');
+    }
     int status = 0;
     pid_t p = fork();
     if (p == 0) {
