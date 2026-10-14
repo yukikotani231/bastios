@@ -628,6 +628,13 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       if pget(s.k.procs, p, F_TICKS) % 16 == 0 {
         cg_oom_tick(&mut s.k, p);
       }
+    } else {
+      // Nobody is charged, but a cpu.max period must still end on time: a
+      // throttled group's processes are not picked, so while the processors
+      // only run waiting calls again no other tick would start the next
+      // period (cg_cpu_tick with no process, as an idle tick does).
+      s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
+      cg_cpu_tick(&mut s.k, 0);
     }
     s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
     lx_alarms(&mut s.k);

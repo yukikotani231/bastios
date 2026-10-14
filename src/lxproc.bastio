@@ -908,7 +908,9 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
         ret(&mut k.procs, pid, vpid_of(k, pid, c));
         return KEEP;
       }
-      if state(k.procs, c) == ZOMBIE {
+      // A zombie that someone else traces is that tracer's to hear of first;
+      // its parent waits for it until the tracer has (or lets go).
+      if state(k.procs, c) == ZOMBIE && (traced_by(k, c, pid) || tr_get(k, c) % 65536 == 0) {
         if status != 0 {
           lx_fill(&mut k, 0, 4);
           let code = pget(k.procs, c, F_CODE);

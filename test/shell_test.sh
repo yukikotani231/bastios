@@ -426,6 +426,11 @@ steps = [
     # ran out of quota in.
     ("mkdir /sys/fs/cgroup/cq; echo +cpu > /sys/fs/cgroup/cgroup.subtree_control; echo '20000 100000' > /sys/fs/cgroup/cq/cpu.max; cat /sys/fs/cgroup/cq/cpu.max; ash -c 'echo $$ > /sys/fs/cgroup/cq/cgroup.procs; while :; do :; done' & sleep 3; while read k v; do case $k in usage_usec) u=$v;; nr_throttled) t=$v;; esac; done < /sys/fs/cgroup/cq/cpu.stat; [ \"$u\" -gt 100000 ] && [ \"$u\" -lt 1000000 ] && [ \"$t\" -gt 5 ] && echo throttled; echo 1 > /sys/fs/cgroup/cq/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/cq; echo r=$?",
      [b"\r\n20000 100000\r\n", b"throttled", b"r=0"], b"\n# "),
+    # cpu.max with every processor busy running waiting calls again (readers of
+    # a fifo nobody writes to): the throttled group's next period must still
+    # begin, or its process is never scheduled again.
+    ("mkdir /sys/fs/cgroup/rk /sys/fs/cgroup/rq; echo +cpu > /sys/fs/cgroup/cgroup.subtree_control; echo '20000 100000' > /sys/fs/cgroup/rq/cpu.max; mkfifo /tmp/rb; ash -c 'echo $$ > /sys/fs/cgroup/rk/cgroup.procs; for i in 1 2 3 4; do cat /tmp/rb > /dev/null & done; sleep 60 > /tmp/rb & wait' & sleep 1; ash -c 'echo $$ > /sys/fs/cgroup/rq/cgroup.procs; i=0; while [ $i -lt 3000 ]; do i=$((i+1)); done; echo burst > /tmp/rbd' & n=0; while [ ! -f /tmp/rbd ] && [ $n -lt 20 ]; do sleep 1; n=$((n+1)); done; read r < /tmp/rbd; echo r=$r; echo 1 > /sys/fs/cgroup/rk/cgroup.kill; echo 1 > /sys/fs/cgroup/rq/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/rk /sys/fs/cgroup/rq; echo c=$?; rm -f /tmp/rb /tmp/rbd",
+     [b"r=burst", b"c=0"], b"\n# "),
     # cpu.weight: two groups that both have more busy processes than there are
     # processors share them in proportion to their weights, here 1 to 3.
     ("mkdir /sys/fs/cgroup/wa /sys/fs/cgroup/wb; echo +cpu > /sys/fs/cgroup/cgroup.subtree_control; echo 100 > /sys/fs/cgroup/wa/cpu.weight; echo 300 > /sys/fs/cgroup/wb/cpu.weight; cat /sys/fs/cgroup/wb/cpu.weight; printf 'echo $$ > /sys/fs/cgroup/$1/cgroup.procs\\nwhile :; do :; done\\n' > /tmp/wb.sh; for g in wa wb; do for i in 1 2 3 4 5 6; do ash /tmp/wb.sh $g & done; done; sleep 12; while read k v; do case $k in usage_usec) a=$v;; esac; done < /sys/fs/cgroup/wa/cpu.stat; while read k v; do case $k in usage_usec) b=$v;; esac; done < /sys/fs/cgroup/wb/cpu.stat; echo a=$a b=$b; [ $((b * 10)) -gt $((a * 20)) ] && [ $((b * 10)) -lt $((a * 45)) ] && echo weighted; echo 1 > /sys/fs/cgroup/wa/cgroup.kill; echo 1 > /sys/fs/cgroup/wb/cgroup.kill; sleep 2; rmdir /sys/fs/cgroup/wa /sys/fs/cgroup/wb; echo r=$?",
@@ -2520,6 +2525,20 @@ m = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
 off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
 good = code == 0 and m and off and m.group(1) == off.group(1)
 print(("ok  " if good else "FAIL"), f"(24 processors) every page back, and S5 (status {code})")
+fails += not good
+
+# 255 processors, the most the xAPIC's eight-bit ids can address (a
+# processor beyond that needs x2APIC mode, which QEMU emulates without KVM
+# only from 9.0, so the 256th is out of reach of this test): every one
+# starts and reports itself, and every page comes back at power off.
+ok, code = report_boot(["-m", "512M", "-smp", "255"], "255 processors", 0)
+good = ok and b"pages of memory, 255 processors" in out
+print(("ok  " if good else "FAIL"), "(255 processors) all 255 start")
+fails += not good
+m = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
+off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+good = code == 0 and m and off and m.group(1) == off.group(1)
+print(("ok  " if good else "FAIL"), f"(255 processors) every page back, and S5 (status {code})")
 fails += not good
 
 # A disk that is not blank and has no BastiOS file system (an MBR's
