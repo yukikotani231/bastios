@@ -101,6 +101,7 @@ const F_START: u64 = 65;             // when it started: centiseconds since boot
 const F_FAULT_RIP: u64 = 67;         // the last page fault found its page mapped already: rip + 1 and address (src/main.bastio)
 const F_FAULT_VA: u64 = 68;
 const F_ARGS: u64 = 69;              // Linux: the argument strings at exec: window offset + length * 2^40 (/proc/PID/cmdline)
+const F_XSIG: u64 = 70;              // Linux: the signal its parent gets when it ends, plus 1 (clone's exit_signal); 0 is SIGCHLD
 const F_NETNS: u64 = 64;             // network (src/netns.bastio, src/lxnetlink.bastio)
 // File permission bits (src/lxperm.bastio).
 const MAY_X: u64 = 1;
