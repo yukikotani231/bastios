@@ -191,16 +191,29 @@ int main(void) {
         close(s3);
     }
     {
-        /* Sixteen pairs at once (a server with many logins). */
-        int ms[16], ss[16], made = 0, echoed = 0;
-        for (int i = 0; i < 16; i++)
+        /* Sixty-four pairs at once (a server with many logins); the 65th fails. */
+        int ms[65], ss[65], made = 0, echoed = 0;
+        for (int i = 0; i < 65; i++)
             made += openpty(&ms[i], &ss[i], NULL, NULL, NULL) == 0;
-        EXPECT("sixteen pseudo-terminal pairs at once", made == 16);
+        EXPECT("sixty-four pseudo-terminal pairs at once, the 65th fails", made == 64);
         for (int i = 0; i < made; i++) {
-            char c = 'a' + i, got = 0;
+            char c = 'a' + i % 26, got = 0;
             echoed += write(ss[i], &c, 1) == 1 && read(ms[i], &got, 1) == 1 && got == c;
         }
         EXPECT("each pair carries its own bytes", echoed == made);
+        {
+            int distinct = 1;
+            for (int i = 0; i < made && distinct; i++) {
+                int n = -1;
+                struct stat a, b;
+                distinct = ioctl(ms[i], TIOCGPTN, &n) == 0 && n >= 0 && n < 64 && fstat(ss[i], &a) == 0 && fstat(ms[i], &b) == 0 && a.st_ino != b.st_ino;
+                for (int j = 0; j < i && distinct; j++) {
+                    struct stat o;
+                    distinct = fstat(ss[j], &o) == 0 && o.st_ino != a.st_ino;
+                }
+            }
+            EXPECT("every slave is a device of its own", distinct);
+        }
         for (int i = 0; i < made; i++) {
             close(ms[i]);
             close(ss[i]);

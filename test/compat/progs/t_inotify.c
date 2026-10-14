@@ -265,13 +265,13 @@ int main(void) {
         unlink(nm);
     }
 
-    /* epoll: sixteen instances, and two hundred descriptors on one. */
-    int eps[16], nep = 0;
-    for (int i = 0; i < 16; i++) {
+    /* epoll: thirty-two instances, and two hundred descriptors on one. */
+    int eps[32], nep = 0;
+    for (int i = 0; i < 32; i++) {
         eps[i] = epoll_create1(0);
         nep += eps[i] >= 0;
     }
-    EXPECT("sixteen epoll instances", nep == 16);
+    EXPECT("thirty-two epoll instances", nep == 32);
     int efd[200], nadd = 0;
     for (int i = 0; i < 200; i++) {
         struct epoll_event ev = { .events = EPOLLIN, .data.u32 = i };
@@ -285,30 +285,41 @@ int main(void) {
     EXPECT("the last one is the one reported", ready == 1 && got[0].data.u32 == 199);
     for (int i = 0; i < 200; i++)
         close(efd[i]);
-    for (int i = 0; i < 16; i++)
+    for (int i = 0; i < 32; i++)
         close(eps[i]);
 
-    /* timerfd: thirty at once. */
-    int tfd[30], ntf = 0;
-    for (int i = 0; i < 30; i++) {
+    /* timerfd: sixty at once. */
+    int tfd[60], ntf = 0;
+    for (int i = 0; i < 60; i++) {
         tfd[i] = timerfd_create(CLOCK_MONOTONIC, 0);
         ntf += tfd[i] >= 0;
     }
-    EXPECT("thirty timerfds at once", ntf == 30);
-    for (int i = 0; i < 30; i++)
+    EXPECT("sixty timerfds at once", ntf == 60);
+    for (int i = 0; i < 60; i++)
         close(tfd[i]);
 
-    /* named pipes: twelve open at once. */
-    int ff[12], nff = 0;
-    for (int i = 0; i < 12; i++) {
+    /* inotify instances: thirty at once. */
+    int ino[30], nino = 0;
+    for (int i = 0; i < 30; i++) {
+        ino[i] = inotify_init1(IN_NONBLOCK);
+        nino += ino[i] >= 0;
+    }
+    EXPECT("thirty inotify instances at once", nino == 30);
+    for (int i = 0; i < 30; i++)
+        if (ino[i] >= 0)
+            close(ino[i]);
+
+    /* named pipes: thirty open at once. */
+    int ff[30], nff = 0;
+    for (int i = 0; i < 30; i++) {
         char nm[16];
         snprintf(nm, sizeof nm, "in_fifo%d", i);
         unlink(nm);
         ff[i] = mkfifo(nm, 0600) == 0 ? open(nm, O_RDONLY | O_NONBLOCK) : -1;
         nff += ff[i] >= 0;
     }
-    EXPECT("twelve named pipes open at once", nff == 12);
-    for (int i = 0; i < 12; i++) {
+    EXPECT("thirty named pipes open at once", nff == 30);
+    for (int i = 0; i < 30; i++) {
         char nm[16];
         snprintf(nm, sizeof nm, "in_fifo%d", i);
         if (ff[i] >= 0)

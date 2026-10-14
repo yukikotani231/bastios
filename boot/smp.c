@@ -67,8 +67,7 @@ static inline uint8_t *this_core(void) {
     return (uint8_t *)(sp & ~(uint64_t)(CORE_BLOCK - 1));
 }
 
-/* The saved user context of the processor running the caller. */
-uint64_t *bst_platform_ctx(void) { return (uint64_t *)(this_core() + CORE_CTX); }
+/* bst_platform_ctx, the saved user context of the processor running the caller, is in boot.S. */
 
 /* Three words the compiled kernel keeps per processor to skip CR3 loads
  * (the table it left in CR3, when it last loaded CR3, and how many locks
