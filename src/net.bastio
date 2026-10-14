@@ -107,12 +107,13 @@ const SOCK_FIELDS: u64 = 20;          // S_SLOTS + RXQ * SLOT_W + 2
 
 // Network namespaces and interfaces (src/netns.bastio).
 const NNET: u64 = 16;                  // network namespaces
-const NS_W: u64 = 5;                   // words per namespace:
+const NS_W: u64 = 6;                   // words per namespace:
 const NS_USED: u64 = 0;                //   1 while it exists
 const NS_GW: u64 = 1;                  //   the default route's gateway (0: none; ns 0 uses n.gw)
 const NS_FWD: u64 = 2;                 //   1: forwards packets between interfaces (ip_forward)
 const NS_LO: u64 = 3;                  //   its loopback interface's slot
 const NS_INO: u64 = 4;                 //   its inode number (/proc/PID/ns/net)
+const NS_OWNER: u64 = 5;               //   the user namespace id that made it (0: the first)
 
 const IFN: u64 = 32;                   // interfaces, all namespaces together
 const IF_W: u64 = 10;                  // words per interface:

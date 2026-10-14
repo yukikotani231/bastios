@@ -108,6 +108,12 @@ static int lo_up(void) {
 static int lo_up_in_own_netns(void) { return unshare(CLONE_NEWNET) == 0 && lo_up() == 0; }
 static int lo_up_in_first_netns(void) { return lo_up() == -1 && errno == EPERM; }
 
+/* A network namespace made by a process in the first user namespace: the
+ * root of a user namespace made inside it does not own it. */
+static int lo_up_in_foreign_netns(void) {
+    return unshare(CLONE_NEWNET) == 0 && in_userns(lo_up_in_first_netns, 0);
+}
+
 /* statfs of /proc/self/fd/N is the file system of the file N holds. */
 static int statfs_fd_link(void) {
     int f = open("/tmp", O_PATH | O_DIRECTORY);
@@ -206,6 +212,7 @@ int main(void) {
     EXPECT("a process maps the user namespace it has just made itself", in_child(map_own_after_unshare));
     EXPECT("the root of a user namespace brings loopback up in a network namespace of its own", in_userns(lo_up_in_own_netns, 0));
     EXPECT("and not in the first one", in_userns(lo_up_in_first_netns, 0));
+    EXPECT("nor in one that another user namespace made", in_child(lo_up_in_foreign_netns));
     EXPECT("statfs of /proc/self/fd/N answers for the file N holds", statfs_fd_link());
     EXPECT("the root of a user namespace mounts in a mount namespace of its own", in_userns(mounts_in_own_ns, 1));
     EXPECT("and not without one", in_userns(no_mounts_without_ns, 0));

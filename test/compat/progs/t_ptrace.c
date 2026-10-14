@@ -13,6 +13,39 @@
 #include <stddef.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/prctl.h>
+#include <errno.h>
+
+
+/* The classic BPF and seccomp definitions musl does not ship. */
+struct sock_filter { unsigned short code; unsigned char jt, jf; unsigned int k; };
+struct sock_fprog { unsigned short len; struct sock_filter *filter; };
+#define BPF_STMT(c, k) { (c), 0, 0, (k) }
+#define BPF_JUMP(c, k, jt, jf) { (c), (jt), (jf), (k) }
+#define BPF_LD_W_ABS 0x20
+#define BPF_JEQ_K 0x15
+#define BPF_RET_K 0x06
+#define SECCOMP_MODE_FILTER 2
+#define SECCOMP_RET_ALLOW 0x7fff0000u
+#define SECCOMP_RET_TRACE 0x7ff00000u
+#ifndef PTRACE_O_TRACESECCOMP
+#define PTRACE_O_TRACESECCOMP 0x80
+#endif
+#ifndef PTRACE_EVENT_SECCOMP
+#define PTRACE_EVENT_SECCOMP 7
+#endif
+
+/* A filter that answers SECCOMP_RET_TRACE with data 42 to getppid. */
+static int trace_getppid_filter(void) {
+    struct sock_filter f[] = {
+        BPF_STMT(BPF_LD_W_ABS, 0),
+        BPF_JUMP(BPF_JEQ_K, SYS_getppid, 0, 1),
+        BPF_STMT(BPF_RET_K, SECCOMP_RET_TRACE | 42),
+        BPF_STMT(BPF_RET_K, SECCOMP_RET_ALLOW),
+    };
+    struct sock_fprog prog = { sizeof f / sizeof f[0], f };
+    return prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 && prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) == 0;
+}
 
 #ifdef __aarch64__
 /* AArch64 has no PTRACE_GETREGS: the registers come as NT_PRSTATUS. */
@@ -387,6 +420,61 @@ int main(int argc, char **argv) {
         w = waitpid(c, &st, 0);
         EXPECT("a seized tracee resumed with PTRACE_CONT runs to its end", rc == 0 && w == c && WIFEXITED(st) && WEXITSTATUS(st) == 7);
     }
+
+#ifndef __aarch64__
+    /* SECCOMP_RET_TRACE: with PTRACE_O_TRACESECCOMP the tracee stops before
+     * the call with the event and the filter's data, and the call runs when
+     * it goes on, without the filters again. */
+    {
+        pid_t c = fork();
+        if (c == 0) {
+            pid_t pp = getppid();
+            if (!trace_getppid_filter()) _exit(10);
+            ptrace(PTRACE_TRACEME, 0, 0, 0);
+            raise(SIGSTOP);
+            _exit(syscall(SYS_getppid) == pp ? 0 : 11);
+        }
+        int sig = 0, st = 0;
+        int ok = wait_stop(c, &sig) && sig == SIGSTOP;
+        int r1 = (int)ptrace(PTRACE_SETOPTIONS, c, 0, (void *)(long)PTRACE_O_TRACESECCOMP);
+        ptrace(PTRACE_CONT, c, 0, 0);
+        int w = waitpid(c, &st, 0);
+        int ev = w == c && WIFSTOPPED(st) && WSTOPSIG(st) == SIGTRAP && (st >> 16) == PTRACE_EVENT_SECCOMP;
+        unsigned long msg = 0;
+        int r2 = (int)ptrace(PTRACE_GETEVENTMSG, c, 0, &msg);
+        EXPECT("SECCOMP_RET_TRACE stops the tracee with PTRACE_EVENT_SECCOMP and the filter's data",
+               ok && r1 == 0 && ev && r2 == 0 && msg == 42);
+        ptrace(PTRACE_CONT, c, 0, 0);
+        w = waitpid(c, &st, 0);
+        EXPECT("the call runs once the tracer goes on, and the filter is not asked again",
+               w == c && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
+
+    /* Without PTRACE_O_TRACESECCOMP, or without a tracer, the call fails
+     * with ENOSYS. */
+    {
+        pid_t c = fork();
+        if (c == 0) {
+            if (!trace_getppid_filter()) _exit(10);
+            ptrace(PTRACE_TRACEME, 0, 0, 0);
+            raise(SIGSTOP);
+            _exit(syscall(SYS_getppid) == -1 && errno == ENOSYS ? 0 : 11);
+        }
+        int sig = 0, st = 0;
+        int ok = wait_stop(c, &sig) && sig == SIGSTOP;
+        ptrace(PTRACE_CONT, c, 0, 0);
+        int w = waitpid(c, &st, 0);
+        EXPECT("SECCOMP_RET_TRACE with a tracer that did not ask for it is ENOSYS",
+               ok && w == c && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+        pid_t d = fork();
+        if (d == 0) {
+            if (!trace_getppid_filter()) _exit(10);
+            _exit(syscall(SYS_getppid) == -1 && errno == ENOSYS ? 0 : 11);
+        }
+        EXPECT("and without a tracer", waitpid(d, &st, 0) == d && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
+
+#endif
 
     /* PTRACE_SEIZE and PTRACE_INTERRUPT on a tracee that sleeps in a system call. */
     {

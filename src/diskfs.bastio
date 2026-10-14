@@ -547,6 +547,16 @@ fn dir_room(d: &mut DiskFs, blocks: u64) -> bool
     }
   }
   let mut nd = try_balloc(n * BLOCK);
+  if blen(nd) != n * BLOCK && blen(d.ix) == IX_BYTES {
+    // The name index (2 MiB) can take the room the bigger directory needs
+    // on a machine with little memory: the directory matters more, and the
+    // index is built again by a lookup once there is room for it.
+    bfree(nd);
+    bfree(d.ix);
+    d.ix = balloc(0);
+    d.ixn = 0;
+    nd = try_balloc(n * BLOCK);
+  }
   if blen(nd) != n * BLOCK {
     bfree(nd);
     return false;
