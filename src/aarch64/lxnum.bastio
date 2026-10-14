@@ -140,6 +140,8 @@ fn lx_number(n: u64) -> u64
   if n == 136 { return LX_RT_SIGPENDING; }
   if n == 137 { return LX_RT_SIGTIMEDWAIT; }
   if n == 138 { return LX_RT_SIGQUEUEINFO; }
+  if n == 240 { return LX_RT_TGSIGQUEUEINFO; }
+  if n == 267 { return LX_SYNCFS; }
   if n == 139 { return LX_RT_SIGRETURN; }
   if n == 140 { return LX_SETPRIORITY; }
   if n == 141 { return LX_GETPRIORITY; }

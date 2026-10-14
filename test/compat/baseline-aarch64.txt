@@ -1074,6 +1074,7 @@ t_sys: keys: add_key, read, describe, update, request_key, link, search, unlink
 t_sys: keys: unknown type, bad payload, expiry, revocation, no such key
 t_sys: keys: a child shares the session keyring but not the process keyring
 t_sys: keys: request_key with a callout leaves a negative key
+t_sys: syncfs and rt_tgsigqueueinfo
 t_sys: seccomp USER_NOTIF: a supervisor answers a call
 t_sys: setdomainname
 t_sys: sethostname, uname, /proc/sys/kernel/hostname
