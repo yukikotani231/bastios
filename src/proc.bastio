@@ -422,11 +422,11 @@ const FD_CLOEXEC: u64 = 8192;
 
 const OFD_N: u64 = 4096;
 // Loop devices (src/lxloop.bastio): LOOP_N devices of LOOP_W words.
-const LOOP_N: u64 = 8;
+const LOOP_N: u64 = 32;
 const LOOP_W: u64 = 13;
-const LOOP_LEN: u64 = 104;             // LOOP_N * LOOP_W
+const LOOP_LEN: u64 = 416;             // LOOP_N * LOOP_W
 const DEV_LOOPCTL: u64 = 6;            // OF_DEV device /dev/loop-control
-const DEV_LOOP: u64 = 16;              // OF_DEV device /dev/loopN is DEV_LOOP + N
+const DEV_LOOP: u64 = 64;              // OF_DEV device /dev/loopN is DEV_LOOP + N
 const S_IFBLK: u64 = 0x61B0;           // a block device, rw-rw----
 // Pseudo-terminals (src/lxpty.bastio): PTY_N pairs of PTY_W words, and two
 // rings of PTY_CAP bytes each.
