@@ -238,6 +238,11 @@ $ bb cp /disk/strace /disk/a/usr/bin/strace && bb chroot /disk/a /bin/sh -c 'str
 2
 1
 
+== strace: attaches to a running process, and hears of its death when its parent is elsewhere
+$ bb cp /disk/strace /disk/a/usr/bin/strace && bb chroot /disk/a /bin/sh -c 'sleep 30 & p=$!; sleep 1; strace -p $p -o /root/sp.txt >/dev/null 2>&1 & sleep 4; kill $p; sleep 2; grep -c "^--- SIGTERM" /root/sp.txt; grep -c "^+++ killed by SIGTERM" /root/sp.txt'
+1
+1
+
 == nvim: LuaJIT loads a shared object that gcc built
 $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf 'local ffi = require("ffi")\nffi.cdef[[int answer(void);]]\nio.open("/root/so.txt", "w"):write(ffi.load("/root/libso.so").answer(), "\\n")\n' > /disk/a/root/so.lua && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -shared -fPIC -o libso.so so.c && nvim -l so.lua >/dev/null 2>&1'; bb cat /disk/a/root/so.txt
 42
