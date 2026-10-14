@@ -48,7 +48,11 @@ const LX_FSCONFIG: u64 = 431;
 const LX_FSMOUNT: u64 = 432;
 const LX_FSPICK: u64 = 433;
 const LX_UNSHARE: u64 = 272;
-const LX_IO_SETUP: u64 = 206;          // Linux AIO: nginx tries it and does without
+const LX_IO_SETUP: u64 = 206;          // Linux AIO (src/lxaio.bastio)
+const LX_IO_DESTROY: u64 = 207;
+const LX_IO_GETEVENTS: u64 = 208;
+const LX_IO_SUBMIT: u64 = 209;
+const LX_IO_CANCEL: u64 = 210;
 const LX_MEMBARRIER: u64 = 324;
 const LX_IO_URING_SETUP: u64 = 425;    // libuv and BIND try it and do without
 const LX_OPENAT: u64 = 257;
@@ -452,6 +456,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_xattr_call(n) {
     return lx_xattr_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));  // src/lxxattr.bastio
   }
+  if n >= LX_IO_SETUP && n <= LX_IO_CANCEL {
+    return lx_aio_call(&mut con, &mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10));  // src/lxaio.bastio
+  }
   if n == LX_ADD_KEY || n == LX_REQUEST_KEY || n == LX_KEYCTL {
     return lx_keys_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));  // src/lxkeys.bastio
   }
@@ -805,7 +812,7 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   }
   // The new mount API (runc and crun use it when present) likewise falls
   // back on ENOSYS.
-  if n == LX_RSEQ || n == LX_IO_SETUP || n == LX_IO_URING_SETUP
+  if n == LX_RSEQ || n == LX_IO_URING_SETUP
       || n == LX_OPEN_TREE || n == LX_MOVE_MOUNT || n == LX_FSOPEN
       || n == LX_FSCONFIG || n == LX_FSMOUNT || n == LX_FSPICK {
     ret(&mut k.procs, pid, ENOSYS);

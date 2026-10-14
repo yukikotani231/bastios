@@ -458,6 +458,88 @@ static int keys_negative(void) {
     return kctl(11, id, (long)b, sizeof b, 0) == -1 && errno == ENOKEY_;
 }
 
+/* Linux AIO: requests are done at submit; events come back from io_getevents. */
+struct aio_cb { uint64_t data; uint32_t key, rwf; uint16_t op, prio; uint32_t fd; uint64_t buf, nbytes; int64_t off; uint64_t res2; uint32_t flags, resfd; };
+struct aio_ev { uint64_t data, obj; int64_t res, res2; };
+#define AIO_SETUP SYS_io_setup
+#define AIO_DESTROY SYS_io_destroy
+#define AIO_SUBMIT SYS_io_submit
+#define AIO_GET SYS_io_getevents
+#define AIO_CANCEL SYS_io_cancel
+
+static void aio_prep(struct aio_cb *cb, int op, int fd, void *buf, size_t n, long off, uint64_t data) {
+    memset(cb, 0, sizeof *cb);
+    cb->op = op; cb->fd = fd; cb->buf = (uint64_t)buf; cb->nbytes = n; cb->off = off; cb->data = data;
+}
+
+static int aio_basic(void) {
+    unsigned long ctx = 0;
+    struct aio_cb w, r, *list[2];
+    struct aio_ev ev[2];
+    char out[16] = "kernel-aio", in[16];
+    int fd, ok = 0;
+    fd = open("/tmp/aio.dat", O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return 0;
+    if (syscall(AIO_SETUP, 4, &ctx) != 0 || ctx == 0) goto done;
+    aio_prep(&w, 1, fd, out, 10, 0, 0x11);
+    aio_prep(&r, 0, fd, in, 10, 0, 0x22);
+    memset(in, 0, sizeof in);
+    list[0] = &w; list[1] = &r;
+    if (syscall(AIO_SUBMIT, ctx, 2, list) != 2) goto done;                      /* both, in order */
+    if (syscall(AIO_GET, ctx, 2, 2, ev, NULL) != 2) goto done;
+    if (ev[0].data != 0x11 || ev[0].obj != (uint64_t)&w || ev[0].res != 10) goto done;
+    if (ev[1].data != 0x22 || ev[1].obj != (uint64_t)&r || ev[1].res != 10) goto done;
+    if (memcmp(in, "kernel-aio", 10)) goto done;
+    if (syscall(AIO_GET, ctx, 0, 2, ev, NULL) != 0) goto done;                  /* nothing left */
+    ok = syscall(AIO_DESTROY, ctx) == 0;
+done:
+    close(fd);
+    unlink("/tmp/aio.dat");
+    return ok;
+}
+
+static int aio_line;
+static int aio_errors(void) {
+    unsigned long ctx = 0, bad = 0xffffffffffffffffUL;
+    struct aio_cb cb, *list[1];
+    struct aio_ev ev[1];
+    char buf[16];
+    int p[2], fd, ok = 0;
+    if (syscall(AIO_SETUP, 1, NULL) != -1 || errno != EFAULT) return 0;
+    if (syscall(AIO_SETUP, 0, &ctx) != -1 || errno != EINVAL) return 0;
+    ctx = 5;
+    if (syscall(AIO_SETUP, 1, &ctx) != -1 || errno != EINVAL) return 0;         /* *ctxp not zero */
+    ctx = 0;
+    if (syscall(AIO_SETUP, 1, &ctx) != 0) return 0;
+    if (syscall(AIO_DESTROY, bad) != -1 || errno != EINVAL) { aio_line = __LINE__; goto done; }
+    if (syscall(AIO_GET, bad, 0, 0, ev, NULL) != -1 || errno != EINVAL) { aio_line = __LINE__; goto done; }
+    if (syscall(AIO_CANCEL, ctx, NULL, NULL) != -1 || errno != EFAULT) { aio_line = __LINE__; goto done; }
+    list[0] = &cb;
+    aio_prep(&cb, 0, -1, buf, 16, 0, 1);
+    if (syscall(AIO_SUBMIT, ctx, 1, list) != -1 || errno != EBADF) { aio_line = __LINE__; goto done; }
+    if (syscall(AIO_SUBMIT, bad, 1, list) != -1 || errno != EINVAL) { aio_line = __LINE__; goto done; }
+    if (syscall(AIO_SUBMIT, ctx, 0, NULL) != 0) { aio_line = __LINE__; goto done; }
+    if (syscall(AIO_SUBMIT, ctx, 1, (void *)-1) != -1 || errno != EFAULT) { aio_line = __LINE__; goto done; }
+    fd = open("/tmp/aio.ro", O_RDONLY | O_CREAT, 0600);
+    if (fd < 0) { aio_line = __LINE__; goto done; }
+    aio_prep(&cb, 1, fd, buf, 16, 0, 1);                                        /* a write to a read-only file */
+    if (syscall(AIO_SUBMIT, ctx, 1, list) != -1 || errno != EBADF) { close(fd); { aio_line = __LINE__; goto done; } }
+    close(fd);
+    unlink("/tmp/aio.ro");
+    if (pipe(p) != 0) { aio_line = __LINE__; goto done; }
+    aio_prep(&cb, 0, p[0], buf, 16, 0, 0x33);                                   /* an empty pipe is EAGAIN in the event */
+    cb.rwf = 8;                                                                 /* RWF_NOWAIT */
+    if (syscall(AIO_SUBMIT, ctx, 1, list) != 1) { aio_line = __LINE__; goto pipes; }
+    if (syscall(AIO_GET, ctx, 1, 1, ev, NULL) != 1 || ev[0].data != 0x33 || ev[0].res != -EAGAIN) { aio_line = __LINE__; goto pipes; }
+    ok = 1;
+pipes:
+    close(p[0]); close(p[1]);
+done:
+    syscall(AIO_DESTROY, ctx);
+    if (!ok) errno = aio_line;
+    return ok;
+}
+
 int main(void) {
     setup();
     EXPECT("sethostname, uname, /proc/sys/kernel/hostname", hostname());
@@ -476,5 +558,7 @@ int main(void) {
     EXPECT("keys: unknown type, bad payload, expiry, revocation, no such key", keys_errors());
     EXPECT("keys: a child shares the session keyring but not the process keyring", keys_inherit());
     EXPECT("keys: request_key with a callout leaves a negative key", keys_negative());
+    EXPECT("aio: io_submit does the requests, io_getevents returns them in order", aio_basic());
+    EXPECT("aio: bad context, bad descriptor, bad pointer, and an empty pipe finishes with EAGAIN", aio_errors());
     return done();
 }
