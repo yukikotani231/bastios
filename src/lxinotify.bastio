@@ -34,6 +34,7 @@
 // them.
 
 import "lxperm.bastio";
+import "lxxattr.bastio";
 import "lxopen2.bastio";
 
 const LX_INOTIFY_INIT: u64 = 253;
@@ -460,6 +461,7 @@ fn ino_gone(k: &mut Kernel, h: u64)
   if h == NO_FILE {
     return;
   }
+  xa_gone(&mut k, h);                  // its extended attributes (src/lxxattr.bastio)
   let mut i = 0;
   while i < INO_N
     invariant i <= INO_N && kok(k)
