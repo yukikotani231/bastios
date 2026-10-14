@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Boot
 
+- The disk holds 262143 files and directories (32767 before): the directory takes up to 16384 blocks, named by up to 32 extension blocks, and the in-memory directory and name index grow to 64 MiB and 2 MiB. Disk formats are unchanged. `shell_test.sh` creates 33000 files in one directory (the old limit would have refused the 32768th), reboots, and finds them; `test/fsck.py` reads the larger directory. Filling the whole table is no longer tested (it is eight times longer than the old fill).
 - Tested: 255 processors (the most xAPIC ids can address) start in QEMU without KVM, reach the shell in about ten seconds, and every page comes back at power off. Beyond that the kernel already runs processors in x2APIC mode, but the test for it needs QEMU 9.
 - Executable holds: 512 programs at once can be loaded lazily (128 before), one for each possible process; past the limit a program is loaded whole, as before.
 - System V semaphores: 1024 SEM_UNDO adjustments in the whole system (256 before), so one process can hold an undo for each of 512 semaphores and still have the rest of the machine room. `t_sysv` checks 512 in one process, all undone at exit.

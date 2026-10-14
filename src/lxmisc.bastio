@@ -929,8 +929,21 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_sysinfo(&mut k, pid, a);
   } else if n == LX_STATFS {
     let pn = lx_path_at(&mut k, pid, AT_FDCWD, a);
+    let mut pfd = NO_RESULT;
+    if pn != NO_RESULT && pn <= XFER {
+      pfd = proc_fd(k.procs, k.fs.xfer, pn);   // /proc/PID/fd/N: the file system of what the descriptor holds
+    }
     if pn == NO_RESULT {
       r = k.perr;
+    } else if pfd != NO_RESULT {
+      let d = fd_look(k, pfd / LXNFD, pfd % LXNFD);
+      if tgid(k.procs, pfd / LXNFD) != tgid(k.procs, pid) {
+        r = EACCES;
+      } else if d.kind == K_BAD {
+        r = ENOENT;
+      } else {
+        r = lx_fstatfs(&mut k, pid, d, b);
+      }
     } else if !path_there(&mut k, pn) {
       r = ENOENT;
     } else if cg_under(k, pn) {

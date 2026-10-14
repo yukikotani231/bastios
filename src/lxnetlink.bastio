@@ -204,9 +204,18 @@ fn nl_send(k: &mut Kernel, pid: u64, q: u64, buf: u64, n: u64) -> u64
   }
   netns_gc(&mut k);                          // a link whose namespace ended is gone
   let tgt = nl_target(k, n);
-  let admin = cap_has(k, pid, CAP_NET_ADMIN);
+  let admin = net_admin(k, pid);
   nic_nl_request(&mut k.nic, q, k.fs.xfer, n, tgt, admin);
   return n;
+}
+
+/// Whether process pid may configure its network namespace (CAP_NET_ADMIN):
+/// as root does, or as the root of a user namespace does in a network
+/// namespace of its own, never in the first one.
+fn net_admin(k: &Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  return cap_has(k, pid, CAP_NET_ADMIN) || (pget(k.procs, pid, F_NETNS) != 0 && ns_cap(k, pid, CAP_NET_ADMIN));
 }
 
 /// recv on a netlink socket: whole answers, up to n bytes; the source
