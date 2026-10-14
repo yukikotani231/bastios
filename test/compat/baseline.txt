@@ -1047,6 +1047,7 @@ apps: ripgrep: replacement, multi-line and standard input
 apps: ripgrep: search with line numbers, honouring .ignore
 alpine: git: clone over HTTP and over HTTPS (git's dumb protocol, curl's TLS)
 alpine: nvim: tree-sitter parses help text with the vimdoc parser
+alpine: nvim: :diffthis marks the line that differs, and vim.diff finds the hunk
 alpine: nvim: LuaJIT loads a shared object that gcc built
 alpine: nvim: a plugin cloned over HTTP is on the packpath and runs at startup
 alpine: nvim: a small plugin manager in Lua clones a plugin, loads it, then updates it with git pull
@@ -1071,6 +1072,7 @@ alpine: tmux: a client on the console passes it to the server (SCM_RIGHTS of the
 alpine: tmux: a detached session runs a shell on a pseudo-terminal, takes keys and shows its screen
 alpine: apk: install ripgrep and fzf over HTTP
 alpine: rg and fzf: search a tree, filter a list
+alpine: nvim: :make reads gcc's error into the quickfix list and :cc jumps to its line
 alpine: nvim: :grep with ripgrep fills the quickfix list
 alpine: cmake: configure, build and run a C project
 alpine: nvim: the LSP client talks to lua-language-server, a real server, and gets a hover

@@ -221,6 +221,10 @@ gcc says 42
 $ bb printf 'local t = vim.treesitter.get_string_parser("*tag*\\tsome text\\n", "vimdoc"):parse()[1]:root()\nio.open("/root/ts.txt", "w"):write(t:type(), " ", t:child_count(), " ", t:sexpr():len() > 20 and "tree" or "none", "\\n")\n' > /disk/a/root/ts.lua && bb chroot /disk/a /usr/bin/nvim -l /root/ts.lua >/dev/null 2>&1; bb cat /disk/a/root/ts.txt
 help_file 1 tree
 
+== nvim: :diffthis marks the line that differs, and vim.diff finds the hunk
+$ bb printf 'vim.cmd("edit /root/da.txt | call setline(1, [\"same\", \"old\", \"tail\"]) | diffthis")\nvim.cmd("vsplit /root/db.txt | call setline(1, [\"same\", \"new\", \"tail\"]) | diffthis")\nlocal function hl(l) return vim.fn.diff_hlID(l, 1) ~= 0 and "marked" or "plain" end\nlocal d = vim.diff("same\\nold\\ntail\\n", "same\\nnew\\ntail\\n", {result_type = "indices"})\nio.open("/root/dif.txt", "w"):write(hl(1), " ", hl(2), " ", hl(3), " ", vim.wo.diff and "diff" or "nodiff", " ", d[1][1], "\\n")\n' > /disk/a/root/dif.lua && bb chroot /disk/a /usr/bin/nvim -l /root/dif.lua >/dev/null 2>&1; bb cat /disk/a/root/dif.txt
+plain marked plain diff 2
+
 == nvim: LuaJIT loads a shared object that gcc built
 $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf 'local ffi = require("ffi")\nffi.cdef[[int answer(void);]]\nio.open("/root/so.txt", "w"):write(ffi.load("/root/libso.so").answer(), "\\n")\n' > /disk/a/root/so.lua && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -shared -fPIC -o libso.so so.c && nvim -l so.lua >/dev/null 2>&1'; bb cat /disk/a/root/so.txt
 42
@@ -361,6 +365,10 @@ a.txt:1
 sub/b.txt:1
 2
 banana
+
+== nvim: :make reads gcc's error into the quickfix list and :cc jumps to its line
+$ bb printf 'int main(void) {\n  return undefined_var;\n}\n' > /disk/a/root/bad.c && bb printf 'vim.o.makeprg = "gcc -c /root/bad.c -o /dev/null"\nvim.cmd("silent make")\nlocal at, e\nfor i, x in ipairs(vim.fn.getqflist()) do if x.valid == 1 then at, e = i, x break end end\nvim.cmd("cc " .. at)\nio.open("/root/qf.txt", "w"):write(e.lnum, " ", vim.fn.line("."), " ", vim.fn.fnamemodify(vim.fn.bufname(vim.fn.bufnr()), ":t"), "\\n")\n' > /disk/a/root/qf.lua && bb chroot /disk/a /bin/sh -c 'cd /root && nvim -l /root/qf.lua >/dev/null 2>&1'; bb cat /disk/a/root/qf.txt
+2 2 bad.c
 
 == nvim: :grep with ripgrep fills the quickfix list
 $ bb chroot /disk/a /usr/bin/nvim --headless -u NONE -c 'set grepprg=rg\ --vimgrep' -c 'silent grep needle /root/rgp' -c 'call writefile([len(getqflist()) . " " . join(sort(map(getqflist(), "fnamemodify(bufname(v:val.bufnr), \":t\")")), ",")], "/root/rg.txt")' -c 'qa!' >/dev/null 2>&1; bb cat /disk/a/root/rg.txt
