@@ -257,3 +257,356 @@ fn sct_text(i: u64) -> Str {
   }
   return "\n";
 }
+
+// The directories under /proc/sys, so that they open, stat and list: the
+// path of directory j, and its children (a name and whether it is itself a
+// directory). Every file the kernel serves under /proc/sys is a child of
+// its parent; t_proc lists each directory and opens what it lists.
+
+const SYSD_N: u64 = 12;
+
+fn sysd_path(j: u64) -> Str {
+  if j == 0 {
+    return "sys";
+  }
+  if j == 1 {
+    return "sys/fs";
+  }
+  if j == 2 {
+    return "sys/fs/inotify";
+  }
+  if j == 3 {
+    return "sys/kernel";
+  }
+  if j == 4 {
+    return "sys/kernel/random";
+  }
+  if j == 5 {
+    return "sys/net";
+  }
+  if j == 6 {
+    return "sys/net/core";
+  }
+  if j == 7 {
+    return "sys/net/ipv4";
+  }
+  if j == 8 {
+    return "sys/net/ipv6";
+  }
+  if j == 9 {
+    return "sys/net/ipv6/conf";
+  }
+  if j == 10 {
+    return "sys/net/ipv6/conf/all";
+  }
+  if j == 11 {
+    return "sys/vm";
+  }
+  return "sys";
+}
+
+fn sysd_count(j: u64) -> u64 {
+  if j == 0 {
+    return 4;
+  }
+  if j == 1 {
+    return 8;
+  }
+  if j == 2 {
+    return 3;
+  }
+  if j == 3 {
+    return 29;
+  }
+  if j == 4 {
+    return 2;
+  }
+  if j == 5 {
+    return 3;
+  }
+  if j == 6 {
+    return 4;
+  }
+  if j == 7 {
+    return 6;
+  }
+  if j == 8 {
+    return 1;
+  }
+  if j == 9 {
+    return 1;
+  }
+  if j == 10 {
+    return 1;
+  }
+  if j == 11 {
+    return 13;
+  }
+  return 0;
+}
+
+fn sysd_child(j: u64, i: u64) -> Str {
+  if j == 0 && i == 0 {
+    return "fs";
+  }
+  if j == 0 && i == 1 {
+    return "kernel";
+  }
+  if j == 0 && i == 2 {
+    return "net";
+  }
+  if j == 0 && i == 3 {
+    return "vm";
+  }
+  if j == 1 && i == 0 {
+    return "inotify";
+  }
+  if j == 1 && i == 1 {
+    return "file-max";
+  }
+  if j == 1 && i == 2 {
+    return "file-nr";
+  }
+  if j == 1 && i == 3 {
+    return "nr_open";
+  }
+  if j == 1 && i == 4 {
+    return "pipe-max-size";
+  }
+  if j == 1 && i == 5 {
+    return "protected_hardlinks";
+  }
+  if j == 1 && i == 6 {
+    return "protected_symlinks";
+  }
+  if j == 1 && i == 7 {
+    return "suid_dumpable";
+  }
+  if j == 2 && i == 0 {
+    return "max_queued_events";
+  }
+  if j == 2 && i == 1 {
+    return "max_user_instances";
+  }
+  if j == 2 && i == 2 {
+    return "max_user_watches";
+  }
+  if j == 3 && i == 0 {
+    return "random";
+  }
+  if j == 3 && i == 1 {
+    return "cap_last_cap";
+  }
+  if j == 3 && i == 2 {
+    return "core_pattern";
+  }
+  if j == 3 && i == 3 {
+    return "dmesg_restrict";
+  }
+  if j == 3 && i == 4 {
+    return "domainname";
+  }
+  if j == 3 && i == 5 {
+    return "hostname";
+  }
+  if j == 3 && i == 6 {
+    return "kptr_restrict";
+  }
+  if j == 3 && i == 7 {
+    return "msg_next_id";
+  }
+  if j == 3 && i == 8 {
+    return "msgmax";
+  }
+  if j == 3 && i == 9 {
+    return "msgmnb";
+  }
+  if j == 3 && i == 10 {
+    return "msgmni";
+  }
+  if j == 3 && i == 11 {
+    return "ngroups_max";
+  }
+  if j == 3 && i == 12 {
+    return "osrelease";
+  }
+  if j == 3 && i == 13 {
+    return "ostype";
+  }
+  if j == 3 && i == 14 {
+    return "panic";
+  }
+  if j == 3 && i == 15 {
+    return "perf_event_paranoid";
+  }
+  if j == 3 && i == 16 {
+    return "pid_max";
+  }
+  if j == 3 && i == 17 {
+    return "printk";
+  }
+  if j == 3 && i == 18 {
+    return "randomize_va_space";
+  }
+  if j == 3 && i == 19 {
+    return "sem";
+  }
+  if j == 3 && i == 20 {
+    return "sem_next_id";
+  }
+  if j == 3 && i == 21 {
+    return "shm_next_id";
+  }
+  if j == 3 && i == 22 {
+    return "shmall";
+  }
+  if j == 3 && i == 23 {
+    return "shmmax";
+  }
+  if j == 3 && i == 24 {
+    return "shmmni";
+  }
+  if j == 3 && i == 25 {
+    return "sysrq";
+  }
+  if j == 3 && i == 26 {
+    return "tainted";
+  }
+  if j == 3 && i == 27 {
+    return "threads-max";
+  }
+  if j == 3 && i == 28 {
+    return "version";
+  }
+  if j == 4 && i == 0 {
+    return "entropy_avail";
+  }
+  if j == 4 && i == 1 {
+    return "poolsize";
+  }
+  if j == 5 && i == 0 {
+    return "core";
+  }
+  if j == 5 && i == 1 {
+    return "ipv4";
+  }
+  if j == 5 && i == 2 {
+    return "ipv6";
+  }
+  if j == 6 && i == 0 {
+    return "netdev_max_backlog";
+  }
+  if j == 6 && i == 1 {
+    return "rmem_max";
+  }
+  if j == 6 && i == 2 {
+    return "somaxconn";
+  }
+  if j == 6 && i == 3 {
+    return "wmem_max";
+  }
+  if j == 7 && i == 0 {
+    return "ip_forward";
+  }
+  if j == 7 && i == 1 {
+    return "ip_local_port_range";
+  }
+  if j == 7 && i == 2 {
+    return "tcp_fin_timeout";
+  }
+  if j == 7 && i == 3 {
+    return "tcp_keepalive_time";
+  }
+  if j == 7 && i == 4 {
+    return "tcp_syncookies";
+  }
+  if j == 7 && i == 5 {
+    return "tcp_tw_reuse";
+  }
+  if j == 8 && i == 0 {
+    return "conf";
+  }
+  if j == 9 && i == 0 {
+    return "all";
+  }
+  if j == 10 && i == 0 {
+    return "disable_ipv6";
+  }
+  if j == 11 && i == 0 {
+    return "dirty_background_ratio";
+  }
+  if j == 11 && i == 1 {
+    return "dirty_ratio";
+  }
+  if j == 11 && i == 2 {
+    return "drop_caches";
+  }
+  if j == 11 && i == 3 {
+    return "max_map_count";
+  }
+  if j == 11 && i == 4 {
+    return "min_free_kbytes";
+  }
+  if j == 11 && i == 5 {
+    return "mmap_min_addr";
+  }
+  if j == 11 && i == 6 {
+    return "oom_kill_allocating_task";
+  }
+  if j == 11 && i == 7 {
+    return "overcommit_memory";
+  }
+  if j == 11 && i == 8 {
+    return "overcommit_ratio";
+  }
+  if j == 11 && i == 9 {
+    return "page-cluster";
+  }
+  if j == 11 && i == 10 {
+    return "panic_on_oom";
+  }
+  if j == 11 && i == 11 {
+    return "swappiness";
+  }
+  if j == 11 && i == 12 {
+    return "vfs_cache_pressure";
+  }
+  return "";
+}
+
+fn sysd_child_dir(j: u64, i: u64) -> bool {
+  if j == 0 && i == 0 {
+    return true;
+  }
+  if j == 0 && i == 1 {
+    return true;
+  }
+  if j == 0 && i == 2 {
+    return true;
+  }
+  if j == 0 && i == 3 {
+    return true;
+  }
+  if j == 1 && i == 0 {
+    return true;
+  }
+  if j == 3 && i == 0 {
+    return true;
+  }
+  if j == 5 && i == 0 {
+    return true;
+  }
+  if j == 5 && i == 1 {
+    return true;
+  }
+  if j == 5 && i == 2 {
+    return true;
+  }
+  if j == 8 && i == 0 {
+    return true;
+  }
+  if j == 9 && i == 0 {
+    return true;
+  }
+  return false;
+}
