@@ -36,6 +36,10 @@
 // same tracer, stopped by SIGSTOP. A vfork parent hears of its event only
 // when it runs again.
 //
+// SECCOMP_RET_TRACE with PTRACE_O_TRACESECCOMP stops the tracee before the
+// call as a PTRACE_SYSCALL stop does, but with PTRACE_EVENT_SECCOMP in the
+// status and the filter's data as the event message (pt_seccomp_stop).
+//
 // Not done: the exit event and PTRACE_O_TRACEVFORKDONE (PTRACE_SETOPTIONS
 // keeps them and only PTRACE_O_EXITKILL acts), the floating point and debug
 // registers, PTRACE_LISTEN, and PTRACE_GET_SYSCALL_INFO. A tracer that is not the parent hears of its
@@ -233,6 +237,33 @@ fn pt_sys_entry(k: &mut Kernel, p: u64, restarted: bool) -> bool
   }
   tr_stop(&mut k, p, 5 + 128 * (tr_opt(tr_get(k, p)) % 2));   // SIGTRAP, with 0x80 for PTRACE_O_TRACESYSGOOD
   return true;
+}
+
+/// Whether process p is traced by a tracer that asked to hear of
+/// SECCOMP_RET_TRACE (PTRACE_O_TRACESECCOMP).
+fn pt_wants_seccomp(k: &Kernel, p: u64) -> bool
+  requires kok(k) && 1 <= p && p < NPROC
+{
+  return tr_tracer(k, p) != 0 && tr_opt(tr_get(k, p)) / 128 % 2 == 1;
+}
+
+/// A filter of process p answered SECCOMP_RET_TRACE with data (16 bits) and
+/// its tracer asked for that: p stops before the call with SIGTRAP and
+/// PTRACE_EVENT_SECCOMP in the status (PTRACE_GETEVENTMSG gives data). It
+/// stops as before a system call (rax is -ENOSYS, the call's number stays
+/// for the tracer to read or change), and the call starts again when the
+/// tracer resumes it, without the filters (SPS_TRACED, src/lxseccomp.bastio).
+fn pt_seccomp_stop(k: &mut Kernel, p: u64, data: u64)
+  requires kok(k) && 1 <= p && p < NPROC && data < 65536
+  ensures kok(k)
+{
+  let t = tr2_get(k, p);
+  let nr = smaller(pget(k.procs, p, F_REGS + R_LXNR), 1023);
+  tr2_put(&mut k, p, t % TS_ENTRY + TS_ENTRY + TS_SECC + nr * TS_NR + 7 * TS_EV + data * TS_MSG);
+  if PT_ENTRY_RET == 1 {
+    pset(&mut k.procs, p, F_REGS + R_RET, ENOSYS);
+  }
+  tr_stop(&mut k, p, 5);
 }
 
 /// Process p has made its system call. If its tracer asked to see calls it
@@ -640,7 +671,7 @@ fn lx_ptrace(k: &mut Kernel, pid: u64, req0: u64, p0: u64, addr: u64, data: u64)
     let mut code = 0;
     if sig == 5 {
       let mut ev = t2 / TS_EV % 16;
-      if t2 / TS_ENTRY % 2 == 1 || t2 / TS_EXIT % 2 == 1 {
+      if (t2 / TS_ENTRY % 2 == 1 || t2 / TS_EXIT % 2 == 1) && t2 / TS_SECC % 2 == 0 {
         ev = 0;
       }
       if ev == EV_STOP {
