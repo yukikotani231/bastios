@@ -1945,7 +1945,10 @@ qemu.kill(); qemu.wait()
 # entries the superblock's first sector has room to name, and a second
 # boot finds them.
 big = os.path.join(disk_dir.name, "big.img")
-with open(big, "wb") as f:
+# (formatted with user/mbig on it, then made 40 GiB: the file system takes
+# the volume's size at mount)
+subprocess.run([sys.executable, "test/compat/mkdisk.py", big, "mbig=build/user/mbig.elf"], check=True)
+with open(big, "r+b") as f:
     f.truncate(40 << 30)
 qemu = boot(1, extra=["-drive", f"file={big},format=raw,if=none,id=bg", "-device", "virtio-blk-pci,drive=bg"])
 out = b""
@@ -1959,7 +1962,7 @@ for line, want, until in [
     # Files past the 1 GiB a root map reaches: pieces at offsets up to 40 GiB
     # (a super map of root maps, one per GiB), a write across a GiB boundary,
     # cuts and regrowth, and every block freed at the end (user/mbig.c).
-    ("mbig /disk", b"mbig: ok, files past 1 GiB in /disk", b"\n# "),
+    ("/disk/mbig /disk", b"mbig: ok, files past 1 GiB in /disk", b"\n# "),
     ("mkdir disk/many; i=0; while [ $i -lt 1100 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; sleep 1", b"\r\n1100\r\n", b"\n# "),
     # One directory takes more entries than the 32767 a disk held before the
     # directory table grew (it holds 262143 now): the creates past that

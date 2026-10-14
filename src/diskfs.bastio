@@ -286,13 +286,13 @@ fn tree_in(d: &DiskFs, m: &Bytes, at: u64) -> u64
   ensures result == 0 || (result >= DATA_B0 && result < MAX_BLOCKS) || (result >= SEG_FLAG + DATA_B0 && result < SEG_FLAG + MAX_BLOCKS)
 {
   let w = get_u64(m, at);
-  if w >= SEG_FLAG {
-    if w >= SEG_FLAG + DATA_B0 && w < SEG_FLAG + d.blocks {
+  if w < SEG_FLAG {
+    if w >= DATA_B0 && w < d.blocks {
       return w;
     }
     return 0;
   }
-  if w >= DATA_B0 && w < d.blocks {
+  if w >= SEG_FLAG + DATA_B0 && w < SEG_FLAG + d.blocks {
     return w;
   }
   return 0;
