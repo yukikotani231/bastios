@@ -274,7 +274,6 @@ t_file: getxattr of what is not there is ENODATA
 t_file: getxattr reads it back
 t_file: getxattr with size 0 gives the length
 t_file: link
-t_file: listxattr empty
 t_file: listxattr into too small a buffer is ERANGE
 t_file: listxattr lists both, NUL separated
 t_file: listxattr of a fresh file is empty
@@ -291,7 +290,6 @@ t_file: pwrite
 t_file: read back
 t_file: readlink
 t_file: readv
-t_file: removexattr of a missing file
 t_file: removexattr of a missing name is ENODATA
 t_file: removexattr removes one
 t_file: rename
@@ -869,6 +867,15 @@ t_proc: oom_score_adj above 1000 is EINVAL
 t_proc: oom_score_adj rejects text
 t_proc: oom_score_adj can be set back to 0
 t_proc: /proc/self lists oom_score_adj
+t_proc: fdinfo of a file starts at position 0
+t_proc: fdinfo follows the position
+t_proc: fdinfo flags carry O_CLOEXEC
+t_proc: fdinfo has mnt_id and ino
+t_proc: an eventfd shows its count
+t_proc: an inotify instance lists its watches
+t_proc: a pidfd shows the process
+t_proc: fdinfo lists the open descriptors
+t_proc: /proc/self lists fdinfo
 t_ptrace: PTRACE_ATTACH stops the target with SIGSTOP
 t_ptrace: PTRACE_CONT with a signal runs the handler for it
 t_ptrace: PTRACE_CONT without a signal drops the one that stopped it, and the child saw the poke

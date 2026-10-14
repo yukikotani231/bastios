@@ -10,6 +10,8 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <sched.h>
+#include <sys/eventfd.h>
+#include <sys/inotify.h>
 
 /* Reads up to n - 1 bytes of path into b as a string; the count, or -1. */
 static int slurp(const char *path, char *b, int n) {
@@ -207,6 +209,27 @@ int main(int argc, char **argv) {
         EXPECT("oom_score_adj rejects text", ({ int fd = open("/proc/self/oom_score_adj", O_WRONLY); int r = fd < 0 ? 0 : (write(fd, "x\n", 2) == -1 && errno == EINVAL); if (fd >= 0) close(fd); r; }));
         EXPECT("oom_score_adj can be set back to 0", put("/proc/self/oom_score_adj", "0\n") && slurp("/proc/self/oom_score_adj", b, sizeof b) > 0 && strcmp(b, "0\n") == 0);
         EXPECT("/proc/self lists oom_score_adj", ({ DIR *d = opendir("/proc/self"); struct dirent *e; int seen = 0; while (d && (e = readdir(d))) if (!strcmp(e->d_name, "oom_score_adj")) seen = 1; if (d) closedir(d); seen; }));
+    }
+    {
+        /* /proc/PID/fdinfo: position, flags, mount and inode of each open
+         * descriptor, and what its kind adds. */
+        char b[400], path[64];
+        int f = open("/proc/self/exe", O_RDONLY | O_CLOEXEC), e = eventfd(0, 0), n = inotify_init1(0), w = -1;
+        char c5[5];
+        uint64_t one = 5;
+        EXPECT("fdinfo of a file starts at position 0", f >= 0 && (snprintf(path, sizeof path, "/proc/self/fdinfo/%d", f), slurp(path, b, sizeof b)) > 0 && strncmp(b, "pos:\t0\n", 7) == 0);
+        EXPECT("fdinfo follows the position", read(f, c5, 5) == 5 && slurp(path, b, sizeof b) > 0 && strncmp(b, "pos:\t5\n", 7) == 0);
+        EXPECT("fdinfo flags carry O_CLOEXEC", strstr(b, "flags:\t02000000\n") != NULL);
+        EXPECT("fdinfo has mnt_id and ino", strstr(b, "\nmnt_id:\t") != NULL && strstr(b, "\nino:\t") != NULL);
+        EXPECT("an eventfd shows its count", e >= 0 && write(e, &one, 8) == 8 && (snprintf(path, sizeof path, "/proc/self/fdinfo/%d", e), slurp(path, b, sizeof b)) > 0 && strstr(b, "eventfd-count: 0000000000000005\n") != NULL);
+        EXPECT("an inotify instance lists its watches", n >= 0 && (w = inotify_add_watch(n, ".", IN_MODIFY | IN_ONESHOT)) > 0 && (snprintf(path, sizeof path, "/proc/self/fdinfo/%d", n), slurp(path, b, sizeof b)) > 0
+               && ({ int wd = 0; unsigned ino, sdev, mask; char *q = strstr(b, "inotify wd:"); q && sscanf(q, "inotify wd:%d ino:%x sdev:%x mask:%x", &wd, &ino, &sdev, &mask) == 4 && wd == w && mask == (IN_MODIFY | IN_ONESHOT); }));
+        EXPECT("a pidfd shows the process", ({ int pf = syscall(434, getpid(), 0), r = 0; char want[32]; if (pf >= 0) { snprintf(path, sizeof path, "/proc/self/fdinfo/%d", pf); snprintf(want, sizeof want, "Pid:\t%d\n", (int)getpid()); r = slurp(path, b, sizeof b) > 0 && strstr(b, want) != NULL; close(pf); } r; }));
+        EXPECT("fdinfo lists the open descriptors", ({ DIR *d = opendir("/proc/self/fdinfo"); struct dirent *de; int seen = 0; char nm[16]; snprintf(nm, sizeof nm, "%d", f); while (d && (de = readdir(d))) if (!strcmp(de->d_name, nm)) seen = 1; if (d) closedir(d); seen; }));
+        EXPECT("/proc/self lists fdinfo", ({ DIR *d = opendir("/proc/self"); struct dirent *de; int seen = 0; while (d && (de = readdir(d))) if (!strcmp(de->d_name, "fdinfo")) seen = 1; if (d) closedir(d); seen; }));
+        if (f >= 0) close(f);
+        if (e >= 0) close(e);
+        if (n >= 0) close(n);
     }
     return done();
 }
