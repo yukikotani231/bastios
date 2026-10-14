@@ -145,7 +145,7 @@ fn lx_pick(k: &mut Kernel, from: u64) -> u64
   requires kok(k)
   ensures kok(k) && result < NPROC
 {
-  let cap = len(k.procs) / STRIDE;   // past it, every process is FREE
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);   // past it, every process is FREE
   if cap == 0 {
     return 0;
   }
