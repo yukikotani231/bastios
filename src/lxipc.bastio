@@ -17,7 +17,7 @@
 // Shared memory segments (shmget, shmat, shmdt, shmctl) keep their pages
 // in k.shm; /proc/sysvipc and the IPC sysctls are printed from here.
 //
-// Limits are small and fixed: 16 queues and 16 semaphore sets, SEMMSL 64 semaphores
+// Limits are small and fixed: 32 queues, 32 semaphore sets and 32 shared memory segments, SEMMSL 64 semaphores
 // a set, MQ_MSGS messages a queue whatever msg_qbytes says, and IPC_SET
 // may not raise msg_qbytes past MSGMNB even for root. A wait runs the
 // call again and again rather than sleeping until a change. MSG_COPY
@@ -50,6 +50,29 @@ const SHM_STAT_ANY: u64 = 15;
 const SHM_DEST: u64 = 512;             // in the mode: removed, waiting for the last detach
 const SHM_LOCKED: u64 = 1024;
 const SHMMAX: u64 = 2097152;           // a segment is at most one level-1 table of pages
+
+/// The largest segment shmget makes: SHMMAX, or less if /proc/sys/kernel/shmmax was written.
+fn shmmax_now(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= SHMMAX
+{
+  let w = get(k.sys, SYS_SHMMAX);
+  if w == 0 {
+    return SHMMAX;
+  }
+  return smaller(w - 1, SHMMAX);
+}
+
+/// The value /proc/sys/kernel/shmmax reads as: what was written, or SHMMAX.
+fn shmmax_shown(k: &Kernel) -> u64
+  requires kok(k)
+{
+  let w = get(k.sys, SYS_SHMMAX);
+  if w == 0 {
+    return SHMMAX;
+  }
+  return w - 1;
+}
 const SHM_PAGES: u64 = 512;
 const SHMID_DS: u64 = 112;             // struct shmid64_ds
 
@@ -82,7 +105,7 @@ const EIDRM: u64 = 18446744073709551573;   // 2^64 - 43
 const ENOMSG: u64 = 18446744073709551574;  // 2^64 - 42
 const LONG_NEG: u64 = 0x8000000000000000;  // a negative long argument
 
-const IPC_SETS: u64 = 16;              // queues, and semaphore sets
+const IPC_SETS: u64 = 32;              // queues, and semaphore sets
 const IPC_SPAN: u64 = 32768;           // id = seq * IPC_SPAN + slot, as Linux's IPCMNI
 const HW: u64 = 16;                    // header words
 const H_SEQ: u64 = 0;                  // 0: free; else the id's seq + 1 (an id may have seq 0, see ipc_get)
@@ -105,16 +128,16 @@ const H_NS: u64 = 15;                  // the IPC namespace (src/lxns.bastio)
 const KQ: u64 = 0;                     // the kinds: message queues,
 const KS: u64 = 1;                     // semaphore sets,
 const KM: u64 = 2;                     // and shared memory segments
-const SH_BASE: u64 = 256;              // IPC_SETS * HW
+const SH_BASE: u64 = 512;              // IPC_SETS * HW
 const SEMMSL: u64 = 64;
 const SEMVMX: u64 = 32767;
 const SEMOPM: u64 = 500;
-const SV_BASE: u64 = 512;              // SH_BASE + IPC_SETS * HW
-const UN_BASE: u64 = 2560;             // SV_BASE + IPC_SETS * SEMMSL * 2
+const SV_BASE: u64 = 1024;             // SH_BASE + IPC_SETS * HW
+const UN_BASE: u64 = 5120;             // SV_BASE + IPC_SETS * SEMMSL * 2
 const UNDO_N: u64 = 256;
-const SM_BASE: u64 = 3584;             // UN_BASE + UNDO_N * 4: shared memory headers
-const SA_BASE: u64 = 3840;             // SM_BASE + IPC_SETS * HW: attachments
-const SA_N: u64 = 8;                   // attachments a process: segment + 1, first page, pages
+const SM_BASE: u64 = 6144;             // UN_BASE + UNDO_N * 4: shared memory headers
+const SA_BASE: u64 = 6656;             // SM_BASE + IPC_SETS * HW: attachments
+const SA_N: u64 = 16;                  // attachments a process: segment + 1, first page, pages
 const SA_W: u64 = 3;
 const ADJ_BIAS: u64 = 65536;           // an adjustment is kept + ADJ_BIAS
 
@@ -1569,7 +1592,7 @@ fn lx_shmget(k: &mut Kernel, pid: u64, key: u64, size: u64, flg: u64) -> u64
     }
     return g.r;
   }
-  if size == 0 || size > SHMMAX {
+  if size == 0 || size > shmmax_now(k) || flg / 2048 % 2 == 1 {   // SHM_HUGETLB: no huge pages
     ipc_free(&mut k, KM, g.slot);
     return EINVAL;
   }
@@ -1768,7 +1791,7 @@ fn lx_shmctl(k: &mut Kernel, pid: u64, id: u64, cmd0: u64, va: u64) -> u64
   let cmd = cmd0 & !IPC_64;
   if cmd == IPC_INFO {
     // struct shminfo64: shmmax shmmin shmmni shmseg shmall, 4 unused
-    xput(&mut k, 0, SHMMAX, 8);
+    xput(&mut k, 0, shmmax_shown(k), 8);
     xput(&mut k, 8, 1, 8);
     xput(&mut k, 16, IPC_SETS, 8);
     xput(&mut k, 24, SA_N, 8);
@@ -1973,7 +1996,7 @@ fn ipc_proc_text(k: &mut Kernel, pid: u64, i: u64, o: &mut Bytes) -> u64
   ensures kok(k) && blen(o) == XFER && result <= XFER
 {
   if i < 6 {
-    let mut v = SHMMAX;
+    let mut v = shmmax_shown(k);
     if i == 1 {
       v = IPC_SETS * SHM_PAGES;
     } else if i == 2 || i == 5 {

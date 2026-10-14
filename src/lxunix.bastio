@@ -70,6 +70,8 @@ const UXF0: u64 = 96;                  // UXL0 + UX_LIS * UXL_W: the in-flight w
 const UXC0: u64 = 112;                 // UXF0 + UX_N: the channels' credentials
 const UXLC0: u64 = 144;                // UXC0 + 2 * UX_N: the listeners' credentials
 const UXH0: u64 = 152;                 // UXLC0 + 2 * UX_LIS: the listeners' socket files
+const UXE0: u64 = 156;                 // UXH0 + UX_LIS: the other descriptions in flight, UX_XTRA per channel
+const UXO0: u64 = 268;                 // UXE0 + UX_N * UX_XTRA: where in the channel the in-flight message starts
 const SO_PEERCRED: u64 = 17;
 const UX_DG: u64 = 16;                 // word 3: a datagram socket
 const SUN_LEN: u64 = 110;              // sizeof(struct sockaddr_un)
@@ -155,6 +157,117 @@ fn uc_set_fly(k: &mut Kernel, c: u64, v: u64)
   ensures kok(k)
 {
   k.ux = set(k.ux, UXF0 + c, v);
+  if v == 0 {
+    k.ux = set(k.ux, UXO0 + c, 0);
+  }
+}
+
+/// How many bytes sent before the in-flight message are still queued ahead
+/// of it: a read takes those first and leaves the descriptions in place.
+fn uc_off(k: &Kernel, c: u64) -> u64
+  requires kok(k) && c < UX_N
+{
+  return get(k.ux, UXO0 + c);
+}
+
+fn uc_set_off(k: &mut Kernel, c: u64, v: u64)
+  requires kok(k) && c < UX_N
+  ensures kok(k)
+{
+  k.ux = set(k.ux, UXO0 + c, v);
+}
+
+/// The other descriptions (number + 1, or 0) a message in flight on
+/// channel c passes with the first.
+fn uc_xtra(k: &Kernel, c: u64, i: u64) -> u64
+  requires kok(k) && c < UX_N && i < UX_XTRA
+{
+  return get(k.ux, UXE0 + c * UX_XTRA + i);
+}
+
+fn uc_set_xtra(k: &mut Kernel, c: u64, i: u64, v: u64)
+  requires kok(k) && c < UX_N && i < UX_XTRA
+  ensures kok(k)
+{
+  k.ux = set(k.ux, UXE0 + c * UX_XTRA + i, v);
+}
+
+/// How many of the other descriptions channel c has in flight.
+fn uc_xcount(k: &Kernel, c: u64) -> u64
+  requires kok(k) && c < UX_N
+  ensures result <= UX_XTRA
+{
+  let mut n = 0;
+  while n < UX_XTRA && uc_xtra(k, c, n) != 0
+    invariant n <= UX_XTRA && kok(k)
+  {
+    n = n + 1;
+  }
+  return n;
+}
+
+/// Nobody will receive channel c's other descriptions, and the message's
+/// reference to each is given up (a last one stays allocated, as for the
+/// first: see the listener close).
+fn uc_keep_xtra(k: &mut Kernel, c: u64)
+  requires kok(k) && c < UX_N
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < UX_XTRA
+    invariant i <= UX_XTRA && kok(k)
+  {
+    let f = uc_xtra(k, c, i);
+    if f > 0 && f <= OFD_N {
+      let refs = of_get(k.ofd, f - 1, 1);
+      if refs > 1 {
+        of_set(&mut k.ofd, f - 1, 1, refs - 1);
+      }
+    }
+    uc_set_xtra(&mut k, c, i, 0);
+    i = i + 1;
+  }
+}
+
+/// Takes the last of channel c's other descriptions out of it and returns
+/// its descriptor value (0 when there is none); the caller drops it.
+fn uc_take_xtra(k: &mut Kernel, c: u64) -> u64
+  requires kok(k) && c < UX_N
+  ensures kok(k)
+{
+  let n = uc_xcount(k, c);
+  if n == 0 {
+    return 0;
+  }
+  let f = uc_xtra(k, c, n - 1);
+  uc_set_xtra(&mut k, c, n - 1, 0);
+  if f > 0 && f <= OFD_N {
+    return FD_OFD + f - 1;
+  }
+  return 0;
+}
+
+/// A channel nobody reads any more may still hold descriptions that were
+/// in flight to it (see ux_close): hands one to unref_value, which drops
+/// them one after another, as it does for the first. Not a call of
+/// unref_one, so the kernel stays free of recursion.
+fn ux_reap(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut c = 0;
+  while c < UX_N
+    invariant c <= UX_N && kok(k)
+  {
+    if uc_get(k, c, 2) == 0 {
+      let v = uc_take_xtra(&mut k, c);
+      if v != 0 {
+        return v;
+      }
+    }
+    c = c + 1;
+  }
+  return 0;
 }
 
 /// Process pid's credentials as SO_PEERCRED reports them: effective uid
@@ -260,6 +373,7 @@ fn uc_new(k: &mut Kernel) -> u64
   uc_set(&mut k, c, 2, 1);
   uc_set(&mut k, c, 3, 1);
   uc_set_fly(&mut k, c, 0);
+  uc_keep_xtra(&mut k, c);
   return c;
 }
 
@@ -362,6 +476,7 @@ fn ux_close(k: &mut Kernel, x: u64, w: u64) -> u64
             }
           }
           uc_set_fly(&mut k, cx % UX_N, 0);
+          uc_keep_xtra(&mut k, cx % UX_N);
         }
         of_set(&mut k.ofd, h, 0, OF_FREE);
         of_set(&mut k.ofd, h, 1, 0);
@@ -393,7 +508,7 @@ fn ux_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   of_set(&mut k.ofd, h, 3, kind / SOCK_NONBLOCK % 2 + w);
   let fd = fd_install(&mut k, pid, h);
   if fd < LXNFD && kind / SOCK_CLOEXEC % 2 == 1 {
-    fd_set(&mut k.lxfd, pid, fd, FD_OFD + h + FD_CLOEXEC);
+    fd_set_k(&mut k, pid, fd, FD_OFD + h + FD_CLOEXEC);
   }
   return fd;
 }
@@ -439,8 +554,8 @@ fn ux_socketpair(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64, s
   if kind / SOCK_CLOEXEC % 2 == 1 {
     ce = FD_CLOEXEC;
   }
-  fd_set(&mut k.lxfd, pid, a, FD_OFD + p % 4294967296 + ce);
-  fd_set(&mut k.lxfd, pid, b, FD_OFD + p / 4294967296 + ce);
+  fd_set_k(&mut k, pid, a, FD_OFD + p % 4294967296 + ce);
+  fd_set_k(&mut k, pid, b, FD_OFD + p / 4294967296 + ce);
   let x = of_get(k.ofd, p % 4294967296, 2);
   uc_set_cred(&mut k, x % UX_N, pid, ux_ids(k, pid));
   uc_set_cred(&mut k, x / UX_N % UX_N, pid, ux_ids(k, pid));
@@ -984,7 +1099,7 @@ fn ux_accept(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, flags: u64
     return nfd;                             // -EMFILE; the description is gone
   }
   if flags / SOCK_CLOEXEC % 2 == 1 {
-    fd_set(&mut k.lxfd, pid, nfd, FD_OFD + h + FD_CLOEXEC);
+    fd_set_k(&mut k, pid, nfd, FD_OFD + h + FD_CLOEXEC);
   }
   let r = sun_out(&mut k, pid, addr, lenp);
   if r != 0 {
@@ -1177,7 +1292,11 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
   } else if n == 0 {
     return 0;
   }
-  let want = smaller(smaller(n, avail), XFER);
+  let mut want = smaller(smaller(n, avail), XFER);
+  let ahead = uc_off(k, c);
+  if !peek && !u.dg && uc_fly(k, c) > 0 && ahead > 0 {
+    want = smaller(want, ahead);            // bytes sent before the descriptions come out alone
+  }
   ring_out(&mut k.fs.xfer, 0, k.uxb, c * UX_CAP, UX_CAP, ring_slot(r, lead), want);
   let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, want);
   if put == NO_RESULT || put != want {
@@ -1186,16 +1305,26 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
   if !peek {
     // A description sent with these bytes goes with them: read and recv
     // drop it (recvmsg took it out first), as Linux does.
+    let mut used = put;
+    if u.dg {
+      used = avail;                         // the whole message goes
+    }
     let f = uc_fly(k, c);
-    if f > 0 {
+    if f > 0 && ahead >= lead + used {
+      uc_set_off(&mut k, c, ahead - lead - used);   // only bytes before the message went
+    } else if f > 0 {
       uc_set_fly(&mut k, c, 0);
       if f <= OFD_N {
         unref_value(&mut k, FD_OFD + f - 1);
       }
-    }
-    let mut used = put;
-    if u.dg {
-      used = avail;                         // the whole message goes
+      let mut q = 0;
+      while q < UX_XTRA
+        invariant q <= UX_XTRA && kok(k)
+      {
+        let xv = uc_take_xtra(&mut k, c);
+        unref_value(&mut k, xv);
+        q = q + 1;
+      }
     }
     ring_pop_n(&mut r, lead + used);
     uc_keep(&mut k, c, r);

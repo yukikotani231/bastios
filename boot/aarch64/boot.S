@@ -164,6 +164,8 @@ start:
         bic     x1, x1, #(1 << 1)       /* A off: unaligned accesses are fine */
         msr     sctlr_el1, x1
         isb
+        mov     x1, #2
+        msr     cntkctl_el1, x1         /* EL0VCTEN: user mode reads the counter (the vDSO's clocks) */
 
         bl      bst_gic_init            /* interrupt controller and timer */
         bl      bst_smp_boot            /* the other processors, parked */
@@ -218,6 +220,8 @@ bst_secondary_entry:
         bic     x1, x1, #(1 << 1)
         msr     sctlr_el1, x1
         isb
+        mov     x1, #2
+        msr     cntkctl_el1, x1         /* EL0VCTEN, as above */
         bl      bst_secondary_main
         b       park
 

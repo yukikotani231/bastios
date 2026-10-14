@@ -250,6 +250,83 @@ static int next_ids_and_copy(void) {
     return ok;
 }
 
+/* shmmax is writable: a segment larger than it is EINVAL, and the file reads back what was written. */
+static int shmmax_written(void) {
+    char was[32] = "", now[32] = "";
+    FILE *f = fopen("/proc/sys/kernel/shmmax", "r");
+    if (!f || !fgets(was, sizeof was, f)) return 0;
+    fclose(f);
+    f = fopen("/proc/sys/kernel/shmmax", "w");
+    if (!f || fputs("8192\n", f) < 0) return 0;
+    fclose(f);
+    f = fopen("/proc/sys/kernel/shmmax", "r");
+    if (!f || !fgets(now, sizeof now, f)) return 0;
+    fclose(f);
+    int big = shmget(IPC_PRIVATE, 8193, IPC_CREAT | 0600);
+    int e = errno;
+    int small = shmget(IPC_PRIVATE, 8192, IPC_CREAT | 0600);
+    int huge = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 04000 | 0600);
+    int e2 = errno;
+    if (small >= 0) shmctl(small, IPC_RMID, 0);
+    if (huge >= 0) shmctl(huge, IPC_RMID, 0);
+    f = fopen("/proc/sys/kernel/shmmax", "w");
+    int back = f && fputs(was, f) >= 0;
+    if (f) fclose(f);
+    return atol(now) == 8192 && big < 0 && e == EINVAL && small >= 0 && huge < 0 && e2 == EINVAL && back;
+}
+
+/* 32 queues, 32 semaphore sets and 32 segments at once; the 33rd of each is ENOSPC. */
+static int many_objects(void) {
+    int q[33], m[33], g[33], ok = 1;
+    for (int i = 0; i < 33; i++) q[i] = m[i] = g[i] = -1;
+    for (int i = 0; i < 33; i++) {
+        q[i] = msgget(IPC_PRIVATE, IPC_CREAT | 0600);
+        m[i] = semget(IPC_PRIVATE, 2, IPC_CREAT | 0600);
+        g[i] = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0600);
+        if (i < 32) ok = ok && q[i] >= 0 && m[i] >= 0 && g[i] >= 0;
+    }
+    ok = ok && q[32] < 0 && errno == ENOSPC && m[32] < 0 && g[32] < 0;
+    for (int i = 0; ok && i < 32; i++) {
+        struct { long t; char c; } mb = { 1, 'a' + i % 26 };
+        ok = msgsnd(q[i], &mb, 1, 0) == 0 && semctl(m[i], 1, SETVAL, i + 1) == 0;
+        char *p = shmat(g[i], 0, 0);
+        if (p == (char *)-1) ok = 0; else { *p = 'a' + i % 26; shmdt(p); }
+    }
+    for (int i = 0; ok && i < 32; i++) {
+        struct { long t; char c; } mb;
+        ok = msgrcv(q[i], &mb, 1, 0, 0) == 1 && mb.c == 'a' + i % 26 && semctl(m[i], 1, GETVAL) == i + 1;
+        char *p = shmat(g[i], 0, 0);
+        if (p == (char *)-1) ok = 0; else { ok = ok && *p == 'a' + i % 26; shmdt(p); }
+    }
+    for (int i = 0; i < 33; i++) {
+        if (q[i] >= 0) msgctl(q[i], IPC_RMID, 0);
+        if (m[i] >= 0) semctl(m[i], 0, IPC_RMID);
+        if (g[i] >= 0) shmctl(g[i], IPC_RMID, 0);
+    }
+    return ok;
+}
+
+/* One process holds 16 attachments at once; the 17th is EMFILE. */
+static int many_attachments(void) {
+    int id = shmget(IPC_PRIVATE, 8192, IPC_CREAT | 0600);
+    if (id < 0) return 0;
+    char *v[17];
+    int ok = 1, n = 0, e = 0;
+    for (int i = 0; i < 17; i++) {
+        v[i] = shmat(id, 0, 0);
+        if (v[i] == (char *)-1) { e = errno; break; }
+        n++;
+        v[i][i] = 'a' + i % 26;
+    }
+    ok = n == 16 && e == EMFILE;
+    for (int i = 0; ok && i < 16; i++) ok = v[0][i] == 'a' + i % 26 && v[15][i] == 'a' + i % 26;
+    for (int i = 0; i < n; i++) ok = shmdt(v[i]) == 0 && ok;
+    char *again = shmat(id, 0, 0);                                                       /* room again */
+    ok = ok && again != (char *)-1 && shmdt(again) == 0;
+    shmctl(id, IPC_RMID, 0);
+    return ok;
+}
+
 int main(void) {
     setup();
     EXPECT("msgsnd, msgrcv and IPC_STAT", queue_basics());
@@ -265,6 +342,9 @@ int main(void) {
     EXPECT("shmat, a second view, fork, IPC_RMID", shm_basics());
     EXPECT("shmget and shmat errors", shm_errors());
     EXPECT("/proc/sysvipc and /proc/sys/kernel limits", proc_files());
+    EXPECT("shmmax is written; a segment past it, or with SHM_HUGETLB, is EINVAL", shmmax_written());
     EXPECT("msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message", next_ids_and_copy());
+    EXPECT("32 queues, semaphore sets and segments at once, the 33rd of each is ENOSPC", many_objects());
+    EXPECT("16 attachments in one process, the 17th is EMFILE", many_attachments());
     return done();
 }

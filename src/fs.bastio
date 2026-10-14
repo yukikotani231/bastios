@@ -76,8 +76,8 @@ const VDIR_ROOT: u64 = NFILES + 2 * DSLOTS;  // the top directory
 const VDIR_DISK: u64 = NFILES + 2 * DSLOTS + 1;  // "disk"
 const VDIR_LO: u64 = NFILES + 2 * DSLOTS + 2;    // the loop mount's top directory
 const NAMEBUF: u64 = 256;             // holds any in-memory node's name
-const MNT_N: u64 = 8;                 // tmpfs mounts at once
-const MNT_LEN: u64 = 16;              // MNT_N * 2: per mount, its directory node + 1 (0: free) and 1 if read-only
+const MNT_N: u64 = 64;                // tmpfs mounts at once
+const MNT_LEN: u64 = 128;             // MNT_N * 2: per mount, its directory node + 1 (0: free) and 1 if read-only
 
 struct Vfs {
   ram: Vec[Node],       // the in-memory file system
@@ -99,11 +99,13 @@ struct Vfs {
   rix: Buf,             // the name index of ram (src/ramfs.bastio)
   rhi: u64,             // every in-memory file is in a node below this (ram_find looks no further); only grows
   nopen: Buf,           // per file (nslot): how many rows and holds are open on it; node_open reads this instead of scanning ftab
+  pool_hi: u64,         // every open row in the pool is below this (file_writing scans no further); only grows
+  nat_rows: bool,       // a row past the pool (a native process's) was ever opened: false lets file_writing skip them
   rlinked: bool,        // a hard link to an in-memory file was ever made: false lets vfs_nlink skip counting them
 }
 
 spec fn vfs_ok(v: &Vfs) -> bool {
-  nodes_ok(v.ram) && rix_ok(v.rix) && v.rhi <= NFILES && len(v.ftab) <= FTAB_LEN && len(v.holds) == HOLD_LEN && blen(v.xfer) == XFER && disk_ok(v.disk) && blen(v.name) == NAMEBUF && len(v.mnt) == MNT_LEN && len(v.nopen) == NOPEN + 1
+  nodes_ok(v.ram) && rix_ok(v.rix) && v.rhi <= NFILES && v.pool_hi <= FD_POOL && len(v.ftab) <= FTAB_LEN && len(v.holds) == HOLD_LEN && blen(v.xfer) == XFER && disk_ok(v.disk) && blen(v.name) == NAMEBUF && len(v.mnt) == MNT_LEN && len(v.nopen) == NOPEN + 1
     && disk_ok(v.lo) && blen(v.lname) == NAMEBUF && pc_ok(v.pc)
 }
 
@@ -112,7 +114,7 @@ fn vfs_new(disk: DiskFs) -> Vfs
   ensures vfs_ok(result)
 {
   return Vfs { ram: ram_new(), ftab: alloc(FTAB_START), holds: alloc(HOLD_LEN), xfer: balloc(XFER), disk: disk, name: balloc(NAMEBUF), mnt: alloc(MNT_LEN), now: 0,
-    lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0))), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, pc: pc_new(), nopen: alloc(NOPEN + 1), rix: alloc(RIX + 1), rhi: 0, rlinked: false };
+    lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0))), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, pc: pc_new(), nopen: alloc(NOPEN + 1), rix: alloc(RIX + 1), rhi: 0, pool_hi: 0, nat_rows: false, rlinked: false };
 }
 
 /// ram_create of the name in the transfer buffer, noting the node in `rhi`
@@ -351,6 +353,13 @@ fn open_row(v: &mut Vfs, mem: &mut Mem, base: u64, rows: u64, flags: u64, n: u64
   }
   if fd >= rows {
     return NO_FD;
+  }
+  if base + fd < FD_POOL {
+    if base + fd >= v.pool_hi {
+      v.pool_hi = base + fd + 1;
+    }
+  } else {
+    v.nat_rows = true;
   }
   if on_disk(v, n) {
     let mk = path_ok(v, n) && parent_ok(&mut v, n);

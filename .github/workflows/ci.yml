@@ -259,6 +259,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     env:
+      # Raise it to drop the third-party cache entry below (a bad entry is
+      # never replaced: a key that hits is not saved again).
+      CACHE_V: 1
       BASTIOC0: bastiolang/stage0/target/release/bastioc0
       BASTIOLIB: bastiolang
     steps:
@@ -268,7 +271,7 @@ jobs:
           repository: yukikotani231/bastiolang
           ref: main
           path: bastiolang
-      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-arm gcc-aarch64-linux-gnu tcl
+      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-arm gcc-aarch64-linux-gnu g++-aarch64-linux-gnu tcl
       - run: cd bastiolang/stage0 && cargo build --release --locked
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
@@ -276,6 +279,22 @@ jobs:
           key: proof-none
           restore-keys: proof-
           path: build/proof-cache
+      - name: Cache keys
+        id: keys
+        run: |
+          echo "pins=$(grep -E '^[A-Z0-9_]+ *\?=' arch/aarch64/Makefile test/compat/images.mk | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - name: Restore the third-party programs
+        id: tp
+        uses: actions/cache/restore@v4
+        with:
+          key: compat-3p-arm64-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
+          path: |
+            build/aarch64/compat/z3
+            build/aarch64/compat/tcc
+            build/aarch64/compat/src/tcc
+            build/aarch64/compat/musl
+            build/aarch64/compat/dropbear
+            build/aarch64/compat/runc
       - name: Restore Alpine's images
         id: al
         uses: actions/cache/restore@v4
@@ -284,6 +303,21 @@ jobs:
           path: |
             build/aarch64/compat/alpine/*.tar.gz
             build/aarch64/compat/alpine/*.json
+      - name: Build the disks
+        run: make ARCH=aarch64 compat-disks
+      - name: Save the third-party programs
+        if: steps.tp.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          key: compat-3p-arm64-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
+          path: |
+            build/aarch64/compat/z3
+            build/aarch64/compat/tcc
+            build/aarch64/compat/src/tcc
+            build/aarch64/compat/musl
+            build/aarch64/compat/dropbear
+            build/aarch64/compat/runc
+        continue-on-error: true
       - run: make ARCH=aarch64 compat
       - name: Checks that did not pass
         if: always()

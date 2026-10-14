@@ -241,6 +241,11 @@ steps = [
     # /bin/NAME (stat), with their arguments and exit status, and a
     # nested ash whose exit status the outer one sees.
     ("(echo in subshell; exit 4); echo sub=$?", [b"in subshell", b"sub=4"], b"\n# "),
+    # a descriptor far above the ones used so far survives fork, is closed
+    # by exit and is not there after execve (the kernel scans descriptor
+    # rows only up to the highest number ever open)
+    ("exec 200>/tmp/hifd; (echo from-child >&200); exec 200>&-; cat /tmp/hifd", [b"from-child"], b"\n# "),
+    ("exec 201>/tmp/hifd2; sh -c 'echo x >&201' 2>/dev/null; echo kept=$?; exec 201>&-", [b"kept="], b"\n# "),
     ("mhello a b; echo st=$?", [b"hello from musl: mhello, argc 3, 6", b"st=3"], b"\n# "),
     ("hello", b"hello from user mode, pid ", b"\n# "),
     ("nothere", b"nothere: not found", b"\n# "),
@@ -376,6 +381,11 @@ steps = [
     # it lists them by those ids; user/mns.c (above) checks the rest.
     ("unshare -p -f --mount-proc sh -c 'echo $$; kill -0 1 && echo seen; cat /proc/1/stat; ls -d /proc/9'",
      b"\r\n1\r\nseen\r\n1 (ash) S 0 1 1 ", b"\n# "),
+    # setns into a network namespace: nsenter -n joins the one a process
+    # unshared into, so its /proc/self/ns/net link names that namespace
+    # (and the caller's own stays the first one's).
+    ("unshare -n sleep 5 & sleep 1; readlink /proc/$!/ns/net; nsenter -t $! -n readlink /proc/self/ns/net; readlink /proc/self/ns/net; kill $!; echo ns6",
+     [b"\r\nnet:[40265320", b"\r\nnet:[40265320", b"\r\nnet:[4026531840]\r\n", b"ns6"], b"\n# "),
     ("unshare -u sh -c 'hostname inner; sleep 5' & sleep 1; nsenter -t $! -u hostname; readlink /proc/self/ns/uts; readlink /proc/$!/ns/uts; stat -L -c %i /proc/self/ns/mnt; ls /proc/self/ns; hostname; kill $!; echo ns5",
      [b"\r\ninner\r\nuts:[4026531838]\r\nuts:[40265320", b"\r\n4026531841\r\n", b"pid_for_children", b"\r\nbastios\r\n", b"ns5"], b"\n# "),
     # Owners and the umask (src/lxperm.bastio): a new file takes the umask,

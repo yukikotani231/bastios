@@ -201,7 +201,7 @@ fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
   pset(&mut k.procs, p, F_MMAP, pget(k.procs, h, F_MMAP));
   pset(&mut k.procs, p, F_PROG, pget(k.procs, h, F_PROG));
   if (h + 1) * LXNFD <= len(k.lxfd) && (p + 1) * LXNFD <= len(k.lxfd) {
-    swap_words(&mut k.lxfd, h * LXNFD, p * LXNFD, LXNFD);
+    swap_words(&mut k.lxfd, h * LXNFD, p * LXNFD, smaller(k.fd_hi, LXNFD));   // past fd_hi both rows are zero
   }
   // The working directory and root are shared (CLONE_FS) unless the threads
   // are in different mount namespaces, which only setns and unshare make

@@ -102,13 +102,13 @@ const SY_CORE: u64 = 29;               // /proc/sys/kernel/core_pattern (nothing
 const SY_NROPEN: u64 = 30;             // /proc/sys/fs/nr_open
 const SY_DROP: u64 = 31;               // /proc/sys/vm/drop_caches: written, kept for nothing
 const SY_NEXTID: u64 = 96;             // 96 .. 98: /proc/sys/kernel/{msg,sem,shm}_next_id, by IPC kind (src/lxipc.bastio)
-const SY_LOOP: u64 = 32;               // 32 ..: loop device n's attribute a at n * LOOP_SYS + a
 const SY_NS: u64 = 128;                // 128 ..: /proc/P/ns link f at P * NF_N + f (src/lxnsk.bastio)
 const NF_N: u64 = 8;
 const SY_UM: u64 = SY_NS + NPROC * NF_N;   // /proc/P/uid_map, gid_map, setgroups at P * 3 + 0, 1, 2 (src/lxuser.bastio)
 const UMF_N: u64 = 3;
 const SY_CG: u64 = SY_UM + NPROC * UMF_N;   // a cgroup's control file f at slot * CGF_N + f (src/lxcgroup.bastio)
 const CGF_N: u64 = 18;
+const SY_LOOP: u64 = SY_CG + CG_N * CGF_N;   // after the cgroups: loop device n's attribute a at n * LOOP_SYS + a
 const NS_DIRS: u64 = 0x400;            // DIR_PROC + NS_DIRS + pid: /proc/PID/ns
 const FD_DIRS: u64 = 0x800;            // DIR_PROC + FD_DIRS + pid: /proc/PID/fd
 const TASK_DIRS: u64 = 0xC00;          // DIR_PROC + TASK_DIRS + pid: /proc/PID/task
@@ -626,36 +626,50 @@ fn loop_sys_at(x: &Bytes, n: u64) -> u64
   requires n <= blen(x)
   ensures result <= LOOP_N * LOOP_SYS
 {
-  if n < 17 || !xfer_is(x, 0, 14, "sys/block/loop") || cast[u64](bget(x, 15)) != 47 {
+  if n < 17 || !xfer_is(x, 0, 14, "sys/block/loop") {
     return 0;
   }
+  // One digit or two (no leading zero), then a slash.
   let c = cast[u64](bget(x, 14));
-  if c < 48 || c >= 48 + LOOP_N {
+  if c < 48 || c >= 58 {
     return 0;
   }
-  let base = (c - 48) * LOOP_SYS + 1;
-  if xfer_is(x, 16, n, "size") {
+  let mut v = c - 48;
+  let mut at = 16;
+  if cast[u64](bget(x, 15)) != 47 {
+    let e = cast[u64](bget(x, 15));
+    if c == 48 || e < 48 || e >= 58 || n < 18 || cast[u64](bget(x, 16)) != 47 {
+      return 0;
+    }
+    v = v * 10 + e - 48;
+    at = 17;
+  }
+  if v >= LOOP_N {
+    return 0;
+  }
+  let base = v * LOOP_SYS + 1;
+  if xfer_is(x, at, n, "size") {
     return base;
   }
-  if xfer_is(x, 16, n, "ro") {
+  if xfer_is(x, at, n, "ro") {
     return base + 1;
   }
-  if xfer_is(x, 16, n, "loop/backing_file") {
+  if xfer_is(x, at, n, "loop/backing_file") {
     return base + 2;
   }
-  if xfer_is(x, 16, n, "loop/offset") {
+  if xfer_is(x, at, n, "loop/offset") {
     return base + 3;
   }
-  if xfer_is(x, 16, n, "loop/sizelimit") {
+  if xfer_is(x, at, n, "loop/sizelimit") {
     return base + 4;
   }
-  if xfer_is(x, 16, n, "loop/autoclear") {
+  if xfer_is(x, at, n, "loop/autoclear") {
     return base + 5;
   }
-  if xfer_is(x, 16, n, "loop/partscan") {
+  if xfer_is(x, at, n, "loop/partscan") {
     return base + 6;
   }
-  if xfer_is(x, 16, n, "loop/dio") {
+  if xfer_is(x, at, n, "loop/dio") {
     return base + 7;
   }
   return 0;
@@ -716,7 +730,7 @@ fn is_nextid_file(f: u64) -> bool {
 }
 
 fn proc_writable(f: u64) -> bool {
-  return is_nextid_file(f) || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
+  return is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
 }
 
 /// What stat says about /proc file f (a proc_file device).
@@ -2434,6 +2448,35 @@ fn lx_procfs_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u
 /// does (round_pipe_size), at least a page and at most 2^31. Returns n,
 /// or -EINVAL for anything else. Past PIPE_CAP it is kept and read back,
 /// but a pipe still holds no more than PIPE_CAP (F_SETPIPE_SZ: ENOMEM).
+/// A write of n bytes in k.fs.xfer, starting at i after the blanks, to
+/// /proc/sys/kernel/shmmax: a decimal number up to 2^40, then blanks.
+fn shmmax_write(k: &mut Kernel, n: u64, start: u64) -> u64
+  requires kok(k) && n <= 32 && start <= n
+  ensures kok(k)
+  ensures result <= n || result > XFER
+{
+  let mut i = start;
+  let mut v = 0;
+  let mut any = false;
+  while i < n && bget(k.fs.xfer, i) >= 48 && bget(k.fs.xfer, i) <= 57 && v <= 0x10000000000
+    invariant i <= n && n <= 32 && v <= 0x10000000009 * 10 && kok(k)
+  {
+    v = v * 10 + cast[u64](bget(k.fs.xfer, i)) - 48;
+    any = true;
+    i = i + 1;
+  }
+  while i < n && (bget(k.fs.xfer, i) == 10 || bget(k.fs.xfer, i) == 32 || bget(k.fs.xfer, i) == 9)
+    invariant i <= n && n <= 32 && kok(k)
+  {
+    i = i + 1;
+  }
+  if !any || i < n || v > 0x10000000000 {
+    return EINVAL;
+  }
+  k.sys = set(k.sys, SYS_SHMMAX, v + 1);
+  return n;
+}
+
 /// A write of n bytes in k.fs.xfer, starting at i after the blanks, to a
 /// *_next_id file: -1 (none) or an id up to INT_MAX for the next new
 /// object of that IPC kind.
@@ -2547,6 +2590,9 @@ fn proc_write_xfer(k: &mut Kernel, f: u64, n: u64) -> u64
   }
   if f >= PROC_DEV + PSYS + SY_NEXTID && f < PROC_DEV + PSYS + SY_NEXTID + 3 {
     return next_id_write(&mut k, f, n, i);
+  }
+  if f == PROC_DEV + PSYS + SY_IPC {
+    return shmmax_write(&mut k, n, i);
   }
   let mut v = 0;
   let mut any = false;

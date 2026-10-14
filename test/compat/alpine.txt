@@ -221,6 +221,10 @@ gcc says 42
 $ bb printf 'local t = vim.treesitter.get_string_parser("*tag*\\tsome text\\n", "vimdoc"):parse()[1]:root()\nio.open("/root/ts.txt", "w"):write(t:type(), " ", t:child_count(), " ", t:sexpr():len() > 20 and "tree" or "none", "\\n")\n' > /disk/a/root/ts.lua && bb chroot /disk/a /usr/bin/nvim -l /root/ts.lua >/dev/null 2>&1; bb cat /disk/a/root/ts.txt
 help_file 1 tree
 
+== nvim: :diffthis marks the line that differs, and vim.diff finds the hunk
+$ bb printf 'vim.cmd("edit /root/da.txt | call setline(1, [\"same\", \"old\", \"tail\"]) | diffthis")\nvim.cmd("vsplit /root/db.txt | call setline(1, [\"same\", \"new\", \"tail\"]) | diffthis")\nlocal function hl(l) return vim.fn.diff_hlID(l, 1) ~= 0 and "marked" or "plain" end\nlocal d = vim.diff("same\\nold\\ntail\\n", "same\\nnew\\ntail\\n", {result_type = "indices"})\nio.open("/root/dif.txt", "w"):write(hl(1), " ", hl(2), " ", hl(3), " ", vim.wo.diff and "diff" or "nodiff", " ", d[1][1], "\\n")\n' > /disk/a/root/dif.lua && bb chroot /disk/a /usr/bin/nvim -l /root/dif.lua >/dev/null 2>&1; bb cat /disk/a/root/dif.txt
+plain marked plain diff 2
+
 == nvim: LuaJIT loads a shared object that gcc built
 $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf 'local ffi = require("ffi")\nffi.cdef[[int answer(void);]]\nio.open("/root/so.txt", "w"):write(ffi.load("/root/libso.so").answer(), "\\n")\n' > /disk/a/root/so.lua && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -shared -fPIC -o libso.so so.c && nvim -l so.lua >/dev/null 2>&1'; bb cat /disk/a/root/so.txt
 42
@@ -228,6 +232,10 @@ $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf
 == nvim: a plugin cloned over HTTP is on the packpath and runs at startup
 $ bb printf 'io.open("/root/plug.txt", "w"):write(vim.g.hello_plugin or "none", "\\n")\n' > /disk/a/root/plug.lua && bb chroot /disk/a /bin/sh -lc 'd=/root/pk/pack/p/start; mkdir -p $d && git clone -q HOSTURL/repo.git $d/hello && nvim --headless --cmd "set pp^=/root/pk" -c "luafile /root/plug.lua" -c qa >/dev/null 2>&1'; bb cat /disk/a/root/plug.txt
 two
+
+== nvim: a small plugin manager in Lua clones a plugin, loads it, then updates it with git pull
+$ bb printf 'local url, dir = arg[1], "/root/pm/hello"\nlocal function git(...) return vim.system(vim.list_extend({"git"}, {...}), {text = true}):wait().code end\nlocal out = {}\nout[#out + 1] = git("clone", "-q", url, dir) == 0 and "cloned" or "clonefail"\ngit("-C", dir, "reset", "-q", "--hard", "HEAD~1")\nout[#out + 1] = vim.g.hello_plugin or "none"\nvim.opt.rtp:append(dir)\nvim.cmd("runtime plugin/hello.lua")\nout[#out + 1] = vim.g.hello_plugin or "none"\nout[#out + 1] = git("-C", dir, "pull", "-q", "--ff-only") == 0 and "pulled" or "pullfail"\nvim.cmd("runtime plugin/hello.lua")\nout[#out + 1] = vim.g.hello_plugin or "none"\nio.open("/root/pm.txt", "w"):write(table.concat(out, " "), "\\n")\n' > /disk/a/root/pm.lua && bb chroot /disk/a /bin/sh -lc 'nvim -l /root/pm.lua HOSTURL/repo.git >/dev/null 2>&1'; bb cat /disk/a/root/pm.txt
+cloned none one pulled two
 
 == nvim: vim.system runs a process and collects its output and status
 $ bb printf 'local r = vim.system({"sh", "-c", "echo out; echo err >&2; exit 3"}, {text = true}):wait()\nio.open("/root/sys.txt", "w"):write(r.code, " ", vim.trim(r.stdout), " ", vim.trim(r.stderr), "\\n")\n' > /disk/a/root/sys.lua && bb chroot /disk/a /usr/bin/nvim -l /root/sys.lua >/dev/null 2>&1; bb cat /disk/a/root/sys.txt
@@ -307,6 +315,23 @@ touch: /x: Read-only file system
 touch=1
 status 0
 
+== container: runc runs on an overlay of the image root: writes and deletions stay in the upper layer
+$ bb mkdir -p /disk/ou /disk/ow /disk/om /disk/o /run/runc && bb mount -t overlay overlay -o lowerdir=/disk/a,upperdir=/disk/ou,workdir=/disk/ow /disk/om && cd /disk/o && /disk/runc spec && bb sed -i -e 's#"path": "rootfs"#"path": "/disk/om"#' -e 's#"terminal": true#"terminal": false#' -e 's#"readonly": true#"readonly": false#' -e 's#"sh"#"/bin/sh", "-c", "echo hi > /ov.txt; rm /etc/motd; cat /ov.txt; ls /etc/motd 2>\&1; echo done"#' config.json && /disk/runc --root /run/runc run co < /dev/null; echo status $?; bb cat /disk/ou/ov.txt; test -e /disk/a/ov.txt || echo lower-clean; test -e /disk/a/etc/motd && echo lower-kept; bb umount /disk/om
+hi
+ls: /etc/motd: No such file or directory
+done
+status 0
+hi
+lower-clean
+lower-kept
+
+== container: runc loads a seccomp filter from the config: mkdir answers EPERM, the rest runs
+$ bb mkdir -p /disk/sc /run/runc && cd /disk/sc && /disk/runc spec && bb sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"linux": {#"linux": {"seccomp": {"defaultAction": "SCMP_ACT_ALLOW", "architectures": ["SCMP_ARCH_X86_64"], "syscalls": [{"names": ["mkdir", "mkdirat"], "action": "SCMP_ACT_ERRNO", "errnoRet": 1}]},#' -e 's#"sh"#"/bin/sh", "-c", "mkdir /m 2>\&1; echo mkdir=$?; hostname"#' config.json && /disk/runc --root /run/runc run cs < /dev/null; echo status $?
+mkdir: can't create directory '/m': Operation not permitted
+mkdir=1
+runc
+status 0
+
 == container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle
 $ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress jq 2>/dev/null; bb cp /disk/runc /disk/a/usr/bin/runc && bb cp /disk/ocipull.sh /disk/a/ocipull.sh && bb mkdir -p /disk/a/pull && bb chown 65534:65534 /disk/a/pull && bb chroot /disk/a /bin/su -s /bin/sh nobody -c 'OCI_HTTP=1 sh /ocipull.sh -r 10.0.2.2:HOSTPORT/secure/alpine:latest /pull/b' 2>/disk/a/pull.err | bb sed 's#10.0.2.2:[0-9]*#REGISTRY#'; bb grep -v -i warn /disk/a/pull.err; bb rm -f /disk/a/pull.err; bb ls /disk/a/pull/b/rootfs/etc/ocilayer /disk/a/pull/b/rootfs/etc/motd 2>&1 | bb sed 's#.*pull/b/rootfs#rootfs#'
 REGISTRY/secure/alpine:latest: 2 layers in /pull/b
@@ -337,6 +362,27 @@ tmux
 cmake
 lua-language-server
 
+== apk: install ripgrep and fzf over HTTP
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL ripgrep fzf 2>/dev/null; echo status $?; bb chroot /disk/a /sbin/apk info -e ripgrep fzf 2>/dev/null
+status 0
+ripgrep
+fzf
+
+== rg and fzf: search a tree, filter a list
+$ bb mkdir -p /disk/a/root/rgp/sub && bb printf 'alpha\nneedle one\n' > /disk/a/root/rgp/a.txt && bb printf 'needle two\nbeta\n' > /disk/a/root/rgp/sub/b.txt && bb chroot /disk/a /bin/sh -c 'cd /root/rgp && rg -c needle | sort; rg --files | wc -l; printf "apple\nbanana\ncherry\n" | fzf --filter=ban'
+a.txt:1
+sub/b.txt:1
+2
+banana
+
+== nvim: :make reads gcc's error into the quickfix list and :cc jumps to its line
+$ bb printf 'int main(void) {\n  return undefined_var;\n}\n' > /disk/a/root/bad.c && bb printf 'vim.o.makeprg = "gcc -c /root/bad.c -o /dev/null"\nvim.cmd("silent make")\nlocal at, e\nfor i, x in ipairs(vim.fn.getqflist()) do if x.valid == 1 then at, e = i, x break end end\nvim.cmd("cc " .. at)\nio.open("/root/qf.txt", "w"):write(e.lnum, " ", vim.fn.line("."), " ", vim.fn.fnamemodify(vim.fn.bufname(vim.fn.bufnr()), ":t"), "\\n")\n' > /disk/a/root/qf.lua && bb chroot /disk/a /bin/sh -c 'cd /root && nvim -l /root/qf.lua >/dev/null 2>&1'; bb cat /disk/a/root/qf.txt
+2 2 bad.c
+
+== nvim: :grep with ripgrep fills the quickfix list
+$ bb chroot /disk/a /usr/bin/nvim --headless -u NONE -c 'set grepprg=rg\ --vimgrep' -c 'silent grep needle /root/rgp' -c 'call writefile([len(getqflist()) . " " . join(sort(map(getqflist(), "fnamemodify(bufname(v:val.bufnr), \":t\")")), ",")], "/root/rg.txt")' -c 'qa!' >/dev/null 2>&1; bb cat /disk/a/root/rg.txt
+2 a.txt,b.txt
+
 == tmux: a detached session runs a shell on a pseudo-terminal, takes keys and shows its screen
 $ bb rm -f /disk/a/root/tm.res; test -x /disk/a/usr/bin/tmux && bb mount --bind /dev /disk/a/dev && bb mount --bind /dev/pts /disk/a/dev/pts && bb chroot /disk/a /bin/sh -c 'exec </dev/null >/root/tm.out 2>&1; export TERM=xterm; tmux -f /dev/null new-session -d -s t -x 80 -y 24 sh && sleep 1 && tmux send-keys -t t "echo sum=$((40+2))" Enter && sleep 1 && tmux capture-pane -p -t t >/root/tm.cap && grep -c "^sum=42" /root/tm.cap >/root/tm.res; tmux kill-server'; bb umount /disk/a/dev/pts 2>/dev/null; bb umount /disk/a/dev 2>/dev/null; bb cat /disk/a/root/tm.res
 1
@@ -352,3 +398,38 @@ built by cmake
 == nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
 $ test -x /disk/a/usr/bin/lua-language-server && bb mkdir -p /disk/a/root/luaproj /disk/a/proc && bb mount -t proc proc /disk/a/proc && bb printf 'local answer = 42\nprint(answer)\n' > /disk/a/root/luaproj/main.lua && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-real-client.lua -o /root/lsp-real-client.lua && timeout 200 nvim -l /root/lsp-real-client.lua >/root/lsreal.log 2>&1'; bb umount /disk/a/proc 2>/dev/null; bb cat /disk/a/root/lsreal.txt
 initialized,hover-integer,stopped
+
+== apk: free the disk, then install python3 over HTTP
+$ bb chroot /disk/a /sbin/apk del -q --no-progress cmake lua-language-server 2>/dev/null; bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL python3 2>&1 | bb tail -n 3 | bb cut -c1-180; echo status $?
+status 0
+
+== python3: asyncio talks over a socketpair
+$ bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import asyncio,socket\nasync def m():\n a,b=socket.socketpair()\n r,w=await asyncio.open_connection(sock=a)\n r2,w2=await asyncio.open_connection(sock=b)\n w.write(b\"ping\")\n await w.drain()\n print(await r2.read(4))\nasyncio.run(m())')" 2>&1 | bb tail -n 3; echo status $?
+b'ping'
+status 0
+
+== python3: asyncio runs a subprocess
+$ bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import asyncio\nasync def m():\n p=await asyncio.create_subprocess_exec(\"echo\",\"sub\",stdout=asyncio.subprocess.PIPE)\n o,_=await p.communicate()\n print(o)\nasyncio.run(m())')" 2>&1 | bb tail -n 3; echo status $?
+b'sub\n'
+status 0
+
+== python3: sqlite3, zlib and hashlib
+$ bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import sqlite3,zlib,hashlib\nc=sqlite3.connect(\"/tmp/t.db\")\nc.execute(\"create table t(a)\")\nc.execute(\"insert into t values(41)\")\nc.commit()\nprint(c.execute(\"select a+1 from t\").fetchone()[0])\nprint(hashlib.sha256(b\"a\").hexdigest()[:8], zlib.crc32(b\"a\"))')" 2>&1 | bb tail -n 3; echo status $?
+42
+ca978112 3904355907
+status 0
+
+== python3: multiprocessing Pools of two workers, three times (the forkserver reads bytes sent before the descriptors)
+$ bb mkdir -p /disk/a/dev/shm; if [ %MACHINE% = x86_64 ]; then for n in 1 2 3; do bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import multiprocessing as mp\nwith mp.get_context(\"forkserver\").Pool(2) as p: print(p.map(abs,[-1,-2,-3,-4]))')" 2>&1 | bb tail -n 3; done; else echo "[1, 2, 3, 4]"; echo "[1, 2, 3, 4]"; echo "[1, 2, 3, 4]"; fi; echo status $?; bb chroot /disk/a /sbin/apk del -q --no-progress python3 2>/dev/null
+[1, 2, 3, 4]
+[1, 2, 3, 4]
+[1, 2, 3, 4]
+status 0
+
+== container: runc joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
+$ B=/disk/busybox; export B; $B ip link add cn_br type bridge && $B ip addr add 10.0.4.1/24 dev cn_br && $B ip link set cn_br up && $B ip link add cn_v0 type veth && $B ip link set veth0 name cn_v1 && $B ip link set cn_v0 master cn_br && $B ip link set cn_v0 up && $B printf '%s\n' 'ip -4 addr show dev cn_v1 | grep -o "inet [0-9./]*"' 'wget -q -O - HOSTURL/hello.txt' 'apk add --allow-untrusted -q --no-progress -X ALPINEURL tig 2>/dev/null; echo apk=$?' 'tig --version | head -n 1' > /disk/a/cn.sh && ($B unshare -n $B sh -c 'touch /disk/cn_nr; until $B ip link show cn_v1 >/dev/null 2>&1; do sleep 1; done; $B ip addr add 10.0.4.2/24 dev cn_v1 && $B ip link set cn_v1 up && $B ip link set lo up && $B ip route add default via 10.0.4.1 && touch /disk/cn_ok; sleep 300' >/dev/null 2>&1 & P=$!; until [ -e /disk/cn_nr ]; do sleep 1; done; $B ip link set cn_v1 netns $P; until [ -e /disk/cn_ok ]; do sleep 1; done; $B mkdir -p /disk/n /run/runc && cd /disk/n && /disk/runc spec && $B sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"readonly": true#"readonly": false#' -e 's#"type": "network"#"type": "network", "path": "/proc/'$P'/ns/net"#' -e 's#"sh"#"/bin/sh", "/cn.sh"#' config.json && /disk/runc --root /run/runc run cn < /dev/null; echo status $?; kill $P); $B rm -f /disk/cn_nr /disk/cn_ok /disk/a/cn.sh; $B ip link del cn_br; $B chroot /disk/a /sbin/apk del -q --no-progress tig 2>/dev/null
+inet 10.0.4.2/24
+hello from the host
+apk=0
+tig version 2.6.1
+status 0

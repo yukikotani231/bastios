@@ -251,10 +251,10 @@ fn fast_call(cpu: &mut Cpu, v: u64, pid: u64, vpid: u64, vtg: u64, others: &Atom
 }
 
 /// Is any process READY (waiting for a processor)?
-fn any_ready(procs: &Buf) -> bool
+fn any_ready(procs: &Buf, hi: u64) -> bool
   requires ptab_ok(procs)
 {
-  let cap = len(procs) / STRIDE;     // past it, every process is FREE
+  let cap = smaller(len(procs) / STRIDE, hi);     // past it, every process is FREE
   let mut p = 1;
   while p < cap
     invariant 1 <= p && cap <= NPROC
@@ -328,6 +328,9 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
     tty_cook(&mut s.con, &mut s.k);
     wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
     woke = disk_wake(&mut s.k);
+    if woke && s.k.fs.disk.q.dead {
+      puts(&mut s.con, "[disk: a request timed out, the disk is treated as dead]\r\n");
+    }
     if sock_wake(&mut s.k) {
       woke = true;
     }
@@ -344,7 +347,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
   // stops its own timer (boot/smp.c, bst_cpu_wait), so a process left
   // ready after the bootstrap processor's tick wakes the idle ones, which
   // is when their own ticks, 10 ms apart, would have found it.
-  if (woke || s.ticked) && s.idle > 0 && any_ready(s.k.procs) {
+  if (woke || s.ticked) && s.idle > 0 && any_ready(s.k.procs, s.k.pid_hi) {
     lapic_wake(&mut s.apic);
   }
   s.ticked = false;
@@ -379,13 +382,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
           let mut sp = root;
           let l = mmu_enter(&mut mmu, &mut sp);
           put_space(&mut s.k.spaces, p, Space::Mapped(sp));
-          let mut r = 0;
-          while r < 18
-            invariant r <= 18 && ptab_ok(s.k.procs)
-          {
-            cpu_set(&mut cpu, r, pget(s.k.procs, p, F_REGS + r));
-            r = r + 1;
-          }
+          regs_load(&mut cpu, s.k.procs, p, 18);
           cpu_set(&mut cpu, R_FSBASE, pget(s.k.procs, p, F_REGS + R_FSBASE));
           pset(&mut s.k.procs, p, F_STATE, RUNNING);
           return Job::Run(Task { pid: p, tgid: tgid(s.k.procs, p), vpid: vpid_of(s.k, p, p), vtgid: vpid_of(s.k, p, tgid(s.k.procs, p)), lease: l, fpu: f, slow: sc_mode(s.k, p) != 0 || tr2_get(s.k, p) % 2 == 1 });
@@ -575,13 +572,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
 {
   restore_fpu(&mut s.k.mem, &mut s.k.fpus, p, Fpu::State(fpu));
   // Registers, then the error code, fault address and FS base (words 18-20).
-  let mut r = 0;
-  while r < 21
-    invariant r <= 21 && ptab_ok(s.k.procs)
-  {
-    pset(&mut s.k.procs, p, F_REGS + r, cpu_get(cpu, r));
-    r = r + 1;
-  }
+  regs_store(&mut s.k.procs, cpu, p, 21);
   ack(&mut s.pic, &mut s.apic, v);
   if v == V_TIMER {
     s.k.ticks = tick(s.k.ticks);
@@ -680,6 +671,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       s.reboot = what == REBOOT;
     }
     sock_wake(&mut s.k);
+    if what == SWITCH {
+      sig_wake_now(&mut s.k, p);            // a signal posted while it ran is not lost to its sleep
+    }
     if disk_hold(&mut s.k, p, EIO) || what == SWITCH {
       return (p + 1) % NPROC;
     }
@@ -798,7 +792,7 @@ fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, p
   after_trap(&mut s, p);
   let j = next_job(&mut s, &mut cpu, &mut mmu, c, poll);
   atomic_store(pend, s.con.r.n);
-  atomic_store(others, any_ready(s.k.procs));
+  atomic_store(others, any_ready(s.k.procs, s.k.pid_hi));
   return Next { job: j, from: c };
 }
 
@@ -815,7 +809,7 @@ fn next_job_p(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool, 
   }
   let j = next_job(&mut s, &mut cpu, &mut mmu, from, poll);
   atomic_store(pend, s.con.r.n);
-  atomic_store(others, any_ready(s.k.procs));
+  atomic_store(others, any_ready(s.k.procs, s.k.pid_hi));
   return j;
 }
 
