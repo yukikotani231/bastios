@@ -62,6 +62,67 @@ int main(void) {
            ok = ok && recvmsg(sv[1], &r, 0) == 1 && (h = CMSG_FIRSTHDR(&r)) && h->cmsg_type == SCM_RIGHTS && (memcpy(&fd, CMSG_DATA(h), sizeof fd), fd >= 0) &&
                 write(fd, "z", 1) == 1 && read(p[0], &x, 1) == 1 && x == 'z';
            ok; }));
+    EXPECT("SCM_RIGHTS passes several descriptors in one message", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 && ({
+           int p[3][2]; int fds[3]; for (int i = 0; i < 3; i++) { pipe(p[i]); fds[i] = p[i][1]; }
+           char cb[CMSG_SPACE(3 * sizeof(int))] = {0}; struct iovec v = {"f", 1};
+           struct msghdr m = {.msg_iov = &v, .msg_iovlen = 1, .msg_control = cb, .msg_controllen = sizeof cb};
+           struct cmsghdr *h = CMSG_FIRSTHDR(&m); h->cmsg_level = SOL_SOCKET; h->cmsg_type = SCM_RIGHTS; h->cmsg_len = CMSG_LEN(sizeof fds);
+           memcpy(CMSG_DATA(h), fds, sizeof fds);
+           int ok = sendmsg(sv[0], &m, 0) == 1;
+           char rb[CMSG_SPACE(3 * sizeof(int))]; char x; struct iovec rv = {&x, 1};
+           struct msghdr r = {.msg_iov = &rv, .msg_iovlen = 1, .msg_control = rb, .msg_controllen = sizeof rb};
+           int got[3] = {-1, -1, -1};
+           ok = ok && recvmsg(sv[1], &r, 0) == 1 && (h = CMSG_FIRSTHDR(&r)) && h->cmsg_type == SCM_RIGHTS && h->cmsg_len == CMSG_LEN(sizeof got) &&
+                !(r.msg_flags & MSG_CTRUNC) && (memcpy(got, CMSG_DATA(h), sizeof got), 1);
+           for (int i = 0; i < 3; i++)
+               ok = ok && got[i] >= 0 && write(got[i], "0123" + i, 1) == 1 && read(p[i][0], &x, 1) == 1 && x == "0123"[i];
+           ok; }));
+    EXPECT("SCM_RIGHTS with a short buffer closes the rest and says MSG_CTRUNC", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 && ({
+           int p[3][2]; int fds[3]; for (int i = 0; i < 3; i++) { pipe(p[i]); fds[i] = p[i][1]; }
+           char cb[CMSG_SPACE(3 * sizeof(int))] = {0}; struct iovec v = {"f", 1};
+           struct msghdr m = {.msg_iov = &v, .msg_iovlen = 1, .msg_control = cb, .msg_controllen = sizeof cb};
+           struct cmsghdr *h = CMSG_FIRSTHDR(&m); h->cmsg_level = SOL_SOCKET; h->cmsg_type = SCM_RIGHTS; h->cmsg_len = CMSG_LEN(sizeof fds);
+           memcpy(CMSG_DATA(h), fds, sizeof fds);
+           int ok = sendmsg(sv[0], &m, 0) == 1;
+           char rb[CMSG_SPACE(2 * sizeof(int))]; char x; struct iovec rv = {&x, 1};
+           struct msghdr r = {.msg_iov = &rv, .msg_iovlen = 1, .msg_control = rb, .msg_controllen = sizeof rb};
+           ok = ok && recvmsg(sv[1], &r, 0) == 1 && (r.msg_flags & MSG_CTRUNC) && (h = CMSG_FIRSTHDR(&r)) && h->cmsg_len == CMSG_LEN(2 * sizeof(int));
+           ok; }));
+    EXPECT("SCM_RIGHTS with a bad descriptor among several is EBADF", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 && ({
+           int p[2]; pipe(p); int fds[2] = {p[1], 999};
+           char cb[CMSG_SPACE(2 * sizeof(int))] = {0}; struct iovec v = {"f", 1};
+           struct msghdr m = {.msg_iov = &v, .msg_iovlen = 1, .msg_control = cb, .msg_controllen = sizeof cb};
+           struct cmsghdr *h = CMSG_FIRSTHDR(&m); h->cmsg_level = SOL_SOCKET; h->cmsg_type = SCM_RIGHTS; h->cmsg_len = CMSG_LEN(sizeof fds);
+           memcpy(CMSG_DATA(h), fds, sizeof fds);
+           sendmsg(sv[0], &m, 0) == -1 && errno == EBADF; }));
+    EXPECT("SCM_RIGHTS from two clients that sent and closed before the accept, and a child that closes the listener", ({
+           struct sockaddr_un ua = {.sun_family = AF_UNIX}; strcpy(ua.sun_path, "/tmp/t_scm.sock"); unlink(ua.sun_path);
+           int ls = socket(AF_UNIX, SOCK_STREAM, 0); int ok = ls >= 0 && bind(ls, (void *)&ua, sizeof ua) == 0 && listen(ls, 4) == 0;
+           int cl[2], rp[2][2], wp[2][2];
+           for (int i = 0; i < 2 && ok; i++) {
+               cl[i] = socket(AF_UNIX, SOCK_STREAM, 0); ok = ok && connect(cl[i], (void *)&ua, sizeof ua) == 0;
+               pipe(rp[i]); pipe(wp[i]);
+               int fds[4] = {rp[i][0], wp[i][1], rp[i][1], wp[i][0]};
+               char cb[CMSG_SPACE(sizeof fds)] = {0}; struct iovec v = {"f", 1};
+               struct msghdr m = {.msg_iov = &v, .msg_iovlen = 1, .msg_control = cb, .msg_controllen = sizeof cb};
+               struct cmsghdr *h = CMSG_FIRSTHDR(&m); h->cmsg_level = SOL_SOCKET; h->cmsg_type = SCM_RIGHTS; h->cmsg_len = CMSG_LEN(sizeof fds);
+               memcpy(CMSG_DATA(h), fds, sizeof fds);
+               ok = ok && sendmsg(cl[i], &m, 0) == 1;
+               close(rp[i][0]); close(wp[i][1]); close(rp[i][1]); close(wp[i][0]);   // the message holds the only references
+               close(cl[i]);
+           }
+           pid_t kid = fork();                 // a child that only closes the listener: the connections wait on
+           if (kid == 0) { close(ls); _exit(0); }
+           int kst; waitpid(kid, &kst, 0);
+           for (int i = 0; i < 2 && ok; i++) {
+               int a = accept(ls, 0, 0); char rb[CMSG_SPACE(4 * sizeof(int))]; char x; struct iovec rv = {&x, 1};
+               struct msghdr r = {.msg_iov = &rv, .msg_iovlen = 1, .msg_control = rb, .msg_controllen = sizeof rb};
+               int got[4] = {-1, -1, -1, -1}; struct cmsghdr *h;
+               ok = ok && a >= 0 && recvmsg(a, &r, 0) == 1 && (h = CMSG_FIRSTHDR(&r)) && h->cmsg_len == CMSG_LEN(sizeof got) && (memcpy(got, CMSG_DATA(h), sizeof got), 1);
+               ok = ok && write(got[1], "q", 1) == 1 && read(got[3], &x, 1) == 1 && x == 'q' && write(got[2], "r", 1) == 1 && read(got[0], &x, 1) == 1 && x == 'r';
+               close(a);
+           }
+           ok; }));
     EXPECT("AF_UNIX SOCK_DGRAM socketpair", socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) == 0 && send(sv[0], "dg", 2, 0) == 2 &&
            recv(sv[1], b, sizeof b, 0) == 2);
     {

@@ -457,7 +457,7 @@ const LK_WAITS: u64 = 768;            // LK_N * LK_W
 const LK_WW: u64 = 4;
 const LK_HI: u64 = LK_WAITS + NPROC * LK_WW;   // after them: every held lock is in an entry below this
 const LK_LEN: u64 = LK_HI + 1;
-const IPC_LEN: u64 = 3840 + NPROC * 24;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
+const IPC_LEN: u64 = 6656 + NPROC * 24;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
 const RNG_LEN: u64 = 19;              // the random generator's words (src/lxdev.bastio)
 const SYS_SHMMAX: u64 = 154;           // /proc/sys/kernel/shmmax as written, + 1 (0: never written; src/lxipc.bastio)
 const SYS_PQ: u64 = 160;
@@ -514,7 +514,7 @@ const CAP_SETUID: u64 = 7;
 const CAP_SYS_BOOT: u64 = 22;
 const CAP_SETPCAP: u64 = 8;
 const PQ_N: u64 = 32;                  // POSIX message queues (SYS_PQ + PQ_N * 12 words = SYS_LEN)
-const IPCB_LEN: u64 = 812032;         // its message bytes, IPC_SETS * MQ_CAP; then the POSIX queues' names and messages, PQ_N * (256 + 16384), then their SIGEV_THREAD cookies, PQ_N * 32
+const IPCB_LEN: u64 = 1090560;         // its message bytes, IPC_SETS * MQ_CAP; then the POSIX queues' names and messages, PQ_N * (256 + 16384), then their SIGEV_THREAD cookies, PQ_N * 32
 const LK_EOF: u64 = 18446744073709551615;   // a range to the end of the file; no file
 const LK_DESC: u64 = 4294967296;      // 2^32: lock owners from here are descriptions
 const LKC_FCNTL: u64 = 0;             // record and OFD locks
@@ -722,7 +722,8 @@ const UX_LIS: u64 = 4;
 const UX_BACKLOG: u64 = 4;            // connections waiting for accept
 const UXL_W: u64 = 8;                 // 4 + UX_BACKLOG
 const UX_PATH: u64 = 108;             // the longest name
-const UX_LEN: u64 = 156;              // UX_N * UX_W + UX_LIS * UXL_W + UX_N, then 2 * (UX_N + UX_LIS) credential words, then UX_LIS socket files
+const UX_XTRA: u64 = 7;               // descriptions a message passes besides the first
+const UX_LEN: u64 = 268;              // UX_N * UX_W + UX_LIS * UXL_W + UX_N, then 2 * (UX_N + UX_LIS) credential words, then UX_LIS socket files, then UX_XTRA words per channel
 const UXB_LEN: u64 = 65968;           // UX_N * UX_CAP + UX_LIS * UX_PATH
 
 const NPIPES: u64 = 2048;             // OFD_N / 2: each pipe has two descriptions

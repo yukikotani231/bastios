@@ -704,6 +704,7 @@ t_nopie: the data follows it
 t_nopie: the text is where it was linked
 t_nopie: the whole bss is usable
 t_nsmany: 24 IPC namespaces at once
+t_nsmany: 60 tmpfs mounts at once, each with its own files
 t_nsmany: 24 PID namespaces at once
 t_nsmany: 24 UTS namespaces at once, each with its own name
 t_nsmany: and 24 more once those are gone
@@ -914,6 +915,10 @@ t_sock2: MSG_DONTWAIT on an empty socket is EAGAIN
 t_sock2: MSG_PEEK leaves the bytes
 t_sock2: SA_RESTART restarts a read
 t_sock2: SCM_RIGHTS passes a descriptor
+t_sock2: SCM_RIGHTS passes several descriptors in one message
+t_sock2: SCM_RIGHTS with a short buffer closes the rest and says MSG_CTRUNC
+t_sock2: SCM_RIGHTS with a bad descriptor among several is EBADF
+t_sock2: SCM_RIGHTS from two clients that sent and closed before the accept, and a child that closes the listener
 t_sock2: SO_ERROR is 0
 t_sock2: SO_KEEPALIVE
 t_sock2: SO_RCVBUF and SO_SNDBUF
@@ -943,6 +948,7 @@ t_sys: splice reads a /proc file into a pipe
 t_sys: settimeofday
 t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message
+t_sysv: 32 queues, semaphore sets and segments at once, the 33rd of each is ENOSPC
 t_sysv: GETNCNT counts a waiting process
 t_sysv: IPC_RMID ends a wait with EIDRM
 t_sysv: SEM_UNDO is undone at exit
@@ -1002,6 +1008,7 @@ tty: epoll: keys reach a program waiting in epoll_wait on /dev/tty
 alpine-tty: nvim: :make runs gcc through make
 alpine-tty: nvim: edit a C file, build it with gcc, run it
 alpine-tty: nvim: edit a file in a git work tree, then commit it
+alpine-tty: nvim: git commit opens Neovim as the editor, and the message typed there is the commit's
 alpine-tty: nvim: edit and save a C file
 alpine: apk: install neovim over HTTP
 alpine: nvim: a script run without a terminal
@@ -1041,6 +1048,7 @@ alpine: git: clone over HTTP and over HTTPS (git's dumb protocol, curl's TLS)
 alpine: nvim: tree-sitter parses help text with the vimdoc parser
 alpine: nvim: LuaJIT loads a shared object that gcc built
 alpine: nvim: a plugin cloned over HTTP is on the packpath and runs at startup
+alpine: nvim: a small plugin manager in Lua clones a plugin, loads it, then updates it with git pull
 alpine: nvim: vim.system runs a process and collects its output and status
 alpine: nvim: a job on a pseudo-terminal (what :terminal runs on, with /dev and /dev/pts bound into the chroot)
 alpine: nvim: a file watcher and a timer from libuv
@@ -1062,10 +1070,16 @@ alpine: tmux: a client on the console passes it to the server (SCM_RIGHTS of the
 alpine: tmux: a detached session runs a shell on a pseudo-terminal, takes keys and shows its screen
 alpine: apk: install ripgrep and fzf over HTTP
 alpine: rg and fzf: search a tree, filter a list
+alpine: nvim: :make reads gcc's error into the quickfix list and :cc jumps to its line
 alpine: nvim: :grep with ripgrep fills the quickfix list
 alpine: cmake: configure, build and run a C project
 alpine: nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
 alpine: proc: /proc/self/exe is named from the reader's root (chroot), as on Linux
+alpine: apk: free the disk, then install python3 over HTTP
+alpine: python3: asyncio talks over a socketpair
+alpine: python3: asyncio runs a subprocess
+alpine: python3: sqlite3, zlib and hashlib
+alpine: python3: a multiprocessing Pool (the forkserver gets several descriptors in one message)
 t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
 t_gai: AF_INET6 UDP connect to :: reads back ::1
 t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1
