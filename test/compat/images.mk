@@ -21,3 +21,7 @@ NODE_IMAGE ?= library/node@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f6
 # The tree-sitter C parser for Neovim (npm package, pinned by version and SHA-256).
 TREESITTER_C_VER    := 0.24.1
 TREESITTER_C_SHA256 := 8e9ecd7687665d2fa1b3c07fbd1f4380b7d285850d6954629e2156e1b757451e
+
+# strace for AArch64, built from source (arch/aarch64/Makefile).
+STRACE_VER := 6.11
+STRACE_SHA256 := 83262583a3529f02c3501aa8b8ac772b4cbc03dc934e98bab6e4883626e283a5

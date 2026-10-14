@@ -171,6 +171,9 @@ fn pt_resume(k: &mut Kernel, c: u64, sig: u64, detach: bool, sys: bool, step: bo
       next = next + TS_NOENT;               // the stop before it is done; the one after it is not
     }
   }
+  if t / TS_CUT % 2 == 1 && t / TS_EXIT % 2 == 1 && sys && !detach {
+    next = next + TS_CUT;                   // the signal that cut the call short is next
+  }
   tr2_put(&mut k, c, next);
   jc_set(&mut k, c, jc_get(k, c) / JC_EXECED % 2 * JC_EXECED);   // the stop is no news any more
   if sig != 0 {

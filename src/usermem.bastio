@@ -419,6 +419,47 @@ fn anon_covers(an: &Buf, pid: u64, q: u64) -> bool
   return false;
 }
 
+/// Where the record of process pid that covers window page q ends (the
+/// first page after it); q if none does.
+fn anon_end(an: &Buf, pid: u64, q: u64) -> u64
+  requires pid < NPROC && q < WPAGES
+  ensures q <= result && result <= WPAGES
+{
+  let mut i = 0;
+  while i < AN_N
+    invariant i <= AN_N && pid < NPROC && q < WPAGES
+  {
+    let first1 = an_get(an, an_at(pid, i, 0));
+    let pages = an_get(an, an_at(pid, i, 1));
+    if first1 != 0 && first1 - 1 <= q && q - (first1 - 1) < pages && pages <= WPAGES - (first1 - 1) {
+      return first1 - 1 + pages;
+    }
+    i = i + 1;
+  }
+  return q;
+}
+
+/// The first window page above q where a record of process pid begins
+/// (WPAGES if none).
+fn anon_after(an: &Buf, pid: u64, q: u64) -> u64
+  requires pid < NPROC
+  ensures result <= WPAGES
+{
+  let mut best = WPAGES;
+  let mut i = 0;
+  while i < AN_N
+    invariant i <= AN_N && pid < NPROC && best <= WPAGES
+  {
+    let first1 = an_get(an, an_at(pid, i, 0));
+    let pages = an_get(an, an_at(pid, i, 1));
+    if first1 != 0 && first1 - 1 > q && first1 - 1 < best && pages != 0 {
+      best = first1 - 1;
+    }
+    i = i + 1;
+  }
+  return best;
+}
+
 /// Window page q of process pid, if a record covers it: maps a fresh zero
 /// page there unless one is there. True if q is mapped now.
 fn anon_touch(m: &mut Mem, spaces: &mut Vec[Space], an: &Buf, pid: u64, q: u64) -> bool
@@ -591,4 +632,98 @@ fn l1_present(l1: &mut PageTable, i: u64) -> bool
   requires pt_level(l1) == 1 && i < 512
 {
   return pt_has(l1, i);
+}
+
+/// What process pid's page tables say of window page q: 0 if unmapped, else
+/// 1 plus 2 if readable (not PROT_NONE), 4 if writable, 8 if its frame is
+/// shared (MAP_SHARED, or copy-on-write after fork).
+fn user_page_bits(spaces: &mut Vec[Space], pid: u64, q: u64) -> u64
+  requires spaces_ok(spaces) && pid < NPROC
+  ensures spaces_ok(spaces) && result < 16
+{
+  if q >= WPAGES {
+    return 0;
+  }
+  match take_space(&mut spaces, pid) {
+    Space::Empty => { return 0; },
+    Space::Mapped(mut root) => {
+      let mut r = 0;
+      if pt_has(root, 1) {
+        r = pt_borrow(&mut root, 1, l3_bits, q * 4096);
+      }
+      put_space(&mut spaces, pid, Space::Mapped(root));
+      return r;
+    },
+  }
+}
+
+fn l3_bits(l3: &mut PageTable, off: u64) -> u64
+  requires pt_level(l3) == 3 && off < USER_SIZE
+  ensures result < 16
+{
+  let t = off / L2_SIZE;
+  if !pt_has(l3, t) {
+    return 0;
+  }
+  return pt_borrow(&mut l3, t, l2_bits, off % L2_SIZE);
+}
+
+fn l2_bits(l2: &mut PageTable, off: u64) -> u64
+  requires pt_level(l2) == 2 && off < L2_SIZE
+  ensures result < 16
+{
+  let p = off / 4096;
+  if !pt_has(l2, p / 512) {
+    return 0;
+  }
+  return pt_borrow(&mut l2, p / 512, l1_bits, p % 512);
+}
+
+fn l1_bits(l1: &mut PageTable, i: u64) -> u64
+  requires pt_level(l1) == 1 && i < 512
+  ensures result < 16
+{
+  if !pt_has(l1, i) {
+    return 0;
+  }
+  let mut r = 1;
+  if pt_accessible(l1, i) {
+    r = r + 2;
+  }
+  if pt_writable(l1, i) {
+    r = r + 4;
+  }
+  if pt_shared(l1, i) {
+    r = r + 8;
+  }
+  return r;
+}
+
+/// The first window page from q on that may be mapped in process pid's
+/// window (WPAGES if none): a lower bound that skips the empty tables.
+fn user_next_mapped(spaces: &mut Vec[Space], pid: u64, q: u64) -> u64
+  requires spaces_ok(spaces) && pid < NPROC && q <= WPAGES
+  ensures spaces_ok(spaces) && q <= result && result <= WPAGES
+{
+  if q >= WPAGES {
+    return WPAGES;
+  }
+  match take_space(&mut spaces, pid) {
+    Space::Empty => { return WPAGES; },
+    Space::Mapped(mut root) => {
+      let mut r = WPAGES;
+      if pt_has(root, 1) {
+        r = pt_borrow(&mut root, 1, l3_next, q);
+      }
+      put_space(&mut spaces, pid, Space::Mapped(root));
+      return r;
+    },
+  }
+}
+
+fn l3_next(l3: &mut PageTable, q: u64) -> u64
+  requires pt_level(l3) == 3 && q < WPAGES
+  ensures q <= result && result <= WPAGES
+{
+  return w_next(&mut l3, q);
 }
