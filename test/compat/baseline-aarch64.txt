@@ -49,6 +49,8 @@ alpine: nvim: a script run without a terminal
 alpine: nvim: shada and a session file survive a restart (atomic writes, rename)
 alpine: nvim: the LSP client starts a language server, asks it for a hover and stops it
 alpine: nvim: tree-sitter parses help text with the vimdoc parser
+alpine: nvim: tree-sitter parses C with a parser built from the grammar, and a query finds the function names
+alpine: nvim: tree-sitter highlights C: the keyword, the type and the comment get their captures
 alpine: nvim: vim.system runs a process and collects its output and status
 alpine: openssl: a digest and random bytes
 alpine: rsync: copy a tree
@@ -902,6 +904,13 @@ t_proc: an inotify instance lists its watches
 t_proc: a pidfd shows the process
 t_proc: fdinfo lists the open descriptors
 t_proc: /proc/self lists fdinfo
+t_proc: maps lists an anonymous mapping
+t_proc: maps lists a shared mapping with s
+t_proc: maps drops a mapping when it is unmapped
+t_proc: maps shows a PROT_NONE page with no permissions
+t_proc: maps has a [heap] after brk grows
+t_proc: maps has [stack] and [vdso]
+t_proc: maps lines end at column 74 for names
 t_ptrace: PTRACE_ATTACH stops the target with SIGSTOP
 t_ptrace: PTRACE_CONT with a signal runs the handler for it
 t_ptrace: PTRACE_CONT without a signal drops the one that stopped it, and the child saw the poke
@@ -1128,5 +1137,6 @@ alpine: nvim: :grep with ripgrep fills the quickfix list
 alpine: tmux: a detached session runs a shell on a pseudo-terminal, takes keys and shows its screen
 alpine: tmux: a client on the console passes it to the server (SCM_RIGHTS of the console)
 alpine-tty: tmux: attach on the console, run a command in the session, detach and find it still there
+alpine: strace: traces a program's system calls with ptrace, following the child it starts
 alpine-tty: tmux: Neovim in a pane takes keys through tmux and saves the file
 alpine-tty: nvim: :make runs make and the build succeeds

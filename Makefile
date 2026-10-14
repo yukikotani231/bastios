@@ -488,8 +488,7 @@ build/compat/crun: | build/compat/src
 # vimdoc parser, so the grammar's generated parser.c, from the npm package at a
 # pinned version and SHA-256, is built into a shared object (nvim loads
 # parser/c.so; the C queries come with neovim). It runs on BastiOS only.
-TREESITTER_C_VER    := 0.24.1
-TREESITTER_C_SHA256 := 8e9ecd7687665d2fa1b3c07fbd1f4380b7d285850d6954629e2156e1b757451e
+# (The version is in test/compat/images.mk, which arch/aarch64/Makefile shares.)
 build/compat/tree-sitter-c.so: | build/compat/src
 	curl -fsSL -o build/compat/src/tree-sitter-c.tgz https://registry.npmjs.org/tree-sitter-c/-/tree-sitter-c-$(TREESITTER_C_VER).tgz
 	echo "$(TREESITTER_C_SHA256)  build/compat/src/tree-sitter-c.tgz" | sha256sum -c - >/dev/null
@@ -509,6 +508,23 @@ build/compat/strace: | build/compat/src
 	rm -rf build/compat/src/strace && mkdir build/compat/src/strace
 	tar xzf build/compat/src/strace.tgz -C build/compat/src/strace usr/bin/strace
 	strip -o $@.part build/compat/src/strace/usr/bin/strace
+	mv $@.part $@
+
+# gdb, for the cases that debug a program on the Alpine disk (ptrace, breakpoints).
+# Alpine's package is not on the disk's repository, so this is the layer of the
+# sdemos/gdb image on Docker Hub (gdb 8, musl), pinned by the layer's SHA-256. It
+# comes with the libraries Alpine's root has other versions of (readline 7), so
+# they ship beside it in one tar, /disk/gdb.tar, to unpack under the root's /opt.
+GDB_LAYER := sha256:f647f910b52b912d3903996992f8b0ad5a9b0c3a6fcca693d85174451ffe706c
+build/compat/gdb.tar: | build/compat/src
+	tok=$$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:sdemos/gdb:pull" | jq -r .token) && \
+	  curl -fsSL -H "Authorization: Bearer $$tok" -o build/compat/src/gdb.tgz https://registry-1.docker.io/v2/sdemos/gdb/blobs/$(GDB_LAYER)
+	echo "$(patsubst sha256:%,%,$(GDB_LAYER))  build/compat/src/gdb.tgz" | sha256sum -c - >/dev/null
+	rm -rf build/compat/src/gdb && mkdir -p build/compat/src/gdb/gdb/bin build/compat/src/gdb/gdb/lib
+	tar xzf build/compat/src/gdb.tgz -C build/compat/src/gdb usr/bin/gdb usr/lib/libreadline.so.7.0 usr/lib/libncursesw.so.6.0 usr/lib/libexpat.so.1.6.7
+	strip -o build/compat/src/gdb/gdb/bin/gdb build/compat/src/gdb/usr/bin/gdb
+	cd build/compat/src/gdb/usr/lib && cp libreadline.so.7.0 ../../gdb/lib/libreadline.so.7 && cp libncursesw.so.6.0 ../../gdb/lib/libncursesw.so.6 && cp libexpat.so.1.6.7 ../../gdb/lib/libexpat.so.1
+	tar cf $@.part -C build/compat/src/gdb gdb
 	mv $@.part $@
 
 # Dropbear, the SSH server (and its client and key tool, which also run on
@@ -727,10 +743,10 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # over SSH.
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh \
     build/compat/bastioc1 build/compat/z3 build/compat/tcc \
-    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace tools/ocipull.sh | build/compat
+    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar tools/ocipull.sh | build/compat
 	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) $(ALPINE_X86_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) \
 	  --extra "$$(test/compat/bastiotools.sh build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)) \
-	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace tools/ocipull.sh"
+	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar tools/ocipull.sh"
 
 # Debian on BastiOS, on a fifth disk (test/compat/debiandisk.py) for
 # test/compat/debian.txt: Debian's root file system, whose programs are

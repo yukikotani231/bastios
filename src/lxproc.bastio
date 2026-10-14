@@ -500,7 +500,7 @@ fn file_running(k: &Kernel, f: u64) -> bool
   if f >= NO_FILE - NPROGS - 1 {
     return false;
   }
-  let cap = len(k.procs) / STRIDE;     // past it, every process is FREE
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE
   let mut p = 1;
   while p < cap
     invariant p <= cap + 1 && cap <= NPROC && kok(k)
@@ -867,7 +867,7 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
     want = 0xFFFFFFFF00000000 + p32;        // negative: sign-extend
   }
   let mut found = false;
-  let cap = len(k.procs) / STRIDE;     // past it, every process is FREE
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE
   let mut c = 1;
   while c < cap
     invariant 1 <= c && cap <= NPROC && kok(k)
@@ -906,7 +906,9 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
         ret(&mut k.procs, pid, vpid_of(k, pid, c));
         return KEEP;
       }
-      if state(k.procs, c) == ZOMBIE {
+      // A zombie that someone else traces is that tracer's to hear of first;
+      // its parent waits for it until the tracer has (or lets go).
+      if state(k.procs, c) == ZOMBIE && (traced_by(k, c, pid) || tr_get(k, c) % 65536 == 0) {
         if status != 0 {
           lx_fill(&mut k, 0, 4);
           let code = pget(k.procs, c, F_CODE);
@@ -992,7 +994,7 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
     }
   }
   let mut found = false;
-  let cap = len(k.procs) / STRIDE;     // past it, every process is FREE
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE
   let mut c = 1;
   while c < cap
     invariant 1 <= c && cap <= NPROC && kok(k)

@@ -12,6 +12,8 @@
 #include <sched.h>
 #include <sys/eventfd.h>
 #include <sys/inotify.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
 
 /* Reads up to n - 1 bytes of path into b as a string; the count, or -1. */
 static int slurp(const char *path, char *b, int n) {
@@ -21,6 +23,22 @@ static int slurp(const char *path, char *b, int n) {
     close(fd);
     if (r >= 0) b[r] = 0;
     return r;
+}
+
+/* Whether the maps text b has a line with permissions perm whose range
+ * covers lo .. hi (neighbours with the same permissions merge into one),
+ * and that ends in name if that is not NULL. */
+static int maps_has(const char *b, unsigned long lo, unsigned long hi, const char *perm, const char *name) {
+    unsigned long a, e;
+    char pr[8];
+    for (; *b; b++) {
+        const char *nl = strchr(b, '\n');
+        if (sscanf(b, "%lx-%lx %7s", &a, &e, pr) == 3 && a <= lo && e >= hi && !strncmp(pr, perm, 4)
+            && (!name || (nl && nl - b >= (long)strlen(name) && !strncmp(nl - strlen(name), name, strlen(name))))) return 1;
+        if (!nl) break;
+        b = nl;
+    }
+    return 0;
 }
 
 /* Walks the directory at path: every entry must stat, and the files
@@ -230,6 +248,23 @@ int main(int argc, char **argv) {
         if (f >= 0) close(f);
         if (e >= 0) close(e);
         if (n >= 0) close(n);
+    }
+    {
+        /* /proc/PID/maps: the regions the process really has. */
+        static char mb[16384];
+        char *a = mmap(NULL, 8 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        char *sh = mmap(NULL, 2 * 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+                a[0] = 1;                                    /* touch one page; the rest stay untouched */
+        EXPECT("maps lists an anonymous mapping", a != MAP_FAILED && slurp("/proc/self/maps", mb, sizeof mb) > 0
+               && maps_has(mb, (unsigned long)a, (unsigned long)a + 8 * 4096, "rw-p", NULL));
+        EXPECT("maps lists a shared mapping with s", sh != MAP_FAILED && slurp("/proc/self/maps", mb, sizeof mb) > 0
+               && maps_has(mb, (unsigned long)sh, (unsigned long)sh + 2 * 4096, "rw-s", NULL));
+        EXPECT("maps drops a mapping when it is unmapped", munmap(a, 8 * 4096) == 0 && slurp("/proc/self/maps", mb, sizeof mb) > 0
+               && !maps_has(mb, (unsigned long)a, (unsigned long)a + 1, "rw-p", NULL) && !maps_has(mb, (unsigned long)a, (unsigned long)a + 1, "r-xp", NULL));
+        EXPECT("maps shows a PROT_NONE page with no permissions", ({ char *g = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); int r = 0; if (g != MAP_FAILED && mprotect(g, 4096, PROT_NONE) == 0 && slurp("/proc/self/maps", mb, sizeof mb) > 0) r = maps_has(mb, (unsigned long)g, (unsigned long)g + 4096, "---p", NULL); r; }));
+        EXPECT("maps has a [heap] after brk grows", ({ char *b0 = (char *)syscall(SYS_brk, 0); int r = 0; if ((char *)syscall(SYS_brk, b0 + 3 * 4096) == b0 + 3 * 4096) { b0[0] = 1; r = slurp("/proc/self/maps", mb, sizeof mb) > 0 && maps_has(mb, (unsigned long)b0, (unsigned long)b0 + 3 * 4096, "rw-p", "[heap]"); } r; }));
+        EXPECT("maps has [stack] and [vdso]", strstr(mb, "[stack]\n") != NULL && strstr(mb, "[vdso]\n") != NULL);
+        EXPECT("maps lines end at column 74 for names", ({ char *q = strstr(mb, "[stack]"); q && q[-1] == ' ' && ({ char *l = q; while (l > mb && l[-1] != '\n') l--; (size_t)(q - l) == 73; }); }));
     }
     return done();
 }
