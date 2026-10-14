@@ -2269,6 +2269,33 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
         a = put_c(&mut o, 0, 47);
       }
       let mut j = 0;
+      // A directory opened before a chroot or pivot_root reads relative to
+      // the process's root now (the root directory itself as "/"), when it
+      // is inside it.
+      let rl = root_len(k, p);
+      if rl > 0 && d.kind == K_DIR {
+        let mut s0 = 0;
+        if n > 0 && base_byte(k, p, h, 0) == 47 {
+          s0 = 1;
+        }
+        let mut inside = n >= s0 + rl && (n == s0 + rl || base_byte(k, p, h, s0 + rl) == 47);
+        let mut i = 0;
+        while inside && i < rl
+          invariant i <= rl && rl <= FNAME_MAX && s0 <= 1 && (!inside || s0 + rl <= n) && n <= FNAME_MAX && kok(k) && p < NPROC
+        {
+          if cast[u8](wget(k.croot, p * CWD_STRIDE + 1 + i) % 256) != base_byte(k, p, h, s0 + i) {
+            inside = false;
+          }
+          i = i + 1;
+        }
+        if inside {
+          j = s0 + rl;
+          if j < n {
+            j = j + 1;                      // the slash after the root's name
+          }
+          a = put_c(&mut o, 0, 47);
+        }
+      }
       while j < n && a < PROC_OUT
         invariant j <= n && n <= FNAME_MAX && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
       {

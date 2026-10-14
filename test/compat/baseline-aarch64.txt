@@ -793,6 +793,16 @@ t_openat2: open of /proc/self/exe with O_NOFOLLOW is ELOOP
 t_openat2: openat2 opens a file
 t_openat2: unknown flags are EINVAL
 t_openat2: unknown resolve flags are EINVAL
+t_ovpivot: a program and a link to it in the lower layer
+t_ovpivot: unshare a mount namespace
+t_ovpivot: mount the overlay
+t_ovpivot: access finds the program before the pivot
+t_ovpivot: bind the overlay onto itself
+t_ovpivot: access still finds it
+t_ovpivot: pivot_root into it
+t_ovpivot: eaccess finds /bin/sh in the new root
+t_ovpivot: stat finds /bin/sh as a regular file
+t_ovpivot: lstat sees the link
 t_path: O_NOFOLLOW, O_NOATIME, EISDIR, rmdir of . and mkdir over a name
 t_path: a loop of links through a long path is ELOOP
 t_path: a name ending in / or /. must be a directory
@@ -933,6 +943,19 @@ t_server: reading the other end makes room: EPOLLOUT
 t_server: sendfile to a TCP connection moves the whole file, in order
 t_server: sendfile to a full nonblocking connection is EAGAIN after what fits
 t_server: sigsuspend ends when another process signals
+t_ropivot: unshare a mount namespace
+t_ropivot: bind the root directory onto itself
+t_ropivot: before the pivot, remount the descriptor's path read-only
+t_ropivot: then creating a file below it is EROFS
+t_ropivot: and writable again
+t_ropivot: open the root directory O_PATH
+t_ropivot: mount /proc in it
+t_ropivot: pivot_root into it
+t_ropivot: the root directory's descriptor reads as "/"
+t_ropivot: stat of the descriptor's path is the root directory
+t_ropivot: before the remount a file can be created
+t_ropivot: remount the descriptor's path read-only
+t_ropivot: after it, creating a file is EROFS
 t_sig2: 24 processes at once
 t_sig2: SA_ONSTACK runs on the alternate stack
 t_sig2: SA_RESETHAND runs the handler once

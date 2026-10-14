@@ -535,10 +535,13 @@ fn lx_memfd(k: &mut Kernel, pid: u64, name: u64, flags: u64) -> u64
   return EEXIST;
 }
 
-/// The slot of the sealing table for file f, or SEAL_N if it has none.
-fn seal_slot(k: &Kernel, f: u64) -> u64
+/// The slot of the sealing table for file f, or SEAL_N if it has none. A
+/// slot is only for a file without a name (a memfd is never linked): one
+/// whose file was freed and its node reused for a file with a name is stale,
+/// and is dropped here.
+fn seal_slot(k: &mut Kernel, f: u64) -> u64
   requires kok(k)
-  ensures result <= SEAL_N
+  ensures kok(k) && result <= SEAL_N
 {
   let mut e = 0;
   while e < SEAL_N
@@ -546,7 +549,10 @@ fn seal_slot(k: &Kernel, f: u64) -> u64
   {
     let w = get(k.sys, SYS_SEAL + 2 * e);
     if w != 0 && w - 1 == f {
-      return e;
+      if vfs_orphan(&mut k.fs, f) {
+        return e;
+      }
+      k.sys = set(k.sys, SYS_SEAL + 2 * e, 0);
     }
     e = e + 1;
   }
@@ -568,7 +574,7 @@ fn seal_new(k: &mut Kernel, pid: u64, fd: u64, allow: bool)
   if f == NO_FILE || f >= 0xFFFFFFFFFFFFFFFF {
     return;                                 // the table holds f + 1
   }
-  let mut e = seal_slot(k, f);
+  let mut e = seal_slot(&mut k, f);
   if e >= SEAL_N {
     e = k.ns / 1000 % SEAL_N;
     let mut i = 0;
@@ -606,7 +612,7 @@ fn seals_of(k: &mut Kernel, pid: u64, fd: u64) -> u64
   if f == NO_FILE || f >= 0xFFFFFFFFFFFFFFFF {
     return 0;
   }
-  let e = seal_slot(k, f);
+  let e = seal_slot(&mut k, f);
   if e >= SEAL_N {
     return 0;
   }
@@ -659,7 +665,7 @@ fn lx_seals(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
   if f == NO_FILE || f >= 0xFFFFFFFFFFFFFFFF {
     return EINVAL;
   }
-  let e = seal_slot(k, f);
+  let e = seal_slot(&mut k, f);
   if e >= SEAL_N {
     return EINVAL;
   }

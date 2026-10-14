@@ -293,6 +293,26 @@ PID   USER     TIME  COMMAND
     1 root      0:00 {busybox} ps
 status 0
 
+== container: crun: cgroup limits: the container sees the memory, pids and cpu limits crun set
+$ cd /disk/cr && bb sed -i -e 's#"devices"#"memory": {"limit": 83886080}, "pids": {"limit": 20}, "cpu": {"shares": 512, "quota": 80000, "period": 100000}, "devices"#' -e 's#"hostname; echo pid=$$; cat /proc/self/cgroup; exec ps"#"cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpu.weight; exit 4"#' config.json; /disk/crun --root /run/crun run d3 < /dev/null; echo status $?
+83886080
+20
+80000 100000
+20
+status 4
+
+== container: crun: memory.max kills a process of a container that outgrows it
+$ cd /disk/cr && bb sed -i -e 's#"quota": 80000#"quota": 1000000#' -e 's#cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpu.weight; exit 4#dd if=/dev/zero of=/dev/null bs=120M count=1 iflag=fullblock; exit 4#' config.json; /disk/crun --root /run/crun run d4 < /dev/null 2>&1 | bb cat; echo status $?
+Killed
+status 0
+
+== container: crun loads a seccomp filter from the config: mkdir answers EPERM, the rest runs
+$ bb mkdir -p /disk/csc && cd /disk/csc && /disk/crun spec && bb sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"linux": {#"linux": {"seccomp": {"defaultAction": "SCMP_ACT_ALLOW", "architectures": ["SCMP_ARCH_X86_64"], "syscalls": [{"names": ["mkdir", "mkdirat"], "action": "SCMP_ACT_ERRNO", "errnoRet": 1}]},#' -e 's#"sh"#"/bin/sh", "-c", "mkdir /m 2>\&1; echo mkdir=$?; hostname"#' config.json && /disk/crun --root /run/crun run cs < /dev/null; echo status $?
+mkdir: can't create directory '/m': Operation not permitted
+mkdir=1
+crun
+status 0
+
 == container: the root file system is read-only, and the exit status comes back
 $ cd /disk/b && bb sed -i -e 's#"hostname; echo pid=$$; cat /proc/self/cgroup; exec ps"#"touch /x 2>\&1; echo touch=$?; id -u; exit 3"#' config.json; /disk/runc --root /run/runc run c2 < /dev/null; echo status $?
 touch: /x: Read-only file system

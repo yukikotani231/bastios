@@ -1181,6 +1181,17 @@ fn vfs_stat(v: &mut Vfs, n: u64) -> u64
   return vfs_size(&mut v, f);
 }
 
+/// Whether RAM file f has no name: a memfd, or a file removed while open.
+fn vfs_orphan(v: &mut Vfs, f: u64) -> bool
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  if f >= NFILES {
+    return false;
+  }
+  return ram_len(&mut v.ram, f) == 0;
+}
+
 /// Copies the name of directory entry i into the start of the transfer
 /// buffer. Returns its length, 0 for an unused entry, or NO_FILE past the
 /// last entry. Entries 0 to NFILES - 1 are in memory, the next DSLOTS on
