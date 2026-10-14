@@ -101,7 +101,7 @@ const SY_NETARP: u64 = 28;             // /proc/net/arp
 const SY_CORE: u64 = 29;               // /proc/sys/kernel/core_pattern (nothing dumps core)
 const SY_NROPEN: u64 = 30;             // /proc/sys/fs/nr_open
 const SY_DROP: u64 = 31;               // /proc/sys/vm/drop_caches: written, kept for nothing
-const SY_CAPLAST: u64 = 32;            // /proc/sys/kernel/cap_last_cap (container runtimes read it)
+const SY_SC: u64 = 32;                // 32 .. 32 + SCT_N: the plain sysctl files of src/lxsysctl.bastio
 const SY_NEXTID: u64 = 96;             // 96 .. 98: /proc/sys/kernel/{msg,sem,shm}_next_id, by IPC kind (src/lxipc.bastio)
 const SY_NS: u64 = 128;                // 128 ..: /proc/P/ns link f at P * NF_N + f (src/lxnsk.bastio)
 const NF_N: u64 = 8;
@@ -113,6 +113,7 @@ const SY_LOOP: u64 = SY_CG + CG_N * CGF_N;   // after the cgroups: loop device n
 const NS_DIRS: u64 = 0x400;            // DIR_PROC + NS_DIRS + pid: /proc/PID/ns
 const FD_DIRS: u64 = 0x800;            // DIR_PROC + FD_DIRS + pid: /proc/PID/fd
 const TASK_DIRS: u64 = 0xC00;          // DIR_PROC + TASK_DIRS + pid: /proc/PID/task
+const SYSD: u64 = 0x1400;              // DIR_PROC + SYSD + j: /proc/sys and its directories (src/lxsysctl.bastio)
 const NET_DIR: u64 = 0x1000;            // DIR_PROC + NET_DIR: /proc/net
 const LOOP_SYS: u64 = 8;               // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
@@ -379,6 +380,15 @@ fn proc_dir(procs: &Buf, x: &Bytes, n: u64) -> u64
   if n == 8 && xfer_is(x, 5, n, "net") {
     return DIR_PROC + NET_DIR;
   }
+  let mut sj = 0;
+  while sj < SYSD_N
+    invariant sj <= SYSD_N
+  {
+    if xfer_is(x, 5, n, sysd_path(sj)) {
+      return DIR_PROC + SYSD + sj;
+    }
+    sj = sj + 1;
+  }
   let e = comp_end(x, 5, n);
   if e + 3 == n && xfer_is(x, e, n, "/ns") {
     let q = proc_pid(procs, x, 5, e);
@@ -511,9 +521,6 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   if xfer_is(x, 5, n, "sys/kernel/core_pattern") {
     return PROC_DEV + PSYS + SY_CORE;
   }
-  if xfer_is(x, 5, n, "sys/kernel/cap_last_cap") {
-    return PROC_DEV + PSYS + SY_CAPLAST;
-  }
   if xfer_is(x, 5, n, "sys/fs/nr_open") {
     return PROC_DEV + PSYS + SY_NROPEN;
   }
@@ -531,6 +538,15 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   }
   if xfer_is(x, 5, n, "sys/fs/pipe-max-size") {
     return PROC_DEV + PSYS + SY_PIPE_MAX;
+  }
+  let mut si = 0;
+  while si < SCT_N
+    invariant si <= SCT_N
+  {
+    if xfer_is(x, 5, n, sct_name(si)) {
+      return PROC_DEV + PSYS + SY_SC + si;
+    }
+    si = si + 1;
   }
   if xfer_is(x, 5, n, "sys/fs/inotify/max_queued_events") {
     return PROC_DEV + PSYS + SY_INO;
@@ -733,8 +749,13 @@ fn is_nextid_file(f: u64) -> bool {
   return f >= PROC_DEV + PSYS + SY_NEXTID && f < PROC_DEV + PSYS + SY_NEXTID + 3;
 }
 
+/// Is f one of the plain numeric sysctl files (src/lxsysctl.bastio)?
+fn is_sct_file(f: u64) -> bool {
+  return f >= PROC_DEV + PSYS + SY_SC && f < PROC_DEV + PSYS + SY_SC + SCT_NUM;
+}
+
 fn proc_writable(f: u64) -> bool {
-  return is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
+  return is_sct_file(f) || is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
 }
 
 /// What stat says about /proc file f (a proc_file device).
@@ -750,6 +771,9 @@ fn proc_meta(f: u64) -> Meta {
 
 /// What stat says about /proc directory d (a proc_dir description).
 fn proc_dir_meta(d: u64) -> Meta {
+  if d >= DIR_PROC + SYSD && d < DIR_PROC + SYSD + SYSD_N {
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 20000 + d % 1024, mtime: 0, own: 0 };
+  }
   if d == DIR_PROC + NET_DIR {
     return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 16384, mtime: 0, own: 0 };
   }
@@ -775,6 +799,13 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
   ensures kok(k) && result.len <= XFER
 {
   let end = Ent { len: 0, dir: false, end: true };
+  if dir >= DIR_PROC + SYSD && dir < DIR_PROC + SYSD + SYSD_N {
+    let j = dir - DIR_PROC - SYSD;
+    if i >= sysd_count(j) {
+      return end;
+    }
+    return Ent { len: name_out(&mut k.fs.xfer, sysd_child(j, i)), dir: sysd_child_dir(j, i), end: false };
+  }
   if dir == DIR_PROC + NET_DIR {
     if i == 0 {
       return Ent { len: name_out(&mut k.fs.xfer, "dev"), dir: false, end: false };
@@ -929,7 +960,10 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
   if i == 12 {
     return Ent { len: name_out(&mut k.fs.xfer, "diskstats"), dir: false, end: false };
   }
-  let p = i - 12;
+  if i == 13 {
+    return Ent { len: name_out(&mut k.fs.xfer, "sys"), dir: true, end: false };
+  }
+  let p = i - 13;
   if p >= NPROC {
     return end;
   }
@@ -1599,6 +1633,18 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       }
       return a;
     }
+    if what >= SY_SC && what < SY_SC + SCT_NUM {
+      let mut v = sct_default(what - SY_SC);
+      let w = get(k.sys, SYS_SCT + (what - SY_SC));
+      if w != 0 {
+        v = w - 1;
+      }
+      let a = put_n(&mut o, 0, v);
+      return put_c(&mut o, a, 10);
+    }
+    if what >= SY_SC + SCT_NUM && what < SY_SC + SCT_N {
+      return put_s(&mut o, 0, sct_text(what - SY_SC));
+    }
     if what == SY_TAINTED {
       return put_s(&mut o, 0, "0\n");
     }
@@ -1620,10 +1666,6 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     }
     if what == SY_NROPEN {
       return put_s(&mut o, 0, "1048576\n");
-    }
-    if what == SY_CAPLAST {
-      let a = put_n(&mut o, 0, 40);   // CAP_LAST (src/lxcap.bastio)
-      return put_c(&mut o, a, 10);
     }
     if what == SY_DROP {
       return put_s(&mut o, 0, "0\n");
@@ -2633,6 +2675,11 @@ fn proc_write_xfer(k: &mut Kernel, f: u64, n: u64) -> u64
   }
   if !any || i < n || v > 0x80000000 {
     return EINVAL;
+  }
+  let sbase = PROC_DEV + PSYS + SY_SC;
+  if f >= sbase && f < sbase + SCT_NUM {
+    k.sys = set(k.sys, SYS_SCT + (f - sbase), v + 1);
+    return n;
   }
   let mut size = PIPE_PAGE;
   while size < v && size < 0x80000000

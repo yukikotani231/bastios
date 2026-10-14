@@ -7,8 +7,47 @@
 #include <sys/times.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <sched.h>
+
+/* Reads up to n - 1 bytes of path into b as a string; the count, or -1. */
+static int slurp(const char *path, char *b, int n) {
+    int fd = open(path, O_RDONLY), r;
+    if (fd < 0) return -1;
+    r = read(fd, b, n - 1);
+    close(fd);
+    if (r >= 0) b[r] = 0;
+    return r;
+}
+
+/* Walks the directory at path: every entry must stat, and the files
+ * must open for reading. Returns the number of files, or -1. */
+static int walk(const char *path, int depth) {
+    DIR *d = opendir(path);
+    struct dirent *e;
+    int n = 0;
+    if (!d || depth > 8) return -1;
+    while ((e = readdir(d))) {
+        char sub[600];
+        struct stat sb;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        snprintf(sub, sizeof sub, "%s/%s", path, e->d_name);
+        if (stat(sub, &sb) != 0) { n = -1; break; }
+        if (S_ISDIR(sb.st_mode)) {
+            int m = walk(sub, depth + 1);
+            if (m < 0) { n = -1; break; }
+            n += m;
+        } else {
+            int fd = open(sub, O_RDONLY);
+            if (fd < 0) { n = -1; break; }
+            close(fd);
+            n++;
+        }
+    }
+    closedir(d);
+    return n;
+}
 
 /* Writes s to a new file at path. */
 static int put(const char *path, const char *s) {
@@ -118,6 +157,39 @@ int main(int argc, char **argv) {
         EXPECT("#! naming a missing interpreter is ENOENT", put("cp_bang", "#!/no/such/sh\n") &&
             execl("./cp_bang", "./cp_bang", (char *)0) == -1 && errno == ENOENT);
         unlink("cp_bang");
+    }
+    {
+        /* The plain sysctl numbers a program reads for a default, and
+         * writes back to the same file. */
+        char b[64];
+        EXPECT("sysctl somaxconn reads 4096", slurp("/proc/sys/net/core/somaxconn", b, sizeof b) > 0 && strcmp(b, "4096\n") == 0);
+        EXPECT("sysctl overcommit_memory reads 0", slurp("/proc/sys/vm/overcommit_memory", b, sizeof b) > 0 && strcmp(b, "0\n") == 0);
+        EXPECT("sysctl max_map_count reads 65530", slurp("/proc/sys/vm/max_map_count", b, sizeof b) > 0 && strcmp(b, "65530\n") == 0);
+        EXPECT("sysctl cap_last_cap reads 40", slurp("/proc/sys/kernel/cap_last_cap", b, sizeof b) > 0 && strcmp(b, "40\n") == 0);
+        EXPECT("sysctl ip_local_port_range has two numbers", slurp("/proc/sys/net/ipv4/ip_local_port_range", b, sizeof b) > 0 && strcmp(b, "32768\t60999\n") == 0);
+        EXPECT("writing a sysctl number reads back", put("/proc/sys/vm/swappiness", "10\n") && slurp("/proc/sys/vm/swappiness", b, sizeof b) > 0 && strcmp(b, "10\n") == 0);
+        EXPECT("a sysctl number rejects text", ({ int fd = open("/proc/sys/vm/swappiness", O_WRONLY); int r = fd < 0 ? 0 : (write(fd, "x\n", 2) == -1 && errno == EINVAL); if (fd >= 0) close(fd); r; }));
+        EXPECT("a read-only sysctl is not opened for writing", open("/proc/sys/fs/file-nr", O_WRONLY) == -1);
+        EXPECT("a sysctl file is a regular file", ({ struct stat sb; stat("/proc/sys/vm/swappiness", &sb) == 0 && S_ISREG(sb.st_mode) && (sb.st_mode & 0777) == 0644; }));
+    }
+    {
+        /* /proc/sys lists, and everything it lists opens. */
+        struct stat sb;
+        DIR *d = opendir("/proc");
+        struct dirent *e;
+        int seen = 0;
+        while (d && (e = readdir(d))) if (!strcmp(e->d_name, "sys")) seen = 1;
+        if (d) closedir(d);
+        EXPECT("/proc lists sys", seen);
+        EXPECT("/proc/sys is a directory", stat("/proc/sys", &sb) == 0 && S_ISDIR(sb.st_mode));
+        EXPECT("/proc/sys/net/core is a directory", stat("/proc/sys/net/core", &sb) == 0 && S_ISDIR(sb.st_mode));
+        EXPECT("a directory under /proc/sys that is not there is ENOENT", stat("/proc/sys/nosuch", &sb) == -1 && errno == ENOENT);
+        EXPECT("every file listed under /proc/sys opens", walk("/proc/sys", 0) >= 60);
+        d = opendir("/proc/sys/vm");
+        seen = 0;
+        while (d && (e = readdir(d))) if (!strcmp(e->d_name, "swappiness")) seen = 1;
+        if (d) closedir(d);
+        EXPECT("/proc/sys/vm lists swappiness", seen);
     }
     return done();
 }
