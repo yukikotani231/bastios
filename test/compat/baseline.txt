@@ -1221,6 +1221,7 @@ alpine: strace: traces a program's system calls with ptrace, following the child
 alpine: strace: attaches to a running process, and hears of its death when its parent is elsewhere
 alpine: gdb: a breakpoint in a PIE program stops it, shows its arguments and backtrace, and finish gives the return value
 alpine: gdb: attach to a running program, stop it at a breakpoint, read its variables and detach
+alpine: gdb: attach to a program with three threads, and every thread is listed
 alpine: nvim: LuaJIT loads a shared object that gcc built
 alpine: nvim: a plugin cloned over HTTP is on the packpath and runs at startup
 alpine: nvim: a small plugin manager in Lua clones a plugin, loads it, then updates it with git pull

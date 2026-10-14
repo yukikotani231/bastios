@@ -254,6 +254,10 @@ $ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc; bb mount -t proc pro
 $1 = 1
 Breakpoint 1, spin (n=1) at spin.c:1
 
+== gdb: attach to a program with three threads, and every thread is listed
+$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb chroot /disk/a /bin/sh -c 'cd /root && printf "#include <pthread.h>\n#include <unistd.h>\nvoid *w(void *a) { for (;;) usleep(1000); return a; }\nint main(void) { pthread_t t[2]; pthread_create(&t[0], 0, w, 0); pthread_create(&t[1], 0, w, 0); for (;;) usleep(1000); }\n" > th.c && gcc -g -O0 -pthread -o th th.c && (./th & P=$!; sleep 3; PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-x86_64.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" -p $P -ex "info threads" -ex detach </dev/null 2>&1 | grep -c "^[ *] [0-9] *LWP"; kill $P)'; bb umount /disk/a/proc; fi
+3
+
 == nvim: LuaJIT loads a shared object that gcc built
 $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf 'local ffi = require("ffi")\nffi.cdef[[int answer(void);]]\nio.open("/root/so.txt", "w"):write(ffi.load("/root/libso.so").answer(), "\\n")\n' > /disk/a/root/so.lua && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -shared -fPIC -o libso.so so.c && nvim -l so.lua >/dev/null 2>&1'; bb cat /disk/a/root/so.txt
 42
