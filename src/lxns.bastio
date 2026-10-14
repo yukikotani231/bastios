@@ -2034,6 +2034,14 @@ fn ns_umount(k: &mut Kernel, pid: u64) -> bool
   if e >= MT_N {
     return false;
   }
+  // Only the old root that pivot_root stacked there goes from the root's
+  // own path: umount2(".") run again (crun does, until it fails) finds the
+  // mount that is the new root, which Linux refuses to take, as "." is
+  // still in the old root's detached mount.
+  let n = lpath_len(k);
+  if me_get(k, e, ME_FLAGS) % MT_RO != MK_OLDROOT && (pid + 1) * CWD_STRIDE <= len(k.croot) && row_is(k.croot, pid, k.mstr, 0, n) {
+    return false;
+  }
   me_release(&mut k, e);
   return true;
 }
