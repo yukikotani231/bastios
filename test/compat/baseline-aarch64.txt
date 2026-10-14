@@ -949,6 +949,7 @@ t_signal: sigsuspend
 t_signal: sigwait
 t_signal: timer_create
 t_signal: unblock delivers
+t_sigsleep: a signal sent to a thread about to sleep in a futex wait runs its handler
 t_sock2: AF_UNIX SOCK_DGRAM socketpair
 t_sock2: MSG_DONTWAIT on an empty socket is EAGAIN
 t_sock2: MSG_PEEK leaves the bytes

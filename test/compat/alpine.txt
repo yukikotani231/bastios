@@ -221,6 +221,18 @@ gcc says 42
 $ bb printf 'local t = vim.treesitter.get_string_parser("*tag*\\tsome text\\n", "vimdoc"):parse()[1]:root()\nio.open("/root/ts.txt", "w"):write(t:type(), " ", t:child_count(), " ", t:sexpr():len() > 20 and "tree" or "none", "\\n")\n' > /disk/a/root/ts.lua && bb chroot /disk/a /usr/bin/nvim -l /root/ts.lua >/dev/null 2>&1; bb cat /disk/a/root/ts.txt
 help_file 1 tree
 
+== nvim: :diffthis marks the line that differs, and vim.diff finds the hunk
+$ bb printf 'vim.cmd("edit /root/da.txt | call setline(1, [\"same\", \"old\", \"tail\"]) | diffthis")\nvim.cmd("vsplit /root/db.txt | call setline(1, [\"same\", \"new\", \"tail\"]) | diffthis")\nlocal function hl(l) return vim.fn.diff_hlID(l, 1) ~= 0 and "marked" or "plain" end\nlocal d = vim.diff("same\\nold\\ntail\\n", "same\\nnew\\ntail\\n", {result_type = "indices"})\nio.open("/root/dif.txt", "w"):write(hl(1), " ", hl(2), " ", hl(3), " ", vim.wo.diff and "diff" or "nodiff", " ", d[1][1], "\\n")\n' > /disk/a/root/dif.lua && bb chroot /disk/a /usr/bin/nvim -l /root/dif.lua >/dev/null 2>&1; bb cat /disk/a/root/dif.txt
+plain marked plain diff 2
+
+== nvim: tree-sitter parses C with a parser built from the grammar, and a query finds the function names
+$ bb cp /disk/tree-sitter-c.so /disk/a/usr/share/nvim/runtime/parser/c.so && bb printf 'local src = "int add(int a, int b) { return a + b; }\\nint main(void) { return add(1, 2); }\\n"\nlocal root = vim.treesitter.get_string_parser(src, "c"):parse()[1]:root()\nlocal q = vim.treesitter.query.parse("c", "(function_definition declarator: (function_declarator declarator: (identifier) @n))")\nlocal names = {}\nfor _, node in q:iter_captures(root, src) do names[#names + 1] = vim.treesitter.get_node_text(node, src) end\nio.open("/root/tsc.txt", "w"):write(table.concat(names, ","), "\\n")\n' > /disk/a/root/tsc.lua && bb chroot /disk/a /usr/bin/nvim -l /root/tsc.lua >/disk/a/root/e.txt 2>&1; bb cat /disk/a/root/e.txt | bb head -n 3; bb cat /disk/a/root/tsc.txt
+add,main
+
+== nvim: tree-sitter highlights C: the keyword, the type and the comment get their captures
+$ bb cp /disk/tree-sitter-c.so /disk/a/usr/share/nvim/runtime/parser/c.so && bb printf 'vim.cmd("enew")\nvim.api.nvim_buf_set_lines(0, 0, -1, false, {"int main(void) { return 0; } // done"})\nvim.treesitter.start(0, "c")\nvim.treesitter.get_parser(0, "c"):parse()\nlocal function cap(col) local c = vim.treesitter.get_captures_at_pos(0, 0, col) return c[1] and c[1].capture or "none" end\nio.open("/root/tsh.txt", "w"):write(cap(0), " ", cap(17), " ", cap(31), "\\n")\n' > /disk/a/root/tsh.lua && bb chroot /disk/a /usr/bin/nvim -l /root/tsh.lua >/disk/a/root/e.txt 2>&1; bb cat /disk/a/root/e.txt | bb head -n 3; bb cat /disk/a/root/tsh.txt
+type.builtin keyword.return comment
+
 == nvim: LuaJIT loads a shared object that gcc built
 $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf 'local ffi = require("ffi")\nffi.cdef[[int answer(void);]]\nio.open("/root/so.txt", "w"):write(ffi.load("/root/libso.so").answer(), "\\n")\n' > /disk/a/root/so.lua && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -shared -fPIC -o libso.so so.c && nvim -l so.lua >/dev/null 2>&1'; bb cat /disk/a/root/so.txt
 42
@@ -228,6 +240,10 @@ $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf
 == nvim: a plugin cloned over HTTP is on the packpath and runs at startup
 $ bb printf 'io.open("/root/plug.txt", "w"):write(vim.g.hello_plugin or "none", "\\n")\n' > /disk/a/root/plug.lua && bb chroot /disk/a /bin/sh -lc 'd=/root/pk/pack/p/start; mkdir -p $d && git clone -q HOSTURL/repo.git $d/hello && nvim --headless --cmd "set pp^=/root/pk" -c "luafile /root/plug.lua" -c qa >/dev/null 2>&1'; bb cat /disk/a/root/plug.txt
 two
+
+== nvim: a small plugin manager in Lua clones a plugin, loads it, then updates it with git pull
+$ bb printf 'local url, dir = arg[1], "/root/pm/hello"\nlocal function git(...) return vim.system(vim.list_extend({"git"}, {...}), {text = true}):wait().code end\nlocal out = {}\nout[#out + 1] = git("clone", "-q", url, dir) == 0 and "cloned" or "clonefail"\ngit("-C", dir, "reset", "-q", "--hard", "HEAD~1")\nout[#out + 1] = vim.g.hello_plugin or "none"\nvim.opt.rtp:append(dir)\nvim.cmd("runtime plugin/hello.lua")\nout[#out + 1] = vim.g.hello_plugin or "none"\nout[#out + 1] = git("-C", dir, "pull", "-q", "--ff-only") == 0 and "pulled" or "pullfail"\nvim.cmd("runtime plugin/hello.lua")\nout[#out + 1] = vim.g.hello_plugin or "none"\nio.open("/root/pm.txt", "w"):write(table.concat(out, " "), "\\n")\n' > /disk/a/root/pm.lua && bb chroot /disk/a /bin/sh -lc 'nvim -l /root/pm.lua HOSTURL/repo.git >/dev/null 2>&1'; bb cat /disk/a/root/pm.txt
+cloned none one pulled two
 
 == nvim: vim.system runs a process and collects its output and status
 $ bb printf 'local r = vim.system({"sh", "-c", "echo out; echo err >&2; exit 3"}, {text = true}):wait()\nio.open("/root/sys.txt", "w"):write(r.code, " ", vim.trim(r.stdout), " ", vim.trim(r.stderr), "\\n")\n' > /disk/a/root/sys.lua && bb chroot /disk/a /usr/bin/nvim -l /root/sys.lua >/dev/null 2>&1; bb cat /disk/a/root/sys.txt
@@ -358,6 +374,10 @@ sub/b.txt:1
 2
 banana
 
+== nvim: :make reads gcc's error into the quickfix list and :cc jumps to its line
+$ bb printf 'int main(void) {\n  return undefined_var;\n}\n' > /disk/a/root/bad.c && bb printf 'vim.o.makeprg = "gcc -c /root/bad.c -o /dev/null"\nvim.cmd("silent make")\nlocal at, e\nfor i, x in ipairs(vim.fn.getqflist()) do if x.valid == 1 then at, e = i, x break end end\nvim.cmd("cc " .. at)\nio.open("/root/qf.txt", "w"):write(e.lnum, " ", vim.fn.line("."), " ", vim.fn.fnamemodify(vim.fn.bufname(vim.fn.bufnr()), ":t"), "\\n")\n' > /disk/a/root/qf.lua && bb chroot /disk/a /bin/sh -c 'cd /root && nvim -l /root/qf.lua >/dev/null 2>&1'; bb cat /disk/a/root/qf.txt
+2 2 bad.c
+
 == nvim: :grep with ripgrep fills the quickfix list
 $ bb chroot /disk/a /usr/bin/nvim --headless -u NONE -c 'set grepprg=rg\ --vimgrep' -c 'silent grep needle /root/rgp' -c 'call writefile([len(getqflist()) . " " . join(sort(map(getqflist(), "fnamemodify(bufname(v:val.bufnr), \":t\")")), ",")], "/root/rg.txt")' -c 'qa!' >/dev/null 2>&1; bb cat /disk/a/root/rg.txt
 2 a.txt,b.txt
@@ -398,9 +418,11 @@ $ bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import sqli
 ca978112 3904355907
 status 0
 
-== python3: a multiprocessing Pool (the forkserver gets several descriptors in one message)
-$ bb mkdir -p /disk/a/dev/shm; if [ %MACHINE% = x86_64 ]; then bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import multiprocessing as mp\nwith mp.get_context(\"forkserver\").Pool(1) as p: print(p.map(abs,[-1,-2]))')" 2>&1 | bb tail -n 3; else echo "[1, 2]"; fi; echo status $?; bb chroot /disk/a /sbin/apk del -q --no-progress python3 2>/dev/null
-[1, 2]
+== python3: multiprocessing Pools of two workers, three times (the forkserver reads bytes sent before the descriptors)
+$ bb mkdir -p /disk/a/dev/shm; if [ %MACHINE% = x86_64 ]; then for n in 1 2 3; do bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import multiprocessing as mp\nwith mp.get_context(\"forkserver\").Pool(2) as p: print(p.map(abs,[-1,-2,-3,-4]))')" 2>&1 | bb tail -n 3; done; else echo "[1, 2, 3, 4]"; echo "[1, 2, 3, 4]"; echo "[1, 2, 3, 4]"; fi; echo status $?; bb chroot /disk/a /sbin/apk del -q --no-progress python3 2>/dev/null
+[1, 2, 3, 4]
+[1, 2, 3, 4]
+[1, 2, 3, 4]
 status 0
 
 == container: runc joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
