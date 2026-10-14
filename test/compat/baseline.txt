@@ -1046,6 +1046,7 @@ apps: ripgrep: replacement, multi-line and standard input
 apps: ripgrep: search with line numbers, honouring .ignore
 alpine: git: clone over HTTP and over HTTPS (git's dumb protocol, curl's TLS)
 alpine: nvim: tree-sitter parses help text with the vimdoc parser
+alpine: nvim: :diffthis marks the line that differs, and vim.diff finds the hunk
 alpine: nvim: LuaJIT loads a shared object that gcc built
 alpine: nvim: a plugin cloned over HTTP is on the packpath and runs at startup
 alpine: nvim: a small plugin manager in Lua clones a plugin, loads it, then updates it with git pull
