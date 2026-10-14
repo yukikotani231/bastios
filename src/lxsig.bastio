@@ -178,7 +178,14 @@ fn tr_stop(k: &mut Kernel, p: u64, s: u64)
   jc_set(&mut k, p, s + JC_STOP + jc_get(k, p) / JC_EXECED % 2 * JC_EXECED);
   let w = tr_get(k, p);
   tr_put(&mut k, p, tr_make(w % 65536, tr_att(w), 1, 0, s, tr_opt(w)));
-  jc_tell(&mut k, p);
+  // Only the tracer hears of a ptrace-stop, as on Linux; the parent does
+  // when it is the tracer (tr_tell leaves that to jc_tell). Telling a
+  // parent that is not the tracer posted it a SIGCHLD at every stop of its
+  // child, which strace -f then showed as a storm of signals in the shell.
+  let tt = tr_tracer(k, p);
+  if tt == 0 || tt > NPROC || tt - 1 == pget(k.procs, p, F_PARENT) {
+    jc_tell(&mut k, p);
+  }
   tr_tell(&mut k, p);
 }
 
@@ -574,18 +581,13 @@ fn sig_fork(t: &mut Buf, parent: u64, child: u64)
   requires len(t) <= SIGACT_LEN && parent < NPROC && child < NPROC
   ensures len(t) <= SIGACT_LEN
 {
-  let mut s = 1;
-  while s <= NSIG
-    invariant 1 <= s && s <= NSIG + 1 && len(t) <= SIGACT_LEN
+  // Four words for each of the NSIG signals: one row of 256 words.
+  let mut i = 0;
+  while i < 256
+    invariant i <= 256 && len(t) <= SIGACT_LEN
   {
-    let mut f = 0;
-    while f < 4
-      invariant f <= 4 && s <= NSIG && len(t) <= SIGACT_LEN
-    {
-      sa_set(&mut t, child, s, f, sa_get(t, parent, s, f));
-      f = f + 1;
-    }
-    s = s + 1;
+    wset(&mut t, child * 256 + i, wget(t, parent * 256 + i));
+    i = i + 1;
   }
 }
 
@@ -976,6 +978,21 @@ fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
       let w = tr_get(k, p);
       if w % 65536 != 0 && s != SIGKILL {
         if tr_skip(w) == 0 {
+          let t = tr2_get(k, p);
+          if pget(k.procs, p, F_RESTART) != 0 && t % 2 == 1 && t / TS_NOENT % 2 == 0 && t / TS_ENTRY % 2 == 0 && t / TS_EXIT % 2 == 0 && t / TS_CUT % 2 == 0 {
+            // A call that waits is cut short by this signal: as on Linux, the
+            // tracer sees the call end (-ERESTARTSYS) before it sees the
+            // signal, and the call starts again, with a stop of its own, once
+            // the handler is done. Without that stop its view of which stops
+            // are entries and which are exits slips by one.
+            pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
+            tr2_put(&mut k, p, t % TS_NR + t / TS_NR % 1024 * TS_NR + TS_EXIT + TS_CUT + t / TS_EV * TS_EV);
+            tr_stop(&mut k, p, 5 + 128 * (tr_opt(w) % 2));
+            return false;
+          }
+          if t / TS_CUT % 2 == 1 {
+            tr2_put(&mut k, p, t - TS_CUT);       // the exit stop is behind: this is the signal's own
+          }
           tr_stop(&mut k, p, s);            // the tracer decides what becomes of it
           return false;
         }

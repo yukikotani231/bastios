@@ -40,7 +40,7 @@ fn group_alone(k: &mut Kernel, pid: u64) -> bool
     return true;
   }
   let g = tgid(k.procs, pid);
-  let cap = len(k.procs) / STRIDE;     // past it, every process is FREE
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE
   let mut q = 1;
   while q < cap
     invariant 1 <= q && cap <= NPROC && kok(k)
@@ -128,7 +128,7 @@ fn break_l1(l1: &mut PageTable, m: &mut Mem) -> bool
   while i < 512
     invariant i <= 512 && pt_level(l1) == 1 && pt_leases(l1) == 0 && mem_ok(m)
   {
-    if cow_l1(&mut l1, &mut m, i) == COW_NOMEM {
+    if cow_l1(&mut l1, &mut m, i, false) == COW_NOMEM {
       return false;
     }
     i = i + 1;

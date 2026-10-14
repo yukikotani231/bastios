@@ -36,6 +36,7 @@ fn lx_fork(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return EAGAIN;
   }
   pidfd_reuse(&mut k, c);                   // pidfds on the slot's last process (src/lxpidfd.bastio)
+  keys_fork(&mut k, pid, c);                // its session keyring is the parent's (src/lxkeys.bastio)
   let fp = find_free(&mut k.mem);
   if fp >= NPAGES {
     return ENOMEM;
@@ -77,6 +78,7 @@ fn lx_vfork_vm(k: &mut Kernel, mmu: &Mmu, pid: u64, stack: u64) -> u64
     return EAGAIN;
   }
   pidfd_reuse(&mut k, c);                   // pidfds on the slot's last process (src/lxpidfd.bastio)
+  keys_fork(&mut k, pid, c);                // its session keyring is the parent's (src/lxkeys.bastio)
   // fork_into frees the space it is given if c turns out to have one:
   // that must never be the parent's.
   match take_space(&mut k.spaces, c) {
@@ -500,7 +502,7 @@ fn file_running(k: &Kernel, f: u64) -> bool
   if f >= NO_FILE - NPROGS - 1 {
     return false;
   }
-  let cap = len(k.procs) / STRIDE;     // past it, every process is FREE
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE
   let mut p = 1;
   while p < cap
     invariant p <= cap + 1 && cap <= NPROC && kok(k)
@@ -867,7 +869,7 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
     want = 0xFFFFFFFF00000000 + p32;        // negative: sign-extend
   }
   let mut found = false;
-  let cap = len(k.procs) / STRIDE;     // past it, every process is FREE
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE
   let mut c = 1;
   while c < cap
     invariant 1 <= c && cap <= NPROC && kok(k)
@@ -994,7 +996,7 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
     }
   }
   let mut found = false;
-  let cap = len(k.procs) / STRIDE;     // past it, every process is FREE
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE
   let mut c = 1;
   while c < cap
     invariant 1 <= c && cap <= NPROC && kok(k)

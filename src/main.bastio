@@ -38,6 +38,7 @@ import "lxtime.bastio";
 import "lxunix.bastio";
 import "lxmem.bastio";
 import "lxmisc.bastio";
+import "lxkeys.bastio";
 import "lxthread.bastio";
 import "lxdev.bastio";
 import "lxevent.bastio";
@@ -327,7 +328,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
     net_wake(&mut s.k);
     tty_intr(&mut s.con, &mut s.k);
     tty_cook(&mut s.con, &mut s.k);
-    wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
+    wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line, s.k.pid_hi);
     woke = disk_wake(&mut s.k);
     if woke && s.k.fs.disk.q.dead {
       puts(&mut s.con, "[disk: a request timed out, the disk is treated as dead]\r\n");
@@ -353,7 +354,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
   }
   s.ticked = false;
   if p == 0 {
-    if live_count(s.k.procs) == 0 {
+    if live_count(s.k.procs, s.k.pid_hi) == 0 {
       s.stop = true;
       return Job::Stop;
     }
@@ -736,6 +737,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       sig = SIGILL;
     } else if v == 3 {
       sig = SIGTRAP;
+      pt_brk(&mut s.k, p);
     } else if v == 1 {
       sig = SIGTRAP;                        // a single step (src/lxptrace.bastio)
       pt_stepped(&mut s.k, p);
@@ -931,7 +933,7 @@ fn exchange(s: &mut Sys, tx: &mut Bytes, rx: &Bytes, rn: u64, mx: &Bytes, mn: u6
   if typed {
     tty_intr(&mut s.con, &mut s.k);
     tty_cook(&mut s.con, &mut s.k);
-    wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
+    wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line, s.k.pid_hi);
   }
   let n = con_take(&mut s.con, &mut tx);
   if con_room(s.con) >= OUTCAP / 2 {

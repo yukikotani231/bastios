@@ -240,10 +240,10 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # (dynamic) BusyBox starts only inside the unpacked root.
 $(B)/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh $(B)/compat/busybox $(B)/compat/runc tools/ocipull.sh \
     $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys \
-    $(B)/compat/bastioc1 $(B)/compat/z3 $(B)/compat/tcc $(B)/compat/musl/lib/libc.a $(B)/compat/tree-sitter-c.so $(B)/compat/crun | $(B)/compat
+    $(B)/compat/bastioc1 $(B)/compat/z3 $(B)/compat/tcc $(B)/compat/musl/lib/libc.a $(B)/compat/tree-sitter-c.so $(B)/compat/strace $(B)/compat/crun | $(B)/compat
 	COMPAT_ARCH=aarch64 test/compat/alpinedisk.py $@ $(B)/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) \
 	  --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) --busybox $(B)/compat/busybox \
-	  --extra "$(BASTIO_TOOLS) $(B)/compat/runc tools/ocipull.sh $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys $(B)/compat/tree-sitter-c.so $(B)/compat/crun"
+	  --extra "$(BASTIO_TOOLS) $(B)/compat/runc tools/ocipull.sh $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys $(B)/compat/tree-sitter-c.so $(B)/compat/strace $(B)/compat/crun"
 
 # The tree-sitter C parser for Neovim, as the x86-64 suite builds it (the
 # top-level Makefile): the generated parser.c of the pinned npm package in a
@@ -255,6 +255,20 @@ $(B)/compat/tree-sitter-c.so: | $(B)/compat
 	echo "$(TREESITTER_C_SHA256)  $(B)/compat/src/tree-sitter-c.tgz" | sha256sum -c - >/dev/null
 	tar xzf $(B)/compat/src/tree-sitter-c.tgz -C $(B)/compat/src/tree-sitter-c --strip-components=1 package/src
 	$(CROSS)gcc -shared -fPIC -O2 -nostdlib -fno-stack-protector -Wl,-s -I $(B)/compat/src/tree-sitter-c/src -o $@.part $(B)/compat/src/tree-sitter-c/src/parser.c
+	mv $@.part $@
+
+# strace for the ptrace cases: nobody publishes an arm64 build to pin, so it is
+# built from the release tarball (pinned in test/compat/images.mk) as a static
+# executable at a fixed address, as the kernel loads those.
+$(B)/compat/strace: | $(B)/compat
+	rm -rf $(B)/compat/src/strace && mkdir -p $(B)/compat/src/strace
+	curl -fsSL -o $(B)/compat/src/strace.tar.xz https://github.com/strace/strace/releases/download/v$(STRACE_VER)/strace-$(STRACE_VER).tar.xz
+	echo "$(STRACE_SHA256)  $(B)/compat/src/strace.tar.xz" | sha256sum -c - >/dev/null
+	tar xJf $(B)/compat/src/strace.tar.xz -C $(B)/compat/src/strace --strip-components=1
+	cd $(B)/compat/src/strace && ./configure --host=aarch64-linux-gnu --enable-mpers=no CC=$(CROSS)gcc \
+	  'LDFLAGS=-static -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x400000' >/dev/null
+	$(MAKE) -C $(B)/compat/src/strace/src -j$$(nproc) all >/dev/null
+	$(CROSS)strip -o $@.part $(B)/compat/src/strace/src/strace
 	mv $@.part $@
 
 # runc for the container cases: the static arm64 binary of the upstream

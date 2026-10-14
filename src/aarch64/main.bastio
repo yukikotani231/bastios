@@ -37,6 +37,7 @@ import "lxtime.bastio";
 import "lxunix.bastio";
 import "lxmem.bastio";
 import "lxmisc.bastio";
+import "lxkeys.bastio";
 import "lxthread.bastio";
 import "lxdev.bastio";
 import "lxevent.bastio";
@@ -163,7 +164,7 @@ fn pump(ser: &Serial, s: &mut Sys)
   if typed {
     tty_intr(&mut s.con, &mut s.k);
     tty_cook(&mut s.con, &mut s.k);
-    wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line);
+    wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line, s.k.pid_hi);
   }
   drain(ser, &mut s.con);
   wake_writers(&mut s.k.procs);
@@ -207,7 +208,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64) -> Job
   }
   let p = lx_pick(&mut s.k, from);
   if p == 0 {
-    if live_count(s.k.procs) == 0 {
+    if live_count(s.k.procs, s.k.pid_hi) == 0 {
       s.stop = true;
       return Job::Stop;
     }

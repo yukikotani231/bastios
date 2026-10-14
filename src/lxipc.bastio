@@ -891,6 +891,9 @@ fn undo_find(k: &mut Kernel, g: u64, setw: u64, i: u64, make: bool) -> u64
     k.ipc = set(k.ipc, a + 1, setw);
     k.ipc = set(k.ipc, a + 2, i);
     k.ipc = set(k.ipc, a + 3, ADJ_BIAS);
+    if free >= k.undo_hi {
+      k.undo_hi = free + 1;
+    }
   }
   return free;
 }
@@ -901,9 +904,10 @@ fn undo_clear(k: &mut Kernel, setw: u64, i: u64)
   requires kok(k)
   ensures kok(k)
 {
+  let hi = smaller(k.undo_hi, UNDO_N);
   let mut u = 0;
-  while u < UNDO_N
-    invariant u <= UNDO_N && kok(k)
+  while u < hi
+    invariant u <= hi && hi <= UNDO_N && kok(k)
   {
     let a = un_at(u);
     if get(k.ipc, a) != 0 && get(k.ipc, a + 1) == setw && (i == SEMMSL || get(k.ipc, a + 2) == i) {
@@ -926,9 +930,10 @@ fn sem_exit(k: &mut Kernel, pid: u64)
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  let hi = smaller(k.undo_hi, UNDO_N);
   let mut u = 0;
-  while u < UNDO_N
-    invariant u <= UNDO_N && kok(k)
+  while u < hi
+    invariant u <= hi && hi <= UNDO_N && kok(k)
   {
     let a = un_at(u);
     if get(k.ipc, a) == pid + 1 {

@@ -1951,12 +1951,12 @@ deadline = time.time() + timeout
 # with a sleep before QEMU is killed.
 for line, want, until in [
     ("ash", b"built-in shell (ash)", b"\n# "),
-    ("stat -f -c '%b %c' /disk; echo big > /disk/b; cat /disk/b; stat -f -c %f /disk; rm /disk/b", b"10485755 32767\r\nbig\r\n1048", b"\n# "),
+    ("stat -f -c '%b %c' /disk; echo big > /disk/b; cat /disk/b; stat -f -c %f /disk; rm /disk/b", b"10485755 262143\r\nbig\r\n1048", b"\n# "),
     ("mkdir disk/many; i=0; while [ $i -lt 1100 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; sleep 1", b"\r\n1100\r\n", b"\n# "),
-    # The directory table of the disk (DSLOTS entries) fills up: the create
-    # that finds no free entry fails with ENOSPC, and removing the files
-    # frees their entries again.
-    ("mkdir disk/full; i=0; while echo x > disk/full/f$i 2>/dev/null; do i=$((i+1)); done; echo x > disk/full/z; echo n$((i > 30000))", b"disk/full/z: No space left on device\r\nn1\r\n", b"\n# "),
+    # One directory takes more entries than the 32767 a disk held before the
+    # directory table grew (it holds 262143 now): the creates past that
+    # all succeed. (Filling the table would take ten minutes of disk writes.)
+    ("mkdir disk/full; i=0; while [ $i -lt 33000 ]; do echo x > disk/full/f$i || break; i=$((i+1)); done; echo x > disk/full/z; echo n$((i == 33000))", b"\r\nn1\r\n", b"\n# "),
 ]:
     mark = len(out)
     if mark == 0 and not read_until(b"bastios> "):
@@ -1964,7 +1964,7 @@ for line, want, until in [
         break
     mark = len(out)
     if "disk/full" in line:
-        deadline = time.time() + timeout      # 32767 creates, each a disk write: a minute or two
+        deadline = time.time() + timeout      # 33000 creates, each a disk write: a minute or two
     qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
     ok = read_until(until, mark) and want in out[mark:]
     print(("ok  " if ok else "FAIL"), "(big-disk boot)", repr(line)); ok or print(repr(out[mark:]))
@@ -2080,7 +2080,7 @@ out = b""
 deadline = time.time() + timeout
 ok = (read_until(b"bastios> ") and send_line_ok(b"ash", b"\n# ")
       and send_line_ok(b"ls disk/many | wc -l; cat disk/many/f1099; stat -f -c %c /disk", b"\n# ")
-      and b"\r\n1100\r\n1099\r\n32767\r\n" in out
+      and b"\r\n1100\r\n1099\r\n262143\r\n" in out
       and (reset_deadline() or True)
       and send_line_ok(b"n=$(ls disk/full | wc -l); echo c$((n > 30000)); cat disk/full/f30000; rm -r disk/full; echo x > disk/after; cat disk/after; rm disk/after; sleep 1", b"\n# ")
       and b"\r\nc1\r\nx\r\nx\r\n" in out)
