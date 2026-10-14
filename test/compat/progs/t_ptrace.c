@@ -15,6 +15,8 @@
 #include <sys/syscall.h>
 #include <sys/prctl.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <stdint.h>
 
 
 /* The classic BPF and seccomp definitions musl does not ship. */
@@ -501,6 +503,41 @@ int main(int argc, char **argv) {
         }
         ok = w == c && WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL;
         EXPECT("it can be resumed and then killed", rs == 0 && ok);
+    }
+
+    /* /proc/PID/mem: a process's own memory, and another's, read and written at an address. */
+    {
+        static volatile int v = 1234;
+        int fd = open("/proc/self/mem", O_RDWR);
+        int x = 0, y = 77;
+        ssize_t a = fd >= 0 ? pread(fd, &x, sizeof x, (off_t)(uintptr_t)&v) : -1;
+        ssize_t b = fd >= 0 ? pwrite(fd, &y, sizeof y, (off_t)(uintptr_t)&v) : -1;
+        int z = 0;
+        ssize_t c2 = fd >= 0 && lseek(fd, (off_t)(uintptr_t)&v, SEEK_SET) == (off_t)(uintptr_t)&v ? read(fd, &z, sizeof z) : -1;
+        char junk[8];
+        ssize_t d = fd >= 0 ? pread(fd, junk, sizeof junk, 16) : 0;
+        EXPECT("/proc/self/mem reads and writes the program's own memory",
+               fd >= 0 && a == 4 && x == 1234 && b == 4 && v == 77 && c2 == 4 && z == 77 && d < 0);
+        if (fd >= 0) close(fd);
+
+        static volatile int w = 55;
+        pid_t c = fork();
+        if (c == 0) {
+            usleep(400000);
+            _exit(w == 99 ? 0 : 1);
+        }
+        usleep(100000);
+        char path[40];
+        snprintf(path, sizeof path, "/proc/%d/mem", (int)c);
+        int cf = open(path, O_RDWR);
+        int cur = 0, nv = 99;
+        ssize_t e = cf >= 0 ? pread(cf, &cur, sizeof cur, (off_t)(uintptr_t)&w) : -1;
+        ssize_t f = cf >= 0 ? pwrite(cf, &nv, sizeof nv, (off_t)(uintptr_t)&w) : -1;
+        int st = 0;
+        waitpid(c, &st, 0);
+        EXPECT("/proc/PID/mem reads and writes another process's memory",
+               cf >= 0 && e == 4 && cur == 55 && f == 4 && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+        if (cf >= 0) close(cf);
     }
     return done();
 }
