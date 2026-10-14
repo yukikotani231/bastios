@@ -51,6 +51,17 @@ fn lazy_set(k: &mut Kernel, pid: u64, src: Src, hold: u64)
       lz = lazy_plan(&mut k.fs, src, e);
     }
   }
+  if lz.pages == 0 && hold < HOLD_N && src.file && src.f < NFILES && vfs_dirent(&mut k.fs, src.f) == 0 {
+    // A program run from a file with no name (a memfd, an unlinked file) is
+    // kept alive by this hold, as Linux keeps it by the process's exe link:
+    // /proc/self/exe opens it (crun's second stage does). An empty record
+    // covers no page, so no fault looks at it.
+    k.lazy = set(k.lazy, lz_at(pid, 0), 1);
+    k.lazy = set(k.lazy, lz_at(pid, 1), 0);
+    k.lazy = set(k.lazy, lz_at(pid, 2), hold);
+    k.lazy = set(k.lazy, lz_at(pid, 3), 0);
+    return;
+  }
   if lz.pages == 0 {
     vfs_unhold(&mut k.fs, &mut k.mem, hold);
     k.lazy = set(k.lazy, lz_at(pid, 0), 0);

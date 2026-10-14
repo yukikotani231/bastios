@@ -1132,3 +1132,7 @@ alpine: tmux: a client on the console passes it to the server (SCM_RIGHTS of the
 alpine-tty: tmux: attach on the console, run a command in the session, detach and find it still there
 alpine-tty: tmux: Neovim in a pane takes keys through tmux and saves the file
 alpine-tty: nvim: :make runs make and the build succeeds
+alpine: container: crun runs the same container (own hostname, PID 1)
+alpine: container: crun: cgroup limits: the container sees the memory, pids and cpu limits crun set
+alpine: container: crun: memory.max kills a process of a container that outgrows it
+alpine: container: crun loads a seccomp filter from the config: mkdir answers EPERM, the rest runs
