@@ -71,7 +71,13 @@ const VFS_MISS: u64 = 18446744073709551614;     // the disk has not caught up: s
 // vfs_readdir) come after them.
 const LO0: u64 = NFILES + DSLOTS;     // the loop mount's entry e is LO0 + e
 const HFILES: u64 = NFILES + 2 * DSLOTS;   // every file handle is below this
-const NOPEN: u64 = HFILES;           // the files nopen counts: slot NOPEN takes any other (fs, node), unused
+const NOPEN: u64 = HFILES;           // the files nopen counts (slot NOPEN, past them, is where any other (fs, node) would go: never stored)
+const NOPEN_START: u64 = 8192;       // what nopen starts with (NFILES: the in-memory nodes); it doubles as disk entries are opened
+
+spec fn nopen_ok(n: &Buf) -> bool {
+  len(n) >= NFILES && len(n) <= NOPEN
+}
+
 const VDIR_ROOT: u64 = NFILES + 2 * DSLOTS;  // the top directory
 const VDIR_DISK: u64 = NFILES + 2 * DSLOTS + 1;  // "disk"
 const VDIR_LO: u64 = NFILES + 2 * DSLOTS + 2;    // the loop mount's top directory
@@ -105,7 +111,7 @@ struct Vfs {
 }
 
 spec fn vfs_ok(v: &Vfs) -> bool {
-  nodes_ok(v.ram) && rix_ok(v.rix) && v.rhi <= NFILES && v.pool_hi <= FD_POOL && len(v.ftab) <= FTAB_LEN && len(v.holds) == HOLD_LEN && blen(v.xfer) == XFER && disk_ok(v.disk) && blen(v.name) == NAMEBUF && len(v.mnt) == MNT_LEN && len(v.nopen) == NOPEN + 1
+  nodes_ok(v.ram) && rix_ok(v.rix) && v.rhi <= NFILES && v.pool_hi <= FD_POOL && len(v.ftab) <= FTAB_LEN && len(v.holds) == HOLD_LEN && blen(v.xfer) == XFER && disk_ok(v.disk) && blen(v.name) == NAMEBUF && len(v.mnt) == MNT_LEN && nopen_ok(v.nopen)
     && disk_ok(v.lo) && blen(v.lname) == NAMEBUF && pc_ok(v.pc)
 }
 
@@ -114,7 +120,7 @@ fn vfs_new(disk: DiskFs) -> Vfs
   ensures vfs_ok(result)
 {
   return Vfs { ram: ram_new(), ftab: alloc(FTAB_START), holds: alloc(HOLD_LEN), xfer: balloc(XFER), disk: disk, name: balloc(NAMEBUF), mnt: alloc(MNT_LEN), now: 0,
-    lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0))), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, pc: pc_new(), nopen: alloc(NOPEN + 1), rix: alloc(RIX + 1), rhi: 0, pool_hi: 0, nat_rows: false, rlinked: false };
+    lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0))), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, pc: pc_new(), nopen: alloc(NOPEN_START), rix: alloc(RIX + 1), rhi: 0, pool_hi: 0, nat_rows: false, rlinked: false };
 }
 
 /// ram_create of the name in the transfer buffer, noting the node in `rhi`
@@ -269,6 +275,8 @@ fn fset(t: &mut Buf, row: u64, f: u64, x: u64)
 }
 
 /// Where nopen counts node i of file system fs (NOPEN for an unknown one).
+/// The disk's entries and the loop mount's alternate, so the table grows
+/// in step with whichever is open.
 fn nslot(fs: u64, i: u64) -> u64
   ensures result <= NOPEN
 {
@@ -276,20 +284,59 @@ fn nslot(fs: u64, i: u64) -> u64
     return i;
   }
   if fs == FS_DISK && i < DSLOTS {
-    return NFILES + i;
+    return NFILES + 2 * i;
   }
   if fs == FS_LO && i < DSLOTS {
-    return LO0 + i;
+    return NFILES + 2 * i + 1;
   }
   return NOPEN;
 }
 
+/// Makes room in nopen for slot `at` (below NOPEN): the table doubles,
+/// the counts stay, and the new ones are 0 (the kernel's allocator reuses a
+/// freed block only for a buffer of the same size). False, with n as it was,
+/// when memory runs out.
+fn nopen_room(n: &mut Buf, at: u64) -> bool
+  requires nopen_ok(n) && at < NOPEN
+  ensures nopen_ok(n) && (result ==> at < len(n))
+{
+  if at < len(n) {
+    return true;
+  }
+  let mut want = len(n) * 2;
+  if want <= at {
+    want = at + 1;
+  }
+  if want > NOPEN {
+    want = NOPEN;
+  }
+  let mut nt = try_alloc(want);
+  if len(nt) != want {
+    free(nt);
+    return false;
+  }
+  let mut j = 0;
+  while j < len(n)
+    invariant j <= len(n) && len(n) <= want && len(nt) == want
+  {
+    nt = set(nt, j, get(n, j));
+    j = j + 1;
+  }
+  let prev = n;
+  n = nt;
+  free(prev);
+  return true;
+}
+
 /// One more row or hold open on node i of file system fs.
 fn nopen_add(n: &mut Buf, fs: u64, i: u64)
-  requires len(n) == NOPEN + 1
-  ensures len(n) == NOPEN + 1
+  requires nopen_ok(n)
+  ensures nopen_ok(n)
 {
   let at = nslot(fs, i);
+  if at >= NOPEN || !nopen_room(&mut n, at) {
+    return;
+  }
   let c = get(n, at);
   if c < 0x100000000 {
     n = set(n, at, c + 1);
@@ -298,10 +345,13 @@ fn nopen_add(n: &mut Buf, fs: u64, i: u64)
 
 /// One fewer.
 fn nopen_sub(n: &mut Buf, fs: u64, i: u64)
-  requires len(n) == NOPEN + 1
-  ensures len(n) == NOPEN + 1
+  requires nopen_ok(n)
+  ensures nopen_ok(n)
 {
   let at = nslot(fs, i);
+  if at >= len(n) {
+    return;
+  }
   let c = get(n, at);
   if c > 0 {
     n = set(n, at, c - 1);
@@ -312,11 +362,16 @@ fn nopen_sub(n: &mut Buf, fs: u64, i: u64)
 /// open and hold counts itself in `nopen` (open_row, ram_open, vfs_hold)
 /// and each close takes itself out (vfs_close, vfs_unhold), so this is one
 /// read, not a pass over every process's rows (which close, unlink and
-/// rename did each time: a third of an open/close pair).
+/// rename did each time: a third of an open/close pair). A slot past the
+/// end of the table has never been counted: nothing is open on it.
 fn node_open(n: &Buf, fs: u64, i: u64) -> bool
-  requires len(n) == NOPEN + 1
+  requires nopen_ok(n)
 {
-  return get(n, nslot(fs, i)) > 0;
+  let at = nslot(fs, i);
+  if at >= len(n) {
+    return false;
+  }
+  return get(n, at) > 0;
 }
 
 /// Opens the file named by the first n bytes of the transfer buffer in a
@@ -459,8 +514,8 @@ fn vfs_open_node(v: &mut Vfs, base: u64, rows: u64, flags: u64, i: u64) -> u64
 /// create the file only if `mk` (a good name whose directory exists).
 /// False if it cannot be opened.
 fn dk_open(d: &mut DiskFs, ftab: &mut Buf, nopen: &mut Buf, pc: &mut PCache, mem: &mut Mem, x: &Bytes, row: u64, flags: u64, p: u64, n: u64, fs: u64, mk: bool, now: u64) -> bool
-  requires disk_ok(d) && len(ftab) <= FTAB_LEN && len(nopen) == NOPEN + 1 && row < FD_ROWS && p < n && n <= blen(x) && pc_ok(pc) && mem_ok(mem)
-  ensures disk_ok(d) && len(ftab) <= FTAB_LEN && len(nopen) == NOPEN + 1 && pc_ok(pc) && mem_ok(mem)
+  requires disk_ok(d) && len(ftab) <= FTAB_LEN && nopen_ok(nopen) && row < FD_ROWS && p < n && n <= blen(x) && pc_ok(pc) && mem_ok(mem)
+  ensures disk_ok(d) && len(ftab) <= FTAB_LEN && nopen_ok(nopen) && pc_ok(pc) && mem_ok(mem)
 {
   let mut i = disk_find(d, x, p, n - p);
   if i < DSLOTS && disk_link_of(d, i) < DSLOTS {
@@ -953,7 +1008,7 @@ fn vfs_unlink(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
 /// vfs_unlink of x[0..n] on disk file system d (fs in the table), whose
 /// names start p bytes in.
 fn dk_unlink(d: &mut DiskFs, nopen: &Buf, x: &Bytes, p: u64, n: u64, fs: u64) -> bool
-  requires disk_ok(d) && len(nopen) == NOPEN + 1 && p < n && n <= blen(x)
+  requires disk_ok(d) && nopen_ok(nopen) && p < n && n <= blen(x)
   ensures disk_ok(d)
 {
   let e = disk_find(d, x, p, n - p);

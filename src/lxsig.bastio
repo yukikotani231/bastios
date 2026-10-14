@@ -581,18 +581,13 @@ fn sig_fork(t: &mut Buf, parent: u64, child: u64)
   requires len(t) <= SIGACT_LEN && parent < NPROC && child < NPROC
   ensures len(t) <= SIGACT_LEN
 {
-  let mut s = 1;
-  while s <= NSIG
-    invariant 1 <= s && s <= NSIG + 1 && len(t) <= SIGACT_LEN
+  // Four words for each of the NSIG signals: one row of 256 words.
+  let mut i = 0;
+  while i < 256
+    invariant i <= 256 && len(t) <= SIGACT_LEN
   {
-    let mut f = 0;
-    while f < 4
-      invariant f <= 4 && s <= NSIG && len(t) <= SIGACT_LEN
-    {
-      sa_set(&mut t, child, s, f, sa_get(t, parent, s, f));
-      f = f + 1;
-    }
-    s = s + 1;
+    wset(&mut t, child * 256 + i, wget(t, parent * 256 + i));
+    i = i + 1;
   }
 }
 

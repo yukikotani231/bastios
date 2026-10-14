@@ -145,7 +145,7 @@ fn lx_pick(k: &mut Kernel, from: u64) -> u64
   requires kok(k)
   ensures kok(k) && result < NPROC
 {
-  let cap = len(k.procs) / STRIDE;   // past it, every process is FREE
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);   // past it, every process is FREE
   if cap == 0 {
     return 0;
   }
@@ -377,6 +377,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
     return EAGAIN;
   }
   pidfd_reuse(&mut k, c);                   // pidfds on the slot's last process (src/lxpidfd.bastio)
+  keys_fork(&mut k, pid, c);                // its session keyring is the parent's (src/lxkeys.bastio)
   if has_space(&mut k.spaces, c) {
     return EAGAIN;                          // a FREE row has no space; check it
   }

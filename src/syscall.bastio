@@ -280,7 +280,7 @@ fn disk_wake(k: &mut Kernel) -> bool
   let done = k.fs.disk.q.done;
   let dead = k.fs.disk.q.dead;
   let good = k.fs.disk.q.good;
-  let cap = len(k.procs) / STRIDE;     // past it, every process is FREE
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE
   let mut p = 1;
   while p < cap
     invariant 1 <= p && cap <= NPROC && kok(k)
