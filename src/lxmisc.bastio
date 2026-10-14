@@ -536,6 +536,18 @@ fn lx_pio(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, va: u64
     }
     return r;
   }
+  if d.kind == K_DEV && is_mem_file(d.x) {
+    // /proc/PID/mem: at off, leaving the descriptor's position as it was.
+    let h = fd_ofd(k, pid, fd);
+    if h >= OFD_N {
+      return EBADF;
+    }
+    let at = of_get(k.ofd, h, 3);
+    of_set(&mut k.ofd, h, 3, off);
+    let r = mem_io(&mut k, pid, fd, d.x, va, n, write);
+    of_set(&mut k.ofd, h, 3, at);
+    return r;
+  }
   if write && d.kind == K_FILE && seal_no_write(&mut k, pid, fd) {
     return EPERM;                           // F_SEAL_WRITE
   }
