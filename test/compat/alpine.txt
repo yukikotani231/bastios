@@ -249,6 +249,11 @@ Breakpoint 1, add (a=40, b=2) at d.c:2
 $1 = 42
 Value returned is $2 = 42
 
+== gdb: attach to a running program, stop it at a breakpoint, read its variables and detach
+$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb chroot /disk/a /bin/sh -c 'cd /root && printf "int g; int spin(int n) { g += n; return g; }\nint main(void) { for (;;) spin(1); }\n" > spin.c && gcc -g -O0 -pie -fPIE -o spin spin.c && (./spin & sleep 2; P=$(pidof spin); PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-x86_64.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" -p $P -ex "print g > 0" -ex "break spin" -ex c -ex detach </dev/null 2>&1 | grep -e "^\$1 = " -e "^Breakpoint 1, spin (n=1)"; kill $P)'; bb umount /disk/a/proc; fi
+$1 = 1
+Breakpoint 1, spin (n=1) at spin.c:1
+
 == nvim: LuaJIT loads a shared object that gcc built
 $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf 'local ffi = require("ffi")\nffi.cdef[[int answer(void);]]\nio.open("/root/so.txt", "w"):write(ffi.load("/root/libso.so").answer(), "\\n")\n' > /disk/a/root/so.lua && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -shared -fPIC -o libso.so so.c && nvim -l so.lua >/dev/null 2>&1'; bb cat /disk/a/root/so.txt
 42
