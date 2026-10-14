@@ -6,6 +6,7 @@
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <sched.h>
+#include <signal.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -459,6 +460,33 @@ static int keys_negative(void) {
     return kctl(11, id, (long)b, sizeof b, 0) == -1 && errno == ENOKEY_;
 }
 
+/* syncfs takes any open descriptor and fails EBADF on a bad one;
+ * rt_tgsigqueueinfo delivers a queued signal to a thread of this process. */
+static volatile int got_val;
+static void on_rt(int sig, siginfo_t *si, void *ctx) { (void)sig; (void)ctx; got_val = si->si_value.sival_int; }
+
+static int small_calls(void) {
+    int fd = open("/", O_RDONLY);
+    if (fd < 0) return 0;
+    if (syscall(SYS_syncfs, fd) != 0) return 0;
+    close(fd);
+    if (syscall(SYS_syncfs, -1) != -1 || errno != EBADF) return 0;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = on_rt;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGUSR1, &sa, 0);
+    siginfo_t si;
+    memset(&si, 0, sizeof si);
+    si.si_signo = SIGUSR1;
+    si.si_code = SI_QUEUE;
+    si.si_pid = getpid();
+    si.si_uid = getuid();
+    si.si_value.sival_int = 77;
+    if (syscall(SYS_rt_tgsigqueueinfo, getpid(), (pid_t)syscall(SYS_gettid), SIGUSR1, &si) != 0) return 0;
+    return got_val == 77;
+}
+
 /* Linux AIO: requests are done at submit; events come back from io_getevents. */
 struct aio_cb { uint64_t data; uint32_t key, rwf; uint16_t op, prio; uint32_t fd; uint64_t buf, nbytes; int64_t off; uint64_t res2; uint32_t flags, resfd; };
 struct aio_ev { uint64_t data, obj; int64_t res, res2; };
@@ -559,6 +587,7 @@ int main(void) {
     EXPECT("keys: unknown type, bad payload, expiry, revocation, no such key", keys_errors());
     EXPECT("keys: a child shares the session keyring but not the process keyring", keys_inherit());
     EXPECT("keys: request_key with a callout leaves a negative key", keys_negative());
+    EXPECT("syncfs and rt_tgsigqueueinfo", small_calls());
     EXPECT("aio: io_submit does the requests, io_getevents returns them in order", aio_basic());
     EXPECT("aio: bad context, bad descriptor, bad pointer, and an empty pipe finishes with EAGAIN", aio_errors());
     return done();
