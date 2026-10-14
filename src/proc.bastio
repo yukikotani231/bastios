@@ -243,10 +243,10 @@ fn state(procs: &Buf, pid: u64) -> u64
 }
 
 /// Processes that are not FREE or ZOMBIE.
-fn live_count(procs: &Buf) -> u64
+fn live_count(procs: &Buf, hi: u64) -> u64
   requires ptab_ok(procs)
 {
-  let cap = len(procs) / STRIDE;     // past it, every process is FREE
+  let cap = smaller(len(procs) / STRIDE, hi);     // past it, every process is FREE
   let mut n = 0;
   let mut p = 1;
   while p < cap
@@ -424,11 +424,11 @@ fn q_pop(q: &mut Queue) -> u64
 
 /// Hands queued bytes to processes blocked in READ, and wakes processes
 /// blocked in a Linux read once a whole line is typed.
-fn wake_readers(procs: &mut Buf, q: &mut Queue, line: &Buf)
+fn wake_readers(procs: &mut Buf, q: &mut Queue, line: &Buf, hi: u64)
   requires ptab_ok(procs) && qok(q) && lineok(line)
   ensures ptab_ok(procs) && qok(q)
 {
-  let cap = len(procs) / STRIDE;     // past it, every process is FREE
+  let cap = smaller(len(procs) / STRIDE, hi);     // past it, every process is FREE
   let mut p = 1;
   while p < cap
     invariant 1 <= p && cap <= NPROC && ptab_ok(procs) && qok(q)
@@ -942,6 +942,7 @@ struct Kernel {
   mt_hi: u64,           // one past the highest mount entry ever given to a namespace (me_set): no later one is in use
   pid_hi: u64,          // one past the highest process id ever handed out by new_pid_from: every row from there on is FREE (scans for a ready process stop there)
   fd_hi: u64,           // one past the highest descriptor number ever open: every non-zero word of lxfd is below it (rows are scanned only that far)
+  ux_xtra: bool,        // some channel may hold extra descriptions in flight (set by sendmsg, cleared by ux_reap once none does): unref_value skips its scan while false
   ofd_hi: u64,          // one past the highest open file description ever made: no later one is in use (scans stop there)
   socks: bool,          // a process may be in SOCKWAIT (nap sets it, sock_wake clears it): false lets sock_wake return at once
 }
@@ -1604,9 +1605,10 @@ fn wake_waiters(k: &mut Kernel, g: u64)
   requires kok(k) && g < NPROC
   ensures kok(k)
 {
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE
   let mut q = 1;
-  while q < NPROC
-    invariant 1 <= q && q <= NPROC && kok(k)
+  while q < cap
+    invariant 1 <= q && cap <= NPROC && kok(k)
   {
     if state(k.procs, q) == LXWAITING && (q == g || pget(k.procs, q, F_TGID) == g) {
       pset(&mut k.procs, q, F_STATE, READY);
@@ -1661,7 +1663,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
   if np == 0 {
     np = pr_reaper(k, pid);                // else to the nearest child subreaper (src/lxprctl.bastio)
   }
-  let cap = len(k.procs) / STRIDE;     // past it, every process is FREE
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE
   let mut c = 1;
   while c < cap
     invariant 1 <= c && cap <= NPROC && kok(k) && np < NPROC
