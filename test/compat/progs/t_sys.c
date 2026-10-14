@@ -370,9 +370,9 @@ static int splice_proc(void) {
 }
 
 /* Kernel keys: add_key, request_key and keyctl. */
-#define K_ADD 248
-#define K_REQ 249
-#define K_CTL 250
+#define K_ADD SYS_add_key
+#define K_REQ SYS_request_key
+#define K_CTL SYS_keyctl
 #define KS_THREAD (-1)
 #define KS_PROCESS (-2)
 #define KS_SESSION (-3)
