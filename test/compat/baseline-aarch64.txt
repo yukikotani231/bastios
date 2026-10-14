@@ -1035,3 +1035,5 @@ bastio: bastioc1: prove a program
 bastio: bastioc1: prove, build with tcc, run
 bastio: bastioc1: a failed proof builds nothing
 bastio: bastioc1: a type error
+alpine: container: cgroup limits: the container sees the memory, pids and cpu limits runc set
+alpine: container: memory.max kills a process of a container that outgrows it
