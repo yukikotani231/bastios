@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Boot
 
+- Executable holds: 512 programs at once can be loaded lazily (128 before), one for each possible process; past the limit a program is loaded whole, as before.
 - Pseudo-terminals: 64 pairs at once (16 before); the 65th `openpty` fails. The master and slave device numbers moved to 128 and 192, and the slaves have inode numbers of their own.
 - Epoll, timerfd, inotify and named pipes: 32 epoll instances (16 before), 64 timerfds (32), 32 inotify instances (16) and 32 named pipes open at once (16). The sets of epoll instances that loop detection walks are 32-bit masks now. `t_inotify` checks each.
 - AF_UNIX: 64 socketpairs (128 stream or datagram channels) and 32 named sockets at once in the whole system (16 channels and 4 names before). A datagram socket keeps its own and its peer's slot in base 64, not base 8.
