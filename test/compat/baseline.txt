@@ -826,6 +826,12 @@ t_proc: writing a sysctl number reads back
 t_proc: a sysctl number rejects text
 t_proc: a read-only sysctl is not opened for writing
 t_proc: a sysctl file is a regular file
+t_proc: /proc lists sys
+t_proc: /proc/sys is a directory
+t_proc: /proc/sys/net/core is a directory
+t_proc: a directory under /proc/sys that is not there is ENOENT
+t_proc: every file listed under /proc/sys opens
+t_proc: /proc/sys/vm lists swappiness
 t_ptrace: PTRACE_ATTACH stops the target with SIGSTOP
 t_ptrace: PTRACE_CONT with a signal runs the handler for it
 t_ptrace: PTRACE_CONT without a signal drops the one that stopped it, and the child saw the poke
