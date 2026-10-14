@@ -416,6 +416,44 @@ fn open_row(v: &mut Vfs, mem: &mut Mem, base: u64, rows: u64, flags: u64, n: u64
   return fd;
 }
 
+/// Opens RAM file node i, which may have no name left (a file unlinked while
+/// it was open), in a free row of base to base + rows - 1: the row less
+/// `base`, or NO_FD if there is none free or i is no file.
+fn vfs_open_node(v: &mut Vfs, base: u64, rows: u64, flags: u64, i: u64) -> u64
+  requires vfs_ok(v) && base + rows <= FD_ROWS && i < NFILES
+  ensures vfs_ok(v)
+  ensures result < rows || result == NO_FD
+{
+  if (base + rows) * FD_STRIDE > len(v.ftab) {
+    return NO_FD;                           // the table has not grown to this process
+  }
+  if ram_len(&mut v.ram, i) == NO_FILE || ram_is_dir(&mut v.ram, i) {
+    return NO_FD;
+  }
+  let mut fd = 0;
+  while fd < rows && fget(v.ftab, base + fd, FD_FS) != 0
+    invariant fd <= rows
+  {
+    fd = fd + 1;
+  }
+  if fd >= rows {
+    return NO_FD;
+  }
+  if base + fd < FD_POOL {
+    if base + fd >= v.pool_hi {
+      v.pool_hi = base + fd + 1;
+    }
+  } else {
+    v.nat_rows = true;
+  }
+  nopen_add(&mut v.nopen, FS_RAM, i);
+  fset(&mut v.ftab, base + fd, FD_FS, FS_RAM);
+  fset(&mut v.ftab, base + fd, FD_NODE, i);
+  fset(&mut v.ftab, base + fd, FD_OFF, 0);
+  fset(&mut v.ftab, base + fd, FD_MODE, flags % (2 * O_APPEND));
+  return fd;
+}
+
 /// vfs_open for a name on disk file system d (file system fs in the
 /// table), whose names start p bytes in, into the free row `row`. It may
 /// create the file only if `mk` (a good name whose directory exists).
@@ -1141,6 +1179,17 @@ fn vfs_stat(v: &mut Vfs, n: u64) -> u64
 {
   let f = vfs_lookup(&mut v, n);
   return vfs_size(&mut v, f);
+}
+
+/// Whether RAM file f has no name: a memfd, or a file removed while open.
+fn vfs_orphan(v: &mut Vfs, f: u64) -> bool
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  if f >= NFILES {
+    return false;
+  }
+  return ram_len(&mut v.ram, f) == 0;
 }
 
 /// Copies the name of directory entry i into the start of the transfer

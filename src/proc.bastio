@@ -100,6 +100,7 @@ const F_ABI: u64 = 66;
 const F_START: u64 = 65;             // when it started: centiseconds since boot, plus 1 (/proc/PID/stat)
 const F_FAULT_RIP: u64 = 67;         // the last page fault found its page mapped already: rip + 1 and address (src/main.bastio)
 const F_FAULT_VA: u64 = 68;
+const F_ARGS: u64 = 69;              // Linux: the argument strings at exec: window offset + length * 2^40 (/proc/PID/cmdline)
 const F_NETNS: u64 = 64;             // network (src/netns.bastio, src/lxnetlink.bastio)
 // File permission bits (src/lxperm.bastio).
 const MAY_X: u64 = 1;
@@ -1507,6 +1508,10 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
   }
   if !src.file {
     pset(&mut procs, pid, F_PROG, src.prog);
+  }
+  pset(&mut procs, pid, F_ARGS, 0);
+  if elf && total <= ARGS_MAX {
+    pset(&mut procs, pid, F_ARGS, str_at(total) + alen * 1099511627776);
   }
   pset(&mut procs, pid, reg_word(R_PC), entry);
   pset(&mut procs, pid, reg_word(R_SP), rsp);
