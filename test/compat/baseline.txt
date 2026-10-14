@@ -914,6 +914,13 @@ t_proc: an inotify instance lists its watches
 t_proc: a pidfd shows the process
 t_proc: fdinfo lists the open descriptors
 t_proc: /proc/self lists fdinfo
+t_proc: maps lists an anonymous mapping
+t_proc: maps lists a shared mapping with s
+t_proc: maps drops a mapping when it is unmapped
+t_proc: maps shows a PROT_NONE page with no permissions
+t_proc: maps has a [heap] after brk grows
+t_proc: maps has [stack] and [vdso]
+t_proc: maps lines end at column 74 for names
 t_ptrace: PTRACE_ATTACH stops the target with SIGSTOP
 t_ptrace: PTRACE_CONT with a signal runs the handler for it
 t_ptrace: PTRACE_CONT without a signal drops the one that stopped it, and the child saw the poke
@@ -972,6 +979,23 @@ t_pty: ttyname of the slave
 t_pty: typing echoes back, CR read as LF
 t_pty: unlockpt lets it open
 t_pty: with both ends closed its /dev/pts entry is gone
+t_rootro: unshare a mount namespace
+t_rootro: bind the rootfs onto itself
+t_rootro: make the bind private
+t_rootro: remount it with no change
+t_rootro: mount /proc below it
+t_rootro: mount a tmpfs on /dev below it
+t_rootro: mount sysfs below it
+t_rootro: remount /sys read-only
+t_rootro: remount the rootfs read-only through its descriptor
+t_rootro: a file cannot be created in it before the pivot
+t_rootro: pivot_root(".", ".") into it
+t_rootro: umount2 of "." again fails with EINVAL
+t_rootro: chdir to the new root
+t_rootro: make the new root private
+t_rootro: a file cannot be created in the new root
+t_rootro: nor a file in the root directory itself
+t_rootro: nor a directory
 t_ropivot: unshare a mount namespace
 t_ropivot: bind the root directory onto itself
 t_ropivot: before the pivot, remount the descriptor's path read-only
@@ -1180,6 +1204,7 @@ alpine: nvim: tree-sitter highlights C: the keyword, the type and the comment ge
 alpine: nvim: :diffthis marks the line that differs, and vim.diff finds the hunk
 alpine: strace: traces a program's system calls with ptrace, following the child it starts
 alpine: strace: attaches to a running process, and hears of its death when its parent is elsewhere
+alpine: gdb: a breakpoint in a program stops it, shows its arguments and backtrace, and finish gives the return value
 alpine: nvim: LuaJIT loads a shared object that gcc built
 alpine: nvim: a plugin cloned over HTTP is on the packpath and runs at startup
 alpine: nvim: a small plugin manager in Lua clones a plugin, loads it, then updates it with git pull
@@ -1194,7 +1219,10 @@ alpine: container: crun runs the same container (own hostname, PID 1)
 alpine: container: crun: cgroup limits: the container sees the memory, pids and cpu limits crun set
 alpine: container: crun: memory.max kills a process of a container that outgrows it
 alpine: container: crun loads a seccomp filter from the config: mkdir answers EPERM, the rest runs
+alpine: container: crun: the root file system is read-only, and the exit status comes back
+alpine: container: crun runs on an overlay of the image root: writes and deletions stay in the upper layer
 alpine: container: the host keeps its hostname and no container is left behind
+alpine: container: crun and runc: a profile that denies mount, module, ptrace and bpf calls leaves the container's own work alone
 alpine: container: the root file system is read-only, and the exit status comes back
 alpine: container: rootless: runc runs Alpine as an unprivileged user in a user namespace of its own
 alpine: container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle
