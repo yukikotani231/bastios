@@ -332,6 +332,7 @@ fn ns_new(n: &mut Net) -> u64
       nsset(&mut n, s, NS_GW, 0);
       nsset(&mut n, s, NS_FWD, 0);
       nsset(&mut n, s, NS_LO, lo);
+      nsset(&mut n, s, NS_OWNER, 0);
       n.ns_seq = n.ns_seq % 1048576 + 1;
       nsset(&mut n, s, NS_INO, 4026532000 + n.ns_seq);
       if_make(&mut n, lo, IFK_LO, s, NAME_LO, 0);
@@ -456,6 +457,38 @@ fn nic_ns_new(c: &mut Nic) -> u64
       let r = ns_new(&mut n);
       c = Nic::Up(n);
       return r;
+    },
+  }
+}
+
+/// Records user namespace id o as the owner of namespace s.
+fn nic_ns_set_owner(c: &mut Nic, s: u64, o: u64)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if s < NNET {
+        nsset(&mut n, s, NS_OWNER, o);
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
+/// The user namespace id that made namespace s (0 for the first, and for
+/// one that does not exist).
+fn nic_ns_owner(c: &Nic, s: u64) -> u64
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if s < NNET {
+        return nsw(n, s, NS_OWNER);
+      }
+      return 0;
     },
   }
 }
