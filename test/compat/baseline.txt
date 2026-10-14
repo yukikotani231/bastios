@@ -979,6 +979,23 @@ t_pty: ttyname of the slave
 t_pty: typing echoes back, CR read as LF
 t_pty: unlockpt lets it open
 t_pty: with both ends closed its /dev/pts entry is gone
+t_rootro: unshare a mount namespace
+t_rootro: bind the rootfs onto itself
+t_rootro: make the bind private
+t_rootro: remount it with no change
+t_rootro: mount /proc below it
+t_rootro: mount a tmpfs on /dev below it
+t_rootro: mount sysfs below it
+t_rootro: remount /sys read-only
+t_rootro: remount the rootfs read-only through its descriptor
+t_rootro: a file cannot be created in it before the pivot
+t_rootro: pivot_root(".", ".") into it
+t_rootro: umount2 of "." again fails with EINVAL
+t_rootro: chdir to the new root
+t_rootro: make the new root private
+t_rootro: a file cannot be created in the new root
+t_rootro: nor a file in the root directory itself
+t_rootro: nor a directory
 t_ropivot: unshare a mount namespace
 t_ropivot: bind the root directory onto itself
 t_ropivot: before the pivot, remount the descriptor's path read-only
@@ -1201,6 +1218,8 @@ alpine: container: crun runs the same container (own hostname, PID 1)
 alpine: container: crun: cgroup limits: the container sees the memory, pids and cpu limits crun set
 alpine: container: crun: memory.max kills a process of a container that outgrows it
 alpine: container: crun loads a seccomp filter from the config: mkdir answers EPERM, the rest runs
+alpine: container: crun: the root file system is read-only, and the exit status comes back
+alpine: container: crun runs on an overlay of the image root: writes and deletions stay in the upper layer
 alpine: container: the host keeps its hostname and no container is left behind
 alpine: container: crun and runc: a profile that denies mount, module, ptrace and bpf calls leaves the container's own work alone
 alpine: container: the root file system is read-only, and the exit status comes back
