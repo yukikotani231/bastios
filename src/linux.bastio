@@ -1317,6 +1317,10 @@ fn lx_fill(k: &mut Kernel, v: u64, n: u64)
   requires kok(k) && v <= 255 && n <= 160
   ensures kok(k)
 {
+  if v == 0 {
+    bcopy(&mut k.fs.xfer, 0, k.zeros, 0, n);   // one block copy from the zero buffer
+    return;
+  }
   let mut i = 0;
   while i < n
     invariant i <= n && n <= 160 && kok(k)
