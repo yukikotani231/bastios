@@ -460,6 +460,27 @@ static int keys_negative(void) {
     return kctl(11, id, (long)b, sizeof b, 0) == -1 && errno == ENOKEY_;
 }
 
+/* clone's exit_signal: the parent gets it, not SIGCHLD, when the child ends. */
+static volatile int exit_sig_seen;
+static void on_exit_sig(int sig) { exit_sig_seen = sig; }
+
+static int exit_signal(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_exit_sig;
+    sigaction(SIGUSR2, &sa, 0);
+    sigaction(SIGCHLD, &sa, 0);
+    long c = syscall(SYS_clone, SIGUSR2, 0, 0, 0, 0);
+    if (c < 0) return 0;
+    if (c == 0) _exit(0);
+    int st;
+    pid_t w;
+    while ((w = waitpid((pid_t)c, &st, __WALL)) == -1 && errno == EINTR) {}   /* the exit signal interrupts the wait */
+    if (w != (pid_t)c) return 0;
+    for (int i = 0; i < 100 && exit_sig_seen == 0; i++) usleep(10000);   /* the signal may land just after the wait returns */
+    return exit_sig_seen == SIGUSR2;
+}
+
 /* syncfs takes any open descriptor and fails EBADF on a bad one;
  * rt_tgsigqueueinfo delivers a queued signal to a thread of this process. */
 static volatile int got_val;
@@ -587,6 +608,7 @@ int main(void) {
     EXPECT("keys: unknown type, bad payload, expiry, revocation, no such key", keys_errors());
     EXPECT("keys: a child shares the session keyring but not the process keyring", keys_inherit());
     EXPECT("keys: request_key with a callout leaves a negative key", keys_negative());
+    EXPECT("clone: the exit signal is what the parent gets", exit_signal());
     EXPECT("syncfs and rt_tgsigqueueinfo", small_calls());
     EXPECT("aio: io_submit does the requests, io_getevents returns them in order", aio_basic());
     EXPECT("aio: bad context, bad descriptor, bad pointer, and an empty pipe finishes with EAGAIN", aio_errors());

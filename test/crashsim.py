@@ -178,10 +178,14 @@ def files(img):
 
     def data(e):
         out = bytearray(e["size"])
-        if e["root"]:
-            for m, l1 in fsck.used(img, e["root"]):
+        w = e["root"]
+        roots = [(0, w)] if 0 < w < fsck.SEG_FLAG else []
+        if w >= fsck.SEG_FLAG:
+            roots = [(m * fsck.SEG_BLOCKS, r) for m, r in fsck.used(img, w - fsck.SEG_FLAG)]
+        for base, root in roots:
+            for m, l1 in fsck.used(img, root):
                 for k, b in fsck.used(img, l1):
-                    at = (m * fsck.PTRS + k) * B
+                    at = (base + m * fsck.PTRS + k) * B
                     if at < len(out):
                         out[at:at + B] = img[b * B:(b + 1) * B][:len(out) - at]
         return bytes(out)
@@ -285,7 +289,7 @@ def check_range(args):
             if key not in seen:
                 seen.add(key)
                 states += 1
-                if bytes(img[0:8]) in (b"BSTDISK2", b"BSTDISK3", b"BSTDISK4"):
+                if bytes(img[0:8]) in (b"BSTDISK2", b"BSTDISK3", b"BSTDISK4", b"BSTDISK5"):
                     errors, _, _ = fsck.check(img)
                     if not errors:
                         bad = crashme_check(img)
