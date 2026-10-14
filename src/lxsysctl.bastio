@@ -1,0 +1,259 @@
+// Plain sysctl files under /proc/sys that programs read for a number and a
+// few write: the table of names and defaults src/lxprocfs.bastio serves.
+// Entries 0 .. SCT_NUM are numbers (defaults here; a write is kept in k.sys at
+// SYS_SC + i as the value + 1, 0 meaning never written); the entries after
+// them are fixed text. Nothing here changes how the kernel behaves: the
+// values are what Linux reports, kept and handed back.
+
+import "proc.bastio";
+
+const SCT_NUM: u64 = 35;
+const SCT_N: u64 = 39;
+
+fn sct_name(i: u64) -> Str {
+  if i == 0 {
+    return "sys/net/core/somaxconn";
+  }
+  if i == 1 {
+    return "sys/vm/overcommit_memory";
+  }
+  if i == 2 {
+    return "sys/vm/overcommit_ratio";
+  }
+  if i == 3 {
+    return "sys/vm/max_map_count";
+  }
+  if i == 4 {
+    return "sys/vm/swappiness";
+  }
+  if i == 5 {
+    return "sys/vm/dirty_ratio";
+  }
+  if i == 6 {
+    return "sys/vm/dirty_background_ratio";
+  }
+  if i == 7 {
+    return "sys/vm/min_free_kbytes";
+  }
+  if i == 8 {
+    return "sys/vm/vfs_cache_pressure";
+  }
+  if i == 9 {
+    return "sys/vm/panic_on_oom";
+  }
+  if i == 10 {
+    return "sys/vm/oom_kill_allocating_task";
+  }
+  if i == 11 {
+    return "sys/vm/page-cluster";
+  }
+  if i == 12 {
+    return "sys/vm/mmap_min_addr";
+  }
+  if i == 13 {
+    return "sys/fs/file-max";
+  }
+  if i == 14 {
+    return "sys/fs/suid_dumpable";
+  }
+  if i == 15 {
+    return "sys/fs/protected_hardlinks";
+  }
+  if i == 16 {
+    return "sys/fs/protected_symlinks";
+  }
+  if i == 17 {
+    return "sys/kernel/cap_last_cap";
+  }
+  if i == 18 {
+    return "sys/kernel/randomize_va_space";
+  }
+  if i == 19 {
+    return "sys/kernel/panic";
+  }
+  if i == 20 {
+    return "sys/kernel/threads-max";
+  }
+  if i == 21 {
+    return "sys/kernel/ngroups_max";
+  }
+  if i == 22 {
+    return "sys/kernel/sysrq";
+  }
+  if i == 23 {
+    return "sys/kernel/kptr_restrict";
+  }
+  if i == 24 {
+    return "sys/kernel/dmesg_restrict";
+  }
+  if i == 25 {
+    return "sys/kernel/perf_event_paranoid";
+  }
+  if i == 26 {
+    return "sys/net/ipv4/ip_forward";
+  }
+  if i == 27 {
+    return "sys/net/ipv4/tcp_syncookies";
+  }
+  if i == 28 {
+    return "sys/net/ipv4/tcp_fin_timeout";
+  }
+  if i == 29 {
+    return "sys/net/ipv4/tcp_keepalive_time";
+  }
+  if i == 30 {
+    return "sys/net/ipv4/tcp_tw_reuse";
+  }
+  if i == 31 {
+    return "sys/net/core/rmem_max";
+  }
+  if i == 32 {
+    return "sys/net/core/wmem_max";
+  }
+  if i == 33 {
+    return "sys/net/core/netdev_max_backlog";
+  }
+  if i == 34 {
+    return "sys/net/ipv6/conf/all/disable_ipv6";
+  }
+  if i == 35 {
+    return "sys/net/ipv4/ip_local_port_range";
+  }
+  if i == 36 {
+    return "sys/fs/file-nr";
+  }
+  if i == 37 {
+    return "sys/kernel/random/entropy_avail";
+  }
+  if i == 38 {
+    return "sys/kernel/random/poolsize";
+  }
+  return "sys/kernel/tainted";
+}
+
+/// The value of number entry i before any write.
+fn sct_default(i: u64) -> u64 {
+  if i == 0 {
+    return 4096;
+  }
+  if i == 1 {
+    return 0;
+  }
+  if i == 2 {
+    return 50;
+  }
+  if i == 3 {
+    return 65530;
+  }
+  if i == 4 {
+    return 60;
+  }
+  if i == 5 {
+    return 20;
+  }
+  if i == 6 {
+    return 10;
+  }
+  if i == 7 {
+    return 67584;
+  }
+  if i == 8 {
+    return 100;
+  }
+  if i == 9 {
+    return 0;
+  }
+  if i == 10 {
+    return 0;
+  }
+  if i == 11 {
+    return 3;
+  }
+  if i == 12 {
+    return 65536;
+  }
+  if i == 13 {
+    return 1048576;
+  }
+  if i == 14 {
+    return 0;
+  }
+  if i == 15 {
+    return 1;
+  }
+  if i == 16 {
+    return 1;
+  }
+  if i == 17 {
+    return 40;
+  }
+  if i == 18 {
+    return 2;
+  }
+  if i == 19 {
+    return 0;
+  }
+  if i == 20 {
+    return 31000;
+  }
+  if i == 21 {
+    return 65536;
+  }
+  if i == 22 {
+    return 176;
+  }
+  if i == 23 {
+    return 0;
+  }
+  if i == 24 {
+    return 0;
+  }
+  if i == 25 {
+    return 2;
+  }
+  if i == 26 {
+    return 0;
+  }
+  if i == 27 {
+    return 1;
+  }
+  if i == 28 {
+    return 60;
+  }
+  if i == 29 {
+    return 7200;
+  }
+  if i == 30 {
+    return 2;
+  }
+  if i == 31 {
+    return 212992;
+  }
+  if i == 32 {
+    return 212992;
+  }
+  if i == 33 {
+    return 1000;
+  }
+  if i == 34 {
+    return 0;
+  }
+  return 0;
+}
+
+/// The text of entry i, for the entries after the numbers.
+fn sct_text(i: u64) -> Str {
+  if i == 35 {
+    return "32768\t60999\n";
+  }
+  if i == 36 {
+    return "0\t0\t1048576\n";
+  }
+  if i == 37 {
+    return "256\n";
+  }
+  if i == 38 {
+    return "256\n";
+  }
+  return "\n";
+}

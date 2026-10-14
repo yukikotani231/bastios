@@ -101,6 +101,7 @@ const SY_NETARP: u64 = 28;             // /proc/net/arp
 const SY_CORE: u64 = 29;               // /proc/sys/kernel/core_pattern (nothing dumps core)
 const SY_NROPEN: u64 = 30;             // /proc/sys/fs/nr_open
 const SY_DROP: u64 = 31;               // /proc/sys/vm/drop_caches: written, kept for nothing
+const SY_SC: u64 = 32;                // 32 .. 32 + SCT_N: the plain sysctl files of src/lxsysctl.bastio
 const SY_NEXTID: u64 = 96;             // 96 .. 98: /proc/sys/kernel/{msg,sem,shm}_next_id, by IPC kind (src/lxipc.bastio)
 const SY_NS: u64 = 128;                // 128 ..: /proc/P/ns link f at P * NF_N + f (src/lxnsk.bastio)
 const NF_N: u64 = 8;
@@ -528,6 +529,15 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   if xfer_is(x, 5, n, "sys/fs/pipe-max-size") {
     return PROC_DEV + PSYS + SY_PIPE_MAX;
   }
+  let mut si = 0;
+  while si < SCT_N
+    invariant si <= SCT_N
+  {
+    if xfer_is(x, 5, n, sct_name(si)) {
+      return PROC_DEV + PSYS + SY_SC + si;
+    }
+    si = si + 1;
+  }
   if xfer_is(x, 5, n, "sys/fs/inotify/max_queued_events") {
     return PROC_DEV + PSYS + SY_INO;
   }
@@ -729,8 +739,13 @@ fn is_nextid_file(f: u64) -> bool {
   return f >= PROC_DEV + PSYS + SY_NEXTID && f < PROC_DEV + PSYS + SY_NEXTID + 3;
 }
 
+/// Is f one of the plain numeric sysctl files (src/lxsysctl.bastio)?
+fn is_sct_file(f: u64) -> bool {
+  return f >= PROC_DEV + PSYS + SY_SC && f < PROC_DEV + PSYS + SY_SC + SCT_NUM;
+}
+
 fn proc_writable(f: u64) -> bool {
-  return is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
+  return is_sct_file(f) || is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
 }
 
 /// What stat says about /proc file f (a proc_file device).
@@ -1594,6 +1609,18 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
         t = t + 1;
       }
       return a;
+    }
+    if what >= SY_SC && what < SY_SC + SCT_NUM {
+      let mut v = sct_default(what - SY_SC);
+      let w = get(k.sys, SYS_SCT + (what - SY_SC));
+      if w != 0 {
+        v = w - 1;
+      }
+      let a = put_n(&mut o, 0, v);
+      return put_c(&mut o, a, 10);
+    }
+    if what >= SY_SC + SCT_NUM && what < SY_SC + SCT_N {
+      return put_s(&mut o, 0, sct_text(what - SY_SC));
     }
     if what == SY_TAINTED {
       return put_s(&mut o, 0, "0\n");
@@ -2610,6 +2637,11 @@ fn proc_write_xfer(k: &mut Kernel, f: u64, n: u64) -> u64
   }
   if !any || i < n || v > 0x80000000 {
     return EINVAL;
+  }
+  let sbase = PROC_DEV + PSYS + SY_SC;
+  if f >= sbase && f < sbase + SCT_NUM {
+    k.sys = set(k.sys, SYS_SCT + (f - sbase), v + 1);
+    return n;
   }
   let mut size = PIPE_PAGE;
   while size < v && size < 0x80000000
