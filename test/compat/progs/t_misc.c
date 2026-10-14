@@ -180,6 +180,31 @@ int main(void) {
         if (c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0) pass();
         else fail("status %#x", st);
     }
+    /* Forty filters stacked on one thread (eight was the system-wide
+     * limit once), the newest denying getpid. */
+    if (begin("forty stacked seccomp filters")) {
+        pid_t c = fork();
+        if (c == 0) {
+            struct sock_filter ok[] = { BPF_STMT(BPF_RET_K, SECCOMP_RET_ALLOW) };
+            struct sock_fprog pok = { 1, ok };
+            struct sock_filter f[] = {
+                BPF_STMT(BPF_LD_W_ABS, 0),
+                BPF_JUMP(BPF_JEQ_K, SYS_getpid, 0, 1),
+                BPF_STMT(BPF_RET_K, SECCOMP_RET_ERRNO | EPERM),
+                BPF_STMT(BPF_RET_K, SECCOMP_RET_ALLOW),
+            };
+            struct sock_fprog prog = { sizeof f / sizeof f[0], f };
+            if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) _exit(10);
+            for (int i = 0; i < 39; i++)
+                if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &pok) != 0) _exit(11);
+            if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) _exit(12);
+            long r = syscall(SYS_getpid);
+            _exit(r == -1 && errno == EPERM && syscall(SYS_gettid) > 0 ? 0 : 13);
+        }
+        int st = 0;
+        if (c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0) pass();
+        else fail("status %#x", st);
+    }
 #ifdef __aarch64__
     /* The Go runtime reads ID_AA64ISAR0_EL1 when it starts; Linux emulates
      * the read (HWCAP_CPUID) instead of killing the program. */

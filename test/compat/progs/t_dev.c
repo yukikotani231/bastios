@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 
 #define LOOP_SET_FD 0x4C00
 #define LOOP_CLR_FD 0x4C01
@@ -102,6 +103,29 @@ int main(void) {
     EXPECT("cleared twice is ENXIO", ioctl(fd, LOOP_CLR_FD, 0) == -1 && errno == ENXIO);
     EXPECT("unbound reads nothing", read(fd, buf, 1) == 0);
     if (fd >= 0) close(fd);
+
+    /* Thirty-two devices at once: loop8 .. loop31 take two digits. */
+    int bound = 0, lfd[32];
+    file = open("ld_img", O_RDWR);
+    for (int i = 0; i < 32; i++) lfd[i] = -1;
+    for (int i = 8; i < 32; i++) {
+        snprintf(dev, sizeof dev, "/dev/loop%d", i);
+        lfd[i] = open(dev, O_RDWR);
+        if (lfd[i] >= 0 && ioctl(lfd[i], LOOP_SET_FD, file) == 0) bound++;
+    }
+    EXPECT("loop8 .. loop31 all bind", bound == 24);
+    EXPECT("loop31 is block device 7:31", stat("/dev/loop31", &st) == 0 && S_ISBLK(st.st_mode)
+           && major(st.st_rdev) == 7 && minor(st.st_rdev) == 31);
+    EXPECT("/sys/block/loop31/size", read_sys(31, "size", buf) && atoi(buf) == 128);
+    EXPECT("/sys/block/loop17 is its own", lfd[17] >= 0 && read_sys(17, "loop/backing_file", buf)
+           && strstr(buf, "/ld_img\n") != 0);
+    EXPECT("the free ones are loop0 .. loop7", (n = ioctl(ctl, LOOP_CTL_GET_FREE)) >= 0 && n < 8);
+    EXPECT("loop32 does not exist", open("/dev/loop32", O_RDWR) < 0 && errno == ENOENT);
+    EXPECT("loop08 does not exist", stat("/dev/loop08", &st) < 0 && errno == ENOENT);
+    EXPECT("/sys/block/loop32 does not exist", !read_sys(32, "size", buf));
+    for (int i = 8; i < 32; i++)
+        if (lfd[i] >= 0) { ioctl(lfd[i], LOOP_CLR_FD, 0); close(lfd[i]); }
+    if (file >= 0) close(file);
     if (ctl >= 0) close(ctl);
     unlink("ld_img");
     return done();

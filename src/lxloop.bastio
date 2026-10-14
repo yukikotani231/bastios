@@ -1,4 +1,4 @@
-// Loop devices: /dev/loop0 .. /dev/loop7 are block devices whose bytes are
+// Loop devices: /dev/loop0 .. /dev/loop31 are block devices whose bytes are
 // those of a file, and /dev/loop-control hands out free ones. losetup and
 // test suites (LTP attaches one to an image file for each test that wants
 // a block device) set them up with ioctls: LOOP_SET_FD binds a device to
@@ -89,10 +89,21 @@ fn loop_at(x: &Bytes, n: u64) -> u64
   if xfer_is(x, 0, n, "dev/loop-control") {
     return DEV_LOOPCTL;
   }
-  if n == 9 && xfer_is(x, 0, 8, "dev/loop") {
+  if n >= 9 && n <= 10 && xfer_is(x, 0, 8, "dev/loop") {
     let c = cast[u64](bget(x, 8));
-    if c >= 48 && c < 48 + LOOP_N {
-      return DEV_LOOP + c - 48;
+    if c >= 48 && c < 58 {
+      let mut v = c - 48;
+      if n == 10 {
+        // Two digits, no leading zero ("dev/loop07" is not a device).
+        let e = cast[u64](bget(x, 9));
+        if c == 48 || e < 48 || e >= 58 {
+          return DEV_NONE;
+        }
+        v = v * 10 + e - 48;
+      }
+      if v < LOOP_N {
+        return DEV_LOOP + v;
+      }
     }
   }
   return DEV_NONE;
