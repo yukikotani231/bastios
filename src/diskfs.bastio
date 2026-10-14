@@ -83,21 +83,22 @@ import "core/endian.bastio";
 import "core/bitmap.bastio";
 import "core/bytes.bastio";
 
-const DSLOTS: u64 = 32768;            // directory entries, at most (2048 directory blocks: 512 named by the superblock, the rest by extension blocks)
+const DSLOTS: u64 = 262144;           // directory entries, at most (16384 directory blocks: 512 named by the superblock, the rest by extension blocks)
 const BATCH_MAX: u64 = 32;               // blocks a batch of writes makes before it commits (disk_write)
 const OB_MAX: u64 = 40;               // blocks it replaces: at most one per block it makes, and room for a write's five
 const BATCH_TICKS: u64 = 10;          // ticks (10 ms each) a batch waits for more writes before disk_pump commits it
 const DENT: u64 = 256;
-const DIR_BYTES: u64 = 8388608;       // DSLOTS * DENT: the most the directory takes in memory
-const DIR_SECTORS: u64 = 16384;
-const DIR_BLOCKS: u64 = 2048;
+const DIR_BYTES: u64 = 67108864;      // DSLOTS * DENT: the most the directory takes in memory
+const DIR_SECTORS: u64 = 131072;
+const DIR_BLOCKS: u64 = 16384;
 const DIR_SB: u64 = 512;              // directory blocks below this are named by the superblock, the rest by extension blocks
 const EXT_PTRS: u64 = 511;            // directory blocks one extension block names (its word 0 names the next extension block)
-const EXT_MAX: u64 = 4;               // extension blocks: DIR_SB + EXT_MAX * EXT_PTRS >= DIR_BLOCKS
-const IX_CELLS: u64 = 65536;          // cells of the name index (a power of two, at least twice DSLOTS)
-const IX_BYTES: u64 = 262144;         // 4 bytes a cell: 0 empty, else entry + 1
+const EXT_START: u64 = 4;             // extension blocks a mounted disk has room for at first (a small disk costs 16 KiB)
+const EXT_MAX: u64 = 32;              // extension blocks: DIR_SB + EXT_MAX * EXT_PTRS >= DIR_BLOCKS
+const IX_CELLS: u64 = 524288;          // cells of the name index (a power of two, at least twice DSLOTS)
+const IX_BYTES: u64 = 2097152;         // 4 bytes a cell: 0 empty, else entry + 1
 const IX_MIN: u64 = 1024;             // a directory with more entries than this has the index
-const IX_MAX: u64 = 49152;            // cells in use (stale ones too) before the index is rebuilt
+const IX_MAX: u64 = 393216;           // cells in use (stale ones too) before the index is rebuilt
 const DIR_START: u64 = 8;             // the blocks of memory the directory starts with (it doubles from there)
 const DIR_FIXED: u64 = 4;             // directory blocks 0..3 are disk blocks 1..4
 const DPB: u64 = 16;                  // directory entries per block
@@ -138,7 +139,8 @@ struct DiskFs {
   dir: Bytes,           // the directory, dcap blocks (at most DIR_BYTES): grows by doubling as blocks are added
   dcap: u64,            // the blocks dir holds room for
   sb: Bytes,            // the superblock's block: the magic and the directory's blocks
-  ext: Bytes,           // the extension blocks, next of EXT_MAX, in chain order
+  ext: Bytes,           // the extension blocks, next of ecap, in chain order
+  ecap: u64,            // the extension blocks ext holds room for (at most EXT_MAX): grows by doubling from EXT_START
   next: u64,
   sec: Bytes,           // a sector buffer
   root: Bytes,          // a root map, while a write changes it
@@ -167,7 +169,7 @@ struct DiskFs {
 }
 
 spec fn disk_ok(d: &DiskFs) -> bool {
-  blk_ok(d.dev) && d.dcap >= DIR_START && d.dcap <= DIR_BLOCKS && blen(d.dir) == d.dcap * BLOCK && d.slots <= d.dcap * DPB && blen(d.sb) == BLOCK && blen(d.ext) == EXT_MAX * BLOCK && d.next <= EXT_MAX && blen(d.sec) == SECTOR && blen(d.root) == BLOCK
+  blk_ok(d.dev) && d.dcap >= DIR_START && d.dcap <= DIR_BLOCKS && blen(d.dir) == d.dcap * BLOCK && d.slots <= d.dcap * DPB && blen(d.sb) == BLOCK && d.ecap >= EXT_START && d.ecap <= EXT_MAX && blen(d.ext) == d.ecap * BLOCK && d.next <= d.ecap && blen(d.sec) == SECTOR && blen(d.root) == BLOCK
     && blen(d.la) == BLOCK && blen(d.lb) == BLOCK && blen(d.data) == BLOCK && blen(d.d2) == BLOCK && dq_ok(d.q)
     && bits_ok(d.used) && d.blocks <= d.used.n && d.used.n <= MAX_BLOCKS && d.slots <= DSLOTS
     && len(d.pb) == BATCH_MAX && len(d.ob) == OB_MAX && d.pn <= BATCH_MAX && d.on <= OB_MAX && d.pw <= DSLOTS && d.free0 <= DSLOTS
@@ -514,7 +516,7 @@ fn dir_block(d: &DiskFs, db: u64) -> u64
 
 /// The disk block of extension block e (e < next), or 0.
 fn ext_no(d: &DiskFs, e: u64) -> u64
-  requires disk_ok(d) && e < EXT_MAX
+  requires disk_ok(d) && e < d.ecap
   ensures result == 0 || (result >= 1 && result < MAX_BLOCKS)
 {
   if e == 0 {
@@ -553,6 +555,37 @@ fn dir_room(d: &mut DiskFs, blocks: u64) -> bool
   let prev = d.dir;
   d.dir = nd;
   d.dcap = n;
+  bfree(prev);
+  return true;
+}
+
+/// Makes room in memory for `blocks` extension blocks, as dir_room does
+/// for the directory. False, with d as it was, when memory runs out.
+fn ext_room(d: &mut DiskFs, blocks: u64) -> bool
+  requires disk_ok(d) && blocks <= EXT_MAX
+  ensures disk_ok(d) && (result ==> blocks <= d.ecap)
+{
+  if blocks <= d.ecap {
+    return true;
+  }
+  let mut n = d.ecap;
+  while n < blocks
+    invariant n >= EXT_START && n <= EXT_MAX && disk_ok(d)
+  {
+    n = n * 2;
+    if n > EXT_MAX {
+      n = EXT_MAX;
+    }
+  }
+  let mut ne = try_balloc(n * BLOCK);
+  if blen(ne) != n * BLOCK {
+    bfree(ne);
+    return false;
+  }
+  bcopy(&mut ne, 0, d.ext, 0, d.ecap * BLOCK);
+  let prev = d.ext;
+  d.ext = ne;
+  d.ecap = n;
   bfree(prev);
   return true;
 }
@@ -641,6 +674,9 @@ fn ext_name(d: &mut DiskFs, db: u64, b: u64) -> bool
       return false;
     }
     return true;
+  }
+  if !ext_room(&mut d, e + 1) {
+    return false;
   }
   let eb = alloc_block(&mut d);
   if eb == 0 {
@@ -739,7 +775,7 @@ fn disk_mount(dev: Blk) -> DiskFs
   if n < DATA_B0 + 16 {
     nc = NC_MIN;      // no file system to cache: a loop mount that no file backs
   }
-  let mut d = DiskFs { dev: dev, dir: balloc(DIR_START * BLOCK), dcap: DIR_START, sb: balloc(BLOCK), ext: balloc(EXT_MAX * BLOCK), next: 0, sec: balloc(SECTOR), root: balloc(BLOCK),
+  let mut d = DiskFs { dev: dev, dir: balloc(DIR_START * BLOCK), dcap: DIR_START, sb: balloc(BLOCK), ext: balloc(EXT_START * BLOCK), ecap: EXT_START, next: 0, sec: balloc(SECTOR), root: balloc(BLOCK),
     la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(nc), txn: 0, pw: 0, pb: alloc(BATCH_MAX), pn: 0, ob: alloc(OB_MAX), on: 0, pt: 0, tick: 0,
     used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, ix: balloc(0), ixn: 0, free0: 0, foreign: false, links: true };
   if n < DATA_B0 + 16 || !blk_read(&mut d.dev, 0, &mut d.sec) {
@@ -780,7 +816,7 @@ fn disk_mount(dev: Blk) -> DiskFs
       while eb != 0 && d.next < EXT_MAX
         invariant d.next <= EXT_MAX && eb < MAX_BLOCKS && disk_ok(d)
       {
-        if !blk_read_block(&mut d.dev, eb * BSECT, &mut d.ext, d.next * BLOCK) {
+        if !ext_room(&mut d, d.next + 1) || !blk_read_block(&mut d.dev, eb * BSECT, &mut d.ext, d.next * BLOCK) {
           d.blocks = 0;
           return d;
         }
