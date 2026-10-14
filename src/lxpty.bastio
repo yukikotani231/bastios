@@ -271,7 +271,7 @@ fn pty_install(k: &mut Kernel, pid: u64, h: u64, flags: u64) -> u64
   of_set(&mut k.ofd, h, 3, flags / LO_NONBLOCK % 2);
   let fd = fd_install(&mut k, pid, h);
   if fd < LXNFD && flags / LO_CLOEXEC % 2 == 1 {
-    fd_set(&mut k.lxfd, pid, fd, FD_OFD + h + FD_CLOEXEC);
+    fd_set_k(&mut k, pid, fd, FD_OFD + h + FD_CLOEXEC);
   }
   return fd;
 }

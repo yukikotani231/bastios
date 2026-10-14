@@ -855,9 +855,9 @@ fn sc_ioctl(k: &mut Kernel, pid: u64, f: u64, nonblock: bool, req: u64, arg: u64
     }
     ref_value(&mut k, v);
     if nfl != 0 {
-      fd_set(&mut k.lxfd, q, fd, v + FD_CLOEXEC);
+      fd_set_k(&mut k, q, fd, v + FD_CLOEXEC);
     } else {
-      fd_set(&mut k.lxfd, q, fd, v);
+      fd_set_k(&mut k, q, fd, v);
     }
     if fl / 2 == 1 {
       sp_put(&mut k, q * SC_PW + SP_VAL, fd);

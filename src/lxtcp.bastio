@@ -75,7 +75,7 @@ fn lx_tcp_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   of_set(&mut k.ofd, h, 3, tm_word(kind / SOCK_NONBLOCK % 2, 0, TM_NEW));
   let fd = fd_install(&mut k, pid, h);
   if fd < LXNFD && kind / SOCK_CLOEXEC % 2 == 1 {
-    fd_set(&mut k.lxfd, pid, fd, FD_OFD + h + FD_CLOEXEC);
+    fd_set_k(&mut k, pid, fd, FD_OFD + h + FD_CLOEXEC);
   }
   return fd;
 }
@@ -191,7 +191,7 @@ fn lx_accept(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, flags: u64
     return nfd;                             // -EMFILE; the description is gone
   }
   if flags / SOCK_CLOEXEC % 2 == 1 {
-    fd_set(&mut k.lxfd, pid, nfd, FD_OFD + h + FD_CLOEXEC);
+    fd_set_k(&mut k, pid, nfd, FD_OFD + h + FD_CLOEXEC);
   }
   let r = sin_out(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, c), tcp_peer_port(k.nic, c), ofd_v6(k, h));
   if r != 0 {

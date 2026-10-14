@@ -101,7 +101,7 @@ fn ev_install(k: &mut Kernel, pid: u64, kind: u64, x: u64, w3: u64, cloexec: boo
   if cloexec {
     ce = FD_CLOEXEC;
   }
-  fd_set(&mut k.lxfd, pid, fd, FD_OFD + h + ce);
+  fd_set_k(&mut k, pid, fd, FD_OFD + h + ce);
   return fd;
 }
 
