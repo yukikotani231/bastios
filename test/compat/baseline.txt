@@ -1031,6 +1031,9 @@ alpine-tty: nvim: :make runs make and the build succeeds
 alpine-tty: nvim: a shell escape with :!
 alpine-tty: nvim: u undoes an edit, and the undo file is written
 t_pty: epoll_ctl accepts both ends of a pair
+t_pty: sixty-four pseudo-terminal pairs at once, the 65th fails
+t_pty: each pair carries its own bytes
+t_pty: every slave is a device of its own
 t_pty: epoll reports the master readable after a slave write
 t_pty: and the slave readable after a master line
 alpine: dropbear: the server starts, in the Alpine guest
