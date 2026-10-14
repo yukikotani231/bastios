@@ -13,7 +13,8 @@
 //
 // k.loops, LOOP_W words per device: the bound description + 1 (0: free),
 // the offset, the size limit (0: none), the LO_FLAGS_* flags, the logical
-// block size, and the 64-byte file name, eight bytes a word.
+// block size, the 64-byte file name, eight bytes a word, and the read-ahead
+// BLKRASET set (+ 1, in 512-byte sectors; 0: the default).
 //
 // A device whose file is mounted (mount -t bstdisk3 /dev/loopN,
 // src/lxmount.bastio) gives EBUSY for read, write, LOOP_CLR_FD,
@@ -32,6 +33,8 @@
 import "lxfd.bastio";
 
 const LW_NAME: u64 = 5;                  // the name's first word
+const LW_RA: u64 = 13;                   // the read-ahead + 1
+const RA_DEFAULT: u64 = 256;             // Linux's 128 KiB
 
 const LOOP_SET_FD: u64 = 0x4C00;
 const LOOP_CLR_FD: u64 = 0x4C01;
@@ -51,6 +54,8 @@ const BLKROSET: u64 = 0x125D;
 const BLKROGET: u64 = 0x125E;
 const BLKGETSIZE: u64 = 0x1260;
 const BLKFLSBUF: u64 = 0x1261;
+const BLKRASET: u64 = 0x1262;
+const BLKRAGET: u64 = 0x1263;
 const BLKSSZGET: u64 = 0x1268;
 const BLKBSZGET: u64 = 0x80081270;
 const BLKGETSIZE64: u64 = 0x80081272;
@@ -453,6 +458,24 @@ fn loop_ioctl(k: &mut Kernel, pid: u64, d: u64, req: u64, arg: u64) -> u64
   }
   if req == BLKFLSBUF {
     return 0;                               // there is no cache to flush
+  }
+  if req == BLKRAGET {
+    let w = lo_get(k.loops, n, LW_RA);
+    let mut ra = RA_DEFAULT;
+    if w != 0 {
+      ra = w - 1;
+    }
+    return loop_put(&mut k, pid, arg, ra, 8);
+  }
+  if req == BLKRASET {
+    if !ns_cap(k, pid, CAP_SYS_ADMIN) {
+      return EACCES;
+    }
+    if arg >= 0x100000000 {
+      return EINVAL;
+    }
+    lo_set(&mut k.loops, n, LW_RA, arg + 1);   // kept: there is no read-ahead to size
+    return 0;
   }
   if lo_get(k.loops, n, 0) == 0 {
     return ENXIO;                           // the rest need a bound device

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Checks a BastiOS disk image (src/diskfs.bastio's BSTDISK4 format, which is BSTDISK3 plus
+"""Checks a BastiOS disk image (src/diskfs.bastio's BSTDISK5 format, which is BSTDISK4 plus files past 1 GiB (a super map of root maps); BSTDISK4, which is BSTDISK3 plus
 extension blocks for a directory past 512 blocks; BSTDISK3 itself; or the
 older BSTDISK2, which is the same with only the fixed directory blocks).
 
@@ -46,7 +46,10 @@ PTRS = 512
 MAX_BLOCKS = 1 << 28
 DTOP = 64
 DNAME_MAX = 200
-FILE_MAX = PTRS * PTRS * BLOCK
+SEG_FLAG = 1 << 40                    # E_ROOT with this bit names a super map of root maps, one per 1 GiB
+SEG_BLOCKS = PTRS * PTRS
+FILE_MAX = PTRS * SEG_BLOCKS * BLOCK
+MAGICS = (b"BSTDISK2", b"BSTDISK3", b"BSTDISK4", b"BSTDISK5")
 E_NAME = 56
 FILE, DIR, ORPHAN, LINK = 1, 2, 3, 4
 
@@ -71,9 +74,9 @@ def entries(img):
     # Where each directory block is: the fixed ones, then the superblock's.
     dblocks = [1 + db for db in range(DIR_FIXED)]
     seen = []
-    if img[0:8] in (b"BSTDISK3", b"BSTDISK4"):
+    if img[0:8] in (b"BSTDISK3", b"BSTDISK4", b"BSTDISK5"):
         ptrs = [u64(img, 8 * db) for db in range(DIR_FIXED, DIR_SB)]
-        if img[0:8] == b"BSTDISK4":
+        if img[0:8] in (b"BSTDISK4", b"BSTDISK5"):
             # The extension chain: word 0 names the next block, the others
             # directory blocks DIR_SB + EXT_PTRS * e + (w - 1).
             eb, seen = u64(img, 8), []
@@ -121,8 +124,8 @@ _EMPTY = _entry(bytes(DENT))
 
 def check(img):
     notes = []
-    if img[0:8] not in (b"BSTDISK2", b"BSTDISK3", b"BSTDISK4"):
-        return ["no BSTDISK4, BSTDISK3 or BSTDISK2 magic (a blank disk is formatted at mount)"], notes, {}
+    if img[0:8] not in MAGICS:
+        return ["no BSTDISK5, BSTDISK4, BSTDISK3 or BSTDISK2 magic (a blank disk is formatted at mount)"], notes, {}
     blocks = min(len(img) // BLOCK, MAX_BLOCKS)
     dblocks, ents, errors, exts = entries(img)
 
@@ -219,25 +222,40 @@ def check(img):
         if size > FILE_MAX:
             errors.append(f"{where(i)}: size {size} is past the limit")
             continue
-        if not block_ok(e["root"], i, "root map"):
-            continue                    # no root map: all holes
-        claim(e["root"], i, "root map")
-        nblocks = (size + BLOCK - 1) // BLOCK
-        for m, l1 in used(img, e["root"]):
-            if not block_ok(l1, i, "map"):
+        w = e["root"]
+        roots = []                      # (first block of the file it maps, root map)
+        if w >= SEG_FLAG:
+            if img[0:8] != b"BSTDISK5":
+                errors.append(f"{where(i)}: a super map on a disk that does not say BSTDISK5")
+            sp = w - SEG_FLAG
+            if not block_ok(sp, i, "super map"):
                 continue
-            claim(l1, i, "map")
-            for k, b in used(img, l1):
-                if not block_ok(b, i, "data"):
+            claim(sp, i, "super map")
+            roots = [(m * SEG_BLOCKS, r) for m, r in used(img, sp)]
+        elif block_ok(w, i, "root map"):
+            roots = [(0, w)]
+        else:
+            continue                    # no root map: all holes
+        nblocks = (size + BLOCK - 1) // BLOCK
+        for base, root in roots:
+            if not block_ok(root, i, "root map"):
+                continue
+            claim(root, i, "root map")
+            for m, l1 in used(img, root):
+                if not block_ok(l1, i, "map"):
                     continue
-                claim(b, i, "data")
-                idx = m * PTRS + k
-                if idx >= nblocks:
-                    errors.append(f"{where(i)}: data block {b} (block {idx} of the file) is wholly past the end ({size} bytes)")
-                elif idx == nblocks - 1 and size % BLOCK:
-                    tail = img[b * BLOCK + size % BLOCK:(b + 1) * BLOCK]
-                    if any(tail):
-                        errors.append(f"{where(i)}: bytes past the end ({size}) in its last block are not zero")
+                claim(l1, i, "map")
+                for k, b in used(img, l1):
+                    if not block_ok(b, i, "data"):
+                        continue
+                    claim(b, i, "data")
+                    idx = base + m * PTRS + k
+                    if idx >= nblocks:
+                        errors.append(f"{where(i)}: data block {b} (block {idx} of the file) is wholly past the end ({size} bytes)")
+                    elif idx == nblocks - 1 and size % BLOCK:
+                        tail = img[b * BLOCK + size % BLOCK:(b + 1) * BLOCK]
+                        if any(tail):
+                            errors.append(f"{where(i)}: bytes past the end ({size}) in its last block are not zero")
     return errors, notes, stats
 
 
