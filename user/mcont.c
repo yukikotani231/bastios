@@ -94,8 +94,10 @@ int main(void) {
 	if (prctl(PR_CAP_AMBIENT, 2, 12, 0, 0) != -1 || errno != EPERM) return fail("ambient raise without inheritable");
 	if (prctl(PR_CAP_AMBIENT, 4, 0, 0, 0) != 0) return fail("ambient clear all");
 
+	/* the session keyring exists (keyctl GET_KEYRING_ID, KEY_SPEC_SESSION_KEYRING) */
+	if (syscall(250, 0, -3, 0, 0, 0) <= 0) return fail("keyctl");
+
 	/* quiet ENOSYS */
-	if (syscall(250, 0, 0, 0, 0, 0) != -1 || errno != ENOSYS) return fail("keyctl");
 	if (syscall(430, "ext4", 0) != -1 || errno != ENOSYS) return fail("fsopen");
 	if (syscall(432, -1, 0, 0) != -1 || errno != ENOSYS) return fail("fsmount");
 
