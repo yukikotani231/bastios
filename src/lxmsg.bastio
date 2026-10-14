@@ -252,6 +252,7 @@ fn rights_more(k: &mut Kernel, pid: u64, ctl: u64, tx: u64)
       if of_get(k.ofd, h, 0) != OF_FREE && refs < 0xFFFFFFFF {
         of_set(&mut k.ofd, h, 1, refs + 1);
         uc_set_xtra(&mut k, tx, j - 1, h + 1);
+        k.ux_xtra = true;
       }
     }
     j = j + 1;

@@ -243,6 +243,12 @@ $ bb cp /disk/strace /disk/a/usr/bin/strace && bb chroot /disk/a /bin/sh -c 'sle
 1
 1
 
+== gdb: a breakpoint in a program stops it, shows its arguments and backtrace, and finish gives the return value
+$ bb tar xf /disk/gdb.tar -C /disk/a/opt; bb printf '#include <stdio.h>\nint add(int a, int b) { return a + b; }\nint main(void) { printf("sum %%d\\n", add(40, 2)); return 0; }\n' > /disk/a/root/d.c && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -g -O0 -static -no-pie -o d d.c && LD_LIBRARY_PATH=/opt/gdb/lib /opt/gdb/bin/gdb -batch -ex "break add" -ex run -ex "print a + b" -ex bt -ex finish ./d </dev/null 2>&1 | grep -e "Breakpoint 1, add (a=40, b=2)" -e "= 42"'
+Breakpoint 1, add (a=40, b=2) at d.c:2
+$1 = 42
+Value returned is $2 = 42
+
 == nvim: LuaJIT loads a shared object that gcc built
 $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf 'local ffi = require("ffi")\nffi.cdef[[int answer(void);]]\nio.open("/root/so.txt", "w"):write(ffi.load("/root/libso.so").answer(), "\\n")\n' > /disk/a/root/so.lua && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -shared -fPIC -o libso.so so.c && nvim -l so.lua >/dev/null 2>&1'; bb cat /disk/a/root/so.txt
 42
@@ -322,6 +328,40 @@ mkdir: can't create directory '/m': Operation not permitted
 mkdir=1
 crun
 status 0
+
+== container: crun and runc: a profile that denies mount, module, ptrace and bpf calls leaves the container's own work alone
+$ bb mkdir -p /disk/cdn /run/runc && cd /disk/cdn && /disk/crun spec && bb sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"linux": {#"linux": {"seccomp": {"defaultAction": "SCMP_ACT_ALLOW", "architectures": ["SCMP_ARCH_X86_64"], "syscalls": [{"names": ["mount", "umount2", "kexec_load", "swapon", "swapoff", "init_module", "finit_module", "delete_module", "ptrace", "bpf", "pivot_root"], "action": "SCMP_ACT_ERRNO", "errnoRet": 1}]},#' -e 's#"sh"#"/bin/sh", "-c", "mount -t tmpfs x /mnt 2>\&1; echo mount=$?; id -u; ps | wc -l; hostname"#' config.json && /disk/crun --root /run/crun run dn < /dev/null; echo crun $?; /disk/runc --root /run/runc run dr < /dev/null; echo runc $?
+mount: permission denied (are you root?)
+mount=1
+0
+4
+crun
+crun 0
+mount: permission denied (are you root?)
+mount=1
+0
+4
+crun
+runc 0
+
+== container: crun and runc: a default-deny profile with a short allowlist still starts the container and runs its commands
+$ bb mkdir -p /disk/ca /run/runc && cd /disk/ca && /disk/crun spec && bb sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"linux": {#"linux": {"seccomp": {"defaultAction": "SCMP_ACT_ERRNO", "defaultErrnoRet": 1, "architectures": ["SCMP_ARCH_X86_64"], "syscalls": [{"names": ["execve", "execveat", "exit", "exit_group", "brk", "mmap", "munmap", "mprotect", "mremap", "read", "write", "readv", "writev", "open", "openat", "close", "fstat", "stat", "lstat", "newfstatat", "lseek", "ioctl", "fcntl", "dup", "dup2", "dup3", "pipe", "pipe2", "getuid", "geteuid", "getgid", "getegid", "getpid", "getppid", "gettid", "getpgrp", "getpgid", "setpgid", "set_tid_address", "arch_prctl", "rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "uname", "gethostname", "wait4", "clone", "fork", "vfork", "kill", "getcwd", "chdir", "access", "faccessat", "faccessat2", "getdents64", "readlink", "readlinkat", "sigaltstack", "futex", "set_robust_list", "prlimit64", "getrandom", "poll", "ppoll", "select", "pselect6", "clock_gettime", "nanosleep", "clock_nanosleep", "sysinfo", "umask", "setsid", "getrlimit", "madvise", "statx", "sched_getaffinity", "sched_yield", "tgkill", "prctl", "capget", "getgroups", "geteuid", "statfs", "fstatfs", "epoll_create1", "epoll_ctl", "epoll_pwait", "eventfd2", "pread64", "pwrite64", "openat2", "fchdir", "fchown", "fchmod", "fchmodat", "unlinkat", "mkdirat", "renameat", "renameat2", "rt_sigtimedwait", "timer_settime", "timer_create", "setitimer", "socket", "socketpair", "connect", "sendmsg", "recvmsg", "sendto", "recvfrom", "getsockopt", "setsockopt", "bind", "listen", "accept4", "getsockname", "getpeername", "shutdown", "sendfile", "copy_file_range", "mincore", "msync", "flock", "fsync", "fdatasync", "ftruncate", "truncate", "chmod", "chown", "setuid", "setgid", "setgroups", "capset", "setresuid", "setresgid", "sched_setaffinity", "membarrier", "rseq", "restart_syscall", "epoll_wait", "epoll_create", "close_range", "tkill", "getresuid", "getresgid", "unshare", "setns", "keyctl", "personality"], "action": "SCMP_ACT_ALLOW"}]},#' -e 's#"sh"#"/bin/sh", "-c", "id -u; hostname; ps | wc -l; mkdir /m 2>\&1; echo mkdir=$?; mount -t tmpfs x /mnt 2>\&1; echo mount=$?"#' config.json && /disk/crun --root /run/crun run da < /dev/null; echo crun $?; /disk/runc --root /run/runc run dr < /dev/null; echo runc $?
+0
+crun
+4
+mkdir: can't create directory '/m': Operation not permitted
+mkdir=1
+mount: permission denied (are you root?)
+mount=1
+crun 0
+0
+crun
+4
+mkdir: can't create directory '/m': Operation not permitted
+mkdir=1
+mount: permission denied (are you root?)
+mount=1
+runc 0
 
 == container: crun: the root file system is read-only, and the exit status comes back
 $ bb mkdir -p /disk/cro && cd /disk/cro && /disk/crun spec && bb sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"sh"#"/bin/sh", "-c", "touch /x 2>\&1; echo touch=$?; id -u; exit 3"#' config.json && /disk/crun --root /run/crun run d5 < /dev/null; echo status $?

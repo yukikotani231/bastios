@@ -1208,6 +1208,7 @@ alpine: nvim: tree-sitter highlights C: the keyword, the type and the comment ge
 alpine: nvim: :diffthis marks the line that differs, and vim.diff finds the hunk
 alpine: strace: traces a program's system calls with ptrace, following the child it starts
 alpine: strace: attaches to a running process, and hears of its death when its parent is elsewhere
+alpine: gdb: a breakpoint in a program stops it, shows its arguments and backtrace, and finish gives the return value
 alpine: nvim: LuaJIT loads a shared object that gcc built
 alpine: nvim: a plugin cloned over HTTP is on the packpath and runs at startup
 alpine: nvim: a small plugin manager in Lua clones a plugin, loads it, then updates it with git pull
@@ -1225,6 +1226,8 @@ alpine: container: crun loads a seccomp filter from the config: mkdir answers EP
 alpine: container: crun: the root file system is read-only, and the exit status comes back
 alpine: container: crun runs on an overlay of the image root: writes and deletions stay in the upper layer
 alpine: container: the host keeps its hostname and no container is left behind
+alpine: container: crun and runc: a profile that denies mount, module, ptrace and bpf calls leaves the container's own work alone
+alpine: container: crun and runc: a default-deny profile with a short allowlist still starts the container and runs its commands
 alpine: container: the root file system is read-only, and the exit status comes back
 alpine: container: rootless: runc runs Alpine as an unprivileged user in a user namespace of its own
 alpine: container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle

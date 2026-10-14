@@ -255,6 +255,10 @@ fn ux_reap(k: &mut Kernel) -> u64
   requires kok(k)
   ensures kok(k)
 {
+  if !k.ux_xtra {
+    return 0;                               // no channel has held an extra description since the last scan found none
+  }
+  let mut held = false;
   let mut c = 0;
   while c < UX_N
     invariant c <= UX_N && kok(k)
@@ -265,8 +269,12 @@ fn ux_reap(k: &mut Kernel) -> u64
         return v;
       }
     }
+    if uc_xtra(k, c, 0) != 0 {
+      held = true;                          // a channel somebody still reads holds one
+    }
     c = c + 1;
   }
+  k.ux_xtra = held;
   return 0;
 }
 
