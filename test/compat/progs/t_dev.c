@@ -16,6 +16,9 @@
 #define LOOP_CTL_GET_FREE 0x4C82
 #define BLKGETSIZE64 0x80081272
 #define BLKSSZGET 0x1268
+#define BLKRASET 0x1262
+#define BLKRAGET 0x1263
+#define RNDGETENTCNT 0x80045200
 
 struct loop_info64 {
     uint64_t lo_device, lo_inode, lo_rdevice, lo_offset, lo_sizelimit;
@@ -34,6 +37,17 @@ struct loop_info {
     unsigned long lo_init[2];
     char reserved[4];
 };
+
+static int read_proc_int(const char *path) {
+    char b[32];
+    int f = open(path, O_RDONLY), r;
+    if (f < 0) return -1;
+    r = read(f, b, sizeof b - 1);
+    close(f);
+    if (r <= 0) return -1;
+    b[r] = 0;
+    return atoi(b);
+}
 
 /* Reads /sys/block/loopN/ATTR into buf. */
 static int read_sys(int n, const char *attr, char *buf) {
@@ -78,6 +92,16 @@ int main(void) {
     EXPECT("LOOP_SET_STATUS64", ioctl(fd, LOOP_SET_STATUS64, &li) == 0);
     EXPECT("BLKGETSIZE64", ioctl(fd, BLKGETSIZE64, &size) == 0 && size == 61440);
     EXPECT("BLKSSZGET", ioctl(fd, BLKSSZGET, &bs) == 0 && bs == 512);
+    {
+        unsigned long ra = 0;
+        EXPECT("BLKRAGET: the default read-ahead is 256 sectors", ioctl(fd, BLKRAGET, &ra) == 0 && ra == 256);
+        EXPECT("BLKRASET is read back", ioctl(fd, BLKRASET, 1024UL) == 0 && ioctl(fd, BLKRAGET, &ra) == 0 && ra == 1024);
+        ioctl(fd, BLKRASET, 256UL);
+        int ent = -1, rfd = open("/dev/urandom", O_RDONLY);
+        EXPECT("RNDGETENTCNT matches entropy_avail", rfd >= 0 && ioctl(rfd, RNDGETENTCNT, &ent) == 0
+               && read_proc_int("/proc/sys/kernel/random/entropy_avail") == ent);
+        if (rfd >= 0) close(rfd);
+    }
     memset(&li, 0, sizeof li);
     EXPECT("LOOP_GET_STATUS64", ioctl(fd, LOOP_GET_STATUS64, &li) == 0 && li.lo_offset == 4096
            && strcmp((char *)li.lo_file_name, "ld_img") == 0 && li.lo_number == (uint32_t)n);

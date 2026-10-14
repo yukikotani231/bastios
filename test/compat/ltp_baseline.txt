@@ -401,6 +401,8 @@ inotify_init1_01
 inotify_init1_02
 ioctl01
 ioctl05
+ioctl06
+ioctl07
 ioctl_loop01
 ioctl_loop02
 ioctl_loop03
@@ -777,6 +779,7 @@ sendfile08_64
 sendmmsg01
 sendmmsg02
 sendmsg02
+sendmsg03
 sendto01
 set_robust_list01
 set_tid_address01

@@ -858,7 +858,27 @@ fn lx_write_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64
   }
   let mut w = 0;
   if n == LX_WRITE {
+    // A file takes a count whole: if the disk lags after some pieces, what
+    // was written is kept in F_WDONE and the call restarts for the rest.
+    let wd = smaller(pget(k.procs, pid, F_WDONE) / 2, READ_MAX * 64);
+    pset(&mut k.procs, pid, F_WDONE, wd * 2);
     w = lx_write_fd(&mut con, &mut k, pid, a, b, c);
+    let missed = pget(k.procs, pid, F_WDONE) % 2 == 1;
+    pset(&mut k.procs, pid, F_WDONE, wd * 2);
+    if missed && w > 0 && w < c && c <= READ_MAX * 64 && b <= 0xFFFFFFFFFFFFFFFF - w {
+      pset(&mut k.procs, pid, F_WDONE, (wd + w) * 2);
+      pset(&mut k.procs, pid, F_REGS + R_RSI, b + w);
+      pset(&mut k.procs, pid, F_REGS + R_RDX, c - w);
+      return disk_retry(&mut k, pid, n);
+    }
+    if wd > 0 && w != DISK_RETRY {
+      if w <= c && c <= 1099511627776 {
+        w = w + wd;
+      } else {
+        w = wd;                         // an error after progress reports the progress
+      }
+      pset(&mut k.procs, pid, F_WDONE, 0);
+    }
   } else {
     w = do_writev(&mut con, &mut k, pid, a, b, c);
   }
@@ -1034,6 +1054,10 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   if req == FIONREAD && (d.kind == K_PIPE_R || d.kind == K_PIPE_W) {
     // The bytes waiting in the pipe, as an int.
     xfer_u64(&mut k.fs.xfer, 0, smaller(pi_get(k.pipes, d.x, 1), PIPE_CAP));
+    return lx_put_out(&mut k, pid, arg, 4);
+  }
+  if d.kind == K_DEV && d.x == DEV_RANDOM && req % 0x100000000 == RNDGETENTCNT {
+    xfer_u64(&mut k.fs.xfer, 0, 256);       // the pool is always full: /proc/sys/kernel/random/entropy_avail
     return lx_put_out(&mut k, pid, arg, 4);
   }
   if d.kind == K_DEV && (is_loop(d.x) || d.x == DEV_LOOPCTL) {
@@ -1685,6 +1709,10 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
     if w == VFS_MISS {
       if total == 0 {
         return DISK_RETRY;                  // sleep until the disk catches up
+      }
+      let wd = pget(k.procs, pid, F_WDONE);
+      if wd % 2 == 0 {
+        pset(&mut k.procs, pid, F_WDONE, wd + 1);   // lx_write_call restarts for the rest
       }
       return total;
     }

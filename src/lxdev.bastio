@@ -14,7 +14,6 @@ import "linux.bastio";
 const DEV_NONE: u64 = 0;
 const DEV_NULL: u64 = 1;
 const DEV_ZERO: u64 = 2;
-const DEV_RANDOM: u64 = 3;          // /dev/random and /dev/urandom
 const DEV_TTY: u64 = 4;
 const DEV_DIR: u64 = 5;             // /dev itself
 
