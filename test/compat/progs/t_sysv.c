@@ -155,6 +155,35 @@ static int sem_undo(void) {
     return v == 1 && WIFEXITED(st) && WEXITSTATUS(st) == 0;
 }
 
+/* 512 SEM_UNDO adjustments at once in one process (eight sets of 64), all undone at exit. */
+static int many_undos(void) {
+    int s[8], ok = 1;
+    unsigned short ones[64];
+    for (int i = 0; i < 64; i++) ones[i] = 1;
+    for (int j = 0; j < 8; j++) {
+        s[j] = semget(IPC_PRIVATE, 64, IPC_CREAT | 0600);
+        if (s[j] < 0 || semctl(s[j], 0, SETALL, (union semun){.array = ones}) != 0) ok = 0;
+    }
+    pid_t c = ok ? fork() : -1;
+    if (c == 0) {
+        struct sembuf ops[64];
+        for (int i = 0; i < 64; i++) ops[i] = (struct sembuf){i, -1, SEM_UNDO};
+        int bad = 0;
+        for (int j = 0; j < 8; j++) bad |= semop(s[j], ops, 64) != 0;
+        _exit(bad);
+    }
+    int st = 1;
+    if (c > 0) waitpid(c, &st, 0);
+    ok = ok && c > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    for (int j = 0; ok && j < 8; j++) {
+        unsigned short w[64];
+        ok = semctl(s[j], 0, GETALL, (union semun){.array = w}) == 0;
+        for (int i = 0; ok && i < 64; i++) ok = w[i] == 1;
+    }
+    for (int j = 0; j < 8; j++) if (s[j] >= 0) semctl(s[j], 0, IPC_RMID);
+    return ok;
+}
+
 static int shm_basics(void) {
     int id = shmget(IPC_PRIVATE, 10000, IPC_CREAT | 0600);
     if (id < 0) return 0;
@@ -346,5 +375,6 @@ int main(void) {
     EXPECT("msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message", next_ids_and_copy());
     EXPECT("32 queues, semaphore sets and segments at once, the 33rd of each is ENOSPC", many_objects());
     EXPECT("32 attachments in one process, the 33rd is EMFILE", many_attachments());
+    EXPECT("512 SEM_UNDO adjustments in one process, all undone at exit", many_undos());
     return done();
 }
