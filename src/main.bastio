@@ -797,6 +797,47 @@ fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, p
   return Next { job: j, from: c };
 }
 
+// What `fault_fast` hands back: the task to run again (with a new lease on
+// its space), or its FPU page for the usual turn.
+enum Fast { Back(Frame), Go(Task) }
+
+/// Under the lock, after task `p` trapped with a page fault (its lease and
+/// FPU page are given back): if it is a plain process whose fault is anonymous
+/// memory, a copy-on-write page or the stack growing, maps the page and
+/// enters its space again, so the processor runs the task on without
+/// putting it back in the round robin and picking a process (finish and
+/// next_job do both for every other trap). Anything else, and a task that is
+/// not RUNNING any more (killed from another processor), takes the usual turn.
+/// The kernel does not touch the registers or the FPU page here, so the task
+/// continues from the state the processor holds.
+fn fault_fast(s: &mut Sys, cpu: &Cpu, mmu: &mut Mmu, p: u64, tgid_: u64, vpid: u64, vtgid: u64, slow: bool, fpu: Frame) -> Fast
+  requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
+  requires 1 <= p && p < NPROC
+  ensures sys_ok(s)
+  ensures result is Fast::Go ==> (1 <= result.Go.pid && result.Go.pid < NPROC)
+  ensures !(result is Fast::Go) ==> mmu_root(mmu) == KERNEL_ROOT
+{
+  if s.stop || state(s.k.procs, p) != RUNNING || pget(s.k.procs, p, F_TGID) != 0 {
+    return Fast::Back(fpu);
+  }
+  pset(&mut s.k.procs, p, reg_word(R_FAULT), cpu_get(cpu, R_FAULT));
+  if !(anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p)) {
+    return Fast::Back(fpu);
+  }
+  pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
+  match take_space(&mut s.k.spaces, p) {
+    Space::Empty => {
+      return Fast::Back(fpu);
+    },
+    Space::Mapped(root) => {
+      let mut sp = root;
+      let l = mmu_enter(&mut mmu, &mut sp);
+      put_space(&mut s.k.spaces, p, Space::Mapped(sp));
+      return Fast::Go(Task { pid: p, tgid: tgid_, vpid: vpid, vtgid: vtgid, lease: l, fpu: fpu, slow: slow });
+    },
+  }
+}
+
 /// `next_job`, then publishes how much console output waits in `pend`.
 /// `back`: this processor was idle (its last job was Job::Idle).
 fn next_job_p(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool, back: bool, pend: &Atomic[u64], others: &Atomic[bool]) -> Job
@@ -1012,18 +1053,38 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
         mmu_exit(&mut mmu, t.lease);
         let mut f = t.fpu;
         cpu_fpu_save(&mut cpu, &mut f);
-        // A processor exception (a page fault, vectors below 32) raises no
-        // device input either: a program touching new memory would poll every
-        // device on each of its faults.
-        let poll = v >= V_TIMER && v != V_SYSCALL && v != V_LINUX;
-        // After an interrupt the devices may have input; after any turn
-        // there may be output.
-        if poll || atomic_load(pend) > 0 {
-          try_pump(u, s, pumping, pend);
+        // A page fault that maps memory for the task runs it again at once
+        // (fault_fast), without a turn of the round robin.
+        let mut fr = Fast::Back(f);
+        if v == 14 && atomic_load(pend) == 0 {
+          match fr {
+            Fast::Back(g) => {
+              fr = locked(s, fault_fast, cpu, &mut mmu, t.pid, t.tgid, t.vpid, t.vtgid, t.slow, g);
+            },
+            Fast::Go(x) => {
+              fr = Fast::Go(x);
+            },
+          }
         }
-        let next = locked(s, turn, &mut cpu, &mut mmu, t.pid, f, v, poll, pend, others);
-        cur = next.from;
-        j = next.job;
+        match fr {
+          Fast::Go(t2) => {
+            j = Job::Run(t2);
+          },
+          Fast::Back(f2) => {
+            // A processor exception (a page fault, vectors below 32) raises no
+            // device input either: a program touching new memory would poll every
+            // device on each of its faults.
+            let poll = v >= V_TIMER && v != V_SYSCALL && v != V_LINUX;
+            // After an interrupt the devices may have input; after any turn
+            // there may be output.
+            if poll || atomic_load(pend) > 0 {
+              try_pump(u, s, pumping, pend);
+            }
+            let next = locked(s, turn, &mut cpu, &mut mmu, t.pid, f2, v, poll, pend, others);
+            cur = next.from;
+            j = next.job;
+          },
+        }
       },
     }
   }

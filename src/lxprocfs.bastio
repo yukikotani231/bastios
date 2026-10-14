@@ -2250,6 +2250,21 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     return put_s(&mut o, a, " rw-p 00000000 00:00 0                          [stack]\n");
   }
   if what == PF_CMDLINE {
+    let w = pget(k.procs, p, F_ARGS);
+    let n = w / 1099511627776;
+    if n != 0 && n < PROC_OUT {
+      let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, USER_BASE + w % 1099511627776, &mut k.fs.xfer, n);
+      if got == n {
+        let mut i = 0;
+        while i < n
+          invariant i <= n && n < PROC_OUT && blen(o) == PROC_OUT && blen(k.fs.xfer) == XFER
+        {
+          bset(&mut o, i, bget(k.fs.xfer, i));
+          i = i + 1;
+        }
+        return n;
+      }
+    }
     let a = put_prog(&mut k, p, &mut o, 0, true);
     return put_c(&mut o, a, 0);
   }
@@ -2437,6 +2452,33 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
         a = put_c(&mut o, 0, 47);
       }
       let mut j = 0;
+      // A directory opened before a chroot or pivot_root reads relative to
+      // the process's root now (the root directory itself as "/"), when it
+      // is inside it.
+      let rl = root_len(k, p);
+      if rl > 0 && d.kind == K_DIR {
+        let mut s0 = 0;
+        if n > 0 && base_byte(k, p, h, 0) == 47 {
+          s0 = 1;
+        }
+        let mut inside = n >= s0 + rl && (n == s0 + rl || base_byte(k, p, h, s0 + rl) == 47);
+        let mut i = 0;
+        while inside && i < rl
+          invariant i <= rl && rl <= FNAME_MAX && s0 <= 1 && (!inside || s0 + rl <= n) && n <= FNAME_MAX && kok(k) && p < NPROC
+        {
+          if cast[u8](wget(k.croot, p * CWD_STRIDE + 1 + i) % 256) != base_byte(k, p, h, s0 + i) {
+            inside = false;
+          }
+          i = i + 1;
+        }
+        if inside {
+          j = s0 + rl;
+          if j < n {
+            j = j + 1;                      // the slash after the root's name
+          }
+          a = put_c(&mut o, 0, 47);
+        }
+      }
       while j < n && a < PROC_OUT
         invariant j <= n && n <= FNAME_MAX && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
       {
