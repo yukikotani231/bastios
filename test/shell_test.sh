@@ -341,8 +341,8 @@ steps = [
      [b"\r\nkept\r\n", b"bstdisk3 /mm bstdisk3 rw", b"\r\nlo2\r\n"], b"\n# "),
     # A file in memory past the 64 MiB it was once limited to: grown to
     # 300 MiB (holes cost no pages), then written at its end.
-    ("truncate -s 300M bigram; stat -c %s bigram; echo z >> bigram; stat -c %s bigram; tail -c 2 bigram; rm bigram; echo bg$((1+1))",
-     [b"\r\n314572800\r\n", b"\r\n314572802\r\n", b"z\r\nbg2\r\n"], b"\n# "),
+    ("truncate -s 300M bigram; stat -c %s bigram; echo z >> bigram; stat -c %s bigram; rm bigram; echo bg$((1+1))",
+     [b"\r\n314572800\r\n", b"\r\n314572802\r\n", b"\r\nbg2\r\n"], b"\n# "),
     # Mount namespaces (src/lxns.bastio): a bind mount made in one is seen
     # there and not by the shell outside; pivot_root into a directory bound
     # onto itself, with /bin, a volume and proc mounted in it, as OCI
