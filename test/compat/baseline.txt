@@ -704,6 +704,7 @@ t_nopie: the data follows it
 t_nopie: the text is where it was linked
 t_nopie: the whole bss is usable
 t_nsmany: 24 IPC namespaces at once
+t_nsmany: 60 tmpfs mounts at once, each with its own files
 t_nsmany: 24 PID namespaces at once
 t_nsmany: 24 UTS namespaces at once, each with its own name
 t_nsmany: and 24 more once those are gone
@@ -1047,6 +1048,7 @@ alpine: git: clone over HTTP and over HTTPS (git's dumb protocol, curl's TLS)
 alpine: nvim: tree-sitter parses help text with the vimdoc parser
 alpine: nvim: LuaJIT loads a shared object that gcc built
 alpine: nvim: a plugin cloned over HTTP is on the packpath and runs at startup
+alpine: nvim: a small plugin manager in Lua clones a plugin, loads it, then updates it with git pull
 alpine: nvim: vim.system runs a process and collects its output and status
 alpine: nvim: a job on a pseudo-terminal (what :terminal runs on, with /dev and /dev/pts bound into the chroot)
 alpine: nvim: a file watcher and a timer from libuv

@@ -4,6 +4,11 @@
  * leaves, so the slots can be taken again. */
 #include "compat.h"
 #include <sched.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
 
@@ -51,11 +56,46 @@ static int many(int kind) {
     return made == N && clean == N ? N : made;
 }
 
+/* 60 tmpfs mounts at once, each with its own files, then all unmounted. */
+static int many_tmpfs(void) {
+    char d[32], f[48], b[16];
+    int n = 0, ok = 1;
+    for (int i = 0; i < 60; i++) {
+        snprintf(d, sizeof d, "nm_t%d", i);
+        mkdir(d, 0755);
+        if (mount("none", d, "tmpfs", 0, NULL) != 0) { ok = 0; break; }
+        n++;
+        snprintf(f, sizeof f, "%s/f", d);
+        FILE *fp = fopen(f, "w");
+        if (!fp) { ok = 0; break; }
+        fprintf(fp, "m%d", i);
+        fclose(fp);
+    }
+    for (int i = 0; ok && i < n; i++) {
+        snprintf(f, sizeof f, "nm_t%d/f", i);
+        FILE *fp = fopen(f, "r");
+        memset(b, 0, sizeof b);
+        char want[16];
+        snprintf(want, sizeof want, "m%d", i);
+        if (!fp || !fgets(b, sizeof b, fp) || strcmp(b, want) != 0) ok = 0;
+        if (fp) fclose(fp);
+    }
+    for (int i = 0; i < n; i++) {
+        snprintf(d, sizeof d, "nm_t%d", i);
+        snprintf(f, sizeof f, "%s/f", d);
+        unlink(f);
+        umount(d);
+        rmdir(d);
+    }
+    return ok && n == 60;
+}
+
 int main(void) {
     setup();
     EXPECT("24 UTS namespaces at once, each with its own name", many(CLONE_NEWUTS) == N);
     EXPECT("and 24 more once those are gone", many(CLONE_NEWUTS) == N);
     EXPECT("24 PID namespaces at once", many(CLONE_NEWPID) == N);
     EXPECT("24 IPC namespaces at once", many(CLONE_NEWIPC) == N);
+    EXPECT("60 tmpfs mounts at once, each with its own files", many_tmpfs());
     return done();
 }
