@@ -1223,6 +1223,7 @@ alpine: container: crun: the root file system is read-only, and the exit status 
 alpine: container: crun runs on an overlay of the image root: writes and deletions stay in the upper layer
 alpine: container: the host keeps its hostname and no container is left behind
 alpine: container: crun and runc: a profile that denies mount, module, ptrace and bpf calls leaves the container's own work alone
+alpine: container: crun and runc: a default-deny profile with a short allowlist still starts the container and runs its commands
 alpine: container: the root file system is read-only, and the exit status comes back
 alpine: container: rootless: runc runs Alpine as an unprivileged user in a user namespace of its own
 alpine: container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle
