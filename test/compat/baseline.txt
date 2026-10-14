@@ -1152,6 +1152,7 @@ t_userns: a process maps the user namespace it has just made itself
 t_userns: the root of a user namespace brings loopback up in a network namespace of its own
 t_userns: and not in the first one
 t_userns: statfs of /proc/self/fd/N answers for the file N holds
+t_userns: nor in one that another user namespace made
 tty: kilo: edit and save a file
 tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
 tty: micropython: REPL line editing and history
