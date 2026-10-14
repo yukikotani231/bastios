@@ -450,7 +450,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return lx_more_call(&mut con, &mut k, pid, n, a, b, c);
   }
   if is_xattr_call(n) {
-    return lx_xattr_call(&mut k, pid, n, a);  // src/lxxattr.bastio
+    return lx_xattr_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));  // src/lxxattr.bastio
   }
   if is_splice_call(n) {
     return lx_splice_call(&mut con, &mut k, pid, n, a, b, c);
