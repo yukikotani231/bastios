@@ -956,6 +956,7 @@ struct Kernel {
   scf: Buf,             // seccomp filters, empty until one is loaded (src/lxseccomp.bastio)
   mstr: Bytes,          // the mounts' paths, and the logical path of the last lookup
   naps: bool,           // a process may be in TIMEWAIT: false lets sleepers_wake skip its scan
+  undo_hi: u64,         // one past the highest SEM_UNDO entry ever made (undo_find): no later one is in use (sem_exit and undo_clear stop there)
   mt_hi: u64,           // one past the highest mount entry ever given to a namespace (me_set): no later one is in use
   pid_hi: u64,          // one past the highest process id ever handed out by new_pid_from: every row from there on is FREE (scans for a ready process stop there)
   fd_hi: u64,           // one past the highest descriptor number ever open: every non-zero word of lxfd is below it (rows are scanned only that far)
