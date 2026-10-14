@@ -137,7 +137,7 @@ const UN_BASE: u64 = 5120;             // SV_BASE + IPC_SETS * SEMMSL * 2
 const UNDO_N: u64 = 256;
 const SM_BASE: u64 = 6144;             // UN_BASE + UNDO_N * 4: shared memory headers
 const SA_BASE: u64 = 6656;             // SM_BASE + IPC_SETS * HW: attachments
-const SA_N: u64 = 16;                  // attachments a process: segment + 1, first page, pages
+const SA_N: u64 = 32;                  // attachments a process: segment + 1, first page, pages
 const SA_W: u64 = 3;
 const ADJ_BIAS: u64 = 65536;           // an adjustment is kept + ADJ_BIAS
 

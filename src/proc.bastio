@@ -465,11 +465,11 @@ const DEV_LOOP: u64 = 64;              // OF_DEV device /dev/loopN is DEV_LOOP +
 const S_IFBLK: u64 = 0x61B0;           // a block device, rw-rw----
 // Pseudo-terminals (src/lxpty.bastio): PTY_N pairs of PTY_W words, and two
 // rings of PTY_CAP bytes each.
-const PTY_N: u64 = 16;
+const PTY_N: u64 = 64;
 const PTY_W: u64 = 53;                 // 16 + TERMIOS_SIZE, then the window's size in pixels
-const PTY_LEN: u64 = 848;              // PTY_N * PTY_W
+const PTY_LEN: u64 = 3392;             // PTY_N * PTY_W
 const PTY_CAP: u64 = 4096;
-const PTYB_LEN: u64 = 131072;         // 2 * PTY_N * PTY_CAP
+const PTYB_LEN: u64 = 524288;         // 2 * PTY_N * PTY_CAP
 const TCSETA: u64 = 0x5406;           // TCSETAW and TCSETAF follow
 const TCSETAF: u64 = 0x5408;
 const TIOCSETD: u64 = 0x5423;
@@ -480,8 +480,8 @@ const DEV_DSP: u64 = 9;                // OF_DEV device /dev/dsp, the sound card
 const DEV_FULL: u64 = 11;               // OF_DEV device /dev/full: zeros to read, ENOSPC to write (src/lxdev.bastio)
 const DEV_MICE: u64 = 10;               // OF_DEV device /dev/input/mice and /dev/psaux (src/lxmouse.bastio)
 const MICE_LEN: u64 = 824;              // its packets: a 56-byte header and 192 packets of 4 bytes
-const DEV_PTM: u64 = 32;               // an OF_PTY master is DEV_PTM + N
-const DEV_PTS: u64 = 48;               // and its slave, /dev/pts/N, DEV_PTS + N
+const DEV_PTM: u64 = 128;              // an OF_PTY master is DEV_PTM + N
+const DEV_PTS: u64 = 192;              // and its slave, /dev/pts/N, DEV_PTS + N
 const DISK_GID: u64 = 6;               // group disk (files/group): the loop devices'
 
 // File locks (src/lxlock.bastio): LK_N entries of LK_W words, then for
@@ -492,7 +492,7 @@ const LK_WAITS: u64 = 768;            // LK_N * LK_W
 const LK_WW: u64 = 4;
 const LK_HI: u64 = LK_WAITS + NPROC * LK_WW;   // after them: every held lock is in an entry below this
 const LK_LEN: u64 = LK_HI + 1;
-const IPC_LEN: u64 = 6656 + NPROC * 48;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
+const IPC_LEN: u64 = 6656 + NPROC * 96;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
 const RNG_LEN: u64 = 19;              // the random generator's words (src/lxdev.bastio)
 const SYS_SHMMAX: u64 = 154;           // /proc/sys/kernel/shmmax as written, + 1 (0: never written; src/lxipc.bastio)
 const SYS_PQ: u64 = 160;
@@ -514,7 +514,8 @@ const SYS_SEAL: u64 = SYS_PT + NPROC;           // SYS_PT + NPROC; SEAL_N memfds
 const SYS_PT2: u64 = SYS_SEAL + 32;            // SYS_SEAL + SEAL_N * 2; a word per process
 const SYS_BUSY: u64 = SYS_PT2 + NPROC;           // SYS_PT2 + NPROC; one word: ticks some process was running at
 const SYS_SCT: u64 = SYS_BUSY + 1;             // the writable numbers of src/lxsysctl.bastio, SC_NUM words (35)
-const SYS_LEN: u64 = SYS_SCT + 35;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio), then SYS_BUSY, the timer ticks all processes have run (/proc/stat)
+const SYS_OOM: u64 = SYS_SCT + 35;             // SYS_SCT + SCT_NUM; a word per process: oom_score_adj + 1001 + 1 (0: never written; src/lxprocfs.bastio)
+const SYS_LEN: u64 = SYS_OOM + NPROC;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio), then SYS_BUSY, the timer ticks all processes have run (/proc/stat)
 const SYS_PIPEMAX: u64 = 150;          // /proc/sys/fs/pipe-max-size (0: PIPE_CAP), past the adjtimex words (src/lxsys.bastio)
 const AT_N: u64 = 32;
 const LR_N: u64 = 4;
