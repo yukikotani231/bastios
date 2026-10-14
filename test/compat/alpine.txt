@@ -550,3 +550,11 @@ hello from the host
 apk=0
 tig version 2.6.1
 status 0
+
+== container: crun joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
+$ B=/disk/busybox; export B; $B ip link add cc_br type bridge && $B ip addr add 10.0.4.1/24 dev cc_br && $B ip link set cc_br up && $B ip link add cc_v0 type veth && $B ip link set veth0 name cc_v1 && $B ip link set cc_v0 master cc_br && $B ip link set cc_v0 up && $B printf '%s\n' 'ip -4 addr show dev cc_v1 | grep -o "inet [0-9./]*"' 'wget -q -O - HOSTURL/hello.txt' 'apk add --allow-untrusted -q --no-progress -X ALPINEURL tig 2>/dev/null; echo apk=$?' 'tig --version | head -n 1' > /disk/a/cc.sh && ($B unshare -n $B sh -c 'touch /disk/cc_nr; until $B ip link show cc_v1 >/dev/null 2>&1; do sleep 1; done; $B ip addr add 10.0.4.2/24 dev cc_v1 && $B ip link set cc_v1 up && $B ip link set lo up && $B ip route add default via 10.0.4.1 && touch /disk/cc_ok; sleep 300' >/dev/null 2>&1 & P=$!; until [ -e /disk/cc_nr ]; do sleep 1; done; $B ip link set cc_v1 netns $P; until [ -e /disk/cc_ok ]; do sleep 1; done; $B mkdir -p /disk/cnn /run/crun && cd /disk/cnn && /disk/crun spec && $B sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"readonly": true#"readonly": false#' -e 's#"type": "network"#"type": "network", "path": "/proc/'$P'/ns/net"#' -e 's#"sh"#"/bin/sh", "/cc.sh"#' config.json && /disk/crun --root /run/crun run cc < /dev/null; echo status $?; kill $P); $B rm -f /disk/cc_nr /disk/cc_ok /disk/a/cc.sh; $B ip link del cc_br; $B chroot /disk/a /sbin/apk del -q --no-progress tig 2>/dev/null
+inet 10.0.4.2/24
+hello from the host
+apk=0
+tig version 2.6.1
+status 0
