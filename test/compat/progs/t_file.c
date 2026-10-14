@@ -139,6 +139,11 @@ int main(void) {
         EXPECT("fremovexattr removes by descriptor", fremovexattr(x, "user.b") == 0 && listxattr("cx_h", l, sizeof l) == 0);
         EXPECT("a directory keeps them too", mkdir("cx_d", 0755) == 0 && setxattr("cx_d", "user.d", "dir", 3, 0) == 0 && getxattr("cx_d", "user.d", v, sizeof v) == 3);
         EXPECT("a symbolic link: l- forms act on the link, others on the target", symlink("cx_d", "cx_s") == 0 && getxattr("cx_s", "user.d", v, sizeof v) == 3 && lgetxattr("cx_s", "user.d", v, sizeof v) == -1);
+        EXPECT("an fd opened through a symbolic link holds the target's attributes", ({ int f1 = open("cx_t", O_RDWR | O_CREAT, 0644), f2, f3, r;
+               symlink("cx_t", "cx_u"); f2 = open("cx_u", O_RDONLY); f3 = open("cx_f2", O_RDWR | O_CREAT, 0644);
+               r = f1 >= 0 && f2 >= 0 && f3 >= 0 && fsetxattr(f3, "user.k", "v", 1, XATTR_CREATE) == 0 && fsetxattr(f2, "user.k", "w", 1, XATTR_CREATE) == 0
+                   && fgetxattr(f1, "user.k", v, sizeof v) == 1 && v[0] == 'w' && fgetxattr(f3, "user.k", v, sizeof v) == 1 && v[0] == 'v';
+               close(f1); close(f2); close(f3); unlink("cx_u"); unlink("cx_t"); unlink("cx_f2"); r; }));
         EXPECT("a missing file is ENOENT", removexattr("cx_none", "user.a") == -1 && errno == ENOENT);
         EXPECT("a bad descriptor is EBADF", fgetxattr(-1, "user.a", v, sizeof v) == -1 && errno == EBADF);
         EXPECT("a bad name pointer is EFAULT", getxattr("cx_h", (const char *)1, v, sizeof v) == -1 && errno == EFAULT);

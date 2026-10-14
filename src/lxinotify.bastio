@@ -784,7 +784,7 @@ fn ino_before(k: &mut Kernel, pid: u64)
 {
   iput(&mut k, INO_G + G_CALL, 0);
   iput(&mut k, INO_G + G_KEPT, 0);
-  if iget(k, INO_G + G_WATCHES) == 0 {
+  if iget(k, INO_G + G_WATCHES) == 0 && !xa_any(k) {
     return;
   }
   let n = pget(k.procs, pid, F_REGS + R_LXNR);
@@ -824,7 +824,7 @@ fn ino_after(k: &mut Kernel, pid: u64)
   ensures kok(k)
 {
   let call = iget(k, INO_G + G_CALL);
-  if call == 0 || iget(k, INO_G + G_WATCHES) == 0 {
+  if call == 0 || (iget(k, INO_G + G_WATCHES) == 0 && !xa_any(k)) {
     return;
   }
   iput(&mut k, INO_G + G_CALL, 0);

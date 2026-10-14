@@ -61,6 +61,46 @@ fn xa_find(k: &Kernel, h: u64, nm: &Bytes, nl: u64) -> u64
   return XA_N;
 }
 
+const XA_COUNT: u64 = SYS_XA + 3 * XA_N;   // the word that counts the entries in use
+
+/// Is any attribute kept? While one is, src/lxinotify.bastio follows the
+/// calls that remove names even with no inotify watch, so that xa_gone
+/// hears of every file that goes (a new file may reuse its handle).
+fn xa_any(k: &Kernel) -> bool
+  requires kok(k)
+{
+  return get(k.sys, XA_COUNT) != 0;
+}
+
+/// Entry e is free.
+fn xa_free(k: &mut Kernel, e: u64)
+  requires kok(k) && e < XA_N
+  ensures kok(k)
+{
+  if get(k.sys, SYS_XA + 3 * e) != 0 {
+    k.sys = set(k.sys, SYS_XA + 3 * e, 0);
+    let c = get(k.sys, XA_COUNT);
+    if c > 0 {
+      k.sys = set(k.sys, XA_COUNT, c - 1);
+    }
+  }
+}
+
+/// Every attribute goes: a file system was unmounted, and its files went
+/// without a word.
+fn xa_clear(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut e = 0;
+  while e < XA_N
+    invariant e <= XA_N && kok(k)
+  {
+    xa_free(&mut k, e);
+    e = e + 1;
+  }
+}
+
 /// Handle h is gone: its attributes go.
 fn xa_gone(k: &mut Kernel, h: u64)
   requires kok(k)
@@ -74,7 +114,7 @@ fn xa_gone(k: &mut Kernel, h: u64)
     invariant e <= XA_N && kok(k)
   {
     if get(k.sys, SYS_XA + 3 * e) == h + 1 {
-      k.sys = set(k.sys, SYS_XA + 3 * e, 0);
+      xa_free(&mut k, e);
     }
     e = e + 1;
   }
@@ -158,8 +198,11 @@ fn xa_set(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64, va: u64, vl: u6
   if h >= HFILES {
     return EOPNOTSUPP_X;
   }
+  if vl > 65536 {
+    return E2BIG;                         // XATTR_SIZE_MAX
+  }
   if vl > XA_VAL {
-    return ENOSPC;
+    return ENOSPC;                        // more than the table holds
   }
   let uid = fs_id(k.procs, pid, false);
   if sp == 2 && uid != 0 {
@@ -168,6 +211,10 @@ fn xa_set(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64, va: u64, vl: u6
   let m = vfs_meta(&mut k.fs, h);
   if !owns(k.procs, pid, m.own) {
     return EPERM;
+  }
+  let t = m.mode % 65536 / 4096 * 4096;
+  if sp == 1 && (t == T_LINK || t == T_FIFO || t == T_CHR || t == T_BLK || t == T_SOCK) {
+    return EPERM;                         // user. attributes are for files and directories only
   }
   let mut e = xa_find(k, h, nm, nl);
   if e < XA_N && flags == 1 {
@@ -207,6 +254,9 @@ fn xa_set(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64, va: u64, vl: u6
     {
       bset(&mut k.mstr, XAB + e * XA_ROW + XA_VOFF + j, bget(k.fs.xfer, j));
       j = j + 1;
+    }
+    if get(k.sys, SYS_XA + 3 * e) == 0 && get(k.sys, XA_COUNT) < XA_N {
+      k.sys = set(k.sys, XA_COUNT, get(k.sys, XA_COUNT) + 1);
     }
     k.sys = set(k.sys, SYS_XA + 3 * e, h + 1);
     k.sys = set(k.sys, SYS_XA + 3 * e + 1, nl);
@@ -319,7 +369,7 @@ fn xa_remove(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64) -> u64
   if e >= XA_N {
     return ENODATA_X;
   }
-  k.sys = set(k.sys, SYS_XA + 3 * e, 0);
+  xa_free(&mut k, e);
   return 0;
 }
 

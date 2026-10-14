@@ -251,6 +251,7 @@ t_file: a name outside every namespace is EOPNOTSUPP
 t_file: a symbolic link: l- forms act on the link, others on the target
 t_file: access F_OK
 t_file: access missing
+t_file: an fd opened through a symbolic link holds the target's attributes
 t_file: chmod
 t_file: chown to self
 t_file: close
