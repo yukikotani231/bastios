@@ -1035,6 +1035,8 @@ bastio: bastioc1: prove a program
 bastio: bastioc1: prove, build with tcc, run
 bastio: bastioc1: a failed proof builds nothing
 bastio: bastioc1: a type error
+alpine: container: cgroup limits: the container sees the memory, pids and cpu limits runc set
+alpine: container: memory.max kills a process of a container that outgrows it
 alpine: proc: /proc/self/exe is named from the reader's root (chroot), as on Linux
 alpine: apk: install ripgrep and fzf over HTTP
 alpine: rg and fzf: search a tree, filter a list
