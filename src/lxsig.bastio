@@ -19,6 +19,7 @@ const LX_KILL: u64 = 62;
 const LX_TKILL: u64 = 200;
 const LX_TGKILL: u64 = 234;
 const LX_RT_SIGQUEUEINFO: u64 = 129;
+const LX_RT_TGSIGQUEUEINFO: u64 = 297;
 const LX_RT_SIGPENDING: u64 = 127;
 const LX_SIGALTSTACK: u64 = 131;
 const SS_ONSTACK: u64 = 1;
@@ -936,6 +937,13 @@ fn lx_sig_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     r = lx_tgkill(&mut k, pid, a, b, c);
   } else if n == LX_RT_SIGQUEUEINFO {
     r = lx_sigqueue(&mut k, pid, a, b, c);
+  } else if n == LX_RT_TGSIGQUEUEINFO {
+    // rt_tgsigqueueinfo(tgid, tid, sig, info): to thread tid, which must be in group tgid.
+    if b >= NPROC || b == 0 || state(k.procs, b) == FREE || tgid(k.procs, b) != a {
+      r = ESRCH;
+    } else {
+      r = lx_sigqueue(&mut k, pid, b, c, size);
+    }
   } else if n == LX_RT_SIGRETURN {
     r = lx_sigreturn(&mut k, pid);
   } else if n == LX_RT_SIGPENDING {
@@ -954,7 +962,7 @@ fn lx_sig_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
 
 fn is_sig_call(n: u64) -> bool {
   return n == LX_RT_SIGACTION || n == LX_RT_SIGPROCMASK || n == LX_KILL || n == LX_TKILL
-    || n == LX_TGKILL || n == LX_RT_SIGRETURN || n == LX_RT_SIGPENDING || n == LX_SIGALTSTACK || n == LX_RT_SIGQUEUEINFO;
+    || n == LX_TGKILL || n == LX_RT_SIGRETURN || n == LX_RT_SIGPENDING || n == LX_SIGALTSTACK || n == LX_RT_SIGQUEUEINFO || n == LX_RT_TGSIGQUEUEINFO;
 }
 
 // ---------------------------------------------------------------- delivery

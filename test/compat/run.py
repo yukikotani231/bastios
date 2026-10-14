@@ -297,7 +297,11 @@ class Guest:
                    "-drive", f"file={self.disk},format=raw,if=none,id=vd", "-device", "virtio-blk-device,drive=vd",
                    "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{self.sshport}-:22", "-device", "virtio-net-device,netdev=n0"]
         else:
-            cmd = ["qemu-system-x86_64", "-kernel", self.kernel, "-m", self.mem, "-smp", "2",
+            # qemu64 plus the x86-64-v2 instruction set (SSSE3, SSE4, POPCNT): what
+            # most distributions build their programs for (the Alpaquita gdb, say).
+            # Nothing past SSE: the kernel keeps a process's FXSAVE state only.
+            cmd = ["qemu-system-x86_64", "-cpu", "qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt",
+                   "-kernel", self.kernel, "-m", self.mem, "-smp", "2",
                    "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
                    "-serial", "stdio", "-monitor", "none",
                    "-drive", f"file={self.disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd",

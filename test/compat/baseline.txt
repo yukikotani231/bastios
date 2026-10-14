@@ -938,6 +938,10 @@ t_ptrace: a tracee that is running is ESRCH
 t_ptrace: PTRACE_SEIZE attaches without stopping the tracee
 t_ptrace: PTRACE_INTERRUPT stops it with PTRACE_EVENT_STOP and SIGTRAP
 t_ptrace: a seized tracee resumed with PTRACE_CONT runs to its end
+t_ptrace: SECCOMP_RET_TRACE stops the tracee with PTRACE_EVENT_SECCOMP and the filter's data
+t_ptrace: the call runs once the tracer goes on, and the filter is not asked again
+t_ptrace: SECCOMP_RET_TRACE with a tracer that did not ask for it is ENOSYS
+t_ptrace: and without a tracer
 t_ptrace: a sleeping seized tracee is stopped by PTRACE_INTERRUPT
 t_ptrace: it can be resumed and then killed
 t_ptrace: attaching to itself is EPERM
@@ -1152,6 +1156,7 @@ t_userns: a process maps the user namespace it has just made itself
 t_userns: the root of a user namespace brings loopback up in a network namespace of its own
 t_userns: and not in the first one
 t_userns: statfs of /proc/self/fd/N answers for the file N holds
+t_userns: nor in one that another user namespace made
 tty: kilo: edit and save a file
 tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
 tty: micropython: REPL line editing and history
@@ -1199,6 +1204,7 @@ t_sys: keys: unknown type, bad payload, expiry, revocation, no such key
 t_sys: keys: a child shares the session keyring but not the process keyring
 t_sys: keys: request_key with a callout leaves a negative key
 t_sys: clone: the exit signal is what the parent gets
+t_sys: syncfs and rt_tgsigqueueinfo
 t_sys: aio: io_submit does the requests, io_getevents returns them in order
 t_sys: aio: bad context, bad descriptor, bad pointer, and an empty pipe finishes with EAGAIN
 t_thread: a thread keeps its descriptors while another spawns a child
@@ -1215,7 +1221,7 @@ alpine: nvim: tree-sitter highlights C: the keyword, the type and the comment ge
 alpine: nvim: :diffthis marks the line that differs, and vim.diff finds the hunk
 alpine: strace: traces a program's system calls with ptrace, following the child it starts
 alpine: strace: attaches to a running process, and hears of its death when its parent is elsewhere
-alpine: gdb: a breakpoint in a program stops it, shows its arguments and backtrace, and finish gives the return value
+alpine: gdb: a breakpoint in a PIE program stops it, shows its arguments and backtrace, and finish gives the return value
 alpine: nvim: LuaJIT loads a shared object that gcc built
 alpine: nvim: a plugin cloned over HTTP is on the packpath and runs at startup
 alpine: nvim: a small plugin manager in Lua clones a plugin, loads it, then updates it with git pull

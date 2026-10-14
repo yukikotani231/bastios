@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Boot
 
+- A file in memory (tmpfs, and the image behind a loop device) can reach 1 GiB (64 MiB before), and a loop device 1 GiB (64 MiB before). Pages are still taken only where a file is written, so a sparse file costs a table of 16 bytes a page. `shell_test.sh` grows a file to 300 MiB and appends to it.
 - The disk holds 262143 files and directories (32767 before): the directory takes up to 16384 blocks, named by up to 32 extension blocks, and the in-memory directory and name index grow to 64 MiB and 2 MiB. Disk formats are unchanged. `shell_test.sh` creates 33000 files in one directory (the old limit would have refused the 32768th), reboots, and finds them; `test/fsck.py` reads the larger directory. Filling the whole table is no longer tested (it is eight times longer than the old fill).
 - Tested: 255 processors (the most xAPIC ids can address) start in QEMU without KVM, reach the shell in about ten seconds, and every page comes back at power off. Beyond that the kernel already runs processors in x2APIC mode, but the test for it needs QEMU 9.
 - Executable holds: 512 programs at once can be loaded lazily (128 before), one for each possible process; past the limit a program is loaded whole, as before.
@@ -188,7 +189,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Linux programs
 
-- ptrace for debuggers: a tracer can write into the read-only code of a program it traces (a breakpoint), read code the program has not run yet, and read and write its x87/SSE registers (`PTRACE_GETFPREGS`, `SETFPREGS`); a breakpoint trap says `SI_KERNEL` and a single step `TRAP_TRACE` in `PTRACE_GETSIGINFO`; `strace -p` hears of the death of a process whose parent is elsewhere. Tested: `strace -p`, and gdb 8 stops at a breakpoint of a static program, prints its arguments and backtrace and finishes the function (x86-64).
+- ptrace for debuggers: a tracer can write into the read-only code of a program it traces (a breakpoint), read code the program has not run yet, and read and write its x87/SSE registers (`PTRACE_GETFPREGS`, `SETFPREGS`); a breakpoint trap says `SI_KERNEL` and a single step `TRAP_TRACE` in `PTRACE_GETSIGINFO`; `strace -p` hears of the death of a process whose parent is elsewhere. `/proc/PID/auxv` exists (gdb finds where a PIE program was loaded), and lseek on it moves its offset (lseek on the other /proc files is still ignored). Tested: `strace -p`, and gdb 16 stops at a breakpoint of a dynamically linked PIE program, prints its arguments and backtrace and finishes the function (x86-64; it needs Alpaquita's musl loader for ifunc relocations and an x86-64-v2 CPU, which the compat lane's QEMU now asks for).
 - Files have owners and permissions (`src/lxperm.bastio`). Each file keeps
   its owner's user and group ids, in memory and on the disk; `chown`,
   `fchown`, `lchown` and `fchownat` change them, and `stat` reports them.

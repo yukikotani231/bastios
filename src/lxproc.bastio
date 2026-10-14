@@ -889,8 +889,8 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
             if traced_by(k, c, pid) {
               let t2 = tr2_get(k, c);
               let mut ev = t2 / TS_EV % 16;              // the event, if it is one (src/lxptrace.bastio)
-              if t2 / TS_ENTRY % 2 == 1 || t2 / TS_EXIT % 2 == 1 {
-                ev = 0;                                  // a system call stop is no event
+              if (t2 / TS_ENTRY % 2 == 1 || t2 / TS_EXIT % 2 == 1) && t2 / TS_SECC % 2 == 0 {
+                ev = 0;                                  // a system call stop is no event (a seccomp stop is)
               }
               if ev == EV_STOP {
                 ev = 128;                                // PTRACE_EVENT_STOP
