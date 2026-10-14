@@ -244,7 +244,7 @@ $ bb cp /disk/strace /disk/a/usr/bin/strace && bb chroot /disk/a /bin/sh -c 'sle
 1
 
 == gdb: a breakpoint in a PIE program stops it, shows its arguments and backtrace, and finish gives the return value
-$ bb tar xf /disk/gdb.tar -C /disk/a/opt; bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb printf '#include <stdio.h>\nint add(int a, int b) { return a + b; }\nint main(void) { printf("sum %%d\\n", add(40, 2)); return 0; }\n' > /disk/a/root/d.c && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -g -O0 -pie -fPIE -o d d.c && PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-x86_64.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" -ex "break add" -ex run -ex "print a + b" -ex bt -ex finish ./d </dev/null 2>&1 | grep -e "Breakpoint 1, add (a=40, b=2)" -e "= 42"'; bb umount /disk/a/proc
+$ if [ %MACHINE% = x86_64 ]; then bb tar xf /disk/gdb.tar -C /disk/a/opt; bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb printf '#include <stdio.h>\nint add(int a, int b) { return a + b; }\nint main(void) { printf("sum %%d\\n", add(40, 2)); return 0; }\n' > /disk/a/root/d.c && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -g -O0 -pie -fPIE -o d d.c && PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-x86_64.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" -ex "break add" -ex run -ex "print a + b" -ex bt -ex finish ./d </dev/null 2>&1 | grep -e "Breakpoint 1, add (a=40, b=2)" -e "= 42"'; bb umount /disk/a/proc; fi
 Breakpoint 1, add (a=40, b=2) at d.c:2
 $1 = 42
 Value returned is $2 = 42
