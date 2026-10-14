@@ -2249,6 +2249,9 @@ fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
   if d.kind == K_DEV && is_loop(d.x) {
     return loop_seek(&mut k, pid, fd, d.x, off, whence);
   }
+  if d.kind == K_DEV && d.x >= PROC_DEV && !is_exe_file(d.x) && !is_ns_file(d.x) {
+    return proc_seek(&mut k, pid, fd, off, whence);   // src/lxprocfs.bastio
+  }
   if d.kind == K_DEV {
     return 0;                               // other devices have no position
   }

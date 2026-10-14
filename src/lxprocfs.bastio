@@ -60,6 +60,7 @@ import "lxnsbase.bastio";
 // files that hook in here are compiled after.
 
 const PF_MOUNTS: u64 = 1;
+const PF_AUXV: u64 = 2;               // /proc/PID/auxv (2 is pid 0's meminfo)
 const PF_MEMINFO: u64 = 2;
 const PF_UPTIME: u64 = 3;
 const PF_STAT: u64 = 4;
@@ -605,6 +606,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   }
   if xfer_is(x, e + 1, n, "cmdline") {
     return base + PF_CMDLINE;
+  }
+  if xfer_is(x, e + 1, n, "auxv") {
+    return base + PF_AUXV;
   }
   if xfer_is(x, e + 1, n, "status") {
     return base + PF_STATUS;
@@ -2021,7 +2025,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
   if what == PF_MOUNTINFO && p != 0 {
     return mountinfo_text(&mut k, p, &mut o);
   }
-  if what == PF_MEMINFO {
+  if what == PF_MEMINFO && p == 0 {
     let total = pool_size(k.mem.pool) * 4;   // the RAM the pool holds
     let avail = count_free(k.mem.bm) * 4;
     let mut a = put_s(&mut o, 0, "MemTotal: ");
@@ -2392,6 +2396,47 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     let a = put_prog(&mut k, p, &mut o, 0, true);
     return put_c(&mut o, a, 0);
   }
+  if what == PF_AUXV {
+    // The auxiliary vector sits just below the argument strings, where exec
+    // built it (init_stack, src/elf.bastio): found by its first entries, which
+    // are always AT_PHDR, AT_PHENT = the program header size, AT_PHNUM. A
+    // debugger asks for AT_ENTRY to find where a PIE program was loaded.
+    let w = pget(k.procs, p, F_ARGS);
+    let top = w % 1099511627776;
+    if w / 1099511627776 != 0 && top >= 288 {
+      if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, USER_BASE + top - 288, &mut k.fs.xfer, 288) == 288 {
+        let mut j = 0;
+        let mut found = false;
+        while j < 28 && !found
+          invariant j <= 28 && blen(k.fs.xfer) == XFER
+        {
+          if rd64(k.fs.xfer, 8 * j) == 3 && rd64(k.fs.xfer, 8 * (j + 2)) == 4 && rd64(k.fs.xfer, 8 * (j + 3)) == PH_SIZE && rd64(k.fs.xfer, 8 * (j + 4)) == 5 {
+            found = true;
+          } else {
+            j = j + 1;
+          }
+        }
+        if found {
+          let mut e = j;
+          while e < 34 && rd64(k.fs.xfer, 8 * e) != 0
+            invariant j <= e && e <= 35 && blen(k.fs.xfer) == XFER
+          {
+            e = e + 2;
+          }
+          let n = 8 * (e + 2 - j);
+          let mut i = 0;
+          while i < n && i < 288
+            invariant i <= 288 && 8 * j + i <= 8 * 34 + 288 && blen(o) == PROC_OUT && blen(k.fs.xfer) == XFER
+          {
+            bset(&mut o, i, bget(k.fs.xfer, 8 * j + i));
+            i = i + 1;
+          }
+          return smaller(n, 288);
+        }
+      }
+    }
+    return 0;
+  }
   if what == PF_EXE {
     return put_prog(&mut k, p, &mut o, 0, false);
   }
@@ -2466,6 +2511,44 @@ fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
   }
   of_set(&mut k.ofd, h, 3, sat_add(of_get(k.ofd, h, 3), put));
   return put;
+}
+
+/// lseek(2) on /proc file f, open in descriptor fd: the description's offset
+/// moves, so a reader that seeks (a debugger reading /proc/PID/auxv in
+/// pieces) gets the part it asked for. The size is 0, as on Linux, so
+/// SEEK_END counts from the start.
+fn proc_seek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let h = fd_ofd(k, pid, fd);
+  if h >= OFD_N {
+    return EBADF;
+  }
+  let mut base = 0;
+  if whence == 1 {
+    base = of_get(k.ofd, h, 3);
+  } else if whence != 0 && whence != 2 {
+    return EINVAL;
+  }
+  if base >= 0x8000000000000000 {
+    return EINVAL;
+  }
+  let mut to = 0;
+  if off < 0x8000000000000000 {
+    if base > 0x7FFFFFFFFFFFFFFF - off {
+      return EINVAL;
+    }
+    to = base + off;
+  } else {
+    let back = 0xFFFFFFFFFFFFFFFF - off + 1;
+    if back > base {
+      return EINVAL;
+    }
+    to = base - back;
+  }
+  of_set(&mut k.ofd, h, 3, to);
+  return to;
 }
 
 /// If x[..n] is /proc/PID/fd/N: PID * LXNFD + N, else NO_RESULT. Only

@@ -187,7 +187,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Linux programs
 
-- ptrace for debuggers: a tracer can write into the read-only code of a program it traces (a breakpoint), read code the program has not run yet, and read and write its x87/SSE registers (`PTRACE_GETFPREGS`, `SETFPREGS`); a breakpoint trap says `SI_KERNEL` and a single step `TRAP_TRACE` in `PTRACE_GETSIGINFO`; `strace -p` hears of the death of a process whose parent is elsewhere. Tested: `strace -p`, and gdb 8 stops at a breakpoint of a static program, prints its arguments and backtrace and finishes the function (x86-64).
+- ptrace for debuggers: a tracer can write into the read-only code of a program it traces (a breakpoint), read code the program has not run yet, and read and write its x87/SSE registers (`PTRACE_GETFPREGS`, `SETFPREGS`); a breakpoint trap says `SI_KERNEL` and a single step `TRAP_TRACE` in `PTRACE_GETSIGINFO`; `strace -p` hears of the death of a process whose parent is elsewhere. `/proc/PID/auxv` exists (gdb finds where a PIE program was loaded), and lseek on a /proc file moves its offset (it used to be ignored, so a reader that seeks got the same bytes again). Tested: `strace -p`, and gdb 16 stops at a breakpoint of a dynamically linked PIE program, prints its arguments and backtrace and finishes the function (x86-64; it needs Alpaquita's musl loader for ifunc relocations and an x86-64-v2 CPU, which the compat lane's QEMU now asks for).
 - Files have owners and permissions (`src/lxperm.bastio`). Each file keeps
   its owner's user and group ids, in memory and on the disk; `chown`,
   `fchown`, `lchown` and `fchownat` change them, and `stat` reports them.
