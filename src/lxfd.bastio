@@ -781,7 +781,8 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     if e != 0 {
       return e;
     }
-  } else if flags & LO_CREAT != 0 && dir_at(&mut k, n) == NO_FILE && dev_at(k.fs.xfer, n) == DEV_NONE {
+  } else if flags & LO_CREAT != 0 && dir_at(&mut k, n) == NO_FILE && dev_at(k.fs.xfer, n) == DEV_NONE && proc_node(k, n) == 0 {
+    // (an existing /proc file opened with O_CREAT, as a shell's > does, is no new name)
     let e = may_dir(&mut k, pid, n);
     if e != 0 {
       return e;

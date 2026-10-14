@@ -8,7 +8,11 @@
 #include <fcntl.h>
 #include <sched.h>
 #include <signal.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
 #include <sys/mount.h>
+#include <sys/socket.h>
+#include <sys/statfs.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -31,6 +35,16 @@ static int as_nobody(void) {
 
 static int write_str(const char *path, const char *s, size_t n) {
     int f = open(path, O_WRONLY);
+    if (f < 0) return -1;
+    int r = write(f, s, n);
+    close(f);
+    return r;
+}
+
+/* The way crun opens them, and a shell's > does: O_CREAT and O_TRUNC on a
+ * file that is already there. */
+static int write_trunc(const char *path, const char *s, size_t n) {
+    int f = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
     if (f < 0) return -1;
     int r = write(f, s, n);
     close(f);
@@ -66,6 +80,43 @@ static int in_userns(int (*f)(void), int mntns) {
     ok = ok && write(down[1], "y", 1) == 1;
     int st;
     return waitpid(c, &st, 0) == c && ok && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
+/* crun unshares the user namespace in the process that later maps it, so
+ * the file it opens for writing belongs to the caller itself, in the
+ * namespace the caller just made. */
+static int map_own_after_unshare(void) {
+    if (!as_nobody() || unshare(CLONE_NEWUSER) != 0) return 0;
+    char map[32];
+    int n = snprintf(map, sizeof map, "0 %d 1\n", NOBODY);
+    return write_trunc("/proc/self/setgroups", "deny", 4) == 4 && write_trunc("/proc/self/uid_map", map, n) == n
+        && write_trunc("/proc/self/gid_map", map, n) == n;
+}
+
+/* The root of a user namespace that made its own network namespace brings
+ * its loopback up (crun does at start), but not in the first one. */
+static int lo_up(void) {
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    struct ifreq r;
+    memset(&r, 0, sizeof r);
+    strcpy(r.ifr_name, "lo");
+    r.ifr_flags = IFF_UP;
+    int e = ioctl(s, SIOCSIFFLAGS, &r);
+    close(s);
+    return e;
+}
+static int lo_up_in_own_netns(void) { return unshare(CLONE_NEWNET) == 0 && lo_up() == 0; }
+static int lo_up_in_first_netns(void) { return lo_up() == -1 && errno == EPERM; }
+
+/* statfs of /proc/self/fd/N is the file system of the file N holds. */
+static int statfs_fd_link(void) {
+    int f = open("/tmp", O_PATH | O_DIRECTORY);
+    char p[40];
+    struct statfs a, b;
+    snprintf(p, sizeof p, "/proc/self/fd/%d", f);
+    int ok = f >= 0 && statfs(p, &a) == 0 && fstatfs(f, &b) == 0 && a.f_type == b.f_type;
+    close(f);
+    return ok;
 }
 
 static int own_pipe(void) {
@@ -152,6 +203,10 @@ int main(void) {
     EXPECT("/dev/full reads zeros and writes ENOSPC", dev_full());
     EXPECT("the first ids of a user namespace are set from one register", in_userns(ids_with_junk, 0));
     EXPECT("uid_map takes text that ends in a NUL", in_userns(map_text, 0));
+    EXPECT("a process maps the user namespace it has just made itself", in_child(map_own_after_unshare));
+    EXPECT("the root of a user namespace brings loopback up in a network namespace of its own", in_userns(lo_up_in_own_netns, 0));
+    EXPECT("and not in the first one", in_userns(lo_up_in_first_netns, 0));
+    EXPECT("statfs of /proc/self/fd/N answers for the file N holds", statfs_fd_link());
     EXPECT("the root of a user namespace mounts in a mount namespace of its own", in_userns(mounts_in_own_ns, 1));
     EXPECT("and not without one", in_userns(no_mounts_without_ns, 0));
     EXPECT("the root of a user namespace gives up capabilities", in_userns(caps_there, 0));

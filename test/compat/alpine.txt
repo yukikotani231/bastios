@@ -410,6 +410,16 @@ touch: /x: Read-only file system
 touch=1
 status 0
 
+== container: rootless: crun runs Alpine as an unprivileged user in a user namespace of its own
+$ bb mkdir -p /disk/cur /disk/cu /run/cru && bb chown 65534:65534 /disk/cur /disk/cu /run/cru && bb su -s /bin/ash nobody -c 'cd /disk/cur && /disk/busybox tar -xf /disk/root.tar && cd /disk/cu && /disk/crun spec --rootless && /disk/busybox sed -i -e "s#\"path\": \"rootfs\"#\"path\": \"/disk/cur\"#" -e "s#\"terminal\": true#\"terminal\": false#" -e "s#\"sh\"#\"/bin/sh\", \"-c\", \"id -u; hostname; echo pid=\$\$; cat /proc/self/uid_map; touch /x 2>\&1; echo touch=\$?\"#" config.json && /disk/crun --root /run/cru run c3 < /dev/null; echo status $?'
+0
+crun
+pid=1
+         0      65534          1
+touch: /x: Read-only file system
+touch=1
+status 0
+
 == container: runc runs on an overlay of the image root: writes and deletions stay in the upper layer
 $ bb mkdir -p /disk/ou /disk/ow /disk/om /disk/o /run/runc && bb mount -t overlay overlay -o lowerdir=/disk/a,upperdir=/disk/ou,workdir=/disk/ow /disk/om && cd /disk/o && /disk/runc spec && bb sed -i -e 's#"path": "rootfs"#"path": "/disk/om"#' -e 's#"terminal": true#"terminal": false#' -e 's#"readonly": true#"readonly": false#' -e 's#"sh"#"/bin/sh", "-c", "echo hi > /ov.txt; rm /etc/motd; cat /ov.txt; ls /etc/motd 2>\&1; echo done"#' config.json && /disk/runc --root /run/runc run co < /dev/null; echo status $?; bb cat /disk/ou/ov.txt; test -e /disk/a/ov.txt || echo lower-clean; test -e /disk/a/etc/motd && echo lower-kept; bb umount /disk/om
 hi
