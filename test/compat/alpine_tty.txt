@@ -53,6 +53,16 @@ $ bb chroot /disk/a /bin/sh -c 'cd /root/p && git add hello.c && git commit -qm 
 edit
 // edited
 
+== nvim: git commit opens Neovim as the editor, and the message typed there is the commit's
+$ bb chroot /disk/a /bin/sh -c 'cd /root && git init -q --template= ed && cd ed && git config user.name a && git config user.email a@b && echo x > f && git add f && GIT_EDITOR="nvim -u NONE" git commit'
+> \x0c
+> \x0c
+> \x0c
+> ityped in nvim\x1b
+> :wq\r
+$ bb chroot /disk/a /bin/sh -c 'cd /root/ed && git --no-pager log --format=%s'
+typed in nvim
+
 == nvim: edit a Bastio program, prove and build it, run it
 $ bb chroot /disk/a /usr/bin/nvim -u NONE /root/dev.bastio
 > ifn put_num(con: &Serial, x: u64) {\r  if x >= 10 {\r    put_num(con, x / 10);\r  }\r  serial_write(con, cast[u8](48 + x % 10));\r}\r\rfn main(con: Serial) -> Serial {\r  put_num(con, 6 * 7);\r  serial_write(con, 10);\r  return con;\r}\x1b
