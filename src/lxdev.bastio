@@ -138,8 +138,8 @@ fn dev_meta(d: u64) -> Meta {
   if d == DEV_LOOPCTL {
     return Meta { ok: true, mode: 0x21B0, size: dev_rdev(d), ino: 30 + d % 16, mtime: 0, own: DISK_GID * 0x100000000 };
   }
-  if d >= DEV_PTM && d < DEV_PTS + 16 {
-    return Meta { ok: true, mode: S_IFCHR, size: 0, ino: 50 + d - DEV_PTM, mtime: 0, own: 0 };
+  if d >= DEV_PTM && d < DEV_PTS + PTY_N {
+    return Meta { ok: true, mode: S_IFCHR, size: 0, ino: 200 + d - DEV_PTM, mtime: 0, own: 0 };
   }
   return Meta { ok: true, mode: S_IFCHR, size: dev_rdev(d), ino: 30 + d % 16, mtime: 0, own: 0 };
 }
