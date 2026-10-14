@@ -77,6 +77,13 @@ confstr01
 connect01
 connect02
 connect03
+io_cancel01
+io_destroy02
+io_getevents01
+io_setup02
+io_submit02
+io_submit03
+io_submit04
 keyctl01
 keyctl03
 keyctl04

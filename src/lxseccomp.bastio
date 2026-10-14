@@ -35,8 +35,13 @@
 // the call after all), and NOTIF_ID_VALID says whether the caller still waits.
 // Closing the descriptor ends every wait with ENOSYS.
 //
-// Not done: SECCOMP_RET_TRACE (no tracer: -ENOSYS, as
-// Linux gives without one), the load-time check that scratch memory is
+// SECCOMP_RET_TRACE: a tracer that asked for PTRACE_O_TRACESECCOMP hears of
+// the call in a stop before it, with SIGTRAP and PTRACE_EVENT_SECCOMP
+// (pt_seccomp_stop, src/lxptrace.bastio); the call starts again when it goes
+// on, and runs without the filters. Without such a tracer: -ENOSYS, as Linux
+// gives.
+//
+// Not done: the load-time check that scratch memory is
 // written before it is read (the interpreter starts every run with it
 // zeroed), SECCOMP_RET_LOG (allowed, not logged), and siginfo details for
 // SIGSYS (si_syscall and si_arch).
@@ -77,6 +82,7 @@ const SC_IOC_FLAGS: u64 = 0x40082104;      // SECCOMP_IOCTL_NOTIF_SET_FLAGS
 // received, 2 received, 3 answered; its id; the filter + 1 that issued it;
 // then the answer (value, error, flags).
 const SP_ST: u64 = 2;
+const SPS_TRACED: u64 = 4;               // a SECCOMP_RET_TRACE call its tracer has seen: it runs when it starts again
 const SP_ID: u64 = 3;
 const SP_F: u64 = 4;
 const SP_VAL: u64 = 5;
@@ -608,13 +614,17 @@ fn sc_action(k: &mut Kernel, pid: u64, nr: u64) -> u64
 /// ahead, or the result to give instead (an errno, or ENOSYS after a
 /// signal), with `kill` set when the process dies of SIGSYS (or SIGKILL,
 /// in strict mode).
-struct ScVerdict { run: bool, ret: u64, wait: bool }
+struct ScVerdict { run: bool, ret: u64, wait: bool, stop: bool }
 
 fn sc_decide(k: &mut Kernel, pid: u64, nr: u64) -> ScVerdict
   requires kok(k) && 1 <= pid && pid < NPROC
   ensures kok(k)
 {
-  let go = ScVerdict { run: true, ret: 0, wait: false };
+  let go = ScVerdict { run: true, ret: 0, wait: false, stop: false };
+  if sp_get(k, pid * SC_PW + SP_ST) == SPS_TRACED {
+    sp_put(&mut k, pid * SC_PW + SP_ST, 0);   // its tracer saw the call at the stop: it runs, and is not filtered again
+    return go;
+  }
   if sp_get(k, pid * SC_PW + SP_ST) != 0 {
     return sc_pending(&mut k, pid);
   }
@@ -622,7 +632,7 @@ fn sc_decide(k: &mut Kernel, pid: u64, nr: u64) -> ScVerdict
     // Strict mode: read, write, exit and rt_sigreturn only.
     if sc_flags(k, pid) / 2 == 1 && nr != 0 && nr != 1 && nr != 60 && nr != 15 {
       sc_force(&mut k, pid, 9);
-      return ScVerdict { run: false, ret: ENOSYS, wait: false };
+      return ScVerdict { run: false, ret: ENOSYS, wait: false, stop: false };
     }
     return go;
   }
@@ -632,27 +642,32 @@ fn sc_decide(k: &mut Kernel, pid: u64, nr: u64) -> ScVerdict
     return go;
   }
   if hi == SCA_ERRNO / 0x10000 {
-    return ScVerdict { run: false, ret: wrap_sub(0, smaller(act % 0x10000, 4095)), wait: false };
+    return ScVerdict { run: false, ret: wrap_sub(0, smaller(act % 0x10000, 4095)), wait: false, stop: false };
   }
   if hi == SCA_TRAP / 0x10000 {
     post_sig(&mut k, pid, 31);
-    return ScVerdict { run: false, ret: ENOSYS, wait: false };
+    return ScVerdict { run: false, ret: ENOSYS, wait: false, stop: false };
   }
   if hi == SCA_USER_NOTIF / 0x10000 {
     let f1 = smaller(sp_get(k, pid * SC_PW + SP_F), SC_N);
     if f1 == 0 || sch_get(k, f1 - 1, 5) != 1 {
-      return ScVerdict { run: false, ret: ENOSYS, wait: false };   // no supervisor
+      return ScVerdict { run: false, ret: ENOSYS, wait: false, stop: false };   // no supervisor
     }
     sp_put(&mut k, pid * SC_PW + SP_ID, (k.ns % 0x3FFFFFFFFFFFFF) * 256 + pid);
     sp_put(&mut k, pid * SC_PW + SP_ST, 1);
     sleepers_wake(&mut k);                    // a supervisor waiting in NOTIF_RECV
-    return ScVerdict { run: false, ret: 0, wait: true };
+    return ScVerdict { run: false, ret: 0, wait: true, stop: false };
   }
   if hi == SCA_TRACE / 0x10000 {
-    return ScVerdict { run: false, ret: ENOSYS, wait: false };   // no tracer
+    if pt_wants_seccomp(k, pid) {
+      pt_seccomp_stop(&mut k, pid, act % 0x10000);
+      sp_put(&mut k, pid * SC_PW + SP_ST, SPS_TRACED);
+      return ScVerdict { run: false, ret: 0, wait: false, stop: true };
+    }
+    return ScVerdict { run: false, ret: ENOSYS, wait: false, stop: false };   // no tracer
   }
   sc_force(&mut k, pid, 31);                         // kill, whatever the action's thread or process
-  return ScVerdict { run: false, ret: ENOSYS, wait: false };
+  return ScVerdict { run: false, ret: ENOSYS, wait: false, stop: false };
 }
 
 /// A process that has a notification pending (state 1 or 2) tries its call
@@ -666,24 +681,24 @@ fn sc_pending(k: &mut Kernel, pid: u64) -> ScVerdict
   let f1 = smaller(sp_get(k, at + SP_F), SC_N);
   if f1 == 0 || sch_get(k, f1 - 1, 5) != 1 {
     sp_put(&mut k, at + SP_ST, 0);
-    return ScVerdict { run: false, ret: ENOSYS, wait: false };
+    return ScVerdict { run: false, ret: ENOSYS, wait: false, stop: false };
   }
   if st != 3 {
-    return ScVerdict { run: false, ret: 0, wait: true };
+    return ScVerdict { run: false, ret: 0, wait: true, stop: false };
   }
   sp_put(&mut k, at + SP_ST, 0);
   if sp_get(k, at + SP_FL) % 2 == 1 {
     // CONTINUE: the call runs, and is not filtered again.
-    return ScVerdict { run: true, ret: 0, wait: false };
+    return ScVerdict { run: true, ret: 0, wait: false, stop: false };
   }
   let e = sp_get(k, at + SP_ERR) % 0x100000000;
   if e != 0 {
     if e >= 0x80000000 {
-      return ScVerdict { run: false, ret: wrap_sub(0, 0x100000000 - e), wait: false };
+      return ScVerdict { run: false, ret: wrap_sub(0, 0x100000000 - e), wait: false, stop: false };
     }
-    return ScVerdict { run: false, ret: wrap_sub(0, e), wait: false };
+    return ScVerdict { run: false, ret: wrap_sub(0, e), wait: false, stop: false };
   }
-  return ScVerdict { run: false, ret: sp_get(k, at + SP_VAL), wait: false };
+  return ScVerdict { run: false, ret: sp_get(k, at + SP_VAL), wait: false, stop: false };
 }
 
 /// The process (not yet freed) whose notification in state st was issued by
