@@ -225,6 +225,14 @@ help_file 1 tree
 $ bb printf 'vim.cmd("edit /root/da.txt | call setline(1, [\"same\", \"old\", \"tail\"]) | diffthis")\nvim.cmd("vsplit /root/db.txt | call setline(1, [\"same\", \"new\", \"tail\"]) | diffthis")\nlocal function hl(l) return vim.fn.diff_hlID(l, 1) ~= 0 and "marked" or "plain" end\nlocal d = vim.diff("same\\nold\\ntail\\n", "same\\nnew\\ntail\\n", {result_type = "indices"})\nio.open("/root/dif.txt", "w"):write(hl(1), " ", hl(2), " ", hl(3), " ", vim.wo.diff and "diff" or "nodiff", " ", d[1][1], "\\n")\n' > /disk/a/root/dif.lua && bb chroot /disk/a /usr/bin/nvim -l /root/dif.lua >/dev/null 2>&1; bb cat /disk/a/root/dif.txt
 plain marked plain diff 2
 
+== nvim: tree-sitter parses C with a parser built from the grammar, and a query finds the function names
+$ bb cp /disk/tree-sitter-c.so /disk/a/usr/share/nvim/runtime/parser/c.so && bb printf 'local src = "int add(int a, int b) { return a + b; }\\nint main(void) { return add(1, 2); }\\n"\nlocal root = vim.treesitter.get_string_parser(src, "c"):parse()[1]:root()\nlocal q = vim.treesitter.query.parse("c", "(function_definition declarator: (function_declarator declarator: (identifier) @n))")\nlocal names = {}\nfor _, node in q:iter_captures(root, src) do names[#names + 1] = vim.treesitter.get_node_text(node, src) end\nio.open("/root/tsc.txt", "w"):write(table.concat(names, ","), "\\n")\n' > /disk/a/root/tsc.lua && bb chroot /disk/a /usr/bin/nvim -l /root/tsc.lua >/disk/a/root/e.txt 2>&1; bb cat /disk/a/root/e.txt | bb head -n 3; bb cat /disk/a/root/tsc.txt
+add,main
+
+== nvim: tree-sitter highlights C: the keyword, the type and the comment get their captures
+$ bb cp /disk/tree-sitter-c.so /disk/a/usr/share/nvim/runtime/parser/c.so && bb printf 'vim.cmd("enew")\nvim.api.nvim_buf_set_lines(0, 0, -1, false, {"int main(void) { return 0; } // done"})\nvim.treesitter.start(0, "c")\nvim.treesitter.get_parser(0, "c"):parse()\nlocal function cap(col) local c = vim.treesitter.get_captures_at_pos(0, 0, col) return c[1] and c[1].capture or "none" end\nio.open("/root/tsh.txt", "w"):write(cap(0), " ", cap(17), " ", cap(31), "\\n")\n' > /disk/a/root/tsh.lua && bb chroot /disk/a /usr/bin/nvim -l /root/tsh.lua >/disk/a/root/e.txt 2>&1; bb cat /disk/a/root/e.txt | bb head -n 3; bb cat /disk/a/root/tsh.txt
+type.builtin keyword.return comment
+
 == nvim: LuaJIT loads a shared object that gcc built
 $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf 'local ffi = require("ffi")\nffi.cdef[[int answer(void);]]\nio.open("/root/so.txt", "w"):write(ffi.load("/root/libso.so").answer(), "\\n")\n' > /disk/a/root/so.lua && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -shared -fPIC -o libso.so so.c && nvim -l so.lua >/dev/null 2>&1'; bb cat /disk/a/root/so.txt
 42
@@ -369,6 +377,10 @@ banana
 == nvim: :make reads gcc's error into the quickfix list and :cc jumps to its line
 $ bb printf 'int main(void) {\n  return undefined_var;\n}\n' > /disk/a/root/bad.c && bb printf 'vim.o.makeprg = "gcc -c /root/bad.c -o /dev/null"\nvim.cmd("silent make")\nlocal at, e\nfor i, x in ipairs(vim.fn.getqflist()) do if x.valid == 1 then at, e = i, x break end end\nvim.cmd("cc " .. at)\nio.open("/root/qf.txt", "w"):write(e.lnum, " ", vim.fn.line("."), " ", vim.fn.fnamemodify(vim.fn.bufname(vim.fn.bufnr()), ":t"), "\\n")\n' > /disk/a/root/qf.lua && bb chroot /disk/a /bin/sh -c 'cd /root && nvim -l /root/qf.lua >/dev/null 2>&1'; bb cat /disk/a/root/qf.txt
 2 2 bad.c
+
+== nvim: the edit-build-run loop on a C project: :make with make and gcc reports the error, the fix is saved, :make succeeds and the program runs
+$ bb mkdir -p /disk/a/root/proj && bb printf 'prog: main.c util.c\n\tgcc -Wall -o prog main.c util.c\n' > /disk/a/root/proj/Makefile && bb printf '#include <stdio.h>\nint answer(void);\nint main(void) { printf("answer=%%d\\n", answer()); return 0; }\n' > /disk/a/root/proj/main.c && bb printf 'int answer(void) {\n  return missing;\n}\n' > /disk/a/root/proj/util.c && bb printf 'local function nvalid() local n = 0 for _, x in ipairs(vim.fn.getqflist()) do if x.valid == 1 then n = n + 1 end end return n end\nvim.cmd("silent make")\nlocal before = nvalid()\nvim.cmd("cfirst")\nlocal l = vim.fn.getline("."):gsub("missing", "42")\nvim.fn.setline(".", l)\nvim.cmd("silent write")\nvim.cmd("silent make")\nlocal after = nvalid()\nlocal out = vim.trim(io.popen("/root/proj/prog"):read("*a"))\nio.open("/root/proj.txt", "w"):write(before > 0 and "error" or "noerror", " ", after, " ", out, "\\n")\n' > /disk/a/root/proj.lua && bb chroot /disk/a /bin/sh -c 'cd /root/proj && nvim -l /root/proj.lua >/dev/null 2>&1'; bb cat /disk/a/root/proj.txt
+error 0 answer=42
 
 == nvim: :grep with ripgrep fills the quickfix list
 $ bb chroot /disk/a /usr/bin/nvim --headless -u NONE -c 'set grepprg=rg\ --vimgrep' -c 'silent grep needle /root/rgp' -c 'call writefile([len(getqflist()) . " " . join(sort(map(getqflist(), "fnamemodify(bufname(v:val.bufnr), \":t\")")), ",")], "/root/rg.txt")' -c 'qa!' >/dev/null 2>&1; bb cat /disk/a/root/rg.txt
