@@ -632,7 +632,7 @@ fn ep_entry_bits(k: &Kernel, pid: u64, e: u64, j: u64) -> u64
 // epoll_ctl keeps the nesting at most EP_DEPTH instances deep and free
 // of loops, as Linux does.
 
-const EP_MASK: u64 = 65536;                  // 2 ^ EP_N: a set of instances is a bit mask below this
+const EP_MASK: u64 = 4294967296;                  // 2 ^ EP_N: a set of instances is a bit mask below this
 const EP_DEPTH: u64 = 5;                      // instances in the longest chain (Linux's EP_MAX_NESTS + 1)
 
 /// The epoll instance entry j of instance e watches, or EP_N if it

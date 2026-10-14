@@ -10,6 +10,16 @@
 #include <fcntl.h>
 #include <sched.h>
 
+/* Reads up to n - 1 bytes of path into b as a string; the count, or -1. */
+static int slurp(const char *path, char *b, int n) {
+    int fd = open(path, O_RDONLY), r;
+    if (fd < 0) return -1;
+    r = read(fd, b, n - 1);
+    close(fd);
+    if (r >= 0) b[r] = 0;
+    return r;
+}
+
 /* Writes s to a new file at path. */
 static int put(const char *path, const char *s) {
     FILE *f = fopen(path, "w");
@@ -118,6 +128,20 @@ int main(int argc, char **argv) {
         EXPECT("#! naming a missing interpreter is ENOENT", put("cp_bang", "#!/no/such/sh\n") &&
             execl("./cp_bang", "./cp_bang", (char *)0) == -1 && errno == ENOENT);
         unlink("cp_bang");
+    }
+    {
+        /* The plain sysctl numbers a program reads for a default, and
+         * writes back to the same file. */
+        char b[64];
+        EXPECT("sysctl somaxconn reads 4096", slurp("/proc/sys/net/core/somaxconn", b, sizeof b) > 0 && strcmp(b, "4096\n") == 0);
+        EXPECT("sysctl overcommit_memory reads 0", slurp("/proc/sys/vm/overcommit_memory", b, sizeof b) > 0 && strcmp(b, "0\n") == 0);
+        EXPECT("sysctl max_map_count reads 65530", slurp("/proc/sys/vm/max_map_count", b, sizeof b) > 0 && strcmp(b, "65530\n") == 0);
+        EXPECT("sysctl cap_last_cap reads 40", slurp("/proc/sys/kernel/cap_last_cap", b, sizeof b) > 0 && strcmp(b, "40\n") == 0);
+        EXPECT("sysctl ip_local_port_range has two numbers", slurp("/proc/sys/net/ipv4/ip_local_port_range", b, sizeof b) > 0 && strcmp(b, "32768\t60999\n") == 0);
+        EXPECT("writing a sysctl number reads back", put("/proc/sys/vm/swappiness", "10\n") && slurp("/proc/sys/vm/swappiness", b, sizeof b) > 0 && strcmp(b, "10\n") == 0);
+        EXPECT("a sysctl number rejects text", ({ int fd = open("/proc/sys/vm/swappiness", O_WRONLY); int r = fd < 0 ? 0 : (write(fd, "x\n", 2) == -1 && errno == EINVAL); if (fd >= 0) close(fd); r; }));
+        EXPECT("a read-only sysctl is not opened for writing", open("/proc/sys/fs/file-nr", O_WRONLY) == -1);
+        EXPECT("a sysctl file is a regular file", ({ struct stat sb; stat("/proc/sys/vm/swappiness", &sb) == 0 && S_ISREG(sb.st_mode) && (sb.st_mode & 0777) == 0644; }));
     }
     return done();
 }

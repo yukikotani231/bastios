@@ -57,6 +57,7 @@ import "lxmq.bastio";
 import "lxsys.bastio";
 import "lxlock.bastio";
 import "lxowner.bastio";
+import "lxsysctl.bastio";
 import "lxprocfs.bastio";
 import "lxprctl.bastio";
 import "lxrlimit.bastio";
@@ -671,6 +672,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       s.reboot = what == REBOOT;
     }
     sock_wake(&mut s.k);
+    if what == SWITCH {
+      sig_wake_now(&mut s.k, p);            // a signal posted while it ran is not lost to its sleep
+    }
     if disk_hold(&mut s.k, p, EIO) || what == SWITCH {
       return (p + 1) % NPROC;
     }
