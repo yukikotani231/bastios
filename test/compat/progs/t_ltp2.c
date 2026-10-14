@@ -226,6 +226,25 @@ int main(void) {
                syscall(SYS_mq_notify, q, &se) == -1 && errno == EINVAL &&
                mq_open("/ltp2q", O_RDWR | O_CREAT | O_EXCL, 0600, &at) == (mqd_t)-1 && errno == EEXIST;
            mq_close(q); ok && mq_unlink("/ltp2q") == 0 && mq_unlink("/ltp2q") == -1 && errno == ENOENT; }));
+    EXPECT("mqueue: 32 queues at once, a 33rd is ENOSPC, each keeps its own messages", ({
+           struct mq_attr at = {.mq_maxmsg = 2, .mq_msgsize = 8}; mqd_t q[33]; char nm[16], b[8]; unsigned pr;
+           int n = 0, ok = 1;
+           for (int i = 0; i < 33; i++) q[i] = (mqd_t)-1;
+           for (int i = 0; i < 32; i++) {
+               snprintf(nm, sizeof nm, "/ltp2m%d", i); mq_unlink(nm);
+               q[i] = mq_open(nm, O_RDWR | O_CREAT | O_EXCL, 0600, &at);
+               if (q[i] != (mqd_t)-1) { n++; char m[2] = {'a' + i % 26, 0}; ok = ok && mq_send(q[i], m, 1, 0) == 0; }
+           }
+           q[32] = mq_open("/ltp2m32", O_RDWR | O_CREAT | O_EXCL, 0600, &at);
+           ok = ok && n == 32 && q[32] == (mqd_t)-1 && errno == ENOSPC;
+           for (int i = 0; ok && i < 32; i++)
+               ok = mq_receive(q[i], b, 8, &pr) == 1 && b[0] == 'a' + i % 26;
+           for (int i = 0; i < 32; i++) {
+               snprintf(nm, sizeof nm, "/ltp2m%d", i);
+               if (q[i] != (mqd_t)-1) mq_close(q[i]);
+               mq_unlink(nm);
+           }
+           ok; }));
     EXPECT("mqueue: mq_notify SIGEV_THREAD runs its function once, a second registration is EBUSY", ({
            struct mq_attr at = {.mq_maxmsg = 4, .mq_msgsize = 16};
            mq_unlink("/ltp2n"); mqd_t q = mq_open("/ltp2n", O_RDWR | O_CREAT | O_EXCL, 0600, &at);

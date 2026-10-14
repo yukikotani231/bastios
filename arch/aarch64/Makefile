@@ -351,6 +351,14 @@ $(B)/compat/bastioc1: $(B)/compat/bastioc1.c
 BASTIO_TOOLS = $(shell BASTIO_DEPCC=gcc BASTIO_DEPMODE=-E BASTIO_CLIBS="crt1.o crti.o crtn.o libc.a" test/compat/bastiotools.sh \
   $(B)/compat/bastioc1 $(B)/compat/bastioc1.c $(B)/compat/z3 $(B)/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_ROOT)/include $(MUSL_ROOT)/lib)
 
+# The Bastio disk (test/compat/bastio.txt): the same toolchain and the programs
+# it builds, on a disk of its own, as on x86-64 (bastiodisk.sh).
+$(B)/compat/bastio.img: $(B)/compat/bastioc1 $(B)/compat/z3 $(B)/compat/tcc $(B)/compat/musl/lib/libc.a test/compat/bastiodisk.sh \
+    test/compat/bastiotools.sh $(wildcard test/compat/bastio/*.bastio) test/compat/mkdisk.py | $(B)/compat
+	BASTIO_DEPCC=gcc BASTIO_DEPMODE=-E BASTIO_CLIBS="crt1.o crti.o crtn.o libc.a" test/compat/bastiodisk.sh $@ \
+	  $(B)/compat/bastioc1 $(B)/compat/bastioc1.c $(B)/compat/z3 $(B)/compat/tcc $(CURDIR)/$(TCC_SRC) \
+	  $(MUSL_ROOT)/include $(MUSL_ROOT)/lib $(BASTIOLIB)/stage1
+
 # Debian (glibc) and Node (musl, V8) the same way, from the arm64 layers.
 $(B)/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox
 	COMPAT_ARCH=aarch64 test/compat/debiandisk.py $@ $(DEBIAN_IMAGE) $(B)/compat/busybox --cache $(ALPINE_CACHE)
@@ -358,9 +366,9 @@ $(B)/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py test
 $(B)/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox
 	COMPAT_ARCH=aarch64 test/compat/nodedisk.py $@ $(NODE_IMAGE) $(B)/compat/busybox --cache $(ALPINE_CACHE)
 
-COMPAT_DISKS := $(B)/compat/disk.img $(B)/compat/alpine.img $(B)/compat/debian.img $(B)/compat/node.img
+COMPAT_DISKS := $(B)/compat/disk.img $(B)/compat/bastio.img $(B)/compat/alpine.img $(B)/compat/debian.img $(B)/compat/node.img
 COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox,apps --kernel $(B)/bastios.bin \
-              --disk $(B)/compat/disk.img --alpine-disk $(B)/compat/alpine.img \
+              --disk $(B)/compat/disk.img --bastio-disk $(B)/compat/bastio.img --alpine-disk $(B)/compat/alpine.img \
               --alpine-repo $(B)/compat/alpine/disk/http \
               --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST)-arm64.json --debian-disk $(B)/compat/debian.img \
               --node-disk $(B)/compat/node.img --out $(B)/compat

@@ -432,6 +432,7 @@ t_ltp2: mincore errors
 t_ltp2: mincore marks mapped pages
 t_ltp2: mlockall and munlockall succeed
 t_ltp2: mqueue: priorities order messages, getattr counts, unlink, bad sigevent EINVAL
+t_ltp2: mqueue: 32 queues at once, a 33rd is ENOSPC, each keeps its own messages
 t_ltp2: mqueue: mq_notify SIGEV_THREAD runs its function once, a second registration is EBUSY
 t_ltp2: nested epoll: readiness passes up, a loop is ELOOP
 t_ltp2: nice: root lowers and raises it, a child inherits it, nobody may not lower it
@@ -577,6 +578,7 @@ t_misc: printf %f
 t_misc: qsort
 t_misc: sched_getaffinity
 t_misc: seccomp filter denies getpid
+t_misc: forty stacked seccomp filters
 t_misc: statfs
 t_misc: strtod
 t_misc: sync
@@ -701,6 +703,11 @@ t_nopie: the bss covers what the kernel image would
 t_nopie: the data follows it
 t_nopie: the text is where it was linked
 t_nopie: the whole bss is usable
+t_nsmany: 24 IPC namespaces at once
+t_nsmany: 60 tmpfs mounts at once, each with its own files
+t_nsmany: 24 PID namespaces at once
+t_nsmany: 24 UTS namespaces at once, each with its own name
+t_nsmany: and 24 more once those are gone
 t_openat2: /proc/self/exe opens the program
 t_openat2: BENEATH inside opens
 t_openat2: BENEATH through a link inside opens
@@ -806,6 +813,15 @@ t_proc: uname
 t_proc: wait with no children is ECHILD
 t_proc: waitid
 t_proc: waitpid WNOHANG
+t_proc: sysctl somaxconn reads 4096
+t_proc: sysctl overcommit_memory reads 0
+t_proc: sysctl max_map_count reads 65530
+t_proc: sysctl cap_last_cap reads 40
+t_proc: sysctl ip_local_port_range has two numbers
+t_proc: writing a sysctl number reads back
+t_proc: a sysctl number rejects text
+t_proc: a read-only sysctl is not opened for writing
+t_proc: a sysctl file is a regular file
 t_ptrace: PTRACE_ATTACH stops the target with SIGSTOP
 t_ptrace: PTRACE_CONT with a signal runs the handler for it
 t_ptrace: PTRACE_CONT without a signal drops the one that stopped it, and the child saw the poke
@@ -903,11 +919,17 @@ t_signal: sigsuspend
 t_signal: sigwait
 t_signal: timer_create
 t_signal: unblock delivers
+t_sigsleep: a signal sent to a thread about to sleep in a futex wait runs its handler
 t_sock2: AF_UNIX SOCK_DGRAM socketpair
 t_sock2: MSG_DONTWAIT on an empty socket is EAGAIN
 t_sock2: MSG_PEEK leaves the bytes
 t_sock2: SA_RESTART restarts a read
 t_sock2: SCM_RIGHTS passes a descriptor
+t_sock2: SCM_RIGHTS passes several descriptors in one message
+t_sock2: SCM_RIGHTS with a short buffer closes the rest and says MSG_CTRUNC
+t_sock2: bytes sent before a message with descriptors are read first, and leave the descriptors for the recvmsg
+t_sock2: SCM_RIGHTS with a bad descriptor among several is EBADF
+t_sock2: SCM_RIGHTS from two clients that sent and closed before the accept, and a child that closes the listener
 t_sock2: SO_ERROR is 0
 t_sock2: SO_KEEPALIVE
 t_sock2: SO_RCVBUF and SO_SNDBUF
@@ -937,6 +959,8 @@ t_sys: splice reads a /proc file into a pipe
 t_sys: settimeofday
 t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message
+t_sysv: 32 queues, semaphore sets and segments at once, the 33rd of each is ENOSPC
+t_sysv: 16 attachments in one process, the 17th is EMFILE
 t_sysv: GETNCNT counts a waiting process
 t_sysv: IPC_RMID ends a wait with EIDRM
 t_sysv: SEM_UNDO is undone at exit
@@ -996,6 +1020,7 @@ tty: epoll: keys reach a program waiting in epoll_wait on /dev/tty
 alpine-tty: nvim: :make runs gcc through make
 alpine-tty: nvim: edit a C file, build it with gcc, run it
 alpine-tty: nvim: edit a file in a git work tree, then commit it
+alpine-tty: nvim: git commit opens Neovim as the editor, and the message typed there is the commit's
 alpine-tty: nvim: edit and save a C file
 alpine: apk: install neovim over HTTP
 alpine: nvim: a script run without a terminal
@@ -1014,6 +1039,7 @@ alpine: dropbear: the server stops, in the Alpine guest
 alpine-tty: nvim: it reads the terminal's size, and has colours
 alpine-tty: tmux: attach on the console, run a command in the session, detach and find it still there
 alpine-tty: tmux: Neovim in a pane takes keys through tmux and saves the file
+alpine-tty: nvim: :terminal runs a shell in a window, takes typed keys, and the shell's exit closes it
 node: node: a hot loop is compiled and gives the right sum
 node: node: a script with arrays and JSON
 node: node: an expression
@@ -1032,8 +1058,12 @@ apps: ripgrep: replacement, multi-line and standard input
 apps: ripgrep: search with line numbers, honouring .ignore
 alpine: git: clone over HTTP and over HTTPS (git's dumb protocol, curl's TLS)
 alpine: nvim: tree-sitter parses help text with the vimdoc parser
+alpine: nvim: tree-sitter parses C with a parser built from the grammar, and a query finds the function names
+alpine: nvim: tree-sitter highlights C: the keyword, the type and the comment get their captures
+alpine: nvim: :diffthis marks the line that differs, and vim.diff finds the hunk
 alpine: nvim: LuaJIT loads a shared object that gcc built
 alpine: nvim: a plugin cloned over HTTP is on the packpath and runs at startup
+alpine: nvim: a small plugin manager in Lua clones a plugin, loads it, then updates it with git pull
 alpine: nvim: vim.system runs a process and collects its output and status
 alpine: nvim: a job on a pseudo-terminal (what :terminal runs on, with /dev and /dev/pts bound into the chroot)
 alpine: nvim: a file watcher and a timer from libuv
@@ -1046,16 +1076,25 @@ alpine: container: the root file system is read-only, and the exit status comes 
 alpine: container: rootless: runc runs Alpine as an unprivileged user in a user namespace of its own
 alpine: container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle
 alpine: container: the image's command, environment and working directory run rootless from the bundle
+alpine: container: runc joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
+alpine: container: runc runs on an overlay of the image root: writes and deletions stay in the upper layer
+alpine: container: runc loads a seccomp filter from the config: mkdir answers EPERM, the rest runs
 alpine: nvim: a headless server on a unix socket answers another nvim (--listen, sockconnect, RPC)
 alpine: apk: install tmux, cmake and lua-language-server over HTTP
 alpine: tmux: a client on the console passes it to the server (SCM_RIGHTS of the console)
 alpine: tmux: a detached session runs a shell on a pseudo-terminal, takes keys and shows its screen
 alpine: apk: install ripgrep and fzf over HTTP
 alpine: rg and fzf: search a tree, filter a list
+alpine: nvim: :make reads gcc's error into the quickfix list and :cc jumps to its line
 alpine: nvim: :grep with ripgrep fills the quickfix list
 alpine: cmake: configure, build and run a C project
 alpine: nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
 alpine: proc: /proc/self/exe is named from the reader's root (chroot), as on Linux
+alpine: apk: free the disk, then install python3 over HTTP
+alpine: python3: asyncio talks over a socketpair
+alpine: python3: asyncio runs a subprocess
+alpine: python3: sqlite3, zlib and hashlib
+alpine: python3: multiprocessing Pools of two workers, three times (the forkserver reads bytes sent before the descriptors)
 t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
 t_gai: AF_INET6 UDP connect to :: reads back ::1
 t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1

@@ -473,6 +473,20 @@ build/compat/runc: | build/compat/src
 	echo "$(RUNC_SHA256)  $@.part" | sha256sum -c - >/dev/null
 	chmod +x $@.part && mv $@.part $@
 
+# The tree-sitter C parser for Neovim: Alpine's neovim package ships only the
+# vimdoc parser, so the grammar's generated parser.c, from the npm package at a
+# pinned version and SHA-256, is built into a shared object (nvim loads
+# parser/c.so; the C queries come with neovim). It runs on BastiOS only.
+TREESITTER_C_VER    := 0.24.1
+TREESITTER_C_SHA256 := 8e9ecd7687665d2fa1b3c07fbd1f4380b7d285850d6954629e2156e1b757451e
+build/compat/tree-sitter-c.so: | build/compat/src
+	curl -fsSL -o build/compat/src/tree-sitter-c.tgz https://registry.npmjs.org/tree-sitter-c/-/tree-sitter-c-$(TREESITTER_C_VER).tgz
+	echo "$(TREESITTER_C_SHA256)  build/compat/src/tree-sitter-c.tgz" | sha256sum -c - >/dev/null
+	rm -rf build/compat/src/tree-sitter-c && mkdir build/compat/src/tree-sitter-c
+	tar xzf build/compat/src/tree-sitter-c.tgz -C build/compat/src/tree-sitter-c --strip-components=1 package/src
+	$(MUSLCC) -shared -fPIC -O2 -Wl,-s -I build/compat/src/tree-sitter-c/src -o $@.part build/compat/src/tree-sitter-c/src/parser.c
+	mv $@.part $@
+
 # Dropbear, the SSH server (and its client and key tool, which also run on
 # the host: ssh.txt logs in from here). The keys are made for the test:
 # the server's host key and a client key whose public half goes in
@@ -689,10 +703,10 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # over SSH.
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh \
     build/compat/bastioc1 build/compat/z3 build/compat/tcc \
-    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc tools/ocipull.sh | build/compat
+    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/tree-sitter-c.so tools/ocipull.sh | build/compat
 	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) $(ALPINE_X86_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) \
 	  --extra "$$(test/compat/bastiotools.sh build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)) \
-	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc tools/ocipull.sh"
+	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/tree-sitter-c.so tools/ocipull.sh"
 
 # Debian on BastiOS, on a fifth disk (test/compat/debiandisk.py) for
 # test/compat/debian.txt: Debian's root file system, whose programs are
