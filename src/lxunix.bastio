@@ -71,6 +71,7 @@ const UXC0: u64 = 112;                 // UXF0 + UX_N: the channels' credentials
 const UXLC0: u64 = 144;                // UXC0 + 2 * UX_N: the listeners' credentials
 const UXH0: u64 = 152;                 // UXLC0 + 2 * UX_LIS: the listeners' socket files
 const UXE0: u64 = 156;                 // UXH0 + UX_LIS: the other descriptions in flight, UX_XTRA per channel
+const UXO0: u64 = 268;                 // UXE0 + UX_N * UX_XTRA: where in the channel the in-flight message starts
 const SO_PEERCRED: u64 = 17;
 const UX_DG: u64 = 16;                 // word 3: a datagram socket
 const SUN_LEN: u64 = 110;              // sizeof(struct sockaddr_un)
@@ -156,6 +157,24 @@ fn uc_set_fly(k: &mut Kernel, c: u64, v: u64)
   ensures kok(k)
 {
   k.ux = set(k.ux, UXF0 + c, v);
+  if v == 0 {
+    k.ux = set(k.ux, UXO0 + c, 0);
+  }
+}
+
+/// How many bytes sent before the in-flight message are still queued ahead
+/// of it: a read takes those first and leaves the descriptions in place.
+fn uc_off(k: &Kernel, c: u64) -> u64
+  requires kok(k) && c < UX_N
+{
+  return get(k.ux, UXO0 + c);
+}
+
+fn uc_set_off(k: &mut Kernel, c: u64, v: u64)
+  requires kok(k) && c < UX_N
+  ensures kok(k)
+{
+  k.ux = set(k.ux, UXO0 + c, v);
 }
 
 /// The other descriptions (number + 1, or 0) a message in flight on
@@ -1273,7 +1292,11 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
   } else if n == 0 {
     return 0;
   }
-  let want = smaller(smaller(n, avail), XFER);
+  let mut want = smaller(smaller(n, avail), XFER);
+  let ahead = uc_off(k, c);
+  if !peek && !u.dg && uc_fly(k, c) > 0 && ahead > 0 {
+    want = smaller(want, ahead);            // bytes sent before the descriptions come out alone
+  }
   ring_out(&mut k.fs.xfer, 0, k.uxb, c * UX_CAP, UX_CAP, ring_slot(r, lead), want);
   let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, want);
   if put == NO_RESULT || put != want {
@@ -1282,8 +1305,14 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
   if !peek {
     // A description sent with these bytes goes with them: read and recv
     // drop it (recvmsg took it out first), as Linux does.
+    let mut used = put;
+    if u.dg {
+      used = avail;                         // the whole message goes
+    }
     let f = uc_fly(k, c);
-    if f > 0 {
+    if f > 0 && ahead >= lead + used {
+      uc_set_off(&mut k, c, ahead - lead - used);   // only bytes before the message went
+    } else if f > 0 {
       uc_set_fly(&mut k, c, 0);
       if f <= OFD_N {
         unref_value(&mut k, FD_OFD + f - 1);
@@ -1296,10 +1325,6 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
         unref_value(&mut k, xv);
         q = q + 1;
       }
-    }
-    let mut used = put;
-    if u.dg {
-      used = avail;                         // the whole message goes
     }
     ring_pop_n(&mut r, lead + used);
     uc_keep(&mut k, c, r);

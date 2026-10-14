@@ -88,6 +88,22 @@ int main(void) {
            struct msghdr r = {.msg_iov = &rv, .msg_iovlen = 1, .msg_control = rb, .msg_controllen = sizeof rb};
            ok = ok && recvmsg(sv[1], &r, 0) == 1 && (r.msg_flags & MSG_CTRUNC) && (h = CMSG_FIRSTHDR(&r)) && h->cmsg_len == CMSG_LEN(2 * sizeof(int));
            ok; }));
+    EXPECT("bytes sent before a message with descriptors are read first, and leave the descriptors for the recvmsg", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 && ({
+           int p[2]; pipe(p);
+           char cb[CMSG_SPACE(sizeof(int))] = {0}; struct iovec v = {"c", 1};
+           struct msghdr m = {.msg_iov = &v, .msg_iovlen = 1, .msg_control = cb, .msg_controllen = sizeof cb};
+           struct cmsghdr *h = CMSG_FIRSTHDR(&m); h->cmsg_level = SOL_SOCKET; h->cmsg_type = SCM_RIGHTS; h->cmsg_len = CMSG_LEN(sizeof(int));
+           memcpy(CMSG_DATA(h), &p[1], sizeof(int));
+           char x[4];
+           int ok = write(sv[0], "ab", 2) == 2 && sendmsg(sv[0], &m, 0) == 1 &&
+                    read(sv[1], x, 1) == 1 && x[0] == 'a' &&      // a plain read before the message
+                    read(sv[1], x, 3) == 1 && x[0] == 'b';        // and one that would run into it stops short
+           char rb[CMSG_SPACE(sizeof(int))]; struct iovec rv = {x, 1};
+           struct msghdr r = {.msg_iov = &rv, .msg_iovlen = 1, .msg_control = rb, .msg_controllen = sizeof rb};
+           int fd = -1;
+           ok = ok && recvmsg(sv[1], &r, 0) == 1 && x[0] == 'c' && (h = CMSG_FIRSTHDR(&r)) && h->cmsg_type == SCM_RIGHTS && (memcpy(&fd, CMSG_DATA(h), sizeof fd), fd >= 0) &&
+                write(fd, "z", 1) == 1 && read(p[0], x, 1) == 1 && x[0] == 'z';
+           ok; }));
     EXPECT("SCM_RIGHTS with a bad descriptor among several is EBADF", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 && ({
            int p[2]; pipe(p); int fds[2] = {p[1], 999};
            char cb[CMSG_SPACE(2 * sizeof(int))] = {0}; struct iovec v = {"f", 1};

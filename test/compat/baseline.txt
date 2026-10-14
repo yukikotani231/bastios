@@ -917,6 +917,7 @@ t_sock2: SA_RESTART restarts a read
 t_sock2: SCM_RIGHTS passes a descriptor
 t_sock2: SCM_RIGHTS passes several descriptors in one message
 t_sock2: SCM_RIGHTS with a short buffer closes the rest and says MSG_CTRUNC
+t_sock2: bytes sent before a message with descriptors are read first, and leave the descriptors for the recvmsg
 t_sock2: SCM_RIGHTS with a bad descriptor among several is EBADF
 t_sock2: SCM_RIGHTS from two clients that sent and closed before the accept, and a child that closes the listener
 t_sock2: SO_ERROR is 0
@@ -1080,7 +1081,7 @@ alpine: apk: free the disk, then install python3 over HTTP
 alpine: python3: asyncio talks over a socketpair
 alpine: python3: asyncio runs a subprocess
 alpine: python3: sqlite3, zlib and hashlib
-alpine: python3: a multiprocessing Pool (the forkserver gets several descriptors in one message)
+alpine: python3: multiprocessing Pools of two workers, three times (the forkserver reads bytes sent before the descriptors)
 t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
 t_gai: AF_INET6 UDP connect to :: reads back ::1
 t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1
