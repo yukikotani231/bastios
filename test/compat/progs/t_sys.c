@@ -13,6 +13,9 @@
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <time.h>
+#define ENOKEY_ 126
+#define EKEYEXPIRED_ 127
+#define EKEYREVOKED_ 128
 
 static int slurp(const char *path, char *buf, int n) {
     FILE *f = fopen(path, "r");
@@ -366,6 +369,95 @@ static int splice_proc(void) {
     return ok;
 }
 
+/* Kernel keys: add_key, request_key and keyctl. */
+#define K_ADD 248
+#define K_REQ 249
+#define K_CTL 250
+#define KS_THREAD (-1)
+#define KS_PROCESS (-2)
+#define KS_SESSION (-3)
+static long kadd(const char *type, const char *desc, const void *pl, size_t n, long ring) { return syscall(K_ADD, type, desc, pl, n, ring); }
+static long kctl(long cmd, long a, long b, long c, long d) { return syscall(K_CTL, cmd, a, b, c, d); }
+
+static int keys_basic(void) {
+    char buf[64], want[64];
+    long key, again, ring, look;
+    if (kctl(1, 0, 0, 0, 0) < 0) return 0;                          /* JOIN_SESSION_KEYRING: a new one */
+    key = kadd("user", "compatkey", "hello", 5, KS_SESSION);
+    if (key <= 0) return 0;
+    if (kctl(11, key, (long)buf, sizeof buf, 0) != 5 || memcmp(buf, "hello", 5)) return 0;      /* READ */
+    snprintf(want, sizeof want, "user;%u;%u;3f000000;compatkey", (unsigned)getuid(), (unsigned)getgid());
+    memset(buf, 0, sizeof buf);
+    if (kctl(6, key, (long)buf, sizeof buf, 0) != (long)strlen(want) + 1 || strcmp(buf, want)) return 0;   /* DESCRIBE */
+    again = kadd("user", "compatkey", "bye", 3, KS_SESSION);        /* the same type and description: an update */
+    if (again != key || kctl(11, key, (long)buf, sizeof buf, 0) != 3 || memcmp(buf, "bye", 3)) return 0;
+    look = syscall(K_REQ, "user", "compatkey", NULL, 0);            /* request_key finds it */
+    if (look != key) return 0;
+    errno = 0;
+    if (syscall(K_REQ, "user", "nosuchkey", NULL, 0) != -1 || errno != ENOKEY_) return 0;
+    ring = kadd("keyring", "compatring", NULL, 0, KS_SESSION);
+    if (ring <= 0 || kctl(8, key, ring, 0, 0) != 0) return 0;       /* LINK */
+    if (kctl(11, ring, (long)buf, sizeof buf, 0) != 4) return 0;    /* a keyring reads as serial numbers */
+    if (kctl(10, ring, (long)"user", (long)"compatkey", 0) != key) return 0;                    /* SEARCH */
+    if (kctl(9, key, ring, 0, 0) != 0 || kctl(11, ring, (long)buf, sizeof buf, 0) != 0) return 0;   /* UNLINK */
+    return 1;
+}
+
+static int keys_errors(void) {
+    char big[40000];
+    long key;
+    memset(big, 'x', sizeof big);
+    errno = 0;
+    if (kadd("bogus", "d", "x", 1, KS_SESSION) != -1 || errno != ENODEV) return 0;
+    errno = 0;
+    if (kadd("user", "d", big, 32768, KS_SESSION) != -1 || errno != EINVAL) return 0;
+    errno = 0;
+    if (kadd("user", "d", NULL, 4, KS_SESSION) != -1 || errno != EFAULT) return 0;
+    if (kadd("user", "big", big, 32767, KS_SESSION) <= 0) return 0;
+    key = kadd("user", "tmo", "x", 1, KS_SESSION);
+    if (key <= 0 || kctl(15, key, 1, 0, 0) != 0) return 0;          /* SET_TIMEOUT */
+    sleep(2);
+    errno = 0;
+    if (kctl(11, key, (long)big, 8, 0) != -1 || errno != EKEYEXPIRED_) return 0;
+    key = kadd("user", "rev", "x", 1, KS_SESSION);
+    if (key <= 0 || kctl(3, key, 0, 0, 0) != 0) return 0;           /* REVOKE */
+    errno = 0;
+    if (kctl(11, key, (long)big, 8, 0) != -1 || errno != EKEYREVOKED_) return 0;
+    errno = 0;
+    if (kctl(11, 0x7ffffff0, (long)big, 8, 0) != -1 || errno != ENOKEY_) return 0;
+    return 1;
+}
+
+static int keys_inherit(void) {
+    long key;
+    int st;
+    pid_t p;
+    if (kctl(1, 0, 0, 0, 0) < 0) return 0;
+    key = kadd("user", "inherited", "v", 1, KS_SESSION);
+    if (key <= 0) return 0;
+    p = fork();
+    if (p == 0) {                                                    /* the session keyring is the parent's */
+        char b[8];
+        long mine = kadd("user", "fromchild", "c", 1, KS_PROCESS);
+        _exit(syscall(K_REQ, "user", "inherited", NULL, 0) == key && kctl(11, key, (long)b, sizeof b, 0) == 1
+              && mine > 0 && kctl(11, mine, (long)b, sizeof b, 0) == 1 ? 0 : 1);
+    }
+    if (p < 0 || waitpid(p, &st, 0) != p || !WIFEXITED(st) || WEXITSTATUS(st) != 0) return 0;
+    return syscall(K_REQ, "user", "fromchild", NULL, 0) == -1;       /* a process keyring is not shared */
+}
+
+static int keys_negative(void) {
+    long ring, id;
+    char b[8];
+    if (kctl(1, 0, 0, 0, 0) < 0) return 0;
+    ring = kadd("keyring", "negring", NULL, 0, KS_SESSION);
+    errno = 0;
+    if (ring <= 0 || syscall(K_REQ, "user", "nokey", "callout", ring) != -1 || errno != ENOKEY_) return 0;
+    if (kctl(11, ring, (long)&id, sizeof id, 0) != 4) return 0;      /* a negative key stands for the failure */
+    errno = 0;
+    return kctl(11, id, (long)b, sizeof b, 0) == -1 && errno == ENOKEY_;
+}
+
 int main(void) {
     setup();
     EXPECT("sethostname, uname, /proc/sys/kernel/hostname", hostname());
@@ -380,5 +472,9 @@ int main(void) {
     EXPECT("memory.max kills the biggest process of a group that passes it", cgroup_mem());
     EXPECT("seccomp USER_NOTIF: a supervisor answers a call", notifier());
     EXPECT("seccomp NOTIF_ADDFD installs a descriptor in the caller", notif_addfd());
+    EXPECT("keys: add_key, read, describe, update, request_key, link, search, unlink", keys_basic());
+    EXPECT("keys: unknown type, bad payload, expiry, revocation, no such key", keys_errors());
+    EXPECT("keys: a child shares the session keyring but not the process keyring", keys_inherit());
+    EXPECT("keys: request_key with a callout leaves a negative key", keys_negative());
     return done();
 }
