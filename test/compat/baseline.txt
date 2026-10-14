@@ -578,6 +578,7 @@ t_misc: printf %f
 t_misc: qsort
 t_misc: sched_getaffinity
 t_misc: seccomp filter denies getpid
+t_misc: forty stacked seccomp filters
 t_misc: statfs
 t_misc: strtod
 t_misc: sync

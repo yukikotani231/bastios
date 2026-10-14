@@ -619,7 +619,7 @@ const MNS_SC: u64 = MNS_PQ + PQ_N;          // the seccomp pool (src/lxseccomp.b
 // (holders, parent + 1, instruction count, in use, first instruction, listener open), the
 // scratch words a run uses, then SC_POOL instructions for all of them.
 const SC_PW: u64 = 8;
-const SC_N: u64 = 8;
+const SC_N: u64 = 64;
 const SC_WAIT: u64 = 18446744073709546616;   // 2^64 - 5000: not a result, not an errno: sleep, then run the call again
 const SC_FOREVER: u64 = 18446744073709551613;   // FOREVER (src/lxtime.bastio): a wait with no deadline
 const SC_HW: u64 = 6;
@@ -627,7 +627,7 @@ const SC_MAXI: u64 = 4096;
 const SC_SCR: u64 = SC_N * SC_HW;
 const SC_SCRN: u64 = 24;
 const SC_INS: u64 = SC_SCR + SC_SCRN;
-const SC_POOL: u64 = 8192;               // instructions shared by all filters
+const SC_POOL: u64 = 65536;              // instructions shared by all filters
 const SCF_LEN: u64 = SC_INS + SC_POOL + 1;   // and one word that always reads 0
 const MNS_LEN: u64 = MNS_SC + NPROC * SC_PW;
 const MSTR_LEN: u64 = 256 + MT_N * 512 + 256;   // the last lookup's logical path, then a key and a source per mount, then a path kept by ovl_stash
