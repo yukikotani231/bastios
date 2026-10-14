@@ -2527,6 +2527,20 @@ good = code == 0 and m and off and m.group(1) == off.group(1)
 print(("ok  " if good else "FAIL"), f"(24 processors) every page back, and S5 (status {code})")
 fails += not good
 
+# 255 processors, the most the xAPIC's eight-bit ids can address (a
+# processor beyond that needs x2APIC mode, which QEMU emulates without KVM
+# only from 9.0, so the 256th is out of reach of this test): every one
+# starts and reports itself, and every page comes back at power off.
+ok, code = report_boot(["-m", "512M", "-smp", "255"], "255 processors", 0)
+good = ok and b"pages of memory, 255 processors" in out
+print(("ok  " if good else "FAIL"), "(255 processors) all 255 start")
+fails += not good
+m = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
+off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+good = code == 0 and m and off and m.group(1) == off.group(1)
+print(("ok  " if good else "FAIL"), f"(255 processors) every page back, and S5 (status {code})")
+fails += not good
+
 # A disk that is not blank and has no BastiOS file system (an MBR's
 # signature; or only a GPT's backup header at the end) is someone else's:
 # it is not formatted, and not a byte of it changes.
