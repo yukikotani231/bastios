@@ -473,7 +473,10 @@ static int exit_signal(void) {
     if (c < 0) return 0;
     if (c == 0) _exit(0);
     int st;
-    if (waitpid((pid_t)c, &st, __WALL) != (pid_t)c) return 0;
+    pid_t w;
+    while ((w = waitpid((pid_t)c, &st, __WALL)) == -1 && errno == EINTR) {}   /* the exit signal interrupts the wait */
+    if (w != (pid_t)c) return 0;
+    for (int i = 0; i < 100 && exit_sig_seen == 0; i++) usleep(10000);   /* the signal may land just after the wait returns */
     return exit_sig_seen == SIGUSR2;
 }
 
