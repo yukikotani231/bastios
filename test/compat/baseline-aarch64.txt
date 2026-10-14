@@ -1135,3 +1135,5 @@ alpine: nvim: :grep with ripgrep fills the quickfix list
 alpine: tmux: a detached session runs a shell on a pseudo-terminal, takes keys and shows its screen
 alpine: tmux: a client on the console passes it to the server (SCM_RIGHTS of the console)
 alpine-tty: tmux: attach on the console, run a command in the session, detach and find it still there
+alpine-tty: tmux: Neovim in a pane takes keys through tmux and saves the file
+alpine-tty: nvim: :make runs make and the build succeeds

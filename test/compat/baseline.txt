@@ -938,6 +938,8 @@ t_ptrace: a tracee that is running is ESRCH
 t_ptrace: PTRACE_SEIZE attaches without stopping the tracee
 t_ptrace: PTRACE_INTERRUPT stops it with PTRACE_EVENT_STOP and SIGTRAP
 t_ptrace: a seized tracee resumed with PTRACE_CONT runs to its end
+t_ptrace: a sleeping seized tracee is stopped by PTRACE_INTERRUPT
+t_ptrace: it can be resumed and then killed
 t_ptrace: attaching to itself is EPERM
 t_ptrace: attaching to what is traced already is EPERM
 t_ptrace: PTRACE_SYSCALL stops at getpid and gettid
