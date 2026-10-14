@@ -350,6 +350,16 @@ bst_cpu_enter:
         mov     4*8(%rsi), %rsi
         jmp     *enter_tail_ptr(%rip)           /* the rest runs in the entry area */
 
+/* uint64_t *bst_platform_ctx(void): this processor's saved user context, the
+ * start of its block. It touches only %rax, so the native backend's cpu_get and
+ * cpu_set (a call each, for every word of a context switch) need no frame. */
+.global bst_platform_ctx
+bst_platform_ctx:
+        mov     %rsp, %rax
+        and     $-CORE_BLOCK, %rax
+        add     $CORE_CTX, %rax
+        ret
+
 /* uint64_t bst_cpu_halt(void): sleep until an interrupt; return its vector.
  * The kernel's cpu_idle reaches it through bst_cpu_wait (smp.c). */
 .global bst_cpu_halt
