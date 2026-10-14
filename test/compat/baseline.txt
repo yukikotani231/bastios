@@ -1148,6 +1148,10 @@ t_userns: the first ids of a user namespace are set from one register
 t_userns: the root of a user namespace gives up capabilities
 t_userns: the root of a user namespace mounts in a mount namespace of its own
 t_userns: uid_map takes text that ends in a NUL
+t_userns: a process maps the user namespace it has just made itself
+t_userns: the root of a user namespace brings loopback up in a network namespace of its own
+t_userns: and not in the first one
+t_userns: statfs of /proc/self/fd/N answers for the file N holds
 tty: kilo: edit and save a file
 tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
 tty: micropython: REPL line editing and history
@@ -1190,6 +1194,10 @@ node: node: read and write files
 node: node: timers and promises run in order
 node: node: version
 t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller
+t_sys: keys: add_key, read, describe, update, request_key, link, search, unlink
+t_sys: keys: unknown type, bad payload, expiry, revocation, no such key
+t_sys: keys: a child shares the session keyring but not the process keyring
+t_sys: keys: request_key with a callout leaves a negative key
 t_thread: a thread keeps its descriptors while another spawns a child
 t_thread: clone3: CLONE_CLEAR_SIGHAND, and what it refuses
 t_thread: clone3: a fork child
@@ -1226,9 +1234,11 @@ alpine: container: crun and runc: a profile that denies mount, module, ptrace an
 alpine: container: crun and runc: a default-deny profile with a short allowlist still starts the container and runs its commands
 alpine: container: the root file system is read-only, and the exit status comes back
 alpine: container: rootless: runc runs Alpine as an unprivileged user in a user namespace of its own
+alpine: container: rootless: crun runs Alpine as an unprivileged user in a user namespace of its own
 alpine: container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle
 alpine: container: the image's command, environment and working directory run rootless from the bundle
 alpine: container: runc joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
+alpine: container: crun joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
 alpine: container: runc runs on an overlay of the image root: writes and deletions stay in the upper layer
 alpine: container: runc loads a seccomp filter from the config: mkdir answers EPERM, the rest runs
 alpine: nvim: a headless server on a unix socket answers another nvim (--listen, sockconnect, RPC)

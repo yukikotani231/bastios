@@ -410,6 +410,16 @@ touch: /x: Read-only file system
 touch=1
 status 0
 
+== container: rootless: crun runs Alpine as an unprivileged user in a user namespace of its own
+$ bb mkdir -p /disk/cur /disk/cu /run/cru && bb chown 65534:65534 /disk/cur /disk/cu /run/cru && bb su -s /bin/ash nobody -c 'cd /disk/cur && /disk/busybox tar -xf /disk/root.tar && cd /disk/cu && /disk/crun spec --rootless && /disk/busybox sed -i -e "s#\"path\": \"rootfs\"#\"path\": \"/disk/cur\"#" -e "s#\"terminal\": true#\"terminal\": false#" -e "s#\"sh\"#\"/bin/sh\", \"-c\", \"id -u; hostname; echo pid=\$\$; cat /proc/self/uid_map; touch /x 2>\&1; echo touch=\$?\"#" config.json && /disk/crun --root /run/cru run c3 < /dev/null; echo status $?'
+0
+crun
+pid=1
+         0      65534          1
+touch: /x: Read-only file system
+touch=1
+status 0
+
 == container: runc runs on an overlay of the image root: writes and deletions stay in the upper layer
 $ bb mkdir -p /disk/ou /disk/ow /disk/om /disk/o /run/runc && bb mount -t overlay overlay -o lowerdir=/disk/a,upperdir=/disk/ou,workdir=/disk/ow /disk/om && cd /disk/o && /disk/runc spec && bb sed -i -e 's#"path": "rootfs"#"path": "/disk/om"#' -e 's#"terminal": true#"terminal": false#' -e 's#"readonly": true#"readonly": false#' -e 's#"sh"#"/bin/sh", "-c", "echo hi > /ov.txt; rm /etc/motd; cat /ov.txt; ls /etc/motd 2>\&1; echo done"#' config.json && /disk/runc --root /run/runc run co < /dev/null; echo status $?; bb cat /disk/ou/ov.txt; test -e /disk/a/ov.txt || echo lower-clean; test -e /disk/a/etc/motd && echo lower-kept; bb umount /disk/om
 hi
@@ -527,6 +537,14 @@ status 0
 
 == container: runc joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
 $ B=/disk/busybox; export B; $B ip link add cn_br type bridge && $B ip addr add 10.0.4.1/24 dev cn_br && $B ip link set cn_br up && $B ip link add cn_v0 type veth && $B ip link set veth0 name cn_v1 && $B ip link set cn_v0 master cn_br && $B ip link set cn_v0 up && $B printf '%s\n' 'ip -4 addr show dev cn_v1 | grep -o "inet [0-9./]*"' 'wget -q -O - HOSTURL/hello.txt' 'apk add --allow-untrusted -q --no-progress -X ALPINEURL tig 2>/dev/null; echo apk=$?' 'tig --version | head -n 1' > /disk/a/cn.sh && ($B unshare -n $B sh -c 'touch /disk/cn_nr; until $B ip link show cn_v1 >/dev/null 2>&1; do sleep 1; done; $B ip addr add 10.0.4.2/24 dev cn_v1 && $B ip link set cn_v1 up && $B ip link set lo up && $B ip route add default via 10.0.4.1 && touch /disk/cn_ok; sleep 300' >/dev/null 2>&1 & P=$!; until [ -e /disk/cn_nr ]; do sleep 1; done; $B ip link set cn_v1 netns $P; until [ -e /disk/cn_ok ]; do sleep 1; done; $B mkdir -p /disk/n /run/runc && cd /disk/n && /disk/runc spec && $B sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"readonly": true#"readonly": false#' -e 's#"type": "network"#"type": "network", "path": "/proc/'$P'/ns/net"#' -e 's#"sh"#"/bin/sh", "/cn.sh"#' config.json && /disk/runc --root /run/runc run cn < /dev/null; echo status $?; kill $P); $B rm -f /disk/cn_nr /disk/cn_ok /disk/a/cn.sh; $B ip link del cn_br; $B chroot /disk/a /sbin/apk del -q --no-progress tig 2>/dev/null
+inet 10.0.4.2/24
+hello from the host
+apk=0
+tig version 2.6.1
+status 0
+
+== container: crun joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
+$ B=/disk/busybox; export B; $B ip link add cc_br type bridge && $B ip addr add 10.0.4.1/24 dev cc_br && $B ip link set cc_br up && $B ip link add cc_v0 type veth && $B ip link set veth0 name cc_v1 && $B ip link set cc_v0 master cc_br && $B ip link set cc_v0 up && $B printf '%s\n' 'ip -4 addr show dev cc_v1 | grep -o "inet [0-9./]*"' 'wget -q -O - HOSTURL/hello.txt' 'apk add --allow-untrusted -q --no-progress -X ALPINEURL tig 2>/dev/null; echo apk=$?' 'tig --version | head -n 1' > /disk/a/cc.sh && ($B unshare -n $B sh -c 'touch /disk/cc_nr; until $B ip link show cc_v1 >/dev/null 2>&1; do sleep 1; done; $B ip addr add 10.0.4.2/24 dev cc_v1 && $B ip link set cc_v1 up && $B ip link set lo up && $B ip route add default via 10.0.4.1 && touch /disk/cc_ok; sleep 300' >/dev/null 2>&1 & P=$!; until [ -e /disk/cc_nr ]; do sleep 1; done; $B ip link set cc_v1 netns $P; until [ -e /disk/cc_ok ]; do sleep 1; done; $B mkdir -p /disk/cnn /run/crun && cd /disk/cnn && /disk/crun spec && $B sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"readonly": true#"readonly": false#' -e 's#"type": "network"#"type": "network", "path": "/proc/'$P'/ns/net"#' -e 's#"sh"#"/bin/sh", "/cc.sh"#' config.json && /disk/crun --root /run/crun run cc < /dev/null; echo status $?; kill $P); $B rm -f /disk/cc_nr /disk/cc_ok /disk/a/cc.sh; $B ip link del cc_br; $B chroot /disk/a /sbin/apk del -q --no-progress tig 2>/dev/null
 inet 10.0.4.2/24
 hello from the host
 apk=0
