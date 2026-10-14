@@ -476,7 +476,10 @@ fn child_ended(k: &mut Kernel, p: u64, child: u64)
   if g != 0 && g < NPROC && state(k.procs, g) != FREE && state(k.procs, g) != ZOMBIE {
     t = g;
   }
-  let xs = pget(k.procs, child, F_XSIG);
+  let mut xs = 0;
+  if child < NPROC {
+    xs = pget(k.procs, child, F_XSIG);
+  }
   let mut sig = SIGCHLD;
   if xs != 0 {
     sig = xs - 1;                           // clone's exit_signal; 0 sends nothing
