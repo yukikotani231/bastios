@@ -223,7 +223,7 @@ fn cmd_ls(con: &Serial, line: &Buf, n: u64)
   let mut name = balloc(256);
   let mut i = 0;
   let mut more = true;
-  while more && i < 32768
+  while more && i < 65536
     invariant blen(name) == 256
   {
     let r = f_dirent(i, &mut name);
@@ -265,7 +265,7 @@ fn ls_dir(con: &Serial, line: &Buf, a: u64, n: u64)
   let mut buf = balloc(256);
   let mut i = 0;
   let mut more = true;
-  while more && i < 32768
+  while more && i < 65536
     invariant blen(buf) == 256 && dl <= 255 && dl <= blen(dir)
   {
     let mut j = 0;
