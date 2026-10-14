@@ -188,6 +188,41 @@ fn pset(procs: &mut Buf, pid: u64, f: u64, v: u64)
   }
 }
 
+/// Stores the first `n` words of the processor's saved context into process
+/// `pid`'s register block (word F_REGS on) with one range check up front.
+fn regs_store(procs: &mut Buf, cpu: &Cpu, pid: u64, n: u64)
+  requires ptab_ok(procs) && pid < NPROC && n <= 21
+  ensures len(procs) == old(len(procs))
+{
+  let base = pid * STRIDE + F_REGS;
+  if base + n <= len(procs) {
+    let mut r = 0;
+    while r < n
+      invariant r <= n && base + n <= len(procs) && len(procs) == old(len(procs))
+    {
+      procs = set(procs, base + r, cpu_get(cpu, r));
+      r = r + 1;
+    }
+  }
+}
+
+/// The reverse: loads the first `n` words of process `pid`'s register block
+/// into the processor's saved context.
+fn regs_load(cpu: &mut Cpu, procs: &Buf, pid: u64, n: u64)
+  requires ptab_ok(procs) && pid < NPROC && n <= 18
+{
+  let base = pid * STRIDE + F_REGS;
+  if base + n <= len(procs) {
+    let mut r = 0;
+    while r < n
+      invariant r <= n && n <= 18 && base + n <= len(procs)
+    {
+      cpu_set(&mut cpu, r, get(procs, base + r));
+      r = r + 1;
+    }
+  }
+}
+
 /// The row word that holds saved register r: the register block, or past the
 /// row's usual 72 words for the registers beyond the first 21.
 fn reg_word(r: u64) -> u64
