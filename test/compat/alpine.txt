@@ -418,9 +418,11 @@ $ bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import sqli
 ca978112 3904355907
 status 0
 
-== python3: a multiprocessing Pool (the forkserver gets several descriptors in one message)
-$ bb mkdir -p /disk/a/dev/shm; if [ %MACHINE% = x86_64 ]; then bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import multiprocessing as mp\nwith mp.get_context(\"forkserver\").Pool(1) as p: print(p.map(abs,[-1,-2]))')" 2>&1 | bb tail -n 3; else echo "[1, 2]"; fi; echo status $?; bb chroot /disk/a /sbin/apk del -q --no-progress python3 2>/dev/null
-[1, 2]
+== python3: multiprocessing Pools of two workers, three times (the forkserver reads bytes sent before the descriptors)
+$ bb mkdir -p /disk/a/dev/shm; if [ %MACHINE% = x86_64 ]; then for n in 1 2 3; do bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import multiprocessing as mp\nwith mp.get_context(\"forkserver\").Pool(2) as p: print(p.map(abs,[-1,-2,-3,-4]))')" 2>&1 | bb tail -n 3; done; else echo "[1, 2, 3, 4]"; echo "[1, 2, 3, 4]"; echo "[1, 2, 3, 4]"; fi; echo status $?; bb chroot /disk/a /sbin/apk del -q --no-progress python3 2>/dev/null
+[1, 2, 3, 4]
+[1, 2, 3, 4]
+[1, 2, 3, 4]
 status 0
 
 == container: runc joins a network namespace on a bridge, reaches the host's web server and installs a package with apk

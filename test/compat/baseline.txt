@@ -813,6 +813,15 @@ t_proc: uname
 t_proc: wait with no children is ECHILD
 t_proc: waitid
 t_proc: waitpid WNOHANG
+t_proc: sysctl somaxconn reads 4096
+t_proc: sysctl overcommit_memory reads 0
+t_proc: sysctl max_map_count reads 65530
+t_proc: sysctl cap_last_cap reads 40
+t_proc: sysctl ip_local_port_range has two numbers
+t_proc: writing a sysctl number reads back
+t_proc: a sysctl number rejects text
+t_proc: a read-only sysctl is not opened for writing
+t_proc: a sysctl file is a regular file
 t_ptrace: PTRACE_ATTACH stops the target with SIGSTOP
 t_ptrace: PTRACE_CONT with a signal runs the handler for it
 t_ptrace: PTRACE_CONT without a signal drops the one that stopped it, and the child saw the poke
@@ -910,6 +919,7 @@ t_signal: sigsuspend
 t_signal: sigwait
 t_signal: timer_create
 t_signal: unblock delivers
+t_sigsleep: a signal sent to a thread about to sleep in a futex wait runs its handler
 t_sock2: AF_UNIX SOCK_DGRAM socketpair
 t_sock2: MSG_DONTWAIT on an empty socket is EAGAIN
 t_sock2: MSG_PEEK leaves the bytes
@@ -917,6 +927,7 @@ t_sock2: SA_RESTART restarts a read
 t_sock2: SCM_RIGHTS passes a descriptor
 t_sock2: SCM_RIGHTS passes several descriptors in one message
 t_sock2: SCM_RIGHTS with a short buffer closes the rest and says MSG_CTRUNC
+t_sock2: bytes sent before a message with descriptors are read first, and leave the descriptors for the recvmsg
 t_sock2: SCM_RIGHTS with a bad descriptor among several is EBADF
 t_sock2: SCM_RIGHTS from two clients that sent and closed before the accept, and a child that closes the listener
 t_sock2: SO_ERROR is 0
@@ -949,6 +960,7 @@ t_sys: settimeofday
 t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message
 t_sysv: 32 queues, semaphore sets and segments at once, the 33rd of each is ENOSPC
+t_sysv: 16 attachments in one process, the 17th is EMFILE
 t_sysv: GETNCNT counts a waiting process
 t_sysv: IPC_RMID ends a wait with EIDRM
 t_sysv: SEM_UNDO is undone at exit
@@ -1082,7 +1094,7 @@ alpine: apk: free the disk, then install python3 over HTTP
 alpine: python3: asyncio talks over a socketpair
 alpine: python3: asyncio runs a subprocess
 alpine: python3: sqlite3, zlib and hashlib
-alpine: python3: a multiprocessing Pool (the forkserver gets several descriptors in one message)
+alpine: python3: multiprocessing Pools of two workers, three times (the forkserver reads bytes sent before the descriptors)
 t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
 t_gai: AF_INET6 UDP connect to :: reads back ::1
 t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1

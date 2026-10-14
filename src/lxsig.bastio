@@ -314,6 +314,25 @@ fn post_sig(k: &mut Kernel, p: u64, s: u64)
   }
 }
 
+/// A thread that has just gone to sleep in a call the kernel runs again
+/// (the states post_sig wakes) while a signal it does not block is already
+/// pending wakes at once. post_sig saw the thread on a processor, not asleep,
+/// and left the signal pending; with no check here the thread would sleep on
+/// with it, and a caller waiting for the handler to run (musl's setuid and the
+/// other calls that signal every thread) would wait for good.
+fn sig_wake_now(k: &mut Kernel, p: u64)
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let st = state(k.procs, p);
+  if st == LXREADING || st == LXWAITING || st == FUTEXWAIT || st == SOCKWAIT || st == TIMEWAIT {
+    let pend = pget(k.procs, p, F_SIGPEND);
+    if pend & !pget(k.procs, p, F_SIGMASK) != 0 || has_sig(pend, SIGKILL) {
+      pset(&mut k.procs, p, F_STATE, READY);
+    }
+  }
+}
+
 /// Where k.sigsave keeps who sent process p's pending signal s.
 fn sender_at(p: u64, s: u64) -> u64
   requires p < NPROC && 1 <= s && s <= NSIG
