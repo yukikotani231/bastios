@@ -54,6 +54,19 @@ fn netns_unshare(k: &mut Kernel, pid: u64) -> u64
   return 0;
 }
 
+/// Records the user namespace pid is in as the owner of its network
+/// namespace, which it has just made: called once the user namespace of an
+/// unshare or clone that makes both exists.
+fn netns_own(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let s = pget(k.procs, pid, F_NETNS);
+  if s != 0 && s < NNET {
+    nic_ns_set_owner(&mut k.nic, s, nsk_of(k, NSK_USER, pid));
+  }
+}
+
 /// Process pid leaves its namespace (it exits, or moves): the namespace
 /// ends if nobody else is in it.
 fn netns_exit(k: &mut Kernel, pid: u64)
@@ -211,11 +224,17 @@ fn nl_send(k: &mut Kernel, pid: u64, q: u64, buf: u64, n: u64) -> u64
 
 /// Whether process pid may configure its network namespace (CAP_NET_ADMIN):
 /// as root does, or as the root of a user namespace does in a network
-/// namespace of its own, never in the first one.
+/// namespace that user namespace made, never in the first one and never in
+/// one made by another user namespace.
 fn net_admin(k: &Kernel, pid: u64) -> bool
   requires kok(k) && pid < NPROC
 {
-  return cap_has(k, pid, CAP_NET_ADMIN) || (pget(k.procs, pid, F_NETNS) != 0 && ns_cap(k, pid, CAP_NET_ADMIN));
+  if cap_has(k, pid, CAP_NET_ADMIN) {
+    return true;
+  }
+  let s = pget(k.procs, pid, F_NETNS);
+  let u = nsk_of(k, NSK_USER, pid);
+  return s != 0 && u != 0 && nic_ns_owner(k.nic, s) == u && ns_cap(k, pid, CAP_NET_ADMIN);
 }
 
 /// recv on a netlink socket: whole answers, up to n bytes; the source
