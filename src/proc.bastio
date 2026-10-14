@@ -897,6 +897,7 @@ struct Kernel {
   mstr: Bytes,          // the mounts' paths, and the logical path of the last lookup
   naps: bool,           // a process may be in TIMEWAIT: false lets sleepers_wake skip its scan
   mt_hi: u64,           // one past the highest mount entry ever given to a namespace (me_set): no later one is in use
+  pid_hi: u64,          // one past the highest process id ever handed out by new_pid_from: every row from there on is FREE (scans for a ready process stop there)
   fd_hi: u64,           // one past the highest descriptor number ever open: every non-zero word of lxfd is below it (rows are scanned only that far)
   ofd_hi: u64,          // one past the highest open file description ever made: no later one is in use (scans stop there)
   socks: bool,          // a process may be in SOCKWAIT (nap sets it, sock_wake clears it): false lets sock_wake return at once
@@ -1295,6 +1296,9 @@ fn new_pid_from(k: &mut Kernel, round: bool) -> u64
   }
   let pid = free_pid(k.procs, from);
   if pid != 0 {
+    if pid >= k.pid_hi {
+      k.pid_hi = pid + 1;
+    }
     if round {
       pset(&mut k.procs, 0, F_START, pid);     // row 0 is no process: it keeps the last id handed to a thread
     }
@@ -1318,6 +1322,9 @@ fn new_pid_from(k: &mut Kernel, round: bool) -> u64
     return 0;
   }
   let grown = free_pid(k.procs, cap);
+  if grown >= k.pid_hi && grown != 0 {
+    k.pid_hi = grown + 1;
+  }
   if grown != 0 && round {
     pset(&mut k.procs, 0, F_START, grown);
   }
