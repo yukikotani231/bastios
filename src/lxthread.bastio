@@ -509,6 +509,9 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
   if c == 0 || c >= NPROC {
     return c;
   }
+  if flags % 256 != SIGCHLD {
+    pset(&mut k.procs, c, F_XSIG, flags % 256 + 1);   // the exit signal the parent gets
+  }
   if flags & CLONE_NEWNS != 0 {
     let e = ns_unshare(&mut k, c);          // cannot fail: ns_room said so
   }
@@ -1095,6 +1098,14 @@ fn lx_clone3_read(k: &mut Kernel, pid: u64, va: u64, size: u64) -> Clone3
   }
   if (stack.v == 0) != (stack_size.v == 0) || stack.v >= 0x8000000000000000 || stack_size.v >= 0x8000000000000000 {
     return none;
+  }
+  if size >= 80 {
+    // set_tid_size: choosing the child's ids needs CAP_SYS_ADMIN in its PID
+    // namespace (EPERM); with it the field is still unsupported (E2BIG below).
+    let tsz = user_u64(&mut k.spaces, pid, va + 72);
+    if tsz.ok && tsz.v != 0 && !ns_cap(k, pid, CAP_SYS_ADMIN) {
+      return Clone3 { err: EPERM, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
+    }
   }
   let mut j = 64;
   while j < size

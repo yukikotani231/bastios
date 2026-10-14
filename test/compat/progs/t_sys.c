@@ -458,6 +458,24 @@ static int keys_negative(void) {
     return kctl(11, id, (long)b, sizeof b, 0) == -1 && errno == ENOKEY_;
 }
 
+/* clone's exit_signal: the parent gets it, not SIGCHLD, when the child ends. */
+static volatile int exit_sig_seen;
+static void on_exit_sig(int sig) { exit_sig_seen = sig; }
+
+static int exit_signal(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_exit_sig;
+    sigaction(SIGUSR2, &sa, 0);
+    sigaction(SIGCHLD, &sa, 0);
+    long c = syscall(SYS_clone, SIGUSR2, 0, 0, 0, 0);
+    if (c < 0) return 0;
+    if (c == 0) _exit(0);
+    int st;
+    if (waitpid((pid_t)c, &st, __WALL) != (pid_t)c) return 0;
+    return exit_sig_seen == SIGUSR2;
+}
+
 int main(void) {
     setup();
     EXPECT("sethostname, uname, /proc/sys/kernel/hostname", hostname());
@@ -476,5 +494,6 @@ int main(void) {
     EXPECT("keys: unknown type, bad payload, expiry, revocation, no such key", keys_errors());
     EXPECT("keys: a child shares the session keyring but not the process keyring", keys_inherit());
     EXPECT("keys: request_key with a callout leaves a negative key", keys_negative());
+    EXPECT("clone: the exit signal is what the parent gets", exit_signal());
     return done();
 }
