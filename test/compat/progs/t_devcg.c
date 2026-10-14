@@ -51,6 +51,30 @@ static int link_create(int prog, int cg) {
     return (int)bpf(28, a, 16);
 }
 
+
+/* BPF_PROG_QUERY: the ids of the programs attached to a cgroup. */
+static int query(int cg, uint32_t *ids, uint32_t room, uint32_t *cnt) {
+    struct { uint32_t fd, type, qflags, aflags; uint64_t ids; uint32_t cnt; } a =
+        { (uint32_t)cg, 6, 0, 0, (uint64_t)(uintptr_t)ids, room };
+    int r = (int)bpf(16, &a, sizeof a);
+    *cnt = a.cnt;
+    return r;
+}
+
+static int fd_by_id(uint32_t id) {
+    struct { uint32_t id, next; uint64_t pad; } a = { id, 0, 0 };
+    return (int)bpf(13, &a, sizeof a);
+}
+
+static int info(int fd, uint32_t *type, uint32_t *id) {
+    uint32_t buf[40] = {0};
+    struct { uint32_t fd, len; uint64_t info; } a = { (uint32_t)fd, sizeof buf, (uint64_t)(uintptr_t)buf };
+    int r = (int)bpf(15, &a, sizeof a);
+    *type = buf[0];
+    *id = buf[1];
+    return r;
+}
+
 /* Runs fn in a child that has joined the cgroup; returns its exit status. */
 static int in_cgroup(const char *procs, int (*fn)(void)) {
     pid_t c = fork();
@@ -127,6 +151,30 @@ int main(void) {
     EXPECT("the link filters", in_cgroup("/sys/fs/cgroup/devcg/cgroup.procs", open_zero) == 1);
     close(lk);
     EXPECT("closing the link detaches the program", in_cgroup("/sys/fs/cgroup/devcg/cgroup.procs", open_zero) == 0);
+
+
+    /* Query, GET_FD_BY_ID and info, as runc's `update` uses them. */
+    {
+        uint32_t ids[4] = {0}, cnt = 99;
+        EXPECT("a query of a cgroup with no program finds none", query(cg, ids, 4, &cnt) == 0 && cnt == 0);
+        int lk3 = link_create(prog, cg);
+        cnt = 99;
+        EXPECT("a query finds the attached program", lk3 >= 0 && query(cg, ids, 4, &cnt) == 0 && cnt == 1 && ids[0] != 0);
+        int again = fd_by_id(ids[0]);
+        uint32_t ty = 0, id = 0;
+        EXPECT("a program is reopened by its id", again >= 0 && info(again, &ty, &id) == 0 && ty == 15 && id == ids[0]);
+        EXPECT("an unknown id is ENOENT", fd_by_id(ids[0] + 100) == -1 && errno == ENOENT);
+        uint32_t small[1];
+        int prog2 = load(allow_null, sizeof allow_null / sizeof allow_null[0]);
+        EXPECT("a query with no room for every id is ENOSPC", attach(cg, prog2, 2) == 0 &&
+               query(cg, small, 1, &cnt) == -1 && errno == ENOSPC && cnt == 2);
+        EXPECT("detaching the second program", detach(cg, prog2) == 0 &&
+               query(cg, ids, 4, &cnt) == 0 && cnt == 1);
+        close(again);
+        close(prog2);
+        close(lk3);
+        EXPECT("closing the link empties the query", query(cg, ids, 4, &cnt) == 0 && cnt == 0);
+    }
 
     /* A cgroup below inherits the filter of the one above. */
     mkdir("/sys/fs/cgroup/devcg/sub", 0755);
