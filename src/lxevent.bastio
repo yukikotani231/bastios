@@ -1015,6 +1015,9 @@ fn lx_mknod(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64, dev: u64
   if device && id_get(k.procs, pid, F_UID, true) != 0 {
     return EPERM;                           // CAP_MKNOD
   }
+  if device && !dv_mknod_ok(k, pid, ty, dev) {
+    return EPERM;                           // the device filter of a cgroup (src/lxbpf.bastio)
+  }
   let own = new_owner(&mut k, pid, n);
   let mut made = false;
   if device {
