@@ -1169,7 +1169,7 @@ fn sock_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     return 18446744073709551597;            // ENODEV (src/lxmore.bastio comes later)
   }
   if req == SIOCSIFFLAGS || req == SIOCSIFNAME {
-    if !cap_has(k, pid, CAP_NET_ADMIN) {
+    if !net_admin(k, pid) {
       return EPERM;
     }
     if req == SIOCSIFNAME {
