@@ -306,6 +306,27 @@ static int many_objects(void) {
     return ok;
 }
 
+/* One process holds 16 attachments at once; the 17th is EMFILE. */
+static int many_attachments(void) {
+    int id = shmget(IPC_PRIVATE, 8192, IPC_CREAT | 0600);
+    if (id < 0) return 0;
+    char *v[17];
+    int ok = 1, n = 0, e = 0;
+    for (int i = 0; i < 17; i++) {
+        v[i] = shmat(id, 0, 0);
+        if (v[i] == (char *)-1) { e = errno; break; }
+        n++;
+        v[i][i] = 'a' + i % 26;
+    }
+    ok = n == 16 && e == EMFILE;
+    for (int i = 0; ok && i < 16; i++) ok = v[0][i] == 'a' + i % 26 && v[15][i] == 'a' + i % 26;
+    for (int i = 0; i < n; i++) ok = shmdt(v[i]) == 0 && ok;
+    char *again = shmat(id, 0, 0);                                                       /* room again */
+    ok = ok && again != (char *)-1 && shmdt(again) == 0;
+    shmctl(id, IPC_RMID, 0);
+    return ok;
+}
+
 int main(void) {
     setup();
     EXPECT("msgsnd, msgrcv and IPC_STAT", queue_basics());
@@ -324,5 +345,6 @@ int main(void) {
     EXPECT("shmmax is written; a segment past it, or with SHM_HUGETLB, is EINVAL", shmmax_written());
     EXPECT("msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message", next_ids_and_copy());
     EXPECT("32 queues, semaphore sets and segments at once, the 33rd of each is ENOSPC", many_objects());
+    EXPECT("16 attachments in one process, the 17th is EMFILE", many_attachments());
     return done();
 }
