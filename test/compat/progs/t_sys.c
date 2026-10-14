@@ -479,6 +479,8 @@ static int exit_signal(void) {
     if (w != (pid_t)c) return 0;
     for (int i = 0; i < 100 && exit_sig_seen == 0; i++) usleep(10000);   /* the signal may land just after the wait returns */
     return exit_sig_seen == SIGUSR2;
+}
+
 /* syncfs takes any open descriptor and fails EBADF on a bad one;
  * rt_tgsigqueueinfo delivers a queued signal to a thread of this process. */
 static volatile int got_val;
