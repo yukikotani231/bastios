@@ -38,8 +38,7 @@
 //
 // Not done: the exit event and PTRACE_O_TRACEVFORKDONE (PTRACE_SETOPTIONS
 // keeps them and only PTRACE_O_EXITKILL acts), the floating point and debug
-// registers, PTRACE_INTERRUPT and PTRACE_LISTEN, and
-// PTRACE_GET_SYSCALL_INFO. A tracer that is not the parent hears of its
+// registers, PTRACE_LISTEN, and PTRACE_GET_SYSCALL_INFO. A tracer that is not the parent hears of its
 // tracee's end once, then the parent reaps it. There is no Yama scope: the
 // caller needs root or the target's user and group ids, as for
 // pidfd_getfd.
@@ -70,6 +69,7 @@ const PTRACE_SETSIGINFO: u64 = 0x4203;
 const PTRACE_GETREGSET: u64 = 0x4204;
 const PTRACE_SETREGSET: u64 = 0x4205;
 const PTRACE_SEIZE: u64 = 0x4206;
+const PTRACE_INTERRUPT: u64 = 0x4207;
 const NT_PRSTATUS: u64 = 1;
 const USER_DEBUGREG: u64 = 848;          // offsetof(struct user, u_debugreg)
 const PTRACE_O_VALID: u64 = 0x1000FF;    // the options there are (events and EXITKILL)
@@ -131,6 +131,12 @@ fn pt_resume(k: &mut Kernel, c: u64, sig: u64, detach: bool, sys: bool, step: bo
 {
   let w = tr_get(k, c);
   let t = tr2_get(k, c);
+  if t / TS_OWE % 2 == 1 && sys && !detach {
+    // Resumed from the event stop of a call: now the stop after the call.
+    tr2_put(&mut k, c, TS_SYS + TS_EXIT + t / TS_NR % 1024 * TS_NR);
+    tr_stop(&mut k, c, 5 + 128 * (tr_opt(w) % 2));
+    return;
+  }
   let mut skip = 0;
   if sig != 0 && !detach {
     skip = 1;
@@ -141,6 +147,9 @@ fn pt_resume(k: &mut Kernel, c: u64, sig: u64, detach: bool, sys: bool, step: bo
     tr_put(&mut k, c, tr_make(w % 65536, tr_att(w), 0, skip, 0, tr_opt(w)));
   }
   let mut next = t / TS_NR % 1024 * TS_NR;   // the call's number stays
+  if has_sig(pget(k.procs, c, F_SIGPEND), 5) {
+    next = next + t / TS_EV * TS_EV;       // the event belongs to the SIGTRAP still to be taken
+  }
   if sys && !detach {
     next = next + TS_SYS;
   }
@@ -198,10 +207,10 @@ fn pt_sys_entry(k: &mut Kernel, p: u64, restarted: bool) -> bool
   }
   let nr = smaller(pget(k.procs, p, F_REGS + R_LXNR), 1023);
   if t / TS_NOENT % 2 == 1 {
-    tr2_put(&mut k, p, TS_SYS + nr * TS_NR);
+    tr2_put(&mut k, p, TS_SYS + nr * TS_NR + t / TS_EV * TS_EV);
     return false;
   }
-  tr2_put(&mut k, p, TS_SYS + TS_ENTRY + nr * TS_NR);
+  tr2_put(&mut k, p, TS_SYS + TS_ENTRY + nr * TS_NR + t / TS_EV * TS_EV);
   if PT_ENTRY_RET == 1 {
     pset(&mut k.procs, p, F_REGS + R_RET, ENOSYS);   // what a tracer reads in rax before the call
   }
@@ -220,7 +229,16 @@ fn pt_sys_exit(k: &mut Kernel, p: u64) -> bool
   if tr_tracer(k, p) == 0 || t % 2 == 0 || pget(k.procs, p, F_RESTART) != 0 || (st != READY && st != RUNNING) {
     return false;
   }
-  tr2_put(&mut k, p, t % TS_NR + t / TS_NR % 1024 * TS_NR + TS_EXIT);
+  let ev = t / TS_EV % 16;
+  if ev != 0 && ev != EV_STOP && has_sig(pget(k.procs, p, F_SIGPEND), 5) {
+    // An event (fork, exec, ...) of this very call: as on Linux, its stop
+    // comes first, and the stop after the call when the tracer resumes it.
+    pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) & !sbit(5));
+    tr2_put(&mut k, p, t % TS_NR + t / TS_NR % 1024 * TS_NR + TS_OWE + ev * TS_EV + t / TS_MSG % 65536 * TS_MSG);
+    tr_stop(&mut k, p, 5);
+    return true;
+  }
+  tr2_put(&mut k, p, t % TS_NR + t / TS_NR % 1024 * TS_NR + TS_EXIT + t / TS_EV * TS_EV);
   tr_stop(&mut k, p, 5 + 128 * (tr_opt(tr_get(k, p)) % 2));
   return true;
 }
@@ -248,8 +266,15 @@ fn pt_fork_event(k: &mut Kernel, p: u64, c: u64, kind: u64)
     return;
   }
   tr_put(&mut k, c, tr_make(w % 65536, 1, 0, 0, 0, opt));
-  tr2_put(&mut k, c, 0);
-  tr_stop(&mut k, c, 19);                   // SIGSTOP: where the new child waits for its tracer
+  if opt / 512 % 2 == 1 {
+    // A seizing tracer meets the new child in an event stop (SIGTRAP and
+    // PTRACE_EVENT_STOP), not in a SIGSTOP.
+    tr2_put(&mut k, c, EV_STOP * TS_EV);
+    tr_stop(&mut k, c, 5);
+  } else {
+    tr2_put(&mut k, c, 0);
+    tr_stop(&mut k, c, 19);                 // SIGSTOP: where the new child waits for its tracer
+  }
   tr2_put(&mut k, p, tr2_get(k, p) % TS_EV + kind * TS_EV + vpid_of(k, p, c) % 65536 * TS_MSG);
   post_from(&mut k, p, 5, p);               // SIGTRAP, which the stop reports with the event
 }
@@ -445,7 +470,16 @@ fn lx_ptrace(k: &mut Kernel, pid: u64, req0: u64, p0: u64, addr: u64, data: u64)
     return pt_traceme(&mut k, pid);
   }
   if req == PTRACE_ATTACH || req == PTRACE_SEIZE {
-    return pt_attach(&mut k, pid, p, req == PTRACE_SEIZE);
+    if req == PTRACE_SEIZE && data & !PTRACE_O_VALID != 0 {
+      return EINVAL;
+    }
+    let r = pt_attach(&mut k, pid, p, req == PTRACE_SEIZE);
+    if r == 0 && req == PTRACE_SEIZE && p < NPROC {
+      // SEIZE takes its options in data and does not stop the tracee.
+      let w = tr_get(k, p);
+      tr_put(&mut k, p, tr_make(w % 65536, tr_att(w), tr_stopped(w), tr_skip(w), tr_sig(w), data % 256 + data / 0x100000 % 2 * 256 + 512));
+    }
+    return r;
   }
   if p == 0 || p >= NPROC || state(k.procs, p) == FREE || !traced_by(k, p, pid) {
     return ESRCH;
@@ -456,7 +490,16 @@ fn lx_ptrace(k: &mut Kernel, pid: u64, req0: u64, p0: u64, addr: u64, data: u64)
       return EINVAL;
     }
     let w = tr_get(k, p);
-    tr_put(&mut k, p, tr_make(w % 65536, tr_att(w), tr_stopped(w), tr_skip(w), tr_sig(w), data % 256 + data / 0x100000 % 2 * 256));
+    tr_put(&mut k, p, tr_make(w % 65536, tr_att(w), tr_stopped(w), tr_skip(w), tr_sig(w), data % 256 + data / 0x100000 % 2 * 256 + tr_opt(w) / 512 * 512));
+    return 0;
+  }
+  if req == PTRACE_INTERRUPT && state(k.procs, p) != ZOMBIE {
+    // Stops a running tracee with an event stop (SIGTRAP and
+    // PTRACE_EVENT_STOP in the status); one that is stopped already stays so.
+    if state(k.procs, p) != STOPPED {
+      tr2_put(&mut k, p, tr2_get(k, p) % TS_EV + EV_STOP * TS_EV);
+      post_from(&mut k, p, 5, pid);
+    }
     return 0;
   }
   if !pt_ready(k, pid, p) {

@@ -359,5 +359,32 @@ int main(int argc, char **argv) {
         int st;
         waitpid(c, &st, 0);
     }
+
+    /* PTRACE_SEIZE does not stop the tracee; PTRACE_INTERRUPT does, with an event stop. */
+    {
+        int p[2];
+        pipe(p);
+        pid_t c = fork();
+        if (c == 0) {
+            close(p[1]);
+            char b;
+            read(p[0], &b, 1);
+            _exit(7);
+        }
+        close(p[0]);
+        usleep(50000);
+        long r = ptrace(PTRACE_SEIZE, c, 0, 0);
+        int st = 0;
+        int w = waitpid(c, &st, WNOHANG);
+        EXPECT("PTRACE_SEIZE attaches without stopping the tracee", r == 0 && w == 0);
+        long ri = ptrace(PTRACE_INTERRUPT, c, 0, 0);
+        w = waitpid(c, &st, 0);
+        EXPECT("PTRACE_INTERRUPT stops it with PTRACE_EVENT_STOP and SIGTRAP",
+               ri == 0 && w == c && WIFSTOPPED(st) && WSTOPSIG(st) == SIGTRAP && (st >> 16) == 128);
+        long rc = ptrace(PTRACE_CONT, c, 0, 0);
+        write(p[1], "x", 1);
+        w = waitpid(c, &st, 0);
+        EXPECT("a seized tracee resumed with PTRACE_CONT runs to its end", rc == 0 && w == c && WIFEXITED(st) && WEXITSTATUS(st) == 7);
+    }
     return done();
 }
