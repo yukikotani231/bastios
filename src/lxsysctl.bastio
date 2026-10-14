@@ -610,3 +610,78 @@ fn sysd_child_dir(j: u64, i: u64) -> bool {
   }
   return false;
 }
+
+// The /proc/PID files that are one fixed text each, except oom_score_adj,
+// which holds a number per process (SYS_OOM, src/lxprocfs.bastio). Nothing
+// kills for memory here, so the scores stay 0; the numbers are what Linux
+// reports for a process nobody has tuned.
+
+const PXF_N: u64 = 10;
+
+fn px_name(w: u64) -> Str {
+  if w == 0 {
+    return "oom_score";
+  }
+  if w == 1 {
+    return "oom_score_adj";
+  }
+  if w == 2 {
+    return "loginuid";
+  }
+  if w == 3 {
+    return "sessionid";
+  }
+  if w == 4 {
+    return "coredump_filter";
+  }
+  if w == 5 {
+    return "personality";
+  }
+  if w == 6 {
+    return "schedstat";
+  }
+  if w == 7 {
+    return "wchan";
+  }
+  if w == 8 {
+    return "cpuset";
+  }
+  if w == 9 {
+    return "oom_adj";
+  }
+  return "oom_score";
+}
+
+fn px_text(w: u64) -> Str {
+  if w == 0 {
+    return "0\n";
+  }
+  if w == 1 {
+    return "0\n";
+  }
+  if w == 2 {
+    return "4294967295\n";
+  }
+  if w == 3 {
+    return "4294967295\n";
+  }
+  if w == 4 {
+    return "00000033\n";
+  }
+  if w == 5 {
+    return "00000000\n";
+  }
+  if w == 6 {
+    return "0 0 0\n";
+  }
+  if w == 7 {
+    return "0\n";
+  }
+  if w == 8 {
+    return "/\n";
+  }
+  if w == 9 {
+    return "0\n";
+  }
+  return "0\n";
+}
