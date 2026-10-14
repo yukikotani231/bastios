@@ -115,6 +115,7 @@ const FD_DIRS: u64 = 0x800;            // DIR_PROC + FD_DIRS + pid: /proc/PID/fd
 const TASK_DIRS: u64 = 0xC00;          // DIR_PROC + TASK_DIRS + pid: /proc/PID/task
 const NET_DIR: u64 = 0x1000;            // DIR_PROC + NET_DIR: /proc/net
 const LOOP_SYS: u64 = 8;               // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio
+const SY_PX: u64 = SY_LOOP + LOOP_N * LOOP_SYS;   // after the loop devices: /proc/P/ file w at P * PXF_N + w (src/lxsysctl.bastio)
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
 const S_IFREG_RO: u64 = 0x8124;       // a regular file, r--r--r--
@@ -619,6 +620,15 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   if xfer_is(x, e + 1, n, "io") {
     return base + PF_IO;
   }
+  let mut pw = 0;
+  while pw < PXF_N
+    invariant pw <= PXF_N
+  {
+    if xfer_is(x, e + 1, n, px_name(pw)) {
+      return PROC_DEV + PSYS + SY_PX + p * PXF_N + pw;
+    }
+    pw = pw + 1;
+  }
   let um = um_at(x, e + 1, n, p);
   if um != 0 {
     return um;                              // uid_map, gid_map or setgroups (src/lxuser.bastio)
@@ -744,8 +754,14 @@ fn is_sct_file(f: u64) -> bool {
   return f >= PROC_DEV + PSYS + SY_SC && f < PROC_DEV + PSYS + SY_SC + SCT_NUM;
 }
 
+/// Is f some process's oom_score_adj?
+fn is_px_adj(f: u64) -> bool {
+  let pbase = PROC_DEV + PSYS + SY_PX;
+  return f >= pbase && f < pbase + NPROC * PXF_N && (f - pbase) % PXF_N == 1;
+}
+
 fn proc_writable(f: u64) -> bool {
-  return is_sct_file(f) || is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
+  return is_px_adj(f) || is_sct_file(f) || is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
 }
 
 /// What stat says about /proc file f (a proc_file device).
@@ -898,6 +914,9 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
     }
     if i == 13 + UMF_N {
       return Ent { len: name_out(&mut k.fs.xfer, "io"), dir: false, end: false };
+    }
+    if i >= 14 + UMF_N && i < 14 + UMF_N + PXF_N {
+      return Ent { len: name_out(&mut k.fs.xfer, px_name(i - 14 - UMF_N)), dir: false, end: false };
     }
     return end;
   }
@@ -1609,6 +1628,23 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
         t = t + 1;
       }
       return a;
+    }
+    if what >= SY_PX && what < SY_PX + NPROC * PXF_N {
+      let w = (what - SY_PX) % PXF_N;
+      if w == 1 {
+        let s = get(k.sys, SYS_OOM + (what - SY_PX) / PXF_N);
+        if s == 0 || s == 1002 {
+          return put_s(&mut o, 0, "0\n");
+        }
+        if s > 1002 {
+          let a = put_n(&mut o, 0, s - 1002);
+          return put_c(&mut o, a, 10);
+        }
+        let a = put_c(&mut o, 0, 45);
+        let b = put_n(&mut o, a, 1002 - s);
+        return put_c(&mut o, b, 10);
+      }
+      return put_s(&mut o, 0, px_text(w));
     }
     if what >= SY_SC && what < SY_SC + SCT_NUM {
       let mut v = sct_default(what - SY_SC);
@@ -2614,6 +2650,38 @@ fn proc_write_xfer(k: &mut Kernel, f: u64, n: u64) -> u64
     invariant i <= n && n <= 32 && kok(k)
   {
     i = i + 1;
+  }
+  let pbase = PROC_DEV + PSYS + SY_PX;
+  if f >= pbase && f < pbase + NPROC * PXF_N && (f - pbase) % PXF_N == 1 {
+    // oom_score_adj: -1000 to 1000, kept as 1001 + it
+    let mut neg = false;
+    if i < n && bget(k.fs.xfer, i) == 45 {
+      neg = true;
+      i = i + 1;
+    }
+    let mut a = 0;
+    let mut got = false;
+    while i < n && bget(k.fs.xfer, i) >= 48 && bget(k.fs.xfer, i) <= 57 && a <= 1000
+      invariant i <= n && n <= 32 && a <= 10009 && kok(k)
+    {
+      a = a * 10 + cast[u64](bget(k.fs.xfer, i)) - 48;
+      got = true;
+      i = i + 1;
+    }
+    while i < n && (bget(k.fs.xfer, i) == 10 || bget(k.fs.xfer, i) == 32 || bget(k.fs.xfer, i) == 9)
+      invariant i <= n && n <= 32 && kok(k)
+    {
+      i = i + 1;
+    }
+    if !got || i < n || a > 1000 {
+      return EINVAL;
+    }
+    let mut stored = 1001 + a;
+    if neg {
+      stored = 1001 - a;
+    }
+    k.sys = set(k.sys, SYS_OOM + (f - pbase) / PXF_N, stored + 1);
+    return n;
   }
   if f >= PROC_DEV + PSYS + SY_NEXTID && f < PROC_DEV + PSYS + SY_NEXTID + 3 {
     return next_id_write(&mut k, f, n, i);
