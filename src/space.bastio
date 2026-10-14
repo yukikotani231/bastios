@@ -698,30 +698,32 @@ fn clone_l1(src: &mut PageTable, m: &mut Mem, cow: bool) -> Space
     invariant p <= 512 && mem_ok(m) && pt_level(l1) == 1 && pt_level(src) == 1 && (cow ==> pt_leases(src) == 0)
     invariant forall j: u64 :: p <= j && j < 512 ==> !pt_used(l1, j)
   {
-    if pt_has(src, p) && pt_shared(src, p) {
-      // A MAP_SHARED page stays one page: the child maps it too (and a
-      // copy-on-write page stays read-only in both).
-      let w = pt_writable(src, p);
-      pt_put_shared(&mut l1, p, pt_dup_shared(src, p), w);
-      if !pt_accessible(src, p) {
-        pt_set_access(&mut l1, p, 0);      // PROT_NONE in both
-      }
-    } else if cow && pt_has(src, p) && pt_writable(src, p) {
-      // Copy-on-write: the page becomes shared, read-only on both sides.
-      let s = shared_new(pt_take_frame(&mut src, p));
-      mark_cow(&mut m, s);
-      pt_put_shared(&mut l1, p, shared_dup(s), false);
-      pt_put_shared(&mut src, p, s, false);
-    } else if pt_has(src, p) {
-      let b = find_free(&mut m);
-      if b >= NPAGES {
-        ok = false;
-      } else {
-        let w = pt_writable(src, p);      // a read-only page stays read-only in both
-        let f = pt_borrow_frame(&mut src, p, copy_to, take_dirty(&mut m, b));
-        pt_put_frame(&mut l1, p, f, w);
+    if pt_has(src, p) {
+      if pt_shared(src, p) {
+        // A MAP_SHARED page stays one page: the child maps it too (and a
+        // copy-on-write page stays read-only in both).
+        let w = pt_writable(src, p);
+        pt_put_shared(&mut l1, p, pt_dup_shared(src, p), w);
         if !pt_accessible(src, p) {
-          pt_set_access(&mut l1, p, 0);
+          pt_set_access(&mut l1, p, 0);      // PROT_NONE in both
+        }
+      } else if cow && pt_writable(src, p) {
+        // Copy-on-write: the page becomes shared, read-only on both sides.
+        let s = shared_new(pt_take_frame(&mut src, p));
+        mark_cow(&mut m, s);
+        pt_put_shared(&mut l1, p, shared_dup(s), false);
+        pt_put_shared(&mut src, p, s, false);
+      } else {
+        let b = find_free(&mut m);
+        if b >= NPAGES {
+          ok = false;
+        } else {
+          let w = pt_writable(src, p);      // a read-only page stays read-only in both
+          let f = pt_borrow_frame(&mut src, p, copy_to, take_dirty(&mut m, b));
+          pt_put_frame(&mut l1, p, f, w);
+          if !pt_accessible(src, p) {
+            pt_set_access(&mut l1, p, 0);
+          }
         }
       }
     }
