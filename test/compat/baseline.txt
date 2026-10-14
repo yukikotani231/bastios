@@ -704,6 +704,7 @@ t_nopie: the data follows it
 t_nopie: the text is where it was linked
 t_nopie: the whole bss is usable
 t_nsmany: 24 IPC namespaces at once
+t_nsmany: 60 tmpfs mounts at once, each with its own files
 t_nsmany: 24 PID namespaces at once
 t_nsmany: 24 UTS namespaces at once, each with its own name
 t_nsmany: and 24 more once those are gone
