@@ -50,6 +50,29 @@ const SHM_STAT_ANY: u64 = 15;
 const SHM_DEST: u64 = 512;             // in the mode: removed, waiting for the last detach
 const SHM_LOCKED: u64 = 1024;
 const SHMMAX: u64 = 2097152;           // a segment is at most one level-1 table of pages
+
+/// The largest segment shmget makes: SHMMAX, or less if /proc/sys/kernel/shmmax was written.
+fn shmmax_now(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= SHMMAX
+{
+  let w = get(k.sys, SYS_SHMMAX);
+  if w == 0 {
+    return SHMMAX;
+  }
+  return smaller(w - 1, SHMMAX);
+}
+
+/// The value /proc/sys/kernel/shmmax reads as: what was written, or SHMMAX.
+fn shmmax_shown(k: &Kernel) -> u64
+  requires kok(k)
+{
+  let w = get(k.sys, SYS_SHMMAX);
+  if w == 0 {
+    return SHMMAX;
+  }
+  return w - 1;
+}
 const SHM_PAGES: u64 = 512;
 const SHMID_DS: u64 = 112;             // struct shmid64_ds
 
@@ -1569,7 +1592,7 @@ fn lx_shmget(k: &mut Kernel, pid: u64, key: u64, size: u64, flg: u64) -> u64
     }
     return g.r;
   }
-  if size == 0 || size > SHMMAX {
+  if size == 0 || size > shmmax_now(k) || flg / 2048 % 2 == 1 {   // SHM_HUGETLB: no huge pages
     ipc_free(&mut k, KM, g.slot);
     return EINVAL;
   }
@@ -1768,7 +1791,7 @@ fn lx_shmctl(k: &mut Kernel, pid: u64, id: u64, cmd0: u64, va: u64) -> u64
   let cmd = cmd0 & !IPC_64;
   if cmd == IPC_INFO {
     // struct shminfo64: shmmax shmmin shmmni shmseg shmall, 4 unused
-    xput(&mut k, 0, SHMMAX, 8);
+    xput(&mut k, 0, shmmax_shown(k), 8);
     xput(&mut k, 8, 1, 8);
     xput(&mut k, 16, IPC_SETS, 8);
     xput(&mut k, 24, SA_N, 8);
@@ -1973,7 +1996,7 @@ fn ipc_proc_text(k: &mut Kernel, pid: u64, i: u64, o: &mut Bytes) -> u64
   ensures kok(k) && blen(o) == XFER && result <= XFER
 {
   if i < 6 {
-    let mut v = SHMMAX;
+    let mut v = shmmax_shown(k);
     if i == 1 {
       v = IPC_SETS * SHM_PAGES;
     } else if i == 2 || i == 5 {

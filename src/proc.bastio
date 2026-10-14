@@ -422,11 +422,11 @@ const FD_CLOEXEC: u64 = 8192;
 
 const OFD_N: u64 = 4096;
 // Loop devices (src/lxloop.bastio): LOOP_N devices of LOOP_W words.
-const LOOP_N: u64 = 8;
+const LOOP_N: u64 = 32;
 const LOOP_W: u64 = 13;
-const LOOP_LEN: u64 = 104;             // LOOP_N * LOOP_W
+const LOOP_LEN: u64 = 416;             // LOOP_N * LOOP_W
 const DEV_LOOPCTL: u64 = 6;            // OF_DEV device /dev/loop-control
-const DEV_LOOP: u64 = 16;              // OF_DEV device /dev/loopN is DEV_LOOP + N
+const DEV_LOOP: u64 = 64;              // OF_DEV device /dev/loopN is DEV_LOOP + N
 const S_IFBLK: u64 = 0x61B0;           // a block device, rw-rw----
 // Pseudo-terminals (src/lxpty.bastio): PTY_N pairs of PTY_W words, and two
 // rings of PTY_CAP bytes each.
@@ -459,11 +459,12 @@ const LK_HI: u64 = LK_WAITS + NPROC * LK_WW;   // after them: every held lock is
 const LK_LEN: u64 = LK_HI + 1;
 const IPC_LEN: u64 = 3840 + NPROC * 24;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
 const RNG_LEN: u64 = 19;              // the random generator's words (src/lxdev.bastio)
+const SYS_SHMMAX: u64 = 154;           // /proc/sys/kernel/shmmax as written, + 1 (0: never written; src/lxipc.bastio)
 const SYS_PQ: u64 = 160;
 const SYS_NEXTID: u64 = 151;           // 151 .. 153: the id /proc/sys/kernel/{msg,sem,shm}_next_id asks the next new queue, set or segment to get, + 1 (0: none; src/lxipc.bastio)
 // k.sys is laid out as the chain below: each part starts where the one before it ends, and the parts that
 // hold a word or more for every process grow with NPROC.
-const SYS_PR: u64 = SYS_PQ + 96;               // SYS_PQ + PQ_N * 12; NPROC * PR_W words
+const SYS_PR: u64 = SYS_PQ + 384;               // SYS_PQ + PQ_N * 12; NPROC * PR_W words
 const SYS_RL: u64 = SYS_PR + NPROC * 5;               // SYS_PR + NPROC * PR_W; NPROC * RL_W words (src/lxrlimit.bastio)
 const SYS_DL: u64 = SYS_RL + NPROC * 34;              // SYS_RL + NPROC * RL_W; NPROC * 3 words
 const SYS_JC: u64 = SYS_DL + NPROC * 3;              // SYS_DL + NPROC * 3; a word per process (job control, src/lxsig.bastio)
@@ -512,8 +513,8 @@ const CAP_SETGID: u64 = 6;
 const CAP_SETUID: u64 = 7;
 const CAP_SYS_BOOT: u64 = 22;
 const CAP_SETPCAP: u64 = 8;
-const PQ_N: u64 = 8;                   // POSIX message queues (SYS_PQ + PQ_N * 12 words = SYS_LEN)
-const IPCB_LEN: u64 = 411904;         // its message bytes, IPC_SETS * MQ_CAP; then the POSIX queues' names and messages, PQ_N * (256 + 16384), then their SIGEV_THREAD cookies, PQ_N * 32
+const PQ_N: u64 = 32;                  // POSIX message queues (SYS_PQ + PQ_N * 12 words = SYS_LEN)
+const IPCB_LEN: u64 = 812032;         // its message bytes, IPC_SETS * MQ_CAP; then the POSIX queues' names and messages, PQ_N * (256 + 16384), then their SIGEV_THREAD cookies, PQ_N * 32
 const LK_EOF: u64 = 18446744073709551615;   // a range to the end of the file; no file
 const LK_DESC: u64 = 4294967296;      // 2^32: lock owners from here are descriptions
 const LKC_FCNTL: u64 = 0;             // record and OFD locks
@@ -552,7 +553,7 @@ const DISK_RETRY: u64 = 0x8000000000000002;
 const CWD_STRIDE: u64 = 256;           // FNAME_MAX + 1
 const CWD_LEN: u64 = NPROC * CWD_STRIDE;
 const DPATH_LEN: u64 = 1048576;       // OFD_N * CWD_STRIDE: the most it grows to (dpath_room)
-const MT_N: u64 = 64;                 // mounts of mount namespaces, in all (src/lxns.bastio)
+const MT_N: u64 = 256;                // mounts of mount namespaces, in all (src/lxns.bastio)
 const ME_W: u64 = 5;                  // words per mount
 // After the mounts, k.mns keeps the other namespaces (src/lxns.bastio):
 // each process's UTS, IPC and PID namespace, the next id of each kind, the
@@ -567,7 +568,7 @@ const NSK_PIDC: u64 = 4;              //   the PID namespace its children are in
 const NSK_USER: u64 = 5;              //   the user namespace it is in
 const NSK_CG: u64 = 6;                //   the cgroup it belongs to (src/lxcgroup.bastio)
 const NSK_CGN: u64 = 7;               //   the root of its cgroup namespace: slot + 1 (0: the first namespace)
-const CG_N: u64 = 32;                 // cgroups in all (slot 0 is the root, always there)
+const CG_N: u64 = 128;                // cgroups in all (slot 0 is the root, always there)
 const CG_W: u64 = 44;                 // words per cgroup: see CGW_*
 const CGW_USED: u64 = 0;
 const CGW_PARENT: u64 = 1;
@@ -596,12 +597,12 @@ const UM_BAD: u64 = 0x100000000;      // an id with no map (ID_SPAN)
 const UMW_DENY: u64 = 3;              // user namespace slot word: setgroups denied
 const UMW_CNT: u64 = 4;               // words 4 and 5: extents of the uid and gid map
 const UMW_EXT: u64 = 6;               // then UM_N extents of 3 words (inside, outside, count) for each map
-const USR_N: u64 = 8;                 // user namespaces besides the first
+const USR_N: u64 = 32;                // user namespaces besides the first
 const UM_N: u64 = 5;                  // extents of an id map (Linux's UID_GID_MAP_MAX_EXTENTS)
 const USR_W: u64 = 6 + 2 * UM_N * 3;  // id + 1 (0: free), owner uid, owner gid, setgroups denied, uid and gid extents, then the extents
-const PN_N: u64 = 16;                 // PID namespaces besides the first
+const PN_N: u64 = 64;                // PID namespaces besides the first
 const PN_W: u64 = 3;                  // id + 1 (0: free), the next id to give, 1 once its init has ended
-const UTS_N: u64 = 8;                 // UTS namespaces besides the first
+const UTS_N: u64 = 32;                // UTS namespaces besides the first
 const UTS_W: u64 = 132;               // id + 1 (0: free), then the names as k.sys keeps them
 const MNS_KID: u64 = NPROC + 16 + MT_N * ME_W;   // [MNS_KID + kind * NPROC + pid]
 const MNS_KNEXT: u64 = MNS_KID + NSK_N * NPROC;
@@ -618,7 +619,7 @@ const MNS_SC: u64 = MNS_PQ + PQ_N;          // the seccomp pool (src/lxseccomp.b
 // (holders, parent + 1, instruction count, in use, first instruction, listener open), the
 // scratch words a run uses, then SC_POOL instructions for all of them.
 const SC_PW: u64 = 8;
-const SC_N: u64 = 8;
+const SC_N: u64 = 64;
 const SC_WAIT: u64 = 18446744073709546616;   // 2^64 - 5000: not a result, not an errno: sleep, then run the call again
 const SC_FOREVER: u64 = 18446744073709551613;   // FOREVER (src/lxtime.bastio): a wait with no deadline
 const SC_HW: u64 = 6;
@@ -626,7 +627,7 @@ const SC_MAXI: u64 = 4096;
 const SC_SCR: u64 = SC_N * SC_HW;
 const SC_SCRN: u64 = 24;
 const SC_INS: u64 = SC_SCR + SC_SCRN;
-const SC_POOL: u64 = 8192;               // instructions shared by all filters
+const SC_POOL: u64 = 65536;              // instructions shared by all filters
 const SCF_LEN: u64 = SC_INS + SC_POOL + 1;   // and one word that always reads 0
 const MNS_LEN: u64 = MNS_SC + NPROC * SC_PW;
 const MSTR_LEN: u64 = 256 + MT_N * 512 + 256;   // the last lookup's logical path, then a key and a source per mount, then a path kept by ovl_stash
@@ -642,14 +643,14 @@ const ALARMS_LEN: u64 = NPROC * 2 + NPROC * 16;        // NPROC * 2, then PT_N P
 const PT_BASE: u64 = NPROC * 2;             // where the POSIX timers start in k.alarms (src/lxptimer.bastio)
 const PT_N: u64 = 4;                 // POSIX timers per process
 const PT_W: u64 = 4;                 // words per timer: deadline, interval, state, overruns
-const MAP_N: u64 = 4;                // MAP_SHARED file mappings per process
+const MAP_N: u64 = 16;               // MAP_SHARED file mappings per process
 const MAP_W: u64 = 4;                // words per mapping: first page + 1, pages, description, offset
 const MAPS_LEN: u64 = NPROC * MAP_N * MAP_W;
-const HOLE_N: u64 = 16;              // address space holes munmap left, per process
-const HOLES_LEN: u64 = NPROC * 32;         // NPROC * HOLE_N * 2
+const HOLE_N: u64 = 32;              // address space holes munmap left, per process
+const HOLES_LEN: u64 = NPROC * 64;         // NPROC * HOLE_N * 2
 const LZ_W: u64 = 4;                  // lazy code: first page + 1 (0: none), pages, file hold, file offset
 const LAZY_LEN: u64 = NPROC * LZ_W;
-const AN_N: u64 = 16;                  // anonymous memory not touched yet: records per process (src/lxanon.bastio)
+const AN_N: u64 = 32;                  // anonymous memory not touched yet: records per process (src/lxanon.bastio)
 const ANON_LEN: u64 = NPROC * AN_N * 2;  // first page + 1 (0: free), pages
 const LX_PAUSE: u64 = 34;
 const LX_RT_SIGSUSPEND: u64 = 130;
