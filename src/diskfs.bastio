@@ -108,10 +108,14 @@ const BSECT: u64 = 8;                 // sectors per block
 const DATA_B0: u64 = 5;               // the first block for data and maps
 const PTRS: u64 = 512;                // block numbers in a map
 const MAX_BLOCKS: u64 = 268435456;    // the most blocks used (1 TiB; the used map is then 32 MiB)
-const DFILE_MAX: u64 = 1073741824;    // PTRS * PTRS * BLOCK
+const SEG_BLOCKS: u64 = 262144;       // PTRS * PTRS: the blocks one root map reaches
+const SEG_BYTES: u64 = 1073741824;    // SEG_BLOCKS * BLOCK: a file's first 1 GiB hangs from one root map
+const SEG_FLAG: u64 = 1099511627776;  // 2^40: set in E_ROOT, the word names a super map of up to PTRS root maps, one per 1 GiB
+const DFILE_MAX: u64 = 549755813888;  // PTRS * SEG_BYTES (512 GiB)
 const DNAME_MAX: u64 = 200;
 const DTOP: u64 = 64;                 // the parent of an entry in "disk"; entry 64 stays unused
 const DISK_MAGIC: u64 = 0x334B534944545342;   // "BSTDISK3", little-endian
+const DISK_MAGIC5: u64 = 0x354B534944545342;  // "BSTDISK5": BSTDISK4 plus files with super maps (E_ROOT with SEG_FLAG)
 const DISK_MAGIC4: u64 = 0x344B534944545342;  // "BSTDISK4": BSTDISK3 plus extension blocks (the head is at byte 8 of the superblock)
 const DISK_MAGIC2: u64 = 0x324B534944545342;  // "BSTDISK2": no directory blocks past the fixed ones
 const NO_DISK_FILE: u64 = 18446744073709551615;
@@ -144,6 +148,7 @@ struct DiskFs {
   next: u64,
   sec: Bytes,           // a sector buffer
   root: Bytes,          // a root map, while a write changes it
+  sp: Bytes,            // a super map (see SEG_FLAG), likewise
   la: Bytes,            // a first-level map, likewise
   lb: Bytes,            // a second one, for a write that crosses two
   data: Bytes,          // a data block being built
@@ -169,7 +174,7 @@ struct DiskFs {
 }
 
 spec fn disk_ok(d: &DiskFs) -> bool {
-  blk_ok(d.dev) && d.dcap >= DIR_START && d.dcap <= DIR_BLOCKS && blen(d.dir) == d.dcap * BLOCK && d.slots <= d.dcap * DPB && blen(d.sb) == BLOCK && d.ecap >= EXT_START && d.ecap <= EXT_MAX && blen(d.ext) == d.ecap * BLOCK && d.next <= d.ecap && blen(d.sec) == SECTOR && blen(d.root) == BLOCK
+  blk_ok(d.dev) && d.dcap >= DIR_START && d.dcap <= DIR_BLOCKS && blen(d.dir) == d.dcap * BLOCK && d.slots <= d.dcap * DPB && blen(d.sb) == BLOCK && d.ecap >= EXT_START && d.ecap <= EXT_MAX && blen(d.ext) == d.ecap * BLOCK && d.next <= d.ecap && blen(d.sec) == SECTOR && blen(d.root) == BLOCK && blen(d.sp) == BLOCK
     && blen(d.la) == BLOCK && blen(d.lb) == BLOCK && blen(d.data) == BLOCK && blen(d.d2) == BLOCK && dq_ok(d.q)
     && bits_ok(d.used) && d.blocks <= d.used.n && d.used.n <= MAX_BLOCKS && d.slots <= DSLOTS
     && len(d.pb) == BATCH_MAX && len(d.ob) == OB_MAX && d.pn <= BATCH_MAX && d.on <= OB_MAX && d.pw <= DSLOTS && d.free0 <= DSLOTS
@@ -269,6 +274,26 @@ fn ptr_in(d: &DiskFs, m: &Bytes, at: u64) -> u64
   let p = get_u64(m, at);
   if p >= DATA_B0 && p < d.blocks {
     return p;
+  }
+  return 0;
+}
+
+/// The file tree an entry's root word at m[at..at + 8] names: a root map
+/// block, or a super map block plus SEG_FLAG; 0 for none or for a number
+/// that is not a data block on this disk.
+fn tree_in(d: &DiskFs, m: &Bytes, at: u64) -> u64
+  requires disk_ok(d) && at + 8 <= blen(m)
+  ensures result == 0 || (result >= DATA_B0 && result < MAX_BLOCKS) || (result >= SEG_FLAG + DATA_B0 && result < SEG_FLAG + MAX_BLOCKS)
+{
+  let w = get_u64(m, at);
+  if w < SEG_FLAG {
+    if w >= DATA_B0 && w < d.blocks {
+      return w;
+    }
+    return 0;
+  }
+  if w >= SEG_FLAG + DATA_B0 && w < SEG_FLAG + d.blocks {
+    return w;
   }
   return 0;
 }
@@ -453,12 +478,39 @@ fn dent_zero(d: &mut DiskFs, i: u64, from: u64, to: u64)
 /// Marks every block of the file with root map r as in use (u = 1) or
 /// free (u = 0). A map that cannot be read is skipped: its blocks stay as
 /// they were (in use until the next mount, if they were).
-fn walk(d: &mut DiskFs, r: u64, u: u8)
+fn walk_flat(d: &mut DiskFs, r: u64, u: u8)
   requires disk_ok(d) && r >= DATA_B0 && r < MAX_BLOCKS
   ensures disk_ok(d) && d.dcap == old(d.dcap) && d.slots == old(d.slots)
 {
   used_mark(&mut d.used, r, u);
   walk_from(&mut d, r, 0, u);
+}
+
+/// Marks every block of the file tree t (a root map, or a super map plus
+/// SEG_FLAG: the super map, and each root map it names with its blocks).
+fn walk(d: &mut DiskFs, t: u64, u: u8)
+  requires disk_ok(d) && ((t >= DATA_B0 && t < MAX_BLOCKS) || (t >= SEG_FLAG + DATA_B0 && t < SEG_FLAG + MAX_BLOCKS))
+  ensures disk_ok(d) && d.dcap == old(d.dcap) && d.slots == old(d.slots)
+{
+  if t < SEG_FLAG {
+    walk_flat(&mut d, t, u);
+    return;
+  }
+  let sb = t - SEG_FLAG;
+  used_mark(&mut d.used, sb, u);
+  if !block_in(&mut d.dev, &mut d.sec, sb, &mut d.sp) {
+    return;
+  }
+  let mut j = 0;
+  while j < PTRS
+    invariant j <= PTRS && disk_ok(d)
+  {
+    let r = ptr_in(d, d.sp, 8 * j);
+    if r != 0 {
+      walk_flat(&mut d, r, u);
+    }
+    j = j + 1;
+  }
 }
 
 /// Marks the blocks under entries `from`.. of root map r (not r itself).
@@ -701,11 +753,14 @@ fn ext_name(d: &mut DiskFs, db: u64, b: u64) -> bool
   }
   let mut ok = false;
   if e == 0 {
-    put_u64(&mut d.sb, 0, DISK_MAGIC4);
+    let was = get_u64(d.sb, 0);
+    if was != DISK_MAGIC5 {
+      put_u64(&mut d.sb, 0, DISK_MAGIC4);
+    }
     put_u64(&mut d.sb, 8, eb);
     ok = sec_out(&mut d.dev, &mut d.sec, 0, d.sb, 0);
     if !ok {
-      put_u64(&mut d.sb, 0, DISK_MAGIC);
+      put_u64(&mut d.sb, 0, was);
       put_u64(&mut d.sb, 8, 0);
     }
   } else {
@@ -785,7 +840,7 @@ fn disk_mount(dev: Blk) -> DiskFs
   if n < DATA_B0 + 16 {
     nc = NC_MIN;      // no file system to cache: a loop mount that no file backs
   }
-  let mut d = DiskFs { dev: dev, dir: balloc(DIR_START * BLOCK), dcap: DIR_START, sb: balloc(BLOCK), ext: balloc(EXT_START * BLOCK), ecap: EXT_START, next: 0, sec: balloc(SECTOR), root: balloc(BLOCK),
+  let mut d = DiskFs { dev: dev, dir: balloc(DIR_START * BLOCK), dcap: DIR_START, sb: balloc(BLOCK), ext: balloc(EXT_START * BLOCK), ecap: EXT_START, next: 0, sec: balloc(SECTOR), root: balloc(BLOCK), sp: balloc(BLOCK),
     la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(nc), txn: 0, pw: 0, pb: alloc(BATCH_MAX), pn: 0, ob: alloc(OB_MAX), on: 0, pt: 0, tick: 0,
     used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, ix: balloc(0), ixn: 0, free0: 0, foreign: false, links: true };
   if n < DATA_B0 + 16 || !blk_read(&mut d.dev, 0, &mut d.sec) {
@@ -793,7 +848,7 @@ fn disk_mount(dev: Blk) -> DiskFs
   }
   d.blocks = n;
   let magic = get_u64(d.sec, 0);
-  if magic == DISK_MAGIC || magic == DISK_MAGIC2 || magic == DISK_MAGIC4 {
+  if magic == DISK_MAGIC || magic == DISK_MAGIC2 || magic == DISK_MAGIC4 || magic == DISK_MAGIC5 {
     // The fixed blocks, then each block the superblock names, in order,
     // up to the first it does not (a block number off the data area ends
     // the directory there too; test/fsck.py reports it).
@@ -819,7 +874,7 @@ fn disk_mount(dev: Blk) -> DiskFs
         return d;
       }
     }
-    if magic == DISK_MAGIC4 {
+    if magic == DISK_MAGIC4 || magic == DISK_MAGIC5 {
       // The extension blocks, in chain order (at most EXT_MAX: a longer
       // chain, or a loop, is cut there).
       let mut eb = ptr_in(d, d.sb, 8);
@@ -899,7 +954,7 @@ fn disk_mount(dev: Blk) -> DiskFs
       seen = true;
     }
     if dent_byte(d, i, E_KIND) == 1 {
-      let r = ptr_in(d, d.dir, i * DENT + E_ROOT);
+      let r = tree_in(d, d.dir, i * DENT + E_ROOT);
       if r != 0 {
         walk(&mut d, r, 1);
       }
@@ -956,6 +1011,7 @@ fn disk_unmount_now(d: DiskFs) -> Blk
   bfree(d.ix);
   bfree(d.sec);
   bfree(d.root);
+  bfree(d.sp);
   bfree(d.la);
   bfree(d.lb);
   bfree(d.data);
@@ -1045,15 +1101,15 @@ fn dent_parent(d: &DiskFs, i: u64) -> u64
   return dent_get(d, i, E_PARENT);
 }
 
-/// Entry i's root map block, or 0.
-fn dent_root(d: &DiskFs, i: u64) -> u64
+/// Entry i's file tree (see tree_in), or 0.
+fn dent_tree(d: &DiskFs, i: u64) -> u64
   requires disk_ok(d) && i < DSLOTS
-  ensures result == 0 || (result >= DATA_B0 && result < MAX_BLOCKS)
+  ensures result == 0 || (result >= DATA_B0 && result < MAX_BLOCKS) || (result >= SEG_FLAG + DATA_B0 && result < SEG_FLAG + MAX_BLOCKS)
 {
   if i >= d.dcap * DPB {
     return 0;
   }
-  return ptr_in(d, d.dir, i * DENT + E_ROOT);
+  return tree_in(d, d.dir, i * DENT + E_ROOT);
 }
 
 fn disk_size(d: &DiskFs, i: u64) -> u64
@@ -1593,7 +1649,7 @@ fn disk_remove(d: &mut DiskFs, i: u64) -> bool
       let s = i / 2;
       let b = dir_block(d, s / BSECT);
       if b != 0 && blk_read(&mut d.dev, b * BSECT + s % BSECT, &mut d.sec) {
-        oldroot = ptr_in(d, d.sec, i % 2 * DENT + E_ROOT);
+        oldroot = tree_in(d, d.sec, i % 2 * DENT + E_ROOT);
         dropped = true;
       }
     }
@@ -1601,7 +1657,7 @@ fn disk_remove(d: &mut DiskFs, i: u64) -> bool
   if !dropped {
     disk_drain(&mut d);               // queued writes reach the disk first
   }
-  let r = dent_root(d, i);
+  let r = dent_tree(d, i);
   let file = dent_byte(d, i, E_KIND) == 1 || cast[u64](dent_byte(d, i, E_KIND)) == K_ORPHAN;
   dent_setb(&mut d, i, E_KIND, 0);
   d.free0 = 0;
@@ -1727,11 +1783,27 @@ fn disk_name(d: &DiskFs, i: u64, buf: &mut Bytes, at: u64) -> u64
 /// The block holding block b of the file with root map `root`: 0 for a
 /// hole, DISK_MISS if a map it needs is not in the cache yet (a read of it
 /// is queued, or will be once the queue has room).
-fn data_ptr(d: &mut DiskFs, root: u64, b: u64) -> u64
-  requires disk_ok(d) && b < PTRS * PTRS
+fn data_ptr(d: &mut DiskFs, tree: u64, b: u64) -> u64
+  requires disk_ok(d) && b < SEG_BLOCKS * PTRS
   ensures disk_ok(d)
   ensures result == DISK_MISS || result == 0 || (result >= DATA_B0 && result < MAX_BLOCKS)
 {
+  let mut root = tree;
+  let mut bb = b;
+  if tree >= SEG_FLAG {
+    // A super map: the root map of the block's 1 GiB, then as below.
+    if tree < SEG_FLAG + DATA_B0 || tree >= SEG_FLAG + MAX_BLOCKS {
+      return 0;
+    }
+    let u = dq_want(&mut d.q, tree - SEG_FLAG);
+    if u >= d.q.nc {
+      return DISK_MISS;
+    }
+    root = ptr_in(d, d.q.cache, u * BLOCK + 8 * (bb / SEG_BLOCKS));
+    bb = bb % SEG_BLOCKS;
+  } else if bb >= SEG_BLOCKS {
+    return 0;                         // a single root map reaches the first 1 GiB only
+  }
   if root < DATA_B0 || root >= MAX_BLOCKS {
     return 0;
   }
@@ -1739,7 +1811,7 @@ fn data_ptr(d: &mut DiskFs, root: u64, b: u64) -> u64
   if s >= d.q.nc {
     return DISK_MISS;
   }
-  let l = ptr_in(d, d.q.cache, s * BLOCK + 8 * (b / PTRS));
+  let l = ptr_in(d, d.q.cache, s * BLOCK + 8 * (bb / PTRS));
   if l == 0 {
     return 0;
   }
@@ -1747,7 +1819,7 @@ fn data_ptr(d: &mut DiskFs, root: u64, b: u64) -> u64
   if t >= d.q.nc {
     return DISK_MISS;
   }
-  return ptr_in(d, d.q.cache, t * BLOCK + 8 * (b % PTRS));
+  return ptr_in(d, d.q.cache, t * BLOCK + 8 * (bb % PTRS));
 }
 
 /// Reads up to n bytes of the file in entry i from offset `off` into the
@@ -1772,7 +1844,7 @@ fn disk_read(d: &mut DiskFs, i: u64, off: u64, buf: &mut Bytes, n: u64) -> u64
   if want > n {
     want = n;
   }
-  let root = dent_root(d, i);
+  let root = dent_tree(d, i);
   let l = blen(buf);
   let mut missing = false;
   let mut k = 0;
@@ -1813,11 +1885,11 @@ const READ_AHEAD: u64 = 32;           // blocks queued past one a read missed
 /// Queues reads of the file's blocks from block b on (up to READ_AHEAD,
 /// within `size` bytes), whose maps are cached already.
 fn read_ahead(d: &mut DiskFs, root: u64, b: u64, size: u64)
-  requires disk_ok(d) && b <= PTRS * PTRS && size <= DFILE_MAX
+  requires disk_ok(d) && b <= SEG_BLOCKS * PTRS && size <= DFILE_MAX
   ensures disk_ok(d)
 {
   let mut c = 0;
-  while c < READ_AHEAD && b + c < PTRS * PTRS && (b + c) * BLOCK < size && d.q.r.n + 8 < NQ
+  while c < READ_AHEAD && b + c < SEG_BLOCKS * PTRS && (b + c) * BLOCK < size && d.q.r.n + 8 < NQ
     invariant disk_ok(d)
   {
     let p = data_ptr(&mut d, root, b + c);
@@ -1852,7 +1924,7 @@ fn disk_read_wait(d: &mut DiskFs, i: u64, off: u64, buf: &mut Bytes, n: u64) -> 
 
 /// How many bytes of block b a file of `size` bytes holds.
 fn valid_in(size: u64, b: u64) -> u64
-  requires b < PTRS * PTRS
+  requires b < SEG_BLOCKS * PTRS
   ensures result <= BLOCK
 {
   if size <= b * BLOCK {
@@ -1965,6 +2037,28 @@ fn batch_made(d: &mut DiskFs, prev: u64, now: u64)
     d.ob = set(d.ob, d.on, prev);
     d.on = d.on + 1;
   }
+}
+
+/// Makes the superblock say that files may have super maps (BSTDISK5), on
+/// the disk, before a write makes the first. False if that cannot be done.
+fn set_big(d: &mut DiskFs) -> bool
+  requires disk_ok(d)
+  ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
+{
+  let was = get_u64(d.sb, 0);
+  if was == DISK_MAGIC5 {
+    return true;
+  }
+  disk_drain(&mut d);
+  if d.q.dead {
+    return false;
+  }
+  put_u64(&mut d.sb, 0, DISK_MAGIC5);
+  if !sec_out(&mut d.dev, &mut d.sec, 0, d.sb, 0) {
+    put_u64(&mut d.sb, 0, was);
+    return false;
+  }
+  return true;
 }
 
 /// Queues the commit of the batch (nothing if there is none). False, with
@@ -2106,7 +2200,10 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
   if off >= DFILE_MAX || n == 0 || d.q.dead {
     return 0;
   }
-  let mut want = DFILE_MAX - off;
+  // A write stays within one 1 GiB segment of the file (the caller
+  // continues with the rest).
+  let seg = off / SEG_BYTES;
+  let mut want = (seg + 1) * SEG_BYTES - off;
   if want > n {
     want = n;
   }
@@ -2115,8 +2212,16 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
   if end > newsize {
     newsize = end;
   }
-  let b0 = off / BLOCK;
-  let b1 = (end - 1) / BLOCK;
+  let tree0 = dent_tree(d, i);
+  let big = tree0 >= SEG_FLAG || seg > 0;
+  if big && !set_big(&mut d) {
+    return 0;
+  }
+  // Block numbers in the file (for valid_in) and in the segment's root map.
+  let ba0 = off / BLOCK;
+  let ba1 = (end - 1) / BLOCK;
+  let b0 = ba0 % SEG_BLOCKS;
+  let b1 = ba1 % SEG_BLOCKS;
   let ia = b0 / PTRS;
   let ib = b1 / PTRS;
   let mut m0 = BLOCK - off % BLOCK;
@@ -2124,17 +2229,32 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
     m0 = want;
   }
   // A batch is for one file, and has room for what a write may add.
-  if d.pw != 0 && (d.pw != i + 1 || d.pn + 5 > BATCH_MAX || d.on + 5 > OB_MAX) {
+  if d.pw != 0 && (d.pw != i + 1 || d.pn + 6 > BATCH_MAX || d.on + 6 > OB_MAX) {
     if !disk_commit(&mut d) {
       return DISK_MISS;
     }
     d.txn = 0;
   }
-  if d.pn + 5 > BATCH_MAX || d.on + 5 > OB_MAX {
+  if d.pn + 6 > BATCH_MAX || d.on + 6 > OB_MAX {
     return DISK_MISS;                 // (not reached: a commit empties the batch)
   }
   // Gather the maps as they are, and the old data the write keeps.
-  let root0 = dent_root(d, i);
+  // A file with a super map keeps the segment's root map there; one that
+  // is about to get its second segment makes its root map segment 0.
+  let mut sp0 = 0;
+  let mut root0 = tree0;
+  if big {
+    if tree0 >= SEG_FLAG {
+      sp0 = tree0 - SEG_FLAG;
+    }
+    if !gather(&mut d.q, sp0, &mut d.sp) {
+      return DISK_MISS;
+    }
+    if tree0 < SEG_FLAG && tree0 != 0 {
+      put_u64(&mut d.sp, 0, tree0);
+    }
+    root0 = ptr_in(d, d.sp, 8 * seg);
+  }
   if !gather(&mut d.q, root0, &mut d.root) {
     return DISK_MISS;
   }
@@ -2157,8 +2277,8 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
       old1 = ptr_in(d, d.lb, 8 * (b1 % PTRS));
     }
   }
-  let v0 = valid_in(size, b0);
-  let v1 = valid_in(size, b1);
+  let v0 = valid_in(size, ba0);
+  let v1 = valid_in(size, ba1);
   // A block the write covers wherever it holds data needs no reading.
   let mut keep0 = old0;
   if off % BLOCK == 0 && m0 >= v0 {
@@ -2173,9 +2293,9 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
   if !g0 || !g1 {
     return DISK_MISS;
   }
-  // Room for six held blocks (two data, three maps, the directory block at
-  // commit).
-  if !dq_fits(d.q, 6, 0) {
+  // Room for seven held blocks (two data, three maps, a super map, the
+  // directory block at commit).
+  if !dq_fits(d.q, 7, 0) {
     return DISK_MISS;
   }
   // Each new block is the batch's own copy if the batch made the old one,
@@ -2191,7 +2311,11 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
     nb = batch_pick(&mut d, lb0);
   }
   let nr = batch_pick(&mut d, root0);
-  if n0 == 0 || (b1 != b0 && n1 == 0) || na == 0 || (ib != ia && nb == 0) || nr == 0 {
+  let mut nsp = 0;
+  if big {
+    nsp = batch_pick(&mut d, sp0);
+  }
+  if n0 == 0 || (b1 != b0 && n1 == 0) || na == 0 || (ib != ia && nb == 0) || nr == 0 || (big && nsp == 0) {
     if n0 != old0 {
       free_block(&mut d, n0);
     }
@@ -2207,6 +2331,9 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
     if nr != root0 {
       free_block(&mut d, nr);
     }
+    if nsp != sp0 {
+      free_block(&mut d, nsp);
+    }
     return 0;
   }
   batch_made(&mut d, old0, n0);
@@ -2218,6 +2345,9 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
     batch_made(&mut d, lb0, nb);
   }
   batch_made(&mut d, root0, nr);
+  if big {
+    batch_made(&mut d, sp0, nsp);
+  }
   // The new blocks.
   let mut k0 = 0;
   if keep0 != 0 {
@@ -2246,9 +2376,15 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
     ok = ok && dq_hold(&mut d.q, nb, d.lb, 0);
   }
   ok = ok && dq_hold(&mut d.q, nr, d.root, 0);
+  let mut tree1 = nr;
+  if big {
+    put_u64(&mut d.sp, 8 * seg, nr);
+    ok = ok && dq_hold(&mut d.q, nsp, d.sp, 0);
+    tree1 = nsp + SEG_FLAG;
+  }
   // The entry in memory: the disk gets it when the batch commits.
   dent_set(&mut d, i, E_SIZE, newsize);
-  dent_set(&mut d, i, E_ROOT, nr);
+  dent_set(&mut d, i, E_ROOT, tree1);
   dent_set(&mut d, i, E_MTIME, now);
   if d.pw == 0 {
     d.pt = d.tick;
@@ -2302,7 +2438,7 @@ fn disk_truncate(d: &mut DiskFs, i: u64, now: u64) -> bool
   ensures disk_ok(d)
 {
   disk_drain(&mut d);                 // queued writes reach the disk first
-  let r = dent_root(d, i);
+  let r = dent_tree(d, i);
   if dent_get(d, i, E_SIZE) == 0 && r == 0 {
     return true;
   }
@@ -2335,11 +2471,27 @@ fn disk_resize(d: &mut DiskFs, i: u64, size_to: u64, now: u64) -> bool
   if size_to == 0 {
     return disk_truncate(&mut d, i, now);
   }
-  let root0 = dent_root(d, i);
+  let tree0 = dent_tree(d, i);
   let size_raw = dent_get(d, i, E_SIZE);
   let root_raw = dent_get(d, i, E_ROOT);
   let mtime_raw = dent_get(d, i, E_MTIME);
-  if size_to >= size || root0 == 0 {
+  // The block holding the new end, in its 1 GiB segment (seg) and in that
+  // segment's root map (bl). A file with a super map keeps one root map
+  // per segment there; one without has only segment 0.
+  let bla = (size_to - 1) / BLOCK;
+  let seg = bla / SEG_BLOCKS;
+  let bl = bla % SEG_BLOCKS;
+  let big = tree0 >= SEG_FLAG;
+  let mut root0 = 0;
+  if big {
+    if !block_in(&mut d.dev, &mut d.sec, tree0 - SEG_FLAG, &mut d.sp) {
+      return false;
+    }
+    root0 = ptr_in(d, d.sp, 8 * seg);
+  } else if seg == 0 {
+    root0 = tree0;
+  }
+  if size_to >= size || (root0 == 0 && !big) {
     dent_set(&mut d, i, E_SIZE, size_to);
     dent_set(&mut d, i, E_MTIME, now);
     if !ent_flush(&mut d, i) {
@@ -2350,55 +2502,68 @@ fn disk_resize(d: &mut DiskFs, i: u64, size_to: u64, now: u64) -> bool
     return true;
   }
   // Shrinking: copy the last block kept (its tail zeroed), its map, and
-  // the root, each cut off after the new end.
-  let bl = (size_to - 1) / BLOCK;
+  // the root, each cut off after the new end; and the super map, if any,
+  // cut off after the new end's segment.
   let il = bl / PTRS;
   let kl = bl % PTRS;
-  if !block_in(&mut d.dev, &mut d.sec, root0, &mut d.root) {
-    return false;
-  }
-  let la0 = ptr_in(d, d.root, 8 * il);
-  if !block_in(&mut d.dev, &mut d.sec, la0, &mut d.la) {
-    return false;
-  }
-  // The old map, to free its tail once the switch is done.
-  let mut c = 0;
-  while c < BLOCK
-    invariant c <= BLOCK && disk_ok(d)
-  {
-    bset(&mut d.lb, c, bget(d.la, c));
-    c = c + 1;
-  }
-  let prev = ptr_in(d, d.la, 8 * kl);
-  let mut nd = prev;
-  if prev != 0 && size_to % BLOCK != 0 {
-    if !block_in(&mut d.dev, &mut d.sec, prev, &mut d.data) {
-      return false;
-    }
-    zero(&mut d.data, size_to % BLOCK, BLOCK);
-    nd = alloc_block(&mut d);
-    if nd == 0 {
-      return false;
-    }
-    if !block_out(&mut d.dev, &mut d.sec, nd, d.data) {
-      free_block(&mut d, nd);
-      return false;
-    }
-  }
-  put_u64(&mut d.la, 8 * kl, nd);
-  zero(&mut d.la, 8 * kl + 8, BLOCK);
+  let mut la0 = 0;
+  let mut prev = 0;
+  let mut nd = 0;
   let mut na = 0;
-  let mut ok = true;
-  if la0 != 0 {
-    na = alloc_block(&mut d);
-    ok = na != 0 && block_out(&mut d.dev, &mut d.sec, na, d.la);
-  }
-  put_u64(&mut d.root, 8 * il, na);
-  zero(&mut d.root, 8 * il + 8, BLOCK);
   let mut nr = 0;
-  if ok {
-    nr = alloc_block(&mut d);
-    ok = nr != 0 && block_out(&mut d.dev, &mut d.sec, nr, d.root);
+  let mut ok = true;
+  if root0 != 0 {
+    if !block_in(&mut d.dev, &mut d.sec, root0, &mut d.root) {
+      return false;
+    }
+    la0 = ptr_in(d, d.root, 8 * il);
+    if !block_in(&mut d.dev, &mut d.sec, la0, &mut d.la) {
+      return false;
+    }
+    // The old map, to free its tail once the switch is done.
+    let mut c = 0;
+    while c < BLOCK
+      invariant c <= BLOCK && disk_ok(d)
+    {
+      bset(&mut d.lb, c, bget(d.la, c));
+      c = c + 1;
+    }
+    prev = ptr_in(d, d.la, 8 * kl);
+    nd = prev;
+    if prev != 0 && size_to % BLOCK != 0 {
+      if !block_in(&mut d.dev, &mut d.sec, prev, &mut d.data) {
+        return false;
+      }
+      zero(&mut d.data, size_to % BLOCK, BLOCK);
+      nd = alloc_block(&mut d);
+      if nd == 0 {
+        return false;
+      }
+      if !block_out(&mut d.dev, &mut d.sec, nd, d.data) {
+        free_block(&mut d, nd);
+        return false;
+      }
+    }
+    put_u64(&mut d.la, 8 * kl, nd);
+    zero(&mut d.la, 8 * kl + 8, BLOCK);
+    if la0 != 0 {
+      na = alloc_block(&mut d);
+      ok = na != 0 && block_out(&mut d.dev, &mut d.sec, na, d.la);
+    }
+    put_u64(&mut d.root, 8 * il, na);
+    zero(&mut d.root, 8 * il + 8, BLOCK);
+    if ok {
+      nr = alloc_block(&mut d);
+      ok = nr != 0 && block_out(&mut d.dev, &mut d.sec, nr, d.root);
+    }
+  }
+  // The new super map: the segments up to this one, and no more.
+  let mut nsp = 0;
+  if ok && big {
+    put_u64(&mut d.sp, 8 * seg, nr);
+    zero(&mut d.sp, 8 * seg + 8, BLOCK);
+    nsp = alloc_block(&mut d);
+    ok = nsp != 0 && block_out(&mut d.dev, &mut d.sec, nsp, d.sp);
   }
   if !ok {
     if nd != prev {
@@ -2406,11 +2571,16 @@ fn disk_resize(d: &mut DiskFs, i: u64, size_to: u64, now: u64) -> bool
     }
     free_block(&mut d, na);
     free_block(&mut d, nr);
+    free_block(&mut d, nsp);
     return false;
   }
   // The switch: one sector.
+  let mut tree1 = nr;
+  if big {
+    tree1 = nsp + SEG_FLAG;
+  }
   dent_set(&mut d, i, E_SIZE, size_to);
-  dent_set(&mut d, i, E_ROOT, nr);
+  dent_set(&mut d, i, E_ROOT, tree1);
   dent_set(&mut d, i, E_MTIME, now);
   if !ent_flush(&mut d, i) {
     // As in disk_write: keep both trees; the next mount frees the loser.
@@ -2420,19 +2590,37 @@ fn disk_resize(d: &mut DiskFs, i: u64, size_to: u64, now: u64) -> bool
     return false;
   }
   // Free what only the old tree held.
-  if nd != prev {
-    free_block(&mut d, prev);
+  if root0 != 0 {
+    if nd != prev {
+      free_block(&mut d, prev);
+    }
+    let mut k = kl + 1;
+    while k < PTRS
+      invariant k <= PTRS + 1 && disk_ok(d)
+    {
+      free_block(&mut d, ptr_in(d, d.lb, 8 * k));
+      k = k + 1;
+    }
+    free_block(&mut d, la0);
+    walk_from(&mut d, root0, il + 1, 0);
+    free_block(&mut d, root0);
   }
-  let mut k = kl + 1;
-  while k < PTRS
-    invariant k <= PTRS + 1 && disk_ok(d)
-  {
-    free_block(&mut d, ptr_in(d, d.lb, 8 * k));
-    k = k + 1;
+  if big {
+    // The segments past the new end, from the old super map.
+    if block_in(&mut d.dev, &mut d.sec, tree0 - SEG_FLAG, &mut d.sp) {
+      let mut j = seg + 1;
+      while j < PTRS
+        invariant j <= PTRS + 1 && disk_ok(d)
+      {
+        let r = ptr_in(d, d.sp, 8 * j);
+        if r != 0 {
+          walk_flat(&mut d, r, 0);
+        }
+        j = j + 1;
+      }
+    }
+    free_block(&mut d, tree0 - SEG_FLAG);
   }
-  free_block(&mut d, la0);
-  walk_from(&mut d, root0, il + 1, 0);
-  free_block(&mut d, root0);
   return true;
 }
 
