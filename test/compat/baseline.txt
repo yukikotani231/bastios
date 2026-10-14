@@ -925,6 +925,7 @@ t_signal: sigsuspend
 t_signal: sigwait
 t_signal: timer_create
 t_signal: unblock delivers
+t_sigsleep: a signal sent to a thread about to sleep in a futex wait runs its handler
 t_sock2: AF_UNIX SOCK_DGRAM socketpair
 t_sock2: MSG_DONTWAIT on an empty socket is EAGAIN
 t_sock2: MSG_PEEK leaves the bytes
@@ -965,6 +966,7 @@ t_sys: settimeofday
 t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message
 t_sysv: 32 queues, semaphore sets and segments at once, the 33rd of each is ENOSPC
+t_sysv: 16 attachments in one process, the 17th is EMFILE
 t_sysv: GETNCNT counts a waiting process
 t_sysv: IPC_RMID ends a wait with EIDRM
 t_sysv: SEM_UNDO is undone at exit

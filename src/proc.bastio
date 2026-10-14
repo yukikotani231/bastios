@@ -188,6 +188,41 @@ fn pset(procs: &mut Buf, pid: u64, f: u64, v: u64)
   }
 }
 
+/// Stores the first `n` words of the processor's saved context into process
+/// `pid`'s register block (word F_REGS on) with one range check up front.
+fn regs_store(procs: &mut Buf, cpu: &Cpu, pid: u64, n: u64)
+  requires ptab_ok(procs) && pid < NPROC && n <= 21
+  ensures len(procs) == old(len(procs))
+{
+  let base = pid * STRIDE + F_REGS;
+  if base + n <= len(procs) {
+    let mut r = 0;
+    while r < n
+      invariant r <= n && base + n <= len(procs) && len(procs) == old(len(procs))
+    {
+      procs = set(procs, base + r, cpu_get(cpu, r));
+      r = r + 1;
+    }
+  }
+}
+
+/// The reverse: loads the first `n` words of process `pid`'s register block
+/// into the processor's saved context.
+fn regs_load(cpu: &mut Cpu, procs: &Buf, pid: u64, n: u64)
+  requires ptab_ok(procs) && pid < NPROC && n <= 18
+{
+  let base = pid * STRIDE + F_REGS;
+  if base + n <= len(procs) {
+    let mut r = 0;
+    while r < n
+      invariant r <= n && n <= 18 && base + n <= len(procs)
+    {
+      cpu_set(&mut cpu, r, get(procs, base + r));
+      r = r + 1;
+    }
+  }
+}
+
 /// The row word that holds saved register r: the register block, or past the
 /// row's usual 72 words for the registers beyond the first 21.
 fn reg_word(r: u64) -> u64
@@ -457,7 +492,7 @@ const LK_WAITS: u64 = 768;            // LK_N * LK_W
 const LK_WW: u64 = 4;
 const LK_HI: u64 = LK_WAITS + NPROC * LK_WW;   // after them: every held lock is in an entry below this
 const LK_LEN: u64 = LK_HI + 1;
-const IPC_LEN: u64 = 6656 + NPROC * 24;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
+const IPC_LEN: u64 = 6656 + NPROC * 48;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
 const RNG_LEN: u64 = 19;              // the random generator's words (src/lxdev.bastio)
 const SYS_SHMMAX: u64 = 154;           // /proc/sys/kernel/shmmax as written, + 1 (0: never written; src/lxipc.bastio)
 const SYS_PQ: u64 = 160;
@@ -898,6 +933,7 @@ struct Kernel {
   mstr: Bytes,          // the mounts' paths, and the logical path of the last lookup
   naps: bool,           // a process may be in TIMEWAIT: false lets sleepers_wake skip its scan
   mt_hi: u64,           // one past the highest mount entry ever given to a namespace (me_set): no later one is in use
+  pid_hi: u64,          // one past the highest process id ever handed out by new_pid_from: every row from there on is FREE (scans for a ready process stop there)
   fd_hi: u64,           // one past the highest descriptor number ever open: every non-zero word of lxfd is below it (rows are scanned only that far)
   ofd_hi: u64,          // one past the highest open file description ever made: no later one is in use (scans stop there)
   socks: bool,          // a process may be in SOCKWAIT (nap sets it, sock_wake clears it): false lets sock_wake return at once
@@ -1296,6 +1332,9 @@ fn new_pid_from(k: &mut Kernel, round: bool) -> u64
   }
   let pid = free_pid(k.procs, from);
   if pid != 0 {
+    if pid >= k.pid_hi {
+      k.pid_hi = pid + 1;
+    }
     if round {
       pset(&mut k.procs, 0, F_START, pid);     // row 0 is no process: it keeps the last id handed to a thread
     }
@@ -1319,6 +1358,9 @@ fn new_pid_from(k: &mut Kernel, round: bool) -> u64
     return 0;
   }
   let grown = free_pid(k.procs, cap);
+  if grown >= k.pid_hi && grown != 0 {
+    k.pid_hi = grown + 1;
+  }
   if grown != 0 && round {
     pset(&mut k.procs, 0, F_START, grown);
   }

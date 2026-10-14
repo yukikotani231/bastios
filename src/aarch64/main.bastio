@@ -334,6 +334,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       s.stop = true;
     }
     sock_wake(&mut s.k);
+    if what == SWITCH {
+      sig_wake_now(&mut s.k, p);            // a signal posted while it ran is not lost to its sleep
+    }
     if disk_hold(&mut s.k, p, EIO) || what == SWITCH {
       return (p + 1) % NPROC;
     }
