@@ -200,6 +200,7 @@ fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
   pset(&mut k.procs, p, F_BRK0, pget(k.procs, h, F_BRK0));
   pset(&mut k.procs, p, F_MMAP, pget(k.procs, h, F_MMAP));
   pset(&mut k.procs, p, F_PROG, pget(k.procs, h, F_PROG));
+  pset(&mut k.procs, p, F_ARGS, pget(k.procs, h, F_ARGS));
   if (h + 1) * LXNFD <= len(k.lxfd) && (p + 1) * LXNFD <= len(k.lxfd) {
     swap_words(&mut k.lxfd, h * LXNFD, p * LXNFD, smaller(k.fd_hi, LXNFD));   // past fd_hi both rows are zero
   }
@@ -451,14 +452,14 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
 /// The clone flags a new process (not a thread, not a vfork) may carry:
 /// the exit signal, CLONE_PARENT, the tid and TLS flags, and the ones
 /// that change nothing here (CLONE_SYSVSEM, CLONE_DETACHED, CLONE_IO).
-/// CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC and CLONE_NEWCGROUP give the
-/// child a mount, UTS, IPC or cgroup namespace of its own. Sharing files, the cwd, signal handlers or
+/// CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWCGROUP and CLONE_NEWNET give the
+/// child a mount, UTS, IPC, cgroup or network namespace of its own. Sharing files, the cwd, signal handlers or
 /// memory with a separate process, and the other namespaces, are not
 /// supported.
 fn clone_proc_flags(flags: u64) -> bool {
   let known = 0xff + CLONE_PARENT + CLONE_SYSVSEM + CLONE_SETTLS + CLONE_PARENT_SETTID
     + CLONE_CHILD_CLEARTID + CLONE_DETACHED + CLONE_CHILD_SETTID + CLONE_IO + CLONE_NEWNS
-    + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWUSER + CLONE_NEWCGROUP;
+    + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWUSER + CLONE_NEWCGROUP + CLONE_NEWNET;
   return flags & known == flags;
 }
 
@@ -477,7 +478,7 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
       return EINVAL;                        // init has no parent to share
     }
   }
-  let nsf = flags & (CLONE_NEWNS + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWCGROUP);
+  let nsf = flags & (CLONE_NEWNS + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWCGROUP + CLONE_NEWNET);
   if nsf != 0 && flags & CLONE_NEWUSER == 0 && !ns_cap(k, pid, CAP_SYS_ADMIN) {
     return EPERM;                           // a new user namespace makes the caller privileged in it (src/lxuser.bastio)
   }
@@ -509,6 +510,9 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
   }
   if flags & CLONE_NEWNS != 0 {
     let e = ns_unshare(&mut k, c);          // cannot fail: ns_room said so
+  }
+  if flags & CLONE_NEWNET != 0 {
+    let en = netns_unshare(&mut k, c);      // the child gets a network namespace of its own; past the limit it keeps the parent's
   }
   let e2 = nsk_unshare(&mut k, c, flags & (CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWUSER + CLONE_NEWCGROUP));   // nor this: uts_room did (src/lxnsk.bastio)
   if flags & CLONE_NEWPID != 0 {
