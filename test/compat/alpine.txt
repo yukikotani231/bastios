@@ -243,6 +243,12 @@ $ bb cp /disk/strace /disk/a/usr/bin/strace && bb chroot /disk/a /bin/sh -c 'sle
 1
 1
 
+== gdb: a breakpoint in a program stops it, shows its arguments and backtrace, and finish gives the return value
+$ bb tar xf /disk/gdb.tar -C /disk/a/opt; bb printf '#include <stdio.h>\nint add(int a, int b) { return a + b; }\nint main(void) { printf("sum %%d\\n", add(40, 2)); return 0; }\n' > /disk/a/root/d.c && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -g -O0 -static -no-pie -o d d.c && LD_LIBRARY_PATH=/opt/gdb/lib /opt/gdb/bin/gdb -batch -ex "break add" -ex run -ex "print a + b" -ex bt -ex finish ./d </dev/null 2>&1 | grep -e "Breakpoint 1, add (a=40, b=2)" -e "= 42"'
+Breakpoint 1, add (a=40, b=2) at d.c:2
+$1 = 42
+Value returned is $2 = 42
+
 == nvim: LuaJIT loads a shared object that gcc built
 $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf 'local ffi = require("ffi")\nffi.cdef[[int answer(void);]]\nio.open("/root/so.txt", "w"):write(ffi.load("/root/libso.so").answer(), "\\n")\n' > /disk/a/root/so.lua && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -shared -fPIC -o libso.so so.c && nvim -l so.lua >/dev/null 2>&1'; bb cat /disk/a/root/so.txt
 42

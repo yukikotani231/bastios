@@ -729,6 +729,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       sig = SIGILL;
     } else if v == 3 {
       sig = SIGTRAP;
+      pt_brk(&mut s.k, p);
     } else if v == 1 {
       sig = SIGTRAP;                        // a single step (src/lxptrace.bastio)
       pt_stepped(&mut s.k, p);

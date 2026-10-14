@@ -60,6 +60,8 @@ const PTRACE_SYSCALL: u64 = 24;
 const PTRACE_KILL: u64 = 8;
 const PTRACE_GETREGS: u64 = 12;
 const PTRACE_SETREGS: u64 = 13;
+const PTRACE_GETFPREGS: u64 = 14;
+const PTRACE_SETFPREGS: u64 = 15;
 const PTRACE_ATTACH: u64 = 16;
 const PTRACE_DETACH: u64 = 17;
 const PTRACE_SETOPTIONS: u64 = 0x4200;
@@ -185,11 +187,23 @@ fn pt_stepped(k: &mut Kernel, p: u64)
   requires kok(k) && 1 <= p && p < NPROC
   ensures kok(k)
 {
-  let t = tr2_get(k, p);
+  let t = smaller(tr2_get(k, p), 0xFFFFFFFFFFFFFF);   // the word is far below this
   if t / TS_STEP % 2 == 1 {
     let fl = pget(k.procs, p, F_REGS + R_RFLAGS);
     pset(&mut k.procs, p, F_REGS + R_RFLAGS, step_flags(fl, false));
-    tr2_put(&mut k, p, t % TS_STEP + t / (2 * TS_STEP) * (2 * TS_STEP));
+    tr2_put(&mut k, p, t % TS_STEP + t / (2 * TS_STEP) * (2 * TS_STEP) + TS_TRAP);
+  }
+}
+
+/// Process p took a breakpoint trap (vector 3): if it is traced, the stop
+/// that follows says so in its siginfo.
+fn pt_brk(k: &mut Kernel, p: u64)
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let t = smaller(tr2_get(k, p), 0xFFFFFFFFFFFFFF);   // the word is far below this
+  if tr_tracer(k, p) != 0 && t / TS_BRK % 2 == 0 {
+    tr2_put(&mut k, p, t + TS_BRK);
   }
 }
 
@@ -333,6 +347,20 @@ fn pt_attach(k: &mut Kernel, pid: u64, p: u64, seize: bool) -> u64
   return 0;
 }
 
+/// Reads the code pages of the tracee's program that cover the word at addr,
+/// if they are not read yet (src/lazy.bastio): a tracer looking at code the
+/// tracee has not run, as a debugger does at its first stop, finds it there.
+fn pt_fill(k: &mut Kernel, c: u64, addr: u64)
+  requires kok(k) && 1 <= c && c < NPROC
+  ensures kok(k)
+{
+  if addr >= USER_BASE && addr < 0x8000000000000000 {
+    let g = tgid(k.procs, c);
+    let first = lazy_read(&mut k, g, (addr - USER_BASE) / 4096, true);
+    let second = lazy_read(&mut k, g, (addr + 7 - USER_BASE) / 4096, true);
+  }
+}
+
 /// Peeks (a word at addr of the tracee's memory, or of its registers) and
 /// stores the word at `data`, as the raw system call does.
 fn pt_peek(k: &mut Kernel, pid: u64, c: u64, req: u64, addr: u64, data: u64) -> u64
@@ -350,6 +378,7 @@ fn pt_peek(k: &mut Kernel, pid: u64, c: u64, req: u64, addr: u64, data: u64) -> 
       return EIO;
     }                                       // the debug registers read as zero
   } else {
+    pt_fill(&mut k, c, addr);
     let tp = fd_row(&mut k, tgid(k.procs, c));
     if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, tp, addr, &mut k.fs.xfer, 8) != 8 {
       return EIO;
@@ -383,9 +412,17 @@ fn pt_poke(k: &mut Kernel, c: u64, req: u64, addr: u64, data: u64) -> u64
     }
     return EIO;
   }
+  pt_fill(&mut k, c, addr);
+  if addr >= USER_BASE && addr < 0x8000000000000000 {
+    // Shared program text is read-only for everyone: the tracee gets a copy of
+    // the pages the word is on, to hold what the tracer writes there.
+    let g = tgid(k.procs, c);
+    let first = own_touch(&mut k.mem, &mut k.spaces, g, (addr - USER_BASE) / 4096, true);
+    let second = own_touch(&mut k.mem, &mut k.spaces, g, (addr + 7 - USER_BASE) / 4096, true);
+  }
   let tp = fd_row(&mut k, tgid(k.procs, c));
   xfer_u64(&mut k.fs.xfer, 0, data);
-  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, tp, addr, k.fs.xfer, 8) != 8 {
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, tp, addr, k.fs.xfer, 8) != 8 && force_to_user(&mut k.spaces, tp, addr, k.fs.xfer, 8) != 8 {
     return EIO;
   }
   return 0;
@@ -423,6 +460,56 @@ fn pt_setregs(k: &mut Kernel, pid: u64, c: u64, from: u64, n: u64) -> u64
   {
     ur_write(&mut k, c, i, rd64(k.fs.xfer, i * 8));
     i = i + 1;
+  }
+  return 0;
+}
+
+/// PTRACE_GETFPREGS and SETFPREGS: the tracee's x87 and SSE registers, as
+/// the 512 bytes FXSAVE keeps (a user_fpregs_struct), to or from `to`.
+fn pt_fpregs(k: &mut Kernel, pid: u64, c: u64, to: u64, set: bool) -> u64
+  requires kok(k) && pid < NPROC && 1 <= c && c < NPROC
+  ensures kok(k)
+{
+  if set {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, to, &mut k.fs.xfer, 512) != 512 {
+      return EFAULT;
+    }
+  }
+  match take_fpu(&mut k.fpus, c) {
+    Fpu::None => {
+      put_fpu(&mut k.fpus, c, Fpu::None);
+      if !set {
+        let mut i = 0;
+        while i < 512
+          invariant i <= 512 && kok(k)
+        {
+          bset(&mut k.fs.xfer, i, 0);
+          i = i + 1;
+        }
+        xfer_u64(&mut k.fs.xfer, 0, 0x37f);       // the state a process starts with
+        xfer_u64(&mut k.fs.xfer, 24, 0x1f80);
+      }
+    },
+    Fpu::State(mut f) => {
+      let mut i = 0;
+      while i < 512
+        invariant i <= 512 && kok(k)
+      {
+        if set {
+          frame_write(&mut f, i, bget(k.fs.xfer, i));
+        } else {
+          let v = frame_read8(f, i);
+          bset(&mut k.fs.xfer, i, v);
+        }
+        i = i + 1;
+      }
+      put_fpu(&mut k.fpus, c, Fpu::State(f));
+    },
+  }
+  if !set {
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, to, k.fs.xfer, 512) != 512 {
+      return EFAULT;
+    }
   }
   return 0;
 }
@@ -517,6 +604,9 @@ fn lx_ptrace(k: &mut Kernel, pid: u64, req0: u64, p0: u64, addr: u64, data: u64)
   if PT_USER_API == 1 && req == PTRACE_SETREGS {
     return pt_setregs(&mut k, pid, p, data, USER_REGS_SIZE);
   }
+  if req == PTRACE_GETFPREGS || req == PTRACE_SETFPREGS {
+    return pt_fpregs(&mut k, pid, p, data, req == PTRACE_SETFPREGS);
+  }
   if req == PTRACE_GETREGSET || req == PTRACE_SETREGSET {
     return pt_regset(&mut k, pid, p, req == PTRACE_SETREGSET, addr, data);
   }
@@ -536,9 +626,33 @@ fn lx_ptrace(k: &mut Kernel, pid: u64, req0: u64, p0: u64, addr: u64, data: u64)
     return lx_put_out(&mut k, pid, data, 8);
   }
   if req == PTRACE_GETSIGINFO {
-    // The signal that stopped it: from a user process (SI_USER).
+    // The signal that stopped it, and for a SIGTRAP why: a single step
+    // (TRAP_TRACE), an event (PTRACE_EVENT in the second byte), else the
+    // trap of a breakpoint instruction (SI_KERNEL), which a debugger tells
+    // from the trap of an exec. Any other signal is from a user process
+    // (SI_USER).
     lx_fill(&mut k, 0, 128);
-    xfer_u64(&mut k.fs.xfer, 0, tr_sig(tr_get(k, p)));
+    let sig = tr_sig(tr_get(k, p));
+    let t2 = tr2_get(k, p);
+    let mut code = 0;
+    if sig == 5 {
+      let mut ev = t2 / TS_EV % 16;
+      if t2 / TS_ENTRY % 2 == 1 || t2 / TS_EXIT % 2 == 1 {
+        ev = 0;
+      }
+      if ev == EV_STOP {
+        ev = 128;
+      }
+      if ev != 0 {
+        code = 5 + ev * 256;
+      } else if t2 / TS_TRAP % 2 == 1 {
+        code = 2;                             // TRAP_TRACE
+      } else if t2 / TS_BRK % 2 == 1 {
+        code = 0x80;                          // SI_KERNEL
+      }
+    }
+    xfer_u64(&mut k.fs.xfer, 0, sig);
+    xfer_u64(&mut k.fs.xfer, 8, code);
     return lx_put_out(&mut k, pid, data, 128);
   }
   if req == PTRACE_SETSIGINFO {
