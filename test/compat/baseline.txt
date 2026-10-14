@@ -895,6 +895,9 @@ t_ptrace: a process that is not a tracee is ESRCH
 t_ptrace: a traced child stops for a signal and the tracer hears of it
 t_ptrace: a traced child stops with SIGTRAP after execve
 t_ptrace: a tracee that is running is ESRCH
+t_ptrace: PTRACE_SEIZE attaches without stopping the tracee
+t_ptrace: PTRACE_INTERRUPT stops it with PTRACE_EVENT_STOP and SIGTRAP
+t_ptrace: a seized tracee resumed with PTRACE_CONT runs to its end
 t_ptrace: attaching to itself is EPERM
 t_ptrace: attaching to what is traced already is EPERM
 t_ptrace: PTRACE_SYSCALL stops at getpid and gettid
@@ -1036,6 +1039,7 @@ t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message
 t_sysv: 32 queues, semaphore sets and segments at once, the 33rd of each is ENOSPC
 t_sysv: 32 attachments in one process, the 33rd is EMFILE
+t_sysv: 512 SEM_UNDO adjustments in one process, all undone at exit
 t_sysv: GETNCNT counts a waiting process
 t_sysv: IPC_RMID ends a wait with EIDRM
 t_sysv: SEM_UNDO is undone at exit
@@ -1139,6 +1143,7 @@ alpine: nvim: tree-sitter parses help text with the vimdoc parser
 alpine: nvim: tree-sitter parses C with a parser built from the grammar, and a query finds the function names
 alpine: nvim: tree-sitter highlights C: the keyword, the type and the comment get their captures
 alpine: nvim: :diffthis marks the line that differs, and vim.diff finds the hunk
+alpine: strace: traces a program's system calls with ptrace, following the child it starts
 alpine: nvim: LuaJIT loads a shared object that gcc built
 alpine: nvim: a plugin cloned over HTTP is on the packpath and runs at startup
 alpine: nvim: a small plugin manager in Lua clones a plugin, loads it, then updates it with git pull

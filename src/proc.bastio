@@ -493,7 +493,7 @@ const LK_WAITS: u64 = 768;            // LK_N * LK_W
 const LK_WW: u64 = 4;
 const LK_HI: u64 = LK_WAITS + NPROC * LK_WW;   // after them: every held lock is in an entry below this
 const LK_LEN: u64 = LK_HI + 1;
-const IPC_LEN: u64 = 6656 + NPROC * 96;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
+const IPC_LEN: u64 = 9728 + NPROC * 96;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
 const RNG_LEN: u64 = 19;              // the random generator's words (src/lxdev.bastio)
 const SYS_SHMMAX: u64 = 154;           // /proc/sys/kernel/shmmax as written, + 1 (0: never written; src/lxipc.bastio)
 const SYS_PQ: u64 = 160;
@@ -532,14 +532,16 @@ const TS_ENTRY: u64 = 2;
 const TS_NOENT: u64 = 4;
 const TS_EXIT: u64 = 8;
 const TS_STEP: u64 = 16;               // PTRACE_SINGLESTEP: the trap flag is set until the next stop
+const TS_OWE: u64 = 32;                // an event stop came before the stop after a system call: the tracer is owed that one
 const TS_NR: u64 = 256;                // times a number below 1024
 const TS_EV: u64 = 1048576;            // times the event of the stop (PTRACE_EVENT_*, below 16)
+const EV_STOP: u64 = 15;               // PTRACE_EVENT_STOP (128) as the event field holds it
 const TS_MSG: u64 = 16777216;          // times its message (PTRACE_GETEVENTMSG, below 65536)
 const PT_ATTACHED: u64 = 65536;        // PTRACE_ATTACH or SEIZE rather than TRACEME
 const PT_STOPPED: u64 = 131072;        // in a ptrace-stop: the tracer may read and change it
 const PT_SKIP: u64 = 262144;           // the signal about to be delivered was injected: it does not stop again
 const PT_SIG: u64 = 16777216;          // the signal that stopped it, times PT_SIG
-const PT_OPT: u64 = 4294967296;        // PTRACE_SETOPTIONS: the low 8 bits, then bit 8 for PTRACE_O_EXITKILL, times PT_OPT
+const PT_OPT: u64 = 4294967296;        // PTRACE_SETOPTIONS: the low 8 bits, then bit 8 for PTRACE_O_EXITKILL, bit 9 if the tracer used PTRACE_SEIZE, times PT_OPT
 // Capabilities the kernel checks (src/lxcap.bastio).
 const CAP_SYS_TIME: u64 = 25;
 const CAP_SYS_RESOURCE: u64 = 24;
@@ -980,7 +982,7 @@ fn tr_tracer(k: &Kernel, p: u64) -> u64
 
 /// A ptrace word from its parts (t: tracer + 1).
 fn tr_make(t: u64, att: u64, stopped: u64, skip: u64, sig: u64, opt: u64) -> u64
-  requires t < 65536 && att < 2 && stopped < 2 && skip < 2 && sig < 256 && opt < 512
+  requires t < 65536 && att < 2 && stopped < 2 && skip < 2 && sig < 256 && opt < 1024
   ensures result == t + att * PT_ATTACHED + stopped * PT_STOPPED + skip * PT_SKIP + sig * PT_SIG + opt * PT_OPT
 {
   return t + att * PT_ATTACHED + stopped * PT_STOPPED + skip * PT_SKIP + sig * PT_SIG + opt * PT_OPT;
@@ -1007,9 +1009,9 @@ fn tr_sig(w: u64) -> u64
   return w / PT_SIG % 256;
 }
 fn tr_opt(w: u64) -> u64
-  ensures result < 512
+  ensures result < 1024
 {
-  return w / PT_OPT % 512;
+  return w / PT_OPT % 1024;
 }
 
 /// Whether process t traces process p.

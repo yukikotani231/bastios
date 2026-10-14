@@ -884,7 +884,15 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
             bset(&mut k.fs.xfer, 0, 0x7f);
             bset(&mut k.fs.xfer, 1, cast[u8](jr % 256));
             if traced_by(k, c, pid) {
-              bset(&mut k.fs.xfer, 2, cast[u8](tr2_get(k, c) / TS_EV % 16));   // the event, if it is one (src/lxptrace.bastio)
+              let t2 = tr2_get(k, c);
+              let mut ev = t2 / TS_EV % 16;              // the event, if it is one (src/lxptrace.bastio)
+              if t2 / TS_ENTRY % 2 == 1 || t2 / TS_EXIT % 2 == 1 {
+                ev = 0;                                  // a system call stop is no event
+              }
+              if ev == EV_STOP {
+                ev = 128;                                // PTRACE_EVENT_STOP
+              }
+              bset(&mut k.fs.xfer, 2, cast[u8](ev));
             }
           } else {
             bset(&mut k.fs.xfer, 0, 0xff);
