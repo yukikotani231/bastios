@@ -163,7 +163,7 @@ fn pidfd_getfd(k: &mut Kernel, pid: u64, fd: u64, target: u64, flags: u64) -> u6
     return EMFILE;
   }
   ref_value(&mut k, FD_OFD + h);
-  fd_set(&mut k.lxfd, pid, nfd, FD_OFD + h + FD_CLOEXEC);
+  fd_set_k(&mut k, pid, nfd, FD_OFD + h + FD_CLOEXEC);
   return nfd;
 }
 
