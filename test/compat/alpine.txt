@@ -225,6 +225,14 @@ help_file 1 tree
 $ bb printf 'vim.cmd("edit /root/da.txt | call setline(1, [\"same\", \"old\", \"tail\"]) | diffthis")\nvim.cmd("vsplit /root/db.txt | call setline(1, [\"same\", \"new\", \"tail\"]) | diffthis")\nlocal function hl(l) return vim.fn.diff_hlID(l, 1) ~= 0 and "marked" or "plain" end\nlocal d = vim.diff("same\\nold\\ntail\\n", "same\\nnew\\ntail\\n", {result_type = "indices"})\nio.open("/root/dif.txt", "w"):write(hl(1), " ", hl(2), " ", hl(3), " ", vim.wo.diff and "diff" or "nodiff", " ", d[1][1], "\\n")\n' > /disk/a/root/dif.lua && bb chroot /disk/a /usr/bin/nvim -l /root/dif.lua >/dev/null 2>&1; bb cat /disk/a/root/dif.txt
 plain marked plain diff 2
 
+== nvim: tree-sitter parses C with a parser built from the grammar, and a query finds the function names
+$ bb cp /disk/tree-sitter-c.so /disk/a/usr/share/nvim/runtime/parser/c.so && bb printf 'local src = "int add(int a, int b) { return a + b; }\\nint main(void) { return add(1, 2); }\\n"\nlocal root = vim.treesitter.get_string_parser(src, "c"):parse()[1]:root()\nlocal q = vim.treesitter.query.parse("c", "(function_definition declarator: (function_declarator declarator: (identifier) @n))")\nlocal names = {}\nfor _, node in q:iter_captures(root, src) do names[#names + 1] = vim.treesitter.get_node_text(node, src) end\nio.open("/root/tsc.txt", "w"):write(table.concat(names, ","), "\\n")\n' > /disk/a/root/tsc.lua && bb chroot /disk/a /usr/bin/nvim -l /root/tsc.lua >/disk/a/root/e.txt 2>&1; bb cat /disk/a/root/e.txt | bb head -n 3; bb cat /disk/a/root/tsc.txt
+add,main
+
+== nvim: tree-sitter highlights C: the keyword, the type and the comment get their captures
+$ bb cp /disk/tree-sitter-c.so /disk/a/usr/share/nvim/runtime/parser/c.so && bb printf 'vim.cmd("enew")\nvim.api.nvim_buf_set_lines(0, 0, -1, false, {"int main(void) { return 0; } // done"})\nvim.treesitter.start(0, "c")\nvim.treesitter.get_parser(0, "c"):parse()\nlocal function cap(col) local c = vim.treesitter.get_captures_at_pos(0, 0, col) return c[1] and c[1].capture or "none" end\nio.open("/root/tsh.txt", "w"):write(cap(0), " ", cap(17), " ", cap(31), "\\n")\n' > /disk/a/root/tsh.lua && bb chroot /disk/a /usr/bin/nvim -l /root/tsh.lua >/disk/a/root/e.txt 2>&1; bb cat /disk/a/root/e.txt | bb head -n 3; bb cat /disk/a/root/tsh.txt
+type.builtin keyword.return comment
+
 == nvim: LuaJIT loads a shared object that gcc built
 $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf 'local ffi = require("ffi")\nffi.cdef[[int answer(void);]]\nio.open("/root/so.txt", "w"):write(ffi.load("/root/libso.so").answer(), "\\n")\n' > /disk/a/root/so.lua && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -shared -fPIC -o libso.so so.c && nvim -l so.lua >/dev/null 2>&1'; bb cat /disk/a/root/so.txt
 42
