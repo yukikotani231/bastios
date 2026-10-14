@@ -514,6 +514,120 @@ fn ram_put_pages(v: &mut Vec[Node], mem: &mut Mem, i: u64, pages: Vec[Slot])
 
 // ---------------------------------------------------------------- the table
 
+/// What a free node's size reads as.
+const NO_FILE: u64 = 18446744073709551615;
+
+struct FMeta { ok: bool, mode: u64, mtime: u64, own: u64 }
+
+// The functions below read a node where it lies in the table (`vec_with`),
+// rather than taking it out and putting it back.
+
+/// Is the node a file named by the first n bytes of `name`?
+fn node_named(nd: &Node, name: &Bytes, n: u64) -> bool
+  requires n <= blen(name)
+{
+  match nd {
+    Node::Free => { return false; },
+    Node::File(f) => { return name_is(f, name, n); },
+  }
+}
+
+/// The size of the file in the node, or NO_FILE if it is free.
+fn node_size(nd: &Node) -> u64 {
+  match nd {
+    Node::Free => { return NO_FILE; },
+    Node::File(f) => { return f.size; },
+  }
+}
+
+fn node_is_dir(nd: &Node) -> bool {
+  match nd {
+    Node::Free => { return false; },
+    Node::File(f) => { return f.dir; },
+  }
+}
+
+/// The length of the node's name, or NO_FILE if it is free.
+fn node_len(nd: &Node) -> u64 {
+  match nd {
+    Node::Free => { return NO_FILE; },
+    Node::File(f) => { return blen(f.name); },
+  }
+}
+
+/// Is the node inside the directory named by the first n bytes of `name`?
+fn node_under(nd: &Node, name: &Bytes, n: u64) -> bool
+  requires n <= blen(name)
+{
+  match nd {
+    Node::Free => { return false; },
+    Node::File(f) => {
+      let mut hit = false;
+      if blen(f.name) > n + 1 && bget(f.name, n) == 47 {
+        hit = true;
+        let mut j = 0;
+        while j < n
+          invariant j <= n && n < blen(f.name)
+        {
+          if bget(f.name, j) != bget(name, j) {
+            hit = false;
+          }
+          j = j + 1;
+        }
+      }
+      return hit;
+    },
+  }
+}
+
+/// Copies the node's name into the start of buf and returns its length, or
+/// NO_FILE if the node is free or buf is too short.
+fn node_name_into(nd: &Node, buf: &mut Bytes) -> u64
+  ensures blen(buf) == old(blen(buf))
+  ensures result <= blen(buf) || result == NO_FILE
+{
+  match nd {
+    Node::Free => { return NO_FILE; },
+    Node::File(f) => {
+      let n = blen(f.name);
+      if n > blen(buf) {
+        return NO_FILE;
+      }
+      let l = blen(buf);
+      let mut j = 0;
+      while j < n
+        invariant j <= n && n <= blen(buf) && blen(buf) == l
+      {
+        bset(&mut buf, j, bget(f.name, j));
+        j = j + 1;
+      }
+      return n;
+    },
+  }
+}
+
+/// The node that this node is a hard link to, or NFILES.
+fn node_link_of(nd: &Node) -> u64
+  ensures result <= NFILES
+{
+  match nd {
+    Node::Free => { return NFILES; },
+    Node::File(f) => {
+      if f.link < NFILES {
+        return f.link;
+      }
+      return NFILES;
+    },
+  }
+}
+
+fn node_meta(nd: &Node) -> FMeta {
+  match nd {
+    Node::Free => { return FMeta { ok: false, mode: 0, mtime: 0, own: 0 }; },
+    Node::File(f) => { return FMeta { ok: true, mode: f.mode, mtime: f.mtime, own: f.own }; },
+  }
+}
+
 /// The node holding the file named by the first n bytes of `name`, or
 /// NFILES if there is none. Only nodes below `hi` are looked at: the
 /// caller's high-water mark of the nodes ever created (Vfs.rhi).
@@ -535,15 +649,7 @@ fn ram_find(v: &mut Vec[Node], r: &Buf, hi: u64, name: &Bytes, n: u64) -> u64
     }
     if e != TOMB && e - 1 < hi {
       let i = e - 1;
-      let mut hit = false;
-      match take_node(&mut v, i) {
-        Node::Free => {},
-        Node::File(f) => {
-          hit = name_is(f, name, n);
-          put_node(&mut v, i, Node::File(f));
-        },
-      }
-      if hit {
+      if vec_with(v, i, node_named, name, n) {
         return i;
       }
     }
@@ -602,21 +708,11 @@ fn ram_create(v: &mut Vec[Node], r: &mut Buf, name: &Bytes, n: u64, dir: bool, n
 }
 
 /// The size of the file in node i, or NO_FILE if the node is free.
-const NO_FILE: u64 = 18446744073709551615;
-
 fn ram_size(v: &mut Vec[Node], i: u64) -> u64
   requires nodes_ok(v) && i < NFILES
   ensures nodes_ok(v)
 {
-  let mut s = NO_FILE;
-  match take_node(&mut v, i) {
-    Node::Free => {},
-    Node::File(f) => {
-      s = f.size;
-      put_node(&mut v, i, Node::File(f));
-    },
-  }
-  return s;
+  return vec_with(v, i, node_size);
 }
 
 /// Is node i a directory?
@@ -624,15 +720,7 @@ fn ram_is_dir(v: &mut Vec[Node], i: u64) -> bool
   requires nodes_ok(v) && i < NFILES
   ensures nodes_ok(v)
 {
-  let mut d = false;
-  match take_node(&mut v, i) {
-    Node::Free => {},
-    Node::File(f) => {
-      d = f.dir;
-      put_node(&mut v, i, Node::File(f));
-    },
-  }
-  return d;
+  return vec_with(v, i, node_is_dir);
 }
 
 /// Is node i inside the directory named by the first n bytes of `name`
@@ -641,26 +729,7 @@ fn ram_under(v: &mut Vec[Node], i: u64, name: &Bytes, n: u64) -> bool
   requires nodes_ok(v) && i < NFILES && n <= blen(name)
   ensures nodes_ok(v)
 {
-  let mut hit = false;
-  match take_node(&mut v, i) {
-    Node::Free => {},
-    Node::File(f) => {
-      if blen(f.name) > n + 1 && bget(f.name, n) == 47 {
-        hit = true;
-        let mut j = 0;
-        while j < n
-          invariant j <= n && n < blen(f.name)
-        {
-          if bget(f.name, j) != bget(name, j) {
-            hit = false;
-          }
-          j = j + 1;
-        }
-      }
-      put_node(&mut v, i, Node::File(f));
-    },
-  }
-  return hit;
+  return vec_with(v, i, node_under, name, n);
 }
 
 /// Copies the name of the file in node i into the start of buf. Returns its
@@ -670,26 +739,7 @@ fn ram_name(v: &mut Vec[Node], i: u64, buf: &mut Bytes) -> u64
   ensures nodes_ok(v) && blen(buf) == old(blen(buf))
   ensures result <= blen(buf) || result == NO_FILE
 {
-  let mut r = NO_FILE;
-  match take_node(&mut v, i) {
-    Node::Free => {},
-    Node::File(f) => {
-      let n = blen(f.name);
-      if n <= blen(buf) {
-        let l = blen(buf);
-        let mut j = 0;
-        while j < n
-          invariant j <= n && n <= blen(buf) && blen(buf) == l
-        {
-          bset(&mut buf, j, bget(f.name, j));
-          j = j + 1;
-        }
-        r = n;
-      }
-      put_node(&mut v, i, Node::File(f));
-    },
-  }
-  return r;
+  return vec_with(v, i, node_name_into, &mut buf);
 }
 
 /// The length of node i's name, or NO_FILE if the node is free.
@@ -697,15 +747,7 @@ fn ram_len(v: &mut Vec[Node], i: u64) -> u64
   requires nodes_ok(v) && i < NFILES
   ensures nodes_ok(v)
 {
-  let mut r = NO_FILE;
-  match take_node(&mut v, i) {
-    Node::Free => {},
-    Node::File(f) => {
-      r = blen(f.name);
-      put_node(&mut v, i, Node::File(f));
-    },
-  }
-  return r;
+  return vec_with(v, i, node_len);
 }
 
 /// Renames node i: its name becomes the first nl bytes of `new` followed
@@ -757,22 +799,13 @@ fn ram_reprefix(v: &mut Vec[Node], r: &mut Buf, i: u64, cut: u64, new: &Bytes, n
 
 /// A node's permission bits, modification time (seconds) and owner (user
 /// id + group id * 2^32).
-struct FMeta { ok: bool, mode: u64, mtime: u64, own: u64 }
 
 /// Node i's mode and modification time; ok is false if the node is free.
 fn ram_meta(v: &mut Vec[Node], i: u64) -> FMeta
   requires nodes_ok(v) && i < NFILES
   ensures nodes_ok(v)
 {
-  let mut r = FMeta { ok: false, mode: 0, mtime: 0, own: 0 };
-  match take_node(&mut v, i) {
-    Node::Free => {},
-    Node::File(f) => {
-      r = FMeta { ok: true, mode: f.mode, mtime: f.mtime, own: f.own };
-      put_node(&mut v, i, Node::File(f));
-    },
-  }
-  return r;
+  return vec_with(v, i, node_meta);
 }
 
 /// Sets node i's mode (when `mode` is below 65536) and its modification
@@ -892,17 +925,7 @@ fn ram_link_of(v: &mut Vec[Node], i: u64) -> u64
   requires nodes_ok(v) && i < NFILES
   ensures nodes_ok(v) && result <= NFILES
 {
-  let mut r = NFILES;
-  match take_node(&mut v, i) {
-    Node::Free => {},
-    Node::File(f) => {
-      if f.link < NFILES {
-        r = f.link;
-      }
-      put_node(&mut v, i, Node::File(f));
-    },
-  }
-  return r;
+  return vec_with(v, i, node_link_of);
 }
 
 /// Creates a hard link named by the first n bytes of `name` to node t (a
