@@ -339,6 +339,7 @@ t_file: unlink an open file, then read it
 t_file: utime
 t_file: write
 t_file: writev
+t_file: a write of many unaligned blocks is not short
 t_inotify: /proc/sys/fs/inotify/max_queued_events
 t_inotify: /proc/sys/fs/inotify/max_user_instances
 t_inotify: /proc/sys/fs/inotify/max_user_watches
