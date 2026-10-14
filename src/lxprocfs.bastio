@@ -113,6 +113,7 @@ const SY_LOOP: u64 = SY_CG + CG_N * CGF_N;   // after the cgroups: loop device n
 const NS_DIRS: u64 = 0x400;            // DIR_PROC + NS_DIRS + pid: /proc/PID/ns
 const FD_DIRS: u64 = 0x800;            // DIR_PROC + FD_DIRS + pid: /proc/PID/fd
 const TASK_DIRS: u64 = 0xC00;          // DIR_PROC + TASK_DIRS + pid: /proc/PID/task
+const SYSD: u64 = 0x1400;              // DIR_PROC + SYSD + j: /proc/sys and its directories (src/lxsysctl.bastio)
 const NET_DIR: u64 = 0x1000;            // DIR_PROC + NET_DIR: /proc/net
 const LOOP_SYS: u64 = 8;               // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio
 const SY_PX: u64 = SY_LOOP + LOOP_N * LOOP_SYS;   // after the loop devices: /proc/P/ file w at P * PXF_N + w (src/lxsysctl.bastio)
@@ -379,6 +380,15 @@ fn proc_dir(procs: &Buf, x: &Bytes, n: u64) -> u64
   }
   if n == 8 && xfer_is(x, 5, n, "net") {
     return DIR_PROC + NET_DIR;
+  }
+  let mut sj = 0;
+  while sj < SYSD_N
+    invariant sj <= SYSD_N
+  {
+    if xfer_is(x, 5, n, sysd_path(sj)) {
+      return DIR_PROC + SYSD + sj;
+    }
+    sj = sj + 1;
   }
   let e = comp_end(x, 5, n);
   if e + 3 == n && xfer_is(x, e, n, "/ns") {
@@ -777,6 +787,9 @@ fn proc_meta(f: u64) -> Meta {
 
 /// What stat says about /proc directory d (a proc_dir description).
 fn proc_dir_meta(d: u64) -> Meta {
+  if d >= DIR_PROC + SYSD && d < DIR_PROC + SYSD + SYSD_N {
+    return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 20000 + d % 1024, mtime: 0, own: 0 };
+  }
   if d == DIR_PROC + NET_DIR {
     return Meta { ok: true, mode: S_IFDIR, size: 0, ino: INO_PROC + 16384, mtime: 0, own: 0 };
   }
@@ -802,6 +815,13 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
   ensures kok(k) && result.len <= XFER
 {
   let end = Ent { len: 0, dir: false, end: true };
+  if dir >= DIR_PROC + SYSD && dir < DIR_PROC + SYSD + SYSD_N {
+    let j = dir - DIR_PROC - SYSD;
+    if i >= sysd_count(j) {
+      return end;
+    }
+    return Ent { len: name_out(&mut k.fs.xfer, sysd_child(j, i)), dir: sysd_child_dir(j, i), end: false };
+  }
   if dir == DIR_PROC + NET_DIR {
     if i == 0 {
       return Ent { len: name_out(&mut k.fs.xfer, "dev"), dir: false, end: false };
@@ -959,7 +979,10 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
   if i == 12 {
     return Ent { len: name_out(&mut k.fs.xfer, "diskstats"), dir: false, end: false };
   }
-  let p = i - 12;
+  if i == 13 {
+    return Ent { len: name_out(&mut k.fs.xfer, "sys"), dir: true, end: false };
+  }
+  let p = i - 13;
   if p >= NPROC {
     return end;
   }

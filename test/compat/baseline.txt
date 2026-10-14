@@ -317,6 +317,10 @@ t_inotify: removing it twice is EINVAL
 t_inotify: rmdir: delete-self, ignored, then delete in the directory
 t_inotify: two equal events in a row coalesce
 t_inotify: unlink: attrib, ignored, then delete in the directory
+t_inotify: thirty-two epoll instances
+t_inotify: sixty timerfds at once
+t_inotify: thirty inotify instances at once
+t_inotify: thirty named pipes open at once
 t_ioprio: a child inherits it
 t_ioprio: a failed set changes nothing
 t_ioprio: an unknown class is EINVAL
@@ -822,6 +826,12 @@ t_proc: writing a sysctl number reads back
 t_proc: a sysctl number rejects text
 t_proc: a read-only sysctl is not opened for writing
 t_proc: a sysctl file is a regular file
+t_proc: /proc lists sys
+t_proc: /proc/sys is a directory
+t_proc: /proc/sys/net/core is a directory
+t_proc: a directory under /proc/sys that is not there is ENOENT
+t_proc: every file listed under /proc/sys opens
+t_proc: /proc/sys/vm lists swappiness
 t_proc: oom_score reads 0
 t_proc: oom_score_adj starts at 0
 t_proc: loginuid is unset
@@ -957,6 +967,9 @@ t_sock2: signalfd carries a sigqueue value
 t_sock2: signalfd sees a blocked SIGCHLD
 t_sock2: sigqueue carries a value
 t_sock2: write after SHUT_WR is EPIPE
+t_sock2: 56 or more AF_UNIX socketpairs at once, each with its own byte; the 65th fails
+t_sock2: at least 28 AF_UNIX listeners, each accepting a connection; the 33rd is refused
+t_sock2: 24 bound AF_UNIX datagram sockets send around a ring and name their senders
 t_sys: a cgroup namespace roots the tree
 t_sys: adjtimex reads and sets
 t_sys: clock_settime moves CLOCK_REALTIME
@@ -1042,6 +1055,9 @@ alpine-tty: nvim: :make runs make and the build succeeds
 alpine-tty: nvim: a shell escape with :!
 alpine-tty: nvim: u undoes an edit, and the undo file is written
 t_pty: epoll_ctl accepts both ends of a pair
+t_pty: sixty-four pseudo-terminal pairs at once, the 65th fails
+t_pty: each pair carries its own bytes
+t_pty: every slave is a device of its own
 t_pty: epoll reports the master readable after a slave write
 t_pty: and the slave readable after a master line
 alpine: dropbear: the server starts, in the Alpine guest
@@ -1069,6 +1085,8 @@ apps: ripgrep: replacement, multi-line and standard input
 apps: ripgrep: search with line numbers, honouring .ignore
 alpine: git: clone over HTTP and over HTTPS (git's dumb protocol, curl's TLS)
 alpine: nvim: tree-sitter parses help text with the vimdoc parser
+alpine: nvim: tree-sitter parses C with a parser built from the grammar, and a query finds the function names
+alpine: nvim: tree-sitter highlights C: the keyword, the type and the comment get their captures
 alpine: nvim: :diffthis marks the line that differs, and vim.diff finds the hunk
 alpine: nvim: LuaJIT loads a shared object that gcc built
 alpine: nvim: a plugin cloned over HTTP is on the packpath and runs at startup
@@ -1095,6 +1113,7 @@ alpine: tmux: a detached session runs a shell on a pseudo-terminal, takes keys a
 alpine: apk: install ripgrep and fzf over HTTP
 alpine: rg and fzf: search a tree, filter a list
 alpine: nvim: :make reads gcc's error into the quickfix list and :cc jumps to its line
+alpine: nvim: the edit-build-run loop on a C project: :make with make and gcc reports the error, the fix is saved, :make succeeds and the program runs
 alpine: nvim: :grep with ripgrep fills the quickfix list
 alpine: cmake: configure, build and run a C project
 alpine: nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
