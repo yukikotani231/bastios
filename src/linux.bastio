@@ -1087,17 +1087,14 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     return sock_ioctl(&mut k, pid, fd, req, arg);
   }
   if d.kind == K_FILE || d.kind == K_DIR {
-    // The file system ioctls: no attribute flags are kept (lsattr sees none
-    // and chattr is refused), and there is no reflink, deduplication or
-    // extent map, as on tmpfs. (The request is an unsigned int: a libc
-    // that passes it as an int sign-extends the high bit.)
+    // The file system ioctls: there are no attribute flags (FS_IOC_GETFLAGS
+    // and SETFLAGS stay ENOTTY, so lsattr and chattr say so, and LTP skips
+    // what needs them), and no reflink, deduplication or extent map, as on
+    // tmpfs. (The request is an unsigned int: a libc that passes it as an
+    // int sign-extends the high bit.)
     let fsreq = req % 0x100000000;
-    if fsreq == 0x80086601 {                 // FS_IOC_GETFLAGS
-      xfer_zero(&mut k, 8);
-      return lx_put_out(&mut k, pid, arg, 8);
-    }
-    if fsreq == 0x40086602 || fsreq == 0x40049409 || fsreq == 0x4020940D || fsreq == 0xC0189436 || fsreq == 0xC020660B {
-      return EOPNOTSUPP;                     // FS_IOC_SETFLAGS, FICLONE, FICLONERANGE, FIDEDUPERANGE, FS_IOC_FIEMAP
+    if fsreq == 0x40049409 || fsreq == 0x4020940D || fsreq == 0xC0189436 || fsreq == 0xC020660B {
+      return EOPNOTSUPP;                     // FICLONE, FICLONERANGE, FIDEDUPERANGE, FS_IOC_FIEMAP
     }
   }
   if d.kind != K_CONSOLE {

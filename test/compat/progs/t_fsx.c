@@ -179,12 +179,12 @@ static int seek_data(const char *name) {
     return ok;
 }
 
-/* The file system ioctls a tmpfs answers: no attribute flags, no reflink. */
+/* The file system ioctls: attribute flags are answered or ENOTTY (BastiOS keeps none), no reflink. */
 static int fs_ioctls(const char *name) {
     int fd = filled(name, 100);
     if (fd < 0) return 0;
     long flags = -1;
-    int ok = ioctl(fd, 0x80086601 /* FS_IOC_GETFLAGS */, &flags) == 0;
+    int ok = ioctl(fd, 0x80086601 /* FS_IOC_GETFLAGS */, &flags) == 0 || errno == ENOTTY;
     int clone = ioctl(fd, 0x40049409 /* FICLONE */, fd);
     ok = ok && clone == -1 && (errno == EOPNOTSUPP || errno == EINVAL || errno == EXDEV || errno == EBADF);
     close(fd);
@@ -365,6 +365,6 @@ int main(void) {
     EXPECT("SEEK_DATA and SEEK_HOLE in /tmp", seek_data("/tmp/fsx_s"));
     EXPECT("SEEK_DATA and SEEK_HOLE on the disk", seek_data(on_disk("fsx_s")));
     EXPECT("holes in a file in /tmp: SEEK_DATA, SEEK_HOLE, st_blocks, punching and zeroing", sparse("/tmp/fsx_h"));
-    EXPECT("FS_IOC_GETFLAGS answers and FICLONE is refused", fs_ioctls("/tmp/fsx_i"));
+    EXPECT("FS_IOC_GETFLAGS answers or is ENOTTY, and FICLONE is refused", fs_ioctls("/tmp/fsx_i"));
     return done();
 }
