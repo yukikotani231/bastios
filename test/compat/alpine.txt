@@ -201,6 +201,10 @@ $ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEUR
 hello gpg
 gpg (GnuPG) 
 
+== sshd: Alpine's OpenSSH server takes a public-key login from its own client
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL openssh-server openssh-client 2>/dev/null; bb chroot /disk/a /bin/sh -c 'ssh-keygen -A >/dev/null 2>&1; mkdir -p /run/sshd /var/empty /root/.ssh; chmod 700 /root/.ssh; ssh-keygen -q -t ed25519 -N "" -f /root/.ssh/id; cp /root/.ssh/id.pub /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys; /usr/sbin/sshd -p 2222 -o ListenAddress=127.0.0.1 -o PermitRootLogin=yes -o StrictModes=no; sleep 3; timeout -s KILL 60 ssh -p 2222 -i /root/.ssh/id -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes root@127.0.0.1 "echo hello from sshd" 2>/dev/null; kill $(cat /run/sshd.pid)'; bb chroot /disk/a /sbin/apk del -q --no-progress openssh-server openssh-client 2>/dev/null
+hello from sshd
+
 == nvim: a script run without a terminal
 $ bb chroot /disk/a /usr/bin/nvim --headless -u NONE -c 'call setline(1, ["one", "two"])' -c 'w! /root/n.txt' -c 'qa!' >/dev/null 2>&1; bb cat /disk/a/root/n.txt; bb chroot /disk/a /usr/bin/nvim --version | bb head -n 1
 one
