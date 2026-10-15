@@ -170,6 +170,24 @@ resent = len(offs) - len(set(offs))
 check(bytes(p.got) == pat(size), "several holes: the data arrived intact")
 check(resent == 3, f"several holes: the three lost segments, and no others, were sent again ({resent} repeats)")
 
+# 4b. A window too small for three duplicate ACKs: three segments go, the
+#     first is lost, and the two duplicate ACKs that follow are enough
+#     (early retransmit, RFC 5827); the timer is not waited for.
+first_lost = {"done": False}
+def lose_first(f):
+    s = tcp_of(f)
+    if s and s["data"] and not first_lost["done"]:
+        first_lost["done"] = True
+        return None
+    return 0.01
+size = 2 * MSS + 500
+p, t0, segs = send_run(size, in_rule=lose_first, out_rule=lambda f: 0.01)
+at = [t for t, off, ln in segs if off == 0]
+check(len(at) == 2 and at[1] - at[0] < 0.12,
+      "early retransmit: with three segments out, two duplicate ACKs resend the lost first one after " +
+      (f"{at[1] - at[0]:.3f} s" if len(at) == 2 else "?  (not resent)"))
+check(bytes(p.got) == pat(size), "early retransmit: the data arrived intact")
+
 # 5. As a receiver: delayed ACKs. One full segment is acknowledged within
 #    40 ms (a tick or two late), not at once; two in a row at the second;
 #    a short one at once.

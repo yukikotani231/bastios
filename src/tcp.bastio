@@ -121,6 +121,7 @@ const W_H0: u64 = 61;                 // ... at [start, end) bytes past W_RXHEAD
 const W_HLAST: u64 = 69;              // the one that grew last
 const W_DSSEQ: u64 = 70;              // a duplicate to report (D-SACK) in the next ACK: where it starts ...
 const W_DSLEN: u64 = 71;              // ... and its length; 0: none
+const W_RTXT: u64 = 72;               // the tick (+1) the last segment was sent again in recovery, 0: none
 const W_UNDO: u64 = 59;               // 1 from the start of a recovery until it is known whether it was needed
 const TCP_CORK_TICKS: u64 = 20;       // 200 ms, as Linux
 
@@ -703,6 +704,9 @@ fn tcp_rtx(n: &mut Net, t: u64, mss: u64, cwnd: u64, force: bool) -> u64
         }
         tcp_emit(&mut n, t, TF_ACK + TF_PSH, seq_add(una, q), q, l);
         tset(&mut n, t, W_RTXNXT, q + l);
+        if n.now < 18446744073709551615 {
+          tset(&mut n, t, W_RTXT, n.now + 1);
+        }
         tset(&mut n, t, W_RTXOUT, twb(n, t, W_RTXOUT, SEQ_MOD) + l);
         tset(&mut n, t, W_RTXN, twb(n, t, W_RTXN, SEQ_MOD) + l);
         segs = segs + 1;
@@ -798,10 +802,29 @@ fn tcp_cc_dup(n: &mut Net, t: u64)
   let mss = tcp_mss_of(n, t);
   let dups = twb(n, t, W_DUPS, 1000) + 1;
   tset(&mut n, t, W_DUPS, dups);
+  if tw(n, t, W_INREC) == 1 && tw(n, t, W_SACK) == 1 && tw(n, t, W_RTTOK) == 1 && !is_local(n, tw(n, t, W_RIP)) {
+    // A segment sent again is itself lost when, a round trip and a quarter
+    // later, its gap is still open and ACKs for later data keep coming
+    // (RACK): walk the gaps again rather than wait for the timer.
+    let at = tw(n, t, W_RTXT);
+    let wait = twb(n, t, W_SRTT, 1048576) / 8 * 5 / 4 + 2;
+    if at != 0 && n.now >= at && n.now - at >= wait {
+      tset(&mut n, t, W_RTXNXT, 0);
+      tset(&mut n, t, W_RTXOUT, 0);
+      tset(&mut n, t, W_RTXT, 0);
+      let sent = tcp_rtx(&mut n, t, mss, cwnd_of(n, t), true);
+    }
+  }
   if tw(n, t, W_INREC) == 1 || tw(n, t, W_NOFR) == 1 || is_local(n, tw(n, t, W_RIP)) {
     return;
   }
-  let reo = tcp_reo(n, t);
+  let mut reo = tcp_reo(n, t);
+  // Early retransmit (RFC 5827): with fewer than four segments out there
+  // cannot be three duplicate ACKs; one fewer than the segments out will do.
+  let segs_out = seq_diff(tw(n, t, W_MAX), tw(n, t, W_UNA)) / mss;
+  if reo == TCP_DUPTHRESH && segs_out >= 2 && segs_out < TCP_DUPTHRESH + 1 {
+    reo = segs_out - 1;
+  }
   if dups >= reo || (tw(n, t, W_SACK) == 1 && sb_sacked(n, t) >= reo * mss) {
     let flight = seq_diff(tw(n, t, W_MAX), tw(n, t, W_UNA));
     let mut ss = flight / 2;
@@ -872,6 +895,7 @@ fn tcp_cc_advance(n: &mut Net, t: u64, una_old: u64, k: u64)
       sb_clear(&mut n, t);
       tset(&mut n, t, W_RTXNXT, 0);
       tset(&mut n, t, W_RTXOUT, 0);
+      tset(&mut n, t, W_RTXT, 0);
     } else if tw(n, t, W_SACK) != 1 {
       // NewReno: a partial ACK shows the next segment lost too.
       tset(&mut n, t, W_RTXNXT, 0);
@@ -938,6 +962,7 @@ fn tcp_cc_timeout(n: &mut Net, t: u64)
   tset(&mut n, t, W_DUPS, 0);
   tset(&mut n, t, W_RTXNXT, 0);
   tset(&mut n, t, W_RTXOUT, 0);
+  tset(&mut n, t, W_RTXT, 0);
   tset(&mut n, t, W_RTTAT, 0);
   sb_clear(&mut n, t);
 }
@@ -1000,8 +1025,17 @@ fn tcp_output(n: &mut Net, t: u64, want_ack: bool)
   }
   let mss = tcp_mss_of(n, t);
   let local = is_local(n, rip);
-  let cwnd = cwnd_of(n, t);
   let rec = tw(n, t, W_INREC) == 1 && !local;
+  // Limited transmit (RFC 3042): each of the first two duplicate ACKs lets
+  // one new segment go, so a small window still earns the third.
+  let mut cwnd = cwnd_of(n, t);
+  let mut early = twb(n, t, W_DUPS, 1000);
+  if early > 2 {
+    early = 2;
+  }
+  if !rec && !local && cwnd + early * mss < TCP_CWND_MAX {
+    cwnd = cwnd + early * mss;
+  }
   let mut sent = false;
   let mut segs = 0;
   if rec {
