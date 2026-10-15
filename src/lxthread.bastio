@@ -150,11 +150,16 @@ fn lx_pick(k: &mut Kernel, from: u64) -> u64
   if cap == 0 {
     return 0;
   }
+  let base = from % cap;
   let mut i = 0;
   while i < cap
-    invariant i <= cap && 0 < cap && cap <= NPROC && kok(k)
+    invariant i <= cap && 0 < cap && cap <= NPROC && base < cap && kok(k)
   {
-    let p = (from % cap + i) % cap;
+    // base + i < 2 * cap: one subtraction wraps it, with no division per slot.
+    let mut p = base + i;
+    if p >= cap {
+      p = p - cap;
+    }
     if p != 0 && state(k.procs, p) == READY && !cg_held(k, p) && group_free(&mut k, p) {
       return p;
     }
@@ -496,8 +501,8 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
     }
   }
   if flags & CLONE_NEWPID != 0 {
-    if nsk_of(k, NSK_PID, pid) != 0 || nsk_of(k, NSK_PIDC, pid) != 0 {
-      return ENOSPC;                        // two levels so far (src/lxnsk.bastio)
+    if !pn_deep_ok(k, pid) {
+      return ENOSPC;                        // three levels (src/lxnsk.bastio)
     }
     if !pn_room(&mut k) {
       return ENOMEM;
@@ -603,7 +608,7 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
     return ENOMEM;
   }
   if ns & CLONE_NEWPID != 0 {
-    if nsk_of(k, NSK_PID, pid) != 0 || nsk_of(k, NSK_PIDC, pid) != 0 {
+    if !pn_deep_ok(k, pid) {
       return ENOSPC;
     }
     if !pn_room(&mut k) {
