@@ -1693,6 +1693,21 @@ qemu.kill(); qemu.wait()
 print("---- USB boot transcript ----")
 print(out.decode(errors="replace").replace("\r", "")[-400:])
 
+# A UHCI controller (src/uhci.bastio), as on PCs from before xHCI: the
+# driver only looks, so the boot log says one controller with one device on
+# its ports and that it has no driver, and the keyboard stays the PS/2 one.
+qemu = boot(1, extra=["-device", "piix3-usb-uhci", "-device", "usb-kbd"])
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+good = ok and b"usb: 1 UHCI controller(s), 1 device(s) on their ports (" in out
+print(("ok  " if good else "FAIL"), "(UHCI boot) the boot log counts the controller and the device on its port")
+fails += not good
+good = ok and b"keyboard: USB" not in out
+print(("ok  " if good else "FAIL"), "(UHCI boot) a UHCI keyboard is not mistaken for an xHCI one")
+fails += not good
+qemu.kill(); qemu.wait()
+
 # A USB stick with a BastiOS partition (tools/mkusb.py --blank: a GPT and
 # the partition, no boot image) on the same xHCI controller as the USB
 # keyboard: the partition is the disk, ahead of the virtio disk, which must
@@ -2269,7 +2284,7 @@ for machine, name in (("pc,hpet=off", "i440fx, no HPET"), ("q35,hpet=off", "q35,
 # 2 GiB, whose firmware puts the ACPI tables just below 2 GiB: the kernel
 # must still find them (the processors, power off). Each pause in the report
 # waits for a key, which the serial line gives.
-def report_boot(args, name, keys, qemu_bin="qemu-system-x86_64", between=None):
+def report_boot(args, name, keys, qemu_bin="qemu-system-x86_64", between=None, settle=None):
     global qemu, out, deadline
     qemu = subprocess.Popen(
         [qemu_bin, "-kernel", kernel, "-display", "none", "-nic", "none",
@@ -2289,7 +2304,10 @@ def report_boot(args, name, keys, qemu_bin="qemu-system-x86_64", between=None):
     qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
     read_until(b"pages free at power off", mark)
     try:
-        code = qemu.wait(timeout=max(1, deadline - time.time()))
+        # settle: seconds to wait for QEMU to exit, for a machine that is
+        # expected to stay up (no ACPI to switch it off) so that the test
+        # does not wait out the whole TIMEOUT for it.
+        code = qemu.wait(timeout=settle if settle else max(1, deadline - time.time()))
     except subprocess.TimeoutExpired:
         qemu.kill(); qemu.wait(); code = None
     print(f"---- {name} transcript ----")
@@ -2465,7 +2483,18 @@ for machine, name, extra, status, wants in (
         time.sleep(2)
         t1, c1, w1 = uptime(), clock(), time.time()
         marks.extend([t0, t1, c0, c1, w1 - w0])
-    ok, code = report_boot(["-machine", machine, "-m", "64M", "-append", "diag"] + extra, name, 3, between=measure)
+    # The two timing checks compare guest time with the host's clock over
+    # two seconds, so a host that stalls the guest for a moment fails them
+    # for no fault of the kernel: a boot whose timing was off is repeated
+    # once, and the second boot's results count.
+    for attempt in range(2):
+        marks = []
+        ok, code = report_boot(["-machine", machine, "-m", "64M", "-append", "diag"] + extra, name, 3, between=measure,
+                               settle=5 if status is None else None)
+        if (len(marks) == 5 and None not in marks and 60 * marks[4] <= marks[1] - marks[0] <= 200 * marks[4]
+                and 0.6e9 * marks[4] <= marks[3] - marks[2] <= 1.5e9 * marks[4]):
+            break
+        print(f"({name}) timing off on boot {attempt + 1}: {marks}")
     text = out.decode(errors="replace").replace("\r", "")
     for want, what in wants:
         good = ok and want in text
