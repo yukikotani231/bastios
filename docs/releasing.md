@@ -15,6 +15,21 @@ Each release is built with one version of bastiolang, named in the release
 notes. Once bastiolang has releases, set `BASTIOLANG_REF` in
 `.github/workflows/release.yml` to the matching bastiolang tag.
 
+## Before tagging
+
+- The README's "Status" section is true: the release notes copy it, so it is
+  what readers learn about the known limits of this version (the single
+  kernel lock, table sizes, what has only run in QEMU). Update it if the
+  release changes them.
+- `README.md`'s "Tested with" table and `docs/real-hardware.md` say what has
+  and has not been tried on real hardware.
+- `tests/trusted_base.txt` matches `bastioc0 --trusted-base`, and
+  `docs/trusted-base.md` says what grew.
+- `CHANGELOG.md` names the changes that break the system call ABI or the
+  disk format, since a 0.x minor may do either.
+- The bastiolang commit or tag the release is built with is the one named in
+  the release notes (`BASTIOLANG_REF`).
+
 ## Cutting a release
 
 1. On `main`, move the entries under `## [Unreleased]` in `CHANGELOG.md`

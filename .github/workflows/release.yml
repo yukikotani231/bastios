@@ -92,6 +92,11 @@ jobs:
             echo
             cat build/bench-compare.md
             echo
+            echo "### Status"
+            echo
+            # What does not work yet travels with every release: the README's Status section.
+            awk '/^## Status/ {on=1; next} on && /^## / {exit} on' README.md
+            echo
             echo "Verify a download with \`sha256sum -c --ignore-missing SHA256SUMS\` and \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\`."
           } > dist/notes.md
           cp build/bench/results.json dist/bench-$TAG.json
