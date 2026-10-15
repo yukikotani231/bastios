@@ -128,6 +128,7 @@ class Wire:
     def ra(self):
         ra = struct.pack("!BBHBBHII", 134, 0, 0, 64, 0, 1800, 0, 0)
         ra += bytes([1, 1]) + HOST_MAC
+        ra += struct.pack("!BBHI", 25, 3, 0, 1800) + ipaddress.IPv6Address("2001:db8:1::53").packed   # RDNSS
         ra += struct.pack("!BBBBIII", 3, 4, 64, 0xC0, 86400, 14400, 0) + ipaddress.IPv6Address("2001:db8:1::").packed
         self.send(ip6(58, ROUTER_LL, ALL_NODES, ra, hops=255, at=2))
 
@@ -234,6 +235,10 @@ for name, src, dst in (("global", ON_LINK, GUEST_GL), ("link-local", ROUTER_LL, 
 mark = len(out)
 type_line("ash")
 until(lambda: b"# " in out[mark:], 20)
+mark = len(out)
+type_line("cat /etc/resolv.conf")
+until(lambda: b"# " in out[mark:], 10)
+check(b"nameserver 2001:db8:1:0:0:0:0:53" in out[mark:], "the router advertisement's name server is in /etc/resolv.conf")
 mark = len(out)
 type_line("/disk/ipv6probe")
 done = until(lambda: b"done " in out[mark:], 90)

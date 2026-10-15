@@ -403,8 +403,8 @@ fn raw6_slot(n: &Net, s: u64) -> u64
 /// Queues the ICMPv6 message of plen bytes at 54 of the packet that came
 /// in, from IPv6 peer token src, on every raw ICMPv6 socket of namespace
 /// n.ns, without the IPv6 header (as Linux does).
-fn raw6_deliver(n: &mut Net, plen: u64, src: u64)
-  requires net_ok(n) && plen <= UDP_MAX && 54 + plen <= blen(n.pkt)
+fn raw6_deliver(n: &mut Net, plen: u64, src: u64, hops: u64)
+  requires net_ok(n) && plen <= UDP_MAX && 54 + plen <= blen(n.pkt) && hops <= 255
   ensures net_ok(n)
 {
   let mut s = 0;
@@ -417,7 +417,7 @@ fn raw6_deliver(n: &mut Net, plen: u64, src: u64)
       bcopy(&mut n.dq, (s * RXQ + slot) * UDP_MAX, n.pkt, 54, plen);
       sk_set(&mut n, s, S_SLOTS + slot * SLOT_W, plen);
       sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 1, src);
-      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 2, 0);
+      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 2, hops);   // the "port" of a raw message: its hop limit
       sk_set(&mut n, s, S_COUNT, count + 1);
     }
     s = s + 1;
@@ -447,7 +447,7 @@ fn raw6_local(n: &mut Net, ip: u64, buf: &Bytes, size: u64) -> u64
       bset(&mut n.dq, at, cast[u8](ICMP6_ECHO_REPLY));
       sk_set(&mut n, s, S_SLOTS + slot * SLOT_W, size);
       sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 1, ip);
-      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 2, 0);
+      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 2, 64);
       sk_set(&mut n, s, S_COUNT, count + 1);
     }
     s = s + 1;
@@ -492,7 +492,7 @@ fn icmp6_in(n: &mut Net, plen: u64, shi: u64, slo: u64, smac: u64)
     && shi / TWO48 != 0xFF02 {
     // An echo reply, or an error report: for the raw ICMPv6 sockets (ping6).
     let tok = v6_token(&mut n, shi, slo, smac);
-    raw6_deliver(&mut n, smaller(plen, UDP_MAX), tok);
+    raw6_deliver(&mut n, smaller(plen, UDP_MAX), tok, hops);
   }
 }
 
@@ -577,6 +577,16 @@ fn ra_in(n: &mut Net, plen: u64, smac: u64, slo: u64)
         n.pfx = p;
       }
     }
+    if kind == 25 && l >= 24 && cast[u64](bget(n.pkt, o + 4)) + cast[u64](bget(n.pkt, o + 5)) + cast[u64](bget(n.pkt, o + 6)) + cast[u64](bget(n.pkt, o + 7)) != 0 {
+      // Recursive DNS server (RFC 8106): the first address, if its lifetime is not 0.
+      let dhi = be64(n.pkt, o + 8);
+      let dlo = be64(n.pkt, o + 16);
+      if (dhi != n.dns6_hi || dlo != n.dns6_lo) && (dhi != 0 || dlo != 0) {
+        n.dns6_hi = dhi;
+        n.dns6_lo = dlo;
+        n.dns_new = true;
+      }
+    }
     o = o + l;
   }
 }
@@ -643,6 +653,12 @@ fn nic_v6_state(c: &Nic, what: u64) -> u64
           return n.rtr_lo;
         }
         return 0;
+      }
+      if what == 5 {
+        return n.dns6_hi;
+      }
+      if what == 6 {
+        return n.dns6_lo;
       }
       if card_live(n.dev) {
         return 1;

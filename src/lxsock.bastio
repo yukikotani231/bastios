@@ -36,6 +36,9 @@ const IPPROTO_ICMP: u64 = 1;
 const IPPROTO_ICMPV6: u64 = 58;
 const SOL_RAW: u64 = 255;
 const IPV6_V6ONLY: u64 = 26;
+const IPV6_2292HOPLIMIT: u64 = 8;
+const IPV6_RECVHOPLIMIT: u64 = 51;
+const IPV6_HOPLIMIT: u64 = 52;
 const SOCK_NONBLOCK: u64 = 0x800;
 const SOCK_CLOEXEC: u64 = 0x80000;
 const MSG_DONTWAIT: u64 = 0x40;
@@ -143,7 +146,7 @@ fn sin_in(k: &mut Kernel, pid: u64, va: u64, alen: u64) -> Sin
 /// Whether open file description h is an AF_INET6 socket that was
 /// connected to a ::ffff:a.b.c.d address.
 fn ofd_mapped(k: &Kernel, h: u64) -> bool {
-  return h < len(k.inet6) && get(k.inet6, h) == 2;
+  return h < len(k.inet6) && get(k.inet6, h) % 8 == 2;
 }
 
 /// Whether the (already validated) address at va is a ::ffff:a.b.c.d
@@ -164,10 +167,24 @@ fn sin_mapped(k: &mut Kernel, pid: u64, va: u64) -> bool
   return get_u64(k.fs.xfer, 0) == 0 && get_u64(k.fs.xfer, 8) % 0x100000000 == 0xFFFF0000;
 }
 
+/// Which hop limit control message the AF_INET6 socket of open file
+/// description h wants with each datagram: 0 none, 1 the one IPV6_HOPLIMIT
+/// (2292) asks for (cmsg type 8), 2 the one IPV6_RECVHOPLIMIT asks for (type
+/// 52). It rides in the eights of the word k.inet6 keeps (0: not AF_INET6,
+/// 1: AF_INET6, 2: connected to a ::ffff:a.b.c.d address, 3: IPV6_V6ONLY).
+fn ofd_hlim(k: &Kernel, h: u64) -> u64
+  ensures result <= 3
+{
+  if h < len(k.inet6) {
+    return get(k.inet6, h) / 8 % 4;
+  }
+  return 0;
+}
+
 /// Whether open file description h is an AF_INET6 socket with
 /// IPV6_V6ONLY set: it takes no IPv4 peers.
 fn ofd_v6only(k: &Kernel, h: u64) -> bool {
-  return h < len(k.inet6) && get(k.inet6, h) == 3;
+  return h < len(k.inet6) && get(k.inet6, h) % 8 == 3;
 }
 
 /// The address family (FAM_*) the stack gives the socket of open file
@@ -184,7 +201,7 @@ fn ofd_fam(k: &Kernel, h: u64) -> u64 {
 
 /// Whether open file description h is an AF_INET6 socket.
 fn ofd_v6(k: &Kernel, h: u64) -> bool {
-  return h < len(k.inet6) && get(k.inet6, h) != 0;
+  return h < len(k.inet6) && get(k.inet6, h) % 8 != 0;
 }
 
 /// Whether descriptor fd of process pid is an AF_INET6 socket.
@@ -422,7 +439,7 @@ fn lx_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
     let nb0 = of_get(k.ofd, sk.h, 3) % 2;
     of_set(&mut k.ofd, sk.h, 3, nb0);       // AF_UNSPEC: no peer any more
     if ofd_v6(k, sk.h) {
-      k.inet6 = set(k.inet6, sk.h, 1);
+      k.inet6 = set(k.inet6, sk.h, 1 + 8 * ofd_hlim(k, sk.h));
     }
     return 0;
   }
@@ -440,7 +457,7 @@ fn lx_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
     if sin_mapped(&mut k, pid, addr) {
       mark = 2;
     }
-    k.inet6 = set(k.inet6, sk.h, mark);
+    k.inet6 = set(k.inet6, sk.h, mark + 8 * ofd_hlim(k, sk.h));
   }
   return 0;
 }
@@ -762,7 +779,7 @@ fn lx_setsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
       if only {
         mark = 3;
       }
-      k.inet6 = set(k.inet6, h, mark);
+      k.inet6 = set(k.inet6, h, mark + 8 * ofd_hlim(k, h));
       if !tcp {
         let sk = sk_look(k, pid, fd);
         if sk.err == 0 {
@@ -772,6 +789,23 @@ fn lx_setsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
       return 0;
     }
     return ENOPROTOOPT;                     // an AF_INET socket has no such option
+  }
+  if lv == 41 && (name % 0x100000000 == IPV6_2292HOPLIMIT || name % 0x100000000 == IPV6_RECVHOPLIMIT) && !unix && !tcp {
+    let h = fd_ofd(k, pid, fd);
+    if h < OFD_N && ofd_v6(k, h) {
+      if ln < 4 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 4) != 4 {
+        return EINVAL;
+      }
+      let mut mode = 0;
+      if get_u64(k.fs.xfer, 0) % 0x100000000 != 0 {
+        mode = 1;
+        if name % 0x100000000 == IPV6_RECVHOPLIMIT {
+          mode = 2;
+        }
+      }
+      k.inet6 = set(k.inet6, h, get(k.inet6, h) % 8 + 8 * mode);
+      return 0;
+    }
   }
   let inet = !unix && (lv == 0 || lv == 41 || (tcp && lv == SOL_TCP) || (!tcp && (lv == IPPROTO_UDP || lv == IPPROTO_ICMPV6 || lv == SOL_RAW)));
   if !inet || name % 0x100000000 >= 0x80000000 {

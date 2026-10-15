@@ -8,6 +8,7 @@
 #include <netinet/icmp6.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <sys/uio.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -85,14 +86,20 @@ static int ping6(const char *a, char *from, size_t fl) {
         }
         struct pollfd p = {.fd = s, .events = POLLIN};
         if (poll(&p, 1, 500) == 1) {
-            char b[256];
+            char b[256], ctl[64];
             struct sockaddr_in6 f;
-            socklen_t l = sizeof f;
-            ssize_t n = recvfrom(s, b, sizeof b, 0, (void *)&f, &l);
+            struct iovec iov = {b, sizeof b};
+            struct msghdr m = {.msg_name = &f, .msg_namelen = sizeof f, .msg_iov = &iov, .msg_iovlen = 1,
+                               .msg_control = ctl, .msg_controllen = sizeof ctl};
+            ssize_t n = recvmsg(s, &m, 0);
+            int hl = -1;
+            for (struct cmsghdr *c = CMSG_FIRSTHDR(&m); c; c = CMSG_NXTHDR(&m, c))
+                if (c->cmsg_level == IPPROTO_IPV6 && c->cmsg_type == IPV6_HOPLIMIT) memcpy(&hl, CMSG_DATA(c), sizeof hl);
             close(s);
             inet_ntop(AF_INET6, &f.sin6_addr, from, fl);
+            if (hl != 64) snprintf(from, fl, "hop limit %d", hl);
             return n == sizeof pkt && (unsigned char)b[0] == ICMP6_ECHO_REPLY && memcmp(b + 8, "bastios ping6 ok", 16) == 0 &&
-                   f.sin6_family == AF_INET6;
+                   f.sin6_family == AF_INET6 && hl == 64;
         }
     }
     close(s);
