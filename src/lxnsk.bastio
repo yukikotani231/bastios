@@ -1242,6 +1242,9 @@ fn ns_may_join(k: &Kernel, pid: u64, f: u64, id: u64) -> u64
   requires kok(k) && pid < NPROC && id < MNS_MAX
 {
   if id == nf_id(k, pid, f) && f != NF_TIME && f != NF_TIMEC {
+    if (f == NF_MNT || f == NF_UTS || f == NF_NET) && !ns_join_priv(k, pid, f, id) {
+      return EPERM;                         // even the namespace it is in needs the privilege
+    }
     return 0;                               // already there
   }
   if f == NF_MNT {

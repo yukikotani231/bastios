@@ -132,6 +132,22 @@ static int setns_own_kinds(void) {
     return waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
 }
 
+/* A user without CAP_SYS_ADMIN is refused setns, even into the namespaces it
+ * is already in (LTP setns01 relies on it). */
+static int setns_unprivileged(void) {
+    if (!as_nobody()) return 0;
+    const char *names[] = {"mnt", "uts", "net"};
+    int types[] = {CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWNET};
+    for (int i = 0; i < 3; i++) {
+        char path[32];
+        snprintf(path, sizeof path, "/proc/self/ns/%s", names[i]);
+        int f = open(path, O_RDONLY);
+        if (f < 0 || setns(f, types[i]) != -1 || errno != EPERM) return 0;
+        close(f);
+    }
+    return 1;
+}
+
 /* The root of a user namespace joins the mount namespace of a process in a
  * user namespace it made (runc's remapping thread joins the container's). */
 static int setns_child_mntns(void) {
@@ -341,6 +357,7 @@ int main(void) {
     EXPECT("a process maps the user namespace it has just made itself", in_child(map_own_after_unshare));
     EXPECT("a user namespace is made inside another and mapped through it", in_child(nested_userns));
     EXPECT("whoever made a user namespace joins it with setns, and not the first one", in_child(join_userns));
+    EXPECT("an unprivileged user cannot setns, not even into the namespaces it is in", in_child(setns_unprivileged));
     EXPECT("root of a user namespace joins the mount, UTS and network namespaces it made, not the first mount one", in_userns(setns_own_kinds, 1));
     EXPECT("and the mount namespace of a process in a user namespace it made", in_userns(setns_child_mntns, 0));
     EXPECT("the root of a user namespace brings loopback up in a network namespace of its own", in_userns(lo_up_in_own_netns, 0));
