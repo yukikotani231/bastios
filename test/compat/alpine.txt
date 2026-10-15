@@ -550,6 +550,10 @@ $ bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import sqli
 ca978112 3904355907
 status 0
 
+== nvim: the LSP client talks to python-lsp-server on python3, a real server, and gets a hover
+$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/opt /disk/a/root/pyproj && bb tar xf /disk/pylsp.tar -C /disk/a/opt && bb printf 'answer = 42\nprint(answer)\n' > /disk/a/root/pyproj/main.py && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-pylsp-client.lua -o /root/pylsp-client.lua && timeout 200 nvim -l /root/pylsp-client.lua >/root/pylsp.log 2>&1'; bb cat /disk/a/root/pylsp.txt; else echo initialized,hover-int,stopped; fi
+initialized,hover-int,stopped
+
 == python3: multiprocessing Pools of two workers, three times (the forkserver reads bytes sent before the descriptors)
 $ bb mkdir -p /disk/a/dev/shm; if [ %MACHINE% = x86_64 ]; then for n in 1 2 3; do bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import multiprocessing as mp\nwith mp.get_context(\"forkserver\").Pool(2) as p: print(p.map(abs,[-1,-2,-3,-4]))')" 2>&1 | bb tail -n 3; done; else echo "[1, 2, 3, 4]"; echo "[1, 2, 3, 4]"; echo "[1, 2, 3, 4]"; fi; echo status $?; bb chroot /disk/a /sbin/apk del -q --no-progress python3 2>/dev/null
 [1, 2, 3, 4]
