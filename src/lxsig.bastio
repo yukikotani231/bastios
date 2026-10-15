@@ -168,7 +168,7 @@ fn jc_tell(k: &mut Kernel, p: u64)
         word = chld_word(p, 4, w % 256);
       }
     }
-    post_w(&mut k, par, SIGCHLD, word);
+    post_raw(&mut k, par, SIGCHLD, word, false);
   }
 }
 
@@ -190,7 +190,7 @@ fn tr_tell(k: &mut Kernel, p: u64)
     pset(&mut k.procs, tr, F_STATE, READY);
   }
   if is_linux(k.procs, tr) {
-    post_w(&mut k, tr, SIGCHLD, chld_word(p, 4, jc_get(k, p) % 256));
+    post_raw(&mut k, tr, SIGCHLD, chld_word(p, 4, jc_get(k, p) % 256), false);
   }
 }
 
@@ -331,6 +331,26 @@ fn post_w(k: &mut Kernel, p: u64, s: u64, word: u64)
   ensures kok(k)
 {
   let st = state(k.procs, p);
+  let listen = s == SIGCONT && st == STOPPED && tr_stopped(tr_get(k, p)) == 0 && tr2_get(k, p) / TS_LISTEN % 2 == 1;
+  post_raw(&mut k, p, s, word, listen);
+  if listen {
+    // PTRACE_LISTEN: SIGCONT ends the group-stop with an event stop (SIGTRAP and
+    // PTRACE_EVENT_STOP), and the tracer resumes the tracee from there.
+    tr2_put(&mut k, p, tr2_get(k, p) % TS_EV + EV_STOP * TS_EV);
+    tr_stop(&mut k, p, 5);
+  }
+}
+
+/// post_w without the event stop of a listening tracee: the form the
+/// notifications to a parent or tracer (SIGCHLD, which tr_stop itself sends)
+/// use, so that a ptrace-stop does not lead back into itself. `listen` says
+/// that p is in a group-stop its tracer listens to: SIGCONT does not continue
+/// it then.
+fn post_raw(k: &mut Kernel, p: u64, s: u64, word: u64, listen: bool)
+  requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
+  let st = state(k.procs, p);
   let blocked = has_sig(pget(k.procs, p, F_SIGMASK), s) && s != SIGKILL;
   if st == FREE || st == ZOMBIE {
     return;
@@ -339,11 +359,8 @@ fn post_w(k: &mut Kernel, p: u64, s: u64, word: u64)
   // pending stops; a stop signal drops a pending SIGCONT.
   if s == SIGCONT {
     pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) & !(sbit(SIGSTOP) | sbit(SIGTSTP) | sbit(SIGTTIN) | sbit(SIGTTOU)));
-    if st == STOPPED && tr_stopped(tr_get(k, p)) == 0 && tr2_get(k, p) / TS_LISTEN % 2 == 1 {
-      // PTRACE_LISTEN: SIGCONT ends the group-stop with an event stop (SIGTRAP and
-      // PTRACE_EVENT_STOP), and the tracer resumes the tracee from there.
-      tr2_put(&mut k, p, tr2_get(k, p) % TS_EV + EV_STOP * TS_EV);
-      tr_stop(&mut k, p, 5);
+    if listen {
+      // no continuing: post_w ends the stop
     } else if st == STOPPED && tr_stopped(tr_get(k, p)) == 0 {
       pset(&mut k.procs, p, F_STATE, READY);
       jc_set(&mut k, p, JC_CONT + jc_get(k, p) / JC_EXECED % 2 * JC_EXECED);
