@@ -9,6 +9,8 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/uio.h>
+#include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -106,6 +108,62 @@ static int ping6(const char *a, char *from, size_t fl) {
     return 0;
 }
 
+/* Whether the file at path holds the text (read whole). */
+static int file_has(const char *path, const char *text) {
+    char buf[4096];
+    int f = open(path, O_RDONLY);
+    ssize_t n = f < 0 ? 0 : read(f, buf, sizeof buf - 1);
+    if (f >= 0) close(f);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    return strstr(buf, text) != NULL;
+}
+
+/* Asks rtnetlink (musl has no linux/ headers, so the few layouts are here)
+ * for the addresses (RTM_GETADDR) or routes (RTM_GETROUTE) of family
+ * AF_INET6 and returns whether one of them carries the 16 bytes `want` as
+ * the attribute `attr`. */
+#define AF_NETLINK_ 16
+#define NETLINK_ROUTE_ 0
+#define RTM_GETROUTE_ 26
+#define RTM_GETADDR_ 22
+#define IFA_ADDRESS_ 1
+#define RTA_GATEWAY_ 5
+static int nl_has(int kind, int attr, const unsigned char *want) {
+    int s = socket(AF_NETLINK_, SOCK_RAW, NETLINK_ROUTE_);
+    if (s < 0) return 0;
+    struct { uint32_t len; uint16_t type, flags; uint32_t seq, pid; unsigned char family, pad[3]; } req = {
+        sizeof req, kind, 1 | 0x300, 1, 0, AF_INET6, {0}};
+    int found = 0;
+    if (send(s, &req, sizeof req, 0) == sizeof req) {
+        unsigned char buf[8192];
+        for (int done = 0; !done;) {
+            ssize_t n = recv(s, buf, sizeof buf, 0);
+            if (n <= 0) break;
+            for (ssize_t o = 0; o + 16 <= n;) {
+                uint32_t ml;
+                uint16_t ty;
+                memcpy(&ml, buf + o, 4);
+                memcpy(&ty, buf + o + 4, 2);
+                if (ml < 16 || o + ml > (size_t)n) { done = 1; break; }
+                if (ty == 3) { done = 1; break; }                   /* NLMSG_DONE */
+                size_t hdr = kind == RTM_GETADDR_ ? 8 : 12;         /* ifaddrmsg, rtmsg */
+                for (size_t a = o + 16 + hdr; a + 4 <= o + ml;) {
+                    uint16_t al, at;
+                    memcpy(&al, buf + a, 2);
+                    memcpy(&at, buf + a + 2, 2);
+                    if (al < 4 || a + al > o + ml) break;
+                    if (at == attr && al == 20 && memcmp(buf + a + 4, want, 16) == 0) found = 1;
+                    a += (al + 3) & ~3u;
+                }
+                o += (ml + 3) & ~3u;
+            }
+        }
+    }
+    close(s);
+    return found;
+}
+
 /* The server half, started in the background by the test script, which
  * plays the clients: a dual-stack UDP echo on 9001 and a dual-stack TCP
  * greeter on 9002, after checks that an IPv6-only socket and an IPv4 one
@@ -195,6 +253,24 @@ int main(int argc, char **argv) {
     report(ping6("2001:db8:99::5", from, sizeof from) && strcmp(from, "2001:db8:99::5") == 0,
            "ping6 of a host through the router", from);
     report(ping6("::1", from, sizeof from) && strcmp(from, "::1") == 0, "ping6 of ::1", from);
+
+    /* What the system tells about its IPv6 configuration. */
+    {
+        unsigned char gl[16], ll[16], rt[16];
+        inet_pton(AF_INET6, "2001:db8:1:0:5054:ff:fe12:3456", gl);
+        inet_pton(AF_INET6, "fe80::5054:ff:fe12:3456", ll);
+        inet_pton(AF_INET6, "fe80::2", rt);
+        report(file_has("/proc/net/if_inet6", "00000000000000000000000000000001 01 80 10 80       lo\n"),
+               "/proc/net/if_inet6 lists ::1 on lo", "lo line");
+        report(file_has("/proc/net/if_inet6", "20010db800010000505400fffe123456 02 40 00 80     eth0\n") &&
+               file_has("/proc/net/if_inet6", "fe80000000000000505400fffe123456 02 40 20 80     eth0\n"),
+               "/proc/net/if_inet6 lists the global and link-local addresses of eth0", "eth0 lines");
+        report(file_has("/proc/net/ipv6_route", "00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000002 "),
+               "/proc/net/ipv6_route has the default route through the router", "default route");
+        report(nl_has(RTM_GETADDR_, IFA_ADDRESS_, gl) && nl_has(RTM_GETADDR_, IFA_ADDRESS_, ll),
+               "rtnetlink lists the IPv6 addresses", "RTM_GETADDR");
+        report(nl_has(RTM_GETROUTE_, RTA_GATEWAY_, rt), "rtnetlink lists the default IPv6 route's gateway", "RTM_GETROUTE");
+    }
 
     /* TCP: a request, the whole reply, the server's close. */
     int c = socket(AF_INET6, SOCK_STREAM, 0);
