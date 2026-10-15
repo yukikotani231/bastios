@@ -379,7 +379,7 @@ Trusted, and listed in the README's "What is trusted" table and in [trusted-base
 
 These are current choices, not design limits; the README's "Status" lists them with the plan:
 - one lock for the whole kernel state (the console's devices have their own); the kernel runs with interrupts off and polls the UART and the keyboard, console and PIT interrupts reach only the bootstrap processor, and an idle processor notices new work only at its next timer tick (no wake-up interrupts between processors);
-- a 512 GiB user window per process (an 8 MiB stack at its top), at most `NPROC - 1` (511) processes;
+- a 512 GiB user window per process (an 8 MiB stack at its top), at most `NPROC - 1` (1023) processes;
 - files are simple (32768 in memory and 262143 on disk, paths up to 255 bytes, files up to 1 GiB in memory and 512 GiB on disk, 1024 Linux descriptors per process; every write is copy-on-write, so a block written costs four block writes);
 - user pages are mapped writable and executable;
 - the kernel's arena halts the machine when it runs out (the page pool does not: spawns fail cleanly).
