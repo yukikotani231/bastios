@@ -2912,6 +2912,29 @@ fn proc_peek(procs: &Buf, pid: u64, p: u64) -> bool
   return pid == p || cred_root(procs, pid) || same_ids(procs, pid, p);
 }
 
+/// Whether the path at user address path ends in the component "self"
+/// (after "/" or alone): readlink of /proc/self, which the walk rewrites to
+/// the caller's /proc/PID.
+fn path_ends_self(k: &mut Kernel, pid: u64, path: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, path, &mut k.fs.xfer, FNAME_MAX);
+  if got == NO_RESULT || got < 4 || got > FNAME_MAX {
+    return false;
+  }
+  let mut n = 0;
+  while n < got && bget(k.fs.xfer, n) != 0
+    invariant n <= got && got <= FNAME_MAX && kok(k)
+  {
+    n = n + 1;
+  }
+  if n < 4 || n == got || !xfer_is(k.fs.xfer, n - 4, n, "self") {
+    return false;
+  }
+  return n == 4 || bget(k.fs.xfer, n - 5) == 47;
+}
+
 /// readlink / readlinkat(dirfd, path, buf, size): the target of
 /// /proc/PID/exe or /proc/PID/fd/N, without a NUL (-EACCES unless
 /// proc_peek); -EINVAL for anything else that exists, since nothing else
@@ -2934,6 +2957,7 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
       }
     }
   }
+  let selfname = path_ends_self(&mut k, pid, path);
   let n = lx_path_at_nf(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return k.perr;
@@ -2941,6 +2965,19 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
   let lk = vfs_lookup(&mut k.fs, n);
   if lk != NO_FILE && vfs_is_link(&mut k.fs, lk) {
     return link_out(&mut k, pid, lk, va, size);   // a symbolic link (src/lxlink.bastio)
+  }
+  if selfname && n > 5 && n <= 14 && xfer_is(k.fs.xfer, 0, 5, "proc/") {
+    // readlink of /proc/self: the walk made it /proc/PID, and the link's
+    // text is the caller's id in its PID namespace.
+    let id = vpid_of(k, pid, tgid(k.procs, pid));
+    if id < 10000000 {
+      let d = dec_big(&mut k.fs.xfer, 0, id);
+      let m = smaller(d, size);
+      if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, m) != m {
+        return EFAULT;
+      }
+      return m;
+    }
   }
   let mut pfd = NO_RESULT;
   if n <= XFER {
