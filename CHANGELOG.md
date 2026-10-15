@@ -14,6 +14,10 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 What will be 0.3.0. It needs bastiolang 0.2.0.
 
+### Linux compatibility
+
+- Server programs run: nginx (static files, reverse proxy), redis (replication, snapshots, append-only file), PostgreSQL 18 (`initdb`, `pgbench`, WAL recovery) and Dropbear with rsync, with a `server` lane in `make compat` (`test/compat/server.txt`). Gaps they found are closed: a disk file is never read or written short for want of a cached block (`read`, `pread`, `pwrite`, `readv`), an IPv6 listener may share a port with an IPv4 one, `FIONREAD` works on TCP sockets, and `SO_ERROR` reports a refused nonblocking connect.
+
 ### Boot
 
 - On Intel 7-, 8- and 9-series chipsets the xHCI driver routes the USB 2 ports from the EHCI controller to the xHCI controller (and enables its SuperSpeed ports) before starting it, so keyboards and sticks behind those ports are found. Untested on hardware: QEMU's xHCI has no such registers.
