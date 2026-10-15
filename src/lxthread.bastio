@@ -40,6 +40,7 @@ const ETIMEDOUT: u64 = 18446744073709551506;   // 2^64 - 110
 const CLONE_SIGHAND: u64 = 0x800;
 const CLONE_SETTLS: u64 = 0x80000;
 const CLONE_PARENT_SETTID: u64 = 0x100000;
+const CLONE_PIDFD: u64 = 0x1000;               // the parent gets a pidfd for the child, stored at ptid
 const CLONE_CHILD_CLEARTID: u64 = 0x200000;
 const CLONE_CHILD_SETTID: u64 = 0x1000000;
 const CLONE_PARENT: u64 = 0x8000;
@@ -451,14 +452,14 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
 }
 
 /// The clone flags a new process (not a thread, not a vfork) may carry:
-/// the exit signal, CLONE_PARENT, the tid and TLS flags, and the ones
+/// the exit signal, CLONE_PARENT, CLONE_PIDFD, the tid and TLS flags, and the ones
 /// that change nothing here (CLONE_SYSVSEM, CLONE_DETACHED, CLONE_IO).
 /// CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWCGROUP and CLONE_NEWNET give the
 /// child a mount, UTS, IPC, cgroup or network namespace of its own. Sharing files, the cwd, signal handlers or
 /// memory with a separate process, and the other namespaces, are not
 /// supported.
 fn clone_proc_flags(flags: u64) -> bool {
-  let known = 0xff + CLONE_PARENT + CLONE_SYSVSEM + CLONE_SETTLS + CLONE_PARENT_SETTID
+  let known = 0xff + CLONE_PARENT + CLONE_SYSVSEM + CLONE_SETTLS + CLONE_PARENT_SETTID + CLONE_PIDFD
     + CLONE_CHILD_CLEARTID + CLONE_DETACHED + CLONE_CHILD_SETTID + CLONE_IO + CLONE_NEWNS
     + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWUSER + CLONE_NEWCGROUP + CLONE_NEWNET;
   return flags & known == flags;
@@ -477,6 +478,17 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
     par = pget(k.procs, tgid(k.procs, pid), F_PARENT);
     if par == 0 || par >= NPROC {
       return EINVAL;                        // init has no parent to share
+    }
+  }
+  if flags & CLONE_PIDFD != 0 {
+    // The descriptor is the parent's, so one must be free; it cannot share
+    // the word that CLONE_PARENT_SETTID writes the id to, and a detached
+    // child has no one to wait for it.
+    if flags & (CLONE_PARENT_SETTID + CLONE_DETACHED) != 0 {
+      return EINVAL;
+    }
+    if fd_free(k, pid, 0) >= LXNFD {
+      return EMFILE;
     }
   }
   let nsf = flags & (CLONE_NEWNS + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWCGROUP + CLONE_NEWNET);
@@ -543,6 +555,10 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
   }
   if flags & CLONE_CHILD_SETTID != 0 {
     let d = put_user_u32(&mut k, c, ctid, vpid_of(k, c, c));
+  }
+  if flags & CLONE_PIDFD != 0 {
+    let pfd = ev_install(&mut k, pid, OF_PIDFD, c, 0, true);
+    let w = put_user_u32(&mut k, pid, ptid, pfd % 0x100000000);   // only the parent's copy of the word
   }
   return c;
 }
@@ -1094,14 +1110,18 @@ fn lx_clone3_read(k: &mut Kernel, pid: u64, va: u64, size: u64) -> Clone3
   if (low & CLONE_SIGHAND != 0 && low & 0x100 == 0) || (low & 0x10000 != 0 && low & CLONE_SIGHAND == 0) || (low & 0x200 != 0 && low & CLONE_NEWNS != 0) {
     return none;
   }
-  if low & 0x1000 != 0 {
-    // CLONE_PIDFD: the descriptor is not made (no pidfd for a new process
-    // here); a bad pointer is still EFAULT.
+  let mut parent_word = parent_tid.v;
+  if low & CLONE_PIDFD != 0 {
+    // CLONE_PIDFD: the descriptor's number goes to *pidfd, which clone
+    // takes as the parent_tid word (the two flags exclude each other).
     let pf = user_u64(&mut k.spaces, pid, pidfd.v);
     if !pf.ok {
       return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
     }
-    return none;
+    if low & CLONE_PARENT_SETTID != 0 || low & CLONE_THREAD != 0 {
+      return none;
+    }
+    parent_word = pidfd.v;
   }
   if (stack.v == 0) != (stack_size.v == 0) || stack.v >= 0x8000000000000000 || stack_size.v >= 0x8000000000000000 {
     return none;
@@ -1127,5 +1147,5 @@ fn lx_clone3_read(k: &mut Kernel, pid: u64, va: u64, size: u64) -> Clone3
     }
     j = j + 8;
   }
-  return Clone3 { err: 0, clear: clear == 1, flags: low + exit_signal.v, sp: stack.v + stack_size.v, ptid: parent_tid.v, ctid: child_tid.v, tls: tls.v };
+  return Clone3 { err: 0, clear: clear == 1, flags: low + exit_signal.v, sp: stack.v + stack_size.v, ptid: parent_word, ctid: child_tid.v, tls: tls.v };
 }

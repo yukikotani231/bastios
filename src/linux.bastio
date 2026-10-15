@@ -1043,6 +1043,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   if d.kind == K_SECCOMP && d.x < SC_N {
     return sc_ioctl(&mut k, pid, d.x, pipe_nonblock(k, pid, fd), req % 0x100000000, arg);   // src/lxseccomp.bastio
   }
+  if d.kind == K_PIDFD {
+    return pidfd_ioctl(&mut k, pid, smaller(d.x, NPROC), req % 0x100000000, arg);   // src/lxpidfd.bastio
+  }
   if req == FIOCLEX || req == FIONCLEX {
     let mut on = 0;
     if req == FIOCLEX {

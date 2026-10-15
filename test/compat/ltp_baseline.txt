@@ -416,6 +416,12 @@ ioctl_loop04
 ioctl_loop06
 ioctl_loop07
 ioctl_ns07
+ioctl_pidfd01
+ioctl_pidfd02
+ioctl_pidfd03
+ioctl_pidfd04
+ioctl_pidfd05
+ioctl_pidfd06
 ioprio_get01
 ioprio_set01
 ioprio_set02
