@@ -976,7 +976,7 @@ t_proc: /proc/sys/net/core is a directory
 t_proc: a directory under /proc/sys that is not there is ENOENT
 t_proc: every file listed under /proc/sys opens
 t_proc: /proc/sys/vm lists swappiness
-t_proc: oom_score reads 0
+t_proc: oom_score reads a number
 t_proc: oom_score_adj starts at 0
 t_proc: loginuid is unset
 t_proc: coredump_filter reads its default
