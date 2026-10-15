@@ -327,6 +327,7 @@ class Net:
         self.link = link
         self.peer = None
         self.dhcp_done = False
+        self.arp_asked = []
 
     def send_ip(self, proto, payload):
         mac = self.link.guest_mac or BCAST
@@ -343,8 +344,21 @@ class Net:
             if op == 1 and tip == HOST_IP:
                 arp = struct.pack("!HHBBH", 1, 0x0800, 6, 4, 2) + HOST_MAC + f[38:42] + f[22:28] + f[28:32]
                 self.link.send(f[6:12] + HOST_MAC + b"\x08\x06" + arp)
+            elif op == 1 and HOST_IP < tip <= HOST_IP + 12:
+                self.arp_asked.append(tip)
+                mac = bytes([2, 0, 0, 0, 1, tip - HOST_IP])
+                arp = struct.pack("!HHBBH", 1, 0x0800, 6, 4, 2) + mac + f[38:42] + f[22:28] + f[28:32]
+                self.link.send(f[6:12] + mac + b"\x08\x06" + arp)
             return
         if f[12:14] != b"\x08\x00":
+            return
+        dst = struct.unpack("!I", f[30:34])[0]
+        if f[23] == 1 and f[34] == 8 and HOST_IP < dst <= HOST_IP + 12:
+            # An echo request for one of the twelve neighbors: answer as it.
+            body = b"\0\0\0\0" + f[38:14 + struct.unpack("!H", f[16:18])[0]]
+            body = b"\0\0" + struct.pack("!H", csum(body)) + body[4:]
+            mac = bytes([2, 0, 0, 0, 1, dst - HOST_IP])
+            self.link.send(f[6:12] + mac + b"\x08\x00" + ip_packet(1, dst, GUEST_IP, body))
             return
         if f[23] == 17 and len(f) >= 282 + 4 and struct.unpack("!H", f[36:38])[0] == 67:
             self.dhcp(f)
@@ -684,6 +698,26 @@ check(finished and b"hello from the host" in out[mark:] and bytes(srv.got) == b"
 check(syns and all(k in syns[0]["opts"] for k in (2, 3, 4)),
       "connecting out: the SYN offers an MSS, window scaling and SACK (and nothing is scaled when we do not)")
 net.peer = None
+
+# 7. The ARP cache holds more than four neighbors: the guest pings twelve
+#    hosts that this script answers for, then the same twelve again. The
+#    second round needs no ARP request.
+def ping_round():
+    for i in range(12):
+        mark = len(out)
+        type_line(f"ping 10.0.2.{3 + i}")
+        until(lambda: b"bastios> " in out[mark:], 10)
+        if f"reply from 10.0.2.{3 + i}".encode() not in out[mark:]:
+            return False
+    return True
+
+net.arp_asked = []
+first = ping_round()
+asked_first = len(net.arp_asked)
+second = ping_round()
+asked_second = len(net.arp_asked) - asked_first
+check(first and second, "ARP cache: twelve neighbors answer a ping, twice")
+check(asked_first >= 12 and asked_second == 0, f"ARP cache: {asked_first} requests for twelve neighbors, {asked_second} the second time")
 
 qemu.kill(); qemu.wait()
 print("---- transcript ----")

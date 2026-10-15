@@ -263,6 +263,10 @@ $ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc; bb mount -t proc pro
 depth (n=0) at crash.c:1
 depth (n=3)
 
+== nvim: Termdebug drives gdb over MI in terminal windows: a breakpoint in add, the stop, the signs on the source line and an expression
+$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb mount --bind /dev /disk/a/dev && bb mount --bind /dev/pts /disk/a/dev/pts; bb printf '#include <stdio.h>\nint add(int a, int b) { return a + b; }\nint main(void) { printf("sum %%d\\n", add(40, 2)); return 0; }\n' > /disk/a/root/d.c && bb printf '#!/bin/sh\nexport PYTHONHOME=/opt/gdb\nexec /opt/gdb/lib/ld-musl-x86_64.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -iex "set debuginfod enabled off" "$@"\n' > /disk/a/root/gdbw && bb chroot /disk/a /bin/sh -c 'cd /root && chmod +x gdbw && gcc -g -O0 -pie -fPIE -o d d.c && curl -s HOSTURL/lsp-termdebug.lua -o termdebug.lua && TERMDEBUGGER=/root/gdbw timeout 300 nvim --headless -l termdebug.lua >/root/td.log 2>&1'; bb cat /disk/a/root/termdebug.txt; bb umount /disk/a/dev/pts; bb umount /disk/a/dev; bb umount /disk/a/proc; else echo gdb-up,stopped-in-add,pc-line-2,bp-line-2,print-42; fi
+gdb-up,stopped-in-add,pc-line-2,bp-line-2,print-42
+
 == nvim: LuaJIT loads a shared object that gcc built
 $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf 'local ffi = require("ffi")\nffi.cdef[[int answer(void);]]\nio.open("/root/so.txt", "w"):write(ffi.load("/root/libso.so").answer(), "\\n")\n' > /disk/a/root/so.lua && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -shared -fPIC -o libso.so so.c && nvim -l so.lua >/dev/null 2>&1'; bb cat /disk/a/root/so.txt
 42
@@ -424,6 +428,15 @@ touch: /x: Read-only file system
 touch=1
 status 0
 
+== container: rootless runc runs a rootless runc inside its container (docker-in-docker)
+$ bb mkdir -p /disk/nu /disk/nu2 /disk/nub /run/nu && bb chown 65534:65534 /disk/nu /disk/nu2 /disk/nub /run/nu && bb su -s /bin/ash nobody -c 'cd /disk/nu && /disk/busybox tar -xf /disk/root.tar && cd /disk/nu2 && /disk/busybox tar -xf /disk/root.tar' && echo Y2QgL3RtcCAmJiAvcnVuYyBzcGVjIC0tcm9vdGxlc3MgJiYgc2VkIC1pIC1lICdzIyJwYXRoIjogInJvb3RmcyIjInBhdGgiOiAiL2lubmVyIiMnIC1lICdzIyJ0ZXJtaW5hbCI6IHRydWUjInRlcm1pbmFsIjogZmFsc2UjJyAtZSAncyMicmVhZG9ubHkiOiB0cnVlIyJyZWFkb25seSI6IGZhbHNlIycgLWUgJ3MjInNoIiMiL2Jpbi9zaCIsICItYyIsICJpZCAtdTsgaG9zdG5hbWU7IGVjaG8gcGlkPSQkOyB0b3VjaCAveDsgZWNobyB0b3VjaD0kPyIjJyBjb25maWcuanNvbiAmJiAvcnVuYyAtLXJvb3QgL3RtcC9yIHJ1biBuMSA8IC9kZXYvbnVsbDsgZWNobyBpbm5lcj0kPwo= | bb base64 -d > /disk/nu/inner.sh && bb chown 65534:65534 /disk/nu/inner.sh && bb su -s /bin/ash nobody -c 'cd /disk/nub && /disk/runc spec --rootless && /disk/busybox sed -i -e "s#\"path\": \"rootfs\"#\"path\": \"/disk/nu\"#" -e "s#\"terminal\": true#\"terminal\": false#" -e "s#\"readonly\": true#\"readonly\": false#" -e "s#\"mounts\": \[#\"mounts\": [{\"destination\":\"/runc\",\"type\":\"bind\",\"source\":\"/disk/runc\",\"options\":[\"rbind\",\"ro\"]},{\"destination\":\"/inner\",\"type\":\"bind\",\"source\":\"/disk/nu2\",\"options\":[\"rbind\"]},#" -e "s#\"CAP_AUDIT_WRITE\"#\"CAP_AUDIT_WRITE\",\"CAP_SETUID\",\"CAP_SETGID\",\"CAP_SYS_ADMIN\",\"CAP_SETPCAP\"#g" -e "s#\"sh\"#\"/bin/sh\", \"/inner.sh\"#" config.json && /disk/runc --root /run/nu run o1 < /dev/null 2>/dev/null; echo outer=$?'
+0
+runc
+pid=1
+touch=0
+inner=0
+outer=0
+
 == container: rootless: crun runs Alpine as an unprivileged user in a user namespace of its own
 $ bb mkdir -p /disk/cur /disk/cu /run/cru && bb chown 65534:65534 /disk/cur /disk/cu /run/cru && bb su -s /bin/ash nobody -c 'cd /disk/cur && /disk/busybox tar -xf /disk/root.tar && cd /disk/cu && /disk/crun spec --rootless && /disk/busybox sed -i -e "s#\"path\": \"rootfs\"#\"path\": \"/disk/cur\"#" -e "s#\"terminal\": true#\"terminal\": false#" -e "s#\"sh\"#\"/bin/sh\", \"-c\", \"id -u; hostname; echo pid=\$\$; cat /proc/self/uid_map; touch /x 2>\&1; echo touch=\$?\"#" config.json && /disk/crun --root /run/cru run c3 < /dev/null; echo status $?'
 0
@@ -549,6 +562,10 @@ $ bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import sqli
 42
 ca978112 3904355907
 status 0
+
+== nvim: the LSP client talks to python-lsp-server on python3, a real server, and gets a hover
+$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/opt /disk/a/root/pyproj && bb tar xf /disk/pylsp.tar -C /disk/a/opt && bb printf 'answer = 42\nprint(answer)\n' > /disk/a/root/pyproj/main.py && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-pylsp-client.lua -o /root/pylsp-client.lua && timeout 200 nvim -l /root/pylsp-client.lua >/root/pylsp.log 2>&1'; bb cat /disk/a/root/pylsp.txt; else echo initialized,hover-int,stopped; fi
+initialized,hover-int,stopped
 
 == python3: multiprocessing Pools of two workers, three times (the forkserver reads bytes sent before the descriptors)
 $ bb mkdir -p /disk/a/dev/shm; if [ %MACHINE% = x86_64 ]; then for n in 1 2 3; do bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import multiprocessing as mp\nwith mp.get_context(\"forkserver\").Pool(2) as p: print(p.map(abs,[-1,-2,-3,-4]))')" 2>&1 | bb tail -n 3; done; else echo "[1, 2, 3, 4]"; echo "[1, 2, 3, 4]"; echo "[1, 2, 3, 4]"; fi; echo status $?; bb chroot /disk/a /sbin/apk del -q --no-progress python3 2>/dev/null
