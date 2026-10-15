@@ -528,6 +528,9 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
     let en = netns_unshare(&mut k, c);      // the child gets a network namespace of its own; past the limit it keeps the parent's
   }
   let e2 = nsk_unshare(&mut k, c, flags & (CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWUSER + CLONE_NEWCGROUP));   // nor this: uts_room did (src/lxnsk.bastio)
+  if flags & CLONE_NEWNS != 0 {
+    mntns_own(&mut k, c);                   // after the user namespace, if the same call made one
+  }
   if flags & CLONE_NEWNET != 0 {
     netns_own(&mut k, c);                   // after the user namespace, if the same call made one
   }
@@ -625,6 +628,9 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
     }
   }
   let e = nsk_unshare(&mut k, pid, ns);     // src/lxnsk.bastio
+  if e == 0 && ns & CLONE_NEWNS != 0 {
+    mntns_own(&mut k, pid);
+  }
   if e == 0 && ns & CLONE_NEWNET != 0 {
     netns_own(&mut k, pid);                 // after the user namespace, if the same call made one
   }

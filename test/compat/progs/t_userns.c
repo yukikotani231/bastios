@@ -163,6 +163,21 @@ static int lo_up_in_foreign_netns(void) {
     return unshare(CLONE_NEWNET) == 0 && in_userns(lo_up_in_first_netns, 0);
 }
 
+static int no_mounts_without_ns(void);
+
+/* Likewise a mount namespace, and a UTS namespace, that a process of the
+ * first user namespace made: the root of a user namespace made inside it
+ * owns neither. */
+static int mount_in_foreign_mntns(void) {
+    return unshare(CLONE_NEWNS) == 0 && in_userns(no_mounts_without_ns, 0);
+}
+static int hostname_denied(void) {
+    return sethostname("x", 1) == -1 && errno == EPERM;
+}
+static int hostname_in_foreign_utsns(void) {
+    return unshare(CLONE_NEWUTS) == 0 && in_userns(hostname_denied, 0);
+}
+
 /* statfs of /proc/self/fd/N is the file system of the file N holds. */
 static int statfs_fd_link(void) {
     int f = open("/tmp", O_PATH | O_DIRECTORY);
@@ -264,6 +279,8 @@ int main(void) {
     EXPECT("the root of a user namespace brings loopback up in a network namespace of its own", in_userns(lo_up_in_own_netns, 0));
     EXPECT("and not in the first one", in_userns(lo_up_in_first_netns, 0));
     EXPECT("nor in one that another user namespace made", in_child(lo_up_in_foreign_netns));
+    EXPECT("nor mounts in a mount namespace that another user namespace made", in_child(mount_in_foreign_mntns));
+    EXPECT("nor sets the hostname of a UTS namespace that another user namespace made", in_child(hostname_in_foreign_utsns));
     EXPECT("statfs of /proc/self/fd/N answers for the file N holds", statfs_fd_link());
     EXPECT("the root of a user namespace mounts in a mount namespace of its own", in_userns(mounts_in_own_ns, 1));
     EXPECT("and not without one", in_userns(no_mounts_without_ns, 0));
