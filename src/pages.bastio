@@ -161,7 +161,7 @@ fn give_page(m: &mut Mem, f: Frame)
 
 /// Shared pages the kernel keeps: a level-2 table, never loaded, whose
 /// slot s is a level-1 table of shared pages. k.shm holds the pages of
-/// System V shared memory segments (slot s: segment s, src/lxipc.bastio),
+/// System V shared memory segments (slots s, s + 32, ...: segment s, src/lxipc.bastio),
 /// k.txt the read-only pages of the built-in programs (slot s: program s,
 /// src/text.bastio). None only if there was no page for it at boot.
 enum Store {
