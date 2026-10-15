@@ -48,7 +48,7 @@ const AUX_WORDS: u64 = 32;            // the auxiliary vector: 16 pairs
 // The vDSO (user/vdso.c): one read-only page just below the stack, holding
 // the image and, from byte VDSO_DATA, the clock it reads (src/tsc.bastio).
 const VDSO_PAGE: u64 = 134215679;     // STACK_FIRST - 1
-const VDSO_DATA: u64 = 496;           // word of the page: mult, base, at, epoch
+const VDSO_DATA: u64 = 496;           // word of the page: mult, base, at, epoch, then 1 if the process is in a time namespace
 const AT_SYSINFO_EHDR: u64 = 33;
 const AT_IGNORE: u64 = 1;
 
