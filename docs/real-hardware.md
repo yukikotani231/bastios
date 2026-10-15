@@ -96,6 +96,23 @@ Each of these is worth a report on its own; try the next step only if you have t
 - **The prompt appears but typing does nothing.** Try another keyboard: the laptop's own (PS/2 inside), a USB keyboard on another port, or one plugged in directly rather than through a hub or dock.
 - **A SATA disk is plugged in, but the log does not say `disk: AHCI`.** Reboot, select the first entry, **BastiOS**, press `e`, add a line `cmdline: ahci_reset` at the end of the entry, and press F10 to boot.
 
+## Where did it stop? A quick triage
+
+The last line of the boot log tells where the kernel got to. Find it in the first column, try what the second column says, and put both in the report.
+
+| Last line you can read | What it means | Try |
+|---|---|---|
+| The firmware's own screen, no Limine menu | The stick was not booted | Boot menu key, USB boot allowed, Secure Boot off; under UEFI try the entry with and without "UEFI:" |
+| The Limine menu, then nothing | Limine could not load the kernel or set a screen mode | Pick the first entry (**BastiOS**); a serial log may still show Limine's own messages |
+| `multiboot2: Loading executable` and nothing more | The kernel stopped before its first message | Photograph the screen; a serial log is the only way to see more |
+| `BastiOS 0.2: N pages of memory, P processors` and then nothing | It stopped starting the other processors or reading ACPI | Report `P` against the machine's real thread count; a serial log shows how far it got |
+| The log reaches `net:` and `disk:` lines but there is no `bastios>` | The keyboard or the shell did not start | Another keyboard or port; the serial line takes input too |
+| `disk: none found` with a disk in the machine | The disk is behind a controller BastiOS has no driver for | Look at the `pci` lines of the report: `RAID mode` or `Intel VMD` means a firmware setting hides the disk (set the SATA mode to AHCI, turn VMD off); a SATA disk may need `cmdline: ahci_reset` |
+| No `net:` line with a network card in the machine | No driver for that card | Report the vendor:device id from the `pci` lines |
+| `bastio: kernel fault` | A bug | Copy the whole line and the lines above it exactly |
+
+A photo of the last screen and the `pci` lines of the report are worth more than a description.
+
 ## What to send back
 
 Open an issue at <https://github.com/yukikotani231/bastios/issues> titled `Real hardware: <maker and model>` with:
