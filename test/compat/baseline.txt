@@ -642,7 +642,8 @@ t_mem: FUTEX_WAKE on an unmapped word is EFAULT
 t_mem: MAP_SHARED anonymous across fork
 t_mem: MAP_SHARED file mapped by two processes
 t_mem: MAP_SHARED file mapping across fork
-t_mem: a writable MAP_SHARED mapping is written back after twenty read-only ones
+t_mem: a writable MAP_SHARED mapping is written back after seventy read-only ones
+t_mem: forty writable MAP_SHARED mappings are each written back
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
 t_mem: a MAP_SHARED mapping sees write(2)
@@ -1320,6 +1321,16 @@ go: go: goroutines, channels and the collector
 go: go: make the device nodes
 go: go: run a program
 go: go: version
+rust: rust: unpack the root, make the device nodes
+rust: rust: version
+rust: rust: compile and run a program
+rust: rust: collections, strings, closures and traits
+rust: rust: threads, channels and a mutex
+rust: rust: exit status and a panic
+rust: rust: files and directories
+rust: rust: cargo builds and runs a project
+rust: rust: cargo test
+rust: rust: a compile error is reported
 t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller
 t_sys: keys: add_key, read, describe, update, request_key, link, search, unlink
 t_sys: keys: unknown type, bad payload, expiry, revocation, no such key

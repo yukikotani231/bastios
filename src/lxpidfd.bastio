@@ -397,7 +397,7 @@ fn pidfd_ioctl(k: &mut Kernel, pid: u64, p: u64, req: u64, arg: u64) -> u64
   }
   let want = load_le64(k.fs.xfer, 0);
   let me = nsk_of(k, NSK_PID, pid);
-  if p >= NPROC || (me != 0 && nsk_of(k, NSK_PID, p) != me) {
+  if p >= NPROC || (me != 0 && vp_in(k, p, me) == 0) {
     return ESRCH;
   }
   let st = state(k.procs, p);
