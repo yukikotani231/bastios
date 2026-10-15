@@ -401,6 +401,40 @@ static int big_segment(void) {
     return ok;
 }
 
+/* msgmni is written: that many queues, then ENOSPC; a larger value changes nothing past 32. */
+static int msgmni_written(void) {
+    char buf[32] = {0};
+    int fd = open("/proc/sys/kernel/msgmni", O_RDWR);
+    if (fd < 0)
+        return 0;
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    long old = n > 0 ? atol(buf) : -1;
+    if (dprintf(fd, "3\n") <= 0)
+        return 0;
+    close(fd);
+    int ids[4], made = 0, ok = 1;
+    for (int i = 0; i < 3; i++) {
+        ids[i] = msgget(0x6d6e0000 + i, IPC_CREAT | IPC_EXCL | 0600);
+        made += ids[i] >= 0;
+    }
+    int fourth = msgget(0x6d6e0003, IPC_CREAT | IPC_EXCL | 0600);
+    ok = made == 3 && fourth < 0 && errno == ENOSPC;
+    fd = open("/proc/sys/kernel/msgmni", O_RDONLY);
+    n = fd >= 0 ? read(fd, buf, sizeof buf - 1) : -1;
+    if (fd >= 0)
+        close(fd);
+    ok = ok && n > 0 && atol(buf) == 3;
+    for (int i = 0; i < 3; i++)
+        if (ids[i] >= 0)
+            msgctl(ids[i], IPC_RMID, 0);
+    fd = open("/proc/sys/kernel/msgmni", O_WRONLY);
+    if (fd >= 0) {
+        dprintf(fd, "%ld\n", old);
+        close(fd);
+    }
+    return ok;
+}
+
 int main(void) {
     setup();
     EXPECT("msgsnd, msgrcv and IPC_STAT", queue_basics());
@@ -418,6 +452,7 @@ int main(void) {
     EXPECT("shmat and shmdt in a loop reuse the address space", shm_loop());
     EXPECT("/proc/sysvipc and /proc/sys/kernel limits", proc_files());
     EXPECT("shmmax is written; a segment past it, or with SHM_HUGETLB, is EINVAL", shmmax_written());
+    EXPECT("msgmni is written: that many queues, then ENOSPC", msgmni_written());
     EXPECT("msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message", next_ids_and_copy());
     EXPECT("32 queues, semaphore sets and segments at once, the 33rd of each is ENOSPC", many_objects());
     EXPECT("32 attachments in one process, the 33rd is EMFILE", many_attachments());

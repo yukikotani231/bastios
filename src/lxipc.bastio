@@ -277,6 +277,29 @@ fn ipc_may(k: &Kernel, pid: u64, kind: u64, slot: u64, want: u64) -> bool
   return (want & 7) & (g & 7) == (want & 7);
 }
 
+/// How many message queues may exist: IPC_SETS, or less if /proc/sys/kernel/msgmni was written.
+fn msgmni_now(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= IPC_SETS
+{
+  let w = get(k.sys, SYS_MSGMNI);
+  if w == 0 {
+    return IPC_SETS;
+  }
+  return smaller(w - 1, IPC_SETS);
+}
+
+/// The value /proc/sys/kernel/msgmni reads as: what was written, or IPC_SETS.
+fn msgmni_shown(k: &Kernel) -> u64
+  requires kok(k)
+{
+  let w = get(k.sys, SYS_MSGMNI);
+  if w == 0 {
+    return IPC_SETS;
+  }
+  return w - 1;
+}
+
 /// Whether pid owns or created the set, or is root: IPC_SET and IPC_RMID.
 fn ipc_owner(k: &Kernel, pid: u64, kind: u64, slot: u64) -> bool
   requires kok(k) && pid < NPROC && slot < IPC_SETS
@@ -326,6 +349,21 @@ fn ipc_get(k: &mut Kernel, pid: u64, kind: u64, key: u64, flg: u64) -> Got
     if (want - 1) % IPC_SPAN < IPC_SETS && hget(k, kind, (want - 1) % IPC_SPAN, H_SEQ) == 0 && (want - 1) / IPC_SPAN < 65536 {
       f = (want - 1) % IPC_SPAN;
       seq = (want - 1) / IPC_SPAN;
+    }
+  }
+  if kind == KQ {
+    let mut used = 0;
+    let mut u = 0;
+    while u < IPC_SETS
+      invariant u <= IPC_SETS && used <= u && kok(k)
+    {
+      if hget(k, KQ, u, H_SEQ) != 0 {
+        used = used + 1;
+      }
+      u = u + 1;
+    }
+    if used >= msgmni_now(k) {
+      return Got { r: ENOSPC, slot: IPC_SETS, fresh: false };   // msgmni queues exist
     }
   }
   if f >= IPC_SETS {
@@ -2073,7 +2111,9 @@ fn ipc_proc_text(k: &mut Kernel, pid: u64, i: u64, o: &mut Bytes) -> u64
     let mut v = shmmax_shown(k);
     if i == 1 {
       v = IPC_SETS * SHM_PAGES;
-    } else if i == 2 || i == 5 {
+    } else if i == 5 {
+      v = msgmni_shown(k);
+    } else if i == 2 {
       v = IPC_SETS;
     } else if i == 3 {
       v = MSGMAX;

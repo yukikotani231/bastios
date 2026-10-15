@@ -94,6 +94,7 @@ fgetxattr03
 flistxattr01
 flistxattr02
 flistxattr03
+fork13
 fremovexattr01
 fremovexattr02
 fsetxattr01
@@ -139,6 +140,7 @@ llistxattr01
 llistxattr02
 llistxattr03
 lremovexattr01
+msgget03
 removexattr01
 removexattr02
 request_key01
