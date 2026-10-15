@@ -25,11 +25,13 @@
 // BPF_F_ALLOW_OVERRIDE. A link (BPF_LINK_CREATE) detaches when its
 // descriptor closes.
 //
-// Not done: BPF_PROG_QUERY finds nothing attached and there is no
-// BPF_PROG_GET_FD_BY_ID, so a runtime that replaces the rules of a cgroup
-// attaches a second program, and both have to allow; the verifier's
-// register tracking (every program is run, not proved), and every other
-// command and program type: -EINVAL.
+// BPF_PROG_QUERY lists the ids (slot + 1) of the programs attached to a
+// cgroup, BPF_PROG_GET_FD_BY_ID opens one by id and BPF_OBJ_GET_INFO_BY_FD
+// gives its type and id.
+//
+// Not done: the verifier's register tracking (every program is run, not
+// proved), the other fields of the program info, and every other command
+// and program type: -EINVAL.
 
 import "linux.bastio";
 import "lxfd.bastio";
@@ -37,6 +39,8 @@ import "lxfd.bastio";
 const BPF_PROG_LOAD: u64 = 5;
 const BPF_PROG_ATTACH: u64 = 8;
 const BPF_PROG_DETACH: u64 = 9;
+const BPF_PROG_GET_FD_BY_ID: u64 = 13;
+const BPF_OBJ_GET_INFO_BY_FD: u64 = 15;
 const BPF_PROG_QUERY: u64 = 16;
 const BPF_LINK_CREATE: u64 = 28;
 const BPF_PROG_TYPE_CGROUP_DEVICE: u64 = 15;
@@ -639,7 +643,7 @@ fn lx_bpf(k: &mut Kernel, pid: u64, cmd: u64, attr: u64, size: u64) -> u64
   }
   if cmd == BPF_PROG_QUERY {
     // target_fd, attach_type, query_flags, attach_flags, prog_ids, prog_cnt:
-    // nothing is found attached.
+    // the ids (slot + 1) of the programs attached to the cgroup itself.
     if size < 28 {
       return EINVAL;
     }
@@ -649,12 +653,104 @@ fn lx_bpf(k: &mut Kernel, pid: u64, cmd: u64, attr: u64, size: u64) -> u64
     if !bpf_cgroup_fd(k, pid, w0 % 0x100000000) {
       return EBADF;
     }
-    xfer_u64(&mut k.fs.xfer, 0, 0);
+    let d = fd_look(k, pid, w0 % 0x100000000);
+    if d.x < DIR_CG || d.x - DIR_CG >= CG_N {
+      return EBADF;
+    }
+    let c = d.x - DIR_CG;
+    let a0 = cg_get(k, c, CGW_DEV0);
+    let a1 = cg_get(k, c, CGW_DEV1);
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, attr + 24, &mut k.fs.xfer, 4) != 4 {
+      return EFAULT;
+    }
+    let room = get_u64(k.fs.xfer, 0) % 0x100000000;
+    let mut n = 0;
+    if a0 != 0 {
+      n = n + 1;
+    }
+    if a1 != 0 {
+      n = n + 1;
+    }
+    let mut af = 0;
+    if n == 2 {
+      af = BPF_F_ALLOW_MULTI;
+    }
+    xfer_u64(&mut k.fs.xfer, 0, af);
     if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, attr + 12, k.fs.xfer, 4) != 4 {
       return EFAULT;                        // attach_flags
     }
+    xfer_u64(&mut k.fs.xfer, 0, n);
     if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, attr + 24, k.fs.xfer, 4) != 4 {
       return EFAULT;                        // prog_cnt
+    }
+    if size >= 32 && room != 0 && n != 0 {
+      // prog_ids is the user address at attr + 16.
+      if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, attr + 16, &mut k.fs.xfer, 8) != 8 {
+        return EFAULT;
+      }
+      let dst = get_u64(k.fs.xfer, 0);
+      if dst < USER_BASE || dst >= USER_BASE + USER_SIZE {
+        return EFAULT;
+      }
+      let mut m = 0;
+      let mut off = 0;
+      if a0 != 0 && m < room {
+        xfer_u64(&mut k.fs.xfer, 0, a0);
+        if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, dst, k.fs.xfer, 4) != 4 {
+          return EFAULT;
+        }
+        m = m + 1;
+        off = 4;
+      }
+      if a1 != 0 && m < room {
+        xfer_u64(&mut k.fs.xfer, 0, a1);
+        if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, dst + off, k.fs.xfer, 4) != 4 {
+          return EFAULT;
+        }
+        m = m + 1;
+      }
+      if m < n {
+        return ENOSPC;
+      }
+    }
+    return 0;
+  }
+  if cmd == BPF_PROG_GET_FD_BY_ID {
+    // prog_id: a new descriptor on that program.
+    let id = w0 % 0x100000000;
+    if id == 0 || id > DVP_N || dv_get(k, id - 1, 0) == 0 {
+      return ENOENT;
+    }
+    dv_hold(&mut k, id - 1);
+    let fd = bpf_object(&mut k, pid, id - 1, 0);
+    if fd >= 18446744073709547520 {
+      dv_drop(&mut k, id - 1);
+    }
+    return fd;
+  }
+  if cmd == BPF_OBJ_GET_INFO_BY_FD {
+    // bpf_fd, info_len, info: the type and the id; the rest is zero.
+    let p = bpf_prog_fd(k, pid, w0 % 0x100000000);
+    if p >= DVP_N {
+      return EBADF;
+    }
+    let mut len = w0 / 0x100000000;
+    if len > 256 {
+      len = 256;
+    }
+    if len < 8 || w1 < USER_BASE {
+      return EINVAL;
+    }
+    let mut i = 8;
+    while i < len
+      invariant i <= len + 8 && len <= 256 && kok(k)
+    {
+      xfer_u64(&mut k.fs.xfer, i, 0);
+      i = i + 8;
+    }
+    xfer_u64(&mut k.fs.xfer, 0, BPF_PROG_TYPE_CGROUP_DEVICE + (p + 1) * 0x100000000);
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, w1, k.fs.xfer, len) != len {
+      return EFAULT;
     }
     return 0;
   }
