@@ -875,7 +875,7 @@ def main():
         web.shutdown()
         shutil.rmtree(scratch, ignore_errors=True)
     results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust", "python"] if k in results}
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node",     report(results, names, args.out, time.time() - t0)
+    report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]
     base = os.path.join(HERE, "baseline.txt" if args.arch == "x86_64" else f"baseline-{args.arch}.txt")
