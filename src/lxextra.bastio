@@ -22,6 +22,7 @@ const LX_SYNC_FILE_RANGE: u64 = 277;
 const LX_PREADV2: u64 = 327;
 const LX_PWRITEV2: u64 = 328;
 const LX_FCHMODAT2: u64 = 452;
+const LX_BSTDISK: u64 = 20819;             // BastiOS's own: raw sectors of the install target (below)
 
 const RWF_HIPRI: u64 = 1;
 const RWF_DSYNC: u64 = 2;
@@ -54,7 +55,7 @@ fn fs_type_name(t: u64) -> Str {
 
 fn is_extra_call(n: u64) -> bool {
   return n == LX_USTAT || n == LX_SYSFS || n == LX_VHANGUP || n == LX_READAHEAD || n == LX_SYNC_FILE_RANGE
-    || n == LX_MLOCK2 || n == LX_PREADV2 || n == LX_PWRITEV2 || n == LX_FCHMODAT2;
+    || n == LX_MLOCK2 || n == LX_PREADV2 || n == LX_PWRITEV2 || n == LX_FCHMODAT2 || n == LX_BSTDISK;
 }
 
 /// The call process pid's registers ask for, as the dispatcher should see
@@ -133,6 +134,8 @@ fn lx_extra_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64
     }
   } else if n == LX_FCHMODAT2 {
     r = lx_fchmodat2(&mut k, pid, a, b, c, r10);
+  } else if n == LX_BSTDISK {
+    r = lx_bstdisk(&mut k, pid, a, b, c);
   } else if n == LX_SYSFS {
     r = lx_sysfs(&mut k, pid, a, b, c);
   } else if n == LX_USTAT {
@@ -275,4 +278,80 @@ fn lx_ustat(k: &mut Kernel, pid: u64, dev: u64, buf: u64) -> u64
   xfer_u64(&mut k.fs.xfer, 0, nfree);       // f_tfree (an int)
   xfer_u64(&mut k.fs.xfer, 8, NFILES);      // f_tinode
   return lx_put_out(&mut k, pid, buf, USTAT_SIZE);
+}
+
+// ---------------------------------------------------------------- the install target
+
+const BD_SIZE: u64 = 0;                    // lx_bstdisk's operations: the disk's size in sectors
+const BD_READ: u64 = 1;                    // one sector (512 bytes) to the buffer
+const BD_WRITE: u64 = 2;                   // one sector from the buffer
+const BD_READ_BLOCK: u64 = 3;              // eight sectors (4 KiB) from a multiple of 8
+const BD_WRITE_BLOCK: u64 = 4;             // eight sectors to a multiple of 8, and the drive's cache is flushed
+
+/// bstdisk(op, lba, buf): a BastiOS call (number 20819, not a Linux one)
+/// for the installer (docs/install.md): with the boot option `install` the
+/// disk is not mounted but left for root to read and write sector by
+/// sector, which is how a GPT, a boot loader and the file system of a new
+/// system get onto it. Without that option it fails with -ENODEV: a disk
+/// BastiOS mounted is only ever written by its file system. BD_SIZE
+/// returns the disk's sectors; the others return 0, or -EINVAL for a
+/// sector off the disk (or a block not on a multiple of 8), -EIO if the
+/// disk fails and -EFAULT for a buffer that is not the caller's.
+fn lx_bstdisk(k: &mut Kernel, pid: u64, op: u64, lba: u64, buf: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if !cred_root(k.procs, pid) {
+    return EPERM;
+  }
+  if !k.fs.disk.raw {
+    return ENODEV;
+  }
+  let n = blk_sectors(k.fs.disk.dev);
+  if op == BD_SIZE {
+    return n;
+  }
+  if op == BD_READ || op == BD_WRITE {
+    if lba >= n {
+      return EINVAL;
+    }
+    if op == BD_READ {
+      if !blk_read(&mut k.fs.disk.dev, lba, &mut k.fs.xfer) {
+        return EIO;
+      }
+      if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, k.fs.xfer, SECTOR) != SECTOR {
+        return EFAULT;
+      }
+      return 0;
+    }
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, &mut k.fs.xfer, SECTOR) != SECTOR {
+      return EFAULT;
+    }
+    if !blk_write(&mut k.fs.disk.dev, lba, k.fs.xfer) {
+      return EIO;
+    }
+    return 0;
+  }
+  if op == BD_READ_BLOCK || op == BD_WRITE_BLOCK {
+    if lba % BSECT != 0 || lba > n || n - lba < BSECT {
+      return EINVAL;
+    }
+    if op == BD_READ_BLOCK {
+      if !blk_read_block(&mut k.fs.disk.dev, lba, &mut k.fs.xfer, 0) {
+        return EIO;
+      }
+      if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, k.fs.xfer, BLOCK) != BLOCK {
+        return EFAULT;
+      }
+      return 0;
+    }
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, &mut k.fs.xfer, BLOCK) != BLOCK {
+      return EFAULT;
+    }
+    if !blk_write_block(&mut k.fs.disk.dev, lba, k.fs.xfer, 0) {
+      return EIO;
+    }
+    return 0;
+  }
+  return EINVAL;
 }

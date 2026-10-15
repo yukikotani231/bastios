@@ -28,6 +28,7 @@ const CBLOCK: u64 = 4096;            // a block
 const NC: u64 = 256;                  // cache slots (1 MiB: more than BusyBox, re-read on each exec at 256 KiB)
 const NC_MIN: u64 = 16;               // slots of a disk with no file system (an unused loop mount)
 const NH: u64 = 256;                  // hash buckets over the block numbers the slots hold
+const PLO_MAX: u64 = 1099511627776;   // 2^40: the most sectors before a file system's first (a partition's start)
 const NQ: u64 = 128;                  // queued operations
 const QW: u64 = 3;                    // words per operation: kind, slot, block
 const DQ_NONE: u64 = 18446744073709551615;
@@ -72,13 +73,14 @@ struct DiskQ {
   moved: u64,           // counts operations finished, so sleepers know to look again
   dead: bool,           // a command failed or never finished: the disk is not used again
   good: u64,            // once dead: the last transaction that finished before it died
+  plo: u64,             // the first sector of the file system on the device (block b is at sector plo + 8 * b)
 }
 
 spec fn dq_ok(q: &DiskQ) -> bool {
   q.nc >= NC_MIN && q.nc <= NC
   && blen(q.cache) == q.nc * CBLOCK && len(q.tag) == q.nc && len(q.st) == q.nc && len(q.q) == NQ * QW
   && len(q.hh) == NH && len(q.hn) == q.nc && len(q.hk) == q.nc
-  && ring_ok(q.r) && q.r.cap == NQ && q.hand < q.nc && q.batch >= 1 && q.batch <= VIO_BATCH
+  && ring_ok(q.r) && q.r.cap == NQ && q.hand < q.nc && q.batch >= 1 && q.batch <= VIO_BATCH && q.plo <= PLO_MAX
 }
 
 fn dq_new(nc: u64) -> DiskQ
@@ -86,7 +88,7 @@ fn dq_new(nc: u64) -> DiskQ
   ensures dq_ok(result)
 {
   let mut q = DiskQ { nc: nc, cache: balloc(nc * CBLOCK), tag: alloc(nc), st: alloc(nc), hh: alloc(NH), hn: alloc(nc), hk: alloc(nc), q: alloc(NQ * QW),
-    r: ring_new(NQ), running: false, batch: 1, since: 0, hand: 0, next: 1, done: 0, moved: 0, dead: false, good: 0 };
+    r: ring_new(NQ), running: false, batch: 1, since: 0, hand: 0, next: 1, done: 0, moved: 0, dead: false, good: 0, plo: 0 };
   let mut i = 0;
   while i < nc
     invariant i <= nc && dq_ok(q)
@@ -602,8 +604,8 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
         more = false;
       }
     }
-    let n = blk_room(dev, b * 8, want);
-    if n > 1 && blk_begin_n(&mut dev, b * 8, n, false) {
+    let n = blk_room(dev, q.plo + b * 8, want);
+    if n > 1 && blk_begin_n(&mut dev, q.plo + b * 8, n, false) {
       q.running = true;
       q.batch = n;
       q.since = now;
@@ -627,7 +629,7 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
         more = false;
       }
     }
-    let n = blk_room(dev, b * 8, want);
+    let n = blk_room(dev, q.plo + b * 8, want);
     if n > 1 {
       let mut staged = true;
       let mut j = 0;
@@ -640,7 +642,7 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
         }
         j = j + 1;
       }
-      if staged && blk_begin_n(&mut dev, b * 8, n, true) {
+      if staged && blk_begin_n(&mut dev, q.plo + b * 8, n, true) {
         q.running = true;
         q.batch = n;
         q.since = now;
@@ -648,7 +650,7 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
       }
     }
   }
-  if !blk_begin(&mut dev, op, b * 8, &mut q.cache, s * CBLOCK) {
+  if !blk_begin(&mut dev, op, q.plo + b * 8, &mut q.cache, s * CBLOCK) {
     dq_kill(&mut q);
     return DQ_MOVED;                  // dropped on the next call
   }
