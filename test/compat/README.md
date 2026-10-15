@@ -60,6 +60,11 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   `TCC_REV`; the patch modifies tcc, so it is under tcc's license,
   LGPL-2.1-or-later, not this repository's). The compiler's own sources are on the disk under `/disk/s`,
   but proving them needs more memory than a process gets.
+  bastiolang's developer tools (`tools/bastiofmt`, `tools/bastio-lsp`, built
+  here as static PIEs against musl) are on the disk too: the cases format a
+  line and the compiler's own parser, and drive the language server over
+  its standard input and output with the requests an editor sends (hover,
+  go to definition, formatting, a diagnostic from `bastioc1`).
 - `alpine.txt`: Alpine Linux 3.24, from a fourth disk (`alpinedisk.py`).
   The first case unpacks its minirootfs and enters it with `chroot`. Then
   `apk` installs packages from a repository on the same disk, and they run:
