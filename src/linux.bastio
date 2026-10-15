@@ -1002,6 +1002,12 @@ fn termio_src(i: u64) -> u64
   return i + 8;
 }
 
+// ioctl requests on /proc/PID/ns descriptors (src/lxnsk.bastio).
+const NS_GET_USERNS: u64 = 0xb701;
+const NS_GET_PARENT: u64 = 0xb702;
+const NS_GET_NSTYPE: u64 = 0xb703;
+const NS_GET_OWNER_UID: u64 = 0xb704;
+
 /// ioctl(fd, req, arg). Descriptors 0-2 are the console, a terminal with
 /// 24 rows of 80 columns. Its settings (tt_byte) start in canonical mode
 /// with echo; a program may turn off canonical mode, echo, ISIG, ICRNL
@@ -1068,6 +1074,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   }
   if d.kind == K_DEV && is_pty_dev(d.x) {
     return pty_ioctl(&mut k, pid, fd, d.x, req % 0x100000000, arg);   // src/lxpty.bastio
+  }
+  if d.kind == K_DEV && is_ns_file(d.x) && req % 0x100000000 >= NS_GET_USERNS && req % 0x100000000 <= NS_GET_OWNER_UID {
+    return ns_ioctl(&mut k, pid, fd, d.x, req % 0x100000000, arg);   // src/lxnsk.bastio
   }
   if d.kind == K_DEV && d.x == DEV_DSP {
     return dsp_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxsnd.bastio
@@ -1344,14 +1353,11 @@ fn lx_fill(k: &mut Kernel, v: u64, n: u64)
   requires kok(k) && v <= 255 && n <= 160
   ensures kok(k)
 {
-  let w = v * 72340172838076673;           // v in every byte: 0x0101010101010101 * v
-  let mut i = 0;
-  while i + 8 <= n
-    invariant i <= n && n <= 160 && kok(k)
-  {
-    store_le64(&mut k.fs.xfer, i, w);
-    i = i + 8;
+  if v == 0 {
+    bytes_copy_span(&mut k.fs.xfer, 0, k.fs.zeros, 0, n);   // one bcopy, not a store per word
+    return;
   }
+  let mut i = 0;
   while i < n
     invariant i <= n && n <= 160 && kok(k)
   {
