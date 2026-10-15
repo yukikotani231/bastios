@@ -40,7 +40,7 @@ LINE = re.compile(rb"soak: round (\d+) ok ops=(\d+) free=(-?\d+) cached=(-?\d+) 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--kernel", default=os.path.join(ROOT, "build/bastios.elf"))
-    ap.add_argument("--prog", default=os.path.join(ROOT, "build/user/msoak.elf"))
+    ap.add_argument("--prog", help="a built msoak (default: user/msoak.c compiled with $MUSLCC)")
     ap.add_argument("--secs", type=int, default=120)
     ap.add_argument("--rounds", type=int, default=0)
     ap.add_argument("--smp", type=int, default=4)
@@ -65,7 +65,12 @@ def main():
         if a.mem < 1024:
             a.mem = 1024
     else:
-        subprocess.check_call([os.path.join(HERE, "compat/mkdisk.py"), disk, "msoak=" + a.prog], stdout=subprocess.DEVNULL)
+        prog = a.prog
+        if not prog:
+            prog = os.path.join(work, "msoak.elf")
+            subprocess.check_call([os.environ.get("MUSLCC", "musl-gcc"), "-static-pie", "-O2", "-o", prog,
+                                   os.path.join(ROOT, "user/msoak.c")])
+        subprocess.check_call([os.path.join(HERE, "compat/mkdisk.py"), disk, "msoak=" + prog], stdout=subprocess.DEVNULL)
 
     blob = os.urandom(16 << 20)
     blob_md5 = hashlib.md5(blob).hexdigest()
