@@ -1287,6 +1287,23 @@ session("NVMe namespace 2", None, [
     ("cat disk/nv", b"written by nvme\r\nand ahci\r\n"),
 ], halt=True, ready=nvme_ns2_found)
 
+# An NVMe drive that takes only 8 KiB per command (MDTS 1): batches are cut
+# to two blocks (src/nvme.bastio, nvme_room), and what is read and written
+# in runs is still right.
+qemu = boot(1, extra=["-machine", "q35", "-drive", f"file={disk},format=raw,if=none,id=nvm",
+                      "-device", "nvme,serial=bastios,drive=nvm,mdts=1"])
+def nvme_mdts_found():
+    global fails
+    ok = b"disk: NVMe\r\n" in out
+    print(("ok  " if ok else "FAIL"), "(NVMe MDTS 1) disk driver: NVMe")
+    fails += not ok
+session("NVMe MDTS 1", None, [
+    ("cat disk/nv", b"written by nvme\r\nand ahci\r\n"),
+    ("fstest", b"fstest: disk ok"),
+    ("diskbench", b"read 2 MiB: "),
+    ("rm disk/big", b""),
+], halt=True, ready=nvme_mdts_found)
+
 # And on an NVMe drive with 4 KiB sectors: what AHCI wrote is there, and
 # what is written here is where the ATA boot below looks for it.
 qemu = boot(1, nvme4k=True)
