@@ -7,12 +7,22 @@ when you change any of them.
 
 ## The model
 
-BastiOS has Linux's model of users, without capabilities: a process has
+BastiOS has Linux's model of users, with capabilities only as a root's right and the kept sets below: a process has
 real, effective, saved and file-system user and group ids, and up to
 `NGROUPS_KEPT` (16) supplementary groups (`src/lxcred.bastio`, row words
 `F_UID` .. `F_GROUPS` in `src/proc.bastio`). Effective user 0 ("root") is
 the only privilege; where Linux asks for a capability, BastiOS asks for
 root.
+
+One refinement lets a daemon drop root and keep a little power, as chronyd
+does: after `prctl(PR_SET_KEEPCAPS, 1)`, a `setuid` that gives up the last
+root id keeps the permitted set but empties the effective set, and `capset`
+may then shrink the permitted set and fill the effective one (`src/lxcap.bastio`,
+`cap_after_setuid`). While those kept sets are in force the process passes the
+capability checks for the capabilities they hold, and nothing else; they end at
+`execve` or when a root id returns. A process that is root has every
+capability, as before. `/proc/PID/status` shows the sets (`CapPrm`, `CapEff`
+and so on). The proof `cap_has` ensures the caller is root or holds a kept set.
 
 Everything starts as root. The kernel's first program, the native shell,
 runs with every id 0, and so does anything it starts. A process becomes
