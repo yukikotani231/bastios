@@ -159,9 +159,13 @@ fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, a
   let b2 = take_low_page(&mut m, at + 3);
   let b3 = take_low_page(&mut m, at + 4);
   let t = take_low_page(&mut m, at + 5);
-  let regs = mmio_claim(&mut win, bar, E1K_LEN);
+  let mut regs = mmio_claim(&mut win, bar, E1K_LEN);
   let id = pci_read(&mut pci, e, PCI_ID);
-  return net_up(Card::E1000(e1k_new(regs, e1k_model(id % 65536, id / 65536 % 65536), r, b0, b1, b2, b3, t)));
+  let model = e1k_model(id % 65536, id / 65536 % 65536);
+  if model >= E1K_PCH {
+    regs = e1k_pch_reset(regs, &mut pci, e, model == E1K_PCH_LPT);
+  }
+  return net_up(Card::E1000(e1k_new(regs, model, r, b0, b1, b2, b3, t)));
 }
 
 /// Resets the card and takes its pages back (at power off).

@@ -12,7 +12,14 @@
 //              others). An advanced receive descriptor is written back with
 //              the status at byte 8 and the length at byte 12, over the
 //              buffer's address, which is therefore written again each time.
-// The I217-I219 (on the PCH) and I225/I226 are other designs, not driven.
+//   E1K_PCH    the I217, I218 and I219 (8086:153A ... 0DC8, the LAN of Intel's
+//              PCH chipsets; E1K_PCH_LPT for the four older ones that need no
+//              ULP exit). No QEMU model exists, so this path is written from
+//              Linux's e1000e (ich8lan.c) and has never run on hardware: it
+//              uses the legacy descriptors of the 8254x, but the PHY sits
+//              behind the ME and the chipset's SMBus, and `e1k_pch_reset`
+//              must run (x86-64 `nic_new` does it) before `e1k_new`.
+// The I225/I226 are another design, not driven.
 // Polled like the virtio card: its registers are a 128 KiB
 // block of the device window, claimed as an `Mmio`, and every page it can
 // touch is a `Dma` lent at start and taken back after a reset at power off.
@@ -28,6 +35,8 @@ const E1K_NONE: u64 = 0;              // e1k_model: not one of these
 const E1K_8254X: u64 = 1;
 const E1K_82574: u64 = 2;
 const E1K_IGB: u64 = 3;
+const E1K_PCH: u64 = 4;
+const E1K_PCH_LPT: u64 = 5;           // I217 and two I218: no ultra-low-power state to leave
 const E1K_LEN: u64 = 0x20000;         // the register block
 const E1K_TOP: u64 = 0xFEC00000;      // its BAR must lie below the I/O APIC, HPET and local APIC
 const E1K_PAGES: u64 = 6;
@@ -56,6 +65,19 @@ const Q_T: u64 = 0x18;
 const Q_DCTL: u64 = 0x28;             // igb: bit 25 enables the queue
 const E1K_MDIC: u64 = 0x0020;         // PHY register access
 const E1K_GCR: u64 = 0x5B00;          // 82574: bit 22 must be set (erratum)
+const E1K_STATUS: u64 = 0x0008;
+const E1K_CTRL_EXT: u64 = 0x0018;
+const E1K_TXDCTL0: u64 = 0x3828;      // PCH: write-back policy and errata bits
+const E1K_TXDCTL1: u64 = 0x3928;
+const E1K_TARC0: u64 = 0x3840;
+const E1K_TARC1: u64 = 0x3940;
+const E1K_RFCTL: u64 = 0x5008;
+const E1K_PBECCSTS: u64 = 0x100C;
+const E1K_KABGTXD: u64 = 0x3004;
+const E1K_EXTCNF: u64 = 0x0F00;       // PCH: bit 5 is the software semaphore for the PHY
+const E1K_FWSM: u64 = 0x5B54;         // PCH: bit 15 the ME is running, bit 10 it is configuring ULP, bit 6 PHY reset allowed
+const E1K_H2ME: u64 = 0x5B50;
+const E1K_FEXTNVM3: u64 = 0x003C;
 const E1K_MTA: u64 = 0x5200;          // 128 words of multicast filter
 const E1K_RAL: u64 = 0x5400;          // our MAC address, low 32 bits
 const E1K_RAH: u64 = 0x5404;          // high 16 bits, and bit 31: valid
@@ -73,6 +95,23 @@ const QD_ENABLE: u64 = 0x2000000;
 const SRRCTL_ADV: u64 = 0x2000002;    // 2 KiB buffers, advanced one-buffer descriptors
 const ADV_TX: u64 = 0x2B300000;       // advanced data descriptor: DEXT, RS, IFCS, EOP; type 3
 const GCR_ERRATUM: u64 = 0x400000;
+// PCH bits.
+const CTRL_PHY_RST: u64 = 0x80000000;
+const CTRL_MEHE: u64 = 0x80000;
+const CTRL_LANPHYPC_OVR: u64 = 0x10000;
+const CTRL_LANPHYPC_VAL: u64 = 0x20000;
+const CTRL_GIO_MASTER_OFF: u64 = 4;
+const STATUS_GIO_MASTER: u64 = 0x80000;
+const STATUS_LAN_INIT: u64 = 0x200;
+const STATUS_PHYRA: u64 = 0x400;
+const CTRL_EXT_FORCE_SMBUS: u64 = 0x800;
+const CTRL_EXT_PHYPDEN: u64 = 0x100000;
+const CTRL_EXT_LPCD: u64 = 4;
+const H2ME_ULP: u64 = 0x800;
+const H2ME_ENFORCE: u64 = 0x1000;
+const FWSM_ULP_DONE: u64 = 0x400;
+const TIPG_PCH: u64 = 0x00602008;
+const MDIC_READ_ID1: u64 = 0x08220000; // read register 2 of the PHY at address 1
 // MDIC: write PHY 1's control register (0) with autonegotiation on and
 // restarted (and power-down off), then bit 28 says it is done.
 const MDIC_AUTONEG: u64 = 0x04201200;
@@ -108,10 +147,25 @@ spec fn e1k_ok(e: &E1k) -> bool {
 
 /// Which family PCI id `vendor:device` is, or E1K_NONE.
 fn e1k_model(vendor: u64, device: u64) -> u64
-  ensures result <= E1K_IGB
+  ensures result <= E1K_PCH_LPT
 {
   if vendor != E1K_VENDOR {
     return E1K_NONE;
+  }
+  if device == 0x153A || device == 0x153B || device == 0x15A0 || device == 0x15A1 {
+    return E1K_PCH_LPT;               // I217-LM/V, I218-LM2/V2
+  }
+  if device == 0x155A || device == 0x1559 || device == 0x15A2 || device == 0x15A3
+    || device == 0x156F || device == 0x1570 || device == 0x15B7 || device == 0x15B8 || device == 0x15B9
+    || device == 0x15D7 || device == 0x15D8 || device == 0x15E3 || device == 0x15D6
+    || device == 0x15BD || device == 0x15BE || device == 0x15BB || device == 0x15BC
+    || device == 0x15DF || device == 0x15E0 || device == 0x15E1 || device == 0x15E2
+    || device == 0x0D4E || device == 0x0D4F || device == 0x0D4C || device == 0x0D4D || device == 0x0D53 || device == 0x0D55
+    || device == 0x15FB || device == 0x15FC || device == 0x15F9 || device == 0x15FA || device == 0x15F4 || device == 0x15F5
+    || device == 0x0DC5 || device == 0x0DC6 || device == 0x0DC7 || device == 0x0DC8
+    || device == 0x1A1E || device == 0x1A1F || device == 0x1A1C || device == 0x1A1D
+    || device == 0x550C || device == 0x550D {
+    return E1K_PCH;                   // I218-LM/V (LPT-LP, 3), I219 up to Alder and Raptor Lake
   }
   if device == 0x100E || device == 0x100C || device == 0x100F {
     return E1K_8254X;                 // 82540EM, 82544GC, 82545EM
@@ -218,6 +272,274 @@ fn e1k_eeprom(e: &mut E1k, w: u64) -> u64
   return 65536;
 }
 
+
+// ---- The PCH parts (E1K_PCH, E1K_PCH_LPT) ----
+// Their registers are the 8254x's, but the PHY is reached through the ME and
+// the chipset's SMBus and may be asleep (ultra-low-power mode) or on the
+// wrong bus, and a reset has to be done while holding the PHY semaphore.
+// The delays here are reads of PCI configuration space, which are port
+// accesses of about a microsecond each and do not touch the card (a read of
+// the card's own registers right after the reset hangs some of them).
+
+fn pch_r(r: &mut Mmio, o: u64) -> u64
+  requires mmio_len(r) == E1K_LEN && mmio_base(r) % 4096 == 0 && o % 4 == 0 && o + 4 <= E1K_LEN
+  ensures mmio_len(r) == E1K_LEN && mmio_base(r) == old(mmio_base(r)) && result <= 4294967295
+{
+  return cast[u64](mmio_read32(&mut r, o));
+}
+
+fn pch_w(r: &mut Mmio, o: u64, v: u64)
+  requires mmio_len(r) == E1K_LEN && mmio_base(r) % 4096 == 0 && o % 4 == 0 && o + 4 <= E1K_LEN && v <= 4294967295
+  ensures mmio_len(r) == E1K_LEN && mmio_base(r) == old(mmio_base(r))
+{
+  mmio_write32(&mut r, o, cast[u32](v));
+}
+
+/// Waits at least `ms` milliseconds.
+fn pch_pause(p: &mut Pci, dev: u64, ms: u64)
+  requires pci_ok(p) && dev < PCI_NONE && ms <= 3000
+  ensures pci_ok(p)
+{
+  let mut n = 0;
+  while n < ms * 1500
+    invariant pci_ok(p) && ms <= 3000
+  {
+    pci_read(&mut p, dev, PCI_ID);
+    n = n + 1;
+  }
+}
+
+/// Takes the PHY semaphore (EXTCNF bit 5), waiting up to 200 ms for the ME
+/// to let go of it; false if it could not.
+fn pch_lock(r: &mut Mmio, p: &mut Pci, dev: u64) -> bool
+  requires mmio_len(r) == E1K_LEN && mmio_base(r) % 4096 == 0 && pci_ok(p) && dev < PCI_NONE
+  ensures mmio_len(r) == E1K_LEN && mmio_base(r) == old(mmio_base(r)) && pci_ok(p)
+{
+  let mut n = 0;
+  while n < 200
+    invariant n <= 200 && mmio_len(r) == E1K_LEN && mmio_base(r) == old(mmio_base(r)) && pci_ok(p)
+  {
+    let x = pch_r(&mut r, E1K_EXTCNF);
+    if x / 32 % 2 == 0 {
+      pch_w(&mut r, E1K_EXTCNF, x + 32);
+      if pch_r(&mut r, E1K_EXTCNF) / 32 % 2 == 1 {
+        return true;
+      }
+    }
+    pch_pause(&mut p, dev, 1);
+    n = n + 1;
+  }
+  return false;
+}
+
+fn pch_unlock(r: &mut Mmio)
+  requires mmio_len(r) == E1K_LEN && mmio_base(r) % 4096 == 0
+  ensures mmio_len(r) == E1K_LEN && mmio_base(r) == old(mmio_base(r))
+{
+  let x = pch_r(&mut r, E1K_EXTCNF);
+  if x / 32 % 2 == 1 {
+    pch_w(&mut r, E1K_EXTCNF, x - 32);
+  }
+}
+
+/// Whether the PHY answers: its identifier register reads as something
+/// other than 0 and 0xFFFF.
+fn pch_phy_ok(r: &mut Mmio, p: &mut Pci, dev: u64) -> bool
+  requires mmio_len(r) == E1K_LEN && mmio_base(r) % 4096 == 0 && pci_ok(p) && dev < PCI_NONE
+  ensures mmio_len(r) == E1K_LEN && mmio_base(r) == old(mmio_base(r)) && pci_ok(p)
+{
+  if !pch_lock(&mut r, &mut p, dev) {
+    return false;
+  }
+  pch_w(&mut r, E1K_MDIC, MDIC_READ_ID1);
+  let mut ok = false;
+  let mut n = 0;
+  while n < 100
+    invariant n <= 100 && mmio_len(r) == E1K_LEN && mmio_base(r) == old(mmio_base(r)) && pci_ok(p)
+  {
+    let m = pch_r(&mut r, E1K_MDIC);
+    if m / MDIC_READY % 2 == 1 {
+      ok = m / 1073741824 % 2 == 0 && m % 65536 != 0 && m % 65536 != 65535;
+      n = 100;
+    } else {
+      pch_pause(&mut p, dev, 1);
+      n = n + 1;
+    }
+  }
+  pch_unlock(&mut r);
+  return ok;
+}
+
+/// Toggles the LANPHYPC pin, which power-cycles the PHY and brings it out of
+/// SMBus mode (and ultra-low-power mode), then waits for it to settle.
+fn pch_toggle_phy(r: &mut Mmio, p: &mut Pci, dev: u64)
+  requires mmio_len(r) == E1K_LEN && mmio_base(r) % 4096 == 0 && pci_ok(p) && dev < PCI_NONE
+  ensures mmio_len(r) == E1K_LEN && mmio_base(r) == old(mmio_base(r)) && pci_ok(p)
+{
+  let f = pch_r(&mut r, E1K_FEXTNVM3);
+  pch_w(&mut r, E1K_FEXTNVM3, ((f & 0xF3FFFFFF) | 0x08000000) & 0xFFFFFFFF);   // PHY config counter: 50 ms
+  let c = pch_r(&mut r, E1K_CTRL);
+  let mut v = c;
+  if v / CTRL_LANPHYPC_OVR % 2 == 0 {
+    v = v + CTRL_LANPHYPC_OVR;
+  }
+  if v / CTRL_LANPHYPC_VAL % 2 == 1 {
+    v = v - CTRL_LANPHYPC_VAL;
+  }
+  pch_w(&mut r, E1K_CTRL, v);
+  pch_pause(&mut p, dev, 1);
+  pch_w(&mut r, E1K_CTRL, v - CTRL_LANPHYPC_OVR);
+  // The power cycle is done when LPCD sets; wait for it up to 120 ms, then 30 ms more.
+  let mut n = 0;
+  while n < 24 && pch_r(&mut r, E1K_CTRL_EXT) / CTRL_EXT_LPCD % 2 == 0
+    invariant n <= 24 && mmio_len(r) == E1K_LEN && mmio_base(r) == old(mmio_base(r)) && pci_ok(p)
+  {
+    pch_pause(&mut p, dev, 5);
+    n = n + 1;
+  }
+  pch_pause(&mut p, dev, 30);
+}
+
+/// Brings an I217-I219 to the state `e1k_new` expects: leaves the
+/// ultra-low-power state, makes the PHY reachable, and resets the whole
+/// chip (MAC and PHY) the way e1000e does. `lpt_only` is E1K_PCH_LPT.
+fn e1k_pch_reset(regs: Mmio, p: &mut Pci, dev: u64, lpt_only: bool) -> Mmio
+  requires mmio_len(regs) == E1K_LEN && mmio_base(regs) % 4096 == 0 && pci_ok(p) && dev < PCI_NONE
+  ensures mmio_len(result) == E1K_LEN && mmio_base(result) == mmio_base(regs) && pci_ok(p)
+{
+  let mut r = regs;
+  let fwsm = pch_r(&mut r, E1K_FWSM);
+  let me = fwsm / 32768 % 2 == 1;
+  // With the ME running, ask it to take the PHY out of ULP and wait for it
+  // (up to 2.5 s), as e1000_disable_ulp_lpt_lp does.
+  if me && !lpt_only {
+    let h = pch_r(&mut r, E1K_H2ME);
+    let mut v = h;
+    if v / H2ME_ULP % 2 == 1 {
+      v = v - H2ME_ULP;
+    }
+    if v / H2ME_ENFORCE % 2 == 0 {
+      v = v + H2ME_ENFORCE;
+    }
+    pch_w(&mut r, E1K_H2ME, v);
+    let mut n = 0;
+    while n < 250 && pch_r(&mut r, E1K_FWSM) / FWSM_ULP_DONE % 2 == 1
+      invariant n <= 250 && mmio_len(r) == E1K_LEN && mmio_base(r) == mmio_base(regs) && pci_ok(p)
+    {
+      pch_pause(&mut p, dev, 10);
+      n = n + 1;
+    }
+    let h2 = pch_r(&mut r, E1K_H2ME);
+    if h2 / H2ME_ENFORCE % 2 == 1 {
+      pch_w(&mut r, E1K_H2ME, h2 - H2ME_ENFORCE);
+    }
+  }
+  // The reset allowed to touch the PHY (bit 6 of FWSM), which the ME may forbid.
+  let phy_reset = fwsm / 64 % 2 == 1;
+  if !pch_phy_ok(&mut r, &mut p, dev) {
+    // Force the MAC onto SMBus, which is where the PHY may be; if it is
+    // still silent, power-cycle it.
+    let ce = pch_r(&mut r, E1K_CTRL_EXT);
+    if ce / CTRL_EXT_FORCE_SMBUS % 2 == 0 {
+      pch_w(&mut r, E1K_CTRL_EXT, ce + CTRL_EXT_FORCE_SMBUS);
+    }
+    pch_pause(&mut p, dev, 50);
+    if !pch_phy_ok(&mut r, &mut p, dev) && phy_reset {
+      pch_toggle_phy(&mut r, &mut p, dev);
+      if !pch_phy_ok(&mut r, &mut p, dev) {
+        let ce2 = pch_r(&mut r, E1K_CTRL_EXT);
+        if ce2 / CTRL_EXT_FORCE_SMBUS % 2 == 1 {
+          pch_w(&mut r, E1K_CTRL_EXT, ce2 - CTRL_EXT_FORCE_SMBUS);
+        }
+      }
+    }
+  }
+  // Stop DMA, interrupts and the units, then the global reset with the
+  // PHY semaphore held.
+  let c0 = pch_r(&mut r, E1K_CTRL);
+  if c0 / CTRL_GIO_MASTER_OFF % 2 == 0 {
+    pch_w(&mut r, E1K_CTRL, c0 + CTRL_GIO_MASTER_OFF);
+  }
+  let mut n = 0;
+  while n < 100 && pch_r(&mut r, E1K_STATUS) / STATUS_GIO_MASTER % 2 == 1
+    invariant n <= 100 && mmio_len(r) == E1K_LEN && mmio_base(r) == mmio_base(regs) && pci_ok(p)
+  {
+    pch_pause(&mut p, dev, 1);
+    n = n + 1;
+  }
+  pch_w(&mut r, E1K_IMC, 4294967295);
+  pch_w(&mut r, E1K_RCTL, 0);
+  pch_w(&mut r, E1K_TCTL, 8);
+  pch_pause(&mut p, dev, 10);
+  let mut c = pch_r(&mut r, E1K_CTRL);
+  if phy_reset && c / CTRL_PHY_RST % 2 == 0 {
+    c = c + CTRL_PHY_RST;
+  }
+  if c / CTRL_RST % 2 == 0 {
+    c = c + CTRL_RST;
+  }
+  pch_lock(&mut r, &mut p, dev);
+  pch_w(&mut r, E1K_CTRL, c);
+  pch_pause(&mut p, dev, 20);
+  // The chip is back when the LAN has initialized itself (STATUS bit 9).
+  let mut k = 0;
+  while k < 100 && pch_r(&mut r, E1K_STATUS) / STATUS_LAN_INIT % 2 == 0
+    invariant k <= 100 && mmio_len(r) == E1K_LEN && mmio_base(r) == mmio_base(regs) && pci_ok(p)
+  {
+    pch_pause(&mut p, dev, 1);
+    k = k + 1;
+  }
+  pch_unlock(&mut r);
+  let st = pch_r(&mut r, E1K_STATUS);
+  if st / STATUS_PHYRA % 2 == 1 {
+    pch_w(&mut r, E1K_STATUS, st - STATUS_PHYRA);
+  }
+  pch_w(&mut r, E1K_IMC, 4294967295);
+  pch_r(&mut r, E1K_ICR);
+  let kb = pch_r(&mut r, E1K_KABGTXD);
+  pch_w(&mut r, E1K_KABGTXD, (kb | 0x50000) & 0xFFFFFFFF);
+  return r;
+}
+
+/// The errata bits and write-back policy e1000e sets in
+/// e1000_initialize_hw_bits_ich8lan and e1000_init_hw_ich8lan.
+fn e1k_pch_bits(e: &mut E1k)
+  requires e1k_ok(e)
+  ensures e1k_ok(e) && e.live == old(e.live) && e.irq == old(e.irq) && e.rx_next == old(e.rx_next) && e.tx_next == old(e.tx_next)
+  ensures e.model == old(e.model) && e.rq == old(e.rq) && e.tq == old(e.tq)
+{
+  // CTRL_EXT: bit 22, PHY power-down when idle, relaxed ordering off.
+  let ce = e1k_read(&mut e, E1K_CTRL_EXT);
+  e1k_write(&mut e, E1K_CTRL_EXT, (ce | 0x520000) & 0xFFFFFFFF);
+  // Both transmit queues: bit 22, full write-back (granularity in
+  // descriptors, threshold 1) and a prefetch threshold of 31.
+  let t0 = e1k_read(&mut e, E1K_TXDCTL0);
+  e1k_write(&mut e, E1K_TXDCTL0, ((((t0 | 0x400000) & 0xFFC0FFC0) | 0x0101001F)) & 0xFFFFFFFF);
+  let t1 = e1k_read(&mut e, E1K_TXDCTL1);
+  e1k_write(&mut e, E1K_TXDCTL1, ((((t1 | 0x400000) & 0xFFC0FFC0) | 0x0101001F)) & 0xFFFFFFFF);
+  // Transmit arbitration: bits 23, 24, 26 and 27 of queue 0; bits 24, 26
+  // and 30 of queue 1, and bit 28 unless multiple requests are enabled.
+  let a0 = e1k_read(&mut e, E1K_TARC0);
+  e1k_write(&mut e, E1K_TARC0, (a0 | 0x0D800000) & 0xFFFFFFFF);
+  let a1 = e1k_read(&mut e, E1K_TARC1);
+  let tc = e1k_read(&mut e, E1K_TCTL);
+  let mut b = a1 | 0x45000000;
+  if tc / 268435456 % 2 == 0 {
+    b = b | 0x10000000;
+  } else {
+    b = b & 0xEFFFFFFF;
+  }
+  e1k_write(&mut e, E1K_TARC1, b & 0xFFFFFFFF);
+  // No NFS filtering (it corrupts descriptors); ECC and memory error
+  // handling on, as for the Lynx Point and later.
+  let rf = e1k_read(&mut e, E1K_RFCTL);
+  e1k_write(&mut e, E1K_RFCTL, (rf | 0xC0) & 0xFFFFFFFF);
+  let eb = e1k_read(&mut e, E1K_PBECCSTS);
+  e1k_write(&mut e, E1K_PBECCSTS, (eb | 0x10000) & 0xFFFFFFFF);
+  let c = e1k_read(&mut e, E1K_CTRL);
+  e1k_write(&mut e, E1K_CTRL, (c | CTRL_MEHE) & 0xFFFFFFFF);
+}
+
 /// Resets the card (registers to their defaults, rings off).
 fn e1k_reset(e: &mut E1k) -> bool
   requires e1k_ok(e)
@@ -257,7 +579,8 @@ fn e1k_new(regs: Mmio, model: u64, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3
   let mut e = E1k { regs: regs, ring: dma_lend(r), rb0: dma_lend(b0), rb1: dma_lend(b1), rb2: dma_lend(b2),
     rb3: dma_lend(b3), tb: dma_lend(t), rx_next: 0, tx_next: 0, model: model, rq: rq, tq: tq, mac: 0, live: false, irq: false };
   let ra = dma_addr(e.ring);
-  if ra > ADDR_LIMIT - 4096 || !e1k_reset(&mut e) {
+  // (An I217-I219 was reset by e1k_pch_reset.)
+  if ra > ADDR_LIMIT - 4096 || (model < E1K_PCH && !e1k_reset(&mut e)) {
     return e;
   }
   e1k_read(&mut e, E1K_ICR);           // clears anything pending
@@ -298,6 +621,9 @@ fn e1k_new(regs: Mmio, model: u64, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3
   // card loads them from its EEPROM), else read from the EEPROM directly.
   let mut lo = e1k_read(&mut e, E1K_RAL);
   let mut hi = e1k_read(&mut e, E1K_RAH);
+  if hi / RAH_AV % 2 == 0 && model >= E1K_PCH {
+    return e;                         // no EEPROM to read: the address lives in the flash the card loaded it from
+  }
   if hi / RAH_AV % 2 == 0 {
     let w0 = e1k_eeprom(&mut e, 0);
     let w1 = e1k_eeprom(&mut e, 1);
@@ -334,6 +660,9 @@ fn e1k_new(regs: Mmio, model: u64, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3
   }
   let rq0 = e.rq;
   let tq0 = e.tq;
+  if model >= E1K_PCH {
+    e1k_pch_bits(&mut e);
+  }
   e1k_write(&mut e, rq0 + Q_BAL, ra);
   e1k_write(&mut e, rq0 + Q_BAH, 0);
   e1k_write(&mut e, rq0 + Q_LEN, E1K_DESCS * 16);
@@ -354,7 +683,11 @@ fn e1k_new(regs: Mmio, model: u64, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3
   e1k_write(&mut e, tq0 + Q_LEN, E1K_DESCS * 16);
   e1k_write(&mut e, tq0 + Q_H, 0);
   e1k_write(&mut e, tq0 + Q_T, 0);
-  e1k_write(&mut e, E1K_TIPG, TIPG_STD);
+  if model >= E1K_PCH {
+    e1k_write(&mut e, E1K_TIPG, TIPG_PCH);
+  } else {
+    e1k_write(&mut e, E1K_TIPG, TIPG_STD);
+  }
   e1k_write(&mut e, E1K_TCTL, TCTL_ON);
   e.live = true;
   return e;
