@@ -94,6 +94,7 @@ fgetxattr03
 flistxattr01
 flistxattr02
 flistxattr03
+fork13
 fremovexattr01
 fremovexattr02
 fsetxattr01
