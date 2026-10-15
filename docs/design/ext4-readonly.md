@@ -1,6 +1,8 @@
 # Design: reading ext4
 
-Status: proposal. Nothing here is built yet.
+Status: stage 1 is built (`src/ext4.bastio`, `mount -t ext4`; `user/mext4.c` and
+`test/ext4img.py` test it). Stage 2 (a second block device) and the peer
+file system are not.
 
 ## Goal
 
@@ -65,7 +67,7 @@ the parser:
 
 | Stage | Source | What it adds |
 | --- | --- | --- |
-| 1 | an image that is a file (`vfs_read_at`) | `mount -t ext4 -o ro,loop`-style mount of an image on the boot disk or in tmpfs |
+| 1 | an image that is a file (`vfs_read_at`), on the disk or in memory, or a loop device bound to one | `mount -t ext4 IMAGE DIR` |
 | 2 | a second block device | needs `blk_find` to return a list; the same importer |
 
 Features it accepts: `extents`, `64bit`, `flex_bg`, `huge_file` (reads),
@@ -104,12 +106,14 @@ size other than 1, 2 or 4 KiB, instead of showing wrong data.
 The importer is Bastio, so memory safety is proved like the rest of the
 kernel: every read from the image goes through bounds-checked `Bytes`, and
 every loop over an image-controlled count (extent entries, directory
-entries, depth) has a bound taken from the constants above and a
-`decreases`/invariant, so a hostile image cannot make the kernel read out
-of bounds or loop forever. What is *not* proved: that the data shown is
+entries, depth) has a bound taken from the constants above, so a hostile image cannot make
+the kernel read out of bounds, and cannot make it loop longer than a fixed
+number of directory entries (`EX_ITER`). Bastio does not prove that a loop
+ends; the bounds are in the code. What is *not* proved: that the data shown is
 what Linux would show. That is checked by tests against `e2fsprogs` images
-(`test/ext4.sh`: build a tree with `mke2fs -d`, mount, and compare a
-listing and checksums with what the host made), and malformed images
+(`test/ext4img.py` builds a tree with `mke2fs -d` in three layouts, and
+`user/mext4.c` mounts each and compares every file, link and hole with what
+the host made), and malformed images
 (truncated, loops in the directory tree, extent depth bombs) must be
 refused with an error, not crash. The trusted base does not grow.
 

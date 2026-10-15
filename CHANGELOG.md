@@ -14,6 +14,10 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 What will be 0.3.0. It needs bastiolang 0.2.0.
 
+### Added
+
+- `mount -t ext4 IMAGE DIR` (also `ext2` and `ext3` images without a journal to replay) reads an ext4 image, a file anywhere (on the disk too) or a loop device, into a read-only mount on an empty in-memory directory (`src/ext4.bastio`, `docs/design/ext4-readonly.md`). Files, directories, symbolic links, hard links, device nodes, pipes, modes, owners and times are shown; extents and classic block maps are read; holes stay holes. It is a snapshot held in memory: at most 32768 nodes, paths up to 255 bytes and files up to 1 GiB (the mount fails with `ENOSPC`, `ENAMETOOLONG` or `EFBIG` otherwise), and an image with a journal to replay, inline data or encryption is refused with `EINVAL`. `test/ext4img.py` makes images with `mke2fs -d` and `user/mext4.c` checks them in `make test`.
+
 ### Boot
 
 - On Intel 7-, 8- and 9-series chipsets the xHCI driver routes the USB 2 ports from the EHCI controller to the xHCI controller (and enables its SuperSpeed ports) before starting it, so keyboards and sticks behind those ports are found. Untested on hardware: QEMU's xHCI has no such registers.

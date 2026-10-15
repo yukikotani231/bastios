@@ -1912,6 +1912,25 @@ if ok:
 qemu.kill(); qemu.wait()
 print(("ok  " if ok else "FAIL"), "after the concurrent writers' power cuts mpc finds every file whole")
 fails += not ok
+# Mounting ext4 (src/ext4.bastio): images made on this machine with mke2fs
+# -d (test/ext4img.py) sit on the disk, and user/mext4.c mounts each of
+# them, checks every file, link, hole and refusal of a write, and unmounts.
+# Four damaged or unsupported images must be refused with EINVAL.
+img_dir = os.path.join(disk_dir.name, "ext4")
+if subprocess.run([sys.executable, "test/ext4img.py", img_dir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+    subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mext4=build/user/mext4.elf"]
+                   + [f"{n}={img_dir}/{f}.img" for n, f in (("e4", "e4"), ("e2", "e2"), ("e4k", "e4k"), ("bz", "bad-zero"), ("bs", "bad-short"), ("br", "bad-recover"), ("bi", "bad-inline"))], check=True)
+    qemu = boot(2, with_disk=True)
+    session("ext4", False, [
+        ("ash", b"", b"\n# "),
+        ("mkdir m; /disk/mext4 tree /disk/e4 m", b"mext4: clean", b"\n# "),
+        ("mkdir m; /disk/mext4 tree /disk/e2 m ext2", b"mext4: clean", b"\n# "),
+        ("mkdir m; /disk/mext4 tree /disk/e4k m", b"mext4: clean", b"\n# "),
+        ("for i in bz bs br bi; do mkdir m; /disk/mext4 refuse /disk/$i m; rmdir m; done", b"mext4: clean\r\nmext4: clean\r\nmext4: clean\r\nmext4: clean", b"\n# "),
+        ("exit", b"", b"bastios> "),
+    ], halt=True)
+else:
+    print("SKIP ext4: mke2fs is missing")
 # What a power cut inside disk_take_name leaves: a file under the name its
 # hard link still has (disk/b), and a link naming a free entry (disk/c).
 # The mount drops both links; the file stays, and the image is clean. The
