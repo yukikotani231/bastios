@@ -407,7 +407,13 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     sig = SIGBUS;
   }
   let addr = pget(s.k.procs, p, reg_word(R_FAULT));
-  if fault_caught(&mut s.k, p, sig, addr) {
+  // The siginfo's si_code: ILL_ILLOPN (2) for a bad opcode, else the address
+  // is unmapped (SEGV_MAPERR, BUS_ADRALN and TRAP_BRKPT are all 1).
+  let mut code = 1;
+  if sig == SIGILL {
+    code = 2;
+  }
+  if fault_caught(&mut s.k, p, sig, addr, code) {
     return (p + 1) % NPROC;
   }
   puts(&mut s.con, "\r\n[pid ");
