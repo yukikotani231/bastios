@@ -518,6 +518,32 @@ fn path_exists(k: &mut Kernel, pid: u64, dirfd: u64, va: u64) -> u64
 /// pread64 / pwrite64 on a file: at offset `off`, leaving the file offset
 /// where it was. Linux's order of errors: a negative offset, a bad
 /// descriptor, one that cannot seek, a directory.
+/// The rest of a pwrite that stopped short for the disk (src/linux.bastio
+/// leaves F_WDONE odd): after driving the disk's queue the missing count is
+/// written, up to eight times. Returns the count written, short only if the
+/// disk never catches up.
+fn pwrite_finish(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, row: u64, va: u64, n: u64, off: u64, first: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC && row < FD_ROWS && first <= n
+  ensures kok(k) && con_ok(con) && result <= n
+{
+  let mut r = first;
+  let mut tries = 0;
+  while r > 0 && r < n && pget(k.procs, pid, F_WDONE) % 2 == 1 && tries < 8 && off <= 0xFFFFFFFFFFFFFFFF - r && va <= 0xFFFFFFFFFFFFFFFF - r
+    invariant kok(k) && con_ok(con) && r <= n
+  {
+    pset(&mut k.procs, pid, F_WDONE, 0);
+    disk_drain(&mut k.fs.disk);
+    vfs_seek(&mut k.fs, row, off + r);
+    let more = lx_write_fd(&mut con, &mut k, pid, fd, va + r, n - r);
+    if more > n - r {
+      return r;
+    }
+    r = r + more;
+    tries = tries + 1;
+  }
+  return r;
+}
+
 fn lx_pio(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, va: u64, n: u64, off: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
   ensures kok(k) && con_ok(con)
@@ -573,7 +599,15 @@ fn lx_pio(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, va: u64
   }
   let mut r = 0;
   if write {
+    pset(&mut k.procs, pid, F_WDONE, 0);
     r = lx_write_fd(&mut con, &mut k, pid, fd, va, n);
+    // A pwrite is not restarted for the disk as write(2) is (lx_write_call):
+    // a count that stopped when old blocks were missing is finished here, so a
+    // program writing a database page never sees half of it written.
+    if r <= n {
+      r = pwrite_finish(&mut con, &mut k, pid, fd, d.x, va, n, off, r);
+    }
+    pset(&mut k.procs, pid, F_WDONE, 0);
   } else {
     r = lx_file_read(&mut k, pid, d.x, va, n);
   }

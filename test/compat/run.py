@@ -696,6 +696,7 @@ def main():
     ap.add_argument("--debian-disk", help="the Debian disk (a glibc root file system) for debian.txt")
     ap.add_argument("--node-disk", help="the Node disk (the root of the node:alpine image) for node.txt")
     ap.add_argument("--go-disk", help="the Go disk (the Go toolchain of the golang image) for go.txt")
+    ap.add_argument("--server-disk", help="the server disk (the roots of the nginx, redis and postgres images) for server.txt")
     ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
@@ -718,6 +719,7 @@ def main():
     debian = load_applets(os.path.join(HERE, "debian.txt"))
     node = load_applets(os.path.join(HERE, "node.txt"))
     go = load_applets(os.path.join(HERE, "go.txt"))
+    server = load_applets(os.path.join(HERE, "server.txt"))
     rust = load_applets(os.path.join(HERE, "rust.txt"))
     tty = load_tty(os.path.join(HERE, "tty.txt"))
     alpine_tty = load_tty(os.path.join(HERE, "alpine_tty.txt"))
@@ -829,6 +831,13 @@ def main():
         disk = os.path.join(args.out, "go-run.img")
         shutil.copyfile(args.go_disk, disk)
         lanes.append((disk, [("go", "Go toolchain", applets_lane(go, 600))], "1G"))
+    if args.server_disk:
+        # nginx, redis and PostgreSQL, from the roots of their official
+        # images: they unpack onto the disk and write it (a database, say),
+        # so on a copy; PostgreSQL's shared buffers want the memory.
+        disk = os.path.join(args.out, "server-run.img")
+        shutil.copyfile(args.server_disk, disk)
+        lanes.append((disk, [("server", "servers (nginx, redis, PostgreSQL)", applets_lane(server, 900))], "1G"))
     if args.rust_disk:
         # rustc is a large dynamic program, and the cases unpack a root
         # of about a gigabyte onto the disk: a copy.
@@ -851,7 +860,7 @@ def main():
         log.close()
         web.shutdown()
         shutil.rmtree(scratch, ignore_errors=True)
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "rust"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "rust", "server"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]

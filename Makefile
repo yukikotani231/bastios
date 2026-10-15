@@ -562,7 +562,11 @@ build/compat/dropbear: | build/compat/src
 	cp build/compat/src/dropbear/dbclient build/compat/src/dropbear/dropbearkey build/compat/
 	cp build/compat/src/dropbear/dropbear $@
 
-build/compat/ssh_host_key build/compat/ssh_authorized_keys &: build/compat/dropbear
+# dbclient is built with the server (above).
+build/compat/dbclient: build/compat/dropbear
+	test -x $@
+
+build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/ssh_id &: build/compat/dropbear
 	rm -f build/compat/ssh_host_key build/compat/ssh_id
 	build/compat/dropbearkey -t ed25519 -f build/compat/ssh_host_key >/dev/null
 	build/compat/dropbearkey -t ed25519 -f build/compat/ssh_id | grep '^ssh-' > build/compat/ssh_authorized_keys
@@ -764,10 +768,10 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # over SSH.
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh \
     build/compat/bastioc1 build/compat/z3 build/compat/tcc \
-    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar tools/ocipull.sh | build/compat
+    build/compat/dropbear build/compat/dbclient build/compat/ssh_id build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar tools/ocipull.sh | build/compat
 	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) $(ALPINE_X86_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) \
 	  --extra "$$(test/compat/bastiotools.sh build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)) \
-	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar tools/ocipull.sh"
+	  build/compat/dropbear build/compat/dbclient build/compat/ssh_id build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar tools/ocipull.sh"
 
 # Debian on BastiOS, on a fifth disk (test/compat/debiandisk.py) for
 # test/compat/debian.txt: Debian's root file system, whose programs are
@@ -801,12 +805,15 @@ build/compat/go.img: test/compat/godisk.py test/compat/alpinedisk.py test/compat
 build/compat/rust.img: test/compat/rustdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
 	test/compat/rustdisk.py $@ $(RUST_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
 
-compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/rust.img
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --rust-disk build/compat/rust.img --out build/compat $(COMPAT_PROGS)
+build/compat/server.img: test/compat/serverdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/images.mk
+	test/compat/serverdisk.py $@ --cache $(ALPINE_CACHE) $(NGINX_IMAGE) $(REDIS_IMAGE) $(POSTGRES_IMAGE)
+
+compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/rust.img build/compat/server.img
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --rust-disk build/compat/rust.img --server-disk build/compat/server.img --out build/compat $(COMPAT_PROGS)
 
 # Records which checks pass now, so `make compat` catches regressions.
-compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/rust.img
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --rust-disk build/compat/rust.img --out build/compat $(COMPAT_PROGS)
+compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/rust.img build/compat/server.img
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --rust-disk build/compat/rust.img --server-disk build/compat/server.img --out build/compat $(COMPAT_PROGS)
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)

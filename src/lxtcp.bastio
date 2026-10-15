@@ -150,6 +150,14 @@ fn lx_listen(k: &mut Kernel, pid: u64, fd: u64) -> u64
   }
   let t = tcp_listen(&mut k.nic, net_ns(k, pid), tk.port);    // port 0: an ephemeral one
   if t >= TCBS {
+    if tk.port != 0 && ofd_v6(k, tk.h) {
+      // An AF_INET6 listener on a port an IPv4 one holds (a server that
+      // binds both, as Redis and nginx do with IPV6_V6ONLY): the stack
+      // has one port space and reaches ::1 through the IPv4 listener, so
+      // this one stays quiet: it never has a connection to accept.
+      of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, tk.port, TM_LISTEN));
+      return 0;
+    }
     return EADDRINUSE;
   }
   of_set(&mut k.ofd, tk.h, 2, t);
@@ -170,7 +178,10 @@ fn lx_accept(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, flags: u64
   if tk.mode != TM_LISTEN {
     return EINVAL;
   }
-  let c = tcp_accept(&mut k.nic, tk.t);
+  let mut c = TCBS;
+  if tk.t < TCBS {
+    c = tcp_accept(&mut k.nic, tk.t);
+  }
   if c >= TCBS {
     if tk.nb == 1 {
       return EAGAIN;
@@ -442,6 +453,32 @@ fn lx_tcp_name(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
   return sin_out(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, tk.t), tcp_peer_port(k.nic, tk.t), ofd_v6(k, tk.h));
 }
 
+/// SO_ERROR of a stream socket: ECONNREFUSED (111) for a connect that was
+/// started and then refused (reset before it was reported), which a
+/// nonblocking program reads after poll (libpq, say); else 0.
+fn tcp_sock_error(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= 111
+{
+  let tk = tk_look(k, pid, fd);
+  if tk.err == 0 && tk.mode == TM_CONN && tk.port == 0 && tk.t < TCBS && tcp_was_reset(k.nic, tk.t) {
+    return 111;
+  }
+  return 0;
+}
+
+/// The bytes a stream socket has received and not yet handed out (FIONREAD).
+fn tcp_waiting(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= TCP_RING
+{
+  let tk = tk_look(k, pid, fd);
+  if tk.err == 0 && tk.mode == TM_CONN && tk.t < TCBS {
+    return tcp_pending(k.nic, tk.t);
+  }
+  return 0;
+}
+
 /// What a poll on a stream socket finds now: a listener is readable when a
 /// connection is waiting to be accepted, a connection when bytes or the
 /// end have arrived, and writable while its send buffer has room.
@@ -460,6 +497,9 @@ fn tcp_poll_bits(k: &Kernel, pid: u64, fd: u64) -> u64
     Nic::Up(n) => {
       if tk.rd == 1 && tk.mode == TM_CONN {
         return tcb_poll_bits(n, tk.t, false) | POLLIN | POLLRDHUP;
+      }
+      if tk.mode == TM_LISTEN && tk.t >= TCBS {
+        return 0;                           // a quiet IPv6 listener (lx_listen)
       }
       return tcb_poll_bits(n, tk.t, tk.mode == TM_LISTEN);
     },

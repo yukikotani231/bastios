@@ -118,6 +118,32 @@ $ echo '{"a":[1,2,{"b":3}]}' | bb chroot /disk/a /usr/bin/jq -M -c '.a[2].b, (.a
 $ bb chroot /disk/a /bin/sh -c 'mkdir -p /root/s/d && echo hi > /root/s/d/f && rsync -a /root/s/ /root/t/ && cat /root/t/d/f; rm -rf /root/s /root/t'
 hi
 
+== sshd: a Dropbear server inside the Alpine root takes a key login
+$ bb mkdir -p /disk/a/usr/local/sbin /disk/a/root/.ssh /disk/a/etc/dropbear && bb cp /disk/dropbear /disk/dbclient /disk/a/usr/local/sbin/ && bb cp /disk/ssh_host_key /disk/a/etc/dropbear/dropbear_ed25519_host_key && bb cp /disk/ssh_id /disk/a/root/.ssh/id_dropbear && bb cp /disk/ssh_authorized_keys /disk/a/root/.ssh/authorized_keys && bb chmod 700 /disk/a/root/.ssh && bb chmod 600 /disk/a/root/.ssh/*; (bb chroot /disk/a /usr/local/sbin/dropbear -F -s -p 2222 -P /run/db.pid > /disk/a/tmp/db.log 2>&1 &); bb sleep 1; bb chroot /disk/a /usr/local/sbin/dbclient -y -y -i /root/.ssh/id_dropbear -p 2222 root@127.0.0.1 'echo logged in as $(id -u)' 2>/dev/null
+logged in as 0
+
+== rsync over ssh: push a tree, with its modes, times and links
+$ bb chroot /disk/a /bin/sh -c 'mkdir -p /root/src/d/e && echo one > /root/src/a && seq 1 20000 > /root/src/d/big && echo deep > /root/src/d/e/f && ln -s a /root/src/link && chmod 640 /root/src/a && touch -d @1700000000 /root/src/a && rsync -a -e "/usr/local/sbin/dbclient -y -y -i /root/.ssh/id_dropbear -p 2222" /root/src/ root@127.0.0.1:/root/dst/ 2>/dev/null; echo status $?; stat -c "%a %Y" /root/dst/a; readlink /root/dst/link; diff -r /root/src /root/dst && echo same'
+status 0
+640 1700000000
+a
+same
+
+== rsync over ssh: only the changes cross
+$ bb chroot /disk/a /bin/sh -c 'echo more >> /root/src/a; rsync -a --stats -e "/usr/local/sbin/dbclient -y -y -i /root/.ssh/id_dropbear -p 2222" /root/src/ root@127.0.0.1:/root/dst/ 2>/dev/null | grep "Number of regular files transferred"; diff -r /root/src /root/dst && echo same'
+Number of regular files transferred: 1
+same
+
+== rsync over ssh: pull a tree back, deleting what the source no longer has
+$ bb chroot /disk/a /bin/sh -c 'rm /root/src/d/e/f; mkdir -p /root/pull/d/e && echo stale > /root/pull/d/e/f; rsync -a --delete -e "/usr/local/sbin/dbclient -y -y -i /root/.ssh/id_dropbear -p 2222" root@127.0.0.1:/root/src/ /root/pull/ 2>/dev/null; echo status $?; ls /root/pull/d/e | wc -l; diff -r /root/src /root/pull && echo same'
+status 0
+0
+same
+
+== sshd: stop the server, clean up
+$ bb kill $(bb cat /disk/a/run/db.pid); bb sleep 1; bb rm -rf /disk/a/root/src /disk/a/root/dst /disk/a/root/pull /disk/a/root/.ssh /disk/a/etc/dropbear /disk/a/usr/local/sbin; bb grep -c 'Pubkey auth succeeded' /disk/a/tmp/db.log; bb rm -f /disk/a/tmp/db.log
+4
+
 == openssl: a digest and random bytes
 $ bb chroot /disk/a /bin/sh -c 'echo abc | openssl dgst -sha256; openssl rand -hex 4 | wc -c'
 SHA2-256(stdin)= edeaaff3f1774ad2888673770c6d64097e391bc362d7d6fb34982ddf0efd18cb

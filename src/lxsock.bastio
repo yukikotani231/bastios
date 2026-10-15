@@ -774,6 +774,9 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
       v = 1;                                // SOCK_STREAM
     }
   }
+  if level == SOL_SOCKET && name == SO_ERROR && is_tcp(k, pid, fd) {
+    v = tcp_sock_error(k, pid, fd);        // a nonblocking connect the peer refused
+  }
   if level == SOL_SOCKET && (name == SO_SNDBUF || name == SO_RCVBUF) {
     v = 4096;                               // a unix channel; a TCP buffer is as big
   }

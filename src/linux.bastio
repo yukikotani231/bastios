@@ -1079,6 +1079,12 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     let r = lx_fcntl(&mut k, pid, fd, F_SETFD, on);
     return r;
   }
+  if req == FIONREAD && d.kind == K_SOCK && is_tcp(k, pid, fd) {
+    // The bytes waiting in a stream socket's receive buffer, as an int
+    // (nginx asks while it reads a proxied response).
+    xfer_u64(&mut k.fs.xfer, 0, tcp_waiting(k, pid, fd));
+    return lx_put_out(&mut k, pid, arg, 4);
+  }
   if req == FIONREAD && (d.kind == K_PIPE_R || d.kind == K_PIPE_W) {
     // The bytes waiting in the pipe, as an int.
     xfer_u64(&mut k.fs.xfer, 0, smaller(pi_get(k.pipes, d.x, 1), PIPE_CAP));
@@ -1602,13 +1608,17 @@ fn line_take(l: &mut Buf, t: u64)
 
 /// read from the file open on native row `row`: up to READ_MAX bytes, a
 /// transfer buffer at a time, so a regular file is not read short (as
-/// programs expect of one) unless it ends or the disk must be waited for.
+/// programs expect of one) unless it ends. When a block is not cached yet
+/// the whole call waits for the disk and runs again from its first byte
+/// (the offset goes back), as a short read would break a program that
+/// reads a database page and finds it half there.
 fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && row < FD_ROWS
   ensures kok(k)
   ensures lx_count_or_fail(result, n)
 {
   let want = smaller(n, READ_MAX);
+  let start = vfs_offset(k.fs, row);
   let mut done = 0;
   while done < want
     invariant done <= want && want <= READ_MAX && kok(k)
@@ -1618,9 +1628,7 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
       return EBADF;
     }
     if got == VFS_MISS {
-      if done > 0 {
-        return done;                        // what came so far; the rest waits
-      }
+      vfs_seek(&mut k.fs, row, start);      // the bytes copied so far are read again
       return DISK_RETRY;                    // sleep until the disk catches up
     }
     if va > 0xFFFFFFFFFFFFFFFF - READ_MAX {
@@ -1879,6 +1887,7 @@ fn file_readv(k: &mut Kernel, pid: u64, row: u64, iov: u64, cnt: u64) -> u64
   if iov > USER_BASE + USER_SIZE {
     return EFAULT;
   }
+  let first = vfs_offset(k.fs, row);
   let mut total = 0;
   let mut i = 0;
   while i < cnt
@@ -1893,6 +1902,10 @@ fn file_readv(k: &mut Kernel, pid: u64, row: u64, iov: u64, cnt: u64) -> u64
       return EFAULT;
     }
     let r = lx_file_read(&mut k, pid, row, base.v, size.v);
+    if r == DISK_RETRY && total > 0 {
+      vfs_seek(&mut k.fs, row, first);      // the whole call waits for the disk and runs again
+      return r;
+    }
     if r > USER_SIZE {
       if total > 0 {
         return total;
