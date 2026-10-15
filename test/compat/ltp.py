@@ -37,6 +37,9 @@ from run import Guest, NOTE, esc, syscall_names  # noqa: E402
 HERE = os.path.dirname(os.path.abspath(__file__))
 BATCH = 63              # programs per disk image (the disk holds 64 files, one is kconfig)
 TFAIL, TBROK, TWARN, TCONF = 1, 2, 4, 32
+# Tests that keep going until their LTP runtime (600 s * LTP_RUNTIME_MUL = 60 s)
+# is spent, and then pass: they get that much more time before they count as hung.
+RUNS_OUT = {"fork13"}
 WAITED = 20             # seconds: a failing test this slow was waiting out a timeout
 # LTP's result lines: "file.c:12: TFAIL: why", or from tests on its old
 # library, "name 1 TFAIL : file.c:12: why".
@@ -175,7 +178,7 @@ def run_batch(args, group, progs, work, log, idle=False):
             cmd = " ".join(shlex.quote(a) for a in ["/disk/" + argv[0]] + argv[1:])
             t0 = time.time()
             text, status = g.run(f"cd /disk; PATH=/disk:/bin TMPDIR=/tmp KCONFIG_PATH=/disk/kconfig LTP_DEV_FS_TYPE=tmpfs LTP_COLORIZE_OUTPUT=0 LTP_RUNTIME_MUL=0.1 {cmd}; "
-                                 "echo @@end $?", args.timeout)
+                                 "echo @@end $?", args.timeout + (90 if tag in RUNS_OUT else 0))
             results.append(record(tag, text, status))
             results[-1]["secs"] = round(time.time() - t0, 1)
     except SystemExit as e:
