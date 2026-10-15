@@ -19,6 +19,7 @@ BastiOS is a kernel written in [Bastio](https://github.com/yukikotani231/bastiol
 | --- | --- |
 | [Architecture](architecture.md) | The big picture: boot, memory, processes, the scheduler, system calls, file systems, the network, and what each proof guarantees |
 | [Trusted base](trusted-base.md) | What is trusted instead of proved, file by file, and how that list is kept from growing unnoticed |
+| [Proof coverage](proof-coverage.md) | Which kernel functions state what they promise, which only what they need, and what to specify next |
 | [Linux programs](linux.md) | How Linux ELF programs are loaded, which system calls exist, container runtimes, overlay mounts, `ptrace`, network namespaces |
 | [Users and permissions](security.md) | The security model, what is enforced, and the known gaps |
 | [Performance](performance.md) | Measurements against Linux on the same emulated machine, and where the time goes |
