@@ -322,6 +322,7 @@ fn ux_look(k: &Kernel, pid: u64, fd: u64) -> Ux
   ensures result.err == 0 && result.mode == UM_DGRAM ==> (result.x % UX_S <= UX_LIS && result.x / UX_S % UX_S <= UX_LIS && result.dg)
   ensures result.err == 0 && result.mode == UM_CONN ==> result.x < UX_N * UX_N
   ensures result.err == 0 && (result.mode == UM_BOUND || result.mode == UM_LISTEN) ==> result.x < UX_LIS
+  ensures result.err == 0 || result.err >= 0x8000000000000000
 {
   let v = fd_get(k.lxfd, pid, fd) % FD_CLOEXEC;
   if v == 0 {
@@ -501,6 +502,7 @@ fn ux_close(k: &mut Kernel, x: u64, w: u64) -> u64
 fn ux_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_fd_or_fail(result)
 {
   if (kind % 16 != SOCK_STREAM && kind % 16 != SOCK_DGRAM) || proto != 0 {
     return EPROTONOSUPPORT;
@@ -1151,6 +1153,7 @@ fn sun_out(k: &mut Kernel, pid: u64, va: u64, lenp: u64) -> u64
 fn ux_send(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, addr: u64, alen: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   return ux_send_from(&mut k, pid, fd, va, n, dontwait, addr, alen, false);
 }
@@ -1174,6 +1177,7 @@ fn ux_send_xfer(k: &mut Kernel, pid: u64, fd: u64, n: u64) -> u64
 fn ux_send_from(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, addr: u64, alen: u64, xf: bool) -> u64
   requires kok(k) && pid < NPROC && (!xf || n <= XFER)
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let u = ux_look(k, pid, fd);
   if u.err != 0 {

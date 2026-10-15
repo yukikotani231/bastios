@@ -34,6 +34,7 @@ fn tm_word(nb: u64, port: u64, mode: u64) -> u64
 fn tk_look(k: &Kernel, pid: u64, fd: u64) -> Tk
   requires kok(k) && pid < NPROC
   ensures result.err == 0 ==> (result.h < OFD_N && result.t <= TCBS && result.nb <= 1 && result.port <= 65535 && result.mode <= TM_CONN && result.rd <= 1)
+  ensures result.err == 0 || result.err >= 0x8000000000000000
 {
   let none = Tk { err: ENOTSOCK, h: 0, t: 0, nb: 0, port: 0, mode: 0, rd: 0 };
   let v = fd_get(k.lxfd, pid, fd) % FD_CLOEXEC;
@@ -64,6 +65,7 @@ fn is_tcp(k: &Kernel, pid: u64, fd: u64) -> bool
 fn lx_tcp_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_fd_or_fail(result)
 {
   if proto != 0 && proto != IPPROTO_TCP {
     return EPROTONOSUPPORT;
@@ -269,6 +271,7 @@ fn lx_tcp_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u6
 fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, more: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let tk = tk_look(k, pid, fd);
   if tk.err != 0 {
@@ -292,7 +295,7 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, more: bool) 
   let mut total = got;
   let mut go = true;
   while go && buf < 0x800000000000 && total < n && total <= TCP_RING - XFER
-    invariant kok(k) && pid < NPROC && total <= TCP_RING
+    invariant kok(k) && pid < NPROC && total <= TCP_RING && total <= n
   {
     let c = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf + total, &mut k.fs.xfer, smaller(n - total, XFER));
     if c == NO_RESULT || c == 0 {
@@ -317,6 +320,7 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, more: bool) 
 fn tcp_send_xfer(k: &mut Kernel, pid: u64, fd: u64, n: u64, more: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let tk = tk_look(k, pid, fd);
   if tk.err != 0 {

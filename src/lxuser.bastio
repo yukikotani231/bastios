@@ -539,6 +539,7 @@ fn um_writer_ok(k: &Kernel, pid: u64, s: u64, t: u64) -> bool
 fn um_map_write(k: &mut Kernel, pid: u64, t: u64, g: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && t < NPROC && g < 2
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let s = usr_slot_of(k, t);
   if s >= USR_N || usr_get(k, s, UMW_CNT + g) != 0 {
@@ -646,6 +647,7 @@ fn um_map_write(k: &mut Kernel, pid: u64, t: u64, g: u64, va: u64, n: u64) -> u6
 fn um_setgroups_write(k: &mut Kernel, pid: u64, t: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && t < NPROC
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let s = usr_slot_of(k, t);
   if s >= USR_N {
@@ -684,6 +686,7 @@ fn um_setgroups_write(k: &mut Kernel, pid: u64, t: u64, va: u64, n: u64) -> u64
 fn um_write(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && d >= PROC_DEV + PSYS + SY_UM && d < PROC_DEV + PSYS + SY_UM + NPROC * UMF_N
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let w = um_which(d);
   if w == 2 {

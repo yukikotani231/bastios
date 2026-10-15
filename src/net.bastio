@@ -1426,6 +1426,7 @@ fn udp_bind(n: &mut Net, s: u64, port: u64) -> bool
 fn udp_sendto(n: &mut Net, s: u64, to: u64, port: u64, buf: &Bytes, size: u64) -> u64
   requires net_ok(n)
   ensures net_ok(n)
+  ensures result == NO_SOCK || result <= size
 {
   let ip = dst_ip(to);
   if !udp_is_open(n, s) || ip > IP_MAX || port == 0 || port > 65535
@@ -1475,6 +1476,7 @@ fn udp_sendto(n: &mut Net, s: u64, to: u64, port: u64, buf: &Bytes, size: u64) -
 fn udp_send_more(n: &mut Net, s: u64, to: u64, port: u64, buf: &Bytes, size: u64, more: bool) -> u64
   requires net_ok(n)
   ensures net_ok(n)
+  ensures result == NO_SOCK || result <= size
 {
   if !udp_is_open(n, s) || s >= SOCKS || size > blen(buf) {
     return NO_SOCK;
@@ -2141,6 +2143,7 @@ fn sock_sendto(c: &mut Nic, s: u64, ip: u64, port: u64, buf: &Bytes, size: u64) 
 fn sock_send_more(c: &mut Nic, s: u64, ip: u64, port: u64, buf: &Bytes, size: u64, more: bool) -> u64
   requires nic_ok(c)
   ensures nic_ok(c)
+  ensures result == NO_SOCK || result <= size
 {
   match c {
     Nic::None => {

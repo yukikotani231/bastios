@@ -112,6 +112,7 @@ fn ev_install(k: &mut Kernel, pid: u64, kind: u64, x: u64, w3: u64, cloexec: boo
 fn lx_eventfd(k: &mut Kernel, pid: u64, init: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_fd_or_fail(result)
 {
   if flags & !(EFD_SEMAPHORE | LO_NONBLOCK | LO_CLOEXEC) != 0 {
     return EINVAL;
@@ -224,6 +225,7 @@ fn sfd_one(k: &mut Kernel, pid: u64, s: u64, va: u64) -> bool
 fn sfd_read(k: &mut Kernel, pid: u64, h: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   if h >= OFD_N {
     return EBADF;
@@ -236,7 +238,7 @@ fn sfd_read(k: &mut Kernel, pid: u64, h: u64, va: u64, n: u64) -> u64
   let mut stop = false;
   let mut s = 1;
   while s <= NSIG && !stop
-    invariant 1 <= s && s <= NSIG + 1 && done <= SFD_INFO * NSIG && kok(k)
+    invariant 1 <= s && s <= NSIG + 1 && done <= SFD_INFO * NSIG && kok(k) && done <= n
   {
     let pend = pget(k.procs, pid, F_SIGPEND);
     if has_sig(pend & mask, s) && done + SFD_INFO <= SFD_INFO * NSIG && done + SFD_INFO <= n {
@@ -297,6 +299,7 @@ fn tfd_next(k: &Kernel, t: u64) -> u64
 fn ev_read(k: &mut Kernel, pid: u64, kind: u64, x: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   if n < 8 {
     return EINVAL;
@@ -344,6 +347,7 @@ fn ev_read(k: &mut Kernel, pid: u64, kind: u64, x: u64, va: u64, n: u64) -> u64
 fn lx_timerfd_create(k: &mut Kernel, pid: u64, clk: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_fd_or_fail(result)
 {
   if clk != CLOCK_REALTIME && clk != CLOCK_MONOTONIC && clk != CLOCK_BOOTTIME {
     return EINVAL;
@@ -491,6 +495,7 @@ fn ep_at(e: u64, j: u64, f: u64) -> u64
 fn lx_epoll_create(k: &mut Kernel, pid: u64, cloexec: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_fd_or_fail(result)
 {
   let mut e = 0;
   while e < EP_N && get(k.evt, EP_AT + e * EP_STRIDE) != 0

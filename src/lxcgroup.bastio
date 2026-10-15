@@ -1367,6 +1367,7 @@ fn cg_group_tasks(k: &Kernel, q: u64) -> u64
 fn cg_write_procs(k: &mut Kernel, pid: u64, s: u64, v: u64) -> u64
   requires kok(k) && pid < NPROC && s < CG_N
   ensures kok(k)
+  ensures result == 0 || result >= 0x8000000000000000
 {
   let mut q = pid;
   if v != 0 {
@@ -1422,6 +1423,7 @@ fn cg_kill(k: &mut Kernel, s: u64)
 fn cg_write_sub(k: &mut Kernel, s: u64, n: u64) -> u64
   requires kok(k) && s < CG_N && n <= 64
   ensures kok(k)
+  ensures result == 0 || result >= 0x8000000000000000
 {
   let mut bits = cg_get(k, s, CGW_SUB) % (CG_ALL + 1);
   let avail = cg_avail(k, s);
@@ -1492,6 +1494,7 @@ fn comp_end_ws(x: &Bytes, a: u64, n: u64) -> u64
 fn cg_write(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && d >= PROC_DEV + PSYS + SY_CG && d < PROC_DEV + PSYS + SY_CG + CG_N * CGF_N
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let s = cgd_slot(d);
   let f = cgd_f(d);

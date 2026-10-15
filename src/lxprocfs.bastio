@@ -2541,6 +2541,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
 fn proc_fill(k: &mut Kernel, pid: u64, fd: u64, f: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures (result <= n && result <= XFER) || result >= 0x8000000000000000
 {
   let h = fd_ofd(k, pid, fd);
   if h >= OFD_N || is_exe_file(f) {
@@ -2586,6 +2587,7 @@ fn proc_fill(k: &mut Kernel, pid: u64, fd: u64, f: u64, n: u64) -> u64
 fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   if is_mem_file(f) {
     return mem_io(&mut k, pid, fd, f, va, n, false);
@@ -2658,6 +2660,7 @@ fn is_mem_file(f: u64) -> bool {
 fn mem_io(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64, write: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   if f < PROC_DEV + 16 {
     return EBADF;
@@ -3248,6 +3251,7 @@ fn shmmax_write(k: &mut Kernel, n: u64, start: u64) -> u64
   requires kok(k) && n <= 32 && start <= n
   ensures kok(k)
   ensures result <= n || result > XFER
+  ensures lx_count_or_fail(result, n)
 {
   let mut i = start;
   let mut v = 0;
@@ -3278,6 +3282,7 @@ fn next_id_write(k: &mut Kernel, f: u64, n: u64, start: u64) -> u64
   requires kok(k) && n <= 32 && start <= n && f >= PROC_DEV + PSYS + SY_NEXTID && f < PROC_DEV + PSYS + SY_NEXTID + 3
   ensures kok(k)
   ensures result <= n || result > XFER
+  ensures lx_count_or_fail(result, n)
 {
   let mut i = start;
   let mut neg = false;
@@ -3320,6 +3325,7 @@ fn next_id_write(k: &mut Kernel, f: u64, n: u64, start: u64) -> u64
 fn proc_write(k: &mut Kernel, pid: u64, f: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   if is_cg_file(f) {
     return cg_write(&mut k, pid, f, va, n);   // src/lxcgroup.bastio
@@ -3366,6 +3372,7 @@ fn proc_write_xfer(k: &mut Kernel, f: u64, n: u64) -> u64
   requires kok(k) && n <= 32
   ensures kok(k)
   ensures result <= n || result > XFER
+  ensures lx_count_or_fail(result, n)
 {
   if f == PROC_DEV + PSYS + SY_DROP {
     // 1, 2 or 3 drop the caches; there is nothing to drop that anyone could

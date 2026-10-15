@@ -425,6 +425,7 @@ fn layout_rnd(rng: &mut Buf, sys: &Buf, procs: &Buf, pid: u64) -> Rnd
 fn dev_read(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   if d == DEV_NULL || n == 0 {
     return 0;
@@ -456,6 +457,7 @@ fn dev_read(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
 fn dev_read1(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let want = smaller(n, XFER);
   let mut i = 0;

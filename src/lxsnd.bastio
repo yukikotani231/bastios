@@ -28,6 +28,7 @@ const SNDCTL_DSP_GETOSPACE: u64 = 0x8010500C;
 fn dsp_write(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   if !snd_live(k.snd) {
     return ENODEV;

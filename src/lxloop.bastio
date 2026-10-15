@@ -552,6 +552,7 @@ fn loop_ioctl(k: &mut Kernel, pid: u64, d: u64, req: u64, arg: u64) -> u64
 fn loop_io(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, d: u64, write: bool, va: u64, n: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
   ensures kok(k) && con_ok(con)
+  ensures lx_count_or_fail(result, n)
 {
   let first = loop_io_part(&mut con, &mut k, pid, fd, d, write, va, n);
   if first == 0 || first > n || va > 0xFFFFFFFFFFFFFFFF - n {
@@ -576,6 +577,7 @@ fn loop_io(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, d: u64, write: bool
 fn loop_io_part(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, d: u64, write: bool, va: u64, n: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
   ensures kok(k) && con_ok(con)
+  ensures lx_count_or_fail(result, n)
 {
   let h = fd_ofd(k, pid, fd);
   if h >= OFD_N {
