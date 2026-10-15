@@ -195,6 +195,7 @@ steps = [
     ("cpus", f"processors running: {smp}\r\n".encode()),
     ("about", b"proved safe"),
     ("echo hello world", b"hello world"),
+    ("echo a\\eb", b"a\x1bb"),
     ("add 2 40", b"42"),
     ("mul 3 7", b"21"),
     ("mul 4294967296 4294967296", b"overflow"),
