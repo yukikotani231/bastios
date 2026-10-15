@@ -688,6 +688,10 @@ fn proc_node(k: &Kernel, n: u64) -> u64
   if p != 0 {
     return p;
   }
+  let b = blk_sys_at(k, n);
+  if b != 0 {
+    return PROC_DEV + PSYS + b;
+  }
   return cg_file(k, n);
 }
 

@@ -572,3 +572,38 @@ hello from the host
 apk=0
 tig version 2.6.1
 status 0
+
+== monitoring: install procps, htop, lsof, sysstat and pstree
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress procps htop lsof sysstat pstree 2>/dev/null; echo status $?; bb chroot /disk/a /sbin/apk info -e procps htop lsof sysstat pstree 2>/dev/null
+status 0
+procps
+htop
+lsof
+sysstat
+pstree
+
+== monitoring: ps, free, uptime, vmstat, top, pstree read /proc
+$ bb mkdir -p /disk/a/proc /disk/a/sys; bb mount -t proc proc /disk/a/proc; bb chroot /disk/a /bin/sh -c 'ps -p 1 -o comm=; free | head -n 1; uptime | grep -c "load average"; vmstat 1 2 | tail -n 1 | awk "NF==17{print \"vmstat ok\"}"; vmstat -s | grep -c "total memory"; top -b -n 1 | head -n 1 | cut -c1-6; pstree -p 1 | head -n 1'; bb umount /disk/a/proc
+sh
+              total        used        free      shared  buff/cache   available
+1
+vmstat ok
+1
+top - 
+-+= 00001 root sh 
+
+== monitoring: lsof, pwdx and /proc/PID/fd, cwd and root links
+$ bb mount -t proc proc /disk/a/proc; bb chroot /disk/a /bin/sh -c 'lsof -p $$ 2>/dev/null | grep -c " cwd "; pwdx $$ | cut -d" " -f2; readlink /proc/self/cwd; readlink /proc/self/root; ls /proc/self/fd | head -n 3'; bb umount /disk/a/proc
+1
+/
+/
+/
+0
+1
+2
+
+== monitoring: iostat finds the boot disk under /sys/block
+$ bb mount -t proc proc /disk/a/proc; bb mount --bind /sys /disk/a/sys; bb chroot /disk/a /bin/sh -c 'iostat -d | grep -c -e ^vda -e ^sda -e ^nvme; grep -c ^ctxt /proc/stat; cut -d. -f1 /proc/loadavg | cut -c1'; bb umount /disk/a/sys; bb umount /disk/a/proc
+1
+1
+0

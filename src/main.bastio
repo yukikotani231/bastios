@@ -391,6 +391,9 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
           regs_load(&mut cpu, s.k.procs, p, 18);
           cpu_set(&mut cpu, R_FSBASE, pget(s.k.procs, p, F_REGS + R_FSBASE));
           pset(&mut s.k.procs, p, F_STATE, RUNNING);
+          if pget(s.k.procs, p, F_RESTART) == 0 {
+            s.k.sys = set(s.k.sys, SYS_CTXT, tick(get(s.k.sys, SYS_CTXT)));   // /proc/stat's ctxt: a process that runs (not one polled to see if its waiting call can go on)
+          }
           return Job::Run(Task { pid: p, tgid: tgid(s.k.procs, p), vpid: vpid_of(s.k, p, p), vtgid: vpid_of(s.k, p, tgid(s.k.procs, p)), lease: l, fpu: f, slow: sc_mode(s.k, p) != 0 || tr2_get(s.k, p) % 2 == 1 });
         },
       }
@@ -580,6 +583,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   // Registers, then the error code, fault address and FS base (words 18-20).
   regs_store(&mut s.k.procs, cpu, p, 21);
   ack(&mut s.pic, &mut s.apic, v);
+
   if v == V_TIMER {
     s.k.ticks = tick(s.k.ticks);
     s.ticked = true;
@@ -675,8 +679,8 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
     ino_after(&mut s.k, p);
     let ended = tsc_now(s.k.tsc, s.k.ns, cpu);
-    if ended > began {
-      tm_sys_add(&mut s.k, p, ended - began);   // system time (src/lxrlimit.bastio)
+    if ended > began && pget(s.k.procs, p, F_RESTART) == 0 {
+      tm_sys_add(&mut s.k, p, ended - began);   // system time (src/lxrlimit.bastio); a call that waits is not charged for each time it is polled
     }
     call_done(&mut s.k, p);
     if what == POWEROFF || what == REBOOT {
@@ -710,6 +714,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     }
     if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) {
       pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
+      s.k.sys = set(s.k.sys, SYS_PGF, tick(get(s.k.sys, SYS_PGF)));
       return p;                             // code read, a page mapped or copied, or the stack grew: run the instruction again
     }
     // Another thread, on another processor, may have mapped a page of
@@ -839,6 +844,7 @@ fn fault_fast(s: &mut Sys, cpu: &Cpu, mmu: &mut Mmu, p: u64, tgid_: u64, vpid: u
     return Fast::Back(fpu);
   }
   pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
+  s.k.sys = set(s.k.sys, SYS_PGF, tick(get(s.k.sys, SYS_PGF)));   // /proc/vmstat's pgfault
   match take_space(&mut s.k.spaces, p) {
     Space::Empty => {
       return Fast::Back(fpu);
