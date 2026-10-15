@@ -1901,6 +1901,26 @@ fn usb_poll(u: &mut Usb) -> u64
   }
 }
 
+/// Intel's 7-, 8- and 9-series chipsets (Panther Point, Lynx Point,
+/// Wildcat Point) power up with the USB 2 ports of the shared lanes routed
+/// to the EHCI controller, and the super-speed switch off; the xHCI
+/// controller then sees no device behind those ports. Routing them (and
+/// switching the SuperSpeed ports on) is two registers in its PCI
+/// configuration space: XUSB2PR (0xD0, whose supported mask is at 0xD4) and
+/// USB3_PSSEN (0xD8, mask at 0xDC). It is what Linux does too. Untested:
+/// QEMU's xHCI has no such registers.
+fn xhci_route_ports(pci: &mut Pci, dev: u64)
+  requires pci_ok(pci) && dev < PCI_NONE
+{
+  let id = pci_read(&mut pci, dev, PCI_ID);
+  if id == 0x1E318086 || id == 0x8C318086 || id == 0x9C318086 || id == 0x8CB18086 || id == 0x9CB18086 {
+    let usb2 = pci_read(&mut pci, dev, 0xD4);
+    let usb3 = pci_read(&mut pci, dev, 0xDC);
+    pci_write(&mut pci, dev, 0xD8, usb3);
+    pci_write(&mut pci, dev, 0xD0, usb2);
+  }
+}
+
 /// The xHCI controller `dev` on PCI, whose registers are bar ..
 /// bar + size, started with pages at .. at+10, if the registers lie in the
 /// device window (`bar_space`) clear of the framebuffer at lo .. hi and
@@ -1923,6 +1943,7 @@ fn usb_new(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, lo: u64, hi
     return Usb::None;
   }
   pci_enable(&mut pci, dev);
+  xhci_route_ports(&mut pci, dev);
   let f0 = take_low_page(&mut m, at);
   let f1 = take_low_page(&mut m, at + 1);
   let f2 = take_low_page(&mut m, at + 2);
