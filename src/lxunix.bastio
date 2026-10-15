@@ -1543,7 +1543,7 @@ fn ux_poll_bits(k: &Kernel, pid: u64, fd: u64) -> u64
     b = b | POLLIN | POLLRDHUP;             // shut for reading here
   }
   if uc_get(k, tx, 2) != 1 {
-    b = b | POLLERR;
+    b = b | POLLOUT;                        // as on Linux, a write is ready (and fails with EPIPE); no POLLERR
   } else if uc_get(k, tx, 1) < UX_CAP {
     b = b | POLLOUT;
   }
