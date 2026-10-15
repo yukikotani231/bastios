@@ -571,13 +571,7 @@ fn ns_tr(k: &mut Kernel, ns: u64, p: &Bytes, c: u64) -> u64
   }
   if e >= MT_N || kl > c {
     k.mns = set(k.mns, MNS_LRO, 0);
-    let mut i = 0;
-    while i < c
-      invariant i <= c && c <= FNAME_MAX && c <= blen(p) && kok(k)
-    {
-      bset(&mut k.fs.xfer, i, bget(p, i));
-      i = i + 1;
-    }
+    bytes_copy_span(&mut k.fs.xfer, 0, p, 0, c);
     return c;
   }
   if me_get(k, e, ME_FLAGS) % MT_RO == MK_OVERLAY {
@@ -614,14 +608,8 @@ fn ns_tr(k: &mut Kernel, ns: u64, p: &Bytes, c: u64) -> u64
     bset(&mut k.fs.xfer, w, 47);
     w = w + 1;
   }
-  let mut j = r;
-  while j < c
-    invariant r <= j && j <= c && c <= blen(p) && w + (c - j) <= FNAME_MAX && kok(k)
-  {
-    bset(&mut k.fs.xfer, w, bget(p, j));
-    w = w + 1;
-    j = j + 1;
-  }
+  bytes_copy_span(&mut k.fs.xfer, w, p, r, c);
+  w = w + (c - r);
   if me_get(k, e, ME_FLAGS) & MT_RO != 0 {
     k.mns = set(k.mns, MNS_LRO, 1);
   } else {
@@ -1015,13 +1003,7 @@ fn ns_keep(k: &mut Kernel, p: &Bytes, c: u64)
   requires kok(k) && c <= FNAME_MAX && c <= blen(p)
   ensures kok(k)
 {
-  let mut i = 0;
-  while i < c
-    invariant i <= c && c <= FNAME_MAX && c <= blen(p) && kok(k)
-  {
-    bset(&mut k.mstr, i, bget(p, i));
-    i = i + 1;
-  }
+  bytes_copy_span(&mut k.mstr, 0, p, 0, c);
   k.mns = set(k.mns, MNS_LPLEN, c);
 }
 

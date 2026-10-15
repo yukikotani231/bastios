@@ -542,8 +542,8 @@ def run_program(env, prog, timeout):
 
 
 # What differs between the guests' processors in the cases (debian.txt's).
-ARCH_WORDS = {"x86_64": {"GLIBCLD": "/lib64/ld-linux-x86-64.so.2", "MULTIARCH": "x86_64-linux-gnu", "MACHINE": "x86_64"},
-              "aarch64": {"GLIBCLD": "/lib/ld-linux-aarch64.so.1", "MULTIARCH": "aarch64-linux-gnu", "MACHINE": "aarch64"}}
+ARCH_WORDS = {"x86_64": {"GLIBCLD": "/lib64/ld-linux-x86-64.so.2", "MULTIARCH": "x86_64-linux-gnu", "MACHINE": "x86_64", "SCMPARCH": "SCMP_ARCH_X86_64"},
+              "aarch64": {"GLIBCLD": "/lib/ld-linux-aarch64.so.1", "MULTIARCH": "aarch64-linux-gnu", "MACHINE": "aarch64", "SCMPARCH": "SCMP_ARCH_AARCH64"}}
 ARCH = "x86_64"
 
 def arch_words(text):

@@ -25,7 +25,10 @@
 // change ids and groups to mapped ones, and set the names of a UTS
 // namespace it made. Mounting, device access and the rest stay root's.
 //
-// Not done: setns into a user namespace, the map in
+// setns into a user namespace (a /proc/PID/ns/user descriptor or a pidfd)
+// is for root, and for a process that holds CAP_SYS_ADMIN over it (ns_cap_over):
+// the user that made it, from the namespace it was made in, or the root of
+// a namespace it descends from. Not done: the map in
 // SO_PEERCRED, si_uid and System V IPC owners, and capabilities that apply
 // to the namespace's own objects (mounts, network): only root has those.
 
@@ -268,6 +271,42 @@ fn ns_cap(k: &Kernel, pid: u64, c: u64) -> bool
   }
   let held = CAP_FULL & !cap_word(k, pid, CAPW_EFF) & !cap_word(k, pid, CAPW_PERM);
   return (held >> c) % 2 == 1;
+}
+
+/// Whether process pid holds capability c over user namespace u (and what
+/// it owns): it has it outright, it is in u and holds it there, or it is in
+/// a namespace u descends from and either holds it there or is the user
+/// that made the namespace on the way down to u.
+fn ns_cap_over(k: &Kernel, pid: u64, u: u64, c: u64) -> bool
+  requires kok(k) && pid < NPROC && c <= CAP_LAST
+{
+  if cap_has(k, pid, c) {
+    return true;
+  }
+  let p = nsk_of(k, NSK_USER, pid);
+  if u == 0 || u >= MNS_MAX {
+    return false;
+  }
+  if p == u {
+    return ns_cap(k, pid, c);
+  }
+  let mut v = u;
+  let mut n = 0;
+  while v != 0 && n <= USR_N
+    invariant v < MNS_MAX && n <= USR_N + 1 && kok(k)
+  {
+    let s = usr_slot(k, v);
+    if s >= USR_N {
+      return false;
+    }
+    let par = usr_get(k, s, UMW_PAR) % MNS_MAX;
+    if par == p {
+      return id_get(k.procs, pid, F_UID, true) == usr_get(k, s, 1) || ns_cap(k, pid, c);
+    }
+    v = par;
+    n = n + 1;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------- /proc
