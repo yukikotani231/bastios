@@ -1096,21 +1096,37 @@ fn map_record(k: &mut Kernel, pid: u64, fd: u64, first: u64, pages: u64, off: u6
   if h >= OFD_N || (of_get(k.ofd, h, 0) != OF_FILE && of_get(k.ofd, h, 0) != OF_DEV) || first >= WPAGES {
     return;
   }
-  // A file opened without write access is never written back, so a record
-  // of its mapping would only use up one of the MAP_N (a program that maps
-  // twenty input files and then a writable output file, as Go's linker
-  // does, would find no record left for the output).
-  if of_get(k.ofd, h, 0) == OF_FILE {
-    let row = of_get(k.ofd, h, 2);
-    if row >= FD_ROWS || fget(k.fs.ftab, row, FD_MODE) / O_WRITE % 2 == 0 {
-      return;
-    }
-  }
   let mut i = 0;
   while i < MAP_N && get(k.maps, mp_at(pid, i, 0)) != 0
     invariant i <= MAP_N && kok(k)
   {
     i = i + 1;
+  }
+  if i >= MAP_N && of_get(k.ofd, h, 0) == OF_FILE {
+    // Every record is in use. A mapping of a file opened for writing is
+    // the one that must be written back, so it takes the place of the
+    // record of a read-only file's mapping, which only says that mapping
+    // may not become writable (a program that maps twenty input files and
+    // then a writable output file, as Go's linker does, would otherwise
+    // find no record left for the output, and its pages would never reach
+    // the file).
+    let row = of_get(k.ofd, h, 2);
+    if row < FD_ROWS && fget(k.fs.ftab, row, FD_MODE) / O_WRITE % 2 == 1 {
+      let mut j = 0;
+      while j < MAP_N && i >= MAP_N
+        invariant j <= MAP_N && kok(k)
+      {
+        let h2 = get(k.maps, mp_at(pid, j, 2));
+        if get(k.maps, mp_at(pid, j, 0)) != 0 && h2 < OFD_N && of_get(k.ofd, h2, 0) == OF_FILE {
+          let row2 = of_get(k.ofd, h2, 2);
+          if row2 < FD_ROWS && fget(k.fs.ftab, row2, FD_MODE) / O_WRITE % 2 == 0 {
+            map_drop(&mut k, pid, j);
+            i = j;
+          }
+        }
+        j = j + 1;
+      }
+    }
   }
   if i >= MAP_N {
     return;
