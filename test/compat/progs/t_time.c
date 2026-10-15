@@ -3,6 +3,9 @@
 #include <sys/syscall.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 int main(void) {
@@ -71,6 +74,29 @@ int main(void) {
         EXPECT("gmtime_r", gmtime_r(&t, &tm) && tm.tm_year == 70);
         char s[64];
         EXPECT("strftime + localtime", (t = time(0), localtime_r(&t, &tm) != 0 && strftime(s, sizeof s, "%Y-%m-%d", &tm) == 10));
+    }
+    {
+        /* Time zones: a POSIX TZ string, and a zone file (a TZif file whose one
+         * type is JST, UTC+9) that TZ names, as /usr/share/zoneinfo's are read. */
+        time_t t = 86400 * 365; struct tm tm; char s[64];
+        setenv("TZ", "JST-9", 1); tzset();
+        EXPECT("TZ=JST-9 is nine hours ahead", localtime_r(&t, &tm) && tm.tm_hour == 9 && tm.tm_mday == 1 && strcmp(tm.tm_zone, "JST") == 0);
+        setenv("TZ", "EST5EDT,M3.2.0,M11.1.0", 1); tzset();
+        t = 1721000000;                               /* 2024-07-14 23:33:20 UTC */
+        EXPECT("TZ with a DST rule", localtime_r(&t, &tm) && tm.tm_isdst == 1 && tm.tm_hour == 19);
+        t = 1704067200;                               /* 2024-01-01 00:00:00 UTC */
+        EXPECT("and outside the DST period", localtime_r(&t, &tm) && tm.tm_isdst == 0 && tm.tm_hour == 19 && tm.tm_mday == 31);
+        unsigned char z[] = {'T','Z','i','f',0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                             0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1, 0,0,0,4,
+                             0,0,0x7E,0x90, 0, 0, 'J','S','T',0};
+        FILE *f = fopen("/tmp/ct_tzif", "wb");
+        EXPECT("a zone file is written", f && fwrite(z, 1, sizeof z, f) == sizeof z && fclose(f) == 0);
+        setenv("TZ", ":/tmp/ct_tzif", 1); tzset();
+        t = 1721000000;
+        EXPECT("TZ naming a zone file reads it", localtime_r(&t, &tm) && tm.tm_hour == 8 && strcmp(tm.tm_zone, "JST") == 0 &&
+               strftime(s, sizeof s, "%H:%M %Z %z", &tm) > 0 && strcmp(s, "08:33 JST +0900") == 0);
+        unlink("/tmp/ct_tzif");
+        unsetenv("TZ"); tzset();
     }
     {
         struct timespec r;

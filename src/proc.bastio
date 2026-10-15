@@ -1245,7 +1245,7 @@ fn read_u64(s: Str, at: u64) -> u64
 
 const MAGIC: u64 = 0x0A52455355545342;   // "BSTUSER\n"
 const ARGV0_MAX: u64 = 63;              // the most bytes of a program name in argv
-const START_ENV_LEN: u64 = 84;           // start_env_str()'s length
+const START_ENV_LEN: u64 = 97;           // start_env_str()'s length
 
 /// Starts program `prog` as a child of `parent` (0 for none), with just
 /// its name as argv. Returns the new process id, or 0 if the image is
@@ -1478,12 +1478,13 @@ fn name_arg(args: &mut Bytes, name: Str) -> u64
 
 /// The environment a program the kernel starts gets (the shell's ash, and
 /// what it runs): where programs are, a home, and a terminal type that
-/// curses programs know (Alpine's ncurses-terminfo-base has vt100). Each
+/// curses programs know (Alpine's ncurses-terminfo-base has vt100), and
+/// a UTF-8 locale (the only non-C one musl has). Each
 /// string ends at a ";", which start_env makes a NUL.
 fn start_env_str() -> Str
   ensures slen(result) == START_ENV_LEN
 {
-  return "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin;HOME=/;TERM=vt100;";
+  return "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin;HOME=/;TERM=vt100;LANG=C.UTF-8;";
 }
 
 /// Puts start_env_str() in args after the first `from` bytes. Returns where it ends.

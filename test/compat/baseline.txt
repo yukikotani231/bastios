@@ -89,6 +89,7 @@ busybox: diff
 busybox: du
 busybox: echo
 busybox: env
+busybox: lang
 busybox: expr
 busybox: find
 busybox: free
@@ -1395,3 +1396,5 @@ t_pty: with IUTF8 erase takes whole characters
 t_pty: IUTF8 can be cleared
 t_pty: without IUTF8 erase takes one byte
 tty: utf-8: erase takes back a whole character on the console
+alpine-tty: nvim: Japanese text is typed in, edited by character and saved as UTF-8
+alpine-tty: nvim: it counts characters and cells of Japanese text
