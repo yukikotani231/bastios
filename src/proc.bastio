@@ -625,7 +625,7 @@ const ME_W: u64 = 5;                  // words per mount
 // each process's UTS, IPC and PID namespace, the next id of each kind, the
 // host and domain names of UTS namespaces other than the first (whose
 // names are in k.sys), and the IPC namespace of each POSIX queue.
-const NSK_N: u64 = 8;                 // kinds, per process:
+const NSK_N: u64 = 10;                // kinds, per process:
 const NSK_UTS: u64 = 0;
 const NSK_IPC: u64 = 1;
 const NSK_PID: u64 = 2;               //   the PID namespace it is in
@@ -633,6 +633,8 @@ const NSK_VPID: u64 = 3;              //   its id in it (0 in the first namespac
 const NSK_PIDC: u64 = 4;              //   the PID namespace its children are in
 const NSK_USER: u64 = 5;              //   the user namespace it is in
 const NSK_CG: u64 = 6;                //   the cgroup it belongs to (src/lxcgroup.bastio)
+const NSK_TIME: u64 = 8;             //   the time namespace it is in (offsets: MNS_TM)
+const NSK_TIMEC: u64 = 9;            //   the time namespace its children are in
 const NSK_CGN: u64 = 7;               //   the root of its cgroup namespace: slot + 1 (0: the first namespace)
 const CG_N: u64 = 128;                // cgroups in all (slot 0 is the root, always there)
 const CG_W: u64 = 44;                 // words per cgroup: see CGW_*
@@ -705,7 +707,13 @@ const DVP_N: u64 = 16;
 const DVP_MAXI: u64 = 512;
 const DVP_W: u64 = 2 + DVP_MAXI;
 const MNS_DVP: u64 = MNS_SC + NPROC * SC_PW;
-const MNS_LEN: u64 = MNS_DVP + DVP_N * DVP_W;
+// Time namespaces (src/lxnsk.bastio): TM_N slots of TM_W words in k.mns from
+// MNS_TM (id + 1, the CLOCK_MONOTONIC offset and the CLOCK_BOOTTIME offset in
+// ns, two's complement).
+const TM_N: u64 = 16;
+const TM_W: u64 = 3;
+const MNS_TM: u64 = MNS_DVP + DVP_N * DVP_W;
+const MNS_LEN: u64 = MNS_TM + TM_N * TM_W;
 const XAB: u64 = 256 + MT_N * 512 + 256;      // where k.mstr keeps the extended attributes: XA_N rows of XA_ROW bytes, the name then the value
 const KDB: u64 = XAB + 32 * 320;                 // where k.mstr keeps the key descriptions: KEY_N rows of KDESC bytes (src/lxkeys.bastio)
 const KPB: u64 = KDB + KEY_N * KDESC;              // then KP_N payload slots of KPAY bytes

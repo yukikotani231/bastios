@@ -23,7 +23,7 @@
 //        process by its row.
 //
 // /proc/PID/ns/ holds a link per kind (cgroup, ipc, mnt, net, pid,
-// pid_for_children, user, uts) whose target is "KIND:[INODE]", with
+// pid_for_children, time, time_for_children, user, uts) whose target is "KIND:[INODE]", with
 // Linux's inode numbers for the first namespaces and a distinct one for
 // every other (ns_inode). Opening a link gives a descriptor that remembers
 // the namespace (word 3 of its open file description, + 1); stat and
@@ -47,6 +47,8 @@ const NF_PID: u64 = 4;
 const NF_PIDC: u64 = 5;                    // pid_for_children
 const NF_USER: u64 = 6;
 const NF_UTS: u64 = 7;
+const NF_TIME: u64 = 8;
+const NF_TIMEC: u64 = 9;                   // time_for_children
 const NS_INO0: u64 = 4026531835;           // the first cgroup namespace's inode (PROC_CGROUP_INIT_INO)
 const NSK_INO: u64 = 4026532000;            // other namespaces' inodes start here
 const S_IFREG_NS: u64 = 0x8124;            // what stat says an nsfs file is: r--r--r--
@@ -101,6 +103,7 @@ fn nsk_fork(t: &mut Buf, pid: u64, c: u64)
     t = set(t, nsk_at(i, c), get(t, nsk_at(i, pid)));
     i = i + 1;
   }
+  t = set(t, nsk_at(NSK_TIME, c), get(t, nsk_at(NSK_TIMEC, pid)));   // the child is in the namespace its parent made for children
 }
 
 /// execve from a thread: the thread takes over the leader's slot h.
@@ -281,10 +284,330 @@ fn nsk_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
   if flags & CLONE_NEWCGROUP != 0 {
     cgns_unshare(&mut k, pid);              // src/lxcgroup.bastio
   }
+  if flags & CLONE_NEWTIME != 0 {
+    let e = tm_unshare(&mut k, pid);
+    if e != 0 {
+      return e;
+    }
+  }
   if flags & CLONE_NEWPID != 0 {
     return pidns_unshare(&mut k, pid);
   }
   return 0;
+}
+
+// ---------------------------------------------------------------- time
+
+// A time namespace shifts CLOCK_MONOTONIC (with its raw and coarse forms)
+// and CLOCK_BOOTTIME by a fixed offset, written to
+// /proc/PID/timens_offsets after unshare(CLONE_NEWTIME) and before the
+// first process is in it. unshare moves the process's children only
+// (NSK_TIMEC); a child starts in it (NSK_TIME), and setns changes both.
+// clock_now applies the offset, so nanosleep, timers, timerfd and
+// absolute deadlines all see it, as do sysinfo and /proc/uptime.
+
+/// The slot of time namespace id, or TM_N for the first one or one that
+/// has none.
+fn tm_slot(k: &Kernel, id: u64) -> u64
+  requires kok(k) && id < MNS_MAX
+  ensures result <= TM_N
+{
+  if id == 0 {
+    return TM_N;
+  }
+  let mut s = 0;
+  while s < TM_N
+    invariant s <= TM_N && kok(k)
+  {
+    if get(k.mns, MNS_TM + s * TM_W) == id + 1 {
+      return s;
+    }
+    s = s + 1;
+  }
+  return TM_N;
+}
+
+/// Is a process (not a zombie) in time namespace id; with `own`, as its own
+/// namespace only, else as its children's too?
+fn tm_used(k: &Kernel, id: u64, own: bool) -> bool
+  requires kok(k)
+{
+  if id == 0 {
+    return true;
+  }
+  let mut q = 0;
+  while q < NPROC
+    invariant q <= NPROC && kok(k)
+  {
+    let s = pget(k.procs, q, F_STATE);
+    if s != FREE && s != ZOMBIE
+       && (get(k.mns, nsk_at(NSK_TIME, q)) == id || (!own && get(k.mns, nsk_at(NSK_TIMEC, q)) == id)) {
+      return true;
+    }
+    q = q + 1;
+  }
+  return false;
+}
+
+fn tm_live(k: &Kernel, id: u64) -> bool
+  requires kok(k)
+{
+  return tm_used(k, id, false);
+}
+
+/// Frees the slots of time namespaces nothing is in; returns a free slot,
+/// or TM_N if there is none.
+fn tm_gc(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k) && result <= TM_N
+{
+  let mut free = TM_N;
+  let mut s = 0;
+  while s < TM_N
+    invariant s <= TM_N && free <= TM_N && kok(k)
+  {
+    let v = get(k.mns, MNS_TM + s * TM_W);
+    if v != 0 && !tm_live(k, smaller(v - 1, MNS_MAX - 1)) {
+      k.mns = set(k.mns, MNS_TM + s * TM_W, 0);
+    }
+    if get(k.mns, MNS_TM + s * TM_W) == 0 && free == TM_N {
+      free = s;
+    }
+    s = s + 1;
+  }
+  return free;
+}
+
+/// unshare(CLONE_NEWTIME): a new namespace, offsets 0, for pid's children.
+fn tm_unshare(k: &mut Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let s = tm_gc(&mut k);
+  if s >= TM_N {
+    return ENOMEM;
+  }
+  let id = nsk_new(&mut k, NSK_TIME);
+  if id == 0 {
+    return ENOMEM;
+  }
+  k.mns = set(k.mns, MNS_TM + s * TM_W + 1, 0);
+  k.mns = set(k.mns, MNS_TM + s * TM_W + 2, 0);
+  k.mns = set(k.mns, MNS_TM + s * TM_W, id + 1);
+  nsk_set(&mut k, NSK_TIMEC, pid, id);
+  return 0;
+}
+
+/// Is there a slot for a new time namespace?
+fn tm_room(k: &mut Kernel) -> bool
+  requires kok(k)
+  ensures kok(k)
+{
+  return tm_gc(&mut k) < TM_N;
+}
+
+/// t shifted by off (two's complement ns), not below 0.
+fn tm_shift(t: u64, off: u64) -> u64
+  requires t < FOREVER
+  ensures result < FOREVER
+{
+  if off < 0x8000000000000000 {
+    return smaller(sat_add(t, off), FOREVER - 1);
+  }
+  let m = (0xFFFFFFFFFFFFFFFF - off) + 1;
+  if t >= m {
+    return t - m;
+  }
+  return 0;
+}
+
+/// Tells pid's vDSO page whether the process is in a time namespace other
+/// than the first, in which the vDSO leaves the monotonic clocks to the
+/// system call (user/vdso.c). A page the process does not own outright
+/// stays as it is.
+fn tm_vdso(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut on = 0;
+  if nsk_of(k, NSK_TIME, pid) != 0 {
+    on = 1;
+  }
+  xfer_u64(&mut k.fs.xfer, 0, on);
+  let r = force_to_user(&mut k.spaces, pid, USER_BASE + VDSO_PAGE * 4096 + (VDSO_DATA + 4) * 8, k.fs.xfer, 8);
+}
+
+/// What clock clk (a clock_now clock below the CPU-time ones) reads for
+/// pid, from the boot-relative time t.
+fn tm_clock(k: &Kernel, pid: u64, clk: u64, t: u64) -> u64
+  requires kok(k) && pid < NPROC && t < FOREVER
+  ensures result < FOREVER
+{
+  let id = nsk_of(k, NSK_TIME, pid);
+  if id == 0 {
+    return t;
+  }
+  let s = tm_slot(k, id);
+  if s >= TM_N {
+    return t;
+  }
+  if clk == 1 || clk == 4 || clk == 6 {
+    return tm_shift(t, get(k.mns, MNS_TM + s * TM_W + 1));
+  }
+  if clk == 7 || clk == 9 {
+    return tm_shift(t, get(k.mns, MNS_TM + s * TM_W + 2));
+  }
+  return t;
+}
+
+/// What a write to pid's /proc/PID/timens_offsets (n bytes in the transfer
+/// buffer: lines of "clock secs nsecs", clock 1 monotonic or 7 boottime)
+/// sets, for the namespace pid's children get. n, or -errno.
+fn tm_write(k: &mut Kernel, p: u64, n: u64) -> u64
+  requires kok(k) && n <= 32 && p < NPROC
+  ensures kok(k)
+  ensures result <= n || result > XFER
+{
+  let id = nsk_of(k, NSK_TIMEC, p);
+  let s = tm_slot(k, id);
+  if s >= TM_N {
+    return EACCES;                          // the first namespace's offsets are 0, for good
+  }
+  if tm_used(k, id, true) {
+    return EACCES;                          // a process is in it: the offsets are frozen
+  }
+  let mut i = 0;
+  let mut w1 = get(k.mns, MNS_TM + s * TM_W + 1);
+  let mut w2 = get(k.mns, MNS_TM + s * TM_W + 2);
+  while i < n
+    invariant i <= n && n <= 32 && kok(k) && s < TM_N
+  {
+    // clock
+    let mut clk = 0;
+    let mut got = false;
+    while i < n && bget(k.fs.xfer, i) >= 48 && bget(k.fs.xfer, i) <= 57 && clk < 100
+      invariant i <= n && n <= 32 && clk <= 1000 && kok(k)
+    {
+      clk = clk * 10 + cast[u64](bget(k.fs.xfer, i)) - 48;
+      got = true;
+      i = i + 1;
+    }
+    if !got || i >= n || bget(k.fs.xfer, i) != 32 {
+      return EINVAL;
+    }
+    while i < n && bget(k.fs.xfer, i) == 32
+      invariant i <= n && n <= 32 && kok(k)
+    {
+      i = i + 1;
+    }
+    let mut neg = false;
+    if i < n && bget(k.fs.xfer, i) == 45 {
+      neg = true;
+      i = i + 1;
+    }
+    let mut sec = 0;
+    got = false;
+    while i < n && bget(k.fs.xfer, i) >= 48 && bget(k.fs.xfer, i) <= 57 && sec <= 4000000000
+      invariant i <= n && n <= 32 && sec <= 40000000099 && kok(k)
+    {
+      sec = sec * 10 + cast[u64](bget(k.fs.xfer, i)) - 48;
+      got = true;
+      i = i + 1;
+    }
+    if !got || sec > 4000000000 || i >= n || bget(k.fs.xfer, i) != 32 {
+      return EINVAL;
+    }
+    while i < n && bget(k.fs.xfer, i) == 32
+      invariant i <= n && n <= 32 && kok(k)
+    {
+      i = i + 1;
+    }
+    let mut ns = 0;
+    got = false;
+    while i < n && bget(k.fs.xfer, i) >= 48 && bget(k.fs.xfer, i) <= 57 && ns <= 1000000000
+      invariant i <= n && n <= 32 && ns <= 10000000009 && kok(k)
+    {
+      ns = ns * 10 + cast[u64](bget(k.fs.xfer, i)) - 48;
+      got = true;
+      i = i + 1;
+    }
+    if !got || ns >= 1000000000 {
+      return EINVAL;
+    }
+    while i < n && (bget(k.fs.xfer, i) == 10 || bget(k.fs.xfer, i) == 32)
+      invariant i <= n && n <= 32 && kok(k)
+    {
+      i = i + 1;
+    }
+    // secs may be negative, nsecs is always added: "-2 500000000" is -1.5 s
+    let m = sec * 1000000000;
+    let mut off = m + ns;
+    if neg && m > 0 {
+      if ns >= m {
+        off = ns - m;
+      } else {
+        off = (0xFFFFFFFFFFFFFFFF - (m - ns)) + 1;
+      }
+    }
+    if clk == 1 {
+      w1 = off;
+    } else if clk == 7 {
+      w2 = off;
+    } else {
+      return EINVAL;
+    }
+  }
+  k.mns = set(k.mns, MNS_TM + s * TM_W + 1, w1);
+  k.mns = set(k.mns, MNS_TM + s * TM_W + 2, w2);
+  return n;
+}
+
+/// The text /proc/PID/timens_offsets reads: what the namespace pid is in
+/// has, as "monotonic SECS NSECS" and "boottime SECS NSECS".
+fn tm_text(k: &Kernel, p: u64, o: &mut Bytes) -> u64
+  requires kok(k) && p < NPROC && blen(o) == PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let s = tm_slot(k, nsk_of(k, NSK_TIME, p));
+  let mut a = put_s(&mut o, 0, "monotonic ");
+  let mut w = 0;
+  if s < TM_N {
+    w = get(k.mns, MNS_TM + s * TM_W + 1);
+  }
+  a = tm_put(&mut o, a, w);
+  a = put_s(&mut o, a, "boottime  ");
+  w = 0;
+  if s < TM_N {
+    w = get(k.mns, MNS_TM + s * TM_W + 2);
+  }
+  return tm_put(&mut o, a, w);
+}
+
+/// " SECS NSECS\n" for the offset w (two's complement ns).
+fn tm_put(o: &mut Bytes, at: u64, w: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = at;
+  if w >= 0x8000000000000000 {
+    let m = (0xFFFFFFFFFFFFFFFF - w) + 1;       // -w, at most 2^63
+    let r = m % 1000000000;
+    let mut q = m / 1000000000;                 // seconds, rounded away from 0
+    let mut f = 0;
+    if r != 0 {
+      q = q + 1;
+      f = 1000000000 - r;
+    }
+    a = put_c(&mut o, a, 45);
+    a = put_n(&mut o, a, q);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, f);
+    return put_c(&mut o, a, 10);
+  }
+  a = put_n(&mut o, a, w / 1000000000);
+  a = put_c(&mut o, a, 32);
+  a = put_n(&mut o, a, w % 1000000000);
+  return put_c(&mut o, a, 10);
 }
 
 // ---------------------------------------------------------------- PID
@@ -651,11 +974,20 @@ fn ns_inode(f: u64, id: u64) -> u64
     if f == NF_USER {
       return NS_INO0 + 2;                   // 4026531837
     }
+    if f == NF_TIME || f == NF_TIMEC {
+      return NS_INO0 - 1;                   // 4026531834
+    }
     return NS_INO0 + 3;                     // uts: 4026531838
   }
   let mut g = f;
   if f == NF_PIDC {
     g = NF_PID;
+  }
+  if f == NF_TIMEC {
+    g = NF_TIME;
+  }
+  if g == NF_TIME {
+    return NSK_INO + 0x10000000 + id;
   }
   return NSK_INO + id * 8 + g % 8;
 }
@@ -682,6 +1014,12 @@ fn nf_name(f: u64) -> Str {
   }
   if f == NF_USER {
     return "user";
+  }
+  if f == NF_TIME {
+    return "time";
+  }
+  if f == NF_TIMEC {
+    return "time_for_children";
   }
   return "uts";
 }
@@ -712,6 +1050,12 @@ fn nf_id(k: &Kernel, p: u64, f: u64) -> u64
   if f == NF_USER {
     return nsk_of(k, NSK_USER, p);
   }
+  if f == NF_TIME {
+    return nsk_of(k, NSK_TIME, p);
+  }
+  if f == NF_TIMEC {
+    return nsk_of(k, NSK_TIMEC, p);
+  }
   return nsk_of(k, NSK_CGN, p);
 }
 
@@ -733,7 +1077,10 @@ fn nsf_proc(d: u64) -> u64
 fn nsf_kind(d: u64) -> u64
   ensures result < NF_N
 {
-  return d % NF_N;
+  if d < PROC_DEV + PSYS + SY_NS {
+    return 0;
+  }
+  return (d - PROC_DEV - PSYS - SY_NS) % NF_N;
 }
 
 /// The device of link `name` (x[from..to]) in /proc/P/ns, or 0.
@@ -846,6 +1193,9 @@ fn nf_flag(f: u64) -> u64 {
   if f == NF_USER {
     return CLONE_NEWUSER;
   }
+  if f == NF_TIME || f == NF_TIMEC {
+    return CLONE_NEWTIME;
+  }
   return CLONE_NEWUTS;
 }
 
@@ -853,7 +1203,7 @@ fn nf_flag(f: u64) -> u64 {
 fn ns_may_join(k: &Kernel, pid: u64, f: u64, id: u64) -> u64
   requires kok(k) && pid < NPROC && id < MNS_MAX
 {
-  if id == nf_id(k, pid, f) {
+  if id == nf_id(k, pid, f) && f != NF_TIME && f != NF_TIMEC {
     return 0;                               // already there
   }
   if f == NF_MNT {
@@ -883,6 +1233,12 @@ fn ns_may_join(k: &Kernel, pid: u64, f: u64, id: u64) -> u64
   if f == NF_NET {
     if id >= NNET || !nic_ns_live(k.nic, id) {
       return EINVAL;                        // it ended (its number may since be another's)
+    }
+    return 0;
+  }
+  if f == NF_TIME || f == NF_TIMEC {
+    if !tm_live(k, id) || tm_slot(k, id) >= TM_N && id != 0 {
+      return EINVAL;
     }
     return 0;
   }
@@ -937,7 +1293,13 @@ fn ns_join(k: &mut Kernel, pid: u64, f: u64, id: u64, p: u64)
   requires kok(k) && pid < NPROC && p < NPROC
   ensures kok(k)
 {
-  if id == nf_id(k, pid, f) {
+  if id == nf_id(k, pid, f) && f != NF_TIME && f != NF_TIMEC {
+    return;
+  }
+  if f == NF_TIME || f == NF_TIMEC {
+    nsk_set(&mut k, NSK_TIME, pid, id);     // both: setns applies at once, unlike unshare
+    nsk_set(&mut k, NSK_TIMEC, pid, id);
+    tm_vdso(&mut k, pid);
     return;
   }
   if f == NF_MNT {
@@ -961,7 +1323,7 @@ fn lx_setns(k: &mut Kernel, pid: u64, fd: u64, nstype: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let all = CLONE_NEWCGROUP + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWNET + CLONE_NEWUSER + CLONE_NEWNS;
+  let all = CLONE_NEWCGROUP + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWNET + CLONE_NEWUSER + CLONE_NEWNS + CLONE_NEWTIME;
   let d = fd_look(k, pid, fd);
   if d.kind == K_BAD {
     return EBADF;
@@ -1008,7 +1370,7 @@ fn lx_setns(k: &mut Kernel, pid: u64, fd: u64, nstype: u64) -> u64
   while f < NF_N
     invariant f <= NF_N && p < NPROC && kok(k) && pid < NPROC
   {
-    if f != NF_PIDC && nstype & nf_flag(f) != 0 {
+    if f != NF_PIDC && f != NF_TIMEC && nstype & nf_flag(f) != 0 {
       let e = ns_may_join(k, pid, f, nf_id(k, p, f));
       if e != 0 {
         return e;
@@ -1020,7 +1382,7 @@ fn lx_setns(k: &mut Kernel, pid: u64, fd: u64, nstype: u64) -> u64
   while g < NF_N
     invariant g <= NF_N && p < NPROC && kok(k) && pid < NPROC
   {
-    if g != NF_PIDC && nstype & nf_flag(g) != 0 {
+    if g != NF_PIDC && g != NF_TIMEC && nstype & nf_flag(g) != 0 {
       ns_join(&mut k, pid, g, nf_id(k, p, g), p);
     }
     g = g + 1;

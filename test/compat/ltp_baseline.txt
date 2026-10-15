@@ -56,9 +56,11 @@ clock_adjtime02
 clock_getres01
 clock_gettime01
 clock_gettime02
+clock_gettime03
 clock_gettime04
 clock_nanosleep01
 clock_nanosleep02
+clock_nanosleep03
 clock_nanosleep04
 clock_settime01
 clock_settime02
@@ -949,6 +951,7 @@ sysfs04
 sysfs05
 sysinfo01
 sysinfo02
+sysinfo03
 syslog11
 syslog12
 tee01
@@ -967,6 +970,7 @@ timer_settime02
 timer_settime03
 timerfd01
 timerfd02
+timerfd04
 timerfd_create01
 timerfd_gettime01
 timerfd_settime01
