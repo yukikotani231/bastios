@@ -632,6 +632,7 @@ t_mem: FUTEX_WAKE on an unmapped word is EFAULT
 t_mem: MAP_SHARED anonymous across fork
 t_mem: MAP_SHARED file mapped by two processes
 t_mem: MAP_SHARED file mapping across fork
+t_mem: a writable MAP_SHARED mapping is written back after twenty read-only ones
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
 t_mem: a MAP_SHARED mapping sees write(2)
@@ -1284,6 +1285,15 @@ node: node: make the device nodes
 node: node: read and write files
 node: node: timers and promises run in order
 node: node: version
+go: go: a program that panics dies with status 2
+go: go: build a program and run it, and its exit status
+go: go: files, directories and the clock
+go: go: go test
+go: go: gofmt rewrites a program
+go: go: goroutines, channels and the collector
+go: go: make the device nodes
+go: go: run a program
+go: go: version
 t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller
 t_sys: keys: add_key, read, describe, update, request_key, link, search, unlink
 t_sys: keys: unknown type, bad payload, expiry, revocation, no such key
