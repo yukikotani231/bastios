@@ -65,6 +65,7 @@ fn is_tcp(k: &Kernel, pid: u64, fd: u64) -> bool
 fn lx_tcp_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_fd_or_fail(result)
 {
   if proto != 0 && proto != IPPROTO_TCP {
     return EPROTONOSUPPORT;

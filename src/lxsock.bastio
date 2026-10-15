@@ -251,6 +251,7 @@ fn sock_kind_ok(kind: u64) -> bool {
 fn lx_socket(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_fd_or_fail(result)
 {
   if !sock_kind_ok(kind) {
     return EINVAL;
@@ -280,6 +281,7 @@ fn lx_socket(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64) -> u6
 fn lx_inet_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_fd_or_fail(result)
 {
   if kind % 16 == SOCK_STREAM {
     return lx_tcp_socket(&mut k, pid, kind, proto);   // src/lxtcp.bastio
