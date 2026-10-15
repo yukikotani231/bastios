@@ -820,6 +820,19 @@ t_nsmany: 60 tmpfs mounts at once, each with its own files
 t_nsmany: 24 PID namespaces at once
 t_nsmany: 24 UTS namespaces at once, each with its own name
 t_nsmany: and 24 more once those are gone
+t_nsioctl: NS_GET_NSTYPE gives the CLONE_NEW* flag of the namespace
+t_nsioctl: a UTS namespace has no parent
+t_nsioctl: an ordinary descriptor says ENOTTY
+t_nsioctl: from inside a PID namespace its parent is out of reach
+t_nsioctl: from inside a user namespace its parent is out of reach
+t_nsioctl: only a user namespace has an owner uid
+t_nsioctl: the children's PID namespace has the first one as its parent
+t_nsioctl: the descriptor NS_GET_USERNS returns is close-on-exec
+t_nsioctl: the first PID namespace has no parent
+t_nsioctl: the first user namespace has no owner and no parent
+t_nsioctl: the first user namespace is owned by uid 0
+t_nsioctl: the first user namespace owns the first UTS namespace
+t_nsioctl: the owner of a user namespace its creator has no map for is 65534
 t_openat2: /proc/self/exe opens the program
 t_openat2: BENEATH inside opens
 t_openat2: BENEATH through a link inside opens

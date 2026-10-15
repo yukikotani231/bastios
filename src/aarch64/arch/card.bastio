@@ -32,6 +32,10 @@ fn card_is_e1000(d: &Card) -> bool {
   return d is Card::E1000;
 }
 
+fn card_is_rtl(d: &Card) -> bool {
+  return false;
+}
+
 fn card_is_ena(d: &Card) -> bool {
   return false;
 }
