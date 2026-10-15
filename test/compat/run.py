@@ -683,6 +683,7 @@ def main():
     ap.add_argument("--go-disk", help="the Go disk (the Go toolchain of the golang image) for go.txt")
     ap.add_argument("--python-disk", help="the Python disk (the root of the python:alpine image) for python.txt")
     ap.add_argument("--python-wheels", help="the Python packages python.txt installs, served at HOSTURL/wheels/")
+    ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--arch", default="x86_64", choices=["x86_64", "aarch64"],
@@ -705,6 +706,7 @@ def main():
     node = load_applets(os.path.join(HERE, "node.txt"))
     go = load_applets(os.path.join(HERE, "go.txt"))
     python = load_applets(os.path.join(HERE, "python.txt"))
+    rust = load_applets(os.path.join(HERE, "rust.txt"))
     tty = load_tty(os.path.join(HERE, "tty.txt"))
     alpine_tty = load_tty(os.path.join(HERE, "alpine_tty.txt"))
     os.makedirs(args.out, exist_ok=True)
@@ -828,6 +830,12 @@ def main():
             os.makedirs(os.path.join(web.dir, "alpine"), exist_ok=True)
             os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", args.arch))
         lanes.append((disk, [("python", "Python development", applets_lane(python, 900))], "1G"))
+    if args.rust_disk:
+        # rustc is a large dynamic program, and the cases unpack a root
+        # of about a gigabyte onto the disk: a copy.
+        disk = os.path.join(args.out, "rust-run.img")
+        shutil.copyfile(args.rust_disk, disk)
+        lanes.append((disk, [("rust", "Rust toolchain", applets_lane(rust, 900))], "2G"))
     lanes = [l for l in lanes if l[1]]
     # Write out the copies just made before any guest reads a disk: a host
     # still flushing hundreds of MiB can hold up a virtio request for longer
@@ -844,7 +852,7 @@ def main():
         log.close()
         web.shutdown()
         shutil.rmtree(scratch, ignore_errors=True)
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "python"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "rust", "python"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]
