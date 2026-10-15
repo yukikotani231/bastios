@@ -9,6 +9,8 @@ test/trusted_base.sh            # compare with test/trusted_base.txt (the first 
 test/trusted_base.sh --update   # after a deliberate change: rewrite it, and review the diff
 ```
 
+`boot/multiboot.c`, which reads the boot loader's information before anything is proved, is also fuzzed on the host (`test/multiboot_test.sh`, part of `make test`): the real file runs against a fake identity-mapped memory with guard pages around the information, so a read outside the structure the loader described faults, and each parse is followed by the checks the kernel relies on (bounded region and command-line counts, `bst_boot_take` returning memory inside the map).
+
 The hand-written C in `boot/` is compiled with `-Wall -Wextra -Werror`; the generated C is not, because it declares temporaries it may not use.
 
 BastiOS also trusts everything bastiolang trusts: Z3, the Bastio compiler, the C compiler, the runtime preludes of the `kernel` and `user` targets, and the specification of every builtin. [bastiolang's docs/trusted-base.md](https://github.com/yukikotani231/bastiolang/blob/main/docs/trusted-base.md) lists those, and `bastioc0 --trusted-base` counts them.
