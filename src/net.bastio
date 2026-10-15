@@ -72,7 +72,7 @@ const NET_PENDING: u64 = 1000;        // nic_ping_start: started, check later
 const NET_NONE: u64 = 18446744073709551615;
 const PID_LIMIT: u64 = 65536;
 
-const SOCKS: u64 = 8;                 // UDP sockets in the table
+const SOCKS: u64 = 32;                // UDP sockets in the table
 const RXQ: u64 = 4;                   // datagrams each socket can queue
 const UDP_MAX: u64 = 1472;            // the largest payload one frame carries
 const NO_SOCK: u64 = 18446744073709551615;
@@ -152,7 +152,7 @@ const NL_LEN: u64 = 1;                 //   bytes queued
 const NL_PORT: u64 = 2;                //   its port id
 const NL_NS: u64 = 3;                  //   its namespace
 const NL_RAW: u64 = 4;                 //   1: what is queued is one raw mq_notify cookie (32 bytes), not rtnetlink messages
-const NATN: u64 = 64;                  // masqueraded flows (src/netns.bastio)
+const NATN: u64 = 256;                 // masqueraded flows (src/netns.bastio)
 const NAT_W: u64 = 5;                  // words per flow:
 const NAT_PROTO: u64 = 0;              //   IP_TCP, IP_UDP or IP_ICMP; 0: free
 const NAT_IP: u64 = 1;                 //   the inside address ...
@@ -163,7 +163,7 @@ const NAT_BASE: u64 = 40000;           // flow f goes out from port NAT_BASE + f
 const NAT_NONE: u64 = 18446744073709551615;
 
 // The TCP table's size (src/tcp.bastio has the rest).
-const TCBS: u64 = 32;                 // connections (listeners and TIME_WAIT hold some)
+const TCBS: u64 = 240;                // connections (listeners and TIME_WAIT hold some)
 const TCB_W: u64 = 28;                // words per connection (TCP_RING, the size of
                                       // its buffers, is in src/tcpbuf.bastio)
 

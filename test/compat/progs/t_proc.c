@@ -266,5 +266,7 @@ int main(int argc, char **argv) {
         EXPECT("maps has [stack] and [vdso]", strstr(mb, "[stack]\n") != NULL && strstr(mb, "[vdso]\n") != NULL);
         EXPECT("maps lines end at column 74 for names", ({ char *q = strstr(mb, "[stack]"); q && q[-1] == ' ' && ({ char *l = q; while (l > mb && l[-1] != '\n') l--; (size_t)(q - l) == 73; }); }));
     }
+    EXPECT("readlink of /proc/self is the caller's id", ({ char lb[32], want[32]; ssize_t r = readlink("/proc/self", lb, sizeof lb - 1);
+           snprintf(want, sizeof want, "%d", (int)getpid()); r > 0 && (lb[r] = 0, strcmp(lb, want) == 0); }));
     return done();
 }
