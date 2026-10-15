@@ -691,7 +691,11 @@ fn lx_ptrace(k: &mut Kernel, pid: u64, req0: u64, p0: u64, addr: u64, data: u64)
         xfer_u64(&mut k.fs.xfer, 32, 1);        // is_error: -4095 .. -1
       }
     } else {
-      xfer_u64(&mut k.fs.xfer, 24, t2 / TS_NR % 1024);
+      let mut nr = t2 / TS_NR % 1024;
+      if UR_NUM < USER_REGS {
+        nr = ur_read(k, p, UR_NUM);          // the number as the process gave it
+      }
+      xfer_u64(&mut k.fs.xfer, 24, nr);
       let mut i = 0;
       while i < 6
         invariant i <= 6 && kok(k)

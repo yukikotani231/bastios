@@ -41,6 +41,7 @@ fn step_flags(fl: u64, on: bool) -> u64 {
 const PT_AUDIT_ARCH: u64 = 0xC00000B7;
 const UR_RET: u64 = 0;
 const UR_IP: u64 = 32;
+const UR_NUM: u64 = 8;                   // x8 holds the call's number
 const UR_SP: u64 = 31;
 
 fn ur_arg(n: u64) -> u64
