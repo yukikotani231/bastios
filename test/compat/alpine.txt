@@ -424,6 +424,15 @@ touch: /x: Read-only file system
 touch=1
 status 0
 
+== container: rootless runc runs a rootless runc inside its container (docker-in-docker)
+$ bb mkdir -p /disk/nu /disk/nu2 /disk/nub /run/nu && bb chown 65534:65534 /disk/nu /disk/nu2 /disk/nub /run/nu && bb su -s /bin/ash nobody -c 'cd /disk/nu && /disk/busybox tar -xf /disk/root.tar && cd /disk/nu2 && /disk/busybox tar -xf /disk/root.tar' && echo Y2QgL3RtcCAmJiAvcnVuYyBzcGVjIC0tcm9vdGxlc3MgJiYgc2VkIC1pIC1lICdzIyJwYXRoIjogInJvb3RmcyIjInBhdGgiOiAiL2lubmVyIiMnIC1lICdzIyJ0ZXJtaW5hbCI6IHRydWUjInRlcm1pbmFsIjogZmFsc2UjJyAtZSAncyMicmVhZG9ubHkiOiB0cnVlIyJyZWFkb25seSI6IGZhbHNlIycgLWUgJ3MjInNoIiMiL2Jpbi9zaCIsICItYyIsICJpZCAtdTsgaG9zdG5hbWU7IGVjaG8gcGlkPSQkOyB0b3VjaCAveDsgZWNobyB0b3VjaD0kPyIjJyBjb25maWcuanNvbiAmJiAvcnVuYyAtLXJvb3QgL3RtcC9yIHJ1biBuMSA8IC9kZXYvbnVsbDsgZWNobyBpbm5lcj0kPwo= | bb base64 -d > /disk/nu/inner.sh && bb chown 65534:65534 /disk/nu/inner.sh && bb su -s /bin/ash nobody -c 'cd /disk/nub && /disk/runc spec --rootless && /disk/busybox sed -i -e "s#\"path\": \"rootfs\"#\"path\": \"/disk/nu\"#" -e "s#\"terminal\": true#\"terminal\": false#" -e "s#\"readonly\": true#\"readonly\": false#" -e "s#\"mounts\": \[#\"mounts\": [{\"destination\":\"/runc\",\"type\":\"bind\",\"source\":\"/disk/runc\",\"options\":[\"rbind\",\"ro\"]},{\"destination\":\"/inner\",\"type\":\"bind\",\"source\":\"/disk/nu2\",\"options\":[\"rbind\"]},#" -e "s#\"CAP_AUDIT_WRITE\"#\"CAP_AUDIT_WRITE\",\"CAP_SETUID\",\"CAP_SETGID\",\"CAP_SYS_ADMIN\",\"CAP_SETPCAP\"#g" -e "s#\"sh\"#\"/bin/sh\", \"/inner.sh\"#" config.json && /disk/runc --root /run/nu run o1 < /dev/null 2>/dev/null; echo outer=$?'
+0
+runc
+pid=1
+touch=0
+inner=0
+outer=0
+
 == container: rootless: crun runs Alpine as an unprivileged user in a user namespace of its own
 $ bb mkdir -p /disk/cur /disk/cu /run/cru && bb chown 65534:65534 /disk/cur /disk/cu /run/cru && bb su -s /bin/ash nobody -c 'cd /disk/cur && /disk/busybox tar -xf /disk/root.tar && cd /disk/cu && /disk/crun spec --rootless && /disk/busybox sed -i -e "s#\"path\": \"rootfs\"#\"path\": \"/disk/cur\"#" -e "s#\"terminal\": true#\"terminal\": false#" -e "s#\"sh\"#\"/bin/sh\", \"-c\", \"id -u; hostname; echo pid=\$\$; cat /proc/self/uid_map; touch /x 2>\&1; echo touch=\$?\"#" config.json && /disk/crun --root /run/cru run c3 < /dev/null; echo status $?'
 0
