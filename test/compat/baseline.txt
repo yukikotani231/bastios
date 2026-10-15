@@ -318,6 +318,10 @@ t_fdlock: F_SETLEASE and F_GETLEASE
 t_fdlock: F_SETOWN, F_SETOWN_EX and F_SETSIG set a description's owner
 t_fdlock: O_ASYNC on a pipe signals its owner when input arrives
 t_fdlock: a lock needs the matching access mode; bad requests are EINVAL
+t_fsx: fallocate PUNCH_HOLE|KEEP_SIZE zeroes a range in /tmp
+t_fsx: fallocate ZERO_RANGE zeroes (and extends) a range in /tmp
+t_fsx: fallocate PUNCH_HOLE|KEEP_SIZE zeroes a range on the disk (the working directory)
+t_fsx: fallocate ZERO_RANGE zeroes (and extends) a range on the disk (the working directory)
 t_file: /dev/null write
 t_file: /dev/urandom read
 t_file: /dev/zero read
