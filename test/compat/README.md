@@ -107,7 +107,7 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   venv, `pip install` packages from the host's web server (pinned by SHA-256
   in `pythondeps.txt`, served at `HOSTURL/wheels/`; pip finds them through
   `/etc/pip.conf`), build a C extension from source (MarkupSafe), run the
-  whole test suite of a real project (Jinja2's 784 tests), load binary musl
+  whole test suite of a real project (Jinja2's 784 tests, spread over two xdist workers), load binary musl
   wheels (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson,
   cffi) and run `pyprogs/stdlib.py`, which exercises the standard library on
   top of the system calls: fork, threads, signals, sockets, mmap, pty,
