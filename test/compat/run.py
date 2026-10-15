@@ -696,6 +696,7 @@ def main():
     ap.add_argument("--debian-disk", help="the Debian disk (a glibc root file system) for debian.txt")
     ap.add_argument("--node-disk", help="the Node disk (the root of the node:alpine image) for node.txt")
     ap.add_argument("--go-disk", help="the Go disk (the Go toolchain of the golang image) for go.txt")
+    ap.add_argument("--jdk-disk", help="the JDK disk (the JDK of the eclipse-temurin image) for java.txt")
     ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
     ap.add_argument("--perl-disk", help="the Perl disk (the root of a perl image) for perl.txt")
     ap.add_argument("--ruby-disk", help="the Ruby disk (the root of the ruby image) for ruby.txt")
@@ -721,6 +722,7 @@ def main():
     debian = load_applets(os.path.join(HERE, "debian.txt"))
     node = load_applets(os.path.join(HERE, "node.txt"))
     go = load_applets(os.path.join(HERE, "go.txt"))
+    java = load_applets(os.path.join(HERE, "java.txt"))
     rust = load_applets(os.path.join(HERE, "rust.txt"))
     perl = load_applets(os.path.join(HERE, "perl.txt"))
     ruby = load_applets(os.path.join(HERE, "ruby.txt"))
@@ -835,6 +837,11 @@ def main():
         disk = os.path.join(args.out, "go-run.img")
         shutil.copyfile(args.go_disk, disk)
         lanes.append((disk, [("go", "Go toolchain", applets_lane(go, 600))], "1G"))
+    if args.jdk_disk:
+        # The cases unpack a root of about 400 MB onto the disk: a copy.
+        disk = os.path.join(args.out, "jdk-run.img")
+        shutil.copyfile(args.jdk_disk, disk)
+        lanes.append((disk, [("java", "JDK", applets_lane(java, 900))], "2G"))
     if args.rust_disk:
         # rustc is a large dynamic program, and the cases unpack a root
         # of about a gigabyte onto the disk: a copy.
@@ -864,7 +871,7 @@ def main():
         log.close()
         web.shutdown()
         shutil.rmtree(scratch, ignore_errors=True)
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "rust", "perl", "ruby", "lua"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust", "perl", "ruby", "lua"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]

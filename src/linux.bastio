@@ -1607,18 +1607,17 @@ fn line_take(l: &mut Buf, t: u64)
 
 /// read from the file open on native row `row`: up to READ_MAX bytes, a
 /// transfer buffer at a time, so a regular file is not read short (as
-/// programs expect of one) unless it ends. When a block the read needs is
-/// not cached, the offset goes back to where the read began and the call
-/// starts again once the disk has caught up (DISK_RETRY): the part read so
-/// far is read again, from the cache, instead of being returned as a short
-/// count (unzip takes a short read of a 4360-byte file for a broken archive).
+/// programs expect of one, and the JDK's jimage reader takes the count for
+/// granted) unless it ends. When the disk lags after some pieces the
+/// offset goes back to where the call began and the whole call restarts
+/// once the disk has caught up.
 fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && row < FD_ROWS
   ensures kok(k)
   ensures lx_count_or_fail(result, n)
 {
   let want = smaller(n, READ_MAX);
-  let off0 = vfs_offset(k.fs, row);
+  let start = vfs_offset(k.fs, row);
   let mut done = 0;
   while done < want
     invariant done <= want && want <= READ_MAX && kok(k)
@@ -1628,7 +1627,9 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
       return EBADF;
     }
     if got == VFS_MISS {
-      vfs_advance(&mut k.fs, row, off0, 0);  // start the call again from the beginning
+      if done > 0 {
+        vfs_seek(&mut k.fs, row, start);    // undo the pieces; the call restarts whole
+      }
       return DISK_RETRY;                    // sleep until the disk catches up
     }
     if va > 0xFFFFFFFFFFFFFFFF - READ_MAX {
