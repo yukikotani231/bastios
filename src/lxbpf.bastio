@@ -3,12 +3,33 @@
 // program, attach it to the container's cgroup and ask first what is
 // attached.
 //
-// The programs are accepted and kept nowhere: nothing runs one, so the
-// device rules of a cgroup are not enforced (a container's /dev holds only
-// the nodes its runtime made there, and mknod is root's). Queries find no
-// program attached. Every other command, and any other program type, is
-// -EINVAL. A program, and an attachment by link, is a descriptor on
-// /dev/null: it closes like any other.
+// A program is kept in one of DVP_N slots of k.mns (DVP_MAXI instructions
+// each), counted by the descriptors on it and the cgroups it is attached
+// to. It is checked when it is loaded (dv_valid) for the instructions
+// runtimes emit: loads of the three context words, register and immediate
+// ALU operations, forward jumps and exit; anything else, a backward jump
+// or a program that does not end in exit is -EINVAL. The registers hold 32
+// bits here, so a 64-bit operation is accepted only where it gives the same
+// result on such values (mov, and, or and xor, with an immediate below
+// 2^31).
+//
+// Every open of a device through /dev and every mknod of a device node
+// runs the programs attached to the caller's cgroup and to the cgroups
+// above it (dv_check): the access is allowed only if each of them returns
+// an odd number, as Linux's device filter has it, and is -EPERM otherwise.
+// The context is the type (1 block, 2 character) and the access (1 mknod,
+// 2 read, 4 write) in access_type, then the major and the minor numbers.
+// Devices that have no number here (no entry in dv_num) are not checked.
+// A cgroup holds two programs (BPF_F_ALLOW_MULTI); a program attached
+// without it has to be the only one, or replaces the others with
+// BPF_F_ALLOW_OVERRIDE. A link (BPF_LINK_CREATE) detaches when its
+// descriptor closes.
+//
+// Not done: BPF_PROG_QUERY finds nothing attached and there is no
+// BPF_PROG_GET_FD_BY_ID, so a runtime that replaces the rules of a cgroup
+// attaches a second program, and both have to allow; the verifier's
+// register tracking (every program is run, not proved), and every other
+// command and program type: -EINVAL.
 
 import "linux.bastio";
 import "lxfd.bastio";
@@ -22,6 +43,14 @@ const BPF_PROG_TYPE_CGROUP_DEVICE: u64 = 15;
 const BPF_CGROUP_DEVICE: u64 = 6;
 const BPF_MAX_INSNS: u64 = 4096;
 const BPF_ATTR_MAX: u64 = 4096;
+const BPF_F_ALLOW_OVERRIDE: u64 = 1;
+const BPF_F_ALLOW_MULTI: u64 = 2;
+
+const DVA_MKNOD: u64 = 1;
+const DVA_READ: u64 = 2;
+const DVA_WRITE: u64 = 4;
+const DVT_BLOCK: u64 = 1;
+const DVT_CHAR: u64 = 2;
 
 /// Is descriptor fd of pid an open cgroup directory?
 fn bpf_cgroup_fd(k: &Kernel, pid: u64, fd: u64) -> bool
@@ -31,16 +60,500 @@ fn bpf_cgroup_fd(k: &Kernel, pid: u64, fd: u64) -> bool
   return d.kind == K_DIR && d.x >= DIR_CG;
 }
 
-/// A new descriptor that stands for a program or a link.
-fn bpf_object(k: &mut Kernel, pid: u64) -> u64
-  requires kok(k) && pid < NPROC
+// ---------------------------------------------------------------- programs
+
+/// Word w of program slot p.
+fn dv_get(k: &Kernel, p: u64, w: u64) -> u64
+  requires kok(k) && p < DVP_N && w < DVP_W
+{
+  return get(k.mns, MNS_DVP + p * DVP_W + w);
+}
+
+fn dv_put(k: &mut Kernel, p: u64, w: u64, v: u64)
+  requires kok(k) && p < DVP_N && w < DVP_W
   ensures kok(k)
 {
-  let h = ofd_new(&mut k, OF_DEV, DEV_NULL);
+  k.mns = set(k.mns, MNS_DVP + p * DVP_W + w, v);
+}
+
+/// A free program slot, taken (one reference), or DVP_N.
+fn dv_alloc(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k) && result <= DVP_N
+{
+  let mut p = 0;
+  while p < DVP_N
+    invariant p <= DVP_N && kok(k)
+  {
+    if dv_get(k, p, 0) == 0 {
+      dv_put(&mut k, p, 0, 1);
+      dv_put(&mut k, p, 1, 0);
+      return p;
+    }
+    p = p + 1;
+  }
+  return DVP_N;
+}
+
+/// One more holder of program p.
+fn dv_hold(k: &mut Kernel, p: u64)
+  requires kok(k) && p < DVP_N
+  ensures kok(k)
+{
+  dv_put(&mut k, p, 0, smaller(dv_get(k, p, 0), 0xFFFFFF) + 1);
+}
+
+/// One holder less of program p; a program nobody holds is gone.
+fn dv_drop(k: &mut Kernel, p: u64)
+  requires kok(k) && p < DVP_N
+  ensures kok(k)
+{
+  let r = dv_get(k, p, 0);
+  if r > 1 {
+    dv_put(&mut k, p, 0, r - 1);
+  } else {
+    dv_put(&mut k, p, 0, 0);
+    dv_put(&mut k, p, 1, 0);
+  }
+}
+
+/// Whether the n instructions of program p are ones dv_run runs, with
+/// every jump forward and inside the program and exit last.
+fn dv_valid(k: &Kernel, p: u64, n: u64) -> bool
+  requires kok(k) && p < DVP_N && n <= DVP_MAXI
+{
+  if n == 0 {
+    return false;
+  }
+  let mut pc = 0;
+  while pc < n
+    invariant pc <= n && n <= DVP_MAXI && kok(k)
+  {
+    let insn = dv_get(k, p, 2 + pc);
+    let code = insn % 256;
+    let dst = insn / 256 % 16;
+    let src = insn / 4096 % 16;
+    let off = insn / 65536 % 65536;
+    let imm = insn / 0x100000000;
+    let cls = code % 8;
+    let op = code / 16;
+    let reg = code / 8 % 2 == 1;
+    if code == 0x61 {
+      // ldxw dst, [r1 + off]: the context
+      if src != 1 || dst > 9 || imm != 0 || (off != 0 && off != 4 && off != 8) {
+        return false;
+      }
+    } else if code == 0x95 {
+      // exit
+    } else if cls == 7 {
+      // 64-bit ALU: mov, and, or, xor
+      if dst > 9 || !(op == 11 || op == 5 || op == 4 || op == 10) {
+        return false;
+      }
+      if reg && src > 9 {
+        return false;
+      }
+      if !reg && imm > 0x7FFFFFFF {
+        return false;
+      }
+    } else if cls == 4 {
+      // 32-bit ALU: add, sub, or, and, lsh, rsh, xor, mov
+      if dst > 9 || !(op == 0 || op == 1 || op == 4 || op == 5 || op == 6 || op == 7 || op == 10 || op == 11) {
+        return false;
+      }
+      if reg && src > 9 {
+        return false;
+      }
+      if !reg && (op == 6 || op == 7) && imm >= 32 {
+        return false;
+      }
+    } else if cls == 5 || cls == 6 {
+      // ja, jeq, jgt, jge, jset, jne, jlt, jle
+      if !(code == 0x05 || op == 1 || op == 2 || op == 3 || op == 4 || op == 5 || op == 10 || op == 11) || dst > 9 {
+        return false;
+      }
+      if reg && src > 9 {
+        return false;
+      }
+      if !reg && cls == 5 && code != 0x05 && imm > 0x7FFFFFFF {
+        return false;
+      }
+      if off >= 0x8000 || off >= n - pc - 1 {
+        return false;
+      }
+    } else {
+      return false;
+    }
+    pc = pc + 1;
+  }
+  return dv_get(k, p, 2 + n - 1) % 256 == 0x95;
+}
+
+/// Runs program p on the context (access_type, major, minor): 1 if it
+/// allows the access, 0 if it denies it or goes wrong.
+fn dv_run(k: &Kernel, p: u64, ctx0: u64, major: u64, minor: u64) -> u64
+  requires kok(k) && p < DVP_N
+  ensures result <= 1
+{
+  let n = smaller(dv_get(k, p, 1), DVP_MAXI);
+  let mut rg = alloc(11);
+  let mut pc = 0;
+  let mut res = 0;
+  let mut live = true;
+  while pc < n && live
+    invariant pc <= n && n <= DVP_MAXI && len(rg) == 11 && res <= 1 && kok(k)
+  {
+    let insn = dv_get(k, p, 2 + pc);
+    let code = insn % 256;
+    let dst = insn / 256 % 16;
+    let src = insn / 4096 % 16;
+    let off = insn / 65536 % 65536;
+    let imm = insn / 0x100000000;
+    let cls = code % 8;
+    let op = code / 16;
+    let reg = code / 8 % 2 == 1;
+    let mut next = pc + 1;
+    if code == 0x61 {
+      let mut v = 0;
+      if off == 0 {
+        v = ctx0;
+      } else if off == 4 {
+        v = major;
+      } else if off == 8 {
+        v = minor;
+      } else {
+        live = false;
+      }
+      if src != 1 || dst > 9 {
+        live = false;
+      }
+      if live {
+        rg = set(rg, dst, v & 0xFFFFFFFF);
+      }
+    } else if code == 0x95 {
+      res = get(rg, 0) & 1;
+      live = false;
+    } else if cls == 7 || cls == 4 {
+      if dst > 9 || (reg && src > 9) || (cls == 7 && !reg && imm > 0x7FFFFFFF) || (cls == 7 && op != 11 && op != 5 && op != 4 && op != 10) {
+        live = false;
+      } else {
+        let a = get(rg, dst) & 0xFFFFFFFF;
+        let mut v = imm & 0xFFFFFFFF;
+        if reg {
+          v = get(rg, src) & 0xFFFFFFFF;
+        }
+        let mut r = 0;
+        if op == 0 {
+          r = (a + v) & 0xFFFFFFFF;
+        } else if op == 1 {
+          r = (a + 0x100000000 - v) & 0xFFFFFFFF;
+        } else if op == 4 {
+          r = a | v;
+        } else if op == 5 {
+          r = a & v;
+        } else if op == 6 {
+          r = (a * pow2(v % 32)) & 0xFFFFFFFF;
+        } else if op == 7 {
+          r = a / pow2(v % 32);
+        } else if op == 10 {
+          r = (a | v) - (a & v);
+        } else if op == 11 {
+          r = v;
+        } else {
+          live = false;
+        }
+        if live {
+          rg = set(rg, dst, r & 0xFFFFFFFF);
+        }
+      }
+    } else if cls == 5 || cls == 6 {
+      if dst > 9 || (reg && src > 9) || off >= 0x8000 || off >= n - pc - 1 || (cls == 5 && !reg && code != 0x05 && imm > 0x7FFFFFFF) {
+        live = false;
+      } else {
+        let a = get(rg, dst) & 0xFFFFFFFF;
+        let mut v = imm & 0xFFFFFFFF;
+        if reg {
+          v = get(rg, src) & 0xFFFFFFFF;
+        }
+        let mut hit = false;
+        if code == 0x05 {
+          hit = true;
+        } else if op == 1 {
+          hit = a == v;
+        } else if op == 2 {
+          hit = a > v;
+        } else if op == 3 {
+          hit = a >= v;
+        } else if op == 4 {
+          hit = a & v != 0;
+        } else if op == 5 {
+          hit = a != v;
+        } else if op == 10 {
+          hit = a < v;
+        } else if op == 11 {
+          hit = a <= v;
+        } else {
+          live = false;
+        }
+        if hit && live {
+          next = pc + 1 + off;
+        }
+      }
+    } else {
+      live = false;
+    }
+    pc = next;
+  }
+  free(rg);
+  return res;
+}
+
+// ---------------------------------------------------------------- cgroups
+
+/// Detaches program p from cgroup c: whether it was attached.
+fn dv_detach(k: &mut Kernel, c: u64, p: u64) -> bool
+  requires kok(k) && c < CG_N && p < DVP_N
+  ensures kok(k)
+{
+  let mut found = false;
+  if cg_get(k, c, CGW_DEV0) == p + 1 {
+    cg_put(&mut k, c, CGW_DEV0, 0);
+    dv_drop(&mut k, p);
+    found = true;
+  }
+  if cg_get(k, c, CGW_DEV1) == p + 1 {
+    cg_put(&mut k, c, CGW_DEV1, 0);
+    dv_drop(&mut k, p);
+    found = true;
+  }
+  return found;
+}
+
+/// Cgroup c is gone, or new: no program stays attached to it.
+fn dv_cg_clear(k: &mut Kernel, c: u64)
+  requires kok(k) && c < CG_N
+  ensures kok(k)
+{
+  let a0 = cg_get(k, c, CGW_DEV0);
+  if a0 != 0 && a0 <= DVP_N {
+    dv_drop(&mut k, a0 - 1);
+  }
+  let a1 = cg_get(k, c, CGW_DEV1);
+  if a1 != 0 && a1 <= DVP_N {
+    dv_drop(&mut k, a1 - 1);
+  }
+  cg_put(&mut k, c, CGW_DEV0, 0);
+  cg_put(&mut k, c, CGW_DEV1, 0);
+}
+
+/// Attaches program p to cgroup c with these attach flags: 0 or -errno.
+fn dv_attach(k: &mut Kernel, c: u64, p: u64, flags: u64) -> u64
+  requires kok(k) && c < CG_N && p < DVP_N
+  ensures kok(k)
+{
+  let a0 = cg_get(k, c, CGW_DEV0);
+  let a1 = cg_get(k, c, CGW_DEV1);
+  if a0 == p + 1 || a1 == p + 1 {
+    return EEXIST;
+  }
+  if flags & BPF_F_ALLOW_MULTI == 0 && (a0 != 0 || a1 != 0) {
+    if flags & BPF_F_ALLOW_OVERRIDE == 0 {
+      return EPERM;
+    }
+    dv_cg_clear(&mut k, c);
+  }
+  if cg_get(k, c, CGW_DEV0) == 0 {
+    cg_put(&mut k, c, CGW_DEV0, p + 1);
+  } else if cg_get(k, c, CGW_DEV1) == 0 {
+    cg_put(&mut k, c, CGW_DEV1, p + 1);
+  } else {
+    return E2BIG;
+  }
+  dv_hold(&mut k, p);
+  return 0;
+}
+
+/// A descriptor closes on program p (and, for a link, cgroup c1 - 1).
+fn bpf_release(k: &mut Kernel, p: u64, c1: u64)
+  requires kok(k) && p < DVP_N
+  ensures kok(k)
+{
+  if c1 != 0 && c1 <= CG_N {
+    let found = dv_detach(&mut k, c1 - 1, p);
+  }
+  dv_drop(&mut k, p);
+}
+
+// ---------------------------------------------------------------- the check
+
+struct DvNum { ty: u64, major: u64, minor: u64 }
+
+/// The type and numbers of /dev device d (type 0: it has none here).
+fn dv_num(d: u64) -> DvNum
+  ensures result.ty <= 2
+{
+  if d == DEV_NULL {
+    return DvNum { ty: DVT_CHAR, major: 1, minor: 3 };
+  }
+  if d == DEV_ZERO {
+    return DvNum { ty: DVT_CHAR, major: 1, minor: 5 };
+  }
+  if d == DEV_FULL {
+    return DvNum { ty: DVT_CHAR, major: 1, minor: 7 };
+  }
+  if d == DEV_RANDOM {
+    return DvNum { ty: DVT_CHAR, major: 1, minor: 9 };
+  }
+  if d == DEV_TTY {
+    return DvNum { ty: DVT_CHAR, major: 5, minor: 0 };
+  }
+  if d == DEV_PTMX {
+    return DvNum { ty: DVT_CHAR, major: 5, minor: 2 };
+  }
+  if d == DEV_DSP {
+    return DvNum { ty: DVT_CHAR, major: 14, minor: 3 };
+  }
+  if d == DEV_MICE {
+    return DvNum { ty: DVT_CHAR, major: 13, minor: 63 };
+  }
+  if d == DEV_LOOPCTL {
+    return DvNum { ty: DVT_CHAR, major: 10, minor: 237 };
+  }
+  if d >= DEV_LOOP && d < DEV_LOOP + LOOP_N {
+    return DvNum { ty: DVT_BLOCK, major: 7, minor: d - DEV_LOOP };
+  }
+  if d >= DEV_PTS && d < DEV_PTS + PTY_N {
+    return DvNum { ty: DVT_CHAR, major: 136, minor: d - DEV_PTS };
+  }
+  return DvNum { ty: 0, major: 0, minor: 0 };
+}
+
+/// Whether process pid may use a device of this type and these numbers in
+/// this way (DVA_*) under the programs of its cgroup and those above it.
+fn dv_check(k: &Kernel, pid: u64, ty: u64, major: u64, minor: u64, acc: u64) -> bool
+  requires kok(k) && pid < NPROC && ty <= 0xFFFF && acc <= 7
+{
+  let ctx0 = ty + acc * 65536;
+  let mut c = cg_of(k, pid);
+  let mut i = 0;
+  while i < CG_N
+    invariant i <= CG_N && c < CG_N && kok(k)
+  {
+    let mut j = 0;
+    while j < 2
+      invariant j <= 2 && c < CG_N && kok(k)
+    {
+      let pr = cg_get(k, c, CGW_DEV0 + j);
+      if pr != 0 && pr <= DVP_N && dv_run(k, pr - 1, ctx0, major, minor) == 0 {
+        return false;
+      }
+      j = j + 1;
+    }
+    if c == 0 {
+      return true;
+    }
+    c = cg_parent(k, c);
+    i = i + 1;
+  }
+  return true;
+}
+
+/// Whether process pid may open /dev device d with these open flags.
+fn dv_open_ok(k: &Kernel, pid: u64, d: u64, flags: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  if flags & LO_PATH != 0 {
+    return true;                            // a handle for the name only
+  }
+  let n = dv_num(d);
+  if n.ty == 0 {
+    return true;
+  }
+  let mut acc = DVA_READ;
+  if flags % 4 == 1 {
+    acc = DVA_WRITE;
+  } else if flags % 4 >= 2 {
+    acc = DVA_READ + DVA_WRITE;
+  }
+  return dv_check(k, pid, n.ty, n.major, n.minor, acc);
+}
+
+/// Whether process pid may make a device node of this type (T_CHR or
+/// T_BLK) and Linux device number.
+fn dv_mknod_ok(k: &Kernel, pid: u64, ty: u64, dev: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let mut t = DVT_BLOCK;
+  if ty == T_CHR {
+    t = DVT_CHAR;
+  }
+  let major = dev / 256 % 4096;
+  let minor = dev % 256 + dev / 1048576 % 4096 * 256;
+  return dv_check(k, pid, t, major, minor, DVA_MKNOD);
+}
+
+// ---------------------------------------------------------------- bpf(2)
+
+/// A new descriptor on program p; for a link, the cgroup (plus one) it is
+/// attached to.
+fn bpf_object(k: &mut Kernel, pid: u64, p: u64, c1: u64) -> u64
+  requires kok(k) && pid < NPROC && p < DVP_N
+  ensures kok(k)
+{
+  let h = ofd_new(&mut k, OF_BPF, p);
   if h >= OFD_N {
     return ENFILE;
   }
+  of_set(&mut k.ofd, h, 3, c1);
   return fd_install(&mut k, pid, h);
+}
+
+/// The program slot descriptor fd of pid is on, or DVP_N.
+fn bpf_prog_fd(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= DVP_N
+{
+  let h = fd_ofd(k, pid, fd);
+  if h >= OFD_N || of_get(k.ofd, h, 0) != OF_BPF {
+    return DVP_N;
+  }
+  let p = of_get(k.ofd, h, 2);
+  if p >= DVP_N || dv_get(k, p, 0) == 0 {
+    return DVP_N;
+  }
+  return p;
+}
+
+/// BPF_PROG_LOAD of n instructions at user address insns: a descriptor, or -errno.
+fn bpf_load(k: &mut Kernel, pid: u64, n: u64, insns: u64) -> u64
+  requires kok(k) && pid < NPROC && n >= 1 && n <= DVP_MAXI
+  ensures kok(k)
+{
+  let p = dv_alloc(&mut k);
+  if p >= DVP_N {
+    return ENOMEM;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, insns, &mut k.fs.xfer, n * 8) != n * 8 {
+    dv_drop(&mut k, p);
+    return EFAULT;
+  }
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= DVP_MAXI && kok(k)
+  {
+    dv_put(&mut k, p, 2 + i, get_u64(k.fs.xfer, i * 8));
+    i = i + 1;
+  }
+  dv_put(&mut k, p, 1, n);
+  if !dv_valid(k, p, n) {
+    dv_drop(&mut k, p);
+    return EINVAL;
+  }
+  let fd = bpf_object(&mut k, pid, p, 0);
+  if fd >= 18446744073709547520 {
+    dv_drop(&mut k, p);                     // no descriptor to give it
+  }
+  return fd;
 }
 
 /// bpf(cmd, attr, size) for process pid.
@@ -62,15 +575,35 @@ fn lx_bpf(k: &mut Kernel, pid: u64, cmd: u64, attr: u64, size: u64) -> u64
     if w0 % 0x100000000 != BPF_PROG_TYPE_CGROUP_DEVICE || insns == 0 || insns > BPF_MAX_INSNS || w1 < USER_BASE {
       return EINVAL;
     }
-    return bpf_object(&mut k, pid);
+    if insns > DVP_MAXI {
+      return E2BIG;
+    }
+    return bpf_load(&mut k, pid, insns, w1);
   }
   if cmd == BPF_PROG_ATTACH || cmd == BPF_PROG_DETACH {
     // target_fd, attach_bpf_fd, attach_type, attach_flags
     if w1 % 0x100000000 != BPF_CGROUP_DEVICE {
       return EINVAL;
     }
-    if !bpf_cgroup_fd(k, pid, w0 % 0x100000000) {
+    let tfd = w0 % 0x100000000;
+    if !bpf_cgroup_fd(k, pid, tfd) {
       return EBADF;
+    }
+    let d = fd_look(k, pid, tfd);
+    if d.x < DIR_CG || d.x - DIR_CG >= CG_N {
+      return EBADF;
+    }
+    let c = d.x - DIR_CG;
+    let p = bpf_prog_fd(k, pid, w0 / 0x100000000);
+    if p >= DVP_N {
+      return EBADF;
+    }
+    if cmd == BPF_PROG_ATTACH {
+      return dv_attach(&mut k, c, p, w1 / 0x100000000);
+    }
+    let found = dv_detach(&mut k, c, p);
+    if !found {
+      return ENOENT;
     }
     return 0;
   }
@@ -79,14 +612,34 @@ fn lx_bpf(k: &mut Kernel, pid: u64, cmd: u64, attr: u64, size: u64) -> u64
     if w1 % 0x100000000 != BPF_CGROUP_DEVICE {
       return EINVAL;
     }
-    if !bpf_cgroup_fd(k, pid, w0 / 0x100000000) {
+    let tfd = w0 / 0x100000000;
+    if !bpf_cgroup_fd(k, pid, tfd) {
       return EBADF;
     }
-    return bpf_object(&mut k, pid);
+    let d = fd_look(k, pid, tfd);
+    if d.x < DIR_CG || d.x - DIR_CG >= CG_N {
+      return EBADF;
+    }
+    let c = d.x - DIR_CG;
+    let p = bpf_prog_fd(k, pid, w0 % 0x100000000);
+    if p >= DVP_N {
+      return EBADF;
+    }
+    let e = dv_attach(&mut k, c, p, BPF_F_ALLOW_MULTI);
+    if e != 0 {
+      return e;
+    }
+    dv_hold(&mut k, p);                     // the link's own
+    let fd = bpf_object(&mut k, pid, p, c + 1);
+    if fd >= 18446744073709547520 {
+      let found = dv_detach(&mut k, c, p);
+      dv_drop(&mut k, p);
+    }
+    return fd;
   }
   if cmd == BPF_PROG_QUERY {
     // target_fd, attach_type, query_flags, attach_flags, prog_ids, prog_cnt:
-    // nothing is attached.
+    // nothing is found attached.
     if size < 28 {
       return EINVAL;
     }

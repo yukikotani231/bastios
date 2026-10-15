@@ -1671,6 +1671,8 @@ fn cg_mkdir(k: &mut Kernel, pid: u64, n: u64) -> u64
   cg_put(&mut k, free, CGW_VRUN, 0);
   cg_put(&mut k, free, CGW_WST, 0);
   cg_put(&mut k, free, CGW_OOMK, 0);
+  cg_put(&mut k, free, CGW_DEV0, 0);
+  cg_put(&mut k, free, CGW_DEV1, 0);
   cg_put(&mut k, free, CGW_USED, 1);
   return 0;
 }
@@ -1696,6 +1698,7 @@ fn cg_rmdir(k: &mut Kernel, pid: u64, n: u64) -> u64
   if cg_children(k, r.slot) > 0 || cg_tasks(k, r.slot) > 0 || cgns_held(k, r.slot) {
     return EBUSY;
   }
+  dv_cg_clear(&mut k, r.slot);              // its device filters (src/lxbpf.bastio)
   cg_put(&mut k, r.slot, CGW_USED, 0);
   return 0;
 }
