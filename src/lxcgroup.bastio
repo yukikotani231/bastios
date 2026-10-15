@@ -962,7 +962,11 @@ fn cg_resident(k: &mut Kernel, q: u64) -> u64
   if c > WPAGES {
     return 0;
   }
-  return c;
+  let out = swap_count(k, q);              // swapped pages map the marker page: they hold no memory
+  if out >= c {
+    return 0;
+  }
+  return c - out;
 }
 
 /// memory.current of cgroup s: the bytes of memory the processes in it and

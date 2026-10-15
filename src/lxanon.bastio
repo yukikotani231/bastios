@@ -76,6 +76,7 @@ fn anon_forget(k: &mut Kernel, pid: u64, from: u64, to: u64)
   requires kok(k) && pid < NPROC && from <= to && to <= WPAGES
   ensures kok(k)
 {
+  swap_forget(&mut k, tgid(k.procs, pid), from, to);   // swapped pages in the range have nothing to come back to
   let mut i = 0;
   while i < AN_N
     invariant i <= AN_N && kok(k) && pid < NPROC && from <= to && to <= WPAGES
@@ -119,6 +120,7 @@ fn anon_reach(k: &mut Kernel, pid: u64, from: u64, to: u64)
   if from >= to || to > WPAGES {
     return;
   }
+  swap_reach(&mut k, tgid(k.procs, pid), pid, from, to);   // swapped pages come back first (src/swap.bastio)
   let mut i = 0;
   while i < AN_N
     invariant i <= AN_N && kok(k) && pid < NPROC && from < to && to <= WPAGES
