@@ -702,7 +702,8 @@ const USR_W: u64 = UMW_MARK + 1;      // id + 1 (0: free), owner uid, owner gid,
 const PN_N: u64 = 64;                // PID namespaces besides the first
 const PN_W: u64 = 3;                  // id + 1 (0: free), the next id to give, 1 once its init has ended
 const UTS_N: u64 = 32;                // UTS namespaces besides the first
-const UTS_W: u64 = 132;               // id + 1 (0: free), then the names as k.sys keeps them
+const UTS_W: u64 = 133;               // id + 1 (0: free), then the names as k.sys keeps them, then the id of the user namespace that owns it
+const UTS_OWN: u64 = UTS_W - 1;       // its word of the owner
 const MNS_KID: u64 = NPROC + 16 + MT_N * ME_W;   // [MNS_KID + kind * NPROC + pid]
 const MNS_KNEXT: u64 = MNS_KID + NSK_N * NPROC;
 const MNS_UTS: u64 = MNS_KNEXT + NSK_N;
@@ -734,12 +735,15 @@ const DVP_N: u64 = 16;
 const DVP_MAXI: u64 = 512;
 const DVP_W: u64 = 2 + DVP_MAXI;
 const MNS_DVP: u64 = MNS_SC + NPROC * SC_PW;
+// Owners of mount namespaces (src/lxns.bastio): MO_N pairs (namespace id, id of the user namespace that made it) from MNS_MO.
+const MO_N: u64 = 64;
+const MNS_MO: u64 = MNS_DVP + DVP_N * DVP_W;
 // Time namespaces (src/lxnsk.bastio): TM_N slots of TM_W words in k.mns from
 // MNS_TM (id + 1, the CLOCK_MONOTONIC offset and the CLOCK_BOOTTIME offset in
 // ns, two's complement).
 const TM_N: u64 = 16;
 const TM_W: u64 = 3;
-const MNS_TM: u64 = MNS_DVP + DVP_N * DVP_W;
+const MNS_TM: u64 = MNS_MO + MO_N * 2;
 const MNS_LEN: u64 = MNS_TM + TM_N * TM_W;
 const XAB: u64 = 256 + MT_N * 512 + 256;      // where k.mstr keeps the extended attributes: XA_N rows of XA_ROW bytes, the name then the value
 const KDB: u64 = XAB + 32 * 320;                 // where k.mstr keeps the key descriptions: KEY_N rows of KDESC bytes (src/lxkeys.bastio)
