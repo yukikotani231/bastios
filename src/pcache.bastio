@@ -44,15 +44,13 @@
 
 import "pages.bastio";
 
-const PC_T: u64 = 8;                  // level-1 tables
-const PC_N: u64 = 4096;               // PC_T * 512 pages the cache can hold
-const PCK_LEN: u64 = 12291;           // 3 words a slot, the clock hand, 1 once the table is made, slots in use
-const PC_HAND: u64 = 12288;           // 3 * PC_N
-const PC_ONW: u64 = 12289;
-const PC_USED: u64 = 12290;
+const PC_N: u64 = 131072;             // the most slots a cache can have (512 MiB of pages); each cache has c.n of them, a multiple of 512
+const PC_MIN: u64 = 512;              // the least it is given: one level-1 table
+const PC_HAND: u64 = 0;               // st[PC_HAND]: the clock hand
+const PC_ONW: u64 = 1;                // st[PC_ONW]: 1 once the table is made
+const PC_USED: u64 = 2;               // st[PC_USED]: slots in use
 const PC_NONE: u64 = 18446744073709551615;
-const PC_B: u64 = 8192;               // index buckets
-const PC_LK: u64 = 12288;             // PC_B bucket heads, then PC_N chain links
+const PC_B: u64 = 16384;              // index buckets
 const PC_HN: u64 = 16384;             // handles below this have a mark in `has`
 
 enum PcTab { Off, On(PageTable) }
@@ -70,11 +68,17 @@ enum PcTab { Off, On(PageTable) }
 /// checked against `keys`, which stay the truth. `has[h]` is 1 if
 /// file h may have pages here, so dropping a file that has none (every new
 /// file, src/fs.bastio) skips the scan of every slot.
-struct PCache { tab: Vec[PcTab], keys: Buf, link: Buf, has: Bytes }
+struct PCache { tab: Vec[PcTab], keys: Buf, link: Buf, has: Bytes, st: Buf, n: u64 }
+
+/// The sizes of the arrays: `keys` has 3 words for each of the n slots,
+/// `link` the buckets and a link for each slot, `st` the hand, the table
+/// flag and the count of slots in use.
+spec fn pc_f(c: &PCache) -> bool {
+  c.n <= PC_N && len(c.keys) == 3 * c.n && len(c.link) == PC_B + c.n && len(c.st) == 3 && blen(c.has) == PC_HN
+}
 
 spec fn pc_ok(c: &PCache) -> bool {
-  len(c.keys) == PCK_LEN && vlen(c.tab) == 1 && (vget(c.tab, 0) is PcTab::On ==> pt_level(vget(c.tab, 0).On) == 2)
-    && len(c.link) == PC_LK && blen(c.has) == PC_HN
+  pc_f(c) && vlen(c.tab) == 1 && (vget(c.tab, 0) is PcTab::On ==> pt_level(vget(c.tab, 0).On) == 2)
 }
 
 /// (h, pg) packed into one map key: h below 2^20 (handles are far fewer)
@@ -96,8 +100,8 @@ fn pc_bucket(k: u64) -> u64
 
 /// Puts slot i, holding key k, at the front of k's bucket.
 fn pc_link(link: &mut Buf, k: u64, i: u64)
-  requires len(link) == PC_LK && i < PC_N
-  ensures len(link) == PC_LK
+  requires len(link) >= PC_B && i < len(link) - PC_B
+  ensures len(link) == old(len(link))
 {
   let b = pc_bucket(k);
   link = set(link, PC_B + i, get(link, b));
@@ -106,8 +110,8 @@ fn pc_link(link: &mut Buf, k: u64, i: u64)
 
 /// Takes slot i, holding key k, out of k's bucket.
 fn pc_unlink(link: &mut Buf, k: u64, i: u64)
-  requires len(link) == PC_LK && i < PC_N
-  ensures len(link) == PC_LK
+  requires len(link) >= PC_B && i < len(link) - PC_B
+  ensures len(link) == old(len(link))
 {
   let b = pc_bucket(k);
   if get(link, b) == i + 1 {
@@ -115,8 +119,9 @@ fn pc_unlink(link: &mut Buf, k: u64, i: u64)
   } else {
     let mut j = get(link, b);
     let mut steps = 0;
-    while j != 0 && j <= PC_N && steps < PC_N
-      invariant len(link) == PC_LK
+    let room = len(link) - PC_B;
+    while j != 0 && j <= room && steps < room
+      invariant len(link) == old(len(link)) && room == len(link) - PC_B
     {
       if get(link, PC_B + j - 1) == i + 1 {
         link = set(link, PC_B + j - 1, get(link, PC_B + i));
@@ -131,10 +136,10 @@ fn pc_unlink(link: &mut Buf, k: u64, i: u64)
 }
 
 /// Frees slot i's key, and takes it out of the index.
-fn pc_unkey(keys: &mut Buf, link: &mut Buf, i: u64)
-  requires len(keys) == PCK_LEN && len(link) == PC_LK && i < PC_N
-  ensures len(keys) == PCK_LEN && len(link) == PC_LK
-  ensures get(keys, PC_HAND) == get(old(keys), PC_HAND) && get(keys, PC_ONW) == get(old(keys), PC_ONW)
+fn pc_unkey(keys: &mut Buf, link: &mut Buf, st: &mut Buf, i: u64)
+  requires i < len(keys) / 3 && len(link) >= PC_B && i < len(link) - PC_B && len(st) == 3
+  ensures len(keys) == old(len(keys)) && len(link) == old(len(link)) && len(st) == 3
+  ensures get(st, PC_HAND) == get(old(st), PC_HAND) && get(st, PC_ONW) == get(old(st), PC_ONW)
 {
   let h1 = get(keys, 3 * i);
   if h1 != 0 {
@@ -144,8 +149,8 @@ fn pc_unkey(keys: &mut Buf, link: &mut Buf, i: u64)
     }
     keys = set(keys, 3 * i, 0);
     keys = set(keys, 3 * i + 2, 0);
-    if get(keys, PC_USED) > 0 {
-      keys = set(keys, PC_USED, get(keys, PC_USED) - 1);
+    if get(st, PC_USED) > 0 {
+      st = set(st, PC_USED, get(st, PC_USED) - 1);
     }
   }
 }
@@ -155,20 +160,58 @@ fn pc_new() -> PCache
 {
   let mut v = vec_new[PcTab]();
   vec_push(&mut v, PcTab::Off);
-  return PCache { tab: v, keys: alloc(PCK_LEN), link: alloc(PC_LK), has: balloc(PC_HN) };
+  return PCache { tab: v, keys: alloc(0), link: alloc(PC_B), has: balloc(PC_HN), st: alloc(3), n: 0 };
+}
+
+/// Gives an empty cache its slots: as many as `want` pages of the pool
+/// (rounded up to a table's 512, within PC_MIN and PC_N), or fewer when the
+/// kernel's heap is short. Does nothing to a cache that has any.
+fn pc_size(c: &mut PCache, want: u64)
+  requires pc_ok(c) && want < 0x1000000000000
+  ensures pc_ok(c)
+{
+  if c.n != 0 {
+    return;
+  }
+  let mut n = (want + 511) / 512 * 512;
+  if n < PC_MIN {
+    n = PC_MIN;
+  }
+  if n > PC_N {
+    n = PC_N;
+  }
+  while n >= PC_MIN
+    invariant n <= PC_N && n % 512 == 0 && pc_ok(c) && c.n == 0
+  {
+    let k = try_alloc(3 * n);
+    let l = try_alloc(PC_B + n);
+    if len(k) == 3 * n && len(l) == PC_B + n {
+      let pk = c.keys;
+      let pl = c.link;
+      c.keys = k;
+      c.link = l;
+      c.n = n;
+      free(pk);
+      free(pl);
+      return;
+    }
+    free(k);
+    free(l);
+    n = n / 2 / 512 * 512;
+  }
 }
 
 /// Takes the table out (pc_put puts it back).
 fn pc_take(c: &mut PCache) -> PcTab
   requires pc_ok(c)
-  ensures len(c.keys) == PCK_LEN && vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && len(c.link) == PC_LK && blen(c.has) == PC_HN
+  ensures pc_f(c) && c.n == old(c.n) && vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off
   ensures result is PcTab::On ==> pt_level(result.On) == 2
 {
   return vec_swap(&mut c.tab, 0, PcTab::Off);
 }
 
 fn pc_put(c: &mut PCache, x: PcTab)
-  requires len(c.keys) == PCK_LEN && vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && len(c.link) == PC_LK && blen(c.has) == PC_HN
+  requires pc_f(c) && vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off
   requires x is PcTab::On ==> pt_level(x.On) == 2
   ensures pc_ok(c)
 {
@@ -183,23 +226,24 @@ fn pc_put(c: &mut PCache, x: PcTab)
 fn pc_on(c: &PCache) -> bool
   requires pc_ok(c)
 {
-  return get(c.keys, PC_ONW) == 1;
+  return get(c.st, PC_ONW) == 1;
 }
 
 /// How many pages are cached (`Cached:` in /proc/meminfo).
 fn pc_count(c: &PCache) -> u64
   requires pc_ok(c)
 {
-  return get(c.keys, PC_USED);
+  return get(c.st, PC_USED);
 }
 
-/// How many slots the cache may use: an eighth of the pool.
-fn pc_cap(m: &Mem) -> u64
-  ensures result <= PC_N
+/// How many slots the cache may use: its own, within half the pool.
+fn pc_cap(c: &PCache, m: &Mem) -> u64
+  requires pc_ok(c)
+  ensures result <= c.n
 {
-  let n = pool_size(m.pool) / 8;
-  if n > PC_N {
-    return PC_N;
+  let n = pool_size(m.pool) / 2;
+  if n > c.n {
+    return c.n;
   }
   return n;
 }
@@ -207,7 +251,7 @@ fn pc_cap(m: &Mem) -> u64
 /// The slot holding page pg of file h, or PC_NONE.
 fn pc_find(c: &PCache, h: u64, pg: u64) -> u64
   requires pc_ok(c)
-  ensures result < PC_N || result == PC_NONE
+  ensures result < c.n || result == PC_NONE
 {
   if h >= PC_NONE - 1 {
     return PC_NONE;
@@ -216,7 +260,7 @@ fn pc_find(c: &PCache, h: u64, pg: u64) -> u64
   if k != PC_NONE {
     let mut j = get(c.link, pc_bucket(k));
     let mut steps = 0;
-    while j != 0 && j <= PC_N && steps < PC_N
+    while j != 0 && j <= c.n && steps < c.n
       invariant pc_ok(c)
     {
       if get(c.keys, 3 * (j - 1)) == h + 1 && get(c.keys, 3 * (j - 1) + 1) == pg {
@@ -228,8 +272,8 @@ fn pc_find(c: &PCache, h: u64, pg: u64) -> u64
     return PC_NONE;
   }
   let mut i = 0;
-  while i < PC_N
-    invariant i <= PC_N && pc_ok(c)
+  while i < c.n
+    invariant i <= c.n && pc_ok(c)
   {
     if get(c.keys, 3 * i) == h + 1 && get(c.keys, 3 * i + 1) == pg {
       return i;
@@ -243,11 +287,11 @@ fn pc_find(c: &PCache, h: u64, pg: u64) -> u64
 /// keeps it.
 fn pc_get(c: &mut PCache, h: u64, pg: u64) -> u64
   requires pc_ok(c)
-  ensures pc_ok(c)
-  ensures result < PC_N || result == PC_NONE
+  ensures pc_ok(c) && c.n == old(c.n)
+  ensures result < c.n || result == PC_NONE
 {
   let s = pc_find(c, h, pg);
-  if s < PC_N {
+  if s < c.n {
     c.keys = set(c.keys, 3 * s + 2, 1);
   }
   return s;
@@ -295,11 +339,11 @@ fn add_l1(t: &mut PageTable, m: &mut Mem, i: u64, src: &Bytes, n: u64, text: boo
 /// else the first the clock hand finds unused (clearing the marks it
 /// passes).
 fn pc_victim(c: &mut PCache, cap: u64) -> u64
-  requires pc_ok(c) && 0 < cap && cap <= PC_N
-  ensures pc_ok(c) && result < cap
+  requires pc_ok(c) && 0 < cap && cap <= c.n
+  ensures pc_ok(c) && c.n == old(c.n) && result < cap
 {
   let mut i = 0;
-  if get(c.keys, PC_USED) < cap {
+  if get(c.st, PC_USED) < cap {
     while i < cap && get(c.keys, 3 * i) != 0
       invariant i <= cap && pc_ok(c)
     {
@@ -309,7 +353,7 @@ fn pc_victim(c: &mut PCache, cap: u64) -> u64
       return i;
     }
   }
-  i = get(c.keys, PC_HAND) % cap;
+  i = get(c.st, PC_HAND) % cap;
   let mut n = 0;
   while n < cap && get(c.keys, 3 * i + 2) != 0
     invariant n <= cap && i < cap && pc_ok(c)
@@ -318,7 +362,7 @@ fn pc_victim(c: &mut PCache, cap: u64) -> u64
     i = (i + 1) % cap;
     n = n + 1;
   }
-  c.keys = set(c.keys, PC_HAND, (i + 1) % cap);
+  c.st = set(c.st, PC_HAND, (i + 1) % cap);
   return i;
 }
 
@@ -331,7 +375,18 @@ fn pc_tables(c: &mut PCache, m: &mut Mem)
   requires pc_ok(c) && mem_ok(m)
   ensures pc_ok(c) && mem_ok(m)
 {
-  let cap = pc_cap(m);
+  if c.n == 0 {
+    pc_size(&mut c, pool_size(m.pool) / 2);
+  }
+  pc_fill_tables(&mut c, &mut m);
+}
+
+/// Makes the tables for the cache's current size (see pc_tables).
+fn pc_fill_tables(c: &mut PCache, m: &mut Mem)
+  requires pc_ok(c) && mem_ok(m)
+  ensures pc_ok(c) && mem_ok(m) && c.n == old(c.n)
+{
+  let cap = pc_cap(c, m);
   if cap == 0 {
     return;
   }
@@ -340,7 +395,7 @@ fn pc_tables(c: &mut PCache, m: &mut Mem)
       let a = find_free(&mut m);
       if a < NPAGES {
         pc_put(&mut c, PcTab::On(pt_new(take_page(&mut m, a), 2)));
-        c.keys = set(c.keys, PC_ONW, 1);
+        c.st = set(c.st, PC_ONW, 1);
       }
     },
     PcTab::On(t) => { pc_put(&mut c, PcTab::On(t)); },
@@ -350,8 +405,8 @@ fn pc_tables(c: &mut PCache, m: &mut Mem)
     PcTab::On(mut t) => {
       let mut j = 0;
       while j <= (cap - 1) / 512
-        invariant pt_level(t) == 2 && mem_ok(m) && j <= PC_T && len(c.keys) == PCK_LEN
-        invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && len(c.link) == PC_LK && blen(c.has) == PC_HN
+        invariant pt_level(t) == 2 && mem_ok(m) && j <= PC_N / 512 && pc_f(c)
+        invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off
       {
         if !pt_has(t, j) {
           let a = find_free(&mut m);
@@ -373,15 +428,15 @@ fn pc_tables(c: &mut PCache, m: &mut Mem)
 fn pc_add(c: &mut PCache, m: &mut Mem, h: u64, pg: u64, src: &Bytes, n: u64, text: bool) -> u64
   requires pc_ok(c) && mem_ok(m) && n <= 4096 && n <= blen(src)
   ensures pc_ok(c) && mem_ok(m)
-  ensures result < PC_N || result == PC_NONE
+  ensures result < c.n || result == PC_NONE
 {
-  let cap = pc_cap(m);
+  let cap = pc_cap(c, m);
   if h >= PC_NONE - 1 || cap == 0 {
     return PC_NONE;
   }
   let i = pc_victim(&mut c, cap);
-  pc_unkey(&mut c.keys, &mut c.link, i);
-  pc_tables(&mut c, &mut m);
+  pc_unkey(&mut c.keys, &mut c.link, &mut c.st, i);
+  pc_fill_tables(&mut c, &mut m);
   let mut ok = false;
   match pc_take(&mut c) {
     PcTab::Off => {},
@@ -398,8 +453,8 @@ fn pc_add(c: &mut PCache, m: &mut Mem, h: u64, pg: u64, src: &Bytes, n: u64, tex
   c.keys = set(c.keys, 3 * i, h + 1);
   c.keys = set(c.keys, 3 * i + 1, pg);
   c.keys = set(c.keys, 3 * i + 2, 1);
-  if get(c.keys, PC_USED) < PC_N {
-    c.keys = set(c.keys, PC_USED, get(c.keys, PC_USED) + 1);
+  if get(c.st, PC_USED) < c.n {
+    c.st = set(c.st, PC_USED, get(c.st, PC_USED) + 1);
   }
   if h < PC_HN {
     bset(&mut c.has, h, 1);
@@ -481,7 +536,7 @@ fn pc_wrote(c: &mut PCache, h: u64, off: u64, buf: &Bytes, n: u64)
     let ps = pg * 4096;
     let a = pc_lo(off, ps);
     let b = pc_hi(end, ps);
-    if s < PC_N && a < b && a - ps + (b - a) <= 4096 && a - off + (b - a) <= n {
+    if s < c.n && a < b && a - ps + (b - a) <= 4096 && a - off + (b - a) <= n {
       match pc_take(&mut c) {
         PcTab::Off => {},
         PcTab::On(mut t) => {
@@ -516,7 +571,7 @@ fn pc_overlay(c: &mut PCache, h: u64, off: u64, buf: &mut Bytes, n: u64)
     let ps = pg * 4096;
     let a = pc_lo(off, ps);
     let b = pc_hi(end, ps);
-    if s < PC_N && a < b && a - ps + (b - a) <= 4096 && a - off + (b - a) <= n {
+    if s < c.n && a < b && a - ps + (b - a) <= 4096 && a - off + (b - a) <= n {
       match pc_take(&mut c) {
         PcTab::Off => {},
         PcTab::On(mut t) => {
@@ -545,7 +600,7 @@ fn pc_have(c: &mut PCache, h: u64, off: u64, n: u64) -> bool
   while pg <= (end - 1) / 4096
     invariant pc_ok(c)
   {
-    if pc_get(&mut c, h, pg) >= PC_N {
+    if pc_get(&mut c, h, pg) >= c.n {
       return false;
     }
     pg = pg + 1;
@@ -563,7 +618,7 @@ fn pc_fill(c: &mut PCache, m: &mut Mem, h: u64, off: u64, buf: &Bytes, n: u64, e
   requires pc_ok(c) && mem_ok(m) && n <= blen(buf)
   ensures pc_ok(c) && mem_ok(m)
 {
-  if n == 0 || off >= 0x1000000000000 || n >= 0x1000000000000 || h >= PC_NONE - 1 || pc_cap(m) == 0 {
+  if n == 0 || off >= 0x1000000000000 || n >= 0x1000000000000 || h >= PC_NONE - 1 || pc_cap(c, m) == 0 {
     return;
   }
   let end = off + n;
@@ -572,8 +627,8 @@ fn pc_fill(c: &mut PCache, m: &mut Mem, h: u64, off: u64, buf: &Bytes, n: u64, e
   while pg * 4096 < end && ((pg + 1) * 4096 <= end || eof)
     invariant pc_ok(c) && mem_ok(m) && n <= blen(buf) && end == off + n && end < 0x2000000000000 && pg <= end / 4096 + 1
   {
-    if pc_find(c, h, pg) >= PC_N {
-      if pc_add(&mut c, &mut m, h, pg, buf, 0, true) < PC_N {
+    if pc_find(c, h, pg) >= c.n {
+      if pc_add(&mut c, &mut m, h, pg, buf, 0, true) < c.n {
         added = true;
       }
     }
@@ -629,15 +684,15 @@ fn pc_resize(c: &mut PCache, m: &mut Mem, h: u64, size: u64)
     PcTab::On(mut t) => {
       let quiet = pt_lease_count(&mut t) == 0;
       let mut i = 0;
-      while i < PC_N
-        invariant i <= PC_N && pt_level(t) == 2 && mem_ok(m) && len(c.keys) == PCK_LEN
-        invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && len(c.link) == PC_LK && blen(c.has) == PC_HN
+      while i < c.n
+        invariant i <= c.n && pt_level(t) == 2 && mem_ok(m) && pc_f(c)
+        invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off
         invariant quiet ==> pt_leases(t) == 0
       {
         if get(c.keys, 3 * i) == h + 1 {
           let pg = get(c.keys, 3 * i + 1);
           if pg >= size / 4096 + 1 || (pg == size / 4096 && size % 4096 == 0) {
-            pc_unkey(&mut c.keys, &mut c.link, i);
+            pc_unkey(&mut c.keys, &mut c.link, &mut c.st, i);
             if quiet && pt_has(t, i / 512) {
               pt_borrow(&mut t, i / 512, clear_l1, &mut m, i % 512);
             }
@@ -686,12 +741,12 @@ fn pc_close(c: &mut PCache, m: &mut Mem, h: u64)
     PcTab::On(mut t) => {
       if pt_lease_count(&mut t) == 0 {
         let mut i = 0;
-        while i < PC_N
-          invariant i <= PC_N && pt_level(t) == 2 && mem_ok(m) && len(c.keys) == PCK_LEN && pt_leases(t) == 0
-          invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && len(c.link) == PC_LK && blen(c.has) == PC_HN
+        while i < c.n
+          invariant i <= c.n && pt_level(t) == 2 && mem_ok(m) && pc_f(c) && pt_leases(t) == 0
+          invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off
         {
           if get(c.keys, 3 * i) == h + 1 && pt_has(t, i / 512) && pt_borrow(&mut t, i / 512, data_l1, &mut m, i % 512) {
-            pc_unkey(&mut c.keys, &mut c.link, i);
+            pc_unkey(&mut c.keys, &mut c.link, &mut c.st, i);
           }
           i = i + 1;
         }
@@ -726,12 +781,12 @@ fn pc_shrink(c: &mut PCache, m: &mut Mem, want: u64) -> u64
     PcTab::On(mut t) => {
       if pt_lease_count(&mut t) == 0 {
         let mut i = 0;
-        while i < PC_N && n < want
-          invariant i <= PC_N && n <= want && pt_level(t) == 2 && mem_ok(m) && len(c.keys) == PCK_LEN && pt_leases(t) == 0
-          invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && len(c.link) == PC_LK && blen(c.has) == PC_HN
+        while i < c.n && n < want
+          invariant i <= c.n && n <= want && pt_level(t) == 2 && mem_ok(m) && pc_f(c) && pt_leases(t) == 0
+          invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off
         {
           if get(c.keys, 3 * i) != 0 && pt_has(t, i / 512) && pt_borrow(&mut t, i / 512, any_l1, &mut m, i % 512) {
-            pc_unkey(&mut c.keys, &mut c.link, i);
+            pc_unkey(&mut c.keys, &mut c.link, &mut c.st, i);
             n = n + 1;
           }
           i = i + 1;
@@ -758,8 +813,8 @@ fn pc_forget_range(c: &mut PCache, m: &mut Mem, lo: u64, hi: u64)
   ensures pc_ok(c) && mem_ok(m)
 {
   let mut i = 0;
-  while i < PC_N
-    invariant i <= PC_N && pc_ok(c) && mem_ok(m)
+  while i < c.n
+    invariant i <= c.n && pc_ok(c) && mem_ok(m)
   {
     let h1 = get(c.keys, 3 * i);
     if h1 != 0 && h1 - 1 >= lo && h1 - 1 < hi {
@@ -799,6 +854,7 @@ fn pc_free(c: PCache, m: &mut Mem)
   free(cc.keys);
   bfree(cc.has);
   free(cc.link);
+  free(cc.st);
 }
 
 fn free_cache_table(m: &mut Mem, t: PageTable)
