@@ -47,6 +47,9 @@ const LX_FSOPEN: u64 = 430;
 const LX_FSCONFIG: u64 = 431;
 const LX_FSMOUNT: u64 = 432;
 const LX_FSPICK: u64 = 433;
+const LX_LANDLOCK_CREATE_RULESET: u64 = 444;   // xz and others probe it and do without
+const LX_LANDLOCK_ADD_RULE: u64 = 445;
+const LX_LANDLOCK_RESTRICT_SELF: u64 = 446;
 const LX_UNSHARE: u64 = 272;
 const LX_IO_SETUP: u64 = 206;          // Linux AIO (src/lxaio.bastio)
 const LX_IO_DESTROY: u64 = 207;
@@ -85,6 +88,7 @@ const LO_APPEND: u64 = 0x400;
 const LO_NONBLOCK: u64 = 0x800;
 const LO_ASYNC: u64 = 0x2000;
 
+const REREAD_MAX: u64 = 32768;         // a read that waits for the disk after this much returns it; before, it starts over (the cache of a small disk is 16 blocks)
 const READ_MAX: u64 = 262144;          // the most one read of a file returns
 const MAP_SHARED: u64 = 1;
 const MAP_FIXED: u64 = 0x10;
@@ -833,10 +837,12 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     return KEEP;
   }
   // The new mount API (runc and crun use it when present) likewise falls
-  // back on ENOSYS.
+  // back on ENOSYS, and so does Landlock (xz probes it before sandboxing
+  // itself; each probe would otherwise print a line on the console).
   if n == LX_RSEQ || n == LX_IO_URING_SETUP
       || n == LX_OPEN_TREE || n == LX_MOVE_MOUNT || n == LX_FSOPEN
-      || n == LX_FSCONFIG || n == LX_FSMOUNT || n == LX_FSPICK {
+      || n == LX_FSCONFIG || n == LX_FSMOUNT || n == LX_FSPICK
+      || n == LX_LANDLOCK_CREATE_RULESET || n == LX_LANDLOCK_ADD_RULE || n == LX_LANDLOCK_RESTRICT_SELF {
     ret(&mut k.procs, pid, ENOSYS);
     return KEEP;
   }
@@ -1602,13 +1608,18 @@ fn line_take(l: &mut Buf, t: u64)
 
 /// read from the file open on native row `row`: up to READ_MAX bytes, a
 /// transfer buffer at a time, so a regular file is not read short (as
-/// programs expect of one) unless it ends or the disk must be waited for.
+/// programs expect of one, and as Linux never does) unless it ends. When
+/// the disk has to be waited for part of the way, the offset goes back to
+/// where the call began and the call is run again once the disk has caught
+/// up: what was read is in the cache by then. Past REREAD_MAX bytes the read is
+/// short instead, as the cache may not hold more.
 fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && row < FD_ROWS
   ensures kok(k)
   ensures lx_count_or_fail(result, n)
 {
   let want = smaller(n, READ_MAX);
+  let start = vfs_offset(k.fs, row);
   let mut done = 0;
   while done < want
     invariant done <= want && want <= READ_MAX && kok(k)
@@ -1618,8 +1629,11 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
       return EBADF;
     }
     if got == VFS_MISS {
-      if done > 0 {
+      if done > REREAD_MAX {
         return done;                        // what came so far; the rest waits
+      }
+      if done > 0 {
+        vfs_advance(&mut k.fs, row, start, 0);   // from the start again, after the wait
       }
       return DISK_RETRY;                    // sleep until the disk catches up
     }

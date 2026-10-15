@@ -1407,6 +1407,7 @@ srcbuild: sqlite 3.53 (amalgamation): gcc, then SQL
 srcbuild: git 2.53: make install, then commit, clone, gc and fsck
 srcbuild: curl 8.18: configure, make, fetch from the host
 srcbuild: busybox 1.37 (the compat suite's applet set): allnoconfig, make, and BusyBox's own testsuite for sed, grep, sort, cut and tr
+srcbuild: xz 5.8.1 (autotools): configure, make and make check (19 tests: round trips, corrupt input, the scripts)
 t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
 t_gai: AF_INET6 UDP connect to :: reads back ::1
 t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1

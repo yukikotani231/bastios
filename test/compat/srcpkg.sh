@@ -17,6 +17,7 @@ fetch() { # file sha256 path
 }
 fetch busybox-1.37.0.tar.bz2 3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4 b/busybox/busybox_1.37.0.orig.tar.bz2
 fetch zlib-1.3.1.tar.gz 60dd315c07f616887caa029408308a018ace66e3d142726a97db164b3b8f69fb z/zlib/zlib_1.3.dfsg+really1.3.1.orig.tar.gz
+fetch xz-5.8.1.tar.xz 0b54f79df85912504de0b14aec7971e3f964491af1812d83447005807513cd9e x/xz-utils/xz-utils_5.8.1.orig.tar.xz
 fetch lua-5.4.7.tar.gz 9fbf5e28ef86c69858f6d3d34eccc32e911c1a28b4120ff3e84aaa70cfbf1e30 l/lua5.4/lua5.4_5.4.7.orig.tar.gz
 fetch git-2.53.0.tar.xz 5818bd7d80b061bbbdfec8a433d609dc8818a05991f731ffc4a561e2ca18c653 g/git/git_2.53.0.orig.tar.xz
 fetch curl-8.18.0.tar.gz e9274a5f8ab5271c0e0e6762d2fce194d5f98acc568e4ce816845b2dcc0cf88f c/curl/curl_8.18.0.orig.tar.gz

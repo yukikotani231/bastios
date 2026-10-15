@@ -166,5 +166,13 @@ int main(void) {
            if (g >= 0) close(g);
            unlink("cf_big");
            r == 6; }));
+    /* A regular file is not read short for want of cache (mkbuiltins in bash's
+     * build reads a whole file in one call and goes on with 4096 bytes). */
+    {
+        static char big[30000];
+        int self = open("/proc/self/exe", O_RDONLY);
+        EXPECT("read of 30000 bytes from a program file returns them all", self >= 0 && read(self, big, sizeof big) == (ssize_t)sizeof big);
+        if (self >= 0) close(self);
+    }
     return done();
 }
