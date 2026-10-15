@@ -1311,6 +1311,15 @@ go: go: goroutines, channels and the collector
 go: go: make the device nodes
 go: go: run a program
 go: go: version
+java: java: unpack the root, make the device nodes
+java: java: version
+java: java: compile and run a program
+java: java: records, streams and collections
+java: java: threads and an executor
+java: java: exit status and an uncaught exception
+java: java: files and directories
+java: java: a jar with a main class
+java: java: a compile error is reported
 t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller
 t_sys: keys: add_key, read, describe, update, request_key, link, search, unlink
 t_sys: keys: unknown type, bad payload, expiry, revocation, no such key
