@@ -112,6 +112,51 @@ static int nested_userns(void) {
     return getuid() == 7 && strstr(t, "         7          0          1") != NULL;
 }
 
+/* After pivot_root, on a directory of the disk, runc's check that a directory descriptor reads back as
+ * the path it opened (/proc/self/fd/N names the path from the new root). */
+static char pivot_dir[256];
+
+static int fdlink_after_pivot(void) {
+    int pd = open("/proc/self/fd", O_RDONLY | O_DIRECTORY);
+    if (pd < 0 || mount(pivot_dir, pivot_dir, 0, MS_BIND | MS_REC, 0) != 0) return 0;
+    if (chdir(pivot_dir) != 0 || syscall(SYS_pivot_root, ".", ".") != 0) return 0;
+    if (umount2(".", MNT_DETACH) != 0 || chdir("/") != 0) return 0;
+    mkdir("/m", 0755);
+    mkdir("/b", 0755);
+    if (mkdir("/sub/q", 0755) != 0) { printf("mkdir sub/q %d\n", errno); return 0; }
+    if (mount("t", "/m", "tmpfs", 0, 0) != 0) { printf("tmpfs m %d\n", errno); return 0; }
+    mkdir("/m/p", 0755);
+    if (mount("/sub/q", "/b", 0, MS_BIND, 0) != 0) { printf("bind b %d\n", errno); return 0; }
+    mkdir("/sub/pts", 0755);
+    if (mount("devpts", "/sub/pts", "devpts", 0, 0) != 0) { printf("devpts %d\n", errno); return 0; }
+    close(open("/sub/f1", O_CREAT | O_WRONLY, 0644));
+    close(open("/m/f2", O_CREAT | O_WRONLY, 0644));
+    const char *names[9] = {"/", "/sub", "/m", "/m/p", "/b", "/b", "/sub/pts", "/sub/f1", "/m/f2"};
+    for (int i = 0; i < 9; i++) {
+        int fd = i < 7 ? open(names[i], O_PATH | O_DIRECTORY | O_CLOEXEC) : open(names[i], O_RDONLY);
+        char num[16], got[64];
+        snprintf(num, sizeof num, "%d", fd);
+        ssize_t n = fd < 0 ? -1 : readlinkat(pd, num, got, sizeof got - 1);
+        if (n < 0) { printf("readlink %s %d\n", names[i], errno); return 0; }
+        got[n] = 0;
+        if (strcmp(got, names[i]) != 0) {
+            printf("fd of %s reads %s\n", names[i], got);
+            return 0;
+        }
+    }
+    /* Mounting on a file through its descriptor (runc's way to bind devices into a container) */
+    mkdir("/proc", 0755);
+    if (mount("proc", "/proc", "proc", 0, 0) != 0) return 0;
+    int tf = open("/m/f2", O_PATH | O_CLOEXEC);
+    char tp[64];
+    snprintf(tp, sizeof tp, "/proc/self/fd/%d", tf);
+    if (tf < 0 || mount("/sub/f1", tp, 0, MS_BIND, 0) != 0) {
+        printf("bind onto %s: errno %d\n", tp, errno);
+        return 0;
+    }
+    return 1;
+}
+
 /* The user who made a user namespace joins it again with setns (rootless
  * podman's way back into the namespace its pause process holds), and is
  * root there, but cannot go to the first one. */
@@ -161,6 +206,21 @@ static int lo_up_in_first_netns(void) { return lo_up() == -1 && errno == EPERM; 
  * root of a user namespace made inside it does not own it. */
 static int lo_up_in_foreign_netns(void) {
     return unshare(CLONE_NEWNET) == 0 && in_userns(lo_up_in_first_netns, 0);
+}
+
+static int no_mounts_without_ns(void);
+
+/* Likewise a mount namespace, and a UTS namespace, that a process of the
+ * first user namespace made: the root of a user namespace made inside it
+ * owns neither. */
+static int mount_in_foreign_mntns(void) {
+    return unshare(CLONE_NEWNS) == 0 && in_userns(no_mounts_without_ns, 0);
+}
+static int hostname_denied(void) {
+    return sethostname("x", 1) == -1 && errno == EPERM;
+}
+static int hostname_in_foreign_utsns(void) {
+    return unshare(CLONE_NEWUTS) == 0 && in_userns(hostname_denied, 0);
 }
 
 /* statfs of /proc/self/fd/N is the file system of the file N holds. */
@@ -246,6 +306,17 @@ static int caps_there(void) {
     return syscall(SYS_capset, &h, d) == 0 && prctl(PR_CAPBSET_READ, 21, 0, 0, 0) == 0;
 }
 
+/* What an inner container runtime does inside a rootless container: a user
+ * namespace of its own, mapped to the root around it, and a mount namespace
+ * where it mounts. */
+static int nested_mounts(void) {
+    if (unshare(CLONE_NEWUSER) != 0) return 0;
+    if (write_trunc("/proc/self/setgroups", "deny", 4) != 4 || write_trunc("/proc/self/uid_map", "0 0 1\n", 6) != 6
+        || write_trunc("/proc/self/gid_map", "0 0 1\n", 6) != 6) return 0;
+    if (getuid() != 0 || unshare(CLONE_NEWNS) != 0) return 0;
+    return mounts_in_own_ns();
+}
+
 static int caps_not_outside(void) {
     return as_nobody() && mount("t", MNT, "tmpfs", 0, 0) == -1 && errno == EPERM;
 }
@@ -253,6 +324,15 @@ static int caps_not_outside(void) {
 int main(void) {
     setup();
     mkdir(MNT, 0755);
+    if (getcwd(pivot_dir, sizeof pivot_dir - 8)) {
+        strcat(pivot_dir, "/ud_pv");
+        mkdir(pivot_dir, 0777);
+        chmod(pivot_dir, 0777);
+        char sub[300];
+        snprintf(sub, sizeof sub, "%s/sub", pivot_dir);
+        mkdir(sub, 0777);
+        chmod(sub, 0777);
+    }
     EXPECT("a process may chown its own pipe to itself, not to others", in_child(own_pipe));
     EXPECT("an unprivileged process may raise its hard descriptor limit", in_child(hard_nofile));
     EXPECT("/dev/full reads zeros and writes ENOSPC", dev_full());
@@ -261,13 +341,21 @@ int main(void) {
     EXPECT("a process maps the user namespace it has just made itself", in_child(map_own_after_unshare));
     EXPECT("a user namespace is made inside another and mapped through it", in_child(nested_userns));
     EXPECT("whoever made a user namespace joins it with setns, and not the first one", in_child(join_userns));
+    EXPECT("a directory descriptor reads back from the new root after pivot_root", in_userns(fdlink_after_pivot, 1));
     EXPECT("the root of a user namespace brings loopback up in a network namespace of its own", in_userns(lo_up_in_own_netns, 0));
     EXPECT("and not in the first one", in_userns(lo_up_in_first_netns, 0));
     EXPECT("nor in one that another user namespace made", in_child(lo_up_in_foreign_netns));
+    EXPECT("nor mounts in a mount namespace that another user namespace made", in_child(mount_in_foreign_mntns));
+    EXPECT("nor sets the hostname of a UTS namespace that another user namespace made", in_child(hostname_in_foreign_utsns));
     EXPECT("statfs of /proc/self/fd/N answers for the file N holds", statfs_fd_link());
     EXPECT("the root of a user namespace mounts in a mount namespace of its own", in_userns(mounts_in_own_ns, 1));
     EXPECT("and not without one", in_userns(no_mounts_without_ns, 0));
     EXPECT("the root of a user namespace gives up capabilities", in_userns(caps_there, 0));
+    EXPECT("a user namespace made inside one mounts in a mount namespace of its own", in_userns(nested_mounts, 0));
     EXPECT("an unprivileged user mounts nothing", in_child(caps_not_outside));
+    char sub[300];
+    snprintf(sub, sizeof sub, "%s/sub", pivot_dir);
+    rmdir(sub);
+    rmdir(pivot_dir);
     return done();
 }

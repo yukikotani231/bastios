@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Boot
 
+- On Intel 7-, 8- and 9-series chipsets the xHCI driver routes the USB 2 ports from the EHCI controller to the xHCI controller (and enables its SuperSpeed ports) before starting it, so keyboards and sticks behind those ports are found. Untested on hardware: QEMU's xHCI has no such registers.
 - A System V shared memory segment can be 32 MiB (2 MiB before; `shmmax` reads 33554432): its pages hang from up to 16 level-1 tables of the shared store instead of one. Pages are still all taken when the segment is made, so a small VM refuses a big one with ENOMEM.
 - The in-memory file system holds 32768 files and directories (8192 before); the console shell's `ls` looks at the first 32768 disk entries after them. The node table now grows as nodes are made instead of being filled at boot, so a small machine pays only for the nodes it uses; the name index (1 MiB) and the open-description table are still allocated at boot. `ram_create` starts its search at a hint, so making many names is not quadratic. `rmdir` and the rename of a directory no longer walk the whole table when nothing lies under the directory: a count per hash of each ancestor directory name, kept where names enter and leave the index, answers that first.
 - The network stack holds 240 TCP connections (32 before: two for each connection between programs on this machine, plus listeners and connections in TIME_WAIT), 32 UDP sockets (8) and 256 masqueraded flows (64) for network namespaces.
@@ -748,6 +749,8 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   times larger than gcc's, so it is opt-in.
 
 ### Tests and documentation
+
+- A documentation index (`docs/README.md`) and a page on developing on BastiOS (`docs/development.md`); the README's status, `docs/using.md`'s limits, `docs/security.md`'s list of missing calls and `docs/aarch64.md`'s open items now match the code. Issue and pull request templates.
 
 - A getting-started guide (`docs/getting-started.md`): build, boot in
   QEMU, write a Bastio program, run a Linux program, boot from a USB

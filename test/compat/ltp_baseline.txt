@@ -1,5 +1,6 @@
 # LTP tests that pass on BastiOS (make compat-ltp-baseline rewrites this).
 # make compat-ltp fails if one of them stops passing.
+abort01
 accept01
 accept03
 accept4_01
@@ -72,7 +73,10 @@ clone05
 clone06
 clone07
 clone10
+clone11
 clone302
+clone303
+clone304
 close01
 close02
 confstr01
@@ -85,6 +89,18 @@ fanotify04
 fanotify08
 fanotify09
 fanotify11
+fgetxattr01
+fgetxattr03
+flistxattr01
+flistxattr02
+flistxattr03
+fork13
+fremovexattr01
+fremovexattr02
+fsetxattr01
+getxattr01
+getxattr02
+inotify06
 inotify09
 inotify11
 io_cancel01
@@ -114,6 +130,18 @@ keyctl20
 keyctl21
 keyctl22
 keyctl24
+kill11
+lgetxattr01
+lgetxattr02
+listxattr01
+listxattr02
+listxattr03
+llistxattr01
+llistxattr02
+llistxattr03
+lremovexattr01
+removexattr01
+removexattr02
 request_key01
 request_key02
 request_key03
@@ -735,6 +763,7 @@ rt_sigprocmask02
 rt_sigqueueinfo01
 rt_sigqueueinfo02
 rt_sigtimedwait01
+rt_tgsigqueueinfo01
 sbrk02
 sched_get_priority_max01
 sched_get_priority_max02
@@ -872,6 +901,8 @@ settimeofday02
 setuid01
 setuid03
 setuid04
+setxattr01
+setxattr02
 shmat01
 shmat02
 shmat03
@@ -901,6 +932,7 @@ signal02
 signal03
 signal04
 signal05
+signal06
 signalfd01
 signalfd02
 signalfd4_01

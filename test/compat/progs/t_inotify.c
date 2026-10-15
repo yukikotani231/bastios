@@ -199,6 +199,47 @@ int main(void) {
     EXPECT("/proc/sys/fs/inotify/max_queued_events", max > 0);
     EXPECT("/proc/sys/fs/inotify/max_user_instances", proc_num("/proc/sys/fs/inotify/max_user_instances") > 0);
     EXPECT("/proc/sys/fs/inotify/max_user_watches", proc_num("/proc/sys/fs/inotify/max_user_watches") > 0);
+    {
+        /* root may raise a limit; it is kept and read back */
+        long old = proc_num("/proc/sys/fs/inotify/max_user_instances");
+        int lf = open("/proc/sys/fs/inotify/max_user_instances", O_WRONLY);
+        int okw = lf >= 0 && dprintf(lf, "%ld\n", old + 500) > 0;
+        if (lf >= 0)
+            close(lf);
+        EXPECT("max_user_instances is writable and reads back", okw && proc_num("/proc/sys/fs/inotify/max_user_instances") == old + 500);
+        lf = open("/proc/sys/fs/inotify/max_user_instances", O_WRONLY);
+        if (lf >= 0) {
+            dprintf(lf, "%ld\n", old);
+            close(lf);
+        }
+    }
+    {
+        /* a process that just ended does not give its id to the next fork */
+        int p1 = fork();
+        if (p1 == 0)
+            _exit(0);
+        waitpid(p1, 0, 0);
+        int p2 = fork();
+        if (p2 == 0)
+            _exit(0);
+        waitpid(p2, 0, 0);
+        EXPECT("two forks in a row get different pids", p1 > 0 && p2 > 0 && p1 != p2);
+    }
+    {
+        /* pid_max: kept and read back; Linux's bounds are 301 and 4194304 */
+        long old = proc_num("/proc/sys/kernel/pid_max");
+        int pf = open("/proc/sys/kernel/pid_max", O_WRONLY);
+        int okw = pf >= 0 && dprintf(pf, "32768\n") > 0;
+        int bad = pf >= 0 && write(pf, "5\n", 2) < 0 && errno == EINVAL;
+        if (pf >= 0)
+            close(pf);
+        EXPECT("pid_max is writable, kept and bounded", okw && bad && proc_num("/proc/sys/kernel/pid_max") == 32768);
+        pf = open("/proc/sys/kernel/pid_max", O_WRONLY);
+        if (pf >= 0) {
+            dprintf(pf, "%ld\n", old);
+            close(pf);
+        }
+    }
     inotify_add_watch(in, "in_f", IN_ACCESS | IN_MODIFY);
     for (long i = 0; i < max && i < 100000; i++) {
         lseek(fd, 0, SEEK_SET);

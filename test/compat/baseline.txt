@@ -395,6 +395,9 @@ t_file: a write of many unaligned blocks is not short
 t_inotify: /proc/sys/fs/inotify/max_queued_events
 t_inotify: /proc/sys/fs/inotify/max_user_instances
 t_inotify: /proc/sys/fs/inotify/max_user_watches
+t_inotify: max_user_instances is writable and reads back
+t_inotify: pid_max is writable, kept and bounded
+t_inotify: two forks in a row get different pids
 t_inotify: IN_MASK_CREATE on a watched file is EEXIST
 t_inotify: IN_ONESHOT: one event, then the watch goes
 t_inotify: IN_ONLYDIR on a file is ENOTDIR
@@ -1257,6 +1260,9 @@ t_userns: statfs of /proc/self/fd/N answers for the file N holds
 t_userns: nor in one that another user namespace made
 t_userns: a user namespace is made inside another and mapped through it
 t_userns: whoever made a user namespace joins it with setns, and not the first one
+t_userns: nor mounts in a mount namespace that another user namespace made
+t_userns: nor sets the hostname of a UTS namespace that another user namespace made
+t_userns: a user namespace made inside one mounts in a mount namespace of its own
 tty: kilo: edit and save a file
 tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
 tty: micropython: REPL line editing and history
