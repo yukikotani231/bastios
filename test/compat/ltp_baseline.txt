@@ -111,6 +111,7 @@ io_submit02
 io_submit03
 io_submit04
 keyctl01
+keyctl02
 keyctl03
 keyctl04
 keyctl05

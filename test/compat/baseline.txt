@@ -963,6 +963,7 @@ t_proc: wait with no children is ECHILD
 t_proc: waitid
 t_proc: waitpid WNOHANG
 t_proc: sysctl somaxconn reads 4096
+t_proc: keys root_maxkeys reads 200 and a larger value reads back
 t_proc: sysctl overcommit_memory reads 0
 t_proc: sysctl max_map_count reads 65530
 t_proc: sysctl cap_last_cap reads 40
