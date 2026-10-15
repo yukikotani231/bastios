@@ -1282,7 +1282,7 @@ fn disk_child(d: &DiskFs, p: u64, name: &Bytes, from: u64, n: u64) -> u64
   while i < d.slots
     invariant i <= d.slots && d.slots <= DSLOTS
   {
-    if dent_named(d, i, name, from, n) && dent_parent(d, i) == p {
+    if cast[u64](dent_byte(d, i, E_NLEN)) == n && dent_named(d, i, name, from, n) && dent_parent(d, i) == p {
       return i;
     }
     i = i + 1;
