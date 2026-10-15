@@ -33,6 +33,10 @@ const LX_PIDFD_SEND_SIGNAL: u64 = 424;
 const LX_PIDFD_OPEN: u64 = 434;
 const LX_PIDFD_GETFD: u64 = 438;
 const PVM_WAIT: u64 = 4611686018427387904;           // process_vm's answer: not yet (no byte count is this large)
+const PIDFD_THREAD: u64 = 128;                       // pidfd_open's flag: O_EXCL
+const PIDFD_SIGNAL_THREAD: u64 = 1;
+const PIDFD_SIGNAL_THREAD_GROUP: u64 = 2;
+const PIDFD_SIGNAL_PROCESS_GROUP: u64 = 4;
 const KCMP_FILE: u64 = 0;
 const KCMP_FILES: u64 = 2;
 const KCMP_FS: u64 = 3;
@@ -71,21 +75,24 @@ fn lx_pidfd_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u6
 }
 
 /// pidfd_open(p, flags): a close-on-exec descriptor for process p, which
-/// must be running (or a zombie) and lead its thread group.
+/// must be running (or a zombie) and lead its thread group, or with
+/// PIDFD_THREAD any thread.
 fn pidfd_open(k: &mut Kernel, pid: u64, p: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if flags & !LO_NONBLOCK != 0 || p == 0 || p >= 0x80000000 {
+  if flags & !(LO_NONBLOCK + PIDFD_THREAD) != 0 || p == 0 || p >= 0x80000000 {
     return EINVAL;
   }
   if p >= NPROC || state(k.procs, p) == FREE {
     return ESRCH;
   }
-  if tgid(k.procs, p) != p {
+  if tgid(k.procs, p) != p && flags & PIDFD_THREAD == 0 {
     return EINVAL;                          // a thread, not a process
   }
-  return ev_install(&mut k, pid, OF_PIDFD, p, flags / LO_NONBLOCK % 2, true);
+  // Word 3: bit 0 nonblocking, bit 1 a pidfd on a thread (it is ready when
+  // that thread ends).
+  return ev_install(&mut k, pid, OF_PIDFD, p, flags / LO_NONBLOCK % 2 + flags / PIDFD_THREAD % 2 * 2, true);
 }
 
 /// The process pidfd fd of process pid names (NPROC if it is gone), or
@@ -111,7 +118,10 @@ fn pidfd_signal(k: &mut Kernel, pid: u64, fd: u64, s: u64, info: u64, flags: u64
   requires kok(k) && 1 <= pid && pid < NPROC
   ensures kok(k)
 {
-  if flags != 0 {
+  // At most one of the scopes: the thread (what a pidfd on a thread
+  // means unasked), the thread group (a process's), or its process group.
+  if flags & !(PIDFD_SIGNAL_THREAD + PIDFD_SIGNAL_THREAD_GROUP + PIDFD_SIGNAL_PROCESS_GROUP) != 0
+     || (flags != 0 && flags & (flags - 1) != 0) {
     return EINVAL;
   }
   let p = pidfd_target(k, pid, fd, true);
@@ -123,6 +133,12 @@ fn pidfd_signal(k: &mut Kernel, pid: u64, fd: u64, s: u64, info: u64, flags: u64
   }
   if p >= NPROC || state(k.procs, p) == FREE || state(k.procs, p) == ZOMBIE {
     return ESRCH;
+  }
+  if flags == PIDFD_SIGNAL_PROCESS_GROUP {
+    if info != 0 {
+      return EINVAL;                        // a siginfo goes to one process
+    }
+    return lx_kill(&mut k, pid, wrap_sub(0, pgid_of(k.procs, p)), s);   // -pgid
   }
   if info == 0 {
     return lx_kill(&mut k, pid, p, s);

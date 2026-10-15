@@ -382,6 +382,12 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   if !cg_fork_ok(k, pid) {
     return EAGAIN;                          // a control group's pids.max (src/lxcgroup.bastio)
   }
+  if flags & CLONE_PIDFD != 0 && (fd_free(k, pid, 0) >= LXNFD || flags & CLONE_PARENT_SETTID != 0) {
+    if flags & CLONE_PARENT_SETTID != 0 {
+      return EINVAL;                        // both want the word at ptid
+    }
+    return EMFILE;
+  }
   let c = new_tid(&mut k);
   if c == 0 {
     return EAGAIN;
@@ -453,6 +459,10 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   }
   if flags & CLONE_CHILD_SETTID != 0 {
     let ok = put_user_u32(&mut k, pid, ctid, vpid_of(k, pid, c));
+  }
+  if flags & CLONE_PIDFD != 0 {
+    let pfd = ev_install(&mut k, pid, OF_PIDFD, c, 2, true);     // a pidfd on the thread
+    let w = put_user_u32(&mut k, pid, ptid, pfd % 0x100000000);
   }
   pset(&mut k.procs, c, F_STATE, READY);
   return c;
@@ -1145,7 +1155,7 @@ fn lx_clone3_read(k: &mut Kernel, pid: u64, va: u64, size: u64) -> Clone3
     if !pf.ok {
       return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
     }
-    if low & CLONE_PARENT_SETTID != 0 || low & CLONE_THREAD != 0 {
+    if low & CLONE_PARENT_SETTID != 0 {
       return none;
     }
     parent_word = pidfd.v;
