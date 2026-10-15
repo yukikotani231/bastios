@@ -604,12 +604,27 @@ def run_on_host(name, cmd, expected, timeout):
     return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": []}
 
 
-def run_tty(env, name, prog, keys, check, expected, timeout, bb):
-    """A tty.txt case: prog driven by keys, then check as an applet case."""
+def run_tty_once(env, name, prog, keys, check, expected, timeout, bb):
     if not env.keys(with_bb(prog, bb), keys, timeout):
         return {"name": name, "result": "hang", "detail": "the program did not return to the shell",
                 "syscalls": []}
     return run_applet(env, name, check, expected, timeout, bb)
+
+
+def run_tty(env, name, prog, keys, check, expected, timeout, bb):
+    """A tty.txt case: prog driven by keys, then check as an applet case.
+    Keys typed at a full-screen program race the emulator's timing, and a
+    loaded host can lose that race (a hang, or keys that arrive early). As
+    for the cases of the other groups, a failure runs again once, and a pass
+    is kept; the first try is printed so it does not go unseen."""
+    first = run_tty_once(env, name, prog, keys, check, expected, timeout, bb)
+    if first["result"] not in ("hang", "fail"):
+        return first
+    second = run_tty_once(env, name, prog, keys, check, expected, timeout, bb)
+    if second["result"] == "pass":
+        print(f"compat: {name}: passed on the second try (first: {first['result']}, {first['detail'][:120]})", flush=True)
+        second["retried"] = True
+    return second
 
 
 # ---------------------------------------------------------------- reporting

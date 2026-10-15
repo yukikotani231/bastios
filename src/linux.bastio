@@ -123,6 +123,24 @@ const ENOTTY: u64 = 18446744073709551591;   // 2^64 - 25
 const ENOENT: u64 = 18446744073709551614;   // 2^64 - 2
 const ENOMEM: u64 = 18446744073709551604;   // 2^64 - 12
 
+/// A system call's result word is -errno: a value in [2^64 - 4095, 2^64).
+spec fn lx_errno(r: u64) -> bool {
+  r >= 18446744073709547521
+}
+
+/// What a call that hands out a descriptor may return: -errno, or a
+/// descriptor below the per-process limit LXNFD.
+spec fn lx_fd_or_errno(r: u64) -> bool {
+  r < LXNFD || lx_errno(r)
+}
+
+/// What a call that hands out memory may return: -errno, or an address
+/// inside the user window (never a kernel address, never a hole's
+/// bookkeeping value such as DISK_RETRY).
+spec fn lx_user_addr_or_errno(r: u64) -> bool {
+  lx_errno(r) || (r >= USER_BASE && r - USER_BASE <= USER_SIZE)
+}
+
 // Process calls and file metadata (src/lxproc.bastio).
 const LX_CLONE: u64 = 56;
 const CLONE_VM: u64 = 0x100;
@@ -1377,6 +1395,7 @@ fn lx_fill(k: &mut Kernel, v: u64, n: u64)
 fn lx_put_out(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && n <= 160
   ensures kok(k)
+  ensures result == 0 || result == EFAULT
 {
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, n) != n {
     return EFAULT;
@@ -1389,6 +1408,7 @@ fn lx_put_out(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
 fn lx_zero_out(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && n <= 64
   ensures kok(k)
+  ensures result == 0 || result == EFAULT
 {
   if va == 0 {
     return 0;
@@ -1595,6 +1615,7 @@ fn line_take(l: &mut Buf, t: u64)
 fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && row < FD_ROWS
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let want = smaller(n, READ_MAX);
   let off0 = vfs_offset(k.fs, row);
@@ -1953,7 +1974,10 @@ fn do_writev(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u6
 }
 
 /// What a call that moved `total` bytes before failing with `err` returns.
-fn lx_fail_or(total: u64, err: u64) -> u64 {
+fn lx_fail_or(total: u64, err: u64) -> u64
+  ensures total > 0 ==> result == total
+  ensures total == 0 ==> result == err
+{
   if total > 0 {
     return total;
   }
@@ -2438,6 +2462,7 @@ fn stack_fault(k: &mut Kernel, p: u64) -> bool
 fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures result >= USER_BASE && result - USER_BASE <= USER_SIZE
 {
   let cur = pget(k.procs, pid, F_BRK);
   let low = pget(k.procs, pid, F_MMAP);
@@ -2483,6 +2508,7 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
 fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_user_addr_or_errno(result)
 {
   // In Linux's order: the offset, the descriptor, the length, the type.
   if off % 4096 != 0 {
@@ -2623,6 +2649,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
 fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags: u64, fd: u64, off: u64, anon: bool, cached: bool, f: u64, sh: bool) -> u64
   requires kok(k) && pid < NPROC && at <= USER_SIZE && pages <= WPAGES && off % 4096 == 0
   ensures kok(k)
+  ensures lx_user_addr_or_errno(result)
 {
   // Fresh pages are zero: only a file's bytes need copying in.
   if anon {
