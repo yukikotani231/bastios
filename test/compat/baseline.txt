@@ -953,6 +953,7 @@ t_proc: maps shows a PROT_NONE page with no permissions
 t_proc: maps has a [heap] after brk grows
 t_proc: maps has [stack] and [vdso]
 t_proc: maps lines end at column 74 for names
+t_proc: readlink of /proc/self is the caller's id
 t_ptrace: PTRACE_ATTACH stops the target with SIGSTOP
 t_ptrace: PTRACE_CONT with a signal runs the handler for it
 t_ptrace: PTRACE_CONT without a signal drops the one that stopped it, and the child saw the poke
