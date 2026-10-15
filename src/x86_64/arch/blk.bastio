@@ -886,6 +886,41 @@ fn blk_fetch_n(b: &mut Blk, j: u64, buf: &mut Bytes, at: u64)
   }
 }
 
+/// Asks that the next write started carry Force Unit Access, so its data is
+/// on the medium when it completes. False: this device cannot do that.
+fn blk_fua_next(b: &mut Blk) -> bool
+  requires blk_ok(b)
+  ensures blk_ok(b)
+{
+  match b {
+    Blk::Nvme(mut n) => {
+      let ok = nvme_fua_next(&mut n);
+      b = Blk::Nvme(n);
+      return ok;
+    },
+    Blk::Ata(a) => { b = Blk::Ata(a); return false; },
+    Blk::Ahci(h) => { b = Blk::Ahci(h); return false; },
+    Blk::Virtio(v) => { b = Blk::Virtio(v); return false; },
+    Blk::Usb(x) => { b = Blk::Usb(x); return false; },
+    Blk::Loop(l) => { b = Blk::Loop(l); return false; },
+  }
+}
+
+/// True if the command last started (blk_begin, blk_begin_n) was a write
+/// that carried Force Unit Access.
+fn blk_fua_done(b: &Blk) -> bool
+  requires blk_ok(b)
+{
+  match b {
+    Blk::Nvme(n) => { return n.fua_done; },
+    Blk::Ata(a) => { return false; },
+    Blk::Ahci(h) => { return false; },
+    Blk::Virtio(v) => { return false; },
+    Blk::Usb(x) => { return false; },
+    Blk::Loop(l) => { return false; },
+  }
+}
+
 /// BIO_RUNNING while the started command runs, then once BIO_OK or
 /// BIO_FAILED; BIO_IDLE if none was started.
 fn blk_poll(b: &mut Blk) -> u64
