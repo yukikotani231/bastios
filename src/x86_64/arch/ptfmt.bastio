@@ -61,6 +61,7 @@ fn step_flags(fl: u64, on: bool) -> u64 {
 const PT_AUDIT_ARCH: u64 = 0xC000003E;
 const UR_RET: u64 = 10;
 const UR_IP: u64 = 16;
+const UR_NUM: u64 = 255;                 // no register holds the call's number (orig_rax does)
 const UR_SP: u64 = 19;
 
 fn ur_arg(n: u64) -> u64
