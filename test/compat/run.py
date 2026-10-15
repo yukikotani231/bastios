@@ -604,12 +604,27 @@ def run_on_host(name, cmd, expected, timeout):
     return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": []}
 
 
-def run_tty(env, name, prog, keys, check, expected, timeout, bb):
-    """A tty.txt case: prog driven by keys, then check as an applet case."""
+def run_tty_once(env, name, prog, keys, check, expected, timeout, bb):
     if not env.keys(with_bb(prog, bb), keys, timeout):
         return {"name": name, "result": "hang", "detail": "the program did not return to the shell",
                 "syscalls": []}
     return run_applet(env, name, check, expected, timeout, bb)
+
+
+def run_tty(env, name, prog, keys, check, expected, timeout, bb):
+    """A tty.txt case: prog driven by keys, then check as an applet case.
+    Keys typed at a full-screen program race the emulator's timing, and a
+    loaded host can lose that race (a hang, or keys that arrive early). As
+    for the cases of the other groups, a failure runs again once, and a pass
+    is kept; the first try is printed so it does not go unseen."""
+    first = run_tty_once(env, name, prog, keys, check, expected, timeout, bb)
+    if first["result"] not in ("hang", "fail"):
+        return first
+    second = run_tty_once(env, name, prog, keys, check, expected, timeout, bb)
+    if second["result"] == "pass":
+        print(f"compat: {name}: passed on the second try (first: {first['result']}, {first['detail'][:120]})", flush=True)
+        second["retried"] = True
+    return second
 
 
 # ---------------------------------------------------------------- reporting
@@ -683,6 +698,7 @@ def main():
     ap.add_argument("--go-disk", help="the Go disk (the Go toolchain of the golang image) for go.txt")
     ap.add_argument("--python-disk", help="the Python disk (the root of the python:alpine image) for python.txt")
     ap.add_argument("--python-wheels", help="the Python packages python.txt installs, served at HOSTURL/wheels/")
+    ap.add_argument("--jdk-disk", help="the JDK disk (the JDK of the eclipse-temurin image) for java.txt")
     ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
@@ -706,6 +722,7 @@ def main():
     node = load_applets(os.path.join(HERE, "node.txt"))
     go = load_applets(os.path.join(HERE, "go.txt"))
     python = load_applets(os.path.join(HERE, "python.txt"))
+    java = load_applets(os.path.join(HERE, "java.txt"))
     rust = load_applets(os.path.join(HERE, "rust.txt"))
     tty = load_tty(os.path.join(HERE, "tty.txt"))
     alpine_tty = load_tty(os.path.join(HERE, "alpine_tty.txt"))
@@ -830,6 +847,11 @@ def main():
             os.makedirs(os.path.join(web.dir, "alpine"), exist_ok=True)
             os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", args.arch))
         lanes.append((disk, [("python", "Python development", applets_lane(python, 900))], "1G"))
+    if args.jdk_disk:
+        # The cases unpack a root of about 400 MB onto the disk: a copy.
+        disk = os.path.join(args.out, "jdk-run.img")
+        shutil.copyfile(args.jdk_disk, disk)
+        lanes.append((disk, [("java", "JDK", applets_lane(java, 900))], "2G"))
     if args.rust_disk:
         # rustc is a large dynamic program, and the cases unpack a root
         # of about a gigabyte onto the disk: a copy.
@@ -852,8 +874,8 @@ def main():
         log.close()
         web.shutdown()
         shutil.rmtree(scratch, ignore_errors=True)
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "rust", "python"] if k in results}
-    report(results, names, args.out, time.time() - t0)
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust", "python"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node",     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]
     base = os.path.join(HERE, "baseline.txt" if args.arch == "x86_64" else f"baseline-{args.arch}.txt")

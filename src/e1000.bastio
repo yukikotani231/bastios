@@ -225,6 +225,7 @@ fn e1k_write(e: &mut E1k, r: u64, v: u64)
 /// The address of receive buffer b (0-7).
 fn e1k_rxbuf_addr(e: &E1k, b: u64) -> u64
   requires b < E1K_DESCS
+  ensures result <= ADDR_LIMIT + RX_BUF
 {
   let mut a = dma_addr(e.rb3);
   if b < 2 {
