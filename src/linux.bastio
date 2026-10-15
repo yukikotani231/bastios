@@ -1650,6 +1650,7 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
 fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
   ensures kok(k) && con_ok(con)
+  ensures lx_count_or_fail(result, n0)
 {
   let mut n = n0;
   let d = fd_look(k, pid, fd);

@@ -480,6 +480,7 @@ fn tm_write(k: &mut Kernel, p: u64, n: u64) -> u64
   requires kok(k) && n <= 32 && p < NPROC
   ensures kok(k)
   ensures result <= n || result > XFER
+  ensures lx_count_or_fail(result, n)
 {
   let id = nsk_of(k, NSK_TIMEC, p);
   let s = tm_slot(k, id);

@@ -1107,6 +1107,7 @@ fn tcp_status_of(n: &Net, t: u64) -> u64
 fn tcp_write(n: &mut Net, t: u64, buf: &Bytes, size: u64) -> u64
   requires net_ok(n)
   ensures net_ok(n)
+  ensures result == NO_SOCK || result <= size
 {
   tcb_enter(&mut n, t);
   if !tcb_held(n, t) || tw(n, t, W_FIN) != 0 {
@@ -1396,6 +1397,7 @@ fn tcp_row(c: &Nic, t: u64, ns: u64, f: u64) -> u64
 fn tcp_send(c: &mut Nic, t: u64, buf: &Bytes, size: u64) -> u64
   requires nic_ok(c)
   ensures nic_ok(c)
+  ensures result == NO_SOCK || result <= size
 {
   match c {
     Nic::None => { c = Nic::None; return NO_SOCK; },

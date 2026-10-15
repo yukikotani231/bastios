@@ -208,6 +208,7 @@ fn nl_target(k: &Kernel, len: u64) -> u64
 fn nl_send(k: &mut Kernel, pid: u64, q: u64, buf: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   if n > XFER {
     return EMSGSIZE;

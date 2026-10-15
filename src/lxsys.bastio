@@ -184,6 +184,7 @@ fn lx_setname(k: &mut Kernel, pid: u64, base: u64, bit: u64, va: u64, n: u64) ->
 fn uts_proc_write(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && i < 2
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   if !uts_may_set(k, pid) {
     return EACCES;
@@ -207,7 +208,7 @@ fn uts_proc_write(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
 fn uts_xfer_write(k: &mut Kernel, pid: u64, i: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && i < 2 && n <= XFER
   ensures kok(k)
-  ensures result <= n || result > XFER
+  ensures result <= n || result >= 0x8000000000000000
 {
   if !uts_may_set(k, pid) {
     return EACCES;
