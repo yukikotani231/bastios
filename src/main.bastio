@@ -196,7 +196,8 @@ const MAX_IDLE: u64 = 1024;           // more than there are processors
 // (an idle application processor sleeps through its own; see `next_job`).
 // `acpi` holds the clock's PM timer (without an HPET) and the power
 // button; `reboot` says the stop is a restart.
-struct Sys { k: Kernel, con: Con, pic: Pic, apic: Lapic, clock: Hpet, acpi: Acpi, stop: bool, reboot: bool, idle: u64, ticked: bool, login: u64, slept: u64, polled: bool }
+// The fields every trap reads come first, so that the lock and they share a page.
+struct Sys { con: Con, pic: Pic, apic: Lapic, stop: bool, reboot: bool, idle: u64, ticked: bool, login: u64, slept: u64, polled: bool, clock: Hpet, acpi: Acpi, k: Kernel }
   invariant kok(k) && con_ok(con) && pic_ok(pic) && lapic_ok(apic) && hpet_ok(clock) && acpi_ok(acpi);
 
 spec fn sys_ok(s: &Sys) -> bool {

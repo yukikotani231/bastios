@@ -20,7 +20,7 @@ import "snd.bastio";
 // ALARMS_LEN and HOLES_LEN follow it, and a
 // signal's sender word keeps the pid in 8 bits (post_from, src/lxsig.bastio).
 const NPROC: u64 = 512;
-const STRIDE: u64 = 72 + REGS_EXT;
+const STRIDE: u64 = 97 + REGS_EXT;
 const PTAB_LEN: u64 = NPROC * STRIDE;   // the most the table grows to
 const PGROW: u64 = 32;               // rows the process table starts with (it doubles from there)
 
@@ -103,6 +103,11 @@ const F_FAULT_VA: u64 = 68;
 const F_ARGS: u64 = 69;              // Linux: the argument strings at exec: window offset + length * 2^40 (/proc/PID/cmdline)
 const F_WDONE: u64 = 71;             // Linux write(2) restarted for the disk: 2 * the bytes already written + 1 if the last pass stopped for the disk (src/linux.bastio)
 const F_XSIG: u64 = 70;              // Linux: the signal its parent gets when it ends, plus 1 (clone's exit_signal); 0 is SIGCHLD
+const F_TR: u64 = 72 + REGS_EXT;      // ptrace word (src/lxptrace.bastio); in the row, not in k.sys, so a system call touches one page less
+const F_TR2: u64 = 73 + REGS_EXT;     // its system-call-stop word
+const F_TM: u64 = 74 + REGS_EXT;      // 3 words: system ns, children's user ticks, children's system ticks (src/lxrlimit.bastio)
+const F_SC: u64 = 77 + REGS_EXT;      // SC_PW words: seccomp state (src/lxseccomp.bastio)
+const F_NSK: u64 = 85 + REGS_EXT;     // NSK_N words: the namespaces it is in (src/lxnsk.bastio)
 const F_NETNS: u64 = 64;             // network (src/netns.bastio, src/lxnetlink.bastio)
 // File permission bits (src/lxperm.bastio).
 const MAY_X: u64 = 1;
@@ -536,15 +541,15 @@ const SYS_RL: u64 = SYS_PR + NPROC * 5;               // SYS_PR + NPROC * PR_W; 
 const SYS_DL: u64 = SYS_RL + NPROC * 34;              // SYS_RL + NPROC * RL_W; NPROC * 3 words
 const SYS_JC: u64 = SYS_DL + NPROC * 3;              // SYS_DL + NPROC * 3; a word per process (job control, src/lxsig.bastio)
 const SYS_TM: u64 = SYS_JC + NPROC;              // SYS_JC + NPROC; NPROC * 3 words (system and children's times, src/lxrlimit.bastio)
-const SYS_RB: u64 = SYS_TM + NPROC * 3;              // SYS_TM + NPROC * 3; a word per thread (robust futex list head, src/lxthread.bastio)
+const SYS_RB: u64 = SYS_TM;              // SYS_TM (the CPU times are in the process table, F_TM); a word per thread (robust futex list head, src/lxthread.bastio)
 const SYS_CAP: u64 = SYS_RB + NPROC;             // SYS_RB + NPROC; NPROC * CAP_W words (capabilities, src/lxcap.bastio)
 const SYS_IOP: u64 = SYS_CAP + NPROC * 4;            // SYS_CAP + NPROC * CAP_W; a word per thread (ioprio_set, src/lxprio.bastio)
 const SYS_AT: u64 = SYS_IOP + NPROC;             // SYS_IOP + NPROC; AT_N entries of 3 words: handle + 1, access time, the modification time it was set against
 const SYS_LR: u64 = SYS_AT + 96;             // SYS_AT + AT_N * 3; NPROC * LR_N ranges of 2 words
 const SYS_PT: u64 = SYS_LR + NPROC * 8;             // SYS_LR + NPROC * LR_N * 2; a word per process
-const SYS_SEAL: u64 = SYS_PT + NPROC;           // SYS_PT + NPROC; SEAL_N memfds of 2 words: file + 1 (0: free), seals
+const SYS_SEAL: u64 = SYS_PT;           // SYS_PT (the ptrace words are in the process table, F_TR and F_TR2); SEAL_N memfds of 2 words: file + 1 (0: free), seals
 const SYS_PT2: u64 = SYS_SEAL + 32;            // SYS_SEAL + SEAL_N * 2; a word per process
-const SYS_BUSY: u64 = SYS_PT2 + NPROC;           // SYS_PT2 + NPROC; one word: ticks some process was running at
+const SYS_BUSY: u64 = SYS_PT2;           // SYS_PT2; one word: ticks some process was running at
 const SYS_SCT: u64 = SYS_BUSY + 1;             // the writable numbers of src/lxsysctl.bastio, SC_NUM words (36)
 const SYS_OOM: u64 = SYS_SCT + 36;             // SYS_SCT + SCT_NUM; a word per process: oom_score_adj + 1001 + 1 (0: never written; src/lxprocfs.bastio)
 const SYS_XA: u64 = SYS_OOM + NPROC;             // extended attributes (src/lxxattr.bastio): XA_N entries of three words: handle + 1 (0 free), name length, value length; then one word, the number of entries in use
@@ -708,8 +713,8 @@ const PN_W: u64 = 4;                  // id + 1 (0: free), the next id to give, 
 const UTS_N: u64 = 32;                // UTS namespaces besides the first
 const UTS_W: u64 = 133;               // id + 1 (0: free), then the names as k.sys keeps them, then the id of the user namespace that owns it
 const UTS_OWN: u64 = UTS_W - 1;       // its word of the owner
-const MNS_KID: u64 = NPROC + 16 + MT_N * ME_W;   // [MNS_KID + kind * NPROC + pid]
-const MNS_KNEXT: u64 = MNS_KID + NSK_N * NPROC;
+const MNS_KID: u64 = NPROC + 16 + MT_N * ME_W;   // (each process's namespaces are in its row of the process table, F_NSK + kind)
+const MNS_KNEXT: u64 = MNS_KID;
 const MNS_UTS: u64 = MNS_KNEXT + NSK_N;
 const MNS_PN: u64 = MNS_UTS + UTS_N * UTS_W;
 const MNS_USR: u64 = MNS_PN + PN_N * PN_W;
@@ -738,7 +743,7 @@ const SCF_LEN: u64 = SC_INS + SC_POOL + 1;   // and one word that always reads 0
 const DVP_N: u64 = 16;
 const DVP_MAXI: u64 = 512;
 const DVP_W: u64 = 2 + DVP_MAXI;
-const MNS_DVP: u64 = MNS_SC + NPROC * SC_PW;
+const MNS_DVP: u64 = MNS_SC;
 // Owners of mount namespaces (src/lxns.bastio): MO_N pairs (namespace id, id of the user namespace that made it) from MNS_MO.
 const MO_N: u64 = 64;
 const MNS_MO: u64 = MNS_DVP + DVP_N * DVP_W;
@@ -991,8 +996,18 @@ struct Kernel {
   epoch: u64,           // CLOCK_REALTIME minus the clock, in ns (src/rtc.bastio)
   rng: Buf,             // the generator behind /dev/urandom, RNG_LEN words (src/lxdev.bastio)
   cpus: u64,            // processors running, the bootstrap one included
-  fs: Vfs,              // files and the open-file table
-  nic: Nic,             // the network card and its UDP sockets, if any
+  naps: bool,           // a process may be in TIMEWAIT: false lets sleepers_wake skip its scan
+  undo_hi: u64,         // one past the highest SEM_UNDO entry ever made (undo_find): no later one is in use (sem_exit and undo_clear stop there)
+  mt_hi: u64,           // one past the highest mount entry ever given to a namespace (me_set): no later one is in use
+  pid_hi: u64,          // one past the highest process id ever handed out by new_pid_from: every row from there on is FREE (scans for a ready process stop there)
+  fd_hi: u64,           // one past the highest descriptor number ever open: every non-zero word of lxfd is below it (rows are scanned only that far)
+  ux_xtra: bool,        // some channel may hold extra descriptions in flight (set by sendmsg, cleared by ux_reap once none does): unref_value skips its scan while false
+  ofd_hi: u64,          // one past the highest open file description ever made: no later one is in use (scans stop there)
+  socks: bool,          // a process may be in SOCKWAIT (nap sets it, sock_wake clears it): false lets sock_wake return at once
+  perr: u64,            // why lx_path_from last gave NO_RESULT: -ENOENT, -ENOTDIR, ... (src/linux.bastio)
+  pdir: bool,           // the name lx_path_from last gave ended in "/" or "/." and names nothing yet: only a directory may be made there
+  cg_on: bool,          // some cgroup has ever been frozen, throttled or held back by cpu.weight (set by cg_put, never cleared): while false the scheduler skips the cgroup checks
+  ino_on: bool,         // some inotify or fanotify watch or extended attribute has ever been made: while false a Linux system call skips the inotify hooks (they would touch two tables for nothing; set where one is made, never cleared)
   sigact: Buf,          // Linux signal actions (src/lxsig.bastio)
   cwd: Buf,             // Linux working directories (src/lxdir.bastio)
   croot: Buf,           // each process's root (chroot), laid out like cwd; length 0 is the top
@@ -1011,53 +1026,45 @@ struct Kernel {
   loops: Buf,           // loop devices (src/lxloop.bastio)
   ptys: Buf,            // pseudo-terminals (src/lxpty.bastio)
   ptyb: Bytes,          // their rings
-  perr: u64,            // why lx_path_from last gave NO_RESULT: -ENOENT, -ENOTDIR, ... (src/linux.bastio)
-  pdir: bool,           // the name lx_path_from last gave ended in "/" or "/." and names nothing yet: only a directory may be made there
   ipc: Buf,             // System V message queues and semaphores (src/lxipc.bastio)
   ipcb: Bytes,          // the queues' messages
   shm: Store,           // System V shared memory pages (src/lxipc.bastio)
   txt: Store,           // the built-in programs' read-only pages (src/text.bastio)
   sys: Buf,             // settings root may change: names, the clock discipline (src/lxsys.bastio)
-  snd: Snd,             // the sound card, if any (src/hda.bastio)
   mice: Bytes,          // mouse packets for /dev/input/mice (src/lxmouse.bastio)
   mns: Buf,             // mount namespaces: each process's, and their mounts (src/lxns.bastio)
   scf: Buf,             // seccomp filters, empty until one is loaded (src/lxseccomp.bastio)
   mstr: Bytes,          // the mounts' paths, and the logical path of the last lookup
-  naps: bool,           // a process may be in TIMEWAIT: false lets sleepers_wake skip its scan
-  undo_hi: u64,         // one past the highest SEM_UNDO entry ever made (undo_find): no later one is in use (sem_exit and undo_clear stop there)
-  mt_hi: u64,           // one past the highest mount entry ever given to a namespace (me_set): no later one is in use
-  pid_hi: u64,          // one past the highest process id ever handed out by new_pid_from: every row from there on is FREE (scans for a ready process stop there)
-  fd_hi: u64,           // one past the highest descriptor number ever open: every non-zero word of lxfd is below it (rows are scanned only that far)
-  ux_xtra: bool,        // some channel may hold extra descriptions in flight (set by sendmsg, cleared by ux_reap once none does): unref_value skips its scan while false
-  ofd_hi: u64,          // one past the highest open file description ever made: no later one is in use (scans stop there)
-  socks: bool,          // a process may be in SOCKWAIT (nap sets it, sock_wake clears it): false lets sock_wake return at once
+  fs: Vfs,              // files and the open-file table
+  nic: Nic,             // the network card and its UDP sockets, if any
+  snd: Snd,             // the sound card, if any (src/hda.bastio)
 }
 
 /// Process p's ptrace word (see SYS_PT).
 fn tr_get(k: &Kernel, p: u64) -> u64
   requires kok(k) && p < NPROC
 {
-  return get(k.sys, SYS_PT + p);
+  return pget(k.procs, p, F_TR);
 }
 
 fn tr_put(k: &mut Kernel, p: u64, v: u64)
   requires kok(k) && p < NPROC
   ensures kok(k)
 {
-  k.sys = set(k.sys, SYS_PT + p, v);
+  pset(&mut k.procs, p, F_TR, v);
 }
 
 fn tr2_get(k: &Kernel, p: u64) -> u64
   requires kok(k) && p < NPROC
 {
-  return get(k.sys, SYS_PT2 + p);
+  return pget(k.procs, p, F_TR2);
 }
 
 fn tr2_put(k: &mut Kernel, p: u64, v: u64)
   requires kok(k) && p < NPROC
   ensures kok(k)
 {
-  k.sys = set(k.sys, SYS_PT2 + p, v);
+  pset(&mut k.procs, p, F_TR2, v);
 }
 
 /// The process that traces p, or 0.
@@ -1313,7 +1320,7 @@ fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
   wset(&mut k.cwd, pid * CWD_STRIDE, 0);   // starts at "/"
   wset(&mut k.croot, pid * CWD_STRIDE, 0);
   k.mns = set(k.mns, pid, 0);               // in the first mount namespace
-  nsk_reset(&mut k.mns, pid);               // and the first others (src/lxnsk.bastio)
+  nsk_reset(&mut k.procs, pid);               // and the first others (src/lxnsk.bastio)
   let mut args = balloc(ARGV0_MAX + 1 + START_ENV_LEN);
   let alen = name_arg(&mut args, name);
   let total = start_env(&mut args, alen);

@@ -2402,7 +2402,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       {
         j = j - 1;
         a = put_c(&mut o, a, 9);
-        a = put_n(&mut o, a, get(k.mns, nsk_at(vp_kind(j), p)));
+        a = put_n(&mut o, a, pget(k.procs, p, F_NSK + vp_kind(j)));
       }
     }
     a = put_s(&mut o, a, "\nUid:");

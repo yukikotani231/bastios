@@ -115,14 +115,14 @@ fn sc_put(k: &mut Kernel, i: u64, v: u64)
 fn sp_get(k: &Kernel, w: u64) -> u64
   requires kok(k) && w < NPROC * SC_PW
 {
-  return get(k.mns, MNS_SC + w);
+  return pget(k.procs, w / SC_PW, F_SC + w % SC_PW);
 }
 
 fn sp_put(k: &mut Kernel, w: u64, v: u64)
   requires kok(k) && w < NPROC * SC_PW
   ensures kok(k)
 {
-  k.mns = set(k.mns, MNS_SC + w, v);
+  pset(&mut k.procs, w / SC_PW, F_SC + w % SC_PW, v);
 }
 
 /// Process p's top filter plus one (0: it has none).

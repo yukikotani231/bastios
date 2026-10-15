@@ -363,6 +363,8 @@ fn ino_add_watch(k: &mut Kernel, pid: u64, fd: u64, va: u64, mask: u64) -> u64
   if all < INO_N * INO_W {
     iput(&mut k, INO_G + G_WATCHES, all + 1);
   }
+  k.ino_on = true;
+  iput(&mut k, INO_G + G_PID, pid);         // ino_before has not run for this call
   return wd;
 }
 
@@ -829,6 +831,9 @@ fn ino_before(k: &mut Kernel, pid: u64)
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if !k.ino_on {
+    return;                                 // no watch or attribute has ever been made: nothing to follow
+  }
   iput(&mut k, INO_G + G_CALL, 0);
   iput(&mut k, INO_G + G_KEPT, 0);
   iput(&mut k, INO_G + G_PID, pid);
@@ -874,6 +879,9 @@ fn ino_after(k: &mut Kernel, pid: u64)
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if !k.ino_on {
+    return;
+  }
   let call = iget(k, INO_G + G_CALL);
   if call == 0 || (iget(k, INO_G + G_WATCHES) == 0 && !xa_any(k)) {
     return;
@@ -1417,6 +1425,8 @@ fn fan_mark(k: &mut Kernel, pid: u64, fd: u64, flags: u64, mask: u64, dirfd: u64
     if w < INO_N * INO_W + INO_N * FAN_M {
       iput(&mut k, INO_G + G_WATCHES, w + 1);
     }
+    k.ino_on = true;
+    iput(&mut k, INO_G + G_PID, pid);       // ino_before has not run for this call
   }
   if ign {
     iput(&mut k, at + 3, iget(k, at + 3) | (mask & FAN_MASKS));

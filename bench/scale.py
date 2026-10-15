@@ -37,6 +37,16 @@ def build():
     return out
 
 
+def cpu_seconds(pid):
+    """Host CPU time (user + system) QEMU has used so far: it does not move with
+    other processes on the host the way wall time does."""
+    try:
+        f = open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()
+        return (int(f[11]) + int(f[12])) / os.sysconf("SC_CLK_TCK")
+    except OSError:
+        return 0.0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--smp", default="1,2,4")
@@ -60,7 +70,9 @@ def main():
                     best = None
                     for _ in range(a.runs):
                         it = max(1, int(ITERS[t] * a.iters))
+                        c0 = cpu_seconds(g.q.pid)
                         at, text = g.run(f"/disk/scale {t} {n} {it}", timeout=1200)
+                        cpu = cpu_seconds(g.q.pid) - c0
                         if text is None:
                             print(f"smp {n} {t}: timeout", file=sys.stderr)
                             break
@@ -72,10 +84,10 @@ def main():
                         dt = g.time_at(at + e.start()) - g.time_at(at + m.end() - 1)
                         rate = int(e.group(1)) / dt
                         if best is None or rate > best[0]:
-                            best = (rate, dt)
+                            best = (rate, dt, cpu / int(e.group(1)) * 1e6)
                     res[(n, t)] = best
                     if best:
-                        print(f"smp {n} {t}: {best[1]:.2f} s, {best[0]:.0f} ops/s", flush=True)
+                        print(f"smp {n} {t}: {best[1]:.2f} s, {best[0]:.0f} ops/s, {best[2]:.1f} us of host CPU per op", flush=True)
             finally:
                 g.stop()
     print("\n| test | " + " | ".join(f"{c} CPU" for c in counts) + " |")

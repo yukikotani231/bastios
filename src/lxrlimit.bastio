@@ -522,14 +522,14 @@ fn lx_munlockall(k: &mut Kernel, pid: u64) -> u64
 fn tm_get(k: &Kernel, p: u64, i: u64) -> u64
   requires kok(k) && p < NPROC && i < 3
 {
-  return get(k.sys, SYS_TM + 3 * p + i);
+  return pget(k.procs, p, F_TM + i);
 }
 
 fn tm_set(k: &mut Kernel, p: u64, i: u64, v: u64)
   requires kok(k) && p < NPROC && i < 3
   ensures kok(k)
 {
-  k.sys = set(k.sys, SYS_TM + 3 * p + i, v);
+  pset(&mut k.procs, p, F_TM + i, v);
 }
 
 /// Process p spent ns in a system call.

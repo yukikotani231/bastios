@@ -197,7 +197,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   cwd_fork(&mut k.cwd, pid, c);
   cwd_fork(&mut k.croot, pid, c);
   k.mns = set(k.mns, c, get(k.mns, pid));   // the same mount namespace (src/lxns.bastio)
-  nsk_fork(&mut k.mns, pid, c);             // and the same others (src/lxnsk.bastio)
+  nsk_fork(&mut k.procs, pid, c);             // and the same others (src/lxnsk.bastio)
   if (nsk_of(k, NSK_TIME, c) != 0) != (nsk_of(k, NSK_TIME, pid) != 0) {
     tm_vdso(&mut k, c);                     // the page it copied says what the parent's time namespace did
   }

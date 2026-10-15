@@ -257,6 +257,7 @@ fn xa_set(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64, va: u64, vl: u6
     }
     if get(k.sys, SYS_XA + 3 * e) == 0 && get(k.sys, XA_COUNT) < XA_N {
       k.sys = set(k.sys, XA_COUNT, get(k.sys, XA_COUNT) + 1);
+      k.ino_on = true;                    // src/lxinotify.bastio follows removals from now on
     }
     k.sys = set(k.sys, SYS_XA + 3 * e, h + 1);
     k.sys = set(k.sys, SYS_XA + 3 * e + 1, nl);

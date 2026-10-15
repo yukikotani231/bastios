@@ -74,6 +74,9 @@ fn cg_put(k: &mut Kernel, s: u64, w: u64, v: u64)
   ensures kok(k)
 {
   k.mns = set(k.mns, cg_at(s, w), v);
+  if v != 0 && (w == CGW_FRZ || w == CGW_THR || w == CGW_WST) {
+    k.cg_on = true;
+  }
 }
 
 /// Is slot s a cgroup? The root always is.
@@ -99,7 +102,7 @@ fn cg_of(k: &Kernel, pid: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures result < CG_N
 {
-  return smaller(get(k.mns, nsk_at(NSK_CG, pid)), CG_N - 1);
+  return smaller(pget(k.procs, pid, F_NSK + NSK_CG), CG_N - 1);
 }
 
 /// Is cgroup s anc or below it?
@@ -149,8 +152,8 @@ fn cg_frozen(k: &Kernel, s: u64) -> bool
 fn cg_held(k: &Kernel, q: u64) -> bool
   requires kok(k) && q < NPROC
 {
-  if pget(k.procs, q, F_SIGPEND) & sbit(9) != 0 {
-    return false;
+  if !k.cg_on || pget(k.procs, q, F_SIGPEND) & sbit(9) != 0 {
+    return false;                           // no group can be frozen, throttled or held yet
   }
   return cg_frozen(k, cg_of(k, q)) || cg_throttled(k, cg_of(k, q)) || cg_wheld(k, cg_of(k, q));
 }
@@ -1112,7 +1115,7 @@ fn cgns_held(k: &Kernel, s: u64) -> bool
     invariant q <= NPROC && kok(k)
   {
     let st = pget(k.procs, q, F_STATE);
-    if st != FREE && st != ZOMBIE && get(k.mns, nsk_at(NSK_CGN, q)) == s + 1 {
+    if st != FREE && st != ZOMBIE && pget(k.procs, q, F_NSK + NSK_CGN) == s + 1 {
       return true;
     }
     q = q + 1;
@@ -1337,7 +1340,7 @@ fn cg_move(k: &mut Kernel, q: u64, dest: u64)
     invariant 1 <= r && r <= NPROC && kok(k)
   {
     if cg_live(k, r) && (r == q || in_group(k.procs, r, g)) {
-      k.mns = set(k.mns, nsk_at(NSK_CG, r), dest);
+      pset(&mut k.procs, r, F_NSK + NSK_CG, dest);
     }
     r = r + 1;
   }

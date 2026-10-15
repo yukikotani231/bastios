@@ -314,3 +314,17 @@ lock's bounded plain spin (bastiolang). The numbers move by about 10% from
 run to run. Four processors give less than four times one because the
 lock is held about 8 us of each 16 us system call and is saturated at
 four; the next step is shortening what runs under it, not more cores.
+
+### Data pages under the lock
+
+`bench/datapages.py` single-steps a system-call loop from gdb, decodes each
+instruction's memory operand and lists the distinct data pages the kernel
+touches per return to the program, each named by the kernel table it falls
+in. A `read` of `/dev/zero` touched 38. Words a system call reads for its own
+process now sit in its row of the process table (the ptrace words, CPU times,
+seccomp state and namespace ids, `F_TR` to `F_NSK`) instead of one page per
+table; the fields every trap reads come first in `Sys` and `Kernel`; the
+inotify and cgroup checks are skipped until the first watch, attribute,
+freeze, quota or weight exists (`ino_on`, `cg_on`). That is 29 pages. The
+throughput change is below what one run can show (about 10% noise on four
+cores), so the page count is the figure to compare.

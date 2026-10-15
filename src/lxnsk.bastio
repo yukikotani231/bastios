@@ -55,69 +55,64 @@ const S_IFREG_NS: u64 = 0x8124;            // what stat says an nsfs file is: r-
 
 // ---------------------------------------------------------------- ids
 
-fn nsk_at(kind: u64, pid: u64) -> u64
-  requires kind < NSK_N && pid < NPROC
-  ensures result < MNS_LEN
-{
-  return MNS_KID + kind * NPROC + pid;
-}
-
-/// The namespace of kind `kind` (NSK_*) process pid is in.
+/// The namespace of kind `kind` (NSK_*) process pid is in. The kinds of one
+/// process sit side by side in its row of the process table, so a system
+/// call that asks for several reads one page.
 fn nsk_of(k: &Kernel, kind: u64, pid: u64) -> u64
   requires kok(k) && kind < NSK_N && pid < NPROC
   ensures result < MNS_MAX
 {
-  return smaller(get(k.mns, nsk_at(kind, pid)), MNS_MAX - 1);
+  return smaller(pget(k.procs, pid, F_NSK + kind), MNS_MAX - 1);
 }
 
 fn nsk_set(k: &mut Kernel, kind: u64, pid: u64, id: u64)
   requires kok(k) && kind < NSK_N && pid < NPROC
   ensures kok(k)
 {
-  k.mns = set(k.mns, nsk_at(kind, pid), id);
+  pset(&mut k.procs, pid, F_NSK + kind, id);
 }
 
 /// A process the kernel starts is in the first namespaces.
 fn nsk_reset(t: &mut Buf, pid: u64)
-  requires len(t) == MNS_LEN && pid < NPROC
+  requires ptab_ok(t) && pid < NPROC
   ensures len(t) == old(len(t))
 {
   let mut i = 0;
   while i < NSK_N
-    invariant i <= NSK_N && len(t) == MNS_LEN && pid < NPROC
+    invariant i <= NSK_N && ptab_ok(t) && pid < NPROC && len(t) == old(len(t))
   {
-    t = set(t, nsk_at(i, pid), 0);
+    pset(&mut t, pid, F_NSK + i, 0);
     i = i + 1;
   }
 }
 
 /// A child starts in its parent's namespaces.
 fn nsk_fork(t: &mut Buf, pid: u64, c: u64)
-  requires len(t) == MNS_LEN && pid < NPROC && c < NPROC
+  requires ptab_ok(t) && pid < NPROC && c < NPROC
   ensures len(t) == old(len(t))
 {
   let mut i = 0;
   while i < NSK_N
-    invariant i <= NSK_N && len(t) == MNS_LEN && pid < NPROC && c < NPROC
+    invariant i <= NSK_N && ptab_ok(t) && pid < NPROC && c < NPROC && len(t) == old(len(t))
   {
-    t = set(t, nsk_at(i, c), get(t, nsk_at(i, pid)));
+    pset(&mut t, c, F_NSK + i, pget(t, pid, F_NSK + i));
     i = i + 1;
   }
-  t = set(t, nsk_at(NSK_TIME, c), get(t, nsk_at(NSK_TIMEC, pid)));   // the child is in the namespace its parent made for children
+  pset(&mut t, c, F_NSK + NSK_TIME, pget(t, pid, F_NSK + NSK_TIMEC));   // the child is in the namespace its parent made for children
 }
 
 /// execve from a thread: the thread takes over the leader's slot h.
 fn nsk_swap(t: &mut Buf, h: u64, p: u64)
-  requires len(t) == MNS_LEN && h < NPROC && p < NPROC
+  requires ptab_ok(t) && h < NPROC && p < NPROC
   ensures len(t) == old(len(t))
 {
   let mut i = 0;
   while i < NSK_N
-    invariant i <= NSK_N && len(t) == MNS_LEN && h < NPROC && p < NPROC
+    invariant i <= NSK_N && ptab_ok(t) && h < NPROC && p < NPROC && len(t) == old(len(t))
   {
-    let a = get(t, nsk_at(i, h));
-    t = set(t, nsk_at(i, h), get(t, nsk_at(i, p)));
-    t = set(t, nsk_at(i, p), a);
+    let a = pget(t, h, F_NSK + i);
+    pset(&mut t, h, F_NSK + i, pget(t, p, F_NSK + i));
+    pset(&mut t, p, F_NSK + i, a);
     i = i + 1;
   }
 }
@@ -134,7 +129,7 @@ fn nsk_live(k: &Kernel, kind: u64, id: u64) -> bool
     invariant q <= NPROC && kok(k) && kind < NSK_N
   {
     let s = pget(k.procs, q, F_STATE);
-    if s != FREE && s != ZOMBIE && get(k.mns, nsk_at(kind, q)) == id {
+    if s != FREE && s != ZOMBIE && pget(k.procs, q, F_NSK + kind) == id {
       return true;
     }
     q = q + 1;
@@ -354,7 +349,7 @@ fn tm_used(k: &Kernel, id: u64, own: bool) -> bool
   {
     let s = pget(k.procs, q, F_STATE);
     if s != FREE && s != ZOMBIE
-       && (get(k.mns, nsk_at(NSK_TIME, q)) == id || (!own && get(k.mns, nsk_at(NSK_TIMEC, q)) == id)) {
+       && (pget(k.procs, q, F_NSK + NSK_TIME) == id || (!own && pget(k.procs, q, F_NSK + NSK_TIMEC) == id)) {
       return true;
     }
     q = q + 1;
@@ -714,7 +709,7 @@ fn pn_used(k: &Kernel, id: u64) -> bool
     invariant q <= NPROC && kok(k)
   {
     if pget(k.procs, q, F_STATE) != FREE
-       && (pn_within(k, get(k.mns, nsk_at(NSK_PID, q)), id) || pn_within(k, get(k.mns, nsk_at(NSK_PIDC, q)), id)) {
+       && (pn_within(k, pget(k.procs, q, F_NSK + NSK_PID), id) || pn_within(k, pget(k.procs, q, F_NSK + NSK_PIDC), id)) {
       return true;
     }
     q = q + 1;
@@ -909,14 +904,14 @@ fn vp_in(k: &Kernel, row: u64, o: u64) -> u64
 {
   let r = nsk_of(k, NSK_PID, row);
   if r == o {
-    return get(k.mns, nsk_at(NSK_VPID, row));
+    return pget(k.procs, row, F_NSK + NSK_VPID);
   }
   let p = pn_parent(k, r);
   if r != 0 && p == o {
-    return get(k.mns, nsk_at(NSK_VP1, row));
+    return pget(k.procs, row, F_NSK + NSK_VP1);
   }
   if p != 0 && pn_parent(k, p) == o {
-    return get(k.mns, nsk_at(NSK_VP2, row));
+    return pget(k.procs, row, F_NSK + NSK_VP2);
   }
   return 0;
 }
@@ -1034,7 +1029,7 @@ fn pidns_init(k: &Kernel, pid: u64) -> u64
     invariant 1 <= q && q <= NPROC && kok(k)
   {
     let s = pget(k.procs, q, F_STATE);
-    if q != pid && s != FREE && s != ZOMBIE && nsk_of(k, NSK_PID, q) == o && get(k.mns, nsk_at(NSK_VPID, q)) == 1 {
+    if q != pid && s != FREE && s != ZOMBIE && nsk_of(k, NSK_PID, q) == o && pget(k.procs, q, F_NSK + NSK_VPID) == 1 {
       return q;
     }
     q = q + 1;
@@ -1050,7 +1045,7 @@ fn pidns_exit(k: &mut Kernel, pid: u64)
   ensures kok(k)
 {
   let o = nsk_of(k, NSK_PID, pid);
-  if o == 0 || get(k.mns, nsk_at(NSK_VPID, pid)) != 1 {
+  if o == 0 || pget(k.procs, pid, F_NSK + NSK_VPID) != 1 {
     return;
   }
   let s = pn_slot(k, o);
