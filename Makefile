@@ -789,7 +789,7 @@ build/compat/go.img: test/compat/godisk.py test/compat/alpinedisk.py test/compat
 # The Rust toolchain of the official rust:alpine image (rustc, cargo, Alpine's
 # gcc and musl), as a tar file the cases unpack, for rust.txt. Pinned by
 # digest, its layers kept in ALPINE_CACHE like the others'. x86-64 only.
-build/compat/rust.img: test/compat/rustdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
+build/compat/rust.img: test/compat/rustcrate/Cargo.toml test/compat/rustcrate/Cargo.lock test/compat/rustcrate/src/main.rs test/compat/rustdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
 	test/compat/rustdisk.py $@ $(RUST_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
 
 compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/rust.img
