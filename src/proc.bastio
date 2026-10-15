@@ -567,7 +567,8 @@ const AIO_W: u64 = 5 + AIO_EV * 4;
 const SYS_AIOSER: u64 = SYS_AIO + AIO_N * AIO_W;     // how many contexts were made
 const SYS_INOL: u64 = SYS_AIOSER + 1;          // /proc/sys/fs/inotify/{max_queued_events,max_user_instances,max_user_watches} as written, + 1 (0: never written; src/lxprocfs.bastio)
 const SYS_PIDMX: u64 = SYS_INOL + 3;           // /proc/sys/kernel/pid_max as written, + 1 (0: never written; src/lxprocfs.bastio)
-const SYS_LEN: u64 = SYS_PIDMX + 1;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio), then SYS_BUSY, the timer ticks all processes have run (/proc/stat)
+const SYS_MSGMNI: u64 = SYS_PIDMX + 1;         // /proc/sys/kernel/msgmni as written, + 1 (0: never written; src/lxipc.bastio)
+const SYS_LEN: u64 = SYS_MSGMNI + 1;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio), then SYS_BUSY, the timer ticks all processes have run (/proc/stat)
 const SYS_PIPEMAX: u64 = 150;          // /proc/sys/fs/pipe-max-size (0: PIPE_CAP), past the adjtimex words (src/lxsys.bastio)
 const AT_N: u64 = 32;
 const LR_N: u64 = 4;
@@ -642,6 +643,14 @@ const SK_WAIT: u64 = 0x8000000000000000;
 // What lx_write_fd returns when the console's ring has no room for the
 // write: not an errno, and never returned to the process.
 const CON_FULL: u64 = 0x8000000000000001;
+
+/// What a read or write that was asked for n bytes may return: a count of
+/// at most n, or a failure (-errno, or an internal marker such as CON_FULL
+/// or DISK_RETRY: all have the top bit set). A call can never claim to
+/// have moved more than it was given room for.
+spec fn lx_count_or_fail(r: u64, n: u64) -> bool {
+  r <= n || r >= 0x8000000000000000
+}
 // What a file read or write returns when the disk has not caught up
 // (VFS_MISS): the caller sleeps in DISKWAIT and its call restarts.
 const DISK_RETRY: u64 = 0x8000000000000002;
