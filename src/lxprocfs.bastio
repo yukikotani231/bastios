@@ -2760,6 +2760,34 @@ fn proc_fd(procs: &Buf, x: &Bytes, n: u64) -> u64
   return p * LXNFD + fd;
 }
 
+/// Where the name x[..n] (no leading "/") goes on once process p's root is
+/// taken off its front: 0 if the name is not inside the root.
+fn root_skip(k: &Kernel, p: u64, x: &Bytes, n: u64) -> u64
+  requires kok(k) && p < NPROC && n <= blen(x)
+  ensures result <= n
+{
+  let rl = root_len(k, p);
+  if rl == 0 || n < rl {
+    return 0;
+  }
+  let mut i = 0;
+  while i < rl
+    invariant i <= rl && rl <= n && n <= blen(x) && rl <= FNAME_MAX && kok(k) && p < NPROC
+  {
+    if cast[u64](bget(x, i)) != wget(k.croot, p * CWD_STRIDE + 1 + i) % 256 {
+      return 0;
+    }
+    i = i + 1;
+  }
+  if n == rl {
+    return rl;
+  }
+  if bget(x, rl) != 47 {
+    return 0;
+  }
+  return rl + 1;
+}
+
 /// The target of /proc/P/fd/FD into o: "/dev/tty" for the console, the
 /// path of a file, a "pipe:[N]" or "socket:[N]" or "anon_inode:[...]"
 /// name for the rest. Returns its length, or NO_RESULT if fd is closed.
@@ -2795,12 +2823,13 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
       let n = vfs_dirent(&mut k.fs, f);
       if n != NO_FILE && n <= XFER {
         let mut a = put_c(&mut o, 0, 47);
-        let mut j = 0;
         // A file below a mount the process's namespace made (a tmpfs, say)
-        // reads under the mount's name, not the file layer's.
+        // reads under the mount's name, not the file layer's; and below the
+        // process's root (chroot, pivot_root) from there.
         let mut lg = balloc(FNAME_MAX);
         let ln = ns_back(k, ns_of(k, p), smaller(n, FNAME_MAX), &mut lg);
         if ln != NO_RESULT && ln < PROC_OUT {
+          let mut j = root_skip(k, p, lg, ln);
           while j < ln
             invariant j <= ln && ln < PROC_OUT && a <= PROC_OUT && blen(o) == PROC_OUT && FNAME_MAX <= blen(lg) && kok(k)
           {
@@ -2811,6 +2840,7 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
           return a;
         }
         bfree(lg);
+        let mut j = root_skip(k, p, k.fs.xfer, n);
         while j < n
           invariant j <= n && n <= XFER && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
         {
@@ -2840,7 +2870,7 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
       // the process's root now (the root directory itself as "/"), when it
       // is inside it.
       let rl = root_len(k, p);
-      if rl > 0 && d.kind == K_DIR {
+      if rl > 0 {
         let mut s0 = 0;
         if n > 0 && base_byte(k, p, h, 0) == 47 {
           s0 = 1;
