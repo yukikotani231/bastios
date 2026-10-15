@@ -1326,6 +1326,7 @@ rust: rust: cargo test
 rust: rust: a compile error is reported
 rust: rust: a crate with a path dependency, release build
 rust: rust: crates from a vendored registry (rayon, serde derive)
+rust: rust: cargo test runs unit, integration and doc tests
 t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller
 t_sys: keys: add_key, read, describe, update, request_key, link, search, unlink
 t_sys: keys: unknown type, bad payload, expiry, revocation, no such key
