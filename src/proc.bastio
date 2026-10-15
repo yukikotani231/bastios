@@ -768,7 +768,7 @@ const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
 // flags, restorer, mask).
 const SIGACT_ROW: u64 = 256;          // per process: four words per signal
 const SIGACT_LEN: u64 = NPROC * SIGACT_ROW;
-const SIGSAVE_ROW: u64 = 65;          // per process: the saved mask, then a sender per signal (1 + NSIG)
+const SIGSAVE_ROW: u64 = 129;         // per process: the saved mask, a sender per signal, then a queued value per signal (1 + 2 * NSIG)
 const SIGSAVE_LEN: u64 = NPROC * SIGSAVE_ROW;
 const ALARMS_LEN: u64 = NPROC * 2 + NPROC * 16;        // NPROC * 2, then PT_N POSIX timers of PT_W words per process
 const PT_BASE: u64 = NPROC * 2;             // where the POSIX timers start in k.alarms (src/lxptimer.bastio)
