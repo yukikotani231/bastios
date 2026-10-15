@@ -356,6 +356,34 @@ static int many_attachments(void) {
     return ok;
 }
 
+/* A segment of 24 MiB and a page spans two page-table pages of the store; the
+ * first and last bytes of each, a fork, and a second view all see the same
+ * memory. One byte past 32 MiB is EINVAL. */
+static int big_segment(void) {
+    size_t size = 24 * 1024 * 1024 + 4096;
+    int id = shmget(IPC_PRIVATE, size, IPC_CREAT | 0600);
+    if (id < 0) return 0;
+    char *p = shmat(id, 0, 0);
+    if (p == (char *)-1) { shmctl(id, IPC_RMID, 0); return 0; }
+    size_t at[] = { 0, 2 * 1024 * 1024 - 1, 2 * 1024 * 1024, 13 * 1024 * 1024, size - 1 };
+    int ok = 1;
+    for (int i = 0; i < 5; i++) p[at[i]] = 'a' + i;
+    char *q = shmat(id, 0, SHM_RDONLY);
+    ok = ok && q != (char *)-1;
+    for (int i = 0; ok && i < 5; i++) ok = q[at[i]] == 'a' + i;
+    pid_t c = fork();
+    if (c == 0) { p[13 * 1024 * 1024] = 'z'; _exit(0); }
+    int st = 0;
+    waitpid(c, &st, 0);
+    ok = ok && q[13 * 1024 * 1024] == 'z' && p[size - 1] == 'e';
+    struct shmid_ds ds;
+    ok = ok && shmctl(id, IPC_STAT, &ds) == 0 && ds.shm_segsz == size;
+    ok = ok && shmdt(p) == 0 && shmdt(q) == 0;
+    shmctl(id, IPC_RMID, 0);
+    ok = ok && shmget(IPC_PRIVATE, 32 * 1024 * 1024 + 1, IPC_CREAT | 0600) == -1 && errno == EINVAL;
+    return ok;
+}
+
 int main(void) {
     setup();
     EXPECT("msgsnd, msgrcv and IPC_STAT", queue_basics());
@@ -375,6 +403,7 @@ int main(void) {
     EXPECT("msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message", next_ids_and_copy());
     EXPECT("32 queues, semaphore sets and segments at once, the 33rd of each is ENOSPC", many_objects());
     EXPECT("32 attachments in one process, the 33rd is EMFILE", many_attachments());
+    EXPECT("a 24 MiB segment is shared by a second view and a child; past 32 MiB is EINVAL", big_segment());
     EXPECT("512 SEM_UNDO adjustments in one process, all undone at exit", many_undos());
     return done();
 }

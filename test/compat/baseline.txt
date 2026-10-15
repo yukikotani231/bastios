@@ -1186,6 +1186,7 @@ t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message
 t_sysv: 32 queues, semaphore sets and segments at once, the 33rd of each is ENOSPC
 t_sysv: 32 attachments in one process, the 33rd is EMFILE
+t_sysv: a 24 MiB segment is shared by a second view and a child; past 32 MiB is EINVAL
 t_sysv: 512 SEM_UNDO adjustments in one process, all undone at exit
 t_sysv: GETNCNT counts a waiting process
 t_sysv: IPC_RMID ends a wait with EIDRM
