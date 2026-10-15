@@ -1361,7 +1361,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // acknowledged like the timer's), unless it shares the timer's, the
   // keyboard's, the cascade or COM1's.
   if nic_live(nic) && nic_e1000(nic) {
-    let ed = e1k_find(&mut pci);
+    let ed = nic_intx_dev(&mut pci);
     if ed < PCI_NONE {
       let line = pci_irq_line(&mut pci, ed);
       if line >= 3 && line < 16 && line != 4 {
@@ -1371,7 +1371,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     }
   }
   if nic_live(nic) {
-    if nic_e1000(nic) {
+    if nic_rtl(nic) {
+      puts(&mut con, "net: rtl8168, mac ");
+    } else if nic_e1000(nic) {
       puts(&mut con, "net: e1000, mac ");
     } else if nic_ena(nic) {
       puts(&mut con, "net: ena, mac ");
@@ -1397,7 +1399,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     put_num(&mut con, nic_why(nic));
     puts(&mut con, ", see docs/cloud.md)\r\n");
   } else if !nic_live(nic) {
-    puts(&mut con, "net: none (drivers: virtio, e1000 and ena only)\r\n");
+    puts(&mut con, "net: none (drivers: virtio, e1000, rtl8168 and ena only)\r\n");
   }
   // The hardware report, with the boot option `diag` (src/info.bastio),
   // after a line for each thing the boot log above says nothing about.

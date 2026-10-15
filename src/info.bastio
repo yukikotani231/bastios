@@ -561,6 +561,8 @@ fn put_driver(con: &mut Con, vendor: u64, device: u64, cls: u64)
     puts(&mut con, " e1000 network (82574)");
   } else if e1k_model(vendor, device) == E1K_IGB {
     puts(&mut con, " e1000 network (igb)");
+  } else if rtl_model(vendor, device) {
+    puts(&mut con, " rtl8168 network (untested on hardware)");
   } else if cls == XHCI_CLASS {
     puts(&mut con, " xHCI USB (keyboard, mouse, disk)");
   } else if cls == HDA_CLASS {
