@@ -49,7 +49,7 @@
 // the directory), /proc/PID/fd, maps and environ, writable sysctls but
 // pipe-max-size (proc_write), and
 // /proc/sys as a directory (its files open and stat, but are not listed).
-// A sysctl for a feature BastiOS lacks (core dumps, splice) is left out,
+// A sysctl for a feature BastiOS lacks (splice, say) is left out,
 // so a program that checks for it finds the feature missing.
 
 import "linux.bastio";
@@ -100,7 +100,7 @@ const SY_NETUNIX: u64 = 25;            // /proc/net/unix
 const SY_NETRAW: u64 = 26;             // /proc/net/raw
 const SY_NETROUTE: u64 = 27;           // /proc/net/route
 const SY_NETARP: u64 = 28;             // /proc/net/arp
-const SY_CORE: u64 = 29;               // /proc/sys/kernel/core_pattern (nothing dumps core)
+const SY_CORE: u64 = 29;               // /proc/sys/kernel/core_pattern ("core": a dump goes to a file of that name, src/lxcore.bastio)
 const SY_NROPEN: u64 = 30;             // /proc/sys/fs/nr_open
 const SY_DROP: u64 = 31;               // /proc/sys/vm/drop_caches: written, kept for nothing
 const SY_SC: u64 = 32;                // 32 .. 32 + SCT_N: the plain sysctl files of src/lxsysctl.bastio
