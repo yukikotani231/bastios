@@ -1241,7 +1241,11 @@ fn ns_may_join(k: &Kernel, pid: u64, f: u64, id: u64) -> u64
       return EPERM;
     }
     if !tm_live(k, id) || tm_slot(k, id) >= TM_N && id != 0 {
-      if f == NF_USER {
+      return EINVAL;
+    }
+    return 0;
+  }
+  if f == NF_USER {
     if id == 0 {
       if cap_has(k, pid, CAP_SYS_ADMIN) {
         return 0;
