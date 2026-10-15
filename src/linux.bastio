@@ -128,6 +128,12 @@ spec fn lx_errno(r: u64) -> bool {
   r >= 18446744073709547521
 }
 
+/// What a call that hands out a descriptor may return: -errno, or a
+/// descriptor below the per-process limit LXNFD.
+spec fn lx_fd_or_errno(r: u64) -> bool {
+  r < LXNFD || lx_errno(r)
+}
+
 /// What a call that hands out memory may return: -errno, or an address
 /// inside the user window (never a kernel address, never a hole's
 /// bookkeeping value such as DISK_RETRY).

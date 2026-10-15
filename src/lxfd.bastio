@@ -653,6 +653,7 @@ fn fd_free_in(t: &Buf, pid: u64, from: u64) -> u64
 fn fd_install(k: &mut Kernel, pid: u64, h: u64) -> u64
   requires kok(k) && pid < NPROC && h < OFD_N
   ensures kok(k)
+  ensures lx_fd_or_errno(result)
 {
   let fd = fd_free(k, pid, 0);
   if fd >= LXNFD {
@@ -668,6 +669,7 @@ fn fd_install(k: &mut Kernel, pid: u64, h: u64) -> u64
 fn fd_install_console(k: &mut Kernel, pid: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_fd_or_errno(result)
 {
   let fd = fd_free(k, pid, 0);
   if fd >= LXNFD {
@@ -1137,6 +1139,7 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
 fn lx_dup2(k: &mut Kernel, pid: u64, src: u64, new: u64, cloexec: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_fd_or_errno(result)
 {
   let v = fd_get(k.lxfd, pid, src) % FD_CLOEXEC;
   if v == 0 || new >= fd_limit(k, pid) {
@@ -1159,6 +1162,7 @@ fn lx_dup2(k: &mut Kernel, pid: u64, src: u64, new: u64, cloexec: bool) -> u64
 fn lx_dup(k: &mut Kernel, pid: u64, src: u64, from: u64, cloexec: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_fd_or_errno(result)
 {
   let v = fd_get(k.lxfd, pid, src) % FD_CLOEXEC;
   if v == 0 {

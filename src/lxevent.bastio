@@ -87,6 +87,7 @@ fn is_event_call(n: u64) -> bool {
 fn ev_install(k: &mut Kernel, pid: u64, kind: u64, x: u64, w3: u64, cloexec: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_fd_or_errno(result)
 {
   let fd = fd_free(k, pid, 0);
   if fd >= LXNFD {
