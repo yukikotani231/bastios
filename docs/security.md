@@ -109,9 +109,10 @@ Known gaps, most serious first.
    Linux it is `ENXIO` without a controlling terminal); names of unix
    sockets in the abstract namespace (a leading 0 byte) have no
    permissions, as on Linux.
-4. Not implemented, so not a hole: `/proc/PID/mem`, `environ`
-   and `maps`, `chroot`, `iopl` and `ioperm`, `syslog`, `swapon` and
-   `pivot_root` all fail (`ENOSYS` or missing). `process_vm_readv`,
+4. Not implemented, so not a hole: `/proc/PID/environ`, `iopl` and
+   `ioperm`, and `swapon` all fail (`ENOSYS` or missing); `syslog` answers but the kernel keeps no log. (`chroot` and
+   `pivot_root` exist: `chroot` needs root, `pivot_root` works on a mount
+   namespace's own mounts.) `process_vm_readv`,
    `process_vm_writev`, `pidfd_getfd`, `kcmp` and `ptrace` (`PTRACE_ATTACH`
    and `PTRACE_SEIZE`; `PTRACE_TRACEME` lets a process's parent trace it,
    as on Linux) reach another process only
