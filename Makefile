@@ -553,7 +553,11 @@ build/compat/dropbear: | build/compat/src
 	cp build/compat/src/dropbear/dbclient build/compat/src/dropbear/dropbearkey build/compat/
 	cp build/compat/src/dropbear/dropbear $@
 
-build/compat/ssh_host_key build/compat/ssh_authorized_keys &: build/compat/dropbear
+# dbclient is built with the server (above).
+build/compat/dbclient: build/compat/dropbear
+	test -x $@
+
+build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/ssh_id &: build/compat/dropbear
 	rm -f build/compat/ssh_host_key build/compat/ssh_id
 	build/compat/dropbearkey -t ed25519 -f build/compat/ssh_host_key >/dev/null
 	build/compat/dropbearkey -t ed25519 -f build/compat/ssh_id | grep '^ssh-' > build/compat/ssh_authorized_keys
@@ -755,10 +759,10 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # over SSH.
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh \
     build/compat/bastioc1 build/compat/z3 build/compat/tcc \
-    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar tools/ocipull.sh | build/compat
+    build/compat/dropbear build/compat/dbclient build/compat/ssh_id build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar tools/ocipull.sh | build/compat
 	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) $(ALPINE_X86_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) \
 	  --extra "$$(test/compat/bastiotools.sh build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)) \
-	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar tools/ocipull.sh"
+	  build/compat/dropbear build/compat/dbclient build/compat/ssh_id build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar tools/ocipull.sh"
 
 # Debian on BastiOS, on a fifth disk (test/compat/debiandisk.py) for
 # test/compat/debian.txt: Debian's root file system, whose programs are

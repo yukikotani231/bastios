@@ -130,7 +130,7 @@ errors: 0, replies: 20000
 20007
 
 == redis: restart and find the data again
-$ r="bb chroot /disk/rd /usr/local/bin/redis-cli --raw"; $r -p 6380 shutdown nosave 2>/dev/null; $r shutdown 2>/dev/null; bb sleep 2; bb chroot /disk/rd /usr/local/bin/redis-server --daemonize yes --port 6379 --dir /data --logfile /tmp/redis.log --appendonly yes --save '' --pidfile /tmp/redis.pid; bb sleep 2; $r get greeting; $r get hits; $r lrange l 0 -1 | bb tr '\n' ' '; echo; $r get k20000; $r dbsize
+$ r="bb chroot /disk/rd /usr/local/bin/redis-cli --raw"; $r -p 6380 shutdown nosave >/dev/null 2>&1; $r shutdown >/dev/null 2>&1; bb sleep 2; bb chroot /disk/rd /usr/local/bin/redis-server --daemonize yes --port 6379 --dir /data --logfile /tmp/redis.log --appendonly yes --save '' --pidfile /tmp/redis.pid; bb sleep 2; $r get greeting; $r get hits; $r lrange l 0 -1 | bb tr '\n' ' '; echo; $r get k20000; $r dbsize
 hello
 45
 a b c 
@@ -178,7 +178,7 @@ $ bb chroot /disk/pg /bin/su postgres -c "/usr/local/bin/psql -h 127.0.0.1 -At -
 100000
 
 == postgres: dump to a file and restore into a second database
-$ bb chroot /disk/pg /bin/su postgres -c "/usr/local/bin/createdb -h 127.0.0.1 copy && /usr/local/bin/pg_dump -h 127.0.0.1 -t t postgres | /usr/local/bin/psql -h 127.0.0.1 -q -d copy && /usr/local/bin/psql -h 127.0.0.1 -At -d copy -c 'select count(*), sum(id) from t'"
+$ bb chroot /disk/pg /bin/su postgres -c "/usr/local/bin/createdb -h 127.0.0.1 copy && /usr/local/bin/pg_dump -h 127.0.0.1 -t t postgres | /usr/local/bin/psql -h 127.0.0.1 -q -d copy >/dev/null && /usr/local/bin/psql -h 127.0.0.1 -At -d copy -c 'select count(*), sum(id) from t'"
 100000|5000050000
 
 == postgres: concurrent clients updating one row keep a count
@@ -201,7 +201,7 @@ server started
 40
 
 == postgres: a clean restart keeps the data
-$ bb chroot /disk/pg /bin/su postgres -c '/usr/local/bin/pg_ctl -D /var/lib/postgresql/data -w restart' | bb tail -n 1; bb chroot /disk/pg /bin/su postgres -c "/usr/local/bin/psql -h 127.0.0.1 -At -d copy -c 'select count(*) from t'"
+$ bb chroot /disk/pg /bin/su postgres -c '/usr/local/bin/pg_ctl -D /var/lib/postgresql/data -l /tmp/pg3.log -w restart' | bb tail -n 1; bb chroot /disk/pg /bin/su postgres -c "/usr/local/bin/psql -h 127.0.0.1 -At -d copy -c 'select count(*) from t'"
 server started
 100000
 
