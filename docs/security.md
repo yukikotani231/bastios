@@ -153,3 +153,15 @@ What the page tables enforce for a user process, and what they do not.
   1 GiB pages, read-write and executable. A write through a kernel bug
   could change kernel code. The proofs say the kernel makes no such write;
   this would be a second line.
+
+## Randomness
+
+`/dev/urandom`, `/dev/random` and `getrandom` come from one ChaCha20 generator
+(`src/lxdev.bastio`) with fast key erasure. Its pool takes the time-stamp
+counter on every scheduler pass, the clocks at boot, a virtio-rng's 64 bytes
+at boot if the machine has one, and, if the processor has RDSEED or RDRAND, 64
+bytes at boot and one word every 4096 scheduler passes (`rng_hw_boot`,
+`rng_stir`; `hw_random` in `boot/smp.c`). Without one of those two
+hardware sources (a QEMU CPU model without them, an old processor, a virtual
+machine without virtio-rng) the pool's early state rests on timing jitter and
+the clock, which is an estimate of entropy and not a measured one. `test/rng_test.sh` boots with and without the instructions.
