@@ -38,7 +38,9 @@ struct sock_fprog { unsigned short len; struct sock_filter *filter; };
 #endif
 
 
+#ifndef PTRACE_GET_SYSCALL_INFO
 #define PTRACE_GET_SYSCALL_INFO 0x420e
+#endif
 /* struct ptrace_syscall_info, as linux/ptrace.h has it (musl does not). */
 struct sysinfo {
     unsigned char op, pad[3];
@@ -483,7 +485,6 @@ int main(int argc, char **argv) {
         EXPECT("the tracee goes on to its end", w == c && WIFEXITED(st) && WEXITSTATUS(st) == 0);
     }
 
-#ifndef __aarch64__
     /* SECCOMP_RET_TRACE: with PTRACE_O_TRACESECCOMP the tracee stops before
      * the call with the event and the filter's data, and the call runs when
      * it goes on, without the filters again. */
@@ -561,7 +562,6 @@ int main(int argc, char **argv) {
         EXPECT("and without a tracer", waitpid(d, &st, 0) == d && WIFEXITED(st) && WEXITSTATUS(st) == 0);
     }
 
-#endif
 
     /* PTRACE_SEIZE and PTRACE_INTERRUPT on a tracee that sleeps in a system call. */
     {
