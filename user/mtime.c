@@ -11,6 +11,8 @@
 #include <stdint.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/ioctl.h>
+#include <sys/timex.h>
 #include <sys/select.h>
 #include <sys/timerfd.h>
 #include <sys/time.h>
@@ -123,6 +125,43 @@ static const char *events(void)
     close(e);
     close(p[0]);
     close(p[1]);
+    return 0;
+}
+
+/* The hardware clock (/dev/rtc0) takes a date and gives it back, and
+ * adjtimex's frequency changes the rate of the wall clock but not the
+ * monotonic one. NULL, or what went wrong. */
+struct rtc_tm { int sec, min, hour, mday, mon, year, wday, yday, isdst; };
+
+static const char *clocks(void)
+{
+    int fd = open("/dev/rtc0", O_RDWR);
+    if (fd < 0)
+        return "open /dev/rtc0";
+    struct rtc_tm was, set = { 0, 30, 12, 15, 9, 126, 0, 0, 0 }, now;   /* 2026-10-15 12:30:00 */
+    if (ioctl(fd, 0x80247009, &was) != 0 || was.year < 100)
+        return "RTC_RD_TIME";
+    if (ioctl(fd, 0x4024700A, &set) != 0 || ioctl(fd, 0x80247009, &now) != 0)
+        return "RTC_SET_TIME";
+    if (now.year != 126 || now.mon != 9 || now.mday != 15 || now.hour != 12 || now.min != 30 || now.wday != 4 || now.yday != 287)
+        return "the clock reads back another date";
+    ioctl(fd, 0x4024700A, &was);
+    close(fd);
+    struct timex t = { .modes = ADJ_FREQUENCY, .freq = 500L * 65536 };
+    if (adjtimex(&t) < 0)
+        return "adjtimex ADJ_FREQUENCY";
+    struct timespec r0, m0, r1, m1;
+    clock_gettime(CLOCK_REALTIME, &r0);
+    clock_gettime(CLOCK_MONOTONIC, &m0);
+    struct timespec d = { 1, 0 };
+    nanosleep(&d, 0);
+    clock_gettime(CLOCK_REALTIME, &r1);
+    clock_gettime(CLOCK_MONOTONIC, &m1);
+    t.freq = 0;
+    adjtimex(&t);
+    long gain = ((r1.tv_sec - r0.tv_sec) - (m1.tv_sec - m0.tv_sec)) * 1000000L + ((r1.tv_nsec - r0.tv_nsec) - (m1.tv_nsec - m0.tv_nsec)) / 1000;
+    if (gain < 250 || gain > 750)
+        return "+500 ppm did not gain 0.5 ms in a second";
     return 0;
 }
 
@@ -259,7 +298,10 @@ int main(void)
     const char *bad = events();
     if (bad)
         return fail(bad);
-    printf("mtime: rang %d, selected, slept %lld, timed out %lld, woke %s, events ok\n", rang >= 3 ? 3 : rang, slept / 100 * 100, waited / 100 * 100,
+    const char *wrong = clocks();
+    if (wrong)
+        return fail(wrong);
+    printf("mtime: rang %d, selected, slept %lld, timed out %lld, woke %s, events ok, clocks ok\n", rang >= 3 ? 3 : rang, slept / 100 * 100, waited / 100 * 100,
            woke >= 100 && woke < 5000 ? "in time" : "late");
     return 0;
 }

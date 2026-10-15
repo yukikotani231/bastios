@@ -79,3 +79,10 @@ $ bb chroot /disk/d /usr/bin/dpkg-query -W -f '${Package}\n' bash coreutils libc
 bash
 coreutils
 libc6
+
+== debian: time zones from the tzdata files
+$ bb chroot /disk/d /usr/bin/env TZ=Asia/Tokyo /usr/bin/date -d @0 '+%Y-%m-%d %H:%M %Z'; bb chroot /disk/d /usr/bin/env TZ=America/New_York /usr/bin/date -d @1720000000 '+%H:%M %Z'; bb chroot /disk/d /usr/bin/env TZ=America/New_York /usr/bin/date -d @1700000000 '+%H:%M %Z'; bb chroot /disk/d /usr/bin/env TZ=Europe/London /usr/bin/date -d @1720000000 '+%H:%M %Z'
+1970-01-01 09:00 JST
+05:46 EDT
+17:13 EST
+10:46 BST
