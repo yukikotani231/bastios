@@ -51,6 +51,7 @@ def main():
     ap.add_argument("--leak-kb", type=int, default=512)
     ap.add_argument("--stall", type=int, default=300, help="seconds without a finished round that count as a hang")
     ap.add_argument("--env", action="append", default=[], help="NAME=VALUE for msoak (e.g. SOAK_IPC=m)")
+    ap.add_argument("--par", type=int, default=1, help="msoak instances at once (they stop on their own after --secs)")
     ap.add_argument("--alpine", help="run the Alpine build workload on this disk image instead of msoak")
     ap.add_argument("--only", help="comma-separated steps of msoak to run (default: all)")
     ap.add_argument("--keep", help="directory for the log and disk image")
@@ -184,20 +185,27 @@ def main():
         mark = len(out)
         send(f"{bb} sh /tmp/asoak.sh {big} 10.0.2.2:{port} {blob_md5}\r".encode())
     else:
-        send(((f"SOAK_ONLY={a.only} " if a.only else "") + "".join(e + " " for e in a.env) + f"/disk/msoak {big} {a.seed} {a.mempct}\r").encode())
+        pre = (f"SOAK_ONLY={a.only} " if a.only else "") + "".join(e + " " for e in a.env)
+        if a.par > 1:
+            cmd = "".join(f"{pre}/disk/msoak {big} {a.seed + i} {a.mempct} {a.secs} & " for i in range(a.par - 1))
+            cmd += f"{pre}/disk/msoak {big} {a.seed + a.par - 1} {a.mempct} {a.secs}"
+            send((cmd + "\r").encode())
+        else:
+            send((f"{pre}/disk/msoak {big} {a.seed} {a.mempct}\r").encode())
     t0 = time.time()
     deadline = t0 + a.secs
     last_progress = t0
     seen = 0
     rows = []
+    pos = 0
     stopped = False
     while True:
         alive = pump(1.0)
         text = bytes(out[mark:])
-        for m in LINE.finditer(text):
-            if len(rows) < int(m.group(1)):
-                rows.append(tuple(int(x) for x in m.groups()))
-                last_progress = time.time()
+        for m in LINE.finditer(text, pos):
+            rows.append(tuple(int(x) for x in m.groups()))
+            pos = m.end()
+            last_progress = time.time()
         if b"/disk/msoak: not found" in text or b"ash: /disk/msoak:" in text:
             fails.append("msoak did not start: " + re.search(rb"ash: /disk/msoak:[^\r\n]*", text).group(0).decode())
             break
@@ -213,8 +221,14 @@ def main():
         if a.rounds and len(rows) >= a.rounds:
             stopped = True
             break
-        if not a.rounds and time.time() > deadline:
+        if a.par > 1 and text.count(b"soak: done") >= a.par:
             stopped = True
+            break
+        if not a.rounds and a.par == 1 and time.time() > deadline:
+            stopped = True
+            break
+        if a.par > 1 and time.time() > deadline + 600:
+            fails.append("the instances did not end after their time")
             break
         if time.time() - last_progress > a.stall:
             fails.append(f"hang: no round finished for {a.stall} s (after round {len(rows)})")
@@ -227,7 +241,7 @@ def main():
             print(f"{r[0]:5d} {r[1]:6d} {r[2]:12d} {r[3]:9d} {r[4]:5d} {r[5]:5d}")
 
     if stopped and not fails:
-        if not a.rounds:
+        if not a.rounds and a.par == 1:
             send(b"\x03")
         if not read_until(b"\n# ", len(out) - 1 if a.rounds else mark, 60):
             # the last round may still be running; give it a minute
@@ -241,13 +255,13 @@ def main():
             lo_base = min(r[2] for r in base)
             lo_tail = min(r[2] for r in tail)
             print(f"free memory: {lo_base} kB after the warm-up, {lo_tail} kB at the end")
-            if lo_base - lo_tail > a.leak_kb:
+            if a.par == 1 and lo_base - lo_tail > a.leak_kb:   # with --par, others' pressure moves free memory
                 fails.append(f"free memory fell by {lo_base - lo_tail} kB over {len(rows) - a.warmup} rounds")
             fds = {r[4] for r in rows}
             procs = {r[5] for r in rows}
-            if len(fds) > 1:
+            if a.par == 1 and len(fds) > 1:      # instances see one another's descriptors and processes
                 fails.append(f"descriptor count changed: {sorted(fds)}")
-            if len(procs) > 1:
+            if a.par == 1 and len(procs) > 1:
                 fails.append(f"process count changed: {sorted(procs)}")
         elif not a.rounds:
             fails.append(f"only {len(rows)} rounds in {a.secs} s: too few to judge")

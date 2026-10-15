@@ -5,7 +5,8 @@
  * (free memory, descriptors or processes that only ever go down or up) from
  * noise.
  *
- *   msoak [ROUNDS [SEED [MEMPCT]]]       run ROUNDS rounds (default 10)
+ *   msoak [ROUNDS [SEED [MEMPCT [SECS]]]] run ROUNDS rounds (default 10), or
+ *                                        until SECS seconds have passed
  *   msoak child                          (internal) the exec'd child
  *
  * Lines: "soak: round N ok ops=OPS free=KB cached=KB fds=N procs=N" for a
@@ -823,12 +824,19 @@ int main(int argc, char **argv)
         rng ^= (uint64_t)atoi(argv[2]) * 0x9e3779b97f4a7c15ull;
     if (argc > 3)
         mempct = atoi(argv[3]);
+    long secs = argc > 4 ? atol(argv[4]) : 0;
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     snprintf(dir, sizeof dir, "/tmp/soak%d", (int)getpid());
     if (mkdir(dir, 0755) < 0 && errno != EEXIST) {
         printf("soak: FAIL mkdir %s (errno %d)\n", dir, errno);
         return 1;
     }
     for (int r = 1; r <= rounds && !failed; r++) {
+        struct timespec t1;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        if (secs && t1.tv_sec - t0.tv_sec >= secs)
+            break;
         /* every step once, in a different order each round */
         int order[NSTEPS];
         for (int i = 0; i < NSTEPS; i++)
@@ -854,5 +862,9 @@ int main(int argc, char **argv)
         fflush(stdout);
     }
     rmdir(dir);
+    if (!failed) {
+        printf("soak: done\n");
+        fflush(stdout);
+    }
     return failed;
 }
