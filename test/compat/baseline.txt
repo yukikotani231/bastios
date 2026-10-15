@@ -1316,6 +1316,15 @@ go: go: goroutines, channels and the collector
 go: go: make the device nodes
 go: go: run a program
 go: go: version
+java: java: unpack the root, make the device nodes
+java: java: version
+java: java: compile and run a program
+java: java: records, streams and collections
+java: java: threads and an executor
+java: java: exit status and an uncaught exception
+java: java: files and directories
+java: java: a jar with a main class
+java: java: a compile error is reported
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program
