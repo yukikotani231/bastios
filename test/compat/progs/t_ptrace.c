@@ -37,6 +37,20 @@ struct sock_fprog { unsigned short len; struct sock_filter *filter; };
 #define PTRACE_EVENT_SECCOMP 7
 #endif
 
+
+#define PTRACE_GET_SYSCALL_INFO 0x420e
+/* struct ptrace_syscall_info, as linux/ptrace.h has it (musl does not). */
+struct sysinfo {
+    unsigned char op, pad[3];
+    unsigned int arch;
+    unsigned long long ip, sp;
+    union {
+        struct { unsigned long long nr, args[6]; } entry;
+        struct { long long rval; unsigned char is_error; } exit;
+        struct { unsigned long long nr, args[6]; unsigned int ret_data; } seccomp;
+    };
+};
+
 /* A filter that answers SECCOMP_RET_TRACE with data 42 to getppid. */
 static int trace_getppid_filter(void) {
     struct sock_filter f[] = {
@@ -423,6 +437,52 @@ int main(int argc, char **argv) {
         EXPECT("a seized tracee resumed with PTRACE_CONT runs to its end", rc == 0 && w == c && WIFEXITED(st) && WEXITSTATUS(st) == 7);
     }
 
+
+    /* PTRACE_GET_SYSCALL_INFO: the entry of a call has its number and
+     * arguments, its exit the result and whether it is an error, and a stop
+     * that is no system call stop has op 0. */
+    {
+        pid_t c = fork();
+        if (c == 0) {
+            ptrace(PTRACE_TRACEME, 0, 0, 0);
+            raise(SIGSTOP);
+            syscall(SYS_lseek, 99, 5, 0);
+            _exit(0);
+        }
+        int sig = 0, st = 0;
+        int ok = wait_stop(c, &sig) && sig == SIGSTOP;
+        struct sysinfo si;
+        memset(&si, 0, sizeof si);
+        long r0 = ptrace(PTRACE_GET_SYSCALL_INFO, c, (void *)sizeof si, &si);
+        EXPECT("PTRACE_GET_SYSCALL_INFO at a signal stop is op 0, with the header only", ok && r0 == 24 && si.op == 0);
+        int found = 0, bad = 0;
+        long size = 0;
+        for (int i = 0; i < 200 && !found; i++) {
+            if (ptrace(PTRACE_SYSCALL, c, 0, 0) != 0) { bad = 1; break; }
+            int w = waitpid(c, &st, 0);
+            if (w != c || !WIFSTOPPED(st)) { bad = 1; break; }
+            memset(&si, 0, sizeof si);
+            size = ptrace(PTRACE_GET_SYSCALL_INFO, c, (void *)sizeof si, &si);
+            if (si.op == 1 && si.entry.nr == SYS_lseek) found = 1;
+        }
+        EXPECT("PTRACE_GET_SYSCALL_INFO at a call's entry gives its number and arguments",
+               !bad && found && size >= 80 && si.entry.args[0] == 99 && si.entry.args[1] == 5 && si.entry.args[2] == 0 && si.ip != 0 && si.sp != 0 && si.arch != 0);
+        struct sysinfo small;
+        memset(&small, 0xAA, sizeof small);
+        long sz2 = ptrace(PTRACE_GET_SYSCALL_INFO, c, (void *)8, &small);
+        EXPECT("a buffer that is too small gets what fits, and the full size is the result",
+               sz2 == size && small.op == 1 && small.ip == 0xAAAAAAAAAAAAAAAAull);
+        ptrace(PTRACE_SYSCALL, c, 0, 0);
+        int w = waitpid(c, &st, 0);
+        memset(&si, 0, sizeof si);
+        long r3 = ptrace(PTRACE_GET_SYSCALL_INFO, c, (void *)sizeof si, &si);
+        EXPECT("and at its exit the result, as an error",
+               w == c && WIFSTOPPED(st) && r3 >= 33 && si.op == 2 && si.exit.rval == -EBADF && si.exit.is_error == 1);
+        ptrace(PTRACE_CONT, c, 0, 0);
+        w = waitpid(c, &st, 0);
+        EXPECT("the tracee goes on to its end", w == c && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
+
 #ifndef __aarch64__
     /* SECCOMP_RET_TRACE: with PTRACE_O_TRACESECCOMP the tracee stops before
      * the call with the event and the filter's data, and the call runs when
@@ -450,6 +510,31 @@ int main(int argc, char **argv) {
         w = waitpid(c, &st, 0);
         EXPECT("the call runs once the tracer goes on, and the filter is not asked again",
                w == c && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
+
+    /* At the SECCOMP_RET_TRACE stop the info is that of a seccomp stop. */
+    {
+        pid_t c = fork();
+        if (c == 0) {
+            if (!trace_getppid_filter()) _exit(10);
+            ptrace(PTRACE_TRACEME, 0, 0, 0);
+            raise(SIGSTOP);
+            syscall(SYS_getppid);
+            _exit(0);
+        }
+        int sig = 0, st = 0;
+        int ok = wait_stop(c, &sig) && sig == SIGSTOP;
+        ptrace(PTRACE_SETOPTIONS, c, 0, (void *)(long)PTRACE_O_TRACESECCOMP);
+        ptrace(PTRACE_CONT, c, 0, 0);
+        int w = waitpid(c, &st, 0);
+        struct sysinfo si;
+        memset(&si, 0, sizeof si);
+        long size = ptrace(PTRACE_GET_SYSCALL_INFO, c, (void *)sizeof si, &si);
+        EXPECT("PTRACE_GET_SYSCALL_INFO at a SECCOMP_RET_TRACE stop gives the call and the filter's data",
+               ok && w == c && (st >> 16) == PTRACE_EVENT_SECCOMP && size >= 84 && si.op == 3 &&
+               si.seccomp.nr == SYS_getppid && si.seccomp.ret_data == 42);
+        ptrace(PTRACE_CONT, c, 0, 0);
+        waitpid(c, &st, 0);
     }
 
     /* Without PTRACE_O_TRACESECCOMP, or without a tracer, the call fails
