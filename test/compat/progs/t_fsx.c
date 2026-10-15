@@ -2,6 +2,7 @@
  * (PUNCH_HOLE, ZERO_RANGE) and extended attributes, on files in /tmp and
  * on the disk. */
 #include "compat.h"
+#include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
@@ -240,6 +241,71 @@ static int sparse(const char *name) {
     return ok;
 }
 
+/* How many names a directory lists besides . and .. */
+static int count_names(const char *dir) {
+    DIR *d = opendir(dir);
+    int n = 0;
+    if (!d) return -1;
+    for (struct dirent *e; (e = readdir(d)); )
+        if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) n++;
+    closedir(d);
+    return n;
+}
+
+/* A file nothing names (O_TMPFILE) is in no directory until linkat names it. */
+static int tmpfile_checks(const char *dir) {
+    int ok = 1;
+    char proc[64], to[96], buf[8];
+    snprintf(to, sizeof to, "%s/named", dir);
+    unlink(to);
+    int before = count_names(dir);
+    int fd = open(dir, O_TMPFILE | O_RDWR, 0640);
+    S(fd >= 0);
+    if (fd < 0) return 0;
+    struct stat st;
+    S(write(fd, "hello", 5) == 5);
+    S(fstat(fd, &st) == 0);
+    S(st.st_size == 5);
+    S(st.st_nlink == 0);
+    S((st.st_mode & 0777) == 0640 && S_ISREG(st.st_mode));
+    S(count_names(dir) == before);
+    snprintf(proc, sizeof proc, "/proc/self/fd/%d", fd);
+    S(linkat(AT_FDCWD, proc, AT_FDCWD, to, AT_SYMLINK_FOLLOW) == 0);
+    S(count_names(dir) == before + 1);
+    S(stat(to, &st) == 0 && st.st_size == 5 && st.st_nlink == 1);
+    S(pwrite(fd, "J", 1, 0) == 1);
+    int g = open(to, O_RDONLY);
+    S(g >= 0 && read(g, buf, 8) == 5 && memcmp(buf, "Jello", 5) == 0);
+    if (g >= 0) close(g);
+    /* it has a name now: a second one is a plain hard link, and the first stays */
+    S(linkat(AT_FDCWD, proc, AT_FDCWD, "/tmp/fsx_t2", AT_SYMLINK_FOLLOW) == 0 || errno == ENOENT);
+    unlink("/tmp/fsx_t2");
+    close(fd);
+    S(unlink(to) == 0 && count_names(dir) == before);
+    /* O_EXCL: never named. Read-only, a plain file and a missing directory are refused. */
+    fd = open(dir, O_TMPFILE | O_RDWR | O_EXCL, 0600);
+    S(fd >= 0);
+    snprintf(proc, sizeof proc, "/proc/self/fd/%d", fd);
+    S(linkat(AT_FDCWD, proc, AT_FDCWD, to, AT_SYMLINK_FOLLOW) == -1 && errno == ENOENT);
+    if (fd >= 0) close(fd);
+    S(open(dir, O_TMPFILE | O_RDONLY, 0600) == -1 && errno == EINVAL);
+    S(open("/nonexistent_dir", O_TMPFILE | O_RDWR, 0600) == -1 && errno == ENOENT);
+    int f2 = open("/tmp/fsx_tf", O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (f2 >= 0) {
+        close(f2);
+        S(open("/tmp/fsx_tf", O_TMPFILE | O_RDWR, 0600) == -1 && errno == ENOTDIR);
+        unlink("/tmp/fsx_tf");
+    }
+    /* a file removed while open cannot be named again */
+    f2 = open("/tmp/fsx_tg", O_RDWR | O_CREAT | O_TRUNC, 0600);
+    S(f2 >= 0 && unlink("/tmp/fsx_tg") == 0);
+    snprintf(proc, sizeof proc, "/proc/self/fd/%d", f2);
+    S(linkat(AT_FDCWD, proc, AT_FDCWD, to, AT_SYMLINK_FOLLOW) == -1 && errno == ENOENT);
+    if (f2 >= 0) close(f2);
+    unlink(to);
+    return ok;
+}
+
 static int xattrs(const char *name, const char *lnk, const char *moved, int rich) {
     char v[4096], w[4096], nm[32];
     int ok = 1;
@@ -365,6 +431,7 @@ int main(void) {
     EXPECT("SEEK_DATA and SEEK_HOLE in /tmp", seek_data("/tmp/fsx_s"));
     EXPECT("SEEK_DATA and SEEK_HOLE on the disk", seek_data(on_disk("fsx_s")));
     EXPECT("holes in a file in /tmp: SEEK_DATA, SEEK_HOLE, st_blocks, punching and zeroing", sparse("/tmp/fsx_h"));
+    EXPECT("O_TMPFILE: a file without a name in /tmp, named with linkat", tmpfile_checks("/tmp"));
     EXPECT("FS_IOC_GETFLAGS answers and FICLONE is refused", fs_ioctls("/tmp/fsx_i"));
     return done();
 }

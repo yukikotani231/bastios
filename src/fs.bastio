@@ -1169,6 +1169,9 @@ fn vfs_nlink(v: &mut Vfs, f: u64) -> u64
   let t = vfs_target(&mut v, f);
   if t < NFILES {
     if !ram_has_links(v.rix) {
+      if ram_len(&mut v.ram, t) == 0 {
+        return 0;                           // no name: removed while open, or O_TMPFILE
+      }
       return 1;                             // no link node exists, so the count would be 0 (and costs a pass over every node)
     }
     return 1 + ram_links(&mut v.ram, t);
@@ -1310,6 +1313,15 @@ fn vfs_stat(v: &mut Vfs, n: u64) -> u64
 {
   let f = vfs_lookup(&mut v, n);
   return vfs_size(&mut v, f);
+}
+
+/// Whether the name in the first n bytes of the transfer buffer is in memory
+/// and not on a disk or a loop mount.
+fn vfs_ram_path(v: &mut Vfs, n: u64) -> bool
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+{
+  return !on_disk(v, n) && lo_pfx(&mut v, n) == 0;
 }
 
 /// Whether RAM file f has no name: a memfd, or a file removed while open.
@@ -2347,6 +2359,32 @@ fn vfs_link(v: &mut Vfs, n: u64, m: u64) -> u64
   }
   if f >= NFILES || vfs_ram_link(&mut v, m, f) >= NFILES {
     return LINK_FULL;
+  }
+  return LINKED;
+}
+
+/// Gives RAM file f, which has no name, the name in the first m bytes of
+/// the transfer buffer (linkat of an O_TMPFILE file). Returns LINKED,
+/// LINK_EXISTS, LINK_XDEV or LINK_NONE (no such directory, or f is not
+/// without a name).
+fn vfs_name_orphan(v: &mut Vfs, f: u64, m: u64) -> u64
+  requires vfs_ok(v) && m <= XFER
+  ensures vfs_ok(v)
+{
+  if f >= NFILES || m == 0 || m > FNAME_MAX {
+    return LINK_NONE;
+  }
+  if !vfs_ram_path(&mut v, m) {
+    return LINK_XDEV;
+  }
+  if !path_ok(v, m) || !parent_ok(&mut v, m) {
+    return LINK_NONE;
+  }
+  if vfs_lookup(&mut v, m) != NO_FILE || vfs_dir_lookup(&mut v, m) != NO_FILE {
+    return LINK_EXISTS;
+  }
+  if !ram_name_orphan(&mut v.ram, &mut v.rix, f, v.xfer, m) {
+    return LINK_NONE;
   }
   return LINKED;
 }

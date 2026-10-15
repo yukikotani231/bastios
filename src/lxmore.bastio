@@ -622,6 +622,193 @@ fn lx_memfd(k: &mut Kernel, pid: u64, name: u64, flags: u64) -> u64
   return EEXIST;
 }
 
+/// The name of an O_TMPFILE file while it has one: the directory (the
+/// first n bytes of t, which may be none for the top), "/.tmpfile-" and
+/// the 16 hex digits of serial, put at the start of the transfer buffer.
+/// Returns its length.
+fn tmpf_name(k: &mut Kernel, t: &Bytes, n: u64, serial: u64) -> u64
+  requires kok(k) && n + 26 <= FNAME_MAX && blen(t) == 2 * FNAME_MAX
+  ensures kok(k)
+  ensures result <= n + 26
+{
+  let mut at = 0;
+  while at < n
+    invariant at <= n && kok(k)
+  {
+    bset(&mut k.fs.xfer, at, bget(t, at));
+    at = at + 1;
+  }
+  if n > 0 {
+    bset(&mut k.fs.xfer, n, 47);
+    at = n + 1;
+  }
+  let pre = ".tmpfile-";
+  let mut i = 0;
+  while i < slen(pre) && i < 9
+    invariant i <= 9 && kok(k) && at <= n + 1
+  {
+    bset(&mut k.fs.xfer, at + i, sget(pre, i));
+    i = i + 1;
+  }
+  let mut j = 0;
+  while j < 16
+    invariant j <= 16 && kok(k) && at <= n + 1
+  {
+    let digit = serial / (1 << (4 * j)) % 16;
+    let mut ch = 48 + digit;
+    if digit >= 10 {
+      ch = 87 + digit;
+    }
+    bset(&mut k.fs.xfer, at + 9 + j, cast[u8](ch));
+    j = j + 1;
+  }
+  return at + 25;
+}
+
+/// Remembers that file f (made by O_TMPFILE without O_EXCL) may be named
+/// by linkat; the table is a ring that overwrites its oldest entry.
+fn tmpf_mark(k: &mut Kernel, f: u64)
+  requires kok(k) && f < NFILES
+  ensures kok(k)
+{
+  let mut e = k.ns / 1000 % TMPF_N;
+  let mut i = 0;
+  while i < TMPF_N && get(k.sys, SYS_TMPF + e) != 0
+    invariant i <= TMPF_N && e < TMPF_N && kok(k)
+  {
+    e = (e + 1) % TMPF_N;
+    i = i + 1;
+  }
+  k.sys = set(k.sys, SYS_TMPF + e, f + 1);
+}
+
+/// Whether file f may be named by linkat: it was made by O_TMPFILE, and
+/// still has no name. Forgets it either way when it has one.
+fn tmpf_linkable(k: &mut Kernel, f: u64) -> u64
+  requires kok(k)
+  ensures kok(k) && result <= TMPF_N
+{
+  let mut e = 0;
+  while e < TMPF_N
+    invariant e <= TMPF_N && kok(k)
+  {
+    let w = get(k.sys, SYS_TMPF + e);
+    if w != 0 && w - 1 == f {
+      if vfs_orphan(&mut k.fs, f) {
+        return e;
+      }
+      k.sys = set(k.sys, SYS_TMPF + e, 0);
+    }
+    e = e + 1;
+  }
+  return TMPF_N;
+}
+
+/// open(dir, O_TMPFILE | O_RDWR or O_WRONLY, mode), the directory being
+/// the first n bytes of the transfer buffer: a file in memory that has no
+/// name. It is made under a name that is removed again before the call
+/// returns, so the usual permissions, owner and mode apply; linkat can
+/// give it a name unless O_EXCL was asked. A directory on a disk is
+/// EOPNOTSUPP (a program then falls back to a named file).
+fn lx_open_tmpfile(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+  ensures kok(k)
+{
+  if flags & LO_DIRECTORY == 0 || flags % 4 == 0 {
+    return EINVAL;                          // O_TMPFILE is two bits; it needs write access
+  }
+  if dir_at(&mut k, n) == NO_FILE {
+    if n > 0 && vfs_lookup(&mut k.fs, n) != NO_FILE {
+      return ENOTDIR;
+    }
+    return ENOENT;
+  }
+  if n + 26 > FNAME_MAX {
+    return ENAMETOOLONG;
+  }
+  if n > 0 && !vfs_ram_path(&mut k.fs, n) {
+    return EOPNOTSUPP;
+  }
+  let mut t = balloc(2 * FNAME_MAX);
+  xfer_save(k, &mut t, 0, n);
+  let oflags = (flags & !(LO_TMPFILE | LO_DIRECTORY | LO_EXCL)) | LO_CREAT | LO_EXCL;
+  let mut tries = 0;
+  let mut fd = EEXIST;
+  while tries < 16 && fd == EEXIST
+    invariant tries <= 16 && kok(k) && blen(t) == 2 * FNAME_MAX && n + 26 <= FNAME_MAX
+  {
+    let l = tmpf_name(&mut k, t, n, sat_add(k.ns, tries));
+    fd = lx_open_n(&mut k, pid, l, oflags, mode);
+    if fd == EEXIST {
+      tries = tries + 1;
+    } else if fd < LXNFD {
+      let d = fd_look(k, pid, fd);
+      let l2 = tmpf_name(&mut k, t, n, sat_add(k.ns, tries));
+      let mut f = NO_FILE;
+      if d.kind == K_FILE && d.x < FD_ROWS {
+        f = vfs_row_file(k.fs, d.x);
+      }
+      vfs_unlink(&mut k.fs, &mut k.mem, l2);
+      if f < NFILES && flags & LO_EXCL == 0 {
+        tmpf_mark(&mut k, f);
+      }
+    }
+  }
+  bfree(t);
+  return fd;
+}
+
+/// linkat of /proc/PID/fd/N (descriptor tfd of process t) when it holds a
+/// file O_TMPFILE made: the file takes the name at ndir/npath. Returns 0
+/// or -errno, or NFILES if the descriptor holds some other file (linkat
+/// goes on as it would).
+fn tmpf_link(k: &mut Kernel, pid: u64, t: u64, tfd: u64, ndir: u64, npath: u64) -> u64
+  requires kok(k) && pid < NPROC && t < NPROC
+  ensures kok(k)
+{
+  let d = fd_look(k, t, tfd);
+  if d.kind != K_FILE || d.x >= FD_ROWS {
+    return NFILES;
+  }
+  let f = vfs_row_file(k.fs, d.x);
+  if f >= NFILES {
+    return NFILES;
+  }
+  let e = tmpf_linkable(&mut k, f);
+  if e >= TMPF_N {
+    if vfs_orphan(&mut k.fs, f) {
+      return ENOENT;                        // removed while open: no name to give it back
+    }
+    return NFILES;
+  }
+  let m = lx_path_at_nf_w(&mut k, pid, ndir, npath);
+  if m == NO_RESULT {
+    return k.perr;
+  }
+  if dir_at(&mut k, m) != NO_FILE || vfs_lookup(&mut k.fs, m) != NO_FILE {
+    return EEXIST;
+  }
+  if path_ro(&mut k, m) {
+    return EROFS;
+  }
+  let pe = may_dir(&mut k, pid, m);
+  if pe != 0 {
+    return pe;
+  }
+  let r = vfs_name_orphan(&mut k.fs, f, m);
+  if r == LINKED {
+    k.sys = set(k.sys, SYS_TMPF + e, 0);
+    return 0;
+  }
+  if r == LINK_EXISTS {
+    return EEXIST;
+  }
+  if r == LINK_XDEV {
+    return EXDEV;
+  }
+  return ENOENT;
+}
+
 /// The slot of the sealing table for file f, or SEAL_N if it has none. A
 /// slot is only for a file without a name (a memfd is never linked): one
 /// whose file was freed and its node reused for a file with a name is stale,

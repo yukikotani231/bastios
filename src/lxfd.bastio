@@ -746,7 +746,7 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     }
   }
   if flags & LO_TMPFILE != 0 {
-    return EOPNOTSUPP;                      // so a program falls back to a named file
+    return lx_open_tmpfile(&mut k, pid, n, flags, mode);   // src/lxmore.bastio
   }
   if flags & LO_CREAT != 0 && flags & LO_PATH == 0 {
     let qe = mq_fs_creat(&mut k, pid, n, mode);

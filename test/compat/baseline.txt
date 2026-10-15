@@ -330,6 +330,7 @@ t_fsx: extended attributes stay on a bstdisk3 file system when it is mounted aga
 t_fsx: SEEK_DATA and SEEK_HOLE in /tmp
 t_fsx: SEEK_DATA and SEEK_HOLE on the disk
 t_fsx: holes in a file in /tmp: SEEK_DATA, SEEK_HOLE, st_blocks, punching and zeroing
+t_fsx: O_TMPFILE: a file without a name in /tmp, named with linkat
 t_fsx: FS_IOC_GETFLAGS answers and FICLONE is refused
 t_file: /dev/null write
 t_file: /dev/urandom read

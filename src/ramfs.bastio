@@ -891,6 +891,43 @@ fn ram_create(v: &mut Vec[Node], r: &mut Buf, name: &Bytes, n: u64, dir: bool, n
   return NFILES;
 }
 
+/// Gives node i, a file without a name, the name in the first n bytes of
+/// `name` (the reverse of ram_orphan). False, changing nothing, if the
+/// node has a name or is a directory or a link, or n is not a name's length.
+fn ram_name_orphan(v: &mut Vec[Node], r: &mut Buf, i: u64, name: &Bytes, n: u64) -> bool
+  requires nodes_ok(v) && rix_ok(r) && i < NFILES && n <= blen(name)
+  ensures nodes_ok(v) && rix_ok(r)
+{
+  if n == 0 || n > FNAME_MAX {
+    return false;
+  }
+  let mut done = false;
+  match take_node(&mut v, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      let mut g = f;
+      if blen(g.name) == 0 && !g.dir && g.link >= NFILES {
+        let prev = g.name;
+        let mut nm = balloc(n);
+        let mut j = 0;
+        while j < n
+          invariant j <= n && blen(nm) == n
+        {
+          bset(&mut nm, j, bget(name, j));
+          j = j + 1;
+        }
+        g.name = nm;
+        bfree(prev);
+        rix_put(&mut r, name_hash(name, 0, n), i);
+        kid_adj(&mut r, name, n, true);
+        done = true;
+      }
+      put_node(&mut v, i, Node::File(g));
+    },
+  }
+  return done;
+}
+
 /// The size of the file in node i, or NO_FILE if the node is free.
 fn ram_size(v: &mut Vec[Node], i: u64) -> u64
   requires nodes_ok(v) && i < NFILES

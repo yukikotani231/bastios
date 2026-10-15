@@ -336,6 +336,15 @@ fn lx_hardlink(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
   if n == NO_RESULT {
     return k.perr;
   }
+  if flags & AT_SYMLINK_FOLLOW != 0 && n <= XFER {
+    let pfd = proc_fd(k.procs, k.fs.xfer, n);
+    if pfd != NO_RESULT && pfd / LXNFD < NPROC {
+      let te = tmpf_link(&mut k, pid, pfd / LXNFD, pfd % LXNFD, ndir, npath);
+      if te != NFILES {
+        return te;                          // a file O_TMPFILE made takes the name
+      }
+    }
+  }
   if dir_at(&mut k, n) != NO_FILE {
     // Directories have one name; a read-only destination is reported first.
     let m0 = lx_path_at_nf(&mut k, pid, ndir, npath);
