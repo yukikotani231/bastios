@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Boot
 
+- The kernel looks at UHCI (USB 1.1) controllers and says in the boot log how many there are and how many devices are on their ports. There is no driver for them yet; this shows whether a USB keyboard on an older PC is out of reach.
 - The hardware report's `pci` lines say when a SATA controller is in RAID mode (Intel RST) or Intel VMD is on, which hide the disks from BastiOS, and what to change in the firmware.
 - On Intel 7-, 8- and 9-series chipsets the xHCI driver routes the USB 2 ports from the EHCI controller to the xHCI controller (and enables its SuperSpeed ports) before starting it, so keyboards and sticks behind those ports are found. Untested on hardware: QEMU's xHCI has no such registers.
 - A System V shared memory segment can be 32 MiB (2 MiB before; `shmmax` reads 33554432): its pages hang from up to 16 level-1 tables of the shared store instead of one. Pages are still all taken when the segment is made, so a small VM refuses a big one with ENOMEM.
