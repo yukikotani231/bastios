@@ -1,0 +1,65 @@
+# The Rust toolchain on BastiOS, for the compatibility suite (test/compat):
+# rustc and cargo of the official rust:alpine image, with Alpine's gcc and
+# musl, which rustc links with, entered with chroot. The Rust disk
+# (rustdisk.py) holds the image's root as a tar file (/disk/root.tar) and a
+# BusyBox at /disk/busybox. The format is applets.txt's:
+#
+#   == NAME
+#   $ COMMAND        (one line, run by ash in /)
+#   expected output, line by line, compared exactly
+#
+# The expected output is what Linux prints for the same commands in a chroot
+# of the same root.
+
+== rust: unpack the root, make the device nodes
+$ bb mkdir -p /disk/r && cd /disk/r && bb tar -xf /disk/root.tar && bb mkdir -p proc tmp work && for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; cd /; bb mount -t proc proc /disk/r/proc; bb ls /disk/r/dev | bb cat
+console
+null
+random
+tty
+urandom
+zero
+
+== rust: version
+$ rc() { bb chroot /disk/r /usr/bin/env PATH=/usr/local/cargo/bin:/usr/bin:/bin RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo HOME=/tmp "$@"; }; rc rustc --version | bb sed 's/ (.*//'; rc cargo --version | bb sed 's/ (.*//'
+rustc 1.99.0
+cargo 1.99.0
+
+== rust: compile and run a program
+$ bb printf 'fn main() { println!("hello {}", 6*7); }\n' > /disk/r/work/h.rs; rc rustc /work/h.rs -o /work/h && rc /work/h
+hello 42
+
+== rust: collections, strings, closures and traits
+$ bb printf 'use std::collections::HashMap;\ntrait Area { fn area(&self) -> f64; }\nstruct Sq(f64);\nstruct Ci(f64);\nimpl Area for Sq { fn area(&self) -> f64 { self.0 * self.0 } }\nimpl Area for Ci { fn area(&self) -> f64 { 3.0 * self.0 * self.0 } }\nfn main() {\n  let mut m: HashMap<String, usize> = HashMap::new();\n  for w in "the cat and the dog and the bird".split_whitespace() { *m.entry(w.to_string()).or_insert(0) += 1; }\n  let mut v: Vec<_> = m.into_iter().collect();\n  v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));\n  println!("{:?}", &v[..3]);\n  let shapes: Vec<Box<dyn Area>> = vec![Box::new(Sq(2.0)), Box::new(Ci(1.0))];\n  println!("{}", shapes.iter().map(|s| s.area()).sum::<f64>());\n  let sq: Vec<u64> = (1..=5).map(|x| x * x).collect();\n  println!("{:?} {}", sq, sq.iter().sum::<u64>());\n}\n' > /disk/r/work/c.rs; rc rustc -O /work/c.rs -o /work/c && rc /work/c
+[("the", 3), ("and", 2), ("bird", 1)]
+7
+[1, 4, 9, 16, 25] 55
+
+== rust: threads, channels and a mutex
+$ bb printf 'use std::sync::{mpsc, Arc, Mutex};\nuse std::thread;\nfn main() {\n  let n = Arc::new(Mutex::new(0u64));\n  let (tx, rx) = mpsc::channel();\n  let hs: Vec<_> = (0..4).map(|i| { let n = n.clone(); let tx = tx.clone(); thread::spawn(move || { for _ in 0..1000 { *n.lock().unwrap() += 1; } tx.send(i).unwrap(); }) }).collect();\n  drop(tx);\n  for h in hs { h.join().unwrap(); }\n  let mut got: Vec<i32> = rx.iter().collect();\n  got.sort();\n  println!("{} {:?}", *n.lock().unwrap(), got);\n}\n' > /disk/r/work/t.rs; rc rustc -O /work/t.rs -o /work/t && rc /work/t
+4000 [0, 1, 2, 3]
+
+== rust: exit status and a panic
+$ bb printf 'fn main() {\n  if std::env::args().count() > 1 { std::process::exit(3); }\n  let v: Vec<i32> = Vec::new();\n  println!("{}", v[1]);\n}\n' > /disk/r/work/p.rs; rc rustc /work/p.rs -o /work/p && { rc /work/p a; echo status $?; rc /work/p 2>&1 | bb grep -c 'panicked at /work/p.rs:4:19:'; rc /work/p >/dev/null 2>&1; echo status $?; }
+status 3
+1
+status 101
+
+== rust: files and directories
+$ bb printf 'use std::fs;\nuse std::io::Write;\nfn main() {\n  fs::create_dir_all("/tmp/rd/a/b").unwrap();\n  let mut f = fs::File::create("/tmp/rd/a/b/f.txt").unwrap();\n  f.write_all(b"one\\ntwo\\n").unwrap();\n  drop(f);\n  println!("{:?}", fs::read_to_string("/tmp/rd/a/b/f.txt").unwrap());\n  fs::rename("/tmp/rd/a/b/f.txt", "/tmp/rd/g.txt").unwrap();\n  let mut names: Vec<_> = fs::read_dir("/tmp/rd").unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();\n  names.sort();\n  println!("{:?} {}", names, fs::metadata("/tmp/rd/g.txt").unwrap().len());\n  fs::remove_dir_all("/tmp/rd").unwrap();\n  println!("{}", fs::metadata("/tmp/rd").is_err());\n}\n' > /disk/r/work/f.rs; rc rustc /work/f.rs -o /work/f && rc /work/f
+"one\ntwo\n"
+["a", "g.txt"] 8
+true
+
+== rust: cargo builds and runs a project
+$ bb mkdir -p /disk/r/work/proj/src && bb printf '[package]\nname = "proj"\nversion = "0.1.0"\nedition = "2021"\n' > /disk/r/work/proj/Cargo.toml && bb printf 'mod util;\nfn main() { println!("{}", util::fib(30)); }\n' > /disk/r/work/proj/src/main.rs && bb printf 'pub fn fib(n: u32) -> u64 { if n < 2 { n as u64 } else { fib(n - 1) + fib(n - 2) } }\n#[cfg(test)]\nmod tests { #[test] fn small() { assert_eq!(super::fib(10), 55); } }\n' > /disk/r/work/proj/src/util.rs; rc sh -c 'cd /work/proj && cargo run --offline -q 2>&1'
+832040
+
+== rust: cargo test
+$ rc sh -c 'cd /work/proj && cargo test --offline -q 2>&1' | bb grep -E '^test result|running' | bb sed 's/; finished in .*//'
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+== rust: a compile error is reported
+$ bb printf 'fn main() { let x: i32 = "no"; }\n' > /disk/r/work/e.rs; rc rustc /work/e.rs -o /work/e 2>&1 | bb sed -n 1p
+error[E0308]: mismatched types

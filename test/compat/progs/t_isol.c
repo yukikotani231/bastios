@@ -9,7 +9,7 @@
  * A set-user-ID file in a loop-mounted image does not raise its runner:
  * the image's maker chose its owners and modes (BastiOS mounts them
  * nosuid). It may not read where a root process's /proc exe and fd links
- * lead, nor open /dev/console, nor SHM_LOCK under a zero RLIMIT_MEMLOCK;
+ * lead, nor open its maps, auxv, mem and io, nor open /dev/console, nor SHM_LOCK under a zero RLIMIT_MEMLOCK;
  * and a SysV set's group bits reach it through a supplementary group. */
 #include "compat.h"
 #include <fcntl.h>
@@ -288,6 +288,27 @@ static int no_proc_links(void) {
     return ok && readlink("/proc/self/exe", buf, sizeof buf) > 0 && readlink("/proc/self/ns/uts", buf, sizeof buf) > 0;
 }
 
+/* Another user's memory map, auxiliary vector, memory and I/O counts say
+ * where its stack and code lie (with address space randomization, the one
+ * thing keeping that secret): they open for the process itself, not for
+ * another user. */
+static int no_proc_layout(void) {
+    static const char *const files[] = {"maps", "auxv", "mem", "io"};
+    char p[64];
+    pid_t root = getppid();
+    if (!become_nobody()) return 0;
+    for (int i = 0; i < 4; i++) {
+        snprintf(p, sizeof p, "/proc/%d/%s", (int)root, files[i]);
+        int fd = open(p, O_RDONLY);
+        if (fd >= 0 || errno != EACCES) return 0;
+        snprintf(p, sizeof p, "/proc/self/%s", files[i]);
+        fd = open(p, O_RDONLY);
+        if (fd < 0) return 0;
+        close(fd);
+    }
+    return 1;
+}
+
 static int no_console(void) {
     if (!become_nobody()) return 0;
     return open("/dev/console", O_RDWR) == -1 && errno == EACCES;
@@ -357,6 +378,7 @@ int main(int argc, char **argv) {
     EXPECT("ports below 1024 are root's", in_child(low_ports));
     EXPECT("root binds a port below 1024", root_binds_low());
     EXPECT("another user's /proc exe, fd and ns links are hidden", in_child(no_proc_links));
+    EXPECT("another user's memory map, auxv, mem and io are hidden", in_child(no_proc_layout));
     EXPECT("/dev/console is root's", in_child(no_console));
     EXPECT("SysV group bits count supplementary groups", sysv_groups());
     EXPECT("SHM_LOCK needs RLIMIT_MEMLOCK or root", in_child(no_shm_lock));
