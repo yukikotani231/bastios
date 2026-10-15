@@ -112,6 +112,33 @@ static int nested_userns(void) {
     return getuid() == 7 && strstr(t, "         7          0          1") != NULL;
 }
 
+/* Root of a user namespace maps the namespace of its child, as runc does
+ * inside a container: the child's root is its own, through the map around
+ * it. */
+static int parent_maps_nested(void) {
+    int up[2], down[2];
+    if (pipe(up) || pipe(down)) return 0;
+    pid_t c = fork();
+    if (c == 0) {
+        char b;
+        if (unshare(CLONE_NEWUSER) != 0) _exit(10);
+        if (write(up[1], "x", 1) != 1 || read(down[0], &b, 1) != 1) _exit(11);
+        if (setresuid(0, 0, 0) != 0) _exit(12);
+        _exit(getuid() == 0 ? 0 : 13);
+    }
+    char b, path[64];
+    if (read(up[0], &b, 1) != 1) return 0;
+    snprintf(path, sizeof path, "/proc/%d/setgroups", c);
+    int ok = write_str(path, "deny", 4) == 4;
+    snprintf(path, sizeof path, "/proc/%d/uid_map", c);
+    ok = ok && write_str(path, "0 0 1\n", 6) == 6;
+    snprintf(path, sizeof path, "/proc/%d/gid_map", c);
+    ok = ok && write_str(path, "0 0 1\n", 6) == 6;
+    ok = ok && write(down[1], "y", 1) == 1;
+    int st;
+    return waitpid(c, &st, 0) == c && ok && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
 /* The user who made a user namespace joins it again with setns (rootless
  * podman's way back into the namespace its pause process holds), and is
  * root there, but cannot go to the first one. */
@@ -260,6 +287,7 @@ int main(void) {
     EXPECT("uid_map takes text that ends in a NUL", in_userns(map_text, 0));
     EXPECT("a process maps the user namespace it has just made itself", in_child(map_own_after_unshare));
     EXPECT("a user namespace is made inside another and mapped through it", in_child(nested_userns));
+    EXPECT("root of a user namespace maps the namespace of its child", in_userns(parent_maps_nested, 0));
     EXPECT("whoever made a user namespace joins it with setns, and not the first one", in_child(join_userns));
     EXPECT("the root of a user namespace brings loopback up in a network namespace of its own", in_userns(lo_up_in_own_netns, 0));
     EXPECT("and not in the first one", in_userns(lo_up_in_first_netns, 0));
