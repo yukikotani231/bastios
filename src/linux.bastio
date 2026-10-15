@@ -1341,7 +1341,14 @@ fn lx_fill(k: &mut Kernel, v: u64, n: u64)
   requires kok(k) && v <= 255 && n <= 160
   ensures kok(k)
 {
+  let w = v * 72340172838076673;           // v in every byte: 0x0101010101010101 * v
   let mut i = 0;
+  while i + 8 <= n
+    invariant i <= n && n <= 160 && kok(k)
+  {
+    store_le64(&mut k.fs.xfer, i, w);
+    i = i + 8;
+  }
   while i < n
     invariant i <= n && n <= 160 && kok(k)
   {
@@ -1635,6 +1642,9 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
   }
   if d.kind == K_DEV && d.x == DEV_MICE {
     return mice_write(&mut k, pid, va, n);  // mouse commands (src/lxmouse.bastio)
+  }
+  if d.kind == K_DEV && is_mem_file(d.x) {
+    return mem_io(&mut k, pid, fd, d.x, va, n, true);   // /proc/PID/mem (src/lxprocfs.bastio)
   }
   if d.kind == K_DEV && d.x >= PROC_DEV {
     return proc_write(&mut k, pid, d.x, va, n);   // a sysctl open for writing (src/lxprocfs.bastio)
@@ -2288,9 +2298,9 @@ fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
   if d.kind == K_DEV && is_loop(d.x) {
     return loop_seek(&mut k, pid, fd, d.x, off, whence);
   }
-  // Only /proc/PID/auxv seeks (a debugger reads it in pieces); programs that
+  // Only /proc/PID/auxv and mem seek (a debugger reads them in pieces); programs that
   // seek in the other /proc files have always been told 0 and left at the start.
-  if d.kind == K_DEV && d.x >= PROC_DEV + 16 && (d.x - PROC_DEV) % 16 == 2 {   // PF_AUXV
+  if d.kind == K_DEV && ((d.x >= PROC_DEV + 16 && (d.x - PROC_DEV) % 16 == 2) || is_mem_file(d.x)) {   // PF_AUXV, PF_MEM
     return proc_seek(&mut k, pid, fd, off, whence);   // src/lxprocfs.bastio
   }
   if d.kind == K_DEV {

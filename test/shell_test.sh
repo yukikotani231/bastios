@@ -8,9 +8,12 @@ KERNEL=${KERNEL:-build/bastios.elf}
 # Seconds each boot's steps may take in all. The longest boot's steps take
 # about 35 s alone; with make test's other lanes running beside it (test/all.sh)
 # they took over 60 s, and its last steps failed for want of time, on main too.
-# The native job (NATIVE=1) on a loaded runner took over 110 s, so the limit
-# is only there to end a hang, not to tell slow from broken.
-TIMEOUT=${TIMEOUT:-240}
+# The native job (NATIVE=1) on a loaded runner took over 110 s, and with the
+# steps added since it ran past 240 s: the step being run then, and every one
+# after it, failed with no output (main's native job, on whichever of the
+# thread steps was running). So the limit is only there to end a hang, not to
+# tell slow from broken.
+TIMEOUT=${TIMEOUT:-600}
 SMP=${SMP:-4}
 
 python3 - "$KERNEL" "$TIMEOUT" "$SMP" <<'PY'
@@ -300,6 +303,9 @@ steps = [
     # src/tcpbuf.bastio), so the later page counts may be lower than the
     # first by that much.
     ("mtcp loop 3000000", b"mtcp: loop 3000000 bytes, 0 wrong", b"\n# "),
+    # 100 connections to ourselves at once is 200 in the kernel's table (it
+    # held 32), and 30 UDP sockets at once (8 before).
+    ("mtcp many 100", b"mtcp: 100 connections and 30 udp sockets, 16 queued", b"\n# "),
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
     # More processes at once than the 32 rows the process table starts with:
     # it grows (new_pid), and /proc lists three-digit pids. (stdin from the
@@ -387,7 +393,7 @@ steps = [
     # sees itself and only its own children there, and a /proc mounted in
     # it lists them by those ids; user/mns.c (above) checks the rest.
     ("unshare -p -f --mount-proc sh -c 'echo $$; kill -0 1 && echo seen; cat /proc/1/stat; ls -d /proc/9'",
-     b"\r\n1\r\nseen\r\n1 (ash) S 0 1 1 ", b"\n# "),
+     [b"\r\n1\r\nseen\r\n1 (ash) ", b" 0 1 1 0 -1 "], b"\n# "),     # not the state letter: the shell may not have gone to sleep for cat yet
     # setns into a network namespace: nsenter -n joins the one a process
     # unshared into, so its /proc/self/ns/net link names that namespace
     # (and the caller's own stays the first one's).
@@ -410,7 +416,7 @@ steps = [
     # but has no more rights: root's files show as 65534 and stay unreadable,
     # and a file she makes is hers outside. Without a map she is 65534.
     ("su alice -c 'unshare -U -r sh -c \"id -u; id -g; ls -ln /etc/shadow; cat /etc/shadow; echo s=\\$?; touch /home/alice/f; ls -ln /home/alice/f; cat /proc/self/uid_map /proc/self/setgroups\"; ls -ln /home/alice/f; unshare -U id -u; unshare -U -r -u sh -c \"hostname box; hostname\"; unshare -U -r unshare -U true; echo n=$?'",
-     [b"\r\n0\r\n0\r\n", b"65534    65534", b"Permission denied", b"s=1", b"0        0", b"         0       1000          1\r\ndeny", b"1000     1000", b"\r\n65534\r\nbox\r\n", b"n=1"], b"\n# "),
+     [b"\r\n0\r\n0\r\n", b"65534    65534", b"Permission denied", b"s=1", b"0        0", b"         0       1000          1\r\ndeny", b"1000     1000", b"\r\n65534\r\nbox\r\n", b"n=0"], b"\n# "),
     # The root of a user namespace mounts in a mount namespace of its own,
     # and only there: a tmpfs it mounts is gone with the namespace, and a
     # user without a mount namespace of its own (or without any) mounts nothing.
@@ -532,7 +538,7 @@ steps = [
     # What Linux programs look for besides: processors, the file system
     # types, a process's own mount table, and three fixed sysctls.
     ("n=0; while read k r; do [ \"$k\" = processor ] && n=$((n+1)); done < /proc/cpuinfo; echo cpus=$n; cat /proc/filesystems; cat /proc/self/mounts", [f"cpus={smp}\r\n".encode(), b"nodev\tramfs", b"nodev\ttmpfs", b"\tbstdisk3", b"proc /proc proc"], b"\n# "),
-    ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n512\r\n", b"mounts"], b"\n# "),
+    ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n512\r\n", b"mounts", b"auxv", b"mem"], b"\n# "),
     # An 8 MiB stack, Linux's default (t_mem in make compat maps 640 MiB
     # of the 1 GiB window and grows the stack past 6 MiB).
     ("ulimit -s", b"\r\n8192\r\n", b"\n# "),

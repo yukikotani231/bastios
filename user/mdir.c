@@ -302,23 +302,49 @@ int main(void)
         return fail("removing bw");
     if (open(".", O_TMPFILE | O_RDWR, 0600) != -1 || errno != EOPNOTSUPP)
         return fail("O_TMPFILE refused");
-    /* Making directories until the in-memory table is full ends in ENOSPC. */
+    /* Making files until the in-memory table is full ends in ENOSPC. (Files,
+     * not directories: rmdir looks through the whole table for children.) */
     int made = 0;
     char nm[16];
-    while (made < 20000) {
+    while (made < 100000) {
         snprintf(nm, sizeof nm, "n%d", made);
-        if (mkdir(nm, 0755) != 0)
+        int fd = open(nm, O_CREAT | O_WRONLY, 0644);
+        if (fd < 0)
             break;
+        close(fd);
         made++;
     }
-    if (made == 20000 || errno != ENOSPC)
+    if (made == 100000 || errno != ENOSPC)
         return fail("filling the in-memory table");
-    if (made < 4000) /* the table held 1024 once; it holds thousands now */
-        return fail("the in-memory table holds thousands of names");
+    if (made < 30000) /* the table held 1024 once, then 8192; it holds 32768 nodes */
+        return fail("the in-memory table holds tens of thousands of names");
     while (made > 0) {
         snprintf(nm, sizeof nm, "n%d", --made);
-        if (rmdir(nm) != 0)
+        if (unlink(nm) != 0)
             return fail("emptying the in-memory table");
+    }
+    /* Tens of thousands of directories: rmdir and rename must not walk the
+     * whole table for children, and still refuse a directory that has some. */
+    if (mkdir("tpdirectory", 0755) != 0 || mkdir("tpdirectory/inner", 0755) != 0 || mkdir("tpdirectory/inner/deepest", 0755) != 0)
+        return fail("nested directories");
+    if (rmdir("tpdirectory") != -1 || errno != ENOTEMPTY || rmdir("tpdirectory/inner") != -1 || errno != ENOTEMPTY)
+        return fail("rmdir of a directory with names under it");
+    if (rename("tpdirectory", "tqdirectory") != 0 || rmdir("tqdirectory") != -1 || errno != ENOTEMPTY
+        || access("tqdirectory/inner/deepest", F_OK) != 0 || access("tpdirectory", F_OK) != -1)
+        return fail("renaming a directory with names under it");
+    if (rmdir("tqdirectory/inner/deepest") != 0 || rmdir("tqdirectory/inner") != 0 || rmdir("tqdirectory") != 0)
+        return fail("emptying the renamed directory");
+    for (made = 0; made < 20000; made++) {
+        snprintf(nm, sizeof nm, "q%d", made);
+        if (mkdir(nm, 0755) != 0)
+            return fail("making 20000 directories");
+    }
+    if (rename("q7", "r7") != 0 || rename("r7", "q7") != 0)
+        return fail("renaming a directory among thousands");
+    while (made > 0) {
+        snprintf(nm, sizeof nm, "q%d", --made);
+        if (rmdir(nm) != 0)
+            return fail("removing 20000 directories");
     }
     /* tmpfs: mounted on an empty directory, listed in /proc/self/mounts,
      * busy while a file in it is open, emptied by umount2; read-only

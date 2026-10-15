@@ -234,6 +234,8 @@ fn lx_number(n: u64) -> u64
   if n == 243 { return LX_RECVMMSG; }
   if n == 261 { return LX_PRLIMIT64; }
   if n == 264 { return LX_NAME_TO_HANDLE_AT; }
+  if n == 262 { return LX_FANOTIFY_INIT; }
+  if n == 263 { return LX_FANOTIFY_MARK; }
   if n == 265 { return LX_OPEN_BY_HANDLE_AT; }
   if n == 266 { return LX_CLOCK_ADJTIME; }
   if n == 268 { return LX_SETNS; }

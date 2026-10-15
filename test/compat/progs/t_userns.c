@@ -93,6 +93,25 @@ static int map_own_after_unshare(void) {
         && write_trunc("/proc/self/gid_map", map, n) == n;
 }
 
+/* A user namespace inside one: its map names ids of the namespace around
+ * it (an id that one does not map is refused), and reads back the same way
+ * while the host ids stay what permissions use. */
+static int nested_userns(void) {
+    if (!map_own_after_unshare() || getuid() != 0) return 0;
+    if (unshare(CLONE_NEWUSER) != 0) return 0;
+    if (write_trunc("/proc/self/setgroups", "deny", 4) != 4) return 0;
+    if (write_trunc("/proc/self/uid_map", "0 5 1\n", 6) != -1 || errno != EPERM) return 0;
+    if (write_trunc("/proc/self/uid_map", "7 0 1\n", 6) != 6) return 0;
+    if (write_trunc("/proc/self/gid_map", "7 0 1\n", 6) != 6) return 0;
+    char t[64];
+    int f = open("/proc/self/uid_map", O_RDONLY);
+    int n = f < 0 ? -1 : read(f, t, sizeof t - 1);
+    if (f >= 0) close(f);
+    if (n <= 0) return 0;
+    t[n] = 0;
+    return getuid() == 7 && strstr(t, "         7          0          1") != NULL;
+}
+
 /* The root of a user namespace that made its own network namespace brings
  * its loopback up (crun does at start), but not in the first one. */
 static int lo_up(void) {
@@ -210,6 +229,7 @@ int main(void) {
     EXPECT("the first ids of a user namespace are set from one register", in_userns(ids_with_junk, 0));
     EXPECT("uid_map takes text that ends in a NUL", in_userns(map_text, 0));
     EXPECT("a process maps the user namespace it has just made itself", in_child(map_own_after_unshare));
+    EXPECT("a user namespace is made inside another and mapped through it", in_child(nested_userns));
     EXPECT("the root of a user namespace brings loopback up in a network namespace of its own", in_userns(lo_up_in_own_netns, 0));
     EXPECT("and not in the first one", in_userns(lo_up_in_first_netns, 0));
     EXPECT("nor in one that another user namespace made", in_child(lo_up_in_foreign_netns));

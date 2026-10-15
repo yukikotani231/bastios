@@ -260,6 +260,30 @@ t_dns: name server binds UDP port 53
 t_dns: point resolv.conf at it
 t_dns: resolv.conf names a server
 t_dns: resolv.conf put back
+t_fanotify: a child's event comes to its directory
+t_fanotify: a class other than notification is refused
+t_fanotify: a directory mark with FAN_EVENT_ON_CHILD
+t_fanotify: a mark on a missing file is ENOENT
+t_fanotify: a mark with no operation is EINVAL
+t_fanotify: a modification ends the ignore mask
+t_fanotify: a mount mark covers files under the directory
+t_fanotify: a subdirectory's event needs FAN_ONDIR
+t_fanotify: a write is modify and close-write
+t_fanotify: add FAN_ONDIR
+t_fanotify: an empty queue is EAGAIN
+t_fanotify: an ignored event is left out
+t_fanotify: and reports them
+t_fanotify: fanotify_init makes a descriptor
+t_fanotify: fdinfo lists the inode marks
+t_fanotify: flush the marks
+t_fanotify: ignore access
+t_fanotify: mark a file for access, modify, open and close
+t_fanotify: now it comes, without the flag in its mask
+t_fanotify: open, access and close of a file are one event
+t_fanotify: reading the event's descriptor makes no event
+t_fanotify: remove the mark
+t_fanotify: the event says who did it
+t_fanotify: the event's descriptor reads the file
 t_fdlock: 200 descriptors, dup2 to 200 and F_DUPFD from 100
 t_fdlock: F_GETLK reports the conflicting lock that starts first
 t_fdlock: F_SETLEASE and F_GETLEASE
@@ -503,6 +527,7 @@ t_ltp2: mlockall and munlockall succeed
 t_ltp2: mmap: MAP_FIXED_NOREPLACE over a mapping is EEXIST, an unknown MAP_SHARED_VALIDATE flag EOPNOTSUPP, no type EINVAL
 t_ltp2: mprotect: a shared mapping of /dev/zero opened read-only cannot become writable (EACCES)
 t_ltp2: mqueue: priorities order messages, getattr counts, unlink, bad sigevent EINVAL
+t_ltp2: mqueue file system: queues show as files, a new file makes a queue, mq_unlink removes the file
 t_ltp2: mqueue: 32 queues at once, a 33rd is ENOSPC, each keeps its own messages
 t_ltp2: mqueue: mq_notify SIGEV_THREAD runs its function once, a second registration is EBUSY
 t_ltp2: mremap MREMAP_FIXED moves pages to the address asked for; an unmapped address is EFAULT
@@ -915,6 +940,7 @@ t_proc: maps shows a PROT_NONE page with no permissions
 t_proc: maps has a [heap] after brk grows
 t_proc: maps has [stack] and [vdso]
 t_proc: maps lines end at column 74 for names
+t_proc: readlink of /proc/self is the caller's id
 t_ptrace: PTRACE_ATTACH stops the target with SIGSTOP
 t_ptrace: PTRACE_CONT with a signal runs the handler for it
 t_ptrace: PTRACE_CONT without a signal drops the one that stopped it, and the child saw the poke
@@ -941,6 +967,16 @@ t_ptrace: attaching to what is traced already is EPERM
 t_ptrace: both run on after PTRACE_CONT, the child's end first for its tracer
 t_ptrace: int3 stops the tracee with SIGTRAP
 t_ptrace: the new child is traced already and stops with SIGSTOP
+t_ptrace: PTRACE_GET_SYSCALL_INFO at a SECCOMP_RET_TRACE stop gives the call and the filter's data
+t_ptrace: PTRACE_GET_SYSCALL_INFO at a call's entry gives its number and arguments
+t_ptrace: PTRACE_GET_SYSCALL_INFO at a signal stop is op 0, with the header only
+t_ptrace: SECCOMP_RET_TRACE stops the tracee with PTRACE_EVENT_SECCOMP and the filter's data
+t_ptrace: SECCOMP_RET_TRACE with a tracer that did not ask for it is ENOSYS
+t_ptrace: a buffer that is too small gets what fits, and the full size is the result
+t_ptrace: and at its exit the result, as an error
+t_ptrace: and without a tracer
+t_ptrace: the call runs once the tracer goes on, and the filter is not asked again
+t_ptrace: the tracee goes on to its end
 t_pty: /dev/tty in the child's session is its pty
 t_pty: Ctrl-C sends SIGINT to the foreground group
 t_pty: Ctrl-D on an empty line reads as end of file

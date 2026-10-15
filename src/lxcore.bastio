@@ -1,0 +1,342 @@
+// Core files: when a signal whose default action is "terminate and dump
+// core" ends a process whose RLIMIT_CORE is not 0, the process's memory and
+// registers are written to a file called "core" in its working directory,
+// in the ELF format `gdb PROGRAM core` reads: the registers of the thread
+// that took the signal (NT_PRSTATUS), a few facts about the process
+// (NT_PRPSINFO), its auxiliary vector (NT_AUXV), and one PT_LOAD segment
+// for every run of pages the process has touched. Pages it never touched
+// (untouched anonymous memory, program pages not loaded yet) are left out,
+// as Linux leaves holes: gdb reads those from the program file.
+//
+// The first 4096 bytes are the headers; the segments' data follows, page
+// by page. A dump is best effort: it ends quietly where the file cannot be
+// created or written, or past the limit, and the process dies as it would
+// have without it.
+//
+// Trusted: nothing new. The dump only reads the dying process's pages
+// through the same checked copies /proc/PID/mem uses and writes the file
+// through the ordinary descriptor path.
+
+import "lxprocfs.bastio";
+import "lxrlimit.bastio";
+
+const CORE_MAX: u64 = 48;                 // runs of pages in one core file
+const CORE_STEPS: u64 = 1048576;          // the page walk's cap
+const CORE_HDR: u64 = 4096;               // the headers, padded: XFER
+const CORE_N1: u64 = 2808;                // 64 + 56 * (CORE_MAX + 1): the notes start after the program headers
+const CORE_N2: u64 = 3164;                // CORE_N1 + 20 + 336 (NT_PRSTATUS)
+const CORE_N3: u64 = 3320;                // CORE_N2 + 20 + 136 (NT_PRPSINFO): NT_AUXV, 288 bytes at most
+
+/// Whether a default-action death by signal s leaves a core file.
+fn core_signal(s: u64) -> bool {
+  return s == 3 || s == 4 || s == 5 || s == 6 || s == 7 || s == 8 || s == 11 || s == 24 || s == 25 || s == 31;
+}
+
+/// v in n little-endian bytes at `at` of x.
+fn core_put(x: &mut Bytes, at: u64, v: u64, n: u64)
+  requires blen(x) == XFER && at <= XFER && n <= 8 && n <= XFER - at
+  ensures blen(x) == XFER
+{
+  let mut i = 0;
+  let mut w = v;
+  while i < n
+    invariant i <= n && n <= 8 && at <= XFER && n <= XFER - at && blen(x) == XFER
+  {
+    bset(&mut x, at + i, cast[u8](w % 256));
+    w = w / 256;
+    i = i + 1;
+  }
+}
+
+/// Process p's runs of touched pages, as (first page, end page, bits % 8)
+/// triples in runs: how many (at most CORE_MAX), and the number of pages.
+fn core_runs(k: &mut Kernel, g: u64, runs: &mut Bytes) -> u64
+  requires kok(k) && g < NPROC && blen(runs) == CORE_MAX * 24
+  ensures kok(k) && blen(runs) == CORE_MAX * 24 && result <= CORE_MAX
+{
+  let mut n = 0;
+  let mut q = 0;
+  let mut steps = 0;
+  let mut open = false;
+  let mut rs = 0;
+  let mut re = 0;
+  let mut rb = 0;
+  while q < WPAGES && steps < CORE_STEPS
+    invariant q <= WPAGES && steps <= CORE_STEPS && n <= CORE_MAX && rs <= WPAGES && re <= WPAGES
+      && rb < 8 && blen(runs) == CORE_MAX * 24 && kok(k) && g < NPROC
+  {
+    steps = steps + 1;
+    let mut bits = user_page_bits(&mut k.spaces, g, q) % 8;
+    if q == VDSO_PAGE {
+      bits = 0;                             // the vDSO is the kernel's, not the program's
+    }
+    if bits == 0 {
+      if open && n < CORE_MAX {
+        xfer_u64(&mut runs, n * 24, rs);
+        xfer_u64(&mut runs, n * 24 + 8, re);
+        xfer_u64(&mut runs, n * 24 + 16, rb);
+        n = n + 1;
+      }
+      open = false;
+      q = smaller(larger(user_next_mapped(&mut k.spaces, g, q + 1), q + 1), WPAGES);
+    } else {
+      if open && re == q && rb == bits {
+        re = q + 1;
+      } else {
+        if open && n < CORE_MAX {
+          xfer_u64(&mut runs, n * 24, rs);
+          xfer_u64(&mut runs, n * 24 + 8, re);
+          xfer_u64(&mut runs, n * 24 + 16, rb);
+          n = n + 1;
+        }
+        open = true;
+        rs = q;
+        re = q + 1;
+        rb = bits;
+      }
+      q = q + 1;
+    }
+  }
+  if open && n < CORE_MAX {
+    xfer_u64(&mut runs, n * 24, rs);
+    xfer_u64(&mut runs, n * 24 + 8, re);
+    xfer_u64(&mut runs, n * 24 + 16, rb);
+    n = n + 1;
+  }
+  return n;
+}
+
+/// The header of one note at `at` of x: the name "CORE", the type, and the
+/// length of the data that follows (the caller pads it to 4).
+fn core_note(x: &mut Bytes, at: u64, ty: u64, dlen: u64)
+  requires blen(x) == XFER && at <= XFER - 20
+  ensures blen(x) == XFER
+{
+  core_put(&mut x, at, 5, 4);
+  core_put(&mut x, at + 4, dlen, 4);
+  core_put(&mut x, at + 8, ty, 4);
+  bset(&mut x, at + 12, 67);
+  bset(&mut x, at + 13, 79);
+  bset(&mut x, at + 14, 82);
+  bset(&mut x, at + 15, 69);
+  bset(&mut x, at + 16, 0);
+}
+
+/// Writes the core file of process p, dying of signal s (taking the
+/// registers of p and the pages of its thread group). True if it wrote one,
+/// which the wait status then says (WCOREDUMP).
+fn core_dump(k: &mut Kernel, p: u64, s: u64) -> bool
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  if !core_signal(s) || EM_NATIVE != 62 {
+    return false;                           // (the aarch64 notes are not written yet)
+  }
+  let lim = rl_cur(k, p, RLIMIT_CORE);
+  if lim == 0 {
+    return false;
+  }
+  let g = tgid(k.procs, p);
+  let mut runs = balloc(CORE_MAX * 24);
+  let nrun = core_runs(&mut k, g, &mut runs);
+  // What the notes carry, before the transfer buffer is used for the file.
+  let mut aux = balloc(PROC_OUT);
+  let naux = smaller(proc_text(&mut k, p, PROC_DEV + 16 * p + 2, &mut aux), 288);
+  let mut cm = balloc(16);
+  let nc = pr_comm(&mut k, p);
+  let mut i = 0;
+  while i < nc
+    invariant i <= nc && nc <= 15 && blen(cm) == 16 && kok(k)
+  {
+    bset(&mut cm, i, bget(k.fs.xfer, i));
+    i = i + 1;
+  }
+  // The file: "core" in the working directory.
+  bset(&mut k.fs.xfer, 0, 99);
+  bset(&mut k.fs.xfer, 1, 111);
+  bset(&mut k.fs.xfer, 2, 114);
+  bset(&mut k.fs.xfer, 3, 101);
+  let n = lx_path_xfer(&mut k, p, 4, OFD_N, true);
+  if n == NO_RESULT || n > FNAME_MAX {
+    bfree(runs);
+    bfree(aux);
+    bfree(cm);
+    return false;
+  }
+  let fd = lx_open_n(&mut k, p, n, LO_CREAT + LO_TRUNC + 1, 384);
+  if fd >= LXNFD {
+    bfree(runs);
+    bfree(aux);
+    bfree(cm);
+    return false;
+  }
+  let row = fd_look(k, p, fd);
+  let mut dumped = false;
+  if row.kind == K_FILE {
+    // The headers.
+    xfer_zero(&mut k, XFER);
+    core_put(&mut k.fs.xfer, 0, 0x464C457F, 4);       // \x7fELF
+    bset(&mut k.fs.xfer, 4, 2);                       // 64-bit
+    bset(&mut k.fs.xfer, 5, 1);                       // little-endian
+    bset(&mut k.fs.xfer, 6, 1);
+    core_put(&mut k.fs.xfer, 16, 4, 2);               // ET_CORE
+    core_put(&mut k.fs.xfer, 18, EM_NATIVE, 2);
+    core_put(&mut k.fs.xfer, 20, 1, 4);
+    core_put(&mut k.fs.xfer, 32, 64, 8);              // e_phoff
+    core_put(&mut k.fs.xfer, 52, 64, 2);              // e_ehsize
+    core_put(&mut k.fs.xfer, 54, 56, 2);              // e_phentsize
+    core_put(&mut k.fs.xfer, 56, nrun + 1, 2);        // e_phnum
+    // NT_PRSTATUS
+    core_note(&mut k.fs.xfer, CORE_N1, 1, 112 + USER_REGS_SIZE + 8);
+    let at = CORE_N1 + 20;
+    core_put(&mut k.fs.xfer, at, s, 4);               // si_signo
+    core_put(&mut k.fs.xfer, at + 12, s, 2);          // pr_cursig
+    core_put(&mut k.fs.xfer, at + 32, p, 4);          // pr_pid
+    core_put(&mut k.fs.xfer, at + 36, pget(k.procs, p, F_PARENT), 4);
+    core_put(&mut k.fs.xfer, at + 40, p, 4);
+    core_put(&mut k.fs.xfer, at + 44, p, 4);
+    let mut r = 0;
+    while r < USER_REGS
+      invariant r <= USER_REGS && blen(k.fs.xfer) == XFER && kok(k)
+    {
+      core_put(&mut k.fs.xfer, at + 112 + 8 * r, ur_read(k, p, r), 8);
+      r = r + 1;
+    }
+    // NT_PRPSINFO
+    core_note(&mut k.fs.xfer, CORE_N2, 3, 136);
+    let at2 = CORE_N2 + 20;
+    bset(&mut k.fs.xfer, at2, 82);                    // pr_state: running
+    bset(&mut k.fs.xfer, at2 + 1, 82);
+    core_put(&mut k.fs.xfer, at2 + 24, p, 4);
+    core_put(&mut k.fs.xfer, at2 + 28, pget(k.procs, p, F_PARENT), 4);
+    core_put(&mut k.fs.xfer, at2 + 32, p, 4);
+    core_put(&mut k.fs.xfer, at2 + 36, p, 4);
+    let mut j = 0;
+    while j < 15
+      invariant j <= 15 && blen(k.fs.xfer) == XFER && blen(cm) == 16
+    {
+      bset(&mut k.fs.xfer, at2 + 40 + j, bget(cm, j));
+      bset(&mut k.fs.xfer, at2 + 56 + j, bget(cm, j));
+      j = j + 1;
+    }
+    // NT_AUXV
+    core_note(&mut k.fs.xfer, CORE_N3, 6, naux);
+    let mut a = 0;
+    while a < naux
+      invariant a <= naux && naux <= 288 && blen(k.fs.xfer) == XFER && blen(aux) == PROC_OUT
+    {
+      bset(&mut k.fs.xfer, CORE_N3 + 20 + a, bget(aux, a));
+      a = a + 1;
+    }
+    let nend = CORE_N3 + 20 + (naux + 3) / 4 * 4;
+    // The program headers: the notes, then the runs.
+    core_put(&mut k.fs.xfer, 64, 4, 4);               // PT_NOTE
+    core_put(&mut k.fs.xfer, 72, CORE_N1, 8);         // p_offset
+    core_put(&mut k.fs.xfer, 96, nend - CORE_N1, 8);  // p_filesz
+    core_put(&mut k.fs.xfer, 104, nend - CORE_N1, 8);
+    let mut off = CORE_HDR;
+    let mut h = 0;
+    while h < nrun
+      invariant h <= nrun && nrun <= CORE_MAX && blen(k.fs.xfer) == XFER && blen(runs) == CORE_MAX * 24 && off <= CORE_HDR + h * 549755813888
+    {
+      let from = rd64(runs, h * 24);
+      let to = rd64(runs, h * 24 + 8);
+      let bits = rd64(runs, h * 24 + 16);
+      if to > from && to <= WPAGES {
+        let ph = 120 + 56 * h;
+        let len = (to - from) * 4096;
+        let mut fl = 0;
+        if bits / 2 % 2 == 1 {
+          fl = 4;
+          if bits / 4 % 2 == 1 {
+            fl = 6;
+          } else {
+            fl = 5;
+          }
+        }
+        core_put(&mut k.fs.xfer, ph, 1, 4);           // PT_LOAD
+        core_put(&mut k.fs.xfer, ph + 4, fl, 4);
+        core_put(&mut k.fs.xfer, ph + 8, off, 8);
+        core_put(&mut k.fs.xfer, ph + 16, USER_BASE + from * 4096, 8);
+        core_put(&mut k.fs.xfer, ph + 24, USER_BASE + from * 4096, 8);
+        core_put(&mut k.fs.xfer, ph + 32, len, 8);
+        core_put(&mut k.fs.xfer, ph + 40, len, 8);
+        core_put(&mut k.fs.xfer, ph + 48, 4096, 8);
+        off = off + len;
+      }
+      h = h + 1;
+    }
+    let mut w = vfs_write(&mut k.fs, &mut k.mem, row.x, CORE_HDR);
+    let mut tries0 = 0;
+    while w == VFS_MISS && tries0 < 64
+      invariant tries0 <= 64 && kok(k) && row.x < FD_ROWS
+    {
+      disk_wait(&mut k.fs.disk);
+      w = vfs_write(&mut k.fs, &mut k.mem, row.x, CORE_HDR);
+      tries0 = tries0 + 1;
+    }
+    if w == CORE_HDR {
+      dumped = true;
+      // The segments' data, a page at a time, as far as the limit lets it.
+      let tp = fd_row(&mut k, g);
+      let mut done = CORE_HDR;
+      let mut go = true;
+      let mut h2 = 0;
+      while go && h2 < nrun
+        invariant done <= 0x10000001000 && h2 <= nrun && nrun <= CORE_MAX && kok(k) && tp < NPROC && g < NPROC && blen(runs) == CORE_MAX * 24
+      {
+        let from = rd64(runs, h2 * 24);
+        let to = rd64(runs, h2 * 24 + 8);
+        if to > from && to <= WPAGES {
+          let mut q = from;
+          while go && q < to
+            invariant done <= 0x10000001000 && from <= q && q <= to && to <= WPAGES && kok(k) && tp < NPROC && g < NPROC
+          {
+            if done >= lim || done >= 0x10000000000 {
+              go = false;
+            } else {
+              let pg = USER_BASE + q * 4096;
+              let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, tp, pg, &mut k.fs.xfer, 4096);
+              if got != 4096 {
+                xfer_zero(&mut k, XFER);
+              }
+              let mut w2 = vfs_write(&mut k.fs, &mut k.mem, row.x, 4096);
+              let mut tries = 0;
+              while w2 == VFS_MISS && tries < 64
+                invariant tries <= 64 && kok(k) && row.x < FD_ROWS
+              {
+                disk_wait(&mut k.fs.disk);   // a dying process cannot sleep until the disk catches up
+                w2 = vfs_write(&mut k.fs, &mut k.mem, row.x, 4096);
+                tries = tries + 1;
+              }
+              if w2 != 4096 {
+                go = false;
+              }
+              done = done + 4096;
+              q = q + 1;
+            }
+          }
+        }
+        h2 = h2 + 1;
+      }
+    }
+  }
+  lx_fd_close(&mut k, p, fd);
+  bfree(runs);
+  bfree(aux);
+  bfree(cm);
+  return dumped;
+}
+
+/// The F_CODE of a process the signal s ended: SIG_DEATH + s, plus 128 when
+/// it left a core file (the signal stays code % 128; code / 128 % 2 is the
+/// core flag).
+fn death_code(s: u64, dumped: bool) -> u64
+  requires s < 128
+  ensures result % 128 == s
+{
+  if dumped {
+    return SIG_DEATH + 128 + s;
+  }
+  return SIG_DEATH + s;
+}

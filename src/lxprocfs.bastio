@@ -49,7 +49,7 @@
 // the directory), /proc/PID/fd, maps and environ, writable sysctls but
 // pipe-max-size (proc_write), and
 // /proc/sys as a directory (its files open and stat, but are not listed).
-// A sysctl for a feature BastiOS lacks (core dumps, splice) is left out,
+// A sysctl for a feature BastiOS lacks (splice, say) is left out,
 // so a program that checks for it finds the feature missing.
 
 import "linux.bastio";
@@ -62,6 +62,7 @@ import "lxnsbase.bastio";
 const PF_MOUNTS: u64 = 1;
 const PF_AUXV: u64 = 2;               // /proc/PID/auxv (2 is pid 0's meminfo)
 const PF_MEMINFO: u64 = 2;
+const PF_MEM: u64 = 3;                // /proc/PID/mem (3 is pid 0's uptime)
 const PF_UPTIME: u64 = 3;
 const PF_STAT: u64 = 4;
 const PF_CMDLINE: u64 = 5;
@@ -99,7 +100,7 @@ const SY_NETUNIX: u64 = 25;            // /proc/net/unix
 const SY_NETRAW: u64 = 26;             // /proc/net/raw
 const SY_NETROUTE: u64 = 27;           // /proc/net/route
 const SY_NETARP: u64 = 28;             // /proc/net/arp
-const SY_CORE: u64 = 29;               // /proc/sys/kernel/core_pattern (nothing dumps core)
+const SY_CORE: u64 = 29;               // /proc/sys/kernel/core_pattern ("core": a dump goes to a file of that name, src/lxcore.bastio)
 const SY_NROPEN: u64 = 30;             // /proc/sys/fs/nr_open
 const SY_DROP: u64 = 31;               // /proc/sys/vm/drop_caches: written, kept for nothing
 const SY_SC: u64 = 32;                // 32 .. 32 + SCT_N: the plain sysctl files of src/lxsysctl.bastio
@@ -610,6 +611,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   if xfer_is(x, e + 1, n, "auxv") {
     return base + PF_AUXV;
   }
+  if xfer_is(x, e + 1, n, "mem") {
+    return base + PF_MEM;
+  }
   if xfer_is(x, e + 1, n, "status") {
     return base + PF_STATUS;
   }
@@ -802,7 +806,7 @@ fn is_px_adj(f: u64) -> bool {
 }
 
 fn proc_writable(f: u64) -> bool {
-  return is_px_adj(f) || is_sct_file(f) || is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
+  return is_mem_file(f) || is_px_adj(f) || is_sct_file(f) || is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
 }
 
 /// What stat says about /proc file f (a proc_file device).
@@ -985,6 +989,12 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
     }
     if i == 14 + UMF_N + PXF_N {
       return Ent { len: name_out(&mut k.fs.xfer, "fdinfo"), dir: true, end: false };
+    }
+    if i == 15 + UMF_N + PXF_N {
+      return Ent { len: name_out(&mut k.fs.xfer, "auxv"), dir: false, end: false };
+    }
+    if i == 16 + UMF_N + PXF_N {
+      return Ent { len: name_out(&mut k.fs.xfer, "mem"), dir: false, end: false };
     }
     return end;
   }
@@ -1219,6 +1229,29 @@ fn put_x(o: &mut Bytes, at: u64, v: u64) -> u64
   return a;
 }
 
+/// Appends v in lower-case hexadecimal without padding (Linux's %x).
+fn put_h(o: &mut Bytes, at: u64, v: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = at;
+  let mut sh = 16;
+  while sh > 0
+    invariant sh <= 16 && blen(o) == PROC_OUT && a <= PROC_OUT
+  {
+    sh = sh - 1;
+    let d = (v >> (4 * sh)) & 15;
+    if sh == 0 || v >> (4 * sh) != 0 {
+      if d < 10 {
+        a = put_c(&mut o, a, cast[u8](48 + d));
+      } else {
+        a = put_c(&mut o, a, cast[u8](87 + d));
+      }
+    }
+  }
+  return a;
+}
+
 /// Appends v in octal with a leading 0, as fdinfo's flags.
 fn put_oct(o: &mut Bytes, at: u64, v: u64) -> u64
   requires blen(o) == PROC_OUT && at <= PROC_OUT
@@ -1297,7 +1330,7 @@ fn fdinfo_out(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
     }
     a = put_c(&mut o, a, 10);
   }
-  if d.kind == K_INOTIFY && d.x < INO_N {
+  if d.kind == K_INOTIFY && d.x < INO_N && get(k.evt, INO_AT + d.x * INO_STRIDE) != 2 {
     let mut w = 0;
     while w < INO_W
       invariant w <= INO_W && a <= PROC_OUT && blen(o) == PROC_OUT && d.x < INO_N && kok(k)
@@ -1314,6 +1347,31 @@ fn fdinfo_out(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
         a = put_s(&mut o, a, " ignored_mask:0\n");
       }
       w = w + 1;
+    }
+  }
+  if d.kind == K_INOTIFY && d.x < INO_N && get(k.evt, INO_AT + d.x * INO_STRIDE) == 2 {
+    let mut m = 0;
+    while m < FAN_M
+      invariant m <= FAN_M && a <= PROC_OUT && blen(o) == PROC_OUT && d.x < INO_N && kok(k)
+    {
+      let at = INO_AT + d.x * INO_STRIDE + 6 + m * FAN_MK;     // the mark (fm_at in src/lxinotify.bastio)
+      let hv = get(k.evt, at);
+      if hv != 0 && get(k.evt, at + 1) == 0 && hv < 0x100000000 && a + 120 <= PROC_OUT {
+        a = put_s(&mut o, a, "fanotify ino:");
+        a = put_x(&mut o, a, hv);
+        a = put_s(&mut o, a, " sdev:00000001 mflags:");
+        if get(k.evt, at + 4) % 2 == 1 {
+          a = put_s(&mut o, a, "40");
+        } else {
+          a = put_s(&mut o, a, "0");
+        }
+        a = put_s(&mut o, a, " mask:");
+        a = put_h(&mut o, a, get(k.evt, at + 2));
+        a = put_s(&mut o, a, " ignored_mask:");
+        a = put_h(&mut o, a, get(k.evt, at + 3));
+        a = put_c(&mut o, a, 10);
+      }
+      m = m + 1;
     }
   }
   return a;
@@ -1760,7 +1818,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       return cg_text(&mut k, pid, f, &mut o);    // a cgroup's control file (src/lxcgroup.bastio)
     }
     if is_um_file(f) {
-      return um_text(k, f, &mut o);         // uid_map, gid_map, setgroups (src/lxuser.bastio)
+      return um_text(k, pid, f, &mut o);         // uid_map, gid_map, setgroups (src/lxuser.bastio)
     }
     if what >= SY_LOOP && what - SY_LOOP < LOOP_N * LOOP_SYS {
       return loop_sys_text(&mut k, what - SY_LOOP, &mut o);
@@ -2465,8 +2523,8 @@ fn proc_fill(k: &mut Kernel, pid: u64, fd: u64, f: u64, n: u64) -> u64
       return ESRCH;
     }
   }
-  if is_ns_file(f) {
-    return EINVAL;                          // as reading an nsfs file is
+  if is_ns_file(f) || is_mem_file(f) {
+    return EINVAL;                          // as reading an nsfs file is; memory is read by mem_io
   }
   let off = of_get(k.ofd, h, 3);
   let mut out = balloc(PROC_OUT);
@@ -2497,6 +2555,9 @@ fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if is_mem_file(f) {
+    return mem_io(&mut k, pid, fd, f, va, n, false);
+  }
   let m = proc_fill(&mut k, pid, fd, f, n);
   if m == 0 || m > XFER {
     return m;
@@ -2549,6 +2610,112 @@ fn proc_seek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
   }
   of_set(&mut k.ofd, h, 3, to);
   return to;
+}
+
+/// Is f some process's /proc/PID/mem?
+fn is_mem_file(f: u64) -> bool {
+  return f >= PROC_DEV + 16 && f < PROC_DEV + PSYS && (f - PROC_DEV) % 16 == PF_MEM;
+}
+
+/// read(2) or write(2) on /proc/PID/mem, open in descriptor fd: the memory of
+/// process PID, at the description's offset (an address), as ptrace's peek and
+/// poke reach it: a write goes into read-only code too (a breakpoint) and a
+/// read finds the code pages the program has not run yet. A page that is not
+/// mapped ends the transfer: the bytes before it are moved, and it is EIO
+/// only if none was.
+fn mem_io(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64, write: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if f < PROC_DEV + 16 {
+    return EBADF;
+  }
+  if va >= 0x800000000000 {
+    return EFAULT;
+  }
+  let p = (f - PROC_DEV) / 16;
+  if p == 0 || p >= NPROC || state(k.procs, p) == FREE {
+    return ESRCH;
+  }
+  if state(k.procs, p) == ZOMBIE {
+    return 0;
+  }
+  if tgid(k.procs, p) != tgid(k.procs, pid) && !cred_root(k.procs, pid) && !same_ids(k.procs, pid, p) {
+    return EPERM;                           // as for ptrace
+  }
+  let h = fd_ofd(k, pid, fd);
+  if h >= OFD_N {
+    return EBADF;
+  }
+  let off = of_get(k.ofd, h, 3);
+  if off >= 0x800000000000 {
+    if n == 0 {
+      return 0;
+    }
+    return EIO;                             // not an address a program can have
+  }
+  let g = tgid(k.procs, p);
+  let tp = fd_row(&mut k, g);
+  let mut done = 0;
+  let mut go = true;
+  while go && done < n && done < 0x100000
+    invariant done <= n && done <= 0x101000 && kok(k) && pid < NPROC && tp < NPROC && g < NPROC && 1 <= p && p < NPROC
+  {
+    let at = off + done;
+    if at >= 0x800000000000 {
+      go = false;
+    } else {
+      let mut c = 4096 - at % 4096;
+      if c > n - done {
+        c = n - done;
+      }
+      if c > XFER {
+        c = XFER;
+      }
+      if write {
+        if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + done, &mut k.fs.xfer, c) != c {
+          go = false;
+          if done == 0 {
+            return EFAULT;
+          }
+        } else {
+          pt_fill(&mut k, p, at);
+          own_touch(&mut k.mem, &mut k.spaces, g, (at - USER_BASE) / 4096, true);
+          if at >= USER_BASE && copy_to_user(&mut k.spaces, &mut k.mem, k.anon, tp, at, k.fs.xfer, c) != c && force_to_user(&mut k.spaces, tp, at, k.fs.xfer, c) != c {
+            go = false;
+          } else if at < USER_BASE {
+            go = false;
+          } else {
+            done = done + c;
+          }
+        }
+      } else {
+        pt_fill(&mut k, p, at);
+        let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, tp, at, &mut k.fs.xfer, c);
+        if got == NO_RESULT || got == 0 {
+          go = false;
+        } else {
+          let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + done, k.fs.xfer, got);
+          if put == NO_RESULT || put == 0 {
+            go = false;
+            if done == 0 {
+              return EFAULT;
+            }
+          } else {
+            done = done + put;
+            if put < c {
+              go = false;
+            }
+          }
+        }
+      }
+    }
+  }
+  if done == 0 && n != 0 {
+    return EIO;
+  }
+  of_set(&mut k.ofd, h, 3, off + done);
+  return done;
 }
 
 /// If x[..n] is /proc/PID/fd/N: PID * LXNFD + N, else NO_RESULT. Only
@@ -2793,6 +2960,29 @@ fn proc_peek(procs: &Buf, pid: u64, p: u64) -> bool
   return pid == p || cred_root(procs, pid) || same_ids(procs, pid, p);
 }
 
+/// Whether the path at user address path ends in the component "self"
+/// (after "/" or alone): readlink of /proc/self, which the walk rewrites to
+/// the caller's /proc/PID.
+fn path_ends_self(k: &mut Kernel, pid: u64, path: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, path, &mut k.fs.xfer, FNAME_MAX);
+  if got == NO_RESULT || got < 4 || got > FNAME_MAX {
+    return false;
+  }
+  let mut n = 0;
+  while n < got && bget(k.fs.xfer, n) != 0
+    invariant n <= got && got <= FNAME_MAX && kok(k)
+  {
+    n = n + 1;
+  }
+  if n < 4 || n == got || !xfer_is(k.fs.xfer, n - 4, n, "self") {
+    return false;
+  }
+  return n == 4 || bget(k.fs.xfer, n - 5) == 47;
+}
+
 /// readlink / readlinkat(dirfd, path, buf, size): the target of
 /// /proc/PID/exe or /proc/PID/fd/N, without a NUL (-EACCES unless
 /// proc_peek); -EINVAL for anything else that exists, since nothing else
@@ -2815,6 +3005,7 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
       }
     }
   }
+  let selfname = path_ends_self(&mut k, pid, path);
   let n = lx_path_at_nf(&mut k, pid, dirfd, path);
   if n == NO_RESULT {
     return k.perr;
@@ -2822,6 +3013,19 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
   let lk = vfs_lookup(&mut k.fs, n);
   if lk != NO_FILE && vfs_is_link(&mut k.fs, lk) {
     return link_out(&mut k, pid, lk, va, size);   // a symbolic link (src/lxlink.bastio)
+  }
+  if selfname && n > 5 && n <= 14 && xfer_is(k.fs.xfer, 0, 5, "proc/") {
+    // readlink of /proc/self: the walk made it /proc/PID, and the link's
+    // text is the caller's id in its PID namespace.
+    let id = vpid_of(k, pid, tgid(k.procs, pid));
+    if id < 10000000 {
+      let d = dec_big(&mut k.fs.xfer, 0, id);
+      let m = smaller(d, size);
+      if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, m) != m {
+        return EFAULT;
+      }
+      return m;
+    }
   }
   let mut pfd = NO_RESULT;
   if n <= XFER {
@@ -3045,7 +3249,7 @@ fn uts_file_index(f: u64) -> u64
 /// Whether a write of the transfer buffer can set /proc file f: the number
 /// files, which need no user memory beyond that buffer.
 fn proc_xfer_writable(f: u64) -> bool {
-  return proc_writable(f) && !is_cg_file(f) && !is_um_file(f) && f != PROC_DEV + PSYS + SY_UTS && f != PROC_DEV + PSYS + SY_UTS + 1;
+  return proc_writable(f) && !is_mem_file(f) && !is_cg_file(f) && !is_um_file(f) && f != PROC_DEV + PSYS + SY_UTS && f != PROC_DEV + PSYS + SY_UTS + 1;
 }
 
 /// The part of proc_write after the bytes are in the transfer buffer: n of
