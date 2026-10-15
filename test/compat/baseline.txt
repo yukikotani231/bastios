@@ -179,8 +179,8 @@ t_cloned: pwrite to the sealed memfd is EPERM
 t_cloned: sendfile copies the binary into the memfd
 t_core: the core file names the signal, the program counter and the variable
 t_core: a null write ends the child with SIGSEGV
-t_core: RLIMIT_CORE above 0 leaves a core file
-t_core: RLIMIT_CORE 0 leaves no core file
+t_core: RLIMIT_CORE above 0 leaves a core file, and the wait status says so
+t_core: RLIMIT_CORE 0 leaves no core file, and the status has no core flag
 t_cred: a child inherits ids; /proc/self/status shows them
 t_cred: an unprivileged process keeps to the ids it holds
 t_cred: getgrnam finds users

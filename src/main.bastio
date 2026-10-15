@@ -768,8 +768,8 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     if v == 14 {
       fault_diag(&mut s, p);
     }
-    core_dump(&mut s.k, p, sig);
-    terminate(&mut s.k, mmu, p, SIG_DEATH + sig);
+    let dumped = core_dump(&mut s.k, p, sig);
+    terminate(&mut s.k, mmu, p, death_code(sig, dumped));
     return (p + 1) % NPROC;
   }
   return p;
