@@ -275,3 +275,42 @@ machine, because they come from algorithms, not from emulation.
    a fork is now a fault and a copy, even after the child is gone, since
    a page whose other reference was dropped is still copied (no way yet
    to take back a sole reference to a shared page as a private one).
+
+## Scaling with processors
+
+`bench/scale.py` runs `bench/scale.c` on 1, 2, 4, .. processors: n workers
+on n processors each do a fixed amount of one kind of work (user-mode spin
+as the control, a system call, fork + exit, a pipe and a socketpair
+ping-pong, anonymous page faults, open/read/close), and it prints
+operations per host second and the ratio to one processor. The kernel runs
+every system call under one lock, so the ceiling is one over the time that
+lock is held. A kernel built with `-DBST_LOCKSTAT` counts it:
+`bench/lockstat.py --smp 4 -- /disk/scale syscall 4 400` prints, per lock,
+how often it was taken and waited for, and the time spent holding and
+waiting.
+
+Under QEMU's TCG the time in the lock is mostly not instructions. Every
+trap writes CR3 twice (the kernel's tables and the user's shadow tables
+are separate) and TCG has no PCID, so each system call starts with an empty
+software TLB and the kernel pays a refill for every page it touches while
+it holds the lock: a `read` of `/dev/zero` runs about 1500 instructions
+under the lock, spread over 27 pages of code. `bench/hot-functions.txt` lists
+the functions the system call, file, fork, fault and pipe paths run, and the
+linker puts them first in the text (`build/hot.ld`), so the same paths touch
+16 to 33 pages instead of 27 to 66. `bench/hotfuncs.py` regenerates the list.
+
+Four host cores, one run each, work per worker fixed (operations per second):
+
+| test | before, 1 CPU | before, 4 CPU | after, 1 CPU | after, 4 CPU |
+|---|---|---|---|---|
+| syscall | 61.9k | 87.8k | 67.7k | 118k |
+| pipe | 17.0k | 21.2k | 18.3k | 29.2k |
+| file | 10.5k | 12.8k | 12.6k | 15.7k |
+| fork | 3.2k | 4.0k | 3.6k | 4.8k |
+| fault | 68.0k | 131k | 80.2k | 215k |
+
+Two thirds of the gain is the hot-function layout and the rest is the
+lock's bounded plain spin (bastiolang). The numbers move by about 10% from
+run to run. Four processors give less than four times one because the
+lock is held about 8 us of each 16 us system call and is saturated at
+four; the next step is shortening what runs under it, not more cores.
