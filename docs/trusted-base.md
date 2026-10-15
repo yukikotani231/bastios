@@ -56,6 +56,17 @@ What the kernel trusts these to do, beyond the obvious:
 
 Bastio proves memory safety but not stack depth, so nothing stops kernel code from recursing past the bottom of its stack. The kernel stack used to sit right above the IST1 stack, the task state segment and the saved user context, all mapped, so an overflow wrote over them without a fault: a corrupted `rsp0` or `ist1`, or a user context with a forged rip. Now the page under each kernel stack is unmapped (`guard_block` in `smp.c` splits the 2 MiB page that holds each processor's block into 4 KiB ones and takes the guard out before that processor starts; the layout is in `core.h`). A push into the guard page faults; that fault finds no stack either and becomes a double fault, which runs on IST1 and halts the processor with cr2 in the guard. `test/stackguard_test.sh` moves the waiting processor's %rsp to just above the guard through QEMU's gdb stub and checks for that report; on a kernel without the guard it reports nothing. `test/stackdepth.py` adds up the frames along the deepest call chain of a native kernel (`build/kernel.s`) and fails when it passes 64 KiB of the 92 KiB, so a compiler change that makes frames grow cannot overflow the stack unseen; the recursion in the kernel (a hub inside a hub, a signal that posts one more) is counted at a fixed depth that the test lists, one of them an assumption and not a proof. Still trusted: the trap stack (one frame and `bst_lapic_ack`) and the IST1 stack (the fault report) have no guard, because what runs on them is short, fixed C and assembly, not Bastio code.
 
+### Why the rest of `smp.c` and `multiboot.c` cannot move yet
+
+Everything that remains runs before Bastio's `main`, and each part is held there by a missing capability, not by size. In `smp.c`, `bst_smp_init` (about 100 lines) starts the processors; the timer calibration (`calibrate_lapic_timer` and the four counting helpers, about 190 lines) must finish before an AP arms its timer; the ACPI search (`find_rsdp`, `find_table`, `root_entry`, about 90 lines) feeds both. What blocks moving them:
+
+- **x2APIC registers are MSRs.** Bastio reaches the local APIC only as a page of `Mmio`, so any code that must also work in x2APIC mode (which firmware may lock, or a processor id of 255 or more forces) has to stay in C. A narrow capability limited to MSRs 0x800 to 0x8FF would be safe, since those registers write no memory, but it is a new builtin in every backend of bastiolang's kernel target.
+- **Bastio cannot hand a result back to the platform.** `boot_info` only reads. An AP arms its timer from the calibrated count, so a calibration done in `main` needs a second builtin that publishes it.
+- **Firmware memory is not a capability.** The ACPI tables and the Multiboot information sit in RAM that no `Mmio` window covers, and `multiboot.c` runs before the page pool exists, because it is what tells the pool which memory is free.
+- **The AP hand-off is privileged.** Copying the trampoline below 1 MiB, the guard pages under each kernel stack (`guard_block`), the task state segment and `KERNEL_GS_BASE` (`core_init`) use `invlpg`, `ltr` and `wrmsr`.
+
+Adding the first two builtins would move about 250 lines of C into proved Bastio and add a few dozen lines to the prelude and the native runtime, which is a small net gain for a change that rewrites boot-time timing code on real hardware. It is not done; the choice is recorded here so that it is not rediscovered.
+
 ## What the proofs of user programs trust
 
 | File | What it does |
