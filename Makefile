@@ -8,6 +8,7 @@
 #   make run-iso    boot the ISO in QEMU (run-uefi: under UEFI firmware)
 #   make test       boot it in QEMU and drive the shell over the serial line
 #   make fuzz       fuzz the system calls (SEED, SEEDS, CALLS, SMP)
+#   make soak       run a mixed workload for a long time (SECS, ALPINE)
 #
 # The kernel and its programs are built with bastioc1, bastiolang's compiler
 # (stage1, written in Bastio), which stage0's bastioc0 builds once into
@@ -375,6 +376,14 @@ run-uefi: build/bastios.iso $(DISK)
 # The tests are listed in test/all.sh, which runs JOBS of them at a time.
 test: $(if $(filter d,$(LANES)),build/bastioc1,build/bastios.elf)
 	BASTIOC=$(BASTIOC) BASTIOC0=$(BASTIOC0) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/all.sh
+
+# The long-run soak (test/soak.py): rounds of a mixed workload for SECS
+# seconds, looking for leaks, hangs and panics. `make soak SECS=3600`;
+# `make soak ALPINE=build/compat/soak-alpine.img` runs gcc builds in Alpine
+# instead (see test/soak.py).
+SECS ?= 600
+soak: build/bastios.elf
+	MUSLCC=$(MUSLCC) test/soak.py --secs $(SECS) $(if $(ALPINE),--alpine $(ALPINE))
 
 # The system call fuzzer at length: SEEDS runs of CALLS calls from seed
 # SEED (see test/fuzz_test.sh; `make test` runs a short one).
@@ -855,6 +864,27 @@ compat-ltp-baseline: build/bastios.elf build/ltp/.built
 bench: build/bastios.elf
 	bench/run.py $(BENCH_ARGS)
 
+# Not part of `make test`: whole-program workloads (bench/workloads.py), the
+# same Alpine gcc, make, apk, tar and gzip on BastiOS and on Linux. The disk
+# is the compat suite's Alpine disk cut down to gcc, make and musl-dev, plus
+# the guest script and a generated C project (bench/workloads/).
+BENCH_GCC_IMAGE ?= alpinelinux/alpine-gitlab-ci@sha256:4bce54b0b246967f6ab51476d5511245ba35a49f30b2e63102ca294ab488add9
+build/bench/wl/proj.tar: bench/workloads/mkproj.py | build/bench/wl
+	bench/workloads/mkproj.py $@
+build/bench/wl/wl.sh: bench/workloads/wl.sh | build/bench/wl
+	cp $< $@
+build/bench/wl:
+	mkdir -p $@
+build/bench/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py build/bench/wl/proj.tar build/bench/wl/wl.sh
+	MKDISK_FREE_MB=700 test/compat/alpinedisk.py $@ build/bench/alpine $(ALPINE_BASE) $(BENCH_GCC_IMAGE) \
+	  --disk gcc,musl-dev,make --cache $(ALPINE_CACHE) --extra "wl.sh=build/bench/wl/wl.sh proj.tar=build/bench/wl/proj.tar"
+bench-workloads: build/bastios.elf build/bench/alpine.img
+	bench/workloads.py $(WORKLOAD_ARGS)
+
+# TCP over virtio-net and e1000 against Linux's, driven from the host (bench/netcmp.py).
+bench-net: build/bastios.elf
+	bench/netcmp.py $(NET_ARGS)
+
 # Not part of `make test`: the change in each benchmark from bench/baseline.json
 # (or COMPARE_TO=other.json) to the last `make bench` (build/bench/results.json).
 # Exits 1 if a test got more than 10% slower; see bench/compare.py.
@@ -896,6 +926,6 @@ clean:
 .PRECIOUS: build/user/%.c build/user/%.s build/user/%.o build/user/%.elf
 FORCE:
 
-.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-compare smpbench buildbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-workloads bench-net bench-compare smpbench buildbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
 
 endif

@@ -1233,6 +1233,7 @@ session("NVMe", None, [
     ("echo written by nvme > disk/nv", b""),
     ("cat disk/nv", b"written by nvme\r\n"),
     ("fstest", b"fstest: disk ok"),
+    ("diskbench", b"read 2 MiB: "),          # runs of blocks go in one command (nvme_begin_n)
     ("rm disk/big", b""),
     ("cat disk/hk2", b"dh\r\n"),
     ("rm disk/hk2", b""),
@@ -1250,6 +1251,7 @@ session("AHCI", None, [
     ("cat disk/nv", b"written by nvme\r\n"),
     ("echo and ahci >> disk/nv", b""),
     ("fstest", b"fstest: disk ok"),
+    ("diskbench", b"read 2 MiB: "),          # ahci_begin_n
     ("rm disk/big", b""),
 ], halt=True, ready=ahci_found)
 
@@ -1284,6 +1286,23 @@ def nvme_ns2_found():
 session("NVMe namespace 2", None, [
     ("cat disk/nv", b"written by nvme\r\nand ahci\r\n"),
 ], halt=True, ready=nvme_ns2_found)
+
+# An NVMe drive that takes only 8 KiB per command (MDTS 1): batches are cut
+# to two blocks (src/nvme.bastio, nvme_room), and what is read and written
+# in runs is still right.
+qemu = boot(1, extra=["-machine", "q35", "-drive", f"file={disk},format=raw,if=none,id=nvm",
+                      "-device", "nvme,serial=bastios,drive=nvm,mdts=1"])
+def nvme_mdts_found():
+    global fails
+    ok = b"disk: NVMe\r\n" in out
+    print(("ok  " if ok else "FAIL"), "(NVMe MDTS 1) disk driver: NVMe")
+    fails += not ok
+session("NVMe MDTS 1", None, [
+    ("cat disk/nv", b"written by nvme\r\nand ahci\r\n"),
+    ("fstest", b"fstest: disk ok"),
+    ("diskbench", b"read 2 MiB: "),
+    ("rm disk/big", b""),
+], halt=True, ready=nvme_mdts_found)
 
 # And on an NVMe drive with 4 KiB sectors: what AHCI wrote is there, and
 # what is written here is where the ATA boot below looks for it.
@@ -1692,6 +1711,21 @@ if ok:
 qemu.kill(); qemu.wait()
 print("---- USB boot transcript ----")
 print(out.decode(errors="replace").replace("\r", "")[-400:])
+
+# A UHCI controller (src/uhci.bastio), as on PCs from before xHCI: the
+# driver only looks, so the boot log says one controller with one device on
+# its ports and that it has no driver, and the keyboard stays the PS/2 one.
+qemu = boot(1, extra=["-device", "piix3-usb-uhci", "-device", "usb-kbd"])
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+good = ok and b"usb: 1 UHCI controller(s), 1 device(s) on their ports (" in out
+print(("ok  " if good else "FAIL"), "(UHCI boot) the boot log counts the controller and the device on its port")
+fails += not good
+good = ok and b"keyboard: USB" not in out
+print(("ok  " if good else "FAIL"), "(UHCI boot) a UHCI keyboard is not mistaken for an xHCI one")
+fails += not good
+qemu.kill(); qemu.wait()
 
 # A USB stick with a BastiOS partition (tools/mkusb.py --blank: a GPT and
 # the partition, no boot image) on the same xHCI controller as the USB

@@ -263,6 +263,16 @@ Measured with `make iobench` (`test/iobench.sh`, `-smp 2`, NVMe, three runs, tic
 - `make smpbench`, which does no disk I/O, is unchanged within noise (8.7 s and 17.8 s against 8.5 s and 16.9 s).
 - `bench` is still three to four times slower beside a disk writer. Two causes remain: the idle processor polling the disk takes the kernel lock every few microseconds, and copying blocks in and out of the cache happens under that lock. Completion interrupts (MSI-X and MSI) remove the first cause. The second needs the disk state behind its own lock (stages 4 and 5 of the plan).
 
+Batched commands on NVMe and AHCI followed (2026-10-15). The queue already grouped reads and writes of consecutive blocks, but only virtio took them in one request. NVMe now takes up to 32 blocks in one read or write command, the first block in its data page and the others in 31 more pages named by a PRP list page (limited by the drive's MDTS, from Identify Controller); AHCI fills one PRD entry per block. The pages come from the top of the pool, as virtio's do, and go back at shutdown. Order is unchanged: the batch holds only blocks with no flush between them. Measured with `make diskbench` and `make iobench` on the same host (ticks at 100 Hz, `-smp 2` for iobench):
+
+| | before | after |
+|---|---|---|
+| `diskbench` write, NVMe / NVMe 4 KiB / AHCI | 8-10 / 7-9 / 6-7 | 3-5 / 3-5 / 3-4 |
+| `diskbench` read, same order | 3-4 / 3-4 / 3 | 2-4 / 2-3 / 3 |
+| `bench` getpid beside a `diskbench` (NVMe) | 18-19 | 14-16 |
+| `diskbench` write beside it | 10-16 | 3-5 |
+| two `diskbench` at once, write | 16-21 | 8-12 |
+
 Completion interrupts came next. Measured the same way, booting `main` before the change and the change itself alternately on the same host (2026-10-10):
 
 | | polled (before) | interrupts (after) |

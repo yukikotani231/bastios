@@ -1,0 +1,106 @@
+// UHCI, the USB 1.1 host controller on the chipsets of the 1990s and 2000s,
+// and the companion of an EHCI controller on those of the 2000s: a low- or
+// full-speed device (every keyboard and mouse) on such a machine is behind
+// one of these, not behind the EHCI controller or an xHCI one.
+//
+// For now the driver only looks: it reads each controller's port registers
+// and says how many ports have a device on them, so a report from a real
+// machine shows whether its USB keyboard is out of reach (see
+// docs/real-hardware.md). It writes nothing but the I/O decode bit of the
+// controller's PCI command register, never starts the controller and gives
+// the ports back before it returns.
+//
+// The registers are 32 bytes of I/O ports at BAR 4 (PCI offset 0x20): the
+// two port status registers at offsets 0x10 and 0x12 (up to 8 ports at
+// 0x10 + 2 * n).
+
+import "pci.bastio";
+
+const UHCI_CLASS: u64 = 0x0C0300;     // serial bus controller, USB, UHCI
+const UHCI_TRIES: u64 = 8;            // the most controllers looked at
+const UHCI_PORTS: u64 = 32;           // I/O ports a controller decodes
+const UHCI_PORT_MAX: u64 = 8;         // the most root ports counted
+const UHCI_BAR: u64 = 0x20;           // BAR 4
+const UHCI_PORTSC: u64 = 0x10;
+const UHCI_CONNECTED: u64 = 1;        // PORTSC bit 0: a device is attached
+const UHCI_LOW_SPEED: u64 = 0x100;    // PORTSC bit 8: it is low-speed
+const UHCI_ALWAYS_ONE: u64 = 0x80;    // PORTSC bit 7 reads as 1 on every port that exists
+
+/// The first I/O port of controller `dev`'s registers (0 if BAR 4 is not an I/O BAR).
+fn uhci_base(pci: &mut Pci, dev: u64) -> u64
+  requires pci_ok(pci) && dev < PCI_NONE
+  ensures result < 65536
+{
+  let b = pci_read(&mut pci, dev, UHCI_BAR);
+  if b % 2 == 0 {
+    return 0;
+  }
+  return b % 65536 - b % 4;
+}
+
+/// What the ports of the controller at I/O port `base` hold, as
+/// ports + 16 * connected + 256 * low-speed devices: how many root ports
+/// there are, how many have a device and how many of those are low-speed.
+fn uhci_ports(io: &mut PortIo) -> u64
+  requires port_count(io) == UHCI_PORTS
+  ensures port_count(io) == UHCI_PORTS && result < 4096
+{
+  let mut n = 0;
+  let mut up = 0;
+  let mut slow = 0;
+  while n < UHCI_PORT_MAX
+    invariant port_count(io) == UHCI_PORTS && n <= UHCI_PORT_MAX && up <= n && slow <= n
+  {
+    let v = cast[u64](pio_in16(&mut io, UHCI_PORTSC + 2 * n));
+    if v == 0xFFFF || v & UHCI_ALWAYS_ONE == 0 {
+      return n + 16 * up + 256 * slow;
+    }
+    if v & UHCI_CONNECTED != 0 {
+      up = up + 1;
+      if v & UHCI_LOW_SPEED != 0 {
+        slow = slow + 1;
+      }
+    }
+    n = n + 1;
+  }
+  return n + 16 * up + 256 * slow;
+}
+
+/// Looks at every UHCI controller (up to UHCI_TRIES) and returns how many
+/// there were, plus 16 * the root ports with a device, plus 256 * those that
+/// are low-speed. Controllers whose ports lie outside what is free (below
+/// 0x1000, or among the avoided ports) are counted but not looked at.
+fn uhci_survey(ports: &mut Ports, pci: &mut Pci, avoid_lo: u64, avoid_hi: u64) -> u64
+  requires pci_ok(pci)
+  requires forall k: u64 :: 0x1000 <= k && k < 65536 && !(avoid_lo <= k && k < avoid_hi) ==> port_free(ports, k)
+  ensures pci_ok(pci) && result < 1048576
+  ensures forall k: u64 :: port_free(ports, k) == old(port_free(ports, k))
+{
+  let mut d = 0;
+  let mut n = 0;
+  let mut up = 0;
+  let mut slow = 0;
+  while d < PCI_NONE && n < UHCI_TRIES
+    invariant pci_ok(pci) && d <= PCI_NONE && n <= UHCI_TRIES && up <= 15 * n && slow <= 15 * n
+    invariant forall k: u64 :: port_free(ports, k) == old(port_free(ports, k))
+  {
+    d = pci_class_from(&mut pci, UHCI_CLASS, d);
+    if d < PCI_NONE {
+      n = n + 1;
+      let base = uhci_base(&mut pci, d);
+      if base >= 0x1000 && base + UHCI_PORTS <= 65536 && (base + UHCI_PORTS <= avoid_lo || base >= avoid_hi) {
+        let c = pci_read(&mut pci, d, PCI_COMMAND) % 65536;
+        if c % 2 == 0 {
+          pci_write(&mut pci, d, PCI_COMMAND, c + PCI_CMD_IO);
+        }
+        let mut io = port_claim(&mut ports, base, UHCI_PORTS);
+        let v = uhci_ports(&mut io);
+        port_release(&mut ports, io);
+        up = up + v / 16 % 16;
+        slow = slow + v / 256;
+      }
+      d = pci_next(&mut pci, d);
+    }
+  }
+  return n + 16 * up + 256 * slow;
+}
