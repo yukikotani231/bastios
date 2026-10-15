@@ -141,6 +141,10 @@ def batches(tests, n):
         yield cur
 
 
+# Tests of time namespaces, which shift the clocks by up to minus ten seconds.
+NEEDS_UPTIME = {"clock_gettime03", "timerfd04", "sysinfo03", "clock_nanosleep03"}
+
+
 def run_batch(args, group, progs, work, log, idle=False):
     """Boots a kernel with this batch's programs on its disk and runs its
     tests. Returns their results."""
@@ -158,6 +162,11 @@ def run_batch(args, group, progs, work, log, idle=False):
     g = Guest(args.kernel, disk, log, idle=idle)
     try:
         g.boot()
+        if any(t[0] in NEEDS_UPTIME for t in group):
+            # They write a negative offset to a clock and expect to read a
+            # time that is still positive, so the machine must be up for
+            # longer than the offset.
+            g.run("while read u _ </proc/uptime; [ ${u%%.*} -lt 30 ]; do sleep 1; done; true", 120)
         for tag, argv, _ in group:
             # From /disk, where LTP finds a test's helper programs. A test
             # that wants a file system on its device is given tmpfs, which
