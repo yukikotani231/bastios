@@ -129,11 +129,12 @@ def load_tty(path):
     return [(c["name"], c["prog"], c["keys"], c["check"], c["exp"]) for c in cases]
 
 
-def add_aports(www, tcc_src=None):
+def add_aports(www, archives=()):
     """The abuild cases' files in the web root: /aports.tar, the APKBUILDs
     and sources of test/compat/aports (every directory but the *-src ones),
     /libgreet-1.2.tar.gz, libgreet's source (the APKBUILD fetches it over
-    HTTP), and /tinycc-0.9.28.tar.gz, the tcc checkout in tcc_src."""
+    HTTP), and /NAME.tar.gz for each NAME=DIR of archives: a git checkout
+    at HEAD, under the directory NAME (tinycc-0.9.28)."""
     base = os.path.join(HERE, "aports")
     with tarfile.open(os.path.join(www, "aports.tar"), "w") as t:
         for d in sorted(os.listdir(base)):
@@ -141,9 +142,10 @@ def add_aports(www, tcc_src=None):
                 t.add(os.path.join(base, d), arcname=d, filter=lambda i: setattr(i, "uid", 0) or setattr(i, "gid", 0) or i)
     with tarfile.open(os.path.join(www, "libgreet-1.2.tar.gz"), "w:gz") as t:
         t.add(os.path.join(base, "libgreet-src"), arcname="libgreet-1.2", filter=lambda i: setattr(i, "uid", 0) or setattr(i, "gid", 0) or i)
-    if tcc_src:
-        subprocess.run(["git", "-C", tcc_src, "archive", "--format=tar.gz", "--prefix=tinycc-0.9.28/",
-                        "-o", os.path.join(www, "tinycc-0.9.28.tar.gz"), "HEAD"], check=True)
+    for a in archives:
+        name, src = a.split("=", 1)
+        subprocess.run(["git", "-C", src, "archive", "--format=tar.gz", f"--prefix={name}/",
+                        "-o", os.path.join(www, name + ".tar.gz"), "HEAD"], check=True)
 
 
 class WebServer:
@@ -152,7 +154,7 @@ class WebServer:
     /repo.git, a git repository for the dumb HTTP protocol, and
     /lsp-server.lua, /lsp-client.lua and /lsp-real-client.lua, the files of the Neovim LSP cases."""
 
-    def __init__(self, tcc_src=None):
+    def __init__(self, archives=()):
         self.dir = tempfile.mkdtemp(prefix="compat-www-")
         with open(os.path.join(self.dir, "hello.txt"), "w") as f:
             f.write("hello from the host\n")
@@ -182,7 +184,7 @@ class WebServer:
         for name in ("server.lua", "client.lua", "real-client.lua"):
             shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)), "lsp", name),
                         os.path.join(self.dir, "lsp-" + name))
-        add_aports(self.dir, tcc_src)
+        add_aports(self.dir, archives)
         handler = functools.partial(Quiet, directory=self.dir)
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.port = self.httpd.server_address[1]
@@ -706,7 +708,8 @@ def main():
     ap.add_argument("--debian-disk", help="the Debian disk (a glibc root file system) for debian.txt")
     ap.add_argument("--node-disk", help="the Node disk (the root of the node:alpine image) for node.txt")
     ap.add_argument("--go-disk", help="the Go disk (the Go toolchain of the golang image) for go.txt")
-    ap.add_argument("--tcc-src", help="the tcc checkout alpine.txt's abuild case builds a package from")
+    ap.add_argument("--src-archive", action="append", default=[], metavar="NAME=DIR",
+                    help="a git checkout the web server serves as NAME.tar.gz, for the abuild cases of alpine.txt")
     ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
@@ -734,7 +737,7 @@ def main():
     alpine_tty = load_tty(os.path.join(HERE, "alpine_tty.txt"))
     os.makedirs(args.out, exist_ok=True)
     log = open(os.path.join(args.out, "serial.log"), "wb")
-    web = WebServer(args.tcc_src)
+    web = WebServer(args.src_archive)
     if args.registry_image:
         web.add_registry(args.registry_image)
     env = Host(os.path.abspath(args.host), web) if args.host else None
