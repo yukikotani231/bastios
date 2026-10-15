@@ -905,6 +905,9 @@ fn lx_open_tail(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     if (flags % 4 != 0 && (!proc_writable(pf) || (fs_id(k.procs, pid, false) != 0 && !um_owner(k, pid, pf)))) || is_exe_file(pf) {
       return EACCES;
     }
+    if proc_secret(k.procs, pid, pf) {
+      return EACCES;                        // another user's layout, memory or I/O counts
+    }
     let hp = ofd_new(&mut k, OF_DEV, pf);
     if hp >= OFD_N {
       return ENFILE;
