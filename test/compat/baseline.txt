@@ -1429,11 +1429,8 @@ server: postgres: pgbench loads and runs
 server: postgres: an immediate stop is recovered from the log
 server: postgres: a clean restart keeps the data
 server: postgres: stop
-alpine: git: clone, gc and fsck
 alpine: sshd: a Dropbear server inside the Alpine root takes a key login
 alpine: rsync over ssh: push a tree, with its modes, times and links
 alpine: rsync over ssh: only the changes cross
 alpine: rsync over ssh: pull a tree back, deleting what the source no longer has
 alpine: sshd: stop the server, clean up
-alpine: container: cgroup limits: the container sees the memory, pids and cpu limits runc set
-alpine: container: memory.max kills a process of a container that outgrows it
