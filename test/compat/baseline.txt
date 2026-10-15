@@ -963,6 +963,7 @@ t_proc: wait with no children is ECHILD
 t_proc: waitid
 t_proc: waitpid WNOHANG
 t_proc: sysctl somaxconn reads 4096
+t_proc: keys root_maxkeys reads 200 and a larger value reads back
 t_proc: sysctl overcommit_memory reads 0
 t_proc: sysctl max_map_count reads 65530
 t_proc: sysctl cap_last_cap reads 40
@@ -1104,6 +1105,7 @@ t_ropivot: before the remount a file can be created
 t_ropivot: remount the descriptor's path read-only
 t_ropivot: after it, creating a file is EROFS
 t_sig2: 24 processes at once
+t_sig2: sigqueue carries a 64-bit sigval whole
 t_sig2: SA_ONSTACK runs on the alternate stack
 t_sig2: SA_RESETHAND runs the handler once
 t_sig2: SA_RESTART does not restart epoll_wait
@@ -1361,6 +1363,7 @@ alpine: strace: traces a program's system calls with ptrace, following the child
 alpine: strace: attaches to a running process, and hears of its death when its parent is elsewhere
 alpine: gdb: a breakpoint in a PIE program stops it, shows its arguments and backtrace, and finish gives the return value
 alpine: gdb: a core file of a crashed program shows where it died, its call chain and its arguments
+alpine: nvim: Termdebug drives gdb over MI in terminal windows: a breakpoint in add, the stop, the signs on the source line and an expression
 alpine: gdb: attach to a running program, stop it at a breakpoint, read its variables and detach
 alpine: gdb: attach to a program with three threads, and every thread is listed
 alpine: nvim: LuaJIT loads a shared object that gcc built
@@ -1404,6 +1407,7 @@ alpine: nvim: the edit-build-run loop on a C project: :make with make and gcc re
 alpine: nvim: :grep with ripgrep fills the quickfix list
 alpine: cmake: configure, build and run a C project
 alpine: nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
+alpine: nvim: the LSP client talks to python-lsp-server on python3, a real server, and gets a hover
 alpine: proc: /proc/self/exe is named from the reader's root (chroot), as on Linux
 alpine: apk: free the disk, then install python3 over HTTP
 alpine: python3: asyncio talks over a socketpair
