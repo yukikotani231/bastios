@@ -43,7 +43,11 @@ const INTERP_MAX: u64 = 256;          // the longest interpreter path, NUL inclu
 const ARGS_MAX: u64 = 131072;         // string bytes, NULs included (Linux's ARG_MAX)
 const ARGV_MAX: u64 = 8192;           // the most arguments
 const ENVC_MAX: u64 = 1024;           // the most environment strings
-const RANDOM_AT: u64 = 0x7FFFFFFFF0;  // USER_SIZE - 16
+const RANDOM_AT: u64 = 0x7FFFFFFFF0;  // USER_SIZE - 16, where AT_RANDOM points when the stack is not moved
+const STACK_SHIFT_MAX: u64 = 524288;  // how far down the stack's top may move (the stack is 8 MiB, of which an exec uses at most 0.8 MiB)
+const MMAP_RND_PAGES: u64 = 16777216; // the mmap area's top moves down by up to this many pages (64 GiB)
+const PIE_RND_PAGES: u64 = 4194304;   // a position-independent program moves up by up to this many pages (16 GiB)
+const BRK_RND_PAGES: u64 = 8192;      // the program break starts up to this many pages (32 MiB) above the image
 const AUX_WORDS: u64 = 32;            // the auxiliary vector: 16 pairs
 // The vDSO (user/vdso.c): one read-only page just below the stack, holding
 // the image and, from byte VDSO_DATA, the clock it reads (src/tsc.bastio).
@@ -218,6 +222,21 @@ fn elf_parse(v: &mut Vfs, src: Src) -> Elf
   return elf_parse_at(&mut v, src, PIE_AT);
 }
 
+/// elf_parse, placing a PIE at PIE_AT plus the random distance of `rn`; a
+/// program too big to fit there is placed at PIE_AT after all. Whoever
+/// needs the layout exec built (the lazy code record, say) asks this with
+/// the same `rn`.
+fn elf_parse_rnd(v: &mut Vfs, src: Src, rn: Rnd) -> Elf
+  requires vfs_ok(v) && rnd_ok(rn)
+  ensures vfs_ok(v) && elf_fits(src.size, result)
+{
+  let e = elf_parse_at(&mut v, src, PIE_AT + rn.pie_pg * 4096);
+  if e.ok {
+    return e;
+  }
+  return elf_parse(&mut v, src);
+}
+
 /// elf_parse, placing a PIE at window offset `place` instead.
 fn elf_parse_at(v: &mut Vfs, src: Src, place: u64) -> Elf
   requires vfs_ok(v) && place <= IMAGE_MAX
@@ -370,19 +389,46 @@ fn nul_count(args: &Bytes, from: u64, to: u64, most: u64) -> u64
   return n;
 }
 
-/// The window offset the strings start at: below the AT_RANDOM bytes.
-fn str_at(total: u64) -> u64
-  requires total <= ARGS_MAX
-  ensures result + total <= RANDOM_AT && result + ARGS_MAX + 16 >= RANDOM_AT
+/// What one program start draws at random (layout_rnd, src/lxdev.bastio):
+/// the 16 bytes AT_RANDOM points at (`a`, then `b`), and how far each part
+/// of the layout moves. Every distance is 0 when randomization is off
+/// (`randomize_va_space` 0, or personality ADDR_NO_RANDOMIZE), and `brk_pg`
+/// is 0 below level 2, as on Linux.
+struct Rnd {
+  a: u64,         // AT_RANDOM bytes 0 to 7
+  b: u64,         // AT_RANDOM bytes 8 to 15
+  mmap_pg: u64,   // pages the top of the mmap area (and the interpreter) lies below the vDSO
+  pie_pg: u64,    // pages a PIE is placed above PIE_AT
+  brk_pg: u64,    // pages the program break starts above the image
+  shift: u64,     // bytes the whole initial stack (strings, AT_RANDOM and all) lies below the top; a multiple of 16
+}
+
+spec fn rnd_ok(r: Rnd) -> bool {
+  r.mmap_pg < MMAP_RND_PAGES && r.pie_pg < PIE_RND_PAGES && r.brk_pg < BRK_RND_PAGES
+  && r.shift <= STACK_SHIFT_MAX && r.shift % 16 == 0
+}
+
+/// No randomization, and AT_RANDOM bytes of `a` and `b`.
+fn rnd_fixed(a: u64, b: u64) -> Rnd
+  ensures rnd_ok(result)
 {
-  return (RANDOM_AT - total) / 16 * 16;
+  return Rnd { a: a, b: b, mmap_pg: 0, pie_pg: 0, brk_pg: 0, shift: 0 };
+}
+
+/// The window offset the strings start at: below the AT_RANDOM bytes,
+/// which are `shift` below the top.
+fn str_at(total: u64, shift: u64) -> u64
+  requires total <= ARGS_MAX && shift <= STACK_SHIFT_MAX
+  ensures result + total <= RANDOM_AT - shift && result + ARGS_MAX + 16 + shift >= RANDOM_AT
+{
+  return (RANDOM_AT - shift - total) / 16 * 16;
 }
 
 /// The window offset of the initial rsp: below the strings, with room for
 /// argc, argv, envp and the auxiliary vector, 16-aligned as the ABI wants.
-/// `s` is where the strings start (str_at).
-fn vec_at(s: u64, argc: u64, envc: u64) -> u64
-  requires s <= RANDOM_AT && s + ARGS_MAX + 16 >= RANDOM_AT && argc <= ARGV_MAX && envc <= ENVC_MAX
+/// `s` is where the strings start (str_at) for a stack `shift` bytes down.
+fn vec_at(s: u64, argc: u64, envc: u64, shift: u64) -> u64
+  requires shift <= STACK_SHIFT_MAX && s + shift <= RANDOM_AT && s + ARGS_MAX + 16 + shift >= RANDOM_AT && argc <= ARGV_MAX && envc <= ENVC_MAX
   ensures result + 8 * (3 + argc + envc + AUX_WORDS) <= s
   ensures result >= STACK_FIRST * 4096 && result % 16 == 0
 {
@@ -391,11 +437,11 @@ fn vec_at(s: u64, argc: u64, envc: u64) -> u64
 
 /// The window offset of rsp at the entry point, for the strings in the
 /// first `total` bytes of `args`, the first `alen` of them the arguments.
-fn elf_sp(args: &Bytes, alen: u64, total: u64) -> u64
-  requires alen <= total && total <= ARGS_MAX && total <= blen(args)
+fn elf_sp(args: &Bytes, alen: u64, total: u64, shift: u64) -> u64
+  requires alen <= total && total <= ARGS_MAX && total <= blen(args) && shift <= STACK_SHIFT_MAX
   ensures result >= STACK_FIRST * 4096 && result < USER_SIZE
 {
-  return vec_at(str_at(total), nul_count(args, 0, alen, ARGV_MAX), nul_count(args, alen, total, ENVC_MAX));
+  return vec_at(str_at(total, shift), nul_count(args, 0, alen, ARGV_MAX), nul_count(args, alen, total, ENVC_MAX), shift);
 }
 
 /// Writes the initial stack the Linux ABI promises at the entry point,
@@ -403,20 +449,22 @@ fn elf_sp(args: &Bytes, alen: u64, total: u64) -> u64
 /// The first `alen` bytes of `args` are the argument strings and the bytes
 /// from there to `total` the environment strings, each ending in a NUL
 /// (bytes after the last NUL, arguments past ARGV_MAX and strings past
-/// ENVC_MAX are not passed). `seed` fills the AT_RANDOM bytes; it is not a
-/// source of secure randomness. `base` is where the interpreter was placed,
+/// ENVC_MAX are not passed). `rn` gives the AT_RANDOM bytes and how far
+/// down the stack starts. `base` is where the interpreter was placed,
 /// or 0. False if memory ran out.
-fn init_stack(m: &mut Mem, l3: &mut PageTable, e: Elf, base: u64, vdso: bool, args: &Bytes, alen: u64, total: u64, seed: u64) -> bool
-  requires mem_ok(m) && pt_level(l3) == 3 && alen <= total && total <= ARGS_MAX && total <= blen(args)
+fn init_stack(m: &mut Mem, l3: &mut PageTable, e: Elf, base: u64, vdso: bool, args: &Bytes, alen: u64, total: u64, rn: Rnd) -> bool
+  requires mem_ok(m) && pt_level(l3) == 3 && alen <= total && total <= ARGS_MAX && total <= blen(args) && rnd_ok(rn)
   ensures mem_ok(m) && pt_level(l3) == 3
 {
   let argc = nul_count(args, 0, alen, ARGV_MAX);
   let envc = nul_count(args, alen, total, ENVC_MAX);
-  let s = str_at(total);
-  let at = vec_at(s, argc, envc);
+  let s = str_at(total, rn.shift);
+  let at = vec_at(s, argc, envc, rn.shift);
+  let rand_at = RANDOM_AT - rn.shift;
+  let top = rand_at / 4096;               // the page the AT_RANDOM bytes are on; above it nothing is mapped
   let mut p = at / 4096;
-  while p < WPAGES
-    invariant pt_level(l3) == 3 && mem_ok(m)
+  while p <= top
+    invariant pt_level(l3) == 3 && mem_ok(m) && top < WPAGES
   {
     if !w_map(&mut m, &mut l3, p, false) {
       return false;
@@ -462,7 +510,7 @@ fn init_stack(m: &mut Mem, l3: &mut PageTable, e: Elf, base: u64, vdso: bool, ar
   aux(&mut vec, v + 20, 14, 0);                    // AT_EGID
   aux(&mut vec, v + 22, 17, 100);                  // AT_CLKTCK: the timer runs at 100 Hz
   aux(&mut vec, v + 24, 23, 0);                    // AT_SECURE
-  aux(&mut vec, v + 26, 25, USER_BASE + RANDOM_AT); // AT_RANDOM
+  aux(&mut vec, v + 26, 25, USER_BASE + rand_at); // AT_RANDOM
   if vdso && vdso_is_elf() {
     aux(&mut vec, v + 28, AT_SYSINFO_EHDR, USER_BASE + VDSO_PAGE * 4096);
   } else {
@@ -470,18 +518,11 @@ fn init_stack(m: &mut Mem, l3: &mut PageTable, e: Elf, base: u64, vdso: bool, ar
   }
   aux(&mut vec, v + 30, 0, 0);                     // AT_NULL
   let mut rnd = balloc(16);
-  let mut x = seed % 0x80000000;
-  let mut r = 0;
-  while r < 16
-    invariant r <= 16 && x < 0x80000000 && blen(rnd) == 16
-  {
-    x = (x * 1103515245 + 12345) % 0x80000000;
-    bset(&mut rnd, r, cast[u8](x / 0x800000));
-    r = r + 1;
-  }
+  put_u64(&mut rnd, 0, rn.a);
+  put_u64(&mut rnd, 8, rn.b);
   put_window(&mut l3, vec, at, 8 * words);
   put_window(&mut l3, args, s, total);
-  put_window(&mut l3, rnd, RANDOM_AT, 16);
+  put_window(&mut l3, rnd, rand_at, 16);
   bfree(vec);
   bfree(rnd);
   return true;
@@ -706,8 +747,8 @@ fn share_text_in(m: &mut Mem, txt: &mut Store, l3: &mut PageTable, v: &mut Vfs, 
 /// `isrc` too when `ie` is ok, and a stack holding argv, envp and the
 /// auxiliary vector. Returns `Space::Empty`, with every page given back,
 /// when memory runs out.
-fn elf_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, e: Elf, isrc: Src, ie: Elf, lz: Lz, args: &Bytes, alen: u64, total: u64, seed: u64, clk: Tsc, epoch: u64) -> Space
-  requires mem_ok(m) && store_ok(txt) && vfs_ok(v) && e.ok && elf_fits(src.size, e) && elf_fits(isrc.size, ie)
+fn elf_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, e: Elf, isrc: Src, ie: Elf, lz: Lz, args: &Bytes, alen: u64, total: u64, rn: Rnd, clk: Tsc, epoch: u64) -> Space
+  requires mem_ok(m) && store_ok(txt) && vfs_ok(v) && e.ok && elf_fits(src.size, e) && elf_fits(isrc.size, ie) && rnd_ok(rn)
   requires alen <= total && total <= ARGS_MAX && total <= blen(args)
   ensures mem_ok(m) && store_ok(txt) && vfs_ok(v)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
@@ -782,7 +823,7 @@ fn elf_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, e: Elf, isrc: 
       if ie.ok {
         base = ie.bias;
       }
-      if !init_stack(&mut m, &mut l3, e, base, vdso, args, alen, total, seed) {
+      if !init_stack(&mut m, &mut l3, e, base, vdso, args, alen, total, rn) {
         free_l3(&mut m, l3);
         return Space::Empty;
       }
