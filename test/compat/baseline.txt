@@ -1391,3 +1391,49 @@ t_gai: getaddrinfo(NULL, port, AI_PASSIVE) with AF_UNSPEC
 t_server: FIONREAD on a TCP socket counts the bytes waiting
 t_server: a nonblocking connect to a port nobody listens on ends in ECONNREFUSED (SO_ERROR)
 t_server: an IPv6-only listener and an IPv4 one share a port number
+server: nginx: unpack the root, make the device nodes
+server: nginx: the configuration it came with is valid
+server: nginx: a site, a proxy and a backend, both configurations valid
+server: nginx: start the backend and the front, which listens on IPv4 and IPv6
+server: nginx: serve a static file
+server: nginx: serve it on the IPv6 loopback too
+server: nginx: a missing file is 404
+server: nginx: a 300000-line file arrives whole (sendfile)
+server: nginx: reverse proxy to the backend
+server: nginx: a big file through the proxy arrives whole
+server: nginx: eight downloads at once, each whole
+server: nginx: the access log has every request
+server: nginx: reload on SIGHUP keeps serving
+server: nginx: stop both
+server: redis: unpack the root, make the device nodes
+server: redis: start a server, which listens on IPv4 and IPv6
+server: redis: strings, counters and expiry
+server: redis: lists, hashes, sets and sorted sets
+server: redis: a transaction and a Lua script
+server: redis: publish and subscribe
+server: redis: a replica follows the master
+server: redis: a snapshot written by a forked child
+server: redis: twenty thousand keys in one pipeline
+server: redis: restart and find the data again
+server: redis: redis-benchmark gets answers for every request
+server: redis: stop
+server: postgres: unpack the root, make the device nodes
+server: postgres: initdb makes a cluster
+server: postgres: the server starts and takes a connection
+server: postgres: a table of a hundred thousand rows, summed
+server: postgres: an index answers a lookup, a join and a group by
+server: postgres: a rolled-back transaction leaves no trace
+server: postgres: dump to a file and restore into a second database
+server: postgres: concurrent clients updating one row keep a count
+server: postgres: pgbench loads and runs
+server: postgres: an immediate stop is recovered from the log
+server: postgres: a clean restart keeps the data
+server: postgres: stop
+alpine: git: clone, gc and fsck
+alpine: sshd: a Dropbear server inside the Alpine root takes a key login
+alpine: rsync over ssh: push a tree, with its modes, times and links
+alpine: rsync over ssh: only the changes cross
+alpine: rsync over ssh: pull a tree back, deleting what the source no longer has
+alpine: sshd: stop the server, clean up
+alpine: container: cgroup limits: the container sees the memory, pids and cpu limits runc set
+alpine: container: memory.max kills a process of a container that outgrows it
