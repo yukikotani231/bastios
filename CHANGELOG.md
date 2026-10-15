@@ -52,6 +52,8 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Network
 
+- IPv6 router advertisements are followed through their lifetimes: a default router that advertises lifetime 0 is dropped, a router or prefix that is not refreshed expires, a prefix advertised with valid lifetime 0 is withdrawn, and the card solicits a router again when it has none.
+
 - TCP over IPv6 asks for and sends segments of at most 1440 bytes (1460 before, which made frames 20 bytes past a 1500-byte link once the header was rewritten), and an IPv6 packet whose payload would pass 1460 bytes is dropped instead of sent oversized. `test/ipv6_test.sh` checks the MSS in the SYN and the longest frame sent.
 
 - TCP sends like a modern stack: a congestion window (initial window of ten segments, slow start, congestion avoidance), a resend timer taken from measured round trips (RFC 6298), fast retransmit, SACK-based recovery (RFC 6675) with NewReno for peers without SACK, an adaptive reordering threshold with D-SACK undo of spurious reductions, and a 16-buffer virtio receive ring. As a receiver it holds up to four out-of-order stretches, reports repeats with D-SACK, names several stretches in one ACK, and delays the ACK of a single full segment by up to 40 ms. `/proc/net/tcp` shows the real queues, timer, window and slow-start threshold. `test/tcpcc_test.sh` checks each rule on a scripted wire and `test/tcpperf.sh` measures throughput on delayed, lossy, reordering and bandwidth-limited paths. Loopback is not window-limited.

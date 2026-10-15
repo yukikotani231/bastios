@@ -71,6 +71,7 @@ class Wire:
         self.got = []                   # (kind, details) seen from the guest
         self.tcp = {}                   # guest port -> state of a connection to :80
         self.bad = []                   # frames from the guest with a wrong checksum
+        self.mute = False               # do not answer router solicitations
         self.maxframe = 0               # the longest TCP frame from the guest
         self.syn_mss = None             # the MSS its SYN asks for
 
@@ -116,7 +117,8 @@ class Wire:
         kind = p[0]
         if kind == 133:                 # router solicitation
             self.got.append(("rs", src, hops))
-            self.ra()
+            if not self.mute:
+                self.ra()
         elif kind == 135 and hops == 255:   # neighbor solicitation
             target = p[8:24]
             self.got.append(("ns", target, f[0:6]))
@@ -128,10 +130,10 @@ class Wire:
         elif kind == 129:
             self.got.append(("echo-reply", src, dst, p[4:]))
 
-    def ra(self):
-        ra = struct.pack("!BBHBBHII", 134, 0, 0, 64, 0, 1800, 0, 0)
+    def ra(self, valid=86400, router=1800):
+        ra = struct.pack("!BBHBBHII", 134, 0, 0, 64, 0, router, 0, 0)
         ra += bytes([1, 1]) + HOST_MAC
-        ra += struct.pack("!BBBBIII", 3, 4, 64, 0xC0, 86400, 14400, 0) + ipaddress.IPv6Address("2001:db8:1::").packed
+        ra += struct.pack("!BBBBIII", 3, 4, 64, 0xC0, valid, 14400, 0) + ipaddress.IPv6Address("2001:db8:1::").packed
         self.send(ip6(58, ROUTER_LL, ALL_NODES, ra, hops=255, at=2))
 
     def tcp_in(self, src, p):
@@ -252,6 +254,30 @@ check(off and all(g[2] == HOST_MAC for g in off), "sent off-link traffic to the 
 check(any(g[0] == "tcp-served" for g in wire.got), "TCP reached the server over IPv6")
 check(wire.syn_mss is not None and wire.syn_mss <= 1440, f"the SYN asks for an MSS that fits an IPv6 frame ({wire.syn_mss})")
 check(0 < wire.maxframe <= 1514, f"no frame past the 1500-byte link MTU although the server offered 1460 ({wire.maxframe} bytes)")
+# Lifetimes: a prefix advertised as valid for 0 seconds is withdrawn, one
+# valid for 2 seconds runs out, and a fresh advertisement brings it back.
+def pings(dst, src=ON_LINK):
+    n = len([g for g in wire.got if g[0] == "echo-reply"])
+    echo = struct.pack("!BBHHH", 128, 0, 0, 0x6363, 2) + b"lifetime"
+    wire.send(ip6(58, src, dst, echo, at=2))
+    return until(lambda: len([g for g in wire.got if g[0] == "echo-reply"]) > n, 1.5)
+check(pings(GUEST_GL), "before any change the global address answers")
+wire.mute = True
+rs_before = len([g for g in wire.got if g[0] == "rs"])
+wire.ra(valid=0)
+until(lambda: False, 0.3)
+check(until(lambda: len([g for g in wire.got if g[0] == "rs"]) > rs_before, 3), "after a withdrawal it solicits a router again")
+check(not pings(GUEST_GL), "a prefix advertised with valid lifetime 0 is withdrawn (its address stops answering)")
+check(pings(GUEST_LL, ROUTER_LL), "the link-local address still answers")
+wire.ra(valid=2)
+until(lambda: False, 0.3)
+check(pings(GUEST_GL), "a new advertisement brings the address back")
+until(lambda: False, 2.5)
+check(not pings(GUEST_GL), "a prefix valid for 2 seconds runs out")
+wire.mute = False
+wire.ra()
+until(lambda: False, 0.3)
+check(pings(GUEST_GL), "and returns with the next advertisement")
 check(not wire.bad, f"every frame from the guest had a right checksum {wire.bad[:3]}")
 
 qemu.kill()

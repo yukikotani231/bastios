@@ -223,6 +223,8 @@ struct Net {
   iid: u64,           // our interface id (low half of our IPv6 addresses)
   pfx: u64,           // the advertised prefix (high half of our global address), 0: none yet
   rtr_mac: u64,       // the IPv6 default router's MAC, 0: none
+  rtr_until: u64,     // the tick the default router's lifetime ends at, 0: never
+  pfx_until: u64,     // the tick the advertised prefix stops being valid, 0: never
   rs_n: u64,          // router solicitations sent
   rs_until: u64,      // the tick to send the next at
   ns: u64,            // the network namespace being handled (src/netns.bastio)
@@ -1667,7 +1669,7 @@ fn net_up(d: Card) -> Nic
     socks: alloc(SOCKS * SOCK_FIELDS), dq: balloc(SOCKS * RXQ * UDP_MAX), cork: balloc(SOCKS * UDP_MAX), eph: 0,
     tcbs: alloc(TCBS * TCB_W), rb: rings_new(), iss: 0,
     lo: balloc(LO_BYTES), lo_len: alloc(LOQ), lo_at: alloc(LOQ), lo_tail: 0, lo_used: 0, lo_head: 0, lo_n: 0, lo_in: false, seen_rx: 0, seen_tick: 0, irq_on: false,
-    v6: alloc(V6N * V6W), v6_next: 0, iid: 0, pfx: 0, rtr_mac: 0, rs_n: 0, rs_until: 0,
+    v6: alloc(V6N * V6W), v6_next: 0, iid: 0, pfx: 0, rtr_mac: 0, rtr_until: 0, pfx_until: 0, rs_n: 0, rs_until: 0,
     ns: 0, ifs: alloc(IFN * IF_W), nss: alloc(NNET * NS_W), ns_seq: 0, lo_if: alloc(LOQ), in_if: IF_ETH,
     nlq: balloc(NLS * NLQ), nls: alloc(NLS * NL_W), nl_at: 0, nl_lim: 0, nl_msg: 0, nl_full: false,
     nat: alloc(NATN * NAT_W), nat_next: 0 };

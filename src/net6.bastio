@@ -482,8 +482,13 @@ fn ra_in(n: &mut Net, plen: u64, smac: u64)
   requires net_ok(n) && 16 <= plen && 54 + plen <= FRAME_MAX && smac < MAC_LIMIT
   ensures net_ok(n)
 {
-  if be16(n.pkt, 60) != 0 {
+  let life = be16(n.pkt, 60);
+  if life != 0 {
     n.rtr_mac = smac;                 // a router lifetime: a default router
+    n.rtr_until = v6_until(n.now, life);
+  } else if n.rtr_mac == smac {
+    n.rtr_mac = 0;                    // it says it is no router any more
+    n.rtr_until = 0;
   }
   let end = 54 + plen;
   let mut o = 70;
@@ -497,19 +502,50 @@ fn ra_in(n: &mut Net, plen: u64, smac: u64)
     }
     if kind == 3 && l == 32 && cast[u64](bget(n.pkt, o + 2)) == 64 && (cast[u64](bget(n.pkt, o + 3)) / 64) % 2 == 1 {
       let p = be64(n.pkt, o + 16);
+      let valid = be32(n.pkt, o + 4);
       if p / TWO48 / 64 != 0xFE80 / 64 && p / TWO48 / 256 != 0xFF {
-        n.pfx = p;
+        if valid == 0 {
+          if n.pfx == p {
+            n.pfx = 0;                // withdrawn: solicit again for another
+            n.pfx_until = 0;
+            n.rs_n = 0;
+          }
+        } else {
+          n.pfx = p;
+          n.pfx_until = v6_until(n.now, valid);
+        }
       }
     }
     o = o + l;
   }
 }
 
-/// The timer side: router solicitations until a router answers.
+/// The tick a lifetime of `secs` seconds (0xFFFFFFFF: infinite) from `now` ends
+/// at; 0 means never.
+fn v6_until(now: u64, secs: u64) -> u64
+  ensures true
+{
+  if secs >= 4294967295 || now > 18446744073709551615 - 429496729500 {
+    return 0;
+  }
+  return now + 100 * secs;
+}
+
+/// The timer side: lifetimes run out, and router solicitations go until a
+/// router answers.
 fn v6_tick(n: &mut Net, now: u64)
   requires net_ok(n)
   ensures net_ok(n)
 {
+  if n.rtr_until != 0 && now >= n.rtr_until {
+    n.rtr_mac = 0;
+    n.rtr_until = 0;
+  }
+  if n.pfx_until != 0 && now >= n.pfx_until {
+    n.pfx = 0;
+    n.pfx_until = 0;
+    n.rs_n = 0;
+  }
   if n.pfx != 0 || n.rs_n >= RS_TRIES || now < n.rs_until || !card_live(n.dev) {
     return;
   }
