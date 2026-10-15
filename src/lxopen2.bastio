@@ -227,7 +227,26 @@ fn open2_check(k: &mut Kernel, pid: u64, h: u64, path: u64, flags: u64, res: u64
       c = c + 1;
     }
     let id = xdev_at(&mut k, sl);
-    if !xdev_same(&mut k, lp, ln, sp, sl, id) || !xdev_same(&mut k, fp, fl, sp, sl, id) {
+    let mut same = xdev_same(&mut k, lp, ln, sp, sl, id);
+    // fp is the file layer's name, which mounts moved ("/sys" mounted in a
+    // chroot is the host's "sys"): the start is compared in the same terms.
+    let tl = ns_tr(&mut k, ns_of(k, pid), sp, sl);
+    if same && tl != NO_RESULT {
+      let mut tp = balloc(CWD_STRIDE);
+      c = 0;
+      while c < tl
+        invariant c <= tl && tl <= FNAME_MAX && blen(tp) == CWD_STRIDE && kok(k)
+      {
+        bset(&mut tp, c, bget(k.fs.xfer, c));
+        c = c + 1;
+      }
+      let tid = xdev_at(&mut k, tl);
+      same = xdev_same(&mut k, fp, fl, tp, tl, tid);
+      bfree(tp);
+    } else {
+      same = false;
+    }
+    if !same {
       e = EXDEV;
     }
     bfree(fp);

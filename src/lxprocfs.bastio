@@ -1932,18 +1932,20 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       // The address, reference count and inode are not kept.
       let mut a = put_s(&mut o, 0, "Num       RefCount Protocol Flags    Type St Inode Path\n");
       let mut l = 0;
-      while l < UX_LIS && a + 160 < PROC_OUT
+      while l < UX_LIS && a + 330 < PROC_OUT
         invariant l <= UX_LIS && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
       {
         let st = ul_row(k, l, 0, 0);
         if st != UL_FREE {
           a = put_s(&mut o, a, "0000000000000000: 00000002 00000000 ");
-          if st == UL_LISTEN {
+          if st == UL_LISTEN || st == UL_SEQ {
             a = put_s(&mut o, a, "00010000 ");
           } else {
             a = put_s(&mut o, a, "00000000 ");
           }
-          if st == UL_DGRAM {
+          if st == UL_SEQ {
+            a = put_s(&mut o, a, "0005 01 0");
+          } else if st == UL_DGRAM {
             a = put_s(&mut o, a, "0002 01 0");
           } else {
             a = put_s(&mut o, a, "0001 01 0");
@@ -2769,6 +2771,91 @@ fn proc_fd(procs: &Buf, x: &Bytes, n: u64) -> u64
   return p * LXNFD + fd;
 }
 
+/// How many leading bytes of the name nm[..n] (no leading "/") a process
+/// that has done chroot or pivot_root leaves out when it reads the path: its
+/// root's name and the slash after it, if the name is inside the root; else
+/// 0.
+fn root_skip(k: &Kernel, p: u64, nm: &Bytes, n: u64) -> u64
+  requires kok(k) && p < NPROC && n <= FNAME_MAX && n <= blen(nm)
+  ensures result <= n
+{
+  let rl = root_len(k, p);
+  if rl == 0 || n < rl || (n > rl && bget(nm, rl) != 47) {
+    return 0;
+  }
+  let mut i = 0;
+  while i < rl
+    invariant i <= rl && rl <= FNAME_MAX && rl <= n && n <= blen(nm) && kok(k) && p < NPROC
+  {
+    if cast[u8](wget(k.croot, p * CWD_STRIDE + 1 + i) % 256) != bget(nm, i) {
+      return 0;
+    }
+    i = i + 1;
+  }
+  if n > rl {
+    return rl + 1;
+  }
+  return rl;
+}
+
+/// The path of the open file in table row x for process p, into o (as
+/// fd_link's): below a mount the process's namespace made it reads under the
+/// mount's name, and for a process in a chroot without the root's name. With
+/// inside, a file outside the root gives NO_RESULT. NO_RESULT too if the file
+/// has no name.
+fn file_link(k: &mut Kernel, p: u64, x: u64, o: &mut Bytes, inside: bool) -> u64
+  requires kok(k) && p < NPROC && blen(o) == PROC_OUT
+  ensures kok(k) && blen(o) == PROC_OUT
+  ensures result <= PROC_OUT || result == NO_RESULT
+{
+  if x >= FD_ROWS {
+    return NO_RESULT;
+  }
+  let f = vfs_row_file(k.fs, x);
+  if f == NO_FILE {
+    return NO_RESULT;
+  }
+  let n = vfs_dirent(&mut k.fs, f);
+  if n == NO_FILE || n > XFER {
+    return NO_RESULT;
+  }
+  let mut a = put_c(&mut o, 0, 47);
+  let mut j = 0;
+  // A file below a mount the process's namespace made (a tmpfs, say)
+  // reads under the mount's name, not the file layer's.
+  let mut lg = balloc(FNAME_MAX);
+  let ln = ns_back(k, ns_of(k, p), smaller(n, FNAME_MAX), &mut lg);
+  if ln != NO_RESULT && ln < PROC_OUT {
+    j = root_skip(k, p, lg, ln);
+    if inside && j == 0 && root_len(k, p) > 0 {
+      bfree(lg);
+      return NO_RESULT;
+    }
+    while j < ln
+      invariant j <= ln && ln < PROC_OUT && a <= PROC_OUT && blen(o) == PROC_OUT && FNAME_MAX <= blen(lg) && kok(k)
+    {
+      a = put_c(&mut o, a, bget(lg, j));
+      j = j + 1;
+    }
+    bfree(lg);
+    return a;
+  }
+  bfree(lg);
+  if n <= FNAME_MAX {
+    j = root_skip(k, p, k.fs.xfer, n);
+  }
+  if inside && j == 0 && root_len(k, p) > 0 {
+    return NO_RESULT;
+  }
+  while j < n
+    invariant j <= n && n <= XFER && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+  {
+    a = put_c(&mut o, a, bget(k.fs.xfer, j));
+    j = j + 1;
+  }
+  return a;
+}
+
 /// The target of /proc/P/fd/FD into o: "/dev/tty" for the console, the
 /// path of a file, a "pipe:[N]" or "socket:[N]" or "anon_inode:[...]"
 /// name for the rest. Returns its length, or NO_RESULT if fd is closed.
@@ -2799,35 +2886,9 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
     return put_c(&mut o, put_n(&mut o, a, d.x), 93);
   }
   if d.kind == K_FILE {
-    let f = vfs_row_file(k.fs, d.x);
-    if f != NO_FILE {
-      let n = vfs_dirent(&mut k.fs, f);
-      if n != NO_FILE && n <= XFER {
-        let mut a = put_c(&mut o, 0, 47);
-        let mut j = 0;
-        // A file below a mount the process's namespace made (a tmpfs, say)
-        // reads under the mount's name, not the file layer's.
-        let mut lg = balloc(FNAME_MAX);
-        let ln = ns_back(k, ns_of(k, p), smaller(n, FNAME_MAX), &mut lg);
-        if ln != NO_RESULT && ln < PROC_OUT {
-          while j < ln
-            invariant j <= ln && ln < PROC_OUT && a <= PROC_OUT && blen(o) == PROC_OUT && FNAME_MAX <= blen(lg) && kok(k)
-          {
-            a = put_c(&mut o, a, bget(lg, j));
-            j = j + 1;
-          }
-          bfree(lg);
-          return a;
-        }
-        bfree(lg);
-        while j < n
-          invariant j <= n && n <= XFER && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
-        {
-          a = put_c(&mut o, a, bget(k.fs.xfer, j));
-          j = j + 1;
-        }
-        return a;
-      }
+    let r = file_link(&mut k, p, d.x, &mut o, false);
+    if r != NO_RESULT {
+      return r;
     }
   }
   if d.kind == K_DIR || (d.kind == K_DEV && d.x == DEV_PTSDIR) {
@@ -2849,7 +2910,7 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
       // the process's root now (the root directory itself as "/"), when it
       // is inside it.
       let rl = root_len(k, p);
-      if rl > 0 && d.kind == K_DIR {
+      if rl > 0 {
         let mut s0 = 0;
         if n > 0 && base_byte(k, p, h, 0) == 47 {
           s0 = 1;
@@ -2940,7 +3001,7 @@ fn magic_target(k: &mut Kernel, pid: u64, n: u64) -> u64
   // file only for a process that has not changed its root: a file may lie
   // outside the root (a chroot, a container), where its name resolves to
   // nothing; open and exec reopen a file through the link.
-  if d.kind != K_DIR && !(d.kind == K_DEV && d.x == DEV_PTSDIR) && !(d.kind == K_FILE && root_len(k, pid) == 0 && !ofd_lacks(k, fd_ofd(k, t, fd), ACC_LINK)) {
+  if d.kind != K_DIR && !(d.kind == K_DEV && d.x == DEV_PTSDIR) && !(d.kind == K_FILE && !ofd_lacks(k, fd_ofd(k, t, fd), ACC_LINK)) {
     return NO_RESULT;
   }
   if d.kind == K_FILE {
@@ -2953,7 +3014,12 @@ fn magic_target(k: &mut Kernel, pid: u64, n: u64) -> u64
     }
   }
   let mut lo = balloc(PROC_OUT);
-  let ln = fd_link(&mut k, t, fd, &mut lo);
+  let mut ln = NO_RESULT;
+  if d.kind == K_FILE {
+    ln = file_link(&mut k, t, d.x, &mut lo, true);   // a file outside the root has no path to follow
+  } else {
+    ln = fd_link(&mut k, t, fd, &mut lo);
+  }
   if ln == NO_RESULT || ln == 0 || ln > FNAME_MAX || bget(lo, 0) != 47 {
     bfree(lo);
     return NO_RESULT;                       // not a path ("anon_inode:[file]")
