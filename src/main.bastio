@@ -216,8 +216,10 @@ fn power_button(s: &mut Sys)
 }
 
 // A process taken out to run: its id, its process id (tgid, for a thread),
-// its lease on its address space, and its FPU page.
-struct Task { pid: u64, tgid: u64, vpid: u64, vtgid: u64, lease: Lease, fpu: Frame, slow: bool }
+// its lease on its address space, and its FPU page. `live`: the processor's
+// FPU registers already hold that page's state (the task ran on this
+// processor just before and nothing else did), so it is not loaded again.
+struct Task { pid: u64, tgid: u64, vpid: u64, vtgid: u64, lease: Lease, fpu: Frame, slow: bool, live: bool }
 
 enum Job { Stop, Idle, Disk, Run(Task) }   // Disk: idle, but a polled disk command is running
 
@@ -390,7 +392,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
           regs_load(&mut cpu, s.k.procs, p, 18);
           cpu_set(&mut cpu, R_FSBASE, pget(s.k.procs, p, F_REGS + R_FSBASE));
           pset(&mut s.k.procs, p, F_STATE, RUNNING);
-          return Job::Run(Task { pid: p, tgid: tgid(s.k.procs, p), vpid: vpid_of(s.k, p, p), vtgid: vpid_of(s.k, p, tgid(s.k.procs, p)), lease: l, fpu: f, slow: sc_mode(s.k, p) != 0 || tr2_get(s.k, p) % 2 == 1 });
+          return Job::Run(Task { pid: p, tgid: tgid(s.k.procs, p), vpid: vpid_of(s.k, p, p), vtgid: vpid_of(s.k, p, tgid(s.k.procs, p)), lease: l, fpu: f, slow: sc_mode(s.k, p) != 0 || tr2_get(s.k, p) % 2 == 1, live: false });
         },
       }
     },
@@ -795,7 +797,7 @@ fn after_trap(s: &mut Sys, p: u64)
 /// `finish` for task `t`, then `next_job` from where it leaves the round
 /// robin, in one critical section, so a system call costs one round trip
 /// of the lock. Publishes how much console output waits in `pend`.
-fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, poll: bool, pend: &Atomic[u64], others: &Atomic[bool]) -> Next
+fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, poll: bool, pend: &Atomic[u64], others: &Atomic[bool], lazy: bool, tgid_: u64, vpid: u64, vtgid: u64, slow: bool) -> Next
   requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
   requires 1 <= p && p < NPROC
   ensures sys_ok(s) && result.from < NPROC
@@ -804,10 +806,128 @@ fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, p
 {
   let c = finish(&mut s, &mut cpu, mmu, p, fpu, v);
   after_trap(&mut s, p);
+  // `lazy`: the processor's FPU registers still hold p's state, and its
+  // page is stale (sched skipped the save). The kernel never touches the
+  // FPU registers, so they stay p's until the processor runs something
+  // else; the page is brought up to date (fpu_flush) before anything can
+  // read it: a signal frame, another process, the idle loop. If p runs
+  // again at once, nothing is saved or loaded at all.
+  let mut live = lazy;
+  if live && c == p {
+    // The call is done and p goes on: no round robin, no pick.
+    match resume(&mut s, &mut cpu, &mut mmu, p, tgid_, vpid, vtgid, slow) {
+      Res::Go(t) => {
+        atomic_store(pend, s.con.r.n);
+        atomic_store(others, any_ready(s.k.procs, s.k.pid_hi));
+        return Next { job: Job::Run(t), from: c };
+      },
+      Res::No => {},
+    }
+  }
+  if live && (c != p || pget(s.k.procs, p, F_SIGPEND) != 0) {
+    fpu_flush(&mut s, &mut cpu, p);
+    live = false;
+  }
   let j = next_job(&mut s, &mut cpu, &mut mmu, c, poll);
   atomic_store(pend, s.con.r.n);
   atomic_store(others, any_ready(s.k.procs, s.k.pid_hi));
-  return Next { job: j, from: c };
+  if !live {
+    return Next { job: j, from: c };
+  }
+  match j {
+    Job::Run(t) => {
+      if t.pid == p {
+        return Next { job: Job::Run(Task { pid: t.pid, tgid: t.tgid, vpid: t.vpid, vtgid: t.vtgid, lease: t.lease, fpu: t.fpu, slow: t.slow, live: true }), from: c };
+      }
+      fpu_flush(&mut s, &mut cpu, p);
+      return Next { job: Job::Run(t), from: c };
+    },
+    Job::Stop => {
+      fpu_flush(&mut s, &mut cpu, p);
+      return Next { job: Job::Stop, from: c };
+    },
+    Job::Idle => {
+      fpu_flush(&mut s, &mut cpu, p);
+      return Next { job: Job::Idle, from: c };
+    },
+    Job::Disk => {
+      fpu_flush(&mut s, &mut cpu, p);
+      return Next { job: Job::Disk, from: c };
+    },
+  }
+}
+
+// What `resume` hands back: the task to run again, or nothing.
+enum Res { No, Go(Task) }
+
+/// Under the lock, after the system call of task `p` (a plain process, whose
+/// FPU registers still hold its state) was handled and left it READY: the
+/// part of `next_job` that puts p back on the processor, without looking at
+/// any other process. What it skips waits for the next tick, which runs the
+/// full `next_job` (polling, entropy, a frozen or throttled group, sleepers
+/// due, a login to restart), or for the call that `finish` ended some other
+/// way. `tgid_`, `vpid`, `vtgid` and `slow` are the task's, as `next_job`
+/// gave them: a call that could change them is not resumed (resume_call).
+/// Res::No if anything is not the common case; nothing has changed then.
+fn resume(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, tgid_: u64, vpid: u64, vtgid: u64, slow: bool) -> Res
+  requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
+  requires 1 <= p && p < NPROC
+  ensures sys_ok(s)
+  ensures result is Res::Go ==> (1 <= result.Go.pid && result.Go.pid < NPROC)
+  ensures !(result is Res::Go) ==> mmu_root(mmu) == KERNEL_ROOT
+{
+  if s.stop || state(s.k.procs, p) != READY || pget(s.k.procs, p, F_TGID) != 0 || pget(s.k.procs, p, F_SIGPEND) != 0 {
+    return Res::No;
+  }
+  match take_space(&mut s.k.spaces, p) {
+    Space::Empty => {
+      return Res::No;
+    },
+    Space::Mapped(root) => {
+      match take_fpu(&mut s.k.fpus, p) {
+        Fpu::None => {
+          put_space(&mut s.k.spaces, p, Space::Mapped(root));
+          return Res::No;
+        },
+        Fpu::State(f) => {
+          let mut sp = root;
+          let l = mmu_enter(&mut mmu, &mut sp);
+          put_space(&mut s.k.spaces, p, Space::Mapped(sp));
+          regs_load(&mut cpu, s.k.procs, p, 18);
+          cpu_set(&mut cpu, R_FSBASE, pget(s.k.procs, p, F_REGS + R_FSBASE));
+          pset(&mut s.k.procs, p, F_STATE, RUNNING);
+          return Res::Go(Task { pid: p, tgid: tgid_, vpid: vpid, vtgid: vtgid, lease: l, fpu: f, slow: slow, live: true });
+        },
+      }
+    },
+  }
+}
+
+/// Under the lock: writes the processor's FPU registers into process p's
+/// page, if it has one (it may have ended since the registers were loaded).
+fn fpu_flush(s: &mut Sys, cpu: &mut Cpu, p: u64)
+  requires sys_ok(s) && p < NPROC
+  ensures sys_ok(s)
+{
+  match take_fpu(&mut s.k.fpus, p) {
+    Fpu::None => {},
+    Fpu::State(f) => {
+      let mut g = f;
+      cpu_fpu_save(&mut cpu, &mut g);
+      put_fpu(&mut s.k.fpus, p, Fpu::State(g));
+    },
+  }
+}
+
+/// Whether the system call `n` may leave the FPU page stale until the task
+/// is put back, and the task go on without a pick (`resume`): it does not
+/// read the page (fork and clone copy it, execve resets it, ptrace hands it
+/// out, and an exit can stop for the tracer first), and it does not change
+/// what the task was picked with (a seccomp filter, a namespace).
+fn lazy_call(n: u64) -> bool {
+  return n != LX_CLONE && n != LX_CLONE3 && n != LX_FORK && n != LX_VFORK && n != LX_EXECVE
+      && n != LX_EXECVEAT && n != LX_PTRACE && n != LX_RT_SIGRETURN && n != LX_EXIT && n != LX_EXIT_GROUP
+      && n != LX_SECCOMP && n != LX_PRCTL && n != LX_SETNS && n != LX_UNSHARE;
 }
 
 // What `fault_fast` hands back: the task to run again (with a new lease on
@@ -846,7 +966,7 @@ fn fault_fast(s: &mut Sys, cpu: &Cpu, mmu: &mut Mmu, p: u64, tgid_: u64, vpid: u
       let mut sp = root;
       let l = mmu_enter(&mut mmu, &mut sp);
       put_space(&mut s.k.spaces, p, Space::Mapped(sp));
-      return Fast::Go(Task { pid: p, tgid: tgid_, vpid: vpid, vtgid: vtgid, lease: l, fpu: fpu, slow: slow });
+      return Fast::Go(Task { pid: p, tgid: tgid_, vpid: vpid, vtgid: vtgid, lease: l, fpu: fpu, slow: slow, live: true });
     },
   }
 }
@@ -1056,7 +1176,9 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
       Job::Run(t) => {
         // The FPU page is this processor's while the task runs, so it is
         // loaded and saved outside the lock.
-        cpu_fpu_load(&mut cpu, t.fpu);
+        if !t.live {
+          cpu_fpu_load(&mut cpu, t.fpu);
+        }
         let mut v = cpu_run(&mut cpu, mmu);
         // A task with a seccomp filter or under PTRACE_SYSCALL has every
         // call seen by the kernel, the ones answered here included.
@@ -1065,7 +1187,12 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
         }
         mmu_exit(&mut mmu, t.lease);
         let mut f = t.fpu;
-        cpu_fpu_save(&mut cpu, &mut f);
+        // A Linux call that leaves the FPU page alone keeps the state in the
+        // registers; `turn` saves it there if the task does not run again at once.
+        let lazy = !t.slow && v == V_LINUX && lazy_call(cpu_get(cpu, R_RAX));
+        if !lazy {
+          cpu_fpu_save(&mut cpu, &mut f);
+        }
         // A page fault that maps memory for the task runs it again at once
         // (fault_fast), without a turn of the round robin.
         let mut fr = Fast::Back(f);
@@ -1093,7 +1220,7 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
             if poll || atomic_load(pend) > 0 {
               try_pump(u, s, pumping, pend);
             }
-            let next = locked(s, turn, &mut cpu, &mut mmu, t.pid, f2, v, poll, pend, others);
+            let next = locked(s, turn, &mut cpu, &mut mmu, t.pid, f2, v, poll, pend, others, lazy, t.tgid, t.vpid, t.vtgid, t.slow);
             cur = next.from;
             j = next.job;
           },
