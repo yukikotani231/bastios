@@ -125,6 +125,14 @@ fn lazy_forget(k: &mut Kernel, pid: u64, from: u64, to: u64)
   }
   let first = first1 - 1;
   let end = sat_add(first, get(k.lazy, lz_at(pid, 1)));
+  if end == first {
+    // An empty record (lazy_set's hold on a program with no name) covers no
+    // page: only the whole window going (exit, execve) lets go of the hold.
+    if from == 0 && to == WPAGES {
+      lazy_drop(&mut k, pid);
+    }
+    return;
+  }
   if to <= first || end <= from {
     return;                                 // none of it
   }
