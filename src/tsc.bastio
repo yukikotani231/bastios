@@ -33,25 +33,17 @@ fn tsc_scale(d: u64, mult: u64) -> u64
   let lo = d % TWO32;
   let mh = mult / TWO32;
   let ml = mult % TWO32;
-  // d * mult / 2^32 = hi*mh*2^32 + hi*ml + lo*mh + lo*ml/2^32. Each
-  // product is checked against the bound by division first, as hpet_ns
-  // does. The first term is not rare: with a counter near 1 GHz, mh is 1
-  // and hi is 1 after about 4 seconds.
+  // d * mult / 2^32 = hi*mh*2^32 + hi*ml + lo*mh + lo*ml/2^32. The first
+  // product is checked against the bound by division, as hpet_ns does; it
+  // is not rare: with a counter near 1 GHz, mh is 1 and hi is 1 after about
+  // 4 seconds. The other three factors are all below 2^32, so their
+  // products fit in 64 bits whatever the values are.
   if mh != 0 && hi > (TWO32 - 1) / mh {
     return NS_MAX;
   }
   let top = hi * mh * TWO32;
-  if ml != 0 && hi > NS_MAX / ml {
-    return NS_MAX;
-  }
   let a = hi * ml;
-  if mh != 0 && lo > NS_MAX / mh {
-    return NS_MAX;
-  }
   let b = lo * mh;
-  if ml != 0 && lo > NS_MAX / ml {
-    return NS_MAX;
-  }
   let c = lo * ml / TWO32;
   if a > NS_MAX - b {
     return NS_MAX;
