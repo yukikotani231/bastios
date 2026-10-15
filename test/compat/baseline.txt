@@ -1242,6 +1242,7 @@ t_userns: and not in the first one
 t_userns: statfs of /proc/self/fd/N answers for the file N holds
 t_userns: nor in one that another user namespace made
 t_userns: a user namespace is made inside another and mapped through it
+t_userns: whoever made a user namespace joins it with setns, and not the first one
 tty: kilo: edit and save a file
 tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
 tty: micropython: REPL line editing and history
