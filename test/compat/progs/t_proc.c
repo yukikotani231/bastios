@@ -1,6 +1,7 @@
 /* Processes: fork, exec, wait, exit status, process groups and sessions,
  * identity, limits, system information. */
 #include "compat.h"
+#include <sys/auxv.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/sysinfo.h>
@@ -266,6 +267,17 @@ int main(int argc, char **argv) {
         EXPECT("maps has [stack] and [vdso]", strstr(mb, "[stack]\n") != NULL && strstr(mb, "[vdso]\n") != NULL);
         EXPECT("maps lines end at column 74 for names", ({ char *q = strstr(mb, "[stack]"); q && q[-1] == ' ' && ({ char *l = q; while (l > mb && l[-1] != '\n') l--; (size_t)(q - l) == 73; }); }));
     }
+    EXPECT("auxv carries AT_HWCAP and AT_HWCAP2 (a C library's ifuncs read them before it has a thread pointer), AT_PAGESZ, and ends in AT_NULL", ({
+           unsigned long av[64]; ssize_t n = slurp("/proc/self/auxv", (char *)av, sizeof av);
+           int hw = 0, hw2 = 0, pg = 0, end = 0;
+           for (int i = 0; n >= 16 && i + 1 < (int)(n / 8); i += 2) {
+               if (av[i] == AT_HWCAP) hw = 1;
+               if (av[i] == AT_HWCAP2) hw2 = 1;
+               if (av[i] == AT_PAGESZ && av[i + 1] == 4096) pg = 1;
+               if (av[i] == AT_NULL) { end = 1; break; }
+           }
+           hw && hw2 && pg && end; }));
+    EXPECT("getauxval finds AT_HWCAP without setting errno", ({ errno = 0; getauxval(AT_HWCAP); errno == 0; }));
     EXPECT("readlink of /proc/self is the caller's id", ({ char lb[32], want[32]; ssize_t r = readlink("/proc/self", lb, sizeof lb - 1);
            snprintf(want, sizeof want, "%d", (int)getpid()); r > 0 && (lb[r] = 0, strcmp(lb, want) == 0); }));
     return done();

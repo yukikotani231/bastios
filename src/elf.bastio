@@ -44,12 +44,14 @@ const ARGS_MAX: u64 = 131072;         // string bytes, NULs included (Linux's AR
 const ARGV_MAX: u64 = 8192;           // the most arguments
 const ENVC_MAX: u64 = 1024;           // the most environment strings
 const RANDOM_AT: u64 = 0x7FFFFFFFF0;  // USER_SIZE - 16
-const AUX_WORDS: u64 = 32;            // the auxiliary vector: 16 pairs
+const AUX_WORDS: u64 = 36;            // the auxiliary vector: 18 pairs
 // The vDSO (user/vdso.c): one read-only page just below the stack, holding
 // the image and, from byte VDSO_DATA, the clock it reads (src/tsc.bastio).
 const VDSO_PAGE: u64 = 134215679;     // STACK_FIRST - 1
 const VDSO_DATA: u64 = 496;           // word of the page: mult, base, at, epoch, then 1 if the process is in a time namespace
 const AT_SYSINFO_EHDR: u64 = 33;
+const AT_HWCAP: u64 = 16;
+const AT_HWCAP2: u64 = 26;
 const AT_IGNORE: u64 = 1;
 
 /// Where an executable's bytes come from: built-in image `prog`, or file
@@ -468,7 +470,9 @@ fn init_stack(m: &mut Mem, l3: &mut PageTable, e: Elf, base: u64, vdso: bool, ar
   } else {
     aux(&mut vec, v + 28, AT_IGNORE, 0);
   }
-  aux(&mut vec, v + 30, 0, 0);                     // AT_NULL
+  aux(&mut vec, v + 30, AT_HWCAP, hwcap());        // the processor's features, as the C library's ifuncs read them
+  aux(&mut vec, v + 32, AT_HWCAP2, hwcap2());
+  aux(&mut vec, v + 34, 0, 0);                     // AT_NULL
   let mut rnd = balloc(16);
   let mut x = seed % 0x80000000;
   let mut r = 0;
