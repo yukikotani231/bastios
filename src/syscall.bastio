@@ -358,9 +358,10 @@ fn sock_wake(k: &mut Kernel) -> bool
   let mut woke = false;
   let mut left = false;
   let mut asleep = false;
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE
   let mut p = 1;
-  while p < NPROC
-    invariant 1 <= p && p <= NPROC && kok(k)
+  while p < cap
+    invariant 1 <= p && cap <= NPROC && kok(k)
   {
     if state(k.procs, p) == SOCKWAIT {
       let w = pget(k.procs, p, F_WAIT);
