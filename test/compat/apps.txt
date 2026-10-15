@@ -59,6 +59,27 @@ wal
 $ /disk/sqlite3 -list ca_b.db 'create table t(a, b); with recursive c(x) as (select 1 union all select x + 1 from c where x < 20000) insert into t select x, x % 97 from c; create index i on t(b); select count(*), count(distinct b), sum(a) from t where b = 5;'; rm -f ca_b.db
 207|1|2069172
 
+== sqlite3-mp: four processes write one database, in a rollback journal and in WAL
+$ rm -f ca_m.db* ca_n.db*; /disk/sqlite3 ca_m.db 'create table t(w, i)'; /disk/sqlite3 ca_n.db 'pragma journal_mode = wal; create table t(w, i)' > /dev/null; for w in 1 2 3 4; do (for i in 1 2 3 4 5 6 7 8 9 10; do /disk/sqlite3 -cmd '.timeout 20000' ca_m.db "insert into t values ($w, $i)"; /disk/sqlite3 -cmd '.timeout 20000' ca_n.db "insert into t values ($w, $i)"; done) & done; wait; /disk/sqlite3 -list ca_m.db 'select count(*), count(distinct w) from t; pragma integrity_check'; /disk/sqlite3 -list ca_n.db 'select count(*), count(distinct w) from t; pragma integrity_check'; rm -f ca_m.db* ca_n.db*
+40|4
+ok
+40|4
+ok
+
+== sqlite3-mp: a writer killed in a transaction leaves a hot journal that the next reader rolls back
+$ rm -f ca_k.db*; /disk/sqlite3 ca_k.db 'create table t(a); insert into t values (1);'; /disk/sqlite3 ca_k.db 'begin; insert into t select x from (with recursive c(x) as (select 1 union all select x + 1 from c where x < 5000000) select x from c);' & p=$!; /disk/busybox sleep 8; kill -9 $p; wait; /disk/busybox ls ca_k.db* | /disk/busybox tr '\n' ' '; echo; /disk/sqlite3 -list ca_k.db 'select count(*), min(a), max(a) from t; pragma integrity_check'; /disk/busybox ls ca_k.db* | /disk/busybox tr '\n' ' '; echo; rm -f ca_k.db*
+ca_k.db ca_k.db-journal 
+1|1|1
+ok
+ca_k.db 
+
+== speedtest1: SQLite's benchmark, which checks its results (--verify)
+$ /disk/speedtest1 --size 10 --verify --nomemstat > ca_st.out 2>&1; echo status $?; /disk/busybox grep -c ' - .*s$' ca_st.out; /disk/speedtest1 --size 5 --verify --journal wal --nomemstat > ca_st.out 2>&1; echo status $?; /disk/busybox grep -c ' - .*s$' ca_st.out; rm -f ca_st.out speedtest1.db*
+status 0
+85
+status 0
+85
+
 == ash: a 1200-byte typed line
 $ echo 012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789 | /disk/busybox wc -c
 1201

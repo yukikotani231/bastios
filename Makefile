@@ -450,7 +450,7 @@ CRUN_VER      ?= 1.19.1
 CRUN_SHA256   ?= eaa2408dee92432d142d58317127b5974d39a8ad48689ba8b2eff8f74614f4b8
 DROPBEAR_GIT  ?= https://github.com/mkj/dropbear
 DROPBEAR_TAG  ?= DROPBEAR_2024.86
-COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo \
+COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/speedtest1 build/compat/micropython build/compat/kilo \
                  build/compat/git build/compat/perl build/compat/python build/compat/ttyepoll \
                  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/rg
 APP_CFLAGS    := -static-pie -fPIE -O2 -w -s
@@ -578,6 +578,12 @@ build/compat/sqlite3: | build/compat/src
 	cd build/compat/src/sqlite && ./configure --disable-tcl >/dev/null && $(MAKE) -s sqlite3.c shell.c >/dev/null
 	$(MUSLCC) $(APP_CFLAGS) -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION -o $@ \
 	  build/compat/src/sqlite/shell.c build/compat/src/sqlite/sqlite3.c -lm
+
+# SQLite's benchmark, which checks its own results (--verify), from the
+# sources build/compat/sqlite3 fetched.
+build/compat/speedtest1: build/compat/sqlite3
+	$(MUSLCC) $(APP_CFLAGS) -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_ENABLE_RTREE -Ibuild/compat/src/sqlite -o $@ \
+	  build/compat/src/sqlite/test/speedtest1.c build/compat/src/sqlite/sqlite3.c -lm
 
 # MicroPython's unix port, without the modules that need libraries musl
 # does not bring (ffi, btree, ssl).
@@ -786,18 +792,29 @@ build/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/co
 build/compat/go.img: test/compat/godisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
 	test/compat/godisk.py $@ $(GO_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
 
+# The database servers of the official postgres:alpine, redis:alpine and
+# valkey:alpine images (x86-64 only), as tar files on a disk for db.txt.
+# Pinned by digest, their layers kept in ALPINE_CACHE like the others'.
+build/compat/db.img: test/compat/dbdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py
+	test/compat/dbdisk.py $@ $(POSTGRES_IMAGE) $(REDIS_IMAGE) $(VALKEY_IMAGE) --cache $(ALPINE_CACHE)
+# The JDK of the official eclipse-temurin alpine image, as a tar file the cases
+# unpack, for java.txt. Pinned by digest, its layers kept in ALPINE_CACHE like
+# the others'. x86-64 only.
+build/compat/jdk.img: test/compat/jdkdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
+	test/compat/jdkdisk.py $@ $(JDK_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+
 # The Rust toolchain of the official rust:alpine image (rustc, cargo, Alpine's
 # gcc and musl), as a tar file the cases unpack, for rust.txt. Pinned by
 # digest, its layers kept in ALPINE_CACHE like the others'. x86-64 only.
 build/compat/rust.img: test/compat/rustdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
 	test/compat/rustdisk.py $@ $(RUST_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
 
-compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/rust.img
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --rust-disk build/compat/rust.img --out build/compat $(COMPAT_PROGS)
+compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img build/compat/db.img
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --db-disk build/compat/db.img --out build/compat $(COMPAT_PROGS)
 
 # Records which checks pass now, so `make compat` catches regressions.
-compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/rust.img
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --rust-disk build/compat/rust.img --out build/compat $(COMPAT_PROGS)
+compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img build/compat/db.img
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --db-disk build/compat/db.img --out build/compat $(COMPAT_PROGS)
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)

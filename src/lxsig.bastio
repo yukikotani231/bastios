@@ -711,7 +711,10 @@ fn may_signal(k: &Kernel, pid: u64, p: u64, s: u64) -> bool
 {
   let ruid = id_get(k.procs, pid, F_UID, false);
   let euid = id_get(k.procs, pid, F_UID, true);
-  if euid == 0 || (s == 18 && sid_of(k.procs, pid) == sid_of(k.procs, p)) {
+  // A thread may signal the others of its own process whatever their ids
+  // are: Go changes the ids of its threads one by one with a signal sent
+  // after the first thread has already given up root.
+  if euid == 0 || tgid(k.procs, pid) == tgid(k.procs, p) || (s == 18 && sid_of(k.procs, pid) == sid_of(k.procs, p)) {
     return true;
   }
   let tr = id_get(k.procs, p, F_UID, false);

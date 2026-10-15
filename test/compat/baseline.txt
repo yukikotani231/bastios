@@ -62,6 +62,9 @@ apps: sqlite3: 20000 rows, an index and a query
 apps: sqlite3: WAL
 apps: sqlite3: a database file
 apps: sqlite3: in memory
+apps: sqlite3-mp: four processes write one database, in a rollback journal and in WAL
+apps: sqlite3-mp: a writer killed in a transaction leaves a hot journal that the next reader rolls back
+apps: speedtest1: SQLite's benchmark, which checks its results (--verify)
 apps: wget: 1 MiB from the host
 apps: wget: 1 MiB over HTTPS
 apps: wget: HTTPS from the host (BusyBox's own TLS)
@@ -1315,6 +1318,36 @@ go: go: goroutines, channels and the collector
 go: go: make the device nodes
 go: go: run a program
 go: go: version
+db: db: gosu (Go) gives up root: every thread changes its ids
+db: db: postgres dump and restore into another database
+db: db: postgres extension, an index and vacuum
+db: db: postgres initdb, a cluster with a write-ahead log
+db: db: postgres over TCP, with several clients at once
+db: db: postgres parallel query, workers share a segment (POSIX shared memory)
+db: db: postgres recovers a committed row after the server is killed
+db: db: postgres rolls back and keeps its constraints
+db: db: postgres server starts and accepts connections
+db: db: postgres shuts down cleanly and starts again with its data
+db: db: postgres tables, an index and a join
+db: db: postgres version
+db: db: redis load from several clients
+db: db: redis restarts with its data from the append-only file
+db: db: redis saves in the background (fork) and syncs its append-only file
+db: db: redis server starts and answers
+db: db: redis strings, lists, hashes, sorted sets and expiry
+db: db: redis version
+db: db: unpack the roots and make the device nodes
+db: db: valkey server starts, stores and saves
+db: db: valkey version
+java: java: unpack the root, make the device nodes
+java: java: version
+java: java: compile and run a program
+java: java: records, streams and collections
+java: java: threads and an executor
+java: java: exit status and an uncaught exception
+java: java: files and directories
+java: java: a jar with a main class
+java: java: a compile error is reported
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program
