@@ -2391,11 +2391,19 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, vpid_of(k, pid, p));
     a = put_s(&mut o, a, "\nPPid:\t");
     a = put_n(&mut o, a, vpid_of(k, pid, parent));
-    if nsk_of(k, NSK_PID, p) != 0 && nsk_of(k, NSK_PID, pid) == 0 {
-      a = put_s(&mut o, a, "\nNSpid:\t");     // its id here, then in its own namespace
-      a = put_n(&mut o, a, p);
-      a = put_c(&mut o, a, 9);
-      a = put_n(&mut o, a, get(k.mns, nsk_at(NSK_VPID, p)));
+    let dp = pn_depth(k, nsk_of(k, NSK_PID, p));
+    let dobs = pn_depth(k, nsk_of(k, NSK_PID, pid));
+    if dp > dobs {
+      a = put_s(&mut o, a, "\nNSpid:\t");     // its id here, then in each namespace inside, down to its own
+      a = put_n(&mut o, a, vpid_of(k, pid, p));
+      let mut j = smaller(dp - dobs, 3);
+      while j > 0 && j <= 3
+        invariant j <= 3 && blen(o) == PROC_OUT && a <= PROC_OUT && kok(k)
+      {
+        j = j - 1;
+        a = put_c(&mut o, a, 9);
+        a = put_n(&mut o, a, get(k.mns, nsk_at(vp_kind(j), p)));
+      }
     }
     a = put_s(&mut o, a, "\nUid:");
     a = put_ids(&mut o, a, k, pid, p, 0, F_UID, F_SUID);

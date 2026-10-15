@@ -1233,7 +1233,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut debug_exit = port_claim(&mut ports, DEBUG_EXIT, 1);
   let mut uart = Uart { io: port_claim(&mut ports, COM1, 8), present: true };
   let mut kbd = Kbd { data: port_claim(&mut ports, KBD_DATA, 1), status: port_claim(&mut ports, KBD_STATUS, 1),
-    shift: false, ctrl: false, alt: false, ext: false, present: true, aux: false, wheel: false, mb: 0, mn: 0 };
+    shift: false, ctrl: false, alt: false, ext: false, present: true, aux: false, aux_irq: false, wheel: false, mb: 0, mn: 0 };
   let mut pic = Pic { master: port_claim(&mut ports, PIC1, 2), slave: port_claim(&mut ports, PIC2, 2) };
   let mut pit = Pit { io: port_claim(&mut ports, PIT, 4) };
   let mut rtc = Rtc { io: port_claim(&mut ports, RTC, 2) };
@@ -1292,6 +1292,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut term = Term { uart: uart, screen: screen, kbd: kbd, usb: Usb::None };
   let mut con = con_new();
   pic_init(&mut pic);
+  if term.kbd.aux_irq {
+    pic_unmask(&mut pic, 12);               // the PS/2 mouse wakes an idle processor, so it need not be polled
+  }
   pit_init(&mut pit, 100);
   let pool_pages = pool_size(pool);
   puts(&mut con, "\r\nBastiOS 0.2: ");
@@ -1521,7 +1524,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // Every processor runs the scheduler until the kernel stops; then they
   // are all back in their park loops and the state is this one's again.
   con_flush(&mut term, &mut con);
-  let sl = lock_new(Sys { k: k, con: con, pic: pic, apic: apic, clock: clock, acpi: acpi, stop: false, reboot: false, idle: 0, ticked: false, login: login, slept: 0, polled: usb_on || usb_mouse_on || ser_on != SER_NONE || term.kbd.aux });
+  let sl = lock_new(Sys { k: k, con: con, pic: pic, apic: apic, clock: clock, acpi: acpi, stop: false, reboot: false, idle: 0, ticked: false, login: login, slept: 0, polled: usb_on || usb_mouse_on || ser_on != SER_NONE || (term.kbd.aux && !term.kbd.aux_irq) });
   let tl = lock_new(term);
   let pumping = atomic_new(false);
   let pend = atomic_new(0);
