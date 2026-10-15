@@ -312,6 +312,14 @@ fn set_wall(k: &mut Kernel, t: u64) -> u64
   }
   k.epoch = t - k.ns;
   tfd_clock_set(&mut k);
+  // As Linux's ntp_clear: a clock that was just set is unsynchronised, with
+  // the largest error, and has no offset left to work off.
+  k.sys = set(k.sys, TX_STATUS, get(k.sys, TX_STATUS) & !STA_UNSYNC);
+  k.sys = set(k.sys, TX_MAXERR, 16000000);
+  k.sys = set(k.sys, TX_ESTERR, 16000000);
+  k.sys = set(k.sys, TX_OFFSET, 0);
+  k.sys = set(k.sys, TX_PEND, 0);
+  k.sys = set(k.sys, TX_ADJ, 0);
   return 0;
 }
 

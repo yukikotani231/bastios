@@ -15,6 +15,7 @@ alpine: apk: the packages the root came with
 alpine: apk: they are in its database
 alpine: apk: upgrade, with a version constraint on the dependency
 alpine: bash: arrays, brace expansion, here-strings
+alpine: chrony: chronyd -q steps the clock from an NTP server
 alpine: curl: 1 MiB from the host
 alpine: curl: a file from the host
 alpine: file: what a file is (libmagic)
@@ -1186,6 +1187,7 @@ t_sock2: 24 bound AF_UNIX datagram sockets send around a ring and name their sen
 t_sys: /dev/rtc0 reads and sets the hardware clock
 t_sys: a cgroup namespace roots the tree
 t_sys: adjtimex reads and sets
+t_sys: setting the clock leaves the NTP error at its maximum and the status unsynchronised
 t_sys: adjtimex slews the wall clock: frequency, PLL offset, adjtime
 t_sys: clock_settime moves CLOCK_REALTIME
 t_sys: memory.max kills the biggest process of a group that passes it

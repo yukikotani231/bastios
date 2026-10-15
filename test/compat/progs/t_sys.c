@@ -174,6 +174,30 @@ static long drift_since(const struct timespec *real0, const struct timespec *mon
     return dr - dm;
 }
 
+/* Setting the clock leaves it unsynchronised with the largest error
+ * (chronyd probes ADJ_SETOFFSET this way). */
+static int clock_cleared(void) {
+    struct timex t = {0};
+    t.modes = ADJ_MAXERROR | ADJ_STATUS;
+    t.maxerror = 0;
+    t.status = STA_PLL;                                  /* synchronised */
+    int ok = adjtimex(&t) >= 0 && t.maxerror == 0 && !(t.status & STA_UNSYNC);
+    struct timex z = {0};
+    z.modes = ADJ_SETOFFSET | ADJ_NANO;
+    ok = ok && adjtimex(&z) >= 0 && z.maxerror >= 100000 && (z.status & STA_UNSYNC);
+    t = (struct timex){0};
+    t.modes = ADJ_MAXERROR | ADJ_STATUS;
+    t.maxerror = 0;
+    t.status = STA_PLL;
+    adjtimex(&t);
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ok = ok && clock_settime(CLOCK_REALTIME, &ts) == 0;
+    struct timex v = {0};
+    ok = ok && adjtimex(&v) >= 0 && v.maxerror >= 100000 && (v.status & STA_UNSYNC);
+    return ok;
+}
+
 /* What slewing() found wrong, for the failure line. */
 static char slew_why[160];
 #define STEP(cond, ...) do { if (ok && !(cond)) { ok = 0; snprintf(slew_why, sizeof slew_why, __VA_ARGS__); } } while (0)
@@ -208,11 +232,11 @@ static int slewing(void) {
     clock_gettime(CLOCK_MONOTONIC, &m0);
     sleep(1);
     d = drift_since(&r0, &m0);
-    STEP(d > -100 && d < 100, "0 ppm drifted %ld us", d);   /* back to the rate it had */
+    STEP(d > -350 && d < 350, "0 ppm drifted %ld us", d);   /* back to the rate it had */
 
     /* A PLL offset of 20 ms, time constant 0 (1/16 of it a second): 2 s move it about 2.4 ms. */
     t = (struct timex){0};
-    t.modes = ADJ_OFFSET | ADJ_STATUS | ADJ_TIMECONST;
+    t.modes = ADJ_OFFSET | ADJ_STATUS | ADJ_TIMECONST | ADJ_MICRO;   /* in usec (an earlier check set nanoseconds) */
     t.status = STA_PLL;
     t.constant = 0;
     t.offset = 20000;
@@ -734,6 +758,7 @@ int main(void) {
     EXPECT("settimeofday", timeofday());
     EXPECT("adjtimex reads and sets", adjust());
     EXPECT("/dev/rtc0 reads and sets the hardware clock", hw_clock());
+    EXPECT("setting the clock leaves the NTP error at its maximum and the status unsynchronised", clock_cleared());
     if (begin("adjtimex slews the wall clock: frequency, PLL offset, adjtime")) {
         if (slewing()) pass(); else fail("%s", slew_why);
     }

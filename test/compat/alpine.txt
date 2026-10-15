@@ -572,3 +572,9 @@ hello from the host
 apk=0
 tig version 2.6.1
 status 0
+
+== chrony: chronyd -q steps the clock from an NTP server
+$ bb date -u -s '2000-01-01 00:00:00' >/disk/a/root/ca_chrony; bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL chrony 2>/dev/null; echo status $?; h=HOSTNTP; bb chroot /disk/a /usr/sbin/chronyd -d -q -u root -f /dev/null "server ${h%:*} port ${h#*:} iburst" 2>&1 | bb grep -c 'System clock wrong'; bb date -u +%Y-%m-%d; bb rm /disk/a/root/ca_chrony
+status 0
+1
+2031-02-03
