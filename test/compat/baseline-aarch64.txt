@@ -665,6 +665,7 @@ t_mem: read(2) sees a store into a MAP_SHARED mapping
 t_mem: writable MAP_SHARED of a read-only file is EACCES
 t_misc: /etc/passwd
 t_misc: /proc/diskstats opens
+t_misc: /proc/diskstats has the disk's line with its counts
 t_misc: /proc/meminfo
 t_misc: /proc/modules opens
 t_misc: /proc/net is a directory

@@ -55,6 +55,7 @@ tests=(
   "stackguard|c|test/stackguard_test.sh"
   "stackdepth|c|test/stackdepth.py"
   "fuzz|c|test/fuzz_test.sh 1 2 2000"
+  "soak|c|test/soak.py --rounds 150 --smp 2 --warmup 10 --leak-kb 128"
 )
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
