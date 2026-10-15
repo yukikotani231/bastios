@@ -296,7 +296,11 @@ fn nsk_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
 // the namespace. A process sees, and can signal and wait for, only the
 // processes of its own namespace, by their ids there; one in the first
 // namespace sees every process by its row, as before. A namespace made
-// from inside another is refused (ENOSPC), so there are two levels.
+// from inside another nests: a process has an id in its own namespace
+// (NSK_VPID) and in the two around it (NSK_VP1, NSK_VP2), so there are three
+// levels besides the first (past them is ENOSPC). A process sees, and can
+// signal, the processes of its namespace and of those inside it, by their
+// ids in its own.
 
 /// The k.mns slot of PID namespace id, or PN_N (the first, or none).
 fn pn_slot(k: &Kernel, id: u64) -> u64
@@ -318,8 +322,54 @@ fn pn_slot(k: &Kernel, id: u64) -> u64
   return PN_N;
 }
 
-/// Is a process (or its zombie) in PID namespace id, or about to start
-/// children in it?
+/// The PID namespace around namespace id (0: the first, or id is).
+fn pn_parent(k: &Kernel, id: u64) -> u64
+  requires kok(k)
+  ensures result < MNS_MAX
+{
+  let s = pn_slot(k, id % MNS_MAX);
+  if id == 0 || s >= PN_N {
+    return 0;
+  }
+  return get(k.mns, MNS_PN + s * PN_W + 3) % MNS_MAX;
+}
+
+/// Is PID namespace n namespace a or inside it?
+fn pn_within(k: &Kernel, n: u64, a: u64) -> bool
+  requires kok(k)
+{
+  let mut x = n;
+  let mut i = 0;
+  while i < 4 && x != 0
+    invariant i <= 4 && kok(k)
+  {
+    if x == a {
+      return true;
+    }
+    x = pn_parent(k, x);
+    i = i + 1;
+  }
+  return false;
+}
+
+/// How many PID namespaces deep n is (0: the first).
+fn pn_depth(k: &Kernel, n: u64) -> u64
+  requires kok(k)
+  ensures result <= 4
+{
+  let mut x = n;
+  let mut d = 0;
+  while d < 4 && x != 0
+    invariant d <= 4 && kok(k)
+  {
+    x = pn_parent(k, x);
+    d = d + 1;
+  }
+  return d;
+}
+
+/// Is a process (or its zombie) in PID namespace id or one inside it, or
+/// about to start children there?
 fn pn_used(k: &Kernel, id: u64) -> bool
   requires kok(k)
 {
@@ -328,7 +378,7 @@ fn pn_used(k: &Kernel, id: u64) -> bool
     invariant q <= NPROC && kok(k)
   {
     if pget(k.procs, q, F_STATE) != FREE
-       && (get(k.mns, nsk_at(NSK_PID, q)) == id || get(k.mns, nsk_at(NSK_PIDC, q)) == id) {
+       && (pn_within(k, get(k.mns, nsk_at(NSK_PID, q)), id) || pn_within(k, get(k.mns, nsk_at(NSK_PIDC, q)), id)) {
       return true;
     }
     q = q + 1;
@@ -359,11 +409,13 @@ fn pn_gc(k: &mut Kernel) -> u64
   return free;
 }
 
-/// Opens slot s as the new PID namespace id, whose next id is `next`.
-fn pn_open(k: &mut Kernel, s: u64, id: u64, next: u64)
+/// Opens slot s as the new PID namespace id inside namespace par, whose
+/// next id is `next`.
+fn pn_open(k: &mut Kernel, s: u64, id: u64, next: u64, par: u64)
   requires kok(k) && s < PN_N && id < MNS_MAX
   ensures kok(k)
 {
+  k.mns = set(k.mns, MNS_PN + s * PN_W + 3, par);
   k.mns = set(k.mns, MNS_PN + s * PN_W, id + 1);
   k.mns = set(k.mns, MNS_PN + s * PN_W + 1, next);
   k.mns = set(k.mns, MNS_PN + s * PN_W + 2, 0);
@@ -395,13 +447,21 @@ fn pn_alloc(k: &mut Kernel, id: u64) -> u64
   return v;
 }
 
+/// Can a PID namespace be made inside the one the children of pid start in?
+fn pn_deep_ok(k: &Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  return pn_depth(k, nsk_of(k, NSK_PIDC, pid)) < 3;
+}
+
 /// unshare(CLONE_NEWPID): pid's children will start in a new PID
-/// namespace. 0, ENOSPC when pid is in one already, or ENOMEM.
+/// namespace, inside the one they start in now. 0, ENOSPC when that is
+/// three levels deep, or ENOMEM.
 fn pidns_unshare(k: &mut Kernel, pid: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if nsk_of(k, NSK_PID, pid) != 0 || nsk_of(k, NSK_PIDC, pid) != 0 {
+  if !pn_deep_ok(k, pid) {
     return ENOSPC;
   }
   let s = pn_gc(&mut k);
@@ -412,7 +472,7 @@ fn pidns_unshare(k: &mut Kernel, pid: u64) -> u64
   if id == 0 {
     return ENOMEM;
   }
-  pn_open(&mut k, s, id, 1);
+  pn_open(&mut k, s, id, 1, nsk_of(k, NSK_PIDC, pid));
   nsk_set(&mut k, NSK_PIDC, pid, id);
   return 0;
 }
@@ -442,8 +502,22 @@ fn pidns_enter(k: &mut Kernel, pid: u64, c: u64)
   let n = nsk_of(k, NSK_PIDC, pid);
   nsk_set(&mut k, NSK_PID, c, n);
   nsk_set(&mut k, NSK_PIDC, c, n);
+  pn_ids(&mut k, c, n);
+}
+
+/// Gives c an id in PID namespace n and in the two around it.
+fn pn_ids(k: &mut Kernel, c: u64, n: u64)
+  requires kok(k) && c < NPROC && n < MNS_MAX
+  ensures kok(k)
+{
   let v = pn_alloc(&mut k, n);
   nsk_set(&mut k, NSK_VPID, c, v);
+  let p = pn_parent(k, n);
+  let v1 = pn_alloc(&mut k, p);
+  nsk_set(&mut k, NSK_VP1, c, v1);
+  let q = pn_parent(k, p);
+  let v2 = pn_alloc(&mut k, q);
+  nsk_set(&mut k, NSK_VP2, c, v2);
 }
 
 /// clone(CLONE_NEWPID): child c of pid is the init of a new namespace
@@ -460,7 +534,9 @@ fn pidns_clone(k: &mut Kernel, c: u64)
   if id == 0 {
     return;
   }
-  pn_open(&mut k, s, id, 2);
+  pn_open(&mut k, s, id, 2, nsk_of(k, NSK_PID, c));   // c has an id in the namespace around (pidns_enter): one level out now
+  nsk_set(&mut k, NSK_VP2, c, nsk_of(k, NSK_VP1, c));
+  nsk_set(&mut k, NSK_VP1, c, nsk_of(k, NSK_VPID, c));
   nsk_set(&mut k, NSK_PID, c, id);
   nsk_set(&mut k, NSK_PIDC, c, id);
   nsk_set(&mut k, NSK_VPID, c, 1);
@@ -474,12 +550,43 @@ fn pidns_thread(k: &mut Kernel, pid: u64, c: u64)
   let n = nsk_of(k, NSK_PID, pid);
   nsk_set(&mut k, NSK_PID, c, n);
   nsk_set(&mut k, NSK_PIDC, c, nsk_of(k, NSK_PIDC, pid));
-  let v = pn_alloc(&mut k, n);
-  nsk_set(&mut k, NSK_VPID, c, v);
+  pn_ids(&mut k, c, n);
+}
+
+/// The kind that holds a process's id j levels out of its own PID namespace.
+fn vp_kind(j: u64) -> u64
+  ensures result < NSK_N
+{
+  if j == 0 {
+    return NSK_VPID;
+  }
+  if j == 1 {
+    return NSK_VP1;
+  }
+  return NSK_VP2;
+}
+
+/// Process row's id in PID namespace o (not the first): 0 if it is not in
+/// o or inside it.
+fn vp_in(k: &Kernel, row: u64, o: u64) -> u64
+  requires kok(k) && row < NPROC
+{
+  let r = nsk_of(k, NSK_PID, row);
+  if r == o {
+    return get(k.mns, nsk_at(NSK_VPID, row));
+  }
+  let p = pn_parent(k, r);
+  if r != 0 && p == o {
+    return get(k.mns, nsk_at(NSK_VP1, row));
+  }
+  if p != 0 && pn_parent(k, p) == o {
+    return get(k.mns, nsk_at(NSK_VP2, row));
+  }
+  return 0;
 }
 
 /// Process row's id as process obs sees it: its row for a process in the
-/// first namespace, else its id there, or 0 if it is not in obs's.
+/// first namespace, else its id there, or 0 if it is not in obs's or inside it.
 fn vpid_of(k: &Kernel, obs: u64, row: u64) -> u64
   requires kok(k) && obs < NPROC
 {
@@ -487,10 +594,10 @@ fn vpid_of(k: &Kernel, obs: u64, row: u64) -> u64
   if o == 0 {
     return row;
   }
-  if row >= NPROC || nsk_of(k, NSK_PID, row) != o {
+  if row >= NPROC {
     return 0;
   }
-  return get(k.mns, nsk_at(NSK_VPID, row));
+  return vp_in(k, row, o);
 }
 
 /// The row of the process id v names for obs, or NPROC if there is none.
@@ -509,7 +616,7 @@ fn kpid_of(k: &Kernel, obs: u64, v: u64) -> u64
   while q < NPROC
     invariant 1 <= q && q <= NPROC && kok(k)
   {
-    if pget(k.procs, q, F_STATE) != FREE && nsk_of(k, NSK_PID, q) == o && get(k.mns, nsk_at(NSK_VPID, q)) == v {
+    if v != 0 && pget(k.procs, q, F_STATE) != FREE && vp_in(k, q, o) == v {
       return q;
     }
     q = q + 1;
@@ -619,7 +726,7 @@ fn pidns_exit(k: &mut Kernel, pid: u64)
     invariant 1 <= q && q <= NPROC && kok(k)
   {
     let st = pget(k.procs, q, F_STATE);
-    if q != pid && st != FREE && st != ZOMBIE && nsk_of(k, NSK_PID, q) == o {
+    if q != pid && st != FREE && st != ZOMBIE && pn_within(k, nsk_of(k, NSK_PID, q), o) {
       post_from(&mut k, q, SIGKILL, 0);
     }
     q = q + 1;
