@@ -164,7 +164,7 @@ const NAT_NONE: u64 = 18446744073709551615;
 
 // The TCP table's size (src/tcp.bastio has the rest).
 const TCBS: u64 = 240;                // connections (listeners and TIME_WAIT hold some)
-const TCB_W: u64 = 73;                // words per connection (TCP_RING, the size of
+const TCB_W: u64 = 76;                // words per connection (TCP_RING, the size of
                                       // its buffers, is in src/tcpbuf.bastio)
 
 struct Net {
