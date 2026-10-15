@@ -7,8 +7,8 @@
 
 import "proc.bastio";
 
-const SCT_NUM: u64 = 36;
-const SCT_N: u64 = 40;
+const SCT_NUM: u64 = 40;
+const SCT_N: u64 = 44;
 
 fn sct_name(i: u64) -> Str {
   if i == 0 {
@@ -120,15 +120,27 @@ fn sct_name(i: u64) -> Str {
     return "sys/fs/aio-max-nr";
   }
   if i == 36 {
-    return "sys/net/ipv4/ip_local_port_range";
+    return "sys/kernel/keys/root_maxkeys";
   }
   if i == 37 {
-    return "sys/fs/file-nr";
+    return "sys/kernel/keys/root_maxbytes";
   }
   if i == 38 {
-    return "sys/kernel/random/entropy_avail";
+    return "sys/kernel/keys/maxkeys";
   }
   if i == 39 {
+    return "sys/kernel/keys/maxbytes";
+  }
+  if i == 40 {
+    return "sys/net/ipv4/ip_local_port_range";
+  }
+  if i == 41 {
+    return "sys/fs/file-nr";
+  }
+  if i == 42 {
+    return "sys/kernel/random/entropy_avail";
+  }
+  if i == 43 {
     return "sys/kernel/random/poolsize";
   }
   return "sys/kernel/tainted";
@@ -244,21 +256,33 @@ fn sct_default(i: u64) -> u64 {
   if i == 35 {
     return 65536;                       // fs/aio-max-nr
   }
+  if i == 36 {
+    return 200;                         // kernel/keys/root_maxkeys
+  }
+  if i == 37 {
+    return 25000;                       // kernel/keys/root_maxbytes
+  }
+  if i == 38 {
+    return 200;                         // kernel/keys/maxkeys
+  }
+  if i == 39 {
+    return 20000;                       // kernel/keys/maxbytes
+  }
   return 0;
 }
 
 /// The text of entry i, for the entries after the numbers.
 fn sct_text(i: u64) -> Str {
-  if i == 36 {
+  if i == 40 {
     return "32768\t60999\n";
   }
-  if i == 37 {
+  if i == 41 {
     return "0\t0\t1048576\n";
   }
-  if i == 38 {
+  if i == 42 {
     return "256\n";
   }
-  if i == 39 {
+  if i == 43 {
     return "256\n";
   }
   return "\n";
@@ -269,7 +293,7 @@ fn sct_text(i: u64) -> Str {
 // directory). Every file the kernel serves under /proc/sys is a child of
 // its parent; t_proc lists each directory and opens what it lists.
 
-const SYSD_N: u64 = 12;
+const SYSD_N: u64 = 13;
 
 fn sysd_path(j: u64) -> Str {
   if j == 0 {
@@ -308,6 +332,9 @@ fn sysd_path(j: u64) -> Str {
   if j == 11 {
     return "sys/vm";
   }
+  if j == 12 {
+    return "sys/kernel/keys";
+  }
   return "sys";
 }
 
@@ -322,7 +349,7 @@ fn sysd_count(j: u64) -> u64 {
     return 3;
   }
   if j == 3 {
-    return 29;
+    return 30;
   }
   if j == 4 {
     return 2;
@@ -347,6 +374,9 @@ fn sysd_count(j: u64) -> u64 {
   }
   if j == 11 {
     return 13;
+  }
+  if j == 12 {
+    return 4;
   }
   return 0;
 }
@@ -419,72 +449,75 @@ fn sysd_child(j: u64, i: u64) -> Str {
     return "hostname";
   }
   if j == 3 && i == 6 {
-    return "kptr_restrict";
+    return "keys";
   }
   if j == 3 && i == 7 {
-    return "msg_next_id";
+    return "kptr_restrict";
   }
   if j == 3 && i == 8 {
-    return "msgmax";
+    return "msg_next_id";
   }
   if j == 3 && i == 9 {
-    return "msgmnb";
+    return "msgmax";
   }
   if j == 3 && i == 10 {
-    return "msgmni";
+    return "msgmnb";
   }
   if j == 3 && i == 11 {
-    return "ngroups_max";
+    return "msgmni";
   }
   if j == 3 && i == 12 {
-    return "osrelease";
+    return "ngroups_max";
   }
   if j == 3 && i == 13 {
-    return "ostype";
+    return "osrelease";
   }
   if j == 3 && i == 14 {
-    return "panic";
+    return "ostype";
   }
   if j == 3 && i == 15 {
-    return "perf_event_paranoid";
+    return "panic";
   }
   if j == 3 && i == 16 {
-    return "pid_max";
+    return "perf_event_paranoid";
   }
   if j == 3 && i == 17 {
-    return "printk";
+    return "pid_max";
   }
   if j == 3 && i == 18 {
-    return "randomize_va_space";
+    return "printk";
   }
   if j == 3 && i == 19 {
-    return "sem";
+    return "randomize_va_space";
   }
   if j == 3 && i == 20 {
-    return "sem_next_id";
+    return "sem";
   }
   if j == 3 && i == 21 {
-    return "shm_next_id";
+    return "sem_next_id";
   }
   if j == 3 && i == 22 {
-    return "shmall";
+    return "shm_next_id";
   }
   if j == 3 && i == 23 {
-    return "shmmax";
+    return "shmall";
   }
   if j == 3 && i == 24 {
-    return "shmmni";
+    return "shmmax";
   }
   if j == 3 && i == 25 {
-    return "sysrq";
+    return "shmmni";
   }
   if j == 3 && i == 26 {
-    return "tainted";
+    return "sysrq";
   }
   if j == 3 && i == 27 {
-    return "threads-max";
+    return "tainted";
   }
   if j == 3 && i == 28 {
+    return "threads-max";
+  }
+  if j == 3 && i == 29 {
     return "version";
   }
   if j == 4 && i == 0 {
@@ -580,6 +613,18 @@ fn sysd_child(j: u64, i: u64) -> Str {
   if j == 11 && i == 12 {
     return "vfs_cache_pressure";
   }
+  if j == 12 && i == 0 {
+    return "maxbytes";
+  }
+  if j == 12 && i == 1 {
+    return "maxkeys";
+  }
+  if j == 12 && i == 2 {
+    return "root_maxbytes";
+  }
+  if j == 12 && i == 3 {
+    return "root_maxkeys";
+  }
   return "";
 }
 
@@ -615,6 +660,9 @@ fn sysd_child_dir(j: u64, i: u64) -> bool {
     return true;
   }
   if j == 9 && i == 0 {
+    return true;
+  }
+  if j == 3 && i == 6 {
     return true;
   }
   return false;
