@@ -721,7 +721,8 @@ fn lx_setsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
 }
 
 /// getsockopt(fd, level, name, val, lenp): SO_TYPE says stream or
-/// datagram; SO_SNDBUF and SO_RCVBUF the buffer sizes; SO_ERROR and every
+/// datagram; SO_SNDBUF and SO_RCVBUF the buffer sizes; SO_ERROR of a TCP
+/// socket whose connect failed ECONNREFUSED, once; SO_ERROR otherwise and every
 /// other option the kernel accepts and
 /// ignores (setsockopt) read as 0. Options at other levels than
 /// SOL_SOCKET and (on TCP) SOL_TCP are -ENOPROTOOPT.
@@ -773,6 +774,9 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
     if tcp && !ux_dgram(k, pid, fd) {
       v = 1;                                // SOCK_STREAM
     }
+  }
+  if level == SOL_SOCKET && name == SO_ERROR && is_tcp(k, pid, fd) {
+    v = tcp_so_error(&mut k, pid, fd);      // a refused connect, once
   }
   if level == SOL_SOCKET && (name == SO_SNDBUF || name == SO_RCVBUF) {
     v = 4096;                               // a unix channel; a TCP buffer is as big

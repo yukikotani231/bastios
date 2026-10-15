@@ -766,6 +766,11 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     return KEEP;
   }
   if n == LX_GETPPID {
+    // An orphan's parent is init (process 1), as on Linux; pid 1 itself has none.
+    if pget(k.procs, tgid(k.procs, pid), F_PARENT) == 0 && tgid(k.procs, pid) != 1 && nsk_of(k, NSK_PID, pid) == 0 {
+      ret(&mut k.procs, pid, 1);
+      return KEEP;
+    }
     ret(&mut k.procs, pid, vpid_of(k, pid, tgid(k.procs, smaller(pget(k.procs, tgid(k.procs, pid), F_PARENT), NPROC - 1))));
     return KEEP;
   }
@@ -1582,12 +1587,17 @@ fn line_take(l: &mut Buf, t: u64)
 
 /// read from the file open on native row `row`: up to READ_MAX bytes, a
 /// transfer buffer at a time, so a regular file is not read short (as
-/// programs expect of one) unless it ends or the disk must be waited for.
+/// programs expect of one) unless it ends. When a block the read needs is
+/// not cached, the offset goes back to where the read began and the call
+/// starts again once the disk has caught up (DISK_RETRY): the part read so
+/// far is read again, from the cache, instead of being returned as a short
+/// count (unzip takes a short read of a 4360-byte file for a broken archive).
 fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && row < FD_ROWS
   ensures kok(k)
 {
   let want = smaller(n, READ_MAX);
+  let off0 = vfs_offset(k.fs, row);
   let mut done = 0;
   while done < want
     invariant done <= want && want <= READ_MAX && kok(k)
@@ -1597,9 +1607,7 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
       return EBADF;
     }
     if got == VFS_MISS {
-      if done > 0 {
-        return done;                        // what came so far; the rest waits
-      }
+      vfs_advance(&mut k.fs, row, off0, 0);  // start the call again from the beginning
       return DISK_RETRY;                    // sleep until the disk catches up
     }
     if va > 0xFFFFFFFFFFFFFFFF - READ_MAX {
@@ -1860,6 +1868,7 @@ fn file_readv(k: &mut Kernel, pid: u64, row: u64, iov: u64, cnt: u64) -> u64
   }
   let mut total = 0;
   let mut i = 0;
+  let off0 = vfs_offset(k.fs, row);
   while i < cnt
     invariant i <= cnt && cnt <= IOV_MAX && iov <= USER_BASE + USER_SIZE && kok(k) && total <= USER_SIZE
   {
@@ -1872,6 +1881,10 @@ fn file_readv(k: &mut Kernel, pid: u64, row: u64, iov: u64, cnt: u64) -> u64
       return EFAULT;
     }
     let r = lx_file_read(&mut k, pid, row, base.v, size.v);
+    if r == DISK_RETRY && total > 0 {
+      vfs_advance(&mut k.fs, row, off0, 0);  // the whole call starts again
+      return DISK_RETRY;
+    }
     if r > USER_SIZE {
       if total > 0 {
         return total;
