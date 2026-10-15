@@ -1210,7 +1210,15 @@ fn dir_meta(k: &mut Kernel, dir: u64) -> Meta
     return cg_dir_meta(dir - DIR_CG);
   }
   if dir >= DIR_PROC {
-    return proc_dir_meta(dir);
+    let m = proc_dir_meta(dir);
+    if dir > DIR_PROC && dir - DIR_PROC < NPROC && dir - DIR_PROC < 0x400 {   // below NS_DIRS (src/lxprocfs.bastio)
+      // /proc/PID belongs to the process's effective user and group, as on
+      // Linux: newuidmap and newgidmap check it before they write a map.
+      let t = dir - DIR_PROC;
+      return Meta { ok: m.ok, mode: m.mode, size: m.size, ino: m.ino, mtime: m.mtime,
+                    own: id_get(k.procs, t, F_UID, true) + id_get(k.procs, t, F_GID, true) * 0x100000000 };
+    }
+    return m;
   }
   if dir >= DIR_VFS {
     let dm = vfs_meta(&mut k.fs, dir - DIR_VFS);
