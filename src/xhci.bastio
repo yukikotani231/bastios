@@ -1,5 +1,6 @@
 // USB on an xHCI (USB 3) host controller: a keyboard and a mouse, for PCs
-// without PS/2 ports, and a USB stick or disk to keep the file system on. When the
+// without PS/2 ports, a USB stick or disk to keep the file system on, and a
+// serial port (/dev/ttyUSB0, /dev/ttyACM0). When the
 // stick is the disk and the controller has MSI-X, its event ring raises
 // V_DISK, as the other disks do, so a process waiting for it sleeps;
 // otherwise the controller is polled.
@@ -27,13 +28,22 @@
 // type (BASTIOS_PART), and then only that partition: a stick holding the
 // boot image (`make usb`) keeps Limine and the kernel in the partitions
 // before it. A stick without one is left alone.
+// A serial port gets a slot and its two bulk endpoints as well: an FTDI
+// adapter (vendor 0x0403, a vendor-specific interface; each packet it sends
+// begins with two modem-status bytes, which are dropped) or a CDC data
+// interface (class 10, with the CDC control interface, if any, told to raise
+// DTR and RTS). One transfer of one packet is kept queued on the IN
+// endpoint; each completed one adds its bytes to a queue (`sp.q`), which
+// xhci_poll hands out as SER_PKT + byte. xhci_ser_send puts up to
+// SER_TX_MAX bytes on the OUT endpoint, one transfer at a time. The kernel's
+// rings and the Linux device are in src/lxserial.bastio.
 // Hubs (USB 2) are followed two deep: a device on a hub's port gets a
 // route string and, if it is low or full speed behind a high-speed hub,
 // that hub's transaction translator. A USB 3 hub is only seen through
 // the USB 2 hub inside it, so a SuperSpeed device behind one is not found.
 //
 // The registers are a block of the device window claimed as an `Mmio`.
-// The controller reads and writes only the eleven pages lent to it at
+// The controller reads and writes only the thirteen pages lent to it at
 // start (`Dma`), which come back after a controller reset at power off:
 //
 //   dcbaa   0: the device context base address array; 2048: the scratchpad array
@@ -52,6 +62,9 @@
 //   data    the data of the disk's commands: up to a 4 KiB block
 //   ctx3    0: slot 5's device context; 2048: its control ring;
 //           3072: the mouse's interrupt transfer ring
+//   ctx4    0: slot 6's device context; 2048: its control ring
+//   ser     0: the serial port's bulk OUT ring; 1024: its IN ring;
+//           2048: the bytes being sent; 2560: the packet received
 //
 // and the scratchpad pages the controller asks for (`sps`: Intel's want 34
 // or so; QEMU's none), taken from the pool wherever they are free.
@@ -1800,7 +1813,7 @@ fn ports_settle(x: &mut Xhci)
   }
 }
 
-/// Starts the controller in the registers `regs` with eleven pages (and
+/// Starts the controller in the registers `regs` with thirteen pages (and
 /// the scratchpad pages it asks for, from m), and attaches the first boot
 /// keyboard, boot mouse and mass-storage device on its root ports and the
 /// hubs below them. `live` says whether there is a keyboard, `mlive` a
