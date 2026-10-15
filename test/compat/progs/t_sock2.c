@@ -20,33 +20,58 @@
 static volatile int got, val;
 static void h(int s, siginfo_t *i, void *c) { (void)c; got = s; val = i->si_value.sival_int; }
 
-/* Stream socketpairs until one fails (64 fit), each carrying its own byte. */
+/* Stream socketpairs until one fails (512 channels' worth, fewer when the process runs out of
+ * descriptors first), each carrying its own byte. */
 static int many_pairs(void) {
-    int sv[65][2], n = 0, ok = 1;
-    for (int i = 0; i < 65; i++) {
+    static int sv[520][2];
+    int n = 0, ok = 1;
+    for (int i = 0; i < 520; i++) {
         if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv[i]) != 0) break;
         n++;
     }
-    ok = n >= 56 && n < 65;
+    ok = n >= 400 && n < 520;
     for (int i = 0; ok && i < n; i++) ok = write(sv[i][0], &(char){'a' + i % 26}, 1) == 1;
     for (int i = 0; ok && i < n; i++) { char ch = 0; ok = read(sv[i][1], &ch, 1) == 1 && ch == 'a' + i % 26; }
     for (int i = 0; i < n; i++) { close(sv[i][0]); close(sv[i][1]); }
     return ok;
 }
 
-/* Listening sockets until a bind fails (32 fit), each with a connection through it. */
+/* 300 clients connected to one listener, each accepted and carrying its own byte. */
+static int many_connections(void) {
+    enum { N = 300 };
+    static int cs[N], as[N];
+    struct sockaddr_un u = {.sun_family = AF_UNIX};
+    strcpy(u.sun_path, "/tmp/mc");
+    unlink(u.sun_path);
+    int l = socket(AF_UNIX, SOCK_STREAM, 0), ok = l >= 0 && bind(l, (void *)&u, sizeof u) == 0 && listen(l, 4) == 0;
+    int n = 0;
+    for (int i = 0; ok && i < N; i++) {
+        cs[i] = socket(AF_UNIX, SOCK_STREAM, 0);
+        ok = cs[i] >= 0 && connect(cs[i], (void *)&u, sizeof u) == 0 && (as[i] = accept(l, 0, 0)) >= 0 &&
+             write(cs[i], &(char){'a' + i % 26}, 1) == 1;
+        n += ok;
+    }
+    for (int i = 0; ok && i < N; i++) { char ch = 0; ok = read(as[i], &ch, 1) == 1 && ch == 'a' + i % 26; }
+    for (int i = 0; i < n; i++) { close(cs[i]); close(as[i]); }
+    if (l >= 0) close(l);
+    unlink(u.sun_path);
+    return ok && n == N;
+}
+
+/* Listening sockets until a bind fails (128 fit), each with a connection through it. */
 static int many_listeners(void) {
-    int ls[33], cs[32], as[32], n = 0, ok = 1;
+    static int ls[130], cs[130], as[130];
+    int n = 0, ok = 1;
     char path[40];
     struct sockaddr_un u = {.sun_family = AF_UNIX};
-    for (int i = 0; i < 33; i++) {
+    for (int i = 0; i < 130; i++) {
         ls[i] = socket(AF_UNIX, SOCK_STREAM, 0);
         snprintf(u.sun_path, sizeof u.sun_path, "/tmp/ml%d", i);
         unlink(u.sun_path);
         if (ls[i] < 0 || bind(ls[i], (void *)&u, sizeof u) != 0 || listen(ls[i], 2) != 0) break;
         n++;
     }
-    ok = n >= 28 && n < 33;
+    ok = n >= 120 && n < 130;
     for (int i = 0; ok && i < n; i++) {
         snprintf(u.sun_path, sizeof u.sun_path, "/tmp/ml%d", i);
         cs[i] = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -54,7 +79,7 @@ static int many_listeners(void) {
              write(cs[i], &(char){'A' + i % 26}, 1) == 1;
     }
     for (int i = 0; ok && i < n; i++) { char ch = 0; ok = read(as[i], &ch, 1) == 1 && ch == 'A' + i % 26; }
-    for (int i = 0; i < 33; i++) {
+    for (int i = 0; i < 130; i++) {
         if (ls[i] >= 0) close(ls[i]);
         snprintf(path, sizeof path, "/tmp/ml%d", i);
         unlink(path);
@@ -241,8 +266,9 @@ int main(void) {
                read(f, &i, sizeof i) == sizeof i && i.ssi_signo == SIGUSR1 && i.ssi_code == SI_QUEUE && i.ssi_int == 7);
         close(f);
     }
-    EXPECT("56 or more AF_UNIX socketpairs at once, each with its own byte; the 65th fails", many_pairs());
-    EXPECT("at least 28 AF_UNIX listeners, each accepting a connection; the 33rd is refused", many_listeners());
+    EXPECT("400 or more AF_UNIX socketpairs at once, each with its own byte; they run out before 520", many_pairs());
+    EXPECT("300 connections to one AF_UNIX listener at once, each with its own byte", many_connections());
+    EXPECT("at least 120 AF_UNIX listeners, each accepting a connection; the 129th is refused", many_listeners());
     EXPECT("24 bound AF_UNIX datagram sockets send around a ring and name their senders", many_datagrams());
     return done();
 }
