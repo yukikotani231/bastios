@@ -321,7 +321,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
   }
   hole_clear(&mut k, pid);                // a new window has no holes
   anon_clear(&mut k, pid);
-  lazy_set(&mut k, pid, src, hold);       // map_drop_all dropped the old record
+  lazy_set(&mut k, pid, src, hold, rn);   // map_drop_all dropped the old record
   shm_drop_all(&mut k, pid);
   lx_fd_close_all(&mut k, pid, true);
   sig_reset(&mut k.sigact, pid, true);

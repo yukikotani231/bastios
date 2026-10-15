@@ -1527,10 +1527,7 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, rn: Rn
   let elf = src.file || is_elf(img);
   // A PIE lands at PIE_AT plus its random distance; a program too big for
   // that place goes where it would have without randomization.
-  let mut e = elf_parse_at(&mut v, src, PIE_AT + rn.pie_pg * 4096);
-  if !e.ok {
-    e = elf_parse(&mut v, src);
-  }
+  let e = elf_parse_rnd(&mut v, src, rn);
   let mut size = 0;
   let mut entry = e.entry;
   let mut rsp = USER_BASE + elf_sp(args, alen, total, rn.shift);

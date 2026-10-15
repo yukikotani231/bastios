@@ -222,6 +222,21 @@ fn elf_parse(v: &mut Vfs, src: Src) -> Elf
   return elf_parse_at(&mut v, src, PIE_AT);
 }
 
+/// elf_parse, placing a PIE at PIE_AT plus the random distance of `rn`; a
+/// program too big to fit there is placed at PIE_AT after all. Whoever
+/// needs the layout exec built (the lazy code record, say) asks this with
+/// the same `rn`.
+fn elf_parse_rnd(v: &mut Vfs, src: Src, rn: Rnd) -> Elf
+  requires vfs_ok(v) && rnd_ok(rn)
+  ensures vfs_ok(v) && elf_fits(src.size, result)
+{
+  let e = elf_parse_at(&mut v, src, PIE_AT + rn.pie_pg * 4096);
+  if e.ok {
+    return e;
+  }
+  return elf_parse(&mut v, src);
+}
+
 /// elf_parse, placing a PIE at window offset `place` instead.
 fn elf_parse_at(v: &mut Vfs, src: Src, place: u64) -> Elf
   requires vfs_ok(v) && place <= IMAGE_MAX
