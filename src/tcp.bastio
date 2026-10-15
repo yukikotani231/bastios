@@ -25,6 +25,7 @@ import "net.bastio";
 // (TCP_RING bytes each way) are rings of pages, in src/tcpbuf.bastio.
 
 const TCP_MSS: u64 = 1460;            // the largest segment we send to or ask of another machine
+const TCP_MSS6: u64 = 1440;           // ... over IPv6, whose header is 20 bytes longer
 const TCP_MSS_LO: u64 = 14946;        // ... and to an address of this one: a frame of NET_BUF bytes
 const TCP_WS: u64 = 4;                // our window scale (RFC 7323): TCP_RING fits in 16 bits after it
 const TCP_BURST: u64 = 16;            // segments one tcp_output sends at most
@@ -208,10 +209,13 @@ fn tnxt(n: &mut Net, t: u64, v: u64)
 /// frames, or the loopback buffer's if `ip` is an address of this machine.
 fn mss_for(n: &Net, ip: u64) -> u64
   requires net_ok(n)
-  ensures result == TCP_MSS || result == TCP_MSS_LO
+  ensures result == TCP_MSS || result == TCP_MSS_LO || result == TCP_MSS6
 {
   if is_local(n, ip) {
     return TCP_MSS_LO;
+  }
+  if is_v6tok(ip) {
+    return TCP_MSS6;                  // the IPv4 form is rewritten 20 bytes longer on the wire
   }
   return TCP_MSS;
 }

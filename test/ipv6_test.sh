@@ -71,6 +71,8 @@ class Wire:
         self.got = []                   # (kind, details) seen from the guest
         self.tcp = {}                   # guest port -> state of a connection to :80
         self.bad = []                   # frames from the guest with a wrong checksum
+        self.maxframe = 0               # the longest TCP frame from the guest
+        self.syn_mss = None             # the MSS its SYN asks for
 
     def send(self, f):
         self.sock.sendto(f, ("127.0.0.1", self.guest_port))
@@ -101,6 +103,13 @@ class Wire:
                 u = struct.pack("!HHHH", 7, sport, len(p), 0) + p[8:]
                 self.send(ip6(17, dst, src, u, at=6))
         elif nh == 6 and dst == ON_LINK:
+            self.maxframe = max(self.maxframe, len(f))
+            if p[13] & 2:
+                o = p[20:(p[12] >> 4) * 4]
+                while len(o) >= 2 and o[0]:
+                    if o[0] == 2 and len(o) >= 4:
+                        self.syn_mss = struct.unpack("!H", o[2:4])[0]
+                    o = o[max(o[1], 2) if o[0] != 1 else 1:]
             self.tcp_in(src, p)
 
     def icmp(self, f, src, dst, p, hops):
@@ -137,7 +146,7 @@ class Wire:
             self.send(ip6(6, ON_LINK, src, t, at=16))
         if flags & 2:                   # SYN
             c = self.tcp[sport] = dict(rcv=seq + 1, snd=5000, buf=b"", sent=False, closed=False)
-            seg(0x12, 5000, seq + 1, opts=struct.pack("!BBH", 2, 4, 1440))
+            seg(0x12, 5000, seq + 1, opts=struct.pack("!BBH", 2, 4, 1460))
             c["snd"] = 5001
             return
         if not c:
@@ -241,6 +250,8 @@ check(any(g[0] == "ns" and g[1] == ON_LINK for g in wire.got), "asked for a neig
 off = [g for g in wire.got if g[0] == "udp" and g[1] == OFF_LINK]
 check(off and all(g[2] == HOST_MAC for g in off), "sent off-link traffic to the router's MAC")
 check(any(g[0] == "tcp-served" for g in wire.got), "TCP reached the server over IPv6")
+check(wire.syn_mss is not None and wire.syn_mss <= 1440, f"the SYN asks for an MSS that fits an IPv6 frame ({wire.syn_mss})")
+check(0 < wire.maxframe <= 1514, f"no frame past the 1500-byte link MTU although the server offered 1460 ({wire.maxframe} bytes)")
 check(not wire.bad, f"every frame from the guest had a right checksum {wire.bad[:3]}")
 
 qemu.kill()

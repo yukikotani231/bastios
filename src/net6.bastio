@@ -268,8 +268,8 @@ fn v6_out(n: &mut Net, flen: u64) -> bool
     return false;
   }
   let plen = total - 20;
-  if 54 + plen > FRAME_MAX {
-    return false;                     // no room for the longer header
+  if 54 + plen > FRAME_MAX || plen > 1460 {
+    return false;                     // no room for the longer header, or past a 1500-byte link (no fragmentation)
   }
   let i = dst - V6_BASE;
   let dhi = get(n.v6, i * V6W);

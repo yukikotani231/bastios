@@ -76,7 +76,10 @@ int main(void) {
     ok = ok && getpeername(c, (void *)&peer, &pl) == 0 && peer.sin6_family == AF_INET6 &&
          memcmp(&peer.sin6_addr, &to.sin6_addr, 16) == 0;
     report(ok, "getpeername gives the IPv6 address", "getpeername");
-    if (c >= 0 && write(c, "GET /\n", 6) == 6) {
+    /* The request, then enough more to need several full segments. */
+    static char req[6006] = "GET /\n";
+    memset(req + 6, 'x', sizeof req - 6);
+    if (c >= 0 && write(c, req, sizeof req) == (ssize_t)sizeof req) {
         ssize_t r;
         while (n < sizeof got && (r = read(c, got + n, sizeof got - n)) > 0) n += r;
     }
