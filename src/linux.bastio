@@ -1592,7 +1592,18 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
   while done < want
     invariant done <= want && want <= READ_MAX && kok(k)
   {
-    let got = vfs_read(&mut k.fs, &mut k.mem, row, smaller(want - done, XFER));
+    let mut got = vfs_read(&mut k.fs, &mut k.mem, row, smaller(want - done, XFER));
+    let mut tries = 0;
+    while got == VFS_MISS && done > 0 && tries < 64
+      invariant tries <= 64 && kok(k) && row < FD_ROWS && (got <= XFER || got == NO_FD || got == VFS_MISS)
+    {
+      // Part of the range is already with the user and the offset has moved
+      // past it: wait for the disk here and go on (a short count would be an
+      // error to a program reading a fixed-size page, as a database does).
+      disk_wait(&mut k.fs.disk);
+      got = vfs_read(&mut k.fs, &mut k.mem, row, smaller(want - done, XFER));
+      tries = tries + 1;
+    }
     if got == NO_FD {
       return EBADF;
     }
