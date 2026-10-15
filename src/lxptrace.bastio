@@ -40,9 +40,13 @@
 // call as a PTRACE_SYSCALL stop does, but with PTRACE_EVENT_SECCOMP in the
 // status and the filter's data as the event message (pt_seccomp_stop).
 //
+// PTRACE_GET_SYSCALL_INFO says at a system call stop (entry, exit or
+// SECCOMP_RET_TRACE) which one it is, with the call's number and arguments,
+// the result at an exit and the filter's data at a seccomp stop.
+//
 // Not done: the exit event and PTRACE_O_TRACEVFORKDONE (PTRACE_SETOPTIONS
 // keeps them and only PTRACE_O_EXITKILL acts), the floating point and debug
-// registers, PTRACE_LISTEN, and PTRACE_GET_SYSCALL_INFO. A tracer that is not the parent hears of its
+// registers, and PTRACE_LISTEN. A tracer that is not the parent hears of its
 // tracee's end once, then the parent reaps it. There is no Yama scope: the
 // caller needs root or the target's user and group ids, as for
 // pidfd_getfd.
@@ -76,6 +80,7 @@ const PTRACE_GETREGSET: u64 = 0x4204;
 const PTRACE_SETREGSET: u64 = 0x4205;
 const PTRACE_SEIZE: u64 = 0x4206;
 const PTRACE_INTERRUPT: u64 = 0x4207;
+const PTRACE_GET_SYSCALL_INFO: u64 = 0x420e;
 const NT_PRSTATUS: u64 = 1;
 const USER_DEBUGREG: u64 = 848;          // offsetof(struct user, u_debugreg)
 const PTRACE_O_VALID: u64 = 0x1000FF;    // the options there are (events and EXITKILL)
@@ -654,6 +659,65 @@ fn lx_ptrace(k: &mut Kernel, pid: u64, req0: u64, p0: u64, addr: u64, data: u64)
   if req == PTRACE_KILL {
     post_from(&mut k, p, SIGKILL, pid);
     return 0;
+  }
+  if req == PTRACE_GET_SYSCALL_INFO {
+    // struct ptrace_syscall_info: op, arch, ip, sp, then entry (nr, six
+    // arguments), exit (result, is_error) or seccomp (nr, arguments,
+    // ret_data). The result is the size the stop needs; at most addr bytes
+    // are copied. Not at a system call stop it is op 0 and the header only.
+    let t2 = tr2_get(k, p);
+    let mut op = 0;
+    let mut size = 24;
+    if t2 / TS_EXIT % 2 == 1 {
+      op = 2;
+      size = 33;
+    } else if t2 / TS_ENTRY % 2 == 1 && t2 / TS_SECC % 2 == 1 {
+      op = 3;
+      size = 84;
+    } else if t2 / TS_ENTRY % 2 == 1 {
+      op = 1;
+      size = 80;
+    }
+    lx_fill(&mut k, 0, 88);
+    xfer_u64(&mut k.fs.xfer, 0, op + PT_AUDIT_ARCH * 0x100000000);
+    xfer_u64(&mut k.fs.xfer, 8, ur_read(k, p, UR_IP));
+    xfer_u64(&mut k.fs.xfer, 16, ur_read(k, p, UR_SP));
+    if op == 0 {
+      size = 24;
+    } else if op == 2 {
+      let r = ur_read(k, p, UR_RET);
+      xfer_u64(&mut k.fs.xfer, 24, r);
+      if r >= 0xFFFFFFFFFFFFF001 {
+        xfer_u64(&mut k.fs.xfer, 32, 1);        // is_error: -4095 .. -1
+      }
+    } else {
+      let mut nr = t2 / TS_NR % 1024;
+      if UR_NUM < USER_REGS {
+        nr = ur_read(k, p, UR_NUM);          // the number as the process gave it
+      }
+      xfer_u64(&mut k.fs.xfer, 24, nr);
+      let mut i = 0;
+      while i < 6
+        invariant i <= 6 && kok(k)
+      {
+        xfer_u64(&mut k.fs.xfer, 32 + i * 8, ur_read(k, p, ur_arg(i)));
+        i = i + 1;
+      }
+      if op == 3 {
+        xfer_u64(&mut k.fs.xfer, 80, t2 / TS_MSG % 65536);
+      }
+    }
+    let mut n = size;
+    if addr < n {
+      n = addr;
+    }
+    if n > 0 {
+      let e = lx_put_out(&mut k, pid, data, n);
+      if e != 0 {
+        return e;
+      }
+    }
+    return size;
   }
   if req == PTRACE_GETEVENTMSG {
     xfer_u64(&mut k.fs.xfer, 0, tr2_get(k, p) / TS_MSG % 65536);
