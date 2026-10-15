@@ -362,19 +362,72 @@ fn rng_refill(r: &mut Buf)
   r = set(r, RNG_HAVE, 4);
 }
 
+/// The next 64 random bits of generator r.
+fn rng_word(r: &mut Buf) -> u64
+  requires len(r) == RNG_LEN
+  ensures len(r) == RNG_LEN
+{
+  if get(r, RNG_HAVE) == 0 || get(r, RNG_HAVE) > 4 {
+    rng_refill(&mut r);
+  }
+  let h = get(r, RNG_HAVE);
+  r = set(r, RNG_HAVE, h - 1);
+  let v = get(r, RNG_OUT + h - 1);
+  r = set(r, RNG_OUT + h - 1, 0);            // given out: not kept
+  return v;
+}
+
 /// The next 64 random bits.
 fn rng_next(k: &mut Kernel) -> u64
   requires kok(k)
   ensures kok(k)
 {
-  if get(k.rng, RNG_HAVE) == 0 || get(k.rng, RNG_HAVE) > 4 {
-    rng_refill(&mut k.rng);
+  return rng_word(&mut k.rng);
+}
+
+/// The sysctl kernel.randomize_va_space: 0 for none, 1 for the stack, the
+/// mmap area, the interpreter and PIEs, 2 (the default) the program break
+/// too. Larger values count as 2.
+fn aslr_level(sys: &Buf) -> u64
+  requires len(sys) == SYS_LEN
+  ensures result <= 2
+{
+  let w = get(sys, SYS_SCT + 18);
+  if w == 0 {
+    return 2;
   }
-  let h = get(k.rng, RNG_HAVE);
-  k.rng = set(k.rng, RNG_HAVE, h - 1);
-  let v = get(k.rng, RNG_OUT + h - 1);
-  k.rng = set(k.rng, RNG_OUT + h - 1, 0);    // given out: not kept
-  return v;
+  return smaller(w - 1, 2);
+}
+
+/// What the program process `pid` is about to start draws: 16 bytes for
+/// AT_RANDOM from the generator, and the random distances that move the
+/// stack, the mmap area, a PIE and the program break (src/elf.bastio),
+/// unless randomize_va_space is 0 or the process asked for personality
+/// ADDR_NO_RANDOMIZE (0x0040000, which an exec keeps). The distances come
+/// from the same generator, so one start does not tell the next.
+fn layout_rnd(rng: &mut Buf, sys: &Buf, procs: &Buf, pid: u64) -> Rnd
+  requires len(rng) == RNG_LEN && len(sys) == SYS_LEN && ptab_ok(procs) && pid < NPROC
+  ensures len(rng) == RNG_LEN && rnd_ok(result)
+{
+  let a = rng_word(&mut rng);
+  let b = rng_word(&mut rng);
+  let c = rng_word(&mut rng);
+  let d = rng_word(&mut rng);
+  let lvl = aslr_level(sys);
+  if lvl == 0 || (pget(procs, pid, F_PERSONA) / 262144) % 2 == 1 {
+    return rnd_fixed(a, b);
+  }
+  let mut brk = 0;
+  if lvl >= 2 {
+    brk = (d >> 24) % BRK_RND_PAGES;
+  }
+  return Rnd {
+    a: a, b: b,
+    mmap_pg: c % MMAP_RND_PAGES,
+    pie_pg: (c >> 24) % PIE_RND_PAGES,
+    brk_pg: brk,
+    shift: (c >> 48) % 128 * 4096 + d % 256 * 16
+  };
 }
 
 /// read(2) on device d: nothing from /dev/null, zeros or random bytes from
