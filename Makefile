@@ -8,6 +8,7 @@
 #   make run-iso    boot the ISO in QEMU (run-uefi: under UEFI firmware)
 #   make test       boot it in QEMU and drive the shell over the serial line
 #   make fuzz       fuzz the system calls (SEED, SEEDS, CALLS, SMP)
+#   make soak       run a mixed workload for a long time (SECS, ALPINE)
 #
 # The kernel and its programs are built with bastioc1, bastiolang's compiler
 # (stage1, written in Bastio), which stage0's bastioc0 builds once into
@@ -373,8 +374,16 @@ run-uefi: build/bastios.iso $(DISK)
 	  -cdrom build/bastios.iso $(ISO_DISPLAY) $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
 
 # The tests are listed in test/all.sh, which runs JOBS of them at a time.
-test: build/bastios.elf
+test: $(if $(filter d,$(LANES)),build/bastioc1,build/bastios.elf)
 	BASTIOC=$(BASTIOC) BASTIOC0=$(BASTIOC0) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/all.sh
+
+# The long-run soak (test/soak.py): rounds of a mixed workload for SECS
+# seconds, looking for leaks, hangs and panics. `make soak SECS=3600`;
+# `make soak ALPINE=build/compat/soak-alpine.img` runs gcc builds in Alpine
+# instead (see test/soak.py).
+SECS ?= 600
+soak: build/bastios.elf
+	MUSLCC=$(MUSLCC) test/soak.py --secs $(SECS) $(if $(ALPINE),--alpine $(ALPINE))
 
 # The system call fuzzer at length: SEEDS runs of CALLS calls from seed
 # SEED (see test/fuzz_test.sh; `make test` runs a short one).
@@ -496,6 +505,13 @@ build/compat/tree-sitter-c.so: | build/compat/src
 	tar xzf build/compat/src/tree-sitter-c.tgz -C build/compat/src/tree-sitter-c --strip-components=1 package/src
 	$(MUSLCC) -shared -fPIC -O2 -Wl,-s -I build/compat/src/tree-sitter-c/src -o $@.part build/compat/src/tree-sitter-c/src/parser.c
 	mv $@.part $@
+
+# python-lsp-server and the pure-Python packages it needs, as a tar file for
+# the case that runs it under Alpine's python3 with Neovim's LSP client. The
+# wheels come from PyPI, each pinned by SHA-256 in test/compat/pylsp.py, and are
+# unpacked without pip. x86-64 only.
+build/compat/pylsp.tar: test/compat/pylsp.py | build/compat/src
+	test/compat/pylsp.py $@ build/compat/src/pylsp-wheels
 
 # strace, for the cases that trace a program on the Alpine disk (ptrace). Alpine's
 # package is not on the disk's repository, so this is the layer of the stagex/strace
@@ -755,10 +771,10 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # over SSH.
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh \
     build/compat/bastioc1 build/compat/z3 build/compat/tcc \
-    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar tools/ocipull.sh | build/compat
+    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar tools/ocipull.sh | build/compat
 	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) $(ALPINE_X86_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) \
 	  --extra "$$(test/compat/bastiotools.sh build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)) \
-	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar tools/ocipull.sh"
+	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar tools/ocipull.sh"
 
 # Debian on BastiOS, on a fifth disk (test/compat/debiandisk.py) for
 # test/compat/debian.txt: Debian's root file system, whose programs are
@@ -786,12 +802,24 @@ build/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/co
 build/compat/go.img: test/compat/godisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
 	test/compat/godisk.py $@ $(GO_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
 
-compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --out build/compat $(COMPAT_PROGS)
+# The JDK of the official eclipse-temurin alpine image, as a tar file the cases
+# unpack, for java.txt. Pinned by digest, its layers kept in ALPINE_CACHE like
+# the others'. x86-64 only.
+build/compat/jdk.img: test/compat/jdkdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
+	test/compat/jdkdisk.py $@ $(JDK_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+
+# The Rust toolchain of the official rust:alpine image (rustc, cargo, Alpine's
+# gcc and musl), as a tar file the cases unpack, for rust.txt. Pinned by
+# digest, its layers kept in ALPINE_CACHE like the others'. x86-64 only.
+build/compat/rust.img: test/compat/rustdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
+	test/compat/rustdisk.py $@ $(RUST_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+
+compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --out build/compat $(COMPAT_PROGS)
 
 # Records which checks pass now, so `make compat` catches regressions.
-compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --out build/compat $(COMPAT_PROGS)
+compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --out build/compat $(COMPAT_PROGS)
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
@@ -849,6 +877,27 @@ compat-ltp-baseline: build/bastios.elf build/ltp/.built
 bench: build/bastios.elf
 	bench/run.py $(BENCH_ARGS)
 
+# Not part of `make test`: whole-program workloads (bench/workloads.py), the
+# same Alpine gcc, make, apk, tar and gzip on BastiOS and on Linux. The disk
+# is the compat suite's Alpine disk cut down to gcc, make and musl-dev, plus
+# the guest script and a generated C project (bench/workloads/).
+BENCH_GCC_IMAGE ?= alpinelinux/alpine-gitlab-ci@sha256:4bce54b0b246967f6ab51476d5511245ba35a49f30b2e63102ca294ab488add9
+build/bench/wl/proj.tar: bench/workloads/mkproj.py | build/bench/wl
+	bench/workloads/mkproj.py $@
+build/bench/wl/wl.sh: bench/workloads/wl.sh | build/bench/wl
+	cp $< $@
+build/bench/wl:
+	mkdir -p $@
+build/bench/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py build/bench/wl/proj.tar build/bench/wl/wl.sh
+	MKDISK_FREE_MB=700 test/compat/alpinedisk.py $@ build/bench/alpine $(ALPINE_BASE) $(BENCH_GCC_IMAGE) \
+	  --disk gcc,musl-dev,make --cache $(ALPINE_CACHE) --extra "wl.sh=build/bench/wl/wl.sh proj.tar=build/bench/wl/proj.tar"
+bench-workloads: build/bastios.elf build/bench/alpine.img
+	bench/workloads.py $(WORKLOAD_ARGS)
+
+# TCP over virtio-net and e1000 against Linux's, driven from the host (bench/netcmp.py).
+bench-net: build/bastios.elf
+	bench/netcmp.py $(NET_ARGS)
+
 # Not part of `make test`: the change in each benchmark from bench/baseline.json
 # (or COMPARE_TO=other.json) to the last `make bench` (build/bench/results.json).
 # Exits 1 if a test got more than 10% slower; see bench/compare.py.
@@ -890,6 +939,6 @@ clean:
 .PRECIOUS: build/user/%.c build/user/%.s build/user/%.o build/user/%.elf
 FORCE:
 
-.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-compare smpbench buildbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-workloads bench-net bench-compare smpbench buildbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
 
 endif

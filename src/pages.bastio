@@ -311,11 +311,12 @@ fn is_x_frame(m: &Mem, f: &Frame) -> bool
 
 /// The free pages plus the cached ones (`mem`).
 fn count_avail(bm: &Buf) -> u64
+  ensures result <= len(bm)
 {
   let mut n = 0;
   let mut i = 0;
   while i < len(bm)
-    invariant n <= i
+    invariant n <= i && i <= len(bm)
   {
     if get(bm, i) == 1 || get(bm, i) == TXT_PAGE {
       n = n + 1;
