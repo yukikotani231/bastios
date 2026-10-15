@@ -395,6 +395,7 @@ t_file: a write of many unaligned blocks is not short
 t_inotify: /proc/sys/fs/inotify/max_queued_events
 t_inotify: /proc/sys/fs/inotify/max_user_instances
 t_inotify: /proc/sys/fs/inotify/max_user_watches
+t_inotify: max_user_instances is writable and reads back
 t_inotify: IN_MASK_CREATE on a watched file is EEXIST
 t_inotify: IN_ONESHOT: one event, then the watch goes
 t_inotify: IN_ONLYDIR on a file is ENOTDIR

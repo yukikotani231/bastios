@@ -99,6 +99,7 @@ fremovexattr02
 fsetxattr01
 getxattr01
 getxattr02
+inotify06
 inotify09
 inotify11
 io_cancel01
