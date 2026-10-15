@@ -85,11 +85,20 @@ What decides the bytes of a release:
 - **Fetched sources** are pinned: BusyBox by tag (`BUSYBOX_TAG`) and Limine
   by tag (`LIMINE_TAG`) in the `Makefile`.
 - **Time**: BusyBox records its build time in its version string unless
-  `KCONFIG_NOTIMESTAMP` is set, which the `Makefile` does.
+  `KCONFIG_NOTIMESTAMP` is set, which the `Makefile` does. The images use the
+  time of the tagged commit when `SOURCE_DATE_EPOCH` is set: file dates in the
+  ISO, and the identifiers in its partition tables (the MBR signature, and
+  for the USB image the GPT disk and partition GUIDs, derived from it).
 
-With those fixed, `make build/bastios.elf` and `make ARCH=aarch64` give byte-identical kernels from
-two different checkout directories (tried on an x86-64 host with Ubuntu 24.04's
-`cc`). The ISO and USB images are *not* byte-identical between builds: the
-partition tables carry random identifiers. To compare a rebuild with a
-release, compare the kernel (`bastios-vX.Y.Z.elf`, which is also inside the
-ISO as `boot/bastios.elf`), not the image around it.
+With those fixed, `make build/bastios.elf` and `make ARCH=aarch64` give
+byte-identical kernels from two different checkout directories, and with
+`SOURCE_DATE_EPOCH` set to the same value `make iso usb` gives byte-identical
+`bastios.iso` and `bastios-usb.img` (tried on an x86-64 host with Ubuntu
+24.04's compilers; the ISO also boots under BIOS and UEFI in `test/iso_test.sh`).
+Without `SOURCE_DATE_EPOCH` the images carry the build time and random
+identifiers. To rebuild a release's images, set it to the commit's time (the
+release workflow does):
+
+```sh
+SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) make iso usb
+```

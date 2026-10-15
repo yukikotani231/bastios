@@ -62,6 +62,9 @@ jobs:
           bench/compare.py bench/baseline.json build/bench/results.json | tee build/bench-compare.md || true
       - name: Package
         run: |
+          # The images are made again with the commit's time, so they do not depend on when the build ran.
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          rm -f build/bastios.iso build/bastios-gpt.iso build/bastios-usb.img
           make iso usb BASTIOC=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
           mkdir -p dist
           cp build/bastios.iso dist/bastios-$TAG.iso

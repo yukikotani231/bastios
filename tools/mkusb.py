@@ -23,7 +23,7 @@ that type, and then only that partition.
 --find prints the first sector and the sector count of the BastiOS
 partition of IMG, or exits 1 if it has none.
 """
-import struct, sys, uuid, zlib
+import os, struct, sys, uuid, zlib
 
 SECTOR = 512
 BASTIOS_TYPE = uuid.UUID("e0c9ea2a-d5f1-45b3-a799-0a7bec83d701")
@@ -64,13 +64,22 @@ def gpt_header(cur, alt, first_use, last_use, disk_guid, elba, count, ents):
     return bytes(h) + bytes(SECTOR - 92)
 
 
+def new_guid(what):
+    """A random GUID, or, if SOURCE_DATE_EPOCH is set, one made from it and
+    WHAT, so the same sources build the same image."""
+    sde = os.environ.get("SOURCE_DATE_EPOCH")
+    if sde:
+        return uuid.uuid5(BASTIOS_TYPE, sde + ":" + what)
+    return uuid.uuid4()
+
+
 def add_entry(ents, count, type_, first, last, name):
     slot = next((i for i in range(count) if not any(ents[i * ESIZE:i * ESIZE + 16])), None)
     if slot is None:
         sys.exit("mkusb: no free GPT entry")
     e = bytearray(ESIZE)
     e[0:16] = type_.bytes_le
-    e[16:32] = uuid.uuid4().bytes_le
+    e[16:32] = new_guid(name).bytes_le
     struct.pack_into("<QQQ", e, 32, first, last, 0)
     e[56:56 + 2 * len(name)] = name.encode("utf-16le")
     ents[slot * ESIZE:(slot + 1) * ESIZE] = e
@@ -80,7 +89,7 @@ def build(base, mib, bios_boot=False):
     """base: the boot image (empty for --blank). Returns the new image."""
     count = 128
     ents = bytearray(count * ESIZE)
-    disk_guid = uuid.uuid4().bytes_le
+    disk_guid = new_guid("disk").bytes_le
     used_to = 34                                      # past the primary GPT
     pelba, first_use = 2, 34
     if base:

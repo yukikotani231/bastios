@@ -286,11 +286,18 @@ build/bastios.iso: build/bastios.elf boot/limine.conf build/limine/limine
 	cp boot/limine.conf build/limine/limine-bios.sys build/limine/limine-bios-cd.bin \
 	  build/limine/limine-uefi-cd.bin build/limine/LICENSE build/iso/boot/limine/
 	cp build/limine/BOOTX64.EFI build/iso/EFI/BOOT/
+	# With SOURCE_DATE_EPOCH set (xorriso reads it too) the image does not
+	# depend on when it was built.
+	[ -z "$$SOURCE_DATE_EPOCH" ] || find build/iso -exec touch -h -d @$$SOURCE_DATE_EPOCH {} +
 	xorriso -as mkisofs -quiet -R -r -J -b boot/limine/limine-bios-cd.bin \
 	  -no-emul-boot -boot-load-size 4 -boot-info-table -hfsplus -apm-block-size 2048 \
 	  --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image \
 	  --protective-msdos-label build/iso -o $@ 2>/dev/null
 	build/limine/limine bios-install --quiet $@
+	# Limine gives the MBR it writes a random disk signature (bytes 440-443).
+	[ -z "$$SOURCE_DATE_EPOCH" ] || python3 -c 'import hashlib,sys; \
+	  f=open(sys.argv[1],"r+b"); f.seek(440); \
+	  f.write(hashlib.sha256(("mbr:"+sys.argv[2]).encode()).digest()[:4])' $@ "$$SOURCE_DATE_EPOCH"
 
 iso: build/bastios.iso
 
