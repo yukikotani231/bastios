@@ -28,7 +28,9 @@ notes. Once bastiolang has releases, set `BASTIOLANG_REF` in
    ```
 4. `.github/workflows/release.yml` runs: it checks that the tag, the banner
    and the changelog agree, builds bastiolang's stage0, runs `make test`,
-   builds the ISO, and creates a **draft** GitHub release.
+   builds the ISO and the AArch64 kernel (boot-testing it in QEMU as part of
+   `make test`), records a build provenance attestation for the files, and
+   creates a **draft** GitHub release.
 5. Read the draft, then publish it by hand.
 
 To try the build without making a release, start the workflow from the
@@ -44,6 +46,10 @@ workflow artifact and stops there.
   a 64 MiB partition after them where BastiOS keeps its files.
 - `bastios-vX.Y.Z.elf`: the kernel alone, a Multiboot image for
   `qemu-system-x86_64 -kernel`.
+- `bastios-aarch64-vX.Y.Z.bin` and `.elf`: the AArch64 kernel for QEMU's
+  `virt` machine (`make ARCH=aarch64`; a Linux arm64 `Image`, so
+  `qemu-system-aarch64 -M virt -cpu max -kernel` boots it; see
+  [aarch64.md](aarch64.md)).
 - `busybox-1.36.1-source.tar.gz` and `busybox-vX.Y.Z.config`: the kernel
   image embeds a BusyBox binary, which is GPL-2.0-only, so its complete
   source and the configuration it was built with ship alongside it.
@@ -53,3 +59,37 @@ workflow artifact and stops there.
   against the baseline, not as absolute figures; update the baseline when a
   release's numbers are meant to become the new reference.
 - `SHA256SUMS`.
+
+## Checking a download
+
+```sh
+sha256sum -c --ignore-missing SHA256SUMS
+gh attestation verify bastios-vX.Y.Z.iso --repo yukikotani231/bastios
+```
+
+The attestation says which workflow run, on which commit, built the file.
+
+## Rebuilding a release
+
+What decides the bytes of a release:
+
+- **BastiOS**: the tag.
+- **bastiolang**: the commit named in the release notes ("Built with
+  bastiolang ..."), and the Rust release pinned in its
+  `rust-toolchain.toml`. Build `bastioc0` from it with `cargo build --release
+  --locked`.
+- **The C compiler**: the kernel is Bastio translated to C, so its bytes
+  follow the C compiler and its version. The release runner is Ubuntu 24.04
+  (`cc`, and `aarch64-linux-gnu-gcc` for the AArch64 kernel). Compare a rebuild
+  with a release only on the same Ubuntu release.
+- **Fetched sources** are pinned: BusyBox by tag (`BUSYBOX_TAG`) and Limine
+  by tag (`LIMINE_TAG`) in the `Makefile`.
+- **Time**: BusyBox records its build time in its version string unless
+  `KCONFIG_NOTIMESTAMP` is set, which the `Makefile` does.
+
+With those fixed, `make build/bastios.elf` and `make ARCH=aarch64` give byte-identical kernels from
+two different checkout directories (tried on an x86-64 host with Ubuntu 24.04's
+`cc`). The ISO and USB images are *not* byte-identical between builds: the
+partition tables carry random identifiers. To compare a rebuild with a
+release, compare the kernel (`bastios-vX.Y.Z.elf`, which is also inside the
+ISO as `boot/bastios.elf`), not the image around it.

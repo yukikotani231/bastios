@@ -43,6 +43,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### AArch64
 
+- The release workflow also builds the AArch64 kernel (`bastios-aarch64-vX.Y.Z.bin`, `.elf`) and records a build provenance attestation for every file it ships. The kernel no longer embeds BusyBox's build time, so two builds of the same sources give the same `bastios.elf` (`docs/releasing.md` says how to verify a download and rebuild a release).
 - BastiOS builds for AArch64 and boots to the shell on QEMU's `virt` machine
   (`make ARCH=aarch64 run`; [docs/aarch64.md](docs/aarch64.md)): exception
   vectors, MMU, GICv3, the generic timer as the scheduler tick, the PL011

@@ -176,6 +176,10 @@ MUSL_LDSO ?= /lib/ld-musl-x86_64.so.1
 build/user/ld-musl.so: | build/user
 	cp -L $(MUSL_LDSO) $@
 
+# BusyBox otherwise embeds the time it was built in its version string, so
+# two builds of the same sources would differ.
+export KCONFIG_NOTIMESTAMP := 1
+
 # BusyBox (GPL-2.0-only, not part of this repository): fetched at a pinned
 # tag, configured from allnoconfig plus the options in user/busybox.config,
 # and built against musl as a static PIE. `ash` is its shell (BusyBox picks
