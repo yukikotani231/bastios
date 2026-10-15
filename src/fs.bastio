@@ -109,11 +109,11 @@ struct Vfs {
   rhi: u64,             // every in-memory file is in a node below this (ram_find looks no further); only grows
   nopen: Buf,           // per file (nslot): how many rows and holds are open on it; node_open reads this instead of scanning ftab
   pool_hi: u64,         // every open row in the pool is below this (file_writing scans no further); only grows
-  nat_rows: bool,       // a row past the pool (a native process's) was ever opened: false lets file_writing skip them
+  nat_hi: u64,          // one past the highest row past the pool (a native process's) ever opened, 0 if none: every open one is below it (file_writing scans no further)
 }
 
 spec fn vfs_ok(v: &Vfs) -> bool {
-  nodes_ok(v.ram) && rix_ok(v.rix) && v.rhi <= NFILES && v.pool_hi <= FD_POOL && len(v.ftab) <= FTAB_LEN && len(v.holds) == HOLD_LEN && blen(v.xfer) == XFER && blen(v.zeros) == ZEROS && disk_ok(v.disk) && blen(v.name) == NAMEBUF && len(v.mnt) == MNT_LEN && v.mnt_hi <= MNT_N && nopen_ok(v.nopen)
+  nodes_ok(v.ram) && rix_ok(v.rix) && v.rhi <= NFILES && v.pool_hi <= FD_POOL && v.nat_hi <= FD_ROWS && len(v.ftab) <= FTAB_LEN && len(v.holds) == HOLD_LEN && blen(v.xfer) == XFER && blen(v.zeros) == ZEROS && disk_ok(v.disk) && blen(v.name) == NAMEBUF && len(v.mnt) == MNT_LEN && v.mnt_hi <= MNT_N && nopen_ok(v.nopen)
     && disk_ok(v.lo) && blen(v.lname) == NAMEBUF && pc_ok(v.pc)
 }
 
@@ -122,7 +122,7 @@ fn vfs_new(disk: DiskFs) -> Vfs
   ensures vfs_ok(result)
 {
   return Vfs { ram: ram_new(), ftab: alloc(FTAB_START), holds: alloc(HOLD_LEN), xfer: balloc(XFER), zeros: balloc(ZEROS), disk: disk, name: balloc(NAMEBUF), mnt: alloc(MNT_LEN), mnt_hi: 0, now: 0,
-    lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0))), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, pc: pc_new(), nopen: alloc(NOPEN_START), rix: alloc(KBASE + KB), rhi: 0, pool_hi: 0, nat_rows: false };
+    lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0))), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, pc: pc_new(), nopen: alloc(NOPEN_START), rix: alloc(KBASE + KB), rhi: 0, pool_hi: 0, nat_hi: 0 };
 }
 
 /// ram_create of the name in the transfer buffer, noting the node in `rhi`
@@ -416,8 +416,8 @@ fn open_row(v: &mut Vfs, mem: &mut Mem, base: u64, rows: u64, flags: u64, n: u64
     if base + fd >= v.pool_hi {
       v.pool_hi = base + fd + 1;
     }
-  } else {
-    v.nat_rows = true;
+  } else if base + fd >= v.nat_hi {
+    v.nat_hi = base + fd + 1;
   }
   if on_disk(v, n) {
     let mk = path_ok(v, n) && parent_ok(&mut v, n);
@@ -504,8 +504,8 @@ fn vfs_open_node(v: &mut Vfs, base: u64, rows: u64, flags: u64, i: u64) -> u64
     if base + fd >= v.pool_hi {
       v.pool_hi = base + fd + 1;
     }
-  } else {
-    v.nat_rows = true;
+  } else if base + fd >= v.nat_hi {
+    v.nat_hi = base + fd + 1;
   }
   nopen_add(&mut v.nopen, FS_RAM, i);
   fset(&mut v.ftab, base + fd, FD_FS, FS_RAM);

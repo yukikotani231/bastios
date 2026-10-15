@@ -475,8 +475,8 @@ fn file_writing(k: &Kernel, f: u64) -> bool
   if rows_writing(k, f, 0, smaller(k.fs.pool_hi, have)) {
     return true;
   }
-  // Rows past the pool (a native process's) are scanned only if any was opened.
-  return k.fs.nat_rows && rows_writing(k, f, FD_POOL, have);
+  // Rows past the pool (a native process's) are scanned only as far as one was opened.
+  return rows_writing(k, f, FD_POOL, smaller(have, k.fs.nat_hi));
 }
 
 /// Whether a row from `lo` to below `hi` is open for writing on file f.
