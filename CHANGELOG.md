@@ -754,6 +754,8 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Tests and documentation
 
+- A documentation index (`docs/README.md`) and a page on developing on BastiOS (`docs/development.md`); the README's status, `docs/using.md`'s limits, `docs/security.md`'s list of missing calls and `docs/aarch64.md`'s open items now match the code. Issue and pull request templates.
+
 - A getting-started guide (`docs/getting-started.md`): build, boot in
   QEMU, write a Bastio program, run a Linux program, boot from a USB
   stick. `make test` checks its programs and terminal sessions, and the
