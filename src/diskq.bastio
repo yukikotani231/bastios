@@ -71,7 +71,6 @@ struct DiskQ {
   done: u64,            // the last transaction finished
   moved: u64,           // counts operations finished, so sleepers know to look again
   dead: bool,           // a command failed or never finished: the disk is not used again
-  dirty: bool,          // a write went to the device without Force Unit Access since the last flush finished
   good: u64,            // once dead: the last transaction that finished before it died
 }
 
@@ -87,7 +86,7 @@ fn dq_new(nc: u64) -> DiskQ
   ensures dq_ok(result)
 {
   let mut q = DiskQ { nc: nc, cache: balloc(nc * CBLOCK), tag: alloc(nc), st: alloc(nc), hh: alloc(NH), hn: alloc(nc), hk: alloc(nc), q: alloc(NQ * QW),
-    r: ring_new(NQ), running: false, batch: 1, since: 0, hand: 0, next: 1, done: 0, moved: 0, dead: false, dirty: true, good: 0 };
+    r: ring_new(NQ), running: false, batch: 1, since: 0, hand: 0, next: 1, done: 0, moved: 0, dead: false, good: 0 };
   let mut i = 0;
   while i < nc
     invariant i <= nc && dq_ok(q)
@@ -492,29 +491,6 @@ fn dq_settle(q: &mut DiskQ, s: u64)
   }
 }
 
-/// True if the writes at the head of the queue are followed (past more
-/// writes, nothing else) by a flush: the flush is there to put them on the
-/// medium, so they can ask for that themselves (Force Unit Access) and the
-/// flush then finds nothing left to do.
-fn dq_flush_follows(q: &DiskQ) -> bool
-  requires dq_ok(q)
-{
-  let mut i = 0;
-  while i < q.r.n && i < NQ
-    invariant i <= NQ && dq_ok(q)
-  {
-    let k = get(q.q, ((q.r.h + i) % NQ) * QW);
-    if k == Q_FLUSH {
-      return true;
-    }
-    if k != Q_WRITE {
-      return false;
-    }
-    i = i + 1;
-  }
-  return false;
-}
-
 /// Moves the queue along without waiting for the device. `now` is the
 /// tick count, to notice a command that never finishes.
 fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
@@ -576,8 +552,6 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
         q.tag = set(q.tag, s, NOTAG);
       } else if kind == Q_WRITE {
         dq_settle(&mut q, s);
-      } else if kind == Q_FLUSH && r == BIO_OK {
-        q.dirty = false;
       }
     }
     dq_pop(&mut q);
@@ -592,12 +566,6 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
   }
   if kind == Q_DONE {
     q.done = b;
-    dq_pop(&mut q);
-    return DQ_MOVED;
-  }
-  if kind == Q_FLUSH && !q.dirty && !q.dead {
-    // Everything written since the last flush asked to be on the medium
-    // when it completed (Force Unit Access): nothing is left for a flush.
     dq_pop(&mut q);
     return DQ_MOVED;
   }
@@ -642,10 +610,6 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
       return DQ_MOVED;
     }
   }
-  let mut fua = false;
-  if kind == Q_WRITE && dq_flush_follows(q) {
-    fua = true;
-  }
   if kind == Q_WRITE {
     // Likewise the writes queued after it of the blocks that follow b: one
     // request takes them (each wait for the host costs a trip through its
@@ -676,13 +640,7 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
         }
         j = j + 1;
       }
-      if staged && fua {
-        let u = blk_fua_next(&mut dev);
-      }
       if staged && blk_begin_n(&mut dev, b * 8, n, true) {
-        if !blk_fua_done(dev) {
-          q.dirty = true;
-        }
         q.running = true;
         q.batch = n;
         q.since = now;
@@ -690,15 +648,9 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
       }
     }
   }
-  if fua {
-    let u = blk_fua_next(&mut dev);
-  }
   if !blk_begin(&mut dev, op, b * 8, &mut q.cache, s * CBLOCK) {
     dq_kill(&mut q);
     return DQ_MOVED;                  // dropped on the next call
-  }
-  if kind == Q_WRITE && !blk_fua_done(dev) {
-    q.dirty = true;
   }
   q.running = true;
   q.since = now;

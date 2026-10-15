@@ -84,8 +84,6 @@ struct Nvme {
   irq: bool,          // I/O completions raise MSI-X message 0 (nvme_msix)
   extra: Vec[Extra],  // empty, or VIO_BATCH pages (nvme_install): the PRP list, then data pages for blocks 1 on
   pages: u64,         // the first `pages` data pages after the list are there
-  fua_next: bool,     // the next write command carries Force Unit Access (nvme_fua_next)
-  fua_done: bool,     // the last command started was a write that did
   maxn: u64,          // blocks one command may move: the drive's MDTS, at most VIO_BATCH (1: no batches)
 }
 
@@ -300,7 +298,7 @@ fn nvme_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, i
 {
   let mut n = Nvme { regs: regs, asq: dma_lend(f0), acq: dma_lend(f1), sq: dma_lend(f2), cq: dma_lend(f3),
     buf: dma_lend(f4), stride: 4, asq_at: 0, sq_at: 0, acq_at: 1, cq_at: 1, sectors: 0, shift: 0, ns: 1, busy: false, irq: false,
-    extra: vec_new[Extra](), pages: 0, maxn: 1, fua_next: false, fua_done: false };
+    extra: vec_new[Extra](), pages: 0, maxn: 1 };
   let cap_lo = cast[u64](nr32(&mut n, NV_CAP));
   let cap_hi = cast[u64](nr32(&mut n, NV_CAP + 4));
   let mut stride = 4;
@@ -574,9 +572,6 @@ fn nvme_begin(n: &mut Nvme, op: u64, lba: u64, src: &Bytes, at: u64) -> bool
   requires nvme_ok(n) && op <= BIO_FLUSH && at + 4096 <= blen(src)
   ensures nvme_ok(n) && n.sectors == old(n.sectors) && (result ==> n.busy)
 {
-  let fua = n.fua_next;
-  n.fua_next = false;
-  n.fua_done = false;
   if n.busy {
     return false;
   }
@@ -598,10 +593,6 @@ fn nvme_begin(n: &mut Nvme, op: u64, lba: u64, src: &Bytes, at: u64) -> bool
   if op == BIO_WRITE {
     nvme_in(&mut n.buf, 0, 4096, src, at);
     code = OP_WRITE;
-  }
-  if fua && op == BIO_WRITE {
-    c12 = c12 + 1073741824;           // bit 30 of dword 12: Force Unit Access
-    n.fua_done = true;
   }
   nvme_submit(&mut n, code, dma_phys(n.buf), wrap[u32](dlba), cast[u32](dlba / 4294967296), c12);
   n.busy = true;
@@ -704,9 +695,6 @@ fn nvme_begin_n(n: &mut Nvme, lba: u64, cnt: u64, wr: bool) -> bool
   requires nvme_ok(n) && cnt >= 1 && cnt <= VIO_BATCH
   ensures nvme_ok(n) && n.sectors == old(n.sectors) && (result ==> n.busy)
 {
-  let fua = n.fua_next;
-  n.fua_next = false;
-  n.fua_done = false;
   if n.busy || cnt > n.pages + 1 || cnt > n.maxn || lba % 8 != 0 || lba >= n.sectors || (n.sectors - lba) / 8 < cnt {
     return false;
   }
@@ -754,10 +742,6 @@ fn nvme_begin_n(n: &mut Nvme, lba: u64, cnt: u64, wr: bool) -> bool
   let mut code: u8 = OP_READ;
   if wr {
     code = OP_WRITE;
-    if fua {
-      c12 = c12 + 1073741824;         // Force Unit Access
-      n.fua_done = true;
-    }
   }
   sqe(&mut n.sq, n.sq_at, code, n.ns, dma_phys(n.buf), wrap[u32](dlba), cast[u32](dlba / 4294967296), c12);
   dma_write64(&mut n.sq, n.sq_at * 64 + 32, prp2);
@@ -821,15 +805,4 @@ fn nvme_fetch_n(n: &mut Nvme, j: u64, out: &mut Bytes, at: u64)
       }
     },
   }
-}
-
-/// Makes the next write command carry Force Unit Access: its data is on the
-/// medium when it completes, so a flush after it has nothing of its to do.
-/// True: this drive does that (the caller then asks nvme_fua_done).
-fn nvme_fua_next(n: &mut Nvme) -> bool
-  requires nvme_ok(n)
-  ensures nvme_ok(n) && n.sectors == old(n.sectors) && n.busy == old(n.busy)
-{
-  n.fua_next = true;
-  return true;
 }
