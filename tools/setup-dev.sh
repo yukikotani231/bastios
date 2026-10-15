@@ -60,9 +60,17 @@ fi
 echo "== building the kernel (proves every source file; the first build also builds BusyBox)"
 make -j"$(nproc)"
 
-echo "== booting it once"
-# QEMU's -display none keeps this usable on a machine without a screen.
-printf 'hello\nhalt\n' | timeout 120 make run 2>&1 | tail -15 || true
+echo "== booting it once (it should reach the shell prompt)"
+log=$(mktemp)
+trap 'rm -f "$log"' EXIT
+timeout 60 make run </dev/null >"$log" 2>&1 || true
+if grep -q 'type `help`' "$log"; then
+  echo "BastiOS booted to its shell."
+else
+  echo "setup-dev: BastiOS did not reach its prompt; the boot log is below" >&2
+  tail -20 "$log" >&2
+  exit 1
+fi
 
 cat <<'MSG'
 
