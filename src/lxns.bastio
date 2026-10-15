@@ -1884,8 +1884,23 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
       i = i + 1;
     }
     sl = 13;
-  } else if kind == MK_MQUEUE || kind == MK_CGROUP {
-    // Nothing behind them: the directory itself, as the file layer has it.
+  } else if kind == MK_MQUEUE {
+    // The queues of the caller's IPC namespace (src/lxmq.bastio).
+    let dn = mq_fs_mount(&mut k, pid);
+    if dn == NO_RESULT {
+      bfree(src);
+      return ENOMEM;
+    }
+    let mut i = 0;
+    while i < dn
+      invariant i <= dn && dn <= 18 && blen(src) == MS_ROW && kok(k)
+    {
+      bset(&mut src, i, bget(k.fs.xfer, i));
+      i = i + 1;
+    }
+    sl = dn;
+  } else if kind == MK_CGROUP {
+    // Nothing behind it: the directory itself, as the file layer has it.
     let mut i = 0;
     while i < n
       invariant i <= n && n <= FNAME_MAX && blen(src) == MS_ROW && kok(k)
