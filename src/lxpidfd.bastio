@@ -16,8 +16,9 @@
 // -EINVAL, as before Linux 6.9), /proc/PID/fdinfo's Pid line, and fstat's
 // anonymous inode. pidfd_getfd needs the same user ids or root (Linux's
 // PTRACE_MODE_ATTACH_REALCREDS without a ptrace scope), and so does kcmp.
-// kcmp's KCMP_FILE compares open file descriptions; the other kinds
-// (address space, descriptor table, working directory, signal actions, I/O
+// kcmp's KCMP_FILE compares open file descriptions and KCMP_FILES the
+// descriptor tables (processes that share one are a ring, src/lxfd.bastio);
+// the other kinds (address space, working directory, signal actions, I/O
 // context, System V undo list) are each one per thread group here, so it
 // compares groups. KCMP_EPOLL_TFD is -EOPNOTSUPP. process_vm_writev, like
 // the kernel's other copies to user memory, does not check that a page is
@@ -33,6 +34,7 @@ const LX_PIDFD_OPEN: u64 = 434;
 const LX_PIDFD_GETFD: u64 = 438;
 const PVM_WAIT: u64 = 4611686018427387904;           // process_vm's answer: not yet (no byte count is this large)
 const KCMP_FILE: u64 = 0;
+const KCMP_FILES: u64 = 2;
 const KCMP_EPOLL_TFD: u64 = 7;
 
 fn is_pidfd_call(n: u64) -> bool {
@@ -152,9 +154,9 @@ fn pidfd_getfd(k: &mut Kernel, pid: u64, fd: u64, target: u64, flags: u64) -> u6
   if !cred_root(k.procs, pid) && !same_ids(k.procs, pid, p) {
     return EPERM;
   }
-  // A thread group's descriptors are in the row of whichever member holds
-  // the group's shared state (src/lxthread.bastio).
-  let h = fd_ofd(k, fd_row(&mut k, p), target);
+  // Shared descriptors are in the row of whichever member holds them
+  // (src/lxfd.bastio).
+  let h = fd_ofd(k, fd_home(k, p), target);
   if target >= LXNFD || h >= OFD_N {
     return EBADF;                           // not open there (the console is not passed on)
   }
@@ -233,9 +235,13 @@ fn lx_kcmp(k: &mut Kernel, pid: u64, p1: u64, p2: u64, kind: u64, i1: u64, i2: u
   }
   let mut x = tgid(k.procs, p1);
   let mut y = tgid(k.procs, p2);
+  if t == KCMP_FILES {
+    x = fd_ring_id(k, p1);                  // processes that share a table share a ring
+    y = fd_ring_id(k, p2);
+  }
   if t == KCMP_FILE {
-    let r1 = fd_row(&mut k, tgid(k.procs, p1));
-    let r2 = fd_row(&mut k, tgid(k.procs, p2));
+    let r1 = fd_home(k, p1);
+    let r2 = fd_home(k, p2);
     x = fd_ofd(k, r1, i1 % 0x100000000);
     y = fd_ofd(k, r2, i2 % 0x100000000);
     if x >= OFD_N || y >= OFD_N {

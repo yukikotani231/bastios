@@ -75,7 +75,6 @@ const RLIMIT_STACK: u64 = 3;
 const RLIMIT_NOFILE: u64 = 7;
 const RLIMIT_CORE: u64 = 4;
 const RLIM_NLIMITS: u64 = 16;
-const NR_OPEN: u64 = 1048576;          // Linux's default /proc/sys/fs/nr_open
 const STACK_BYTES: u64 = 8388608;     // STACK_PAGES pages
 const PR_SET_NAME: u64 = 15;
 const PR_GET_NAME: u64 = 16;

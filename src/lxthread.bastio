@@ -37,6 +37,8 @@ const FUTEX_PRIVATE: u64 = 128;
 const FUTEX_PHYS: u64 = 0x8000000000000000;   // keys of futexes on shared pages          // the rest: FUTEX_PRIVATE_FLAG, FUTEX_CLOCK_REALTIME
 const ETIMEDOUT: u64 = 18446744073709551506;   // 2^64 - 110
 
+const CLONE_FS: u64 = 0x200;
+const CLONE_FILES: u64 = 0x400;
 const CLONE_SIGHAND: u64 = 0x800;
 const CLONE_SETTLS: u64 = 0x80000;
 const CLONE_PARENT_SETTID: u64 = 0x100000;
@@ -185,7 +187,7 @@ fn swap_words(t: &mut Buf, a: u64, b: u64, n: u64)
 }
 
 /// Moves what the threads of a group share from member h to member p:
-/// the address space, descriptors, working directory, signal actions,
+/// the address space, working directory, signal actions,
 /// alarm, and the break and mmap floor. False, with nothing moved, if h
 /// has no space or p already has one.
 fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
@@ -207,9 +209,6 @@ fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
   pset(&mut k.procs, p, F_MMAP, pget(k.procs, h, F_MMAP));
   pset(&mut k.procs, p, F_PROG, pget(k.procs, h, F_PROG));
   pset(&mut k.procs, p, F_ARGS, pget(k.procs, h, F_ARGS));
-  if (h + 1) * LXNFD <= len(k.lxfd) && (p + 1) * LXNFD <= len(k.lxfd) {
-    swap_words(&mut k.lxfd, h * LXNFD, p * LXNFD, smaller(k.fd_hi, LXNFD));   // past fd_hi both rows are zero
-  }
   // The working directory and root are shared (CLONE_FS) unless the threads
   // are in different mount namespaces, which only setns and unshare make
   // them: then each keeps its own. Namespaces belong to the thread.
@@ -238,6 +237,7 @@ fn group_take(k: &mut Kernel, mmu: &Mmu, p: u64)
   requires kok(k) && p < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
+  fd_take(&mut k, p);                       // threads, and processes cloned with CLONE_FILES
   if pget(k.procs, p, F_TGID) == 0 || has_space(&mut k.spaces, p) {
     return;
   }
@@ -407,6 +407,9 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   let g = tgid(k.procs, pid);
   pset(&mut k.procs, g, F_TGID, g);
   wcopy(&mut k.procs, c * STRIDE, pid * STRIDE, STRIDE);
+  pset(&mut k.procs, c, F_FDNEXT, 0);      // the copy of the row says who shares with the creator
+  pset(&mut k.procs, c, F_FDHOLD, 0);
+  fd_join(&mut k, pid, c);                  // the group's descriptors
   pset(&mut k.procs, c, F_WAIT, 0);
   pset(&mut k.procs, c, F_CODE, 0);
   pset(&mut k.procs, c, F_TICKS, 0);
@@ -454,12 +457,13 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
 /// The clone flags a new process (not a thread, not a vfork) may carry:
 /// the exit signal, CLONE_PARENT, CLONE_PIDFD, the tid and TLS flags, and the ones
 /// that change nothing here (CLONE_SYSVSEM, CLONE_DETACHED, CLONE_IO).
+/// CLONE_FILES, which shares the descriptor table (fd_join).
 /// CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWCGROUP and CLONE_NEWNET give the
-/// child a mount, UTS, IPC, cgroup or network namespace of its own. Sharing files, the cwd, signal handlers or
+/// child a mount, UTS, IPC, cgroup or network namespace of its own. Sharing the cwd, signal handlers or
 /// memory with a separate process, and the other namespaces, are not
 /// supported.
 fn clone_proc_flags(flags: u64) -> bool {
-  let known = 0xff + CLONE_PARENT + CLONE_SYSVSEM + CLONE_SETTLS + CLONE_PARENT_SETTID + CLONE_PIDFD
+  let known = 0xff + CLONE_PARENT + CLONE_FILES + CLONE_SYSVSEM + CLONE_SETTLS + CLONE_PARENT_SETTID + CLONE_PIDFD
     + CLONE_CHILD_CLEARTID + CLONE_DETACHED + CLONE_CHILD_SETTID + CLONE_IO + CLONE_NEWNS
     + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWUSER + CLONE_NEWCGROUP + CLONE_NEWNET;
   return flags & known == flags;
@@ -521,6 +525,10 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
   if flags % 256 != SIGCHLD {
     pset(&mut k.procs, c, F_XSIG, flags % 256 + 1);   // the exit signal the parent gets
   }
+  if flags & CLONE_FILES != 0 {
+    lx_fd_close_all(&mut k, c, false);      // the copy fork made: the child has the parent's table instead
+    fd_join(&mut k, pid, c);
+  }
   if flags & CLONE_NEWNS != 0 {
     let e = ns_unshare(&mut k, c);          // cannot fail: ns_room said so
   }
@@ -563,14 +571,13 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
   return c;
 }
 
-const CLONE_FS: u64 = 0x200;
-const CLONE_FILES: u64 = 0x400;
 // CLONE_NEWNS, NEWCGROUP, NEWUTS, NEWIPC, NEWUSER, NEWPID, NEWNET and
 // NEWTIME: the namespaces.
 const CLONE_NEWALL: u64 = 0x7e020080;
 
-/// unshare(flags). A process (not a thread group) shares nothing with
-/// another one here, so unsharing its files, cwd, memory, signal handlers
+/// unshare(flags). CLONE_FILES gives the caller a copy of the descriptor
+/// table it shares. A process (not a thread group) shares nothing else with
+/// another one here, so unsharing its cwd, memory, signal handlers
 /// or semaphore undo list changes nothing. CLONE_NEWNS, CLONE_NEWUTS and
 /// CLONE_NEWIPC give it a mount, UTS or IPC namespace of its own
 /// (src/lxns.bastio, src/lxnsk.bastio). The other namespaces are not
@@ -598,8 +605,11 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
   }
   // A thread keeps its own working directory and root even when cloned with
   // CLONE_FS, so unsharing those has nothing left to do.
-  if flags != ns && flags != ns + CLONE_FS && pget(k.procs, pid, F_TGID) != 0 {
+  if flags & !(ns + CLONE_FS + CLONE_FILES) != 0 && pget(k.procs, pid, F_TGID) != 0 {
     return EINVAL;                          // threads that share them: not supported
+  }
+  if flags & CLONE_FILES != 0 && fd_next(k.procs, pid) != 0 && fd_top(k, pid) > nr_open(k) {
+    return EMFILE;                          // the copy would hold a descriptor past /proc/sys/fs/nr_open
   }
   if ns & CLONE_NEWNS != 0 && ns & (CLONE_NEWNET + CLONE_NEWUTS + CLONE_NEWIPC) != 0 && !ns_room(&mut k, pid) {
     return ENOMEM;                          // so the others are not made alone
@@ -626,6 +636,9 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
     if e != 0 {
       return e;
     }
+  }
+  if flags & CLONE_FILES != 0 {
+    fd_unshare(&mut k, pid);
   }
   let e = nsk_unshare(&mut k, pid, ns);     // src/lxnsk.bastio
   if e == 0 && ns & CLONE_NEWNS != 0 {

@@ -318,6 +318,13 @@ t_fdlock: F_SETLEASE and F_GETLEASE
 t_fdlock: F_SETOWN, F_SETOWN_EX and F_SETSIG set a description's owner
 t_fdlock: O_ASYNC on a pipe signals its owner when input arrives
 t_fdlock: a lock needs the matching access mode; bad requests are EINVAL
+t_fdshare: a descriptor the child closes is closed in the parent
+t_fdshare: a descriptor the child opens is open in the parent
+t_fdshare: after unshare(CLONE_FILES) the child's changes stay with it
+t_fdshare: close_range with CLOSE_RANGE_UNSHARE closes only the caller's copy
+t_fdshare: execve gives the program a table of its own
+t_fdshare: kcmp(KCMP_FILES) tells sharing processes from the rest
+t_fdshare: unshare(CLONE_FILES) is EMFILE past nr_open
 t_file: /dev/null write
 t_file: /dev/urandom read
 t_file: /dev/zero read

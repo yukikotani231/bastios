@@ -167,6 +167,8 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   drop_fpu(&mut k.mem, take_fpu(&mut k.fpus, c));
   put_fpu(&mut k.fpus, c, Fpu::State(fpu));
   wcopy(&mut k.procs, c * STRIDE, pid * STRIDE, STRIDE);
+  pset(&mut k.procs, c, F_FDNEXT, 0);       // its descriptors are its own copies
+  pset(&mut k.procs, c, F_FDHOLD, 0);
   pset(&mut k.procs, c, F_WAIT, 0);
   pset(&mut k.procs, c, F_CODE, 0);
   pset(&mut k.procs, c, F_TICKS, 0);
