@@ -225,6 +225,31 @@ fn regs_store(procs: &mut Buf, cpu: &Cpu, pid: u64, n: u64)
   ensures len(procs) == old(len(procs))
 {
   let base = pid * STRIDE + F_REGS;
+  if n == 21 && base + 21 <= len(procs) {
+    // The usual case, a whole context, without a loop's counting and bounds.
+    procs = set(procs, base + 0, cpu_get(cpu, 0));
+    procs = set(procs, base + 1, cpu_get(cpu, 1));
+    procs = set(procs, base + 2, cpu_get(cpu, 2));
+    procs = set(procs, base + 3, cpu_get(cpu, 3));
+    procs = set(procs, base + 4, cpu_get(cpu, 4));
+    procs = set(procs, base + 5, cpu_get(cpu, 5));
+    procs = set(procs, base + 6, cpu_get(cpu, 6));
+    procs = set(procs, base + 7, cpu_get(cpu, 7));
+    procs = set(procs, base + 8, cpu_get(cpu, 8));
+    procs = set(procs, base + 9, cpu_get(cpu, 9));
+    procs = set(procs, base + 10, cpu_get(cpu, 10));
+    procs = set(procs, base + 11, cpu_get(cpu, 11));
+    procs = set(procs, base + 12, cpu_get(cpu, 12));
+    procs = set(procs, base + 13, cpu_get(cpu, 13));
+    procs = set(procs, base + 14, cpu_get(cpu, 14));
+    procs = set(procs, base + 15, cpu_get(cpu, 15));
+    procs = set(procs, base + 16, cpu_get(cpu, 16));
+    procs = set(procs, base + 17, cpu_get(cpu, 17));
+    procs = set(procs, base + 18, cpu_get(cpu, 18));
+    procs = set(procs, base + 19, cpu_get(cpu, 19));
+    procs = set(procs, base + 20, cpu_get(cpu, 20));
+    return;
+  }
   if base + n <= len(procs) {
     let mut r = 0;
     while r < n
@@ -242,6 +267,27 @@ fn regs_load(cpu: &mut Cpu, procs: &Buf, pid: u64, n: u64)
   requires ptab_ok(procs) && pid < NPROC && n <= 18
 {
   let base = pid * STRIDE + F_REGS;
+  if n == 18 && base + 18 <= len(procs) {
+    cpu_set(&mut cpu, 0, get(procs, base + 0));
+    cpu_set(&mut cpu, 1, get(procs, base + 1));
+    cpu_set(&mut cpu, 2, get(procs, base + 2));
+    cpu_set(&mut cpu, 3, get(procs, base + 3));
+    cpu_set(&mut cpu, 4, get(procs, base + 4));
+    cpu_set(&mut cpu, 5, get(procs, base + 5));
+    cpu_set(&mut cpu, 6, get(procs, base + 6));
+    cpu_set(&mut cpu, 7, get(procs, base + 7));
+    cpu_set(&mut cpu, 8, get(procs, base + 8));
+    cpu_set(&mut cpu, 9, get(procs, base + 9));
+    cpu_set(&mut cpu, 10, get(procs, base + 10));
+    cpu_set(&mut cpu, 11, get(procs, base + 11));
+    cpu_set(&mut cpu, 12, get(procs, base + 12));
+    cpu_set(&mut cpu, 13, get(procs, base + 13));
+    cpu_set(&mut cpu, 14, get(procs, base + 14));
+    cpu_set(&mut cpu, 15, get(procs, base + 15));
+    cpu_set(&mut cpu, 16, get(procs, base + 16));
+    cpu_set(&mut cpu, 17, get(procs, base + 17));
+    return;
+  }
   if base + n <= len(procs) {
     let mut r = 0;
     while r < n
