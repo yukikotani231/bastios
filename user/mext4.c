@@ -3,6 +3,7 @@
  *   mext4 tree IMG DIR      mount IMG (type TYPE, default ext4) on DIR, check the tree
  *                           test/ext4img.py put in it, then unmount
  *   mext4 refuse IMG DIR    the mount must fail with EINVAL
+ *   mext4 fuzz IMG DIR N [SEED]  mount N mutated copies of IMG
  *
  * The tree: small (11 bytes, mode 0640, two names with dir/hard), big
  * (700000 bytes of a pattern), sparse (3 MiB, zero but for ten bytes at
@@ -156,8 +157,81 @@ static void tree(const char *d)
     check(rename(p, t) < 0 && errno == EROFS, "rename is refused");
 }
 
+/* Mounts mutated copies of IMG on DIR: a few bytes of the first 1 MiB (where an
+ * image's metadata is) changed each time, from a fixed seed. A mount may
+ * succeed or fail with any error, but must not hang or crash, and what is
+ * mounted must unmount and leave the directory empty. */
+static void fuzz(const char *img, const char *dir, int rounds, unsigned seed)
+{
+    unsigned char *b;
+    long n;
+    if (slurp(img, &b, &n) != 0) {
+        check(0, "fuzz: read the image");
+        return;
+    }
+    long span = n < (1 << 20) ? n : (1 << 20);
+    int mounted = 0;
+    unsigned char *w = malloc(n);
+    for (int r = 0; r < rounds; r++) {
+        memcpy(w, b, n);
+        seed = seed * 1103515245u + 12345u;
+        int flips = 1 + (seed >> 16) % 8;
+        for (int k = 0; k < flips; k++) {
+            seed = seed * 1103515245u + 12345u;
+            long at = ((seed >> 8) & 0xfffff) % span;
+            seed = seed * 1103515245u + 12345u;
+            /* Half the time a byte is made 0 or 0xff, which turns counts and
+             * offsets into extremes; otherwise it is flipped at random. */
+            switch ((seed >> 20) % 3) {
+            case 0: w[at] = 0; break;
+            case 1: w[at] = 0xff; break;
+            default: w[at] ^= 1 << ((seed >> 12) % 8);
+            }
+        }
+        int fd = open("/tmp/fz.img", O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        long off = 0;
+        while (fd >= 0 && off < n) {
+            long m = write(fd, w + off, n - off);
+            if (m <= 0)
+                break;
+            off += m;
+        }
+        if (fd >= 0)
+            close(fd);
+        if (off != n) {
+            check(0, "fuzz: write the copy");
+            break;
+        }
+        if (mount("/tmp/fz.img", dir, "ext4", MS_RDONLY, 0) == 0) {
+            mounted++;
+            /* Walk what was made: stat every name, read what is small. */
+            DIR *d = opendir(dir);
+            struct dirent *e;
+            while (d && (e = readdir(d))) {
+                char p[1024];
+                struct stat st;
+                snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+                stat(p, &st);
+            }
+            if (d)
+                closedir(d);
+            if (umount(dir) != 0) {
+                check(0, "fuzz: umount");
+                break;
+            }
+        }
+        unlink("/tmp/fz.img");
+    }
+    printf("mext4: fuzz %d rounds, %d mounted\n", rounds, mounted);
+}
+
 int main(int argc, char **argv)
 {
+    if (argc >= 5 && strcmp(argv[1], "fuzz") == 0) {
+        fuzz(argv[2], argv[3], atoi(argv[4]), argc > 5 ? atoi(argv[5]) : 1);
+        printf(bad ? "mext4: %d failed\n" : "mext4: clean\n", bad);
+        return bad != 0;
+    }
     if (argc < 4) {
         printf("usage: mext4 tree|refuse IMG DIR [TYPE]\n");
         return 2;

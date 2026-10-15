@@ -1927,6 +1927,7 @@ if subprocess.run([sys.executable, "test/ext4img.py", img_dir], stdout=subproces
         ("mkdir m; /disk/mext4 tree /disk/e2 m ext2", b"mext4: clean", b"\n# "),
         ("mkdir m; /disk/mext4 tree /disk/e4k m", b"mext4: clean", b"\n# "),
         ("for i in bz bs br bi; do mkdir m; /disk/mext4 refuse /disk/$i m; rmdir m; done", b"mext4: clean\r\nmext4: clean\r\nmext4: clean\r\nmext4: clean", b"\n# "),
+        ("mkdir fz; /disk/mext4 fuzz /disk/e4k fz 100 1", b"mext4: clean", b"\n# "),
         ("exit", b"", b"bastios> "),
     ], halt=True)
 else:
