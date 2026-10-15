@@ -1020,8 +1020,8 @@ fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
         return false;                       // not run until SIGCONT
       }
       if s == SIGKILL || (h == SIG_DFL && !dfl_ignores(s)) {
-        core_dump(&mut k, p, s);
-        terminate(&mut k, mmu, p, SIG_DEATH + s);
+        let dumped = core_dump(&mut k, p, s);
+        terminate(&mut k, mmu, p, death_code(s, dumped));
         return false;
       }
       if h != SIG_DFL && h != SIG_IGN {
@@ -1031,8 +1031,8 @@ fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
           // (on the normal stack) may still catch.
           let segv = sa_get(k.sigact, p, SIGSEGV, 0);
           if s == SIGSEGV || segv == SIG_DFL || segv == SIG_IGN {
-            core_dump(&mut k, p, SIGSEGV);
-            terminate(&mut k, mmu, p, SIG_DEATH + SIGSEGV);
+            let dumped = core_dump(&mut k, p, SIGSEGV);
+            terminate(&mut k, mmu, p, death_code(SIGSEGV, dumped));
             return false;
           }
           pset(&mut k.procs, p, F_SIGMASK, pget(k.procs, p, F_SIGMASK) & !sbit(SIGSEGV));

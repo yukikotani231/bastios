@@ -123,17 +123,18 @@ fn core_note(x: &mut Bytes, at: u64, ty: u64, dlen: u64)
 }
 
 /// Writes the core file of process p, dying of signal s (taking the
-/// registers of p and the pages of its thread group).
-fn core_dump(k: &mut Kernel, p: u64, s: u64)
+/// registers of p and the pages of its thread group). True if it wrote one,
+/// which the wait status then says (WCOREDUMP).
+fn core_dump(k: &mut Kernel, p: u64, s: u64) -> bool
   requires kok(k) && 1 <= p && p < NPROC
   ensures kok(k)
 {
   if !core_signal(s) || EM_NATIVE != 62 {
-    return;                                 // (the aarch64 notes are not written yet)
+    return false;                           // (the aarch64 notes are not written yet)
   }
   let lim = rl_cur(k, p, RLIMIT_CORE);
   if lim == 0 {
-    return;
+    return false;
   }
   let g = tgid(k.procs, p);
   let mut runs = balloc(CORE_MAX * 24);
@@ -160,16 +161,17 @@ fn core_dump(k: &mut Kernel, p: u64, s: u64)
     bfree(runs);
     bfree(aux);
     bfree(cm);
-    return;
+    return false;
   }
   let fd = lx_open_n(&mut k, p, n, LO_CREAT + LO_TRUNC + 1, 384);
   if fd >= LXNFD {
     bfree(runs);
     bfree(aux);
     bfree(cm);
-    return;
+    return false;
   }
   let row = fd_look(k, p, fd);
+  let mut dumped = false;
   if row.kind == K_FILE {
     // The headers.
     xfer_zero(&mut k, XFER);
@@ -274,6 +276,7 @@ fn core_dump(k: &mut Kernel, p: u64, s: u64)
       tries0 = tries0 + 1;
     }
     if w == CORE_HDR {
+      dumped = true;
       // The segments' data, a page at a time, as far as the limit lets it.
       let tp = fd_row(&mut k, g);
       let mut done = CORE_HDR;
@@ -322,4 +325,18 @@ fn core_dump(k: &mut Kernel, p: u64, s: u64)
   bfree(runs);
   bfree(aux);
   bfree(cm);
+  return dumped;
+}
+
+/// The F_CODE of a process the signal s ended: SIG_DEATH + s, plus 128 when
+/// it left a core file (the signal stays code % 128; code / 128 % 2 is the
+/// core flag).
+fn death_code(s: u64, dumped: bool) -> u64
+  requires s < 128
+  ensures result % 128 == s
+{
+  if dumped {
+    return SIG_DEATH + 128 + s;
+  }
+  return SIG_DEATH + s;
 }
