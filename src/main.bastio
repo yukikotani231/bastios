@@ -1399,7 +1399,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     put_num(&mut con, nic_why(nic));
     puts(&mut con, ", see docs/cloud.md)\r\n");
   } else if !nic_live(nic) {
-    puts(&mut con, "net: none (drivers: virtio, e1000 and ena only)\r\n");
+    puts(&mut con, "net: none (drivers: virtio, e1000, rtl8168 and ena only)\r\n");
   }
   // The hardware report, with the boot option `diag` (src/info.bastio),
   // after a line for each thing the boot log above says nothing about.
