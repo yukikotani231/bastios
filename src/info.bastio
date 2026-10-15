@@ -573,6 +573,10 @@ fn put_driver(con: &mut Con, vendor: u64, device: u64, cls: u64)
     puts(&mut con, " HD Audio sound");
   } else if cls / 256 == 0x0401 {
     puts(&mut con, " sound (AC'97): no driver");
+  } else if cls / 256 == 0x0104 {
+    puts(&mut con, " storage (RAID mode, e.g. Intel RST): no driver; disks behind it are hidden, so set the SATA mode to AHCI in the firmware");
+  } else if vendor == 0x8086 && cls / 256 == 0x0805 && (device == 0x9A0B || device == 0x467F || device == 0xA77F || device == 0x7D0B) {
+    puts(&mut con, " Intel VMD: no driver; NVMe drives behind it are hidden, so turn VMD off in the firmware");
   } else if cls / 65536 == 1 {
     puts(&mut con, " storage: no driver");
   } else if cls / 65536 == 2 {

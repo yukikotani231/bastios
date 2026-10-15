@@ -25,9 +25,10 @@ import "blkconst.bastio";
 import "core/ring.bastio";
 
 const CBLOCK: u64 = 4096;            // a block
-const NC: u64 = 256;                  // cache slots (1 MiB: more than BusyBox, re-read on each exec at 256 KiB)
+const NC: u64 = 8192;                 // the most cache slots (32 MiB)
+const NC_STD: u64 = 256;              // slots by default (1 MiB: more than BusyBox, re-read on each exec at 256 KiB)
 const NC_MIN: u64 = 16;               // slots of a disk with no file system (an unused loop mount)
-const NH: u64 = 256;                  // hash buckets over the block numbers the slots hold
+const NH: u64 = 4096;                 // hash buckets over the block numbers the slots hold
 const NQ: u64 = 128;                  // queued operations
 const QW: u64 = 3;                    // words per operation: kind, slot, block
 const DQ_NONE: u64 = 18446744073709551615;
@@ -71,6 +72,12 @@ struct DiskQ {
   done: u64,            // the last transaction finished
   moved: u64,           // counts operations finished, so sleepers know to look again
   dead: bool,           // a command failed or never finished: the disk is not used again
+  // Counts for /proc/diskstats, modulo 2^62: blocks and commands finished,
+  // ticks (10 ms) the commands ran, and how long processes slept in DISKWAIT.
+  rd_blk: u64, rd_cmd: u64, rd_tk: u64,
+  wr_blk: u64, wr_cmd: u64, wr_tk: u64,
+  fl_cmd: u64, fl_tk: u64,
+  w_wakes: u64, w_tk: u64, w_last: u64,
   good: u64,            // once dead: the last transaction that finished before it died
 }
 
@@ -81,12 +88,29 @@ spec fn dq_ok(q: &DiskQ) -> bool {
   && ring_ok(q.r) && q.r.cap == NQ && q.hand < q.nc && q.batch >= 1 && q.batch <= VIO_BATCH
 }
 
+/// How many cache slots a machine with `pages` pages of memory gets: a
+/// 128th of its memory in bytes, so the cache is an eighth of the kernel's
+/// heap extension (a 16th of memory), between NC_STD and NC.
+fn dq_slots_for(pages: u64) -> u64
+  ensures result >= NC_STD && result <= NC
+{
+  let s = pages / 128;
+  if s < NC_STD {
+    return NC_STD;
+  }
+  if s > NC {
+    return NC;
+  }
+  return s;
+}
+
 fn dq_new(nc: u64) -> DiskQ
   requires nc >= NC_MIN && nc <= NC
   ensures dq_ok(result)
 {
   let mut q = DiskQ { nc: nc, cache: balloc(nc * CBLOCK), tag: alloc(nc), st: alloc(nc), hh: alloc(NH), hn: alloc(nc), hk: alloc(nc), q: alloc(NQ * QW),
-    r: ring_new(NQ), running: false, batch: 1, since: 0, hand: 0, next: 1, done: 0, moved: 0, dead: false, good: 0 };
+    r: ring_new(NQ), running: false, batch: 1, since: 0, hand: 0, next: 1, done: 0, moved: 0, dead: false, rd_blk: 0, rd_cmd: 0, rd_tk: 0, wr_blk: 0, wr_cmd: 0, wr_tk: 0,
+    fl_cmd: 0, fl_tk: 0, w_wakes: 0, w_tk: 0, w_last: 0, good: 0 };
   let mut i = 0;
   while i < nc
     invariant i <= nc && dq_ok(q)
@@ -468,6 +492,30 @@ fn dq_end(q: &mut DiskQ) -> u64
   return t;
 }
 
+/// Counts a finished device command of `kind` that moved `blocks` blocks,
+/// started at tick `since`, now `now`.
+fn dq_count(q: &mut DiskQ, kind: u64, blocks: u64, since: u64, now: u64)
+  requires dq_ok(q) && blocks <= VIO_BATCH
+  ensures dq_ok(q)
+{
+  let mut t = 0;
+  if now > since {
+    t = (now - since) % 0x4000000000000000;
+  }
+  if kind == Q_READ {
+    q.rd_blk = (q.rd_blk % 0x4000000000000000 + blocks) % 0x4000000000000000;
+    q.rd_cmd = (q.rd_cmd % 0x4000000000000000 + 1) % 0x4000000000000000;
+    q.rd_tk = (q.rd_tk % 0x4000000000000000 + t) % 0x4000000000000000;
+  } else if kind == Q_WRITE {
+    q.wr_blk = (q.wr_blk % 0x4000000000000000 + blocks) % 0x4000000000000000;
+    q.wr_cmd = (q.wr_cmd % 0x4000000000000000 + 1) % 0x4000000000000000;
+    q.wr_tk = (q.wr_tk % 0x4000000000000000 + t) % 0x4000000000000000;
+  } else if kind == Q_FLUSH {
+    q.fl_cmd = (q.fl_cmd % 0x4000000000000000 + 1) % 0x4000000000000000;
+    q.fl_tk = (q.fl_tk % 0x4000000000000000 + t) % 0x4000000000000000;
+  }
+}
+
 /// Drops the head operation.
 fn dq_pop(q: &mut DiskQ)
   requires dq_ok(q) && q.r.n > 0
@@ -515,6 +563,9 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
     }
     if r != BIO_OK {
       dq_kill(&mut q);
+    }
+    if r == BIO_OK {
+      dq_count(&mut q, kind, q.batch, q.since, now);
     }
     if q.batch > 1 {
       // A batched read (blk_begin_n): its blocks go to the slots of the

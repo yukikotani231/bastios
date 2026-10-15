@@ -1,0 +1,54 @@
+# The labels of this repository. .github/workflows/labels.yml creates or
+# updates them when this file changes on main; labels not listed here are left
+# alone. See CONTRIBUTING.md ("Finding something to work on").
+- name: good first issue
+  color: 7057ff
+  description: Small, well-scoped, and the issue says where to start
+- name: help wanted
+  color: 008672
+  description: Open for anyone; larger than a first issue
+- name: bug
+  color: d73a4a
+  description: Something does not work as documented
+- name: enhancement
+  color: a2eeef
+  description: A new feature or an improvement
+- name: documentation
+  color: 0075ca
+  description: Docs, tutorials, examples and comments
+- name: question
+  color: d876e3
+  description: A question about using or changing the project
+- name: area/kernel
+  color: c5def5
+  description: Scheduler, memory, processes and the proofs about them
+- name: area/linux-abi
+  color: c5def5
+  description: System calls and running unmodified Linux programs
+- name: area/drivers
+  color: c5def5
+  description: Disks, network cards, USB and other devices
+- name: area/net
+  color: c5def5
+  description: The network stack
+- name: area/fs
+  color: c5def5
+  description: File systems and the page cache
+- name: area/boot
+  color: c5def5
+  description: boot/, the trusted assembly and C
+- name: area/arm64
+  color: c5def5
+  description: The AArch64 port
+- name: area/tests
+  color: c5def5
+  description: The shell tests and the compatibility suite
+- name: area/ci
+  color: c5def5
+  description: Workflows and build scripts
+- name: performance
+  color: fbca04
+  description: Speed of the kernel or its build
+- name: real hardware
+  color: fbca04
+  description: Needs a physical machine to reproduce or verify

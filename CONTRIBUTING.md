@@ -9,7 +9,15 @@ Thanks for your interest. BastiOS is pre-release and moves together with [bastio
 - You need the same tools as for a build: Rust, Z3, a C compiler, QEMU and musl-gcc, with bastiolang checked out next to this repository (see [Getting started](docs/getting-started.md#1-build)).
 - A change that needs a language feature or a compiler fix goes to [bastiolang](https://github.com/yukikotani231/bastiolang) first; say so in the pull request.
 
+To set up a machine in one command (Debian or Ubuntu), run `tools/setup-dev.sh`: it installs the tools, checks out bastiolang next to this repository and builds its compiler, builds the kernel and boots it once. The repository also has a [dev container](.devcontainer/devcontainer.json) that runs it for you, in VS Code or GitHub Codespaces.
+
 Bugs and ideas go in the issue tracker. For a crash or a hang, include the commit, the QEMU command line (or the hardware), and the console log. A security problem goes through [SECURITY.md](SECURITY.md), not an issue.
+
+## Finding something to work on
+
+Issues labelled [`good first issue`](https://github.com/yukikotani231/bastios/labels/good%20first%20issue) are small and say where to start and how to know you are done. [`help wanted`](https://github.com/yukikotani231/bastios/labels/help%20wanted) marks larger work that is open to anyone. Comment on the issue before you start, so two people do not do the same thing. The other labels name the area (`area/kernel`, `area/drivers`, `area/linux-abi`, ...) or the kind of change (`bug`, `enhancement`, `documentation`, `performance`); `.github/labels.yml` is the list. Most work does not need hardware beyond QEMU; issues that do are labelled `real hardware`.
+
+A change that is not tied to an issue is welcome too, when it is small. For anything that adds to the trusted base (`boot/`, the compiler's preludes), open an issue first.
 
 ## Before you send a pull request
 
