@@ -171,6 +171,33 @@ fn wset(t: &mut Buf, i: u64, v: u64)
   }
 }
 
+/// Copies n words from index src to index dst of t, a word at a time as
+/// wget and wset would: one past the end reads as 0 and a write there
+/// changes nothing. When both ranges lie inside the buffer, which is the
+/// usual case, the bounds are checked once, not per word.
+fn wcopy(t: &mut Buf, dst: u64, src: u64, n: u64)
+  requires dst <= 1099511627776 && src <= 1099511627776 && n <= 1048576
+  ensures len(t) == old(len(t))
+{
+  let l = len(t);
+  let mut i = 0;
+  if src + n <= l && dst + n <= l {
+    while i < n
+      invariant i <= n && len(t) == l && src + n <= l && dst + n <= l
+    {
+      t = set(t, dst + i, get(t, src + i));
+      i = i + 1;
+    }
+  } else {
+    while i < n
+      invariant i <= n && len(t) == l
+    {
+      wset(&mut t, dst + i, wget(t, src + i));
+      i = i + 1;
+    }
+  }
+}
+
 fn pget(procs: &Buf, pid: u64, f: u64) -> u64
   requires ptab_ok(procs) && pid < NPROC && f < STRIDE
 {
