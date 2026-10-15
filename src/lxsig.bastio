@@ -265,6 +265,14 @@ fn jc_stop(k: &mut Kernel, p: u64, s: u64)
 {
   pset(&mut k.procs, p, F_STATE, STOPPED);
   jc_set(&mut k, p, s + JC_STOP + jc_get(k, p) / JC_EXECED % 2 * JC_EXECED);
+  let w = tr_get(k, p);
+  if w % 65536 != 0 && tr_opt(w) / 512 % 2 == 1 {
+    // A seized tracee's group-stop is a ptrace-stop too, reported as
+    // PTRACE_EVENT_STOP with the stop signal; PTRACE_LISTEN keeps it a group-stop.
+    tr2_put(&mut k, p, tr2_get(k, p) % TS_EV + EV_STOP * TS_EV);
+    tr_put(&mut k, p, tr_make(w % 65536, tr_att(w), 1, 0, s, tr_opt(w)));
+    tr_tell(&mut k, p);
+  }
   jc_tell(&mut k, p);
 }
 
@@ -331,7 +339,12 @@ fn post_w(k: &mut Kernel, p: u64, s: u64, word: u64)
   // pending stops; a stop signal drops a pending SIGCONT.
   if s == SIGCONT {
     pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) & !(sbit(SIGSTOP) | sbit(SIGTSTP) | sbit(SIGTTIN) | sbit(SIGTTOU)));
-    if st == STOPPED && tr_stopped(tr_get(k, p)) == 0 {
+    if st == STOPPED && tr_stopped(tr_get(k, p)) == 0 && tr2_get(k, p) / TS_LISTEN % 2 == 1 {
+      // PTRACE_LISTEN: SIGCONT ends the group-stop with an event stop (SIGTRAP and
+      // PTRACE_EVENT_STOP), and the tracer resumes the tracee from there.
+      tr2_put(&mut k, p, tr2_get(k, p) % TS_EV + EV_STOP * TS_EV);
+      tr_stop(&mut k, p, 5);
+    } else if st == STOPPED && tr_stopped(tr_get(k, p)) == 0 {
       pset(&mut k.procs, p, F_STATE, READY);
       jc_set(&mut k, p, JC_CONT + jc_get(k, p) / JC_EXECED % 2 * JC_EXECED);
       jc_tell(&mut k, p);
@@ -1211,10 +1224,16 @@ fn fault_caught(k: &mut Kernel, p: u64, s: u64, addr: u64, code: u64) -> bool
 {
   let h = sa_get(k.sigact, p, s, 0);
   let masked = has_sig(pget(k.procs, p, F_SIGMASK), s);
-  // A traced process stops for the signal, handler or not (src/lxptrace.bastio).
-  let traced = tr_tracer(k, p) != 0 && !masked;
+  // A traced process stops for the signal, handler or not, even a blocked
+  // one: as on Linux a processor exception forces its signal (a single step
+  // inside musl's raise runs with every signal blocked)
+  // (src/lxptrace.bastio).
+  let traced = tr_tracer(k, p) != 0;
   if (h == SIG_DFL || h == SIG_IGN || masked) && !traced {
     return false;
+  }
+  if masked {
+    pset(&mut k.procs, p, F_SIGMASK, pget(k.procs, p, F_SIGMASK) & !sbit(s));
   }
   pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
   wset(&mut k.sigsave, sender_at(p, s), FAULT_MARK + (code % 256) * FAULT_CODE + addr % FAULT_CODE);
