@@ -1,6 +1,7 @@
 // Device files for Linux programs: /dev/null, /dev/zero, /dev/random,
 // /dev/urandom and /dev/tty, the loop devices (src/lxloop.bastio), /dev/dsp
 // (src/lxsnd.bastio), /dev/input/mice and /dev/psaux (src/lxmouse.bastio),
+// /dev/ttyUSB0 and /dev/ttyACM0 (src/lxserial.bastio),
 // and /dev
 // itself as a directory to stat.
 // Opening one makes an open file description of kind OF_DEV whose x is the
@@ -46,6 +47,9 @@ fn dev_at(x: &Bytes, n: u64) -> u64
   if xfer_is(x, 0, n, "dev/input/mice") || xfer_is(x, 0, n, "dev/psaux") {
     return DEV_MICE;                        // src/lxmouse.bastio
   }
+  if xfer_is(x, 0, n, "dev/ttyUSB0") || xfer_is(x, 0, n, "dev/ttyACM0") {
+    return DEV_SER;                         // src/lxserial.bastio
+  }
   if xfer_is(x, 0, n, "dev/ptmx") {
     return DEV_PTMX;
   }
@@ -85,6 +89,9 @@ fn dev_rdev(d: u64) -> u64 {
   if d == DEV_MICE {
     return 0xD3F;                           // 13:63, /dev/input/mice
   }
+  if d == DEV_SER {
+    return 0xBC00;                          // 188:0, /dev/ttyUSB0 (an ACM port is 166:0)
+  }
   return 0;
 }
 
@@ -113,6 +120,9 @@ fn rdev_dev(rdev: u64) -> u64 {
   }
   if rdev == 0xD3F || rdev == 0xA01 {
     return DEV_MICE;                        // /dev/input/mice, /dev/psaux (10:1)
+  }
+  if rdev == 0xBC00 || rdev == 0xA600 {
+    return DEV_SER;                         // /dev/ttyUSB0 (188:0), /dev/ttyACM0 (166:0)
   }
   return DEV_NONE;
 }

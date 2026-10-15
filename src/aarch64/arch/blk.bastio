@@ -77,7 +77,7 @@ fn blk_free(win: &mut MmioSpace, b: Blk, m: &mut Mem)
 /// from a USB mouse there (MOUSE_PKT plus its bytes), or 256.
 fn blk_kbd_poll(b: &mut Blk) -> u64
   requires blk_ok(b)
-  ensures blk_ok(b) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT))
+  ensures blk_ok(b) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT) || (result >= SER_PKT && result < SER_PKT + 256))
 {
   match b {
     Blk::Loop(l) => { b = Blk::Loop(l); return 256; },
@@ -105,6 +105,21 @@ fn blk_mouse(b: &Blk) -> bool {
     Blk::Nvme(n) => { return false; },
     Blk::Usb(x) => { return false; },
   }
+}
+
+/// No USB serial port is used on this architecture.
+fn blk_ser(b: &Blk) -> u64
+  ensures result <= SER_ACM
+{
+  return SER_NONE;
+}
+
+/// Sends nothing: no USB serial port is used on this architecture.
+fn blk_ser_send(b: &mut Blk, src: &Bytes, n: u64) -> u64
+  requires blk_ok(b)
+  ensures blk_ok(b) && result <= n && result <= blen(src)
+{
+  return 0;
 }
 
 /// The disk's size in sectors (0 if there is none).

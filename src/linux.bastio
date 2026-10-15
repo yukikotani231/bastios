@@ -379,6 +379,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if d.kind == K_DEV && d.x == DEV_MICE {
       return mice_read(&mut k, pid, n, a, va, cnt);   // src/lxmouse.bastio
     }
+    if d.kind == K_DEV && d.x == DEV_SER {
+      return ser_read(&mut k, pid, n, a, va, cnt);    // src/lxserial.bastio
+    }
     let mut r = EBADF;
     if d.kind == K_FILE {
       r = lx_file_read(&mut k, pid, d.x, va, cnt);
@@ -1082,6 +1085,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   if d.kind == K_DEV && d.x == DEV_DSP {
     return dsp_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxsnd.bastio
   }
+  if d.kind == K_DEV && d.x == DEV_SER {
+    return ser_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxserial.bastio
+  }
   if d.kind == K_SOCK && (req == SIOCATMARK || req == SIOCGIFNAME || (req >= SIOCGIFCONF && req <= SIOCGIFADDR) || req == SIOCSIFNAME || req == SIOCGIFINDEX
     || req == SIOCGIFMTU || req == SIOCGIFTXQLEN || req == SIOCGIFBRDADDR || req == SIOCGIFNETMASK || req == SIOCGIFHWADDR) {
     return sock_ioctl(&mut k, pid, fd, req, arg);
@@ -1652,6 +1658,9 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
   }
   if d.kind == K_DEV && d.x == DEV_MICE {
     return mice_write(&mut k, pid, va, n);  // mouse commands (src/lxmouse.bastio)
+  }
+  if d.kind == K_DEV && d.x == DEV_SER {
+    return ser_write(&mut k, pid, va, n);   // src/lxserial.bastio
   }
   if d.kind == K_DEV && is_mem_file(d.x) {
     return mem_io(&mut k, pid, fd, d.x, va, n, true);   // /proc/PID/mem (src/lxprocfs.bastio)

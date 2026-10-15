@@ -65,9 +65,9 @@ import "bio.bastio";
 import "blkconst.bastio";
 
 const XHCI_CLASS: u64 = 0x0C0330;      // serial bus controller, USB, xHCI
-const XHCI_PAGES: u64 = 11;
-const USB_AT: u64 = 32;                // the controller's pages: 32 .. 42
-const XHCI_SLOTS: u64 = 5;             // the keyboard's, the mouse's, the disk's, and two hubs'
+const XHCI_PAGES: u64 = 13;
+const USB_AT: u64 = 32;                // the controller's pages: 32 .. 44
+const XHCI_SLOTS: u64 = 6;             // the keyboard's, the mouse's, the disk's, the serial port's, and two hubs'
 const MQ_N: u64 = 16;                  // mouse packets kept, not yet taken
 const XHCI_DEPTH: u64 = 2;             // hubs followed: one on a root port, and one on that
 const XHCI_MAX_LEN: u64 = 0x100000;    // registers claimed: the BAR, up to 1 MiB
@@ -77,6 +77,12 @@ const XHCI_SETTLE_MS: u64 = 1000;
 const XHCI_TRIES: u64 = 8;             // the most controllers looked at      // the longest wait for devices to show up on the ports
 const RING_N: u64 = 64;
 const EVT_N: u64 = 252;                // event ring TRBs: offsets 64 .. 4096
+const SQ_N: u64 = 1024;                // serial bytes received, not yet taken
+const SER_IN_RING: u64 = 1024;         // in the serial page: the bulk OUT ring is at 0, the IN ring here,
+const SER_TX_BUF: u64 = 2048;          // the bytes being sent (at most SER_TX_MAX),
+const SER_RX_BUF: u64 = 2560;          // and the packet received (at most SER_RX_MAX)
+const SER_TX_MAX: u64 = 512;
+const SER_RX_MAX: u64 = 512;
 const RAW_AT: u64 = 3072;              // the control-transfer data area
 const RAW_LEN: u64 = 1024;
 const CBW_AT: u64 = 1024;              // in the bulk page
@@ -156,10 +162,29 @@ const SCSI_READ: u64 = 0x28;
 const SCSI_WRITE: u64 = 0x2A;
 const SCSI_SYNC: u64 = 0x35;
 
+/// The serial port (an FTDI adapter or a CDC-ACM device): one packet at a
+/// time is kept queued on its bulk IN endpoint, and one write at a time on
+/// its OUT endpoint.
+struct SerPort {
+  kind: u64,          // SER_NONE, SER_FTDI or SER_ACM
+  slot: u8,
+  in_dci: u64,
+  out_dci: u64,
+  in_at: u64,         // the IN and OUT rings' positions
+  out_at: u64,
+  e0: u64,            // its control ring's
+  mps: u64,           // the IN endpoint's packet size: the length of each transfer queued on it
+  q: Bytes,           // bytes received, not yet taken
+  qn: u64,
+  wait: bool,         // is the IN endpoint idle, for lack of room in q?
+  tx_busy: bool,      // is a write on the OUT ring?
+  dead: bool,         // did a transfer fail? The port is then ignored
+}
+
 struct Xhci {
   regs: Mmio,
   dcbaa: Dma, cmd: Dma, evt: Dma, ctx: Dma, ctx2: Dma, inp: Dma, ep0: Dma, intr: Dma,
-  bulk: Dma, data: Dma, ctx3: Dma,
+  bulk: Dma, data: Dma, ctx3: Dma, ctx4: Dma, ser: Dma,
   sps: Vec[Dma],      // the scratchpad pages
   op: u64,            // where the operational registers start
   rt: u64,            // the runtime registers
@@ -212,6 +237,7 @@ struct Xhci {
   dcc: u64,           // how: the completion code
   bop: u64,           // what it is: BIO_READ, BIO_WRITE or BIO_FLUSH
   irq: bool,          // do events raise an interrupt (MSI-X)?
+  sp: SerPort,         // the serial port
 }
 
 spec fn xhci_ok(x: &Xhci) -> bool {
@@ -222,6 +248,8 @@ spec fn xhci_ok(x: &Xhci) -> bool {
   && (x.csz == 32 || x.csz == 64)
   && x.cmd_at < RING_N * 2 && x.e0a < RING_N * 2 && x.e0b < RING_N * 2
   && x.e0c < RING_N * 2 && x.e0d < RING_N * 2 && x.e0e < RING_N * 2 && x.int_at < RING_N * 2
+  && x.sp.e0 < RING_N * 2 && x.sp.in_at < RING_N * 2 && x.sp.out_at < RING_N * 2 && x.sp.in_dci < 32 && x.sp.out_dci < 32
+  && x.sp.mps <= SER_RX_MAX && x.sp.kind <= SER_ACM && blen(x.sp.q) == SQ_N && x.sp.qn <= SQ_N
   && x.m_at < RING_N * 2 && x.mdci < 32 && blen(x.mq) == MQ_N * 4 && x.mqn <= MQ_N && x.mbtn < 8
   && x.evt_at < EVT_N * 2 && x.out_at < RING_N * 2 && x.in_at < RING_N * 2
   && x.dci < 32 && x.dout < 32 && x.din < 32
@@ -345,6 +373,19 @@ fn evt_step(x: &mut Xhci) -> u64
       mouse_queue(&mut x);
       return EV_TAKEN;
     }
+    if x.sp.kind != SER_NONE && s == cast[u64](x.sp.slot) {
+      if e == x.sp.in_dci {
+        ser_rx(&mut x, cc, cast[u64](x.ev_s & 0xFFFFFF));
+        return EV_TAKEN;
+      }
+      if e == x.sp.out_dci {
+        x.sp.tx_busy = false;
+        if cc != CC_SUCCESS && cc != CC_SHORT {
+          x.sp.dead = true;
+        }
+        return EV_TAKEN;
+      }
+    }
     // Only data coming in and the status wrapper ask for an event; any
     // other comes from an error, which ends the command too.
     if x.busy && s == cast[u64](x.ds) && (e == x.din || e == x.dout) {
@@ -394,12 +435,14 @@ fn xhci_command(x: &mut Xhci, p: u64, c: u32) -> bool
   return evt_wait(&mut x, TRB_COMMAND_EV, 0) == CC_SUCCESS;
 }
 
-/// Puts a TRB on the control ring of slot `slot` (1 to 5).
+/// Puts a TRB on the control ring of slot `slot` (1 to 6).
 fn ep0_put(x: &mut Xhci, slot: u64, p: u64, s: u32, c: u32)
   requires xhci_ok(x)
   ensures xhci_ok(x)
 {
-  if slot == 5 {
+  if slot == 6 {
+    x.sp.e0 = trb_put(&mut x.ctx4, 2048, x.sp.e0, p, s, c);
+  } else if slot == 5 {
     x.e0e = trb_put(&mut x.ctx3, 2048, x.e0e, p, s, c);
   } else if slot == 4 {
     x.e0d = trb_put(&mut x.ep0, 3072, x.e0d, p, s, c);
@@ -529,12 +572,16 @@ fn dev_attach(x: &mut Xhci, p: u64, route: u64, tt: u64, speed: u64, depth: u64)
     return false;
   }
   // The device context: half a page of ctx or ctx2. The control ring: a
-  // quarter of ep0. Slot 5 has both in ctx3.
+  // quarter of ep0. Slots 5 and 6 have both in ctx3 and ctx4.
   let half = ((s - 1) % 2) * 2048;
   let mut ca = dma_phys(x.ctx) + half;
   let quarter = ((s - 1) % 4) * 1024;
   let mut ea = dma_phys(x.ep0) + quarter;
-  if s == 5 {
+  if s == 6 {
+    zero_page(&mut x.ctx4, 0, 3072);
+    ca = dma_phys(x.ctx4);
+    ea = ca + 2048;
+  } else if s == 5 {
     zero_page(&mut x.ctx3, 0, 3072);
     ca = dma_phys(x.ctx3);
     ea = ca + 2048;
@@ -545,7 +592,7 @@ fn dev_attach(x: &mut Xhci, p: u64, route: u64, tt: u64, speed: u64, depth: u64)
     ca = dma_phys(x.ctx2) + half;
   }
   zero_page(&mut x.inp, 0, 4096);
-  if s != 5 {
+  if s <= 4 {
     zero_page(&mut x.ep0, quarter, quarter + 1024);
   }
   if s == 1 {
@@ -556,8 +603,10 @@ fn dev_attach(x: &mut Xhci, p: u64, route: u64, tt: u64, speed: u64, depth: u64)
     x.e0c = 1;
   } else if s == 4 {
     x.e0d = 1;
-  } else {
+  } else if s == 5 {
     x.e0e = 1;
+  } else {
+    x.sp.e0 = 1;
   }
   dma_write64(&mut x.dcbaa, s * 8, ca);
   // Address the device: the slot and its default control endpoint.
@@ -591,9 +640,16 @@ fn dev_attach(x: &mut Xhci, p: u64, route: u64, tt: u64, speed: u64, depth: u64)
       return dev_detach(&mut x, s);
     }
   }
+  // The vendor, to tell an FTDI adapter (whose interface is vendor-specific).
+  let mut vid = 0;
+  if xhci_control(&mut x, s, 0x0012000001000680, 18, true) {
+    vid = raw(&mut x, 8) + raw(&mut x, 9) * 256;
+  }
   // The configuration: a boot keyboard or boot mouse interface and its
   // interrupt IN endpoint, or a SCSI bulk-only mass-storage interface and
-  // its two bulk endpoints.
+  // its two bulk endpoints, or the bulk endpoints of a serial port: an FTDI
+  // adapter's vendor interface or a CDC data interface (with the CDC
+  // control interface's number, to raise DTR).
   if !xhci_control(&mut x, s, 0x0200000002000680, 512, true) {
     return dev_detach(&mut x, s);
   }
@@ -612,6 +668,14 @@ fn dev_attach(x: &mut Xhci, p: u64, route: u64, tt: u64, speed: u64, depth: u64)
   let mut eout = 0;
   let mut mpin = 0;
   let mut mpout = 0;
+  let mut sface = 256;                // the serial port's data interface
+  let mut cface = 256;                // and the CDC control interface (ACM)
+  let mut skind = SER_NONE;
+  let mut sin = 0;
+  let mut sout = 0;
+  let mut spin = 0;
+  let mut spout = 0;
+  let mut in_ser = false;
   let mut i = 0;
   let mut in_kbd = false;
   let mut in_mouse = false;
@@ -620,6 +684,7 @@ fn dev_attach(x: &mut Xhci, p: u64, route: u64, tt: u64, speed: u64, depth: u64)
   while i < total && i < 512
     invariant xhci_ok(x) && iface <= 256 && ep < 16 && emps < 2048 && ival <= 255
     invariant miface <= 256 && ein < 16 && eout < 16 && mpin < 2048 && mpout < 2048
+    invariant sface <= 256 && cface <= 256 && skind <= SER_ACM && sin < 16 && sout < 16 && spin < 2048 && spout < 2048
     invariant riface <= 256 && rep < 16 && rmps < 2048 && rival <= 255
   {
     let dl = raw(&mut x, i);
@@ -646,6 +711,18 @@ fn dev_attach(x: &mut Xhci, p: u64, route: u64, tt: u64, speed: u64, depth: u64)
         if class == 9 {
           hub = true;
         }
+        if class == 2 && sub == 2 && cface == 256 {
+          cface = raw(&mut x, i + 2);
+        }
+        let inum = raw(&mut x, i + 2);
+        in_ser = ((class == 255 && vid == 0x0403) || class == 10) && x.sp.kind == SER_NONE && (sface == 256 || sface == inum);
+        if in_ser {
+          sface = inum;
+          skind = SER_FTDI;
+          if class == 10 {
+            skind = SER_ACM;
+          }
+        }
       } else if ty == 5 {
         let addr = raw(&mut x, i + 2);
         let attr = raw(&mut x, i + 3) & 3;
@@ -669,6 +746,15 @@ fn dev_attach(x: &mut Xhci, p: u64, route: u64, tt: u64, speed: u64, depth: u64)
             mpout = size;
           }
         }
+        if in_ser && attr == 2 {
+          if addr >= 128 && sin == 0 {
+            sin = addr & 15;
+            spin = size;
+          } else if addr < 128 && sout == 0 {
+            sout = addr & 15;
+            spout = size;
+          }
+        }
       }
       i = i + dl;
     }
@@ -678,6 +764,9 @@ fn dev_attach(x: &mut Xhci, p: u64, route: u64, tt: u64, speed: u64, depth: u64)
   }
   if miface < 256 && ein != 0 && eout != 0 && mpin != 0 && mpout != 0 {
     return msd_setup(&mut x, s, p, route, tt, speed, config, miface, ein, eout, mpin, mpout);
+  }
+  if sface < 256 && sin != 0 && sout != 0 && spin != 0 && spout != 0 {
+    return ser_setup(&mut x, s, p, route, tt, speed, config, skind, cface, sin, sout, spin, spout);
   }
   if hub && depth < XHCI_DEPTH {
     return hub_setup(&mut x, s, p, route, tt, speed, depth, config);
@@ -759,8 +848,9 @@ fn hub_setup(x: &mut Xhci, s: u64, p: u64, route: u64, tt: u64, speed: u64, dept
   let had_kbd = x.live;
   let had_mouse = x.mlive;
   let had_msd = x.msd;
+  let had_ser = x.sp.kind;
   k = 1;
-  while k <= n && (!x.live || !x.mlive || x.msd == MSD_NONE)
+  while k <= n && (!x.live || !x.mlive || x.msd == MSD_NONE || x.sp.kind == SER_NONE)
     invariant xhci_ok(x) && k >= 1 && n <= 15
   {
     if hub_status(&mut x, s, k) & 1 != 0 && hub_feature(&mut x, s, k, HUB_RESET, true) {
@@ -799,7 +889,7 @@ fn hub_setup(x: &mut Xhci, s: u64, p: u64, route: u64, tt: u64, speed: u64, dept
     }
     k = k + 1;
   }
-  if x.live == had_kbd && x.mlive == had_mouse && x.msd == had_msd {
+  if x.live == had_kbd && x.mlive == had_mouse && x.msd == had_msd && x.sp.kind == had_ser {
     return dev_detach(&mut x, s);
   }
   return true;
@@ -1002,6 +1092,141 @@ fn msd_setup(x: &mut Xhci, s: u64, p: u64, route: u64, tt: u64, speed: u64, conf
     x.msd = MSD_ON;
   }
   return true;
+}
+
+/// The serial port on slot s: its bulk endpoints (one packet at a time is
+/// queued on the IN one), then, for an FTDI adapter, 115200 baud and DTR
+/// and RTS up, or, for a CDC-ACM device (`cface` its control interface, 256
+/// if none), DTR and RTS up. The line coding of a CDC device is left as it
+/// is. A device whose packets are bigger than SER_RX_MAX is not used.
+fn ser_setup(x: &mut Xhci, s: u64, p: u64, route: u64, tt: u64, speed: u64, config: u64, kind: u64, cface: u64,
+  ein: u64, eout: u64, mpin: u64, mpout: u64) -> bool
+  requires xhci_ok(x) && 1 <= s && s <= XHCI_SLOTS && p < 256 && speed < 16 && route < 256 && tt < 65536
+  requires config <= 255 && kind <= SER_ACM && cface <= 256 && 1 <= ein && ein < 16 && 1 <= eout && eout < 16
+  requires mpin < 2048 && mpout < 2048
+  ensures xhci_ok(x)
+{
+  if mpin > SER_RX_MAX || !xhci_control(&mut x, s, (config << 16) | 0x0900, 0, false) {
+    return dev_detach(&mut x, s);
+  }
+  let dout = eout * 2;
+  let din = ein * 2 + 1;
+  let mut top = dout;
+  if din > top {
+    top = din;
+  }
+  zero_page(&mut x.inp, 0, RAW_AT);
+  zero_page(&mut x.ser, 0, 4096);
+  x.sp.out_at = 1;
+  x.sp.in_at = 1;
+  let ba = dma_phys(x.ser);
+  let ia = ba + SER_IN_RING;
+  ictx(&mut x, 0, 1, cast[u32](1 | (1 << dout) | (1 << din)));
+  ictx(&mut x, 1, 0, cast[u32](route | (speed << 20) | (top << 27)));
+  ictx(&mut x, 1, 1, cast[u32](p << 16));
+  ictx(&mut x, 1, 2, cast[u32](tt));
+  ictx(&mut x, dout + 1, 1, cast[u32](6 + 2 * 8 + (mpout << 16)));   // 3 retries, bulk OUT
+  ictx(&mut x, dout + 1, 2, cast[u32](ba & 0xFFFFFFFF) | 1);
+  ictx(&mut x, dout + 1, 3, cast[u32](ba >> 32));
+  ictx(&mut x, dout + 1, 4, 512);
+  ictx(&mut x, din + 1, 1, cast[u32](6 + 6 * 8 + (mpin << 16)));     // 3 retries, bulk IN
+  ictx(&mut x, din + 1, 2, cast[u32](ia & 0xFFFFFFFF) | 1);
+  ictx(&mut x, din + 1, 3, cast[u32](ia >> 32));
+  ictx(&mut x, din + 1, 4, 512);
+  let pa = dma_phys(x.inp);
+  if !xhci_command(&mut x, pa, cast[u32](TRB_CONFIGURE * 1024 + s * 16777216)) {
+    return dev_detach(&mut x, s);
+  }
+  if kind == SER_FTDI {
+    xhci_control(&mut x, s, 0x001A0340, 0, false);       // SET_BAUD_RATE: divisor 26 (3 MHz / 26 = 115200)
+    xhci_control(&mut x, s, 0x03030140, 0, false);       // SET_MODEM_CTRL: DTR and RTS up
+  } else if cface < 256 {
+    xhci_control(&mut x, s, (cface << 32) | 0x00032221, 0, false);   // SET_CONTROL_LINE_STATE: DTR and RTS up
+  }
+  x.sp.slot = cast[u8](s);
+  x.sp.in_dci = din;
+  x.sp.out_dci = dout;
+  x.sp.mps = mpin;
+  x.sp.qn = 0;
+  x.sp.wait = false;
+  x.sp.tx_busy = false;
+  x.sp.dead = false;
+  x.sp.kind = kind;
+  ser_in_queue(&mut x);
+  return true;
+}
+
+/// Queues one packet's worth of transfer for the serial port's next bytes.
+fn ser_in_queue(x: &mut Xhci)
+  requires xhci_ok(x)
+  ensures xhci_ok(x)
+{
+  let b = dma_phys(x.ser);
+  x.sp.in_at = trb_put(&mut x.ser, SER_IN_RING, x.sp.in_at, b + SER_RX_BUF, cast[u32](x.sp.mps), cast[u32](TRB_NORMAL * 1024 + 32 + 4));  // IOC, ISP
+  xw(&mut x, x.db + cast[u64](x.sp.slot) * 4, cast[u32](x.sp.in_dci));
+}
+
+/// A transfer on the serial port's IN endpoint ended with completion code
+/// cc, `left` bytes short of the packet queued: the bytes received (past
+/// the two status bytes that begin each packet of an FTDI adapter) join sq,
+/// and the next transfer is queued if sq has room for a packet.
+fn ser_rx(x: &mut Xhci, cc: u64, left: u64)
+  requires xhci_ok(x)
+  ensures xhci_ok(x)
+{
+  if cc != CC_SUCCESS && cc != CC_SHORT {
+    x.sp.dead = true;
+    return;
+  }
+  let got = x.sp.mps - smaller(left, x.sp.mps);
+  let mut i = 0;
+  if x.sp.kind == SER_FTDI {
+    i = 2;
+  }
+  while i < got && x.sp.qn < SQ_N && i < SER_RX_MAX
+    invariant xhci_ok(x) && i <= SER_RX_MAX
+  {
+    bset(&mut x.sp.q, x.sp.qn, dma_read8(&mut x.ser, SER_RX_BUF + i));
+    x.sp.qn = x.sp.qn + 1;
+    i = i + 1;
+  }
+  if x.sp.qn + x.sp.mps <= SQ_N {
+    ser_in_queue(&mut x);
+  } else {
+    x.sp.wait = true;
+  }
+}
+
+/// Sends the first n bytes of src to the serial port, at most SER_TX_MAX,
+/// if the last write has ended; returns how many were taken (0 if there is
+/// no port or a write is still running, all of them if the port failed).
+fn xhci_ser_send(x: &mut Xhci, src: &Bytes, n: u64) -> u64
+  requires xhci_ok(x)
+  ensures xhci_ok(x) && result <= n && result <= blen(src)
+{
+  let want = smaller(n, blen(src));
+  if x.sp.kind == SER_NONE {
+    return 0;
+  }
+  if x.sp.dead {
+    return want;
+  }
+  if x.sp.tx_busy || want == 0 {
+    return 0;
+  }
+  let m = smaller(want, SER_TX_MAX);
+  let mut i = 0;
+  while i < m
+    invariant xhci_ok(x) && i <= m && m <= SER_TX_MAX && m <= blen(src)
+  {
+    dma_write8(&mut x.ser, SER_TX_BUF + i, bget(src, i));
+    i = i + 1;
+  }
+  let b = dma_phys(x.ser);
+  x.sp.out_at = trb_put(&mut x.ser, 0, x.sp.out_at, b + SER_TX_BUF, cast[u32](m), cast[u32](TRB_NORMAL * 1024 + 32));   // IOC
+  xw(&mut x, x.db + cast[u64](x.sp.slot) * 4, cast[u32](x.sp.out_dci));
+  x.sp.tx_busy = true;
+  return m;
 }
 
 // ---------------------------------------------------------------- bulk-only transport
@@ -1581,7 +1806,7 @@ fn ports_settle(x: &mut Xhci)
 /// hubs below them. `live` says whether there is a keyboard, `mlive` a
 /// mouse and `msd` a disk; with none, the controller is left reset.
 fn xhci_new(regs: Mmio, m: &mut Mem, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, f5: Frame, f6: Frame,
-  f7: Frame, f8: Frame, f9: Frame, f10: Frame) -> Xhci
+  f7: Frame, f8: Frame, f9: Frame, f10: Frame, f11: Frame, f12: Frame) -> Xhci
   requires mmio_base(regs) % 4096 == 0 && mmio_len(regs) <= XHCI_MAX_LEN && mmio_len(regs) >= 0x2000
   requires mem_ok(m)
   ensures xhci_ok(result) && mem_ok(m)
@@ -1589,12 +1814,14 @@ fn xhci_new(regs: Mmio, m: &mut Mem, f0: Frame, f1: Frame, f2: Frame, f3: Frame,
 {
   let mut x = Xhci { regs: regs, dcbaa: dma_lend(f0), cmd: dma_lend(f1), evt: dma_lend(f2), ctx: dma_lend(f3),
     inp: dma_lend(f4), ep0: dma_lend(f5), intr: dma_lend(f6),
-    bulk: dma_lend(f7), data: dma_lend(f8), ctx2: dma_lend(f9), ctx3: dma_lend(f10), sps: vec_new[Dma](), op: 0, rt: 0, db: 0,
+    bulk: dma_lend(f7), data: dma_lend(f8), ctx2: dma_lend(f9), ctx3: dma_lend(f10), ctx4: dma_lend(f11), ser: dma_lend(f12), sps: vec_new[Dma](), op: 0, rt: 0, db: 0,
     csz: 32, ports: 0, cmd_at: 1, evt_at: 1, e0a: 1, e0b: 1, e0c: 1, e0d: 1, e0e: 1, int_at: 1, ev_p: 0, ev_s: 0, ev_c: 0, slot: 0,
     dci: 0, port: 0, keys: balloc(6), q: balloc(16), qn: 0, shift: false, ctrl: false, live: false,
     mslot: 0, mdci: 0, m_at: 1, mq: balloc(MQ_N * 4), mqn: 0, mbtn: 0, mlive: false,
     msd: MSD_NONE, ds: 0, dout: 0, din: 0, iface: 0, out_at: 1, in_at: 1, tag: 0, plo: 0, sectors: 0,
-    busy: false, stage: 0, done: false, dcc: 0, bop: 0, irq: false };
+    busy: false, stage: 0, done: false, dcc: 0, bop: 0, irq: false,
+    sp: SerPort { kind: SER_NONE, slot: 0, in_dci: 0, out_dci: 0, in_at: 1, out_at: 1, e0: 1, mps: 0, q: balloc(SQ_N), qn: 0,
+      wait: false, tx_busy: false, dead: false } };
   let cap = cast[u64](xr(&mut x, 0) & 255);
   let hcs1 = cast[u64](xr(&mut x, 4));
   let hcs2 = cast[u64](xr(&mut x, 8));
@@ -1653,7 +1880,7 @@ fn xhci_new(regs: Mmio, m: &mut Mem, f0: Frame, f1: Frame, f2: Frame, f3: Frame,
   // The first boot keyboard, boot mouse and mass-storage device on a root
   // port, or on a hub.
   let mut p = 1;
-  while p <= x.ports && p < 256 && (!x.live || !x.mlive || x.msd == MSD_NONE)
+  while p <= x.ports && p < 256 && (!x.live || !x.mlive || x.msd == MSD_NONE || x.sp.kind == SER_NONE)
     invariant xhci_ok(x) && p >= 1
   {
     let speed = port_up(&mut x, p);
@@ -1662,7 +1889,7 @@ fn xhci_new(regs: Mmio, m: &mut Mem, f0: Frame, f1: Frame, f2: Frame, f3: Frame,
     }
     p = p + 1;
   }
-  if !x.live && !x.mlive && x.msd != MSD_ON {
+  if !x.live && !x.mlive && x.msd != MSD_ON && x.sp.kind == SER_NONE {
     xhci_halt(&mut x);
   }
   return x;
@@ -1694,6 +1921,9 @@ fn xhci_free(x: Xhci, m: &mut Mem) -> Mmio
   give_page(&mut m, dma_take(d.bulk));
   give_page(&mut m, dma_take(d.data));
   give_page(&mut m, dma_take(d.ctx3));
+  give_page(&mut m, dma_take(d.ctx4));
+  give_page(&mut m, dma_take(d.ser));
+  bfree(d.sp.q);
   bfree(d.keys);
   bfree(d.q);
   bfree(d.mq);
@@ -1818,13 +2048,13 @@ fn mouse_report(x: &mut Xhci, n: u64)
 /// its bytes, as kbd_poll gives), or 256 if there is neither.
 fn xhci_poll(x: &mut Xhci) -> u64
   requires xhci_ok(x)
-  ensures xhci_ok(x) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT))
+  ensures xhci_ok(x) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT) || (result >= SER_PKT && result < SER_PKT + 256))
 {
-  if !x.live && !x.mlive {
+  if !x.live && !x.mlive && x.sp.kind == SER_NONE {
     return 256;
   }
   let mut n = 0;
-  while x.qn == 0 && x.mqn == 0 && n < 8 && evt_step(&mut x) != 0
+  while x.qn == 0 && x.mqn == 0 && x.sp.qn == 0 && n < 8 && evt_step(&mut x) != 0
     invariant xhci_ok(x)
   {
     n = n + 1;
@@ -1842,6 +2072,22 @@ fn xhci_poll(x: &mut Xhci) -> u64
     }
     x.mqn = x.mqn - 1;
     return p;
+  }
+  if x.qn == 0 && x.sp.qn > 0 {
+    let sb = cast[u64](bget(x.sp.q, 0));
+    let mut j = 0;
+    while j + 1 < x.sp.qn
+      invariant xhci_ok(x) && x.sp.qn >= 1 && j < x.sp.qn
+    {
+      bset(&mut x.sp.q, j, bget(x.sp.q, j + 1));
+      j = j + 1;
+    }
+    x.sp.qn = x.sp.qn - 1;
+    if x.sp.wait && x.sp.qn + x.sp.mps <= SQ_N {
+      x.sp.wait = false;
+      ser_in_queue(&mut x);
+    }
+    return SER_PKT + sb;
   }
   if x.qn == 0 {
     return 256;
@@ -1879,6 +2125,42 @@ fn usb_mouse(u: &Usb) -> bool {
   }
 }
 
+/// SER_NONE, SER_FTDI or SER_ACM: is there a USB serial port?
+fn usb_ser(u: &Usb) -> u64
+  ensures result <= SER_ACM
+{
+  match u {
+    Usb::None => { return SER_NONE; },
+    Usb::Xhci(x) => { return ser_kind_of(x.sp.kind); },
+  }
+}
+
+/// k, if it is a kind of serial port, else SER_NONE.
+fn ser_kind_of(k: u64) -> u64
+  ensures result <= SER_ACM
+{
+  if k == SER_FTDI || k == SER_ACM {
+    return k;
+  }
+  return SER_NONE;
+}
+
+/// Sends the first n bytes of src to the USB serial port, if there is one:
+/// how many it took (xhci_ser_send).
+fn usb_ser_send(u: &mut Usb, src: &Bytes, n: u64) -> u64
+  requires usb_ok(u)
+  ensures usb_ok(u) && result <= n && result <= blen(src)
+{
+  match u {
+    Usb::None => { u = Usb::None; return 0; },
+    Usb::Xhci(mut x) => {
+      let r = xhci_ser_send(&mut x, src, n);
+      u = Usb::Xhci(x);
+      return r;
+    },
+  }
+}
+
 /// MSD_NONE, MSD_UNUSED or MSD_ON: is there a USB disk, and is it the disk?
 fn usb_msd(u: &Usb) -> u64 {
   match u {
@@ -1889,7 +2171,7 @@ fn usb_msd(u: &Usb) -> u64 {
 
 fn usb_poll(u: &mut Usb) -> u64
   requires usb_ok(u)
-  ensures usb_ok(u) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT))
+  ensures usb_ok(u) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT) || (result >= SER_PKT && result < SER_PKT + 256))
 {
   match u {
     Usb::None => { u = Usb::None; return 256; },
@@ -1925,7 +2207,7 @@ fn xhci_route_ports(pci: &mut Pci, dev: u64)
 /// bar + size, started with pages at .. at+10, if the registers lie in the
 /// device window (`bar_space`) clear of the framebuffer at lo .. hi and
 /// the block at lo2 .. hi2; else none. A controller with neither a
-/// keyboard, a mouse nor a disk with a BastiOS partition is stopped and given back
+/// keyboard, mouse, serial port nor a disk with a BastiOS partition is stopped and given back
 /// at once.
 fn usb_new(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, lo: u64, hi: u64, lo2: u64, hi2: u64,
   dev: u64, bar: u64, size: u64, msi: u64, vec: u64) -> Usb
@@ -1955,9 +2237,11 @@ fn usb_new(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, lo: u64, hi
   let f8 = take_low_page(&mut m, at + 8);
   let f9 = take_low_page(&mut m, at + 9);
   let f10 = take_low_page(&mut m, at + 10);
+  let f11 = take_low_page(&mut m, at + 11);
+  let f12 = take_low_page(&mut m, at + 12);
   let regs = mmio_claim(&mut win, bar, size);
-  let mut x = xhci_new(regs, &mut m, f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10);
-  if !x.live && !x.mlive && x.msd != MSD_ON {
+  let mut x = xhci_new(regs, &mut m, f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12);
+  if !x.live && !x.mlive && x.msd != MSD_ON && x.sp.kind == SER_NONE {
     mmio_release(&mut win, xhci_free(x, &mut m));
     return Usb::None;
   }

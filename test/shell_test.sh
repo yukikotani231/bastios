@@ -1693,6 +1693,109 @@ qemu.kill(); qemu.wait()
 print("---- USB boot transcript ----")
 print(out.decode(errors="replace").replace("\r", "")[-400:])
 
+# A USB serial port: QEMU's usb-serial (an FTDI adapter) on the xHCI
+# controller, its other end a socket this script holds. /dev/ttyUSB0
+# (src/lxserial.bastio) carries what mserial writes out to the socket and
+# what the socket gets in: a line, 1500 bytes sent in pieces, and 2000
+# bytes written, more than the ring holds. The same exchange runs with the
+# controller as the disk's too (the stick boot below).
+ser_path = os.path.join(disk_dir.name, "ser.sock")
+def serial_extra():
+    return ["-chardev", f"socket,id=ser,path={ser_path},server=on,wait=off",
+            "-device", "usb-serial,bus=xh.0,chardev=ser"]
+def serial_connect():
+    # QEMU plugs the adapter in when something is connected to its socket,
+    # so the script connects right after starting QEMU, before the guest
+    # looks for devices.
+    end = time.time() + 10
+    while True:
+        s = socket.socket(socket.AF_UNIX)
+        s.settimeout(15)
+        try:
+            s.connect(ser_path)
+            return s
+        except OSError:
+            s.close()
+            if time.time() > end:
+                raise
+            time.sleep(0.05)
+def serial_session(name, s):
+    global fails
+    mark = len(out)
+    qemu.stdin.write(b"mserial\r"); qemu.stdin.flush()
+    ok = read_until(b"mserial: ready", mark)
+    seen = b""
+    try:
+        while ok and not seen.endswith(b"ping\n"):
+            seen += s.recv(256)
+    except OSError:
+        ok = False
+    good = ok and seen == b"ping\n"
+    print(("ok  " if good else "FAIL"), f"({name}) what the program writes reaches the adapter", repr(seen))
+    fails += not good
+    if not ok:
+        s.close()
+        return
+    s.sendall(b"pong-from-host\n")
+    good = read_until(b"mserial: got pong-from-host", mark) and read_until(b"mserial: rx ready", mark)
+    print(("ok  " if good else "FAIL"), f"({name}) a line sent to the adapter is read")
+    fails += not good
+    data = bytes((i * 7 + 3) & 255 for i in range(1500))
+    for i in range(0, 1500, 250):
+        s.sendall(data[i:i + 250])
+        time.sleep(0.15)
+    good = read_until(b"mserial: rx 1500 bytes, sum %d\r\n" % sum(data), mark)
+    print(("ok  " if good else "FAIL"), f"({name}) 1500 bytes sent in pieces arrive whole")
+    fails += not good
+    want = bytes((i * 5 + 1) & 255 for i in range(2000))
+    back = b""
+    try:
+        while len(back) < len(want):
+            c = s.recv(4096)
+            if not c:
+                break
+            back += c
+    except OSError:
+        pass
+    good = back == want and read_until(b"mserial: tx done", mark) and read_until(b"bastios> ", mark)
+    print(("ok  " if good else "FAIL"), f"({name}) 2000 bytes written, more than the ring holds, arrive whole ({len(back)} received)")
+    fails += not good
+    s.close()
+if os.path.exists(ser_path):
+    os.unlink(ser_path)
+qemu = boot(1, virtio=True, extra=["-device", "qemu-xhci,id=xh"] + serial_extra())
+ser_sock = serial_connect()
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+good = ok and b"serial: USB FTDI adapter (/dev/ttyUSB0)\r\n" in out
+print(("ok  " if good else "FAIL"), "(USB serial boot) the adapter is found")
+fails += not good
+if ok:
+    serial_session("USB serial boot", ser_sock)
+    qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
+    read_until(b"pages free at power off")
+    booted = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
+    off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+    good = booted and off and booted.group(1) == off.group(1)
+    print(("ok  " if good else "FAIL"), "(USB serial boot) every page back at power off")
+    fails += not good
+qemu.kill(); qemu.wait()
+print("---- USB serial boot transcript ----")
+print(out.decode(errors="replace").replace("\r", "")[-400:])
+# Without an adapter, the device is there but cannot be opened.
+qemu = boot(1)
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+if ok:
+    mark = len(out)
+    qemu.stdin.write(b"mserial\r"); qemu.stdin.flush()
+    good = read_until(b"bastios> ", mark) and b"mserial: no serial port (ENODEV)\r\n" in out[mark:]
+    print(("ok  " if good else "FAIL"), "(no adapter) /dev/ttyUSB0 fails to open with ENODEV")
+    fails += not good
+qemu.kill(); qemu.wait()
+
 # A USB stick with a BastiOS partition (tools/mkusb.py --blank: a GPT and
 # the partition, no boot image) on the same xHCI controller as the USB
 # keyboard: the partition is the disk, ahead of the virtio disk, which must
@@ -1706,8 +1809,10 @@ print(out.decode(errors="replace").replace("\r", "")[-400:])
 stick = os.path.join(disk_dir.name, "stick.img")
 subprocess.run(["tools/mkusb.py", stick, "--blank", "--mib", "33"], check=True, stdout=subprocess.DEVNULL)
 before = open(disk, "rb").read()
-def stick_boot(name, steps, keys=False, image=None, hubs=False):
+def stick_boot(name, steps, keys=False, image=None, hubs=False, serial=False):
     global qemu, out, deadline, fails
+    if serial and os.path.exists(ser_path):
+        os.unlink(ser_path)
     usb = ["-device", "usb-storage,bus=xh.0,drive=st", "-device", "usb-kbd,bus=xh.0"]
     if hubs:
         usb = ["-device", "usb-hub,bus=xh.0,port=1", "-device", "usb-hub,bus=xh.0,port=1.2",
@@ -1715,7 +1820,8 @@ def stick_boot(name, steps, keys=False, image=None, hubs=False):
                "-device", "usb-kbd,bus=xh.0,port=1.4"]
     qemu = boot(1, virtio=True, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci,id=xh",
                                        "-drive", f"file={image or stick},format=raw,if=none,id=st"] + usb +
-                                      ["-qmp", f"unix:{qmp_path},server,nowait"])
+                                      (serial_extra() if serial else []) + ["-qmp", f"unix:{qmp_path},server,nowait"])
+    ser_sock = serial_connect() if serial else None
     out = b""
     deadline = time.time() + timeout
     ok = read_until(b"bastios> ")
@@ -1749,6 +1855,8 @@ def stick_boot(name, steps, keys=False, image=None, hubs=False):
         if hubs:
             usbmouse(name, qmp_cmd)
         qmp.close()
+    if ok and serial:
+        serial_session(name, ser_sock)
     for line, w in steps:
         if not ok:
             break
@@ -1780,7 +1888,7 @@ stick_boot("USB disk", [
     ("diskbench", b"read 2 MiB: "),
 ], keys=True)
 stick_boot("USB disk behind hubs", [("cat disk/s", b"on the stick\r\n"), ("fstest", b"fstest: disk ok")],
-           keys=True, hubs=True)
+           keys=True, hubs=True, serial=True)
 f, n = map(int, subprocess.check_output(["tools/mkusb.py", "--find", stick]).split())
 part = os.path.join(disk_dir.name, "part.img")
 with open(stick, "rb") as src, open(part, "wb") as dst:

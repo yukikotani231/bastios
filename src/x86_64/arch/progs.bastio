@@ -111,6 +111,9 @@ fn prog_image(i: u64) -> Str {
   if i == 35 {
     return include_bytes("../../../build/user/mproc.elf");
   }
+  if i == 36 {
+    return include_bytes("../../../build/user/mserial.elf");
+  }
   return include_bytes("../../../build/user/fault.bin");
 }
 

@@ -156,9 +156,26 @@ fn vfs_ram_link(v: &mut Vfs, n: u64, t: u64) -> u64
 /// plus its bytes), or 256.
 fn vfs_kbd_poll(v: &mut Vfs) -> u64
   requires vfs_ok(v)
-  ensures vfs_ok(v) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT))
+  ensures vfs_ok(v) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT) || (result >= SER_PKT && result < SER_PKT + 256))
 {
   return blk_kbd_poll(&mut v.disk.dev);
+}
+
+/// SER_NONE, SER_FTDI or SER_ACM: is there a USB serial port on the disk's
+/// xHCI controller?
+fn vfs_ser(v: &Vfs) -> u64
+  requires vfs_ok(v)
+  ensures result <= SER_ACM
+{
+  return blk_ser(v.disk.dev);
+}
+
+/// Sends the first n bytes of src to that port: how many it took.
+fn vfs_ser_send(v: &mut Vfs, src: &Bytes, n: u64) -> u64
+  requires vfs_ok(v)
+  ensures vfs_ok(v) && result <= n && result <= blen(src)
+{
+  return blk_ser_send(&mut v.disk.dev, src, n);
 }
 
 /// The disk drivers a file system hands back at power off: the disk's and
