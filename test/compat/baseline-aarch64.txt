@@ -630,7 +630,6 @@ t_mem: FUTEX_WAKE on an unmapped word is EFAULT
 t_mem: MAP_SHARED anonymous across fork
 t_mem: MAP_SHARED file mapped by two processes
 t_mem: MAP_SHARED file mapping across fork
-t_mem: a writable MAP_SHARED mapping is written back after twenty read-only ones
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
 t_mem: a MAP_SHARED mapping sees write(2)
