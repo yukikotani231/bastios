@@ -591,13 +591,7 @@ fn sig_fork(t: &mut Buf, parent: u64, child: u64)
   ensures len(t) <= SIGACT_LEN
 {
   // Four words for each of the NSIG signals: one row of 256 words.
-  let mut i = 0;
-  while i < 256
-    invariant i <= 256 && len(t) <= SIGACT_LEN
-  {
-    wset(&mut t, child * 256 + i, wget(t, parent * 256 + i));
-    i = i + 1;
-  }
+  wcopy(&mut t, child * 256, parent * 256, 256);
 }
 
 /// A new program (spawn, or execve with keep_ign): every handler goes back

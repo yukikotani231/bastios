@@ -29,6 +29,10 @@ import gdb, json
 gdb.execute("set pagination off")
 gdb.execute("set confirm off")
 gdb.execute("target remote :%(port)d")
+if %(brk)d:
+    gdb.execute("hbreak *%(brk)d")
+    gdb.execute("continue", to_string=True)
+    gdb.execute("delete", to_string=True)
 pcs = []
 n = %(steps)d
 for i in range(n):
@@ -49,6 +53,7 @@ def main():
     ap.add_argument("--steps", type=int, default=20000)
     ap.add_argument("--warm", type=float, default=3.0, help="seconds of host time before gdb attaches")
     ap.add_argument("--top", type=int, default=30)
+    ap.add_argument("--break", dest="brk", default="", help="start the window when this kernel function is entered (counts every instruction of the window, not whole round trips)")
     ap.add_argument("--save", default="", help="also write the executed addresses to this JSON file")
     ap.add_argument("cmd", nargs="+")
     args = ap.parse_args()
@@ -57,6 +62,14 @@ def main():
     ns = argparse.Namespace(accel="tcg", cpu="", mem=args.mem, smp=args.smp, kernel=args.kernel)
     line = " ".join(args.cmd)
     port = 20000 + os.getpid() % 20000
+    brk = 0
+    if args.brk:
+        for a, nm in zip(addrs, names):
+            if nm == args.brk or nm.startswith(args.brk + "."):
+                brk = a
+                break
+        if not brk:
+            raise SystemExit(f"insnprof: no function {args.brk} in {args.elf}")
     bench.ICOUNT = True
     with tempfile.TemporaryDirectory() as tmp:
         bench.EXTRA_QEMU = ["-gdb", f"tcp::{port}"]
@@ -66,7 +79,7 @@ def main():
         out = os.path.join(tmp, "pcs.json")
         script = os.path.join(tmp, "step.py")
         with open(script, "w") as f:
-            f.write(GDB % {"port": port, "steps": args.steps, "out": out})
+            f.write(GDB % {"port": port, "steps": args.steps, "out": out, "brk": brk})
         subprocess.run(["gdb", "--batch", "-nx", "-x", script], capture_output=True, check=False)
         g.stop()
         if not os.path.exists(out):
@@ -85,9 +98,12 @@ def main():
         if user and not was_user:
             entry_at.append(i)
         was_user = user
-    if len(entry_at) >= 2:
-        pcs = pcs[entry_at[0]:entry_at[-1]]
-    entries = max(len(entry_at) - 1, 0)
+    if brk:
+        entries = 1
+    else:
+        if len(entry_at) >= 2:
+            pcs = pcs[entry_at[0]:entry_at[-1]]
+        entries = max(len(entry_at) - 1, 0)
     for pc in pcs:
         if addrs and addrs[0] <= pc < addrs[-1] + 0x10000:
             hits[names[bisect.bisect_right(addrs, pc) - 1]] += 1
