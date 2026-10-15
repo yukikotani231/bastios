@@ -232,10 +232,23 @@ static int many(int n)
             || recv(us[i], &got, 1, 0) != 1 || got != b)
             return fail("udp datagram");
     }
+    /* One socket queues sixteen datagrams before it is read. */
+    struct sockaddr_in q = { .sin_family = AF_INET, .sin_port = htons(9200) };
+    q.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    for (int i = 0; i < 16; i++) {
+        char b = (char)('a' + i);
+        if (sendto(tx, &b, 1, 0, (struct sockaddr *)&q, sizeof q) != 1)
+            return fail("udp queue send");
+    }
+    for (int i = 0; i < 16; i++) {
+        char got = 0;
+        if (recv(us[0], &got, 1, 0) != 1 || got != (char)('a' + i))
+            return fail("udp queue order");
+    }
     for (int i = 0; i < 30; i++)
         close(us[i]);
     close(tx);
-    printf("mtcp: %d connections and 30 udp sockets\n", n);
+    printf("mtcp: %d connections and 30 udp sockets, 16 queued\n", n);
     return 0;
 }
 
