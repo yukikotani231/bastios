@@ -1,0 +1,197 @@
+# Lua and LuaRocks on BastiOS, for the compatibility suite (test/compat): the
+# Lua 5.4 interpreter and LuaRocks of an Alpine-based image (with gcc and
+# musl, which rocks with C modules are built with), entered with chroot. The
+# Lua disk (scriptdisk.py) holds the image's root as a tar file
+# (/disk/root.tar) and a BusyBox at /disk/busybox. The format is
+# applets.txt's:
+#
+#   == NAME
+#   $ COMMAND        (one line, run by ash in /)
+#   expected output, line by line, compared exactly
+#
+# The expected output is what Linux prints for the same commands in a chroot
+# of the same root.
+
+== lua: unpack the root, make the device nodes
+$ bb mkdir -p /disk/s && cd /disk/s && bb tar -xf /disk/root.tar && bb mkdir -p proc tmp work && for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; cd /; bb mount -t proc proc /disk/s/proc; bb ls /disk/s/dev | bb cat
+console
+null
+random
+tty
+urandom
+zero
+
+== lua: version
+$ bb chroot /disk/s /usr/local/bin/lua -v; bb chroot /disk/s /usr/local/bin/luarocks --version | bb head -1
+Lua 5.4.9  Copyright (C) 1994-2026 Lua.org, PUC-Rio
+/usr/local/bin/luarocks 3.13.0
+
+== lua: expression, standard input and script arguments
+$ bb chroot /disk/s /usr/local/bin/lua -e 'print(6 * 7, _VERSION)'; echo 'print(1 + 1)' | bb chroot /disk/s /usr/local/bin/lua -; bb printf 'print(#arg, arg[0], arg[1], arg[2], ...)\n' > /disk/s/work/a.lua; bb chroot /disk/s /usr/local/bin/lua /work/a.lua x y
+42	Lua 5.4
+2
+2	/work/a.lua	x	y	x	y
+
+== lua: strings, patterns and formatting
+$ bb printf 'local s = "The quick brown fox"\nprint(s:upper(), s:len(), s:sub(5, 9), s:find("quick"), s:rep(2, "|"):len())\nprint(("%%5.2f|%%-5d|%%5s|%%x|%%q"):format(3.14159, 42, "ab", 255, "a\\nb"))\nprint(s:gsub("(%%w+)", "<%%1>"))\nfor k, v in ("a=1, b=2, c=3"):gmatch("(%%w+)=(%%w+)") do io.write(k, ":", v, " ") end print()\nprint(string.byte("A"), string.char(72, 105), ("abc"):reverse(), ("  trim  "):match("^%%s*(.-)%%s*$") .. "|")\nprint(string.pack("<i4", 258):byte(1, -1))\nprint(string.unpack("<I2 z", "\\1\\2hello\\0"))\nprint(#string.format("%%s", string.rep("x", 100000)), tostring(nil), tostring(true), tonumber("0x10"), tonumber("  12  "), tonumber("1e2"), tonumber("z", 36))\n' > /disk/s/work/t.lua; bb chroot /disk/s /usr/local/bin/lua /work/t.lua  2>&1
+THE QUICK BROWN FOX	19	quick	5	39
+ 3.14|42   |   ab|ff|"a\
+b"
+<The> <quick> <brown> <fox>	4
+a:1 b:2 c:3 
+65	Hi	cba	trim|
+2	1	0	0
+513	hello	9
+100000	nil	true	16	12	100.0	35
+
+== lua: integers, floats and math
+$ bb printf 'print(7 // 2, -7 // 2, 7 %% -3, 7.5 // 2, 2^10, 10 / 4, 1 << 62, 1 << 63, 1 << 64)\nprint(math.maxinteger, math.mininteger, math.maxinteger + 1 == math.mininteger, math.type(1), math.type(1.0), math.type("1"))\nprint(math.floor(-3.5), math.ceil(-3.5), math.abs(-4), math.max(3, 9, 2), math.fmod(-7, 3), math.sqrt(144), math.tointeger(3.0))\nprint(string.format("%%.14g %%.14g %%.14g", math.pi, math.sin(1), math.exp(1)), 0.1 + 0.2 == 0.3, 3 | 4, 7 & 2, 5 ~ 1, ~0)\nprint(1e308 * 10, -1e308 * 10, 0/0 ~= 0/0, math.ult(1, -1), 8 // 0.0, pcall(function() return 1 // 0 end))\nmath.randomseed(42); local a = math.random(1, 100); math.randomseed(42); print(a == math.random(1, 100), math.random() < 1)\n' > /disk/s/work/t.lua; bb chroot /disk/s /usr/local/bin/lua /work/t.lua  2>&1
+3	-4	-2	3.0	1024.0	2.5	4611686018427387904	-9223372036854775808	0
+9223372036854775807	-9223372036854775808	true	integer	float	nil
+-4	-3	4	9	-1	12.0	3
+3.1415926535898 0.8414709848079 2.718281828459	false	7	2	4	-1
+inf	-inf	true	true	inf	false	/work/t.lua:5: attempt to divide by zero
+true	true
+
+== lua: tables, sort and metatables
+$ bb printf 'local t = {5, 2, 8, 1, 9, 3}\ntable.sort(t); print(table.concat(t, ","), #t, select("#", table.unpack(t)))\ntable.sort(t, function(a, b) return a > b end); print(table.concat(t, " "))\ntable.insert(t, 1, 100); table.insert(t, 7); print(table.remove(t), table.remove(t, 1), table.concat(t, ","))\nprint(table.concat(table.move({1, 2, 3}, 1, 3, 2), ","), table.pack(1, nil, 3).n)\nlocal V = {}\nV.__index = V\nV.__add = function(a, b) return setmetatable({x = a.x + b.x}, V) end\nV.__tostring = function(a) return "V(" .. a.x .. ")" end\nV.__eq = function(a, b) return a.x == b.x end\nV.__lt = function(a, b) return a.x < b.x end\nV.__len = function() return 99 end\nV.__call = function(self, y) return self.x * y end\nV.__concat = function(a, b) return tostring(a) .. "&" .. tostring(b) end\nlocal a, b = setmetatable({x = 1}, V), setmetatable({x = 2}, V)\nprint(tostring(a + b), a == b, a < b, #a, a(10), a .. b)\nlocal log = setmetatable({}, {__newindex = function(t, k, v) rawset(t, k, v * 2) end, __index = function(t, k) return k .. "?" end})\nlog.z = 21; print(log.z, log.q, rawget(log, "q"))\nlocal keys = {} for k in pairs({a = 1, b = 2, c = 3}) do keys[#keys + 1] = k end table.sort(keys) print(table.concat(keys))\nprint(next({}), type(next), rawequal(a, a), rawlen({1, 2}))\n' > /disk/s/work/t.lua; bb chroot /disk/s /usr/local/bin/lua /work/t.lua  2>&1
+1,2,3,5,8,9	6	6
+9 8 5 3 2 1
+7	100	9,8,5,3,2,1
+1,1,2,3	3
+V(3)	false	true	99	10	V(1)&V(2)
+42	q?	nil
+abc
+nil	function	true	2
+
+== lua: closures, varargs, goto and error handling
+$ bb printf 'local function counter() local n = 0 return function() n = n + 1 return n end end\nlocal c1, c2 = counter(), counter()\nprint(c1(), c1(), c1(), c2())\nlocal function va(...) return select("#", ...), (select(2, ...)) end\nprint(va(1, nil, 3, nil))\nfor i = 1, 3 do for j = 1, 3 do if j == 2 then goto continue end io.write(i, j, " ") ::continue:: end end print()\nprint(pcall(error, {code = 7}), pcall(error, "msg", 0), select(2, pcall(error, "msg")))\nprint(xpcall(function() local x = nil; return x.y end, function(m) return "handled: " .. m end))\nlocal ok, e = pcall(function() return 1 + {} end) print(ok, e)\nprint(select(2, pcall(string.rep)), select(2, load("x = = 1")))\ndo local x <close> = setmetatable({}, {__close = function() print("closed") end}) print("in scope") end\nlocal r = {} for i = 10, 1, -3 do r[#r + 1] = i end print(table.concat(r, ","))\nprint(tostring(1e15), tostring(2^53), 2^63 == math.maxinteger + 1.0, 10 // 3 * 3 + 10 %% 3)\n' > /disk/s/work/t.lua; bb chroot /disk/s /usr/local/bin/lua /work/t.lua  2>&1
+1	2	3	1
+4	nil
+11 13 21 23 31 33 
+false	false	msg
+false	handled: /work/t.lua:8: attempt to index a nil value (local 'x')
+false	/work/t.lua:9: attempt to perform arithmetic on a table value
+bad argument #1 to 'string.rep' (string expected, got no value)	[string "x = = 1"]:1: unexpected symbol near '='
+in scope
+closed
+10,7,4,1
+1e+15	9.007199254741e+15	true	10
+
+== lua: coroutines
+$ bb printf 'local function gen(n) return coroutine.wrap(function() for i = 1, n do coroutine.yield(i * i) end end) end\nlocal t = {} for v in gen(5) do t[#t + 1] = v end print(table.concat(t, " "))\nlocal co = coroutine.create(function(a, b) local c = coroutine.yield(a + b) local d, e = coroutine.yield(c * 2) return d + e end)\nprint(coroutine.resume(co, 1, 2)) print(coroutine.resume(co, 10)) print(coroutine.resume(co, 3, 4)) print(coroutine.resume(co), coroutine.status(co))\nlocal co2 = coroutine.create(function() error("boom") end) print(coroutine.resume(co2))\nprint(coroutine.isyieldable(), select(2, coroutine.running()))\nlocal deep = coroutine.wrap(function() local function r(n) if n == 0 then coroutine.yield("bottom") else r(n - 1) end end r(1000) return "done" end)\nprint(deep(), deep())\nlocal n = 0 for i = 1, 2000 do local c = coroutine.wrap(function() coroutine.yield(1) end) n = n + c() end print(n)\n' > /disk/s/work/t.lua; bb chroot /disk/s /usr/local/bin/lua /work/t.lua  2>&1
+1 4 9 16 25
+true	3
+true	20
+true	7
+false	dead
+false	/work/t.lua:5: boom
+false	true
+bottom	done
+2000
+
+== lua: garbage collection, finalizers and weak tables
+$ bb printf 'local t = setmetatable({}, {__mode = "v"})\nt[1] = {} t[2] = "str" t[3] = {}\nlocal keep = t[3]\ncollectgarbage() collectgarbage()\nprint(t[1], t[2], t[3] == keep)\nlocal done = 0\nfor i = 1, 5 do setmetatable({}, {__gc = function() done = done + 1 end}) end\ncollectgarbage() collectgarbage() print(done)\nlocal before = collectgarbage("count")\nlocal big = {} for i = 1, 200000 do big[i] = {i} end\nlocal mid = collectgarbage("count") big = nil collectgarbage() collectgarbage()\nprint(mid > before + 1000, collectgarbage("count") < mid / 2)\nprint(collectgarbage("incremental"), collectgarbage("generational"), collectgarbage("incremental"))\nlocal ws = setmetatable({}, {__mode = "k"}) ws[{}] = 1 collectgarbage() print(next(ws))\n' > /disk/s/work/t.lua; bb chroot /disk/s /usr/local/bin/lua /work/t.lua  2>&1
+nil	str	true
+5
+true	true
+generational	incremental	generational
+nil
+
+== lua: files, directories and processes
+$ bb printf 'local f = assert(io.open("/tmp/l.txt", "w"))\nf:write("one\\n", "two\\n", 3, "\\n", 4.5, "\\n") f:close()\nfor l in io.lines("/tmp/l.txt") do io.write("[", l, "]") end print()\nlocal f = io.open("/tmp/l.txt") print(f:read("l", "n", "n", "a")) print(f:seek("set", 4), f:read(3), f:seek("cur"), f:seek("end")) f:close()\nprint(io.open("/nonexistent/x"))\nprint(os.rename("/tmp/l.txt", "/tmp/m.txt"), io.open("/tmp/l.txt"), os.remove("/tmp/m.txt"), select(2, os.remove("/tmp/m.txt")))\nlocal p = io.popen("echo from-shell; exit 3") print(p:read("a"), p:close())\nprint(os.execute("exit 5")) print(os.execute("true")) print(os.execute())\nlocal name = os.tmpname() print(name:sub(1, 5)) os.remove(name)\nprint(os.getenv("NO_SUCH_VAR"), type(os.time()), os.date("!%%Y-%%m-%%d %%H:%%M:%%S", 86400 * 365))\nprint(os.time({year = 2020, month = 1, day = 1, hour = 12}) - os.time({year = 2020, month = 1, day = 1, hour = 0}), os.date("!%%A %%j", 0))\nprint(type(os.clock()), os.difftime(10, 4))\nlocal g = io.open("/tmp/big.bin", "wb") for i = 1, 4096 do g:write(string.rep(string.char(i %% 256), 256)) end g:close()\nlocal h = io.open("/tmp/big.bin", "rb") local data = h:read("a") h:close() print(#data, data:byte(257), data:byte(-1)) os.remove("/tmp/big.bin")\nio.stderr:write("to-stderr\\n") io.stdout:write("to-stdout\\n")\nos.exit(7)\n' > /disk/s/work/t.lua; bb chroot /disk/s /usr/local/bin/lua /work/t.lua  2>&1; echo status $?
+[one][two][3][4.5]
+one	nil
+4	two	7	14
+nil	/nonexistent/x: No such file or directory	2
+true	nil	true	/tmp/m.txt: No such file or directory	2
+from-shell
+	nil	exit	3
+nil	exit	5
+true	exit	0
+true
+/tmp/
+nil	number	1971-01-01 00:00:00
+43200	Thursday 001
+number	6.0
+1048576	2	0
+to-stderr
+to-stdout
+status 7
+
+== lua: load, require and packages
+$ bb printf 'local f = load("return 1 + ...") print(f(41))\nlocal env = {x = 5} local g = load("y = x * 2 return y", "chunk", "t", env) print(g(), env.y, y)\nprint(select(2, load("return", "=name")), type(load(function() return nil end)))\nlocal fh = io.open("/work/mymod.lua", "w") fh:write("local M = {} function M.hi() return '\''hi from mymod'\'' end print('\''loading'\'') return M") fh:close()\npackage.path = "/work/?.lua;" .. package.path\nlocal m = require("mymod") print(m.hi(), require("mymod") == m, package.loaded.mymod == m)\nprint((select(2, pcall(require, "no.such.module")):match("^[^\\n]*")))\nprint(dofile("/work/mymod.lua").hi())\nprint(type(package.searchers), #package.searchers, package.config:sub(1, 1), type(package.cpath))\nprint(select(2, pcall(dofile, "/work/nonexistent.lua")))\n' > /disk/s/work/t.lua; bb chroot /disk/s /usr/local/bin/lua /work/t.lua  2>&1
+42
+10	10	nil
+nil	function
+loading
+hi from mymod	true	true
+module 'no.such.module' not found:
+loading
+hi from mymod
+table	4	/	string
+cannot open /work/nonexistent.lua: No such file or directory
+
+== lua: utf8 and string.pack round trips
+$ bb printf 'print(utf8.char(72, 228, 8364, 128512), utf8.len("häl€"), #utf8.char(8364), utf8.codepoint("€", 1))\nfor p, c in utf8.codes("aé€") do io.write(p, "=", c, " ") end print()\nprint(utf8.offset("aé€x", 3), utf8.len("\\xff"), #utf8.charpattern)\nlocal packed = string.pack(">I4 <i2 d s1 z", 0xdeadbeef, -2, 1.5, "hello", "end")\nprint(#packed, string.unpack(">I4 <i2 d s1 z", packed))\nprint(string.packsize("i4 i8 d"), pcall(string.pack, "i1", 200))\n' > /disk/s/work/t.lua; bb chroot /disk/s /usr/local/bin/lua /work/t.lua  2>&1
+Hä€😀	4	3	8364
+1=97 2=233 4=8364 
+4	nil	14
+24	3735928559	-2	1.5	hello	end	25
+20	false	bad argument #2 to 'string.pack' (integer overflow)
+
+== lua: a C module built with gcc is loaded with require
+$ bb printf 'local src = [[\n#include <lua.h>\n#include <lauxlib.h>\nstatic int add(lua_State *L) { lua_pushinteger(L, luaL_checkinteger(L, 1) + luaL_checkinteger(L, 2)); return 1; }\nstatic int greet(lua_State *L) { lua_pushfstring(L, "hello, %%s", luaL_checkstring(L, 1)); return 1; }\nstatic const luaL_Reg fns[] = {{"add", add}, {"greet", greet}, {NULL, NULL}};\nint luaopen_cmod(lua_State *L) { luaL_newlib(L, fns); return 1; }\n]]\nlocal f = io.open("/work/cmod.c", "w") f:write(src) f:close()\nprint(os.execute("gcc -O2 -shared -fPIC -I/usr/local/include -o /work/cmod.so /work/cmod.c"))\npackage.cpath = "/work/?.so;" .. package.cpath\nlocal m = require("cmod") print(m.add(40, 2), m.greet("BastiOS"), pcall(m.add, "x", 1))\n' > /disk/s/work/t.lua; bb chroot /disk/s /usr/local/bin/lua /work/t.lua  2>&1
+true	exit	0
+42	hello, BastiOS	false	bad argument #1 to 'cmod.add' (number expected, got string)
+
+== lua: a larger workload (sieve, recursion, strings, sorting)
+$ bb printf 'local function sieve(n) local p = {} for i = 2, n do p[i] = true end\n  for i = 2, math.floor(math.sqrt(n)) do if p[i] then for j = i * i, n, i do p[j] = false end end end\n  local c = 0 for i = 2, n do if p[i] then c = c + 1 end end return c end\nprint(sieve(2000000))\nlocal function fib(n) if n < 2 then return n end return fib(n - 1) + fib(n - 2) end print(fib(30))\nlocal parts = {} for i = 1, 100000 do parts[#parts + 1] = tostring(i) end local s = table.concat(parts) print(#s, s:sub(-5))\nmath.randomseed(7) local arr = {} for i = 1, 200000 do arr[i] = math.random(1, 1000000) end table.sort(arr)\nlocal ok = true for i = 2, #arr do if arr[i - 1] > arr[i] then ok = false end end print(ok, #arr)\nlocal words = {} for w in (("lorem ipsum dolor sit amet "):rep(20000)):gmatch("%%a+") do words[w] = (words[w] or 0) + 1 end print(words.lorem, words.amet)\n' > /disk/s/work/t.lua; bb chroot /disk/s /usr/local/bin/lua /work/t.lua  2>&1
+148933
+832040
+488895	00000
+true	200000
+20000	20000
+
+== luarocks: configuration and the empty tree
+$ bb chroot /disk/s /usr/local/bin/luarocks config --scope system lua_version 2>&1; bb chroot /disk/s /usr/local/bin/luarocks list --porcelain 2>&1 | bb wc -l; bb chroot /disk/s /usr/local/bin/luarocks path --lr-path | bb tr ';' '\n' | bb grep /usr/local | bb head -2
+5.4
+1
+/usr/local/share/lua/5.4/?.lua
+/usr/local/share/lua/5.4/?/init.lua
+
+== luarocks: make a rock that has a C module and a script
+$ bb mkdir -p /disk/s/work/hello-src/bin && bb printf 'local M = {} function M.say(n) return '\''hello '\'' .. n .. '\'' '\'' .. require('\''hello.native'\'').twice(21) end return M\n' > /disk/s/work/hello-src/hello.lua && bb printf '#include <lua.h>\n#include <lauxlib.h>\nstatic int twice(lua_State *L) { lua_pushinteger(L, 2 * luaL_checkinteger(L, 1)); return 1; }\nint luaopen_hello_native(lua_State *L) { lua_newtable(L); lua_pushcfunction(L, twice); lua_setfield(L, -2, "twice"); return 1; }\n' > /disk/s/work/hello-src/native.c && bb printf '#!/usr/bin/env lua\nprint(require('\''hello'\'').say(arg[1] or '\''world'\''))\n' > /disk/s/work/hello-src/bin/hello && bb printf 'package = "hello"\nversion = "1.0-1"\nsource = { url = "file:///work/hello-src" }\ndescription = { summary = "A test rock", license = "MIT" }\ndependencies = { "lua >= 5.4" }\nbuild = {\n  type = "builtin",\n  modules = {\n    hello = "hello.lua",\n    ["hello.native"] = { sources = { "native.c" } },\n  },\n  install = { bin = { hello = "bin/hello" } },\n}\n' > /disk/s/work/hello-src/hello-1.0-1.rockspec && bb chmod +x /disk/s/work/hello-src/bin/hello && bb chroot /disk/s /bin/sh -c 'cd /work/hello-src && luarocks make hello-1.0-1.rockspec 2>&1 | grep installed'
+hello 1.0-1 is now installed in /usr/local (license: MIT)
+
+== luarocks: the installed rock loads and its script runs
+$ bb chroot /disk/s /usr/local/bin/lua -e 'print(require("hello").say("rocks"))'; bb chroot /disk/s /usr/local/bin/hello BastiOS; bb chroot /disk/s /usr/local/bin/luarocks list --porcelain | bb cut -f1,2,3; bb chroot /disk/s /usr/local/bin/luarocks show hello | bb sed -n 1,4p
+hello rocks 42
+hello BastiOS 42
+dkjson	2.11-1	installed
+hello	1.0-1	installed
+
+hello 1.0-1 - A test rock
+
+License:      	MIT
+
+== luarocks: pack, remove and install from the rock file
+$ bb chroot /disk/s /bin/sh -c 'cd /work && luarocks pack hello >/dev/null 2>&1; ls /work/*.rock | cat; luarocks remove hello 2>&1 | tail -n 1; luarocks list --porcelain | wc -l; luarocks install /work/hello-1.0-1.*.rock 2>&1 | tail -n 1; hello again'
+/work/hello-1.0-1.linux-x86_64.rock
+Removal successful.
+1
+
+hello again 42
+
+== luarocks: install into a separate tree and use it
+$ bb chroot /disk/s /bin/sh -c 'cd /work && luarocks --tree /work/tree install /work/hello-1.0-1.*.rock 2>&1 | tail -n 1; eval $(luarocks --tree /work/tree path); lua -e "print(require(\"hello\").say(\"tree\"))"; ls /work/tree/lib/luarocks/rocks-5.4 | cat'
+
+hello tree 42
+hello
+manifest
+
+== luarocks: lint and where the modules went
+$ bb chroot /disk/s /bin/sh -c 'cd /work/hello-src && luarocks lint hello-1.0-1.rockspec; echo lint $?; luarocks which hello.native 2>&1 | head -n 1; luarocks show --modules hello 2>&1 | grep -c hello'
+lint 0
+/usr/local/lib/lua/5.4/hello/native.so
+2

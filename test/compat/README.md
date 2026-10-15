@@ -100,6 +100,20 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   starts threads and writes machine code at run time, so this lane boots the
   guest with 1 GiB of memory, and the cases change the disk, so `run.py` runs
   them on a copy.
+- `perl.txt`, `ruby.txt`, `lua.txt`: Perl, Ruby (with RubyGems, Bundler and
+  Rake) and Lua (with LuaRocks, gcc and musl, for rocks with C modules), each
+  from a disk of its own (`perldisk.py`, `rubydisk.py`, `scriptdisk.py`):
+  the root of an Alpine-based image (`PERL_IMAGE`, `RUBY_IMAGE`,
+  `LUA_IMAGE`, pinned by digest) as a tar file the cases unpack and enter
+  with `chroot`. The cases run scripts that use the files, processes,
+  pipes, signals, threads and sockets of the language, build and install
+  gems and rocks, and compile a C module. The Perl and Ruby disks also
+  hold a subset of the language's own test suite (`perl-tests.txt`,
+  `ruby-tests.txt`: the tests that pass on Linux, taken from the source
+  tarball `PERL_SRC` and `RUBY_SRC`, which must match the version of the
+  image), which `run.sh GROUP` runs; a group's case expects `ran N`, so a
+  failing test shows up as its name in the output. These lanes boot the
+  guest with 1 GiB of memory, and `run.py` runs them on a copy of the disk.
 
 `mkdisk.py` puts the programs and that BusyBox on a disk image in BastiOS's
 own disk format, so they appear as `/disk/NAME`. `run.py` boots the kernel

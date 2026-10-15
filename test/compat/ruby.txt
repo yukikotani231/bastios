@@ -1,0 +1,455 @@
+# Ruby, RubyGems and Bundler on BastiOS, for the compatibility suite (test/compat): the
+# Ruby interpreter, RubyGems, Bundler and Rake of an Alpine-based image (with gcc and
+# musl, which native gems are built with), entered with chroot. The
+# Ruby disk (rubydisk.py) holds the image's root as a tar file
+# (/disk/root.tar) and a BusyBox at /disk/busybox. The format is
+# applets.txt's:
+#
+#   == NAME
+#   $ COMMAND        (one line, run by ash in /)
+#   expected output, line by line, compared exactly
+#
+# The expected output is what Linux prints for the same commands in a chroot
+# of the same root.
+
+== ruby: unpack the root, make the device nodes
+$ bb mkdir -p /disk/s && cd /disk/s && bb tar -xf /disk/root.tar && bb mkdir -p proc tmp work && for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; cd /; bb mount -t proc proc /disk/s/proc; bb ls /disk/s/dev | bb cat
+console
+null
+random
+tty
+urandom
+zero
+
+== ruby: versions
+$ bb chroot /disk/s /usr/local/bin/ruby -v | bb sed 's/ (.*//'; bb chroot /disk/s /usr/local/bin/gem -v; bb chroot /disk/s /usr/local/bin/bundle -v; bb chroot /disk/s /usr/local/bin/ruby -e 'puts RUBY_PLATFORM, RUBY_ENGINE, RbConfig::CONFIG["host_os"]'
+ruby 3.3.12
+3.5.22
+Bundler version 2.5.22
+x86_64-linux-musl
+ruby
+linux-musl
+
+== ruby: strings, symbols, arrays, hashes and blocks
+$ bb printf '$stdout.sync = true\nThread.report_on_exception = false\ns = "The quick brown fox jumps over the lazy dog"\nputs s.split.map(&:capitalize).join(" "), s.scan(/o\\w/).inspect, s.tr("aeiou", "*").squeeze("*"), s.sub(/(\\w+) (\\w+)/, '\''\\2 \\1'\'')\nputs s.each_char.group_by { |c| c }.map { |k, v| [k, v.size] }.sort_by { |k, v| [-v, k] }.first(3).inspect\nh = { apple: 3, banana: 5, cherry: 7 }\nputs h.map { |k, v| "#{k}=#{v}" }.join(","), h.select { |_, v| v > 3 }.keys.inspect, h.sum { |_, v| v }, h.min_by { |_, v| v }.inspect, h.to_a.transpose.inspect\na = (1..10).to_a\nputs a.each_slice(3).map(&:sum).inspect, a.partition(&:even?).inspect, a.each_cons(2).count, a.inject(:*), a.zip(a.rotate).first(2).inspect, a.sample.class\nputs format("%%5.2f|%%-6s|%%06d|%%x|%%o|%%e|%%s", 3.14159, "ab", 42, 255, 8, 12345.678, :sym), "abc".succ, "az".succ, "zz".succ, "%%s and %%p" %% ["str", "str"]\ncase [1, [2, 3], { k: "v" }]\nin [Integer => i, [x, *rest], { k: String => v }] then puts "matched #{i} #{x} #{rest} #{v}"\nend\nPoint = Struct.new(:x, :y) { def dist = Math.sqrt(x * x + y * y) }\nputs Point.new(3, 4).dist, Point.new(1, 2).to_a.inspect, Point.new(1, 2) == Point.new(1, 2), Data.define(:a, :b).new(a: 1, b: 2).inspect\nputs (1..Float::INFINITY).lazy.select(&:even?).map { |x| x * x }.first(4).inspect, [3, 1, 2].sort.reverse.inspect, [1, 2, 3].each_with_object([]) { |x, m| m.unshift(x) }.inspect\nputs "héllo wörld".upcase, "héllo".bytes.size, "héllo".length, "日本語".reverse, "日本語".encoding, "abc".unpack("C*").inspect, [65, 66].pack("c*"), "snowman: ☃".bytesize\nputs [1, 2, 3].frozen?, "lit".frozen?, :a.to_proc.call("x") rescue puts "err #{$!.class}"\n' > /disk/s/work/t.rb; bb chroot /disk/s /usr/local/bin/ruby /work/t.rb  2>&1
+The Quick Brown Fox Jumps Over The Lazy Dog
+["ow", "ox", "ov", "og"]
+Th* q*ck br*wn f*x j*mps *v*r th* l*zy d*g
+quick The brown fox jumps over the lazy dog
+[[" ", 8], ["o", 4], ["e", 3]]
+apple=3,banana=5,cherry=7
+[:banana, :cherry]
+15
+[:apple, 3]
+[[:apple, :banana, :cherry], [3, 5, 7]]
+[6, 15, 24, 10]
+[[2, 4, 6, 8, 10], [1, 3, 5, 7, 9]]
+9
+3628800
+[[1, 2], [2, 3]]
+Integer
+ 3.14|ab    |000042|ff|10|1.234568e+04|sym
+abd
+ba
+aaa
+str and "str"
+matched 1 2 [3] v
+5.0
+[1, 2]
+true
+#<data a=1, b=2>
+[4, 16, 36, 64]
+[3, 2, 1]
+[3, 2, 1]
+HÉLLO WÖRLD
+6
+5
+語本日
+UTF-8
+[97, 98, 99]
+AB
+12
+err NoMethodError
+
+== ruby: numbers, bignums, rationals and floats
+$ bb printf '$stdout.sync = true\nThread.report_on_exception = false\nputs 2**100, (2**100).to_s(16), 100.downto(98).to_a.inspect, 10.divmod(3).inspect, (-7).divmod(2).inspect, -7 %% 3, 7.fdiv(2), 10.gcd(4), 10.lcm(4), 255.to_s(2), "ff".hex, "0b101".to_i(0), Integer.sqrt(10**20)\nputs (1..20).inject(:*), 25.downto(1).inject(:*) / 24.downto(1).inject(:*), 3.14.round(1), 3.15.round(1), 2.5.round, 3.5.round, (-2.5).round, 1234.5678.round(-2), 1e20.to_i, 0.1 + 0.2, (0.1 + 0.2).round(2), 1/3r + 1/6r, Rational(3, 6), Complex(1, 2) * Complex(3, 4)\nputs Math.sqrt(2), Math.hypot(3, 4), Math::PI.floor(5), Math.log(Math::E), Math.log2(1024), Math.cbrt(27), Math.sin(0), Float::MAX, Float::EPSILON, Float::NAN.nan?, (0.0 / 0.0).to_s, 1.0 / 0, -1.0 / 0\nputs 12345678901234567890 * 98765432109876543210, (10**30).digits.size, 100.digits.inspect, 1_000_000.to_s.reverse.scan(/\\d{1,3}/).join(",").reverse, 3.7 %% 1, -3.7.truncate, 3.2.ceil, -3.2.floor, 5.clamp(1, 3), 10.pow(20, 7)\nrequire "bigdecimal"; puts BigDecimal("0.1") + BigDecimal("0.2") == BigDecimal("0.3"), (BigDecimal("1") / 3).round(10).to_s("F")\nsrand(42); a = rand(100); srand(42); puts a == rand(100), Random.new(1).rand(1000) == Random.new(1).rand(1000), Random.rand.between?(0, 1)\n' > /disk/s/work/t.rb; bb chroot /disk/s /usr/local/bin/ruby /work/t.rb  2>&1
+1267650600228229401496703205376
+10000000000000000000000000
+[100, 99, 98]
+[3, 1]
+[-4, 1]
+2
+3.5
+2
+20
+11111111
+255
+5
+10000000000
+2432902008176640000
+25
+3.1
+3.2
+3
+4
+-3
+1200
+100000000000000000000
+0.30000000000000004
+0.3
+1/2
+1/2
+-5+10i
+1.4142135623730951
+5.0
+3.14159
+1.0
+10.0
+3.0
+0.0
+1.7976931348623157e+308
+2.220446049250313e-16
+true
+NaN
+Infinity
+-Infinity
+1219326311370217952237463801111263526900
+31
+[0, 0, 1]
+1,000,000
+0.7000000000000002
+-3
+4
+-4
+3
+2
+true
+0.3333333333
+true
+true
+true
+
+== ruby: exceptions, control flow and metaprogramming
+$ bb printf '$stdout.sync = true\nThread.report_on_exception = false\nclass AppError < StandardError; def initialize(msg = "app failed") = super; end\ndef risky(n)\n  raise AppError if n == 1\n  raise ArgumentError, "bad #{n}" if n == 2\n  Integer("x#{n}") if n == 3\n  n\nensure\n  print "[ensure #{n}]"\nend\n[0, 1, 2, 3].each { |n| begin; puts risky(n); rescue AppError, ArgumentError => e; puts "#{e.class}: #{e.message}"; rescue => e; puts "other #{e.class}: #{e.message}"; end }\ntries = 0; begin; tries += 1; raise "retry me" if tries < 3; puts "ok after #{tries}"; rescue; retry; end\nputs catch(:done) { 10.times { |i| throw :done, i * 10 if i == 4 }; :never }\nputs (begin; Integer("zz"); rescue ArgumentError => e; e.message; end), (1 / 0 rescue "zero div"), ([].fetch(5) rescue $!.class), ({ a: 1 }.fetch(:b) rescue $!.message)\nclass Foo\n  def method_missing(name, *args) = name.to_s.start_with?("get_") ? "got #{name.to_s.sub('\''get_'\'', '\'''\'')} #{args.inspect}" : super\n  def respond_to_missing?(name, priv = false) = name.to_s.start_with?("get_") || super\n  [:a, :b].each { |m| define_method("say_#{m}") { |x = 1| "#{m}#{x}" } }\n  attr_accessor :v\nend\nf = Foo.new; puts f.get_thing(1, 2), f.respond_to?(:get_x), f.say_a, f.say_b(7), (f.unknown rescue $!.class), Foo.instance_methods(false).sort.inspect, f.public_send(:v=, 5), f.instance_variables.inspect\nmodule Loud; def speak = super.upcase + "!"; end\nclass Animal; def speak = "hi"; end\nclass Dog < Animal; prepend Loud; def speak = "woof"; end\nputs Dog.new.speak, Dog.ancestors.first(3).inspect, Dog.instance_method(:speak).owner, Dog.new.singleton_class.inspect[0, 15]\no = Object.new; def o.to_s = "custom"; puts "#{o}", o.singleton_methods.inspect, o.frozen?, 5.then { _1 + 1 }, [1, 2].each_with_index.map { |x, i| x * i }.inspect\nx = 10; add = ->(a, b = 2) { a + b + x }; puts add.(1), add[1, 3], add.curry.arity, add.lambda?, proc { |a, b| [a, b] }.call(1).inspect, method(:puts).arity\nputs ObjectSpace.each_object(Class).count > 100, GC.start.inspect, GC.count.class, defined?(foo).inspect, defined?(puts), __method__.inspect, binding.local_variable_get(:x)\nat_exit { puts "at_exit ran" }; warn "to stderr"; $stdout.flush\n' > /disk/s/work/t.rb; bb chroot /disk/s /usr/local/bin/ruby /work/t.rb  2>&1
+[ensure 0]0
+[ensure 1]AppError: app failed
+[ensure 2]ArgumentError: bad 2
+[ensure 3]ArgumentError: invalid value for Integer(): "x3"
+ok after 3
+40
+invalid value for Integer(): "zz"
+zero div
+IndexError
+key not found: :b
+got thing [1, 2]
+true
+a1
+b7
+NoMethodError
+[:method_missing, :say_a, :say_b, :v, :v=]
+5
+[:@v]
+WOOF!
+[Loud, Dog, Animal]
+Loud
+#<Class:#<Dog:0
+custom
+[:to_s]
+false
+6
+[0, 2]
+13
+14
+-1
+true
+[1, nil]
+-1
+true
+nil
+Integer
+nil
+method
+nil
+10
+to stderr
+at_exit ran
+
+== ruby: files, directories and the file system
+$ bb printf '$stdout.sync = true\nThread.report_on_exception = false\nrequire "tmpdir"; require "fileutils"; require "pathname"; require "tempfile"\nDir.mktmpdir("rbt") do |d|\n  Dir.chdir(d) do\n    FileUtils.mkdir_p("a/b/c"); File.write("a/b/f.txt", "line1\\nline2\\nline3\\n")\n    puts File.read("a/b/f.txt").lines.size, File.size("a/b/f.txt"), File.file?("a/b/f.txt"), File.directory?("a/b"), File.exist?("nope"), File.basename("a/b/f.txt", ".txt"), File.extname("x.tar.gz"), File.dirname("/a/b/c")\n    File.open("a/b/f.txt", "r+") { |f| f.seek(6); puts f.read(5), f.pos; f.seek(0, IO::SEEK_END); f.puts "tail"; f.rewind; puts f.gets.chomp, f.readlines.size, f.eof? }\n    File.open("a/b/f.txt", "a") { |f| f << "appended" }; puts File.readlines("a/b/f.txt").last\n    FileUtils.mv("a/b/f.txt", "a/g.txt"); FileUtils.cp("a/g.txt", "a/h.txt"); File.symlink("g.txt", "a/ln"); File.link("a/g.txt", "a/hard")\n    puts Dir.glob("a/*").sort.inspect, Dir.children("a").sort.inspect, Dir.entries("a/b").sort.inspect, File.readlink("a/ln"), File.symlink?("a/ln"), File.stat("a/g.txt").nlink, File.lstat("a/ln").symlink?\n    File.chmod(0600, "a/g.txt"); puts "%%o" %% (File.stat("a/g.txt").mode & 07777), File.readable?("a/g.txt"), File.executable?("a/g.txt"), File.world_readable?("a/g.txt").inspect\n    File.utime(Time.at(1_000_000_000), Time.at(1_000_000_000), "a/g.txt"); puts File.mtime("a/g.txt").to_i\n    File.open("lock", "w") { |f| puts f.flock(File::LOCK_EX | File::LOCK_NB) }\n    File.truncate("a/g.txt", 4); puts File.size("a/g.txt"); FileUtils.rm_rf("a"); puts Dir.exist?("a")\n    puts Pathname.new("x/y/../z.rb").cleanpath, Pathname("/usr/local").join("bin").to_s, Pathname("a/b.txt").sub_ext(".rb")\n    t = Tempfile.new("zz"); t.write("tmp"); t.flush; puts File.read(t.path), File.basename(t.path).start_with?("zz"); t.close!\n    big = "x" * 3_000_000; File.binwrite("big", big); puts File.size("big"), File.binread("big") == big, IO.readlines("/proc/self/stat").size\n    File.write("bin", [0, 255, 128].pack("C*")); puts File.binread("bin").bytes.inspect\n  end\nend\nputs File.expand_path("~") != "", File.expand_path("../x", "/a/b"), Dir.pwd.class, File.identical?("/", "/.")\n' > /disk/s/work/t.rb; bb chroot /disk/s /usr/local/bin/ruby /work/t.rb  2>&1
+3
+18
+true
+true
+false
+f
+.gz
+/a/b
+line2
+11
+line1
+3
+true
+appended
+["a/b", "a/g.txt", "a/h.txt", "a/hard", "a/ln"]
+["b", "g.txt", "h.txt", "hard", "ln"]
+[".", "..", "c"]
+g.txt
+true
+2
+true
+600
+true
+false
+nil
+1000000000
+0
+4
+false
+x/z.rb
+/usr/local/bin
+a/b.rb
+tmp
+true
+3000000
+true
+1
+[0, 255, 128]
+true
+/a/x
+String
+true
+
+== ruby: processes, pipes, signals and exit status
+$ bb printf '$stdout.sync = true\nThread.report_on_exception = false\nrequire "open3"; require "timeout"\n$stdout.sync = true\npid = fork { puts "child"; exit 7 }; Process.wait(pid); puts "status #{$?.exitstatus}"\nputs `echo from-backticks; exit 3`, $?.exitstatus, system("true"), system("sh", "-c", "exit 5"), $?.exitstatus, system("nonexistent-cmd-xyz").inspect\nr, w = IO.pipe; if (k = fork) then w.close; got = r.readlines; Process.wait(k); puts "pipe: #{got.size} lines, last #{got.last}" else r.close; 100.times { |i| w.puts "msg #{i + 1}" }; exit!(0) end\nout, err, st = Open3.capture3("sh", "-c", "echo out; echo err >&2; exit 2"); puts out, err, st.exitstatus\nOpen3.popen3("cat") { |i, o, e, t| i.puts "through cat"; i.close; puts o.read, t.value.success? }\nIO.popen(["echo", "popen"]) { |io| puts io.read }; IO.popen("cat", "r+") { |io| io.puts "rw"; io.close_write; puts io.read }\nSignal.trap("USR1") { puts "got USR1" }; Process.kill("USR1", $$); sleep 0.1\nn = 0; Signal.trap("ALRM") { n += 1 }; Process.kill("ALRM", $$); sleep 0.05; puts "alarm #{n}"\nkid = fork { sleep 30 }; Process.kill("TERM", kid); Process.wait(kid); puts "killed by #{$?.termsig}", $?.signaled?\nputs (Timeout.timeout(0.2) { sleep 5 } rescue "timeout #{$!.class}")\npid = spawn("sh", "-c", "exit 4", out: File::NULL); Process.wait(pid); puts "spawn #{$?.exitstatus}"\nrd, wr = IO.pipe; pid = spawn("echo", "to-pipe", out: wr); wr.close; Process.wait(pid); puts rd.read\nputs Process.pid > 1, Process.ppid >= 1, Process.clock_gettime(Process::CLOCK_MONOTONIC).class, Process.times.class, ENV.fetch("NOPE", "unset"), ENV["PATH"].to_s.empty?\nfork { exec("echo", "exec'\''d") }; Process.wait\nat_exit { puts "bye" }; exit 3\n' > /disk/s/work/t.rb; bb chroot /disk/s /usr/local/bin/ruby /work/t.rb  2>&1
+child
+status 7
+from-backticks
+3
+true
+false
+5
+nil
+pipe: 100 lines, last msg 100
+out
+err
+2
+through cat
+true
+popen
+rw
+got USR1
+alarm 1
+killed by 15
+true
+timeout Timeout::Error
+spawn 4
+to-pipe
+true
+true
+Float
+Process::Tms
+unset
+false
+exec'd
+bye
+
+== ruby: threads, fibers, queues and timing
+$ bb printf '$stdout.sync = true\nThread.report_on_exception = false\nrequire "timeout"; require "monitor"; require "time"\ncount = 0; m = Mutex.new\nts = 4.times.map { |i| Thread.new(i) { |n| 500.times { m.synchronize { count += n + 1 } }; n * 2 } }\nputs ts.map(&:value).inspect, count\nq = Queue.new; prod = Thread.new { 10.times { |i| q << i }; q << :done }; items = []; while (x = q.pop) != :done; items << x; end; puts items.sum\nsq = SizedQueue.new(2); c = Thread.new { 5.times.map { sq.pop } }; 5.times { |i| sq.push(i) }; puts c.value.inspect\ncv = ConditionVariable.new; mx = Mutex.new; ready = false; waiter = Thread.new { mx.synchronize { cv.wait(mx) until ready; :woke } }; sleep 0.05; mx.synchronize { ready = true; cv.signal }; puts waiter.value\nt = Thread.new { Thread.current[:v] = 1; Thread.current.thread_variable_set(:tv, 2); sleep }; sleep 0.05; puts t.status, t[:v], t.alive?; t.kill; t.join; puts t.status.inspect\ne = Thread.new { raise "in thread" }; puts (e.join rescue "joined: #{$!.message}")\nf = Fiber.new { |x| y = Fiber.yield(x * 2); z = Fiber.yield(y + 1); :end }; puts f.resume(5), f.resume(10), f.resume(0), f.alive?\nen = Enumerator.new { |y| a, b = 0, 1; loop { y << a; a, b = b, a + b } }; puts en.take(10).inspect, en.lazy.select(&:odd?).first(5).inspect, en.next, en.next, en.next\nputs Thread.list.size >= 1, Thread.main == Thread.current, Thread.current.priority, Thread.new { sleep 0.01; 42 }.value\nt0 = Process.clock_gettime(Process::CLOCK_MONOTONIC); sleep 0.1; d = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0; puts d >= 0.09 && d < 1\nputs (Timeout.timeout(0.1) { loop { } } rescue "timed out"), Time.at(0).utc.iso8601 rescue puts "x"\nputs Time.at(1_700_000_000).utc.strftime("%%Y-%%m-%%d %%H:%%M:%%S %%a %%j"), Time.utc(2000, 1, 1).to_i, Time.now.year >= 2024, (Time.utc(2024, 3, 1) - Time.utc(2024, 2, 1)) / 86400\nObjectSpace.garbage_collect; puts 3\n' > /disk/s/work/t.rb; bb chroot /disk/s /usr/local/bin/ruby /work/t.rb  2>&1
+[0, 2, 4, 6]
+5000
+45
+[0, 1, 2, 3, 4]
+woke
+sleep
+1
+true
+false
+joined: in thread
+10
+11
+end
+false
+[0, 1, 1, 2, 3, 5, 8, 13, 21, 34]
+[1, 1, 3, 5, 13]
+0
+1
+1
+true
+true
+0
+42
+true
+timed out
+1970-01-01T00:00:00Z
+2023-11-14 22:13:20 Tue 318
+946684800
+true
+29.0
+3
+
+== ruby: sockets on the loopback
+$ bb printf '$stdout.sync = true\nThread.report_on_exception = false\nrequire "socket"\nsrv = TCPServer.new("127.0.0.1", 0); port = srv.addr[1]; puts srv.addr[0], port > 0\nth = Thread.new { c = srv.accept; line = c.gets; c.puts "echo: #{line}"; data = c.read(100000); c.print "got #{data.size}"; c.close }\ns = TCPSocket.new("127.0.0.1", port); s.puts "hello"; puts s.gets; s.write("x" * 100000); s.close_write; puts s.read; s.close; th.join\nu1 = UDPSocket.new; u1.bind("127.0.0.1", 0); u2 = UDPSocket.new; u2.send("datagram", 0, "127.0.0.1", u1.addr[1]); msg, from = u1.recvfrom(100); puts msg, from[0]\na, b = UNIXSocket.pair; a.write("over a socketpair"); a.close; puts b.read\npath = "/tmp/rb.sock"; File.unlink(path) rescue nil; us = UNIXServer.new(path); t2 = Thread.new { c = us.accept; c.puts c.gets.upcase; c.close }; cl = UNIXSocket.new(path); cl.puts "unix"; puts cl.gets; t2.join; us.close; File.unlink(path)\nr, w = IO.pipe; puts IO.select([r], nil, nil, 0.05).inspect; w.write "x"; puts IO.select([r], nil, nil, 1)[0].size\nputs Addrinfo.tcp("127.0.0.1", 80).ip_address, Socket.gethostname.empty?, Socket.ip_address_list.any? { |a| a.ipv4_loopback? }\nbegin; TCPSocket.new("127.0.0.1", 1); rescue => e; puts e.class; end\nrequire "net/http"; srv2 = TCPServer.new("127.0.0.1", 0); p2 = srv2.addr[1]\nt3 = Thread.new { c = srv2.accept; while (l = c.gets) && l != "\\r\\n"; end; c.print "HTTP/1.1 200 OK\\r\\nContent-Length: 5\\r\\nConnection: close\\r\\n\\r\\nhello"; c.close }\nres = Net::HTTP.get_response(URI("http://127.0.0.1:#{p2}/")); puts res.code, res.body; t3.join\n' > /disk/s/work/t.rb; bb chroot /disk/s /usr/local/bin/ruby /work/t.rb  2>&1
+AF_INET
+true
+echo: hello
+got 100000
+datagram
+AF_INET
+over a socketpair
+UNIX
+nil
+1
+127.0.0.1
+false
+true
+Errno::ECONNREFUSED
+200
+hello
+
+== ruby: the standard library
+$ bb printf '$stdout.sync = true\nThread.report_on_exception = false\nrequire "json"; require "set"; require "time"; require "date"; require "securerandom"; require "digest"; require "zlib"; require "yaml"; require "stringio"; require "strscan"; require "erb"; require "optparse"; require "logger"; require "benchmark"; require "csv"; require "securerandom"; require "forwardable"; require "ostruct"; require "shellwords"; require "base64"; require "pp"; require "io/console"; require "etc"; require "objspace"\nputs JSON.generate({ "a" => [1, 2.5, nil, true], "b" => { "c" => "d" } }), JSON.parse('\''{"x":[1,{"y":"z"}]}'\'', symbolize_names: true).inspect, JSON.pretty_generate([1, { "k" => 2 }]).lines.size\ns = Set[3, 1, 2]; s << 2 << 5; puts s.size, s.include?(5), (s & Set[1, 5, 9]).to_a.sort.inspect, s.subset?(Set[1, 2, 3, 5, 8])\nputs Time.parse("2024-03-15 10:20:30 UTC").to_i, Time.iso8601("2024-03-15T10:20:30Z").utc.hour, Date.new(2024, 2, 29).next_year.to_s, (Date.new(2024, 12, 25) - Date.new(2024, 1, 1)).to_i, Date.parse("March 3, 2021").yday, DateTime.new(2000, 1, 1, 12).iso8601, Date.valid_date?(2023, 2, 29)\nputs SecureRandom.hex(8).size, SecureRandom.uuid =~ /\\A\\h{8}-\\h{4}-4\\h{3}-[89ab]\\h{3}-\\h{12}\\z/ ? "uuid" : "bad", Digest::MD5.hexdigest("abc"), Digest::SHA256.hexdigest("abc")[0, 16], Digest::SHA1.base64digest("abc")\nz = Zlib::Deflate.deflate("hello " * 1000); puts z.size < 100, Zlib::Inflate.inflate(z).size, Zlib.crc32("abc"), Zlib.adler32("abc")\nputs({ "a" => 1, "b" => [1, 2], "c" => { "d" => nil } }.to_yaml, YAML.load("- 1\\n- {a: [b, c]}\\n- text\\n").inspect)\nio = StringIO.new("one\\ntwo\\nthree"); puts io.gets, io.read(3), io.eof?, io.readlines.inspect; out = StringIO.new; out.puts 1, 2; out.printf("%%03d", 7); puts out.string.inspect\nsc = StringScanner.new("3.14 + 42"); puts sc.scan(/\\d+\\.\\d+/), sc.skip(/\\s*\\+\\s*/), sc.scan(/\\d+/), sc.eos?\nputs ERB.new("<%% 3.times do |i| %%>[<%%= i * 2 %%>]<%% end %%> <%%= name.upcase %%>", trim_mode: "-").result_with_hash(name: "erb")\nopts = {}; OptionParser.new { |o| o.on("-n", "--num N", Integer) { |v| opts[:n] = v }; o.on("-v") { opts[:v] = true } }.parse!(%%w[-n 5 -v rest]); puts opts.inspect\nsio = StringIO.new; l = Logger.new(sio); l.formatter = proc { |sev, _, _, msg| "#{sev}:#{msg}\\n" }; l.info("hi"); l.debug("dbg"); l.level = Logger::WARN; l.info("no"); l.error("err"); puts sio.string\nputs CSV.parse("a,b\\n1,\\"x,y\\"\\n2,z\\n", headers: true).map { |r| r["b"] }.inspect, CSV.generate { |c| c << [1, "a b", nil, "q\\"uote"] }\nclass Q; extend Forwardable; def_delegators :@a, :size, :<<; def initialize = @a = []; end; q = Q.new; q << 1 << 2; puts q.size\nputs OpenStruct.new(a: 1).a, "a b '\''c d'\'' \\"e\\"".shellsplit.inspect, Shellwords.escape("it'\''s"), Base64.strict_encode64("BastiOS"), Base64.decode64("QmFzdGlPUw==")\nputs Etc.nprocessors >= 1, Etc.getpwuid(0).name, Benchmark.realtime { 1000.times { } } < 1, ObjectSpace.memsize_of("x" * 1000) > 0\nputs [1, [2, [3, { a: "b" * 5 }]]].pretty_inspect\n' > /disk/s/work/t.rb; bb chroot /disk/s /usr/local/bin/ruby /work/t.rb  2>&1
+{"a":[1,2.5,null,true],"b":{"c":"d"}}
+{:x=>[1, {:y=>"z"}]}
+6
+4
+true
+[1, 5]
+true
+1710498030
+10
+2025-02-28
+359
+62
+2000-01-01T12:00:00+00:00
+false
+16
+uuid
+900150983cd24fb0d6963f7d28e17f72
+ba7816bf8f01cfea
+qZk+NkcGgWq6PiVxeFDCbJzQ2J0=
+true
+6000
+891568578
+38600999
+---
+a: 1
+b:
+- 1
+- 2
+c:
+  d:
+[1, {"a"=>["b", "c"]}, "text"]
+one
+two
+false
+["\n", "three"]
+"1\n2\n007"
+3.14
+3
+42
+true
+[0][2][4] ERB
+{:n=>5, :v=>true}
+INFO:hi
+DEBUG:dbg
+ERROR:err
+["x,y", "z"]
+1,a b,,"q""uote"
+2
+1
+["a", "b", "c d", "e"]
+it\'s
+QmFzdGlPUw==
+BastiOS
+true
+root
+true
+true
+[1, [2, [3, {:a=>"bbbbb"}]]]
+
+== ruby: a larger workload (sorting, hashing, strings, GC)
+$ bb printf '$stdout.sync = true\nThread.report_on_exception = false\nsrand(42); n = Array.new(300_000) { rand(1_000_000) }; s = n.sort; puts s.each_cons(2).all? { |a, b| a <= b }, s.size\nh = Hash.new(0); n.each { |x| h[x %% 10007] += 1 }; puts h.size, h.values.sum\nstr = +""; 100_000.times { |i| str << "item#{i}," }; puts str.size, str.scan(/item\\d*7,/).size\ndef fib(n) = n < 2 ? n : fib(n - 1) + fib(n - 2); puts fib(27)\nwords = Array.new(20_000) { |i| (1..(3 + i %% 5)).map { |j| (97 + (j * 7 + j * j) %% 26).chr }.join }; puts words.tally.size\nobjs = Array.new(400_000) { |i| [i, i.to_s] }; GC.start; puts objs.size, objs.last.inspect, GC.stat[:count].positive?\nputs (1..1_000_000).sum, (1..200).reduce(:*).to_s.size, 50.times.map { |i| (2**i).to_s }.last\nm = (0...200).map { |i| (0...200).map { |j| i * j } }; puts m.transpose[199][199], m.flatten.sum\n' > /disk/s/work/t.rb; bb chroot /disk/s /usr/local/bin/ruby /work/t.rb  2>&1
+true
+300000
+10007
+300000
+988890
+10000
+196418
+5
+400000
+[399999, "399999"]
+true
+500000500000
+375
+562949953421312
+39601
+396010000
+
+== ruby: gem lists the default and bundled gems
+$ bb chroot /disk/s /usr/local/bin/gem list --local 2>/dev/null | bb grep -c .; bb chroot /disk/s /usr/local/bin/gem list --local 2>/dev/null | bb grep -E '^(rake|minitest|test-unit|json|rexml|bundler) ' | bb sed 's/ (.*//'; bb chroot /disk/s /usr/local/bin/gem env gemdir; bb chroot /disk/s /usr/local/bin/gem env | bb grep -c 'RUBYGEMS VERSION'
+86
+bundler
+json
+minitest
+rake
+rexml
+test-unit
+/usr/local/lib/ruby/gems/3.3.0
+1
+
+== ruby: build a gem, install it from the file and use it
+$ bb mkdir -p /disk/s/work/hellogem/lib /disk/s/work/hellogem/bin && bb printf 'module Hellogem; VERSION = '\''1.2.3'\''; def self.greet(n) = "hello #{n} from gem #{VERSION}"; end\n' > /disk/s/work/hellogem/lib/hellogem.rb && bb printf '#!/usr/bin/env ruby\nrequire '\''hellogem'\''\nputs Hellogem.greet(ARGV[0] || '\''world'\'')\n' > /disk/s/work/hellogem/bin/hello && bb printf 'Gem::Specification.new do |s|\n  s.name = "hellogem"\n  s.version = "1.2.3"\n  s.summary = "A test gem"\n  s.authors = ["Test"]\n  s.files = ["lib/hellogem.rb", "bin/hello"]\n  s.executables = ["hello"]\n  s.require_paths = ["lib"]\n  s.license = "MIT"\n  s.add_runtime_dependency "rake", ">= 1"\nend\n' > /disk/s/work/hellogem/hellogem.gemspec && bb chmod +x /disk/s/work/hellogem/bin/hello && bb chroot /disk/s /bin/sh -c 'cd /work/hellogem && gem build hellogem.gemspec 2>&1 | grep -E "Successfully|File:"; gem install --local --no-document hellogem-1.2.3.gem 2>&1 | grep -E "Successfully|ERROR"; hello BastiOS; ruby -e "require %q(hellogem); puts Hellogem::VERSION"; gem list hellogem | grep hellogem; gem contents hellogem | sed s,.*gems/,, ; gem uninstall -x hellogem 2>&1 | grep -c Successfully; gem list hellogem | wc -l'
+  Successfully built RubyGem
+  File: hellogem-1.2.3.gem
+Successfully installed hellogem-1.2.3
+hello BastiOS from gem 1.2.3
+1.2.3
+hellogem (1.2.3)
+hellogem-1.2.3/bin/hello
+hellogem-1.2.3/lib/hellogem.rb
+1
+1
+
+== ruby: bundler resolves a Gemfile with a path gem and runs a command
+$ bb mkdir -p /disk/s/work/app && bb printf 'source '\''https://rubygems.org'\''\ngem '\''hellogem'\'', path: '\''/work/hellogem'\''\ngem '\''rake'\''\n' > /disk/s/work/app/Gemfile && bb printf 'require '\''bundler/setup'\''\nrequire '\''hellogem'\''\nputs Hellogem.greet('\''bundler'\''), Gem.loaded_specs.keys.sort.inspect, Bundler.root\n' > /disk/s/work/app/main.rb && bb chroot /disk/s /bin/sh -c 'cd /work/app && bundle install --local 2>&1 | grep -E "Bundle complete|Could not|error"; bundle exec ruby main.rb; bundle exec rake --version; bundle list 2>&1 | grep -E "hellogem|rake" | sed "s/^ *\* //"; ls Gemfile.lock; bundle exec ruby -e "puts ENV[%q(BUNDLE_GEMFILE)]"'
+Bundle complete! 2 Gemfile dependencies, 3 gems now installed.
+hello bundler from gem 1.2.3
+["bundler", "hellogem", "pathname", "rake"]
+/work/app
+rake, version 13.1.0
+hellogem (1.2.3)
+rake (13.1.0)
+Gemfile.lock
+/work/app/Gemfile
+
+== ruby: rake runs a Rakefile
+$ bb printf 'task default: [:build] do\n  puts '\''default done'\''\nend\ntask :prep do\n  puts '\''prep'\''\nend\ntask build: :prep do\n  puts '\''building'\''\n  File.write('\''/work/built.txt'\'', '\''ok'\'')\nend\nrule '\''.out'\'' => '\''.in'\'' do |t|\n  File.write(t.name, File.read(t.source).upcase)\nend\ntask :out => ['\''/work/a.out'\'']\nfile '\''/work/b.txt'\'' do |t| File.write(t.name, '\''b'\'') end\n' > /disk/s/work/Rakefile && bb printf 'text\n' > /disk/s/work/a.in && bb chroot /disk/s /bin/sh -c 'cd /work && rake && rake out && cat /work/a.out && rake -T 2>&1 | head -n 2; rake -P | head -n 3; rake build | tail -n 1; rake /work/b.txt && cat /work/b.txt; echo; rake nosuch 2>&1 | head -n 1'
+prep
+building
+default done
+TEXT
+rake /work/b.txt
+rake build
+    prep
+building
+b
+rake aborted!
+
+== ruby: minitest and test-unit run tests
+$ bb printf 'require '\''minitest/autorun'\''\nclass T < Minitest::Test\n  def test_ok; assert_equal 4, 2 + 2; end\n  def test_array; assert_includes [1, 2, 3], 2; end\n  def test_raise; assert_raises(ZeroDivisionError) { 1 / 0 }; end\nend\n' > /disk/s/work/mt.rb && bb printf 'require '\''test/unit'\''\nclass U < Test::Unit::TestCase\n  def test_a; assert_equal '\''abc'\'', '\''a'\'' + '\''bc'\''; end\n  def test_b; assert_in_delta 0.3, 0.1 + 0.2, 1e-9; end\nend\n' > /disk/s/work/tu.rb && bb chroot /disk/s /usr/local/bin/ruby /work/mt.rb --seed 1 2>&1 | bb grep -E 'runs|Finished' | bb sed 's/[0-9.]* s,/N s,/; s/in [0-9.]*s.*/in Ns/'; bb chroot /disk/s /usr/local/bin/ruby /work/tu.rb 2>&1 | bb grep -E 'tests,' 
+Finished in Ns
+3 runs, 4 assertions, 0 failures, 0 errors, 0 skips
+2 tests, 2 assertions, 0 failures, 0 errors, 0 pendings, 0 omissions, 0 notifications
+
+== ruby: the ruby test suite, bootstraptest/ (29 tests)
+$ bb chroot /disk/s /bin/sh /work/run.sh bootstraptest
+ran 29
+
+== ruby: the ruby test suite, test/ruby/ part 1 of 2 (15 tests)
+$ bb chroot /disk/s /bin/sh /work/run.sh test/ruby 0 2
+ran 15
+
+== ruby: the ruby test suite, test/ruby/ part 2 of 2 (15 tests)
+$ bb chroot /disk/s /bin/sh /work/run.sh test/ruby 1 2
+ran 15
