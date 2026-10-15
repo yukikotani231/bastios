@@ -3,7 +3,10 @@
 #include "compat.h"
 #include <fcntl.h>
 #include <stdint.h>
+#include <sched.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <sys/syscall.h>
 
 struct how {
@@ -30,6 +33,20 @@ static int opens(long fd) {
 }
 
 static int fails(long r, int e) { return r == -1 && errno == e; }
+
+/* In a mount namespace with its own root, as a container has: cgroup2 on
+ * /sys/fs/cgroup, and the files in it are on one file system. */
+static int xdev_in_chroot(void) {
+    if (unshare(CLONE_NEWNS) != 0) return 0;
+    mkdir("o2_r", 0755);
+    mkdir("o2_r/sys", 0755);
+    mkdir("o2_r/sys/fs", 0755);
+    mkdir("o2_r/sys/fs/cgroup", 0755);
+    if (mount("cgroup2", "o2_r/sys/fs/cgroup", "cgroup2", 0, 0) != 0 || chroot("o2_r") != 0 || chdir("/") != 0) return 0;
+    int cg = open("/sys/fs/cgroup", O_PATH | O_DIRECTORY);
+    return cg >= 0 && opens(o2(cg, "cgroup.procs", O_RDONLY, 0, NO_XDEV))
+        && fails(o2(cg, "no_such_file", O_RDONLY, 0, NO_XDEV), ENOENT);
+}
 
 int main(void) {
     setup();
@@ -109,6 +126,20 @@ int main(void) {
 
     EXPECT("NO_XDEV inside one file system opens", opens(o2(d, "f", O_RDONLY, 0, NO_XDEV)));
     EXPECT("NO_XDEV into /proc is EXDEV", fails(o2(AT_FDCWD, "/proc/version", O_RDONLY, 0, NO_XDEV), EXDEV));
+    {
+        // A directory inside a file system of its own: its files are on it.
+        int cg = open("/sys/fs/cgroup", O_PATH | O_DIRECTORY);
+        EXPECT("NO_XDEV inside /sys/fs/cgroup opens", cg >= 0 && opens(o2(cg, "cgroup.procs", O_RDONLY, 0, NO_XDEV)));
+        EXPECT("NO_XDEV inside /sys/fs/cgroup: a missing file is ENOENT", cg >= 0 && fails(o2(cg, "no_such_file", O_RDONLY, 0, NO_XDEV), ENOENT));
+        if (cg >= 0) close(cg);
+    }
+    {
+        pid_t c = fork();
+        if (c == 0) _exit(xdev_in_chroot() ? 0 : 1);
+        int st = 0;
+        waitpid(c, &st, 0);
+        EXPECT("NO_XDEV inside a mount of a container's root opens", WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
 
     close(d);
     unlink("o2_d/new");
@@ -118,6 +149,10 @@ int main(void) {
     unlink("o2_d/f");
     rmdir("o2_d/sub");
     rmdir("o2_d");
+    rmdir("o2_r/sys/fs/cgroup");
+    rmdir("o2_r/sys/fs");
+    rmdir("o2_r/sys");
+    rmdir("o2_r");
     unlink("o2_top");
     return done();
 }

@@ -170,11 +170,10 @@ What has been tested is this sequence with the mirror replaced by a copy served 
 
 ## What does not work yet
 
-- It has only run in QEMU.
+- It has only run in QEMU. [real-hardware.md](real-hardware.md) says what is needed to try a real PC.
 - Users, passwords and SSH host keys are kept in memory and lost at power off; only `/disk` is kept.
-- The disk holds at most 1023 files and directories (an Alpine root with a few packages fits; a compiler toolchain does not yet) and is at most 256 MiB as `make disk` writes it.
-- At most 31 processes, 64 MiB of address space each, and 256 MiB of memory in `make run`.
-- There is no init system or login prompt at boot: you start as root in the native shell.
+- There is no init system. The console starts in the native shell as root; the boot option `login` (the third entry of the ISO and USB boot menu) starts BusyBox's `login` instead.
+- At most 511 processes, a 512 GiB address window each, and 256 MiB of memory in `make run`. The disk holds up to 262143 files and directories; `make disk` writes an image of at most 1 TiB, 33 MiB or the size of the files plus `MKDISK_FREE_MB` (16 by default), whichever is larger. The other limits are listed in the README's Status section.
 - There is no graphical desktop; the screen is a text console when booted from the ISO.
 - Some Linux system calls are missing; the kernel prints a note on the console when a program uses one (Dropbear's `execveat` does, harmlessly). [linux.md](linux.md) lists what is there, and `make compat` measures it.
 - The system call ABI and the disk format can still change between versions.
