@@ -484,6 +484,16 @@ static int rtc_tick(void) {
     return 1;
 }
 
+/* The RTC's seconds register (0), as a number: it is BCD unless bit 2 of
+ * register B says binary. Read just after rtc_tick, when it is stable. */
+static uint32_t rtc_seconds(void) {
+    outb(0x70, 0x0B);
+    uint32_t binary = inb(0x71) & 4;
+    outb(0x70, 0x00);
+    uint32_t s = inb(0x71);
+    return binary ? s : (s >> 4) * 10 + (s & 15);
+}
+
 /* Count the local APIC timer (and the time-stamp counter) against about
  * 10 ms of PIT channel 0, which counts down from 0xFFFF in mode 2 at
  * 1193182 Hz (set up by pit_counts). Used when the speaker channel the
@@ -576,12 +586,21 @@ static void calibrate_lapic_timer(void) {
     timer_from = 5;
     n = 0;
     if (rtc_reg_a() != 0xFF && rtc_tick()) {
+        uint32_t s0 = rtc_seconds();
         lw(0x380, 0xFFFFFFFF);
         t0 = rdtsc();
         if (rtc_tick()) {
             t1 = rdtsc();
-            n = (0xFFFFFFFF - lr(0x390)) / 100;
-            tsc_hz = t1 - t0;
+            uint32_t count = 0xFFFFFFFF - lr(0x390);
+            /* A starved processor (a loaded emulator) can miss the 244 us
+             * the update-in-progress bit is set and so a whole update:
+             * the window is then two seconds, not one. The seconds register
+             * says how many passed. */
+            uint32_t secs = (rtc_seconds() + 60 - s0) % 60;
+            if (secs >= 1 && secs <= 3) {
+                n = count / 100 / secs;
+                tsc_hz = (t1 - t0) / secs;
+            }
         }
         lw(0x380, 0);
     }
