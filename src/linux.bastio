@@ -1350,14 +1350,11 @@ fn lx_fill(k: &mut Kernel, v: u64, n: u64)
   requires kok(k) && v <= 255 && n <= 160
   ensures kok(k)
 {
-  let w = v * 72340172838076673;           // v in every byte: 0x0101010101010101 * v
-  let mut i = 0;
-  while i + 8 <= n
-    invariant i <= n && n <= 160 && kok(k)
-  {
-    store_le64(&mut k.fs.xfer, i, w);
-    i = i + 8;
+  if v == 0 {
+    bytes_copy_span(&mut k.fs.xfer, 0, k.fs.zeros, 0, n);   // one bcopy, not a store per word
+    return;
   }
+  let mut i = 0;
   while i < n
     invariant i <= n && n <= 160 && kok(k)
   {
