@@ -1818,7 +1818,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       return cg_text(&mut k, pid, f, &mut o);    // a cgroup's control file (src/lxcgroup.bastio)
     }
     if is_um_file(f) {
-      return um_text(k, f, &mut o);         // uid_map, gid_map, setgroups (src/lxuser.bastio)
+      return um_text(k, pid, f, &mut o);         // uid_map, gid_map, setgroups (src/lxuser.bastio)
     }
     if what >= SY_LOOP && what - SY_LOOP < LOOP_N * LOOP_SYS {
       return loop_sys_text(&mut k, what - SY_LOOP, &mut o);
