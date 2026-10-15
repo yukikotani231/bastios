@@ -45,7 +45,7 @@ const PING_ID: u64 = 0x4253;          // "BS"
 const PING_DATA: u64 = 32;
 
 const ARP_N: u64 = 64;
-const HELD_N: u64 = 32;               // frames held for ARP answers
+const HELD_N: u64 = 8;                // frames held for ARP answers
 
 // DHCP (RFC 2131), as a client.
 const DHCP_OFF: u64 = 0;              // no lease being sought: static address
